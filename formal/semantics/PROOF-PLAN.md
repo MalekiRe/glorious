@@ -5047,3 +5047,30 @@ propext, Classical.choice and Quot.sound. This closes expected-type admission
 for ordered operand lists; binding initializers, assignment values and other
 scalar expected positions still require migration. It does not make unreachable
 suffix checking disappear. All fourteen completion families remain open.
+
+## Bottom initializers through source annotations and record fields
+
+HasType.bind and FrameTyped.bind retain the initializer's inferred type and
+consume ReturnJoin at actual binding installation. Source Annotation moved to
+the checking layer: absent annotations preserve the inferred type; explicit
+annotations resolve the expected type and use that same join. The old exact-type
+annotation path has been removed. SourceScope.bind_checked, finite-call
+execution, source checking and general preservation consume the new contract.
+
+NamedRecordBuild.field also keeps the inferred initializer type and joins it to
+the selected field's declared type. Generated temporary binding uses the same
+Core rule. Its first-execution theorem exposes the inferred type and join;
+source-ordered evaluation, declaration-ordered movement and actual constructor
+assembly remain proved, not assumed.
+
+SourceClosure.Admitted.bottom_initializer constructs admission for an explicitly
+annotated bottom initializer and proves whole-binding divergence, prefix
+ownership/storage safety and nonresumption of pending frames. No initialized
+local or successful body execution is supplied. All 30 strict Lean jobs passed;
+inspected initializer, record execution, public soundness/behavior and
+no-exact-cleanup proofs use only propext, Classical.choice and Quot.sound.
+
+This migrates expected initializer types, not unreachable-suffix admission:
+the body still has a static checking derivation and return-disposition obligation.
+Assignment values and other scalar expected positions remain to be migrated.
+All fourteen whole-language completion families remain open.

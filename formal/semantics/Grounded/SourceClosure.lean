@@ -1601,6 +1601,40 @@ theorem SourceClosure.Admitted.bottom_argument_call {packages : List PackageSour
   exact ⟨caller, trace, infinite, safe, fun stack _ terminal => infinite.no_resume terminal stack⟩
 
 
+/-- Explicitly annotated bindings consume the initializer's inferred bottom
+through the shared return join. The same source products establish admission,
+whole-binding divergence, prefix safety and pending-stack nonresumption. -/
+theorem SourceClosure.Admitted.bottom_initializer {packages : List PackageSource}
+    {closure : SourceClosure packages} {program : Program} (admitted : closure.Admitted program)
+    {home : Module} {scope : SourceScope} {before middle final : FlowContext}
+    {sourceInitial sourceBody : NamedExpr} {initial body : Expr}
+    {mutable : Bool} {name : Identifier} {annotation : TypeExpr} {localType type : Ty} {finalMask : Initialization}
+    (bottom : NamedExpr.Elaborates program closure.functionNames home scope before sourceInitial initial .never middle)
+    (resolved : ResolvesType program.aliases annotation localType)
+    (discard : ReturnDisposition program type [(⟨scope.next⟩, ⟨⟨localType, mutable⟩, finalMask⟩)])
+    (continued : NamedExpr.Elaborates program closure.functionNames home (scope.enter (some name) ⟨localType, mutable⟩)
+      ((⟨scope.next⟩, ⟨⟨localType, mutable⟩, .present⟩) :: middle) sourceBody body type
+      ((⟨scope.next⟩, ⟨⟨localType, mutable⟩, finalMask⟩) :: final))
+    (slots : before.slots = scope.context) {environment : Environment}
+    (store : BindingMap.Typed program environment.heap environment.activation environment.bindings before)
+    (issued : environment.supply.Issued environment.activation) :
+    NamedExpr.Elaborates program closure.functionNames home scope before
+      (.bind mutable name (some annotation) sourceInitial sourceBody)
+      (.bind mutable ⟨scope.next⟩ localType initial body) type final ∧
+    ∃ trace, InfiniteRun program ⟨environment, .expression (.bind mutable ⟨scope.next⟩ localType initial body), []⟩ trace ∧
+      (∀ index, ConfigurationTyped program final (.one type) (trace index) ∧
+        AddressedEnvironment.ConsumptionFrame program final.slots environment (trace index).outerEnvironment ∧
+        (trace index).OwnershipSafe program ∧
+        Configuration.ExternalFrame ⟨environment, .expression (.bind mutable ⟨scope.next⟩ localType initial body), []⟩ (trace index) ∧
+        ∀ identity, environment.heap.next ≤ identity.index →
+          ∀ cell, (trace index).environment.heap.read identity = some cell →
+            ¬ (trace index).Untracked identity) ∧
+      ∀ (stack : List Frame) (done : Configuration), Terminal done →
+        ¬ Run program ⟨environment, .expression (.bind mutable ⟨scope.next⟩ localType initial body), stack⟩ (done.extend stack) := by
+  have binding := NamedExpr.Elaborates.bind bottom discard (.explicit resolved (.nonreturning _ rfl)) continued
+  obtain ⟨trace, infinite, safe⟩ := (binding.checked slots).bind_bottom_behavior
+    admitted.checked (bottom.checked slots) store issued
+  exact ⟨binding, trace, infinite, safe, fun stack _ terminal => infinite.no_resume terminal stack⟩
 /-- Every active and retained scope has live, correctly owned and typed partial
 storage throughout execution. Retired identities cannot reappear in those
 scopes; surviving old cells retain their original owner and declared type. -/

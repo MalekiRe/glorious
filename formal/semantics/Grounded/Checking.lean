@@ -81,6 +81,22 @@ theorem ReturnJoin.same_context {program : Program} {input output before}
   | nonreturning => exact .nonreturning _ rfl
 
 
+/-- An absent annotation preserves inference; an explicit annotation supplies
+the expected type through the ordinary return join. -/
+inductive Annotation (program : Program) (context : FlowContext) : Option TypeExpr → Ty → Ty → Prop where
+  | inferred (type : Ty) : Annotation program context none type type
+  | explicit {source : TypeExpr} {actual type : Ty}
+      (resolved : ResolvesType program.aliases source type)
+      (joined : ReturnJoin program actual context type context) :
+      Annotation program context (some source) actual type
+
+theorem Annotation.joined {program context source actual type}
+    (annotation : Annotation program context source actual type) :
+    ReturnJoin program actual context type context := by
+  cases annotation with
+  | inferred => exact .refl _
+  | explicit _ joined => exact joined
+
 mutual
 inductive HasType (program : Program) : Module → FlowContext → Expr → Ty → FlowContext → Prop where
   | unit {home context} : HasType program home context .unit .unit context
@@ -108,8 +124,9 @@ inductive HasType (program : Program) : Module → FlowContext → Expr → Ty �
       (head : HasType program home before first discarded middle) (drop : UsePermitted program.data .discard discarded)
       (tail : HasType program home middle rest type after) :
       HasType program home before (.sequence first rest) type after
-  | bind {home before middle after mutable name initial body localType type finalMask}
-      (initialized : HasType program home before initial localType middle)
+  | bind {home before middle after mutable name initial body initialType localType type finalMask}
+      (initialized : HasType program home before initial initialType middle)
+      (joined : ReturnJoin program initialType middle localType middle)
       (drop : ReturnDisposition program type [(name, ⟨⟨localType, mutable⟩, finalMask⟩)])
       (continued : HasType program home ((name, ⟨⟨localType, mutable⟩, .present⟩) :: middle) body type
         ((name, ⟨⟨localType, mutable⟩, finalMask⟩) :: after))
@@ -246,7 +263,7 @@ theorem HasType.slots {program : Program} {home : Module} {before after : FlowCo
   | move selected path selection ready mask context =>
     exact replaceBinding.map_same BindingState.slot selected context rfl
   | sequence head drop tail headIH tailIH => exact tailIH.trans headIH
-  | bind initialized drop continued fresh initialIH bodyIH =>
+  | bind initialized joined drop continued fresh initialIH bodyIH =>
     have outer := congrArg List.tail bodyIH
     exact outer.trans initialIH
   | tuple head tail headIH tailIH => exact tailIH.trans headIH

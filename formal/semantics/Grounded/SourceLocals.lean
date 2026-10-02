@@ -193,14 +193,15 @@ theorem SourceScope.assign_checked {scope : SourceScope} {spelling : Identifier}
     (by rw [same]; exact mask) context continued
 
 theorem SourceScope.bind_checked (scope : SourceScope) (mutable : Bool)
-    {initial body : Expr} {localType result : Ty} {before middle after : FlowContext} {finalMask : Initialization}
+    {initial body : Expr} {initialType localType result : Ty} {before middle after : FlowContext} {finalMask : Initialization}
     (slots : before.slots = scope.context)
-    (initialized : HasType program home before initial localType middle)
+    (initialized : HasType program home before initial initialType middle)
+    (joined : ReturnJoin program initialType middle localType middle)
     (discard : ReturnDisposition program result [(⟨scope.next⟩, ⟨⟨localType, mutable⟩, finalMask⟩)])
     (continued : HasType program home ((⟨scope.next⟩, ⟨⟨localType, mutable⟩, .present⟩) :: middle) body result
       ((⟨scope.next⟩, ⟨⟨localType, mutable⟩, finalMask⟩) :: after)) :
     HasType program home before (.bind mutable ⟨scope.next⟩ localType initial body) result after := by
-  refine .bind initialized discard continued ?_
+  refine .bind initialized joined discard continued ?_
   have keys := congrArg (List.map Prod.fst) (initialized.slots.trans slots)
   simp only [FlowContext.slots, SourceScope.context, List.map_map, Function.comp_def] at keys
   rw [keys]

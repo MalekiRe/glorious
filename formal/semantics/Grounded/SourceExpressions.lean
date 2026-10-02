@@ -177,10 +177,10 @@ inductive NamedExpr.Elaborates (program : Program) (names : Module → FunctionN
       (discard : UsePermitted program.data .discard discarded)
       (continued : NamedExpr.Elaborates program names home scope middle rest tail type after) :
       NamedExpr.Elaborates program names home scope before (.sequence first rest) (.sequence head tail) type after
-  | bind {scope before middle after mutable name annotation initial body first rest localType type finalMask}
-      (initialized : NamedExpr.Elaborates program names home scope before initial first localType middle)
+  | bind {scope before middle after mutable name annotation initial body first rest initialType localType type finalMask}
+      (initialized : NamedExpr.Elaborates program names home scope before initial first initialType middle)
       (discard : ReturnDisposition program type [(⟨scope.next⟩, ⟨⟨localType, mutable⟩, finalMask⟩)])
-      (annotated : Annotation program.aliases annotation localType)
+      (annotated : Annotation program middle annotation initialType localType)
       (continued : NamedExpr.Elaborates program names home (scope.enter (some name) ⟨localType, mutable⟩)
         ((⟨scope.next⟩, ⟨⟨localType, mutable⟩, .present⟩) :: middle) body rest type
         ((⟨scope.next⟩, ⟨⟨localType, mutable⟩, finalMask⟩) :: after)) :
@@ -271,9 +271,10 @@ inductive NamedRecordBuild (program : Program) (names : Module → FunctionName 
       (transferred : HasTypes program home before moves ((Fields.record constructor.fields).residents.map Field.type) after) :
       NamedRecordBuild program names home identity tag constructor scope before [] prepared
         (.construct identity tag moves) after
-  | field {identity tag constructor scope before middle after name initial rest head tail prepared} {index : Nat} {field : Field}
+  | field {identity tag constructor scope before middle after name initial rest head tail prepared initialType} {index : Nat} {field : Field}
       (selected : constructor.fields[index]? = some (name, field))
-      (initialized : NamedExpr.Elaborates program names home scope before initial head field.type middle)
+      (initialized : NamedExpr.Elaborates program names home scope before initial head initialType middle)
+      (joined : ReturnJoin program initialType middle field.type middle)
       (continued : NamedRecordBuild program names home identity tag constructor
         (scope.enter none ⟨field.type, false⟩)
         ((⟨scope.next⟩, ⟨⟨field.type, false⟩, .present⟩) :: middle) rest
@@ -306,10 +307,11 @@ theorem NamedRecordBuild.first_execution {program : Program} {home : Module}
       ((name, initial) :: rest) prepared core final)
     {environment after : Environment} {value : Value}
     (executed : Evaluates program environment core value after) :
-    ∃ (index : Nat) (field : Field) (head tail : Expr) (middle : FlowContext)
+    ∃ (index : Nat) (field : Field) (head tail : Expr) (middle : FlowContext) (initialType : Ty)
       (resident : Value) (initialized localAfter : Environment),
       constructor.fields[index]? = some (name, field) ∧
-      NamedExpr.Elaborates program names home scope before initial head field.type middle ∧
+      NamedExpr.Elaborates program names home scope before initial head initialType middle ∧
+      ReturnJoin program initialType middle field.type middle ∧
       NamedRecordBuild program names home identity tag constructor (scope.enter none ⟨field.type, false⟩)
         ((⟨scope.next⟩, ⟨⟨field.type, false⟩, .present⟩) :: middle) rest
         ((name, ⟨scope.next⟩) :: prepared) tail
@@ -319,9 +321,9 @@ theorem NamedRecordBuild.first_execution {program : Program} {home : Module}
       Evaluates program (initialized.extend [⟨⟨scope.next⟩, ⟨field.type, false⟩, resident⟩]) tail value localAfter ∧
       localAfter.exitScope 1 = some after := by
   cases built with
-  | field selected initialized continued =>
+  | field selected initialized joined continued =>
     obtain ⟨resident, middle, localAfter, headRun, tailRun, exited⟩ := Evaluates.bind_iff.mp executed
-    exact ⟨_, _, _, _, _, resident, middle, localAfter, selected, initialized, continued, rfl, headRun, tailRun, exited⟩
+    exact ⟨_, _, _, _, _, _, resident, middle, localAfter, selected, initialized, joined, continued, rfl, headRun, tailRun, exited⟩
 
 /-- Every completed record run contains its actual declaration-ordered transfer
 phase, followed by construction and retirement of all generated scopes. -/
@@ -350,7 +352,7 @@ theorem NamedRecordBuild.assembly {program : Program} {home : Module}
         .step .construct (.refl _), residents, .step .constructResult (.refl _)⟩
   | cons first rest ih =>
     cases built with
-    | field selected initialized continued =>
+    | field selected initialized joined continued =>
       obtain ⟨resident, middle, localAfter, headRun, tailRun, exited⟩ := Evaluates.bind_iff.mp executed
       obtain ⟨values, preparedFinal, moves, entry, exit, ordered, same, front, residents, back⟩ := ih continued tailRun
       refine ⟨values, preparedFinal, moves, entry, exit, ordered, same, ?_, residents, ?_⟩
@@ -469,9 +471,9 @@ theorem NamedExpr.Elaborates.checked {program : Program} {home : Module} {names 
   | sequence _ discard _ head tail =>
     have first := head slots
     exact .sequence first discard (tail (first.slots.trans slots))
-  | bind _ discard _ _ first rest =>
+  | bind _ discard annotated _ first rest =>
     have initial := first slots
-    apply SourceScope.bind_checked _ _ slots initial discard
+    apply SourceScope.bind_checked _ _ slots initial annotated.joined discard
     apply rest
     simp only [FlowContext.slots, SourceScope.context, SourceScope.enter, List.map_cons]
     congr 1
@@ -511,10 +513,10 @@ theorem NamedExpr.Elaborates.checked {program : Program} {home : Module} {names 
   | finish ordered transferred =>
     rename_i _ _ constructor _ _ _ _ _ _
     exact .construct constructor.declared constructor.chosen constructor.finite constructor.visible constructor.access transferred
-  | field selected initialized continued first rest =>
+  | field selected initialized joined continued first rest =>
     rename_i slots
     have initial := first slots
-    apply SourceScope.bind_checked _ false (finalMask := .absent) slots initial (.returning (by
+    apply SourceScope.bind_checked _ false (finalMask := .absent) slots initial joined (.returning (by
       simp only [List.mem_singleton]
       intro binding same
       subst binding

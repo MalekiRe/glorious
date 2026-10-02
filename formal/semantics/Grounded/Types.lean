@@ -54,10 +54,6 @@ theorem ResolvesType.unique {aliases : Aliases} {source : TypeExpr} {type : Ty}
     | cons otherFirst otherRest => rw [firstIH _ otherFirst, restIH _ otherRest]
 
 
-inductive Annotation (aliases : Aliases) : Option TypeExpr → Ty → Prop where
-  | inferred (type : Ty) : Annotation aliases none type
-  | explicit {source : TypeExpr} {type : Ty} (resolved : ResolvesType aliases source type) :
-      Annotation aliases (some source) type
 
 /-- Inline type expansion must be finite, including every enum variant. There
 are no indirections in this subset; zero array length does not license Self. -/

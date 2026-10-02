@@ -35,7 +35,7 @@ theorem HasType.structural_value {context final : FlowContext} {expression : Exp
   | read selected path selection ready copyable => intro closed; cases closed
   | move selected path selection ready mask context => intro closed; cases closed
   | sequence head discard tail headIH tailIH => intro closed; cases closed
-  | bind initial discard body fresh initialIH bodyIH => intro closed; cases closed
+  | bind initial joined discard body fresh initialIH bodyIH => intro closed; cases closed
   | tuple head tail headIH tailIH =>
     intro closed
     cases closed with | tuple first rest =>
@@ -198,10 +198,10 @@ theorem HasType.executes (checkedProgram : program.Checked) {context final : Flo
       obtain ⟨value, middle, headRun, _, middleTyped, middleIssued, _⟩ := ih _ .sequenceFirst head store issued
       obtain ⟨result, after, tailRun, _⟩ := ih _ .sequenceRest tail middleTyped middleIssued
       exact ⟨result, after, .sequence headRun tailRun⟩
-    | @bind home before middleContext afterContext mutable name initial body localType type finalMask initialTyped discard bodyTyped fresh =>
+    | @bind home before middleContext afterContext mutable name initial body initialType localType type finalMask initialTyped joined discard bodyTyped fresh =>
       obtain ⟨value, middle, initialRun, resident, middleTyped, middleIssued, _⟩ := ih _ .bindInitial initialTyped store issued
       obtain ⟨entered, _, _, _⟩ := AddressedEnvironment.extend.typed middleTyped
-        (inputs := [⟨name, ⟨localType, mutable⟩, value⟩]) (.cons resident .nil (by simp))
+        (inputs := [⟨name, ⟨localType, mutable⟩, value⟩]) (.cons (joined.on_return resident).1 .nil (by simp))
         (by simpa using List.nodup_cons.mpr ⟨fresh, middleTyped.context_distinct⟩)
       obtain ⟨result, localAfter, bodyRun, _, localTyped, _, _⟩ := ih _ .bindBody bodyTyped entered middleIssued
       obtain ⟨after, exited, _⟩ := AddressedEnvironment.exitScope.progress localTyped 1

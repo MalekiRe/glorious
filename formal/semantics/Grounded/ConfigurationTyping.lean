@@ -163,12 +163,13 @@ inductive FrameTyped (program : Program) (heap : RuntimeHeap StorageCell) (suppl
   | sequence {home before after discarded result rest}
       (discard : UsePermitted program.data .discard discarded) (checked : HasType program home before rest result after) :
       FrameTyped program heap supply activation before (.one discarded) (.sequence rest) after (.one result)
-  | bind {home before after name mutable localType result body finalMask}
+  | bind {home before after name mutable initialType localType result body finalMask}
+      (joined : ReturnJoin program initialType before localType before)
       (discard : ReturnDisposition program result [(name, ⟨⟨localType, mutable⟩, finalMask⟩)])
       (checked : HasType program home ((name, ⟨⟨localType, mutable⟩, .present⟩) :: before) body result
         ((name, ⟨⟨localType, mutable⟩, finalMask⟩) :: after))
       (fresh : name ∉ before.map Prod.fst) :
-      FrameTyped program heap supply activation before (.one localType) (.bind name ⟨localType, mutable⟩ body) after (.one result)
+      FrameTyped program heap supply activation before (.one initialType) (.bind name ⟨localType, mutable⟩ body) after (.one result)
   | scope {context after : FlowContext} (locals : FlowContext) {input result}
       (discard : ReturnDisposition program input locals)
       (joined : ReturnJoin program input context result after) :
@@ -309,7 +310,7 @@ theorem ConfigurationTyped.progress {context result state}
         obtain ⟨value, after, _, _, taken, _⟩ := AddressedEnvironment.take.progress store selected path selection ready
         exact ⟨_, .move taken⟩
       | sequence head discard tail => exact ⟨_, .sequence⟩
-      | bind initial discard body fresh => exact ⟨_, .bind⟩
+      | bind initial joined discard body fresh => exact ⟨_, .bind⟩
       | tuple head tail => exact ⟨_, .tuple⟩
       | project source discard mask selected => exact ⟨_, .project⟩
       | array residents finite size => exact ⟨_, .array⟩
@@ -330,7 +331,7 @@ theorem ConfigurationTyped.progress {context result state}
         right
         cases frame with
         | sequence discard checked => exact ⟨_, .sequenceResult⟩
-        | bind discard checked fresh => exact ⟨_, .bindResult⟩
+        | bind joined discard checked fresh => exact ⟨_, .bindResult⟩
         | scope locals discard joined =>
           by_cases empty : List.take locals.length environment.bindings = []
           · exact ⟨_, .scope empty⟩
@@ -454,15 +455,15 @@ theorem ConfigurationTyped.preservation {context : FlowContext} {result : Result
       cases code with | cleanup safe checked => exact .intro store issued checked continuation
     | bind =>
       cases code with | expression checked =>
-        cases checked with | bind initial discard body fresh =>
-          exact .intro store issued (.expression initial) (.cons (.bind discard body fresh) continuation)
+        cases checked with | bind initial joined discard body fresh =>
+          exact .intro store issued (.expression initial) (.cons (.bind joined discard body fresh) continuation)
     | @bindResult env stack name slot body value =>
       cases code with | result resident =>
         cases continuation with | cons frame tail =>
-          cases frame with | @bind home before after bindingName mutable localType result body finalMask discard checked fresh =>
+          cases frame with | @bind home before after bindingName mutable initialType localType result body finalMask joined discard checked fresh =>
             have contextDistinct := store.context_distinct
             obtain ⟨entered, _, _, retained⟩ := AddressedEnvironment.extend.typed store
-              (inputs := [⟨name, ⟨_, mutable⟩, value⟩]) (.cons resident .nil (by simp))
+              (inputs := [⟨name, ⟨_, mutable⟩, value⟩]) (.cons (joined.on_return resident).1 .nil (by simp))
               (by simpa using List.nodup_cons.mpr ⟨fresh, contextDistinct⟩)
             refine .intro entered issued (.expression checked) (.cons (.scope [_] discard (.refl _)) ?_)
             exact tail.transport (fun _ previous => previous)
@@ -973,7 +974,7 @@ theorem FrameTyped.declares {before : Environment} {current next : FlowContext}
     (store : before.Declares program current.slots) : (frame.environment before).Declares program next.slots := by
   cases typed with
   | sequence discard checked => simpa only [Frame.environment, Frame.activation, checked.slots] using store
-  | bind discard checked fresh =>
+  | bind joined discard checked fresh =>
     have same : next.slots = current.slots := congrArg List.tail checked.slots
     simpa only [Frame.environment, Frame.activation, same] using store
   | scope locals discard joined =>
@@ -1003,7 +1004,7 @@ theorem FrameTyped.consumption_frame {before after : Environment} {current next 
     AddressedEnvironment.ConsumptionFrame program next.slots (frame.environment before) (frame.environment after) := by
   cases typed with
   | sequence discard checked => simpa only [Frame.environment, Frame.activation, checked.slots] using framed
-  | bind discard checked fresh =>
+  | bind joined discard checked fresh =>
     have same : next.slots = current.slots := congrArg List.tail checked.slots
     simpa only [Frame.environment, Frame.activation, same] using framed
   | scope locals discard joined =>

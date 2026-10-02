@@ -1589,5 +1589,29 @@ theorem HasType.call_bottom_argument_behavior (checkedProgram : program.Checked)
   · exact infinite
 
 
+/-- A bottom initializer prevents the entire binding from returning. No
+local resident, allocation success or execution of the body is assumed. -/
+theorem HasType.bind_bottom_behavior (checkedProgram : program.Checked)
+    {before middle final : FlowContext} {initial body : Expr} {mutable : Bool}
+    {name : BindingId} {localType type : Ty}
+    (checked : HasType program home before (.bind mutable name localType initial body) type final)
+    (bottom : HasType program home before initial .never middle)
+    {environment : Environment}
+    (store : BindingMap.Typed program environment.heap environment.activation environment.bindings before)
+    (issued : environment.supply.Issued environment.activation) :
+    ∃ trace, InfiniteRun program ⟨environment, .expression (.bind mutable name localType initial body), []⟩ trace ∧
+      ∀ index, ConfigurationTyped program final (.one type) (trace index) ∧
+        AddressedEnvironment.ConsumptionFrame program final.slots environment (trace index).outerEnvironment ∧
+        (trace index).OwnershipSafe program ∧
+        Configuration.ExternalFrame ⟨environment, .expression (.bind mutable name localType initial body), []⟩ (trace index) ∧
+        ∀ identity, environment.heap.next ≤ identity.index →
+          ∀ cell, (trace index).environment.heap.read identity = some cell →
+            ¬ (trace index).Untracked identity := by
+  rcases checked.behavior checkedProgram store issued with normal | infinite
+  · obtain ⟨_, _, evaluated, _⟩ := normal
+    obtain ⟨_, _, _, initialRun, _, _⟩ := Evaluates.bind_iff.mp evaluated
+    obtain ⟨resident, _⟩ := bottom.evaluation_soundness checkedProgram store issued initialRun
+    exact resident.not_never.elim
+  · exact infinite
 end Grounded
 
