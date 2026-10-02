@@ -3520,6 +3520,15 @@ discardable, including the hole left by transfer. Authority comes from the
 real elaborated module, not an existential alternative scope. Evaluation and
 termination consumers use the same module-bearing constructors.
 
+The transfer theorem also derives disposal permission for every original
+resident in any disjoint sibling path. `PathDisjoint.write_frame` proves that
+the very same resident remains in the residual aggregate; the existing
+descendant-disposal producer then supplies its permission. No future readiness
+or assumed sibling disappearance occurs. The conclusion covers both the
+declared path type and every independently valid type of the observed resident,
+so type ambiguity cannot launder a nondiscardable owner. Arbitrary observing
+modules may describe the path without changing the actual projection authority.
+
 All 30 Lean build jobs passed. Axiom inspection of the transfer theorem, general
 preservation and source maximal behavior found only standard Lean axioms.
 No examples or tests were added. This does not implement custom destructor

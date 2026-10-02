@@ -934,12 +934,27 @@ theorem HasType.projection_transfer (checkedProgram : program.Checked)
         ⟨current, .result selected, stack⟩ ∧
       ValueHasType program selected child ∧
       (PartialValue.resident aggregate).writeFields program parent [key] .hole = some remainder ∧
-      remainder.selectFields program parent [key] = some .hole ∧ remainder.Disposable program parent := by
+      remainder.selectFields program parent [key] = some .hole ∧ remainder.Disposable program parent ∧
+      ∀ (observer : Module) (descendant : Ty) (path : List FieldKey) (owner : Value),
+        PathDisjoint program observer parent [key] path →
+        PathType program observer parent path descendant →
+        ((PartialValue.resident aggregate).selectFields program parent path).bind PartialValue.read = some owner →
+        UsePermitted program.data .discard descendant ∧
+        ∀ ownerType, ValueHasType program owner ownerType → UsePermitted program.data .discard ownerType := by
   have safe := (checked.soundness checkedProgram store issued run).2.2.2.2
   change aggregate.ProjectionCleanupSafe program projectionHome key at safe
   obtain ⟨parent, child, index, selected, remainder, resident, access, found, typed, written, absent, disposable⟩ := safe
-  exact ⟨parent, child, index, selected, remainder, resident, access, .projectResult found,
-    typed, written, absent, disposable⟩
+  refine ⟨parent, child, index, selected, remainder, resident, access, .projectResult found,
+    typed, written, absent, disposable, ?_⟩
+  intro observer descendant path owner apart pathTyped observed
+  have retained : (remainder.selectFields program parent path).bind PartialValue.read = some owner := by
+    rw [apart.write_frame written]
+    exact observed
+  refine ⟨disposable.selected_permission pathTyped retained, ?_⟩
+  intro ownerType ownerTyped
+  obtain ⟨part, located, permission⟩ := pathTyped.disposable disposable
+  rw [located] at retained
+  exact permission.read_permission_as retained ownerTyped
 
 end Grounded
 
