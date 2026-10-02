@@ -359,11 +359,12 @@ theorem StorageAddress.take.hole {program : Program} {before after : RuntimeHeap
     (taken : address.take program before = some (value, after)) :
     ∃ old next, before.read address.root = some old ∧ after.read address.root = some next ∧
       next.activation = old.activation ∧ next.type = old.type ∧
-      next.resident.selectFields program next.type address.fields = some .hole := by
+      next.resident.selectFields program next.type address.fields = some .hole ∧
+      old.resident.writeFields program old.type address.fields .hole = some next.resident := by
   simp only [StorageAddress.take, Option.bind_eq_some_iff, Option.map_eq_some_iff] at taken
   obtain ⟨cell, original, selected, _, resident, _, updated, changed, heap, written, same⟩ := taken
   cases same
   exact ⟨cell, { cell with resident := updated }, original, RuntimeHeap.write_read written,
-    rfl, rfl, PartialValue.write_select changed⟩
+    rfl, rfl, PartialValue.write_select changed, changed⟩
 
 end Grounded

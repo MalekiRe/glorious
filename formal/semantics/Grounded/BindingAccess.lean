@@ -903,12 +903,13 @@ theorem AddressedEnvironment.take.hole {before after : AddressedEnvironment} {va
     ∃ address old next, before.bindings.resolve place = some address ∧
       before.heap.read address.root = some old ∧ after.heap.read address.root = some next ∧
       next.activation = old.activation ∧ next.type = old.type ∧
-      next.resident.selectFields program next.type address.fields = some .hole := by
+      next.resident.selectFields program next.type address.fields = some .hole ∧
+      old.resident.writeFields program old.type address.fields .hole = some next.resident := by
   obtain ⟨pair, raw, same⟩ := Option.map_eq_some_iff.mp taken
   cases same
   obtain ⟨address, resolved, moved⟩ := Option.bind_eq_some_iff.mp raw
-  obtain ⟨old, next, original, live, activation, type, absent⟩ := StorageAddress.take.hole moved
-  exact ⟨address, old, next, resolved, original, live, activation, type, absent⟩
+  obtain ⟨old, next, original, live, activation, type, absent, written⟩ := StorageAddress.take.hole moved
+  exact ⟨address, old, next, resolved, original, live, activation, type, absent, written⟩
 
 /-- Consumption-only histories preserve every descendant that remains readable.
 Erasure cannot resurrect an earlier hole, even along overlapping paths. -/

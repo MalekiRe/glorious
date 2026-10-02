@@ -1003,4 +1003,112 @@ theorem PartialValue.Empty.write_hole_selected {program : Program} {parent : Ty}
         · rw [List.getElem?_set_ne (Ne.symm same)] at later
           exact empty selected later
 
+theorem Initialization.Empty.write_absent {program : Program} {parent : Ty}
+    {before after : Initialization} {path : List FieldKey} (empty : before.Empty)
+    (written : before.writeFields program parent path .absent = some after) : after.Empty := by
+  induction path generalizing parent before after with
+  | nil => cases written; simp [Initialization.Empty]
+  | cons key rest ih =>
+    simp only [Initialization.writeFields, Option.bind_eq_some_iff, Option.map_eq_some_iff] at written
+    obtain ⟨⟨index, child, types⟩, info, current, found, updated, changed, rfl⟩ := written
+    have updatedEmpty := ih (empty.open_field found) changed
+    simp only [Initialization.Empty]
+    refine ⟨?_, ?_⟩
+    · intro equal
+      have bound := (List.getElem?_eq_some_iff.mp found).1
+      have length := congrArg List.length equal
+      simp only [List.length_set, List.length_nil] at length
+      dsimp only at length bound
+      omega
+    · intro value member
+      rcases List.mem_or_eq_of_mem_set member with original | same
+      · obtain ⟨position, selected⟩ := List.mem_iff_getElem?.mp original
+        exact empty.open_field selected
+      · subst value; exact updatedEmpty
+
+private theorem InitializationsDisposable.replace {data : DataDeclarations}
+    {types : List Ty} {states : List Initialization} (permission : InitializationsDisposable data types states)
+    {index : Nat} {type : Ty} {replacement : Initialization}
+    (selected : types[index]? = some type) (allowed : replacement.Disposable data type) :
+    InitializationsDisposable data types (states.set index replacement) := by
+  induction types generalizing states index with
+  | nil => simp at selected
+  | cons first rest ih =>
+    cases permission with
+    | cons head tail =>
+      cases index with
+      | zero => cases selected; exact .cons allowed tail
+      | succ index => exact .cons head (ih tail selected)
+
+private theorem InitializationsDisposable.tuple_permission {data : DataDeclarations}
+    {first : Ty} {rest : List Ty} {states : List Initialization}
+    (permission : InitializationsDisposable data (first :: rest) states) :
+    (Initialization.fields states).Disposable data (.tuple first rest) := by
+  cases permission with
+  | cons head tail => exact .tuple head tail
+
+/-- Consuming any field preserves an existing residual disposal permission. The
+same mask update drives both source checking and actual storage realization. -/
+theorem Initialization.Disposable.write_absent {program : Program} {parent : Ty}
+    {before after : Initialization} {path : List FieldKey}
+    (permission : before.Disposable program.data parent)
+    (written : before.writeFields program parent path .absent = some after) :
+    after.Disposable program.data parent := by
+  induction path generalizing parent before after with
+  | nil => cases written; exact .empty (by simp [Initialization.Empty])
+  | cons key rest ih =>
+    cases permission with
+    | empty absent => exact .empty (absent.write_absent written)
+    | permitted allowed => exact .permitted allowed
+    | tuple head tail =>
+      simp only [Initialization.writeFields, Option.bind_eq_some_iff, Option.map_eq_some_iff] at written
+      obtain ⟨⟨index, child, types⟩, info, current, found, updated, changed, rfl⟩ := written
+      have layout := Ty.fieldInfo_layout info
+      simp only [Ty.fieldTypes, Option.some.injEq] at layout
+      subst types
+      have selected : _ := info
+      simp only [Ty.fieldInfo, Ty.fieldTypes, Option.bind_some,
+        Option.bind_eq_some_iff, Option.map_eq_some_iff] at selected
+      obtain ⟨_, indexed, _, selected, equal⟩ := selected
+      cases equal
+      have all := InitializationsDisposable.cons head tail
+      have replaced := all.replace selected (ih (all.select selected found) changed)
+      exact replaced.tuple_permission
+    | @nominal identity declaration states declared restriction fields =>
+      simp only [Initialization.writeFields, Option.bind_eq_some_iff, Option.map_eq_some_iff] at written
+      obtain ⟨⟨index, child, types⟩, info, current, found, updated, changed, rfl⟩ := written
+      have layout := Ty.fieldInfo_layout info
+      simp only [Ty.fieldTypes, declared, Option.bind_some, Option.map_eq_some_iff] at layout
+      obtain ⟨schema, chosen, rfl⟩ := layout
+      have selected : _ := info
+      simp only [Ty.fieldInfo, Ty.fieldTypes, declared, Option.bind_some, chosen,
+        Option.map_some, Option.bind_eq_some_iff, Option.map_eq_some_iff] at selected
+      obtain ⟨_, indexed, _, selected, equal⟩ := selected
+      cases equal
+      have all := fields none schema chosen
+      have replaced := all.replace selected (ih (all.select selected found) changed)
+      refine .nominal declared restriction ?_
+      intro tag candidate constructor
+      cases shape : declaration.shape with
+      | «structure» residents =>
+        simp only [DataDecl.constructor, shape, Option.some.injEq] at chosen
+        subst schema
+        cases tag <;> simp_all [DataDecl.constructor, Initialization.openFields]
+      | enumeration variants nonexhaustive => simp [DataDecl.constructor, shape] at chosen
+
+/-- The actual erasure preserves residual disposal permission. Static and
+runtime updates are the paired products of the existing checked path producer. -/
+theorem PartialValue.Disposable.write_hole {program : Program} {parent child : Ty}
+    {before after : PartialValue} {home : Module} {path : List FieldKey}
+    (permission : before.Disposable program parent)
+    (finite : FiniteLayout program.target program.data parent)
+    (checked : PathType program home parent path child)
+    (written : before.writeFields program parent path .hole = some after) :
+    after.Disposable program parent := by
+  obtain ⟨state, typed, disposition⟩ := permission
+  obtain ⟨actual, next, stateWritten, actualWritten, actualTyped, _⟩ :=
+    checked.restore_partial finite typed (.hole child)
+  cases Option.some.inj (actualWritten.symm.trans written)
+  exact ⟨next, actualTyped, disposition.write_absent stateWritten⟩
+
 end Grounded

@@ -3614,7 +3614,19 @@ frontier are unchanged. Every typed retained caller at another activation
 keeps its cells exactly and remains well typed. No completed move or future
 readiness is supplied. This covers whole and partial owned-place movement.
 
-All 30 Lean build jobs passed. Inspected producer, move-transfer, preservation
+
+`Initialization.Disposable.write_absent` proves residual disposal is closed
+under the actual arbitrary-depth mask update, preserving nominal restrictions
+and empty-shell distinctions. `PartialValue.Disposable.write_hole` pairs that
+result with runtime erasure through the existing checked-path producer. The
+storage and addressed move producers expose the actual old-to-new resident
+update. `HasType.move_transfers` consumes this evidence and source-derived layout
+and path typing: whenever the original containing resident was disposable,
+the constructed moved-from resident remains disposable. No post-move disposal
+or mask-realization premise is supplied. All 30 build jobs and standard-axiom
+inspection of the producer, runtime bridge, source move and maximal behavior
+passed after this integration.
+
 and source-behavior dependencies contain only standard Lean axioms. No tests,
 examples or subagents were used. These are logical owned-cell semantics, not
 reference-hole restoration, custom Drop or physical memory proofs; none of the

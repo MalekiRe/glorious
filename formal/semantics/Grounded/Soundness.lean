@@ -1069,7 +1069,8 @@ theorem HasType.move_transfers (checkedProgram : program.Checked)
       (∃ address old next, current.bindings.resolve place = some address ∧
         current.heap.read address.root = some old ∧ after.heap.read address.root = some next ∧
         next.activation = old.activation ∧ next.type = old.type ∧
-        next.resident.selectFields program next.type address.fields = some .hole) ∧
+        next.resident.selectFields program next.type address.fields = some .hole ∧
+        (old.resident.Disposable program old.type → next.resident.Disposable program next.type)) ∧
       ∀ (caller : AddressedScope) states,
         BindingMap.Typed program current.heap caller.activation caller.bindings states →
         caller.activation ≠ current.activation →
@@ -1092,12 +1093,21 @@ theorem HasType.move_transfers (checkedProgram : program.Checked)
         have entered : Step program ⟨current, .expression (.move place), stack⟩ ⟨after, .result value, stack⟩ := .move taken
         have hole := AddressedEnvironment.take.hole taken
         have unreadable : after.read program place = none := by
-          obtain ⟨address, old, next, resolved, _, found, _, _, empty⟩ := hole
+          obtain ⟨address, old, next, resolved, _, found, _, _, empty, _⟩ := hole
           have bindings : after.bindings = current.bindings := congrArg AddressedScope.bindings scope
           change after.bindings.read program after.heap place = none
           simp [BindingMap.read, bindings, resolved, StorageAddress.read, found, empty, PartialValue.read]
-        exact ⟨after, value, _, observed, resident, entered,
-          original.preservation checkedProgram entered, absent, unreadable, scope, supply, next, hole, retained⟩
+        refine ⟨after, value, _, observed, resident, entered,
+          original.preservation checkedProgram entered, absent, unreadable, scope, supply, next, ?_, retained⟩
+        obtain ⟨address, old, remaining, resolved, found, live, activation, sameType, empty, erased⟩ := hole
+        obtain ⟨identity, cell, _, resolvedSource, stored, _, declared, cellTyped, _⟩ :=
+          currentStore.resolve selected path
+        cases Option.some.inj (resolvedSource.symm.trans resolved)
+        cases Option.some.inj (stored.symm.trans found)
+        refine ⟨_, old, remaining, resolvedSource, found, live, activation, sameType, empty, ?_⟩
+        intro permission
+        rw [sameType]
+        exact permission.write_hole cellTyped.1 (by simpa only [declared] using path) erased
 
 end Grounded
 
