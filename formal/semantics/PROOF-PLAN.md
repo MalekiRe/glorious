@@ -3377,3 +3377,27 @@ scope exclusion will not suffice once values can carry references. The
 reference-aware reachable-storage and loan contract remains an obligation,
 as do custom Drop execution and the other completion families above.
 
+## Retained caller cells survive actual callee execution
+
+`Run.decompose_extension` factors arbitrary execution prefixes at the first
+terminal control above a saved continuation. The previous completed-run
+`Run.unextend` theorem now consumes this general producer. `Run.body_frame`
+uses that factorization and external framing to preserve cells outside the
+callee entry bindings through nested execution and the actual return cleanup.
+`Run.call_frame` derives this isolation for every initially live caller cell
+from fresh parameter allocation, without typing or termination premises.
+
+The public source-selected invocation behavior now preserves complete caller
+cells on return and at every divergence prefix. Ordered Copy/move invocation
+exports the corresponding guarantee from its constructed post-input heap
+through every callee prefix. Input moves are not rolled back: preservation
+begins after those actual ordered input transitions. No independent runtime
+analysis, assumed post-state liveness or successful-execution premise is added.
+
+Verification: all 30 `lake build Grounded` jobs passed. Axiom inspection of
+the decomposition and framing producers and both public consumers found only
+standard Lean axioms. This remains direct owned-value invocation; references,
+captured environments, custom Drop and the broad completion obligations remain
+open. In particular, future borrowed calls must preserve permissions and
+authorized effects rather than promise unconditional equality of caller cells.
+

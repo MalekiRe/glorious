@@ -1670,6 +1670,7 @@ theorem SourceClosure.Admitted.invocation_behavior {packages : List PackageSourc
       AddressedEnvironment.ConsumptionFrame program context.slots environment after ∧
       (⟨after, .result value, []⟩ : Configuration).OwnershipSafe program ∧
       Configuration.ExternalFrame ⟨environment, .results values, [.call declaration]⟩ ⟨after, .result value, []⟩ ∧
+      (∀ identity cell, environment.heap.read identity = some cell → after.heap.read identity = some cell) ∧
       (∀ identity, environment.heap.next ≤ identity.index → identity.index < after.heap.next →
         after.heap.Retired identity) ∧
       ∃ inputs, prepareBindings declaration.parameters values = some inputs ∧
@@ -1680,6 +1681,8 @@ theorem SourceClosure.Admitted.invocation_behavior {packages : List PackageSourc
         AddressedEnvironment.ConsumptionFrame program context.slots environment (trace index).outerEnvironment ∧
         (trace index).OwnershipSafe program ∧
         Configuration.ExternalFrame ⟨environment, .results values, [.call declaration]⟩ (trace index) ∧
+        (∀ identity cell, environment.heap.read identity = some cell →
+          (trace index).environment.heap.read identity = some cell) ∧
         ∀ identity, environment.heap.next ≤ identity.index →
           ∀ cell, (trace index).environment.heap.read identity = some cell →
             ¬ (trace index).Untracked identity)) := by
@@ -1688,8 +1691,12 @@ theorem SourceClosure.Admitted.invocation_behavior {packages : List PackageSourc
       ⟨environment, .results values, [.call declaration]⟩ :=
     .intro store issued (.results arguments) (.cons (.call declared) .nil)
   rcases entry.behavior admitted.checked with ⟨after, value, run, typed, stored, framed, safe, external, retired⟩ | ⟨trace, infinite, safe⟩
-  · exact .inl ⟨after, value, run, typed, run.outer_scope, stored, framed, safe, external, retired, run.call_cleanup⟩
-  · exact .inr ⟨trace, infinite, safe⟩
+  · exact .inl ⟨after, value, run, typed, run.outer_scope, stored, framed, safe, external,
+      fun _ _ found => run.call_frame found, retired, run.call_cleanup⟩
+  · refine .inr ⟨trace, infinite, ?_⟩
+    intro index
+    obtain ⟨typed, framed, owned, external, tracked⟩ := safe index
+    exact ⟨typed, framed, owned, external, fun _ _ found => (infinite.prefix index).call_frame found, tracked⟩
 
 /-- Ordered Copy/move inputs and complete invocation share one pre-state
 compatibility contract. Actual inputs retain their original observations; no
@@ -1714,6 +1721,9 @@ theorem SourceClosure.Admitted.compatible_call_behavior {packages : List Package
       prepareBindings declaration.parameters values = some bindings ∧
       Run program ⟨environment, .expression (.call identity (inputs.map Prod.fst)), []⟩
         ⟨enterBindings middle.heap middle.supply bindings, .expression declaration.body, [.restore middle.scope]⟩ ∧
+      (∀ state, Run program
+          ⟨enterBindings middle.heap middle.supply bindings, .expression declaration.body, [.restore middle.scope]⟩ state →
+        ∀ identity cell, middle.heap.read identity = some cell → state.environment.heap.read identity = some cell) ∧
       ((∃ after value, Evaluates program environment (.call identity (inputs.map Prod.fst)) value after ∧
         ValueHasType program value declaration.result ∧
         BindingMap.Typed program after.heap after.activation after.bindings final ∧
@@ -1736,7 +1746,9 @@ theorem SourceClosure.Admitted.compatible_call_behavior {packages : List Package
   obtain ⟨final, middle, values, bindings, checked, evaluated, observed, prepared, entered, typed, _⟩ :=
     HasType.compatible_call_entry admitted.checked declared (admitted.resolved_visibility selected declared)
       arguments compatible ordinary inputsAdmitted store issued
-  refine ⟨final, middle, values, bindings, checked, evaluated, observed, prepared, entered, ?_⟩
+  refine ⟨final, middle, values, bindings, checked, evaluated, observed, prepared, entered, ?_, ?_⟩
+  · intro state suffix identity cell found
+    exact (Run.step (Step.callInputs prepared) suffix).call_frame found
   rcases typed.behavior admitted.checked with ⟨after, value, returned, resident, stored, _, safe, _, _⟩ | ⟨trace, infinite, _⟩
   · have run := entered.trans returned
     have framed := (checked.soundness admitted.checked store issued run).2.2.1

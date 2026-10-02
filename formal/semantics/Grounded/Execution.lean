@@ -242,26 +242,39 @@ theorem Step.unextend {before after : Configuration} {tail : List Frame}
     cases control <;> cases frame <;> cases step <;>
       exact ⟨_, by constructor <;> assumption, rfl⟩
 
+/-- A prefix either still executes above the saved continuation or has reached
+its first terminal control and then continued through that saved continuation. -/
+theorem Run.decompose_extension {before after : Configuration} (run : Run program before after) :
+    ∀ (base : Configuration) (tail : List Frame), before = base.extend tail →
+      (∃ current, Run program base current ∧ after = current.extend tail) ∨
+      (∃ done, Terminal done ∧ Run program base done ∧ Run program (done.extend tail) after) := by
+  induction run with
+  | refl state =>
+    intro base tail same
+    exact .inl ⟨base, .refl _, same⟩
+  | step head rest ih =>
+    intro base tail same
+    subst_vars
+    by_cases terminal : Terminal base
+    · exact .inr ⟨base, terminal, .refl _, .step head rest⟩
+    · obtain ⟨next, step, same⟩ := head.unextend terminal
+      rcases ih next tail same with ⟨current, front, final⟩ | ⟨done, terminal, front, back⟩
+      · exact .inl ⟨current, .step step front, final⟩
+      · exact .inr ⟨done, terminal, .step step front, back⟩
+
 /-- Any run that consumes a retained frame first completes the computation
 above it. Extract both actual runs, without a termination assumption. -/
 theorem Run.unextend {before after : Configuration} (run : Run program before after) :
     ∀ (base : Configuration) (tail : List Frame), before = base.extend tail →
       after.continuation.length < tail.length →
       ∃ done, Terminal done ∧ Run program base done ∧ Run program (done.extend tail) after := by
-  induction run with
-  | refl state =>
-    intro base tail same shorter
-    subst state
+  intro base tail same shorter
+  rcases run.decompose_extension base tail same with ⟨current, _, final⟩ | completed
+  · subst after
     simp only [Configuration.extend, List.length_append] at shorter
     omega
-  | step head rest ih =>
-    intro base tail same shorter
-    subst_vars
-    by_cases terminal : Terminal base
-    · exact ⟨base, terminal, .refl _, .step head rest⟩
-    · obtain ⟨next, step, same⟩ := head.unextend terminal
-      obtain ⟨done, terminal, front, back⟩ := ih next tail same shorter
-      exact ⟨done, terminal, .step step front, back⟩
+  · exact completed
+
 
 
 theorem Step.unique {before first second : Configuration} (left : Step program before first)
@@ -871,5 +884,55 @@ theorem Run.external_frame {before after : Configuration} (run : Run program bef
   | step head tail ih =>
     obtain ⟨middle, retained⟩ := head.untracked_frame outside found
     exact ih retained middle
+
+/-- A callee cannot mutate cells outside its entry ownership, even when they
+occur in the saved caller. Covers every prefix, including the return cleanup. -/
+theorem Run.body_frame {entry : Environment} {after : Configuration} {caller : AddressedScope}
+    {body : Expr} {identity : StorageId} {cell : StorageCell}
+    (run : Run program ⟨entry, .expression body, [.restore caller]⟩ after)
+    (outside : identity ∉ entry.bindings.map Prod.snd)
+    (found : entry.heap.read identity = some cell) :
+    after.environment.heap.read identity = some cell := by
+  have untracked : (⟨entry, .expression body, []⟩ : Configuration).Untracked identity :=
+    ⟨outside, by simp⟩
+  rcases run.decompose_extension ⟨entry, .expression body, []⟩ [.restore caller] rfl with
+    ⟨current, prefixRun, same⟩ | ⟨done, terminal, prefixRun, suffix⟩
+  · subst after
+    exact (prefixRun.external_frame identity cell untracked found).1
+  · obtain ⟨preserved, remaining⟩ := prefixRun.external_frame identity cell untracked found
+    cases terminal with
+    | result current value =>
+      cases suffix with
+      | refl => exact preserved
+      | step head tail =>
+        cases head with
+        | restore restored =>
+          obtain ⟨heap, released, same⟩ := Option.map_eq_some_iff.mp restored
+          cases same
+          cases tail with
+          | refl => exact (releaseBindings.outside released remaining.1).trans preserved
+          | step impossible rest => cases impossible
+    | results current values =>
+      cases suffix with
+      | refl => exact preserved
+      | step impossible rest => cases impossible
+
+/-- Actual fresh parameter allocation isolates every already-live caller cell.
+No typing, callee termination or post-state liveness premise is needed. -/
+theorem Run.call_frame {before : Environment} {after : Configuration} {declaration : FunctionDecl}
+    {values : List Value} (run : Run program ⟨before, .results values, [.call declaration]⟩ after)
+    {identity : StorageId} {cell : StorageCell} (found : before.heap.read identity = some cell) :
+    after.environment.heap.read identity = some cell := by
+  cases run with
+  | refl => exact found
+  | step head tail =>
+    cases head with
+    | callInputs prepared =>
+      have old := before.heap.bounded _ _ found
+      apply tail.body_frame
+      · intro member
+        have bound := allocateBindings.bounds before.heap before.supply.allocate.1 _ identity member
+        omega
+      · exact (allocateBindings.old _ _ _ old).trans found
 
 end Grounded
