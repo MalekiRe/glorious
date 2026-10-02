@@ -3355,3 +3355,25 @@ remain open. Continue the authoritative ownership/cleanup dependency chain,
 including reference semantics needed by custom Drop, rather than treating this
 negative audit or another isolated lemma as whole-language completion.
 
+## External live storage is framed through maximal source behavior
+
+`Step.untracked_frame` now proves that an initially live cell outside every
+active and retained scope survives each actual machine transition unchanged
+and remains outside those scopes. Allocation freshness, resolved write targets,
+and the shared release operation discharge the cases; no post-state liveness
+or execution success is supplied. `Run.external_frame` composes this guarantee.
+
+`ConfigurationTyped.behavior`, `HasType.behavior`, and all three public source
+behavior contracts now expose `Configuration.ExternalFrame` on normal return
+and at every divergence prefix. The guarantee preserves the entire cell,
+including partial residents, owner and type, alongside the existing retirement
+and live-allocation accountability conclusions.
+
+Verification: all 30 `lake build Grounded` jobs passed. Lean axiom inspection
+of both framing producers, general maximal behavior and the three source
+consumers found only `propext`, `Classical.choice` and `Quot.sound`. No examples
+or unit tests were added. This is the current logical owned-value machine:
+scope exclusion will not suffice once values can carry references. The
+reference-aware reachable-storage and loan contract remains an obligation,
+as do custom Drop execution and the other completion families above.
+

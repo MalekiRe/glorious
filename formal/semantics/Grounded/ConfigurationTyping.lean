@@ -801,12 +801,14 @@ theorem ConfigurationTyped.behavior (checkedProgram : program.Checked)
       BindingMap.Typed program after.heap after.activation after.bindings context ∧
       AddressedEnvironment.ConsumptionFrame program context.slots before.outerEnvironment after ∧
       (⟨after, .result value, []⟩ : Configuration).OwnershipSafe program ∧
+      before.ExternalFrame ⟨after, .result value, []⟩ ∧
       ∀ identity, before.environment.heap.next ≤ identity.index → identity.index < after.heap.next →
         after.heap.Retired identity) ∨
     (∃ trace, InfiniteRun program before trace ∧
       ∀ index, ConfigurationTyped program context (.one type) (trace index) ∧
         AddressedEnvironment.ConsumptionFrame program context.slots before.outerEnvironment (trace index).outerEnvironment ∧
         (trace index).OwnershipSafe program ∧
+        before.ExternalFrame (trace index) ∧
         ∀ identity, before.environment.heap.next ≤ identity.index →
           ∀ cell, (trace index).environment.heap.read identity = some cell →
             ¬ (trace index).Untracked identity) := by
@@ -817,7 +819,7 @@ theorem ConfigurationTyped.behavior (checkedProgram : program.Checked)
     obtain ⟨after, value, same, store, _, resident⟩ := current.normal_form done
     subst state
     refine ⟨after, value, run, resident, store, typed.consumption_run checkedProgram run,
-      current.ownership_safe, run.return_retires_all ?_⟩
+      current.ownership_safe, run.external_frame, run.return_retires_all ?_⟩
     intro identity member
     obtain ⟨cell, found⟩ := typed.live_scopes before.continuation [] (by simp) identity member
     exact before.environment.heap.bounded _ _ found
@@ -826,7 +828,7 @@ theorem ConfigurationTyped.behavior (checkedProgram : program.Checked)
     intro index
     have run := infinite.prefix index
     have current := typed.run checkedProgram run
-    exact ⟨current, typed.consumption_run checkedProgram run, current.ownership_safe,
+    exact ⟨current, typed.consumption_run checkedProgram run, current.ownership_safe, run.external_frame,
       fun _ fresh _ live => run.allocated_tracked fresh live⟩
 
 

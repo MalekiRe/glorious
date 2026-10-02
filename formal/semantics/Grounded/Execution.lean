@@ -781,4 +781,95 @@ theorem Run.return_retires_all {before : Configuration} {after : Environment} {v
       exact Nat.not_lt_of_ge fresh (bounded identity original)
     exact False.elim (run.allocated_tracked fresh found ⟨outside, by simp⟩)
 
+/-- An already-live cell outside all active and retained scopes is untouched.
+This is a pre-state frame condition, not a post-state liveness assumption. -/
+theorem Step.untracked_frame {before after : Configuration} (step : Step program before after)
+    {identity : StorageId} {cell : StorageCell}
+    (untracked : before.Untracked identity) (found : before.environment.heap.read identity = some cell) :
+    after.environment.heap.read identity = some cell ∧ after.Untracked identity := by
+  cases step <;> simp_all [Configuration.Untracked, Frame.Retains]
+  case move env after stack place value taken =>
+    obtain ⟨⟨result, heap⟩, operation, same⟩ := Option.map_eq_some_iff.mp taken
+    cases same
+    obtain ⟨address, resolved, raw⟩ := Option.bind_eq_some_iff.mp operation
+    obtain ⟨target, mapped, same⟩ := Option.map_eq_some_iff.mp resolved
+    cases same
+    have apart : identity ≠ target := by
+      intro same; subst target
+      exact untracked.1 place.root (lookup.mem mapped)
+    simp only [StorageAddress.take, Option.bind_eq_some_iff, Option.map_eq_some_iff] at raw
+    obtain ⟨resident, _, selected, _, owner, _, updated, _, next, written, same⟩ := raw
+    cases same
+    exact ⟨(RuntimeHeap.write_other written apart).trans found, untracked.1⟩
+  case assignResult env after stack place rest value written =>
+    obtain ⟨heap, operation, same⟩ := Option.map_eq_some_iff.mp written
+    cases same
+    obtain ⟨address, resolved, raw⟩ := Option.bind_eq_some_iff.mp operation
+    obtain ⟨target, mapped, same⟩ := Option.map_eq_some_iff.mp resolved
+    cases same
+    have apart : identity ≠ target := by
+      intro same; subst target
+      exact untracked.1 place.root (lookup.mem mapped)
+    simp only [StorageAddress.restore, Option.bind_eq_some_iff] at raw
+    obtain ⟨resident, _, updated, _, written⟩ := raw
+    exact ⟨(RuntimeHeap.write_other written apart).trans found, untracked.1⟩
+  case constant env stack name declaration declared =>
+    exact ⟨found, by simp [enterBindings, allocateBindings], untracked.1⟩
+  case callInputs env stack declaration values inputs prepared =>
+    have old := env.heap.bounded _ _ found
+    refine ⟨(allocateBindings.old _ _ _ old).trans found, ?_, untracked.1⟩
+    intro name member
+    have bound := allocateBindings.bounds env.heap env.supply.allocate.1 inputs identity
+      (List.mem_map_of_mem (f := Prod.snd) member)
+    omega
+  case bindResult env stack name slot body value =>
+    have old := env.heap.bounded _ _ found
+    refine ⟨(allocateBindings.old _ _ _ old).trans found, ?_⟩
+    intro other member
+    rcases List.mem_append.mp member with fresh | previous
+    · have bound := allocateBindings.bounds env.heap env.activation [⟨name, slot, value⟩] identity
+        (List.mem_map_of_mem (f := Prod.snd) fresh)
+      omega
+    · exact untracked.1 other previous
+  case selectedPattern env inputs stack values arms body selected =>
+    have old := env.heap.bounded _ _ found
+    refine ⟨(allocateBindings.old _ _ _ old).trans found, ?_⟩
+    intro name member
+    rcases List.mem_append.mp member with fresh | previous
+    · have bound := allocateBindings.bounds env.heap env.activation inputs identity
+        (List.mem_map_of_mem (f := Prod.snd) fresh)
+      omega
+    · exact untracked.1 name previous
+  case restore env after caller stack value restored =>
+    obtain ⟨heap, released, same⟩ := Option.map_eq_some_iff.mp restored
+    cases same
+    have outside : identity ∉ env.bindings.map Prod.snd := by simpa using untracked.1
+    exact ⟨(releaseBindings.outside released outside).trans found, untracked.2.1⟩
+  case scope env after stack count value exited =>
+    obtain ⟨heap, released, same⟩ := Option.map_eq_some_iff.mp exited
+    cases same
+    have outside : identity ∉ (List.take count env.bindings).map Prod.snd := by
+      intro member
+      obtain ⟨⟨name, address⟩, included, same⟩ := List.mem_map.mp member
+      cases same
+      exact untracked.1 name (List.mem_of_mem_take included)
+    refine ⟨(releaseBindings.outside released outside).trans found, ?_⟩
+    intro name member
+    exact untracked.1 name (List.mem_of_mem_drop member)
+
+/-- The entire external live cell survives, including partial residents,
+allocation owner and declared type. No future liveness is required. -/
+def Configuration.ExternalFrame (before after : Configuration) : Prop :=
+  ∀ identity cell, before.Untracked identity → before.environment.heap.read identity = some cell →
+    after.environment.heap.read identity = some cell ∧ after.Untracked identity
+
+theorem Run.external_frame {before after : Configuration} (run : Run program before after) :
+    before.ExternalFrame after := by
+  intro identity cell outside found
+  induction run with
+  | refl => exact ⟨found, outside⟩
+  | step head tail ih =>
+    obtain ⟨middle, retained⟩ := head.untracked_frame outside found
+    exact ih retained middle
+
 end Grounded

@@ -774,12 +774,14 @@ theorem SourceClosure.Admitted.behavior {packages : List PackageSource} {closure
       BindingMap.Typed program after.heap after.activation after.bindings final ∧
       AddressedEnvironment.ConsumptionFrame program final.slots environment after ∧
       (⟨after, .result value, []⟩ : Configuration).OwnershipSafe program ∧
+      Configuration.ExternalFrame ⟨environment, .expression core, []⟩ ⟨after, .result value, []⟩ ∧
       ∀ identity, environment.heap.next ≤ identity.index → identity.index < after.heap.next →
         after.heap.Retired identity) ∨
     (∃ trace, InfiniteRun program ⟨environment, .expression core, []⟩ trace ∧
       ∀ index, ConfigurationTyped program final (.one type) (trace index) ∧
         AddressedEnvironment.ConsumptionFrame program final.slots environment (trace index).outerEnvironment ∧
         (trace index).OwnershipSafe program ∧
+        Configuration.ExternalFrame ⟨environment, .expression core, []⟩ (trace index) ∧
         ∀ identity, environment.heap.next ≤ identity.index →
           ∀ cell, (trace index).environment.heap.read identity = some cell →
             ¬ (trace index).Untracked identity) :=
@@ -1667,6 +1669,7 @@ theorem SourceClosure.Admitted.invocation_behavior {packages : List PackageSourc
       BindingMap.Typed program after.heap after.activation after.bindings context ∧
       AddressedEnvironment.ConsumptionFrame program context.slots environment after ∧
       (⟨after, .result value, []⟩ : Configuration).OwnershipSafe program ∧
+      Configuration.ExternalFrame ⟨environment, .results values, [.call declaration]⟩ ⟨after, .result value, []⟩ ∧
       (∀ identity, environment.heap.next ≤ identity.index → identity.index < after.heap.next →
         after.heap.Retired identity) ∧
       ∃ inputs, prepareBindings declaration.parameters values = some inputs ∧
@@ -1676,6 +1679,7 @@ theorem SourceClosure.Admitted.invocation_behavior {packages : List PackageSourc
       ∀ index, ConfigurationTyped program context (.one declaration.result) (trace index) ∧
         AddressedEnvironment.ConsumptionFrame program context.slots environment (trace index).outerEnvironment ∧
         (trace index).OwnershipSafe program ∧
+        Configuration.ExternalFrame ⟨environment, .results values, [.call declaration]⟩ (trace index) ∧
         ∀ identity, environment.heap.next ≤ identity.index →
           ∀ cell, (trace index).environment.heap.read identity = some cell →
             ¬ (trace index).Untracked identity)) := by
@@ -1683,8 +1687,8 @@ theorem SourceClosure.Admitted.invocation_behavior {packages : List PackageSourc
   have entry : ConfigurationTyped program context (.one declaration.result)
       ⟨environment, .results values, [.call declaration]⟩ :=
     .intro store issued (.results arguments) (.cons (.call declared) .nil)
-  rcases entry.behavior admitted.checked with ⟨after, value, run, typed, stored, framed, safe, retired⟩ | ⟨trace, infinite, safe⟩
-  · exact .inl ⟨after, value, run, typed, run.outer_scope, stored, framed, safe, retired, run.call_cleanup⟩
+  rcases entry.behavior admitted.checked with ⟨after, value, run, typed, stored, framed, safe, external, retired⟩ | ⟨trace, infinite, safe⟩
+  · exact .inl ⟨after, value, run, typed, run.outer_scope, stored, framed, safe, external, retired, run.call_cleanup⟩
   · exact .inr ⟨trace, infinite, safe⟩
 
 /-- Ordered Copy/move inputs and complete invocation share one pre-state
@@ -1715,6 +1719,8 @@ theorem SourceClosure.Admitted.compatible_call_behavior {packages : List Package
         BindingMap.Typed program after.heap after.activation after.bindings final ∧
         AddressedEnvironment.ConsumptionFrame program final.slots environment after ∧
         (⟨after, .result value, []⟩ : Configuration).OwnershipSafe program ∧
+        Configuration.ExternalFrame ⟨environment, .expression (.call identity (inputs.map Prod.fst)), []⟩
+          ⟨after, .result value, []⟩ ∧
         (∀ identity, environment.heap.next ≤ identity.index → identity.index < after.heap.next →
           after.heap.Retired identity) ∧
         ∀ identity ∈ (enterBindings middle.heap middle.supply bindings).bindings.map Prod.snd,
@@ -1723,6 +1729,7 @@ theorem SourceClosure.Admitted.compatible_call_behavior {packages : List Package
         ∀ index, ConfigurationTyped program final (.one declaration.result) (trace index) ∧
           AddressedEnvironment.ConsumptionFrame program final.slots environment (trace index).outerEnvironment ∧
           (trace index).OwnershipSafe program ∧
+          Configuration.ExternalFrame ⟨environment, .expression (.call identity (inputs.map Prod.fst)), []⟩ (trace index) ∧
           ∀ identity, environment.heap.next ≤ identity.index →
             ∀ cell, (trace index).environment.heap.read identity = some cell →
               ¬ (trace index).Untracked identity)) := by
@@ -1730,10 +1737,10 @@ theorem SourceClosure.Admitted.compatible_call_behavior {packages : List Package
     HasType.compatible_call_entry admitted.checked declared (admitted.resolved_visibility selected declared)
       arguments compatible ordinary inputsAdmitted store issued
   refine ⟨final, middle, values, bindings, checked, evaluated, observed, prepared, entered, ?_⟩
-  rcases typed.behavior admitted.checked with ⟨after, value, returned, resident, stored, _, safe, _⟩ | ⟨trace, infinite, _⟩
+  rcases typed.behavior admitted.checked with ⟨after, value, returned, resident, stored, _, safe, _, _⟩ | ⟨trace, infinite, _⟩
   · have run := entered.trans returned
     have framed := (checked.soundness admitted.checked store issued run).2.2.1
-    refine .inl ⟨after, value, run, resident, stored, framed, safe,
+    refine .inl ⟨after, value, run, resident, stored, framed, safe, run.external_frame,
       run.return_retires_all ?_, returned.body_return_retires⟩
     intro identity member
     obtain ⟨cell, found⟩ := store.live identity member
@@ -1742,7 +1749,7 @@ theorem SourceClosure.Admitted.compatible_call_behavior {packages : List Package
     refine .inr ⟨whole, execution, ?_⟩
     intro index
     have safe := checked.soundness admitted.checked store issued (execution.prefix index)
-    exact ⟨safe.1, safe.2.2.1, safe.2.2.2.2,
+    exact ⟨safe.1, safe.2.2.1, safe.2.2.2.2, (execution.prefix index).external_frame,
       fun _ fresh _ live => (execution.prefix index).allocated_tracked fresh live⟩
 
 
