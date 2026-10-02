@@ -227,25 +227,36 @@ theorem ArmsType.selected {program : Program} {home : Module} {before after : Fl
       (∀ binding ∈ localsAfter, binding.2.Disposable program.data) ∧
       HasType program home (initializedContext locals ++ before) body result (localsAfter ++ branchAfter) ∧
       FlowContext.slots localsAfter = locals ∧ ((locals ++ before.slots).map Prod.fst).Nodup ∧
-      BindingContextApprox program.data branchAfter after := by
+      BindingContextApprox program.data branchAfter after ∧
+      PatternType program home pattern subject locals ∧ pattern.matchValue value = some bindings ∧
+      ∃ front back, arms = front ++ (pattern, body) :: back ∧
+        ∀ earlier ∈ front, earlier.1.matchValue value = none := by
   induction arms generalizing previous with
   | nil => simp [selectArm] at selected
   | cons arm arms ih =>
     cases checked with
     | clause patternTyped distinct useful bodyTyped localSlots disposable joined tailTyped =>
+      rename_i branchAfter candidate candidateBody candidateBindings localsAfter
       simp only [selectArm] at selected
       split at selected
       next matched found =>
         cases Option.some.inj selected
         obtain ⟨inputsTyped, slots⟩ := patternTyped.bindings resident found
           (List.nodup_append.mp (by simpa only [List.map_append] using distinct)).1
-        exact ⟨_, _, _, _, by simp only [List.mem_cons]; exact Or.inl rfl,
-          inputsTyped, slots, disposable, bodyTyped, localSlots, distinct, joined⟩
+        exact ⟨_, _, _, _, List.mem_cons_self,
+          inputsTyped, slots, disposable, bodyTyped, localSlots, distinct, joined, patternTyped, found,
+          [], arms, rfl, by simp⟩
       next missed =>
-        obtain ⟨locals, localsAfter, branchAfter, pattern, member, inputsTyped, slots, disposable, bodyTyped, localSlots, distinct, joined⟩ :=
+        obtain ⟨locals, localsAfter, branchAfter, pattern, member, inputsTyped, slots, disposable, bodyTyped,
+          localSlots, distinct, joined, patternTyped, matched, front, back, split, earlier⟩ :=
           ih tailTyped selected
-        exact ⟨locals, localsAfter, branchAfter, pattern, List.mem_cons_of_mem _ member, inputsTyped, slots,
-          disposable, bodyTyped, localSlots, distinct, joined⟩
+        refine ⟨locals, localsAfter, branchAfter, pattern, List.mem_cons_of_mem _ member, inputsTyped, slots,
+          disposable, bodyTyped, localSlots, distinct, joined, patternTyped, matched, (candidate, candidateBody) :: front, back,
+          by simp only [List.cons_append, split], ?_⟩
+        intro previous member
+        rcases List.mem_cons.mp member with same | member
+        · subst previous; exact missed
+        · exact earlier previous member
 
 /-- Constant declarations use the same structural syntax and expression typing
 as constant occurrences. No completed initialization is an admission premise. -/

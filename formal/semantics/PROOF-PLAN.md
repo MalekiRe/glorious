@@ -3420,3 +3420,25 @@ This closes heap-observation reclamation for the current direct owned-value
 fragment, not reference-bearing, captured, foreign or effectful invocation.
 No broad semantic completion item is marked complete.
 
+## First-selected pattern ownership enters the public safety invariant
+
+`Configuration.OwnershipSafe` previously had no pattern-selection case despite
+covering the other modeled disposal sites. It now requires the actual subject
+typing and selected pattern ownership derivation, including the original
+source-order split and failure of every preceding clause. A later matching
+clause cannot supply permission for an earlier selected clause.
+
+The existing `ArmsType.selected` producer now retains that evidence alongside
+the selected body and binding derivations. Preservation and termination
+consumers were migrated; `ConfigurationTyped.ownership_safe` consumes the
+same product. General source-prefix soundness and maximal behavior therefore
+carry structural wildcard/constant discard permission and deconstruction
+authority through the authoritative `PatternType` rules, rather than a new
+disposal analysis or an assumed successful cleanup.
+
+Verification: all 30 `lake build Grounded` jobs passed. Axiom inspection of
+selection, ownership safety, preservation, source-prefix soundness and maximal
+source consumers found only standard Lean axioms. No examples or tests were
+added. Borrowed matching and custom Drop execution remain open; this repair
+does not mark the principal-ownership or pattern-callable family complete.
+

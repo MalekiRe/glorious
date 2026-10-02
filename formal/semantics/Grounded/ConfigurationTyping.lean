@@ -408,7 +408,7 @@ theorem ConfigurationTyped.preservation {context : FlowContext} {result : Result
       cases code with | results residents =>
         cases continuation with | cons frame tail =>
           cases frame with | patterns nonempty covered checked =>
-            obtain ⟨locals, localsAfter, branchAfter, _, _, inputsTyped, slots, discard, bodyTyped, localSlots, distinct, joined⟩ :=
+            obtain ⟨locals, localsAfter, branchAfter, _, _, inputsTyped, slots, discard, bodyTyped, localSlots, distinct, joined, _⟩ :=
               checked.selected residents.argument selected
             obtain ⟨entered, _, _, retained⟩ := AddressedEnvironment.extend.typed store inputsTyped (by
               rw [← slots] at distinct
@@ -684,6 +684,14 @@ def Configuration.OwnershipSafe (program : Program) (state : Configuration) : Pr
       BindingMap.ReplacementSafe program state.environment.heap state.environment.bindings place
   | .result aggregate, .project key :: _ => aggregate.ProjectionCleanupSafe program key
   | .result value, .sequence _ :: _ => ∃ type, (PartialValue.resident value).Disposable program type
+  | .results values, .patterns arms :: _ =>
+      ∀ bindings body, selectArm (argumentValue values) arms = some (bindings, body) →
+        ∃ home subject locals pattern front back,
+          ValueHasType program (argumentValue values) subject ∧
+          PatternType program home pattern subject locals ∧
+          arms = front ++ (pattern, body) :: back ∧
+          (∀ earlier ∈ front, earlier.1.matchValue (argumentValue values) = none) ∧
+          pattern.matchValue (argumentValue values) = some bindings
   | _, _ => True
 
 theorem ConfigurationTyped.ownership_safe {context : FlowContext} {result : ResultType}
@@ -712,6 +720,16 @@ theorem ConfigurationTyped.ownership_safe {context : FlowContext} {result : Resu
           exact ProjectionType.cleanup_safe (by assumption) resident (by assumption) (by assumption)
         case sequence =>
           exact ⟨_, Initialization.Disposable.realizes (.permitted (by assumption)) (.resident resident)⟩
+    case results residents =>
+      cases continuation
+      · trivial
+      case cons frame tail =>
+        cases frame <;> try trivial
+        case patterns nonempty covered checked =>
+          intro bindings body selected
+          obtain ⟨locals, _, _, pattern, _, _, _, _, _, _, _, _, patternTyped, matched, front, back, split, missed⟩ :=
+            checked.selected residents.argument selected
+          exact ⟨_, _, locals, pattern, front, back, residents.argument, patternTyped, split, missed, matched⟩
 
 /-- Source-prefix ownership safety constrains every actual lexical retirement,
 including its intermediate heap transitions and strict acquisition order. -/
