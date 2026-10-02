@@ -4771,3 +4771,39 @@ behavior and compatible-call proof closures use only standard Lean axioms.
 This strengthens the decoded record-pattern boundary; it does not close parsing,
 references, custom Drop or any of the fourteen broad completion obligations.
 
+
+## Source-ordered named record construction
+
+Decoded named record expressions now elaborate their initializers in written
+order through the existing Core binding machine. Each result enters a fresh
+anonymous lexical binding. Only the generated moves are reordered into the
+selected declaration's field order. Positional source construction now requires
+a tuple schema; it cannot bypass record-label admission.
+
+One RecordConstructor witness supplies the actual declaration, record schema,
+finite layout and constructor/field visibility. Label permutation against that
+schema, together with its derived uniqueness, rejects missing, unknown and
+repeated labels. recordMoves.ordered relates every declaration index to the
+same-name source-produced temporary. The terminal generated move list is
+checked by HasTypes; every temporary's final mask must be absent. There is no
+Copy or discard requirement on an initialized field merely to assemble it.
+
+SourceScope uses optional spellings with the same fresh identity allocator for
+named bindings and anonymous temporaries. enter_anonymous_resolve proves that
+these temporaries cannot shadow source names. Named patterns, parameters and
+ordinary bindings use the migrated named entry contract.
+
+NamedExpr.Elaborates.checked consumes the complete record-building derivation
+in its mutual proof, connecting it to existing source safety, maximal behavior,
+result ownership and compatible-invocation consumers. Evaluates.bind_iff
+inverts actual machine runs, including scope retirement;
+NamedRecordBuild.first_execution extracts the first initializer's execution and
+the remaining source-order continuation in its actual output heap. No future
+successful execution is an admission premise and no alternate evaluator is
+introduced. All 30 strict Lean jobs passed. Inspected transfer, label, ordering,
+hygiene and public soundness/behavior proofs use only propext, Classical.choice
+and Quot.sound.
+
+This closes the decoded named-record construction cutover, not textual parsing,
+constructor-path resolution, references, custom Drop or whole-language soundness.
+All fourteen broad completion obligations remain open.

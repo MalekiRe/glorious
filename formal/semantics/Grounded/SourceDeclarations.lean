@@ -17,7 +17,7 @@ inductive NamedParametersElaborate (program : Program) : List NamedParameter →
       (tail : NamedParametersElaborate program rest scope)
       (resolved : ResolvesType program.aliases parameter.type type)
       (finite : FiniteLayout program.target program.data type) :
-      NamedParametersElaborate program (parameter :: rest) (scope.enter parameter.name ⟨type, parameter.mutable⟩)
+      NamedParametersElaborate program (parameter :: rest) (scope.enter (some parameter.name) ⟨type, parameter.mutable⟩)
 
 theorem NamedParametersElaborate.finite {program : Program} {source : List NamedParameter} {scope : SourceScope}
     (elaborated : NamedParametersElaborate program source scope) :

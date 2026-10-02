@@ -57,6 +57,45 @@ theorem Evaluates.bind {environment middle localAfter after : Environment} {muta
   .step .bind ((Run.extend initialized [.bind name ⟨localType, mutable⟩ body]).trans
     (.step .bindResult ((Run.extend continued [.scope 1]).trans (Run.scope exited))))
 
+/-- A completed binding executes its initializer before entering its body, then
+retires the actual local storage. No completed execution is assumed by typing. -/
+theorem Evaluates.bind_iff {environment after : Environment} {mutable : Bool} {name : BindingId}
+    {localType : Ty} {initial body : Expr} {value : Value} :
+    Evaluates program environment (.bind mutable name localType initial body) value after ↔
+      ∃ resident middle localAfter,
+        Evaluates program environment initial resident middle ∧
+        Evaluates program (middle.extend [⟨name, ⟨localType, mutable⟩, resident⟩]) body value localAfter ∧
+        localAfter.exitScope 1 = some after := by
+  constructor
+  · intro evaluated
+    cases evaluated with
+    | step head rest =>
+      cases head with
+      | bind =>
+        obtain ⟨done, terminal, initialRun, continued⟩ := rest.unextend
+          ⟨environment, .expression initial, []⟩ [_] rfl (by simp)
+        cases terminal with
+        | results middle values =>
+          cases continued with
+          | step head rest => cases head
+        | result middle resident =>
+          cases continued with
+          | step head rest =>
+            cases head with
+            | bindResult =>
+              obtain ⟨done, terminal, bodyRun, returned⟩ := rest.unextend
+                ⟨_, .expression _, []⟩ [_] rfl (by simp)
+              cases terminal with
+              | results localAfter values =>
+                cases returned with
+                | step head rest => cases head
+              | result localAfter result =>
+                obtain ⟨same, exited⟩ := returned.scope_result
+                subst result
+                exact ⟨_, _, _, initialRun, bodyRun, exited⟩
+  · rintro ⟨resident, middle, localAfter, initialized, continued, exited⟩
+    exact .bind initialized continued exited
+
 theorem Evaluates.assign {home : Module} {environment middle updated after : Environment} {place : Place}
       {expression rest : Expr} {resident value : Value} {old : PartialValue}
       (evaluated : Evaluates program environment expression resident middle)

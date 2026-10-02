@@ -6,7 +6,7 @@ consults spellings. This is local elaboration, not a parser or type inference. -
 namespace Grounded
 
 structure SourceBinding where
-  spelling : Identifier
+  spelling : Option Identifier
   identity : BindingId
   slot : BindingType
 
@@ -23,7 +23,7 @@ def SourceScope.context (scope : SourceScope) : List (BindingId × BindingType) 
 
 /-- Nearest source spelling wins. An absent name is not an invented binding. -/
 def SourceScope.resolve (scope : SourceScope) (spelling : Identifier) : Option SourceBinding :=
-  scope.bindings.find? (fun binding => binding.spelling == spelling)
+  scope.bindings.find? (fun binding => binding.spelling == some spelling)
 
 theorem SourceScope.fresh (scope : SourceScope) :
     (⟨scope.next⟩ : BindingId) ∉ scope.bindings.map SourceBinding.identity := by
@@ -33,8 +33,8 @@ theorem SourceScope.fresh (scope : SourceScope) :
   rw [equal] at bound
   exact Nat.lt_irrefl _ bound
 
-/-- The binder is installed only for its body, not its initializer. -/
-def SourceScope.enter (scope : SourceScope) (spelling : Identifier) (slot : BindingType) : SourceScope where
+/-- Named and hygienic anonymous bindings share one identity allocator. -/
+def SourceScope.enter (scope : SourceScope) (spelling : Option Identifier) (slot : BindingType) : SourceScope where
   bindings := ⟨spelling, ⟨scope.next⟩, slot⟩ :: scope.bindings
   next := scope.next + 1
   distinct := List.nodup_cons.mpr ⟨scope.fresh, scope.distinct⟩
@@ -45,13 +45,18 @@ def SourceScope.enter (scope : SourceScope) (spelling : Identifier) (slot : Bind
     | tail _ member => exact Nat.lt_succ_of_lt (scope.below binding member)
 
 theorem SourceScope.enter_resolve (scope : SourceScope) (spelling : Identifier) (slot : BindingType) :
-    (scope.enter spelling slot).resolve spelling = some ⟨spelling, ⟨scope.next⟩, slot⟩ := by
+    (scope.enter (some spelling) slot).resolve spelling = some ⟨some spelling, ⟨scope.next⟩, slot⟩ := by
   simp [resolve, enter]
 
 theorem SourceScope.enter_resolve_other (scope : SourceScope) (spelling other : Identifier) (slot : BindingType)
     (different : spelling ≠ other) :
-    (scope.enter spelling slot).resolve other = scope.resolve other := by
+    (scope.enter (some spelling) slot).resolve other = scope.resolve other := by
   simp [resolve, enter, different]
+
+/-- A compiler temporary cannot shadow any source name. -/
+theorem SourceScope.enter_anonymous_resolve (scope : SourceScope) (slot : BindingType) (name : Identifier) :
+    (scope.enter none slot).resolve name = scope.resolve name := by
+  simp [resolve, enter]
 
 private theorem selected_binding {bindings : List SourceBinding} {binding : SourceBinding}
     (distinct : (bindings.map SourceBinding.identity).Nodup) (member : binding ∈ bindings) :
@@ -75,20 +80,20 @@ theorem SourceScope.selected {scope : SourceScope} {spelling : Identifier} {bind
 
 /-- Successful resolution selects precisely the first matching spelling. -/
 theorem SourceScope.resolve_first (scope : SourceScope) (spelling : Identifier) (binding : SourceBinding) :
-    scope.resolve spelling = some binding ↔ binding.spelling = spelling ∧
+    scope.resolve spelling = some binding ↔ binding.spelling = some spelling ∧
       ∃ before after, scope.bindings = before ++ binding :: after ∧
-        ∀ earlier ∈ before, earlier.spelling ≠ spelling := by
+        ∀ earlier ∈ before, earlier.spelling ≠ some spelling := by
   simp [resolve, List.find?_eq_some_iff_append]
 
 theorem SourceScope.resolve_missing (scope : SourceScope) (spelling : Identifier) :
-    scope.resolve spelling = none ↔ ∀ binding ∈ scope.bindings, binding.spelling ≠ spelling := by
+    scope.resolve spelling = none ↔ ∀ binding ∈ scope.bindings, binding.spelling ≠ some spelling := by
   simp [resolve, List.find?_eq_none]
 
 /-- Shadowing changes future name resolution, never an already-resolved outer
 reference. This includes the case where both declarations have the same spelling. -/
 theorem SourceScope.enter_preserves_selected {scope : SourceScope} {spelling : Identifier} {binding : SourceBinding}
     (resolved : scope.resolve spelling = some binding) (newName : Identifier) (slot : BindingType) :
-    lookup binding.identity (scope.enter newName slot).context = some binding.slot := by
+    lookup binding.identity (scope.enter (some newName) slot).context = some binding.slot := by
   have different : binding.identity ≠ (⟨scope.next⟩ : BindingId) := by
     intro equal
     have bound := scope.below binding (List.mem_of_find?_eq_some resolved)

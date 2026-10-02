@@ -73,9 +73,66 @@ inductive NamedExpr where
   | array (elements : List NamedExpr)
   | constant (identity : Nat)
   | construct (identity : Nat) (tag : Option Nat) (fields : List NamedExpr)
+  | record (identity : Nat) (tag : Option Nat) (fields : List (String × NamedExpr))
   | call (name : FunctionName) (arguments : List NamedExpr)
   | assign (name : Identifier) (fields : List FieldKey) (value rest : NamedExpr)
   | applyPatterns (arguments : List NamedExpr) (arms : List (NamedPattern × NamedExpr))
+
+/-- The selected record constructor supplies one shared declaration schema and
+its static construction authority throughout initializer elaboration. -/
+structure RecordConstructor (program : Program) (home : Module) (identity : Nat) (tag : Option Nat) where
+  declaration : DataDecl
+  fields : List (String × Field)
+  declared : program.data identity = some declaration
+  chosen : declaration.constructor tag = some (.record fields)
+  finite : FiniteLayout program.target program.data (.nominal identity)
+  visible : declaration.visibility.Allows declaration.home home
+  access : ∀ field ∈ (Fields.record fields).residents, field.visibility.Allows declaration.home home
+
+/-- Only already-produced temporary identities are reordered. Initializer
+expressions never enter this declaration-order transfer list. -/
+def recordMoves (fields : List (String × Field)) (prepared : List (String × BindingId)) : Option (List Expr) :=
+  fields.mapM fun field =>
+    (prepared.find? (fun entry => entry.1 == field.1)).map fun entry => .move ⟨entry.2, []⟩
+
+/-- Declaration positions select precisely their named source-produced temporary,
+not the initializer's position in the written record expression. -/
+theorem recordMoves.ordered {fields : List (String × Field)} {prepared : List (String × BindingId)}
+    {moves : List Expr} (selected : recordMoves fields prepared = some moves) :
+    ∀ (index : Nat) (field : String × Field), fields[index]? = some field → ∃ binding,
+      prepared.find? (fun entry => entry.1 == field.1) = some binding ∧
+      moves[index]? = some (Expr.move ⟨binding.2, []⟩) := by
+  induction fields generalizing moves with
+  | nil => intro index field indexed; simp at indexed
+  | cons field fields ih =>
+    rw [recordMoves, List.mapM_cons] at selected
+    change (do
+      let first ← (prepared.find? (fun entry => entry.1 == field.1)).map (fun entry => Expr.move ⟨entry.2, []⟩)
+      let rest ← recordMoves fields prepared
+      pure (first :: rest)) = some moves at selected
+    simp only [bind, pure, Option.bind_eq_some_iff, Option.map_eq_some_iff, Option.some.injEq] at selected
+    obtain ⟨first, ⟨binding, found, rfl⟩, rest, selected, rfl⟩ := selected
+    intro index chosen indexed
+    cases index with
+    | zero =>
+      simp only [List.getElem?_cons_zero, Option.some.injEq] at indexed
+      subst chosen
+      exact ⟨binding, found, rfl⟩
+    | succ index => exact ih selected index chosen indexed
+
+theorem RecordConstructor.distinct {program : Program} {home : Module} {identity : Nat} {tag : Option Nat}
+    (constructor : RecordConstructor program home identity tag) : (constructor.fields.map Prod.fst).Nodup := by
+  have finite := constructor.finite
+  cases finite with
+  | nominal declared schemas fields =>
+    cases Option.some.inj (declared.symm.trans constructor.declared)
+    have member : Fields.record constructor.fields ∈ constructor.declaration.schemas := by
+      have chosen := constructor.chosen
+      cases shape : constructor.declaration.shape <;> cases tag <;>
+        simp_all [DataDecl.constructor, DataDecl.schemas]
+      exact List.mem_of_getElem? chosen
+    exact schemas _ member
+
 
 mutual
 /-- Name resolution and static availability are composed in evaluation order.
@@ -124,7 +181,7 @@ inductive NamedExpr.Elaborates (program : Program) (names : Module → FunctionN
       (initialized : NamedExpr.Elaborates program names home scope before initial first localType middle)
       (discard : finalMask.Disposable program.data localType)
       (annotated : Annotation program.aliases annotation localType)
-      (continued : NamedExpr.Elaborates program names home (scope.enter name ⟨localType, mutable⟩)
+      (continued : NamedExpr.Elaborates program names home (scope.enter (some name) ⟨localType, mutable⟩)
         ((⟨scope.next⟩, ⟨⟨localType, mutable⟩, .present⟩) :: middle) body rest type
         ((⟨scope.next⟩, ⟨⟨localType, mutable⟩, finalMask⟩) :: after)) :
       NamedExpr.Elaborates program names home scope before (.bind mutable name annotation initial body)
@@ -145,13 +202,17 @@ inductive NamedExpr.Elaborates (program : Program) (names : Module → FunctionN
       NamedExpr.Elaborates program names home scope before (.array source) (.array core) (.array element length) after
   | constant {scope context name type} (checked : HasType program home [] (.constant name) type []) :
       NamedExpr.Elaborates program names home scope context (.constant name) (.constant name) type context
-  | construct {scope before after identity tag declaration schema source core}
-      (declared : program.data identity = some declaration) (chosen : declaration.constructor tag = some schema)
+  | construct {scope before after identity tag declaration fields source core}
+      (declared : program.data identity = some declaration) (chosen : declaration.constructor tag = some (.tuple fields))
       (finite : FiniteLayout program.target program.data (.nominal identity))
       (visible : declaration.visibility.Allows declaration.home home)
-      (access : ∀ field ∈ schema.residents, field.visibility.Allows declaration.home home)
-      (residents : NamedExprsElaborate program names home scope before source core (schema.residents.map Field.type) after) :
+      (access : ∀ field ∈ fields, field.visibility.Allows declaration.home home)
+      (residents : NamedExprsElaborate program names home scope before source core (fields.map Field.type) after) :
       NamedExpr.Elaborates program names home scope before (.construct identity tag source) (.construct identity tag core) (.nominal identity) after
+  | record {scope before after identity tag constructor source core}
+      (complete : (source.map Prod.fst).Perm (constructor.fields.map Prod.fst))
+      (built : NamedRecordBuild program names home identity tag constructor scope before source [] core after) :
+      NamedExpr.Elaborates program names home scope before (.record identity tag source) core (.nominal identity) after
   | call {scope before after name identity declaration source core}
       (unshadowed : name.Unshadowed scope)
       (resolved : names home name = some identity)
@@ -199,7 +260,67 @@ inductive NamedArmsElaborate (program : Program) (names : Module → FunctionNam
       (joined : BindingContextApprox program.data branchAfter after)
       (tailTyped : NamedArmsElaborate program names home scope before subject result (previous ++ [pattern]) tail coreTail after) :
       NamedArmsElaborate program names home scope before subject result previous ((source, body) :: tail) ((pattern, coreBody) :: coreTail) after
+/-- Source-order initialization uses fresh unnamed locals. The terminal transfer
+checks exactly the generated moves; each temporary leaves its scope as a hole. -/
+inductive NamedRecordBuild (program : Program) (names : Module → FunctionName → Option Nat) (home : Module) :
+    (identity : Nat) → (tag : Option Nat) → RecordConstructor program home identity tag →
+    SourceScope → FlowContext → List (String × NamedExpr) → List (String × BindingId) → Expr → FlowContext → Prop where
+  | finish {identity tag constructor scope before after prepared moves}
+      (ordered : recordMoves constructor.fields prepared = some moves)
+      (transferred : HasTypes program home before moves ((Fields.record constructor.fields).residents.map Field.type) after) :
+      NamedRecordBuild program names home identity tag constructor scope before [] prepared
+        (.construct identity tag moves) after
+  | field {identity tag constructor scope before middle after name initial rest head tail prepared} {index : Nat} {field : Field}
+      (selected : constructor.fields[index]? = some (name, field))
+      (initialized : NamedExpr.Elaborates program names home scope before initial head field.type middle)
+      (continued : NamedRecordBuild program names home identity tag constructor
+        (scope.enter none ⟨field.type, false⟩)
+        ((⟨scope.next⟩, ⟨⟨field.type, false⟩, .present⟩) :: middle) rest
+        ((name, ⟨scope.next⟩) :: prepared) tail
+        ((⟨scope.next⟩, ⟨⟨field.type, false⟩, .absent⟩) :: after)) :
+      NamedRecordBuild program names home identity tag constructor scope before ((name, initial) :: rest) prepared
+        (.bind false ⟨scope.next⟩ field.type head tail) after
 end
+
+/-- Complete constructor admission rejects repeated, missing and unknown labels
+against the same selected declaration schema. -/
+theorem NamedExpr.Elaborates.record_labels {program : Program} {home : Module}
+    {names : Module → FunctionName → Option Nat} {scope : SourceScope} {before after : FlowContext}
+    {identity : Nat} {tag : Option Nat} {source : List (String × NamedExpr)} {core : Expr} {type : Ty}
+    (elaborated : NamedExpr.Elaborates program names home scope before (.record identity tag source) core type after) :
+    (source.map Prod.fst).Nodup ∧ ∃ constructor : RecordConstructor program home identity tag,
+      (source.map Prod.fst).Perm (constructor.fields.map Prod.fst) := by
+  cases elaborated with
+  | record complete built => exact ⟨complete.nodup_iff.mpr (RecordConstructor.distinct _), _, complete⟩
+
+/-- Each source initializer completes in the preceding initializer's actual
+output heap before the remaining source fields begin. Generated local storage
+is retired after the constructor continuation, not treated as a source name. -/
+theorem NamedRecordBuild.first_execution {program : Program} {home : Module}
+    {names : Module → FunctionName → Option Nat} {identity : Nat} {tag : Option Nat}
+    {constructor : RecordConstructor program home identity tag} {scope : SourceScope}
+    {before final : FlowContext} {name : String} {initial : NamedExpr} {rest : List (String × NamedExpr)}
+    {prepared : List (String × BindingId)} {core : Expr}
+    (built : NamedRecordBuild program names home identity tag constructor scope before
+      ((name, initial) :: rest) prepared core final)
+    {environment after : Environment} {value : Value}
+    (executed : Evaluates program environment core value after) :
+    ∃ (index : Nat) (field : Field) (head tail : Expr) (middle : FlowContext)
+      (resident : Value) (initialized localAfter : Environment),
+      constructor.fields[index]? = some (name, field) ∧
+      NamedExpr.Elaborates program names home scope before initial head field.type middle ∧
+      NamedRecordBuild program names home identity tag constructor (scope.enter none ⟨field.type, false⟩)
+        ((⟨scope.next⟩, ⟨⟨field.type, false⟩, .present⟩) :: middle) rest
+        ((name, ⟨scope.next⟩) :: prepared) tail
+        ((⟨scope.next⟩, ⟨⟨field.type, false⟩, .absent⟩) :: final) ∧
+      core = .bind false ⟨scope.next⟩ field.type head tail ∧
+      Evaluates program environment head resident initialized ∧
+      Evaluates program (initialized.extend [⟨⟨scope.next⟩, ⟨field.type, false⟩, resident⟩]) tail value localAfter ∧
+      localAfter.exitScope 1 = some after := by
+  cases built with
+  | field selected initialized continued =>
+    obtain ⟨resident, middle, localAfter, headRun, tailRun, exited⟩ := Evaluates.bind_iff.mp executed
+    exact ⟨_, _, _, _, _, resident, middle, localAfter, selected, initialized, continued, rfl, headRun, tailRun, exited⟩
 
 /-- Field-label permutation within any record clause preserves its exact Core
 clause, body scope, masks, coverage history and first-match priority. -/
@@ -267,7 +388,9 @@ theorem NamedExpr.Elaborates.checked {program : Program} {home : Module} {names 
   induction elaborated using NamedExpr.Elaborates.rec
     (motive_2 := fun scope before _ core types after _ => before.slots = scope.context → HasTypes program home before core types after)
     (motive_3 := fun scope before subject result previous _ arms after _ =>
-      before.slots = scope.context → ArmsType program home before subject result previous arms after) with
+      before.slots = scope.context → ArmsType program home before subject result previous arms after)
+    (motive_4 := fun identity _ _ scope before _ _ core after _ =>
+      before.slots = scope.context → HasType program home before core (.nominal identity) after) with
   | unit => exact .unit
   | integer fits => exact .integer fits
   | character valid => exact .character valid
@@ -297,6 +420,7 @@ theorem NamedExpr.Elaborates.checked {program : Program} {home : Module} {names 
     | constant declared visible resolved structural initialized => exact .constant declared visible resolved structural initialized
   | construct declared chosen finite visible access _ ih =>
     exact .construct declared chosen finite visible access (ih slots)
+  | record _ _ ih => exact ih slots
   | call _ _ declared visible _ ih => exact .call declared visible (ih slots)
   | assign resolved _ selected path writable selection discard mask context _ first rest =>
     have resident := first slots
@@ -318,6 +442,18 @@ theorem NamedExpr.Elaborates.checked {program : Program} {home : Module} {names 
       (body ?_) localSlots disposable joined (tail slots)
     rw [allocated.checked.2]
     simp [FlowContext.slots, initializedContext, List.map_append, List.map_map, Function.comp_def, ← slots]
+
+  | finish ordered transferred =>
+    rename_i _ _ constructor _ _ _ _ _ _
+    exact .construct constructor.declared constructor.chosen constructor.finite constructor.visible constructor.access transferred
+  | field selected initialized continued first rest =>
+    rename_i slots
+    have initial := first slots
+    apply SourceScope.bind_checked _ false slots initial (.empty (state := .absent) (by simp [Initialization.Empty]))
+    apply rest
+    simp only [FlowContext.slots, SourceScope.context, SourceScope.enter, List.map_cons]
+    congr 1
+    exact initial.slots.trans slots
 
 theorem NamedExprsElaborate.checked {program : Program} {home : Module} {names : Module → FunctionName → Option Nat}
     {scope : SourceScope} {before after : FlowContext} {source : List NamedExpr} {core : List Expr} {types : List Ty}
@@ -344,6 +480,7 @@ theorem NamedExpr.Elaborates.recheck_input {program : Program} {home : Module}
     NamedExpr.Elaborates program names home scope current source core type final := by
   obtain ⟨place, rfl | rfl⟩ := ordinary
   · cases elaborated with
+    | record _ built => cases built
     | read resolved _ _ _ _ _ =>
       cases checked with
       | read selected path selection ready copyable =>
@@ -351,6 +488,7 @@ theorem NamedExpr.Elaborates.recheck_input {program : Program} {home : Module}
         exact .read resolved selected (by simpa only [same] using path)
           (by simpa only [same] using selection) ready copyable
   · cases elaborated with
+    | record _ built => cases built
     | readMove resolved _ _ _ _ noncopyable _ _ =>
       cases checked with
       | move selected path selection ready mask context =>

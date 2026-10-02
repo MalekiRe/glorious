@@ -57,7 +57,7 @@ inductive NamedPattern.Elaborates (program : Program) (home : Module) :
       NamedPattern.Elaborates program home scope .wildcard type .wildcard [] scope
   | binder {scope type} (name : Identifier) :
       NamedPattern.Elaborates program home scope (.binder name) type (.binder ⟨scope.next⟩ type)
-        [(⟨scope.next⟩, ⟨type, false⟩)] (scope.enter name ⟨type, false⟩)
+        [(⟨scope.next⟩, ⟨type, false⟩)] (scope.enter (some name) ⟨type, false⟩)
   | constant {scope name type} (typed : HasType program home [] (.constant name) type [])
       (discard : UsePermitted program.data .discard type) :
       NamedPattern.Elaborates program home scope (.constant name) type
