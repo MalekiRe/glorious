@@ -2797,14 +2797,17 @@ available for all ownership classes.
 scope-frame preservation consume this same relation. No alternate join model or
 post-state certificate was added. `PathType.approximate_initialization` derives
 the type-indexed join relation at arbitrary checked descendant paths from the
-actual resident. `HasType.scope_join_preserves_ownership` carries this to every
-actual scope-retirement step reached by a checked program: retained heap cells
-are unchanged, both branch and joined contexts type that actual store, no
-nondiscardable descendant gains a fresh unknown mask, and every manually exact
-nominal descendant retains its consumed-versus-live status. Its inputs are
-ordinary program/body checking, actual entry-store typing, issued activation
-and an observed run/step; no future successful cleanup, progress or completion
-is assumed.
+actual resident. `HasType.scope_join_preserves_ownership` now constructs the
+scope-retirement transition from a reached cleanup state, without taking the
+completed step as an input. It derives disposal permission and newest-owner-first
+order, retires every selected local identity, and preserves continuation typing.
+Retained heap cells are unchanged, both branch and joined contexts type the
+resulting store, no nondiscardable descendant gains a fresh unknown mask, and
+every manually exact nominal descendant retains its consumed-versus-live status.
+Its inputs are ordinary program/body checking, actual entry-store typing, issued
+activation and the run reaching cleanup; neither cleanup success nor future
+typing is supplied. The strengthened theorem passed all 30 Lean build jobs and
+standard-axiom inspection. Custom Drop execution remains outside this fragment.
 
 Integrated verification: `lake build Grounded` passed all 30 jobs, including
 the recently integrated import-privacy and ordered-call proof consumers. A

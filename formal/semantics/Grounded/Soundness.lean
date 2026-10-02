@@ -50,21 +50,25 @@ theorem HasType.behavior (checkedProgram : program.Checked) {context final : Flo
   exact (ConfigurationTyped.entry checked store issued).behavior checkedProgram
 
 
-/-- Actual scope retirement retains its outer cells and joins each descendant
-under the descendant's own use class. No positive-lower occupancy becomes a
-fresh unknown, and manually exact nominal shells retain their consumed status. -/
+/-- Reached scope cleanup constructs its actual retirement and preserved
+continuation, then joins retained descendants under their own use classes.
+No completed cleanup or future mask realization is assumed. -/
 theorem HasType.scope_join_preserves_ownership (checkedProgram : program.Checked)
     {context final : FlowContext} {expression : Expr} {type : Ty}
     (checked : HasType program home context expression type final)
-    {environment current after : Environment}
+    {environment current : Environment}
     (store : BindingMap.Typed program environment.heap environment.activation environment.bindings context)
     (issued : environment.supply.Issued environment.activation)
     {value : Value} {count : Nat} {stack : List Frame}
     (run : Run program ⟨environment, .expression expression, []⟩
-      ⟨current, .result value, .scope count :: stack⟩)
-    (step : Step program ⟨current, .result value, .scope count :: stack⟩
-      ⟨after, .result value, stack⟩) :
-    ∃ branch joined : FlowContext,
+      ⟨current, .result value, .scope count :: stack⟩) :
+    ∃ (after : Environment) (branch joined : FlowContext),
+      BindingMap.Disposable program current.heap (List.take count current.bindings) ∧
+      (BindingMap.releaseOrder (List.take count current.bindings)).Pairwise
+        (fun newer older => older.index < newer.index) ∧
+      Step program ⟨current, .result value, .scope count :: stack⟩ ⟨after, .result value, stack⟩ ∧
+      ConfigurationTyped program final (.one type) ⟨after, .result value, stack⟩ ∧
+      (∀ identity ∈ (List.take count current.bindings).map Prod.snd, after.heap.Retired identity) ∧
       BindingMap.Typed program after.heap after.activation after.bindings branch ∧
       BindingMap.Typed program after.heap after.activation after.bindings joined ∧
       BindingContextApprox program.data branch joined ∧
@@ -81,6 +85,7 @@ theorem HasType.scope_join_preserves_ownership (checkedProgram : program.Checked
               program.data identity = some declaration → declaration.restriction = some .exact →
               (selectedState.Empty ↔ nextSelected.Empty)) := by
   have typed := (checked.soundness checkedProgram store issued run).1
+  have original := typed
   cases typed with
   | intro currentStore currentIssued code continuation =>
     cases code with
@@ -89,26 +94,27 @@ theorem HasType.scope_join_preserves_ownership (checkedProgram : program.Checked
       | cons frame tail =>
         cases frame with
         | scope locals discard joined =>
-          cases step with
-          | scope exited =>
-            obtain ⟨actual, produced, afterTyped, _, _, _, _, _, preserved⟩ :=
-              AddressedEnvironment.exitScope.progress currentStore locals.length
-            cases Option.some.inj (exited.symm.trans produced)
-            have branchTyped : BindingMap.Typed program after.heap after.activation after.bindings _ :=
-              (by simpa using afterTyped)
-            refine ⟨_, _, branchTyped, branchTyped.approximate joined, joined, preserved, ?_⟩
-            intro name state selected selectedHome selectedType fields selectedState path selection
-            obtain ⟨next, found, approximation⟩ := joined.lookup selected
-            obtain ⟨address, cell, mapped, live, owner, typeEq, cellTyped, member⟩ := branchTyped.lookup selected
-            have residentTyped : cell.resident.Typed program state.slot.type state.initialization := by
-              simpa only [typeEq] using cellTyped.2
-            obtain ⟨nextSelected, selectedAfter, selectedJoined⟩ :=
-              path.approximate_initialization residentTyped approximation selection
-            refine ⟨next, nextSelected, found, selectedAfter,
-              fun required unknown => selectedJoined.no_new_nondiscardable_maybe required unknown, ?_⟩
-            intro identity declaration same declared restricted
-            subst selectedType
-            exact selectedJoined.exact_nominal_consumption declared restricted
+          obtain ⟨after, produced, afterTyped, _, _, _, retired, _, preserved⟩ :=
+            AddressedEnvironment.exitScope.progress currentStore locals.length
+          have step : Step program ⟨current, .result value, .scope locals.length :: stack⟩
+              ⟨after, .result value, stack⟩ := .scope produced
+          have branchTyped : BindingMap.Typed program after.heap after.activation after.bindings _ :=
+            (by simpa using afterTyped)
+          have safe := original.ownership_safe
+          refine ⟨after, _, _, safe.1, safe.2, step, original.preservation checkedProgram step, retired,
+            branchTyped, branchTyped.approximate joined, joined, preserved, ?_⟩
+          intro name state selected selectedHome selectedType fields selectedState path selection
+          obtain ⟨next, found, approximation⟩ := joined.lookup selected
+          obtain ⟨address, cell, mapped, live, owner, typeEq, cellTyped, member⟩ := branchTyped.lookup selected
+          have residentTyped : cell.resident.Typed program state.slot.type state.initialization := by
+            simpa only [typeEq] using cellTyped.2
+          obtain ⟨nextSelected, selectedAfter, selectedJoined⟩ :=
+            path.approximate_initialization residentTyped approximation selection
+          refine ⟨next, nextSelected, found, selectedAfter,
+            fun required unknown => selectedJoined.no_new_nondiscardable_maybe required unknown, ?_⟩
+          intro identity declaration same declared restricted
+          subst selectedType
+          exact selectedJoined.exact_nominal_consumption declared restricted
 
 /-- Every reached checked assignment can restore its selected place, including
 an uncertain one. Its actual module authorizes the write and old-value disposal;
