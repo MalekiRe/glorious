@@ -931,18 +931,19 @@ theorem AddressedEnvironment.ConsumptionFrame.read_before {slots : List (Binding
     simp only [mapped, Option.map_some, Option.bind_some, StorageAddress.read] at read ⊢
     exact (framed.2 name slot identity selected immutable mapped).read_before read
 
-/-- Consumption preserves an empty live cell and its storage metadata. Empty
-nominal shells are not identified with unreadable but still-owned residents. -/
+/-- Consumption preserves descendant absence and the live cell metadata.
+Unreadability of a partial owner is not evidence of complete consumption. -/
 theorem StorageCell.Consumption.empty {before after : Option StorageCell}
     (consumed : StorageCell.Consumption program before after) {cell : StorageCell}
-    (found : before = some cell) (empty : cell.resident.Empty) :
-    ∃ next, after = some next ∧ next.activation = cell.activation ∧
-      next.type = cell.type ∧ next.resident.Empty := by
+    (found : before = some cell) (path : List FieldKey)
+    (empty : ∀ part, cell.resident.selectFields program cell.type path = some part → part.Empty) :
+    ∃ next, after = some next ∧ next.activation = cell.activation ∧ next.type = cell.type ∧
+      ∀ part, next.resident.selectFields program next.type path = some part → part.Empty := by
   induction consumed generalizing cell with
   | refl => exact ⟨cell, found, rfl, rfl, empty⟩
   | erase written =>
     cases found
-    exact ⟨_, rfl, rfl, rfl, empty.write_hole written⟩
+    exact ⟨_, rfl, rfl, rfl, PartialValue.Empty.write_hole_selected empty written⟩
   | trans head tail first last =>
     obtain ⟨middle, stored, activation, type, absent⟩ := first found empty
     obtain ⟨next, final, nextActivation, nextType, nextEmpty⟩ := last stored absent

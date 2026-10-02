@@ -3626,13 +3626,17 @@ assumption is added to the source theorem.
 `PartialValue.Empty.write_hole` separately proves structural absence is
 preserved by erasure. It does not confuse unreadability of a partial owner with
 complete consumption, nor classify a zero-field nominal owner as absent.
-`StorageCell.Consumption.empty` preserves the live cell, declared type and
-activation through the same existing history.
-`SourceClosure.Admitted.immutable_empty` consumes this result between arbitrary
-reached prefixes: a structurally empty immutable source owner keeps its lexical
-identity and empty live storage throughout the suffix. No after-state absence
-or replacement cell is supplied. All 30 build jobs and standard-axiom inspection
-of this producer/history/source chain and maximal behavior passed.
+`PartialValue.Empty.write_hole_selected` preserves structural absence at
+arbitrary descendant paths, including ancestor and overlapping erasure. The
+shared `Ty.fieldInfo_child_unique` supplies canonical child types to both
+read-stability and absence proofs. `StorageCell.Consumption.empty` lifts this
+through the existing history, preserving the live cell, type and activation.
+`SourceClosure.Admitted.immutable_empty` consumes the generalized result between
+arbitrary reached prefixes, preserving lexical identity and descendant absence.
+No after-state absence or replacement cell is supplied. Missing paths are not
+treated as access permission; the conclusion excludes newly inhabited children.
+All 30 build jobs and standard-axiom inspection of the generalized producer,
+history, source theorem and maximal behavior passed.
 
 All 30 Lean build jobs passed. Axiom inspection of the erasure producer,
 consumption lemma, source observation theorem, general preservation and maximal

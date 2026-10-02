@@ -325,6 +325,18 @@ theorem Ty.fieldInfo_layout {program : Program} {parent child : Ty} {key : Field
   cases same
   exact layout
 
+theorem Ty.fieldInfo_child_unique {program : Program} {parent child other : Ty}
+    {first second : FieldKey} {index : Nat} {types others : List Ty}
+    (left : parent.fieldInfo program first = some (index, child, types))
+    (right : parent.fieldInfo program second = some (index, other, others)) : child = other := by
+  simp only [Ty.fieldInfo, Ty.fieldInfo_layout left, Option.bind_some,
+    Option.bind_eq_some_iff, Option.map_eq_some_iff] at left right
+  obtain ⟨_, _, _, selected, equal⟩ := left
+  obtain ⟨_, _, _, otherSelected, otherEqual⟩ := right
+  cases equal
+  cases otherEqual
+  exact Option.some.inj (selected.symm.trans otherSelected)
+
 theorem ProjectionType.fieldIndex {program : Program} {home : Module} {parent child : Ty}
     {key : FieldKey} {index : Nat} (projection : ProjectionType program home parent key index child) :
     parent.fieldIndex program key = some index := by
@@ -885,14 +897,7 @@ theorem PartialValue.write_hole_read_before {program : Program} {parent : Ty}
           opened] at read ⊢
         by_cases same : other = index
         · subst other
-          have childSame : observedType = child := by
-            simp only [Ty.fieldInfo, Ty.fieldInfo_layout info, Option.bind_some,
-              Option.bind_eq_some_iff, Option.map_eq_some_iff] at info observedInfo
-            obtain ⟨_, _, _, selected, equal⟩ := info
-            obtain ⟨_, _, _, observedSelected, observedEqual⟩ := observedInfo
-            cases equal
-            cases observedEqual
-            exact Option.some.inj (observedSelected.symm.trans selected)
+          have childSame := Ty.fieldInfo_child_unique observedInfo info
           subst observedType
           have atIndex := List.getElem?_set_self (List.getElem?_eq_some_iff.mp found).1 (a := updated)
           simp only [atIndex, Option.bind_some] at read
@@ -947,5 +952,55 @@ theorem PartialValue.Empty.write_hole {program : Program} {parent : Ty}
       rcases List.mem_or_eq_of_mem_set member with original | same
       · exact allEmpty value original
       · subst value; exact updatedEmpty
+
+theorem PartialValue.Empty.selected {program : Program} {parent : Ty}
+    {before selected : PartialValue} {path : List FieldKey} (empty : before.Empty)
+    (found : before.selectFields program parent path = some selected) : selected.Empty := by
+  induction path generalizing parent before with
+  | nil => cases found; exact empty
+  | cons key rest ih =>
+    simp only [PartialValue.selectFields, Option.bind_eq_some_iff] at found
+    obtain ⟨⟨index, child, types⟩, info, fields, opened, current, atIndex, selected⟩ := found
+    exact ih (empty_open_fields empty opened current (List.mem_of_getElem? atIndex)) selected
+
+/-- Consumption cannot recreate ownership in an empty descendant, even when
+an ancestor or overlapping path is erased. This is stronger than read failure. -/
+theorem PartialValue.Empty.write_hole_selected {program : Program} {parent : Ty}
+    {before after : PartialValue} {writtenPath observedPath : List FieldKey}
+    (empty : ∀ original, before.selectFields program parent observedPath = some original → original.Empty)
+    (written : before.writeFields program parent writtenPath .hole = some after) :
+    ∀ selected, after.selectFields program parent observedPath = some selected → selected.Empty := by
+  induction writtenPath generalizing parent before after observedPath with
+  | nil =>
+    cases written
+    intro selected later
+    exact PartialValue.Empty.selected (by simp [PartialValue.Empty]) later
+  | cons key rest ih =>
+    cases observedPath with
+    | nil =>
+      intro selected later
+      cases later
+      exact (empty before rfl).write_hole written
+    | cons observed tail =>
+      intro selected later
+      simp only [PartialValue.writeFields, Option.bind_eq_some_iff] at written
+      obtain ⟨⟨index, child, types⟩, info, fields, opened, current, found, updated, changed, closed⟩ := written
+      have reopened := PartialValue.closeFields_open (program := program) closed
+      cases observedInfo : parent.fieldInfo program observed with
+      | none => simp [PartialValue.selectFields, observedInfo] at later
+      | some data =>
+        obtain ⟨other, observedType, observedTypes⟩ := data
+        simp only [PartialValue.selectFields, observedInfo, Option.bind_some, opened] at empty
+        simp only [PartialValue.selectFields, observedInfo, Option.bind_some, reopened] at later
+        by_cases same : other = index
+        · subst other
+          have childSame := Ty.fieldInfo_child_unique observedInfo info
+          subst observedType
+          have atIndex := List.getElem?_set_self (List.getElem?_eq_some_iff.mp found).1 (a := updated)
+          simp only [found, Option.bind_some] at empty
+          simp only [atIndex, Option.bind_some] at later
+          exact ih empty changed selected later
+        · rw [List.getElem?_set_ne (Ne.symm same)] at later
+          exact empty selected later
 
 end Grounded
