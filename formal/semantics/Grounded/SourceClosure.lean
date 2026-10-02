@@ -1559,6 +1559,39 @@ theorem SourceClosure.Admitted.bottom_function_call {packages : List PackageSour
 
 
 
+/-- Source operands admit bottom at an arbitrary ordered position. The same
+elaboration builds the complete pack and proves divergence without a completed
+prefix, invented argument value or permission to discard pending owners. -/
+theorem SourceClosure.Admitted.bottom_operand_pack {packages : List PackageSource}
+    {closure : SourceClosure packages} {program : Program} (admitted : closure.Admitted program)
+    {home : Module} {scope : SourceScope} {before middle headAfter final : FlowContext}
+    {sourceFront sourceBack : List NamedExpr} {sourceHead : NamedExpr}
+    {front back : List Expr} {head : Expr} {types more : List Ty} (expected : Ty)
+    (prefixTyped : NamedExprsElaborate program closure.functionNames home scope before sourceFront front types middle)
+    (bottom : NamedExpr.Elaborates program closure.functionNames home scope middle sourceHead head .never headAfter)
+    (suffixTyped : NamedExprsElaborate program closure.functionNames home scope headAfter sourceBack back more final)
+    (slots : before.slots = scope.context) {environment : Environment}
+    (store : BindingMap.Typed program environment.heap environment.activation environment.bindings before)
+    (issued : environment.supply.Issued environment.activation) :
+    NamedExprsElaborate program closure.functionNames home scope before
+      (sourceFront ++ sourceHead :: sourceBack) (front ++ head :: back) (types ++ expected :: more) final ∧
+    ∃ trace, InfiniteRun program ⟨environment, .arguments (front ++ head :: back), []⟩ trace ∧
+      (∀ index, ConfigurationTyped program final (.many (types ++ expected :: more)) (trace index) ∧
+        AddressedEnvironment.ConsumptionFrame program final.slots environment (trace index).outerEnvironment ∧
+        (trace index).OwnershipSafe program ∧
+        Configuration.ExternalFrame ⟨environment, .arguments (front ++ head :: back), []⟩ (trace index) ∧
+        ∀ identity, environment.heap.next ≤ identity.index →
+          ∀ cell, (trace index).environment.heap.read identity = some cell →
+            ¬ (trace index).Untracked identity) ∧
+      ∀ (stack : List Frame) (done : Configuration), Terminal done →
+        ¬ Run program ⟨environment, .arguments (front ++ head :: back), stack⟩ (done.extend stack) := by
+  have arguments := prefixTyped.bottom_operand expected bottom suffixTyped
+  have prefixChecked := prefixTyped.checked slots
+  have bottomChecked := bottom.checked (prefixChecked.slots.trans slots)
+  obtain ⟨trace, infinite, safe⟩ := (arguments.checked slots).bottom_behavior
+    admitted.checked prefixChecked bottomChecked store issued
+  exact ⟨arguments, trace, infinite, safe, fun stack _ terminal => infinite.no_resume terminal stack⟩
+
 /-- Source-selected calls admit a bottom operand at any ordered argument
 position. The same source derivations construct admission and prove divergence;
 no successful prefix, fabricated argument or callee entry is a premise. -/

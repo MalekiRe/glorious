@@ -559,6 +559,49 @@ theorem HasType.compatible_call_soundness (checkedProgram : program.Checked)
   obtain ⟨final, checked⟩ := HasType.call_compatible_inputs declared visible arguments compatible admitted
   exact ⟨final, checked, fun _ _ store issued run => checked.soundness checkedProgram store issued run⟩
 
+/-- Ordered operands have an actual maximal behavior. A normal alternative
+contains the returned pack and realized output storage; neither is admission. -/
+theorem HasTypes.behavior (checkedProgram : program.Checked)
+    {context final : FlowContext} {expressions : List Expr} {types : List Ty}
+    (checked : HasTypes program home context expressions types final)
+    {environment : Environment}
+    (store : BindingMap.Typed program environment.heap environment.activation environment.bindings context)
+    (issued : environment.supply.Issued environment.activation) :
+    (∃ after values, EvaluatesMany program environment expressions values after ∧
+      ValuesHaveTypes program values types ∧
+      BindingMap.Typed program after.heap after.activation after.bindings final ∧
+      after.supply.Issued after.activation ∧
+      AddressedEnvironment.ConsumptionFrame program final.slots environment after ∧
+      (⟨after, .results values, []⟩ : Configuration).OwnershipSafe program ∧
+      Configuration.ExternalFrame ⟨environment, .arguments expressions, []⟩ ⟨after, .results values, []⟩ ∧
+      ∀ identity, environment.heap.next ≤ identity.index →
+        ∀ cell, after.heap.read identity = some cell →
+          ¬ (⟨after, .results values, []⟩ : Configuration).Untracked identity) ∨
+    (∃ trace, InfiniteRun program ⟨environment, .arguments expressions, []⟩ trace ∧
+      ∀ index, ConfigurationTyped program final (.many types) (trace index) ∧
+        AddressedEnvironment.ConsumptionFrame program final.slots environment (trace index).outerEnvironment ∧
+        (trace index).OwnershipSafe program ∧
+        Configuration.ExternalFrame ⟨environment, .arguments expressions, []⟩ (trace index) ∧
+        ∀ identity, environment.heap.next ≤ identity.index →
+          ∀ cell, (trace index).environment.heap.read identity = some cell →
+            ¬ (trace index).Untracked identity) := by
+  have entry : ConfigurationTyped program final (.many types)
+      ⟨environment, .arguments expressions, []⟩ :=
+    .intro store issued (.arguments checked) .nil
+  rcases entry.maximal_behavior checkedProgram with normal | infinite
+  · obtain ⟨state, run, done, current, framed, safe, exterior, tracked⟩ := normal
+    cases done with
+    | result after value =>
+      cases current with | intro store issued code continuation =>
+        cases continuation
+        cases code
+    | results after values =>
+      cases current with | intro store issued code continuation =>
+        cases continuation
+        cases code with | results residents =>
+          exact Or.inl ⟨after, values, run, residents, store, issued, framed, safe, exterior, tracked⟩
+  · exact Or.inr infinite
+
 /-- Actual argument execution realizes the ordered checking output, even when
 static call expansion is infinite. Completion is observed, not admitted. -/
 theorem HasTypes.evaluation_soundness (checkedProgram : program.Checked)
@@ -1564,6 +1607,30 @@ theorem HasTypes.bottom_no_evaluation (checkedProgram : program.Checked)
   obtain ⟨resident, _⟩ := bottom.evaluation_soundness checkedProgram nextTyped nextIssued headRun
   exact resident.not_never
 
+/-- A bottom operand at any position yields an infinite ordered-pack
+execution. No preceding operand is assumed to terminate. -/
+theorem HasTypes.bottom_behavior (checkedProgram : program.Checked)
+    {before middle headAfter final : FlowContext} {front back : List Expr} {head : Expr}
+    {prefixTypes types : List Ty}
+    (checked : HasTypes program home before (front ++ head :: back) types final)
+    (prefixTyped : HasTypes program home before front prefixTypes middle)
+    (bottom : HasType program home middle head .never headAfter)
+    {environment : Environment}
+    (store : BindingMap.Typed program environment.heap environment.activation environment.bindings before)
+    (issued : environment.supply.Issued environment.activation) :
+    ∃ trace, InfiniteRun program ⟨environment, .arguments (front ++ head :: back), []⟩ trace ∧
+      ∀ index, ConfigurationTyped program final (.many types) (trace index) ∧
+        AddressedEnvironment.ConsumptionFrame program final.slots environment (trace index).outerEnvironment ∧
+        (trace index).OwnershipSafe program ∧
+        Configuration.ExternalFrame ⟨environment, .arguments (front ++ head :: back), []⟩ (trace index) ∧
+        ∀ identity, environment.heap.next ≤ identity.index →
+          ∀ cell, (trace index).environment.heap.read identity = some cell →
+            ¬ (trace index).Untracked identity := by
+  rcases checked.behavior checkedProgram store issued with normal | infinite
+  · obtain ⟨_, _, evaluated, _⟩ := normal
+    exact False.elim (prefixTyped.bottom_no_evaluation checkedProgram bottom store issued evaluated)
+  · exact infinite
+
 /-- A bottom operand forces whole-call divergence, regardless of whether its
 preceding arguments terminate. The ordinary admitted call retains its normal
 signature and all general prefix-safety guarantees. -/
@@ -1584,11 +1651,20 @@ theorem HasType.call_bottom_argument_behavior (checkedProgram : program.Checked)
         ∀ identity, environment.heap.next ≤ identity.index →
           ∀ cell, (trace index).environment.heap.read identity = some cell →
             ¬ (trace index).Untracked identity := by
-  rcases checked.behavior checkedProgram store issued with normal | infinite
-  · obtain ⟨_, _, evaluated, _⟩ := normal
-    obtain ⟨_, _, _, _, _, _, argumentsRun, _⟩ := Evaluates.call_iff.mp evaluated
-    exact False.elim (prefixTyped.bottom_no_evaluation checkedProgram bottom store issued argumentsRun)
-  · exact infinite
+  have entry := ConfigurationTyped.entry checked store issued
+  cases checked with
+  | @call _ _ _ _ _ declaration declared visible inputs =>
+    obtain ⟨trace, infinite, _⟩ := inputs.bottom_behavior checkedProgram prefixTyped bottom store issued
+    have setup : Run program ⟨environment, .expression (.call identity (front ++ head :: back)), []⟩
+        ⟨environment, .arguments (front ++ head :: back), [.call declaration]⟩ :=
+      .step (.call declared) (.refl _)
+    obtain ⟨whole, execution⟩ := setup.prepend_infinite (infinite.extend [.call declaration])
+    refine ⟨whole, execution, ?_⟩
+    intro index
+    have run := execution.prefix index
+    have current := entry.run checkedProgram run
+    exact ⟨current, entry.consumption_run checkedProgram run, current.ownership_safe, run.external_frame,
+      fun _ fresh _ live => run.allocated_tracked fresh live⟩
 
 
 /-- A bottom initializer prevents the entire binding from returning. No

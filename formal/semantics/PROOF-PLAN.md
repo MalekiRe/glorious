@@ -5249,3 +5249,34 @@ to source admission. All 30 strict Lean jobs passed, and the public theorem
 uses only propext, Classical.choice and Quot.sound. This closes the returning
 side of the record result-index migration, not operand-list outcomes or any
 of the fourteen still-open whole-language completion families.
+
+## Shared maximal behavior for scalar control and operand packs
+
+ConfigurationTyped.maximal_behavior now constructs a terminal execution or an
+infinite execution for either ResultType through the same preservation/progress
+producer. The existing scalar ConfigurationTyped.behavior consumes it rather
+than retaining a separate terminal-or-infinite construction. Scalar principal
+uniqueness and return-retirement guarantees are preserved.
+
+HasTypes.behavior derives a returned typed pack with realized storage, issued
+activation, ownership safety, exterior framing and allocation tracking, or an
+infinite ordered-pack execution preserving the same prefix invariants. It does
+not assume argument termination or an output environment. HasTypes.bottom_behavior
+excludes normal completion when any ordered operand is bottom, deriving the
+intermediate readiness from actual prefix execution only when needed.
+
+Whole-call bottom-argument behavior now composes this actual infinite pack run
+with the real call setup step and pending callee frame. The prior proof by a
+separate whole-call behavior split is removed. The public source call theorem
+consumes that composition. SourceClosure.Admitted.bottom_operand_pack additionally
+constructs source pack admission and proves divergence and pending-stack
+nonresumption directly, without inventing argument values or granting disposal
+rights to retained owners.
+
+All 30 strict Lean jobs passed. Inspected shared maximal behavior, pack behavior,
+whole-call composition and public source proofs use only propext,
+Classical.choice and Quot.sound. This closes operational maximal behavior for
+ordered packs in the admitted fragment. It does not yet give HasTypes a static
+normal-result outcome index or propagate that index through aggregate/call
+result inference. That migration, unreachable continuation checking and all
+fourteen whole-language completion families remain open.

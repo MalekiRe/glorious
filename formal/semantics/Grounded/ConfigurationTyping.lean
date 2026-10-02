@@ -1527,6 +1527,38 @@ theorem ConfigurationTyped.retired_not_retained {context result state} {identity
   rw [retired.2] at found
   cases found
 
+/-- One maximal-behavior producer covers both scalar control and ordered
+operand packs, including partially executed configurations and continuations. -/
+theorem ConfigurationTyped.maximal_behavior (checkedProgram : program.Checked)
+    {context : FlowContext} {result : ResultType} {before : Configuration}
+    (typed : ConfigurationTyped program context result before) :
+    (∃ state, Run program before state ∧ Terminal state ∧
+      ConfigurationTyped program context result state ∧
+      AddressedEnvironment.ConsumptionFrame program context.slots before.outerEnvironment state.outerEnvironment ∧
+      state.OwnershipSafe program ∧ before.ExternalFrame state ∧
+      ∀ identity, before.environment.heap.next ≤ identity.index →
+        ∀ cell, state.environment.heap.read identity = some cell → ¬ state.Untracked identity) ∨
+    (∃ trace, InfiniteRun program before trace ∧
+      ∀ index, ConfigurationTyped program context result (trace index) ∧
+        AddressedEnvironment.ConsumptionFrame program context.slots before.outerEnvironment (trace index).outerEnvironment ∧
+        (trace index).OwnershipSafe program ∧ before.ExternalFrame (trace index) ∧
+        ∀ identity, before.environment.heap.next ≤ identity.index →
+          ∀ cell, (trace index).environment.heap.read identity = some cell →
+            ¬ (trace index).Untracked identity) := by
+  rcases Run.terminal_or_infinite before
+      (fun _ run => (typed.run checkedProgram run).progress) with ⟨state, run, done⟩ | ⟨trace, infinite⟩
+  · have current := typed.run checkedProgram run
+    exact Or.inl ⟨state, run, done, current, typed.consumption_run checkedProgram run,
+      current.ownership_safe, run.external_frame,
+      fun _ fresh _ live => run.allocated_tracked fresh live⟩
+  · right
+    refine ⟨trace, infinite, ?_⟩
+    intro index
+    have run := infinite.prefix index
+    have current := typed.run checkedProgram run
+    exact ⟨current, typed.consumption_run checkedProgram run, current.ownership_safe, run.external_frame,
+      fun _ fresh _ live => run.allocated_tracked fresh live⟩
+
 /-- Maximal behavior starts from the actual typed control and continuation,
 including partially evaluated calls and pending caller restoration. -/
 theorem ConfigurationTyped.behavior (checkedProgram : program.Checked)
@@ -1551,24 +1583,16 @@ theorem ConfigurationTyped.behavior (checkedProgram : program.Checked)
         ∀ identity, before.environment.heap.next ≤ identity.index →
           ∀ cell, (trace index).environment.heap.read identity = some cell →
             ¬ (trace index).Untracked identity) := by
-  rcases Run.terminal_or_infinite before
-      (fun _ run => (typed.run checkedProgram run).progress) with ⟨state, run, done⟩ | ⟨trace, infinite⟩
-  · left
-    have current := typed.run checkedProgram run
+  rcases typed.maximal_behavior checkedProgram with normal | infinite
+  · obtain ⟨state, run, done, current, framed, safe, exterior, _⟩ := normal
     obtain ⟨after, value, same, store, _, resident⟩ := current.normal_form done
     subst state
-    refine ⟨after, value, run, resident, resident.principal_exists, store, typed.consumption_run checkedProgram run,
-      current.ownership_safe, run.external_frame, run.return_retires_all ?_⟩
+    refine Or.inl ⟨after, value, run, resident, resident.principal_exists, store, framed,
+      safe, exterior, run.return_retires_all ?_⟩
     intro identity member
     obtain ⟨cell, found, _, _⟩ := typed.typed_scopes before.continuation [] (by simp) identity member
     exact before.environment.heap.bounded _ _ found
-  · right
-    refine ⟨trace, infinite, ?_⟩
-    intro index
-    have run := infinite.prefix index
-    have current := typed.run checkedProgram run
-    exact ⟨current, typed.consumption_run checkedProgram run, current.ownership_safe, run.external_frame,
-      fun _ fresh _ live => run.allocated_tracked fresh live⟩
+  · exact Or.inr infinite
 
 
 end Grounded
