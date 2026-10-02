@@ -900,4 +900,52 @@ theorem PartialValue.write_hole_read_before {program : Program} {parent : Ty}
           exact ih changed read
         · simpa only [List.getElem?_set_ne (Ne.symm same)] using read
 
+private theorem empty_open_fields {program : Program} {parent : Ty} {before : PartialValue}
+    {fields : List PartialValue} (empty : before.Empty)
+    (opened : before.openFields program parent = some fields) :
+    ∀ value ∈ fields, value.Empty := by
+  cases before with
+  | hole =>
+    obtain ⟨count, rfl⟩ := hole_open_fields opened
+    intro value member
+    have same := (List.mem_replicate.mp member).2
+    subst value
+    trivial
+  | resident value => simp [PartialValue.Empty] at empty
+  | tuple head tail =>
+    cases parent <;> simp_all [PartialValue.openFields, PartialValue.Empty]
+    subst fields
+    simpa only [List.mem_cons, forall_eq_or_imp] using empty
+  | nominal identity tag values =>
+    cases parent <;> cases tag <;> simp_all [PartialValue.openFields, PartialValue.Empty]
+
+private theorem empty_close_fields {parent : Ty} {fields : List PartialValue} {after : PartialValue}
+    (closed : PartialValue.closeFields parent fields = some after) (nonempty : fields ≠ [])
+    (empty : ∀ value ∈ fields, value.Empty) : after.Empty := by
+  cases parent <;> cases fields <;> simp_all [PartialValue.closeFields]
+  all_goals subst after; simp_all [PartialValue.Empty]
+
+/-- Erasure preserves actual structural absence, not merely failure to read a
+whole aggregate. This also protects zero-field nominal ownership distinctions. -/
+theorem PartialValue.Empty.write_hole {program : Program} {parent : Ty}
+    {before after : PartialValue} {path : List FieldKey} (empty : before.Empty)
+    (written : before.writeFields program parent path .hole = some after) : after.Empty := by
+  induction path generalizing parent before after with
+  | nil => cases written; simp [PartialValue.Empty]
+  | cons key rest ih =>
+    simp only [PartialValue.writeFields, Option.bind_eq_some_iff] at written
+    obtain ⟨⟨index, child, types⟩, info, fields, opened, current, found, updated, changed, closed⟩ := written
+    have allEmpty := empty_open_fields empty opened
+    have updatedEmpty := ih (allEmpty current (List.mem_of_getElem? found)) changed
+    apply empty_close_fields closed
+    · have bound := (List.getElem?_eq_some_iff.mp found).1
+      intro absent
+      have length := congrArg List.length absent
+      simp only [List.length_set, List.length_nil] at length
+      omega
+    · intro value member
+      rcases List.mem_or_eq_of_mem_set member with original | same
+      · exact allEmpty value original
+      · subst value; exact updatedEmpty
+
 end Grounded

@@ -3623,6 +3623,17 @@ actual suffix, rather than merely comparing every state to program entry.
 No second history relation, successful-read premise, or future-state admission
 assumption is added to the source theorem.
 
+`PartialValue.Empty.write_hole` separately proves structural absence is
+preserved by erasure. It does not confuse unreadability of a partial owner with
+complete consumption, nor classify a zero-field nominal owner as absent.
+`StorageCell.Consumption.empty` preserves the live cell, declared type and
+activation through the same existing history.
+`SourceClosure.Admitted.immutable_empty` consumes this result between arbitrary
+reached prefixes: a structurally empty immutable source owner keeps its lexical
+identity and empty live storage throughout the suffix. No after-state absence
+or replacement cell is supplied. All 30 build jobs and standard-axiom inspection
+of this producer/history/source chain and maximal behavior passed.
+
 All 30 Lean build jobs passed. Axiom inspection of the erasure producer,
 consumption lemma, source observation theorem, general preservation and maximal
 source behavior reported only `propext`, `Classical.choice` and `Quot.sound`.

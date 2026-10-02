@@ -785,6 +785,39 @@ theorem SourceClosure.Admitted.immutable_read {packages : List PackageSource} {c
   | none => exact Or.inl rfl
   | some value => exact Or.inr (framed.read_before retained immutable observed).symm
 
+/-- Once an immutable source owner is structurally empty, later execution
+preserves its empty live cell, declaration type, activation and lexical identity.
+Failure to read a partially consumed owner is not used as evidence of absence. -/
+theorem SourceClosure.Admitted.immutable_empty {packages : List PackageSource} {closure : SourceClosure packages}
+    {program : Program} (admitted : closure.Admitted program) {home : Module} {scope : SourceScope}
+    {expression : NamedExpr} {core : Expr} {type : Ty} {before final : FlowContext}
+    (elaborated : NamedExpr.Elaborates program closure.functionNames
+      home scope before expression core type final)
+    (slots : before.slots = scope.context)
+    {environment : Environment}
+    (store : BindingMap.Typed program environment.heap environment.activation environment.bindings before)
+    (issued : environment.supply.Issued environment.activation)
+    {earlier state : Configuration}
+    (reached : Run program ⟨environment, .expression core, []⟩ earlier)
+    (run : Run program earlier state)
+    {name : BindingId} {slot : BindingType} (selected : lookup name scope.context = some slot)
+    (immutable : slot.mutable = false) {identity : StorageId} {cell : StorageCell}
+    (mapped : lookup name earlier.outerEnvironment.bindings = some identity)
+    (found : earlier.outerEnvironment.heap.read identity = some cell)
+    (empty : cell.resident.Empty) :
+    lookup name state.outerEnvironment.bindings = some identity ∧
+      ∃ next, state.outerEnvironment.heap.read identity = some next ∧
+        next.activation = cell.activation ∧ next.type = cell.type ∧ next.resident.Empty := by
+  have current := (admitted.soundness elaborated slots store issued reached).1
+  have framed := current.consumption_run admitted.checked run
+  have retained : lookup name final.slots = some slot := by
+    rw [(elaborated.checked slots).slots, slots]
+    exact selected
+  have bindings : state.outerEnvironment.bindings = earlier.outerEnvironment.bindings :=
+    congrArg AddressedScope.bindings framed.1
+  refine ⟨by simpa only [bindings] using mapped, ?_⟩
+  exact (framed.2 name slot identity retained immutable mapped).empty found empty
+
 /-- Source admission determines a complete behavior without a termination or
 future-state premise. Infinite execution retains the same general safety contract
 as finite execution, rather than being encoded as an abort. -/
