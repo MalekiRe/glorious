@@ -3080,3 +3080,33 @@ progress found only `propext`, `Classical.choice` and `Quot.sound`. No unit test
 or concrete examples were added. Whole-language soundness and the broad source
 and invocation boundaries remain open.
 
+## Maximal source-admitted execution: typed return or safe divergence
+
+The finite-prefix safety contract now has a whole-execution consequence for the
+current logical machine. `InfiniteRun` is an unbounded sequence of actual
+`Step` transitions, not a second evaluator, bounded runner or stuttering rule.
+Its prefixes produce the existing `Run` relation. Step determinism proves
+infinite-trace uniqueness and excludes an infinite trace whenever a finite
+terminal run exists.
+
+`Run.terminal_or_infinite` constructs an infinite trace from reachable-state
+progress when no terminal configuration is reachable. This is a theorem about
+the existing transition relation, not a new source-admission premise.
+`HasType.behavior` supplies that progress from general preservation and carries
+the result into either an actual typed normal evaluation with final storage and
+consumption framing, or an infinite trace whose every state preserves
+configuration typing, ownership safety and the same consumption frame.
+
+`SourceClosure.Admitted.behavior` consumes actual source elaboration and the
+source-produced checked program. It assumes neither a completed execution nor
+`FiniteCalls`, termination, future readiness or a run-progress certificate.
+The two behavior classes are exhaustive for admitted code in this machine and
+are exclusive by `Run.excludes_infinite`.
+
+Verification: `lake build Grounded` passed all 30 jobs. Explicit axiom inspection
+of trace construction, prefix extraction, trace uniqueness, exclusivity and the
+public source behavior theorem found only standard Lean axioms. No examples or
+unit tests were added. Physical exhaustion, effects, foreign boundaries and
+whole-language completion remain separate open obligations; this theorem does
+not reinterpret their missing transitions as divergence.
+

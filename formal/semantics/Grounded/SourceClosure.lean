@@ -757,6 +757,30 @@ theorem SourceClosure.Admitted.soundness {packages : List PackageSource} {closur
       (state.environment.bindings.map Prod.fst).Nodup ∧ state.OwnershipSafe program :=
   elaborated.soundness slots admitted.checked store issued run
 
+/-- Source admission determines a complete behavior without a termination or
+future-state premise. Infinite execution retains the same general safety contract
+as finite execution, rather than being encoded as an abort. -/
+theorem SourceClosure.Admitted.behavior {packages : List PackageSource} {closure : SourceClosure packages}
+    {program : Program} (admitted : closure.Admitted program) {home : Module} {scope : SourceScope}
+    {expression : NamedExpr} {core : Expr} {type : Ty} {before final : FlowContext}
+    (elaborated : NamedExpr.Elaborates program closure.functionNames
+      home scope before expression core type final)
+    (slots : before.slots = scope.context)
+    {environment : Environment}
+    (store : BindingMap.Typed program environment.heap environment.activation environment.bindings before)
+    (issued : environment.supply.Issued environment.activation) :
+    (∃ after value, Evaluates program environment core value after ∧
+      ValueHasType program value type ∧
+      BindingMap.Typed program after.heap after.activation after.bindings final ∧
+      AddressedEnvironment.ConsumptionFrame program final.slots environment after ∧
+      (⟨after, .result value, []⟩ : Configuration).OwnershipSafe program) ∨
+    (∃ trace, InfiniteRun program ⟨environment, .expression core, []⟩ trace ∧
+      ∀ index, ConfigurationTyped program final (.one type) (trace index) ∧
+        AddressedEnvironment.ConsumptionFrame program final.slots environment (trace index).outerEnvironment ∧
+        (trace index).OwnershipSafe program) :=
+  (elaborated.checked slots).behavior admitted.checked store issued
+
+
 
 private theorem supplied_file_unique {files : SourceFiles}
     (distinct : (files.map Prod.fst).Nodup) {path : SourcePath} {first second : ModuleSource}

@@ -284,6 +284,69 @@ theorem Run.unique {before first second : Configuration} (left : Run program bef
       cases head.unique other
       exact ih rest leftDone rightDone
 
+/-- An infinite execution contains an actual machine step at every index.
+There is no fuel limit, stuttering transition or assumed evaluator. -/
+structure InfiniteRun (program : Program) (before : Configuration)
+    (trace : Nat → Configuration) : Prop where
+  initial : trace 0 = before
+  steps : ∀ index, Step program (trace index) (trace (index + 1))
+
+theorem InfiniteRun.prefix {before : Configuration} {trace : Nat → Configuration}
+    (infinite : InfiniteRun program before trace) (index : Nat) :
+    Run program before (trace index) := by
+  induction index with
+  | zero => rw [infinite.initial]; exact .refl _
+  | succ index ih => exact ih.trans (.step (infinite.steps index) (.refl _))
+
+/-- Infinite behavior is also deterministic, not merely finite terminal results. -/
+theorem InfiniteRun.unique {before : Configuration} {first second : Nat → Configuration}
+    (left : InfiniteRun program before first) (right : InfiniteRun program before second) :
+    first = second := by
+  funext index
+  induction index with
+  | zero => exact left.initial.trans right.initial.symm
+  | succ index ih =>
+    have step := left.steps index
+    rw [ih] at step
+    exact (step.unique (right.steps index)).symm
+
+
+/-- Determinism makes finite terminal execution and infinite execution exclusive. -/
+theorem Run.excludes_infinite {before after : Configuration}
+    (run : Run program before after) (done : Terminal after) :
+    ∀ trace, ¬ InfiniteRun program before trace := by
+  induction run with
+  | refl state =>
+    intro trace infinite
+    exact done.no_step (by simpa only [infinite.initial] using infinite.steps 0)
+  | step head tail ih =>
+    intro trace infinite
+    have first := infinite.steps 0
+    rw [infinite.initial] at first
+    have same := head.unique first
+    exact ih done (fun index => trace (index + 1)) ⟨same, fun index => infinite.steps (index + 1)⟩
+
+/-- Reachable-state progress constructs an unbounded execution when no terminal
+state is reachable. Source consumers derive progress from preservation. -/
+theorem Run.terminal_or_infinite (before : Configuration)
+    (progress : ∀ state, Run program before state → Terminal state ∨ ∃ next, Step program state next) :
+    (∃ after, Run program before after ∧ Terminal after) ∨
+      ∃ trace, InfiniteRun program before trace := by
+  classical
+  by_cases finished : ∃ after, Run program before after ∧ Terminal after
+  · exact .inl finished
+  · right
+    have successor : ∀ current : {state // Run program before state},
+        ∃ next : {state // Run program before state}, Step program current.val next.val := by
+      intro current
+      rcases progress current.val current.property with done | ⟨next, step⟩
+      · exact False.elim (finished ⟨current.val, current.property, done⟩)
+      · exact ⟨⟨next, current.property.trans (.step step (.refl _))⟩, step⟩
+    let states : Nat → {state // Run program before state} :=
+      Nat.rec ⟨before, .refl _⟩ (fun _ current => Classical.choose (successor current))
+    exact ⟨fun index => (states index).val, rfl, fun index => Classical.choose_spec (successor (states index))⟩
+
+
 theorem Frame.scope_extension (current : Environment) (inputs : List BindingInput) :
     (Frame.scope inputs.length).environment (current.extend inputs) =
       { current with heap := (allocateBindings current.heap current.activation inputs).2 } := by

@@ -23,6 +23,38 @@ theorem HasType.soundness (checkedProgram : program.Checked) {context final : Fl
   have current := entry.run checkedProgram run
   exact ⟨current, current.progress, entry.consumption_run checkedProgram run, current.bindings_distinct, current.ownership_safe⟩
 
+/-- General checking admits a complete machine behavior, not just a supplied
+finite run. Divergence consists of real steps, each preserving the same storage
+and ownership contract; the normal alternative carries the actual typed result. -/
+theorem HasType.behavior (checkedProgram : program.Checked) {context final : FlowContext}
+    {expression : Expr} {type : Ty} (checked : HasType program home context expression type final)
+    {environment : Environment}
+    (store : BindingMap.Typed program environment.heap environment.activation environment.bindings context)
+    (issued : environment.supply.Issued environment.activation) :
+    (∃ after value, Evaluates program environment expression value after ∧
+      ValueHasType program value type ∧
+      BindingMap.Typed program after.heap after.activation after.bindings final ∧
+      AddressedEnvironment.ConsumptionFrame program final.slots environment after ∧
+      (⟨after, .result value, []⟩ : Configuration).OwnershipSafe program) ∨
+    (∃ trace, InfiniteRun program ⟨environment, .expression expression, []⟩ trace ∧
+      ∀ index, ConfigurationTyped program final (.one type) (trace index) ∧
+        AddressedEnvironment.ConsumptionFrame program final.slots environment (trace index).outerEnvironment ∧
+        (trace index).OwnershipSafe program) := by
+  have entry := ConfigurationTyped.entry checked store issued
+  rcases Run.terminal_or_infinite ⟨environment, .expression expression, []⟩
+      (fun _ run => (entry.run checkedProgram run).progress) with ⟨state, run, done⟩ | ⟨trace, infinite⟩
+  · left
+    have safe := checked.soundness checkedProgram store issued run
+    obtain ⟨after, value, same, typed, _, resident⟩ := safe.1.normal_form done
+    subst state
+    exact ⟨after, value, run, resident, typed, safe.2.2.1, safe.2.2.2.2⟩
+  · right
+    refine ⟨trace, infinite, ?_⟩
+    intro index
+    have safe := checked.soundness checkedProgram store issued (infinite.prefix index)
+    exact ⟨safe.1, safe.2.2.1, safe.2.2.2.2⟩
+
+
 /-- Actual scope retirement retains its outer cells and joins each descendant
 under the descendant's own use class. No positive-lower occupancy becomes a
 fresh unknown, and manually exact nominal shells retain their consumed status. -/
