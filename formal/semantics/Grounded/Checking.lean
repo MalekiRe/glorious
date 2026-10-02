@@ -167,9 +167,10 @@ inductive HasType (program : Program) : Module → FlowContext → Expr → Ty �
 
 inductive HasTypes (program : Program) : Module → FlowContext → List Expr → List Ty → FlowContext → Prop where
   | nil {home context} : HasTypes program home context [] [] context
-  | cons {home before middle after head tail first rest}
-      (headTyped : HasType program home before head first middle)
-      (tailTyped : HasTypes program home middle tail rest after) :
+  | cons {home before middle after head tail actual first rest}
+      (headTyped : HasType program home before head actual middle)
+      (tailTyped : HasTypes program home middle tail rest after)
+      (joined : ReturnJoin program actual middle first middle) :
       HasTypes program home before (head :: tail) (first :: rest) after
 inductive ArmsType (program : Program) :
     Module → FlowContext → Ty → Ty → List Pattern → List (Pattern × Expr) → FlowContext → Prop where
@@ -254,7 +255,7 @@ theorem HasType.slots {program : Program} {home : Module} {before after : FlowCo
   | applyPatterns arguments nonempty covered bodies argumentsIH bodiesIH =>
     exact (bodiesIH nonempty).trans argumentsIH
   | nil => rfl
-  | cons head tail headIH tailIH => exact tailIH.trans headIH
+  | cons head tail joined headIH tailIH => exact tailIH.trans headIH
   | empty => rename_i nonempty; exact False.elim (nonempty rfl)
   | clause pattern distinct useful body localSlots disposable joined tail bodyIH tailIH =>
     simp only [FlowContext.slots, List.map_append] at bodyIH
@@ -347,7 +348,7 @@ theorem HasTypes.slots {program : Program} {home : Module} {before after : FlowC
   | nil => cases checked; rfl
   | cons head tail ih =>
     cases checked with
-    | cons headTyped tailTyped => exact (ih tailTyped).trans headTyped.slots
+    | cons headTyped tailTyped joined => exact (ih tailTyped).trans headTyped.slots
 
 theorem ArmsType.slots {program : Program} {home : Module} {before after : FlowContext}
     {subject result : Ty} {previous : List Pattern} {arms : List (Pattern × Expr)}
@@ -440,7 +441,7 @@ theorem HasTypes.compatible_inputs {program : Program} {home : Module} {before :
       intro input member
       obtain ⟨after, pending⟩ := checked input (List.mem_cons_of_mem first member)
       exact (parts.1 input member).admit_next head pending)
-    exact ⟨final, .cons head tail⟩
+    exact ⟨final, .cons head tail (.refl _)⟩
 
 /-- A destructive input cannot be certified compatible with a later access to
 that same place. Copy-before-move remains permitted by the ordered relation. -/

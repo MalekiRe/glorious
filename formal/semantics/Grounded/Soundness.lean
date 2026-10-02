@@ -422,7 +422,7 @@ theorem HasTypes.compatible_inputs_execute {before final : FlowContext} {inputs 
     | mk expression type =>
       obtain ⟨place, form⟩ := ordinary (expression, type) (by simp)
       cases checked with
-      | cons head tail =>
+      | cons head tail joined =>
         have slots := head.slots
         have tailCompatible := parts.2
         rw [← slots] at tailCompatible
@@ -433,7 +433,7 @@ theorem HasTypes.compatible_inputs_execute {before final : FlowContext} {inputs 
             obtain ⟨after, values, evaluated, valuesTyped, observed, afterTyped, scope, supply⟩ :=
               ih tailCompatible tailOrdinary tail store
             refine ⟨after, value :: values, .cons (.read read) evaluated,
-              .cons valueTyped valuesTyped, ?_, afterTyped, scope, supply⟩
+              .cons (joined.on_return valueTyped).1 valuesTyped, ?_, afterTyped, scope, supply⟩
             change some value :: values.map some = environment.read program place ::
               rest.map (fun input => input.1.inputObservation program environment)
             rw [read, observed]
@@ -447,7 +447,7 @@ theorem HasTypes.compatible_inputs_execute {before final : FlowContext} {inputs 
               ih tailCompatible tailOrdinary tail (environment := { environment with heap := heap }) movedTyped
             refine ⟨after, value :: values,
               .cons (.move (by simp [AddressedEnvironment.take, taken])) evaluated,
-              .cons valueTyped valuesTyped, ?_, afterTyped, scope, supply⟩
+              .cons (joined.on_return valueTyped).1 valuesTyped, ?_, afterTyped, scope, supply⟩
             change some value :: values.map some = environment.read program place ::
               rest.map (fun input => input.1.inputObservation program environment)
             have first : some value = environment.read program place := (BindingMap.take.read_before taken).symm
@@ -1545,5 +1545,49 @@ theorem HasType.call_bottom_behavior (checkedProgram : program.Checked)
       middle.supply.allocate_issued bodyRun
     exact resident.not_never.elim
   · exact infinite
+/-- A normal argument pack cannot cross a bottom operand. The prefix's
+intermediate readiness is derived from its actual execution, not assumed. -/
+theorem HasTypes.bottom_no_evaluation (checkedProgram : program.Checked)
+    {before middle final : FlowContext} {front back : List Expr} {head : Expr} {types : List Ty}
+    (prefixTyped : HasTypes program home before front types middle)
+    (bottom : HasType program home middle head .never final)
+    {environment after : Environment} {values : List Value}
+    (store : BindingMap.Typed program environment.heap environment.activation environment.bindings before)
+    (issued : environment.supply.Issued environment.activation) :
+    ¬ EvaluatesMany program environment (front ++ head :: back) values after := by
+  intro evaluated
+  obtain ⟨_, _, next, _, prefixRun, suffixRun⟩ := EvaluatesMany.append_iff.mp evaluated
+  obtain ⟨_, nextTyped, nextIssued, _⟩ := prefixTyped.evaluation_soundness checkedProgram store issued prefixRun
+  obtain ⟨_, _, _, _, headRun, _⟩ := EvaluatesMany.cons_iff.mp suffixRun
+  obtain ⟨resident, _⟩ := bottom.evaluation_soundness checkedProgram nextTyped nextIssued headRun
+  exact resident.not_never
+
+/-- A bottom operand forces whole-call divergence, regardless of whether its
+preceding arguments terminate. The ordinary admitted call retains its normal
+signature and all general prefix-safety guarantees. -/
+theorem HasType.call_bottom_argument_behavior (checkedProgram : program.Checked)
+    {before middle headAfter final : FlowContext} {front back : List Expr} {head : Expr}
+    {types : List Ty} {identity : Nat} {type : Ty}
+    (checked : HasType program home before (.call identity (front ++ head :: back)) type final)
+    (prefixTyped : HasTypes program home before front types middle)
+    (bottom : HasType program home middle head .never headAfter)
+    {environment : Environment}
+    (store : BindingMap.Typed program environment.heap environment.activation environment.bindings before)
+    (issued : environment.supply.Issued environment.activation) :
+    ∃ trace, InfiniteRun program ⟨environment, .expression (.call identity (front ++ head :: back)), []⟩ trace ∧
+      ∀ index, ConfigurationTyped program final (.one type) (trace index) ∧
+        AddressedEnvironment.ConsumptionFrame program final.slots environment (trace index).outerEnvironment ∧
+        (trace index).OwnershipSafe program ∧
+        Configuration.ExternalFrame ⟨environment, .expression (.call identity (front ++ head :: back)), []⟩ (trace index) ∧
+        ∀ identity, environment.heap.next ≤ identity.index →
+          ∀ cell, (trace index).environment.heap.read identity = some cell →
+            ¬ (trace index).Untracked identity := by
+  rcases checked.behavior checkedProgram store issued with normal | infinite
+  · obtain ⟨_, _, evaluated, _⟩ := normal
+    obtain ⟨_, _, _, _, _, _, argumentsRun, _⟩ := Evaluates.call_iff.mp evaluated
+    exact False.elim (prefixTyped.bottom_no_evaluation checkedProgram bottom store issued argumentsRun)
+  · exact infinite
+
+
 end Grounded
 

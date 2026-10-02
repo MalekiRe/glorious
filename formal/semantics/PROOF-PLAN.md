@@ -5017,3 +5017,33 @@ All 30 strict Lean jobs passed. Inspected whole-call and source-call divergence,
 public soundness/behavior and storage-lifetime proofs use only propext,
 Classical.choice and Quot.sound. Bottom elimination in arbitrary expression
 operands and all fourteen whole-language completion families remain open.
+
+## Expected types for ordered operands
+
+HasTypes.cons now retains the operand's inferred type and a ReturnJoin to its
+expected argument type. NamedExprsElaborate.cons produces the same evidence;
+FrameTyped.argumentHead consumes it. The machine constructs an argument value
+at the expected type only after an actual return. Bottom contributes no value,
+no disposal permission and no claim that later operands execute. Runtime
+transitions are unchanged.
+
+General preservation, structural evaluation, finite-call execution, ordered
+ordinary-input observations and source checking have been migrated. Existing
+compatible Copy/move admission uses identity joins and retains its pre-state
+observation theorem. Source arrays, constructors and pattern/direct-call input
+lists use the shared ordered relation rather than a separate coercion analysis.
+
+NamedExprsElaborate.bottom_operand admits bottom at any argument position using
+its real prefix and suffix derivations. HasTypes.bottom_no_evaluation derives
+intermediate readiness from an observed prefix and rules out completed packs.
+HasType.call_bottom_argument_behavior derives whole-call divergence without
+assuming prefix termination. SourceClosure.Admitted.bottom_argument_call uses
+the same source products to construct the actual selected call's admission and
+prove infinite behavior, prefix safety and pending-stack nonresumption.
+
+All 30 strict Lean jobs passed. Inspected operand/source-call proofs, public
+soundness/behavior, compatible-call behavior and no-exact-cleanup use only
+propext, Classical.choice and Quot.sound. This closes expected-type admission
+for ordered operand lists; binding initializers, assignment values and other
+scalar expected positions still require migration. It does not make unreachable
+suffix checking disappear. All fourteen completion families remain open.

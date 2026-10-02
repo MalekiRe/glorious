@@ -219,8 +219,9 @@ inductive FrameTyped (program : Program) (heap : RuntimeHeap StorageCell) (suppl
       (retained : BindingMap.Typed program heap caller.activation caller.bindings context)
       (issued : supply.Issued caller.activation) (older : caller.activation.index < activation.index) :
       FrameTyped program heap supply activation locals (.one input) (.restore caller) context (.one result)
-  | argumentHead {home before after first types tail} (checked : HasTypes program home before tail types after) :
-      FrameTyped program heap supply activation before (.one first) (.argumentHead tail) after (.many (first :: types))
+  | argumentHead {home before after actual first types tail} (checked : HasTypes program home before tail types after)
+      (joined : ReturnJoin program actual before first before) :
+      FrameTyped program heap supply activation before (.one actual) (.argumentHead tail) after (.many (first :: types))
   | argumentTail {context first types head} (resident : ValueHasType program head first) :
       FrameTyped program heap supply activation context (.many types) (.argumentTail head) context (.many (first :: types))
 
@@ -356,7 +357,7 @@ theorem ConfigurationTyped.progress {context result state}
           · obtain ⟨index, entry, chosen, _, member, _⟩ := BindingMap.release_next _ _ ⟨[], List.append_nil _⟩ empty
             obtain ⟨cell, found⟩ := store.live _ (List.mem_map_of_mem (f := Prod.snd) member)
             exact ⟨_, .restoreOwner chosen found⟩
-        | argumentHead checked => exact ⟨_, .argumentHead⟩
+        | argumentHead checked joined => exact ⟨_, .argumentHead⟩
     | results residents =>
       cases continuation with
       | nil => exact .inl (.results _ _)
@@ -660,13 +661,13 @@ theorem ConfigurationTyped.preservation {context : FlowContext} {result : Result
       cases code with | arguments checked => cases checked; exact .intro store issued (.results .nil) continuation
     | cons =>
       cases code with | arguments checked =>
-        cases checked with | cons head tail =>
-          exact .intro store issued (.expression head) (.cons (.argumentHead tail) continuation)
+        cases checked with | cons head tail joined =>
+          exact .intro store issued (.expression head) (.cons (.argumentHead tail joined) continuation)
     | argumentHead =>
       cases code with | result resident =>
         cases continuation with | cons frame tail =>
-          cases frame with | argumentHead checked =>
-            exact .intro store issued (.arguments checked) (.cons (.argumentTail resident) tail)
+          cases frame with | argumentHead checked joined =>
+            exact .intro store issued (.arguments checked) (.cons (.argumentTail (joined.on_return resident).1) tail)
     | argumentTail =>
       cases code with | results residents =>
         cases continuation with | cons frame tail =>
@@ -986,7 +987,7 @@ theorem FrameTyped.declares {before : Environment} {current next : FlowContext}
   | tupleHead checked => simpa only [Frame.environment, Frame.activation, checked.slots] using store
   | patterns nonempty covered checked => simpa only [Frame.environment, Frame.activation, checked.slots nonempty] using store
   | restore locals discard joined caller issued older => exact ⟨_, caller, rfl⟩
-  | argumentHead checked => simpa only [Frame.environment, Frame.activation, checked.slots] using store
+  | argumentHead checked joined => simpa only [Frame.environment, Frame.activation, checked.slots] using store
   | tupleTail | project | array | construct | call | argumentTail => exact store
 
 
@@ -1019,7 +1020,7 @@ theorem FrameTyped.consumption_frame {before after : Environment} {current next 
     refine AddressedEnvironment.ConsumptionFrame.of_cells ?_ ?_
     · rfl
     · exact retained _ _ caller older
-  | argumentHead checked => simpa only [Frame.environment, Frame.activation, checked.slots] using framed
+  | argumentHead checked joined => simpa only [Frame.environment, Frame.activation, checked.slots] using framed
   | tupleTail | project | array | construct | call | argumentTail => exact framed
 
 

@@ -86,11 +86,11 @@ theorem HasType.structural_value {context final : FlowContext} {expression : Exp
   | assign resident selected path writable selection discard mask context rest residentIH restIH => intro closed; cases closed
   | applyPatterns arguments nonempty covered bodies argumentsIH bodiesIH => intro closed; cases closed
   | nil => exact ⟨[], .nil, fun environment => ⟨environment, .nil, rfl, rfl⟩⟩
-  | @cons home before middle after head tail first rest headTyped tailTyped headIH tailIH =>
+  | @cons home before middle after head tail actual first rest headTyped tailTyped joined headIH tailIH =>
     rename_i closed
     obtain ⟨value, resident, heads⟩ := headIH (closed head (by simp))
     obtain ⟨values, residents, tails⟩ := tailIH (fun expression member => closed expression (by simp [member]))
-    refine ⟨_, .cons resident residents, ?_⟩
+    refine ⟨_, .cons (joined.on_return resident).1 residents, ?_⟩
     intro environment
     obtain ⟨middle, headRun, headScope, headHeap⟩ := heads environment
     obtain ⟨after, tailRun, tailScope, tailHeap⟩ := tails middle
@@ -167,12 +167,12 @@ theorem HasType.executes (checkedProgram : program.Checked) {context final : Flo
       induction expressions generalizing context final types environment with
       | nil => cases checked; exact ⟨[], environment, .nil, .nil, store, issued⟩
       | cons head tail tailIH =>
-        cases checked with | cons headTyped tailTyped =>
+        cases checked with | cons headTyped tailTyped joined =>
           obtain ⟨value, middle, headRun, resident, middleTyped, middleIssued, _⟩ :=
             ih head (dependencies head (by simp)) headTyped store issued
           obtain ⟨values, after, tailRun, residents, afterTyped, afterIssued⟩ :=
             tailIH tailTyped (fun child member => dependencies child (by simp [member])) middleTyped middleIssued
-          exact ⟨_, after, .cons headRun tailRun, .cons resident residents, afterTyped, afterIssued⟩
+          exact ⟨value :: values, after, .cons headRun tailRun, .cons (joined.on_return resident).1 residents, afterTyped, afterIssued⟩
     suffices ∃ value after, Evaluates program environment expression value after by
       obtain ⟨value, after, run⟩ := this
       have current := (ConfigurationTyped.entry checked store issued).run checkedProgram run
@@ -292,12 +292,12 @@ theorem HasTypes.executes (checkedProgram : program.Checked) {context final : Fl
   | nil => cases checked; exact ⟨[], environment, .nil, .nil, store, issued⟩
   | cons first rest ih =>
     cases checked with
-    | cons head tail =>
+    | cons head tail joined =>
       obtain ⟨value, middle, firstRun, resident, middleTyped, middleIssued, _⟩ :=
         head.executes checkedProgram (finite _ (by simp)) store issued
       obtain ⟨values, after, tailRun, residents, afterTyped, afterIssued⟩ :=
         ih tail (fun expression member => finite expression (List.mem_cons_of_mem _ member)) middleTyped middleIssued
-      exact ⟨value :: values, after, .cons firstRun tailRun, .cons resident residents, afterTyped, afterIssued⟩
+      exact ⟨value :: values, after, .cons firstRun tailRun, .cons (joined.on_return resident).1 residents, afterTyped, afterIssued⟩
 
 /-- Direct place accesses have no recursive evaluation dependencies. -/
 theorem FiniteCalls.read (place : Place) : FiniteCalls program (.read place) :=

@@ -243,9 +243,10 @@ inductive NamedExpr.Elaborates (program : Program) (names : Module → FunctionN
 inductive NamedExprsElaborate (program : Program) (names : Module → FunctionName → Option Nat) (home : Module) :
     SourceScope → FlowContext → List NamedExpr → List Expr → List Ty → FlowContext → Prop where
   | nil {scope context} : NamedExprsElaborate program names home scope context [] [] [] context
-  | cons {scope before middle after head tail first rest type types}
-      (initial : NamedExpr.Elaborates program names home scope before head first type middle)
-      (continued : NamedExprsElaborate program names home scope middle tail rest types after) :
+  | cons {scope before middle after head tail first rest actual type types}
+      (initial : NamedExpr.Elaborates program names home scope before head first actual middle)
+      (continued : NamedExprsElaborate program names home scope middle tail rest types after)
+      (joined : ReturnJoin program actual middle type middle) :
       NamedExprsElaborate program names home scope before (head :: tail) (first :: rest) (type :: types) after
 inductive NamedArmsElaborate (program : Program) (names : Module → FunctionName → Option Nat) (home : Module) :
     SourceScope → FlowContext → Ty → Ty → List Pattern → List (NamedPattern × NamedExpr) → List (Pattern × Expr) → FlowContext → Prop where
@@ -495,10 +496,10 @@ theorem NamedExpr.Elaborates.checked {program : Program} {home : Module} {names 
     have arguments := inputs slots
     exact .applyPatterns arguments nonempty covered (bodies (arguments.slots.trans slots))
   | nil => exact .nil
-  | cons _ _ head tail =>
+  | cons _ _ joined head tail =>
     rename_i slots
     have first := head slots
-    exact .cons first (tail (first.slots.trans slots))
+    exact .cons first (tail (first.slots.trans slots)) joined
   | empty => exact .empty
   | clause allocated _ useful _ localSlots disposable joined _ body tail =>
     rename_i slots
@@ -531,9 +532,36 @@ theorem NamedExprsElaborate.checked {program : Program} {home : Module} {names :
   | nil => cases elaborated; exact .nil
   | cons head tail ih =>
     cases elaborated with
-    | cons first rest =>
+    | cons first rest joined =>
       have checked := first.checked slots
-      exact .cons checked (ih rest (checked.slots.trans slots))
+      exact .cons checked (ih rest (checked.slots.trans slots)) joined
+
+/-- Ordered source admission composes through the same intermediate context. -/
+theorem NamedExprsElaborate.append {program : Program} {names : Module → FunctionName → Option Nat}
+    {home : Module} {scope : SourceScope} {before middle after : FlowContext}
+    {front back : List NamedExpr} {first rest : List Expr} {types more : List Ty}
+    (prefixTyped : NamedExprsElaborate program names home scope before front first types middle)
+    (suffixTyped : NamedExprsElaborate program names home scope middle back rest more after) :
+    NamedExprsElaborate program names home scope before (front ++ back) (first ++ rest) (types ++ more) after := by
+  induction front generalizing before first types with
+  | nil => cases prefixTyped; exact suffixTyped
+  | cons head tail ih =>
+    cases prefixTyped with
+    | cons initial continued joined => exact .cons initial (ih continued) joined
+
+/-- A bottom operand inhabits its expected argument position without producing
+an argument value. Remaining operands retain their ordinary static checks. -/
+theorem NamedExprsElaborate.bottom_operand {program : Program}
+    {names : Module → FunctionName → Option Nat} {home : Module} {scope : SourceScope}
+    {before middle headAfter final : FlowContext} {front back : List NamedExpr} {sourceHead : NamedExpr}
+    {first rest : List Expr} {head : Expr} {types more : List Ty} (expected : Ty)
+    (prefixTyped : NamedExprsElaborate program names home scope before front first types middle)
+    (bottom : NamedExpr.Elaborates program names home scope middle sourceHead head .never headAfter)
+    (suffixTyped : NamedExprsElaborate program names home scope headAfter back rest more final) :
+    NamedExprsElaborate program names home scope before (front ++ sourceHead :: back)
+      (first ++ head :: rest) (types ++ expected :: more) final :=
+  prefixTyped.append (.cons bottom suffixTyped (.nonreturning _ rfl))
+
 
 /-- Rechecking an already selected ordinary input preserves its source identity
 and Copy/move choice. The new availability comes from the shared Core framing
@@ -600,7 +628,7 @@ theorem NamedExprsElaborate.compatible_inputs {program : Program} {home : Module
         rw [← slots] at compatible
         obtain ⟨next, checked⟩ := compatible.admit_next headChecked (pending.checked slots)
         exact ⟨next, pending.recheck_input (ordinary input (List.mem_cons_of_mem first member)) checked currentSlots⟩)
-    exact ⟨final, .cons head tail⟩
+    exact ⟨final, .cons head tail (.refl _)⟩
 /-- Execute the actual ordered source inputs with their original pre-state
 observations. Copy overlap is retained; destructive overlap is excluded only
 by the shared, mode-sensitive compatibility relation. -/

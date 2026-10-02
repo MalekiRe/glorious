@@ -1559,6 +1559,48 @@ theorem SourceClosure.Admitted.bottom_function_call {packages : List PackageSour
 
 
 
+/-- Source-selected calls admit a bottom operand at any ordered argument
+position. The same source derivations construct admission and prove divergence;
+no successful prefix, fabricated argument or callee entry is a premise. -/
+theorem SourceClosure.Admitted.bottom_argument_call {packages : List PackageSource}
+    {closure : SourceClosure packages} {program : Program} (admitted : closure.Admitted program)
+    {home : Module} {scope : SourceScope} {before middle headAfter final : FlowContext}
+    {sourceFront sourceBack : List NamedExpr} {sourceHead : NamedExpr}
+    {front back : List Expr} {head : Expr} {types more : List Ty} {expected : Ty}
+    {name : FunctionName} {identity : Nat} {declaration : FunctionDecl}
+    (unshadowed : name.Unshadowed scope)
+    (resolved : closure.functionNames home name = some identity)
+    (declared : program.functions identity = some declaration)
+    (visible : declaration.visibility.Allows declaration.home home)
+    (signature : types ++ expected :: more = declaration.parameters.map fun parameter => parameter.2.type)
+    (prefixTyped : NamedExprsElaborate program closure.functionNames home scope before sourceFront front types middle)
+    (bottom : NamedExpr.Elaborates program closure.functionNames home scope middle sourceHead head .never headAfter)
+    (suffixTyped : NamedExprsElaborate program closure.functionNames home scope headAfter sourceBack back more final)
+    (slots : before.slots = scope.context) {environment : Environment}
+    (store : BindingMap.Typed program environment.heap environment.activation environment.bindings before)
+    (issued : environment.supply.Issued environment.activation) :
+    NamedExpr.Elaborates program closure.functionNames home scope before
+      (.call name (sourceFront ++ sourceHead :: sourceBack)) (.call identity (front ++ head :: back)) declaration.result final ∧
+    ∃ trace, InfiniteRun program ⟨environment, .expression (.call identity (front ++ head :: back)), []⟩ trace ∧
+      (∀ index, ConfigurationTyped program final (.one declaration.result) (trace index) ∧
+        AddressedEnvironment.ConsumptionFrame program final.slots environment (trace index).outerEnvironment ∧
+        (trace index).OwnershipSafe program ∧
+        Configuration.ExternalFrame ⟨environment, .expression (.call identity (front ++ head :: back)), []⟩ (trace index) ∧
+        ∀ identity, environment.heap.next ≤ identity.index →
+          ∀ cell, (trace index).environment.heap.read identity = some cell →
+            ¬ (trace index).Untracked identity) ∧
+      ∀ (stack : List Frame) (done : Configuration), Terminal done →
+        ¬ Run program ⟨environment, .expression (.call identity (front ++ head :: back)), stack⟩ (done.extend stack) := by
+  have arguments := prefixTyped.bottom_operand expected bottom suffixTyped
+  rw [signature] at arguments
+  have caller := NamedExpr.Elaborates.call unshadowed resolved declared visible arguments
+  have prefixChecked := prefixTyped.checked slots
+  have bottomChecked := bottom.checked (prefixChecked.slots.trans slots)
+  obtain ⟨trace, infinite, safe⟩ := (caller.checked slots).call_bottom_argument_behavior
+    admitted.checked prefixChecked bottomChecked store issued
+  exact ⟨caller, trace, infinite, safe, fun stack _ terminal => infinite.no_resume terminal stack⟩
+
+
 /-- Every active and retained scope has live, correctly owned and typed partial
 storage throughout execution. Retired identities cannot reappear in those
 scopes; surviving old cells retain their original owner and declared type. -/
