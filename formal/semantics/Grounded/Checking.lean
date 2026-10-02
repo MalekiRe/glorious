@@ -189,7 +189,7 @@ inductive HasType (program : Program) : Module → FlowContext → Expr → Ty �
       (mask : state.initialization.writeFields program state.slot.type place.fields .present = some updated)
       (context : replaceBinding place.root { state with initialization := updated } evaluated = some restored)
       (continued : HasType program home restored rest result after) :
-      HasType program home before (.assign home place value rest) result after
+      HasType program home before (.assign home place value rest) (actualType.sequenceResult result) after
   | applyPatterns {home before evaluated after inputs arguments arms result}
       (argumentsTyped : HasTypes program home before arguments inputs evaluated)
       (nonempty : arms ≠ []) (covered : Covers program home [argumentType inputs] (arms.map fun arm => [arm.1]))

@@ -5151,3 +5151,23 @@ behavior, function soundness and no-exact-cleanup proofs use only propext,
 Classical.choice and Quot.sound. Continuations still require static checking;
 propagation through other compound forms remains open. All fourteen completion
 families remain open.
+
+## Assignment result propagation uses sequential composition
+
+Source assignment, Core assignment and its pending frame now use the same
+Ty.sequenceResult as ordinary sequencing. Bottom on the RHS makes the entire
+assignment bottom, rather than preserving a fictitious normal continuation
+result. The actual return transition derives the ordinary continuation result
+from its returned RHS resident before cleanup/install. SourceScope.assign_checked
+and general preservation consume this contract.
+
+SourceClosure.Admitted.bottom_assignment now concludes source elaboration at
+bottom and preserves that type at every prefix. Its existing divergence and
+pending-stack exclusion proof remains valid. The inferred bottom can therefore
+feed NamedFunction.Elaborates.bottom and the existing return-disposition path;
+no separate nontermination table or new runtime rule is introduced.
+
+All 30 strict Lean jobs passed. Inspected assignment/source behavior, function
+bottom admission and no-exact-resident-overwrite proofs use only propext,
+Classical.choice and Quot.sound. Other compound forms and unreachable static
+continuation checking remain open, as do all fourteen completion families.

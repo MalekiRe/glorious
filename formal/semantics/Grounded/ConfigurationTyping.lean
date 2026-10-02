@@ -188,7 +188,7 @@ inductive FrameTyped (program : Program) (heap : RuntimeHeap StorageCell) (suppl
       (mask : state.initialization.writeFields program state.slot.type place.fields .present = some updated)
       (context : replaceBinding place.root { state with initialization := updated } before = some restored)
       (checked : HasType program home restored rest result after) :
-      FrameTyped program heap supply activation before (.one actualType) (.assign home place rest) after (.one result)
+      FrameTyped program heap supply activation before (.one actualType) (.assign home place rest) after (.one (actualType.sequenceResult result))
   | tupleHead {home before after first types tail} (checked : HasTypes program home before tail types after) :
       FrameTyped program heap supply activation before (.one first) (.tupleHead tail) after (.one (.tuple first types))
   | tupleTail {context first types head} (resident : ValueHasType program head first) :
@@ -541,6 +541,7 @@ theorem ConfigurationTyped.preservation {context : FlowContext} {result : Result
       cases code with | result resident =>
         cases continuation with | cons frame tail =>
           cases frame with | assign joined selected path writable selection discard mask context checked =>
+            rw [resident.sequenceResult _] at tail
             have discard := discard resident.type_ne_never
             obtain ⟨old, _, produced, permission⟩ := (store.replacement_safe selected path selection discard).selection
             cases Option.some.inj (actual.symm.trans produced)

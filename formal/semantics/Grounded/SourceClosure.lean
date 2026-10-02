@@ -1686,9 +1686,9 @@ theorem SourceClosure.Admitted.bottom_assignment {packages : List PackageSource}
     (store : BindingMap.Typed program environment.heap environment.activation environment.bindings before)
     (issued : environment.supply.Issued environment.activation) :
     NamedExpr.Elaborates program closure.functionNames home scope before
-      (.assign name fields sourceValue sourceRest) (.assign home ⟨binding.identity, fields⟩ value rest) type final ∧
+      (.assign name fields sourceValue sourceRest) (.assign home ⟨binding.identity, fields⟩ value rest) .never final ∧
     ∃ trace, InfiniteRun program ⟨environment, .expression (.assign home ⟨binding.identity, fields⟩ value rest), []⟩ trace ∧
-      (∀ index, ConfigurationTyped program final (.one type) (trace index) ∧
+      (∀ index, ConfigurationTyped program final (.one .never) (trace index) ∧
         AddressedEnvironment.ConsumptionFrame program final.slots environment (trace index).outerEnvironment ∧
         (trace index).OwnershipSafe program ∧
         Configuration.ExternalFrame ⟨environment, .expression (.assign home ⟨binding.identity, fields⟩ value rest), []⟩ (trace index) ∧

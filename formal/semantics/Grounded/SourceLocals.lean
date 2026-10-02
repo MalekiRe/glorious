@@ -187,7 +187,7 @@ theorem SourceScope.assign_checked {scope : SourceScope} {spelling : Identifier}
     (mask : state.initialization.writeFields program binding.slot.type fields .present = some updated)
     (context : replaceBinding binding.identity { state with initialization := updated } evaluated = some restored)
     (continued : HasType program home restored rest result after) :
-    HasType program home before (.assign home ⟨binding.identity, fields⟩ value rest) result after := by
+    HasType program home before (.assign home ⟨binding.identity, fields⟩ value rest) (actualType.sequenceResult result) after := by
   have same := scope.selected_slot resolved (resident.slots.trans slots) selected
   exact .assign resident joined selected (by rw [same]; exact path) (by rw [same]; exact writable)
     (by rw [same]; exact selection) discard
