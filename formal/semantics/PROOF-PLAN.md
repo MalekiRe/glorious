@@ -55,10 +55,42 @@ owner, general/source soundness, noncopyable-read, exact-cleanup and replacement
 safety proofs use only propext, Classical.choice and Quot.sound. These checks
 establish the stated core contracts, not whole-language completion.
 
-The static operand-completion index and unreachable-continuation admission
-remain open ownership/control integration work. This storage-exclusivity proof
-does not close those obligations or make the current admission relation
-complete for every valid owner-preserving source program.
+### Accepted milestone: safety of the currently admitted core
+
+The user selected safety of the currently admitted core, not expansion of
+source admission. Checking and elaboration remain unchanged. The static
+operand-completion index and unreachable-continuation admission are explicitly
+deferred alongside feature expansion, not completed and not prerequisites for
+this bounded safety milestone. The checker can still reject valid programs.
+
+The acceptance audit follows the existing general proofs, rather than adding
+examples or a second ownership analysis:
+
+| Guarantee | Existing proof |
+|---|---|
+| Preservation, progress and ownership at every reached prefix | `HasType.soundness` |
+| Moves update physical residents and masks together; immediate retake fails | `BindingMap.take.progress` |
+| No noncopyable read or nondiscardable direct discard | `HasType.no_noncopyable_read`, `HasType.no_nondiscardable_discard` |
+| No exact resident scheduled for cleanup or erased by replacement | `HasType.no_exact_cleanup`, `HasType.no_exact_overwrite` |
+| Nondiscardable descendants survive lexical/indexed retirement and cannot be overwritten | `HasType.scope_preserves_nondiscardable`, `HasType.retirement_preserves_nondiscardable`, `HasType.no_nondiscardable_overwrite` |
+| Caller restoration preserves unconsumed exact descendants | `HasType.restore_preserves_exact` |
+| Active/retained storage exclusivity and unique ownership of new live cells | `ConfigurationTyped.exclusive_ownership`, `HasType.allocated_unique_owner` |
+| Normal scalar/pack completion retires temporary storage; infinite execution retains prefix safety | `Run.terminal_retires_all`, `HasType.behavior`, `HasTypes.behavior` |
+| Bottom execution does not resume pending continuations | `HasType.never_continuation_prefix` |
+| Named source admission consumes the same safety and behavior contracts | `SourceClosure.Admitted.soundness`, `SourceClosure.Admitted.behavior` |
+
+These are conditional on checked declarations, elaboration/checking and a typed
+initial store with an issued activation. They do not assume future readiness,
+successful cleanup or termination. Structural values are not physical resource
+identities; storage-map uniqueness is not an end-to-end resource-trace theorem
+for the deferred raw-memory, borrowing or foreign-runtime features.
+
+Final acceptance check: `lake build Grounded` passed all 30 jobs. The 18
+theorems listed above were inspected with `#print axioms`; their dependencies
+are only `propext`, `Classical.choice` and `Quot.sound`. No proof or admission
+rule was changed for this scope clarification. This closes the selected
+admitted-core ownership-safety milestone, not whole-language soundness or
+admission completeness.
 
 ## Current proved contract and ownership
 
