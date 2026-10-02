@@ -1233,6 +1233,9 @@ def Configuration.OwnershipSafe (program : Program) (state : Configuration) : Pr
   | .result _, .restore _ :: _ =>
       BindingMap.Disposable program state.environment.heap state.environment.bindings ∧
         state.environment.bindings.releaseOrder.Pairwise (fun newer older => older.index < newer.index)
+  | .result _, .retire index :: _ =>
+      ∀ entry cell, state.environment.bindings[index]? = some entry →
+        state.environment.heap.read entry.2 = some cell → cell.resident.Disposable program cell.type
   | .result _, .assign home place _ :: _ =>
       BindingMap.ReplacementSafe program home state.environment.heap state.environment.bindings place
   | .install home place _ _, _ =>
@@ -1271,6 +1274,14 @@ theorem ConfigurationTyped.ownership_safe {context : FlowContext} {result : Resu
             BindingMap.releaseOrder_decreasing _ (store.take locals.length).addresses_distinct⟩
         case restore =>
           exact ⟨store.disposable (by assumption), BindingMap.releaseOrder_decreasing _ store.addresses_distinct⟩
+        case retire inside discard =>
+          intro entry cell selected found
+          obtain ⟨state, actual, source, actualFound, _, declared, resident⟩ := store.index selected
+          cases Option.some.inj (actualFound.symm.trans found)
+          have permission := discard _ source
+          change state.initialization.Disposable program.data state.slot.type at permission
+          rw [← declared] at permission
+          exact permission.realizes resident.2
         case assign =>
           exact store.replacement_safe (by assumption) (by assumption) (by assumption) (by assumption)
         case project =>
@@ -1287,6 +1298,28 @@ theorem ConfigurationTyped.ownership_safe {context : FlowContext} {result : Resu
           obtain ⟨locals, _, _, pattern, _, _, _, _, _, _, _, _, patternTyped, matched, front, back, split, missed⟩ :=
             checked.selected residents.argument selected
           exact ⟨_, locals, pattern, front, back, residents.argument, patternTyped, split, missed, matched⟩
+
+/-- A live nondiscardable descendant protects its containing cell at the actual
+indexed retirement step, not only at a completed cleanup boundary. -/
+theorem Configuration.OwnershipSafe.retire_preserves_nondiscardable
+    {before : Environment} {after : Configuration} {value : Value} {index : Nat} {stack : List Frame}
+    (safe : (⟨before, .result value, .retire index :: stack⟩ : Configuration).OwnershipSafe program)
+    (step : Step program ⟨before, .result value, .retire index :: stack⟩ after)
+    {address : StorageId} {cell : StorageCell} (found : before.heap.read address = some cell)
+    {home : Module} {type : Ty} {fields : List FieldKey}
+    (path : PathType program home cell.type fields type) {owner : PartialValue}
+    (resident : cell.resident.selectFields program cell.type fields = some owner)
+    (required : ¬ owner.Disposable program type) :
+    after.environment.heap.read address = some cell := by
+  cases step with
+  | retire operation =>
+    obtain ⟨entry, selected, heap, primitive, rfl⟩ := AddressedEnvironment.retireBinding.eq_some_iff.mp operation
+    apply (RuntimeHeap.retire_other primitive ?_).trans found
+    intro same
+    have permission := safe entry cell selected (same ▸ found)
+    obtain ⟨part, actual, allowed⟩ := path.disposable permission
+    cases Option.some.inj (actual.symm.trans resident)
+    exact required allowed
 /-- Recover ownership authority for the actual first matching clause, not an
 arbitrary clause with the same body or the same produced binding pack. -/
 theorem Configuration.OwnershipSafe.selected_pattern {environment : Environment} {values : List Value}

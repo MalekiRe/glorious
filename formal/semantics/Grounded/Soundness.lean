@@ -50,6 +50,26 @@ theorem HasType.behavior (checkedProgram : program.Checked) {context final : Flo
   exact (ConfigurationTyped.entry checked store issued).behavior checkedProgram
 
 
+/-- Source safety protects outstanding descendants during the actual storage
+retirement transition, independently of whether later execution terminates. -/
+theorem HasType.retirement_preserves_nondiscardable (checkedProgram : program.Checked)
+    {context final : FlowContext} {expression : Expr} {type : Ty}
+    (checked : HasType program home context expression type final)
+    {environment current : Environment}
+    (store : BindingMap.Typed program environment.heap environment.activation environment.bindings context)
+    (issued : environment.supply.Issued environment.activation)
+    {value : Value} {index : Nat} {stack : List Frame} {after : Configuration}
+    (run : Run program ⟨environment, .expression expression, []⟩
+      ⟨current, .result value, .retire index :: stack⟩)
+    (step : Step program ⟨current, .result value, .retire index :: stack⟩ after)
+    {address : StorageId} {cell : StorageCell} (found : current.heap.read address = some cell)
+    {selectedHome : Module} {selectedType : Ty} {fields : List FieldKey}
+    (path : PathType program selectedHome cell.type fields selectedType) {owner : PartialValue}
+    (resident : cell.resident.selectFields program cell.type fields = some owner)
+    (required : ¬ owner.Disposable program selectedType) :
+    after.environment.heap.read address = some cell :=
+  (checked.soundness checkedProgram store issued run).2.2.2.2.retire_preserves_nondiscardable
+    step found path resident required
 /-- Reached scope cleanup constructs its actual retirement and preserved
 continuation, then joins retained descendants under their own use classes.
 No completed cleanup or future mask realization is assumed. -/

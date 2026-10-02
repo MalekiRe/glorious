@@ -4089,3 +4089,14 @@ preserved. Complete batch execution reuses these same per-owner constructors.
 The storage trace is therefore connected stage-by-stage to the machine, not
 merely related by its final heap. All 30 strict build jobs and the inspected
 source-safety/maximal-behavior axiom closures passed.
+
+`OwnershipSafe` now exposes disposal permission for the actual selected cell
+at `.retire` states as well as at scope/return entry. The general preserved
+configuration invariant derives this from the indexed source mask and current
+resident. `HasType.retirement_preserves_nondiscardable` proves that every actual
+indexed retirement preserves a cell containing an outstanding nondiscardable
+descendant, including partially consumed owners. It requires neither completed
+cleanup nor future termination. The strengthened fact propagates through
+source admission and maximal behavior. All 30 strict build jobs passed; the
+inspected ownership, source-retirement and admitted-behavior proofs use only
+the three standard Lean axioms listed above.
