@@ -205,7 +205,14 @@ theorem BindingMap.CopySafe.read_permission (safe : BindingMap.CopySafe program 
   cases Option.some.inj (found.symm.trans read)
   exact resident.use_permission typed permission
 
-
+/-- A checked Copy read permits every finite use count under any valid typing
+of the actual resident, not merely under the annotation used to admit the read. -/
+theorem BindingMap.CopySafe.permitted_uses (safe : BindingMap.CopySafe program heap bindings place)
+    {value : Value} {type : Ty} {principal : Principal}
+    (read : bindings.read program heap place = some value) (resident : ValueHasType program value type)
+    (classified : type.HasPrincipal program.data principal) : ∀ count, principal.Permits count := by
+  have allowed := (classified .copy).mp (safe.read_permission read resident)
+  exact fun count => allowed count trivial
 /-- A move changes the checking state and the actual resident together. The
 same binding map survives; every other storage identity is framed. -/
 theorem BindingMap.take.progress (typed : BindingMap.Typed program heap activation bindings context)

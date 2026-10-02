@@ -1243,7 +1243,10 @@ def Configuration.OwnershipSafe (program : Program) (state : Configuration) : Pr
       ∀ value type principal, .enter value ∈ pending → ValueHasType program value type →
         type.HasPrincipal program.data principal → principal.Permits 0
   | .expression (.read place), _ =>
-      BindingMap.CopySafe program state.environment.heap state.environment.bindings place
+      BindingMap.CopySafe program state.environment.heap state.environment.bindings place ∧
+      ∀ value type principal, state.environment.read program place = some value →
+        ValueHasType program value type → type.HasPrincipal program.data principal →
+        ∀ count, principal.Permits count
   | .result _, .scope count :: _ =>
       BindingMap.Disposable program state.environment.heap (List.take count state.environment.bindings) ∧
         (BindingMap.releaseOrder (List.take count state.environment.bindings)).Pairwise
@@ -1283,7 +1286,8 @@ theorem ConfigurationTyped.ownership_safe {context : FlowContext} {result : Resu
     case expression checked =>
       cases checked <;> try trivial
       case read =>
-        exact store.copy_safe (by assumption) (by assumption) (by assumption) (by assumption) (by assumption)
+        have safe := store.copy_safe (by assumption) (by assumption) (by assumption) (by assumption) (by assumption)
+        exact ⟨safe, fun _ _ _ read resident classified => safe.permitted_uses read resident classified⟩
     case result resident =>
       cases continuation
       · trivial

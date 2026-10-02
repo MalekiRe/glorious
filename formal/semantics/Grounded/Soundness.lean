@@ -615,7 +615,7 @@ theorem HasType.no_noncopyable_read (checkedProgram : program.Checked)
     (required : ¬ UsePermitted program.data .copy ownerType) : False := by
   have permission := (checked.soundness checkedProgram store issued run).2.2.2.2
   cases step with
-  | read selected => exact required (BindingMap.CopySafe.read_permission permission selected resident)
+  | read selected => exact required (BindingMap.CopySafe.read_permission permission.1 selected resident)
 
 
 /-- Direct disposal cannot erase any nondiscardable principal, including one

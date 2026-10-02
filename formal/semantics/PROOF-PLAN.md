@@ -4291,3 +4291,11 @@ All 30 strict jobs passed. Inspected zero-use, configuration ownership,
 exact-cleanup exclusion and public source safety/behavior closures contain only
 the standard three Lean axioms. This does not supply custom destructor bodies,
 references, nonlocal cleanup or a full-language soundness result.
+
+The same general invariant now gives quantitative authority for actual Copy
+reads: every finite owned-use count is permitted under every valid typing and
+principal interpretation of the read resident. `BindingMap.CopySafe.permitted_uses`
+derives this through the existing addressed-read and resident-typing producer.
+The noncopyable-read exclusion consumer is migrated. All 30 strict jobs and
+the inspected Copy, general ownership and admitted-behavior axiom closures
+passed; no new axioms or source permission premises were introduced.
