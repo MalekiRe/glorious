@@ -1504,5 +1504,46 @@ theorem FunctionChecked.evaluation_result {program : Program} {declaration : Fun
   obtain ⟨_, _, body, _, joined⟩ := checked.body
   obtain ⟨resident, _⟩ := body.evaluation_soundness checkedProgram store issued run
   exact (joined.on_return resident).1
+/-- A call to a checked bottom body cannot return even when its declared
+signature is normal. Argument termination is not assumed: maximal behavior
+also covers divergence while evaluating the arguments. -/
+theorem HasType.call_bottom_behavior (checkedProgram : program.Checked)
+    {context final locals : FlowContext} {identity : Nat} {arguments : List Expr} {type : Ty}
+    {declaration : FunctionDecl}
+    (checked : HasType program home context (.call identity arguments) type final)
+    (declared : program.functions identity = some declaration)
+    (body : HasType program declaration.home (initializedContext declaration.parameters)
+      declaration.body .never locals)
+    {environment : Environment}
+    (store : BindingMap.Typed program environment.heap environment.activation environment.bindings context)
+    (issued : environment.supply.Issued environment.activation) :
+    ∃ trace, InfiniteRun program ⟨environment, .expression (.call identity arguments), []⟩ trace ∧
+      ∀ index, ConfigurationTyped program final (.one type) (trace index) ∧
+        AddressedEnvironment.ConsumptionFrame program final.slots environment (trace index).outerEnvironment ∧
+        (trace index).OwnershipSafe program ∧
+        Configuration.ExternalFrame ⟨environment, .expression (.call identity arguments), []⟩ (trace index) ∧
+        ∀ identity, environment.heap.next ≤ identity.index →
+          ∀ cell, (trace index).environment.heap.read identity = some cell →
+            ¬ (trace index).Untracked identity := by
+  rcases checked.behavior checkedProgram store issued with normal | infinite
+  · obtain ⟨_, _, evaluated, _⟩ := normal
+    obtain ⟨actual, values, middle, bindings, localAfter, selected, inputRun, prepared, bodyRun, _⟩ :=
+      Evaluates.call_iff.mp evaluated
+    cases Option.some.inj (declared.symm.trans selected)
+    have ⟨_, _, inputs⟩ := checked.call_signature declared
+    obtain ⟨residents, _, _, _⟩ := inputs.evaluation_soundness checkedProgram store issued inputRun
+    obtain ⟨actualInputs, produced, inputsTyped, slots⟩ :=
+      prepareBindings.progress residents (checkedProgram.functions _ _ declared).distinct
+    cases Option.some.inj (prepared.symm.trans produced)
+    have entered := enterBindings.typed inputsTyped middle.heap middle.supply
+    have bodyTyped : HasType program declaration.home (bindings.map BindingInput.state)
+        declaration.body .never locals := by
+      rw [← slots] at body
+      simp only [initializedContext, List.map_map, Function.comp_def] at body
+      exact body
+    obtain ⟨resident, _⟩ := bodyTyped.evaluation_soundness checkedProgram entered
+      middle.supply.allocate_issued bodyRun
+    exact resident.not_never.elim
+  · exact infinite
 end Grounded
 

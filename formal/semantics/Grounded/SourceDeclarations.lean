@@ -82,15 +82,27 @@ theorem NamedFunction.Elaborates.bottom {program : Program}
       ⟨source.home, source.visibility, scope.context, result, body⟩ :=
   (NamedFunction.BodyElaborates.intro parameters distinct resultType resultFinite elaborated
     (.nonreturning _ rfl)).bottom_admitted
+/-- The emitted body keeps its inferred type, before declared-result coercion. -/
+theorem NamedFunction.BodyElaborates.checked_body {program : Program}
+    {names : Module → FunctionName → Option Nat} {source : NamedFunction}
+    {core : FunctionDecl} {actualResult : Ty} {after : FlowContext}
+    (body : NamedFunction.BodyElaborates program names source core actualResult after) :
+    HasType program core.home (initializedContext core.parameters) core.body actualResult after := by
+  cases body with
+  | intro parameters distinct resultType resultFinite elaborated joined =>
+    exact elaborated.checked (by
+      simp [FlowContext.slots, initializedContext, List.map_map, Function.comp_def])
+
+
 theorem NamedFunction.Elaborates.checked {program : Program} {names : Module → FunctionName → Option Nat}
     {source : NamedFunction} {core : FunctionDecl}
     (elaborated : NamedFunction.Elaborates program names source core) : FunctionChecked program core := by
   cases elaborated with
   | intro body disposable =>
+    have checkedBody := body.checked_body
     cases body with
     | intro parameters distinct resultType resultFinite body joined =>
-      exact ⟨SourceScope.context_distinct _, parameters.finite, resultFinite, _, _, body.checked (by
-        simp [FlowContext.slots, initializedContext, List.map_map, Function.comp_def]), disposable, joined⟩
+      exact ⟨SourceScope.context_distinct _, parameters.finite, resultFinite, _, _, checkedBody, disposable, joined⟩
 
 theorem NamedFunction.Elaborates.origin {program : Program} {names : Module → FunctionName → Option Nat}
     {source : NamedFunction} {core : FunctionDecl}

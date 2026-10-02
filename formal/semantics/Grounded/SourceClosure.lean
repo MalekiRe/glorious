@@ -1527,6 +1527,37 @@ theorem SourceClosure.Admitted.function_soundness {packages : List PackageSource
     (fun _ _ run => checked.evaluation_result admitted.checked typed issued run),
     fun _ run => body.soundness admitted.checked typed issued run⟩
 
+/-- A source call to an admitted bottom body diverges even under a normal
+signature. This derives the complete call behavior without assuming argument
+termination, body entry or a future ready environment. -/
+theorem SourceClosure.Admitted.bottom_function_call {packages : List PackageSource}
+    {closure : SourceClosure packages} {program : Program} (admitted : closure.Admitted program)
+    {home : Module} {scope : SourceScope} {before final locals : FlowContext}
+    {source : NamedExpr} {arguments : List Expr} {identity : Nat} {type : Ty}
+    {declaration : FunctionDecl} {callee : NamedFunction}
+    (elaborated : NamedExpr.Elaborates program closure.functionNames home scope before
+      source (.call identity arguments) type final)
+    (slots : before.slots = scope.context)
+    (declared : program.functions identity = some declaration)
+    (body : NamedFunction.BodyElaborates program closure.functionNames callee declaration .never locals)
+    {environment : Environment}
+    (store : BindingMap.Typed program environment.heap environment.activation environment.bindings before)
+    (issued : environment.supply.Issued environment.activation) :
+    ∃ trace, InfiniteRun program ⟨environment, .expression (.call identity arguments), []⟩ trace ∧
+      (∀ index, ConfigurationTyped program final (.one type) (trace index) ∧
+        AddressedEnvironment.ConsumptionFrame program final.slots environment (trace index).outerEnvironment ∧
+        (trace index).OwnershipSafe program ∧
+        Configuration.ExternalFrame ⟨environment, .expression (.call identity arguments), []⟩ (trace index) ∧
+        ∀ identity, environment.heap.next ≤ identity.index →
+          ∀ cell, (trace index).environment.heap.read identity = some cell →
+            ¬ (trace index).Untracked identity) ∧
+      ∀ (stack : List Frame) (done : Configuration), Terminal done →
+        ¬ Run program ⟨environment, .expression (.call identity arguments), stack⟩ (done.extend stack) := by
+  obtain ⟨trace, infinite, safe⟩ := (elaborated.checked slots).call_bottom_behavior
+    admitted.checked declared body.checked_body store issued
+  exact ⟨trace, infinite, safe, fun stack _ terminal => infinite.no_resume terminal stack⟩
+
+
 
 /-- Every active and retained scope has live, correctly owned and typed partial
 storage throughout execution. Retired identities cannot reappear in those

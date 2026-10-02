@@ -4996,3 +4996,24 @@ declared-result, public soundness/behavior, storage-lifetime and no-exact-cleanu
 proofs use only propext, Classical.choice and Quot.sound. This closes the
 function-result boundary, not bottom elimination in every expression operand.
 All fourteen whole-language completion families remain open.
+
+## Whole-call divergence for bottom bodies with normal signatures
+
+HasType.call_bottom_behavior derives an infinite execution of the complete
+call from ordinary caller admission and a bottom-typed selected body. It does
+not assume argument termination or body entry. General maximal behavior supplies
+the alternatives; a putative normal run exposes actual argument evaluation,
+parameter preparation and fresh binding storage. Body preservation would then
+produce a resident of bottom type, which ValueHasType.not_never excludes.
+
+NamedFunction.BodyElaborates.checked_body is shared by function admission and
+the public SourceClosure.Admitted.bottom_function_call consumer. The source
+theorem retains configuration typing, consumption framing, ownership safety,
+external-storage protection and allocation tracking at every infinite prefix.
+It also excludes resuming any pending stack with a terminal result, including
+when the selected function has an ordinary declared return type.
+
+All 30 strict Lean jobs passed. Inspected whole-call and source-call divergence,
+public soundness/behavior and storage-lifetime proofs use only propext,
+Classical.choice and Quot.sound. Bottom elimination in arbitrary expression
+operands and all fourteen whole-language completion families remain open.
