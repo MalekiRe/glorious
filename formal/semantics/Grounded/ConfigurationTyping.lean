@@ -730,6 +730,26 @@ theorem ConfigurationTyped.ownership_safe {context : FlowContext} {result : Resu
           obtain ⟨locals, _, _, pattern, _, _, _, _, _, _, _, _, patternTyped, matched, front, back, split, missed⟩ :=
             checked.selected residents.argument selected
           exact ⟨_, _, locals, pattern, front, back, residents.argument, patternTyped, split, missed, matched⟩
+/-- Recover ownership authority for the actual first matching clause, not an
+arbitrary clause with the same body or the same produced binding pack. -/
+theorem Configuration.OwnershipSafe.selected_pattern {environment : Environment} {values : List Value}
+    {stack : List Frame} {front back : List (Pattern × Expr)} {pattern : Pattern} {body : Expr}
+    {bindings : List BindingInput}
+    (safe : (⟨environment, .results values, .patterns (front ++ (pattern, body) :: back) :: stack⟩ : Configuration).OwnershipSafe program)
+    (missed : ∀ earlier ∈ front, earlier.1.matchValue (argumentValue values) = none)
+    (matched : pattern.matchValue (argumentValue values) = some bindings) :
+    ∃ home subject locals, ValueHasType program (argumentValue values) subject ∧
+      PatternType program home pattern subject locals := by
+  have selected : selectArm (argumentValue values) (front ++ (pattern, body) :: back) = some (bindings, body) := by
+    rw [selectArm.skip_missed _ _ _ missed]
+    simp only [selectArm, matched]
+  obtain ⟨home, subject, locals, actual, actualFront, actualBack, resident, typed, split, skipped, found⟩ :=
+    safe bindings body selected
+  have same := selectArm.first_unique split missed skipped
+    (by simp only [matched, ne_eq, reduceCtorEq, not_false_eq_true])
+    (by simp only [found, ne_eq, reduceCtorEq, not_false_eq_true])
+  have patternSame : pattern = actual := congrArg Prod.fst same
+  exact ⟨home, subject, locals, resident, patternSame.symm ▸ typed⟩
 
 /-- Source-prefix ownership safety constrains every actual lexical retirement,
 including its intermediate heap transitions and strict acquisition order. -/

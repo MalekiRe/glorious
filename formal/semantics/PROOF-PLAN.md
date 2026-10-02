@@ -3442,3 +3442,16 @@ source consumers found only standard Lean axioms. No examples or tests were
 added. Borrowed matching and custom Drop execution remain open; this repair
 does not mark the principal-ownership or pattern-callable family complete.
 
+The runtime consequence is now explicit: `selectArm.first_unique` identifies
+the selected clause itself even when distinct clauses share bodies and binding
+outputs. `Configuration.OwnershipSafe.selected_pattern` recovers authority for
+that exact clause. `HasType.pattern_discard_permission` consumes general
+source-prefix soundness and proves zero-use permission for every reached
+whole-subject wildcard or constant-pattern disposal, under any valid typing
+of the actual subject. Thus nondiscardable subjects cannot take those disposal
+paths. This is a general theorem over programs and execution prefixes, not a
+concrete example. All 30 build jobs passed; the new producer and consumers
+depend only on standard Lean axioms. Nested deconstruction continues to use
+the existing recursive `PatternType` authority; no new matching evaluator was
+introduced.
+
