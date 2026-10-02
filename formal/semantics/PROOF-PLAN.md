@@ -4265,3 +4265,24 @@ use only `propext`, `Classical.choice` and `Quot.sound`. This closes the
 quantitative interpretation of current ordinary owned types, not generic
 constraint inference, reference/capture classes, custom Drop or whole-language
 soundness. Those broader obligations remain open.
+
+## Cleanup states carry quantitative ownership safety
+
+`Configuration.OwnershipSafe` no longer defaults to `True` during cleanup.
+It carries the current queue's disposal authority and proves zero-use permission
+for each queued resident under every valid typing and principal interpretation.
+`DisposalTask.Safe.zero_use` derives this from the existing permission producer
+and resident-typing invariance; no future cleanup success is a premise.
+
+The general configuration theorem and all source soundness/maximal-behavior
+consumers carry this strengthened invariant. `HasType.no_exact_cleanup`
+excludes a positive-lower resident from any reached cleanup queue, including
+nested aggregate fields and selected-pattern discards. It covers inferred as
+well as manually declared exact principals. Partial shell release still uses
+its residual disposal authority; it is not incorrectly treated as destruction
+of the original fully initialized owner.
+
+All 30 strict jobs passed. Inspected zero-use, configuration ownership,
+exact-cleanup exclusion and public source safety/behavior closures contain only
+the standard three Lean axioms. This does not supply custom destructor bodies,
+references, nonlocal cleanup or a full-language soundness result.

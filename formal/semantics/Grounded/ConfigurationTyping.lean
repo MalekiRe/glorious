@@ -22,7 +22,16 @@ inductive DisposalTask.Safe (program : Program) : DisposalTask → Prop where
   | nominalShell {identity tag fields}
       (allowed : (PartialValue.nominal identity tag fields).Disposable program (.nominal identity)) :
       Safe program (.release (.nominal identity tag))
-
+/-- Cleanup has zero-use authority under every valid typing of the actual
+resident. A different annotation cannot disguise an exact-linear owner. -/
+theorem DisposalTask.Safe.zero_use {program : Program} {value : Value} {type : Ty}
+    {principal : Principal} (safe : DisposalTask.Safe program (.enter value))
+    (resident : ValueHasType program value type) (classified : type.HasPrincipal program.data principal) :
+    principal.Permits 0 := by
+  cases safe with
+  | enter typed allowed =>
+    have permission := typed.use_permission resident allowed
+    exact ((classified .discard).mp permission) 0 (by simp)
 theorem DisposalTask.Safe.expand {program : Program} {value : Value}
     (safe : DisposalTask.Safe program (.enter value)) :
     ∀ task ∈ DisposalTask.expand value, DisposalTask.Safe program task := by
@@ -1229,6 +1238,10 @@ owned-use authority. Scope retirement also preserves newest-owner-first order.
 These are current-state facts, not future readiness. -/
 def Configuration.OwnershipSafe (program : Program) (state : Configuration) : Prop :=
   match state.control, state.continuation with
+  | .cleanup pending _, _ =>
+      (∀ task ∈ pending, DisposalTask.Safe program task) ∧
+      ∀ value type principal, .enter value ∈ pending → ValueHasType program value type →
+        type.HasPrincipal program.data principal → principal.Permits 0
   | .expression (.read place), _ =>
       BindingMap.CopySafe program state.environment.heap state.environment.bindings place
   | .result _, .scope count :: _ =>
@@ -1263,6 +1276,8 @@ theorem ConfigurationTyped.ownership_safe {context : FlowContext} {result : Resu
   cases typed with
   | intro store issued code continuation =>
     cases code <;> try trivial
+    case cleanup safe checked =>
+      exact ⟨safe, fun _ _ _ member resident classified => (safe _ member).zero_use resident classified⟩
     case install resident selected path writable selection discard mask context checked =>
       exact store.replacement_safe selected path selection discard
     case expression checked =>
