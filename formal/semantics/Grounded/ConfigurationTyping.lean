@@ -145,6 +145,17 @@ inductive ControlTyped (program : Program) (before : FlowContext) : Control → 
       (safe : ∀ task ∈ pending, DisposalTask.Safe program task)
       (checked : ControlTyped program before rest result after) :
       ControlTyped program before (.cleanup pending rest) result after
+  | install {home restored after place type result rest state updated available value}
+      (resident : ValueHasType program value type)
+      (selected : lookup place.root before = some state)
+      (path : PathType program home state.slot.type place.fields type)
+      (writable : state.slot.mutable = true)
+      (selection : state.initialization.selectFields program state.slot.type place.fields = some available)
+      (discard : available.Disposable program.data type)
+      (mask : state.initialization.writeFields program state.slot.type place.fields .present = some updated)
+      (context : replaceBinding place.root { state with initialization := updated } before = some restored)
+      (checked : HasType program home restored rest result after) :
+      ControlTyped program before (.install home place value rest) (.one result) after
 
 inductive FrameTyped (program : Program) (heap : RuntimeHeap StorageCell) (supply : ActivationSupply)
     (activation : ActivationId) : FlowContext → ResultType → Frame → FlowContext → ResultType → Prop where
@@ -274,6 +285,9 @@ theorem ConfigurationTyped.progress {context result state}
       | cons task pending => cases task with
         | enter value => exact ⟨_, .cleanupEnter⟩
         | release head => exact ⟨_, .cleanupRelease⟩
+    | install resident selected path writable selection discard mask context checked =>
+      obtain ⟨after, _, _, written, _⟩ := AddressedEnvironment.write.progress store selected path resident
+      exact .inr ⟨_, .install written⟩
     | expression checked =>
       right
       cases checked with
@@ -314,8 +328,8 @@ theorem ConfigurationTyped.progress {context result state}
           obtain ⟨after, exited, _⟩ := AddressedEnvironment.exitScope.progress store locals.length
           exact ⟨_, .scope exited⟩
         | assign selected path writable selection discard mask context checked =>
-          obtain ⟨after, _, _, written, _⟩ := AddressedEnvironment.write.progress store selected path resident
-          exact ⟨_, .assignResult written⟩
+          obtain ⟨old, _, selected, _⟩ := (store.replacement_safe selected path selection discard).selection
+          exact ⟨_, .assignResult selected⟩
         | tupleHead checked => exact ⟨_, .tupleHead⟩
         | project discard mask projection =>
           obtain ⟨value, remainder, selected, _⟩ := projection.take_progress resident mask discard
@@ -451,10 +465,17 @@ theorem ConfigurationTyped.preservation {context : FlowContext} {result : Result
         cases checked with | assign resident selected path writable selection discard mask context rest =>
           exact .intro store issued (.expression resident)
             (.cons (.assign selected path writable selection discard mask context rest) continuation)
-    | assignResult written =>
+    | assignResult actual =>
       cases code with | result resident =>
         cases continuation with | cons frame tail =>
           cases frame with | assign selected path writable selection discard mask context checked =>
+            obtain ⟨old, _, produced, permission⟩ := (store.replacement_safe selected path selection discard).selection
+            cases Option.some.inj (actual.symm.trans produced)
+            exact .intro store issued (.cleanup permission.disposalTasks
+              (.install resident selected path writable selection discard mask context checked)) tail
+    | install written =>
+      cases code with
+      | install resident selected path writable selection discard mask context checked =>
             obtain ⟨next, nextMask, nextContext, produced, maskWritten, contextWritten, nextTyped,
               _, scope, supply, _, _, retained⟩ := AddressedEnvironment.write.progress store selected path resident
             cases Option.some.inj (mask.symm.trans maskWritten)
@@ -464,9 +485,8 @@ theorem ConfigurationTyped.preservation {context : FlowContext} {result : Result
             simp only [AddressedEnvironment.scope] at activation
             refine .intro nextTyped (by rw [supply, activation]; exact issued) (.expression checked) ?_
             rw [supply, activation]
-            apply tail.transport (fun _ previous => previous)
+            apply continuation.transport (fun _ previous => previous)
             intro caller states callerTyped older
-            simp only [Frame.activation] at older
             exact (retained caller states callerTyped (by intro same; have := congrArg ActivationId.index same; omega)).1
     | tuple =>
       cases code with | expression checked =>
@@ -633,6 +653,8 @@ theorem ControlTyped.slots {current next control result}
   | expression checked => exact checked.slots
   | arguments checked => exact checked.slots
   | result | results => rfl
+  | install resident selected path writable selection discard mask context checked =>
+    exact checked.slots.trans (replaceBinding.map_same BindingState.slot selected context rfl)
 
 theorem FrameTyped.declares {before : Environment} {current next : FlowContext}
     {input result : ResultType} {frame : Frame}
@@ -782,18 +804,18 @@ theorem ConfigurationTyped.consumption_step {context : FlowContext} {result : Re
             · intro scope states realized older
               change scope.activation.index < env.activation.index at older
               exact (retained scope states realized (by intro same; have := congrArg ActivationId.index same; omega)).2
-    case assignResult after stack place rest value written =>
-      cases code with | result resident =>
-        have original := continuation
-        cases continuation with | cons frame tail =>
-          cases frame with | assign selected path writable selection discard mask context checked =>
+    case install after stack place rest value written =>
+      cases code with
+      | install resident selected path writable selection discard mask context checked =>
             obtain ⟨producedAfter, _, _, produced, _, _, _, _, _, _, _, _, retained⟩ :=
               AddressedEnvironment.write.progress store selected path resident
             cases Option.some.inj (written.symm.trans produced)
             have selectedSlot := congrArg (Option.map BindingState.slot) selected
             rw [← lookup.map] at selectedSlot
-            apply original.consumption_frame declared
-              (AddressedEnvironment.write.consumption_frame declared selectedSlot writable written)
+            change lookup place.root current.slots = some _ at selectedSlot
+            rw [← (ControlTyped.install resident selected path writable selection discard mask context checked).slots] at selectedSlot
+            have framed := AddressedEnvironment.write.consumption_frame declared selectedSlot writable written
+            apply continuation.consumption_frame declared framed
             intro scope states realized older
             exact (retained scope states realized (by intro same; have := congrArg ActivationId.index same; omega)).2
     case restore after caller stack value restored =>
@@ -837,6 +859,8 @@ def Configuration.OwnershipSafe (program : Program) (state : Configuration) : Pr
         state.environment.bindings.releaseOrder.Pairwise (fun newer older => older.index < newer.index)
   | .result _, .assign home place _ :: _ =>
       BindingMap.ReplacementSafe program home state.environment.heap state.environment.bindings place
+  | .install home place _ _, _ =>
+      BindingMap.ReplacementSafe program home state.environment.heap state.environment.bindings place
   | .result aggregate, .project home key :: _ => aggregate.ProjectionCleanupSafe program home key
   | .result value, .sequence _ :: _ => ∃ type, (PartialValue.resident value).Disposable program type
   | .results values, .patterns home arms :: _ =>
@@ -855,6 +879,8 @@ theorem ConfigurationTyped.ownership_safe {context : FlowContext} {result : Resu
   cases typed with
   | intro store issued code continuation =>
     cases code <;> try trivial
+    case install resident selected path writable selection discard mask context checked =>
+      exact store.replacement_safe selected path selection discard
     case expression checked =>
       cases checked <;> try trivial
       case read =>

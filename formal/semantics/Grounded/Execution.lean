@@ -37,6 +37,7 @@ inductive Control where
   | result (value : Value)
   | results (values : List Value)
   | cleanup (pending : List DisposalTask) (rest : Control)
+  | install (home : Module) (place : Place) (value : Value) (rest : Expr)
 
 inductive Frame where
   | sequence (rest : Expr)
@@ -134,9 +135,15 @@ inductive Step (program : Program) : Configuration → Configuration → Prop wh
   | assign {home : Module} {env : Environment} {stack : List Frame} {place : Place} {value rest : Expr} :
       Step program ⟨env, .expression (.assign home place value rest), stack⟩
         ⟨env, .expression value, .assign home place rest :: stack⟩
-  | assignResult {home : Module} {env after : Environment} {stack : List Frame} {place : Place} {rest : Expr} {value : Value}
+  | assignResult {home : Module} {env : Environment} {stack : List Frame} {place : Place}
+      {rest : Expr} {value : Value} {old : PartialValue}
+      (selected : env.bindings.selectPartial program env.heap place = some old) :
+      Step program ⟨env, .result value, .assign home place rest :: stack⟩
+        ⟨env, .cleanup old.disposalTasks (.install home place value rest), stack⟩
+  | install {home : Module} {env after : Environment} {stack : List Frame}
+      {place : Place} {rest : Expr} {value : Value}
       (written : env.write program place value = some after) :
-      Step program ⟨env, .result value, .assign home place rest :: stack⟩ ⟨after, .expression rest, stack⟩
+      Step program ⟨env, .install home place value rest, stack⟩ ⟨after, .expression rest, stack⟩
   | tuple {env : Environment} {stack : List Frame} {head : Expr} {tail : List Expr} :
       Step program ⟨env, .expression (.tuple head tail), stack⟩
         ⟨env, .expression head, .tupleHead tail :: stack⟩
@@ -211,11 +218,11 @@ distinct. This is a pre-state separation condition, not a post-state promise. -/
 theorem Step.assignment_frame {before : Environment} {after : Configuration} {stack : List Frame}
     {assignmentHome : Module} {place other : Place} {rest : Expr} {value : Value}
     (distinct : (before.bindings.map Prod.snd).Nodup)
-    (step : Step program ⟨before, .result value, .assign assignmentHome place rest :: stack⟩ after)
+    (step : Step program ⟨before, .install assignmentHome place value rest, stack⟩ after)
     (different : other.root ≠ place.root) :
     after.environment.read program other = before.read program other := by
   cases step with
-  | assignResult written =>
+  | install written =>
     obtain ⟨heap, stored, same⟩ := Option.map_eq_some_iff.mp written
     cases same
     exact BindingMap.restore.read_other distinct stored different
@@ -317,6 +324,8 @@ theorem Step.unextend {before after : Configuration} {tail : List Frame}
     | arguments arguments =>
       cases step <;> exact ⟨_, by constructor <;> assumption, rfl⟩
     | cleanup pending rest =>
+      cases step <;> exact ⟨_, by constructor <;> assumption, rfl⟩
+    | install home place value rest =>
       cases step <;> exact ⟨_, by constructor <;> assumption, rfl⟩
   | cons frame stack =>
     cases control <;> cases frame <;> cases step <;>
@@ -521,7 +530,7 @@ theorem Step.outer_scope {before after : Configuration} (step : Step program bef
     cases same
     apply continuationEnvironment.scope_congr
     rfl
-  case assignResult home env after stack place rest value written =>
+  case install home env after stack place rest value written =>
     obtain ⟨heap, _, same⟩ := Option.map_eq_some_iff.mp written
     cases same
     apply continuationEnvironment.scope_congr
@@ -561,10 +570,10 @@ theorem Step.assignment_frame_disjoint {before : Environment} {after : Configura
     (otherMapped : lookup other.root before.bindings = some identity)
     (found : before.heap.read identity = some cell)
     (apart : PathDisjoint program home cell.type place.fields other.fields)
-    (step : Step program ⟨before, .result value, .assign assignmentHome place rest :: stack⟩ after) :
+    (step : Step program ⟨before, .install assignmentHome place value rest, stack⟩ after) :
     after.environment.read program other = before.read program other := by
   cases step with
-  | assignResult written =>
+  | install written =>
     obtain ⟨heap, stored, same⟩ := Option.map_eq_some_iff.mp written
     cases same
     exact BindingMap.restore.read_disjoint mapped otherMapped found apart stored
@@ -596,7 +605,7 @@ theorem Step.heap_history {before after : Configuration} (step : Step program be
     cases same
     obtain ⟨identity, _, raw⟩ := Option.bind_eq_some_iff.mp operation
     exact StorageAddress.take.history raw
-  | assignResult written =>
+  | install written =>
     obtain ⟨heap, operation, same⟩ := Option.map_eq_some_iff.mp written
     cases same
     obtain ⟨identity, _, raw⟩ := Option.bind_eq_some_iff.mp operation
@@ -719,7 +728,7 @@ theorem Step.storage_origin {before after : Configuration} (step : Step program 
     cases same
     obtain ⟨address, _, raw⟩ := Option.bind_eq_some_iff.mp operation
     exact StorageAddress.take.identity raw found
-  | assignResult written =>
+  | install written =>
     obtain ⟨heap, operation, same⟩ := Option.map_eq_some_iff.mp written
     cases same
     obtain ⟨address, _, raw⟩ := Option.bind_eq_some_iff.mp operation
@@ -804,7 +813,7 @@ theorem Step.untracked_origin {before after : Configuration} (step : Step progra
     obtain ⟨address, _, raw⟩ := Option.bind_eq_some_iff.mp operation
     obtain ⟨old, original, _, _⟩ := StorageAddress.take.identity raw found
     exact ⟨⟨old, original⟩, untracked.1⟩
-  case assignResult home env after stack place rest value written =>
+  case install home env after stack place rest value written =>
     obtain ⟨heap, operation, same⟩ := Option.map_eq_some_iff.mp written
     cases same
     obtain ⟨address, _, raw⟩ := Option.bind_eq_some_iff.mp operation
@@ -913,7 +922,7 @@ theorem Step.untracked_frame {before after : Configuration} (step : Step program
     obtain ⟨resident, _, selected, _, owner, _, updated, _, next, written, same⟩ := raw
     cases same
     exact ⟨(RuntimeHeap.write_other written apart).trans found, untracked.1⟩
-  case assignResult home env after stack place rest value written =>
+  case install home env after stack place rest value written =>
     obtain ⟨heap, operation, same⟩ := Option.map_eq_some_iff.mp written
     cases same
     obtain ⟨address, resolved, raw⟩ := Option.bind_eq_some_iff.mp operation

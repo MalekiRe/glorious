@@ -70,6 +70,14 @@ theorem BindingMap.Typed.separated (typed : BindingMap.Typed program heap activa
 
 
 
+/-- Select actual partial occupancy for destruction, without demanding a whole
+value read. Address resolution and field selection are the ordinary producers. -/
+def BindingMap.selectPartial (bindings : BindingMap) (program : Program)
+    (heap : RuntimeHeap StorageCell) (place : Place) : Option PartialValue := do
+  let address ← bindings.resolve place
+  let cell ← heap.read address.root
+  cell.resident.selectFields program cell.type address.fields
+
 /-- The selected old resident has legal residual disposition immediately before
 a write. Selection uses the same heap path as restoration itself. -/
 def BindingMap.ReplacementSafe (program : Program) (home : Module) (heap : RuntimeHeap StorageCell)
@@ -79,6 +87,13 @@ def BindingMap.ReplacementSafe (program : Program) (home : Module) (heap : Runti
     cell.resident.selectFields program cell.type place.fields = some resident ∧
     PathType program home cell.type place.fields type ∧
     resident.Disposable program type
+
+theorem BindingMap.ReplacementSafe.selection
+    (safe : BindingMap.ReplacementSafe program home heap bindings place) :
+    ∃ resident type, bindings.selectPartial program heap place = some resident ∧
+      resident.Disposable program type := by
+  obtain ⟨identity, cell, resident, type, mapped, found, selected, _, permission⟩ := safe
+  exact ⟨resident, type, by simp [BindingMap.selectPartial, BindingMap.resolve, mapped, found, selected], permission⟩
 
 /-- Replacement cannot discard a live nondiscardable descendant of the old
 destination, even when the destination itself is only partially initialized. -/

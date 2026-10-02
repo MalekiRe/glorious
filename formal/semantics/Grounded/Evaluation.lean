@@ -58,13 +58,16 @@ theorem Evaluates.bind {environment middle localAfter after : Environment} {muta
     (.step .bindResult ((Run.extend continued [.scope 1]).trans (.step (.scope exited) (.refl _)))))
 
 theorem Evaluates.assign {home : Module} {environment middle updated after : Environment} {place : Place}
-      {expression rest : Expr} {resident value : Value}
+      {expression rest : Expr} {resident value : Value} {old : PartialValue}
       (evaluated : Evaluates program environment expression resident middle)
       (written : middle.write program place resident = some updated)
+      (selected : middle.bindings.selectPartial program middle.heap place = some old)
       (continued : Evaluates program updated rest value after) :
       Evaluates program environment (.assign home place expression rest) value after :=
   .step .assign ((Run.extend evaluated [.assign home place rest]).trans
-    (.step (.assignResult written) continued))
+    (.step (.assignResult selected)
+      ((Run.cleanup middle (.install home place resident rest) [] old.disposalTasks).trans
+        (.step (.install written) continued))))
 
 theorem Evaluates.tuple {environment middle after : Environment} {head : Expr} {tail : List Expr}
       {first : Value} {rest : List Value} (headEval : Evaluates program environment head first middle)

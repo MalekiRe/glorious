@@ -107,7 +107,7 @@ theorem SourceScope.shadow_assignment_preserves_outer {scope : SourceScope} {spe
     {program : Program} {fields outerFields : List FieldKey} {value : Value}
     {assignmentHome : Module} {before : Environment} {after : Configuration} {stack : List Frame} {rest : Expr}
     {context : FlowContext} (store : BindingMap.Typed program before.heap before.activation before.bindings context)
-    (step : Step program ⟨before, .result value, .assign assignmentHome ⟨⟨scope.next⟩, fields⟩ rest :: stack⟩ after) :
+    (step : Step program ⟨before, .install assignmentHome ⟨⟨scope.next⟩, fields⟩ value rest, stack⟩ after) :
     after.environment.read program ⟨binding.identity, outerFields⟩ =
       before.read program ⟨binding.identity, outerFields⟩ := by
   apply Step.assignment_frame store.addresses_distinct step

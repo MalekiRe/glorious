@@ -128,9 +128,9 @@ theorem HasType.scope_join_preserves_ownership (checkedProgram : program.Checked
           subst selectedType
           exact selectedJoined.exact_nominal_consumption declared restricted
 
-/-- Every reached checked assignment can restore its selected place, including
-an uncertain one. Its actual module authorizes the write and old-value disposal;
-disjoint masks retain their availability. No completed write is assumed. -/
+/-- Every reached checked assignment destroys the actual old partial resident
+before installing its protected replacement. Disjoint masks retain availability.
+Neither completed destruction nor a completed write is assumed. -/
 theorem HasType.assignment_restores (checkedProgram : program.Checked)
     {context final : FlowContext} {expression : Expr} {type : Ty}
     (checked : HasType program home context expression type final)
@@ -141,7 +141,7 @@ theorem HasType.assignment_restores (checkedProgram : program.Checked)
     (run : Run program ⟨environment, .expression expression, []⟩
       ⟨current, .result value, .assign assignmentHome place rest :: stack⟩) :
     ∃ after before next state updated assignedType,
-      Step program ⟨current, .result value, .assign assignmentHome place rest :: stack⟩
+      Run program ⟨current, .result value, .assign assignmentHome place rest :: stack⟩
         ⟨after, .expression rest, stack⟩ ∧
       BindingMap.Typed program current.heap current.activation current.bindings before ∧
       lookup place.root before = some state ∧ state.slot.mutable = true ∧
@@ -155,7 +155,15 @@ theorem HasType.assignment_restores (checkedProgram : program.Checked)
       updated.selectFields program state.slot.type place.fields = some .present ∧
       (∀ observed, PathDisjoint program assignmentHome state.slot.type place.fields observed →
         updated.selectFields program state.slot.type observed =
-          state.initialization.selectFields program state.slot.type observed) := by
+          state.initialization.selectFields program state.slot.type observed) ∧
+      ∃ old oldType, current.bindings.selectPartial program current.heap place = some old ∧
+        old.Disposable program oldType ∧
+        Step program ⟨current, .result value, .assign assignmentHome place rest :: stack⟩
+          ⟨current, .cleanup old.disposalTasks (.install assignmentHome place value rest), stack⟩ ∧
+        Run program ⟨current, .cleanup old.disposalTasks (.install assignmentHome place value rest), stack⟩
+          ⟨current, .install assignmentHome place value rest, stack⟩ ∧
+        Step program ⟨current, .install assignmentHome place value rest, stack⟩
+          ⟨after, .expression rest, stack⟩ := by
   have typed := (checked.soundness checkedProgram store issued run).1
   cases typed with
   | intro currentStore currentIssued code continuation =>
@@ -167,10 +175,16 @@ theorem HasType.assignment_restores (checkedProgram : program.Checked)
         | assign selected path writable selection discard mask context restTyped =>
           obtain ⟨actual, updated, next, produced, maskWritten, contextWritten, nextTyped,
             readback, _⟩ := AddressedEnvironment.write.progress currentStore selected path resident
-          exact ⟨actual, _, _, _, _, _, .assignResult produced, currentStore, selected, writable, path, resident,
+          obtain ⟨old, oldType, oldSelected, permission⟩ :=
+            (currentStore.replacement_safe selected path selection discard).selection
+          have cleanup := Run.cleanup (program := program) current (.install assignmentHome place value rest) stack old.disposalTasks
+          exact ⟨actual, _, _, _, _, _,
+            .step (.assignResult oldSelected) (cleanup.trans (.step (.install produced) (.refl _))),
+            currentStore, selected, writable, path, resident,
             currentStore.replacement_safe selected path selection discard, maskWritten, contextWritten,
             nextTyped, readback, Initialization.write_select maskWritten,
-            fun _ apart => apart.initialization_frame maskWritten⟩
+            (fun _ apart => apart.initialization_frame maskWritten),
+            old, oldType, oldSelected, permission, .assignResult oldSelected, cleanup, .install produced⟩
 
 
 /-- Pre-state observation of an ordinary place input. This uses the same

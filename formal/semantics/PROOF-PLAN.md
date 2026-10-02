@@ -3812,3 +3812,35 @@ All 30 build jobs passed; inspected prefix, eventuality, exclusivity, source
 cleanup and maximal source behavior proofs use only standard Lean axioms. No
 tests or examples were added. This does not cover custom hooks, whose permitted
 divergence must prevent later cleanup, or close any of the fourteen broad tasks.
+
+
+## Replacement destroys actual old occupancy before installation
+
+The assignment-result transition no longer overwrites the old resident. It uses
+`BindingMap.selectPartial`, which resolves the ordinary address and applies the
+shared field selector, to enter the existing partial-resident cleanup machine.
+The replacement value, destination and continuation remain protected in
+`Control.install`. Only after cleanup completes does `Step.install` invoke the
+authoritative addressed write. Holes contribute no tasks; resident fields are
+destroyed in reverse order, followed by their enclosing shell.
+
+`ReplacementSafe.selection` derives the selected residual and its disposal
+permission from the existing checked replacement contract. Preservation and
+progress consume it at cleanup entry; installation retains the checked path,
+mutability, mask restoration and continuation obligations. Heap-history, exact
+cell framing, disjoint observations and lexical-shadowing consumers now track
+the actual installation transition rather than the preceding cleanup entry.
+Evaluation and constructive termination run cleanup before writing.
+
+`HasType.assignment_restores` constructs the entire cleanup-and-installation run,
+exposes the actual selected residual and its permission, and retains readback
+and disjoint-mask guarantees. General source safety, inevitable cleanup and
+maximal behavior cover the new states without a completed-cleanup or future
+realization assumption.
+
+Verification: all 30 strict Lean build jobs passed. Inspected assignment,
+preservation, progress, source-cleanup and maximal-behavior proofs depend only
+on `propext`, `Classical.choice`, and `Quot.sound`. No tests or examples were
+added. This is structural no-hook destruction over the logical heap, not custom
+Drop or physical release. Scope retirement and caller restoration still need
+explicit partial-resident destruction; all fourteen broad obligations remain open.
