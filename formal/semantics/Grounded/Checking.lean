@@ -269,6 +269,28 @@ def Program.ConstantsChecked (program : Program) : Prop :=
   ∀ name declaration, program.constants name = some declaration → ConstantChecked program declaration
 
 
+/-- Return cleanup is either checked normally or unreachable because the
+function result is bottom. Neither case postulates execution or a result value. -/
+inductive ReturnDisposition (program : Program) : Ty → FlowContext → Prop where
+  | returning {result locals} (discard : ∀ binding ∈ locals, binding.2.Disposable program.data) :
+      ReturnDisposition program result locals
+  | nonreturning (locals) : ReturnDisposition program .never locals
+
+theorem ReturnDisposition.on_return {program : Program} {result locals value}
+    (exit : ReturnDisposition program result locals) (resident : ValueHasType program value result) :
+    ∀ binding ∈ locals, binding.2.Disposable program.data := by
+  cases exit with
+  | returning discard => exact discard
+  | nonreturning => exact resident.not_never.elim
+
+theorem ReturnDisposition.restrict {program : Program} {result locals remaining}
+    (exit : ReturnDisposition program result locals) (subset : ∀ binding ∈ remaining, binding ∈ locals) :
+    ReturnDisposition program result remaining := by
+  cases exit with
+  | returning discard => exact .returning (fun binding member => discard binding (subset binding member))
+  | nonreturning => exact .nonreturning _
+
+
 /-- Bodies certify disposition from their final masks, never from a completed run. -/
 structure FunctionChecked (program : Program) (declaration : FunctionDecl) : Prop where
   distinct : (declaration.parameters.map Prod.fst).Nodup
@@ -276,7 +298,7 @@ structure FunctionChecked (program : Program) (declaration : FunctionDecl) : Pro
   resultFinite : FiniteLayout program.target program.data declaration.result
   body : ∃ after, HasType program declaration.home (initializedContext declaration.parameters)
     declaration.body declaration.result after ∧
-    ∀ binding ∈ after, binding.2.Disposable program.data
+    ReturnDisposition program declaration.result after
 
 structure Program.Checked (program : Program) : Prop where
   data : program.data.Valid program.target

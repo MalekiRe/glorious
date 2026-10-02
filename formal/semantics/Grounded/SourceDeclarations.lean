@@ -53,8 +53,18 @@ inductive NamedFunction.Elaborates (program : Program) (names : Module → Funct
     NamedFunction → FunctionDecl → Prop where
   | intro {source core after}
       (body : NamedFunction.BodyElaborates program names source core after)
-      (disposable : ∀ binding ∈ after, binding.2.Disposable program.data) :
+      (disposable : ReturnDisposition program core.result after) :
       NamedFunction.Elaborates program names source core
+
+/-- A bottom body is admitted without disposal evidence for a return that
+cannot occur. Its existing flow derivation still checks every executed operation. -/
+theorem NamedFunction.BodyElaborates.bottom_admitted {program : Program}
+    {names : Module → FunctionName → Option Nat} {source : NamedFunction}
+    {core : FunctionDecl} {after : FlowContext}
+    (body : NamedFunction.BodyElaborates program names source core after)
+    (bottom : core.result = .never) : NamedFunction.Elaborates program names source core :=
+  .intro body (bottom ▸ ReturnDisposition.nonreturning after)
+
 
 theorem NamedFunction.Elaborates.checked {program : Program} {names : Module → FunctionName → Option Nat}
     {source : NamedFunction} {core : FunctionDecl}
@@ -79,8 +89,16 @@ theorem NamedFunction.BodyElaborates.disposition_cases {program : Program}
     {names : Module → FunctionName → Option Nat} {source : NamedFunction}
     {core : FunctionDecl} {after : FlowContext}
     (body : NamedFunction.BodyElaborates program names source core after) :
-    (∀ binding ∈ after, binding.2.Disposable program.data) ∨
-      ∃ binding ∈ after, ¬ binding.2.Disposable program.data := by
+    ReturnDisposition program core.result after ∨
+      (core.result ≠ .never ∧ ∃ binding ∈ after, ¬ binding.2.Disposable program.data) := by
+  classical
+  by_cases bottom : core.result = .never
+  · exact .inl (bottom ▸ ReturnDisposition.nonreturning after)
+  suffices decision : (∀ binding ∈ after, binding.2.Disposable program.data) ∨
+      ∃ binding ∈ after, ¬ binding.2.Disposable program.data by
+    rcases decision with allowed | denied
+    · exact .inl (.returning allowed)
+    · exact .inr ⟨bottom, denied⟩
   cases body with
   | intro parameters distinct resultType resultFinite elaborated =>
     have checked := elaborated.checked (by
@@ -119,7 +137,7 @@ def NamedCleanupRejected (program : Program) (names : Module → FunctionName �
   ∃ (identity : Nat), ∃ source core after binding,
     sources[identity]? = some source ∧ outputs[identity]? = some (core, after) ∧
     NamedFunction.BodyElaborates program names source core after ∧
-    binding ∈ after ∧ ¬ binding.2.Disposable program.data
+    core.result ≠ .never ∧ binding ∈ after ∧ ¬ binding.2.Disposable program.data
 
 
 /-- Body products retain their final masks in source/emission order, before
@@ -146,11 +164,11 @@ theorem NamedFunctionsElaborate.disposition_cases {program : Program}
     rcases body.disposition_cases with allowed | denied
     · rcases ih with admitted | rejected
       · exact .inl (.cons (.intro body allowed) admitted)
-      · obtain ⟨identity, selectedSource, core, after, binding, foundSource, foundOutput, checked, member, denied⟩ := rejected
+      · obtain ⟨identity, selectedSource, core, after, binding, foundSource, foundOutput, checked, normal, member, denied⟩ := rejected
         exact .inr ⟨identity + 1, selectedSource, core, after, binding,
-          by simpa using foundSource, by simpa using foundOutput, checked, member, denied⟩
-    · obtain ⟨binding, member, denied⟩ := denied
-      exact .inr ⟨0, source, core, after, binding, rfl, rfl, body, member, denied⟩
+          by simpa using foundSource, by simpa using foundOutput, checked, normal, member, denied⟩
+    · obtain ⟨normal, binding, member, denied⟩ := denied
+      exact .inr ⟨0, source, core, after, binding, rfl, rfl, body, normal, member, denied⟩
 
 
 /-- Declaration elaboration is independent of how the source namespace is

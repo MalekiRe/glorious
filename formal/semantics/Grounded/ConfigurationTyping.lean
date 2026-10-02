@@ -214,7 +214,7 @@ inductive FrameTyped (program : Program) (heap : RuntimeHeap StorageCell) (suppl
       (checked : ArmsType program home before (argumentType inputs) result [] arms after) :
       FrameTyped program heap supply activation before (.many inputs) (.patterns home arms) after (.one result)
   | restore {context : FlowContext} (locals : FlowContext) {result} {caller : AddressedScope}
-      (discard : ∀ binding ∈ locals, binding.2.Disposable program.data)
+      (discard : ReturnDisposition program result locals)
       (retained : BindingMap.Typed program heap caller.activation caller.bindings context)
       (issued : supply.Issued caller.activation) (older : caller.activation.index < activation.index) :
       FrameTyped program heap supply activation locals (.one result) (.restore caller) context (.one result)
@@ -381,7 +381,7 @@ theorem ConfigurationTyped.invoke {environment : Environment} {callerContext fin
       callerContext (.one type) stack final result)
     (inputsTyped : BindingInputsTyped program inputs)
     (checked : HasType program home (inputs.map BindingInput.state) body type locals)
-    (discard : ∀ binding ∈ locals, binding.2.Disposable program.data) :
+    (discard : ReturnDisposition program type locals) :
     ConfigurationTyped program final result
       ⟨enterBindings environment.heap environment.supply inputs, .expression body, .restore environment.scope :: stack⟩ := by
   refine .intro (enterBindings.typed inputsTyped _ _) environment.supply.allocate_issued (.expression checked)
@@ -498,14 +498,15 @@ theorem ConfigurationTyped.preservation {context : FlowContext} {result : Result
       cases code with | result resident =>
         cases continuation with | cons frame tail =>
           cases frame with | restore locals discard callerTyped callerIssued older =>
+            have allowed := discard.on_return resident
             obtain ⟨entry, selected, matching⟩ := BindingMap.nextRelease.binding chosen
             obtain ⟨state, cell, source, actual, _⟩ := store.index selected
             have inside := (List.getElem?_eq_some_iff.mp source).1
-            obtain ⟨cell, actual, permission⟩ := store.disposable discard _ (BindingMap.nextRelease.member chosen)
+            obtain ⟨cell, actual, permission⟩ := store.disposable allowed _ (BindingMap.nextRelease.member chosen)
             cases Option.some.inj (actual.symm.trans found)
             exact .intro store issued (.cleanup permission.disposalTasks (.result resident))
-              (.cons (.retire inside (fun binding selected => discard binding (List.mem_of_getElem? selected)))
-                (.cons (.restore _ (fun binding member => discard binding (List.mem_of_mem_eraseIdx member)) callerTyped callerIssued older) tail))
+              (.cons (.retire inside (fun binding selected => allowed binding (List.mem_of_getElem? selected)))
+                (.cons (.restore _ (discard.restrict (fun _ member => List.mem_of_mem_eraseIdx member)) callerTyped callerIssued older) tail))
     | retire operation =>
       cases code with | result resident =>
         cases continuation with | cons frame tail =>
@@ -587,7 +588,7 @@ theorem ConfigurationTyped.preservation {context : FlowContext} {result : Result
       cases code with | expression checked =>
         cases checked with | constant otherDeclared visible resolved structural body =>
           cases Option.some.inj (declared.symm.trans otherDeclared)
-          exact ConfigurationTyped.invoke store issued continuation .nil body (by simp)
+          exact ConfigurationTyped.invoke store issued continuation .nil body (.returning (by simp))
     | restore restored =>
       cases code with | result resident =>
         cases continuation with | cons frame tail =>
@@ -831,7 +832,7 @@ theorem ConfigurationTyped.retire_restore {context : FlowContext} {result : Resu
             omega
           refine .intro nextTyped (by rw [supply, activation]; exact issued) (.result resident)
             (.cons (.restore _
-              (fun binding member => discard binding (List.mem_of_mem_eraseIdx member))
+              (discard.restrict (fun _ member => List.mem_of_mem_eraseIdx member))
               (callers caller _ callerTyped different).1
               (by rw [supply]; exact callerIssued) (by rw [activation]; exact older)) ?_)
           rw [supply]
@@ -937,7 +938,7 @@ theorem ConfigurationTyped.restore_prefix {context : FlowContext} {result : Resu
             have equal := congrArg ActivationId.index same
             omega
           refine .intro retained issued (.result resident)
-            (.cons (.restore remaining (fun binding member => discard binding (subset.subset member))
+            (.cons (.restore remaining (discard.restrict (fun _ member => subset.subset member))
               (callers caller _ callerTyped different) callerIssued older) ?_)
           apply tail.transport (fun _ previous => previous)
           intro scope states scopeTyped previous
@@ -1380,7 +1381,7 @@ theorem ConfigurationTyped.ownership_safe {context : FlowContext} {result : Resu
             exact ⟨(store.take locals.length).disposable (by simpa using discard),
               BindingMap.releaseOrder_decreasing _ (store.take locals.length).addresses_distinct⟩
           case restore =>
-            exact ⟨store.disposable (by assumption), BindingMap.releaseOrder_decreasing _ store.addresses_distinct⟩
+            exact ⟨store.disposable (ReturnDisposition.on_return (by assumption) resident), BindingMap.releaseOrder_decreasing _ store.addresses_distinct⟩
           case retire inside discard =>
             intro entry cell selected found
             obtain ⟨state, actual, source, actualFound, _, declared, resident⟩ := store.index selected

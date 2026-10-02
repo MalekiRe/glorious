@@ -4887,3 +4887,31 @@ with public soundness/behavior, use only propext, Classical.choice and
 Quot.sound. This closes continuation isolation for already bottom-typed bodies.
 The static nonreturning-outcome cutover, bottom elimination and mixed normal/
 diverging branch admission remain open, as do the fourteen completion families.
+
+## Return-sensitive function cleanup admission
+
+FunctionChecked.body and NamedFunction.Elaborates now produce the same
+ReturnDisposition consumed by ConfigurationTyped.invoke and FrameTyped.restore.
+The returning alternative requires ordinary residual disposal. The nonreturning
+alternative requires the actual declared result to be bottom; it does not grant
+zero-use permission to any parameter or local resident.
+
+The source disposition decision now admits bottom bodies without an impossible
+return-cleanup obligation. NamedCleanupRejected explicitly excludes bottom
+results and retains the same indexed source/body/failed-binding evidence.
+NamedFunction.BodyElaborates.bottom_admitted proves general admission for every
+already elaborated bottom body, independent of its residual masks.
+
+ReturnDisposition.on_return consumes the actual typed returned value and
+recovers ordinary disposal permission; its nonreturning case is impossible by
+ValueHasType.not_never. Actual restore-owner cleanup and OwnershipSafe consume
+that result. Retirement and retained-frame transport preserve the same
+return disposition. No cleanup transition was removed or suppressed, and normal
+returning functions still require full disposal certification.
+
+All 30 strict Lean jobs passed. The new admission and return-permission proofs,
+the source disposition decision, public soundness/behavior and continuation
+nonresumption theorem depend only on the standard Lean axioms. This repairs
+the function-return boundary, not arbitrary expected-result bottom elimination,
+lexical binding exits or mixed returning/diverging clause joins. Those consumers
+still require coordinated migration; all fourteen completion families remain open.
