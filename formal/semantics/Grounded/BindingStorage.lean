@@ -222,6 +222,21 @@ theorem BindingMap.Typed.frame (typed : BindingMap.Typed program heap activation
     exact .cons ((unchanged _ (by simp)).trans found) owner declared resident
       (ih (fun identity member => unchanged identity (List.mem_cons_of_mem _ member))) freshName freshStorage
 
+/-- Retiring other cells cannot revoke cleanup permission for a retained
+resident. The surviving map removes exactly the identities actually retired. -/
+theorem BindingMap.Disposable.retirement_prefix
+    (disposition : BindingMap.Disposable program heap bindings)
+    {retired : List StorageId} {middle : RuntimeHeap StorageCell}
+    (executed : heap.retireMany retired = some middle) :
+    BindingMap.Disposable program middle
+      (bindings.filter fun entry => decide (entry.2 ∉ retired)) := by
+  intro identity member
+  obtain ⟨entry, member, same⟩ := List.mem_map.mp member
+  obtain ⟨included, keep⟩ := List.mem_filter.mp member
+  have original := List.mem_map.mpr ⟨entry, included, same⟩
+  obtain ⟨cell, found, permission⟩ := disposition identity original
+  have outside : identity ∉ retired := by simpa only [decide_eq_true_eq, same] using keep
+  exact ⟨cell, (RuntimeHeap.retireMany_outside executed outside).trans found, permission⟩
 /-- Retain exactly the selected storage identities without changing any source
 binding state. This transports masks, rather than reconstructing availability. -/
 theorem BindingMap.Typed.filter_cells

@@ -3862,6 +3862,14 @@ been retired. The remaining source context is a sublist of the original context:
 its complete binding states, including initialization masks, are retained
 verbatim. Neither a future realization nor reconstructed readiness is assumed.
 The shared filter proof preserves both lexical and storage identity uniqueness.
+`BindingMap.Disposable.retirement_prefix` carries actual residual disposal
+permission through the same physical prefix. The reached-source scope theorem
+now retains cleanup authority for every pending local as well as realization
+for all surviving bindings; nondiscardable outer bindings are not accidentally
+classified as disposable. The proof frames the original selected cells rather
+than assuming later successful reads or a fresh permission derivation.
+The strict 30-job build and producer/source axiom inspections passed for this
+extension as well.
 
 `HasType.scope_join_preserves_ownership` consumes this result at reached source
 scope cleanup, alongside its existing ordered retirement and branch-join

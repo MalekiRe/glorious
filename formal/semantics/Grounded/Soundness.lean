@@ -89,7 +89,9 @@ theorem HasType.scope_join_preserves_ownership (checkedProgram : program.Checked
           BindingMap.Typed program current.heap current.activation current.bindings original ∧
           remaining.Sublist original ∧
           BindingMap.Typed program middle current.activation
-            (current.bindings.filter fun entry => decide (entry.2 ∉ front)) remaining) ∧
+            (current.bindings.filter fun entry => decide (entry.2 ∉ front)) remaining ∧
+          BindingMap.Disposable program middle
+            ((List.take count current.bindings).filter fun entry => decide (entry.2 ∉ front))) ∧
       ∀ name state, lookup name branch = some state →
         ∀ selectedHome selectedType fields selectedState,
           PathType program selectedHome state.slot.type fields selectedType →
@@ -123,7 +125,7 @@ theorem HasType.scope_join_preserves_ownership (checkedProgram : program.Checked
             (fun _ _ _ split => safe.scope_retirement step split), ?_, ?_⟩
           · intro front middle executed
             obtain ⟨remaining, subset, retained⟩ := currentStore.retirement_prefix executed
-            exact ⟨_, remaining, currentStore, subset, retained⟩
+            exact ⟨_, remaining, currentStore, subset, retained, safe.1.retirement_prefix executed⟩
           intro name state selected selectedHome selectedType fields selectedState path selection
           obtain ⟨next, found, approximation⟩ := joined.lookup selected
           obtain ⟨address, cell, mapped, live, owner, typeEq, cellTyped, member⟩ := branchTyped.lookup selected
