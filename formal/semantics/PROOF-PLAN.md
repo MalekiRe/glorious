@@ -2190,7 +2190,7 @@ future-state admission premise is introduced.
 construct retirement and preserve any cell containing a selected partial resident
 that lacks residual disposal permission. Neither the selected descendant nor its
 containing owner must remain readable. No explicit exact annotation is required.
-remain valid, including for cells outside the current lexical scope. Both scope
+Exact-owner guarantees remain valid, including outside the current lexical scope. Both scope
 and return consumers construct cleanup through their authoritative producers
 before applying owner protection. No successful retirement/restoration step is
 a premise. All 30 build jobs and explicit producer/consumer axiom inspection
