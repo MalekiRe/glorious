@@ -4862,3 +4862,28 @@ continuation typing, preservation and progress together. Do not coerce bottom
 by manufacturing a normal post-state, erase pending owners, or interpret abort
 as ordinary cleanup. L13 and all fourteen whole-language completion obligations
 remain open.
+
+## Nonreturning execution preserves its pending continuation
+
+InfiniteRun.extend and InfiniteRun.extend_prefix establish exact operational
+composition beneath an arbitrary pending stack. Every finite run from that
+extended state is a prefix of the extended infinite run and exposes the same
+pending frames verbatim. InfiniteRun.no_resume rules out delivering an inner
+terminal result to those frames, including when the continuation itself would
+diverge. Infinite execution of the whole machine alone would not establish
+that stronger exclusion.
+
+HasType.never_continuation_prefix derives the inner infinite run from bottom
+checking and carries configuration typing, consumption framing, ownership
+safety, external framing and allocation tracking into every observed prefix.
+SourceClosure.Admitted.never_continuation_prefix and never_no_resume consume
+actual source admission and elaboration. No future state, successful cleanup,
+normal output value or independently supplied divergence is assumed. Pending
+frames remain intact; arbitrary pending frames are not thereby certified as
+well typed and receive no permission to dispose values.
+
+All 30 strict Lean jobs passed. New operational and source proofs, together
+with public soundness/behavior, use only propext, Classical.choice and
+Quot.sound. This closes continuation isolation for already bottom-typed bodies.
+The static nonreturning-outcome cutover, bottom elimination and mixed normal/
+diverging branch admission remain open, as do the fourteen completion families.

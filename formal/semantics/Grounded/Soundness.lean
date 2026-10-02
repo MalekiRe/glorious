@@ -73,6 +73,28 @@ theorem HasType.never_behavior (checkedProgram : program.Checked) {context final
     exact resident.not_never.elim
   · exact infinite
 
+/-- An arbitrary pending continuation remains physically untouched beneath a
+checked bottom expression. Safety concerns the active inner configuration; this
+does not certify an arbitrary caller's stored values or grant it cleanup rights. -/
+theorem HasType.never_continuation_prefix (checkedProgram : program.Checked)
+    {context final : FlowContext} {expression : Expr}
+    (checked : HasType program home context expression .never final)
+    {environment : Environment}
+    (store : BindingMap.Typed program environment.heap environment.activation environment.bindings context)
+    (issued : environment.supply.Issued environment.activation)
+    {stack : List Frame} {state : Configuration}
+    (run : Run program ⟨environment, .expression expression, stack⟩ state) :
+    ∃ inner, state = inner.extend stack ∧ ¬ Terminal inner ∧
+      Run program ⟨environment, .expression expression, []⟩ inner ∧
+      ConfigurationTyped program final (.one .never) inner ∧
+      AddressedEnvironment.ConsumptionFrame program final.slots environment inner.outerEnvironment ∧
+      inner.OwnershipSafe program ∧
+      Configuration.ExternalFrame ⟨environment, .expression expression, []⟩ inner ∧
+      ∀ identity, environment.heap.next ≤ identity.index →
+        ∀ cell, inner.environment.heap.read identity = some cell → ¬ inner.Untracked identity := by
+  obtain ⟨trace, infinite, safe⟩ := checked.never_behavior checkedProgram store issued
+  obtain ⟨index, same, prefixRun, nonterminal⟩ := infinite.extend_prefix (tail := stack) run
+  exact ⟨trace index, same, nonterminal, prefixRun, safe index⟩
 /-- Source safety protects outstanding descendants during the actual storage
 retirement transition, independently of whether later execution terminates. -/
 theorem HasType.retirement_preserves_nondiscardable (checkedProgram : program.Checked)

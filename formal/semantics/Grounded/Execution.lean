@@ -630,6 +630,37 @@ theorem InfiniteRun.reaches {before after : Configuration} {trace : Nat → Conf
     obtain ⟨index, reached⟩ := ih (trace := fun index => trace (index + 1))
       ⟨head.unique first, fun index => infinite.steps (index + 1)⟩
     exact ⟨index + 1, reached⟩
+/-- Pending frames do not participate in any step of an infinite inner run. -/
+theorem InfiniteRun.extend {before : Configuration} {trace : Nat → Configuration}
+    (infinite : InfiniteRun program before trace) (tail : List Frame) :
+    InfiniteRun program (before.extend tail) (fun index => (trace index).extend tail) :=
+  ⟨congrArg (fun state => state.extend tail) infinite.initial,
+    fun index => (infinite.steps index).extend tail⟩
+
+/-- Every actual prefix under pending frames stays inside the infinite inner
+execution. This protects the exact stack, not merely its length or frame types. -/
+theorem InfiniteRun.extend_prefix {before after : Configuration} {trace : Nat → Configuration}
+    (infinite : InfiniteRun program before trace) {tail : List Frame}
+    (run : Run program (before.extend tail) after) :
+    ∃ index, after = (trace index).extend tail ∧
+      Run program before (trace index) ∧ ¬ Terminal (trace index) := by
+  obtain ⟨index, reached⟩ := (infinite.extend tail).reaches run
+  exact ⟨index, reached.symm, infinite.prefix index,
+    fun terminal => terminal.no_step (infinite.steps index)⟩
+/-- An infinite inner computation cannot deliver a terminal result to the
+pending continuation, even if that continuation would itself diverge. -/
+theorem InfiniteRun.no_resume {before done : Configuration} {trace : Nat → Configuration}
+    (infinite : InfiniteRun program before trace) (terminal : Terminal done) (tail : List Frame) :
+    ¬ Run program (before.extend tail) (done.extend tail) := by
+  intro run
+  obtain ⟨index, same, _, nonterminal⟩ := infinite.extend_prefix run
+  have innerSame : done = trace index := by
+    cases done
+    cases observed : trace index
+    rw [observed] at same
+    simp only [Configuration.extend, Configuration.mk.injEq] at same ⊢
+    exact ⟨same.1, same.2.1, List.append_cancel_right same.2.2⟩
+  exact nonterminal (innerSame ▸ terminal)
 /-- Determinism makes finite terminal execution and infinite execution exclusive. -/
 theorem Run.excludes_infinite {before after : Configuration}
     (run : Run program before after) (done : Terminal after) :

@@ -1261,6 +1261,46 @@ theorem SourceClosure.Admitted.never_behavior {packages : List PackageSource} {c
   (elaborated.checked slots).never_behavior admitted.checked store issued
 
 
+/-- A source-admitted bottom body cannot resume pending cleanup or caller
+frames. Every observed prefix has the same physical pending stack and inherits
+the active body's storage/ownership safety, without a normal-return witness. -/
+theorem SourceClosure.Admitted.never_continuation_prefix
+    {packages : List PackageSource} {closure : SourceClosure packages}
+    {program : Program} (admitted : closure.Admitted program) {home : Module} {scope : SourceScope}
+    {expression : NamedExpr} {core : Expr} {before final : FlowContext}
+    (elaborated : NamedExpr.Elaborates program closure.functionNames
+      home scope before expression core .never final)
+    (slots : before.slots = scope.context) {environment : Environment}
+    (store : BindingMap.Typed program environment.heap environment.activation environment.bindings before)
+    (issued : environment.supply.Issued environment.activation)
+    {stack : List Frame} {state : Configuration}
+    (run : Run program ⟨environment, .expression core, stack⟩ state) :
+    ∃ inner, state = inner.extend stack ∧ ¬ Terminal inner ∧
+      Run program ⟨environment, .expression core, []⟩ inner ∧
+      ConfigurationTyped program final (.one .never) inner ∧
+      AddressedEnvironment.ConsumptionFrame program final.slots environment inner.outerEnvironment ∧
+      inner.OwnershipSafe program ∧
+      Configuration.ExternalFrame ⟨environment, .expression core, []⟩ inner ∧
+      ∀ identity, environment.heap.next ≤ identity.index →
+        ∀ cell, inner.environment.heap.read identity = some cell → ¬ inner.Untracked identity :=
+  (elaborated.checked slots).never_continuation_prefix admitted.checked store issued run
+/-- A checked bottom source expression cannot hand any terminal result to its
+pending continuation. The pending frames need not terminate for this exclusion. -/
+theorem SourceClosure.Admitted.never_no_resume
+    {packages : List PackageSource} {closure : SourceClosure packages}
+    {program : Program} (admitted : closure.Admitted program) {home : Module} {scope : SourceScope}
+    {expression : NamedExpr} {core : Expr} {before final : FlowContext}
+    (elaborated : NamedExpr.Elaborates program closure.functionNames
+      home scope before expression core .never final)
+    (slots : before.slots = scope.context) {environment : Environment}
+    (store : BindingMap.Typed program environment.heap environment.activation environment.bindings before)
+    (issued : environment.supply.Issued environment.activation)
+    {done : Configuration} (terminal : Terminal done) (stack : List Frame) :
+    ¬ Run program ⟨environment, .expression core, stack⟩ (done.extend stack) := by
+  obtain ⟨_, infinite, _⟩ := admitted.never_behavior elaborated slots store issued
+  exact infinite.no_resume terminal stack
+
+
 private theorem supplied_file_unique {files : SourceFiles}
     (distinct : (files.map Prod.fst).Nodup) {path : SourcePath} {first second : ModuleSource}
     (left : (path, first) ∈ files) (right : (path, second) ∈ files) : first = second := by
