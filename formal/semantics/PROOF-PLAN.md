@@ -3793,3 +3793,22 @@ reported only `propext`, `Classical.choice`, and `Quot.sound`. No tests or examp
 were added. Scope retirement, caller restoration, and replacement still require
 explicit partial-resident destruction. Custom Drop, hook divergence and physical
 release remain open, as do all fourteen broad completion obligations.
+
+
+## Structural cleanup is inevitable in maximal source behavior
+
+`SourceClosure.Admitted.cleanup` now proves more than existence of a completing
+cleanup run. Every terminating execution from the original source entry factors
+through the resumed control, and every infinite execution from that entry reaches
+that exact control, environment, and continuation at a finite trace index. Thus
+later source divergence cannot be confused with divergence inside the current
+no-hook structural cleanup. Neither source termination nor a future execution
+guarantee is an admission premise.
+
+The proof uses general deterministic prefix results, `Run.terminal_suffix` and
+`InfiniteRun.reaches`. The existing finite/infinite exclusivity theorem now
+consumes the same eventuality producer instead of repeating its trace induction.
+All 30 build jobs passed; inspected prefix, eventuality, exclusivity, source
+cleanup and maximal source behavior proofs use only standard Lean axioms. No
+tests or examples were added. This does not cover custom hooks, whose permitted
+divergence must prevent later cleanup, or close any of the fourteen broad tasks.

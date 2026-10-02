@@ -377,6 +377,19 @@ theorem Run.unique {before first second : Configuration} (left : Run program bef
       cases head.unique other
       exact ih rest leftDone rightDone
 
+/-- A finite terminal execution cannot bypass any executable prefix of the
+same deterministic machine. No terminal state can supply an extra step. -/
+theorem Run.terminal_suffix {before middle after : Configuration}
+    (front : Run program before middle) (completed : Run program before after)
+    (done : Terminal after) : Run program middle after := by
+  induction front with
+  | refl => exact completed
+  | step head tail ih =>
+    cases completed with
+    | refl => exact False.elim (done.no_step head)
+    | step other rest =>
+      cases head.unique other
+      exact ih rest
 /-- An infinite execution contains an actual machine step at every index.
 There is no fuel limit, stuttering transition or assumed evaluator. -/
 structure InfiniteRun (program : Program) (before : Configuration)
@@ -404,20 +417,26 @@ theorem InfiniteRun.unique {before : Configuration} {first second : Nat → Conf
     exact (step.unique (right.steps index)).symm
 
 
+/-- Every finite executable prefix occurs in every infinite execution from
+the same state. This converts constructed completion into an eventuality. -/
+theorem InfiniteRun.reaches {before after : Configuration} {trace : Nat → Configuration}
+    (infinite : InfiniteRun program before trace) (run : Run program before after) :
+    ∃ index, trace index = after := by
+  induction run generalizing trace with
+  | refl => exact ⟨0, infinite.initial⟩
+  | step head tail ih =>
+    have first := infinite.steps 0
+    rw [infinite.initial] at first
+    obtain ⟨index, reached⟩ := ih (trace := fun index => trace (index + 1))
+      ⟨head.unique first, fun index => infinite.steps (index + 1)⟩
+    exact ⟨index + 1, reached⟩
 /-- Determinism makes finite terminal execution and infinite execution exclusive. -/
 theorem Run.excludes_infinite {before after : Configuration}
     (run : Run program before after) (done : Terminal after) :
     ∀ trace, ¬ InfiniteRun program before trace := by
-  induction run with
-  | refl state =>
-    intro trace infinite
-    exact done.no_step (by simpa only [infinite.initial] using infinite.steps 0)
-  | step head tail ih =>
-    intro trace infinite
-    have first := infinite.steps 0
-    rw [infinite.initial] at first
-    have same := head.unique first
-    exact ih done (fun index => trace (index + 1)) ⟨same, fun index => infinite.steps (index + 1)⟩
+  intro trace infinite
+  obtain ⟨index, reached⟩ := infinite.reaches run
+  exact done.no_step (reached ▸ infinite.steps index)
 
 /-- Finite setup composes with an infinite execution using only actual steps. -/
 theorem Run.prepend_infinite {before after : Configuration} (run : Run program before after)
