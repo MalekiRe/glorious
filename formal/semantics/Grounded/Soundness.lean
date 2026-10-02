@@ -504,27 +504,31 @@ descendant, without requiring the containing aggregate to remain readable. -/
 theorem HasType.scope_preserves_nondiscardable (checkedProgram : program.Checked)
     {context final : FlowContext} {expression : Expr} {type : Ty}
     (checked : HasType program home context expression type final)
-    {environment current : Environment} {after : Configuration}
+    {environment current : Environment}
     (store : BindingMap.Typed program environment.heap environment.activation environment.bindings context)
     (issued : environment.supply.Issued environment.activation)
     {value : Value} {count : Nat} {stack : List Frame}
     (run : Run program ⟨environment, .expression expression, []⟩
       ⟨current, .result value, .scope count :: stack⟩)
-    (step : Step program ⟨current, .result value, .scope count :: stack⟩ after)
     {address : StorageId} {cell : StorageCell} (found : current.heap.read address = some cell)
     {selectedHome : Module} {selectedType : Ty} {fields : List FieldKey}
     (path : PathType program selectedHome cell.type fields selectedType)
     {owner : Value}
     (resident : ((cell.resident.selectFields program cell.type fields).bind PartialValue.read) = some owner)
     (required : ¬ UsePermitted program.data .discard selectedType) :
-    after.environment.heap.read address = some cell := by
-  have disposition := (checked.soundness checkedProgram store issued run).2.2.2.2
+    ∃ after : Environment,
+      Step program ⟨current, .result value, .scope count :: stack⟩ ⟨after, .result value, stack⟩ ∧
+      ConfigurationTyped program final (.one type) ⟨after, .result value, stack⟩ ∧
+      after.heap.read address = some cell := by
+  obtain ⟨after, _, _, disposition, _, step, preserved, _⟩ :=
+    checked.scope_join_preserves_ownership checkedProgram store issued run
+  refine ⟨after, step, preserved, ?_⟩
   cases step with
   | scope retired =>
     simp only [AddressedEnvironment.exitScope, Option.map_eq_some_iff] at retired
     obtain ⟨heap, released, same⟩ := retired
     subst_vars
-    exact BindingMap.Disposable.release_preserves_nondiscardable disposition.1 released found path resident required
+    exact BindingMap.Disposable.release_preserves_nondiscardable disposition released found path resident required
 
 /-- Returning from a checked call constructs actual local retirement and caller
 restoration. The returned payload and remaining continuation are preserved. -/
@@ -601,25 +605,29 @@ live exact nominal owner in the heap. -/
 theorem HasType.scope_preserves_exact (checkedProgram : program.Checked)
     {context final : FlowContext} {expression : Expr} {type : Ty}
     (checked : HasType program home context expression type final)
-    {environment current : Environment} {after : Configuration}
+    {environment current : Environment}
     (store : BindingMap.Typed program environment.heap environment.activation environment.bindings context)
     (issued : environment.supply.Issued environment.activation)
     {value : Value} {count : Nat} {stack : List Frame}
     (run : Run program ⟨environment, .expression expression, []⟩
       ⟨current, .result value, .scope count :: stack⟩)
-    (step : Step program ⟨current, .result value, .scope count :: stack⟩ after)
     {address : StorageId} {cell : StorageCell} (found : current.heap.read address = some cell)
     {identity : Nat} {declaration : DataDecl} {tag : Option Nat} {fields : List Value}
     (declared : program.data identity = some declaration) (restricted : declaration.restriction = some .exact)
     (resident : cell.resident.read = some (.nominal identity tag fields)) :
-    after.environment.heap.read address = some cell := by
-  have disposition := (checked.soundness checkedProgram store issued run).2.2.2.2
+    ∃ after : Environment,
+      Step program ⟨current, .result value, .scope count :: stack⟩ ⟨after, .result value, stack⟩ ∧
+      ConfigurationTyped program final (.one type) ⟨after, .result value, stack⟩ ∧
+      after.heap.read address = some cell := by
+  obtain ⟨after, _, _, disposition, _, step, preserved, _⟩ :=
+    checked.scope_join_preserves_ownership checkedProgram store issued run
+  refine ⟨after, step, preserved, ?_⟩
   cases step with
   | scope exited =>
     simp only [AddressedEnvironment.exitScope, Option.map_eq_some_iff] at exited
     obtain ⟨heap, released, same⟩ := exited
     subst_vars
-    exact BindingMap.Disposable.release_preserves_exact disposition.1 released found declared restricted resident
+    exact BindingMap.Disposable.release_preserves_exact disposition released found declared restricted resident
 
 /-- An actual caller restoration after a checked prefix cannot retire or alter a
 live exact nominal owner in the heap. -/

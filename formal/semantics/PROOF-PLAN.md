@@ -2095,8 +2095,9 @@ derives that the cell cannot belong to the retired address list from the shared
 runtime disposition proof, then consumes `RuntimeHeap.retireMany_outside`.
 The owner need not be in the current lexical environment.
 
-`HasType.scope_preserves_exact` carries this result through an arbitrary checked
-execution prefix and an observed lexical-retirement step.
+`HasType.scope_preserves_exact` consumes constructive scope retirement after an
+arbitrary checked execution prefix, preserving continuation typing and the
+exact owner cell without requiring an observed cleanup step.
 `HasType.return_restores` constructs caller restoration from the reached return
 frame, preserving the returned payload and continuation typing, retiring all
 callee bindings and retaining caller cells exactly.
@@ -2178,12 +2179,12 @@ future-state admission premise is introduced.
 prove that an actual retirement step preserves any readable heap cell whose
 structural type forbids discard. They require neither an explicit exact nominal
 annotation nor a syntactic resident wrapper. The earlier exact-value guarantees
-remain valid, including for cells outside the current lexical scope. The return
-consumer now uses `HasType.return_restores` to construct the actual transition
-and preserve continuation typing before applying the nondiscardable-cell
-argument; no successful caller-restoration step is a premise. All 30 build jobs
-and explicit producer/consumer axiom inspection passed after this migration.
-This remains logical owned-cell cleanup, not custom Drop or physical release.
+remain valid, including for cells outside the current lexical scope. Both scope
+and return consumers construct cleanup through their authoritative producers
+before applying owner protection. No successful retirement/restoration step is
+a premise. All 30 build jobs and explicit producer/consumer axiom inspection
+passed after this migration. This remains logical owned-cell cleanup, not
+custom Drop or physical release.
 
 `lake build Grounded` passed all 30 jobs. Explicit axiom inspection of residual
 permission recovery, both general retirement theorems and source-function
