@@ -4478,3 +4478,31 @@ removed. All 30 strict Lean jobs passed. Inspected control, queue, general
 soundness and public source/invocation behavior closures use only the standard
 Lean axioms. Custom hooks, reference restoration and all fourteen broad
 whole-language completion obligations remain open.
+
+
+## Constructive residual cleanup admission for named functions
+
+`FiniteLayout.disposable_cases` derives either disposal authority or its
+refutation for an arbitrary initialization mask. It handles absence, definite
+and conditional occupancy, residual tuples, every nominal variant, explicit
+principal restrictions and malformed field-mask lengths. A zero-field shell
+is not mistaken for consumed storage. Whole-owner permission reuses
+`FiniteLayout.permission_cases`; list decisions share the promoted existing
+`finite_permissions` producer. No second capability definition is introduced.
+
+`BindingState.disposable_context_cases` composes these proofs into either
+complete context disposition or a particular binding with denied authority.
+`NamedFunction.elaborate_disposition` obtains the required finite types from
+parameter elaboration and the body checker's slot-preservation theorem. Given
+signature and body elaboration, it constructs both ordinary function admission
+and `FunctionChecked`, or identifies a denied final binding. Final disposition
+is a conclusion, not an additional premise. The positive result is the same
+contract consumed by general execution preservation and progress.
+
+This decides the cleanup obligation of the supplied body elaboration; it is
+not a complete type-inference algorithm or a refutation of every possible
+alternative elaboration. It assumes no execution, termination, future readiness
+or successful cleanup. All 30 strict Lean jobs passed; inspected emptiness,
+residual/context decisions, named-function admission and public source
+soundness/behavior closures use only the standard Lean axioms. Custom Drop,
+reference restoration and the fourteen whole-language obligations remain open.

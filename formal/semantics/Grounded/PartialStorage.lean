@@ -663,4 +663,142 @@ theorem PartialValue.Disposable.not_exact_read {program : Program} {identity : N
 def StorageCell.WellTyped (program : Program) (cell : StorageCell) : Prop :=
   ∃ state, cell.Typed program state
 
+theorem Initialization.empty_cases (state : Initialization) : state.Empty ∨ ¬ state.Empty := by
+  cases state with
+  | absent => exact .inl (by simp [Initialization.Empty])
+  | present => exact .inr (by simp [Initialization.Empty])
+  | maybe => exact .inr (by simp [Initialization.Empty])
+  | fields states =>
+    cases states with
+    | nil => exact .inr (by simp [Initialization.Empty])
+    | cons head tail =>
+      rcases finite_permissions (head :: tail) Initialization.Empty
+        (fun child member => child.empty_cases) with all | missing
+      · exact .inl (by simp only [Initialization.Empty]; exact ⟨by simp, all⟩)
+      · obtain ⟨child, member, denied⟩ := missing
+        exact .inr (by intro empty; simp only [Initialization.Empty] at empty; exact denied (empty.2 child member))
+termination_by sizeOf state
+decreasing_by
+  have smaller := List.sizeOf_lt_of_mem member
+  simp +arith at *
+  omega
+
+private theorem InitializationsDisposable.cases_of_each {data : DataDeclarations}
+    (types : List Ty) (states : List Initialization)
+    (each : ∀ type ∈ types, ∀ state : Initialization, state.Disposable data type ∨ ¬ state.Disposable data type) :
+    InitializationsDisposable data types states ∨ ¬ InitializationsDisposable data types states := by
+  induction types generalizing states with
+  | nil =>
+    cases states with
+    | nil => exact .inl .nil
+    | cons head tail => exact .inr (by intro permission; cases permission)
+  | cons type types ih =>
+    cases states with
+    | nil => exact .inr (by intro permission; cases permission)
+    | cons head tail =>
+      rcases each type (by simp) head with allowed | denied
+      · rcases ih tail (fun type member => each type (by simp [member])) with rest | denied
+        · exact .inl (.cons allowed rest)
+        · exact .inr (by intro permission; cases permission with | cons head tail => exact denied tail)
+      · exact .inr (by intro permission; cases permission with | cons head tail => exact denied head)
+
+private theorem Initialization.disposable_cases_of_residual {data : DataDeclarations} {type : Ty}
+    (whole : UsePermitted data .discard type ∨ ¬ UsePermitted data .discard type)
+    (residual : ∀ states, ¬ Initialization.Empty (.fields states) →
+      ¬ UsePermitted data .discard type →
+      Initialization.Disposable data type (.fields states) ∨ ¬ Initialization.Disposable data type (.fields states))
+    (state : Initialization) : state.Disposable data type ∨ ¬ state.Disposable data type := by
+  rcases whole with allowed | denied
+  · exact .inl (.permitted allowed)
+  rcases state.empty_cases with empty | nonempty
+  · exact .inl (.empty empty)
+  cases state with
+  | absent => exact False.elim (nonempty (by simp [Initialization.Empty]))
+  | present => exact .inr (fun permission => denied (Initialization.Disposable.present_iff.mp permission))
+  | maybe => exact .inr (fun permission => denied (Initialization.Disposable.maybe_iff.mp permission))
+  | fields states => exact residual states nonempty denied
+
+/-- Finite type evidence decides residual disposal for every initialization
+mask. Rejection is a proof of denied authority, not missing readiness evidence. -/
+theorem FiniteLayout.disposable_cases {target : Target} {data : DataDeclarations} {type : Ty}
+    (finite : FiniteLayout target data type) (state : Initialization) :
+    state.Disposable data type ∨ ¬ state.Disposable data type := by
+  induction finite generalizing state with
+  | unit => exact .inl (.permitted .unit)
+  | integer type => exact .inl (.permitted (.integer type))
+  | character => exact .inl (.permitted .character)
+  | @array element length resident size ih =>
+    apply Initialization.disposable_cases_of_residual
+      (FiniteLayout.permission_cases (.array resident size) .discard) _ state
+    intro states nonempty denied
+    exact .inr (by
+      intro permission
+      cases permission with
+      | empty empty => exact nonempty empty
+      | permitted allowed => exact denied allowed)
+  | @tuple first rest head tail headIH tailIH =>
+    apply Initialization.disposable_cases_of_residual
+      (FiniteLayout.permission_cases (.tuple head tail) .discard) _ state
+    intro states nonempty denied
+    rcases InitializationsDisposable.cases_of_each (first :: rest) states
+      (by intro type member; cases member with | head => exact headIH | tail _ member => exact tailIH type member) with all | missing
+    · cases all with
+      | cons first rest => exact .inl (.tuple first rest)
+    · exact .inr (by
+        intro permission
+        cases permission with
+        | empty empty => exact nonempty empty
+        | permitted allowed => exact denied allowed
+        | tuple first rest => exact missing (.cons first rest))
+  | @nominal identity declaration declared schemas fields ih =>
+    apply Initialization.disposable_cases_of_residual
+      (FiniteLayout.permission_cases (.nominal declared schemas fields) .discard) _ state
+    intro states nonempty denied
+    have restriction : UsePermission.discard.Allows declaration.restriction ∨
+        ¬ UsePermission.discard.Allows declaration.restriction := by
+      cases declaration.restriction with
+      | none => exact .inl trivial
+      | some principal => cases principal <;> simp [UsePermission.Allows]
+    rcases restriction with allowed | restricted
+    · have each : ∀ schema ∈ declaration.schemas,
+          InitializationsDisposable data (schema.residents.map Field.type) states ∨
+          ¬ InitializationsDisposable data (schema.residents.map Field.type) states := by
+        intro schema member
+        apply InitializationsDisposable.cases_of_each
+        intro type included
+        obtain ⟨field, fieldMember, rfl⟩ := List.mem_map.mp included
+        exact ih schema member field fieldMember
+      rcases finite_permissions declaration.schemas _ each with all | missing
+      · apply Or.inl
+        apply Initialization.Disposable.nominal declared allowed
+        intro tag schema chosen
+        apply all schema
+        cases shape : declaration.shape with
+        | «structure» fs =>
+          cases tag <;> simp [DataDecl.constructor, shape] at chosen
+          subst schema
+          simp [DataDecl.schemas, shape]
+        | enumeration variants nonExhaustive =>
+          cases tag <;> simp [DataDecl.constructor, shape] at chosen
+          simpa [DataDecl.schemas, shape] using List.mem_of_getElem? chosen
+      · obtain ⟨schema, member, missing⟩ := missing
+        obtain ⟨tag, chosen⟩ := DataDecl.constructor_exists member
+        exact .inr (by
+          intro permission
+          cases permission with
+          | empty empty => exact nonempty empty
+          | permitted permitted => exact denied permitted
+          | nominal found restriction residents =>
+            cases Option.some.inj (found.symm.trans declared)
+            exact missing (residents tag schema chosen))
+    · exact .inr (by
+        intro permission
+        cases permission with
+        | empty empty => exact nonempty empty
+        | permitted permitted => exact denied permitted
+        | nominal found restriction residents =>
+          cases Option.some.inj (found.symm.trans declared)
+          exact restricted restriction)
+
+
 end Grounded

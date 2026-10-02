@@ -18,6 +18,16 @@ structure BindingState where
 def BindingState.Disposable (data : DataDeclarations) (state : BindingState) : Prop :=
   state.initialization.Disposable data state.slot.type
 
+/-- Finite declared types produce either complete residual cleanup authority
+or a concrete binding whose current static mask denies it. -/
+theorem BindingState.disposable_context_cases {target : Target} {data : DataDeclarations}
+    {context : List (BindingId × BindingState)}
+    (finite : ∀ binding ∈ context, FiniteLayout target data binding.2.slot.type) :
+    (∀ binding ∈ context, binding.2.Disposable data) ∨
+      ∃ binding ∈ context, ¬ binding.2.Disposable data :=
+  finite_permissions context _ (fun binding member =>
+    (finite binding member).disposable_cases binding.2.initialization)
+
 inductive BindingInputsTyped (program : Program) : List BindingInput → Prop where
   | nil : BindingInputsTyped program []
   | cons {input : BindingInput} {rest : List BindingInput}

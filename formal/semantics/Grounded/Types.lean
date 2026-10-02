@@ -170,7 +170,7 @@ theorem Ty.HasPrincipal.satisfies {data : DataDeclarations} {type : Ty} {princip
   | affine => exact classified .discard
   | exact => simp [Ty.SatisfiesUse]
 
-private theorem finite_permissions {α : Type} (items : List α) (permission : α → Prop)
+theorem finite_permissions {α : Type} (items : List α) (permission : α → Prop)
     (each : ∀ item ∈ items, permission item ∨ ¬ permission item) :
     (∀ item ∈ items, permission item) ∨ ∃ item ∈ items, ¬ permission item := by
   induction items with

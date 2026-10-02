@@ -56,6 +56,37 @@ theorem NamedFunction.Elaborates.checked {program : Program} {names : Module →
       simp [FlowContext.slots, initializedContext, List.map_map, Function.comp_def]), disposable⟩
 
 
+/-- Body elaboration and finite parameter declarations suffice to decide the
+remaining cleanup obligation. Failure identifies a denied final binding; it
+does not presume failure of every alternative elaboration or future execution. -/
+theorem NamedFunction.elaborate_disposition {program : Program}
+    {names : Module → FunctionName → Option Nat} {source : NamedFunction}
+    {scope : SourceScope} {result : Ty} {body : Expr} {after : FlowContext}
+    (parameters : NamedParametersElaborate program source.parameters scope)
+    (distinct : (source.parameters.map NamedParameter.name).Nodup)
+    (resultType : ResolvesType program.aliases (source.result.getD (.concrete .unit)) result)
+    (resultFinite : FiniteLayout program.target program.data result)
+    (elaborated : NamedExpr.Elaborates program names source.home scope
+      (initializedContext scope.context) source.body body result after) :
+    (NamedFunction.Elaborates program names source
+        ⟨source.home, source.visibility, scope.context, result, body⟩ ∧
+      FunctionChecked program ⟨source.home, source.visibility, scope.context, result, body⟩) ∨
+      ∃ binding ∈ after, ¬ binding.2.Disposable program.data := by
+  have checked := elaborated.checked (by
+    simp [FlowContext.slots, initializedContext, List.map_map, Function.comp_def])
+  have finite : ∀ binding ∈ after, FiniteLayout program.target program.data binding.2.slot.type := by
+    intro binding member
+    have selected : (binding.1, binding.2.slot) ∈ after.slots := List.mem_map.mpr ⟨binding, member, rfl⟩
+    rw [checked.slots] at selected
+    have parameter : (binding.1, binding.2.slot) ∈ scope.context := by
+      simpa [FlowContext.slots, initializedContext, List.map_map, Function.comp_def] using selected
+    exact parameters.finite _ parameter
+  rcases BindingState.disposable_context_cases finite with allowed | denied
+  · have admitted := NamedFunction.Elaborates.intro parameters distinct resultType resultFinite elaborated allowed
+    exact .inl ⟨admitted, admitted.checked⟩
+  · exact .inr denied
+
+
 inductive NamedFunctionsElaborate (program : Program) (names : Module → FunctionName → Option Nat) :
     List NamedFunction → List FunctionDecl → Prop where
   | nil : NamedFunctionsElaborate program names [] []
