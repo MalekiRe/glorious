@@ -554,13 +554,13 @@ theorem SourceClosure.Admitted.checked {packages : List PackageSource} {closure 
   admitted.2.2.2.2.1.checked
 
 /-- Source admission preserves the meaning of every explicit principal class. -/
-theorem SourceClosure.Admitted.principal_permission {packages : List PackageSource}
+theorem SourceClosure.Admitted.principal {packages : List PackageSource}
     {closure : SourceClosure packages} {program : Program} (admitted : closure.Admitted program)
     {identity : Nat} {declaration : DataDecl} {principal : Principal}
     (declared : program.data identity = some declaration)
-    (manual : declaration.restriction = some principal) (permission : UsePermission) :
-    UsePermitted program.data permission (.nominal identity) ↔ permission.Allows (some principal) :=
-  admitted.checked.data.principals.permission declared manual permission
+    (manual : declaration.restriction = some principal) :
+    Ty.HasPrincipal program.data (.nominal identity) principal :=
+  admitted.checked.data.principals.principal declared manual
 
 /-- A manual declaration cannot advertise permission absent from an owned field,
 including a field of an inactive variant or of an unused declaration. -/
@@ -572,7 +572,7 @@ theorem SourceClosure.Admitted.no_principal_widening {packages : List PackageSou
     (promised : permission.Allows (some principal)) {schema : Fields} {field : Field}
     (variant : schema ∈ declaration.schemas) (member : field ∈ schema.residents)
     (unsupported : ¬ UsePermitted program.data permission field.type) : False := by
-  have permitted := (admitted.principal_permission declared manual permission).mpr promised
+  have permitted := (admitted.principal declared manual permission).mpr promised
   cases permitted with
   | nominal found restriction fields =>
     cases Option.some.inj (found.symm.trans declared)

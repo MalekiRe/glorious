@@ -2594,9 +2594,9 @@ closure and declaration-resolution consumers were migrated without an old
 function-only admission alias. No runtime progress or execution outcome was
 added as an admission premise.
 
-`DataDeclarations.PrincipalsValid.permission` proves that every admitted
+`DataDeclarations.PrincipalsValid.principal` proves that every admitted
 explicit principal has exactly its advertised permissions.
-`SourceClosure.Admitted.principal_permission` exposes that result at public
+`SourceClosure.Admitted.principal` exposes that result at public
 source admission. `no_principal_widening` rejects an unsupported field in any
 variant, including inactive variants and unused declarations. General
 preservation, progress and source-function soundness retain their contracts
@@ -4228,3 +4228,36 @@ All 30 strict jobs passed; the inspected acquisition, constructed-call and
 admitted-behavior closures use only the standard three Lean axioms. This remains
 a theorem of the modeled owned-value fragment, not reference reborrowing,
 custom destruction, physical exhaustion or whole-language completion.
+
+## Quantitative principals feed actual admission and acquisition
+
+`Principal.Permits` interprets the three public intervals over owned-use counts.
+`Principal.Satisfies` is interval containment, with a general characterization
+of all admitted principal/request combinations. `UsePermission.Allows` now
+uses that containment directly: copying requests the duplicable interval;
+MayDiscard requests the affine interval. Existing checking, residual disposal,
+preservation and progress therefore consume the quantitative interpretation,
+not a parallel principal analysis.
+
+`Ty.HasPrincipal` interprets the existing structural permission producer.
+`Ty.principal_exists` and `Ty.HasPrincipal.unique` prove there is exactly one
+such class; `Ty.HasPrincipal.satisfies` proves the public bound interpretation.
+An exact-once request accepts all three ordinary principals and grants neither
+Copy nor MayDiscard by itself. The existence proof is classical mathematical
+classification, not an algorithm that treats unresolved evidence as denial.
+
+Manual declarations produce this same contract through
+`DataDeclarations.PrincipalsValid.principal` and
+`SourceClosure.Admitted.principal`. The no-widening consumer is migrated.
+Constructive `NamedExpr.Elaborates.ordinary_progress` now returns the principal
+and its bound interpretation along with the actual typed resident transition:
+Copy for a duplicable principal, physical take and an initialized-cell hole for
+either nonduplicable principal. Mode selection does not confuse an exact-once
+request with an exact-linear principal.
+
+All 30 strict Lean jobs passed. Inspected interval, unique-class, bound,
+acquisition, source-admission, no-widening and maximal-behavior theorem closures
+use only `propext`, `Classical.choice` and `Quot.sound`. This closes the
+quantitative interpretation of current ordinary owned types, not generic
+constraint inference, reference/capture classes, custom Drop or whole-language
+soundness. Those broader obligations remain open.

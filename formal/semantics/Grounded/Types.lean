@@ -81,10 +81,30 @@ inductive FiniteLayout (target : Target) (data : DataDeclarations) : Ty → Prop
 inductive UsePermission where
   | copy | discard
 
+/-- The three ordinary principal intervals describe permitted owned-use counts. -/
+@[simp] def Principal.Permits : Principal → Nat → Prop
+  | .duplicable, _ => True
+  | .affine, quantity => quantity ≤ 1
+  | .exact, quantity => quantity = 1
+
+/-- A public bound requests an interval contained in the actual principal.
+In particular, an exact-once request does not assert an exact-linear principal. -/
+def Principal.Satisfies (principal requested : Principal) : Prop :=
+  ∀ quantity, requested.Permits quantity → principal.Permits quantity
+
+@[simp] theorem Principal.satisfies_iff (principal requested : Principal) :
+    principal.Satisfies requested ↔
+      principal = .duplicable ∨ requested = .exact ∨ principal = requested := by
+  cases principal <;> cases requested <;> simp [Satisfies]
+  all_goals first | exact ⟨0, by omega⟩ | exact ⟨2, by omega⟩
+
+@[simp] def UsePermission.request : UsePermission → Principal
+  | .copy => .duplicable
+  | .discard => .affine
+
 def UsePermission.Allows (permission : UsePermission) : Option Principal → Prop
-  | none | some .duplicable => True
-  | some .affine => permission = .discard
-  | some .exact => False
+  | none => True
+  | some principal => principal.Satisfies permission.request
 
 /-- One structural producer for Copy and MayDiscard. This logical fragment has
 no custom Drop hooks or indirections; every resident contributes its permission. -/
@@ -122,7 +142,56 @@ theorem UsePermitted.copy_discard {data : DataDeclarations} {type : Ty}
   | array length resident ih => exact .array length ih
   | emptyArray element => exact .emptyArray element
   | nominal declared restriction fields ih => exact .nominal declared (UsePermission.copy_allows_discard restriction) ih
+/-- Public bound interpretation consumes the same Copy/MayDiscard producer as
+checking. Exact-once requests add neither copying nor disposal permission. -/
+def Ty.SatisfiesUse (data : DataDeclarations) (type : Ty) : Principal → Prop
+  | .duplicable => UsePermitted data .copy type
+  | .affine => UsePermitted data .discard type
+  | .exact => True
 
+/-- Principal classification is an interpretation of existing permissions, not
+another structural inference pass or a second permission table. -/
+def Ty.HasPrincipal (data : DataDeclarations) (type : Ty) (principal : Principal) : Prop :=
+  ∀ permission, UsePermitted data permission type ↔ permission.Allows (some principal)
+
+theorem Ty.HasPrincipal.unique {data : DataDeclarations} {type : Ty} {first second : Principal}
+    (left : type.HasPrincipal data first) (right : type.HasPrincipal data second) : first = second := by
+  have leftCopy := left .copy
+  have leftDiscard := left .discard
+  have rightCopy := right .copy
+  have rightDiscard := right .discard
+  cases first <;> cases second <;> simp_all [UsePermission.Allows]
+
+theorem Ty.HasPrincipal.satisfies {data : DataDeclarations} {type : Ty} {principal : Principal}
+    (classified : type.HasPrincipal data principal) (requested : Principal) :
+    type.SatisfiesUse data requested ↔ principal.Satisfies requested := by
+  cases requested with
+  | duplicable => exact classified .copy
+  | affine => exact classified .discard
+  | exact => simp [Ty.SatisfiesUse]
+
+/-- Logical totality is not an inference algorithm: negative permission evidence
+is a proof, not absence of a successful solver result. -/
+theorem Ty.principal_exists (data : DataDeclarations) (type : Ty) :
+    ∃ principal, type.HasPrincipal data principal ∧
+      ∀ other, type.HasPrincipal data other → other = principal := by
+  classical
+  have finish (principal : Principal) (classified : type.HasPrincipal data principal) :
+      ∃ principal, type.HasPrincipal data principal ∧
+        ∀ other, type.HasPrincipal data other → other = principal :=
+    ⟨principal, classified, fun _ other => other.unique classified⟩
+  by_cases copies : UsePermitted data .copy type
+  · apply finish .duplicable
+    have discards := copies.copy_discard
+    intro permission
+    cases permission <;> simp [UsePermission.Allows, copies, discards]
+  · by_cases discards : UsePermitted data .discard type
+    · apply finish .affine
+      intro permission
+      cases permission <;> simp [UsePermission.Allows, copies, discards]
+    · apply finish .exact
+      intro permission
+      cases permission <;> simp [UsePermission.Allows, copies, discards]
 /-- A manual class must be supported by every owned field of every variant.
 No declaration means inference; an exact restriction requests no zero-use or
 Copy capability. This uses the same permission producer as expression checking. -/
@@ -139,11 +208,11 @@ def DataDeclarations.PrincipalsValid (data : DataDeclarations) : Prop :=
 
 /-- An admitted explicit principal denotes exactly its declared permissions;
 structural intersection cannot silently narrow an invalid declaration. -/
-theorem DataDeclarations.PrincipalsValid.permission {data : DataDeclarations}
+theorem DataDeclarations.PrincipalsValid.principal {data : DataDeclarations}
     (valid : data.PrincipalsValid) {identity : Nat} {declaration : DataDecl} {principal : Principal}
-    (declared : data identity = some declaration) (manual : declaration.restriction = some principal)
-    (permission : UsePermission) :
-    UsePermitted data permission (.nominal identity) ↔ permission.Allows (some principal) := by
+    (declared : data identity = some declaration) (manual : declaration.restriction = some principal) :
+    Ty.HasPrincipal data (.nominal identity) principal := by
+  intro permission
   constructor
   · intro permitted
     cases permitted with

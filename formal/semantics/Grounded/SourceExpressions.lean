@@ -489,16 +489,18 @@ theorem NamedExpr.Elaborates.ordinary_progress {program : Program} {home : Modul
     (checkedProgram : program.Checked) {environment : Environment}
     (store : BindingMap.Typed program environment.heap environment.activation environment.bindings before)
     (issued : environment.supply.Issued environment.activation) :
-    ∃ core after current value,
+    ∃ principal core after current value,
+      type.HasPrincipal program.data principal ∧
+      (∀ requested, type.SatisfiesUse program.data requested ↔ principal.Satisfies requested) ∧
       NamedExpr.Elaborates program names home scope before (.read name fields) core type after ∧
-      (UsePermitted program.data .copy type → core = .read ⟨binding.identity, fields⟩ ∧ after = before) ∧
-      (¬ UsePermitted program.data .copy type → core = .move ⟨binding.identity, fields⟩) ∧
+      (principal = .duplicable → core = .read ⟨binding.identity, fields⟩ ∧ after = before) ∧
+      (principal ≠ .duplicable → core = .move ⟨binding.identity, fields⟩) ∧
       Step program ⟨environment, .expression core, []⟩ ⟨current, .result value, []⟩ ∧
       ConfigurationTyped program after (.one type) ⟨current, .result value, []⟩ ∧
       ValueHasType program value type ∧
       environment.read program ⟨binding.identity, fields⟩ = some value ∧
-      (UsePermitted program.data .copy type → current = environment) ∧
-      (¬ UsePermitted program.data .copy type →
+      (principal = .duplicable → current = environment) ∧
+      (principal ≠ .duplicable →
         environment.take program ⟨binding.identity, fields⟩ = some (value, current) ∧
         current.take program ⟨binding.identity, fields⟩ = none ∧
         ∃ address old next, environment.bindings.resolve ⟨binding.identity, fields⟩ = some address ∧
@@ -506,8 +508,14 @@ theorem NamedExpr.Elaborates.ordinary_progress {program : Program} {home : Modul
           next.activation = old.activation ∧ next.type = old.type ∧
           next.resident.selectFields program next.type address.fields = some .hole ∧
           old.resident.writeFields program old.type address.fields .hole = some next.resident) := by
+  obtain ⟨principal, classified, _⟩ := type.principal_exists program.data
+  have copying_iff : UsePermitted program.data .copy type ↔ principal = .duplicable := by
+    simpa [UsePermission.Allows] using classified .copy
   obtain ⟨core, after, elaborated, copies, moves⟩ :=
     NamedExpr.Elaborates.ordinary_exists (names := names) resolved selected path selection ready
+  have copiesByClass := fun chosen => copies (copying_iff.mpr chosen)
+  have movesByClass := fun (denied : principal ≠ .duplicable) =>
+    moves (fun allowed => denied (copying_iff.mp allowed))
   have same := scope.selected_slot resolved slots selected
   have physicalPath : PathType program home state.slot.type fields type := by
     rw [same]; exact path
@@ -520,9 +528,9 @@ theorem NamedExpr.Elaborates.ordinary_progress {program : Program} {home : Modul
         store selected physicalPath physicalSelection ready
     have stepped : Step program ⟨environment, .expression (.read ⟨binding.identity, fields⟩), []⟩
         ⟨environment, .result value, []⟩ := .read observed
-    exact ⟨_, _, _, _, elaborated, copies, moves, stepped,
+    exact ⟨principal, _, _, _, _, classified, classified.satisfies, elaborated, copiesByClass, movesByClass, stepped,
       (elaborated.soundness slots checkedProgram store issued (.step stepped (.refl _))).1,
-      resident, observed, fun _ => rfl, fun denied => False.elim (denied copying)⟩
+      resident, observed, fun _ => rfl, fun denied => False.elim (denied (copying_iff.mp copying))⟩
   · have coreSelected := moves copying
     subst core
     obtain ⟨value, current, _, _, taken, resident, _, _, _, noRetake, _⟩ :=
@@ -534,9 +542,9 @@ theorem NamedExpr.Elaborates.ordinary_progress {program : Program} {home : Modul
       obtain ⟨pair, raw, equal⟩ := Option.map_eq_some_iff.mp taken
       cases equal
       exact BindingMap.take.read_before raw
-    exact ⟨_, _, _, _, elaborated, copies, moves, stepped,
+    exact ⟨principal, _, _, _, _, classified, classified.satisfies, elaborated, copiesByClass, movesByClass, stepped,
       (elaborated.soundness slots checkedProgram store issued (.step stepped (.refl _))).1,
-      resident, observed, fun allowed => False.elim (copying allowed),
+      resident, observed, fun allowed => False.elim (copying (copying_iff.mpr allowed)),
       fun _ => ⟨taken, noRetake, AddressedEnvironment.take.hole taken⟩⟩
 /-- Completed executions preserve the declared result and caller environment;
 termination is not assumed by source admission. -/
