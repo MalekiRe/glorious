@@ -259,6 +259,31 @@ theorem BindingMap.Typed.eraseIdx
       · intro member
         obtain ⟨entry, member, same⟩ := List.mem_map.mp member
         exact freshStorage (List.mem_map.mpr ⟨entry, List.mem_of_mem_eraseIdx member, same⟩)
+/-- Indexed removal agrees with removing exactly the selected storage identity.
+Storage injectivity prevents a second binding from disappearing with it. -/
+theorem BindingMap.eraseIdx_filter {bindings : BindingMap} {index : Nat} {entry : BindingId × StorageId}
+    (distinct : (bindings.map Prod.snd).Nodup) (selected : bindings[index]? = some entry) :
+    bindings.eraseIdx index = bindings.filter (fun binding => decide (binding.2 ≠ entry.2)) := by
+  induction bindings generalizing index with
+  | nil => simp at selected
+  | cons head tail ih =>
+    have fresh := (List.nodup_cons.mp distinct).1
+    have tailDistinct := (List.nodup_cons.mp distinct).2
+    cases index with
+    | zero =>
+      simp only [List.getElem?_cons_zero] at selected
+      cases Option.some.inj selected
+      simp only [List.eraseIdx_zero, ne_eq, not_true_eq_false, decide_false, List.filter_cons_of_neg, Bool.false_eq_true, not_false_eq_true]
+      symm
+      apply List.filter_eq_self.mpr
+      intro binding member
+      exact decide_eq_true_eq.mpr (fun same => fresh (List.mem_map.mpr ⟨binding, member, same⟩))
+    | succ index =>
+      simp only [List.getElem?_cons_succ] at selected
+      have apart : head.2 ≠ entry.2 := by
+        intro same
+        exact fresh (List.mem_map.mpr ⟨entry, List.mem_of_getElem? selected, same.symm⟩)
+      simpa [apart] using congrArg (List.cons head) (ih tailDistinct selected)
 /-- One actual cell retirement removes the corresponding lexical position and
 its exact source state. Other masks and storage identities are unchanged. -/
 theorem BindingMap.Typed.retire_at

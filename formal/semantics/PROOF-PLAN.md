@@ -3939,3 +3939,15 @@ theorem consumes both results, retaining the actual initialization mask rather
 than reconstructing readiness. All 30 strict build jobs and inspected axiom
 closures passed. This establishes the typing bridge needed by the retirement
 frame, not the unimplemented operational scope/return cutover.
+
+The constructed single-owner operation now closes back into the same retirement
+prefix invariant. Its heap is exactly the result of retiring `front ++ [owner]`
+from the original heap, and its binding map is exactly the original map filtered
+by that extended prefix. `BindingMap.eraseIdx_filter` proves that synchronized
+indexed removal deletes precisely that storage identity; injectivity prevents
+another binding from disappearing. The reached-source theorem derives both
+equalities alongside source-state preservation, local-index confinement and
+caller framing. Thus a subsequent prefix instantiation consumes the actual
+produced state, not a promised future realization. All 30 strict build jobs and
+inspected axiom closures passed. The staged scope/return machine cutover remains
+open; no broad completion obligation is closed.

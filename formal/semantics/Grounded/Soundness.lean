@@ -111,6 +111,8 @@ theorem HasType.scope_join_preserves_ownership (checkedProgram : program.Checked
               middle.read entry.2 = some cell ∧ cell.resident.Disposable program cell.type ∧
               ({ current with heap := middle, bindings :=
                 current.bindings.filter fun entry => decide (entry.2 ∉ front) } : AddressedEnvironment).retireBinding index = some next ∧
+              current.heap.retireMany (front ++ [entry.2]) = some next.heap ∧
+              next.bindings = (current.bindings.filter fun binding => decide (binding.2 ∉ front ++ [entry.2])) ∧
               middle.retire entry.2 = some next.heap ∧ next.heap.read entry.2 = none ∧ next.heap.next = middle.next ∧
               next.activation = current.activation ∧ next.supply = current.supply ∧
               next.bindings = (current.bindings.filter fun entry => decide (entry.2 ∉ front)).eraseIdx index ∧
@@ -171,11 +173,21 @@ theorem HasType.scope_join_preserves_ownership (checkedProgram : program.Checked
                 AddressedEnvironment.retireBinding.progress
                   (current := { current with heap := middle, bindings :=
                     (current.bindings.filter fun entry => decide (entry.2 ∉ front)) }) retained selected
+              have extended : current.heap.retireMany (front ++ [entry.2]) = some next.heap := by
+                rw [RuntimeHeap.retireMany_append, executed]
+                simp only [Option.bind_some, RuntimeHeap.retireMany, primitive]
+              have nextBindings : next.bindings =
+                  (current.bindings.filter fun binding => decide (binding.2 ∉ front ++ [entry.2])) := by
+                rw [bindings, BindingMap.eraseIdx_filter retained.addresses_distinct selected]
+                rw [List.filter_filter]
+                apply congrArg (fun predicate : BindingId × StorageId → Bool => current.bindings.filter predicate)
+                funext binding
+                by_cases previous : binding.2 ∈ front <;> by_cases same : binding.2 = entry.2 <;> simp [previous, same]
               have localIndex := BindingMap.nextRelease.in_prefix
                 (List.IsPrefix.filter _ (List.take_prefix locals.length current.bindings)) chosen
               exact .inr ⟨index, entry, state, cell, next, chosen, localIndex, selected, sourceSelected,
                 cellType, cellTyped, retained.eraseIdx index, (List.mem_filter.mp pending).1, first,
-                found, allowed, retired, primitive, absent, frontier, activation, supply, bindings, nextTyped, outside, callers⟩
+                found, allowed, retired, extended, nextBindings, primitive, absent, frontier, activation, supply, bindings, nextTyped, outside, callers⟩
           intro name state selected selectedHome selectedType fields selectedState path selection
           obtain ⟨next, found, approximation⟩ := joined.lookup selected
           obtain ⟨address, cell, mapped, live, owner, typeEq, cellTyped, member⟩ := branchTyped.lookup selected
