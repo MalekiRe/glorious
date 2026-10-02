@@ -1237,7 +1237,9 @@ the replacement until old-resident cleanup has finished. -/
 def Control.PrincipalConsistent (program : Program) : Control → Prop
   | .result value => value.PrincipalConsistent program
   | .results values => ∀ value ∈ values, value.PrincipalConsistent program
-  | .cleanup _ rest => rest.PrincipalConsistent program
+  | .cleanup pending rest =>
+      (∀ value, .enter value ∈ pending → value.PrincipalConsistent program) ∧
+        rest.PrincipalConsistent program
   | .install _ _ value _ => value.PrincipalConsistent program
   | _ => True
 
@@ -1254,7 +1256,11 @@ theorem ControlTyped.principal_consistent {before after control result}
     intro value member
     obtain ⟨_, _, resident⟩ := residents.member member
     exact resident.principal_consistent
-  | cleanup safe checked ih => exact ih
+  | cleanup safe checked ih =>
+    refine ⟨?_, ih⟩
+    intro value member
+    cases safe (.enter value) member with
+    | enter resident allowed => exact resident.principal_consistent
   | install resident => exact resident.principal_consistent
   | expression | arguments => trivial
 

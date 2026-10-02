@@ -4361,8 +4361,8 @@ outside this modeled result/pack boundary.
 
 Protected payloads and retained tuple/argument frames now share that invariant.
 `Control.PrincipalConsistent` follows the actual saved control through nested
-cleanup and covers installation replacements; `Frame.PrincipalConsistent`
-covers already-evaluated residents retained while later operands execute.
+cleanup, classifies every queued enter-resident and covers installation
+replacements; `Frame.PrincipalConsistent`
 Control and continuation typing derive these facts from the existing resident
 producer, and `ConfigurationTyped.ownership_safe` carries both through general
 source prefix safety and maximal behavior. The superseded result-only inline
@@ -4370,3 +4370,7 @@ predicate is removed. No runtime class metadata or second permission analysis
 is introduced. All 30 strict jobs passed; inspected control, continuation,
 ownership and source-behavior closures contain only the standard Lean axioms.
 This does not supply callable capture environments, loans or custom destructors.
+Queued residents obtain their classification from `DisposalTask.Safe`; release
+markers remain shell metadata, not duplicated owners. The strengthened cleanup
+case passed all 30 strict jobs and the inspected general ownership, exact-cleanup
+exclusion and public source-behavior dependency checks.
