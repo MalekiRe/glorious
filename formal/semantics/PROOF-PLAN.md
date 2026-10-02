@@ -3594,10 +3594,12 @@ and `AddressedEnvironment.ConsumptionFrame.read_before` connects it to lexical
 lookup and actual heap reads. The whole-binding-only interfaces are replaced.
 
 `SourceClosure.Admitted.immutable_read` consumes general source soundness and
-slot preservation. At every execution prefix, every path beneath an immutable
-source binding is either unreadable or yields exactly its incoming value,
-including across nested calls observed in the outer environment. An initially
-unreadable descendant cannot become readable through consumption.
+slot preservation. Between any two execution prefixes, every path beneath an
+immutable source binding is either unreadable or yields exactly its earlier
+value, including across nested calls observed in the outer environment. Once
+a descendant becomes unreadable, no later execution can resurrect it.
+This uses preservation at the earlier prefix and consumption framing of the
+actual suffix, rather than merely comparing every state to program entry.
 No second history relation, successful-read premise, or future-state admission
 assumption is added to the source theorem.
 

@@ -757,9 +757,9 @@ theorem SourceClosure.Admitted.soundness {packages : List PackageSource} {closur
       (state.environment.bindings.map Prod.fst).Nodup ∧ state.OwnershipSafe program :=
   elaborated.soundness slots admitted.checked store issued run
 
-/-- At every admitted source prefix, any path beneath an immutable binding is
-either unreadable through consumption or yields exactly its incoming value.
-This also excludes resurrection of an initially unreadable descendant. -/
+/-- Between any two admitted source prefixes, a path beneath an immutable
+binding is either unreadable or yields exactly its earlier value. Once such a
+descendant becomes unreadable, no later execution can resurrect it. -/
 theorem SourceClosure.Admitted.immutable_read {packages : List PackageSource} {closure : SourceClosure packages}
     {program : Program} (admitted : closure.Admitted program) {home : Module} {scope : SourceScope}
     {expression : NamedExpr} {core : Expr} {type : Ty} {before final : FlowContext}
@@ -769,12 +769,15 @@ theorem SourceClosure.Admitted.immutable_read {packages : List PackageSource} {c
     {environment : Environment}
     (store : BindingMap.Typed program environment.heap environment.activation environment.bindings before)
     (issued : environment.supply.Issued environment.activation)
-    {state : Configuration} (run : Run program ⟨environment, .expression core, []⟩ state)
+    {earlier state : Configuration}
+    (reached : Run program ⟨environment, .expression core, []⟩ earlier)
+    (run : Run program earlier state)
     {name : BindingId} {slot : BindingType} (selected : lookup name scope.context = some slot)
     (immutable : slot.mutable = false) (path : List FieldKey) :
     state.outerEnvironment.read program ⟨name, path⟩ = none ∨
-      state.outerEnvironment.read program ⟨name, path⟩ = environment.read program ⟨name, path⟩ := by
-  have framed := (admitted.soundness elaborated slots store issued run).2.2.1
+      state.outerEnvironment.read program ⟨name, path⟩ = earlier.outerEnvironment.read program ⟨name, path⟩ := by
+  have current := (admitted.soundness elaborated slots store issued reached).1
+  have framed := current.consumption_run admitted.checked run
   have retained : lookup name final.slots = some slot := by
     rw [(elaborated.checked slots).slots, slots]
     exact selected
