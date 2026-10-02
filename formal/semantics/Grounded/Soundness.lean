@@ -84,6 +84,12 @@ theorem HasType.scope_join_preserves_ownership (checkedProgram : program.Checked
               PathType program observer cell.type fields (.nominal nominal) →
               program.data nominal = some declaration → declaration.restriction = some .exact →
               ∃ part, cell.resident.selectFields program cell.type fields = some part ∧ part.Empty) ∧
+      (∀ front middle, current.heap.retireMany front = some middle →
+        ∃ original remaining,
+          BindingMap.Typed program current.heap current.activation current.bindings original ∧
+          remaining.Sublist original ∧
+          BindingMap.Typed program middle current.activation
+            (current.bindings.filter fun entry => decide (entry.2 ∉ front)) remaining) ∧
       ∀ name state, lookup name branch = some state →
         ∀ selectedHome selectedType fields selectedState,
           PathType program selectedHome state.slot.type fields selectedType →
@@ -114,7 +120,10 @@ theorem HasType.scope_join_preserves_ownership (checkedProgram : program.Checked
           have safe := original.ownership_safe
           refine ⟨after, _, _, safe.1, safe.2, step, original.preservation checkedProgram step, retired,
             branchTyped, branchTyped.approximate joined, joined, preserved,
-            (fun _ _ _ split => safe.scope_retirement step split), ?_⟩
+            (fun _ _ _ split => safe.scope_retirement step split), ?_, ?_⟩
+          · intro front middle executed
+            obtain ⟨remaining, subset, retained⟩ := currentStore.retirement_prefix executed
+            exact ⟨_, remaining, currentStore, subset, retained⟩
           intro name state selected selectedHome selectedType fields selectedState path selection
           obtain ⟨next, found, approximation⟩ := joined.lookup selected
           obtain ⟨address, cell, mapped, live, owner, typeEq, cellTyped, member⟩ := branchTyped.lookup selected

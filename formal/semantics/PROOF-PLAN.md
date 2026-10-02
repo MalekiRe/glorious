@@ -3852,3 +3852,25 @@ on `propext`, `Classical.choice`, and `Quot.sound`. No tests or examples were
 added. This is structural no-hook destruction over the logical heap, not custom
 Drop or physical release. Scope retirement and caller restoration still need
 explicit partial-resident destruction; all fourteen broad obligations remain open.
+
+
+## Remaining bindings stay realized during retirement prefixes
+
+`BindingMap.Typed.retirement_prefix` derives typing in each actual intermediate
+retirement heap for exactly the bindings whose storage identities have not yet
+been retired. The remaining source context is a sublist of the original context:
+its complete binding states, including initialization masks, are retained
+verbatim. Neither a future realization nor reconstructed readiness is assumed.
+The shared filter proof preserves both lexical and storage identity uniqueness.
+
+`HasType.scope_join_preserves_ownership` consumes this result at reached source
+scope cleanup, alongside its existing ordered retirement and branch-join
+guarantees. This supplies the binding-realization invariant needed to stage
+per-owner destruction without retaining maps to dead cells. It does not yet
+change the atomic scope/return transitions into interleaved resident destruction
+and single-owner retirement. That operational cutover, custom hooks and physical
+release remain open; no broad completion obligation is closed.
+
+All 30 strict Lean build jobs passed. Inspected retirement-prefix, source scope
+cleanup and maximal source behavior proofs use only standard Lean axioms. No
+tests or examples were added.

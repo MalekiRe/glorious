@@ -222,6 +222,48 @@ theorem BindingMap.Typed.frame (typed : BindingMap.Typed program heap activation
     exact .cons ((unchanged _ (by simp)).trans found) owner declared resident
       (ih (fun identity member => unchanged identity (List.mem_cons_of_mem _ member))) freshName freshStorage
 
+/-- Retain exactly the selected storage identities without changing any source
+binding state. This transports masks, rather than reconstructing availability. -/
+theorem BindingMap.Typed.filter_cells
+    (typed : BindingMap.Typed program heap activation bindings context)
+    (keep : StorageId → Bool) :
+    ∃ remaining, remaining.Sublist context ∧
+      BindingMap.Typed program heap activation (bindings.filter fun entry => keep entry.2) remaining := by
+  induction typed with
+  | nil => exact ⟨[], .refl _, .nil⟩
+  | @cons name identity cell state bindings context found owner declared resident tail freshName freshStorage ih =>
+    obtain ⟨remaining, subset, retained⟩ := ih
+    cases chosen : keep identity with
+    | false =>
+      exact ⟨remaining, subset.cons _, by simpa [chosen] using retained⟩
+    | true =>
+      refine ⟨(name, state) :: remaining, subset.cons_cons _, ?_⟩
+      simp only [List.filter_cons, chosen, ↓reduceIte]
+      refine .cons found owner declared resident retained ?_ ?_
+      · intro member
+        obtain ⟨entry, member, same⟩ := List.mem_map.mp member
+        exact freshName (List.mem_map.mpr ⟨entry, subset.subset member, same⟩)
+      · intro member
+        obtain ⟨entry, member, same⟩ := List.mem_map.mp member
+        exact freshStorage (List.mem_map.mpr ⟨entry, (List.mem_filter.mp member).1, same⟩)
+
+/-- Every actual retirement prefix leaves the not-yet-retired bindings realized
+in that prefix's heap. Their source states are retained verbatim, not supplied
+as a future-state invariant. -/
+theorem BindingMap.Typed.retirement_prefix
+    (typed : BindingMap.Typed program heap activation bindings context)
+    {retired : List StorageId} {middle : RuntimeHeap StorageCell}
+    (executed : heap.retireMany retired = some middle) :
+    ∃ remaining, remaining.Sublist context ∧
+      BindingMap.Typed program middle activation
+        (bindings.filter fun entry => decide (entry.2 ∉ retired)) remaining := by
+  obtain ⟨remaining, subset, retained⟩ := typed.filter_cells (fun identity => decide (identity ∉ retired))
+  refine ⟨remaining, subset, retained.frame ?_⟩
+  intro identity member
+  obtain ⟨entry, member, same⟩ := List.mem_map.mp member
+  have outside := (List.mem_filter.mp member).2
+  simp only [decide_eq_true_eq] at outside
+  exact RuntimeHeap.retireMany_outside executed (same ▸ outside)
 /-- A write confined to one owned cell preserves every differently owned map.
 The address separation follows from the cell’s owner, not lexical spelling. -/
 theorem BindingMap.Typed.frame_other_activation
