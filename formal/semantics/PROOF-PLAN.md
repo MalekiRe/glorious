@@ -64,8 +64,9 @@ completed execution, including recursive executions. Source return contracts
 preserve the returned resident's principal across every valid typing. General
 maximal behavior constructs either a normal result with that unique principal
 or an infinite execution retaining prefix safety. `Configuration.OwnershipSafe`
-also classifies current results and every current argument-pack resident, not
-only final returns, through the same finite resident evidence.
+also classifies current results, argument packs, protected cleanup/installation
+payloads and values retained in tuple/argument continuation frames through the
+same finite resident evidence. This is not a closure-capture or reference model.
 
 `correctness` constructs a unique completed execution when supplied
 `FiniteCalls program expression`: accessibility of the static subexpression/
@@ -4357,3 +4358,15 @@ All 30 strict jobs passed; inspected ownership, general/source safety, exact
 cleanup exclusion and invocation-behavior closures use only the standard three
 Lean axioms. References, retained capture environments and custom Drop remain
 outside this modeled result/pack boundary.
+
+Protected payloads and retained tuple/argument frames now share that invariant.
+`Control.PrincipalConsistent` follows the actual saved control through nested
+cleanup and covers installation replacements; `Frame.PrincipalConsistent`
+covers already-evaluated residents retained while later operands execute.
+Control and continuation typing derive these facts from the existing resident
+producer, and `ConfigurationTyped.ownership_safe` carries both through general
+source prefix safety and maximal behavior. The superseded result-only inline
+predicate is removed. No runtime class metadata or second permission analysis
+is introduced. All 30 strict jobs passed; inspected control, continuation,
+ownership and source-behavior closures contain only the standard Lean axioms.
+This does not supply callable capture environments, loans or custom destructors.

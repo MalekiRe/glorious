@@ -196,6 +196,19 @@ theorem ValueHasType.principal_exists {program : Program} {value : Value} {type 
   exact ⟨principal, classified, fun _ _ original originalClass =>
     (original.principal resident originalClass).unique classified⟩
 
+/-- One actual resident has one ownership class, independently of its valid
+annotation. This is derived from resident typing, not stored as runtime metadata. -/
+def Value.PrincipalConsistent (program : Program) (value : Value) : Prop :=
+  ∃ type, ValueHasType program value type ∧
+    ∃ principal, type.HasPrincipal program.data principal ∧
+      ∀ originalType originalPrincipal, ValueHasType program value originalType →
+        originalType.HasPrincipal program.data originalPrincipal → originalPrincipal = principal
+
+theorem ValueHasType.principal_consistent {value : Value} {type : Ty}
+    (resident : ValueHasType program value type) : value.PrincipalConsistent program :=
+  ⟨type, resident, resident.principal_exists⟩
+
+
 theorem ValuesHaveTypes.member {values : List Value} {types : List Ty}
     (typed : ValuesHaveTypes program values types) {value : Value} (member : value ∈ values) :
     ∃ type, type ∈ types ∧ ValueHasType program value type := by

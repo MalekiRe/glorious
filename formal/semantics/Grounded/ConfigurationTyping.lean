@@ -1232,24 +1232,58 @@ theorem ConfigurationTyped.consumption_run {context : FlowContext} {result : Res
   | refl state => exact .refl _ _
   | step head tail ih => exact (typed.consumption_step head).trans (ih (typed.preservation checkedProgram head))
 
+/-- Cleanup retains its protected continuation payload; installation retains
+the replacement until old-resident cleanup has finished. -/
+def Control.PrincipalConsistent (program : Program) : Control → Prop
+  | .result value => value.PrincipalConsistent program
+  | .results values => ∀ value ∈ values, value.PrincipalConsistent program
+  | .cleanup _ rest => rest.PrincipalConsistent program
+  | .install _ _ value _ => value.PrincipalConsistent program
+  | _ => True
+
+def Frame.PrincipalConsistent (program : Program) : Frame → Prop
+  | .tupleTail value | .argumentTail value => value.PrincipalConsistent program
+  | _ => True
+
+theorem ControlTyped.principal_consistent {before after control result}
+    (typed : ControlTyped program before control result after) :
+    control.PrincipalConsistent program := by
+  induction typed with
+  | result resident => exact resident.principal_consistent
+  | results residents =>
+    intro value member
+    obtain ⟨_, _, resident⟩ := residents.member member
+    exact resident.principal_consistent
+  | cleanup safe checked ih => exact ih
+  | install resident => exact resident.principal_consistent
+  | expression | arguments => trivial
+
+theorem FrameTyped.principal_consistent {heap supply activation context next input result frame}
+    (typed : FrameTyped program heap supply activation context input frame next result) :
+    frame.PrincipalConsistent program := by
+  cases typed <;> try trivial
+  case tupleTail resident => exact resident.principal_consistent
+  case argumentTail resident => exact resident.principal_consistent
+
+theorem ContinuationTyped.principal_consistent {heap supply activation context final input result stack}
+    (typed : ContinuationTyped program heap supply activation context input stack final result) :
+    ∀ frame ∈ stack, frame.PrincipalConsistent program := by
+  induction typed with
+  | nil => intro frame member; cases member
+  | cons head tail ih =>
+    intro frame member
+    rcases List.mem_cons.mp member with rfl | member
+    · exact head.principal_consistent
+    · exact ih frame member
+
 
 /-- Current results and argument packs retain a principal consistent under every
 valid resident typing. Copy reads and disposal sites respect the same structural
 authority; scope retirement preserves newest-owner-first order. No future
 readiness or completed execution is assumed. -/
 def Configuration.OwnershipSafe (program : Program) (state : Configuration) : Prop :=
-  (match state.control with
-  | .result value =>
-      ∃ type, ValueHasType program value type ∧
-        ∃ principal, type.HasPrincipal program.data principal ∧
-          ∀ originalType originalPrincipal, ValueHasType program value originalType →
-            originalType.HasPrincipal program.data originalPrincipal → originalPrincipal = principal
-  | .results values =>
-      ∀ value ∈ values, ∃ type, ValueHasType program value type ∧
-        ∃ principal, type.HasPrincipal program.data principal ∧
-          ∀ originalType originalPrincipal, ValueHasType program value originalType →
-            originalType.HasPrincipal program.data originalPrincipal → originalPrincipal = principal
-  | _ => True) ∧
+  (state.control.PrincipalConsistent program ∧
+    ∀ frame ∈ state.continuation, frame.PrincipalConsistent program) ∧
   match state.control, state.continuation with
   | .cleanup pending _, _ =>
       (∀ task ∈ pending, DisposalTask.Safe program task) ∧
@@ -1292,12 +1326,7 @@ theorem ConfigurationTyped.ownership_safe {context : FlowContext} {result : Resu
   cases typed with
   | intro store issued code continuation =>
     constructor
-    · cases code <;> try trivial
-      case result resident => exact ⟨_, resident, resident.principal_exists⟩
-      case results residents =>
-        intro value member
-        obtain ⟨type, _, resident⟩ := residents.member member
-        exact ⟨type, resident, resident.principal_exists⟩
+    · exact ⟨code.principal_consistent, continuation.principal_consistent⟩
     · cases code <;> try trivial
       case cleanup safe checked =>
         exact ⟨safe, fun _ _ _ member resident classified => (safe _ member).zero_use resident classified⟩
