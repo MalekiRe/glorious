@@ -525,9 +525,9 @@ theorem HasType.scope_preserves_nondiscardable (checkedProgram : program.Checked
     {address : StorageId} {cell : StorageCell} (found : current.heap.read address = some cell)
     {selectedHome : Module} {selectedType : Ty} {fields : List FieldKey}
     (path : PathType program selectedHome cell.type fields selectedType)
-    {owner : Value}
-    (resident : ((cell.resident.selectFields program cell.type fields).bind PartialValue.read) = some owner)
-    (required : ¬ UsePermitted program.data .discard selectedType) :
+    {owner : PartialValue}
+    (resident : cell.resident.selectFields program cell.type fields = some owner)
+    (required : ¬ owner.Disposable program selectedType) :
     ∃ after : Environment,
       Step program ⟨current, .result value, .scope count :: stack⟩ ⟨after, .result value, stack⟩ ∧
       ConfigurationTyped program final (.one type) ⟨after, .result value, stack⟩ ∧
@@ -605,9 +605,9 @@ theorem HasType.restore_preserves_nondiscardable (checkedProgram : program.Check
     {address : StorageId} {cell : StorageCell} (found : current.heap.read address = some cell)
     {selectedHome : Module} {selectedType : Ty} {fields : List FieldKey}
     (path : PathType program selectedHome cell.type fields selectedType)
-    {owner : Value}
-    (resident : ((cell.resident.selectFields program cell.type fields).bind PartialValue.read) = some owner)
-    (required : ¬ UsePermitted program.data .discard selectedType) :
+    {owner : PartialValue}
+    (resident : cell.resident.selectFields program cell.type fields = some owner)
+    (required : ¬ owner.Disposable program selectedType) :
     ∃ after : Environment,
       Step program ⟨current, .result value, .restore caller :: stack⟩ ⟨after, .result value, stack⟩ ∧
       ConfigurationTyped program final (.one type) ⟨after, .result value, stack⟩ ∧
@@ -727,10 +727,10 @@ theorem HasType.no_nondiscardable_overwrite (checkedProgram : program.Checked)
     (path : PathType program selectedHome cell.type place.fields selectedType)
     {descendantHome : Module} {descendantType : Ty} {fields : List FieldKey}
     (descendant : PathType program descendantHome selectedType fields descendantType)
-    {owner : Value}
+    {owner : PartialValue}
     (selected : ((cell.resident.selectFields program cell.type place.fields).bind fun old =>
-      (old.selectFields program selectedType fields).bind PartialValue.read) = some owner)
-    (required : ¬ UsePermitted program.data .discard descendantType) : False := by
+      old.selectFields program selectedType fields) = some owner)
+    (required : ¬ owner.Disposable program descendantType) : False := by
   exact BindingMap.ReplacementSafe.not_nondiscardable
     (checked.soundness checkedProgram store issued run).2.2.2.2 mapped found path descendant selected required
 

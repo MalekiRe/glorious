@@ -89,17 +89,19 @@ theorem BindingMap.ReplacementSafe.not_nondiscardable
     (path : PathType program selectedHome cell.type place.fields selectedType)
     {descendantHome : Module} {descendantType : Ty} {fields : List FieldKey}
     (descendant : PathType program descendantHome selectedType fields descendantType)
-    {owner : Value}
+    {owner : PartialValue}
     (selected : ((cell.resident.selectFields program cell.type place.fields).bind fun old =>
-      (old.selectFields program selectedType fields).bind PartialValue.read) = some owner)
-    (required : ¬ UsePermitted program.data .discard descendantType) : False := by
+      old.selectFields program selectedType fields) = some owner)
+    (required : ¬ owner.Disposable program descendantType) : False := by
   obtain ⟨actualAddress, actualCell, value, type, actualMapped, actualFound,
     actualSelected, actualPath, permission⟩ := safe
   cases Option.some.inj (actualMapped.symm.trans mapped)
   cases Option.some.inj (actualFound.symm.trans found)
   cases actualPath.result_unique path
   rw [actualSelected] at selected
-  exact required (permission.selected_permission descendant selected)
+  obtain ⟨part, partFound, partPermission⟩ := descendant.disposable permission
+  cases Option.some.inj (partFound.symm.trans selected)
+  exact required partPermission
 
 
 theorem BindingMap.ReplacementSafe.not_exact
@@ -114,15 +116,8 @@ theorem BindingMap.ReplacementSafe.not_exact
     (selected : ((cell.resident.selectFields program cell.type place.fields).bind fun old =>
       old.selectFields program selectedType fields) = some owner)
     (unconsumed : ¬ owner.Empty) : False := by
-  obtain ⟨actualAddress, actualCell, value, type, actualMapped, actualFound,
-    actualSelected, actualPath, permission⟩ := safe
-  cases Option.some.inj (actualMapped.symm.trans mapped)
-  cases Option.some.inj (actualFound.symm.trans found)
-  cases actualPath.result_unique path
-  rw [actualSelected] at selected
-  obtain ⟨selectedOwner, selectedOwnerFound, selectedPermission⟩ := descendant.disposable permission
-  cases Option.some.inj (selectedOwnerFound.symm.trans selected)
-  exact unconsumed (selectedPermission.exact_nominal_empty declared restricted)
+  exact safe.not_nondiscardable mapped found path descendant selected
+    (fun permission => unconsumed (permission.exact_nominal_empty declared restricted))
 
 
 theorem BindingMap.Typed.replacement_safe

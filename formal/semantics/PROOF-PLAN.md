@@ -2187,9 +2187,9 @@ future-state admission premise is introduced.
 
 `BindingMap.Disposable.release_preserves_nondiscardable` and the public
 `HasType.scope_preserves_nondiscardable` / `restore_preserves_nondiscardable`
-prove that an actual retirement step preserves any readable heap cell whose
-structural type forbids discard. They require neither an explicit exact nominal
-annotation nor a syntactic resident wrapper. The earlier exact-value guarantees
+construct retirement and preserve any cell containing a selected partial resident
+that lacks residual disposal permission. Neither the selected descendant nor its
+containing owner must remain readable. No explicit exact annotation is required.
 remain valid, including for cells outside the current lexical scope. Both scope
 and return consumers construct cleanup through their authoritative producers
 before applying owner protection. No successful retirement/restoration step is
@@ -2215,9 +2215,9 @@ module visibility contexts, so the existentially selected type cannot conceal
 another structural principal.
 
 `HasType.no_nondiscardable_overwrite` consumes the general public prefix
-soundness contract. It excludes overwrites of all readable structurally
-nondiscardable selected owners, including tuples, arrays and inherited nominal
-restrictions. It does not assume that execution terminates. Moved-out holes
+soundness contract. It excludes overwrites above any selected partial descendant
+that lacks residual disposal permission, including unreadable aggregates with
+remaining ownership obligations. It does not assume termination. Moved-out holes
 remain restorable; no additional restriction was imposed on source admission.
 
 `lake build Grounded` passed all 30 jobs. Explicit axiom inspection covered
@@ -2226,6 +2226,15 @@ exclusion, preservation, progress and source-function soundness. Only standard
 Lean axioms occurred. No unit tests, examples or assumed completion conditions
 were introduced. Custom destruction, correlated branch states, loans, nonlocal
 cleanup and the other whole-language obligations remain open.
+
+The generalized retirement and replacement producers now share residual
+`PartialValue.Disposable` evidence. Exact-nominal consumers derive their
+protection from these producers and structural nonemptiness, rather than
+duplicating the heap and path argument. All 30 build jobs passed after the
+cutover. Axiom inspection of both producers, the three public general protection
+theorems, exact-owner consumers and maximal source behavior reported only
+standard Lean axioms. No tests or examples were added. This is logical
+retirement and overwrite protection, not custom Drop or field destruction.
 
 
 ## Repaired the runtime disposal authority itself

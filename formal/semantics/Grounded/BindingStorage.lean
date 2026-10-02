@@ -469,15 +469,17 @@ theorem BindingMap.Disposable.release_preserves_nondiscardable
     {address : StorageId} {cell : StorageCell} (found : heap.read address = some cell)
     {selectedHome : Module} {selectedType : Ty} {fields : List FieldKey}
     (path : PathType program selectedHome cell.type fields selectedType)
-    {owner : Value}
-    (resident : ((cell.resident.selectFields program cell.type fields).bind PartialValue.read) = some owner)
-    (required : ¬ UsePermitted program.data .discard selectedType) :
+    {owner : PartialValue}
+    (resident : cell.resident.selectFields program cell.type fields = some owner)
+    (required : ¬ owner.Disposable program selectedType) :
     after.read address = some cell := by
   have outside : address ∉ bindings.map Prod.snd := by
     intro member
     obtain ⟨actual, selected, permission⟩ := disposition address member
     cases Option.some.inj (selected.symm.trans found)
-    exact required (permission.selected_permission path resident)
+    obtain ⟨part, partFound, partPermission⟩ := path.disposable permission
+    cases Option.some.inj (partFound.symm.trans resident)
+    exact required partPermission
   exact (releaseBindings.outside released outside).trans found
 
 
@@ -493,14 +495,8 @@ theorem BindingMap.Disposable.release_preserves_exact
     {owner : PartialValue} (resident : cell.resident.selectFields program cell.type fields = some owner)
     (unconsumed : ¬ owner.Empty) :
     after.read address = some cell := by
-  have outside : address ∉ bindings.map Prod.snd := by
-    intro member
-    obtain ⟨actual, selected, permission⟩ := disposition address member
-    cases Option.some.inj (selected.symm.trans found)
-    obtain ⟨selectedOwner, selectedOwnerFound, selectedPermission⟩ := path.disposable permission
-    cases Option.some.inj (selectedOwnerFound.symm.trans resident)
-    exact unconsumed (selectedPermission.exact_nominal_empty declared restricted)
-  exact (releaseBindings.outside released outside).trans found
+  exact disposition.release_preserves_nondiscardable released found path resident
+    (fun permission => unconsumed (permission.exact_nominal_empty declared restricted))
 
 
 theorem BindingMap.Typed.release (typed : BindingMap.Typed program heap activation bindings context) :
