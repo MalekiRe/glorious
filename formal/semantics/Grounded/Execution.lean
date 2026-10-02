@@ -935,4 +935,25 @@ theorem Run.call_frame {before : Environment} {after : Configuration} {declarati
         omega
       · exact (allocateBindings.old _ _ _ old).trans found
 
+/-- A returned owned-value call preserves every old heap observation and leaves
+no live allocation behind. The allocation frontier still advances: retired
+identities are not reused, and this is not rollback. -/
+theorem Run.call_heap {before after : Environment} {declaration : FunctionDecl}
+    {values : List Value} {value : Value}
+    (run : Run program ⟨before, .results values, [.call declaration]⟩ ⟨after, .result value, []⟩)
+    (bounded : ∀ identity ∈ before.bindings.map Prod.snd, identity.index < before.heap.next) :
+    ∀ identity, after.heap.read identity = before.heap.read identity := by
+  intro identity
+  cases found : before.heap.read identity with
+  | some cell => exact run.call_frame found
+  | none =>
+    by_cases old : identity.index < before.heap.next
+    · exact (run.retired ⟨old, found⟩).2
+    · cases live : after.heap.read identity with
+      | none => rfl
+      | some cell =>
+        have retired := run.return_retires_all bounded identity (Nat.le_of_not_gt old)
+          (after.heap.bounded _ _ live)
+        exact live.symm.trans retired.2
+
 end Grounded

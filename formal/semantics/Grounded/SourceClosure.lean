@@ -1670,7 +1670,7 @@ theorem SourceClosure.Admitted.invocation_behavior {packages : List PackageSourc
       AddressedEnvironment.ConsumptionFrame program context.slots environment after ∧
       (⟨after, .result value, []⟩ : Configuration).OwnershipSafe program ∧
       Configuration.ExternalFrame ⟨environment, .results values, [.call declaration]⟩ ⟨after, .result value, []⟩ ∧
-      (∀ identity cell, environment.heap.read identity = some cell → after.heap.read identity = some cell) ∧
+      (∀ identity, after.heap.read identity = environment.heap.read identity) ∧
       (∀ identity, environment.heap.next ≤ identity.index → identity.index < after.heap.next →
         after.heap.Retired identity) ∧
       ∃ inputs, prepareBindings declaration.parameters values = some inputs ∧
@@ -1691,8 +1691,11 @@ theorem SourceClosure.Admitted.invocation_behavior {packages : List PackageSourc
       ⟨environment, .results values, [.call declaration]⟩ :=
     .intro store issued (.results arguments) (.cons (.call declared) .nil)
   rcases entry.behavior admitted.checked with ⟨after, value, run, typed, stored, framed, safe, external, retired⟩ | ⟨trace, infinite, safe⟩
-  · exact .inl ⟨after, value, run, typed, run.outer_scope, stored, framed, safe, external,
-      fun _ _ found => run.call_frame found, retired, run.call_cleanup⟩
+  · refine .inl ⟨after, value, run, typed, run.outer_scope, stored, framed, safe, external,
+      run.call_heap ?_, retired, run.call_cleanup⟩
+    intro identity member
+    obtain ⟨cell, found⟩ := store.live identity member
+    exact environment.heap.bounded _ _ found
   · refine .inr ⟨trace, infinite, ?_⟩
     intro index
     obtain ⟨typed, framed, owned, external, tracked⟩ := safe index
@@ -1731,6 +1734,7 @@ theorem SourceClosure.Admitted.compatible_call_behavior {packages : List Package
         (⟨after, .result value, []⟩ : Configuration).OwnershipSafe program ∧
         Configuration.ExternalFrame ⟨environment, .expression (.call identity (inputs.map Prod.fst)), []⟩
           ⟨after, .result value, []⟩ ∧
+        (∀ identity, after.heap.read identity = middle.heap.read identity) ∧
         (∀ identity, environment.heap.next ≤ identity.index → identity.index < after.heap.next →
           after.heap.Retired identity) ∧
         ∀ identity ∈ (enterBindings middle.heap middle.supply bindings).bindings.map Prod.snd,
@@ -1752,11 +1756,17 @@ theorem SourceClosure.Admitted.compatible_call_behavior {packages : List Package
   rcases typed.behavior admitted.checked with ⟨after, value, returned, resident, stored, _, safe, _, _⟩ | ⟨trace, infinite, _⟩
   · have run := entered.trans returned
     have framed := (checked.soundness admitted.checked store issued run).2.2.1
+    have bounded : ∀ identity ∈ environment.bindings.map Prod.snd, identity.index < environment.heap.next := by
+      intro identity member
+      obtain ⟨cell, found⟩ := store.live identity member
+      exact environment.heap.bounded _ _ found
     refine .inl ⟨after, value, run, resident, stored, framed, safe, run.external_frame,
-      run.return_retires_all ?_, returned.body_return_retires⟩
+      (Run.step (Step.callInputs prepared) returned).call_heap ?_,
+      run.return_retires_all bounded, returned.body_return_retires⟩
     intro identity member
-    obtain ⟨cell, found⟩ := store.live identity member
-    exact environment.heap.bounded _ _ found
+    have same : middle.bindings = environment.bindings :=
+      congrArg AddressedScope.bindings evaluated.outer_scope
+    exact Nat.lt_of_lt_of_le (bounded identity (by simpa only [same] using member)) evaluated.heap_history.next_le
   · obtain ⟨whole, execution⟩ := entered.prepend_infinite infinite
     refine .inr ⟨whole, execution, ?_⟩
     intro index

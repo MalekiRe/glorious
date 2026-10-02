@@ -3401,3 +3401,22 @@ captured environments, custom Drop and the broad completion obligations remain
 open. In particular, future borrowed calls must preserve permissions and
 authorized effects rather than promise unconditional equality of caller cells.
 
+## Returned owned-value calls restore all heap observations
+
+`Run.call_heap` combines caller-cell preservation, permanent retirement and
+complete allocation accounting: every address reads exactly as it did before
+callee entry when the call returns. This includes absent addresses, so the
+conclusion excludes residual live callee allocations rather than merely
+preserving known caller cells. The allocation frontier is not reset.
+
+Both public source invocation contracts consume this theorem. Ordered
+Copy/move calls compare against the constructed post-input heap, preserving
+input consumption rather than rolling it back. Their existing typed-result,
+retirement and divergence guarantees remain intact.
+
+Verification: all 30 `lake build Grounded` jobs passed; axiom inspection of
+the producer and both source consumers found only standard Lean axioms.
+This closes heap-observation reclamation for the current direct owned-value
+fragment, not reference-bearing, captured, foreign or effectful invocation.
+No broad semantic completion item is marked complete.
+
