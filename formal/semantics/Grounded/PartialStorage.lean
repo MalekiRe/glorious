@@ -506,6 +506,15 @@ theorem PartialValue.Disposable.read_permission {program : Program} {value : Par
   obtain ⟨state, typed, disposition⟩ := permission
   exact disposition.may_read (typed.read_sound read).2
 
+/-- Actual readable occupancy can be destroyed only when its principal permits
+zero use. Holes and authorized residual shells are not treated as whole owners. -/
+theorem PartialValue.Disposable.zero_use {program : Program} {value : PartialValue} {type : Ty}
+    {owner : Value} {principal : Principal} (permission : value.Disposable program type)
+    (observed : value.read = some owner) (classified : type.HasPrincipal program.data principal) :
+    principal.Permits 0 :=
+  ((classified .discard).mp (permission.read_permission observed)) 0 (by simp)
+
+
 /-- Another valid typing of the observed value cannot weaken its owned-use
 principal; this includes the element-type ambiguity of empty arrays. -/
 theorem PartialValue.Disposable.read_permission_as {program : Program} {value : PartialValue}

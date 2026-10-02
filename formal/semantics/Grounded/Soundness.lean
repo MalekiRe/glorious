@@ -73,6 +73,32 @@ theorem HasType.retirement_preserves_nondiscardable (checkedProgram : program.Ch
     after.environment.heap.read address = some cell :=
   (checked.soundness checkedProgram store issued run).2.2.2.2.retire_preserves_nondiscardable
     step found path resident required
+
+/-- Each indexed retirement protects a readable exact descendant, whether its
+class was inferred or declared. The enclosing owner may already be partially moved. -/
+theorem HasType.retirement_preserves_exact_resident (checkedProgram : program.Checked)
+    {context final : FlowContext} {expression : Expr} {type : Ty}
+    (checked : HasType program home context expression type final)
+    {environment current : Environment}
+    (store : BindingMap.Typed program environment.heap environment.activation environment.bindings context)
+    (issued : environment.supply.Issued environment.activation)
+    {value : Value} {index : Nat} {stack : List Frame} {after : Configuration}
+    (run : Run program ⟨environment, .expression expression, []⟩
+      ⟨current, .result value, .retire index :: stack⟩)
+    (step : Step program ⟨current, .result value, .retire index :: stack⟩ after)
+    {address : StorageId} {cell : StorageCell} (found : current.heap.read address = some cell)
+    {selectedHome : Module} {selectedType : Ty} {fields : List FieldKey}
+    (path : PathType program selectedHome cell.type fields selectedType) {owner : PartialValue}
+    (resident : cell.resident.selectFields program cell.type fields = some owner)
+    {observed : Value} (read : owner.read = some observed)
+    (classified : selectedType.HasPrincipal program.data .exact) :
+    after.environment.heap.read address = some cell := by
+  apply checked.retirement_preserves_nondiscardable checkedProgram store issued run step found path resident
+  intro permission
+  have zero := permission.zero_use read classified
+  simp at zero
+
+
 /-- Reached scope cleanup constructs its actual retirement and preserved
 continuation, then joins retained descendants under their own use classes.
 No completed cleanup or future mask realization is assumed. -/

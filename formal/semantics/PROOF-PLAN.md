@@ -4404,3 +4404,21 @@ state, rather than exporting it only from the specialized function-storage
 theorem. The retained-scope producer was promoted before its invariant consumer;
 no duplicate derivation was introduced. All 30 strict jobs and inspected general
 ownership/source/invocation behavior axiom closures passed after integration.
+
+## Actual retirement protects inferred exact descendants
+
+`PartialValue.Disposable.zero_use` derives the quantitative zero-use obligation
+from actual readable occupancy and its principal, using the existing residual
+disposal and read-soundness path. `HasType.retirement_preserves_exact_resident`
+consumes it in the actual indexed retirement transition: a readable exact
+descendant protects its containing cell even when the enclosing aggregate has
+already been partially moved. This covers inferred as well as manually declared
+exact classes without supplying nondisposability as a separate premise.
+
+The observation is of the reached pre-state. No later termination, cleanup
+success or future initialization is assumed. The stronger existing manual-shell
+protection remains: this readable-descendant result does not prohibit legal
+cleanup of an inferred-exact aggregate after all exact descendants have moved.
+All 30 strict jobs passed; inspected quantitative retirement, general ownership
+and public source-soundness/behavior closures use only the standard Lean axioms.
+Custom destructor and reference restoration obligations remain open.
