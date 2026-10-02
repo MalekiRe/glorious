@@ -17,6 +17,9 @@ def Code.append {n : Nat} {α : Type} : Code n α → Code n α → Code n α
   | .branch guard yes no, tail => .branch guard (yes.append tail) (no.append tail)
   | .loop guard body next, tail => .loop guard body (next.append tail)
 
+@[simp] theorem Code.append_halt {n : Nat} {α : Type} (code : Code n α) : code.append .halt = code := by
+  induction code <;> simp_all [Code.append]
+
 /-- Precision policy: both branches establish the same exact Context and a
 loop preserves its invariant Context. These are checking restrictions, not
 requirements imposed by Code execution on arbitrary machine states. -/

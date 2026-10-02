@@ -101,12 +101,32 @@ noncomputable def Op.effect_of_exec {n : Nat} {op : Op n} {before after : State 
     cases executed
     exact .drop live
 
-/-- Capabilities of the resident actually selected by a structural effect. -/
-def Op.Effect.Permitted {n : Nat} {op : Op n} {before after : State n}
+/-- Only the resident capabilities needed for resource conservation, not full legality. -/
+def Op.Effect.ConservationAllowed {n : Nat} {op : Op n} {before after : State n}
     (signature : Signature) : op.Effect before after → Prop
   | .take _ _ _ _ | .put _ _ _ => True
   | .copy (value := value) _ _ _ => (value.kind signature).copyable
   | .drop (value := value) _ => (value.kind signature).disposable
+
+/-- Complete resident-level legality, derived only from the authoritative
+checker. Execution witnesses already carry selection, vacancy and register facts. -/
+def Op.Effect.Legal {n : Nat} {op : Op n} {before after : State n}
+    (signature : Signature) : op.Effect before after → Prop
+  | .take (p := p) (mode := mode) (value := value) (result := result) _ _ _ _ =>
+      p.layout = (Value.kind signature value).layout id ∧ mode.Checked (Value.kind signature value) (Value.kind signature result)
+  | .put (lens := lens) (value := value) _ _ _ =>
+      Fits (Value.kind signature value) (lens.selected.map (Value.kind signature))
+  | .copy (value := value) _ _ _ => (value.kind signature).copyable
+  | .drop (value := value) _ => (value.kind signature).disposable ∧ (value.kind signature).shallow
+
+theorem Op.Effect.Legal.conservationAllowed {n : Nat} {op : Op n} {before after : State n}
+    {signature : Signature} {effect : op.Effect before after} (legal : effect.Legal signature) :
+    effect.ConservationAllowed signature := by
+  cases effect with
+  | take => trivial
+  | put => trivial
+  | copy => exact legal
+  | drop => exact legal.1
 
 theorem vacant_mass_zero {cell : Cell Atom} (leaf : Atom → Nat) (shell : Shell → Nat)
     (empty : vacant cell = true) : cellMass leaf shell cell = 0 := by
@@ -128,7 +148,7 @@ theorem Extract.resource_balance {mode : Extract} {value result : Value}
 /-- Ownership observations consume the transition witness, not a second
 reconstruction of selection and execution from typing. -/
 theorem Op.Effect.conserves {n : Nat} {op : Op n} {state next : State n}
-    {signature : Signature} (effect : op.Effect state next) (allowed : effect.Permitted signature) :
+    {signature : Signature} (effect : op.Effect state next) (allowed : effect.ConservationAllowed signature) :
     Conserves signature state next := by
   cases effect with
   | @take _ p mode actual value result found live extracted unused =>
@@ -168,7 +188,7 @@ realization and resident capabilities. No post-state property is an input. -/
 theorem Op.Checked.realize {n : Nat} {signature : Signature} {before after : Context n}
     {op : Op n} (checked : Op.Checked before op after) {state : State n}
     (typed : state.Typed signature before) :
-    ∃ next, ∃ effect : op.Effect state next, next.Typed signature after ∧ effect.Permitted signature := by
+    ∃ next, ∃ effect : op.Effect state next, next.Typed signature after ∧ effect.Legal signature := by
   cases checked with
   | @take p mode input output lens empty found selected layout extract =>
     have unused : state.temp = none := by simpa [empty] using typed.2
@@ -176,13 +196,19 @@ theorem Op.Checked.realize {n : Nat} {signature : Signature} {before after : Con
     obtain ⟨value, live, classified⟩ := Option.map_eq_some_iff.mp (actualTyped.trans selected)
     obtain ⟨result, extracted, resultTyped⟩ := extract.realized classified
     exact ⟨_, .take actualFound live extracted unused,
-      p.typed_write typed actual lens rebuild rfl (by simp [resultTyped]), trivial⟩
+      p.typed_write typed actual lens rebuild rfl (by simp [resultTyped]), by
+        change p.layout = (value.kind signature).layout id ∧ mode.Checked (value.kind signature) (result.kind signature)
+        rw [classified, resultTyped]
+        exact ⟨layout, extract⟩⟩
   | @put p shape lens resident found fits =>
     obtain ⟨actual, actualFound, actualTyped, rebuild⟩ := p.realized typed lens found
     obtain ⟨available, _⟩ := fits.realized actualTyped
     obtain ⟨value, live, classified⟩ := Option.map_eq_some_iff.mp (typed.2.trans resident)
     exact ⟨_, .put actualFound live available,
-      p.typed_write typed actual lens rebuild (by simp [classified]) rfl, trivial⟩
+      p.typed_write typed actual lens rebuild (by simp [classified]) rfl, by
+        change Fits (value.kind signature) (actual.selected.map (Value.kind signature))
+        rw [classified, actualTyped]
+        exact fits⟩
   | @copy p shape lens empty found selected allowed =>
     have unused : state.temp = none := by simpa [empty] using typed.2
     obtain ⟨actual, actualFound, actualTyped, _⟩ := p.realized typed lens found
@@ -193,13 +219,14 @@ theorem Op.Checked.realize {n : Nat} {signature : Signature} {before after : Con
   | @drop shape resident allowed exhausted =>
     obtain ⟨value, live, classified⟩ := Option.map_eq_some_iff.mp (typed.2.trans resident)
     exact ⟨_, .drop live, ⟨typed.1, rfl⟩, by
-      change (value.kind signature).disposable
-      exact classified.symm ▸ allowed⟩
+      change (value.kind signature).disposable ∧ (value.kind signature).shallow
+      rw [classified]
+      exact ⟨allowed, exhausted⟩⟩
 
 theorem Op.Checked.effect {n : Nat} {signature : Signature} {before after : Context n}
     {op : Op n} (checked : Op.Checked before op after) {state next : State n}
     (typed : state.Typed signature before) (executed : op.exec state = some next) :
-    ∃ effect : op.Effect state next, next.Typed signature after ∧ effect.Permitted signature := by
+    ∃ effect : op.Effect state next, next.Typed signature after ∧ effect.Legal signature := by
   obtain ⟨result, effect, realized, allowed⟩ := checked.realize typed
   cases Option.some.inj (executed.symm.trans effect.exec)
   exact ⟨effect, realized, allowed⟩
@@ -209,6 +236,6 @@ theorem Op.Checked.sound {n : Nat} {signature : Signature} {before after : Conte
     (typed : state.Typed signature before) :
     ∃ next, op.exec state = some next ∧ next.Typed signature after ∧ Conserves signature state next := by
   obtain ⟨next, effect, realized, allowed⟩ := checked.realize typed
-  exact ⟨next, effect.exec, realized, effect.conserves allowed⟩
+  exact ⟨next, effect.exec, realized, effect.conserves allowed.conservationAllowed⟩
 
 end OwnershipMir

@@ -57,6 +57,23 @@ theorem OwnershipTrace.empty_of_halt {n : Nat} {before after : Configuration n (
   | refl => rfl
   | step head tail => exact False.elim (head.not_halt halted)
 
+/-- Determinism compares finite observations without assuming either endpoint
+halts. The residual trace identifies which boundary was crossed. -/
+theorem OwnershipTrace.compare {n : Nat} {before left right : Configuration n (Op n)} {first last}
+    (a : OwnershipTrace before left first) (b : OwnershipTrace before right last) :
+    (∃ rest, first ++ rest = last ∧ OwnershipTrace left right rest) ∨
+    (∃ rest, last ++ rest = first ∧ OwnershipTrace right left rest) := by
+  induction a generalizing right last with
+  | refl => exact Or.inl ⟨last, rfl, b⟩
+  | step head tail ih =>
+    cases b with
+    | refl => exact Or.inr ⟨_, rfl, .step head tail⟩
+    | step first rest =>
+      cases head.deterministic first
+      rcases ih rest with ⟨suffix, equal, trace⟩ | ⟨suffix, equal, trace⟩
+      · exact Or.inl ⟨suffix, by simpa only [List.append_assoc] using congrArg (_ ++ ·) equal, trace⟩
+      · exact Or.inr ⟨suffix, by simpa only [List.append_assoc] using congrArg (_ ++ ·) equal, trace⟩
+
 theorem OwnershipTrace.terminal_unique {n : Nat} {before middle after : Configuration n (Op n)} {first last}
     (left : OwnershipTrace before middle first) (leftHalt : middle.code = .halt)
     (right : OwnershipTrace before after last) (rightHalt : after.code = .halt) : first = last := by
@@ -92,15 +109,15 @@ theorem Block.exec_trace {n : Nat} (ops : List (Op n)) {before after : State n}
     exact .step (.act head) (ih tail)
 
 theorem commands_trace {n : Nat} (commands : List (Command n)) {before after : State n}
-    (executed : Block.exec Command.exec commands before = some after) :
-    OwnershipTrace ⟨lower (sequence commands), before⟩ ⟨.halt, after⟩
+    (executed : Block.exec Command.exec commands before = some after) (next : Code n (Op n)) :
+    OwnershipTrace ⟨(lower (sequence commands)).append next, before⟩ ⟨next, after⟩
       (commands.flatMap fun command => command.block.map Op.event) := by
   induction commands generalizing before with
   | nil => cases Option.some.inj executed; exact .refl _
   | cons command rest ih =>
     obtain ⟨middle, head, tail⟩ := Option.bind_eq_some_iff.mp executed
-    have first := Block.exec_trace command.block (by rwa [Command.exec_eq] at head) (lower (sequence rest))
-    exact first.trans (ih tail)
+    have first := Block.exec_trace command.block (by rwa [Command.exec_eq] at head) ((lower (sequence rest)).append next)
+    simpa only [sequence, Block.emit, lower, Command.emit, Block.emit_append, List.flatMap_cons] using first.trans (ih tail)
 
 /-- Independent structural order, not a projection of generated commands.
 Nested holes have no resident to detach or release. A root hole still has an
@@ -164,16 +181,89 @@ theorem Scope.commands_order {n : Nat} (scope : Scope n) (context : Context n) :
   cleanupOwners_order scope.owners.reverse
     (List.pairwise_reverse.mpr (scope.distinct.imp (fun apart same => apart same.symm))) context
 
-/-- Ordering and endpoint are both derived from actual execution. -/
+/-- Cleanup hands off to an arbitrary continuation; the continuation need not
+terminate or even be admitted for the cleanup boundary theorem to hold. -/
+theorem Scope.exit_trace_then {n : Nat} {signature : Signature} {scope : Scope n} {context : Context n}
+    (admitted : scope.Admitted context) {state : State n} (typed : state.Typed signature context)
+    (next : Code n (Op n)) :
+    OwnershipTrace ⟨(lower (sequence (scope.commands context))).append next, state⟩
+      ⟨next, scope.exit state⟩ (scope.cleanupOrder context) := by
+  obtain ⟨result, executed, _, _⟩ :=
+    Block.checked_exec Command.Checked.sound (scope.commands context) (Scope.checked admitted) typed
+  have trace := commands_trace (scope.commands context) executed next
+  have same : result = scope.exit state := (Scope.exit_iff admitted typed).mp (lower_run (Block.exec_run _ executed .halt))
+  rw [same, scope.commands_order] at trace
+  exact trace
+
+/-- Every finite observation is either a cleanup prefix with a residual path
+to handoff, or the complete cleanup trace followed by continuation observations.
+No property of the continuation is assumed. The alternatives need not be exclusive. -/
+theorem Scope.cleanup_then_prefix {n : Nat} {signature : Signature} {scope : Scope n} {context : Context n}
+    (admitted : scope.Admitted context) {state : State n} (typed : state.Typed signature context)
+    (next : Code n (Op n)) {reached : Configuration n (Op n)} {events : List (OwnershipEvent n)}
+    (observed : OwnershipTrace ⟨(lower (sequence (scope.commands context))).append next, state⟩ reached events) :
+    (∃ rest, events ++ rest = scope.cleanupOrder context ∧
+      OwnershipTrace reached ⟨next, scope.exit state⟩ rest) ∨
+    (∃ tail, events = scope.cleanupOrder context ++ tail ∧
+      OwnershipTrace ⟨next, scope.exit state⟩ reached tail) := by
+  rcases observed.compare (Scope.exit_trace_then admitted typed next) with inside | ⟨tail, equal, trace⟩
+  · exact Or.inl inside
+  · exact Or.inr ⟨tail, equal.symm, trace⟩
+
+/-- Normal return factors through completed cleanup, with an exact event split.
+Continuation actions are not misclassified as part of the cleanup schedule. -/
+theorem Scope.cleanup_then_return_iff {n : Nat} {signature : Signature} {scope : Scope n} {context : Context n}
+    (admitted : scope.Admitted context) {state result : State n} (typed : state.Typed signature context)
+    (next : Code n (Op n)) (events : List (OwnershipEvent n)) :
+    OwnershipTrace ⟨(lower (sequence (scope.commands context))).append next, state⟩ ⟨.halt, result⟩ events ↔
+      ∃ tail, events = scope.cleanupOrder context ++ tail ∧
+        OwnershipTrace ⟨next, scope.exit state⟩ ⟨.halt, result⟩ tail := by
+  constructor
+  · intro observed
+    rcases Scope.cleanup_then_prefix admitted typed next observed with ⟨rest, equal, residual⟩ | completed
+    · have empty := residual.empty_of_halt rfl
+      have boundary := residual.run.from_halt rfl
+      exact ⟨[], by simpa only [empty, List.append_nil] using equal,
+        by rw [boundary]; exact .refl _⟩
+    · exact completed
+  · rintro ⟨tail, equal, continuation⟩
+    rw [equal]
+    exact (Scope.exit_trace_then admitted typed next).trans continuation
+
+/-- Cleanup cannot introduce or conceal divergence in the continuation. -/
+theorem Scope.cleanup_then_diverges_iff {n : Nat} {signature : Signature} {scope : Scope n} {context : Context n}
+    (admitted : scope.Admitted context) {state : State n} (typed : state.Typed signature context)
+    (next : Code n (Op n)) :
+    Diverges Op.exec ⟨(lower (sequence (scope.commands context))).append next, state⟩ ↔
+      Diverges Op.exec ⟨next, scope.exit state⟩ :=
+  (Scope.exit_trace_then admitted typed next).run.diverges_iff
+
+/-- Safety composes with checking of the continuation at the cleared context.
+Unlike cleanup itself, the continuation may modify previously retained slots. -/
+theorem Scope.cleanup_then_safety {n : Nat} {signature : Signature} {scope : Scope n} {context final : Context n}
+    (admitted : scope.Admitted context) {state : State n} (typed : state.Typed signature context)
+    (unique : state.Unique) {next : Code n (Op n)}
+    (checked : Code.Checked Op.Checked (clearContext scope.owners context) next final)
+    {reached : Configuration n (Op n)}
+    (run : Run Op.exec ⟨(lower (sequence (scope.commands context))).append next, state⟩ reached) :
+    Safe signature Op.Checked final reached ∧ reached.state.Unique ∧ Conserves signature state reached.state ∧
+      ∃ events, OwnershipTrace ⟨(lower (sequence (scope.commands context))).append next, state⟩ reached events ∧
+        ((∃ rest, events ++ rest = scope.cleanupOrder context ∧ OwnershipTrace reached ⟨next, scope.exit state⟩ rest) ∨
+         (∃ tail, events = scope.cleanupOrder context ++ tail ∧ OwnershipTrace ⟨next, scope.exit state⟩ reached tail)) := by
+  have start : Safe signature Op.Checked final
+      ⟨(lower (sequence (scope.commands context))).append next, state⟩ :=
+    ⟨context, typed, (lower_checked (Scope.checked admitted)).append checked⟩
+  have safety := ownership_safety start unique run
+  obtain ⟨events, observed⟩ := OwnershipTrace.of_run run
+  exact ⟨safety.1, safety.2.1, safety.2.2.1, events, observed,
+    Scope.cleanup_then_prefix admitted typed next observed⟩
+
+/-- Standalone cleanup is the halt-continuation instance. -/
 theorem Scope.exit_trace {n : Nat} {signature : Signature} {scope : Scope n} {context : Context n}
     (admitted : scope.Admitted context) {state : State n} (typed : state.Typed signature context) :
     OwnershipTrace ⟨lower (sequence (scope.commands context)), state⟩ ⟨.halt, scope.exit state⟩
       (scope.cleanupOrder context) := by
-  obtain ⟨result, executed, _, _⟩ :=
-    Block.checked_exec Command.Checked.sound (scope.commands context) (Scope.checked admitted) typed
-  have trace := commands_trace (scope.commands context) executed
-  have same := (Scope.exit_iff admitted typed).mp trace.run
-  simpa [same, scope.commands_order] using trace
+  simpa only [Code.append_halt] using Scope.exit_trace_then admitted typed .halt
 
 /-- Any observed prefix, including a pause after detach and before release,
 follows the structural specification. It cannot reverse fields or roots. -/
@@ -208,9 +298,11 @@ theorem Scope.cleanup_observed_safety {n : Nat} {signature : Signature} {scope :
       (∀ slot, slot ∉ scope.owners → reached.state.slots slot = state.slots slot) ∧
       ∃ events, OwnershipTrace ⟨lower (sequence (scope.commands context)), state⟩ reached events ∧
         events.IsPrefix (scope.cleanupOrder context) := by
-  have safety := compiled_ownership_safety (Scope.checked admitted) typed unique run
-  obtain ⟨events, observed⟩ := OwnershipTrace.of_run run
-  exact ⟨safety.1, safety.2.1, safety.2.2.1, safety.2.2.2, scope.cleanup_frame context run,
+  obtain ⟨safe, distinct, conserved, events, trace, _⟩ := Scope.cleanup_then_safety admitted typed unique
+    (Code.Checked.halt (rule := Op.Checked)) (by simpa only [Code.append_halt] using run)
+  have observed : OwnershipTrace ⟨lower (sequence (scope.commands context)), state⟩ reached events :=
+    by simpa only [Code.append_halt] using trace
+  exact ⟨safe, distinct, conserved, safe.progress Op.Checked.sound, scope.cleanup_frame context run,
     events, observed, Scope.cleanup_prefix_order admitted typed observed⟩
 
 end OwnershipMir

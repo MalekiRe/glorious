@@ -134,6 +134,29 @@ theorem Run.excludes_divergence {n : Nat} {α : Type} {exec : α → State n →
     exact ⟨fun i => trace (i + 1), same.symm, fun i => by
       simpa [Nat.add_assoc] using steps (i + 1)⟩
 
+/-- A concrete finite prefix preserves and reflects actual divergence,
+without a safety or termination assumption about its endpoint. -/
+theorem Run.diverges_iff {n : Nat} {α : Type} {exec : α → State n → Option (State n)}
+    {before after : Configuration n α} (run : Run exec before after) :
+    Diverges exec before ↔ Diverges exec after := by
+  induction run with
+  | refl => rfl
+  | @step before middle after head tail ih =>
+    constructor
+    · rintro ⟨trace, initial, steps⟩
+      have first : Step exec before (trace 1) := by simpa [initial] using steps 0
+      have same := head.deterministic first
+      apply ih.mp
+      exact ⟨fun i => trace (i + 1), same.symm, fun i => by
+        simpa [Nat.add_assoc] using steps (i + 1)⟩
+    · intro infinite
+      obtain ⟨trace, initial, steps⟩ := ih.mpr infinite
+      refine ⟨(fun i => match i with | 0 => before | j + 1 => trace j), rfl, ?_⟩
+      intro i
+      cases i with
+      | zero => simpa [initial] using head
+      | succ i => exact steps i
+
 theorem Safe.diverges_iff {n : Nat} {α : Type} {signature : Signature} {final : Context n}
     {rule : Context n → α → Context n → Prop} {exec : α → State n → Option (State n)}
     {start : Configuration n α} (safe : Safe signature rule final start)

@@ -46,7 +46,8 @@ theorem Op.Checked.shell_balance {n : Nat} {signature : Signature} {before after
     {op : Op n} (checked : Op.Checked before op after) {state next : State n}
     (typed : state.Typed signature before) (executed : op.exec state = some next) :
     next.shells + op.shellDebit state = state.shells := by
-  obtain ⟨effect, _, allowed⟩ := checked.effect typed executed
+  obtain ⟨effect, _, legal⟩ := checked.effect typed executed
+  have allowed := legal.conservationAllowed
   cases effect with
   | @take _ p mode actual value result actualFound live extracted unused =>
     have frame := p.shells_write state actual actualFound none (some result)
@@ -131,7 +132,8 @@ theorem Op.Checked.linear_shells {n : Nat} {signature : Signature} {before after
     {op : Op n} (checked : Op.Checked before op after) {state next : State n}
     (typed : state.Typed signature before) (executed : op.exec state = some next) :
     next.linearShells ≤ state.linearShells := by
-  obtain ⟨effect, _, allowed⟩ := checked.effect typed executed
+  obtain ⟨effect, _, legal⟩ := checked.effect typed executed
+  have allowed := legal.conservationAllowed
   cases effect with
   | @take _ p mode actual value result actualFound live extracted unused =>
     have frame := p.mass_write state actual actualFound none (some result) (fun _ => 0) noncopyShell

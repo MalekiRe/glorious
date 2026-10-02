@@ -58,7 +58,13 @@ ownership pipeline. The transfer register is part of the actual runtime state.
 - `Model.lean`, `Instructions.lean`: exact runtime occupancy and one local
   progress/preservation contract for take, put, copy, and drop. Constructive
   checking produces an `Op.Effect` witness of actual selection, extraction,
-  replacement, and register contents, with classified resident capabilities.
+  replacement, and register contents. `Op.Checked.realize` and `.effect` expose
+  full resident-level `Effect.Legal` evidence: take layout and deconstruction
+  authority, put layout compatibility, copyability, and drop disposability plus
+  exhaustion. The narrower `ConservationAllowed` predicate states only the
+  conditions needed by resource conservation; legality derives it. The former
+  ambiguous `Permitted` interface is removed, and shell consumers use this
+  derived conservation evidence. Runtime execution and admission are unchanged.
   Resource conservation, shell accounting, and raw retained-storage framing
   consume those witnesses rather than reconstructing execution independently.
   Raw execution does not consult ownership permissions. Checked drop releases
@@ -98,6 +104,18 @@ ownership pipeline. The transfer register is part of the actual runtime state.
   framing, and ordered observations for every actual cleanup prefix, including
   pauses between detach and release. This is stronger than endpoint-only
   correctness; cleanup order is no longer justified only by generator syntax.
+  `Scope.exit_trace_then` generalizes the boundary to arbitrary continuations;
+  standalone cleanup is its halt instance. `Scope.cleanup_then_prefix` compares
+  actual finite observations with the complete cleanup trace: either a residual
+  cleanup trace reaches handoff, or the full cleanup trace precedes continuation
+  observations. The alternatives need not be exclusive.
+  `Scope.cleanup_then_return_iff` factors every normal return through handoff
+  with an exact event split. `Scope.cleanup_then_diverges_iff` preserves and
+  reflects actual infinite execution without requiring continuation admission
+  or termination. `Scope.cleanup_then_safety` composes checked continuations
+  at the cleared context; the standalone observed-safety theorem now consumes
+  that contract. Retained-slot framing is not falsely extended past handoff:
+  the continuation may subsequently modify those slots.
 
 Bounds: this remains an ownership-command frontend, not the full named source
 language. Field paths are resolved visible paths; shells carry resolved nominal
@@ -123,8 +141,8 @@ claims of this pre-call refactor.
 
 Verification: a fresh `lake clean && lake build OwnershipMir` in `formal/mir`
 passed all 18 jobs with warnings as errors and auto-implicit parameters disabled.
-Axiom inspection of sixteen finite-block, instruction-effect, ownership,
-adequacy, cleanup-order, and composed-safety theorems reported only `propext`,
+Axiom inspection of sixteen instruction-legality, ownership, adequacy,
+continuation-cleanup, and composed-safety theorems reported only `propext`,
 `Classical.choice`, and `Quot.sound`. No `sorry`, new axioms,
 concrete examples, or unit tests were used to bypass the general obligations.
 
