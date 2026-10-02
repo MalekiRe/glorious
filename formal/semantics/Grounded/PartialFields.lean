@@ -1178,4 +1178,53 @@ theorem PartialValue.Disposable.write_hole {program : Program} {parent : Ty}
   obtain ⟨next, stateWritten, afterTyped⟩ := typed.write_hole finite written
   exact ⟨next, afterTyped, disposition.write_absent stateWritten⟩
 
+/-- Erasing an overlapping path cannot invalidate existing disposal permission
+for a checked descendant. Its containing owner need not be disposable. -/
+theorem PartialValue.Disposable.write_hole_selected {program : Program} {home : Module}
+    {parent child : Ty} {before after : PartialValue} {state : Initialization}
+    {writtenPath observedPath : List FieldKey}
+    (typed : before.Typed program parent state)
+    (finite : FiniteLayout program.target program.data parent)
+    (checked : PathType program home parent observedPath child)
+    (permission : ∀ original, before.selectFields program parent observedPath = some original →
+      original.Disposable program child)
+    (written : before.writeFields program parent writtenPath .hole = some after) :
+    ∀ selected, after.selectFields program parent observedPath = some selected → selected.Disposable program child := by
+  induction writtenPath generalizing parent child before after state observedPath with
+  | nil =>
+    cases written
+    intro selected later
+    obtain ⟨actual, found, allowed⟩ := checked.disposable ⟨.absent, .hole _, .empty (by simp [Initialization.Empty])⟩
+    cases Option.some.inj (found.symm.trans later)
+    exact allowed
+  | cons key rest ih =>
+    cases checked with
+    | here parent =>
+      intro selected later
+      cases later
+      exact (permission before rfl).write_hole finite written
+    | @step parent intermediate child observed other tail projection path =>
+      intro selected later
+      obtain ⟨observedTypes, layout, observedFields, member, observedOpened, fieldsTyped⟩ :=
+        projection.open_partial typed
+      have observedInfo := projection.fieldInfo layout member
+      simp only [PartialValue.writeFields, Option.bind_eq_some_iff] at written
+      obtain ⟨⟨index, childType, types⟩, info, fields, opened, current, found, updated, changed, closed⟩ := written
+      cases Option.some.inj (observedOpened.symm.trans opened)
+      have reopened := PartialValue.closeFields_open (program := program) closed
+      simp only [PartialValue.selectFields, observedInfo, Option.bind_some, opened] at permission
+      simp only [PartialValue.selectFields, observedInfo, Option.bind_some, reopened] at later
+      by_cases same : other = index
+      · subst other
+        have childSame := Ty.fieldInfo_child_unique observedInfo info
+        subst childType
+        obtain ⟨original, originalState, originalFound, _, originalTyped⟩ := fieldsTyped.select member
+        cases Option.some.inj (originalFound.symm.trans found)
+        have atIndex := List.getElem?_set_self (List.getElem?_eq_some_iff.mp found).1 (a := updated)
+        simp only [found, Option.bind_some] at permission
+        simp only [atIndex, Option.bind_some] at later
+        exact ih originalTyped (projection.finite_child finite) path permission changed selected later
+      · rw [List.getElem?_set_ne (Ne.symm same)] at later
+        exact permission selected later
+
 end Grounded

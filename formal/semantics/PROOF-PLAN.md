@@ -3689,12 +3689,20 @@ No second source path judgment or post-state typing is supplied.
 `PartialValue.Disposable.write_hole` now consumes this physical preservation
 result; the existing source-move consumer is migrated. The authoritative
 `StorageCell.Consumption` history preserves resident typing, live-cell metadata
-and existing residual disposal permission through arbitrary compositions.
+and existing residual disposal permission through arbitrary compositions. Its
+permission guarantee covers every checked descendant independently of siblings: 
+`PartialValue.Disposable.write_hole_selected` handles descendant, ancestor and
+overlapping erasure without requiring the containing owner to be disposable.
 `SourceClosure.Admitted.immutable_disposable` derives entry layout from binding
 typing, carries it to the earlier reached state through the actual prefix, then
-preserves its disposal permission through every later source suffix. Lexical
-identity, activation and declared type remain unchanged. Neither future cleanup
-success nor post-state permission is an admission premise.
+constructs a selected descendant with preserved disposal permission after every
+later source suffix. The result includes actual successful path selection, not
+merely a conditional permission for an assumed future selection. Lexical identity,
+activation and declared type remain unchanged. Neither future cleanup success
+nor post-state permission is an admission premise.
+
+The generalized erasure/history/source chain and general preservation and maximal
+source behavior passed all 30 build jobs and standard-axiom inspection.
 
 Verification: all 30 `lake build Grounded` jobs passed. Axiom inspection of shared
 opening, child layout, runtime erasure, disposal closure, consumption preservation,

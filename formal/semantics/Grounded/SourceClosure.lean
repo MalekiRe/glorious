@@ -820,9 +820,9 @@ theorem SourceClosure.Admitted.immutable_empty {packages : List PackageSource} {
   refine ⟨by simpa only [bindings] using mapped, ?_⟩
   exact (framed.2 name slot identity retained immutable mapped).empty found path empty
 
-/-- Existing residual cleanup permission survives every later source prefix
-for an immutable binding. The initial layout is derived from entry typing;
-no post-state mask, permission or successful cleanup is assumed. -/
+/-- Existing descendant cleanup permission survives every later source prefix
+for an immutable binding, even inside a nondisposable owner. Entry typing supplies
+the layout; neither future masks nor permission nor successful cleanup is assumed. -/
 theorem SourceClosure.Admitted.immutable_disposable {packages : List PackageSource} {closure : SourceClosure packages}
     {program : Program} (admitted : closure.Admitted program) {home : Module} {scope : SourceScope}
     {expression : NamedExpr} {core : Expr} {type : Ty} {before final : FlowContext}
@@ -839,11 +839,15 @@ theorem SourceClosure.Admitted.immutable_disposable {packages : List PackageSour
     (immutable : slot.mutable = false) {identity : StorageId} {cell : StorageCell}
     (mapped : lookup name earlier.outerEnvironment.bindings = some identity)
     (found : earlier.outerEnvironment.heap.read identity = some cell)
-    (permission : cell.resident.Disposable program cell.type) :
+    {observer : Module} {fields : List FieldKey} {selectedType : Ty} {resident : PartialValue}
+    (path : PathType program observer cell.type fields selectedType)
+    (selectedResident : cell.resident.selectFields program cell.type fields = some resident)
+    (permission : resident.Disposable program selectedType) :
     lookup name state.outerEnvironment.bindings = some identity ∧
       ∃ next, state.outerEnvironment.heap.read identity = some next ∧
         next.activation = cell.activation ∧ next.type = cell.type ∧ next.WellTyped program ∧
-        next.resident.Disposable program next.type := by
+        ∃ selected, next.resident.selectFields program next.type fields = some selected ∧
+          selected.Disposable program selectedType := by
   have reachedSafe := admitted.soundness elaborated slots store issued reached
   have prefixFrame := reachedSafe.2.2.1
   have retained : lookup name final.slots = some slot := by
@@ -867,7 +871,16 @@ theorem SourceClosure.Admitted.immutable_disposable {packages : List PackageSour
     congrArg AddressedScope.bindings framed.1
   obtain ⟨next, finalFound, activation, sameType, nextTyped, preserved⟩ :=
     (framed.2 name slot identity retained immutable mapped).preservation found actualTyped
-  exact ⟨by simpa only [bindings] using mapped, next, finalFound, activation, sameType, nextTyped, preserved permission⟩
+  have nextPath : PathType program observer next.type fields selectedType := by
+    simpa only [sameType] using path
+  obtain ⟨mask, finite, residentTyped⟩ := nextTyped
+  obtain ⟨selected, _, _, selectedAfter, _⟩ := nextPath.select_partial residentTyped
+  refine ⟨by simpa only [bindings] using mapped, next, finalFound, activation, sameType,
+    ⟨mask, finite, residentTyped⟩, selected, selectedAfter, ?_⟩
+  apply preserved observer selectedType fields path ?_ selected selectedAfter
+  intro original selectedBefore
+  cases Option.some.inj (selectedResident.symm.trans selectedBefore)
+  exact permission
 
 /-- Source admission determines a complete behavior without a termination or
 future-state premise. Infinite execution retains the same general safety contract

@@ -959,25 +959,30 @@ theorem StorageCell.Consumption.empty {before after : Option StorageCell}
     exact ⟨next, final, nextActivation.trans activation, nextType.trans type, nextEmpty⟩
 
 /-- Consumption histories preserve the live typed cell and existing residual
-cleanup permission. Each erasure derives its mask update from the actual write. -/
+cleanup permission at every checked descendant, independently of its siblings. -/
 theorem StorageCell.Consumption.preservation {before after : Option StorageCell}
     (consumed : StorageCell.Consumption program before after) {cell : StorageCell}
     (found : before = some cell) (typed : cell.WellTyped program) :
     ∃ next, after = some next ∧ next.activation = cell.activation ∧ next.type = cell.type ∧
       next.WellTyped program ∧
-      (cell.resident.Disposable program cell.type → next.resident.Disposable program next.type) := by
+      (∀ (home : Module) (child : Ty) (path : List FieldKey),
+        PathType program home cell.type path child →
+        (∀ original, cell.resident.selectFields program cell.type path = some original → original.Disposable program child) →
+        ∀ selected, next.resident.selectFields program next.type path = some selected → selected.Disposable program child) := by
   induction consumed generalizing cell with
-  | refl => exact ⟨cell, found, rfl, rfl, typed, id⟩
+  | refl => exact ⟨cell, found, rfl, rfl, typed, fun _ _ _ _ permission => permission⟩
   | erase written =>
     cases found
     obtain ⟨state, finite, resident⟩ := typed
     obtain ⟨next, _, nextTyped⟩ := resident.write_hole finite written
     exact ⟨_, rfl, rfl, rfl, ⟨next, finite, nextTyped⟩,
-      fun permission => permission.write_hole finite written⟩
+      fun _ _ _ checked permission => PartialValue.Disposable.write_hole_selected resident finite checked permission written⟩
   | trans head tail first last =>
     obtain ⟨middle, stored, activation, type, middleTyped, firstPermission⟩ := first found typed
     obtain ⟨next, final, nextActivation, nextType, nextTyped, lastPermission⟩ := last stored middleTyped
-    exact ⟨next, final, nextActivation.trans activation, nextType.trans type, nextTyped,
-      fun permission => lastPermission (firstPermission permission)⟩
+    refine ⟨next, final, nextActivation.trans activation, nextType.trans type, nextTyped, ?_⟩
+    intro home child path checked permission
+    exact lastPermission home child path (by simpa only [type] using checked)
+      (firstPermission home child path checked permission)
 
 end Grounded
