@@ -5280,3 +5280,24 @@ ordered packs in the admitted fragment. It does not yet give HasTypes a static
 normal-result outcome index or propagate that index through aggregate/call
 result inference. That migration, unreachable continuation checking and all
 fourteen whole-language completion families remain open.
+
+## Terminal operand packs retire their temporary storage
+
+Run.terminal_retires_all generalizes the authoritative allocation-retirement
+proof to either terminal result form. It derives an empty continuation from
+Terminal, then combines preserved outer scope with actual allocation tracking.
+Scalar returns and completed operand packs both retire every storage identity
+allocated during the run. No post-state retirement assumption is introduced.
+
+The scalar-only Run.return_retires_all is removed and all real consumers are
+migrated, including call-heap restoration and public function behavior.
+ConfigurationTyped.maximal_behavior produces terminal retirement once; scalar
+behavior and HasTypes.behavior consume that same result. The pack's normal
+alternative now proves retirement, not merely tracking of temporary cells.
+Infinite prefixes retain their live-allocation tracking guarantee.
+
+All 30 strict Lean jobs passed. Inspected terminal-retirement, maximal behavior,
+pack behavior and public source safety proofs use only propext, Classical.choice
+and Quot.sound. This concerns the admitted value/storage fragment; references,
+raw allocations and other whole-language completion families remain open, as do
+static operand-outcome propagation and unreachable continuation checking.

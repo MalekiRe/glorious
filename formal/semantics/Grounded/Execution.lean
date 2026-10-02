@@ -1082,27 +1082,30 @@ theorem Run.allocated_tracked {before after : Configuration} (run : Run program 
   obtain ⟨⟨old, found⟩, _⟩ := run.untracked_origin untracked live
   exact Nat.not_lt_of_ge fresh (before.environment.heap.bounded _ _ found)
 
-/-- A complete return retires all storage allocated during the run, including
-nested calls, pattern bindings and locals, not just entry parameters. -/
-theorem Run.return_retires_all {before : Configuration} {after : Environment} {value : Value}
-    (run : Run program before ⟨after, .result value, []⟩)
+/-- Any terminal return, scalar or ordered pack, retires storage allocated
+during the run, including nested calls, pattern bindings and locals. -/
+theorem Run.terminal_retires_all {before after : Configuration}
+    (run : Run program before after) (done : Terminal after)
     (bounded : ∀ identity ∈ before.outerEnvironment.bindings.map Prod.snd,
       identity.index < before.environment.heap.next) :
-    ∀ identity, before.environment.heap.next ≤ identity.index → identity.index < after.heap.next →
-      after.heap.Retired identity := by
+    ∀ identity, before.environment.heap.next ≤ identity.index → identity.index < after.environment.heap.next →
+      after.environment.heap.Retired identity := by
+  have stack : after.continuation = [] := by cases done <;> rfl
   intro identity fresh allocated
   refine ⟨allocated, ?_⟩
-  cases found : after.heap.read identity with
+  cases found : after.environment.heap.read identity with
   | none => rfl
   | some cell =>
     have same := congrArg AddressedScope.bindings run.outer_scope
-    change after.bindings = before.outerEnvironment.bindings at same
-    have outside : identity ∉ after.bindings.map Prod.snd := by
+    change (continuationEnvironment after.environment after.continuation).bindings = before.outerEnvironment.bindings at same
+    rw [stack] at same
+    change after.environment.bindings = before.outerEnvironment.bindings at same
+    have outside : identity ∉ after.environment.bindings.map Prod.snd := by
       intro member
       have original : identity ∈ before.outerEnvironment.bindings.map Prod.snd := by
         simpa only [same] using member
       exact Nat.not_lt_of_ge fresh (bounded identity original)
-    exact False.elim (run.allocated_tracked fresh found ⟨outside, by simp⟩)
+    exact False.elim (run.allocated_tracked fresh found ⟨outside, by simp [stack]⟩)
 
 /-- An already-live cell outside all active and retained scopes is untouched.
 This is a pre-state frame condition, not a post-state liveness assumption. -/
@@ -1273,7 +1276,7 @@ theorem Run.call_heap {before after : Environment} {declaration : FunctionDecl}
     · cases live : after.heap.read identity with
       | none => rfl
       | some cell =>
-        have retired := run.return_retires_all bounded identity (Nat.le_of_not_gt old)
+        have retired := run.terminal_retires_all (.result _ _) bounded identity (Nat.le_of_not_gt old)
           (after.heap.bounded _ _ live)
         exact live.symm.trans retired.2
 

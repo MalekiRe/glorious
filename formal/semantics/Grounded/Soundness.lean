@@ -574,9 +574,8 @@ theorem HasTypes.behavior (checkedProgram : program.Checked)
       AddressedEnvironment.ConsumptionFrame program final.slots environment after ∧
       (⟨after, .results values, []⟩ : Configuration).OwnershipSafe program ∧
       Configuration.ExternalFrame ⟨environment, .arguments expressions, []⟩ ⟨after, .results values, []⟩ ∧
-      ∀ identity, environment.heap.next ≤ identity.index →
-        ∀ cell, after.heap.read identity = some cell →
-          ¬ (⟨after, .results values, []⟩ : Configuration).Untracked identity) ∨
+      ∀ identity, environment.heap.next ≤ identity.index → identity.index < after.heap.next →
+        after.heap.Retired identity) ∨
     (∃ trace, InfiniteRun program ⟨environment, .arguments expressions, []⟩ trace ∧
       ∀ index, ConfigurationTyped program final (.many types) (trace index) ∧
         AddressedEnvironment.ConsumptionFrame program final.slots environment (trace index).outerEnvironment ∧
@@ -589,7 +588,7 @@ theorem HasTypes.behavior (checkedProgram : program.Checked)
       ⟨environment, .arguments expressions, []⟩ :=
     .intro store issued (.arguments checked) .nil
   rcases entry.maximal_behavior checkedProgram with normal | infinite
-  · obtain ⟨state, run, done, current, framed, safe, exterior, tracked⟩ := normal
+  · obtain ⟨state, run, done, current, framed, safe, exterior, retired⟩ := normal
     cases done with
     | result after value =>
       cases current with | intro store issued code continuation =>
@@ -599,7 +598,7 @@ theorem HasTypes.behavior (checkedProgram : program.Checked)
       cases current with | intro store issued code continuation =>
         cases continuation
         cases code with | results residents =>
-          exact Or.inl ⟨after, values, run, residents, store, issued, framed, safe, exterior, tracked⟩
+          exact Or.inl ⟨after, values, run, residents, store, issued, framed, safe, exterior, retired⟩
   · exact Or.inr infinite
 
 /-- Actual argument execution realizes the ordered checking output, even when

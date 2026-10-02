@@ -1536,8 +1536,8 @@ theorem ConfigurationTyped.maximal_behavior (checkedProgram : program.Checked)
       ConfigurationTyped program context result state ∧
       AddressedEnvironment.ConsumptionFrame program context.slots before.outerEnvironment state.outerEnvironment ∧
       state.OwnershipSafe program ∧ before.ExternalFrame state ∧
-      ∀ identity, before.environment.heap.next ≤ identity.index →
-        ∀ cell, state.environment.heap.read identity = some cell → ¬ state.Untracked identity) ∨
+      ∀ identity, before.environment.heap.next ≤ identity.index → identity.index < state.environment.heap.next →
+        state.environment.heap.Retired identity) ∨
     (∃ trace, InfiniteRun program before trace ∧
       ∀ index, ConfigurationTyped program context result (trace index) ∧
         AddressedEnvironment.ConsumptionFrame program context.slots before.outerEnvironment (trace index).outerEnvironment ∧
@@ -1548,9 +1548,11 @@ theorem ConfigurationTyped.maximal_behavior (checkedProgram : program.Checked)
   rcases Run.terminal_or_infinite before
       (fun _ run => (typed.run checkedProgram run).progress) with ⟨state, run, done⟩ | ⟨trace, infinite⟩
   · have current := typed.run checkedProgram run
-    exact Or.inl ⟨state, run, done, current, typed.consumption_run checkedProgram run,
-      current.ownership_safe, run.external_frame,
-      fun _ fresh _ live => run.allocated_tracked fresh live⟩
+    refine Or.inl ⟨state, run, done, current, typed.consumption_run checkedProgram run,
+      current.ownership_safe, run.external_frame, run.terminal_retires_all done ?_⟩
+    intro identity member
+    obtain ⟨cell, found, _, _⟩ := typed.typed_scopes before.continuation [] (by simp) identity member
+    exact before.environment.heap.bounded _ _ found
   · right
     refine ⟨trace, infinite, ?_⟩
     intro index
@@ -1584,14 +1586,10 @@ theorem ConfigurationTyped.behavior (checkedProgram : program.Checked)
           ∀ cell, (trace index).environment.heap.read identity = some cell →
             ¬ (trace index).Untracked identity) := by
   rcases typed.maximal_behavior checkedProgram with normal | infinite
-  · obtain ⟨state, run, done, current, framed, safe, exterior, _⟩ := normal
+  · obtain ⟨state, run, done, current, framed, safe, exterior, retired⟩ := normal
     obtain ⟨after, value, same, store, _, resident⟩ := current.normal_form done
     subst state
-    refine Or.inl ⟨after, value, run, resident, resident.principal_exists, store, framed,
-      safe, exterior, run.return_retires_all ?_⟩
-    intro identity member
-    obtain ⟨cell, found, _, _⟩ := typed.typed_scopes before.continuation [] (by simp) identity member
-    exact before.environment.heap.bounded _ _ found
+    exact Or.inl ⟨after, value, run, resident, resident.principal_exists, store, framed, safe, exterior, retired⟩
   · exact Or.inr infinite
 
 

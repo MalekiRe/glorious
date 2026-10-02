@@ -2598,7 +2598,7 @@ theorem SourceClosure.Admitted.compatible_call_behavior {packages : List Package
       exact environment.heap.bounded _ _ found
     refine .inl ⟨after, value, run, resident, principal, stored, framed, safe, run.external_frame,
       (Run.step (Step.callInputs prepared) returned).call_heap ?_,
-      run.return_retires_all bounded, returned.body_return_retires⟩
+      run.terminal_retires_all (.result _ _) bounded, returned.body_return_retires⟩
     intro identity member
     have same : middle.bindings = environment.bindings :=
       congrArg AddressedScope.bindings evaluated.outer_scope
