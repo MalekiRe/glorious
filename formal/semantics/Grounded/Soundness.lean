@@ -87,6 +87,7 @@ theorem HasType.scope_join_preserves_ownership (checkedProgram : program.Checked
       (count = 0 ∨ ∃ (index : Nat) (entry : BindingId × StorageId) (next : Environment),
         BindingMap.nextRelease (List.take count current.bindings) current.bindings = some (index, entry.2) ∧
         index < count ∧ current.retireBinding index = some next ∧
+        next.exitScope (count - 1) = current.exitScope count ∧
         ConfigurationTyped program final (.one type) ⟨next, .result value, .scope (count - 1) :: stack⟩) ∧
       (∀ (index : Nat) (entry : BindingId × StorageId) (next : Environment),
         current.bindings[index]? = some entry → index < count →

@@ -4019,3 +4019,12 @@ result or an intermediate realization. All 30 strict build jobs passed, with
 only standard Lean axioms in the inspected producer and source closures. This
 closes batch/staged storage-result correspondence for return; the machine still
 needs to interleave resident destruction and retirement.
+
+Scope exit now has the same exact factorization through canonical indexed
+retirement. Removing a local shortens precisely the pending prefix while
+preserving the outer suffix. Exiting the smaller scope from the actual produced
+environment equals the original batch exit, including its heap, activation and
+supply. General typed scope progress and the reached-source scope theorem
+consume this equality. All 30 strict build jobs and inspected proof closures
+passed. This supplies result correspondence for the scope machine cutover;
+interleaved destruction itself remains unimplemented.

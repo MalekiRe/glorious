@@ -683,6 +683,7 @@ theorem ConfigurationTyped.scope_next {context : FlowContext} {result : ResultTy
     count = 0 ∨ ∃ (index : Nat) (entry : BindingId × StorageId) (next : Environment),
       BindingMap.nextRelease (List.take count current.bindings) current.bindings = some (index, entry.2) ∧
       index < count ∧ current.retireBinding index = some next ∧
+      next.exitScope (count - 1) = current.exitScope count ∧
       ConfigurationTyped program context result ⟨next, .result value, .scope (count - 1) :: stack⟩ := by
   have original := typed
   cases typed with | intro store issued code continuation =>
@@ -699,7 +700,7 @@ theorem ConfigurationTyped.scope_next {context : FlowContext} {result : ResultTy
               simp only [List.length_take, List.length_nil] at short
               simp only [List.length_append] at length
               omega
-            obtain ⟨index, entry, chosen, selected, _, _⟩ := BindingMap.release_next _ _
+            obtain ⟨index, entry, chosen, selected, _, first⟩ := BindingMap.release_next _ _
               store.addresses_distinct (fun _ member => List.mem_of_mem_take member) nonempty
             have inside := BindingMap.nextRelease.in_prefix (List.take_prefix locals.length current.bindings) chosen
             have localIndex : index < locals.length := by
@@ -707,6 +708,7 @@ theorem ConfigurationTyped.scope_next {context : FlowContext} {result : ResultTy
               omega
             obtain ⟨next, produced, _⟩ := AddressedEnvironment.retireBinding.progress store selected
             exact .inr ⟨index, entry, next, chosen, localIndex, produced,
+              AddressedEnvironment.exitScope.retireBinding store selected localIndex first produced,
               original.retire_scope selected localIndex produced⟩
 /-- Retiring one callee owner preserves the returned payload, the saved caller,
 and every older continuation; it does not restore the caller prematurely. -/

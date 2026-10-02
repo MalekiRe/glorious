@@ -302,6 +302,24 @@ theorem BindingMap.eraseIdx_drop (bindings : BindingMap) {index count : Nat}
         | succ count => simpa using ih (Nat.lt_of_succ_lt_succ inside)
 
 
+/-- Synchronized removal shortens precisely the pending local prefix. -/
+theorem BindingMap.eraseIdx_take (bindings : BindingMap) {index count : Nat}
+    (inside : index < count) :
+    (bindings.eraseIdx index).take (count - 1) = (bindings.take count).eraseIdx index := by
+  induction bindings generalizing index count with
+  | nil => simp
+  | cons entry rest ih =>
+    cases count with
+    | zero => omega
+    | succ count =>
+      cases index with
+      | zero => simp
+      | succ index =>
+        cases count with
+        | zero => omega
+        | succ count => simpa using congrArg (List.cons entry) (ih (Nat.lt_of_succ_lt_succ inside))
+
+
 /-- One actual cell retirement removes the corresponding lexical position and
 its exact source state. Other masks and storage identities are unchanged. -/
 theorem BindingMap.Typed.retire_at
@@ -1270,6 +1288,36 @@ def AddressedEnvironment.exitScope (current : AddressedEnvironment) (count : Nat
     Option AddressedEnvironment :=
   (releaseBindings current.heap (current.bindings.take count)).map fun heap =>
     { current with bindings := current.bindings.drop count, heap := heap }
+
+/-- Canonical retirement inside a scope factors its existing batch exit,
+including the exact retained lexical suffix and both supplies. -/
+theorem AddressedEnvironment.exitScope.retireBinding {before after : AddressedEnvironment}
+    {context : List (BindingId × BindingState)} {index count : Nat} {entry : BindingId × StorageId}
+    (typed : BindingMap.Typed program before.heap before.activation before.bindings context)
+    (selected : before.bindings[index]? = some entry) (inside : index < count)
+    (first : (BindingMap.releaseOrder (before.bindings.take count)).head? = some entry.2)
+    (retired : before.retireBinding index = some after) :
+    after.exitScope (count - 1) = before.exitScope count := by
+  obtain ⟨next, produced, primitive, _, _, activation, supply, bindings, _⟩ :=
+    AddressedEnvironment.retireBinding.progress typed selected
+  cases Option.some.inj (retired.symm.trans produced)
+  have selectedLocal : (before.bindings.take count)[index]? = some entry := by
+    simpa only [List.getElem?_take, inside, ↓reduceIte] using selected
+  have order : BindingMap.releaseOrder (after.bindings.take (count - 1)) =
+      (BindingMap.releaseOrder (before.bindings.take count)).tail := by
+    rw [bindings, BindingMap.eraseIdx_take before.bindings inside]
+    exact BindingMap.releaseOrder_eraseIdx (typed.take count).addresses_distinct selectedLocal first
+  have suffix : after.bindings.drop (count - 1) = before.bindings.drop count := by
+    rw [bindings, BindingMap.eraseIdx_drop before.bindings inside]
+  obtain ⟨tail, ordered⟩ := List.head?_eq_some_iff.mp first
+  simp only [AddressedEnvironment.exitScope, releaseBindings, order, ordered, List.tail_cons,
+    RuntimeHeap.retireMany, primitive, Option.bind_some]
+  congr 1
+  funext heap
+  change (⟨after.activation, after.supply, after.bindings.drop (count - 1), heap⟩ : AddressedEnvironment) =
+    ⟨before.activation, before.supply, before.bindings.drop count, heap⟩
+  rw [activation, supply, suffix]
+
 
 theorem AddressedEnvironment.exitScope.progress {current : AddressedEnvironment}
     {context : List (BindingId × BindingState)}
