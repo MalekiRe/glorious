@@ -246,6 +246,16 @@ theorem SourceArmsChecked.evaluation_soundness {source : List (SourcePattern × 
         ⟨middle.extend bindings.bindings, .cleanup (bindings.discarded.map DisposalTask.enter) (.expression body),
           [.scope bindings.bindings.length]⟩
         ⟨middle.extend bindings.bindings, .expression body, [.scope bindings.bindings.length]⟩ ∧
+      (∀ front back next, bindings.discarded = front ++ back →
+        Run program
+          ⟨middle.extend bindings.bindings, .cleanup (bindings.discarded.map DisposalTask.enter) (.expression body),
+            .scope bindings.bindings.length :: []⟩ next →
+        (∃ pending, pending ≠ [] ∧ next =
+          ⟨middle.extend bindings.bindings, .cleanup (pending ++ back.map DisposalTask.enter) (.expression body),
+            .scope bindings.bindings.length :: []⟩) ∨
+        Run program
+          ⟨middle.extend bindings.bindings, .cleanup (back.map DisposalTask.enter) (.expression body),
+            .scope bindings.bindings.length :: []⟩ next) ∧
       Evaluates program (middle.extend bindings.bindings) body value localAfter ∧
       localAfter.exitScope bindings.bindings.length = some after ∧
       ValueHasType program value result ∧
@@ -265,10 +275,10 @@ theorem SourceArmsChecked.evaluation_soundness {source : List (SourcePattern × 
   have reached : Run program ⟨environment, .expression (.applyPatterns home inputs arguments checked.normalize.val), []⟩
       ⟨middle, .results values, [.patterns home checked.normalize.val]⟩ :=
     .step .applyPatterns (Run.extend argumentsRun [.patterns home checked.normalize.val])
-  obtain ⟨discards, entered, cleaned, _⟩ :=
+  obtain ⟨discards, entered, cleaned, _, ordered⟩ :=
     (checked.admits argumentsTyped nonempty covered bodies).pattern_cleanup checkedProgram store issued reached selected
   refine ⟨values, middle, bindings, body, localAfter, argumentsRun, residents, middleTyped,
-    selected, inputsTyped, discards, entered, cleaned, bodyRun, retired, resident, afterTyped, afterIssued, framed, ?_⟩
+    selected, inputsTyped, discards, entered, cleaned, ordered, bodyRun, retired, resident, afterTyped, afterIssued, framed, ?_⟩
   intro front back same
   exact EvaluatesMany.append_iff.mp (same ▸ argumentsRun)
 

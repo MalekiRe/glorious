@@ -4138,3 +4138,15 @@ and `Quot.sound`. No unit tests, axioms, or proof placeholders were added.
 This closes the selected-pattern structural-disposal omission, not custom Drop
 execution or whole-language soundness. Custom destructor bodies and divergence,
 and the fourteen broad completion obligations, remain open.
+
+
+Cleanup ordering now holds for arbitrary execution prefixes, not only the
+constructed terminating schedule. `Run.cleanup_append_decompose` proves that
+a later worklist suffix stays intact while earlier cleanup is active, including
+prefixes inside nested aggregate destruction. Once the prefix is exhausted,
+execution factors through the exact original suffix boundary. The reached-source
+`HasType.pattern_cleanup` contract and decoded-source evaluation theorem
+consume this property for every split of the matcher's reverse-order resident
+queue. All 30 strict jobs passed; inspected execution, source-ordering and
+admitted-behavior closures contain only the standard three Lean axioms. This
+does not add custom destructor execution or assume its termination.

@@ -1116,11 +1116,24 @@ theorem HasType.pattern_cleanup (checkedProgram : program.Checked)
         .scope result.bindings.length :: stack⟩ after →
       (∃ pending, after = ⟨current.extend result.bindings, .cleanup pending (.expression body),
         .scope result.bindings.length :: stack⟩) ∨
-      Run program ⟨current.extend result.bindings, .expression body, .scope result.bindings.length :: stack⟩ after) := by
+      Run program ⟨current.extend result.bindings, .expression body, .scope result.bindings.length :: stack⟩ after) ∧
+    (∀ front back next, result.discarded = front ++ back →
+      Run program
+        ⟨current.extend result.bindings, .cleanup (result.discarded.map DisposalTask.enter) (.expression body),
+          .scope result.bindings.length :: stack⟩ next →
+      (∃ pending, pending ≠ [] ∧ next =
+        ⟨current.extend result.bindings, .cleanup (pending ++ back.map DisposalTask.enter) (.expression body),
+          .scope result.bindings.length :: stack⟩) ∨
+      Run program
+        ⟨current.extend result.bindings, .cleanup (back.map DisposalTask.enter) (.expression body),
+          .scope result.bindings.length :: stack⟩ next) := by
   have safe := (checked.soundness checkedProgram store issued run).2.2.2.2
   obtain ⟨subject, locals, pattern, front, back, resident, typed, _, _, matched⟩ := safe result body selected
-  exact ⟨typed.discarded resident matched, .selectedPattern selected, Run.cleanup _ _ _ _,
-    fun _ prefixRun => Run.cleanup_decompose prefixRun _ _ _ _ rfl⟩
+  refine ⟨typed.discarded resident matched, .selectedPattern selected, Run.cleanup _ _ _ _,
+    fun _ prefixRun => Run.cleanup_decompose prefixRun _ _ _ _ rfl, ?_⟩
+  intro front back next split prefixRun
+  exact Run.cleanup_append_decompose prefixRun _ (front.map DisposalTask.enter) (back.map DisposalTask.enter) _ _
+    (by simp only [split, List.map_append])
 /-- An arbitrary nested binder in the first selected clause transfers its exact
 resident into fresh storage through the real pattern-entry transition. The
 position is derived from the matcher's ordered output, not supplied as readiness. -/

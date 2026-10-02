@@ -342,6 +342,34 @@ theorem Run.cleanup_decompose {before after : Configuration} (run : Run program 
     | cleanupEnter => exact ih _ _ _ _ rfl
     | cleanupRelease => exact ih _ _ _ _ rfl
     | cleanupDone => exact .inr tail
+/-- Earlier cleanup cannot consume a later queue suffix. This applies to every
+finite execution prefix, including one stopped inside a nested aggregate. -/
+theorem Run.cleanup_append_decompose {before after : Configuration} (run : Run program before after) :
+    ∀ (environment : Environment) (pending later : List DisposalTask) (rest : Control) (stack : List Frame),
+      before = ⟨environment, .cleanup (pending ++ later) rest, stack⟩ →
+      (∃ remaining, remaining ≠ [] ∧
+        after = ⟨environment, .cleanup (remaining ++ later) rest, stack⟩) ∨
+      Run program ⟨environment, .cleanup later rest, stack⟩ after := by
+  induction run with
+  | refl state =>
+    intro environment pending later rest stack same
+    subst same
+    cases pending with
+    | nil => exact .inr (.refl _)
+    | cons task pending => exact .inl ⟨task :: pending, by simp, rfl⟩
+  | step head tail ih =>
+    intro environment pending later rest stack same
+    subst same
+    cases pending with
+    | nil => exact .inr (.step head tail)
+    | cons task pending =>
+      cases task with
+      | enter value =>
+        cases head with
+        | cleanupEnter => exact ih _ (DisposalTask.expand value ++ pending) later _ _ (by simp only [List.append_assoc]; rfl)
+      | release shell =>
+        cases head with
+        | cleanupRelease => exact ih _ pending later _ _ rfl
 /-- One canonical lexical owner is completely cleaned before its storage is
 retired. The remaining scope resumes in the actual retirement output. -/
 theorem Run.scope_owner {before after : Environment} {count index : Nat} {identity : StorageId}
