@@ -3614,7 +3614,6 @@ frontier are unchanged. Every typed retained caller at another activation
 keeps its cells exactly and remains well typed. No completed move or future
 readiness is supplied. This covers whole and partial owned-place movement.
 
-
 `Initialization.Disposable.write_absent` proves residual disposal is closed
 under the actual arbitrary-depth mask update, preserving nominal restrictions
 and empty-shell distinctions. `PartialValue.Disposable.write_hole` pairs that
@@ -3627,7 +3626,7 @@ or mask-realization premise is supplied. All 30 build jobs and standard-axiom
 inspection of the producer, runtime bridge, source move and maximal behavior
 passed after this integration.
 
-and source-behavior dependencies contain only standard Lean axioms. No tests,
+No tests,
 examples or subagents were used. These are logical owned-cell semantics, not
 reference-hole restoration, custom Drop or physical memory proofs; none of the
 fourteen broad completion obligations is closed.
