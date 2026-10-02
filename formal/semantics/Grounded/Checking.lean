@@ -35,6 +35,10 @@ def Ty.sequenceResult (first result : Ty) : Ty :=
   | .never => .never
   | _ => result
 
+theorem Ty.sequenceResult.cases (first result : Ty) :
+    first.sequenceResult result = .never ∨ first.sequenceResult result = result := by
+  cases first <;> simp [Ty.sequenceResult]
+
 theorem ValueHasType.sequenceResult {program : Program} {value : Value} {first : Ty}
     (resident : ValueHasType program value first) (result : Ty) :
     first.sequenceResult result = result := by
@@ -144,7 +148,7 @@ inductive HasType (program : Program) : Module → FlowContext → Expr → Ty �
       (continued : HasType program home ((name, ⟨⟨localType, mutable⟩, .present⟩) :: middle) body type
         ((name, ⟨⟨localType, mutable⟩, finalMask⟩) :: after))
       (fresh : name ∉ middle.map Prod.fst) :
-      HasType program home before (.bind mutable name localType initial body) type after
+      HasType program home before (.bind mutable name localType initial body) (initialType.sequenceResult type) after
   | tuple {home before middle after head tail first rest}
       (headTyped : HasType program home before head first middle)
       (tailTyped : HasTypes program home middle tail rest after) :

@@ -1619,9 +1619,9 @@ theorem SourceClosure.Admitted.bottom_initializer {packages : List PackageSource
     (issued : environment.supply.Issued environment.activation) :
     NamedExpr.Elaborates program closure.functionNames home scope before
       (.bind mutable name (some annotation) sourceInitial sourceBody)
-      (.bind mutable ⟨scope.next⟩ localType initial body) type final ∧
+      (.bind mutable ⟨scope.next⟩ localType initial body) .never final ∧
     ∃ trace, InfiniteRun program ⟨environment, .expression (.bind mutable ⟨scope.next⟩ localType initial body), []⟩ trace ∧
-      (∀ index, ConfigurationTyped program final (.one type) (trace index) ∧
+      (∀ index, ConfigurationTyped program final (.one .never) (trace index) ∧
         AddressedEnvironment.ConsumptionFrame program final.slots environment (trace index).outerEnvironment ∧
         (trace index).OwnershipSafe program ∧
         Configuration.ExternalFrame ⟨environment, .expression (.bind mutable ⟨scope.next⟩ localType initial body), []⟩ (trace index) ∧

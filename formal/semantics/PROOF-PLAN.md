@@ -5171,3 +5171,31 @@ All 30 strict Lean jobs passed. Inspected assignment/source behavior, function
 bottom admission and no-exact-resident-overwrite proofs use only propext,
 Classical.choice and Quot.sound. Other compound forms and unreachable static
 continuation checking remain open, as do all fourteen completion families.
+
+## Binding and named-record result propagation
+
+Source bindings, Core bindings and their pending frames now compose initializer
+and body results with Ty.sequenceResult. The actual binding-return transition
+recovers the body's normal type from its real initializer value before creating
+local storage. SourceScope.bind_checked and source checking use the same result.
+SourceClosure.Admitted.bottom_initializer now concludes bottom typing for the
+whole binding, so outer function return admission sees the unreachable exit.
+
+NamedRecordBuild now carries its inferred result type as an authoritative index.
+The terminal constructor supplies the selected nominal type; each source-order
+initializer composes its type with the remaining build through the same Core
+binding rule. Named source record elaboration consumes that result rather than
+forcing every build to be nominal. NamedRecordBuild.result_shape proves that
+inference produces only bottom or that exact selected nominal identity.
+
+The first-execution theorem retains both initializer and continuation types and
+their composition equality. Actual assembly and record-execution proofs are
+migrated: completed executions still contain declaration-ordered transfers,
+the selected constructor and generated-scope retirement. General preservation,
+source soundness/behavior and no-exact-cleanup consume the new contracts.
+
+All 30 strict Lean jobs passed. Inspected result-shape, record execution,
+bottom-initializer and public safety proofs use only propext, Classical.choice
+and Quot.sound. Runtime transitions are unchanged. Operand-list outcome
+propagation and unreachable continuation checking remain open, as do all
+fourteen whole-language completion families.

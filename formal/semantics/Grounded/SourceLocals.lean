@@ -201,7 +201,7 @@ theorem SourceScope.bind_checked (scope : SourceScope) (mutable : Bool)
     (discard : initialType ≠ .never → ReturnDisposition program result [(⟨scope.next⟩, ⟨⟨localType, mutable⟩, finalMask⟩)])
     (continued : HasType program home ((⟨scope.next⟩, ⟨⟨localType, mutable⟩, .present⟩) :: middle) body result
       ((⟨scope.next⟩, ⟨⟨localType, mutable⟩, finalMask⟩) :: after)) :
-    HasType program home before (.bind mutable ⟨scope.next⟩ localType initial body) result after := by
+    HasType program home before (.bind mutable ⟨scope.next⟩ localType initial body) (initialType.sequenceResult result) after := by
   refine .bind initialized joined discard continued ?_
   have keys := congrArg (List.map Prod.fst) (initialized.slots.trans slots)
   simp only [FlowContext.slots, SourceScope.context, List.map_map, Function.comp_def] at keys

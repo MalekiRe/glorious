@@ -169,7 +169,7 @@ inductive FrameTyped (program : Program) (heap : RuntimeHeap StorageCell) (suppl
       (checked : HasType program home ((name, ⟨⟨localType, mutable⟩, .present⟩) :: before) body result
         ((name, ⟨⟨localType, mutable⟩, finalMask⟩) :: after))
       (fresh : name ∉ before.map Prod.fst) :
-      FrameTyped program heap supply activation before (.one initialType) (.bind name ⟨localType, mutable⟩ body) after (.one result)
+      FrameTyped program heap supply activation before (.one initialType) (.bind name ⟨localType, mutable⟩ body) after (.one (initialType.sequenceResult result))
   | scope {context after : FlowContext} (locals : FlowContext) {input result}
       (discard : ReturnDisposition program input locals)
       (joined : ReturnJoin program input context result after) :
@@ -463,6 +463,7 @@ theorem ConfigurationTyped.preservation {context : FlowContext} {result : Result
       cases code with | result resident =>
         cases continuation with | cons frame tail =>
           cases frame with | @bind home before after bindingName mutable initialType localType result body finalMask joined discard checked fresh =>
+            rw [resident.sequenceResult _] at tail
             have contextDistinct := store.context_distinct
             obtain ⟨entered, _, _, retained⟩ := AddressedEnvironment.extend.typed store
               (inputs := [⟨name, ⟨_, mutable⟩, value⟩]) (.cons (joined.on_return resident).1 .nil (by simp))
