@@ -5100,3 +5100,31 @@ Unreachable-suffix admission is still restrictive: a bottom RHS does not yet
 remove static obligations on the hypothetical destination or continuation.
 This change repairs expected RHS typing, not that separate flow boundary.
 Other scalar checking contexts and all fourteen completion families remain open.
+
+## Disposal obligations follow actual initializer and RHS return
+
+Binding cleanup admission is now guarded by the initializer's inferred type
+being non-bottom. Assignment replacement permission has the corresponding RHS
+guard. These guards are static type propositions, not supplied execution or
+value evidence. Source elaboration, Core checking and their actual pending
+frames carry the same contracts. A returned resident proves its inferred type
+is non-bottom, discharging the guard before ordinary scope cleanup or replacement
+permission can be consumed. Install control and cleanup tasks retain their
+unconditional physical safety requirements.
+
+SourceClosure.Admitted.bottom_initializer no longer requires disposal permission
+for the never-created local. SourceClosure.Admitted.bottom_assignment now
+constructs the source admission from resolution, place typing, bottom RHS and
+continuation derivations without disposal permission for the old resident.
+Both results include whole-expression divergence, prefix safety and outer-stack
+nonresumption. This admits these nonreturning operations even when their local
+or destination resident is nondiscardable; it does not authorize destruction.
+
+All 30 strict Lean jobs passed. Both strengthened source theorems, public source
+soundness/behavior, no-exact-cleanup and no-exact-resident-overwrite were inspected
+and use only propext, Classical.choice and Quot.sound. No runtime step changed.
+
+The remaining unreachable-flow boundary includes static continuation and
+hypothetical mask derivations, propagation of nonreturning outcomes through
+compound expressions, and outer function cleanup admission. All fourteen
+whole-language completion families remain open.

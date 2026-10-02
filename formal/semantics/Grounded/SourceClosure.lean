@@ -1611,7 +1611,6 @@ theorem SourceClosure.Admitted.bottom_initializer {packages : List PackageSource
     {mutable : Bool} {name : Identifier} {annotation : TypeExpr} {localType type : Ty} {finalMask : Initialization}
     (bottom : NamedExpr.Elaborates program closure.functionNames home scope before sourceInitial initial .never middle)
     (resolved : ResolvesType program.aliases annotation localType)
-    (discard : ReturnDisposition program type [(⟨scope.next⟩, ⟨⟨localType, mutable⟩, finalMask⟩)])
     (continued : NamedExpr.Elaborates program closure.functionNames home (scope.enter (some name) ⟨localType, mutable⟩)
       ((⟨scope.next⟩, ⟨⟨localType, mutable⟩, .present⟩) :: middle) sourceBody body type
       ((⟨scope.next⟩, ⟨⟨localType, mutable⟩, finalMask⟩) :: final))
@@ -1631,36 +1630,48 @@ theorem SourceClosure.Admitted.bottom_initializer {packages : List PackageSource
             ¬ (trace index).Untracked identity) ∧
       ∀ (stack : List Frame) (done : Configuration), Terminal done →
         ¬ Run program ⟨environment, .expression (.bind mutable ⟨scope.next⟩ localType initial body), stack⟩ (done.extend stack) := by
-  have binding := NamedExpr.Elaborates.bind bottom discard (.explicit resolved (.nonreturning _ rfl)) continued
+  have binding := NamedExpr.Elaborates.bind bottom (fun impossible => (impossible rfl).elim)
+    (.explicit resolved (.nonreturning _ rfl)) continued
   obtain ⟨trace, infinite, safe⟩ := (binding.checked slots).bind_bottom_behavior
     admitted.checked (bottom.checked slots) store issued
   exact ⟨binding, trace, infinite, safe, fun stack _ terminal => infinite.no_resume terminal stack⟩
-/-- The admitted source assignment retains the RHS's bottom derivation.
-No replacement value or successful cleanup is a premise. -/
+/-- A bottom RHS admits assignment without permission to discard the old
+resident. No return, replacement value or successful cleanup is assumed. -/
 theorem SourceClosure.Admitted.bottom_assignment {packages : List PackageSource}
     {closure : SourceClosure packages} {program : Program} (admitted : closure.Admitted program)
-    {home : Module} {scope : SourceScope} {before middle final : FlowContext}
+    {home : Module} {scope : SourceScope} {before middle restored final : FlowContext}
     {sourceValue sourceRest : NamedExpr} {value rest : Expr} {name : Identifier}
-    {fields : List FieldKey} {place : Place} {type : Ty}
-    (elaborated : NamedExpr.Elaborates program closure.functionNames home scope before
-      (.assign name fields sourceValue sourceRest) (.assign home place value rest) type final)
+    {fields : List FieldKey} {binding : SourceBinding} {targetType type : Ty}
+    {state : BindingState} {available updated : Initialization}
+    (resolved : scope.resolve name = some binding)
     (bottom : NamedExpr.Elaborates program closure.functionNames home scope before sourceValue value .never middle)
+    (selected : lookup binding.identity middle = some state)
+    (path : PathType program home binding.slot.type fields targetType)
+    (writable : binding.slot.mutable = true)
+    (selection : state.initialization.selectFields program binding.slot.type fields = some available)
+    (mask : state.initialization.writeFields program binding.slot.type fields .present = some updated)
+    (context : replaceBinding binding.identity { state with initialization := updated } middle = some restored)
+    (continued : NamedExpr.Elaborates program closure.functionNames home scope restored sourceRest rest type final)
     (slots : before.slots = scope.context) {environment : Environment}
     (store : BindingMap.Typed program environment.heap environment.activation environment.bindings before)
     (issued : environment.supply.Issued environment.activation) :
-    ∃ trace, InfiniteRun program ⟨environment, .expression (.assign home place value rest), []⟩ trace ∧
+    NamedExpr.Elaborates program closure.functionNames home scope before
+      (.assign name fields sourceValue sourceRest) (.assign home ⟨binding.identity, fields⟩ value rest) type final ∧
+    ∃ trace, InfiniteRun program ⟨environment, .expression (.assign home ⟨binding.identity, fields⟩ value rest), []⟩ trace ∧
       (∀ index, ConfigurationTyped program final (.one type) (trace index) ∧
         AddressedEnvironment.ConsumptionFrame program final.slots environment (trace index).outerEnvironment ∧
         (trace index).OwnershipSafe program ∧
-        Configuration.ExternalFrame ⟨environment, .expression (.assign home place value rest), []⟩ (trace index) ∧
+        Configuration.ExternalFrame ⟨environment, .expression (.assign home ⟨binding.identity, fields⟩ value rest), []⟩ (trace index) ∧
         ∀ identity, environment.heap.next ≤ identity.index →
           ∀ cell, (trace index).environment.heap.read identity = some cell →
             ¬ (trace index).Untracked identity) ∧
       ∀ (stack : List Frame) (done : Configuration), Terminal done →
-        ¬ Run program ⟨environment, .expression (.assign home place value rest), stack⟩ (done.extend stack) := by
+        ¬ Run program ⟨environment, .expression (.assign home ⟨binding.identity, fields⟩ value rest), stack⟩ (done.extend stack) := by
+  have elaborated := NamedExpr.Elaborates.assign resolved bottom (.nonreturning _ rfl)
+    selected path writable selection (fun impossible => (impossible rfl).elim) mask context continued
   obtain ⟨trace, infinite, safe⟩ := (elaborated.checked slots).assign_bottom_behavior
     admitted.checked (bottom.checked slots) store issued
-  exact ⟨trace, infinite, safe, fun stack _ terminal => infinite.no_resume terminal stack⟩
+  exact ⟨elaborated, trace, infinite, safe, fun stack _ terminal => infinite.no_resume terminal stack⟩
 
 
 /-- Every active and retained scope has live, correctly owned and typed partial

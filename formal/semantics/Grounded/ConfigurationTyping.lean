@@ -165,7 +165,7 @@ inductive FrameTyped (program : Program) (heap : RuntimeHeap StorageCell) (suppl
       FrameTyped program heap supply activation before (.one discarded) (.sequence rest) after (.one result)
   | bind {home before after name mutable initialType localType result body finalMask}
       (joined : ReturnJoin program initialType before localType before)
-      (discard : ReturnDisposition program result [(name, ⟨⟨localType, mutable⟩, finalMask⟩)])
+      (discard : initialType ≠ .never → ReturnDisposition program result [(name, ⟨⟨localType, mutable⟩, finalMask⟩)])
       (checked : HasType program home ((name, ⟨⟨localType, mutable⟩, .present⟩) :: before) body result
         ((name, ⟨⟨localType, mutable⟩, finalMask⟩) :: after))
       (fresh : name ∉ before.map Prod.fst) :
@@ -184,7 +184,7 @@ inductive FrameTyped (program : Program) (heap : RuntimeHeap StorageCell) (suppl
       (path : PathType program home state.slot.type place.fields type)
       (writable : state.slot.mutable = true)
       (selection : state.initialization.selectFields program state.slot.type place.fields = some available)
-      (discard : available.Disposable program.data type)
+      (discard : actualType ≠ .never → available.Disposable program.data type)
       (mask : state.initialization.writeFields program state.slot.type place.fields .present = some updated)
       (context : replaceBinding place.root { state with initialization := updated } before = some restored)
       (checked : HasType program home restored rest result after) :
@@ -347,7 +347,7 @@ theorem ConfigurationTyped.progress {context result state}
           obtain ⟨after, retired, _⟩ := AddressedEnvironment.retireBinding.progress store selected
           exact ⟨_, .retire retired⟩
         | assign joined selected path writable selection discard mask context checked =>
-          obtain ⟨old, _, selected, _⟩ := (store.replacement_safe selected path selection discard).selection
+          obtain ⟨old, _, selected, _⟩ := (store.replacement_safe selected path selection (discard resident.type_ne_never)).selection
           exact ⟨_, .assignResult selected⟩
         | tupleHead checked => exact ⟨_, .tupleHead⟩
         | project discard mask projection =>
@@ -466,7 +466,7 @@ theorem ConfigurationTyped.preservation {context : FlowContext} {result : Result
             obtain ⟨entered, _, _, retained⟩ := AddressedEnvironment.extend.typed store
               (inputs := [⟨name, ⟨_, mutable⟩, value⟩]) (.cons (joined.on_return resident).1 .nil (by simp))
               (by simpa using List.nodup_cons.mpr ⟨fresh, contextDistinct⟩)
-            refine .intro entered issued (.expression checked) (.cons (.scope [_] discard (.refl _)) ?_)
+            refine .intro entered issued (.expression checked) (.cons (.scope [_] (discard resident.type_ne_never) (.refl _)) ?_)
             exact tail.transport (fun _ previous => previous)
               (fun scope states typed _ => (retained scope.activation scope.bindings states typed).1)
     | scope exited =>
@@ -540,6 +540,7 @@ theorem ConfigurationTyped.preservation {context : FlowContext} {result : Result
       cases code with | result resident =>
         cases continuation with | cons frame tail =>
           cases frame with | assign joined selected path writable selection discard mask context checked =>
+            have discard := discard resident.type_ne_never
             obtain ⟨old, _, produced, permission⟩ := (store.replacement_safe selected path selection discard).selection
             cases Option.some.inj (actual.symm.trans produced)
             exact .intro store issued (.cleanup permission.disposalTasks
@@ -1403,7 +1404,9 @@ theorem ConfigurationTyped.ownership_safe {context : FlowContext} {result : Resu
             rw [← declared] at permission
             exact permission.realizes resident.2
           case assign =>
-            exact store.replacement_safe (by assumption) (by assumption) (by assumption) (by assumption)
+            apply store.replacement_safe (by assumption) (by assumption) (by assumption)
+            apply_assumption
+            exact resident.type_ne_never
           case project =>
             exact ProjectionType.cleanup_safe (by assumption) resident (by assumption) (by assumption)
           case sequence =>

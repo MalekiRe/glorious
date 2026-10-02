@@ -257,7 +257,7 @@ theorem HasType.executes (checkedProgram : program.Checked) {context final : Flo
       simp only [AddressedEnvironment.scope] at activation
       have updatedIssued : updated.supply.Issued updated.activation := by rw [supply, activation]; exact middleIssued
       obtain ⟨result, after, restRun, _⟩ := ih _ .assignRest rest updatedTyped updatedIssued
-      obtain ⟨old, _, selection, _⟩ := (middleTyped.replacement_safe selected path selection discard).selection
+      obtain ⟨old, _, selection, _⟩ := (middleTyped.replacement_safe selected path selection (discard valueTyped.type_ne_never)).selection
       exact ⟨result, after, .assign valueRun written selection restRun⟩
     | applyPatterns arguments nonempty covered bodies =>
       obtain ⟨values, middle, argumentsRun, residents, middleTyped, middleIssued⟩ :=

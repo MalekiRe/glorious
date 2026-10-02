@@ -78,6 +78,12 @@ end
 theorem ValueHasType.not_never {program : Program} {value : Value}
     (typed : ValueHasType program value .never) : False := by cases typed
 
+theorem ValueHasType.type_ne_never {program : Program} {value : Value} {type : Ty}
+    (typed : ValueHasType program value type) : type ≠ .never := by
+  intro equal
+  subst type
+  exact typed.not_never
+
 /-- Owned-use permission is invariant under the possible typings of one value.
 In particular, an empty array's unconstrained element type cannot hide an owner. -/
 theorem ValueHasType.use_permission {program : Program} {value : Value} {type : Ty}

@@ -183,7 +183,7 @@ theorem SourceScope.assign_checked {scope : SourceScope} {spelling : Identifier}
     (selected : lookup binding.identity evaluated = some state)
     (path : PathType program home binding.slot.type fields type) (writable : binding.slot.mutable = true)
     (selection : state.initialization.selectFields program binding.slot.type fields = some available)
-    (discard : available.Disposable program.data type)
+    (discard : actualType ≠ .never → available.Disposable program.data type)
     (mask : state.initialization.writeFields program binding.slot.type fields .present = some updated)
     (context : replaceBinding binding.identity { state with initialization := updated } evaluated = some restored)
     (continued : HasType program home restored rest result after) :
@@ -198,7 +198,7 @@ theorem SourceScope.bind_checked (scope : SourceScope) (mutable : Bool)
     (slots : before.slots = scope.context)
     (initialized : HasType program home before initial initialType middle)
     (joined : ReturnJoin program initialType middle localType middle)
-    (discard : ReturnDisposition program result [(⟨scope.next⟩, ⟨⟨localType, mutable⟩, finalMask⟩)])
+    (discard : initialType ≠ .never → ReturnDisposition program result [(⟨scope.next⟩, ⟨⟨localType, mutable⟩, finalMask⟩)])
     (continued : HasType program home ((⟨scope.next⟩, ⟨⟨localType, mutable⟩, .present⟩) :: middle) body result
       ((⟨scope.next⟩, ⟨⟨localType, mutable⟩, finalMask⟩) :: after)) :
     HasType program home before (.bind mutable ⟨scope.next⟩ localType initial body) result after := by

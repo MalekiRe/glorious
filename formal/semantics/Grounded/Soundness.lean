@@ -375,6 +375,7 @@ theorem HasType.assignment_restores (checkedProgram : program.Checked)
       | cons frame tail =>
         cases frame with
         | assign joined selected path writable selection discard mask context restTyped =>
+          have discard := discard resident.type_ne_never
           have resident := (joined.on_return resident).1
           obtain ⟨actual, updated, next, produced, maskWritten, contextWritten, nextTyped,
             readback, _⟩ := AddressedEnvironment.write.progress currentStore selected path resident

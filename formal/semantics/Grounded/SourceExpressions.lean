@@ -179,7 +179,7 @@ inductive NamedExpr.Elaborates (program : Program) (names : Module → FunctionN
       NamedExpr.Elaborates program names home scope before (.sequence first rest) (.sequence head tail) type after
   | bind {scope before middle after mutable name annotation initial body first rest initialType localType type finalMask}
       (initialized : NamedExpr.Elaborates program names home scope before initial first initialType middle)
-      (discard : ReturnDisposition program type [(⟨scope.next⟩, ⟨⟨localType, mutable⟩, finalMask⟩)])
+      (discard : initialType ≠ .never → ReturnDisposition program type [(⟨scope.next⟩, ⟨⟨localType, mutable⟩, finalMask⟩)])
       (annotated : Annotation program middle annotation initialType localType)
       (continued : NamedExpr.Elaborates program names home (scope.enter (some name) ⟨localType, mutable⟩)
         ((⟨scope.next⟩, ⟨⟨localType, mutable⟩, .present⟩) :: middle) body rest type
@@ -229,7 +229,7 @@ inductive NamedExpr.Elaborates (program : Program) (names : Module → FunctionN
       (path : PathType program home binding.slot.type fields type)
       (writable : binding.slot.mutable = true)
       (selection : state.initialization.selectFields program binding.slot.type fields = some available)
-      (discard : available.Disposable program.data type)
+      (discard : actualType ≠ .never → available.Disposable program.data type)
       (mask : state.initialization.writeFields program binding.slot.type fields .present = some updated)
       (context : replaceBinding binding.identity { state with initialization := updated } evaluated = some restored)
       (continued : NamedExpr.Elaborates program names home scope restored rest coreRest result after) :
@@ -517,7 +517,7 @@ theorem NamedExpr.Elaborates.checked {program : Program} {home : Module} {names 
   | field selected initialized joined continued first rest =>
     rename_i slots
     have initial := first slots
-    apply SourceScope.bind_checked _ false (finalMask := .absent) slots initial joined (.returning (by
+    apply SourceScope.bind_checked _ false (finalMask := .absent) slots initial joined (fun _ => .returning (by
       simp only [List.mem_singleton]
       intro binding same
       subst binding

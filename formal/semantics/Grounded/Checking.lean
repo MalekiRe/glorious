@@ -127,7 +127,7 @@ inductive HasType (program : Program) : Module → FlowContext → Expr → Ty �
   | bind {home before middle after mutable name initial body initialType localType type finalMask}
       (initialized : HasType program home before initial initialType middle)
       (joined : ReturnJoin program initialType middle localType middle)
-      (drop : ReturnDisposition program type [(name, ⟨⟨localType, mutable⟩, finalMask⟩)])
+      (drop : initialType ≠ .never → ReturnDisposition program type [(name, ⟨⟨localType, mutable⟩, finalMask⟩)])
       (continued : HasType program home ((name, ⟨⟨localType, mutable⟩, .present⟩) :: middle) body type
         ((name, ⟨⟨localType, mutable⟩, finalMask⟩) :: after))
       (fresh : name ∉ middle.map Prod.fst) :
@@ -172,7 +172,7 @@ inductive HasType (program : Program) : Module → FlowContext → Expr → Ty �
       (path : PathType program home state.slot.type place.fields type)
       (writable : state.slot.mutable = true)
       (selection : state.initialization.selectFields program state.slot.type place.fields = some available)
-      (discard : available.Disposable program.data type)
+      (discard : actualType ≠ .never → available.Disposable program.data type)
       (mask : state.initialization.writeFields program state.slot.type place.fields .present = some updated)
       (context : replaceBinding place.root { state with initialization := updated } evaluated = some restored)
       (continued : HasType program home restored rest result after) :
