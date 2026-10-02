@@ -437,7 +437,8 @@ theorem BindingMap.Disposable.release_prefix
     ∃ middle next, heap.retireMany front = some middle ∧
       middle.retire identity = some next ∧ next.retireMany back = some after ∧
       (∀ older ∈ back, older.index < identity.index) ∧
-      ∃ cell, middle.read identity = some cell ∧ cell.resident.Disposable program cell.type := by
+      ∃ cell, heap.read identity = some cell ∧ middle.read identity = some cell ∧
+        cell.resident.Disposable program cell.type := by
   obtain ⟨middle, next, prefixRun, retired, suffixRun, older⟩ :=
     releaseBindings.prefix_step released ordered split
   have member : identity ∈ bindings.map Prod.snd := by
@@ -449,7 +450,7 @@ theorem BindingMap.Disposable.release_prefix
     intro included
     rw [split] at ordered
     exact Nat.lt_irrefl _ ((List.pairwise_append.mp ordered).2.2 identity included identity (by simp))
-  exact ⟨middle, next, prefixRun, retired, suffixRun, older, cell,
+  exact ⟨middle, next, prefixRun, retired, suffixRun, older, cell, found,
     (RuntimeHeap.retireMany_outside prefixRun outside).trans found, permission⟩
 
 

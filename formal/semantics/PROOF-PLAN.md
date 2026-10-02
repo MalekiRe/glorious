@@ -3252,16 +3252,23 @@ implement those missing semantics. No broad completion obligation is closed.
 
 ## Disposal permission survives every intermediate retirement prefix
 
-`BindingMap.Disposable.release_prefix` now derives the actual cell and its
+`BindingMap.Disposable.release_prefix` derives the exact original cell and its
 residual disposal permission immediately before each retirement in a scope.
-Strict acquisition order excludes the current identity from the completed
-prefix; the shared heap-framing theorem preserves its actual resident. No
-intermediate readiness, permission or heap realization is supplied.
+Its conclusion identifies the same cell in both the pre-cleanup and intermediate
+heaps. Strict acquisition order excludes its identity from the completed
+prefix; the shared heap-framing theorem preserves the resident. No intermediate
+readiness or replacement resident is assumed.
 
 Both `Configuration.OwnershipSafe.scope_retirement` and `return_retirement`
 consume this producer and export the stronger intermediate-state guarantee.
-Their ownership-safety input is already derived by general source-prefix
-soundness and maximal source behavior. This extends the real retirement
+`HasType.scope_join_preserves_ownership` and `HasType.return_restores` consume
+these intermediate-state guarantees for the cleanup transitions they construct.
+For every split of the actual retirement order, they expose the actual prefix
+heap, next retirement, remaining suffix and unchanged original eligible cell.
+The suffix reaches the same constructed final heap. No completed cleanup or
+intermediate-state readiness is an admission premise. The composed producer,
+both constructive consumers and maximal source behavior passed all 30 Lean
+build jobs and standard-axiom inspection. This extends the real retirement
 consumers, rather than merely recording a separate pre-state permission list.
 
 Verification: all 30 `lake build Grounded` jobs passed. Axiom inspection of the

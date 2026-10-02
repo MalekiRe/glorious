@@ -73,6 +73,13 @@ theorem HasType.scope_join_preserves_ownership (checkedProgram : program.Checked
       BindingMap.Typed program after.heap after.activation after.bindings joined ∧
       BindingContextApprox program.data branch joined ∧
       (∀ address ∈ after.bindings.map Prod.snd, after.heap.read address = current.heap.read address) ∧
+      (∀ front identity back,
+        BindingMap.releaseOrder (List.take count current.bindings) = front ++ identity :: back →
+        ∃ middle next, current.heap.retireMany front = some middle ∧
+          middle.retire identity = some next ∧ next.retireMany back = some after.heap ∧
+          (∀ older ∈ back, older.index < identity.index) ∧
+          ∃ cell, current.heap.read identity = some cell ∧ middle.read identity = some cell ∧
+            cell.resident.Disposable program cell.type) ∧
       ∀ name state, lookup name branch = some state →
         ∀ selectedHome selectedType fields selectedState,
           PathType program selectedHome state.slot.type fields selectedType →
@@ -102,7 +109,8 @@ theorem HasType.scope_join_preserves_ownership (checkedProgram : program.Checked
             (by simpa using afterTyped)
           have safe := original.ownership_safe
           refine ⟨after, _, _, safe.1, safe.2, step, original.preservation checkedProgram step, retired,
-            branchTyped, branchTyped.approximate joined, joined, preserved, ?_⟩
+            branchTyped, branchTyped.approximate joined, joined, preserved,
+            (fun _ _ _ split => safe.scope_retirement step split), ?_⟩
           intro name state selected selectedHome selectedType fields selectedState path selection
           obtain ⟨next, found, approximation⟩ := joined.lookup selected
           obtain ⟨address, cell, mapped, live, owner, typeEq, cellTyped, member⟩ := branchTyped.lookup selected
@@ -546,7 +554,13 @@ theorem HasType.return_restores (checkedProgram : program.Checked)
       ConfigurationTyped program final (.one type) ⟨after, .result value, stack⟩ ∧
       after.scope = caller ∧
       (∀ identity ∈ current.bindings.map Prod.snd, after.heap.Retired identity) ∧
-      (∀ identity ∈ caller.bindings.map Prod.snd, after.heap.read identity = current.heap.read identity) := by
+      (∀ identity ∈ caller.bindings.map Prod.snd, after.heap.read identity = current.heap.read identity) ∧
+      ∀ front identity back, current.bindings.releaseOrder = front ++ identity :: back →
+        ∃ middle next, current.heap.retireMany front = some middle ∧
+          middle.retire identity = some next ∧ next.retireMany back = some after.heap ∧
+          (∀ older ∈ back, older.index < identity.index) ∧
+          ∃ cell, current.heap.read identity = some cell ∧ middle.read identity = some cell ∧
+            cell.resident.Disposable program cell.type := by
   have typed := (checked.soundness checkedProgram store issued run).1
   have original := typed
   cases typed with
@@ -565,7 +579,8 @@ theorem HasType.return_restores (checkedProgram : program.Checked)
             AddressedEnvironment.restore.progress currentStore callerTyped different
           have step : Step program ⟨current, .result value, .restore caller :: stack⟩
               ⟨after, .result value, stack⟩ := .restore restored
-          refine ⟨after, step, original.preservation checkedProgram step, ?_, retired, preserved⟩
+          refine ⟨after, step, original.preservation checkedProgram step, ?_, retired, preserved,
+            (fun _ _ _ split => original.ownership_safe.return_retirement step split)⟩
           simp [AddressedEnvironment.scope, activation, bindings]
 
 /-- Actual caller restoration preserves live nondiscardable descendants,

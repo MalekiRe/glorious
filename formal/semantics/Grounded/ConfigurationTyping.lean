@@ -762,7 +762,8 @@ theorem Configuration.OwnershipSafe.scope_retirement {before : Environment} {aft
     ∃ middle next, before.heap.retireMany front = some middle ∧
       middle.retire identity = some next ∧ next.retireMany back = some after.environment.heap ∧
       (∀ older ∈ back, older.index < identity.index) ∧
-      ∃ cell, middle.read identity = some cell ∧ cell.resident.Disposable program cell.type := by
+      ∃ cell, before.heap.read identity = some cell ∧ middle.read identity = some cell ∧
+        cell.resident.Disposable program cell.type := by
   cases step with
   | scope exited =>
     obtain ⟨heap, released, same⟩ := Option.map_eq_some_iff.mp exited
@@ -780,7 +781,8 @@ theorem Configuration.OwnershipSafe.return_retirement {before : Environment} {af
     ∃ middle next, before.heap.retireMany front = some middle ∧
       middle.retire identity = some next ∧ next.retireMany back = some after.environment.heap ∧
       (∀ older ∈ back, older.index < identity.index) ∧
-      ∃ cell, middle.read identity = some cell ∧ cell.resident.Disposable program cell.type := by
+      ∃ cell, before.heap.read identity = some cell ∧ middle.read identity = some cell ∧
+        cell.resident.Disposable program cell.type := by
   cases step with
   | restore restored =>
     obtain ⟨heap, released, same⟩ := Option.map_eq_some_iff.mp restored
