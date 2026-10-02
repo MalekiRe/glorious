@@ -823,6 +823,7 @@ theorem HasType.pattern_binding (checkedProgram : program.Checked)
     ∃ after identity position,
       Step program ⟨current, .results values, .patterns (front ++ (pattern, body) :: back) :: stack⟩ after ∧
       after.environment.bindings[position]? = some (name, identity) ∧
+      lookup name after.environment.bindings = some identity ∧
       after.environment.heap.read identity = some ⟨current.activation, boundType, .resident owner⟩ ∧
       identity.index = current.heap.next + position ∧ ValueHasType program owner boundType := by
   have safe := (checked.soundness checkedProgram store issued run).2.2.2.2
@@ -838,10 +839,21 @@ theorem HasType.pattern_binding (checkedProgram : program.Checked)
   have selected : selectArm (argumentValue values) (front ++ (pattern, body) :: back) = some (bindings, body) := by
     rw [selectArm.skip_missed _ _ _ missed]
     simp only [selectArm, matched]
-  refine ⟨⟨current.extend bindings, .expression body, .scope bindings.length :: stack⟩,
-    identity, before.length, .selectedPattern selected, ?_, cell, position, resident⟩
-  simp only [AddressedEnvironment.extend]
-  exact List.getElem?_append_left (List.getElem?_eq_some_iff.mp found).1 |>.trans found
+  let result : Configuration := ⟨current.extend bindings, .expression body, .scope bindings.length :: stack⟩
+  have entered : Step program
+      ⟨current, .results values, .patterns (front ++ (pattern, body) :: back) :: stack⟩ result :=
+    .selectedPattern selected
+  have located : result.environment.bindings[before.length]? = some (name, identity) := by
+    simp only [result, AddressedEnvironment.extend]
+    exact List.getElem?_append_left (List.getElem?_eq_some_iff.mp found).1 |>.trans found
+  have preserved := ConfigurationTyped.preservation checkedProgram
+    (checked.soundness checkedProgram store issued run).1 entered
+  have distinct : (result.environment.bindings.map Prod.fst).Nodup := by
+    dsimp only [result] at preserved ⊢
+    cases preserved with
+    | intro store issued code continuation => exact store.keys.symm ▸ store.context_distinct
+  exact ⟨result, identity, before.length, entered, located,
+    lookup.of_mem distinct (List.mem_of_getElem? located), cell, position, resident⟩
 
 end Grounded
 
