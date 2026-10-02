@@ -51,6 +51,17 @@ def allocateBindings (heap : RuntimeHeap StorageCell) (activation : ActivationId
       let tail := allocateBindings first.2 activation rest
       ((input.name, first.1) :: tail.1, tail.2)
 
+/-- A binding batch changes no storage identity outside its actual outputs. -/
+theorem allocateBindings.outside (heap : RuntimeHeap StorageCell) (activation : ActivationId)
+    (inputs : List BindingInput) {identity : StorageId}
+    (outside : identity ∉ (allocateBindings heap activation inputs).1.map Prod.snd) :
+    (allocateBindings heap activation inputs).2.read identity = heap.read identity := by
+  induction inputs generalizing heap with
+  | nil => rfl
+  | cons input rest ih =>
+    simp only [allocateBindings, List.map_cons, List.mem_cons, not_or] at outside
+    exact (ih _ outside.2).trans (RuntimeHeap.allocate_other _ _ _ outside.1)
+
 theorem allocateBindings.history (heap : RuntimeHeap StorageCell) (activation : ActivationId)
     (inputs : List BindingInput) : RuntimeHeap.History heap (allocateBindings heap activation inputs).2 := by
   induction inputs generalizing heap with

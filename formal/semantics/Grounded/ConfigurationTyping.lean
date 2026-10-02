@@ -800,24 +800,34 @@ theorem ConfigurationTyped.behavior (checkedProgram : program.Checked)
       ValueHasType program value type ∧
       BindingMap.Typed program after.heap after.activation after.bindings context ∧
       AddressedEnvironment.ConsumptionFrame program context.slots before.outerEnvironment after ∧
-      (⟨after, .result value, []⟩ : Configuration).OwnershipSafe program) ∨
+      (⟨after, .result value, []⟩ : Configuration).OwnershipSafe program ∧
+      ∀ identity, before.environment.heap.next ≤ identity.index → identity.index < after.heap.next →
+        after.heap.Retired identity) ∨
     (∃ trace, InfiniteRun program before trace ∧
       ∀ index, ConfigurationTyped program context (.one type) (trace index) ∧
         AddressedEnvironment.ConsumptionFrame program context.slots before.outerEnvironment (trace index).outerEnvironment ∧
-        (trace index).OwnershipSafe program) := by
+        (trace index).OwnershipSafe program ∧
+        ∀ identity, before.environment.heap.next ≤ identity.index →
+          ∀ cell, (trace index).environment.heap.read identity = some cell →
+            ¬ (trace index).Untracked identity) := by
   rcases Run.terminal_or_infinite before
       (fun _ run => (typed.run checkedProgram run).progress) with ⟨state, run, done⟩ | ⟨trace, infinite⟩
   · left
     have current := typed.run checkedProgram run
     obtain ⟨after, value, same, store, _, resident⟩ := current.normal_form done
     subst state
-    exact ⟨after, value, run, resident, store, typed.consumption_run checkedProgram run, current.ownership_safe⟩
+    refine ⟨after, value, run, resident, store, typed.consumption_run checkedProgram run,
+      current.ownership_safe, run.return_retires_all ?_⟩
+    intro identity member
+    obtain ⟨cell, found⟩ := typed.live_scopes before.continuation [] (by simp) identity member
+    exact before.environment.heap.bounded _ _ found
   · right
     refine ⟨trace, infinite, ?_⟩
     intro index
     have run := infinite.prefix index
     have current := typed.run checkedProgram run
-    exact ⟨current, typed.consumption_run checkedProgram run, current.ownership_safe⟩
+    exact ⟨current, typed.consumption_run checkedProgram run, current.ownership_safe,
+      fun _ fresh _ live => run.allocated_tracked fresh live⟩
 
 
 end Grounded

@@ -668,4 +668,117 @@ theorem Run.retired_untyped {before after : Configuration} (run : Run program be
     cases found
 
 
+/-- Only restore frames retain a separate caller binding map. -/
+def Frame.Retains (frame : Frame) (identity : StorageId) : Prop :=
+  match frame with
+  | .restore caller => identity ∈ caller.bindings.map Prod.snd
+  | _ => False
+
+/-- Inspect the existing active and retained binding maps, not a shadow owner table. -/
+def Configuration.Untracked (state : Configuration) (identity : StorageId) : Prop :=
+  identity ∉ state.environment.bindings.map Prod.snd ∧
+    ∀ frame ∈ state.continuation, ¬ frame.Retains identity
+
+/-- A live cell outside every resulting scope cannot have been allocated or
+abandoned by this step: it was already live and untracked before the step. -/
+theorem Step.untracked_origin {before after : Configuration} (step : Step program before after)
+    {identity : StorageId} {cell : StorageCell}
+    (untracked : after.Untracked identity) (found : after.environment.heap.read identity = some cell) :
+    (∃ old, before.environment.heap.read identity = some old) ∧ before.Untracked identity := by
+  cases step <;> simp_all [Configuration.Untracked, Frame.Retains]
+  case move env after stack place value taken =>
+    obtain ⟨⟨result, heap⟩, operation, same⟩ := Option.map_eq_some_iff.mp taken
+    cases same
+    obtain ⟨address, _, raw⟩ := Option.bind_eq_some_iff.mp operation
+    obtain ⟨old, original, _, _⟩ := StorageAddress.take.identity raw found
+    exact ⟨⟨old, original⟩, untracked.1⟩
+  case assignResult env after stack place rest value written =>
+    obtain ⟨heap, operation, same⟩ := Option.map_eq_some_iff.mp written
+    cases same
+    obtain ⟨address, _, raw⟩ := Option.bind_eq_some_iff.mp operation
+    obtain ⟨old, original, _, _⟩ := StorageAddress.restore.identity raw found
+    exact ⟨⟨old, original⟩, untracked.1⟩
+  case constant env stack name declaration declared =>
+    exact ⟨⟨cell, found⟩, untracked.2.1⟩
+  case callInputs env stack declaration values inputs prepared =>
+    have outside : identity ∉ (allocateBindings env.heap env.supply.allocate.1 inputs).1.map Prod.snd := by
+      simpa [enterBindings] using untracked.1
+    exact ⟨⟨cell, (allocateBindings.outside _ _ _ outside).symm.trans found⟩, untracked.2.1⟩
+  case bindResult env stack name slot body value =>
+    have outside : identity ∉ (env.extend [⟨name, slot, value⟩]).bindings.map Prod.snd := by
+      simpa using untracked.1
+    have parts : identity ∉ (allocateBindings env.heap env.activation [⟨name, slot, value⟩]).1.map Prod.snd ∧
+        identity ∉ env.bindings.map Prod.snd := by
+      simpa only [AddressedEnvironment.extend, List.map_append, List.mem_append, not_or] using outside
+    exact ⟨⟨cell, (allocateBindings.outside _ _ _ parts.1).symm.trans found⟩, by simpa using parts.2⟩
+  case selectedPattern env inputs stack values arms body selected =>
+    have outside : identity ∉ (env.extend inputs).bindings.map Prod.snd := by simpa using untracked.1
+    have parts : identity ∉ (allocateBindings env.heap env.activation inputs).1.map Prod.snd ∧
+        identity ∉ env.bindings.map Prod.snd := by
+      simpa only [AddressedEnvironment.extend, List.map_append, List.mem_append, not_or] using outside
+    exact ⟨⟨cell, (allocateBindings.outside _ _ _ parts.1).symm.trans found⟩, by simpa using parts.2⟩
+  case restore env after caller stack value restored =>
+    obtain ⟨heap, released, same⟩ := Option.map_eq_some_iff.mp restored
+    cases same
+    refine ⟨⟨cell, RuntimeHeap.retireMany_origin released found⟩, ?_, untracked.1⟩
+    intro name member
+    have absent := (releaseBindings.retired released identity (List.mem_map_of_mem (f := Prod.snd) member)).2
+    rw [absent] at found
+    cases found
+  case scope env after stack count value exited =>
+    obtain ⟨heap, released, same⟩ := Option.map_eq_some_iff.mp exited
+    cases same
+    refine ⟨⟨cell, RuntimeHeap.retireMany_origin released found⟩, ?_⟩
+    intro name member
+    have split : (name, identity) ∈ List.take count env.bindings ∨ (name, identity) ∈ env.bindings.drop count := by
+      rw [← List.mem_append, List.take_append_drop]
+      exact member
+    rcases split with removed | retained
+    · have absent := (releaseBindings.retired released identity (List.mem_map_of_mem (f := Prod.snd) removed)).2
+      rw [absent] at found
+      cases found
+    · exact untracked.1 name retained
+
+/-- Storage accountability composes through arbitrary finite execution. -/
+theorem Run.untracked_origin {before after : Configuration} (run : Run program before after)
+    {identity : StorageId} {cell : StorageCell}
+    (untracked : after.Untracked identity) (found : after.environment.heap.read identity = some cell) :
+    (∃ old, before.environment.heap.read identity = some old) ∧ before.Untracked identity := by
+  induction run with
+  | refl => exact ⟨⟨cell, found⟩, untracked⟩
+  | step head tail ih =>
+    obtain ⟨⟨middle, live⟩, tracked⟩ := ih untracked found
+    exact head.untracked_origin tracked live
+
+/-- Every newly allocated live cell remains in an actual active or retained scope. -/
+theorem Run.allocated_tracked {before after : Configuration} (run : Run program before after)
+    {identity : StorageId} (fresh : before.environment.heap.next ≤ identity.index)
+    {cell : StorageCell} (live : after.environment.heap.read identity = some cell) :
+    ¬ after.Untracked identity := by
+  intro untracked
+  obtain ⟨⟨old, found⟩, _⟩ := run.untracked_origin untracked live
+  exact Nat.not_lt_of_ge fresh (before.environment.heap.bounded _ _ found)
+
+/-- A complete return retires all storage allocated during the run, including
+nested calls, pattern bindings and locals, not just entry parameters. -/
+theorem Run.return_retires_all {before : Configuration} {after : Environment} {value : Value}
+    (run : Run program before ⟨after, .result value, []⟩)
+    (bounded : ∀ identity ∈ before.outerEnvironment.bindings.map Prod.snd,
+      identity.index < before.environment.heap.next) :
+    ∀ identity, before.environment.heap.next ≤ identity.index → identity.index < after.heap.next →
+      after.heap.Retired identity := by
+  intro identity fresh allocated
+  refine ⟨allocated, ?_⟩
+  cases found : after.heap.read identity with
+  | none => rfl
+  | some cell =>
+    have same := congrArg AddressedScope.bindings run.outer_scope
+    change after.bindings = before.outerEnvironment.bindings at same
+    have outside : identity ∉ after.bindings.map Prod.snd := by
+      intro member
+      have original : identity ∈ before.outerEnvironment.bindings.map Prod.snd := by
+        simpa only [same] using member
+      exact Nat.not_lt_of_ge fresh (bounded identity original)
+    exact False.elim (run.allocated_tracked fresh found ⟨outside, by simp⟩)
+
 end Grounded

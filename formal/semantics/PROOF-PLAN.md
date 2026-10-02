@@ -3256,3 +3256,42 @@ new producer, both consumers and public source soundness found only standard
 Lean axioms. No examples or unit tests were added. Custom Drop and field-by-field
 destruction remain outside the current logical retirement operation.
 
+## Complete storage accountability through maximal source behavior
+
+The prior invocation cleanup result covered entry parameters, not every cell
+allocated by nested calls, local bindings and pattern bindings. The operational
+chain now closes that gap generally:
+
+- `allocateBindings.outside` frames identities outside the actual output map.
+- `Step.untracked_origin` and `Run.untracked_origin` prove that a live cell
+  outside every active/retained scope was already live and untracked before
+  execution. `Configuration.Untracked` inspects existing binding maps and restore
+  frames; it is not another owner table or assumed frame invariant.
+- `Run.allocated_tracked` therefore excludes orphaned fresh live storage at
+  every reachable prefix, including prefixes of infinite execution.
+- `Run.return_retires_all` proves retirement of every issued identity between
+  the initial and final allocation frontiers. General configuration typing
+  derives its outer-scope bound from current retained-scope liveness, rather
+  than supplying a future cleanup guarantee.
+
+`ConfigurationTyped.behavior`, `HasType.behavior` and all three public source
+maximal-behavior consumers now export this contract. Normal completion retires
+all newly allocated cells; divergence keeps every new live cell tracked by the
+actual active or retained binding maps. The ordered-input consumer composes from
+before argument evaluation, not just from after parameter allocation. Existing
+parameter-preparation and exact parameter-retirement witnesses remain exported.
+
+Verification: an independent source-only build passed all 30 Lean jobs. An
+imported-module audit traversed all 4,511 Grounded declarations and checked their
+transitive axiom dependencies: only `propext`, `Classical.choice` and `Quot.sound`
+were used. The audit ran through stdin; no tests, examples or audit scaffolding
+were added to the repository.
+
+Completion audit remains negative. This contract concerns logical cell storage;
+values cannot yet contain loans, raw allocations or captured environments.
+Language §7.6 custom hooks and reverse field destruction, §7.7 nonlocal cleanup,
+and library §§22/30 physical ownership and suspension contracts are not modeled
+by logical retirement. The declarations checked by source admission remain the
+decoded fragment described above, not the complete normative language or library.
+No broad completion obligation is marked complete.
+

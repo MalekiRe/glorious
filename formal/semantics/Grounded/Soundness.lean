@@ -35,11 +35,16 @@ theorem HasType.behavior (checkedProgram : program.Checked) {context final : Flo
       ValueHasType program value type ∧
       BindingMap.Typed program after.heap after.activation after.bindings final ∧
       AddressedEnvironment.ConsumptionFrame program final.slots environment after ∧
-      (⟨after, .result value, []⟩ : Configuration).OwnershipSafe program) ∨
+      (⟨after, .result value, []⟩ : Configuration).OwnershipSafe program ∧
+      ∀ identity, environment.heap.next ≤ identity.index → identity.index < after.heap.next →
+        after.heap.Retired identity) ∨
     (∃ trace, InfiniteRun program ⟨environment, .expression expression, []⟩ trace ∧
       ∀ index, ConfigurationTyped program final (.one type) (trace index) ∧
         AddressedEnvironment.ConsumptionFrame program final.slots environment (trace index).outerEnvironment ∧
-        (trace index).OwnershipSafe program) := by
+        (trace index).OwnershipSafe program ∧
+        ∀ identity, environment.heap.next ≤ identity.index →
+          ∀ cell, (trace index).environment.heap.read identity = some cell →
+            ¬ (trace index).Untracked identity) := by
   exact (ConfigurationTyped.entry checked store issued).behavior checkedProgram
 
 
