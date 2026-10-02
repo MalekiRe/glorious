@@ -493,6 +493,32 @@ theorem BindingMap.release_next (pending available : BindingMap)
     have actual : available[index]? = some entry := by rw [indices]; exact oldSelected
     refine ⟨index, entry, ?_, actual, member, by simp only [List.head?_cons, same]⟩
     simp [BindingMap.nextRelease, ordered, List.findIdx?_eq_some_of_exists witness, same, index]
+/-- Selecting a pending lexical prefix cannot select a retained outer binding,
+even after earlier retirements have shortened that prefix. -/
+theorem BindingMap.nextRelease.in_prefix {pending available : BindingMap} {index : Nat} {identity : StorageId}
+    (leading : pending <+: available)
+    (chosen : BindingMap.nextRelease pending available = some (index, identity)) :
+    index < pending.length := by
+  cases first : pending.releaseOrder.head? with
+  | none => simp [BindingMap.nextRelease, first] at chosen
+  | some root =>
+    cases searched : available.findIdx? (fun entry => decide (entry.2 = root)) with
+    | none => simp [BindingMap.nextRelease, first, searched] at chosen
+    | some position =>
+      have same : position = index ∧ root = identity := by
+        simpa [BindingMap.nextRelease, first, searched] using chosen
+      obtain ⟨rfl, rfl⟩ := same
+      have member : root ∈ pending.map Prod.snd := by
+        apply BindingMap.mem_releaseOrder.mp
+        obtain ⟨tail, ordered⟩ := List.head?_eq_some_iff.mp first
+        simp only [ordered, List.mem_cons, true_or]
+      obtain ⟨entry, member, same⟩ := List.mem_map.mp member
+      have bound := List.findIdx_lt_length_of_exists
+        (xs := pending) (p := fun entry => decide (entry.2 = root))
+        ⟨entry, member, by simp only [same, decide_true]⟩
+      rw [← (List.findIdx?_eq_some_iff_findIdx_eq.mp searched).2,
+        leading.findIdx_eq_of_findIdx_lt_length bound]
+      exact bound
 /-- Every later retirement is strictly older; each owned cell occurs exactly
 once because typed binding maps are injective in storage identity. -/
 theorem BindingMap.releaseOrder_decreasing (bindings : BindingMap)

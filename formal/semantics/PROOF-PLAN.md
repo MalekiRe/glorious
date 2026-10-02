@@ -3916,3 +3916,16 @@ All 30 strict build jobs passed; inspected producer and source proofs use only
 standard Lean axioms. The machine still needs staged scope/return controls that
 interleave each resident's destruction with this retirement operation; no broad
 completion obligation is closed.
+The executable selector is also proved to stay within the remaining local
+prefix. `BindingMap.nextRelease.in_prefix` derives the strict index bound from
+the actual search result and prefix relation, including prefixes shortened by
+previous retirements. The source scope theorem consumes this bound; the next
+retirement cannot select a retained outer binding. The strict build and axiom
+checks passed.
+
+The next operational cutover must also migrate `ControlTyped.slots`, whose
+current conclusion requires unchanged slot lists, and its consumption-frame
+and live-scope consumers. A control performing synchronized retirement removes
+a binding; retaining this equality would be the wrong phase contract. Scope
+and return completion must be derived through the resulting intermediate
+controls, not recovered by assuming their final cleanup run.

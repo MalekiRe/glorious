@@ -97,6 +97,7 @@ theorem HasType.scope_join_preserves_ownership (checkedProgram : program.Checked
               BindingMap.nextRelease
                 ((List.take count current.bindings).filter fun entry => decide (entry.2 ∉ front))
                 (current.bindings.filter fun entry => decide (entry.2 ∉ front)) = some (index, entry.2) ∧
+              index < ((List.take count current.bindings).filter fun entry => decide (entry.2 ∉ front)).length ∧
               (current.bindings.filter fun entry => decide (entry.2 ∉ front))[index]? = some entry ∧
               entry ∈ List.take count current.bindings ∧
               (BindingMap.releaseOrder ((List.take count current.bindings).filter
@@ -161,7 +162,9 @@ theorem HasType.scope_join_preserves_ownership (checkedProgram : program.Checked
                 AddressedEnvironment.retireBinding.progress
                   (current := { current with heap := middle, bindings :=
                     (current.bindings.filter fun entry => decide (entry.2 ∉ front)) }) retained selected
-              exact .inr ⟨index, entry, cell, next, chosen, selected, (List.mem_filter.mp pending).1, first,
+              have localIndex := BindingMap.nextRelease.in_prefix
+                (List.IsPrefix.filter _ (List.take_prefix locals.length current.bindings)) chosen
+              exact .inr ⟨index, entry, cell, next, chosen, localIndex, selected, (List.mem_filter.mp pending).1, first,
                 found, allowed, retired, primitive, absent, frontier, activation, supply, bindings, nextTyped, outside, callers⟩
           intro name state selected selectedHome selectedType fields selectedState path selection
           obtain ⟨next, found, approximation⟩ := joined.lookup selected
