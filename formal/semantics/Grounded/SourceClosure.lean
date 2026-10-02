@@ -778,6 +778,9 @@ theorem SourceClosure.Admitted.cleanup {packages : List PackageSource} {closure 
         Run program ⟨current, rest, stack⟩ last) ∧
       (∀ trace, InfiniteRun program ⟨environment, .expression core, []⟩ trace →
         ∃ index, trace index = ⟨current, rest, stack⟩) ∧
+      (∀ state, Run program ⟨current, .cleanup pending rest, stack⟩ state →
+        (∃ remaining, state = ⟨current, .cleanup remaining rest, stack⟩) ∨
+          Run program ⟨current, rest, stack⟩ state) ∧
       ∀ next remaining continuation frames,
         Run program ⟨current, .cleanup pending rest, stack⟩ ⟨next, .cleanup remaining continuation, frames⟩ →
         ∀ task ∈ remaining, DisposalTask.Safe program task := by
@@ -787,6 +790,7 @@ theorem SourceClosure.Admitted.cleanup {packages : List PackageSource} {closure 
   exact ⟨completed, typed.run admitted.checked completed, typed.cleanup_safe,
     fun _ terminal done => reached.terminal_suffix terminal done,
     fun _ infinite => infinite.reaches reached,
+    fun _ suffix => suffix.cleanup_decompose current pending rest stack rfl,
     fun _ _ _ _ suffix => (typed.run admitted.checked suffix).cleanup_safe⟩
 /-- Between any two admitted source prefixes, a path beneath an immutable
 binding is either unreadable or yields exactly its earlier value. Once such a

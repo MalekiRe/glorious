@@ -307,6 +307,25 @@ theorem Run.cleanup (environment : Environment) (rest : Control) (stack : List F
     cases task with
     | enter value => exact (Run.cleanup_value environment rest stack value pending).trans ih
     | release head => exact .step .cleanupRelease ih
+/-- A cleanup prefix either still holds the original environment, protected
+control and caller frames, or has already resumed that exact continuation.
+In particular, an installation cannot run while its old-resident queue is active. -/
+theorem Run.cleanup_decompose {before after : Configuration} (run : Run program before after) :
+    ∀ (environment : Environment) (pending : List DisposalTask) (rest : Control) (stack : List Frame),
+      before = ⟨environment, .cleanup pending rest, stack⟩ →
+      (∃ remaining, after = ⟨environment, .cleanup remaining rest, stack⟩) ∨
+        Run program ⟨environment, rest, stack⟩ after := by
+  induction run with
+  | refl state =>
+    intro environment pending rest stack same
+    exact .inl ⟨pending, same⟩
+  | step head tail ih =>
+    intro environment pending rest stack same
+    subst same
+    cases head with
+    | cleanupEnter => exact ih _ _ _ _ rfl
+    | cleanupRelease => exact ih _ _ _ _ rfl
+    | cleanupDone => exact .inr tail
 /-- Until a subcomputation has a terminal control, its caller frames cannot
 participate in a transition. This is an operational fact, not admission evidence. -/
 theorem Step.unextend {before after : Configuration} {tail : List Frame}

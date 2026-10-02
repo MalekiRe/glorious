@@ -3838,6 +3838,14 @@ and disjoint-mask guarantees. General source safety, inevitable cleanup and
 maximal behavior cover the new states without a completed-cleanup or future
 realization assumption.
 
+`Run.cleanup_decompose` additionally classifies every actual cleanup prefix:
+either cleanup still retains the exact original heap/environment, protected
+control and caller frames, or execution has passed through that exact saved
+control. `SourceClosure.Admitted.cleanup` consumes this barrier theorem. It
+covers partial projection handoff and delayed installation as well as sequence
+discard; no intermediate heap mutation or payload substitution is permitted.
+All 30 strict build jobs and inspected barrier/source axiom closures passed.
+
 Verification: all 30 strict Lean build jobs passed. Inspected assignment,
 preservation, progress, source-cleanup and maximal-behavior proofs depend only
 on `propext`, `Classical.choice`, and `Quot.sound`. No tests or examples were
