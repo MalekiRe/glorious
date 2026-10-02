@@ -367,5 +367,61 @@ theorem NamedPattern.Elaborates.no_exact_record_omission {program : Program} {ho
   simp [UsePermission.Allows] at denied
 
 
+private theorem record_lookup_permute {first second : List (String × NamedPattern)}
+    (permuted : first.Perm second) (distinct : (first.map Prod.fst).Nodup) (name : String) :
+    first.find? (fun entry => entry.1 == name) = second.find? (fun entry => entry.1 == name) := by
+  induction permuted with
+  | nil => rfl
+  | cons entry permuted ih =>
+    simp only [List.map_cons, List.nodup_cons] at distinct
+    simp only [List.find?_cons, ih distinct.2]
+  | swap first second rest =>
+    by_cases left : first.1 = name <;> by_cases right : second.1 = name <;>
+      simp_all [List.map_cons, List.nodup_cons]
+  | trans first second firstIH secondIH =>
+    exact (firstIH distinct).trans (secondIH ((first.map Prod.fst).nodup_iff.mp distinct))
+
+/-- Named field order does not affect declaration-order normalization. The
+unique-label check is essential: conflicting duplicate labels are not reordered. -/
+theorem recordPatternFields.permute (fields : List (String × Field))
+    {first second : List (String × NamedPattern)} (permuted : first.Perm second)
+    (distinct : (first.map Prod.fst).Nodup) :
+    recordPatternFields fields first = recordPatternFields fields second := by
+  unfold recordPatternFields
+  congr 1
+  funext field
+  rw [record_lookup_permute permuted distinct field.1]
+
+/-- Reordering supplied labels preserves the exact Core pattern, binding IDs
+and final lexical scope; it does not merely find another well-typed result. -/
+theorem NamedPattern.Elaborates.record_permute {program : Program} {home : Module}
+    {scope after : SourceScope} {identity : Nat} {tag : Option Nat}
+    {first second : List (String × NamedPattern)} {type : Ty} {pattern : Pattern}
+    {bindings : List (BindingId × BindingType)}
+    (elaborated : NamedPattern.Elaborates program home scope (.record identity tag first)
+      type pattern bindings after) (permuted : first.Perm second) :
+    NamedPattern.Elaborates program home scope (.record identity tag second)
+      type pattern bindings after := by
+  cases elaborated with
+  | record declared chosen access distinct known residents =>
+    refine .record declared chosen access ((permuted.map Prod.fst).nodup_iff.mp distinct)
+      (fun entry member => known entry (permuted.mem_iff.mpr member)) ?_
+    rw [← recordPatternFields.permute _ permuted distinct]
+    exact residents
+
+
+theorem namedRecordPatternBinders.permute {first second : List (String × NamedPattern)}
+    (permuted : first.Perm second) :
+    (namedRecordPatternBinders first).Perm (namedRecordPatternBinders second) := by
+  induction permuted with
+  | nil => exact .nil
+  | cons entry permuted ih => exact List.Perm.append_left _ ih
+  | swap first second rest =>
+    simpa only [namedRecordPatternBinders, List.append_assoc] using
+      List.Perm.append_right (namedRecordPatternBinders rest)
+        (List.perm_append_comm (l₁ := second.2.binders) (l₂ := first.2.binders))
+  | trans _ _ first second => exact first.trans second
+
+
 end
 end Grounded

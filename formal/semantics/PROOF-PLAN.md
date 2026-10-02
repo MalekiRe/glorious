@@ -4750,3 +4750,24 @@ This is decoded record-pattern elaboration, not a parser or constructor-path
 resolver. Surface remainder-marker validation, reference-pattern ergonomics,
 custom Drop and all fourteen broad completion obligations remain open.
 
+## Named record field permutation preserves execution
+
+`recordPatternFields.permute` proves that unique source field labels may be
+permuted without changing declaration-order normalization. Duplicate-label
+rejection is essential to the lookup proof; it is not replaced by first-wins
+normalization. `NamedPattern.Elaborates.record_permute` preserves the exact Core
+pattern, allocated binding identities and final lexical scope.
+
+`NamedArmsElaborate.record_permute` carries this through a top-level record
+pattern in any clause position, preserving the body, incoming/final masks,
+coverage history and first-match priority. `NamedExpr.Elaborates.record_permute`
+then preserves the entire pattern-call expression's Core and final masks.
+Arguments and clause order are unchanged. The same Core execution therefore
+supplies matching, cleanup and public soundness/behavior after permutation;
+no alternative evaluator or assumed execution equivalence is introduced.
+
+All 30 strict Lean jobs passed. Inspected permutation, source safety, maximal
+behavior and compatible-call proof closures use only standard Lean axioms.
+This strengthens the decoded record-pattern boundary; it does not close parsing,
+references, custom Drop or any of the fourteen broad completion obligations.
+

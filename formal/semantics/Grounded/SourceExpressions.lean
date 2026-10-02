@@ -201,6 +201,51 @@ inductive NamedArmsElaborate (program : Program) (names : Module → FunctionNam
       NamedArmsElaborate program names home scope before subject result previous ((source, body) :: tail) ((pattern, coreBody) :: coreTail) after
 end
 
+/-- Field-label permutation within any record clause preserves its exact Core
+clause, body scope, masks, coverage history and first-match priority. -/
+theorem NamedArmsElaborate.record_permute {program : Program}
+    {names : Module → FunctionName → Option Nat} {home : Module} {scope : SourceScope}
+    {before after : FlowContext} {subject result : Ty} {previous : List Pattern}
+    {front back : List (NamedPattern × NamedExpr)} {core : List (Pattern × Expr)}
+    {identity : Nat} {tag : Option Nat} {first second : List (String × NamedPattern)} {body : NamedExpr}
+    (elaborated : NamedArmsElaborate program names home scope before subject result previous
+      (front ++ (.record identity tag first, body) :: back) core after)
+    (permuted : first.Perm second) :
+    NamedArmsElaborate program names home scope before subject result previous
+      (front ++ (.record identity tag second, body) :: back) core after := by
+  induction front generalizing previous core with
+  | nil =>
+    cases elaborated with
+    | clause allocated distinct useful bodyTyped slots disposable joined tail =>
+      refine .clause (allocated.record_permute permuted) ?_ useful bodyTyped slots disposable joined tail
+      have distinct : (namedRecordPatternBinders first).Nodup := by
+        simpa only [NamedPattern.binders] using distinct
+      simpa only [NamedPattern.binders] using (namedRecordPatternBinders.permute permuted).nodup_iff.mp distinct
+  | cons clause front ih =>
+    simp only [List.cons_append] at elaborated ⊢
+    cases elaborated with
+    | clause allocated distinct useful bodyTyped slots disposable joined tail =>
+      exact .clause allocated distinct useful bodyTyped slots disposable joined (ih tail)
+
+
+/-- The complete pattern-call expression has identical Core and final masks
+when labels within one record clause are permuted. Arguments and clause order
+are unchanged, so all executions and cleanup behavior are shared. -/
+theorem NamedExpr.Elaborates.record_permute {program : Program}
+    {names : Module → FunctionName → Option Nat} {home : Module} {scope : SourceScope}
+    {before after : FlowContext} {arguments : List NamedExpr}
+    {front back : List (NamedPattern × NamedExpr)} {core : Expr} {type : Ty}
+    {identity : Nat} {tag : Option Nat} {first second : List (String × NamedPattern)} {body : NamedExpr}
+    (elaborated : NamedExpr.Elaborates program names home scope before
+      (.applyPatterns arguments (front ++ (.record identity tag first, body) :: back)) core type after)
+    (permuted : first.Perm second) :
+    NamedExpr.Elaborates program names home scope before
+      (.applyPatterns arguments (front ++ (.record identity tag second, body) :: back)) core type after := by
+  cases elaborated with
+  | applyPatterns inputs nonempty covered bodies =>
+    exact .applyPatterns inputs nonempty covered (bodies.record_permute permuted)
+
+
 /-- Local value bindings hide direct-function names regardless of the expected
 result or argument types. Local callable invocation is a separate language
 operation; failure to support it must not expose the hidden declaration. -/
