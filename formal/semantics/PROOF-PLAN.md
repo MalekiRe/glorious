@@ -4197,9 +4197,10 @@ analysis or blanket ban on overlapping reads.
 
 `NamedExpr.Elaborates.compatible_call_entry` consumes that batch through the
 real named-call admission, argument execution, parameter preparation and fresh
-activation allocation. It constructs the callee-entry run, proves its general
-configuration invariant, progress, caller consumption frame, binding uniqueness
-and ownership safety. Callee recursion/divergence is allowed; neither a completed
+activation allocation. It constructs the callee-entry run and proves the general
+configuration invariant, terminal-or-step progress, caller consumption frame,
+binding uniqueness and ownership safety for every subsequent execution prefix,
+including recursive body execution and return cleanup. Neither a completed
 call nor future heap readiness is supplied. The argument types are checked
 against the actual selected declaration.
 

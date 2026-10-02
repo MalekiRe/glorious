@@ -415,16 +415,12 @@ theorem NamedExpr.Elaborates.compatible_call_entry {program : Program} {home : M
       prepareBindings declaration.parameters values = some bindings ∧ BindingInputsTyped program bindings ∧
       Run program ⟨environment, .expression (.call identity (inputs.map fun input => input.2.1)), []⟩
         ⟨enterBindings middle.heap middle.supply bindings, .expression declaration.body, [.restore middle.scope]⟩ ∧
-      ConfigurationTyped program final (.one declaration.result)
-        ⟨enterBindings middle.heap middle.supply bindings, .expression declaration.body, [.restore middle.scope]⟩ ∧
-      (∃ next, Step program
-        ⟨enterBindings middle.heap middle.supply bindings, .expression declaration.body, [.restore middle.scope]⟩ next) ∧
-      AddressedEnvironment.ConsumptionFrame program final.slots environment
-        (⟨enterBindings middle.heap middle.supply bindings, .expression declaration.body,
-          [.restore middle.scope]⟩ : Configuration).outerEnvironment ∧
-      ((enterBindings middle.heap middle.supply bindings).bindings.map Prod.fst).Nodup ∧
-      (⟨enterBindings middle.heap middle.supply bindings, .expression declaration.body,
-        [.restore middle.scope]⟩ : Configuration).OwnershipSafe program := by
+      (∀ state, Run program
+        ⟨enterBindings middle.heap middle.supply bindings, .expression declaration.body, [.restore middle.scope]⟩ state →
+        ConfigurationTyped program final (.one declaration.result) state ∧
+        (Terminal state ∨ ∃ next, Step program state next) ∧
+        AddressedEnvironment.ConsumptionFrame program final.slots environment state.outerEnvironment ∧
+        (state.environment.bindings.map Prod.fst).Nodup ∧ state.OwnershipSafe program) := by
   obtain ⟨final, middle, values, arguments, executed, residents, observed, _, _, _⟩ :=
     NamedExprsElaborate.compatible_inputs_execute slots compatible ordinary admitted store
   have invocation : NamedExpr.Elaborates program names home scope before (.call name (inputs.map Prod.fst))
@@ -436,14 +432,8 @@ theorem NamedExpr.Elaborates.compatible_call_entry {program : Program} {home : M
   have run : Run program ⟨environment, .expression (.call identity (inputs.map fun input => input.2.1)), []⟩
       ⟨enterBindings middle.heap middle.supply bindings, .expression declaration.body, [.restore middle.scope]⟩ :=
     .step (.call declared) ((Run.extend executed [.call declaration]).trans (.step (.callInputs prepared) (.refl _)))
-  have safety := (invocation.checked slots).soundness checkedProgram store issued run
-  have progress : ∃ next, Step program
-      ⟨enterBindings middle.heap middle.supply bindings, .expression declaration.body, [.restore middle.scope]⟩ next := by
-    rcases safety.2.1 with terminal | next
-    · cases terminal
-    · exact next
-  exact ⟨final, values, middle, bindings, invocation, executed, observed, prepared, inputsTyped,
-    run, safety.1, progress, safety.2.2⟩
+  exact ⟨final, values, middle, bindings, invocation, executed, observed, prepared, inputsTyped, run,
+    fun _ continued => (invocation.checked slots).soundness checkedProgram store issued (run.trans continued)⟩
 /-- Every prefix of the selected elaboration is safe, including recursive calls.
 The only dynamic input evidence describes the actual incoming environment. -/
 theorem NamedExpr.Elaborates.soundness {program : Program} {home : Module}
