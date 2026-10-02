@@ -3902,3 +3902,17 @@ disposal permission, successful retirement and synchronized binding/state
 removal. The strict 30-job build and producer/source axiom inspections passed.
 This removes the conditional-selection gap without introducing a second
 scheduler. The operational scope/return cutover remains open.
+
+Next-owner selection now uses executable `BindingMap.nextRelease`: the existing
+release order supplies the identity and the actual binding map supplies its
+deterministic index. `release_next` derives successful selection and exact
+pending membership from storage-identity uniqueness, rather than choosing an
+arbitrary index. `AddressedEnvironment.retireBinding` synchronizes physical cell
+retirement with removal from the runtime map. Its progress theorem transports
+the corresponding source-state removal, preserves activation and both supplies,
+and frames all other cells and retained caller activations. The source scope
+prefix theorem consumes both executable producers and derives their results.
+All 30 strict build jobs passed; inspected producer and source proofs use only
+standard Lean axioms. The machine still needs staged scope/return controls that
+interleave each resident's destruction with this retirement operation; no broad
+completion obligation is closed.

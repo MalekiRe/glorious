@@ -93,16 +93,27 @@ theorem HasType.scope_join_preserves_ownership (checkedProgram : program.Checked
           BindingMap.Disposable program middle
             ((List.take count current.bindings).filter fun entry => decide (entry.2 ∉ front)) ∧
           (((List.take count current.bindings).filter fun entry => decide (entry.2 ∉ front)) = [] ∨
-            ∃ (index : Nat) (entry : BindingId × StorageId), ∃ cell next,
+            ∃ (index : Nat) (entry : BindingId × StorageId) (cell : StorageCell) (next : AddressedEnvironment),
+              BindingMap.nextRelease
+                ((List.take count current.bindings).filter fun entry => decide (entry.2 ∉ front))
+                (current.bindings.filter fun entry => decide (entry.2 ∉ front)) = some (index, entry.2) ∧
               (current.bindings.filter fun entry => decide (entry.2 ∉ front))[index]? = some entry ∧
               entry ∈ List.take count current.bindings ∧
               (BindingMap.releaseOrder ((List.take count current.bindings).filter
                 fun binding : BindingId × StorageId => decide (binding.2 ∉ front))).head? = some entry.2 ∧
               middle.read entry.2 = some cell ∧ cell.resident.Disposable program cell.type ∧
-              middle.retire entry.2 = some next ∧ next.read entry.2 = none ∧ next.next = middle.next ∧
-              BindingMap.Typed program next current.activation
-                ((current.bindings.filter fun entry => decide (entry.2 ∉ front)).eraseIdx index)
-                (remaining.eraseIdx index))) ∧
+              ({ current with heap := middle, bindings :=
+                current.bindings.filter fun entry => decide (entry.2 ∉ front) } : AddressedEnvironment).retireBinding index = some next ∧
+              middle.retire entry.2 = some next.heap ∧ next.heap.read entry.2 = none ∧ next.heap.next = middle.next ∧
+              next.activation = current.activation ∧ next.supply = current.supply ∧
+              next.bindings = (current.bindings.filter fun entry => decide (entry.2 ∉ front)).eraseIdx index ∧
+              BindingMap.Typed program next.heap next.activation next.bindings (remaining.eraseIdx index) ∧
+              (∀ identity, identity ≠ entry.2 → next.heap.read identity = middle.read identity) ∧
+              (∀ (caller : AddressedScope) states,
+                BindingMap.Typed program middle caller.activation caller.bindings states →
+                caller.activation ≠ current.activation →
+                BindingMap.Typed program next.heap caller.activation caller.bindings states ∧
+                (∀ identity ∈ caller.bindings.map Prod.snd, next.heap.read identity = middle.read identity)))) ∧
       ∀ name state, lookup name branch = some state →
         ∀ selectedHome selectedType fields selectedState,
           PathType program selectedHome state.slot.type fields selectedType →
@@ -140,14 +151,18 @@ theorem HasType.scope_join_preserves_ownership (checkedProgram : program.Checked
             refine ⟨_, remaining, currentStore, subset, retained, permission, ?_⟩
             by_cases finished : ((List.take locals.length current.bindings).filter fun entry => decide (entry.2 ∉ front)) = []
             · exact .inl finished
-            · obtain ⟨index, entry, selected, pending, first⟩ := BindingMap.release_next _ _ (by
+            · obtain ⟨index, entry, chosen, selected, pending, first⟩ :=
+                BindingMap.release_next _ _ retained.addresses_distinct (by
                 intro entry member
                 obtain ⟨member, kept⟩ := List.mem_filter.mp member
                 exact List.mem_filter.mpr ⟨List.mem_of_mem_take member, kept⟩) finished
               obtain ⟨cell, found, allowed⟩ := permission entry.2 (List.mem_map.mpr ⟨entry, pending, rfl⟩)
-              obtain ⟨next, retired, absent, frontier, nextTyped⟩ := retained.retire_at_progress selected
-              exact .inr ⟨index, entry, cell, next, selected, (List.mem_filter.mp pending).1, first,
-                found, allowed, retired, absent, frontier, nextTyped⟩
+              obtain ⟨next, retired, primitive, absent, frontier, activation, supply, bindings, nextTyped, outside, callers⟩ :=
+                AddressedEnvironment.retireBinding.progress
+                  (current := { current with heap := middle, bindings :=
+                    (current.bindings.filter fun entry => decide (entry.2 ∉ front)) }) retained selected
+              exact .inr ⟨index, entry, cell, next, chosen, selected, (List.mem_filter.mp pending).1, first,
+                found, allowed, retired, primitive, absent, frontier, activation, supply, bindings, nextTyped, outside, callers⟩
           intro name state selected selectedHome selectedType fields selectedState path selection
           obtain ⟨next, found, approximation⟩ := joined.lookup selected
           obtain ⟨address, cell, mapped, live, owner, typeEq, cellTyped, member⟩ := branchTyped.lookup selected
