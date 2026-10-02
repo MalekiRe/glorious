@@ -4435,21 +4435,22 @@ certificate is assumed. All 30 strict jobs and inspected replacement, retirement
 and public source-soundness/behavior axiom closures passed.
 
 
-## Branch approximation cannot manufacture residual disposal authority
+## Branch approximation preserves exactly residual disposal authority
 
-`Initialization.Approximates.disposable_before` proves that every disposal
-permission after a join was already valid for the incoming mask. This is a
-general static theorem, independent of future runtime realization. It covers
-structural tuples, every nominal constructor, inferred classes and explicit
-exact restrictions, including partially moved owners and empty residual shells.
+`Initialization.Approximates.disposable_iff` proves that disposal permission
+holds after a join exactly when it held for the incoming mask. The backward
+direction excludes invented destruction authority; the forward direction
+preserves legal residual cleanup. Both derive from the same approximation
+constructors, including every nominal variant and explicit exact-shell
+consumption. No runtime realization is assumed by this static theorem.
 
-`HasType.scope_join_preserves_ownership` now consumes this theorem for every
-selected descendant in the actual reached branch and joined contexts. Existing
-unknown-state and explicit exact-shell guarantees remain unchanged. No source
-permission, future disposal or completed execution is assumed. All 30 strict
-Lean jobs passed; inspected join, general soundness and public source-behavior
-closures use only the standard Lean axioms. Custom destruction, reference
-restoration and whole-language completion remain open.
+`HasType.scope_join_preserves_ownership` consumes the equivalence for every
+selected descendant in actual reached branch and joined contexts. Existing
+unknown-state and explicit exact-shell guarantees remain unchanged. The two
+directional inductions are private; the public boundary exposes the complete
+equivalence. All 30 strict Lean jobs passed; inspected join, general soundness
+and public source-behavior closures use only the standard Lean axioms. Custom
+destruction, reference restoration and whole-language completion remain open.
 
 ## Protected cleanup queues retain disposal authority before resumption
 
