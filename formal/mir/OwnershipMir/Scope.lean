@@ -2,6 +2,8 @@ import OwnershipMir.Cleanup
 
 namespace OwnershipMir
 
+variable {authority : Authority}
+
 /-- Fixed-slot lexical ownership, in acquisition order. Protected results and
 retained storage are outside this list. Calls derive the list from their
 complete activation region; this module supplies local cleanup semantics. -/
@@ -22,8 +24,8 @@ def Scope.exit {n : Nat} (scope : Scope n) (state : State n) : State n :=
 def Cleanable {n : Nat} (owners : List (Fin n)) (context : Context n) : Prop :=
   ∀ i ∈ owners, ∀ shape, context.slots i = some shape → shape.disposable
 
-def Scope.Admitted {n : Nat} (scope : Scope n) (context : Context n) : Prop :=
-  context.temp = none ∧ Cleanable scope.owners context
+def Scope.Admitted {n : Nat} (scope : Scope n) (authority : Authority) (context : Context n) : Prop :=
+  context.temp = none ∧ Cleanable scope.owners context ∧ context.Declared authority.declarations
 
 /-- This list is already newest-first. The public scope entry reverses exactly
 once; each root's structural schedule is produced by cleanupTree. -/
@@ -50,7 +52,7 @@ def Scope.commands {n : Nat} (scope : Scope n) (context : Context n) : List (Com
 
 theorem cleanupOwners_checked {n : Nat} (owners : List (Fin n)) (context : Context n)
     (empty : context.temp = none) (allowed : Cleanable owners context) :
-    Code.Checked Command.Checked context (sequence (cleanupOwners owners context))
+    Code.Checked (Op.Checked authority) context (lower (sequence (cleanupOwners owners context)))
       (clearContext owners context) := by
   induction owners generalizing context with
   | nil =>
@@ -63,8 +65,8 @@ theorem cleanupOwners_checked {n : Nat} (owners : List (Fin n)) (context : Conte
     exact .halt
   | cons owner rest ih =>
     let next : Context n := ⟨update context.slots owner none, none⟩
-    have head : Code.Checked Command.Checked context
-        (sequence (match context.slots owner with | none => [] | some shape => cleanupTree owner [] shape)) next := by
+    have head : Code.Checked (Op.Checked authority) context
+        (lower (sequence (match context.slots owner with | none => [] | some shape => cleanupTree owner [] shape))) next := by
       cases found : context.slots owner with
       | none =>
         have same : next = context := by
@@ -84,13 +86,13 @@ theorem cleanupOwners_checked {n : Nat} (owners : List (Fin n)) (context : Conte
         simp [next] at found
       · exact allowed i (by simp [member]) shape (by simpa [next, update, same] using found)
     have tail := ih next rfl tailAllowed
-    simpa [cleanupOwners, clearContext, next] using sequence_checked_append head tail
+    simpa [cleanupOwners, clearContext, next] using lower_sequence_checked_append head tail
 
-theorem Scope.checked {n : Nat} {scope : Scope n} {context : Context n} (admitted : scope.Admitted context) :
-    Code.Checked Command.Checked context (sequence (scope.commands context)) (clearContext scope.owners context) := by
+theorem Scope.checked {n : Nat} {scope : Scope n} {context : Context n} (admitted : scope.Admitted authority context) :
+    Code.Checked (Op.Checked authority) context (lower (sequence (scope.commands context))) (clearContext scope.owners context) := by
   have allowed : Cleanable scope.owners.reverse context := by
     intro i member
-    exact admitted.2 i (by simpa using member)
+    exact admitted.2.1 i (by simpa using member)
   simpa [Scope.commands, clearContext] using cleanupOwners_checked scope.owners.reverse context admitted.1 allowed
 
 def Command.DisposesIn {n : Nat} (owners : List (Fin n)) : Command n → Prop
@@ -176,7 +178,7 @@ theorem sequence_disposal_frame {n : Nat} (commands : List (Command n)) (owners 
 all local roots and unchanged retained/result slots. Permission is wholly a
 pre-state structural condition; termination and the final state are derived. -/
 theorem Scope.exit_run {n : Nat} {signature : Signature} {scope : Scope n} {context : Context n}
-    (admitted : scope.Admitted context) {state : State n} (typed : state.Typed signature context) :
+    (admitted : scope.Admitted authority context) {state : State n} (typed : state.Typed signature context) :
     Run (Step Op.exec) ⟨lower (sequence (scope.commands context)), state⟩ ⟨.halt, scope.exit state⟩ ∧
       (scope.exit state).Typed signature (clearContext scope.owners context) ∧
       Conserves signature state (scope.exit state) := by
@@ -207,20 +209,21 @@ theorem Scope.exit_run {n : Nat} {signature : Signature} {scope : Scope n} {cont
 is the actual general prefix safety theorem for the extended ownership slice. -/
 theorem Scope.program_safety {n : Nat} {signature : Signature} {scope : Scope n}
     {before middle : Context n} {body : Code n (Command n)}
-    (checked : Code.Checked Command.Checked before body middle) (admitted : scope.Admitted middle)
+    (checked : Code.Checked (Command.Checked authority) before body middle) (admitted : scope.Admitted authority middle)
     {initial : State n} (typed : initial.Typed signature before) (unique : initial.Unique)
     {reached : Configuration n (Op n)}
     (run : Run (Step Op.exec) ⟨lower (body.append (sequence (scope.commands middle))), initial⟩ reached) :
-    Safe signature Op.Checked (clearContext scope.owners middle) reached ∧ reached.state.Unique ∧
+    Safe signature (Op.Checked authority) (clearContext scope.owners middle) reached ∧ reached.state.Unique ∧
       Conserves signature initial reached.state ∧
       (reached.code = .halt ∨ ∃ next, Step Op.exec reached next) ∧
       reached.state.linearShells ≤ initial.linearShells ∧
       ∃ amount, ShellTrace ⟨lower (body.append (sequence (scope.commands middle))), initial⟩ reached amount ∧
         reached.state.shells + amount = initial.shells := by
-  have program := checked.append (Scope.checked admitted)
-  have safety := compiled_ownership_safety program typed unique run
-  have start : Safe signature Op.Checked (clearContext scope.owners middle)
-      ⟨lower (body.append (sequence (scope.commands middle))), initial⟩ := ⟨_, typed, lower_checked program⟩
+  have program := (lower_checked checked).append (Scope.checked admitted)
+  have start : Safe signature (Op.Checked authority) (clearContext scope.owners middle)
+      ⟨lower (body.append (sequence (scope.commands middle))), initial⟩ :=
+    ⟨_, typed, by simpa only [lower_append] using program⟩
+  have safety := ownership_safety start unique run
   exact ⟨safety.1, safety.2.1, safety.2.2.1, safety.2.2.2, start.linear_shells_run run, start.shell_run run⟩
 
 end OwnershipMir

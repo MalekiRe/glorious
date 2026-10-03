@@ -1,6 +1,7 @@
 import OwnershipMir.CallShells
 
 namespace OwnershipMir.Calls
+variable {module : Module} {authority : Authority}
 
 /-- Appending retained caller regions changes no local lookup or instruction.
 This is storage embedding for activations, not another execution semantics. -/
@@ -49,7 +50,7 @@ theorem Function.call_return {n : Nat} {program : Program n} {signature : Signat
     (functions : program.Checked) {identity : Nat} (selected : program identity = some function)
     {caller : State (n + 1)} {before after : Context (n + 1)}
     (callerTyped : caller.Typed signature before) {destination : Place (n + 1)}
-    (checked : Instruction.Checked program before (.call identity destination) after)
+    (checked : Instruction.Checked program module before (.call identity destination) after)
     {argument : Value} (resident : caller.temp = some argument) {returned : State (n + 1)}
     (bodyRun : Run (Transition program) (function.start argument) ⟨.body .halt function.cleanup, returned, []⟩)
     (next : Body n) (cleanup : Code (n + 1) (Op (n + 1))) (stack : List (Frame n)) :
@@ -103,7 +104,7 @@ theorem Function.return_initialized {n : Nat} {program : Program n} {signature :
     ∃ value, after.state.temp = some value ∧ value.kind signature = function.output ∧ value.ready := by
   have returned := ((Function.start_safe functions selected typed).execution functions run).terminal_typed terminal
   obtain ⟨value, stored, classified⟩ := Option.map_eq_some_iff.mp returned.2
-  have ready : (value.kind signature).ready := classified.symm ▸ (functions identity function selected).2.2.2
+  have ready : (value.kind signature).ready := classified.symm ▸ (functions identity function selected).2.2.2.1
   exact ⟨value, stored, classified, by simpa [Value.kind] using ready⟩
 
 end OwnershipMir.Calls

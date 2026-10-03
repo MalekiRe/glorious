@@ -1,6 +1,7 @@
 import OwnershipMir.Calls
 
 namespace OwnershipMir.Calls
+variable {module : Module} {authority : Authority}
 
 theorem argument_typed {n : Nat} {signature : Signature} {value : Value} {shape : Shape}
     (typed : value.kind signature = shape) :
@@ -16,16 +17,16 @@ theorem typed_empty {n : Nat} {signature : Signature} {state : State (n + 1)}
   simp_all [emptyState]
 
 theorem Function.cleanup_checked {n : Nat} {function : Function n}
-    (admitted : (activationScope n).Admitted function.cleanupContext) :
-    Code.Checked Op.Checked function.cleanupContext function.cleanup (emptyContext n) := by
+    (admitted : (activationScope n).Admitted authority function.cleanupContext) :
+    Code.Checked (Op.Checked authority) function.cleanupContext function.cleanup (emptyContext n) := by
   have slots : clearSlots (activationScope n).owners function.cleanupContext.slots = fun _ => none := by
     funext i
     exact if_pos (List.mem_finRange i)
-  simpa only [Function.cleanup, clearContext, slots, emptyContext] using lower_checked (Scope.checked admitted)
+  simpa only [Function.cleanup, clearContext, slots, emptyContext] using (Scope.checked admitted)
 
 theorem Instruction.Checked.executed {n : Nat} {program : Program n} {signature : Signature}
     {before after : Context (n + 1)} {instruction : Instruction n}
-    (checked : Instruction.Checked program before instruction after) {state next : State (n + 1)}
+    (checked : Instruction.Checked program module before instruction after) {state next : State (n + 1)}
     (typed : state.Typed signature before) (executed : instruction.exec state = some next) :
     next.Typed signature after ∧ Conserves signature state next := by
   cases checked with
@@ -83,12 +84,12 @@ theorem Safe.progress {n : Nat} {program : Program n} {signature : Signature} {f
     {config : Configuration n} (safe : Safe program signature final config) :
     config.Terminal ∨ ∃ next, Transition program config next := by
   cases safe with
-  | @body code cleanup state stack before output typed checked retained =>
+  | @body code cleanup state stack before output module typed checked retained =>
     cases checked with
     | halt =>
       cases retained with
       | nil => exact Or.inl ⟨cleanup, rfl, rfl⟩
-      | @cons frame stack output cleanup final slots shape after callerExit resident returned put next outer release =>
+      | @cons frame stack output cleanup final slots shape after callerExit callerModule calleeModule resident returned put next outer release =>
         obtain ⟨result, executed, realized, _⟩ := put.sound (state := ⟨frame.slots, state.temp⟩) ⟨resident, typed.2.trans returned⟩
         have empty : result.temp = none := by
           cases put
@@ -111,8 +112,8 @@ theorem Safe.progress {n : Nat} {program : Program n} {signature : Signature} {f
     | loop scalar body tail =>
       obtain ⟨choice, observed⟩ := observe_ready typed scalar
       exact Or.inr ⟨_, .operation (.loop observed)⟩
-  | @cleaning code state stack before typed checked retained =>
-    have start : OwnershipMir.Safe signature Op.Checked (emptyContext n) ⟨code, state⟩ := ⟨before, typed, checked⟩
+  | @cleaning code state stack before module typed checked retained =>
+    have start : OwnershipMir.Safe signature (Op.Checked _) (emptyContext n) ⟨code, state⟩ := ⟨before, typed, checked⟩
     rcases start.progress Op.Checked.progress with halted | ⟨next, step⟩
     · cases halted
       cases checked

@@ -51,6 +51,21 @@ ownership pipeline. The transfer register is part of the actual runtime state.
   products, nominal shells, and typed initialization holes. A live fieldless
   exact shell is not a hole. Shell deconstruction authority is independent of
   disposal permission; recursive capabilities include the shell and residents.
+  The former value-carried `canOpen` flag is removed.
+- `Nominal.lean`: one resolved declaration environment supplies nominal identity,
+  principal restriction, ordered field layouts, and field visibility. Logical
+  module ancestry and package identity determine private, exported, package, and
+  parent access. `Layout.Declared` validates cached metadata, including holes;
+  `Layout.Accessible` checks selected fields, while `Authority.CanOpen` requires
+  authority over every field of an ownership-deconstructed shell. Whole-owner
+  transfer remains independent of representation visibility. General private
+  field exclusion proofs cover deconstruction and projection.
+- `Metadata.lean`: the existing checked instruction producer preserves declared
+  metadata through selection, hole installation, filling, copying, and dropping.
+  `Op.Checked.deconstruction_authorized` derives declaration identity, restriction,
+  payload layout, and lexical field authority for the value actually extracted
+  by a physical transition. No permission Boolean or post-state validity premise
+  supplies this conclusion.
 - `Focus.lean`, `Places.lean`: one executable field focus/rebuild, constructive
   classification correspondence, and an additive ownership-frame equation.
   Whole slots use the empty path. Restoration requires vacancy and, for field
@@ -64,7 +79,8 @@ ownership pipeline. The transfer register is part of the actual runtime state.
   exhaustion. The narrower `ConservationAllowed` predicate states only the
   conditions needed by resource conservation; legality derives it. The former
   ambiguous `Permitted` interface is removed, and shell consumers use this
-  derived conservation evidence. Runtime execution and admission are unchanged.
+  derived conservation evidence. Raw runtime execution remains unchanged;
+  source admission now also requires lexical projection authority.
   Resource conservation, shell accounting, and raw retained-storage framing
   consume those witnesses rather than reconstructing execution independently.
   Raw execution does not consult ownership permissions. Checked drop releases
@@ -206,6 +222,20 @@ ownership pipeline. The transfer register is part of the actual runtime state.
   shell bounds, actual source progress, exact terminal-return correspondence,
   bidirectional divergence correspondence, and initialized returned residents.
   The existing MIR cleanup and call proofs remain the physical consumers.
+- `CallMetadata.lean`: declaration validity is preserved across the active
+  region and all retained caller regions, including argument transfer, protected
+  handoff, cleanup, and retirement. Each program carries the shared declarations;
+  each function is checked in its own lexical module. Function admission checks
+  input/output layouts and the cleanup context against those declarations. Both
+  public source and compiled program-safety theorems now derive declaration-valid
+  residents at every execution prefix, alongside the existing ownership and
+  progress guarantees. Source-to-MIR lowering preserves the declaration
+  environment and lexical modules.
+- Generated cleanup is checked directly as MIR from its complete destruction
+  plan, not by granting user source commands access to private fields. User
+  move/copy/dispose projections and call argument/result places require lexical
+  visibility. Internal MIR projection operations do not independently enforce
+  source privacy; source checking is its authoritative producer.
 
 Bounds: this is a resolved ownership source-to-MIR slice, not the full named
 source language. Function identities, field paths, nominal metadata, and slot
@@ -214,8 +244,9 @@ argument-tuple place by explicit whole move; duplicable arguments can be copied
 by a preceding source command. Calls producing arguments execute in the source
 control sequence, not as assumed-terminating argument evaluators. Name
 resolution, arbitrary argument-expression/tuple elaboration, implicit
-copy/reborrow selection, and declaration-derived authority/visibility remain
-outside these claims. Exact occupancy and branch agreement remain checking
+copy/reborrow selection remain outside these claims. Declaration-derived
+authority and visibility are integrated for this resolved ownership slice.
+Exact occupancy and branch agreement remain checking
 precision policy; loops retain invariant contexts. No maybe-initialized
 admission is added.
 
@@ -230,21 +261,24 @@ borrowing/lifetimes, custom destructors, effects, foreign execution, CFG/SSA,
 and backend refinement remain outside this slice. Earlier compiler and Lean
 code are preserved, not silently replaced or granted these claims.
 
-Nominal/source integration must derive layout and principal restriction from
-declarations and deconstruction authority from checking context, with field
-visibility separate. The call slice does not claim that integration.
+Nominal declarations here contain finite instantiated structural field layouts.
+Parsing, alias/name resolution, recursive type elaboration, enum/non-exhaustive
+representation, and custom destruction are not modeled by this slice. The
+declaration and module identities are already resolved; this does not claim
+full language elaboration or hostile-bytecode admission.
 
-Verification: a fresh `lake clean && lake build OwnershipMir` passed all 31
-jobs with warnings as errors and auto-implicit parameters disabled. Twenty-four
-general theorem dependencies were inspected. Generic positive-simulation
-terminal reflection uses no axioms; generic actual divergence equivalence uses
-only `Classical.choice`. All remaining inspected dependencies are limited to
-`propext`, `Classical.choice`, and `Quot.sound`. The checks include source
-checking-to-MIR admission, positive simulation, source preservation/progress,
-both public safety theorems, exact return reflection, actual divergence
-equivalence, initialized results, and existing local/call/cleanup consumers.
-No `sorry`, new axioms, concrete examples, or unit tests were used to bypass
-the general obligations.
+Verification: a fresh `lake clean && lake build OwnershipMir` passed all 34
+jobs with warnings as errors and auto-implicit parameters disabled; the final
+input/output-interface admission changes also passed the integrated build.
+Twenty-two general theorem dependencies were inspected successfully. Both
+private-field exclusion theorems use no axioms. The remaining inspected
+dependencies are limited to `propext`, `Classical.choice`, and `Quot.sound`.
+The checks cover actual deconstruction authorization, declaration preservation
+through complete call runs, source checking-to-MIR admission, positive
+simulation, source progress, both public safety theorems, exact return
+reflection, actual divergence equivalence, initialized results, and existing
+local/call/cleanup consumers. No `sorry`, new axioms, concrete examples, or
+unit tests were used to bypass the general obligations.
 
 
 ### Joint storage ownership

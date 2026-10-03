@@ -16,12 +16,11 @@ def LinearKind.kind : LinearKind → Kind
 
 abbrev Signature := Nat → LinearKind
 
-/-- Resolved nominal-shell metadata. Deconstruction authority is independent
-of zero-use permission. A restriction never grants capabilities to children. -/
+/-- Resolved nominal identity and cached restriction. Admission validates the
+cache against declarations; values carry no lexical access permission. -/
 structure Shell where
   name : Nat
   restriction : Kind
-  canOpen : Bool
   deriving DecidableEq
 
 inductive Layout where

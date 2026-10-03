@@ -2,6 +2,8 @@ import OwnershipMir.Adequacy
 
 namespace OwnershipMir
 
+variable {authority : Authority}
+
 def shellWeight : Cell Atom → Nat := cellMass (fun _ => 0) (fun s => if s.restriction = .exact then 1 else 0)
 
 def State.shells {n : Nat} (state : State n) : Nat :=
@@ -43,7 +45,7 @@ theorem vacant_shell_zero {cell : Cell Atom} (empty : vacant cell = true) : shel
   | some tree => cases tree <;> simp [vacant] at empty <;> rfl
 
 theorem Op.Checked.shell_balance {n : Nat} {signature : Signature} {before after : Context n}
-    {op : Op n} (checked : Op.Checked before op after) {state next : State n}
+    {op : Op n} (checked : (Op.Checked authority) before op after) {state next : State n}
     (typed : state.Typed signature before) (executed : op.exec state = some next) :
     next.shells + op.shellDebit state = state.shells := by
   obtain ⟨effect, _, legal⟩ := checked.effect typed executed
@@ -86,7 +88,7 @@ inductive ShellTrace {n : Nat} : Configuration n (Op n) → Configuration n (Op 
       (tail : ShellTrace middle after amount) : ShellTrace before after (before.shellDebit + amount)
 
 theorem Safe.shell_step {n : Nat} {signature : Signature} {final : Context n}
-    {before after : Configuration n (Op n)} (safe : Safe signature Op.Checked final before)
+    {before after : Configuration n (Op n)} (safe : Safe signature (Op.Checked authority) final before)
     (step : Step Op.exec before after) : after.state.shells + before.shellDebit = before.state.shells := by
   obtain ⟨context, typed, checked⟩ := safe
   cases step with
@@ -96,7 +98,7 @@ theorem Safe.shell_step {n : Nat} {signature : Signature} {final : Context n}
   | loop observed => cases checked; split <;> rfl
 
 theorem Safe.shell_run {n : Nat} {signature : Signature} {final : Context n}
-    {before after : Configuration n (Op n)} (safe : Safe signature Op.Checked final before)
+    {before after : Configuration n (Op n)} (safe : Safe signature (Op.Checked authority) final before)
     (run : Run (Step Op.exec) before after) :
     ∃ amount, ShellTrace before after amount ∧ after.state.shells + amount = before.state.shells := by
   induction run with
@@ -129,7 +131,7 @@ private theorem extract_mass_le {mode : Extract} {value result : Value}
 /-- Affine shells, including fieldless shells without resource tokens, cannot
 be duplicated either. The measure is another instance of the same tree fold. -/
 theorem Op.Checked.linear_shells {n : Nat} {signature : Signature} {before after : Context n}
-    {op : Op n} (checked : Op.Checked before op after) {state next : State n}
+    {op : Op n} (checked : (Op.Checked authority) before op after) {state next : State n}
     (typed : state.Typed signature before) (executed : op.exec state = some next) :
     next.linearShells ≤ state.linearShells := by
   obtain ⟨effect, _, legal⟩ := checked.effect typed executed
@@ -154,7 +156,7 @@ theorem Op.Checked.linear_shells {n : Nat} {signature : Signature} {before after
   | drop live => simp [State.linearShells, State.mass, cellMass]
 
 theorem Safe.linear_shells_step {n : Nat} {signature : Signature} {final : Context n}
-    {before after : Configuration n (Op n)} (safe : Safe signature Op.Checked final before)
+    {before after : Configuration n (Op n)} (safe : Safe signature (Op.Checked authority) final before)
     (step : Step Op.exec before after) : after.state.linearShells ≤ before.state.linearShells := by
   obtain ⟨context, typed, checked⟩ := safe
   cases step with
@@ -164,7 +166,7 @@ theorem Safe.linear_shells_step {n : Nat} {signature : Signature} {final : Conte
   | loop observed => split <;> exact Nat.le_refl _
 
 theorem Safe.linear_shells_run {n : Nat} {signature : Signature} {final : Context n}
-    {before after : Configuration n (Op n)} (safe : Safe signature Op.Checked final before)
+    {before after : Configuration n (Op n)} (safe : Safe signature (Op.Checked authority) final before)
     (run : Run (Step Op.exec) before after) : after.state.linearShells ≤ before.state.linearShells := by
   induction run with
   | refl => exact Nat.le_refl _

@@ -31,8 +31,16 @@ structure Function (n : Nat) where
   output : Shape
   body : Body n
   residual : Fin (n + 1) → Option Shape
+  module : Module
 
-abbrev Program (n : Nat) := Nat → Option (Function n)
+structure Program (n : Nat) where
+  declarations : Declarations
+  functions : Nat → Option (Function n)
+
+instance {n : Nat} : CoeFun (Program n) (fun _ => Nat → Option (Function n)) := ⟨Program.functions⟩
+
+def Program.authority {n : Nat} (program : Program n) (module : Module) : Authority :=
+  ⟨program.declarations, module⟩
 
 def Function.entry {n : Nat} (function : Function n) : Context (n + 1) :=
   ⟨argumentSlots function.input, none⟩
@@ -45,21 +53,24 @@ def Function.cleanup {n : Nat} (function : Function n) : Code (n + 1) (Op (n + 1
 
 /-- A call uses a prepared argument tuple exactly once. The result contract is
 checked at the caller's actual destination, not assumed to be installable. -/
-inductive Instruction.Checked {n : Nat} (program : Program n) :
+inductive Instruction.Checked {n : Nat} (program : Program n) (module : Module) :
     Context (n + 1) → Instruction n → Context (n + 1) → Prop where
-  | operation {before after op} (checked : Op.Checked before op after) :
-      Checked program before (.operation op) after
+  | operation {before after op} (checked : Op.Checked (program.authority module) before op after) :
+      Checked program module before (.operation op) after
   | call {before after identity destination function}
       (resolved : program identity = some function) (argument : before.temp = some function.input)
-      (result : Op.Checked ⟨before.slots, some function.output⟩ (.put destination) after) :
-      Checked program before (.call identity destination) after
+      (result : Op.Checked (program.authority module) ⟨before.slots, some function.output⟩ (.put destination) after) :
+      Checked program module before (.call identity destination) after
 
 /-- Recursive bodies are checked against declarations, not their executions.
 There is no assumed termination, successful return, or future cleanup run. -/
 def Program.Checked {n : Nat} (program : Program n) : Prop :=
   ∀ identity function, program identity = some function →
-    Code.Checked (Instruction.Checked program) function.entry function.body function.exit ∧
-    (activationScope n).Admitted function.cleanupContext ∧ function.input.ready ∧ function.output.ready
+    Code.Checked (Instruction.Checked program function.module) function.entry function.body function.exit ∧
+    (activationScope n).Admitted (program.authority function.module) function.cleanupContext ∧
+    function.input.ready ∧ function.output.ready ∧
+    Layout.Declared program.declarations (function.input.layout id) ∧
+    Layout.Declared program.declarations (function.output.layout id)
 
 /-- Suspended callers have no transfer register: its argument has moved into
 the fresh activation. Protected return values are installed in these slots. -/
@@ -111,31 +122,31 @@ obligations. Its runtime frame contains only actual storage and control. -/
 inductive StackTyped {n : Nat} (program : Program n) (signature : Signature) :
     List (Frame n) → Context (n + 1) → Code (n + 1) (Op (n + 1)) → Context (n + 1) → Prop where
   | nil {final cleanup} : StackTyped program signature [] final cleanup final
-  | cons {frame stack output cleanup final slots result after callerExit}
+  | cons {frame stack output cleanup final slots result after callerExit callerModule calleeModule}
       (resident : ∀ i, (frame.slots i).map (Value.kind signature) = slots i)
       (returned : output.temp = some result)
-      (put : Op.Checked ⟨slots, some result⟩ (.put frame.destination) after)
-      (next : Code.Checked (Instruction.Checked program) after frame.next callerExit)
+      (put : Op.Checked (program.authority callerModule) ⟨slots, some result⟩ (.put frame.destination) after)
+      (next : Code.Checked (Instruction.Checked program callerModule) after frame.next callerExit)
       (outer : StackTyped program signature stack callerExit frame.cleanup final)
-      (release : Code.Checked Op.Checked ⟨output.slots, none⟩ cleanup (emptyContext n)) :
+      (release : Code.Checked (Op.Checked (program.authority calleeModule)) ⟨output.slots, none⟩ cleanup (emptyContext n)) :
       StackTyped program signature (frame :: stack) output cleanup final
 
 inductive ResumeTyped {n : Nat} (program : Program n) (signature : Signature) :
     List (Frame n) → Context (n + 1) → Prop where
-  | cons {frame stack before output final}
+  | cons {frame stack before output final module}
       (resident : frame.state.Typed signature before)
-      (next : Code.Checked (Instruction.Checked program) before frame.next output)
+      (next : Code.Checked (Instruction.Checked program module) before frame.next output)
       (outer : StackTyped program signature stack output frame.cleanup final) :
       ResumeTyped program signature (frame :: stack) final
 
 inductive Safe {n : Nat} (program : Program n) (signature : Signature) (final : Context (n + 1)) :
     Configuration n → Prop where
-  | body {code cleanup state stack before output} (typed : state.Typed signature before)
-      (checked : Code.Checked (Instruction.Checked program) before code output)
+  | body {code cleanup state stack before output module} (typed : state.Typed signature before)
+      (checked : Code.Checked (Instruction.Checked program module) before code output)
       (retained : StackTyped program signature stack output cleanup final) :
       Safe program signature final ⟨.body code cleanup, state, stack⟩
-  | cleaning {code state stack before} (typed : state.Typed signature before)
-      (checked : Code.Checked Op.Checked before code (emptyContext n))
+  | cleaning {code state stack before module} (typed : state.Typed signature before)
+      (checked : Code.Checked (Op.Checked (program.authority module)) before code (emptyContext n))
       (retained : ResumeTyped program signature stack final) :
       Safe program signature final ⟨.cleaning code, state, stack⟩
 

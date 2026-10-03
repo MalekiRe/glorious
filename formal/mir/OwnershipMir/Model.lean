@@ -1,4 +1,4 @@
-import OwnershipMir.Focus
+import OwnershipMir.Nominal
 
 /-! A fixed-slot ownership region. Resource identity is independent of location;
 its principal comes from one immutable signature, never a use-site annotation.
@@ -45,6 +45,17 @@ It intentionally does not admit maybe-initialized joins. -/
 structure Context (n : Nat) where
   slots : Fin n → Option Shape
   temp : Option Shape
+
+def Cell.Declared {α : Type} (declarations : Declarations) (classify : α → Kind) (cell : Cell α) : Prop :=
+  ∀ tree, cell = some tree → Layout.Declared declarations (tree.layout classify)
+
+def Context.Declared {n : Nat} (declarations : Declarations) (context : Context n) : Prop :=
+  (∀ i, Cell.Declared declarations id (context.slots i)) ∧ Cell.Declared declarations id context.temp
+
+def State.Declared {n : Nat} (declarations : Declarations) (signature : Signature) (state : State n) : Prop :=
+  (∀ i, Cell.Declared declarations (Atom.kind signature) (state.slots i)) ∧
+    Cell.Declared declarations (Atom.kind signature) state.temp
+
 
 /-- Realization boundary. The checker demands one exact structural shape;
 execution itself neither reads a Context nor relies on branch agreement. -/

@@ -1,10 +1,11 @@
 import OwnershipMir.SourceCallLowering
 
 namespace OwnershipMir.SourceCalls
+variable {module : Module} {authority : Authority}
 
 private theorem operations_ready {n : Nat} {program : Calls.Program n} {signature : Signature}
     {before final : Context (n + 1)} (ops : List (Op (n + 1))) {next : Calls.Body n}
-    (checked : Code.Checked (Calls.Instruction.Checked program) before
+    (checked : Code.Checked (Calls.Instruction.Checked program module) before
       (Block.emit (ops.map Calls.Instruction.operation) next) final)
     {state : State (n + 1)} (typed : state.Typed signature before) :
     ∃ result, Block.exec Op.exec ops state = some result := by
@@ -20,7 +21,7 @@ private theorem operations_ready {n : Nat} {program : Calls.Program n} {signatur
 
 private theorem command_progress {n : Nat} {signature : Signature} {final : Context n}
     {code : Code n (Command n)} {state : State n}
-    (safe : OwnershipMir.Safe signature Op.Checked final ⟨OwnershipMir.lower code, state⟩) :
+    (safe : OwnershipMir.Safe signature (Op.Checked authority) final ⟨OwnershipMir.lower code, state⟩) :
     code = .halt ∨ ∃ next, Step Command.exec ⟨code, state⟩ next := by
   obtain ⟨before, typed, checked⟩ := safe
   cases code with
@@ -176,6 +177,7 @@ theorem compiled_program_safety {n : Nat} {program : Program n} {signature : Sig
       Calls.Preserves signature (function.start argument).lower after ∧
       (after.Terminal ∨ ∃ next, Calls.Transition program.lower after next) ∧
       after.linearShells ≤ (function.start argument).lower.linearShells ∧
+      after.Declared program.declarations signature ∧
       ∃ amount, Calls.ShellTrace program.lower (function.start argument).lower after amount ∧
         after.shells + amount = (function.start argument).lower.shells :=
   Calls.program_safety functions.lower (Program.selected selected) typed unique run
@@ -189,9 +191,9 @@ theorem program_safety {n : Nat} {program : Program n} {signature : Signature} {
     (run : Run (Transition program) (function.start argument) after) :
     Safe program signature function.exit after ∧ after.lower.Unique ∧
       Calls.Preserves signature (function.start argument).lower after.lower ∧
-      (after.Terminal ∨ ∃ next, Transition program after next) := by
-  obtain ⟨safe, distinct, conserved, _⟩ := compiled_program_safety functions selected typed unique (Run.lower run)
-  exact ⟨safe, distinct, conserved, Safe.progress safe⟩
+      (after.Terminal ∨ ∃ next, Transition program after next) ∧ after.lower.Declared program.declarations signature := by
+  obtain ⟨safe, distinct, conserved, _, _, declared, _⟩ := compiled_program_safety functions selected typed unique (Run.lower run)
+  exact ⟨safe, distinct, conserved, Safe.progress safe, declared⟩
 
 /-- Every actual terminal target execution corresponds to a source execution
 with the exact lowered endpoint, not just the same result type. -/

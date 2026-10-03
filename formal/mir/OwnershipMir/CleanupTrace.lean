@@ -3,6 +3,8 @@ import OwnershipMir.Trace
 
 namespace OwnershipMir
 
+variable {authority : Authority}
+
 /-- Independent structural order, not a projection of generated commands.
 Nested holes have no resident to detach or release. A root hole still has an
 occupied binding to retire. Pairs visit right then left before their storage. -/
@@ -68,12 +70,12 @@ theorem Scope.commands_order {n : Nat} (scope : Scope n) (context : Context n) :
 /-- Cleanup hands off to an arbitrary continuation; the continuation need not
 terminate or even be admitted for the cleanup boundary theorem to hold. -/
 theorem Scope.exit_trace_then {n : Nat} {signature : Signature} {scope : Scope n} {context : Context n}
-    (admitted : scope.Admitted context) {state : State n} (typed : state.Typed signature context)
+    (admitted : scope.Admitted authority context) {state : State n} (typed : state.Typed signature context)
     (next : Code n (Op n)) :
     OwnershipTrace ⟨(lower (sequence (scope.commands context))).append next, state⟩
       ⟨next, scope.exit state⟩ (scope.cleanupOrder context) := by
   obtain ⟨result, executed, _, _⟩ :=
-    Block.checked_exec Command.Checked.progress Command.Checked.executed (scope.commands context) (Scope.checked admitted) typed
+    sequence_execute (scope.commands context) (Scope.checked admitted) typed
   have trace := commands_trace (scope.commands context) executed next
   have same : result = scope.exit state := (Scope.exit_iff admitted typed).mp (lower_run (Block.exec_run _ executed .halt))
   rw [same, scope.commands_order] at trace
@@ -83,7 +85,7 @@ theorem Scope.exit_trace_then {n : Nat} {signature : Signature} {scope : Scope n
 to handoff, or the complete cleanup trace followed by continuation observations.
 No property of the continuation is assumed. The alternatives need not be exclusive. -/
 theorem Scope.cleanup_then_prefix {n : Nat} {signature : Signature} {scope : Scope n} {context : Context n}
-    (admitted : scope.Admitted context) {state : State n} (typed : state.Typed signature context)
+    (admitted : scope.Admitted authority context) {state : State n} (typed : state.Typed signature context)
     (next : Code n (Op n)) {reached : Configuration n (Op n)} {events : List (OwnershipEvent n)}
     (observed : OwnershipTrace ⟨(lower (sequence (scope.commands context))).append next, state⟩ reached events) :
     (∃ rest, events ++ rest = scope.cleanupOrder context ∧
@@ -97,7 +99,7 @@ theorem Scope.cleanup_then_prefix {n : Nat} {signature : Signature} {scope : Sco
 /-- Normal return factors through completed cleanup, with an exact event split.
 Continuation actions are not misclassified as part of the cleanup schedule. -/
 theorem Scope.cleanup_then_return_iff {n : Nat} {signature : Signature} {scope : Scope n} {context : Context n}
-    (admitted : scope.Admitted context) {state result : State n} (typed : state.Typed signature context)
+    (admitted : scope.Admitted authority context) {state result : State n} (typed : state.Typed signature context)
     (next : Code n (Op n)) (events : List (OwnershipEvent n)) :
     OwnershipTrace ⟨(lower (sequence (scope.commands context))).append next, state⟩ ⟨.halt, result⟩ events ↔
       ∃ tail, events = scope.cleanupOrder context ++ tail ∧
@@ -116,7 +118,7 @@ theorem Scope.cleanup_then_return_iff {n : Nat} {signature : Signature} {scope :
 
 /-- Cleanup cannot introduce or conceal divergence in the continuation. -/
 theorem Scope.cleanup_then_diverges_iff {n : Nat} {signature : Signature} {scope : Scope n} {context : Context n}
-    (admitted : scope.Admitted context) {state : State n} (typed : state.Typed signature context)
+    (admitted : scope.Admitted authority context) {state : State n} (typed : state.Typed signature context)
     (next : Code n (Op n)) :
     Diverges (Step Op.exec) ⟨(lower (sequence (scope.commands context))).append next, state⟩ ↔
       Diverges (Step Op.exec) ⟨next, scope.exit state⟩ :=
@@ -125,18 +127,18 @@ theorem Scope.cleanup_then_diverges_iff {n : Nat} {signature : Signature} {scope
 /-- Safety composes with checking of the continuation at the cleared context.
 Unlike cleanup itself, the continuation may modify previously retained slots. -/
 theorem Scope.cleanup_then_safety {n : Nat} {signature : Signature} {scope : Scope n} {context final : Context n}
-    (admitted : scope.Admitted context) {state : State n} (typed : state.Typed signature context)
+    (admitted : scope.Admitted authority context) {state : State n} (typed : state.Typed signature context)
     (unique : state.Unique) {next : Code n (Op n)}
-    (checked : Code.Checked Op.Checked (clearContext scope.owners context) next final)
+    (checked : Code.Checked (Op.Checked authority) (clearContext scope.owners context) next final)
     {reached : Configuration n (Op n)}
     (run : Run (Step Op.exec) ⟨(lower (sequence (scope.commands context))).append next, state⟩ reached) :
-    Safe signature Op.Checked final reached ∧ reached.state.Unique ∧ Conserves signature state reached.state ∧
+    Safe signature (Op.Checked authority) final reached ∧ reached.state.Unique ∧ Conserves signature state reached.state ∧
       ∃ events, OwnershipTrace ⟨(lower (sequence (scope.commands context))).append next, state⟩ reached events ∧
         ((∃ rest, events ++ rest = scope.cleanupOrder context ∧ OwnershipTrace reached ⟨next, scope.exit state⟩ rest) ∨
          (∃ tail, events = scope.cleanupOrder context ++ tail ∧ OwnershipTrace ⟨next, scope.exit state⟩ reached tail)) := by
-  have start : Safe signature Op.Checked final
+  have start : Safe signature (Op.Checked authority) final
       ⟨(lower (sequence (scope.commands context))).append next, state⟩ :=
-    ⟨context, typed, (lower_checked (Scope.checked admitted)).append checked⟩
+    ⟨context, typed, (Scope.checked admitted).append checked⟩
   have safety := ownership_safety start unique run
   obtain ⟨events, observed⟩ := OwnershipTrace.of_run run
   exact ⟨safety.1, safety.2.1, safety.2.2.1, events, observed,
@@ -144,7 +146,7 @@ theorem Scope.cleanup_then_safety {n : Nat} {signature : Signature} {scope : Sco
 
 /-- Standalone cleanup is the halt-continuation instance. -/
 theorem Scope.exit_trace {n : Nat} {signature : Signature} {scope : Scope n} {context : Context n}
-    (admitted : scope.Admitted context) {state : State n} (typed : state.Typed signature context) :
+    (admitted : scope.Admitted authority context) {state : State n} (typed : state.Typed signature context) :
     OwnershipTrace ⟨lower (sequence (scope.commands context)), state⟩ ⟨.halt, scope.exit state⟩
       (scope.cleanupOrder context) := by
   simpa only [Code.append_halt] using Scope.exit_trace_then admitted typed .halt
@@ -152,14 +154,14 @@ theorem Scope.exit_trace {n : Nat} {signature : Signature} {scope : Scope n} {co
 /-- Any observed prefix, including a pause after detach and before release,
 follows the structural specification. It cannot reverse fields or roots. -/
 theorem Scope.cleanup_prefix_order {n : Nat} {signature : Signature} {scope : Scope n} {context : Context n}
-    (admitted : scope.Admitted context) {state : State n} (typed : state.Typed signature context)
+    (admitted : scope.Admitted authority context) {state : State n} (typed : state.Typed signature context)
     {reached : Configuration n (Op n)} {events : List (OwnershipEvent n)}
     (observed : OwnershipTrace ⟨lower (sequence (scope.commands context)), state⟩ reached events) :
     events.IsPrefix (scope.cleanupOrder context) :=
   observed.prefix (Scope.exit_trace admitted typed) rfl
 
 theorem Scope.cleanup_trace_iff {n : Nat} {signature : Signature} {scope : Scope n} {context : Context n}
-    (admitted : scope.Admitted context) {state result : State n} (typed : state.Typed signature context)
+    (admitted : scope.Admitted authority context) {state result : State n} (typed : state.Typed signature context)
     (events : List (OwnershipEvent n)) :
     OwnershipTrace ⟨lower (sequence (scope.commands context)), state⟩ ⟨.halt, result⟩ events ↔
       result = scope.exit state ∧ events = scope.cleanupOrder context := by
@@ -173,17 +175,17 @@ theorem Scope.cleanup_trace_iff {n : Nat} {signature : Signature} {scope : Scope
 /-- The public prefix contract attaches ordered observations to every real
 run while retaining the existing preservation and retained-storage guarantees. -/
 theorem Scope.cleanup_observed_safety {n : Nat} {signature : Signature} {scope : Scope n} {context : Context n}
-    (admitted : scope.Admitted context) {state : State n} (typed : state.Typed signature context)
+    (admitted : scope.Admitted authority context) {state : State n} (typed : state.Typed signature context)
     (unique : state.Unique) {reached : Configuration n (Op n)}
     (run : Run (Step Op.exec) ⟨lower (sequence (scope.commands context)), state⟩ reached) :
-    Safe signature Op.Checked (clearContext scope.owners context) reached ∧ reached.state.Unique ∧
+    Safe signature (Op.Checked authority) (clearContext scope.owners context) reached ∧ reached.state.Unique ∧
       Conserves signature state reached.state ∧
       (reached.code = .halt ∨ ∃ next, Step Op.exec reached next) ∧
       (∀ slot, slot ∉ scope.owners → reached.state.slots slot = state.slots slot) ∧
       ∃ events, OwnershipTrace ⟨lower (sequence (scope.commands context)), state⟩ reached events ∧
         events.IsPrefix (scope.cleanupOrder context) := by
   obtain ⟨safe, distinct, conserved, events, trace, _⟩ := Scope.cleanup_then_safety admitted typed unique
-    (Code.Checked.halt (rule := Op.Checked)) (by simpa only [Code.append_halt] using run)
+    (Code.Checked.halt (rule := (Op.Checked authority))) (by simpa only [Code.append_halt] using run)
   have observed : OwnershipTrace ⟨lower (sequence (scope.commands context)), state⟩ reached events :=
     by simpa only [Code.append_halt] using trace
   exact ⟨safe, distinct, conserved, safe.progress Op.Checked.progress, scope.cleanup_frame context run,

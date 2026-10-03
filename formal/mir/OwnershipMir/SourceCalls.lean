@@ -1,6 +1,7 @@
 import OwnershipMir.CallBoundary
 
 namespace OwnershipMir.SourceCalls
+variable {module : Module}
 
 /-- The argument pack and result are explicit owned places. Calls force a move;
 copying a duplicable argument uses the existing source copy command beforehand.
@@ -35,8 +36,16 @@ structure Function (n : Nat) where
   output : Shape
   body : Body n
   residual : Fin (n + 1) → Option Shape
+  module : Module
 
-abbrev Program (n : Nat) := Nat → Option (Function n)
+structure Program (n : Nat) where
+  declarations : Declarations
+  functions : Nat → Option (Function n)
+
+instance {n : Nat} : CoeFun (Program n) (fun _ => Nat → Option (Function n)) := ⟨Program.functions⟩
+
+def Program.authority {n : Nat} (program : Program n) (module : Module) : Authority :=
+  ⟨program.declarations, module⟩
 
 def Function.entry {n : Nat} (function : Function n) : Context (n + 1) :=
   ⟨Calls.argumentSlots function.input, none⟩
@@ -49,27 +58,32 @@ def Function.cleanup {n : Nat} (function : Function n) : Code (n + 1) (Command (
 
 /-- Source whole-value transfer additionally requires initialization. Internal
 MIR cleanup can move residual structures, but source arguments/results cannot. -/
-structure AcquireChecked {n : Nat} (before : Context n) (place : Place n) (after : Context n) : Prop where
-  transfer : Op.Checked before (.take place .whole) after
+structure AcquireChecked {n : Nat} (authority : Authority) (before : Context n) (place : Place n) (after : Context n) : Prop where
+  transfer : Op.Checked authority before (.take place .whole) after
+  access : place.Visible authority before.slots
   initialized : ∀ shape, after.temp = some shape → shape.ready
 
-inductive Instruction.Checked {n : Nat} (program : Program n) :
+inductive Instruction.Checked {n : Nat} (program : Program n) (module : Module) :
     Context (n + 1) → Instruction n → Context (n + 1) → Prop where
-  | command {before after command} (checked : Command.Checked before command after) :
-      Checked program before (.command command) after
+  | command {before after command} (checked : Command.Checked (program.authority module) before command after) :
+      Checked program module before (.command command) after
   | call {before prepared after identity argument destination function}
       (resolved : program identity = some function)
-      (input : AcquireChecked before argument prepared)
+      (input : AcquireChecked (program.authority module) before argument prepared)
       (argumentType : prepared.temp = some function.input)
-      (result : Op.Checked ⟨prepared.slots, some function.output⟩ (.put destination) after) :
-      Checked program before (.call identity argument destination) after
-  | result {before after value} (checked : AcquireChecked before value after) :
-      Checked program before (.result value) after
+      (result : Op.Checked (program.authority module) ⟨prepared.slots, some function.output⟩ (.put destination) after)
+      (access : destination.Visible (program.authority module) prepared.slots) :
+      Checked program module before (.call identity argument destination) after
+  | result {before after value} (checked : AcquireChecked (program.authority module) before value after) :
+      Checked program module before (.result value) after
 
 def Program.Checked {n : Nat} (program : Program n) : Prop :=
   ∀ identity function, program identity = some function →
-    Code.Checked (Instruction.Checked program) function.entry function.body function.exit ∧
-    (Calls.activationScope n).Admitted function.cleanupContext ∧ function.input.ready ∧ function.output.ready
+    Code.Checked (Instruction.Checked program function.module) function.entry function.body function.exit ∧
+    (Calls.activationScope n).Admitted (program.authority function.module) function.cleanupContext ∧
+    function.input.ready ∧ function.output.ready ∧
+    Layout.Declared program.declarations (function.input.layout id) ∧
+    Layout.Declared program.declarations (function.output.layout id)
 
 structure Frame (n : Nat) where
   slots : Fin (n + 1) → Option Value
@@ -126,9 +140,9 @@ def lower {n : Nat} : Body n → Calls.Body n
   | .loop guard body next => .loop guard (lower body) (lower next)
 
 def Function.lower {n : Nat} (function : Function n) : Calls.Function n :=
-  ⟨function.input, function.output, SourceCalls.lower function.body, function.residual⟩
+  ⟨function.input, function.output, SourceCalls.lower function.body, function.residual, function.module⟩
 def Program.lower {n : Nat} (program : Program n) : Calls.Program n :=
-  fun identity => (program identity).map Function.lower
+  ⟨program.declarations, fun identity => (program identity).map Function.lower⟩
 
 def Frame.lower {n : Nat} (frame : Frame n) : Calls.Frame n :=
   ⟨frame.slots, SourceCalls.lower frame.next, OwnershipMir.lower frame.cleanup, frame.destination⟩
@@ -146,7 +160,8 @@ def Function.start {n : Nat} (function : Function n) (argument : Value) : Config
 
 theorem Program.selected {n : Nat} {program : Program n} {identity : Nat} {function : Function n}
     (selected : program identity = some function) : program.lower identity = some function.lower := by
-  simp [Program.lower, selected]
+  change (program identity).map Function.lower = some function.lower
+  simp [selected]
 
 theorem lower_append {n : Nat} (first last : Body n) :
     lower (first.append last) = (lower first).append (lower last) := by
@@ -179,9 +194,9 @@ theorem lower_append {n : Nat} (first last : Body n) :
 
 private theorem operations_checked {n : Nat} {program : Calls.Program n}
     {before after final : Context (n + 1)} {ops : List (Op (n + 1))}
-    (checked : Code.Checked Op.Checked before (sequence ops) after) {next : Calls.Body n}
-    (tail : Code.Checked (Calls.Instruction.Checked program) after next final) :
-    Code.Checked (Calls.Instruction.Checked program) before
+    (checked : Code.Checked (Op.Checked (program.authority module)) before (sequence ops) after) {next : Calls.Body n}
+    (tail : Code.Checked (Calls.Instruction.Checked program module) after next final) :
+    Code.Checked (Calls.Instruction.Checked program module) before
       (Block.emit (ops.map Calls.Instruction.operation) next) final := by
   induction ops generalizing before with
   | nil => cases checked; exact tail
@@ -191,19 +206,19 @@ private theorem operations_checked {n : Nat} {program : Calls.Program n}
 
 theorem Instruction.Checked.lower {n : Nat} {program : Program n}
     {before after final : Context (n + 1)} {instruction : Instruction n}
-    (checked : Instruction.Checked program before instruction after) {next : Calls.Body n}
-    (tail : Code.Checked (Calls.Instruction.Checked program.lower) after next final) :
-    Code.Checked (Calls.Instruction.Checked program.lower) before
+    (checked : Instruction.Checked program module before instruction after) {next : Calls.Body n}
+    (tail : Code.Checked (Calls.Instruction.Checked program.lower module) after next final) :
+    Code.Checked (Calls.Instruction.Checked program.lower module) before
       (Block.emit instruction.block next) final := by
   cases checked with
-  | command checked => exact operations_checked (checked.lower .halt) tail
-  | call resolved input argumentType result =>
+  | command checked => exact operations_checked (program := program.lower) (module := module) (checked.lower .halt) tail
+  | call resolved input argumentType result access =>
     exact .act (.operation input.transfer) (.act (.call (Program.selected resolved) argumentType result) tail)
   | result checked => exact .act (.operation checked.transfer) tail
 
 theorem lower_checked {n : Nat} {program : Program n} {before after : Context (n + 1)} {source : Body n}
-    (checked : Code.Checked (Instruction.Checked program) before source after) :
-    Code.Checked (Calls.Instruction.Checked program.lower) before (lower source) after := by
+    (checked : Code.Checked (Instruction.Checked program module) before source after) :
+    Code.Checked (Calls.Instruction.Checked program.lower module) before (lower source) after := by
   induction checked with
   | halt => exact .halt
   | act head tail ih => exact head.lower ih

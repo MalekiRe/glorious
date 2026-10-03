@@ -1,6 +1,7 @@
 import OwnershipMir.CallControl
 
 namespace OwnershipMir.Calls
+variable {module : Module} {authority : Authority}
 
 theorem Run.cleaning {n : Nat} {program : Program n}
     {before after : OwnershipMir.Configuration (n + 1) (Op (n + 1))}
@@ -19,14 +20,14 @@ theorem activation_exit {n : Nat} (state : State (n + 1)) : (activationScope n).
 /-- Scope ownership is the whole activation, not a supplied subset. Its actual
 cleanup trace follows newest-root, reverse-field, enclosing-storage-last order. -/
 theorem Function.cleanup_trace {n : Nat} {signature : Signature} {function : Function n}
-    (admitted : (activationScope n).Admitted function.cleanupContext) {state : State (n + 1)}
+    (admitted : (activationScope n).Admitted authority function.cleanupContext) {state : State (n + 1)}
     (typed : state.Typed signature function.cleanupContext) :
     OwnershipTrace ⟨function.cleanup, state⟩ ⟨.halt, emptyState n⟩
       ((activationScope n).cleanupOrder function.cleanupContext) := by
   simpa only [Function.cleanup, activation_exit] using Scope.exit_trace admitted typed
 
 theorem Function.cleanup_returns {n : Nat} {program : Program n} {signature : Signature} {function : Function n}
-    (admitted : (activationScope n).Admitted function.cleanupContext) {state : State (n + 1)}
+    (admitted : (activationScope n).Admitted authority function.cleanupContext) {state : State (n + 1)}
     (typed : state.Typed signature function.cleanupContext) (frame : Frame n) (stack : List (Frame n)) :
     Run (Transition program) ⟨.cleaning function.cleanup, state, frame :: stack⟩
       ⟨.body frame.next frame.cleanup, frame.state, stack⟩ :=
@@ -64,7 +65,7 @@ theorem cleanup_prefix {n : Nat} {program : Program n}
 /-- The existing ordered-cleanup theorem is consumed at the actual call
 boundary. No cleanup behavior or future result is an admission premise. -/
 theorem Function.cleanup_prefix {n : Nat} {program : Program n} {signature : Signature} {function : Function n}
-    (admitted : (activationScope n).Admitted function.cleanupContext) {state : State (n + 1)}
+    (admitted : (activationScope n).Admitted authority function.cleanupContext) {state : State (n + 1)}
     (typed : state.Typed signature function.cleanupContext) (frame : Frame n) (stack : List (Frame n))
     {after : Configuration n}
     (observed : Run (Transition program) ⟨.cleaning function.cleanup, state, frame :: stack⟩ after) :
@@ -80,7 +81,7 @@ theorem Function.cleanup_prefix {n : Nat} {program : Program n} {signature : Sig
   · exact Or.inr resumed
 
 theorem Function.cleanup_diverges_iff {n : Nat} {program : Program n} {signature : Signature} {function : Function n}
-    (admitted : (activationScope n).Admitted function.cleanupContext) {state : State (n + 1)}
+    (admitted : (activationScope n).Admitted authority function.cleanupContext) {state : State (n + 1)}
     (typed : state.Typed signature function.cleanupContext) (frame : Frame n) (stack : List (Frame n)) :
     Diverges (Transition program) ⟨.cleaning function.cleanup, state, frame :: stack⟩ ↔
       Diverges (Transition program) ⟨.body frame.next frame.cleanup, frame.state, stack⟩ :=

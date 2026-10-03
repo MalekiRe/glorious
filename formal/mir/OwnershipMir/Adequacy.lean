@@ -2,25 +2,27 @@ import OwnershipMir.Lowering
 
 namespace OwnershipMir
 
+variable {authority : Authority}
+
 /-- Source readiness follows from syntactic checking and the initial store.
 Preservation/conservation then reuse the proved MIR implementation. -/
 theorem Command.Checked.sound {n : Nat} {signature : Signature} {before after : Context n}
-    {command : Command n} (checked : Command.Checked before command after) {state : State n}
+    {command : Command n} (checked : (Command.Checked authority) before command after) {state : State n}
     (typed : state.Typed signature before) :
     ∃ next, command.exec state = some next ∧ next.Typed signature after ∧ Conserves signature state next := by
-  have checkedBlock : Code.Checked Op.Checked before (sequence command.block) after := checked.lower .halt
+  have checkedBlock : Code.Checked (Op.Checked authority) before (sequence command.block) after := checked.lower .halt
   obtain ⟨result, executed, realized, conserved⟩ :=
     Block.checked_exec Op.Checked.progress Op.Checked.executed command.block checkedBlock typed
   exact ⟨result, by rwa [Command.exec_eq], realized, conserved⟩
 
 theorem Command.Checked.progress {n : Nat} {signature : Signature} {before after : Context n}
-    {command : Command n} (checked : Command.Checked before command after) {state : State n}
+    {command : Command n} (checked : (Command.Checked authority) before command after) {state : State n}
     (typed : state.Typed signature before) : ∃ next, command.exec state = some next := by
   obtain ⟨next, executed, _, _⟩ := checked.sound typed
   exact ⟨next, executed⟩
 
 theorem Command.Checked.executed {n : Nat} {signature : Signature} {before after : Context n}
-    {command : Command n} (checked : Command.Checked before command after) {state next : State n}
+    {command : Command n} (checked : (Command.Checked authority) before command after) {state next : State n}
     (typed : state.Typed signature before) (executed : command.exec state = some next) :
     next.Typed signature after ∧ Conserves signature state next := by
   exact Block.executed Op.Checked.executed command.block (checked.lower .halt) typed
@@ -37,9 +39,9 @@ def Matches {n : Nat} (source : Configuration n (Command n)) (target : Configura
 
 theorem Matches.advance {n : Nat} {signature : Signature} {final : Context n}
     {source : Configuration n (Command n)} {before after : Configuration n (Op n)}
-    (matched : Matches source before) (safe : Safe signature Command.Checked final source)
+    (matched : Matches source before) (safe : Safe signature (Command.Checked authority) final source)
     (step : Step Op.exec before after) :
-    ∃ next, Run (Step Command.exec) source next ∧ Safe signature Command.Checked final next ∧ Matches next after := by
+    ∃ next, Run (Step Command.exec) source next ∧ Safe signature (Command.Checked authority) final next ∧ Matches next after := by
   cases matched with
   | refl =>
     rcases safe.progress Command.Checked.progress with halted | ⟨next, sourceStep⟩
@@ -54,9 +56,9 @@ theorem Matches.advance {n : Nat} {signature : Signature} {final : Context n}
 
 theorem Matches.run {n : Nat} {signature : Signature} {final : Context n}
     {source : Configuration n (Command n)} {before after : Configuration n (Op n)}
-    (matched : Matches source before) (safe : Safe signature Command.Checked final source)
+    (matched : Matches source before) (safe : Safe signature (Command.Checked authority) final source)
     (run : Run (Step Op.exec) before after) :
-    ∃ next, Run (Step Command.exec) source next ∧ Safe signature Command.Checked final next ∧ Matches next after := by
+    ∃ next, Run (Step Command.exec) source next ∧ Safe signature (Command.Checked authority) final next ∧ Matches next after := by
   induction run generalizing source with
   | refl => exact ⟨source, .refl _, safe, matched⟩
   | step head tail ih =>
@@ -67,7 +69,7 @@ theorem Matches.run {n : Nat} {signature : Signature} {final : Context n}
 /-- No extra target return is possible: all finite returned states correspond
 in both directions, including every slot's value and initialization hole. -/
 theorem compiled_return_iff {n : Nat} {signature : Signature} {before final : Context n}
-    {source : Code n (Command n)} (checked : Code.Checked Command.Checked before source final)
+    {source : Code n (Command n)} (checked : Code.Checked (Command.Checked authority) before source final)
     {initial result : State n} (typed : initial.Typed signature before) :
     Run (Step Op.exec) ⟨lower source, initial⟩ ⟨.halt, result⟩ ↔
       Run (Step Command.exec) ⟨source, initial⟩ ⟨.halt, result⟩ := by
@@ -127,12 +129,12 @@ theorem Safe.diverges_iff {n : Nat} {α : Type} {signature : Signature} {final :
 /-- Divergence is preserved and reflected as an actual infinite execution,
 not identified with stuckness or inferred merely from an absent result. -/
 theorem compiled_diverges_iff {n : Nat} {signature : Signature} {before final : Context n}
-    {source : Code n (Command n)} (checked : Code.Checked Command.Checked before source final)
+    {source : Code n (Command n)} (checked : Code.Checked (Command.Checked authority) before source final)
     {initial : State n} (typed : initial.Typed signature before) :
     Diverges (Step Op.exec) ⟨lower source, initial⟩ ↔ Diverges (Step Command.exec) ⟨source, initial⟩ := by
-  have targetSafe : Safe signature Op.Checked final ⟨lower source, initial⟩ :=
+  have targetSafe : Safe signature (Op.Checked authority) final ⟨lower source, initial⟩ :=
     ⟨before, typed, lower_checked checked⟩
-  have sourceSafe : Safe signature Command.Checked final ⟨source, initial⟩ := ⟨before, typed, checked⟩
+  have sourceSafe : Safe signature (Command.Checked authority) final ⟨source, initial⟩ := ⟨before, typed, checked⟩
   rw [targetSafe.diverges_iff Op.Checked.progress Op.Checked.executed,
     sourceSafe.diverges_iff Command.Checked.progress Command.Checked.executed]
   constructor

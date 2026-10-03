@@ -2,6 +2,8 @@ import OwnershipMir.Scope
 
 namespace OwnershipMir
 
+variable {authority : Authority}
+
 /-- A syntactic write footprint, not another ownership analysis. It states
 which instructions can physically change a root, independent of checking. -/
 def Op.Fixes {n : Nat} (slot : Fin n) : Op n → Prop
@@ -90,7 +92,7 @@ theorem Run.return_unique {n : Nat} {α : Type} {exec : α → State n → Optio
 /-- Full return correspondence for the independently specified atomic scope
 boundary. Cleanup has exactly its prescribed result, not merely a safe one. -/
 theorem Scope.exit_iff {n : Nat} {signature : Signature} {scope : Scope n} {context : Context n}
-    (admitted : scope.Admitted context) {state result : State n} (typed : state.Typed signature context) :
+    (admitted : scope.Admitted authority context) {state result : State n} (typed : state.Typed signature context) :
     Run (Step Op.exec) ⟨lower (sequence (scope.commands context)), state⟩ ⟨.halt, result⟩ ↔ result = scope.exit state := by
   constructor
   · intro run

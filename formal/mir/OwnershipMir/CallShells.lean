@@ -1,6 +1,8 @@
 import OwnershipMir.CallCleanup
+import OwnershipMir.CallMetadata
 
 namespace OwnershipMir.Calls
+variable {module : Module} {authority : Authority}
 
 def bodyShellDebit {n : Nat} (code : Body n) (state : State (n + 1)) : Nat :=
   match code with
@@ -21,7 +23,7 @@ def Configuration.linearShells {n : Nat} (config : Configuration n) : Nat :=
 theorem local_shells {n : Nat} {program : Program n} {signature : Signature}
     {before output : Context (n + 1)} {code next : Body n} {state after : State (n + 1)}
     (typed : state.Typed signature before)
-    (checked : Code.Checked (Instruction.Checked program) before code output)
+    (checked : Code.Checked (Instruction.Checked program module) before code output)
     (step : OwnershipMir.Step Instruction.exec ⟨code, state⟩ ⟨next, after⟩) :
     after.linearShells ≤ state.linearShells ∧ after.shells + bodyShellDebit code state = state.shells := by
   cases step with
@@ -56,7 +58,7 @@ theorem Safe.shell_step {n : Nat} {program : Program n} {signature : Signature} 
   | @clean code state next after stack step =>
     cases safe with
     | cleaning typed checked retained =>
-      have start : OwnershipMir.Safe signature Op.Checked _ ⟨code, state⟩ := ⟨_, typed, checked⟩
+      have start : OwnershipMir.Safe signature (Op.Checked _) _ ⟨code, state⟩ := ⟨_, typed, checked⟩
       have bounded := start.linear_shells_step step
       have balance := start.shell_step step
       change after.shells + OwnershipMir.Configuration.shellDebit ⟨code, state⟩ = state.shells at balance
@@ -97,6 +99,14 @@ theorem Function.start_safe {n : Nat} {program : Program n} {signature : Signatu
     {argument : Value} (typed : argument.kind signature = function.input) :
     Safe program signature function.exit (function.start argument) :=
   .body (argument_typed typed) (functions identity function selected).1 .nil
+theorem Function.start_declared {n : Nat} {program : Program n} {signature : Signature} {function : Function n}
+    (functions : program.Checked) {identity : Nat} (selected : program identity = some function)
+    {argument : Value} (typed : argument.kind signature = function.input) :
+    (function.start argument).Declared program.declarations signature := by
+  have valid : Layout.Declared program.declarations (argument.layout (Atom.kind signature)) := by
+    simpa [← typed, Value.kind, Tree.layout_map] using (functions identity function selected).2.2.2.2.1
+  exact ⟨argument_declared valid, by intro frame impossible; cases impossible⟩
+
 
 /-- General entry-to-arbitrary-prefix safety, including recursive calls,
 intermediate transfers, protected returns, and every cleanup instruction. -/
@@ -108,11 +118,13 @@ theorem program_safety {n : Nat} {program : Program n} {signature : Signature} {
     Safe program signature function.exit after ∧ after.Unique ∧ Preserves signature (function.start argument) after ∧
       (after.Terminal ∨ ∃ next, Transition program after next) ∧
       after.linearShells ≤ (function.start argument).linearShells ∧
+      after.Declared program.declarations signature ∧
       ∃ amount, ShellTrace program (function.start argument) after amount ∧
         after.shells + amount = (function.start argument).shells := by
   have safe := Function.start_safe functions selected typed
   obtain ⟨preserved, distinct, conserved, progress⟩ := ownership_safety functions safe unique run
   obtain ⟨bounded, amount, trace, balanced⟩ := safe.shell_execution functions run
-  exact ⟨preserved, distinct, conserved, progress, bounded, amount, trace, balanced⟩
+  exact ⟨preserved, distinct, conserved, progress, bounded,
+    safe.declared_run functions (Function.start_declared functions selected typed) run, amount, trace, balanced⟩
 
 end OwnershipMir.Calls

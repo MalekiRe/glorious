@@ -2,6 +2,8 @@ import OwnershipMir.Blocks
 
 namespace OwnershipMir
 
+variable {authority : Authority}
+
 /-- Observable ownership actions. Release occurs at the actual drop, not at
 selection: the intervening transfer-register state remains observable. -/
 inductive OwnershipEvent (n : Nat) where

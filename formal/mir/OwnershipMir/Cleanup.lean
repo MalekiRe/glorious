@@ -3,6 +3,8 @@ import OwnershipMir.TreeFrame
 
 namespace OwnershipMir
 
+variable {authority : Authority}
+
 @[simp] theorem update_overwrite {α : Type} {n : Nat} (slots : Fin n → α) (i : Fin n) (a b : α) :
     update (update slots i a) i b = update slots i b := by
   funext j
@@ -39,13 +41,13 @@ def clearFocused {n : Nat} (context : Context n) (root : Fin n) (frame : TreeFra
 theorem disposeAt_checked {n : Nat} (context : Context n) (root : Fin n) (frame : TreeFrame Kind)
     (shape : Shape) (empty : context.temp = none) (resident : context.slots root = some (frame.plug shape))
     (allowed : shape.disposable) (exhausted : shape.shallow) :
-    Code.Checked Command.Checked context (sequence [disposeAt root frame.path (shape.layout id)])
+    Code.Checked (Op.Checked authority) context (lower (sequence [disposeAt root frame.path (shape.layout id)]))
       (clearFocused context root frame shape) := by
   have found : (Place.mk root frame.path (shape.layout id)).find context.slots =
       some ⟨some shape, frame.rebuild (shape.layout id)⟩ := by
     simp only [Place.find, resident]
     exact frame.focus _ _
-  exact .act (.dispose empty found rfl rfl allowed exhausted) .halt
+  exact .act (.take empty found rfl rfl (.whole _)) (.act (.drop rfl allowed exhausted) .halt)
 
 @[simp] theorem frame_left_clear (frame : TreeFrame Kind) (right : Shape) (layout : Layout) :
     (frame.compose (.left .hole right)).rebuild layout none = some (frame.plug (.pair (.hole layout) right)) :=
@@ -65,7 +67,7 @@ whole-aggregate drop, or assumed cleanup execution is supplied. -/
 theorem cleanupTree_checked {n : Nat} (root : Fin n) (shape : Shape) (frame : TreeFrame Kind)
     (context : Context n) (empty : context.temp = none)
     (resident : context.slots root = some (frame.plug shape)) (allowed : shape.disposable) :
-    Code.Checked Command.Checked context (sequence (cleanupTree root frame.path shape))
+    Code.Checked (Op.Checked authority) context (lower (sequence (cleanupTree root frame.path shape)))
       (clearFocused context root frame shape) := by
   induction shape generalizing frame context with
   | hole layout =>
@@ -102,47 +104,58 @@ theorem cleanupTree_checked {n : Nat} (root : Fin n) (shape : Shape) (frame : Tr
       (some (frame.plug (.pair left (.hole (right.layout id))))), none⟩
     let bothDone : Context n := ⟨update context.slots root
       (some (frame.plug (.pair (.hole (left.layout id)) (.hole (right.layout id))))), none⟩
-    have rightChecked : Code.Checked Command.Checked context
-        (sequence (cleanupTree root (frame.path ++ [.right]) right)) rightDone := by
+    have rightChecked : Code.Checked (Op.Checked authority) context
+        (lower (sequence (cleanupTree root (frame.path ++ [.right]) right))) rightDone := by
       simpa [clearFocused, TreeFrame.path, rightDone] using
         rightIH (frame.compose (.right left .hole)) context empty
           (by simpa [TreeFrame.plug] using resident) allowed.2
-    have leftChecked : Code.Checked Command.Checked rightDone
-        (sequence (cleanupTree root (frame.path ++ [.left]) left)) bothDone := by
+    have leftChecked : Code.Checked (Op.Checked authority) rightDone
+        (lower (sequence (cleanupTree root (frame.path ++ [.left]) left))) bothDone := by
       simpa [clearFocused, TreeFrame.path, rightDone, bothDone] using
         leftIH (frame.compose (.left .hole (.hole (right.layout id)))) rightDone rfl
           (by simp [rightDone, TreeFrame.plug]) allowed.1
-    have release : Code.Checked Command.Checked bothDone
-        (sequence [disposeAt root frame.path (.pair (left.layout id) (right.layout id))])
+    have release : Code.Checked (Op.Checked authority) bothDone
+        (lower (sequence [disposeAt root frame.path (.pair (left.layout id) (right.layout id))]))
         (clearFocused context root frame (.pair left right)) := by
       simpa [clearFocused, bothDone, Tree.layout] using
         disposeAt_checked bothDone root frame (.pair (.hole (left.layout id)) (.hole (right.layout id)))
           rfl (by simp [bothDone]) ⟨trivial, trivial⟩ trivial
-    exact sequence_checked_append rightChecked (sequence_checked_append leftChecked release)
+    exact lower_sequence_checked_append rightChecked (lower_sequence_checked_append leftChecked release)
   | wrap shell body ih =>
     let bodyDone : Context n := ⟨update context.slots root
       (some (frame.plug (.wrap shell (.hole (body.layout id))))), none⟩
-    have bodyChecked : Code.Checked Command.Checked context
-        (sequence (cleanupTree root (frame.path ++ [.body]) body)) bodyDone := by
+    have bodyChecked : Code.Checked (Op.Checked authority) context
+        (lower (sequence (cleanupTree root (frame.path ++ [.body]) body))) bodyDone := by
       simpa [clearFocused, TreeFrame.path, bodyDone] using
         ih (frame.compose (.body shell .hole)) context empty
           (by simpa [TreeFrame.plug] using resident) allowed.2
-    have release : Code.Checked Command.Checked bodyDone
-        (sequence [disposeAt root frame.path (.wrap shell (body.layout id))])
+    have release : Code.Checked (Op.Checked authority) bodyDone
+        (lower (sequence [disposeAt root frame.path (.wrap shell (body.layout id))]))
         (clearFocused context root frame (.wrap shell body)) := by
       simpa [clearFocused, bodyDone, Tree.layout] using
         disposeAt_checked bodyDone root frame (.wrap shell (.hole (body.layout id)))
           rfl (by simp [bodyDone]) ⟨allowed.1, trivial⟩ trivial
-    exact sequence_checked_append bodyChecked release
+    exact lower_sequence_checked_append bodyChecked release
 
-/-- Finite cleanup has an actual terminating execution, derived from local
-progress. Structured user code can still diverge before reaching scope exit. -/
+/-- Generated cleanup is checked directly as MIR. This does not give user
+source code permission to traverse a private representation. -/
+theorem sequence_execute {n : Nat} {signature : Signature} (commands : List (Command n))
+    {before after : Context n} (checked : Code.Checked (Op.Checked authority) before (lower (sequence commands)) after)
+    {state : State n} (typed : state.Typed signature before) :
+    ∃ result, Block.exec Command.exec commands state = some result ∧
+      result.Typed signature after ∧ Conserves signature state result := by
+  rw [lower_sequence] at checked
+  obtain ⟨result, executed, realized, conserved⟩ :=
+    Block.checked_exec Op.Checked.progress Op.Checked.executed (commands.flatMap Command.block) checked typed
+  exact ⟨result, by rwa [commands_exec_eq], realized, conserved⟩
+
+/-- Finite source cleanup execution is derived from its actual compiled plan. -/
 theorem sequence_run {n : Nat} {signature : Signature} (commands : List (Command n))
-    {before after : Context n} (checked : Code.Checked Command.Checked before (sequence commands) after)
+    {before after : Context n} (checked : Code.Checked (Op.Checked authority) before (lower (sequence commands)) after)
     {state : State n} (typed : state.Typed signature before) :
     ∃ result, Run (Step Command.exec) ⟨sequence commands, state⟩ ⟨.halt, result⟩ ∧
       result.Typed signature after ∧ Conserves signature state result := by
-  obtain ⟨result, executed, final, conserved⟩ := Block.checked_exec Command.Checked.progress Command.Checked.executed commands checked typed
+  obtain ⟨result, executed, final, conserved⟩ := sequence_execute commands checked typed
   exact ⟨result, Block.exec_run commands executed .halt, final, conserved⟩
 
 end OwnershipMir

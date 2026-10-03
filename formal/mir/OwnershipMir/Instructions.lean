@@ -2,6 +2,8 @@ import OwnershipMir.Places
 
 namespace OwnershipMir
 
+variable {authority : Authority}
+
 inductive Op (n : Nat) where
   | take (place : Place n) (mode : Extract)
   | put (place : Place n)
@@ -34,21 +36,21 @@ def Op.exec {n : Nat} : Op n → State n → Option (State n)
     | some _ => some {state with temp := none}
     | none => none
 
-inductive Op.Checked {n : Nat} : Context n → Op n → Context n → Prop where
+inductive Op.Checked {n : Nat} (authority : Authority) : Context n → Op n → Context n → Prop where
   | take {context p mode input output lens} (empty : context.temp = none)
       (found : p.find context.slots = some lens) (selected : lens.selected = some input)
-      (layout : p.layout = input.layout id) (extract : mode.Checked input output) :
-      Checked context (.take p mode) ⟨p.write context.slots lens none, some output⟩
+      (layout : p.layout = input.layout id) (extract : Extract.Checked authority mode input output) :
+      Checked authority context (.take p mode) ⟨p.write context.slots lens none, some output⟩
   | put {context p shape lens} (resident : context.temp = some shape)
       (found : p.find context.slots = some lens) (vacant : Fits shape lens.selected) :
-      Checked context (.put p) ⟨p.write context.slots lens (some shape), none⟩
+      Checked authority context (.put p) ⟨p.write context.slots lens (some shape), none⟩
   | copy {context p shape lens} (empty : context.temp = none)
       (found : p.find context.slots = some lens) (selected : lens.selected = some shape)
       (allowed : shape.copyable) :
-      Checked context (.copy p) {context with temp := some shape}
+      Checked authority context (.copy p) {context with temp := some shape}
   | drop {context shape} (resident : context.temp = some shape)
       (allowed : shape.disposable) (exhausted : shape.shallow) :
-      Checked context .drop {context with temp := none}
+      Checked authority context .drop {context with temp := none}
 
 /-- Structural witnesses for the actual instruction transition. Permission
 is separate: this relation also describes unchecked execution. -/
@@ -111,16 +113,16 @@ def Op.Effect.ConservationAllowed {n : Nat} {op : Op n} {before after : State n}
 /-- Complete resident-level legality, derived only from the authoritative
 checker. Execution witnesses already carry selection, vacancy and register facts. -/
 def Op.Effect.Legal {n : Nat} {op : Op n} {before after : State n}
-    (signature : Signature) : op.Effect before after → Prop
+    (authority : Authority) (signature : Signature) : op.Effect before after → Prop
   | .take (p := p) (mode := mode) (value := value) (result := result) _ _ _ _ =>
-      p.layout = (Value.kind signature value).layout id ∧ mode.Checked (Value.kind signature value) (Value.kind signature result)
+      p.layout = (Value.kind signature value).layout id ∧ Extract.Checked authority mode (Value.kind signature value) (Value.kind signature result)
   | .put (lens := lens) (value := value) _ _ _ =>
       Fits (Value.kind signature value) (lens.selected.map (Value.kind signature))
   | .copy (value := value) _ _ _ => (value.kind signature).copyable
   | .drop (value := value) _ => (value.kind signature).disposable ∧ (value.kind signature).shallow
 
 theorem Op.Effect.Legal.conservationAllowed {n : Nat} {op : Op n} {before after : State n}
-    {signature : Signature} {effect : op.Effect before after} (legal : effect.Legal signature) :
+    {signature : Signature} {effect : op.Effect before after} (legal : effect.Legal authority signature) :
     effect.ConservationAllowed signature := by
   cases effect with
   | take => trivial
@@ -186,9 +188,9 @@ theorem Op.Effect.conserves {n : Nat} {op : Op n} {state next : State n}
 /-- Checking constructs the structural transition once and derives its
 realization and resident capabilities. No post-state property is an input. -/
 theorem Op.Checked.realize {n : Nat} {signature : Signature} {before after : Context n}
-    {op : Op n} (checked : Op.Checked before op after) {state : State n}
+    {op : Op n} (checked : (Op.Checked authority) before op after) {state : State n}
     (typed : state.Typed signature before) :
-    ∃ next, ∃ effect : op.Effect state next, next.Typed signature after ∧ effect.Legal signature := by
+    ∃ next, ∃ effect : op.Effect state next, next.Typed signature after ∧ effect.Legal authority signature := by
   cases checked with
   | @take p mode input output lens empty found selected layout extract =>
     have unused : state.temp = none := by simpa [empty] using typed.2
@@ -197,7 +199,7 @@ theorem Op.Checked.realize {n : Nat} {signature : Signature} {before after : Con
     obtain ⟨result, extracted, resultTyped⟩ := extract.realized classified
     exact ⟨_, .take actualFound live extracted unused,
       p.typed_write typed actual lens rebuild rfl (by simp [resultTyped]), by
-        change p.layout = (value.kind signature).layout id ∧ mode.Checked (value.kind signature) (result.kind signature)
+        change p.layout = (value.kind signature).layout id ∧ Extract.Checked authority mode (value.kind signature) (result.kind signature)
         rw [classified, resultTyped]
         exact ⟨layout, extract⟩⟩
   | @put p shape lens resident found fits =>
@@ -224,28 +226,28 @@ theorem Op.Checked.realize {n : Nat} {signature : Signature} {before after : Con
       exact ⟨allowed, exhausted⟩⟩
 
 theorem Op.Checked.effect {n : Nat} {signature : Signature} {before after : Context n}
-    {op : Op n} (checked : Op.Checked before op after) {state next : State n}
+    {op : Op n} (checked : (Op.Checked authority) before op after) {state next : State n}
     (typed : state.Typed signature before) (executed : op.exec state = some next) :
-    ∃ effect : op.Effect state next, next.Typed signature after ∧ effect.Legal signature := by
+    ∃ effect : op.Effect state next, next.Typed signature after ∧ effect.Legal authority signature := by
   obtain ⟨result, effect, realized, allowed⟩ := checked.realize typed
   cases Option.some.inj (executed.symm.trans effect.exec)
   exact ⟨effect, realized, allowed⟩
 
 theorem Op.Checked.sound {n : Nat} {signature : Signature} {before after : Context n}
-    {op : Op n} (checked : Op.Checked before op after) {state : State n}
+    {op : Op n} (checked : (Op.Checked authority) before op after) {state : State n}
     (typed : state.Typed signature before) :
     ∃ next, op.exec state = some next ∧ next.Typed signature after ∧ Conserves signature state next := by
   obtain ⟨next, effect, realized, allowed⟩ := checked.realize typed
   exact ⟨next, effect.exec, realized, effect.conserves allowed.conservationAllowed⟩
 
 theorem Op.Checked.progress {n : Nat} {signature : Signature} {before after : Context n}
-    {op : Op n} (checked : Op.Checked before op after) {state : State n}
+    {op : Op n} (checked : (Op.Checked authority) before op after) {state : State n}
     (typed : state.Typed signature before) : ∃ next, op.exec state = some next := by
   obtain ⟨next, effect, _, _⟩ := checked.realize typed
   exact ⟨next, effect.exec⟩
 
 theorem Op.Checked.executed {n : Nat} {signature : Signature} {before after : Context n}
-    {op : Op n} (checked : Op.Checked before op after) {state next : State n}
+    {op : Op n} (checked : (Op.Checked authority) before op after) {state next : State n}
     (typed : state.Typed signature before) (executed : op.exec state = some next) :
     next.Typed signature after ∧ Conserves signature state next := by
   obtain ⟨effect, realized, legal⟩ := checked.effect typed executed

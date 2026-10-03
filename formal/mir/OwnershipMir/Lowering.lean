@@ -5,6 +5,8 @@ same focus/rebuild contract as whole slots; transient registers belong to the
 actual machine state throughout block execution. -/
 namespace OwnershipMir
 
+variable {authority : Authority}
+
 inductive Command (n : Nat) where
   | move (mode : Extract) (source target : Place n)
   | copy (source target : Place n)
@@ -37,24 +39,29 @@ def Command.exec {n : Nat} (command : Command n) (state : State n) : Option (Sta
       let _ ← origin.selected
       some ⟨source.write state.slots origin none, none⟩
 
-inductive Command.Checked {n : Nat} : Context n → Command n → Context n → Prop where
+inductive Command.Checked {n : Nat} (authority : Authority) : Context n → Command n → Context n → Prop where
   | move {context mode source target input output origin into} (empty : context.temp = none)
       (found : source.find context.slots = some origin) (selected : origin.selected = some input)
-      (layout : source.layout = input.layout id) (extract : mode.Checked input output)
+      (layout : source.layout = input.layout id) (extract : Extract.Checked authority mode input output)
       (initialized : mode = .whole → input.ready)
       (destination : target.find (source.write context.slots origin none) = some into)
-      (vacant : Fits output into.selected) :
-      Checked context (.move mode source target)
+      (vacant : Fits output into.selected)
+      (sourceAccess : source.Visible authority context.slots)
+      (targetAccess : target.Visible authority (source.write context.slots origin none)) :
+      Checked authority context (.move mode source target)
         ⟨target.write (source.write context.slots origin none) into (some output), none⟩
   | copy {context source target shape origin into} (empty : context.temp = none)
       (found : source.find context.slots = some origin) (selected : origin.selected = some shape)
       (allowed : shape.copyable) (destination : target.find context.slots = some into)
-      (vacant : Fits shape into.selected) :
-      Checked context (.copy source target) ⟨target.write context.slots into (some shape), none⟩
+      (vacant : Fits shape into.selected)
+      (sourceAccess : source.Visible authority context.slots)
+      (targetAccess : target.Visible authority context.slots) :
+      Checked authority context (.copy source target) ⟨target.write context.slots into (some shape), none⟩
   | dispose {context source shape origin} (empty : context.temp = none)
       (found : source.find context.slots = some origin) (selected : origin.selected = some shape)
-      (layout : source.layout = shape.layout id) (allowed : shape.disposable) (exhausted : shape.shallow) :
-      Checked context (.dispose source) ⟨source.write context.slots origin none, none⟩
+      (layout : source.layout = shape.layout id) (allowed : shape.disposable) (exhausted : shape.shallow)
+      (access : source.Visible authority context.slots) :
+      Checked authority context (.dispose source) ⟨source.write context.slots origin none, none⟩
 
 def Command.block {n : Nat} : Command n → List (Op n)
   | .move mode source target => [.take source mode, .put target]
@@ -82,20 +89,20 @@ theorem lower_append {n : Nat} (first last : Code n (Command n)) :
   | loop guard body next _ nextIH => simp [lower, Code.append, nextIH]
 
 theorem Command.Checked.lower {n : Nat} {before after final : Context n} {command : Command n}
-    (checked : Command.Checked before command after) {next : Code n (Op n)}
-    (tail : Code.Checked Op.Checked after next final) :
-    Code.Checked Op.Checked before (command.emit next) final := by
+    (checked : (Command.Checked authority) before command after) {next : Code n (Op n)}
+    (tail : Code.Checked (Op.Checked authority) after next final) :
+    Code.Checked (Op.Checked authority) before (command.emit next) final := by
   cases checked with
-  | move empty found selected layout extract initialized destination vacant =>
+  | move empty found selected layout extract initialized destination vacant sourceAccess targetAccess =>
     exact .act (.take empty found selected layout extract) (.act (.put rfl destination vacant) tail)
-  | copy empty found selected allowed destination vacant =>
+  | copy empty found selected allowed destination vacant sourceAccess targetAccess =>
     exact .act (.copy empty found selected allowed) (.act (.put rfl destination vacant) tail)
-  | dispose empty found selected layout allowed exhausted =>
+  | dispose empty found selected layout allowed exhausted access =>
     exact .act (.take empty found selected layout (.whole _)) (.act (.drop rfl allowed exhausted) tail)
 
 theorem lower_checked {n : Nat} {before after : Context n} {source : Code n (Command n)}
-    (checked : Code.Checked Command.Checked before source after) :
-    Code.Checked Op.Checked before (lower source) after := by
+    (checked : Code.Checked (Command.Checked authority) before source after) :
+    Code.Checked (Op.Checked authority) before (lower source) after := by
   induction checked with
   | halt => exact .halt
   | act head tail ih => exact head.lower ih
@@ -140,11 +147,11 @@ admission; arbitrary physical prefixes, including half-completed transfers,
 retain unique ownership and exact-resource conservation and cannot get stuck. -/
 theorem compiled_ownership_safety {n : Nat} {signature : Signature}
     {before final : Context n} {source : Code n (Command n)}
-    (checked : Code.Checked Command.Checked before source final) {initial : State n}
+    (checked : Code.Checked (Command.Checked authority) before source final) {initial : State n}
     (typed : initial.Typed signature before) (unique : initial.Unique)
     {reached : Configuration n (Op n)}
     (run : Run (Step Op.exec) ⟨lower source, initial⟩ reached) :
-    Safe signature Op.Checked final reached ∧ reached.state.Unique ∧
+    Safe signature (Op.Checked authority) final reached ∧ reached.state.Unique ∧
       Conserves signature initial reached.state ∧
       (reached.code = .halt ∨ ∃ next, Step Op.exec reached next) :=
   ownership_safety ⟨before, typed, lower_checked checked⟩ unique run
@@ -152,7 +159,7 @@ theorem compiled_ownership_safety {n : Nat} {signature : Signature}
 /-- A source return is implemented with exactly the same slots and empty
 transfer register. This is value/state correspondence, not just safety. -/
 theorem compiled_return {n : Nat} {signature : Signature} {before final : Context n}
-    {source : Code n (Command n)} (checked : Code.Checked Command.Checked before source final)
+    {source : Code n (Command n)} (checked : Code.Checked (Command.Checked authority) before source final)
     {initial result : State n} (typed : initial.Typed signature before)
     (empty : final.temp = none)
     (run : Run (Step Command.exec) ⟨source, initial⟩ ⟨.halt, result⟩) :
@@ -167,11 +174,11 @@ theorem compiled_return {n : Nat} {signature : Signature} {before final : Contex
 /-- Ordinary source movement reads an actually initialized subtree. Internal
 cleanup transfers may carry holes, but cannot masquerade as source moves. -/
 theorem Command.Checked.move_ready {n : Nat} {signature : Signature} {before after : Context n}
-    {source target : Place n} (checked : Command.Checked before (.move .whole source target) after)
+    {source target : Place n} (checked : (Command.Checked authority) before (.move .whole source target) after)
     {state : State n} (typed : state.Typed signature before) :
     ∃ lens value, source.find state.slots = some lens ∧ lens.selected = some value ∧ value.ready := by
   cases checked with
-  | move empty found selected layout extract initialized destination vacant =>
+  | move empty found selected layout extract initialized destination vacant sourceAccess targetAccess =>
     obtain ⟨actual, actualFound, actualTyped, _⟩ := source.realized typed _ found
     obtain ⟨value, live, classified⟩ := Option.map_eq_some_iff.mp (actualTyped.trans selected)
     have ready : (value.kind signature).ready := classified.symm ▸ initialized rfl
@@ -187,5 +194,29 @@ theorem commands_trace {n : Nat} (commands : List (Command n)) {before after : S
     obtain ⟨middle, head, tail⟩ := Option.bind_eq_some_iff.mp executed
     have first := Block.exec_trace command.block (by rwa [Command.exec_eq] at head) ((lower (sequence rest)).append next)
     simpa only [sequence, Block.emit, lower, Command.emit, Block.emit_append, List.flatMap_cons] using first.trans (ih tail)
+
+theorem lower_sequence {n : Nat} (commands : List (Command n)) :
+    lower (sequence commands) = sequence (commands.flatMap Command.block) := by
+  induction commands with
+  | nil => rfl
+  | cons cmd rest ih =>
+    change Block.emit cmd.block (lower (sequence rest)) = sequence (cmd.block ++ rest.flatMap Command.block)
+    rw [ih, sequence_append, Block.emit_sequence]
+
+theorem commands_exec_eq {n : Nat} (commands : List (Command n)) (state : State n) :
+    Block.exec Command.exec commands state = Block.exec Op.exec (commands.flatMap Command.block) state := by
+  induction commands generalizing state with
+  | nil => rfl
+  | cons cmd rest ih =>
+    simp only [Block.exec, List.flatMap_cons, Block.exec_append, Command.exec_eq]
+    rw [funext ih]
+
+theorem lower_sequence_checked_append {n : Nat} {before middle after : Context n}
+    {first last : List (Command n)}
+    (head : Code.Checked (Op.Checked authority) before (lower (sequence first)) middle)
+    (tail : Code.Checked (Op.Checked authority) middle (lower (sequence last)) after) :
+    Code.Checked (Op.Checked authority) before (lower (sequence (first ++ last))) after := by
+  rw [sequence_append, lower_append]
+  exact head.append tail
 
 end OwnershipMir

@@ -1,10 +1,12 @@
-import OwnershipMir.Instructions
+import OwnershipMir.Metadata
 import OwnershipMir.Execution
 
 /-! Source commands and MIR share only structured control. Their primitive
 operations and operational meanings are different. Loops unfold at runtime;
 neither admission nor safety assumes termination. -/
 namespace OwnershipMir
+
+variable {authority : Authority}
 
 inductive Code (n : Nat) (instruction : Type) where
   | halt
@@ -166,9 +168,9 @@ theorem Safe.run {n : Nat} {α : Type} {signature : Signature} {final : Context 
 
 /-- This includes intermediate transfer states, not only instruction boundaries. -/
 theorem ownership_safety {n : Nat} {signature : Signature} {final : Context n}
-    {before after : Configuration n (Op n)} (safe : Safe signature Op.Checked final before)
+    {before after : Configuration n (Op n)} (safe : Safe signature (Op.Checked authority) final before)
     (unique : before.state.Unique) (run : Run (Step Op.exec) before after) :
-    Safe signature Op.Checked final after ∧ after.state.Unique ∧
+    Safe signature (Op.Checked authority) final after ∧ after.state.Unique ∧
       Conserves signature before.state after.state ∧
       (after.code = .halt ∨ ∃ next, Step Op.exec after next) := by
   obtain ⟨preserved, conserved⟩ := safe.run Op.Checked.executed run

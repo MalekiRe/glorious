@@ -7,6 +7,13 @@ structure Place (n : Nat) where
   path : List Direction
   layout : Layout
 
+/-- Lexical projection permission is independent of physical focus and of
+permission to dispose of an owner. Whole empty roots need no representation. -/
+def Place.Visible {n : Nat} (authority : Authority) (place : Place n) (slots : Fin n → Cell Kind) : Prop :=
+  match slots place.root with
+  | none => place.path = []
+  | some shape => ∃ selected, Layout.Accessible authority (shape.layout id) place.path selected
+
 /-- The empty path is ordinary whole-slot access, not a second operation. -/
 def Place.find {n : Nat} {α : Type} (place : Place n) (slots : Fin n → Cell α) : Option (Lens α) :=
   focus place.path place.layout (slots place.root)
@@ -92,13 +99,13 @@ def Extract.apply {α : Type} : Extract → Tree α → Option (Tree α)
   | .deconstruct, .wrap _ body => some body
   | _, _ => none
 
-inductive Extract.Checked : Extract → Shape → Shape → Prop where
-  | whole (shape) : Checked .whole shape shape
-  | deconstruct {shell body} (authorized : shell.canOpen = true) :
-      Checked .deconstruct (.wrap shell body) body
+inductive Extract.Checked (authority : Authority) : Extract → Shape → Shape → Prop where
+  | whole (shape) : Checked authority .whole shape shape
+  | deconstruct {shell body} (authorized : authority.CanOpen shell (body.layout id)) :
+      Checked authority .deconstruct (.wrap shell body) body
 
-theorem Extract.Checked.realized {signature : Signature} {mode : Extract} {before after : Shape}
-    (checked : mode.Checked before after) {value : Value} (typed : value.kind signature = before) :
+theorem Extract.Checked.realized {authority : Authority} {signature : Signature} {mode : Extract} {before after : Shape}
+    (checked : Extract.Checked authority mode before after) {value : Value} (typed : value.kind signature = before) :
     ∃ result : Value, mode.apply value = some result ∧ result.kind signature = after := by
   cases checked with
   | whole shape => exact ⟨value, rfl, typed⟩

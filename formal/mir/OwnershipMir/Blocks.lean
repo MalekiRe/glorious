@@ -2,6 +2,8 @@ import OwnershipMir.Machine
 
 namespace OwnershipMir
 
+variable {authority : Authority}
+
 /-- Finite straight-line emission; the continuation is outside the block. -/
 def Block.emit {n : Nat} {α : Type} : List α → Code n α → Code n α
   | [], next => next
@@ -148,5 +150,16 @@ theorem Block.checked_prefix {n : Nat} {α : Type} {signature : Signature}
       obtain ⟨result, middle, remaining, finalTyped, continuation⟩ :=
         ih tail realized (fun op member => ready op (by simp [member]))
       exact ⟨result, middle, by simp [Block.exec, executed, remaining], finalTyped, continuation⟩
+
+theorem Block.exec_append {n : Nat} {α : Type} (exec : α → State n → Option (State n))
+    (first last : List α) (state : State n) :
+    Block.exec exec (first ++ last) state = (Block.exec exec first state).bind (Block.exec exec last) := by
+  induction first generalizing state with
+  | nil => rfl
+  | cons op rest ih =>
+    simp only [List.cons_append, Block.exec, Option.bind_assoc]
+    congr 1
+    funext middle
+    exact ih middle
 
 end OwnershipMir

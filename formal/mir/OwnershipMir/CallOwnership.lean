@@ -1,6 +1,7 @@
 import OwnershipMir.CallSafety
 
 namespace OwnershipMir.Calls
+variable {module : Module} {authority : Authority}
 
 def stackMass {n : Nat} (leaf : Atom → Nat) (shell : Shell → Nat) : List (Frame n) → Nat
   | [] => 0
@@ -102,7 +103,7 @@ theorem Safe.ownership_step {n : Nat} {program : Program n} {signature : Signatu
   | clean step =>
     cases safe with
     | cleaning typed checked retained =>
-      have start : OwnershipMir.Safe signature Op.Checked _ ⟨_, _⟩ := ⟨_, typed, checked⟩
+      have start : OwnershipMir.Safe signature (Op.Checked _) _ ⟨_, _⟩ := ⟨_, typed, checked⟩
       exact Preserves.local (start.step Op.Checked.executed step).2 _ _ _
   | retire =>
     apply Preserves.of_mass
