@@ -207,4 +207,13 @@ theorem exact_shell_not_disposable (shell : Shell) (body : Shape)
     (tree.map f).ready ↔ tree.ready := by
   induction tree <;> simp_all [Tree.map, Tree.ready]
 
+/-- An initialized resident has no hidden initialization state beyond its
+exact layout. Owner identities and scalar payloads are intentionally erased. -/
+theorem Tree.ready_map_eq_of_layout_eq {α : Type} (kind : α → AtomType)
+    {first second : Tree α} (left : first.ready) (right : second.ready)
+    (same : first.layout kind = second.layout kind) : first.map kind = second.map kind := by
+  induction first generalizing second <;> cases second <;>
+    simp_all [Tree.ready, Tree.layout, Tree.map]
+  all_goals grind
+
 end OwnershipMir

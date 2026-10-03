@@ -103,22 +103,6 @@ theorem Store.Permitted.unique_overlap_within {n : Nat} {store : Store n Atom}
     obtain ⟨origin, originFound, _, within, _⟩ := authorized
     exact within.trans (ancestor.within graph found originFound)
 
-/-- A declared hole retains the layout of the extracted field. -/
-theorem focus_rebuild_layout {α : Type} (kind : α → AtomType)
-    {path : List Direction} {layout : Layout} {tree : Tree α} {lens : Lens α}
-    (found : focus path layout (some tree) = some lens)
-    (selected : (lens.selected.getD (.hole layout)).layout kind = layout)
-    {replacement : Cell α} (typed : (replacement.getD (.hole layout)).layout kind = layout) :
-    ((lens.rebuild replacement).getD (.hole layout)).layout kind = tree.layout kind := by
-  induction path generalizing tree lens with
-  | nil => cases Option.some.inj found; exact typed.trans selected.symm
-  | cons direction path ih =>
-    cases direction <;> cases tree <;> simp only [focus] at found
-    all_goals try contradiction
-    all_goals
-      obtain ⟨sub, focused, rfl⟩ := Option.map_eq_some_iff.mp found
-      simp only [Option.getD_some, Tree.layout]
-      rw [ih focused selected]
 
 /-- A permitted write can change an enclosing referent, or a disjoint field,
 but never overwrite a strict descendant referent. Exact layout replacement
@@ -140,7 +124,8 @@ theorem focus_frame_layout {α : Type} (kind : α → AtomType)
     change cell = some original at resident
     subst cell
     obtain ⟨changed, present⟩ := focus_rebuild_present writing replacement
-    have unchanged := focus_rebuild_layout kind writing selected (replacement := some replacement) replacementType
+    have unchanged := focus_rebuild_layout kind _ _ writing (some replacement)
+      (by intro shape same; simpa only [same, Option.getD_some] using replacementType.trans selected.symm) original rfl
     rw [present] at unchanged
     exact ⟨⟨some changed, id⟩, changed, by simp [focus, present], rfl, unchanged.trans originalType⟩
   | cons direction query ih =>
@@ -313,6 +298,37 @@ theorem WriteLoanReady.progress {n : Nat} {store : Store n Atom} {signature : Si
   · intro leaf shell
     have mass := store.replaceLoan_mass live located value none leaf shell
     simpa [after, hole, resident, cellMass, Tree.mass] using mass
+
+
+/-- Fully initialized replacement may change payloads and owner identities,
+but preserves the exact typing of every physical region. Temporary holes do
+not satisfy this theorem's readiness premises. -/
+theorem Store.replaceLoan_regionKinds {n : Nat} {store : Store n Atom} {signature : Signature}
+    {loan : Loan n} {slots : Region n Atom} {lens : Lens Atom} {original value : Value}
+    (live : store.region loan.referent.region = some slots)
+    (focused : (loan.referent.place loan.target).find slots = some lens)
+    (resident : lens.selected = some original) (oldReady : original.ready) (newReady : value.ready)
+    (sameLayout : value.layout (Atom.kind signature) = original.layout (Atom.kind signature)) (temp : Cell Atom) :
+    ∀ region, (store.replaceLoan loan slots lens value temp).regionKinds signature region =
+      store.regionKinds signature region := by
+  have classified := Tree.ready_map_eq_of_layout_eq (Atom.kind signature) newReady oldReady sameLayout
+  have rebuilt := focus_rebuild_map_congr (Atom.kind signature) focused
+    (first := some value) (second := lens.selected) (by simp [cellMap, resident, classified])
+  rw [focus_rebuild _ _ _ _ focused] at rebuilt
+  intro region
+  by_cases sameRegion : region = loan.referent.region
+  · subst region
+    unfold Store.regionKinds Store.replaceLoan
+    rw [Store.replace_same (Store.region_bound live), live]
+    apply congrArg some
+    funext root
+    by_cases sameRoot : root = loan.referent.root
+    · subst root
+      simp only [Place.write, Address.place, update_same]
+      exact rebuilt
+    · simp [Place.write, Address.place, update, sameRoot]
+  · unfold Store.regionKinds Store.replaceLoan
+    rw [Store.replace_other _ _ _ _ _ sameRegion]
 
 
 end OwnershipMir

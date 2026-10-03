@@ -130,4 +130,49 @@ theorem focus_rebuild {α : Type} (path : List Direction) (layout : Layout)
         obtain ⟨sub, selected, rfl⟩ := Option.map_eq_some_iff.mp found
         simp [ih _ sub selected]
 
+/-- Rebuilding the same physical focus respects classification of the
+replacement; no second path traversal or reconstructed lens is required. -/
+theorem focus_rebuild_map_congr {α β : Type} (kind : α → β)
+    {path : List Direction} {layout : Layout} {cell : Cell α} {lens : Lens α}
+    (found : focus path layout cell = some lens) {first second : Cell α}
+    (same : cellMap kind first = cellMap kind second) :
+    cellMap kind (lens.rebuild first) = cellMap kind (lens.rebuild second) := by
+  induction path generalizing cell lens with
+  | nil => cases Option.some.inj found; exact same
+  | cons direction path ih =>
+    cases cell with
+    | none => cases direction <;> simp [focus] at found
+    | some tree =>
+      cases direction <;> cases tree <;> simp only [focus] at found
+      all_goals try contradiction
+      all_goals
+        obtain ⟨sub, focused, rfl⟩ := Option.map_eq_some_iff.mp found
+        have framed := ih focused
+        unfold cellMap at framed
+        simp only [cellMap, Option.map_some, Tree.map, map_getD]
+        rw [framed]
+
+
+/-- Clearing retains the selected layout; filling preserves that layout.
+The same equation serves physical references and declared static metadata. -/
+theorem focus_rebuild_layout {α : Type} (kind : α → AtomType) (path : List Direction) (layout : Layout)
+    {cell : Cell α} {lens : Lens α} (found : focus path layout cell = some lens)
+    (replacement : Cell α)
+    (fits : ∀ shape, lens.selected = some shape →
+      ((replacement.getD (.hole layout)).layout kind) = shape.layout kind) :
+    ∀ tree, cell = some tree → ((lens.rebuild replacement).getD (.hole layout)).layout kind = tree.layout kind := by
+  induction path generalizing cell lens with
+  | nil => cases Option.some.inj found; exact fits
+  | cons direction path ih =>
+    cases cell with
+    | none => cases direction <;> cases found
+    | some tree =>
+      cases direction <;> cases tree <;> simp only [focus] at found
+      all_goals try contradiction
+      all_goals obtain ⟨inside, located, rfl⟩ := Option.map_eq_some_iff.mp found
+      all_goals intro actual same; cases same
+      all_goals simp only [Option.getD_some, Tree.layout]
+      all_goals rw [ih located fits _ rfl]
+
+
 end OwnershipMir

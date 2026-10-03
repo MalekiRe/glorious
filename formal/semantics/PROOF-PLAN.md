@@ -351,10 +351,20 @@ The source/MIR instruction grammar and body admission still need to produce
 borrow/read/move/write permission evidence and constrain every conflicting
 ordinary access. Lifetime-aware return and complete cleanup, source-derived
 last-use evidence, and their general source-to-MIR preservation/progress
-consumers remain open. Retained-caller typing must account for temporarily
-uninitialized borrowed storage; the existing shape-only frame typing is not
-that proof. Existing public program safety does not assert
+consumers remain open. Retained-caller typing must still account for temporarily
+uninitialized borrowed storage. Existing public program safety does not assert
 `Store.BorrowInvariant`; importing these contracts does not close that gap.
+
+Retained-frame framing now consumes equality of physical region typing rather
+than equality of resident values. Both `StackTyped.frame` and `ResumeTyped.frame`
+and all their actual preservation callers use the shared `Store.regionKinds`
+projection. It is computed from the authoritative store, not cached in frames.
+Initialized same-layout replacement derives this projection equality and feeds
+`StackTyped.replaceLoan`; changing payloads therefore does not require an
+unchanged-store assumption. The shared physical focus layout theorem now also
+serves nominal metadata, replacing the duplicate proof. The integrated 38-job
+gate passed. This does not admit intermediate holes into a fully initialized
+caller context or discharge the source borrowing-admission obligation.
 
 
 ### Joint storage ownership

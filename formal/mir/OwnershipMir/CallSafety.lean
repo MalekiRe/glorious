@@ -1,4 +1,5 @@
 import OwnershipMir.Calls
+import OwnershipMir.LoanFraming
 
 namespace OwnershipMir.Calls
 variable {module : Module} {authority : Authority}
@@ -37,26 +38,34 @@ theorem StackTyped.frame {n : Nat} {program : Program n} {signature : Signature}
     {before after : Store (n + 1) Atom} {ceiling : Nat} {stack : List (Frame n)}
     {output final : Context (n + 1)} {cleanup : Code (n + 1) (Op (n + 1))}
     (typed : StackTyped program signature before ceiling stack output cleanup final)
-    (same : ∀ r, r < ceiling → after.region r = before.region r) :
+    (same : ∀ r, r < ceiling → after.regionKinds signature r = before.regionKinds signature r) :
     StackTyped program signature after ceiling stack output cleanup final := by
   induction typed generalizing after with
-  | nil => exact .nil
   | cons older live resident returned put next outer release ih =>
-    exact .cons older ((same _ older).trans live) resident returned put next
+    have projected := same _ older
+    unfold Store.regionKinds at projected
+    rw [live] at projected
+    obtain ⟨slots, afterLive, classified⟩ := Option.map_eq_some_iff.mp projected
+    exact .cons older afterLive (fun i => (congrFun classified i).trans (resident i)) returned put next
       (ih (fun r below => same r (Nat.lt_trans below older))) release
+  | nil => exact .nil
 
 theorem ResumeTyped.frame {n : Nat} {program : Program n} {signature : Signature}
     {before after : Store (n + 1) Atom} {ceiling : Nat} {stack : List (Frame n)} {final : Context (n + 1)}
     (typed : ResumeTyped program signature before ceiling stack final)
-    (same : ∀ r, r < ceiling → after.region r = before.region r) :
+    (same : ∀ r, r < ceiling → after.regionKinds signature r = before.regionKinds signature r) :
     ResumeTyped program signature after ceiling stack final := by
   cases typed with
   | cons older live resident next outer =>
-    exact .cons older ((same _ older).trans live) resident next
+    have projected := same _ older
+    unfold Store.regionKinds at projected
+    rw [live] at projected
+    obtain ⟨slots, afterLive, classified⟩ := Option.map_eq_some_iff.mp projected
+    exact .cons older afterLive ⟨fun i => (congrFun classified i).trans (resident.1 i), resident.2⟩ next
       (outer.frame (fun r below => same r (Nat.lt_trans below older)))
 
 /-- The one store is updated in place logically; preserved caller typing uses
-region-disjoint framing, never snapshots copied into continuation frames. -/
+its exact typing projection, never saved snapshots of caller values. -/
 theorem Safe.preservation {n : Nat} {program : Program n} {signature : Signature} {final : Context (n + 1)}
     (functions : program.Checked) {before after : Configuration n} (safe : Safe program signature final before)
     (step : Transition program before after) : Safe program signature final after := by
@@ -68,7 +77,7 @@ theorem Safe.preservation {n : Nat} {program : Program n} {signature : Signature
       obtain ⟨⟨current, realized, remaining⟩, _⟩ :=
         OwnershipMir.Safe.step ⟨_, typed, checked⟩ Instruction.Checked.executed step
       exact .body (Store.replace_same (Store.region_bound live) _ _) realized remaining
-        (retained.frame (fun r below => Store.replace_other _ _ _ _ _ (by omega)))
+        (retained.frame (fun r below => by unfold Store.regionKinds; rw [Store.replace_other _ _ _ _ _ (by omega)]))
   | @enter identity destination next cleanup store active stack function argument resolved resident =>
     cases safe with
     | body live typed checked retained =>
@@ -83,7 +92,7 @@ theorem Safe.preservation {n : Nat} {program : Program n} {signature : Signature
           have bound := Store.region_bound live
           exact .body (Store.allocate_fresh _ _) (argument_typed classified) admitted.1
             (.cons bound ((Store.allocate_old bound _).trans live) typed.1 rfl put tail
-              (retained.frame (fun r below => Store.allocate_old (Nat.lt_trans below bound) _))
+              (retained.frame (fun r below => by unfold Store.regionKinds; rw [Store.allocate_old (Nat.lt_trans below bound) _]))
               (Function.cleanup_checked admitted.2.1))
   | @handoff cleanup store active frame stack caller slots live installed =>
     cases safe with
@@ -96,7 +105,7 @@ theorem Safe.preservation {n : Nat} {program : Program n} {signature : Signature
         exact .cleaning (before := ⟨_, none⟩)
           ((Store.replace_other _ _ _ _ _ (by omega)).trans activeLive) ⟨typed.1, rfl⟩ release
           (.cons older (Store.replace_same (Store.region_bound live) _ _) realized next
-            (outer.frame (fun r below => Store.replace_other _ _ _ _ _ (by omega))))
+            (outer.frame (fun r below => by unfold Store.regionKinds; rw [Store.replace_other _ _ _ _ _ (by omega)])))
   | clean live step =>
     cases safe with
     | cleaning found typed checked retained =>
@@ -104,7 +113,7 @@ theorem Safe.preservation {n : Nat} {program : Program n} {signature : Signature
       obtain ⟨⟨current, realized, remaining⟩, _⟩ :=
         OwnershipMir.Safe.step ⟨_, typed, checked⟩ Op.Checked.executed step
       exact .cleaning (Store.replace_same (Store.region_bound live) _ _) realized remaining
-        (retained.frame (fun r below => Store.replace_other _ _ _ _ _ (by omega)))
+        (retained.frame (fun r below => by unfold Store.regionKinds; rw [Store.replace_other _ _ _ _ _ (by omega)]))
   | retire empty register =>
     cases safe with
     | cleaning live typed checked retained =>
@@ -112,7 +121,7 @@ theorem Safe.preservation {n : Nat} {program : Program n} {signature : Signature
       | cons older callerLive resident next outer =>
         exact .body ((Store.retire_other _ _ _ (by omega)).trans callerLive)
           (by simpa [Store.retire, register] using resident) next
-          (outer.frame (fun r below => Store.retire_other _ _ _ (by omega)))
+          (outer.frame (fun r below => by unfold Store.regionKinds; rw [Store.retire_other _ _ _ (by omega)]))
 
 theorem Safe.progress {n : Nat} {program : Program n} {signature : Signature} {final : Context (n + 1)}
     {config : Configuration n} (safe : Safe program signature final config) :
@@ -165,5 +174,21 @@ theorem Safe.execution {n : Nat} {program : Program n} {signature : Signature} {
   induction run with
   | refl => exact safe
   | step head tail ih => exact ih (safe.preservation functions head)
+
+/-- Retained callers need exact resident typing, not unchanged payloads.
+This consumes the physical replacement proof and does not admit a temporary
+hole as an initialized caller value. -/
+theorem StackTyped.replaceLoan {n : Nat} {program : Program n} {signature : Signature}
+    {store : Store (n + 1) Atom} {ceiling : Nat} {stack : List (Frame n)}
+    {output final : Context (n + 1)} {cleanup : Code (n + 1) (Op (n + 1))}
+    (typed : StackTyped program signature store ceiling stack output cleanup final)
+    {loan : Loan (n + 1)} {slots : Region (n + 1) Atom} {lens : Lens Atom} {original value : Value}
+    (live : store.region loan.referent.region = some slots)
+    (focused : (loan.referent.place loan.target).find slots = some lens)
+    (resident : lens.selected = some original) (oldReady : original.ready) (newReady : value.ready)
+    (sameLayout : value.layout (Atom.kind signature) = original.layout (Atom.kind signature)) (temp : Cell Atom) :
+    StackTyped program signature (store.replaceLoan loan slots lens value temp) ceiling stack output cleanup final :=
+  typed.frame (fun region _ => store.replaceLoan_regionKinds live focused resident oldReady newReady sameLayout temp region)
+
 
 end OwnershipMir.Calls

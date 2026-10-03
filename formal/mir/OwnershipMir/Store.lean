@@ -39,6 +39,11 @@ namespace Store
 def region {n : Nat} {α : Type} (store : Store n α) (identity : Nat) : Option (Region n α) :=
   (store.regions[identity]?).join
 
+/-- A typing projection of the physical region, not a saved caller snapshot. -/
+def regionKinds {n : Nat} (store : Store n Atom) (signature : Signature) (identity : Nat) :
+    Option (Fin n → Cell AtomType) :=
+  (store.region identity).map (fun slots i => (slots i).map (Value.kind signature))
+
 def replace {n : Nat} {α : Type} (store : Store n α) (identity : Nat)
     (slots : Region n α) (temp : Cell α) : Store n α :=
   {store with regions := store.regions.set identity (some slots), temp := temp}

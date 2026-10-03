@@ -30,26 +30,6 @@ theorem focus_selected_declared {declarations : Declarations} (path : List Direc
           apply ih ?_ located
           intro tree same; cases same; exact nested
 
-/-- Clearing installs exactly the selected layout as a hole; filling preserves
-an existing layout. This is the one layout equation used for every ancestor. -/
-theorem focus_rebuild_layout (path : List Direction) (layout : Layout)
-    {cell : Cell AtomType} {lens : Lens AtomType} (found : focus path layout cell = some lens)
-    (replacement : Cell AtomType)
-    (fits : ∀ shape, lens.selected = some shape →
-      ((replacement.getD (.hole layout)).layout id) = shape.layout id) :
-    ∀ tree, cell = some tree → ((lens.rebuild replacement).getD (.hole layout)).layout id = tree.layout id := by
-  induction path generalizing cell lens with
-  | nil => cases Option.some.inj found; exact fits
-  | cons direction path ih =>
-    cases cell with
-    | none => cases direction <;> cases found
-    | some tree =>
-      cases direction <;> cases tree <;> simp only [focus] at found
-      all_goals try contradiction
-      all_goals obtain ⟨inside, located, rfl⟩ := Option.map_eq_some_iff.mp found
-      all_goals intro actual same; cases same
-      all_goals simp only [Option.getD_some, Tree.layout]
-      all_goals rw [ih located fits _ rfl]
 
 theorem focus_rebuild_declared {declarations : Declarations} (path : List Direction) (layout : Layout)
     {cell : Cell AtomType} {lens : Lens AtomType} (valid : Cell.Declared declarations id cell)
@@ -65,7 +45,7 @@ theorem focus_rebuild_declared {declarations : Declarations} (path : List Direct
     | cons direction path => cases direction <;> cases found
   | some tree =>
     intro result stored
-    have same := focus_rebuild_layout path layout found replacement fits tree rfl
+    have same := focus_rebuild_layout id path layout found replacement fits tree rfl
     rw [stored] at same
     exact (by simpa only [Option.getD_some] using same) ▸ valid tree rfl
 
