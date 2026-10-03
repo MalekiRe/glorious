@@ -489,6 +489,37 @@ theorem Op.Effect.no_new_atoms {n : Nat} {store : Store n Atom} {region : Nat}
   rw [afterZero, if_pos rfl] at positive
   omega
 
+theorem Op.Effect.active_before {n : Nat} {store : Store n Atom} {region : Nat}
+    {slots : Region n Atom} {op : Op n} {after : State n}
+    (effect : op.Effect ⟨slots, store.temp⟩ after) (live : store.region region = some slots)
+    {identity : Nat} (active : (store.replace region after.slots after.temp).Active identity) : store.Active identity := by
+  obtain ⟨handle, ⟨mode, target, member⟩, ancestor⟩ := active
+  exact ⟨handle, ⟨mode, target, effect.no_new_atoms live member⟩, ancestor.of_loans_eq
+    (before := store.replace region after.slots after.temp) (after := store) rfl⟩
+
+/-- A surviving capability keeps its permissions. Removed handles cannot be
+used merely because their immutable loan-table entries still exist. -/
+theorem Op.Effect.preserves_permission {n : Nat} {store : Store n Atom} {region : Nat}
+    {slots : Region n Atom} {op : Op n} {after : State n}
+    (effect : op.Effect ⟨slots, store.temp⟩ after) (live : store.region region = some slots)
+    {via : Option Nat} {mode : BorrowMode} {address : Address n}
+    (permission : store.Permitted via mode address)
+    (surviving : ∀ identity, via = some identity → (store.replace region after.slots after.temp).HasHandle identity) :
+    (store.replace region after.slots after.temp).Permitted via mode address := by
+  constructor
+  · cases via with
+    | none => trivial
+    | some identity =>
+      obtain ⟨loan, origin, _, within, allowed⟩ := permission.1
+      exact ⟨loan, origin, surviving identity rfl, within, allowed⟩
+  · intro identity loan origin active overlap
+    rcases permission.2 identity loan origin (effect.active_before live active) overlap with shared | ⟨parent, same, ancestor⟩
+    · exact Or.inl shared
+    · exact Or.inr ⟨parent, same, ancestor.of_loans_eq
+        (before := store) (after := store.replace region after.slots after.temp) rfl⟩
+
+
+
 
 theorem Op.Effect.borrow_preservation {n : Nat} {store : Store n Atom} {signature : Signature}
     {region : Nat} {slots : Region n Atom} {op : Op n} {after : State n}
@@ -500,9 +531,7 @@ theorem Op.Effect.borrow_preservation {n : Nat} {store : Store n Atom} {signatur
         (store.replace region after.slots after.temp).Permitted none mode address := by
   let next := store.replace region after.slots after.temp
   have ancestry := Store.ancestor_iff_of_loans_eq (before := store.replace region after.slots after.temp) (after := store) rfl
-  have active : ∀ id, next.Active id → store.Active id := by
-    rintro id ⟨handle, ⟨mode, target, member⟩, ancestor⟩
-    exact ⟨handle, ⟨mode, target, effect.no_new_atoms live member⟩, (ancestry _ _).mp ancestor⟩
+  have active : ∀ id, next.Active id → store.Active id := fun _ => effect.active_before live
   refine ⟨⟨valid.graph, ?_, ?_, ?_⟩, ?_⟩
   · intro id mode target member
     have oldMember := effect.no_new_atoms live member
@@ -523,11 +552,7 @@ theorem Op.Effect.borrow_preservation {n : Nat} {store : Store n Atom} {signatur
     dsimp only [next]
     omega
   · intro mode address authorized
-    refine ⟨trivial, ?_⟩
-    intro id loan origin remaining overlap
-    rcases authorized.2 id loan origin (active _ remaining) overlap with shared | ⟨parent, impossible, _⟩
-    · exact Or.inl shared
-    · cases impossible
+    exact effect.preserves_permission live authorized (fun _ impossible => by cases impossible)
 
 /-- Existing shape admission constructs the actual effect and its resource
 legality; the same pre-state owner permissions then preserve the complete
@@ -545,6 +570,56 @@ theorem Op.Checked.borrow_progress {n : Nat} {authority : Authority} {signature 
   obtain ⟨result, effect, realized, legal⟩ := checked.realize typed
   obtain ⟨preserved, permissions⟩ := effect.borrow_preservation legal.conservationAllowed permission live valid
   exact ⟨result, effect.exec, realized, preserved, permissions⟩
+
+
+/-- An admitted owner update cannot change any active loan's resident,
+including its initialization state. This is stronger than layout framing. -/
+theorem Store.LoanReady.owner_write {n : Nat} {store : Store n Atom} {region : Nat}
+    {place : Place n} {slots : Region n Atom} {lens : Lens Atom} {identity : Nat}
+    (ready : store.LoanReady identity) (active : store.Active identity)
+    (permission : store.Permitted none .unique ⟨region, place.root, place.path⟩)
+    (live : store.region region = some slots) (writing : place.find slots = some lens) (value temp : Cell Atom) :
+    (store.replace region (place.write slots lens value) temp).LoanReady identity := by
+  obtain ⟨loan, read, original, origin, queried, selected, initialized⟩ := ready
+  obtain ⟨after, found, unchanged⟩ := store.find_write_disjoint live writing queried
+    (permission.owner_disjoint origin active) value temp
+  exact ⟨loan, after, original, origin, found, unchanged.trans selected, initialized⟩
+
+theorem Op.Effect.preserves_loanReady {n : Nat} {store : Store n Atom} {region : Nat}
+    {slots : Region n Atom} {op : Op n} {after : State n}
+    (effect : op.Effect ⟨slots, store.temp⟩ after) (permission : op.OwnerPermitted store region)
+    (live : store.region region = some slots) {identity : Nat}
+    (ready : store.LoanReady identity) (active : store.Active identity) :
+    (store.replace region after.slots after.temp).LoanReady identity := by
+  have unchanged := congrArg (fun result : Store n Atom => result.regions) (Store.replace_self live)
+  have regions : ∀ temp, (store.replace region slots temp).regions = store.regions := by
+    intro temp
+    exact unchanged
+  have loans : ∀ temp, (store.replace region slots temp).loans = store.loans := fun _ => rfl
+  cases effect with
+  | take found selected extracted empty => exact ready.owner_write active permission live found _ _
+  | put found selected available => exact ready.owner_write active permission live found _ _
+  | copy found selected empty =>
+    simpa only [Store.LoanReady, Store.find, Store.region, regions, loans] using ready
+  | drop selected =>
+    simpa only [Store.LoanReady, Store.find, Store.region, regions, loans] using ready
+
+
+/-- Readiness of actual reference residents, including the authority their
+declared modes promise. This observes the same loan table and resident graph. -/
+def Value.ReferencesReady {n : Nat} (store : Store n Atom) (value : Value) : Prop :=
+  ∀ identity mode target, value.Contains (.reference identity mode target) →
+    store.LoanReady identity ∧ ∀ loan, store.loans[identity]? = some loan →
+      store.Permitted (some identity) mode loan.referent
+
+theorem Store.LoanReady.allocate {n : Nat} {store : Store n Atom} {identity : Nat}
+    (ready : store.LoanReady identity) (slots : Region n Atom) : (store.allocate slots).LoanReady identity := by
+  obtain ⟨loan, lens, value, origin, queried, selected, initialized⟩ := ready
+  obtain ⟨roots, live, focused⟩ := Option.bind_eq_some_iff.mp queried
+  refine ⟨loan, lens, value, origin, ?_, selected, initialized⟩
+  unfold Store.find
+  rw [Store.allocate_old (Store.region_bound live) slots, live]
+  exact focused
 
 
 end OwnershipMir

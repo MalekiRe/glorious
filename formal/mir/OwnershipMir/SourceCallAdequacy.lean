@@ -402,4 +402,106 @@ theorem cleanup_command_borrow_progress {n : Nat} {program : Program n} {signatu
   exact ⟨_, step, preserved, step.lower⟩
 
 
+/-- Arguments and results share the actual acquisition contract. Reference
+readiness and mode permissions are before-state obligations on the selected
+resident; the returned obligations are derived through the physical move. -/
+theorem AcquireChecked.borrow_progress {n : Nat} {signature : Signature}
+    {store : Store n Atom} {region : Nat} {slots : Region n Atom} {before after : Context n} {place : Place n}
+    (checked : AcquireChecked authority before place after)
+    (typed : (State.mk slots store.temp).Typed signature before) (live : store.region region = some slots)
+    (valid : store.BorrowInvariant signature) (permission : (Op.take place .whole).OwnerPermitted store region)
+    (references : ∀ lens value, place.find slots = some lens → lens.selected = some value → Value.ReferencesReady store value) :
+    ∃ result value, acquire place ⟨slots, store.temp⟩ = some result ∧ result.temp = some value ∧
+      result.Typed signature after ∧ value.ready ∧
+      (store.replace region result.slots result.temp).BorrowInvariant signature ∧
+      Value.ReferencesReady (store.replace region result.slots result.temp) value := by
+  obtain ⟨result, effect, realized, legal⟩ := checked.transfer.realize typed
+  have executed := effect.exec
+  have preserved := (effect.borrow_preservation legal.conservationAllowed permission live valid).1
+  cases effect with
+  | @take _ _ _ lens value moved found selected extracted empty =>
+    cases Option.some.inj extracted
+    have operation : (Op.take place .whole).Effect ⟨slots, store.temp⟩
+        ⟨place.write slots lens none, some value⟩ := .take found selected rfl empty
+    refine ⟨_, value, (acquire_eq _ _).trans executed, rfl, realized, ?_, preserved, ?_⟩
+    · have ready := checked.initialized (Value.kind signature value) realized.2.symm
+      simpa only [Value.kind, Tree.ready_map] using ready
+    · intro identity mode target member
+      have admitted := references lens value found selected identity mode target member
+      obtain ⟨whole, stored, inside⟩ := focus_contains found selected member
+      have handle : store.HasHandle identity :=
+        ⟨mode, target, Or.inr ⟨region, slots, place.root, whole, live, stored, inside⟩⟩
+      refine ⟨operation.preserves_loanReady permission live admitted.1 (Store.hasHandle_active handle), ?_⟩
+      intro loan origin
+      apply operation.preserves_permission live (admitted.2 loan origin)
+      intro id same
+      cases Option.some.inj same
+      exact ⟨mode, target, Or.inl ⟨value, rfl, member⟩⟩
+
+/-- Actual result acquisition preserves the initialization and permissions of
+returned references. Selection of permitted input/retained-owner origins and
+declared outlives constraints remains a separate source-contract obligation. -/
+theorem result_borrow_progress {n : Nat} {program : Program n} {signature : Signature}
+    {store : Store (n + 1) Atom} {active : Nat} {slots : Region (n + 1) Atom} {stack : List (Frame n)}
+    {place : Place (n + 1)} {next : Body n} {cleanup : Code (n + 1) (Command (n + 1))}
+    {before after : Context (n + 1)}
+    (checked : AcquireChecked authority before place after)
+    (typed : (State.mk slots store.temp).Typed signature before) (live : store.region active = some slots)
+    (valid : store.BorrowInvariant signature) (permission : (Op.take place .whole).OwnerPermitted store active)
+    (references : ∀ lens value, place.find slots = some lens → lens.selected = some value → Value.ReferencesReady store value) :
+    ∃ result value, Transition program ⟨.body (.act (.result place) next) cleanup, store, active, stack⟩ result ∧
+      result.store.temp = some value ∧ value.ready ∧ Value.ReferencesReady result.store value ∧
+      result.store.BorrowInvariant signature ∧
+      ∃ middle, Calls.Transition program.lower
+        (Configuration.lower ⟨.body (.act (.result place) next) cleanup, store, active, stack⟩) middle ∧
+        Run (Calls.Transition program.lower) middle result.lower := by
+  obtain ⟨result, value, executed, register, _, ready, preserved, admitted⟩ :=
+    checked.borrow_progress typed live valid permission references
+  have step : Transition program ⟨.body (.act (.result place) next) cleanup, store, active, stack⟩
+      ⟨.body next cleanup, store.replace active result.slots result.temp, active, stack⟩ :=
+    .operation live (.act executed)
+  exact ⟨_, value, step, register, ready, admitted, preserved, step.lower⟩
+
+
+/-- Source call entry consumes the same acquisition admission as source
+results, then physically installs the argument in the fresh callee region.
+Neither referent initialization nor callee reference permissions are assumed
+after that transfer. -/
+theorem argument_borrow_progress {n : Nat} {program : Program n} {signature : Signature}
+    {store : Store (n + 1) Atom} {active identity : Nat} {slots : Region (n + 1) Atom} {stack : List (Frame n)}
+    {argument destination : Place (n + 1)} {next : Body n} {cleanup : Code (n + 1) (Command (n + 1))}
+    {function : Function n} {before prepared : Context (n + 1)}
+    (resolved : program identity = some function)
+    (checked : AcquireChecked authority before argument prepared) (argumentType : prepared.temp = some function.input)
+    (typed : (State.mk slots store.temp).Typed signature before) (live : store.region active = some slots)
+    (valid : store.BorrowInvariant signature) (permission : (Op.take argument .whole).OwnerPermitted store active)
+    (references : ∀ lens value, argument.find slots = some lens → lens.selected = some value → Value.ReferencesReady store value) :
+    ∃ result value callee, Transition program ⟨.body (.act (.call identity argument destination) next) cleanup, store, active, stack⟩ result ∧
+      result.store.region result.active = some callee ∧ callee 0 = some value ∧
+      Value.kind signature value = function.input ∧ value.ready ∧ Value.ReferencesReady result.store value ∧
+      result.store.BorrowInvariant signature ∧
+      ∃ middle, Calls.Transition program.lower
+        (Configuration.lower ⟨.body (.act (.call identity argument destination) next) cleanup, store, active, stack⟩) middle ∧
+        Run (Calls.Transition program.lower) middle result.lower := by
+  obtain ⟨preparedState, value, acquired, register, preparedTyped, ready, preserved, admitted⟩ :=
+    checked.borrow_progress typed live valid permission references
+  have classified : Value.kind signature value = function.input := by
+    simpa only [register, Option.map_some, argumentType, Option.some.injEq] using preparedTyped.2
+  let staged := store.replace active preparedState.slots preparedState.temp
+  have stagedRegister : staged.temp = some value := register
+  have entered := Calls.enter_borrow_invariant preserved stagedRegister
+  have fresh : (staged.allocate (Calls.argumentSlots value)).region store.regions.length =
+      some (Calls.argumentSlots value) := by
+    have located := Store.allocate_fresh staged (Calls.argumentSlots value)
+    simpa only [staged, Store.replace, List.length_set] using located
+  have step := Transition.enter (program := program) (destination := destination) (next := next)
+    (cleanup := cleanup) (stack := stack) live resolved acquired register
+  refine ⟨_, value, Calls.argumentSlots value, step, fresh, rfl, classified, ready, ?_, entered.1, step.lower⟩
+  intro id mode target member
+  have source := admitted id mode target member
+  refine ⟨source.1.allocate _, ?_⟩
+  intro loan origin
+  exact (entered.2 (some id) mode loan.referent).mpr (source.2 loan origin)
+
+
 end OwnershipMir.SourceCalls

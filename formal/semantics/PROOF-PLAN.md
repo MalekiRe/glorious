@@ -390,6 +390,22 @@ fresh loan creation or derive permissions for subsequent source commands from
 shape-only program admission. The integrated 38-job gate and nine additional
 dependency inspections passed, using only standard Lean axioms.
 
+Actual source arguments and results now share reference-ready acquisition.
+`Value.ReferencesReady` observes initialization and the permissions promised by
+each resident reference mode through the existing loan table. Ordinary effects
+preserve active referent initialization and the permissions of surviving
+capabilities; removed handles cannot retain authority merely through immutable
+metadata. `AcquireChecked.borrow_progress` derives these facts after the actual
+move from before-state obligations on the selected resident. Source result
+progress consumes it directly; source argument progress additionally transfers
+the same value into the fresh callee argument slot and derives callee reference
+readiness, typing, and the borrow invariant. Both produce actual source steps
+and positive MIR executions. The integrated 38-job gate and five additional
+dependency inspections passed with only standard Lean axioms. Permitted return
+origins, declared outlives constraints, and derivation of these before-state
+obligations by whole-program source admission remain open; reference readiness
+alone is not a proof of the declared return-lifetime contract.
+
 
 ### Joint storage ownership
 
