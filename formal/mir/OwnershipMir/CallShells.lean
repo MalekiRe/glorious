@@ -111,7 +111,7 @@ theorem Safe.shell_execution {n : Nat} {program : Program n} {signature : Signat
 /-- The outer activation is an explicit caller boundary. Its final state keeps
 its declared output context; called activations must retire completely. -/
 def Function.start {n : Nat} (function : Function n) (argument : Value) : Configuration n :=
-  ⟨.body function.body function.cleanup, ⟨[some (argumentSlots argument)], none⟩, 0, []⟩
+  ⟨.body function.body function.cleanup, ⟨[some (argumentSlots argument)], none, []⟩, 0, []⟩
 
 theorem Function.start_safe {n : Nat} {program : Program n} {signature : Signature} {function : Function n}
     (functions : program.Checked) {identity : Nat} (selected : program identity = some function)

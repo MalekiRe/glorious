@@ -160,7 +160,7 @@ def Configuration.lower {n : Nat} (config : Configuration n) : Calls.Configurati
   ⟨config.control.lower, config.store, config.active, config.stack.map Frame.lower⟩
 
 def Function.start {n : Nat} (function : Function n) (argument : Value) : Configuration n :=
-  ⟨.body function.body function.cleanup, ⟨[some (Calls.argumentSlots argument)], none⟩, 0, []⟩
+  ⟨.body function.body function.cleanup, ⟨[some (Calls.argumentSlots argument)], none, []⟩, 0, []⟩
 
 @[simp] theorem Function.start_lower {n : Nat} (function : Function n) (argument : Value) :
     (function.start argument).lower = function.lower.start argument := rfl

@@ -6,10 +6,10 @@ def Configuration.mass {n : Nat} (config : Configuration n) (leaf : Atom → Nat
   config.store.mass leaf shell
 
 def Configuration.count {n : Nat} (config : Configuration n) (identity : ResourceIdentity) : Nat :=
-  config.mass (Atom.weight identity) (fun _ => 0)
+  config.store.count identity
 
 def Configuration.Unique {n : Nat} (config : Configuration n) : Prop :=
-  ∀ identity, config.count identity ≤ 1
+  config.store.Unique
 
 structure Preserves {n : Nat} (signature : Signature) (before after : Configuration n) : Prop where
   bounded : ∀ identity, after.count identity ≤ before.count identity

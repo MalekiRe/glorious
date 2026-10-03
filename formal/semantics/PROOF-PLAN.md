@@ -295,11 +295,32 @@ safety, exact return correspondence, and divergence equivalence; they use only
 the same standard axioms. The public ownership theorem now protects unique
 handle identity as well as owning resource identity.
 This completes the store and handle-representation cutovers, not borrowing.
-There is no loan-creation or dereference instruction yet. A handle carries an
-uninterpreted loan identity; the current typing theorem does not assert that
-its referent exists or that access is permitted. Loan-table interpretation,
-permission suspension, reborrowing, dereference, and lifetime-aware return and
-cleanup admission remain required parts of the requested integration.
+`Loans.lean` now interprets loan identities against immutable origins in the
+same physical store. `BorrowReady.sound` derives actual borrow/reborrow
+execution, initialized fresh handles, referent validity, compatible active
+loans, and global uniqueness from pre-state obligations. Reborrowing requires
+a resident parent handle; ancestry alone does not supply access authority.
+Shared/shared overlap is admitted. General exclusion theorems derive suspension
+of conflicting parent and owner access after issuance.
+
+`ReadLoanReady.sound` derives physical copying dereference through the existing
+focus, exact target layout and initialization, permission of the actual read,
+and preservation of reference validity, permissions, and every resource count.
+`Store.retire_reference_invalid` proves that retaining or returning a handle
+into a retired region violates reference validity. Existing activation runs
+preserve immutable loan origins, their graph, and ancestry; these results are
+consumed in the call-metadata module. The integrated 36-job build passed, and
+eight inspected theorem dependencies used only standard Lean axioms.
+
+These are physical operation contracts, not source-admitted borrowing safety.
+The source/MIR instruction grammar and body admission still need to produce
+borrow/read permission evidence and constrain every conflicting ordinary
+access. Lifetime-aware return and cleanup, permission restoration after last
+use, writes/moves through unique references, and their general source-to-MIR
+preservation/progress consumers remain open. Existing public program safety
+does not assert `Store.BorrowInvariant`; importing these contracts does not
+close that gap. No post-state validity or successful execution is assumed by
+the new physical-operation soundness theorems.
 
 
 ### Joint storage ownership

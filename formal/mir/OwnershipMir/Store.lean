@@ -4,11 +4,35 @@ namespace OwnershipMir
 
 abbrev Region (n : Nat) (α : Type) := Fin n → Cell α
 
+/-- Storage identity excludes type metadata; overlapping paths share storage. -/
+structure Address (n : Nat) where
+  region : Nat
+  root : Fin n
+  path : List Direction
+  deriving DecidableEq
+
+def Address.Within {n : Nat} (child parent : Address n) : Prop :=
+  child.region = parent.region ∧ child.root = parent.root ∧ parent.path.IsPrefix child.path
+
+def Address.Overlaps {n : Nat} (left right : Address n) : Prop :=
+  left.Within right ∨ right.Within left
+
+/-- Immutable loan origin. Liveness is interpreted from resident handles and
+parent dependencies, not maintained as a competing mutable reference count. -/
+structure Loan (n : Nat) where
+  referent : Address n
+  mode : BorrowMode
+  target : Layout
+  parent : Option Nat
+  deriving DecidableEq
+
+
 /-- Region identities are never reused. A retired region is absent, not an
 empty live region. Only the machine's one transfer register is outside regions. -/
 structure Store (n : Nat) (α : Type) where
   regions : List (Option (Region n α))
   temp : Cell α
+  loans : List (Loan n)
 
 namespace Store
 
@@ -17,13 +41,13 @@ def region {n : Nat} {α : Type} (store : Store n α) (identity : Nat) : Option 
 
 def replace {n : Nat} {α : Type} (store : Store n α) (identity : Nat)
     (slots : Region n α) (temp : Cell α) : Store n α :=
-  ⟨store.regions.set identity (some slots), temp⟩
+  {store with regions := store.regions.set identity (some slots), temp := temp}
 
 def allocate {n : Nat} {α : Type} (store : Store n α) (slots : Region n α) : Store n α :=
-  ⟨store.regions ++ [some slots], none⟩
+  {store with regions := store.regions ++ [some slots], temp := none}
 
 def retire {n : Nat} {α : Type} (store : Store n α) (identity : Nat) : Store n α :=
-  ⟨store.regions.set identity none, store.temp⟩
+  {store with regions := store.regions.set identity none}
 
 theorem region_bound {n : Nat} {α : Type} {store : Store n α} {identity : Nat} {slots : Region n α}
     (live : store.region identity = some slots) : identity < store.regions.length := by
@@ -68,6 +92,12 @@ def mass {n : Nat} {α : Type} (store : Store n α) (leaf : α → Nat) (shell :
   (store.regions.map (fun region => match region with
     | none => 0
     | some slots => total (fun i => cellMass leaf shell (slots i)))).sum + cellMass leaf shell store.temp
+
+def count {n : Nat} (store : Store n Atom) (identity : ResourceIdentity) : Nat :=
+  store.mass (Atom.weight identity) (fun _ => 0)
+
+def Unique {n : Nat} (store : Store n Atom) : Prop := ∀ identity, store.count identity ≤ 1
+
 
 private theorem sum_set {α : Type} (measure : α → Nat) (items : List α) (index : Nat)
     (old value : α) (found : items[index]? = some old) :
@@ -131,7 +161,7 @@ theorem replace_self {n : Nat} {α : Type} {store : Store n α} {identity : Nat}
       | zero => simp at found; subst head; rfl
       | succ index => exact congrArg (head :: ·) (ih index (by simpa using found))
   cases store with
-  | mk regions temp => exact congrArg (fun regions => Store.mk regions temp) (same regions identity live)
+  | mk regions temp loans => exact congrArg (fun regions => Store.mk regions temp loans) (same regions identity live)
 
 @[simp] theorem replace_replace {n : Nat} {α : Type} (store : Store n α) (identity : Nat)
     (first last : Region n α) (temp next : Cell α) :

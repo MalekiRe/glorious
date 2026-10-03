@@ -1,5 +1,5 @@
 import OwnershipMir.CleanupTrace
-import OwnershipMir.Store
+import OwnershipMir.Loans
 
 namespace OwnershipMir.Calls
 

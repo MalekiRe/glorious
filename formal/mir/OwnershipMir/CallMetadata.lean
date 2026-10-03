@@ -124,5 +124,29 @@ theorem Safe.declared_run {n : Nat} {program : Program n} {signature : Signature
   | refl => exact valid
   | step head tail ih => exact ih (safe.preservation functions head) (safe.declared_step valid head)
 
+/-- Existing activation transitions preserve immutable loan origins even while
+moving values, allocating regions, returning, and retiring empty storage. This
+is not reference-validity preservation: that additionally needs admission of
+all accesses and lifetime-safe cleanup. -/
+theorem Transition.loans {n : Nat} {program : Program n} {before after : Configuration n}
+    (step : Transition program before after) : after.store.loans = before.store.loans := by
+  cases step <;> rfl
+
+theorem Run.loans {n : Nat} {program : Program n} {before after : Configuration n}
+    (run : Run (Transition program) before after) : after.store.loans = before.store.loans := by
+  induction run with
+  | refl => rfl
+  | step head tail ih => exact ih.trans head.loans
+
+theorem Run.loan_graph {n : Nat} {program : Program n} {before after : Configuration n}
+    (run : Run (Transition program) before after) (graph : before.store.LoanGraph) : after.store.LoanGraph := by
+  simpa only [Store.LoanGraph, Run.loans run] using graph
+
+theorem Run.loan_ancestry {n : Nat} {program : Program n} {before after : Configuration n}
+    (run : Run (Transition program) before after) (parent child : Nat) :
+    after.store.Ancestor parent child ↔ before.store.Ancestor parent child :=
+  Store.ancestor_iff_of_loans_eq (Run.loans run) parent child
+
+
 end Calls
 end OwnershipMir
