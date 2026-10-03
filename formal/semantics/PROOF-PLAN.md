@@ -333,16 +333,28 @@ restoration follows from pre-state resident last-use evidence, not an assumed
 post-state permission. The integrated 36-job build and four additional axiom
 inspections passed; these proofs use only `propext` and `Quot.sound`.
 
+`LoanMutation` and `LoanFraming` now prove actual unique-reference extraction
+and restoration. Movement retains a declared hole even at a complete root.
+The general framing theorem derives preservation of every live referent from
+pre-state unique permission, immutable loan ancestry, and the existing physical
+conservation equation. It handles enclosing referents and disjoint fields; it
+does not blanket-ban shared overlap or assume post-state reference validity.
+Both progress theorems preserve the complete borrow invariant, all permissions,
+and every physical additive measure. Extraction also proves that initialized-loan
+admission fails until restoration; writing derives that admission from the
+actual installed initialized value. Exact move/write round-trip includes the
+entire store. The focused 11-job proof gate passed; four inspected dependencies
+use only standard Lean axioms (`propext`, `Classical.choice`, `Quot.sound`).
 
 These are physical operation contracts, not source-admitted borrowing safety.
 The source/MIR instruction grammar and body admission still need to produce
-borrow/read permission evidence and constrain every conflicting ordinary
-access. Lifetime-aware return and complete cleanup, source-derived last-use
-evidence, writes/moves through unique references, and their general source-to-MIR
-preservation/progress consumers remain open. Existing public program safety
-does not assert `Store.BorrowInvariant`; importing these contracts does not
-close that gap. No post-state validity or successful execution is assumed by
-the new physical-operation soundness theorems.
+borrow/read/move/write permission evidence and constrain every conflicting
+ordinary access. Lifetime-aware return and complete cleanup, source-derived
+last-use evidence, and their general source-to-MIR preservation/progress
+consumers remain open. Retained-caller typing must account for temporarily
+uninitialized borrowed storage; the existing shape-only frame typing is not
+that proof. Existing public program safety does not assert
+`Store.BorrowInvariant`; importing these contracts does not close that gap.
 
 
 ### Joint storage ownership
