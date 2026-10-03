@@ -175,4 +175,53 @@ theorem focus_rebuild_layout {α : Type} (kind : α → AtomType) (path : List D
       all_goals rw [ih located fits _ rfl]
 
 
+theorem focus_rebuild_present_nonempty {α : Type} {path : List Direction} {layout : Layout}
+    {cell : Cell α} {lens : Lens α} (found : focus path layout cell = some lens)
+    (nonempty : path ≠ []) (replacement : Cell α) : ∃ tree, lens.rebuild replacement = some tree := by
+  cases path with
+  | nil => exact False.elim (nonempty rfl)
+  | cons direction path =>
+    cases cell with
+    | none => cases direction <;> cases found
+    | some tree =>
+      cases direction <;> cases tree <;> simp only [focus] at found
+      all_goals try contradiction
+      all_goals obtain ⟨sub, focused, rfl⟩ := Option.map_eq_some_iff.mp found
+      all_goals exact ⟨_, rfl⟩
+
+/-- Nonoverlapping physical projections survive arbitrary replacement,
+including clearing a whole owner. No layout or initialization premise on the
+replacement is needed because the queried storage is not touched. -/
+theorem focus_disjoint {α : Type} {path query : List Direction} {layout queryLayout : Layout}
+    {cell : Cell α} {write read : Lens α}
+    (writing : focus path layout cell = some write) (reading : focus query queryLayout cell = some read)
+    (apart : ¬ path.IsPrefix query ∧ ¬ query.IsPrefix path) (replacement : Cell α) :
+    ∃ after, focus query queryLayout (write.rebuild replacement) = some after ∧ after.selected = read.selected := by
+  induction query generalizing path cell write read with
+  | nil => exact False.elim (apart.2 List.nil_prefix)
+  | cons direction query ih =>
+    cases path with
+    | nil => exact False.elim (apart.1 List.nil_prefix)
+    | cons step path =>
+      cases cell with
+      | none => cases step <;> cases writing
+      | some tree =>
+        cases step <;> cases direction <;> cases tree <;> simp only [focus] at writing reading
+        all_goals try contradiction
+        all_goals
+          obtain ⟨sub, focused, rfl⟩ := Option.map_eq_some_iff.mp writing
+          obtain ⟨subRead, queried, rfl⟩ := Option.map_eq_some_iff.mp reading
+        all_goals first
+          | (simp only [focus, queried, Option.map_some]; exact ⟨_, rfl, rfl⟩)
+          | (have below : ¬ path.IsPrefix query ∧ ¬ query.IsPrefix path :=
+               ⟨fun prefixProof => apart.1 ((List.prefix_cons_inj _).mpr prefixProof),
+                fun prefixProof => apart.2 ((List.prefix_cons_inj _).mpr prefixProof)⟩
+             have nonempty : path ≠ [] := by intro empty; subst path; exact below.1 List.nil_prefix
+             obtain ⟨changed, present⟩ := focus_rebuild_present_nonempty focused nonempty replacement
+             obtain ⟨after, located, selected⟩ := ih focused queried below
+             rw [present] at located
+             simp only [focus, present, Option.getD_some, located, Option.map_some]
+             exact ⟨_, rfl, selected⟩)
+
+
 end OwnershipMir

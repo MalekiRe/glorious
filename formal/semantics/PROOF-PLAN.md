@@ -346,14 +346,14 @@ actual installed initialized value. Exact move/write round-trip includes the
 entire store. The focused 11-job proof gate passed; four inspected dependencies
 use only standard Lean axioms (`propext`, `Classical.choice`, `Quot.sound`).
 
-These are physical operation contracts, not source-admitted borrowing safety.
-The source/MIR instruction grammar and body admission still need to produce
-borrow/read/move/write permission evidence and constrain every conflicting
-ordinary access. Lifetime-aware return and complete cleanup, source-derived
-last-use evidence, and their general source-to-MIR preservation/progress
-consumers remain open. Retained-caller typing must still account for temporarily
-uninitialized borrowed storage. Existing public program safety does not assert
-`Store.BorrowInvariant`; importing these contracts does not close that gap.
+Whole-program source-admitted borrowing safety is still open. The source/MIR
+instruction grammar and body admission must derive borrow/read/move/write
+permission evidence and ordinary owner permissions. Lifetime-aware return and
+complete cleanup, source-derived last-use evidence, and their general
+preservation/progress consumers remain open. Retained-caller typing must still
+account for temporarily uninitialized borrowed storage. Existing public program
+safety does not assert `Store.BorrowInvariant`; importing the physical contracts
+does not close that gap.
 
 Retained-frame framing now consumes equality of physical region typing rather
 than equality of resident values. Both `StackTyped.frame` and `ResumeTyped.frame`
@@ -365,6 +365,30 @@ unchanged-store assumption. The shared physical focus layout theorem now also
 serves nominal metadata, replacing the duplicate proof. The integrated 38-job
 gate passed. This does not admit intermediate holes into a fully initialized
 caller context or discharge the source borrowing-admission obligation.
+
+Ordinary operations now have a complete physical borrowing proof. The existing
+`Op.Effect` produces both referent framing and resident-atom support; no second
+alias analysis is added. Copy may duplicate shared handles, so the support
+proof uses preservation of zero atom measure rather than falsely assuming all
+counts decrease. `Op.Checked.borrow_progress` combines actual checker
+realization, resource legality, and pre-state `Op.OwnerPermitted` to derive
+execution, typing, the complete borrow invariant, and surviving owner
+permissions. Disjoint fields remain legal, including whole-root clears when no
+live referent overlaps. Actual call-body, cleanup, and result-handoff progress
+consume this proof. Ending an uninitialized handle is still a separate
+admission obligation; borrow-invariant preservation alone does not justify it.
+
+`Command.OwnerPermitted` states source move/copy/dispose access in the entry
+store. Ordered block progress transports permissions for pending instructions
+through each actual ordinary effect; no pending post-state readiness or
+successful run is assumed. `Block.borrow_prefix` and
+`Command.Checked.borrow_prefix` cover every physical internal prefix, including
+half-completed transfers. Source body and cleanup command progress produce
+actual source transitions and positive MIR executions with the same physical
+endpoint and borrow invariant. This ordinary-block theorem does not cover
+fresh loan creation or derive permissions for subsequent source commands from
+shape-only program admission. The integrated 38-job gate and nine additional
+dependency inspections passed, using only standard Lean axioms.
 
 
 ### Joint storage ownership

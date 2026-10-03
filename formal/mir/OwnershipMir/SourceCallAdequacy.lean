@@ -1,5 +1,126 @@
 import OwnershipMir.SourceCallLowering
 
+namespace OwnershipMir
+
+theorem Op.OwnerPermitted.transport {n : Nat} {before after : Store n Atom} {region : Nat} {op : Op n}
+    (preserved : ∀ mode address, before.Permitted none mode address → after.Permitted none mode address)
+    (permission : op.OwnerPermitted before region) : op.OwnerPermitted after region := by
+  cases op with
+  | take place mode => exact preserved _ _ permission
+  | put place => exact preserved _ _ permission
+  | copy place => exact preserved _ _ permission
+  | drop => trivial
+
+/-- All permissions are stated in the entry store. Each real effect transports
+those for pending instructions; pending post-state permission is not assumed.
+This rule is for ordinary blocks, which do not create fresh loans. -/
+theorem Block.borrow_progress {n : Nat} {authority : Authority} {signature : Signature}
+    {ops : List (Op n)} {before after : Context n} {store : Store n Atom} {region : Nat} {slots : Region n Atom}
+    (checked : Code.Checked (Op.Checked authority) before (sequence ops) after)
+    (typed : (State.mk slots store.temp).Typed signature before) (live : store.region region = some slots)
+    (valid : store.BorrowInvariant signature) (permissions : ∀ op ∈ ops, op.OwnerPermitted store region) :
+    ∃ result, Block.exec Op.exec ops ⟨slots, store.temp⟩ = some result ∧ result.Typed signature after ∧
+      (store.replace region result.slots result.temp).BorrowInvariant signature ∧
+      ∀ mode address, store.Permitted none mode address →
+        (store.replace region result.slots result.temp).Permitted none mode address := by
+  induction ops generalizing before store slots with
+  | nil =>
+    cases checked
+    refine ⟨⟨slots, store.temp⟩, rfl, typed, ?_, ?_⟩
+    · simpa only [Store.replace_self live] using valid
+    · intro mode address allowed; simpa only [Store.replace_self live] using allowed
+  | cons op rest ih =>
+    cases checked with
+    | act head tail =>
+      obtain ⟨middle, executed, realized, preserved, framed⟩ :=
+        head.borrow_progress typed live valid (permissions op (List.mem_cons_self))
+      have nextLive := Store.replace_same (Store.region_bound live) middle.slots middle.temp
+      obtain ⟨result, completed, resultTyped, resultValid, resultPermissions⟩ :=
+        ih tail realized nextLive preserved (fun pending member =>
+          (permissions pending (List.mem_cons_of_mem op member)).transport framed)
+      change Block.exec Op.exec rest middle = some result at completed
+      refine ⟨result, ?_, resultTyped, ?_, ?_⟩
+      · simpa only [Block.exec, executed, Option.bind_some] using completed
+      · simpa only [Store.replace_replace] using resultValid
+      · intro mode address allowed
+        simpa only [Store.replace_replace] using resultPermissions mode address (framed mode address allowed)
+
+def Command.OwnerPermitted {n : Nat} (store : Store n Atom) (region : Nat) : Command n → Prop
+  | .move _ source target =>
+      store.Permitted none .unique ⟨region, source.root, source.path⟩ ∧
+      store.Permitted none .unique ⟨region, target.root, target.path⟩
+  | .copy source target =>
+      store.Permitted none .shared ⟨region, source.root, source.path⟩ ∧
+      store.Permitted none .unique ⟨region, target.root, target.path⟩
+  | .dispose source => store.Permitted none .unique ⟨region, source.root, source.path⟩
+
+theorem Command.OwnerPermitted.block {n : Nat} {store : Store n Atom} {region : Nat} {command : Command n}
+    (permission : command.OwnerPermitted store region) : ∀ op ∈ command.block, op.OwnerPermitted store region := by
+  cases command <;> simpa [Command.block, Op.OwnerPermitted, Command.OwnerPermitted] using permission
+
+/-- Source command permission is sufficient for ordered physical progress,
+including same-aggregate transfers. The source destination is not resolved or
+assumed ready before the real source-clear transition. -/
+theorem Command.Checked.borrow_progress {n : Nat} {authority : Authority} {signature : Signature}
+    {command : Command n} {before after : Context n} {store : Store n Atom} {region : Nat} {slots : Region n Atom}
+    (checked : Command.Checked authority before command after)
+    (typed : (State.mk slots store.temp).Typed signature before) (live : store.region region = some slots)
+    (valid : store.BorrowInvariant signature) (permission : command.OwnerPermitted store region) :
+    ∃ result, command.exec ⟨slots, store.temp⟩ = some result ∧ result.Typed signature after ∧
+      (store.replace region result.slots result.temp).BorrowInvariant signature ∧
+      ∀ mode address, store.Permitted none mode address →
+        (store.replace region result.slots result.temp).Permitted none mode address := by
+  have compiled := checked.lower (.halt)
+  obtain ⟨result, executed, realized, preserved, permissions⟩ :=
+    Block.borrow_progress compiled typed live valid permission.block
+  exact ⟨result, (command.exec_eq _).trans executed, realized, preserved, permissions⟩
+
+/-- Every actual internal prefix preserves borrowing, including the transfer
+register between extraction and installation. This is not only an endpoint
+simulation theorem. -/
+theorem Block.borrow_prefix {n : Nat} {authority : Authority} {signature : Signature}
+    {ops : List (Op n)} {before after : Context n} {store : Store n Atom} {region : Nat} {slots : Region n Atom}
+    (checked : Code.Checked (Op.Checked authority) before (sequence ops) after)
+    (typed : (State.mk slots store.temp).Typed signature before) (live : store.region region = some slots)
+    (valid : store.BorrowInvariant signature) (permissions : ∀ op ∈ ops, op.OwnerPermitted store region)
+    {result : Configuration n (Op n)}
+    (run : Run (Step Op.exec) ⟨sequence ops, ⟨slots, store.temp⟩⟩ result) :
+    (store.replace region result.state.slots result.state.temp).BorrowInvariant signature := by
+  induction ops generalizing before store slots with
+  | nil =>
+    cases run with
+    | refl => simpa only [Store.replace_self live] using valid
+    | step head tail => cases head
+  | cons op rest ih =>
+    cases run with
+    | refl => simpa only [Store.replace_self live] using valid
+    | step head runTail =>
+      cases head with
+      | act executed =>
+        cases checked with
+        | act admitted checkedTail =>
+          obtain ⟨effect, realized, legal⟩ := admitted.effect typed executed
+          obtain ⟨preserved, framed⟩ := effect.borrow_preservation legal.conservationAllowed
+            (permissions op List.mem_cons_self) live valid
+          have remaining := ih checkedTail realized (Store.replace_same (Store.region_bound live) _ _) preserved
+            (fun pending member => (permissions pending (List.mem_cons_of_mem op member)).transport framed) runTail
+          simpa only [Store.replace_replace] using remaining
+
+theorem Command.Checked.borrow_prefix {n : Nat} {authority : Authority} {signature : Signature}
+    {command : Command n} {before after : Context n} {store : Store n Atom} {region : Nat} {slots : Region n Atom}
+    (checked : Command.Checked authority before command after)
+    (typed : (State.mk slots store.temp).Typed signature before) (live : store.region region = some slots)
+    (valid : store.BorrowInvariant signature) (permission : command.OwnerPermitted store region)
+    {result : Configuration n (Op n)}
+    (run : Run (Step Op.exec) ⟨sequence command.block, ⟨slots, store.temp⟩⟩ result) :
+    (store.replace region result.state.slots result.state.temp).BorrowInvariant signature :=
+  Block.borrow_prefix (checked.lower .halt) typed live valid permission.block run
+
+
+
+end OwnershipMir
+
+
 namespace OwnershipMir.SourceCalls
 variable {module : Module} {authority : Authority}
 
@@ -240,6 +361,45 @@ theorem retirement_borrow_safe {n : Nat} {program : Program n} {signature : Sign
   refine ⟨⟨.body frame.next frame.cleanup, store.retire active, frame.region, stack⟩,
     .retire empty register, ?_, valid.retire_empty empty, rfl, rfl, store.retire_empty_permissions empty⟩
   exact Calls.Transition.retire empty register
+
+
+/-- Source atomic command progress and its positive MIR execution share the
+same physical endpoint. Permission evidence concerns the source entry store;
+it is transported through the actual internal block by borrow_progress. -/
+theorem command_borrow_progress {n : Nat} {program : Program n} {signature : Signature}
+    {store : Store (n + 1) Atom} {active : Nat} {slots : Region (n + 1) Atom} {stack : List (Frame n)}
+    {command : Command (n + 1)} {next : Body n} {cleanup : Code (n + 1) (Command (n + 1))}
+    {before after : Context (n + 1)}
+    (checked : Command.Checked authority before command after)
+    (typed : (State.mk slots store.temp).Typed signature before) (live : store.region active = some slots)
+    (valid : store.BorrowInvariant signature) (permission : command.OwnerPermitted store active) :
+    ∃ result, Transition program ⟨.body (.act (.command command) next) cleanup, store, active, stack⟩ result ∧
+      result.store.BorrowInvariant signature ∧
+      ∃ middle, Calls.Transition program.lower
+        (Configuration.lower ⟨.body (.act (.command command) next) cleanup, store, active, stack⟩) middle ∧
+        Run (Calls.Transition program.lower) middle result.lower := by
+  obtain ⟨result, executed, _, preserved, _⟩ := checked.borrow_progress typed live valid permission
+  have step : Transition program ⟨.body (.act (.command command) next) cleanup, store, active, stack⟩
+      ⟨.body next cleanup, store.replace active result.slots result.temp, active, stack⟩ :=
+    .operation live (.act executed)
+  exact ⟨_, step, preserved, step.lower⟩
+
+theorem cleanup_command_borrow_progress {n : Nat} {program : Program n} {signature : Signature}
+    {store : Store (n + 1) Atom} {active : Nat} {slots : Region (n + 1) Atom} {stack : List (Frame n)}
+    {command : Command (n + 1)} {next : Code (n + 1) (Command (n + 1))} {before after : Context (n + 1)}
+    (checked : Command.Checked authority before command after)
+    (typed : (State.mk slots store.temp).Typed signature before) (live : store.region active = some slots)
+    (valid : store.BorrowInvariant signature) (permission : command.OwnerPermitted store active) :
+    ∃ result, Transition program ⟨.cleaning (.act command next), store, active, stack⟩ result ∧
+      result.store.BorrowInvariant signature ∧
+      ∃ middle, Calls.Transition program.lower
+        (Configuration.lower ⟨.cleaning (.act command next), store, active, stack⟩) middle ∧
+        Run (Calls.Transition program.lower) middle result.lower := by
+  obtain ⟨result, executed, _, preserved, _⟩ := checked.borrow_progress typed live valid permission
+  have step : Transition program ⟨.cleaning (.act command next), store, active, stack⟩
+      ⟨.cleaning next, store.replace active result.slots result.temp, active, stack⟩ :=
+    .clean live (.act executed)
+  exact ⟨_, step, preserved, step.lower⟩
 
 
 end OwnershipMir.SourceCalls

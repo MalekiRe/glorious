@@ -186,4 +186,82 @@ theorem release_handle_borrow_safe {n : Nat} {program : Program n} {signature : 
   exact .clean live (.act (op := Op.drop) (after := State.mk slots none) (by simp [Op.exec, register]))
 
 
+/-- Ordinary body instructions consume pre-state owner permission and the
+existing checker witness. No completed transition or post-state invariant is
+an admission premise. This does not infer permission from shape typing. -/
+theorem Safe.operation_borrow_progress {n : Nat} {program : Program n} {signature : Signature}
+    {final : Context (n + 1)} {store : Store (n + 1) Atom} {active : Nat} {stack : List (Frame n)}
+    {op : Op (n + 1)} {next : Body n} {cleanup : Code (n + 1) (Op (n + 1))}
+    (functions : program.Checked)
+    (safe : Safe program signature final ⟨.body (.act (.operation op) next) cleanup, store, active, stack⟩)
+    (valid : store.BorrowInvariant signature) (permission : op.OwnerPermitted store active) :
+    ∃ after, Transition program ⟨.body (.act (.operation op) next) cleanup, store, active, stack⟩ after ∧
+      Safe program signature final after ∧ after.store.BorrowInvariant signature ∧
+      ∀ mode address, store.Permitted none mode address → after.store.Permitted none mode address := by
+  have original := safe
+  cases safe with
+  | body live typed checked retained =>
+    cases checked with
+    | act head tail =>
+      cases head with
+      | operation admitted =>
+        obtain ⟨result, executed, _, preserved, permissions⟩ := admitted.borrow_progress typed live valid permission
+        have step : Transition program ⟨.body (.act (.operation op) next) cleanup, store, active, stack⟩
+            ⟨.body next cleanup, store.replace active result.slots result.temp, active, stack⟩ :=
+          .operation live (.act executed)
+        exact ⟨_, step, original.preservation functions step, preserved, permissions⟩
+
+/-- Cleanup uses the same owner-access producer as ordinary execution. Handle
+release initialization is an additional obligation, as in the existing
+release_handle_borrow_safe theorem; borrow-invariant preservation alone does
+not justify ending an uninitialized loan. -/
+theorem Safe.cleanup_borrow_progress {n : Nat} {program : Program n} {signature : Signature}
+    {final : Context (n + 1)} {store : Store (n + 1) Atom} {active : Nat} {stack : List (Frame n)}
+    {op : Op (n + 1)} {next : Code (n + 1) (Op (n + 1))}
+    (functions : program.Checked)
+    (safe : Safe program signature final ⟨.cleaning (.act op next), store, active, stack⟩)
+    (valid : store.BorrowInvariant signature) (permission : op.OwnerPermitted store active) :
+    ∃ after, Transition program ⟨.cleaning (.act op next), store, active, stack⟩ after ∧
+      Safe program signature final after ∧ after.store.BorrowInvariant signature ∧
+      ∀ mode address, store.Permitted none mode address → after.store.Permitted none mode address := by
+  have original := safe
+  cases safe with
+  | cleaning live typed checked retained =>
+    cases checked with
+    | act admitted tail =>
+      obtain ⟨result, executed, _, preserved, permissions⟩ := admitted.borrow_progress typed live valid permission
+      have step : Transition program ⟨.cleaning (.act op next), store, active, stack⟩
+          ⟨.cleaning next, store.replace active result.slots result.temp, active, stack⟩ :=
+        .clean live (.act executed)
+      exact ⟨_, step, original.preservation functions step, preserved, permissions⟩
+
+
+/-- Returning a result constructs its actual installation in caller storage.
+The same owner permission excludes overwriting a live referent, including one
+reachable through a returned reference. No successful handoff is assumed. -/
+theorem Safe.handoff_borrow_progress {n : Nat} {program : Program n} {signature : Signature}
+    {final : Context (n + 1)} {store : Store (n + 1) Atom} {active : Nat} {stack : List (Frame n)}
+    {frame : Frame n} {cleanup : Code (n + 1) (Op (n + 1))}
+    (functions : program.Checked)
+    (safe : Safe program signature final ⟨.body .halt cleanup, store, active, frame :: stack⟩)
+    (valid : store.BorrowInvariant signature)
+    (permission : (Op.put frame.destination).OwnerPermitted store frame.region) :
+    ∃ after, Transition program ⟨.body .halt cleanup, store, active, frame :: stack⟩ after ∧
+      Safe program signature final after ∧ after.store.BorrowInvariant signature ∧
+      ∀ mode address, store.Permitted none mode address → after.store.Permitted none mode address := by
+  have original := safe
+  cases safe with
+  | body live typed checked retained =>
+    cases checked
+    cases retained with
+    | cons older callerLive resident returned put next outer release =>
+      obtain ⟨result, installed, _, preserved, permissions⟩ :=
+        put.borrow_progress ⟨resident, typed.2.trans returned⟩ callerLive valid permission
+      cases Op.effect_of_exec installed with
+      | put found register available =>
+        have step := Transition.handoff (program := program) (active := active) (cleanup := cleanup)
+          (stack := stack) callerLive installed
+        exact ⟨_, step, original.preservation functions step, preserved, permissions⟩
+
+
 end OwnershipMir.Calls

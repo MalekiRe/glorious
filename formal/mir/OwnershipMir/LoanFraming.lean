@@ -331,4 +331,220 @@ theorem Store.replaceLoan_regionKinds {n : Nat} {store : Store n Atom} {signatur
     rw [Store.replace_other _ _ _ _ _ sameRegion]
 
 
+theorem Store.Permitted.owner_disjoint {n : Nat} {store : Store n Atom} {address : Address n}
+    (permission : store.Permitted none .unique address) {identity : Nat} {loan : Loan n}
+    (origin : store.loans[identity]? = some loan) (active : store.Active identity) :
+    ¬ address.Overlaps loan.referent := by
+  intro overlap
+  rcases permission.2 identity loan origin active overlap with shared | ⟨parent, impossible, _⟩
+  · cases shared.1
+  · cases impossible
+
+theorem Store.find_write_disjoint {n : Nat} {store : Store n Atom} {region : Nat}
+    {place : Place n} {slots : Region n Atom} {write read : Lens Atom} {address : Address n} {layout : Layout}
+    (live : store.region region = some slots) (writing : place.find slots = some write)
+    (reading : store.find address layout = some read)
+    (apart : ¬ (Address.mk region place.root place.path).Overlaps address) (value temp : Cell Atom) :
+    ∃ after, (store.replace region (place.write slots write value) temp).find address layout = some after ∧
+      after.selected = read.selected := by
+  obtain ⟨roots, originalLive, queried⟩ := Option.bind_eq_some_iff.mp reading
+  by_cases sameRegion : address.region = region
+  · have sameRoots := Option.some.inj ((sameRegion ▸ originalLive).symm.trans live)
+    subst roots
+    by_cases sameRoot : address.root = place.root
+    · have paths : ¬ place.path.IsPrefix address.path ∧ ¬ address.path.IsPrefix place.path :=
+        ⟨fun nested => apart (Or.inr ⟨sameRegion, sameRoot, nested⟩),
+         fun nested => apart (Or.inl ⟨sameRegion.symm, sameRoot.symm, nested⟩)⟩
+      have focused : focus address.path layout (slots place.root) = some read := by
+        simpa only [Place.find, Address.place, sameRoot] using queried
+      obtain ⟨after, found, selected⟩ := focus_disjoint writing focused paths value
+      refine ⟨after, ?_, selected⟩
+      unfold Store.find
+      rw [sameRegion, Store.replace_same (Store.region_bound live)]
+      simpa [Place.find, Place.write, Address.place, sameRoot] using found
+    · refine ⟨read, ?_, rfl⟩
+      unfold Store.find
+      rw [sameRegion, Store.replace_same (Store.region_bound live)]
+      simpa [Place.find, Place.write, Address.place, update, sameRoot] using queried
+  · refine ⟨read, ?_, rfl⟩
+    unfold Store.find
+    rw [Store.replace_other _ _ _ _ _ sameRegion, originalLive]
+    exact queried
+
+/-- One owner-access permission frames live loans across actual take/put
+updates, including whole-root removal. It permits disjoint borrowed fields
+rather than banning all loans in the updated root. -/
+theorem Store.Referent.owner_write {n : Nat} {store : Store n Atom} {signature : Signature}
+    {region : Nat} {place : Place n} {slots : Region n Atom} {lens : Lens Atom}
+    {identity : Nat} {loan : Loan n} (referent : store.Referent signature loan)
+    (permission : store.Permitted none .unique ⟨region, place.root, place.path⟩)
+    (origin : store.loans[identity]? = some loan) (active : store.Active identity)
+    (live : store.region region = some slots) (writing : place.find slots = some lens) (value temp : Cell Atom) :
+    (store.replace region (place.write slots lens value) temp).Referent signature loan := by
+  obtain ⟨read, original, queried, selected, typed⟩ := referent
+  obtain ⟨after, found, unchanged⟩ := store.find_write_disjoint live writing queried
+    (permission.owner_disjoint origin active) value temp
+  exact ⟨after, original, found, unchanged.trans selected, typed⟩
+
+/-- Ordinary owner accesses use the same pre-state permission relation as
+borrowing and dereference. This is not yet derived by shape-only admission. -/
+def Op.OwnerPermitted {n : Nat} (store : Store n Atom) (region : Nat) : Op n → Prop
+  | .take place _ | .put place => store.Permitted none .unique ⟨region, place.root, place.path⟩
+  | .copy place => store.Permitted none .shared ⟨region, place.root, place.path⟩
+  | .drop => True
+
+theorem Op.Effect.preserves_referent {n : Nat} {store : Store n Atom} {signature : Signature}
+    {region : Nat} {slots : Region n Atom} {op : Op n} {after : State n}
+    (effect : op.Effect ⟨slots, store.temp⟩ after) (permission : op.OwnerPermitted store region)
+    (live : store.region region = some slots) {identity : Nat} {loan : Loan n}
+    (origin : store.loans[identity]? = some loan) (active : store.Active identity)
+    (referent : store.Referent signature loan) :
+    (store.replace region after.slots after.temp).Referent signature loan := by
+  have unchanged := congrArg (fun result : Store n Atom => result.regions) (Store.replace_self live)
+  have regions : ∀ temp, (store.replace region slots temp).regions = store.regions := by
+    intro temp
+    exact unchanged
+  cases effect with
+  | take found selected extracted empty => exact referent.owner_write permission origin active live found _ _
+  | put found selected available => exact referent.owner_write permission origin active live found _ _
+  | copy found selected empty =>
+    simpa only [Store.Referent, Store.find, Store.region, regions] using referent
+  | drop selected =>
+    simpa only [Store.Referent, Store.find, Store.region, regions] using referent
+
+
+theorem Extract.atom_mass {mode : Extract} {value result : Value}
+    (executed : mode.apply value = some result) (leaf : Atom → Nat) :
+    result.mass leaf (fun _ => 0) = value.mass leaf (fun _ => 0) := by
+  cases mode with
+  | whole => cases Option.some.inj executed; rfl
+  | deconstruct =>
+    cases value <;> simp only [Extract.apply, Option.some.injEq] at executed
+    all_goals try contradiction
+    subst result
+    simp [Tree.mass]
+
+/-- Actual ordinary effects cannot manufacture new resident atoms. Copying
+may duplicate an existing shared handle, so this is zero preservation, not a
+false universal nonincrease claim. -/
+theorem Op.Effect.zero_atom_mass {n : Nat} {store : Store n Atom} {region : Nat}
+    {slots : Region n Atom} {op : Op n} {after : State n}
+    (effect : op.Effect ⟨slots, store.temp⟩ after) (live : store.region region = some slots)
+    (leaf : Atom → Nat) (zero : store.mass leaf (fun _ => 0) = 0) :
+    (store.replace region after.slots after.temp).mass leaf (fun _ => 0) = 0 := by
+  have across := Store.replace_mass_state live after leaf (fun _ => 0)
+  rw [zero] at across
+  cases effect with
+  | @take _ place mode lens value result found selected extracted empty =>
+    dsimp only at *
+    have within := place.mass_write ⟨slots, store.temp⟩ lens found none (some result) leaf (fun _ => 0)
+    have same := Extract.atom_mass extracted leaf
+    dsimp only at within
+    simp only [selected, empty, cellMass] at within
+    rw [empty] at across
+    omega
+  | @put _ place lens value found resident available =>
+    dsimp only at *
+    have within := place.mass_write ⟨slots, store.temp⟩ lens found (some value) none leaf (fun _ => 0)
+    have vacant := vacant_mass_zero leaf (fun _ => 0) available
+    dsimp only at within
+    dsimp only [cellMass] at vacant
+    simp only [resident, cellMass] at within
+    rw [resident] at across
+    omega
+  | @copy _ place lens value found selected empty =>
+    dsimp only at *
+    have copied : value.mass leaf (fun _ => 0) = 0 := by
+      apply Tree.mass_zero_of_atoms
+      intro atom member
+      obtain ⟨whole, stored, inside⟩ := focus_contains found selected member
+      have contained : store.Contains atom := Or.inr ⟨region, slots, place.root, whole, live, stored, inside⟩
+      have bound := contained.mass_le leaf (fun _ => 0)
+      omega
+    have same : (State.mk slots (some value)).mass leaf (fun _ => 0) =
+        (State.mk slots store.temp).mass leaf (fun _ => 0) := by simp [State.mass, empty, cellMass, copied]
+    omega
+  | drop resident =>
+    dsimp only at *
+    have lower : (State.mk slots none).mass leaf (fun _ => 0) ≤
+        (State.mk slots store.temp).mass leaf (fun _ => 0) := by simp [State.mass, cellMass]
+    omega
+
+theorem Op.Effect.no_new_atoms {n : Nat} {store : Store n Atom} {region : Nat}
+    {slots : Region n Atom} {op : Op n} {after : State n}
+    (effect : op.Effect ⟨slots, store.temp⟩ after) (live : store.region region = some slots)
+    {atom : Atom} (present : (store.replace region after.slots after.temp).Contains atom) : store.Contains atom := by
+  classical
+  by_cases member : store.Contains atom
+  · exact member
+  apply False.elim
+  have zero : store.mass (fun item => if item = atom then 1 else 0) (fun _ => 0) = 0 := by
+    apply Store.mass_zero_of_atoms
+    intro item contained
+    by_cases same : item = atom
+    · subst item; exact False.elim (member contained)
+    · exact if_neg same
+  have afterZero := effect.zero_atom_mass live _ zero
+  have positive := present.mass_le (fun item => if item = atom then 1 else 0) (fun _ => 0)
+  rw [afterZero, if_pos rfl] at positive
+  omega
+
+
+theorem Op.Effect.borrow_preservation {n : Nat} {store : Store n Atom} {signature : Signature}
+    {region : Nat} {slots : Region n Atom} {op : Op n} {after : State n}
+    (effect : op.Effect ⟨slots, store.temp⟩ after) (allowed : effect.ConservationAllowed signature)
+    (permission : op.OwnerPermitted store region) (live : store.region region = some slots)
+    (valid : store.BorrowInvariant signature) :
+    (store.replace region after.slots after.temp).BorrowInvariant signature ∧
+      ∀ mode address, store.Permitted none mode address →
+        (store.replace region after.slots after.temp).Permitted none mode address := by
+  let next := store.replace region after.slots after.temp
+  have ancestry := Store.ancestor_iff_of_loans_eq (before := store.replace region after.slots after.temp) (after := store) rfl
+  have active : ∀ id, next.Active id → store.Active id := by
+    rintro id ⟨handle, ⟨mode, target, member⟩, ancestor⟩
+    exact ⟨handle, ⟨mode, target, effect.no_new_atoms live member⟩, (ancestry _ _).mp ancestor⟩
+  refine ⟨⟨valid.graph, ?_, ?_, ?_⟩, ?_⟩
+  · intro id mode target member
+    have oldMember := effect.no_new_atoms live member
+    obtain ⟨loan, origin, modeEq, targetEq, referent⟩ := valid.references id mode target oldMember
+    exact ⟨loan, origin, modeEq, targetEq, effect.preserves_referent permission live origin
+      (Store.hasHandle_active ⟨mode, target, oldMember⟩) referent⟩
+  · intro first left second right leftFound leftActive rightFound rightActive overlap
+    simpa only [ancestry] using valid.compatible first left second right leftFound (active _ leftActive)
+      rightFound (active _ rightActive) overlap
+  · intro resource
+    have balance := Store.replace_mass_state live after (Atom.weight resource) (fun _ => 0)
+    have bound := (effect.conserves allowed).bounded resource
+    have unique := valid.unique resource
+    change after.mass (Atom.weight resource) (fun _ => 0) ≤
+      (State.mk slots store.temp).mass (Atom.weight resource) (fun _ => 0) at bound
+    change store.mass (Atom.weight resource) (fun _ => 0) ≤ 1 at unique
+    change next.mass (Atom.weight resource) (fun _ => 0) ≤ 1
+    dsimp only [next]
+    omega
+  · intro mode address authorized
+    refine ⟨trivial, ?_⟩
+    intro id loan origin remaining overlap
+    rcases authorized.2 id loan origin (active _ remaining) overlap with shared | ⟨parent, impossible, _⟩
+    · exact Or.inl shared
+    · cases impossible
+
+/-- Existing shape admission constructs the actual effect and its resource
+legality; the same pre-state owner permissions then preserve the complete
+physical borrow invariant. Deriving these permissions from source remains a
+separate obligation, not a post-state assumption in this theorem. -/
+theorem Op.Checked.borrow_progress {n : Nat} {authority : Authority} {signature : Signature}
+    {store : Store n Atom} {region : Nat} {slots : Region n Atom} {before after : Context n} {op : Op n}
+    (checked : Op.Checked authority before op after) (typed : (State.mk slots store.temp).Typed signature before)
+    (live : store.region region = some slots) (valid : store.BorrowInvariant signature)
+    (permission : op.OwnerPermitted store region) :
+    ∃ result, op.exec ⟨slots, store.temp⟩ = some result ∧ result.Typed signature after ∧
+      (store.replace region result.slots result.temp).BorrowInvariant signature ∧
+      ∀ mode address, store.Permitted none mode address →
+        (store.replace region result.slots result.temp).Permitted none mode address := by
+  obtain ⟨result, effect, realized, legal⟩ := checked.realize typed
+  obtain ⟨preserved, permissions⟩ := effect.borrow_preservation legal.conservationAllowed permission live valid
+  exact ⟨result, effect.exec, realized, preserved, permissions⟩
+
+
 end OwnershipMir
