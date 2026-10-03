@@ -1,0 +1,102 @@
+name: Materialize consolidated specifications
+
+on:
+  push:
+    branches:
+      - spec/consolidate-glorious-language-and-stdlib
+
+permissions:
+  contents: write
+
+jobs:
+  materialize:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Materialize specifications and remove superseded drafts
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f .spec-materialize/ready || exit 0
+
+          cat .spec-materialize/language/*.part | tr -d '\r\n' | base64 --decode | bzip2 --decompress > glorious-language-specification.md
+          cat .spec-materialize/stdlib/*.part | tr -d '\r\n' | base64 --decode | bzip2 --decompress > glorious-standard-library-specification.md
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import os
+          import re
+
+          replacements = {
+              'glorious-branded-environment-core-spec.md': 'glorious-language-specification.md',
+              'docs/control-kernel.md': 'glorious-standard-library-specification.md',
+              'docs/conversions.md': 'glorious-standard-library-specification.md',
+              'docs/default-moves-and-closure-captures.md': 'glorious-language-specification.md',
+              'docs/effect-syntax-redesign.md': 'glorious-language-specification.md',
+              'docs/new-stdlib.md': 'glorious-standard-library-specification.md',
+              'docs/optional-label-unification.md': 'glorious-language-specification.md',
+              'docs/std-lib.md': 'glorious-standard-library-specification.md',
+          }
+
+          link = re.compile(r'\(([^)\s]+?\.md)(?:#[^)]*)?\)')
+          root = Path.cwd()
+          excluded = {
+              root / 'glorious-language-specification.md',
+              root / 'glorious-standard-library-specification.md',
+          }
+
+          for path in root.rglob('*.md'):
+              if '.git' in path.parts or path in excluded:
+                  continue
+              original = path.read_text(encoding='utf-8')
+
+              def rewrite(match):
+                  target = match.group(1)
+                  if '://' in target or target.startswith('mailto:'):
+                      return match.group(0)
+                  resolved = (path.parent / target).resolve()
+                  try:
+                      repo_path = resolved.relative_to(root).as_posix()
+                  except ValueError:
+                      return match.group(0)
+                  replacement = replacements.get(repo_path)
+                  if replacement is None:
+                      return match.group(0)
+                  relative = os.path.relpath(root / replacement, path.parent).replace(os.sep, '/')
+                  return f'({relative})'
+
+              updated = link.sub(rewrite, original)
+              if path.name == 'README.md' and path.parent == root:
+                  updated = updated.replace(
+                      '# Grandiose\n\nGrandiose is an experimental systems language',
+                      '# Glorious and Grandiose\n\nGlorious is an experimental systems language',
+                      1,
+                  )
+                  updated = updated.replace(
+                      'bytecode. It aims to make resource usage',
+                      'bytecode. Grandiose is its compiler and toolchain. It aims to make resource usage',
+                      1,
+                  )
+              if updated != original:
+                  path.write_text(updated, encoding='utf-8')
+          PY
+
+          rm -f \
+            glorious-branded-environment-core-spec.md \
+            docs/control-kernel.md \
+            docs/conversions.md \
+            docs/default-moves-and-closure-captures.md \
+            docs/effect-syntax-redesign.md \
+            docs/new-stdlib.md \
+            docs/optional-label-unification.md \
+            docs/std-lib.md
+
+          rm -rf .spec-materialize
+
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add -A
+          git diff --cached --check
+          git commit -m "docs: consolidate Glorious language and standard library specs"
+          git push
