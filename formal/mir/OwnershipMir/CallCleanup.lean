@@ -137,4 +137,18 @@ theorem handoff_frame {n : Nat} {caller slots : Region (n + 1) Atom} {temp : Cel
     (slot : Fin (n + 1)) (outside : slot ≠ frame.destination.root) : slots slot = caller slot := by
   exact Op.exec_frame slot (by exact outside) installed
 
+/-- The actual return-to-caller retirement preserves all loan guarantees and
+permissions from the before-state invariant. No escape or post-state premise
+is needed once the retiring storage is empty. -/
+theorem retirement_borrow_safe {n : Nat} {program : Program n} {signature : Signature}
+    {store : Store (n + 1) Atom} {active : Nat} (frame : Frame n) (stack : List (Frame n))
+    (valid : store.BorrowInvariant signature) (empty : store.region active = some (fun _ => none))
+    (register : store.temp = none) :
+    ∃ after, Transition program ⟨.cleaning .halt, store, active, frame :: stack⟩ after ∧
+      after.store.BorrowInvariant signature ∧ after.active = frame.region ∧ after.stack = stack ∧
+      (∀ via mode address, after.store.Permitted via mode address ↔ store.Permitted via mode address) :=
+  ⟨⟨.body frame.next frame.cleanup, store.retire active, frame.region, stack⟩,
+    .retire empty register, valid.retire_empty empty, rfl, rfl, store.retire_empty_permissions empty⟩
+
+
 end OwnershipMir.Calls

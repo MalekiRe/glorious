@@ -312,6 +312,19 @@ preserve immutable loan origins, their graph, and ancestry; these results are
 consumed in the call-metadata module. The integrated 36-job build passed, and
 eight inspected theorem dependencies used only standard Lean axioms.
 
+Call entry now preserves the complete borrow invariant and every permission:
+`Calls.entry_borrow_safe` consumes the actual register-to-fresh-region transfer,
+not a copied argument or a post-state premise. Empty retirement likewise
+preserves the complete invariant and all permissions. Before-state referent
+validity itself excludes surviving references into already-empty storage; no
+separate escape table is required. The actual MIR retirement and matching
+source-to-MIR retirement consume this proof. These boundary guarantees do not
+justify the ordinary accesses, argument preparation, result installation, or
+cleanup steps between entry and retirement. Those remain the admission and
+preservation gap. The integrated 36-job gate passed; inspected lifecycle proof
+dependencies use only `propext` and `Quot.sound`.
+
+
 These are physical operation contracts, not source-admitted borrowing safety.
 The source/MIR instruction grammar and body admission still need to produce
 borrow/read permission evidence and constrain every conflicting ordinary

@@ -1,4 +1,4 @@
-import OwnershipMir.CallSafety
+import OwnershipMir.CallOwnership
 
 namespace OwnershipMir
 
@@ -146,6 +146,85 @@ theorem Run.loan_ancestry {n : Nat} {program : Program n} {before after : Config
     (run : Run (Transition program) before after) (parent child : Nat) :
     after.store.Ancestor parent child ↔ before.store.Ancestor parent child :=
   Store.ancestor_iff_of_loans_eq (Run.loans run) parent child
+
+
+theorem enter_contains {n : Nat} {store : Store (n + 1) Atom} {argument : Value}
+    (register : store.temp = some argument) (atom : Atom) :
+    (store.allocate (argumentSlots argument)).Contains atom ↔ store.Contains atom := by
+  have onlyArgument : ∀ root value, argumentSlots (n := n) argument root = some value → value = argument := by
+    intro root
+    refine Fin.cases ?_ (fun i => ?_) root
+    · intro value found; exact (Option.some.inj found).symm
+    · intro value found; cases found
+  constructor
+  · rintro (⟨value, impossible, _⟩ | ⟨region, slots, root, value, live, resident, contains⟩)
+    · cases impossible
+    · by_cases fresh : region = store.regions.length
+      · subst region
+        cases Option.some.inj ((store.allocate_fresh (argumentSlots argument)).symm.trans live)
+        cases onlyArgument root value resident
+        exact Or.inl ⟨argument, register, contains⟩
+      · have bound := Store.region_bound live
+        have old : region < store.regions.length := by
+          simp only [Store.allocate, List.length_append, List.length_singleton] at bound
+          omega
+        exact Or.inr ⟨region, slots, root, value,
+          (Store.allocate_old old (argumentSlots argument)).symm.trans live, resident, contains⟩
+  · rintro (⟨value, resident, contains⟩ | ⟨region, slots, root, value, live, resident, contains⟩)
+    · cases Option.some.inj (register.symm.trans resident)
+      exact Or.inr ⟨store.regions.length, argumentSlots argument, 0, argument,
+        store.allocate_fresh (argumentSlots argument), rfl, contains⟩
+    · exact Or.inr ⟨region, slots, root, value,
+        (Store.allocate_old (Store.region_bound live) (argumentSlots argument)).trans live, resident, contains⟩
+
+theorem enter_borrow_invariant {n : Nat} {store : Store (n + 1) Atom} {signature : Signature} {argument : Value}
+    (valid : store.BorrowInvariant signature) (register : store.temp = some argument) :
+    (store.allocate (argumentSlots argument)).BorrowInvariant signature ∧
+      ∀ via mode address, (store.allocate (argumentSlots argument)).Permitted via mode address ↔
+        store.Permitted via mode address := by
+  let after := store.allocate (argumentSlots (n := n) argument)
+  have handles : ∀ identity, after.HasHandle identity ↔ store.HasHandle identity := by
+    intro identity; simp only [Store.HasHandle, after, enter_contains register]
+  have ancestry := Store.ancestor_iff_of_loans_eq (before := after) (after := store) rfl
+  have active : ∀ identity, after.Active identity ↔ store.Active identity := by
+    intro identity; simp only [Store.Active, handles, ancestry]
+  change after.BorrowInvariant signature ∧ ∀ via mode address, after.Permitted via mode address ↔ store.Permitted via mode address
+  constructor
+  · refine ⟨valid.graph, ?_, ?_, ?_⟩
+    · intro identity mode target contains
+      obtain ⟨loan, found, modeEq, targetEq, lens, value, focused, selected, typed⟩ :=
+        valid.references identity mode target ((enter_contains register _).mp contains)
+      obtain ⟨slots, live, located⟩ := Option.bind_eq_some_iff.mp focused
+      refine ⟨loan, found, modeEq, targetEq, lens, value, ?_, selected, typed⟩
+      unfold Store.find
+      change ((store.allocate (argumentSlots argument)).region loan.referent.region).bind _ = some lens
+      rw [Store.allocate_old (Store.region_bound live) _, live]
+      exact located
+    · intro left first right last firstFound firstActive lastFound lastActive overlap
+      simpa only [ancestry] using valid.compatible left first right last firstFound ((active _).mp firstActive)
+        lastFound ((active _).mp lastActive) overlap
+    · intro identity
+      change (store.allocate _).mass _ _ ≤ 1
+      rw [enter_mass store argument register]
+      exact valid.unique identity
+  · intro via mode address
+    simp only [Store.Permitted, handles, active, ancestry]
+    rfl
+
+
+theorem entry_borrow_safe {n : Nat} {program : Program n} {signature : Signature}
+    {store : Store (n + 1) Atom} {identity active : Nat} {function : Function n} {argument : Value}
+    (destination : Place (n + 1)) (next : Body n) (cleanup : Code (n + 1) (Op (n + 1))) (stack : List (Frame n))
+    (selected : program identity = some function) (register : store.temp = some argument)
+    (valid : store.BorrowInvariant signature) :
+    ∃ after, Transition program ⟨.body (.act (.call identity destination) next) cleanup, store, active, stack⟩ after ∧
+      after.store.BorrowInvariant signature ∧ after.active = store.regions.length ∧
+      after.stack = ⟨active, next, cleanup, destination⟩ :: stack ∧
+      (∀ via mode address, after.store.Permitted via mode address ↔ store.Permitted via mode address) := by
+  obtain ⟨preserved, permissions⟩ := enter_borrow_invariant valid register
+  exact ⟨⟨.body function.body function.cleanup, store.allocate (argumentSlots argument), store.regions.length,
+      ⟨active, next, cleanup, destination⟩ :: stack⟩,
+    .enter selected register, preserved, rfl, rfl, permissions⟩
 
 
 end Calls

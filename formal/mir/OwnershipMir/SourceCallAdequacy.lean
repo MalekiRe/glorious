@@ -226,4 +226,20 @@ theorem Function.return_initialized {n : Nat} {program : Program n} {signature :
   Calls.Function.return_initialized functions.lower (Program.selected selected) typed
     (Run.lower run) (after.terminal_lower.mpr terminal)
 
+/-- Source and MIR retirement share the physical store and its derived lifetime
+proof; lowering cannot substitute a copied caller store or a different loan
+interpretation at this boundary. -/
+theorem retirement_borrow_safe {n : Nat} {program : Program n} {signature : Signature}
+    {store : Store (n + 1) Atom} {active : Nat} (frame : Frame n) (stack : List (Frame n))
+    (valid : store.BorrowInvariant signature) (empty : store.region active = some (fun _ => none))
+    (register : store.temp = none) :
+    ∃ after, Transition program ⟨.cleaning .halt, store, active, frame :: stack⟩ after ∧
+      Calls.Transition program.lower (Configuration.lower ⟨.cleaning .halt, store, active, frame :: stack⟩) after.lower ∧
+      after.store.BorrowInvariant signature ∧ after.active = frame.region ∧ after.stack = stack ∧
+      (∀ via mode address, after.store.Permitted via mode address ↔ store.Permitted via mode address) := by
+  refine ⟨⟨.body frame.next frame.cleanup, store.retire active, frame.region, stack⟩,
+    .retire empty register, ?_, valid.retire_empty empty, rfl, rfl, store.retire_empty_permissions empty⟩
+  exact Calls.Transition.retire empty register
+
+
 end OwnershipMir.SourceCalls

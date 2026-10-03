@@ -567,4 +567,81 @@ theorem ReadLoanReady.sound {n : Nat} {store : Store n Atom} {signature : Signat
     rfl
 
 
+theorem focus_none_selected {α : Type} {path : List Direction} {layout : Layout} {lens : Lens α}
+    (found : focus path layout none = some lens) : lens.selected = none := by
+  cases path with
+  | nil => cases Option.some.inj found; rfl
+  | cons direction rest => cases direction <;> simp [focus] at found
+
+theorem Store.Referent.outside_empty {n : Nat} {store : Store n Atom} {signature : Signature}
+    {loan : Loan n} (referent : store.Referent signature loan) {region : Nat}
+    (empty : store.region region = some (fun _ => none)) : loan.referent.region ≠ region := by
+  intro same
+  obtain ⟨lens, value, found, selected, _⟩ := referent
+  change ((store.region loan.referent.region).bind fun slots => focus loan.referent.path loan.target (slots loan.referent.root)) = some lens at found
+  rw [same, empty] at found
+  have missing := focus_none_selected found
+  rw [selected] at missing
+  cases missing
+
+theorem Store.retire_empty_contains {n : Nat} {store : Store n Atom} {region : Nat}
+    (empty : store.region region = some (fun _ => none)) (atom : Atom) :
+    (store.retire region).Contains atom ↔ store.Contains atom := by
+  constructor
+  · rintro (register | ⟨other, slots, root, value, live, resident, member⟩)
+    · exact Or.inl register
+    · have different : other ≠ region := by
+        intro same; subst other; rw [Store.retire_same] at live; cases live
+      exact Or.inr ⟨other, slots, root, value, (store.retire_other region other different).symm.trans live, resident, member⟩
+  · rintro (register | ⟨other, slots, root, value, live, resident, member⟩)
+    · exact Or.inl register
+    · have different : other ≠ region := by
+        intro same; subst other
+        cases Option.some.inj (empty.symm.trans live)
+        cases resident
+      exact Or.inr ⟨other, slots, root, value, (store.retire_other region other different).trans live, resident, member⟩
+
+theorem Store.retire_empty_permissions {n : Nat} {store : Store n Atom} {region : Nat}
+    (empty : store.region region = some (fun _ => none)) (via : Option Nat) (mode : BorrowMode) (address : Address n) :
+    (store.retire region).Permitted via mode address ↔ store.Permitted via mode address := by
+  have handles : ∀ identity, (store.retire region).HasHandle identity ↔ store.HasHandle identity := by
+    intro identity; simp only [Store.HasHandle, store.retire_empty_contains empty]
+  have ancestry := Store.ancestor_iff_of_loans_eq (before := store.retire region) (after := store) rfl
+  have active : ∀ identity, (store.retire region).Active identity ↔ store.Active identity := by
+    intro identity; simp only [Store.Active, handles, ancestry]
+  simp only [Store.Permitted, handles, active, ancestry]
+  rfl
+
+/-- Empty retirement needs no assumed future reference validity or separate
+escape table: before-state referent validity excludes every surviving handle
+into the already-empty region. Cleanup must preserve that validity first. -/
+theorem Store.BorrowInvariant.retire_empty {n : Nat} {store : Store n Atom} {signature : Signature}
+    (valid : store.BorrowInvariant signature) {region : Nat}
+    (empty : store.region region = some (fun _ => none)) : (store.retire region).BorrowInvariant signature := by
+  have handles : ∀ identity, (store.retire region).HasHandle identity ↔ store.HasHandle identity := by
+    intro identity; simp only [Store.HasHandle, store.retire_empty_contains empty]
+  have ancestry := Store.ancestor_iff_of_loans_eq (before := store.retire region) (after := store) rfl
+  have active : ∀ identity, (store.retire region).Active identity ↔ store.Active identity := by
+    intro identity; simp only [Store.Active, handles, ancestry]
+  refine ⟨valid.graph, ?_, ?_, ?_⟩
+  · intro identity mode target contains
+    obtain ⟨loan, found, modeEq, targetEq, referent⟩ :=
+      valid.references identity mode target ((store.retire_empty_contains empty _).mp contains)
+    have different := referent.outside_empty empty
+    obtain ⟨lens, value, focused, selected, typed⟩ := referent
+    refine ⟨loan, found, modeEq, targetEq, lens, value, ?_, selected, typed⟩
+    unfold Store.find
+    rw [Store.retire_other _ _ _ different]
+    exact focused
+  · intro left first right last firstFound firstActive lastFound lastActive overlap
+    simpa only [ancestry] using valid.compatible left first right last firstFound ((active _).mp firstActive)
+      lastFound ((active _).mp lastActive) overlap
+  · intro identity
+    have conserved := store.retire_mass empty (Atom.weight identity) (fun _ => 0)
+    change (store.retire region).mass _ _ ≤ 1
+    have bound := valid.unique identity
+    change store.mass (Atom.weight identity) (fun _ => 0) ≤ 1 at bound
+    omega
+
+
 end OwnershipMir
