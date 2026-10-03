@@ -86,12 +86,10 @@ def Program.Checked {n : Nat} (program : Program n) : Prop :=
     Layout.Declared program.declarations (function.output.layout id)
 
 structure Frame (n : Nat) where
-  slots : Fin (n + 1) → Option Value
+  region : Nat
   next : Body n
   cleanup : Code (n + 1) (Command (n + 1))
   destination : Place (n + 1)
-
-def Frame.state {n : Nat} (frame : Frame n) : State (n + 1) := ⟨frame.slots, none⟩
 
 inductive Control (n : Nat) where
   | body (code : Body n) (cleanup : Code (n + 1) (Command (n + 1)))
@@ -99,31 +97,40 @@ inductive Control (n : Nat) where
 
 structure Configuration (n : Nat) where
   control : Control n
-  state : State (n + 1)
+  store : Store (n + 1) Atom
+  active : Nat
   stack : List (Frame n)
 
-/-- Independent source execution: call entry acquires an argument and suspends
-the caller, without executing the callee atomically or assuming it returns. -/
+/-- Source calls acquire in the actual active region before allocating a fresh
+callee region. The source and target share storage, not execution relations. -/
 inductive Transition {n : Nat} (program : Program n) : Configuration n → Configuration n → Prop where
-  | operation {code cleanup state next after stack}
-      (step : OwnershipMir.Step Instruction.exec ⟨code, state⟩ ⟨next, after⟩) :
-      Transition program ⟨.body code cleanup, state, stack⟩ ⟨.body next cleanup, after, stack⟩
-  | enter {identity argument destination next cleanup state prepared stack function value}
-      (resolved : program identity = some function) (acquired : acquire argument state = some prepared)
-      (resident : prepared.temp = some value) :
-      Transition program ⟨.body (.act (.call identity argument destination) next) cleanup, state, stack⟩
-        ⟨.body function.body function.cleanup, ⟨Calls.argumentSlots value, none⟩,
-          ⟨prepared.slots, next, cleanup, destination⟩ :: stack⟩
-  | handoff {cleanup state frame stack slots}
-      (installed : (Op.put frame.destination).exec ⟨frame.slots, state.temp⟩ = some ⟨slots, none⟩) :
-      Transition program ⟨.body .halt cleanup, state, frame :: stack⟩
-        ⟨.cleaning cleanup, ⟨state.slots, none⟩, {frame with slots := slots} :: stack⟩
-  | clean {code state next after stack}
-      (step : OwnershipMir.Step Command.exec ⟨code, state⟩ ⟨next, after⟩) :
-      Transition program ⟨.cleaning code, state, stack⟩ ⟨.cleaning next, after, stack⟩
-  | retire {frame stack} :
-      Transition program ⟨.cleaning .halt, Calls.emptyState n, frame :: stack⟩
-        ⟨.body frame.next frame.cleanup, frame.state, stack⟩
+  | operation {code cleanup store active slots next after stack}
+      (live : store.region active = some slots)
+      (step : OwnershipMir.Step Instruction.exec ⟨code, ⟨slots, store.temp⟩⟩ ⟨next, after⟩) :
+      Transition program ⟨.body code cleanup, store, active, stack⟩
+        ⟨.body next cleanup, store.replace active after.slots after.temp, active, stack⟩
+  | enter {identity argument destination next cleanup store active slots prepared stack function value}
+      (live : store.region active = some slots) (resolved : program identity = some function)
+      (acquired : acquire argument ⟨slots, store.temp⟩ = some prepared) (resident : prepared.temp = some value) :
+      Transition program ⟨.body (.act (.call identity argument destination) next) cleanup, store, active, stack⟩
+        ⟨.body function.body function.cleanup,
+          (store.replace active prepared.slots prepared.temp).allocate (Calls.argumentSlots value),
+          store.regions.length, ⟨active, next, cleanup, destination⟩ :: stack⟩
+  | handoff {cleanup store active frame stack caller slots}
+      (live : store.region frame.region = some caller)
+      (installed : (Op.put frame.destination).exec ⟨caller, store.temp⟩ = some ⟨slots, none⟩) :
+      Transition program ⟨.body .halt cleanup, store, active, frame :: stack⟩
+        ⟨.cleaning cleanup, store.replace frame.region slots none, active, frame :: stack⟩
+  | clean {code store active slots next after stack}
+      (live : store.region active = some slots)
+      (step : OwnershipMir.Step Command.exec ⟨code, ⟨slots, store.temp⟩⟩ ⟨next, after⟩) :
+      Transition program ⟨.cleaning code, store, active, stack⟩
+        ⟨.cleaning next, store.replace active after.slots after.temp, active, stack⟩
+  | retire {store active frame stack}
+      (empty : store.region active = some (fun _ => none)) (register : store.temp = none) :
+      Transition program ⟨.cleaning .halt, store, active, frame :: stack⟩
+        ⟨.body frame.next frame.cleanup, store.retire active, frame.region, stack⟩
+
 
 def Configuration.Terminal {n : Nat} (config : Configuration n) : Prop :=
   ∃ cleanup, config.control = .body .halt cleanup ∧ config.stack = []
@@ -145,15 +152,15 @@ def Program.lower {n : Nat} (program : Program n) : Calls.Program n :=
   ⟨program.declarations, fun identity => (program identity).map Function.lower⟩
 
 def Frame.lower {n : Nat} (frame : Frame n) : Calls.Frame n :=
-  ⟨frame.slots, SourceCalls.lower frame.next, OwnershipMir.lower frame.cleanup, frame.destination⟩
+  ⟨frame.region, SourceCalls.lower frame.next, OwnershipMir.lower frame.cleanup, frame.destination⟩
 def Control.lower {n : Nat} : Control n → Calls.Control n
   | .body code cleanup => .body (SourceCalls.lower code) (OwnershipMir.lower cleanup)
   | .cleaning code => .cleaning (OwnershipMir.lower code)
 def Configuration.lower {n : Nat} (config : Configuration n) : Calls.Configuration n :=
-  ⟨config.control.lower, config.state, config.stack.map Frame.lower⟩
+  ⟨config.control.lower, config.store, config.active, config.stack.map Frame.lower⟩
 
 def Function.start {n : Nat} (function : Function n) (argument : Value) : Configuration n :=
-  ⟨.body function.body function.cleanup, ⟨Calls.argumentSlots argument, none⟩, []⟩
+  ⟨.body function.body function.cleanup, ⟨[some (Calls.argumentSlots argument)], none⟩, 0, []⟩
 
 @[simp] theorem Function.start_lower {n : Nat} (function : Function n) (argument : Value) :
     (function.start argument).lower = function.lower.start argument := rfl

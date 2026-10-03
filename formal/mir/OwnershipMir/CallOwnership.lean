@@ -1,14 +1,9 @@
 import OwnershipMir.CallSafety
 
 namespace OwnershipMir.Calls
-variable {module : Module} {authority : Authority}
-
-def stackMass {n : Nat} (leaf : Atom → Nat) (shell : Shell → Nat) : List (Frame n) → Nat
-  | [] => 0
-  | frame :: rest => frame.state.mass leaf shell + stackMass leaf shell rest
 
 def Configuration.mass {n : Nat} (config : Configuration n) (leaf : Atom → Nat) (shell : Shell → Nat) : Nat :=
-  config.state.mass leaf shell + stackMass leaf shell config.stack
+  config.store.mass leaf shell
 
 def Configuration.count {n : Nat} (config : Configuration n) (identity : Nat) : Nat :=
   config.mass (Atom.weight identity) (fun _ => 0)
@@ -42,73 +37,89 @@ theorem empty_mass (n : Nat) (leaf : Atom → Nat) (shell : Shell → Nat) :
     (emptyState n).mass leaf shell = 0 := by
   simp [emptyState, State.mass, cellMass, total_zero]
 
-/-- Fresh activation storage and suspended caller storage partition the old
-residents. Argument transfer is equality for every additive tree measure. -/
-theorem enter_mass {n : Nat} (state : State (n + 1)) (stack : List (Frame n))
-    (next : Body n) (cleanup : Code (n + 1) (Op (n + 1))) (destination : Place (n + 1))
-    (argument : Value) (resident : state.temp = some argument) (leaf : Atom → Nat) (shell : Shell → Nat) :
-    (State.mk (argumentSlots argument) none : State (n + 1)).mass leaf shell +
-        stackMass leaf shell (⟨state.slots, next, cleanup, destination⟩ :: stack) =
-      state.mass leaf shell + stackMass leaf shell stack := by
-  rw [argument_mass]
-  simp [stackMass, Frame.state, State.mass, resident, cellMass, Nat.add_comm, Nat.add_left_comm]
+theorem enter_mass {n : Nat} (store : Store (n + 1) Atom) (argument : Value)
+    (resident : store.temp = some argument) (leaf : Atom → Nat) (shell : Shell → Nat) :
+    (store.allocate (argumentSlots argument)).mass leaf shell = store.mass leaf shell := by
+  have equation := store.allocate_mass (argumentSlots argument) leaf shell
+  have argumentEquation : total (fun i : Fin (n + 1) => cellMass leaf shell (argumentSlots argument i)) =
+      cellMass leaf shell (some argument) := by
+    simpa [State.mass, cellMass] using argument_mass (n := n) argument leaf shell
+  rw [argumentEquation, resident] at equation
+  omega
 
-/-- Protecting the result moves its actual resident into the caller before any
-callee cleanup. The same equality covers opaque owners and fieldless shells. -/
-theorem handoff_mass {n : Nat} (state : State (n + 1)) (frame : Frame n) (stack : List (Frame n))
-    {slots : Fin (n + 1) → Option Value}
-    (installed : (Op.put frame.destination).exec ⟨frame.slots, state.temp⟩ = some ⟨slots, none⟩)
+theorem local_mass {n : Nat} (store : Store (n + 1) Atom) {active : Nat} {slots : Region (n + 1) Atom}
+    (live : store.region active = some slots) (after : State (n + 1)) (leaf : Atom → Nat) (shell : Shell → Nat)
+    (same : after.mass leaf shell = (State.mk slots store.temp).mass leaf shell) :
+    (store.replace active after.slots after.temp).mass leaf shell = store.mass leaf shell := by
+  have equation := store.replace_mass live after.slots after.temp leaf shell
+  simp only [State.mass] at same
+  omega
+
+theorem handoff_mass {n : Nat} (store : Store (n + 1) Atom) (frame : Frame n)
+    {caller slots : Region (n + 1) Atom} (live : store.region frame.region = some caller)
+    (installed : (Op.put frame.destination).exec ⟨caller, store.temp⟩ = some ⟨slots, none⟩)
     (leaf : Atom → Nat) (shell : Shell → Nat) :
-    (State.mk state.slots none).mass leaf shell + stackMass leaf shell ({frame with slots := slots} :: stack) =
-      state.mass leaf shell + stackMass leaf shell (frame :: stack) := by
+    (store.replace frame.region slots none).mass leaf shell = store.mass leaf shell := by
+  apply local_mass store live ⟨slots, none⟩ leaf shell
   cases Op.effect_of_exec installed with
-  | @put _ _ lens value found live available =>
-    change state.temp = some value at live
-    have equation := frame.destination.mass_write (State.mk frame.slots state.temp) lens found (some value) none leaf shell
-    rw [vacant_mass_zero _ _ available, live] at equation
-    simp only [State.mass, cellMass, Nat.add_zero] at equation
-    simp only [stackMass, Frame.state, State.mass, cellMass, Nat.add_zero, live]
+  | @put _ _ lens value found resident available =>
+    have equation := frame.destination.mass_write (State.mk caller store.temp) lens found (some value) none leaf shell
+    rw [vacant_mass_zero _ _ available] at equation
+    simp only [Nat.add_zero] at equation
+    change store.temp = some value at resident
+    rw [resident] at equation
+    simp only [State.mass, cellMass, resident] at equation ⊢
     omega
 
-theorem Preserves.local {n : Nat} {signature : Signature} {state after : State (n + 1)}
-    (preserved : Conserves signature state after) (beforeControl afterControl : Control n) (stack : List (Frame n)) :
-    Preserves signature ⟨beforeControl, state, stack⟩ ⟨afterControl, after, stack⟩ := by
-  exact ⟨fun i => Nat.add_le_add_right (preserved.bounded i) _,
-    fun i exact => congrArg (· + stackMass (Atom.weight i) (fun _ => 0) stack) (preserved.exact i exact)⟩
+theorem Preserves.local {n : Nat} {signature : Signature} (store : Store (n + 1) Atom)
+    {active : Nat} {slots : Region (n + 1) Atom} (live : store.region active = some slots)
+    {after : State (n + 1)} (preserved : Conserves signature ⟨slots, store.temp⟩ after)
+    (beforeControl afterControl : Control n) (stack : List (Frame n)) :
+    Preserves signature ⟨beforeControl, store, active, stack⟩
+      ⟨afterControl, store.replace active after.slots after.temp, active, stack⟩ := by
+  constructor
+  · intro i
+    have equation := store.replace_mass live after.slots after.temp (Atom.weight i) (fun _ => 0)
+    have bound := preserved.bounded i
+    change (store.replace active after.slots after.temp).mass _ _ ≤ store.mass _ _
+    simp only [State.count, weight] at bound
+    omega
+  · intro i exact
+    have equation := store.replace_mass live after.slots after.temp (Atom.weight i) (fun _ => 0)
+    have same := preserved.exact i exact
+    change (store.replace active after.slots after.temp).mass _ _ = store.mass _ _
+    simp only [State.count, weight] at same
+    omega
 
 theorem Preserves.of_mass {n : Nat} {signature : Signature} {before after : Configuration n}
     (same : ∀ leaf shell, after.mass leaf shell = before.mass leaf shell) : Preserves signature before after :=
-  ⟨fun i => by change after.mass _ _ ≤ before.mass _ _; exact Nat.le_of_eq (same _ _), fun i _ => same _ _⟩
+  ⟨fun i => Nat.le_of_eq (same (Atom.weight i) (fun _ => 0)), fun i _ => same (Atom.weight i) (fun _ => 0)⟩
 
-/-- Counts cover the active region AND every suspended caller. Per-frame
-uniqueness alone would not prevent a duplicated owner across activations. -/
+/-- Every resident is counted once in the store, regardless of how many control
+frames refer to a region. Neither allocation nor handoff copies an owner. -/
 theorem Safe.ownership_step {n : Nat} {program : Program n} {signature : Signature} {final : Context (n + 1)}
     {before after : Configuration n} (safe : Safe program signature final before)
     (step : Transition program before after) : Preserves signature before after := by
   cases step with
-  | operation step =>
+  | operation live step =>
     cases safe with
-    | body typed checked retained =>
-      obtain ⟨_, preserved⟩ :=
-        OwnershipMir.Safe.step ⟨_, typed, checked⟩ Instruction.Checked.executed step
-      exact Preserves.local preserved _ _ _
-  | enter resolved resident =>
-    apply Preserves.of_mass
-    intro leaf shell
-    exact enter_mass _ _ _ _ _ _ resident leaf shell
-  | handoff installed =>
-    apply Preserves.of_mass
-    intro leaf shell
-    exact handoff_mass _ _ _ installed leaf shell
-  | clean step =>
+    | body found typed checked retained =>
+      cases Option.some.inj (live.symm.trans found)
+      obtain ⟨_, preserved⟩ := OwnershipMir.Safe.step ⟨_, typed, checked⟩ Instruction.Checked.executed step
+      exact Preserves.local _ live preserved _ _ _
+  | enter resolved resident => exact Preserves.of_mass (enter_mass _ _ resident)
+  | handoff live installed => exact Preserves.of_mass (handoff_mass _ _ live installed)
+  | clean live step =>
     cases safe with
-    | cleaning typed checked retained =>
-      have start : OwnershipMir.Safe signature (Op.Checked _) _ ⟨_, _⟩ := ⟨_, typed, checked⟩
-      exact Preserves.local (start.step Op.Checked.executed step).2 _ _ _
-  | retire =>
+    | cleaning found typed checked retained =>
+      cases Option.some.inj (live.symm.trans found)
+      obtain ⟨_, preserved⟩ := OwnershipMir.Safe.step ⟨_, typed, checked⟩ Op.Checked.executed step
+      exact Preserves.local _ live preserved _ _ _
+  | retire empty register =>
     apply Preserves.of_mass
     intro leaf shell
-    simp [Configuration.mass, stackMass, empty_mass]
+    have equation := Store.retire_mass _ empty leaf shell
+    simpa [Configuration.mass, cellMass, total_zero] using equation
 
 theorem Safe.ownership_execution {n : Nat} {program : Program n} {signature : Signature} {final : Context (n + 1)}
     (functions : program.Checked) {before after : Configuration n} (safe : Safe program signature final before)

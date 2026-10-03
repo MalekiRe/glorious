@@ -60,11 +60,11 @@ theorem Safe.progress {n : Nat} {program : Program n} {signature : Signature} {f
     {config : Configuration n} (safe : Safe program signature final config) :
     config.Terminal ∨ ∃ next, Transition program config next := by
   cases config with
-  | mk control state stack =>
+  | mk control store active stack =>
     cases control with
     | body code cleanup =>
       change Calls.Safe program.lower signature final
-        ⟨.body (lower code) (OwnershipMir.lower cleanup), state, stack.map Frame.lower⟩ at safe
+        ⟨.body (lower code) (OwnershipMir.lower cleanup), store, active, stack.map Frame.lower⟩ at safe
       cases code with
       | halt =>
         cases stack with
@@ -73,22 +73,22 @@ theorem Safe.progress {n : Nat} {program : Program n} {signature : Signature} {f
           rcases safe.progress with ⟨_, _, impossible⟩ | ⟨next, step⟩
           · cases impossible
           · cases step with
-            | operation step => exact False.elim (step.not_halt rfl)
-            | handoff installed => exact Or.inr ⟨_, .handoff installed⟩
+            | operation live step => exact False.elim (step.not_halt rfl)
+            | handoff live installed => exact Or.inr ⟨_, .handoff live installed⟩
       | act instruction next =>
         cases safe with
-        | body typed checked retained =>
+        | body live typed checked retained =>
           cases instruction with
           | command cmd =>
             obtain ⟨result, executed⟩ := operations_ready cmd.block checked typed
-            exact Or.inr ⟨_, .operation (.act (by simpa [Instruction.exec, Command.exec_eq] using executed))⟩
+            exact Or.inr ⟨_, .operation live (.act (by simpa [Instruction.exec, Command.exec_eq] using executed))⟩
           | result value =>
             cases checked with
             | act head tail =>
               cases head with
               | operation move =>
                 obtain ⟨result, executed⟩ := move.progress typed
-                exact Or.inr ⟨_, .operation (.act (by simpa [Instruction.exec, acquire_eq] using executed))⟩
+                exact Or.inr ⟨_, .operation live (.act (by simpa [Instruction.exec, acquire_eq] using executed))⟩
           | call identity argument destination =>
             cases checked with
             | act head tail =>
@@ -102,36 +102,37 @@ theorem Safe.progress {n : Nat} {program : Program n} {signature : Signature} {f
                   | call resolved argumentType result =>
                     obtain ⟨function, selected, rfl⟩ := Option.map_eq_some_iff.mp resolved
                     obtain ⟨value, resident, _⟩ := Option.map_eq_some_iff.mp (realized.2.trans argumentType)
-                    exact Or.inr ⟨_, .enter selected (by rwa [acquire_eq]) resident⟩
+                    exact Or.inr ⟨_, .enter live selected (by rwa [acquire_eq]) resident⟩
       | branch guard yes no =>
         cases safe with
-        | body typed checked retained =>
+        | body live typed checked retained =>
           cases checked with
           | branch scalar left right =>
             obtain ⟨choice, observed⟩ := observe_ready typed scalar
-            exact Or.inr ⟨_, .operation (.branch observed)⟩
+            exact Or.inr ⟨_, .operation live (.branch observed)⟩
       | loop guard body next =>
         cases safe with
-        | body typed checked retained =>
+        | body live typed checked retained =>
           cases checked with
           | loop scalar body tail =>
             obtain ⟨choice, observed⟩ := observe_ready typed scalar
-            exact Or.inr ⟨_, .operation (.loop observed)⟩
+            exact Or.inr ⟨_, .operation live (.loop observed)⟩
     | cleaning code =>
       change Calls.Safe program.lower signature final
-        ⟨.cleaning (OwnershipMir.lower code), state, stack.map Frame.lower⟩ at safe
+        ⟨.cleaning (OwnershipMir.lower code), store, active, stack.map Frame.lower⟩ at safe
       cases safe with
-      | cleaning typed checked retained =>
+      | cleaning live typed checked retained =>
         rcases command_progress ⟨_, typed, checked⟩ with halted | ⟨next, step⟩
         · subst code
           cases checked
           have empty := Calls.typed_empty typed
-          subst state
+          have slotsEmpty := congrArg State.slots empty
+          have tempEmpty := congrArg State.temp empty
           cases stack with
           | nil => cases retained
-          | cons frame stack => exact Or.inr ⟨_, .retire⟩
+          | cons frame stack => exact Or.inr ⟨_, .retire (live.trans (congrArg some slotsEmpty)) tempEmpty⟩
         · cases next with
-          | mk next after => exact Or.inr ⟨_, .clean step⟩
+          | mk next after => exact Or.inr ⟨_, .clean live step⟩
 
 theorem Function.start_safe {n : Nat} {program : Program n} {signature : Signature} {function : Function n}
     (functions : program.Checked) {identity : Nat} (selected : program identity = some function)
@@ -221,7 +222,7 @@ theorem Function.return_initialized {n : Nat} {program : Program n} {signature :
     (functions : program.Checked) {identity : Nat} (selected : program identity = some function)
     {argument : Value} (typed : argument.kind signature = function.input) {after : Configuration n}
     (run : Run (Transition program) (function.start argument) after) (terminal : after.Terminal) :
-    ∃ value, after.state.temp = some value ∧ value.kind signature = function.output ∧ value.ready :=
+    ∃ value, after.store.temp = some value ∧ Value.kind signature value = function.output ∧ value.ready :=
   Calls.Function.return_initialized functions.lower (Program.selected selected) typed
     (Run.lower run) (after.terminal_lower.mpr terminal)
 

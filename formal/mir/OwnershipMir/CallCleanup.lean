@@ -1,15 +1,27 @@
 import OwnershipMir.CallControl
 
 namespace OwnershipMir.Calls
-variable {module : Module} {authority : Authority}
+variable {authority : Authority}
 
 theorem Run.cleaning {n : Nat} {program : Program n}
     {before after : OwnershipMir.Configuration (n + 1) (Op (n + 1))}
-    (run : Run (Step Op.exec) before after) (stack : List (Frame n)) :
-    Run (Transition program) ⟨.cleaning before.code, before.state, stack⟩ ⟨.cleaning after.code, after.state, stack⟩ := by
-  induction run with
-  | refl => exact .refl _
-  | step head tail ih => exact .step (.clean head) ih
+    (run : Run (Step Op.exec) before after) (store : Store (n + 1) Atom) (active : Nat)
+    (live : store.region active = some before.state.slots) (register : store.temp = before.state.temp)
+    (stack : List (Frame n)) :
+    Run (Transition program) ⟨.cleaning before.code, store, active, stack⟩
+      ⟨.cleaning after.code, store.replace active after.state.slots after.state.temp, active, stack⟩ := by
+  induction run generalizing store with
+  | @refl start =>
+    have same : store.replace active start.state.slots start.state.temp = store := by
+      rw [← register]; exact Store.replace_self live
+    rw [same]; exact .refl _
+  | @step before middle after head tail ih =>
+    have first : Transition program ⟨.cleaning before.code, store, active, stack⟩
+        ⟨.cleaning middle.code, store.replace active middle.state.slots middle.state.temp, active, stack⟩ :=
+      .clean live (by simpa [register] using head)
+    have rest := ih (store.replace active middle.state.slots middle.state.temp)
+      (Store.replace_same (Store.region_bound live) _ _) rfl
+    simpa only [Store.replace_replace] using Run.step first rest
 
 theorem activation_exit {n : Nat} (state : State (n + 1)) : (activationScope n).exit state = emptyState n := by
   have slots : clearSlots (activationScope n).owners state.slots = fun _ => none := by
@@ -17,8 +29,6 @@ theorem activation_exit {n : Nat} (state : State (n + 1)) : (activationScope n).
     exact if_pos (List.mem_finRange i)
   simp only [Scope.exit, slots, emptyState]
 
-/-- Scope ownership is the whole activation, not a supplied subset. Its actual
-cleanup trace follows newest-root, reverse-field, enclosing-storage-last order. -/
 theorem Function.cleanup_trace {n : Nat} {signature : Signature} {function : Function n}
     (admitted : (activationScope n).Admitted authority function.cleanupContext) {state : State (n + 1)}
     (typed : state.Typed signature function.cleanupContext) :
@@ -27,68 +37,85 @@ theorem Function.cleanup_trace {n : Nat} {signature : Signature} {function : Fun
   simpa only [Function.cleanup, activation_exit] using Scope.exit_trace admitted typed
 
 theorem Function.cleanup_returns {n : Nat} {program : Program n} {signature : Signature} {function : Function n}
-    (admitted : (activationScope n).Admitted authority function.cleanupContext) {state : State (n + 1)}
-    (typed : state.Typed signature function.cleanupContext) (frame : Frame n) (stack : List (Frame n)) :
-    Run (Transition program) ⟨.cleaning function.cleanup, state, frame :: stack⟩
-      ⟨.body frame.next frame.cleanup, frame.state, stack⟩ :=
-  (Run.cleaning (function.cleanup_trace admitted typed).run _).trans (.step .retire (.refl _))
+    (admitted : (activationScope n).Admitted authority function.cleanupContext)
+    (store : Store (n + 1) Atom) (active : Nat) {slots : Region (n + 1) Atom}
+    (live : store.region active = some slots)
+    (typed : (State.mk slots store.temp).Typed signature function.cleanupContext)
+    (frame : Frame n) (stack : List (Frame n)) :
+    Run (Transition program) ⟨.cleaning function.cleanup, store, active, frame :: stack⟩
+      ⟨.body frame.next frame.cleanup, store.retire active, frame.region, stack⟩ := by
+  have register : store.temp = none := Option.map_eq_none_iff.mp typed.2
+  have cleaned := Run.cleaning (program := program) (function.cleanup_trace admitted typed).run store active live rfl (frame :: stack)
+  have retired := Transition.retire (program := program) (store := store.replace active (fun _ => none) none)
+    (frame := frame) (stack := stack) (Store.replace_same (Store.region_bound live) _ _) rfl
+  have complete := cleaned.trans (.step retired (.refl _))
+  simpa [emptyState, Store.replace, Store.retire, List.set_set, register] using complete
 
-/-- Every observed prefix stops inside the SAME cleanup with every protected
-caller unchanged, or crosses the fully empty retirement boundary first. -/
+/-- The physical prefix is a prefix of the same local cleanup, or has crossed
+empty retirement. Store identities and all exterior cells are retained. -/
 theorem cleanup_prefix {n : Nat} {program : Program n}
     {start : OwnershipMir.Configuration (n + 1) (Op (n + 1))}
-    (complete : Run (Step Op.exec) start ⟨.halt, emptyState n⟩) (frame : Frame n) (stack : List (Frame n))
-    {after : Configuration n}
-    (observed : Run (Transition program) ⟨.cleaning start.code, start.state, frame :: stack⟩ after) :
-    (∃ current, Run (Step Op.exec) start current ∧ after = ⟨.cleaning current.code, current.state, frame :: stack⟩) ∨
-      Run (Transition program) ⟨.body frame.next frame.cleanup, frame.state, stack⟩ after := by
+    (complete : Run (Step Op.exec) start ⟨.halt, emptyState n⟩)
+    (store : Store (n + 1) Atom) (active : Nat)
+    (live : store.region active = some start.state.slots) (register : store.temp = start.state.temp)
+    (frame : Frame n) (stack : List (Frame n)) {after : Configuration n}
+    (observed : Run (Transition program) ⟨.cleaning start.code, store, active, frame :: stack⟩ after) :
+    (∃ current, Run (Step Op.exec) start current ∧
+      after = ⟨.cleaning current.code, store.replace active current.state.slots current.state.temp, active, frame :: stack⟩) ∨
+      Run (Transition program)
+        ⟨.body frame.next frame.cleanup, {store.retire active with temp := none}, frame.region, stack⟩ after := by
   generalize finishEq : (OwnershipMir.Configuration.mk .halt (emptyState n)) = finish at complete
-  induction complete generalizing after with
+  induction complete generalizing store after with
   | refl =>
     cases finishEq
     cases observed with
-    | refl => exact Or.inl ⟨_, .refl _, rfl⟩
+    | refl =>
+      refine Or.inl ⟨_, .refl _, ?_⟩
+      rw [← register, Store.replace_self live]
     | step head tail =>
-      have same := head.deterministic (.retire (frame := frame) (stack := stack))
+      have same := head.deterministic (.retire live register)
       cases same
-      exact Or.inr tail
+      exact Or.inr (by simpa [Store.retire, register, emptyState] using tail)
   | @step before middle finish head tail ih =>
     cases observed with
-    | refl => exact Or.inl ⟨_, .refl _, rfl⟩
+    | refl =>
+      refine Or.inl ⟨_, .refl _, ?_⟩
+      rw [← register, Store.replace_self live]
     | step first rest =>
-      have same := first.deterministic (.clean head)
+      have same := first.deterministic (.clean live (by simpa [register] using head))
       cases same
-      rcases ih rest finishEq with ⟨current, segment, equal⟩ | resumed
-      · exact Or.inl ⟨current, .step head segment, equal⟩
-      · exact Or.inr resumed
+      rcases ih (store.replace active middle.state.slots middle.state.temp)
+        (Store.replace_same (Store.region_bound live) _ _) rfl rest finishEq with ⟨current, segment, equal⟩ | resumed
+      · exact Or.inl ⟨current, .step head segment, by simpa only [Store.replace_replace] using equal⟩
+      · exact Or.inr (by simpa [Store.retire_replace] using resumed)
 
-/-- The existing ordered-cleanup theorem is consumed at the actual call
-boundary. No cleanup behavior or future result is an admission premise. -/
 theorem Function.cleanup_prefix {n : Nat} {program : Program n} {signature : Signature} {function : Function n}
-    (admitted : (activationScope n).Admitted authority function.cleanupContext) {state : State (n + 1)}
-    (typed : state.Typed signature function.cleanupContext) (frame : Frame n) (stack : List (Frame n))
-    {after : Configuration n}
-    (observed : Run (Transition program) ⟨.cleaning function.cleanup, state, frame :: stack⟩ after) :
-    (∃ current events,
-      OwnershipTrace ⟨function.cleanup, state⟩ current events ∧
+    (admitted : (activationScope n).Admitted authority function.cleanupContext)
+    (store : Store (n + 1) Atom) (active : Nat) {slots : Region (n + 1) Atom}
+    (live : store.region active = some slots)
+    (typed : (State.mk slots store.temp).Typed signature function.cleanupContext)
+    (frame : Frame n) (stack : List (Frame n)) {after : Configuration n}
+    (observed : Run (Transition program) ⟨.cleaning function.cleanup, store, active, frame :: stack⟩ after) :
+    (∃ current events, OwnershipTrace ⟨function.cleanup, ⟨slots, store.temp⟩⟩ current events ∧
       events.IsPrefix ((activationScope n).cleanupOrder function.cleanupContext) ∧
-      after = ⟨.cleaning current.code, current.state, frame :: stack⟩) ∨
-      Run (Transition program) ⟨.body frame.next frame.cleanup, frame.state, stack⟩ after := by
-  rcases Calls.cleanup_prefix (function.cleanup_trace admitted typed).run frame stack observed with
+      after = ⟨.cleaning current.code, store.replace active current.state.slots current.state.temp, active, frame :: stack⟩) ∨
+      Run (Transition program) ⟨.body frame.next frame.cleanup, store.retire active, frame.region, stack⟩ after := by
+  have register : store.temp = none := Option.map_eq_none_iff.mp typed.2
+  rcases Calls.cleanup_prefix (function.cleanup_trace admitted typed).run store active live rfl frame stack observed with
     ⟨current, run, same⟩ | resumed
   · obtain ⟨events, trace⟩ := OwnershipTrace.of_run run
     exact Or.inl ⟨current, events, trace, trace.prefix (function.cleanup_trace admitted typed) rfl, same⟩
-  · exact Or.inr resumed
+  · exact Or.inr (by simpa [Store.retire, register] using resumed)
 
 theorem Function.cleanup_diverges_iff {n : Nat} {program : Program n} {signature : Signature} {function : Function n}
-    (admitted : (activationScope n).Admitted authority function.cleanupContext) {state : State (n + 1)}
-    (typed : state.Typed signature function.cleanupContext) (frame : Frame n) (stack : List (Frame n)) :
-    Diverges (Transition program) ⟨.cleaning function.cleanup, state, frame :: stack⟩ ↔
-      Diverges (Transition program) ⟨.body frame.next frame.cleanup, frame.state, stack⟩ :=
-  (function.cleanup_returns admitted typed frame stack).diverges_iff Transition.deterministic
+    (admitted : (activationScope n).Admitted authority function.cleanupContext)
+    (store : Store (n + 1) Atom) (active : Nat) {slots : Region (n + 1) Atom}
+    (live : store.region active = some slots)
+    (typed : (State.mk slots store.temp).Typed signature function.cleanupContext) (frame : Frame n) (stack : List (Frame n)) :
+    Diverges (Transition program) ⟨.cleaning function.cleanup, store, active, frame :: stack⟩ ↔
+      Diverges (Transition program) ⟨.body frame.next frame.cleanup, store.retire active, frame.region, stack⟩ :=
+  (function.cleanup_returns admitted store active live typed frame stack).diverges_iff Transition.deterministic
 
-/-- A boundary operation may change the top caller, never any deeper retained
-caller. Interior frames may be pushed/popped without touching that suffix. -/
 theorem Transition.retained_suffix {n : Nat} {program : Program n} {before after : Configuration n}
     (step : Transition program before after) (interiorFrames retained : List (Frame n))
     (partition : before.stack = interiorFrames ++ retained) (interior : interiorFrames ≠ []) :
@@ -99,20 +126,15 @@ theorem Transition.retained_suffix {n : Nat} {program : Program n} {before after
     cases step with
     | operation => exact ⟨top :: rest, partition⟩
     | enter => exact ⟨_ :: top :: rest, congrArg (_ :: ·) partition⟩
-    | handoff =>
-      rcases List.cons.inj partition with ⟨rfl, rfl⟩
-      exact ⟨_ :: rest, rfl⟩
+    | handoff => exact ⟨top :: rest, partition⟩
     | clean => exact ⟨top :: rest, partition⟩
     | retire =>
       rcases List.cons.inj partition with ⟨rfl, rfl⟩
       exact ⟨rest, rfl⟩
 
-/-- Return installation changes no caller root outside the destination. The
-ordinary place effect supplies the proof; there is no call-specific store walk. -/
-theorem handoff_frame {n : Nat} (state : State (n + 1)) (frame : Frame n)
-    {slots : Fin (n + 1) → Option Value}
-    (installed : (Op.put frame.destination).exec ⟨frame.slots, state.temp⟩ = some ⟨slots, none⟩)
-    (slot : Fin (n + 1)) (outside : slot ≠ frame.destination.root) : slots slot = frame.slots slot := by
+theorem handoff_frame {n : Nat} {caller slots : Region (n + 1) Atom} {temp : Cell Atom} (frame : Frame n)
+    (installed : (Op.put frame.destination).exec ⟨caller, temp⟩ = some ⟨slots, none⟩)
+    (slot : Fin (n + 1)) (outside : slot ≠ frame.destination.root) : slots slot = caller slot := by
   exact Op.exec_frame slot (by exact outside) installed
 
 end OwnershipMir.Calls

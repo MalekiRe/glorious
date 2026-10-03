@@ -157,49 +157,55 @@ ownership pipeline. The transfer register is part of the actual runtime state.
   that contract. Retained-slot framing is not falsely extended past handoff:
   the continuation may subsequently modify those slots.
 
-- `Calls.lean`, `CallSafety.lean`: recursive calls are control transitions over
-  fresh frame-local slot regions and an unbounded continuation stack, not
-  terminating atomic instructions. Entry transfers the prepared argument pack
-  into slot zero and retains caller slots without a transfer register. Result
-  handoff uses the existing checked `put` into the caller, clears the callee
-  register, and starts ordinary lowered cleanup. Retirement requires the
-  entire callee state to be empty. `activationScope` contains every slot; no
-  externally supplied subset can hide callee-owned storage. Program admission
-  checks bodies against declarations, input/output readiness, and structural
+- `Store.lean`, `Calls.lean`, `CallSafety.lean`: source and MIR activations use
+  one addressable region store and one transfer register. Continuation frames
+  contain region identities and control, never saved copies of resident slots.
+  Region creation appends a fresh identity; empty retirement leaves a tombstone
+  and never reuses the identity. Local operations update their selected region
+  in the same store. Entry transfers the prepared argument into fresh slot zero;
+  checked result handoff installs directly into the actual caller region before
+  callee cleanup. Retirement requires an empty region and empty register.
+  `StackTyped` and `ResumeTyped` refer to actual store cells, with strict
+  region ordering for retained callers. `activationScope` covers every slot.
+  Program admission checks bodies, readiness, declarations, and structural
   residual disposability; it assumes no successful return or future run.
   Call-body preservation now instantiates the same shared `Safe.step` via
   `Instruction.Checked.executed`; the duplicate `Calls.local_step` branch/loop
   proof and the bundled `InstructionSound` interface are removed. Calls still
   advance through activation transitions, never a fictitious local execution.
 - `CallOwnership.lean`, `CallShells.lean`: arbitrary additive tree measures
-  agree across argument transfer and protected result handoff. Joint resource
-  uniqueness covers the active state plus every retained caller, not merely
-  separate per-frame uniqueness. `Calls.program_safety` derives preservation,
+  agree across argument transfer and protected result handoff. Ownership and
+  shell measures range over every live region of the physical store and its
+  single transfer register, independently of the continuation stack. Joint
+  uniqueness is not a collection of separate per-frame claims.
+  `Calls.program_safety` derives preservation,
   progress, exact-resource conservation, affine bounds, noncopyable-shell
   bounds, and exact-shell discharge accounting at every actual finite prefix.
 - `CallControl.lean`: concrete activation determinism and terminality feed
   shared execution proofs. Checked nontermination iff no terminal execution
   consumes shared infinite-trace construction; infinite-prefix safety consumes
-  shared trace reachability. No activation transition rule is changed.
+  shared trace reachability.
 - `CallCleanup.lean`: the existing ordered scope-cleanup trace discharges all
-  activation slots before resumption. Every call-cleanup prefix either retains
-  the identical protected caller stack with the prescribed event prefix, or
-  has crossed complete retirement into the caller continuation. Cleanup
-  preserves and reflects continuation divergence. Result installation frames
-  every caller root outside its destination; deeper retained regions are
-  untouched by boundary operations.
-- `CallBoundary.lean`: appending retained caller storage preserves actual
-  transitions and executions. `Function.call_return` composes a real callee
-  return with entry, constructively checked result installation, complete
-  cleanup, and resumption, preserving caller roots outside the destination.
-  `Function.call_diverges` propagates actual recursive divergence through entry.
-  `Function.return_initialized` derives an initialized runtime result.
+  activation slots before resumption. Every call-cleanup prefix is an actual
+  local cleanup trace embedded into the same store, or has crossed empty
+  retirement into the caller continuation. Cleanup preserves and reflects
+  continuation divergence. Result installation frames caller roots outside
+  its destination; region update laws preserve unrelated regions.
+- `CallBoundary.lean`: appending retained control frames preserves actual
+  transitions and executions without copying storage. `Safe.within_run`
+  proves exterior-region framing for the current region-local instruction set.
+  `Function.call_return` composes a real callee run in the actual ambient store
+  with entry, constructively checked caller installation, ordered cleanup,
+  and retirement; it no longer supplies a standalone copied callee store.
+  `Function.call_diverges` propagates actual ambient-store divergence through
+  entry. `Function.return_initialized` derives an initialized returned value.
 
 - `SourceCalls.lean`: an independent resolved ownership source language extends
   atomic commands with recursive direct calls and result transfer. Source call
-  entry acquires the argument place and retains the cleared caller slots, rather
-  than assuming a prepared MIR register. Callee bodies execute through a source
-  activation stack; source cleanup executes atomic commands. Source checking
+  entry acquires the argument from the actual caller region before allocating
+  a fresh callee region, rather than assuming a prepared MIR register. Both
+  source and MIR preserve the same store and region identities at boundaries;
+  source cleanup executes atomic commands. Source checking
   requires initialized whole-value arguments/results, declaration agreement,
   valid result placement, and complete activation cleanup. It derives
   `Calls.Program.Checked` for the compiled program, without successful execution
@@ -222,9 +228,10 @@ ownership pipeline. The transfer register is part of the actual runtime state.
   shell bounds, actual source progress, exact terminal-return correspondence,
   bidirectional divergence correspondence, and initialized returned residents.
   The existing MIR cleanup and call proofs remain the physical consumers.
-- `CallMetadata.lean`: declaration validity is preserved across the active
-  region and all retained caller regions, including argument transfer, protected
-  handoff, cleanup, and retirement. Each program carries the shared declarations;
+- `CallMetadata.lean`: declaration validity covers every live region and the
+  transfer register, including regions not named by the current control stack.
+  It is preserved across transfer, handoff, cleanup, and retirement. Each
+  program carries shared declarations;
   each function is checked in its own lexical module. Function admission checks
   input/output layouts and the cleanup context against those declarations. Both
   public source and compiled program-safety theorems now derive declaration-valid
@@ -251,9 +258,10 @@ precision policy; loops retain invariant contexts. No maybe-initialized
 admission is added.
 
 Each activation has the same arbitrary finite slot capacity, with slot indices
-in resolved acquisition order; the stack is unbounded. Region freshness is
-structural, not a physical allocation or address theorem. Cleanup visits every
-callee slot, and results reside in caller storage outside the retiring region.
+  in resolved acquisition order; the stack and region store are unbounded.
+  Freshness and nonreuse are structural region-identity properties, not physical
+  allocation or numerical-address theorems. Cleanup visits every callee slot;
+  installed results remain outside the retired region.
 The outermost activation is an explicit caller boundary: a terminal execution
 returns its declared output context, including its residual region, rather than
 silently destroying it. Heap allocation/exhaustion, physical addresses,
@@ -267,18 +275,18 @@ representation, and custom destruction are not modeled by this slice. The
 declaration and module identities are already resolved; this does not claim
 full language elaboration or hostile-bytecode admission.
 
-Verification: a fresh `lake clean && lake build OwnershipMir` passed all 34
-jobs with warnings as errors and auto-implicit parameters disabled; the final
-input/output-interface admission changes also passed the integrated build.
-Twenty-two general theorem dependencies were inspected successfully. Both
-private-field exclusion theorems use no axioms. The remaining inspected
-dependencies are limited to `propext`, `Classical.choice`, and `Quot.sound`.
-The checks cover actual deconstruction authorization, declaration preservation
-through complete call runs, source checking-to-MIR admission, positive
-simulation, source progress, both public safety theorems, exact return
-reflection, actual divergence equivalence, initialized results, and existing
-local/call/cleanup consumers. No `sorry`, new axioms, concrete examples, or
-unit tests were used to bypass the general obligations.
+Verification: after the unified-store migration, a fresh
+`lake clean && lake build OwnershipMir` passed all 35 jobs with warnings as
+errors and auto-implicit parameters disabled. Fourteen general theorem
+dependencies were inspected: MIR preservation/progress, global ownership and
+shell accounting, declaration validity, cleanup prefix/return, ambient-store
+call return/divergence, positive source simulation, source progress, compiled
+safety, exact terminal correspondence, and actual divergence equivalence.
+Dependencies are limited to `propext`, `Classical.choice`, and `Quot.sound`.
+No `sorry`, new axioms, concrete examples, or unit tests bypass the obligations.
+This verified checkpoint completes the store cutover, not borrowing:
+reference values, permissions, reborrowing, dereference, and lifetime-aware
+return/cleanup admission remain the next part of the requested integration.
 
 
 ### Joint storage ownership

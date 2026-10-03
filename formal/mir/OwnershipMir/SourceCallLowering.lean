@@ -44,13 +44,24 @@ theorem lower_step {n : Nat} {before after : OwnershipMir.Configuration (n + 1) 
 
 private theorem body_run {n : Nat} {program : Calls.Program n}
     {before after : OwnershipMir.Configuration (n + 1) (Calls.Instruction n)}
-    (run : Run (Step Calls.Instruction.exec) before after)
+    (run : Run (Step Calls.Instruction.exec) before after) (store : Store (n + 1) Atom) (active : Nat)
+    (live : store.region active = some before.state.slots) (register : store.temp = before.state.temp)
     (cleanup : Code (n + 1) (Op (n + 1))) (stack : List (Calls.Frame n)) :
-    Run (Calls.Transition program) ⟨.body before.code cleanup, before.state, stack⟩
-      ⟨.body after.code cleanup, after.state, stack⟩ := by
-  induction run with
-  | refl => exact .refl _
-  | step head tail ih => exact .step (.operation head) ih
+    Run (Calls.Transition program) ⟨.body before.code cleanup, store, active, stack⟩
+      ⟨.body after.code cleanup, store.replace active after.state.slots after.state.temp, active, stack⟩ := by
+  induction run generalizing store with
+  | @refl start =>
+    have same : store.replace active start.state.slots start.state.temp = store := by
+      rw [← register]; exact Store.replace_self live
+    rw [same]; exact .refl _
+  | @step before middle after head tail ih =>
+    have first : Calls.Transition program ⟨.body before.code cleanup, store, active, stack⟩
+        ⟨.body middle.code cleanup, store.replace active middle.state.slots middle.state.temp, active, stack⟩ :=
+      .operation live (by simpa [register] using head)
+    have rest := ih (store.replace active middle.state.slots middle.state.temp)
+      (Store.replace_same (Store.region_bound live) _ _) rfl
+    simpa only [Store.replace_replace] using Run.step first rest
+
 
 /-- Argument preparation is a real target step before call entry. Callee
 execution, protected handoff, source cleanup, and retirement all remain visible. -/
@@ -59,17 +70,24 @@ theorem Transition.lower {n : Nat} {program : Program n} {before after : Configu
     ∃ middle, Calls.Transition program.lower before.lower middle ∧
       Run (Calls.Transition program.lower) middle after.lower := by
   cases step with
-  | operation step =>
+  | operation live step =>
     obtain ⟨middle, head, tail⟩ := lower_step step
-    exact ⟨_, .operation head, body_run tail _ _⟩
-  | enter resolved acquired resident =>
-    exact ⟨_, .operation (.act (by rwa [acquire_eq] at acquired)),
-      .step (.enter (Program.selected resolved) resident) (.refl _)⟩
-  | handoff installed => exact ⟨_, .handoff installed, .refl _⟩
-  | clean step =>
+    refine ⟨_, .operation live head, ?_⟩
+    simpa only [Configuration.lower, Control.lower, Store.replace_replace] using body_run tail _ _ (Store.replace_same (Store.region_bound live) _ _) rfl _ _
+  | @enter identity argument destination next cleanup store active slots prepared stack function value live resolved acquired resident =>
+    refine ⟨_, .operation live (.act (by rwa [acquire_eq] at acquired)), .step ?_ (.refl _)⟩
+    simpa only [Configuration.lower, Control.lower, Frame.lower, List.map_cons, Store.replace, List.length_set,
+      Block.emit, Function.lower, Function.cleanup, Calls.Function.cleanup, Function.cleanupContext, Calls.Function.cleanupContext] using
+      (Calls.Transition.enter (store := store.replace active prepared.slots prepared.temp) (active := active)
+        (next := SourceCalls.lower next) (cleanup := OwnershipMir.lower cleanup) (destination := destination)
+        (stack := stack.map Frame.lower) (Program.selected resolved) resident)
+  | handoff live installed => exact ⟨_, .handoff live installed, .refl _⟩
+  | clean live step =>
     obtain ⟨middle, head, tail⟩ := OwnershipMir.lower_step step
-    exact ⟨_, .clean head, Calls.Run.cleaning tail _⟩
-  | retire => exact ⟨_, .retire, .refl _⟩
+    refine ⟨_, .clean live head, ?_⟩
+    simpa only [Configuration.lower, Control.lower, Store.replace_replace] using Calls.Run.cleaning tail _ _ (Store.replace_same (Store.region_bound live) _ _) rfl _
+  | retire empty register => exact ⟨_, .retire empty register, .refl _⟩
+
 
 theorem Run.lower {n : Nat} {program : Program n} {before after : Configuration n}
     (run : Run (Transition program) before after) :
@@ -85,30 +103,32 @@ theorem Transition.not_terminal {n : Nat} {program : Program n} {before after : 
 theorem Transition.deterministic {n : Nat} {program : Program n} {before first second : Configuration n}
     (left : Transition program before first) (right : Transition program before second) : first = second := by
   cases left with
-  | operation left =>
+  | operation found left =>
     cases right with
-    | operation right => cases left.deterministic right; rfl
-    | enter => cases left with | act executed => cases executed
+    | operation live right => cases Option.some.inj (found.symm.trans live); cases left.deterministic right; rfl
+    | enter live => cases Option.some.inj (found.symm.trans live); cases left with | act executed => cases executed
     | handoff => exact False.elim (left.not_halt rfl)
-  | enter resolved acquired resident =>
+  | enter found resolved acquired resident =>
     cases right with
-    | operation right => cases right with | act executed => cases executed
-    | enter selected moved live =>
+    | operation live right => cases Option.some.inj (found.symm.trans live); cases right with | act executed => cases executed
+    | enter live selected moved stored =>
+      cases Option.some.inj (found.symm.trans live)
       cases Option.some.inj (resolved.symm.trans selected)
       cases Option.some.inj (acquired.symm.trans moved)
-      cases Option.some.inj (resident.symm.trans live)
+      cases Option.some.inj (resident.symm.trans stored)
       rfl
-  | handoff installed =>
+  | handoff found installed =>
     cases right with
-    | operation right => exact False.elim (right.not_halt rfl)
-    | handoff other => cases Option.some.inj (installed.symm.trans other); rfl
-  | clean left =>
+    | operation live right => exact False.elim (right.not_halt rfl)
+    | handoff live other => cases Option.some.inj (found.symm.trans live); cases Option.some.inj (installed.symm.trans other); rfl
+  | clean found left =>
     cases right with
-    | clean right => cases left.deterministic right; rfl
+    | clean live right => cases Option.some.inj (found.symm.trans live); cases left.deterministic right; rfl
     | retire => exact False.elim (left.not_halt rfl)
   | retire =>
     cases right with
-    | clean right => exact False.elim (right.not_halt rfl)
+    | clean live right => exact False.elim (right.not_halt rfl)
     | retire => rfl
+
 
 end OwnershipMir.SourceCalls

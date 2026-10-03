@@ -10,9 +10,11 @@ def bodyShellDebit {n : Nat} (code : Body n) (state : State (n + 1)) : Nat :=
   | _ => 0
 
 def Configuration.shellDebit {n : Nat} (config : Configuration n) : Nat :=
-  match config.control with
-  | .body code _ => bodyShellDebit code config.state
-  | .cleaning code => OwnershipMir.Configuration.shellDebit ⟨code, config.state⟩
+  match config.store.region config.active with
+  | none => 0
+  | some slots => match config.control with
+    | .body code _ => bodyShellDebit code ⟨slots, config.store.temp⟩
+    | .cleaning code => OwnershipMir.Configuration.shellDebit ⟨code, ⟨slots, config.store.temp⟩⟩
 
 def Configuration.shells {n : Nat} (config : Configuration n) : Nat :=
   config.mass (fun _ => 0) (fun shell => if shell.restriction = .exact then 1 else 0)
@@ -36,40 +38,57 @@ theorem local_shells {n : Nat} {program : Program n} {signature : Signature}
   | branch => exact ⟨Nat.le_refl _, Nat.add_zero _⟩
   | loop => exact ⟨Nat.le_refl _, Nat.add_zero _⟩
 
+private theorem store_shells {n : Nat} {store : Store n Atom} {active : Nat} {slots : Region n Atom}
+    (live : store.region active = some slots) (next : State n) (debit : Nat)
+    (bounded : next.linearShells ≤ (State.mk slots store.temp).linearShells)
+    (balance : next.shells + debit = (State.mk slots store.temp).shells) :
+    (store.replace active next.slots next.temp).mass (fun _ => 0) (fun s => if s.restriction = .data then 0 else 1) ≤
+        store.mass (fun _ => 0) (fun s => if s.restriction = .data then 0 else 1) ∧
+      (store.replace active next.slots next.temp).mass (fun _ => 0) (fun s => if s.restriction = .exact then 1 else 0) + debit =
+        store.mass (fun _ => 0) (fun s => if s.restriction = .exact then 1 else 0) := by
+  have linear := Store.replace_mass_state live next (fun _ => 0) (fun s => if s.restriction = .data then 0 else 1)
+  have exacts := Store.replace_mass_state live next (fun _ => 0) (fun s => if s.restriction = .exact then 1 else 0)
+  change next.mass (fun _ => 0) (fun s => if s.restriction = .data then 0 else 1) ≤
+    (State.mk slots store.temp).mass (fun _ => 0) (fun s => if s.restriction = .data then 0 else 1) at bounded
+  change next.mass _ _ + debit = (State.mk slots store.temp).mass _ _ at balance
+  constructor <;> omega
+
 theorem Safe.shell_step {n : Nat} {program : Program n} {signature : Signature} {final : Context (n + 1)}
     {before after : Configuration n} (safe : Safe program signature final before)
     (step : Transition program before after) :
     after.linearShells ≤ before.linearShells ∧ after.shells + before.shellDebit = before.shells := by
   cases step with
-  | @operation code cleanup state next after stack step =>
+  | operation live step =>
     cases safe with
-    | body typed checked retained =>
+    | body found typed checked retained =>
+      cases Option.some.inj (live.symm.trans found)
       obtain ⟨bounded, balance⟩ := local_shells typed checked step
-      constructor
-      · exact Nat.add_le_add_right bounded _
-      · change after.shells + stackMass _ _ stack + bodyShellDebit code state = state.shells + stackMass _ _ stack
-        omega
-  | @enter identity destination next cleanup state stack function argument resolved resident =>
-    have same := enter_mass state stack next cleanup destination argument resident
-    exact ⟨Nat.le_of_eq (same _ _), by simpa only [Configuration.shellDebit, bodyShellDebit, Nat.add_zero, Configuration.shells, Configuration.mass] using same (fun _ => 0) (fun s => if s.restriction = .exact then 1 else 0)⟩
-  | @handoff cleanup state frame stack slots installed =>
-    have same := handoff_mass state frame stack installed
-    exact ⟨Nat.le_of_eq (same _ _), by simpa only [Configuration.shellDebit, bodyShellDebit, Nat.add_zero, Configuration.shells, Configuration.mass] using same (fun _ => 0) (fun s => if s.restriction = .exact then 1 else 0)⟩
-  | @clean code state next after stack step =>
+      simpa [Configuration.linearShells, Configuration.shells, Configuration.mass, Configuration.shellDebit, live]
+        using store_shells live _ _ bounded balance
+  | @enter identity destination next cleanup store active stack function argument resolved resident =>
+    have same := enter_mass store argument resident
+    refine ⟨Nat.le_of_eq (same _ _), ?_⟩
+    simp only [Configuration.shellDebit, bodyShellDebit, Configuration.shells, Configuration.mass, same]
+    cases store.region active <;> rfl
+  | @handoff cleanup store active frame stack caller slots live installed =>
+    have same := handoff_mass store frame live installed
+    refine ⟨Nat.le_of_eq (same _ _), ?_⟩
+    simp only [Configuration.shellDebit, Configuration.shells, Configuration.mass, same]
+    cases store.region active <;> rfl
+  | @clean code store active slots next after stack live step =>
     cases safe with
-    | cleaning typed checked retained =>
-      have start : OwnershipMir.Safe signature (Op.Checked _) _ ⟨code, state⟩ := ⟨_, typed, checked⟩
-      have bounded := start.linear_shells_step step
-      have balance := start.shell_step step
-      change after.shells + OwnershipMir.Configuration.shellDebit ⟨code, state⟩ = state.shells at balance
-      constructor
-      · exact Nat.add_le_add_right bounded _
-      · change after.shells + stackMass _ _ stack + OwnershipMir.Configuration.shellDebit ⟨code, state⟩ =
-          state.shells + stackMass _ _ stack
-        omega
-  | retire =>
-    simp [Configuration.linearShells, Configuration.shells, Configuration.mass, stackMass, empty_mass,
-      Configuration.shellDebit, OwnershipMir.Configuration.shellDebit]
+    | cleaning found typed checked retained =>
+      cases Option.some.inj (live.symm.trans found)
+      have start : OwnershipMir.Safe signature (Op.Checked _) _ ⟨code, ⟨slots, store.temp⟩⟩ := ⟨_, typed, checked⟩
+      simpa [Configuration.linearShells, Configuration.shells, Configuration.mass, Configuration.shellDebit, live]
+        using store_shells live _ _ (start.linear_shells_step step) (start.shell_step step)
+  | @retire store active frame stack empty register =>
+    have same (leaf : Atom → Nat) (shell : Shell → Nat) : (store.retire active).mass leaf shell = store.mass leaf shell := by
+      simpa [cellMass, total_zero] using store.retire_mass empty leaf shell
+    exact ⟨Nat.le_of_eq (same _ _), by
+      simpa [Configuration.shellDebit, empty, OwnershipMir.Configuration.shellDebit, Configuration.shells, Configuration.mass]
+        using same (fun _ => 0) (fun s => if s.restriction = .exact then 1 else 0)⟩
+
 
 /-- A trace interpretation of real transitions, not runtime bookkeeping. -/
 inductive ShellTrace {n : Nat} (program : Program n) : Configuration n → Configuration n → Nat → Prop where
@@ -92,20 +111,26 @@ theorem Safe.shell_execution {n : Nat} {program : Program n} {signature : Signat
 /-- The outer activation is an explicit caller boundary. Its final state keeps
 its declared output context; called activations must retire completely. -/
 def Function.start {n : Nat} (function : Function n) (argument : Value) : Configuration n :=
-  ⟨.body function.body function.cleanup, ⟨argumentSlots argument, none⟩, []⟩
+  ⟨.body function.body function.cleanup, ⟨[some (argumentSlots argument)], none⟩, 0, []⟩
 
 theorem Function.start_safe {n : Nat} {program : Program n} {signature : Signature} {function : Function n}
     (functions : program.Checked) {identity : Nat} (selected : program identity = some function)
     {argument : Value} (typed : argument.kind signature = function.input) :
     Safe program signature function.exit (function.start argument) :=
-  .body (argument_typed typed) (functions identity function selected).1 .nil
+  .body rfl (argument_typed typed) (functions identity function selected).1 .nil
 theorem Function.start_declared {n : Nat} {program : Program n} {signature : Signature} {function : Function n}
     (functions : program.Checked) {identity : Nat} (selected : program identity = some function)
     {argument : Value} (typed : argument.kind signature = function.input) :
     (function.start argument).Declared program.declarations signature := by
   have valid : Layout.Declared program.declarations (argument.layout (Atom.kind signature)) := by
     simpa [← typed, Value.kind, Tree.layout_map] using (functions identity function selected).2.2.2.2.1
-  exact ⟨argument_declared valid, by intro frame impossible; cases impossible⟩
+  refine ⟨?_, by intro tree impossible; cases impossible⟩
+  intro r slots live
+  have bound : r < 1 := Store.region_bound live
+  have zero : r = 0 := by omega
+  subst r
+  cases Option.some.inj live
+  exact (argument_declared valid).1
 
 
 /-- General entry-to-arbitrary-prefix safety, including recursive calls,

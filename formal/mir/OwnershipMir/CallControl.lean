@@ -7,7 +7,7 @@ theorem Transition.not_terminal {n : Nat} {program : Program n} {before after : 
     (step : Transition program before after) : ¬ before.Terminal := by
   intro ⟨cleanup, halted, empty⟩
   cases step with
-  | operation step => cases halted; exact step.not_halt rfl
+  | operation live step => cases halted; exact step.not_halt rfl
   | enter => cases halted
   | handoff => cases empty
   | clean => cases halted
@@ -16,26 +16,26 @@ theorem Transition.not_terminal {n : Nat} {program : Program n} {before after : 
 theorem Transition.deterministic {n : Nat} {program : Program n} {before first second : Configuration n}
     (left : Transition program before first) (right : Transition program before second) : first = second := by
   cases left with
-  | operation left =>
+  | operation found left =>
     cases right with
-    | operation right => cases left.deterministic right; rfl
+    | operation live right => cases Option.some.inj (found.symm.trans live); cases left.deterministic right; rfl
     | enter => cases left with | act executed => cases executed
     | handoff => exact False.elim (left.not_halt rfl)
   | enter resolved resident =>
     cases right with
-    | operation right => cases right with | act executed => cases executed
+    | operation live right => cases right with | act executed => cases executed
     | enter selected live => cases Option.some.inj (resolved.symm.trans selected); cases Option.some.inj (resident.symm.trans live); rfl
-  | handoff installed =>
+  | handoff found installed =>
     cases right with
-    | operation right => exact False.elim (right.not_halt rfl)
-    | handoff other => cases Option.some.inj (installed.symm.trans other); rfl
-  | clean left =>
+    | operation live right => exact False.elim (right.not_halt rfl)
+    | handoff live other => cases Option.some.inj (found.symm.trans live); cases Option.some.inj (installed.symm.trans other); rfl
+  | clean found left =>
     cases right with
-    | clean right => cases left.deterministic right; rfl
+    | clean live right => cases Option.some.inj (found.symm.trans live); cases left.deterministic right; rfl
     | retire => exact False.elim (left.not_halt rfl)
   | retire =>
     cases right with
-    | clean right => exact False.elim (right.not_halt rfl)
+    | clean live right => exact False.elim (right.not_halt rfl)
     | retire => rfl
 
 /-- Nontermination is an actual infinite transition sequence, not stuckness.

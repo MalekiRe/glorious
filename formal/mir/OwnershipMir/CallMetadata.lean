@@ -20,14 +20,51 @@ theorem Safe.declared_step {n : Nat} {α : Type} {signature : Signature} {declar
   | branch => exact valid
   | loop => exact valid
 
+def Store.Declared {n : Nat} (declarations : Declarations) (signature : Signature) (store : Store n Atom) : Prop :=
+  (∀ r slots, store.region r = some slots → ∀ i, Cell.Declared declarations (Atom.kind signature) (slots i)) ∧
+    Cell.Declared declarations (Atom.kind signature) store.temp
+
+theorem Store.Declared.replace {n : Nat} {declarations : Declarations} {signature : Signature}
+    {store : Store n Atom} (valid : store.Declared declarations signature) (identity : Nat)
+    {slots : Region n Atom} {temp : Cell Atom} (localValid : (State.mk slots temp).Declared declarations signature) :
+    (store.replace identity slots temp).Declared declarations signature := by
+  refine ⟨?_, localValid.2⟩
+  intro r actual live
+  by_cases same : r = identity
+  · subst r
+    have bound : identity < store.regions.length := by simpa [Store.replace] using Store.region_bound live
+    cases Option.some.inj ((Store.replace_same bound slots temp).symm.trans live)
+    exact localValid.1
+  · exact valid.1 r actual ((Store.replace_other _ _ _ _ _ same).symm.trans live)
+
+theorem Store.Declared.allocate {n : Nat} {declarations : Declarations} {signature : Signature}
+    {store : Store n Atom} (valid : store.Declared declarations signature) {slots : Region n Atom}
+    (localValid : (State.mk slots none).Declared declarations signature) :
+    (store.allocate slots).Declared declarations signature := by
+  refine ⟨?_, by intro tree impossible; cases impossible⟩
+  intro r actual live
+  have bound : r < store.regions.length + 1 := by simpa [Store.allocate] using Store.region_bound live
+  by_cases same : r = store.regions.length
+  · subst r
+    cases Option.some.inj ((Store.allocate_fresh store slots).symm.trans live)
+    exact localValid.1
+  · exact valid.1 r actual ((Store.allocate_old (by omega) slots).symm.trans live)
+
+theorem Store.Declared.retire {n : Nat} {declarations : Declarations} {signature : Signature}
+    {store : Store n Atom} (valid : store.Declared declarations signature) (identity : Nat) :
+    (store.retire identity).Declared declarations signature := by
+  refine ⟨?_, valid.2⟩
+  intro r actual live
+  by_cases same : r = identity
+  · subst r; rw [Store.retire_same] at live; cases live
+  · exact valid.1 r actual ((Store.retire_other _ _ _ same).symm.trans live)
+
 namespace Calls
 
-/-- One declaration environment validates the active region and every retained
-caller. This invariant follows actual residents, including holes and registers. -/
+/-- The invariant covers every live region in the unified store. -/
 def Configuration.Declared {n : Nat} (declarations : Declarations) (signature : Signature)
-    (config : Configuration n) : Prop :=
-  config.state.Declared declarations signature ∧
-    ∀ frame ∈ config.stack, frame.state.Declared declarations signature
+    (config : Configuration n) : Prop := config.store.Declared declarations signature
+
 
 theorem argument_declared {n : Nat} {declarations : Declarations} {signature : Signature} {value : Value}
     (valid : Layout.Declared declarations (value.layout (Atom.kind signature))) :
@@ -52,36 +89,32 @@ theorem Safe.declared_step {n : Nat} {program : Program n} {signature : Signatur
     (valid : before.Declared program.declarations signature) (step : Transition program before after) :
     after.Declared program.declarations signature := by
   cases step with
-  | operation step =>
+  | operation live step =>
     cases safe with
-    | body typed checked retained =>
-      exact ⟨OwnershipMir.Safe.declared_step ⟨_, typed, checked⟩ (fun checked typed valid executed => checked.preserves_declarations typed valid executed) valid.1 step, valid.2⟩
-  | @enter identity destination next cleanup state stack function argument resolved resident =>
-    refine ⟨argument_declared (valid.1.2 argument resident), ?_⟩
-    intro frame member
-    rcases List.mem_cons.mp member with same | member
-    · subst frame; exact State.declared_without_temp valid.1
-    · exact valid.2 frame member
-  | @handoff cleanup state frame stack slots installed =>
+    | body found typed checked retained =>
+      cases Option.some.inj (live.symm.trans found)
+      exact valid.replace _ (OwnershipMir.Safe.declared_step ⟨_, typed, checked⟩
+        (fun checked typed valid executed => checked.preserves_declarations typed valid executed)
+        ⟨valid.1 _ _ live, valid.2⟩ step)
+  | enter resolved resident => exact valid.allocate (argument_declared (valid.2 _ resident))
+  | @handoff cleanup store active frame stack caller slots live installed =>
     cases safe with
-    | body typed checked retained =>
+    | body activeLive typed checked retained =>
       cases checked
       cases retained with
-      | cons resident returned put next outer release =>
-        have caller := valid.2 frame (by simp)
-        have transferred := put.preserves_declarations (state := ⟨frame.slots, state.temp⟩)
-          ⟨resident, typed.2.trans returned⟩ ⟨caller.1, valid.1.2⟩ installed
-        refine ⟨State.declared_without_temp valid.1, ?_⟩
-        intro other member
-        rcases List.mem_cons.mp member with same | member
-        · subst other; exact transferred
-        · exact valid.2 other (List.mem_cons_of_mem _ member)
-  | clean step =>
+      | cons older callerLive resident returned put next outer release =>
+        cases Option.some.inj (live.symm.trans callerLive)
+        exact valid.replace _ (put.preserves_declarations (state := ⟨caller, store.temp⟩)
+          ⟨resident, typed.2.trans returned⟩ ⟨valid.1 _ _ live, valid.2⟩ installed)
+  | clean live step =>
     cases safe with
-    | cleaning typed checked retained =>
-      exact ⟨OwnershipMir.Safe.declared_step ⟨_, typed, checked⟩ (fun checked typed valid executed => checked.preserves_declarations typed valid executed) valid.1 step, valid.2⟩
-  | @retire frame stack =>
-    exact ⟨valid.2 frame (by simp), fun other member => valid.2 other (List.mem_cons_of_mem _ member)⟩
+    | cleaning found typed checked retained =>
+      cases Option.some.inj (live.symm.trans found)
+      exact valid.replace _ (OwnershipMir.Safe.declared_step ⟨_, typed, checked⟩
+        (fun checked typed valid executed => checked.preserves_declarations typed valid executed)
+        ⟨valid.1 _ _ live, valid.2⟩ step)
+  | retire empty register => exact valid.retire _
+
 
 theorem Safe.declared_run {n : Nat} {program : Program n} {signature : Signature} {final : Context (n + 1)}
     (functions : program.Checked) {before after : Configuration n} (safe : Safe program signature final before)

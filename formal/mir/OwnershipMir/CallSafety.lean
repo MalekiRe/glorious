@@ -33,96 +33,131 @@ theorem Instruction.Checked.executed {n : Nat} {program : Program n} {signature 
   | operation checked => exact checked.executed typed executed
   | call => cases executed
 
-/-- The activation invariant follows every physical phase: body execution,
-argument transfer, protected result installation, cleanup, and empty retirement. -/
+theorem StackTyped.frame {n : Nat} {program : Program n} {signature : Signature}
+    {before after : Store (n + 1) Atom} {ceiling : Nat} {stack : List (Frame n)}
+    {output final : Context (n + 1)} {cleanup : Code (n + 1) (Op (n + 1))}
+    (typed : StackTyped program signature before ceiling stack output cleanup final)
+    (same : ∀ r, r < ceiling → after.region r = before.region r) :
+    StackTyped program signature after ceiling stack output cleanup final := by
+  induction typed generalizing after with
+  | nil => exact .nil
+  | cons older live resident returned put next outer release ih =>
+    exact .cons older ((same _ older).trans live) resident returned put next
+      (ih (fun r below => same r (Nat.lt_trans below older))) release
+
+theorem ResumeTyped.frame {n : Nat} {program : Program n} {signature : Signature}
+    {before after : Store (n + 1) Atom} {ceiling : Nat} {stack : List (Frame n)} {final : Context (n + 1)}
+    (typed : ResumeTyped program signature before ceiling stack final)
+    (same : ∀ r, r < ceiling → after.region r = before.region r) :
+    ResumeTyped program signature after ceiling stack final := by
+  cases typed with
+  | cons older live resident next outer =>
+    exact .cons older ((same _ older).trans live) resident next
+      (outer.frame (fun r below => same r (Nat.lt_trans below older)))
+
+/-- The one store is updated in place logically; preserved caller typing uses
+region-disjoint framing, never snapshots copied into continuation frames. -/
 theorem Safe.preservation {n : Nat} {program : Program n} {signature : Signature} {final : Context (n + 1)}
     (functions : program.Checked) {before after : Configuration n} (safe : Safe program signature final before)
     (step : Transition program before after) : Safe program signature final after := by
   cases step with
-  | operation step =>
+  | operation live step =>
     cases safe with
-    | body typed checked retained =>
+    | body found typed checked retained =>
+      cases Option.some.inj (live.symm.trans found)
       obtain ⟨⟨current, realized, remaining⟩, _⟩ :=
         OwnershipMir.Safe.step ⟨_, typed, checked⟩ Instruction.Checked.executed step
-      exact .body realized remaining retained
-  | @enter identity destination next cleanup state stack function argument resolved resident =>
+      exact .body (Store.replace_same (Store.region_bound live) _ _) realized remaining
+        (retained.frame (fun r below => Store.replace_other _ _ _ _ _ (by omega)))
+  | @enter identity destination next cleanup store active stack function argument resolved resident =>
     cases safe with
-    | body typed checked retained =>
+    | body live typed checked retained =>
       cases checked with
       | act head tail =>
         cases head with
         | call selected argumentType put =>
           cases Option.some.inj (resolved.symm.trans selected)
-          have classified : argument.kind signature = function.input := by
+          have classified : Value.kind signature argument = function.input := by
             simpa [resident] using typed.2.trans argumentType
           have admitted := functions identity function resolved
-          exact .body (argument_typed classified) admitted.1
-            (.cons typed.1 rfl put tail retained (Function.cleanup_checked admitted.2.1))
-  | @handoff cleanup state frame stack slots installed =>
+          have bound := Store.region_bound live
+          exact .body (Store.allocate_fresh _ _) (argument_typed classified) admitted.1
+            (.cons bound ((Store.allocate_old bound _).trans live) typed.1 rfl put tail
+              (retained.frame (fun r below => Store.allocate_old (Nat.lt_trans below bound) _))
+              (Function.cleanup_checked admitted.2.1))
+  | @handoff cleanup store active frame stack caller slots live installed =>
     cases safe with
-    | body typed checked retained =>
+    | body activeLive typed checked retained =>
       cases checked
       cases retained with
-      | cons resident returned put next outer release =>
-        obtain ⟨effect, realized, _⟩ := put.effect (state := ⟨frame.slots, state.temp⟩) ⟨resident, typed.2.trans returned⟩ installed
-        exact .cleaning (before := ⟨_, none⟩) ⟨typed.1, rfl⟩ release (.cons realized next outer)
-  | clean step =>
+      | cons older callerLive resident returned put next outer release =>
+        cases Option.some.inj (live.symm.trans callerLive)
+        obtain ⟨_, realized, _⟩ := put.effect (state := ⟨caller, store.temp⟩) ⟨resident, typed.2.trans returned⟩ installed
+        exact .cleaning (before := ⟨_, none⟩)
+          ((Store.replace_other _ _ _ _ _ (by omega)).trans activeLive) ⟨typed.1, rfl⟩ release
+          (.cons older (Store.replace_same (Store.region_bound live) _ _) realized next
+            (outer.frame (fun r below => Store.replace_other _ _ _ _ _ (by omega))))
+  | clean live step =>
     cases safe with
-    | cleaning typed checked retained =>
+    | cleaning found typed checked retained =>
+      cases Option.some.inj (live.symm.trans found)
       obtain ⟨⟨current, realized, remaining⟩, _⟩ :=
-        (OwnershipMir.Safe.step (signature := signature) ⟨_, typed, checked⟩ Op.Checked.executed step)
-      exact .cleaning realized remaining retained
-  | retire =>
+        OwnershipMir.Safe.step ⟨_, typed, checked⟩ Op.Checked.executed step
+      exact .cleaning (Store.replace_same (Store.region_bound live) _ _) realized remaining
+        (retained.frame (fun r below => Store.replace_other _ _ _ _ _ (by omega)))
+  | retire empty register =>
     cases safe with
-    | cleaning typed checked retained =>
+    | cleaning live typed checked retained =>
       cases retained with
-      | cons resident next outer => exact .body resident next outer
+      | cons older callerLive resident next outer =>
+        exact .body ((Store.retire_other _ _ _ (by omega)).trans callerLive)
+          (by simpa [Store.retire, register] using resident) next
+          (outer.frame (fun r below => Store.retire_other _ _ _ (by omega)))
 
-/-- Recursion is admitted through body checking. Progress never asks for a
-completed callee execution, successful allocation, or terminating cleanup. -/
 theorem Safe.progress {n : Nat} {program : Program n} {signature : Signature} {final : Context (n + 1)}
     {config : Configuration n} (safe : Safe program signature final config) :
     config.Terminal ∨ ∃ next, Transition program config next := by
   cases safe with
-  | @body code cleanup state stack before output module typed checked retained =>
+  | @body code cleanup store active slots stack before output module live typed checked retained =>
     cases checked with
     | halt =>
       cases retained with
       | nil => exact Or.inl ⟨cleanup, rfl, rfl⟩
-      | @cons frame stack output cleanup final slots shape after callerExit callerModule calleeModule resident returned put next outer release =>
-        obtain ⟨result, executed, realized, _⟩ := put.sound (state := ⟨frame.slots, state.temp⟩) ⟨resident, typed.2.trans returned⟩
+      | @cons ceiling frame stack output cleanup final callerSlots actual result after callerExit callerModule calleeModule older callerLive resident returned put next outer release =>
+        obtain ⟨result, executed, realized, _⟩ := put.sound (state := ⟨actual, store.temp⟩) ⟨resident, typed.2.trans returned⟩
         have empty : result.temp = none := by
           cases put
           exact Option.map_eq_none_iff.mp realized.2
         cases result with
         | mk slots temp =>
           cases empty
-          exact Or.inr ⟨_, .handoff executed⟩
+          exact Or.inr ⟨_, .handoff callerLive executed⟩
     | act head tail =>
       cases head with
       | operation checked =>
         obtain ⟨next, executed⟩ := checked.progress typed
-        exact Or.inr ⟨_, .operation (.act executed)⟩
+        exact Or.inr ⟨_, .operation live (.act executed)⟩
       | call resolved argument result =>
-        obtain ⟨value, live, _⟩ := Option.map_eq_some_iff.mp (typed.2.trans argument)
-        exact Or.inr ⟨_, .enter resolved live⟩
+        obtain ⟨value, resident, _⟩ := Option.map_eq_some_iff.mp (typed.2.trans argument)
+        exact Or.inr ⟨_, .enter resolved resident⟩
     | branch scalar left right =>
       obtain ⟨choice, observed⟩ := observe_ready typed scalar
-      exact Or.inr ⟨_, .operation (.branch observed)⟩
+      exact Or.inr ⟨_, .operation live (.branch observed)⟩
     | loop scalar body tail =>
       obtain ⟨choice, observed⟩ := observe_ready typed scalar
-      exact Or.inr ⟨_, .operation (.loop observed)⟩
-  | @cleaning code state stack before module typed checked retained =>
-    have start : OwnershipMir.Safe signature (Op.Checked _) (emptyContext n) ⟨code, state⟩ := ⟨before, typed, checked⟩
+      exact Or.inr ⟨_, .operation live (.loop observed)⟩
+  | @cleaning code store active slots stack before module live typed checked retained =>
+    have start : OwnershipMir.Safe signature (Op.Checked _) (emptyContext n) ⟨code, ⟨slots, store.temp⟩⟩ := ⟨before, typed, checked⟩
     rcases start.progress Op.Checked.progress with halted | ⟨next, step⟩
     · cases halted
       cases checked
       have same := typed_empty typed
-      subst state
+      have emptySlots := congrArg State.slots same
+      have emptyTemp := congrArg State.temp same
       cases retained
-      exact Or.inr ⟨_, .retire⟩
+      exact Or.inr ⟨_, .retire (live.trans (congrArg some emptySlots)) emptyTemp⟩
     · cases next with
-      | mk code state => exact Or.inr ⟨_, .clean step⟩
+      | mk code state => exact Or.inr ⟨_, .clean live step⟩
 
 theorem Safe.execution {n : Nat} {program : Program n} {signature : Signature} {final : Context (n + 1)}
     (functions : program.Checked) {before after : Configuration n} (safe : Safe program signature final before)
