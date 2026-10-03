@@ -179,15 +179,45 @@ ownership pipeline. The transfer register is part of the actual runtime state.
   `Function.call_diverges` propagates actual recursive divergence through entry.
   `Function.return_initialized` derives an initialized runtime result.
 
-Bounds: this is the resolved ownership MIR slice, not the full named source
-language. The existing atomic ownership-command lowering/return/divergence
-theorems remain intact; they are not a source-call lowering theorem. Call
-admission currently starts from checked MIR function bodies and prepared
-argument packs. Named source resolution, argument-pack elaboration, and
-source-call refinement remain outside these claims. Field paths and nominal
-metadata are resolved; declaration-derived authority and visibility are not
-added. Exact occupancy and branch agreement remain checking precision policy;
-loops retain invariant contexts. No maybe-initialized admission is added.
+- `SourceCalls.lean`: an independent resolved ownership source language extends
+  atomic commands with recursive direct calls and result transfer. Source call
+  entry acquires the argument place and retains the cleared caller slots, rather
+  than assuming a prepared MIR register. Callee bodies execute through a source
+  activation stack; source cleanup executes atomic commands. Source checking
+  requires initialized whole-value arguments/results, declaration agreement,
+  valid result placement, and complete activation cleanup. It derives
+  `Calls.Program.Checked` for the compiled program, without successful execution
+  or return premises.
+- `SourceCallLowering.lean`: every source transition produces a nonempty finite
+  target execution. Argument transfer precedes actual call entry; commands and
+  cleanup expand through the existing finite-block lowering. Retained source
+  continuations and cleanup code are lowered along with the current control;
+  the underlying resident storage is unchanged at corresponding boundaries.
+- `Simulation.lean`: positive finite-step simulation and source progress reflect
+  a terminal target run to an exact mapped source endpoint. Deterministic finite
+  termination gives accessibility, which strictly descends across each positive
+  source-step implementation. No assumed reverse simulation or eventual return
+  to a source boundary is used. Actual infinite-trace equivalence additionally
+  consumes progress at every target-reachable state, including internal steps.
+- `SourceCallAdequacy.lean`: source-boundary progress is derived from checked
+  finite prefixes. Its invariant is the existing activation invariant pulled
+  back through lowering; its preservation follows actual forward simulation.
+  Public source admission derives target-prefix ownership/conservation, both
+  shell bounds, actual source progress, exact terminal-return correspondence,
+  bidirectional divergence correspondence, and initialized returned residents.
+  The existing MIR cleanup and call proofs remain the physical consumers.
+
+Bounds: this is a resolved ownership source-to-MIR slice, not the full named
+source language. Function identities, field paths, nominal metadata, and slot
+acquisition order are resolved. A source call takes an already constructed
+argument-tuple place by explicit whole move; duplicable arguments can be copied
+by a preceding source command. Calls producing arguments execute in the source
+control sequence, not as assumed-terminating argument evaluators. Name
+resolution, arbitrary argument-expression/tuple elaboration, implicit
+copy/reborrow selection, and declaration-derived authority/visibility remain
+outside these claims. Exact occupancy and branch agreement remain checking
+precision policy; loops retain invariant contexts. No maybe-initialized
+admission is added.
 
 Each activation has the same arbitrary finite slot capacity, with slot indices
 in resolved acquisition order; the stack is unbounded. Region freshness is
@@ -204,14 +234,15 @@ Nominal/source integration must derive layout and principal restriction from
 declarations and deconstruction authority from checking context, with field
 visibility separate. The call slice does not claim that integration.
 
-Verification: a fresh `lake clean && lake build OwnershipMir` passed all 27
-jobs with warnings as errors and auto-implicit parameters disabled. Lean
-signature inspection confirms `Safe.step` requires preservation only and
-`Safe.progress` requires progress only. Seventeen instruction, block, shared
-control, lowering, cleanup, and call theorem dependencies were inspected and
-use only `propext`, `Classical.choice`, and `Quot.sound`. Existing source/MIR
-return and divergence correspondence, ordered cleanup, recursive call
-composition, and full ownership/shell safety all consume the split contracts.
+Verification: a fresh `lake clean && lake build OwnershipMir` passed all 31
+jobs with warnings as errors and auto-implicit parameters disabled. Twenty-four
+general theorem dependencies were inspected. Generic positive-simulation
+terminal reflection uses no axioms; generic actual divergence equivalence uses
+only `Classical.choice`. All remaining inspected dependencies are limited to
+`propext`, `Classical.choice`, and `Quot.sound`. The checks include source
+checking-to-MIR admission, positive simulation, source preservation/progress,
+both public safety theorems, exact return reflection, actual divergence
+equivalence, initialized results, and existing local/call/cleanup consumers.
 No `sorry`, new axioms, concrete examples, or unit tests were used to bypass
 the general obligations.
 

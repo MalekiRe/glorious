@@ -126,4 +126,27 @@ theorem Block.executed {n : Nat} {α : Type} {signature : Signature}
   cases remaining
   exact ⟨realized, conserved⟩
 
+/-- Execute a checked straight-line prefix without requiring progress of its
+continuation. The local premise covers only members of this prefix, so control
+operations in the continuation need not be atomic state transformers. -/
+theorem Block.checked_prefix {n : Nat} {α : Type} {signature : Signature}
+    {rule : Context n → α → Context n → Prop} {exec : α → State n → Option (State n)}
+    (ops : List α) {tail : Code n α} {before final : Context n}
+    (checked : Code.Checked rule before (Block.emit ops tail) final)
+    {state : State n} (typed : state.Typed signature before)
+    (ready : ∀ op ∈ ops, ∀ {input output}, rule input op output →
+      ∀ {resident}, resident.Typed signature input →
+        ∃ next, exec op resident = some next ∧ next.Typed signature output) :
+    ∃ result middle, Block.exec exec ops state = some result ∧
+      result.Typed signature middle ∧ Code.Checked rule middle tail final := by
+  induction ops generalizing before state with
+  | nil => exact ⟨state, before, rfl, typed, checked⟩
+  | cons op rest ih =>
+    cases checked with
+    | act head tail =>
+      obtain ⟨next, executed, realized⟩ := ready op (by simp) head typed
+      obtain ⟨result, middle, remaining, finalTyped, continuation⟩ :=
+        ih tail realized (fun op member => ready op (by simp [member]))
+      exact ⟨result, middle, by simp [Block.exec, executed, remaining], finalTyped, continuation⟩
+
 end OwnershipMir
