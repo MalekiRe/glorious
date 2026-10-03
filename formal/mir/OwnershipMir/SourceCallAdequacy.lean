@@ -438,29 +438,47 @@ theorem AcquireChecked.borrow_progress {n : Nat} {signature : Signature}
       cases Option.some.inj same
       exact ⟨mode, target, Or.inl ⟨value, rfl, member⟩⟩
 
-/-- Actual result acquisition preserves the initialization and permissions of
-returned references. Selection of permitted input/retained-owner origins and
-declared outlives constraints remains a separate source-contract obligation. -/
+/-- Result admission consumes interpreted permitted origins and derives the
+outlives boundary from pre-call storage. It does not assume a returned pointer
+already outlives the callee, or infer provenance from its reference type. -/
 theorem result_borrow_progress {n : Nat} {program : Program n} {signature : Signature}
-    {store : Store (n + 1) Atom} {active : Nat} {slots : Region (n + 1) Atom} {stack : List (Frame n)}
+    {initial store : Store (n + 1) Atom} {active : Nat} {slots : Region (n + 1) Atom} {stack : List (Frame n)}
+    {inputs : Value} {retained : List (Address (n + 1))}
     {place : Place (n + 1)} {next : Body n} {cleanup : Code (n + 1) (Command (n + 1))}
     {before after : Context (n + 1)}
     (checked : AcquireChecked authority before place after)
     (typed : (State.mk slots store.temp).Typed signature before) (live : store.region active = some slots)
     (valid : store.BorrowInvariant signature) (permission : (Op.take place .whole).OwnerPermitted store active)
-    (references : ∀ lens value, place.find slots = some lens → lens.selected = some value → Value.ReferencesReady store value) :
+    (references : ∀ lens value, place.find slots = some lens → lens.selected = some value → Value.ReferencesReady store value)
+    (origins : ∀ lens value, place.find slots = some lens → lens.selected = some value → Value.ReturnsFrom store inputs retained value)
+    (inputsReady : Value.ReferencesReady initial inputs)
+    (ownersLive : ∀ owner ∈ retained, ∃ slots, initial.region owner.region = some slots)
+    (extension : initial.loans.IsPrefix store.loans) (scope : active = initial.regions.length) :
     ∃ result value, Transition program ⟨.body (.act (.result place) next) cleanup, store, active, stack⟩ result ∧
       result.store.temp = some value ∧ value.ready ∧ Value.ReferencesReady result.store value ∧
       result.store.BorrowInvariant signature ∧
+      (∀ identity mode target, value.Contains (.reference identity mode target) →
+        ∃ loan, result.store.loans[identity]? = some loan ∧ loan.referent.region < active) ∧
       ∃ middle, Calls.Transition program.lower
         (Configuration.lower ⟨.body (.act (.result place) next) cleanup, store, active, stack⟩) middle ∧
         Run (Calls.Transition program.lower) middle result.lower := by
   obtain ⟨result, value, executed, register, _, ready, preserved, admitted⟩ :=
     checked.borrow_progress typed live valid permission references
+  obtain ⟨lens, found, selected⟩ : ∃ lens, place.find slots = some lens ∧ lens.selected = some value := by
+    cases Op.effect_of_exec ((acquire_eq _ _).symm.trans executed) with
+    | take found selected extracted empty =>
+      cases Option.some.inj extracted
+      cases Option.some.inj register
+      exact ⟨_, found, selected⟩
+  have returned : Value.ReturnsFrom (store.replace active result.slots result.temp) inputs retained value :=
+    (origins lens value found selected).of_loans_eq (before := store)
+      (after := store.replace active result.slots result.temp) rfl
+  have lifetime := returned.before_call inputsReady ownersLive extension preserved register
   have step : Transition program ⟨.body (.act (.result place) next) cleanup, store, active, stack⟩
       ⟨.body next cleanup, store.replace active result.slots result.temp, active, stack⟩ :=
     .operation live (.act executed)
-  exact ⟨_, value, step, register, ready, admitted, preserved, step.lower⟩
+  refine ⟨_, value, step, register, ready, admitted, preserved, ?_, step.lower⟩
+  simpa only [scope] using lifetime
 
 
 /-- Source call entry consumes the same acquisition admission as source

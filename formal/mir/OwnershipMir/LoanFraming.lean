@@ -622,4 +622,103 @@ theorem Store.LoanReady.allocate {n : Nat} {store : Store n Atom} {identity : Na
   exact focused
 
 
+/-- An interpreted return contract names permitted input references and
+retained owners. Reborrows use actual loan ancestry, not matching reference
+types or a second provenance table. -/
+def Value.ReturnsFrom {n : Nat} (store : Store n Atom) (inputs : Value)
+    (retained : List (Address n)) (value : Value) : Prop :=
+  ∀ identity mode target, value.Contains (.reference identity mode target) →
+    (∃ input inputMode inputTarget, inputs.Contains (.reference input inputMode inputTarget) ∧ store.Ancestor input identity) ∨
+    (∃ owner ∈ retained, ∃ loan, store.loans[identity]? = some loan ∧ loan.referent.Within owner)
+
+theorem Value.ReturnsFrom.of_loans_eq {n : Nat} {before after : Store n Atom}
+    {inputs value : Value} {retained : List (Address n)} (origins : Value.ReturnsFrom before inputs retained value)
+    (same : before.loans = after.loans) : Value.ReturnsFrom after inputs retained value := by
+  intro identity mode target member
+  rcases origins identity mode target member with ⟨input, inputMode, inputTarget, source, ancestor⟩ |
+    ⟨owner, allowed, loan, found, within⟩
+  · exact Or.inl ⟨input, inputMode, inputTarget, source, ancestor.of_loans_eq same⟩
+  · exact Or.inr ⟨owner, allowed, loan, same ▸ found, within⟩
+
+/-- Permitted origins derive the physical outlives boundary: every returned
+referent belongs to pre-call storage. In particular, equal reference types
+cannot authorize a reference into the new callee activation. -/
+theorem Value.ReturnsFrom.before_call {n : Nat} {initial final : Store n Atom} {signature : Signature}
+    {inputs value : Value} {retained : List (Address n)}
+    (origins : Value.ReturnsFrom final inputs retained value)
+    (inputsReady : Value.ReferencesReady initial inputs)
+    (ownersLive : ∀ owner ∈ retained, ∃ slots, initial.region owner.region = some slots)
+    (extension : initial.loans.IsPrefix final.loans)
+    (valid : final.BorrowInvariant signature) (resident : final.temp = some value) :
+    ∀ identity mode target, value.Contains (.reference identity mode target) →
+      ∃ loan, final.loans[identity]? = some loan ∧ loan.referent.region < initial.regions.length := by
+  intro identity mode target member
+  obtain ⟨loan, found, _, _, _⟩ := valid.references identity mode target (Or.inl ⟨value, resident, member⟩)
+  refine ⟨loan, found, ?_⟩
+  rcases origins identity mode target member with ⟨input, inputMode, inputTarget, source, ancestor⟩ |
+    ⟨owner, allowed, other, otherFound, within⟩
+  · obtain ⟨original, lens, originalValue, origin, queried, _, _⟩ := (inputsReady input inputMode inputTarget source).1
+    obtain ⟨slots, live, _⟩ := Option.bind_eq_some_iff.mp queried
+    have retainedOrigin : final.loans[input]? = some original := by
+      obtain ⟨suffix, appended⟩ := extension
+      obtain ⟨bound, _⟩ := List.getElem?_eq_some_iff.mp origin
+      rw [← appended, List.getElem?_append_left bound]
+      exact origin
+    have within := ancestor.within valid.graph retainedOrigin found
+    rw [within.1]
+    exact Store.region_bound live
+  · cases Option.some.inj (found.symm.trans otherFound)
+    obtain ⟨slots, live⟩ := ownersLive owner allowed
+    rw [within.1]
+    exact Store.region_bound live
+
+
+theorem BorrowReady.fresh_permission {n : Nat} {store : Store n Atom} {signature : Signature} {loan : Loan n}
+    (valid : store.BorrowInvariant signature) (ready : BorrowReady store signature loan) :
+    (store.issue loan).Permitted (some store.loans.length) loan.mode loan.referent := by
+  refine ⟨⟨loan, store.issue_fresh loan, ?_, Address.within_refl _, ?_⟩, ?_⟩
+  · exact (Store.HasHandle.issue_iff loan ready.empty _).mpr (Or.inr rfl)
+  · cases loan.mode with
+    | shared => exact Or.inl rfl
+    | unique => exact Or.inr rfl
+  · intro identity other found active overlap
+    rcases (Store.Active.issue_iff valid.references valid.graph loan ready.empty ready.permission identity).mp active with old | fresh
+    · have bound := old.bound valid.references valid.graph
+      have original := (store.issue_old bound loan).symm.trans found
+      rcases ready.permission.2 identity other original old overlap with shared | ⟨parent, linked, ancestor⟩
+      · exact Or.inl shared
+      · exact Or.inr ⟨store.loans.length, rfl, .parent (store.issue_fresh loan) linked (ancestor.issue loan)⟩
+    · subst identity
+      exact Or.inr ⟨store.loans.length, rfl, .refl _⟩
+
+/-- Fresh borrowing produces both usable reference authority and its return
+origin. An input-derived reborrow follows the actual parent edge; an owner
+borrow must be covered by an explicitly permitted retained owner. -/
+theorem BorrowReady.return_progress {n : Nat} {store : Store n Atom} {signature : Signature} {loan : Loan n}
+    {inputs : Value} {retained : List (Address n)}
+    (valid : store.BorrowInvariant signature) (ready : BorrowReady store signature loan)
+    (origin :
+      (∃ parent input mode target, loan.parent = some parent ∧
+        inputs.Contains (.reference input mode target) ∧ store.Ancestor input parent) ∨
+      (∃ owner ∈ retained, loan.referent.Within owner)) :
+    ∃ after value, store.borrow loan = some after ∧ after.temp = some value ∧
+      after.BorrowInvariant signature ∧ Value.ReferencesReady after value ∧
+      Value.ReturnsFrom after inputs retained value := by
+  obtain ⟨after, executed, preserved, found, initialized, register⟩ := ready.sound valid
+  have same : after = store.issue loan := Option.some.inj (executed.symm.trans ready.progress)
+  subst after
+  refine ⟨store.issue loan, .leaf (.reference store.loans.length loan.mode loan.target), executed, register, preserved, ?_, ?_⟩
+  · intro identity mode target member
+    cases member
+    refine ⟨initialized, ?_⟩
+    intro other selected
+    cases Option.some.inj (found.symm.trans selected)
+    exact ready.fresh_permission valid
+  · intro identity mode target member
+    cases member
+    rcases origin with ⟨parent, input, mode, target, linked, member, ancestor⟩ | ⟨owner, allowed, within⟩
+    · exact Or.inl ⟨input, mode, target, member, .parent found linked (ancestor.issue loan)⟩
+    · exact Or.inr ⟨owner, allowed, loan, found, within⟩
+
+
 end OwnershipMir

@@ -401,10 +401,24 @@ progress consumes it directly; source argument progress additionally transfers
 the same value into the fresh callee argument slot and derives callee reference
 readiness, typing, and the borrow invariant. Both produce actual source steps
 and positive MIR executions. The integrated 38-job gate and five additional
-dependency inspections passed with only standard Lean axioms. Permitted return
-origins, declared outlives constraints, and derivation of these before-state
-obligations by whole-program source admission remain open; reference readiness
-alone is not a proof of the declared return-lifetime contract.
+dependency inspections passed with only standard Lean axioms. Reference
+readiness alone is not a proof of the declared return-lifetime contract.
+
+The interpreted return-origin boundary now derives the physical lifetime bound.
+`Value.ReturnsFrom` permits actual ancestry from authorized input references or
+containment in explicitly permitted retained owners; equal reference types do
+not supply origin evidence. `before_call` proves every returned referent lies
+in pre-call storage, using input readiness, retained-owner liveness, immutable
+loan-table extension, and the existing loan graph. It does not assume the
+returned address already outlives the callee. Fresh borrowing/reborrowing
+produces usable reference permissions and permitted origins through the actual
+new parent edge. The strengthened source `result_borrow_progress` consumes this
+origin contract and proves the bound at the real result transition and its
+positive MIR execution. The integrated 38-job gate and four dependency
+inspections passed with standard Lean axioms only. Deriving authorized input
+views, retained owners, and declared lexical outlives relations from source
+signatures/body admission remains open, as do source/MIR borrowing instruction
+integration and suspended caller typestate.
 
 
 ### Joint storage ownership
