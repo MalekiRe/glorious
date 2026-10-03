@@ -47,10 +47,14 @@ simulation and reverse matching no longer depend on that length. Branches and
 loops retain shared control proofs; aggregates are not a second execution or
 ownership pipeline. The transfer register is part of the actual runtime state.
 
-- `Tree.lean`: scalar data, opaque affine/exact resource identities, ordered
-  products, nominal shells, and typed initialization holes. A live fieldless
-  exact shell is not a hole. Shell deconstruction authority is independent of
-  disposal permission; recursive capabilities include the shell and residents.
+- `Tree.lean`: scalar data, opaque affine/exact owners, shared/unique reference
+  handles, ordered products, nominal shells, and typed initialization holes.
+  `AtomType` replaces ownership-only leaf shapes: reference mode and target
+  layout survive typing and cannot be mistaken for scalar branch conditions.
+  Handle capability comes from its mode, not its referent: shared is duplicable,
+  unique is affine. `ResourceIdentity` separates owners from unique loan handles;
+  the same resource measure and conservation proof count both. An exact shell
+  is not a hole; shell destruction authority remains independent of disposal.
   The former value-carried `canOpen` flag is removed.
 - `Nominal.lean`: one resolved declaration environment supplies nominal identity,
   principal restriction, ordered field layouts, and field visibility. Logical
@@ -177,8 +181,8 @@ ownership pipeline. The transfer register is part of the actual runtime state.
   agree across argument transfer and protected result handoff. Ownership and
   shell measures range over every live region of the physical store and its
   single transfer register, independently of the continuation stack. Joint
-  uniqueness is not a collection of separate per-frame claims.
-  `Calls.program_safety` derives preservation,
+  uniqueness covers owning residents and unique reference handles jointly,
+  not separate per-frame claims. `Calls.program_safety` derives preservation,
   progress, exact-resource conservation, affine bounds, noncopyable-shell
   bounds, and exact-shell discharge accounting at every actual finite prefix.
 - `CallControl.lean`: concrete activation determinism and terminality feed
@@ -284,9 +288,18 @@ call return/divergence, positive source simulation, source progress, compiled
 safety, exact terminal correspondence, and actual divergence equivalence.
 Dependencies are limited to `propext`, `Classical.choice`, and `Quot.sound`.
 No `sorry`, new axioms, concrete examples, or unit tests bypass the obligations.
-This verified checkpoint completes the store cutover, not borrowing:
-reference values, permissions, reborrowing, dereference, and lifetime-aware
-return/cleanup admission remain the next part of the requested integration.
+After reference-shape and identity integration, the complete 35-job build also
+passed. Eight additional dependency inspections covered copyable/exact resource
+lemmas, scalar observation, primitive preservation, global ownership, compiled
+safety, exact return correspondence, and divergence equivalence; they use only
+the same standard axioms. The public ownership theorem now protects unique
+handle identity as well as owning resource identity.
+This completes the store and handle-representation cutovers, not borrowing.
+There is no loan-creation or dereference instruction yet. A handle carries an
+uninterpreted loan identity; the current typing theorem does not assert that
+its referent exists or that access is permitted. Loan-table interpretation,
+permission suspension, reborrowing, dereference, and lifetime-aware return and
+cleanup admission remain required parts of the requested integration.
 
 
 ### Joint storage ownership

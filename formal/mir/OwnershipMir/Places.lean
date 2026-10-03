@@ -9,7 +9,7 @@ structure Place (n : Nat) where
 
 /-- Lexical projection permission is independent of physical focus and of
 permission to dispose of an owner. Whole empty roots need no representation. -/
-def Place.Visible {n : Nat} (authority : Authority) (place : Place n) (slots : Fin n → Cell Kind) : Prop :=
+def Place.Visible {n : Nat} (authority : Authority) (place : Place n) (slots : Fin n → Cell AtomType) : Prop :=
   match slots place.root with
   | none => place.path = []
   | some shape => ∃ selected, Layout.Accessible authority (shape.layout id) place.path selected
@@ -23,7 +23,7 @@ def Place.write {n : Nat} {α : Type} (place : Place n) (slots : Fin n → Cell 
   update slots place.root (lens.rebuild value)
 
 theorem Place.realized {n : Nat} {signature : Signature} {state : State n} {context : Context n}
-    (typed : state.Typed signature context) (place : Place n) (lens : Lens Kind)
+    (typed : state.Typed signature context) (place : Place n) (lens : Lens AtomType)
     (found : place.find context.slots = some lens) :
     ∃ actual, place.find state.slots = some actual ∧
       actual.selected.map (Value.kind signature) = lens.selected ∧
@@ -35,11 +35,11 @@ theorem Place.realized {n : Nat} {signature : Signature} {state : State n} {cont
   exact found
 
 theorem Place.typed_write {n : Nat} {signature : Signature} {state : State n} {context : Context n}
-    (typed : state.Typed signature context) (place : Place n) (actual : Lens Atom) (lens : Lens Kind)
+    (typed : state.Typed signature context) (place : Place n) (actual : Lens Atom) (lens : Lens AtomType)
     (rebuild : ∀ value, (actual.rebuild value).map (Value.kind signature) =
       lens.rebuild (value.map (Value.kind signature)))
-    {value : Cell Atom} {kind : Cell Kind} (resident : value.map (Value.kind signature) = kind)
-    {temp : Cell Atom} {tempKind : Cell Kind} (register : temp.map (Value.kind signature) = tempKind) :
+    {value : Cell Atom} {kind : Cell AtomType} (resident : value.map (Value.kind signature) = kind)
+    {temp : Cell Atom} {tempKind : Cell AtomType} (register : temp.map (Value.kind signature) = tempKind) :
     (State.mk (place.write state.slots actual value) temp).Typed signature
       ⟨place.write context.slots lens kind, tempKind⟩ := by
   exact typed_update typed place.root (by rw [rebuild, resident]) register
@@ -64,7 +64,7 @@ theorem Place.mass_write {n : Nat} (state : State n) (place : Place n) (lens : L
   omega
 
 theorem Place.count_write {n : Nat} (state : State n) (place : Place n) (lens : Lens Atom)
-    (found : place.find state.slots = some lens) (value temp : Cell Atom) (identity : Nat) :
+    (found : place.find state.slots = some lens) (value temp : Cell Atom) (identity : ResourceIdentity) :
     (State.mk (place.write state.slots lens value) temp).count identity +
         weight identity lens.selected + weight identity state.temp =
       state.count identity + weight identity value + weight identity temp := by
@@ -74,10 +74,10 @@ def vacant {α : Type} : Cell α → Bool
   | none | some (.hole _) => true
   | _ => false
 
-def Fits (shape : Shape) (cell : Cell Kind) : Prop :=
+def Fits (shape : Shape) (cell : Cell AtomType) : Prop :=
   cell = none ∨ cell = some (.hole (shape.layout id))
 
-theorem Fits.realized {signature : Signature} {shape : Shape} {cell : Cell Atom} {kind : Cell Kind}
+theorem Fits.realized {signature : Signature} {shape : Shape} {cell : Cell Atom} {kind : Cell AtomType}
     (typed : cell.map (Value.kind signature) = kind) (fits : Fits shape kind) :
     vacant cell = true ∧ ∀ identity, weight identity cell = 0 := by
   rcases fits with absent | hole

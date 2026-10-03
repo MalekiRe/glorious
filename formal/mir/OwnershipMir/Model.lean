@@ -6,7 +6,7 @@ The ownership interpretation counts actual residents, including the transfer
 register. It is not a second state maintained by the machine. -/
 namespace OwnershipMir
 
-def weight (identity : Nat) (cell : Option Value) : Nat :=
+def weight (identity : ResourceIdentity) (cell : Option Value) : Nat :=
   cellMass (Atom.weight identity) (fun _ => 0) cell
 
 def total : {n : Nat} → (Fin n → Nat) → Nat
@@ -46,7 +46,7 @@ structure Context (n : Nat) where
   slots : Fin n → Option Shape
   temp : Option Shape
 
-def Cell.Declared {α : Type} (declarations : Declarations) (classify : α → Kind) (cell : Cell α) : Prop :=
+def Cell.Declared {α : Type} (declarations : Declarations) (classify : α → AtomType) (cell : Cell α) : Prop :=
   ∀ tree, cell = some tree → Layout.Declared declarations (tree.layout classify)
 
 def Context.Declared {n : Nat} (declarations : Declarations) (context : Context n) : Prop :=
@@ -66,7 +66,7 @@ def State.Typed {n : Nat} (signature : Signature) (state : State n) (context : C
 def State.mass {n : Nat} (leaf : Atom → Nat) (shell : Shell → Nat) (state : State n) : Nat :=
   total (fun i => cellMass leaf shell (state.slots i)) + cellMass leaf shell state.temp
 
-def State.count {n : Nat} (state : State n) (identity : Nat) : Nat :=
+def State.count {n : Nat} (state : State n) (identity : ResourceIdentity) : Nat :=
   total (fun i => weight identity (state.slots i)) + weight identity state.temp
 
 def State.Unique {n : Nat} (state : State n) : Prop :=
@@ -76,7 +76,7 @@ def State.Unique {n : Nat} (state : State n) : Prop :=
 Duplicable scalar data carries no resource identity. -/
 structure Conserves {n : Nat} (signature : Signature) (before after : State n) : Prop where
   bounded : ∀ identity, after.count identity ≤ before.count identity
-  exact : ∀ identity, signature identity = .exact → after.count identity = before.count identity
+  exact : ∀ identity, identity.kind signature = .exact → after.count identity = before.count identity
 
 theorem Conserves.refl {n : Nat} (signature : Signature) (state : State n) :
     Conserves signature state state := ⟨fun _ => Nat.le_refl _, fun _ _ => rfl⟩

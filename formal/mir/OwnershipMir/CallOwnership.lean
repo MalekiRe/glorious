@@ -5,7 +5,7 @@ namespace OwnershipMir.Calls
 def Configuration.mass {n : Nat} (config : Configuration n) (leaf : Atom → Nat) (shell : Shell → Nat) : Nat :=
   config.store.mass leaf shell
 
-def Configuration.count {n : Nat} (config : Configuration n) (identity : Nat) : Nat :=
+def Configuration.count {n : Nat} (config : Configuration n) (identity : ResourceIdentity) : Nat :=
   config.mass (Atom.weight identity) (fun _ => 0)
 
 def Configuration.Unique {n : Nat} (config : Configuration n) : Prop :=
@@ -13,7 +13,7 @@ def Configuration.Unique {n : Nat} (config : Configuration n) : Prop :=
 
 structure Preserves {n : Nat} (signature : Signature) (before after : Configuration n) : Prop where
   bounded : ∀ identity, after.count identity ≤ before.count identity
-  exact : ∀ identity, signature identity = .exact → after.count identity = before.count identity
+  exact : ∀ identity, identity.kind signature = .exact → after.count identity = before.count identity
 
 theorem Preserves.refl {n : Nat} (signature : Signature) (config : Configuration n) : Preserves signature config config :=
   ⟨fun _ => Nat.le_refl _, fun _ _ => rfl⟩

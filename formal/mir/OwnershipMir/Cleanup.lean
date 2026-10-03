@@ -35,10 +35,10 @@ def cleanupTree {n : Nat} (root : Fin n) (path : List Direction) : Shape → Lis
     cleanupTree root (path ++ [.body]) body ++
       [disposeAt root path (.wrap shell (body.layout id))]
 
-def clearFocused {n : Nat} (context : Context n) (root : Fin n) (frame : TreeFrame Kind) (shape : Shape) : Context n :=
+def clearFocused {n : Nat} (context : Context n) (root : Fin n) (frame : TreeFrame AtomType) (shape : Shape) : Context n :=
   ⟨update context.slots root (frame.rebuild (shape.layout id) none), none⟩
 
-theorem disposeAt_checked {n : Nat} (context : Context n) (root : Fin n) (frame : TreeFrame Kind)
+theorem disposeAt_checked {n : Nat} (context : Context n) (root : Fin n) (frame : TreeFrame AtomType)
     (shape : Shape) (empty : context.temp = none) (resident : context.slots root = some (frame.plug shape))
     (allowed : shape.disposable) (exhausted : shape.shallow) :
     Code.Checked (Op.Checked authority) context (lower (sequence [disposeAt root frame.path (shape.layout id)]))
@@ -49,22 +49,22 @@ theorem disposeAt_checked {n : Nat} (context : Context n) (root : Fin n) (frame 
     exact frame.focus _ _
   exact .act (.take empty found rfl rfl (.whole _)) (.act (.drop rfl allowed exhausted) .halt)
 
-@[simp] theorem frame_left_clear (frame : TreeFrame Kind) (right : Shape) (layout : Layout) :
+@[simp] theorem frame_left_clear (frame : TreeFrame AtomType) (right : Shape) (layout : Layout) :
     (frame.compose (.left .hole right)).rebuild layout none = some (frame.plug (.pair (.hole layout) right)) :=
   frame.nested_rebuild _ (by intro h; cases h) layout
 
-@[simp] theorem frame_right_clear (frame : TreeFrame Kind) (left : Shape) (layout : Layout) :
+@[simp] theorem frame_right_clear (frame : TreeFrame AtomType) (left : Shape) (layout : Layout) :
     (frame.compose (.right left .hole)).rebuild layout none = some (frame.plug (.pair left (.hole layout))) :=
   frame.nested_rebuild _ (by intro h; cases h) layout
 
-@[simp] theorem frame_body_clear (frame : TreeFrame Kind) (shell : Shell) (layout : Layout) :
+@[simp] theorem frame_body_clear (frame : TreeFrame AtomType) (shell : Shell) (layout : Layout) :
     (frame.compose (.body shell .hole)).rebuild layout none = some (frame.plug (.wrap shell (.hole layout))) :=
   frame.nested_rebuild _ (by intro h; cases h) layout
 
 /-- General cleanup admission is derived structurally from current occupancy.
 Every child transition feeds the next checker context; no future readiness,
 whole-aggregate drop, or assumed cleanup execution is supplied. -/
-theorem cleanupTree_checked {n : Nat} (root : Fin n) (shape : Shape) (frame : TreeFrame Kind)
+theorem cleanupTree_checked {n : Nat} (root : Fin n) (shape : Shape) (frame : TreeFrame AtomType)
     (context : Context n) (empty : context.temp = none)
     (resident : context.slots root = some (frame.plug shape)) (allowed : shape.disposable) :
     Code.Checked (Op.Checked authority) context (lower (sequence (cleanupTree root frame.path shape)))

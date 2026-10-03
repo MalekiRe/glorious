@@ -5,7 +5,7 @@ namespace OwnershipMir
 variable {authority : Authority}
 
 theorem focus_selected_declared {declarations : Declarations} (path : List Direction) (layout : Layout)
-    {cell : Cell Kind} {lens : Lens Kind} (valid : Cell.Declared declarations id cell)
+    {cell : Cell AtomType} {lens : Lens AtomType} (valid : Cell.Declared declarations id cell)
     (found : focus path layout cell = some lens) : Cell.Declared declarations id lens.selected := by
   induction path generalizing cell lens with
   | nil => cases Option.some.inj found; exact valid
@@ -33,8 +33,8 @@ theorem focus_selected_declared {declarations : Declarations} (path : List Direc
 /-- Clearing installs exactly the selected layout as a hole; filling preserves
 an existing layout. This is the one layout equation used for every ancestor. -/
 theorem focus_rebuild_layout (path : List Direction) (layout : Layout)
-    {cell : Cell Kind} {lens : Lens Kind} (found : focus path layout cell = some lens)
-    (replacement : Cell Kind)
+    {cell : Cell AtomType} {lens : Lens AtomType} (found : focus path layout cell = some lens)
+    (replacement : Cell AtomType)
     (fits : ∀ shape, lens.selected = some shape →
       ((replacement.getD (.hole layout)).layout id) = shape.layout id) :
     ∀ tree, cell = some tree → ((lens.rebuild replacement).getD (.hole layout)).layout id = tree.layout id := by
@@ -52,8 +52,8 @@ theorem focus_rebuild_layout (path : List Direction) (layout : Layout)
       all_goals rw [ih located fits _ rfl]
 
 theorem focus_rebuild_declared {declarations : Declarations} (path : List Direction) (layout : Layout)
-    {cell : Cell Kind} {lens : Lens Kind} (valid : Cell.Declared declarations id cell)
-    (found : focus path layout cell = some lens) (replacement : Cell Kind)
+    {cell : Cell AtomType} {lens : Lens AtomType} (valid : Cell.Declared declarations id cell)
+    (found : focus path layout cell = some lens) (replacement : Cell AtomType)
     (newValid : Cell.Declared declarations id replacement)
     (fits : ∀ shape, lens.selected = some shape →
       ((replacement.getD (.hole layout)).layout id) = shape.layout id) :
@@ -70,7 +70,7 @@ theorem focus_rebuild_declared {declarations : Declarations} (path : List Direct
     exact (by simpa only [Option.getD_some] using same) ▸ valid tree rfl
 
 theorem Context.declared_update {n : Nat} {declarations : Declarations} {context : Context n}
-    (valid : context.Declared declarations) (i : Fin n) {value temp : Cell Kind}
+    (valid : context.Declared declarations) (i : Fin n) {value temp : Cell AtomType}
     (resident : Cell.Declared declarations id value) (register : Cell.Declared declarations id temp) :
     (Context.mk (update context.slots i value) temp).Declared declarations := by
   refine ⟨fun j => ?_, register⟩
@@ -117,7 +117,7 @@ theorem Op.Checked.declared {n : Nat} {before after : Context n} {op : Op n}
 theorem State.Typed.declared_iff {n : Nat} {declarations : Declarations} {signature : Signature}
     {state : State n} {context : Context n} (typed : state.Typed signature context) :
     state.Declared declarations signature ↔ context.Declared declarations := by
-  have cell : ∀ (value : Cell Atom) (shape : Cell Kind), value.map (Value.kind signature) = shape →
+  have cell : ∀ (value : Cell Atom) (shape : Cell AtomType), value.map (Value.kind signature) = shape →
       (Cell.Declared declarations (Atom.kind signature) value ↔ Cell.Declared declarations id shape) := by
     intro value shape same
     subst shape

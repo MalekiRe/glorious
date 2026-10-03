@@ -104,7 +104,8 @@ theorem observe_ready {n : Nat} {signature : Signature} {state : State n} {conte
   rename_i atom
   cases atom with
   | data payload => exact ⟨payload != 0, by simp [observe, found]⟩
-  | owner identity => cases h : signature identity <;> simp [Atom.kind, h, LinearKind.kind] at kind
+  | owner identity => cases h : signature identity <;> simp [Atom.kind, h, LinearKind.type] at kind
+  | reference => simp [Atom.kind] at kind
 
 theorem Safe.progress {n : Nat} {α : Type} {signature : Signature} {final : Context n}
     {rule : Context n → α → Context n → Prop} {exec : α → State n → Option (State n)}

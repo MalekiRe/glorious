@@ -137,7 +137,7 @@ theorem vacant_mass_zero {cell : Cell Atom} (leaf : Atom → Nat) (shell : Shell
   | some tree => cases tree <;> simp [vacant] at empty <;> rfl
 
 theorem Extract.resource_balance {mode : Extract} {value result : Value}
-    (executed : mode.apply value = some result) (identity : Nat) :
+    (executed : mode.apply value = some result) (identity : ResourceIdentity) :
     resourceMass identity result = resourceMass identity value := by
   cases mode with
   | whole => cases Option.some.inj executed; rfl
