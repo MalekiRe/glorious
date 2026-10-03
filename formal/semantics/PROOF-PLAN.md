@@ -324,12 +324,21 @@ cleanup steps between entry and retirement. Those remain the admission and
 preservation gap. The integrated 36-job gate passed; inspected lifecycle proof
 dependencies use only `propext` and `Quot.sound`.
 
+Physical handle release now consumes the existing cleanup `drop` transition.
+`Calls.release_handle_borrow_safe` requires an initialized referent before
+ending the handle, preserves the borrow invariant, and characterizes surviving
+loan activity exactly by handles in region storage and their ancestry. Shared
+aliases and descendant handles therefore keep loans active. Owner permission
+restoration follows from pre-state resident last-use evidence, not an assumed
+post-state permission. The integrated 36-job build and four additional axiom
+inspections passed; these proofs use only `propext` and `Quot.sound`.
+
 
 These are physical operation contracts, not source-admitted borrowing safety.
 The source/MIR instruction grammar and body admission still need to produce
 borrow/read permission evidence and constrain every conflicting ordinary
-access. Lifetime-aware return and cleanup, permission restoration after last
-use, writes/moves through unique references, and their general source-to-MIR
+access. Lifetime-aware return and complete cleanup, source-derived last-use
+evidence, writes/moves through unique references, and their general source-to-MIR
 preservation/progress consumers remain open. Existing public program safety
 does not assert `Store.BorrowInvariant`; importing these contracts does not
 close that gap. No post-state validity or successful execution is assumed by

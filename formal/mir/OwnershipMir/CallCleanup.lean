@@ -151,4 +151,39 @@ theorem retirement_borrow_safe {n : Nat} {program : Program n} {signature : Sign
     .retire empty register, valid.retire_empty empty, rfl, rfl, store.retire_empty_permissions empty⟩
 
 
+/-- Releasing a physical handle executes the existing cleanup instruction.
+The referent must be initialized before ending the handle; remaining aliases
+and descendants determine which loans stay active. -/
+theorem release_handle_borrow_safe {n : Nat} {program : Program n} {signature : Signature}
+    {store : Store (n + 1) Atom} {active identity : Nat} {mode : BorrowMode} {target : Layout}
+    {slots : Region (n + 1) Atom} (next : Code (n + 1) (Op (n + 1))) (stack : List (Frame n))
+    (valid : store.BorrowInvariant signature) (live : store.region active = some slots)
+    (register : store.temp = some (.leaf (.reference identity mode target)))
+    (ready : store.LoanReady identity) :
+    ∃ after loan lens referent,
+      Transition program ⟨.cleaning (.act .drop next), store, active, stack⟩ after ∧
+      after.store.BorrowInvariant signature ∧
+      store.loans[identity]? = some loan ∧ store.find loan.referent loan.target = some lens ∧
+      lens.selected = some referent ∧ referent.ready ∧
+      after.store = {store with temp := none} ∧
+      (∀ origin, after.store.Active origin ↔
+        ∃ handle mode target region slots root value, store.region region = some slots ∧
+          slots root = some value ∧ value.Contains (.reference handle mode target) ∧ store.Ancestor origin handle) ∧
+      (∀ requested address,
+        (∀ origin loan handle mode target region slots root value,
+          store.loans[origin]? = some loan → store.region region = some slots → slots root = some value →
+          value.Contains (.reference handle mode target) → store.Ancestor origin handle →
+          address.Overlaps loan.referent → requested = .shared ∧ loan.mode = .shared) →
+        after.store.Permitted none requested address) := by
+  obtain ⟨loan, lens, referent, found, focused, selected, initialized⟩ := ready
+  have cleared : store.replace active slots none = {store with temp := none} := by
+    have same := congrArg (fun result : Store (n + 1) Atom => {result with temp := none}) (Store.replace_self live)
+    simpa only [Store.replace] using same
+  refine ⟨⟨.cleaning next, {store with temp := none}, active, stack⟩,
+    loan, lens, referent, ?_, valid.clearTemp, found, focused, selected, initialized, rfl,
+    store.clearTemp_active_iff, fun requested address lastUse => Store.clearTemp_owner_permission requested address lastUse⟩
+  rw [← cleared]
+  exact .clean live (.act (op := Op.drop) (after := State.mk slots none) (by simp [Op.exec, register]))
+
+
 end OwnershipMir.Calls

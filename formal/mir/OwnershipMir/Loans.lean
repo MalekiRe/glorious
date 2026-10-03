@@ -644,4 +644,67 @@ theorem Store.BorrowInvariant.retire_empty {n : Nat} {store : Store n Atom} {sig
     omega
 
 
+theorem Store.clearTemp_contains {n : Nat} {store : Store n Atom} {atom : Atom}
+    (contains : ({store with temp := none} : Store n Atom).Contains atom) : store.Contains atom := by
+  rcases contains with ⟨value, impossible, _⟩ | resident
+  · cases impossible
+  · exact Or.inr resident
+
+/-- Last use is physical: an origin remains active exactly when some handle
+in surviving region storage keeps it or a descendant alive. Dropping a shared
+alias does not end a loan while another alias survives. -/
+theorem Store.clearTemp_active_iff {n : Nat} (store : Store n Atom) (identity : Nat) :
+    ({store with temp := none} : Store n Atom).Active identity ↔
+      ∃ handle mode target region slots root value,
+        store.region region = some slots ∧ slots root = some value ∧
+        value.Contains (.reference handle mode target) ∧ store.Ancestor identity handle := by
+  constructor
+  · rintro ⟨handle, ⟨mode, target, contains⟩, ancestor⟩
+    rcases contains with ⟨value, impossible, _⟩ | ⟨region, slots, root, value, live, selected, member⟩
+    · cases impossible
+    · exact ⟨handle, mode, target, region, slots, root, value, live, selected, member,
+        ancestor.of_loans_eq (before := {store with temp := none}) (after := store) rfl⟩
+  · rintro ⟨handle, mode, target, region, slots, root, value, live, selected, member, ancestor⟩
+    exact ⟨handle, ⟨mode, target, Or.inr ⟨region, slots, root, value, live, selected, member⟩⟩,
+      ancestor.of_loans_eq (before := store) (after := {store with temp := none}) rfl⟩
+
+theorem Store.BorrowInvariant.clearTemp {n : Nat} {store : Store n Atom} {signature : Signature}
+    (valid : store.BorrowInvariant signature) : ({store with temp := none} : Store n Atom).BorrowInvariant signature := by
+  let after : Store n Atom := {store with temp := none}
+  have active : ∀ identity, after.Active identity → store.Active identity := by
+    rintro identity ⟨handle, ⟨mode, target, contains⟩, ancestor⟩
+    exact ⟨handle, ⟨mode, target, Store.clearTemp_contains contains⟩, ancestor.of_loans_eq (before := after) (after := store) rfl⟩
+  change after.BorrowInvariant signature
+  refine ⟨valid.graph, ?_, ?_, ?_⟩
+  · intro identity mode target contains
+    exact valid.references identity mode target (Store.clearTemp_contains contains)
+  · intro left first right last firstFound firstActive lastFound lastActive overlaps
+    rcases valid.compatible left first right last firstFound (active _ firstActive)
+      lastFound (active _ lastActive) overlaps with shared | forward | reverse
+    · exact Or.inl shared
+    · exact Or.inr (Or.inl (forward.of_loans_eq (before := store) (after := after) rfl))
+    · exact Or.inr (Or.inr (reverse.of_loans_eq (before := store) (after := after) rfl))
+  · intro identity
+    have bound := valid.unique identity
+    change store.mass _ _ ≤ 1 at bound
+    change after.mass _ _ ≤ 1
+    simp only [after, Store.mass, cellMass, Nat.add_zero] at *
+    omega
+
+/-- If no surviving stored handle keeps an overlapping origin alive, ending
+the register's handles restores owner access. The premise inspects only the
+before-store's region residents and immutable ancestry, not a future permission. -/
+theorem Store.clearTemp_owner_permission {n : Nat} {store : Store n Atom} (requested : BorrowMode) (address : Address n)
+    (lastUse : ∀ identity loan handle mode target region slots root value,
+      store.loans[identity]? = some loan → store.region region = some slots → slots root = some value →
+      value.Contains (.reference handle mode target) → store.Ancestor identity handle →
+      address.Overlaps loan.referent → requested = .shared ∧ loan.mode = .shared) :
+    ({store with temp := none} : Store n Atom).Permitted none requested address := by
+  refine ⟨True.intro, ?_⟩
+  intro identity loan found active overlap
+  obtain ⟨handle, mode, target, region, slots, root, value, live, selected, member, ancestor⟩ :=
+    (store.clearTemp_active_iff identity).mp active
+  exact Or.inl (lastUse identity loan handle mode target region slots root value found live selected member ancestor overlap)
+
+
 end OwnershipMir
