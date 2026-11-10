@@ -124,6 +124,27 @@ and checked at each call. Nothing is annotated.
 - The check is "at most once". A resumption that is dropped is accepted; it
   leaks the computation it captured and skips that computation's cleanups.
 
+## A cleanup runs inside what it was registered inside
+
+**Decision.** When frames are abandoned (a label exit, a terminal operation, a
+cancellation), each cleanup among them runs with every label scope and handler
+it was registered inside still in place. An abandoned handler is passive: it
+serves operations performed by those cleanups but no longer runs its completion
+clause. The target of the exit stays until the cleanups are done.
+
+- An exit already in progress keeps its value. If a cleanup jumps to the label
+  being left, or performs the terminal operation being handled, the first exit
+  still decides the result; in the second case both arms run.
+- A cleanup that leaves to somewhere further out does not skip the cleanups
+  still pending.
+
+Before this, unwinding removed every abandoned frame first and ran the cleanups
+afterwards, so a `defer` that performed an effect handled inside the abandoned
+region, or jumped to the label being left, went wrong at run time even though
+the checker (rightly, reading the program text) accepted it. A random search
+for accepted programs that go wrong found it. The compiler proof did not, and
+could not: both machines were wrong in the same way.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by

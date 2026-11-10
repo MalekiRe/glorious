@@ -85,14 +85,20 @@ def Frame.asLabel : Frame → Option Nat
   | .invoke _ _ _ => none
   | .yield _ => none
 
-/-- The cleanups of abandoned frames, innermost first, as pending calls on top
-of `base`. Everything else in the abandoned frames is dropped. -/
+/--
+Leave the frames `above` behind and continue with `base`. What they were going
+to do is dropped: returns, pending calls and pending results. What their
+cleanups need stays, in place: each cleanup itself, and every label scope and
+handler it was registered inside, so that a cleanup can still jump to such a
+label or perform an operation such a handler serves. An abandoned handler is
+made passive, so that it no longer runs its completion clause.
+-/
 def unwind : List Frame → List Frame → List Frame
   | [], base => base
-  | .guard fn captures :: above, base => .invoke fn captures [] :: unwind above base
+  | .guard fn captures :: above, base => .guard fn captures :: unwind above base
+  | .handler h :: above, base => .handler h.abandon :: unwind above base
+  | .label id :: above, base => .label id :: unwind above base
   | .call _ _ :: above, base => unwind above base
-  | .handler _ :: above, base => unwind above base
-  | .label _ :: above, base => unwind above base
   | .invoke _ _ _ :: above, base => unwind above base
   | .yield _ :: above, base => unwind above base
 
@@ -125,7 +131,8 @@ simply ends. A guard runs its cleanup and then passes the result on. -/
 def deliver (p : Program) : Value → List Frame → Store Frame → Step State Value
   | v, [], _ => .halt v
   | v, .call ρ body :: stack, store => .next ⟨body, ρ ++ [v], stack, store⟩
-  | v, .handler h :: stack, store => callFn p h.ret h.caps [v] stack store
+  | v, .handler h :: stack, store =>
+    if h.passive then deliver p v stack store else callFn p h.ret h.caps [v] stack store
   | v, .label _ :: stack, store => deliver p v stack store
   | v, .guard fn captures :: stack, store => callFn p fn captures [] (.yield v :: stack) store
   | _, .invoke fn captures args :: stack, store => callFn p fn captures args stack store
@@ -144,7 +151,9 @@ def apply (p : Program) (c : Callee) (stack : List Frame) (store : Store Frame) 
     | none => .stuck
   | .label id v =>
     match findLabel Frame.asLabel id stack with
-    | some (above, below) => deliver p .unit (unwind above (.yield v :: below)) store
+    | some (above, below) =>
+      -- The scope stays until its cleanups have run; then its result is `v`.
+      deliver p .unit (unwind above (.label id :: .yield v :: below)) store
     | none => .stuck
 
 def step (p : Program) (s : State) : Step State Value :=
@@ -168,7 +177,7 @@ def step (p : Program) (s : State) : Step State Value :=
   | .handle ret ops captures thunk body =>
     match evalAtoms s.env captures, evalCall s.env thunk [] with
     | some caps, some c =>
-      apply p c (.handler ⟨ret, ops, caps⟩ :: .call s.env body :: s.stack) s.store
+      apply p c (.handler ⟨ret, ops, caps, false⟩ :: .call s.env body :: s.stack) s.store
     | _, _ => .stuck
   | .raise op args =>
     match evalAtoms s.env args with
@@ -178,7 +187,11 @@ def step (p : Program) (s : State) : Step State Value :=
       | none => .stuck
       | some d =>
         -- The abandoned frames are cleaned up before the handler's arm runs.
-        deliver p .unit (unwind d.above (.invoke d.arm d.handler.caps vs :: d.below)) s.store
+        -- The handler stays, passive, until they are; the arm runs outside it.
+        deliver p .unit
+          (unwind d.above
+            (.handler d.handler.abandon :: .invoke d.arm d.handler.caps vs :: d.below))
+          s.store
   | .perform op args body =>
     match evalAtoms s.env args with
     | none => .stuck
@@ -200,7 +213,7 @@ def step (p : Program) (s : State) : Step State Value :=
         ⟨s.store.conts, s.store.labels + 1, s.store.cells⟩
   | .handleTail ret ops captures thunk =>
     match evalAtoms s.env captures, evalCall s.env thunk [] with
-    | some caps, some c => apply p c (.handler ⟨ret, ops, caps⟩ :: s.stack) s.store
+    | some caps, some c => apply p c (.handler ⟨ret, ops, caps, false⟩ :: s.stack) s.store
     | _, _ => .stuck
   | .labelTail thunk =>
     match evalClosure s.env thunk with

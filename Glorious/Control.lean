@@ -16,6 +16,12 @@ structure Handler where
   ret : Nat
   ops : List (Nat × Nat)
   caps : List Value
+  /-- The handled computation has been abandoned. The handler still serves
+  operations performed by the cleanups of that computation, which were
+  registered inside it, but a result that reaches it passes straight through. -/
+  passive : Bool
+
+def Handler.abandon (h : Handler) : Handler := ⟨h.ret, h.ops, h.caps, true⟩
 
 /-- What a call applies to. -/
 inductive Callee where

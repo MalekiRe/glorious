@@ -44,13 +44,20 @@ def Frame.asLabel : Frame → Option Nat
   | .invoke _ _ _ => none
   | .yield _ => none
 
-/-- The cleanups of abandoned frames, innermost first, as pending calls on top of `base`. -/
+/--
+Leave the frames `above` behind and continue with `base`. What they were going
+to do is dropped: returns, pending calls and pending results. What their
+cleanups need stays, in place: each cleanup itself, and every label scope and
+handler it was registered inside, so that a cleanup can still jump to such a
+label or perform an operation such a handler serves. An abandoned handler is
+made passive, so that it no longer runs its completion clause.
+-/
 def unwind : List Frame → List Frame → List Frame
   | [], base => base
-  | .guard fn captures :: above, base => .invoke fn captures [] :: unwind above base
+  | .guard fn captures :: above, base => .guard fn captures :: unwind above base
+  | .handler h :: above, base => .handler h.abandon :: unwind above base
+  | .label id :: above, base => .label id :: unwind above base
   | .ret _ _ _ :: above, base => unwind above base
-  | .handler _ :: above, base => unwind above base
-  | .label _ :: above, base => unwind above base
   | .invoke _ _ _ :: above, base => unwind above base
   | .yield _ :: above, base => unwind above base
 
@@ -77,7 +84,8 @@ def callFn (p : Program) (fn : Nat) (captures vs : List Value) (frames : List Fr
 def deliver (p : Program) : Value → List Frame → Store Frame → Step State Value
   | v, [], _ => .halt v
   | v, .ret code pc locals :: frames, store => .next ⟨code, pc, locals ++ [v], frames, store⟩
-  | v, .handler h :: frames, store => callFn p h.ret h.caps [v] frames store
+  | v, .handler h :: frames, store =>
+    if h.passive then deliver p v frames store else callFn p h.ret h.caps [v] frames store
   | v, .label _ :: frames, store => deliver p v frames store
   | v, .guard fn captures :: frames, store => callFn p fn captures [] (.yield v :: frames) store
   | _, .invoke fn captures args :: frames, store => callFn p fn captures args frames store
@@ -93,7 +101,8 @@ def apply (p : Program) (c : Callee) (frames : List Frame) (store : Store Frame)
     | none => .stuck
   | .label id v =>
     match findLabel Frame.asLabel id frames with
-    | some (above, below) => deliver p .unit (unwind above (.yield v :: below)) store
+    | some (above, below) =>
+      deliver p .unit (unwind above (.label id :: .yield v :: below)) store
     | none => .stuck
 
 def step (p : Program) (s : State) : Step State Value :=
@@ -118,7 +127,7 @@ def step (p : Program) (s : State) : Step State Value :=
   | some (.handle ret ops captures thunk) =>
     match evalAtoms s.locals captures, evalCall s.locals thunk [] with
     | some caps, some c =>
-      apply p c (.handler ⟨ret, ops, caps⟩ :: .ret s.code (s.pc + 1) s.locals :: s.frames) s.store
+      apply p c (.handler ⟨ret, ops, caps, false⟩ :: .ret s.code (s.pc + 1) s.locals :: s.frames) s.store
     | _, _ => .stuck
   | some (.raise op args) =>
     match evalAtoms s.locals args with
@@ -127,7 +136,10 @@ def step (p : Program) (s : State) : Step State Value :=
       match findHandler Frame.asHandler op s.frames with
       | none => .stuck
       | some d =>
-        deliver p .unit (unwind d.above (.invoke d.arm d.handler.caps vs :: d.below)) s.store
+        deliver p .unit
+          (unwind d.above
+            (.handler d.handler.abandon :: .invoke d.arm d.handler.caps vs :: d.below))
+          s.store
   | some (.perform op args) =>
     match evalAtoms s.locals args with
     | none => .stuck
@@ -158,7 +170,7 @@ def step (p : Program) (s : State) : Step State Value :=
       .next ⟨s.code, if v.isInt n then s.pc + 1 else fail, s.locals, s.frames, s.store⟩
   | some (.handleTail ret ops captures thunk) =>
     match evalAtoms s.locals captures, evalCall s.locals thunk [] with
-    | some caps, some c => apply p c (.handler ⟨ret, ops, caps⟩ :: s.frames) s.store
+    | some caps, some c => apply p c (.handler ⟨ret, ops, caps, false⟩ :: s.frames) s.store
     | _, _ => .stuck
   | some (.labelTail thunk) =>
     match evalClosure s.locals thunk with

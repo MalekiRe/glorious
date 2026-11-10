@@ -310,6 +310,9 @@ struct Handler {
     ret: usize,
     ops: Vec<(u64, usize)>,
     caps: Vec<Value>,
+    /// The handled computation was abandoned: the handler still serves the
+    /// cleanups registered inside it, but a result passes straight through.
+    passive: bool,
 }
 
 enum Frame {
@@ -325,6 +328,14 @@ enum Frame {
     Invoke { func: usize, caps: Vec<Value>, args: Vec<Value> },
     /// A pending result: what is delivered here is discarded and this is delivered.
     Yield(Value),
+}
+
+/// The passive form of a handler whose computation has been abandoned.
+fn abandon(h: &Rc<Handler>) -> Rc<Handler> {
+    if h.passive {
+        return Rc::clone(h);
+    }
+    Rc::new(Handler { ret: h.ret, ops: h.ops.clone(), caps: h.caps.clone(), passive: true })
 }
 
 /// Why the machine stopped.
@@ -416,6 +427,7 @@ impl Vm {
                     self.locals = locals;
                     return Ok(());
                 }
+                Some(Frame::Handler(h)) if h.passive => {}
                 Some(Frame::Handler(h)) => return self.call_fn(h.ret, &h.caps, vec![v]),
                 Some(Frame::Label(_)) => {}
                 Some(Frame::Guard { func, caps }) => {
@@ -428,12 +440,16 @@ impl Vm {
         }
     }
 
-    /// Turn the guards of abandoned frames into pending cleanup calls, so the
-    /// innermost cleanup ends up on top. `abandoned` is bottom first.
-    fn push_cleanups(&mut self, abandoned: Vec<Frame>, skip: usize) {
-        for frame in abandoned.into_iter().skip(skip) {
-            if let Frame::Guard { func, caps } = frame {
-                self.frames.push(Frame::Invoke { func, caps, args: Vec::new() });
+    /// Leave frames behind. What they were going to do is dropped; what their
+    /// cleanups need stays in place: each cleanup, and every label scope and
+    /// handler it was registered inside. An abandoned handler becomes passive.
+    /// `abandoned` is bottom first.
+    fn keep_for_cleanups(&mut self, abandoned: impl Iterator<Item = Frame>) {
+        for frame in abandoned {
+            match frame {
+                Frame::Guard { .. } | Frame::Label(_) => self.frames.push(frame),
+                Frame::Handler(h) => self.frames.push(Frame::Handler(abandon(&h))),
+                Frame::Ret { .. } | Frame::Invoke { .. } | Frame::Yield(_) => {}
             }
         }
     }
@@ -460,9 +476,13 @@ impl Vm {
                     .iter()
                     .rposition(|f| matches!(f, Frame::Label(l) if *l == id))
                     .ok_or(Stop::Wrong)?;
-                let abandoned = self.frames.split_off(at);
+                // The scope stays until its cleanups have run; then its result
+                // is the value the label was applied to.
+                let mut abandoned = self.frames.split_off(at).into_iter();
+                let scope = abandoned.next().unwrap();
                 self.frames.push(Frame::Yield(args.pop().unwrap()));
-                self.push_cleanups(abandoned, 1);
+                self.frames.push(scope);
+                self.keep_for_cleanups(abandoned);
                 self.deliver(unit())
             }
             _ => wrong(),
@@ -548,16 +568,19 @@ impl Vm {
                 if !tail {
                     self.push_ret();
                 }
-                let handler = Handler { ret: *ret, ops: ops.clone(), caps };
+                let handler = Handler { ret: *ret, ops: ops.clone(), caps, passive: false };
                 self.frames.push(Frame::Handler(Rc::new(handler)));
                 self.apply(callee, Vec::new())
             }
             Instr::Raise(op, args) => {
                 let args = self.atoms(args)?;
                 let (at, handler, arm) = self.find_handler(*op)?;
-                let abandoned = self.frames.split_off(at);
+                // The handler stays, passive, until the abandoned frames are
+                // cleaned up; its arm then runs outside it.
+                let abandoned = self.frames.split_off(at).into_iter().skip(1);
                 self.frames.push(Frame::Invoke { func: arm, caps: handler.caps.clone(), args });
-                self.push_cleanups(abandoned, 1);
+                self.frames.push(Frame::Handler(abandon(&handler)));
+                self.keep_for_cleanups(abandoned);
                 self.deliver(unit())
             }
             Instr::Perform(op, args) => {
@@ -605,7 +628,7 @@ impl Vm {
                     self.conts.get_mut(id).and_then(Option::take).ok_or(Stop::Wrong)?;
                 self.push_ret();
                 self.frames.push(Frame::Yield(unit()));
-                self.push_cleanups(segment, 0);
+                self.keep_for_cleanups(segment.into_iter());
                 self.deliver(unit())
             }
             Instr::Host(id, args) => {
