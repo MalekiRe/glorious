@@ -1,39 +1,22 @@
-// Backtracking search with a resumption that is used twice.
+// Backtracking search. The search tries each alternative in turn by ordinary
+// recursion and reports every solution through an effect; the handler resumes
+// it once per solution, as a generator's consumer would.
 // expect:
-// Cons(Cons(8, Cons(2, Nil)), Cons(Cons(3, Cons(5, Cons(2, Nil))), Nil))
+// Cons(Cons(2, Cons(8, Nil)), Cons(Cons(2, Cons(5, Cons(3, Nil))), Nil))
 
 // A list of lists appears below, so the element type is a parameter.
 enum List<T> { Nil, Cons(T, List<T>) }
 
-fn append(a, b) {
-    match(a) {
-        Nil => b,
-        Cons(head, rest) => Cons(head, append(rest, b))
-    }
-}
+effect Search<T> { found(T) }
 
-// `choose()` returns true on one path and false on another: its handler
-// resumes the rest of the computation once for each answer.
-effect Choice { [2, 2] choose() }
-
-effect Reject { reject() -> ! }
-
-// Every result the body can produce, over all the choices it makes.
-fn all(body) {
-    handle body() {
-        result => Cons(result, Nil),
-        choose(k) => append(k(true), k(false)),
-        reject() => Nil
-    }
-}
-
-// Choose a subset of the items.
-fn subset(items) {
+// Report every subset of the items. `picked` holds the items chosen so far,
+// most recent first.
+fn subsets(items, picked) {
     match(items) {
-        Nil => Nil,
-        Cons(head, others) =>
-            let rest = subset(others);
-            if(choose()) { Cons(head, rest) } else { rest }
+        Nil => found(picked),
+        Cons(head, rest) =>
+            subsets(rest, Cons(head, picked));
+            subsets(rest, picked)
     }
 }
 
@@ -46,9 +29,11 @@ fn sum(list) {
 
 // The subsets of 3, 5, 8, 2 that add up to 10.
 fn main() {
-    all({
-        let picked = subset(Cons(3, Cons(5, Cons(8, Cons(2, Nil)))));
-        if(sum(picked) != 10) { reject() };
-        picked
-    })
+    let mut solutions = Nil;
+    handle subsets(Cons(3, Cons(5, Cons(8, Cons(2, Nil)))), Nil) {
+        found(picked) =>
+            if(sum(picked) == 10) { solutions = Cons(picked, solutions) };
+            ()
+    };
+    solutions
 }

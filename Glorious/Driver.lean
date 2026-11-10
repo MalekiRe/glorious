@@ -86,7 +86,7 @@ def explainStuck (c : Compiled) (cfg : Core.Config) : String :=
     match f.eval s.env, evalAtoms s.env args with
     | some (.clo fn _), some vs => enter fn vs
     | some (.cont _), some [_] =>
-      "a resumption is used more times than its operation allows, or after it was cancelled"
+      "a resumption is used a second time: it was already resumed or cancelled"
     | some (.cont _), some vs =>
       s!"a resumption takes exactly one argument, but is given {vs.length}"
     | some (.label _), some [_] => "a label is applied after its scope has ended"
@@ -128,7 +128,7 @@ def explainStuck (c : Compiled) (cfg : Core.Config) : String :=
   | .guard _ thunk _ => applied thunk []
   | .guardTail _ thunk => applied thunk []
   | .raise op _ => performed op
-  | .perform op _ _ _ => performed op
+  | .perform op _ _ => performed op
   | .cancel _ _ => "`cancel` is applied to something that is not a usable resumption"
   | .mem op args _ =>
     match evalAtoms s.env args with

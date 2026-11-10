@@ -65,7 +65,7 @@ def instr : Instr → Bytes
   | .handleTail ret ops captures thunk =>
     5 :: nat ret ++ list pair ops ++ list atom captures ++ atom thunk
   | .raise op args => 6 :: nat op ++ list atom args
-  | .perform op shots args => 7 :: nat op ++ nat shots ++ list atom args
+  | .perform op args => 7 :: nat op ++ list atom args
   | .label thunk => 8 :: atom thunk
   | .labelTail thunk => 9 :: atom thunk
   | .guard cleanup thunk => 10 :: atom cleanup ++ atom thunk
@@ -85,6 +85,6 @@ def string (s : String) : Bytes := list (fun b => [b.toNat]) s.toUTF8.toList
 /-- A bytecode file: the magic `GLBC`, a format version, the constructor names
 used to print values, and the program. -/
 def file (ctorNames : List String) (p : Program) : Bytes :=
-  [0x47, 0x4C, 0x42, 0x43, 1] ++ list string ctorNames ++ program p
+  [0x47, 0x4C, 0x42, 0x43, 2] ++ list string ctorNames ++ program p
 
 end Glorious.Bytecode.Encode

@@ -62,7 +62,7 @@ abandons its continuation and is handled by the outermost handler, giving 65.
 def effects : Core.Program where
   fns := [
     -- 0: worker
-    ⟨[ ⟨[], .perform 0 1 [.int 1] <| .perform 0 1 [.var 0] <|
+    ⟨[ ⟨[], .perform 0 [.int 1] <| .perform 0 [.var 0] <|
               .let_ (.prim .intAdd [.var 0, .var 1]) <| .ret (.var 2)⟩ ]⟩,
     -- 1: the `Ask` arm, receiving the payload and the resumption
     ⟨[ ⟨[.wild, .wild], .let_ (.prim .intAdd [.var 0, .int 10]) <| .tail (.var 1) [.var 2]⟩ ]⟩,
@@ -96,7 +96,7 @@ main = handle (() => Ask(1))() { r => r; Ask(x, k) => let _ = k(x) in tail k(x) 
 -/
 def resumeTwice : Core.Program where
   fns := [
-    ⟨[ ⟨[], .perform 0 1 [.int 1] <| .ret (.var 0)⟩ ]⟩,
+    ⟨[ ⟨[], .perform 0 [.int 1] <| .ret (.var 0)⟩ ]⟩,
     ⟨[ ⟨[.wild, .wild], .call (.var 1) [.var 0] <| .tail (.var 1) [.var 0]⟩ ]⟩,
     ⟨[ ⟨[.wild], .ret (.var 0)⟩ ]⟩
   ]

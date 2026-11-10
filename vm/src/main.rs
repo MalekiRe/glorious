@@ -88,7 +88,7 @@ enum Instr {
     Ret(Atom),
     Handle { ret: usize, ops: Vec<(u64, usize)>, caps: Vec<Atom>, thunk: Atom, tail: bool },
     Raise(u64, Vec<Atom>),
-    Perform(u64, u64, Vec<Atom>),
+    Perform(u64, Vec<Atom>),
     Label { thunk: Atom, tail: bool },
     Guard { cleanup: Atom, thunk: Atom, tail: bool },
     Cancel(Atom),
@@ -235,8 +235,7 @@ impl Reader<'_> {
             }
             7 => {
                 let op = self.nat()?;
-                let shots = self.nat()?;
-                Ok(Instr::Perform(op, shots, self.atoms()?))
+                Ok(Instr::Perform(op, self.atoms()?))
             }
             8 => Ok(Instr::Label { thunk: self.atom()?, tail: false }),
             9 => Ok(Instr::Label { thunk: self.atom()?, tail: true }),
@@ -292,7 +291,7 @@ fn decode(bytes: &[u8]) -> Decoded<Program> {
     if bytes.len() < 5 || &bytes[..4] != b"GLBC" {
         return Err("not a Glorious bytecode file".into());
     }
-    if bytes[4] != 1 {
+    if bytes[4] != 2 {
         return Err(format!("unsupported bytecode version {}", bytes[4]));
     }
     let mut r = Reader { bytes, pos: 5 };
@@ -313,7 +312,6 @@ struct Handler {
     caps: Vec<Value>,
 }
 
-#[derive(Clone)]
 enum Frame {
     /// Where to continue after a call returns, and the locals to restore.
     Ret { code: usize, pc: usize, locals: Vec<Value> },
@@ -348,8 +346,9 @@ struct Vm {
     pc: usize,
     locals: Vec<Value>,
     frames: Vec<Frame>,
-    /// Captured continuations with the number of uses each has left.
-    conts: Vec<Option<(u64, Vec<Frame>)>>,
+    /// Captured continuations. A resumption is one-shot: resuming or cancelling
+    /// it moves its frames out and leaves the entry empty.
+    conts: Vec<Option<Vec<Frame>>>,
     labels: u64,
     /// Memory: a cell is live with a value, or has been freed.
     cells: Vec<Option<Value>>,
@@ -447,15 +446,8 @@ impl Vm {
                 if args.len() != 1 {
                     return wrong();
                 }
-                let entry = self.conts.get_mut(id).ok_or(Stop::Wrong)?;
-                let segment = match entry {
-                    Some((0, _)) | None => return wrong(),
-                    Some((1, _)) => entry.take().unwrap().1,
-                    Some((uses, segment)) => {
-                        *uses -= 1;
-                        segment.clone()
-                    }
-                };
+                let segment =
+                    self.conts.get_mut(id).and_then(Option::take).ok_or(Stop::Wrong)?;
                 self.frames.extend(segment);
                 self.deliver(args.pop().unwrap())
             }
@@ -568,7 +560,7 @@ impl Vm {
                 self.push_cleanups(abandoned, 1);
                 self.deliver(unit())
             }
-            Instr::Perform(op, shots, args) => {
+            Instr::Perform(op, args) => {
                 let mut args = self.atoms(args)?;
                 let (at, handler, arm) = self.find_handler(*op)?;
                 // The continuation runs from the handler up to the performer.
@@ -576,7 +568,7 @@ impl Vm {
                 let locals = std::mem::take(&mut self.locals);
                 segment.push(Frame::Ret { code: self.code, pc: self.pc + 1, locals });
                 args.push(Value::Cont(self.conts.len()));
-                self.conts.push(Some((*shots, segment)));
+                self.conts.push(Some(segment));
                 self.call_fn(arm, &handler.caps, args)
             }
             Instr::Label { thunk, tail } => {
@@ -609,7 +601,7 @@ impl Vm {
                 let Value::Cont(id) = self.atom(k)? else {
                     return wrong();
                 };
-                let (_, segment) =
+                let segment =
                     self.conts.get_mut(id).and_then(Option::take).ok_or(Stop::Wrong)?;
                 self.push_ret();
                 self.frames.push(Frame::Yield(unit()));

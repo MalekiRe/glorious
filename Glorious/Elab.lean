@@ -29,8 +29,6 @@ structure OpInfo where
   id : Nat
   arity : Nat
   terminal : Bool
-  /-- How many times the operation's resumption may be used. -/
-  shots : Nat
 
 structure Globals where
   ctors : List (String × CtorInfo) := []
@@ -347,7 +345,7 @@ partial def elabCall (scope : Scope) (isTail : Bool) (f : Expr) (args : List Exp
       if info.terminal then
         terminate (.raise info.id atoms)
         pure (.int 0)
-      else emit (.perform info.id info.shots atoms)
+      else emit (.perform info.id atoms)
     | .prim p n => do
       if isTail then throw s!"`tail` applies to calls, not to the intrinsic `{x}`"
       if n != args.length then
@@ -547,8 +545,6 @@ partial def elabHandle (scope : Scope) (tailPos : Bool) (subject : Expr) (arms :
         else if ps.length == n + 1 then
           mkClause captures ps (fun sc => elabStmts sc true body)
         else if ps.length == n then
-          unless info.shots == 1 do
-            throw "an arm for an operation resumed more than once must name the resumption"
           mkClause captures (ps ++ [.wild]) (fun sc => do
             let r ← elabStmts sc false body
             terminate (.tail (.var n) [r])
@@ -559,7 +555,7 @@ partial def elabHandle (scope : Scope) (tailPos : Bool) (subject : Expr) (arms :
       let forward : Core.Clause :=
         if info.terminal then ⟨List.replicate n .wild, .raise info.id payload⟩
         else ⟨List.replicate (n + 1) .wild,
-          .perform info.id info.shots payload
+          .perform info.id payload
             (.tail (.var n) [.var (n + 1 + captures.length)])⟩
       let opName := (opNames.lookup id).getD "an operation"
       let idx ← addFn ⟨clauses ++ [forward]⟩ s!"the handler arm for `{opName}` in `{owner}`"
@@ -606,10 +602,8 @@ def collect (items : List Item) :
       for op in ops do
         if (g.ops.lookup op.name).isSome then
           throw s!"operation `{op.name}` is declared twice"
-        if op.shots == 0 then
-          throw s!"operation `{op.name}` must allow its resumption at least one use"
         g := { g with
-          ops := (op.name, ⟨owner, nextOp, op.payload.length, op.terminal, op.shots⟩) :: g.ops }
+          ops := (op.name, ⟨owner, nextOp, op.payload.length, op.terminal⟩) :: g.ops }
         nextOp := nextOp + 1
     | .fn name _ _ _ clauses =>
       if (g.fns.lookup name).isSome then throw s!"function `{name}` is declared twice"

@@ -453,17 +453,8 @@ private partial def parseItem : P Item := do
     let mut ops : Array OpDecl := #[]
     repeat
       if (← peek) == .punct "}" then break
-      -- An optional quantity `[lo, hi]`: the resumption may be used `hi` times.
-      let mut shots := 1
-      if ← acceptPunct "[" then
-        match ← peek, ← peek 1, ← peek 2 with
-        | .int _, .punct ",", .int hi =>
-          advance
-          advance
-          advance
-          shots := hi
-        | _, _, _ => failAt "expected a quantity such as `[2, 2]`"
-        expectPunct "]"
+      if (← peek) == .punct "[" then
+        failAt "expected an operation name (there are no quantities: a resumption is used once)"
       let op ← expectIdent
       expectPunct "("
       let payload ← parseTypeList ")"
@@ -475,7 +466,7 @@ private partial def parseItem : P Item := do
           terminal := true
         else
           result := some (← parseType)
-      ops := ops.push ⟨op, payload, result, terminal, shots⟩
+      ops := ops.push ⟨op, payload, result, terminal⟩
       if !(← acceptPunct ",") then
         if !(← acceptPunct ";") then break
     expectPunct "}"

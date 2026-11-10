@@ -253,23 +253,19 @@ def cases : List Case := [
   ⟨"fn main() { let x = 1; &mut x }",
     [], "error: in `main`: `x` is not a mutable variable, so it cannot be borrowed"⟩,
 
-  -- An operation may declare how many times its resumption can be used. Each
-  -- use runs the captured computation again; one use too many goes wrong.
-  ⟨"effect Choice { [2, 2] choose() }
-  fn main() { handle (if(choose()) { 1 } else { 2 }) * 10 { choose(k) => k(true) * 100 + k(false) } }",
-    [], "1020"⟩,
-  ⟨"effect Choice { [2, 2] choose() }
-  fn main() { handle choose() { choose(k) => k(true); k(false); k(true) } }",
+  -- A resumption is one-shot: it is resumed once or cancelled once. A second use
+  -- goes wrong when the program runs; the checker does not catch it yet.
+  ⟨"effect Choice { choose() }
+  fn main() { handle (if(choose()) { 1 } else { 2 }) * 10 { choose(k) => k(true) } }",
+    [], "10"⟩,
+  ⟨"effect Choice { choose() }
+  fn main() { handle choose() { choose(k) => k(true); k(false) } }",
     [], "went wrong"⟩,
-  ⟨"effect Choice { [2, 2] choose() }
-  fn work() { defer print(1); choose() }
-  fn main() { handle work() { _ => 0, choose(k) => k(true); k(false); 0 } }",
-    [], "1\n1\n0"⟩,
-  ⟨"effect Choice { [2, 2] choose() }  fn main() { handle choose() { choose() => true } }",
-    [], "error: an arm for an operation resumed more than once must name the resumption"⟩,
-  ⟨"effect Never { [0, 0] op() }  fn main() { 0 }",
-    [], "error: operation `op` must allow its resumption at least one use"⟩,
-
+  ⟨"effect Choice { choose() }
+  fn main() { handle choose() { choose(k) => cancel(k); k(true) } }",
+    [], "went wrong"⟩,
+  ⟨"effect Choice { [2, 2] choose() }  fn main() { 0 }",
+    [], "error: 1:17: expected an operation name (there are no quantities: a resumption is used once), found `[`"⟩,
 
   -- Types and effects are inferred. Mistakes that used to surface when a program
   -- ran are now reported before it does.

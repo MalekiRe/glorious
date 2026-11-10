@@ -72,32 +72,18 @@ def findHandler {φ : Type} (asHandler : φ → Option Handler) (op : Nat) :
       | some d => some ⟨fr :: d.above, d.handler, d.arm, d.below⟩
       | none => none
 
-/-- Captured continuations, indexed by resumption identity. An entry holds how
-many more times its resumption may be used, and is emptied by the last use. -/
-abbrev Conts (φ : Type) := List (Option (Nat × List φ))
+/-- Captured continuations, indexed by resumption identity. A resumption is
+one-shot: its entry holds the captured frames until it is resumed or cancelled,
+and is empty afterwards. -/
+abbrev Conts (φ : Type) := List (Option (List φ))
 
-/-- Use a resumption once: its captured frames, and the entries afterwards. A
-resumption with no uses left cannot be used. -/
-def useCont {α : Type} : List (Option (Nat × α)) → Nat → Option (α × List (Option (Nat × α)))
+/-- Take a resumption's captured frames, leaving its entry empty. Resuming and
+cancelling both do this, so a resumption that has been used cannot be used again. -/
+def takeCont {α : Type} : List (Option α) → Nat → Option (α × List (Option α))
   | [], _ => none
   | c :: cs, 0 =>
     match c with
-    | some (uses, x) =>
-      if uses = 0 then none
-      else if uses = 1 then some (x, none :: cs)
-      else some (x, some (uses - 1, x) :: cs)
-    | none => none
-  | c :: cs, id + 1 =>
-    match useCont cs id with
-    | some (x, cs') => some (x, c :: cs')
-    | none => none
-
-/-- Give a resumption up for good: its captured frames, and its entry emptied. -/
-def takeCont {α : Type} : List (Option (Nat × α)) → Nat → Option (α × List (Option (Nat × α)))
-  | [], _ => none
-  | c :: cs, 0 =>
-    match c with
-    | some (_, x) => some (x, none :: cs)
+    | some x => some (x, none :: cs)
     | none => none
   | c :: cs, id + 1 =>
     match takeCont cs id with

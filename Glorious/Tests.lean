@@ -56,7 +56,7 @@ def notTail (n : Nat) : String :=
 #guard diagnose "fn main() { match(Some(1)) { None => 0 } }"
   == "no clause of a callable in `main` matches the arguments (Ok(1))"
 #guard diagnose "effect Ask { ask() }  fn main() { handle ask() { ask(k) => k(1) + k(2) } }"
-  == "a resumption is used more times than its operation allows, or after it was cancelled"
+  == "a resumption is used a second time: it was already resumed or cancelled"
 #guard diagnose "fn main() { let l = @out { @out }; l(1) }"
   == "a label is applied after its scope has ended"
 #guard diagnose "fn main() { let x = 5; x(1) }" == "`5` is called, but it is not callable"

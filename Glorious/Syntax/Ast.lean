@@ -85,8 +85,6 @@ structure OpDecl where
   result : Option TypeExpr
   /-- Declared `-> !`: the operation never returns. -/
   terminal : Bool
-  /-- How many times its resumption may be used. -/
-  shots : Nat
 
 inductive Assoc where
   | left

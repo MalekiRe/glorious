@@ -139,7 +139,7 @@ def apply (p : Program) (c : Callee) (stack : List Frame) (store : Store Frame) 
   match c with
   | .fn fn captures vs => callFn p fn captures vs stack store
   | .cont id v =>
-    match useCont store.conts id with
+    match takeCont store.conts id with
     | some (segment, conts) => deliver p v (segment ++ stack) ⟨conts, store.labels, store.cells⟩
     | none => .stuck
   | .label id v =>
@@ -179,7 +179,7 @@ def step (p : Program) (s : State) : Step State Value :=
       | some d =>
         -- The abandoned frames are cleaned up before the handler's arm runs.
         deliver p .unit (unwind d.above (.invoke d.arm d.handler.caps vs :: d.below)) s.store
-  | .perform op shots args body =>
+  | .perform op args body =>
     match evalAtoms s.env args with
     | none => .stuck
     | some vs =>
@@ -188,9 +188,8 @@ def step (p : Program) (s : State) : Step State Value :=
       | some d =>
         -- The continuation runs from the performer up to and including the
         -- handler, so resuming it reinstalls the handler: handlers are deep.
-        -- It may be resumed `shots` times.
         callFn p d.arm d.handler.caps (vs ++ [.cont s.store.conts.length]) d.below
-          ⟨s.store.conts ++ [some (shots, .call s.env body :: d.above ++ [.handler d.handler])],
+          ⟨s.store.conts ++ [some (.call s.env body :: d.above ++ [.handler d.handler])],
             s.store.labels, s.store.cells⟩
   | .label thunk body =>
     match evalClosure s.env thunk with

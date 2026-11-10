@@ -1,0 +1,62 @@
+# Design decisions on the `lean-kernel` branch
+
+This file records decisions that settle a question the specifications leave
+open, or that deliberately depart from them. Read it before changing the
+kernel. Where it disagrees with a specification in the repository root, this
+file is the current intent for this branch.
+
+## Resumptions are one-shot
+
+**Decision (user, with the kernel rewrite).** A resumption can be used at most
+once: resumed once, or cancelled once. There is no multi-shot resumption, and
+no `[n, n]` quantity on operation declarations.
+
+This departs from the language specification §10.6, which admits exact finite
+`[n, n]`, and from the usage-multiplication rules in the kernel draft §3.6.
+Those parts of the specifications do not apply on this branch.
+
+**Why.**
+
+- Multi-shot was needed only by handlers that run the rest of a computation
+  more than once: backtracking and exhaustive exploration. Exceptions, state,
+  generators, async, schedulers and early exit are all one-shot. One example
+  and four tests used it.
+- A second resume re-ran the captured frames but shared every mutable cell with
+  the first run, so it was only correct for code that mutates nothing.
+- A scope resumed twice ends twice. Freeing a mutable variable's cell at the end
+  of its scope would be a double free, and a `defer` ran once per resume.
+- The usage-multiplication machinery in the ownership rules exists only because
+  a continuation can run a suffix several times. With one-shot resumptions a
+  value used once in the source is used once at run time.
+- The VM had to copy the captured frames on every resume but the last. A
+  one-shot resume moves them back.
+
+**What to do instead.** Write backtracking as ordinary recursion over the
+alternatives, and report each solution through an effect or a callback. See
+`examples/backtracking.glorious`.
+
+**Do not reintroduce** use counts, a `shots` field on `perform`, or frame
+copying on resume without revisiting the points above. A middle option was
+considered and rejected for now: multi-shot only for continuations shown to
+capture no mutable cells, cleanups or owned resources. It keeps pure
+backtracking but adds a second kind of resumption and a new analysis.
+
+## Other standing decisions
+
+- **Branching is by pattern callables** (language specification §6), not by
+  handler-based matching as in the kernel draft. `if`, `match`, loops and
+  operators are written in the language, in `Glorious/Prelude.lean`.
+- **Handlers are attached to `handle`**; an arm is a function. An arm whose
+  payload patterns can fail is followed by a generated clause that performs the
+  operation again outside the handler.
+- **Labels and resumptions are ordinary callable values.** A label is found by
+  unwinding the stack. The specification asks for direct jumps; that is a known
+  gap, not a decision against it.
+- **Types, effect rows and captures are inferred.** Annotations are optional. A
+  declaration with type parameters is polymorphic; one with bare field names has
+  a single inferred type for the whole program.
+- **Label lifetimes are checked by inferred capture sets** rather than written
+  lifetimes. The check is conservative about callables received as parameters.
+- **What is proved** is that compiling Core to bytecode preserves behaviour. The
+  parser, checker, elaborator, binary decoder in the Rust VM and the VM itself
+  are not proved; they are compared by running every test program three ways.

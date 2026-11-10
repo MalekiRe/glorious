@@ -22,9 +22,9 @@ inductive Instr where
   | handle (ret : Nat) (ops : List (Nat × Nat)) (captures : List Atom) (thunk : Atom)
   /-- Abandon the frames up to the nearest handler of `op` and enter its arm. -/
   | raise (op : Nat) (args : List Atom)
-  /-- Capture the frames up to the nearest handler of `op` as a resumption usable
-  `shots` times and enter its arm; the value it is resumed with becomes the next local. -/
-  | perform (op : Nat) (shots : Nat) (args : List Atom)
+  /-- Capture the frames up to the nearest handler of `op` as a one-shot resumption
+  and enter its arm; the value it is resumed with becomes the next local. -/
+  | perform (op : Nat) (args : List Atom)
   /-- Push a return frame and a fresh label scope, then enter `thunk` with the label. -/
   | label (thunk : Atom)
   /-- Push a handler delimiter and enter `thunk`, reusing the current frame. -/
