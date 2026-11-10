@@ -47,6 +47,11 @@ inductive Tm where
   and bind the scope's result. Applying the label to a value leaves the scope
   with that value. -/
   | label (thunk : Atom) (body : Tm)
+  /-- `handle` whose result is the result of the current activation: no caller
+  frame is kept, so a handler re-installed by a tail call does not grow the stack. -/
+  | handleTail (ret : Nat) (ops : List (Nat × Nat)) (captures : List Atom) (thunk : Atom)
+  /-- `label` whose result is the result of the current activation. -/
+  | labelTail (thunk : Atom)
   /-- Ask the host to perform operation `id` and bind its result. -/
   | host (id : Nat) (args : List Atom) (body : Tm)
 

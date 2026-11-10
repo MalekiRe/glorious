@@ -23,6 +23,8 @@ def compileTm : Core.Tm → Code
   | .raise op args => [.raise op args]
   | .perform op args body => .perform op args :: compileTm body
   | .label thunk body => .label thunk :: compileTm body
+  | .handleTail ret ops captures thunk => [.handleTail ret ops captures thunk]
+  | .labelTail thunk => [.labelTail thunk]
   | .host id args body => .host id args :: compileTm body
 
 /-- A structural test a pattern imposes on a place. -/

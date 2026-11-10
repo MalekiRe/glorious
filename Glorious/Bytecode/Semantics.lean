@@ -130,6 +130,16 @@ def step (p : Program) (s : State) : Step State Value :=
     | none => .stuck
     | some v =>
       .next ⟨s.code, if v.isInt n then s.pc + 1 else fail, s.locals, s.frames, s.store⟩
+  | some (.handleTail ret ops captures thunk) =>
+    match evalAtoms s.locals captures, evalCall s.locals thunk [] with
+    | some caps, some c => apply p c (.handler ⟨ret, ops, caps⟩ :: s.frames) s.store
+    | _, _ => .stuck
+  | some (.labelTail thunk) =>
+    match evalClosure s.locals thunk with
+    | none => .stuck
+    | some (fn, captures) =>
+      callFn p fn captures [.label s.store.labels] (.label s.store.labels :: s.frames)
+        ⟨s.store.conts, s.store.labels + 1⟩
   -- A host operation is a step of the program in its world; see `stepIO`.
   | some (.host _ _) => .stuck
 

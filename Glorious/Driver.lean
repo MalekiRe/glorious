@@ -63,4 +63,20 @@ def evalSource (src : String) (input : List Int := []) (fuel : Nat := 200000) : 
       (Machine.exec (Bytecode.stepIO bytecode) (fuel * 20) (Bytecode.initIO bytecode input))
     if onCore == onVm then onVm else s!"MISMATCH: Core gives {onCore}, bytecode gives {onVm}"
 
+/-- The deepest the bytecode machine's stack gets while running a program. -/
+def peakStack (src : String) (input : List Int := []) (fuel : Nat := 4000000) : Option Nat :=
+  match compileSource src with
+  | .error _ => none
+  | .ok c =>
+    let bytecode := compile c.core
+    let rec go : Nat → Bytecode.Config → Nat → Option Nat
+      | 0, _, _ => none
+      | n + 1, cfg, peak =>
+        let peak := max peak cfg.state.frames.length
+        match Bytecode.stepIO bytecode cfg with
+        | .next cfg' => go n cfg' peak
+        | .halt _ => some peak
+        | .stuck => none
+    go fuel (Bytecode.initIO bytecode input) 0
+
 end Glorious

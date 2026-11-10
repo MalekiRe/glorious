@@ -492,6 +492,55 @@ theorem step_sim (p : Core.Program) {s : Core.State} {t : Bytecode.State} (hm : 
         simp [Bytecode.step, hi, he]
       rw [h1, h2]
       exact callFn_sim (.label (.call hc.tail hfr)) (.mk hcs)
+  | handleTail ret ops captures thunk =>
+    have hc : CodeAt code pc [Instr.handleTail ret ops captures thunk] := hcode
+    have hi := hc.head
+    cases hcap : evalAtoms ρ captures with
+    | none =>
+      have h1 : Core.step p ⟨.handleTail ret ops captures thunk, ρ, stack, ⟨conts, labels⟩⟩
+          = .stuck := by
+        simp [Core.step, hcap]
+      rw [h1]
+      exact .stuck
+    | some caps =>
+      cases he : evalCall ρ thunk [] with
+      | none =>
+        have h1 : Core.step p ⟨.handleTail ret ops captures thunk, ρ, stack, ⟨conts, labels⟩⟩
+            = .stuck := by
+          simp [Core.step, hcap, he]
+        rw [h1]
+        exact .stuck
+      | some c =>
+        have h1 : Core.step p ⟨.handleTail ret ops captures thunk, ρ, stack, ⟨conts, labels⟩⟩
+            = Core.apply p c (.handler ⟨ret, ops, caps⟩ :: stack) ⟨conts, labels⟩ := by
+          simp [Core.step, hcap, he]
+        have h2 : Bytecode.step (compile p) ⟨code, pc, ρ, frames, ⟨conts', labels⟩⟩
+            = Bytecode.apply (compile p) c (.handler ⟨ret, ops, caps⟩ :: frames)
+                ⟨conts', labels⟩ := by
+          simp [Bytecode.step, hi, hcap, he]
+        rw [h1, h2]
+        exact apply_sim (.handler hfr) hks
+  | labelTail thunk =>
+    have hc : CodeAt code pc [Instr.labelTail thunk] := hcode
+    have hi := hc.head
+    cases he : evalClosure ρ thunk with
+    | none =>
+      have h1 : Core.step p ⟨.labelTail thunk, ρ, stack, ⟨conts, labels⟩⟩ = .stuck := by
+        simp [Core.step, he]
+      rw [h1]
+      exact .stuck
+    | some r =>
+      obtain ⟨fn, captures⟩ := r
+      have h1 : Core.step p ⟨.labelTail thunk, ρ, stack, ⟨conts, labels⟩⟩
+          = Core.callFn p fn captures [.label labels] (.label labels :: stack)
+              ⟨conts, labels + 1⟩ := by
+        simp [Core.step, he]
+      have h2 : Bytecode.step (compile p) ⟨code, pc, ρ, frames, ⟨conts', labels⟩⟩
+          = Bytecode.callFn (compile p) fn captures [.label labels] (.label labels :: frames)
+              ⟨conts', labels + 1⟩ := by
+        simp [Bytecode.step, hi, he]
+      rw [h1, h2]
+      exact callFn_sim (.label hfr) (.mk hcs)
   | host id args body =>
     -- Host operations are not steps of the machine state alone.
     have h1 : Core.step p ⟨.host id args body, ρ, stack, ⟨conts, labels⟩⟩ = .stuck := rfl

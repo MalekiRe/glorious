@@ -263,10 +263,13 @@ partial def elabExpr (scope : Scope) (tailPos : Bool) : Expr → M Atom
     if tailPos then elabCall scope true f args
     else throw "`tail` call is not in tail position"
   | .closure clauses => elabClosure scope clauses
-  | .handle subject arms => elabHandle scope subject arms
+  | .handle subject arms => elabHandle scope tailPos subject arms
   | .labelScope l body => do
     let thunk ← elabClosure scope [.mk [.var (labelName l)] body]
-    emit (.label thunk)
+    if tailPos then
+      terminate (.labelTail thunk)
+      pure (.int 0)
+    else emit (.label thunk)
 
 partial def elabApply (scope : Scope) (isTail : Bool) (callee : Atom) (args : List Expr) :
     M Atom := do
@@ -422,9 +425,11 @@ Arms whose head names an operation serve that operation; the others are
 completion clauses. An arm for a resumptive operation either binds the
 resumption as an extra final pattern, or omits it and resumes with its value.
 Each operation's function ends with a clause that performs the operation again
-outside the handler, so a payload no arm matches is forwarded.
+outside the handler, so a payload no arm matches is forwarded. In tail position
+the handler keeps no caller frame.
 -/
-partial def elabHandle (scope : Scope) (subject : Expr) (arms : List Clause) : M Atom := do
+partial def elabHandle (scope : Scope) (tailPos : Bool) (subject : Expr) (arms : List Clause) :
+    M Atom := do
   let g ← read
   let thunk ← elabClosure scope [.mk [] [.expr subject]]
   let captures := captureNames scope (arms.flatMap (fvClause []))
@@ -475,7 +480,11 @@ partial def elabHandle (scope : Scope) (subject : Expr) (arms : List Clause) : M
           .perform info.id payload (.tail (.var n) [.var (n + 1 + captures.length)])⟩
       let idx ← addFn ⟨clauses ++ [forward]⟩
       table := table.push (id, idx)
-  emit (.handle retIdx table.toList (captures.filterMap (fun x => scope.lookup x)) thunk)
+  let caps := captures.filterMap (fun x => scope.lookup x)
+  if tailPos then
+    terminate (.handleTail retIdx table.toList caps thunk)
+    pure (.int 0)
+  else emit (.handle retIdx table.toList caps thunk)
 
 end
 
