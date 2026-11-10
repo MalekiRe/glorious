@@ -19,4 +19,6 @@ import Glorious.Syntax.Parser
 import Glorious.Elab
 import Glorious.Prelude
 import Glorious.Driver
+import Glorious.Bytecode.Encode
+import Glorious.Cases
 import Glorious.Tests

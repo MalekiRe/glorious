@@ -10,7 +10,7 @@ namespace Glorious
 
 /-- A runtime value. -/
 inductive Value where
-  /-- A mathematical integer. Fixed-width arithmetic is not modelled yet. -/
+  /-- An integer. Arithmetic keeps it within 64 bits; see `checked`. -/
   | int (n : Int)
   /-- A `struct` or `enum` value: a constructor tag and its fields. -/
   | data (tag : Nat) (fields : List Value)
@@ -103,10 +103,15 @@ def child (pl : Place) (i : Nat) : Place := ⟨pl.var, pl.path ++ [i]⟩
 
 end Place
 
+/-- Integers are 64-bit and arithmetic is checked: a result outside this range
+has no meaning. -/
+def checked (n : Int) : Option Value :=
+  if -9223372036854775808 ≤ n ∧ n ≤ 9223372036854775807 then some (.int n) else none
+
 def Prim.eval : Prim → List Value → Option Value
-  | .intAdd, [.int a, .int b] => some (.int (a + b))
-  | .intSub, [.int a, .int b] => some (.int (a - b))
-  | .intMul, [.int a, .int b] => some (.int (a * b))
+  | .intAdd, [.int a, .int b] => checked (a + b)
+  | .intSub, [.int a, .int b] => checked (a - b)
+  | .intMul, [.int a, .int b] => checked (a * b)
   | .intLt, [.int a, .int b] => some (.int (if a < b then 1 else 0))
   | .intEq, [.int a, .int b] => some (.int (if a = b then 1 else 0))
   | _, _ => none

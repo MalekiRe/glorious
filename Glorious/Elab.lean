@@ -238,7 +238,9 @@ def resolveName (scope : Scope) (qual : Option String) (x : String) : M Head := 
 mutual
 
 partial def elabExpr (scope : Scope) (tailPos : Bool) : Expr → M Atom
-  | .int n => pure (.int n)
+  | .int n =>
+    if -9223372036854775808 ≤ n ∧ n ≤ 9223372036854775807 then pure (.int n)
+    else throw s!"integer literal `{n}` does not fit in 64 bits"
   | .name q x => do
     match ← resolveName scope q x with
     | .local a => pure a

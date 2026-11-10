@@ -1,12 +1,17 @@
 import Glorious.Driver
+import Glorious.Cases
+import Glorious.Bytecode.Encode
 
 /-!
 # Command line
 
-`glorious run FILE [INPUT...]` runs a program on the bytecode machine, printing
-what it writes as it writes it. `glorious check FILE [INPUT...]` runs it on both
-machines and reports whether they agree. The integers after the file are the
-program's input.
+* `glorious run FILE [INPUT...]` runs a program on the bytecode machine, printing
+  what it writes as it writes it. The integers after the file are its input.
+* `glorious check FILE [INPUT...]` runs it on both machines and reports whether
+  they agree.
+* `glorious build FILE OUT` compiles it to a bytecode file for the Rust VM.
+* `glorious selftest [VM]` runs the test programs on the Core machine and the
+  Lean bytecode machine, and on the Rust VM if its path is given.
 -/
 
 open Glorious
@@ -29,7 +34,40 @@ partial def runStreaming (names : Array String) (bytecode : Bytecode.Program)
   | r => pure r
 
 def usage : String :=
-  "usage: glorious run FILE [INPUT...]\n       glorious check FILE [INPUT...]"
+  "usage: glorious run FILE [INPUT...]\n       glorious check FILE [INPUT...]\n" ++
+  "       glorious build FILE OUT\n       glorious selftest [VM]"
+
+def writeBytecode (c : Compiled) (out : System.FilePath) : IO Unit :=
+  IO.FS.writeBinFile out
+    ⟨(Bytecode.Encode.file c.ctorNames.toList (compile c.core)).toArray⟩
+
+/-- Run every test program on the Lean machines, and on the Rust VM if given. -/
+def selftest (vm : Option String) : IO UInt32 := do
+  let mut failures := 0
+  let mut ran := 0
+  let tmp : System.FilePath := (← IO.getEnv "TMPDIR").getD "/tmp"
+  let file := tmp / s!"glorious-selftest-{← IO.monoMsNow}.glbc"
+  for c in cases do
+    ran := ran + 1
+    let got := evalSource c.src c.input
+    if got != c.expect then
+      failures := failures + 1
+      IO.eprintln s!"lean machines: expected\n{c.expect}\ngot\n{got}\nfor\n{c.src}\n"
+    if let some vm := vm then
+      match compileSource c.src with
+      | .error _ => pure ()
+      | .ok compiled =>
+        writeBytecode compiled file
+        let out ← IO.Process.output
+          { cmd := vm, args := #[file.toString] ++ (c.input.map toString).toArray }
+        let got := if out.exitCode == 0 then out.stdout else "went wrong\n"
+        if got != c.expect ++ "\n" then
+          failures := failures + 1
+          IO.eprintln s!"rust vm: expected\n{c.expect}\ngot\n{got}\n{out.stderr}for\n{c.src}\n"
+  if vm.isSome then IO.FS.removeFile file
+  let machines := if vm.isSome then "Core, Lean bytecode and Rust VM" else "Core and Lean bytecode"
+  IO.println s!"{ran} programs on {machines}: {failures} failures"
+  pure (if failures == 0 then 0 else 1)
 
 def parseInput (args : List String) : Except String (List Int) :=
   args.mapM fun a =>
@@ -39,6 +77,16 @@ def parseInput (args : List String) : Except String (List Int) :=
 
 def main (args : List String) : IO UInt32 := do
   match args with
+  | ["selftest"] => selftest none
+  | ["selftest", vm] => selftest (some vm)
+  | ["build", path, out] =>
+    match compileSource (← IO.FS.readFile path) with
+    | .ok c =>
+      writeBytecode c out
+      pure 0
+    | .error e =>
+      IO.eprintln s!"{path}: {e}"
+      pure 1
   | command :: path :: rest =>
     let input ← match parseInput rest with
       | .ok input => pure input
