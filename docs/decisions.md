@@ -133,6 +133,10 @@ and checked at each call. Nothing is annotated.
 - **Types, effect rows and captures are inferred.** Annotations are optional. A
   declaration with type parameters is polymorphic; one with bare field names has
   a single inferred type for the whole program.
+- **A callee may perform fewer effects than its caller permits.** Calls are
+  checked by inclusion, not by making the two rows equal. A function value
+  whose effects are unknown is given, at the end of the function, the most that
+  every place it is called from permits.
 - **Label lifetimes are checked by inferred capture sets** rather than written
   lifetimes. The check is conservative about callables received as parameters.
   A resumption counts as holding everything its computation and handler use.

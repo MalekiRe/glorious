@@ -133,6 +133,9 @@ structure St where
   dups : Array (Ty × String) := #[]
   /-- The same, for types that later functions can still affect. -/
   lateDups : Array (Ty × String) := #[]
+  /-- Calls whose callee has effects not yet known: the callee's row, the row
+  permitted where it is called, and a description of the call. -/
+  rowIncl : Array (Row × Row × String) := #[]
   types : List (String × TypeDecl) := []
   ctors : List (String × CtorSig) := []
   ops : List (String × OpSig) := []
@@ -524,6 +527,80 @@ def unifyAt (what : String) (expected actual : Ty) : M Unit := do
     let detail := if e.startsWith "effect" || e.startsWith "this would" then s!" ({e})" else ""
     throw s!"{what}: expected `{showTy (← zonk expected)}`, found `{showTy (← zonk actual)}`{detail}"
 
+/-! ## The effects of a callee
+
+A callee may perform fewer effects than are permitted where it is called. Its
+named effects are required of the caller at once. If the rest of its effects is
+still unknown, the call is remembered, and at the end of the function each
+unknown is given the most that every place it is called from permits. Making a
+callee's effects equal to its caller's instead would wrongly tie together two
+calls of one function value made under different handlers.
+-/
+
+/-- The named effects of a callee must be permitted where it is called. -/
+def includeNamed (callee amb : Row) (what : String) : M Unit := do
+  let c ← flattenRow callee
+  for (e, args) in dedupe c.effs do
+    let a ← flattenRow amb
+    try
+      match a.effs.lookup e with
+      | some args' => unifyAll args args'
+      | none => unifyRow amb ⟨[(e, args)], some (← freshRowVar)⟩
+    catch err => throw s!"{what} cannot be called here: {err}"
+
+/-- The callee's unknown remaining effects, unless they are the caller's own. -/
+def openTail (callee amb : Row) : M (Option Nat) := do
+  let c ← flattenRow callee
+  let a ← flattenRow amb
+  match c.tail with
+  | none => pure none
+  | some ρ => pure (if a.tail == some ρ then none else some ρ)
+
+def includeRow (callee amb : Row) (what : String) : M Unit := do
+  includeNamed callee amb what
+  if (← openTail callee amb).isSome then
+    modify fun s => { s with rowIncl := s.rowIncl.push (callee, amb, what) }
+
+/--
+Work through the remembered calls. Named effects are always passed on. With
+`bind`, an unknown that `bind` accepts is then decided, newest first, since an
+inner unknown should give way before an outer one: if every place it is called
+from has the same remaining effects, it gets the named effects common to them
+all; otherwise, and only when `final`, it is made equal to each in turn.
+-/
+partial def settleRows (bind : Option (Nat → Bool)) (final : Bool) : M Unit := do
+  let pending := (← get).rowIncl
+  modify fun s => { s with rowIncl := #[] }
+  let mut left : Array (Row × Row × String × Nat) := #[]
+  for (callee, amb, what) in pending do
+    includeNamed callee amb what
+    if let some ρ ← openTail callee amb then left := left.push (callee, amb, what, ρ)
+  let restore : M Unit :=
+    modify fun s => { s with rowIncl := left.map (fun (c, a, w, _) => (c, a, w)) ++ s.rowIncl }
+  match bind with
+  | none => restore
+  | some ok =>
+    let candidates := ((left.toList.map (·.2.2.2)).eraseDups.filter ok).mergeSort (· ≥ ·)
+    for ρ in candidates do
+      let mine := left.toList.filter (·.2.2.2 == ρ)
+      let ambs ← mine.mapM fun (_, amb, _, _) => flattenRow amb
+      match ambs with
+      | [] => pure ()
+      | first :: _ =>
+        if ambs.all (·.tail == first.tail) && first.tail != some ρ then
+          let common := (dedupe first.effs).filter fun (n, _) =>
+            ambs.all fun a => a.effs.any (·.1 == n)
+          modify fun s => { s with rows := s.rows.set! ρ (some ⟨common, first.tail⟩) }
+          restore
+          return ← settleRows bind final
+        else if final then
+          for (callee, amb, what, _) in mine do
+            try unifyRow callee amb
+            catch err => throw s!"{what} cannot be called here: {err}"
+          restore
+          return ← settleRows bind final
+    restore
+
 /-! ## Declarations -/
 
 /-- Read a type as written. In a declaration, a bare unknown name is a field
@@ -759,6 +836,7 @@ partial def runProjections (final : Bool) : M Unit := do
 
 def runPending : M Unit := do
   runProjections true
+  settleRows (some fun _ => true) true
   let pending := (← get).pending
   modify fun s => { s with pending := #[] }
   for p in pending do
@@ -818,6 +896,7 @@ end
 def checkEscape (brand : Nat) (what : String) (roots : List (String × Ty)) (amb : Row) :
     M Unit := do
   runProjections false
+  settleRows none false
   let holds := fun (t : Ty) => do
     modify fun s => { s with seen := [] }
     tyHolds brand t
@@ -1132,14 +1211,15 @@ partial def applyTy (scope : Scope) (amb : Row) (what : String) (callee : Ty) (a
   match ← find callee with
   | .fn ps r effs tail _ => do
     checkArgs scope amb what ps args
-    try unifyRow ⟨effs, tail⟩ amb
-    catch e => throw s!"{what} cannot be called here: {e}"
+    includeRow ⟨effs, tail⟩ amb what
     pure r
   | t => do
     let argTys ← args.mapM (inferExpr scope amb)
     let r ← freshTy
+    let row ← freshRow
     unifyAt s!"{what} is called with {arguments args.length}"
-      (.func argTys r amb (← freshCap)) t
+      (.func argTys r row (← freshCap)) t
+    includeRow row amb what
     pure r
 
 partial def inferCall (scope : Scope) (amb : Row) (f : Expr) (args : List Expr) : M Ty := do
@@ -1220,6 +1300,14 @@ partial def inferStmts (scope : Scope) (amb : Row) : List Stmt → M Ty
         keep := t :: keep
       for (subject, _, result) in s.projections do
         keep := subject :: result :: keep
+      -- Decide the effects of what the callable calls, where nothing outside
+      -- depends on them; calls still undecided keep their effects fixed.
+      let mut fixedRows : List Nat := []
+      for k in keep do
+        fixedRows := fixedRows ++ freeRows (← zonk k)
+      settleRows (some fun ρ => !fixedRows.contains ρ) false
+      for (callee, permitted, _) in (← get).rowIncl do
+        keep := .func [] .unit callee (← freshCap) :: .func [] .unit permitted (← freshCap) :: keep
       let scheme ← generalize t keep (top := false)
       checkUses [(x, .poly scheme)] rest
       inferStmts ((x, .poly scheme) :: scope) amb rest

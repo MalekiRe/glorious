@@ -513,6 +513,25 @@ def cases : List Case := [
   ⟨"effect Ask { ask() -> Int }\n  effect Tick { tick() }\n  fn work() { tick(); tick(); 0 }\n  fn main() { handle ask() { ask(outer) => handle work() { tick() => outer(1); } } }",
     [], "error: in `main`: `outer` is used more than once, but a value that holds a resumption can be used only once"⟩,
 
+
+  -- A callee may perform fewer effects than are permitted where it is called,
+  -- so one function value can be called both inside and outside a handler. It
+  -- is then held to what every such place permits.
+  ⟨"fn g(f) { f(0); let mut i = 0; while({ i < 2 }) { f(i); i = i + 1 }; 0 }\n  fn main() { g(print) }",
+    [], "0\n0\n1\n0"⟩,
+  ⟨"fn mk() { { x => print(x) } }\n  fn main() { let show = mk(); show(0); let mut i = 0; while({ i < 2 }) { show(i); i = i + 1 }; 0 }",
+    [], "0\n0\n1\n0"⟩,
+  ⟨"effect Ask { ask() -> Int }\n  effect Log { log(Int) }\n  fn main() { handle ask() + 1 { ask(k) => handle { log(1); k(5) }() { log(x) => print(x) } } }",
+    [], "1\n6"⟩,
+  ⟨"effect A { a() -> Int }\n  effect B { b() -> Int }\n  fn both(f) { (handle f() { a() => 1 }) + (handle f() { b() => 2 }) }\n  fn main() { both({ 5 }) }",
+    [], "10"⟩,
+  ⟨"effect A { a() -> Int }\n  effect B { b() -> Int }\n  fn both(f) { (handle f() { a() => 1 }) + (handle f() { b() => 2 }) }\n  fn main() { both({ a() }) }",
+    [], "error: `main` performs effects that nothing handles: {A}"⟩,
+  ⟨"effect Log { log(Int) }\n  fn g(f) { f(0); handle f(1) { log(x) => print(x) } }\n  fn main() { g({ x => log(x); }) }",
+    [], "error: `main` performs effects that nothing handles: {Log}"⟩,
+  ⟨"effect Ask { ask() -> Int }\n  fn main() { let mut n = 0; handle ask() + 1 { ask(k) => while({ n < 2 }) { n = n + 1; k(n); }; 0 } }",
+    [], "error: in `main`: `while` may use what it is given more than once, but a value that holds a resumption can be used only once"⟩,
+
   -- Errors are reported, not guessed around.
   ⟨"fn main() { nope }",
     [], "error: in `main`: unknown name `nope`"⟩,
