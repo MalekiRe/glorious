@@ -303,6 +303,8 @@ private partial def parseStmts : P (List Stmt) := do
   repeat
     let t ← peek
     if t == .punct "}" || t == .punct "," || t == .eof then break
+    let here ← peekTok
+    let mark := fun (s : Stmt) => Stmt.located here.line here.col s
     if t == .ident "let" then
       advance
       if (← peek) == .ident "mut" then
@@ -311,27 +313,27 @@ private partial def parseStmts : P (List Stmt) := do
         expectPunct "="
         let value ← parseBinary 0 false
         expectPunct ";"
-        out := out.push (.letMut name value)
+        out := out.push (mark (.letMut name value))
       else
         let pat ← parsePattern
         expectPunct "="
         let value ← parseBinary 0 false
         expectPunct ";"
-        out := out.push (.let_ pat value)
+        out := out.push (mark (.let_ pat value))
     else if t == .ident "defer" then
       advance
       let e ← parseBinary 0 false
       expectPunct ";"
-      out := out.push (.defer e)
+      out := out.push (mark (.defer e))
     else
       let e ← parseBinary 0 false
       if ← acceptPunct "=" then
         let value ← parseBinary 0 false
-        out := out.push (.assign e value)
+        out := out.push (mark (.assign e value))
         -- An assignment may end a block; its value is unit.
         if !(← acceptPunct ";") then break
       else
-        out := out.push (.expr e)
+        out := out.push (mark (.expr e))
         if ← acceptPunct ";" then
           let t' ← peek
           if t' == .punct "}" || t' == .punct "," then

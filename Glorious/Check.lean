@@ -109,6 +109,8 @@ abbrev Scope := List (String × Binding)
 /-- A coverage check to run once the types involved are known. `what` names the
 clauses and ends with the verb of the message. -/
 structure Pending where
+  /-- Where the clauses are, as a prefix for the message. -/
+  pos : String
   what : String
   tys : List Ty
   rows : List (List Pattern)
@@ -145,8 +147,12 @@ structure St where
   /-- The functions being inferred together, with their types so far. -/
   group : List (String × Ty) := []
   pending : Array Pending := #[]
-  /-- Field reads whose subject was not yet known: subject, index, field type. -/
-  projections : Array (Ty × Nat × Ty) := #[]
+  /-- Field reads whose subject was not yet known: subject, index, field type,
+  and where the read is. -/
+  projections : Array (Ty × Nat × Ty × String) := #[]
+  /-- Where the statement being checked starts, as a prefix for messages that
+  are only raised later. -/
+  pos : String := ""
 
 abbrev M := StateT St (Except String)
 
@@ -320,10 +326,11 @@ def instantiate (s : Scheme) (via : Option String := none) : M Ty := do
       | .ty t => .ty (subst tm rm cm t)
       | .brand b => .brand b
       | .once => .once)
+  let pos := (← get).pos
   for (t, why) in s.dups do
     -- At a use, the reason is the function's need rather than its inner detail.
     let why := match via with
-      | some f => s!"`{f}` may use what it is given more than once"
+      | some f => s!"{pos}`{f}` may use what it is given more than once"
       | none => why
     modify fun st => { st with dups := st.dups.push (subst tm rm cm t, why) }
   pure (subst tm rm cm s.ty)
@@ -559,7 +566,7 @@ def openTail (callee amb : Row) : M (Option Nat) := do
 def includeRow (callee amb : Row) (what : String) : M Unit := do
   includeNamed callee amb what
   if (← openTail callee amb).isSome then
-    modify fun s => { s with rowIncl := s.rowIncl.push (callee, amb, what) }
+    modify fun s => { s with rowIncl := s.rowIncl.push (callee, amb, s.pos ++ what) }
 
 /--
 Work through the remembered calls. Named effects are always passed on. With
@@ -816,11 +823,13 @@ def fieldType (t : Ty) (idx : Nat) : M (Option Ty) := do
 partial def runProjections (final : Bool) : M Unit := do
   let waiting := (← get).projections
   modify fun s => { s with projections := #[] }
-  let mut left : Array (Ty × Nat × Ty) := #[]
-  for (subject, idx, result) in waiting do
+  let mut left : Array (Ty × Nat × Ty × String) := #[]
+  for (subject, idx, result, pos) in waiting do
     match ← fieldType subject idx with
-    | some t => unifyAt s!"the field `.{idx}`" result t
-    | none => left := left.push (subject, idx, result)
+    | some t =>
+      try unifyAt s!"the field `.{idx}`" result t
+      catch e => throw (pos ++ e)
+    | none => left := left.push (subject, idx, result, pos)
   if left.isEmpty then pure ()
   else if left.size < waiting.size then
     modify fun s => { s with projections := left ++ s.projections }
@@ -829,8 +838,8 @@ partial def runProjections (final : Bool) : M Unit := do
     modify fun s => { s with projections := left ++ s.projections }
   else
     match left[0]? with
-    | some (_, idx, _) =>
-      throw s!"`.{idx}` reads a field of a value whose type is not known here; \
+    | some (_, idx, _, pos) =>
+      throw s!"{pos}`.{idx}` reads a field of a value whose type is not known here; \
         annotate the value it is read from"
     | none => pure ()
 
@@ -842,7 +851,7 @@ def runPending : M Unit := do
   for p in pending do
     let rows ← p.rows.mapM (·.mapM normPat)
     unless ← exhaustive p.tys rows do
-      throw s!"{p.what} not cover every case"
+      throw s!"{p.pos}{p.what} not cover every case"
 
 /-! ## Scopes that values cannot outlive
 
@@ -989,7 +998,7 @@ end
 
 /-- Require that values of a type may be used more than once. -/
 def mustDup (t : Ty) (why : String) : M Unit :=
-  modify fun s => { s with dups := s.dups.push (t, why) }
+  modify fun s => { s with dups := s.dups.push (t, s.pos ++ why) }
 
 def checkDups (dups : Array (Ty × String)) : M Unit := do
   for (t, why) in dups do
@@ -1044,6 +1053,7 @@ partial def usesStmts (resumptive : String → Bool) (x : String) : List Stmt �
       | _ => 0
     addUses (addUses inTarget (usesExpr resumptive x value)) (usesStmts resumptive x rest)
   | .defer e :: rest => addUses (usesExpr resumptive x e) (usesStmts resumptive x rest)
+  | .located _ _ s :: rest => usesStmts resumptive x (s :: rest)
 
 end
 
@@ -1168,7 +1178,7 @@ partial def inferExpr (scope : Scope) (amb : Row) : Expr → M Ty
     | none => do
       -- Not known yet: settle it once the rest of the function is inferred.
       let t ← freshTy
-      modify fun s => { s with projections := s.projections.push (subject, idx, t) }
+      modify fun s => { s with projections := s.projections.push (subject, idx, t, s.pos) }
       pure t
   | .call f args => inferCall scope amb f args
   | .tailCall f args => inferCall scope amb f args
@@ -1276,6 +1286,10 @@ partial def inferCall (scope : Scope) (amb : Row) (f : Expr) (args : List Expr) 
 /-- The type of a block: that of its last expression, or unit. -/
 partial def inferStmts (scope : Scope) (amb : Row) : List Stmt → M Ty
   | [] => pure .unit
+  | .located line col s :: rest => do
+    modify fun st => { st with pos := s!"{line}:{col}: " }
+    try inferStmts scope amb (s :: rest)
+    catch e => throw (positioned line col e)
   | [.expr e] => inferExpr scope amb e
   | .expr e :: rest => do
     let _ ← inferExpr scope amb e
@@ -1298,7 +1312,7 @@ partial def inferStmts (scope : Scope) (amb : Row) : List Stmt → M Ty
           | .poly p => p.ty) :: keep
       for (_, t) in s.group do
         keep := t :: keep
-      for (subject, _, result) in s.projections do
+      for (subject, _, result, _) in s.projections do
         keep := subject :: result :: keep
       -- Decide the effects of what the callable calls, where nothing outside
       -- depends on them; calls still undecided keep their effects fixed.
@@ -1315,7 +1329,7 @@ partial def inferStmts (scope : Scope) (amb : Row) : List Stmt → M Ty
     let t ← inferExpr scope amb value
     let binds ← inferPat pat t
     checkUses binds rest
-    let check : Pending := ⟨"the pattern of this `let` does", [t], [[pat]]⟩
+    let check : Pending := ⟨(← get).pos, "the pattern of this `let` does", [t], [[pat]]⟩
     modify fun s => { s with pending := s.pending.push check }
     inferStmts (binds ++ scope) amb rest
   | .letMut x value :: rest => do
@@ -1413,7 +1427,7 @@ partial def inferCallable (scope : Scope) (annots : List (Option Ty)) (ret : Opt
       let binds ← inferPats pats params
       checkUses binds body
       unifyAt "the result of a clause" result (← inferStmts (binds ++ scope) row body)
-  let check : Pending := ⟨what, params, clauses.map fun
+  let check : Pending := ⟨(← get).pos, what, params, clauses.map fun
     | .mk pats _ => pats⟩
   modify fun s => { s with pending := s.pending.push check }
   -- A function's own label returns from it, so nothing holding that label may
@@ -1461,7 +1475,7 @@ partial def inferHandle (scope : Scope) (amb : Row) (subject : Expr) (arms : Lis
       checkUses binds body
       unifyAt "the result of a completion clause" result
         (← inferStmts (binds ++ scope) amb body)
-    let check : Pending := ⟨"the completion clauses of this handler do", [subjectTy],
+    let check : Pending := ⟨(← get).pos, "the completion clauses of this handler do", [subjectTy],
       completions.toList.map fun (p, _) => [p]⟩
     modify fun st => { st with pending := st.pending.push check }
   let mut covered : List String := []
@@ -1554,6 +1568,7 @@ def checkGroup (decls : List FnDecl) : M Unit := do
   modify fun s => { s with group := group }
   for d in decls do
     try
+      modify fun s => { s with pos := "" }
       let rigid := d.params.map fun p => (p, Ty.con s!"'{p}@{d.name}" [])
       let annots ← d.annots.mapM fun
         | some t => some <$> resolveType rigid false t
@@ -1573,15 +1588,15 @@ def checkGroup (decls : List FnDecl) : M Unit := do
       let hint := if recursive then
         "; if the last expression of the body is not meant as the result, end it with `;`"
         else ""
-      throw s!"in `{d.name}`: {e}{hint}"
+      throw (inFunction d.name (e ++ hint))
   for d in decls do
     let scheme ← generalize ((group.lookup d.name).getD .unit)
     modify fun s => { s with fns := (d.name, scheme) :: s.fns }
   -- A later function can still decide a requirement made here, through a
   -- declaration whose field types are inferred, so each is checked again at
   -- the end of the program.
-  let owner := ", ".intercalate (decls.map fun d => s!"`{d.name}`")
-  let late := (← get).dups.map fun (t, why) => (t, s!"in {owner}: {why}")
+  let owner := (decls.head?.map (·.name)).getD "the program"
+  let late := (← get).dups.map fun (t, why) => (t, inFunction owner why)
   modify fun s => { s with group := [], dups := #[], lateDups := s.lateDups ++ late }
 
 /-- Check a whole program. -/

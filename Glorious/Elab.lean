@@ -164,6 +164,7 @@ partial def fvStmts (bound : List String) : List Stmt → List String
   | .let_ pat value :: rest => fvExpr bound value ++ fvStmts (patVars pat ++ bound) rest
   | .expr e :: rest => fvExpr bound e ++ fvStmts bound rest
   | .defer e :: rest => fvExpr bound e ++ fvStmts bound rest
+  | .located _ _ s :: rest => fvStmts bound (s :: rest)
   | .letMut x value :: rest => fvExpr bound value ++ fvStmts (x :: bound) rest
   | .assign target value :: rest =>
     fvExpr bound target ++ fvExpr bound value ++ fvStmts bound rest
@@ -402,6 +403,9 @@ partial def elabCall (scope : Scope) (isTail : Bool) (f : Expr) (args : List Exp
 /-- Statements in sequence; the value is that of the last expression, or unit. -/
 partial def elabStmts (scope : Scope) (tailPos : Bool) : List Stmt → M Atom
   | [] => emit (.let_ (.construct 0 []))
+  | .located line col s :: rest => do
+    try elabStmts scope tailPos (s :: rest)
+    catch e => throw (positioned line col e)
   | [.expr e] => elabExpr scope tailPos e
   | .expr e :: rest => do
     let _ ← elabExpr scope false e

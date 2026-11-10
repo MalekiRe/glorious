@@ -51,6 +51,8 @@ inductive Stmt where
   | letMut (name : String) (value : Expr)
   /-- `x = e;` or `*p = e;`. -/
   | assign (target : Expr) (value : Expr)
+  /-- A statement together with where it starts in the source. -/
+  | located (line col : Nat) (s : Stmt)
 
 inductive Clause where
   | mk (pats : List Pattern) (body : List Stmt)
@@ -58,6 +60,24 @@ inductive Clause where
 end
 
 instance : Inhabited Expr := ⟨.int 0⟩
+
+/-- Does a message already begin with a `line:column:` position? -/
+def hasPosition (msg : String) : Bool :=
+  match msg.splitOn ":" with
+  | l :: c :: _ :: _ => !l.isEmpty && l.all Char.isDigit && !c.isEmpty && c.all Char.isDigit
+  | _ => false
+
+/-- Give a message a position unless it has a more precise one already. -/
+def positioned (line col : Nat) (msg : String) : String :=
+  if hasPosition msg then msg else s!"{line}:{col}: {msg}"
+
+/-- Name the function a message is about, keeping its position in front. -/
+def inFunction (name : String) (msg : String) : String :=
+  if hasPosition msg then
+    match msg.splitOn ": " with
+    | pos :: rest => s!"{pos}: in `{name}`: {": ".intercalate rest}"
+    | [] => msg
+  else s!"in `{name}`: {msg}"
 
 instance : Inhabited Clause := ⟨.mk [] []⟩
 

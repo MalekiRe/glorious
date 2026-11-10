@@ -107,7 +107,7 @@ def cases : List Case := [
     [], "4"⟩,
   ⟨"effect Ask { ask(x) }
   fn main() { handle ask(1) { ask(x, k) => k(x) + k(x) } }",
-    [], "error: in `main`: `k` is used more than once, but a value that holds a resumption can be used only once"⟩,
+    [], "error: 2:15: in `main`: `k` is used more than once, but a value that holds a resumption can be used only once"⟩,
   ⟨"effect Ask { ask(x) }  fn main() { ask(1) }",
     [], "error: `main` performs effects that nothing handles: {Ask}"⟩,
 
@@ -136,7 +136,7 @@ def cases : List Case := [
   fn main() { (find(2, 1, 2, 3), find(9, 1, 2, 3)) }",
     [], "(Ok(2), Err(()))"⟩,
   ⟨"fn main() { let l = @out { @out }; l(1) }",
-    [], "error: in `main`: the result of the scope `@out`: expected `_`, found `fn(_) -> _` (this would need a type that contains itself)"⟩,
+    [], "error: 1:13: in `main`: the result of the scope `@out`: expected `_`, found `fn(_) -> _` (this would need a type that contains itself)"⟩,
 
   -- Loops are a handler, a tail call and two terminal operations.
   ⟨"effect State { get(), put(value) }
@@ -216,7 +216,7 @@ def cases : List Case := [
   ⟨"effect Ask { ask() }
   fn work() { defer print(1); ask() }
   fn main() { handle work() { ask(k) => cancel(k); k(1) } }",
-    [], "error: in `main`: `k` is used more than once, but a value that holds a resumption can be used only once"⟩,
+    [], "error: 3:15: in `main`: `k` is used more than once, but a value that holds a resumption can be used only once"⟩,
 
   -- A resource bracket, written in the language.
   ⟨"effect Fail { fail(e) -> ! }
@@ -249,9 +249,9 @@ def cases : List Case := [
   ⟨"fn main() { let mut x = 1; let x = x + 10; x }",
     [], "11"⟩,
   ⟨"fn main() { let x = 1; x = 2; x }",
-    [], "error: in `main`: `x` is not a mutable variable"⟩,
+    [], "error: 1:24: in `main`: `x` is not a mutable variable"⟩,
   ⟨"fn main() { let x = 1; &mut x }",
-    [], "error: in `main`: `x` is not a mutable variable, so it cannot be borrowed"⟩,
+    [], "error: 1:24: in `main`: `x` is not a mutable variable, so it cannot be borrowed"⟩,
 
   -- A resumption is one-shot: it is resumed once or cancelled once, and the
   -- checker rejects a second use.
@@ -260,44 +260,44 @@ def cases : List Case := [
     [], "10"⟩,
   ⟨"effect Choice { choose() }
   fn main() { handle choose() { choose(k) => k(true); k(false) } }",
-    [], "error: in `main`: `k` is used more than once, but a value that holds a resumption can be used only once"⟩,
+    [], "error: 2:15: in `main`: `k` is used more than once, but a value that holds a resumption can be used only once"⟩,
   ⟨"effect Choice { choose() }
   fn main() { handle choose() { choose(k) => cancel(k); k(true) } }",
-    [], "error: in `main`: `k` is used more than once, but a value that holds a resumption can be used only once"⟩,
+    [], "error: 2:15: in `main`: `k` is used more than once, but a value that holds a resumption can be used only once"⟩,
   ⟨"effect Choice { [2, 2] choose() }  fn main() { 0 }",
     [], "error: 1:17: expected an operation name (there are no quantities: a resumption is used once), found `[`"⟩,
 
   -- Types and effects are inferred. Mistakes that used to surface when a program
   -- ran are now reported before it does.
   ⟨"fn main() { 1 + (2, 3) }",
-    [], "error: in `main`: argument 2 of `+`: expected `Int`, found `(Int, Int)`"⟩,
+    [], "error: 1:13: in `main`: argument 2 of `+`: expected `Int`, found `(Int, Int)`"⟩,
   ⟨"fn f(a, b) { a }  fn main() { f(1) }",
-    [], "error: in `main`: `f` takes 2 arguments, but is given 1"⟩,
+    [], "error: 1:31: in `main`: `f` takes 2 arguments, but is given 1"⟩,
   ⟨"fn main() { let x = 5; x(1) }",
-    [], "error: in `main`: `x` is called with 1 argument: expected `fn(Int) -> _`, found `Int`"⟩,
+    [], "error: 1:24: in `main`: `x` is called with 1 argument: expected `fn(Int) -> _`, found `Int`"⟩,
   ⟨"fn main() { (1, 2).5 }",
-    [], "error: in `main`: a tuple of 2 values has no field 5"⟩,
+    [], "error: 1:13: in `main`: a tuple of 2 values has no field 5"⟩,
   ⟨"fn main() { match(Some(1)) { None => 0 } }",
-    [], "error: in `main`: the clauses of this callable do not cover every case"⟩,
+    [], "error: 1:38: in `main`: the clauses of this callable do not cover every case"⟩,
   ⟨"fn f { 0 => 1 }  fn main() { f(5) }",
-    [], "error: in `f`: the clauses of `f` do not cover every case"⟩,
+    [], "error: 1:13: in `f`: the clauses of `f` do not cover every case"⟩,
   ⟨"fn main() { let (a, b) = (1, 2, 3); a }",
-    [], "error: in `main`: a tuple pattern: expected `(_, _)`, found `(Int, Int, Int)`"⟩,
+    [], "error: 1:13: in `main`: a tuple pattern: expected `(_, _)`, found `(Int, Int, Int)`"⟩,
   ⟨"fn main() { if(1) { 2 } }",
-    [], "error: in `main`: argument 1 of `if`: expected `Result<_, _>`, found `Int`"⟩,
+    [], "error: 1:13: in `main`: argument 1 of `if`: expected `Result<_, _>`, found `Int`"⟩,
   ⟨"effect Fail { fail(e) -> ! }  fn risky() { fail(1) }  fn main() { risky() }",
     [], "error: `main` performs effects that nothing handles: {Fail}"⟩,
   ⟨"effect Ask { ask(x) }  fn main() { handle ask(1) { ask(1) => 2 } }",
     [], "error: `main` performs effects that nothing handles: {Ask}"⟩,
   ⟨"fn main() { let mut x = 1; x = (1, 2); x }",
-    [], "error: in `main`: the assigned value: expected `Int`, found `(Int, Int)`"⟩,
+    [], "error: 1:28: in `main`: the assigned value: expected `Int`, found `(Int, Int)`"⟩,
   ⟨"fn incr(p) { *p = *p + 1 }  fn main() { incr(5) }",
-    [], "error: in `main`: argument 1 of `incr`: expected `&mut Int`, found `Int`"⟩,
+    [], "error: 1:41: in `main`: argument 1 of `incr`: expected `&mut Int`, found `Int`"⟩,
 
   -- A declaration with inferred fields has one type throughout the program; one
   -- with type parameters is polymorphic.
   ⟨"enum Wrap { Wrap(v) }  fn main() { (Wrap(1), Wrap((1, 2))) }",
-    [], "error: in `main`: argument 1 of constructor `Wrap`: expected `Int`, found `(Int, Int)`"⟩,
+    [], "error: 1:36: in `main`: argument 1 of constructor `Wrap`: expected `Int`, found `(Int, Int)`"⟩,
   ⟨"enum Wrap<T> { Wrap(T) }  fn main() { (Wrap(1), Wrap((1, 2))) }",
     [], "(Wrap(1), Wrap((1, 2)))"⟩,
   ⟨"enum List<T> { Nil, Cons(T, List<T>) }
@@ -315,7 +315,7 @@ def cases : List Case := [
   ⟨"fn apply(f, x) { f(x) }  fn main() { (apply({ x => x + 1 }, 1), apply({ p => p.0 }, (7, 8))) }",
     [], "(2, 7)"⟩,
   ⟨"fn first(p) { p.0 }  fn main() { first((1, 2)) }",
-    [], "error: in `first`: `.0` reads a field of a value whose type is not known here; annotate the value it is read from"⟩,
+    [], "error: 1:15: in `first`: `.0` reads a field of a value whose type is not known here; annotate the value it is read from"⟩,
   ⟨"fn first<A, B>(p: (A, B)) -> A { p.0 }  fn main() { (first((1, 2)), first(((3, 4), 5))) }",
     [], "(1, (3, 4))"⟩,
 
@@ -324,7 +324,7 @@ def cases : List Case := [
   ⟨"fn double(x: Int) -> Int { x * 2 }  fn main() { double(21) }",
     [], "42"⟩,
   ⟨"fn double(x: Int) -> Int { x * 2 }  fn main() { double((1, 2)) }",
-    [], "error: in `main`: argument 1 of `double`: expected `Int`, found `(Int, Int)`"⟩,
+    [], "error: 1:49: in `main`: argument 1 of `double`: expected `Int`, found `(Int, Int)`"⟩,
   ⟨"fn double(x: Int) -> (Int, Int) { x * 2 }  fn main() { double(1) }",
     [], "error: in `double`: the result of a clause: expected `(Int, Int)`, found `Int`"⟩,
   ⟨"fn id<T>(x: T) -> T { x }  fn main() { (id(1), id((1, 2))) }",
@@ -361,9 +361,9 @@ def cases : List Case := [
   ⟨"fn both { (Ok(_), Ok(_)) => 1, (Err(_), _) => 2, (_, Err(_)) => 3 }\n  fn main() { both((true, false)) }",
     [], "3"⟩,
   ⟨"fn both { (Ok(_), Ok(_)) => 1, (Err(_), Err(_)) => 2 }\n  fn main() { both((true, false)) }",
-    [], "error: in `both`: the clauses of `both` do not cover every case"⟩,
+    [], "error: 1:52: in `both`: the clauses of `both` do not cover every case"⟩,
   ⟨"fn main() { let Some(x) = Some(1); x }",
-    [], "error: in `main`: the pattern of this `let` does not cover every case"⟩,
+    [], "error: 1:13: in `main`: the pattern of this `let` does not cover every case"⟩,
   ⟨"struct Pair<A, B>(first: A, second: B)\n  fn swap(p) { let Pair(a, b) = p; Pair(b, a) }\n  fn main() { swap(Pair(1, (2, 3))) }",
     [], "Pair((2, 3), 1)"⟩,
 
@@ -375,7 +375,7 @@ def cases : List Case := [
   ⟨"fn main() { let first = { p => p.0 }; first((1, 2)) }",
     [], "1"⟩,
   ⟨"fn main() { let mut slot = None; let put = { v => slot = Some(v) }; put(1); put((1, 2)); 0 }",
-    [], "error: in `main`: argument 1 of `put`: expected `Int`, found `(Int, Int)`"⟩,
+    [], "error: 1:77: in `main`: argument 1 of `put`: expected `Int`, found `(Int, Int)`"⟩,
   ⟨"effect Ask { ask() -> Int }\n  fn main() { let call = { f => f() }; call({ 1 }) + handle call({ ask() }) { ask() => 2 } }",
     [], "3"⟩,
   ⟨"fn konst<T>(x: T) -> T { let g = { y => x }; g(1); g((1, 2)) }\n  fn main() { konst(5) }",
@@ -396,19 +396,19 @@ def cases : List Case := [
   ⟨"fn main() { @a { @b { if(1 < 2) { @a(1) }; @b(2) } + 10 } }",
     [], "1"⟩,
   ⟨"fn main() { let mut f = { x => 0 }; @out { f = { x => @out(x) }; 1 }; f(2) }",
-    [], "error: in `main`: a callable that jumps to `@out` could be called after `@out` has ended: `f`, which outlives the scope, could hold it"⟩,
+    [], "error: 1:37: in `main`: a callable that jumps to `@out` could be called after `@out` has ended: `f`, which outlives the scope, could hold it"⟩,
   ⟨"fn main() { let got = @out { Some({ @out(None) }) }; match(got) { Some(f) => f(); 0, None => 1 } }",
-    [], "error: in `main`: a callable that jumps to `@out` could be called after `@out` has ended: it is the result of the scope"⟩,
+    [], "error: 1:13: in `main`: a callable that jumps to `@out` could be called after `@out` has ended: it is the result of the scope"⟩,
   ⟨"effect Emit<T> { emit(T) }\n  fn work() { @out { emit({ @out(1) }); 2 } }\n  fn main() { handle work() { emit(f, k) => f() } }",
-    [], "error: in `work`: a callable that jumps to `@out` could be called after `@out` has ended: it is passed to a handler of `Emit` outside"⟩,
+    [], "error: 2:15: in `work`: a callable that jumps to `@out` could be called after `@out` has ended: it is passed to a handler of `Emit` outside"⟩,
   ⟨"fn compose(f, g) { { x => f(g(x)) } }\n  fn main() { let mut cell = { x => x }; @out { cell = compose({ v => @out(0) }, { v => v }); 0 }; cell(1) }",
-    [], "error: in `main`: a callable that jumps to `@out` could be called after `@out` has ended: `cell`, which outlives the scope, could hold it"⟩,
+    [], "error: 2:42: in `main`: a callable that jumps to `@out` could be called after `@out` has ended: `cell`, which outlives the scope, could hold it"⟩,
   ⟨"fn main() { let mut cell = { v => 0 }; @out { let g = { v => @out(v) }; cell = g; 1 }; cell(2) }",
-    [], "error: in `main`: a callable that jumps to `@out` could be called after `@out` has ended: `cell`, which outlives the scope, could hold it"⟩,
+    [], "error: 1:40: in `main`: a callable that jumps to `@out` could be called after `@out` has ended: `cell`, which outlives the scope, could hold it"⟩,
   ⟨"enum Box { Box(inner) }\n  fn main() { @out { let b = Box({ @out(1) }); 0 } }",
-    [], "error: in `main`: a callable that jumps to `@out` could be called after `@out` has ended: it is stored in a declaration whose field types are inferred; give that declaration a type parameter"⟩,
+    [], "error: 2:15: in `main`: a callable that jumps to `@out` could be called after `@out` has ended: it is stored in a declaration whose field types are inferred; give that declaration a type parameter"⟩,
   ⟨"struct Callback(run: fn() -> Int)\n  fn main() { @out { let c = Callback({ @out(1) }); 0 } }",
-    [], "error: in `main`: a callable that jumps to `@out` could be called after `@out` has ended: it is stored in a declaration's `fn` field; give that declaration a type parameter for the field"⟩,
+    [], "error: 2:15: in `main`: a callable that jumps to `@out` could be called after `@out` has ended: it is stored in a declaration's `fn` field; give that declaration a type parameter for the field"⟩,
   ⟨"fn f(cell) { *cell = { @f(1) }; 0 }\n  fn main() { let mut c = { 0 }; f(&mut c); c() }",
     [], "error: in `f`: a callable that jumps to `@f` could be called after `@f` has ended: the caller could hold it through a parameter"⟩,
   ⟨"fn f() { { @f({ 0 }) } }\n  fn main() { f()() }",
@@ -442,13 +442,13 @@ def cases : List Case := [
   ⟨"fn twice(f) { f(); f() }\n  fn main() { let mut n = 0; twice({ n = n + 1; }); n }",
     [], "2"⟩,
   ⟨"fn mk() { let mut n = 0; { n = n + 1; n } }\n  fn main() { mk()() }",
-    [], "error: in `mk`: `n` could be used after its block has ended: something that uses it is the block's result"⟩,
+    [], "error: 1:11: in `mk`: `n` could be used after its block has ended: something that uses it is the block's result"⟩,
   ⟨"fn mk() { let mut n = 0; &mut n }\n  fn main() { *mk() }",
-    [], "error: in `mk`: `n` could be used after its block has ended: something that uses it is the block's result"⟩,
+    [], "error: 1:11: in `mk`: `n` could be used after its block has ended: something that uses it is the block's result"⟩,
   ⟨"fn main() { let mut a = 1; let mut p = &mut a; { let mut b = 2; p = &mut b; }(); *p }",
-    [], "error: in `main`: `b` could be used after its block has ended: `p`, which outlives the scope, could hold it"⟩,
+    [], "error: 1:50: in `main`: `b` could be used after its block has ended: `p`, which outlives the scope, could hold it"⟩,
   ⟨"fn with(body) { let mut n = 0; body(&mut n); n }\n  fn main() { with({ p => *p = 5; }) }",
-    [], "error: in `with`: `n` could be used after its block has ended: `body`, which outlives the scope, could hold it"⟩,
+    [], "error: 1:17: in `with`: `n` could be used after its block has ended: `body`, which outlives the scope, could hold it"⟩,
 
   -- A resumption holds the computation it captured and the handler around it.
   -- It may be kept, but not beyond a variable or label either of them uses.
@@ -457,16 +457,16 @@ def cases : List Case := [
   ⟨"effect Tick { tick() }\n  fn work() { tick(); tick(); 3 }\n  fn main() { let mut count = 0; let r = handle work() { tick(k) => count = count + 1; k(()) }; (r, count) }",
     [], "(3, 2)"⟩,
   ⟨"effect Tick { tick() }\n  fn work() { tick(); tick(); 0 }\n  fn main() { let mut saved = None; { let mut count = 0; handle work() { tick(k) => count = count + 1; saved = Some(k); 0 } }(); match(saved) { Some(k) => k(()), None => 0 } }",
-    [], "error: in `main`: `count` could be used after its block has ended: `saved`, which outlives the scope, could hold it"⟩,
+    [], "error: 3:39: in `main`: `count` could be used after its block has ended: `saved`, which outlives the scope, could hold it"⟩,
   ⟨"effect Tick { tick() }\n  fn main() { let mut saved = None; @out { handle { tick(); @out(1) }() { tick(k) => saved = Some(k); 0 } }; match(saved) { Some(k) => k(()), None => 0 } }",
-    [], "error: in `main`: a callable that jumps to `@out` could be called after `@out` has ended: `saved`, which outlives the scope, could hold it"⟩,
+    [], "error: 2:37: in `main`: a callable that jumps to `@out` could be called after `@out` has ended: `saved`, which outlives the scope, could hold it"⟩,
 
   -- A `tail` call leaves nothing behind in the caller, so it cannot be written
   -- where a variable is still to be released or a `defer` is still to run.
   ⟨"fn count(n, acc) { let mut x = n; x = x - 1; tail count2(x, acc) }\n  fn count2(n, acc) { acc }\n  fn main() { count(3, 0) }",
-    [], "error: `tail` cannot be used here: `x` is released after the call returns"⟩,
+    [], "error: 1:46: `tail` cannot be used here: `x` is released after the call returns"⟩,
   ⟨"fn f(n) { defer print(n); tail g(n) }\n  fn g(n) { n }\n  fn main() { f(1) }",
-    [], "error: `tail` cannot be used here: a `defer` runs after the call returns"⟩,
+    [], "error: 1:27: `tail` cannot be used here: a `defer` runs after the call returns"⟩,
   ⟨"fn count(n) { let mut x = n; if(x == 0) { 0 } else { tail count(x - 1) } }\n  fn main() { count(3) }",
     [], "0"⟩,
 
@@ -477,17 +477,17 @@ def cases : List Case := [
   ⟨"effect Ask { ask() -> Int }\n  fn main() { handle ask() + 1 { ask(k) => let f = { k(1) }; f() } }",
     [], "2"⟩,
   ⟨"effect Ask { ask() -> Int }\n  fn main() { handle ask() + 1 { ask(k) => let f = { k(1) }; f(); f() } }",
-    [], "error: in `main`: `f` is used more than once, but a value that holds a resumption can be used only once"⟩,
+    [], "error: 2:54: in `main`: `f` is used more than once, but a value that holds a resumption can be used only once"⟩,
   ⟨"effect Ask { ask() -> Int }\n  fn main() { handle ask() + 1 { ask(k) => let pair = (k, 5); let (again, n) = pair; again(n) } }",
     [], "6"⟩,
   ⟨"effect Ask { ask() -> Int }\n  fn main() { handle ask() + 1 { ask(k) => let pair = (k, 5); pair.0(pair.1) } }",
-    [], "error: in `main`: `pair` is used more than once, but a value that holds a resumption can be used only once"⟩,
+    [], "error: 2:44: in `main`: `pair` is used more than once, but a value that holds a resumption can be used only once"⟩,
   ⟨"effect Ask { ask() -> Int }\n  fn once(f) { f() }\n  fn main() { handle ask() + 1 { ask(k) => once({ k(1) }) } }",
     [], "2"⟩,
   ⟨"effect Ask { ask() -> Int }\n  fn twice(f) { f(); f() }\n  fn main() { handle ask() + 1 { ask(k) => twice({ k(1) }) } }",
-    [], "error: in `main`: `twice` may use what it is given more than once, but a value that holds a resumption can be used only once"⟩,
+    [], "error: 3:44: in `main`: `twice` may use what it is given more than once, but a value that holds a resumption can be used only once"⟩,
   ⟨"effect Ask { ask() -> Int }\n  fn both(x) { (x, x) }\n  fn main() { handle ask() + 1 { ask(k) => both(k); 0 } }",
-    [], "error: in `main`: `both` may use what it is given more than once, but a value that holds a resumption can be used only once"⟩,
+    [], "error: 3:44: in `main`: `both` may use what it is given more than once, but a value that holds a resumption can be used only once"⟩,
 
   -- Clauses of one callable are alternatives, so each may use the resumption.
   -- Two separate callables that each use it count as two uses, even where only
@@ -499,19 +499,19 @@ def cases : List Case := [
   ⟨"effect Ask { ask() -> Int }\n  fn main() { handle ask() + 1 { ask(k) => k(if(1 < 2) { 10 } else { 20 }) } }",
     [], "11"⟩,
   ⟨"effect Ask { ask() -> Int }\n  fn main() { handle ask() + 1 { ask(k) => if(1 < 2) { k(10) } else { k(20) } } }",
-    [], "error: in `main`: `k` is used more than once, but a value that holds a resumption can be used only once"⟩,
+    [], "error: 2:15: in `main`: `k` is used more than once, but a value that holds a resumption can be used only once"⟩,
 
   -- A mutable variable can hold a resumption, but reading it would copy it:
   -- `replace` takes the value out and leaves another in its place.
   ⟨"effect Yield { yield(Int) }\n  fn main() { let mut saved = None; handle (yield(1) + 1) { yield(v, k) => saved = Some(k); 0 }; match(saved) { Some(k) => k(41), None => 0 } }",
-    [], "error: in `main`: reading the mutable variable `saved` copies its value (`replace` takes it out instead), but a value that holds a resumption can be used only once"⟩,
+    [], "error: 2:98: in `main`: reading the mutable variable `saved` copies its value (`replace` takes it out instead), but a value that holds a resumption can be used only once"⟩,
   ⟨"fn main() { let mut x = 1; let old = replace(&mut x, 5); (old, x) }",
     [], "(1, 5)"⟩,
 
   -- The arm of an operation that can be resumed may run many times, so it
   -- cannot use up something from outside.
   ⟨"effect Ask { ask() -> Int }\n  effect Tick { tick() }\n  fn work() { tick(); tick(); 0 }\n  fn main() { handle ask() { ask(outer) => handle work() { tick() => outer(1); } } }",
-    [], "error: in `main`: `outer` is used more than once, but a value that holds a resumption can be used only once"⟩,
+    [], "error: 4:15: in `main`: `outer` is used more than once, but a value that holds a resumption can be used only once"⟩,
 
 
   -- A callee may perform fewer effects than are permitted where it is called,
@@ -530,13 +530,13 @@ def cases : List Case := [
   ⟨"effect Log { log(Int) }\n  fn g(f) { f(0); handle f(1) { log(x) => print(x) } }\n  fn main() { g({ x => log(x); }) }",
     [], "error: `main` performs effects that nothing handles: {Log}"⟩,
   ⟨"effect Ask { ask() -> Int }\n  fn main() { let mut n = 0; handle ask() + 1 { ask(k) => while({ n < 2 }) { n = n + 1; k(n); }; 0 } }",
-    [], "error: in `main`: `while` may use what it is given more than once, but a value that holds a resumption can be used only once"⟩,
+    [], "error: 2:59: in `main`: `while` may use what it is given more than once, but a value that holds a resumption can be used only once"⟩,
 
   -- Errors are reported, not guessed around.
   ⟨"fn main() { nope }",
-    [], "error: in `main`: unknown name `nope`"⟩,
+    [], "error: 1:13: in `main`: unknown name `nope`"⟩,
   ⟨"fn f(x) { tail f(x) + 1 }  fn main() { f(1) }",
-    [], "error: `tail` call is not in tail position"⟩,
+    [], "error: 1:11: `tail` call is not in tail position"⟩,
   ⟨"fn main() { 1 +",
     [], "error: 1:16: expected an expression, found end of input"⟩,
   ⟨"fn main() { 1 $ 2 }",
