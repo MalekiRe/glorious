@@ -193,6 +193,15 @@ def isBinder (x : String) : M Bool := do
   if (← resolveCtor x none).isSome then return false
   return ((← read).aliases.lookup x).isNone
 
+/-- Does this pattern match every value? Decided from its shape alone, as the
+checker decides it. -/
+partial def irrefutable : Pattern → M Bool
+  | .wild => pure true
+  | .int _ => pure false
+  | .tuple ps => ps.allM irrefutable
+  | .var x => isBinder x
+  | .ctor _ _ _ => pure false
+
 /-- Read a constant expression as a pattern. -/
 partial def exprToPat : Expr → M Pattern
   | .int n => pure (.int n)
@@ -549,9 +558,10 @@ partial def elabClosure (scope : Scope) (clauses : List Clause) : M Atom := do
 Arms whose head names an operation serve that operation; the others are
 completion clauses. An arm for a resumptive operation either binds the
 resumption as an extra final pattern, or omits it and resumes with its value.
-Each operation's function ends with a clause that performs the operation again
-outside the handler, so a payload no arm matches is forwarded. In tail position
-the handler keeps no caller frame.
+Unless one of an operation's arms matches every payload, its function ends with
+a clause that performs the operation again outside the handler, so a payload no
+arm matches is forwarded; the operation must then be handled outside as well.
+In tail position the handler keeps no caller frame.
 -/
 partial def elabHandle (scope : Scope) (tailPos : Bool) (subject : Expr) (arms : List Clause) :
     M Atom := do
@@ -608,7 +618,11 @@ partial def elabHandle (scope : Scope) (tailPos : Bool) (subject : Expr) (arms :
           .perform info.id payload
             (.tail (.var n) [.var (n + 1 + captures.length)])⟩
       let opName := (opNames.lookup id).getD "an operation"
-      let idx ← addFn ⟨clauses ++ [forward]⟩ s!"the handler arm for `{opName}` in `{owner}`"
+      -- With an arm that cannot fail the forwarding clause would never run, and
+      -- it would still make the function need the operation from outside.
+      let covered ← mine.anyM fun (_, ps, _) => ps.allM irrefutable
+      let idx ← addFn ⟨if covered then clauses else clauses ++ [forward]⟩
+        s!"the handler arm for `{opName}` in `{owner}`"
       table := table.push (id, idx)
   let caps := captures.filterMap (fun x => scope.lookup x)
   if tailPos then
