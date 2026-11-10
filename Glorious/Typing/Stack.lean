@@ -75,7 +75,7 @@ theorem ArmsOk.lookup_none {Cs : List Ty} {ρ : Ty} {ε : Row} {ops : List (Nat 
     (h : ArmsOk Δ Cs ρ ε ops H) {op : Nat} : H.lookup op = none → ops.lookup op = none := by
   induction h with
   | nil => intro _; rfl
-  | @terminal op' arm Ps εa ops H _ _ _ ih =>
+  | @terminal op' arm targs Ps εa ops H _ _ _ _ ih =>
     intro hl
     by_cases he : op = op'
     · subst he
@@ -83,7 +83,7 @@ theorem ArmsOk.lookup_none {Cs : List Ty} {ρ : Ty} {ε : Row} {ops : List (Nat 
       cases hl
     · rw [lookup_cons_ne he] at hl ⊢
       exact ih hl
-  | @resumptive op' arm Ps o εa ops H _ _ _ ih =>
+  | @resumptive op' arm targs Ps o εa ops H _ _ _ _ ih =>
     intro hl
     by_cases he : op = op'
     · subst he
@@ -93,31 +93,32 @@ theorem ArmsOk.lookup_none {Cs : List Ty} {ρ : Ty} {ε : Row} {ops : List (Nat 
       exact ih hl
 
 theorem ArmsOk.lookup_some {Cs : List Ty} {ρ : Ty} {ε : Row} {ops : List (Nat × Nat)} {H : Row}
-    (h : ArmsOk Δ Cs ρ ε ops H) {op : Nat} {Ps : List Ty} {r : Option Ty} :
-    H.lookup op = some (Ps, r) →
-    ∃ arm εa, ops.lookup op = some arm ∧ Row.le εa ε ∧ ArmSig Δ Cs ρ ε arm Ps εa r := by
+    (h : ArmsOk Δ Cs ρ ε ops H) {op : Nat} {targs : List Ty} :
+    H.lookup op = some targs →
+    ∃ arm εa Ps r, ops.lookup op = some arm ∧ Δ.opSig op targs = some (Ps, r) ∧ Row.le εa ε
+      ∧ ArmSig Δ Cs ρ ε arm Ps εa r := by
   induction h with
   | nil => intro hl; simp [List.lookup] at hl
-  | @terminal op' arm Ps' εa ops H hsig hle _ ih =>
+  | @terminal op' arm targs' Ps' εa ops H hop hsig hle _ ih =>
     intro hl
     by_cases he : op = op'
     · subst he
       rw [lookup_cons_eq] at hl
       cases hl
-      exact ⟨arm, εa, lookup_cons_eq .., hle, hsig⟩
+      exact ⟨arm, εa, Ps', none, lookup_cons_eq .., hop, hle, hsig⟩
     · rw [lookup_cons_ne he] at hl
-      obtain ⟨arm', εa', hl', hle', hsig'⟩ := ih hl
-      exact ⟨arm', εa', by rw [lookup_cons_ne he]; exact hl', hle', hsig'⟩
-  | @resumptive op' arm Ps' o εa ops H hsig hle _ ih =>
+      obtain ⟨arm', εa', Ps, r, hl', hop', hle', hsig'⟩ := ih hl
+      exact ⟨arm', εa', Ps, r, by rw [lookup_cons_ne he]; exact hl', hop', hle', hsig'⟩
+  | @resumptive op' arm targs' Ps' o εa ops H hop hsig hle _ ih =>
     intro hl
     by_cases he : op = op'
     · subst he
       rw [lookup_cons_eq] at hl
       cases hl
-      exact ⟨arm, εa, lookup_cons_eq .., hle, hsig⟩
+      exact ⟨arm, εa, Ps', some o, lookup_cons_eq .., hop, hle, hsig⟩
     · rw [lookup_cons_ne he] at hl
-      obtain ⟨arm', εa', hl', hle', hsig'⟩ := ih hl
-      exact ⟨arm', εa', by rw [lookup_cons_ne he]; exact hl', hle', hsig'⟩
+      obtain ⟨arm', εa', Ps, r, hl', hop', hle', hsig'⟩ := ih hl
+      exact ⟨arm', εa', Ps, r, by rw [lookup_cons_ne he]; exact hl', hop', hle', hsig'⟩
 
 theorem findHandler_skip {op : Nat} {fr : Frame} {st : List Frame} {d : Dispatch Frame}
     (hfr : handles Frame.asHandler op fr = none)
@@ -129,80 +130,85 @@ theorem findHandler_skip {op : Nat} {fr : Frame} {st : List Frame} {d : Dispatch
 /--
 An operation the stack's type offers has a handler on the stack, and the
 machine's search finds it. The function serving the operation is typed at the
-type the row gives the operation; the stack below the handler takes what the
-handler yields; and the frames above the handler, with the handler, can be put
-on any later stack that suits the handler and are typed there as they are here.
+operation's declared type; the stack below the handler takes what the handler
+yields; and the frames above the handler, with the handler, can be put on any
+later stack that suits the handler and are typed there as they are here.
 -/
 theorem find_ok {S : StoreTy} {st : List Frame} {τ : Ty} {ε : Row} (hst : StackOk Δ S st τ ε) :
-    ∀ {op : Nat} {Ps : List Ty} {r : Option Ty}, ε.lookup op = some (Ps, r) →
-    ∃ d ρ ε₀ εa εb Cs, findHandler Frame.asHandler op st = some d
+    ∀ {op : Nat} {targs : List Ty}, ε.lookup op = some targs →
+    ∃ d ρ ε₀ εa εb Cs Ps r, findHandler Frame.asHandler op st = some d
       ∧ S.handlers d.id = some (ρ, ε₀)
       ∧ HasVals Δ S d.handler.caps Cs
+      ∧ Δ.opSig op targs = some (Ps, r)
       ∧ Row.le εa ε₀ ∧ ArmSig Δ Cs ρ ε₀ d.arm Ps εa r
       ∧ StackOk Δ S d.below ρ εb ∧ Row.le ε₀ εb
       ∧ (∃ fr, fr ∈ st ∧ fr.isTarget (.handler d.id) = true)
       ∧ (∀ S', S.Le S' → ∀ st' ε', StackOk Δ S' st' ρ ε' → Row.le ε₀ ε' →
           StackOk Δ S' (d.above ++ .handler d.id d.handler :: st') τ ε) := by
   induction hst with
-  | nil => intro op Ps r hl; simp [List.lookup] at hl
+  | nil => intro op targs hl; simp [List.lookup] at hl
   | @call env body st Γ σ τ εb ε henv hbody hrow _ ih =>
-    intro op Ps r hl
-    obtain ⟨d, ρ, ε₀, εa, εb', Cs, hf, hid, hcaps, hale, hsig, hbelow, hble, ⟨fr, hfr, hft⟩, hre⟩ :=
-      ih hl
-    exact ⟨_, ρ, ε₀, εa, εb', Cs, findHandler_skip (by simp [handles, Frame.asHandler]) hf, hid,
-      hcaps, hale, hsig, hbelow, hble, ⟨fr, List.mem_cons_of_mem _ hfr, hft⟩,
+    intro op targs hl
+    obtain ⟨d, ρ, ε₀, εa, εb', Cs, Ps, r, hf, hid, hcaps, hop, hale, hsig, hbelow, hble,
+      ⟨fr, hfr, hft⟩, hre⟩ := ih hl
+    exact ⟨_, ρ, ε₀, εa, εb', Cs, Ps, r,
+      findHandler_skip (by simp [handles, Frame.asHandler]) hf, hid,
+      hcaps, hop, hale, hsig, hbelow, hble, ⟨fr, List.mem_cons_of_mem _ hfr, hft⟩,
       fun S' hle st' ε' hst' hr => .call (henv.mono hle) hbody hrow (hre S' hle st' ε' hst' hr)⟩
   | @handler id h st σ ρ H ε₀ ε hid hh hrow hrest ih =>
-    intro op Ps r hl
+    intro op targs hl
     obtain ⟨Cs, hcaps, hok⟩ := hh
     rw [List.lookup_append] at hl
     cases hH : H.lookup op with
     | none =>
       rw [hH] at hl
-      have hl' : ε.lookup op = some (Ps, r) := hrow _ _ (by simpa using hl)
-      obtain ⟨d, ρ', ε₀', εa, εb', Cs', hf, hid', hcaps', hale, hsig, hbelow, hble,
+      have hl' : ε.lookup op = some targs := hrow _ _ (by simpa using hl)
+      obtain ⟨d, ρ', ε₀', εa, εb', Cs', Ps, r, hf, hid', hcaps', hop, hale, hsig, hbelow, hble,
         ⟨fr, hfr, hft⟩, hre⟩ := ih hl'
       have hskip : handles Frame.asHandler op (.handler id h) = none := by
         simp [handles, Frame.asHandler, hok.arms.lookup_none hH]
-      exact ⟨_, ρ', ε₀', εa, εb', Cs', findHandler_skip hskip hf, hid', hcaps', hale, hsig,
-        hbelow, hble, ⟨fr, List.mem_cons_of_mem _ hfr, hft⟩,
+      exact ⟨_, ρ', ε₀', εa, εb', Cs', Ps, r, findHandler_skip hskip hf, hid', hcaps', hop, hale,
+        hsig, hbelow, hble, ⟨fr, List.mem_cons_of_mem _ hfr, hft⟩,
         fun S' hle st' ε' hst' hr =>
           .handler (hle.handlers _ _ hid) (HandlerRt.mono hle ⟨Cs, hcaps, hok⟩) hrow
             (hre S' hle st' ε' hst' hr)⟩
-    | some sig =>
+    | some found =>
       rw [hH] at hl
-      have e : sig = (Ps, r) := by simpa using hl
+      have e : found = targs := by simpa using hl
       subst e
-      obtain ⟨arm, εa, harm, hale, hsig⟩ := hok.arms.lookup_some hH
+      obtain ⟨arm, εa, Ps, r, harm, hop, hale, hsig⟩ := hok.arms.lookup_some hH
       have hfind : findHandler Frame.asHandler op (.handler id h :: st)
           = some ⟨[], id, h, arm, st⟩ := by
         simp [findHandler, handles, Frame.asHandler, harm]
-      exact ⟨_, ρ, ε₀, εa, ε, Cs, hfind, hid, hcaps, hale, hsig, hrest, hrow,
+      exact ⟨_, ρ, ε₀, εa, ε, Cs, Ps, r, hfind, hid, hcaps, hop, hale, hsig, hrest, hrow,
         ⟨.handler id h, List.mem_cons_self .., by simp [Frame.isTarget]⟩,
         fun S' hle st' ε' hst' hr =>
           .handler (hle.handlers _ _ hid) (HandlerRt.mono hle ⟨Cs, hcaps, hok⟩) hr hst'⟩
   | @label id st τ ε hid _ ih =>
-    intro op Ps r hl
-    obtain ⟨d, ρ, ε₀, εa, εb', Cs, hf, hid', hcaps, hale, hsig, hbelow, hble, ⟨fr, hfr, hft⟩, hre⟩ :=
-      ih hl
-    exact ⟨_, ρ, ε₀, εa, εb', Cs, findHandler_skip (by simp [handles, Frame.asHandler]) hf, hid',
-      hcaps, hale, hsig, hbelow, hble, ⟨fr, List.mem_cons_of_mem _ hfr, hft⟩,
+    intro op targs hl
+    obtain ⟨d, ρ, ε₀, εa, εb', Cs, Ps, r, hf, hid', hcaps, hop, hale, hsig, hbelow, hble,
+      ⟨fr, hfr, hft⟩, hre⟩ := ih hl
+    exact ⟨_, ρ, ε₀, εa, εb', Cs, Ps, r,
+      findHandler_skip (by simp [handles, Frame.asHandler]) hf, hid',
+      hcaps, hop, hale, hsig, hbelow, hble, ⟨fr, List.mem_cons_of_mem _ hfr, hft⟩,
       fun S' hle st' ε' hst' hr => .label (hle.labels _ _ hid) (hre S' hle st' ε' hst' hr)⟩
   | @guard fn captures st Cs' σc τ ε hgs hgc _ ih =>
-    intro op Ps r hl
-    obtain ⟨d, ρ, ε₀, εa, εb', Cs, hf, hid', hcaps, hale, hsig, hbelow, hble, ⟨fr, hfr, hft⟩, hre⟩ :=
-      ih hl
-    exact ⟨_, ρ, ε₀, εa, εb', Cs, findHandler_skip (by simp [handles, Frame.asHandler]) hf, hid',
-      hcaps, hale, hsig, hbelow, hble, ⟨fr, List.mem_cons_of_mem _ hfr, hft⟩,
+    intro op targs hl
+    obtain ⟨d, ρ, ε₀, εa, εb', Cs, Ps, r, hf, hid', hcaps, hop, hale, hsig, hbelow, hble,
+      ⟨fr, hfr, hft⟩, hre⟩ := ih hl
+    exact ⟨_, ρ, ε₀, εa, εb', Cs, Ps, r,
+      findHandler_skip (by simp [handles, Frame.asHandler]) hf, hid',
+      hcaps, hop, hale, hsig, hbelow, hble, ⟨fr, List.mem_cons_of_mem _ hfr, hft⟩,
       fun S' hle st' ε' hst' hr => .guard hgs (hgc.mono hle) (hre S' hle st' ε' hst' hr)⟩
   | @yield w st σ τ ε hw _ ih =>
-    intro op Ps r hl
-    obtain ⟨d, ρ, ε₀, εa, εb', Cs, hf, hid', hcaps, hale, hsig, hbelow, hble, ⟨fr, hfr, hft⟩, hre⟩ :=
-      ih hl
-    exact ⟨_, ρ, ε₀, εa, εb', Cs, findHandler_skip (by simp [handles, Frame.asHandler]) hf, hid',
-      hcaps, hale, hsig, hbelow, hble, ⟨fr, List.mem_cons_of_mem _ hfr, hft⟩,
+    intro op targs hl
+    obtain ⟨d, ρ, ε₀, εa, εb', Cs, Ps, r, hf, hid', hcaps, hop, hale, hsig, hbelow, hble,
+      ⟨fr, hfr, hft⟩, hre⟩ := ih hl
+    exact ⟨_, ρ, ε₀, εa, εb', Cs, Ps, r,
+      findHandler_skip (by simp [handles, Frame.asHandler]) hf, hid',
+      hcaps, hop, hale, hsig, hbelow, hble, ⟨fr, List.mem_cons_of_mem _ hfr, hft⟩,
       fun S' hle st' ε' hst' hr => .yield (hw.mono hle) (hre S' hle st' ε' hst' hr)⟩
-  | exit _ _ _ _ => intro op Ps r hl; simp [List.lookup] at hl
+  | exit _ _ _ _ => intro op targs hl; simp [List.lookup] at hl
 
 /-! ## Delivering and leaving -/
 

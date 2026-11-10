@@ -336,10 +336,12 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
     obtain ⟨S', hS, hid, hs'⟩ := hs.push_handler (τ, ε)
     exact .of_safe (callFn_safe hp hsig (htc.mono hS) .nil hrow
       (.handler hid ⟨Cs, hcvt.mono hS, hok⟩ hle (hst.mono hS)) hs')
-  | @raise _ op args Ps _ _ hl hargs =>
+  | @raise _ op args targs Ps _ _ hl hop hargs =>
     obtain ⟨vs, hvs, hvst⟩ := atoms_ok (S := S) henv hargs
-    obtain ⟨d, ρ, ε₀, εa, εb, Cs, hfind, hid, hcaps, hale, hsig, hbelow, hble, hin, _⟩ :=
-      find_ok hst (hle _ _ hl)
+    obtain ⟨d, ρ, ε₀, εa, εb, Cs, Ps', r, hfind, hid, hcaps, hop', hale, hsig, hbelow, hble, hin,
+      _⟩ := find_ok hst (hle _ _ hl)
+    rw [hop] at hop'
+    cases hop'
     have h1 : step p ⟨.raise op args, env, stack, ⟨conts, labels, cells⟩⟩
         = leave p (.handler d.id) (.invoke d.arm d.handler.caps vs) stack
             ⟨conts, labels, cells⟩ := by
@@ -347,10 +349,12 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
     rw [h1]
     exact .of_safe (leave_safe hp hs hst
       (.handler (sig := ⟨Cs, Ps, ρ, εa⟩) hid hsig hale hcaps hvst) hin)
-  | @perform _ op args body Ps σ _ _ hl hargs hbody =>
+  | @perform _ op args body targs Ps σ _ _ hl hop hargs hbody =>
     obtain ⟨vs, hvs, hvst⟩ := atoms_ok (S := S) henv hargs
-    obtain ⟨d, ρ, ε₀, εa, εb, Cs, hfind, hid, hcaps, hale, hsig, hbelow, hble, _, hre⟩ :=
-      find_ok hst (hle _ _ hl)
+    obtain ⟨d, ρ, ε₀, εa, εb, Cs, Ps', r, hfind, hid, hcaps, hop', hale, hsig, hbelow, hble, _,
+      hre⟩ := find_ok hst (hle _ _ hl)
+    rw [hop] at hop'
+    cases hop'
     have h1 : step p ⟨.perform op args body, env, stack, ⟨conts, labels, cells⟩⟩
         = callFn p d.arm d.handler.caps (vs ++ [.cont conts.length]) d.below
             ⟨conts ++ [some (.call env body :: d.above ++ [.handler d.id d.handler])],

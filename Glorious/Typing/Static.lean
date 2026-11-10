@@ -9,8 +9,10 @@ several types simply has several signatures here, and must be well typed at
 each: polymorphism is a finite set of instances, as it is for any whole program
 without polymorphic recursion.
 
-A callable's type carries the operations it may perform, each with the types of
-its payload and of the value it is resumed with. A row lists operations nearest
+A callable's type carries the operations it may perform. An operation is named,
+with the type arguments its effect is used at; what it takes and gives back is
+looked up in the program's declarations, so that an operation's payload can be
+a callable that performs the same operation. A row lists operations nearest
 handler first, so that looking an operation up in a row finds the same handler
 the machine finds on the stack.
 -/
@@ -24,18 +26,18 @@ inductive Ty where
   | tuple (fields : List Ty)
   /-- A declared data type applied to its arguments. -/
   | data (name : Nat) (args : List Ty)
-  /-- A callable: a function, a resumption or a label. `eff` gives each operation
-  it may perform the types of its payload and, unless it never returns, of the
-  value it is resumed with. -/
-  | fn (params : List Ty) (ret : Ty) (eff : List (Nat × List Ty × Option Ty))
+  /-- A callable: a function, a resumption or a label. `eff` lists the operations
+  it may perform, each with the type arguments of its effect. -/
+  | fn (params : List Ty) (ret : Ty) (eff : List (Nat × List Ty))
   | ref (t : Ty)
 
 /-- The type of an operation: its payload, and what it is resumed with if it
 can be resumed at all. -/
 abbrev OpTy := List Ty × Option Ty
 
-/-- The operations available somewhere, nearest handler first. -/
-abbrev Row := List (Nat × OpTy)
+/-- The operations available somewhere, nearest handler first, each with the
+type arguments of its effect. -/
+abbrev Row := List (Nat × List Ty)
 
 def Ty.unit : Ty := .tuple []
 
@@ -52,10 +54,12 @@ structure FnSig where
   ret : Ty
   eff : Row
 
-/-- What a program declares: the signatures of its functions and the fields of
-its data constructors. -/
+/-- What a program declares: the signatures of its functions, the fields of its
+data constructors and the types of its operations. -/
 structure Ctx where
   fnSig : Nat → FnSig → Prop
+  /-- The type of operation `op` when its effect is used at `args`. -/
+  opSig : (op : Nat) → (args : List Ty) → Option OpTy
   /-- The field types of constructor `tag` when it builds a value of declared
   type `name` applied to `args`. -/
   ctorFields : (tag name : Nat) → (args : List Ty) → Option (List Ty)
@@ -141,13 +145,14 @@ which resumes with the operation's result type and yields what the handler
 yields, where the handler was installed. -/
 inductive ArmsOk (Δ : Ctx) (Cs : List Ty) (ρ : Ty) (ε : Row) : List (Nat × Nat) → Row → Prop where
   | nil : ArmsOk Δ Cs ρ ε [] []
-  | terminal {op arm : Nat} {Ps : List Ty} {εa : Row} {ops : List (Nat × Nat)} {H : Row} :
-      Δ.fnSig arm ⟨Cs, Ps, ρ, εa⟩ → Row.le εa ε → ArmsOk Δ Cs ρ ε ops H →
-      ArmsOk Δ Cs ρ ε ((op, arm) :: ops) ((op, (Ps, none)) :: H)
-  | resumptive {op arm : Nat} {Ps : List Ty} {o : Ty} {εa : Row} {ops : List (Nat × Nat)}
-      {H : Row} :
-      Δ.fnSig arm ⟨Cs, Ps ++ [.fn [o] ρ ε], ρ, εa⟩ → Row.le εa ε → ArmsOk Δ Cs ρ ε ops H →
-      ArmsOk Δ Cs ρ ε ((op, arm) :: ops) ((op, (Ps, some o)) :: H)
+  | terminal {op arm : Nat} {targs Ps : List Ty} {εa : Row} {ops : List (Nat × Nat)} {H : Row} :
+      Δ.opSig op targs = some (Ps, none) → Δ.fnSig arm ⟨Cs, Ps, ρ, εa⟩ → Row.le εa ε →
+      ArmsOk Δ Cs ρ ε ops H → ArmsOk Δ Cs ρ ε ((op, arm) :: ops) ((op, targs) :: H)
+  | resumptive {op arm : Nat} {targs Ps : List Ty} {o : Ty} {εa : Row}
+      {ops : List (Nat × Nat)} {H : Row} :
+      Δ.opSig op targs = some (Ps, some o) → Δ.fnSig arm ⟨Cs, Ps ++ [.fn [o] ρ ε], ρ, εa⟩ →
+      Row.le εa ε → ArmsOk Δ Cs ρ ε ops H →
+      ArmsOk Δ Cs ρ ε ((op, arm) :: ops) ((op, targs) :: H)
 
 /-- A handler whose functions share captures of types `Cs`. It handles a
 computation yielding `σ`, itself yields `ρ`, gives the operations in `H` their
@@ -180,11 +185,12 @@ inductive HasTm (Δ : Ctx) : TEnv → Tm → Ty → Row → Prop where
       HasAtom Γ thunk (.fn [] σ εt) → HasAtoms Γ captures Cs →
       HandlerOk Δ Cs ret ops σ τ H ε → Row.le εt (H ++ ε) →
       HasTm Δ Γ (.handleTail ret ops captures thunk) τ ε
-  | raise {Γ : TEnv} {op : Nat} {args : List Atom} {Ps : List Ty} {τ : Ty} {ε : Row} :
-      ε.lookup op = some (Ps, none) → HasAtoms Γ args Ps → HasTm Δ Γ (.raise op args) τ ε
-  | perform {Γ : TEnv} {op : Nat} {args : List Atom} {body : Tm} {Ps : List Ty} {σ τ : Ty}
-      {ε : Row} :
-      ε.lookup op = some (Ps, some σ) → HasAtoms Γ args Ps →
+  | raise {Γ : TEnv} {op : Nat} {args : List Atom} {targs Ps : List Ty} {τ : Ty} {ε : Row} :
+      ε.lookup op = some targs → Δ.opSig op targs = some (Ps, none) → HasAtoms Γ args Ps →
+      HasTm Δ Γ (.raise op args) τ ε
+  | perform {Γ : TEnv} {op : Nat} {args : List Atom} {body : Tm} {targs Ps : List Ty}
+      {σ τ : Ty} {ε : Row} :
+      ε.lookup op = some targs → Δ.opSig op targs = some (Ps, some σ) → HasAtoms Γ args Ps →
       HasTm Δ (Γ ++ [σ]) body τ ε → HasTm Δ Γ (.perform op args body) τ ε
   | label {Γ : TEnv} {thunk : Atom} {body : Tm} {σ ρ τ : Ty} {εl εt ε : Row} :
       HasAtom Γ thunk (.fn [.fn [σ] ρ εl] σ εt) → Row.le εt ε →

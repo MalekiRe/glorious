@@ -1,6 +1,7 @@
 import Glorious.Syntax.Parser
 import Glorious.Elab
 import Glorious.Check
+import Glorious.Infer
 import Glorious.Prelude
 import Glorious.Compile
 import Glorious.Core.Semantics
@@ -31,6 +32,31 @@ def compileSource (src : String) (check : Bool := true) : Except String Compiled
   if check then Check.checkProgram (prelude ++ items)
   let out ← Elab.elabProgram (prelude ++ items)
   pure ⟨out.program, out.ctorNames, out.fnNames, out.opNames⟩
+
+/-- Find a certificate for a program's Core and have the proved checker accept
+it. An error here is a defect in the compiler, not in the program. -/
+def certifyProgram (items : List Syntax.Item) (p : Core.Program) : Except String Typing.Cert := do
+  let cert ← match Infer.certify items p with
+    | .ok cert => pure cert
+    | .error e => throw s!"no certificate was found: {e}"
+  if Typing.checkProgram cert p then pure cert
+  else throw s!"the certificate was rejected: {Infer.rejected cert p}"
+
+/-- Compile a program and certify its Core, reporting how that went. -/
+def certifySource (src : String) : String :=
+  let run : Except String Typing.Cert := do
+    let (prelude, fix) ← match Syntax.parse {} Prelude.source with
+      | .ok r => pure r
+      | .error e => throw s!"prelude: {e}"
+    let (items, _) ← Syntax.parse fix src
+    Check.checkProgram (prelude ++ items)
+    let out ← Elab.elabProgram (prelude ++ items)
+    match certifyProgram (prelude ++ items) out.program with
+    | .ok cert => pure cert
+    | .error e => throw s!"CERTIFY: {e}"
+  match run with
+  | .ok cert => s!"ok ({cert.sigs.length} signatures)"
+  | .error e => e
 
 partial def showValue (names : Array String) : Value → String
   | .int n => toString n

@@ -28,25 +28,14 @@ def Ty.beqList : List Ty → List Ty → Bool
   | _, _ => false
 termination_by structural a => a
 
-def Ty.beqRow :
-    List (Nat × List Ty × Option Ty) → List (Nat × List Ty × Option Ty) → Bool
+def Ty.beqRow : List (Nat × List Ty) → List (Nat × List Ty) → Bool
   | [], [] => true
   | x :: as, y :: bs => Ty.beqEntry x y && Ty.beqRow as bs
   | _, _ => false
 termination_by structural a => a
 
-def Ty.beqEntry : Nat × List Ty × Option Ty → Nat × List Ty × Option Ty → Bool
-  | (op, x), (op', y) => op == op' && Ty.beqPair x y
-termination_by structural a => a
-
-def Ty.beqPair : List Ty × Option Ty → List Ty × Option Ty → Bool
-  | (ps, r), (ps', r') => Ty.beqList ps ps' && Ty.beqOpt r r'
-termination_by structural a => a
-
-def Ty.beqOpt : Option Ty → Option Ty → Bool
-  | none, none => true
-  | some a, some b => Ty.beq a b
-  | _, _ => false
+def Ty.beqEntry : Nat × List Ty → Nat × List Ty → Bool
+  | (op, x), (op', y) => op == op' && Ty.beqList x y
 termination_by structural a => a
 
 end
@@ -81,29 +70,17 @@ theorem Ty.beqList_eq : ∀ (a b : List Ty), Ty.beqList a b = true → a = b
     rw [Ty.beq_eq a b h.1, Ty.beqList_eq as bs h.2]
   | [], _ :: _, h | _ :: _, [], h => by simp [Ty.beqList] at h
 
-theorem Ty.beqRow_eq : ∀ (a b : List (Nat × List Ty × Option Ty)), Ty.beqRow a b = true → a = b
+theorem Ty.beqRow_eq : ∀ (a b : List (Nat × List Ty)), Ty.beqRow a b = true → a = b
   | [], [], _ => rfl
   | x :: as, y :: bs, h => by
     simp only [Ty.beqRow, Bool.and_eq_true] at h
     rw [Ty.beqEntry_eq x y h.1, Ty.beqRow_eq as bs h.2]
   | [], _ :: _, h | _ :: _, [], h => by simp [Ty.beqRow] at h
 
-theorem Ty.beqEntry_eq : ∀ (a b : Nat × List Ty × Option Ty), Ty.beqEntry a b = true → a = b
+theorem Ty.beqEntry_eq : ∀ (a b : Nat × List Ty), Ty.beqEntry a b = true → a = b
   | (op, x), (op', y), h => by
     simp only [Ty.beqEntry, Bool.and_eq_true, beq_iff_eq] at h
-    rw [h.1, Ty.beqPair_eq x y h.2]
-
-theorem Ty.beqPair_eq : ∀ (a b : List Ty × Option Ty), Ty.beqPair a b = true → a = b
-  | (ps, r), (ps', r'), h => by
-    simp only [Ty.beqPair, Bool.and_eq_true] at h
-    rw [Ty.beqList_eq ps ps' h.1, Ty.beqOpt_eq r r' h.2]
-
-theorem Ty.beqOpt_eq : ∀ (a b : Option Ty), Ty.beqOpt a b = true → a = b
-  | none, none, _ => rfl
-  | some a, some b, h => by
-    simp only [Ty.beqOpt] at h
-    rw [Ty.beq_eq a b h]
-  | none, some _, h | some _, none, h => by simp [Ty.beqOpt] at h
+    rw [h.1, Ty.beqList_eq x y h.2]
 
 end
 
@@ -120,19 +97,12 @@ theorem Ty.beqList_refl : ∀ (a : List Ty), Ty.beqList a a = true
   | [] => by simp [Ty.beqList]
   | a :: as => by simp [Ty.beqList, Ty.beq_refl a, Ty.beqList_refl as]
 
-theorem Ty.beqRow_refl : ∀ (a : List (Nat × List Ty × Option Ty)), Ty.beqRow a a = true
+theorem Ty.beqRow_refl : ∀ (a : List (Nat × List Ty)), Ty.beqRow a a = true
   | [] => by simp [Ty.beqRow]
   | x :: as => by simp [Ty.beqRow, Ty.beqEntry_refl x, Ty.beqRow_refl as]
 
-theorem Ty.beqEntry_refl : ∀ (a : Nat × List Ty × Option Ty), Ty.beqEntry a a = true
-  | (op, x) => by simp [Ty.beqEntry, Ty.beqPair_refl x]
-
-theorem Ty.beqPair_refl : ∀ (a : List Ty × Option Ty), Ty.beqPair a a = true
-  | (ps, r) => by simp [Ty.beqPair, Ty.beqList_refl ps, Ty.beqOpt_refl r]
-
-theorem Ty.beqOpt_refl : ∀ (a : Option Ty), Ty.beqOpt a a = true
-  | none => by simp [Ty.beqOpt]
-  | some a => by simp only [Ty.beqOpt, Ty.beq_refl a]
+theorem Ty.beqEntry_refl : ∀ (a : Nat × List Ty), Ty.beqEntry a a = true
+  | (op, x) => by simp [Ty.beqEntry, Ty.beqList_refl x]
 
 end
 

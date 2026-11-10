@@ -15,10 +15,10 @@ namespace Glorious.Typing.Witness
 open Core
 
 /-- `Ask`: takes an integer and is resumed with one. -/
-def askRow : Row := [(0, ([.int], some .int))]
+def askRow : Row := [(0, [])]
 
 /-- `Fail`: takes an integer and is not resumed. -/
-def failRow : Row := [(1, ([.int], none))]
+def failRow : Row := [(1, [])]
 
 /-- A computation that may ask. -/
 def asker : Ty := .fn [] .int askRow
@@ -35,8 +35,13 @@ def sigs : List (Nat × FnSig) := [
   (5, ⟨[asker], [], .int, askRow⟩),
   (6, ⟨[asker], [], .int, failRow⟩)]
 
-/-- Each function of `effects` has one signature, and the program declares no data types. -/
-def ctx : Ctx := ⟨fun fn sig => (fn, sig) ∈ sigs, fun _ _ _ => none⟩
+/-- Each function of `effects` has one signature; `Ask` takes an integer and is
+resumed with one, `Fail` takes an integer and is not resumed; and the program
+declares no data types. -/
+def ctx : Ctx where
+  fnSig fn sig := (fn, sig) ∈ sigs
+  opSig op _ := if op = 0 then some ([.int], some .int) else if op = 1 then some ([.int], none) else none
+  ctorFields _ _ _ := none
 
 theorem sig0 : ctx.fnSig 0 ⟨[], [], .int, askRow⟩ := .head _
 theorem sig1 : ctx.fnSig 1 ⟨[], [.int, resumption], .int, failRow⟩ := .tail _ (.head _)
@@ -55,12 +60,12 @@ theorem ask_under_fail : Row.le askRow (failRow ++ askRow) := by
   by_cases h0 : op = 0
   · subst h0
     exact h
-  · rw [show askRow = [(0, ([.int], some .int))] from rfl, lookup_cons_ne h0] at h
+  · rw [show askRow = [(0, [])] from rfl, lookup_cons_ne h0] at h
     simp [List.lookup] at h
 
 /-- The handler that serves `Fail` by adding one, used twice. -/
 theorem failHandler (ε : Row) : HandlerOk ctx [] 3 [(1, 4)] .int .int failRow ε :=
-  ⟨⟨[], sig3, Row.nil_le _⟩, .terminal (Ps := [.int]) (εa := []) sig4 (Row.nil_le _) .nil⟩
+  ⟨⟨[], sig3, Row.nil_le _⟩, .terminal (targs := []) (Ps := [.int]) (εa := []) rfl sig4 (Row.nil_le _) .nil⟩
 
 /-- A function of no arguments has a clause for no arguments. -/
 theorem covers0 {S : StoreTy} {body : Tm} {vs : List Value} (h : HasVals ctx S vs []) :
@@ -96,8 +101,8 @@ theorem effects_ok : ProgramOk ctx Glorious.Witness.effects where
       simp only [List.mem_cons, List.not_mem_nil, or_false] at hc
       subst hc
       exact ⟨[], .nil,
-        .perform (Ps := [.int]) (σ := .int) rfl (.cons .int .nil)
-          (.perform (Ps := [.int]) (σ := .int) rfl (.cons (.var rfl) .nil)
+        .perform (targs := []) (Ps := [.int]) (σ := .int) rfl rfl (.cons .int .nil)
+          (.perform (targs := []) (Ps := [.int]) (σ := .int) rfl rfl (.cons (.var rfl) .nil)
             (.let_ (σ := .int) (.prim (.var rfl) (.var rfl)) (.ret (.var rfl))))⟩
     · refine ⟨_, rfl, ?_, fun S vs hv => covers2 hv⟩
       intro c hc
@@ -138,9 +143,10 @@ theorem effects_ok : ProgramOk ctx Glorious.Witness.effects where
       exact ⟨[], .nil,
         .handle (Cs := []) (σ := .int) (ρ := .int) (εt := askRow) (H := askRow) (.var rfl) .nil
           ⟨⟨[], sig2, Row.nil_le _⟩,
-            .resumptive (Ps := [.int]) (o := .int) (εa := failRow) sig1 (Row.le_refl _) .nil⟩
+            .resumptive (targs := []) (Ps := [.int]) (o := .int) (εa := failRow) rfl sig1
+              (Row.le_refl _) .nil⟩
           (Row.le_append_left _ _)
-          (.raise (Ps := [.int]) rfl (.cons (.var rfl) .nil))⟩
+          (.raise (targs := []) (Ps := [.int]) rfl rfl (.cons (.var rfl) .nil))⟩
   main := ⟨.int,
     .let_ (σ := asker) (.closure (sig := ⟨[], [], .int, askRow⟩) sig0 .nil)
       (.let_ (σ := asker)
@@ -171,6 +177,7 @@ def cert : Cert where
     ⟨5, ⟨[asker], [], .int, askRow⟩, [[.handler .int failRow]]⟩,
     ⟨6, ⟨[asker], [], .int, failRow⟩, [[.handler .int askRow]]⟩]
   datas := []
+  ops := [⟨0, [], [.int], some .int⟩, ⟨1, [], [.int], none⟩]
   mainTy := .int
   mainHints := [.ty asker, .ty asker, .ty (.fn [] .int failRow), .handler .int failRow]
 
@@ -179,23 +186,23 @@ theorem effects_checked : checkProgram cert Glorious.Witness.effects = true := b
 /-! What the checker turns away, and a use of the coverage check on a data type. -/
 
 /-- Reading a local that does not exist. -/
-example : checkProgram ⟨[], [], .int, []⟩ ⟨[], .ret (.var 0)⟩ = false := by decide
+example : checkProgram ⟨[], [], [], .int, []⟩ ⟨[], .ret (.var 0)⟩ = false := by decide
 
 /-- Performing an operation nothing handles. -/
-example : checkProgram ⟨[], [], .int, []⟩ ⟨[], .raise 0 []⟩ = false := by decide
+example : checkProgram ⟨[], [], [], .int, []⟩ ⟨[], .raise 0 []⟩ = false := by decide
 
 /-- Calling something that is not callable. -/
-example : checkProgram ⟨[], [], .int, [.ty .int]⟩
+example : checkProgram ⟨[], [], [], .int, [.ty .int]⟩
     ⟨[], .let_ (.atom (.int 1)) (.tail (.var 0) [])⟩ = false := by decide
 
 /-- A function with a clause for `0` only does not cover its integer parameter;
 with a second clause that binds the argument, it does. -/
-example : checkProgram ⟨[⟨0, ⟨[], [.int], .int, []⟩, [[]]⟩], [], .int, [.ty (.fn [.int] .int [])]⟩
+example : checkProgram ⟨[⟨0, ⟨[], [.int], .int, []⟩, [[]]⟩], [], [], .int, [.ty (.fn [.int] .int [])]⟩
     ⟨[⟨[⟨[.int 0], .ret (.int 1)⟩]⟩], .let_ (.closure 0 []) (.tail (.var 0) [.int 5])⟩
     = false := by decide
 
 example : checkProgram
-    ⟨[⟨0, ⟨[], [.int], .int, []⟩, [[], []]⟩], [], .int, [.ty (.fn [.int] .int [])]⟩
+    ⟨[⟨0, ⟨[], [.int], .int, []⟩, [[], []]⟩], [], [], .int, [.ty (.fn [.int] .int [])]⟩
     ⟨[⟨[⟨[.int 0], .ret (.int 1)⟩, ⟨[.bind], .ret (.var 1)⟩]⟩],
       .let_ (.closure 0 []) (.tail (.var 0) [.int 5])⟩
     = true := by decide
@@ -208,7 +215,7 @@ def optionDecl : DataInst := ⟨0, [], [(1, []), (2, [.int])]⟩
 /-- `get(None) = 0; get(Some(x)) = x`, applied to `Some(7)`: both constructors
 have a clause, so the function covers its parameter. -/
 example : checkProgram
-    ⟨[⟨0, ⟨[], [option], .int, []⟩, [[], []]⟩], [optionDecl], .int,
+    ⟨[⟨0, ⟨[], [option], .int, []⟩, [[], []]⟩], [optionDecl], [], .int,
       [.ty option, .ty (.fn [option] .int [])]⟩
     ⟨[⟨[⟨[.ctor 1 []], .ret (.int 0)⟩, ⟨[.ctor 2 [.bind]], .ret (.var 1)⟩]⟩],
       .let_ (.construct 2 [.int 7]) (.let_ (.closure 0 []) (.tail (.var 1) [.var 0]))⟩
@@ -216,7 +223,7 @@ example : checkProgram
 
 /-- Without the clause for `None` it does not. -/
 example : checkProgram
-    ⟨[⟨0, ⟨[], [option], .int, []⟩, [[]]⟩], [optionDecl], .int,
+    ⟨[⟨0, ⟨[], [option], .int, []⟩, [[]]⟩], [optionDecl], [], .int,
       [.ty option, .ty (.fn [option] .int [])]⟩
     ⟨[⟨[⟨[.ctor 2 [.bind]], .ret (.var 1)⟩]⟩],
       .let_ (.construct 2 [.int 7]) (.let_ (.closure 0 []) (.tail (.var 1) [.var 0]))⟩

@@ -22,11 +22,20 @@ structure DataInst where
   args : List Ty
   ctors : List (Nat × List Ty)
 
+/-- An operation of an effect used at some type arguments: what it takes, and
+what it is resumed with if it can be resumed. -/
+structure OpInst where
+  op : Nat
+  args : List Ty
+  payload : List Ty
+  result : Option Ty
+
 /-- A type the checker is told rather than left to find. -/
 inductive Hint where
   /-- The type of the value a `let` binds. -/
   | ty (σ : Ty)
-  /-- What a handler yields, and the operations it serves with their types. -/
+  /-- What a handler yields, and the operations it serves, in the handler's
+  order, each with the type arguments of its effect. -/
   | handler (ρ : Ty) (H : Row)
 
 /-- A signature of a function, with the hints for each of its clauses at that signature. -/
@@ -39,6 +48,7 @@ structure SigEntry where
 structure Cert where
   sigs : List SigEntry
   datas : List DataInst
+  ops : List OpInst
   mainTy : Ty
   mainHints : List Hint
 
@@ -48,9 +58,15 @@ def findData (ds : List DataInst) (name : Nat) (args : List Ty) :
   | some d => some d.ctors
   | none => none
 
+def findOp (os : List OpInst) (op : Nat) (args : List Ty) : Option OpTy :=
+  match os.find? (fun o => o.op == op && o.args == args) with
+  | some o => some (o.payload, o.result)
+  | none => none
+
 /-- The typing context a certificate describes. -/
 def Cert.ctx (C : Cert) : Ctx where
   fnSig fn sig := ∃ e, e ∈ C.sigs ∧ e.fn = fn ∧ e.sig = sig
+  opSig op args := findOp C.ops op args
   ctorFields tag name args := (findData C.datas name args).bind (·.lookup tag)
 
 variable {C : Cert}
@@ -302,11 +318,12 @@ theorem hasSigLe_sound {fn : Nat} {Cs Ps : List Ty} {ρ : Ty} {ε : Row}
 
 def checkArms (C : Cert) (Cs : List Ty) (ρ : Ty) (ε : Row) : List (Nat × Nat) → Row → Bool
   | [], [] => true
-  | (op, arm) :: ops, (op', (Ps, r)) :: H =>
+  | (op, arm) :: ops, (op', targs) :: H =>
     op == op'
-      && (match r with
-          | none => hasSigLe C arm Cs Ps ρ ε
-          | some o => hasSigLe C arm Cs (Ps ++ [.fn [o] ρ ε]) ρ ε)
+      && (match findOp C.ops op targs with
+          | some (Ps, none) => hasSigLe C arm Cs Ps ρ ε
+          | some (Ps, some o) => hasSigLe C arm Cs (Ps ++ [.fn [o] ρ ε]) ρ ε
+          | none => false)
       && checkArms C Cs ρ ε ops H
   | [], _ :: _ => false
   | _ :: _, [] => false
@@ -315,16 +332,17 @@ theorem checkArms_sound {Cs : List Ty} {ρ : Ty} {ε : Row} :
     ∀ {ops : List (Nat × Nat)} {H : Row}, checkArms C Cs ρ ε ops H = true →
       ArmsOk C.ctx Cs ρ ε ops H
   | [], [], _ => .nil
-  | (op, arm) :: ops, (op', (Ps, r)) :: H, h => by
+  | (op, arm) :: ops, (op', targs) :: H, h => by
     simp only [checkArms, Bool.and_eq_true, beq_iff_eq] at h
     obtain ⟨⟨rfl, harm⟩, hrest⟩ := h
-    cases r with
-    | none =>
+    split at harm
+    · rename_i Ps hop
       obtain ⟨εa, hsig, hle⟩ := hasSigLe_sound harm
-      exact .terminal hsig hle (checkArms_sound hrest)
-    | some o =>
+      exact .terminal hop hsig hle (checkArms_sound hrest)
+    · rename_i Ps o hop
       obtain ⟨εa, hsig, hle⟩ := hasSigLe_sound harm
-      exact .resumptive hsig hle (checkArms_sound hrest)
+      exact .resumptive hop hsig hle (checkArms_sound hrest)
+    · simp at harm
   | [], _ :: _, h => by simp [checkArms] at h
   | _ :: _, [], h => by simp [checkArms] at h
 
@@ -370,12 +388,18 @@ def checkTm (C : Cert) : TEnv → Tm → List Hint → Ty → Row → Bool
     | _, _, _ => false
   | Γ, .raise op args, _, _, ε =>
     match ε.lookup op with
-    | some (Ps, none) => atomsTy Γ args == some Ps
-    | _ => false
+    | some targs =>
+      match findOp C.ops op targs with
+      | some (Ps, none) => atomsTy Γ args == some Ps
+      | _ => false
+    | none => false
   | Γ, .perform op args body, hs, τ, ε =>
     match ε.lookup op with
-    | some (Ps, some σ) => atomsTy Γ args == some Ps && checkTm C (Γ ++ [σ]) body hs τ ε
-    | _ => false
+    | some targs =>
+      match findOp C.ops op targs with
+      | some (Ps, some σ) => atomsTy Γ args == some Ps && checkTm C (Γ ++ [σ]) body hs τ ε
+      | _ => false
+    | none => false
   | Γ, .label thunk body, hs, τ, ε =>
     match atomTy Γ thunk with
     | some (.fn [.fn [σ'] _ _] σ εt) =>
@@ -479,17 +503,23 @@ theorem checkTm_sound : ∀ (tm : Tm) {Γ : TEnv} {hs : List Hint} {τ : Ty} {ε
     intro Γ hs τ ε h
     simp only [checkTm] at h
     split at h
-    · rename_i Ps hl
-      simp only [beq_iff_eq] at h
-      exact .raise hl (atomsTy_sound h)
+    · rename_i targs hl
+      split at h
+      · rename_i Ps hop
+        simp only [beq_iff_eq] at h
+        exact .raise hl hop (atomsTy_sound h)
+      · simp at h
     · simp at h
   | perform op args body ih =>
     intro Γ hs τ ε h
     simp only [checkTm] at h
     split at h
-    · rename_i Ps σ hl
-      simp only [Bool.and_eq_true, beq_iff_eq] at h
-      exact .perform hl (atomsTy_sound h.1) (ih h.2)
+    · rename_i targs hl
+      split at h
+      · rename_i Ps σ hop
+        simp only [Bool.and_eq_true, beq_iff_eq] at h
+        exact .perform hl hop (atomsTy_sound h.1) (ih h.2)
+      · simp at h
     · simp at h
   | label thunk body ih =>
     intro Γ hs τ ε h

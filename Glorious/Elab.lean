@@ -51,6 +51,8 @@ structure Builder where
   ops : Array (Core.Tm → Core.Tm)
   depth : Nat
   done : Option Core.Tm
+  /-- The locals that hold a callable literal: its function and what it captured. -/
+  literals : List (Nat × Nat × List Atom) := []
 
 structure St where
   fns : Array Core.Fn
@@ -93,7 +95,7 @@ def finish (result : Atom) : M Core.Tm := do
 /-- Build a computation whose locals start at `depth`, then restore the outer one. -/
 def withBuilder {α : Type} (depth : Nat) (k : M α) : M α := do
   let outer := (← get).b
-  modify fun s => { s with b := ⟨#[], depth, none⟩ }
+  modify fun s => { s with b := ⟨#[], depth, none, []⟩ }
   let r ← k
   modify fun s => { s with b := outer }
   pure r
@@ -105,6 +107,21 @@ def withNoTail {α : Type} (why : Option String) (k : M α) : M α := do
   let r ← k
   modify fun s => { s with noTail := outer }
   pure r
+
+/--
+The value of a local as a name refers to it. A local that holds a callable
+literal is built again from the same function and captures, so that each use of
+the name is a value of its own: the name can then be used at several types, as
+the checker allows for a `let` of a callable literal, while each Core value
+keeps a single type.
+-/
+def useLocal (a : Atom) : M Atom := do
+  match a with
+  | .var i =>
+    match (← get).b.literals.lookup i with
+    | some (idx, captures) => emit (.let_ (.closure idx captures))
+    | none => pure a
+  | .int _ => pure a
 
 def addFn (f : Core.Fn) (name : String) : M Nat := do
   let s ← get
@@ -292,7 +309,7 @@ partial def elabExpr (scope : Scope) (tailPos : Bool) : Expr → M Atom
     else throw s!"integer literal `{n}` does not fit in 64 bits"
   | .name q x => do
     match ← resolveName scope q x with
-    | .local a => pure a
+    | .local a => useLocal a
     | .cell c => emit (.mem .load [c])
     | .fn idx => emit (.let_ (.closure idx []))
     | .ctor info =>
@@ -350,7 +367,7 @@ partial def elabCall (scope : Scope) (isTail : Bool) (f : Expr) (args : List Exp
   match f with
   | .name q x =>
     match ← resolveName scope q x with
-    | .local a => elabApply scope isTail a args
+    | .local a => do elabApply scope isTail (← useLocal a) args
     | .cell c => do
       let callee ← emit (.mem .load [c])
       elabApply scope isTail callee args
@@ -551,7 +568,11 @@ partial def elabClosure (scope : Scope) (clauses : List Clause) : M Atom := do
   let coreClauses ← clauses.mapM fun
     | .mk pats body => mkClause captures pats (fun sc => elabStmts sc true body)
   let idx ← addFn ⟨coreClauses⟩ s!"a callable in `{(← get).owner}`"
-  emit (.let_ (.closure idx (captures.filterMap (fun x => scope.lookup x))))
+  let captured := captures.filterMap (fun x => scope.lookup x)
+  let a ← emit (.let_ (.closure idx captured))
+  if let .var i := a then
+    modify fun s => { s with b := { s.b with literals := (i, idx, captured) :: s.b.literals } }
+  pure a
 
 /--
 `handle subject { arms }`. The subject becomes a callable run under the handler.
@@ -706,7 +727,7 @@ def elabProgram (items : List Item) : Except String Output := do
       modify fun s => { s with fns := s.fns.set! idx ⟨coreClauses⟩ }
       idx := idx + 1
   let fnNames := (fns.map fun (name, _) => s!"`{name}`").toArray
-  let init : St := ⟨Array.replicate fns.length ⟨[]⟩, fnNames, "", ⟨#[], 0, none⟩, none⟩
+  let init : St := ⟨Array.replicate fns.length ⟨[]⟩, fnNames, "", ⟨#[], 0, none, []⟩, none⟩
   let (_, st) ← (action.run g).run init
   let opNames := Id.run do
     let mut out := Array.replicate g.ops.length ""

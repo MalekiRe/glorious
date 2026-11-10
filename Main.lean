@@ -113,6 +113,21 @@ def parseInput (args : List String) : Except String (List Int) :=
 
 def main (args : List String) : IO UInt32 := do
   match args with
+  | ["certifytest"] =>
+    let examples ← exampleCases "examples"
+    let mut bad := 0
+    let mut ran := 0
+    for c in cases ++ examples do
+      let got := certifySource c.src
+      if got.startsWith "CERTIFY" then
+        bad := bad + 1
+        IO.eprintln s!"{got}\n  for: {c.src}\n"
+      if got.startsWith "ok" || got.startsWith "CERTIFY" then ran := ran + 1
+    IO.println s!"{ran} programs the checker accepts: {bad} without a certificate"
+    pure (if bad == 0 then 0 else 1)
+  | ["certify", path] =>
+    IO.println (certifySource (← IO.FS.readFile path))
+    pure 0
   | ["selftest"] => selftest none
   | ["selftest", vm] => selftest (some vm)
   | ["build", path, out] =>
