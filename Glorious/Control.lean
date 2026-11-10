@@ -49,6 +49,15 @@ def evalCall (ρ : Env) (f : Atom) (args : List Atom) : Option Callee :=
   | some (.label id), some [v] => some (.label id v)
   | _, _ => none
 
+/-- Evaluate the callable a label scope runs, applied to the scope's label. Any
+callable taking one value will do: a function, a resumption or another label. -/
+def evalScope (ρ : Env) (thunk : Atom) (label : Value) : Option Callee :=
+  match thunk.eval ρ with
+  | some (.clo fn captures) => some (.fn fn captures [label])
+  | some (.cont id) => some (.cont id label)
+  | some (.label id) => some (.label id label)
+  | _ => none
+
 /-- Evaluate an operand that must be a function closure. -/
 def evalClosure (ρ : Env) (a : Atom) : Option (Nat × List Value) :=
   match a.eval ρ with
@@ -88,9 +97,9 @@ def findHandler {φ : Type} (asHandler : φ → Option (Nat × Handler)) (op : N
       | none => none
 
 /-- Captured continuations, indexed by resumption identity. A resumption is
-one-shot: its entry holds the captured frames, with the identity of the handler
-at their base, until it is resumed or cancelled, and is empty afterwards. -/
-abbrev Conts (φ : Type) := List (Option (Nat × List φ))
+one-shot: its entry holds the captured frames until it is resumed or cancelled,
+and is empty afterwards. -/
+abbrev Conts (φ : Type) := List (Option (List φ))
 
 /-- Take a resumption's captured frames, leaving its entry empty. Resuming and
 cancelling both do this, so a resumption that has been used cannot be used again. -/

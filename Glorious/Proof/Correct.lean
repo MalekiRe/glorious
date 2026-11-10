@@ -62,15 +62,15 @@ theorem MatchFrames.append {a b : List Core.Frame} {a' b' : List Bytecode.Frame}
 
 /-- A store entry is used up in both machines, or holds corresponding stacks. -/
 inductive MatchCont :
-    Option (Nat × List Core.Frame) → Option (Nat × List Bytecode.Frame) → Prop where
+    Option (List Core.Frame) → Option (List Bytecode.Frame) → Prop where
   | empty : MatchCont Option.none Option.none
-  | full {handler : Nat} {s : List Core.Frame} {s' : List Bytecode.Frame} :
-      MatchFrames s s' → MatchCont (Option.some (handler, s)) (Option.some (handler, s'))
+  | full {s : List Core.Frame} {s' : List Bytecode.Frame} :
+      MatchFrames s s' → MatchCont (Option.some s) (Option.some s')
 
 /-- The continuation stores correspond entry by entry, so resumption identities agree. -/
 inductive MatchConts : Conts Core.Frame → Conts Bytecode.Frame → Prop where
   | nil : MatchConts [] []
-  | cons {a : Option (Nat × List Core.Frame)} {b : Option (Nat × List Bytecode.Frame)}
+  | cons {a : Option (List Core.Frame)} {b : Option (List Bytecode.Frame)}
       {as : Conts Core.Frame} {bs : Conts Bytecode.Frame} :
       MatchCont a b → MatchConts as bs → MatchConts (a :: as) (b :: bs)
 
@@ -83,7 +83,7 @@ theorem length_eq (h : MatchConts a b) : a.length = b.length := by
   | nil => rfl
   | cons _ _ ih => simp [ih]
 
-theorem snoc {x : Option (Nat × List Core.Frame)} {y : Option (Nat × List Bytecode.Frame)}
+theorem snoc {x : Option (List Core.Frame)} {y : Option (List Bytecode.Frame)}
     (h : MatchConts a b) (hx : MatchCont x y) : MatchConts (a ++ [x]) (b ++ [y]) := by
   induction h with
   | nil => exact .cons hx .nil
@@ -92,21 +92,21 @@ theorem snoc {x : Option (Nat × List Core.Frame)} {y : Option (Nat × List Byte
 /-- Taking a continuation out of corresponding stores gives corresponding
 stacks and leaves corresponding stores. -/
 theorem take (h : MatchConts a b) :
-    ∀ {id handler : Nat} {seg : List Core.Frame} {a₁ : Conts Core.Frame},
-    takeCont a id = some ((handler, seg), a₁) →
-    ∃ seg' b₁, takeCont b id = some ((handler, seg'), b₁) ∧ MatchFrames seg seg'
+    ∀ {id : Nat} {seg : List Core.Frame} {a₁ : Conts Core.Frame},
+    takeCont a id = some (seg, a₁) →
+    ∃ seg' b₁, takeCont b id = some (seg', b₁) ∧ MatchFrames seg seg'
       ∧ MatchConts a₁ b₁ := by
   induction h with
-  | nil => intro id handler seg a₁ ht; simp [takeCont] at ht
+  | nil => intro id seg a₁ ht; simp [takeCont] at ht
   | @cons x y as bs hx hrest ih =>
-    intro id handler seg a₁ ht
+    intro id seg a₁ ht
     cases id with
     | zero =>
       cases hx with
       | empty => simp [takeCont] at ht
       | full hs =>
         simp [takeCont] at ht
-        obtain ⟨⟨rfl, rfl⟩, rfl⟩ := ht
+        obtain ⟨rfl, rfl⟩ := ht
         exact ⟨_, _, rfl, hs, .cons .empty hrest⟩
     | succ id =>
       cases hr : takeCont as id with
@@ -382,7 +382,7 @@ theorem apply_sim {c : Callee} (hfr : MatchFrames stack frames) (hks : MatchStor
       rw [h1]
       exact .stuck
     | some r =>
-      obtain ⟨⟨handler, seg⟩, conts₁⟩ := r
+      obtain ⟨seg, conts₁⟩ := r
       obtain ⟨seg', conts₁', ht', hseg, hcs₁⟩ := hcs.take ht
       have h1 : Core.apply p (.cont id v) stack ⟨conts, labels, cells⟩
           = Core.deliver p v (seg ++ stack) ⟨conts₁, labels, cells⟩ := by
@@ -566,12 +566,12 @@ theorem step_sim (p : Core.Program) {s : Core.State} {t : Bytecode.State} (hm : 
         obtain ⟨above', below', hf', habove, hbelow⟩ := find_sim hfr hf
         have h1 : Core.step p ⟨.perform op args body, ρ, stack, ⟨conts, labels, cells⟩⟩
             = Core.callFn p d.arm d.handler.caps (vs ++ [.cont conts.length]) d.below
-                ⟨conts ++ [some (d.id, .call ρ body :: d.above ++ [.handler d.id d.handler])],
+                ⟨conts ++ [some (.call ρ body :: d.above ++ [.handler d.id d.handler])],
                   labels, cells⟩ := by
           simp [Core.step, hv, hf]
         have h2 : Bytecode.step (compile p) ⟨code, pc, ρ, frames, ⟨conts', labels, cells⟩⟩
             = Bytecode.callFn (compile p) d.arm d.handler.caps (vs ++ [.cont conts.length]) below'
-                ⟨conts' ++ [some (d.id, .ret code (pc + 1) ρ :: above' ++ [.handler d.id d.handler])],
+                ⟨conts' ++ [some (.ret code (pc + 1) ρ :: above' ++ [.handler d.id d.handler])],
                   labels, cells⟩ := by
           simp [Bytecode.step, hi, hv, hf', hcs.length_eq]
         rw [h1, h2]
@@ -580,24 +580,23 @@ theorem step_sim (p : Core.Program) {s : Core.State} {t : Bytecode.State} (hm : 
   | label thunk body =>
     have hc : CodeAt code pc (Instr.label thunk :: compileTm body) := hcode
     have hi := hc.head
-    cases he : evalClosure ρ thunk with
+    cases he : evalScope ρ thunk (.label labels) with
     | none =>
       have h1 : Core.step p ⟨.label thunk body, ρ, stack, ⟨conts, labels, cells⟩⟩ = .stuck := by
         simp [Core.step, he]
       rw [h1]
       exact .stuck
-    | some r =>
-      obtain ⟨fn, captures⟩ := r
+    | some c =>
       have h1 : Core.step p ⟨.label thunk body, ρ, stack, ⟨conts, labels, cells⟩⟩
-          = Core.callFn p fn captures [.label labels]
-              (.label labels :: .call ρ body :: stack) ⟨conts, labels + 1, cells⟩ := by
+          = Core.apply p c (.label labels :: .call ρ body :: stack)
+              ⟨conts, labels + 1, cells⟩ := by
         simp [Core.step, he]
       have h2 : Bytecode.step (compile p) ⟨code, pc, ρ, frames, ⟨conts', labels, cells⟩⟩
-          = Bytecode.callFn (compile p) fn captures [.label labels]
+          = Bytecode.apply (compile p) c
               (.label labels :: .ret code (pc + 1) ρ :: frames) ⟨conts', labels + 1, cells⟩ := by
         simp [Bytecode.step, hi, he]
       rw [h1, h2]
-      exact callFn_sim (.cons .label (.cons (.call hc.tail) hfr)) (.mk hcs)
+      exact apply_sim (.cons .label (.cons (.call hc.tail) hfr)) (.mk hcs)
   | handleTail ret ops captures thunk =>
     have hc : CodeAt code pc [Instr.handleTail ret ops captures thunk] := hcode
     have hi := hc.head
@@ -630,24 +629,22 @@ theorem step_sim (p : Core.Program) {s : Core.State} {t : Bytecode.State} (hm : 
   | labelTail thunk =>
     have hc : CodeAt code pc [Instr.labelTail thunk] := hcode
     have hi := hc.head
-    cases he : evalClosure ρ thunk with
+    cases he : evalScope ρ thunk (.label labels) with
     | none =>
       have h1 : Core.step p ⟨.labelTail thunk, ρ, stack, ⟨conts, labels, cells⟩⟩ = .stuck := by
         simp [Core.step, he]
       rw [h1]
       exact .stuck
-    | some r =>
-      obtain ⟨fn, captures⟩ := r
+    | some c =>
       have h1 : Core.step p ⟨.labelTail thunk, ρ, stack, ⟨conts, labels, cells⟩⟩
-          = Core.callFn p fn captures [.label labels] (.label labels :: stack)
-              ⟨conts, labels + 1, cells⟩ := by
+          = Core.apply p c (.label labels :: stack) ⟨conts, labels + 1, cells⟩ := by
         simp [Core.step, he]
       have h2 : Bytecode.step (compile p) ⟨code, pc, ρ, frames, ⟨conts', labels, cells⟩⟩
-          = Bytecode.callFn (compile p) fn captures [.label labels] (.label labels :: frames)
+          = Bytecode.apply (compile p) c (.label labels :: frames)
               ⟨conts', labels + 1, cells⟩ := by
         simp [Bytecode.step, hi, he]
       rw [h1, h2]
-      exact callFn_sim (.cons .label hfr) (.mk hcs)
+      exact apply_sim (.cons .label hfr) (.mk hcs)
   | guard cleanup thunk body =>
     have hc : CodeAt code pc (Instr.guard cleanup thunk :: compileTm body) := hcode
     have hi := hc.head
@@ -731,19 +728,21 @@ theorem step_sim (p : Core.Program) {s : Core.State} {t : Bytecode.State} (hm : 
           rw [h1]
           exact .stuck
         | some r =>
-          obtain ⟨⟨handler, seg⟩, conts₁⟩ := r
+          obtain ⟨seg, conts₁⟩ := r
           obtain ⟨seg', conts₁', ht', hseg, hcs₁⟩ := hcs.take ht
           have h1 : Core.step p ⟨.cancel k body, ρ, stack, ⟨conts, labels, cells⟩⟩
-              = Core.leave p (.handler handler) (.yield Value.unit)
-                  (seg ++ .yield Value.unit :: .call ρ body :: stack) ⟨conts₁, labels, cells⟩ := by
+              = Core.leave p (.label labels) (.yield Value.unit)
+                  (seg ++ .yield Value.unit :: .label labels :: .call ρ body :: stack)
+                  ⟨conts₁, labels + 1, cells⟩ := by
             simp [Core.step, hk, ht]
           have h2 : Bytecode.step (compile p) ⟨code, pc, ρ, frames, ⟨conts', labels, cells⟩⟩
-              = Bytecode.leave (compile p) (.handler handler) (.yield Value.unit)
-                  (seg' ++ .yield Value.unit :: .ret code (pc + 1) ρ :: frames)
-                  ⟨conts₁', labels, cells⟩ := by
+              = Bytecode.leave (compile p) (.label labels) (.yield Value.unit)
+                  (seg' ++ .yield Value.unit :: .label labels :: .ret code (pc + 1) ρ :: frames)
+                  ⟨conts₁', labels + 1, cells⟩ := by
             simp [Bytecode.step, hi, hk, ht']
           rw [h1, h2]
-          exact leave_sim (hseg.append (.cons .yield (.cons (.call hc.tail) hfr))) (.mk hcs₁)
+          exact leave_sim
+            (hseg.append (.cons .yield (.cons .label (.cons (.call hc.tail) hfr)))) (.mk hcs₁)
   | mem op args body =>
     have hc : CodeAt code pc (Instr.mem op args :: compileTm body) := hcode
     have hi := hc.head

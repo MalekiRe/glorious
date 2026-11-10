@@ -163,7 +163,7 @@ def apply (p : Program) (c : Callee) (stack : List Frame) (store : Store Frame) 
   | .fn fn captures vs => callFn p fn captures vs stack store
   | .cont id v =>
     match takeCont store.conts id with
-    | some ((_, segment), conts) =>
+    | some (segment, conts) =>
       deliver p v (segment ++ stack) ⟨conts, store.labels, store.cells⟩
     | none => .stuck
   | .label id v =>
@@ -216,14 +216,13 @@ def step (p : Program) (s : State) : Step State Value :=
         -- handler, so resuming it reinstalls the handler: handlers are deep.
         callFn p d.arm d.handler.caps (vs ++ [.cont s.store.conts.length]) d.below
           ⟨s.store.conts
-              ++ [some (d.id, .call s.env body :: d.above ++ [.handler d.id d.handler])],
+              ++ [some (.call s.env body :: d.above ++ [.handler d.id d.handler])],
             s.store.labels, s.store.cells⟩
   | .label thunk body =>
-    match evalClosure s.env thunk with
+    match evalScope s.env thunk (.label s.store.labels) with
     | none => .stuck
-    | some (fn, captures) =>
-      callFn p fn captures [.label s.store.labels]
-        (.label s.store.labels :: .call s.env body :: s.stack)
+    | some c =>
+      apply p c (.label s.store.labels :: .call s.env body :: s.stack)
         ⟨s.store.conts, s.store.labels + 1, s.store.cells⟩
   | .handleTail ret ops captures thunk =>
     match evalAtoms s.env captures, evalCall s.env thunk [] with
@@ -232,10 +231,10 @@ def step (p : Program) (s : State) : Step State Value :=
         ⟨s.store.conts, s.store.labels + 1, s.store.cells⟩
     | _, _ => .stuck
   | .labelTail thunk =>
-    match evalClosure s.env thunk with
+    match evalScope s.env thunk (.label s.store.labels) with
     | none => .stuck
-    | some (fn, captures) =>
-      callFn p fn captures [.label s.store.labels] (.label s.store.labels :: s.stack)
+    | some c =>
+      apply p c (.label s.store.labels :: s.stack)
         ⟨s.store.conts, s.store.labels + 1, s.store.cells⟩
   | .guard cleanup thunk body =>
     match evalClosure s.env cleanup, evalCall s.env thunk [] with
@@ -252,13 +251,14 @@ def step (p : Program) (s : State) : Step State Value :=
     | some none => .next ⟨body, s.env ++ [.unit], s.stack, s.store⟩
     | some (some id) =>
       match takeCont s.store.conts id with
-      | some ((handler, segment), conts) =>
-        -- The captured computation is put back and left again at once, down
-        -- to the handler at its base, so that its cleanups run. Whatever it
-        -- might still deliver is discarded: the result of `cancel` is unit.
-        leave p (.handler handler) (.yield .unit)
-          (segment ++ .yield .unit :: .call s.env body :: s.stack)
-          ⟨conts, s.store.labels, s.store.cells⟩
+      | some (segment, conts) =>
+        -- The captured computation is put back inside a fresh label scope and
+        -- that scope is left at once, so that its cleanups run. Whatever the
+        -- computation might still deliver is discarded: the result of
+        -- `cancel` is unit.
+        leave p (.label s.store.labels) (.yield .unit)
+          (segment ++ .yield .unit :: .label s.store.labels :: .call s.env body :: s.stack)
+          ⟨conts, s.store.labels + 1, s.store.cells⟩
       | none => .stuck
   | .mem op args body =>
     match evalAtoms s.env args with

@@ -370,10 +370,9 @@ struct Vm {
     pc: usize,
     locals: Vec<Value>,
     frames: Vec<Frame>,
-    /// Captured continuations, each with the identity of the handler at its
-    /// base. A resumption is one-shot: resuming or cancelling it moves its
-    /// frames out and leaves the entry empty.
-    conts: Vec<Option<(u64, Vec<Frame>)>>,
+    /// Captured continuations. A resumption is one-shot: resuming or
+    /// cancelling it moves its frames out and leaves the entry empty.
+    conts: Vec<Option<Vec<Frame>>>,
     /// How many label scopes and handlers have been put on the stack; the
     /// identity of the next one.
     labels: u64,
@@ -485,8 +484,7 @@ impl Vm {
                 if args.len() != 1 {
                     return wrong();
                 }
-                let (_, segment) =
-                    self.conts.get_mut(id).and_then(Option::take).ok_or(Stop::Wrong)?;
+                let segment = self.conts.get_mut(id).and_then(Option::take).ok_or(Stop::Wrong)?;
                 self.frames.extend(segment);
                 self.deliver(args.pop().unwrap())
             }
@@ -599,26 +597,25 @@ impl Vm {
             }
             Instr::Perform(op, args) => {
                 let mut args = self.atoms(args)?;
-                let (at, id, handler, arm) = self.find_handler(*op)?;
+                let (at, _, handler, arm) = self.find_handler(*op)?;
                 // The continuation runs from the handler up to the performer.
                 let mut segment = self.frames.split_off(at);
                 let locals = std::mem::take(&mut self.locals);
                 segment.push(Frame::Ret { code: self.code, pc: self.pc + 1, locals });
                 args.push(Value::Cont(self.conts.len()));
-                self.conts.push(Some((id, segment)));
+                self.conts.push(Some(segment));
                 self.call_fn(arm, &handler.caps, args)
             }
             Instr::Label { thunk, tail } => {
-                let Value::Clo(c) = self.atom(thunk)? else {
-                    return wrong();
-                };
+                // Any callable taking one value will do; `apply` rejects the rest.
+                let callee = self.atom(thunk)?;
                 if !tail {
                     self.push_ret();
                 }
                 let id = self.labels;
                 self.labels += 1;
                 self.frames.push(Frame::Label(id));
-                self.call_fn(c.func, &c.caps, vec![Value::Label(id)])
+                self.apply(callee, vec![Value::Label(id)])
             }
             Instr::Guard { cleanup, thunk, tail } => {
                 let Value::Clo(c) = self.atom(cleanup)? else {
@@ -645,15 +642,17 @@ impl Vm {
                     }
                     _ => return wrong(),
                 };
-                let (handler, segment) =
-                    self.conts.get_mut(id).and_then(Option::take).ok_or(Stop::Wrong)?;
-                // The captured computation is put back and left again at once,
-                // down to the handler at its base, so that its cleanups run.
-                // Whatever it might still deliver is discarded.
+                let segment = self.conts.get_mut(id).and_then(Option::take).ok_or(Stop::Wrong)?;
+                // The captured computation is put back inside a fresh label
+                // scope and that scope is left at once, so that its cleanups
+                // run. Whatever it might still deliver is discarded.
+                let scope = self.labels;
+                self.labels += 1;
                 self.push_ret();
+                self.frames.push(Frame::Label(scope));
                 self.frames.push(Frame::Yield(unit()));
                 self.frames.extend(segment);
-                self.leave(Target::Handler(handler), After::Yield(unit()))
+                self.leave(Target::Label(scope), After::Yield(unit()))
             }
             Instr::Host(id, args) => {
                 let args = self.atoms(args)?;

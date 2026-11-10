@@ -115,7 +115,7 @@ def apply (p : Program) (c : Callee) (frames : List Frame) (store : Store Frame)
   | .fn fn captures vs => callFn p fn captures vs frames store
   | .cont id v =>
     match takeCont store.conts id with
-    | some ((_, segment), conts) =>
+    | some (segment, conts) =>
       deliver p v (segment ++ frames) ⟨conts, store.labels, store.cells⟩
     | none => .stuck
   | .label id v =>
@@ -167,14 +167,13 @@ def step (p : Program) (s : State) : Step State Value :=
       | some d =>
         callFn p d.arm d.handler.caps (vs ++ [.cont s.store.conts.length]) d.below
           ⟨s.store.conts
-              ++ [some (d.id, .ret s.code (s.pc + 1) s.locals :: d.above ++ [.handler d.id d.handler])],
+              ++ [some (.ret s.code (s.pc + 1) s.locals :: d.above ++ [.handler d.id d.handler])],
             s.store.labels, s.store.cells⟩
   | some (.label thunk) =>
-    match evalClosure s.locals thunk with
+    match evalScope s.locals thunk (.label s.store.labels) with
     | none => .stuck
-    | some (fn, captures) =>
-      callFn p fn captures [.label s.store.labels]
-        (.label s.store.labels :: .ret s.code (s.pc + 1) s.locals :: s.frames)
+    | some c =>
+      apply p c (.label s.store.labels :: .ret s.code (s.pc + 1) s.locals :: s.frames)
         ⟨s.store.conts, s.store.labels + 1, s.store.cells⟩
   | some (.testCtor pl tag arity fail) =>
     match pl.eval s.locals with
@@ -193,10 +192,10 @@ def step (p : Program) (s : State) : Step State Value :=
         ⟨s.store.conts, s.store.labels + 1, s.store.cells⟩
     | _, _ => .stuck
   | some (.labelTail thunk) =>
-    match evalClosure s.locals thunk with
+    match evalScope s.locals thunk (.label s.store.labels) with
     | none => .stuck
-    | some (fn, captures) =>
-      callFn p fn captures [.label s.store.labels] (.label s.store.labels :: s.frames)
+    | some c =>
+      apply p c (.label s.store.labels :: s.frames)
         ⟨s.store.conts, s.store.labels + 1, s.store.cells⟩
   | some (.guard cleanup thunk) =>
     match evalClosure s.locals cleanup, evalCall s.locals thunk [] with
@@ -213,10 +212,11 @@ def step (p : Program) (s : State) : Step State Value :=
     | some none => .next ⟨s.code, s.pc + 1, s.locals ++ [.unit], s.frames, s.store⟩
     | some (some id) =>
       match takeCont s.store.conts id with
-      | some ((handler, segment), conts) =>
-        leave p (.handler handler) (.yield .unit)
-          (segment ++ .yield .unit :: .ret s.code (s.pc + 1) s.locals :: s.frames)
-          ⟨conts, s.store.labels, s.store.cells⟩
+      | some (segment, conts) =>
+        leave p (.label s.store.labels) (.yield .unit)
+          (segment ++ .yield .unit :: .label s.store.labels
+            :: .ret s.code (s.pc + 1) s.locals :: s.frames)
+          ⟨conts, s.store.labels + 1, s.store.cells⟩
       | none => .stuck
   | some (.mem op args) =>
     match evalAtoms s.locals args with

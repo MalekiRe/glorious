@@ -150,13 +150,22 @@ value, or runs the handler's arm.
 - **`cancel` gives up any callable taking one value.** For a resumption it runs
   the captured computation's cleanups; for a function or a label there is
   nothing to do. Before, `cancel` of anything but a resumption went wrong, and
-  the checker could not tell the two apart. The cancelled computation is put
-  back above a frame that discards whatever it delivers, so that if one of its
-  cleanups jumps to a label inside it and it runs on to completion, the
-  canceller still receives unit.
+  the checker could not tell the two apart.
+- **`cancel` leaves a fresh label scope, not the captured handler.** The
+  captured computation is put back above a frame that discards whatever it
+  delivers, inside a label scope made for the purpose, and that scope is left at
+  once with unit. If one of the cleanups jumps to a label inside the computation
+  and it runs on to completion, the canceller still receives unit. Before, the
+  exit was aimed at the handler at the base of the captured computation, which
+  is only right if no other frame carries that handler's identity; a fresh
+  label needs no such fact, and a resumption no longer records its handler.
+- **A label scope runs any callable taking one value**, as a call does: a
+  function, a resumption or another label. Before, only a function was
+  accepted, and a scope given a resumption went wrong although nothing in its
+  type says it is not a function.
 
 Two earlier designs were wrong, and both let a program the checker accepts go
-wrong at run time. Three further faults (the two rules above, and the discarding
+wrong at run time. Five further faults (the four rules above, and the discarding
 frame) were found the same way as the second: by trying to say what type each
 stack has.
 

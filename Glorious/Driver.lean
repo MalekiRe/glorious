@@ -82,8 +82,8 @@ def explainStuck (c : Compiled) (cfg : Core.Config) : String :=
     match c.core.fns[fn]? with
     | none => s!"function {fn} does not exist; this is a compiler defect"
     | some _ => s!"no clause of {fnName fn} matches the arguments ({shown vs})"
-  let applied (f : Atom) (args : List Atom) : String :=
-    match f.eval s.env, evalAtoms s.env args with
+  let applied (f : Atom) (args : Option (List Value)) : String :=
+    match f.eval s.env, args with
     | some (.clo fn _), some vs => enter fn vs
     | some (.cont _), some [_] =>
       "a resumption is used a second time: it was already resumed or cancelled"
@@ -119,14 +119,14 @@ def explainStuck (c : Compiled) (cfg : Core.Config) : String :=
       | some v => s!"`{showValue c.ctorNames v}` does not have the field being read"
       | none => unbound
     | _ => unbound
-  | .call f args _ => applied f args
-  | .tail f args => applied f args
-  | .handle _ _ _ thunk _ => applied thunk []
-  | .handleTail _ _ _ thunk => applied thunk []
-  | .label thunk _ => applied thunk []
-  | .labelTail thunk => applied thunk []
-  | .guard _ thunk _ => applied thunk []
-  | .guardTail _ thunk => applied thunk []
+  | .call f args _ => applied f (evalAtoms s.env args)
+  | .tail f args => applied f (evalAtoms s.env args)
+  | .handle _ _ _ thunk _ => applied thunk (some [])
+  | .handleTail _ _ _ thunk => applied thunk (some [])
+  | .label thunk _ => applied thunk (some [.label s.store.labels])
+  | .labelTail thunk => applied thunk (some [.label s.store.labels])
+  | .guard _ thunk _ => applied thunk (some [])
+  | .guardTail _ thunk => applied thunk (some [])
   | .raise op _ => performed op
   | .perform op _ _ => performed op
   | .cancel _ _ => "`cancel` is applied to something that is not a usable resumption"
