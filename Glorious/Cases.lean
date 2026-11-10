@@ -107,7 +107,7 @@ def cases : List Case := [
     [], "4"⟩,
   ⟨"effect Ask { ask(x) }
   fn main() { handle ask(1) { ask(x, k) => k(x) + k(x) } }",
-    [], "went wrong"⟩,
+    [], "error: in `main`: `k` is used more than once, but a value that holds a resumption can be used only once"⟩,
   ⟨"effect Ask { ask(x) }  fn main() { ask(1) }",
     [], "error: `main` performs effects that nothing handles: {Ask}"⟩,
 
@@ -216,7 +216,7 @@ def cases : List Case := [
   ⟨"effect Ask { ask() }
   fn work() { defer print(1); ask() }
   fn main() { handle work() { ask(k) => cancel(k); k(1) } }",
-    [], "went wrong"⟩,
+    [], "error: in `main`: `k` is used more than once, but a value that holds a resumption can be used only once"⟩,
 
   -- A resource bracket, written in the language.
   ⟨"effect Fail { fail(e) -> ! }
@@ -253,17 +253,17 @@ def cases : List Case := [
   ⟨"fn main() { let x = 1; &mut x }",
     [], "error: in `main`: `x` is not a mutable variable, so it cannot be borrowed"⟩,
 
-  -- A resumption is one-shot: it is resumed once or cancelled once. A second use
-  -- goes wrong when the program runs; the checker does not catch it yet.
+  -- A resumption is one-shot: it is resumed once or cancelled once, and the
+  -- checker rejects a second use.
   ⟨"effect Choice { choose() }
   fn main() { handle (if(choose()) { 1 } else { 2 }) * 10 { choose(k) => k(true) } }",
     [], "10"⟩,
   ⟨"effect Choice { choose() }
   fn main() { handle choose() { choose(k) => k(true); k(false) } }",
-    [], "went wrong"⟩,
+    [], "error: in `main`: `k` is used more than once, but a value that holds a resumption can be used only once"⟩,
   ⟨"effect Choice { choose() }
   fn main() { handle choose() { choose(k) => cancel(k); k(true) } }",
-    [], "went wrong"⟩,
+    [], "error: in `main`: `k` is used more than once, but a value that holds a resumption can be used only once"⟩,
   ⟨"effect Choice { [2, 2] choose() }  fn main() { 0 }",
     [], "error: 1:17: expected an operation name (there are no quantities: a resumption is used once), found `[`"⟩,
 
@@ -417,7 +417,7 @@ def cases : List Case := [
     [], "error: in `find`: a callable that jumps to `@find` could be called after `@find` has ended: the caller could hold it through a parameter"⟩,
 
   -- A resumption is not tied to a scope: it may be kept and called later.
-  ⟨"effect Yield { yield(Int) }\n  fn main() { let mut saved = None; handle (yield(1) + 1) { yield(v, k) => saved = Some(k); 0 }; match(saved) { Some(k) => k(41), None => 0 } }",
+  ⟨"effect Yield { yield(Int) }\n  fn main() { let mut saved = None; handle (yield(1) + 1) { yield(v, k) => saved = Some(k); 0 }; match(replace(&mut saved, None)) { Some(k) => k(41), None => 0 } }",
     [], "42"⟩,
 
   -- A trailing `;` discards the value of the last expression, so the block
@@ -452,7 +452,7 @@ def cases : List Case := [
 
   -- A resumption holds the computation it captured and the handler around it.
   -- It may be kept, but not beyond a variable or label either of them uses.
-  ⟨"effect Yield { yield() }\n  fn main() { let mut saved = None; let r = handle { yield(); 5 }() { yield(k) => saved = Some(k); 0 }; match(saved) { Some(k) => r + k(()), None => r } }",
+  ⟨"effect Yield { yield() }\n  fn main() { let mut saved = None; let r = handle { yield(); 5 }() { yield(k) => saved = Some(k); 0 }; match(replace(&mut saved, None)) { Some(k) => r + k(()), None => r } }",
     [], "5"⟩,
   ⟨"effect Tick { tick() }\n  fn work() { tick(); tick(); 3 }\n  fn main() { let mut count = 0; let r = handle work() { tick(k) => count = count + 1; k(()) }; (r, count) }",
     [], "(3, 2)"⟩,
@@ -469,6 +469,49 @@ def cases : List Case := [
     [], "error: `tail` cannot be used here: a `defer` runs after the call returns"⟩,
   ⟨"fn count(n) { let mut x = n; if(x == 0) { 0 } else { tail count(x - 1) } }\n  fn main() { count(3) }",
     [], "0"⟩,
+
+
+  -- Anything that holds a resumption can be used only once: a callable that
+  -- captured it, data it is stored in. A function says, by how it uses its
+  -- parameters, whether it can be given such a value.
+  ⟨"effect Ask { ask() -> Int }\n  fn main() { handle ask() + 1 { ask(k) => let f = { k(1) }; f() } }",
+    [], "2"⟩,
+  ⟨"effect Ask { ask() -> Int }\n  fn main() { handle ask() + 1 { ask(k) => let f = { k(1) }; f(); f() } }",
+    [], "error: in `main`: `f` is used more than once, but a value that holds a resumption can be used only once"⟩,
+  ⟨"effect Ask { ask() -> Int }\n  fn main() { handle ask() + 1 { ask(k) => let pair = (k, 5); let (again, n) = pair; again(n) } }",
+    [], "6"⟩,
+  ⟨"effect Ask { ask() -> Int }\n  fn main() { handle ask() + 1 { ask(k) => let pair = (k, 5); pair.0(pair.1) } }",
+    [], "error: in `main`: `pair` is used more than once, but a value that holds a resumption can be used only once"⟩,
+  ⟨"effect Ask { ask() -> Int }\n  fn once(f) { f() }\n  fn main() { handle ask() + 1 { ask(k) => once({ k(1) }) } }",
+    [], "2"⟩,
+  ⟨"effect Ask { ask() -> Int }\n  fn twice(f) { f(); f() }\n  fn main() { handle ask() + 1 { ask(k) => twice({ k(1) }) } }",
+    [], "error: in `main`: `twice` may use what it is given more than once, but a value that holds a resumption can be used only once"⟩,
+  ⟨"effect Ask { ask() -> Int }\n  fn both(x) { (x, x) }\n  fn main() { handle ask() + 1 { ask(k) => both(k); 0 } }",
+    [], "error: in `main`: `both` may use what it is given more than once, but a value that holds a resumption can be used only once"⟩,
+
+  -- Clauses of one callable are alternatives, so each may use the resumption.
+  -- Two separate callables that each use it count as two uses, even where only
+  -- one of them can run.
+  ⟨"effect Ask { ask() -> Int }\n  fn main() { handle ask() + 1 { ask(k) => match(1 < 2) { Ok(_) => k(10), Err(_) => k(20) } } }",
+    [], "11"⟩,
+  ⟨"effect Ask { ask() -> Int }\n  fn main() { handle ask() + 1 { ask(k) => if(1 < 2) { k(10) } else { 0 } } }",
+    [], "11"⟩,
+  ⟨"effect Ask { ask() -> Int }\n  fn main() { handle ask() + 1 { ask(k) => k(if(1 < 2) { 10 } else { 20 }) } }",
+    [], "11"⟩,
+  ⟨"effect Ask { ask() -> Int }\n  fn main() { handle ask() + 1 { ask(k) => if(1 < 2) { k(10) } else { k(20) } } }",
+    [], "error: in `main`: `k` is used more than once, but a value that holds a resumption can be used only once"⟩,
+
+  -- A mutable variable can hold a resumption, but reading it would copy it:
+  -- `replace` takes the value out and leaves another in its place.
+  ⟨"effect Yield { yield(Int) }\n  fn main() { let mut saved = None; handle (yield(1) + 1) { yield(v, k) => saved = Some(k); 0 }; match(saved) { Some(k) => k(41), None => 0 } }",
+    [], "error: in `main`: reading the mutable variable `saved` copies its value (`replace` takes it out instead), but a value that holds a resumption can be used only once"⟩,
+  ⟨"fn main() { let mut x = 1; let old = replace(&mut x, 5); (old, x) }",
+    [], "(1, 5)"⟩,
+
+  -- The arm of an operation that can be resumed may run many times, so it
+  -- cannot use up something from outside.
+  ⟨"effect Ask { ask() -> Int }\n  effect Tick { tick() }\n  fn work() { tick(); tick(); 0 }\n  fn main() { handle ask() { ask(outer) => handle work() { tick() => outer(1); } } }",
+    [], "error: in `main`: `outer` is used more than once, but a value that holds a resumption can be used only once"⟩,
 
   -- Errors are reported, not guessed around.
   ⟨"fn main() { nope }",

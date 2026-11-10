@@ -15,8 +15,8 @@ supply the right number of arguments, that pattern clauses cover every case,
 that every effect a program performs is handled before it reaches `main`, that
 no callable able to jump to a label can be called after the label's scope has
 ended, and that nothing able to reach a mutable variable outlives the block the
-variable is declared in. It does not yet track how many times a value is used.
-This pass is not proved.
+variable is declared in, and that nothing holding a resumption is used more
+than once. This pass is not proved.
 -/
 
 namespace Glorious.Check
@@ -59,6 +59,8 @@ value of some type. -/
 inductive Captured where
   | brand (id : Nat)
   | ty (t : Ty)
+  /-- A resumption: whatever holds it can be used only once. -/
+  | once
 
 /-- A type with some of its variables generalised. `edges` records what the
 generalised capture variables capture, to be repeated at each use. -/
@@ -67,6 +69,8 @@ structure Scheme where
   rvars : List Nat
   cvars : List Nat
   edges : List (Nat × Captured)
+  /-- Types that must be free to use more than once, with the reason. -/
+  dups : List (Ty × String)
   ty : Ty
 
 structure TypeDecl where
@@ -124,6 +128,11 @@ structure St where
   brands : Nat := 0
   /-- Capture variables already visited by the search in progress. -/
   seen : List Nat := []
+  /-- Types that must be free to use more than once, with the reason; checked
+  once the types are known. -/
+  dups : Array (Ty × String) := #[]
+  /-- The same, for types that later functions can still affect. -/
+  lateDups : Array (Ty × String) := #[]
   types : List (String × TypeDecl) := []
   ctors : List (String × CtorSig) := []
   ops : List (String × OpSig) := []
@@ -296,7 +305,7 @@ partial def subst (tm : List (Nat × Ty)) (rm cm : List (Nat × Nat)) : Ty → T
       ((cm.lookup cap).getD cap)
   | .ref t cap => .ref (subst tm rm cm t) ((cm.lookup cap).getD cap)
 
-def instantiate (s : Scheme) : M Ty := do
+def instantiate (s : Scheme) (via : Option String := none) : M Ty := do
   let tm ← s.tvars.mapM fun id => do
     pure (id, ← freshTy)
   let rm ← s.rvars.mapM fun id => do
@@ -306,7 +315,14 @@ def instantiate (s : Scheme) : M Ty := do
   for (cap, what) in s.edges do
     captures ((cm.lookup cap).getD cap) (match what with
       | .ty t => .ty (subst tm rm cm t)
-      | .brand b => .brand b)
+      | .brand b => .brand b
+      | .once => .once)
+  for (t, why) in s.dups do
+    -- At a use, the reason is the function's need rather than its inner detail.
+    let why := match via with
+      | some f => s!"`{f}` may use what it is given more than once"
+      | none => why
+    modify fun st => { st with dups := st.dups.push (subst tm rm cm t, why) }
   pure (subst tm rm cm s.ty)
 
 /-- Replace a function's own type parameters, which stood for themselves while
@@ -389,7 +405,13 @@ def generalize (t : Ty) (keep : List Ty := []) (top : Bool := true) : M Scheme :
       edges := edges.push (root, target)
       all := all.push (root, .ty target)
     | .brand b => all := all.push (root, .brand b)
-  let mut reach : List Nat := (freeCaps t).eraseDups
+    | .once => all := all.push (root, .once)
+  -- What must be free to use more than once is part of the function's
+  -- contract, so the capture variables it mentions are generalised too.
+  let mut dups : Array (Ty × String) := #[]
+  for (d, why) in s.dups do
+    dups := dups.push (← zonk d, why)
+  let mut reach : List Nat := (freeCaps t ++ dups.toList.flatMap (freeCaps ·.1)).eraseDups
   let mut todo := reach
   while !todo.isEmpty do
     let mut next : List Nat := []
@@ -400,9 +422,11 @@ def generalize (t : Ty) (keep : List Ty := []) (top : Bool := true) : M Scheme :
     reach := reach ++ next
     todo := next
   let cvars := reach.filter (!fixedCaps.contains ·)
-  pure ⟨(freeTys t).eraseDups.filter (!fixedTys.contains ·),
-    (freeRows t).eraseDups.filter (!fixedRows.contains ·), cvars,
-    all.toList.filter (cvars.contains ·.1), t⟩
+  let tvars := (freeTys t).eraseDups.filter (!fixedTys.contains ·)
+  let mine := dups.toList.filter fun (d, _) =>
+    (freeTys d).any tvars.contains || (freeCaps d).any cvars.contains
+  pure ⟨tvars, (freeRows t).eraseDups.filter (!fixedRows.contains ·), cvars,
+    all.toList.filter (cvars.contains ·.1), mine, t⟩
 
 /-! ## Unification -/
 
@@ -768,6 +792,7 @@ partial def capHolds (brand : Nat) (cap : Nat) : M Bool := do
       match what with
       | .brand b => if b == brand then return true
       | .ty t => if ← tyHolds brand t then return true
+      | .once => pure ()
   return false
 
 /-- Does the type mention a callable that holds the brand? -/
@@ -827,6 +852,137 @@ def scopeRoots (scope : Scope) : List (String × Ty) :=
     | .label t _ => (s!"it can be passed out through `{name}`", t)
     | .poly s => (s!"`{name}`, which outlives the scope, could hold it", s.ty)
 
+/-! ## Values that can be used only once
+
+A resumption can be used once. So can anything that holds one: a tuple or data
+value with a resumption inside, and a callable that has captured one. A
+reference holds nothing, and neither does a function merely because it accepts
+or returns such a value.
+
+A binding used more than once must therefore be of a type that holds no
+resumption. The requirement is recorded when the uses are counted and checked
+once types are known; for a type that depends on a function's parameters it
+becomes part of the function's contract and is checked at each call.
+
+Uses are counted from the shape of the program. Clauses of one callable are
+alternatives. A callable that mentions a binding uses it once, by capturing it.
+The arm of an operation that can be resumed may run any number of times, so a
+binding from outside used in one counts as used repeatedly. The count knows
+nothing about which callables a function goes on to call, so two callables that
+each use a resumption count as two uses even if only one of them ever runs.
+-/
+
+mutual
+
+partial def capOwnsOnce (cap : Nat) : M Bool := do
+  let root ← findCap cap
+  if (← get).seen.contains root then return false
+  modify fun s => { s with seen := root :: s.seen }
+  for (src, what) in (← get).capEdges do
+    if (← findCap src) == root then
+      match what with
+      | .once => return true
+      | .ty t => if ← tyOwnsOnce [] t then return true
+      | .brand _ => pure ()
+  return false
+
+/-- Does a value of this type hold a resumption? -/
+partial def tyOwnsOnce (visiting : List String) (t : Ty) : M Bool := do
+  match ← find t with
+  | .var _ => pure false
+  | .tuple args => args.anyM (tyOwnsOnce visiting)
+  | .fn _ _ _ _ cap => capOwnsOnce cap
+  | .ref _ _ => pure false
+  | .con name args => do
+    if ← args.anyM (tyOwnsOnce visiting) then return true
+    if visiting.contains name then return false
+    match (← get).types.lookup name with
+    | none => pure false
+    | some decl =>
+      decl.ctors.anyM fun c => do
+        match (← get).ctors.lookup c with
+        | none => pure false
+        | some sig =>
+          (sig.fields.map (subst (sig.tvars.zip args) [] [])).anyM
+            (tyOwnsOnce (name :: visiting))
+
+end
+
+/-- Require that values of a type may be used more than once. -/
+def mustDup (t : Ty) (why : String) : M Unit :=
+  modify fun s => { s with dups := s.dups.push (t, why) }
+
+def checkDups (dups : Array (Ty × String)) : M Unit := do
+  for (t, why) in dups do
+    modify fun s => { s with seen := [] }
+    if ← tyOwnsOnce [] t then
+      throw s!"{why}, but a value that holds a resumption can be used only once"
+
+private def addUses (a b : Nat) : Nat := min 2 (a + b)
+
+mutual
+
+/-- How often an expression uses the binding `x`: 0, 1, or 2 for more.
+`resumptive` says which operation names have arms that may run repeatedly. -/
+partial def usesExpr (resumptive : String → Bool) (x : String) : Expr → Nat
+  | .int _ => 0
+  | .name q y => if q.isNone && y == x then 1 else 0
+  | .label _ => 0
+  | .call f args =>
+    (args.map (usesExpr resumptive x)).foldl addUses (usesExpr resumptive x f)
+  | .tailCall f args =>
+    (args.map (usesExpr resumptive x)).foldl addUses (usesExpr resumptive x f)
+  | .tuple args => (args.map (usesExpr resumptive x)).foldl addUses 0
+  | .proj e _ => usesExpr resumptive x e
+  | .closure clauses => (clauses.map (usesClause resumptive x)).foldl max 0
+  | .handle subject arms =>
+    let repeated := fun (arm : Clause) =>
+      match arm with
+      | .mk [.ctor name _ _] _ => resumptive name
+      | _ => false
+    let once := ((arms.filter (!repeated ·)).map (usesClause resumptive x)).foldl max 0
+    let many := if (arms.filter repeated).any (usesClause resumptive x · > 0) then 2 else 0
+    addUses (addUses (usesExpr resumptive x subject) once) many
+  | .labelScope _ body => usesStmts resumptive x body
+  | .ref _ => 0
+  | .deref e => usesExpr resumptive x e
+
+partial def usesClause (resumptive : String → Bool) (x : String) : Clause → Nat
+  | .mk pats body =>
+    if (pats.flatMap Elab.patVars).contains x then 0 else usesStmts resumptive x body
+
+partial def usesStmts (resumptive : String → Bool) (x : String) : List Stmt → Nat
+  | [] => 0
+  | .expr e :: rest => addUses (usesExpr resumptive x e) (usesStmts resumptive x rest)
+  | .let_ pat value :: rest =>
+    addUses (usesExpr resumptive x value)
+      (if (Elab.patVars pat).contains x then 0 else usesStmts resumptive x rest)
+  | .letMut y value :: rest =>
+    addUses (usesExpr resumptive x value) (if y == x then 0 else usesStmts resumptive x rest)
+  | .assign target value :: rest =>
+    let inTarget := match target with
+      | .deref e => usesExpr resumptive x e
+      | _ => 0
+    addUses (addUses inTarget (usesExpr resumptive x value)) (usesStmts resumptive x rest)
+  | .defer e :: rest => addUses (usesExpr resumptive x e) (usesStmts resumptive x rest)
+
+end
+
+/-- Record, for each binding used more than once in `body`, that its type must
+allow that. -/
+def checkUses (binds : Scope) (body : List Stmt) : M Unit := do
+  let ops := (← get).ops
+  let resumptive := fun (name : String) =>
+    match ops.lookup name with
+    | some sig => sig.result.isSome
+    | none => false
+  for (x, b) in binds do
+    if usesStmts resumptive x body ≥ 2 then
+      match b with
+      | .val t => mustDup t s!"`{x}` is used more than once"
+      | .poly s => mustDup s.ty s!"`{x}` is used more than once"
+      | _ => pure ()
+
 /-- Can this pattern fail to match? Decided from its shape alone. -/
 partial def irrefutable : Pattern → M Bool
   | .wild => pure true
@@ -848,6 +1004,7 @@ inductive Head where
   | prim
   | host (id : Nat)
   | cancel
+  | replace
   | const (e : Expr)
 
 def resolveName (scope : Scope) (qual : Option String) (x : String) : M Head := do
@@ -860,22 +1017,22 @@ def resolveName (scope : Scope) (qual : Option String) (x : String) : M Head := 
       unless q == sig.effect do throw s!"`{x}` is not an operation of `{q}`"
     return .op sig
   if let some t := s.group.lookup x then return .fn t
-  if let some scheme := s.fns.lookup x then return .fn (← instantiate scheme)
+  if let some scheme := s.fns.lookup x then return .fn (← instantiate scheme (some x))
   if (Elab.prims.lookup x).isSome then return .prim
   if let some (id, _) := Elab.hosts.lookup x then return .host id
   if x == "cancel" then return .cancel
+  if x == "replace" then return .replace
   if let some e := s.aliases.lookup x then return .const e
   throw s!"unknown name `{x}`"
 
 /-- Record that `cap` captures the named bindings: a value by its type, a label
 or a mutable variable by the brand of its scope as well. -/
 def captureAll (scope : Scope) (cap : Nat) (names : List String) : M Unit := do
+  -- Capturing a mutable variable holds the variable, not what is in it.
   for name in names.eraseDups do
     match scope.lookup name with
     | some (.val t) => captures cap (.ty t)
-    | some (.cell t brand) =>
-      captures cap (.ty t)
-      captures cap (.brand brand)
+    | some (.cell _ brand) => captures cap (.brand brand)
     | some (.label _ brand) => captures cap (.brand brand)
     | some (.poly s) => captures cap (.ty s.ty)
     | none => pure ()
@@ -886,6 +1043,9 @@ private def labelType (t : Ty) (brand : Nat) : M Ty := do
   let cap ← freshCap
   captures cap (.brand brand)
   pure (.func [t] (← freshTy) (← freshRow) cap)
+
+private def readsCell (x : String) : String :=
+  s!"reading the mutable variable `{x}` copies its value (`replace` takes it out instead)"
 
 private def arguments (n : Nat) : String :=
   if n == 1 then "1 argument" else s!"{n} arguments"
@@ -900,9 +1060,11 @@ partial def inferExpr (scope : Scope) (amb : Row) : Expr → M Ty
   | .name q x => do
     match ← resolveName scope q x with
     | .local (.val t) => pure t
-    | .local (.cell t _) => pure t
+    | .local (.cell t _) => do
+      mustDup t (readsCell x)
+      pure t
     | .local (.label t brand) => labelType t brand
-    | .local (.poly s) => instantiate s
+    | .local (.poly s) => instantiate s (some x)
     | .fn t => pure t
     | .ctor sig => do
       let (fields, result) ← instCtor sig
@@ -912,6 +1074,7 @@ partial def inferExpr (scope : Scope) (amb : Row) : Expr → M Ty
     | .prim => throw s!"intrinsic `{x}` must be called"
     | .host _ => throw s!"host operation `{x}` must be called"
     | .cancel => throw "`cancel` must be applied to a resumption"
+    | .replace => throw "`replace` must be called"
     | .const e => inferExpr [] amb e
   | .label l =>
     match scope.lookup ("@" ++ l) with
@@ -951,6 +1114,7 @@ partial def inferExpr (scope : Scope) (amb : Row) : Expr → M Ty
     let t ← inferExpr scope amb e
     let inner ← freshTy
     unifyAt "`*` reads through a reference" (.ref inner (← freshCap)) t
+    mustDup inner "reading through a reference copies the value (`replace` takes it out instead)"
     pure inner
 
 /-- Check the arguments of a call against the parameter types. -/
@@ -1009,12 +1173,18 @@ partial def inferCall (scope : Scope) (amb : Row) (f : Expr) (args : List Expr) 
     | .cancel => do
       checkArgs scope amb "`cancel`" [← freshTy] args
       pure .unit
+    | .replace => do
+      let t ← freshTy
+      checkArgs scope amb "`replace`" [.ref t (← freshCap), t] args
+      pure t
     | .local (.val t) => applyTy scope amb s!"`{x}`" t args
-    | .local (.cell t _) => applyTy scope amb s!"`{x}`" t args
+    | .local (.cell t _) => do
+      mustDup t (readsCell x)
+      applyTy scope amb s!"`{x}`" t args
     | .local (.label t brand) => do
       applyTy scope amb s!"the label `{x}`" (← labelType t brand) args
     | .local (.poly s) => do
-      applyTy scope amb s!"`{x}`" (← instantiate s) args
+      applyTy scope amb s!"`{x}`" (← instantiate s (some x)) args
     | .fn t => applyTy scope amb s!"`{x}`" t args
     | .const e => do
       applyTy scope amb s!"`{x}`" (← inferExpr [] amb e) args
@@ -1051,10 +1221,12 @@ partial def inferStmts (scope : Scope) (amb : Row) : List Stmt → M Ty
       for (subject, _, result) in s.projections do
         keep := subject :: result :: keep
       let scheme ← generalize t keep (top := false)
+      checkUses [(x, .poly scheme)] rest
       inferStmts ((x, .poly scheme) :: scope) amb rest
   | .let_ pat value :: rest => do
     let t ← inferExpr scope amb value
     let binds ← inferPat pat t
+    checkUses binds rest
     let check : Pending := ⟨"the pattern of this `let` does", [t], [[pat]]⟩
     modify fun s => { s with pending := s.pending.push check }
     inferStmts (binds ++ scope) amb rest
@@ -1151,6 +1323,7 @@ partial def inferCallable (scope : Scope) (annots : List (Option Ty)) (ret : Opt
       unless pats.length == arity do
         throw "the clauses of a callable take different numbers of arguments"
       let binds ← inferPats pats params
+      checkUses binds body
       unifyAt "the result of a clause" result (← inferStmts (binds ++ scope) row body)
   let check : Pending := ⟨what, params, clauses.map fun
     | .mk pats _ => pats⟩
@@ -1197,6 +1370,7 @@ partial def inferHandle (scope : Scope) (amb : Row) (subject : Expr) (arms : Lis
   else
     for (p, body) in completions do
       let binds ← inferPat p subjectTy
+      checkUses binds body
       unifyAt "the result of a completion clause" result
         (← inferStmts (binds ++ scope) amb body)
     let check : Pending := ⟨"the completion clauses of this handler do", [subjectTy],
@@ -1211,6 +1385,7 @@ partial def inferHandle (scope : Scope) (amb : Row) (subject : Expr) (arms : Lis
       unless ps.length == payload.length do
         arityError s!"an arm for the operation `{x}`" payload.length ps.length
       let binds ← inferPats ps payload
+      checkUses binds body
       unifyAt s!"the result of the arm for `{x}`" result (← inferStmts (binds ++ scope) amb body)
       if ← ps.allM irrefutable then covered := x :: covered
     | some o =>
@@ -1218,13 +1393,16 @@ partial def inferHandle (scope : Scope) (amb : Row) (subject : Expr) (arms : Lis
         -- The resumption holds the handled computation and, because resuming
         -- reinstalls the handler, the arms too: everything either of them uses.
         let held ← freshCap
+        captures held .once
         captureAll scope held (Elab.fvExpr [] (.handle subject arms))
         let binds ← inferPats ps (payload ++ [.func [o] result amb held])
+        checkUses binds body
         unifyAt s!"the result of the arm for `{x}`" result
           (← inferStmts (binds ++ scope) amb body)
         if ← (ps.take payload.length).allM irrefutable then covered := x :: covered
       else if ps.length == payload.length then
         let binds ← inferPats ps payload
+        checkUses binds body
         unifyAt s!"the value the arm for `{x}` resumes with" o
           (← inferStmts (binds ++ scope) amb body)
         if ← ps.allM irrefutable then covered := x :: covered
@@ -1298,6 +1476,7 @@ def checkGroup (decls : List FnDecl) : M Unit := do
       let t ← inferCallable [] annots ret (some d.name) d.clauses s!"the clauses of `{d.name}` do"
       unifyAt s!"`{d.name}` is used recursively at a different type" ((group.lookup d.name).getD t) t
       runPending
+      checkDups (← get).dups
     catch e =>
       -- The usual cause: the body ends in an expression run only for its effect,
       -- whose value has become the function's result.
@@ -1310,7 +1489,12 @@ def checkGroup (decls : List FnDecl) : M Unit := do
   for d in decls do
     let scheme ← generalize ((group.lookup d.name).getD .unit)
     modify fun s => { s with fns := (d.name, scheme) :: s.fns }
-  modify fun s => { s with group := [] }
+  -- A later function can still decide a requirement made here, through a
+  -- declaration whose field types are inferred, so each is checked again at
+  -- the end of the program.
+  let owner := ", ".intercalate (decls.map fun d => s!"`{d.name}`")
+  let late := (← get).dups.map fun (t, why) => (t, s!"in {owner}: {why}")
+  modify fun s => { s with group := [], dups := #[], lateDups := s.lateDups ++ late }
 
 /-- Check a whole program. -/
 def checkProgram (items : List Item) : Except String Unit := do
@@ -1326,6 +1510,7 @@ def checkProgram (items : List Item) : Except String Unit := do
     declare items
     for comp in components names deps do
       checkGroup (comp.filterMap fun n => decls.find? (·.name == n))
+    checkDups (← get).lateDups
     match (← get).fns.lookup "main" with
     | none => pure ()
     | some scheme =>

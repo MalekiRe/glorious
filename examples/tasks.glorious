@@ -23,10 +23,15 @@ effect Task {
     spawn(task)
 }
 
-fn push(queue, task) { *queue = append(*queue, Cons(task, Nil)) }
+// A waiting task holds a resumption, which can be used only once, so the
+// queue is taken out of its variable with `replace` rather than copied.
+fn push(queue, task) {
+    let waiting = replace(queue, Nil);
+    *queue = append(waiting, Cons(task, Nil))
+}
 
 fn run_next(queue) {
-    match(*queue) {
+    match(replace(queue, Nil)) {
         Nil => (),
         Cons(task, rest) => *queue = rest; task()
     }

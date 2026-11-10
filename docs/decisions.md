@@ -51,8 +51,8 @@ language, in `Glorious/Prelude.lean`, and so are `true`, `false`, `Some`,
 The only words the parser treats specially are `fn`, `let`, `mut`, `enum`,
 `struct`, `effect`, `handle`, `tail`, `defer`, `_`, and the fixity words
 `infixl`, `infixr`, `infix`, `prefix`. The elaborator and checker additionally
-know `cancel`, `Int`, the machine intrinsics (`int_add` and so on) and the two
-host operations. A word operator such as `else` or `and` is declared with a
+know `cancel`, `replace`, `Int`, the machine intrinsics (`int_add` and so on)
+and the two host operations. A word operator such as `else` or `and` is declared with a
 fixity like any other operator.
 
 Do not add a parser rule, a checker rule or an error message that names a
@@ -97,6 +97,27 @@ Consequences to keep in mind:
 - A resumption that is neither resumed nor cancelled is never unwound, so the
   variables of the computation it captured are not released. That is a leak,
   not a dangling reference.
+
+## Values that hold a resumption are used at most once
+
+**Decision.** The checker rejects a second use of a resumption, and of anything
+that holds one: data it is stored in, and a callable that captured it. Whether a
+function may be given such a value is inferred from how it uses its parameters
+and checked at each call. Nothing is annotated.
+
+- Reading a mutable variable copies its value, so a variable that holds a
+  resumption is read with `replace(reference, new_value)`, which takes the value
+  out. `replace` is known to the compiler, like `cancel`; it is a load followed
+  by a store, not a new kernel operation.
+- Uses are counted from the shape of the program. Clauses of one callable are
+  alternatives. **Two separate callables that each use a resumption count as two
+  uses, even if only one can run**, so resuming in both blocks of a two-block
+  conditional is rejected; write one callable with a clause per case, or compute
+  the value first and resume once. Accepting it properly needs the
+  path-sensitive summaries of the language specification section 7.4, which are
+  not implemented.
+- The check is "at most once". A resumption that is dropped is accepted; it
+  leaks the computation it captured and skips that computation's cleanups.
 
 ## Other standing decisions
 

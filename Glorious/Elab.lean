@@ -249,6 +249,7 @@ inductive Head where
   | prim (p : Prim) (arity : Nat)
   | host (id : Nat) (arity : Nat)
   | cancel
+  | replace
   | const (e : Expr)
 
 def resolveName (scope : Scope) (qual : Option String) (x : String) : M Head := do
@@ -267,6 +268,7 @@ def resolveName (scope : Scope) (qual : Option String) (x : String) : M Head := 
   if let some (p, n) := prims.lookup x then return .prim p n
   if let some (id, n) := hosts.lookup x then return .host id n
   if x == "cancel" then return .cancel
+  if x == "replace" then return .replace
   if let some e := g.aliases.lookup x then return .const e
   throw s!"unknown name `{x}`"
 
@@ -290,6 +292,7 @@ partial def elabExpr (scope : Scope) (tailPos : Bool) : Expr → M Atom
     | .prim _ _ => throw s!"intrinsic `{x}` must be called"
     | .host _ _ => throw s!"host operation `{x}` must be called"
     | .cancel => throw "`cancel` must be applied to a resumption"
+    | .replace => throw "`replace` must be called"
     | .const e => elabExpr [] false e
   | .label l =>
     match scope.lookup (labelName l) with
@@ -378,6 +381,17 @@ partial def elabCall (scope : Scope) (isTail : Bool) (f : Expr) (args : List Exp
         let atom ← elabExpr scope false k
         emit (.cancel atom)
       | _ => throw "`cancel` takes exactly one resumption"
+    | .replace => do
+      -- Take the value out of a cell and put another in its place.
+      if isTail then throw "`tail` applies to calls, not to `replace`"
+      match args with
+      | [target, value] => do
+        let cell ← elabExpr scope false target
+        let new ← elabExpr scope false value
+        let old ← emit (.mem .load [cell])
+        let _ ← emit (.mem .store [cell, new])
+        pure old
+      | _ => throw "`replace` takes a reference and a value"
     | .const e => do
       let callee ← elabExpr [] false e
       elabApply scope isTail callee args
