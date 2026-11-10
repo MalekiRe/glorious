@@ -6,5 +6,7 @@ import Glorious.Bytecode.Ast
 import Glorious.Bytecode.Semantics
 import Glorious.Compile
 import Glorious.Proof.Simulation
+import Glorious.Proof.CodeAt
+import Glorious.Proof.Patterns
 import Glorious.Proof.Correct
 import Glorious.Proof.Witness

@@ -22,11 +22,13 @@ structure State where
   locals : Env
   frames : List Frame
 
+/-- Resolve a call: the callee's code and its initial locals,
+`arguments ++ captures`. Execution starts at the callee's first instruction. -/
 def enter (p : Program) (ρ : Env) (f : Atom) (args : List Atom) : Option (Code × Env) :=
   match evalCall ρ f args with
   | some (fn, captures, vs) =>
     match p.fns[fn]? with
-    | some F => if vs.length = F.arity then some (F.code, captures ++ vs) else none
+    | some F => some (F.code, vs ++ captures)
     | none => none
   | none => none
 
@@ -52,6 +54,14 @@ def step (p : Program) (s : State) : Step State Value :=
       match s.frames with
       | [] => .halt v
       | fr :: frames => .next ⟨fr.code, fr.pc, fr.locals ++ [v], frames⟩
+  | some (.testCtor pl tag arity fail) =>
+    match pl.eval s.locals with
+    | none => .stuck
+    | some v => .next ⟨s.code, if v.isCtor tag arity then s.pc + 1 else fail, s.locals, s.frames⟩
+  | some (.testInt pl n fail) =>
+    match pl.eval s.locals with
+    | none => .stuck
+    | some v => .next ⟨s.code, if v.isInt n then s.pc + 1 else fail, s.locals, s.frames⟩
 
 def init (p : Program) : State := ⟨p.main, 0, [], []⟩
 

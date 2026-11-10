@@ -18,11 +18,15 @@ inductive Instr where
   | tail (f : Atom) (args : List Atom)
   /-- Return a value to the frame below. -/
   | ret (a : Atom)
+  /-- Fall through if the place holds constructor `tag` with `arity` fields;
+  otherwise jump to `fail`. -/
+  | testCtor (pl : Place) (tag arity : Nat) (fail : Nat)
+  /-- Fall through if the place holds the integer `n`; otherwise jump to `fail`. -/
+  | testInt (pl : Place) (n : Int) (fail : Nat)
 
 abbrev Code := List Instr
 
 structure Fn where
-  arity : Nat
   code : Code
 
 structure Program where

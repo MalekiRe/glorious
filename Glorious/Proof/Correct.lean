@@ -1,7 +1,5 @@
-import Glorious.Compile
-import Glorious.Core.Semantics
-import Glorious.Bytecode.Semantics
 import Glorious.Proof.Simulation
+import Glorious.Proof.Patterns
 
 /-!
 # Compiler correctness
@@ -14,40 +12,6 @@ namespace Glorious
 
 open Machine
 open Bytecode (Instr Code)
-
-/-! ## Code positions -/
-
-theorem drop_eq_cons {α : Type} {l : List α} {n : Nat} {a : α} {t : List α}
-    (h : l.drop n = a :: t) : l[n]? = some a ∧ l.drop (n + 1) = t := by
-  induction l generalizing n with
-  | nil => simp at h
-  | cons x xs ih =>
-    cases n with
-    | zero =>
-      simp at h
-      obtain ⟨rfl, rfl⟩ := h
-      simp
-    | succ n =>
-      simp at h
-      simpa using ih h
-
-/-- The instructions `is` sit in `code` starting at position `pc`. -/
-def CodeAt (code : Code) (pc : Nat) (is : Code) : Prop :=
-  ∃ post, code.drop pc = is ++ post
-
-theorem CodeAt.zero (code : Code) : CodeAt code 0 code := ⟨[], by simp⟩
-
-theorem CodeAt.head {code : Code} {pc : Nat} {i : Instr} {is : Code}
-    (h : CodeAt code pc (i :: is)) : code[pc]? = some i := by
-  obtain ⟨post, h⟩ := h
-  have h' : code.drop pc = i :: (is ++ post) := h
-  exact (drop_eq_cons h').1
-
-theorem CodeAt.tail {code : Code} {pc : Nat} {i : Instr} {is : Code}
-    (h : CodeAt code pc (i :: is)) : CodeAt code (pc + 1) is := by
-  obtain ⟨post, h⟩ := h
-  have h' : code.drop pc = i :: (is ++ post) := h
-  exact ⟨post, (drop_eq_cons h').2⟩
 
 /-! ## The simulation relation -/
 
@@ -71,13 +35,20 @@ inductive Match : Core.State → Bytecode.State → Prop where
 theorem match_init (p : Core.Program) : Match (Core.init p) (Bytecode.init (compile p)) :=
   .mk (CodeAt.zero _) .nil
 
-/-! ## Calls resolve the same way -/
+/-! ## Calls -/
 
-theorem enter_compile {p : Core.Program} {ρ : Env} {f : Atom} {args : List Atom}
-    {callee : Core.Tm} {ρ' : Env} (h : Core.enter p ρ f args = some (callee, ρ')) :
-    Bytecode.enter (compile p) ρ f args = some (compileTm callee, ρ') := by
+/--
+When Core resolves a call to a clause body and an environment, the bytecode
+resolves the same call to the callee's code, and running that code from its
+start reaches the compiled clause body with that environment as its locals.
+-/
+theorem enter_run {p : Core.Program} {ρ : Env} {f : Atom} {args : List Atom}
+    {body : Core.Tm} {ρ' : Env} (h : Core.enter p ρ f args = some (body, ρ'))
+    (fr : List Bytecode.Frame) :
+    ∃ code ρ₀ k pc, Bytecode.enter (compile p) ρ f args = some (code, ρ₀)
+      ∧ run (Bytecode.step (compile p)) k ⟨code, 0, ρ₀, fr⟩ = .next ⟨code, pc, ρ', fr⟩
+      ∧ CodeAt code pc (compileTm body) := by
   simp only [Core.enter] at h
-  simp only [Bytecode.enter]
   cases hc : evalCall ρ f args with
   | none => simp [hc] at h
   | some r =>
@@ -85,17 +56,25 @@ theorem enter_compile {p : Core.Program} {ρ : Env} {f : Atom} {args : List Atom
     cases hF : p.fns[fn]? with
     | none => simp [hc, hF] at h
     | some F =>
-      by_cases hlen : vs.length = F.arity
-      · simp [hc, hF, hlen] at h
+      cases hs : Core.selectClause F.clauses vs with
+      | none => simp [hc, hF, hs] at h
+      | some r =>
+        obtain ⟨body', bs⟩ := r
+        simp [hc, hF, hs] at h
         obtain ⟨rfl, rfl⟩ := h
-        simp [compile, compileFn, hF, hlen]
-      · simp [hc, hF, hlen] at h
+        have hargs : ∀ j v, vs[j]? = some v → (argPlace j).eval (vs ++ captures) = some v :=
+          fun j v hj => argPlace_eval (getElem?_append_of_eq_some hj)
+        obtain ⟨k, pc, hk, hbody⟩ :=
+          select_run (P := compile p) (fr := fr) hargs F.clauses 0 hs (CodeAt.zero _)
+        rw [List.append_assoc] at hk
+        refine ⟨compileClauses 0 F.clauses, vs ++ captures, k, pc, ?_, hk, hbody⟩
+        simp [Bytecode.enter, hc, compile, compileFn, hF]
 
-/-! ## One Core step is one bytecode step -/
+/-! ## One Core step is one or more bytecode steps -/
 
 theorem step_sim (p : Core.Program) {s : Core.State} {t : Bytecode.State} (hm : Match s t) :
     match Core.step p s with
-    | .next s' => ∃ t', Bytecode.step (compile p) t = .next t' ∧ Match s' t'
+    | .next s' => ∃ k t', run (Bytecode.step (compile p)) (k + 1) t = .next t' ∧ Match s' t'
     | .halt v => Bytecode.step (compile p) t = .halt v
     | .stuck => True := by
   obtain @⟨tm, ρ, stack, code, pc, frames, hcode, hfr⟩ := hm
@@ -113,7 +92,8 @@ theorem step_sim (p : Core.Program) {s : Core.State} {t : Bytecode.State} (hm : 
             = .next ⟨body, ρ' ++ [v], stack'⟩ := by
           simp [Core.step, ha]
         rw [hcore]
-        exact ⟨⟨fcode, fpc, ρ' ++ [v], frames'⟩, by simp [Bytecode.step, hi, ha], .mk hfc hrest⟩
+        exact ⟨0, ⟨fcode, fpc, ρ' ++ [v], frames'⟩,
+          run_one_next (by simp [Bytecode.step, hi, ha]), .mk hfc hrest⟩
   | let_ rhs body =>
     have hc : CodeAt code pc (Instr.op rhs :: compileTm body) := hcode
     have hi := hc.head
@@ -123,7 +103,8 @@ theorem step_sim (p : Core.Program) {s : Core.State} {t : Bytecode.State} (hm : 
       have hcore : Core.step p ⟨.let_ rhs body, ρ, stack⟩ = .next ⟨body, ρ ++ [v], stack⟩ := by
         simp [Core.step, hr]
       rw [hcore]
-      exact ⟨⟨code, pc + 1, ρ ++ [v], frames⟩, by simp [Bytecode.step, hi, hr], .mk hc.tail hfr⟩
+      exact ⟨0, ⟨code, pc + 1, ρ ++ [v], frames⟩,
+        run_one_next (by simp [Bytecode.step, hi, hr]), .mk hc.tail hfr⟩
   | call f args body =>
     have hc : CodeAt code pc (Instr.call f args :: compileTm body) := hcode
     have hi := hc.head
@@ -131,13 +112,17 @@ theorem step_sim (p : Core.Program) {s : Core.State} {t : Bytecode.State} (hm : 
     | none => simp [Core.step, he]
     | some r =>
       obtain ⟨callee, ρ'⟩ := r
-      have he' := enter_compile he
+      obtain ⟨ccode, ρ₀, k, cpc, he', hk, hbody⟩ := enter_run he (⟨code, pc + 1, ρ⟩ :: frames)
+      have hstep : Bytecode.step (compile p) ⟨code, pc, ρ, frames⟩
+          = .next ⟨ccode, 0, ρ₀, ⟨code, pc + 1, ρ⟩ :: frames⟩ := by
+        simp [Bytecode.step, hi, he']
       have hcore : Core.step p ⟨.call f args body, ρ, stack⟩
           = .next ⟨callee, ρ', ⟨ρ, body⟩ :: stack⟩ := by
         simp [Core.step, he]
       rw [hcore]
-      exact ⟨⟨compileTm callee, 0, ρ', ⟨code, pc + 1, ρ⟩ :: frames⟩,
-        by simp [Bytecode.step, hi, he'], .mk (CodeAt.zero _) (.cons hc.tail hfr)⟩
+      refine ⟨k, ⟨ccode, cpc, ρ', ⟨code, pc + 1, ρ⟩ :: frames⟩, ?_, .mk hbody (.cons hc.tail hfr)⟩
+      rw [run_succ, hstep, Step.bind_next]
+      exact hk
   | tail f args =>
     have hc : CodeAt code pc [Instr.tail f args] := hcode
     have hi := hc.head
@@ -145,12 +130,16 @@ theorem step_sim (p : Core.Program) {s : Core.State} {t : Bytecode.State} (hm : 
     | none => simp [Core.step, he]
     | some r =>
       obtain ⟨callee, ρ'⟩ := r
-      have he' := enter_compile he
+      obtain ⟨ccode, ρ₀, k, cpc, he', hk, hbody⟩ := enter_run he frames
+      have hstep : Bytecode.step (compile p) ⟨code, pc, ρ, frames⟩
+          = .next ⟨ccode, 0, ρ₀, frames⟩ := by
+        simp [Bytecode.step, hi, he']
       have hcore : Core.step p ⟨.tail f args, ρ, stack⟩ = .next ⟨callee, ρ', stack⟩ := by
         simp [Core.step, he]
       rw [hcore]
-      exact ⟨⟨compileTm callee, 0, ρ', frames⟩,
-        by simp [Bytecode.step, hi, he'], .mk (CodeAt.zero _) hfr⟩
+      refine ⟨k, ⟨ccode, cpc, ρ', frames⟩, ?_, .mk hbody hfr⟩
+      rw [run_succ, hstep, Step.bind_next]
+      exact hk
 
 /-- `Match` is a forward simulation from Core to bytecode. -/
 theorem forwardSim (p : Core.Program) :
@@ -159,8 +148,7 @@ theorem forwardSim (p : Core.Program) :
     intro s t s' hm hs
     have h := step_sim p hm
     rw [hs] at h
-    obtain ⟨t', ht', hm'⟩ := h
-    exact ⟨0, t', run_one_next ht', hm'⟩
+    exact h
   halt := by
     intro s t v hm hs
     have h := step_sim p hm

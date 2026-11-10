@@ -10,6 +10,42 @@ definition the compiler is proved against.
 
 namespace Glorious.Core
 
+mutual
+
+/-- Match a value against a pattern. On success, the bound values in binder order. -/
+def Pat.matchVal : Pat → Value → Option (List Value)
+  | .wild, _ => some []
+  | .bind, v => some [v]
+  | .int n, .int m => if n = m then some [] else none
+  | .int _, .data _ _ => none
+  | .int _, .clo _ _ => none
+  | .ctor tag ps, .data t fields => if tag = t then Pat.matchVals ps fields else none
+  | .ctor _ _, .int _ => none
+  | .ctor _ _, .clo _ _ => none
+
+/-- Match values against patterns pointwise. The two lists must have the same length. -/
+def Pat.matchVals : List Pat → List Value → Option (List Value)
+  | [], [] => some []
+  | p :: ps, v :: vs =>
+    match p.matchVal v, Pat.matchVals ps vs with
+    | some b, some bs => some (b ++ bs)
+    | _, _ => none
+  | [], _ :: _ => none
+  | _ :: _, [] => none
+
+end
+
+/-- The first clause whose patterns match the arguments: its body and bindings.
+A clause with the wrong number of patterns has no meaning. -/
+def selectClause : List Clause → List Value → Option (Tm × List Value)
+  | [], _ => none
+  | c :: cs, vs =>
+    if c.pats.length = vs.length then
+      match Pat.matchVals c.pats vs with
+      | some bs => some (c.body, bs)
+      | none => selectClause cs vs
+    else none
+
 /-- A suspended caller: the environment and the code waiting for a call's result. -/
 structure Frame where
   env : Env
@@ -20,14 +56,17 @@ structure State where
   env : Env
   stack : List Frame
 
-/-- Resolve a call: the callee's body and the environment it starts in. The
-call is undefined unless the callee is a callable of a known function and the
-argument count matches. -/
+/-- Resolve a call: the selected clause body and the environment it starts in.
+The call is undefined unless the callee is a callable of a known function and
+one of its clauses matches the arguments. -/
 def enter (p : Program) (ρ : Env) (f : Atom) (args : List Atom) : Option (Tm × Env) :=
   match evalCall ρ f args with
   | some (fn, captures, vs) =>
     match p.fns[fn]? with
-    | some F => if vs.length = F.arity then some (F.body, captures ++ vs) else none
+    | some F =>
+      match selectClause F.clauses vs with
+      | some (body, bs) => some (body, vs ++ captures ++ bs)
+      | none => none
     | none => none
   | none => none
 

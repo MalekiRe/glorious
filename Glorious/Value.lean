@@ -26,6 +26,11 @@ inductive Atom where
   | var (i : Nat)
   | int (n : Int)
 
+/-- A field path into a local: `var.path₀.path₁...`. -/
+structure Place where
+  var : Nat
+  path : List Nat
+
 /-- Machine intrinsics. Their meaning is shared by both machines. -/
 inductive Prim where
   | intAdd
@@ -37,8 +42,49 @@ inductive Rhs where
   | atom (a : Atom)
   | prim (p : Prim) (args : List Atom)
   | construct (tag : Nat) (args : List Atom)
-  | project (a : Atom) (idx : Nat)
+  /-- Read a field path out of a local. -/
+  | place (pl : Place)
   | closure (fn : Nat) (captures : List Atom)
+
+namespace Value
+
+/-- Follow a field path into a value. -/
+def follow : Value → List Nat → Option Value
+  | v, [] => some v
+  | .data _ fields, i :: path =>
+    match fields[i]? with
+    | some field => field.follow path
+    | none => none
+  | .int _, _ :: _ => none
+  | .clo _ _, _ :: _ => none
+
+/-- Is this value built by constructor `tag` with exactly `arity` fields? -/
+def isCtor (v : Value) (tag arity : Nat) : Bool :=
+  match v with
+  | .data t fields => tag == t && arity == fields.length
+  | .int _ => false
+  | .clo _ _ => false
+
+/-- Is this value the integer `n`? -/
+def isInt (v : Value) (n : Int) : Bool :=
+  match v with
+  | .int m => n == m
+  | .data _ _ => false
+  | .clo _ _ => false
+
+end Value
+
+namespace Place
+
+def eval (ρ : Env) (pl : Place) : Option Value :=
+  match ρ[pl.var]? with
+  | some v => v.follow pl.path
+  | none => none
+
+/-- The place of field `i` of this place. -/
+def child (pl : Place) (i : Nat) : Place := ⟨pl.var, pl.path ++ [i]⟩
+
+end Place
 
 def Prim.eval : Prim → List Value → Option Value
   | .intAdd, [.int a, .int b] => some (.int (a + b))
@@ -67,10 +113,7 @@ def Rhs.eval (ρ : Env) : Rhs → Option Value
     match evalAtoms ρ args with
     | some vs => some (.data tag vs)
     | none => none
-  | .project a idx =>
-    match a.eval ρ with
-    | some (.data _ fields) => fields[idx]?
-    | _ => none
+  | .place pl => pl.eval ρ
   | .closure fn captures =>
     match evalAtoms ρ captures with
     | some vs => some (.clo fn vs)
