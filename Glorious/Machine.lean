@@ -22,6 +22,8 @@ namespace Step
 
 variable {σ ν : Type}
 
+instance : Inhabited (Step σ ν) := ⟨.stuck⟩
+
 /-- Continue with `f` if the step produced a new state; otherwise keep the outcome. -/
 def bind (r : Step σ ν) (f : σ → Step σ ν) : Step σ ν :=
   match r with
@@ -119,6 +121,26 @@ theorem halt_unique {n m : Nat} {s : σ} {v w : ν}
   have b := run_halt_mono h₂ (Nat.le_max_right n m)
   rw [a] at b
   exact Step.halt.inj b
+
+/-- `run` written as a loop, for executing machines. -/
+def exec (step : σ → Step σ ν) : Nat → σ → Step σ ν
+  | 0, s => .next s
+  | n + 1, s =>
+    match step s with
+    | .next s' => exec step n s'
+    | .halt v => .halt v
+    | .stuck => .stuck
+
+theorem exec_eq_run (n : Nat) (s : σ) : exec step n s = run step n s := by
+  induction n generalizing s with
+  | zero => rfl
+  | succ n ih =>
+    rw [run_succ]
+    simp only [exec]
+    cases step s with
+    | next s' => simpa using ih s'
+    | halt v => rfl
+    | stuck => rfl
 
 end Machine
 

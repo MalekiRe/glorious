@@ -1,0 +1,457 @@
+import Glorious.Syntax.Ast
+import Glorious.Syntax.Lexer
+
+/-!
+# Parser
+
+Recursive descent with precedence climbing. Operators and their fixities are
+declared by the program, so they are collected from the token stream first.
+
+Braces in expression position always denote a callable: `{ x => body }` and
+`{ P => a, Q => b }` take one argument, a plain block `{ body }` takes none. A
+callable of several arguments is written `fn(x, y) { body }`. A block written
+directly after a call is passed as its last argument, and `f { body }` calls `f`
+with the block.
+-/
+
+namespace Glorious.Syntax
+
+structure PCtx where
+  toks : Array Token
+  fix : Fixities
+
+abbrev P := ReaderT PCtx (StateT Nat (Except String))
+
+instance {α : Type} : Inhabited (P α) := ⟨throw "parser: unreachable"⟩
+
+private def peekTok (k : Nat := 0) : P Token := do
+  let ctx ← read
+  let i ← get
+  pure (ctx.toks[i + k]?.getD ⟨.eof, 0, 0⟩)
+
+private def peek (k : Nat := 0) : P Tok := do
+  pure (← peekTok k).tok
+
+private def advance : P Unit := modify (· + 1)
+
+private def failAt {α : Type} (msg : String) : P α := do
+  let t ← peekTok
+  throw s!"{t.line}:{t.col}: {msg}, found {t.tok.describe}"
+
+private def expectPunct (s : String) : P Unit := do
+  if (← peek) == .punct s then advance else failAt s!"expected `{s}`"
+
+private def acceptPunct (s : String) : P Bool := do
+  if (← peek) == .punct s then
+    advance
+    pure true
+  else pure false
+
+private def expectIdent : P String := do
+  match ← peek with
+  | .ident s =>
+    advance
+    pure s
+  | _ => failAt "expected a name"
+
+/-- Does the block starting at token `i` have clauses (`... => ...`) rather than statements? -/
+private partial def scanClauseForm (toks : Array Token) (i depth : Nat) : Bool :=
+  match toks[i]? with
+  | none => false
+  | some t =>
+    match t.tok with
+    | .eof => false
+    | .punct "(" => scanClauseForm toks (i + 1) (depth + 1)
+    | .punct "{" => scanClauseForm toks (i + 1) (depth + 1)
+    | .punct ")" => if depth == 0 then false else scanClauseForm toks (i + 1) (depth - 1)
+    | .punct "}" => if depth == 0 then false else scanClauseForm toks (i + 1) (depth - 1)
+    | .punct "=>" => if depth == 0 then true else scanClauseForm toks (i + 1) depth
+    | .punct ";" => if depth == 0 then false else scanClauseForm toks (i + 1) depth
+    | _ => scanClauseForm toks (i + 1) depth
+
+private def infixOf (t : Tok) : P (Option (String × Nat × Assoc)) := do
+  let fix := (← read).fix
+  let name? := match t with
+    | .op s => some s
+    | .ident s => some s
+    | _ => none
+  match name? with
+  | some s => pure ((fix.infixes.lookup s).map fun (prec, assoc) => (s, prec, assoc))
+  | none => pure none
+
+mutual
+
+private partial def parsePattern : P Pattern := do
+  match ← peek with
+  | .ident "_" =>
+    advance
+    pure .wild
+  | .ident x =>
+    advance
+    let (qual, name) ← if ← acceptPunct "::" then do
+        let y ← expectIdent
+        pure (some x, y)
+      else pure (none, x)
+    if ← acceptPunct "(" then
+      let args ← parsePatternList
+      pure (.ctor name qual args)
+    else if qual.isSome then pure (.ctor name qual [])
+    else pure (.var name)
+  | .int n =>
+    advance
+    pure (.int n)
+  | .op "-" =>
+    match ← peek 1 with
+    | .int n =>
+      advance
+      advance
+      pure (.int (-(n : Int)))
+    | _ => failAt "expected a pattern"
+  | .punct "(" =>
+    advance
+    let args ← parsePatternList
+    match args with
+    | [p] => pure p
+    | _ => pure (.tuple args)
+  | _ => failAt "expected a pattern"
+
+/-- Patterns separated by commas up to and including the closing `)`. -/
+private partial def parsePatternList : P (List Pattern) := do
+  let mut out : Array Pattern := #[]
+  repeat
+    if (← peek) == .punct ")" then break
+    out := out.push (← parsePattern)
+    if !(← acceptPunct ",") then break
+  expectPunct ")"
+  pure out.toList
+
+/-- Expressions separated by commas up to and including the closing `)`. -/
+private partial def parseArgs : P (List Expr) := do
+  let mut out : Array Expr := #[]
+  repeat
+    if (← peek) == .punct ")" then break
+    out := out.push (← parseBinary 0 false)
+    if !(← acceptPunct ",") then break
+  expectPunct ")"
+  pure out.toList
+
+/-- Binary operators by precedence climbing. With `noBlock`, a `{` after a call
+is not taken as a trailing block. -/
+private partial def parseBinary (minPrec : Nat) (noBlock : Bool) : P Expr := do
+  let mut lhs ← parseUnary noBlock
+  repeat
+    let t ← peek
+    match ← infixOf t with
+    | some (name, prec, assoc) =>
+      if prec < minPrec then break
+      advance
+      let next := match assoc with
+        | .right => prec
+        | _ => prec + 1
+      let rhs ← parseBinary next noBlock
+      lhs := .call (.name none name) [lhs, rhs]
+    | none =>
+      match t with
+      | .op s => failAt s!"operator `{s}` has no infix fixity"
+      | _ => break
+  pure lhs
+
+private partial def parseUnary (noBlock : Bool) : P Expr := do
+  let t ← peek
+  let fix := (← read).fix
+  let name? := match t with
+    | .op s => some s
+    | .ident s => some s
+    | _ => none
+  match name? with
+  | some s =>
+    match fix.prefixes.lookup s with
+    | some prec =>
+      advance
+      let operand ← parseBinary prec noBlock
+      pure (.call (.name none s) [operand])
+    | none =>
+      if t == .op "-" then
+        match ← peek 1 with
+        | .int n =>
+          advance
+          advance
+          pure (.int (-(n : Int)))
+        | _ => failAt "operator `-` has no prefix fixity"
+      else parsePostfix noBlock
+  | none => parsePostfix noBlock
+
+private partial def parsePostfix (noBlock : Bool) : P Expr := do
+  let mut e ← parsePrimary noBlock
+  repeat
+    match ← peek with
+    | .punct "(" =>
+      advance
+      let mut args ← parseArgs
+      while !noBlock && (← peek) == .punct "{" do
+        args := args ++ [← parseBraces]
+      e := .call e args
+    | .punct "{" =>
+      -- `f { body }` is `f({ body })`.
+      if noBlock then break
+      let mut args : List Expr := []
+      while (← peek) == .punct "{" do
+        args := args ++ [← parseBraces]
+      e := .call e args
+    | .punct "." =>
+      match ← peek 1 with
+      | .int n =>
+        advance
+        advance
+        e := .proj e n
+      | _ => failAt "expected a field index after `.`"
+    | _ => break
+  pure e
+
+private partial def parsePrimary (noBlock : Bool) : P Expr := do
+  match ← peek with
+  | .int n =>
+    advance
+    pure (.int n)
+  | .ident "tail" =>
+    advance
+    match ← parsePostfix noBlock with
+    | .call f args => pure (.tailCall f args)
+    | _ => failAt "`tail` must be followed by a call"
+  | .ident "handle" =>
+    advance
+    let subject ← parseBinary 0 true
+    expectPunct "{"
+    let arms ← parseClauses
+    expectPunct "}"
+    pure (.handle subject arms)
+  | .ident "fn" =>
+    advance
+    expectPunct "("
+    let pats ← parsePatternList
+    expectPunct "{"
+    let body ← parseStmts
+    expectPunct "}"
+    pure (.closure [.mk pats body])
+  | .ident x =>
+    advance
+    if ← acceptPunct "::" then
+      let y ← expectIdent
+      pure (.name (some x) y)
+    else pure (.name none x)
+  | .punct "@" =>
+    advance
+    let l ← expectIdent
+    if !noBlock && (← peek) == .punct "{" then
+      advance
+      let body ← parseStmts
+      expectPunct "}"
+      pure (.labelScope l body)
+    else pure (.label l)
+  | .punct "(" =>
+    advance
+    let args ← parseArgs
+    match args with
+    | [e] => pure e
+    | _ => pure (.tuple args)
+  | .punct "{" => parseBraces
+  | _ => failAt "expected an expression"
+
+/-- A callable literal in braces. -/
+private partial def parseBraces : P Expr := do
+  expectPunct "{"
+  let ctx ← read
+  if scanClauseForm ctx.toks (← get) 0 then
+    let clauses ← parseClauses
+    expectPunct "}"
+    pure (.closure clauses)
+  else
+    let body ← parseStmts
+    expectPunct "}"
+    pure (.closure [.mk [] body])
+
+/-- Clauses separated by commas, up to but not including the closing `}`. -/
+private partial def parseClauses : P (List Clause) := do
+  let mut out : Array Clause := #[]
+  repeat
+    if (← peek) == .punct "}" then break
+    out := out.push (← parseClause)
+    if !(← acceptPunct ",") then break
+  pure out.toList
+
+/-- One clause: a single pattern for the argument, or none for a callable taking
+no arguments. Callables of several arguments are written `fn(x, y) { body }`. -/
+private partial def parseClause : P Clause := do
+  let pats ←
+    if (← peek) == .punct "=>" then pure []
+    else do
+      pure [← parsePattern]
+  expectPunct "=>"
+  let body ← parseStmts
+  pure (.mk pats body)
+
+/-- Statements up to a `}` or a `,`. A trailing `;` makes the value unit. -/
+private partial def parseStmts : P (List Stmt) := do
+  let mut out : Array Stmt := #[]
+  repeat
+    let t ← peek
+    if t == .punct "}" || t == .punct "," || t == .eof then break
+    if t == .ident "let" then
+      advance
+      let pat ← parsePattern
+      expectPunct "="
+      let value ← parseBinary 0 false
+      expectPunct ";"
+      out := out.push (.let_ pat value)
+    else
+      let e ← parseBinary 0 false
+      out := out.push (.expr e)
+      if ← acceptPunct ";" then
+        let t' ← peek
+        if t' == .punct "}" || t' == .punct "," then
+          out := out.push (.expr (.tuple []))
+      else break
+  pure out.toList
+
+end
+
+/-- Count the comma-separated fields up to and including the closing `)`. -/
+private partial def countFields : P Nat := do
+  if ← acceptPunct ")" then return 0
+  let mut count := 1
+  let mut depth := 0
+  repeat
+    match ← peek with
+    | .punct "(" =>
+      depth := depth + 1
+      advance
+    | .punct ")" =>
+      advance
+      if depth == 0 then break
+      depth := depth - 1
+    | .punct "," =>
+      if depth == 0 then count := count + 1
+      advance
+    | .eof => failAt "expected `)`"
+    | _ => advance
+  pure count
+
+private def fixityKinds : List String := ["infixl", "infixr", "infix", "prefix"]
+
+private partial def parseItem : P Item := do
+  match ← peek with
+  | .ident "enum" =>
+    advance
+    let name ← expectIdent
+    expectPunct "{"
+    let mut ctors : Array (String × Nat) := #[]
+    repeat
+      if (← peek) == .punct "}" then break
+      let c ← expectIdent
+      let arity ← if ← acceptPunct "(" then countFields else pure 0
+      ctors := ctors.push (c, arity)
+      if !(← acceptPunct ",") then break
+    expectPunct "}"
+    pure (.enum name ctors.toList)
+  | .ident "struct" =>
+    advance
+    let name ← expectIdent
+    let arity ← if ← acceptPunct "(" then countFields else pure 0
+    let _ ← acceptPunct ";"
+    pure (.struct name arity)
+  | .ident "effect" =>
+    advance
+    let name ← expectIdent
+    expectPunct "{"
+    let mut ops : Array (String × Nat × Bool) := #[]
+    repeat
+      if (← peek) == .punct "}" then break
+      let op ← expectIdent
+      expectPunct "("
+      let arity ← countFields
+      let mut terminal := false
+      if ← acceptPunct "->" then
+        if (← peek) == .op "!" then
+          advance
+          terminal := true
+        else
+          let _ ← expectIdent
+      ops := ops.push (op, arity, terminal)
+      if !(← acceptPunct ",") then
+        if !(← acceptPunct ";") then break
+    expectPunct "}"
+    pure (.effect name ops.toList)
+  | .ident "fn" =>
+    advance
+    let name ← match ← peek with
+      | .ident s => do
+        advance
+        pure s
+      | .op s => do
+        advance
+        pure s
+      | _ => failAt "expected a function name"
+    if ← acceptPunct "(" then
+      let pats ← parsePatternList
+      expectPunct "{"
+      let body ← parseStmts
+      expectPunct "}"
+      pure (.fn name [.mk pats body])
+    else
+      expectPunct "{"
+      let clauses ← parseClauses
+      expectPunct "}"
+      pure (.fn name clauses)
+  | .ident "let" =>
+    advance
+    let name ← expectIdent
+    expectPunct "="
+    let value ← parseBinary 0 false
+    expectPunct ";"
+    pure (.alias name value)
+  | .ident kind =>
+    if fixityKinds.contains kind then
+      advance
+      advance
+      advance
+      let _ ← acceptPunct ";"
+      pure .fixity
+    else failAt "expected a declaration"
+  | _ => failAt "expected a declaration"
+
+private partial def parseItems : P (List Item) := do
+  let mut out : Array Item := #[]
+  repeat
+    if (← peek) == .eof then break
+    out := out.push (← parseItem)
+  pure out.toList
+
+/-- Collect the fixity declarations of a token stream. -/
+private def collectFixities (toks : Array Token) (fix : Fixities) : Except String Fixities := do
+  let mut fix := fix
+  for i in [0:toks.size] do
+    match toks[i]?.map (·.tok), toks[i + 1]?.map (·.tok), toks[i + 2]?.map (·.tok) with
+    | some (.ident kind), some (.int prec), some nameTok =>
+      if fixityKinds.contains kind then
+        let name ← match nameTok with
+          | .ident s => pure s
+          | .op s => pure s
+          | _ => throw s!"{(toks[i]?.getD default).line}: a fixity declaration needs an operator name"
+        if kind == "prefix" then
+          fix := { fix with prefixes := (name, prec) :: fix.prefixes }
+        else
+          let assoc := if kind == "infixl" then Assoc.left
+            else if kind == "infixr" then Assoc.right else Assoc.non
+          fix := { fix with infixes := (name, prec, assoc) :: fix.infixes }
+    | _, _, _ => pure ()
+  pure fix
+
+/-- Parse a source text, given the fixities already in scope. Returns the items
+and the fixities including those it declares. -/
+def parse (fix : Fixities) (src : String) : Except String (List Item × Fixities) := do
+  let toks ← lex src
+  let fix ← collectFixities toks fix
+  let (items, _) ← (parseItems.run ⟨toks, fix⟩).run 0
+  pure (items, fix)
+
+end Glorious.Syntax

@@ -40,6 +40,10 @@ inductive Prim where
   | intAdd
   | intSub
   | intMul
+  /-- `1` if the first integer is smaller, else `0`. -/
+  | intLt
+  /-- `1` if the integers are equal, else `0`. -/
+  | intEq
 
 /-- A computation that produces a value without transferring control. -/
 inductive Rhs where
@@ -100,6 +104,8 @@ def Prim.eval : Prim → List Value → Option Value
   | .intAdd, [.int a, .int b] => some (.int (a + b))
   | .intSub, [.int a, .int b] => some (.int (a - b))
   | .intMul, [.int a, .int b] => some (.int (a * b))
+  | .intLt, [.int a, .int b] => some (.int (if a < b then 1 else 0))
+  | .intEq, [.int a, .int b] => some (.int (if a = b then 1 else 0))
   | _, _ => none
 
 def Atom.eval (ρ : Env) : Atom → Option Value

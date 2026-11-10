@@ -12,3 +12,10 @@ import Glorious.Proof.Patterns
 import Glorious.Proof.Correct
 import Glorious.Proof.Witness
 import Glorious.Proof.Audit
+import Glorious.Syntax.Ast
+import Glorious.Syntax.Lexer
+import Glorious.Syntax.Parser
+import Glorious.Elab
+import Glorious.Prelude
+import Glorious.Driver
+import Glorious.Tests
