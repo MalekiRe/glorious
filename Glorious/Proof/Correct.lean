@@ -44,6 +44,12 @@ inductive MatchFrames : List Core.Frame → List Bytecode.Frame → Prop where
       {frames : List Bytecode.Frame} :
       MatchFrame f f' → MatchFrames stack frames → MatchFrames (f :: stack) (f' :: frames)
 
+theorem MatchFrames.length_eq {a : List Core.Frame} {a' : List Bytecode.Frame}
+    (h : MatchFrames a a') : a.length = a'.length := by
+  induction h with
+  | nil => rfl
+  | cons _ _ ih => simp [ih]
+
 theorem MatchFrames.append {a b : List Core.Frame} {a' b' : List Bytecode.Frame}
     (ha : MatchFrames a a') (hb : MatchFrames b b') : MatchFrames (a ++ b) (a' ++ b') := by
   induction ha with
@@ -234,14 +240,15 @@ theorem match_init (p : Core.Program) : Match (Core.init p) (Bytecode.init (comp
 /--
 How the outcome of a Core step relates to the outcome of the bytecode step
 taken from a matching state: if Core moves on, the bytecode moves on and after
-some further steps matches again; if Core halts, the bytecode halts with the
-same value; if Core is stuck, nothing is required.
+some further steps matches again, without touching its stack in between; if
+Core halts, the bytecode halts with the same value; if Core is stuck, nothing
+is required.
 -/
 inductive SimOutcome (p : Core.Program) :
     Step Core.State Value → Step Bytecode.State Value → Prop where
   | next {s' : Core.State} {t₀ t' : Bytecode.State} {k : Nat} :
-      run (Bytecode.step (compile p)) k t₀ = .next t' → Match s' t' →
-      SimOutcome p (.next s') (.next t₀)
+      RunsThrough (Bytecode.step (compile p)) (fun t => t.frames = t'.frames) k t₀ t' →
+      Match s' t' → SimOutcome p (.next s') (.next t₀)
   | halt {v : Value} : SimOutcome p (.halt v) (.halt v)
   | stuck {r : Step Bytecode.State Value} : SimOutcome p .stuck r
 
@@ -256,8 +263,8 @@ theorem invoke_run {p : Core.Program} {fn : Nat} {captures vs : List Value}
     {body : Core.Tm} {ρ' : Env} (h : Core.invoke p fn captures vs = some (body, ρ'))
     (fr : List Bytecode.Frame) (ks : Store Bytecode.Frame) :
     ∃ code k pc, Bytecode.invoke (compile p) fn captures vs = some (code, vs ++ captures)
-      ∧ run (Bytecode.step (compile p)) k ⟨code, 0, vs ++ captures, fr, ks⟩
-          = .next ⟨code, pc, ρ', fr, ks⟩
+      ∧ RunsThrough (Bytecode.step (compile p)) (fun t => t.frames = fr) k
+          ⟨code, 0, vs ++ captures, fr, ks⟩ ⟨code, pc, ρ', fr, ks⟩
       ∧ CodeAt code pc (compileTm body) := by
   simp only [Core.invoke] at h
   cases hF : p.fns[fn]? with
@@ -317,7 +324,7 @@ theorem deliver_sim (hfr : MatchFrames stack frames) (hks : MatchStore store sto
     | @call body ρ code pc hc =>
       show SimOutcome p (.next ⟨body, ρ ++ [v], stack, store⟩)
         (.next ⟨code, pc, ρ ++ [v], frames, store'⟩)
-      exact .next (k := 0) rfl (.mk hc hrest hks)
+      exact .next (RunsThrough.refl rfl) (.mk hc hrest hks)
     | handler => exact callFn_sim hrest hks
     | label => exact ih
     | guard => exact callFn_sim (.cons .yield hrest) hks
@@ -411,7 +418,7 @@ theorem step_sim (p : Core.Program) {s : Core.State} {t : Bytecode.State} (hm : 
           = .next ⟨code, pc + 1, ρ ++ [v], frames, ⟨conts', labels, cells⟩⟩ := by
         simp [Bytecode.step, hi, hr]
       rw [h1, h2]
-      exact .next (k := 0) rfl (.mk hc.tail hfr hks)
+      exact .next (RunsThrough.refl rfl) (.mk hc.tail hfr hks)
   | call f args body =>
     have hc : CodeAt code pc (Instr.call f args :: compileTm body) := hcode
     have hi := hc.head
@@ -715,7 +722,7 @@ theorem step_sim (p : Core.Program) {s : Core.State} {t : Bytecode.State} (hm : 
             = .next ⟨code, pc + 1, ρ ++ [res], frames, ⟨conts', labels, cells'⟩⟩ := by
           simp [Bytecode.step, hi, hv, hm]
         rw [h1, h2]
-        exact .next (k := 0) rfl (.mk hc.tail hfr (.mk hcs))
+        exact .next (RunsThrough.refl rfl) (.mk hc.tail hfr (.mk hcs))
   | host id args body =>
     -- Host operations are not steps of the machine state alone.
     have h1 : Core.step p ⟨.host id args body, ρ, stack, ⟨conts, labels, cells⟩⟩ = .stuck := rfl
@@ -793,6 +800,15 @@ theorem run_lift (w : World) : ∀ (k : Nat) {t t' : Bytecode.State},
     | halt v => rw [hs] at h; simp at h
     | stuck => rw [hs] at h; simp at h
 
+/-- A run of the machine state alone is the same run in any world, with the
+same property of every state along the way. -/
+theorem runsThrough_lift (w : World) {I : Bytecode.State → Prop} {k : Nat}
+    {t t' : Bytecode.State} (h : RunsThrough (Bytecode.step P) I k t t') :
+    RunsThrough (Bytecode.stepIO P) (fun d => I d.state) k ⟨t, w⟩ ⟨t', w⟩ :=
+  ⟨run_lift w k h.1, fun j hj => by
+    obtain ⟨tj, htj, hI⟩ := h.2 j hj
+    exact ⟨⟨tj, w⟩, run_lift w j htj, hI⟩⟩
+
 theorem lift_next_world {w : World} {r : Step Bytecode.State Value} {d : Bytecode.Config}
     (h : Bytecode.lift w r = .next d) : d.world = w := by
   cases r with
@@ -854,8 +870,9 @@ end World
 inductive SimOutcomeIO (p : Core.Program) :
     Step Core.Config Result → Step Bytecode.Config Result → Prop where
   | next {c' : Core.Config} {d₀ d' : Bytecode.Config} {k : Nat} :
-      run (Bytecode.stepIO (compile p)) k d₀ = .next d' → MatchIO c' d' →
-      SimOutcomeIO p (.next c') (.next d₀)
+      RunsThrough (Bytecode.stepIO (compile p)) (fun d => d.state.frames = d'.state.frames)
+        k d₀ d' →
+      MatchIO c' d' → SimOutcomeIO p (.next c') (.next d₀)
   | halt {r : Result} : SimOutcomeIO p (.halt r) (.halt r)
   | stuck {r : Step Bytecode.Config Result} : SimOutcomeIO p .stuck r
 
@@ -868,7 +885,7 @@ theorem lift_sim {p : Core.Program} {s : Core.State} {t : Bytecode.State} (w : W
   cases h with
   | @next s' t₀ t' k hk hm =>
     rw [stepIO_of_step_next w ht]
-    exact .next (run_lift w k hk) (.mk hm)
+    exact .next (runsThrough_lift w hk) (.mk hm)
   | halt =>
     rw [stepIO_of_step_halt w ht]
     exact .halt
@@ -904,7 +921,7 @@ theorem stepIO_sim (p : Core.Program) {c : Core.Config} {d : Bytecode.Config}
             = .next ⟨⟨code, pc + 1, ρ ++ [res], frames, store'⟩, w'⟩ := by
           simp [Bytecode.stepIO, hi, hv, hh]
         rw [h1, h2]
-        exact .next (k := 0) rfl (.mk (.mk hc.tail hfr hstore))
+        exact .next (RunsThrough.refl rfl) (.mk (.mk hc.tail hfr hstore))
   | _ => exact lift_sim w (step_sim p (.mk hcode hfr hstore))
 
 /-- `MatchIO` is a forward simulation from Core to bytecode. -/
@@ -917,7 +934,7 @@ theorem forwardSim (p : Core.Program) :
     generalize hstep : Bytecode.stepIO (compile p) d = r at h
     cases h with
     | @next _ d₀ d' k hk hm' =>
-      exact ⟨k, d', by rw [run_succ, hstep, Step.bind_next]; exact hk, hm'⟩
+      exact ⟨k, d', by rw [run_succ, hstep, Step.bind_next]; exact hk.1, hm'⟩
   halt := by
     intro c d r hm hs
     have h := stepIO_sim p hm
@@ -925,6 +942,37 @@ theorem forwardSim (p : Core.Program) :
     generalize hstep : Bytecode.stepIO (compile p) d = r' at h
     cases h with
     | halt => exact ⟨0, run_one_halt hstep⟩
+
+/-- The same simulation, also accounting for the bytecode's intermediate
+states: whatever state it is in, its stack is as deep as the stack of the Core
+state it is at or on its way to. -/
+theorem forwardSimThrough (p : Core.Program) :
+    ForwardSimThrough (Core.stepIO p) (Bytecode.stepIO (compile p)) MatchIO
+      (fun c d => d.state.frames.length = c.state.stack.length) where
+  rel := by
+    intro c d hm
+    obtain @⟨s, t, w, hst⟩ := hm
+    obtain ⟨_, hfr, _⟩ := hst
+    exact hfr.length_eq.symm
+  next := by
+    intro c d c' hm hs
+    have h := stepIO_sim p hm
+    rw [hs] at h
+    generalize hstep : Bytecode.stepIO (compile p) d = r at h
+    cases h with
+    | @next _ d₀ d' k hk hm' =>
+      have hlen : d'.state.frames.length = c'.state.stack.length := by
+        obtain @⟨s, t, w, hst⟩ := hm'
+        obtain ⟨_, hfr, _⟩ := hst
+        exact hfr.length_eq.symm
+      exact ⟨k, d₀, d', rfl, hk.imp (fun x hx => by rw [hx]; exact hlen), hm'⟩
+  halt := by
+    intro c d r hm hs
+    have h := stepIO_sim p hm
+    rw [hs] at h
+    generalize hstep : Bytecode.stepIO (compile p) d = r' at h
+    cases h with
+    | halt => rfl
 
 /-! ## Behaviour preservation -/
 
@@ -988,5 +1036,20 @@ theorem compile_emits_reflect {out : List Value} (safe : ¬ Core.GoesWrong p inp
   rcases h with ⟨c, hc, hpre⟩ | ⟨r, hr, hpre⟩
   · exact Or.inl ⟨c.world.output, ⟨c, hc, rfl⟩, by rw [← hout]; exact hpre⟩
   · exact Or.inr ⟨r, hr, by rw [← hout]; exact hpre⟩
+
+/-! ## Stack depth
+
+Core's stack discipline is what makes a tail call, a tail handler or a tail
+label scope keep no frame. This theorem carries that discipline to the bytecode.
+-/
+
+/-- Every stack depth the bytecode reaches is a depth the Core program reaches.
+The bytecode therefore never uses a deeper stack than the Core semantics does. -/
+theorem compile_stack_depth (safe : ¬ Core.GoesWrong p input) {d : Bytecode.Config}
+    (h : Reaches (Bytecode.stepIO (compile p)) (Bytecode.initIO (compile p) input) d) :
+    ∃ c, Reaches (Core.stepIO p) (Core.initIO p input) c
+      ∧ d.state.frames.length = c.state.stack.length := by
+  obtain ⟨m, hm⟩ := h
+  exact (forwardSimThrough p).reflect m (matchIO_init p input) safe hm
 
 end Glorious

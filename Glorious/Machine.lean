@@ -126,6 +126,47 @@ theorem halt_unique {n m : Nat} {s : σ} {v w : ν}
   rw [a] at b
   exact Step.halt.inj b
 
+/-- A run of `k` steps from `s` to `s'` along which every state, both ends
+included, satisfies `I`. -/
+def RunsThrough (step : σ → Step σ ν) (I : σ → Prop) (k : Nat) (s s' : σ) : Prop :=
+  run step k s = .next s' ∧ ∀ j, j ≤ k → ∃ sj, run step j s = .next sj ∧ I sj
+
+namespace RunsThrough
+
+variable {I : σ → Prop} {s s₁ s₂ s' : σ}
+
+theorem refl (h : I s) : RunsThrough step I 0 s s := by
+  refine ⟨rfl, fun j hj => ?_⟩
+  have e : j = 0 := by omega
+  subst e
+  exact ⟨s, rfl, h⟩
+
+theorem cons {k : Nat} (hs : step s = .next s₁) (h : I s) (hr : RunsThrough step I k s₁ s') :
+    RunsThrough step I (k + 1) s s' := by
+  refine ⟨by rw [run_succ, hs, Step.bind_next]; exact hr.1, fun j hj => ?_⟩
+  cases j with
+  | zero => exact ⟨s, rfl, h⟩
+  | succ j =>
+    obtain ⟨sj, hsj, hI⟩ := hr.2 j (by omega)
+    exact ⟨sj, by rw [run_succ, hs, Step.bind_next]; exact hsj, hI⟩
+
+theorem trans {a b : Nat} (h₁ : RunsThrough step I a s s₁) (h₂ : RunsThrough step I b s₁ s₂) :
+    RunsThrough step I (a + b) s s₂ := by
+  refine ⟨by rw [run_add, h₁.1, Step.bind_next]; exact h₂.1, fun j hj => ?_⟩
+  by_cases hja : j ≤ a
+  · exact h₁.2 j hja
+  · obtain ⟨sj, hsj, hI⟩ := h₂.2 (j - a) (by omega)
+    have e : j = a + (j - a) := by omega
+    exact ⟨sj, by rw [e, run_add, h₁.1, Step.bind_next]; exact hsj, hI⟩
+
+theorem imp {J : σ → Prop} {k : Nat} (h : RunsThrough step I k s s') (hIJ : ∀ x, I x → J x) :
+    RunsThrough step J k s s' :=
+  ⟨h.1, fun j hj => by
+    obtain ⟨sj, hsj, hI⟩ := h.2 j hj
+    exact ⟨sj, hsj, hIJ sj hI⟩⟩
+
+end RunsThrough
+
 /-! An observation that only grows along each step only grows along a run. -/
 
 theorem run_obs_prefix {α : Type} (obs : σ → List α)

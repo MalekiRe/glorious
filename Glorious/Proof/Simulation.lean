@@ -185,4 +185,56 @@ theorem obs_reflect {α : Type} (sim : ForwardSim stepS stepT R)
 
 end ForwardSim
 
+/--
+A forward simulation that also accounts for the target's intermediate states.
+`I s t` says the target state `t` is at source state `s` or on its way there.
+A source step is matched by one target step and then a run all of whose states
+are on the way to the new source state.
+-/
+structure ForwardSimThrough (stepS : σ₁ → Step σ₁ ν) (stepT : σ₂ → Step σ₂ ν)
+    (R : σ₁ → σ₂ → Prop) (I : σ₁ → σ₂ → Prop) : Prop where
+  rel : ∀ {s : σ₁} {t : σ₂}, R s t → I s t
+  next : ∀ {s : σ₁} {t : σ₂} {s' : σ₁}, R s t → stepS s = .next s' →
+    ∃ k t₀ t', stepT t = .next t₀ ∧ RunsThrough stepT (I s') k t₀ t' ∧ R s' t'
+  halt : ∀ {s : σ₁} {t : σ₂} {v : ν}, R s t → stepS s = .halt v → stepT t = .halt v
+
+namespace ForwardSimThrough
+
+variable {stepS : σ₁ → Step σ₁ ν} {stepT : σ₂ → Step σ₂ ν} {R I : σ₁ → σ₂ → Prop}
+
+/-- Every state the target reaches is at, or on its way to, a state the source
+reaches, provided the source does not go wrong. -/
+theorem reflect (sim : ForwardSimThrough stepS stepT R I) (m : Nat) {s : σ₁} {t d : σ₂}
+    (hR : R s t) (safe : ¬ GoesWrong stepS s) (hm : run stepT m t = .next d) :
+    ∃ c, Reaches stepS s c ∧ I c d := by
+  cases m with
+  | zero =>
+    rw [run_zero] at hm
+    cases hm
+    exact ⟨s, ⟨0, rfl⟩, sim.rel hR⟩
+  | succ m =>
+    cases hs : stepS s with
+    | stuck => exact absurd ⟨1, by simp [run_succ, hs]⟩ safe
+    | halt v =>
+      rw [run_succ, sim.halt hR hs] at hm
+      simp at hm
+    | next s' =>
+      obtain ⟨k, t₀, t', h0, hthrough, hR'⟩ := sim.next hR hs
+      rw [run_succ, h0, Step.bind_next] at hm
+      have safe' : ¬ GoesWrong stepS s' := fun ⟨n, hn⟩ =>
+        safe ⟨n + 1, by rw [run_succ, hs, Step.bind_next]; exact hn⟩
+      by_cases hle : m ≤ k
+      · obtain ⟨tj, htj, hI⟩ := hthrough.2 m hle
+        rw [htj] at hm
+        cases hm
+        exact ⟨s', ⟨1, by simp [run_succ, hs]⟩, hI⟩
+      · have e : m = k + (m - k) := by omega
+        rw [e, run_add, hthrough.1, Step.bind_next] at hm
+        obtain ⟨c, ⟨n, hn⟩, hI⟩ := reflect sim (m - k) hR' safe' hm
+        exact ⟨c, ⟨n + 1, by rw [run_succ, hs, Step.bind_next]; exact hn⟩, hI⟩
+termination_by m
+decreasing_by omega
+
+end ForwardSimThrough
+
 end Glorious

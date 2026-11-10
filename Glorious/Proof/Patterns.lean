@@ -332,13 +332,14 @@ theorem step_test_fail {ρ : Env} {pc : Nat} {t : Test} {fail : Nat}
       simp [hv] at hb
       simp [Bytecode.step, hi, hv, hb]
 
-/-- Tests that all hold fall through, one instruction each. -/
+/-- Tests that all hold fall through, one instruction each, leaving the frames alone. -/
 theorem tests_pass {ρ : Env} {fail : Nat} {rest : Code} : ∀ (ts : List Test) (pc : Nat),
     checkAll ρ ts = some true → CodeAt code pc (ts.map (Test.instr fail) ++ rest) →
-    run (Bytecode.step P) ts.length ⟨code, pc, ρ, fr, ks⟩ = .next ⟨code, pc + ts.length, ρ, fr, ks⟩ := by
+    RunsThrough (Bytecode.step P) (fun t => t.frames = fr) ts.length
+      ⟨code, pc, ρ, fr, ks⟩ ⟨code, pc + ts.length, ρ, fr, ks⟩ := by
   intro ts
   induction ts with
-  | nil => intro pc _ _; rfl
+  | nil => intro pc _ _; exact RunsThrough.refl rfl
   | cons t ts ih =>
     intro pc h hc
     have hc' : CodeAt code pc (Test.instr fail t :: (ts.map (Test.instr fail) ++ rest)) := hc
@@ -351,13 +352,15 @@ theorem tests_pass {ρ : Env} {fail : Nat} {rest : Code} : ∀ (ts : List Test) 
         simp [checkAll, hb] at h
         have e : pc + (t :: ts).length = pc + 1 + ts.length := by
           simp only [List.length_cons]; omega
-        rw [e, List.length_cons, run_succ, step_test_pass hc'.head hb, Step.bind_next]
-        exact ih (pc + 1) h hc'.tail
+        rw [e]
+        exact RunsThrough.cons (step_test_pass hc'.head hb) rfl (ih (pc + 1) h hc'.tail)
 
-/-- Tests of which one fails jump to the failure target, leaving the locals untouched. -/
+/-- Tests of which one fails jump to the failure target, leaving the locals and
+the frames alone. -/
 theorem tests_fail {ρ : Env} {fail : Nat} {rest : Code} : ∀ (ts : List Test) (pc : Nat),
     checkAll ρ ts = some false → CodeAt code pc (ts.map (Test.instr fail) ++ rest) →
-    ∃ k, run (Bytecode.step P) (k + 1) ⟨code, pc, ρ, fr, ks⟩ = .next ⟨code, fail, ρ, fr, ks⟩ := by
+    ∃ k, RunsThrough (Bytecode.step P) (fun t => t.frames = fr) (k + 1)
+      ⟨code, pc, ρ, fr, ks⟩ ⟨code, fail, ρ, fr, ks⟩ := by
   intro ts
   induction ts with
   | nil => intro pc h _; simp [checkAll] at h
@@ -368,27 +371,27 @@ theorem tests_fail {ρ : Env} {fail : Nat} {rest : Code} : ∀ (ts : List Test) 
     | none => simp [checkAll, hb] at h
     | some r =>
       cases r with
-      | false => exact ⟨0, run_one_next (step_test_fail hc'.head hb)⟩
+      | false =>
+        exact ⟨0, RunsThrough.cons (step_test_fail hc'.head hb) rfl (RunsThrough.refl rfl)⟩
       | true =>
         simp [checkAll, hb] at h
         obtain ⟨k, hk⟩ := ih (pc + 1) h hc'.tail
-        refine ⟨k + 1, ?_⟩
-        rw [run_succ, step_test_pass hc'.head hb, Step.bind_next]
-        exact hk
+        exact ⟨k + 1, RunsThrough.cons (step_test_pass hc'.head hb) rfl hk⟩
 
 /-- Loading the bound places appends exactly the bound values. -/
 theorem binds_run {ρ : Env} {rest : Code} :
     ∀ (pls : List Place) (bs extra : List Value) (pc : Nat), evalPlaces ρ pls = some bs →
     CodeAt code pc (pls.map (fun pl => Instr.op (.place pl)) ++ rest) →
-    run (Bytecode.step P) pls.length ⟨code, pc, ρ ++ extra, fr, ks⟩
-      = .next ⟨code, pc + pls.length, ρ ++ extra ++ bs, fr, ks⟩ := by
+    RunsThrough (Bytecode.step P) (fun t => t.frames = fr) pls.length
+      ⟨code, pc, ρ ++ extra, fr, ks⟩ ⟨code, pc + pls.length, ρ ++ extra ++ bs, fr, ks⟩ := by
   intro pls
   induction pls with
   | nil =>
     intro bs extra pc h _
     simp [evalPlaces] at h
     subst h
-    simp
+    simp only [List.length_nil, Nat.add_zero, List.append_nil]
+    exact RunsThrough.refl rfl
   | cons pl pls ih =>
     intro bs extra pc h hc
     have hc' : CodeAt code pc
@@ -405,11 +408,14 @@ theorem binds_run {ρ : Env} {rest : Code} :
         have hstep : Bytecode.step P ⟨code, pc, ρ ++ extra, fr, ks⟩
             = .next ⟨code, pc + 1, ρ ++ extra ++ [v], fr, ks⟩ := by
           simp [Bytecode.step, hc'.head, Rhs.eval, Place.eval_append hp]
-        have hrest := ih vs (extra ++ [v]) (pc + 1) hr hc'.tail
+        have hrest : RunsThrough (Bytecode.step P) (fun t => t.frames = fr) pls.length
+            ⟨code, pc + 1, ρ ++ extra ++ [v], fr, ks⟩
+            ⟨code, pc + 1 + pls.length, ρ ++ extra ++ (v :: vs), fr, ks⟩ := by
+          simpa [List.append_assoc] using ih vs (extra ++ [v]) (pc + 1) hr hc'.tail
         have e : pc + (pl :: pls).length = pc + 1 + pls.length := by
           simp only [List.length_cons]; omega
-        rw [e, List.length_cons, run_succ, hstep, Step.bind_next]
-        simpa [List.append_assoc] using hrest
+        rw [e]
+        exact RunsThrough.cons hstep rfl hrest
 
 theorem compileClause_length (fail : Nat) (c : Core.Clause) :
     (compileClause fail c).length = clauseLen c := by
@@ -417,13 +423,15 @@ theorem compileClause_length (fail : Nat) (c : Core.Clause) :
 
 /--
 Entering a callable's code with the arguments in place runs to the body of the
-clause the Core semantics selects, with that clause's bindings appended.
+clause the Core semantics selects, with that clause's bindings appended. The
+frames are not touched on the way.
 -/
 theorem select_run {ρ : Env} {vs : List Value} {body : Core.Tm} {bs : List Value}
     (hargs : ∀ j v, vs[j]? = some v → (argPlace j).eval ρ = some v) :
     ∀ (cs : List Core.Clause) (pc : Nat), Core.selectClause cs vs = some (body, bs) →
     CodeAt code pc (compileClauses pc cs) →
-    ∃ k pc', run (Bytecode.step P) k ⟨code, pc, ρ, fr, ks⟩ = .next ⟨code, pc', ρ ++ bs, fr, ks⟩
+    ∃ k pc', RunsThrough (Bytecode.step P) (fun t => t.frames = fr) k
+        ⟨code, pc, ρ, fr, ks⟩ ⟨code, pc', ρ ++ bs, fr, ks⟩
       ∧ CodeAt code pc' (compileTm body) := by
   intro cs
   induction cs with
@@ -449,9 +457,7 @@ theorem select_run {ρ : Env} {vs : List Value} {body : Core.Tm} {bs : List Valu
           rwa [compileClause_length] at this
         obtain ⟨k, hk⟩ := tests_fail (P := P) (fr := fr) (ks := ks) (clauseTests c) pc hfalse hcT
         obtain ⟨k', pc', hk', hbody⟩ := ih (pc + clauseLen c) h hnext
-        refine ⟨(k + 1) + k', pc', ?_, hbody⟩
-        rw [run_add, hk, Step.bind_next]
-        exact hk'
+        exact ⟨(k + 1) + k', pc', hk.trans hk', hbody⟩
       | some bs' =>
         simp [hlen, hm] at h
         obtain ⟨rfl, rfl⟩ := h
@@ -463,13 +469,14 @@ theorem select_run {ρ : Env} {vs : List Value} {body : Core.Tm} {bs : List Valu
         have hcB : CodeAt code (pc + (clauseTests c).length)
             ((clauseBinds c).map (fun pl => Instr.op (.place pl)) ++ compileTm c.body) := by
           simpa using hcT.append_right
-        have h2 := binds_run (P := P) (fr := fr) (ks := ks) (clauseBinds c) bs' [] _ hbinds hcB
+        have h2 : RunsThrough (Bytecode.step P) (fun t => t.frames = fr) (clauseBinds c).length
+            ⟨code, pc + (clauseTests c).length, ρ, fr, ks⟩
+            ⟨code, pc + (clauseTests c).length + (clauseBinds c).length, ρ ++ bs', fr, ks⟩ := by
+          simpa using binds_run (P := P) (fr := fr) (ks := ks) (clauseBinds c) bs' [] _ hbinds hcB
         have hcBody : CodeAt code (pc + (clauseTests c).length + (clauseBinds c).length)
             (compileTm c.body) := by
           simpa using hcB.append_right
-        refine ⟨(clauseTests c).length + (clauseBinds c).length, _, ?_, hcBody⟩
-        rw [run_add, h1, Step.bind_next]
-        simpa using h2
+        exact ⟨(clauseTests c).length + (clauseBinds c).length, _, h1.trans h2, hcBody⟩
     · simp [hlen] at h
 
 end Machine

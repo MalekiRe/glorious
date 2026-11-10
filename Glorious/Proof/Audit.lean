@@ -35,3 +35,7 @@ three standard axioms, in particular on `sorryAx` or a declared `axiom`.
 /-- info: 'Glorious.Bytecode.Decode.program_encode' depends on axioms: [propext, Quot.sound] -/
 #guard_msgs in
 #print axioms Glorious.Bytecode.Decode.program_encode
+
+/-- info: 'Glorious.compile_stack_depth' depends on axioms: [propext, Classical.choice, Quot.sound] -/
+#guard_msgs in
+#print axioms Glorious.compile_stack_depth
