@@ -41,6 +41,24 @@ considered and rejected for now: multi-shot only for continuations shown to
 capture no mutable cells, cleanups or owned resources. It keeps pure
 backtracking but adds a second kind of resumption and a new analysis.
 
+## The compiler knows no control flow
+
+**Decision (user).** There are no `if`, `else`, `match`, loop or boolean
+constructs in the compiler. They are functions and operators defined in the
+language, in `Glorious/Prelude.lean`, and so are `true`, `false`, `Some`,
+`None`, `Result` and the arithmetic and comparison operators.
+
+The only words the parser treats specially are `fn`, `let`, `mut`, `enum`,
+`struct`, `effect`, `handle`, `tail`, `defer`, `_`, and the fixity words
+`infixl`, `infixr`, `infix`, `prefix`. The elaborator and checker additionally
+know `cancel`, `Int`, the machine intrinsics (`int_add` and so on) and the two
+host operations. A word operator such as `else` or `and` is declared with a
+fixity like any other operator.
+
+Do not add a parser rule, a checker rule or an error message that names a
+prelude function. If a prelude construct is awkward to type or to use, fix it
+in the prelude or with a general language rule.
+
 ## A trailing `;` discards a value
 
 **Decision (user).** A block yields the value of its last expression. Ending

@@ -1268,8 +1268,8 @@ def checkGroup (decls : List FnDecl) : M Unit := do
       unifyAt s!"`{d.name}` is used recursively at a different type" ((group.lookup d.name).getD t) t
       runPending
     catch e =>
-      -- The usual cause: the body ends in an expression such as an `if` with no
-      -- `else`, whose value becomes the function's result.
+      -- The usual cause: the body ends in an expression run only for its effect,
+      -- whose value has become the function's result.
       let recursive := (e.splitOn "is used recursively").length > 1
         && (e.splitOn "contains itself").length > 1
       let hint := if recursive then
