@@ -1,3 +1,0 @@
-crates/grandiose-stage0/tests/pattern.rs::record_pattern_tracks_implicit_discarded_fields_for_later_use_checking	pass	tooling/self-host-stage0-pattern-check.sh executes Grandiose scalar, pair/variant, selected-field, and implicit-discard pattern decisions.
-crates/grandiose-stage0/tests/pattern.rs::named_enum_payload_patterns_keep_selected_field_indices	pass	The frozen Rust M18 oracle suite passes (25 tests); the Grandiose probe covers its current structural-pattern matching boundary.
-crates/grandiose-stage0/tests/pattern.rs::explicit_nominal_pattern_arguments_must_match_the_subject_identity	pass	The frozen Rust M18 oracle suite passes (25 tests), retaining ownership for nominal layouts and generic identity until later pattern slices land.

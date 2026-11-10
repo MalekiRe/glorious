@@ -1,9 +1,0 @@
-[package]
-name = "grandiose-runtime"
-version = "0.1.0"
-edition = "2024"
-description = "Shared low-level storage substrate for Glorious native and VM execution"
-license = "MIT OR Apache-2.0"
-
-[lib]
-path = "src/lib.rs"

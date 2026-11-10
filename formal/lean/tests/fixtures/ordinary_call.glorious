@@ -1,2 +1,0 @@
-fn identity(value: i64) -> i64 { value }
-fn main() -> () { let value = identity(42i64); () }

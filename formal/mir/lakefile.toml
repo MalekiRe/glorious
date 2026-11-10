@@ -1,7 +1,0 @@
-name = "ownershipMir"
-version = "0.1.0"
-defaultTargets = ["OwnershipMir"]
-moreLeanArgs = ["-DwarningAsError=true", "-DautoImplicit=false"]
-
-[[lean_lib]]
-name = "OwnershipMir"

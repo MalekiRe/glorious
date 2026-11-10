@@ -1,3 +1,0 @@
-crates/grandiose-stage0/tests/module_graph.rs::module_graph_follows_explicit_external_module_declarations	pass	tooling/self-host-stage0-module-graph-check.sh executes Grandiose root/module admission and external-path classification.
-crates/grandiose-stage0/tests/module_graph.rs::module_graph_reports_missing_and_unclaimed_supplied_modules	pass	tooling/self-host-stage0-module-graph-check.sh executes missing, duplicate, and unclaimed module outcomes.
-crates/grandiose-stage0/tests/module_graph.rs::module_graph_indexes_nested_inline_modules_in_their_lexical_source	pass	tooling/self-host-stage0-module-graph-check.sh executes source-owned nested module topology.

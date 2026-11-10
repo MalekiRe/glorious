@@ -1,2 +1,0 @@
-crates/grandiose-stage0/tests/semantic_conformance.rs::semantic_inventory_is_total_enabled_and_machine_checkable	pass	tooling/self-host-stage0-dependency-check.sh executes Grandiose cold/green/red dependency status, validation, reuse decisions, and journal behavior.
-crates/grandiose-stage0/tests/source_and_query.rs::query_reuses_green_dependencies_and_recomputes_red_ones	pass	The frozen Rust source/query oracle suite passes (14 tests), retaining the complete dependency-observation contract as the implementation oracle.

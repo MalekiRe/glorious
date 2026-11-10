@@ -1,7 +1,0 @@
-name = "groundedSpec"
-version = "0.1.0"
-defaultTargets = ["Grounded"]
-moreLeanArgs = ["-DwarningAsError=true", "-DautoImplicit=false"]
-
-[[lean_lib]]
-name = "Grounded"

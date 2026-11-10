@@ -1,9 +1,0 @@
-[package]
-name = "grand-lsp"
-version = "0.1.0"
-edition = "2024"
-description = "Disabled legacy language server; pending Stage0 redesign"
-build = "build.rs"
-
-# Standalone like ../grand: the repo's root workspace belongs to the compiler.
-[workspace]

@@ -1,3 +1,0 @@
-crates/grandiose-stage0/tests/request_and_revision.rs::normalization_is_independent_of_host_input_enumeration_order	pass	tooling/self-host-stage0-blake3-check.sh executes Grandiose fixed-width BLAKE3 digest identity and source-owned length-framed construction.
-crates/grandiose-stage0/tests/request_and_revision.rs::normalization_rejects_forged_file_identity_for_a_logical_source	pass	The frozen request/revision oracle suite passes (25 tests), retaining package, module, file, and definition identity behavior as the implementation oracle.
-crates/grandiose-stage0/tests/request_and_revision.rs::normalization_rejects_invalid_and_colliding_dependency_source_module_aliases	pass	The Grandiose structural boundary includes typed keys and normalized package-alias comparison.
