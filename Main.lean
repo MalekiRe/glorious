@@ -39,7 +39,7 @@ def usage : String :=
 
 def writeBytecode (c : Compiled) (out : System.FilePath) : IO Unit :=
   IO.FS.writeBinFile out
-    ⟨(Bytecode.Encode.file c.ctorNames.toList (compile c.core)).toArray⟩
+    ⟨((Bytecode.Encode.file c.ctorNames.toList (compile c.core)).map Nat.toUInt8).toArray⟩
 
 /-- Run every test program on the Lean machines, and on the Rust VM if given. -/
 def selftest (vm : Option String) : IO UInt32 := do

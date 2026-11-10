@@ -10,11 +10,13 @@ alternative starts with a one-byte tag.
 
 namespace Glorious.Bytecode.Encode
 
-abbrev Bytes := List UInt8
+/-- Bytes as numbers below 256, so that statements about the format need no
+machine-word arithmetic. -/
+abbrev Bytes := List Nat
 
 def nat (n : Nat) : Bytes :=
-  if h : n < 128 then [UInt8.ofNat n]
-  else UInt8.ofNat (n % 128 + 128) :: nat (n / 128)
+  if n < 128 then [n]
+  else (n % 128 + 128) :: nat (n / 128)
 termination_by n
 decreasing_by omega
 
@@ -71,7 +73,7 @@ def code (c : Code) : Bytes := list instr c
 
 def program (p : Program) : Bytes := list (fun f => code f.code) p.fns ++ code p.main
 
-def string (s : String) : Bytes := list (fun b => [b]) s.toUTF8.toList
+def string (s : String) : Bytes := list (fun b => [b.toNat]) s.toUTF8.toList
 
 /-- A bytecode file: the magic `GLBC`, a format version, the constructor names
 used to print values, and the program. -/

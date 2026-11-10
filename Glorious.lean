@@ -21,4 +21,5 @@ import Glorious.Prelude
 import Glorious.Driver
 import Glorious.Bytecode.Encode
 import Glorious.Cases
+import Glorious.Bytecode.Decode
 import Glorious.Tests
