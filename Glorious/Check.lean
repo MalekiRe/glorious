@@ -1267,7 +1267,15 @@ def checkGroup (decls : List FnDecl) : M Unit := do
       let t ← inferCallable [] annots ret (some d.name) d.clauses s!"the clauses of `{d.name}` do"
       unifyAt s!"`{d.name}` is used recursively at a different type" ((group.lookup d.name).getD t) t
       runPending
-    catch e => throw s!"in `{d.name}`: {e}"
+    catch e =>
+      -- The usual cause: the body ends in an expression such as an `if` with no
+      -- `else`, whose value becomes the function's result.
+      let recursive := (e.splitOn "is used recursively").length > 1
+        && (e.splitOn "contains itself").length > 1
+      let hint := if recursive then
+        "; if the last expression of the body is not meant as the result, end it with `;`"
+        else ""
+      throw s!"in `{d.name}`: {e}{hint}"
   for d in decls do
     let scheme ← generalize ((group.lookup d.name).getD .unit)
     modify fun s => { s with fns := (d.name, scheme) :: s.fns }

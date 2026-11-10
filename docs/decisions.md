@@ -41,6 +41,21 @@ considered and rejected for now: multi-shot only for continuations shown to
 capture no mutable cells, cleanups or owned resources. It keeps pure
 backtracking but adds a second kind of resumption and a new analysis.
 
+## A trailing `;` discards a value
+
+**Decision (user).** A block yields the value of its last expression. Ending
+that expression with `;` discards the value, and the block yields `()`.
+
+This matters because `if(c) { a }` is a library function that returns an
+option, which `else` unwraps. An `if` with no `else` at the end of a body
+therefore makes the body's value an option, and in a recursive function that is
+a type containing itself. Write `if(c) { a };` when the `if` is run only for
+its effect. Function results stay inferred; there is no `return` keyword, and
+`@function_name(value)` leaves a function early.
+
+Do not "fix" this by making `if` a special form or by giving unannotated
+functions a unit result.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by

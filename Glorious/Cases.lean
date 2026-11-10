@@ -420,6 +420,19 @@ def cases : List Case := [
   ⟨"effect Yield { yield(Int) }\n  fn main() { let mut saved = None; handle (yield(1) + 1) { yield(v, k) => saved = Some(k); 0 }; match(saved) { Some(k) => k(41), None => 0 } }",
     [], "42"⟩,
 
+  -- A trailing `;` discards the value of the last expression, so the block
+  -- yields unit. Without it, the value of an `if` with no `else` is an option.
+  ⟨"fn each(f, n) { if(n > 0) { f(n); each(f, n - 1) }; }  fn main() { each(print, 3) }",
+    [], "3\n2\n1\n()"⟩,
+  ⟨"fn each(f, n) { if(n > 0) { f(n); each(f, n - 1) } }  fn main() { each(print, 3) }",
+    [], "error: in `each`: `each` is used recursively at a different type: expected `fn(fn(Int) -> _, Int) -> _`, found `fn(fn(Int) -> _, Int) -> Result<_, ()>` (this would need a type that contains itself); if the last expression of the body is not meant as the result, end it with `;`"⟩,
+  ⟨"fn log(x) { if(x > 0) { print(x) } }  fn main() { log(1) }",
+    [], "1\nOk(())"⟩,
+  ⟨"fn log(x) { if(x > 0) { print(x) }; }  fn main() { log(1) }",
+    [], "1\n()"⟩,
+  ⟨"fn main() { let f = { x => x + 1; }; f(1) }",
+    [], "()"⟩,
+
   -- Errors are reported, not guessed around.
   ⟨"fn main() { nope }",
     [], "error: in `main`: unknown name `nope`"⟩,
