@@ -193,14 +193,18 @@ for the machine in `Core/Semantics.lean`. This, not the test corpus, is what
 says the kernel rules fit together. Change a kernel rule and this proof has to
 be redone; that is its purpose.
 
-What is proved (`Typing/Safety.lean`, `Typing/Compiled.lean`):
+What is proved (`Typing/Safety.lean`, `Typing/Compiled.lean`,
+`Typing/Certify.lean`):
 
 - `type_safety`: if a well-typed program goes wrong, the state it could not
   step from is one of four named faults.
 - `compiled_type_safety`: the same for its compiled bytecode, by way of
   `compile_correct`.
+- `checked_safety` and `checked_compiled_safety`: the same for any program the
+  function `checkProgram` accepts, with nothing else assumed.
 - `Typing/Witness.lean` types a program with nested handlers, a resumptive and
-  a terminal operation, so the theorem is not about an empty set of programs.
+  a terminal operation, by hand and through the checker, so the theorems are
+  not about an empty set of programs.
 
 The four faults are what types alone do not rule out: integer overflow, use of
 a freed cell, a second use of a resumption, and a label applied after its scope
@@ -226,15 +230,25 @@ How the typing is set up, and why:
   stack that takes the handler's result and serves what the handler needs, it
   gives a typed stack.
 
-What the theorem does not say:
+**The checker takes a certificate and does not trust it.** `checkProgram` is
+given the program and a `Cert`: the signatures of each function, the data types
+used at each instance, the type of each `let`, and what each handler yields and
+serves. Everything else it works out. It also checks that each function's
+clauses cover its parameters (`covers`, proved in `Typing/Covers.lean`), which
+`type_safety` on its own has to assume. A wrong certificate is rejected or
+describes some other valid typing; it cannot make an ill-typed program pass.
+This is the reason for the split: finding types is hard and stays unproved in
+the front-end, checking them is easy and is proved.
 
-- It assumes each function's clauses cover every argument list of its
-  signature's types (`ProgramOk.fns`). The front-end checks this; no proved
-  check does.
-- It is about Core programs with a typing derivation. The checker does not yet
-  produce one, so nothing is proved about the programs the checker accepts.
-  Connecting the two (the front-end emits signatures, a small proved checker
-  validates them) is the next step.
+What the theorems do not say:
+
+- They are about Core programs with a certificate. The front-end does not
+  produce certificates yet, so nothing is proved about the programs it accepts.
+  That is the next step: the front-end emits a certificate with the Core it
+  generates, and compilation fails if `checkProgram` rejects it.
+- `covers` is proved sound, not complete. It searches to a bounded depth, and
+  a set of clauses that covers its parameters could in principle be turned away.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by

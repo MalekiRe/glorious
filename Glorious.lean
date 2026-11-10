@@ -18,6 +18,10 @@ import Glorious.Typing.Values
 import Glorious.Typing.Stack
 import Glorious.Typing.Safety
 import Glorious.Typing.Compiled
+import Glorious.Typing.Equality
+import Glorious.Typing.Checker
+import Glorious.Typing.Covers
+import Glorious.Typing.Certify
 import Glorious.Typing.Witness
 import Glorious.Proof.Audit
 import Glorious.Syntax.Ast
