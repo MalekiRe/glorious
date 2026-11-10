@@ -6,7 +6,7 @@ import Glorious.Value
 Core is the elaborated kernel language: every intermediate result is named and
 every callable is a closed function with an explicit capture list. This file
 covers data, closures, calls, tail calls, pattern callables, and effects with
-handlers and one-shot resumptions, and label scopes.
+handlers and one-shot resumptions, label scopes, and host operations.
 -/
 
 namespace Glorious.Core
@@ -47,6 +47,8 @@ inductive Tm where
   and bind the scope's result. Applying the label to a value leaves the scope
   with that value. -/
   | label (thunk : Atom) (body : Tm)
+  /-- Ask the host to perform operation `id` and bind its result. -/
+  | host (id : Nat) (args : List Atom) (body : Tm)
 
 /-- One clause of a callable: one pattern per argument, and a body. The body
 runs in the environment `arguments ++ captures ++ pattern bindings`. -/

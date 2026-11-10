@@ -87,6 +87,16 @@ fn >=(a, b) { not bool(int_lt(a, b)) }
 fn ==(a, b) { bool(int_eq(a, b)) }
 fn !=(a, b) { not bool(int_eq(a, b)) }
 
+// The outside world.
+fn print(value) { host_write(value) }
+
+fn read() {
+    match(host_read()) {
+        (1, value) => Some(value),
+        _ => None
+    }
+}
+
 // Loops: a handler for `break` and `continue` around a body run again by a tail call.
 effect LoopControl {
     break(value) -> !,

@@ -27,6 +27,8 @@ inductive Instr where
   | perform (op : Nat) (args : List Atom)
   /-- Push a return frame and a fresh label scope, then enter `thunk` with the label. -/
   | label (thunk : Atom)
+  /-- Ask the host to perform operation `id`; its result becomes the next local. -/
+  | host (id : Nat) (args : List Atom)
   /-- Fall through if the place holds constructor `tag` with `arity` fields;
   otherwise jump to `fail`. -/
   | testCtor (pl : Place) (tag arity : Nat) (fail : Nat)

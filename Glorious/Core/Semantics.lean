@@ -1,5 +1,6 @@
 import Glorious.Machine
 import Glorious.Control
+import Glorious.Host
 import Glorious.Core.Ast
 
 /-!
@@ -167,16 +168,53 @@ def step (p : Program) (s : State) : Step State Value :=
       callFn p fn captures [.label s.store.labels]
         (.label s.store.labels :: .call s.env body :: s.stack)
         ⟨s.store.conts, s.store.labels + 1⟩
+  -- A host operation is a step of the program in its world; see `stepIO`.
+  | .host _ _ _ => .stuck
 
 def init (p : Program) : State := ⟨p.main, [], [], ⟨[], 0⟩⟩
 
-/-- The program finishes with result `v`. -/
-def Halts (p : Program) (v : Value) : Prop := Machine.Halts (step p) (init p) v
+/-- A machine state together with the world outside the program. -/
+structure Config where
+  state : State
+  world : World
 
-/-- The program reaches a state the semantics gives no meaning to. -/
-def GoesWrong (p : Program) : Prop := Machine.GoesWrong (step p) (init p)
+/-- Carry the outcome of a step that does not touch the world. -/
+def lift (w : World) : Step State Value → Step Config Result
+  | .next s => .next ⟨s, w⟩
+  | .halt v => .halt ⟨v, w⟩
+  | .stuck => .stuck
 
-/-- The program runs forever. -/
-def Diverges (p : Program) : Prop := Machine.Diverges (step p) (init p)
+/-- One step of a program in its world. Host operations are the only steps
+that touch the world; every other step is a `step` of the machine state. -/
+def stepIO (p : Program) (c : Config) : Step Config Result :=
+  match c.state.tm with
+  | .host id args body =>
+    match evalAtoms c.state.env args with
+    | none => .stuck
+    | some vs =>
+      match Host.call c.world id vs with
+      | none => .stuck
+      | some (r, world) =>
+        .next ⟨⟨body, c.state.env ++ [r], c.state.stack, c.state.store⟩, world⟩
+  | _ => lift c.world (step p c.state)
+
+/-- The program about to start, with `input` waiting to be read. -/
+def initIO (p : Program) (input : List Int) : Config := ⟨init p, ⟨input, []⟩⟩
+
+/-- Given `input`, the program finishes with result `r`. -/
+def Halts (p : Program) (input : List Int) (r : Result) : Prop :=
+  Machine.Halts (stepIO p) (initIO p input) r
+
+/-- Given `input`, the program reaches a state the semantics gives no meaning to. -/
+def GoesWrong (p : Program) (input : List Int) : Prop :=
+  Machine.GoesWrong (stepIO p) (initIO p input)
+
+/-- Given `input`, the program runs forever. -/
+def Diverges (p : Program) (input : List Int) : Prop :=
+  Machine.Diverges (stepIO p) (initIO p input)
+
+/-- Given `input`, at some point while running the program has written exactly `out`. -/
+def Emits (p : Program) (input : List Int) (out : List Value) : Prop :=
+  ∃ c, Machine.Reaches (stepIO p) (initIO p input) c ∧ c.world.output = out
 
 end Glorious.Core

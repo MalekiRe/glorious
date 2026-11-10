@@ -311,7 +311,9 @@ theorem apply_sim {c : Callee} (hfr : MatchFrames stack frames) (hks : MatchStor
 
 end Outcomes
 
-/-! ## One Core step is one or more bytecode steps -/
+/-! ## One Core step is one or more bytecode steps
+
+First for steps of the machine state alone, then for programs in their world. -/
 
 theorem step_sim (p : Core.Program) {s : Core.State} {t : Bytecode.State} (hm : Match s t) :
     SimOutcome p (Core.step p s) (Bytecode.step (compile p) t) := by
@@ -490,56 +492,277 @@ theorem step_sim (p : Core.Program) {s : Core.State} {t : Bytecode.State} (hm : 
         simp [Bytecode.step, hi, he]
       rw [h1, h2]
       exact callFn_sim (.label (.call hc.tail hfr)) (.mk hcs)
+  | host id args body =>
+    -- Host operations are not steps of the machine state alone.
+    have h1 : Core.step p ⟨.host id args body, ρ, stack, ⟨conts, labels⟩⟩ = .stuck := rfl
+    rw [h1]
+    exact .stuck
 
-/-- `Match` is a forward simulation from Core to bytecode. -/
+/-! ## Programs in their world -/
+
+/-- Configurations match when their machine states match in the same world. -/
+inductive MatchIO : Core.Config → Bytecode.Config → Prop where
+  | mk {s : Core.State} {t : Bytecode.State} {w : World} : Match s t → MatchIO ⟨s, w⟩ ⟨t, w⟩
+
+theorem matchIO_init (p : Core.Program) (input : List Int) :
+    MatchIO (Core.initIO p input) (Bytecode.initIO (compile p) input) :=
+  .mk (match_init p)
+
+theorem MatchIO.output_eq {c : Core.Config} {d : Bytecode.Config} (h : MatchIO c d) :
+    c.world.output = d.world.output := by
+  cases h
+  rfl
+
+section World
+
+variable {P : Bytecode.Program}
+
+/-- A bytecode step in a world is either a step of the machine state alone, or
+a host instruction. -/
+theorem stepIO_eq_lift_or_host (t : Bytecode.State) (w : World) :
+    Bytecode.stepIO P ⟨t, w⟩ = Bytecode.lift w (Bytecode.step P t)
+      ∨ ∃ id args, t.code[t.pc]? = some (Instr.host id args) := by
+  cases hi : t.code[t.pc]? with
+  | none =>
+    left
+    simp [Bytecode.stepIO, hi]
+  | some i =>
+    cases i with
+    | host id args => exact Or.inr ⟨id, args, rfl⟩
+    | _ =>
+      left
+      simp [Bytecode.stepIO, hi]
+
+theorem stepIO_of_step_next {t t' : Bytecode.State} (w : World)
+    (h : Bytecode.step P t = .next t') : Bytecode.stepIO P ⟨t, w⟩ = .next ⟨t', w⟩ := by
+  rcases stepIO_eq_lift_or_host (P := P) t w with he | ⟨id, args, hi⟩
+  · rw [he, h]
+    rfl
+  · simp [Bytecode.step, hi] at h
+
+theorem stepIO_of_step_halt {t : Bytecode.State} {v : Value} (w : World)
+    (h : Bytecode.step P t = .halt v) : Bytecode.stepIO P ⟨t, w⟩ = .halt ⟨v, w⟩ := by
+  rcases stepIO_eq_lift_or_host (P := P) t w with he | ⟨id, args, hi⟩
+  · rw [he, h]
+    rfl
+  · simp [Bytecode.step, hi] at h
+
+/-- A run of the machine state alone is the same run in any world. -/
+theorem run_lift (w : World) : ∀ (k : Nat) {t t' : Bytecode.State},
+    run (Bytecode.step P) k t = .next t' →
+    run (Bytecode.stepIO P) k ⟨t, w⟩ = .next ⟨t', w⟩ := by
+  intro k
+  induction k with
+  | zero =>
+    intro t t' h
+    rw [run_zero] at h
+    cases h
+    rfl
+  | succ k ih =>
+    intro t t' h
+    rw [run_succ] at h
+    cases hs : Bytecode.step P t with
+    | next t₁ =>
+      rw [hs, Step.bind_next] at h
+      rw [run_succ, stepIO_of_step_next w hs, Step.bind_next]
+      exact ih h
+    | halt v => rw [hs] at h; simp at h
+    | stuck => rw [hs] at h; simp at h
+
+theorem lift_next_world {w : World} {r : Step Bytecode.State Value} {d : Bytecode.Config}
+    (h : Bytecode.lift w r = .next d) : d.world = w := by
+  cases r with
+  | next s =>
+    simp [Bytecode.lift] at h
+    subst h
+    rfl
+  | halt v => simp [Bytecode.lift] at h
+  | stuck => simp [Bytecode.lift] at h
+
+theorem lift_halt_world {w : World} {r : Step Bytecode.State Value} {res : Result}
+    (h : Bytecode.lift w r = .halt res) : res.world = w := by
+  cases r with
+  | next s => simp [Bytecode.lift] at h
+  | halt v =>
+    simp [Bytecode.lift] at h
+    subst h
+    rfl
+  | stuck => simp [Bytecode.lift] at h
+
+/-- A bytecode step never retracts output. -/
+theorem stepIO_output_next {d d' : Bytecode.Config} (h : Bytecode.stepIO P d = .next d') :
+    d.world.output <+: d'.world.output := by
+  obtain ⟨t, w⟩ := d
+  rcases stepIO_eq_lift_or_host (P := P) t w with he | ⟨id, args, hi⟩
+  · rw [he] at h
+    rw [lift_next_world h]
+    exact List.prefix_refl _
+  · simp only [Bytecode.stepIO, hi] at h
+    cases hv : evalAtoms t.locals args with
+    | none => simp [hv] at h
+    | some vs =>
+      cases hh : Host.call w id vs with
+      | none => simp [hv, hh] at h
+      | some r =>
+        obtain ⟨res, w'⟩ := r
+        simp [hv, hh] at h
+        subst h
+        exact Host.call_output hh
+
+theorem stepIO_output_halt {d : Bytecode.Config} {res : Result}
+    (h : Bytecode.stepIO P d = .halt res) : d.world.output <+: res.world.output := by
+  obtain ⟨t, w⟩ := d
+  rcases stepIO_eq_lift_or_host (P := P) t w with he | ⟨id, args, hi⟩
+  · rw [he] at h
+    rw [lift_halt_world h]
+    exact List.prefix_refl _
+  · simp only [Bytecode.stepIO, hi] at h
+    cases hv : evalAtoms t.locals args with
+    | none => simp [hv] at h
+    | some vs =>
+      cases hh : Host.call w id vs with
+      | none => simp [hv, hh] at h
+      | some r => simp [hv, hh] at h
+
+end World
+
+/-- `SimOutcome` for programs in their world. -/
+inductive SimOutcomeIO (p : Core.Program) :
+    Step Core.Config Result → Step Bytecode.Config Result → Prop where
+  | next {c' : Core.Config} {d₀ d' : Bytecode.Config} {k : Nat} :
+      run (Bytecode.stepIO (compile p)) k d₀ = .next d' → MatchIO c' d' →
+      SimOutcomeIO p (.next c') (.next d₀)
+  | halt {r : Result} : SimOutcomeIO p (.halt r) (.halt r)
+  | stuck {r : Step Bytecode.Config Result} : SimOutcomeIO p .stuck r
+
+/-- A simulated step of the machine state is a simulated step in any world. -/
+theorem lift_sim {p : Core.Program} {s : Core.State} {t : Bytecode.State} (w : World)
+    (h : SimOutcome p (Core.step p s) (Bytecode.step (compile p) t)) :
+    SimOutcomeIO p (Core.lift w (Core.step p s)) (Bytecode.stepIO (compile p) ⟨t, w⟩) := by
+  generalize Core.step p s = r at h
+  generalize ht : Bytecode.step (compile p) t = r' at h
+  cases h with
+  | @next s' t₀ t' k hk hm =>
+    rw [stepIO_of_step_next w ht]
+    exact .next (run_lift w k hk) (.mk hm)
+  | halt =>
+    rw [stepIO_of_step_halt w ht]
+    exact .halt
+  | stuck => exact .stuck
+
+theorem stepIO_sim (p : Core.Program) {c : Core.Config} {d : Bytecode.Config}
+    (hm : MatchIO c d) : SimOutcomeIO p (Core.stepIO p c) (Bytecode.stepIO (compile p) d) := by
+  obtain @⟨s, t, w, hst⟩ := hm
+  obtain @⟨tm, ρ, stack, store, code, pc, frames, store', hcode, hfr, hstore⟩ := hst
+  cases tm with
+  | host id args body =>
+    have hc : CodeAt code pc (Instr.host id args :: compileTm body) := hcode
+    have hi := hc.head
+    cases hv : evalAtoms ρ args with
+    | none =>
+      have h1 : Core.stepIO p ⟨⟨.host id args body, ρ, stack, store⟩, w⟩ = .stuck := by
+        simp [Core.stepIO, hv]
+      rw [h1]
+      exact .stuck
+    | some vs =>
+      cases hh : Host.call w id vs with
+      | none =>
+        have h1 : Core.stepIO p ⟨⟨.host id args body, ρ, stack, store⟩, w⟩ = .stuck := by
+          simp [Core.stepIO, hv, hh]
+        rw [h1]
+        exact .stuck
+      | some r =>
+        obtain ⟨res, w'⟩ := r
+        have h1 : Core.stepIO p ⟨⟨.host id args body, ρ, stack, store⟩, w⟩
+            = .next ⟨⟨body, ρ ++ [res], stack, store⟩, w'⟩ := by
+          simp [Core.stepIO, hv, hh]
+        have h2 : Bytecode.stepIO (compile p) ⟨⟨code, pc, ρ, frames, store'⟩, w⟩
+            = .next ⟨⟨code, pc + 1, ρ ++ [res], frames, store'⟩, w'⟩ := by
+          simp [Bytecode.stepIO, hi, hv, hh]
+        rw [h1, h2]
+        exact .next (k := 0) rfl (.mk (.mk hc.tail hfr hstore))
+  | _ => exact lift_sim w (step_sim p (.mk hcode hfr hstore))
+
+/-- `MatchIO` is a forward simulation from Core to bytecode. -/
 theorem forwardSim (p : Core.Program) :
-    ForwardSim (Core.step p) (Bytecode.step (compile p)) Match where
+    ForwardSim (Core.stepIO p) (Bytecode.stepIO (compile p)) MatchIO where
   next := by
-    intro s t s' hm hs
-    have h := step_sim p hm
+    intro c d c' hm hs
+    have h := stepIO_sim p hm
     rw [hs] at h
-    generalize hstep : Bytecode.step (compile p) t = r at h
+    generalize hstep : Bytecode.stepIO (compile p) d = r at h
     cases h with
-    | @next _ t₀ t' k hk hm' =>
-      exact ⟨k, t', by rw [run_succ, hstep, Step.bind_next]; exact hk, hm'⟩
+    | @next _ d₀ d' k hk hm' =>
+      exact ⟨k, d', by rw [run_succ, hstep, Step.bind_next]; exact hk, hm'⟩
   halt := by
-    intro s t v hm hs
-    have h := step_sim p hm
+    intro c d r hm hs
+    have h := stepIO_sim p hm
     rw [hs] at h
-    generalize hstep : Bytecode.step (compile p) t = r at h
+    generalize hstep : Bytecode.stepIO (compile p) d = r' at h
     cases h with
     | halt => exact ⟨0, run_one_halt hstep⟩
 
 /-! ## Behaviour preservation -/
 
-/-- If the Core program halts with `v`, so does its bytecode. -/
-theorem compile_halts {p : Core.Program} {v : Value} :
-    Core.Halts p v → Bytecode.Halts (compile p) v :=
-  (forwardSim p).halts (match_init p)
+variable {p : Core.Program} {input : List Int}
+
+/-- If the Core program halts with a result, so does its bytecode. -/
+theorem compile_halts {r : Result} :
+    Core.Halts p input r → Bytecode.Halts (compile p) input r :=
+  (forwardSim p).halts (matchIO_init p input)
 
 /-- If the Core program runs forever, so does its bytecode. -/
-theorem compile_diverges {p : Core.Program} :
-    Core.Diverges p → Bytecode.Diverges (compile p) :=
-  (forwardSim p).diverges (match_init p)
+theorem compile_diverges : Core.Diverges p input → Bytecode.Diverges (compile p) input :=
+  (forwardSim p).diverges (matchIO_init p input)
 
 /-- A result computed by the bytecode is a result of the Core program, unless
 the Core program goes wrong. -/
-theorem compile_halts_reflect {p : Core.Program} {v : Value} :
-    Bytecode.Halts (compile p) v → Core.Halts p v ∨ Core.GoesWrong p :=
-  (forwardSim p).halts_reflect (match_init p)
+theorem compile_halts_reflect {r : Result} :
+    Bytecode.Halts (compile p) input r → Core.Halts p input r ∨ Core.GoesWrong p input :=
+  (forwardSim p).halts_reflect (matchIO_init p input)
 
 /--
-**Compiler correctness.** For a Core program that does not go wrong, the
-compiled bytecode has exactly the same behaviour: it halts with the same values,
-it diverges exactly when the Core program does, and it never goes wrong.
+**Compiler correctness.** For a Core program that does not go wrong on a given
+input, the compiled bytecode has exactly the same behaviour: it halts with the
+same value and the same world (the same output written and input left), it
+diverges exactly when the Core program does, and it never goes wrong.
 -/
-theorem compile_correct (p : Core.Program) (safe : ¬ Core.GoesWrong p) :
-    (∀ v, Bytecode.Halts (compile p) v ↔ Core.Halts p v)
-    ∧ (Bytecode.Diverges (compile p) ↔ Core.Diverges p)
-    ∧ ¬ Bytecode.GoesWrong (compile p) := by
-  refine ⟨fun v => ⟨fun h => ?_, compile_halts⟩, ⟨?_, compile_diverges⟩, ?_⟩
+theorem compile_correct (p : Core.Program) (input : List Int) (safe : ¬ Core.GoesWrong p input) :
+    (∀ r, Bytecode.Halts (compile p) input r ↔ Core.Halts p input r)
+    ∧ (Bytecode.Diverges (compile p) input ↔ Core.Diverges p input)
+    ∧ ¬ Bytecode.GoesWrong (compile p) input := by
+  refine ⟨fun r => ⟨fun h => ?_, compile_halts⟩, ⟨?_, compile_diverges⟩, ?_⟩
   · exact (compile_halts_reflect h).resolve_right safe
-  · exact (forwardSim p).diverges_reflect (match_init p) safe
-  · exact (forwardSim p).not_goesWrong (match_init p) safe
+  · exact (forwardSim p).diverges_reflect (matchIO_init p input) safe
+  · exact (forwardSim p).not_goesWrong (matchIO_init p input) safe
+
+/-! ## Output while running
+
+`compile_correct` settles the output of programs that halt. These two theorems
+cover output at every moment, so they also speak for programs that never halt.
+-/
+
+/-- Whatever the Core program has written at some point, the bytecode has
+written at some point. -/
+theorem compile_emits {out : List Value} :
+    Core.Emits p input out → Bytecode.Emits (compile p) input out := by
+  intro ⟨c, hreach, hout⟩
+  obtain ⟨d, hd, hm⟩ := (forwardSim p).reaches (matchIO_init p input) hreach
+  exact ⟨d, hd, by rw [← hm.output_eq]; exact hout⟩
+
+/-- Whatever the bytecode has written at some point is the beginning of what
+the Core program writes: either by some point while running, or by the time it
+halts. The bytecode never writes anything the Core program does not. -/
+theorem compile_emits_reflect {out : List Value} (safe : ¬ Core.GoesWrong p input) :
+    Bytecode.Emits (compile p) input out →
+    (∃ out', Core.Emits p input out' ∧ out <+: out')
+      ∨ (∃ r, Core.Halts p input r ∧ out <+: r.world.output) := by
+  intro ⟨d, hreach, hout⟩
+  have h := (forwardSim p).obs_reflect (fun c => c.world.output) (fun d => d.world.output)
+    (fun r => r.world.output) (fun hm => hm.output_eq) (fun hs => stepIO_output_next hs)
+    (fun hs => stepIO_output_halt hs) (matchIO_init p input) safe hreach
+  rcases h with ⟨c, hc, hpre⟩ | ⟨r, hr, hpre⟩
+  · exact Or.inl ⟨c.world.output, ⟨c, hc, rfl⟩, by rw [← hout]; exact hpre⟩
+  · exact Or.inr ⟨r, hr, by rw [← hout]; exact hpre⟩
 
 end Glorious

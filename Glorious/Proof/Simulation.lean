@@ -143,6 +143,46 @@ theorem diverges_reflect (sim : ForwardSim stepS stepT R) {s : σ₁} {t : σ₂
     cases ht'
   | stuck => exact absurd ⟨n, hs⟩ safe
 
+/-- Every state the source reaches is matched by a state the target reaches. -/
+theorem reaches (sim : ForwardSim stepS stepT R) {s : σ₁} {t : σ₂} {s' : σ₁} (hR : R s t) :
+    Reaches stepS s s' → ∃ t', Reaches stepT t t' ∧ R s' t' := by
+  intro ⟨n, h⟩
+  obtain ⟨m, t', _, ht', hR'⟩ := sim.run_next n hR h
+  exact ⟨t', ⟨m, ht'⟩, hR'⟩
+
+/--
+Observations are reflected. Suppose related states have the same observation
+and the target's observation only grows. Then whatever the target has observed
+at any point is a prefix of what the source observes at some point, or of what
+it finally observes when it halts.
+-/
+theorem obs_reflect {α : Type} (sim : ForwardSim stepS stepT R)
+    (obsS : σ₁ → List α) (obsT : σ₂ → List α) (final : ν → List α)
+    (hobs : ∀ {s : σ₁} {t : σ₂}, R s t → obsS s = obsT t)
+    (hstep : ∀ {t t' : σ₂}, stepT t = .next t' → obsT t <+: obsT t')
+    (hhalt : ∀ {t : σ₂} {v : ν}, stepT t = .halt v → obsT t <+: final v)
+    {s : σ₁} {t t' : σ₂} (hR : R s t) (safe : ¬ GoesWrong stepS s) (h : Reaches stepT t t') :
+    (∃ s', Reaches stepS s s' ∧ obsT t' <+: obsS s')
+      ∨ (∃ v, Halts stepS s v ∧ obsT t' <+: final v) := by
+  obtain ⟨m, hm⟩ := h
+  cases hs : run stepS m s with
+  | next s' =>
+    obtain ⟨m', t'', hle, ht'', hR'⟩ := sim.run_next m hR hs
+    have e : m' = m + (m' - m) := by omega
+    rw [e, run_add, hm, Step.bind_next] at ht''
+    refine Or.inl ⟨s', ⟨m, hs⟩, ?_⟩
+    rw [hobs hR']
+    exact run_obs_prefix obsT hstep _ ht''
+  | halt v =>
+    obtain ⟨m', hm'⟩ := sim.run_halt m hR hs
+    by_cases hle : m' ≤ m
+    · rw [run_halt_mono hm' hle] at hm
+      cases hm
+    · have e : m' = m + (m' - m) := by omega
+      rw [e, run_add, hm, Step.bind_next] at hm'
+      exact Or.inr ⟨v, ⟨m, hs⟩, run_obs_prefix_halt obsT final hstep hhalt _ hm'⟩
+  | stuck => exact absurd ⟨m, hs⟩ safe
+
 end ForwardSim
 
 end Glorious

@@ -40,9 +40,10 @@ def patterns : Core.Program where
     .let_ (.closure 1 []) <|
     .tail (.var 4) [.var 3]
 
-theorem patterns_core : Core.Halts patterns (.int 10) := ⟨40, rfl⟩
+theorem patterns_core : Core.Halts patterns [] ⟨.int 10, ⟨[], []⟩⟩ := ⟨40, rfl⟩
 
-theorem patterns_bytecode : Bytecode.Halts (compile patterns) (.int 10) := ⟨80, rfl⟩
+theorem patterns_bytecode : Bytecode.Halts (compile patterns) [] ⟨.int 10, ⟨[], []⟩⟩ :=
+  ⟨80, rfl⟩
 
 /--
 A resumptive operation `Ask` (0) and a terminal operation `Fail` (1).
@@ -83,9 +84,10 @@ def effects : Core.Program where
     .handle 3 [(1, 4)] [] (.var 2) <|
     .ret (.var 3)
 
-theorem effects_core : Core.Halts effects (.int 65) := ⟨60, rfl⟩
+theorem effects_core : Core.Halts effects [] ⟨.int 65, ⟨[], []⟩⟩ := ⟨60, rfl⟩
 
-theorem effects_bytecode : Bytecode.Halts (compile effects) (.int 65) := ⟨60, rfl⟩
+theorem effects_bytecode : Bytecode.Halts (compile effects) [] ⟨.int 65, ⟨[], []⟩⟩ :=
+  ⟨60, rfl⟩
 
 /-- Resuming the same resumption twice has no meaning: resumptions are one-shot.
 ```
@@ -103,7 +105,7 @@ def resumeTwice : Core.Program where
     .handle 2 [(0, 1)] [] (.var 0) <|
     .ret (.var 1)
 
-theorem resumeTwice_goesWrong : Core.GoesWrong resumeTwice := ⟨20, rfl⟩
+theorem resumeTwice_goesWrong : Core.GoesWrong resumeTwice [] := ⟨20, rfl⟩
 
 /--
 A label scope left early from inside a nested call, and one that ends normally.
@@ -138,9 +140,10 @@ def labels : Core.Program where
     .let_ (.prim .intAdd [.var 1, .var 3]) <|
     .ret (.var 4)
 
-theorem labels_core : Core.Halts labels (.int 307) := ⟨40, rfl⟩
+theorem labels_core : Core.Halts labels [] ⟨.int 307, ⟨[], []⟩⟩ := ⟨40, rfl⟩
 
-theorem labels_bytecode : Bytecode.Halts (compile labels) (.int 307) := ⟨40, rfl⟩
+theorem labels_bytecode : Bytecode.Halts (compile labels) [] ⟨.int 307, ⟨[], []⟩⟩ :=
+  ⟨40, rfl⟩
 
 /-- A label used after its scope has ended has no meaning.
 ```
@@ -154,6 +157,31 @@ def escapedLabel : Core.Program where
     .label (.var 0) <|
     .tail (.var 1) [.int 1]
 
-theorem escapedLabel_goesWrong : Core.GoesWrong escapedLabel := ⟨20, rfl⟩
+theorem escapedLabel_goesWrong : Core.GoesWrong escapedLabel [] := ⟨20, rfl⟩
+
+/--
+Reading and writing through the host.
+```
+main = let (_, a) = read() in let (_, b) = read() in write(a + b); write(a * b); a + b
+```
+With input `3, 4, 5` the program writes 7 then 12, returns 7 and leaves 5 unread.
+-/
+def io : Core.Program where
+  fns := []
+  main :=
+    .host 1 [] <|
+    .let_ (.place ⟨0, [1]⟩) <|
+    .host 1 [] <|
+    .let_ (.place ⟨2, [1]⟩) <|
+    .let_ (.prim .intAdd [.var 1, .var 3]) <|
+    .let_ (.prim .intMul [.var 1, .var 3]) <|
+    .host 0 [.var 4] <|
+    .host 0 [.var 5] <|
+    .ret (.var 4)
+
+theorem io_core : Core.Halts io [3, 4, 5] ⟨.int 7, ⟨[5], [.int 7, .int 12]⟩⟩ := ⟨20, rfl⟩
+
+theorem io_bytecode :
+    Bytecode.Halts (compile io) [3, 4, 5] ⟨.int 7, ⟨[5], [.int 7, .int 12]⟩⟩ := ⟨20, rfl⟩
 
 end Glorious.Witness

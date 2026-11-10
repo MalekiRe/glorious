@@ -38,23 +38,29 @@ partial def showValue (names : Array String) : Value → String
   | .cont id => s!"<resumption {id}>"
   | .label id => s!"<label {id}>"
 
-def showOutcome {σ : Type} (names : Array String) : Step σ Value → String
-  | .halt v => showValue names v
+/-- Everything the program wrote, one value per line, then its result. -/
+def showResult (names : Array String) (r : Result) : String :=
+  "\n".intercalate (r.world.output.map (showValue names) ++ [showValue names r.value])
+
+def showOutcome {σ : Type} (names : Array String) : Step σ Result → String
+  | .halt r => showResult names r
   | .stuck => "went wrong"
   | .next _ => "out of fuel"
 
 /--
-Compile a program and run it on both machines. The result is the printed value,
-or a description of what went wrong; if the machines disagree, both are shown.
+Compile a program and run it on both machines with the given input. The result
+is what it wrote followed by its value, or a description of what went wrong; if
+the machines disagree, both are shown.
 -/
-def evalSource (src : String) (fuel : Nat := 200000) : String :=
+def evalSource (src : String) (input : List Int := []) (fuel : Nat := 200000) : String :=
   match compileSource src with
   | .error e => s!"error: {e}"
   | .ok c =>
     let bytecode := compile c.core
-    let onCore := showOutcome c.ctorNames (Machine.exec (Core.step c.core) fuel (Core.init c.core))
+    let onCore := showOutcome c.ctorNames
+      (Machine.exec (Core.stepIO c.core) fuel (Core.initIO c.core input))
     let onVm := showOutcome c.ctorNames
-      (Machine.exec (Bytecode.step bytecode) (fuel * 20) (Bytecode.init bytecode))
+      (Machine.exec (Bytecode.stepIO bytecode) (fuel * 20) (Bytecode.initIO bytecode input))
     if onCore == onVm then onVm else s!"MISMATCH: Core gives {onCore}, bytecode gives {onVm}"
 
 end Glorious

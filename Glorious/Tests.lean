@@ -127,6 +127,21 @@ namespace Glorious.Tests
       }
   }" == "10"
 
+/-! The host: output is written in order, input is consumed, and both survive
+effects and early exits. -/
+
+#guard evalSource "fn main() { print(1); print((2, 3)); 4 }" == "1\n(2, 3)\n4"
+#guard evalSource "fn main() { (read(), read(), read()) }" [7, 8] == "(Ok(7), Ok(8), Err(()))"
+#guard evalSource "fn sum_input(total) { match(read()) { Some(n) => tail sum_input(total + n), None => total } }
+  fn main() { let total = sum_input(0); print(total); total * 2 }" [1, 2, 3, 4] == "10\n20"
+#guard evalSource "effect Fail { fail(e) -> ! }
+  fn work() { print(1); fail(2); print(3) }
+  fn main() { handle work() { fail(e) => print(e * 10); 0 } }" == "1\n20\n0"
+#guard evalSource "fn countdown(n) { match(n) { 0 => (), _ => print(n); tail countdown(n - 1) } }
+  fn main() { countdown(3) }" == "3\n2\n1\n()"
+#guard evalSource "fn main() { loop { let x = read() else { break(0) }; print(x * x) } }" [2, 3]
+  == "4\n9\n0"
+
 /-! Errors are reported, not guessed around. -/
 
 #guard evalSource "fn main() { nope }" == "error: unknown name `nope`"

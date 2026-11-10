@@ -64,6 +64,10 @@ def GoesWrong (step : σ → Step σ ν) (s : σ) : Prop :=
 def Diverges (step : σ → Step σ ν) (s : σ) : Prop :=
   ∀ n, ∃ s', run step n s = .next s'
 
+/-- The machine started in `s` is in state `s'` after some number of steps. -/
+def Reaches (step : σ → Step σ ν) (s s' : σ) : Prop :=
+  ∃ n, run step n s = .next s'
+
 variable {step : σ → Step σ ν}
 
 @[simp] theorem run_zero (s : σ) : run step 0 s = .next s := rfl
@@ -121,6 +125,51 @@ theorem halt_unique {n m : Nat} {s : σ} {v w : ν}
   have b := run_halt_mono h₂ (Nat.le_max_right n m)
   rw [a] at b
   exact Step.halt.inj b
+
+/-! An observation that only grows along each step only grows along a run. -/
+
+theorem run_obs_prefix {α : Type} (obs : σ → List α)
+    (hstep : ∀ {s s' : σ}, step s = .next s' → obs s <+: obs s') :
+    ∀ (n : Nat) {s s' : σ}, run step n s = .next s' → obs s <+: obs s' := by
+  intro n
+  induction n with
+  | zero =>
+    intro s s' h
+    rw [run_zero] at h
+    cases h
+    exact List.prefix_refl _
+  | succ n ih =>
+    intro s s' h
+    rw [run_succ] at h
+    cases hs : step s with
+    | next s₁ =>
+      rw [hs, Step.bind_next] at h
+      exact (hstep hs).trans (ih h)
+    | halt v => rw [hs] at h; simp at h
+    | stuck => rw [hs] at h; simp at h
+
+theorem run_obs_prefix_halt {α : Type} (obs : σ → List α) (final : ν → List α)
+    (hstep : ∀ {s s' : σ}, step s = .next s' → obs s <+: obs s')
+    (hhalt : ∀ {s : σ} {v : ν}, step s = .halt v → obs s <+: final v) :
+    ∀ (n : Nat) {s : σ} {v : ν}, run step n s = .halt v → obs s <+: final v := by
+  intro n
+  induction n with
+  | zero =>
+    intro s v h
+    rw [run_zero] at h
+    cases h
+  | succ n ih =>
+    intro s v h
+    rw [run_succ] at h
+    cases hs : step s with
+    | next s₁ =>
+      rw [hs, Step.bind_next] at h
+      exact (hstep hs).trans (ih h)
+    | halt w =>
+      rw [hs, Step.bind_halt] at h
+      cases h
+      exact hhalt hs
+    | stuck => rw [hs] at h; simp at h
 
 /-- `run` written as a loop, for executing machines. -/
 def exec (step : σ → Step σ ν) : Nat → σ → Step σ ν

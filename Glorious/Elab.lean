@@ -41,6 +41,10 @@ def prims : List (String × Prim × Nat) :=
   [("int_add", .intAdd, 2), ("int_sub", .intSub, 2), ("int_mul", .intMul, 2),
    ("int_lt", .intLt, 2), ("int_eq", .intEq, 2)]
 
+/-- Host operations by surface name: their identity and argument count. -/
+def hosts : List (String × Nat × Nat) :=
+  [("host_write", 0, 1), ("host_read", 1, 0)]
+
 /-- The Core computation under construction: binding forms awaiting their
 continuation, the number of locals so far, and the terminator once one is known. -/
 structure Builder where
@@ -208,6 +212,7 @@ inductive Head where
   | ctor (info : CtorInfo)
   | op (info : OpInfo)
   | prim (p : Prim) (arity : Nat)
+  | host (id : Nat) (arity : Nat)
   | const (e : Expr)
 
 def resolveName (scope : Scope) (qual : Option String) (x : String) : M Head := do
@@ -221,6 +226,7 @@ def resolveName (scope : Scope) (qual : Option String) (x : String) : M Head := 
     return .op info
   if let some idx := g.fns.lookup x then return .fn idx
   if let some (p, n) := prims.lookup x then return .prim p n
+  if let some (id, n) := hosts.lookup x then return .host id n
   if let some e := g.aliases.lookup x then return .const e
   throw s!"unknown name `{x}`"
 
@@ -239,6 +245,7 @@ partial def elabExpr (scope : Scope) (tailPos : Bool) : Expr → M Atom
       else throw s!"constructor `{x}` takes {info.arity} arguments"
     | .op _ => throw s!"operation `{x}` must be called"
     | .prim _ _ => throw s!"intrinsic `{x}` must be called"
+    | .host _ _ => throw s!"host operation `{x}` must be called"
     | .const e => elabExpr [] false e
   | .label l =>
     match scope.lookup (labelName l) with
@@ -298,6 +305,12 @@ partial def elabCall (scope : Scope) (isTail : Bool) (f : Expr) (args : List Exp
         throw s!"intrinsic `{x}` takes {n} arguments, but is given {args.length}"
       let atoms ← args.mapM (elabExpr scope false)
       emit (.let_ (.prim p atoms))
+    | .host id n => do
+      if isTail then throw s!"`tail` applies to calls, not to the host operation `{x}`"
+      if n != args.length then
+        throw s!"host operation `{x}` takes {n} arguments, but is given {args.length}"
+      let atoms ← args.mapM (elabExpr scope false)
+      emit (.host id atoms)
     | .const e => do
       let callee ← elabExpr [] false e
       elabApply scope isTail callee args

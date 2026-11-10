@@ -23,6 +23,7 @@ def compileTm : Core.Tm → Code
   | .raise op args => [.raise op args]
   | .perform op args body => .perform op args :: compileTm body
   | .label thunk body => .label thunk :: compileTm body
+  | .host id args body => .host id args :: compileTm body
 
 /-- A structural test a pattern imposes on a place. -/
 inductive Test where

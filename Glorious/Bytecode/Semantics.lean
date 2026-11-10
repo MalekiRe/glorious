@@ -1,5 +1,6 @@
 import Glorious.Machine
 import Glorious.Control
+import Glorious.Host
 import Glorious.Bytecode.Ast
 
 /-!
@@ -129,13 +130,47 @@ def step (p : Program) (s : State) : Step State Value :=
     | none => .stuck
     | some v =>
       .next ⟨s.code, if v.isInt n then s.pc + 1 else fail, s.locals, s.frames, s.store⟩
+  -- A host operation is a step of the program in its world; see `stepIO`.
+  | some (.host _ _) => .stuck
 
 def init (p : Program) : State := ⟨p.main, 0, [], [], ⟨[], 0⟩⟩
 
-def Halts (p : Program) (v : Value) : Prop := Machine.Halts (step p) (init p) v
+/-- A machine state together with the world outside the program. -/
+structure Config where
+  state : State
+  world : World
 
-def GoesWrong (p : Program) : Prop := Machine.GoesWrong (step p) (init p)
+def lift (w : World) : Step State Value → Step Config Result
+  | .next s => .next ⟨s, w⟩
+  | .halt v => .halt ⟨v, w⟩
+  | .stuck => .stuck
 
-def Diverges (p : Program) : Prop := Machine.Diverges (step p) (init p)
+/-- One step of a program in its world. Only a host instruction touches the world. -/
+def stepIO (p : Program) (c : Config) : Step Config Result :=
+  match c.state.code[c.state.pc]? with
+  | some (.host id args) =>
+    match evalAtoms c.state.locals args with
+    | none => .stuck
+    | some vs =>
+      match Host.call c.world id vs with
+      | none => .stuck
+      | some (r, world) =>
+        .next ⟨⟨c.state.code, c.state.pc + 1, c.state.locals ++ [r], c.state.frames,
+          c.state.store⟩, world⟩
+  | _ => lift c.world (step p c.state)
+
+def initIO (p : Program) (input : List Int) : Config := ⟨init p, ⟨input, []⟩⟩
+
+def Halts (p : Program) (input : List Int) (r : Result) : Prop :=
+  Machine.Halts (stepIO p) (initIO p input) r
+
+def GoesWrong (p : Program) (input : List Int) : Prop :=
+  Machine.GoesWrong (stepIO p) (initIO p input)
+
+def Diverges (p : Program) (input : List Int) : Prop :=
+  Machine.Diverges (stepIO p) (initIO p input)
+
+def Emits (p : Program) (input : List Int) (out : List Value) : Prop :=
+  ∃ c, Machine.Reaches (stepIO p) (initIO p input) c ∧ c.world.output = out
 
 end Glorious.Bytecode
