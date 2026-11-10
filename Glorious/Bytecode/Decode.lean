@@ -117,8 +117,9 @@ def instr : Bytes → Option (Instr × Bytes)
     pure (.raise op args, bs)
   | 7 :: bs => do
     let (op, bs) ← nat bs
+    let (shots, bs) ← nat bs
     let (args, bs) ← list atom bs
-    pure (.perform op args, bs)
+    pure (.perform op shots args, bs)
   | 8 :: bs => (atom bs).map fun (thunk, rest) => (.label thunk, rest)
   | 9 :: bs => (atom bs).map fun (thunk, rest) => (.labelTail thunk, rest)
   | 10 :: bs => do

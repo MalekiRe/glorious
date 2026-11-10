@@ -1,0 +1,61 @@
+// A small list library and a sort, in the language.
+// expect:
+// Cons(1, Cons(3, Cons(5, Cons(7, Cons(9, Nil)))))
+// Cons(1, Cons(4, Cons(9, Cons(16, Cons(25, Nil)))))
+// 13579
+
+enum List { Nil, Cons(head, tail) }
+
+fn append(a, b) {
+    match(a) {
+        Nil => b,
+        Cons(head, rest) => Cons(head, append(rest, b))
+    }
+}
+
+fn range(from, to) {
+    match(from < to) {
+        Ok(_) => Cons(from, range(from + 1, to)),
+        Err(_) => Nil
+    }
+}
+
+fn map(list, f) {
+    match(list) {
+        Nil => Nil,
+        Cons(head, rest) => Cons(f(head), map(rest, f))
+    }
+}
+
+fn filter(list, keep) {
+    match(list) {
+        Nil => Nil,
+        Cons(head, others) =>
+            let rest = filter(others, keep);
+            if(keep(head)) { Cons(head, rest) } else { rest }
+    }
+}
+
+fn fold(list, initial, step) {
+    tail match(list) {
+        Nil => initial,
+        Cons(head, rest) => tail fold(rest, step(initial, head), step)
+    }
+}
+
+fn sort(list) {
+    match(list) {
+        Nil => Nil,
+        Cons(pivot, rest) =>
+            let smaller = sort(filter(rest, { x => x < pivot }));
+            let larger = sort(filter(rest, { x => x >= pivot }));
+            append(smaller, Cons(pivot, larger))
+    }
+}
+
+fn main() {
+    let numbers = Cons(5, Cons(3, Cons(9, Cons(1, Cons(7, Nil)))));
+    print(sort(numbers));
+    print(map(range(1, 6), { x => x * x }));
+    fold(sort(numbers), 0, fn(total, x) { total * 10 + x })
+}

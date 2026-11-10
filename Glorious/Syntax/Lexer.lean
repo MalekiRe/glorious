@@ -9,7 +9,7 @@ inductive Tok where
   | int (n : Nat)
   /-- A symbolic operator such as `+` or `==`. -/
   | op (s : String)
-  /-- Punctuation: `( ) { } , ; . @ :: = => ->`. -/
+  /-- Punctuation: `( ) { } [ ] , ; . @ :: = => ->`. -/
   | punct (s : String)
   | eof
   deriving BEq, Inhabited
@@ -33,7 +33,7 @@ private def isIdentRest (c : Char) : Bool := c.isAlphanum || c == '_'
 
 private def isOpChar (c : Char) : Bool := "+-*/<>=!&|%^~?".toList.contains c
 
-private def isPunctChar (c : Char) : Bool := "(){},;.@".toList.contains c
+private def isPunctChar (c : Char) : Bool := "(){}[],;.@".toList.contains c
 
 private def slice (cs : Array Char) (i j : Nat) : String :=
   (cs.extract i j).foldl (fun s c => s.push c) ""

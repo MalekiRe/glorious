@@ -389,9 +389,20 @@ private partial def parseItem : P Item := do
     advance
     let name ← expectIdent
     expectPunct "{"
-    let mut ops : Array (String × Nat × Bool) := #[]
+    let mut ops : Array (String × Nat × Bool × Nat) := #[]
     repeat
       if (← peek) == .punct "}" then break
+      -- An optional quantity `[lo, hi]`: the resumption may be used `hi` times.
+      let mut shots := 1
+      if ← acceptPunct "[" then
+        match ← peek, ← peek 1, ← peek 2 with
+        | .int _, .punct ",", .int hi =>
+          advance
+          advance
+          advance
+          shots := hi
+        | _, _, _ => failAt "expected a quantity such as `[2, 2]`"
+        expectPunct "]"
       let op ← expectIdent
       expectPunct "("
       let arity ← countFields
@@ -402,7 +413,7 @@ private partial def parseItem : P Item := do
           terminal := true
         else
           let _ ← expectIdent
-      ops := ops.push (op, arity, terminal)
+      ops := ops.push (op, arity, terminal, shots)
       if !(← acceptPunct ",") then
         if !(← acceptPunct ";") then break
     expectPunct "}"

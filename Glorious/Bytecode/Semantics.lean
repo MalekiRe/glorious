@@ -88,7 +88,7 @@ def apply (p : Program) (c : Callee) (frames : List Frame) (store : Store Frame)
   match c with
   | .fn fn captures vs => callFn p fn captures vs frames store
   | .cont id v =>
-    match takeCont store.conts id with
+    match useCont store.conts id with
     | some (segment, conts) => deliver p v (segment ++ frames) ⟨conts, store.labels, store.cells⟩
     | none => .stuck
   | .label id v =>
@@ -128,7 +128,7 @@ def step (p : Program) (s : State) : Step State Value :=
       | none => .stuck
       | some d =>
         deliver p .unit (unwind d.above (.invoke d.arm d.handler.caps vs :: d.below)) s.store
-  | some (.perform op args) =>
+  | some (.perform op shots args) =>
     match evalAtoms s.locals args with
     | none => .stuck
     | some vs =>
@@ -137,7 +137,7 @@ def step (p : Program) (s : State) : Step State Value :=
       | some d =>
         callFn p d.arm d.handler.caps (vs ++ [.cont s.store.conts.length]) d.below
           ⟨s.store.conts
-              ++ [some (.ret s.code (s.pc + 1) s.locals :: d.above ++ [.handler d.handler])],
+              ++ [some (shots, .ret s.code (s.pc + 1) s.locals :: d.above ++ [.handler d.handler])],
             s.store.labels, s.store.cells⟩
   | some (.label thunk) =>
     match evalClosure s.locals thunk with

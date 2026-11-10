@@ -6,7 +6,7 @@ import Glorious.Control
 Core is the elaborated kernel language: every intermediate result is named and
 every callable is a closed function with an explicit capture list. This file
 covers data, closures, calls, tail calls, pattern callables, and effects with
-handlers and one-shot resumptions, label scopes, guaranteed cleanup, and host
+handlers and resumptions, label scopes, guaranteed cleanup, and host
 operations.
 -/
 
@@ -42,8 +42,9 @@ inductive Tm where
   /-- Perform a terminal operation: the computation up to its handler is abandoned. -/
   | raise (op : Nat) (args : List Atom)
   /-- Perform a resumptive operation and bind the value it is resumed with. The
-  serving function receives the arguments followed by the resumption. -/
-  | perform (op : Nat) (args : List Atom) (body : Tm)
+  serving function receives the arguments followed by the resumption, which may
+  be used `shots` times. -/
+  | perform (op : Nat) (shots : Nat) (args : List Atom) (body : Tm)
   /-- Run the callable `thunk` inside a fresh label scope, passing it the label,
   and bind the scope's result. Applying the label to a value leaves the scope
   with that value. -/

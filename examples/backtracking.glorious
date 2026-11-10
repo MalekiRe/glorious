@@ -1,0 +1,53 @@
+// Backtracking search with a resumption that is used twice.
+// expect:
+// Cons(Cons(8, Cons(2, Nil)), Cons(Cons(3, Cons(5, Cons(2, Nil))), Nil))
+
+enum List { Nil, Cons(head, tail) }
+
+fn append(a, b) {
+    match(a) {
+        Nil => b,
+        Cons(head, rest) => Cons(head, append(rest, b))
+    }
+}
+
+// `choose()` returns true on one path and false on another: its handler
+// resumes the rest of the computation once for each answer.
+effect Choice { [2, 2] choose() }
+
+effect Reject { reject() -> ! }
+
+// Every result the body can produce, over all the choices it makes.
+fn all(body) {
+    handle body() {
+        result => Cons(result, Nil),
+        choose(k) => append(k(true), k(false)),
+        reject() => Nil
+    }
+}
+
+// Choose a subset of the items.
+fn subset(items) {
+    match(items) {
+        Nil => Nil,
+        Cons(head, others) =>
+            let rest = subset(others);
+            if(choose()) { Cons(head, rest) } else { rest }
+    }
+}
+
+fn sum(list) {
+    match(list) {
+        Nil => 0,
+        Cons(head, rest) => head + sum(rest)
+    }
+}
+
+// The subsets of 3, 5, 8, 2 that add up to 10.
+fn main() {
+    all({
+        let picked = subset(Cons(3, Cons(5, Cons(8, Cons(2, Nil)))));
+        if(sum(picked) != 10) { reject() };
+        picked
+    })
+}

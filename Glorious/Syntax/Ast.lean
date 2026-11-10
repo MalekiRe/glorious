@@ -76,8 +76,9 @@ inductive Item where
   | enum (name : String) (ctors : List (String × Nat))
   /-- A struct with positional fields. -/
   | struct (name : String) (arity : Nat)
-  /-- An effect and its operations: name, payload count, and whether it is terminal. -/
-  | effect (name : String) (ops : List (String × Nat × Bool))
+  /-- An effect and its operations: name, payload count, whether it is terminal,
+  and how many times its resumption may be used. -/
+  | effect (name : String) (ops : List (String × Nat × Bool × Nat))
   | fn (name : String) (clauses : List Clause)
   /-- `let Name = expr;`: a constructor alias or a constant. -/
   | alias (name : String) (value : Expr)

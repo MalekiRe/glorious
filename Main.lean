@@ -41,13 +41,43 @@ def writeBytecode (c : Compiled) (out : System.FilePath) : IO Unit :=
   IO.FS.writeBinFile out
     ⟨((Bytecode.Encode.file c.ctorNames.toList (compile c.core)).map Nat.toUInt8).toArray⟩
 
-/-- Run every test program on the Lean machines, and on the Rust VM if given. -/
+/-- The expectation at the top of an example file: an optional `// input: ...`
+line, then `// expect:` followed by one comment line per line of output. -/
+def parseExpectation (src : String) : Option (List Int × String) := Id.run do
+  let mut input : List Int := []
+  let mut expect : Array String := #[]
+  let mut found := false
+  for line in src.splitOn "\n" do
+    if !line.startsWith "//" then break
+    if line.startsWith "// input:" then
+      input := ((line.drop 9).toString.splitOn " ").filterMap String.toInt?
+    else if line.startsWith "// expect:" then
+      found := true
+    else if found then
+      expect := expect.push (line.drop 3).toString
+  if found then some (input, "\n".intercalate expect.toList) else none
+
+/-- The example programs that state what they must print. -/
+def exampleCases (dir : System.FilePath) : IO (List Case) := do
+  if !(← dir.pathExists) then return []
+  let entries := (← dir.readDir).qsort (fun a b => a.fileName < b.fileName)
+  let mut out : Array Case := #[]
+  for entry in entries do
+    if entry.fileName.endsWith ".glorious" then
+      let src ← IO.FS.readFile entry.path
+      if let some (input, expect) := parseExpectation src then
+        out := out.push ⟨src, input, expect⟩
+  pure out.toList
+
+/-- Run every test program and every example on the Lean machines, and on the
+Rust VM if its path is given. -/
 def selftest (vm : Option String) : IO UInt32 := do
   let mut failures := 0
   let mut ran := 0
   let tmp : System.FilePath := (← IO.getEnv "TMPDIR").getD "/tmp"
   let file := tmp / s!"glorious-selftest-{← IO.monoMsNow}.glbc"
-  for c in cases do
+  let examples ← exampleCases "examples"
+  for c in cases ++ examples do
     ran := ran + 1
     let got := evalSource c.src c.input
     if got != c.expect then
@@ -66,7 +96,7 @@ def selftest (vm : Option String) : IO UInt32 := do
           IO.eprintln s!"rust vm: expected\n{c.expect}\ngot\n{got}\n{out.stderr}for\n{c.src}\n"
   if vm.isSome then IO.FS.removeFile file
   let machines := if vm.isSome then "Core, Lean bytecode and Rust VM" else "Core and Lean bytecode"
-  IO.println s!"{ran} programs on {machines}: {failures} failures"
+  IO.println s!"{ran} programs ({examples.length} examples) on {machines}: {failures} failures"
   pure (if failures == 0 then 0 else 1)
 
 def parseInput (args : List String) : Except String (List Int) :=

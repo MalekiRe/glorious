@@ -21,7 +21,7 @@ def compileTm : Core.Tm → Code
   | .tail f args => [.tail f args]
   | .handle ret ops captures thunk body => .handle ret ops captures thunk :: compileTm body
   | .raise op args => [.raise op args]
-  | .perform op args body => .perform op args :: compileTm body
+  | .perform op shots args body => .perform op shots args :: compileTm body
   | .label thunk body => .label thunk :: compileTm body
   | .handleTail ret ops captures thunk => [.handleTail ret ops captures thunk]
   | .labelTail thunk => [.labelTail thunk]

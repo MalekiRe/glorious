@@ -1,4 +1,6 @@
 // Generators and folds, written in the language rather than built into it.
+// expect:
+// (385, Ok(15))
 
 effect Yield { yield(value) }
 
