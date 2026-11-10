@@ -1,3 +1,5 @@
+import Std.Data.HashMap
+import Std.Data.HashSet
 import Glorious.Syntax.Ast
 import Glorious.Elab
 import Glorious.Typing.Certify
@@ -11,10 +13,12 @@ them, by unification over the Core program the elaborator produced. It is not
 proved and does not need to be: whatever it produces goes to `checkProgram`,
 which accepts it only if it is a valid typing.
 
-A Core function used at several types gets several signatures. Each place a
-function is referred to from outside its own group of mutually recursive
-functions gets a fresh copy of that group to infer; equal results are merged at
-the end.
+It works in two steps. First each group of mutually recursive functions is
+inferred once, callees before callers, giving the group a general type together
+with the conditions a user of the group must also meet. A reference to a
+function from outside its group takes a fresh copy of that type. Then, starting
+from `main`, each function is given a signature for every ground type it is
+actually used at, and its hints are read off at that type.
 -/
 
 namespace Glorious.Infer
@@ -63,15 +67,13 @@ structure OpDecl where
   payload : List ITy
   result : Option ITy
 
-/-- One use of a function: its signature so far, and the hints found for each clause. -/
-structure Inst where
-  fn : Nat
-  group : Nat
+/-- A function's signature while it is being inferred. -/
+structure ISig where
   caps : List ITy
   params : List ITy
   ret : ITy
   row : IRow
-  hints : Array (Array IHint) := #[]
+  deriving Inhabited
 
 /-- Every operation of `sub` must be served at the same type: by `under` if it
 lists the operation, and by `sup` otherwise. -/
@@ -80,10 +82,36 @@ structure Incl where
   under : IOps
   sup : IRow
 
+/-- A function of an inferred group: its signature, the hints of each clause,
+and the functions outside the group it refers to, each at the type it uses. -/
+structure Member where
+  fn : Nat
+  sig : ISig
+  hints : Array (Array IHint)
+  refs : Array (Nat × ISig)
+
+/-- The general type of a group of mutually recursive functions. Variables made
+while the group was inferred stand for anything, except those in `fixed`, which
+declarations share with the rest of the program. -/
+structure Scheme where
+  startTy : Nat
+  startRow : Nat
+  fixedTys : Std.HashSet Nat
+  fixedRows : Std.HashSet Nat
+  members : List Member
+  /-- Everything the group's own typing depends on. -/
+  incls : Array Incl
+  places : Array (ITy × Nat × ITy)
+  /-- The part of it a user of the group can still affect, and so must meet too. -/
+  exported : Array Incl
+  exportedPlaces : Array (ITy × Nat × ITy)
+
 structure St where
   fns : Array Core.Fn
   /-- For each function, an identity shared by the functions it is mutually recursive with. -/
   scc : Array Nat := #[]
+  /-- How many values each function captures. -/
+  ncaps : Array Nat := #[]
   ctors : Array (Option CtorDecl) := #[]
   ops : Array (Option OpDecl) := #[]
   /-- The constructor tags of each declared type. -/
@@ -92,14 +120,26 @@ structure St where
   rows : Array (Option IRow) := #[]
   /-- Counts bindings, so that a pass over the constraints can tell whether it learnt anything. -/
   gen : Nat := 0
-  insts : Array Inst := #[]
-  /-- Copies of recursive groups: the group's identity and its instances so far. -/
-  groups : Array (Nat × List (Nat × Nat)) := #[]
+  /-- Variables below these belong to declarations. -/
+  globalTys : Nat := 0
+  globalRows : Nat := 0
+  schemes : Std.HashMap Nat Scheme := {}
+  /-- The group being inferred, and the signatures of its functions. -/
+  curScc : Option Nat := none
+  cur : List (Nat × ISig) := []
   incls : Array Incl := #[]
   /-- Field reads whose subject was not yet known: subject, index, field. -/
   places : Array (ITy × Nat × ITy) := #[]
   /-- The hints of the clause being inferred. -/
   hints : Array IHint := #[]
+  /-- The outside functions the function being inferred refers to. -/
+  refs : Array (Nat × ISig) := #[]
+  /-- Renaming in progress while a scheme is copied. -/
+  renTy : Std.HashMap Nat Nat := {}
+  renRow : Std.HashMap Nat Nat := {}
+  /-- The signatures given out so far, by function. -/
+  emitted : Std.HashMap Nat (List FnSig) := {}
+  entries : Array SigEntry := #[]
 
 abbrev M := StateT St (Except String)
 
@@ -353,59 +393,242 @@ partial def inferPats (ps : List Core.Pat) (ts : List ITy) : M (List ITy) := do
 
 end
 
+/-! ## General types of groups -/
+
+/-- A type with everything known about it written out. -/
+partial def resolve (t : ITy) : M ITy := do
+  match ← find t with
+  | .var id => pure (.var id)
+  | .param i => pure (.param i)
+  | .int => pure .int
+  | .tuple fs => do pure (.tuple (← fs.mapM resolve))
+  | .data n args => do pure (.data n (← args.mapM resolve))
+  | .fn ps r ops tail => do
+    let row ← flattenRow ⟨ops, tail⟩
+    let ops ← row.ops.mapM fun (op, targs) => do pure (op, ← targs.mapM resolve)
+    pure (.fn (← ps.mapM resolve) (← resolve r) ops row.tail)
+  | .ref t => do pure (.ref (← resolve t))
+
+def resolveRow (r : IRow) : M IRow := do
+  let r ← flattenRow r
+  pure ⟨← r.ops.mapM fun (op, targs) => do pure (op, ← targs.mapM resolve), r.tail⟩
+
+def resolveSig (s : ISig) : M ISig := do
+  pure ⟨← s.caps.mapM resolve, ← s.params.mapM resolve, ← resolve s.ret, ← resolveRow s.row⟩
+
+def resolveIncl (c : Incl) : M Incl := do
+  pure ⟨← resolveRow c.sub, ← c.under.mapM fun (op, targs) => do pure (op, ← targs.mapM resolve),
+    ← resolveRow c.sup⟩
+
+def resolveHint : IHint → M IHint
+  | .ty t => do pure (.ty (← resolve t))
+  | .handler ρ H => do
+    pure (.handler (← resolve ρ) (← H.mapM fun (op, targs) => do pure (op, ← targs.mapM resolve)))
+
+/-- The variables of a resolved type: type variables, and row variables. -/
+partial def varsOf (t : ITy) (acc : Std.HashSet Nat × Std.HashSet Nat) :
+    Std.HashSet Nat × Std.HashSet Nat :=
+  match t with
+  | .var id => (acc.1.insert id, acc.2)
+  | .param _ => acc
+  | .int => acc
+  | .tuple fs => fs.foldl (fun a f => varsOf f a) acc
+  | .data _ args => args.foldl (fun a f => varsOf f a) acc
+  | .fn ps r ops tail =>
+    let acc := ps.foldl (fun a f => varsOf f a) acc
+    let acc := varsOf r acc
+    let acc := ops.foldl (fun a e => e.2.foldl (fun a f => varsOf f a) a) acc
+    match tail with
+    | some v => (acc.1, acc.2.insert v)
+    | none => acc
+  | .ref t => varsOf t acc
+
+def varsOfRow (r : IRow) (acc : Std.HashSet Nat × Std.HashSet Nat) :
+    Std.HashSet Nat × Std.HashSet Nat :=
+  varsOf (.fn [] .int r.ops r.tail) acc
+
+def varsOfSig (s : ISig) (acc : Std.HashSet Nat × Std.HashSet Nat) :
+    Std.HashSet Nat × Std.HashSet Nat :=
+  varsOf (.fn (s.caps ++ s.params) s.ret s.row.ops s.row.tail) acc
+
 mutual
 
-/-- The instance of `fn` to use from an instance in `group`: the group's own if
-`fn` belongs to the same recursive group, and otherwise a fresh copy. -/
-partial def instOf (group : Option Nat) (fn : Nat) (ncaps : Nat) : M Nat := do
+/-- A copy of a scheme's type with its general variables renamed. -/
+partial def copyTy (sch : Scheme) (t : ITy) : M ITy := do
+  match t with
+  | .var id =>
+    if id < sch.startTy || sch.fixedTys.contains id then pure t
+    else
+      match (← get).renTy[id]? with
+      | some id' => pure (.var id')
+      | none =>
+        match ← freshTy with
+        | .var id' =>
+          modify fun s => { s with renTy := s.renTy.insert id id' }
+          pure (.var id')
+        | t' => pure t'
+  | .param i => pure (.param i)
+  | .int => pure .int
+  | .tuple fs => do pure (.tuple (← fs.mapM (copyTy sch)))
+  | .data n args => do pure (.data n (← args.mapM (copyTy sch)))
+  | .fn ps r ops tail => do
+    let row ← copyRow sch ⟨ops, tail⟩
+    pure (.fn (← ps.mapM (copyTy sch)) (← copyTy sch r) row.ops row.tail)
+  | .ref t => do pure (.ref (← copyTy sch t))
+
+partial def copyRow (sch : Scheme) (r : IRow) : M IRow := do
+  let ops ← r.ops.mapM fun (op, targs) => do pure (op, ← targs.mapM (copyTy sch))
+  match r.tail with
+  | none => pure ⟨ops, none⟩
+  | some v =>
+    if v < sch.startRow || sch.fixedRows.contains v then pure ⟨ops, some v⟩
+    else
+      match (← get).renRow[v]? with
+      | some v' => pure ⟨ops, some v'⟩
+      | none =>
+        let fresh ← freshRow
+        match fresh.tail with
+        | some v' =>
+          modify fun s => { s with renRow := s.renRow.insert v v' }
+          pure ⟨ops, some v'⟩
+        | none => pure ⟨ops, none⟩
+
+end
+
+def copySig (sch : Scheme) (s : ISig) : M ISig := do
+  pure ⟨← s.caps.mapM (copyTy sch), ← s.params.mapM (copyTy sch), ← copyTy sch s.ret,
+    ← copyRow sch s.row⟩
+
+def copyIncl (sch : Scheme) (c : Incl) : M Incl := do
+  pure ⟨← copyRow sch c.sub, (← copyRow sch ⟨c.under, none⟩).ops, ← copyRow sch c.sup⟩
+
+def copyPlace (sch : Scheme) (p : ITy × Nat × ITy) : M (ITy × Nat × ITy) := do
+  pure (← copyTy sch p.1, p.2.1, ← copyTy sch p.2.2)
+
+def copyHint (sch : Scheme) : IHint → M IHint
+  | .ty t => do pure (.ty (← copyTy sch t))
+  | .handler ρ H => do pure (.handler (← copyTy sch ρ) (← copyRow sch ⟨H, none⟩).ops)
+
+def startCopy : M Unit := modify fun s => { s with renTy := {}, renRow := {} }
+
+/-- Enforce the inclusions and the field reads until nothing more is learnt. -/
+partial def settle : M Unit := do
+  let before := (← get).gen
+  for c in (← get).incls do
+    let sub ← flattenRow c.sub
+    for (op, targs) in sub.ops do
+      match c.under.lookup op with
+      | some targs' => unifyList targs targs'
+      | none => requireOp c.sup op targs
+  let waiting := (← get).places
+  modify fun s => { s with places := #[] }
+  for (t, i, r) in waiting do
+    match ← fieldNow t i with
+    | some f => unify f r
+    | none => modify fun s => { s with places := s.places.push (t, i, r) }
+  if (← get).gen != before then settle
+
+mutual
+
+/-- The general type of the group of `fn`, inferring the group if this is its first use. -/
+partial def schemeOf (scc : Nat) : M Scheme := do
+  if let some sch := (← get).schemes[scc]? then return sch
+  let outer ← get
+  let startTy := outer.tys.size
+  let startRow := outer.rows.size
+  let fns := (List.range outer.fns.size).filter fun f => outer.scc[f]?.getD f == scc
+  -- A signature for each function of the group, before any body is looked at.
+  let mut cur : List (Nat × ISig) := []
+  for f in fns do
+    let arity := match outer.fns[f]? with
+      | some ⟨c :: _⟩ => c.pats.length
+      | _ => 0
+    let sig : ISig :=
+      ⟨← freshTys (outer.ncaps[f]?.getD 0), ← freshTys arity, ← freshTy, ← freshRow⟩
+    cur := cur ++ [(f, sig)]
+  modify fun s => { s with curScc := some scc, cur := cur, incls := #[], places := #[] }
+  let mut raw : List Member := []
+  for (f, sig) in cur do
+    let F := (outer.fns[f]?).getD ⟨[]⟩
+    modify fun s => { s with refs := #[] }
+    let mut hints : Array (Array IHint) := #[]
+    for c in F.clauses do
+      modify fun s => { s with hints := #[] }
+      unless c.pats.length == sig.params.length do
+        throw s!"the clauses of function {f} take different numbers of arguments"
+      let binds ← inferPats c.pats sig.params
+      inferTm sig.row sig.ret (sig.params ++ sig.caps ++ binds).toArray c.body
+      hints := hints.push (← get).hints
+    raw := raw ++ [⟨f, sig, hints, (← get).refs⟩]
+  settle
+  -- Write out what was learnt, and separate what is general from what is shared.
+  let members ← raw.mapM fun m => do
+    pure { m with
+      sig := ← resolveSig m.sig
+      hints := ← m.hints.mapM fun hs => hs.mapM resolveHint
+      refs := ← m.refs.mapM fun (g, s) => do pure (g, ← resolveSig s) }
+  let incls ← (← get).incls.mapM resolveIncl
+  let places ← (← get).places.mapM fun (t, i, r) => do pure (← resolve t, i, ← resolve r)
   let s ← get
-  let scc := s.scc[fn]?.getD fn
-  let target ← match group with
-    | some g =>
-      match s.groups[g]? with
-      | some (scc', members) =>
-        if scc' == scc then
-          match members.lookup fn with
-          | some id => return id
-          | none => pure g
-        else newGroup scc
-      | none => newGroup scc
-    | none => newGroup scc
-  let F ← match s.fns[fn]? with
-    | some F => pure F
-    | none => throw s!"function {fn} does not exist"
-  let arity := match F.clauses with
-    | c :: _ => c.pats.length
-    | [] => 0
-  let caps ← freshTys ncaps
-  let params ← freshTys arity
-  let ret ← freshTy
-  let row ← freshRow
-  let id := (← get).insts.size
+  let mut fixed : Std.HashSet Nat × Std.HashSet Nat := ({}, {})
+  for g in [0:s.globalTys] do
+    fixed := varsOf (← resolve (.var g)) fixed
+  for g in [0:s.globalRows] do
+    fixed := varsOfRow (← resolveRow ⟨[], some g⟩) fixed
+  -- A row can still grow if a user can reach it, or if something that can grow feeds it.
+  let mut live := members.foldl (fun acc m => varsOfSig m.sig acc) fixed
+  let mut grew := true
+  while grew do
+    grew := false
+    for c in incls do
+      if let some v := c.sub.tail then
+        if v < s.globalRows || live.2.contains v then
+          if let some w := c.sup.tail then
+            unless live.2.contains w do
+              live := (live.1, live.2.insert w)
+              grew := true
+  let exported := incls.filter fun c =>
+    match c.sub.tail with
+    | some v => v < s.globalRows || live.2.contains v
+    | none => false
+  let exportedPlaces := places.filter fun (t, _, _) =>
+    match t with
+    | .var v => v < s.globalTys || live.1.contains v
+    | _ => false
+  let sch : Scheme :=
+    ⟨startTy, startRow, fixed.1, fixed.2, members, incls, places, exported, exportedPlaces⟩
   modify fun s =>
     { s with
-      insts := s.insts.push ⟨fn, target, caps, params, ret, row, #[]⟩
-      groups := s.groups.modify target fun (scc, members) => (scc, (fn, id) :: members) }
-  -- Infer the body at once: it may refer back to this instance.
-  let outer := (← get).hints
-  let mut all : Array (Array IHint) := #[]
-  for c in F.clauses do
-    modify fun s => { s with hints := #[] }
-    unless c.pats.length == arity do
-      throw s!"the clauses of function {fn} take different numbers of arguments"
-    let binds ← inferPats c.pats params
-    inferTm (some target) row ret (params ++ caps ++ binds).toArray c.body
-    all := all.push (← get).hints
-  modify fun s =>
-    { s with hints := outer, insts := s.insts.modify id fun i => { i with hints := all } }
-  pure id
-where
-  newGroup (scc : Nat) : M Nat := do
-    let s ← get
-    set { s with groups := s.groups.push (scc, []) }
-    pure s.groups.size
+      schemes := s.schemes.insert scc sch
+      curScc := outer.curScc, cur := outer.cur, incls := outer.incls, places := outer.places
+      hints := outer.hints, refs := outer.refs }
+  pure sch
 
-partial def inferRhs (group : Option Nat) (Γ : Array ITy) : Rhs → M ITy
+/-- The signature to use for a reference to `fn`: the group's own inside its
+group, and otherwise a fresh copy of its general type, whose conditions the
+referring function takes on. -/
+partial def refSig (fn : Nat) : M ISig := do
+  let s ← get
+  let scc := s.scc[fn]?.getD fn
+  if s.curScc == some scc then
+    match s.cur.lookup fn with
+    | some sig => pure sig
+    | none => throw s!"certificate: function {fn} is missing from its group"
+  else
+    let sch ← schemeOf scc
+    match sch.members.find? (·.fn == fn) with
+    | none => throw s!"certificate: function {fn} is missing from its group"
+    | some m =>
+      startCopy
+      let sig ← copySig sch m.sig
+      let incls ← sch.exported.mapM (copyIncl sch)
+      let places ← sch.exportedPlaces.mapM (copyPlace sch)
+      modify fun s =>
+        { s with
+          incls := s.incls ++ incls, places := s.places ++ places, refs := s.refs.push (fn, sig) }
+      pure sig
+
+partial def inferRhs (Γ : Array ITy) : Rhs → M ITy
   | .atom a => atomTy Γ a
   | .prim _ args => do
     for a in args do
@@ -425,55 +648,45 @@ partial def inferRhs (group : Option Nat) (Γ : Array ITy) : Rhs → M ITy
     pure t
   | .closure fn captures => do
     let ts ← captures.mapM (atomTy Γ)
-    let id ← instOf group fn captures.length
-    match (← get).insts[id]? with
-    | some inst =>
-      unifyList ts inst.caps
-      pure (.func inst.params inst.ret inst.row)
-    | none => throw "certificate: an instance is missing"
+    let sig ← refSig fn
+    unifyList ts sig.caps
+    pure (.func sig.params sig.ret sig.row)
 
-/-- Infer a handler's functions. Gives the types of its operations, in the order of `ops`. -/
-partial def inferHandler (group : Option Nat) (amb : IRow) (Γ : Array ITy) (ret : Nat)
-    (ops : List (Nat × Nat)) (captures : List Atom) (σ ρ : ITy) : M IOps := do
+/-- Infer a handler's functions. Gives its operations, in the order of `ops`. -/
+partial def inferHandler (amb : IRow) (Γ : Array ITy) (ret : Nat) (ops : List (Nat × Nat))
+    (captures : List Atom) (σ ρ : ITy) : M IOps := do
   let Cs ← captures.mapM (atomTy Γ)
-  let retId ← instOf group ret captures.length
-  match (← get).insts[retId]? with
-  | some inst =>
-    unifyList Cs inst.caps
-    unifyList [σ] inst.params
-    unify ρ inst.ret
-    needs inst.row [] amb
-  | none => throw "certificate: an instance is missing"
+  let retSig ← refSig ret
+  unifyList Cs retSig.caps
+  unifyList [σ] retSig.params
+  unify ρ retSig.ret
+  needs retSig.row [] amb
   let mut H : IOps := []
   let mut shared : List (Nat × List ITy) := []
   for (op, arm) in ops do
     let ((targs, payload, result), shared') ← instOp shared op
     shared := shared'
     H := H ++ [(op, targs)]
-    let armId ← instOf group arm captures.length
-    match (← get).insts[armId]? with
-    | some inst =>
-      unifyList Cs inst.caps
-      let params := match result with
-        | some o => payload ++ [.func [o] ρ amb]
-        | none => payload
-      unifyList params inst.params
-      unify ρ inst.ret
-      needs inst.row [] amb
-    | none => throw "certificate: an instance is missing"
+    let armSig ← refSig arm
+    unifyList Cs armSig.caps
+    let params := match result with
+      | some o => payload ++ [.func [o] ρ amb]
+      | none => payload
+    unifyList params armSig.params
+    unify ρ armSig.ret
+    needs armSig.row [] amb
   pure H
 
 /-- Infer a computation that must give a `τ` and may perform what `amb` serves. -/
-partial def inferTm (group : Option Nat) (amb : IRow) (τ : ITy) (Γ : Array ITy) :
-    Core.Tm → M Unit
+partial def inferTm (amb : IRow) (τ : ITy) (Γ : Array ITy) : Core.Tm → M Unit
   | .ret a => do unify (← atomTy Γ a) τ
   | .let_ rhs body => do
-    let σ ← inferRhs group Γ rhs
+    let σ ← inferRhs Γ rhs
     hint (.ty σ)
-    inferTm group amb τ (Γ.push σ) body
+    inferTm amb τ (Γ.push σ) body
   | .call f args body => do
     let σ ← applied Γ amb f args
-    inferTm group amb τ (Γ.push σ) body
+    inferTm amb τ (Γ.push σ) body
   | .tail f args => do
     let σ ← applied Γ amb f args
     unify σ τ
@@ -482,15 +695,15 @@ partial def inferTm (group : Option Nat) (amb : IRow) (τ : ITy) (Γ : Array ITy
     let ρ ← freshTy
     let εt ← freshRow
     unify (← atomTy Γ thunk) (.func [] σ εt)
-    let H ← inferHandler group amb Γ ret ops captures σ ρ
+    let H ← inferHandler amb Γ ret ops captures σ ρ
     needs εt H amb
     hint (.handler ρ H)
-    inferTm group amb τ (Γ.push ρ) body
+    inferTm amb τ (Γ.push ρ) body
   | .handleTail ret ops captures thunk => do
     let σ ← freshTy
     let εt ← freshRow
     unify (← atomTy Γ thunk) (.func [] σ εt)
-    let H ← inferHandler group amb Γ ret ops captures σ τ
+    let H ← inferHandler amb Γ ret ops captures σ τ
     needs εt H amb
     hint (.handler τ H)
   | .raise op args => do
@@ -504,17 +717,17 @@ partial def inferTm (group : Option Nat) (amb : IRow) (τ : ITy) (Γ : Array ITy
     match result with
     | some σ =>
       requireOp amb op targs
-      inferTm group amb τ (Γ.push σ) body
+      inferTm amb τ (Γ.push σ) body
     | none => throw s!"operation {op} is performed for a result, but it never returns"
   | .label thunk body => do
     let σ ← scope Γ amb thunk
-    inferTm group amb τ (Γ.push σ) body
+    inferTm amb τ (Γ.push σ) body
   | .labelTail thunk => do
     let σ ← scope Γ amb thunk
     unify σ τ
   | .guard cleanup thunk body => do
     let σ ← guarded Γ amb cleanup thunk
-    inferTm group amb τ (Γ.push σ) body
+    inferTm amb τ (Γ.push σ) body
   | .guardTail cleanup thunk => do
     let σ ← guarded Γ amb cleanup thunk
     unify σ τ
@@ -522,7 +735,7 @@ partial def inferTm (group : Option Nat) (amb : IRow) (τ : ITy) (Γ : Array ITy
     let ε' ← freshRow
     unify (← atomTy Γ k) (.func [← freshTy] (← freshTy) ε')
     needs ε' [] amb
-    inferTm group amb τ (Γ.push .unit) body
+    inferTm amb τ (Γ.push .unit) body
   | .mem op args body => do
     let ts ← args.mapM (atomTy Γ)
     let σ ← match op, ts with
@@ -538,14 +751,14 @@ partial def inferTm (group : Option Nat) (amb : IRow) (τ : ITy) (Γ : Array ITy
         unify t (.ref (← freshTy))
         pure .unit
       | _, _ => throw "a memory operation has the wrong number of arguments"
-    inferTm group amb τ (Γ.push σ) body
+    inferTm amb τ (Γ.push σ) body
   | .host id args body => do
     let _ ← args.mapM (atomTy Γ)
     let σ ← match id, args.length with
       | 0, 1 => pure ITy.unit
       | 1, 0 => pure (ITy.tuple [.int, .int])
       | _, _ => throw s!"host operation {id} does not exist with {args.length} arguments"
-    inferTm group amb τ (Γ.push σ) body
+    inferTm amb τ (Γ.push σ) body
 where
   /-- A call: the callee's operations must be served where it is called. -/
   applied (Γ : Array ITy) (amb : IRow) (f : Atom) (args : List Atom) : M ITy := do
@@ -570,25 +783,6 @@ where
     pure σ
 
 end
-
-/-! ## Solving what was put off -/
-
-/-- Enforce the inclusions and the field reads until nothing more is learnt. -/
-partial def settle : M Unit := do
-  let before := (← get).gen
-  for c in (← get).incls do
-    let sub ← flattenRow c.sub
-    for (op, targs) in sub.ops do
-      match c.under.lookup op with
-      | some targs' => unifyList targs targs'
-      | none => requireOp c.sup op targs
-  let waiting := (← get).places
-  modify fun s => { s with places := #[] }
-  for (t, i, r) in waiting do
-    match ← fieldNow t i with
-    | some f => unify f r
-    | none => modify fun s => { s with places := s.places.push (t, i, r) }
-  if (← get).gen != before then settle
 
 /-- Settle, and give a value whose fields are read but whose type nothing else
 determines the smallest tuple type that has those fields. This happens for a
@@ -646,6 +840,50 @@ partial def ofTy : Ty → ITy
   | .fn ps r eff =>
     .fn (ps.map ofTy) (ofTy r) (eff.map fun (op, targs) => (op, targs.map ofTy)) none
   | .ref t => .ref (ofTy t)
+
+def zonkSig (s : ISig) : M FnSig := do
+  pure ⟨← s.caps.mapM zonk, ← s.params.mapM zonk, ← zonk s.ret, ← zonkRow s.row⟩
+
+/-! ## Signatures at the types a program uses -/
+
+/-- Give `fn` the signature `sig`, and with it every function of its group and
+everything they refer to, at the types that follow. -/
+partial def instantiate (fn : Nat) (sig : FnSig) : M Unit := do
+  if ((← get).emitted[fn]?.getD []).contains sig then return
+  let sch ← schemeOf ((← get).scc[fn]?.getD fn)
+  let outer ← get
+  modify fun s => { s with incls := #[], places := #[] }
+  startCopy
+  let members ← sch.members.mapM fun m => do
+    pure { m with
+      sig := ← copySig sch m.sig
+      hints := ← m.hints.mapM fun hs => hs.mapM (copyHint sch)
+      refs := ← m.refs.mapM fun (g, s) => do pure (g, ← copySig sch s) }
+  let incls ← sch.incls.mapM (copyIncl sch)
+  let places ← sch.places.mapM (copyPlace sch)
+  modify fun s => { s with incls := incls, places := places }
+  match members.find? (·.fn == fn) with
+  | none => throw s!"certificate: function {fn} is missing from its group"
+  | some m =>
+    unifyList m.sig.caps (sig.caps.map ofTy)
+    unifyList m.sig.params (sig.params.map ofTy)
+    unify m.sig.ret (ofTy sig.ret)
+    unifyRow m.sig.row ⟨sig.eff.map fun (op, targs) => (op, targs.map ofTy), none⟩
+  settleAll
+  let mut wanted : List (Nat × FnSig) := []
+  for m in members do
+    let ground ← zonkSig m.sig
+    unless ((← get).emitted[m.fn]?.getD []).contains ground do
+      let hints ← m.hints.toList.mapM fun hs => hs.toList.mapM zonkHint
+      modify fun s =>
+        { s with
+          emitted := s.emitted.insert m.fn (ground :: s.emitted[m.fn]?.getD [])
+          entries := s.entries.push ⟨m.fn, ground, hints⟩ }
+      for (g, gs) in m.refs do
+        wanted := wanted ++ [(g, ← zonkSig gs)]
+  modify fun s => { s with incls := outer.incls, places := outer.places }
+  for (g, gs) in wanted do
+    instantiate g gs
 
 /-- Every use of a declared type inside a type. -/
 partial def dataUses : Ty → List (Nat × List Ty)
@@ -828,22 +1066,53 @@ def sccs (fns : Array Core.Fn) : Array Nat := Id.run do
 
 /-! ## The certificate -/
 
+/-- How many values each function captures, read off the places that build it. -/
+def captureCounts (p : Core.Program) : Array Nat := Id.run do
+  let mut out := Array.replicate p.fns.length 0
+  let rec visit (out : Array Nat) : Core.Tm → Array Nat
+    | .ret _ => out
+    | .let_ rhs body =>
+      match rhs with
+      | .closure fn captures => visit (out.setIfInBounds fn captures.length) body
+      | _ => visit out body
+    | .call _ _ body => visit out body
+    | .tail _ _ => out
+    | .handle ret ops captures _ body =>
+      visit ((ret :: ops.map (·.2)).foldl (fun o f => o.setIfInBounds f captures.length) out) body
+    | .handleTail ret ops captures _ =>
+      (ret :: ops.map (·.2)).foldl (fun o f => o.setIfInBounds f captures.length) out
+    | .raise _ _ => out
+    | .perform _ _ body => visit out body
+    | .label _ body => visit out body
+    | .labelTail _ => out
+    | .guard _ _ body => visit out body
+    | .guardTail _ _ => out
+    | .cancel _ body => visit out body
+    | .mem _ _ body => visit out body
+    | .host _ _ body => visit out body
+  for F in p.fns do
+    for c in F.clauses do
+      out := visit out c.body
+  visit out p.main
+
 def certifyM (items : List Item) (g : Elab.Globals) (p : Core.Program) : M Cert := do
   declare items g
-  modify fun s => { s with scc := sccs s.fns }
+  modify fun s =>
+    { s with
+      scc := sccs s.fns, ncaps := captureCounts p
+      globalTys := s.tys.size, globalRows := s.rows.size }
   let τ ← freshTy
-  inferTm none ⟨[], none⟩ τ #[] p.main
+  inferTm ⟨[], none⟩ τ #[] p.main
   let mainHints := (← get).hints
+  let refs := (← get).refs
   settleAll
-  let mut entries : List SigEntry := []
-  for inst in (← get).insts do
-    let sig : FnSig :=
-      ⟨← inst.caps.mapM zonk, ← inst.params.mapM zonk, ← zonk inst.ret, ← zonkRow inst.row⟩
-    unless entries.any (fun e => e.fn == inst.fn && e.sig == sig) do
-      let hints ← inst.hints.toList.mapM fun hs => hs.toList.mapM zonkHint
-      entries := entries ++ [⟨inst.fn, sig, hints⟩]
   let mainTy ← zonk τ
   let mainHints ← mainHints.toList.mapM zonkHint
+  let wanted ← refs.toList.mapM fun (g, gs) => do pure (g, ← zonkSig gs)
+  modify fun s => { s with incls := #[], places := #[] }
+  for (g, gs) in wanted do
+    instantiate g gs
+  let entries := (← get).entries.toList
   let types : List Ty :=
     mainTy :: mainHints.flatMap hintTypes
       ++ entries.flatMap fun e =>
