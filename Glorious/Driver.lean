@@ -1,5 +1,6 @@
 import Glorious.Syntax.Parser
 import Glorious.Elab
+import Glorious.Check
 import Glorious.Prelude
 import Glorious.Compile
 import Glorious.Core.Semantics
@@ -19,12 +20,15 @@ structure Compiled where
   fnNames : Array String
   opNames : Array String
 
-/-- Parse and elaborate a program together with the prelude. -/
-def compileSource (src : String) : Except String Compiled := do
+/-- Parse, check and elaborate a program together with the prelude. With
+`check := false` the type checker is skipped, so that programs which go wrong
+can still be run. -/
+def compileSource (src : String) (check : Bool := true) : Except String Compiled := do
   let (prelude, fix) ← match Syntax.parse {} Prelude.source with
     | .ok r => pure r
     | .error e => throw s!"prelude: {e}"
   let (items, _) ← Syntax.parse fix src
+  if check then Check.checkProgram (prelude ++ items)
   let out ← Elab.elabProgram (prelude ++ items)
   pure ⟨out.program, out.ctorNames, out.fnNames, out.opNames⟩
 
@@ -138,7 +142,7 @@ def explainStuck (c : Compiled) (cfg : Core.Config) : String :=
 
 /-- Run a program on the Core machine and, if it goes wrong, say why. -/
 def diagnose (src : String) (input : List Int := []) (fuel : Nat := 200000) : String :=
-  match compileSource src with
+  match compileSource src (check := false) with
   | .error e => s!"error: {e}"
   | .ok c =>
     let rec go : Nat → Core.Config → String

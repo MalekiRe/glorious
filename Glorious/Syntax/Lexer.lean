@@ -9,7 +9,7 @@ inductive Tok where
   | int (n : Nat)
   /-- A symbolic operator such as `+` or `==`. -/
   | op (s : String)
-  /-- Punctuation: `( ) { } [ ] , ; . @ :: = => ->`. -/
+  /-- Punctuation: `( ) { } [ ] , ; . @ : :: = => ->`. -/
   | punct (s : String)
   | eof
   deriving BEq, Inhabited
@@ -62,10 +62,16 @@ private partial def lexLoop (cs : Array Char) (i line col : Nat) (acc : Array To
     else if isOpChar c then
       let j := spanWhile cs isOpChar i
       let s := slice cs i j
-      let tok := if ["=", "=>", "->"].contains s then Tok.punct s else Tok.op s
-      lexLoop cs j line (col + (j - i)) (acc.push ⟨tok, line, col⟩)
+      -- `>>` closes two type argument lists; it is never one operator.
+      if j > i + 1 && (cs.extract i j).all (· == '>') then
+        lexLoop cs (i + 1) line (col + 1) (acc.push ⟨.op ">", line, col⟩)
+      else
+        let tok := if ["=", "=>", "->"].contains s then Tok.punct s else Tok.op s
+        lexLoop cs j line (col + (j - i)) (acc.push ⟨tok, line, col⟩)
     else if c == ':' && cs[i + 1]? == some ':' then
       lexLoop cs (i + 2) line (col + 2) (acc.push ⟨.punct "::", line, col⟩)
+    else if c == ':' then
+      lexLoop cs (i + 1) line (col + 1) (acc.push ⟨.punct ":", line, col⟩)
     else if isPunctChar c then
       lexLoop cs (i + 1) line (col + 1) (acc.push ⟨.punct (String.singleton c), line, col⟩)
     else throw s!"{line}:{col}: unexpected character `{c}`"

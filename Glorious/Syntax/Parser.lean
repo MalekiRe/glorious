@@ -341,26 +341,85 @@ private partial def parseStmts : P (List Stmt) := do
 
 end
 
-/-- Count the comma-separated fields up to and including the closing `)`. -/
-private partial def countFields : P Nat := do
-  if ← acceptPunct ")" then return 0
-  let mut count := 1
-  let mut depth := 0
+private def isOp (s : String) : P Bool := do
+  pure ((← peek) == .op s)
+
+private def expectOp (s : String) : P Unit := do
+  if (← peek) == .op s then advance else failAt s!"expected `{s}`"
+
+/-- Type parameters `<A, B>`, if present. -/
+private partial def parseGenerics : P (List String) := do
+  if !(← isOp "<") then return []
+  advance
+  let mut out : Array String := #[]
   repeat
-    match ← peek with
-    | .punct "(" =>
-      depth := depth + 1
+    if ← isOp ">" then break
+    out := out.push (← expectIdent)
+    if !(← acceptPunct ",") then break
+  expectOp ">"
+  pure out.toList
+
+mutual
+
+private partial def parseType : P TypeExpr := do
+  match ← peek with
+  | .op "!" =>
+    advance
+    pure .never
+  | .op "&" =>
+    advance
+    if (← peek) == .ident "mut" then advance
+    pure (.ref (← parseType))
+  | .ident "_" =>
+    advance
+    pure .hole
+  | .ident "fn" =>
+    advance
+    expectPunct "("
+    let params ← parseTypeList ")"
+    let ret ← if ← acceptPunct "->" then parseType else pure (.tuple [])
+    pure (.fn params ret)
+  | .ident x =>
+    advance
+    if ← isOp "<" then
       advance
-    | .punct ")" =>
+      let mut args : Array TypeExpr := #[]
+      repeat
+        if ← isOp ">" then break
+        args := args.push (← parseType)
+        if !(← acceptPunct ",") then break
+      expectOp ">"
+      pure (.name x args.toList)
+    else pure (.name x [])
+  | .punct "(" =>
+    advance
+    let args ← parseTypeList ")"
+    match args with
+    | [t] => pure t
+    | _ => pure (.tuple args)
+  | _ => failAt "expected a type"
+
+/-- Types separated by commas up to and including the closing punctuation. An
+item may be written `name: Type`. -/
+private partial def parseTypeList (close : String) : P (List TypeExpr) := do
+  let mut out : Array TypeExpr := #[]
+  repeat
+    if (← peek) == .punct close then break
+    match ← peek, ← peek 1 with
+    | .ident _, .punct ":" =>
       advance
-      if depth == 0 then break
-      depth := depth - 1
-    | .punct "," =>
-      if depth == 0 then count := count + 1
       advance
-    | .eof => failAt "expected `)`"
-    | _ => advance
-  pure count
+    | _, _ => pure ()
+    out := out.push (← parseType)
+    if !(← acceptPunct ",") then break
+  expectPunct close
+  pure out.toList
+
+end
+
+/-- The fields of a constructor, struct or operation, if any are written. -/
+private def parseFields : P (List TypeExpr) := do
+  if ← acceptPunct "(" then parseTypeList ")" else pure []
 
 private def fixityKinds : List String := ["infixl", "infixr", "infix", "prefix"]
 
@@ -369,27 +428,29 @@ private partial def parseItem : P Item := do
   | .ident "enum" =>
     advance
     let name ← expectIdent
+    let params ← parseGenerics
     expectPunct "{"
-    let mut ctors : Array (String × Nat) := #[]
+    let mut ctors : Array (String × List TypeExpr) := #[]
     repeat
       if (← peek) == .punct "}" then break
       let c ← expectIdent
-      let arity ← if ← acceptPunct "(" then countFields else pure 0
-      ctors := ctors.push (c, arity)
+      ctors := ctors.push (c, ← parseFields)
       if !(← acceptPunct ",") then break
     expectPunct "}"
-    pure (.enum name ctors.toList)
+    pure (.enum name params ctors.toList)
   | .ident "struct" =>
     advance
     let name ← expectIdent
-    let arity ← if ← acceptPunct "(" then countFields else pure 0
+    let params ← parseGenerics
+    let fields ← parseFields
     let _ ← acceptPunct ";"
-    pure (.struct name arity)
+    pure (.struct name params fields)
   | .ident "effect" =>
     advance
     let name ← expectIdent
+    let params ← parseGenerics
     expectPunct "{"
-    let mut ops : Array (String × Nat × Bool × Nat) := #[]
+    let mut ops : Array OpDecl := #[]
     repeat
       if (← peek) == .punct "}" then break
       -- An optional quantity `[lo, hi]`: the resumption may be used `hi` times.
@@ -405,19 +466,20 @@ private partial def parseItem : P Item := do
         expectPunct "]"
       let op ← expectIdent
       expectPunct "("
-      let arity ← countFields
+      let payload ← parseTypeList ")"
       let mut terminal := false
+      let mut result : Option TypeExpr := none
       if ← acceptPunct "->" then
-        if (← peek) == .op "!" then
+        if ← isOp "!" then
           advance
           terminal := true
         else
-          let _ ← expectIdent
-      ops := ops.push (op, arity, terminal, shots)
+          result := some (← parseType)
+      ops := ops.push ⟨op, payload, result, terminal, shots⟩
       if !(← acceptPunct ",") then
         if !(← acceptPunct ";") then break
     expectPunct "}"
-    pure (.effect name ops.toList)
+    pure (.effect name params ops.toList)
   | .ident "fn" =>
     advance
     let name ← match ← peek with
@@ -428,17 +490,26 @@ private partial def parseItem : P Item := do
         advance
         pure s
       | _ => failAt "expected a function name"
+    let params ← parseGenerics
     if ← acceptPunct "(" then
-      let pats ← parsePatternList
+      let mut pats : Array Pattern := #[]
+      let mut annots : Array (Option TypeExpr) := #[]
+      repeat
+        if (← peek) == .punct ")" then break
+        pats := pats.push (← parsePattern)
+        annots := annots.push (← if ← acceptPunct ":" then some <$> parseType else pure none)
+        if !(← acceptPunct ",") then break
+      expectPunct ")"
+      let ret ← if ← acceptPunct "->" then some <$> parseType else pure none
       expectPunct "{"
       let body ← parseStmts
       expectPunct "}"
-      pure (.fn name [.mk pats body])
+      pure (.fn name params annots.toList ret [.mk pats.toList body])
     else
       expectPunct "{"
       let clauses ← parseClauses
       expectPunct "}"
-      pure (.fn name clauses)
+      pure (.fn name params [] none clauses)
   | .ident "let" =>
     advance
     let name ← expectIdent

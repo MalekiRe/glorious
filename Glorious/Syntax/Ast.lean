@@ -61,6 +61,33 @@ instance : Inhabited Expr := ⟨.int 0⟩
 
 instance : Inhabited Clause := ⟨.mk [] []⟩
 
+/-- A type as written in the source. -/
+inductive TypeExpr where
+  /-- A named type applied to arguments, a generic parameter, or, in a
+  declaration, a bare field name whose type is to be inferred. -/
+  | name (name : String) (args : List TypeExpr)
+  | tuple (args : List TypeExpr)
+  /-- `fn(A, B) -> R`. Its effects are inferred. -/
+  | fn (params : List TypeExpr) (ret : TypeExpr)
+  /-- `&T` or `&mut T`. -/
+  | ref (t : TypeExpr)
+  /-- `!`. -/
+  | never
+  /-- `_`: to be inferred. -/
+  | hole
+  deriving Inhabited
+
+/-- An operation of an effect. -/
+structure OpDecl where
+  name : String
+  payload : List TypeExpr
+  /-- The type the operation returns to its performer, if written. -/
+  result : Option TypeExpr
+  /-- Declared `-> !`: the operation never returns. -/
+  terminal : Bool
+  /-- How many times its resumption may be used. -/
+  shots : Nat
+
 inductive Assoc where
   | left
   | right
@@ -72,14 +99,15 @@ structure Fixities where
   prefixes : List (String × Nat) := []
 
 inductive Item where
-  /-- An enum and its constructors with their field counts. -/
-  | enum (name : String) (ctors : List (String × Nat))
+  /-- An enum: its type parameters and its constructors with their fields. -/
+  | enum (name : String) (params : List String) (ctors : List (String × List TypeExpr))
   /-- A struct with positional fields. -/
-  | struct (name : String) (arity : Nat)
-  /-- An effect and its operations: name, payload count, whether it is terminal,
-  and how many times its resumption may be used. -/
-  | effect (name : String) (ops : List (String × Nat × Bool × Nat))
-  | fn (name : String) (clauses : List Clause)
+  | struct (name : String) (params : List String) (fields : List TypeExpr)
+  | effect (name : String) (params : List String) (ops : List OpDecl)
+  /-- A function: its type parameters, the annotation on each parameter and on
+  the result where written, and its clauses. -/
+  | fn (name : String) (params : List String) (annots : List (Option TypeExpr))
+      (ret : Option TypeExpr) (clauses : List Clause)
   /-- `let Name = expr;`: a constructor alias or a constant. -/
   | alias (name : String) (value : Expr)
   /-- A fixity declaration; already collected before parsing. -/

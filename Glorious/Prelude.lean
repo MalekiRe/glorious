@@ -9,7 +9,7 @@ functions over the kernel.
 namespace Glorious.Prelude
 
 def source : String := r#"
-enum Result { Ok(value), Err(error) }
+enum Result<T, E> { Ok(T), Err(E) }
 
 // Truth is success. `Option<T>` is `Result<T, ()>` and `Bool` is `Option<()>`.
 let Some = Ok;
@@ -98,8 +98,8 @@ fn read() {
 }
 
 // Loops: a handler for `break` and `continue` around a body run again by a tail call.
-effect LoopControl {
-    break(value) -> !,
+effect LoopControl<B> {
+    break(B) -> !,
     continue() -> !
 }
 

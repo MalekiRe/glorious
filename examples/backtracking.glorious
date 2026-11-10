@@ -2,7 +2,8 @@
 // expect:
 // Cons(Cons(8, Cons(2, Nil)), Cons(Cons(3, Cons(5, Cons(2, Nil))), Nil))
 
-enum List { Nil, Cons(head, tail) }
+// A list of lists appears below, so the element type is a parameter.
+enum List<T> { Nil, Cons(T, List<T>) }
 
 fn append(a, b) {
     match(a) {

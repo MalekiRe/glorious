@@ -592,22 +592,26 @@ def collect (items : List Item) :
   let mut nextOp := 0
   for item in items do
     match item with
-    | .enum owner ctors =>
-      for (c, arity) in ctors do
+    | .enum owner _ ctors =>
+      for (c, fields) in ctors do
         if (g.ctors.lookup c).isSome then throw s!"constructor `{c}` is declared twice"
-        g := { g with ctors := (c, ⟨owner, names.size, arity, ctors.length == 1⟩) :: g.ctors }
+        g := { g with
+          ctors := (c, ⟨owner, names.size, fields.length, ctors.length == 1⟩) :: g.ctors }
         names := names.push c
-    | .struct owner arity =>
+    | .struct owner _ fields =>
       if (g.ctors.lookup owner).isSome then throw s!"constructor `{owner}` is declared twice"
-      g := { g with ctors := (owner, ⟨owner, names.size, arity, true⟩) :: g.ctors }
+      g := { g with ctors := (owner, ⟨owner, names.size, fields.length, true⟩) :: g.ctors }
       names := names.push owner
-    | .effect owner ops =>
-      for (op, arity, terminal, shots) in ops do
-        if (g.ops.lookup op).isSome then throw s!"operation `{op}` is declared twice"
-        if shots == 0 then throw s!"operation `{op}` must allow its resumption at least one use"
-        g := { g with ops := (op, ⟨owner, nextOp, arity, terminal, shots⟩) :: g.ops }
+    | .effect owner _ ops =>
+      for op in ops do
+        if (g.ops.lookup op.name).isSome then
+          throw s!"operation `{op.name}` is declared twice"
+        if op.shots == 0 then
+          throw s!"operation `{op.name}` must allow its resumption at least one use"
+        g := { g with
+          ops := (op.name, ⟨owner, nextOp, op.payload.length, op.terminal, op.shots⟩) :: g.ops }
         nextOp := nextOp + 1
-    | .fn name clauses =>
+    | .fn name _ _ _ clauses =>
       if (g.fns.lookup name).isSome then throw s!"function `{name}` is declared twice"
       g := { g with fns := (name, fns.size) :: g.fns }
       fns := fns.push (name, clauses)
