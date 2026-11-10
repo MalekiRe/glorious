@@ -135,6 +135,9 @@ structure St where
   dups : Array (Ty × String) := #[]
   /-- The same, for types that later functions can still affect. -/
   lateDups : Array (Ty × String) := #[]
+  /-- The clauses of every top-level function, for following calls when uses
+  are counted. -/
+  fnBodies : List (String × List Clause) := []
   /-- Calls whose callee has effects not yet known: the callee's row, the row
   permitted where it is called, and a description of the call. -/
   rowIncl : Array (Row × Row × String) := #[]
@@ -1057,20 +1060,433 @@ partial def usesStmts (resumptive : String → Bool) (x : String) : List Stmt �
 
 end
 
+
+/-! ### Counting uses along the paths a program can take
+
+The count above treats every callable that mentions a binding as one use. That
+is too coarse where a function runs only one of several callables it is given,
+which is how every conditional is written. So before a binding is held to
+"used more than once", its uses are counted again by running the program
+abstractly: constructors, callables and top-level functions are followed,
+clauses are chosen by the constructor of the value they are applied to, and
+anything not understood is treated as opaque, in which case every callable
+handed to it counts as called.
+
+This is an upper bound on the uses along any one path. If the analysis runs out
+of budget it gives no answer and the coarse count stands.
+-/
+
+/-- What is known about a value during the count. -/
+inductive AVal where
+  | unknown
+  /-- The binding whose uses are being counted. -/
+  | tracked
+  /-- A constructed value; a tuple has the empty tag. -/
+  | data (tag : String) (args : List AVal)
+  | clo (clauses : List Clause) (env : List (String × AVal))
+  | fn (name : String)
+  deriving Inhabited
+
+structure ACtx where
+  fns : List (String × List Clause)
+  ctors : List String
+  aliases : List (String × Expr)
+  ops : List (String × Bool)
+
+/-- A budget of steps; running out abandons the count. -/
+abbrev A := StateT Nat Option
+
+private def tick : A Unit := do
+  match ← get with
+  | 0 => failure
+  | n + 1 => set n
+
+/-- The outcomes of a computation: its value and the uses so far, per path. -/
+abbrev Alts := List (AVal × Nat)
+
+partial def ACtx.ctorOf (ctx : ACtx) (name : String) : Option String :=
+  if ctx.ctors.contains name then some name
+  else
+    match ctx.aliases.lookup name with
+    | some (.name _ y) => ctx.ctorOf y
+    | _ => none
+
+private partial def constPat : Expr → Option Pattern
+  | .int n => some (.int n)
+  | .name q x => some (if q.isSome then .ctor x q [] else .var x)
+  | .call (.name q x) args => do
+    some (.ctor x q (← args.mapM constPat))
+  | .tuple args => do
+    some (.tuple (← args.mapM constPat))
+  | _ => none
+
+/-- The names a pattern binds, leaving out constructors and constants. -/
+partial def binders (ctx : ACtx) : Pattern → List String
+  | .wild => []
+  | .int _ => []
+  | .var x =>
+    if (ctx.ctorOf x).isSome || (ctx.aliases.lookup x).isSome then [] else [x]
+  | .ctor _ _ ps => ps.flatMap (binders ctx)
+  | .tuple ps => ps.flatMap (binders ctx)
+
+inductive Fit where
+  | yes
+  | no
+  | maybe
+  deriving Inhabited
+
+def Fit.and : Fit → Fit → Fit
+  | .no, _ => .no
+  | _, .no => .no
+  | .yes, .yes => .yes
+  | _, _ => .maybe
+
+mutual
+
+/-- Does a value match a pattern, and what does the pattern bind? -/
+partial def fit (ctx : ACtx) : Pattern → AVal → Fit × List (String × AVal)
+  | .wild, _ => (.yes, [])
+  | .int _, _ => (.maybe, [])
+  | .var x, v =>
+    match ctx.ctorOf x with
+    | some c => fitData ctx c [] v
+    | none =>
+      match ctx.aliases.lookup x with
+      | some e =>
+        match constPat e with
+        | some p => fit ctx p v
+        | none => (.maybe, [])
+      | none => (.yes, [(x, v)])
+  | .ctor x _ ps, v =>
+    match ctx.ctorOf x with
+    | some c => fitData ctx c ps v
+    | none => (.maybe, (ps.flatMap (binders ctx)).map (·, AVal.unknown))
+  | .tuple ps, v => fitData ctx "" ps v
+
+partial def fitData (ctx : ACtx) (tag : String) (ps : List Pattern) (v : AVal) :
+    Fit × List (String × AVal) :=
+  match v with
+  | .data tag' args =>
+    if tag' == tag && args.length == ps.length then fitAll ctx ps args else (.no, [])
+  | _ => (.maybe, (ps.flatMap (binders ctx)).map (·, AVal.unknown))
+
+partial def fitAll (ctx : ACtx) (ps : List Pattern) (vs : List AVal) :
+    Fit × List (String × AVal) :=
+  (ps.zip vs).foldl (fun (acc : Fit × List (String × AVal)) (p, v) =>
+    let (f, binds) := fit ctx p v
+    (acc.1.and f, binds ++ acc.2)) (.yes, [])
+
+end
+
+private def maxUses (alts : Alts) : Nat := (alts.map (·.2)).foldl max 0
+
+/-- Uses made by matching a value against a pattern: a binding taken apart by a
+pattern that looks inside it is used. A plain name or `_` does not look. -/
+partial def takenApart (ctx : ACtx) : Pattern → AVal → Nat
+  | .wild, _ => 0
+  | .var x, v =>
+    if (binders ctx (.var x)).isEmpty then
+      match v with
+      | .tracked => 1
+      | _ => 0
+    else 0
+  | _, .tracked => 1
+  | .ctor _ _ ps, .data _ args =>
+    ((ps.zip args).map fun (p, v) => takenApart ctx p v).foldl (· + ·) 0
+  | .tuple ps, .data _ args =>
+    ((ps.zip args).map fun (p, v) => takenApart ctx p v).foldl (· + ·) 0
+  | _, _ => 0
+
+mutual
+
+/-- The uses made if a value goes somewhere the count cannot follow: every
+callable in it is taken to be called. -/
+partial def escapes (ctx : ACtx) (depth : Nat) : AVal → A Nat
+  | .tracked => pure 1
+  | .data _ args => do
+    let ns ← args.mapM (escapes ctx depth)
+    pure (ns.foldl (· + ·) 0)
+  | .clo clauses env => do
+    tick
+    let mut worst := 0
+    for clause in clauses do
+      match clause with
+      | .mk pats body =>
+        let params := (pats.flatMap (binders ctx)).map (·, AVal.unknown)
+        let found ← runStmts ctx depth (params ++ env) body
+        for (v, n) in found do
+          worst := max worst (n + (← escapes ctx depth v))
+    pure worst
+  | _ => pure 0
+
+/-- Keep the number of paths small: beyond a limit, merge them into one whose
+value is unknown and whose uses are the most any of them made. -/
+partial def cap (ctx : ACtx) (depth : Nat) (alts : Alts) : A Alts := do
+  if alts.length ≤ 16 then pure alts
+  else
+    let mut worst := 0
+    for (v, n) in alts do
+      worst := max worst (n + (← escapes ctx depth v))
+    pure [(.unknown, worst)]
+
+/-- A call the count cannot follow: its arguments escape. -/
+partial def unfollowed (ctx : ACtx) (depth : Nat) (args : List AVal) : A Alts := do
+  let mut n := 0
+  for a in args do
+    n := n + (← escapes ctx depth a)
+  pure [(.unknown, n)]
+
+partial def applyClauses (ctx : ACtx) (depth : Nat) (clauses : List Clause)
+    (env : List (String × AVal)) (args : List AVal) : A Alts := do
+  let mut out : Alts := []
+  for clause in clauses do
+    match clause with
+    | .mk pats body =>
+      if pats.length == args.length then
+        let (fitness, binds) := fitAll ctx pats args
+        let taken := ((pats.zip args).map fun (p, v) => takenApart ctx p v).foldl (· + ·) 0
+        let run : A Alts := do
+          let alts ← runStmts ctx depth (binds ++ env) body
+          pure (alts.map fun (v, n) => (v, n + taken))
+        match fitness with
+        | .no => pure ()
+        | .maybe => out := out ++ (← run)
+        | .yes =>
+          out := out ++ (← run)
+          break
+  if out.isEmpty then unfollowed ctx depth args else cap ctx depth out
+
+partial def callValue (ctx : ACtx) (depth : Nat) (f : AVal) (args : List AVal) : A Alts := do
+  tick
+  match f with
+  | .tracked => do
+    -- Calling the binding uses it.
+    let alts ← unfollowed ctx depth args
+    pure (alts.map fun (v, n) => (v, n + 1))
+  | .clo clauses env => applyClauses ctx depth clauses env args
+  | .fn name =>
+    match depth, ctx.fns.lookup name with
+    | d + 1, some clauses => applyClauses ctx d clauses [] args
+    | _, _ => unfollowed ctx depth args
+  | _ => unfollowed ctx depth args
+
+/-- Evaluate expressions left to right, over every combination of paths. -/
+partial def runList (ctx : ACtx) (depth : Nat) (env : List (String × AVal)) :
+    List Expr → A (List (List AVal × Nat))
+  | [] => pure [([], 0)]
+  | e :: es => do
+    let heads ← runExpr ctx depth env e
+    let tails ← runList ctx depth env es
+    let out := heads.flatMap fun (v, n) => tails.map fun (vs, m) => (v :: vs, n + m)
+    if out.length ≤ 16 then pure out
+    else
+      let mut worst := 0
+      for (vs, n) in out do
+        let mut total := n
+        for v in vs do
+          total := total + (← escapes ctx depth v)
+        worst := max worst total
+      pure [((e :: es).map fun _ => AVal.unknown, worst)]
+
+partial def runExpr (ctx : ACtx) (depth : Nat) (env : List (String × AVal)) : Expr → A Alts
+  | .int _ => pure [(.unknown, 0)]
+  | .name q x => do
+    tick
+    -- Naming the binding is not yet a use; calling it, taking it apart, or
+    -- letting it go where the count cannot follow is.
+    match (if q.isNone then env.lookup x else none) with
+    | some v => pure [(v, 0)]
+    | none =>
+      if let some c := ctx.ctorOf x then pure [(.data c [], 0)]
+      else if (ctx.ops.lookup x).isSome then pure [(.unknown, 0)]
+      else if (ctx.fns.lookup x).isSome then pure [(.fn x, 0)]
+      else
+        match ctx.aliases.lookup x with
+        | some e => runExpr ctx depth [] e
+        | none => pure [(.unknown, 0)]
+  | .label _ => pure [(.unknown, 0)]
+  | .tuple es => do
+    let alts ← runList ctx depth env es
+    pure (alts.map fun (vs, n) => (.data "" vs, n))
+  | .proj e idx => do
+    let alts ← runExpr ctx depth env e
+    pure (alts.map fun (v, n) =>
+      match v with
+      | .data _ args => (args.getD idx .unknown, n)
+      | .tracked => (.unknown, n + 1)
+      | _ => (.unknown, n))
+  | .call f args => runCall ctx depth env f args
+  | .tailCall f args => runCall ctx depth env f args
+  | .closure clauses => pure [(.clo clauses env, 0)]
+  | .handle subject arms => do
+    let subject ← runExpr ctx depth env subject
+    let mut completions : List Clause := []
+    let mut repeated := 0
+    let mut terminal : Alts := []
+    for arm in arms do
+      match arm with
+      | .mk [.ctor name q ps] body =>
+        match ctx.ops.lookup name with
+        | some resumptive =>
+          let params := (ps.flatMap (binders ctx)).map (·, AVal.unknown)
+          let alts ← runStmts ctx depth (params ++ env) body
+          if resumptive then
+            -- May run any number of times: one use there is already too many.
+            for (v, n) in alts do
+              if n + (← escapes ctx depth v) > 0 then repeated := 2
+          else terminal := terminal ++ alts
+        | none => completions := completions ++ [.mk [.ctor name q ps] body]
+      | other => completions := completions ++ [other]
+    let mut done : Alts := []
+    if completions.isEmpty then done := subject
+    else
+      for (v, n) in subject do
+        let found ← applyClauses ctx depth completions env [v]
+        for (v', n') in found do
+          done := (v', n + n') :: done
+    let before := maxUses subject
+    let all := done ++ terminal.map fun (v, n) => (v, n + before)
+    cap ctx depth (all.map fun (v, n) => (v, n + repeated))
+  | .labelScope _ body => do
+    let alts ← runStmts ctx depth env body
+    -- Leaving through the label gives a value the count does not follow.
+    pure (alts ++ [(.unknown, maxUses alts)])
+  | .ref _ => pure [(.unknown, 0)]
+  | .deref e => do
+    let alts ← runExpr ctx depth env e
+    let mut worst := 0
+    for (v, n) in alts do
+      worst := max worst (n + (← escapes ctx depth v))
+    pure [(.unknown, worst)]
+
+partial def runCall (ctx : ACtx) (depth : Nat) (env : List (String × AVal)) (f : Expr)
+    (args : List Expr) : A Alts := do
+  tick
+  let general : A Alts := do
+    let mut out : Alts := []
+    let found ← runExpr ctx depth env f
+    for (fv, n) in found do
+      let found ← runList ctx depth env args
+      for (vs, m) in found do
+        let found ← callValue ctx depth fv vs
+        for (v, k) in found do
+          out := (v, n + m + k) :: out
+    cap ctx depth out
+  match f with
+  | .name q x =>
+    if q.isNone && (env.lookup x).isSome then general
+    else if let some c := ctx.ctorOf x then
+      let alts ← runList ctx depth env args
+      pure (alts.map fun (vs, n) => (.data c vs, n))
+    else if (ctx.ops.lookup x).isSome then
+      -- Performing an operation hands its payload to a handler.
+      let mut worst := 0
+      let found ← runList ctx depth env args
+      for (vs, n) in found do
+        let found ← unfollowed ctx depth vs
+        for (_, k) in found do
+          worst := max worst (n + k)
+      pure [(.unknown, worst)]
+    else general
+  | _ => general
+
+partial def runStmts (ctx : ACtx) (depth : Nat) (env : List (String × AVal)) :
+    List Stmt → A Alts
+  | [] => pure [(.data "" [], 0)]
+  | .located _ _ s :: rest => runStmts ctx depth env (s :: rest)
+  | [.expr e] => runExpr ctx depth env e
+  | .expr e :: rest => do
+    -- The value is dropped, so the rest does not depend on which path was taken.
+    let first := maxUses (← runExpr ctx depth env e)
+    let alts ← runStmts ctx depth env rest
+    pure (alts.map fun (v, n) => (v, n + first))
+  | .let_ pat value :: rest => do
+    let mut out : Alts := []
+    let found ← runExpr ctx depth env value
+    for (v, n) in found do
+      let (_, binds) := fit ctx pat v
+      let bound := binds.map (·.1)
+      let others := ((binders ctx pat).filter (!bound.contains ·)).map (·, AVal.unknown)
+      let taken := takenApart ctx pat v
+      let found ← runStmts ctx depth (binds ++ others ++ env) rest
+      for (v', n') in found do
+        out := (v', n + n' + taken) :: out
+    cap ctx depth out
+  | .letMut x value :: rest => do
+    -- The value goes into a cell, where the count does not follow it.
+    let mut first := 0
+    let found ← runExpr ctx depth env value
+    for (v, n) in found do
+      first := max first (n + (← escapes ctx depth v))
+    let alts ← runStmts ctx depth ((x, .unknown) :: env) rest
+    pure (alts.map fun (v, n) => (v, n + first))
+  | .assign target value :: rest => do
+    let mut first := 0
+    let found ← runExpr ctx depth env value
+    for (v, n) in found do
+      first := max first (n + (← escapes ctx depth v))
+    let inTarget ← match target with
+      | .deref e => do
+        let mut worst := 0
+        let found ← runExpr ctx depth env e
+        for (v, n) in found do
+          worst := max worst (n + (← escapes ctx depth v))
+        pure worst
+      | _ => pure 0
+    let alts ← runStmts ctx depth env rest
+    pure (alts.map fun (v, n) => (v, n + first + inTarget))
+  | .defer e :: rest => do
+    let mut first := 0
+    let found ← runExpr ctx depth env e
+    for (v, n) in found do
+      first := max first (n + (← escapes ctx depth v))
+    let alts ← runStmts ctx depth env rest
+    pure (alts.map fun (v, n) => (v, n + first))
+
+end
+
+/-- The most uses of `x` along any path through `body`, if the count finishes.
+`outer` are the other local names in scope, about which nothing is known. -/
+def pathUses (ctx : ACtx) (outer : List String) (x : String) (body : List Stmt) : Option Nat :=
+  let env := (x, AVal.tracked) :: outer.map (·, AVal.unknown)
+  let count : A Nat := do
+    let mut worst := 0
+    let found ← runStmts ctx 8 env body
+    for (v, n) in found do
+      -- What the body yields leaves the region being counted.
+      worst := max worst (n + (← escapes ctx 8 v))
+    pure worst
+  (count.run 20000).map (·.1)
+
 /-- Record, for each binding used more than once in `body`, that its type must
-allow that. -/
-def checkUses (binds : Scope) (body : List Stmt) : M Unit := do
-  let ops := (← get).ops
+allow that. `outer` is the scope the bindings are added to. A binding whose
+type is already known to allow it needs no count; one that fails the coarse
+count is counted again along the paths the program can take. -/
+def checkUses (pos : String) (outer : Scope) (binds : Scope) (body : List Stmt) : M Unit := do
+  -- Report at the statement the bindings belong to, not the last one checked.
+  modify fun st => { st with pos := pos }
+  let s ← get
   let resumptive := fun (name : String) =>
-    match ops.lookup name with
+    match s.ops.lookup name with
     | some sig => sig.result.isSome
     | none => false
+  let ctx : ACtx := ⟨s.fnBodies, s.ctors.map (·.1), s.aliases,
+    s.ops.map fun (name, sig) => (name, sig.result.isSome)⟩
+  let names := (binds ++ outer).map (·.1)
   for (x, b) in binds do
-    if usesStmts resumptive x body ≥ 2 then
-      match b with
-      | .val t => mustDup t s!"`{x}` is used more than once"
-      | .poly s => mustDup s.ty s!"`{x}` is used more than once"
-      | _ => pure ()
+    let t := match b with
+      | .val t => some t
+      | .poly p => some p.ty
+      | _ => none
+    if let some t := t then
+      if usesStmts resumptive x body ≥ 2 then
+        let t ← zonk t
+        modify fun st => { st with seen := [] }
+        let settled := (freeTys t).isEmpty && (freeCaps t).isEmpty && !(← tyOwnsOnce [] t)
+        unless settled do
+          match pathUses ctx (names.filter (· != x)) x body with
+          | some n => if n ≥ 2 then mustDup t s!"`{x}` is used more than once"
+          | none => mustDup t s!"`{x}` is used more than once"
 
 /-- Can this pattern fail to match? Decided from its shape alone. -/
 partial def irrefutable : Pattern → M Bool
@@ -1323,15 +1739,19 @@ partial def inferStmts (scope : Scope) (amb : Row) : List Stmt → M Ty
       for (callee, permitted, _) in (← get).rowIncl do
         keep := .func [] .unit callee (← freshCap) :: .func [] .unit permitted (← freshCap) :: keep
       let scheme ← generalize t keep (top := false)
-      checkUses [(x, .poly scheme)] rest
-      inferStmts ((x, .poly scheme) :: scope) amb rest
+      let here := (← get).pos
+      let result ← inferStmts ((x, .poly scheme) :: scope) amb rest
+      checkUses here scope [(x, .poly scheme)] rest
+      pure result
   | .let_ pat value :: rest => do
     let t ← inferExpr scope amb value
     let binds ← inferPat pat t
-    checkUses binds rest
     let check : Pending := ⟨(← get).pos, "the pattern of this `let` does", [t], [[pat]]⟩
     modify fun s => { s with pending := s.pending.push check }
-    inferStmts (binds ++ scope) amb rest
+    let here := (← get).pos
+    let result ← inferStmts (binds ++ scope) amb rest
+    checkUses here scope binds rest
+    pure result
   | .letMut x value :: rest => do
     let t ← inferExpr scope amb value
     -- The variable lives until the end of this block: nothing that can reach
@@ -1425,8 +1845,9 @@ partial def inferCallable (scope : Scope) (annots : List (Option Ty)) (ret : Opt
       unless pats.length == arity do
         throw "the clauses of a callable take different numbers of arguments"
       let binds ← inferPats pats params
-      checkUses binds body
+      let here := (← get).pos
       unifyAt "the result of a clause" result (← inferStmts (binds ++ scope) row body)
+      checkUses here scope binds body
   let check : Pending := ⟨(← get).pos, what, params, clauses.map fun
     | .mk pats _ => pats⟩
   modify fun s => { s with pending := s.pending.push check }
@@ -1472,9 +1893,10 @@ partial def inferHandle (scope : Scope) (amb : Row) (subject : Expr) (arms : Lis
   else
     for (p, body) in completions do
       let binds ← inferPat p subjectTy
-      checkUses binds body
+      let here := (← get).pos
       unifyAt "the result of a completion clause" result
         (← inferStmts (binds ++ scope) amb body)
+      checkUses here scope binds body
     let check : Pending := ⟨(← get).pos, "the completion clauses of this handler do", [subjectTy],
       completions.toList.map fun (p, _) => [p]⟩
     modify fun st => { st with pending := st.pending.push check }
@@ -1487,8 +1909,9 @@ partial def inferHandle (scope : Scope) (amb : Row) (subject : Expr) (arms : Lis
       unless ps.length == payload.length do
         arityError s!"an arm for the operation `{x}`" payload.length ps.length
       let binds ← inferPats ps payload
-      checkUses binds body
+      let here := (← get).pos
       unifyAt s!"the result of the arm for `{x}`" result (← inferStmts (binds ++ scope) amb body)
+      checkUses here scope binds body
       if ← ps.allM irrefutable then covered := x :: covered
     | some o =>
       if ps.length == payload.length + 1 then
@@ -1498,15 +1921,17 @@ partial def inferHandle (scope : Scope) (amb : Row) (subject : Expr) (arms : Lis
         captures held .once
         captureAll scope held (Elab.fvExpr [] (.handle subject arms))
         let binds ← inferPats ps (payload ++ [.func [o] result amb held])
-        checkUses binds body
+        let here := (← get).pos
         unifyAt s!"the result of the arm for `{x}`" result
           (← inferStmts (binds ++ scope) amb body)
+        checkUses here scope binds body
         if ← (ps.take payload.length).allM irrefutable then covered := x :: covered
       else if ps.length == payload.length then
         let binds ← inferPats ps payload
-        checkUses binds body
+        let here := (← get).pos
         unifyAt s!"the value the arm for `{x}` resumes with" o
           (← inferStmts (binds ++ scope) amb body)
+        checkUses here scope binds body
         if ← ps.allM irrefutable then covered := x :: covered
       else arityError s!"an arm for the operation `{x}`" payload.length ps.length
   for (e, inst) in insts do
@@ -1610,6 +2035,7 @@ def checkProgram (items : List Item) : Except String Unit := do
     | some d => ((d.clauses.flatMap (Elab.fvClause [])).filter names.contains).eraseDups
     | none => []
   let action : M Unit := do
+    modify fun s => { s with fnBodies := decls.map fun d => (d.name, d.clauses) }
     declare items
     for comp in components names deps do
       checkGroup (comp.filterMap fun n => decls.find? (·.name == n))

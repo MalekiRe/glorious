@@ -109,13 +109,18 @@ and checked at each call. Nothing is annotated.
   resumption is read with `replace(reference, new_value)`, which takes the value
   out. `replace` is known to the compiler, like `cancel`; it is a load followed
   by a store, not a new kernel operation.
-- Uses are counted from the shape of the program. Clauses of one callable are
-  alternatives. **Two separate callables that each use a resumption count as two
-  uses, even if only one can run**, so resuming in both blocks of a two-block
-  conditional is rejected; write one callable with a clause per case, or compute
-  the value first and resume once. Accepting it properly needs the
-  path-sensitive summaries of the language specification section 7.4, which are
-  not implemented.
+- Uses are counted along the paths a program can take (language specification
+  section 7.4). The checker runs the code abstractly: it follows constructors,
+  callables and calls into top-level functions, and chooses clauses by the
+  constructor of the value they are applied to. That is how it sees that a
+  function given two blocks runs only one of them, so resuming in both blocks
+  of a conditional is accepted without the compiler knowing any conditional.
+- What the count cannot follow is treated as using everything handed to it: a
+  call of a function value held in a variable or received as a parameter, a
+  value stored in a mutable variable, an operation's payload. A path cut short
+  by leaving through a label is counted as if it continued. Recursion is
+  followed to a fixed depth, and if the count runs out of budget the coarse
+  count (one use per callable that mentions the binding) stands.
 - The check is "at most once". A resumption that is dropped is accepted; it
   leaks the computation it captured and skips that computation's cleanups.
 

@@ -278,9 +278,9 @@ def cases : List Case := [
   ⟨"fn main() { (1, 2).5 }",
     [], "error: 1:13: in `main`: a tuple of 2 values has no field 5"⟩,
   ⟨"fn main() { match(Some(1)) { None => 0 } }",
-    [], "error: 1:38: in `main`: the clauses of this callable do not cover every case"⟩,
+    [], "error: 1:13: in `main`: the clauses of this callable do not cover every case"⟩,
   ⟨"fn f { 0 => 1 }  fn main() { f(5) }",
-    [], "error: 1:13: in `f`: the clauses of `f` do not cover every case"⟩,
+    [], "error: in `f`: the clauses of `f` do not cover every case"⟩,
   ⟨"fn main() { let (a, b) = (1, 2, 3); a }",
     [], "error: 1:13: in `main`: a tuple pattern: expected `(_, _)`, found `(Int, Int, Int)`"⟩,
   ⟨"fn main() { if(1) { 2 } }",
@@ -361,7 +361,7 @@ def cases : List Case := [
   ⟨"fn both { (Ok(_), Ok(_)) => 1, (Err(_), _) => 2, (_, Err(_)) => 3 }\n  fn main() { both((true, false)) }",
     [], "3"⟩,
   ⟨"fn both { (Ok(_), Ok(_)) => 1, (Err(_), Err(_)) => 2 }\n  fn main() { both((true, false)) }",
-    [], "error: 1:52: in `both`: the clauses of `both` do not cover every case"⟩,
+    [], "error: in `both`: the clauses of `both` do not cover every case"⟩,
   ⟨"fn main() { let Some(x) = Some(1); x }",
     [], "error: 1:13: in `main`: the pattern of this `let` does not cover every case"⟩,
   ⟨"struct Pair<A, B>(first: A, second: B)\n  fn swap(p) { let Pair(a, b) = p; Pair(b, a) }\n  fn main() { swap(Pair(1, (2, 3))) }",
@@ -477,7 +477,7 @@ def cases : List Case := [
   ⟨"effect Ask { ask() -> Int }\n  fn main() { handle ask() + 1 { ask(k) => let f = { k(1) }; f() } }",
     [], "2"⟩,
   ⟨"effect Ask { ask() -> Int }\n  fn main() { handle ask() + 1 { ask(k) => let f = { k(1) }; f(); f() } }",
-    [], "error: 2:54: in `main`: `f` is used more than once, but a value that holds a resumption can be used only once"⟩,
+    [], "error: 2:44: in `main`: `f` is used more than once, but a value that holds a resumption can be used only once"⟩,
   ⟨"effect Ask { ask() -> Int }\n  fn main() { handle ask() + 1 { ask(k) => let pair = (k, 5); let (again, n) = pair; again(n) } }",
     [], "6"⟩,
   ⟨"effect Ask { ask() -> Int }\n  fn main() { handle ask() + 1 { ask(k) => let pair = (k, 5); pair.0(pair.1) } }",
@@ -490,8 +490,9 @@ def cases : List Case := [
     [], "error: 3:44: in `main`: `both` may use what it is given more than once, but a value that holds a resumption can be used only once"⟩,
 
   -- Clauses of one callable are alternatives, so each may use the resumption.
-  -- Two separate callables that each use it count as two uses, even where only
-  -- one of them can run.
+  -- So may two separate callables of which a function runs only one: uses are
+  -- counted along the paths the program can take, following calls into the
+  -- functions that make the choice.
   ⟨"effect Ask { ask() -> Int }\n  fn main() { handle ask() + 1 { ask(k) => match(1 < 2) { Ok(_) => k(10), Err(_) => k(20) } } }",
     [], "11"⟩,
   ⟨"effect Ask { ask() -> Int }\n  fn main() { handle ask() + 1 { ask(k) => if(1 < 2) { k(10) } else { 0 } } }",
@@ -499,6 +500,49 @@ def cases : List Case := [
   ⟨"effect Ask { ask() -> Int }\n  fn main() { handle ask() + 1 { ask(k) => k(if(1 < 2) { 10 } else { 20 }) } }",
     [], "11"⟩,
   ⟨"effect Ask { ask() -> Int }\n  fn main() { handle ask() + 1 { ask(k) => if(1 < 2) { k(10) } else { k(20) } } }",
+    [], "11"⟩,
+  ⟨"effect Ask { ask() -> Int }\n  fn main() { handle ask() + 1 { ask(k) => if(1 < 2) { if(2 < 1) { k(1) } else { k(2) } } else { k(3) } } }",
+    [], "3"⟩,
+  ⟨"effect Ask { ask() -> Int }\n  fn main() { handle ask() + 1 { ask(k) => match((1 < 2) and { 2 < 3 }) { Ok(_) => k(1), Err(_) => k(2) } } }",
+    [], "2"⟩,
+  ⟨"effect Ask { ask() -> Int }\n  fn pick(c, a, b) { match(c) { Ok(_) => a(), Err(_) => b() } }\n  fn main() { handle ask() + 1 { ask(k) => pick(1 < 2, { k(1) }, { k(2) }) } }",
+    [], "2"⟩,
+  ⟨"effect Ask { ask() -> Int }\n  fn decide(c, k) { if(c) { k(1) } else { k(2) } }\n  fn main() { handle ask() + 1 { ask(k) => decide(1 < 2, k) } }",
+    [], "2"⟩,
+  ⟨"effect Ask { ask() -> Int }\n  fn main() { handle ask() + 1 { ask(k) => let a = { k(1) }; let b = { k(2) }; if(1 < 2) { a() } else { b() } } }",
+    [], "2"⟩,
+
+  -- Naming a resumption, or putting it in a value, is not yet a use: calling it
+  -- is, and so is letting it go where the count cannot follow.
+  ⟨"effect Ask { ask() -> Int }\n  fn main() { handle ask() + 1 { ask(k) => if(1 < 2) { let j = k; j(1) } else { k(2) } } }",
+    [], "2"⟩,
+  ⟨"effect Ask { ask() -> Int }\n  fn main() { handle ask() + 1 { ask(k) => match(if(1 < 2) { Some(k) } else { None }) { Some(j) => j(1), None => k(2) } } }",
+    [], "2"⟩,
+  ⟨"effect Ask { ask() -> Int }\n  fn main() { handle ask() + 1 { ask(k) => k; k(5) } }",
+    [], "6"⟩,
+
+  -- More than one use along some path is still rejected, and so is anything the
+  -- count cannot follow: a callable handed to a function value, or a path cut
+  -- short by leaving through a label.
+  ⟨"effect Ask { ask() -> Int }\n  fn main() { handle ask() + 1 { ask(k) => if(1 < 2) { k(10) } else { k(20) }; k(30) } }",
+    [], "error: 2:15: in `main`: `k` is used more than once, but a value that holds a resumption can be used only once"⟩,
+  ⟨"effect Ask { ask() -> Int }\n  fn main() { handle ask() + 1 { ask(k) => if(1 < 2) { k(10); k(11) } else { k(20) } } }",
+    [], "error: 2:15: in `main`: `k` is used more than once, but a value that holds a resumption can be used only once"⟩,
+  ⟨"effect Ask { ask() -> Int }\n  fn both(a, b) { a(); b() }\n  fn main() { handle ask() + 1 { ask(k) => both({ k(1) }, { k(2) }) } }",
+    [], "error: 3:15: in `main`: `k` is used more than once, but a value that holds a resumption can be used only once"⟩,
+  ⟨"effect Ask { ask() -> Int }\n  fn main() { handle ask() + 1 { ask(k) => let a = { k(1) }; let b = { k(2) }; a() + b() } }",
+    [], "error: 2:15: in `main`: `k` is used more than once, but a value that holds a resumption can be used only once"⟩,
+  ⟨"effect Ask { ask() -> Int }\n  fn main() { handle ask() + 1 { ask(k) => let j = k; j(1) + k(2) } }",
+    [], "error: 2:15: in `main`: `k` is used more than once, but a value that holds a resumption can be used only once"⟩,
+  ⟨"effect Ask { ask() -> Int }\n  fn wrap(k) { { k(1) } }\n  fn main() { handle ask() + 1 { ask(k) => let f = wrap(k); f() + f() } }",
+    [], "error: 3:44: in `main`: `f` is used more than once, but a value that holds a resumption can be used only once"⟩,
+  ⟨"effect Ask { ask() -> Int }\n  fn main() { handle ask() + 1 { ask(k) => let box = Some(k); match(box) { Some(j) => j(1) + k(2), None => 0 } } }",
+    [], "error: 2:15: in `main`: `k` is used more than once, but a value that holds a resumption can be used only once"⟩,
+  ⟨"effect Ask { ask() -> Int }\n  effect Stop { stop() -> ! }\n  fn main() { handle ask() + 1 { ask(k) => handle k(1) { stop() => k(2) } } }",
+    [], "error: 3:15: in `main`: `k` is used more than once, but a value that holds a resumption can be used only once"⟩,
+  ⟨"effect Ask { ask() -> Int }\n  fn go(run) { handle ask() + 1 { ask(k) => run({ k(1) }, { k(2) }) } }\n  fn main() { go(fn(f, g) { f() }) }",
+    [], "error: 2:16: in `go`: `k` is used more than once, but a value that holds a resumption can be used only once"⟩,
+  ⟨"effect Ask { ask() -> Int }\n  fn main() { handle ask() + 1 { ask(k) => @out { if(1 < 2) { @out(k(1)) }; k(2) } } }",
     [], "error: 2:15: in `main`: `k` is used more than once, but a value that holds a resumption can be used only once"⟩,
 
   -- A mutable variable can hold a resumption, but reading it would copy it:
