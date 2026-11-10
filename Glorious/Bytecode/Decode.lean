@@ -81,6 +81,13 @@ def pair (bs : Bytes) : Option ((Nat × Nat) × Bytes) := do
   let (b, bs) ← nat bs
   pure ((a, b), bs)
 
+def memOp : Bytes → Option (MemOp × Bytes)
+  | 0 :: bs => some (.alloc, bs)
+  | 1 :: bs => some (.load, bs)
+  | 2 :: bs => some (.store, bs)
+  | 3 :: bs => some (.free, bs)
+  | _ => none
+
 def instr : Bytes → Option (Instr × Bytes)
   | 0 :: bs => (rhs bs).map fun (r, rest) => (.op r, rest)
   | 1 :: bs => do
@@ -138,6 +145,10 @@ def instr : Bytes → Option (Instr × Bytes)
     let (n, bs) ← int bs
     let (fail, bs) ← nat bs
     pure (.testInt pl n fail, bs)
+  | 16 :: bs => do
+    let (op, bs) ← memOp bs
+    let (args, bs) ← list atom bs
+    pure (.mem op args, bs)
   | _ => none
 
 def code (bs : Bytes) : Option (Code × Bytes) := list instr bs
@@ -221,6 +232,10 @@ theorem list_encode {α : Type} {enc : α → Bytes} {dec : Bytes → Option (α
 @[simp] theorem pairs_encode (xs : List (Nat × Nat)) (rest : Bytes) :
     list pair (Encode.list Encode.pair xs ++ rest) = some (xs, rest) :=
   list_encode pair_encode xs rest
+
+@[simp] theorem memOp_encode (op : MemOp) (rest : Bytes) :
+    memOp (Encode.memOp op ++ rest) = some (op, rest) := by
+  cases op <;> simp [memOp, Encode.memOp]
 
 @[simp] theorem instr_encode (i : Instr) (rest : Bytes) :
     instr (Encode.instr i ++ rest) = some (i, rest) := by

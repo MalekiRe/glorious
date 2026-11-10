@@ -35,6 +35,7 @@ theorem Value.follow_snoc {v : Value} {path : List Nat} {tag : Nat} {fields : Li
     | clo fn caps => simp [Value.follow] at h
     | cont id => simp [Value.follow] at h
     | label id => simp [Value.follow] at h
+    | ref a => simp [Value.follow] at h
     | data t fs =>
       simp only [List.cons_append, Value.follow] at h ⊢
       cases hg : fs[j]? with
@@ -172,12 +173,14 @@ theorem patTests_check (ρ : Env) : ∀ (p : Pat) (pl : Place) (v : Value), pl.e
     | clo f cs => simp [patTests, checkAll, Test.check, hv, Value.isInt, Pat.matchVal]
     | cont id => simp [patTests, checkAll, Test.check, hv, Value.isInt, Pat.matchVal]
     | label id => simp [patTests, checkAll, Test.check, hv, Value.isInt, Pat.matchVal]
+    | ref a => simp [patTests, checkAll, Test.check, hv, Value.isInt, Pat.matchVal]
   | .ctor tag ps, pl, v, hv => by
     cases v with
     | int m => simp [patTests, checkAll, Test.check, hv, Value.isCtor, Pat.matchVal]
     | clo f cs => simp [patTests, checkAll, Test.check, hv, Value.isCtor, Pat.matchVal]
     | cont id => simp [patTests, checkAll, Test.check, hv, Value.isCtor, Pat.matchVal]
     | label id => simp [patTests, checkAll, Test.check, hv, Value.isCtor, Pat.matchVal]
+    | ref a => simp [patTests, checkAll, Test.check, hv, Value.isCtor, Pat.matchVal]
     | data t fs =>
       by_cases ht : tag = t
       · by_cases hl : ps.length = fs.length
@@ -235,12 +238,14 @@ theorem patBinds_eval (ρ : Env) : ∀ (p : Pat) (pl : Place) (v : Value) (bs : 
     | clo f cs => simp [Pat.matchVal] at hm
     | cont id => simp [Pat.matchVal] at hm
     | label id => simp [Pat.matchVal] at hm
+    | ref a => simp [Pat.matchVal] at hm
   | .ctor tag ps, pl, v, bs, hv, hm => by
     cases v with
     | int m => simp [Pat.matchVal] at hm
     | clo f cs => simp [Pat.matchVal] at hm
     | cont id => simp [Pat.matchVal] at hm
     | label id => simp [Pat.matchVal] at hm
+    | ref a => simp [Pat.matchVal] at hm
     | data t fs =>
       by_cases ht : tag = t
       · simp [Pat.matchVal, ht] at hm

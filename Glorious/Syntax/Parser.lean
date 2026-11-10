@@ -178,6 +178,13 @@ private partial def parseUnary (noBlock : Bool) : P Expr := do
           advance
           pure (.int (-(n : Int)))
         | _ => failAt "operator `-` has no prefix fixity"
+      else if t == .op "&" then
+        advance
+        if (← peek) == .ident "mut" then advance
+        pure (.ref (← expectIdent))
+      else if t == .op "*" then
+        advance
+        pure (.deref (← parseUnary noBlock))
       else parsePostfix noBlock
   | none => parsePostfix noBlock
 
@@ -298,11 +305,19 @@ private partial def parseStmts : P (List Stmt) := do
     if t == .punct "}" || t == .punct "," || t == .eof then break
     if t == .ident "let" then
       advance
-      let pat ← parsePattern
-      expectPunct "="
-      let value ← parseBinary 0 false
-      expectPunct ";"
-      out := out.push (.let_ pat value)
+      if (← peek) == .ident "mut" then
+        advance
+        let name ← expectIdent
+        expectPunct "="
+        let value ← parseBinary 0 false
+        expectPunct ";"
+        out := out.push (.letMut name value)
+      else
+        let pat ← parsePattern
+        expectPunct "="
+        let value ← parseBinary 0 false
+        expectPunct ";"
+        out := out.push (.let_ pat value)
     else if t == .ident "defer" then
       advance
       let e ← parseBinary 0 false
@@ -310,12 +325,18 @@ private partial def parseStmts : P (List Stmt) := do
       out := out.push (.defer e)
     else
       let e ← parseBinary 0 false
-      out := out.push (.expr e)
-      if ← acceptPunct ";" then
-        let t' ← peek
-        if t' == .punct "}" || t' == .punct "," then
-          out := out.push (.expr (.tuple []))
-      else break
+      if ← acceptPunct "=" then
+        let value ← parseBinary 0 false
+        out := out.push (.assign e value)
+        -- An assignment may end a block; its value is unit.
+        if !(← acceptPunct ";") then break
+      else
+        out := out.push (.expr e)
+        if ← acceptPunct ";" then
+          let t' ← peek
+          if t' == .punct "}" || t' == .punct "," then
+            out := out.push (.expr (.tuple []))
+        else break
   pure out.toList
 
 end

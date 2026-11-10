@@ -49,6 +49,12 @@ def rhs : Rhs → Bytes
 
 def pair (p : Nat × Nat) : Bytes := nat p.1 ++ nat p.2
 
+def memOp : MemOp → Bytes
+  | .alloc => [0]
+  | .load => [1]
+  | .store => [2]
+  | .free => [3]
+
 def instr : Instr → Bytes
   | .op r => 0 :: rhs r
   | .call f args => 1 :: atom f ++ list atom args
@@ -68,6 +74,7 @@ def instr : Instr → Bytes
   | .host id args => 13 :: nat id ++ list atom args
   | .testCtor pl tag arity fail => 14 :: place pl ++ nat tag ++ nat arity ++ nat fail
   | .testInt pl n fail => 15 :: place pl ++ int n ++ nat fail
+  | .mem op args => 16 :: memOp op ++ list atom args
 
 def code (c : Code) : Bytes := list instr c
 

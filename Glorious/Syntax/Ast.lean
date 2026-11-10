@@ -37,12 +37,20 @@ inductive Expr where
   | handle (subject : Expr) (arms : List Clause)
   /-- `@name { body }`. -/
   | labelScope (name : String) (body : List Stmt)
+  /-- `&x` or `&mut x`: a reference to a mutable variable. -/
+  | ref (name : String)
+  /-- `*e`: the value a reference points to. -/
+  | deref (e : Expr)
 
 inductive Stmt where
   | let_ (pat : Pattern) (value : Expr)
   | expr (e : Expr)
   /-- `defer e;`: run `e` when the rest of the block is left, by any path. -/
   | defer (e : Expr)
+  /-- `let mut x = e;`: a variable that can be assigned and borrowed. -/
+  | letMut (name : String) (value : Expr)
+  /-- `x = e;` or `*p = e;`. -/
+  | assign (target : Expr) (value : Expr)
 
 inductive Clause where
   | mk (pats : List Pattern) (body : List Stmt)

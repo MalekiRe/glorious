@@ -1,4 +1,4 @@
-import Glorious.Value
+import Glorious.Control
 
 /-!
 # Core syntax
@@ -62,6 +62,8 @@ inductive Tm where
   /-- Give up a resumption without resuming it: the cleanups of the continuation
   it captured run, innermost first, and the result is unit. -/
   | cancel (k : Atom) (body : Tm)
+  /-- Perform a memory operation and bind its result. -/
+  | mem (op : MemOp) (args : List Atom) (body : Tm)
   /-- Ask the host to perform operation `id` and bind its result. -/
   | host (id : Nat) (args : List Atom) (body : Tm)
 

@@ -1,4 +1,4 @@
-import Glorious.Value
+import Glorious.Control
 
 /-!
 # Bytecode syntax
@@ -37,6 +37,8 @@ inductive Instr where
   | guardTail (cleanup : Atom) (thunk : Atom)
   /-- Run the cleanups of a resumption's captured frames; unit becomes the next local. -/
   | cancel (k : Atom)
+  /-- Perform a memory operation; its result becomes the next local. -/
+  | mem (op : MemOp) (args : List Atom)
   /-- Ask the host to perform operation `id`; its result becomes the next local. -/
   | host (id : Nat) (args : List Atom)
   /-- Fall through if the place holds constructor `tag` with `arity` fields;

@@ -228,6 +228,31 @@ def cases : List Case := [
   }",
     [], "1\n2\n-2\n-1\n300"⟩,
 
+  -- Mutable variables are cells: assignment persists across loop iterations,
+  -- closures and handler arms, and a reference can be passed and written through.
+  ⟨"fn main() { let mut total = 0; let mut i = 0;
+     loop { if(i == 5) { break(()) }; total = total + i; i = i + 1 }; total }",
+    [], "10"⟩,
+  ⟨"fn main() { let mut i = 0; let mut acc = 1; while({ i < 5 }) { acc = acc * 2; i = i + 1 }; acc }",
+    [], "32"⟩,
+  ⟨"fn main() { let mut n = 0; let bump = { n = n + 1; n }; bump(); bump(); (bump(), n) }",
+    [], "(3, 3)"⟩,
+  ⟨"fn incr(p) { *p = *p + 1 }  fn main() { let mut x = 5; incr(&mut x); incr(&mut x); x }",
+    [], "7"⟩,
+  ⟨"fn swap(a, b) { let t = *a; *a = *b; *b = t }
+  fn main() { let mut x = 1; let mut y = 2; swap(&mut x, &mut y); (x, y) }",
+    [], "(2, 1)"⟩,
+  ⟨"effect Tick { tick() }
+  fn work() { tick(); tick(); tick(); 0 }
+  fn main() { let mut count = 0; handle work() { tick() => count = count + 1 }; count }",
+    [], "3"⟩,
+  ⟨"fn main() { let mut x = 1; let x = x + 10; x }",
+    [], "11"⟩,
+  ⟨"fn main() { let x = 1; x = 2; x }",
+    [], "error: `x` is not a mutable variable"⟩,
+  ⟨"fn main() { let x = 1; &mut x }",
+    [], "error: `x` is not a mutable variable, so it cannot be borrowed"⟩,
+
   -- Errors are reported, not guessed around.
   ⟨"fn main() { nope }",
     [], "error: unknown name `nope`"⟩,

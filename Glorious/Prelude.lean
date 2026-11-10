@@ -110,6 +110,12 @@ fn loop(body) {
         continue() => tail loop(body)
     }
 }
+
+fn while(condition, body) {
+    loop {
+        if(condition()) { body() } else { break(()) }
+    }
+}
 "#
 
 end Glorious.Prelude

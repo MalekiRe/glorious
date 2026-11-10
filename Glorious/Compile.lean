@@ -28,6 +28,7 @@ def compileTm : Core.Tm → Code
   | .guard cleanup thunk body => .guard cleanup thunk :: compileTm body
   | .guardTail cleanup thunk => [.guardTail cleanup thunk]
   | .cancel k body => .cancel k :: compileTm body
+  | .mem op args body => .mem op args :: compileTm body
   | .host id args body => .host id args :: compileTm body
 
 /-- A structural test a pattern imposes on a place. -/

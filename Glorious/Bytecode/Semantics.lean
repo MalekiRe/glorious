@@ -89,7 +89,7 @@ def apply (p : Program) (c : Callee) (frames : List Frame) (store : Store Frame)
   | .fn fn captures vs => callFn p fn captures vs frames store
   | .cont id v =>
     match takeCont store.conts id with
-    | some (segment, conts) => deliver p v (segment ++ frames) ⟨conts, store.labels⟩
+    | some (segment, conts) => deliver p v (segment ++ frames) ⟨conts, store.labels, store.cells⟩
     | none => .stuck
   | .label id v =>
     match findLabel Frame.asLabel id frames with
@@ -138,14 +138,14 @@ def step (p : Program) (s : State) : Step State Value :=
         callFn p d.arm d.handler.caps (vs ++ [.cont s.store.conts.length]) d.below
           ⟨s.store.conts
               ++ [some (.ret s.code (s.pc + 1) s.locals :: d.above ++ [.handler d.handler])],
-            s.store.labels⟩
+            s.store.labels, s.store.cells⟩
   | some (.label thunk) =>
     match evalClosure s.locals thunk with
     | none => .stuck
     | some (fn, captures) =>
       callFn p fn captures [.label s.store.labels]
         (.label s.store.labels :: .ret s.code (s.pc + 1) s.locals :: s.frames)
-        ⟨s.store.conts, s.store.labels + 1⟩
+        ⟨s.store.conts, s.store.labels + 1, s.store.cells⟩
   | some (.testCtor pl tag arity fail) =>
     match pl.eval s.locals with
     | none => .stuck
@@ -165,7 +165,7 @@ def step (p : Program) (s : State) : Step State Value :=
     | none => .stuck
     | some (fn, captures) =>
       callFn p fn captures [.label s.store.labels] (.label s.store.labels :: s.frames)
-        ⟨s.store.conts, s.store.labels + 1⟩
+        ⟨s.store.conts, s.store.labels + 1, s.store.cells⟩
   | some (.guard cleanup thunk) =>
     match evalClosure s.locals cleanup, evalCall s.locals thunk [] with
     | some (fn, captures), some c =>
@@ -183,12 +183,21 @@ def step (p : Program) (s : State) : Step State Value :=
       | some (segment, conts) =>
         deliver p .unit
           (unwind segment (.yield .unit :: .ret s.code (s.pc + 1) s.locals :: s.frames))
-          ⟨conts, s.store.labels⟩
+          ⟨conts, s.store.labels, s.store.cells⟩
       | none => .stuck
+  | some (.mem op args) =>
+    match evalAtoms s.locals args with
+    | none => .stuck
+    | some vs =>
+      match op.eval s.store.cells vs with
+      | none => .stuck
+      | some (r, cells) =>
+        .next ⟨s.code, s.pc + 1, s.locals ++ [r], s.frames,
+          ⟨s.store.conts, s.store.labels, cells⟩⟩
   -- A host operation is a step of the program in its world; see `stepIO`.
   | some (.host _ _) => .stuck
 
-def init (p : Program) : State := ⟨p.main, 0, [], [], ⟨[], 0⟩⟩
+def init (p : Program) : State := ⟨p.main, 0, [], [], ⟨[], 0, []⟩⟩
 
 /-- A machine state together with the world outside the program. -/
 structure Config where

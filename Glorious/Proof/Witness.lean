@@ -211,4 +211,34 @@ theorem cleanup_core : Core.Halts cleanup [] ⟨.int 7, ⟨[], [.int 1, .int 7]�
 theorem cleanup_bytecode :
     Bytecode.Halts (compile cleanup) [] ⟨.int 7, ⟨[], [.int 1, .int 7]⟩⟩ := ⟨30, rfl⟩
 
+/--
+Memory: allocate a cell, write it, read it, release it.
+```
+main = let r = alloc(1) in store(r, 5); let v = load(r) in free(r); v
+```
+-/
+def memory : Core.Program where
+  fns := []
+  main :=
+    .mem .alloc [.int 1] <|
+    .mem .store [.var 0, .int 5] <|
+    .mem .load [.var 0] <|
+    .mem .free [.var 0] <|
+    .ret (.var 2)
+
+theorem memory_core : Core.Halts memory [] ⟨.int 5, ⟨[], []⟩⟩ := ⟨10, rfl⟩
+
+theorem memory_bytecode : Bytecode.Halts (compile memory) [] ⟨.int 5, ⟨[], []⟩⟩ := ⟨10, rfl⟩
+
+/-- Reading a cell after it has been released has no meaning. -/
+def useAfterFree : Core.Program where
+  fns := []
+  main :=
+    .mem .alloc [.int 1] <|
+    .mem .free [.var 0] <|
+    .mem .load [.var 0] <|
+    .ret (.var 2)
+
+theorem useAfterFree_goesWrong : Core.GoesWrong useAfterFree [] := ⟨10, rfl⟩
+
 end Glorious.Witness

@@ -99,10 +99,22 @@ def addFn (f : Core.Fn) : M Nat := do
 private def indexed (names : List String) (base : Nat) : Scope :=
   (names.zip (List.range names.length)).map fun (x, k) => (x, .var (base + k))
 
-private def captureNames (scope : Scope) (free : List String) : List String :=
-  free.eraseDups.filter fun x => (scope.lookup x).isSome
-
 private def labelName (l : String) : String := "@" ++ l
+
+/-- A mutable variable `x` is in scope under this key, bound to its cell. -/
+private def cellKey (x : String) : String := "&" ++ x
+
+/-- The nearest binding of `x`: whether it is a mutable variable, the key it is
+in scope under, and its value or cell. -/
+private def lookupVar (scope : Scope) (x : String) : Option (Bool × String × Atom) :=
+  scope.findSome? fun (k, a) =>
+    if k == x then some (false, k, a)
+    else if k == cellKey x then some (true, k, a)
+    else none
+
+/-- The scope keys a callable must capture for the names free in it. -/
+private def captureNames (scope : Scope) (free : List String) : List String :=
+  (free.filterMap fun x => (lookupVar scope x).map (·.2.1)).eraseDups
 
 /-! ## Free names -/
 
@@ -126,6 +138,8 @@ partial def fvExpr (bound : List String) : Expr → List String
   | .closure clauses => clauses.flatMap (fvClause bound)
   | .handle subject arms => fvExpr bound subject ++ arms.flatMap (fvClause bound)
   | .labelScope l body => fvStmts (labelName l :: bound) body
+  | .ref x => if bound.contains x then [] else [x]
+  | .deref e => fvExpr bound e
 
 partial def fvClause (bound : List String) : Clause → List String
   | .mk pats body => fvStmts (pats.flatMap patVars ++ bound) body
@@ -135,6 +149,9 @@ partial def fvStmts (bound : List String) : List Stmt → List String
   | .let_ pat value :: rest => fvExpr bound value ++ fvStmts (patVars pat ++ bound) rest
   | .expr e :: rest => fvExpr bound e ++ fvStmts bound rest
   | .defer e :: rest => fvExpr bound e ++ fvStmts bound rest
+  | .letMut x value :: rest => fvExpr bound value ++ fvStmts (x :: bound) rest
+  | .assign target value :: rest =>
+    fvExpr bound target ++ fvExpr bound value ++ fvStmts bound rest
 
 end
 
@@ -209,6 +226,8 @@ end
 /-- What a name in an expression refers to. -/
 inductive Head where
   | local (a : Atom)
+  /-- A mutable variable: its cell. -/
+  | cell (c : Atom)
   | fn (idx : Nat)
   | ctor (info : CtorInfo)
   | op (info : OpInfo)
@@ -219,7 +238,10 @@ inductive Head where
 
 def resolveName (scope : Scope) (qual : Option String) (x : String) : M Head := do
   if qual.isNone then
-    if let some a := scope.lookup x then return .local a
+    match lookupVar scope x with
+    | some (false, _, a) => return .local a
+    | some (true, _, c) => return .cell c
+    | none => pure ()
   if let some info ← resolveCtor x qual then return .ctor info
   let g ← read
   if let some info := g.ops.lookup x then
@@ -244,6 +266,7 @@ partial def elabExpr (scope : Scope) (tailPos : Bool) : Expr → M Atom
   | .name q x => do
     match ← resolveName scope q x with
     | .local a => pure a
+    | .cell c => emit (.mem .load [c])
     | .fn idx => emit (.let_ (.closure idx []))
     | .ctor info =>
       if info.arity == 0 then emit (.let_ (.construct info.tag []))
@@ -276,6 +299,14 @@ partial def elabExpr (scope : Scope) (tailPos : Bool) : Expr → M Atom
       terminate (.labelTail thunk)
       pure (.int 0)
     else emit (.label thunk)
+  | .ref x =>
+    match lookupVar scope x with
+    | some (true, _, c) => pure c
+    | some (false, _, _) => throw s!"`{x}` is not a mutable variable, so it cannot be borrowed"
+    | none => throw s!"unknown name `{x}`"
+  | .deref e => do
+    let p ← elabExpr scope false e
+    emit (.mem .load [p])
 
 partial def elabApply (scope : Scope) (isTail : Bool) (callee : Atom) (args : List Expr) :
     M Atom := do
@@ -290,6 +321,9 @@ partial def elabCall (scope : Scope) (isTail : Bool) (f : Expr) (args : List Exp
   | .name q x =>
     match ← resolveName scope q x with
     | .local a => elabApply scope isTail a args
+    | .cell c => do
+      let callee ← emit (.mem .load [c])
+      elabApply scope isTail callee args
     | .fn idx => do
       let callee ← emit (.let_ (.closure idx []))
       elabApply scope isTail callee args
@@ -344,6 +378,22 @@ partial def elabStmts (scope : Scope) (tailPos : Bool) : List Stmt → M Atom
   | .let_ pat value :: rest => do
     let a ← elabExpr scope false value
     let scope ← bindLet scope pat a
+    elabStmts scope tailPos rest
+  | .letMut x value :: rest => do
+    let a ← elabExpr scope false value
+    let cell ← emit (.mem .alloc [a])
+    elabStmts ((cellKey x, cell) :: scope) tailPos rest
+  | .assign target value :: rest => do
+    let cell ← match target with
+      | .name none x =>
+        match lookupVar scope x with
+        | some (true, _, c) => pure c
+        | some (false, _, _) => throw s!"`{x}` is not a mutable variable"
+        | none => throw s!"unknown name `{x}`"
+      | .deref e => elabExpr scope false e
+      | _ => throw "only a mutable variable or `*reference` can be assigned"
+    let a ← elabExpr scope false value
+    let _ ← emit (.mem .store [cell, a])
     elabStmts scope tailPos rest
   | .defer e :: rest => do
     -- The rest of the block runs under a guard whose cleanup is `e`.

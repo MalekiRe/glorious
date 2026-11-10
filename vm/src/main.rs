@@ -23,6 +23,7 @@ enum Value {
     Clo(Rc<Clo>),
     Cont(usize),
     Label(u64),
+    Ref(usize),
 }
 
 struct Data {
@@ -64,6 +65,14 @@ enum Prim {
     Eq,
 }
 
+#[derive(Clone, Copy)]
+enum MemOp {
+    Alloc,
+    Load,
+    Store,
+    Free,
+}
+
 enum Rhs {
     Atom(Atom),
     Prim(Prim, Vec<Atom>),
@@ -86,6 +95,7 @@ enum Instr {
     Host(u64, Vec<Atom>),
     TestCtor(Place, u64, usize, usize),
     TestInt(Place, i64, usize),
+    Mem(MemOp, Vec<Atom>),
 }
 
 // ---------------------------------------------------------------- decoding
@@ -247,6 +257,16 @@ impl Reader<'_> {
                 let n = self.int()?;
                 Ok(Instr::TestInt(pl, n, self.index()?))
             }
+            16 => {
+                let op = match self.byte()? {
+                    0 => MemOp::Alloc,
+                    1 => MemOp::Load,
+                    2 => MemOp::Store,
+                    3 => MemOp::Free,
+                    t => return Err(format!("unknown memory operation {t}")),
+                };
+                Ok(Instr::Mem(op, self.atoms()?))
+            }
             t => Err(format!("unknown instruction {t}")),
         }
     }
@@ -328,6 +348,8 @@ struct Vm {
     frames: Vec<Frame>,
     conts: Vec<Option<Vec<Frame>>>,
     labels: u64,
+    /// Memory: a cell is live with a value, or has been freed.
+    cells: Vec<Option<Value>>,
     input: VecDeque<i64>,
     out: BufWriter<io::Stdout>,
     names: Vec<String>,
@@ -454,6 +476,34 @@ impl Vm {
             }
         }
         wrong()
+    }
+
+    /// A live cell, or nothing if the address is unknown or freed.
+    fn cell(&mut self, addr: usize) -> Step<&mut Option<Value>> {
+        match self.cells.get_mut(addr) {
+            Some(cell) if cell.is_some() => Ok(cell),
+            _ => wrong(),
+        }
+    }
+
+    fn mem(&mut self, op: MemOp, mut args: Vec<Value>) -> Step<Value> {
+        match (op, args.as_mut_slice()) {
+            (MemOp::Alloc, [_]) => {
+                self.cells.push(args.pop());
+                Ok(Value::Ref(self.cells.len() - 1))
+            }
+            (MemOp::Load, [Value::Ref(a)]) => Ok(self.cell(*a)?.clone().unwrap()),
+            (MemOp::Store, [Value::Ref(a), _]) => {
+                let addr = *a;
+                *self.cell(addr)? = args.pop();
+                Ok(unit())
+            }
+            (MemOp::Free, [Value::Ref(a)]) => {
+                *self.cell(*a)? = None;
+                Ok(unit())
+            }
+            _ => wrong(),
+        }
     }
 
     fn push_ret(&mut self) {
@@ -585,6 +635,13 @@ impl Vm {
                 self.pc = if holds { self.pc + 1 } else { *fail };
                 Ok(())
             }
+            Instr::Mem(op, args) => {
+                let args = self.atoms(args)?;
+                let result = self.mem(*op, args)?;
+                self.locals.push(result);
+                self.pc += 1;
+                Ok(())
+            }
         }
     }
 }
@@ -626,6 +683,7 @@ fn show(names: &[String], v: &Value) -> String {
         Value::Clo(c) => format!("<fn {}>", c.func),
         Value::Cont(id) => format!("<resumption {id}>"),
         Value::Label(id) => format!("<label {id}>"),
+        Value::Ref(addr) => format!("<ref {addr}>"),
     }
 }
 
@@ -669,6 +727,7 @@ fn main() -> ExitCode {
         frames: Vec::new(),
         conts: Vec::new(),
         labels: 0,
+        cells: Vec::new(),
         input,
         out: BufWriter::new(io::stdout()),
         names: program.names,

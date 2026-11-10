@@ -23,11 +23,13 @@ def Pat.matchVal : Pat → Value → Option (List Value)
   | .int _, .clo _ _ => none
   | .int _, .cont _ => none
   | .int _, .label _ => none
+  | .int _, .ref _ => none
   | .ctor tag ps, .data t fields => if tag = t then Pat.matchVals ps fields else none
   | .ctor _ _, .int _ => none
   | .ctor _ _, .clo _ _ => none
   | .ctor _ _, .cont _ => none
   | .ctor _ _, .label _ => none
+  | .ctor _ _, .ref _ => none
 
 /-- Match values against patterns pointwise. The two lists must have the same length. -/
 def Pat.matchVals : List Pat → List Value → Option (List Value)
@@ -138,7 +140,7 @@ def apply (p : Program) (c : Callee) (stack : List Frame) (store : Store Frame) 
   | .fn fn captures vs => callFn p fn captures vs stack store
   | .cont id v =>
     match takeCont store.conts id with
-    | some (segment, conts) => deliver p v (segment ++ stack) ⟨conts, store.labels⟩
+    | some (segment, conts) => deliver p v (segment ++ stack) ⟨conts, store.labels, store.cells⟩
     | none => .stuck
   | .label id v =>
     match findLabel Frame.asLabel id stack with
@@ -188,14 +190,14 @@ def step (p : Program) (s : State) : Step State Value :=
         -- handler, so resuming it reinstalls the handler: handlers are deep.
         callFn p d.arm d.handler.caps (vs ++ [.cont s.store.conts.length]) d.below
           ⟨s.store.conts ++ [some (.call s.env body :: d.above ++ [.handler d.handler])],
-            s.store.labels⟩
+            s.store.labels, s.store.cells⟩
   | .label thunk body =>
     match evalClosure s.env thunk with
     | none => .stuck
     | some (fn, captures) =>
       callFn p fn captures [.label s.store.labels]
         (.label s.store.labels :: .call s.env body :: s.stack)
-        ⟨s.store.conts, s.store.labels + 1⟩
+        ⟨s.store.conts, s.store.labels + 1, s.store.cells⟩
   | .handleTail ret ops captures thunk =>
     match evalAtoms s.env captures, evalCall s.env thunk [] with
     | some caps, some c => apply p c (.handler ⟨ret, ops, caps⟩ :: s.stack) s.store
@@ -205,7 +207,7 @@ def step (p : Program) (s : State) : Step State Value :=
     | none => .stuck
     | some (fn, captures) =>
       callFn p fn captures [.label s.store.labels] (.label s.store.labels :: s.stack)
-        ⟨s.store.conts, s.store.labels + 1⟩
+        ⟨s.store.conts, s.store.labels + 1, s.store.cells⟩
   | .guard cleanup thunk body =>
     match evalClosure s.env cleanup, evalCall s.env thunk [] with
     | some (fn, captures), some c =>
@@ -222,12 +224,20 @@ def step (p : Program) (s : State) : Step State Value :=
       match takeCont s.store.conts id with
       | some (segment, conts) =>
         deliver p .unit (unwind segment (.yield .unit :: .call s.env body :: s.stack))
-          ⟨conts, s.store.labels⟩
+          ⟨conts, s.store.labels, s.store.cells⟩
       | none => .stuck
+  | .mem op args body =>
+    match evalAtoms s.env args with
+    | none => .stuck
+    | some vs =>
+      match op.eval s.store.cells vs with
+      | none => .stuck
+      | some (r, cells) =>
+        .next ⟨body, s.env ++ [r], s.stack, ⟨s.store.conts, s.store.labels, cells⟩⟩
   -- A host operation is a step of the program in its world; see `stepIO`.
   | .host _ _ _ => .stuck
 
-def init (p : Program) : State := ⟨p.main, [], [], ⟨[], 0⟩⟩
+def init (p : Program) : State := ⟨p.main, [], [], ⟨[], 0, []⟩⟩
 
 /-- A machine state together with the world outside the program. -/
 structure Config where

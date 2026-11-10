@@ -37,6 +37,7 @@ partial def showValue (names : Array String) : Value → String
   | .clo fn _ => s!"<fn {fn}>"
   | .cont id => s!"<resumption {id}>"
   | .label id => s!"<label {id}>"
+  | .ref addr => s!"<ref {addr}>"
 
 /-- Everything the program wrote, one value per line, then its result. -/
 def showResult (names : Array String) (r : Result) : String :=

@@ -4,7 +4,7 @@ import Glorious.Value
 # Control structures shared by both machines
 
 Handlers, the search for the handler of an operation, the search for a label
-scope, and the store of captured continuations. Both machines use these definitions on their own kind
+scope, the store of captured continuations, and memory. Both machines use these definitions on their own kind
 of stack frame.
 -/
 
@@ -105,10 +105,42 @@ def findLabel {φ : Type} (asLabel : φ → Option Nat) (id : Nat) :
       | some (above, below) => some (fr :: above, below)
       | none => none
 
+/-- Operations on memory cells. -/
+inductive MemOp where
+  /-- Allocate a cell holding a value; the result is a reference to it. -/
+  | alloc
+  /-- Read the value a reference points to. -/
+  | load
+  /-- Replace the value a reference points to. -/
+  | store
+  /-- Release a cell. Using it afterwards has no meaning. -/
+  | free
+
+/-- Memory: a cell is live with a value, or has been freed. Addresses are never reused. -/
+abbrev Cells := List (Option Value)
+
+/-- Perform a memory operation: its result and the memory afterwards. -/
+def MemOp.eval (cells : Cells) : MemOp → List Value → Option (Value × Cells)
+  | .alloc, [v] => some (.ref cells.length, cells ++ [some v])
+  | .load, [.ref a] =>
+    match cells[a]? with
+    | some (some v) => some (v, cells)
+    | _ => none
+  | .store, [.ref a, v] =>
+    match cells[a]? with
+    | some (some _) => some (.unit, cells.set a (some v))
+    | _ => none
+  | .free, [.ref a] =>
+    match cells[a]? with
+    | some (some _) => some (.unit, cells.set a none)
+    | _ => none
+  | _, _ => none
+
 /-- The machine state that is not on the stack. -/
 structure Store (φ : Type) where
   conts : Conts φ
   /-- How many label scopes have been entered; the identity of the next one. -/
   labels : Nat
+  cells : Cells
 
 end Glorious
