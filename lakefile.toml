@@ -1,0 +1,7 @@
+name = "glorious"
+version = "0.1.0"
+defaultTargets = ["Glorious"]
+moreLeanArgs = ["-DwarningAsError=true", "-DautoImplicit=false"]
+
+[[lean_lib]]
+name = "Glorious"
