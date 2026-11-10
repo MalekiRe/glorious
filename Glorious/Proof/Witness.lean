@@ -10,6 +10,10 @@ that both machines run each to the same result.
 
 namespace Glorious.Witness
 
+-- The kernel runs both machines to check these. Delivering a result and leaving
+-- for a target are defined through each other, which it unfolds more slowly.
+set_option maxHeartbeats 4000000
+
 /--
 Recursion, an integer branch and a nested pattern.
 ```

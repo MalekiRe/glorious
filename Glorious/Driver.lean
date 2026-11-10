@@ -103,7 +103,7 @@ def explainStuck (c : Compiled) (cfg : Core.Config) : String :=
     | none => unbound
     | some v =>
       match s.stack.dropWhile (fun fr => (Core.Frame.asLabel fr).isSome) with
-      | .handler h :: _ => enter h.ret [v]
+      | .handler _ h :: _ => enter h.ret [v]
       | _ => "a result could not be delivered"
   | .let_ rhs _ =>
     match rhs with

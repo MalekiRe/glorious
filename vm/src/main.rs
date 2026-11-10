@@ -310,32 +310,45 @@ struct Handler {
     ret: usize,
     ops: Vec<(u64, usize)>,
     caps: Vec<Value>,
-    /// The handled computation was abandoned: the handler still serves the
-    /// cleanups registered inside it, but a result passes straight through.
-    passive: bool,
+}
+
+/// Where an exit is going: a label scope or a handler, by its identity.
+#[derive(Clone, Copy, PartialEq)]
+enum Target {
+    Label(u64),
+    Handler(u64),
+}
+
+/// What an exit does once it has arrived and removed its target.
+enum After {
+    Yield(Value),
+    Invoke { func: usize, caps: Vec<Value>, args: Vec<Value> },
 }
 
 enum Frame {
     /// Where to continue after a call returns, and the locals to restore.
     Ret { code: usize, pc: usize, locals: Vec<Value> },
-    /// The delimiter of an installed handler.
-    Handler(Rc<Handler>),
+    /// The delimiter of an installed handler, with its identity.
+    Handler { id: u64, handler: Rc<Handler> },
     /// The scope of a label.
     Label(u64),
     /// A cleanup that runs when the computation above it is left.
     Guard { func: usize, caps: Vec<Value> },
-    /// A pending call: what is delivered here is discarded and the function runs.
-    Invoke { func: usize, caps: Vec<Value>, args: Vec<Value> },
     /// A pending result: what is delivered here is discarded and this is delivered.
     Yield(Value),
+    /// An exit in progress: a cleanup was running above this frame. What it
+    /// delivers is discarded and the exit continues towards its target.
+    Exit { target: Target, after: After },
 }
 
-/// The passive form of a handler whose computation has been abandoned.
-fn abandon(h: &Rc<Handler>) -> Rc<Handler> {
-    if h.passive {
-        return Rc::clone(h);
+impl Frame {
+    fn is_target(&self, target: Target) -> bool {
+        match (self, target) {
+            (Frame::Label(id), Target::Label(wanted)) => *id == wanted,
+            (Frame::Handler { id, .. }, Target::Handler(wanted)) => *id == wanted,
+            _ => false,
+        }
     }
-    Rc::new(Handler { ret: h.ret, ops: h.ops.clone(), caps: h.caps.clone(), passive: true })
 }
 
 /// Why the machine stopped.
@@ -357,9 +370,12 @@ struct Vm {
     pc: usize,
     locals: Vec<Value>,
     frames: Vec<Frame>,
-    /// Captured continuations. A resumption is one-shot: resuming or cancelling
-    /// it moves its frames out and leaves the entry empty.
-    conts: Vec<Option<Vec<Frame>>>,
+    /// Captured continuations, each with the identity of the handler at its
+    /// base. A resumption is one-shot: resuming or cancelling it moves its
+    /// frames out and leaves the entry empty.
+    conts: Vec<Option<(u64, Vec<Frame>)>>,
+    /// How many label scopes and handlers have been put on the stack; the
+    /// identity of the next one.
     labels: u64,
     /// Memory: a cell is live with a value, or has been freed.
     cells: Vec<Option<Value>>,
@@ -427,29 +443,36 @@ impl Vm {
                     self.locals = locals;
                     return Ok(());
                 }
-                Some(Frame::Handler(h)) if h.passive => {}
-                Some(Frame::Handler(h)) => return self.call_fn(h.ret, &h.caps, vec![v]),
+                Some(Frame::Handler { handler, .. }) => {
+                    return self.call_fn(handler.ret, &handler.caps, vec![v]);
+                }
                 Some(Frame::Label(_)) => {}
                 Some(Frame::Guard { func, caps }) => {
                     self.frames.push(Frame::Yield(v));
                     return self.call_fn(func, &caps, Vec::new());
                 }
-                Some(Frame::Invoke { func, caps, args }) => return self.call_fn(func, &caps, args),
                 Some(Frame::Yield(w)) => v = w,
+                Some(Frame::Exit { target, after }) => return self.leave(target, after),
             }
         }
     }
 
-    /// Leave frames behind. What they were going to do is dropped; what their
-    /// cleanups need stays in place: each cleanup, and every label scope and
-    /// handler it was registered inside. An abandoned handler becomes passive.
-    /// `abandoned` is bottom first.
-    fn keep_for_cleanups(&mut self, abandoned: impl Iterator<Item = Frame>) {
-        for frame in abandoned {
-            match frame {
-                Frame::Guard { .. } | Frame::Label(_) => self.frames.push(frame),
-                Frame::Handler(h) => self.frames.push(Frame::Handler(abandon(&h))),
-                Frame::Ret { .. } | Frame::Invoke { .. } | Frame::Yield(_) => {}
+    /// Leave for `target`, abandoning the frames on the way. Each cleanup among
+    /// them runs in place, with everything below it still there; when it is
+    /// done the exit goes on. Once the target is reached it is removed and
+    /// `after` happens on what is below it.
+    fn leave(&mut self, target: Target, after: After) -> Step<()> {
+        loop {
+            let frame = self.frames.pop().ok_or(Stop::Wrong)?;
+            if frame.is_target(target) {
+                return match after {
+                    After::Yield(v) => self.deliver(v),
+                    After::Invoke { func, caps, args } => self.call_fn(func, &caps, args),
+                };
+            }
+            if let Frame::Guard { func, caps } = frame {
+                self.frames.push(Frame::Exit { target, after });
+                return self.call_fn(func, &caps, Vec::new());
             }
         }
     }
@@ -462,7 +485,7 @@ impl Vm {
                 if args.len() != 1 {
                     return wrong();
                 }
-                let segment =
+                let (_, segment) =
                     self.conts.get_mut(id).and_then(Option::take).ok_or(Stop::Wrong)?;
                 self.frames.extend(segment);
                 self.deliver(args.pop().unwrap())
@@ -471,30 +494,22 @@ impl Vm {
                 if args.len() != 1 {
                     return wrong();
                 }
-                let at = self
-                    .frames
-                    .iter()
-                    .rposition(|f| matches!(f, Frame::Label(l) if *l == id))
-                    .ok_or(Stop::Wrong)?;
-                // The scope stays until its cleanups have run; then its result
-                // is the value the label was applied to.
-                let mut abandoned = self.frames.split_off(at).into_iter();
-                let scope = abandoned.next().unwrap();
-                self.frames.push(Frame::Yield(args.pop().unwrap()));
-                self.frames.push(scope);
-                self.keep_for_cleanups(abandoned);
-                self.deliver(unit())
+                if !self.frames.iter().any(|f| f.is_target(Target::Label(id))) {
+                    return wrong();
+                }
+                self.leave(Target::Label(id), After::Yield(args.pop().unwrap()))
             }
             _ => wrong(),
         }
     }
 
-    /// The nearest handler with an arm for `op`: its position, the handler, the arm.
-    fn find_handler(&self, op: u64) -> Step<(usize, Rc<Handler>, usize)> {
+    /// The nearest handler with an arm for `op`: its position, its identity,
+    /// the handler, the arm.
+    fn find_handler(&self, op: u64) -> Step<(usize, u64, Rc<Handler>, usize)> {
         for (at, frame) in self.frames.iter().enumerate().rev() {
-            if let Frame::Handler(h) = frame {
-                if let Some(&(_, arm)) = h.ops.iter().find(|(o, _)| *o == op) {
-                    return Ok((at, Rc::clone(h), arm));
+            if let Frame::Handler { id, handler } = frame {
+                if let Some(&(_, arm)) = handler.ops.iter().find(|(o, _)| *o == op) {
+                    return Ok((at, *id, Rc::clone(handler), arm));
                 }
             }
         }
@@ -568,30 +583,29 @@ impl Vm {
                 if !tail {
                     self.push_ret();
                 }
-                let handler = Handler { ret: *ret, ops: ops.clone(), caps, passive: false };
-                self.frames.push(Frame::Handler(Rc::new(handler)));
+                let handler = Rc::new(Handler { ret: *ret, ops: ops.clone(), caps });
+                let id = self.labels;
+                self.labels += 1;
+                self.frames.push(Frame::Handler { id, handler });
                 self.apply(callee, Vec::new())
             }
             Instr::Raise(op, args) => {
                 let args = self.atoms(args)?;
-                let (at, handler, arm) = self.find_handler(*op)?;
-                // The handler stays, passive, until the abandoned frames are
-                // cleaned up; its arm then runs outside it.
-                let abandoned = self.frames.split_off(at).into_iter().skip(1);
-                self.frames.push(Frame::Invoke { func: arm, caps: handler.caps.clone(), args });
-                self.frames.push(Frame::Handler(abandon(&handler)));
-                self.keep_for_cleanups(abandoned);
-                self.deliver(unit())
+                let (_, id, handler, arm) = self.find_handler(*op)?;
+                // The arm runs once the abandoned frames are cleaned up, and
+                // outside the handler.
+                let after = After::Invoke { func: arm, caps: handler.caps.clone(), args };
+                self.leave(Target::Handler(id), after)
             }
             Instr::Perform(op, args) => {
                 let mut args = self.atoms(args)?;
-                let (at, handler, arm) = self.find_handler(*op)?;
+                let (at, id, handler, arm) = self.find_handler(*op)?;
                 // The continuation runs from the handler up to the performer.
                 let mut segment = self.frames.split_off(at);
                 let locals = std::mem::take(&mut self.locals);
                 segment.push(Frame::Ret { code: self.code, pc: self.pc + 1, locals });
                 args.push(Value::Cont(self.conts.len()));
-                self.conts.push(Some(segment));
+                self.conts.push(Some((id, segment)));
                 self.call_fn(arm, &handler.caps, args)
             }
             Instr::Label { thunk, tail } => {
@@ -624,12 +638,13 @@ impl Vm {
                 let Value::Cont(id) = self.atom(k)? else {
                     return wrong();
                 };
-                let segment =
+                let (handler, segment) =
                     self.conts.get_mut(id).and_then(Option::take).ok_or(Stop::Wrong)?;
+                // The captured computation is put back and left again at once,
+                // down to the handler at its base, so that its cleanups run.
                 self.push_ret();
-                self.frames.push(Frame::Yield(unit()));
-                self.keep_for_cleanups(segment.into_iter());
-                self.deliver(unit())
+                self.frames.extend(segment);
+                self.leave(Target::Handler(handler), After::Yield(unit()))
             }
             Instr::Host(id, args) => {
                 let args = self.atoms(args)?;

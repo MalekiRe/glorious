@@ -124,26 +124,38 @@ and checked at each call. Nothing is annotated.
 - The check is "at most once". A resumption that is dropped is accepted; it
   leaks the computation it captured and skips that computation's cleanups.
 
-## A cleanup runs inside what it was registered inside
+## An exit runs each cleanup in place
 
-**Decision.** When frames are abandoned (a label exit, a terminal operation, a
-cancellation), each cleanup among them runs with every label scope and handler
-it was registered inside still in place. An abandoned handler is passive: it
-serves operations performed by those cleanups but no longer runs its completion
-clause. The target of the exit stays until the cleanups are done.
+**Decision.** Leaving for a label, performing a terminal operation and
+cancelling a resumption are all the same thing: an exit towards a target frame.
+The exit drops frames until it meets a cleanup, runs that cleanup with
+everything below it still on the stack and still working, and then carries on.
+When it reaches its target it removes it and does what comes after: delivers a
+value, or runs the handler's arm.
 
-- An exit already in progress keeps its value. If a cleanup jumps to the label
-  being left, or performs the terminal operation being handled, the first exit
-  still decides the result; in the second case both arms run.
-- A cleanup that leaves to somewhere further out does not skip the cleanups
-  still pending.
+- A cleanup can therefore jump to an enclosing label and perform an operation an
+  enclosing handler serves, exactly as it could on a normal return.
+- A cleanup that starts an exit of its own replaces the one in progress.
+- A pending exit sits on the stack as a frame. If a cleanup performs an
+  operation whose arm resumes it, that frame is part of the resumption, and when
+  the cleanup finishes the exit continues through the arm's own frames. The arm
+  never receives a result.
+- Handlers carry an identity, so that an exit can name the one it is going to.
 
-Before this, unwinding removed every abandoned frame first and ran the cleanups
-afterwards, so a `defer` that performed an effect handled inside the abandoned
-region, or jumped to the label being left, went wrong at run time even though
-the checker (rightly, reading the program text) accepted it. A random search
-for accepted programs that go wrong found it. The compiler proof did not, and
-could not: both machines were wrong in the same way.
+Two earlier designs were wrong, and both let a program the checker accepts go
+wrong at run time.
+
+1. Unwinding removed every abandoned frame and then ran the cleanups, so a
+   cleanup found its enclosing handlers and labels gone. A random search for
+   accepted programs that go wrong found this.
+2. The first fix kept abandoned handlers on the stack in a "passive" form that
+   passed results through. A cleanup's operation could then be resumed by an arm
+   that expected the handled computation's result and received the cleanup's
+   instead. Working out how such a stack could be given a type found this; the
+   random search had not.
+
+The compiler proof held throughout, since both machines agreed each time. It is
+a statement about the compiler, not about whether the rules are right.
 
 ## Other standing decisions
 

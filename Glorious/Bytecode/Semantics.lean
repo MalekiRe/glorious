@@ -17,49 +17,39 @@ namespace Glorious.Bytecode
 inductive Frame where
   /-- Where to continue after a call returns, and the locals to restore. -/
   | ret (code : Code) (pc : Nat) (locals : Env)
-  /-- The delimiter of an installed handler. -/
-  | handler (h : Handler)
+  /-- The delimiter of an installed handler, with its identity. -/
+  | handler (id : Nat) (h : Handler)
   /-- The scope of a label. -/
   | label (id : Nat)
   /-- A cleanup that runs when the computation above it is left, by any path. -/
   | guard (fn : Nat) (captures : List Value)
-  /-- A pending call: whatever is delivered here is discarded and the function runs. -/
-  | invoke (fn : Nat) (captures : List Value) (args : List Value)
   /-- A pending result: whatever is delivered here is discarded and `v` is delivered. -/
   | yield (v : Value)
+  /-- An exit in progress. A cleanup was running above this frame; whatever it
+  delivers is discarded and the exit continues towards its target. -/
+  | exit (target : Target) (after : After)
 
-def Frame.asHandler : Frame → Option Handler
-  | .handler h => some h
+def Frame.asHandler : Frame → Option (Nat × Handler)
+  | .handler id h => some (id, h)
   | .ret _ _ _ => none
   | .label _ => none
   | .guard _ _ => none
-  | .invoke _ _ _ => none
   | .yield _ => none
+  | .exit _ _ => none
 
 def Frame.asLabel : Frame → Option Nat
   | .label id => some id
   | .ret _ _ _ => none
-  | .handler _ => none
+  | .handler _ _ => none
   | .guard _ _ => none
-  | .invoke _ _ _ => none
   | .yield _ => none
+  | .exit _ _ => none
 
-/--
-Leave the frames `above` behind and continue with `base`. What they were going
-to do is dropped: returns, pending calls and pending results. What their
-cleanups need stays, in place: each cleanup itself, and every label scope and
-handler it was registered inside, so that a cleanup can still jump to such a
-label or perform an operation such a handler serves. An abandoned handler is
-made passive, so that it no longer runs its completion clause.
--/
-def unwind : List Frame → List Frame → List Frame
-  | [], base => base
-  | .guard fn captures :: above, base => .guard fn captures :: unwind above base
-  | .handler h :: above, base => .handler h.abandon :: unwind above base
-  | .label id :: above, base => .label id :: unwind above base
-  | .ret _ _ _ :: above, base => unwind above base
-  | .invoke _ _ _ :: above, base => unwind above base
-  | .yield _ :: above, base => unwind above base
+/-- Is this frame what an exit is heading for? -/
+def Frame.isTarget : Frame → Target → Bool
+  | .label id, .label id' => id == id'
+  | .handler id _, .handler id' => id == id'
+  | _, _ => false
 
 structure State where
   code : Code
@@ -81,15 +71,43 @@ def callFn (p : Program) (fn : Nat) (captures vs : List Value) (frames : List Fr
   | some (code, ρ) => .next ⟨code, 0, ρ, frames, store⟩
   | none => .stuck
 
+mutual
+
+/-- Deliver a result to the top of a stack. A caller binds it. A handler's
+delimiter is removed and its completion function runs outside it. A label scope
+simply ends. A guard runs its cleanup and then passes the result on. An exit in
+progress discards it and continues. -/
 def deliver (p : Program) : Value → List Frame → Store Frame → Step State Value
   | v, [], _ => .halt v
   | v, .ret code pc locals :: frames, store => .next ⟨code, pc, locals ++ [v], frames, store⟩
-  | v, .handler h :: frames, store =>
-    if h.passive then deliver p v frames store else callFn p h.ret h.caps [v] frames store
+  | v, .handler _ h :: frames, store => callFn p h.ret h.caps [v] frames store
   | v, .label _ :: frames, store => deliver p v frames store
   | v, .guard fn captures :: frames, store => callFn p fn captures [] (.yield v :: frames) store
-  | _, .invoke fn captures args :: frames, store => callFn p fn captures args frames store
   | _, .yield w :: frames, store => deliver p w frames store
+  | _, .exit target after :: frames, store => leave p target after frames store
+
+/--
+Leave for `target`, abandoning the frames on the way. Each cleanup among them
+runs in place: everything below it is still there, so it can jump to an
+enclosing label or perform an operation an enclosing handler serves, exactly as
+on a normal return. When the cleanup is done the exit goes on. Once the target
+is reached it is removed and `after` happens on what is below it. A stack
+without the target has no meaning.
+-/
+def leave (p : Program) (target : Target) (after : After) :
+    List Frame → Store Frame → Step State Value
+  | [], _ => .stuck
+  | fr :: frames, store =>
+    if fr.isTarget target then
+      match after with
+      | .yield v => deliver p v frames store
+      | .invoke fn captures args => callFn p fn captures args frames store
+    else
+      match fr with
+      | .guard fn captures => callFn p fn captures [] (.exit target after :: frames) store
+      | _ => leave p target after frames store
+
+end
 
 def apply (p : Program) (c : Callee) (frames : List Frame) (store : Store Frame) :
     Step State Value :=
@@ -97,12 +115,12 @@ def apply (p : Program) (c : Callee) (frames : List Frame) (store : Store Frame)
   | .fn fn captures vs => callFn p fn captures vs frames store
   | .cont id v =>
     match takeCont store.conts id with
-    | some (segment, conts) => deliver p v (segment ++ frames) ⟨conts, store.labels, store.cells⟩
+    | some ((_, segment), conts) =>
+      deliver p v (segment ++ frames) ⟨conts, store.labels, store.cells⟩
     | none => .stuck
   | .label id v =>
     match findLabel Frame.asLabel id frames with
-    | some (above, below) =>
-      deliver p .unit (unwind above (.label id :: .yield v :: below)) store
+    | some _ => leave p (.label id) (.yield v) frames store
     | none => .stuck
 
 def step (p : Program) (s : State) : Step State Value :=
@@ -127,7 +145,8 @@ def step (p : Program) (s : State) : Step State Value :=
   | some (.handle ret ops captures thunk) =>
     match evalAtoms s.locals captures, evalCall s.locals thunk [] with
     | some caps, some c =>
-      apply p c (.handler ⟨ret, ops, caps, false⟩ :: .ret s.code (s.pc + 1) s.locals :: s.frames) s.store
+      apply p c (.handler s.store.labels ⟨ret, ops, caps⟩ :: .ret s.code (s.pc + 1) s.locals :: s.frames)
+        ⟨s.store.conts, s.store.labels + 1, s.store.cells⟩
     | _, _ => .stuck
   | some (.raise op args) =>
     match evalAtoms s.locals args with
@@ -136,10 +155,9 @@ def step (p : Program) (s : State) : Step State Value :=
       match findHandler Frame.asHandler op s.frames with
       | none => .stuck
       | some d =>
-        deliver p .unit
-          (unwind d.above
-            (.handler d.handler.abandon :: .invoke d.arm d.handler.caps vs :: d.below))
-          s.store
+        -- The handler's arm runs once the abandoned frames are cleaned up, and
+        -- outside the handler.
+        leave p (.handler d.id) (.invoke d.arm d.handler.caps vs) s.frames s.store
   | some (.perform op args) =>
     match evalAtoms s.locals args with
     | none => .stuck
@@ -149,7 +167,7 @@ def step (p : Program) (s : State) : Step State Value :=
       | some d =>
         callFn p d.arm d.handler.caps (vs ++ [.cont s.store.conts.length]) d.below
           ⟨s.store.conts
-              ++ [some (.ret s.code (s.pc + 1) s.locals :: d.above ++ [.handler d.handler])],
+              ++ [some (d.id, .ret s.code (s.pc + 1) s.locals :: d.above ++ [.handler d.id d.handler])],
             s.store.labels, s.store.cells⟩
   | some (.label thunk) =>
     match evalClosure s.locals thunk with
@@ -170,7 +188,9 @@ def step (p : Program) (s : State) : Step State Value :=
       .next ⟨s.code, if v.isInt n then s.pc + 1 else fail, s.locals, s.frames, s.store⟩
   | some (.handleTail ret ops captures thunk) =>
     match evalAtoms s.locals captures, evalCall s.locals thunk [] with
-    | some caps, some c => apply p c (.handler ⟨ret, ops, caps, false⟩ :: s.frames) s.store
+    | some caps, some c =>
+      apply p c (.handler s.store.labels ⟨ret, ops, caps⟩ :: s.frames)
+        ⟨s.store.conts, s.store.labels + 1, s.store.cells⟩
     | _, _ => .stuck
   | some (.labelTail thunk) =>
     match evalClosure s.locals thunk with
@@ -192,9 +212,9 @@ def step (p : Program) (s : State) : Step State Value :=
     | none => .stuck
     | some id =>
       match takeCont s.store.conts id with
-      | some (segment, conts) =>
-        deliver p .unit
-          (unwind segment (.yield .unit :: .ret s.code (s.pc + 1) s.locals :: s.frames))
+      | some ((handler, segment), conts) =>
+        leave p (.handler handler) (.yield .unit)
+          (segment ++ .ret s.code (s.pc + 1) s.locals :: s.frames)
           ⟨conts, s.store.labels, s.store.cells⟩
       | none => .stuck
   | some (.mem op args) =>

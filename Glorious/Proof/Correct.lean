@@ -21,13 +21,13 @@ with the same locals. Every other kind of frame is identical in both machines. -
 inductive MatchFrame : Core.Frame → Bytecode.Frame → Prop where
   | call {body : Core.Tm} {ρ : Env} {code : Code} {pc : Nat} :
       CodeAt code pc (compileTm body) → MatchFrame (.call ρ body) (.ret code pc ρ)
-  | handler {h : Handler} : MatchFrame (.handler h) (.handler h)
+  | handler {id : Nat} {h : Handler} : MatchFrame (.handler id h) (.handler id h)
   | label {id : Nat} : MatchFrame (.label id) (.label id)
   | guard {fn : Nat} {captures : List Value} :
       MatchFrame (.guard fn captures) (.guard fn captures)
-  | invoke {fn : Nat} {captures args : List Value} :
-      MatchFrame (.invoke fn captures args) (.invoke fn captures args)
   | yield {v : Value} : MatchFrame (.yield v) (.yield v)
+  | exit {target : Target} {after : After} :
+      MatchFrame (.exit target after) (.exit target after)
 
 theorem MatchFrame.asHandler_eq {f : Core.Frame} {f' : Bytecode.Frame} (h : MatchFrame f f') :
     f.asHandler = f'.asHandler := by
@@ -36,6 +36,10 @@ theorem MatchFrame.asHandler_eq {f : Core.Frame} {f' : Bytecode.Frame} (h : Matc
 theorem MatchFrame.asLabel_eq {f : Core.Frame} {f' : Bytecode.Frame} (h : MatchFrame f f') :
     f.asLabel = f'.asLabel := by
   cases h <;> rfl
+
+theorem MatchFrame.isTarget_eq {f : Core.Frame} {f' : Bytecode.Frame} (h : MatchFrame f f')
+    (target : Target) : f.isTarget target = f'.isTarget target := by
+  cases h <;> cases target <;> rfl
 
 /-- Stacks correspond frame by frame. -/
 inductive MatchFrames : List Core.Frame → List Bytecode.Frame → Prop where
@@ -56,33 +60,17 @@ theorem MatchFrames.append {a b : List Core.Frame} {a' b' : List Bytecode.Frame}
   | nil => exact hb
   | cons hf _ ih => exact .cons hf ih
 
-/-- Unwinding corresponding frames leaves corresponding frames: the same
-cleanups, label scopes and passive handlers. -/
-theorem unwind_sim {above base : List Core.Frame} {above' base' : List Bytecode.Frame}
-    (ha : MatchFrames above above') (hb : MatchFrames base base') :
-    MatchFrames (Core.unwind above base) (Bytecode.unwind above' base') := by
-  induction ha with
-  | nil => exact hb
-  | cons hf _ ih =>
-    cases hf with
-    | guard => exact .cons .guard ih
-    | call _ => exact ih
-    | handler => exact .cons .handler ih
-    | label => exact .cons .label ih
-    | invoke => exact ih
-    | yield => exact ih
-
 /-- A store entry is used up in both machines, or holds corresponding stacks. -/
 inductive MatchCont :
-    Option (List Core.Frame) → Option (List Bytecode.Frame) → Prop where
+    Option (Nat × List Core.Frame) → Option (Nat × List Bytecode.Frame) → Prop where
   | empty : MatchCont Option.none Option.none
-  | full {s : List Core.Frame} {s' : List Bytecode.Frame} :
-      MatchFrames s s' → MatchCont (Option.some s) (Option.some s')
+  | full {handler : Nat} {s : List Core.Frame} {s' : List Bytecode.Frame} :
+      MatchFrames s s' → MatchCont (Option.some (handler, s)) (Option.some (handler, s'))
 
 /-- The continuation stores correspond entry by entry, so resumption identities agree. -/
 inductive MatchConts : Conts Core.Frame → Conts Bytecode.Frame → Prop where
   | nil : MatchConts [] []
-  | cons {a : Option (List Core.Frame)} {b : Option (List Bytecode.Frame)}
+  | cons {a : Option (Nat × List Core.Frame)} {b : Option (Nat × List Bytecode.Frame)}
       {as : Conts Core.Frame} {bs : Conts Bytecode.Frame} :
       MatchCont a b → MatchConts as bs → MatchConts (a :: as) (b :: bs)
 
@@ -95,7 +83,7 @@ theorem length_eq (h : MatchConts a b) : a.length = b.length := by
   | nil => rfl
   | cons _ _ ih => simp [ih]
 
-theorem snoc {x : Option (List Core.Frame)} {y : Option (List Bytecode.Frame)}
+theorem snoc {x : Option (Nat × List Core.Frame)} {y : Option (Nat × List Bytecode.Frame)}
     (h : MatchConts a b) (hx : MatchCont x y) : MatchConts (a ++ [x]) (b ++ [y]) := by
   induction h with
   | nil => exact .cons hx .nil
@@ -103,20 +91,22 @@ theorem snoc {x : Option (List Core.Frame)} {y : Option (List Bytecode.Frame)}
 
 /-- Taking a continuation out of corresponding stores gives corresponding
 stacks and leaves corresponding stores. -/
-theorem take (h : MatchConts a b) : ∀ {id : Nat} {seg : List Core.Frame} {a₁ : Conts Core.Frame},
-    takeCont a id = some (seg, a₁) →
-    ∃ seg' b₁, takeCont b id = some (seg', b₁) ∧ MatchFrames seg seg' ∧ MatchConts a₁ b₁ := by
+theorem take (h : MatchConts a b) :
+    ∀ {id handler : Nat} {seg : List Core.Frame} {a₁ : Conts Core.Frame},
+    takeCont a id = some ((handler, seg), a₁) →
+    ∃ seg' b₁, takeCont b id = some ((handler, seg'), b₁) ∧ MatchFrames seg seg'
+      ∧ MatchConts a₁ b₁ := by
   induction h with
-  | nil => intro id seg a₁ ht; simp [takeCont] at ht
+  | nil => intro id handler seg a₁ ht; simp [takeCont] at ht
   | @cons x y as bs hx hrest ih =>
-    intro id seg a₁ ht
+    intro id handler seg a₁ ht
     cases id with
     | zero =>
       cases hx with
       | empty => simp [takeCont] at ht
       | full hs =>
         simp [takeCont] at ht
-        obtain ⟨rfl, rfl⟩ := ht
+        obtain ⟨⟨rfl, rfl⟩, rfl⟩ := ht
         exact ⟨_, _, rfl, hs, .cons .empty hrest⟩
     | succ id =>
       cases hr : takeCont as id with
@@ -136,7 +126,7 @@ theorem find_sim {op : Nat} {stack : List Core.Frame} {frames : List Bytecode.Fr
     (h : MatchFrames stack frames) : ∀ {d : Dispatch Core.Frame},
     findHandler Core.Frame.asHandler op stack = some d →
     ∃ above' below', findHandler Bytecode.Frame.asHandler op frames
-        = some ⟨above', d.handler, d.arm, below'⟩
+        = some ⟨above', d.id, d.handler, d.arm, below'⟩
       ∧ MatchFrames d.above above' ∧ MatchFrames d.below below' := by
   induction h with
   | nil => intro d hd; simp [findHandler] at hd
@@ -146,7 +136,7 @@ theorem find_sim {op : Nat} {stack : List Core.Frame} {frames : List Bytecode.Fr
       simp [handles, hf.asHandler_eq]
     cases hx : handles Core.Frame.asHandler op f with
     | some r =>
-      obtain ⟨h, arm⟩ := r
+      obtain ⟨id, h, arm⟩ := r
       simp [findHandler, hx] at hd
       subst hd
       exact ⟨[], frames, by simp [findHandler, hh, hx], .nil, hrest⟩
@@ -275,43 +265,109 @@ theorem callFn_sim {fn : Nat} {captures vs : List Value}
     rw [h1, h2]
     exact .next hk (.mk hbody hfr hks)
 
-/-- Delivering a value to corresponding stacks, including the cleanups and
-pending calls a delivery may trigger. -/
-theorem deliver_sim (hfr : MatchFrames stack frames) (hks : MatchStore store store') :
-    ∀ {v : Value},
-    SimOutcome p (Core.deliver p v stack store) (Bytecode.deliver (compile p) v frames store') := by
+/-- Delivering a value to corresponding stacks, and leaving corresponding
+stacks for a target, including the cleanups either may trigger. The two are
+proved together because each is defined through the other. -/
+theorem deliver_leave_sim (hfr : MatchFrames stack frames) (hks : MatchStore store store') :
+    (∀ v : Value, SimOutcome p (Core.deliver p v stack store)
+        (Bytecode.deliver (compile p) v frames store'))
+    ∧ (∀ (target : Target) (after : After), SimOutcome p (Core.leave p target after stack store)
+        (Bytecode.leave (compile p) target after frames store')) := by
   induction hfr with
-  | nil =>
-    intro v
-    exact .halt
+  | nil => exact ⟨fun _ => .halt, fun _ _ => .stuck⟩
   | @cons f f' stack frames hf hrest ih =>
-    intro v
-    cases hf with
-    | @call body ρ code pc hc =>
-      show SimOutcome p (.next ⟨body, ρ ++ [v], stack, store⟩)
-        (.next ⟨code, pc, ρ ++ [v], frames, store'⟩)
-      exact .next (RunsThrough.refl rfl) (.mk hc hrest hks)
-    | @handler h =>
-      by_cases hp : h.passive = true
-      · have h1 : Core.deliver p v (.handler h :: stack) store = Core.deliver p v stack store := by
-          simp [Core.deliver, hp]
-        have h2 : Bytecode.deliver (compile p) v (.handler h :: frames) store'
-            = Bytecode.deliver (compile p) v frames store' := by
-          simp [Bytecode.deliver, hp]
-        rw [h1, h2]
-        exact ih
-      · have h1 : Core.deliver p v (.handler h :: stack) store
-            = Core.callFn p h.ret h.caps [v] stack store := by
-          simp [Core.deliver, hp]
-        have h2 : Bytecode.deliver (compile p) v (.handler h :: frames) store'
-            = Bytecode.callFn (compile p) h.ret h.caps [v] frames store' := by
-          simp [Bytecode.deliver, hp]
-        rw [h1, h2]
-        exact callFn_sim hrest hks
-    | label => exact ih
-    | guard => exact callFn_sim (.cons .yield hrest) hks
-    | invoke => exact callFn_sim hrest hks
-    | yield => exact ih
+    obtain ⟨ihd, ihl⟩ := ih
+    refine ⟨fun v => ?_, fun target after => ?_⟩
+    · cases hf with
+      | @call body ρ code pc hc =>
+        show SimOutcome p (.next ⟨body, ρ ++ [v], stack, store⟩)
+          (.next ⟨code, pc, ρ ++ [v], frames, store'⟩)
+        exact .next (RunsThrough.refl rfl) (.mk hc hrest hks)
+      | handler => exact callFn_sim hrest hks
+      | label => exact ihd v
+      | guard => exact callFn_sim (.cons .yield hrest) hks
+      | yield => exact ihd _
+      | exit => exact ihl _ _
+    · by_cases ht : f.isTarget target = true
+      · have ht' : f'.isTarget target = true := by rw [← hf.isTarget_eq]; exact ht
+        cases after with
+        | yield w =>
+          have h1 : Core.leave p target (.yield w) (f :: stack) store
+              = Core.deliver p w stack store := by simp [Core.leave, ht]
+          have h2 : Bytecode.leave (compile p) target (.yield w) (f' :: frames) store'
+              = Bytecode.deliver (compile p) w frames store' := by simp [Bytecode.leave, ht']
+          rw [h1, h2]
+          exact ihd w
+        | invoke fn captures args =>
+          have h1 : Core.leave p target (.invoke fn captures args) (f :: stack) store
+              = Core.callFn p fn captures args stack store := by simp [Core.leave, ht]
+          have h2 : Bytecode.leave (compile p) target (.invoke fn captures args) (f' :: frames) store'
+              = Bytecode.callFn (compile p) fn captures args frames store' := by
+            simp [Bytecode.leave, ht']
+          rw [h1, h2]
+          exact callFn_sim hrest hks
+      · have ht' : ¬ f'.isTarget target = true := by rw [← hf.isTarget_eq]; exact ht
+        cases hf with
+        | @guard fn captures =>
+          have h1 : Core.leave p target after (.guard fn captures :: stack) store
+              = Core.callFn p fn captures [] (.exit target after :: stack) store := by
+            simp [Core.leave, ht]
+          have h2 : Bytecode.leave (compile p) target after (.guard fn captures :: frames) store'
+              = Bytecode.callFn (compile p) fn captures [] (.exit target after :: frames) store' := by
+            simp [Bytecode.leave, ht']
+          rw [h1, h2]
+          exact callFn_sim (.cons .exit hrest) hks
+        | @call body ρ code pc hc =>
+          have h1 : Core.leave p target after (.call ρ body :: stack) store
+              = Core.leave p target after stack store := by simp [Core.leave, ht]
+          have h2 : Bytecode.leave (compile p) target after (.ret code pc ρ :: frames) store'
+              = Bytecode.leave (compile p) target after frames store' := by
+            simp [Bytecode.leave, ht']
+          rw [h1, h2]
+          exact ihl _ _
+        | @handler id h =>
+          have h1 : Core.leave p target after (.handler id h :: stack) store
+              = Core.leave p target after stack store := by simp [Core.leave, ht]
+          have h2 : Bytecode.leave (compile p) target after (.handler id h :: frames) store'
+              = Bytecode.leave (compile p) target after frames store' := by
+            simp [Bytecode.leave, ht']
+          rw [h1, h2]
+          exact ihl _ _
+        | @label id =>
+          have h1 : Core.leave p target after (.label id :: stack) store
+              = Core.leave p target after stack store := by simp [Core.leave, ht]
+          have h2 : Bytecode.leave (compile p) target after (.label id :: frames) store'
+              = Bytecode.leave (compile p) target after frames store' := by
+            simp [Bytecode.leave, ht']
+          rw [h1, h2]
+          exact ihl _ _
+        | @yield w =>
+          have h1 : Core.leave p target after (.yield w :: stack) store
+              = Core.leave p target after stack store := by simp [Core.leave, ht]
+          have h2 : Bytecode.leave (compile p) target after (.yield w :: frames) store'
+              = Bytecode.leave (compile p) target after frames store' := by
+            simp [Bytecode.leave, ht']
+          rw [h1, h2]
+          exact ihl _ _
+        | @exit t a =>
+          have h1 : Core.leave p target after (.exit t a :: stack) store
+              = Core.leave p target after stack store := by simp [Core.leave, ht]
+          have h2 : Bytecode.leave (compile p) target after (.exit t a :: frames) store'
+              = Bytecode.leave (compile p) target after frames store' := by
+            simp [Bytecode.leave, ht']
+          rw [h1, h2]
+          exact ihl _ _
+
+theorem deliver_sim (hfr : MatchFrames stack frames) (hks : MatchStore store store')
+    {v : Value} :
+    SimOutcome p (Core.deliver p v stack store) (Bytecode.deliver (compile p) v frames store') :=
+  (deliver_leave_sim hfr hks).1 v
+
+theorem leave_sim (hfr : MatchFrames stack frames) (hks : MatchStore store store')
+    {target : Target} {after : After} :
+    SimOutcome p (Core.leave p target after stack store)
+      (Bytecode.leave (compile p) target after frames store') :=
+  (deliver_leave_sim hfr hks).2 target after
 
 theorem apply_sim {c : Callee} (hfr : MatchFrames stack frames) (hks : MatchStore store store') :
     SimOutcome p (Core.apply p c stack store) (Bytecode.apply (compile p) c frames store') := by
@@ -326,7 +382,7 @@ theorem apply_sim {c : Callee} (hfr : MatchFrames stack frames) (hks : MatchStor
       rw [h1]
       exact .stuck
     | some r =>
-      obtain ⟨seg, conts₁⟩ := r
+      obtain ⟨⟨handler, seg⟩, conts₁⟩ := r
       obtain ⟨seg', conts₁', ht', hseg, hcs₁⟩ := hcs.take ht
       have h1 : Core.apply p (.cont id v) stack ⟨conts, labels, cells⟩
           = Core.deliver p v (seg ++ stack) ⟨conts₁, labels, cells⟩ := by
@@ -346,15 +402,13 @@ theorem apply_sim {c : Callee} (hfr : MatchFrames stack frames) (hks : MatchStor
       obtain ⟨above, below⟩ := r
       obtain ⟨above', below', hl', ha, hb⟩ := findLabel_sim hfr hl
       have h1 : Core.apply p (.label id v) stack store
-          = Core.deliver p Value.unit
-              (Core.unwind above (.label id :: .yield v :: below)) store := by
+          = Core.leave p (.label id) (.yield v) stack store := by
         simp [Core.apply, hl]
       have h2 : Bytecode.apply (compile p) (.label id v) frames store'
-          = Bytecode.deliver (compile p) Value.unit
-              (Bytecode.unwind above' (.label id :: .yield v :: below')) store' := by
+          = Bytecode.leave (compile p) (.label id) (.yield v) frames store' := by
         simp [Bytecode.apply, hl']
       rw [h1, h2]
-      exact deliver_sim (unwind_sim ha (.cons .label (.cons .yield hb))) hks
+      exact leave_sim hfr hks
 
 end Outcomes
 
@@ -455,14 +509,16 @@ theorem step_sim (p : Core.Program) {s : Core.State} {t : Bytecode.State} (hm : 
         exact .stuck
       | some c =>
         have h1 : Core.step p ⟨.handle ret ops captures thunk body, ρ, stack, ⟨conts, labels, cells⟩⟩
-            = Core.apply p c (.handler ⟨ret, ops, caps, false⟩ :: .call ρ body :: stack) ⟨conts, labels, cells⟩ := by
+            = Core.apply p c (.handler labels ⟨ret, ops, caps⟩ :: .call ρ body :: stack)
+                ⟨conts, labels + 1, cells⟩ := by
           simp [Core.step, hcap, he]
         have h2 : Bytecode.step (compile p) ⟨code, pc, ρ, frames, ⟨conts', labels, cells⟩⟩
             = Bytecode.apply (compile p) c
-                (.handler ⟨ret, ops, caps, false⟩ :: .ret code (pc + 1) ρ :: frames) ⟨conts', labels, cells⟩ := by
+                (.handler labels ⟨ret, ops, caps⟩ :: .ret code (pc + 1) ρ :: frames)
+                ⟨conts', labels + 1, cells⟩ := by
           simp [Bytecode.step, hi, hcap, he]
         rw [h1, h2]
-        exact apply_sim (.cons .handler (.cons (.call hc.tail) hfr)) hks
+        exact apply_sim (.cons .handler (.cons (.call hc.tail) hfr)) (.mk hcs)
   | raise op args =>
     have hc : CodeAt code pc [Instr.raise op args] := hcode
     have hi := hc.head
@@ -481,19 +537,15 @@ theorem step_sim (p : Core.Program) {s : Core.State} {t : Bytecode.State} (hm : 
       | some d =>
         obtain ⟨above', below', hf', habove, hbelow⟩ := find_sim hfr hf
         have h1 : Core.step p ⟨.raise op args, ρ, stack, ⟨conts, labels, cells⟩⟩
-            = Core.deliver p Value.unit
-                (Core.unwind d.above
-                  (.handler d.handler.abandon :: .invoke d.arm d.handler.caps vs :: d.below))
+            = Core.leave p (.handler d.id) (.invoke d.arm d.handler.caps vs) stack
                 ⟨conts, labels, cells⟩ := by
           simp [Core.step, hv, hf]
         have h2 : Bytecode.step (compile p) ⟨code, pc, ρ, frames, ⟨conts', labels, cells⟩⟩
-            = Bytecode.deliver (compile p) Value.unit
-                (Bytecode.unwind above'
-                  (.handler d.handler.abandon :: .invoke d.arm d.handler.caps vs :: below'))
+            = Bytecode.leave (compile p) (.handler d.id) (.invoke d.arm d.handler.caps vs) frames
                 ⟨conts', labels, cells⟩ := by
           simp [Bytecode.step, hi, hv, hf']
         rw [h1, h2]
-        exact deliver_sim (unwind_sim habove (.cons .handler (.cons .invoke hbelow))) hks
+        exact leave_sim hfr hks
   | perform op args body =>
     have hc : CodeAt code pc (Instr.perform op args :: compileTm body) := hcode
     have hi := hc.head
@@ -514,12 +566,12 @@ theorem step_sim (p : Core.Program) {s : Core.State} {t : Bytecode.State} (hm : 
         obtain ⟨above', below', hf', habove, hbelow⟩ := find_sim hfr hf
         have h1 : Core.step p ⟨.perform op args body, ρ, stack, ⟨conts, labels, cells⟩⟩
             = Core.callFn p d.arm d.handler.caps (vs ++ [.cont conts.length]) d.below
-                ⟨conts ++ [some (.call ρ body :: d.above ++ [.handler d.handler])],
+                ⟨conts ++ [some (d.id, .call ρ body :: d.above ++ [.handler d.id d.handler])],
                   labels, cells⟩ := by
           simp [Core.step, hv, hf]
         have h2 : Bytecode.step (compile p) ⟨code, pc, ρ, frames, ⟨conts', labels, cells⟩⟩
             = Bytecode.callFn (compile p) d.arm d.handler.caps (vs ++ [.cont conts.length]) below'
-                ⟨conts' ++ [some (.ret code (pc + 1) ρ :: above' ++ [.handler d.handler])],
+                ⟨conts' ++ [some (d.id, .ret code (pc + 1) ρ :: above' ++ [.handler d.id d.handler])],
                   labels, cells⟩ := by
           simp [Bytecode.step, hi, hv, hf', hcs.length_eq]
         rw [h1, h2]
@@ -566,14 +618,15 @@ theorem step_sim (p : Core.Program) {s : Core.State} {t : Bytecode.State} (hm : 
         exact .stuck
       | some c =>
         have h1 : Core.step p ⟨.handleTail ret ops captures thunk, ρ, stack, ⟨conts, labels, cells⟩⟩
-            = Core.apply p c (.handler ⟨ret, ops, caps, false⟩ :: stack) ⟨conts, labels, cells⟩ := by
+            = Core.apply p c (.handler labels ⟨ret, ops, caps⟩ :: stack)
+                ⟨conts, labels + 1, cells⟩ := by
           simp [Core.step, hcap, he]
         have h2 : Bytecode.step (compile p) ⟨code, pc, ρ, frames, ⟨conts', labels, cells⟩⟩
-            = Bytecode.apply (compile p) c (.handler ⟨ret, ops, caps, false⟩ :: frames)
-                ⟨conts', labels, cells⟩ := by
+            = Bytecode.apply (compile p) c (.handler labels ⟨ret, ops, caps⟩ :: frames)
+                ⟨conts', labels + 1, cells⟩ := by
           simp [Bytecode.step, hi, hcap, he]
         rw [h1, h2]
-        exact apply_sim (.cons .handler hfr) hks
+        exact apply_sim (.cons .handler hfr) (.mk hcs)
   | labelTail thunk =>
     have hc : CodeAt code pc [Instr.labelTail thunk] := hcode
     have hi := hc.head
@@ -667,20 +720,18 @@ theorem step_sim (p : Core.Program) {s : Core.State} {t : Bytecode.State} (hm : 
         rw [h1]
         exact .stuck
       | some r =>
-        obtain ⟨seg, conts₁⟩ := r
+        obtain ⟨⟨handler, seg⟩, conts₁⟩ := r
         obtain ⟨seg', conts₁', ht', hseg, hcs₁⟩ := hcs.take ht
         have h1 : Core.step p ⟨.cancel k body, ρ, stack, ⟨conts, labels, cells⟩⟩
-            = Core.deliver p Value.unit
-                (Core.unwind seg (.yield Value.unit :: .call ρ body :: stack))
+            = Core.leave p (.handler handler) (.yield Value.unit) (seg ++ .call ρ body :: stack)
                 ⟨conts₁, labels, cells⟩ := by
           simp [Core.step, hk, ht]
         have h2 : Bytecode.step (compile p) ⟨code, pc, ρ, frames, ⟨conts', labels, cells⟩⟩
-            = Bytecode.deliver (compile p) Value.unit
-                (Bytecode.unwind seg' (.yield Value.unit :: .ret code (pc + 1) ρ :: frames))
-                ⟨conts₁', labels, cells⟩ := by
+            = Bytecode.leave (compile p) (.handler handler) (.yield Value.unit)
+                (seg' ++ .ret code (pc + 1) ρ :: frames) ⟨conts₁', labels, cells⟩ := by
           simp [Bytecode.step, hi, hk, ht']
         rw [h1, h2]
-        exact deliver_sim (unwind_sim hseg (.cons .yield (.cons (.call hc.tail) hfr))) (.mk hcs₁)
+        exact leave_sim (hseg.append (.cons (.call hc.tail) hfr)) (.mk hcs₁)
   | mem op args body =>
     have hc : CodeAt code pc (Instr.mem op args :: compileTm body) := hcode
     have hi := hc.head

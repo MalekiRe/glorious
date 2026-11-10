@@ -16,12 +16,20 @@ structure Handler where
   ret : Nat
   ops : List (Nat × Nat)
   caps : List Value
-  /-- The handled computation has been abandoned. The handler still serves
-  operations performed by the cleanups of that computation, which were
-  registered inside it, but a result that reaches it passes straight through. -/
-  passive : Bool
 
-def Handler.abandon (h : Handler) : Handler := ⟨h.ret, h.ops, h.caps, true⟩
+/-- Where an exit is going: the scope of a label, or an installed handler. Each
+is named by a number given to it when it was put on the stack. -/
+inductive Target where
+  | label (id : Nat)
+  | handler (id : Nat)
+  deriving DecidableEq
+
+/-- What an exit does once it has arrived and removed its target. -/
+inductive After where
+  /-- Deliver a value to what is below. -/
+  | yield (v : Value)
+  /-- Run a function on what is below. -/
+  | invoke (fn : Nat) (captures : List Value) (args : List Value)
 
 /-- What a call applies to. -/
 inductive Callee where
@@ -47,41 +55,42 @@ def evalClosure (ρ : Env) (a : Atom) : Option (Nat × List Value) :=
   | some (.clo fn captures) => some (fn, captures)
   | _ => none
 
-/-- The nearest handler of an operation: the frames above it, the handler, the
-callable serving the operation, and the frames below it. -/
+/-- The nearest handler of an operation: the frames above it, its identity,
+the handler, the callable serving the operation, and the frames below it. -/
 structure Dispatch (φ : Type) where
   above : List φ
+  id : Nat
   handler : Handler
   arm : Nat
   below : List φ
 
 /-- Does this frame handle `op`? -/
-def handles {φ : Type} (asHandler : φ → Option Handler) (op : Nat) (fr : φ) :
-    Option (Handler × Nat) :=
+def handles {φ : Type} (asHandler : φ → Option (Nat × Handler)) (op : Nat) (fr : φ) :
+    Option (Nat × Handler × Nat) :=
   match asHandler fr with
-  | some h =>
+  | some (id, h) =>
     match h.ops.lookup op with
-    | some arm => some (h, arm)
+    | some arm => some (id, h, arm)
     | none => none
   | none => none
 
 /-- Search a stack, top first, for the nearest handler with an arm for `op`.
 Handlers without one are skipped. -/
-def findHandler {φ : Type} (asHandler : φ → Option Handler) (op : Nat) :
+def findHandler {φ : Type} (asHandler : φ → Option (Nat × Handler)) (op : Nat) :
     List φ → Option (Dispatch φ)
   | [] => none
   | fr :: stack =>
     match handles asHandler op fr with
-    | some (h, arm) => some ⟨[], h, arm, stack⟩
+    | some (id, h, arm) => some ⟨[], id, h, arm, stack⟩
     | none =>
       match findHandler asHandler op stack with
-      | some d => some ⟨fr :: d.above, d.handler, d.arm, d.below⟩
+      | some d => some ⟨fr :: d.above, d.id, d.handler, d.arm, d.below⟩
       | none => none
 
 /-- Captured continuations, indexed by resumption identity. A resumption is
-one-shot: its entry holds the captured frames until it is resumed or cancelled,
-and is empty afterwards. -/
-abbrev Conts (φ : Type) := List (Option (List φ))
+one-shot: its entry holds the captured frames, with the identity of the handler
+at their base, until it is resumed or cancelled, and is empty afterwards. -/
+abbrev Conts (φ : Type) := List (Option (Nat × List φ))
 
 /-- Take a resumption's captured frames, leaving its entry empty. Resuming and
 cancelling both do this, so a resumption that has been used cannot be used again. -/
@@ -147,7 +156,8 @@ def MemOp.eval (cells : Cells) : MemOp → List Value → Option (Value × Cells
 /-- The machine state that is not on the stack. -/
 structure Store (φ : Type) where
   conts : Conts φ
-  /-- How many label scopes have been entered; the identity of the next one. -/
+  /-- How many label scopes and handlers have been put on a stack; the identity
+  of the next one. -/
   labels : Nat
   cells : Cells
 
