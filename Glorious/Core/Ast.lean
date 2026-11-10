@@ -60,8 +60,9 @@ inductive Tm where
   | guard (cleanup : Atom) (thunk : Atom) (body : Tm)
   /-- `guard` whose result is the result of the current activation. -/
   | guardTail (cleanup : Atom) (thunk : Atom)
-  /-- Give up a resumption without resuming it: the cleanups of the continuation
-  it captured run, innermost first, and the result is unit. -/
+  /-- Give up a callable without calling it; the result is unit. For a
+  resumption, the cleanups of the continuation it captured run, innermost
+  first. For a function or a label there is nothing to do. -/
   | cancel (k : Atom) (body : Tm)
   /-- Perform a memory operation and bind its result. -/
   | mem (op : MemOp) (args : List Atom) (body : Tm)

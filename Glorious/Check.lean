@@ -1677,7 +1677,9 @@ partial def inferCall (scope : Scope) (amb : Row) (f : Expr) (args : List Expr) 
         checkArgs scope amb s!"`{x}`" [] args
         pure (.tuple [.int, .int])
     | .cancel => do
-      checkArgs scope amb "`cancel`" [← freshTy] args
+      -- Giving up a callable: a resumption, or anything else applied to one value.
+      let given := Ty.func [← freshTy] (← freshTy) (← freshRow) (← freshCap)
+      checkArgs scope amb "`cancel`" [given] args
       pure .unit
     | .replace => do
       let t ← freshTy
@@ -1777,7 +1779,11 @@ partial def inferStmts (scope : Scope) (amb : Row) : List Stmt → M Ty
     unifyAt "the assigned value" expected (← inferExpr scope amb value)
     inferStmts scope amb rest
   | .defer e :: rest => do
-    let _ ← inferExpr scope amb e
+    -- A cleanup performs no effects: it may run while its surroundings are
+    -- being left, when no handler should be asked to do anything.
+    try
+      let _ ← inferExpr scope ⟨[], none⟩ e
+    catch err => throw s!"a `defer` cannot perform effects: {err}"
     inferStmts scope amb rest
 
 /-- Check a pattern against a type; the names it binds. -/

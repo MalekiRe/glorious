@@ -712,26 +712,38 @@ theorem step_sim (p : Core.Program) {s : Core.State} {t : Bytecode.State} (hm : 
         simp [Core.step, hk]
       rw [h1]
       exact .stuck
-    | some id =>
-      cases ht : takeCont conts id with
+    | some o =>
+      cases o with
       | none =>
-        have h1 : Core.step p ⟨.cancel k body, ρ, stack, ⟨conts, labels, cells⟩⟩ = .stuck := by
-          simp [Core.step, hk, ht]
-        rw [h1]
-        exact .stuck
-      | some r =>
-        obtain ⟨⟨handler, seg⟩, conts₁⟩ := r
-        obtain ⟨seg', conts₁', ht', hseg, hcs₁⟩ := hcs.take ht
         have h1 : Core.step p ⟨.cancel k body, ρ, stack, ⟨conts, labels, cells⟩⟩
-            = Core.leave p (.handler handler) (.yield Value.unit) (seg ++ .call ρ body :: stack)
-                ⟨conts₁, labels, cells⟩ := by
-          simp [Core.step, hk, ht]
+            = .next ⟨body, ρ ++ [Value.unit], stack, ⟨conts, labels, cells⟩⟩ := by
+          simp [Core.step, hk]
         have h2 : Bytecode.step (compile p) ⟨code, pc, ρ, frames, ⟨conts', labels, cells⟩⟩
-            = Bytecode.leave (compile p) (.handler handler) (.yield Value.unit)
-                (seg' ++ .ret code (pc + 1) ρ :: frames) ⟨conts₁', labels, cells⟩ := by
-          simp [Bytecode.step, hi, hk, ht']
+            = .next ⟨code, pc + 1, ρ ++ [Value.unit], frames, ⟨conts', labels, cells⟩⟩ := by
+          simp [Bytecode.step, hi, hk]
         rw [h1, h2]
-        exact leave_sim (hseg.append (.cons (.call hc.tail) hfr)) (.mk hcs₁)
+        exact .next (RunsThrough.refl rfl) (.mk hc.tail hfr (.mk hcs))
+      | some id =>
+        cases ht : takeCont conts id with
+        | none =>
+          have h1 : Core.step p ⟨.cancel k body, ρ, stack, ⟨conts, labels, cells⟩⟩ = .stuck := by
+            simp [Core.step, hk, ht]
+          rw [h1]
+          exact .stuck
+        | some r =>
+          obtain ⟨⟨handler, seg⟩, conts₁⟩ := r
+          obtain ⟨seg', conts₁', ht', hseg, hcs₁⟩ := hcs.take ht
+          have h1 : Core.step p ⟨.cancel k body, ρ, stack, ⟨conts, labels, cells⟩⟩
+              = Core.leave p (.handler handler) (.yield Value.unit)
+                  (seg ++ .yield Value.unit :: .call ρ body :: stack) ⟨conts₁, labels, cells⟩ := by
+            simp [Core.step, hk, ht]
+          have h2 : Bytecode.step (compile p) ⟨code, pc, ρ, frames, ⟨conts', labels, cells⟩⟩
+              = Bytecode.leave (compile p) (.handler handler) (.yield Value.unit)
+                  (seg' ++ .yield Value.unit :: .ret code (pc + 1) ρ :: frames)
+                  ⟨conts₁', labels, cells⟩ := by
+            simp [Bytecode.step, hi, hk, ht']
+          rw [h1, h2]
+          exact leave_sim (hseg.append (.cons .yield (.cons (.call hc.tail) hfr))) (.mk hcs₁)
   | mem op args body =>
     have hc : CodeAt code pc (Instr.mem op args :: compileTm body) := hcode
     have hi := hc.head

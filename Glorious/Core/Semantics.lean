@@ -249,12 +249,15 @@ def step (p : Program) (s : State) : Step State Value :=
   | .cancel k body =>
     match evalCont s.env k with
     | none => .stuck
-    | some id =>
+    | some none => .next ⟨body, s.env ++ [.unit], s.stack, s.store⟩
+    | some (some id) =>
       match takeCont s.store.conts id with
       | some ((handler, segment), conts) =>
         -- The captured computation is put back and left again at once, down
-        -- to the handler at its base, so that its cleanups run.
-        leave p (.handler handler) (.yield .unit) (segment ++ .call s.env body :: s.stack)
+        -- to the handler at its base, so that its cleanups run. Whatever it
+        -- might still deliver is discarded: the result of `cancel` is unit.
+        leave p (.handler handler) (.yield .unit)
+          (segment ++ .yield .unit :: .call s.env body :: s.stack)
           ⟨conts, s.store.labels, s.store.cells⟩
       | none => .stuck
   | .mem op args body =>

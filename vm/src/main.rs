@@ -635,14 +635,23 @@ impl Vm {
                 self.apply(callee, Vec::new())
             }
             Instr::Cancel(k) => {
-                let Value::Cont(id) = self.atom(k)? else {
-                    return wrong();
+                let id = match self.atom(k)? {
+                    Value::Cont(id) => id,
+                    // Giving up a function or a label needs nothing done.
+                    Value::Clo(_) | Value::Label(_) => {
+                        self.locals.push(unit());
+                        self.pc += 1;
+                        return Ok(());
+                    }
+                    _ => return wrong(),
                 };
                 let (handler, segment) =
                     self.conts.get_mut(id).and_then(Option::take).ok_or(Stop::Wrong)?;
                 // The captured computation is put back and left again at once,
                 // down to the handler at its base, so that its cleanups run.
+                // Whatever it might still deliver is discarded.
                 self.push_ret();
+                self.frames.push(Frame::Yield(unit()));
                 self.frames.extend(segment);
                 self.leave(Target::Handler(handler), After::Yield(unit()))
             }

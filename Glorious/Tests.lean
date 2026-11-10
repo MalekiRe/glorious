@@ -82,4 +82,15 @@ def notTail (n : Nat) : String :=
 #guard diagnose "fn mk() { let mut n = 0; { n = n + 1; n } }  fn main() { mk()() }"
   == "a reference is used after the cell it points to was freed"
 
+-- The checker does not let a cleanup perform effects. The machines still give
+-- such a program a meaning: the cleanup runs in place, inside the handlers it
+-- was registered inside, and an arm that resumes it never sees its result.
+#guard diagnose "effect Tick { tick() }  effect Stop { stop(Int) -> ! }
+  fn work() { defer tick(); stop(1) }
+  fn main() { handle (handle work() { tick(k) => k(()) + 1 }) { stop(v) => v } }"
+  == "did not go wrong"
+#guard diagnose "effect Stop { stop(Int) -> ! }
+  fn work() { defer stop(2); stop(1) }
+  fn main() { handle work() { stop(v) => v } }" == "did not go wrong"
+
 end Glorious.Tests

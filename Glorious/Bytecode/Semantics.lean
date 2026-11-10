@@ -210,11 +210,12 @@ def step (p : Program) (s : State) : Step State Value :=
   | some (.cancel k) =>
     match evalCont s.locals k with
     | none => .stuck
-    | some id =>
+    | some none => .next ⟨s.code, s.pc + 1, s.locals ++ [.unit], s.frames, s.store⟩
+    | some (some id) =>
       match takeCont s.store.conts id with
       | some ((handler, segment), conts) =>
         leave p (.handler handler) (.yield .unit)
-          (segment ++ .ret s.code (s.pc + 1) s.locals :: s.frames)
+          (segment ++ .yield .unit :: .ret s.code (s.pc + 1) s.locals :: s.frames)
           ⟨conts, s.store.labels, s.store.cells⟩
       | none => .stuck
   | some (.mem op args) =>

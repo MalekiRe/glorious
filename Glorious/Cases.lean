@@ -576,28 +576,37 @@ def cases : List Case := [
   ⟨"effect Ask { ask() -> Int }\n  fn main() { let mut n = 0; handle ask() + 1 { ask(k) => while({ n < 2 }) { n = n + 1; k(n); }; 0 } }",
     [], "error: 2:59: in `main`: `while` may use what it is given more than once, but a value that holds a resumption can be used only once"⟩,
 
-  -- A cleanup runs in place, with everything below it still there: it can jump
-  -- to an enclosing label and perform an operation an enclosing handler serves,
-  -- even while that label or handler is being left. A cleanup that starts an
-  -- exit of its own replaces the one in progress, and no cleanup is skipped.
+  -- A cleanup runs in place, with everything below it still there, so it can
+  -- jump to an enclosing label even while that label is being left. A cleanup
+  -- that starts an exit of its own replaces the one in progress, and no cleanup
+  -- is skipped. A cleanup cannot perform effects.
   ⟨"fn main() { @out { defer @out(2); @out(1) } }",
     [], "2"⟩,
   ⟨"fn main() { @out { defer @out(2); 5 } }",
     [], "2"⟩,
   ⟨"effect Tick { tick() }\n  effect Stop { stop(Int) -> ! }\n  fn work() { defer tick(); stop(1) }\n  fn main() { let mut n = 0; let r = handle (handle work() { tick() => n = n + 1 }) { stop(v) => v }; (r, n) }",
-    [], "(1, 1)"⟩,
+    [], "error: 3:15: in `work`: a `defer` cannot perform effects: operation `tick` cannot be performed here: effect `Tick` is not handled here"⟩,
   ⟨"fn main() { @outer { @inner { defer print(1); defer @outer(9); @inner(0) }; 5 } }",
     [], "1\n9"⟩,
   ⟨"effect Tick { tick() }\n  effect Stop { stop(Int) -> ! }\n  fn work() { defer stop(2); stop(1) }\n  fn main() { handle work() { stop(v) => print(v); v } }",
-    [], "2\n2"⟩,
+    [], "error: 3:15: in `work`: a `defer` cannot perform effects: operation `stop` cannot be performed here: effect `Stop` is not handled here"⟩,
   ⟨"effect Tick { tick() }\n  effect Stop { stop(Int) -> ! }\n  effect Ask { ask() -> Int }\n  fn work() { defer tick(); ask() }\n  fn main() { let mut n = 0; handle (handle work() { tick() => n = n + 1 }) { ask(k) => cancel(k); n } }",
-    [], "1"⟩,
+    [], "error: 4:15: in `work`: a `defer` cannot perform effects: operation `tick` cannot be performed here: effect `Tick` is not handled here"⟩,
 
-  -- A cleanup may perform an operation whose arm resumes it. The exit then
-  -- carries on through that arm, so the arm never sees a result of the wrong
-  -- kind.
   ⟨"effect Tick { tick() }\n  effect Stop { stop(Int) -> ! }\n  fn work() { defer tick(); stop(1) }\n  fn main() { handle (handle work() { tick(k) => k(()) + 1 }) { stop(v) => v } }",
-    [], "1"⟩,
+    [], "error: 3:15: in `work`: a `defer` cannot perform effects: operation `tick` cannot be performed here: effect `Tick` is not handled here"⟩,
+
+
+  -- `cancel` gives up a callable without calling it. Only a resumption has
+  -- anything to clean up.
+  ⟨"fn main() { cancel(5); 0 }",
+    [], "error: 1:13: in `main`: argument 1 of `cancel`: expected `fn(_) -> _`, found `Int`"⟩,
+  ⟨"fn main() { cancel({ 1 }); 0 }",
+    [], "error: 1:13: in `main`: argument 1 of `cancel`: expected `fn(_) -> _`, found `fn() -> Int`"⟩,
+  ⟨"fn main() { cancel({ x => x + 1 }); 0 }",
+    [], "0"⟩,
+  ⟨"effect Ask { ask() -> Int }\n  fn work() { @inner { defer @inner(5); ask() } }\n  fn main() { handle work() { r => (r, r), ask(k) => match(cancel(k)) { () => (0, 0) } } }",
+    [], "(0, 0)"⟩,
 
   -- Errors are reported, not guessed around.
   ⟨"fn main() { nope }",

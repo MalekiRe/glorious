@@ -105,10 +105,14 @@ def takeCont {α : Type} : List (Option α) → Nat → Option (α × List (Opti
     | some (x, cs') => some (x, c :: cs')
     | none => none
 
-/-- Evaluate an operand that must be a resumption. -/
-def evalCont (ρ : Env) (a : Atom) : Option Nat :=
+/-- Evaluate the operand of `cancel`, which gives up a callable without calling
+it: a resumption, by its identity, or a function or label, for which there is
+nothing to do. Anything else has no meaning. -/
+def evalCont (ρ : Env) (a : Atom) : Option (Option Nat) :=
   match a.eval ρ with
-  | some (.cont id) => some id
+  | some (.cont id) => some (some id)
+  | some (.clo _ _) => some none
+  | some (.label _) => some none
   | _ => none
 
 /-- The frames above and below the scope of label `id`, if that scope is on the stack. -/

@@ -141,9 +141,24 @@ value, or runs the handler's arm.
   the cleanup finishes the exit continues through the arm's own frames. The arm
   never receives a result.
 - Handlers carry an identity, so that an exit can name the one it is going to.
+- **A cleanup performs no effects** (language specification section 7.7: an
+  effectful close must be called explicitly). The checker rejects a `defer`
+  whose expression performs an operation or calls something that might. A
+  cleanup may still jump to an enclosing label and use the host. Without this
+  rule a cleanup's operation could capture the pending exit in a resumption,
+  and resuming it later, after the exit's target had gone, went wrong.
+- **`cancel` gives up any callable taking one value.** For a resumption it runs
+  the captured computation's cleanups; for a function or a label there is
+  nothing to do. Before, `cancel` of anything but a resumption went wrong, and
+  the checker could not tell the two apart. The cancelled computation is put
+  back above a frame that discards whatever it delivers, so that if one of its
+  cleanups jumps to a label inside it and it runs on to completion, the
+  canceller still receives unit.
 
 Two earlier designs were wrong, and both let a program the checker accepts go
-wrong at run time.
+wrong at run time. Three further faults (the two rules above, and the discarding
+frame) were found the same way as the second: by trying to say what type each
+stack has.
 
 1. Unwinding removed every abandoned frame and then ran the cleanups, so a
    cleanup found its enclosing handlers and labels gone. A random search for
