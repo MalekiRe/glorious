@@ -18,6 +18,8 @@ inductive Value where
   | clo (fn : Nat) (captures : List Value)
   /-- A resumption: the identity of a captured continuation. -/
   | cont (id : Nat)
+  /-- A label: the identity of a label scope. -/
+  | label (id : Nat)
 
 /-- The locals of one activation, oldest first. -/
 abbrev Env := List Value
@@ -60,6 +62,7 @@ def follow : Value → List Nat → Option Value
   | .int _, _ :: _ => none
   | .clo _ _, _ :: _ => none
   | .cont _, _ :: _ => none
+  | .label _, _ :: _ => none
 
 /-- Is this value built by constructor `tag` with exactly `arity` fields? -/
 def isCtor (v : Value) (tag arity : Nat) : Bool :=
@@ -68,6 +71,7 @@ def isCtor (v : Value) (tag arity : Nat) : Bool :=
   | .int _ => false
   | .clo _ _ => false
   | .cont _ => false
+  | .label _ => false
 
 /-- Is this value the integer `n`? -/
 def isInt (v : Value) (n : Int) : Bool :=
@@ -76,6 +80,7 @@ def isInt (v : Value) (n : Int) : Bool :=
   | .data _ _ => false
   | .clo _ _ => false
   | .cont _ => false
+  | .label _ => false
 
 end Value
 

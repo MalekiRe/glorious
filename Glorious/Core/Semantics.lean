@@ -21,10 +21,12 @@ def Pat.matchVal : Pat → Value → Option (List Value)
   | .int _, .data _ _ => none
   | .int _, .clo _ _ => none
   | .int _, .cont _ => none
+  | .int _, .label _ => none
   | .ctor tag ps, .data t fields => if tag = t then Pat.matchVals ps fields else none
   | .ctor _ _, .int _ => none
   | .ctor _ _, .clo _ _ => none
   | .ctor _ _, .cont _ => none
+  | .ctor _ _, .label _ => none
 
 /-- Match values against patterns pointwise. The two lists must have the same length. -/
 def Pat.matchVals : List Pat → List Value → Option (List Value)
@@ -55,16 +57,24 @@ inductive Frame where
   | call (env : Env) (body : Tm)
   /-- The delimiter of an installed handler. -/
   | handler (h : Handler)
+  /-- The scope of a label. -/
+  | label (id : Nat)
 
 def Frame.asHandler : Frame → Option Handler
-  | .call _ _ => none
   | .handler h => some h
+  | .call _ _ => none
+  | .label _ => none
+
+def Frame.asLabel : Frame → Option Nat
+  | .label id => some id
+  | .call _ _ => none
+  | .handler _ => none
 
 structure State where
   tm : Tm
   env : Env
   stack : List Frame
-  conts : Conts Frame
+  store : Store Frame
 
 /-- Select the clause of function `fn` matching the arguments: its body and the
 environment it starts in, `arguments ++ captures ++ bindings`. -/
@@ -78,29 +88,34 @@ def invoke (p : Program) (fn : Nat) (captures vs : List Value) : Option (Tm × E
 
 /-- Start running a function on top of `stack`. -/
 def callFn (p : Program) (fn : Nat) (captures vs : List Value) (stack : List Frame)
-    (conts : Conts Frame) : Step State Value :=
+    (store : Store Frame) : Step State Value :=
   match invoke p fn captures vs with
-  | some (body, ρ) => .next ⟨body, ρ, stack, conts⟩
+  | some (body, ρ) => .next ⟨body, ρ, stack, store⟩
   | none => .stuck
 
-/-- Deliver a result to the top of `stack`. A caller binds it; a handler's
-delimiter is removed and its completion function runs outside it. -/
-def deliver (p : Program) (v : Value) (stack : List Frame) (conts : Conts Frame) :
-    Step State Value :=
-  match stack with
-  | [] => .halt v
-  | .call ρ body :: stack => .next ⟨body, ρ ++ [v], stack, conts⟩
-  | .handler h :: stack => callFn p h.ret h.caps [v] stack conts
+/-- Deliver a result to the top of a stack. A caller binds it; a handler's
+delimiter is removed and its completion function runs outside it; a label scope
+simply ends. -/
+def deliver (p : Program) (v : Value) : List Frame → Store Frame → Step State Value
+  | [], _ => .halt v
+  | .call ρ body :: stack, store => .next ⟨body, ρ ++ [v], stack, store⟩
+  | .handler h :: stack, store => callFn p h.ret h.caps [v] stack store
+  | .label _ :: stack, store => deliver p v stack store
 
-/-- Apply a callee on top of `stack`: enter a function, or reinstate a captured
-continuation and deliver the argument to it. -/
-def apply (p : Program) (c : Callee) (stack : List Frame) (conts : Conts Frame) :
+/-- Apply a callee on top of `stack`: enter a function, reinstate a captured
+continuation and deliver the argument to it, or leave a label scope with the
+argument as its result. -/
+def apply (p : Program) (c : Callee) (stack : List Frame) (store : Store Frame) :
     Step State Value :=
   match c with
-  | .fn fn captures vs => callFn p fn captures vs stack conts
+  | .fn fn captures vs => callFn p fn captures vs stack store
   | .cont id v =>
-    match takeCont conts id with
-    | some (segment, conts') => deliver p v (segment ++ stack) conts'
+    match takeCont store.conts id with
+    | some (segment, conts) => deliver p v (segment ++ stack) ⟨conts, store.labels⟩
+    | none => .stuck
+  | .label id v =>
+    match findLabel Frame.asLabel id stack with
+    | some below => deliver p v below store
     | none => .stuck
 
 def step (p : Program) (s : State) : Step State Value :=
@@ -108,23 +123,23 @@ def step (p : Program) (s : State) : Step State Value :=
   | .ret a =>
     match a.eval s.env with
     | none => .stuck
-    | some v => deliver p v s.stack s.conts
+    | some v => deliver p v s.stack s.store
   | .let_ rhs body =>
     match rhs.eval s.env with
     | none => .stuck
-    | some v => .next ⟨body, s.env ++ [v], s.stack, s.conts⟩
+    | some v => .next ⟨body, s.env ++ [v], s.stack, s.store⟩
   | .call f args body =>
     match evalCall s.env f args with
     | none => .stuck
-    | some c => apply p c (.call s.env body :: s.stack) s.conts
+    | some c => apply p c (.call s.env body :: s.stack) s.store
   | .tail f args =>
     match evalCall s.env f args with
     | none => .stuck
-    | some c => apply p c s.stack s.conts
+    | some c => apply p c s.stack s.store
   | .handle ret ops captures thunk body =>
     match evalAtoms s.env captures, evalCall s.env thunk [] with
     | some caps, some c =>
-      apply p c (.handler ⟨ret, ops, caps⟩ :: .call s.env body :: s.stack) s.conts
+      apply p c (.handler ⟨ret, ops, caps⟩ :: .call s.env body :: s.stack) s.store
     | _, _ => .stuck
   | .raise op args =>
     match evalAtoms s.env args with
@@ -132,7 +147,7 @@ def step (p : Program) (s : State) : Step State Value :=
     | some vs =>
       match findHandler Frame.asHandler op s.stack with
       | none => .stuck
-      | some d => callFn p d.arm d.handler.caps vs d.below s.conts
+      | some d => callFn p d.arm d.handler.caps vs d.below s.store
   | .perform op args body =>
     match evalAtoms s.env args with
     | none => .stuck
@@ -142,10 +157,18 @@ def step (p : Program) (s : State) : Step State Value :=
       | some d =>
         -- The continuation runs from the performer up to and including the
         -- handler, so resuming it reinstalls the handler: handlers are deep.
-        callFn p d.arm d.handler.caps (vs ++ [.cont s.conts.length]) d.below
-          (s.conts ++ [some (.call s.env body :: d.above ++ [.handler d.handler])])
+        callFn p d.arm d.handler.caps (vs ++ [.cont s.store.conts.length]) d.below
+          ⟨s.store.conts ++ [some (.call s.env body :: d.above ++ [.handler d.handler])],
+            s.store.labels⟩
+  | .label thunk body =>
+    match evalClosure s.env thunk with
+    | none => .stuck
+    | some (fn, captures) =>
+      callFn p fn captures [.label s.store.labels]
+        (.label s.store.labels :: .call s.env body :: s.stack)
+        ⟨s.store.conts, s.store.labels + 1⟩
 
-def init (p : Program) : State := ⟨p.main, [], [], []⟩
+def init (p : Program) : State := ⟨p.main, [], [], ⟨[], 0⟩⟩
 
 /-- The program finishes with result `v`. -/
 def Halts (p : Program) (v : Value) : Prop := Machine.Halts (step p) (init p) v

@@ -105,4 +105,55 @@ def resumeTwice : Core.Program where
 
 theorem resumeTwice_goesWrong : Core.GoesWrong resumeTwice := ⟨20, rfl⟩
 
+/--
+A label scope left early from inside a nested call, and one that ends normally.
+```
+check[l](3)  = tail l(3 * 100)
+check[l](x)  = x
+body(l)      = let c = check[l] in c(1) + c(3) + c(5)
+seven(l)     = 7
+main         = (label body) + (label seven)
+```
+`c(3)` leaves the first scope with 300, abandoning the rest of `body`.
+-/
+def labels : Core.Program where
+  fns := [
+    ⟨[ ⟨[.int 3], .let_ (.prim .intMul [.var 0, .int 100]) <| .tail (.var 1) [.var 2]⟩,
+       ⟨[.wild], .ret (.var 0)⟩ ]⟩,
+    ⟨[ ⟨[.wild],
+          .let_ (.closure 0 [.var 0]) <|
+          .call (.var 1) [.int 1] <|
+          .call (.var 1) [.int 3] <|
+          .call (.var 1) [.int 5] <|
+          .let_ (.prim .intAdd [.var 2, .var 3]) <|
+          .let_ (.prim .intAdd [.var 5, .var 4]) <|
+          .ret (.var 6)⟩ ]⟩,
+    ⟨[ ⟨[.wild], .ret (.int 7)⟩ ]⟩
+  ]
+  main :=
+    .let_ (.closure 1 []) <|
+    .label (.var 0) <|
+    .let_ (.closure 2 []) <|
+    .label (.var 2) <|
+    .let_ (.prim .intAdd [.var 1, .var 3]) <|
+    .ret (.var 4)
+
+theorem labels_core : Core.Halts labels (.int 307) := ⟨40, rfl⟩
+
+theorem labels_bytecode : Bytecode.Halts (compile labels) (.int 307) := ⟨40, rfl⟩
+
+/-- A label used after its scope has ended has no meaning.
+```
+main = let l = label (l => l) in tail l(1)
+```
+-/
+def escapedLabel : Core.Program where
+  fns := [ ⟨[ ⟨[.wild], .ret (.var 0)⟩ ]⟩ ]
+  main :=
+    .let_ (.closure 0 []) <|
+    .label (.var 0) <|
+    .tail (.var 1) [.int 1]
+
+theorem escapedLabel_goesWrong : Core.GoesWrong escapedLabel := ⟨20, rfl⟩
+
 end Glorious.Witness

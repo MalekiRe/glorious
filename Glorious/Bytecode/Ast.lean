@@ -25,6 +25,8 @@ inductive Instr where
   /-- Capture the frames up to the nearest handler of `op` as a resumption and
   enter its arm; the value it is resumed with becomes the next local. -/
   | perform (op : Nat) (args : List Atom)
+  /-- Push a return frame and a fresh label scope, then enter `thunk` with the label. -/
+  | label (thunk : Atom)
   /-- Fall through if the place holds constructor `tag` with `arity` fields;
   otherwise jump to `fail`. -/
   | testCtor (pl : Place) (tag arity : Nat) (fail : Nat)

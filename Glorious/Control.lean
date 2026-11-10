@@ -3,8 +3,8 @@ import Glorious.Value
 /-!
 # Control structures shared by both machines
 
-Handlers, the search for the handler of an operation, and the store of
-captured continuations. Both machines use these definitions on their own kind
+Handlers, the search for the handler of an operation, the search for a label
+scope, and the store of captured continuations. Both machines use these definitions on their own kind
 of stack frame.
 -/
 
@@ -23,13 +23,23 @@ inductive Callee where
   | fn (fn : Nat) (captures : List Value) (args : List Value)
   /-- A resumption and the value to resume it with. -/
   | cont (id : Nat) (arg : Value)
+  /-- A label and the value to leave its scope with. -/
+  | label (id : Nat) (arg : Value)
 
-/-- Evaluate the callee and arguments of a call. A resumption takes exactly one argument. -/
+/-- Evaluate the callee and arguments of a call. A resumption and a label each
+take exactly one argument. -/
 def evalCall (ρ : Env) (f : Atom) (args : List Atom) : Option Callee :=
   match f.eval ρ, evalAtoms ρ args with
   | some (.clo fn captures), some vs => some (.fn fn captures vs)
   | some (.cont id), some [v] => some (.cont id v)
+  | some (.label id), some [v] => some (.label id v)
   | _, _ => none
+
+/-- Evaluate an operand that must be a function closure. -/
+def evalClosure (ρ : Env) (a : Atom) : Option (Nat × List Value) :=
+  match a.eval ρ with
+  | some (.clo fn captures) => some (fn, captures)
+  | _ => none
 
 /-- The nearest handler of an operation: the frames above it, the handler, the
 callable serving the operation, and the frames below it. -/
@@ -77,5 +87,16 @@ def takeCont {α : Type} : List (Option α) → Nat → Option (α × List (Opti
     match takeCont cs id with
     | some (x, cs') => some (x, c :: cs')
     | none => none
+
+/-- The frames below the scope of label `id`, if that scope is on the stack. -/
+def findLabel {φ : Type} (asLabel : φ → Option Nat) (id : Nat) : List φ → Option (List φ)
+  | [] => none
+  | fr :: stack => if asLabel fr = some id then some stack else findLabel asLabel id stack
+
+/-- The machine state that is not on the stack. -/
+structure Store (φ : Type) where
+  conts : Conts φ
+  /-- How many label scopes have been entered; the identity of the next one. -/
+  labels : Nat
 
 end Glorious

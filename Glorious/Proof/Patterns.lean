@@ -34,6 +34,7 @@ theorem Value.follow_snoc {v : Value} {path : List Nat} {tag : Nat} {fields : Li
     | int n => simp [Value.follow] at h
     | clo fn caps => simp [Value.follow] at h
     | cont id => simp [Value.follow] at h
+    | label id => simp [Value.follow] at h
     | data t fs =>
       simp only [List.cons_append, Value.follow] at h ⊢
       cases hg : fs[j]? with
@@ -170,11 +171,13 @@ theorem patTests_check (ρ : Env) : ∀ (p : Pat) (pl : Place) (v : Value), pl.e
     | data t fs => simp [patTests, checkAll, Test.check, hv, Value.isInt, Pat.matchVal]
     | clo f cs => simp [patTests, checkAll, Test.check, hv, Value.isInt, Pat.matchVal]
     | cont id => simp [patTests, checkAll, Test.check, hv, Value.isInt, Pat.matchVal]
+    | label id => simp [patTests, checkAll, Test.check, hv, Value.isInt, Pat.matchVal]
   | .ctor tag ps, pl, v, hv => by
     cases v with
     | int m => simp [patTests, checkAll, Test.check, hv, Value.isCtor, Pat.matchVal]
     | clo f cs => simp [patTests, checkAll, Test.check, hv, Value.isCtor, Pat.matchVal]
     | cont id => simp [patTests, checkAll, Test.check, hv, Value.isCtor, Pat.matchVal]
+    | label id => simp [patTests, checkAll, Test.check, hv, Value.isCtor, Pat.matchVal]
     | data t fs =>
       by_cases ht : tag = t
       · by_cases hl : ps.length = fs.length
@@ -231,11 +234,13 @@ theorem patBinds_eval (ρ : Env) : ∀ (p : Pat) (pl : Place) (v : Value) (bs : 
     | data t fs => simp [Pat.matchVal] at hm
     | clo f cs => simp [Pat.matchVal] at hm
     | cont id => simp [Pat.matchVal] at hm
+    | label id => simp [Pat.matchVal] at hm
   | .ctor tag ps, pl, v, bs, hv, hm => by
     cases v with
     | int m => simp [Pat.matchVal] at hm
     | clo f cs => simp [Pat.matchVal] at hm
     | cont id => simp [Pat.matchVal] at hm
+    | label id => simp [Pat.matchVal] at hm
     | data t fs =>
       by_cases ht : tag = t
       · simp [Pat.matchVal, ht] at hm
@@ -278,7 +283,7 @@ end
 section Machine
 
 variable {P : Bytecode.Program} {code : Code} {fr : List Bytecode.Frame}
-  {ks : Conts Bytecode.Frame}
+  {ks : Store Bytecode.Frame}
 
 theorem step_test_pass {ρ : Env} {pc : Nat} {t : Test} {fail : Nat}
     (hi : code[pc]? = some (Test.instr fail t)) (hb : t.check ρ = some true) :

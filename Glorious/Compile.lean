@@ -22,6 +22,7 @@ def compileTm : Core.Tm → Code
   | .handle ret ops captures thunk body => .handle ret ops captures thunk :: compileTm body
   | .raise op args => [.raise op args]
   | .perform op args body => .perform op args :: compileTm body
+  | .label thunk body => .label thunk :: compileTm body
 
 /-- A structural test a pattern imposes on a place. -/
 inductive Test where
