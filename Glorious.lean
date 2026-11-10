@@ -1,5 +1,6 @@
 import Glorious.Machine
 import Glorious.Value
+import Glorious.Control
 import Glorious.Core.Ast
 import Glorious.Core.Semantics
 import Glorious.Bytecode.Ast

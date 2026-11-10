@@ -16,6 +16,8 @@ inductive Value where
   | data (tag : Nat) (fields : List Value)
   /-- A callable: the index of its function and the values it captured. -/
   | clo (fn : Nat) (captures : List Value)
+  /-- A resumption: the identity of a captured continuation. -/
+  | cont (id : Nat)
 
 /-- The locals of one activation, oldest first. -/
 abbrev Env := List Value
@@ -57,6 +59,7 @@ def follow : Value → List Nat → Option Value
     | none => none
   | .int _, _ :: _ => none
   | .clo _ _, _ :: _ => none
+  | .cont _, _ :: _ => none
 
 /-- Is this value built by constructor `tag` with exactly `arity` fields? -/
 def isCtor (v : Value) (tag arity : Nat) : Bool :=
@@ -64,6 +67,7 @@ def isCtor (v : Value) (tag arity : Nat) : Bool :=
   | .data t fields => tag == t && arity == fields.length
   | .int _ => false
   | .clo _ _ => false
+  | .cont _ => false
 
 /-- Is this value the integer `n`? -/
 def isInt (v : Value) (n : Int) : Bool :=
@@ -71,6 +75,7 @@ def isInt (v : Value) (n : Int) : Bool :=
   | .int m => n == m
   | .data _ _ => false
   | .clo _ _ => false
+  | .cont _ => false
 
 end Value
 
@@ -118,12 +123,5 @@ def Rhs.eval (ρ : Env) : Rhs → Option Value
     match evalAtoms ρ captures with
     | some vs => some (.clo fn vs)
     | none => none
-
-/-- Evaluate the callee and arguments of a call: the function index, the
-captured values and the argument values. -/
-def evalCall (ρ : Env) (f : Atom) (args : List Atom) : Option (Nat × List Value × List Value) :=
-  match f.eval ρ, evalAtoms ρ args with
-  | some (.clo fn captures), some vs => some (fn, captures, vs)
-  | _, _ => none
 
 end Glorious

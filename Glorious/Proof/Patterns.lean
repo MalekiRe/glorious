@@ -33,6 +33,7 @@ theorem Value.follow_snoc {v : Value} {path : List Nat} {tag : Nat} {fields : Li
     cases v with
     | int n => simp [Value.follow] at h
     | clo fn caps => simp [Value.follow] at h
+    | cont id => simp [Value.follow] at h
     | data t fs =>
       simp only [List.cons_append, Value.follow] at h ⊢
       cases hg : fs[j]? with
@@ -168,10 +169,12 @@ theorem patTests_check (ρ : Env) : ∀ (p : Pat) (pl : Place) (v : Value), pl.e
         simp [patTests, checkAll, Test.check, hv, Value.isInt, Pat.matchVal, h, hb]
     | data t fs => simp [patTests, checkAll, Test.check, hv, Value.isInt, Pat.matchVal]
     | clo f cs => simp [patTests, checkAll, Test.check, hv, Value.isInt, Pat.matchVal]
+    | cont id => simp [patTests, checkAll, Test.check, hv, Value.isInt, Pat.matchVal]
   | .ctor tag ps, pl, v, hv => by
     cases v with
     | int m => simp [patTests, checkAll, Test.check, hv, Value.isCtor, Pat.matchVal]
     | clo f cs => simp [patTests, checkAll, Test.check, hv, Value.isCtor, Pat.matchVal]
+    | cont id => simp [patTests, checkAll, Test.check, hv, Value.isCtor, Pat.matchVal]
     | data t fs =>
       by_cases ht : tag = t
       · by_cases hl : ps.length = fs.length
@@ -227,10 +230,12 @@ theorem patBinds_eval (ρ : Env) : ∀ (p : Pat) (pl : Place) (v : Value) (bs : 
       · simp [Pat.matchVal, h] at hm
     | data t fs => simp [Pat.matchVal] at hm
     | clo f cs => simp [Pat.matchVal] at hm
+    | cont id => simp [Pat.matchVal] at hm
   | .ctor tag ps, pl, v, bs, hv, hm => by
     cases v with
     | int m => simp [Pat.matchVal] at hm
     | clo f cs => simp [Pat.matchVal] at hm
+    | cont id => simp [Pat.matchVal] at hm
     | data t fs =>
       by_cases ht : tag = t
       · simp [Pat.matchVal, ht] at hm
@@ -273,10 +278,11 @@ end
 section Machine
 
 variable {P : Bytecode.Program} {code : Code} {fr : List Bytecode.Frame}
+  {ks : Conts Bytecode.Frame}
 
 theorem step_test_pass {ρ : Env} {pc : Nat} {t : Test} {fail : Nat}
     (hi : code[pc]? = some (Test.instr fail t)) (hb : t.check ρ = some true) :
-    Bytecode.step P ⟨code, pc, ρ, fr⟩ = .next ⟨code, pc + 1, ρ, fr⟩ := by
+    Bytecode.step P ⟨code, pc, ρ, fr, ks⟩ = .next ⟨code, pc + 1, ρ, fr, ks⟩ := by
   cases t with
   | ctor pl tag arity =>
     simp only [Test.instr] at hi
@@ -297,7 +303,7 @@ theorem step_test_pass {ρ : Env} {pc : Nat} {t : Test} {fail : Nat}
 
 theorem step_test_fail {ρ : Env} {pc : Nat} {t : Test} {fail : Nat}
     (hi : code[pc]? = some (Test.instr fail t)) (hb : t.check ρ = some false) :
-    Bytecode.step P ⟨code, pc, ρ, fr⟩ = .next ⟨code, fail, ρ, fr⟩ := by
+    Bytecode.step P ⟨code, pc, ρ, fr, ks⟩ = .next ⟨code, fail, ρ, fr, ks⟩ := by
   cases t with
   | ctor pl tag arity =>
     simp only [Test.instr] at hi
@@ -319,7 +325,7 @@ theorem step_test_fail {ρ : Env} {pc : Nat} {t : Test} {fail : Nat}
 /-- Tests that all hold fall through, one instruction each. -/
 theorem tests_pass {ρ : Env} {fail : Nat} {rest : Code} : ∀ (ts : List Test) (pc : Nat),
     checkAll ρ ts = some true → CodeAt code pc (ts.map (Test.instr fail) ++ rest) →
-    run (Bytecode.step P) ts.length ⟨code, pc, ρ, fr⟩ = .next ⟨code, pc + ts.length, ρ, fr⟩ := by
+    run (Bytecode.step P) ts.length ⟨code, pc, ρ, fr, ks⟩ = .next ⟨code, pc + ts.length, ρ, fr, ks⟩ := by
   intro ts
   induction ts with
   | nil => intro pc _ _; rfl
@@ -341,7 +347,7 @@ theorem tests_pass {ρ : Env} {fail : Nat} {rest : Code} : ∀ (ts : List Test) 
 /-- Tests of which one fails jump to the failure target, leaving the locals untouched. -/
 theorem tests_fail {ρ : Env} {fail : Nat} {rest : Code} : ∀ (ts : List Test) (pc : Nat),
     checkAll ρ ts = some false → CodeAt code pc (ts.map (Test.instr fail) ++ rest) →
-    ∃ k, run (Bytecode.step P) (k + 1) ⟨code, pc, ρ, fr⟩ = .next ⟨code, fail, ρ, fr⟩ := by
+    ∃ k, run (Bytecode.step P) (k + 1) ⟨code, pc, ρ, fr, ks⟩ = .next ⟨code, fail, ρ, fr, ks⟩ := by
   intro ts
   induction ts with
   | nil => intro pc h _; simp [checkAll] at h
@@ -364,8 +370,8 @@ theorem tests_fail {ρ : Env} {fail : Nat} {rest : Code} : ∀ (ts : List Test) 
 theorem binds_run {ρ : Env} {rest : Code} :
     ∀ (pls : List Place) (bs extra : List Value) (pc : Nat), evalPlaces ρ pls = some bs →
     CodeAt code pc (pls.map (fun pl => Instr.op (.place pl)) ++ rest) →
-    run (Bytecode.step P) pls.length ⟨code, pc, ρ ++ extra, fr⟩
-      = .next ⟨code, pc + pls.length, ρ ++ extra ++ bs, fr⟩ := by
+    run (Bytecode.step P) pls.length ⟨code, pc, ρ ++ extra, fr, ks⟩
+      = .next ⟨code, pc + pls.length, ρ ++ extra ++ bs, fr, ks⟩ := by
   intro pls
   induction pls with
   | nil =>
@@ -386,8 +392,8 @@ theorem binds_run {ρ : Env} {rest : Code} :
       | some vs =>
         simp [hp, hr] at h
         subst h
-        have hstep : Bytecode.step P ⟨code, pc, ρ ++ extra, fr⟩
-            = .next ⟨code, pc + 1, ρ ++ extra ++ [v], fr⟩ := by
+        have hstep : Bytecode.step P ⟨code, pc, ρ ++ extra, fr, ks⟩
+            = .next ⟨code, pc + 1, ρ ++ extra ++ [v], fr, ks⟩ := by
           simp [Bytecode.step, hc'.head, Rhs.eval, Place.eval_append hp]
         have hrest := ih vs (extra ++ [v]) (pc + 1) hr hc'.tail
         have e : pc + (pl :: pls).length = pc + 1 + pls.length := by
@@ -407,7 +413,7 @@ theorem select_run {ρ : Env} {vs : List Value} {body : Core.Tm} {bs : List Valu
     (hargs : ∀ j v, vs[j]? = some v → (argPlace j).eval ρ = some v) :
     ∀ (cs : List Core.Clause) (pc : Nat), Core.selectClause cs vs = some (body, bs) →
     CodeAt code pc (compileClauses pc cs) →
-    ∃ k pc', run (Bytecode.step P) k ⟨code, pc, ρ, fr⟩ = .next ⟨code, pc', ρ ++ bs, fr⟩
+    ∃ k pc', run (Bytecode.step P) k ⟨code, pc, ρ, fr, ks⟩ = .next ⟨code, pc', ρ ++ bs, fr, ks⟩
       ∧ CodeAt code pc' (compileTm body) := by
   intro cs
   induction cs with
@@ -431,7 +437,7 @@ theorem select_run {ρ : Env} {vs : List Value} {body : Core.Tm} {bs : List Valu
         have hnext : CodeAt code (pc + clauseLen c) (compileClauses (pc + clauseLen c) cs) := by
           have := hc0.append_right
           rwa [compileClause_length] at this
-        obtain ⟨k, hk⟩ := tests_fail (P := P) (fr := fr) (clauseTests c) pc hfalse hcT
+        obtain ⟨k, hk⟩ := tests_fail (P := P) (fr := fr) (ks := ks) (clauseTests c) pc hfalse hcT
         obtain ⟨k', pc', hk', hbody⟩ := ih (pc + clauseLen c) h hnext
         refine ⟨(k + 1) + k', pc', ?_, hbody⟩
         rw [run_add, hk, Step.bind_next]
@@ -443,11 +449,11 @@ theorem select_run {ρ : Env} {vs : List Value} {body : Core.Tm} {bs : List Valu
           simpa [clauseTests, hm] using hcheck
         have hbinds : evalPlaces ρ (clauseBinds c) = some bs' :=
           patsBinds_eval ρ c.pats argPlace vs bs' hargs hm
-        have h1 := tests_pass (P := P) (fr := fr) (clauseTests c) pc htrue hcT
+        have h1 := tests_pass (P := P) (fr := fr) (ks := ks) (clauseTests c) pc htrue hcT
         have hcB : CodeAt code (pc + (clauseTests c).length)
             ((clauseBinds c).map (fun pl => Instr.op (.place pl)) ++ compileTm c.body) := by
           simpa using hcT.append_right
-        have h2 := binds_run (P := P) (fr := fr) (clauseBinds c) bs' [] _ hbinds hcB
+        have h2 := binds_run (P := P) (fr := fr) (ks := ks) (clauseBinds c) bs' [] _ hbinds hcB
         have hcBody : CodeAt code (pc + (clauseTests c).length + (clauseBinds c).length)
             (compileTm c.body) := by
           simpa using hcB.append_right

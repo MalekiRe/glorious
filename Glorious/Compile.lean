@@ -19,6 +19,9 @@ def compileTm : Core.Tm → Code
   | .let_ rhs body => .op rhs :: compileTm body
   | .call f args body => .call f args :: compileTm body
   | .tail f args => [.tail f args]
+  | .handle ret ops captures thunk body => .handle ret ops captures thunk :: compileTm body
+  | .raise op args => [.raise op args]
+  | .perform op args body => .perform op args :: compileTm body
 
 /-- A structural test a pattern imposes on a place. -/
 inductive Test where
