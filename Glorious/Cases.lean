@@ -371,6 +371,59 @@ def cases : List Case := [
   ⟨"struct Pair<A, B>(first: A, second: B)\n  fn swap(p) { let Pair(a, b) = p; Pair(b, a) }\n  fn main() { swap(Pair(1, (2, 3))) }",
     [], "Pair((2, 3), 1)"⟩,
 
+
+  -- A callable bound by `let` can be used at several types, unless it shares
+  -- state that fixes one.
+  ⟨"fn main() { let id = { x => x }; (id(1), id((1, 2))) }",
+    [], "(1, (1, 2))"⟩,
+  ⟨"fn main() { let first = { p => p.0 }; first((1, 2)) }",
+    [], "1"⟩,
+  ⟨"fn main() { let mut slot = None; let put = { v => slot = Some(v) }; put(1); put((1, 2)); 0 }",
+    [], "error: in `main`: argument 1 of `put`: expected `Int`, found `(Int, Int)`"⟩,
+  ⟨"effect Ask { ask() -> Int }\n  fn main() { let call = { f => f() }; call({ 1 }) + handle call({ ask() }) { ask() => 2 } }",
+    [], "3"⟩,
+  ⟨"fn konst<T>(x: T) -> T { let g = { y => x }; g(1); g((1, 2)) }\n  fn main() { konst(5) }",
+    [], "5"⟩,
+
+  -- A label ends with its scope. A callable that can jump to it may be passed
+  -- down, but not kept anywhere that outlives the scope.
+  ⟨"fn find(n) { if(n > 3) { @find(1) }; 0 }\n  fn main() { (find(1), find(9)) }",
+    [], "(0, 1)"⟩,
+  ⟨"fn apply(f) { f() }\n  fn main() { @out { apply({ @out(5) }); 0 } }",
+    [], "5"⟩,
+  ⟨"fn main() { let apply = { f => f() }; @out { apply({ @out(5) }); 0 } }",
+    [], "5"⟩,
+  ⟨"fn compose(f, g) { { x => f(g(x)) } }\n  fn main() { @out { let h = compose({ v => @out(v + 1) }, { v => v * 2 }); h(5); 0 } }",
+    [], "11"⟩,
+  ⟨"enum Box<T> { Box(T) }\n  fn main() { @out { let b = Box({ @out(1) }); match(b) { Box(f) => f() }; 0 } }",
+    [], "1"⟩,
+  ⟨"fn main() { @a { @b { if(1 < 2) { @a(1) }; @b(2) } + 10 } }",
+    [], "1"⟩,
+  ⟨"fn main() { let mut f = { x => 0 }; @out { f = { x => @out(x) }; 1 }; f(2) }",
+    [], "error: in `main`: a callable that jumps to `@out` could be called after `@out` has ended: `f`, which outlives the scope, could hold it"⟩,
+  ⟨"fn main() { let got = @out { Some({ @out(None) }) }; match(got) { Some(f) => f(); 0, None => 1 } }",
+    [], "error: in `main`: a callable that jumps to `@out` could be called after `@out` has ended: it is the result of the scope"⟩,
+  ⟨"effect Emit<T> { emit(T) }\n  fn work() { @out { emit({ @out(1) }); 2 } }\n  fn main() { handle work() { emit(f, k) => f() } }",
+    [], "error: in `work`: a callable that jumps to `@out` could be called after `@out` has ended: it is passed to a handler of `Emit` outside"⟩,
+  ⟨"fn compose(f, g) { { x => f(g(x)) } }\n  fn main() { let mut cell = { x => x }; @out { cell = compose({ v => @out(0) }, { v => v }); 0 }; cell(1) }",
+    [], "error: in `main`: a callable that jumps to `@out` could be called after `@out` has ended: `cell`, which outlives the scope, could hold it"⟩,
+  ⟨"fn main() { let mut cell = { v => 0 }; @out { let g = { v => @out(v) }; cell = g; 1 }; cell(2) }",
+    [], "error: in `main`: a callable that jumps to `@out` could be called after `@out` has ended: `cell`, which outlives the scope, could hold it"⟩,
+  ⟨"enum Box { Box(inner) }\n  fn main() { @out { let b = Box({ @out(1) }); 0 } }",
+    [], "error: in `main`: a callable that jumps to `@out` could be called after `@out` has ended: it is stored in a declaration whose field types are inferred; give that declaration a type parameter"⟩,
+  ⟨"struct Callback(run: fn() -> Int)\n  fn main() { @out { let c = Callback({ @out(1) }); 0 } }",
+    [], "error: in `main`: a callable that jumps to `@out` could be called after `@out` has ended: it is stored in a declaration's `fn` field; give that declaration a type parameter for the field"⟩,
+  ⟨"fn f(cell) { *cell = { @f(1) }; 0 }\n  fn main() { let mut c = { 0 }; f(&mut c); c() }",
+    [], "error: in `f`: a callable that jumps to `@f` could be called after `@f` has ended: the caller could hold it through a parameter"⟩,
+  ⟨"fn f() { { @f({ 0 }) } }\n  fn main() { f()() }",
+    [], "error: in `f`: a callable that jumps to `@f` could be called after `@f` has ended: it is returned from the function"⟩,
+  ⟨"fn find(each, target) { each({ x => if(x == target) { @find(x) } }); 0 }\n  fn main() { find({ f => f(1); f(2); f(3) }, 2) }",
+    [], "error: in `find`: a callable that jumps to `@find` could be called after `@find` has ended: the caller could hold it through a parameter"⟩,
+
+  -- A resumption is not tied to a scope: it may be kept and called later.
+  ⟨"effect Yield { yield(Int) }\n  fn main() { let mut saved = None; handle (yield(1) + 1) { yield(v, k) => saved = Some(k); 0 }; match(saved) { Some(k) => k(41), None => 0 } }",
+    [], "42"⟩,
+
   -- Errors are reported, not guessed around.
   ⟨"fn main() { nope }",
     [], "error: in `main`: unknown name `nope`"⟩,
