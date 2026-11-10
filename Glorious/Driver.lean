@@ -170,4 +170,19 @@ def peakStack (src : String) (input : List Int := []) (fuel : Nat := 4000000) : 
         | .stuck => none
     go fuel (Bytecode.initIO bytecode input) 0
 
+/-- How many memory cells are still live when a program finishes. -/
+def liveCells (src : String) (input : List Int := []) (fuel : Nat := 4000000) : Option Nat :=
+  match compileSource src with
+  | .error _ => none
+  | .ok c =>
+    let bytecode := compile c.core
+    let rec go : Nat → Bytecode.Config → Option Nat
+      | 0, _ => none
+      | n + 1, cfg =>
+        match Bytecode.stepIO bytecode cfg with
+        | .next cfg' => go n cfg'
+        | .halt _ => some (cfg.state.store.cells.filter Option.isSome).length
+        | .stuck => none
+    go fuel (Bytecode.initIO bytecode input)
+
 end Glorious

@@ -59,6 +59,9 @@ structure St where
   /-- The top-level function being elaborated. -/
   owner : String
   b : Builder
+  /-- Why a `tail` call is not allowed at this point, if it is not: something
+  still has to happen in this activation after the call returns. -/
+  noTail : Option String
 
 abbrev M := ReaderT Globals (StateT St (Except String))
 
@@ -93,6 +96,14 @@ def withBuilder {α : Type} (depth : Nat) (k : M α) : M α := do
   modify fun s => { s with b := ⟨#[], depth, none⟩ }
   let r ← k
   modify fun s => { s with b := outer }
+  pure r
+
+/-- Run `k` with `tail` calls allowed or forbidden, then restore the setting. -/
+def withNoTail {α : Type} (why : Option String) (k : M α) : M α := do
+  let outer := (← get).noTail
+  modify fun s => { s with noTail := why }
+  let r ← k
+  modify fun s => { s with noTail := outer }
   pure r
 
 def addFn (f : Core.Fn) (name : String) : M Nat := do
@@ -292,9 +303,11 @@ partial def elabExpr (scope : Scope) (tailPos : Bool) : Expr → M Atom
     | .var i => emit (.let_ (.place ⟨i, [idx]⟩))
     | .int _ => throw "an integer has no fields"
   | .call f args => elabCall scope false f args
-  | .tailCall f args =>
-    if tailPos then elabCall scope true f args
-    else throw "`tail` call is not in tail position"
+  | .tailCall f args => do
+    unless tailPos do throw "`tail` call is not in tail position"
+    if let some why := (← get).noTail then
+      throw s!"`tail` cannot be used here: {why}"
+    elabCall scope true f args
   | .closure clauses => elabClosure scope clauses
   | .handle subject arms => elabHandle scope tailPos subject arms
   | .labelScope l body => do
@@ -386,7 +399,16 @@ partial def elabStmts (scope : Scope) (tailPos : Bool) : List Stmt → M Atom
   | .letMut x value :: rest => do
     let a ← elabExpr scope false value
     let cell ← emit (.mem .alloc [a])
-    elabStmts ((cellKey x, cell) :: scope) tailPos rest
+    -- The rest of the block runs under a guard that releases the cell, so it is
+    -- released however the block is left.
+    let release ← mkClause [cellKey x] [] (fun sc => do
+      match sc.lookup (cellKey x) with
+      | some c => emit (.mem .free [c])
+      | none => throw s!"elaborator: the cell of `{x}` is not in scope")
+    let idx ← addFn ⟨[release]⟩ s!"the release of `{x}` in `{(← get).owner}`"
+    let cleanup ← emit (.let_ (.closure idx [cell]))
+    elabGuarded ((cellKey x, cell) :: scope) tailPos cleanup rest
+      s!"`{x}` is released after the call returns"
   | .assign target value :: rest => do
     let cell ← match target with
       | .name none x =>
@@ -402,11 +424,20 @@ partial def elabStmts (scope : Scope) (tailPos : Bool) : List Stmt → M Atom
   | .defer e :: rest => do
     -- The rest of the block runs under a guard whose cleanup is `e`.
     let cleanup ← elabClosure scope [.mk [] [.expr e]]
-    let thunk ← elabClosure scope [.mk [] rest]
-    if tailPos then
-      terminate (.guardTail cleanup thunk)
-      pure (.int 0)
-    else emit (.guard cleanup thunk)
+    elabGuarded scope tailPos cleanup rest "a `defer` runs after the call returns"
+
+/-- Run the rest of a block under a guard. A `tail` call written directly in
+that rest would leave the guard behind on every iteration, so it is refused. -/
+partial def elabGuarded (scope : Scope) (tailPos : Bool) (cleanup : Atom) (rest : List Stmt)
+    (why : String) : M Atom := do
+  let captures := captureNames scope (fvStmts [] rest)
+  let body ← mkClause captures [] (fun sc => withNoTail (some why) (elabStmts sc true rest))
+  let idx ← addFn ⟨[body]⟩ s!"a guarded block in `{(← get).owner}`"
+  let thunk ← emit (.let_ (.closure idx (captures.filterMap (fun x => scope.lookup x))))
+  if tailPos then
+    terminate (.guardTail cleanup thunk)
+    pure (.int 0)
+  else emit (.guard cleanup thunk)
 
 /-- Bind an irrefutable pattern to a value. -/
 partial def bindLet (scope : Scope) (pat : Pattern) (a : Atom) : M Scope := do
@@ -475,7 +506,8 @@ partial def mkClause (captures : List String) (pats : List Pattern) (body : Scop
   let bindBase := pats.length + captures.length
   let scope := (indexed binders bindBase).reverse ++ params ++ indexed captures pats.length
   let tm ← withBuilder (bindBase + binders.length) do
-    let r ← body scope
+    -- A callable's own body may end in a `tail` call, whatever surrounds it.
+    let r ← withNoTail none (body scope)
     finish r
   pure ⟨corePats.toList, tm⟩
 
@@ -642,7 +674,7 @@ def elabProgram (items : List Item) : Except String Output := do
       modify fun s => { s with fns := s.fns.set! idx ⟨coreClauses⟩ }
       idx := idx + 1
   let fnNames := (fns.map fun (name, _) => s!"`{name}`").toArray
-  let init : St := ⟨Array.replicate fns.length ⟨[]⟩, fnNames, "", ⟨#[], 0, none⟩⟩
+  let init : St := ⟨Array.replicate fns.length ⟨[]⟩, fnNames, "", ⟨#[], 0, none⟩, none⟩
   let (_, st) ← (action.run g).run init
   let opNames := Id.run do
     let mut out := Array.replicate g.ops.length ""

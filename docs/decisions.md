@@ -74,6 +74,30 @@ its effect. Function results stay inferred; there is no `return` keyword, and
 Do not "fix" this by making `if` a special form or by giving unannotated
 functions a unit result.
 
+## A mutable variable ends with its block
+
+**Decision.** `let mut x` lasts until the end of the block it is written in,
+and its storage is released there, however the block is left. The checker
+rejects any program in which a reference to `x`, a callable that uses `x`, or a
+resumption whose computation or handler uses `x` could outlive that block.
+Lifetimes are never written: they are inferred as capture sets, the same way as
+for labels.
+
+Consequences to keep in mind:
+
+- A function cannot return a closure over its own `let mut`. State that must
+  outlive a call belongs to the caller, or to a handler around the computation.
+- A `tail` call cannot be written directly after a `let mut` or a `defer` in
+  the same block, because the release or the deferred call still has to happen.
+- Passing `&mut x`, or a block that uses `x`, to a top-level function is fine.
+  Passing it to a function received as a parameter is rejected: nothing says
+  that function will not keep it. Lifting this needs function types that are
+  polymorphic in what their arguments capture.
+- One-shot resumptions are what make the release sound: a block ends once.
+- A resumption that is neither resumed nor cancelled is never unwound, so the
+  variables of the computation it captured are not released. That is a leak,
+  not a dangling reference.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by
@@ -90,6 +114,7 @@ functions a unit result.
   a single inferred type for the whole program.
 - **Label lifetimes are checked by inferred capture sets** rather than written
   lifetimes. The check is conservative about callables received as parameters.
+  A resumption counts as holding everything its computation and handler use.
 - **What is proved** is that compiling Core to bytecode preserves behaviour. The
   parser, checker, elaborator, binary decoder in the Rust VM and the VM itself
   are not proved; they are compared by running every test program three ways.

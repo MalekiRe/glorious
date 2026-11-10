@@ -66,4 +66,20 @@ def notTail (n : Nat) : String :=
 #guard diagnose "fn f(a, b) { a }  fn main() { f(1) }" == "no clause of `f` matches the arguments (1)"
 #guard diagnose "fn main() { 1 + 2 }" == "did not go wrong"
 
+-- A mutable variable's cell is released however its block is left: by
+-- finishing, by a label, by a terminal operation, or by cancellation.
+#guard liveCells "fn bump(n) { let mut x = n; x = x + 1; x }
+  fn main() { let mut i = 0; while({ i < 20 }) { i = i + bump(0) }; i }" == some 0
+#guard liveCells "fn main() { @out { let mut x = 1; @out(x); 0 } }" == some 0
+#guard liveCells "effect Fail { fail(Int) -> ! }  fn work() { let mut x = 7; fail(x); 0 }
+  fn main() { handle work() { fail(e) => e } }" == some 0
+#guard liveCells "effect Ask { ask() -> Int }  fn work() { let mut x = 7; x + ask() }
+  fn main() { handle work() { ask(k) => cancel(k); 3 } }" == some 0
+-- A resumption that is dropped keeps what it captured: a known leak.
+#guard liveCells "effect Ask { ask() -> Int }  fn work() { let mut x = 7; x + ask() }
+  fn main() { handle work() { ask(k) => 3 } }" == some 1
+-- Without the checker, a callable that outlives its variable finds the cell gone.
+#guard diagnose "fn mk() { let mut n = 0; { n = n + 1; n } }  fn main() { mk()() }"
+  == "a reference is used after the cell it points to was freed"
+
 end Glorious.Tests

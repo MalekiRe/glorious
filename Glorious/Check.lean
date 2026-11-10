@@ -12,10 +12,11 @@ fields has a single type throughout the program.
 
 The checker establishes that values are used at consistent types, that calls
 supply the right number of arguments, that pattern clauses cover every case,
-that every effect a program performs is handled before it reaches `main`, and
-that no callable able to jump to a label can be called after the label's scope
-has ended. It does not yet track how many times a value is used, or how long a
-reference lives. This pass is not proved.
+that every effect a program performs is handled before it reaches `main`, that
+no callable able to jump to a label can be called after the label's scope has
+ended, and that nothing able to reach a mutable variable outlives the block the
+variable is declared in. It does not yet track how many times a value is used.
+This pass is not proved.
 -/
 
 namespace Glorious.Check
@@ -36,7 +37,8 @@ inductive Ty where
   callable has captured, so that the scopes it depends on can be found. -/
   | fn (params : List Ty) (ret : Ty) (effs : List (String × List Ty)) (tail : Option Nat)
       (cap : Nat)
-  | ref (t : Ty)
+  /-- A reference to a mutable variable; `cap` identifies which it may refer to. -/
+  | ref (t : Ty) (cap : Nat)
   deriving Inhabited
 
 /-- A set of effects, possibly open. -/
@@ -91,8 +93,8 @@ structure EffectDecl where
 /-- What a local name stands for. -/
 inductive Binding where
   | val (t : Ty)
-  /-- A mutable variable holding a `t`. -/
-  | cell (t : Ty)
+  /-- A mutable variable holding a `t`; `brand` identifies its block. -/
+  | cell (t : Ty) (brand : Nat)
   /-- A label whose scope yields a `t`; `brand` identifies the scope. -/
   | label (t : Ty) (brand : Nat)
   /-- A local callable, usable at several types. -/
@@ -212,8 +214,8 @@ partial def zonk (t : Ty) : M Ty := do
   | .fn ps r effs tail cap => do
     let row ← zonkRow ⟨effs, tail⟩
     pure (.fn (← ps.mapM zonk) (← zonk r) row.effs row.tail (← findCap cap))
-  | .ref t => do
-    pure (.ref (← zonk t))
+  | .ref t cap => do
+    pure (.ref (← zonk t) (← findCap cap))
 
 partial def zonkRow (r : Row) : M Row := do
   let r ← flattenRow r
@@ -241,7 +243,7 @@ partial def showTy : Ty → String
   | .fn ps r effs _ _ =>
     let sig := s!"fn({", ".intercalate (ps.map showTy)}) -> {showTy r}"
     if effs.isEmpty then sig else s!"{sig} / {showEffs effs}"
-  | .ref t => s!"&mut {showTy t}"
+  | .ref t _ => s!"&mut {showTy t}"
 
 partial def showEffs (effs : List (String × List Ty)) : String :=
   let one := fun (e : String × List Ty) =>
@@ -260,7 +262,7 @@ partial def freeTys : Ty → List Nat
   | .tuple args => args.flatMap freeTys
   | .fn ps r effs _ _ =>
     ps.flatMap freeTys ++ freeTys r ++ effs.flatMap (fun e => e.2.flatMap freeTys)
-  | .ref t => freeTys t
+  | .ref t _ => freeTys t
 
 partial def freeRows : Ty → List Nat
   | .var _ => []
@@ -269,7 +271,7 @@ partial def freeRows : Ty → List Nat
   | .fn ps r effs tail _ =>
     ps.flatMap freeRows ++ freeRows r ++ effs.flatMap (fun e => e.2.flatMap freeRows)
       ++ tail.toList
-  | .ref t => freeRows t
+  | .ref t _ => freeRows t
 
 end
 
@@ -279,7 +281,7 @@ partial def freeCaps : Ty → List Nat
   | .tuple args => args.flatMap freeCaps
   | .fn ps r effs _ cap =>
     cap :: (ps.flatMap freeCaps ++ freeCaps r ++ effs.flatMap (fun e => e.2.flatMap freeCaps))
-  | .ref t => freeCaps t
+  | .ref t cap => cap :: freeCaps t
 
 /-- Replace variables: type variables by types, row and capture variables by
 variables of their own kind. -/
@@ -292,7 +294,7 @@ partial def subst (tm : List (Nat × Ty)) (rm cm : List (Nat × Nat)) : Ty → T
       (effs.map fun (n, args) => (n, args.map (subst tm rm cm)))
       (tail.map fun id => (rm.lookup id).getD id)
       ((cm.lookup cap).getD cap)
-  | .ref t => .ref (subst tm rm cm t)
+  | .ref t cap => .ref (subst tm rm cm t) ((cm.lookup cap).getD cap)
 
 def instantiate (s : Scheme) : M Ty := do
   let tm ← s.tvars.mapM fun id => do
@@ -335,9 +337,9 @@ partial def openParams (seen : List (String × Ty)) : Ty → M (Ty × List (Stri
       seen := s
       effs' := effs'.push (n, args)
     pure (.fn ps r effs'.toList tail cap, seen)
-  | .ref t => do
+  | .ref t cap => do
     let (t, seen) ← openParams seen t
-    pure (.ref t, seen)
+    pure (.ref t cap, seen)
 where
   openAll (seen : List (String × Ty)) (ts : List Ty) : M (List Ty × List (String × Ty)) := do
     let mut seen := seen
@@ -431,7 +433,9 @@ partial def unify (a b : Ty) : M Unit := do
       unifyRow ⟨e1, t1⟩ ⟨e2, t2⟩
       unifyCap c1 c2
     else mismatch a b
-  | .ref x, .ref y => unify x y
+  | .ref x c1, .ref y c2 => do
+    unify x y
+    unifyCap c1 c2
   | _, _ => mismatch a b
 
 partial def mismatch (a b : Ty) : M Unit := do
@@ -528,7 +532,9 @@ partial def resolveType (params : List (String × Ty)) (decl : Bool) : TypeExpr 
       modify fun s => { s with monoRows := tail :: s.monoRows, monoCaps := cap :: s.monoCaps }
     pure (.fn ps r [] (some tail) cap)
   | .ref t => do
-    pure (.ref (← resolveType params decl t))
+    let cap ← freshCap
+    if decl then modify fun s => { s with monoCaps := cap :: s.monoCaps }
+    pure (.ref (← resolveType params decl t) cap)
   | .never => throw "`!` can only be the result of an operation"
   | .hole => if decl then inferred else freshTy
 where
@@ -776,21 +782,22 @@ partial def tyHolds (brand : Nat) (t : Ty) : M Bool := do
     if ← tyHolds brand r then return true
     let row ← flattenRow ⟨effs, tail⟩
     row.effs.anyM fun e => e.2.anyM (tyHolds brand)
-  | .ref t => tyHolds brand t
+  | .ref t cap => do
+    if ← capHolds brand cap then return true
+    tyHolds brand t
 
 end
 
 /-- Reject a scope whose label could still be reached after the scope has ended.
 `roots` are the types that outlive the scope, each with a description. -/
-def checkEscape (brand : Nat) (label : String) (roots : List (String × Ty)) (amb : Row) :
+def checkEscape (brand : Nat) (what : String) (roots : List (String × Ty)) (amb : Row) :
     M Unit := do
   runProjections false
   let holds := fun (t : Ty) => do
     modify fun s => { s with seen := [] }
     tyHolds brand t
   let escape := fun (how : String) =>
-    (throw s!"a callable that jumps to `@{label}` could be called after `@{label}` has \
-      ended: {how}" : M Unit)
+    (throw s!"{what}: {how}" : M Unit)
   for (how, t) in roots do
     if ← holds t then escape how
   let row ← flattenRow amb
@@ -808,12 +815,15 @@ def checkEscape (brand : Nat) (label : String) (roots : List (String × Ty)) (am
       escape "it is stored in a declaration's `fn` field; give that declaration a \
         type parameter for the field"
 
+def jumpsAfter (label : String) : String :=
+  s!"a callable that jumps to `@{label}` could be called after `@{label}` has ended"
+
 /-- The types of the bindings in scope, described for an escape message. -/
 def scopeRoots (scope : Scope) : List (String × Ty) :=
   scope.map fun (name, b) =>
     match b with
     | .val t => (s!"`{name}`, which outlives the scope, could hold it", t)
-    | .cell t => (s!"`{name}`, which outlives the scope, could hold it", t)
+    | .cell t _ => (s!"`{name}`, which outlives the scope, could hold it", t)
     | .label t _ => (s!"it can be passed out through `{name}`", t)
     | .poly s => (s!"`{name}`, which outlives the scope, could hold it", s.ty)
 
@@ -857,6 +867,19 @@ def resolveName (scope : Scope) (qual : Option String) (x : String) : M Head := 
   if let some e := s.aliases.lookup x then return .const e
   throw s!"unknown name `{x}`"
 
+/-- Record that `cap` captures the named bindings: a value by its type, a label
+or a mutable variable by the brand of its scope as well. -/
+def captureAll (scope : Scope) (cap : Nat) (names : List String) : M Unit := do
+  for name in names.eraseDups do
+    match scope.lookup name with
+    | some (.val t) => captures cap (.ty t)
+    | some (.cell t brand) =>
+      captures cap (.ty t)
+      captures cap (.brand brand)
+    | some (.label _ brand) => captures cap (.brand brand)
+    | some (.poly s) => captures cap (.ty s.ty)
+    | none => pure ()
+
 /-- A label is a callable that never returns: it accepts the value its scope
 yields, and holds the scope's brand. -/
 private def labelType (t : Ty) (brand : Nat) : M Ty := do
@@ -877,7 +900,7 @@ partial def inferExpr (scope : Scope) (amb : Row) : Expr → M Ty
   | .name q x => do
     match ← resolveName scope q x with
     | .local (.val t) => pure t
-    | .local (.cell t) => pure t
+    | .local (.cell t _) => pure t
     | .local (.label t brand) => labelType t brand
     | .local (.poly s) => instantiate s
     | .fn t => pure t
@@ -914,17 +937,20 @@ partial def inferExpr (scope : Scope) (amb : Row) : Expr → M Ty
     let brand ← freshBrand
     let found ← inferStmts (("@" ++ l, .label t brand) :: scope) amb body
     unifyAt s!"the result of the scope `@{l}`" t found
-    checkEscape brand l (("it is the result of the scope", t) :: scopeRoots scope) amb
+    checkEscape brand (jumpsAfter l) (("it is the result of the scope", t) :: scopeRoots scope) amb
     pure t
   | .ref x =>
     match scope.lookup x with
-    | some (.cell t) => pure (.ref t)
+    | some (.cell t brand) => do
+      let cap ← freshCap
+      captures cap (.brand brand)
+      pure (.ref t cap)
     | some _ => throw s!"`{x}` is not a mutable variable, so it cannot be borrowed"
     | none => throw s!"unknown name `{x}`"
   | .deref e => do
     let t ← inferExpr scope amb e
     let inner ← freshTy
-    unifyAt "`*` reads through a reference" (.ref inner) t
+    unifyAt "`*` reads through a reference" (.ref inner (← freshCap)) t
     pure inner
 
 /-- Check the arguments of a call against the parameter types. -/
@@ -984,7 +1010,7 @@ partial def inferCall (scope : Scope) (amb : Row) (f : Expr) (args : List Expr) 
       checkArgs scope amb "`cancel`" [← freshTy] args
       pure .unit
     | .local (.val t) => applyTy scope amb s!"`{x}`" t args
-    | .local (.cell t) => applyTy scope amb s!"`{x}`" t args
+    | .local (.cell t _) => applyTy scope amb s!"`{x}`" t args
     | .local (.label t brand) => do
       applyTy scope amb s!"the label `{x}`" (← labelType t brand) args
     | .local (.poly s) => do
@@ -1017,7 +1043,7 @@ partial def inferStmts (scope : Scope) (amb : Row) : List Stmt → M Ty
       for (_, b) in scope do
         keep := (match b with
           | .val t => t
-          | .cell t => t
+          | .cell t _ => t
           | .label t _ => t
           | .poly p => p.ty) :: keep
       for (_, t) in s.group do
@@ -1034,17 +1060,24 @@ partial def inferStmts (scope : Scope) (amb : Row) : List Stmt → M Ty
     inferStmts (binds ++ scope) amb rest
   | .letMut x value :: rest => do
     let t ← inferExpr scope amb value
-    inferStmts ((x, .cell t) :: scope) amb rest
+    -- The variable lives until the end of this block: nothing that can reach
+    -- it may be left over afterwards.
+    let brand ← freshBrand
+    let result ← inferStmts ((x, .cell t brand) :: scope) amb rest
+    checkEscape brand s!"`{x}` could be used after its block has ended"
+      (("something that uses it is the block's result", result) :: scopeRoots scope) amb
+    pure result
   | .assign target value :: rest => do
     let expected ← match target with
       | .name none x =>
         match scope.lookup x with
-        | some (.cell t) => pure t
+        | some (.cell t _) => pure t
         | some _ => throw s!"`{x}` is not a mutable variable"
         | none => throw s!"unknown name `{x}`"
       | .deref e => do
         let inner ← freshTy
-        unifyAt "`*` assigns through a reference" (.ref inner) (← inferExpr scope amb e)
+        unifyAt "`*` assigns through a reference" (.ref inner (← freshCap))
+          (← inferExpr scope amb e)
         pure inner
       | _ => throw "only a mutable variable or `*reference` can be assigned"
     unifyAt "the assigned value" expected (← inferExpr scope amb value)
@@ -1107,13 +1140,7 @@ partial def inferCallable (scope : Scope) (annots : List (Option Ty)) (ret : Opt
   let row ← freshRow
   -- What the callable captures from the scope it is written in.
   let cap ← freshCap
-  for name in (clauses.flatMap (Elab.fvClause [])).eraseDups do
-    match scope.lookup name with
-    | some (.val t) => captures cap (.ty t)
-    | some (.cell t) => captures cap (.ty t)
-    | some (.label _ brand) => captures cap (.brand brand)
-    | some (.poly s) => captures cap (.ty s.ty)
-    | none => pure ()
+  captureAll scope cap (clauses.flatMap (Elab.fvClause []))
   let brand ← freshBrand
   let scope := match self with
     | some name => ("@" ++ name, Binding.label result brand) :: scope
@@ -1133,7 +1160,7 @@ partial def inferCallable (scope : Scope) (annots : List (Option Ty)) (ret : Opt
   if let some name := self then
     let roots := ("it is returned from the function", result) ::
       params.map fun p => ("the caller could hold it through a parameter", p)
-    checkEscape brand name roots row
+    checkEscape brand (jumpsAfter name) roots row
   pure (.func params result row cap)
 
 /--
@@ -1188,7 +1215,11 @@ partial def inferHandle (scope : Scope) (amb : Row) (subject : Expr) (arms : Lis
       if ← ps.allM irrefutable then covered := x :: covered
     | some o =>
       if ps.length == payload.length + 1 then
-        let binds ← inferPats ps (payload ++ [.func [o] result amb (← freshCap)])
+        -- The resumption holds the handled computation and, because resuming
+        -- reinstalls the handler, the arms too: everything either of them uses.
+        let held ← freshCap
+        captureAll scope held (Elab.fvExpr [] (.handle subject arms))
+        let binds ← inferPats ps (payload ++ [.func [o] result amb held])
         unifyAt s!"the result of the arm for `{x}`" result
           (← inferStmts (binds ++ scope) amb body)
         if ← (ps.take payload.length).allM irrefutable then covered := x :: covered

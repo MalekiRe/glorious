@@ -433,6 +433,43 @@ def cases : List Case := [
   ⟨"fn main() { let f = { x => x + 1; }; f(1) }",
     [], "()"⟩,
 
+
+  -- A mutable variable lasts until the end of its block, and its storage is
+  -- released there. A reference to it, or a callable that uses it, may be passed
+  -- down but not kept anywhere that outlives the block.
+  ⟨"fn incr(p) { *p = *p + 1; }\n  fn main() { let mut x = 1; incr(&mut x); x }",
+    [], "2"⟩,
+  ⟨"fn twice(f) { f(); f() }\n  fn main() { let mut n = 0; twice({ n = n + 1; }); n }",
+    [], "2"⟩,
+  ⟨"fn mk() { let mut n = 0; { n = n + 1; n } }\n  fn main() { mk()() }",
+    [], "error: in `mk`: `n` could be used after its block has ended: something that uses it is the block's result"⟩,
+  ⟨"fn mk() { let mut n = 0; &mut n }\n  fn main() { *mk() }",
+    [], "error: in `mk`: `n` could be used after its block has ended: something that uses it is the block's result"⟩,
+  ⟨"fn main() { let mut a = 1; let mut p = &mut a; { let mut b = 2; p = &mut b; }(); *p }",
+    [], "error: in `main`: `b` could be used after its block has ended: `p`, which outlives the scope, could hold it"⟩,
+  ⟨"fn with(body) { let mut n = 0; body(&mut n); n }\n  fn main() { with({ p => *p = 5; }) }",
+    [], "error: in `with`: `n` could be used after its block has ended: `body`, which outlives the scope, could hold it"⟩,
+
+  -- A resumption holds the computation it captured and the handler around it.
+  -- It may be kept, but not beyond a variable or label either of them uses.
+  ⟨"effect Yield { yield() }\n  fn main() { let mut saved = None; let r = handle { yield(); 5 }() { yield(k) => saved = Some(k); 0 }; match(saved) { Some(k) => r + k(()), None => r } }",
+    [], "5"⟩,
+  ⟨"effect Tick { tick() }\n  fn work() { tick(); tick(); 3 }\n  fn main() { let mut count = 0; let r = handle work() { tick(k) => count = count + 1; k(()) }; (r, count) }",
+    [], "(3, 2)"⟩,
+  ⟨"effect Tick { tick() }\n  fn work() { tick(); tick(); 0 }\n  fn main() { let mut saved = None; { let mut count = 0; handle work() { tick(k) => count = count + 1; saved = Some(k); 0 } }(); match(saved) { Some(k) => k(()), None => 0 } }",
+    [], "error: in `main`: `count` could be used after its block has ended: `saved`, which outlives the scope, could hold it"⟩,
+  ⟨"effect Tick { tick() }\n  fn main() { let mut saved = None; @out { handle { tick(); @out(1) }() { tick(k) => saved = Some(k); 0 } }; match(saved) { Some(k) => k(()), None => 0 } }",
+    [], "error: in `main`: a callable that jumps to `@out` could be called after `@out` has ended: `saved`, which outlives the scope, could hold it"⟩,
+
+  -- A `tail` call leaves nothing behind in the caller, so it cannot be written
+  -- where a variable is still to be released or a `defer` is still to run.
+  ⟨"fn count(n, acc) { let mut x = n; x = x - 1; tail count2(x, acc) }\n  fn count2(n, acc) { acc }\n  fn main() { count(3, 0) }",
+    [], "error: `tail` cannot be used here: `x` is released after the call returns"⟩,
+  ⟨"fn f(n) { defer print(n); tail g(n) }\n  fn g(n) { n }\n  fn main() { f(1) }",
+    [], "error: `tail` cannot be used here: a `defer` runs after the call returns"⟩,
+  ⟨"fn count(n) { let mut x = n; if(x == 0) { 0 } else { tail count(x - 1) } }\n  fn main() { count(3) }",
+    [], "0"⟩,
+
   -- Errors are reported, not guessed around.
   ⟨"fn main() { nope }",
     [], "error: in `main`: unknown name `nope`"⟩,
