@@ -607,6 +607,13 @@ def cases : List Case := [
     [], "0"⟩,
   ⟨"effect Ask { ask() -> Int }\n  fn work() { @inner { defer @inner(5); ask() } }\n  fn main() { handle work() { r => (r, r), ask(k) => match(cancel(k)) { () => (0, 0) } } }",
     [], "(0, 0)"⟩,
+  -- A cleanup of a cancelled computation can jump to a label inside it, and the
+  -- computation then runs on where it is being cancelled. So `cancel` needs
+  -- what the callable may perform to be handled there, as a call would.
+  ⟨"effect A { a() -> Int }\n  effect H { h() -> Int }\n  fn work() { let r = @out { defer @out(1); h() }; r + a() }\n  fn main() { handle (handle work() { h(k) => cancel(k); 7 }) { a(k2) => k2(100) } }",
+    [], "7"⟩,
+  ⟨"effect A { a() -> Int }\n  effect H { h() -> Int }\n  effect G { give(k) -> Int }\n  fn work() { let r = @out { defer @out(1); h() }; r + a() }\n  fn main() { handle (handle (handle work() { h(k) => give(k) }) { a(k2) => k2(100) }) { give(k, kg) => cancel(k); 7 } }",
+    [], "error: `main` performs effects that nothing handles: {A, G}"⟩,
 
   -- Errors are reported, not guessed around.
   ⟨"fn main() { nope }",

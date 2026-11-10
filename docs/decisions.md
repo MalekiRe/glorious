@@ -163,9 +163,14 @@ value, or runs the handler's arm.
   function, a resumption or another label. Before, only a function was
   accepted, and a scope given a resumption went wrong although nothing in its
   type says it is not a function.
+- **`cancel` needs the callable's effects handled where it is cancelled**, as a
+  call would. A cleanup of the cancelled computation can jump to a label inside
+  it; the computation then runs on from there, at the canceller, and may perform
+  anything its type allows. Before, the checker accepted a `cancel` outside the
+  handlers the resumption needed, and such a program went wrong.
 
 Two earlier designs were wrong, and both let a program the checker accepts go
-wrong at run time. Five further faults (the four rules above, and the discarding
+wrong at run time. Six further faults (the five rules above, and the discarding
 frame) were found the same way as the second: by trying to say what type each
 stack has.
 
@@ -181,6 +186,55 @@ stack has.
 The compiler proof held throughout, since both machines agreed each time. It is
 a statement about the compiler, not about whether the rules are right.
 
+## Core has types, and typed programs do not go wrong
+
+**Decision.** `Glorious/Typing/` gives Core a type system and proves it sound
+for the machine in `Core/Semantics.lean`. This, not the test corpus, is what
+says the kernel rules fit together. Change a kernel rule and this proof has to
+be redone; that is its purpose.
+
+What is proved (`Typing/Safety.lean`, `Typing/Compiled.lean`):
+
+- `type_safety`: if a well-typed program goes wrong, the state it could not
+  step from is one of four named faults.
+- `compiled_type_safety`: the same for its compiled bytecode, by way of
+  `compile_correct`.
+- `Typing/Witness.lean` types a program with nested handlers, a resumptive and
+  a terminal operation, so the theorem is not about an empty set of programs.
+
+The four faults are what types alone do not rule out: integer overflow, use of
+a freed cell, a second use of a resumption, and a label applied after its scope
+ended. The front-end has checks for the last three (scoped `let mut`, use-once,
+capture sets). Those checks are not proved.
+
+How the typing is set up, and why:
+
+- **Types are monomorphic.** A function has a set of signatures and must be
+  typed at each. A polymorphic source function is a function with several
+  signatures. This avoids type variables and substitution in the proof.
+- **A callable's type carries a row**: each operation it may perform, with the
+  types of its payload and of what it is resumed with. A row is ordered nearest
+  handler first, so looking an operation up in a row finds the handler the
+  machine finds on the stack.
+- **A stack has a type**: what it takes and what it serves. A handler frame
+  serves its own operations and, of what is below, only what the handler was
+  installed among. That is what lets captured frames be put back on a different
+  stack and stay typed.
+- **An exit in progress serves nothing.** A cleanup performs no operations, so
+  nothing running above a pending exit can capture it.
+- **A stored continuation is typed by what it does when put back**: on any later
+  stack that takes the handler's result and serves what the handler needs, it
+  gives a typed stack.
+
+What the theorem does not say:
+
+- It assumes each function's clauses cover every argument list of its
+  signature's types (`ProgramOk.fns`). The front-end checks this; no proved
+  check does.
+- It is about Core programs with a typing derivation. The checker does not yet
+  produce one, so nothing is proved about the programs the checker accepts.
+  Connecting the two (the front-end emits signatures, a small proved checker
+  validates them) is the next step.
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by
@@ -202,6 +256,7 @@ a statement about the compiler, not about whether the rules are right.
 - **Label lifetimes are checked by inferred capture sets** rather than written
   lifetimes. The check is conservative about callables received as parameters.
   A resumption counts as holding everything its computation and handler use.
-- **What is proved** is that compiling Core to bytecode preserves behaviour. The
+- **What is proved** is that compiling Core to bytecode preserves behaviour, and
+  that a typed Core program goes wrong only by a named fault (see above). The
   parser, checker, elaborator, binary decoder in the Rust VM and the VM itself
   are not proved; they are compared by running every test program three ways.

@@ -1,5 +1,7 @@
 import Glorious.Proof.Correct
 import Glorious.Bytecode.Decode
+import Glorious.Typing.Compiled
+import Glorious.Typing.Witness
 
 /-!
 # Axiom audit
@@ -39,3 +41,15 @@ three standard axioms, in particular on `sorryAx` or a declared `axiom`.
 /-- info: 'Glorious.compile_stack_depth' depends on axioms: [propext, Classical.choice, Quot.sound] -/
 #guard_msgs in
 #print axioms Glorious.compile_stack_depth
+
+/-- info: 'Glorious.Typing.type_safety' depends on axioms: [propext, Classical.choice, Quot.sound] -/
+#guard_msgs in
+#print axioms Glorious.Typing.type_safety
+
+/-- info: 'Glorious.Typing.compiled_type_safety' depends on axioms: [propext, Classical.choice, Quot.sound] -/
+#guard_msgs in
+#print axioms Glorious.Typing.compiled_type_safety
+
+/-- info: 'Glorious.Typing.Witness.effects_ok' depends on axioms: [propext, Quot.sound] -/
+#guard_msgs in
+#print axioms Glorious.Typing.Witness.effects_ok

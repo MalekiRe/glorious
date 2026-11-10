@@ -1678,8 +1678,13 @@ partial def inferCall (scope : Scope) (amb : Row) (f : Expr) (args : List Expr) 
         pure (.tuple [.int, .int])
     | .cancel => do
       -- Giving up a callable: a resumption, or anything else applied to one value.
-      let given := Ty.func [← freshTy] (← freshTy) (← freshRow) (← freshCap)
+      let row ← freshRow
+      let given := Ty.func [← freshTy] (← freshTy) row (← freshCap)
       checkArgs scope amb "`cancel`" [given] args
+      -- A cleanup of a cancelled computation may jump to a label inside it, and
+      -- the computation then runs on from there, where it is being cancelled.
+      -- So what it may perform must be handled here, as if it were called.
+      includeRow row amb "`cancel`"
       pure .unit
     | .replace => do
       let t ← freshTy

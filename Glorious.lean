@@ -12,6 +12,13 @@ import Glorious.Proof.CodeAt
 import Glorious.Proof.Patterns
 import Glorious.Proof.Correct
 import Glorious.Proof.Witness
+import Glorious.Typing.Static
+import Glorious.Typing.Runtime
+import Glorious.Typing.Values
+import Glorious.Typing.Stack
+import Glorious.Typing.Safety
+import Glorious.Typing.Compiled
+import Glorious.Typing.Witness
 import Glorious.Proof.Audit
 import Glorious.Syntax.Ast
 import Glorious.Syntax.Lexer
