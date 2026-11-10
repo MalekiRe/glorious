@@ -47,4 +47,23 @@ def notTail (n : Nat) : String :=
 
 #guard peakStack (notTail 10) != peakStack (notTail 300)
 
+/-! When a program goes wrong, the diagnosis names the cause in the program's terms. -/
+
+#guard diagnose "effect Ask { ask(x) }  fn main() { ask(1) }"
+  == "operation `ask` is performed, but no handler for it is installed"
+#guard diagnose "fn f { 0 => 1 }  fn main() { f(5) }"
+  == "no clause of `f` matches the arguments (5)"
+#guard diagnose "fn main() { match(Some(1)) { None => 0 } }"
+  == "no clause of a callable in `main` matches the arguments (Ok(1))"
+#guard diagnose "effect Ask { ask() }  fn main() { handle ask() { ask(k) => k(1) + k(2) } }"
+  == "a resumption is used more times than its operation allows, or after it was cancelled"
+#guard diagnose "fn main() { let l = @out { @out }; l(1) }"
+  == "a label is applied after its scope has ended"
+#guard diagnose "fn main() { let x = 5; x(1) }" == "`5` is called, but it is not callable"
+#guard diagnose "fn main() { 9223372036854775807 + 1 }"
+  == "integer overflow: the result of an operation on (9223372036854775807, 1) does not fit in 64 bits"
+#guard diagnose "fn main() { (1, 2).5 }" == "`(1, 2)` does not have the field being read"
+#guard diagnose "fn f(a, b) { a }  fn main() { f(1) }" == "no clause of `f` matches the arguments (1)"
+#guard diagnose "fn main() { 1 + 2 }" == "did not go wrong"
+
 end Glorious.Tests

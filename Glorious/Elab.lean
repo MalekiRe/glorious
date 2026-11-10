@@ -56,6 +56,10 @@ structure Builder where
 
 structure St where
   fns : Array Core.Fn
+  /-- A description of each function, for diagnostics. -/
+  names : Array String
+  /-- The top-level function being elaborated. -/
+  owner : String
   b : Builder
 
 abbrev M := ReaderT Globals (StateT St (Except String))
@@ -93,9 +97,9 @@ def withBuilder {α : Type} (depth : Nat) (k : M α) : M α := do
   modify fun s => { s with b := outer }
   pure r
 
-def addFn (f : Core.Fn) : M Nat := do
+def addFn (f : Core.Fn) (name : String) : M Nat := do
   let s ← get
-  set { s with fns := s.fns.push f }
+  set { s with fns := s.fns.push f, names := s.names.push name }
   pure s.fns.size
 
 private def indexed (names : List String) (base : Nat) : Scope :=
@@ -489,7 +493,7 @@ partial def elabClosure (scope : Scope) (clauses : List Clause) : M Atom := do
   let captures := captureNames scope (clauses.flatMap (fvClause []))
   let coreClauses ← clauses.mapM fun
     | .mk pats body => mkClause captures pats (fun sc => elabStmts sc true body)
-  let idx ← addFn ⟨coreClauses⟩
+  let idx ← addFn ⟨coreClauses⟩ s!"a callable in `{(← get).owner}`"
   emit (.let_ (.closure idx (captures.filterMap (fun x => scope.lookup x))))
 
 /--
@@ -508,6 +512,7 @@ partial def elabHandle (scope : Scope) (tailPos : Bool) (subject : Expr) (arms :
   let captures := captureNames scope (arms.flatMap (fvClause []))
   let mut completions : Array (Pattern × List Stmt) := #[]
   let mut opArms : Array (OpInfo × List Pattern × List Stmt) := #[]
+  let mut opNames : List (Nat × String) := []
   for arm in arms do
     match arm with
     | .mk [.ctor x q ps] body =>
@@ -516,6 +521,7 @@ partial def elabHandle (scope : Scope) (tailPos : Bool) (subject : Expr) (arms :
         if let some owner := q then
           unless owner == info.owner do throw s!"`{x}` is not an operation of `{owner}`"
         opArms := opArms.push (info, ps, body)
+        opNames := (info.id, x) :: opNames
       | none => completions := completions.push (.ctor x q ps, body)
     | .mk [p] body => completions := completions.push (p, body)
     | .mk _ _ => throw "a handler arm has exactly one head pattern"
@@ -524,7 +530,8 @@ partial def elabHandle (scope : Scope) (tailPos : Bool) (subject : Expr) (arms :
     if completions.isEmpty then pure identity
     else completions.toList.mapM fun (p, body) =>
       mkClause captures [p] (fun sc => elabStmts sc true body)
-  let retIdx ← addFn ⟨retClauses⟩
+  let owner := (← get).owner
+  let retIdx ← addFn ⟨retClauses⟩ s!"the completion clauses of a handler in `{owner}`"
   let mut table : Array (Nat × Nat) := #[]
   for id in (opArms.toList.map (·.1.id)).eraseDups do
     let mine := opArms.toList.filter (·.1.id == id)
@@ -554,7 +561,8 @@ partial def elabHandle (scope : Scope) (tailPos : Bool) (subject : Expr) (arms :
         else ⟨List.replicate (n + 1) .wild,
           .perform info.id info.shots payload
             (.tail (.var n) [.var (n + 1 + captures.length)])⟩
-      let idx ← addFn ⟨clauses ++ [forward]⟩
+      let opName := (opNames.lookup id).getD "an operation"
+      let idx ← addFn ⟨clauses ++ [forward]⟩ s!"the handler arm for `{opName}` in `{owner}`"
       table := table.push (id, idx)
   let caps := captures.filterMap (fun x => scope.lookup x)
   if tailPos then
@@ -570,6 +578,10 @@ structure Output where
   program : Core.Program
   /-- Constructor names by tag, for printing values. Tag 0 is the tuple. -/
   ctorNames : Array String
+  /-- A description of each function, for diagnostics. -/
+  fnNames : Array String
+  /-- Operation names by identity, for diagnostics. -/
+  opNames : Array String
 
 /-- Collect the global declarations. -/
 def collect (items : List Item) :
@@ -626,12 +638,20 @@ def elabProgram (items : List Item) : Except String Output := do
       | n :: rest =>
         unless rest.all (· == n) do
           throw s!"the clauses of `{name}` take different numbers of arguments"
+      modify fun s => { s with owner := name }
       let coreClauses ← (clauses.map (withSelfLabel name)).mapM fun
         | .mk pats body => mkClause [] pats (fun sc => elabStmts sc true body)
       modify fun s => { s with fns := s.fns.set! idx ⟨coreClauses⟩ }
       idx := idx + 1
-  let init : St := ⟨Array.replicate fns.length ⟨[]⟩, ⟨#[], 0, none⟩⟩
+  let fnNames := (fns.map fun (name, _) => s!"`{name}`").toArray
+  let init : St := ⟨Array.replicate fns.length ⟨[]⟩, fnNames, "", ⟨#[], 0, none⟩⟩
   let (_, st) ← (action.run g).run init
-  pure ⟨⟨st.fns.toList, .let_ (.closure mainIdx []) (.tail (.var 0) [])⟩, names⟩
+  let opNames := Id.run do
+    let mut out := Array.replicate g.ops.length ""
+    for (name, info) in g.ops do
+      out := out.set! info.id name
+    pure out
+  pure ⟨⟨st.fns.toList, .let_ (.closure mainIdx []) (.tail (.var 0) [])⟩, names, st.names,
+    opNames⟩
 
 end Glorious.Elab

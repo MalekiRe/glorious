@@ -33,6 +33,12 @@ partial def runStreaming (names : Array String) (bytecode : Bytecode.Program)
   | .next c' => runStreaming names bytecode c' out.length
   | r => pure r
 
+/-- The configuration at which a Core program has no next step. -/
+partial def stuckAt (p : Core.Program) (cfg : Core.Config) : Core.Config :=
+  match Core.stepIO p cfg with
+  | .next cfg' => stuckAt p cfg'
+  | _ => cfg
+
 def usage : String :=
   "usage: glorious run FILE [INPUT...]\n       glorious check FILE [INPUT...]\n" ++
   "       glorious build FILE OUT\n       glorious selftest [VM]"
@@ -135,7 +141,8 @@ def main (args : List String) : IO UInt32 := do
         IO.println (showValue c.ctorNames r.value)
         pure 0
       | _ =>
-        IO.eprintln "the program went wrong"
+        -- The bytecode went wrong, so the Core program does too: find where and say why.
+        IO.eprintln s!"the program went wrong: {explainStuck c (stuckAt c.core (Core.initIO c.core input))}"
         pure 2
     else if command == "check" then
       let (onCore, coreSteps) := runToEnd (Core.stepIO c.core) (Core.initIO c.core input)
