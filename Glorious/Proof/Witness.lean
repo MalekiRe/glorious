@@ -184,4 +184,31 @@ theorem io_core : Core.Halts io [3, 4, 5] ⟨.int 7, ⟨[5], [.int 7, .int 12]�
 theorem io_bytecode :
     Bytecode.Halts (compile io) [3, 4, 5] ⟨.int 7, ⟨[5], [.int 7, .int 12]⟩⟩ := ⟨20, rfl⟩
 
+/--
+Cleanup on an abandoning exit.
+```
+guarded() = guard { write(1) } { Fail(7) }
+main      = handle guarded() { r => r; Fail(e) => write(e); e }
+```
+The terminal operation abandons the guarded computation. Its cleanup writes 1
+before the handler's arm writes 7.
+-/
+def cleanup : Core.Program where
+  fns := [
+    ⟨[ ⟨[], .host 0 [.int 1] <| .ret (.var 0)⟩ ]⟩,
+    ⟨[ ⟨[], .raise 0 [.int 7]⟩ ]⟩,
+    ⟨[ ⟨[.wild], .ret (.var 0)⟩ ]⟩,
+    ⟨[ ⟨[.wild], .host 0 [.var 0] <| .ret (.var 0)⟩ ]⟩,
+    ⟨[ ⟨[], .let_ (.closure 0 []) <| .let_ (.closure 1 []) <| .guardTail (.var 0) (.var 1)⟩ ]⟩
+  ]
+  main :=
+    .let_ (.closure 4 []) <|
+    .handle 2 [(0, 3)] [] (.var 0) <|
+    .ret (.var 1)
+
+theorem cleanup_core : Core.Halts cleanup [] ⟨.int 7, ⟨[], [.int 1, .int 7]⟩⟩ := ⟨30, rfl⟩
+
+theorem cleanup_bytecode :
+    Bytecode.Halts (compile cleanup) [] ⟨.int 7, ⟨[], [.int 1, .int 7]⟩⟩ := ⟨30, rfl⟩
+
 end Glorious.Witness

@@ -41,6 +41,8 @@ inductive Expr where
 inductive Stmt where
   | let_ (pat : Pattern) (value : Expr)
   | expr (e : Expr)
+  /-- `defer e;`: run `e` when the rest of the block is left, by any path. -/
+  | defer (e : Expr)
 
 inductive Clause where
   | mk (pats : List Pattern) (body : List Stmt)

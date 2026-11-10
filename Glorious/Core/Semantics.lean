@@ -60,16 +60,39 @@ inductive Frame where
   | handler (h : Handler)
   /-- The scope of a label. -/
   | label (id : Nat)
+  /-- A cleanup that runs when the computation above it is left, by any path. -/
+  | guard (fn : Nat) (captures : List Value)
+  /-- A pending call: whatever is delivered here is discarded and the function runs. -/
+  | invoke (fn : Nat) (captures : List Value) (args : List Value)
+  /-- A pending result: whatever is delivered here is discarded and `v` is delivered. -/
+  | yield (v : Value)
 
 def Frame.asHandler : Frame → Option Handler
   | .handler h => some h
   | .call _ _ => none
   | .label _ => none
+  | .guard _ _ => none
+  | .invoke _ _ _ => none
+  | .yield _ => none
 
 def Frame.asLabel : Frame → Option Nat
   | .label id => some id
   | .call _ _ => none
   | .handler _ => none
+  | .guard _ _ => none
+  | .invoke _ _ _ => none
+  | .yield _ => none
+
+/-- The cleanups of abandoned frames, innermost first, as pending calls on top
+of `base`. Everything else in the abandoned frames is dropped. -/
+def unwind : List Frame → List Frame → List Frame
+  | [], base => base
+  | .guard fn captures :: above, base => .invoke fn captures [] :: unwind above base
+  | .call _ _ :: above, base => unwind above base
+  | .handler _ :: above, base => unwind above base
+  | .label _ :: above, base => unwind above base
+  | .invoke _ _ _ :: above, base => unwind above base
+  | .yield _ :: above, base => unwind above base
 
 structure State where
   tm : Tm
@@ -94,18 +117,21 @@ def callFn (p : Program) (fn : Nat) (captures vs : List Value) (stack : List Fra
   | some (body, ρ) => .next ⟨body, ρ, stack, store⟩
   | none => .stuck
 
-/-- Deliver a result to the top of a stack. A caller binds it; a handler's
-delimiter is removed and its completion function runs outside it; a label scope
-simply ends. -/
-def deliver (p : Program) (v : Value) : List Frame → Store Frame → Step State Value
-  | [], _ => .halt v
-  | .call ρ body :: stack, store => .next ⟨body, ρ ++ [v], stack, store⟩
-  | .handler h :: stack, store => callFn p h.ret h.caps [v] stack store
-  | .label _ :: stack, store => deliver p v stack store
+/-- Deliver a result to the top of a stack. A caller binds it. A handler's
+delimiter is removed and its completion function runs outside it. A label scope
+simply ends. A guard runs its cleanup and then passes the result on. -/
+def deliver (p : Program) : Value → List Frame → Store Frame → Step State Value
+  | v, [], _ => .halt v
+  | v, .call ρ body :: stack, store => .next ⟨body, ρ ++ [v], stack, store⟩
+  | v, .handler h :: stack, store => callFn p h.ret h.caps [v] stack store
+  | v, .label _ :: stack, store => deliver p v stack store
+  | v, .guard fn captures :: stack, store => callFn p fn captures [] (.yield v :: stack) store
+  | _, .invoke fn captures args :: stack, store => callFn p fn captures args stack store
+  | _, .yield w :: stack, store => deliver p w stack store
 
 /-- Apply a callee on top of `stack`: enter a function, reinstate a captured
-continuation and deliver the argument to it, or leave a label scope with the
-argument as its result. -/
+continuation and deliver the argument to it, or leave a label scope, running
+the cleanups of the frames it abandons before the scope yields the argument. -/
 def apply (p : Program) (c : Callee) (stack : List Frame) (store : Store Frame) :
     Step State Value :=
   match c with
@@ -116,7 +142,7 @@ def apply (p : Program) (c : Callee) (stack : List Frame) (store : Store Frame) 
     | none => .stuck
   | .label id v =>
     match findLabel Frame.asLabel id stack with
-    | some below => deliver p v below store
+    | some (above, below) => deliver p .unit (unwind above (.yield v :: below)) store
     | none => .stuck
 
 def step (p : Program) (s : State) : Step State Value :=
@@ -148,7 +174,9 @@ def step (p : Program) (s : State) : Step State Value :=
     | some vs =>
       match findHandler Frame.asHandler op s.stack with
       | none => .stuck
-      | some d => callFn p d.arm d.handler.caps vs d.below s.store
+      | some d =>
+        -- The abandoned frames are cleaned up before the handler's arm runs.
+        deliver p .unit (unwind d.above (.invoke d.arm d.handler.caps vs :: d.below)) s.store
   | .perform op args body =>
     match evalAtoms s.env args with
     | none => .stuck
@@ -178,6 +206,24 @@ def step (p : Program) (s : State) : Step State Value :=
     | some (fn, captures) =>
       callFn p fn captures [.label s.store.labels] (.label s.store.labels :: s.stack)
         ⟨s.store.conts, s.store.labels + 1⟩
+  | .guard cleanup thunk body =>
+    match evalClosure s.env cleanup, evalCall s.env thunk [] with
+    | some (fn, captures), some c =>
+      apply p c (.guard fn captures :: .call s.env body :: s.stack) s.store
+    | _, _ => .stuck
+  | .guardTail cleanup thunk =>
+    match evalClosure s.env cleanup, evalCall s.env thunk [] with
+    | some (fn, captures), some c => apply p c (.guard fn captures :: s.stack) s.store
+    | _, _ => .stuck
+  | .cancel k body =>
+    match evalCont s.env k with
+    | none => .stuck
+    | some id =>
+      match takeCont s.store.conts id with
+      | some (segment, conts) =>
+        deliver p .unit (unwind segment (.yield .unit :: .call s.env body :: s.stack))
+          ⟨conts, s.store.labels⟩
+      | none => .stuck
   -- A host operation is a step of the program in its world; see `stepIO`.
   | .host _ _ _ => .stuck
 

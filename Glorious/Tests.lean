@@ -169,6 +169,51 @@ effects and early exits. -/
 #guard evalSource "fn main() { loop { let x = read() else { break(0) }; print(x * x) } }" [2, 3]
   == "4\n9\n0"
 
+/-! Cleanup. `defer` runs when the rest of its block is left by any path:
+a normal return, a label exit, a terminal operation, or cancellation. Inner
+cleanups run first, and before control continues at its destination. -/
+
+#guard evalSource "fn main() { defer print(1); print(2); 3 }" == "2\n1\n3"
+#guard evalSource "fn main() { defer print(1); defer print(2); print(3); 0 }" == "3\n2\n1\n0"
+#guard evalSource "fn main() { let r = @out { defer print(1); @out(5); print(99) }; print(r); 0 }"
+  == "1\n5\n0"
+#guard evalSource "effect Fail { fail(e) -> ! }
+  fn inner() { defer print(1); fail(7); print(99) }
+  fn outer() { defer print(2); inner(); print(98) }
+  fn main() { handle outer() { fail(e) => print(e); 0 } }" == "1\n2\n7\n0"
+#guard evalSource "fn f(x) { defer print(0); if(x == 1) { @f(10) }; 20 }
+  fn main() { (f(1), f(2)) }" == "0\n0\n(10, 20)"
+
+/-! A resumptive operation does not run the cleanups it captures: they run when
+the resumed computation finally leaves, exactly once. -/
+
+#guard evalSource "effect Ask { ask() }
+  fn work() { defer print(1); let x = ask(); print(x); x }
+  fn main() { handle work() { ask(k) => print(0); k(42) } }" == "0\n42\n1\n42"
+
+/-! Cancelling a resumption runs the cleanups of the continuation it captured.
+Merely dropping it does not; the type system will have to require one or the other. -/
+
+#guard evalSource "effect Ask { ask() }
+  fn work() { defer print(1); defer print(2); ask(); print(99) }
+  fn main() { handle work() { ask(k) => cancel(k); 7 } }" == "2\n1\n7"
+#guard evalSource "effect Ask { ask() }
+  fn work() { defer print(1); ask(); print(99) }
+  fn main() { handle work() { ask(k) => 7 } }" == "7"
+#guard evalSource "effect Ask { ask() }
+  fn work() { defer print(1); ask() }
+  fn main() { handle work() { ask(k) => cancel(k); k(1) } }" == "went wrong"
+
+/-! A resource bracket, written in the language. -/
+
+#guard evalSource "effect Fail { fail(e) -> ! }
+  fn with_resource(id, use) { print(id); defer print(0 - id); use(id) }
+  fn main() {
+      handle (with_resource(1) { a => with_resource(2) { b => fail(a + b) } }) {
+          fail(e) => e * 100
+      }
+  }" == "1\n2\n-2\n-1\n300"
+
 /-! Errors are reported, not guessed around. -/
 
 #guard evalSource "fn main() { nope }" == "error: unknown name `nope`"

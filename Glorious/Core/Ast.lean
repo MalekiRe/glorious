@@ -6,7 +6,8 @@ import Glorious.Value
 Core is the elaborated kernel language: every intermediate result is named and
 every callable is a closed function with an explicit capture list. This file
 covers data, closures, calls, tail calls, pattern callables, and effects with
-handlers and one-shot resumptions, label scopes, and host operations.
+handlers and one-shot resumptions, label scopes, guaranteed cleanup, and host
+operations.
 -/
 
 namespace Glorious.Core
@@ -52,6 +53,15 @@ inductive Tm where
   | handleTail (ret : Nat) (ops : List (Nat × Nat)) (captures : List Atom) (thunk : Atom)
   /-- `label` whose result is the result of the current activation. -/
   | labelTail (thunk : Atom)
+  /-- Run the callable `thunk` and bind its result, with `cleanup` guaranteed to
+  run when `thunk`'s computation is left by any path: a normal return, a label
+  exit, a terminal operation, or cancellation of a resumption that captured it. -/
+  | guard (cleanup : Atom) (thunk : Atom) (body : Tm)
+  /-- `guard` whose result is the result of the current activation. -/
+  | guardTail (cleanup : Atom) (thunk : Atom)
+  /-- Give up a resumption without resuming it: the cleanups of the continuation
+  it captured run, innermost first, and the result is unit. -/
+  | cancel (k : Atom) (body : Tm)
   /-- Ask the host to perform operation `id` and bind its result. -/
   | host (id : Nat) (args : List Atom) (body : Tm)
 

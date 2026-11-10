@@ -303,6 +303,11 @@ private partial def parseStmts : P (List Stmt) := do
       let value ← parseBinary 0 false
       expectPunct ";"
       out := out.push (.let_ pat value)
+    else if t == .ident "defer" then
+      advance
+      let e ← parseBinary 0 false
+      expectPunct ";"
+      out := out.push (.defer e)
     else
       let e ← parseBinary 0 false
       out := out.push (.expr e)

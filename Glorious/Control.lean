@@ -88,10 +88,22 @@ def takeCont {α : Type} : List (Option α) → Nat → Option (α × List (Opti
     | some (x, cs') => some (x, c :: cs')
     | none => none
 
-/-- The frames below the scope of label `id`, if that scope is on the stack. -/
-def findLabel {φ : Type} (asLabel : φ → Option Nat) (id : Nat) : List φ → Option (List φ)
+/-- Evaluate an operand that must be a resumption. -/
+def evalCont (ρ : Env) (a : Atom) : Option Nat :=
+  match a.eval ρ with
+  | some (.cont id) => some id
+  | _ => none
+
+/-- The frames above and below the scope of label `id`, if that scope is on the stack. -/
+def findLabel {φ : Type} (asLabel : φ → Option Nat) (id : Nat) :
+    List φ → Option (List φ × List φ)
   | [] => none
-  | fr :: stack => if asLabel fr = some id then some stack else findLabel asLabel id stack
+  | fr :: stack =>
+    if asLabel fr = some id then some ([], stack)
+    else
+      match findLabel asLabel id stack with
+      | some (above, below) => some (fr :: above, below)
+      | none => none
 
 /-- The machine state that is not on the stack. -/
 structure Store (φ : Type) where

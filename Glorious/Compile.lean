@@ -25,6 +25,9 @@ def compileTm : Core.Tm → Code
   | .label thunk body => .label thunk :: compileTm body
   | .handleTail ret ops captures thunk => [.handleTail ret ops captures thunk]
   | .labelTail thunk => [.labelTail thunk]
+  | .guard cleanup thunk body => .guard cleanup thunk :: compileTm body
+  | .guardTail cleanup thunk => [.guardTail cleanup thunk]
+  | .cancel k body => .cancel k :: compileTm body
   | .host id args body => .host id args :: compileTm body
 
 /-- A structural test a pattern imposes on a place. -/

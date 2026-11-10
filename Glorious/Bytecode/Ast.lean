@@ -31,6 +31,12 @@ inductive Instr where
   | handleTail (ret : Nat) (ops : List (Nat × Nat)) (captures : List Atom) (thunk : Atom)
   /-- Push a fresh label scope and enter `thunk`, reusing the current frame. -/
   | labelTail (thunk : Atom)
+  /-- Push a return frame and a guard, then enter `thunk`. -/
+  | guard (cleanup : Atom) (thunk : Atom)
+  /-- Push a guard and enter `thunk`, reusing the current frame. -/
+  | guardTail (cleanup : Atom) (thunk : Atom)
+  /-- Run the cleanups of a resumption's captured frames; unit becomes the next local. -/
+  | cancel (k : Atom)
   /-- Ask the host to perform operation `id`; its result becomes the next local. -/
   | host (id : Nat) (args : List Atom)
   /-- Fall through if the place holds constructor `tag` with `arity` fields;

@@ -134,6 +134,7 @@ partial def fvStmts (bound : List String) : List Stmt → List String
   | [] => []
   | .let_ pat value :: rest => fvExpr bound value ++ fvStmts (patVars pat ++ bound) rest
   | .expr e :: rest => fvExpr bound e ++ fvStmts bound rest
+  | .defer e :: rest => fvExpr bound e ++ fvStmts bound rest
 
 end
 
@@ -213,6 +214,7 @@ inductive Head where
   | op (info : OpInfo)
   | prim (p : Prim) (arity : Nat)
   | host (id : Nat) (arity : Nat)
+  | cancel
   | const (e : Expr)
 
 def resolveName (scope : Scope) (qual : Option String) (x : String) : M Head := do
@@ -227,6 +229,7 @@ def resolveName (scope : Scope) (qual : Option String) (x : String) : M Head := 
   if let some idx := g.fns.lookup x then return .fn idx
   if let some (p, n) := prims.lookup x then return .prim p n
   if let some (id, n) := hosts.lookup x then return .host id n
+  if x == "cancel" then return .cancel
   if let some e := g.aliases.lookup x then return .const e
   throw s!"unknown name `{x}`"
 
@@ -246,6 +249,7 @@ partial def elabExpr (scope : Scope) (tailPos : Bool) : Expr → M Atom
     | .op _ => throw s!"operation `{x}` must be called"
     | .prim _ _ => throw s!"intrinsic `{x}` must be called"
     | .host _ _ => throw s!"host operation `{x}` must be called"
+    | .cancel => throw "`cancel` must be applied to a resumption"
     | .const e => elabExpr [] false e
   | .label l =>
     match scope.lookup (labelName l) with
@@ -314,6 +318,13 @@ partial def elabCall (scope : Scope) (isTail : Bool) (f : Expr) (args : List Exp
         throw s!"host operation `{x}` takes {n} arguments, but is given {args.length}"
       let atoms ← args.mapM (elabExpr scope false)
       emit (.host id atoms)
+    | .cancel => do
+      if isTail then throw "`tail` applies to calls, not to `cancel`"
+      match args with
+      | [k] => do
+        let atom ← elabExpr scope false k
+        emit (.cancel atom)
+      | _ => throw "`cancel` takes exactly one resumption"
     | .const e => do
       let callee ← elabExpr [] false e
       elabApply scope isTail callee args
@@ -332,6 +343,14 @@ partial def elabStmts (scope : Scope) (tailPos : Bool) : List Stmt → M Atom
     let a ← elabExpr scope false value
     let scope ← bindLet scope pat a
     elabStmts scope tailPos rest
+  | .defer e :: rest => do
+    -- The rest of the block runs under a guard whose cleanup is `e`.
+    let cleanup ← elabClosure scope [.mk [] [.expr e]]
+    let thunk ← elabClosure scope [.mk [] rest]
+    if tailPos then
+      terminate (.guardTail cleanup thunk)
+      pure (.int 0)
+    else emit (.guard cleanup thunk)
 
 /-- Bind an irrefutable pattern to a value. -/
 partial def bindLet (scope : Scope) (pat : Pattern) (a : Atom) : M Scope := do

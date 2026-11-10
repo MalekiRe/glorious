@@ -56,6 +56,9 @@ inductive Rhs where
 
 namespace Value
 
+/-- The unit value: the empty tuple. -/
+def unit : Value := .data 0 []
+
 /-- Follow a field path into a value. -/
 def follow : Value → List Nat → Option Value
   | v, [] => some v

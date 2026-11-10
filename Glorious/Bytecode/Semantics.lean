@@ -21,16 +21,38 @@ inductive Frame where
   | handler (h : Handler)
   /-- The scope of a label. -/
   | label (id : Nat)
+  /-- A cleanup that runs when the computation above it is left, by any path. -/
+  | guard (fn : Nat) (captures : List Value)
+  /-- A pending call: whatever is delivered here is discarded and the function runs. -/
+  | invoke (fn : Nat) (captures : List Value) (args : List Value)
+  /-- A pending result: whatever is delivered here is discarded and `v` is delivered. -/
+  | yield (v : Value)
 
 def Frame.asHandler : Frame → Option Handler
   | .handler h => some h
   | .ret _ _ _ => none
   | .label _ => none
+  | .guard _ _ => none
+  | .invoke _ _ _ => none
+  | .yield _ => none
 
 def Frame.asLabel : Frame → Option Nat
   | .label id => some id
   | .ret _ _ _ => none
   | .handler _ => none
+  | .guard _ _ => none
+  | .invoke _ _ _ => none
+  | .yield _ => none
+
+/-- The cleanups of abandoned frames, innermost first, as pending calls on top of `base`. -/
+def unwind : List Frame → List Frame → List Frame
+  | [], base => base
+  | .guard fn captures :: above, base => .invoke fn captures [] :: unwind above base
+  | .ret _ _ _ :: above, base => unwind above base
+  | .handler _ :: above, base => unwind above base
+  | .label _ :: above, base => unwind above base
+  | .invoke _ _ _ :: above, base => unwind above base
+  | .yield _ :: above, base => unwind above base
 
 structure State where
   code : Code
@@ -52,11 +74,14 @@ def callFn (p : Program) (fn : Nat) (captures vs : List Value) (frames : List Fr
   | some (code, ρ) => .next ⟨code, 0, ρ, frames, store⟩
   | none => .stuck
 
-def deliver (p : Program) (v : Value) : List Frame → Store Frame → Step State Value
-  | [], _ => .halt v
-  | .ret code pc locals :: frames, store => .next ⟨code, pc, locals ++ [v], frames, store⟩
-  | .handler h :: frames, store => callFn p h.ret h.caps [v] frames store
-  | .label _ :: frames, store => deliver p v frames store
+def deliver (p : Program) : Value → List Frame → Store Frame → Step State Value
+  | v, [], _ => .halt v
+  | v, .ret code pc locals :: frames, store => .next ⟨code, pc, locals ++ [v], frames, store⟩
+  | v, .handler h :: frames, store => callFn p h.ret h.caps [v] frames store
+  | v, .label _ :: frames, store => deliver p v frames store
+  | v, .guard fn captures :: frames, store => callFn p fn captures [] (.yield v :: frames) store
+  | _, .invoke fn captures args :: frames, store => callFn p fn captures args frames store
+  | _, .yield w :: frames, store => deliver p w frames store
 
 def apply (p : Program) (c : Callee) (frames : List Frame) (store : Store Frame) :
     Step State Value :=
@@ -68,7 +93,7 @@ def apply (p : Program) (c : Callee) (frames : List Frame) (store : Store Frame)
     | none => .stuck
   | .label id v =>
     match findLabel Frame.asLabel id frames with
-    | some below => deliver p v below store
+    | some (above, below) => deliver p .unit (unwind above (.yield v :: below)) store
     | none => .stuck
 
 def step (p : Program) (s : State) : Step State Value :=
@@ -101,7 +126,8 @@ def step (p : Program) (s : State) : Step State Value :=
     | some vs =>
       match findHandler Frame.asHandler op s.frames with
       | none => .stuck
-      | some d => callFn p d.arm d.handler.caps vs d.below s.store
+      | some d =>
+        deliver p .unit (unwind d.above (.invoke d.arm d.handler.caps vs :: d.below)) s.store
   | some (.perform op args) =>
     match evalAtoms s.locals args with
     | none => .stuck
@@ -140,6 +166,25 @@ def step (p : Program) (s : State) : Step State Value :=
     | some (fn, captures) =>
       callFn p fn captures [.label s.store.labels] (.label s.store.labels :: s.frames)
         ⟨s.store.conts, s.store.labels + 1⟩
+  | some (.guard cleanup thunk) =>
+    match evalClosure s.locals cleanup, evalCall s.locals thunk [] with
+    | some (fn, captures), some c =>
+      apply p c (.guard fn captures :: .ret s.code (s.pc + 1) s.locals :: s.frames) s.store
+    | _, _ => .stuck
+  | some (.guardTail cleanup thunk) =>
+    match evalClosure s.locals cleanup, evalCall s.locals thunk [] with
+    | some (fn, captures), some c => apply p c (.guard fn captures :: s.frames) s.store
+    | _, _ => .stuck
+  | some (.cancel k) =>
+    match evalCont s.locals k with
+    | none => .stuck
+    | some id =>
+      match takeCont s.store.conts id with
+      | some (segment, conts) =>
+        deliver p .unit
+          (unwind segment (.yield .unit :: .ret s.code (s.pc + 1) s.locals :: s.frames))
+          ⟨conts, s.store.labels⟩
+      | none => .stuck
   -- A host operation is a step of the program in its world; see `stepIO`.
   | some (.host _ _) => .stuck
 
