@@ -10,3 +10,4 @@ import Glorious.Proof.CodeAt
 import Glorious.Proof.Patterns
 import Glorious.Proof.Correct
 import Glorious.Proof.Witness
+import Glorious.Proof.Audit
