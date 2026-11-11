@@ -359,13 +359,26 @@ theorem select_mem {vs : List Value} : ∀ (cs : List Clause) {body : Tm} {bs : 
         exact ⟨c, List.mem_cons_self .., rfl, hm, hlen⟩
     · simp [selectClause, hlen] at h
 
+/-- `after` is `store` once some cells have been released: the resumptions are
+the same, and its cells hold no more than before. -/
+structure Kept (store after : Store Frame) : Prop where
+  conts : after.conts = store.conts
+  cells : ∀ id, occCells id after.cells ≤ occCells id store.cells
+
+theorem Kept.refl (store : Store Frame) : Kept store store :=
+  ⟨rfl, fun _ => Nat.le_refl _⟩
+
+theorem Kept.release {store after : Store Frame} (a : Nat) (h : Kept (store.release a) after) :
+    Kept store after :=
+  ⟨h.conts, fun id => Nat.le_trans (h.cells id) (occCells_release_le id store.cells a)⟩
+
 /-- A step that leaves a well-typed state, or a result: not a stuck machine. The
-state it leaves has the given store, and its locals and stack hold each
-resumption no more often than `budget` allows. -/
+state it leaves has the given store, less the cells whose scopes the step left,
+and its locals and stack hold each resumption no more often than `budget` allows. -/
 def Safe (Δ : Ctx) (S : StoreTy) (budget : Nat → Nat) (store : Store Frame) :
     Step State Value → Prop
   | .next s =>
-    TypedAt Δ S s ∧ s.store = store
+    TypedAt Δ S s ∧ Kept store s.store
       ∧ ∀ id, occEnv id s.env (fv s.tm) + occStack id s.stack ≤ budget id
   | .halt _ => True
   | .stuck => False
@@ -375,6 +388,14 @@ theorem Safe.weaken {S : StoreTy} {b b' : Nat → Nat} {store : Store Frame}
     Safe Δ S b' store r := by
   cases r with
   | next s => exact ⟨h.1, h.2.1, fun id => Nat.le_trans (h.2.2 id) (hb id)⟩
+  | halt v => exact True.intro
+  | stuck => exact h.elim
+
+/-- What is safe once a cell is released is safe counting from before. -/
+theorem Safe.release {S : StoreTy} {b : Nat → Nat} {store : Store Frame} {a : Nat}
+    {r : Step State Value} (h : Safe Δ S b (store.release a) r) : Safe Δ S b store r := by
+  cases r with
+  | next s => exact ⟨h.1, h.2.1.release a, h.2.2⟩
   | halt v => exact True.intro
   | stuck => exact h.elim
 
@@ -399,7 +420,7 @@ theorem callFn_safe {p : Program} {S : StoreTy} {fn : Nat} {sig : FnSig}
     have h1 : callFn p fn captures vs st store = .next ⟨c.body, vs ++ captures ++ bs, st, store⟩ := by
       simp [callFn, invoke, hF, hsel]
     rw [h1]
-    refine ⟨.mk ((hv.append hc).append hbs) hbody hle hst hs, rfl, fun id => ?_⟩
+    refine ⟨.mk ((hv.append hc).append hbs) hbody hle hst hs, Kept.refl _, fun id => ?_⟩
     have := clause_env_le id (captures := captures) (live := fv c.body) hm hlen hwild
     show occEnv id (vs ++ captures ++ bs) (fv c.body) + occStack id st
       ≤ occs id vs + occs id captures + occStack id st

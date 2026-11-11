@@ -630,17 +630,21 @@ partial def elabStmts (scope : Scope) (tailPos : Bool) : List Stmt → M Atom
     elabStmts scope tailPos rest
   | .letMut x value :: rest => do
     let a ← elabExpr scope false value
-    let cell ← emit (.mem .alloc [a])
-    -- The rest of the block runs under a guard that releases the cell, so it is
-    -- released however the block is left.
-    let release ← mkClause [cellKey x] [] (fun sc => do
-      match sc.lookup (cellKey x) with
-      | some c => emit (.mem .free [c])
-      | none => throw s!"elaborator: the cell of `{x}` is not in scope")
-    let idx ← addFn ⟨[release]⟩ s!"the release of `{x}` in `{(← get).owner}`"
-    let cleanup ← emit (.let_ (.closure idx [cell]))
-    elabGuarded ((cellKey x, cell) :: scope) tailPos cleanup rest
-      s!"`{x}` is released after the call returns"
+    -- The rest of the block runs in the scope of the variable's cell, which is
+    -- released however the block is left. It is given the cell as its argument.
+    -- A `tail` call written directly in it would leave the cell's scope behind
+    -- on every iteration, so it is refused.
+    let why := s!"`{x}` is released after the call returns"
+    let captures := captureNames scope (fvStmts [x] rest)
+    let body ← mkClause captures [.var (cellKey x)]
+      (fun sc => withNoTail (some why) (elabStmts sc true rest))
+    let idx ← addFn ⟨[body]⟩ s!"the scope of `{x}` in `{(← get).owner}`"
+    let captured ← (captures.filterMap (fun y => scope.lookup y)).mapM useLocal
+    let thunk ← emit (.let_ (.closure idx captured))
+    if tailPos then
+      terminate (.cellTail a thunk)
+      pure (.int 0)
+    else emit (.cell a thunk)
   | .assign target value :: rest => do
     let cell ← match target with
       | .name none x =>

@@ -64,6 +64,13 @@ inductive Tm where
   resumption, the cleanups of the continuation it captured run, innermost
   first. For a function or a label there is nothing to do. -/
   | cancel (k : Atom) (body : Tm)
+  /-- Run the callable `thunk` in the scope of a fresh memory cell holding
+  `init`, passing it a reference to the cell, and bind the scope's result. The
+  cell is released when the scope is left, by any path: nothing else releases
+  a cell, so none is released twice. -/
+  | cell (init : Atom) (thunk : Atom) (body : Tm)
+  /-- `cell` whose result is the result of the current activation. -/
+  | cellTail (init : Atom) (thunk : Atom)
   /-- Perform a memory operation and bind its result. -/
   | mem (op : MemOp) (args : List Atom) (body : Tm)
   /-- Ask the host to perform operation `id` and bind its result. -/

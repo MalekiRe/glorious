@@ -951,19 +951,27 @@ partial def inferTm (amb : IRow) (τ : ITy) (Γ : Array ITy) : Core.Tm → M Uni
     unify (← atomTy Γ k) (.func [← freshTy] (← freshTy) ε' (← freshCls) (← freshTy))
     needs ε' [] amb
     inferTm amb τ (Γ.push .unit) body
+  | .cell init thunk body => do
+    let ρ ← freshTy
+    let εt ← freshRow
+    unify (← atomTy Γ thunk)
+      (.func [.ref (← atomTy Γ init)] ρ εt (← freshCls) (← freshTy))
+    needs εt [] amb
+    inferTm amb τ (Γ.push ρ) body
+  | .cellTail init thunk => do
+    let εt ← freshRow
+    unify (← atomTy Γ thunk)
+      (.func [.ref (← atomTy Γ init)] τ εt (← freshCls) (← freshTy))
+    needs εt [] amb
   | .mem op args body => do
     let ts ← args.mapM (atomTy Γ)
     let σ ← match op, ts with
-      | .alloc, [t] => pure (ITy.ref t)
       | .load, [t] => do
         let σ ← freshTy
         unify t (.ref σ)
         pure σ
       | .store, [t, v] => do
         unify t (.ref v)
-        pure .unit
-      | .free, [t] => do
-        unify t (.ref (← freshTy))
         pure .unit
       | .swap, [t, v] => do
         unify t (.ref v)
@@ -1300,6 +1308,8 @@ partial def tmRefs : Core.Tm → List Nat
   | .perform _ _ body => tmRefs body
   | .label _ body => tmRefs body
   | .labelTail _ => []
+  | .cell _ _ body => tmRefs body
+  | .cellTail _ _ => []
   | .guard _ _ body => tmRefs body
   | .guardTail _ _ => []
   | .cancel _ body => tmRefs body
@@ -1364,6 +1374,8 @@ def captureCounts (p : Core.Program) : Array Nat := Id.run do
     | .perform _ _ body => visit out body
     | .label _ body => visit out body
     | .labelTail _ => out
+    | .cell _ _ body => visit out body
+    | .cellTail _ _ => out
     | .guard _ _ body => visit out body
     | .guardTail _ _ => out
     | .cancel _ body => visit out body

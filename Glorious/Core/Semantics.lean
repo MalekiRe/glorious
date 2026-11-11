@@ -64,6 +64,8 @@ inductive Frame where
   | label (id : Nat)
   /-- A cleanup that runs when the computation above it is left, by any path. -/
   | guard (fn : Nat) (captures : List Value)
+  /-- The scope of a memory cell: the cell is released when this frame is removed. -/
+  | cell (addr : Nat)
   /-- A pending result: whatever is delivered here is discarded and `v` is delivered. -/
   | yield (v : Value)
   /-- An exit in progress. A cleanup was running above this frame; whatever it
@@ -76,6 +78,7 @@ def Frame.asHandler : Frame → Option (Nat × Handler)
   | .call _ _ => none
   | .label _ => none
   | .guard _ _ => none
+  | .cell _ => none
   | .yield _ => none
   | .exit _ _ => none
 
@@ -84,6 +87,7 @@ def Frame.asLabel : Frame → Option Nat
   | .call _ _ => none
   | .handler _ _ => none
   | .guard _ _ => none
+  | .cell _ => none
   | .yield _ => none
   | .exit _ _ => none
 
@@ -120,14 +124,16 @@ mutual
 
 /-- Deliver a result to the top of a stack. A caller binds it. A handler's
 delimiter is removed and its completion function runs outside it. A label scope
-simply ends. A guard runs its cleanup and then passes the result on. An exit in
-progress discards it and continues. -/
+simply ends. A guard runs its cleanup and then passes the result on. A cell's
+scope ends and the cell is released. An exit in progress discards it and
+continues. -/
 def deliver (p : Program) : Value → List Frame → Store Frame → Step State Value
   | v, [], _ => .halt v
   | v, .call ρ body :: stack, store => .next ⟨body, ρ ++ [v], stack, store⟩
   | v, .handler _ h :: stack, store => callFn p h.ret h.caps [v] stack store
   | v, .label _ :: stack, store => deliver p v stack store
   | v, .guard fn captures :: stack, store => callFn p fn captures [] (.yield v :: stack) store
+  | v, .cell a :: stack, store => deliver p v stack (store.release a)
   | _, .yield w :: stack, store => deliver p w stack store
   | _, .exit target after :: stack, store => leave p target after stack store
 
@@ -135,7 +141,8 @@ def deliver (p : Program) : Value → List Frame → Store Frame → Step State 
 Leave for `target`, abandoning the frames on the way. Each cleanup among them
 runs in place: everything below it is still there, so it can jump to an
 enclosing label or perform an operation an enclosing handler serves, exactly as
-on a normal return. When the cleanup is done the exit goes on. Once the target
+on a normal return. When the cleanup is done the exit goes on. A cell whose
+scope is among them is released. Once the target
 is reached it is removed and `after` happens on what is below it. A stack
 without the target has no meaning.
 -/
@@ -150,6 +157,7 @@ def leave (p : Program) (target : Target) (after : After) :
     else
       match fr with
       | .guard fn captures => callFn p fn captures [] (.exit target after :: stack) store
+      | .cell a => leave p target after stack (store.release a)
       | _ => leave p target after stack store
 
 end
@@ -260,6 +268,15 @@ def step (p : Program) (s : State) : Step State Value :=
           (segment ++ .yield .unit :: .label s.store.labels :: .call s.env body :: s.stack)
           ⟨conts, s.store.labels + 1, s.store.cells⟩
       | none => .stuck
+  | .cell init thunk body =>
+    match init.eval s.env, evalScope s.env thunk (.ref s.store.cells.length) with
+    | some v, some c =>
+      apply p c (.cell s.store.cells.length :: .call s.env body :: s.stack) (s.store.alloc v)
+    | _, _ => .stuck
+  | .cellTail init thunk =>
+    match init.eval s.env, evalScope s.env thunk (.ref s.store.cells.length) with
+    | some v, some c => apply p c (.cell s.store.cells.length :: s.stack) (s.store.alloc v)
+    | _, _ => .stuck
   | .mem op args body =>
     match evalAtoms s.env args with
     | none => .stuck

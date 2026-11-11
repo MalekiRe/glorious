@@ -551,12 +551,19 @@ def checkTm (C : Cert) : TEnv → Tm → List Hint → Ty → Row → Bool
       rowLe ε' ε && linearB C Γ (atomVars [k]) (fv body)
         && checkTm C (Γ ++ [.unit]) body hs τ ε
     | _ => false
+  | Γ, .cell init thunk body, hs, τ, ε =>
+    match atomTy Γ init, atomTy Γ thunk with
+    | some σ, some (.fn [.ref σ'] ρ εt _ _) =>
+      σ' == σ && rowLe εt ε && linearB C Γ (atomVars [init, thunk]) (fv body)
+        && checkTm C (Γ ++ [ρ]) body hs τ ε
+    | _, _ => false
+  | Γ, .cellTail init thunk, _, τ, ε =>
+    match atomTy Γ init, atomTy Γ thunk with
+    | some σ, some (.fn [.ref σ'] ρ εt _ _) =>
+      σ' == σ && ρ == τ && rowLe εt ε && linearB C Γ (atomVars [init, thunk]) []
+    | _, _ => false
   | Γ, .mem op args body, hs, τ, ε =>
     match op, args with
-    | .alloc, [a] =>
-      match atomTy Γ a with
-      | some σ => linearB C Γ (atomVars [a]) (fv body) && checkTm C (Γ ++ [.ref σ]) body hs τ ε
-      | none => false
     | .load, [a] =>
       match atomTy Γ a with
       | some (.ref σ) => dupOk C σ && checkTm C (Γ ++ [σ]) body hs τ ε
@@ -566,10 +573,6 @@ def checkTm (C : Cert) : TEnv → Tm → List Hint → Ty → Row → Bool
       | some (.ref σ) =>
         atomTy Γ b == some σ && linearB C Γ (atomVars [b]) (fv body)
           && checkTm C (Γ ++ [.unit]) body hs τ ε
-      | _ => false
-    | .free, [a] =>
-      match atomTy Γ a with
-      | some (.ref _) => checkTm C (Γ ++ [.unit]) body hs τ ε
       | _ => false
     | .swap, [a, b] =>
       match atomTy Γ a with
@@ -715,15 +718,30 @@ theorem checkTm_sound : ∀ (tm : Tm) {Γ : TEnv} {hs : List Hint} {τ : Ty} {ε
       simp only [Bool.and_eq_true] at h
       exact .cancel (atomTy_sound hk) (rowLe_sound h.1.1) (linearB_sound h.1.2) (ih h.2)
     · simp at h
+  | cell init thunk body ih =>
+    intro Γ hs τ ε h
+    simp only [checkTm] at h
+    split at h
+    · rename_i σ σ' ρ εt once env hinit hthunk
+      simp only [Bool.and_eq_true, beq_iff_eq] at h
+      obtain ⟨⟨⟨rfl, hrow⟩, hlin⟩, hbody⟩ := h
+      exact .cell (atomTy_sound hinit) (atomTy_sound hthunk) (rowLe_sound hrow)
+        (linearB_sound hlin) (ih hbody)
+    · simp at h
+  | cellTail init thunk =>
+    intro Γ hs τ ε h
+    simp only [checkTm] at h
+    split at h
+    · rename_i σ σ' ρ εt once env hinit hthunk
+      simp only [Bool.and_eq_true, beq_iff_eq] at h
+      obtain ⟨⟨⟨rfl, rfl⟩, hrow⟩, hlin⟩ := h
+      exact .cellTail (atomTy_sound hinit) (atomTy_sound hthunk) (rowLe_sound hrow)
+        (linearB_sound hlin)
+    · simp at h
   | mem op args body ih =>
     intro Γ hs τ ε h
     simp only [checkTm] at h
     split at h
-    · split at h
-      · rename_i σ ha
-        simp only [Bool.and_eq_true] at h
-        exact .alloc (atomTy_sound ha) (linearB_sound h.1) (ih h.2)
-      · simp at h
     · split at h
       · rename_i σ ha
         simp only [Bool.and_eq_true] at h
@@ -733,10 +751,6 @@ theorem checkTm_sound : ∀ (tm : Tm) {Γ : TEnv} {hs : List Hint} {τ : Ty} {ε
       · rename_i σ ha
         simp only [Bool.and_eq_true, beq_iff_eq] at h
         exact .store (atomTy_sound ha) (atomTy_sound h.1.1) (linearB_sound h.1.2) (ih h.2)
-      · simp at h
-    · split at h
-      · rename_i σ ha
-        exact .free (atomTy_sound ha) (ih h)
       · simp at h
     · split at h
       · rename_i σ ha

@@ -216,31 +216,38 @@ theorem cleanup_bytecode :
     Bytecode.Halts (compile cleanup) [] ⟨.int 7, ⟨[], [.int 1, .int 7]⟩⟩ := ⟨30, rfl⟩
 
 /--
-Memory: allocate a cell, write it, read it, release it.
+Memory: a cell lives for the scope it is made for.
 ```
-main = let r = alloc(1) in store(r, 5); let v = load(r) in free(r); v
+main = cell(1) { r => store(r, 5); load(r) }
 ```
 -/
 def memory : Core.Program where
-  fns := []
+  fns := [
+    ⟨[⟨[.wild],
+        .mem .store [.var 0, .int 5] <|
+        .mem .load [.var 0] <|
+        .ret (.var 2)⟩]⟩ ]
   main :=
-    .mem .alloc [.int 1] <|
-    .mem .store [.var 0, .int 5] <|
-    .mem .load [.var 0] <|
-    .mem .free [.var 0] <|
-    .ret (.var 2)
+    .let_ (.closure 0 []) <|
+    .cell (.int 1) (.var 0) <|
+    .ret (.var 1)
 
 theorem memory_core : Core.Halts memory [] ⟨.int 5, ⟨[], []⟩⟩ := ⟨10, rfl⟩
 
 theorem memory_bytecode : Bytecode.Halts (compile memory) [] ⟨.int 5, ⟨[], []⟩⟩ := ⟨10, rfl⟩
 
-/-- Reading a cell after it has been released has no meaning. -/
+/-- A reference that leaves its cell's scope is left pointing at a released
+cell: reading through it has no meaning.
+```
+main = let r = cell(1) { r => r }; load(r)
+```
+-/
 def useAfterFree : Core.Program where
-  fns := []
+  fns := [ ⟨[⟨[.wild], .ret (.var 0)⟩]⟩ ]
   main :=
-    .mem .alloc [.int 1] <|
-    .mem .free [.var 0] <|
-    .mem .load [.var 0] <|
+    .let_ (.closure 0 []) <|
+    .cell (.int 1) (.var 0) <|
+    .mem .load [.var 1] <|
     .ret (.var 2)
 
 theorem useAfterFree_goesWrong : Core.GoesWrong useAfterFree [] := ⟨10, rfl⟩

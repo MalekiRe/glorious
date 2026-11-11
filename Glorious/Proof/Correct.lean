@@ -25,6 +25,7 @@ inductive MatchFrame : Core.Frame → Bytecode.Frame → Prop where
   | label {id : Nat} : MatchFrame (.label id) (.label id)
   | guard {fn : Nat} {captures : List Value} :
       MatchFrame (.guard fn captures) (.guard fn captures)
+  | cell {a : Nat} : MatchFrame (.cell a) (.cell a)
   | yield {v : Value} : MatchFrame (.yield v) (.yield v)
   | exit {target : Target} {after : After} :
       MatchFrame (.exit target after) (.exit target after)
@@ -181,6 +182,16 @@ inductive MatchStore : Store Core.Frame → Store Bytecode.Frame → Prop where
       {cells : Cells} :
       MatchConts conts conts' → MatchStore ⟨conts, labels, cells⟩ ⟨conts', labels, cells⟩
 
+theorem MatchStore.release {store : Store Core.Frame} {store' : Store Bytecode.Frame}
+    (h : MatchStore store store') (a : Nat) : MatchStore (store.release a) (store'.release a) := by
+  cases h with
+  | mk hcs => exact .mk hcs
+
+theorem MatchStore.alloc {store : Store Core.Frame} {store' : Store Bytecode.Frame}
+    (h : MatchStore store store') (v : Value) : MatchStore (store.alloc v) (store'.alloc v) := by
+  cases h with
+  | mk hcs => exact .mk hcs
+
 /-- The program counter points at the compiled form of the current Core
 computation, the locals are the Core environment, and the stacks and stores
 correspond. -/
@@ -273,10 +284,10 @@ theorem deliver_leave_sim (hfr : MatchFrames stack frames) (hks : MatchStore sto
         (Bytecode.deliver (compile p) v frames store'))
     ∧ (∀ (target : Target) (after : After), SimOutcome p (Core.leave p target after stack store)
         (Bytecode.leave (compile p) target after frames store')) := by
-  induction hfr with
+  induction hfr generalizing store store' with
   | nil => exact ⟨fun _ => .halt, fun _ _ => .stuck⟩
   | @cons f f' stack frames hf hrest ih =>
-    obtain ⟨ihd, ihl⟩ := ih
+    obtain ⟨ihd, ihl⟩ := ih hks
     refine ⟨fun v => ?_, fun target after => ?_⟩
     · cases hf with
       | @call body ρ code pc hc =>
@@ -286,6 +297,7 @@ theorem deliver_leave_sim (hfr : MatchFrames stack frames) (hks : MatchStore sto
       | handler => exact callFn_sim hrest hks
       | label => exact ihd v
       | guard => exact callFn_sim (.cons .yield hrest) hks
+      | @cell a => exact (ih (hks.release a)).1 v
       | yield => exact ihd _
       | exit => exact ihl _ _
     · by_cases ht : f.isTarget target = true
@@ -341,6 +353,14 @@ theorem deliver_leave_sim (hfr : MatchFrames stack frames) (hks : MatchStore sto
             simp [Bytecode.leave, ht']
           rw [h1, h2]
           exact ihl _ _
+        | @cell a =>
+          have h1 : Core.leave p target after (.cell a :: stack) store
+              = Core.leave p target after stack (store.release a) := by simp [Core.leave, ht]
+          have h2 : Bytecode.leave (compile p) target after (.cell a :: frames) store'
+              = Bytecode.leave (compile p) target after frames (store'.release a) := by
+            simp [Bytecode.leave, ht']
+          rw [h1, h2]
+          exact (ih (hks.release a)).2 _ _
         | @yield w =>
           have h1 : Core.leave p target after (.yield w :: stack) store
               = Core.leave p target after stack store := by simp [Core.leave, ht]
@@ -645,6 +665,63 @@ theorem step_sim (p : Core.Program) {s : Core.State} {t : Bytecode.State} (hm : 
         simp [Bytecode.step, hi, he]
       rw [h1, h2]
       exact apply_sim (.cons .label hfr) (.mk hcs)
+  | cell init thunk body =>
+    have hc : CodeAt code pc (Instr.cell init thunk :: compileTm body) := hcode
+    have hi := hc.head
+    cases hv : init.eval ρ with
+    | none =>
+      have h1 : Core.step p ⟨.cell init thunk body, ρ, stack, ⟨conts, labels, cells⟩⟩ = .stuck := by
+        simp [Core.step, hv]
+      rw [h1]
+      exact .stuck
+    | some v =>
+      cases he : evalScope ρ thunk (.ref cells.length) with
+      | none =>
+        have h1 : Core.step p ⟨.cell init thunk body, ρ, stack, ⟨conts, labels, cells⟩⟩
+            = .stuck := by
+          simp [Core.step, hv, he]
+        rw [h1]
+        exact .stuck
+      | some c =>
+        have h1 : Core.step p ⟨.cell init thunk body, ρ, stack, ⟨conts, labels, cells⟩⟩
+            = Core.apply p c (.cell cells.length :: .call ρ body :: stack)
+                (Store.alloc ⟨conts, labels, cells⟩ v) := by
+          simp [Core.step, hv, he]
+        have h2 : Bytecode.step (compile p) ⟨code, pc, ρ, frames, ⟨conts', labels, cells⟩⟩
+            = Bytecode.apply (compile p) c
+                (.cell cells.length :: .ret code (pc + 1) ρ :: frames)
+                (Store.alloc ⟨conts', labels, cells⟩ v) := by
+          simp [Bytecode.step, hi, hv, he]
+        rw [h1, h2]
+        exact apply_sim (.cons .cell (.cons (.call hc.tail) hfr)) (hks.alloc v)
+  | cellTail init thunk =>
+    have hc : CodeAt code pc [Instr.cellTail init thunk] := hcode
+    have hi := hc.head
+    cases hv : init.eval ρ with
+    | none =>
+      have h1 : Core.step p ⟨.cellTail init thunk, ρ, stack, ⟨conts, labels, cells⟩⟩ = .stuck := by
+        simp [Core.step, hv]
+      rw [h1]
+      exact .stuck
+    | some v =>
+      cases he : evalScope ρ thunk (.ref cells.length) with
+      | none =>
+        have h1 : Core.step p ⟨.cellTail init thunk, ρ, stack, ⟨conts, labels, cells⟩⟩
+            = .stuck := by
+          simp [Core.step, hv, he]
+        rw [h1]
+        exact .stuck
+      | some c =>
+        have h1 : Core.step p ⟨.cellTail init thunk, ρ, stack, ⟨conts, labels, cells⟩⟩
+            = Core.apply p c (.cell cells.length :: stack)
+                (Store.alloc ⟨conts, labels, cells⟩ v) := by
+          simp [Core.step, hv, he]
+        have h2 : Bytecode.step (compile p) ⟨code, pc, ρ, frames, ⟨conts', labels, cells⟩⟩
+            = Bytecode.apply (compile p) c (.cell cells.length :: frames)
+                (Store.alloc ⟨conts', labels, cells⟩ v) := by
+          simp [Bytecode.step, hi, hv, he]
+        rw [h1, h2]
+        exact apply_sim (.cons .cell hfr) (hks.alloc v)
   | guard cleanup thunk body =>
     have hc : CodeAt code pc (Instr.guard cleanup thunk :: compileTm body) := hcode
     have hi := hc.head

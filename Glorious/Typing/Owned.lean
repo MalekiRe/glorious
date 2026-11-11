@@ -484,6 +484,7 @@ def occFrame (id : Nat) : Frame → Nat
   | .handler _ h => occs id h.caps
   | .label _ => 0
   | .guard _ captures => occs id captures
+  | .cell _ => 0
   | .yield w => occ id w
   | .exit _ after => occAfter id after
 
@@ -661,6 +662,19 @@ theorem occCells_set (id : Nat) {cells : Cells} {a : Nat} {old : Option Value}
     occCells id (cells.set a x) + oweight (occ id) old = occCells id cells + oweight (occ id) x :=
   osum_set (occ id) cells a x old h
 
+/-- Releasing a cell drops what it held. -/
+theorem occCells_release_le (id : Nat) (cells : Cells) (a : Nat) :
+    occCells id (cells.set a none) ≤ occCells id cells := by
+  cases h : cells[a]? with
+  | none =>
+    have hlen : cells.length ≤ a := List.getElem?_eq_none_iff.mp h
+    rw [List.set_eq_of_length_le hlen]
+    exact Nat.le_refl _
+  | some old =>
+    have := occCells_set id h none
+    simp only [oweight] at this
+    omega
+
 theorem occConts_push (id : Nat) (conts : Conts Frame) (seg : List Frame) :
     occConts id (conts ++ [some seg]) = occConts id conts + occStack id seg := by
   simp [occConts, osum_append, osum]
@@ -672,7 +686,16 @@ theorem occConts_take (id : Nat) {conts : Conts Frame} {k : Nat} {seg : List Fra
   simpa [occConts, oweight] using this
 
 theorem calleeAtom_fv {tm : Tm} {i : Nat} (h : calleeAtom tm = some (.var i)) : i ∈ fv tm := by
-  cases tm <;> simp [calleeAtom] at h <;> subst h <;> simp [fv, atomVars]
+  cases tm with
+  | cell init thunk body =>
+    simp only [calleeAtom, Option.some.injEq] at h
+    subst h
+    cases init <;> simp [fv, atomVars]
+  | cellTail init thunk =>
+    simp only [calleeAtom, Option.some.injEq] at h
+    subst h
+    cases init <;> simp [fv, atomVars]
+  | _ => simp [calleeAtom] at h <;> subst h <;> simp [fv, atomVars]
 
 /-- A resumption that some part of the computation is about to use is held, so it is unused. -/
 def Resumed (s : State) : Prop :=

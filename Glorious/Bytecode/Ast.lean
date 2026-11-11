@@ -37,6 +37,11 @@ inductive Instr where
   | guardTail (cleanup : Atom) (thunk : Atom)
   /-- Run the cleanups of a resumption's captured frames; unit becomes the next local. -/
   | cancel (k : Atom)
+  /-- Push a return frame and the scope of a fresh memory cell holding `init`,
+  then enter `thunk` with a reference to the cell. -/
+  | cell (init : Atom) (thunk : Atom)
+  /-- Push the scope of a fresh memory cell and enter `thunk`, reusing the current frame. -/
+  | cellTail (init : Atom) (thunk : Atom)
   /-- Perform a memory operation; its result becomes the next local. -/
   | mem (op : MemOp) (args : List Atom)
   /-- Ask the host to perform operation `id`; its result becomes the next local. -/

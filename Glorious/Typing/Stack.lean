@@ -36,6 +36,7 @@ theorem StackOk.mono {S S' : StoreTy} (hle : S.Le S') {st : List Frame} {τ : Ty
   | handler hid hh hrow _ ih => exact .handler (hle.handlers _ _ hid) (hh.mono hle) hrow ih
   | label hid _ ih => exact .label (hle.labels _ _ hid) ih
   | guard hsig hc _ ih => exact .guard hsig (hc.mono hle) ih
+  | cell _ ih => exact .cell ih
   | yield hw _ ih => exact .yield (hw.mono hle) ih
   | exit hx hin _ ih => exact .exit (hx.mono hle) hin ih
   | never _ ih => exact .never ih
@@ -53,6 +54,7 @@ theorem StackOk.tail {S : StoreTy} {st : List Frame} {τ : Ty} {ε : Row}
   | handler _ _ _ h _ => intro fr st' e; cases e; exact ⟨_, _, h⟩
   | label _ h _ => intro fr st' e; cases e; exact ⟨_, _, h⟩
   | guard _ _ h _ => intro fr st' e; cases e; exact ⟨_, _, h⟩
+  | cell h _ => intro fr st' e; cases e; exact ⟨_, _, h⟩
   | yield _ h _ => intro fr st' e; cases e; exact ⟨_, _, h⟩
   | exit _ _ h _ => intro fr st' e; cases e; exact ⟨_, _, h⟩
   | never _ ih => intro fr st' e; exact ih e
@@ -204,6 +206,14 @@ theorem find_ok {S : StoreTy} {st : List Frame} {τ : Ty} {ε : Row} (hst : Stac
       findHandler_skip (by simp [handles, Frame.asHandler]) hf, hid',
       hcaps, hdup, hop, hale, hsig, hbelow, hble, ⟨fr, List.mem_cons_of_mem _ hfr, hft⟩,
       fun S' hle st' ε' hst' hr => .guard hgs (hgc.mono hle) (hre S' hle st' ε' hst' hr)⟩
+  | @cell a st τ ε _ ih =>
+    intro op targs hl
+    obtain ⟨d, ρ, ε₀, εa, εb', Cs, Ps, r, hf, hid', hcaps, hdup, hop, hale, hsig, hbelow, hble,
+      ⟨fr, hfr, hft⟩, hre⟩ := ih hl
+    exact ⟨_, ρ, ε₀, εa, εb', Cs, Ps, r,
+      findHandler_skip (by simp [handles, Frame.asHandler]) hf, hid',
+      hcaps, hdup, hop, hale, hsig, hbelow, hble, ⟨fr, List.mem_cons_of_mem _ hfr, hft⟩,
+      fun S' hle st' ε' hst' hr => .cell (hre S' hle st' ε' hst' hr)⟩
   | @yield w st σ τ ε hw _ ih =>
     intro op targs hl
     obtain ⟨d, ρ, ε₀, εa, εb', Cs, Ps, r, hf, hid', hcaps, hdup, hop, hale, hsig, hbelow, hble,
@@ -285,14 +295,28 @@ theorem StackOk.guard_inv {S : StoreTy} {st : List Frame} {τ : Ty} {ε : Row}
   | never _ ih => intro fn captures st' e; exact ih e
   | _ => intro fn captures st' e; cases e
 
+/-- Releasing a cell keeps the store typed: a released cell keeps its type. -/
+theorem StoreOk.release {S : StoreTy} {store : Store Frame} (hs : StoreOk Δ S store) (a : Nat) :
+    StoreOk Δ S (store.release a) := by
+  refine ⟨hs.conts, hs.labels, hs.handlers, fun a' τ' h => ?_⟩
+  obtain ⟨hlt, hv⟩ := hs.cells a' τ' h
+  refine ⟨by simpa [Store.release] using hlt, fun v hg => ?_⟩
+  simp only [Store.release] at hg
+  rw [List.getElem?_set] at hg
+  by_cases he : a = a'
+  · subst he
+    simp at hg
+  · simp [he] at hg
+    exact hv v hg
+
 /--
 Delivering a value to a typed stack that takes it, and leaving a typed stack
 for a target that is on it, both end well: in a typed state or with the
 program's result. The state holds no more than the value, or what the exit
 carries, and the stack did. Proved together, as the two are defined together.
 -/
-theorem deliver_leave_safe {p : Program} {S : StoreTy} {store : Store Frame}
-    (hp : ProgramOk Δ p) (hs : StoreOk Δ S store) : ∀ (st : List Frame),
+theorem deliver_leave_safe {p : Program} {S : StoreTy} (hp : ProgramOk Δ p) :
+    ∀ (st : List Frame) {store : Store Frame}, StoreOk Δ S store →
     (∀ {v : Value} {τ : Ty} {ε : Row}, StackOk Δ S st τ ε → HasVal Δ S v τ →
         Safe Δ S (fun id => occ id v + occStack id st) store (deliver p v st store))
     ∧ (∀ {target : Target} {after : After} {τ : Ty} {ε : Row}, StackOk Δ S st τ ε →
@@ -302,17 +326,19 @@ theorem deliver_leave_safe {p : Program} {S : StoreTy} {store : Store Frame}
   intro st
   induction st with
   | nil =>
+    intro store hs
     refine ⟨fun _ _ => ?_, fun _ _ hin => ?_⟩
     · exact True.intro
     · obtain ⟨fr, hfr, _⟩ := hin
       cases hfr
   | cons fr st ih =>
-    obtain ⟨ihd, ihl⟩ := ih
+    intro store hs
+    obtain ⟨ihd, ihl⟩ := ih hs
     refine ⟨@fun v τ ε hst hv => ?_, @fun target after τ ε hst hx hin => ?_⟩
     · cases hst with
       | @call env body _ Γ σ τ' εb ε' henv hbody hrow hrest =>
         show Safe Δ S _ store (.next ⟨body, env ++ [v], st, store⟩)
-        refine ⟨.mk (henv.snoc hv) hbody hrow hrest hs, rfl, fun id => ?_⟩
+        refine ⟨.mk (henv.snoc hv) hbody hrow hrest hs, Kept.refl _, fun id => ?_⟩
         have := occEnv_push id env v (fv body)
         show occEnv id (env ++ [v]) (fv body) + occStack id st
           ≤ occ id v + occStack id (.call env body :: st)
@@ -328,6 +354,9 @@ theorem deliver_leave_safe {p : Program} {S : StoreTy} {store : Store Frame}
       | guard hsig hc hrest =>
         exact (callFn_safe hp hsig hc .nil (Row.nil_le _) (.yield hv hrest) hs).weaken
           fun id => by simp only [occStack, occFrame, occs]; omega
+      | @cell a _ _ _ hrest =>
+        exact (((ih (hs.release a)).1 hrest hv).release).weaken
+          fun id => by simp only [occStack, occFrame]; omega
       | yield hw hrest =>
         exact (ihd hrest hw).weaken fun id => by simp only [occStack, occFrame]; omega
       | exit hx hin hrest =>
@@ -371,6 +400,12 @@ theorem deliver_leave_safe {p : Program} {S : StoreTy} {store : Store Frame}
               = leave p target after st store := by simp [leave, ht]
           rw [h1]
           exact (ihl hrest hx hin').weaken fun id => by simp only [occStack]; omega
+        | cell a =>
+          have h1 : leave p target after (.cell a :: st) store
+              = leave p target after st (store.release a) := by simp [leave, ht]
+          rw [h1]
+          exact (((ih (hs.release a)).2 hrest hx hin').release).weaken
+            fun id => by simp only [occStack]; omega
         | yield w =>
           have h1 : leave p target after (.yield w :: st) store
               = leave p target after st store := by simp [leave, ht]
@@ -386,7 +421,7 @@ theorem deliver_safe {p : Program} {S : StoreTy} {store : Store Frame} {st : Lis
     {v : Value} {τ : Ty} {ε : Row} (hp : ProgramOk Δ p) (hs : StoreOk Δ S store)
     (hst : StackOk Δ S st τ ε) (hv : HasVal Δ S v τ) :
     Safe Δ S (fun id => occ id v + occStack id st) store (deliver p v st store) :=
-  (deliver_leave_safe hp hs st).1 hst hv
+  (deliver_leave_safe hp st hs).1 hst hv
 
 theorem leave_safe {p : Program} {S : StoreTy} {store : Store Frame} {st : List Frame}
     {target : Target} {after : After} {τ : Ty} {ε : Row} (hp : ProgramOk Δ p)
@@ -394,7 +429,7 @@ theorem leave_safe {p : Program} {S : StoreTy} {store : Store Frame} {st : List 
     (hin : ∃ fr, fr ∈ st ∧ fr.isTarget target = true) :
     Safe Δ S (fun id => occAfter id after + occStack id st) store
       (leave p target after st store) :=
-  (deliver_leave_safe hp hs st).2 hst hx hin
+  (deliver_leave_safe hp st hs).2 hst hx hin
 
 /-! ## Applying a callee -/
 

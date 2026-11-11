@@ -177,12 +177,11 @@ def explainStuck (c : Compiled) (cfg : Core.Config) : String :=
   | .raise op _ => performed op
   | .perform op _ _ => performed op
   | .cancel _ _ => "`cancel` is applied to something that is not a usable resumption"
-  | .mem op args _ =>
+  | .cell _ thunk _ => applied thunk (some [.ref s.store.cells.length])
+  | .cellTail _ thunk => applied thunk (some [.ref s.store.cells.length])
+  | .mem _ args _ =>
     match evalAtoms s.env args with
-    | some (.ref _ :: _) =>
-      match op with
-      | .free => "a memory cell is freed twice"
-      | _ => "a reference is used after the cell it points to was freed"
+    | some (.ref _ :: _) => "a reference is used after the cell it points to was freed"
     | some vs => s!"a memory operation is applied to ({shown vs}), which is not a reference"
     | none => unbound
   | .host id _ _ => s!"host operation {id} rejected its arguments"
@@ -217,7 +216,9 @@ def peakStack (src : String) (input : List Int := []) (fuel : Nat := 4000000) : 
         | .stuck => none
     go fuel (Bytecode.initIO bytecode input) 0
 
-/-- How many memory cells are still live when a program finishes. -/
+/-- How many memory cells are still live when a program finishes. The step that
+ends the program also leaves the scopes still on the stack, so their cells do
+not count. -/
 def liveCells (src : String) (input : List Int := []) (fuel : Nat := 4000000) : Option Nat :=
   match compileSource src with
   | .error _ => none
@@ -228,7 +229,13 @@ def liveCells (src : String) (input : List Int := []) (fuel : Nat := 4000000) : 
       | n + 1, cfg =>
         match Bytecode.stepIO bytecode cfg with
         | .next cfg' => go n cfg'
-        | .halt _ => some (cfg.state.store.cells.filter Option.isSome).length
+        | .halt _ =>
+          let leaving := cfg.state.frames.filterMap fun
+            | .cell a => some a
+            | _ => none
+          let cells := cfg.state.store.cells
+          some ((List.range cells.length).filter fun a =>
+            (cells[a]?.getD none).isSome && !leaving.contains a).length
         | .stuck => none
     go fuel (Bytecode.initIO bytecode input)
 

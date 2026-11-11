@@ -173,6 +173,8 @@ def fv : Tm → List Nat
   | .guard cleanup thunk body => atomVars [cleanup, thunk] ++ fv body
   | .guardTail cleanup thunk => atomVars [cleanup, thunk]
   | .cancel k body => atomVars [k] ++ fv body
+  | .cell init thunk body => atomVars [init, thunk] ++ fv body
+  | .cellTail init thunk => atomVars [init, thunk]
   | .mem _ args body => atomVars args ++ fv body
   | .host _ args body => atomVars args ++ fv body
 
@@ -336,9 +338,17 @@ inductive HasTm (Δ : Ctx) : TEnv → Tm → Ty → Row → Prop where
       {env : Option (List Ty)} :
       HasAtom Γ k (.fn [σ] ρ ε' once env) → Row.le ε' ε → Linear Δ Γ (atomVars [k]) (fv body) →
       HasTm Δ (Γ ++ [.unit]) body τ ε → HasTm Δ Γ (.cancel k body) τ ε
-  | alloc {Γ : TEnv} {a : Atom} {body : Tm} {σ τ : Ty} {ε : Row} :
-      HasAtom Γ a σ → Linear Δ Γ (atomVars [a]) (fv body) →
-      HasTm Δ (Γ ++ [.ref σ]) body τ ε → HasTm Δ Γ (.mem .alloc [a] body) τ ε
+  /-- A cell lives for the scope it is made for. The callable run in that
+  scope is given a reference to the cell, which holds `init` to begin with. -/
+  | cell {Γ : TEnv} {init thunk : Atom} {body : Tm} {σ ρ τ : Ty} {εt ε : Row} {once : Bool}
+      {env : Option (List Ty)} :
+      HasAtom Γ init σ → HasAtom Γ thunk (.fn [.ref σ] ρ εt once env) → Row.le εt ε →
+      Linear Δ Γ (atomVars [init, thunk]) (fv body) →
+      HasTm Δ (Γ ++ [ρ]) body τ ε → HasTm Δ Γ (.cell init thunk body) τ ε
+  | cellTail {Γ : TEnv} {init thunk : Atom} {σ τ : Ty} {εt ε : Row} {once : Bool}
+      {env : Option (List Ty)} :
+      HasAtom Γ init σ → HasAtom Γ thunk (.fn [.ref σ] τ εt once env) → Row.le εt ε →
+      Linear Δ Γ (atomVars [init, thunk]) [] → HasTm Δ Γ (.cellTail init thunk) τ ε
   /-- Reading a cell copies its value, so the value must be duplicable. A value
   that is not is taken out with `swap`. -/
   | load {Γ : TEnv} {a : Atom} {body : Tm} {σ τ : Ty} {ε : Row} :
@@ -350,9 +360,6 @@ inductive HasTm (Δ : Ctx) : TEnv → Tm → Ty → Row → Prop where
   | swap {Γ : TEnv} {a b : Atom} {body : Tm} {σ τ : Ty} {ε : Row} :
       HasAtom Γ a (.ref σ) → HasAtom Γ b σ → Linear Δ Γ (atomVars [b]) (fv body) →
       HasTm Δ (Γ ++ [σ]) body τ ε → HasTm Δ Γ (.mem .swap [a, b] body) τ ε
-  | free {Γ : TEnv} {a : Atom} {body : Tm} {σ τ : Ty} {ε : Row} :
-      HasAtom Γ a (.ref σ) → HasTm Δ (Γ ++ [.unit]) body τ ε →
-      HasTm Δ Γ (.mem .free [a] body) τ ε
   | write {Γ : TEnv} {a : Atom} {body : Tm} {σ τ : Ty} {ε : Row} :
       HasAtom Γ a σ → HasTm Δ (Γ ++ [.unit]) body τ ε → HasTm Δ Γ (.host 0 [a] body) τ ε
   | read {Γ : TEnv} {body : Tm} {τ : Ty} {ε : Row} :

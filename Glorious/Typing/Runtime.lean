@@ -98,6 +98,9 @@ inductive StackOk (Δ : Ctx) (S : StoreTy) : List Frame → Ty → Row → Prop 
       {ε : Row} :
       Δ.fnSig fn ⟨Cs, [], σc, []⟩ → HasVals Δ S captures Cs → StackOk Δ S st τ ε →
       StackOk Δ S (.guard fn captures :: st) τ ε
+  /-- The scope of a cell passes its result on. -/
+  | cell {a : Nat} {st : List Frame} {τ : Ty} {ε : Row} :
+      StackOk Δ S st τ ε → StackOk Δ S (.cell a :: st) τ ε
   /-- A pending result takes anything, since it discards it. -/
   | yield {w : Value} {st : List Frame} {σ τ : Ty} {ε : Row} :
       HasVal Δ S w σ → StackOk Δ S st σ ε → StackOk Δ S (.yield w :: st) τ ε
@@ -153,6 +156,8 @@ def calleeAtom : Tm → Option Atom
   | .label thunk _ => some thunk
   | .labelTail thunk => some thunk
   | .cancel k _ => some k
+  | .cell _ thunk _ => some thunk
+  | .cellTail _ thunk => some thunk
   | .ret _ => none
   | .let_ _ _ => none
   | .handle _ _ _ _ _ => none

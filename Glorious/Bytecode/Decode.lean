@@ -86,11 +86,9 @@ def pair (bs : Bytes) : Option ((Nat × Nat) × Bytes) := do
   pure ((a, b), bs)
 
 def memOp : Bytes → Option (MemOp × Bytes)
-  | 0 :: bs => some (.alloc, bs)
-  | 1 :: bs => some (.load, bs)
-  | 2 :: bs => some (.store, bs)
-  | 3 :: bs => some (.free, bs)
-  | 4 :: bs => some (.swap, bs)
+  | 0 :: bs => some (.load, bs)
+  | 1 :: bs => some (.store, bs)
+  | 2 :: bs => some (.swap, bs)
   | _ => none
 
 def instr : Bytes → Option (Instr × Bytes)
@@ -154,6 +152,14 @@ def instr : Bytes → Option (Instr × Bytes)
     let (op, bs) ← memOp bs
     let (args, bs) ← list atom bs
     pure (.mem op args, bs)
+  | 17 :: bs => do
+    let (init, bs) ← atom bs
+    let (thunk, bs) ← atom bs
+    pure (.cell init thunk, bs)
+  | 18 :: bs => do
+    let (init, bs) ← atom bs
+    let (thunk, bs) ← atom bs
+    pure (.cellTail init thunk, bs)
   | _ => none
 
 def code (bs : Bytes) : Option (Code × Bytes) := list instr bs

@@ -91,6 +91,11 @@ theorem evalThunk_ok {S : StoreTy} {env : Env} {Γ : TEnv} {f : Atom} {σ : Ty} 
   · cases he
   · cases he
 
+/-- What two operands hold is what each holds. -/
+theorem sumAt_pair (id : Nat) (env : Env) (a b : Atom) :
+    sumAt id env (atomVars [a, b]) = sumAt id env (atomVars [a]) + sumAt id env (atomVars [b]) := by
+  cases a <;> cases b <;> simp [atomVars, sumAt]
+
 /-- What a function value holds is what its captures hold. -/
 theorem occs_clo (id : Nat) {env : Env} {f : Atom} {fn : Nat} {caps : List Value}
     (h : f.eval env = some (.clo fn caps)) : occs id caps = sumAt id env (atomVars [f]) := by
@@ -275,11 +280,12 @@ theorem StepOk.of_safe {S : StoreTy} {s : State} {r : Step State Value} {b : Nat
     StepOk Δ s r := by
   cases r with
   | next s' =>
-    obtain ⟨ht, hst, hle⟩ := h
-    refine ⟨⟨S, ht⟩, fun hD hu => hu.mono (by rw [hst]; exact hc) fun id => ?_⟩
+    obtain ⟨ht, hk, hle⟩ := h
+    refine ⟨⟨S, ht⟩, fun hD hu => hu.mono (by rw [hk.conts]; exact hc) fun id => ?_⟩
     have h1 := hle id
     have h2 := hb hD id
-    simp only [occState, hst, hc]
+    have h3 := hk.cells id
+    simp only [occState, hk.conts, hc]
     omega
   | halt v => exact True.intro
   | stuck => exact h.elim
@@ -294,11 +300,12 @@ theorem StepOk.of_safe_fresh {S : StoreTy} {s : State} {r : Step State Value} {b
     StepOk Δ s r := by
   cases r with
   | next s' =>
-    obtain ⟨ht, hst, hle⟩ := h
-    refine ⟨⟨S, ht⟩, fun hD hu => hu.fresh (by rw [hst]; exact hc) fun id => ?_⟩
+    obtain ⟨ht, hk, hle⟩ := h
+    refine ⟨⟨S, ht⟩, fun hD hu => hu.fresh (by rw [hk.conts]; exact hc) fun id => ?_⟩
     have h1 := hle id
     have h2 := hb hD id
-    simp only [occState, hst, hc, occConts_push]
+    have h4 := hk.cells id
+    simp only [occState, hk.conts, hc, occConts_push]
     omega
   | halt v => exact True.intro
   | stuck => exact h.elim
@@ -313,12 +320,13 @@ theorem StepOk.of_safe_take {S : StoreTy} {s : State} {r : Step State Value} {b 
     StepOk Δ s r := by
   cases r with
   | next s' =>
-    obtain ⟨ht, hst, hle⟩ := h
-    refine ⟨⟨S, ht⟩, fun hD hu => hu.take (by rw [hst]; exact hc) fun id => ?_⟩
+    obtain ⟨ht, hkept, hle⟩ := h
+    refine ⟨⟨S, ht⟩, fun hD hu => hu.take (by rw [hkept.conts]; exact hc) fun id => ?_⟩
     have h1 := hle id
     have h2 := hb hD id
     have h3 := occConts_take id hk
-    simp only [occState, hst, hc]
+    have h4 := hkept.cells id
+    simp only [occState, hkept.conts, hc]
     omega
   | halt v => exact True.intro
   | stuck => exact h.elim
@@ -655,21 +663,46 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
         simp [step, evalCont, hkv]
       rw [h1]
       exact .next (.mk (henv.snoc .unit) hbody hle hst hs) (fun _ hu => hu.mono rfl hquiet)
-  | @alloc _ a body σ _ _ ha hlin hbody =>
-    obtain ⟨v, hv, hvt⟩ := atom_ok henv ha
-    have h1 : step p ⟨.mem .alloc [a] body, env, stack, ⟨conts, labels, cells⟩⟩
-        = .next ⟨body, env ++ [.ref cells.length], stack,
-            ⟨conts, labels, cells ++ [some v]⟩⟩ := by
-      simp [step, evalAtoms, hv, MemOp.eval]
-    rw [h1]
+  | @cell _ init thunk body σ ρ _ εt _ once _ hinit hthunk hrow hlin hbody =>
+    obtain ⟨v, hv, hvt⟩ := atom_ok henv hinit
     obtain ⟨S', hS, hcell, hs'⟩ := hs.push_cell hvt
-    refine .next (.mk ((henv.mono hS).snoc (.ref hcell)) hbody hle (hst.mono hS) hs')
-      (fun hD hu => hu.mono rfl fun id => ?_)
-    have h2 := moved_live hD henv hlin (live := fv (.mem .alloc [a] body)) (fun i hi => hi) id
-    have h3 := occEnv_push id env (.ref cells.length) (fv body)
-    have h4 := occ_eval id env hv
-    simp only [occState, occCells_push, occ] at h3 ⊢
-    omega
+    obtain ⟨c, hc, hcok, hck, hcl, hocc⟩ :=
+      evalScope_ok (S := S') (l := .ref cells.length) (henv.mono hS) hthunk (.ref hcell)
+    have h1 : step p ⟨.cell init thunk body, env, stack, ⟨conts, labels, cells⟩⟩
+        = apply p c (.cell cells.length :: .call env body :: stack)
+            ⟨conts, labels, cells ++ [some v]⟩ := by
+      simp [step, hv, hc, Store.alloc]
+    rw [h1]
+    refine .of_apply
+      (apply_ok hp hs' hcok (.cell (.call (henv.mono hS) hbody hle (hst.mono hS)))
+        (Row.le_trans hrow hle)) rfl (fun hD id => ?_) (fun hfa => ?_)
+    · have h2 := moved_live hD henv hlin (live := fv (.cell init thunk body)) (fun i hi => hi) id
+      have h3 := sumAt_pair id env init thunk
+      have h4 := occ_eval id env hv
+      simp only [hocc id, occ, occStack, occFrame, occCells_push]
+      omega
+    · exact hfa.fault (s := ⟨.cell init thunk body, env, stack, ⟨conts, labels, cells⟩⟩) rfl hck
+        hcl rfl (fun _ h => findLabel_cons_none (findLabel_cons_none h))
+  | @cellTail _ init thunk σ _ εt _ once _ hinit hthunk hrow hlin =>
+    obtain ⟨v, hv, hvt⟩ := atom_ok henv hinit
+    obtain ⟨S', hS, hcell, hs'⟩ := hs.push_cell hvt
+    obtain ⟨c, hc, hcok, hck, hcl, hocc⟩ :=
+      evalScope_ok (S := S') (l := .ref cells.length) (henv.mono hS) hthunk (.ref hcell)
+    have h1 : step p ⟨.cellTail init thunk, env, stack, ⟨conts, labels, cells⟩⟩
+        = apply p c (.cell cells.length :: stack) ⟨conts, labels, cells ++ [some v]⟩ := by
+      simp [step, hv, hc, Store.alloc]
+    rw [h1]
+    refine .of_apply
+      (apply_ok hp hs' hcok (.cell (hst.mono hS)) (Row.le_trans hrow hle)) rfl
+      (fun hD id => ?_) (fun hfa => ?_)
+    · have h2 := moved_live hD henv hlin (live := fv (.cellTail init thunk))
+        (fun i hi => by simpa [fv] using hi) id
+      have h3 := sumAt_pair id env init thunk
+      have h4 := occ_eval id env hv
+      simp only [hocc id, occ, occStack, occFrame, occCells_push]
+      omega
+    · exact hfa.fault (s := ⟨.cellTail init thunk, env, stack, ⟨conts, labels, cells⟩⟩) rfl hck
+        hcl rfl (fun _ h => findLabel_cons_none h)
   | @load _ a body σ _ _ ha hdup hbody =>
     obtain ⟨v, hv, hvt⟩ := atom_ok henv ha
     obtain ⟨addr, rfl, hcell⟩ := hvt.ref_inv
@@ -764,36 +797,6 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
         have h3 := occEnv_push id env old (fv body)
         have h4 := occ_eval id env hw
         have h5 := occCells_set id hget (some w)
-        simp only [oweight] at h5
-        simp only [occState]
-        omega
-  | @free _ a body σ _ _ ha hbody =>
-    obtain ⟨v, hv, hvt⟩ := atom_ok henv ha
-    obtain ⟨addr, rfl, hcell⟩ := hvt.ref_inv
-    obtain ⟨hlt, hval⟩ := hs.cells addr σ hcell
-    cases hget : cells[addr]? with
-    | none => exact absurd hlt (by simpa using List.getElem?_eq_none_iff.mp hget)
-    | some x =>
-      cases x with
-      | none =>
-        have h1 : step p ⟨.mem .free [a] body, env, stack, ⟨conts, labels, cells⟩⟩ = .stuck := by
-          simp [step, evalAtoms, hv, MemOp.eval, hget]
-        rw [h1]
-        exact Fault.freed (a := addr) (vs := []) (by simp [evalAtoms, hv]) hget
-      | some old =>
-        have h1 : step p ⟨.mem .free [a] body, env, stack, ⟨conts, labels, cells⟩⟩
-            = .next ⟨body, env ++ [Value.unit], stack,
-                ⟨conts, labels, cells.set addr none⟩⟩ := by
-          simp [step, evalAtoms, hv, MemOp.eval, hget]
-        rw [h1]
-        refine .next (.mk (henv.snoc .unit) hbody hle hst
-          (hs.set_cell hcell (fun u hu => by cases hu)))
-          (fun _ hu => hu.mono rfl fun id => ?_)
-        have h2 := occEnv_push id env Value.unit (fv body)
-        have h3 := occEnv_mono (id := id) (env := env) (a := fv body)
-          (b := fv (.mem .free [a] body)) (fun i hi => List.mem_append_right _ hi)
-        have h5 := occCells_set id hget none
-        have h6 := occ_unit id
         simp only [oweight] at h5
         simp only [occState]
         omega

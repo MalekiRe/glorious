@@ -51,11 +51,9 @@ def rhs : Rhs → Bytes
 def pair (p : Nat × Nat) : Bytes := nat p.1 ++ nat p.2
 
 def memOp : MemOp → Bytes
-  | .alloc => [0]
-  | .load => [1]
-  | .store => [2]
-  | .free => [3]
-  | .swap => [4]
+  | .load => [0]
+  | .store => [1]
+  | .swap => [2]
 
 def instr : Instr → Bytes
   | .op r => 0 :: rhs r
@@ -77,6 +75,8 @@ def instr : Instr → Bytes
   | .testCtor pl tag arity fail => 14 :: place pl ++ nat tag ++ nat arity ++ nat fail
   | .testInt pl n fail => 15 :: place pl ++ int n ++ nat fail
   | .mem op args => 16 :: memOp op ++ list atom args
+  | .cell init thunk => 17 :: atom init ++ atom thunk
+  | .cellTail init thunk => 18 :: atom init ++ atom thunk
 
 def code (c : Code) : Bytes := list instr c
 
@@ -87,6 +87,6 @@ def string (s : String) : Bytes := list (fun b => [b.toNat]) s.toUTF8.toList
 /-- A bytecode file: the magic `GLBC`, a format version, the constructor names
 used to print values, and the program. -/
 def file (ctorNames : List String) (p : Program) : Bytes :=
-  [0x47, 0x4C, 0x42, 0x43, 2] ++ list string ctorNames ++ program p
+  [0x47, 0x4C, 0x42, 0x43, 3] ++ list string ctorNames ++ program p
 
 end Glorious.Bytecode.Encode

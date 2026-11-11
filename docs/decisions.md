@@ -89,6 +89,13 @@ resumption whose computation or handler uses `x` could outlive that block.
 Lifetimes are never written: they are inferred as capture sets, the same way as
 for labels.
 
+In the kernel a cell is made and released by a scope, `cell init thunk`: the
+callable `thunk` runs with a reference to a fresh cell, on top of a frame that
+releases the cell when it is removed, by a return, an exit or a cancellation.
+There is no operation that allocates or frees. So a cell is released exactly
+when its scope ends, and never twice, whatever the program; what remains to be
+shown is that no reference is used after that (see "Borrow checking").
+
 Consequences to keep in mind:
 
 - A function cannot return a closure over its own `let mut`. State that must
@@ -213,9 +220,9 @@ What is proved (`Typing/Safety.lean`, `Typing/Compiled.lean`,
   not about an empty set of programs.
 
 The four faults are what types alone do not rule out: integer overflow, use of
-a freed cell, a second use of a resumption, and a label applied after its scope
-ended. The third is ruled out by the ownership rules below, for programs that
-follow them. The front-end has checks for the second and fourth (scoped
+a released cell, a second use of a resumption, and a label applied after its
+scope ended. The third is ruled out by the ownership rules below, for programs
+that follow them. The front-end has checks for the second and fourth (scoped
 `let mut`, capture sets). Those checks are not proved.
 
 How the typing is set up, and why:
@@ -456,6 +463,34 @@ are untouched. A program the checker rejects is elaborated without them.
 
 To know about: this drops errors silently. A `Result<T, IoError>` passed where
 an option is expected loses its error with nothing written at the call.
+
+## Borrow checking
+
+**Decision (user): a borrow checker, proved.** Done in stages, each one a
+theorem about Core that the checker in `Typing/Checker.lean` establishes for
+the programs it accepts.
+
+1. **Cells are scoped in the kernel.** Done: see "A mutable variable ends with
+   its block". A cell cannot be released twice or left unreleased by a scope
+   that ends.
+2. **Regions.** Planned. A reference's type names the region (the cell) it
+   points into; a callable's type lists the regions it may touch when called,
+   and may be polymorphic in regions; code may read or write a cell only if its
+   region is among those the code was given. A cell's scope gives its body the
+   new region and requires that nothing typed outside the scope mentions it.
+   The theorem: a program checked this way never reads or writes a released
+   cell. The invariant is that every region the running code was given is the
+   cell of a scope still on its stack.
+3. **Inference of regions** for the certificate, so that programs get the
+   theorem without annotations. A program whose regions cannot be inferred is
+   still compiled, typed as before.
+4. **Labels as regions**, by the same rule: a label is not applied after its
+   scope has ended.
+5. **Unique references**: a `&mut` is the only way to its cell while it lives.
+
+The specification's lifetimes (language specification section 9) are the
+surface form of this; written lifetime parameters, variance and reborrowing
+are not part of the plan above.
 
 ## Other standing decisions
 

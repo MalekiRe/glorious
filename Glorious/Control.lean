@@ -135,16 +135,13 @@ def findLabel {φ : Type} (asLabel : φ → Option Nat) (id : Nat) :
       | some (above, below) => some (fr :: above, below)
       | none => none
 
-/-- Operations on memory cells. -/
+/-- Operations on memory cells. A cell is made and released by the scope it
+belongs to, not by an operation: see `Tm.cell`. -/
 inductive MemOp where
-  /-- Allocate a cell holding a value; the result is a reference to it. -/
-  | alloc
   /-- Read the value a reference points to. -/
   | load
   /-- Replace the value a reference points to. -/
   | store
-  /-- Release a cell. Using it afterwards has no meaning. -/
-  | free
   /-- Replace the value a reference points to, giving back the value that was
   there. The old value is moved out, not copied, so a cell can hold something
   that must not be duplicated. -/
@@ -155,7 +152,6 @@ abbrev Cells := List (Option Value)
 
 /-- Perform a memory operation: its result and the memory afterwards. -/
 def MemOp.eval (cells : Cells) : MemOp → List Value → Option (Value × Cells)
-  | .alloc, [v] => some (.ref cells.length, cells ++ [some v])
   | .load, [.ref a] =>
     match cells[a]? with
     | some (some v) => some (v, cells)
@@ -163,10 +159,6 @@ def MemOp.eval (cells : Cells) : MemOp → List Value → Option (Value × Cells
   | .store, [.ref a, v] =>
     match cells[a]? with
     | some (some _) => some (.unit, cells.set a (some v))
-    | _ => none
-  | .free, [.ref a] =>
-    match cells[a]? with
-    | some (some _) => some (.unit, cells.set a none)
     | _ => none
   | .swap, [.ref a, v] =>
     match cells[a]? with
@@ -181,5 +173,13 @@ structure Store (φ : Type) where
   of the next one. -/
   labels : Nat
   cells : Cells
+
+/-- The store after the scope of cell `a` has ended: the cell is released. -/
+def Store.release {φ : Type} (store : Store φ) (a : Nat) : Store φ :=
+  ⟨store.conts, store.labels, store.cells.set a none⟩
+
+/-- The store with a new cell holding `v`; its address is the old number of cells. -/
+def Store.alloc {φ : Type} (store : Store φ) (v : Value) : Store φ :=
+  ⟨store.conts, store.labels, store.cells ++ [some v]⟩
 
 end Glorious

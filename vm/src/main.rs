@@ -67,10 +67,8 @@ enum Prim {
 
 #[derive(Clone, Copy)]
 enum MemOp {
-    Alloc,
     Load,
     Store,
-    Free,
     Swap,
 }
 
@@ -98,6 +96,7 @@ enum Instr {
     TestCtor(Place, u64, usize, usize),
     TestInt(Place, i64, usize),
     Mem(MemOp, Vec<Atom>),
+    Cell { init: Atom, thunk: Atom, tail: bool },
 }
 
 // ---------------------------------------------------------------- decoding
@@ -221,6 +220,12 @@ impl Reader<'_> {
         Ok(Instr::Guard { cleanup, thunk, tail })
     }
 
+    fn cell(&mut self, tail: bool) -> Decoded<Instr> {
+        let init = self.atom()?;
+        let thunk = self.atom()?;
+        Ok(Instr::Cell { init, thunk, tail })
+    }
+
     fn instr(&mut self) -> Decoded<Instr> {
         match self.byte()? {
             0 => Ok(Instr::Op(self.rhs()?)),
@@ -265,15 +270,15 @@ impl Reader<'_> {
             }
             16 => {
                 let op = match self.byte()? {
-                    0 => MemOp::Alloc,
-                    1 => MemOp::Load,
-                    2 => MemOp::Store,
-                    3 => MemOp::Free,
-                    4 => MemOp::Swap,
+                    0 => MemOp::Load,
+                    1 => MemOp::Store,
+                    2 => MemOp::Swap,
                     t => return Err(format!("unknown memory operation {t}")),
                 };
                 Ok(Instr::Mem(op, self.atoms()?))
             }
+            17 => self.cell(false),
+            18 => self.cell(true),
             t => Err(format!("unknown instruction {t}")),
         }
     }
@@ -298,7 +303,7 @@ fn decode(bytes: &[u8]) -> Decoded<Program> {
     if bytes.len() < 5 || &bytes[..4] != b"GLBC" {
         return Err("not a Glorious bytecode file".into());
     }
-    if bytes[4] != 2 {
+    if bytes[4] != 3 {
         return Err(format!("unsupported bytecode version {}", bytes[4]));
     }
     let mut r = Reader { bytes, pos: 5 };
@@ -341,6 +346,8 @@ enum Frame {
     Label(u64),
     /// A cleanup that runs when the computation above it is left.
     Guard { func: usize, caps: Vec<Value> },
+    /// The scope of a memory cell: the cell is released when this frame is removed.
+    Cell(usize),
     /// A pending result: what is delivered here is discarded and this is delivered.
     Yield(Value),
     /// An exit in progress: a cleanup was running above this frame. What it
@@ -463,6 +470,7 @@ impl Vm {
                     self.frames.push(Frame::Yield(v));
                     return self.call_fn(func, &caps, Vec::new());
                 }
+                Some(Frame::Cell(addr)) => self.release(addr),
                 Some(Frame::Yield(w)) => v = w,
                 Some(Frame::Exit { target, after }) => return self.leave(target, after),
             }
@@ -482,10 +490,21 @@ impl Vm {
                     After::Invoke { func, caps, args } => self.call_fn(func, &caps, args),
                 };
             }
-            if let Frame::Guard { func, caps } = frame {
-                self.frames.push(Frame::Exit { target, after });
-                return self.call_fn(func, &caps, Vec::new());
+            match frame {
+                Frame::Guard { func, caps } => {
+                    self.frames.push(Frame::Exit { target, after });
+                    return self.call_fn(func, &caps, Vec::new());
+                }
+                Frame::Cell(addr) => self.release(addr),
+                _ => {}
             }
+        }
+    }
+
+    /// The scope of a cell has ended: the cell is released.
+    fn release(&mut self, addr: usize) {
+        if let Some(cell) = self.cells.get_mut(addr) {
+            *cell = None;
         }
     }
 
@@ -537,18 +556,10 @@ impl Vm {
 
     fn mem(&mut self, op: MemOp, mut args: Vec<Value>) -> Step<Value> {
         match (op, args.as_mut_slice()) {
-            (MemOp::Alloc, [_]) => {
-                self.cells.push(args.pop());
-                Ok(Value::Ref(self.cells.len() - 1))
-            }
             (MemOp::Load, [Value::Ref(a)]) => Ok(self.cell(*a)?.clone().unwrap()),
             (MemOp::Store, [Value::Ref(a), _]) => {
                 let addr = *a;
                 *self.cell(addr)? = args.pop();
-                Ok(unit())
-            }
-            (MemOp::Free, [Value::Ref(a)]) => {
-                *self.cell(*a)? = None;
                 Ok(unit())
             }
             (MemOp::Swap, [Value::Ref(a), _]) => {
@@ -649,6 +660,18 @@ impl Vm {
                 }
                 self.frames.push(Frame::Guard { func: c.func, caps: c.caps.clone() });
                 self.apply(callee, Vec::new())
+            }
+            Instr::Cell { init, thunk, tail } => {
+                let value = self.atom(init)?;
+                // Any callable taking one value will do; `apply` rejects the rest.
+                let callee = self.atom(thunk)?;
+                if !tail {
+                    self.push_ret();
+                }
+                let addr = self.cells.len();
+                self.cells.push(Some(value));
+                self.frames.push(Frame::Cell(addr));
+                self.apply(callee, vec![Value::Ref(addr)])
             }
             Instr::Cancel(k) => {
                 let id = match self.atom(k)? {
