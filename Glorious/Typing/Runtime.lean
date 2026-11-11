@@ -100,6 +100,8 @@ inductive StackOk (Δ : Ctx) (S : StoreTy) : List Frame → Ty → Row → Prop 
   | exit {target : Target} {after : After} {st : List Frame} {σ τ : Ty} {ε : Row} :
       ExitOk Δ S target after → (∃ fr, fr ∈ st ∧ fr.isTarget target = true) →
       StackOk Δ S st σ ε → StackOk Δ S (.exit target after :: st) τ []
+  /-- Any stack takes the result of a call that does not return: none arrives. -/
+  | never {st : List Frame} {σ : Ty} {ε : Row} : StackOk Δ S st σ ε → StackOk Δ S st .never ε
 
 /-- Captured frames that take a value of type `o`: put back on any later stack
 that takes `ρ` and serves at least `ε₀`, they make a well-typed stack. -/

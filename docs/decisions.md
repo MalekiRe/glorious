@@ -216,10 +216,18 @@ How the typing is set up, and why:
 - **Types are monomorphic.** A function has a set of signatures and must be
   typed at each. A polymorphic source function is a function with several
   signatures. This avoids type variables and substitution in the proof.
-- **A callable's type carries a row**: each operation it may perform, with the
-  types of its payload and of what it is resumed with. A row is ordered nearest
-  handler first, so looking an operation up in a row finds the handler the
-  machine finds on the stack.
+- **A callable's type carries a row**: the operations it may perform, each
+  named, with the type arguments of its effect. What an operation takes and
+  gives back is looked up in the declarations, not written in the row. An
+  earlier version wrote those types in the row; then an operation whose payload
+  is a callable performing the same operation, such as spawning a task, had no
+  finite type. A row is ordered nearest handler first, so looking an operation
+  up in a row finds the handler the machine finds on the stack.
+- **`never` is the type of a call that does not return**, and no value has it.
+  A call or tail call of something that returns `never` can stand where any
+  type is expected. A label's result type is `never` unless the label is also
+  used as an ordinary callable. Without this one label could not be applied in
+  two places that expect different types, which the surface checker allows.
 - **A stack has a type**: what it takes and what it serves. A handler frame
   serves its own operations and, of what is below, only what the handler was
   installed among. That is what lets captured frames be put back on a different
@@ -240,14 +248,25 @@ describes some other valid typing; it cannot make an ill-typed program pass.
 This is the reason for the split: finding types is hard and stays unproved in
 the front-end, checking them is easy and is proved.
 
+**Certificates are found by a separate unproved pass, `Glorious/Infer.lean`.**
+It works on the Core the elaborator produced, not on the surface program, so it
+shares nothing with the surface checker and what it finds is checked whatever
+the surface checker did. It infers each group of mutually recursive functions
+once, then gives each function a signature for every ground type it is used
+at. Two things in the elaborator exist for its sake: a name bound by `let` to a
+callable literal is built again at each use, so that it can be used at several
+types; and a handler arm that cannot fail has no forwarding clause, which
+would otherwise make the arm need its own operation from outside.
+
 What the theorems do not say:
 
-- They are about Core programs with a certificate. The front-end does not
-  produce certificates yet, so nothing is proved about the programs it accepts.
-  That is the next step: the front-end emits a certificate with the Core it
-  generates, and compilation fails if `checkProgram` rejects it.
+- They are about a Core program and a certificate `checkProgram` accepts.
+  `glorious certifytest` finds and checks one for every program in the corpus
+  that the surface checker accepts, but compiling a program does not do this
+  yet. Until it does, a normal compile proves nothing about the program.
 - `covers` is proved sound, not complete. It searches to a bounded depth, and
   a set of clauses that covers its parameters could in principle be turned away.
+
 
 ## Other standing decisions
 

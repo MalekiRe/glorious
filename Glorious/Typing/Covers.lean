@@ -54,6 +54,7 @@ def ctorsOf (C : Cert) : Ty → Option (List (Nat × List Ty))
   | .int => none
   | .fn _ _ _ => none
   | .ref _ => none
+  | .never => none
 
 /-- Do the rows cover every list of values of these types? `fuel` bounds the
 depth of the search; running out means no. -/
@@ -185,6 +186,7 @@ theorem ctorsOf_value {S : StoreTy} {v : Value} {T : Ty} {ctors : List (Nat × L
   | int => simp [ctorsOf] at hc
   | fn _ _ _ => simp [ctorsOf] at hc
   | ref _ => simp [ctorsOf] at hc
+  | never => simp [ctorsOf] at hc
 
 /-- What `covers` accepts is covered: every typed list of values is matched by some row. -/
 theorem covers_sound : ∀ (fuel : Nat) {rows : List (List Pat)} {tys : List Ty},

@@ -30,6 +30,8 @@ inductive Ty where
   it may perform, each with the type arguments of its effect. -/
   | fn (params : List Ty) (ret : Ty) (eff : List (Nat × List Ty))
   | ref (t : Ty)
+  /-- The result of a call that does not return. No value has this type. -/
+  | never
 
 /-- The type of an operation: its payload, and what it is resumed with if it
 can be resumed at all. -/
@@ -174,6 +176,16 @@ inductive HasTm (Δ : Ctx) : TEnv → Tm → Ty → Row → Prop where
       HasTm Δ (Γ ++ [σ]) body τ ε → HasTm Δ Γ (.call f args body) τ ε
   | tail {Γ : TEnv} {f : Atom} {args : List Atom} {Ps : List Ty} {τ : Ty} {ε' ε : Row} :
       HasAtom Γ f (.fn Ps τ ε') → HasAtoms Γ args Ps → Row.le ε' ε →
+      HasTm Δ Γ (.tail f args) τ ε
+  /-- A call that does not return can stand where a result of any type is
+  expected, and the code after it can take its result to be of any type. This is
+  what lets one label be applied in places that expect different types. -/
+  | callNever {Γ : TEnv} {f : Atom} {args : List Atom} {body : Tm} {Ps : List Ty} {σ τ : Ty}
+      {ε' ε : Row} :
+      HasAtom Γ f (.fn Ps .never ε') → HasAtoms Γ args Ps → Row.le ε' ε →
+      HasTm Δ (Γ ++ [σ]) body τ ε → HasTm Δ Γ (.call f args body) τ ε
+  | tailNever {Γ : TEnv} {f : Atom} {args : List Atom} {Ps : List Ty} {τ : Ty} {ε' ε : Row} :
+      HasAtom Γ f (.fn Ps .never ε') → HasAtoms Γ args Ps → Row.le ε' ε →
       HasTm Δ Γ (.tail f args) τ ε
   | handle {Γ : TEnv} {ret : Nat} {ops : List (Nat × Nat)} {captures : List Atom}
       {thunk : Atom} {body : Tm} {Cs : List Ty} {σ ρ τ : Ty} {εt H ε : Row} :

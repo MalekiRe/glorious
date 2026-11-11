@@ -97,6 +97,14 @@ theorem CtorOf.not_ref {tag : Nat} {Fs : List Ty} {τ : Ty} (h : CtorOf Δ tag (
     False := by
   rcases h with ⟨_, hT⟩ | ⟨_, _, _, hT, _⟩ <;> cases hT
 
+theorem CtorOf.not_never {tag : Nat} {Fs : List Ty} (h : CtorOf Δ tag .never Fs) : False := by
+  rcases h with ⟨_, hT⟩ | ⟨_, _, _, hT, _⟩ <;> cases hT
+
+/-- No value is the result of a call that does not return. -/
+theorem HasVal.not_never {S : StoreTy} {v : Value} (h : HasVal Δ S v .never) : False := by
+  cases h with
+  | data hc _ => exact hc.not_never
+
 theorem HasVal.int_inv {S : StoreTy} {v : Value} (h : HasVal Δ S v .int) : ∃ n, v = .int n := by
   cases h with
   | int => exact ⟨_, rfl⟩

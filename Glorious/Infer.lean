@@ -39,6 +39,8 @@ inductive ITy where
   and a variable for any others if the row is open. -/
   | fn (ps : List ITy) (ret : ITy) (ops : List (Nat × List ITy)) (tail : Option Nat)
   | ref (t : ITy)
+  /-- The result of a call that does not return. -/
+  | never
   deriving Inhabited
 
 abbrev IOps := List (Nat × List ITy)
@@ -55,6 +57,9 @@ def ITy.func (ps : List ITy) (ret : ITy) (row : IRow) : ITy := .fn ps ret row.op
 inductive IHint where
   | ty (t : ITy)
   | handler (ρ : ITy) (H : IOps)
+  /-- A call: what the callee gives back, and what the code after it takes the
+  result to be. The checker is told the second only if the first is `never`. -/
+  | result (r b : ITy)
 
 structure CtorDecl where
   owner : Nat
@@ -102,9 +107,13 @@ structure Scheme where
   /-- Everything the group's own typing depends on. -/
   incls : Array Incl
   places : Array (ITy × Nat × ITy)
+  coerces : Array (ITy × ITy)
+  nevers : Array ITy
   /-- The part of it a user of the group can still affect, and so must meet too. -/
   exported : Array Incl
   exportedPlaces : Array (ITy × Nat × ITy)
+  exportedCoerces : Array (ITy × ITy)
+  exportedNevers : Array ITy
 
 structure St where
   fns : Array Core.Fn
@@ -130,6 +139,12 @@ structure St where
   incls : Array Incl := #[]
   /-- Field reads whose subject was not yet known: subject, index, field. -/
   places : Array (ITy × Nat × ITy) := #[]
+  /-- Calls whose callee's result is not yet known: the result, and what the
+  code after the call takes it to be. They are the same type unless the result
+  turns out to be `never`. -/
+  coerces : Array (ITy × ITy) := #[]
+  /-- Result types of labels: `never`, unless something needs them to be a type. -/
+  nevers : Array ITy := #[]
   /-- The hints of the clause being inferred. -/
   hints : Array IHint := #[]
   /-- The outside functions the function being inferred refers to. -/
@@ -188,6 +203,7 @@ partial def occurs (id : Nat) (t : ITy) : M Bool := do
     let row ← flattenRow ⟨ops, tail⟩
     row.ops.anyM fun (_, targs) => targs.anyM (occurs id)
   | .ref t => occurs id t
+  | .never => pure false
 
 partial def showTy (t : ITy) : M String := do
   match ← find t with
@@ -202,6 +218,7 @@ partial def showTy (t : ITy) : M String := do
     let open_ := if row.tail.isSome then ["…"] else []
     pure s!"fn({", ".intercalate (← ps.mapM showTy)}) -> {← showTy r} / \{{", ".intercalate (shown ++ open_)}}"
   | .ref t => do pure s!"&{← showTy t}"
+  | .never => pure "!"
 
 def bindTy (id : Nat) (t : ITy) : M Unit := do
   if ← occurs id t then throw s!"a type would contain itself: ?{id} in {← showTy t}"
@@ -231,6 +248,7 @@ partial def unify (a b : ITy) : M Unit := do
     unify r r'
     unifyRow ⟨ops, tail⟩ ⟨ops', tail'⟩
   | .ref x, .ref y => unify x y
+  | .never, .never => pure ()
   | _, _ => throw s!"{← showTy a} does not match {← showTy b}"
 
 partial def unifyList (as bs : List ITy) : M Unit := do
@@ -295,6 +313,7 @@ partial def subst (args : List ITy) : ITy → ITy
     .fn (ps.map (subst args)) (subst args r)
       (ops.map fun (op, targs) => (op, targs.map (subst args))) tail
   | .ref t => .ref (subst args t)
+  | .never => .never
 
 def ctorDecl (tag : Nat) : M CtorDecl := do
   match (← get).ctors[tag]? with
@@ -360,6 +379,18 @@ def atomTy (Γ : Array ITy) : Atom → M ITy
 
 def hint (h : IHint) : M Unit := modify fun s => { s with hints := s.hints.push h }
 
+/-- A call gives back an `r` and the code after it expects a `b`: the same type,
+unless the call does not return. Decided now if `r` is known. -/
+def coerce (r b : ITy) : M Unit := do
+  match ← find r with
+  | .never => pure ()
+  | .var v =>
+    -- Already the same unknown: nothing is left to decide.
+    if let .var w ← find b then
+      if v == w then return
+    modify fun s => { s with coerces := s.coerces.push (r, b) }
+  | _ => unify r b
+
 def needs (sub : IRow) (under : IOps) (sup : IRow) : M Unit :=
   modify fun s => { s with incls := s.incls.push ⟨sub, under, sup⟩ }
 
@@ -408,6 +439,7 @@ partial def resolve (t : ITy) : M ITy := do
     let ops ← row.ops.mapM fun (op, targs) => do pure (op, ← targs.mapM resolve)
     pure (.fn (← ps.mapM resolve) (← resolve r) ops row.tail)
   | .ref t => do pure (.ref (← resolve t))
+  | .never => pure .never
 
 def resolveRow (r : IRow) : M IRow := do
   let r ← flattenRow r
@@ -424,6 +456,7 @@ def resolveHint : IHint → M IHint
   | .ty t => do pure (.ty (← resolve t))
   | .handler ρ H => do
     pure (.handler (← resolve ρ) (← H.mapM fun (op, targs) => do pure (op, ← targs.mapM resolve)))
+  | .result r b => do pure (.result (← resolve r) (← resolve b))
 
 /-- The variables of a resolved type: type variables, and row variables. -/
 partial def varsOf (t : ITy) (acc : Std.HashSet Nat × Std.HashSet Nat) :
@@ -442,6 +475,7 @@ partial def varsOf (t : ITy) (acc : Std.HashSet Nat × Std.HashSet Nat) :
     | some v => (acc.1, acc.2.insert v)
     | none => acc
   | .ref t => varsOf t acc
+  | .never => acc
 
 def varsOfRow (r : IRow) (acc : Std.HashSet Nat × Std.HashSet Nat) :
     Std.HashSet Nat × Std.HashSet Nat :=
@@ -475,6 +509,7 @@ partial def copyTy (sch : Scheme) (t : ITy) : M ITy := do
     let row ← copyRow sch ⟨ops, tail⟩
     pure (.fn (← ps.mapM (copyTy sch)) (← copyTy sch r) row.ops row.tail)
   | .ref t => do pure (.ref (← copyTy sch t))
+  | .never => pure .never
 
 partial def copyRow (sch : Scheme) (r : IRow) : M IRow := do
   let ops ← r.ops.mapM fun (op, targs) => do pure (op, ← targs.mapM (copyTy sch))
@@ -508,6 +543,7 @@ def copyPlace (sch : Scheme) (p : ITy × Nat × ITy) : M (ITy × Nat × ITy) := 
 def copyHint (sch : Scheme) : IHint → M IHint
   | .ty t => do pure (.ty (← copyTy sch t))
   | .handler ρ H => do pure (.handler (← copyTy sch ρ) (← copyRow sch ⟨H, none⟩).ops)
+  | .result r b => do pure (.result (← copyTy sch r) (← copyTy sch b))
 
 def startCopy : M Unit := modify fun s => { s with renTy := {}, renRow := {} }
 
@@ -526,6 +562,10 @@ partial def settle : M Unit := do
     match ← fieldNow t i with
     | some f => unify f r
     | none => modify fun s => { s with places := s.places.push (t, i, r) }
+  let pending := (← get).coerces
+  modify fun s => { s with coerces := #[] }
+  for (r, b) in pending do
+    coerce r b
   if (← get).gen != before then settle
 
 mutual
@@ -546,7 +586,8 @@ partial def schemeOf (scc : Nat) : M Scheme := do
     let sig : ISig :=
       ⟨← freshTys (outer.ncaps[f]?.getD 0), ← freshTys arity, ← freshTy, ← freshRow⟩
     cur := cur ++ [(f, sig)]
-  modify fun s => { s with curScc := some scc, cur := cur, incls := #[], places := #[] }
+  modify fun s =>
+    { s with curScc := some scc, cur := cur, incls := #[], places := #[], coerces := #[], nevers := #[] }
   let mut raw : List Member := []
   for (f, sig) in cur do
     let F := (outer.fns[f]?).getD ⟨[]⟩
@@ -569,38 +610,46 @@ partial def schemeOf (scc : Nat) : M Scheme := do
       refs := ← m.refs.mapM fun (g, s) => do pure (g, ← resolveSig s) }
   let incls ← (← get).incls.mapM resolveIncl
   let places ← (← get).places.mapM fun (t, i, r) => do pure (← resolve t, i, ← resolve r)
+  let coerces ← (← get).coerces.mapM fun (r, b) => do pure (← resolve r, ← resolve b)
+  let nevers ← (← get).nevers.mapM resolve
   let s ← get
   let mut fixed : Std.HashSet Nat × Std.HashSet Nat := ({}, {})
   for g in [0:s.globalTys] do
     fixed := varsOf (← resolve (.var g)) fixed
   for g in [0:s.globalRows] do
     fixed := varsOfRow (← resolveRow ⟨[], some g⟩) fixed
-  -- A row can still grow if a user can reach it, or if something that can grow feeds it.
-  let mut live := members.foldl (fun acc m => varsOfSig m.sig acc) fixed
-  let mut grew := true
-  while grew do
-    grew := false
-    for c in incls do
-      if let some v := c.sub.tail then
-        if v < s.globalRows || live.2.contains v then
-          if let some w := c.sup.tail then
-            unless live.2.contains w do
-              live := (live.1, live.2.insert w)
-              grew := true
-  let exported := incls.filter fun c =>
-    match c.sub.tail with
-    | some v => v < s.globalRows || live.2.contains v
-    | none => false
-  let exportedPlaces := places.filter fun (t, _, _) =>
+  -- A variable can still be bound if a user can reach it, or if something that
+  -- can still change decides it.
+  let liveTy (live : Std.HashSet Nat × Std.HashSet Nat) (t : ITy) : Bool :=
     match t with
     | .var v => v < s.globalTys || live.1.contains v
     | _ => false
+  let liveRow (live : Std.HashSet Nat × Std.HashSet Nat) (r : IRow) : Bool :=
+    match r.tail with
+    | some v => v < s.globalRows || live.2.contains v
+    | none => false
+  let mut live := members.foldl (fun acc m => varsOfSig m.sig acc) fixed
+  let mut size := 0
+  while live.1.size + live.2.size != size do
+    size := live.1.size + live.2.size
+    for c in incls do
+      if liveRow live c.sub then live := varsOfRow ⟨c.under, none⟩ (varsOfRow c.sup live)
+    for (r, b) in coerces do
+      if liveTy live r then live := varsOf b live
+    for (t, _, r) in places do
+      if liveTy live t then live := varsOf r live
   let sch : Scheme :=
-    ⟨startTy, startRow, fixed.1, fixed.2, members, incls, places, exported, exportedPlaces⟩
+    { startTy, startRow, fixedTys := fixed.1, fixedRows := fixed.2, members, incls, places,
+      coerces, nevers
+      exported := incls.filter fun c => liveRow live c.sub
+      exportedPlaces := places.filter fun (t, _, _) => liveTy live t
+      exportedCoerces := coerces.filter fun (r, _) => liveTy live r
+      exportedNevers := nevers.filter (liveTy live) }
   modify fun s =>
     { s with
       schemes := s.schemes.insert scc sch
       curScc := outer.curScc, cur := outer.cur, incls := outer.incls, places := outer.places
+      coerces := outer.coerces, nevers := outer.nevers
       hints := outer.hints, refs := outer.refs }
   pure sch
 
@@ -623,9 +672,14 @@ partial def refSig (fn : Nat) : M ISig := do
       let sig ← copySig sch m.sig
       let incls ← sch.exported.mapM (copyIncl sch)
       let places ← sch.exportedPlaces.mapM (copyPlace sch)
+      let coerces ← sch.exportedCoerces.mapM fun (r, b) => do
+        pure (← copyTy sch r, ← copyTy sch b)
+      let nevers ← sch.exportedNevers.mapM (copyTy sch)
       modify fun s =>
         { s with
-          incls := s.incls ++ incls, places := s.places ++ places, refs := s.refs.push (fn, sig) }
+          incls := s.incls ++ incls, places := s.places ++ places
+          coerces := s.coerces ++ coerces, nevers := s.nevers ++ nevers
+          refs := s.refs.push (fn, sig) }
       pure sig
 
 partial def inferRhs (Γ : Array ITy) : Rhs → M ITy
@@ -685,11 +739,14 @@ partial def inferTm (amb : IRow) (τ : ITy) (Γ : Array ITy) : Core.Tm → M Uni
     hint (.ty σ)
     inferTm amb τ (Γ.push σ) body
   | .call f args body => do
-    let σ ← applied Γ amb f args
-    inferTm amb τ (Γ.push σ) body
+    let r ← applied Γ amb f args
+    let b ← freshTy
+    coerce r b
+    hint (.result r b)
+    inferTm amb τ (Γ.push b) body
   | .tail f args => do
-    let σ ← applied Γ amb f args
-    unify σ τ
+    let r ← applied Γ amb f args
+    coerce r τ
   | .handle ret ops captures thunk body => do
     let σ ← freshTy
     let ρ ← freshTy
@@ -770,7 +827,11 @@ where
   scope (Γ : Array ITy) (amb : IRow) (thunk : Atom) : M ITy := do
     let σ ← freshTy
     let εt ← freshRow
-    unify (← atomTy Γ thunk) (.func [.func [σ] (← freshTy) (← freshRow)] σ εt)
+    -- Applying the label does not return, unless something uses the label as
+    -- a callable with a result.
+    let ρ ← freshTy
+    modify fun s => { s with nevers := s.nevers.push ρ }
+    unify (← atomTy Γ thunk) (.func [.func [σ] ρ (← freshRow)] σ εt)
     needs εt [] amb
     pure σ
   guarded (Γ : Array ITy) (amb : IRow) (cleanup thunk : Atom) : M ITy := do
@@ -784,11 +845,25 @@ where
 
 end
 
-/-- Settle, and give a value whose fields are read but whose type nothing else
-determines the smallest tuple type that has those fields. This happens for a
-callable that is never called. -/
+/-- Settle, then decide what nothing decided, and settle again: a label's result
+is `never`; a call whose callee is still unknown gives back what the code after
+it expects; and a value whose fields are read, but whose type nothing else
+determines, has the smallest tuple type with those fields. The last happens for
+a callable that is never called. -/
 partial def settleAll : M Unit := do
   settle
+  let mut decided := false
+  for ρ in (← get).nevers do
+    if let .var v ← find ρ then
+      bindTy v .never
+      decided := true
+  modify fun s => { s with nevers := #[] }
+  if decided then return ← settleAll
+  match (← get).coerces[0]? with
+  | some (r, b) =>
+    unify r b
+    return ← settleAll
+  | none => pure ()
   match (← get).places[0]? with
   | none => pure ()
   | some (t, _, _) =>
@@ -816,6 +891,7 @@ partial def zonk (t : ITy) : M Ty := do
   | .data n args => do pure (.data n (← args.mapM zonk))
   | .fn ps r ops tail => do pure (.fn (← ps.mapM zonk) (← zonk r) (← zonkRow ⟨ops, tail⟩))
   | .ref t => do pure (.ref (← zonk t))
+  | .never => pure .never
 
 partial def zonkOps (ops : IOps) : M Typing.Row :=
   ops.mapM fun (op, targs) => do pure (op, ← targs.mapM zonk)
@@ -829,9 +905,14 @@ partial def zonkRow (r : IRow) : M Typing.Row := do
 
 end
 
-def zonkHint : IHint → M Hint
-  | .ty t => do pure (.ty (← zonk t))
-  | .handler ρ H => do pure (.handler (← zonk ρ) (← zonkOps H))
+def zonkHint : IHint → M (List Hint)
+  | .ty t => do pure [.ty (← zonk t)]
+  | .handler ρ H => do pure [.handler (← zonk ρ) (← zonkOps H)]
+  | .result r b => do
+    if (← zonk r) == .never then pure [.ty (← zonk b)] else pure []
+
+def zonkHints (hs : Array IHint) : M (List Hint) := do
+  pure (← hs.toList.mapM zonkHint).flatten
 
 partial def ofTy : Ty → ITy
   | .int => .int
@@ -840,6 +921,7 @@ partial def ofTy : Ty → ITy
   | .fn ps r eff =>
     .fn (ps.map ofTy) (ofTy r) (eff.map fun (op, targs) => (op, targs.map ofTy)) none
   | .ref t => .ref (ofTy t)
+  | .never => .never
 
 def zonkSig (s : ISig) : M FnSig := do
   pure ⟨← s.caps.mapM zonk, ← s.params.mapM zonk, ← zonk s.ret, ← zonkRow s.row⟩
@@ -852,7 +934,7 @@ partial def instantiate (fn : Nat) (sig : FnSig) : M Unit := do
   if ((← get).emitted[fn]?.getD []).contains sig then return
   let sch ← schemeOf ((← get).scc[fn]?.getD fn)
   let outer ← get
-  modify fun s => { s with incls := #[], places := #[] }
+  modify fun s => { s with incls := #[], places := #[], coerces := #[], nevers := #[] }
   startCopy
   let members ← sch.members.mapM fun m => do
     pure { m with
@@ -861,7 +943,9 @@ partial def instantiate (fn : Nat) (sig : FnSig) : M Unit := do
       refs := ← m.refs.mapM fun (g, s) => do pure (g, ← copySig sch s) }
   let incls ← sch.incls.mapM (copyIncl sch)
   let places ← sch.places.mapM (copyPlace sch)
-  modify fun s => { s with incls := incls, places := places }
+  let coerces ← sch.coerces.mapM fun (r, b) => do pure (← copyTy sch r, ← copyTy sch b)
+  let nevers ← sch.nevers.mapM (copyTy sch)
+  modify fun s => { s with incls := incls, places := places, coerces := coerces, nevers := nevers }
   match members.find? (·.fn == fn) with
   | none => throw s!"certificate: function {fn} is missing from its group"
   | some m =>
@@ -874,14 +958,16 @@ partial def instantiate (fn : Nat) (sig : FnSig) : M Unit := do
   for m in members do
     let ground ← zonkSig m.sig
     unless ((← get).emitted[m.fn]?.getD []).contains ground do
-      let hints ← m.hints.toList.mapM fun hs => hs.toList.mapM zonkHint
+      let hints ← m.hints.toList.mapM zonkHints
       modify fun s =>
         { s with
           emitted := s.emitted.insert m.fn (ground :: s.emitted[m.fn]?.getD [])
           entries := s.entries.push ⟨m.fn, ground, hints⟩ }
       for (g, gs) in m.refs do
         wanted := wanted ++ [(g, ← zonkSig gs)]
-  modify fun s => { s with incls := outer.incls, places := outer.places }
+  modify fun s =>
+    { s with
+      incls := outer.incls, places := outer.places, coerces := outer.coerces, nevers := outer.nevers }
   for (g, gs) in wanted do
     instantiate g gs
 
@@ -893,6 +979,7 @@ partial def dataUses : Ty → List (Nat × List Ty)
   | .fn ps r eff =>
     ps.flatMap dataUses ++ dataUses r ++ eff.flatMap fun (_, targs) => targs.flatMap dataUses
   | .ref t => dataUses t
+  | .never => []
 
 /-- Every use of an operation inside a type. -/
 partial def opUses : Ty → List (Nat × List Ty)
@@ -902,6 +989,7 @@ partial def opUses : Ty → List (Nat × List Ty)
   | .fn ps r eff =>
     ps.flatMap opUses ++ opUses r ++ eff ++ eff.flatMap fun (_, targs) => targs.flatMap opUses
   | .ref t => opUses t
+  | .never => []
 
 def hintTypes : Hint → List Ty
   | .ty t => [t]
@@ -1107,9 +1195,9 @@ def certifyM (items : List Item) (g : Elab.Globals) (p : Core.Program) : M Cert 
   let refs := (← get).refs
   settleAll
   let mainTy ← zonk τ
-  let mainHints ← mainHints.toList.mapM zonkHint
+  let mainHints ← zonkHints mainHints
   let wanted ← refs.toList.mapM fun (g, gs) => do pure (g, ← zonkSig gs)
-  modify fun s => { s with incls := #[], places := #[] }
+  modify fun s => { s with incls := #[], places := #[], coerces := #[], nevers := #[] }
   for (g, gs) in wanted do
     instantiate g gs
   let entries := (← get).entries.toList

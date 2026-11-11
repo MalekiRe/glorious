@@ -313,6 +313,24 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
     refine .of_apply (apply_ok hp hs hcok hst (Row.le_trans hrow hle)) (fun hfa => ?_)
     exact hfa.fault (s := ⟨.tail f args, env, stack, ⟨conts, labels, cells⟩⟩) rfl hck hcl
       rfl (fun _ h => h)
+  | @callNever _ f args body Ps σ _ ε₁ _ hf hargs hrow hbody =>
+    obtain ⟨c, hc, hcok, hck, hcl⟩ := evalCall_ok (S := S) henv hf hargs
+    have h1 : step p ⟨.call f args body, env, stack, ⟨conts, labels, cells⟩⟩
+        = apply p c (.call env body :: stack) ⟨conts, labels, cells⟩ := by simp [step, hc]
+    rw [h1]
+    refine .of_apply
+      (apply_ok hp hs hcok (.never (.call henv hbody hle hst)) (Row.le_trans hrow hle))
+      (fun hfa => ?_)
+    exact hfa.fault (s := ⟨.call f args body, env, stack, ⟨conts, labels, cells⟩⟩) rfl hck hcl
+      rfl (fun _ h => findLabel_cons_none h)
+  | @tailNever _ f args Ps _ ε₁ _ hf hargs hrow =>
+    obtain ⟨c, hc, hcok, hck, hcl⟩ := evalCall_ok (S := S) henv hf hargs
+    have h1 : step p ⟨.tail f args, env, stack, ⟨conts, labels, cells⟩⟩
+        = apply p c stack ⟨conts, labels, cells⟩ := by simp [step, hc]
+    rw [h1]
+    refine .of_apply (apply_ok hp hs hcok (.never hst) (Row.le_trans hrow hle)) (fun hfa => ?_)
+    exact hfa.fault (s := ⟨.tail f args, env, stack, ⟨conts, labels, cells⟩⟩) rfl hck hcl
+      rfl (fun _ h => h)
   | @handle _ ret ops captures thunk body Cs σ ρ _ εt H _ hthunk hcaps hok hrow hbody =>
     obtain ⟨caps, hcv, hcvt⟩ := atoms_ok (S := S) henv hcaps
     obtain ⟨fn, tcaps, TCs, hcall, _, hsig, htc⟩ := evalThunk_ok (S := S) henv hthunk

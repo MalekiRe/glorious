@@ -38,20 +38,24 @@ theorem StackOk.mono {S S' : StoreTy} (hle : S.Le S') {st : List Frame} {τ : Ty
   | guard hsig hc _ ih => exact .guard hsig (hc.mono hle) ih
   | yield hw _ ih => exact .yield (hw.mono hle) ih
   | exit hx hin _ ih => exact .exit (hx.mono hle) hin ih
+  | never _ ih => exact .never ih
 
 theorem ContOk.mono {S S' : StoreTy} (hle : S.Le S') {seg : List Frame} {o ρ : Ty} {ε₀ : Row}
     (h : ContOk Δ S seg o ρ ε₀) : ContOk Δ S' seg o ρ ε₀ :=
   fun S'' hle' st ε' hst hr => h S'' (hle.trans hle') st ε' hst hr
 
-theorem StackOk.tail {S : StoreTy} {fr : Frame} {st : List Frame} {τ : Ty} {ε : Row}
-    (h : StackOk Δ S (fr :: st) τ ε) : ∃ τ' ε', StackOk Δ S st τ' ε' := by
-  cases h with
-  | call _ _ _ h => exact ⟨_, _, h⟩
-  | handler _ _ _ h => exact ⟨_, _, h⟩
-  | label _ h => exact ⟨_, _, h⟩
-  | guard _ _ h => exact ⟨_, _, h⟩
-  | yield _ h => exact ⟨_, _, h⟩
-  | exit _ _ h => exact ⟨_, _, h⟩
+theorem StackOk.tail {S : StoreTy} {st : List Frame} {τ : Ty} {ε : Row}
+    (h : StackOk Δ S st τ ε) :
+    ∀ {fr : Frame} {st' : List Frame}, st = fr :: st' → ∃ τ' ε', StackOk Δ S st' τ' ε' := by
+  induction h with
+  | nil => intro fr st' e; cases e
+  | call _ _ _ h _ => intro fr st' e; cases e; exact ⟨_, _, h⟩
+  | handler _ _ _ h _ => intro fr st' e; cases e; exact ⟨_, _, h⟩
+  | label _ h _ => intro fr st' e; cases e; exact ⟨_, _, h⟩
+  | guard _ _ h _ => intro fr st' e; cases e; exact ⟨_, _, h⟩
+  | yield _ h _ => intro fr st' e; cases e; exact ⟨_, _, h⟩
+  | exit _ _ h _ => intro fr st' e; cases e; exact ⟨_, _, h⟩
+  | never _ ih => intro fr st' e; exact ih e
 
 /-! ## Finding the handler of an operation -/
 
@@ -209,6 +213,12 @@ theorem find_ok {S : StoreTy} {st : List Frame} {τ : Ty} {ε : Row} (hst : Stac
       hcaps, hop, hale, hsig, hbelow, hble, ⟨fr, List.mem_cons_of_mem _ hfr, hft⟩,
       fun S' hle st' ε' hst' hr => .yield (hw.mono hle) (hre S' hle st' ε' hst' hr)⟩
   | exit _ _ _ _ => intro op targs hl; simp [List.lookup] at hl
+  | never _ ih =>
+    intro op targs hl
+    obtain ⟨d, ρ, ε₀, εa, εb', Cs, Ps, r, hf, hid', hcaps, hop, hale, hsig, hbelow, hble, hin, hre⟩ :=
+      ih hl
+    exact ⟨d, ρ, ε₀, εa, εb', Cs, Ps, r, hf, hid', hcaps, hop, hale, hsig, hbelow, hble, hin,
+      fun S' hle st' ε' hst' hr => .never (hre S' hle st' ε' hst' hr)⟩
 
 /-! ## Delivering and leaving -/
 
@@ -231,30 +241,49 @@ theorem leave_guard {p : Program} {target : Target} {after : After} {fn : Nat}
       = callFn p fn captures [] (.exit target after :: st) store := by
   simp [leave, h]
 
-theorem StackOk.label_target {S : StoreTy} {fr : Frame} {st : List Frame} {τ σ : Ty} {ε : Row}
-    {id : Nat} (h : StackOk Δ S (fr :: st) τ ε) (ht : fr.isTarget (.label id) = true)
-    (hl : S.labels id = some σ) : ∃ ε', StackOk Δ S st σ ε' := by
-  cases h with
-  | label hid hrest =>
+theorem StackOk.label_target {S : StoreTy} {st : List Frame} {τ : Ty} {ε : Row}
+    (h : StackOk Δ S st τ ε) :
+    ∀ {fr : Frame} {st' : List Frame} {id : Nat} {σ : Ty}, st = fr :: st' →
+      fr.isTarget (.label id) = true → S.labels id = some σ → ∃ ε', StackOk Δ S st' σ ε' := by
+  induction h with
+  | label hid hrest _ =>
+    intro fr st' id σ e ht hl
+    cases e
     simp [Frame.isTarget] at ht
     subst ht
     rw [hl] at hid
     cases hid
     exact ⟨_, hrest⟩
-  | _ => simp [Frame.isTarget] at ht
+  | never _ ih => intro fr st' id σ e ht hl; exact ih e ht hl
+  | _ => intro fr st' id σ e ht _; cases e <;> simp [Frame.isTarget] at ht
 
-theorem StackOk.handler_target {S : StoreTy} {fr : Frame} {st : List Frame} {τ ρ : Ty}
-    {ε ε₀ : Row} {id : Nat} (h : StackOk Δ S (fr :: st) τ ε)
-    (ht : fr.isTarget (.handler id) = true) (hl : S.handlers id = some (ρ, ε₀)) :
-    ∃ ε', StackOk Δ S st ρ ε' ∧ Row.le ε₀ ε' := by
-  cases h with
-  | handler hid _ hrow hrest =>
+theorem StackOk.handler_target {S : StoreTy} {st : List Frame} {τ : Ty} {ε : Row}
+    (h : StackOk Δ S st τ ε) :
+    ∀ {fr : Frame} {st' : List Frame} {id : Nat} {ρ : Ty} {ε₀ : Row}, st = fr :: st' →
+      fr.isTarget (.handler id) = true → S.handlers id = some (ρ, ε₀) →
+      ∃ ε', StackOk Δ S st' ρ ε' ∧ Row.le ε₀ ε' := by
+  induction h with
+  | handler hid _ hrow hrest _ =>
+    intro fr st' id ρ ε₀ e ht hl
+    cases e
     simp [Frame.isTarget] at ht
     subst ht
     rw [hl] at hid
     cases hid
     exact ⟨_, hrest, hrow⟩
-  | _ => simp [Frame.isTarget] at ht
+  | never _ ih => intro fr st' id ρ ε₀ e ht hl; exact ih e ht hl
+  | _ => intro fr st' id ρ ε₀ e ht _; cases e <;> simp [Frame.isTarget] at ht
+
+/-- A guard on a typed stack has a typed cleanup, and what is below it is typed. -/
+theorem StackOk.guard_inv {S : StoreTy} {st : List Frame} {τ : Ty} {ε : Row}
+    (h : StackOk Δ S st τ ε) :
+    ∀ {fn : Nat} {captures : List Value} {st' : List Frame}, st = .guard fn captures :: st' →
+      ∃ Cs σc τ' ε', Δ.fnSig fn ⟨Cs, [], σc, []⟩ ∧ HasVals Δ S captures Cs
+        ∧ StackOk Δ S st' τ' ε' := by
+  induction h with
+  | guard hsig hc hrest _ => intro fn captures st' e; cases e; exact ⟨_, _, _, _, hsig, hc, hrest⟩
+  | never _ ih => intro fn captures st' e; exact ih e
+  | _ => intro fn captures st' e; cases e
 
 /--
 Delivering a value to a typed stack that takes it, and leaving a typed stack
@@ -289,14 +318,15 @@ theorem deliver_leave_safe {p : Program} {S : StoreTy} {store : Store Frame}
         exact callFn_safe hp hsig hc .nil (Row.nil_le _) (.yield hv hrest) hs
       | yield hw hrest => exact ihd hrest hw
       | exit hx hin hrest => exact ihl hrest hx hin
+      | never _ => exact hv.not_never.elim
     · by_cases ht : fr.isTarget target = true
       · cases hx with
         | label hl hv =>
-          obtain ⟨ε', hrest⟩ := hst.label_target ht hl
+          obtain ⟨ε', hrest⟩ := hst.label_target rfl ht hl
           rw [leave_target_yield ht]
           exact ihd hrest hv
         | handler hh hsig hr hc ha =>
-          obtain ⟨ε', hrest, hrow⟩ := hst.handler_target ht hh
+          obtain ⟨ε', hrest, hrow⟩ := hst.handler_target rfl ht hh
           rw [leave_target_invoke ht]
           exact callFn_safe hp hsig hc ha (Row.le_trans hr hrow) hrest hs
       · have hin' : ∃ fr', fr' ∈ st ∧ fr'.isTarget target = true := by
@@ -304,13 +334,12 @@ theorem deliver_leave_safe {p : Program} {S : StoreTy} {store : Store Frame}
           rcases List.mem_cons.mp hf with rfl | hf
           · exact absurd hft ht
           · exact ⟨f, hf, hft⟩
-        obtain ⟨τ', ε', hrest⟩ := hst.tail
+        obtain ⟨τ', ε', hrest⟩ := hst.tail rfl
         cases fr with
         | guard fn captures =>
-          cases hst with
-          | guard hsig hc hrest' =>
-            rw [leave_guard ht]
-            exact callFn_safe hp hsig hc .nil (Row.nil_le _) (.exit hx hin' hrest') hs
+          obtain ⟨Cs, σc, τ'', ε'', hsig, hc, hrest'⟩ := hst.guard_inv rfl
+          rw [leave_guard ht]
+          exact callFn_safe hp hsig hc .nil (Row.nil_le _) (.exit hx hin' hrest') hs
         | call env body =>
           have h1 : leave p target after (.call env body :: st) store
               = leave p target after st store := by simp [leave, ht]

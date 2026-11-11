@@ -140,6 +140,7 @@ def ctorFieldsOf (C : Cert) (tag : Nat) : Ty → Option (List Ty)
   | .int => none
   | .fn _ _ _ => none
   | .ref _ => none
+  | .never => none
 
 theorem ctorFieldsOf_sound {tag : Nat} {T : Ty} {Fs : List Ty}
     (h : ctorFieldsOf C tag T = some Fs) : CtorOf C.ctx tag T Fs := by
@@ -160,6 +161,7 @@ theorem ctorFieldsOf_sound {tag : Nat} {T : Ty} {Fs : List Ty}
   | int => simp [ctorFieldsOf] at h
   | fn _ _ _ => simp [ctorFieldsOf] at h
   | ref _ => simp [ctorFieldsOf] at h
+  | never => simp [ctorFieldsOf] at h
 
 theorem ctorFieldsOf_complete {tag : Nat} {T : Ty} {Fs : List Ty}
     (h : CtorOf C.ctx tag T Fs) : ctorFieldsOf C tag T = some Fs := by
@@ -179,6 +181,7 @@ def fieldsOf (C : Cert) : Ty → Option (List Ty)
   | .int => none
   | .fn _ _ _ => none
   | .ref _ => none
+  | .never => none
 
 def placeTy (C : Cert) : Ty → List Nat → Option Ty
   | τ, [] => some τ
@@ -232,6 +235,7 @@ theorem placeTy_sound : ∀ {path : List Nat} {σ τ : Ty},
         | int => simp [fieldsOf] at hF
         | fn _ _ _ => simp [fieldsOf] at hF
         | ref _ => simp [fieldsOf] at hF
+        | never => simp [fieldsOf] at hF
       · cases h
     · cases h
 
@@ -359,7 +363,9 @@ theorem checkHandler_sound {Cs : List Ty} {ret : Nat} {ops : List (Nat × Nat)} 
 /-! ## Computations -/
 
 /-- Check a computation against the type it must give and the operations it
-may perform. Hints are used up in order, one by each `let` and each handler. -/
+may perform. Hints are used up in order: one by each `let`, one by each handler,
+and one by each call of something that does not return, for the type the code
+after the call takes its result to have. -/
 def checkTm (C : Cert) : TEnv → Tm → List Hint → Ty → Row → Bool
   | Γ, .ret a, _, τ, _ => atomTy Γ a == some τ
   | Γ, .let_ rhs body, hs, τ, ε =>
@@ -369,11 +375,17 @@ def checkTm (C : Cert) : TEnv → Tm → List Hint → Ty → Row → Bool
   | Γ, .call f args body, hs, τ, ε =>
     match atomTy Γ f with
     | some (.fn Ps σ ε') =>
-      atomsTy Γ args == some Ps && rowLe ε' ε && checkTm C (Γ ++ [σ]) body hs τ ε
+      atomsTy Γ args == some Ps && rowLe ε' ε
+        && (if σ = .never then
+              match hs with
+              | .ty σ' :: hs => checkTm C (Γ ++ [σ']) body hs τ ε
+              | _ => false
+            else checkTm C (Γ ++ [σ]) body hs τ ε)
     | _ => false
   | Γ, .tail f args, _, τ, ε =>
     match atomTy Γ f with
-    | some (.fn Ps σ ε') => σ == τ && atomsTy Γ args == some Ps && rowLe ε' ε
+    | some (.fn Ps σ ε') =>
+      (σ == τ || σ == .never) && atomsTy Γ args == some Ps && rowLe ε' ε
     | _ => false
   | Γ, .handle ret ops captures thunk body, hs, τ, ε =>
     match hs, atomTy Γ thunk, atomsTy Γ captures with
@@ -469,16 +481,24 @@ theorem checkTm_sound : ∀ (tm : Tm) {Γ : TEnv} {hs : List Hint} {τ : Ty} {ε
     · rename_i Ps σ ε' hf
       simp only [Bool.and_eq_true, beq_iff_eq] at h
       obtain ⟨⟨hargs, hrow⟩, hbody⟩ := h
-      exact .call (atomTy_sound hf) (atomsTy_sound hargs) (rowLe_sound hrow) (ih hbody)
+      split at hbody
+      · rename_i hσ
+        subst hσ
+        split at hbody
+        · exact .callNever (atomTy_sound hf) (atomsTy_sound hargs) (rowLe_sound hrow) (ih hbody)
+        · simp at hbody
+      · exact .call (atomTy_sound hf) (atomsTy_sound hargs) (rowLe_sound hrow) (ih hbody)
     · simp at h
   | tail f args =>
     intro Γ hs τ ε h
     simp only [checkTm] at h
     split at h
     · rename_i Ps σ ε' hf
-      simp only [Bool.and_eq_true, beq_iff_eq] at h
-      obtain ⟨⟨rfl, hargs⟩, hrow⟩ := h
-      exact .tail (atomTy_sound hf) (atomsTy_sound hargs) (rowLe_sound hrow)
+      simp only [Bool.and_eq_true, Bool.or_eq_true, beq_iff_eq] at h
+      obtain ⟨⟨hσ, hargs⟩, hrow⟩ := h
+      rcases hσ with rfl | rfl
+      · exact .tail (atomTy_sound hf) (atomsTy_sound hargs) (rowLe_sound hrow)
+      · exact .tailNever (atomTy_sound hf) (atomsTy_sound hargs) (rowLe_sound hrow)
     · simp at h
   | handle ret ops captures thunk body ih =>
     intro Γ hs τ ε h

@@ -195,6 +195,12 @@ def cases : List Case := [
   ⟨"fn f(x) { defer print(0); if(x == 1) { @f(10) }; 20 }
   fn main() { (f(1), f(2)) }",
     [], "0\n0\n(10, 20)"⟩,
+  -- Applying a label does not return, so one label can be applied where
+  -- results of different types are expected, and also passed as a callable.
+  ⟨"fn main() { @out { let a = if(true) { @out(1) } else { 5 }; let b = if(true) { @out(2) } else { (1, 2) }; 0 } }",
+    [], "1"⟩,
+  ⟨"fn apply(f, x) { f(x) }\n  fn main() { @out { apply(@out, 3) + 1 } }",
+    [], "3"⟩,
 
   -- A resumptive operation does not run the cleanups it captures: they run when
   -- the resumed computation finally leaves, exactly once.
