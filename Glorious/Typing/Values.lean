@@ -47,7 +47,7 @@ theorem HasVal.mono {S S' : StoreTy} (hle : S.Le S') :
   | _, _, .data hc hf => .data hc (HasVals.mono hle hf)
   | _, _, .clo hsig hθ hc hq he hτ => .clo hsig hθ (HasVals.mono hle hc) hq he hτ
   | _, _, .cont h => .cont (hle.conts _ _ h)
-  | _, _, .label h => .label (hle.labels _ _ h)
+  | _, _, .label h hr => .label (hle.labels _ _ h) hr
   | _, _, .ref h hr => .ref (hle.cells _ _ h) hr
 
 theorem HasVals.mono {S S' : StoreTy} (hle : S.Le S') :
@@ -131,14 +131,15 @@ theorem HasVal.fn_inv {S : StoreTy} {v : Value} {n : Nat} {Ps : List Ty} {σ : T
         ∧ Ps = sig.params.map (Ty.inst θ) ∧ σ = sig.ret.inst θ ∧ ε = sig.eff.inst θ
         ∧ acc = sig.acc.map (Rgn.inst θ))
       ∨ (∃ id o, v = .cont id ∧ n = 0 ∧ Ps = [o] ∧ S.conts id = some (o, σ, ε, acc))
-      ∨ (∃ id τ, v = .label id ∧ n = 0 ∧ Ps = [τ] ∧ S.labels id = some τ) := by
+      ∨ (∃ id τ, v = .label id ∧ n = 0 ∧ Ps = [τ] ∧ S.labels id = some τ
+          ∧ (Δ.regions → .lab id ∈ acc)) := by
   cases h with
   | data hc _ => exact hc.not_fn.elim
   | clo hsig hθ hc _ _ hτ =>
     injection hτ with h1 h2 h3 h4 h5 h6 h7
     exact .inl ⟨_, _, _, _, rfl, hsig, hθ, hc, h1, h2, h3, h4, h7⟩
   | cont hk => exact .inr (.inl ⟨_, _, rfl, rfl, rfl, hk⟩)
-  | label hl => exact .inr (.inr ⟨_, _, rfl, rfl, rfl, hl⟩)
+  | label hl hr => exact .inr (.inr ⟨_, _, rfl, rfl, rfl, hl, hr⟩)
 
 /-- A value whose type states an environment is a function that captured
 values of those types. -/
@@ -163,7 +164,7 @@ theorem HasVal.ctor_inv {S : StoreTy} {v : Value} {T : Ty} {tag : Nat} {Fs : Lis
     subst hτ
     exact hc.not_fn.elim
   | cont _ => exact hc.not_fn.elim
-  | label _ => exact hc.not_fn.elim
+  | label _ _ => exact hc.not_fn.elim
   | ref _ _ => exact hc.not_ref.elim
 
 theorem HasVal.unit {S : StoreTy} : HasVal Δ S Value.unit Ty.unit :=

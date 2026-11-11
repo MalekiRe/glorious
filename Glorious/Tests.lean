@@ -175,6 +175,18 @@ def notTail (n : Nat) : String :=
 #guard borrowChecked "effect Yield { yield(Int) }
   fn main() { let mut saved = None; handle (yield(1) + 1) { yield(v, k) => saved = Some(k); 0 };
     match(replace(&mut saved, None)) { Some(k) => k(41), None => 0 } }" == some false
+-- A label is a region as a mutable variable is: a program certified with the
+-- region rules never jumps to a label whose block has ended. With the ownership
+-- rules too, the only way left for it to go wrong is arithmetic overflow.
+#guard borrowChecked "fn find(want) { @out { let mut i = 0;
+    while({ i < 5 }) { if(i == want) { @out(i) }; i = i + 1; }; 0 - 1 } }
+  fn main() { find(3) }" == some true
+#guard borrowChecked "fn first_big(a, b) { @done { if(10 < a) { @done(a) }; if(10 < b) { @done(b) }; 0 } }
+  fn main() { first_big(3, 12) }" == some true
+-- A callable made before a block, and given inside it one that jumps out of
+-- the block, has in its type a region that did not exist when it was made.
+#guard borrowChecked "fn main() { let apply = { f => f() }; @out { apply({ @out(5) }); 0 } }"
+  == some false
 -- A callable given the type of another that uses a later variable is one more.
 #guard borrowChecked "fn main() { let mut x = 1; let get = { x }; let mut y = 2;
     let both = { x + y }; let pick = if(x < y) { get } else { both }; pick() }" == some false

@@ -326,15 +326,30 @@ theorem HasTm.inst (hΔ : Δ.Stable) (θ : List Rgn) {ϕ : List Rgn} {Γ : TEnv}
       rfl
     · rw [hΔ.op, hop]
       rfl
-  | label hthunk hrow hacc hlin _ ih =>
+  | label hthunk hσ hε hn hreg hacc hrow hlin _ ih =>
     have ht' := hthunk.inst θ
     simp only [Ty.inst_fn, List.map_cons, List.map_nil, Option.map_none] at ht'
     rw [snoc_inst] at ih
-    exact .label ht' (Row.le_inst hrow θ) (hacc.map _) (hlin.inst hΔ θ) ih
-  | labelTail hthunk hrow hacc =>
+    refine .label ht' (Ty.lc_inst hσ θ) (Row.lc_inst hε θ) hn ?_ ?_ (Row.le_inst hrow θ)
+      (hlin.inst hΔ θ) ih
+    · intro hr
+      exact ⟨(hreg hr).1, List.mem_map.mpr ⟨_, (hreg hr).2, rfl⟩⟩
+    · intro x hx
+      obtain ⟨x₀, hx₀, rfl⟩ := List.mem_map.mp hx
+      rcases hacc x₀ hx₀ with ⟨h1, rfl⟩ | ⟨hfree, hmem⟩
+      · exact .inl ⟨h1, rfl⟩
+      · exact .inr ⟨by rw [Rgn.inst_free]; exact hfree, List.mem_map.mpr ⟨x₀, hmem, rfl⟩⟩
+  | labelTail hthunk hσ hε hn hreg hacc hrow =>
     have ht' := hthunk.inst θ
     simp only [Ty.inst_fn, List.map_cons, List.map_nil, Option.map_none] at ht'
-    exact .labelTail ht' (Row.le_inst hrow θ) (hacc.map _)
+    refine .labelTail ht' (Ty.lc_inst hσ θ) (Row.lc_inst hε θ) hn ?_ ?_ (Row.le_inst hrow θ)
+    · intro hr
+      exact ⟨(hreg hr).1, List.mem_map.mpr ⟨_, (hreg hr).2, rfl⟩⟩
+    · intro x hx
+      obtain ⟨x₀, hx₀, rfl⟩ := List.mem_map.mp hx
+      rcases hacc x₀ hx₀ with ⟨h1, rfl⟩ | ⟨hfree, hmem⟩
+      · exact .inl ⟨h1, rfl⟩
+      · exact .inr ⟨by rw [Rgn.inst_free]; exact hfree, List.mem_map.mpr ⟨x₀, hmem, rfl⟩⟩
   | guard hcl hthunk hrow haccc hacc hlin _ ih =>
     have hc' := hcl.inst θ
     have ht' := hthunk.inst θ

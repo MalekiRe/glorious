@@ -138,7 +138,7 @@ theorem dup_occ (hs : C.strict = true) (hd : dataOk C = true) :
       cases h
     · exact h
   | _, _, _, .cont _, hdup, _ => by simp [dupTy] at hdup
-  | _, _, _, .label _, _, id => by simp [occ]
+  | _, _, _, .label _ _, _, id => by simp [occ]
   | _, _, _, .ref _ _, _, id => by simp [occ]
 
 theorem dups_occ (hs : C.strict = true) (hd : dataOk C = true) :
@@ -199,46 +199,51 @@ theorem checked_compiled_owned_safety {p : Program} (h : checkProgram C p = true
 /--
 **Borrow safety, checked.** If the certificate asks for the region rules and
 the checker accepts, the program never reaches a state about to read or write a
-released cell.
+released cell,
 -/
 theorem checked_borrow_safety {p : Program} (h : checkProgram C p = true)
     (hr : C.regions = true) (input : List Int) {c : Config}
     (hc : Machine.Reaches (stepIO p) (initIO p input) c) : ¬ Freed c.state :=
   borrow_safety (checkProgram_sound h) hr input hc
 
-/-- So if such a program goes wrong, the fault is not a use of a released cell. -/
+/-- nor one about to apply a label whose scope has ended. -/
+theorem checked_label_safety {p : Program} (h : checkProgram C p = true)
+    (hr : C.regions = true) (input : List Int) {c : Config}
+    (hc : Machine.Reaches (stepIO p) (initIO p input) c) : ¬ Dead c.state :=
+  label_safety (checkProgram_sound h) hr input hc
+
+/-- So if such a program goes wrong, the fault is neither of those. -/
 theorem checked_scoped_safety {p : Program} (h : checkProgram C p = true)
     (hr : C.regions = true) (input : List Int) (hw : GoesWrong p input) :
     ∃ c, Machine.Reaches (stepIO p) (initIO p input) c ∧ stepIO p c = .stuck ∧ Fault c.state
-      ∧ ¬ Freed c.state :=
+      ∧ ¬ Freed c.state ∧ ¬ Dead c.state :=
   scoped_safety (checkProgram_sound h) hr input hw
 
 /-- The same for the compiled bytecode. -/
 theorem checked_compiled_scoped_safety {p : Program} (h : checkProgram C p = true)
     (hr : C.regions = true) (input : List Int) (hw : Bytecode.GoesWrong (compile p) input) :
     ∃ c, Machine.Reaches (stepIO p) (initIO p input) c ∧ stepIO p c = .stuck ∧ Fault c.state
-      ∧ ¬ Freed c.state :=
+      ∧ ¬ Freed c.state ∧ ¬ Dead c.state :=
   compiled_scoped_safety (checkProgram_sound h) hr input hw
 
 /--
-**Both.** With the ownership rules and the region rules, a program that goes
-wrong overflowed or applied a label after its scope ended: it did not use a
-resumption twice, and it did not use a released cell.
+**Soundness, checked.** If the certificate asks for the ownership rules and
+the region rules and the checker accepts, the program goes wrong in one way
+only: an arithmetic result does not fit in 64 bits. Nothing is assumed about
+the certificate or the program.
 -/
 theorem checked_full_safety {p : Program} (h : checkProgram C p = true) (hs : C.strict = true)
     (hr : C.regions = true) (input : List Int) (hw : GoesWrong p input) :
-    ∃ c, Machine.Reaches (stepIO p) (initIO p input) c ∧ stepIO p c = .stuck ∧ Fault c.state
-      ∧ ¬ Resumed c.state ∧ ¬ Freed c.state := by
-  obtain ⟨c, hreach, hstuck, hf, hres⟩ := checked_owned_safety h hs input hw
-  exact ⟨c, hreach, hstuck, hf, hres, checked_borrow_safety h hr input hreach⟩
+    ∃ c, Machine.Reaches (stepIO p) (initIO p input) c ∧ stepIO p c = .stuck
+      ∧ Overflow c.state :=
+  sound_safety (checkProgram_sound h) (dupSound_of_check h hs) hr input hw
 
 /-- The same for the compiled bytecode. -/
 theorem checked_compiled_full_safety {p : Program} (h : checkProgram C p = true)
     (hs : C.strict = true) (hr : C.regions = true) (input : List Int)
     (hw : Bytecode.GoesWrong (compile p) input) :
-    ∃ c, Machine.Reaches (stepIO p) (initIO p input) c ∧ stepIO p c = .stuck ∧ Fault c.state
-      ∧ ¬ Resumed c.state ∧ ¬ Freed c.state :=
-  checked_full_safety h hs hr input
-    (Classical.byContradiction fun hn => (compile_correct p input hn).2.2 hw)
+    ∃ c, Machine.Reaches (stepIO p) (initIO p input) c ∧ stepIO p c = .stuck
+      ∧ Overflow c.state :=
+  compiled_sound_safety (checkProgram_sound h) (dupSound_of_check h hs) hr input hw
 
 end Glorious.Typing

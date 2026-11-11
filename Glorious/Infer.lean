@@ -1258,12 +1258,19 @@ where
     -- a callable with a result.
     let ρ ← freshTy
     modify fun s => { s with nevers := s.nevers.push ρ }
+    -- The scope has a region of its own, which the callable it runs binds and
+    -- applying the label touches.
     let a ← freshAcc
+    let applying ← freshAcc
+    let own ← if (← get).regions then some <$> freshAtom else pure none
+    if let some r := own then
+      modify fun s => { s with accs := s.accs.set! a { binder := some r } }
+      accRgn applying r
     unify (← atomTy Γ thunk)
-      (.func [.func [σ] ρ (← freshRow) (.lit false) .never (← freshAcc)] σ εt (← freshCls)
+      (.func [.func [σ] ρ (← freshRow) (.lit false) .never applying] σ εt (← freshCls)
         (← freshTy) a)
     needs εt [] amb
-    accSub self a
+    accSub self a own
     pure σ
   guarded (Γ : Array ITy) (amb : IRow) (cleanup thunk : Atom) : M ITy := do
     let σ ← freshTy
@@ -1514,6 +1521,7 @@ def ofRg (env : RgEnv) : Typing.Rgn → M Nat
     | some r => pure r
     | none => freshRg
   | .cell _ => freshRg
+  | .lab _ => freshRg
 
 def ofAcc (env : RgEnv) (acc : List Typing.Rgn) : M Nat := do
   let a ← freshAcc

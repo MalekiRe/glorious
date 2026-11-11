@@ -485,9 +485,8 @@ the programs it accepts.
    cell. The invariant is that every region the running code was given is the
    cell of a scope still on its stack. The theorems are `borrow_safety` (no
    reachable state is about to read or write a released cell), and for the
-   checker `checked_borrow_safety`, `checked_scoped_safety`,
-   `checked_full_safety` (with ownership too: a program that goes wrong
-   overflowed or applied a dead label) and their compiled forms.
+   checker `checked_borrow_safety`, `checked_scoped_safety` and their compiled
+   forms.
 
    What this is not. A region is one cell: there is no outlives relation, no
    region that stands for several cells, and so no reference that may point to
@@ -538,7 +537,8 @@ the programs it accepts.
    whose regions it cannot find is still compiled, with a certificate without
    the region rules, as a program that does not meet the ownership rules is;
    `glorious certify` says which a program got. Of the 140 test programs that
-   compile, 138 get the region rules, and so the theorem.
+   compile, 137 get the region rules, and so the theorems; of the five
+   examples, four.
 
    **Decision: a failure to find regions is not an error of the program.** The
    surface checker already rejects, with the variable named, a program in
@@ -553,7 +553,9 @@ the programs it accepts.
    - a variable that holds something whose type mentions the variable's own
      region, such as a queue of tasks that use the queue;
    - a callable given the same type as another that uses a variable declared
-     later: two callables of one type touch the same regions;
+     later, or made before a block and given, inside it, something that uses
+     the block's variable or label: two callables of one type touch the same
+     regions, and a callable made by a block is not polymorphic in regions;
    - a reference, or a callable that touches a variable, kept in a declared
      type whose field is written as `&T`, as a `fn` type, or left to be
      inferred, rather than as a type parameter.
@@ -567,9 +569,27 @@ the programs it accepts.
    their lists in the same order; a use of a function carries the cells its
    numbered regions are at that use. A declared type is recorded once for each
    shape of its arguments, with a region variable for each region in them.
-4. **Labels as regions**, by the same rule: a label is not applied after its
-   scope has ended.
+4. **Labels as regions.** Done, by the same rule. A label scope has a region
+   (`Rgn.lab id` at run time); the callable the scope runs is polymorphic in
+   it; the label's type says that applying the label touches it; a label frame
+   grants it to the code above. So a label can be applied only where its
+   scope's region was granted, which is only above its frame:
+   `label_safety`, `checked_label_safety`. Unlike cells this needs no
+   invariant of the machine: the frame the region was granted by is the one
+   the jump looks for.
+
+   With both sets of rules, three of the four faults are ruled out, and the
+   theorem is the one the work was for. `checked_full_safety`: **if the
+   checker accepts a program with the ownership rules and the region rules,
+   and the program goes wrong, then it is at an arithmetic operation whose
+   result does not fit in 64 bits.** `checked_compiled_full_safety` says the
+   same of its bytecode. 133 of the 140 test programs get this.
 5. **Unique references**: a `&mut` is the only way to its cell while it lives.
+   Not done. Nothing depends on it for safety here: a cell holds a whole
+   value, there are no references into the middle of one, and a mutable
+   variable is by design shared by the blocks that capture it. It would be a
+   discipline on the programmer, with a theorem about exclusive access, not
+   about going wrong.
 
 The specification's lifetimes (language specification section 9) are the
 surface form of this; written lifetime parameters, variance and reborrowing

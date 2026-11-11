@@ -351,4 +351,106 @@ example : checkProgram
         [[.clo (.fn 0 [] .int [] false none []) [.var 0]]]⟩], [], [], .int,
       [.ty (scopeFn (.fn 0 [] .int [] false none []) [])], true, true⟩ leak = false := by decide
 
+/-! ## Labels and regions
+
+A label is a region too: the callable its scope runs is polymorphic in it, the
+label's type says that applying the label touches it, and what the scope gives
+back cannot mention it. -/
+
+/-- A label that takes an integer, in the scope whose region is `r`. -/
+def labelTy (r : Rgn) : Ty := .fn 0 [.int] .never [] false none [r]
+
+/--
+A scope left early from inside a nested call, through a closure that captured
+the label, and one that ends normally.
+```
+check[l](x) = tail l(x * 100)
+body(l)     = let c = check[l] in c(3) + 1
+seven(l)    = 7
+main        = (label body) + (label seven)
+```
+-/
+def jumps : Program where
+  fns := [
+    ⟨[ ⟨[.wild], .let_ (.prim .intMul [.var 0, .int 100]) <| .tail (.var 1) [.var 2]⟩ ]⟩,
+    ⟨[ ⟨[.wild],
+          .let_ (.closure 0 [.var 0]) <|
+          .call (.var 1) [.int 3] <|
+          .let_ (.prim .intAdd [.var 2, .int 1]) <|
+          .ret (.var 3)⟩ ]⟩,
+    ⟨[ ⟨[.wild], .ret (.int 7)⟩ ]⟩ ]
+  main :=
+    .let_ (.closure 1 []) <|
+    .label (.var 0) <|
+    .let_ (.closure 2 []) <|
+    .label (.var 2) <|
+    .let_ (.prim .intAdd [.var 1, .var 3]) <|
+    .ret (.var 4)
+
+theorem jumps_core : Halts jumps [] ⟨.int 307, ⟨[], []⟩⟩ := ⟨40, rfl⟩
+
+def jumpsCert : Cert where
+  sigs := [
+    -- `check` is closed over a label whose region is fixed when it is made.
+    ⟨0, ⟨[labelTy (.var 0)], [.int], .int, [], 1, 0, [.var 0]⟩, [[.ty .int]]⟩,
+    ⟨1, ⟨[], [labelTy (.bound 0)], .int, [], 0, 1, [.bound 0]⟩,
+      [[.clo (.fn 0 [.int] .int [] false none [.var 0]) [.var 0], .ty .int]]⟩,
+    ⟨2, ⟨[], [labelTy (.bound 0)], .int, [], 0, 1, []⟩, [[]]⟩]
+  datas := []
+  ops := []
+  mainTy := .int
+  mainHints := [.ty (.fn 1 [labelTy (.bound 0)] .int [] false none [.bound 0]),
+    .ty (.fn 1 [labelTy (.bound 0)] .int [] false none []), .ty .int]
+  strict := true
+  regions := true
+
+theorem jumps_checked : checkProgram jumpsCert jumps = true := by decide
+
+/-- So `jumps` goes wrong in no way but overflow. -/
+theorem jumps_sound (input : List Int) (h : GoesWrong jumps input) :
+    ∃ c, Machine.Reaches (stepIO jumps) (initIO jumps input) c
+      ∧ stepIO jumps c = .stuck ∧ Overflow c.state :=
+  checked_full_safety jumps_checked rfl rfl input h
+
+/--
+A closure that captured the label leaves the scope, and is called after the
+scope has ended.
+```
+one()      = 1
+jump[l, h]() = tail l(h)
+hide(l)    = let h = one in jump[l, h]
+main       = let g = label hide in g()
+```
+-/
+def lateJump : Program where
+  fns := [
+    ⟨[ ⟨[], .ret (.int 1)⟩ ]⟩,
+    ⟨[ ⟨[], .tail (.var 0) [.var 1]⟩ ]⟩,
+    ⟨[ ⟨[.wild], .let_ (.closure 0 []) <| .let_ (.closure 1 [.var 0, .var 1]) <| .ret (.var 2)⟩ ]⟩ ]
+  main := .let_ (.closure 2 []) <| .label (.var 0) <| .tail (.var 1) []
+
+theorem lateJump_goesWrong : GoesWrong lateJump [] := ⟨10, rfl⟩
+
+/-- A callable that gives an integer and, without regions, touches nothing. -/
+def thunkTy : Ty := .fn 0 [] .int [] false none []
+
+def lateJumpCert (regions : Bool) : Cert where
+  sigs := [
+    ⟨0, ⟨[], [], .int, [], 0, 0, []⟩, [[]]⟩,
+    ⟨1, ⟨[.fn 0 [thunkTy] .never [] false none [], thunkTy], [], .int, [], 0, 0, []⟩, [[]]⟩,
+    ⟨2, ⟨[], [.fn 0 [thunkTy] .never [] false none []], thunkTy, [], 0, 0, []⟩,
+      [[.ty thunkTy, .ty thunkTy]]⟩]
+  datas := []
+  ops := []
+  mainTy := .int
+  mainHints := [.ty (.fn 0 [.fn 0 [thunkTy] .never [] false none []] thunkTy [] false none [])]
+  strict := true
+  regions := regions
+
+/-- `lateJump` is well typed, and well owned; -/
+example : checkProgram (lateJumpCert false) lateJump = true := by decide
+
+/-- but not under the region rules. -/
+example : checkProgram (lateJumpCert true) lateJump = false := by decide
+
 end Glorious.Typing.Witness

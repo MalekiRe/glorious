@@ -487,41 +487,37 @@ theorem run_owns {p : Program} : ∀ (n : Nat) {c c' : Config}, Owns c.state →
 
 /-! ## What a typed stack grants -/
 
-/-- The regions a typed stack grants are cells whose scopes are on it. -/
+/-- What a region a typed stack grants is: a cell or a label, with its scope on
+the stack. -/
+def Granted (st : List Frame) (r : Rgn) : Prop :=
+  (∃ a, r = .cell a ∧ 0 < ownStack a st) ∨ (∃ id, r = .lab id ∧ Frame.label id ∈ st)
+
+theorem Granted.cons {st : List Frame} {r : Rgn} (fr : Frame) (h : Granted st r) :
+    Granted (fr :: st) r := by
+  rcases h with ⟨a, rfl, ha⟩ | ⟨id, rfl, hm⟩
+  · exact .inl ⟨a, rfl, by simp only [ownStack]; omega⟩
+  · exact .inr ⟨id, rfl, List.mem_cons_of_mem _ hm⟩
+
+/-- The regions a typed stack grants are cells and labels whose scopes are on it. -/
 theorem StackOk.granted {S : StoreTy} {st : List Frame} {τ : Ty} {ε : Row} {ϕ : List Rgn}
-    (h : StackOk Δ S st τ ε ϕ) : ∀ r, r ∈ ϕ → ∃ a, r = .cell a ∧ 0 < ownStack a st := by
+    (h : StackOk Δ S st τ ε ϕ) : ∀ r, r ∈ ϕ → Granted st r := by
   induction h with
   | nil => intro r hr; cases hr
-  | call _ _ _ _ _ ih =>
+  | call _ _ _ _ _ ih => exact fun r hr => (ih r hr).cons _
+  | handler _ _ _ hsub _ ih => exact fun r hr => (ih r (hsub r hr)).cons _
+  | @label id st τ ε ϕ _ _ ih =>
     intro r hr
-    obtain ⟨a, rfl, ha⟩ := ih r hr
-    exact ⟨a, rfl, by simp only [ownStack, ownFrame]; omega⟩
-  | handler _ _ _ hsub _ ih =>
-    intro r hr
-    obtain ⟨a, rfl, ha⟩ := ih r (hsub r hr)
-    exact ⟨a, rfl, by simp only [ownStack, ownFrame]; omega⟩
-  | label _ _ ih =>
-    intro r hr
-    obtain ⟨a, rfl, ha⟩ := ih r hr
-    exact ⟨a, rfl, by simp only [ownStack, ownFrame]; omega⟩
-  | guard _ _ _ ih =>
-    intro r hr
-    obtain ⟨a, rfl, ha⟩ := ih r hr
-    exact ⟨a, rfl, by simp only [ownStack, ownFrame]; omega⟩
+    rcases List.mem_cons.mp hr with rfl | hr
+    · exact .inr ⟨id, rfl, List.mem_cons_self ..⟩
+    · exact (ih r hr).cons _
+  | guard _ _ _ ih => exact fun r hr => (ih r hr).cons _
   | @cell b st τ ε ϕ _ ih =>
     intro r hr
     rcases List.mem_cons.mp hr with rfl | hr
-    · exact ⟨b, rfl, by simp only [ownStack, ownFrame, ↓reduceIte]; omega⟩
-    · obtain ⟨a, rfl, ha⟩ := ih r hr
-      exact ⟨a, rfl, by simp only [ownStack]; omega⟩
-  | yield _ _ ih =>
-    intro r hr
-    obtain ⟨a, rfl, ha⟩ := ih r hr
-    exact ⟨a, rfl, by simp only [ownStack, ownFrame]; omega⟩
-  | exit _ _ _ ih =>
-    intro r hr
-    obtain ⟨a, rfl, ha⟩ := ih r hr
-    exact ⟨a, rfl, by simp only [ownStack, ownFrame]; omega⟩
+    · exact .inl ⟨b, rfl, by simp only [ownStack, ownFrame, ↓reduceIte]; omega⟩
+    · exact (ih r hr).cons _
+  | yield _ _ ih => exact fun r hr => (ih r hr).cons _
+  | exit _ _ _ ih => exact fun r hr => (ih r hr).cons _
   | never _ ih => exact ih
 
 /-- A released cell is about to be read or written. -/
@@ -547,7 +543,8 @@ theorem TypedAt.not_freed {S : StoreTy} {s : State} (hR : Δ.regions) (ht : Type
     subst hwa
     obtain ⟨b, hb, _, hreg⟩ := hvt.ref_inv
     cases hb
-    obtain ⟨c, hc, hpos⟩ := hst.granted _ (hsub _ (hreg hR ▸ hr))
+    rcases hst.granted _ (hsub _ (hreg hR ▸ hr)) with ⟨c, hc, hpos⟩ | ⟨_, hc, _⟩
+    case inr => cases hc
     cases hc
     obtain ⟨u, hu⟩ := ((ho a).2 (by
       show 0 < ownStack a stack + osum (ownStack a) store.conts
@@ -579,6 +576,114 @@ theorem TypedAt.not_freed {S : StoreTy} {s : State} (hR : Δ.regions) (ht : Type
       | some w' =>
         simp [evalAtoms, hx, hy] at hev
         exact key ha (hr hR) hx hev.1
+
+/-! ## A label is applied only inside its scope -/
+
+theorem findLabel_mem {id : Nat} : ∀ {st : List Frame}, Frame.label id ∈ st →
+    findLabel Frame.asLabel id st ≠ none
+  | [], h => by cases h
+  | fr :: st, h => by
+    by_cases hfr : fr.asLabel = some id
+    · simp [findLabel, hfr]
+    · have hm : Frame.label id ∈ st := by
+        rcases List.mem_cons.mp h with rfl | hm
+        · exact absurd rfl hfr
+        · exact hm
+      cases hrest : findLabel Frame.asLabel id st with
+      | none => exact absurd hrest (findLabel_mem hm)
+      | some x => simp [findLabel, hfr, hrest]
+
+/-- A label is about to be applied whose scope is not on the stack. -/
+def Dead (s : State) : Prop :=
+  ∃ f id, calleeAtom s.tm = some f ∧ f.eval s.env = some (.label id)
+    ∧ findLabel Frame.asLabel id s.stack = none
+
+/-- Under the region rules, a typed state is not about to apply a label
+outside its scope: the label's type says applying it touches the scope's
+region, which the code was granted only if the scope is on the stack. -/
+theorem TypedAt.not_dead {S : StoreTy} {s : State} (hR : Δ.regions) (ht : TypedAt Δ S s) :
+    ¬ Dead s := by
+  rintro ⟨f, id, hcallee, hev, hnone⟩
+  obtain @⟨tm, env, stack, store, Γ, τ, ε, ε', ϕ, ϕ', henv, hty, hle, hsub, hst, hs⟩ := ht
+  simp only at hcallee hev hnone
+  -- The callable applied is the label, so it binds no region and its type
+  -- says it touches the label's.
+  have isLabel : ∀ {x : Atom} {n : Nat} {Ps : List Ty} {σ : Ty} {εf : Row} {once : Bool}
+      {fenv : Option (List Ty)} {acc : List Rgn}, x = f →
+      HasAtom Γ x (.fn n Ps σ εf once fenv acc) → n = 0 ∧ .lab id ∈ acc := by
+    intro x n Ps σ εf once fenv acc hx hf
+    subst hx
+    obtain ⟨v, hv, hvt⟩ := atom_ok henv hf
+    rw [hev] at hv
+    cases hv
+    rcases hvt.fn_inv with ⟨_, _, _, _, h, _⟩ | ⟨_, _, h, _⟩ | ⟨id', _, h, hn, _, _, hreg⟩
+    · cases h
+    · cases h
+    · cases h
+      exact ⟨hn, hreg hR⟩
+  -- A granted label has its scope on the stack.
+  have found : .lab id ∈ ϕ → False := by
+    intro hin
+    rcases hst.granted _ (hsub _ hin) with ⟨_, hc, _⟩ | ⟨id', hc, hm⟩
+    · cases hc
+    · cases hc
+      exact findLabel_mem hm hnone
+  have opened : ∀ {n : Nat} {rs : List Rgn} {acc : List Rgn}, n = 0 → rs.length = n →
+      .lab id ∈ acc → Sub (acc.map (Rgn.openAt 0 rs)) ϕ → False := by
+    intro n rs acc hn hrs hin hacc
+    subst hn
+    have hnil : rs = [] := List.eq_nil_of_length_eq_zero hrs
+    subst hnil
+    exact found (hacc _ (List.mem_map.mpr ⟨_, hin, Rgn.openAt_nil 0 _⟩))
+  have scoped' : ∀ {n : Nat} {acc : List Rgn}, n = 0 → (Δ.regions → n = 1 ∧ True) → False := by
+    intro n acc hn hreg
+    have := (hreg hR).1
+    omega
+  cases hty with
+  | ret _ => cases hcallee
+  | let_ _ _ _ => cases hcallee
+  | call hf hn _ _ hacc _ _ =>
+    cases hcallee
+    obtain ⟨h0, hin⟩ := isLabel rfl hf
+    exact opened h0 hn hin hacc
+  | tail hf hn _ _ _ hacc _ =>
+    cases hcallee
+    obtain ⟨h0, hin⟩ := isLabel rfl hf
+    exact opened h0 hn hin hacc
+  | callNever hf hn _ _ hacc _ _ =>
+    cases hcallee
+    obtain ⟨h0, hin⟩ := isLabel rfl hf
+    exact opened h0 hn hin hacc
+  | tailNever hf hn _ _ hacc _ =>
+    cases hcallee
+    obtain ⟨h0, hin⟩ := isLabel rfl hf
+    exact opened h0 hn hin hacc
+  | handle _ _ _ _ _ _ _ _ => cases hcallee
+  | handleTail _ _ _ _ _ _ => cases hcallee
+  | raise _ _ _ _ => cases hcallee
+  | perform _ _ _ _ _ => cases hcallee
+  | label hthunk _ _ _ hreg _ _ _ _ =>
+    cases hcallee
+    exact scoped' (acc := []) (isLabel rfl hthunk).1 (fun h => ⟨(hreg h).1, trivial⟩)
+  | labelTail hthunk _ _ _ hreg _ _ =>
+    cases hcallee
+    exact scoped' (acc := []) (isLabel rfl hthunk).1 (fun h => ⟨(hreg h).1, trivial⟩)
+  | guard _ _ _ _ _ _ _ => cases hcallee
+  | guardTail _ _ _ _ _ _ => cases hcallee
+  | cancel hk _ hacc _ _ =>
+    cases hcallee
+    exact found (hacc _ (isLabel rfl hk).2)
+  | cell _ hthunk _ _ _ _ hreg _ _ _ _ =>
+    cases hcallee
+    exact scoped' (acc := []) (isLabel rfl hthunk).1 (fun h => ⟨(hreg h).1, trivial⟩)
+  | cellTail _ hthunk _ _ _ _ hreg _ _ _ =>
+    cases hcallee
+    exact scoped' (acc := []) (isLabel rfl hthunk).1 (fun h => ⟨(hreg h).1, trivial⟩)
+  | load _ _ _ _ => cases hcallee
+  | store _ _ _ _ _ => cases hcallee
+  | swap _ _ _ _ _ => cases hcallee
+  | write _ _ => cases hcallee
+  | read _ => cases hcallee
 
 /-- Every state a well-typed program reaches is well typed. -/
 theorem run_typed {p : Program} (hp : ProgramOk Δ p) : ∀ (n : Nat) {c c' : Config},
@@ -612,12 +717,51 @@ theorem borrow_safety {p : Program} (hp : ProgramOk Δ p) (hR : Δ.regions) (inp
   obtain ⟨S, ht⟩ := run_typed hp n (c := initIO p input) (typed_init hp) hn
   exact ht.not_freed hR (run_owns n (c := initIO p input) (owns_init p) hn)
 
-/-- So when such a program goes wrong, the fault is not a use of a freed cell. -/
+/--
+**Label safety.** Nor does it reach a state about to apply a label whose scope
+has ended.
+-/
+theorem label_safety {p : Program} (hp : ProgramOk Δ p) (hR : Δ.regions) (input : List Int)
+    {c : Config} (h : Machine.Reaches (stepIO p) (initIO p input) c) : ¬ Dead c.state := by
+  obtain ⟨n, hn⟩ := h
+  obtain ⟨S, ht⟩ := run_typed hp n (c := initIO p input) (typed_init hp) hn
+  exact ht.not_dead hR
+
+/-- So when such a program goes wrong, the fault is neither a use of a released
+cell nor a label applied after its scope ended. -/
 theorem scoped_safety {p : Program} (hp : ProgramOk Δ p) (hR : Δ.regions) (input : List Int)
     (h : GoesWrong p input) :
     ∃ c, Machine.Reaches (stepIO p) (initIO p input) c ∧ stepIO p c = .stuck
-      ∧ Fault c.state ∧ ¬ Freed c.state := by
+      ∧ Fault c.state ∧ ¬ Freed c.state ∧ ¬ Dead c.state := by
   obtain ⟨c, hreach, hstuck, hf⟩ := type_safety hp input h
-  exact ⟨c, hreach, hstuck, hf, borrow_safety hp hR input hreach⟩
+  exact ⟨c, hreach, hstuck, hf, borrow_safety hp hR input hreach, label_safety hp hR input hreach⟩
+
+/-- The result of an arithmetic intrinsic does not fit in 64 bits. -/
+def Overflow (s : State) : Prop :=
+  ∃ q args body m n, s.tm = .let_ (.prim q args) body
+    ∧ evalAtoms s.env args = some [.int m, .int n] ∧ q.eval [.int m, .int n] = none
+
+/-- Of the four faults, overflow is the one that is none of the other three. -/
+theorem Fault.overflow_of {s : State} (hf : Fault s) (h1 : ¬ Resumed s) (h2 : ¬ Freed s)
+    (h3 : ¬ Dead s) : Overflow s := by
+  cases hf with
+  | overflow hargs hq => exact ⟨_, _, _, _, _, rfl, hargs, hq⟩
+  | freed hev hget => exact absurd ⟨_, _, _, _, _, rfl, hev, hget⟩ h2
+  | resumed hc hev hget => exact absurd ⟨_, _, hc, hev, hget⟩ h1
+  | dead hc hev hnone => exact absurd ⟨_, _, hc, hev, hnone⟩ h3
+
+/--
+**Soundness.** A program accepted with the ownership rules and the region
+rules goes wrong in one way only: an arithmetic result does not fit. It uses no
+resumption twice, no cell after it was released, and no label after its scope
+ended.
+-/
+theorem sound_safety {p : Program} (hp : ProgramOk Δ p) (hD : DupSound Δ) (hR : Δ.regions)
+    (input : List Int) (h : GoesWrong p input) :
+    ∃ c, Machine.Reaches (stepIO p) (initIO p input) c ∧ stepIO p c = .stuck
+      ∧ Overflow c.state := by
+  obtain ⟨c, hreach, hstuck, hf, hres⟩ := owned_safety hp hD input h
+  exact ⟨c, hreach, hstuck, hf.overflow_of hres (borrow_safety hp hR input hreach)
+    (label_safety hp hR input hreach)⟩
 
 end Glorious.Typing

@@ -117,3 +117,23 @@ three standard axioms, in particular on `sorryAx` or a declared `axiom`.
 /-- info: 'Glorious.Typing.Witness.readers_borrows' depends on axioms: [propext, Classical.choice, Quot.sound] -/
 #guard_msgs in
 #print axioms Glorious.Typing.Witness.readers_borrows
+
+/-- info: 'Glorious.Typing.label_safety' depends on axioms: [propext, Classical.choice, Quot.sound] -/
+#guard_msgs in
+#print axioms Glorious.Typing.label_safety
+
+/-- info: 'Glorious.Typing.sound_safety' depends on axioms: [propext, Classical.choice, Quot.sound] -/
+#guard_msgs in
+#print axioms Glorious.Typing.sound_safety
+
+/-- info: 'Glorious.Typing.compiled_sound_safety' depends on axioms: [propext, Classical.choice, Quot.sound] -/
+#guard_msgs in
+#print axioms Glorious.Typing.compiled_sound_safety
+
+/-- info: 'Glorious.Typing.checked_label_safety' depends on axioms: [propext, Classical.choice, Quot.sound] -/
+#guard_msgs in
+#print axioms Glorious.Typing.checked_label_safety
+
+/-- info: 'Glorious.Typing.Witness.jumps_sound' depends on axioms: [propext, Classical.choice, Quot.sound] -/
+#guard_msgs in
+#print axioms Glorious.Typing.Witness.jumps_sound

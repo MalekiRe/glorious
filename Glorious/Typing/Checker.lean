@@ -669,6 +669,30 @@ theorem cellOk_sound {ϕ : List Rgn} {n : Nat} {r : Rgn} {σ ρ : Ty} {εt : Row
     cases h
   · exact h
 
+/-- The conditions on the callable a label's scope runs: under the region rules
+it is polymorphic in the scope's region, which the label's type says applying
+it touches, and neither what the scope gives nor what it performs mentions it. -/
+def labelOk (C : Cert) (ϕ : List Rgn) (n : Nat) (σ : Ty) (εt : Row) (accl acc : List Rgn) :
+    Bool :=
+  σ.lc && εt.lc && (n == 0 || n == 1)
+    && (!C.regions || (n == 1 && accl.contains (.bound 0)))
+    && acc.all fun x => (n == 1 && x == .bound 0) || (x.free && ϕ.contains x)
+
+theorem labelOk_sound {ϕ : List Rgn} {n : Nat} {σ : Ty} {εt : Row} {accl acc : List Rgn}
+    (h : labelOk C ϕ n σ εt accl acc = true) :
+    σ.lc = true ∧ εt.lc = true ∧ (n = 0 ∨ n = 1)
+      ∧ (C.ctx.regions → n = 1 ∧ .bound 0 ∈ accl)
+      ∧ (∀ x, x ∈ acc → (n = 1 ∧ x = .bound 0) ∨ (x.free = true ∧ x ∈ ϕ)) := by
+  simp only [labelOk, Bool.and_eq_true, Bool.or_eq_true, beq_iff_eq, Bool.not_eq_true',
+    List.all_eq_true, List.contains_eq_mem, decide_eq_true_eq] at h
+  obtain ⟨⟨⟨⟨hσ, hε⟩, hn⟩, hreg⟩, hacc⟩ := h
+  refine ⟨hσ, hε, hn, fun hR => ?_, hacc⟩
+  have hR' : C.regions = true := hR
+  rcases hreg with h | h
+  · rw [hR'] at h
+    cases h
+  · exact h
+
 /-- Check a computation against the regions it may touch, the type it must
 give and the operations it may perform. Hints are used up in order: one by each
 `let`, one by each handler, one by each call of a callable that binds regions,
@@ -740,14 +764,15 @@ def checkTm (C : Cert) (ϕ : List Rgn) : TEnv → Tm → List Hint → Ty → Ro
     | none => false
   | Γ, .label thunk body, hs, τ, ε =>
     match atomTy Γ thunk with
-    | some (.fn 0 [.fn 0 [σ'] _ _ _ none _] σ εt _ _ acc) =>
-      σ' == σ && rowLe εt ε && subB acc ϕ && linearB C Γ (atomVars [thunk]) (fv body)
+    | some (.fn n [.fn 0 [σ'] _ _ _ none accl] σ εt _ _ acc) =>
+      σ' == σ && labelOk C ϕ n σ εt accl acc && rowLe εt ε
+        && linearB C Γ (atomVars [thunk]) (fv body)
         && checkTm C ϕ (Γ ++ [σ]) body hs τ ε
     | _ => false
   | Γ, .labelTail thunk, _, τ, ε =>
     match atomTy Γ thunk with
-    | some (.fn 0 [.fn 0 [σ'] _ _ _ none _] σ εt _ _ acc) =>
-      σ' == σ && σ == τ && rowLe εt ε && subB acc ϕ
+    | some (.fn n [.fn 0 [σ'] _ _ _ none accl] σ εt _ _ acc) =>
+      σ' == σ && σ == τ && labelOk C ϕ n σ εt accl acc && rowLe εt ε
     | _ => false
   | Γ, .guard cleanup thunk body, hs, τ, ε =>
     match atomTy Γ cleanup, atomTy Γ thunk with
@@ -908,20 +933,22 @@ theorem checkTm_sound {ϕ : List Rgn} : ∀ (tm : Tm) {Γ : TEnv} {hs : List Hin
     intro Γ hs τ ε h
     simp only [checkTm] at h
     split at h
-    · rename_i σ' ρ εl once' accl σ εt once env acc hthunk
+    · rename_i n σ' ρ εl once' accl σ εt once env acc hthunk
       simp only [Bool.and_eq_true, beq_iff_eq] at h
-      obtain ⟨⟨⟨⟨rfl, hrow⟩, hacc⟩, hlin⟩, hbody⟩ := h
-      exact .label (atomTy_sound hthunk) (rowLe_sound hrow) (subB_sound hacc)
+      obtain ⟨⟨⟨⟨rfl, hlab⟩, hrow⟩, hlin⟩, hbody⟩ := h
+      obtain ⟨hσ, hε, hn, hreg, hacc⟩ := labelOk_sound hlab
+      exact .label (atomTy_sound hthunk) hσ hε hn hreg hacc (rowLe_sound hrow)
         (linearB_sound hlin) (ih hbody)
     · simp at h
   | labelTail thunk =>
     intro Γ hs τ ε h
     simp only [checkTm] at h
     split at h
-    · rename_i σ' ρ εl once' accl σ εt once env acc hthunk
+    · rename_i n σ' ρ εl once' accl σ εt once env acc hthunk
       simp only [Bool.and_eq_true, beq_iff_eq] at h
-      obtain ⟨⟨⟨rfl, rfl⟩, hrow⟩, hacc⟩ := h
-      exact .labelTail (atomTy_sound hthunk) (rowLe_sound hrow) (subB_sound hacc)
+      obtain ⟨⟨⟨rfl, rfl⟩, hlab⟩, hrow⟩ := h
+      obtain ⟨hσ, hε, hn, hreg, hacc⟩ := labelOk_sound hlab
+      exact .labelTail (atomTy_sound hthunk) hσ hε hn hreg hacc (rowLe_sound hrow)
     · simp at h
   | guard cleanup thunk body ih =>
     intro Γ hs τ ε h

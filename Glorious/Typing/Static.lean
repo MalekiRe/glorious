@@ -346,15 +346,24 @@ inductive HasTm (Δ : Ctx) (ϕ : List Rgn) : TEnv → Tm → Ty → Row → Prop
       ε.lookup op = some targs → Δ.opSig op targs = some (Ps, some σ) → HasAtoms Γ args Ps →
       Linear Δ Γ (atomVars args) (fv body) →
       HasTm Δ ϕ (Γ ++ [σ]) body τ ε → HasTm Δ ϕ Γ (.perform op args body) τ ε
-  | label {Γ : TEnv} {thunk : Atom} {body : Tm} {σ ρ τ : Ty} {εl εt ε : Row}
+  /-- A label lives for the scope it is made for. The callable run in that
+  scope is given the label. Under the region rules the callable is polymorphic
+  in the scope's region, which the label's type says applying it touches, and
+  neither what the scope gives nor what it performs mentions that region: so
+  nothing typed outside the scope can apply the label. -/
+  | label {Γ : TEnv} {thunk : Atom} {body : Tm} {n : Nat} {σ ρ τ : Ty} {εl εt ε : Row}
       {once once' : Bool} {env : Option (List Ty)} {accl acc : List Rgn} :
-      HasAtom Γ thunk (.fn 0 [.fn 0 [σ] ρ εl once' none accl] σ εt once env acc) → Row.le εt ε →
-      Sub acc ϕ → Linear Δ Γ (atomVars [thunk]) (fv body) →
+      HasAtom Γ thunk (.fn n [.fn 0 [σ] ρ εl once' none accl] σ εt once env acc) →
+      σ.lc = true → εt.lc = true → (n = 0 ∨ n = 1) → (Δ.regions → n = 1 ∧ .bound 0 ∈ accl) →
+      (∀ x, x ∈ acc → (n = 1 ∧ x = .bound 0) ∨ (x.free = true ∧ x ∈ ϕ)) →
+      Row.le εt ε → Linear Δ Γ (atomVars [thunk]) (fv body) →
       HasTm Δ ϕ (Γ ++ [σ]) body τ ε → HasTm Δ ϕ Γ (.label thunk body) τ ε
-  | labelTail {Γ : TEnv} {thunk : Atom} {ρ τ : Ty} {εl εt ε : Row} {once once' : Bool}
-      {env : Option (List Ty)} {accl acc : List Rgn} :
-      HasAtom Γ thunk (.fn 0 [.fn 0 [τ] ρ εl once' none accl] τ εt once env acc) → Row.le εt ε →
-      Sub acc ϕ → HasTm Δ ϕ Γ (.labelTail thunk) τ ε
+  | labelTail {Γ : TEnv} {thunk : Atom} {n : Nat} {ρ τ : Ty} {εl εt ε : Row}
+      {once once' : Bool} {env : Option (List Ty)} {accl acc : List Rgn} :
+      HasAtom Γ thunk (.fn n [.fn 0 [τ] ρ εl once' none accl] τ εt once env acc) →
+      τ.lc = true → εt.lc = true → (n = 0 ∨ n = 1) → (Δ.regions → n = 1 ∧ .bound 0 ∈ accl) →
+      (∀ x, x ∈ acc → (n = 1 ∧ x = .bound 0) ∨ (x.free = true ∧ x ∈ ϕ)) →
+      Row.le εt ε → HasTm Δ ϕ Γ (.labelTail thunk) τ ε
   /-- A cleanup performs no operations. -/
   | guard {Γ : TEnv} {cleanup thunk : Atom} {body : Tm} {σc σ τ : Ty} {εt ε : Row}
       {once once' : Bool} {env env' : Option (List Ty)} {accc acc : List Rgn} :

@@ -28,12 +28,23 @@ theorem compiled_owned_safety {Δ : Ctx} {p : Core.Program} (hp : ProgramOk Δ p
   owned_safety hp hD input
     (Classical.byContradiction fun hn => (compile_correct p input hn).2.2 h)
 
-/-- The same, with the region rules: the fault is not a use of a released cell. -/
+/-- The same, with the region rules: the fault is neither a use of a released
+cell nor a label applied after its scope ended. -/
 theorem compiled_scoped_safety {Δ : Ctx} {p : Core.Program} (hp : ProgramOk Δ p)
     (hR : Δ.regions) (input : List Int) (h : Bytecode.GoesWrong (compile p) input) :
     ∃ c, Machine.Reaches (Core.stepIO p) (Core.initIO p input) c ∧ Core.stepIO p c = .stuck
-      ∧ Fault c.state ∧ ¬ Freed c.state :=
+      ∧ Fault c.state ∧ ¬ Freed c.state ∧ ¬ Dead c.state :=
   scoped_safety hp hR input
+    (Classical.byContradiction fun hn => (compile_correct p input hn).2.2 h)
+
+/-- With both: bytecode compiled from such a program goes wrong only if the
+program overflows. -/
+theorem compiled_sound_safety {Δ : Ctx} {p : Core.Program} (hp : ProgramOk Δ p)
+    (hD : DupSound Δ) (hR : Δ.regions) (input : List Int)
+    (h : Bytecode.GoesWrong (compile p) input) :
+    ∃ c, Machine.Reaches (Core.stepIO p) (Core.initIO p input) c ∧ Core.stepIO p c = .stuck
+      ∧ Overflow c.state :=
+  sound_safety hp hD hR input
     (Classical.byContradiction fun hn => (compile_correct p input hn).2.2 h)
 
 end Glorious.Typing

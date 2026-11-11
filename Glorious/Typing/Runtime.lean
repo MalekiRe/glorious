@@ -60,8 +60,11 @@ inductive HasVal (Δ : Ctx) (S : StoreTy) : Value → Ty → Prop where
   /-- A resumption may be called once. -/
   | cont {id : Nat} {o ρ : Ty} {ε : Row} {Φ : List Rgn} :
       S.conts id = some (o, ρ, ε, Φ) → HasVal Δ S (.cont id) (.fn 0 [o] ρ ε true none Φ)
+  /-- Under the region rules a label's type says that applying it touches the
+  region of its scope. -/
   | label {id : Nat} {σ ρ : Ty} {ε : Row} {once : Bool} {acc : List Rgn} :
-      S.labels id = some σ → HasVal Δ S (.label id) (.fn 0 [σ] ρ ε once none acc)
+      S.labels id = some σ → (Δ.regions → .lab id ∈ acc) →
+      HasVal Δ S (.label id) (.fn 0 [σ] ρ ε once none acc)
   /-- Under the region rules a reference's region is the cell it points to. -/
   | ref {a : Nat} {r : Rgn} {τ : Ty} :
       S.cells a = some τ → (Δ.regions → r = .cell a) → HasVal Δ S (.ref a) (.ref r τ)
@@ -109,8 +112,11 @@ inductive StackOk (Δ : Ctx) (S : StoreTy) : List Frame → Ty → Row → List 
       {Φ ϕ : List Rgn} :
       S.handlers id = some (ρ, ε₀, Φ) → HandlerRt Δ S h σ ρ H ε₀ Φ → Row.le ε₀ ε → Sub Φ ϕ →
       StackOk Δ S st ρ ε ϕ → StackOk Δ S (.handler id h :: st) σ (H ++ ε₀) Φ
+  /-- The scope of a label passes its result on, and grants its own region:
+  what lets the code above apply the label. -/
   | label {id : Nat} {st : List Frame} {τ : Ty} {ε : Row} {ϕ : List Rgn} :
-      S.labels id = some τ → StackOk Δ S st τ ε ϕ → StackOk Δ S (.label id :: st) τ ε ϕ
+      S.labels id = some τ → StackOk Δ S st τ ε ϕ →
+      StackOk Δ S (.label id :: st) τ ε (.lab id :: ϕ)
   | guard {fn : Nat} {captures : List Value} {st : List Frame} {Cs : List Ty} {σc τ : Ty}
       {ε : Row} {ϕ : List Rgn} :
       Enters Δ fn Cs [] σc [] ϕ → HasVals Δ S captures Cs → StackOk Δ S st τ ε ϕ →
