@@ -188,8 +188,9 @@ private partial def parseUnary (noBlock : Bool) : P Expr := do
         | _ => failAt "operator `-` has no prefix fixity"
       else if t == .op "&" then
         advance
-        if (← peek) == .ident "mut" then advance
-        pure (.ref (← expectIdent))
+        let uniq := (← peek) == .ident "mut"
+        if uniq then advance
+        pure (.ref uniq (← expectIdent))
       else if t == .op "*" then
         advance
         pure (.deref (← parseUnary noBlock))
@@ -381,8 +382,9 @@ private partial def parseType : P TypeExpr := do
     pure .never
   | .op "&" =>
     advance
-    if (← peek) == .ident "mut" then advance
-    pure (.ref (← parseType))
+    let uniq := (← peek) == .ident "mut"
+    if uniq then advance
+    pure (.ref uniq (← parseType))
   | .ident "_" =>
     advance
     pure .hole

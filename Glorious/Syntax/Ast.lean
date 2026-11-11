@@ -41,8 +41,8 @@ inductive Expr where
   | handle (subject : Expr) (arms : List Clause)
   /-- `@name { body }`. -/
   | labelScope (name : String) (body : List Stmt)
-  /-- `&x` or `&mut x`: a reference to a mutable variable. -/
-  | ref (name : String)
+  /-- `&x` or `&mut x`: a shared or a unique reference to a mutable variable. -/
+  | ref (uniq : Bool) (name : String)
   /-- `*e`: the value a reference points to. -/
   | deref (e : Expr)
 
@@ -94,7 +94,7 @@ inductive TypeExpr where
   /-- `fn(A, B) -> R`. Its effects are inferred. -/
   | fn (params : List TypeExpr) (ret : TypeExpr)
   /-- `&T` or `&mut T`. -/
-  | ref (t : TypeExpr)
+  | ref (uniq : Bool) (t : TypeExpr)
   /-- `!`. -/
   | never
   /-- `_`: to be inferred. -/

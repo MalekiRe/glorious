@@ -222,7 +222,7 @@ partial def fvExpr (bound : List String) : Expr → List String
   | .closure _ clauses => clauses.flatMap (fvClause bound)
   | .handle subject arms => fvExpr bound subject ++ arms.flatMap (fvClause bound)
   | .labelScope l body => fvStmts (labelName l :: bound) body
-  | .ref x => if bound.contains x then [] else [x]
+  | .ref _ x => if bound.contains x then [] else [x]
   | .deref e => fvExpr bound e
 
 partial def fvClause (bound : List String) : Clause → List String
@@ -256,7 +256,7 @@ partial def appliedExpr (p : String) : Expr → List Nat
   | .closure _ clauses => clauses.flatMap (appliedClause p)
   | .handle subject arms => appliedExpr p subject ++ arms.flatMap (appliedClause p)
   | .labelScope _ body => appliedStmts p body
-  | .ref _ => []
+  | .ref _ _ => []
   | .deref e => appliedExpr p e
 
 partial def appliedCall (p : String) (f : Expr) (args : List Expr) : List Nat :=
@@ -521,7 +521,7 @@ partial def elabExpr (scope : Scope) (tailPos : Bool) : Expr → M Atom
       terminate (.labelTail thunk)
       pure (.int 0)
     else emit (.label thunk)
-  | .ref x =>
+  | .ref _ x =>
     match lookupVar scope x with
     | some (true, _, c) => pure c
     | some (false, _, _) => throw s!"`{x}` is not a mutable variable, so it cannot be borrowed"

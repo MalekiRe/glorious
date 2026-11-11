@@ -1743,7 +1743,7 @@ partial def resolveType (typeNames params : List String) : TypeExpr → M ITy
     let row ← freshRow
     pure (.func (← ps.mapM (resolveType typeNames params)) (← resolveType typeNames params r) row
       (← freshCls) (← freshTy) (← freshAcc))
-  | .ref t => do pure (.ref (← freshRg) (← resolveType typeNames params t))
+  | .ref _ t => do pure (.ref (← freshRg) (← resolveType typeNames params t))
   | .never => freshTy
   | .hole => freshTy
 

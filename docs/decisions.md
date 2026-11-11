@@ -587,16 +587,73 @@ the programs it accepts.
    and the program goes wrong, then it is at an arithmetic operation whose
    result does not fit in 64 bits.** `checked_compiled_full_safety` says the
    same of its bytecode. 133 of the 140 test programs get this.
-5. **Unique references**: a `&mut` is the only way to its cell while it lives.
-   Not done. Nothing depends on it for safety here: a cell holds a whole
-   value, there are no references into the middle of one, and a mutable
-   variable is by design shared by the blocks that capture it. It would be a
-   discipline on the programmer, with a theorem about exclusive access, not
-   about going wrong.
+5. **Exclusive references.** In progress: see "References are exclusive"
+   below. The surface checker enforces it; Core does not know of it yet, so
+   nothing is proved about it.
 
 The specification's lifetimes (language specification section 9) are the
-surface form of this; written lifetime parameters, variance and reborrowing
-are not part of the plan above.
+surface form of this; written lifetime parameters, variance and outlives
+bounds are not part of the plan above.
+
+## References are exclusive
+
+**Decision (user): `&mut x` is exclusive, as in Rust.** `&x` and `&mut x` are
+different types. While a `&mut` borrow of a variable lasts, the variable is
+used only through it; while a `&` borrow lasts, the variable is not assigned
+and not borrowed with `&mut`. Writing through a reference needs `&mut`.
+
+- **A borrow lasts while something that holds it may still be used**: the
+  reference, a value it was put in, a callable that captured it, a variable it
+  was assigned to. "May still be used" is: is mentioned by the rest of the
+  block it is in, or of a block around that; and, inside a callable, anything
+  the callable mentions from outside, since the callable may run again. A
+  value an expression has computed and not yet used, such as an earlier
+  argument of a call, holds what it holds until the expression is done.
+- **A `&mut` reference used as a value is lent, not copied.** What receives it
+  borrows from it, and the reference cannot be used until that is over. So
+  `incr(p); incr(p)` is fine, and so is `let q = p; *q = 1; *p = 2`, where
+  Rust would call `p` moved; `let q = p; *p = 1; *q = 2` is an error. A `&mut`
+  where a `&` is wanted is lent for reading.
+- **A function that only reads through a reference takes either kind.** The
+  kind is inferred like a type, and a function is polymorphic in it.
+
+**Decision: a callable that mentions a mutable variable does not borrow it.**
+It uses the variable when it runs, so what a borrow forbids is *calling* it,
+and passing it to a call that might. This departs from Rust, where a closure
+borrows what it mentions for as long as the closure lives. The reason is the
+rule that the compiler knows no control flow: `while({ i < 5 }) { i = i + 1 }`
+is a call given two callables, one that reads `i` and one that assigns it, both
+alive throughout. Under Rust's rule that is an error unless the checker is
+taught what `while` does. Under this rule nothing needs teaching: neither
+callable holds a reference, and they do not run at the same time. What is lost
+is only that two callables over one variable may exist together; no reference
+can be made to see a change it should not.
+
+What the rule is not, yet:
+
+- **It is not proved.** It is a check in `Check.lean`, like the checks on
+  scopes that it sits beside. Core's references have one kind and are freely
+  copied.
+- An operation that can be resumed, performed while a borrow is held, runs a
+  handler's arm; if the arm uses the borrowed variable, that is not noticed.
+- A `&mut` reference is lent only where its type is known when it is used. One
+  copied before that, or inside a tuple or a declared type, or by a function
+  generic in its type, is copied: the copies are one borrow.
+- "Still to be used" is read off the text, not the paths through it: a name
+  mentioned later in any branch counts.
+- A value that is either what a body gave or the body that was not run, which
+  is what `if` gives `else`, is understood: its alternatives are not both
+  there. Two separate values that are never both live are not.
+
+How it works. A borrow is one more thing a capture variable can capture, so a
+type says which borrows a value of it holds, in the way it already says which
+labels and variables it can reach. Each use of a variable, each use through a
+reference and each call is recorded with the names the rest of the computation
+mentions and the values the expression had in hand, and all are checked at the
+end of the function, when the types are known. A use of a function inside its
+own recursive group is given captures of its own, related to the function's as
+any other use is, so that what a function passes to itself is not taken to be
+what it was passed.
 
 ## Other standing decisions
 

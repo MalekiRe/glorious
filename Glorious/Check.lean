@@ -14,9 +14,10 @@ The checker establishes that values are used at consistent types, that calls
 supply the right number of arguments, that pattern clauses cover every case,
 that every effect a program performs is handled before it reaches `main`, that
 no callable able to jump to a label can be called after the label's scope has
-ended, and that nothing able to reach a mutable variable outlives the block the
-variable is declared in, and that nothing holding a resumption is used more
-than once. This pass is not proved.
+ended, that nothing able to reach a mutable variable outlives the block the
+variable is declared in, that a variable is not used against a borrow of it
+that is still held, and that nothing holding a resumption is used more than
+once. This pass is not proved.
 -/
 
 namespace Glorious.Check
@@ -37,8 +38,10 @@ inductive Ty where
   callable has captured, so that the scopes it depends on can be found. -/
   | fn (params : List Ty) (ret : Ty) (effs : List (String × List Ty)) (tail : Option Nat)
       (cap : Nat)
-  /-- A reference to a mutable variable; `cap` identifies which it may refer to. -/
-  | ref (t : Ty) (cap : Nat)
+  /-- A reference to a mutable variable; `cap` identifies which it may refer to
+  and the borrow it comes from. `how` is `Ty.uniq` for `&mut`, `Ty.shared` for
+  `&`, or a variable where a function works with either. -/
+  | ref (how : Ty) (t : Ty) (cap : Nat)
   deriving Inhabited
 
 /-- A set of effects, possibly open. -/
@@ -51,6 +54,12 @@ def Ty.int : Ty := .con "Int" []
 
 def Ty.unit : Ty := .tuple []
 
+/-- How a reference borrows: for writing too, with nothing else using the
+variable meanwhile, or for reading only, alongside other readers. -/
+def Ty.uniq : Ty := .con "&mut" []
+
+def Ty.shared : Ty := .con "&" []
+
 def Ty.func (params : List Ty) (ret : Ty) (row : Row) (cap : Nat) : Ty :=
   .fn params ret row.effs row.tail cap
 
@@ -61,6 +70,12 @@ inductive Captured where
   | ty (t : Ty)
   /-- A resumption: whatever holds it can be used only once. -/
   | once
+  /-- A borrow of a mutable variable, by its identity: whatever holds it keeps
+  the borrow going. -/
+  | loan (id : Nat)
+  /-- A mutable variable, by the brand of its block, that a callable reads or
+  assigns when it runs. -/
+  | touch (brand : Nat) (write : Bool)
 
 /-- A type with some of its variables generalised. `edges` records what the
 generalised capture variables capture, to be repeated at each use. -/
@@ -105,6 +120,45 @@ inductive Binding where
   | poly (s : Scheme)
 
 abbrev Scope := List (String × Binding)
+
+/-- A borrow. `&x` and `&mut x` borrow a mutable variable; a `&mut` reference
+used as a value is not copied but lent, which borrows from the reference. -/
+structure Loan where
+  id : Nat
+  /-- The variable borrowed, by the brand of its block. -/
+  root : Option Nat
+  uniq : Bool
+  /-- For a reference that was lent: its capture variable, and that of the
+  reference given in its place. -/
+  parent : Option (Nat × Nat)
+
+/-- What is done to a mutable variable. -/
+inductive Using where
+  | read
+  | write
+  /-- `&x`. -/
+  | share
+  /-- `&mut x`. -/
+  | lend
+
+/-- Something that a borrow still in use can forbid. -/
+inductive UseKind where
+  | var (brand : Nat) (name : String) (how : Using)
+  /-- Reading or writing through a reference, or lending it. -/
+  | through (cap : Nat) (name : String) (write : Bool)
+  /-- A call, which may run any callable that these types hold. -/
+  | call (what : String) (tys : List Ty)
+
+/-- A use, with what was still to be used when it happened: the names the rest
+of the computation mentions, and the values the expression around it had
+already computed. -/
+structure Use where
+  owner : String
+  pos : String
+  kind : UseKind
+  scope : Scope
+  later : List String
+  temps : List (Ty × Nat)
 
 /-- A coverage check to run once the types involved are known. `what` names the
 clauses and ends with the verb of the message. -/
@@ -169,6 +223,18 @@ structure St where
   coercing : List String := []
   /-- The coercions applied, each with the place it is applied at. -/
   coercions : Array (Elab.Site × String) := #[]
+  /-- The function being checked. -/
+  owner : String := ""
+  /-- The names the computation still mentions after the expression being checked. -/
+  later : List String := []
+  /-- The values the expression being checked has computed and not yet used,
+  each with how many borrows had been made when it was computed. -/
+  temps : List (Ty × Nat) := []
+  loans : Array Loan := #[]
+  /-- Mutable variables, by the brand of their block: the name, and the type held. -/
+  cells : Array (Nat × String × Ty) := #[]
+  /-- Uses to check against the borrows once the types are known. -/
+  uses : Array Use := #[]
 
 abbrev M := StateT St (Except String)
 
@@ -248,8 +314,8 @@ partial def zonk (t : Ty) : M Ty := do
   | .fn ps r effs tail cap => do
     let row ← zonkRow ⟨effs, tail⟩
     pure (.fn (← ps.mapM zonk) (← zonk r) row.effs row.tail (← findCap cap))
-  | .ref t cap => do
-    pure (.ref (← zonk t) (← findCap cap))
+  | .ref how t cap => do
+    pure (.ref (← zonk how) (← zonk t) (← findCap cap))
 
 partial def zonkRow (r : Row) : M Row := do
   let r ← flattenRow r
@@ -277,7 +343,8 @@ partial def showTy : Ty → String
   | .fn ps r effs _ _ =>
     let sig := s!"fn({", ".intercalate (ps.map showTy)}) -> {showTy r}"
     if effs.isEmpty then sig else s!"{sig} / {showEffs effs}"
-  | .ref t _ => s!"&mut {showTy t}"
+  | .ref (.con "&mut" []) t _ => s!"&mut {showTy t}"
+  | .ref _ t _ => s!"&{showTy t}"
 
 partial def showEffs (effs : List (String × List Ty)) : String :=
   let one := fun (e : String × List Ty) =>
@@ -296,7 +363,7 @@ partial def freeTys : Ty → List Nat
   | .tuple args => args.flatMap freeTys
   | .fn ps r effs _ _ =>
     ps.flatMap freeTys ++ freeTys r ++ effs.flatMap (fun e => e.2.flatMap freeTys)
-  | .ref t _ => freeTys t
+  | .ref how t _ => freeTys how ++ freeTys t
 
 partial def freeRows : Ty → List Nat
   | .var _ => []
@@ -305,7 +372,7 @@ partial def freeRows : Ty → List Nat
   | .fn ps r effs tail _ =>
     ps.flatMap freeRows ++ freeRows r ++ effs.flatMap (fun e => e.2.flatMap freeRows)
       ++ tail.toList
-  | .ref t _ => freeRows t
+  | .ref _ t _ => freeRows t
 
 end
 
@@ -315,7 +382,7 @@ partial def freeCaps : Ty → List Nat
   | .tuple args => args.flatMap freeCaps
   | .fn ps r effs _ cap =>
     cap :: (ps.flatMap freeCaps ++ freeCaps r ++ effs.flatMap (fun e => e.2.flatMap freeCaps))
-  | .ref t cap => cap :: freeCaps t
+  | .ref _ t cap => cap :: freeCaps t
 
 /-- Replace variables: type variables by types, row and capture variables by
 variables of their own kind. -/
@@ -328,7 +395,13 @@ partial def subst (tm : List (Nat × Ty)) (rm cm : List (Nat × Nat)) : Ty → T
       (effs.map fun (n, args) => (n, args.map (subst tm rm cm)))
       (tail.map fun id => (rm.lookup id).getD id)
       ((cm.lookup cap).getD cap)
-  | .ref t cap => .ref (subst tm rm cm t) ((cm.lookup cap).getD cap)
+  | .ref how t cap => .ref (subst tm rm cm how) (subst tm rm cm t) ((cm.lookup cap).getD cap)
+
+/-- A type with every capture variable replaced by a new one. -/
+def freshenCaps (t : Ty) : M Ty := do
+  let t ← zonk t
+  let cm ← (freeCaps t).eraseDups.mapM fun c => do pure (c, ← freshCap)
+  pure (subst [] [] cm t)
 
 def instantiate (s : Scheme) (via : Option String := none) : M Ty := do
   let tm ← s.tvars.mapM fun id => do
@@ -341,7 +414,9 @@ def instantiate (s : Scheme) (via : Option String := none) : M Ty := do
     captures ((cm.lookup cap).getD cap) (match what with
       | .ty t => .ty (subst tm rm cm t)
       | .brand b => .brand b
-      | .once => .once)
+      | .once => .once
+      | .loan l => .loan l
+      | .touch b w => .touch b w)
   let pos := (← get).pos
   for (t, why) in s.dups do
     -- At a use, the reason is the function's need rather than its inner detail.
@@ -379,9 +454,9 @@ partial def openParams (seen : List (String × Ty)) : Ty → M (Ty × List (Stri
       seen := s
       effs' := effs'.push (n, args)
     pure (.fn ps r effs'.toList tail cap, seen)
-  | .ref t cap => do
+  | .ref how t cap => do
     let (t, seen) ← openParams seen t
-    pure (.ref t cap, seen)
+    pure (.ref how t cap, seen)
 where
   openAll (seen : List (String × Ty)) (ts : List Ty) : M (List Ty × List (String × Ty)) := do
     let mut seen := seen
@@ -432,6 +507,8 @@ def generalize (t : Ty) (keep : List Ty := []) (top : Bool := true) : M Scheme :
       all := all.push (root, .ty target)
     | .brand b => all := all.push (root, .brand b)
     | .once => all := all.push (root, .once)
+    | .loan l => all := all.push (root, .loan l)
+    | .touch b w => all := all.push (root, .touch b w)
   -- What must be free to use more than once is part of the function's
   -- contract, so the capture variables it mentions are generalised too.
   let mut dups : Array (Ty × String) := #[]
@@ -483,7 +560,9 @@ partial def unify (a b : Ty) : M Unit := do
       unifyRow ⟨e1, t1⟩ ⟨e2, t2⟩
       unifyCap c1 c2
     else mismatch a b
-  | .ref x c1, .ref y c2 => do
+  | .ref h1 x c1, .ref h2 y c2 => do
+    try unify h1 h2
+    catch _ => mismatch a b
     unify x y
     unifyCap c1 c2
   | _, _ => mismatch a b
@@ -655,10 +734,10 @@ partial def resolveType (params : List (String × Ty)) (decl : Bool) : TypeExpr 
     if decl then
       modify fun s => { s with monoRows := tail :: s.monoRows, monoCaps := cap :: s.monoCaps }
     pure (.fn ps r [] (some tail) cap)
-  | .ref t => do
+  | .ref uniq t => do
     let cap ← freshCap
     if decl then modify fun s => { s with monoCaps := cap :: s.monoCaps }
-    pure (.ref (← resolveType params decl t) cap)
+    pure (.ref (if uniq then .uniq else .shared) (← resolveType params decl t) cap)
   | .never => throw "`!` can only be the result of an operation"
   | .hole => if decl then inferred else freshTy
 where
@@ -897,6 +976,8 @@ partial def capHolds (brand : Nat) (cap : Nat) : M Bool := do
       | .brand b => if b == brand then return true
       | .ty t => if ← tyHolds brand t then return true
       | .once => pure ()
+      | .loan _ => pure ()
+      | .touch _ _ => pure ()
   return false
 
 /-- Does the type mention a callable that holds the brand? -/
@@ -911,7 +992,7 @@ partial def tyHolds (brand : Nat) (t : Ty) : M Bool := do
     if ← tyHolds brand r then return true
     let row ← flattenRow ⟨effs, tail⟩
     row.effs.anyM fun e => e.2.anyM (tyHolds brand)
-  | .ref t cap => do
+  | .ref _ t cap => do
     if ← capHolds brand cap then return true
     tyHolds brand t
 
@@ -989,6 +1070,8 @@ partial def capOwnsOnce (cap : Nat) : M Bool := do
       | .once => return true
       | .ty t => if ← tyOwnsOnce [] t then return true
       | .brand _ => pure ()
+      | .loan _ => pure ()
+      | .touch _ _ => pure ()
   return false
 
 /-- Does a value of this type hold a resumption? -/
@@ -997,7 +1080,7 @@ partial def tyOwnsOnce (visiting : List String) (t : Ty) : M Bool := do
   | .var _ => pure false
   | .tuple args => args.anyM (tyOwnsOnce visiting)
   | .fn _ _ _ _ cap => capOwnsOnce cap
-  | .ref _ _ => pure false
+  | .ref _ _ _ => pure false
   | .con name args => do
     if ← args.anyM (tyOwnsOnce visiting) then return true
     if visiting.contains name then return false
@@ -1049,7 +1132,7 @@ partial def usesExpr (resumptive : String → Bool) (x : String) : Expr → Nat
     let many := if (arms.filter repeated).any (usesClause resumptive x · > 0) then 2 else 0
     addUses (addUses (usesExpr resumptive x subject) once) many
   | .labelScope _ body => usesStmts resumptive x body
-  | .ref _ => 0
+  | .ref _ _ => 0
   | .deref e => usesExpr resumptive x e
 
 partial def usesClause (resumptive : String → Bool) (x : String) : Clause → Nat
@@ -1367,7 +1450,7 @@ partial def runExpr (ctx : ACtx) (depth : Nat) (env : List (String × AVal)) : E
     let alts ← runStmts ctx depth env body
     -- Leaving through the label gives a value the count does not follow.
     pure (alts ++ [(.unknown, maxUses alts)])
-  | .ref _ => pure [(.unknown, 0)]
+  | .ref _ _ => pure [(.unknown, 0)]
   | .deref e => do
     let alts ← runExpr ctx depth env e
     let mut worst := 0
@@ -1514,6 +1597,289 @@ partial def irrefutable : Pattern → M Bool
     return ((← get).aliases.lookup x).isNone
   | .ctor _ _ _ => pure false
 
+/-! ## Borrows
+
+`&x` borrows a mutable variable for reading, `&mut x` for writing too. A
+borrow lasts for as long as something that holds it may still be used: the
+reference itself, a value it was put in, a callable that captured it, a
+variable it was assigned to. While a `&mut` borrow lasts, the variable can be
+used only through it; while a `&` borrow lasts, the variable cannot be assigned
+or borrowed with `&mut`.
+
+A callable that mentions a mutable variable does not borrow it. It uses the
+variable when it runs, so what a borrow forbids is calling it. This is what
+lets a condition and a body, or the arms of a handler, be separate callables
+over the same variables, with no rule that knows what `while` or `if` is.
+
+A `&mut` reference used as a value is lent rather than copied: what receives it
+borrows from it, and the reference cannot be used again until that is over.
+
+Each use is recorded with what was still to be used when it happened, and
+checked once the types say what holds which borrow.
+-/
+
+def withLater {α : Type} (names : List String) (act : M α) : M α := do
+  let outer := (← get).later
+  modify fun s => { s with later := names ++ outer }
+  let r ← act
+  modify fun s => { s with later := outer }
+  pure r
+
+/-- Run a part of an expression, forgetting the values it computed on the way. -/
+def withTemps {α : Type} (act : M α) : M α := do
+  let outer := (← get).temps
+  let r ← act
+  modify fun s => { s with temps := outer }
+  pure r
+
+def pushTemp (t : Ty) : M Unit := modify fun s => { s with temps := (t, s.loans.size) :: s.temps }
+
+def use (scope : Scope) (kind : UseKind) : M Unit :=
+  modify fun s =>
+    { s with uses := s.uses.push ⟨s.owner, s.pos, kind, scope, s.later, s.temps⟩ }
+
+def freshLoan (root : Option Nat) (uniq : Bool) (parent : Option (Nat × Nat)) : M Nat := do
+  let id := (← get).loans.size
+  modify fun s => { s with loans := s.loans.push ⟨id, root, uniq, parent⟩ }
+  pure id
+
+mutual
+
+partial def capHoldsLoan (loan : Nat) (cap : Nat) : M Bool := do
+  let root ← findCap cap
+  if (← get).seen.contains root then return false
+  modify fun s => { s with seen := root :: s.seen }
+  for (src, what) in (← get).capEdges do
+    if (← findCap src) == root then
+      match what with
+      | .loan l => if l == loan then return true
+      | .ty t => if ← tyHoldsLoan loan t then return true
+      | .brand b => if ← cellHoldsLoan loan b then return true
+      | .touch b _ => if ← cellHoldsLoan loan b then return true
+      | .once => pure ()
+  return false
+
+/-- A callable that uses a mutable variable can reach what the variable holds. -/
+partial def cellHoldsLoan (loan : Nat) (brand : Nat) : M Bool := do
+  for (b, _, t) in (← get).cells do
+    if b == brand then
+      if ← tyHoldsLoan loan t then return true
+  return false
+
+/-- Does a value of this type hold the borrow? What a callable takes and gives
+back is not what it holds: only what it captured is. -/
+partial def tyHoldsLoan (loan : Nat) (t : Ty) : M Bool := do
+  match ← find t with
+  | .var _ => pure false
+  | .con _ args => args.anyM (tyHoldsLoan loan)
+  | .tuple args => args.anyM (tyHoldsLoan loan)
+  | .fn _ _ _ _ cap => capHoldsLoan loan cap
+  | .ref _ t cap => do
+    if ← capHoldsLoan loan cap then return true
+    tyHoldsLoan loan t
+
+end
+
+mutual
+
+partial def capTouches (cap : Nat) (out : List (Nat × Bool)) : M (List (Nat × Bool)) := do
+  let root ← findCap cap
+  if (← get).seen.contains root then return out
+  modify fun s => { s with seen := root :: s.seen }
+  let mut out := out
+  for (src, what) in (← get).capEdges do
+    if (← findCap src) == root then
+      match what with
+      | .touch b w => unless out.contains (b, w) do out := (b, w) :: out
+      | .ty t => out ← tyTouches t out
+      | _ => pure ()
+  return out
+
+/-- The mutable variables that running the callables a value holds may read or
+assign. -/
+partial def tyTouches (t : Ty) (out : List (Nat × Bool)) : M (List (Nat × Bool)) := do
+  match ← find t with
+  | .var _ => pure out
+  | .con _ args => args.foldlM (fun o a => tyTouches a o) out
+  | .tuple args => args.foldlM (fun o a => tyTouches a o) out
+  | .fn _ _ _ _ cap => capTouches cap out
+  | .ref _ t _ => tyTouches t out
+
+end
+
+/-- Whether doing this to a variable is forbidden by a borrow of it. -/
+def Using.forbiddenBy (how : Using) (uniq : Bool) : Bool :=
+  match how with
+  | .read => uniq
+  | .share => uniq
+  | .write => true
+  | .lend => true
+
+/-- The types a binding's value has, for looking into what it holds. -/
+private def Binding.held : Binding → Option Ty
+  | .val t => some t
+  | .cell t _ => some t
+  | .poly s => some s.ty
+  | .label _ _ => none
+
+def holdsLoan (loan : Nat) (t : Ty) : M Bool := do
+  modify fun s => { s with seen := [] }
+  tyHoldsLoan loan t
+
+def touchesVar (brand : Nat) (write : Bool) (t : Ty) : M Bool := do
+  modify fun s => { s with seen := [] }
+  let touched ← tyTouches t []
+  pure (touched.any fun (b, w) => b == brand && (w || !write))
+
+/-- A value computed before a borrow was first made cannot hold it, unless it
+came from something that was there before and does: a variable that keeps what
+an earlier run of the same code borrowed. -/
+def tempHolds (loan : Nat) (u : Use) (t : Ty) (made : Nat) : M Bool := do
+  unless ← holdsLoan loan t do return false
+  if loan < made then return true
+  for (_, b) in u.scope do
+    if let some t := b.held then
+      if ← holdsLoan loan t then return true
+  return false
+
+/-- What still holds a borrow where a use happens, if anything does. -/
+def holderOf (loan : Nat) (u : Use) : M (Option String) := do
+  for name in u.later.eraseDups do
+    if let some t := (u.scope.lookup name).bind Binding.held then
+      if ← holdsLoan loan t then return some s!"`{name}`"
+  for (t, made) in u.temps do
+    if ← tempHolds loan u t made then return some "a value this expression is still using"
+  return none
+
+/-- One value both holds a borrow of a variable and holds a callable that uses
+the variable. That is a conflict only if it can be both at once: the fields of
+one constructor are, the alternatives of a type are not. This is what lets a
+value be either what a body gave or the body that was not run. -/
+partial def bothAtOnce (loan brand : Nat) (write : Bool) (t : Ty) : M Bool := do
+  unless (← holdsLoan loan t) && (← touchesVar brand write t) do return false
+  let together := fun (fields : List Ty) => (do
+    let mut holding : List Nat := []
+    let mut touching : List Nat := []
+    for (f, i) in fields.zipIdx do
+      if ← holdsLoan loan f then holding := i :: holding
+      if ← touchesVar brand write f then touching := i :: touching
+    if holding.any fun i => touching.any (· != i) then return true
+    for (f, i) in fields.zipIdx do
+      if holding.contains i && touching.contains i then
+        if ← bothAtOnce loan brand write f then return true
+    return false : M Bool)
+  match ← find t with
+  | .tuple fields => together fields
+  | .con name args =>
+    match (← get).types.lookup name with
+    | none => pure true
+    | some decl =>
+      for c in decl.ctors do
+        match (← get).ctors.lookup c with
+        | none => return true
+        | some sig =>
+          if ← together (sig.fields.map (subst (sig.tvars.zip args) [] [])) then return true
+      return false
+  | _ => pure true
+
+/-- Check the uses recorded against the borrows, now that types are known. -/
+def checkLoans : M Unit := do
+  let s ← get
+  modify fun st => { st with uses := #[] }
+  if s.loans.isEmpty then return
+  let fail := fun (u : Use) (msg : String) => (throw (inFunction u.owner (u.pos ++ msg)) : M Unit)
+  for u in s.uses do
+    match u.kind with
+    | .var brand x how =>
+      for l in s.loans do
+        if l.root == some brand && how.forbiddenBy l.uniq then
+          if let some who ← holderOf l.id u then
+            let kind := if l.uniq then "`&mut` reference" else "reference"
+            fail u (match how with
+              | .read => s!"`{x}` is read while {who} holds a {kind} to it"
+              | .write => s!"`{x}` is assigned while {who} holds a {kind} to it"
+              | .share => s!"`{x}` is borrowed while {who} holds a {kind} to it"
+              | .lend => s!"`{x}` is borrowed with `&mut` while {who} holds a {kind} to it")
+    | .through cap name write =>
+      let root ← findCap cap
+      for l in s.loans do
+        if let some (parent, own) := l.parent then
+          -- A reference lent to the function it is a parameter of, from inside
+          -- it, has become the same as what was lent from it: nothing to tell apart.
+          if (l.uniq || write) && (← findCap parent) == root && (← findCap own) != root then
+            if let some who ← holderOf l.id u then
+              fail u s!"{name} is used while {who}, which borrows from it, is still in use"
+    | .call what tys =>
+      -- The values of the call are the last of the values computed: the
+      -- callee and its arguments, each of which may hold callables.
+      let mine := (u.temps.take tys.length).reverse
+      let outer := { u with temps := u.temps.drop tys.length }
+      for (t, i) in tys.zipIdx do
+        modify fun st => { st with seen := [] }
+        for (brand, write) in ← tyTouches t [] do
+          for l in s.loans do
+            if l.root == some brand && (write || l.uniq) then
+              let mut found ← holderOf l.id outer
+              for ((t', made), j) in mine.zipIdx do
+                if found.isNone then
+                  if ← tempHolds l.id u t' made then
+                    if i != j || (← bothAtOnce l.id brand write t') then
+                      found := some "a value this expression is still using"
+              if let some who := found then
+                let x := ((s.cells.toList.find? (·.1 == brand)).map (·.2.1)).getD "a variable"
+                let kind := if l.uniq then "`&mut` reference" else "reference"
+                let does := if write then "assign or borrow" else "read"
+                fail u s!"calling {what} may {does} `{x}` while {who} holds a {kind} to it"
+
+mutual
+
+/-- Does the code assign the mutable variable `x`, or borrow it with `&mut`? -/
+partial def assignsExpr (x : String) : Expr → Bool
+  | .int _ => false
+  | .name _ _ => false
+  | .label _ => false
+  | .call _ f args => assignsExpr x f || args.any (assignsExpr x)
+  | .tailCall _ f args => assignsExpr x f || args.any (assignsExpr x)
+  | .tuple args => args.any (assignsExpr x)
+  | .proj e _ => assignsExpr x e
+  | .closure _ clauses => clauses.any (assignsClause x)
+  | .handle subject arms => assignsExpr x subject || arms.any (assignsClause x)
+  | .labelScope _ body => assignsStmts x body
+  | .ref uniq y => uniq && y == x
+  | .deref e => assignsExpr x e
+
+partial def assignsClause (x : String) : Clause → Bool
+  | .mk _ body => assignsStmts x body
+
+partial def assignsStmts (x : String) : List Stmt → Bool
+  | [] => false
+  | .let_ _ value :: rest => assignsExpr x value || assignsStmts x rest
+  | .expr e :: rest => assignsExpr x e || assignsStmts x rest
+  | .defer e :: rest => assignsExpr x e || assignsStmts x rest
+  | .located _ _ s :: rest => assignsStmts x (s :: rest)
+  | .letMut _ value :: rest => assignsExpr x value || assignsStmts x rest
+  | .assign target value :: rest =>
+    (match target with
+      | .name none y => y == x
+      | e => assignsExpr x e) || assignsExpr x value || assignsStmts x rest
+
+end
+
+/-- A `&mut` reference used as a value is lent: what is given is a reference
+that borrows from it. Anything else is given as it is. -/
+def lend (scope : Scope) (x : String) (t : Ty) : M Ty := do
+  match ← find t with
+  | .ref how inner cap =>
+    match ← find how with
+    | .con "&mut" [] =>
+      use scope (.through cap s!"`{x}`" true)
+      let cap' ← freshCap
+      captures cap' (.loan (← freshLoan none true (some (cap, cap'))))
+      captures cap' (.ty t)
+      pure (.ref how inner cap')
+    | _ => pure t
+  | _ => pure t
+
 /-! ## Expressions -/
 
 /-- What a name in an expression refers to. -/
@@ -1548,15 +1914,23 @@ def resolveName (scope : Scope) (qual : Option String) (x : String) : M Head := 
 
 /-- Record that `cap` captures the named bindings: a value by its type, a label
 or a mutable variable by the brand of its scope as well. -/
-def captureAll (scope : Scope) (cap : Nat) (names : List String) : M Unit := do
-  -- Capturing a mutable variable holds the variable, not what is in it.
+def captureAll (scope : Scope) (cap : Nat) (names : List String) (assigns : String → Bool) :
+    M Unit := do
+  -- Capturing a mutable variable holds the variable, not what is in it; and
+  -- the callable reads or assigns the variable when it runs.
   for name in names.eraseDups do
     match scope.lookup name with
     | some (.val t) => captures cap (.ty t)
-    | some (.cell _ brand) => captures cap (.brand brand)
+    | some (.cell _ brand) =>
+      captures cap (.brand brand)
+      captures cap (.touch brand (assigns name))
     | some (.label _ brand) => captures cap (.brand brand)
     | some (.poly s) => captures cap (.ty s.ty)
     | none => pure ()
+
+private def placeName : Expr → String
+  | .name _ x => s!"`{x}`"
+  | _ => "this reference"
 
 /-- A label is a callable that never returns: it accepts the value its scope
 yields, and holds the scope's brand. -/
@@ -1617,6 +1991,22 @@ def coerceTo (scope : Scope) (amb : Row) (expected actual : Ty) : M (List String
     | none => pure []
   | several => pure several.reverse
 
+/-- A `&mut` reference where a `&` reference is wanted is lent for reading:
+what is given borrows from it, as a reader. -/
+def shareRef (scope : Scope) (expected actual : Ty) : M Bool := do
+  match ← find expected, ← find actual with
+  | .ref how inner cap, .ref how' inner' cap' =>
+    match ← find how, ← find how' with
+    | .con "&" [], .con "&mut" [] =>
+      let fits ← try (do unify inner inner'; pure true) catch _ => pure false
+      unless fits do return false
+      use scope (.through cap' "a reference" false)
+      captures cap (.loan (← freshLoan none false (some (cap', cap))))
+      captures cap (.ty actual)
+      pure true
+    | _, _ => pure false
+  | _, _ => pure false
+
 /-- Marks a failure as a body's result not being the type wanted, which the
 clause the body belongs to can still answer by looking at its clauses in
 another order. -/
@@ -1630,6 +2020,7 @@ def fitAt (scope : Scope) (amb : Row) (what : String) (site : Option Elab.Site)
     unifyAt what expected actual
     pure none
   catch e =>
+    if ← shareRef scope expected actual then return none
     match site with
     | none => pure (some e)
     | some site =>
@@ -1648,9 +2039,10 @@ partial def inferExpr (scope : Scope) (amb : Row) : Expr → M Ty
   | .int _ => pure .int
   | .name q x => do
     match ← resolveName scope q x with
-    | .local (.val t) => pure t
-    | .local (.cell t _) => do
+    | .local (.val t) => lend scope x t
+    | .local (.cell t brand) => do
       mustDup t (readsCell x)
+      use scope (.var brand x .read)
       pure t
     | .local (.label t brand) => labelType t brand
     | .local (.poly s) => instantiate s (some x)
@@ -1669,8 +2061,13 @@ partial def inferExpr (scope : Scope) (amb : Row) : Expr → M Ty
     match scope.lookup ("@" ++ l) with
     | some (.label t brand) => labelType t brand
     | _ => throw s!"unknown label `@{l}`"
-  | .tuple es => do
-    pure (.tuple (← es.mapM (inferExpr scope amb)))
+  | .tuple es => withTemps do
+    let mut ts : Array Ty := #[]
+    for e in es do
+      let t ← inferExpr scope amb e
+      pushTemp t
+      ts := ts.push t
+    pure (.tuple ts.toList)
   | .proj e idx => do
     let subject ← inferExpr scope amb e
     match ← fieldType subject idx with
@@ -1680,8 +2077,8 @@ partial def inferExpr (scope : Scope) (amb : Row) : Expr → M Ty
       let t ← freshTy
       modify fun s => { s with projections := s.projections.push (subject, idx, t, s.pos) }
       pure t
-  | .call id f args => inferCall scope amb f args id
-  | .tailCall id f args => inferCall scope amb f args id
+  | .call id f args => withTemps (inferCall scope amb f args id)
+  | .tailCall id f args => withTemps (inferCall scope amb f args id)
   | .closure id clauses => do
     let t ← inferCallable scope [] none none clauses "the clauses of this callable do" id
     if let .fn _ _ _ _ cap := t then
@@ -1695,20 +2092,33 @@ partial def inferExpr (scope : Scope) (amb : Row) : Expr → M Ty
     unifyAt s!"the result of the scope `@{l}`" t found
     checkEscape brand (jumpsAfter l) (("it is the result of the scope", t) :: scopeRoots scope) amb
     pure t
-  | .ref x =>
+  | .ref uniq x =>
     match scope.lookup x with
     | some (.cell t brand) => do
+      use scope (.var brand x (if uniq then .lend else .share))
       let cap ← freshCap
       captures cap (.brand brand)
-      pure (.ref t cap)
+      captures cap (.loan (← freshLoan (some brand) uniq none))
+      pure (.ref (if uniq then .uniq else .shared) t cap)
     | some _ => throw s!"`{x}` is not a mutable variable, so it cannot be borrowed"
     | none => throw s!"unknown name `{x}`"
   | .deref e => do
-    let t ← inferExpr scope amb e
+    let t ← inferPlace scope amb e
     let inner ← freshTy
-    unifyAt "`*` reads through a reference" (.ref inner (← freshCap)) t
+    let cap ← freshCap
+    unifyAt "`*` reads through a reference" (.ref (← freshTy) inner cap) t
+    use scope (.through cap (placeName e) false)
     mustDup inner "reading through a reference copies the value (`replace` takes it out instead)"
     pure inner
+
+/-- The reference that `*e` goes through. A name is the reference it stands
+for, not one lent from it. -/
+partial def inferPlace (scope : Scope) (amb : Row) : Expr → M Ty
+  | .name none x => do
+    match scope.lookup x with
+    | some (.val t) => pure t
+    | _ => inferExpr scope amb (.name none x)
+  | e => inferExpr scope amb e
 
 /-- Check one argument. Gives the mismatch if it does not fit. -/
 partial def checkArg (scope : Scope) (amb : Row) (what : String) (p : Ty) (a : Expr)
@@ -1728,7 +2138,16 @@ partial def checkArg (scope : Scope) (amb : Row) (what : String) (p : Ty) (a : E
       if let .fn [] _ _ _ cap ← find input then
         modify fun s => { s with unrun := s.unrun.push (id, cap) }
       pure none
-  | _, _ => fitAt scope amb what site p (← inferExpr scope amb a)
+  | _, _ => do
+    -- A name whose type is not known yet, where a `&mut` reference is wanted:
+    -- it is one, so it is lent rather than handed over.
+    if let .name none x := a then
+      if let some (.val t) := scope.lookup x then
+        if let .var _ ← find t then
+          if let .ref how inner _ ← find p then
+            if let .con "&mut" [] ← find how then
+              unify t (.ref how inner (← freshCap))
+    fitAt scope amb what site p (← inferExpr scope amb a)
 
 /-- Check arguments in the given order. Gives the first that does not fit. -/
 partial def checkArgsIn (scope : Scope) (amb : Row) (what : String) (params : List Ty)
@@ -1739,6 +2158,7 @@ partial def checkArgsIn (scope : Scope) (amb : Row) (what : String) (params : Li
       let site := if call == 0 then none else some (Elab.Site.arg call i)
       if let some e ← checkArg scope amb s!"argument {i + 1} of {what}" p a site then
         return some (i, e)
+      pushTemp p
     | _, _ => pure ()
   return none
 
@@ -1766,17 +2186,24 @@ partial def checkArgs (scope : Scope) (amb : Row) (what : String) (params : List
 /-- Apply a callee of a given type in the ambient effects. -/
 partial def applyTy (scope : Scope) (amb : Row) (what : String) (callee : Ty) (args : List Expr)
     (call : Nat := 0) : M Ty := do
+  pushTemp callee
   match ← find callee with
   | .fn ps r effs tail _ => do
     checkArgs scope amb what ps args call
+    use scope (.call what (callee :: ps))
     includeRow ⟨effs, tail⟩ amb what
     pure r
   | t => do
-    let argTys ← args.mapM (inferExpr scope amb)
+    let mut argTys : Array Ty := #[]
+    for a in args do
+      let ty ← inferExpr scope amb a
+      pushTemp ty
+      argTys := argTys.push ty
     let r ← freshTy
     let row ← freshRow
     unifyAt s!"{what} is called with {arguments args.length}"
-      (.func argTys r row (← freshCap)) t
+      (.func argTys.toList r row (← freshCap)) t
+    use scope (.call what (callee :: argTys.toList))
     includeRow row amb what
     pure r
 
@@ -1821,11 +2248,14 @@ partial def inferCall (scope : Scope) (amb : Row) (f : Expr) (args : List Expr)
       pure .unit
     | .replace => do
       let t ← freshTy
-      checkArgs scope amb "`replace`" [.ref t (← freshCap), t] args call
+      let cap ← freshCap
+      checkArgs scope amb "`replace`" [.ref .uniq t cap, t] args call
+      use scope (.through cap "the reference given to `replace`" true)
       pure t
     | .local (.val t) => applyTy scope amb s!"`{x}`" t args call
-    | .local (.cell t _) => do
+    | .local (.cell t brand) => do
       mustDup t (readsCell x)
+      use scope (.var brand x .read)
       applyTy scope amb s!"`{x}`" t args call
     | .local (.label t brand) => do
       applyTy scope amb s!"the label `{x}`" (← labelType t brand) args call
@@ -1860,10 +2290,10 @@ partial def inferStmts (scope : Scope) (amb : Row) (stmts : List Stmt)
     catch e => throw (positioned line col e)
   | [.expr e] => do finish (← inferExpr scope amb e) true
   | .expr e :: rest => do
-    let _ ← inferExpr scope amb e
+    let _ ← withLater (Elab.fvStmts [] rest) (inferExpr scope amb e)
     inferStmts scope amb rest want
   | .let_ (.var x) (.closure id clauses) :: rest => do
-    let t ← inferExpr scope amb (.closure id clauses)
+    let t ← withLater (Elab.fvStmts [x] rest) (inferExpr scope amb (.closure id clauses))
     if (← resolveCtor x none).isSome || ((← get).aliases.lookup x).isSome then
       let binds ← inferPat (.var x) t
       inferStmts (binds ++ scope) amb rest want
@@ -1896,7 +2326,7 @@ partial def inferStmts (scope : Scope) (amb : Row) (stmts : List Stmt)
       checkUses here scope [(x, .poly scheme)] rest
       pure result
   | .let_ pat value :: rest => do
-    let t ← inferExpr scope amb value
+    let t ← withLater (Elab.fvStmts (Elab.patVars pat) rest) (inferExpr scope amb value)
     let binds ← inferPat pat t
     let check : Pending := ⟨(← get).pos, "the pattern of this `let` does", [t], [[pat]]⟩
     modify fun s => { s with pending := s.pending.push check }
@@ -1905,36 +2335,43 @@ partial def inferStmts (scope : Scope) (amb : Row) (stmts : List Stmt)
     checkUses here scope binds rest
     pure result
   | .letMut x value :: rest => do
-    let t ← inferExpr scope amb value
+    let t ← withLater (Elab.fvStmts [x] rest) (inferExpr scope amb value)
     -- The variable lives until the end of this block: nothing that can reach
     -- it may be left over afterwards.
     let brand ← freshBrand
+    modify fun s => { s with cells := s.cells.push (brand, x, t) }
     let result ← inferStmts ((x, .cell t brand) :: scope) amb rest want
     checkEscape brand s!"`{x}` could be used after its block has ended"
       (("something that uses it is the block's result", result) :: scopeRoots scope) amb
     pure result
   | .assign target value :: rest => do
-    let expected ← match target with
-      | .name none x =>
-        match scope.lookup x with
-        | some (.cell t _) => pure t
-        | some _ => throw s!"`{x}` is not a mutable variable"
-        | none => throw s!"unknown name `{x}`"
-      | .deref e => do
-        let inner ← freshTy
-        unifyAt "`*` assigns through a reference" (.ref inner (← freshCap))
-          (← inferExpr scope amb e)
-        pure inner
-      | _ => throw "only a mutable variable or `*reference` can be assigned"
-    unifyAt "the assigned value" expected (← inferExpr scope amb value)
+    withLater (Elab.fvStmts [] rest) do
+      -- The value is computed first, and then the place is written.
+      let (expected, written) ← match target with
+        | .name none x =>
+          match scope.lookup x with
+          | some (.cell t brand) => pure (t, UseKind.var brand x .write)
+          | some _ => throw s!"`{x}` is not a mutable variable"
+          | none => throw s!"unknown name `{x}`"
+        | .deref e => do
+          let inner ← freshTy
+          let cap ← freshCap
+          unifyAt "`*` assigns through a reference" (.ref .uniq inner cap)
+            (← inferPlace scope amb e)
+          pure (inner, UseKind.through cap (placeName e) true)
+        | _ => throw "only a mutable variable or `*reference` can be assigned"
+      unifyAt "the assigned value" expected (← inferExpr scope amb value)
+      use scope written
     inferStmts scope amb rest want
   | .defer e :: rest => do
     -- A cleanup performs no effects: it may run while its surroundings are
     -- being left, when no handler should be asked to do anything.
     try
-      let _ ← inferExpr scope ⟨[], none⟩ e
+      let _ ← withLater (Elab.fvStmts [] rest) (inferExpr scope ⟨[], none⟩ e)
     catch err => throw s!"a `defer` cannot perform effects: {err}"
-    inferStmts scope amb rest want
+    -- It runs when the rest is left, so what it mentions is still to be used
+    -- throughout the rest.
+    withLater (Elab.fvExpr [] e) (inferStmts scope amb rest want)
 
 /-- Check a pattern against a type; the names it binds. -/
 partial def inferPat (p : Pattern) (t : Ty) : M Scope := do
@@ -1988,9 +2425,16 @@ partial def inferCallable (scope : Scope) (annots : List (Option Ty)) (ret : Opt
     | some t => pure t
     | none => freshTy
   let row ← freshRow
+  -- The body runs when the callable is called, perhaps again and again: what
+  -- it mentions from outside is still to be used wherever the body has got to,
+  -- and the values the expression around it has computed are not its concern.
+  let outerLater := (← get).later
+  let outerTemps := (← get).temps
+  modify fun s =>
+    { s with later := (clauses.flatMap (Elab.fvClause [])).eraseDups, temps := [] }
   -- What the callable captures from the scope it is written in.
   let cap ← freshCap
-  captureAll scope cap (clauses.flatMap (Elab.fvClause []))
+  captureAll scope cap (clauses.flatMap (Elab.fvClause [])) fun x => clauses.any (assignsClause x)
   let brand ← freshBrand
   let scope := match self with
     | some name => ("@" ++ name, Binding.label result brand) :: scope
@@ -2051,6 +2495,7 @@ partial def inferCallable (scope : Scope) (annots : List (Option Ty)) (ret : Opt
     let roots := ("it is returned from the function", result) ::
       params.map fun p => ("the caller could hold it through a parameter", p)
     checkEscape brand (jumpsAfter name) roots row
+  modify fun s => { s with later := outerLater, temps := outerTemps }
   pure (.func params result row cap)
 
 /--
@@ -2081,6 +2526,11 @@ partial def inferHandle (scope : Scope) (amb : Row) (subject : Expr) (arms : Lis
     let decl := (s.effects.lookup e).getD ⟨[], []⟩
     insts := insts ++ [(e, ← decl.tvars.mapM fun _ => freshTy)]
   let ambFlat ← flattenRow amb
+  -- An arm can run whenever the subject performs, and the subject goes on
+  -- when an arm resumes it: what either mentions is still to be used
+  -- throughout the other.
+  let outerLater := (← get).later
+  modify fun st => { st with later := Elab.fvExpr [] (.handle subject arms) ++ outerLater }
   let subjectTy ← inferExpr scope ⟨insts ++ ambFlat.effs, ambFlat.tail⟩ subject
   let result ← freshTy
   if completions.isEmpty then unify result subjectTy
@@ -2113,7 +2563,8 @@ partial def inferHandle (scope : Scope) (amb : Row) (subject : Expr) (arms : Lis
         -- reinstalls the handler, the arms too: everything either of them uses.
         let held ← freshCap
         captures held .once
-        captureAll scope held (Elab.fvExpr [] (.handle subject arms))
+        captureAll scope held (Elab.fvExpr [] (.handle subject arms)) fun x =>
+          assignsExpr x (.handle subject arms)
         let binds ← inferPats ps (payload ++ [.func [o] result amb held])
         let here := (← get).pos
         unifyAt s!"the result of the arm for `{x}`" result
@@ -2135,6 +2586,7 @@ partial def inferHandle (scope : Scope) (amb : Row) (subject : Expr) (arms : Lis
       catch err =>
         throw s!"this handler does not handle every `{e}` operation, and the rest cannot \
           be passed on: {err}"
+  modify fun st => { st with later := outerLater }
   pure result
 
 end
@@ -2185,9 +2637,11 @@ def checkGroup (decls : List FnDecl) : M Unit := do
   for d in decls do
     group := (d.name, ← freshTy) :: group
   modify fun s => { s with group := group }
+  let mut defs : List (String × Ty) := []
+  let mut reused : List (String × Ty) := []
   for d in decls do
     try
-      modify fun s => { s with pos := "" }
+      modify fun s => { s with pos := "", owner := d.name, later := [], temps := [] }
       let rigid := d.params.map fun p => (p, Ty.con s!"'{p}@{d.name}" [])
       let annots ← d.annots.mapM fun
         | some t => some <$> resolveType rigid false t
@@ -2196,7 +2650,15 @@ def checkGroup (decls : List FnDecl) : M Unit := do
         | some t => some <$> resolveType rigid false t
         | none => pure none
       let t ← inferCallable [] annots ret (some d.name) d.clauses s!"the clauses of `{d.name}` do"
-      unifyAt s!"`{d.name}` is used recursively at a different type" ((group.lookup d.name).getD t) t
+      -- A use of the function inside its group has the function's type, but
+      -- what it is given there need not be what the function itself was given:
+      -- the captures of the two are kept apart, and related below.
+      let used := (group.lookup d.name).getD t
+      if let .var _ ← find used then unify used t
+      else
+        unifyAt s!"`{d.name}` is used recursively at a different type" (← freshenCaps used) t
+        reused := (d.name, used) :: reused
+      defs := (d.name, t) :: defs
       runPending
       checkDups (← get).dups
     catch e =>
@@ -2208,8 +2670,15 @@ def checkGroup (decls : List FnDecl) : M Unit := do
         "; if the last expression of the body is not meant as the result, end it with `;`"
         else ""
       throw (inFunction d.name (e ++ hint))
+  -- Each use inside the group is a use like any other: of the function's type
+  -- with captures of its own, which capture what the function's do.
+  for (name, used) in reused do
+    if let some t := defs.lookup name then
+      try unify (← instantiate (← generalize t) (some name)) used
+      catch e => throw (inFunction name s!"`{name}` is used recursively at a different type: {e}")
+  checkLoans
   for d in decls do
-    let scheme ← generalize ((group.lookup d.name).getD .unit)
+    let scheme ← generalize ((defs.lookup d.name).getD .unit)
     modify fun s => { s with fns := (d.name, scheme) :: s.fns }
   -- Later functions follow calls into these as they will be elaborated.
   let cs := (← get).coercions.toList
