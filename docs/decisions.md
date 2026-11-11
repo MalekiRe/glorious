@@ -221,9 +221,11 @@ What is proved (`Typing/Safety.lean`, `Typing/Compiled.lean`,
 
 The four faults are what types alone do not rule out: integer overflow, use of
 a released cell, a second use of a resumption, and a label applied after its
-scope ended. The third is ruled out by the ownership rules below, for programs
-that follow them. The front-end has checks for the second and fourth (scoped
-`let mut`, capture sets). Those checks are not proved.
+scope ended. The third is ruled out by the ownership rules below, and the
+second and fourth by the region rules (see "Borrow checking"), for programs
+that follow them. The front-end has checks of its own for the second and
+fourth (scoped `let mut`, capture sets), which give the errors a programmer
+sees. Those checks are not proved; the region rules are what is.
 
 How the typing is set up, and why:
 
@@ -288,9 +290,10 @@ What the theorems do not say:
   `checkProgram`; that the compiled code computes it is trusted.
 - `covers` is proved sound, not complete. It searches to a bounded depth, and
   a set of clauses that covers its parameters could in principle be turned away.
-- Overflow, use of a freed cell and a label applied after its scope ended remain
-  possible as far as any proof goes; so does a second use of a resumption, for
-  a program compiled without the ownership rules.
+- Overflow remains possible for every program. A second use of a resumption
+  remains possible, as far as any proof goes, for a program compiled without
+  the ownership rules; use of a released cell and a jump to a label whose
+  scope ended, for one compiled without the region rules.
 
 ## Ownership: a resumption is held in one place
 
