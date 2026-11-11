@@ -82,7 +82,7 @@ def dupTy (C : Cert) : Ty → Bool
   | .int => true
   | .tuple fs => dupTys C fs
   | .data name args => dataDup C.datas name args
-  | .fn _ _ _ once => !once
+  | .fn _ _ _ once _ => !once
   | .ref _ => true
   | .never => true
 termination_by structural t => t
@@ -207,7 +207,7 @@ def ctorFieldsOf (C : Cert) (tag : Nat) : Ty → Option (List Ty)
   | .data name args =>
     if tag = 0 then none else (findData C.datas name args).bind (·.lookup tag)
   | .int => none
-  | .fn _ _ _ _ => none
+  | .fn _ _ _ _ _ => none
   | .ref _ => none
   | .never => none
 
@@ -248,7 +248,7 @@ def fieldsOf (C : Cert) : Ty → Option (List Ty)
     | some ((_, Fs) :: rest) => if rest.all (fun c => c.2 == Fs) then some Fs else none
     | _ => none
   | .int => none
-  | .fn _ _ _ _ => none
+  | .fn _ _ _ _ _ => none
   | .ref _ => none
   | .never => none
 
@@ -319,6 +319,18 @@ theorem hasSig_sound {fn : Nat} {sig : FnSig} (h : hasSig C fn sig = true) :
   simp only [Bool.and_eq_true, beq_iff_eq] at hc
   exact ⟨e, he, hc.1, hc.2⟩
 
+/-- An environment a type states is the one the function has. -/
+def envOk (env : Option (List Ty)) (Cs : List Ty) : Bool :=
+  match env with
+  | none => true
+  | some Cs' => Cs' == Cs
+
+theorem envOk_sound {env : Option (List Ty)} {Cs : List Ty} (h : envOk env Cs = true) :
+    ∀ Cs', env = some Cs' → Cs' = Cs := by
+  intro Cs' he
+  subst he
+  simpa [envOk] using h
+
 def checkRhs (C : Cert) (Γ : TEnv) : Rhs → Ty → Bool
   | .atom a, σ => atomTy Γ a == some σ
   | .prim _ args, σ =>
@@ -335,7 +347,13 @@ def checkRhs (C : Cert) (Γ : TEnv) : Rhs → Ty → Bool
     | none => false
   | .closure fn captures, σ =>
     match σ, atomsTy Γ captures with
-    | .fn Ps r e once, some Cs => hasSig C fn ⟨Cs, Ps, r, e⟩ && (once || Cs.all (dupOk C))
+    | .fn Ps r e once env, some Cs =>
+      hasSig C fn ⟨Cs, Ps, r, e⟩ && (once || Cs.all (dupOk C)) && envOk env Cs
+    | _, _ => false
+  | .rebind a fn, σ =>
+    match atomTy Γ a, σ with
+    | some (.fn _ _ _ _ (some Cs)), .fn Ps r e once env =>
+      hasSig C fn ⟨Cs, Ps, r, e⟩ && (once || Cs.all (dupOk C)) && envOk env Cs
     | _, _ => false
 
 theorem checkRhs_sound {Γ : TEnv} {rhs : Rhs} {σ : Ty} (h : checkRhs C Γ rhs σ = true) :
@@ -368,11 +386,23 @@ theorem checkRhs_sound {Γ : TEnv} {rhs : Rhs} {σ : Ty} (h : checkRhs C Γ rhs 
   | closure fn captures =>
     simp only [checkRhs] at h
     split at h
-    · rename_i Ps r e once Cs hcs
+    · rename_i Ps r e once env Cs hcs
       simp only [Bool.and_eq_true, Bool.or_eq_true] at h
-      refine .closure (sig := ⟨Cs, Ps, r, e⟩) (hasSig_sound h.1) (atomsTy_sound hcs)
-        (fun ho => ?_)
-      rcases h.2 with h2 | h2
+      refine .closure (sig := ⟨Cs, Ps, r, e⟩) (hasSig_sound h.1.1) (atomsTy_sound hcs)
+        (fun ho => ?_) (envOk_sound h.2)
+      rcases h.1.2 with h2 | h2
+      · rw [ho] at h2
+        cases h2
+      · exact dupOk_all h2
+    · cases h
+  | rebind a fn =>
+    simp only [checkRhs] at h
+    split at h
+    · rename_i Ps' r' e' once' Cs Ps r e once env ha
+      simp only [Bool.and_eq_true, Bool.or_eq_true] at h
+      refine .rebind (sig := ⟨Cs, Ps, r, e⟩) (atomTy_sound ha) (hasSig_sound h.1.1)
+        (fun ho => ?_) (envOk_sound h.2)
+      rcases h.1.2 with h2 | h2
       · rw [ho] at h2
         cases h2
       · exact dupOk_all h2
@@ -401,7 +431,7 @@ def checkArms (C : Cert) (Cs : List Ty) (ρ : Ty) (ε : Row) : List (Nat × Nat)
     op == op'
       && (match findOp C.ops op targs with
           | some (Ps, none) => hasSigLe C arm Cs Ps ρ ε
-          | some (Ps, some o) => hasSigLe C arm Cs (Ps ++ [.fn [o] ρ ε true]) ρ ε
+          | some (Ps, some o) => hasSigLe C arm Cs (Ps ++ [.fn [o] ρ ε true none]) ρ ε
           | none => false)
       && checkArms C Cs ρ ε ops H
   | [], _ :: _ => false
@@ -451,7 +481,7 @@ def checkTm (C : Cert) : TEnv → Tm → List Hint → Ty → Row → Bool
     | _ => false
   | Γ, .call f args body, hs, τ, ε =>
     match atomTy Γ f with
-    | some (.fn Ps σ ε' _) =>
+    | some (.fn Ps σ ε' _ _) =>
       atomsTy Γ args == some Ps && rowLe ε' ε
         && linearB C Γ (atomVars (f :: args)) (fv body)
         && (if σ = .never then
@@ -462,20 +492,20 @@ def checkTm (C : Cert) : TEnv → Tm → List Hint → Ty → Row → Bool
     | _ => false
   | Γ, .tail f args, _, τ, ε =>
     match atomTy Γ f with
-    | some (.fn Ps σ ε' _) =>
+    | some (.fn Ps σ ε' _ _) =>
       (σ == τ || σ == .never) && atomsTy Γ args == some Ps && rowLe ε' ε
         && linearB C Γ (atomVars (f :: args)) []
     | _ => false
   | Γ, .handle ret ops captures thunk body, hs, τ, ε =>
     match hs, atomTy Γ thunk, atomsTy Γ captures with
-    | .handler ρ H :: hs, some (.fn [] σ εt _), some Cs =>
+    | .handler ρ H :: hs, some (.fn [] σ εt _ _), some Cs =>
       checkHandler C Cs ret ops σ ρ H ε && rowLe εt (H ++ ε)
         && linearB C Γ (atomVars [thunk]) (fv body)
         && checkTm C (Γ ++ [ρ]) body hs τ ε
     | _, _, _ => false
   | Γ, .handleTail ret ops captures thunk, hs, τ, ε =>
     match hs, atomTy Γ thunk, atomsTy Γ captures with
-    | .handler _ H :: _, some (.fn [] σ εt _), some Cs =>
+    | .handler _ H :: _, some (.fn [] σ εt _ _), some Cs =>
       checkHandler C Cs ret ops σ τ H ε && rowLe εt (H ++ ε)
     | _, _, _ => false
   | Γ, .raise op args, _, _, ε =>
@@ -496,28 +526,28 @@ def checkTm (C : Cert) : TEnv → Tm → List Hint → Ty → Row → Bool
     | none => false
   | Γ, .label thunk body, hs, τ, ε =>
     match atomTy Γ thunk with
-    | some (.fn [.fn [σ'] _ _ _] σ εt _) =>
+    | some (.fn [.fn [σ'] _ _ _ none] σ εt _ _) =>
       σ' == σ && rowLe εt ε && linearB C Γ (atomVars [thunk]) (fv body)
         && checkTm C (Γ ++ [σ]) body hs τ ε
     | _ => false
   | Γ, .labelTail thunk, _, τ, ε =>
     match atomTy Γ thunk with
-    | some (.fn [.fn [σ'] _ _ _] σ εt _) => σ' == σ && σ == τ && rowLe εt ε
+    | some (.fn [.fn [σ'] _ _ _ none] σ εt _ _) => σ' == σ && σ == τ && rowLe εt ε
     | _ => false
   | Γ, .guard cleanup thunk body, hs, τ, ε =>
     match atomTy Γ cleanup, atomTy Γ thunk with
-    | some (.fn [] _ [] _), some (.fn [] σ εt _) =>
+    | some (.fn [] _ [] _ _), some (.fn [] σ εt _ _) =>
       rowLe εt ε && linearB C Γ (atomVars [cleanup, thunk]) (fv body)
         && checkTm C (Γ ++ [σ]) body hs τ ε
     | _, _ => false
   | Γ, .guardTail cleanup thunk, _, τ, ε =>
     match atomTy Γ cleanup, atomTy Γ thunk with
-    | some (.fn [] _ [] _), some (.fn [] σ εt _) =>
+    | some (.fn [] _ [] _ _), some (.fn [] σ εt _ _) =>
       σ == τ && rowLe εt ε && linearB C Γ (atomVars [cleanup, thunk]) []
     | _, _ => false
   | Γ, .cancel k body, hs, τ, ε =>
     match atomTy Γ k with
-    | some (.fn [_] _ ε' _) =>
+    | some (.fn [_] _ ε' _ _) =>
       rowLe ε' ε && linearB C Γ (atomVars [k]) (fv body)
         && checkTm C (Γ ++ [.unit]) body hs τ ε
     | _ => false

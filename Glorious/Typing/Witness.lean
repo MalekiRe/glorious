@@ -22,11 +22,11 @@ def askRow : Row := [(0, [])]
 def failRow : Row := [(1, [])]
 
 /-- A computation that may ask; it can be run any number of times. -/
-def asker : Ty := .fn [] .int askRow false
+def asker : Ty := .fn [] .int askRow false none
 
 /-- The resumption the `Ask` arm receives: it runs where `Fail` is served, and
 can be resumed once. -/
-def resumption : Ty := .fn [.int] .int failRow true
+def resumption : Ty := .fn [.int] .int failRow true none
 
 def cert : Cert where
   sigs := [
@@ -42,7 +42,7 @@ def cert : Cert where
   -- and is not resumed.
   ops := [⟨0, [], [.int], some .int⟩, ⟨1, [], [.int], none⟩]
   mainTy := .int
-  mainHints := [.ty asker, .ty asker, .ty (.fn [] .int failRow false), .handler .int failRow]
+  mainHints := [.ty asker, .ty asker, .ty (.fn [] .int failRow false none), .handler .int failRow]
   strict := true
 
 theorem effects_checked : checkProgram cert Glorious.Witness.effects = true := by decide
@@ -66,7 +66,7 @@ those rules on, the checker turns it away. -/
 def twiceCert (strict : Bool) : Cert where
   sigs := [
     ⟨0, ⟨[], [], .int, askRow⟩, [[]]⟩,
-    ⟨1, ⟨[], [.int, .fn [.int] .int [] true], .int, []⟩, [[]]⟩,
+    ⟨1, ⟨[], [.int, .fn [.int] .int [] true none], .int, []⟩, [[]]⟩,
     ⟨2, ⟨[], [.int], .int, []⟩, [[]]⟩]
   datas := []
   ops := [⟨0, [], [.int], some .int⟩]
@@ -93,13 +93,13 @@ example : checkProgram ⟨[], [], [], .int, [.ty .int], true⟩
 /-- A function with a clause for `0` only does not cover its integer parameter;
 with a second clause that binds the argument, it does. -/
 example : checkProgram
-    ⟨[⟨0, ⟨[], [.int], .int, []⟩, [[]]⟩], [], [], .int, [.ty (.fn [.int] .int [] false)], true⟩
+    ⟨[⟨0, ⟨[], [.int], .int, []⟩, [[]]⟩], [], [], .int, [.ty (.fn [.int] .int [] false none)], true⟩
     ⟨[⟨[⟨[.int 0], .ret (.int 1)⟩]⟩], .let_ (.closure 0 []) (.tail (.var 0) [.int 5])⟩
     = false := by decide
 
 example : checkProgram
     ⟨[⟨0, ⟨[], [.int], .int, []⟩, [[], []]⟩], [], [], .int,
-      [.ty (.fn [.int] .int [] false)], true⟩
+      [.ty (.fn [.int] .int [] false none)], true⟩
     ⟨[⟨[⟨[.int 0], .ret (.int 1)⟩, ⟨[.bind], .ret (.var 1)⟩]⟩],
       .let_ (.closure 0 []) (.tail (.var 0) [.int 5])⟩
     = true := by decide
@@ -113,7 +113,7 @@ def optionDecl : DataInst := ⟨0, [], [(1, []), (2, [.int])], true⟩
 have a clause, so the function covers its parameter. -/
 example : checkProgram
     ⟨[⟨0, ⟨[], [option], .int, []⟩, [[], []]⟩], [optionDecl], [], .int,
-      [.ty option, .ty (.fn [option] .int [] false)], true⟩
+      [.ty option, .ty (.fn [option] .int [] false none)], true⟩
     ⟨[⟨[⟨[.ctor 1 []], .ret (.int 0)⟩, ⟨[.ctor 2 [.bind]], .ret (.var 1)⟩]⟩],
       .let_ (.construct 2 [.int 7]) (.let_ (.closure 0 []) (.tail (.var 1) [.var 0]))⟩
     = true := by decide
@@ -121,9 +121,52 @@ example : checkProgram
 /-- Without the clause for `None` it does not. -/
 example : checkProgram
     ⟨[⟨0, ⟨[], [option], .int, []⟩, [[]]⟩], [optionDecl], [], .int,
-      [.ty option, .ty (.fn [option] .int [] false)], true⟩
+      [.ty option, .ty (.fn [option] .int [] false none)], true⟩
     ⟨[⟨[⟨[.ctor 2 [.bind]], .ret (.var 1)⟩]⟩],
       .let_ (.construct 2 [.int 7]) (.let_ (.closure 0 []) (.tail (.var 1) [.var 0]))⟩
     = false := by decide
+
+/-! Two bodies over one environment. A callable that may be called once is
+captured by a first function; a second function is then given what the first
+captured, in its place. Whichever is run, the callable is owned once, so the
+ownership rules accept the program. Capturing it a second time instead owns it
+twice, and they do not. -/
+
+/-- A callable that may be called once, and a function that captured it. -/
+def onceFn : Ty := .fn [] .int [] true none
+
+def shared (env : Option (List Ty)) : Ty := .fn [] .int [] true env
+
+/-- Function 0 gives an integer; functions 1 and 2 each call what they captured. -/
+def bodies : List Fn :=
+  [⟨[⟨[], .ret (.int 1)⟩]⟩, ⟨[⟨[], .tail (.var 0) []⟩]⟩, ⟨[⟨[], .tail (.var 0) []⟩]⟩]
+
+def bodySigs : List SigEntry :=
+  [⟨0, ⟨[], [], .int, []⟩, [[]]⟩, ⟨1, ⟨[onceFn], [], .int, []⟩, [[]]⟩,
+    ⟨2, ⟨[onceFn], [], .int, []⟩, [[]]⟩]
+
+/-- The second body takes over the environment of the first. -/
+def takeOver : Program :=
+  ⟨bodies,
+    .let_ (.closure 0 []) <| .let_ (.closure 1 [.var 0]) <| .let_ (.rebind (.var 1) 2) <|
+      .tail (.var 2) []⟩
+
+/-- The second body captures the callable again. -/
+def captureTwice : Program :=
+  ⟨bodies,
+    .let_ (.closure 0 []) <| .let_ (.closure 1 [.var 0]) <| .let_ (.closure 2 [.var 0]) <|
+      .tail (.var 2) []⟩
+
+def sharedCert (first : Ty) (strict : Bool) : Cert :=
+  ⟨bodySigs, [], [], .int, [.ty onceFn, .ty first, .ty (shared none)], strict⟩
+
+example : checkProgram (sharedCert (shared (some [onceFn])) true) takeOver = true := by decide
+
+/-- The first function's type has to state its environment for it to be taken over. -/
+example : checkProgram (sharedCert (shared none) true) takeOver = false := by decide
+
+example : checkProgram (sharedCert (shared none) false) captureTwice = true := by decide
+
+example : checkProgram (sharedCert (shared none) true) captureTwice = false := by decide
 
 end Glorious.Typing.Witness

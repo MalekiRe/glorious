@@ -156,6 +156,15 @@ structure St where
   /-- Where the statement being checked starts, as a prefix for messages that
   are only raised later. -/
   pos : String := ""
+  /-- The capture variable of each callable literal, by the literal's identity. -/
+  blockCaps : Array (Nat × Nat) := #[]
+  /-- Blocks written without parameters where a callable taking one argument
+  is expected. -/
+  given : Array Nat := #[]
+  /-- Those of them given a callable that takes no arguments, which is how a
+  block that was not run is handed on: the block's identity and the capture
+  variable of what it is given. -/
+  unrun : Array (Nat × Nat) := #[]
 
 abbrev M := StateT St (Except String)
 
@@ -1025,7 +1034,7 @@ partial def usesExpr (resumptive : String → Bool) (x : String) : Expr → Nat
     (args.map (usesExpr resumptive x)).foldl addUses (usesExpr resumptive x f)
   | .tuple args => (args.map (usesExpr resumptive x)).foldl addUses 0
   | .proj e _ => usesExpr resumptive x e
-  | .closure clauses => (clauses.map (usesClause resumptive x)).foldl max 0
+  | .closure _ clauses => (clauses.map (usesClause resumptive x)).foldl max 0
   | .handle subject arms =>
     let repeated := fun (arm : Clause) =>
       match arm with
@@ -1242,6 +1251,8 @@ partial def applyClauses (ctx : ACtx) (depth : Nat) (clauses : List Clause)
   for clause in clauses do
     match clause with
     | .mk pats body =>
+      -- A block without parameters that is given one argument drops it.
+      let pats := if pats.isEmpty && args.length == 1 then [Pattern.wild] else pats
       if pats.length == args.length then
         let (fitness, binds) := fitAll ctx pats args
         let taken := ((pats.zip args).map fun (p, v) => takenApart ctx p v).foldl (· + ·) 0
@@ -1317,7 +1328,7 @@ partial def runExpr (ctx : ACtx) (depth : Nat) (env : List (String × AVal)) : E
       | _ => (.unknown, n))
   | .call f args => runCall ctx depth env f args
   | .tailCall f args => runCall ctx depth env f args
-  | .closure clauses => pure [(.clo clauses env, 0)]
+  | .closure _ clauses => pure [(.clo clauses env, 0)]
   | .handle subject arms => do
     let subject ← runExpr ctx depth env subject
     let mut completions : List Clause := []
@@ -1598,7 +1609,11 @@ partial def inferExpr (scope : Scope) (amb : Row) : Expr → M Ty
       pure t
   | .call f args => inferCall scope amb f args
   | .tailCall f args => inferCall scope amb f args
-  | .closure clauses => inferCallable scope [] none none clauses "the clauses of this callable do"
+  | .closure id clauses => do
+    let t ← inferCallable scope [] none none clauses "the clauses of this callable do"
+    if let .fn _ _ _ _ cap := t then
+      modify fun s => { s with blockCaps := s.blockCaps.push (id, cap) }
+    pure t
   | .handle subject arms => inferHandle scope amb subject arms
   | .labelScope l body => do
     let t ← freshTy
@@ -1628,7 +1643,19 @@ partial def checkArgs (scope : Scope) (amb : Row) (what : String) (params : List
   unless params.length == args.length do arityError what params.length args.length
   let mut i := 1
   for (p, a) in params.zip args do
-    unifyAt s!"argument {i} of {what}" p (← inferExpr scope amb a)
+    match Elab.plainBlock a, ← find p with
+    | some (id, body), .fn [input] _ _ _ _ =>
+      -- A callable taking one argument is expected, and a block is written
+      -- without parameters: it takes the argument without naming it.
+      let t ← inferCallable scope [some input] none none [.mk [.wild] body]
+        "the clauses of this callable do"
+      unifyAt s!"argument {i} of {what}" p t
+      modify fun s => { s with given := s.given.push id }
+      -- A callable that takes no arguments, given to a block: a block that was
+      -- not run, whose environment this one can take over.
+      if let .fn [] _ _ _ cap ← find input then
+        modify fun s => { s with unrun := s.unrun.push (id, cap) }
+    | _, _ => unifyAt s!"argument {i} of {what}" p (← inferExpr scope amb a)
     i := i + 1
 
 /-- Apply a callee of a given type in the ambient effects. -/
@@ -1717,8 +1744,8 @@ partial def inferStmts (scope : Scope) (amb : Row) : List Stmt → M Ty
   | .expr e :: rest => do
     let _ ← inferExpr scope amb e
     inferStmts scope amb rest
-  | .let_ (.var x) (.closure clauses) :: rest => do
-    let t ← inferExpr scope amb (.closure clauses)
+  | .let_ (.var x) (.closure id clauses) :: rest => do
+    let t ← inferExpr scope amb (.closure id clauses)
     if (← resolveCtor x none).isSome || ((← get).aliases.lookup x).isSome then
       let binds ← inferPat (.var x) t
       inferStmts (binds ++ scope) amb rest
@@ -2035,8 +2062,11 @@ def checkGroup (decls : List FnDecl) : M Unit := do
   let late := (← get).dups.map fun (t, why) => (t, inFunction owner why)
   modify fun s => { s with group := [], dups := #[], lateDups := s.lateDups ++ late }
 
-/-- Check a whole program. -/
-def checkProgram (items : List Item) : Except String Unit := do
+/-- Check a whole program. Gives what the elaborator needs to know about its
+blocks: which take an argument they do not name, and for each that is handed a
+block which was not run, the identity of that block if it can only be one. The
+elaborator then lets those two share what they capture. -/
+def checkProgram (items : List Item) : Except String Elab.Blocks := do
   let decls : List FnDecl := items.filterMap fun
     | .fn name params annots ret clauses => some ⟨name, params, annots, ret, clauses⟩
     | _ => none
@@ -2045,7 +2075,7 @@ def checkProgram (items : List Item) : Except String Unit := do
     match decls.find? (·.name == name) with
     | some d => ((d.clauses.flatMap (Elab.fvClause [])).filter names.contains).eraseDups
     | none => []
-  let action : M Unit := do
+  let action : M Elab.Blocks := do
     modify fun s => { s with fnBodies := decls.map fun d => (d.name, d.clauses) }
     declare items
     for comp in components names deps do
@@ -2060,7 +2090,17 @@ def checkProgram (items : List Item) : Except String Unit := do
         unless effs.isEmpty do
           throw s!"`main` performs effects that nothing handles: {showEffs effs}"
       | _ => pure ()
-  let _ ← action.run {}
-  pure ()
+    let s ← get
+    let mut links : List (Nat × Nat) := []
+    for (id, cap) in s.unrun do
+      let root ← findCap cap
+      let mut owners : List Nat := []
+      for (owner, c) in s.blockCaps do
+        if owner != id && owner != 0 && (← findCap c) == root && !owners.contains owner then
+          owners := owner :: owners
+      if let [owner] := owners then links := (id, owner) :: links
+    pure ⟨s.given.toList, links⟩
+  let (blocks, _) ← action.run {}
+  pure blocks
 
 end Glorious.Check

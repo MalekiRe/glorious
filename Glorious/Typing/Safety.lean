@@ -23,8 +23,8 @@ variable {Δ : Ctx}
 /-- The callee of a typed call evaluates, and is typed at the callable's result
 and operations. It holds what the locals naming the callable and its arguments hold. -/
 theorem evalCall_ok {S : StoreTy} {env : Env} {Γ : TEnv} {f : Atom} {args : List Atom}
-    {Ps : List Ty} {σ : Ty} {ε : Row} {once : Bool} (henv : HasVals Δ S env Γ)
-    (hf : HasAtom Γ f (.fn Ps σ ε once)) (hargs : HasAtoms Γ args Ps) :
+    {Ps : List Ty} {σ : Ty} {ε : Row} {once : Bool} {fenv : Option (List Ty)}
+    (henv : HasVals Δ S env Γ) (hf : HasAtom Γ f (.fn Ps σ ε once fenv)) (hargs : HasAtoms Γ args Ps) :
     ∃ c, evalCall env f args = some c ∧ CalleeOk Δ S c σ ε
       ∧ (∀ id v, c = .cont id v → f.eval env = some (.cont id))
       ∧ (∀ id v, c = .label id v → f.eval env = some (.label id))
@@ -56,8 +56,8 @@ theorem evalCall_ok {S : StoreTy} {env : Env} {Γ : TEnv} {f : Atom} {args : Lis
 
 /-- The callable a label scope runs evaluates, applied to the label. -/
 theorem evalScope_ok {S : StoreTy} {env : Env} {Γ : TEnv} {thunk : Atom} {l : Value}
-    {τl σ : Ty} {ε : Row} {once : Bool} (henv : HasVals Δ S env Γ)
-    (hf : HasAtom Γ thunk (.fn [τl] σ ε once)) (hl : HasVal Δ S l τl) :
+    {τl σ : Ty} {ε : Row} {once : Bool} {fenv : Option (List Ty)} (henv : HasVals Δ S env Γ)
+    (hf : HasAtom Γ thunk (.fn [τl] σ ε once fenv)) (hl : HasVal Δ S l τl) :
     ∃ c, evalScope env thunk l = some c ∧ CalleeOk Δ S c σ ε
       ∧ (∀ id v, c = .cont id v → thunk.eval env = some (.cont id))
       ∧ (∀ id v, c = .label id v → thunk.eval env = some (.label id))
@@ -80,7 +80,8 @@ theorem evalScope_ok {S : StoreTy} {env : Env} {Γ : TEnv} {thunk : Atom} {l : V
 
 /-- A callable that takes no arguments is a function. -/
 theorem evalThunk_ok {S : StoreTy} {env : Env} {Γ : TEnv} {f : Atom} {σ : Ty} {ε : Row}
-    {once : Bool} (henv : HasVals Δ S env Γ) (hf : HasAtom Γ f (.fn [] σ ε once)) :
+    {once : Bool} {fenv : Option (List Ty)} (henv : HasVals Δ S env Γ)
+    (hf : HasAtom Γ f (.fn [] σ ε once fenv)) :
     ∃ fn caps Cs, evalCall env f [] = some (.fn fn caps []) ∧ f.eval env = some (.clo fn caps)
       ∧ Δ.fnSig fn ⟨Cs, [], σ, ε⟩ ∧ HasVals Δ S caps Cs := by
   obtain ⟨fv, hfv, hft⟩ := atom_ok henv hf
@@ -398,7 +399,7 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
           = .stuck := by simp [step, hnone]
       rw [h1]
       exact Fault.overflow hargs hq
-  | @call _ f args body Ps σ _ ε₁ _ once hf hargs hrow hlin hbody =>
+  | @call _ f args body Ps σ _ ε₁ _ once _ hf hargs hrow hlin hbody =>
     obtain ⟨c, hc, hcok, hck, hcl, hocc⟩ := evalCall_ok (S := S) henv hf hargs
     have h1 : step p ⟨.call f args body, env, stack, ⟨conts, labels, cells⟩⟩
         = apply p c (.call env body :: stack) ⟨conts, labels, cells⟩ := by simp [step, hc]
@@ -411,7 +412,7 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
       omega
     · exact hfa.fault (s := ⟨.call f args body, env, stack, ⟨conts, labels, cells⟩⟩) rfl hck hcl
         rfl (fun _ h => findLabel_cons_none h)
-  | @tail _ f args Ps _ ε₁ _ once hf hargs hrow hlin =>
+  | @tail _ f args Ps _ ε₁ _ once _ hf hargs hrow hlin =>
     obtain ⟨c, hc, hcok, hck, hcl, hocc⟩ := evalCall_ok (S := S) henv hf hargs
     have h1 : step p ⟨.tail f args, env, stack, ⟨conts, labels, cells⟩⟩
         = apply p c stack ⟨conts, labels, cells⟩ := by simp [step, hc]
@@ -424,7 +425,7 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
       omega
     · exact hfa.fault (s := ⟨.tail f args, env, stack, ⟨conts, labels, cells⟩⟩) rfl hck hcl
         rfl (fun _ h => h)
-  | @callNever _ f args body Ps σ _ ε₁ _ once hf hargs hrow hlin hbody =>
+  | @callNever _ f args body Ps σ _ ε₁ _ once _ hf hargs hrow hlin hbody =>
     obtain ⟨c, hc, hcok, hck, hcl, hocc⟩ := evalCall_ok (S := S) henv hf hargs
     have h1 : step p ⟨.call f args body, env, stack, ⟨conts, labels, cells⟩⟩
         = apply p c (.call env body :: stack) ⟨conts, labels, cells⟩ := by simp [step, hc]
@@ -437,7 +438,7 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
       omega
     · exact hfa.fault (s := ⟨.call f args body, env, stack, ⟨conts, labels, cells⟩⟩) rfl hck hcl
         rfl (fun _ h => findLabel_cons_none h)
-  | @tailNever _ f args Ps _ ε₁ _ once hf hargs hrow hlin =>
+  | @tailNever _ f args Ps _ ε₁ _ once _ hf hargs hrow hlin =>
     obtain ⟨c, hc, hcok, hck, hcl, hocc⟩ := evalCall_ok (S := S) henv hf hargs
     have h1 : step p ⟨.tail f args, env, stack, ⟨conts, labels, cells⟩⟩
         = apply p c stack ⟨conts, labels, cells⟩ := by simp [step, hc]
@@ -450,7 +451,7 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
       omega
     · exact hfa.fault (s := ⟨.tail f args, env, stack, ⟨conts, labels, cells⟩⟩) rfl hck hcl
         rfl (fun _ h => h)
-  | @handle _ ret ops captures thunk body Cs σ ρ _ εt H _ once hthunk hcaps hok hrow hlin hbody =>
+  | @handle _ ret ops captures thunk body Cs σ ρ _ εt H _ once _ hthunk hcaps hok hrow hlin hbody =>
     obtain ⟨caps, hcv, hcvt⟩ := atoms_ok (S := S) henv hcaps
     obtain ⟨fn, tcaps, TCs, hcall, hteval, hsig, htc⟩ := evalThunk_ok (S := S) henv hthunk
     have h1 : step p ⟨.handle ret ops captures thunk body, env, stack, ⟨conts, labels, cells⟩⟩
@@ -468,7 +469,7 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
     have h4 := occs_clo id hteval
     simp only [occStack, occFrame, occs]
     omega
-  | @handleTail _ ret ops captures thunk Cs σ _ εt H _ once hthunk hcaps hok hrow =>
+  | @handleTail _ ret ops captures thunk Cs σ _ εt H _ once _ hthunk hcaps hok hrow =>
     obtain ⟨caps, hcv, hcvt⟩ := atoms_ok (S := S) henv hcaps
     obtain ⟨fn, tcaps, TCs, hcall, hteval, hsig, htc⟩ := evalThunk_ok (S := S) henv hthunk
     have h1 : step p ⟨.handleTail ret ops captures thunk, env, stack, ⟨conts, labels, cells⟩⟩
@@ -521,7 +522,7 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
       refine ⟨ε', ?_⟩
       simpa using StackOk.call (henv.mono hS) hbody hle (hre S' hS st' ε'' hst' hr)
     obtain ⟨S', hS, hcont, hs'⟩ := hs.push_cont hk
-    have hsig' : Δ.fnSig d.arm ⟨Cs, Ps ++ [.fn [σ] ρ ε₀ true], ρ, εa⟩ := hsig
+    have hsig' : Δ.fnSig d.arm ⟨Cs, Ps ++ [.fn [σ] ρ ε₀ true none], ρ, εa⟩ := hsig
     refine .of_safe_fresh (callFn_safe hp hsig'
       (hcaps.mono hS) ((hvst.mono hS).snoc (.cont hcont)) (Row.le_trans hale hble)
       (hbelow.mono hS) hs') rfl (fun hD id => ?_)
@@ -534,7 +535,7 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
       simpa [occStack_append, occStack, occFrame] using this
     simp only [occs_append, occs, occ, occStack, occFrame, occStack_append]
     omega
-  | @label _ thunk body σ ρ _ εl εt _ once once' hthunk hrow hlin hbody =>
+  | @label _ thunk body σ ρ _ εl εt _ once once' _ hthunk hrow hlin hbody =>
     obtain ⟨S', hS, hlab, hs'⟩ := hs.push_label σ
     obtain ⟨c, hc, hcok, hck, hcl, hocc⟩ :=
       evalScope_ok (S := S') (l := .label labels) (henv.mono hS) hthunk (.label hlab)
@@ -550,7 +551,7 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
       omega
     · exact hfa.fault (s := ⟨.label thunk body, env, stack, ⟨conts, labels, cells⟩⟩) rfl hck hcl
         rfl (fun _ h => findLabel_cons_none (findLabel_cons_none h))
-  | @labelTail _ thunk ρ _ εl εt _ once once' hthunk hrow =>
+  | @labelTail _ thunk ρ _ εl εt _ once once' _ hthunk hrow =>
     obtain ⟨S', hS, hlab, hs'⟩ := hs.push_label τ
     obtain ⟨c, hc, hcok, hck, hcl, hocc⟩ :=
       evalScope_ok (S := S') (l := .label labels) (henv.mono hS) hthunk (.label hlab)
@@ -567,7 +568,7 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
       omega
     · exact hfa.fault (s := ⟨.labelTail thunk, env, stack, ⟨conts, labels, cells⟩⟩) rfl hck hcl
         rfl (fun _ h => findLabel_cons_none h)
-  | @guard _ cleanup thunk body σc σ _ εt _ once once' hcl hthunk hrow hlin hbody =>
+  | @guard _ cleanup thunk body σc σ _ εt _ once once' _ _ hcl hthunk hrow hlin hbody =>
     obtain ⟨gfn, gcaps, GCs, _, hgev, hgsig, hgc⟩ := evalThunk_ok (S := S) henv hcl
     obtain ⟨fn, tcaps, TCs, hcall, hteval, hsig, htc⟩ := evalThunk_ok (S := S) henv hthunk
     have h1 : step p ⟨.guard cleanup thunk body, env, stack, ⟨conts, labels, cells⟩⟩
@@ -584,7 +585,7 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
     simp only [occs, occ] at h3
     simp only [occStack, occFrame, occs]
     omega
-  | @guardTail _ cleanup thunk σc _ εt _ once once' hcl hthunk hrow hlin =>
+  | @guardTail _ cleanup thunk σc _ εt _ once once' _ _ hcl hthunk hrow hlin =>
     obtain ⟨gfn, gcaps, GCs, _, hgev, hgsig, hgc⟩ := evalThunk_ok (S := S) henv hcl
     obtain ⟨fn, tcaps, TCs, hcall, hteval, hsig, htc⟩ := evalThunk_ok (S := S) henv hthunk
     have h1 : step p ⟨.guardTail cleanup thunk, env, stack, ⟨conts, labels, cells⟩⟩
@@ -600,7 +601,7 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
     simp only [occs, occ] at h3
     simp only [occStack, occFrame, occs]
     omega
-  | @cancel _ k body σ ρ _ ε₁ _ once hk hrow hlin hbody =>
+  | @cancel _ k body σ ρ _ ε₁ _ once _ hk hrow hlin hbody =>
     obtain ⟨kv, hkv, hkt⟩ := atom_ok henv hk
     have hquiet : ∀ id, occState id ⟨body, env ++ [Value.unit], stack, ⟨conts, labels, cells⟩⟩
         ≤ occState id ⟨.cancel k body, env, stack, ⟨conts, labels, cells⟩⟩ := fun id => by

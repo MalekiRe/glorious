@@ -46,6 +46,7 @@ def rhs : Rhs → Bytes
   | .construct tag args => 2 :: nat tag ++ list atom args
   | .place pl => 3 :: place pl
   | .closure fn captures => 4 :: nat fn ++ list atom captures
+  | .rebind a fn => 5 :: atom a ++ nat fn
 
 def pair (p : Nat × Nat) : Bytes := nat p.1 ++ nat p.2
 

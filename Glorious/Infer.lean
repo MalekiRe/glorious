@@ -42,8 +42,11 @@ inductive ITy where
   | tuple (fs : List ITy)
   | data (name : Nat) (args : List ITy)
   /-- A callable; its operations, each with the type arguments of its effect,
-  and a variable for any others if the row is open. -/
+  and a variable for any others if the row is open. `env` is a tuple of what it
+  captured if its type is to state that, `never` if it cannot, and otherwise
+  not yet known. -/
   | fn (ps : List ITy) (ret : ITy) (ops : List (Nat × List ITy)) (tail : Option Nat) (cls : ICls)
+      (env : ITy)
   | ref (t : ITy)
   /-- The result of a call that does not return. -/
   | never
@@ -58,8 +61,8 @@ structure IRow where
 
 def ITy.unit : ITy := .tuple []
 
-def ITy.func (ps : List ITy) (ret : ITy) (row : IRow) (cls : ICls) : ITy :=
-  .fn ps ret row.ops row.tail cls
+def ITy.func (ps : List ITy) (ret : ITy) (row : IRow) (cls : ICls) (env : ITy) : ITy :=
+  .fn ps ret row.ops row.tail cls env
 
 inductive IHint where
   | ty (t : ITy)
@@ -119,12 +122,14 @@ structure Scheme where
   coerces : Array (ITy × ITy)
   nevers : Array ITy
   onces : Array (ICls × List ITy)
+  shows : Array (ITy × List ITy)
   /-- The part of it a user of the group can still affect, and so must meet too. -/
   exported : Array Incl
   exportedPlaces : Array (ITy × Nat × ITy)
   exportedCoerces : Array (ITy × ITy)
   exportedNevers : Array ITy
   exportedOnces : Array (ICls × List ITy)
+  exportedShows : Array (ITy × List ITy)
 
 structure St where
   fns : Array Core.Fn
@@ -164,6 +169,9 @@ structure St where
   /-- Functions and what they captured: one that captured something that cannot
   be duplicated can be called only once. -/
   onces : Array (ICls × List ITy) := #[]
+  /-- Functions and what they captured: if a function's type comes to state its
+  environment, these are the types it states. -/
+  shows : Array (ITy × List ITy) := #[]
   /-- The hints of the clause being inferred. -/
   hints : Array IHint := #[]
   /-- The outside functions the function being inferred refers to. -/
@@ -241,9 +249,10 @@ partial def occurs (id : Nat) (t : ITy) : M Bool := do
   | .int => pure false
   | .tuple fs => fs.anyM (occurs id)
   | .data _ args => args.anyM (occurs id)
-  | .fn ps r ops tail _ => do
+  | .fn ps r ops tail _ env => do
     if ← ps.anyM (occurs id) then return true
     if ← occurs id r then return true
+    if ← occurs id env then return true
     let row ← flattenRow ⟨ops, tail⟩
     row.ops.anyM fun (_, targs) => targs.anyM (occurs id)
   | .ref t => occurs id t
@@ -256,7 +265,7 @@ partial def showTy (t : ITy) : M String := do
   | .int => pure "Int"
   | .tuple fs => do pure s!"({", ".intercalate (← fs.mapM showTy)})"
   | .data n args => do pure s!"#{n}<{", ".intercalate (← args.mapM showTy)}>"
-  | .fn ps r ops tail _ => do
+  | .fn ps r ops tail _ _ => do
     let row ← flattenRow ⟨ops, tail⟩
     let shown := row.ops.map fun (op, _) => toString op
     let open_ := if row.tail.isSome then ["…"] else []
@@ -287,11 +296,12 @@ partial def unify (a b : ITy) : M Unit := do
   | .data n as, .data m bs =>
     if n == m then unifyList as bs
     else throw s!"{← showTy a} does not match {← showTy b}"
-  | .fn ps r ops tail cls, .fn ps' r' ops' tail' cls' => do
+  | .fn ps r ops tail cls env, .fn ps' r' ops' tail' cls' env' => do
     unifyList ps ps'
     unify r r'
     unifyRow ⟨ops, tail⟩ ⟨ops', tail'⟩
     unifyCls cls cls'
+    unify env env'
   | .ref x, .ref y => unify x y
   | .never, .never => pure ()
   | _, _ => throw s!"{← showTy a} does not match {← showTy b}"
@@ -354,9 +364,9 @@ partial def subst (args : List ITy) : ITy → ITy
   | .int => .int
   | .tuple fs => .tuple (fs.map (subst args))
   | .data n as => .data n (as.map (subst args))
-  | .fn ps r ops tail cls =>
+  | .fn ps r ops tail cls env =>
     .fn (ps.map (subst args)) (subst args r)
-      (ops.map fun (op, targs) => (op, targs.map (subst args))) tail cls
+      (ops.map fun (op, targs) => (op, targs.map (subst args))) tail cls (subst args env)
   | .ref t => .ref (subst args t)
   | .never => .never
 
@@ -479,10 +489,10 @@ partial def resolve (t : ITy) : M ITy := do
   | .int => pure .int
   | .tuple fs => do pure (.tuple (← fs.mapM resolve))
   | .data n args => do pure (.data n (← args.mapM resolve))
-  | .fn ps r ops tail cls => do
+  | .fn ps r ops tail cls env => do
     let row ← flattenRow ⟨ops, tail⟩
     let ops ← row.ops.mapM fun (op, targs) => do pure (op, ← targs.mapM resolve)
-    pure (.fn (← ps.mapM resolve) (← resolve r) ops row.tail (← findCls cls))
+    pure (.fn (← ps.mapM resolve) (← resolve r) ops row.tail (← findCls cls) (← resolve env))
   | .ref t => do pure (.ref (← resolve t))
   | .never => pure .never
 
@@ -518,9 +528,10 @@ partial def varsOf (t : ITy) (acc : Vars) : Vars :=
   | .int => acc
   | .tuple fs => fs.foldl (fun a f => varsOf f a) acc
   | .data _ args => args.foldl (fun a f => varsOf f a) acc
-  | .fn ps r ops tail cls =>
+  | .fn ps r ops tail cls env =>
     let acc := ps.foldl (fun a f => varsOf f a) acc
     let acc := varsOf r acc
+    let acc := varsOf env acc
     let acc := ops.foldl (fun a e => e.2.foldl (fun a f => varsOf f a) a) acc
     let acc := match tail with
       | some v => { acc with rows := acc.rows.insert v }
@@ -532,10 +543,10 @@ partial def varsOf (t : ITy) (acc : Vars) : Vars :=
   | .never => acc
 
 def varsOfRow (r : IRow) (acc : Vars) : Vars :=
-  varsOf (.fn [] .int r.ops r.tail (.lit false)) acc
+  varsOf (.fn [] .int r.ops r.tail (.lit false) .never) acc
 
 def varsOfSig (s : ISig) (acc : Vars) : Vars :=
-  varsOf (.fn (s.caps ++ s.params) s.ret s.row.ops s.row.tail (.lit false)) acc
+  varsOf (.fn (s.caps ++ s.params) s.ret s.row.ops s.row.tail (.lit false) .never) acc
 
 /-- Does a type mention a variable in the set? -/
 def Vars.touches (live : Vars) (t : ITy) : Bool :=
@@ -578,9 +589,10 @@ partial def copyTy (sch : Scheme) (t : ITy) : M ITy := do
   | .int => pure .int
   | .tuple fs => do pure (.tuple (← fs.mapM (copyTy sch)))
   | .data n args => do pure (.data n (← args.mapM (copyTy sch)))
-  | .fn ps r ops tail cls => do
+  | .fn ps r ops tail cls env => do
     let row ← copyRow sch ⟨ops, tail⟩
-    pure (.fn (← ps.mapM (copyTy sch)) (← copyTy sch r) row.ops row.tail (← copyCls sch cls))
+    pure (.fn (← ps.mapM (copyTy sch)) (← copyTy sch r) row.ops row.tail (← copyCls sch cls)
+      (← copyTy sch env))
   | .ref t => do pure (.ref (← copyTy sch t))
   | .never => pure .never
 
@@ -623,6 +635,9 @@ def startCopy : M Unit := modify fun s => { s with renTy := {}, renRow := {}, re
 def copyOnce (sch : Scheme) (o : ICls × List ITy) : M (ICls × List ITy) := do
   pure (← copyCls sch o.1, ← o.2.mapM (copyTy sch))
 
+def copyShow (sch : Scheme) (o : ITy × List ITy) : M (ITy × List ITy) := do
+  pure (← copyTy sch o.1, ← o.2.mapM (copyTy sch))
+
 /-- Is this type known to hold something that cannot be duplicated? -/
 partial def nonDup (seen : List Nat) (t : ITy) : M Bool := do
   match ← find t with
@@ -637,7 +652,7 @@ partial def nonDup (seen : List Nat) (t : ITy) : M Bool := do
       tags.anyM fun tag => do
         let d ← ctorDecl tag
         d.fields.anyM fun f => nonDup (name :: seen) (subst args f)
-  | .fn _ _ _ _ cls => do
+  | .fn _ _ _ _ cls _ => do
     match ← findCls cls with
     | .lit once => pure once
     | .var _ => pure false
@@ -668,6 +683,13 @@ partial def settle : M Unit := do
   for (c, tys) in waitingOnce do
     if ← tys.anyM (nonDup []) then unifyCls c (.lit true)
     else modify fun s => { s with onces := s.onces.push (c, tys) }
+  let waitingShow := (← get).shows
+  modify fun s => { s with shows := #[] }
+  for (env, caps) in waitingShow do
+    match ← find env with
+    | .var _ => modify fun s => { s with shows := s.shows.push (env, caps) }
+    | .tuple stated => unifyList stated caps
+    | _ => pure ()
   if (← get).gen != before then settle
 
 mutual
@@ -692,7 +714,7 @@ partial def schemeOf (scc : Nat) : M Scheme := do
   modify fun s =>
     { s with
       curScc := some scc, cur := cur, incls := #[], places := #[], coerces := #[], nevers := #[]
-      onces := #[] }
+      onces := #[], shows := #[] }
   let mut raw : List Member := []
   for (f, sig) in cur do
     let F := (outer.fns[f]?).getD ⟨[]⟩
@@ -718,6 +740,7 @@ partial def schemeOf (scc : Nat) : M Scheme := do
   let coerces ← (← get).coerces.mapM fun (r, b) => do pure (← resolve r, ← resolve b)
   let nevers ← (← get).nevers.mapM resolve
   let onces ← (← get).onces.mapM fun (c, tys) => do pure (← findCls c, ← tys.mapM resolve)
+  let shows ← (← get).shows.mapM fun (env, caps) => do pure (← resolve env, ← caps.mapM resolve)
   let s ← get
   let mut fixed : Vars := {}
   for g in [0:s.globalTys] do
@@ -753,19 +776,22 @@ partial def schemeOf (scc : Nat) : M Scheme := do
     for (c, tys) in onces do
       if tys.any live.touches then
         if let .var v := c then live := { live with clss := live.clss.insert v }
+    for (env, caps) in shows do
+      if liveTy live env then live := caps.foldl (fun acc c => varsOf c acc) live
   let sch : Scheme :=
     { startTy, startRow, startCls, fixedTys := fixed.tys, fixedRows := fixed.rows
-      fixedClss := fixed.clss, members, incls, places, coerces, nevers, onces
+      fixedClss := fixed.clss, members, incls, places, coerces, nevers, onces, shows
       exported := incls.filter fun c => liveRow live c.sub
       exportedPlaces := places.filter fun (t, _, _) => liveTy live t
       exportedCoerces := coerces.filter fun (r, _) => liveTy live r
       exportedNevers := nevers.filter (liveTy live)
-      exportedOnces := onces.filter fun (c, tys) => liveCls live c || tys.any live.touches }
+      exportedOnces := onces.filter fun (c, tys) => liveCls live c || tys.any live.touches
+      exportedShows := shows.filter fun (env, _) => liveTy live env }
   modify fun s =>
     { s with
       schemes := s.schemes.insert scc sch
       curScc := outer.curScc, cur := outer.cur, incls := outer.incls, places := outer.places
-      coerces := outer.coerces, nevers := outer.nevers, onces := outer.onces
+      coerces := outer.coerces, nevers := outer.nevers, onces := outer.onces, shows := outer.shows
       hints := outer.hints, refs := outer.refs }
   pure sch
 
@@ -792,11 +818,12 @@ partial def refSig (fn : Nat) : M ISig := do
         pure (← copyTy sch r, ← copyTy sch b)
       let nevers ← sch.exportedNevers.mapM (copyTy sch)
       let onces ← sch.exportedOnces.mapM (copyOnce sch)
+      let shows ← sch.exportedShows.mapM (copyShow sch)
       modify fun s =>
         { s with
           incls := s.incls ++ incls, places := s.places ++ places
           coerces := s.coerces ++ coerces, nevers := s.nevers ++ nevers
-          onces := s.onces ++ onces, refs := s.refs.push (fn, sig) }
+          onces := s.onces ++ onces, shows := s.shows ++ shows, refs := s.refs.push (fn, sig) }
       pure sig
 
 partial def inferRhs (Γ : Array ITy) : Rhs → M ITy
@@ -823,7 +850,19 @@ partial def inferRhs (Γ : Array ITy) : Rhs → M ITy
     unifyList ts sig.caps
     let cls ← freshCls
     if (← get).strict then modify fun s => { s with onces := s.onces.push (cls, sig.caps) }
-    pure (.func sig.params sig.ret sig.row cls)
+    let env ← freshTy
+    modify fun s => { s with shows := s.shows.push (env, sig.caps) }
+    pure (.func sig.params sig.ret sig.row cls env)
+  -- The elaborator gives another function only the environment of a block,
+  -- which takes no arguments, so that is the only shape looked for.
+  | .rebind a fn => do
+    let sig ← refSig fn
+    unify (← atomTy Γ a) (.func [] (← freshTy) (← freshRow) (← freshCls) (.tuple sig.caps))
+    let cls ← freshCls
+    if (← get).strict then modify fun s => { s with onces := s.onces.push (cls, sig.caps) }
+    let env ← freshTy
+    modify fun s => { s with shows := s.shows.push (env, sig.caps) }
+    pure (.func sig.params sig.ret sig.row cls env)
 
 /-- Infer a handler's functions. Gives its operations, in the order of `ops`. -/
 partial def inferHandler (amb : IRow) (Γ : Array ITy) (ret : Nat) (ops : List (Nat × Nat))
@@ -843,7 +882,7 @@ partial def inferHandler (amb : IRow) (Γ : Array ITy) (ret : Nat) (ops : List (
     let armSig ← refSig arm
     unifyList Cs armSig.caps
     let params := match result with
-      | some o => payload ++ [.func [o] ρ amb (.lit true)]
+      | some o => payload ++ [.func [o] ρ amb (.lit true) .never]
       | none => payload
     unifyList params armSig.params
     unify ρ armSig.ret
@@ -870,7 +909,7 @@ partial def inferTm (amb : IRow) (τ : ITy) (Γ : Array ITy) : Core.Tm → M Uni
     let σ ← freshTy
     let ρ ← freshTy
     let εt ← freshRow
-    unify (← atomTy Γ thunk) (.func [] σ εt (← freshCls))
+    unify (← atomTy Γ thunk) (.func [] σ εt (← freshCls) (← freshTy))
     let H ← inferHandler amb Γ ret ops captures σ ρ
     needs εt H amb
     hint (.handler ρ H)
@@ -878,7 +917,7 @@ partial def inferTm (amb : IRow) (τ : ITy) (Γ : Array ITy) : Core.Tm → M Uni
   | .handleTail ret ops captures thunk => do
     let σ ← freshTy
     let εt ← freshRow
-    unify (← atomTy Γ thunk) (.func [] σ εt (← freshCls))
+    unify (← atomTy Γ thunk) (.func [] σ εt (← freshCls) (← freshTy))
     let H ← inferHandler amb Γ ret ops captures σ τ
     needs εt H amb
     hint (.handler τ H)
@@ -909,7 +948,7 @@ partial def inferTm (amb : IRow) (τ : ITy) (Γ : Array ITy) : Core.Tm → M Uni
     unify σ τ
   | .cancel k body => do
     let ε' ← freshRow
-    unify (← atomTy Γ k) (.func [← freshTy] (← freshTy) ε' (← freshCls))
+    unify (← atomTy Γ k) (.func [← freshTy] (← freshTy) ε' (← freshCls) (← freshTy))
     needs ε' [] amb
     inferTm amb τ (Γ.push .unit) body
   | .mem op args body => do
@@ -943,7 +982,7 @@ where
   applied (Γ : Array ITy) (amb : IRow) (f : Atom) (args : List Atom) : M ITy := do
     let σ ← freshTy
     let ε' ← freshRow
-    unify (← atomTy Γ f) (.func (← args.mapM (atomTy Γ)) σ ε' (← freshCls))
+    unify (← atomTy Γ f) (.func (← args.mapM (atomTy Γ)) σ ε' (← freshCls) (← freshTy))
     needs ε' [] amb
     pure σ
   scope (Γ : Array ITy) (amb : IRow) (thunk : Atom) : M ITy := do
@@ -954,15 +993,15 @@ where
     let ρ ← freshTy
     modify fun s => { s with nevers := s.nevers.push ρ }
     unify (← atomTy Γ thunk)
-      (.func [.func [σ] ρ (← freshRow) (.lit false)] σ εt (← freshCls))
+      (.func [.func [σ] ρ (← freshRow) (.lit false) .never] σ εt (← freshCls) (← freshTy))
     needs εt [] amb
     pure σ
   guarded (Γ : Array ITy) (amb : IRow) (cleanup thunk : Atom) : M ITy := do
     let σ ← freshTy
     let εt ← freshRow
     -- A cleanup performs no operations.
-    unify (← atomTy Γ cleanup) (.func [] (← freshTy) ⟨[], none⟩ (← freshCls))
-    unify (← atomTy Γ thunk) (.func [] σ εt (← freshCls))
+    unify (← atomTy Γ cleanup) (.func [] (← freshTy) ⟨[], none⟩ (← freshCls) (← freshTy))
+    unify (← atomTy Γ thunk) (.func [] σ εt (← freshCls) (← freshTy))
     needs εt [] amb
     pure σ
 
@@ -1012,11 +1051,14 @@ partial def zonk (t : ITy) : M Ty := do
   | .int => pure .int
   | .tuple fs => do pure (.tuple (← fs.mapM zonk))
   | .data n args => do pure (.data n (← args.mapM zonk))
-  | .fn ps r ops tail cls => do
+  | .fn ps r ops tail cls env => do
     let once := match ← findCls cls with
       | .lit b => b
       | .var _ => false
-    pure (.fn (← ps.mapM zonk) (← zonk r) (← zonkRow ⟨ops, tail⟩) once)
+    let env ← match ← find env with
+      | .tuple stated => do pure (some (← stated.mapM zonk))
+      | _ => pure none
+    pure (.fn (← ps.mapM zonk) (← zonk r) (← zonkRow ⟨ops, tail⟩) once env)
   | .ref t => do pure (.ref (← zonk t))
   | .never => pure .never
 
@@ -1045,8 +1087,11 @@ partial def ofTy : Ty → ITy
   | .int => .int
   | .tuple fs => .tuple (fs.map ofTy)
   | .data n args => .data n (args.map ofTy)
-  | .fn ps r eff once =>
+  | .fn ps r eff once env =>
     .fn (ps.map ofTy) (ofTy r) (eff.map fun (op, targs) => (op, targs.map ofTy)) none (.lit once)
+      (match env with
+        | some stated => .tuple (stated.map ofTy)
+        | none => .never)
   | .ref t => .ref (ofTy t)
   | .never => .never
 
@@ -1062,7 +1107,7 @@ partial def instantiate (fn : Nat) (sig : FnSig) : M Unit := do
   let sch ← schemeOf ((← get).scc[fn]?.getD fn)
   let outer ← get
   modify fun s =>
-    { s with incls := #[], places := #[], coerces := #[], nevers := #[], onces := #[] }
+    { s with incls := #[], places := #[], coerces := #[], nevers := #[], onces := #[], shows := #[] }
   startCopy
   let members ← sch.members.mapM fun m => do
     pure { m with
@@ -1074,8 +1119,11 @@ partial def instantiate (fn : Nat) (sig : FnSig) : M Unit := do
   let coerces ← sch.coerces.mapM fun (r, b) => do pure (← copyTy sch r, ← copyTy sch b)
   let nevers ← sch.nevers.mapM (copyTy sch)
   let onces ← sch.onces.mapM (copyOnce sch)
+  let shows ← sch.shows.mapM (copyShow sch)
   modify fun s =>
-    { s with incls := incls, places := places, coerces := coerces, nevers := nevers, onces := onces }
+    { s with
+      incls := incls, places := places, coerces := coerces, nevers := nevers, onces := onces
+      shows := shows }
   match members.find? (·.fn == fn) with
   | none => throw s!"certificate: function {fn} is missing from its group"
   | some m =>
@@ -1098,7 +1146,7 @@ partial def instantiate (fn : Nat) (sig : FnSig) : M Unit := do
   modify fun s =>
     { s with
       incls := outer.incls, places := outer.places, coerces := outer.coerces, nevers := outer.nevers
-      onces := outer.onces }
+      onces := outer.onces, shows := outer.shows }
   for (g, gs) in wanted do
     instantiate g gs
 
@@ -1107,8 +1155,9 @@ partial def dataUses : Ty → List (Nat × List Ty)
   | .int => []
   | .tuple fs => fs.flatMap dataUses
   | .data n args => (n, args) :: args.flatMap dataUses
-  | .fn ps r eff _ =>
-    ps.flatMap dataUses ++ dataUses r ++ eff.flatMap fun (_, targs) => targs.flatMap dataUses
+  | .fn ps r eff _ env =>
+    ps.flatMap dataUses ++ dataUses r ++ (eff.flatMap fun (_, targs) => targs.flatMap dataUses)
+      ++ (env.getD []).flatMap dataUses
   | .ref t => dataUses t
   | .never => []
 
@@ -1117,8 +1166,9 @@ partial def opUses : Ty → List (Nat × List Ty)
   | .int => []
   | .tuple fs => fs.flatMap opUses
   | .data _ args => args.flatMap opUses
-  | .fn ps r eff _ =>
-    ps.flatMap opUses ++ opUses r ++ eff ++ eff.flatMap fun (_, targs) => targs.flatMap opUses
+  | .fn ps r eff _ env =>
+    ps.flatMap opUses ++ opUses r ++ eff ++ (eff.flatMap fun (_, targs) => targs.flatMap opUses)
+      ++ (env.getD []).flatMap opUses
   | .ref t => opUses t
   | .never => []
 
@@ -1182,7 +1232,7 @@ partial def resolveType (typeNames params : List String) : TypeExpr → M ITy
   | .fn ps r => do
     let row ← freshRow
     pure (.func (← ps.mapM (resolveType typeNames params)) (← resolveType typeNames params r) row
-      (← freshCls))
+      (← freshCls) (← freshTy))
   | .ref t => do pure (.ref (← resolveType typeNames params t))
   | .never => freshTy
   | .hole => freshTy
@@ -1240,6 +1290,7 @@ partial def tmRefs : Core.Tm → List Nat
   | .let_ rhs body =>
     (match rhs with
       | .closure fn _ => [fn]
+      | .rebind _ fn => [fn]
       | _ => []) ++ tmRefs body
   | .call _ _ body => tmRefs body
   | .tail _ _ => []
@@ -1323,11 +1374,13 @@ def captureCounts (p : Core.Program) : Array Nat := Id.run do
       out := visit out c.body
   visit out p.main
 
-def certifyM (items : List Item) (g : Elab.Globals) (p : Core.Program) : M Cert := do
+def certifyM (items : List Item) (g : Elab.Globals) (p : Core.Program)
+    (envSizes : List (Nat × Nat)) : M Cert := do
   declare items g
   modify fun s =>
     { s with
-      scc := sccs s.fns, ncaps := captureCounts p
+      scc := sccs s.fns
+      ncaps := envSizes.foldl (fun acc (fn, n) => acc.setIfInBounds fn n) (captureCounts p)
       globalTys := s.tys.size, globalRows := s.rows.size, globalClss := s.clss.size }
   let τ ← freshTy
   inferTm ⟨[], none⟩ τ #[] p.main
@@ -1338,7 +1391,7 @@ def certifyM (items : List Item) (g : Elab.Globals) (p : Core.Program) : M Cert 
   let mainHints ← zonkHints mainHints
   let wanted ← refs.toList.mapM fun (g, gs) => do pure (g, ← zonkSig gs)
   modify fun s =>
-    { s with incls := #[], places := #[], coerces := #[], nevers := #[], onces := #[] }
+    { s with incls := #[], places := #[], coerces := #[], nevers := #[], onces := #[], shows := #[] }
   for (g, gs) in wanted do
     instantiate g gs
   let entries := (← get).entries.toList
@@ -1355,9 +1408,10 @@ def certifyM (items : List Item) (g : Elab.Globals) (p : Core.Program) : M Cert 
   pure ⟨entries, dupFlags datas, ops, mainTy, mainHints, strict⟩
 
 /-- Find a certificate for an elaborated program, with the ownership rules or without. -/
-def certify (items : List Item) (p : Core.Program) (strict : Bool) : Except String Cert := do
+def certify (items : List Item) (p : Core.Program) (strict : Bool)
+    (envSizes : List (Nat × Nat) := []) : Except String Cert := do
   let (g, _, _) ← Elab.collect items
-  let (cert, _) ← (certifyM items g p).run { fns := p.fns.toArray, strict := strict }
+  let (cert, _) ← (certifyM items g p envSizes).run { fns := p.fns.toArray, strict := strict }
   pure cert
 
 /-- Which part of a program a certificate fails on, for reporting a defect in

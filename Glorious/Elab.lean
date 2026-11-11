@@ -8,9 +8,10 @@ Resolves names, converts closures to closed functions with explicit captures,
 names every intermediate result, and lowers handler arms and label scopes to
 the Core forms. This pass is not proved; Core is where meaning starts.
 
-There are no types yet, so the rules that the language specification makes
-type-directed are syntactic here: braces are always callables, and a clause
-takes exactly one argument.
+Braces are always callables, and a clause takes exactly one argument. One
+rule is directed by types, which the checker supplies: a block written without
+parameters takes an argument if one is expected of it, and if that argument is
+a block that was not run, it runs in that block's environment (`elabGiven`).
 -/
 
 namespace Glorious.Elab
@@ -30,11 +31,25 @@ structure OpInfo where
   arity : Nat
   terminal : Bool
 
+/-- What the checker tells the elaborator about the blocks of a program, each
+named by its identity. -/
+structure Blocks where
+  /-- Blocks written without parameters where a callable taking one argument is
+  expected: they take the argument without naming it. -/
+  given : List Nat := []
+  /-- Those of them whose argument is a block that was not run: each with the
+  identity of that block, whose environment it can take over. -/
+  links : List (Nat × Nat) := []
+
 structure Globals where
   ctors : List (String × CtorInfo) := []
   ops : List (String × OpInfo) := []
   fns : List (String × Nat) := []
   aliases : List (String × Expr) := []
+  /-- The clauses of each top-level function, by name. -/
+  bodies : List (String × List Clause) := []
+  /-- What the checker learnt about the program's blocks, if it was run. -/
+  blocks : Option Blocks := none
 
 /-- Machine intrinsics by surface name, with their argument counts. -/
 def prims : List (String × Prim × Nat) :=
@@ -55,6 +70,8 @@ structure Builder where
   literals : List (Nat × Nat × List Atom) := []
   /-- Those of them no name has referred to yet. -/
   unused : List Nat := []
+  /-- Which activation this is, among those elaborated so far. -/
+  uid : Nat := 0
 
 structure St where
   fns : Array Core.Fn
@@ -66,6 +83,14 @@ structure St where
   /-- Why a `tail` call is not allowed at this point, if it is not: something
   still has to happen in this activation after the call returns. -/
   noTail : Option String
+  /-- How many activations have been started. -/
+  activations : Nat := 0
+  /-- What each callable literal captured, by its identity: the activation it
+  was built in, and each captured name with the local it stood for there. -/
+  layouts : List (Nat × Nat × List (String × Atom)) := []
+  /-- Functions that are only ever given the environment of another, with how
+  many values that environment has. -/
+  envSizes : List (Nat × Nat) := []
 
 abbrev M := ReaderT Globals (StateT St (Except String))
 
@@ -97,7 +122,10 @@ def finish (result : Atom) : M Core.Tm := do
 /-- Build a computation whose locals start at `depth`, then restore the outer one. -/
 def withBuilder {α : Type} (depth : Nat) (k : M α) : M α := do
   let outer := (← get).b
-  modify fun s => { s with b := ⟨#[], depth, none, [], []⟩ }
+  modify fun s =>
+    { s with
+      b := { ops := #[], depth := depth, done := none, uid := s.activations + 1 }
+      activations := s.activations + 1 }
   let r ← k
   modify fun s => { s with b := outer }
   pure r
@@ -156,6 +184,11 @@ private def lookupVar (scope : Scope) (x : String) : Option (Bool × String × A
 private def captureNames (scope : Scope) (free : List String) : List String :=
   (free.filterMap fun x => (lookupVar scope x).map (·.2.1)).eraseDups
 
+private def sameAtom : Atom → Atom → Bool
+  | .var i, .var j => i == j
+  | .int m, .int n => m == n
+  | _, _ => false
+
 /-! ## Free names -/
 
 partial def patVars : Pattern → List String
@@ -175,7 +208,7 @@ partial def fvExpr (bound : List String) : Expr → List String
   | .tailCall f args => fvExpr bound f ++ args.flatMap (fvExpr bound)
   | .tuple args => args.flatMap (fvExpr bound)
   | .proj e _ => fvExpr bound e
-  | .closure clauses => clauses.flatMap (fvClause bound)
+  | .closure _ clauses => clauses.flatMap (fvClause bound)
   | .handle subject arms => fvExpr bound subject ++ arms.flatMap (fvClause bound)
   | .labelScope l body => fvStmts (labelName l :: bound) body
   | .ref x => if bound.contains x then [] else [x]
@@ -195,6 +228,70 @@ partial def fvStmts (bound : List String) : List Stmt → List String
     fvExpr bound target ++ fvExpr bound value ++ fvStmts bound rest
 
 end
+
+/-! ## What a function gives a callable it is passed -/
+
+mutual
+
+/-- With how many arguments the name `p` is applied, at each place it is. -/
+partial def appliedExpr (p : String) : Expr → List Nat
+  | .int _ => []
+  | .name _ _ => []
+  | .label _ => []
+  | .call f args => appliedCall p f args
+  | .tailCall f args => appliedCall p f args
+  | .tuple args => args.flatMap (appliedExpr p)
+  | .proj e _ => appliedExpr p e
+  | .closure _ clauses => clauses.flatMap (appliedClause p)
+  | .handle subject arms => appliedExpr p subject ++ arms.flatMap (appliedClause p)
+  | .labelScope _ body => appliedStmts p body
+  | .ref _ => []
+  | .deref e => appliedExpr p e
+
+partial def appliedCall (p : String) (f : Expr) (args : List Expr) : List Nat :=
+  let here := match f with
+    | .name none x => if x == p then [args.length] else []
+    | _ => appliedExpr p f
+  here ++ args.flatMap (appliedExpr p)
+
+partial def appliedClause (p : String) : Clause → List Nat
+  | .mk pats body => if (pats.flatMap patVars).contains p then [] else appliedStmts p body
+
+partial def appliedStmts (p : String) : List Stmt → List Nat
+  | [] => []
+  | .let_ pat value :: rest =>
+    appliedExpr p value ++ (if (patVars pat).contains p then [] else appliedStmts p rest)
+  | .expr e :: rest => appliedExpr p e ++ appliedStmts p rest
+  | .defer e :: rest => appliedExpr p e ++ appliedStmts p rest
+  | .located _ _ s :: rest => appliedStmts p (s :: rest)
+  | .letMut x value :: rest =>
+    appliedExpr p value ++ (if x == p then [] else appliedStmts p rest)
+  | .assign target value :: rest =>
+    appliedExpr p target ++ appliedExpr p value ++ appliedStmts p rest
+
+end
+
+/--
+Does a function give the callable passed as its `i`-th argument exactly one
+argument, wherever it applies it? Whether a block written without parameters
+takes an argument is decided by the type expected of it, which the checker
+knows. A program the checker rejects can still be elaborated, to be run and
+seen to go wrong; there are no types then, and this reading of the function's
+definition stands in for them.
+-/
+def givesOne (clauses : List Clause) (i : Nat) : Bool :=
+  !clauses.isEmpty && clauses.all fun
+    | .mk pats body =>
+      match pats[i]? with
+      | some (.var p) =>
+        let counts := appliedStmts p body
+        !counts.isEmpty && counts.all (· == 1)
+      | _ => false
+
+/-- A block written in braces, without parameters. -/
+def plainBlock : Expr → Option (Nat × List Stmt)
+  | .closure id [.mk [] body] => if id == 0 then none else some (id, body)
+  | _ => none
 
 /-! ## Names and patterns -/
 
@@ -346,7 +443,7 @@ partial def elabExpr (scope : Scope) (tailPos : Bool) : Expr → M Atom
     if let some why := (← get).noTail then
       throw s!"`tail` cannot be used here: {why}"
     elabCall scope true f args
-  | .closure clauses => elabClosure scope clauses
+  | .closure id clauses => elabClosure scope clauses id
   | .handle subject arms => elabHandle scope tailPos subject arms
   | .labelScope l body => do
     let thunk ← elabClosure scope [.mk [.var (labelName l)] body]
@@ -363,9 +460,23 @@ partial def elabExpr (scope : Scope) (tailPos : Bool) : Expr → M Atom
     let p ← elabExpr scope false e
     emit (.mem .load [p])
 
-partial def elabApply (scope : Scope) (isTail : Bool) (callee : Atom) (args : List Expr) :
-    M Atom := do
-  let atoms ← args.mapM (elabExpr scope false)
+/-- The arguments of a call. A block written without parameters, where a
+callable taking one argument is expected, takes that argument. -/
+partial def elabArgs (scope : Scope) (args : List Expr) (gives : Nat → Bool := fun _ => false) :
+    M (List Atom) := do
+  let blocks := (← read).blocks
+  (args.zip (List.range args.length)).mapM fun (a, i) =>
+    match plainBlock a with
+    | some (id, body) =>
+      let given := match blocks with
+        | some b => b.given.contains id
+        | none => gives i
+      if given then elabGiven scope id body else elabExpr scope false a
+    | none => elabExpr scope false a
+
+partial def elabApply (scope : Scope) (isTail : Bool) (callee : Atom) (args : List Expr)
+    (gives : Nat → Bool := fun _ => false) : M Atom := do
+  let atoms ← elabArgs scope args gives
   if isTail then
     terminate (.tail callee atoms)
     pure (.int 0)
@@ -381,18 +492,18 @@ partial def elabCall (scope : Scope) (isTail : Bool) (f : Expr) (args : List Exp
       elabApply scope isTail callee args
     | .fn idx => do
       let callee ← emit (.let_ (.closure idx []))
-      elabApply scope isTail callee args
+      elabApply scope isTail callee args (givesOne (((← read).bodies.lookup x).getD []))
     | .ctor info => do
       if isTail then throw s!"`tail` applies to calls, not to the constructor `{x}`"
       if info.arity != args.length then
         throw s!"constructor `{x}` takes {info.arity} arguments, but is given {args.length}"
-      let atoms ← args.mapM (elabExpr scope false)
+      let atoms ← elabArgs scope args
       emit (.let_ (.construct info.tag atoms))
     | .op info => do
       if isTail then throw s!"`tail` applies to calls, not to the operation `{x}`"
       if info.arity != args.length then
         throw s!"operation `{x}` takes {info.arity} arguments, but is given {args.length}"
-      let atoms ← args.mapM (elabExpr scope false)
+      let atoms ← elabArgs scope args
       if info.terminal then
         terminate (.raise info.id atoms)
         pure (.int 0)
@@ -401,29 +512,30 @@ partial def elabCall (scope : Scope) (isTail : Bool) (f : Expr) (args : List Exp
       if isTail then throw s!"`tail` applies to calls, not to the intrinsic `{x}`"
       if n != args.length then
         throw s!"intrinsic `{x}` takes {n} arguments, but is given {args.length}"
-      let atoms ← args.mapM (elabExpr scope false)
+      let atoms ← elabArgs scope args
       emit (.let_ (.prim p atoms))
     | .host id n => do
       if isTail then throw s!"`tail` applies to calls, not to the host operation `{x}`"
       if n != args.length then
         throw s!"host operation `{x}` takes {n} arguments, but is given {args.length}"
-      let atoms ← args.mapM (elabExpr scope false)
+      let atoms ← elabArgs scope args
       emit (.host id atoms)
     | .cancel => do
       if isTail then throw "`tail` applies to calls, not to `cancel`"
       match args with
-      | [k] => do
-        let atom ← elabExpr scope false k
-        emit (.cancel atom)
+      | [_] => do
+        match ← elabArgs scope args with
+        | [atom] => emit (.cancel atom)
+        | _ => throw "`cancel` takes exactly one resumption"
       | _ => throw "`cancel` takes exactly one resumption"
     | .replace => do
       -- Take the value out of a cell and put another in its place.
       if isTail then throw "`tail` applies to calls, not to `replace`"
       match args with
-      | [target, value] => do
-        let cell ← elabExpr scope false target
-        let new ← elabExpr scope false value
-        emit (.mem .swap [cell, new])
+      | [_, _] => do
+        match ← elabArgs scope args with
+        | [cell, new] => emit (.mem .swap [cell, new])
+        | _ => throw "`replace` takes a reference and a value"
       | _ => throw "`replace` takes a reference and a value"
     | .const e => do
       let callee ← elabExpr [] false e
@@ -563,7 +675,7 @@ partial def mkClause (captures : List String) (pats : List Pattern) (body : Scop
   pure ⟨corePats.toList, tm⟩
 
 /-- A callable literal: a new closed function and a closure over its captures. -/
-partial def elabClosure (scope : Scope) (clauses : List Clause) : M Atom := do
+partial def elabClosure (scope : Scope) (clauses : List Clause) (id : Nat := 0) : M Atom := do
   let arities := clauses.map fun
     | .mk pats _ => pats.length
   match arities with
@@ -575,13 +687,65 @@ partial def elabClosure (scope : Scope) (clauses : List Clause) : M Atom := do
   let coreClauses ← clauses.mapM fun
     | .mk pats body => mkClause captures pats (fun sc => elabStmts sc true body)
   let idx ← addFn ⟨coreClauses⟩ s!"a callable in `{(← get).owner}`"
+  unless id == 0 do
+    let layout := captures.filterMap fun x => (scope.lookup x).map fun a => (x, a)
+    modify fun s => { s with layouts := (id, s.b.uid, layout) :: s.layouts }
   -- Capturing a name is a use of it, like any other.
   let captured ← (captures.filterMap (fun x => scope.lookup x)).mapM useLocal
+  bindLiteral idx captured
+
+/-- Build a closure and remember it as the literal it is. -/
+partial def bindLiteral (idx : Nat) (captured : List Atom) : M Atom := do
   let a ← emit (.let_ (.closure idx captured))
   if let .var i := a then
     modify fun s =>
       { s with b := { s.b with literals := (i, idx, captured) :: s.b.literals, unused := i :: s.b.unused } }
   pure a
+
+/--
+A block that takes an argument it does not name. If the checker found the
+argument to be another block of this activation that was not run, this block
+runs in that one's environment: the names both mention are taken from what the
+other captured, instead of being captured a second time. So the two are two
+bodies over one environment, of which at most one runs, and a value that can be
+used once can be used by each. Otherwise the argument is dropped.
+-/
+partial def elabGiven (scope : Scope) (id : Nat) (body : List Stmt) : M Atom := do
+  let s ← get
+  let layout := match ((← read).blocks.getD {}).links.lookup id with
+    | some owner =>
+      match s.layouts.lookup owner with
+      | some (uid, layout) => if uid == s.b.uid then layout else []
+      | none => []
+    | none => []
+  -- A name is shared if it still stands for the local the other block captured.
+  let shared := fun (x : String) (a : Atom) =>
+    match scope.lookup x with
+    | some b => sameAtom a b
+    | none => false
+  let free := captureNames scope (fvStmts [] body)
+  let taken := free.filter fun x => layout.any fun (y, a) => x == y && shared y a
+  if taken.isEmpty then elabClosure scope [.mk [.wild] body]
+  else
+    let own := free.filter fun x => !taken.contains x
+    -- The body, as a function over the other block's environment: what this
+    -- block needs besides is passed to it.
+    let slots := (layout.zip (List.range layout.length)).map fun ((y, a), k) =>
+      if shared y a then y else s!"\x00{k}"
+    let names := own ++ slots
+    let tm ← withBuilder names.length do
+      let r ← withNoTail none (elabStmts (indexed names 0) true body)
+      finish r
+    let code ← addFn ⟨[⟨own.map fun _ => .wild, tm⟩]⟩ s!"a block in `{s.owner}`"
+    modify fun s => { s with envSizes := (code, layout.length) :: s.envSizes }
+    -- The callable passed along: given the block that was not run, it runs the
+    -- body in that block's place.
+    let n := own.length
+    let run : Core.Tm :=
+      .let_ (.rebind (.var 0) code) (.tail (.var (n + 1)) ((List.range n).map fun k => .var (k + 1)))
+    let idx ← addFn ⟨[⟨[.wild], run⟩]⟩ s!"a block in `{s.owner}`"
+    let captured ← (own.filterMap (fun x => scope.lookup x)).mapM useLocal
+    bindLiteral idx captured
 
 /--
 `handle subject { arms }`. The subject becomes a callable run under the handler.
@@ -672,6 +836,9 @@ structure Output where
   fnNames : Array String
   /-- Operation names by identity, for diagnostics. -/
   opNames : Array String
+  /-- Functions that are only ever given the environment of another, with how
+  many values that environment has. -/
+  envSizes : List (Nat × Nat)
 
 /-- Collect the global declarations. -/
 def collect (items : List Item) :
@@ -701,7 +868,7 @@ def collect (items : List Item) :
         nextOp := nextOp + 1
     | .fn name _ _ _ clauses =>
       if (g.fns.lookup name).isSome then throw s!"function `{name}` is declared twice"
-      g := { g with fns := (name, fns.size) :: g.fns }
+      g := { g with fns := (name, fns.size) :: g.fns, bodies := (name, clauses) :: g.bodies }
       fns := fns.push (name, clauses)
     | .alias name value => g := { g with aliases := (name, value) :: g.aliases }
     | .fixity => pure ()
@@ -715,8 +882,11 @@ private def withSelfLabel (name : String) : Clause → Clause
       .mk pats [.expr (.labelScope name body)]
     else .mk pats body
 
-def elabProgram (items : List Item) : Except String Output := do
+/-- Elaborate a program. `blocks` is what the checker learnt about its blocks;
+without it, every block captures what it mentions for itself. -/
+def elabProgram (items : List Item) (blocks : Option Blocks := none) : Except String Output := do
   let (g, fns, names) ← collect items
+  let g := { g with blocks := blocks }
   let mainIdx ← match g.fns.lookup "main" with
     | some idx => pure idx
     | none => throw "the program has no `main` function"
@@ -736,7 +906,9 @@ def elabProgram (items : List Item) : Except String Output := do
       modify fun s => { s with fns := s.fns.set! idx ⟨coreClauses⟩ }
       idx := idx + 1
   let fnNames := (fns.map fun (name, _) => s!"`{name}`").toArray
-  let init : St := ⟨Array.replicate fns.length ⟨[]⟩, fnNames, "", ⟨#[], 0, none, [], []⟩, none⟩
+  let init : St :=
+    { fns := Array.replicate fns.length ⟨[]⟩, names := fnNames, owner := ""
+      b := { ops := #[], depth := 0, done := none }, noTail := none }
   let (_, st) ← (action.run g).run init
   let opNames := Id.run do
     let mut out := Array.replicate g.ops.length ""
@@ -744,6 +916,6 @@ def elabProgram (items : List Item) : Except String Output := do
       out := out.set! info.id name
     pure out
   pure ⟨⟨st.fns.toList, .let_ (.closure mainIdx []) (.tail (.var 0) [])⟩, names, st.names,
-    opNames⟩
+    opNames, st.envSizes⟩
 
 end Glorious.Elab

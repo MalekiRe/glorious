@@ -635,6 +635,7 @@ theorem rhsMoves_sub {rhs : Rhs} {i : Nat} (h : i ∈ rhsMoves rhs) : i ∈ rhsV
   | construct tag args => exact h
   | place pl => cases h
   | closure fn captures => exact h
+  | rebind a fn => exact h
 
 theorem atomVars_tail_sub {a : Atom} {as : List Atom} {i : Nat} (h : i ∈ atomVars as) :
     i ∈ atomVars (a :: as) := by

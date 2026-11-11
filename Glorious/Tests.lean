@@ -65,6 +65,11 @@ def notTail (n : Nat) : String :=
 #guard diagnose "fn main() { (1, 2).5 }" == "`(1, 2)` does not have the field being read"
 #guard diagnose "fn f(a, b) { a }  fn main() { f(1) }" == "no clause of `f` matches the arguments (1)"
 #guard diagnose "fn main() { 1 + 2 }" == "did not go wrong"
+-- A program the checker rejects is elaborated without types; its blocks still
+-- take the arguments the functions they are passed to give them.
+#guard diagnose "effect Ask { ask() -> Int }
+  fn main() { handle ask() + 1 { ask(k) => (if(2 < 1) { k(1) } else { 0 }) + k(2) + k(3) } }"
+  == "a resumption is used a second time: it was already resumed or cancelled"
 
 -- A mutable variable's cell is released however its block is left: by
 -- finishing, by a label, by a terminal operation, or by cancellation.
@@ -109,10 +114,29 @@ def notTail (n : Nat) : String :=
 #guard owned "effect Ask { ask() -> Int }
   fn main() { let mut slot = None; handle ask() + 1 { ask(k) => replace(&mut slot, Some(k)); 0 };
     match(replace(&mut slot, None)) { Some(k) => k(5), None => 0 } }" == some true
--- Two callables of which a function runs only one may both use a resumption:
--- the surface checker follows that, the ownership rules of Core do not yet.
--- Such a program compiles, typed but not shown well owned.
+-- The two blocks of `if ... else` may both use a resumption. `if` gives back a
+-- body it did not run, and the block after `else`, given that body, runs in its
+-- environment: the resumption is captured once and used by whichever runs. No
+-- rule names `if` or `else`; a function a program defines does the same.
 #guard owned "effect Ask { ask() -> Int }
-  fn main() { handle ask() + 1 { ask(k) => if(1 < 2) { k(10) } else { k(20) } } }" == some false
+  fn main() { handle ask() + 1 { ask(k) => if(1 < 2) { k(10) } else { k(20) } } }" == some true
+#guard owned "effect Ask { ask() -> Int }
+  fn main() { handle ask() + 1 { ask(k) =>
+    if(1 < 2) { if(2 < 1) { k(1) } else { k(2) } } else { k(3) } } }" == some true
+#guard owned "effect Ask { ask() -> Int }
+  fn decide(c, k) { if(c) { k(1) } else { k(2) } }
+  fn main() { handle ask() + 1 { ask(k) => decide(1 < 2, k) } }" == some true
+#guard owned "effect Ask { ask() -> Int }
+  fn pick(c, a, b) { match(c) { Ok(_) => a(), Err(_) => b(a) } }
+  fn main() { handle ask() + 1 { ask(k) => pick(2 < 1, { k(1) }, { k(2) }) } }" == some true
+-- Two callables that each took the resumption for themselves own it twice,
+-- whichever of them is later run. Such a program compiles, typed but not shown
+-- well owned.
+#guard owned "effect Ask { ask() -> Int }
+  fn pick(c, a, b) { match(c) { Ok(_) => a(), Err(_) => b() } }
+  fn main() { handle ask() + 1 { ask(k) => pick(1 < 2, { k(1) }, { k(2) }) } }" == some false
+#guard owned "effect Ask { ask() -> Int }
+  fn main() { handle ask() + 1 { ask(k) =>
+    let a = { k(1) }; let b = { k(2) }; if(1 < 2) { a() } else { b() } } }" == some false
 
 end Glorious.Tests

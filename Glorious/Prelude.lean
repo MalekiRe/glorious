@@ -20,20 +20,23 @@ let false = Err(());
 // Matching is applying a pattern callable.
 fn match(subject, arms) { tail arms(subject) }
 
-// `if` maps success through its body and keeps failure.
+// `if` gives the result of its body on success. On failure it gives the body
+// back: it was not run, so whatever it captured is still there to be used.
 fn if(condition, body) {
     match(condition) {
         Ok(_) => Ok(body()),
-        Err(error) => Err(error)
+        Err(_) => Err(body)
     }
 }
 
-// `else` unwraps success and recovers from failure.
+// `else` unwraps success, and on failure gives what failed to its fallback. A
+// fallback written as a plain block after an `if` is thereby given the body
+// that was not run, and runs in its place.
 infixr 1 else
 fn else(value, fallback) {
     match(value) {
         Ok(result) => result,
-        Err(_) => tail fallback()
+        Err(failure) => tail fallback(failure)
     }
 }
 

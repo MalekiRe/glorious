@@ -16,6 +16,11 @@ a callable that performs the same operation. A row lists operations nearest
 handler first, so that looking an operation up in a row finds the same handler
 the machine finds on the stack.
 
+A function's type may also state its environment: the types of what it
+captured. Another function written against the same environment can then be
+given it, in place of the first. That is how two bodies of which one runs share
+what they capture.
+
 Ownership is part of the typing. A callable's type says whether it may be
 called once only; a resumption may, and so may a function that captured
 something that cannot be duplicated. A value whose type the context does not
@@ -35,8 +40,11 @@ inductive Ty where
   | data (name : Nat) (args : List Ty)
   /-- A callable: a function, a resumption or a label. `eff` lists the operations
   it may perform, each with the type arguments of its effect. `once` says that
-  it may be called at most once. -/
+  it may be called at most once. `env`, if given, says that it is a function
+  that captured values of exactly these types: its environment, which another
+  function written against the same environment can take over. -/
   | fn (params : List Ty) (ret : Ty) (eff : List (Nat × List Ty)) (once : Bool)
+      (env : Option (List Ty))
   | ref (t : Ty)
   /-- The result of a call that does not return. No value has this type. -/
   | never
@@ -137,6 +145,7 @@ def rhsVars : Rhs → List Nat
   | .construct _ args => atomVars args
   | .place pl => [pl.var]
   | .closure _ captures => atomVars captures
+  | .rebind a _ => atomVars [a]
 
 /-- The locals whose values a control-free computation moves into its result.
 Arithmetic and reading a field copy; they move nothing. -/
@@ -146,6 +155,7 @@ def rhsMoves : Rhs → List Nat
   | .construct _ args => atomVars args
   | .place _ => []
   | .closure _ captures => atomVars captures
+  | .rebind a _ => atomVars [a]
 
 /-- Every local a computation mentions, now or later. A local it does not
 mention is dead: whatever it holds will not be used again. -/
@@ -194,10 +204,19 @@ inductive HasRhs (Δ : Ctx) (Γ : TEnv) : Rhs → Ty → Prop where
       Γ[pl.var]? = some σ → PlaceOk Δ σ pl.path τ → Δ.dup τ → HasRhs Δ Γ (.place pl) τ
   /-- A function that captured something that cannot be duplicated can itself
   be called only once. -/
-  | closure {fn : Nat} {captures : List Atom} {sig : FnSig} {once : Bool} :
+  | closure {fn : Nat} {captures : List Atom} {sig : FnSig} {once : Bool}
+      {env : Option (List Ty)} :
       Δ.fnSig fn sig → HasAtoms Γ captures sig.caps →
-      (once = false → ∀ c, c ∈ sig.caps → Δ.dup c) →
-      HasRhs Δ Γ (.closure fn captures) (.fn sig.params sig.ret sig.eff once)
+      (once = false → ∀ c, c ∈ sig.caps → Δ.dup c) → (∀ Cs, env = some Cs → Cs = sig.caps) →
+      HasRhs Δ Γ (.closure fn captures) (.fn sig.params sig.ret sig.eff once env)
+  /-- A function whose environment is known gives it to another function
+  written against the same environment. The first function is given up without
+  being called, so what it captured is still owned once. -/
+  | rebind {a : Atom} {fn : Nat} {sig : FnSig} {Ps : List Ty} {σ : Ty} {ε : Row}
+      {once once' : Bool} {env : Option (List Ty)} :
+      HasAtom Γ a (.fn Ps σ ε once' (some sig.caps)) → Δ.fnSig fn sig →
+      (once = false → ∀ c, c ∈ sig.caps → Δ.dup c) → (∀ Cs, env = some Cs → Cs = sig.caps) →
+      HasRhs Δ Γ (.rebind a fn) (.fn sig.params sig.ret sig.eff once env)
 
 mutual
 
@@ -228,7 +247,7 @@ inductive ArmsOk (Δ : Ctx) (Cs : List Ty) (ρ : Ty) (ε : Row) : List (Nat × N
   | resumptive {op arm : Nat} {targs Ps : List Ty} {o : Ty} {εa : Row}
       {ops : List (Nat × Nat)} {H : Row} :
       Δ.opSig op targs = some (Ps, some o) →
-      Δ.fnSig arm ⟨Cs, Ps ++ [.fn [o] ρ ε true], ρ, εa⟩ →
+      Δ.fnSig arm ⟨Cs, Ps ++ [.fn [o] ρ ε true none], ρ, εa⟩ →
       Row.le εa ε → ArmsOk Δ Cs ρ ε ops H →
       ArmsOk Δ Cs ρ ε ((op, arm) :: ops) ((op, targs) :: H)
 
@@ -250,35 +269,37 @@ inductive HasTm (Δ : Ctx) : TEnv → Tm → Ty → Row → Prop where
       HasRhs Δ Γ rhs σ → Linear Δ Γ (rhsMoves rhs) (fv body) →
       HasTm Δ (Γ ++ [σ]) body τ ε → HasTm Δ Γ (.let_ rhs body) τ ε
   | call {Γ : TEnv} {f : Atom} {args : List Atom} {body : Tm} {Ps : List Ty} {σ τ : Ty}
-      {ε' ε : Row} {once : Bool} :
-      HasAtom Γ f (.fn Ps σ ε' once) → HasAtoms Γ args Ps → Row.le ε' ε →
+      {ε' ε : Row} {once : Bool} {env : Option (List Ty)} :
+      HasAtom Γ f (.fn Ps σ ε' once env) → HasAtoms Γ args Ps → Row.le ε' ε →
       Linear Δ Γ (atomVars (f :: args)) (fv body) →
       HasTm Δ (Γ ++ [σ]) body τ ε → HasTm Δ Γ (.call f args body) τ ε
   | tail {Γ : TEnv} {f : Atom} {args : List Atom} {Ps : List Ty} {τ : Ty} {ε' ε : Row}
-      {once : Bool} :
-      HasAtom Γ f (.fn Ps τ ε' once) → HasAtoms Γ args Ps → Row.le ε' ε →
+      {once : Bool} {env : Option (List Ty)} :
+      HasAtom Γ f (.fn Ps τ ε' once env) → HasAtoms Γ args Ps → Row.le ε' ε →
       Linear Δ Γ (atomVars (f :: args)) [] → HasTm Δ Γ (.tail f args) τ ε
   /-- A call that does not return can stand where a result of any type is
   expected, and the code after it can take its result to be of any type. This is
   what lets one label be applied in places that expect different types. -/
   | callNever {Γ : TEnv} {f : Atom} {args : List Atom} {body : Tm} {Ps : List Ty} {σ τ : Ty}
-      {ε' ε : Row} {once : Bool} :
-      HasAtom Γ f (.fn Ps .never ε' once) → HasAtoms Γ args Ps → Row.le ε' ε →
+      {ε' ε : Row} {once : Bool} {env : Option (List Ty)} :
+      HasAtom Γ f (.fn Ps .never ε' once env) → HasAtoms Γ args Ps → Row.le ε' ε →
       Linear Δ Γ (atomVars (f :: args)) (fv body) →
       HasTm Δ (Γ ++ [σ]) body τ ε → HasTm Δ Γ (.call f args body) τ ε
   | tailNever {Γ : TEnv} {f : Atom} {args : List Atom} {Ps : List Ty} {τ : Ty} {ε' ε : Row}
-      {once : Bool} :
-      HasAtom Γ f (.fn Ps .never ε' once) → HasAtoms Γ args Ps → Row.le ε' ε →
+      {once : Bool} {env : Option (List Ty)} :
+      HasAtom Γ f (.fn Ps .never ε' once env) → HasAtoms Γ args Ps → Row.le ε' ε →
       Linear Δ Γ (atomVars (f :: args)) [] → HasTm Δ Γ (.tail f args) τ ε
   | handle {Γ : TEnv} {ret : Nat} {ops : List (Nat × Nat)} {captures : List Atom}
-      {thunk : Atom} {body : Tm} {Cs : List Ty} {σ ρ τ : Ty} {εt H ε : Row} {once : Bool} :
-      HasAtom Γ thunk (.fn [] σ εt once) → HasAtoms Γ captures Cs →
+      {thunk : Atom} {body : Tm} {Cs : List Ty} {σ ρ τ : Ty} {εt H ε : Row} {once : Bool}
+      {env : Option (List Ty)} :
+      HasAtom Γ thunk (.fn [] σ εt once env) → HasAtoms Γ captures Cs →
       HandlerOk Δ Cs ret ops σ ρ H ε → Row.le εt (H ++ ε) →
       Linear Δ Γ (atomVars [thunk]) (fv body) →
       HasTm Δ (Γ ++ [ρ]) body τ ε → HasTm Δ Γ (.handle ret ops captures thunk body) τ ε
   | handleTail {Γ : TEnv} {ret : Nat} {ops : List (Nat × Nat)} {captures : List Atom}
-      {thunk : Atom} {Cs : List Ty} {σ τ : Ty} {εt H ε : Row} {once : Bool} :
-      HasAtom Γ thunk (.fn [] σ εt once) → HasAtoms Γ captures Cs →
+      {thunk : Atom} {Cs : List Ty} {σ τ : Ty} {εt H ε : Row} {once : Bool}
+      {env : Option (List Ty)} :
+      HasAtom Γ thunk (.fn [] σ εt once env) → HasAtoms Γ captures Cs →
       HandlerOk Δ Cs ret ops σ τ H ε → Row.le εt (H ++ ε) →
       HasTm Δ Γ (.handleTail ret ops captures thunk) τ ε
   | raise {Γ : TEnv} {op : Nat} {args : List Atom} {targs Ps : List Ty} {τ : Ty} {ε : Row} :
@@ -290,27 +311,30 @@ inductive HasTm (Δ : Ctx) : TEnv → Tm → Ty → Row → Prop where
       Linear Δ Γ (atomVars args) (fv body) →
       HasTm Δ (Γ ++ [σ]) body τ ε → HasTm Δ Γ (.perform op args body) τ ε
   | label {Γ : TEnv} {thunk : Atom} {body : Tm} {σ ρ τ : Ty} {εl εt ε : Row}
-      {once once' : Bool} :
-      HasAtom Γ thunk (.fn [.fn [σ] ρ εl once'] σ εt once) → Row.le εt ε →
+      {once once' : Bool} {env : Option (List Ty)} :
+      HasAtom Γ thunk (.fn [.fn [σ] ρ εl once' none] σ εt once env) → Row.le εt ε →
       Linear Δ Γ (atomVars [thunk]) (fv body) →
       HasTm Δ (Γ ++ [σ]) body τ ε → HasTm Δ Γ (.label thunk body) τ ε
-  | labelTail {Γ : TEnv} {thunk : Atom} {ρ τ : Ty} {εl εt ε : Row} {once once' : Bool} :
-      HasAtom Γ thunk (.fn [.fn [τ] ρ εl once'] τ εt once) → Row.le εt ε →
+  | labelTail {Γ : TEnv} {thunk : Atom} {ρ τ : Ty} {εl εt ε : Row} {once once' : Bool}
+      {env : Option (List Ty)} :
+      HasAtom Γ thunk (.fn [.fn [τ] ρ εl once' none] τ εt once env) → Row.le εt ε →
       HasTm Δ Γ (.labelTail thunk) τ ε
   /-- A cleanup performs no operations. -/
   | guard {Γ : TEnv} {cleanup thunk : Atom} {body : Tm} {σc σ τ : Ty} {εt ε : Row}
-      {once once' : Bool} :
-      HasAtom Γ cleanup (.fn [] σc [] once') → HasAtom Γ thunk (.fn [] σ εt once) →
+      {once once' : Bool} {env env' : Option (List Ty)} :
+      HasAtom Γ cleanup (.fn [] σc [] once' env') → HasAtom Γ thunk (.fn [] σ εt once env) →
       Row.le εt ε → Linear Δ Γ (atomVars [cleanup, thunk]) (fv body) →
       HasTm Δ (Γ ++ [σ]) body τ ε → HasTm Δ Γ (.guard cleanup thunk body) τ ε
-  | guardTail {Γ : TEnv} {cleanup thunk : Atom} {σc τ : Ty} {εt ε : Row} {once once' : Bool} :
-      HasAtom Γ cleanup (.fn [] σc [] once') → HasAtom Γ thunk (.fn [] τ εt once) →
+  | guardTail {Γ : TEnv} {cleanup thunk : Atom} {σc τ : Ty} {εt ε : Row} {once once' : Bool}
+      {env env' : Option (List Ty)} :
+      HasAtom Γ cleanup (.fn [] σc [] once' env') → HasAtom Γ thunk (.fn [] τ εt once env) →
       Row.le εt ε → Linear Δ Γ (atomVars [cleanup, thunk]) [] →
       HasTm Δ Γ (.guardTail cleanup thunk) τ ε
   /-- Giving up a callable may run the cleanups of what it captured, among
   whatever that could still perform. -/
-  | cancel {Γ : TEnv} {k : Atom} {body : Tm} {σ ρ τ : Ty} {ε' ε : Row} {once : Bool} :
-      HasAtom Γ k (.fn [σ] ρ ε' once) → Row.le ε' ε → Linear Δ Γ (atomVars [k]) (fv body) →
+  | cancel {Γ : TEnv} {k : Atom} {body : Tm} {σ ρ τ : Ty} {ε' ε : Row} {once : Bool}
+      {env : Option (List Ty)} :
+      HasAtom Γ k (.fn [σ] ρ ε' once env) → Row.le ε' ε → Linear Δ Γ (atomVars [k]) (fv body) →
       HasTm Δ (Γ ++ [.unit]) body τ ε → HasTm Δ Γ (.cancel k body) τ ε
   | alloc {Γ : TEnv} {a : Atom} {body : Tm} {σ τ : Ty} {ε : Row} :
       HasAtom Γ a σ → Linear Δ Γ (atomVars [a]) (fv body) →

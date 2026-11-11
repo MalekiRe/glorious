@@ -117,7 +117,7 @@ theorem dup_occ (hs : C.strict = true) (hd : dataOk C = true) :
     rcases hc with ⟨_, rfl⟩ | ⟨_, name, args, rfl, hF⟩
     · exact dups_occ hs hd hf (dupTys_all (by simpa [dupTy] using hdup)) id
     · exact dups_occ hs hd hf (data_fields_dup hd (by simpa [dupTy] using hdup) hF) id
-  | _, _, _, .clo _ hc hq, hdup, id => by
+  | _, _, _, .clo _ hc hq _, hdup, id => by
     simp only [occ]
     simp only [dupTy, Bool.not_eq_true'] at hdup
     refine dups_occ hs hd hc (fun c hcm => ?_) id

@@ -31,8 +31,10 @@ inductive Expr where
   | tuple (args : List Expr)
   /-- `e.N`. -/
   | proj (e : Expr) (idx : Nat)
-  /-- A callable literal: one or more clauses. A plain block is one clause with no parameters. -/
-  | closure (clauses : List Clause)
+  /-- A callable literal: one or more clauses. A plain block is one clause with
+  no parameters. A literal written in braces has an identity that is not zero,
+  by which the checker can tell the elaborator about it. -/
+  | closure (id : Nat) (clauses : List Clause)
   /-- `handle subject { arms }`. -/
   | handle (subject : Expr) (arms : List Clause)
   /-- `@name { body }`. -/

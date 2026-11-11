@@ -64,11 +64,15 @@ in the prelude or with a general language rule.
 **Decision (user).** A block yields the value of its last expression. Ending
 that expression with `;` discards the value, and the block yields `()`.
 
-This matters because `if(c) { a }` is a library function that returns an
-option, which `else` unwraps. An `if` with no `else` at the end of a body
-therefore makes the body's value an option, and in a recursive function that is
-a type containing itself. Write `if(c) { a };` when the `if` is run only for
-its effect. Function results stay inferred; there is no `return` keyword, and
+This matters because `if(c) { a }` is a library function that returns a
+`Result`, which `else` unwraps: the body's value on success, and on failure the
+body itself, which was not run (see "Blocks that share an environment"). An
+`if` with no `else` at the end of a body therefore makes the body's value that
+`Result`. In a recursive function that is a type containing itself; and since
+the value holds the body, a body that uses a `let mut` variable or a label of
+the enclosing block would carry it out of that block, which the checker
+rejects. Write `if(c) { a };` when the `if` is run only for its effect.
+Function results stay inferred; there is no `return` keyword, and
 `@function_name(value)` leaves a function early.
 
 Do not "fix" this by making `if` a special form or by giving unannotated
@@ -300,6 +304,8 @@ What the rules are:
 - Reading a field or a cell copies, so what is read must be duplicable. A value
   that is not is taken out of a cell with `replace`, which is why the kernel has
   a `swap` operation.
+- A function whose type states its environment can give it to another function
+  written against the same environment (`rebind`); the first is moved.
 - A handler's functions can run many times with the same captures, so a
   handler's captures are duplicable.
 - A clause's body uses what its patterns bind, not also the argument they took
@@ -316,17 +322,19 @@ the whole of liveness; no dead-variable sets are carried in the typing.
 (`Cert.strict`), and the stronger theorem applies. A program that only the
 surface checker's path-following accepts still compiles, certified as well
 typed only, and for it a second use of a resumption is excluded by the unproved
-surface check alone. `glorious certify FILE` says which. Of the 127 accepted
-programs in the corpus 119 are in the first tier, and so are all five examples.
+surface check alone. `glorious certify FILE` says which. Of the 135 accepted
+programs in the corpus 131 are in the first tier, and so are all five examples.
 
-What the rules do not cover yet, and why those eight programs fall back:
+What the rules do not cover, and why those four programs fall back:
 
-- **Two callables of which only one runs**, both using the resumption:
-  `if(c) { k(1) } else { k(2) }`. Each block captures `k`, so `k` is moved
-  twice. The surface checker accepts this by following the calls (see "Values
-  that hold a resumption are used at most once"); Core has nothing like the
-  specification's correlated alternatives (section 8.3). One callable with two
-  clauses, as in `match`, is within the rules.
+- **Two callables that each captured the resumption**, of which a function then
+  runs one: `let a = { k(1) }; let b = { k(2) }; if(c) { a() } else { b() }`,
+  or a function `pick(c, a, b)` that calls `a()` or `b()`. Each owns `k`, so
+  `k` is moved twice. The specification says the same of bodies stored as
+  independent closures (section 8.3). Two blocks written where a function can
+  hand one to the other share an environment instead; see below.
+- **A resumption moved into a block and also used after the call the block was
+  passed to**: `match(if(c) { Some(k) } else { None }) { ..., None => k(2) }`.
 - **Taking apart a tuple that holds a resumption with `let`**: the elaborator
   reads each field, and reading copies. This needs partial moves (section 7.5).
 
@@ -334,6 +342,74 @@ Not attempted: the exact-once class (a value that must be used), `Drop`, moves
 out of references, user-declared resource types, and any ownership for
 references themselves. A reference stays freely copyable; what keeps a cell
 alive long enough is still the unproved scoping check.
+
+## Blocks that share an environment
+
+**Decision (user).** The two blocks of `if(c) { a } else { b }` may both use a
+value that can be used once, because they are two bodies over one environment
+of which at most one runs. That is the specification's environment sharing
+(branded-environment core specification, section 8). Since `if` and `else` are
+two separate calls, what tells `else` that the environment is still unspent
+travels in the value `if` returns, not in a rule about the expression.
+
+How it is built, without the compiler knowing `if` or `else`:
+
+- **Core.** A callable's type may state its environment: the types of what the
+  function captured (`Ty.fn ... (env : Option (List Ty))`). The kernel has one
+  more control-free computation, `rebind a fn`: the closure `a` is given up and
+  `fn` gets what it captured. It is typed when `a`'s type states exactly the
+  environment `fn` is written against. `a` is moved, so the captures are still
+  owned once. The ownership proof covers it; nothing else in the proof changed.
+- **Prelude.** On failure `if` returns `Err(body)`: the body it did not run.
+  `else` gives the failure's payload to its fallback: `Err(failure) => tail
+  fallback(failure)`. Both are ordinary definitions.
+- **Language rule, part one.** A block written without parameters, where a
+  callable taking one argument is expected, takes that argument without naming
+  it. This is decided by the expected type, at any call. So `x else { 0 }`
+  works on any `Result`, and `x else { e => ... }` can name the failure.
+- **Language rule, part two.** If that argument is itself a block that was not
+  run, and the checker can tell which block of the program it is, the second
+  block runs in the first one's environment: the names both mention are taken
+  from what the first captured instead of being captured again. Names only the
+  second mentions it captures itself.
+
+A function a program defines gets the same treatment by being written the same
+way: `fn pick(c, a, b) { match(c) { Ok(_) => a(), Err(_) => b(a) } }` hands the
+block it did not run to the one it runs, and `pick(c, { k(1) }, { k(2) })` is
+then well owned.
+
+Consequences to know about:
+
+- `if(c) { a }` with no `else` is a `Result<T, fn() -> T>`, not an option. Its
+  failure can be matched and the body still called. Matching it against `None`
+  is a type error.
+- That value holds the body, so it holds what the body captured: see "A
+  trailing `;` discards a value".
+
+How this differs from the specification:
+
+- There is no `Environment` or `RunsIn` trait and no erased `Available`
+  witness. The environment is what the first block captured, and the block that
+  was not run is itself the evidence that the environment is unspent. It is a
+  real value at run time.
+- There are no post-environments (`After`). So this covers alternatives, not a
+  body that runs and then hands on what is left: `and`/`or` chains and
+  sequential use are as before.
+- Bodies stored as independent closures follow normal capture rules, as in the
+  specification.
+
+What is and is not proved: the typing rule for `rebind` is part of the proved
+type system, and every compiled program's Core is checked against it. Which
+block a block is given is found by the unproved surface checker from its
+capture variables, and the rewriting is done by the unproved elaborator. They
+link two blocks only when exactly one block of the program can be what is
+given, and both are built in the same activation. If the linked Core cannot be
+typed, as when the value may also be a function that is not a block, the
+program is compiled again with every block capturing for itself.
+
+A program the checker rejects can still be elaborated and run to see it go
+wrong. There are no types then, so whether a block takes an argument is read
+off the definition of the function it is passed to (`Elab.givesOne`).
 
 ## Other standing decisions
 

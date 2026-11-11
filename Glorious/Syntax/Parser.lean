@@ -8,7 +8,8 @@ Recursive descent with precedence climbing. Operators and their fixities are
 declared by the program, so they are collected from the token stream first.
 
 Braces in expression position always denote a callable: `{ x => body }` and
-`{ P => a, Q => b }` take one argument, a plain block `{ body }` takes none. A
+`{ P => a, Q => b }` take one argument, a plain block `{ body }` takes none
+unless one is expected of it, which the checker decides. A
 callable of several arguments is written `fn(x, y) { body }`. A block written
 directly after a call is passed as its last argument, and `f { body }` calls `f`
 with the block.
@@ -19,6 +20,9 @@ namespace Glorious.Syntax
 structure PCtx where
   toks : Array Token
   fix : Fixities
+  /-- Added to the identity of each callable literal, so that the literals of
+  texts parsed separately stay distinct. -/
+  base : Nat
 
 abbrev P := ReaderT PCtx (StateT Nat (Except String))
 
@@ -239,7 +243,7 @@ private partial def parsePrimary (noBlock : Bool) : P Expr := do
     expectPunct "{"
     let body ← parseStmts
     expectPunct "}"
-    pure (.closure [.mk pats body])
+    pure (.closure 0 [.mk pats body])
   | .ident x =>
     advance
     if ← acceptPunct "::" then
@@ -268,14 +272,15 @@ private partial def parsePrimary (noBlock : Bool) : P Expr := do
 private partial def parseBraces : P Expr := do
   expectPunct "{"
   let ctx ← read
+  let id := ctx.base + (← get)
   if scanClauseForm ctx.toks (← get) 0 then
     let clauses ← parseClauses
     expectPunct "}"
-    pure (.closure clauses)
+    pure (.closure id clauses)
   else
     let body ← parseStmts
     expectPunct "}"
-    pure (.closure [.mk [] body])
+    pure (.closure id [.mk [] body])
 
 /-- Clauses separated by commas, up to but not including the closing `}`. -/
 private partial def parseClauses : P (List Clause) := do
@@ -548,11 +553,13 @@ private def collectFixities (toks : Array Token) (fix : Fixities) : Except Strin
   pure fix
 
 /-- Parse a source text, given the fixities already in scope. Returns the items
-and the fixities including those it declares. -/
-def parse (fix : Fixities) (src : String) : Except String (List Item × Fixities) := do
+and the fixities including those it declares. `base` keeps the identities of
+this text's callable literals apart from those of a text parsed before it. -/
+def parse (fix : Fixities) (src : String) (base : Nat := 0) :
+    Except String (List Item × Fixities) := do
   let toks ← lex src
   let fix ← collectFixities toks fix
-  let (items, _) ← (parseItems.run ⟨toks, fix⟩).run 0
+  let (items, _) ← (parseItems.run ⟨toks, fix, base⟩).run 0
   pure (items, fix)
 
 end Glorious.Syntax

@@ -52,7 +52,7 @@ def ctorsOf (C : Cert) : Ty → Option (List (Nat × List Ty))
   | .tuple Fs => some [(0, Fs)]
   | .data name args => findData C.datas name args
   | .int => none
-  | .fn _ _ _ _ => none
+  | .fn _ _ _ _ _ => none
   | .ref _ => none
   | .never => none
 

@@ -17,7 +17,8 @@ def Ty.beq : Ty → Ty → Bool
   | .int, .int => true
   | .tuple a, .tuple b => Ty.beqList a b
   | .data n a, .data m b => n == m && Ty.beqList a b
-  | .fn p r e q, .fn p' r' e' q' => Ty.beqList p p' && Ty.beq r r' && Ty.beqRow e e' && q == q'
+  | .fn p r e q v, .fn p' r' e' q' v' =>
+    Ty.beqList p p' && Ty.beq r r' && Ty.beqRow e e' && q == q' && Ty.beqEnv v v'
   | .ref a, .ref b => Ty.beq a b
   | .never, .never => true
   | _, _ => false
@@ -39,6 +40,12 @@ def Ty.beqEntry : Nat × List Ty → Nat × List Ty → Bool
   | (op, x), (op', y) => op == op' && Ty.beqList x y
 termination_by structural a => a
 
+def Ty.beqEnv : Option (List Ty) → Option (List Ty) → Bool
+  | none, none => true
+  | some a, some b => Ty.beqList a b
+  | _, _ => false
+termination_by structural a => a
+
 end
 
 mutual
@@ -51,21 +58,22 @@ theorem Ty.beq_eq : ∀ (a b : Ty), Ty.beq a b = true → a = b
   | .data n a, .data m b, h => by
     simp only [Ty.beq, Bool.and_eq_true, beq_iff_eq] at h
     rw [h.1, Ty.beqList_eq a b h.2]
-  | .fn p r e q, .fn p' r' e' q', h => by
+  | .fn p r e q v, .fn p' r' e' q' v', h => by
     simp only [Ty.beq, Bool.and_eq_true, beq_iff_eq] at h
-    rw [Ty.beqList_eq p p' h.1.1.1, Ty.beq_eq r r' h.1.1.2, Ty.beqRow_eq e e' h.1.2, h.2]
+    rw [Ty.beqList_eq p p' h.1.1.1.1, Ty.beq_eq r r' h.1.1.1.2, Ty.beqRow_eq e e' h.1.1.2, h.1.2,
+      Ty.beqEnv_eq v v' h.2]
   | .ref a, .ref b, h => by
     simp only [Ty.beq] at h
     rw [Ty.beq_eq a b h]
   | .never, .never, _ => rfl
-  | .int, .tuple _, h | .int, .data _ _, h | .int, .fn _ _ _ _, h | .int, .ref _, h
-  | .int, .never, h | .tuple _, .int, h | .tuple _, .data _ _, h | .tuple _, .fn _ _ _ _, h
+  | .int, .tuple _, h | .int, .data _ _, h | .int, .fn _ _ _ _ _, h | .int, .ref _, h
+  | .int, .never, h | .tuple _, .int, h | .tuple _, .data _ _, h | .tuple _, .fn _ _ _ _ _, h
   | .tuple _, .ref _, h | .tuple _, .never, h | .data _ _, .int, h | .data _ _, .tuple _, h
-  | .data _ _, .fn _ _ _ _, h | .data _ _, .ref _, h | .data _ _, .never, h | .fn _ _ _ _, .int, h
-  | .fn _ _ _ _, .tuple _, h | .fn _ _ _ _, .data _ _, h | .fn _ _ _ _, .ref _, h | .fn _ _ _ _, .never, h
-  | .ref _, .int, h | .ref _, .tuple _, h | .ref _, .data _ _, h | .ref _, .fn _ _ _ _, h
+  | .data _ _, .fn _ _ _ _ _, h | .data _ _, .ref _, h | .data _ _, .never, h | .fn _ _ _ _ _, .int, h
+  | .fn _ _ _ _ _, .tuple _, h | .fn _ _ _ _ _, .data _ _, h | .fn _ _ _ _ _, .ref _, h | .fn _ _ _ _ _, .never, h
+  | .ref _, .int, h | .ref _, .tuple _, h | .ref _, .data _ _, h | .ref _, .fn _ _ _ _ _, h
   | .ref _, .never, h | .never, .int, h | .never, .tuple _, h | .never, .data _ _, h
-  | .never, .fn _ _ _ _, h | .never, .ref _, h => by
+  | .never, .fn _ _ _ _ _, h | .never, .ref _, h => by
     simp [Ty.beq] at h
 
 theorem Ty.beqList_eq : ∀ (a b : List Ty), Ty.beqList a b = true → a = b
@@ -87,6 +95,13 @@ theorem Ty.beqEntry_eq : ∀ (a b : Nat × List Ty), Ty.beqEntry a b = true → 
     simp only [Ty.beqEntry, Bool.and_eq_true, beq_iff_eq] at h
     rw [h.1, Ty.beqList_eq x y h.2]
 
+theorem Ty.beqEnv_eq : ∀ (a b : Option (List Ty)), Ty.beqEnv a b = true → a = b
+  | none, none, _ => rfl
+  | some a, some b, h => by
+    simp only [Ty.beqEnv] at h
+    rw [Ty.beqList_eq a b h]
+  | none, some _, h | some _, none, h => by simp [Ty.beqEnv] at h
+
 end
 
 mutual
@@ -95,7 +110,8 @@ theorem Ty.beq_refl : ∀ (a : Ty), Ty.beq a a = true
   | .int => by simp [Ty.beq]
   | .tuple a => by simp only [Ty.beq, Ty.beqList_refl a]
   | .data n a => by simp [Ty.beq, Ty.beqList_refl a]
-  | .fn p r e q => by simp [Ty.beq, Ty.beqList_refl p, Ty.beq_refl r, Ty.beqRow_refl e]
+  | .fn p r e q v => by
+    simp [Ty.beq, Ty.beqList_refl p, Ty.beq_refl r, Ty.beqRow_refl e, Ty.beqEnv_refl v]
   | .ref a => by simp only [Ty.beq, Ty.beq_refl a]
   | .never => by simp [Ty.beq]
 
@@ -109,6 +125,10 @@ theorem Ty.beqRow_refl : ∀ (a : List (Nat × List Ty)), Ty.beqRow a a = true
 
 theorem Ty.beqEntry_refl : ∀ (a : Nat × List Ty), Ty.beqEntry a a = true
   | (op, x) => by simp [Ty.beqEntry, Ty.beqList_refl x]
+
+theorem Ty.beqEnv_refl : ∀ (a : Option (List Ty)), Ty.beqEnv a a = true
+  | none => by simp [Ty.beqEnv]
+  | some a => by simp [Ty.beqEnv, Ty.beqList_refl a]
 
 end
 

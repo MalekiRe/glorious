@@ -73,7 +73,7 @@ operation can be resumed. -/
 def ArmSig (Δ : Ctx) (Cs : List Ty) (ρ : Ty) (ε : Row) (arm : Nat) (Ps : List Ty) (εa : Row) :
     Option Ty → Prop
   | none => Δ.fnSig arm ⟨Cs, Ps, ρ, εa⟩
-  | some o => Δ.fnSig arm ⟨Cs, Ps ++ [.fn [o] ρ ε true], ρ, εa⟩
+  | some o => Δ.fnSig arm ⟨Cs, Ps ++ [.fn [o] ρ ε true none], ρ, εa⟩
 
 theorem ArmsOk.lookup_none {Cs : List Ty} {ρ : Ty} {ε : Row} {ops : List (Nat × Nat)} {H : Row}
     (h : ArmsOk Δ Cs ρ ε ops H) {op : Nat} : H.lookup op = none → ops.lookup op = none := by

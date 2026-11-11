@@ -28,11 +28,12 @@ structure Compiled where
 /-- Find a certificate for a program's Core and have the proved checker accept
 it: with the ownership rules if the program meets them, and otherwise as a
 typing only. An error here is a defect in the compiler, not in the program. -/
-def certifyProgram (items : List Syntax.Item) (p : Core.Program) : Except String Typing.Cert := do
-  match Infer.certify items p true with
+def certifyProgram (items : List Syntax.Item) (p : Core.Program)
+    (envSizes : List (Nat × Nat) := []) : Except String Typing.Cert := do
+  match Infer.certify items p true envSizes with
   | .ok cert => if Typing.checkProgram cert p then return cert
   | .error _ => pure ()
-  let cert ← match Infer.certify items p false with
+  let cert ← match Infer.certify items p false envSizes with
     | .ok cert => pure cert
     | .error e => throw s!"no certificate was found: {e}"
   if Typing.checkProgram cert p then pure cert
@@ -45,16 +46,31 @@ def compileSource (src : String) (check : Bool := true) : Except String Compiled
   let (prelude, fix) ← match Syntax.parse {} Prelude.source with
     | .ok r => pure r
     | .error e => throw s!"prelude: {e}"
-  let (items, _) ← Syntax.parse fix src
-  if check then Check.checkProgram (prelude ++ items)
-  let out ← Elab.elabProgram (prelude ++ items)
-  let cert ← if check then
-      match certifyProgram (prelude ++ items) out.program with
-      | .ok cert => pure (some cert)
-      | .error e =>
-        throw s!"the checker accepted this program, but its Core could not be shown to be well typed: {e}. This is a defect in the compiler"
-    else pure none
-  pure ⟨out.program, out.ctorNames, out.fnNames, out.opNames, cert⟩
+  let (items, _) ← Syntax.parse fix src (base := 1000000)
+  let all := prelude ++ items
+  -- What the checker learnt about blocks that share an environment. A program
+  -- it rejects is elaborated without that.
+  let blocks ← match Check.checkProgram all with
+    | .ok blocks => pure (some blocks)
+    | .error e => if check then throw e else pure none
+  let build := fun (blocks : Option Elab.Blocks) => do
+    let out ← Elab.elabProgram all blocks
+    let cert ← if check then
+        match certifyProgram all out.program out.envSizes with
+        | .ok cert => pure (some cert)
+        | .error e =>
+          throw s!"the checker accepted this program, but its Core could not be shown to be well typed: {e}. This is a defect in the compiler"
+      else pure none
+    pure (⟨out.program, out.ctorNames, out.fnNames, out.opNames, cert⟩ : Compiled)
+  -- Blocks can share an environment only where a type can state it. Where one
+  -- cannot, as when what a block is given may also be a function that is not a
+  -- block, every block captures for itself, as it would without the sharing.
+  match build blocks with
+  | .ok c => pure c
+  | .error e =>
+    match blocks with
+    | some b => if b.links.isEmpty then throw e else build (some { b with links := [] })
+    | none => throw e
 
 /-- Whether a program's Core was shown to follow the ownership rules: `some true`
 if so, `some false` if it was only shown to be well typed, `none` if it does not compile. -/

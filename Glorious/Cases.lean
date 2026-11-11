@@ -43,8 +43,41 @@ def cases : List Case := [
     [], "20"⟩,
   ⟨"fn main() { if(1 == 1) { 10 } }",
     [], "Ok(10)"⟩,
-  ⟨"fn main() { if(1 != 1) { 10 } }",
-    [], "Err(())"⟩,
+  -- The block after `else` runs in place of the body that was not run, and
+  -- sees the same variables.
+  ⟨"fn main() { let mut x = 0; if(2 < 1) { x = 1 } else { x = x + 2 }; x }",
+    [], "2"⟩,
+  ⟨"fn main() { let a = 1; let r = if(2 < 1) { a }; let a = 5; r else { a } }",
+    [], "5"⟩,
+  ⟨"fn main() { let n = 1; let r = if(2 < 1) { n }; let g = { r else { n + 10 } }; g() }",
+    [], "11"⟩,
+  -- `else` gives what failed to its fallback, which may name it or not.
+  ⟨"fn main() { (Err(3) else { e => e + 1 }) + (None else { 7 }) + (Some(4) else { 0 }) }",
+    [], "15"⟩,
+  -- A block without parameters fits wherever a callable of one argument is
+  -- expected, through a function of the program's own as well.
+  ⟨"fn wrap(v, f) { v else f }  fn main() { wrap(None) { 3 } + wrap(Some(1)) { 9 } }",
+    [], "4"⟩,
+  ⟨"struct Box(run: fn(Int) -> Int)
+    fn main() { let b = Box({ 5 }); match(b) { Box(f) => f(1) } }",
+    [], "5"⟩,
+  -- What a block is given need not be the body of an `if`.
+  ⟨"fn zero() { 0 }
+    fn main() {
+      let n = 3;
+      let r = if(2 < 1) { n };
+      let r2 = match(2 < 1) { Ok(_) => r, Err(_) => Err(zero) };
+      r2 else { n + 1 }
+    }",
+    [], "4"⟩,
+  -- A function a program defines can choose between two blocks the same way.
+  ⟨"effect Ask { ask() -> Int }
+    fn pick(c, a, b) { match(c) { Ok(_) => a(), Err(_) => b(a) } }
+    fn main() { handle ask() + 1 { ask(k) => pick(2 < 1, { k(1) }, { k(2) }) } }",
+    [], "3"⟩,
+  -- A failed `if` gives back its body, which was not run and still can be.
+  ⟨"fn main() { match(if(1 != 1) { 10 }) { Ok(n) => n, Err(body) => body() + 1 } }",
+    [], "11"⟩,
   ⟨"effect Boom { boom() -> ! }
   fn main() { handle (if(1 < 2) { 1 } else { boom() }) { boom() => 0 } }",
     [], "1"⟩,
@@ -431,7 +464,7 @@ def cases : List Case := [
   ⟨"fn each(f, n) { if(n > 0) { f(n); each(f, n - 1) }; }  fn main() { each(print, 3) }",
     [], "3\n2\n1\n()"⟩,
   ⟨"fn each(f, n) { if(n > 0) { f(n); each(f, n - 1) } }  fn main() { each(print, 3) }",
-    [], "error: in `each`: `each` is used recursively at a different type: expected `fn(fn(Int) -> _, Int) -> _`, found `fn(fn(Int) -> _, Int) -> Result<_, ()>` (this would need a type that contains itself); if the last expression of the body is not meant as the result, end it with `;`"⟩,
+    [], "error: in `each`: `each` is used recursively at a different type: expected `fn(fn(Int) -> _, Int) -> _`, found `fn(fn(Int) -> _, Int) -> Result<_, fn() -> _>` (this would need a type that contains itself); if the last expression of the body is not meant as the result, end it with `;`"⟩,
   ⟨"fn log(x) { if(x > 0) { print(x) } }  fn main() { log(1) }",
     [], "1\nOk(())"⟩,
   ⟨"fn log(x) { if(x > 0) { print(x) }; }  fn main() { log(1) }",
@@ -607,7 +640,7 @@ def cases : List Case := [
   -- anything to clean up.
   ⟨"fn main() { cancel(5); 0 }",
     [], "error: 1:13: in `main`: argument 1 of `cancel`: expected `fn(_) -> _`, found `Int`"⟩,
-  ⟨"fn main() { cancel({ 1 }); 0 }",
+  ⟨"fn main() { cancel(fn() { 1 }); 0 }",
     [], "error: 1:13: in `main`: argument 1 of `cancel`: expected `fn(_) -> _`, found `fn() -> Int`"⟩,
   ⟨"fn main() { cancel({ x => x + 1 }); 0 }",
     [], "0"⟩,

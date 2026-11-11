@@ -45,7 +45,7 @@ theorem HasVal.mono {S S' : StoreTy} (hle : S.Le S') :
     ∀ {v : Value} {τ : Ty}, HasVal Δ S v τ → HasVal Δ S' v τ
   | _, _, .int => .int
   | _, _, .data hc hf => .data hc (HasVals.mono hle hf)
-  | _, _, .clo hsig hc hq => .clo hsig (HasVals.mono hle hc) hq
+  | _, _, .clo hsig hc hq he => .clo hsig (HasVals.mono hle hc) hq he
   | _, _, .cont h => .cont (hle.conts _ _ h)
   | _, _, .label h => .label (hle.labels _ _ h)
   | _, _, .ref h => .ref (hle.cells _ _ h)
@@ -90,7 +90,7 @@ theorem CtorOf.not_int {tag : Nat} {Fs : List Ty} (h : CtorOf Δ tag .int Fs) : 
   rcases h with ⟨_, hT⟩ | ⟨_, _, _, hT, _⟩ <;> cases hT
 
 theorem CtorOf.not_fn {tag : Nat} {Fs Ps : List Ty} {σ : Ty} {ε : Row} {once : Bool}
-    (h : CtorOf Δ tag (.fn Ps σ ε once) Fs) : False := by
+    {env : Option (List Ty)} (h : CtorOf Δ tag (.fn Ps σ ε once env) Fs) : False := by
   rcases h with ⟨_, hT⟩ | ⟨_, _, _, hT, _⟩ <;> cases hT
 
 theorem CtorOf.not_ref {tag : Nat} {Fs : List Ty} {τ : Ty} (h : CtorOf Δ tag (.ref τ) Fs) :
@@ -119,16 +119,27 @@ theorem HasVal.ref_inv {S : StoreTy} {v : Value} {τ : Ty} (h : HasVal Δ S v (.
 /-- A value of a callable type is a function at a signature of that type, a
 resumption or a label. -/
 theorem HasVal.fn_inv {S : StoreTy} {v : Value} {Ps : List Ty} {σ : Ty} {ε : Row} {once : Bool}
-    (h : HasVal Δ S v (.fn Ps σ ε once)) :
+    {env : Option (List Ty)} (h : HasVal Δ S v (.fn Ps σ ε once env)) :
     (∃ fn captures Cs, v = .clo fn captures ∧ Δ.fnSig fn ⟨Cs, Ps, σ, ε⟩
         ∧ HasVals Δ S captures Cs)
       ∨ (∃ id o, v = .cont id ∧ Ps = [o] ∧ S.conts id = some (o, σ, ε))
       ∨ (∃ id τ, v = .label id ∧ Ps = [τ] ∧ S.labels id = some τ) := by
   cases h with
   | data hc _ => exact hc.not_fn.elim
-  | clo hsig hc _ => exact .inl ⟨_, _, _, rfl, hsig, hc⟩
+  | clo hsig hc _ _ => exact .inl ⟨_, _, _, rfl, hsig, hc⟩
   | cont hk => exact .inr (.inl ⟨_, _, rfl, rfl, hk⟩)
   | label hl => exact .inr (.inr ⟨_, _, rfl, rfl, hl⟩)
+
+/-- A value whose type states an environment is a function that captured
+values of those types. -/
+theorem HasVal.env_inv {S : StoreTy} {v : Value} {Ps Cs : List Ty} {σ : Ty} {ε : Row}
+    {once : Bool} (h : HasVal Δ S v (.fn Ps σ ε once (some Cs))) :
+    ∃ fn captures, v = .clo fn captures ∧ HasVals Δ S captures Cs := by
+  cases h with
+  | data hc _ => exact hc.not_fn.elim
+  | clo hsig hc _ he =>
+    rw [he Cs rfl]
+    exact ⟨_, _, rfl, hc⟩
 
 /-- A value of a type some constructor builds is built by a constructor of that type. -/
 theorem HasVal.ctor_inv {S : StoreTy} {v : Value} {T : Ty} {tag : Nat} {Fs : List Ty}
@@ -137,7 +148,7 @@ theorem HasVal.ctor_inv {S : StoreTy} {v : Value} {T : Ty} {tag : Nat} {Fs : Lis
   cases h with
   | int => exact hc.not_int.elim
   | data hc' hf => exact ⟨_, _, _, rfl, hc', hf⟩
-  | clo _ _ _ => exact hc.not_fn.elim
+  | clo _ _ _ _ => exact hc.not_fn.elim
   | cont _ => exact hc.not_fn.elim
   | label _ => exact hc.not_fn.elim
   | ref _ => exact hc.not_ref.elim
@@ -229,9 +240,13 @@ theorem rhs_ok {S : StoreTy} {env : Env} {Γ : TEnv} {rhs : Rhs} {τ : Ty}
     obtain ⟨v, hv', hvt⟩ := henv.get hv
     obtain ⟨w, hw, hwt⟩ := follow_ok hpl hvt
     exact .inl ⟨w, by simp [Rhs.eval, Place.eval, hv', hw], hwt⟩
-  | closure hsig hcaps hq =>
+  | closure hsig hcaps hq he =>
     obtain ⟨vs, hvs, hvst⟩ := atoms_ok henv hcaps
-    exact .inl ⟨_, by simp [Rhs.eval, hvs], .clo hsig hvst hq⟩
+    exact .inl ⟨_, by simp [Rhs.eval, hvs], .clo hsig hvst hq he⟩
+  | rebind ha hsig hq he =>
+    obtain ⟨v, hv, hvt⟩ := atom_ok henv ha
+    obtain ⟨fn', captured, rfl, hcaps⟩ := hvt.env_inv
+    exact .inl ⟨_, by simp [Rhs.eval, hv], .clo hsig hcaps hq he⟩
 
 /-- The value of a control-free computation holds no more than the locals it moves. -/
 theorem rhs_occ {S : StoreTy} {env : Env} {Γ : TEnv} {rhs : Rhs} {σ : Ty} {v : Value}
@@ -258,11 +273,17 @@ theorem rhs_occ {S : StoreTy} {env : Env} {Γ : TEnv} {rhs : Rhs} {σ : Ty} {v :
     simp [Rhs.eval, Place.eval, hx', hw] at hv
     subst hv
     simp [hD _ _ _ hwt hdup id]
-  | closure hsig hcaps hq =>
+  | closure hsig hcaps hq he =>
     obtain ⟨vs, hvs, _⟩ := atoms_ok (S := S) henv hcaps
     simp [Rhs.eval, hvs] at hv
     subst hv
     exact Nat.le_of_eq (by simpa [occ, rhsMoves] using occs_evalAtoms id env _ hvs)
+  | rebind ha hsig hq he =>
+    obtain ⟨w, hw, hwt⟩ := atom_ok henv ha
+    obtain ⟨fn', captured, rfl, _⟩ := hwt.env_inv
+    simp [Rhs.eval, hw] at hv
+    subst hv
+    exact Nat.le_of_eq (by simpa [occ, rhsMoves] using occ_eval id env hw)
 
 /-! ## Patterns and entering a function -/
 

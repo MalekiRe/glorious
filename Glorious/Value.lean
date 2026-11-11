@@ -55,6 +55,9 @@ inductive Rhs where
   /-- Read a field path out of a local. -/
   | place (pl : Place)
   | closure (fn : Nat) (captures : List Atom)
+  /-- What a closure captured, under the code of another function: the closure
+  `a` is given up and `fn` runs in its place. -/
+  | rebind (a : Atom) (fn : Nat)
 
 namespace Value
 
@@ -147,5 +150,9 @@ def Rhs.eval (ρ : Env) : Rhs → Option Value
     match evalAtoms ρ captures with
     | some vs => some (.clo fn vs)
     | none => none
+  | .rebind a fn =>
+    match a.eval ρ with
+    | some (.clo _ captured) => some (.clo fn captured)
+    | _ => none
 
 end Glorious

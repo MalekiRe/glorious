@@ -80,6 +80,7 @@ enum Rhs {
     Construct(u64, Vec<Atom>),
     Place(Place),
     Closure(usize, Vec<Atom>),
+    Rebind(Atom, usize),
 }
 
 enum Instr {
@@ -197,6 +198,10 @@ impl Reader<'_> {
             4 => {
                 let func = self.index()?;
                 Ok(Rhs::Closure(func, self.atoms()?))
+            }
+            5 => {
+                let a = self.atom()?;
+                Ok(Rhs::Rebind(a, self.index()?))
             }
             t => Err(format!("unknown computation tag {t}")),
         }
@@ -417,6 +422,12 @@ impl Vm {
             Rhs::Closure(func, caps) => {
                 Ok(Value::Clo(Rc::new(Clo { func: *func, caps: self.atoms(caps)? })))
             }
+            Rhs::Rebind(a, func) => match self.atom(a)? {
+                Value::Clo(clo) => {
+                    Ok(Value::Clo(Rc::new(Clo { func: *func, caps: clo.caps.clone() })))
+                }
+                _ => Err(Stop::Wrong),
+            },
         }
     }
 

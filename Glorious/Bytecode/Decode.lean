@@ -74,6 +74,10 @@ def rhs : Bytes → Option (Rhs × Bytes)
     let (fn, bs) ← nat bs
     let (captures, bs) ← list atom bs
     pure (.closure fn captures, bs)
+  | 5 :: bs => do
+    let (a, bs) ← atom bs
+    let (fn, bs) ← nat bs
+    pure (.rebind a fn, bs)
   | _ => none
 
 def pair (bs : Bytes) : Option ((Nat × Nat) × Bytes) := do
