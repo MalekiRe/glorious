@@ -77,3 +77,43 @@ three standard axioms, in particular on `sorryAx` or a declared `axiom`.
 /-- info: 'Glorious.Typing.checked_compiled_owned_safety' depends on axioms: [propext, Classical.choice, Quot.sound] -/
 #guard_msgs in
 #print axioms Glorious.Typing.checked_compiled_owned_safety
+
+/-- info: 'Glorious.Typing.borrow_safety' depends on axioms: [propext, Classical.choice, Quot.sound] -/
+#guard_msgs in
+#print axioms Glorious.Typing.borrow_safety
+
+/-- info: 'Glorious.Typing.scoped_safety' depends on axioms: [propext, Classical.choice, Quot.sound] -/
+#guard_msgs in
+#print axioms Glorious.Typing.scoped_safety
+
+/-- info: 'Glorious.Typing.compiled_scoped_safety' depends on axioms: [propext, Classical.choice, Quot.sound] -/
+#guard_msgs in
+#print axioms Glorious.Typing.compiled_scoped_safety
+
+/-- info: 'Glorious.Typing.checked_borrow_safety' depends on axioms: [propext, Classical.choice, Quot.sound] -/
+#guard_msgs in
+#print axioms Glorious.Typing.checked_borrow_safety
+
+/-- info: 'Glorious.Typing.checked_scoped_safety' depends on axioms: [propext, Classical.choice, Quot.sound] -/
+#guard_msgs in
+#print axioms Glorious.Typing.checked_scoped_safety
+
+/-- info: 'Glorious.Typing.checked_compiled_scoped_safety' depends on axioms: [propext, Classical.choice, Quot.sound] -/
+#guard_msgs in
+#print axioms Glorious.Typing.checked_compiled_scoped_safety
+
+/-- info: 'Glorious.Typing.checked_full_safety' depends on axioms: [propext, Classical.choice, Quot.sound] -/
+#guard_msgs in
+#print axioms Glorious.Typing.checked_full_safety
+
+/-- info: 'Glorious.Typing.checked_compiled_full_safety' depends on axioms: [propext, Classical.choice, Quot.sound] -/
+#guard_msgs in
+#print axioms Glorious.Typing.checked_compiled_full_safety
+
+/-- info: 'Glorious.Typing.Witness.counter_borrows' depends on axioms: [propext, Classical.choice, Quot.sound] -/
+#guard_msgs in
+#print axioms Glorious.Typing.Witness.counter_borrows
+
+/-- info: 'Glorious.Typing.Witness.readers_borrows' depends on axioms: [propext, Classical.choice, Quot.sound] -/
+#guard_msgs in
+#print axioms Glorious.Typing.Witness.readers_borrows

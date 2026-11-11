@@ -12,11 +12,14 @@ import Glorious.Proof.CodeAt
 import Glorious.Proof.Patterns
 import Glorious.Proof.Correct
 import Glorious.Proof.Witness
+import Glorious.Typing.Types
 import Glorious.Typing.Static
+import Glorious.Typing.Subst
 import Glorious.Typing.Runtime
 import Glorious.Typing.Values
 import Glorious.Typing.Stack
 import Glorious.Typing.Safety
+import Glorious.Typing.Cells
 import Glorious.Typing.Compiled
 import Glorious.Typing.Equality
 import Glorious.Typing.Checker

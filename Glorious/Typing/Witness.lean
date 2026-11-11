@@ -2,13 +2,18 @@ import Glorious.Typing.Certify
 import Glorious.Proof.Witness
 
 /-!
-# A well-typed, well-owned program
+# Programs the checker accepts, and programs it turns away
 
 The safety theorems would say nothing if the checker accepted no program. Here
 it accepts the `effects` program of `Glorious.Witness`, with the ownership
 rules on: the program installs three handlers, performs a resumptive operation
 under a handler that does not serve it, resumes each resumption once, and ends
 with a terminal operation. The kernel runs the checker to confirm it.
+
+Further down are programs with cells: ones that use a cell within its scope,
+which the region rules accept, and ones that let a reference or a closure
+holding one out of the scope and use it afterwards, which go wrong and which
+the region rules turn away.
 -/
 
 namespace Glorious.Typing.Witness
@@ -22,28 +27,30 @@ def askRow : Row := [(0, [])]
 def failRow : Row := [(1, [])]
 
 /-- A computation that may ask; it can be run any number of times. -/
-def asker : Ty := .fn [] .int askRow false none
+def asker : Ty := .fn 0 [] .int askRow false none []
 
 /-- The resumption the `Ask` arm receives: it runs where `Fail` is served, and
 can be resumed once. -/
-def resumption : Ty := .fn [.int] .int failRow true none
+def resumption : Ty := .fn 0 [.int] .int failRow true none []
 
 def cert : Cert where
   sigs := [
-    ⟨0, ⟨[], [], .int, askRow⟩, [[.ty .int]]⟩,
-    ⟨1, ⟨[], [.int, resumption], .int, failRow⟩, [[.ty .int]]⟩,
-    ⟨2, ⟨[], [.int], .int, []⟩, [[.ty .int]]⟩,
-    ⟨3, ⟨[], [.int], .int, []⟩, [[]]⟩,
-    ⟨4, ⟨[], [.int], .int, []⟩, [[.ty .int]]⟩,
-    ⟨5, ⟨[asker], [], .int, askRow⟩, [[.handler .int failRow]]⟩,
-    ⟨6, ⟨[asker], [], .int, failRow⟩, [[.handler .int askRow]]⟩]
+    ⟨0, ⟨[], [], .int, askRow, 0, 0, []⟩, [[.ty .int]]⟩,
+    ⟨1, ⟨[], [.int, resumption], .int, failRow, 0, 0, []⟩, [[.ty .int]]⟩,
+    ⟨2, ⟨[], [.int], .int, [], 0, 0, []⟩, [[.ty .int]]⟩,
+    ⟨3, ⟨[], [.int], .int, [], 0, 0, []⟩, [[]]⟩,
+    ⟨4, ⟨[], [.int], .int, [], 0, 0, []⟩, [[.ty .int]]⟩,
+    ⟨5, ⟨[asker], [], .int, askRow, 0, 0, []⟩, [[.handler .int failRow [] [[], []]]]⟩,
+    ⟨6, ⟨[asker], [], .int, failRow, 0, 0, []⟩, [[.handler .int askRow [] [[], []]]]⟩]
   datas := []
   -- `Ask` takes an integer and is resumed with one; `Fail` takes an integer
   -- and is not resumed.
   ops := [⟨0, [], [.int], some .int⟩, ⟨1, [], [.int], none⟩]
   mainTy := .int
-  mainHints := [.ty asker, .ty asker, .ty (.fn [] .int failRow false none), .handler .int failRow]
+  mainHints := [.ty asker, .ty asker, .ty (.fn 0 [] .int failRow false none []),
+    .handler .int failRow [] [[], []]]
   strict := true
+  regions := true
 
 theorem effects_checked : checkProgram cert Glorious.Witness.effects = true := by decide
 
@@ -65,14 +72,15 @@ those rules on, the checker turns it away. -/
 
 def twiceCert (strict : Bool) : Cert where
   sigs := [
-    ⟨0, ⟨[], [], .int, askRow⟩, [[]]⟩,
-    ⟨1, ⟨[], [.int, .fn [.int] .int [] true none], .int, []⟩, [[]]⟩,
-    ⟨2, ⟨[], [.int], .int, []⟩, [[]]⟩]
+    ⟨0, ⟨[], [], .int, askRow, 0, 0, []⟩, [[]]⟩,
+    ⟨1, ⟨[], [.int, .fn 0 [.int] .int [] true none []], .int, [], 0, 0, []⟩, [[]]⟩,
+    ⟨2, ⟨[], [.int], .int, [], 0, 0, []⟩, [[]]⟩]
   datas := []
   ops := [⟨0, [], [.int], some .int⟩]
   mainTy := .int
-  mainHints := [.ty asker, .handler .int askRow]
+  mainHints := [.ty asker, .handler .int askRow [] [[], []]]
   strict := strict
+  regions := false
 
 example : checkProgram (twiceCert false) Glorious.Witness.resumeTwice = true := by decide
 
@@ -81,25 +89,26 @@ example : checkProgram (twiceCert true) Glorious.Witness.resumeTwice = false := 
 /-! What the checker turns away, and a use of the coverage check on a data type. -/
 
 /-- Reading a local that does not exist. -/
-example : checkProgram ⟨[], [], [], .int, [], true⟩ ⟨[], .ret (.var 0)⟩ = false := by decide
+example : checkProgram ⟨[], [], [], .int, [], true, true⟩ ⟨[], .ret (.var 0)⟩ = false := by decide
 
 /-- Performing an operation nothing handles. -/
-example : checkProgram ⟨[], [], [], .int, [], true⟩ ⟨[], .raise 0 []⟩ = false := by decide
+example : checkProgram ⟨[], [], [], .int, [], true, true⟩ ⟨[], .raise 0 []⟩ = false := by decide
 
 /-- Calling something that is not callable. -/
-example : checkProgram ⟨[], [], [], .int, [.ty .int], true⟩
+example : checkProgram ⟨[], [], [], .int, [.ty .int], true, true⟩
     ⟨[], .let_ (.atom (.int 1)) (.tail (.var 0) [])⟩ = false := by decide
 
 /-- A function with a clause for `0` only does not cover its integer parameter;
 with a second clause that binds the argument, it does. -/
 example : checkProgram
-    ⟨[⟨0, ⟨[], [.int], .int, []⟩, [[]]⟩], [], [], .int, [.ty (.fn [.int] .int [] false none)], true⟩
+    ⟨[⟨0, ⟨[], [.int], .int, [], 0, 0, []⟩, [[]]⟩], [], [], .int,
+      [.ty (.fn 0 [.int] .int [] false none [])], true, true⟩
     ⟨[⟨[⟨[.int 0], .ret (.int 1)⟩]⟩], .let_ (.closure 0 []) (.tail (.var 0) [.int 5])⟩
     = false := by decide
 
 example : checkProgram
-    ⟨[⟨0, ⟨[], [.int], .int, []⟩, [[], []]⟩], [], [], .int,
-      [.ty (.fn [.int] .int [] false none)], true⟩
+    ⟨[⟨0, ⟨[], [.int], .int, [], 0, 0, []⟩, [[], []]⟩], [], [], .int,
+      [.ty (.fn 0 [.int] .int [] false none [])], true, true⟩
     ⟨[⟨[⟨[.int 0], .ret (.int 1)⟩, ⟨[.bind], .ret (.var 1)⟩]⟩],
       .let_ (.closure 0 []) (.tail (.var 0) [.int 5])⟩
     = true := by decide
@@ -112,16 +121,16 @@ def optionDecl : DataInst := ⟨0, [], [(1, []), (2, [.int])], true⟩
 /-- `get(None) = 0; get(Some(x)) = x`, applied to `Some(7)`: both constructors
 have a clause, so the function covers its parameter. -/
 example : checkProgram
-    ⟨[⟨0, ⟨[], [option], .int, []⟩, [[], []]⟩], [optionDecl], [], .int,
-      [.ty option, .ty (.fn [option] .int [] false none)], true⟩
+    ⟨[⟨0, ⟨[], [option], .int, [], 0, 0, []⟩, [[], []]⟩], [optionDecl], [], .int,
+      [.ty option, .ty (.fn 0 [option] .int [] false none [])], true, true⟩
     ⟨[⟨[⟨[.ctor 1 []], .ret (.int 0)⟩, ⟨[.ctor 2 [.bind]], .ret (.var 1)⟩]⟩],
       .let_ (.construct 2 [.int 7]) (.let_ (.closure 0 []) (.tail (.var 1) [.var 0]))⟩
     = true := by decide
 
 /-- Without the clause for `None` it does not. -/
 example : checkProgram
-    ⟨[⟨0, ⟨[], [option], .int, []⟩, [[]]⟩], [optionDecl], [], .int,
-      [.ty option, .ty (.fn [option] .int [] false none)], true⟩
+    ⟨[⟨0, ⟨[], [option], .int, [], 0, 0, []⟩, [[]]⟩], [optionDecl], [], .int,
+      [.ty option, .ty (.fn 0 [option] .int [] false none [])], true, true⟩
     ⟨[⟨[⟨[.ctor 2 [.bind]], .ret (.var 1)⟩]⟩],
       .let_ (.construct 2 [.int 7]) (.let_ (.closure 0 []) (.tail (.var 1) [.var 0]))⟩
     = false := by decide
@@ -133,17 +142,17 @@ ownership rules accept the program. Capturing it a second time instead owns it
 twice, and they do not. -/
 
 /-- A callable that may be called once, and a function that captured it. -/
-def onceFn : Ty := .fn [] .int [] true none
+def onceFn : Ty := .fn 0 [] .int [] true none []
 
-def shared (env : Option (List Ty)) : Ty := .fn [] .int [] true env
+def shared (env : Option (List Ty)) : Ty := .fn 0 [] .int [] true env []
 
 /-- Function 0 gives an integer; functions 1 and 2 each call what they captured. -/
 def bodies : List Fn :=
   [⟨[⟨[], .ret (.int 1)⟩]⟩, ⟨[⟨[], .tail (.var 0) []⟩]⟩, ⟨[⟨[], .tail (.var 0) []⟩]⟩]
 
 def bodySigs : List SigEntry :=
-  [⟨0, ⟨[], [], .int, []⟩, [[]]⟩, ⟨1, ⟨[onceFn], [], .int, []⟩, [[]]⟩,
-    ⟨2, ⟨[onceFn], [], .int, []⟩, [[]]⟩]
+  [⟨0, ⟨[], [], .int, [], 0, 0, []⟩, [[]]⟩, ⟨1, ⟨[onceFn], [], .int, [], 0, 0, []⟩, [[]]⟩,
+    ⟨2, ⟨[onceFn], [], .int, [], 0, 0, []⟩, [[]]⟩]
 
 /-- The second body takes over the environment of the first. -/
 def takeOver : Program :=
@@ -158,7 +167,7 @@ def captureTwice : Program :=
       .tail (.var 2) []⟩
 
 def sharedCert (first : Ty) (strict : Bool) : Cert :=
-  ⟨bodySigs, [], [], .int, [.ty onceFn, .ty first, .ty (shared none)], strict⟩
+  ⟨bodySigs, [], [], .int, [.ty onceFn, .ty first, .ty (shared none)], strict, true⟩
 
 example : checkProgram (sharedCert (shared (some [onceFn])) true) takeOver = true := by decide
 
@@ -168,5 +177,178 @@ example : checkProgram (sharedCert (shared none) true) takeOver = false := by de
 example : checkProgram (sharedCert (shared none) false) captureTwice = true := by decide
 
 example : checkProgram (sharedCert (shared none) true) captureTwice = false := by decide
+
+/-! ## Cells and regions
+
+A cell is used by the callable its scope runs. That callable is polymorphic in
+the cell's region, and what it gives back cannot mention the region. -/
+
+/-- The type of a callable a cell scope of an integer can run, giving a `ρ`. -/
+def scopeFn (ρ : Ty) (acc : List Rgn) : Ty :=
+  .fn 1 [.ref (.bound 0) .int] ρ [] false none acc
+
+/--
+```
+bump(r) = let x = *r in r := x + 1; *r
+main    = cell 5 in bump
+```
+-/
+def counter : Program where
+  fns := [
+    ⟨[ ⟨[.wild],
+          .mem .load [.var 0] <|
+          .let_ (.prim .intAdd [.var 1, .int 1]) <|
+          .mem .store [.var 0, .var 2] <|
+          .mem .load [.var 0] <|
+          .ret (.var 4)⟩ ]⟩ ]
+  main := .let_ (.closure 0 []) <| .cellTail (.int 5) (.var 0)
+
+def counterCert : Cert where
+  sigs := [⟨0, ⟨[], [.ref (.bound 0) .int], .int, [], 0, 1, [.bound 0]⟩, [[.ty .int]]⟩]
+  datas := []
+  ops := []
+  mainTy := .int
+  mainHints := [.ty (scopeFn .int [.bound 0])]
+  strict := true
+  regions := true
+
+theorem counter_checked : checkProgram counterCert counter = true := by decide
+
+/-- So `counter` never reads or writes a released cell. -/
+theorem counter_borrows (input : List Int) {c : Config}
+    (h : Machine.Reaches (stepIO counter) (initIO counter input) c) : ¬ Freed c.state :=
+  checked_borrow_safety counter_checked rfl input h
+
+/--
+A function that reads through any reference it is given, called with the region
+of the cell at hand; and a closure that captured the reference, made and called
+inside the scope.
+```
+get(r)       = *r
+peek[r]()    = *r
+body[get](r) = let p = peek[r] in get(r) + p()
+main         = cell 21 in body[get]
+```
+-/
+def readers : Program where
+  fns := [
+    ⟨[ ⟨[.wild], .mem .load [.var 0] <| .ret (.var 1)⟩ ]⟩,
+    ⟨[ ⟨[], .mem .load [.var 0] <| .ret (.var 1)⟩ ]⟩,
+    ⟨[ ⟨[.wild],
+          .let_ (.closure 1 [.var 0]) <|
+          .call (.var 1) [.var 0] <|
+          .call (.var 2) [] <|
+          .let_ (.prim .intAdd [.var 3, .var 4]) <|
+          .ret (.var 5)⟩ ]⟩ ]
+  main := .let_ (.closure 0 []) <| .let_ (.closure 2 [.var 0]) <| .cellTail (.int 21) (.var 1)
+
+/-- A closure that reads a cell of region `r` when called. -/
+def peekTy (r : Rgn) : Ty := .fn 0 [] .int [] false none [r]
+
+def readersCert : Cert where
+  sigs := [
+    ⟨0, ⟨[], [.ref (.bound 0) .int], .int, [], 0, 1, [.bound 0]⟩, [[]]⟩,
+    -- `peek` is closed over a reference whose region is fixed when it is made.
+    ⟨1, ⟨[.ref (.var 0) .int], [], .int, [], 1, 0, [.var 0]⟩, [[]]⟩,
+    ⟨2, ⟨[scopeFn .int [.bound 0]], [.ref (.bound 0) .int], .int, [], 0, 1, [.bound 0]⟩,
+      [[.clo (peekTy (.var 0)) [.var 0], .rgns [.var 0], .ty .int]]⟩]
+  datas := []
+  ops := []
+  mainTy := .int
+  mainHints := [.ty (scopeFn .int [.bound 0]), .ty (scopeFn .int [.bound 0])]
+  strict := true
+  regions := true
+
+theorem readers_checked : checkProgram readersCert readers = true := by decide
+
+theorem readers_borrows (input : List Int) {c : Config}
+    (h : Machine.Reaches (stepIO readers) (initIO readers input) c) : ¬ Freed c.state :=
+  checked_borrow_safety readers_checked rfl input h
+
+/--
+The reference leaves the scope, and is read after the cell is released.
+```
+keep(r) = r
+main    = let r = cell 5 in keep in *r
+```
+-/
+def escape : Program where
+  fns := [ ⟨[ ⟨[.wild], .ret (.var 0)⟩ ]⟩ ]
+  main :=
+    .let_ (.closure 0 []) <| .cell (.int 5) (.var 0) <| .mem .load [.var 1] <| .ret (.var 2)
+
+theorem escape_goesWrong : GoesWrong escape [] := ⟨10, rfl⟩
+
+/-- Without regions the reference is only a reference to an integer. -/
+def looseRef : Ty := .ref (.cell 0) .int
+
+def escapeCert (regions : Bool) : Cert where
+  sigs := [⟨0, ⟨[], [looseRef], looseRef, [], 0, 0, []⟩, [[]]⟩]
+  datas := []
+  ops := []
+  mainTy := .int
+  mainHints := [.ty (.fn 0 [looseRef] looseRef [] false none [])]
+  strict := true
+  regions := regions
+
+/-- `escape` is well typed, and well owned; -/
+example : checkProgram (escapeCert false) escape = true := by decide
+
+/-- but not under the region rules, -/
+example : checkProgram (escapeCert true) escape = false := by decide
+
+/-- whether or not `keep` is made polymorphic in the region: what the scope
+gives back would mention the cell's region. -/
+example : checkProgram
+    ⟨[⟨0, ⟨[], [.ref (.bound 0) .int], .ref (.bound 0) .int, [], 0, 1, []⟩, [[]]⟩], [], [], .int,
+      [.ty (scopeFn (.ref (.bound 0) .int) [])], true, true⟩ escape = false := by decide
+
+/--
+A closure that captured the reference leaves the scope, and is called after the
+cell is released.
+```
+peek[r]() = *r
+hide(r)   = peek[r]
+main      = let p = cell 5 in hide in p()
+```
+-/
+def leak : Program where
+  fns := [
+    ⟨[ ⟨[], .mem .load [.var 0] <| .ret (.var 1)⟩ ]⟩,
+    ⟨[ ⟨[.wild], .let_ (.closure 0 [.var 0]) <| .ret (.var 1)⟩ ]⟩ ]
+  main := .let_ (.closure 1 []) <| .cell (.int 5) (.var 0) <| .tail (.var 1) []
+
+theorem leak_goesWrong : GoesWrong leak [] := ⟨10, rfl⟩
+
+def leakCert (regions : Bool) : Cert where
+  sigs := [
+    ⟨0, ⟨[looseRef], [], .int, [], 0, 0, []⟩, [[]]⟩,
+    ⟨1, ⟨[], [looseRef], .fn 0 [] .int [] false none [], [], 0, 0, []⟩,
+      [[.ty (.fn 0 [] .int [] false none [])]]⟩]
+  datas := []
+  ops := []
+  mainTy := .int
+  mainHints := [.ty (.fn 0 [looseRef] (.fn 0 [] .int [] false none []) [] false none [])]
+  strict := true
+  regions := regions
+
+example : checkProgram (leakCert false) leak = true := by decide
+
+example : checkProgram (leakCert true) leak = false := by decide
+
+/-- With regions, the closure's type says it reads the cell: so the scope
+cannot give it back. -/
+example : checkProgram
+    ⟨[⟨0, ⟨[.ref (.var 0) .int], [], .int, [], 1, 0, [.var 0]⟩, [[]]⟩,
+      ⟨1, ⟨[], [.ref (.bound 0) .int], peekTy (.bound 0), [], 0, 1, []⟩,
+        [[.clo (peekTy (.var 0)) [.var 0]]]⟩], [], [], .int,
+      [.ty (scopeFn (peekTy (.bound 0)) [])], true, true⟩ leak = false := by decide
+
+/-- And a closure whose type hides that it reads the cell is not well typed. -/
+example : checkProgram
+    ⟨[⟨0, ⟨[.ref (.var 0) .int], [], .int, [], 1, 0, []⟩, [[]]⟩,
+      ⟨1, ⟨[], [.ref (.bound 0) .int], .fn 0 [] .int [] false none [], [], 0, 1, []⟩,
+        [[.clo (.fn 0 [] .int [] false none []) [.var 0]]]⟩], [], [], .int,
+      [.ty (scopeFn (.fn 0 [] .int [] false none []) [])], true, true⟩ leak = false := by decide
 
 end Glorious.Typing.Witness

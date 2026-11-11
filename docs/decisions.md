@@ -473,14 +473,67 @@ the programs it accepts.
 1. **Cells are scoped in the kernel.** Done: see "A mutable variable ends with
    its block". A cell cannot be released twice or left unreleased by a scope
    that ends.
-2. **Regions.** Planned. A reference's type names the region (the cell) it
+2. **Regions.** Done in Core, in the checker and in the proofs; the certificate
+   search does not use them yet (stage 3), so today only programs with a
+   certificate written by hand get the theorem (`Typing/Witness.lean` has four:
+   two accepted, two that go wrong and are turned away). A reference's type
+   names the region (the cell) it
    points into; a callable's type lists the regions it may touch when called,
    and may be polymorphic in regions; code may read or write a cell only if its
    region is among those the code was given. A cell's scope gives its body the
    new region and requires that nothing typed outside the scope mentions it.
    The theorem: a program checked this way never reads or writes a released
    cell. The invariant is that every region the running code was given is the
-   cell of a scope still on its stack.
+   cell of a scope still on its stack. The theorems are `borrow_safety` (no
+   reachable state is about to read or write a released cell), and for the
+   checker `checked_borrow_safety`, `checked_scoped_safety`,
+   `checked_full_safety` (with ownership too: a program that goes wrong
+   overflowed or applied a dead label) and their compiled forms.
+
+   What this is not. A region is one cell: there is no outlives relation, no
+   region that stands for several cells, and so no reference that may point to
+   one cell or another (a reference stored in a data structure with others of
+   different cells cannot be typed with regions). Holding a dangling reference
+   is allowed; using it is what is ruled out. References are still freely
+   copied: nothing here says a writer is alone (stage 5).
+
+   How it is set up (so that the work can be picked up from here):
+
+   - `Rgn` is `var i` (a region of the function being typed), `bound k` (bound
+     by the nearest callable type that binds regions, de Bruijn) or `cell a` (at
+     run time, the cell at that address). `Ty.ref ρ t`; `Ty.fn rgns params ret
+     eff once env acc` binds `rgns` regions and lists in `acc` the regions a
+     call may touch.
+   - `FnSig` gains `crgns` (regions fixed when a closure is made, `var i`),
+     `rgns` (regions chosen at each call, `bound k`) and `acc`. A body is typed
+     with its call regions opened to the variables after the capture regions.
+   - The typing judgment carries the regions the code may touch,
+     `HasTm Δ ϕ Γ tm τ ε`. A call opens the callee's type with region
+     arguments and needs the callee's regions among `ϕ`. Reading or writing
+     through `ref ρ τ` needs `ρ` among `ϕ`. `cell init thunk` needs `thunk`
+     polymorphic in one region, the cell's, with a result type, row and cell
+     type that do not mention it.
+   - Typing is closed under instantiating region variables (a substitution
+     lemma), so run-time typing stays as it was, on types whose regions are
+     cells: entering a function instantiates its body's typing once.
+   - Stack typing carries the regions granted to the code on top: a cell frame
+     adds its cell, a handler frame keeps what its handled computation was
+     given, and a resumption's type lists the regions its frames need below
+     them.
+   - That every cell frame's cell is live, and that no two frames are for the
+     same cell, is an invariant of the machine alone (`Owns`), proved without
+     types. Granted regions are cells of frames on the stack; hence live.
+   - Declared data types and effects are looked up by the shape of their type
+     arguments with the regions taken out, so that a lookup commutes with
+     instantiating regions.
+   - A certificate has a flag for whether the region rules are to hold
+     (`Cert.regions`), as it has for ownership. Without it references are typed
+     as before and the theorem does not apply.
+   - The checker is told the regions it cannot read off the program: a closure
+     hint carries the regions the closure is made with, a call of a callable
+     that binds regions is preceded by a hint with its region arguments, and a
+     handler hint carries what the handler may touch and the regions each of
+     its functions is entered with.
 3. **Inference of regions** for the certificate, so that programs get the
    theorem without annotations. A program whose regions cannot be inferred is
    still compiled, typed as before.

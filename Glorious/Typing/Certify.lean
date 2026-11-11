@@ -43,9 +43,9 @@ def coverFuel (C : Cert) (rows : List (List Pat)) (tys : List Ty) : Nat :=
 /-- Check a function at one of its signatures: each clause is typed, and
 together the clauses cover the signature's parameters. -/
 def checkFn (C : Cert) (e : SigEntry) (F : Fn) : Bool :=
-  checkClauses C e.sig F.clauses e.hints
+  e.sig.wf && checkClauses C e.sig F.clauses e.hints
     && covers C (coverFuel C (F.clauses.map (·.pats)) e.sig.params) (F.clauses.map (·.pats))
-        e.sig.params
+        (e.sig.params.map (Ty.open e.sig.vars))
 
 /-- A declared type the certificate calls duplicable has only duplicable fields. -/
 def dataOk (C : Cert) : Bool :=
@@ -57,25 +57,26 @@ def checkProgram (C : Cert) (p : Program) : Bool :=
       match p.fns[e.fn]? with
       | some F => checkFn C e F
       | none => false)
-    && checkTm C [] p.main C.mainHints C.mainTy []
+    && checkTm C [] [] p.main C.mainHints C.mainTy []
     && (!C.strict || dataOk C)
 
 /-- A program the checker accepts is well typed. -/
 theorem checkProgram_sound {p : Program} (h : checkProgram C p = true) : ProgramOk C.ctx p := by
   simp only [checkProgram, Bool.and_eq_true] at h
   obtain ⟨⟨hfns, hmain⟩, _⟩ := h
-  refine ⟨fun fn sig hsig => ?_, ⟨C.mainTy, checkTm_sound _ hmain⟩⟩
+  refine ⟨C.ctx_stable, fun fn sig hsig => ?_, ⟨C.mainTy, checkTm_sound _ hmain⟩⟩
   obtain ⟨e, he, rfl, rfl⟩ := hsig
   have hfn := List.all_eq_true.mp hfns e he
   split at hfn
   · rename_i F hF
     simp only [checkFn, Bool.and_eq_true] at hfn
-    obtain ⟨hclauses, hcovers⟩ := hfn
+    obtain ⟨⟨hwf, hclauses⟩, hcovers⟩ := hfn
     have htyped := checkClauses_sound hclauses
-    refine ⟨F, hF, htyped, fun S vs hv => ?_⟩
-    refine select_of_match (fun c hc => ?_) (covers_sound _ hcovers hv)
+    refine ⟨hwf, F, hF, htyped, fun S vs θ hv => ?_⟩
+    refine select_of_match (fun c hc => ?_) (covers_sound _ hcovers θ hv)
     obtain ⟨⟨Bs, hpats, _⟩, _⟩ := htyped c hc
     rw [hpats.length_eq, hv.length_eq]
+    simp
   · simp at hfn
 
 /-! ## Ownership -/
@@ -96,15 +97,23 @@ theorem data_fields_dup (hd : dataOk C = true) {name tag : Nat} {args Fs : List 
     (hF : (findData C.datas name args).bind (·.lookup tag) = some Fs) :
     ∀ c, c ∈ Fs → dupTy C c = true := by
   simp only [dataDup, findData] at hdup hF
-  cases hf : C.datas.find? (fun d => d.name == name && d.args == args) with
+  cases hf : C.datas.find? (fun d => d.name == name && d.args == args.map Ty.shape) with
   | none => simp [hf] at hdup
   | some d =>
     simp only [hf] at hdup hF
     have hmem : d ∈ C.datas := List.mem_of_find?_eq_some hf
     have hall := List.all_eq_true.mp hd d hmem
     simp only [hdup, Bool.not_true, Bool.false_or] at hall
-    have hin : (tag, Fs) ∈ d.ctors := lookup_mem (by simpa using hF)
-    exact dupTys_all (List.all_eq_true.mp hall _ hin)
+    have hF' : (instCtors (freesOf args) d.ctors).lookup tag = some Fs := by simpa using hF
+    rw [instCtors_lookup] at hF'
+    cases hl : d.ctors.lookup tag with
+    | none => simp [hl] at hF'
+    | some Fs₀ =>
+      simp only [hl, Option.map_some, Option.some.injEq] at hF'
+      subst hF'
+      have hin : (tag, Fs₀) ∈ d.ctors := lookup_mem hl
+      have h0 : dupTys C Fs₀ = true := List.all_eq_true.mp hall _ hin
+      exact dupTys_all (by rw [dupTys_inst]; exact h0)
 
 mutual
 
@@ -117,17 +126,20 @@ theorem dup_occ (hs : C.strict = true) (hd : dataOk C = true) :
     rcases hc with ⟨_, rfl⟩ | ⟨_, name, args, rfl, hF⟩
     · exact dups_occ hs hd hf (dupTys_all (by simpa [dupTy] using hdup)) id
     · exact dups_occ hs hd hf (data_fields_dup hd (by simpa [dupTy] using hdup) hF) id
-  | _, _, _, .clo _ hc hq _, hdup, id => by
+  | _, _, _, .clo _ _ hc hq _ hτ, hdup, id => by
+    subst hτ
     simp only [occ]
-    simp only [dupTy, Bool.not_eq_true'] at hdup
+    simp only [FnSig.ty, dupTy, Bool.not_eq_true'] at hdup
     refine dups_occ hs hd hc (fun c hcm => ?_) id
-    rcases hq hdup c hcm with h | h
+    obtain ⟨c₀, hc₀, rfl⟩ := List.mem_map.mp hcm
+    rw [dupTy_inst]
+    rcases hq hdup c₀ hc₀ with h | h
     · rw [hs] at h
       cases h
     · exact h
   | _, _, _, .cont _, hdup, _ => by simp [dupTy] at hdup
   | _, _, _, .label _, _, id => by simp [occ]
-  | _, _, _, .ref _, _, id => by simp [occ]
+  | _, _, _, .ref _ _, _, id => by simp [occ]
 
 theorem dups_occ (hs : C.strict = true) (hd : dataOk C = true) :
     ∀ {S : StoreTy} {vs : List Value} {τs : List Ty}, HasVals C.ctx S vs τs →
@@ -183,5 +195,50 @@ theorem checked_compiled_owned_safety {p : Program} (h : checkProgram C p = true
     ∃ c, Machine.Reaches (stepIO p) (initIO p input) c ∧ stepIO p c = .stuck ∧ Fault c.state
       ∧ ¬ Resumed c.state :=
   compiled_owned_safety (checkProgram_sound h) (dupSound_of_check h hs) input hw
+
+/--
+**Borrow safety, checked.** If the certificate asks for the region rules and
+the checker accepts, the program never reaches a state about to read or write a
+released cell.
+-/
+theorem checked_borrow_safety {p : Program} (h : checkProgram C p = true)
+    (hr : C.regions = true) (input : List Int) {c : Config}
+    (hc : Machine.Reaches (stepIO p) (initIO p input) c) : ¬ Freed c.state :=
+  borrow_safety (checkProgram_sound h) hr input hc
+
+/-- So if such a program goes wrong, the fault is not a use of a released cell. -/
+theorem checked_scoped_safety {p : Program} (h : checkProgram C p = true)
+    (hr : C.regions = true) (input : List Int) (hw : GoesWrong p input) :
+    ∃ c, Machine.Reaches (stepIO p) (initIO p input) c ∧ stepIO p c = .stuck ∧ Fault c.state
+      ∧ ¬ Freed c.state :=
+  scoped_safety (checkProgram_sound h) hr input hw
+
+/-- The same for the compiled bytecode. -/
+theorem checked_compiled_scoped_safety {p : Program} (h : checkProgram C p = true)
+    (hr : C.regions = true) (input : List Int) (hw : Bytecode.GoesWrong (compile p) input) :
+    ∃ c, Machine.Reaches (stepIO p) (initIO p input) c ∧ stepIO p c = .stuck ∧ Fault c.state
+      ∧ ¬ Freed c.state :=
+  compiled_scoped_safety (checkProgram_sound h) hr input hw
+
+/--
+**Both.** With the ownership rules and the region rules, a program that goes
+wrong overflowed or applied a label after its scope ended: it did not use a
+resumption twice, and it did not use a released cell.
+-/
+theorem checked_full_safety {p : Program} (h : checkProgram C p = true) (hs : C.strict = true)
+    (hr : C.regions = true) (input : List Int) (hw : GoesWrong p input) :
+    ∃ c, Machine.Reaches (stepIO p) (initIO p input) c ∧ stepIO p c = .stuck ∧ Fault c.state
+      ∧ ¬ Resumed c.state ∧ ¬ Freed c.state := by
+  obtain ⟨c, hreach, hstuck, hf, hres⟩ := checked_owned_safety h hs input hw
+  exact ⟨c, hreach, hstuck, hf, hres, checked_borrow_safety h hr input hreach⟩
+
+/-- The same for the compiled bytecode. -/
+theorem checked_compiled_full_safety {p : Program} (h : checkProgram C p = true)
+    (hs : C.strict = true) (hr : C.regions = true) (input : List Int)
+    (hw : Bytecode.GoesWrong (compile p) input) :
+    ∃ c, Machine.Reaches (stepIO p) (initIO p input) c ∧ stepIO p c = .stuck ∧ Fault c.state
+      ∧ ¬ Resumed c.state ∧ ¬ Freed c.state :=
+  checked_full_safety h hs hr input
+    (Classical.byContradiction fun hn => (compile_correct p input hn).2.2 hw)
 
 end Glorious.Typing

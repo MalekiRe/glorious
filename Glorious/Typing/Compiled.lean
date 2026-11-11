@@ -1,4 +1,4 @@
-import Glorious.Typing.Safety
+import Glorious.Typing.Cells
 import Glorious.Proof.Correct
 
 /-!
@@ -26,6 +26,14 @@ theorem compiled_owned_safety {Δ : Ctx} {p : Core.Program} (hp : ProgramOk Δ p
     ∃ c, Machine.Reaches (Core.stepIO p) (Core.initIO p input) c ∧ Core.stepIO p c = .stuck
       ∧ Fault c.state ∧ ¬ Resumed c.state :=
   owned_safety hp hD input
+    (Classical.byContradiction fun hn => (compile_correct p input hn).2.2 h)
+
+/-- The same, with the region rules: the fault is not a use of a released cell. -/
+theorem compiled_scoped_safety {Δ : Ctx} {p : Core.Program} (hp : ProgramOk Δ p)
+    (hR : Δ.regions) (input : List Int) (h : Bytecode.GoesWrong (compile p) input) :
+    ∃ c, Machine.Reaches (Core.stepIO p) (Core.initIO p input) c ∧ Core.stepIO p c = .stuck
+      ∧ Fault c.state ∧ ¬ Freed c.state :=
+  scoped_safety hp hR input
     (Classical.byContradiction fun hn => (compile_correct p input hn).2.2 h)
 
 end Glorious.Typing

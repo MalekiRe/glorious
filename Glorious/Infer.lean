@@ -1066,8 +1066,8 @@ partial def zonk (t : ITy) : M Ty := do
     let env ← match ← find env with
       | .tuple stated => do pure (some (← stated.mapM zonk))
       | _ => pure none
-    pure (.fn (← ps.mapM zonk) (← zonk r) (← zonkRow ⟨ops, tail⟩) once env)
-  | .ref t => do pure (.ref (← zonk t))
+    pure (.fn 0 (← ps.mapM zonk) (← zonk r) (← zonkRow ⟨ops, tail⟩) once env [])
+  | .ref t => do pure (.ref (.cell 0) (← zonk t))
   | .never => pure .never
 
 partial def zonkOps (ops : IOps) : M Typing.Row :=
@@ -1084,7 +1084,7 @@ end
 
 def zonkHint : IHint → M (List Hint)
   | .ty t => do pure [.ty (← zonk t)]
-  | .handler ρ H => do pure [.handler (← zonk ρ) (← zonkOps H)]
+  | .handler ρ H => do pure [.handler (← zonk ρ) (← zonkOps H) [] (List.replicate (H.length + 1) [])]
   | .result r b => do
     if (← zonk r) == .never then pure [.ty (← zonk b)] else pure []
 
@@ -1095,16 +1095,16 @@ partial def ofTy : Ty → ITy
   | .int => .int
   | .tuple fs => .tuple (fs.map ofTy)
   | .data n args => .data n (args.map ofTy)
-  | .fn ps r eff once env =>
+  | .fn _ ps r eff once env _ =>
     .fn (ps.map ofTy) (ofTy r) (eff.map fun (op, targs) => (op, targs.map ofTy)) none (.lit once)
       (match env with
         | some stated => .tuple (stated.map ofTy)
         | none => .never)
-  | .ref t => .ref (ofTy t)
+  | .ref _ t => .ref (ofTy t)
   | .never => .never
 
 def zonkSig (s : ISig) : M FnSig := do
-  pure ⟨← s.caps.mapM zonk, ← s.params.mapM zonk, ← zonk s.ret, ← zonkRow s.row⟩
+  pure ⟨← s.caps.mapM zonk, ← s.params.mapM zonk, ← zonk s.ret, ← zonkRow s.row, 0, 0, []⟩
 
 /-! ## Signatures at the types a program uses -/
 
@@ -1163,10 +1163,10 @@ partial def dataUses : Ty → List (Nat × List Ty)
   | .int => []
   | .tuple fs => fs.flatMap dataUses
   | .data n args => (n, args) :: args.flatMap dataUses
-  | .fn ps r eff _ env =>
+  | .fn _ ps r eff _ env _ =>
     ps.flatMap dataUses ++ dataUses r ++ (eff.flatMap fun (_, targs) => targs.flatMap dataUses)
       ++ (env.getD []).flatMap dataUses
-  | .ref t => dataUses t
+  | .ref _ t => dataUses t
   | .never => []
 
 /-- Every use of an operation inside a type. -/
@@ -1174,19 +1174,23 @@ partial def opUses : Ty → List (Nat × List Ty)
   | .int => []
   | .tuple fs => fs.flatMap opUses
   | .data _ args => args.flatMap opUses
-  | .fn ps r eff _ env =>
+  | .fn _ ps r eff _ env _ =>
     ps.flatMap opUses ++ opUses r ++ eff ++ (eff.flatMap fun (_, targs) => targs.flatMap opUses)
       ++ (env.getD []).flatMap opUses
-  | .ref t => opUses t
+  | .ref _ t => opUses t
   | .never => []
 
 def hintTypes : Hint → List Ty
   | .ty t => [t]
-  | .handler ρ H => ρ :: H.flatMap (·.2)
+  | .clo t _ => [t]
+  | .handler ρ H _ _ => ρ :: H.flatMap (·.2)
+  | .rgns _ => []
 
 def hintOps : Hint → List (Nat × List Ty)
   | .ty _ => []
-  | .handler _ H => H
+  | .clo _ _ => []
+  | .handler _ H _ _ => H
+  | .rgns _ => []
 
 /-- The declarations behind every declared type and operation these types use,
 and behind those the declarations use in turn. -/
@@ -1348,7 +1352,7 @@ def sccs (fns : Array Core.Fn) : Array Nat := Id.run do
 /-- Say which uses of declared types are duplicable: all of them, except those
 with a field that is not, found by taking flags away until nothing changes. -/
 partial def dupFlags (datas : List DataInst) : List DataInst :=
-  let C : Cert := ⟨[], datas, [], .int, [], true⟩
+  let C : Cert := ⟨[], datas, [], .int, [], true, false⟩
   let next := datas.map fun d =>
     { d with dup := d.dup && d.ctors.all fun c => Typing.dupTys C c.2 }
   if next.zip datas |>.all (fun (a, b) => a.dup == b.dup) then next else dupFlags next
@@ -1417,7 +1421,7 @@ def certifyM (items : List Item) (g : Elab.Globals) (p : Core.Program)
       ++ entries.flatMap fun e => e.sig.eff ++ e.hints.flatMap (·.flatMap hintOps)
   let (datas, ops) ← declsFor types opsUsed [] []
   let strict := (← get).strict
-  pure ⟨entries, dupFlags datas, ops, mainTy, mainHints, strict⟩
+  pure ⟨entries, dupFlags datas, ops, mainTy, mainHints, strict, false⟩
 
 /-- Find a certificate for an elaborated program, with the ownership rules or without. -/
 def certify (items : List Item) (p : Core.Program) (strict : Bool)
@@ -1440,6 +1444,6 @@ def rejected (C : Cert) (p : Core.Program) : String :=
   match bad with
   | msg :: _ => msg
   | [] =>
-    if Typing.checkTm C [] p.main C.mainHints C.mainTy [] then "nothing" else "`main` is not typed"
+    if Typing.checkTm C [] [] p.main C.mainHints C.mainTy [] then "nothing" else "`main` is not typed"
 
 end Glorious.Infer

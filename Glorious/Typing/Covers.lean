@@ -52,8 +52,8 @@ def ctorsOf (C : Cert) : Ty → Option (List (Nat × List Ty))
   | .tuple Fs => some [(0, Fs)]
   | .data name args => findData C.datas name args
   | .int => none
-  | .fn _ _ _ _ _ => none
-  | .ref _ => none
+  | .fn _ _ _ _ _ _ _ => none
+  | .ref _ _ => none
   | .never => none
 
 /-- Do the rows cover every list of values of these types? `fuel` bounds the
@@ -183,20 +183,41 @@ theorem ctorsOf_value {S : StoreTy} {v : Value} {T : Ty} {ctors : List (Nat × L
         have hF' : (findData C.datas name args).bind (·.lookup t) = some Fs' := hF
         rw [hc] at hF'
         exact ⟨t, fields, Fs', rfl, lookup_mem hF', hf⟩
+    | clo _ _ _ _ _ hτ => simp [FnSig.ty] at hτ
   | int => simp [ctorsOf] at hc
-  | fn _ _ _ _ => simp [ctorsOf] at hc
-  | ref _ => simp [ctorsOf] at hc
+  | fn _ _ _ _ _ _ _ => simp [ctorsOf] at hc
+  | ref _ _ => simp [ctorsOf] at hc
   | never => simp [ctorsOf] at hc
 
-/-- What `covers` accepts is covered: every typed list of values is matched by some row. -/
+/-- A type's constructors at other regions are its constructors, at those regions. -/
+theorem ctorsOf_inst {T : Ty} {ctors : List (Nat × List Ty)} (θ : List Rgn)
+    (hc : ctorsOf C T = some ctors) : ctorsOf C (T.inst θ) = some (instCtors θ ctors) := by
+  cases T with
+  | tuple Fs =>
+    simp only [ctorsOf, Option.some.injEq] at hc
+    subst hc
+    rw [Ty.inst_tuple]
+    rfl
+  | data name args =>
+    simp only [ctorsOf] at hc
+    rw [Ty.inst_data]
+    simp only [ctorsOf, findData_inst, hc, Option.map_some]
+  | int => simp [ctorsOf] at hc
+  | fn _ _ _ _ _ _ _ => simp [ctorsOf] at hc
+  | ref _ _ => simp [ctorsOf] at hc
+  | never => simp [ctorsOf] at hc
+
+/-- What `covers` accepts is covered: every list of values of these types, at
+whatever regions, is matched by some row. -/
 theorem covers_sound : ∀ (fuel : Nat) {rows : List (List Pat)} {tys : List Ty},
-    covers C fuel rows tys = true → ∀ {S : StoreTy} {vs : List Value}, HasVals C.ctx S vs tys →
+    covers C fuel rows tys = true → ∀ {S : StoreTy} {vs : List Value} (θ : List Rgn),
+    HasVals C.ctx S vs (tys.map (Ty.inst θ)) →
     ∃ row, row ∈ rows ∧ ∃ bs, Pat.matchVals row vs = some bs := by
   intro fuel
   induction fuel with
   | zero => intro rows tys h; simp [covers] at h
   | succ fuel ih =>
-    intro rows tys h S vs hvs
+    intro rows tys h S vs θ hvs
     cases tys with
     | nil =>
       cases hvs
@@ -210,23 +231,28 @@ theorem covers_sound : ∀ (fuel : Nat) {rows : List (List Pat)} {tys : List Ty}
       | @cons v vs' _ _ hv hvs' =>
         simp only [covers, Bool.and_eq_true, Bool.or_eq_true] at h
         rcases h.2 with hdef | ⟨_, hctors⟩
-        · obtain ⟨ps, hps, bs, hm⟩ := ih hdef hvs'
+        · obtain ⟨ps, hps, bs, hm⟩ := ih hdef θ hvs'
           obtain ⟨p, hp, hmem⟩ := defaults_mem hps
           obtain ⟨b, hb⟩ := irrefutable_match hp v
           exact ⟨p :: ps, hmem, b ++ bs, by simp [Pat.matchVals, hb, hm]⟩
         · split at hctors
           · rename_i ctors hc
-            obtain ⟨t, fields, Fs, rfl, hin, hf⟩ := ctorsOf_value hc hv
+            obtain ⟨t, fields, Fs', rfl, hin', hf⟩ := ctorsOf_value (ctorsOf_inst θ hc) hv
+            obtain ⟨⟨t', Fs⟩, hin, heq⟩ := List.mem_map.mp hin'
+            cases heq
             have hcov := List.all_eq_true.mp hctors _ hin
-            obtain ⟨srow, hsrow, bs, hm⟩ := ih hcov (hf.append hvs')
+            have hall : HasVals C.ctx S (fields ++ vs') ((Fs ++ Ts).map (Ty.inst θ)) := by
+              rw [List.map_append]
+              exact hf.append hvs'
+            obtain ⟨srow, hsrow, bs, hm⟩ := ih hcov θ hall
             obtain ⟨p, ps, hmem, hcase⟩ := specialize_mem hsrow
-            have hlen : fields.length = Fs.length := hf.length_eq
+            have hlen : fields.length = Fs.length := by simpa using hf.length_eq
             rcases hcase with ⟨hp, rfl⟩ | ⟨qs, rfl, hqs, rfl⟩
             · obtain ⟨r₁, r₂, _, h₂⟩ := matchVals_append (by simp [hlen]) hm
-              obtain ⟨b, hb⟩ := irrefutable_match hp (.data t fields)
+              obtain ⟨b, hb⟩ := irrefutable_match hp (.data t' fields)
               exact ⟨p :: ps, hmem, b ++ r₂, by simp [Pat.matchVals, hb, h₂]⟩
             · obtain ⟨r₁, r₂, h₁, h₂⟩ := matchVals_append (by rw [hqs, hlen]) hm
-              exact ⟨.ctor t qs :: ps, hmem, r₁ ++ r₂,
+              exact ⟨.ctor t' qs :: ps, hmem, r₁ ++ r₂,
                 by simp [Pat.matchVals, Pat.matchVal, h₁, h₂]⟩
           · simp at hctors
 

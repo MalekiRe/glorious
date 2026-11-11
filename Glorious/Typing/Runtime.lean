@@ -1,4 +1,4 @@
-import Glorious.Typing.Static
+import Glorious.Typing.Subst
 
 /-!
 # Types for machine states
@@ -7,6 +7,10 @@ What it means for a running Core machine to be well typed: its values, its
 stack, and the continuations and memory cells in its store. `Typed` is the
 invariant the safety theorem carries from step to step; `Fault` lists the ways
 a typed state can still fail to step.
+
+At run time a region is a cell: every type here is one in which the region
+variables of the functions running have been replaced by the cells they stand
+for.
 -/
 
 namespace Glorious.Typing
@@ -17,12 +21,14 @@ open Core
 are only ever added. -/
 structure StoreTy where
   /-- A resumption: the type it is resumed with, the type its computation
-  finally yields, and the operations that computation needs where it resumes. -/
-  conts : Nat → Option (Ty × Ty × Row)
+  finally yields, the operations that computation needs where it resumes, and
+  the regions it needs there. -/
+  conts : Nat → Option (Ty × Ty × Row × List Rgn)
   /-- A label scope: the type the scope yields. -/
   labels : Nat → Option Ty
-  /-- A handler: the type it yields, and the operations it needs below it. -/
-  handlers : Nat → Option (Ty × Row)
+  /-- A handler: the type it yields, the operations it needs below it, and the
+  regions it and the computation it handles may touch. -/
+  handlers : Nat → Option (Ty × Row × List Rgn)
   /-- A memory cell: the type of its contents. -/
   cells : Nat → Option Ty
 
@@ -41,20 +47,24 @@ inductive HasVal (Δ : Ctx) (S : StoreTy) : Value → Ty → Prop where
   | int {n : Int} : HasVal Δ S (.int n) .int
   | data {tag : Nat} {fields : List Value} {T : Ty} {Fs : List Ty} :
       CtorOf Δ tag T Fs → HasVals Δ S fields Fs → HasVal Δ S (.data tag fields) T
-  /-- A function that may be called many times captured only duplicable values.
-  Only a function has an environment a type can state: a resumption and a label
-  do not. -/
-  | clo {fn : Nat} {captures : List Value} {sig : FnSig} {once : Bool}
-      {env : Option (List Ty)} :
-      Δ.fnSig fn sig → HasVals Δ S captures sig.caps →
-      (once = false → ∀ c, c ∈ sig.caps → Δ.dup c) → (∀ Cs, env = some Cs → Cs = sig.caps) →
-      HasVal Δ S (.clo fn captures) (.fn sig.params sig.ret sig.eff once env)
+  /-- A closure was made with regions for those its function leaves open. One
+  that may be called many times captured only duplicable values. Only a
+  function has an environment a type can state: a resumption and a label do
+  not. -/
+  | clo {fn : Nat} {captures : List Value} {sig : FnSig} {θ : List Rgn} {once : Bool}
+      {env : Option (List Ty)} {τ : Ty} :
+      Δ.fnSig fn sig → θ.length = sig.crgns → HasVals Δ S captures (sig.caps.map (Ty.inst θ)) →
+      (once = false → ∀ c, c ∈ sig.caps → Δ.dup c) →
+      (∀ Cs, env = some Cs → Cs = sig.caps.map (Ty.inst θ)) → τ = sig.ty θ once env →
+      HasVal Δ S (.clo fn captures) τ
   /-- A resumption may be called once. -/
-  | cont {id : Nat} {o ρ : Ty} {ε : Row} :
-      S.conts id = some (o, ρ, ε) → HasVal Δ S (.cont id) (.fn [o] ρ ε true none)
-  | label {id : Nat} {σ ρ : Ty} {ε : Row} {once : Bool} :
-      S.labels id = some σ → HasVal Δ S (.label id) (.fn [σ] ρ ε once none)
-  | ref {a : Nat} {τ : Ty} : S.cells a = some τ → HasVal Δ S (.ref a) (.ref τ)
+  | cont {id : Nat} {o ρ : Ty} {ε : Row} {Φ : List Rgn} :
+      S.conts id = some (o, ρ, ε, Φ) → HasVal Δ S (.cont id) (.fn 0 [o] ρ ε true none Φ)
+  | label {id : Nat} {σ ρ : Ty} {ε : Row} {once : Bool} {acc : List Rgn} :
+      S.labels id = some σ → HasVal Δ S (.label id) (.fn 0 [σ] ρ ε once none acc)
+  /-- Under the region rules a reference's region is the cell it points to. -/
+  | ref {a : Nat} {r : Rgn} {τ : Ty} :
+      S.cells a = some τ → (Δ.regions → r = .cell a) → HasVal Δ S (.ref a) (.ref r τ)
 
 inductive HasVals (Δ : Ctx) (S : StoreTy) : List Value → List Ty → Prop where
   | nil : HasVals Δ S [] []
@@ -64,8 +74,9 @@ inductive HasVals (Δ : Ctx) (S : StoreTy) : List Value → List Ty → Prop whe
 end
 
 /-- An installed handler: its captured values fit the functions that serve it. -/
-def HandlerRt (Δ : Ctx) (S : StoreTy) (h : Handler) (σ ρ : Ty) (H ε : Row) : Prop :=
-  ∃ Cs, HasVals Δ S h.caps Cs ∧ HandlerOk Δ Cs h.ret h.ops σ ρ H ε
+def HandlerRt (Δ : Ctx) (S : StoreTy) (h : Handler) (σ ρ : Ty) (H ε : Row) (Φ : List Rgn) :
+    Prop :=
+  ∃ Cs, HasVals Δ S h.caps Cs ∧ HandlerOk Δ Cs h.ret h.ops σ ρ H ε Φ
 
 /-- An exit fits its target: a label scope is left with a value of the type the
 scope yields, and a handler is left for one of its functions, which yields what
@@ -73,81 +84,96 @@ the handler yields and needs no more than the handler does. -/
 inductive ExitOk (Δ : Ctx) (S : StoreTy) : Target → After → Prop where
   | label {id : Nat} {v : Value} {σ : Ty} :
       S.labels id = some σ → HasVal Δ S v σ → ExitOk Δ S (.label id) (.yield v)
-  | handler {id fn : Nat} {captures args : List Value} {sig : FnSig} {ε₀ : Row} :
-      S.handlers id = some (sig.ret, ε₀) → Δ.fnSig fn sig → Row.le sig.eff ε₀ →
-      HasVals Δ S captures sig.caps → HasVals Δ S args sig.params →
+  | handler {id fn : Nat} {captures args : List Value} {Cs Ps : List Ty} {ρ : Ty} {ε₀ : Row}
+      {Φ : List Rgn} :
+      S.handlers id = some (ρ, ε₀, Φ) → Enters Δ fn Cs Ps ρ ε₀ Φ →
+      HasVals Δ S captures Cs → HasVals Δ S args Ps →
       ExitOk Δ S (.handler id) (.invoke fn captures args)
 
-/-- A stack accepts a result of type `τ`, and serves the operations in `ε` to
-the code running on top of it. -/
-inductive StackOk (Δ : Ctx) (S : StoreTy) : List Frame → Ty → Row → Prop where
-  /-- The bottom of the stack takes the program's result and serves nothing. -/
-  | nil {τ : Ty} : StackOk Δ S [] τ []
-  | call {env : Env} {body : Tm} {st : List Frame} {Γ : TEnv} {σ τ : Ty} {εb ε : Row} :
-      HasVals Δ S env Γ → HasTm Δ (Γ ++ [σ]) body τ εb → Row.le εb ε → StackOk Δ S st τ ε →
-      StackOk Δ S (.call env body :: st) σ ε
+/-- A stack accepts a result of type `τ`, serves the operations in `ε` to the
+code running on top of it, and grants that code the regions in `ϕ`: the cells
+of scopes on the stack that the code may touch. -/
+inductive StackOk (Δ : Ctx) (S : StoreTy) : List Frame → Ty → Row → List Rgn → Prop where
+  /-- The bottom of the stack takes the program's result, serves nothing and
+  grants nothing. -/
+  | nil {τ : Ty} : StackOk Δ S [] τ [] []
+  | call {env : Env} {body : Tm} {st : List Frame} {Γ : TEnv} {σ τ : Ty} {εb ε : Row}
+      {ϕb ϕ : List Rgn} :
+      HasVals Δ S env Γ → HasTm Δ ϕb (Γ ++ [σ]) body τ εb → Row.le εb ε → Sub ϕb ϕ →
+      StackOk Δ S st τ ε ϕ → StackOk Δ S (.call env body :: st) σ ε ϕ
   /-- A handler serves its own operations and, of what is below it, only what
   it was installed among: so the frames above it stay well typed when they are
-  captured and later put back on a different stack. -/
-  | handler {id : Nat} {h : Handler} {st : List Frame} {σ ρ : Ty} {H ε₀ ε : Row} :
-      S.handlers id = some (ρ, ε₀) → HandlerRt Δ S h σ ρ H ε₀ → Row.le ε₀ ε →
-      StackOk Δ S st ρ ε → StackOk Δ S (.handler id h :: st) σ (H ++ ε₀)
-  | label {id : Nat} {st : List Frame} {τ : Ty} {ε : Row} :
-      S.labels id = some τ → StackOk Δ S st τ ε → StackOk Δ S (.label id :: st) τ ε
+  captured and later put back on a different stack. For the same reason it
+  grants only the regions it was installed with. -/
+  | handler {id : Nat} {h : Handler} {st : List Frame} {σ ρ : Ty} {H ε₀ ε : Row}
+      {Φ ϕ : List Rgn} :
+      S.handlers id = some (ρ, ε₀, Φ) → HandlerRt Δ S h σ ρ H ε₀ Φ → Row.le ε₀ ε → Sub Φ ϕ →
+      StackOk Δ S st ρ ε ϕ → StackOk Δ S (.handler id h :: st) σ (H ++ ε₀) Φ
+  | label {id : Nat} {st : List Frame} {τ : Ty} {ε : Row} {ϕ : List Rgn} :
+      S.labels id = some τ → StackOk Δ S st τ ε ϕ → StackOk Δ S (.label id :: st) τ ε ϕ
   | guard {fn : Nat} {captures : List Value} {st : List Frame} {Cs : List Ty} {σc τ : Ty}
-      {ε : Row} :
-      Δ.fnSig fn ⟨Cs, [], σc, []⟩ → HasVals Δ S captures Cs → StackOk Δ S st τ ε →
-      StackOk Δ S (.guard fn captures :: st) τ ε
-  /-- The scope of a cell passes its result on. -/
-  | cell {a : Nat} {st : List Frame} {τ : Ty} {ε : Row} :
-      StackOk Δ S st τ ε → StackOk Δ S (.cell a :: st) τ ε
+      {ε : Row} {ϕ : List Rgn} :
+      Enters Δ fn Cs [] σc [] ϕ → HasVals Δ S captures Cs → StackOk Δ S st τ ε ϕ →
+      StackOk Δ S (.guard fn captures :: st) τ ε ϕ
+  /-- The scope of a cell passes its result on, and grants its cell. -/
+  | cell {a : Nat} {st : List Frame} {τ : Ty} {ε : Row} {ϕ : List Rgn} :
+      StackOk Δ S st τ ε ϕ → StackOk Δ S (.cell a :: st) τ ε (.cell a :: ϕ)
   /-- A pending result takes anything, since it discards it. -/
-  | yield {w : Value} {st : List Frame} {σ τ : Ty} {ε : Row} :
-      HasVal Δ S w σ → StackOk Δ S st σ ε → StackOk Δ S (.yield w :: st) τ ε
+  | yield {w : Value} {st : List Frame} {σ τ : Ty} {ε : Row} {ϕ : List Rgn} :
+      HasVal Δ S w σ → StackOk Δ S st σ ε ϕ → StackOk Δ S (.yield w :: st) τ ε ϕ
   /-- An exit in progress takes anything, and serves nothing: the cleanup
   running above it performs no operations, so it can never be captured. -/
-  | exit {target : Target} {after : After} {st : List Frame} {σ τ : Ty} {ε : Row} :
+  | exit {target : Target} {after : After} {st : List Frame} {σ τ : Ty} {ε : Row}
+      {ϕ : List Rgn} :
       ExitOk Δ S target after → (∃ fr, fr ∈ st ∧ fr.isTarget target = true) →
-      StackOk Δ S st σ ε → StackOk Δ S (.exit target after :: st) τ []
+      StackOk Δ S st σ ε ϕ → StackOk Δ S (.exit target after :: st) τ [] ϕ
   /-- Any stack takes the result of a call that does not return: none arrives. -/
-  | never {st : List Frame} {σ : Ty} {ε : Row} : StackOk Δ S st σ ε → StackOk Δ S st .never ε
+  | never {st : List Frame} {σ : Ty} {ε : Row} {ϕ : List Rgn} :
+      StackOk Δ S st σ ε ϕ → StackOk Δ S st .never ε ϕ
 
 /-- Captured frames that take a value of type `o`: put back on any later stack
-that takes `ρ` and serves at least `ε₀`, they make a well-typed stack. -/
-def ContOk (Δ : Ctx) (S : StoreTy) (seg : List Frame) (o ρ : Ty) (ε₀ : Row) : Prop :=
-  ∀ S', S.Le S' → ∀ st ε', StackOk Δ S' st ρ ε' → Row.le ε₀ ε' →
-    ∃ ε'', StackOk Δ S' (seg ++ st) o ε''
+that takes `ρ`, serves at least `ε₀` and grants at least `Φ`, they make a
+well-typed stack. -/
+def ContOk (Δ : Ctx) (S : StoreTy) (seg : List Frame) (o ρ : Ty) (ε₀ : Row) (Φ : List Rgn) :
+    Prop :=
+  ∀ S', S.Le S' → ∀ st ε' ϕ', StackOk Δ S' st ρ ε' ϕ' → Row.le ε₀ ε' → Sub Φ ϕ' →
+    ∃ ε'' ϕ'', StackOk Δ S' (seg ++ st) o ε'' ϕ''
 
 /-- The store holds what its typing says, and nothing in the typing refers to
 an identity that has not been given out yet. A used resumption and a freed cell
 keep their types. -/
 structure StoreOk (Δ : Ctx) (S : StoreTy) (store : Store Frame) : Prop where
-  conts : ∀ id o ρ ε₀, S.conts id = some (o, ρ, ε₀) →
-    id < store.conts.length ∧ ∀ seg, store.conts[id]? = some (some seg) → ContOk Δ S seg o ρ ε₀
+  conts : ∀ id o ρ ε₀ Φ, S.conts id = some (o, ρ, ε₀, Φ) →
+    id < store.conts.length
+      ∧ ∀ seg, store.conts[id]? = some (some seg) → ContOk Δ S seg o ρ ε₀ Φ
   labels : ∀ id τ, S.labels id = some τ → id < store.labels
   handlers : ∀ id x, S.handlers id = some x → id < store.labels
   cells : ∀ a τ, S.cells a = some τ →
     a < store.cells.length ∧ ∀ v, store.cells[a]? = some (some v) → HasVal Δ S v τ
 
-/-- A machine state is well typed under a store typing. -/
+/-- A machine state is well typed under a store typing. Its code may touch
+regions the stack grants. -/
 inductive TypedAt (Δ : Ctx) (S : StoreTy) : State → Prop where
   | mk {tm : Tm} {env : Env} {stack : List Frame} {store : Store Frame} {Γ : TEnv} {τ : Ty}
-      {ε ε' : Row} :
-      HasVals Δ S env Γ → HasTm Δ Γ tm τ ε → Row.le ε ε' → StackOk Δ S stack τ ε' →
-      StoreOk Δ S store → TypedAt Δ S ⟨tm, env, stack, store⟩
+      {ε ε' : Row} {ϕ ϕ' : List Rgn} :
+      HasVals Δ S env Γ → HasTm Δ ϕ Γ tm τ ε → Row.le ε ε' → Sub ϕ ϕ' →
+      StackOk Δ S stack τ ε' ϕ' → StoreOk Δ S store → TypedAt Δ S ⟨tm, env, stack, store⟩
 
 /-- A machine state is well typed. -/
 def Typed (Δ : Ctx) (s : State) : Prop := ∃ S, TypedAt Δ S s
 
-/-- A program is well typed: every signature the context gives a function is
-one its clauses are typed at, those clauses cover every list of arguments of
-the signature's parameter types, and the main computation performs no
-operations. That the clauses cover the arguments is assumed here, not derived
-from the patterns. -/
+/-- A program is well typed: what the context says of a type does not depend on
+the regions in it; every signature the context gives a function is one its
+clauses are typed at; those clauses cover every list of arguments of the
+signature's parameter types, whatever regions it is entered with; and the main
+computation performs no operations and touches no region it did not make. That
+the clauses cover the arguments is assumed here, not derived from the patterns. -/
 structure ProgramOk (Δ : Ctx) (p : Program) : Prop where
-  fns : ∀ fn sig, Δ.fnSig fn sig → ∃ F, p.fns[fn]? = some F ∧ FnTyped Δ sig F
-    ∧ ∀ S vs, HasVals Δ S vs sig.params → selectClause F.clauses vs ≠ none
-  main : ∃ τ, HasTm Δ [] p.main τ []
+  stable : Δ.Stable
+  fns : ∀ fn sig, Δ.fnSig fn sig → sig.wf = true ∧ ∃ F, p.fns[fn]? = some F ∧ FnTyped Δ sig F
+    ∧ ∀ S vs θ, HasVals Δ S vs ((sig.params.map (Ty.open sig.vars)).map (Ty.inst θ)) →
+        selectClause F.clauses vs ≠ none
+  main : ∃ τ, HasTm Δ [] [] p.main τ []
 
 /-- The callable a computation applies or gives up, if it does so. -/
 def calleeAtom : Tm → Option Atom

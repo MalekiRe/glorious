@@ -15,8 +15,10 @@ namespace Glorious.Typing
 
 open Core
 
-/-- One use of a declared data type: its type arguments, and each constructor's
-field types at those arguments. -/
+/-- One use of a declared data type. A use is found by the shape of its type
+arguments: the arguments with their regions forgotten. Each constructor's field
+types are written with a region variable for each region of the arguments, in
+order, so that one entry serves the type at whatever regions it is used. -/
 structure DataInst where
   name : Nat
   args : List Ty
@@ -26,20 +28,26 @@ structure DataInst where
   dup : Bool
 
 /-- An operation of an effect used at some type arguments: what it takes, and
-what it is resumed with if it can be resumed. -/
+what it is resumed with if it can be resumed. Found and written as a data type is. -/
 structure OpInst where
   op : Nat
   args : List Ty
   payload : List Ty
   result : Option Ty
 
-/-- A type the checker is told rather than left to find. -/
+/-- Something the checker is told rather than left to find. -/
 inductive Hint where
   /-- The type of the value a `let` binds. -/
   | ty (σ : Ty)
-  /-- What a handler yields, and the operations it serves, in the handler's
-  order, each with the type arguments of its effect. -/
-  | handler (ρ : Ty) (H : Row)
+  /-- The type of the closure a `let` binds, and the regions it is made with. -/
+  | clo (σ : Ty) (θ : List Rgn)
+  /-- What a handler yields, the operations it serves, in the handler's order,
+  each with the type arguments of its effect, the regions the handled
+  computation and the handler may touch, and the regions each of the handler's
+  functions is entered with: the one for a result first. -/
+  | handler (ρ : Ty) (H : Row) (Φ : List Rgn) (θs : List (List Rgn))
+  /-- The regions a call chooses for those its callable binds. -/
+  | rgns (rs : List Rgn)
 
 /-- A signature of a function, with the hints for each of its clauses at that signature. -/
 structure SigEntry where
@@ -57,20 +65,82 @@ structure Cert where
   /-- Whether the ownership rules are to be checked. If not, every type counts
   as duplicable, and the program is only shown to be well typed. -/
   strict : Bool
+  /-- Whether the region rules are to be checked. If not, a reference's region
+  means nothing, and nothing is shown about how long a cell is used. -/
+  regions : Bool
+
+/-- The regions of some types, in order. -/
+def freesOf (ts : List Ty) : List Rgn := ts.flatMap Ty.frees
+
+theorem freesOf_inst (θ : List Rgn) (ts : List Ty) :
+    freesOf (ts.map (Ty.inst θ)) = (freesOf ts).map (Rgn.inst θ) := by
+  induction ts with
+  | nil => rfl
+  | cons t ts ih =>
+    simp only [freesOf, List.map_cons, List.flatMap_cons, List.map_append] at ih ⊢
+    rw [ih, Ty.frees_inst]
+
+theorem shapes_inst (θ : List Rgn) (ts : List Ty) :
+    (ts.map (Ty.inst θ)).map Ty.shape = ts.map Ty.shape := by
+  rw [List.map_map]
+  exact List.map_congr_left fun t _ => Ty.shape_inst θ t
+
+/-- A type's constructors, each with its field types, at some regions. -/
+def instCtors (η : List Rgn) (ctors : List (Nat × List Ty)) : List (Nat × List Ty) :=
+  ctors.map fun c => (c.1, c.2.map (Ty.inst η))
+
+theorem instCtors_lookup (η : List Rgn) (tag : Nat) : ∀ ctors : List (Nat × List Ty),
+    (instCtors η ctors).lookup tag = (ctors.lookup tag).map (·.map (Ty.inst η))
+  | [] => rfl
+  | (t, fs) :: ctors => by
+    have ih := instCtors_lookup η tag ctors
+    simp only [instCtors] at ih
+    simp only [instCtors, List.map_cons, List.lookup_cons]
+    cases tag == t with
+    | true => rfl
+    | false => exact ih
+
+theorem instCtors_inst (η θ : List Rgn) (ctors : List (Nat × List Ty)) :
+    instCtors θ (instCtors η ctors) = instCtors (η.map (Rgn.inst θ)) ctors := by
+  simp only [instCtors, List.map_map]
+  refine List.map_congr_left fun c _ => ?_
+  simp only [Function.comp, List.map_map]
+  congr 1
+  exact List.map_congr_left fun f _ => Ty.inst_inst η θ f
 
 def findData (ds : List DataInst) (name : Nat) (args : List Ty) :
     Option (List (Nat × List Ty)) :=
-  match ds.find? (fun d => d.name == name && d.args == args) with
-  | some d => some d.ctors
+  match ds.find? (fun d => d.name == name && d.args == args.map Ty.shape) with
+  | some d => some (instCtors (freesOf args) d.ctors)
   | none => none
+
+theorem findData_inst (ds : List DataInst) (name : Nat) (args : List Ty) (θ : List Rgn) :
+    findData ds name (args.map (Ty.inst θ)) = (findData ds name args).map (instCtors θ) := by
+  simp only [findData, shapes_inst, freesOf_inst]
+  cases ds.find? (fun d => d.name == name && d.args == args.map Ty.shape) with
+  | none => rfl
+  | some d => simp [instCtors_inst]
 
 def findOp (os : List OpInst) (op : Nat) (args : List Ty) : Option OpTy :=
-  match os.find? (fun o => o.op == op && o.args == args) with
-  | some o => some (o.payload, o.result)
+  match os.find? (fun o => o.op == op && o.args == args.map Ty.shape) with
+  | some o => some (o.payload.map (Ty.inst (freesOf args)), o.result.map (Ty.inst (freesOf args)))
   | none => none
 
+theorem findOp_inst (os : List OpInst) (op : Nat) (args : List Ty) (θ : List Rgn) :
+    findOp os op (args.map (Ty.inst θ))
+      = (findOp os op args).map fun x => (x.1.map (Ty.inst θ), x.2.map (Ty.inst θ)) := by
+  simp only [findOp, shapes_inst, freesOf_inst]
+  cases os.find? (fun o => o.op == op && o.args == args.map Ty.shape) with
+  | none => rfl
+  | some o =>
+    simp only [Option.map_some, List.map_map, Option.map_map, Option.some.injEq, Prod.mk.injEq]
+    refine ⟨List.map_congr_left fun f _ => (Ty.inst_inst _ θ f).symm, ?_⟩
+    cases o.result with
+    | none => rfl
+    | some r => simp [Ty.inst_inst]
+
 def dataDup (ds : List DataInst) (name : Nat) (args : List Ty) : Bool :=
-  match ds.find? (fun d => d.name == name && d.args == args) with
+  match ds.find? (fun d => d.name == name && d.args == args.map Ty.shape) with
   | some d => d.dup
   | none => false
 
@@ -82,8 +152,8 @@ def dupTy (C : Cert) : Ty → Bool
   | .int => true
   | .tuple fs => dupTys C fs
   | .data name args => dataDup C.datas name args
-  | .fn _ _ _ once _ => !once
-  | .ref _ => true
+  | .fn _ _ _ _ once _ _ => !once
+  | .ref _ _ => true
   | .never => true
 termination_by structural t => t
 
@@ -94,12 +164,56 @@ termination_by structural ts => ts
 
 end
 
+mutual
+
+/-- Whether a type is duplicable does not depend on its regions. -/
+theorem dupTy_inst (C : Cert) (θ : List Rgn) : ∀ t : Ty, dupTy C (t.inst θ) = dupTy C t
+  | .int => by rw [Ty.inst_int]
+  | .tuple fs => by
+    rw [Ty.inst_tuple]
+    simp only [dupTy]
+    exact dupTys_inst C θ fs
+  | .data name args => by
+    rw [Ty.inst_data]
+    simp only [dupTy, dataDup, shapes_inst]
+  | .fn _ _ _ _ _ _ _ => by
+    rw [Ty.inst_fn]
+    simp only [dupTy]
+  | .ref _ _ => by
+    rw [Ty.inst_ref]
+    simp only [dupTy]
+  | .never => by rw [Ty.inst_never]
+
+theorem dupTys_inst (C : Cert) (θ : List Rgn) : ∀ ts : List Ty,
+    dupTys C (ts.map (Ty.inst θ)) = dupTys C ts
+  | [] => rfl
+  | t :: ts => by
+    simp only [List.map_cons, dupTys]
+    rw [dupTy_inst C θ t, dupTys_inst C θ ts]
+
+end
+
 /-- The typing context a certificate describes. -/
 def Cert.ctx (C : Cert) : Ctx where
   fnSig fn sig := ∃ e, e ∈ C.sigs ∧ e.fn = fn ∧ e.sig = sig
   opSig op args := findOp C.ops op args
   dup τ := C.strict = false ∨ dupTy C τ = true
   ctorFields tag name args := (findData C.datas name args).bind (·.lookup tag)
+  regions := C.regions = true
+
+/-- What a certificate says of a type does not depend on the type's regions. -/
+theorem Cert.ctx_stable (C : Cert) : C.ctx.Stable where
+  dup τ θ := by
+    show (C.strict = false ∨ dupTy C (τ.inst θ) = true) ↔ (C.strict = false ∨ dupTy C τ = true)
+    rw [dupTy_inst]
+  ctor tag name args θ := by
+    show (findData C.datas name (args.map (Ty.inst θ))).bind (·.lookup tag)
+      = ((findData C.datas name args).bind (·.lookup tag)).map (·.map (Ty.inst θ))
+    rw [findData_inst]
+    cases findData C.datas name args with
+    | none => rfl
+    | some ctors => simp [instCtors_lookup]
+  op op targs θ := findOp_inst C.ops op targs θ
 
 variable {C : Cert}
 
@@ -207,8 +321,8 @@ def ctorFieldsOf (C : Cert) (tag : Nat) : Ty → Option (List Ty)
   | .data name args =>
     if tag = 0 then none else (findData C.datas name args).bind (·.lookup tag)
   | .int => none
-  | .fn _ _ _ _ _ => none
-  | .ref _ => none
+  | .fn _ _ _ _ _ _ _ => none
+  | .ref _ _ => none
   | .never => none
 
 theorem ctorFieldsOf_sound {tag : Nat} {T : Ty} {Fs : List Ty}
@@ -228,8 +342,8 @@ theorem ctorFieldsOf_sound {tag : Nat} {T : Ty} {Fs : List Ty}
     · rename_i h0
       exact .inr ⟨h0, name, args, rfl, h⟩
   | int => simp [ctorFieldsOf] at h
-  | fn _ _ _ _ => simp [ctorFieldsOf] at h
-  | ref _ => simp [ctorFieldsOf] at h
+  | fn _ _ _ _ _ _ _ => simp [ctorFieldsOf] at h
+  | ref _ _ => simp [ctorFieldsOf] at h
   | never => simp [ctorFieldsOf] at h
 
 theorem ctorFieldsOf_complete {tag : Nat} {T : Ty} {Fs : List Ty}
@@ -248,8 +362,8 @@ def fieldsOf (C : Cert) : Ty → Option (List Ty)
     | some ((_, Fs) :: rest) => if rest.all (fun c => c.2 == Fs) then some Fs else none
     | _ => none
   | .int => none
-  | .fn _ _ _ _ _ => none
-  | .ref _ => none
+  | .fn _ _ _ _ _ _ _ => none
+  | .ref _ _ => none
   | .never => none
 
 def placeTy (C : Cert) : Ty → List Nat → Option Ty
@@ -302,22 +416,62 @@ theorem placeTy_sound : ∀ {path : List Nat} {σ τ : Ty},
             · cases hF
           · cases hF
         | int => simp [fieldsOf] at hF
-        | fn _ _ _ _ => simp [fieldsOf] at hF
-        | ref _ => simp [fieldsOf] at hF
+        | fn _ _ _ _ _ _ _ => simp [fieldsOf] at hF
+        | ref _ _ => simp [fieldsOf] at hF
         | never => simp [fieldsOf] at hF
       · cases h
     · cases h
 
+/-! ## Regions -/
+
+/-- Is every region of `a` one of `b`? -/
+def subB (a b : List Rgn) : Bool := a.all fun r => b.contains r
+
+theorem subB_sound {a b : List Rgn} (h : subB a b = true) : Sub a b := by
+  intro r hr
+  simpa using List.all_eq_true.mp h r hr
+
+/-- May the region of a reference be read or written through? -/
+def regionOk (C : Cert) (ϕ : List Rgn) (r : Rgn) : Bool := !C.regions || ϕ.contains r
+
+theorem regionOk_sound {ϕ : List Rgn} {r : Rgn} (h : regionOk C ϕ r = true) :
+    C.ctx.regions → r ∈ ϕ := by
+  intro hR
+  have hR' : C.regions = true := hR
+  simpa [regionOk, hR'] using h
+
+/-- The regions a call chooses: none if its callable binds none, and otherwise
+those the next hint gives. -/
+def takeRgns (n : Nat) (hs : List Hint) : Option (List Rgn × List Hint) :=
+  if n = 0 then some ([], hs)
+  else
+    match hs with
+    | .rgns rs :: hs => if rs.length = n then some (rs, hs) else none
+    | _ => none
+
+theorem takeRgns_length {n : Nat} {hs hs' : List Hint} {rs : List Rgn}
+    (h : takeRgns n hs = some (rs, hs')) : rs.length = n := by
+  simp only [takeRgns] at h
+  split at h
+  · rename_i h0
+    cases h
+    exact h0.symm
+  · split at h
+    · split at h
+      · rename_i hl
+        cases h
+        exact hl
+      · cases h
+    · cases h
+
+/-- What a `let` is told about the value it binds. -/
+def Hint.bind? : Hint → Option (Ty × List Rgn)
+  | .ty σ => some (σ, [])
+  | .clo σ θ => some (σ, θ)
+  | .handler _ _ _ _ => none
+  | .rgns _ => none
+
 /-! ## Control-free computations -/
-
-def hasSig (C : Cert) (fn : Nat) (sig : FnSig) : Bool :=
-  C.sigs.any fun e => e.fn == fn && e.sig == sig
-
-theorem hasSig_sound {fn : Nat} {sig : FnSig} (h : hasSig C fn sig = true) :
-    C.ctx.fnSig fn sig := by
-  obtain ⟨e, he, hc⟩ := List.any_eq_true.mp h
-  simp only [Bool.and_eq_true, beq_iff_eq] at hc
-  exact ⟨e, he, hc.1, hc.2⟩
 
 /-- An environment a type states is the one the function has. -/
 def envOk (env : Option (List Ty)) (Cs : List Ty) : Bool :=
@@ -331,7 +485,29 @@ theorem envOk_sound {env : Option (List Ty)} {Cs : List Ty} (h : envOk env Cs = 
   subst he
   simpa [envOk] using h
 
-def checkRhs (C : Cert) (Γ : TEnv) : Rhs → Ty → Bool
+/-- Is `σ` the type of a closure of `fn` over captures of types `Cs`, made with
+the regions `θ`, at one of the function's signatures? -/
+def closes (C : Cert) (fn : Nat) (Cs : List Ty) (θ : List Rgn) (σ : Ty) (once : Bool)
+    (env : Option (List Ty)) : Bool :=
+  C.sigs.any fun e =>
+    e.fn == fn && θ.length == e.sig.crgns && Cs == e.sig.caps.map (Ty.inst θ)
+      && σ == e.sig.ty θ once env && (once || e.sig.caps.all (dupOk C)) && envOk env Cs
+
+theorem closes_sound {fn : Nat} {Cs : List Ty} {θ : List Rgn} {σ : Ty} {once : Bool}
+    {env : Option (List Ty)} (h : closes C fn Cs θ σ once env = true) :
+    ∃ sig, C.ctx.fnSig fn sig ∧ θ.length = sig.crgns ∧ Cs = sig.caps.map (Ty.inst θ)
+      ∧ σ = sig.ty θ once env ∧ (once = false → ∀ c, c ∈ sig.caps → C.ctx.dup c)
+      ∧ (∀ Cs', env = some Cs' → Cs' = Cs) := by
+  obtain ⟨e, he, hc⟩ := List.any_eq_true.mp h
+  simp only [Bool.and_eq_true, beq_iff_eq, Bool.or_eq_true] at hc
+  obtain ⟨⟨⟨⟨⟨hfn, hθ⟩, hcs⟩, hσ⟩, hdup⟩, henv⟩ := hc
+  refine ⟨e.sig, ⟨e, he, hfn, rfl⟩, hθ, hcs, hσ, fun ho => ?_, envOk_sound henv⟩
+  rcases hdup with h2 | h2
+  · rw [ho] at h2
+    cases h2
+  · exact dupOk_all h2
+
+def checkRhs (C : Cert) (Γ : TEnv) (θ : List Rgn) : Rhs → Ty → Bool
   | .atom a, σ => atomTy Γ a == some σ
   | .prim _ args, σ =>
     match args with
@@ -347,17 +523,15 @@ def checkRhs (C : Cert) (Γ : TEnv) : Rhs → Ty → Bool
     | none => false
   | .closure fn captures, σ =>
     match σ, atomsTy Γ captures with
-    | .fn Ps r e once env, some Cs =>
-      hasSig C fn ⟨Cs, Ps, r, e⟩ && (once || Cs.all (dupOk C)) && envOk env Cs
+    | .fn _ _ _ _ once env _, some Cs => closes C fn Cs θ σ once env
     | _, _ => false
   | .rebind a fn, σ =>
     match atomTy Γ a, σ with
-    | some (.fn _ _ _ _ (some Cs)), .fn Ps r e once env =>
-      hasSig C fn ⟨Cs, Ps, r, e⟩ && (once || Cs.all (dupOk C)) && envOk env Cs
+    | some (.fn _ _ _ _ _ (some Cs) _), .fn _ _ _ _ once env _ => closes C fn Cs θ σ once env
     | _, _ => false
 
-theorem checkRhs_sound {Γ : TEnv} {rhs : Rhs} {σ : Ty} (h : checkRhs C Γ rhs σ = true) :
-    HasRhs C.ctx Γ rhs σ := by
+theorem checkRhs_sound {Γ : TEnv} {θ : List Rgn} {rhs : Rhs} {σ : Ty}
+    (h : checkRhs C Γ θ rhs σ = true) : HasRhs C.ctx Γ rhs σ := by
   cases rhs with
   | atom a =>
     simp only [checkRhs, beq_iff_eq] at h
@@ -386,127 +560,167 @@ theorem checkRhs_sound {Γ : TEnv} {rhs : Rhs} {σ : Ty} (h : checkRhs C Γ rhs 
   | closure fn captures =>
     simp only [checkRhs] at h
     split at h
-    · rename_i Ps r e once env Cs hcs
-      simp only [Bool.and_eq_true, Bool.or_eq_true] at h
-      refine .closure (sig := ⟨Cs, Ps, r, e⟩) (hasSig_sound h.1.1) (atomsTy_sound hcs)
-        (fun ho => ?_) (envOk_sound h.2)
-      rcases h.1.2 with h2 | h2
-      · rw [ho] at h2
-        cases h2
-      · exact dupOk_all h2
+    · rename_i n Ps r e once env acc Cs hcs
+      obtain ⟨sig, hsig, hθ, hCs, hσ, hdup, henv⟩ := closes_sound h
+      rw [hσ]
+      subst hCs
+      exact .closure hsig hθ (atomsTy_sound hcs) hdup henv
     · cases h
   | rebind a fn =>
     simp only [checkRhs] at h
     split at h
-    · rename_i Ps' r' e' once' Cs Ps r e once env ha
-      simp only [Bool.and_eq_true, Bool.or_eq_true] at h
-      refine .rebind (sig := ⟨Cs, Ps, r, e⟩) (atomTy_sound ha) (hasSig_sound h.1.1)
-        (fun ho => ?_) (envOk_sound h.2)
-      rcases h.1.2 with h2 | h2
-      · rw [ho] at h2
-        cases h2
-      · exact dupOk_all h2
+    · rename_i n' Ps' r' e' once' Cs acc' n Ps r e once env acc ha
+      obtain ⟨sig, hsig, hθ, hCs, hσ, hdup, henv⟩ := closes_sound h
+      rw [hσ]
+      subst hCs
+      exact .rebind (atomTy_sound ha) hsig hθ hdup henv
     · cases h
 
 /-! ## Handlers -/
 
-/-- Is there a signature of `fn` with these captures, parameters and result
-whose operations `ε` offers? -/
-def hasSigLe (C : Cert) (fn : Nat) (Cs Ps : List Ty) (ρ : Ty) (ε : Row) : Bool :=
+/-- Can `fn` be entered with these captures and arguments, with the regions
+`θ`, to give a `ρ` within `ε` and `Φ`? -/
+def enters (C : Cert) (fn : Nat) (θ : List Rgn) (Cs Ps : List Ty) (ρ : Ty) (ε : Row)
+    (Φ : List Rgn) : Bool :=
   C.sigs.any fun e =>
-    e.fn == fn && e.sig.caps == Cs && e.sig.params == Ps && e.sig.ret == ρ && rowLe e.sig.eff ε
+    e.fn == fn && θ.length == e.sig.crgns && e.sig.rgns == 0
+      && Cs == e.sig.caps.map (Ty.inst θ) && Ps == e.sig.params.map (Ty.inst θ)
+      && ρ == e.sig.ret.inst θ && rowLe (e.sig.eff.inst θ) ε
+      && subB (e.sig.acc.map (Rgn.inst θ)) Φ
 
-theorem hasSigLe_sound {fn : Nat} {Cs Ps : List Ty} {ρ : Ty} {ε : Row}
-    (h : hasSigLe C fn Cs Ps ρ ε = true) :
-    ∃ εa, C.ctx.fnSig fn ⟨Cs, Ps, ρ, εa⟩ ∧ Row.le εa ε := by
+theorem enters_sound {fn : Nat} {θ : List Rgn} {Cs Ps : List Ty} {ρ : Ty} {ε : Row}
+    {Φ : List Rgn} (h : enters C fn θ Cs Ps ρ ε Φ = true) : Enters C.ctx fn Cs Ps ρ ε Φ := by
   obtain ⟨e, he, hc⟩ := List.any_eq_true.mp h
   simp only [Bool.and_eq_true, beq_iff_eq] at hc
-  obtain ⟨⟨⟨⟨hfn, hcaps⟩, hps⟩, hret⟩, hrow⟩ := hc
-  subst hcaps hps hret
-  exact ⟨e.sig.eff, ⟨e, he, hfn, rfl⟩, rowLe_sound hrow⟩
+  obtain ⟨⟨⟨⟨⟨⟨⟨hfn, hθ⟩, hn⟩, hcaps⟩, hps⟩, hret⟩, hrow⟩, hacc⟩ := hc
+  exact ⟨e.sig, θ, ⟨e, he, hfn, rfl⟩, hθ, hn, hcaps, hps, hret, rowLe_sound hrow,
+    subB_sound hacc⟩
 
-def checkArms (C : Cert) (Cs : List Ty) (ρ : Ty) (ε : Row) : List (Nat × Nat) → Row → Bool
-  | [], [] => true
-  | (op, arm) :: ops, (op', targs) :: H =>
+def checkArms (C : Cert) (Cs : List Ty) (ρ : Ty) (ε : Row) (Φ : List Rgn) :
+    List (Nat × Nat) → Row → List (List Rgn) → Bool
+  | [], [], _ => true
+  | (op, arm) :: ops, (op', targs) :: H, θ :: θs =>
     op == op'
       && (match findOp C.ops op targs with
-          | some (Ps, none) => hasSigLe C arm Cs Ps ρ ε
-          | some (Ps, some o) => hasSigLe C arm Cs (Ps ++ [.fn [o] ρ ε true none]) ρ ε
+          | some (Ps, none) => enters C arm θ Cs Ps ρ ε Φ
+          | some (Ps, some o) =>
+            enters C arm θ Cs (Ps ++ [.fn 0 [o] ρ ε true none Φ]) ρ ε Φ
           | none => false)
-      && checkArms C Cs ρ ε ops H
-  | [], _ :: _ => false
-  | _ :: _, [] => false
+      && checkArms C Cs ρ ε Φ ops H θs
+  | [], _ :: _, _ => false
+  | _ :: _, [], _ => false
+  | _ :: _, _ :: _, [] => false
 
-theorem checkArms_sound {Cs : List Ty} {ρ : Ty} {ε : Row} :
-    ∀ {ops : List (Nat × Nat)} {H : Row}, checkArms C Cs ρ ε ops H = true →
-      ArmsOk C.ctx Cs ρ ε ops H
-  | [], [], _ => .nil
-  | (op, arm) :: ops, (op', targs) :: H, h => by
+theorem checkArms_sound {Cs : List Ty} {ρ : Ty} {ε : Row} {Φ : List Rgn} :
+    ∀ {ops : List (Nat × Nat)} {H : Row} {θs : List (List Rgn)},
+      checkArms C Cs ρ ε Φ ops H θs = true → ArmsOk C.ctx Cs ρ ε Φ ops H
+  | [], [], _, _ => .nil
+  | (op, arm) :: ops, (op', targs) :: H, θ :: θs, h => by
     simp only [checkArms, Bool.and_eq_true, beq_iff_eq] at h
     obtain ⟨⟨rfl, harm⟩, hrest⟩ := h
     split at harm
     · rename_i Ps hop
-      obtain ⟨εa, hsig, hle⟩ := hasSigLe_sound harm
-      exact .terminal hop hsig hle (checkArms_sound hrest)
+      exact .terminal hop (enters_sound harm) (checkArms_sound hrest)
     · rename_i Ps o hop
-      obtain ⟨εa, hsig, hle⟩ := hasSigLe_sound harm
-      exact .resumptive hop hsig hle (checkArms_sound hrest)
+      exact .resumptive hop (enters_sound harm) (checkArms_sound hrest)
     · simp at harm
-  | [], _ :: _, h => by simp [checkArms] at h
-  | _ :: _, [], h => by simp [checkArms] at h
+  | [], _ :: _, _, h => by simp [checkArms] at h
+  | _ :: _, [], _, h => by simp [checkArms] at h
+  | _ :: _, _ :: _, [], h => by simp [checkArms] at h
 
 def checkHandler (C : Cert) (Cs : List Ty) (ret : Nat) (ops : List (Nat × Nat)) (σ ρ : Ty)
-    (H ε : Row) : Bool :=
-  hasSigLe C ret Cs [σ] ρ ε && checkArms C Cs ρ ε ops H && Cs.all (dupOk C)
+    (H ε : Row) (Φ : List Rgn) : List (List Rgn) → Bool
+  | θ :: θs => enters C ret θ Cs [σ] ρ ε Φ && checkArms C Cs ρ ε Φ ops H θs && Cs.all (dupOk C)
+  | [] => false
 
 theorem checkHandler_sound {Cs : List Ty} {ret : Nat} {ops : List (Nat × Nat)} {σ ρ : Ty}
-    {H ε : Row} (h : checkHandler C Cs ret ops σ ρ H ε = true) :
-    HandlerOk C.ctx Cs ret ops σ ρ H ε := by
-  simp only [checkHandler, Bool.and_eq_true] at h
-  exact ⟨hasSigLe_sound h.1.1, checkArms_sound h.1.2, dupOk_all h.2⟩
+    {H ε : Row} {Φ : List Rgn} {θs : List (List Rgn)}
+    (h : checkHandler C Cs ret ops σ ρ H ε Φ θs = true) :
+    HandlerOk C.ctx Cs ret ops σ ρ H ε Φ := by
+  cases θs with
+  | nil => simp [checkHandler] at h
+  | cons θ θs =>
+    simp only [checkHandler, Bool.and_eq_true] at h
+    exact ⟨enters_sound h.1.1, checkArms_sound h.1.2, dupOk_all h.2⟩
 
 /-! ## Computations -/
 
-/-- Check a computation against the type it must give and the operations it
-may perform. Hints are used up in order: one by each `let`, one by each handler,
+/-- The conditions on the callable a cell's scope runs: it takes a reference to
+the cell, and under the region rules is polymorphic in the cell's region, which
+neither its result, nor what it performs, nor what the cell holds can mention. -/
+def cellOk (C : Cert) (ϕ : List Rgn) (n : Nat) (r : Rgn) (σ ρ : Ty) (εt : Row)
+    (acc : List Rgn) : Bool :=
+  σ.lc && ρ.lc && εt.lc && (n == 0 || (n == 1 && r == .bound 0))
+    && (!C.regions || (n == 1 && r == .bound 0))
+    && acc.all fun x => (n == 1 && x == .bound 0) || (x.free && ϕ.contains x)
+
+theorem cellOk_sound {ϕ : List Rgn} {n : Nat} {r : Rgn} {σ ρ : Ty} {εt : Row} {acc : List Rgn}
+    (h : cellOk C ϕ n r σ ρ εt acc = true) :
+    σ.lc = true ∧ ρ.lc = true ∧ εt.lc = true ∧ (n = 0 ∨ (n = 1 ∧ r = .bound 0))
+      ∧ (C.ctx.regions → n = 1 ∧ r = .bound 0)
+      ∧ (∀ x, x ∈ acc → (n = 1 ∧ x = .bound 0) ∨ (x.free = true ∧ x ∈ ϕ)) := by
+  simp only [cellOk, Bool.and_eq_true, Bool.or_eq_true, beq_iff_eq, Bool.not_eq_true',
+    List.all_eq_true, List.contains_eq_mem, decide_eq_true_eq] at h
+  obtain ⟨⟨⟨⟨⟨hσ, hρ⟩, hε⟩, hn⟩, hreg⟩, hacc⟩ := h
+  refine ⟨hσ, hρ, hε, hn, fun hR => ?_, hacc⟩
+  have hR' : C.regions = true := hR
+  rcases hreg with h | h
+  · rw [hR'] at h
+    cases h
+  · exact h
+
+/-- Check a computation against the regions it may touch, the type it must
+give and the operations it may perform. Hints are used up in order: one by each
+`let`, one by each handler, one by each call of a callable that binds regions,
 and one by each call of something that does not return, for the type the code
 after the call takes its result to have. -/
-def checkTm (C : Cert) : TEnv → Tm → List Hint → Ty → Row → Bool
+def checkTm (C : Cert) (ϕ : List Rgn) : TEnv → Tm → List Hint → Ty → Row → Bool
   | Γ, .ret a, _, τ, _ => atomTy Γ a == some τ
   | Γ, .let_ rhs body, hs, τ, ε =>
     match hs with
-    | .ty σ :: hs =>
-      checkRhs C Γ rhs σ && linearB C Γ (rhsMoves rhs) (fv body)
-        && checkTm C (Γ ++ [σ]) body hs τ ε
-    | _ => false
+    | h :: hs =>
+      match h.bind? with
+      | some (σ, θ) =>
+        checkRhs C Γ θ rhs σ && linearB C Γ (rhsMoves rhs) (fv body)
+          && checkTm C ϕ (Γ ++ [σ]) body hs τ ε
+      | none => false
+    | [] => false
   | Γ, .call f args body, hs, τ, ε =>
     match atomTy Γ f with
-    | some (.fn Ps σ ε' _ _) =>
-      atomsTy Γ args == some Ps && rowLe ε' ε
-        && linearB C Γ (atomVars (f :: args)) (fv body)
-        && (if σ = .never then
-              match hs with
-              | .ty σ' :: hs => checkTm C (Γ ++ [σ']) body hs τ ε
-              | _ => false
-            else checkTm C (Γ ++ [σ]) body hs τ ε)
+    | some (.fn n Ps σ ε' _ _ acc) =>
+      match takeRgns n hs with
+      | some (rs, hs) =>
+        atomsTy Γ args == some (Ps.map (Ty.open rs)) && rowLe (Row.open rs ε') ε
+          && subB (acc.map (Rgn.openAt 0 rs)) ϕ
+          && linearB C Γ (atomVars (f :: args)) (fv body)
+          && (if σ = .never then
+                match hs with
+                | .ty σ' :: hs => checkTm C ϕ (Γ ++ [σ']) body hs τ ε
+                | _ => false
+              else checkTm C ϕ (Γ ++ [σ.open rs]) body hs τ ε)
+      | none => false
     | _ => false
-  | Γ, .tail f args, _, τ, ε =>
+  | Γ, .tail f args, hs, τ, ε =>
     match atomTy Γ f with
-    | some (.fn Ps σ ε' _ _) =>
-      (σ == τ || σ == .never) && atomsTy Γ args == some Ps && rowLe ε' ε
-        && linearB C Γ (atomVars (f :: args)) []
+    | some (.fn n Ps σ ε' _ _ acc) =>
+      match takeRgns n hs with
+      | some (rs, _) =>
+        (σ.open rs == τ || σ == .never) && atomsTy Γ args == some (Ps.map (Ty.open rs))
+          && rowLe (Row.open rs ε') ε && subB (acc.map (Rgn.openAt 0 rs)) ϕ
+          && linearB C Γ (atomVars (f :: args)) []
+      | none => false
     | _ => false
   | Γ, .handle ret ops captures thunk body, hs, τ, ε =>
     match hs, atomTy Γ thunk, atomsTy Γ captures with
-    | .handler ρ H :: hs, some (.fn [] σ εt _ _), some Cs =>
-      checkHandler C Cs ret ops σ ρ H ε && rowLe εt (H ++ ε)
+    | .handler ρ H Φ θs :: hs, some (.fn 0 [] σ εt _ _ acc), some Cs =>
+      checkHandler C Cs ret ops σ ρ H ε Φ θs && rowLe εt (H ++ ε) && subB acc Φ && subB Φ ϕ
         && linearB C Γ (atomVars [thunk]) (fv body)
-        && checkTm C (Γ ++ [ρ]) body hs τ ε
+        && checkTm C ϕ (Γ ++ [ρ]) body hs τ ε
     | _, _, _ => false
   | Γ, .handleTail ret ops captures thunk, hs, τ, ε =>
     match hs, atomTy Γ thunk, atomsTy Γ captures with
-    | .handler _ H :: _, some (.fn [] σ εt _ _), some Cs =>
-      checkHandler C Cs ret ops σ τ H ε && rowLe εt (H ++ ε)
+    | .handler _ H Φ θs :: _, some (.fn 0 [] σ εt _ _ acc), some Cs =>
+      checkHandler C Cs ret ops σ τ H ε Φ θs && rowLe εt (H ++ ε) && subB acc Φ && subB Φ ϕ
     | _, _, _ => false
   | Γ, .raise op args, _, _, ε =>
     match ε.lookup op with
@@ -521,74 +735,80 @@ def checkTm (C : Cert) : TEnv → Tm → List Hint → Ty → Row → Bool
       match findOp C.ops op targs with
       | some (Ps, some σ) =>
         atomsTy Γ args == some Ps && linearB C Γ (atomVars args) (fv body)
-          && checkTm C (Γ ++ [σ]) body hs τ ε
+          && checkTm C ϕ (Γ ++ [σ]) body hs τ ε
       | _ => false
     | none => false
   | Γ, .label thunk body, hs, τ, ε =>
     match atomTy Γ thunk with
-    | some (.fn [.fn [σ'] _ _ _ none] σ εt _ _) =>
-      σ' == σ && rowLe εt ε && linearB C Γ (atomVars [thunk]) (fv body)
-        && checkTm C (Γ ++ [σ]) body hs τ ε
+    | some (.fn 0 [.fn 0 [σ'] _ _ _ none _] σ εt _ _ acc) =>
+      σ' == σ && rowLe εt ε && subB acc ϕ && linearB C Γ (atomVars [thunk]) (fv body)
+        && checkTm C ϕ (Γ ++ [σ]) body hs τ ε
     | _ => false
   | Γ, .labelTail thunk, _, τ, ε =>
     match atomTy Γ thunk with
-    | some (.fn [.fn [σ'] _ _ _ none] σ εt _ _) => σ' == σ && σ == τ && rowLe εt ε
+    | some (.fn 0 [.fn 0 [σ'] _ _ _ none _] σ εt _ _ acc) =>
+      σ' == σ && σ == τ && rowLe εt ε && subB acc ϕ
     | _ => false
   | Γ, .guard cleanup thunk body, hs, τ, ε =>
     match atomTy Γ cleanup, atomTy Γ thunk with
-    | some (.fn [] _ [] _ _), some (.fn [] σ εt _ _) =>
-      rowLe εt ε && linearB C Γ (atomVars [cleanup, thunk]) (fv body)
-        && checkTm C (Γ ++ [σ]) body hs τ ε
+    | some (.fn 0 [] _ [] _ _ accc), some (.fn 0 [] σ εt _ _ acc) =>
+      rowLe εt ε && subB accc ϕ && subB acc ϕ
+        && linearB C Γ (atomVars [cleanup, thunk]) (fv body)
+        && checkTm C ϕ (Γ ++ [σ]) body hs τ ε
     | _, _ => false
   | Γ, .guardTail cleanup thunk, _, τ, ε =>
     match atomTy Γ cleanup, atomTy Γ thunk with
-    | some (.fn [] _ [] _ _), some (.fn [] σ εt _ _) =>
-      σ == τ && rowLe εt ε && linearB C Γ (atomVars [cleanup, thunk]) []
+    | some (.fn 0 [] _ [] _ _ accc), some (.fn 0 [] σ εt _ _ acc) =>
+      σ == τ && rowLe εt ε && subB accc ϕ && subB acc ϕ
+        && linearB C Γ (atomVars [cleanup, thunk]) []
     | _, _ => false
   | Γ, .cancel k body, hs, τ, ε =>
     match atomTy Γ k with
-    | some (.fn [_] _ ε' _ _) =>
-      rowLe ε' ε && linearB C Γ (atomVars [k]) (fv body)
-        && checkTm C (Γ ++ [.unit]) body hs τ ε
+    | some (.fn _ [_] _ ε' _ _ acc) =>
+      rowLe ε' ε && subB acc ϕ && linearB C Γ (atomVars [k]) (fv body)
+        && checkTm C ϕ (Γ ++ [.unit]) body hs τ ε
     | _ => false
   | Γ, .cell init thunk body, hs, τ, ε =>
     match atomTy Γ init, atomTy Γ thunk with
-    | some σ, some (.fn [.ref σ'] ρ εt _ _) =>
-      σ' == σ && rowLe εt ε && linearB C Γ (atomVars [init, thunk]) (fv body)
-        && checkTm C (Γ ++ [ρ]) body hs τ ε
+    | some σ, some (.fn n [.ref r σ'] ρ εt _ _ acc) =>
+      σ' == σ && cellOk C ϕ n r σ ρ εt acc && rowLe εt ε
+        && linearB C Γ (atomVars [init, thunk]) (fv body)
+        && checkTm C ϕ (Γ ++ [ρ]) body hs τ ε
     | _, _ => false
   | Γ, .cellTail init thunk, _, τ, ε =>
     match atomTy Γ init, atomTy Γ thunk with
-    | some σ, some (.fn [.ref σ'] ρ εt _ _) =>
-      σ' == σ && ρ == τ && rowLe εt ε && linearB C Γ (atomVars [init, thunk]) []
+    | some σ, some (.fn n [.ref r σ'] ρ εt _ _ acc) =>
+      σ' == σ && ρ == τ && cellOk C ϕ n r σ ρ εt acc && rowLe εt ε
+        && linearB C Γ (atomVars [init, thunk]) []
     | _, _ => false
   | Γ, .mem op args body, hs, τ, ε =>
     match op, args with
     | .load, [a] =>
       match atomTy Γ a with
-      | some (.ref σ) => dupOk C σ && checkTm C (Γ ++ [σ]) body hs τ ε
+      | some (.ref r σ) =>
+        regionOk C ϕ r && dupOk C σ && checkTm C ϕ (Γ ++ [σ]) body hs τ ε
       | _ => false
     | .store, [a, b] =>
       match atomTy Γ a with
-      | some (.ref σ) =>
-        atomTy Γ b == some σ && linearB C Γ (atomVars [b]) (fv body)
-          && checkTm C (Γ ++ [.unit]) body hs τ ε
+      | some (.ref r σ) =>
+        regionOk C ϕ r && atomTy Γ b == some σ && linearB C Γ (atomVars [b]) (fv body)
+          && checkTm C ϕ (Γ ++ [.unit]) body hs τ ε
       | _ => false
     | .swap, [a, b] =>
       match atomTy Γ a with
-      | some (.ref σ) =>
-        atomTy Γ b == some σ && linearB C Γ (atomVars [b]) (fv body)
-          && checkTm C (Γ ++ [σ]) body hs τ ε
+      | some (.ref r σ) =>
+        regionOk C ϕ r && atomTy Γ b == some σ && linearB C Γ (atomVars [b]) (fv body)
+          && checkTm C ϕ (Γ ++ [σ]) body hs τ ε
       | _ => false
     | _, _ => false
   | Γ, .host id args body, hs, τ, ε =>
     match id, args with
-    | 0, [a] => (atomTy Γ a).isSome && checkTm C (Γ ++ [.unit]) body hs τ ε
-    | 1, [] => checkTm C (Γ ++ [.tuple [.int, .int]]) body hs τ ε
+    | 0, [a] => (atomTy Γ a).isSome && checkTm C ϕ (Γ ++ [.unit]) body hs τ ε
+    | 1, [] => checkTm C ϕ (Γ ++ [.tuple [.int, .int]]) body hs τ ε
     | _, _ => false
 
-theorem checkTm_sound : ∀ (tm : Tm) {Γ : TEnv} {hs : List Hint} {τ : Ty} {ε : Row},
-    checkTm C Γ tm hs τ ε = true → HasTm C.ctx Γ tm τ ε := by
+theorem checkTm_sound {ϕ : List Rgn} : ∀ (tm : Tm) {Γ : TEnv} {hs : List Hint} {τ : Ty}
+    {ε : Row}, checkTm C ϕ Γ tm hs τ ε = true → HasTm C.ctx ϕ Γ tm τ ε := by
   intro tm
   induction tm with
   | ret a =>
@@ -599,57 +819,68 @@ theorem checkTm_sound : ∀ (tm : Tm) {Γ : TEnv} {hs : List Hint} {τ : Ty} {ε
     intro Γ hs τ ε h
     simp only [checkTm] at h
     split at h
-    · simp only [Bool.and_eq_true] at h
-      exact .let_ (checkRhs_sound h.1.1) (linearB_sound h.1.2) (ih h.2)
+    · split at h
+      · simp only [Bool.and_eq_true] at h
+        exact .let_ (checkRhs_sound h.1.1) (linearB_sound h.1.2) (ih h.2)
+      · simp at h
     · simp at h
   | call f args body ih =>
     intro Γ hs τ ε h
     simp only [checkTm] at h
     split at h
-    · rename_i Ps σ ε' once hf
-      simp only [Bool.and_eq_true, beq_iff_eq] at h
-      obtain ⟨⟨⟨hargs, hrow⟩, hlin⟩, hbody⟩ := h
-      split at hbody
-      · rename_i hσ
-        subst hσ
+    · rename_i n Ps σ ε' once env acc hf
+      split at h
+      · rename_i rs hs' htake
+        have hn := takeRgns_length htake
+        simp only [Bool.and_eq_true, beq_iff_eq] at h
+        obtain ⟨⟨⟨⟨hargs, hrow⟩, hacc⟩, hlin⟩, hbody⟩ := h
         split at hbody
-        · exact .callNever (atomTy_sound hf) (atomsTy_sound hargs) (rowLe_sound hrow)
-            (linearB_sound hlin) (ih hbody)
-        · simp at hbody
-      · exact .call (atomTy_sound hf) (atomsTy_sound hargs) (rowLe_sound hrow)
-          (linearB_sound hlin) (ih hbody)
+        · rename_i hσ
+          subst hσ
+          split at hbody
+          · exact .callNever (rs := rs) (atomTy_sound hf) hn (atomsTy_sound hargs)
+              (rowLe_sound hrow) (subB_sound hacc) (linearB_sound hlin) (ih hbody)
+          · simp at hbody
+        · exact .call (rs := rs) (atomTy_sound hf) hn (atomsTy_sound hargs) (rowLe_sound hrow)
+            (subB_sound hacc) (linearB_sound hlin) (ih hbody)
+      · simp at h
     · simp at h
   | tail f args =>
     intro Γ hs τ ε h
     simp only [checkTm] at h
     split at h
-    · rename_i Ps σ ε' once hf
-      simp only [Bool.and_eq_true, Bool.or_eq_true, beq_iff_eq] at h
-      obtain ⟨⟨⟨hσ, hargs⟩, hrow⟩, hlin⟩ := h
-      rcases hσ with rfl | rfl
-      · exact .tail (atomTy_sound hf) (atomsTy_sound hargs) (rowLe_sound hrow)
-          (linearB_sound hlin)
-      · exact .tailNever (atomTy_sound hf) (atomsTy_sound hargs) (rowLe_sound hrow)
-          (linearB_sound hlin)
+    · rename_i n Ps σ ε' once env acc hf
+      split at h
+      · rename_i rs hs' htake
+        have hn := takeRgns_length htake
+        simp only [Bool.and_eq_true, Bool.or_eq_true, beq_iff_eq] at h
+        obtain ⟨⟨⟨⟨hσ, hargs⟩, hrow⟩, hacc⟩, hlin⟩ := h
+        rcases hσ with hσ | rfl
+        · exact .tail (rs := rs) (atomTy_sound hf) hn hσ (atomsTy_sound hargs)
+            (rowLe_sound hrow) (subB_sound hacc) (linearB_sound hlin)
+        · exact .tailNever (rs := rs) (atomTy_sound hf) hn (atomsTy_sound hargs)
+            (rowLe_sound hrow) (subB_sound hacc) (linearB_sound hlin)
+      · simp at h
     · simp at h
   | handle ret ops captures thunk body ih =>
     intro Γ hs τ ε h
     simp only [checkTm] at h
     split at h
-    · rename_i ρ H hs' σ εt once Cs hthunk hcaps
+    · rename_i ρ H Φ θs hs' σ εt once env acc Cs hthunk hcaps
       simp only [Bool.and_eq_true] at h
-      obtain ⟨⟨⟨hh, hrow⟩, hlin⟩, hbody⟩ := h
+      obtain ⟨⟨⟨⟨⟨hh, hrow⟩, hacc⟩, hΦ⟩, hlin⟩, hbody⟩ := h
       exact .handle (atomTy_sound hthunk) (atomsTy_sound hcaps) (checkHandler_sound hh)
-        (rowLe_sound hrow) (linearB_sound hlin) (ih hbody)
+        (rowLe_sound hrow) (subB_sound hacc) (subB_sound hΦ) (linearB_sound hlin) (ih hbody)
     · simp at h
   | handleTail ret ops captures thunk =>
     intro Γ hs τ ε h
     simp only [checkTm] at h
     split at h
-    · rename_i ρ H hs' σ εt once Cs hthunk hcaps
+    · rename_i ρ H Φ θs hs' σ εt once env acc Cs hthunk hcaps
       simp only [Bool.and_eq_true] at h
-      exact .handleTail (atomTy_sound hthunk) (atomsTy_sound hcaps) (checkHandler_sound h.1)
-        (rowLe_sound h.2)
+      obtain ⟨⟨⟨hh, hrow⟩, hacc⟩, hΦ⟩ := h
+      exact .handleTail (atomTy_sound hthunk) (atomsTy_sound hcaps) (checkHandler_sound hh)
+        (rowLe_sound hrow) (subB_sound hacc) (subB_sound hΦ)
     · simp at h
   | raise op args =>
     intro Γ hs τ ε h
@@ -677,85 +908,92 @@ theorem checkTm_sound : ∀ (tm : Tm) {Γ : TEnv} {hs : List Hint} {τ : Ty} {ε
     intro Γ hs τ ε h
     simp only [checkTm] at h
     split at h
-    · rename_i σ' ρ εl once' σ εt once hthunk
+    · rename_i σ' ρ εl once' accl σ εt once env acc hthunk
       simp only [Bool.and_eq_true, beq_iff_eq] at h
-      obtain ⟨⟨⟨rfl, hrow⟩, hlin⟩, hbody⟩ := h
-      exact .label (atomTy_sound hthunk) (rowLe_sound hrow) (linearB_sound hlin) (ih hbody)
+      obtain ⟨⟨⟨⟨rfl, hrow⟩, hacc⟩, hlin⟩, hbody⟩ := h
+      exact .label (atomTy_sound hthunk) (rowLe_sound hrow) (subB_sound hacc)
+        (linearB_sound hlin) (ih hbody)
     · simp at h
   | labelTail thunk =>
     intro Γ hs τ ε h
     simp only [checkTm] at h
     split at h
-    · rename_i σ' ρ εl once' σ εt once hthunk
+    · rename_i σ' ρ εl once' accl σ εt once env acc hthunk
       simp only [Bool.and_eq_true, beq_iff_eq] at h
-      obtain ⟨⟨rfl, rfl⟩, hrow⟩ := h
-      exact .labelTail (atomTy_sound hthunk) (rowLe_sound hrow)
+      obtain ⟨⟨⟨rfl, rfl⟩, hrow⟩, hacc⟩ := h
+      exact .labelTail (atomTy_sound hthunk) (rowLe_sound hrow) (subB_sound hacc)
     · simp at h
   | guard cleanup thunk body ih =>
     intro Γ hs τ ε h
     simp only [checkTm] at h
     split at h
-    · rename_i σc once' σ εt once hcl hthunk
+    · rename_i σc once' env' accc σ εt once env acc hcl hthunk
       simp only [Bool.and_eq_true] at h
-      exact .guard (atomTy_sound hcl) (atomTy_sound hthunk) (rowLe_sound h.1.1)
-        (linearB_sound h.1.2) (ih h.2)
+      obtain ⟨⟨⟨⟨hrow, haccc⟩, hacc⟩, hlin⟩, hbody⟩ := h
+      exact .guard (atomTy_sound hcl) (atomTy_sound hthunk) (rowLe_sound hrow)
+        (subB_sound haccc) (subB_sound hacc) (linearB_sound hlin) (ih hbody)
     · simp at h
   | guardTail cleanup thunk =>
     intro Γ hs τ ε h
     simp only [checkTm] at h
     split at h
-    · rename_i σc once' σ εt once hcl hthunk
+    · rename_i σc once' env' accc σ εt once env acc hcl hthunk
       simp only [Bool.and_eq_true, beq_iff_eq] at h
-      obtain ⟨⟨rfl, hrow⟩, hlin⟩ := h
+      obtain ⟨⟨⟨⟨rfl, hrow⟩, haccc⟩, hacc⟩, hlin⟩ := h
       exact .guardTail (atomTy_sound hcl) (atomTy_sound hthunk) (rowLe_sound hrow)
-        (linearB_sound hlin)
+        (subB_sound haccc) (subB_sound hacc) (linearB_sound hlin)
     · simp at h
   | cancel k body ih =>
     intro Γ hs τ ε h
     simp only [checkTm] at h
     split at h
-    · rename_i σ ρ ε' once hk
+    · rename_i n σ ρ ε' once env acc hk
       simp only [Bool.and_eq_true] at h
-      exact .cancel (atomTy_sound hk) (rowLe_sound h.1.1) (linearB_sound h.1.2) (ih h.2)
+      exact .cancel (atomTy_sound hk) (rowLe_sound h.1.1.1) (subB_sound h.1.1.2)
+        (linearB_sound h.1.2) (ih h.2)
     · simp at h
   | cell init thunk body ih =>
     intro Γ hs τ ε h
     simp only [checkTm] at h
     split at h
-    · rename_i σ σ' ρ εt once env hinit hthunk
+    · rename_i σ n r σ' ρ εt once env acc hinit hthunk
       simp only [Bool.and_eq_true, beq_iff_eq] at h
-      obtain ⟨⟨⟨rfl, hrow⟩, hlin⟩, hbody⟩ := h
-      exact .cell (atomTy_sound hinit) (atomTy_sound hthunk) (rowLe_sound hrow)
-        (linearB_sound hlin) (ih hbody)
+      obtain ⟨⟨⟨⟨rfl, hcell⟩, hrow⟩, hlin⟩, hbody⟩ := h
+      obtain ⟨hσ, hρ, hε, hn, hreg, hacc⟩ := cellOk_sound hcell
+      exact .cell (atomTy_sound hinit) (atomTy_sound hthunk) hσ hρ hε hn hreg hacc
+        (rowLe_sound hrow) (linearB_sound hlin) (ih hbody)
     · simp at h
   | cellTail init thunk =>
     intro Γ hs τ ε h
     simp only [checkTm] at h
     split at h
-    · rename_i σ σ' ρ εt once env hinit hthunk
+    · rename_i σ n r σ' ρ εt once env acc hinit hthunk
       simp only [Bool.and_eq_true, beq_iff_eq] at h
-      obtain ⟨⟨⟨rfl, rfl⟩, hrow⟩, hlin⟩ := h
-      exact .cellTail (atomTy_sound hinit) (atomTy_sound hthunk) (rowLe_sound hrow)
-        (linearB_sound hlin)
+      obtain ⟨⟨⟨⟨rfl, rfl⟩, hcell⟩, hrow⟩, hlin⟩ := h
+      obtain ⟨hσ, hρ, hε, hn, hreg, hacc⟩ := cellOk_sound hcell
+      exact .cellTail (atomTy_sound hinit) (atomTy_sound hthunk) hσ hρ hε hn hreg hacc
+        (rowLe_sound hrow) (linearB_sound hlin)
     · simp at h
   | mem op args body ih =>
     intro Γ hs τ ε h
     simp only [checkTm] at h
     split at h
     · split at h
-      · rename_i σ ha
+      · rename_i r σ ha
         simp only [Bool.and_eq_true] at h
-        exact .load (atomTy_sound ha) (dupOk_sound h.1) (ih h.2)
+        exact .load (atomTy_sound ha) (regionOk_sound h.1.1) (dupOk_sound h.1.2) (ih h.2)
       · simp at h
     · split at h
-      · rename_i σ ha
+      · rename_i r σ ha
         simp only [Bool.and_eq_true, beq_iff_eq] at h
-        exact .store (atomTy_sound ha) (atomTy_sound h.1.1) (linearB_sound h.1.2) (ih h.2)
+        exact .store (atomTy_sound ha) (regionOk_sound h.1.1.1) (atomTy_sound h.1.1.2)
+          (linearB_sound h.1.2) (ih h.2)
       · simp at h
     · split at h
-      · rename_i σ ha
+      · rename_i r σ ha
         simp only [Bool.and_eq_true, beq_iff_eq] at h
-        exact .swap (atomTy_sound ha) (atomTy_sound h.1.1) (linearB_sound h.1.2) (ih h.2)
+        exact .swap (atomTy_sound ha) (regionOk_sound h.1.1.1) (atomTy_sound h.1.1.2)
+          (linearB_sound h.1.2) (ih h.2)
       · simp at h
     · simp at h
   | host id args body ih =>
@@ -856,12 +1094,16 @@ theorem wildOk_sound {pats : List Pat} {live : List Nat} (h : wildOk pats live =
   have := List.all_eq_true.mp h i (List.mem_range.mpr hlt)
   simpa [hp, hw] using this
 
-/-- Check each clause of a function at a signature, with that clause's hints. -/
+/-- Check each clause of a function at a signature, with that clause's hints.
+The body is checked with the signature's call regions as variables. -/
 def checkClauses (C : Cert) (sig : FnSig) : List Clause → List (List Hint) → Bool
   | [], [] => true
   | c :: cs, h :: hs =>
-    (match patsTys C c.pats sig.params with
-      | some Bs => checkTm C (sig.params ++ sig.caps ++ Bs) c.body h sig.ret sig.eff
+    (match patsTys C c.pats (sig.params.map (Ty.open sig.vars)) with
+      | some Bs =>
+        checkTm C (sig.acc.map (Rgn.openAt 0 sig.vars))
+          (sig.params.map (Ty.open sig.vars) ++ sig.caps ++ Bs) c.body h
+          (sig.ret.open sig.vars) (sig.eff.open sig.vars)
       | none => false)
       && wildOk c.pats (fv c.body)
       && checkClauses C sig cs hs

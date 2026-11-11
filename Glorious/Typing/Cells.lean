@@ -1,0 +1,623 @@
+import Glorious.Typing.Safety
+
+/-!
+# A cell lives as long as its scope
+
+Two things together show that a program checked with the region rules never
+reads or writes a released cell.
+
+The first is about the machine alone, whatever the program: every cell whose
+scope is on the stack, or among the frames a resumption captured, is live, and
+no two scopes are for the same cell. A scope is pushed with a fresh cell, a
+cell is released only when its scope is removed, and frames move between the
+stack and the store without being copied.
+
+The second is about typing: the regions a typed stack grants the code on top of
+it are cells whose scopes are on that stack. Code reads and writes only through
+references whose region it was granted.
+-/
+
+namespace Glorious.Typing
+
+open Core
+
+variable {Δ : Ctx}
+
+/-! ## Scopes own their cells -/
+
+/-- Whether a frame is the scope of cell `a`: one if so. -/
+def ownFrame (a : Nat) : Frame → Nat
+  | .cell b => if b = a then 1 else 0
+  | .call _ _ => 0
+  | .handler _ _ => 0
+  | .label _ => 0
+  | .guard _ _ => 0
+  | .yield _ => 0
+  | .exit _ _ => 0
+
+/-- How many frames of a stack are the scope of cell `a`. -/
+def ownStack (a : Nat) : List Frame → Nat
+  | [] => 0
+  | fr :: st => ownFrame a fr + ownStack a st
+
+theorem ownStack_append (a : Nat) : ∀ (x y : List Frame),
+    ownStack a (x ++ y) = ownStack a x + ownStack a y
+  | [], y => by simp [ownStack]
+  | fr :: x, y => by simp [ownStack, ownStack_append a x y, Nat.add_assoc]
+
+/-- A cell holds a value: it has not been released. -/
+def Live (cells : Cells) (a : Nat) : Prop := ∃ v, cells[a]? = some (some v)
+
+/-- Every cell with a scope on the stack `st`, or among the frames of a
+resumption in the store, is live, and has only that one scope. -/
+def OwnsAt (st : List Frame) (store : Store Frame) : Prop :=
+  ∀ a, ownStack a st + osum (ownStack a) store.conts ≤ 1
+    ∧ (0 < ownStack a st + osum (ownStack a) store.conts → Live store.cells a)
+
+def Owns (s : State) : Prop := OwnsAt s.stack s.store
+
+/-- A stack and store with the same scopes and at least the same live cells. -/
+theorem OwnsAt.of_le {st st' : List Frame} {store store' : Store Frame} (h : OwnsAt st store)
+    (hc : ∀ a, ownStack a st' + osum (ownStack a) store'.conts
+      ≤ ownStack a st + osum (ownStack a) store.conts)
+    (hl : ∀ a, Live store.cells a → Live store'.cells a) : OwnsAt st' store' := by
+  intro a
+  obtain ⟨h1, h2⟩ := h a
+  have := hc a
+  exact ⟨by omega, fun hp => hl a (h2 (by omega))⟩
+
+/-- Removing a frame without releasing anything. -/
+theorem OwnsAt.drop {fr : Frame} {st : List Frame} {store : Store Frame}
+    (h : OwnsAt (fr :: st) store) : OwnsAt st store :=
+  h.of_le (fun a => by simp only [ownStack]; omega) (fun _ hl => hl)
+
+/-- Pushing a frame that is not a cell's scope. -/
+theorem OwnsAt.push {fr : Frame} {st : List Frame} {store : Store Frame} (h : OwnsAt st store)
+    (h0 : ∀ a, ownFrame a fr = 0) : OwnsAt (fr :: st) store :=
+  h.of_le (fun a => by simp only [ownStack, h0 a]; omega) (fun _ hl => hl)
+
+/-- The label counter is no part of it. -/
+theorem OwnsAt.labels {st : List Frame} {conts : Conts Frame} {labels labels' : Nat}
+    {cells : Cells} (h : OwnsAt st ⟨conts, labels, cells⟩) : OwnsAt st ⟨conts, labels', cells⟩ :=
+  h
+
+/-- Removing the scope of a cell and releasing the cell. -/
+theorem OwnsAt.release {a : Nat} {st : List Frame} {store : Store Frame}
+    (h : OwnsAt (.cell a :: st) store) : OwnsAt st (store.release a) := by
+  intro b
+  obtain ⟨h1, h2⟩ := h b
+  simp only [ownStack, ownFrame] at h1 h2
+  refine ⟨by show ownStack b st + osum (ownStack b) store.conts ≤ 1; omega, fun hp => ?_⟩
+  have hp' : 0 < ownStack b st + osum (ownStack b) store.conts := hp
+  have hne : a ≠ b := by
+    intro e
+    subst e
+    simp at h1
+    omega
+  obtain ⟨v, hv⟩ := h2 (by omega)
+  refine ⟨v, ?_⟩
+  show (store.cells.set a none)[b]? = some (some v)
+  rw [List.getElem?_set_ne hne]
+  exact hv
+
+/-- Pushing the scope of a new cell. -/
+theorem OwnsAt.alloc {st : List Frame} {store : Store Frame} (h : OwnsAt st store) (v : Value) :
+    OwnsAt (.cell store.cells.length :: st) (store.alloc v) := by
+  intro b
+  obtain ⟨h1, h2⟩ := h b
+  by_cases hb : store.cells.length = b
+  · subst hb
+    have hz : ownStack store.cells.length st + osum (ownStack store.cells.length) store.conts
+        = 0 := by
+      cases hn : ownStack store.cells.length st + osum (ownStack store.cells.length) store.conts
+        with
+      | zero => rfl
+      | succ k =>
+        obtain ⟨w, hw⟩ := h2 (by omega)
+        have := (List.getElem?_eq_some_iff.mp hw).1
+        omega
+    refine ⟨?_, fun _ => ⟨v, ?_⟩⟩
+    · show ownFrame _ (Frame.cell store.cells.length) + ownStack _ st
+        + osum (ownStack _) store.conts ≤ 1
+      simp only [ownFrame, ↓reduceIte]
+      omega
+    · show (store.cells ++ [some v])[store.cells.length]? = some (some v)
+      simp
+  · refine ⟨?_, fun hp => ?_⟩
+    · show ownFrame b (Frame.cell store.cells.length) + ownStack b st
+        + osum (ownStack b) store.conts ≤ 1
+      simp only [ownFrame, hb, ↓reduceIte]
+      omega
+    · have hp' : 0 < ownFrame b (Frame.cell store.cells.length) + ownStack b st
+          + osum (ownStack b) store.conts := hp
+      simp only [ownFrame, hb, ↓reduceIte] at hp'
+      obtain ⟨w, hw⟩ := h2 (by omega)
+      refine ⟨w, ?_⟩
+      show (store.cells ++ [some v])[b]? = some (some w)
+      rw [List.getElem?_append_left (List.getElem?_eq_some_iff.mp hw).1]
+      exact hw
+
+theorem callFn_next {p : Program} {fn : Nat} {captures vs : List Value} {st : List Frame}
+    {store : Store Frame} {s' : State} (h : callFn p fn captures vs st store = .next s') :
+    s'.stack = st ∧ s'.store = store := by
+  simp only [callFn] at h
+  split at h
+  · cases h
+    exact ⟨rfl, rfl⟩
+  · cases h
+
+/-- Delivering a value and leaving for a target keep every scope's cell live.
+Proved together, as the two are defined together. -/
+theorem deliver_leave_owns (p : Program) : ∀ (st : List Frame) {store : Store Frame},
+    OwnsAt st store →
+    (∀ {v : Value} {s' : State}, deliver p v st store = .next s' → Owns s')
+    ∧ (∀ {target : Target} {after : After} {s' : State},
+        leave p target after st store = .next s' → Owns s') := by
+  intro st
+  induction st with
+  | nil =>
+    intro store _
+    refine ⟨fun h => ?_, fun h => ?_⟩
+    · simp [deliver] at h
+    · simp [leave] at h
+  | cons fr st ih =>
+    intro store ho
+    refine ⟨@fun v s' h => ?_, @fun target after s' h => ?_⟩
+    · cases fr with
+      | call env body =>
+        simp only [deliver, Step.next.injEq] at h
+        subst h
+        exact ho.drop
+      | handler id hd =>
+        simp only [deliver] at h
+        obtain ⟨h1, h2⟩ := callFn_next h
+        show OwnsAt s'.stack s'.store
+        rw [h1, h2]
+        exact ho.drop
+      | label id =>
+        simp only [deliver] at h
+        exact (ih ho.drop).1 h
+      | guard fn captures =>
+        simp only [deliver] at h
+        obtain ⟨h1, h2⟩ := callFn_next h
+        show OwnsAt s'.stack s'.store
+        rw [h1, h2]
+        exact ho.drop.push (fun _ => rfl)
+      | cell a =>
+        simp only [deliver] at h
+        exact (ih ho.release).1 h
+      | yield w =>
+        simp only [deliver] at h
+        exact (ih ho.drop).1 h
+      | exit t af =>
+        simp only [deliver] at h
+        exact (ih ho.drop).2 h
+    · by_cases ht : fr.isTarget target = true
+      · cases after with
+        | yield w =>
+          simp only [leave, ht, ↓reduceIte] at h
+          exact (ih ho.drop).1 h
+        | invoke fn captures args =>
+          simp only [leave, ht, ↓reduceIte] at h
+          obtain ⟨h1, h2⟩ := callFn_next h
+          show OwnsAt s'.stack s'.store
+          rw [h1, h2]
+          exact ho.drop
+      · cases fr with
+        | guard fn captures =>
+          simp only [leave, ht] at h
+          obtain ⟨h1, h2⟩ := callFn_next h
+          show OwnsAt s'.stack s'.store
+          rw [h1, h2]
+          exact ho.drop.push (fun _ => rfl)
+        | cell a =>
+          simp only [leave, ht] at h
+          exact (ih ho.release).2 h
+        | call env body =>
+          simp only [leave, ht] at h
+          exact (ih ho.drop).2 h
+        | handler id hd =>
+          simp only [leave, ht] at h
+          exact (ih ho.drop).2 h
+        | label id =>
+          simp only [leave, ht] at h
+          exact (ih ho.drop).2 h
+        | yield w =>
+          simp only [leave, ht] at h
+          exact (ih ho.drop).2 h
+        | exit t af =>
+          simp only [leave, ht] at h
+          exact (ih ho.drop).2 h
+
+theorem takeCont_spec {α : Type} : ∀ {cs : List (Option α)} {id : Nat} {x : α}
+    {cs' : List (Option α)}, takeCont cs id = some (x, cs') →
+    cs[id]? = some (some x) ∧ cs' = cs.set id none
+  | [], _, _, _, h => by simp [takeCont] at h
+  | c :: cs, 0, x, cs', h => by
+    cases c with
+    | none => simp [takeCont] at h
+    | some y =>
+      simp [takeCont] at h
+      obtain ⟨rfl, rfl⟩ := h
+      simp
+  | c :: cs, id + 1, x, cs', h => by
+    simp only [takeCont] at h
+    split at h
+    · rename_i y cs'' hr
+      simp at h
+      obtain ⟨rfl, rfl⟩ := h
+      obtain ⟨h1, h2⟩ := takeCont_spec hr
+      simp [h1, h2]
+    · cases h
+
+/-- Putting a resumption's frames back on the stack. -/
+theorem OwnsAt.resume {st seg : List Frame} {conts : Conts Frame} {labels : Nat}
+    {cells : Cells} {id : Nat} (h : OwnsAt st ⟨conts, labels, cells⟩)
+    (hk : conts[id]? = some (some seg)) :
+    OwnsAt (seg ++ st) ⟨conts.set id none, labels, cells⟩ :=
+  h.of_le (fun a => by
+    have := osum_set (ownStack a) conts id none (some seg) hk
+    simp only [oweight] at this
+    show ownStack a (seg ++ st) + osum (ownStack a) (conts.set id none)
+      ≤ ownStack a st + osum (ownStack a) conts
+    rw [ownStack_append]
+    omega) (fun _ hl => hl)
+
+theorem apply_owns {p : Program} {c : Callee} {st : List Frame} {store : Store Frame}
+    {s' : State} (ho : OwnsAt st store) (h : apply p c st store = .next s') : Owns s' := by
+  cases c with
+  | fn fn captures vs =>
+    obtain ⟨h1, h2⟩ := callFn_next h
+    show OwnsAt s'.stack s'.store
+    rw [h1, h2]
+    exact ho
+  | cont id v =>
+    obtain ⟨conts, labels, cells⟩ := store
+    simp only [apply] at h
+    split at h
+    · rename_i seg conts' hr
+      obtain ⟨hk, rfl⟩ := takeCont_spec hr
+      exact (deliver_leave_owns p _ (ho.resume hk)).1 h
+    · cases h
+  | label id v =>
+    simp only [apply] at h
+    split at h
+    · exact (deliver_leave_owns p _ ho).2 h
+    · cases h
+
+theorem live_set {cells : Cells} {a b : Nat} {x : Value} (h : Live cells a) :
+    Live (cells.set b (some x)) a := by
+  obtain ⟨w, hw⟩ := h
+  by_cases hb : b = a
+  · subst hb
+    exact ⟨x, by rw [List.getElem?_set_self (List.getElem?_eq_some_iff.mp hw).1]⟩
+  · exact ⟨w, by rw [List.getElem?_set_ne hb]; exact hw⟩
+
+/-- A memory operation releases nothing. -/
+theorem mem_live {op : MemOp} {cells cells' : Cells} {vs : List Value} {r : Value}
+    (h : op.eval cells vs = some (r, cells')) : ∀ a, Live cells a → Live cells' a := by
+  intro a hl
+  unfold MemOp.eval at h
+  split at h
+  · split at h
+    · cases h
+      exact hl
+    · cases h
+  · split at h
+    · cases h
+      exact live_set hl
+    · cases h
+  · split at h
+    · cases h
+      exact live_set hl
+    · cases h
+  · cases h
+
+/-- **Every step of the machine keeps every scope's cell live.** Nothing here
+depends on the program being typed. -/
+theorem step_owns {p : Program} {s s' : State} (ho : Owns s) (h : step p s = .next s') :
+    Owns s' := by
+  obtain ⟨tm, env, stack, store⟩ := s
+  obtain ⟨conts, labels, cells⟩ := store
+  have ho' : OwnsAt stack ⟨conts, labels, cells⟩ := ho
+  cases tm with
+  | ret a =>
+    simp only [step] at h
+    split at h
+    · cases h
+    · exact (deliver_leave_owns p _ ho').1 h
+  | let_ rhs body =>
+    simp only [step] at h
+    split at h
+    · cases h
+    · cases h
+      exact ho'
+  | call f args body =>
+    simp only [step] at h
+    split at h
+    · cases h
+    · exact apply_owns (ho'.push (fun _ => rfl)) h
+  | tail f args =>
+    simp only [step] at h
+    split at h
+    · cases h
+    · exact apply_owns ho' h
+  | handle ret ops captures thunk body =>
+    simp only [step] at h
+    split at h
+    · exact apply_owns (((ho'.push (fr := .call env body) (fun _ => rfl)).push
+        (fun _ => rfl)).labels) h
+    · cases h
+  | handleTail ret ops captures thunk =>
+    simp only [step] at h
+    split at h
+    · exact apply_owns ((ho'.push (fun _ => rfl)).labels) h
+    · cases h
+  | raise op args =>
+    simp only [step] at h
+    split at h
+    · cases h
+    · split at h
+      · cases h
+      · exact (deliver_leave_owns p _ ho').2 h
+  | perform op args body =>
+    simp only [step] at h
+    split at h
+    · cases h
+    · split at h
+      · cases h
+      · rename_i vs _ d hfind
+        obtain ⟨h1, h2⟩ := callFn_next h
+        show OwnsAt s'.stack s'.store
+        rw [h1, h2]
+        refine ho'.of_le (fun a => ?_) (fun _ hl => hl)
+        have hsplit := congrArg (ownStack a) (findHandler_split hfind)
+        simp only [ownStack_append, ownStack, ownFrame] at hsplit
+        show ownStack a d.below + osum (ownStack a)
+            (conts ++ [some (.call env body :: d.above ++ [.handler d.id d.handler])])
+          ≤ ownStack a stack + osum (ownStack a) conts
+        simp only [osum_append, osum, ownStack, ownFrame, ownStack_append]
+        omega
+  | label thunk body =>
+    simp only [step] at h
+    split at h
+    · cases h
+    · exact apply_owns (((ho'.push (fr := .call env body) (fun _ => rfl)).push
+        (fun _ => rfl)).labels) h
+  | labelTail thunk =>
+    simp only [step] at h
+    split at h
+    · cases h
+    · exact apply_owns ((ho'.push (fun _ => rfl)).labels) h
+  | guard cleanup thunk body =>
+    simp only [step] at h
+    split at h
+    · exact apply_owns ((ho'.push (fr := .call env body) (fun _ => rfl)).push (fun _ => rfl)) h
+    · cases h
+  | guardTail cleanup thunk =>
+    simp only [step] at h
+    split at h
+    · exact apply_owns (ho'.push (fun _ => rfl)) h
+    · cases h
+  | cancel k body =>
+    simp only [step] at h
+    split at h
+    · cases h
+    · cases h
+      exact ho'
+    · split at h
+      · rename_i seg conts' hr
+        obtain ⟨hk, rfl⟩ := takeCont_spec hr
+        refine (deliver_leave_owns p _ ?_).2 h
+        have hbase : OwnsAt (.yield Value.unit :: .label labels :: .call env body :: stack)
+            ⟨conts, labels, cells⟩ :=
+          ((ho'.push (fr := .call env body) (fun _ => rfl)).push (fun _ => rfl)).push
+            (fun _ => rfl)
+        exact (hbase.resume hk).labels
+      · cases h
+  | cell init thunk body =>
+    simp only [step] at h
+    split at h
+    · exact apply_owns (st := .cell cells.length :: .call env body :: stack)
+        (OwnsAt.alloc (st := .call env body :: stack) (store := ⟨conts, labels, cells⟩)
+          (ho'.push (fun _ => rfl)) _) h
+    · cases h
+  | cellTail init thunk =>
+    simp only [step] at h
+    split at h
+    · exact apply_owns (st := .cell cells.length :: stack)
+        (OwnsAt.alloc (store := ⟨conts, labels, cells⟩) ho' _) h
+    · cases h
+  | mem op args body =>
+    simp only [step] at h
+    split at h
+    · cases h
+    · split at h
+      · cases h
+      · rename_i vs _ r cells' hev
+        cases h
+        exact ho'.of_le (fun _ => Nat.le_refl _) (mem_live hev)
+  | host id args body => simp [step] at h
+
+/-- A host operation touches neither the stack nor the store. -/
+theorem stepIO_owns {p : Program} {c c' : Config} (ho : Owns c.state)
+    (h : stepIO p c = .next c') : Owns c'.state := by
+  obtain ⟨⟨tm, env, stack, store⟩, w⟩ := c
+  by_cases hh : ∃ id args body, tm = .host id args body
+  · obtain ⟨id, args, body, rfl⟩ := hh
+    simp only [stepIO] at h
+    split at h
+    · cases h
+    · split at h
+      · cases h
+      · cases h
+        exact ho
+  · have hnh : ∀ id args body, tm ≠ .host id args body :=
+      fun id args body e => hh ⟨id, args, body, e⟩
+    rw [stepIO_eq_lift hnh] at h
+    cases hr : step p ⟨tm, env, stack, store⟩ with
+    | next s' =>
+      rw [hr] at h
+      cases h
+      exact step_owns ho hr
+    | halt v => rw [hr] at h; cases h
+    | stuck => rw [hr] at h; cases h
+
+theorem owns_init (p : Program) : Owns (init p) := fun a => by
+  simp [init, ownStack, osum, Live]
+
+/-- Every scope's cell is live in every state a program reaches. -/
+theorem run_owns {p : Program} : ∀ (n : Nat) {c c' : Config}, Owns c.state →
+    Machine.run (stepIO p) n c = .next c' → Owns c'.state := by
+  intro n
+  induction n with
+  | zero =>
+    intro c c' ho h
+    cases h
+    exact ho
+  | succ n ih =>
+    intro c c' ho h
+    rw [Machine.run_succ] at h
+    cases hr : stepIO p c with
+    | next c₁ =>
+      rw [hr, Step.bind_next] at h
+      exact ih (stepIO_owns ho hr) h
+    | halt r => rw [hr, Step.bind_halt] at h; cases h
+    | stuck => rw [hr] at h; cases h
+
+/-! ## What a typed stack grants -/
+
+/-- The regions a typed stack grants are cells whose scopes are on it. -/
+theorem StackOk.granted {S : StoreTy} {st : List Frame} {τ : Ty} {ε : Row} {ϕ : List Rgn}
+    (h : StackOk Δ S st τ ε ϕ) : ∀ r, r ∈ ϕ → ∃ a, r = .cell a ∧ 0 < ownStack a st := by
+  induction h with
+  | nil => intro r hr; cases hr
+  | call _ _ _ _ _ ih =>
+    intro r hr
+    obtain ⟨a, rfl, ha⟩ := ih r hr
+    exact ⟨a, rfl, by simp only [ownStack, ownFrame]; omega⟩
+  | handler _ _ _ hsub _ ih =>
+    intro r hr
+    obtain ⟨a, rfl, ha⟩ := ih r (hsub r hr)
+    exact ⟨a, rfl, by simp only [ownStack, ownFrame]; omega⟩
+  | label _ _ ih =>
+    intro r hr
+    obtain ⟨a, rfl, ha⟩ := ih r hr
+    exact ⟨a, rfl, by simp only [ownStack, ownFrame]; omega⟩
+  | guard _ _ _ ih =>
+    intro r hr
+    obtain ⟨a, rfl, ha⟩ := ih r hr
+    exact ⟨a, rfl, by simp only [ownStack, ownFrame]; omega⟩
+  | @cell b st τ ε ϕ _ ih =>
+    intro r hr
+    rcases List.mem_cons.mp hr with rfl | hr
+    · exact ⟨b, rfl, by simp only [ownStack, ownFrame, ↓reduceIte]; omega⟩
+    · obtain ⟨a, rfl, ha⟩ := ih r hr
+      exact ⟨a, rfl, by simp only [ownStack]; omega⟩
+  | yield _ _ ih =>
+    intro r hr
+    obtain ⟨a, rfl, ha⟩ := ih r hr
+    exact ⟨a, rfl, by simp only [ownStack, ownFrame]; omega⟩
+  | exit _ _ _ ih =>
+    intro r hr
+    obtain ⟨a, rfl, ha⟩ := ih r hr
+    exact ⟨a, rfl, by simp only [ownStack, ownFrame]; omega⟩
+  | never _ ih => exact ih
+
+/-- A released cell is about to be read or written. -/
+def Freed (s : State) : Prop :=
+  ∃ op args body a vs, s.tm = .mem op args body ∧ evalAtoms s.env args = some (.ref a :: vs)
+    ∧ s.store.cells[a]? = some none
+
+/-- Under the region rules, a typed state in which every scope's cell is live
+is not about to read or write a released cell: the reference it goes through
+has a region the code was granted, which is a cell with a scope on the stack. -/
+theorem TypedAt.not_freed {S : StoreTy} {s : State} (hR : Δ.regions) (ht : TypedAt Δ S s)
+    (ho : Owns s) : ¬ Freed s := by
+  rintro ⟨op, args, body, a, vs, htm, hev, hnone⟩
+  obtain @⟨tm, env, stack, store, Γ, τ, ε, ε', ϕ, ϕ', henv, hty, hle, hsub, hst, hs⟩ := ht
+  simp only at htm hev hnone
+  subst htm
+  have key : ∀ {x : Atom} {r : Rgn} {σ : Ty}, HasAtom Γ x (.ref r σ) → r ∈ ϕ →
+      ∀ {w : Value}, x.eval env = some w → w = .ref a → False := by
+    intro x r σ hx hr w hw hwa
+    obtain ⟨v, hv, hvt⟩ := atom_ok henv hx
+    rw [hw] at hv
+    cases hv
+    subst hwa
+    obtain ⟨b, hb, _, hreg⟩ := hvt.ref_inv
+    cases hb
+    obtain ⟨c, hc, hpos⟩ := hst.granted _ (hsub _ (hreg hR ▸ hr))
+    cases hc
+    obtain ⟨u, hu⟩ := ((ho a).2 (by
+      show 0 < ownStack a stack + osum (ownStack a) store.conts
+      omega))
+    rw [hu] at hnone
+    cases hnone
+  cases hty with
+  | @load _ x _ r σ _ _ ha hr _ _ =>
+    cases hx : Atom.eval env x with
+    | none => simp [evalAtoms, hx] at hev
+    | some w =>
+      simp [evalAtoms, hx] at hev
+      exact key ha (hr hR) hx hev.1
+  | @store _ x y _ r σ _ _ ha hr _ _ _ =>
+    cases hx : Atom.eval env x with
+    | none => simp [evalAtoms, hx] at hev
+    | some w =>
+      cases hy : Atom.eval env y with
+      | none => simp [evalAtoms, hx, hy] at hev
+      | some w' =>
+        simp [evalAtoms, hx, hy] at hev
+        exact key ha (hr hR) hx hev.1
+  | @swap _ x y _ r σ _ _ ha hr _ _ _ =>
+    cases hx : Atom.eval env x with
+    | none => simp [evalAtoms, hx] at hev
+    | some w =>
+      cases hy : Atom.eval env y with
+      | none => simp [evalAtoms, hx, hy] at hev
+      | some w' =>
+        simp [evalAtoms, hx, hy] at hev
+        exact key ha (hr hR) hx hev.1
+
+/-- Every state a well-typed program reaches is well typed. -/
+theorem run_typed {p : Program} (hp : ProgramOk Δ p) : ∀ (n : Nat) {c c' : Config},
+    Typed Δ c.state → Machine.run (stepIO p) n c = .next c' → Typed Δ c'.state := by
+  intro n
+  induction n with
+  | zero =>
+    intro c c' ht h
+    cases h
+    exact ht
+  | succ n ih =>
+    intro c c' ht h
+    rw [Machine.run_succ] at h
+    have hstep := stepIO_ok hp ht
+    cases hr : stepIO p c with
+    | next c₁ =>
+      rw [hr] at hstep
+      rw [hr, Step.bind_next] at h
+      exact ih hstep.1 h
+    | halt r => rw [hr, Step.bind_halt] at h; cases h
+    | stuck => rw [hr] at h; cases h
+
+/--
+**Borrow safety.** A program accepted with the region rules never reaches a
+state about to read or write a released cell: every reference it reads or
+writes through is to a cell whose scope is still on the stack.
+-/
+theorem borrow_safety {p : Program} (hp : ProgramOk Δ p) (hR : Δ.regions) (input : List Int)
+    {c : Config} (h : Machine.Reaches (stepIO p) (initIO p input) c) : ¬ Freed c.state := by
+  obtain ⟨n, hn⟩ := h
+  obtain ⟨S, ht⟩ := run_typed hp n (c := initIO p input) (typed_init hp) hn
+  exact ht.not_freed hR (run_owns n (c := initIO p input) (owns_init p) hn)
+
+/-- So when such a program goes wrong, the fault is not a use of a freed cell. -/
+theorem scoped_safety {p : Program} (hp : ProgramOk Δ p) (hR : Δ.regions) (input : List Int)
+    (h : GoesWrong p input) :
+    ∃ c, Machine.Reaches (stepIO p) (initIO p input) c ∧ stepIO p c = .stuck
+      ∧ Fault c.state ∧ ¬ Freed c.state := by
+  obtain ⟨c, hreach, hstuck, hf⟩ := type_safety hp input h
+  exact ⟨c, hreach, hstuck, hf, borrow_safety hp hR input hreach⟩
+
+end Glorious.Typing
