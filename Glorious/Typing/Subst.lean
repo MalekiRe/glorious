@@ -583,9 +583,9 @@ theorem HasTm.inst (hΔ : Δ.Stable) (θ : List Rgn) {ϕ : List Rgn}
       · exact .inr ⟨h1, rfl⟩
     · exact fun hR => List.mem_map.mpr ⟨_, hreg hR, rfl⟩
     · intro hL
-      obtain ⟨h1, hρϕ, hw, hnd⟩ := hloan hL
+      obtain ⟨h1, hρϕ, hw, hnd, hquiet⟩ := hloan hL
       refine ⟨h1, List.mem_map.mpr ⟨_, hρϕ, rfl⟩,
-        fun hu => List.mem_map.mpr ⟨_, hw hu, rfl⟩, ?_⟩
+        fun hu => List.mem_map.mpr ⟨_, hw hu, rfl⟩, ?_, by rw [hquiet, Row.inst_nil]⟩
       refine (hinj hL).1.nodup_scope (fun x hx => ?_) hnd
       rcases hacc x hx with ⟨_, rfl | ⟨_, rfl⟩⟩ | ⟨_, hmem, _⟩
       · exact .inl rfl
@@ -599,7 +599,7 @@ theorem HasTm.inst (hΔ : Δ.Stable) (θ : List Rgn) {ϕ : List Rgn}
       · refine .inr ⟨by rw [Rgn.inst_free]; exact hfree, List.mem_map.mpr ⟨x₀, hmem, rfl⟩,
           fun hL => ?_⟩
         obtain ⟨hinj', hcl⟩ := hinj hL
-        obtain ⟨_, hρϕ, _, _⟩ := hloan hL
+        obtain ⟨_, hρϕ, _, _, _⟩ := hloan hL
         refine ⟨hinj'.ne_wr hcl hmem hρϕ (hne hL).1, fun hu he => ?_⟩
         exact (hne hL).2 hu (hinj' x₀ ρ hmem hρϕ he)
   | load ha hr hd _ ih =>

@@ -159,7 +159,7 @@ theorem StoreOk.push_handler {S : StoreTy} {conts : Conts Frame} {labels : Nat} 
     · simp [he, h], fun _ _ h => h, fun _ _ h => h⟩
   refine ⟨S', hle, by show (if labels = labels then some x else _) = some x; simp, ?_⟩
   refine ⟨fun id o ρ ε₀ Φ h => ?_, fun id τ h => ?_, fun id y h => ?_, fun a τ h => ?_,
-    fun b a h => Nat.le_succ_of_le (hs.loans b a h)⟩
+    fun b a h => Nat.le_succ_of_le (hs.loans b a h), hs.quiet⟩
   · obtain ⟨hlt, hseg⟩ := hs.conts id o ρ ε₀ Φ h
     exact ⟨hlt, fun seg hg => (hseg seg hg).mono hle⟩
   · exact Nat.lt_succ_of_lt (hs.labels id τ h)
@@ -177,7 +177,7 @@ theorem StoreOk.bump {S : StoreTy} {conts : Conts Frame} {labels : Nat} {cells :
     (hs : StoreOk Δ S ⟨conts, labels, cells⟩) : StoreOk Δ S ⟨conts, labels + 1, cells⟩ :=
   ⟨hs.conts, fun id τ h => Nat.lt_succ_of_lt (hs.labels id τ h),
     fun id x h => Nat.lt_succ_of_lt (hs.handlers id x h), hs.cells,
-    fun b a h => Nat.le_succ_of_le (hs.loans b a h)⟩
+    fun b a h => Nat.le_succ_of_le (hs.loans b a h), hs.quiet⟩
 
 /-- A new borrow takes the next identity. -/
 theorem StoreOk.push_loan {S : StoreTy} {conts : Conts Frame} {labels : Nat} {cells : Cells}
@@ -199,7 +199,8 @@ theorem StoreOk.push_loan {S : StoreTy} {conts : Conts Frame} {labels : Nat} {ce
       · simp [he, h]⟩
   refine ⟨S', hle, by show (if labels + 1 = labels + 1 then some a else _) = some a; simp, ?_⟩
   refine ⟨fun id o ρ ε₀ Φ h => ?_, fun id τ h => Nat.lt_succ_of_lt (hs.labels id τ h),
-    fun id y h => Nat.lt_succ_of_lt (hs.handlers id y h), fun a' τ h => ?_, fun b a' h => ?_⟩
+    fun id y h => Nat.lt_succ_of_lt (hs.handlers id y h), fun a' τ h => ?_, fun b a' h => ?_,
+    hs.quiet⟩
   · obtain ⟨hlt, hseg⟩ := hs.conts id o ρ ε₀ Φ h
     exact ⟨hlt, fun seg hg => (hseg seg hg).mono hle⟩
   · obtain ⟨hlt, hv⟩ := hs.cells a' τ h
@@ -228,7 +229,7 @@ theorem StoreOk.push_label {S : StoreTy} {conts : Conts Frame} {labels : Nat} {c
     · simp [he, h], fun _ _ h => h, fun _ _ h => h, fun _ _ h => h⟩
   refine ⟨S', hle, by show (if labels = labels then some x else _) = some x; simp, ?_⟩
   refine ⟨fun id o ρ ε₀ Φ h => ?_, fun id y h => ?_, fun id τ h => ?_, fun a τ h => ?_,
-    fun b a h => Nat.le_succ_of_le (hs.loans b a h)⟩
+    fun b a h => Nat.le_succ_of_le (hs.loans b a h), hs.quiet⟩
   · obtain ⟨hlt, hseg⟩ := hs.conts id o ρ ε₀ Φ h
     exact ⟨hlt, fun seg hg => (hseg seg hg).mono hle⟩
   · have h' : (if id = labels then some x else S.labels id) = some y := h
@@ -243,7 +244,8 @@ theorem StoreOk.push_label {S : StoreTy} {conts : Conts Frame} {labels : Nat} {c
 
 theorem StoreOk.push_cont {S : StoreTy} {conts : Conts Frame} {labels : Nat} {cells : Cells}
     {seg : List Frame} {o ρ : Ty} {ε₀ : Row} {Φ : List Rgn}
-    (hs : StoreOk Δ S ⟨conts, labels, cells⟩) (hk : ContOk Δ S seg o ρ ε₀ Φ) :
+    (hs : StoreOk Δ S ⟨conts, labels, cells⟩) (hk : ContOk Δ S seg o ρ ε₀ Φ)
+    (hq : Δ.regions ∧ Δ.loans → ∀ uniq a b, Frame.lend uniq a b ∉ seg) :
     ∃ S', S.Le S' ∧ S'.conts conts.length = some (o, ρ, ε₀, Φ)
       ∧ StoreOk Δ S' ⟨conts ++ [some seg], labels, cells⟩ := by
   have hfresh : S.conts conts.length = none := by
@@ -263,7 +265,23 @@ theorem StoreOk.push_cont {S : StoreTy} {conts : Conts Frame} {labels : Nat} {ce
     · simp [he, h], fun _ _ h => h, fun _ _ h => h, fun _ _ h => h, fun _ _ h => h⟩
   refine ⟨S', hle,
     by show (if conts.length = conts.length then some (o, ρ, ε₀, Φ) else _) = _; simp, ?_⟩
-  refine ⟨fun id o' ρ' ε' Φ' h => ?_, hs.labels, hs.handlers, fun a τ h => ?_, hs.loans⟩
+  refine ⟨fun id o' ρ' ε' Φ' h => ?_, hs.labels, hs.handlers, fun a τ h => ?_, hs.loans,
+    fun hB k seg' hk' => ?_⟩
+  rotate_right
+  · have hk'' : (conts ++ [some seg])[k]? = some (some seg') := hk'
+    by_cases hlt : k < conts.length
+    · rw [List.getElem?_append_left hlt] at hk''
+      exact hs.quiet hB k seg' hk''
+    · rw [List.getElem?_append_right (Nat.le_of_not_lt hlt)] at hk''
+      by_cases h0 : k - conts.length = 0
+      · rw [h0] at hk''
+        simp at hk''
+        subst hk''
+        exact hq hB
+      · have : ([some seg] : Conts Frame)[k - conts.length]? = none :=
+          List.getElem?_eq_none (by simp; omega)
+        rw [this] at hk''
+        cases hk''
   · have h' : (if id = conts.length then some (o, ρ, ε₀, Φ) else S.conts id)
         = some (o', ρ', ε', Φ') := h
     by_cases he : id = conts.length
@@ -301,7 +319,7 @@ theorem StoreOk.push_cell {S : StoreTy} {conts : Conts Frame} {labels : Nat} {ce
       cases h
     · simp [he, h], fun _ _ h => h⟩
   refine ⟨S', hle, by show (if cells.length = cells.length then some σ else _) = _; simp, ?_⟩
-  refine ⟨fun id o ρ ε₀ Φ h => ?_, hs.labels, hs.handlers, fun a τ h => ?_, hs.loans⟩
+  refine ⟨fun id o ρ ε₀ Φ h => ?_, hs.labels, hs.handlers, fun a τ h => ?_, hs.loans, hs.quiet⟩
   · obtain ⟨hlt, hseg⟩ := hs.conts id o ρ ε₀ Φ h
     exact ⟨hlt, fun seg hg => (hseg seg hg).mono hle⟩
   · have h' : (if a = cells.length then some σ else S.cells a) = some τ := h
@@ -325,7 +343,7 @@ theorem StoreOk.set_cell {S : StoreTy} {conts : Conts Frame} {labels : Nat} {cel
     {a : Nat} {τ : Ty} {x : Option Value} (hs : StoreOk Δ S ⟨conts, labels, cells⟩)
     (ha : S.cells a = some τ) (hx : ∀ v, x = some v → HasVal Δ S v τ) :
     StoreOk Δ S ⟨conts, labels, cells.set a x⟩ := by
-  refine ⟨hs.conts, hs.labels, hs.handlers, fun a' τ' h => ?_, hs.loans⟩
+  refine ⟨hs.conts, hs.labels, hs.handlers, fun a' τ' h => ?_, hs.loans, hs.quiet⟩
   obtain ⟨hlt, hv⟩ := hs.cells a' τ' h
   refine ⟨by simpa using hlt, fun v hg => ?_⟩
   rw [List.getElem?_set] at hg
@@ -581,33 +599,34 @@ theorem lend_enter {S : StoreTy} {uniq : Bool} {a b n : Nat} {ρ κ : Rgn} {σ �
     (hl : S.loans b = some a) (hb : 0 < b) (hon : Δ.regions → OnCell S ρ a)
     (hσ : σ.lc = true) (hρt : ρt.lc = true) (hε : εt.lc = true)
     (hn : (n = 0 ∧ κ = ρ) ∨ (n = 1 ∧ κ = .bound 0)) (hreg : Δ.regions → ρ ∈ ϕ)
-    (hloan : Δ.loans → n = 1 ∧ ρ ∈ ϕ ∧ (uniq = true → .wr ρ ∈ ϕ) ∧ acc.Nodup)
     (hacc : ∀ x, x ∈ acc → (n = 1 ∧ (x = .bound 0 ∨ (uniq = true ∧ x = .wr (.bound 0))))
       ∨ (x.free = true ∧ x ∈ ϕ ∧ (Δ.loans → x ≠ .wr ρ ∧ (uniq = true → x ≠ ρ))))
-    (hsub : Sub ϕ ϕ') (hfr : .loan b ∉ ϕ' ∧ .wr (.loan b) ∉ ϕ')
+    (hloan : Δ.loans → n = 1 ∧ ρ ∈ ϕ ∧ (uniq = true → .wr ρ ∈ ϕ) ∧ acc.Nodup ∧ εt = [])
+    (hsub : Sub ϕ ϕ') (hfr : .loan b ∉ ϕ' ∧ .wr (.loan b) ∉ ϕ') (hrow : Row.le εt ε')
     (hst : StackOk Δ S st ρt ε' ϕ') :
-    ∃ rs G, rs.length = n ∧ HasVal Δ S (.ref a b) ((Ty.ref κ σ).open rs) ∧ ρt.open rs = ρt
+    ∃ rs G ε'', rs.length = n ∧ HasVal Δ S (.ref a b) ((Ty.ref κ σ).open rs) ∧ ρt.open rs = ρt
       ∧ εt.open rs = εt ∧ Sub (acc.map (Rgn.openAt 0 rs)) G
-      ∧ (Δ.loans → (acc.map (Rgn.openAt 0 rs)).Nodup)
-      ∧ StackOk Δ S (.lend uniq a b :: st) ρt ε' G := by
+      ∧ (Δ.loans → (acc.map (Rgn.openAt 0 rs)).Nodup) ∧ Row.le εt ε''
+      ∧ StackOk Δ S (.lend uniq a b :: st) ρt ε'' G := by
   have hnd1 : n = 1 → Δ.loans → (acc.map (Rgn.openAt 0 [.loan b])).Nodup := by
     intro h1 hL
     refine open_scope_nodup (ϕ := ϕ') rfl (fun h => by cases h) (fun x hx => ?_) hfr
-      (hloan hL).2.2.2
+      (hloan hL).2.2.2.1
     rcases hacc x hx with ⟨_, h | ⟨_, h⟩⟩ | ⟨hfree, h, _⟩
     · exact .inl h
     · exact .inr (.inl h)
     · exact .inr (.inr ⟨hfree, hsub x h⟩)
   by_cases hB : Δ.regions ∧ Δ.loans
-  · obtain ⟨h1, hρϕ, hw, _⟩ := hloan hB.2
+  · obtain ⟨h1, hρϕ, hw, _, hquiet⟩ := hloan hB.2
     subst h1
     have hκ : κ = .bound 0 := by
       rcases hn with ⟨h0, _⟩ | ⟨_, h⟩
       · cases h0
       · exact h
     subst hκ
-    refine ⟨[.loan b], lent uniq ρ b ϕ', rfl, ?_, Ty.open_lc hρt _, Row.open_lc hε _, ?_,
-      hnd1 rfl, .lend hl hb (hon hB.1) (hsub _ hρϕ) (fun hu => hsub _ (hw hu)) hst⟩
+    refine ⟨[.loan b], lent uniq ρ b ϕ', [], rfl, ?_, Ty.open_lc hρt _, Row.open_lc hε _, ?_,
+      hnd1 rfl, by rw [hquiet]; exact Row.le_refl _,
+      .lend hl hb (hon hB.1) (hsub _ hρϕ) (fun hu => hsub _ (hw hu)) hst⟩
     · rw [Ty.open_ref, Ty.open_lc hσ]
       exact .ref hcell (fun _ => .inr ⟨b, rfl, hl⟩) (fun _ _ => .inr ⟨rfl, hl⟩)
     · intro x hx
@@ -629,7 +648,7 @@ theorem lend_enter {S : StoreTy} {uniq : Bool} {a b n : Nat} {ρ κ : Rgn} {σ �
   · have hstk : StackOk Δ S (.lend uniq a b :: st) ρt ε' (.loan b :: .wr (.loan b) :: ϕ') :=
       .lendLoose hB hl (fun hR => ⟨ρ, hon hR, hsub _ (hreg hR)⟩) hst
     rcases hn with ⟨rfl, rfl⟩ | ⟨rfl, rfl⟩
-    · refine ⟨[], _, rfl, ?_, Ty.open_nil _, Row.open_nil _, ?_, ?_, hstk⟩
+    · refine ⟨[], _, ε', rfl, ?_, Ty.open_nil _, Row.open_nil _, ?_, ?_, hrow, hstk⟩
       · rw [Ty.open_nil]
         exact .ref hcell hon (fun hR hL => absurd ⟨hR, hL⟩ hB)
       · rw [acc_open_nil]
@@ -639,7 +658,8 @@ theorem lend_enter {S : StoreTy} {uniq : Bool} {a b n : Nat} {ρ κ : Rgn} {σ �
         · exact List.mem_cons_of_mem _ (List.mem_cons_of_mem _ (hsub x h))
       · intro hL
         exact absurd (hloan hL).1 (by simp)
-    · refine ⟨[.loan b], _, rfl, ?_, Ty.open_lc hρt _, Row.open_lc hε _, ?_, hnd1 rfl, hstk⟩
+    · refine ⟨[.loan b], _, ε', rfl, ?_, Ty.open_lc hρt _, Row.open_lc hε _, ?_, hnd1 rfl, hrow,
+        hstk⟩
       · rw [Ty.open_ref, Ty.open_lc hσ]
         exact .ref hcell (fun _ => .inr ⟨b, rfl, hl⟩) (fun hR hL => absurd ⟨hR, hL⟩ hB)
       · intro x hx
@@ -803,7 +823,7 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
   | @perform _ op args body targs Ps σ _ _ hl hop hargs hlin hbody =>
     obtain ⟨vs, hvs, hvst⟩ := atoms_ok (S := S) henv hargs
     obtain ⟨d, ρ, ε₀, Φ, εb, ϕb, Cs, Ps', r, hfind, hid, hcaps, hdup, hop', hent, hbelow, hble,
-      hΦ, _, hre⟩ := find_ok hst (hle _ _ hl)
+      hΦ, _, hre, hquiet⟩ := find_ok hst (hle _ _ hl)
     rw [hop] at hop'
     cases hop'
     have h1 : step p ⟨.perform op args body, env, stack, ⟨conts, labels, cells⟩⟩
@@ -816,7 +836,14 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
       intro S' hS st' ε'' ϕ'' hst' hr hΦ'
       refine ⟨ε', ϕ', ?_⟩
       simpa using StackOk.call (henv.mono hS) hbody hle hsub (hre S' hS st' ε'' ϕ'' hst' hr hΦ')
-    obtain ⟨S', hS, hcont, hs'⟩ := hs.push_cont hk
+    obtain ⟨S', hS, hcont, hs'⟩ := hs.push_cont hk fun hB u a b hm => by
+      rcases List.mem_cons.mp hm with h | h
+      · cases h
+      · rcases List.mem_append.mp h with h | h
+        · exact hquiet hB u a b h
+        · rcases List.mem_cons.mp h with h | h
+          · cases h
+          · cases h
     refine .of_safe_fresh (enter_safe hp hent (hcaps.mono hS)
       ((hvst.mono hS).snoc (.cont hcont)) hble hΦ (hbelow.mono hS) hs') rfl (fun hD id => ?_)
     have h2 := moved_live hD henv hlin (live := fv (.perform op args body)) (fun i hi => hi) id
@@ -1031,9 +1058,9 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
     have hfr := hst.fresh (r := .loan (labels + 1))
       fun ⟨_, h⟩ => absurd (hs.loans _ _ h) (Nat.not_succ_le_self _)
     obtain ⟨S', hS, hl, hs'⟩ := hs.push_loan a
-    obtain ⟨rs, G, hrs, hl', hρo, hεo, hgrant, hnd', hst'⟩ :=
+    obtain ⟨rs, G, ε'', hrs, hl', hρo, hεo, hgrant, hnd', hrow', hst'⟩ :=
       lend_enter (Δ := Δ) (uniq := uniq) (hS.cells _ _ hcell) hl (Nat.succ_pos _)
-        (fun hR => (hon hR).mono hS) hσ hρ hε hn hreg hloan hacc hsub hfr
+        (fun hR => (hon hR).mono hS) hσ hρ hε hn hreg hacc hloan hsub hfr (Row.le_trans hrow hle)
         (.call (henv.mono hS) hbody hle hsub (hst.mono hS))
     obtain ⟨c, hc, hcok, hck, hcl, hocc⟩ :=
       evalScope_ok (S := S') (l := .ref a (labels + 1)) (henv.mono hS) hthunk hrs hl'
@@ -1043,7 +1070,7 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
             ⟨conts, labels + 1, cells⟩ := by
       simp [step, evalLend, hrv, hc]
     rw [h1]
-    refine .of_apply (apply_ok hp hs' hcok hst' (Row.le_trans hrow hle) hgrant hnd') rfl
+    refine .of_apply (apply_ok hp hs' hcok hst' hrow' hgrant hnd') rfl
       (fun hD id => ?_) (fun hfa => ?_)
     · have h2 := moved_live hD henv hlin (live := fv (.lend uniq r thunk body))
         (fun i hi => by
@@ -1226,7 +1253,7 @@ theorem stepIO_ok {p : Program} {c : Config} (hp : ProgramOk Δ p) (ht : Typed �
 theorem typed_init {p : Program} (hp : ProgramOk Δ p) : Typed Δ (init p) := by
   obtain ⟨τ, hmain⟩ := hp.main
   refine ⟨⟨fun _ => none, fun _ => none, fun _ => none, fun _ => none, fun _ => none⟩, ?_⟩
-  refine .mk .nil hmain (Row.le_refl _) (Sub.refl _) .nil ⟨?_, ?_, ?_, ?_, ?_⟩
+  refine .mk .nil hmain (Row.le_refl _) (Sub.refl _) .nil ⟨?_, ?_, ?_, ?_, ?_, ?_⟩
   · intro _ _ _ _ _ h
     simp at h
   · intro _ _ h
@@ -1236,6 +1263,8 @@ theorem typed_init {p : Program} (hp : ProgramOk Δ p) : Typed Δ (init p) := by
   · intro _ _ h
     simp at h
   · intro _ _ h
+    simp at h
+  · intro _ _ _ h
     simp at h
 
 /-- The program about to start holds no resumption. -/

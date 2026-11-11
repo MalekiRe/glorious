@@ -44,6 +44,8 @@ whatever some other callables may touch. -/
 structure IAcc where
   link : Option Nat := none
   rgns : List Nat := []
+  /-- Those of the regions that it may write. -/
+  wrs : List Nat := []
   /-- Included sets, each without one region if one is given. -/
   subs : List (Nat × Option Nat) := []
   /-- The region the callable is polymorphic in, if a cell's scope runs it. -/
@@ -175,6 +177,9 @@ structure St where
   accs : Array IAcc := #[]
   /-- Whether the region rules are to hold. If not, regions are not looked at. -/
   regions : Bool := false
+  /-- Whether the rules for borrows are to hold. If not, writing is not told
+  from reading, and a lent reference is the reference it was lent from. -/
+  loans : Bool := false
   /-- Whether the ownership rules are to hold: a function that captures
   something that cannot be duplicated can then be called only once. -/
   strict : Bool := true
@@ -304,7 +309,8 @@ def unifyAcc (a b : Nat) : M Unit := do
   modify fun s =>
     { s with
       accs := (s.accs.set! lo
-        { rgns := x.rgns ++ y.rgns, subs := x.subs ++ y.subs, binder := x.binder <|> y.binder }).set!
+        { rgns := x.rgns ++ y.rgns, wrs := x.wrs ++ y.wrs, subs := x.subs ++ y.subs
+          binder := x.binder <|> y.binder }).set!
           hi { link := some lo } }
 
 /-- The callable touches this region. -/
@@ -314,6 +320,16 @@ def accRgn (a ρ : Nat) : M Unit := do
   let x ← accNode a
   unless x.rgns.contains ρ do
     modify fun s => { s with accs := s.accs.set! a { x with rgns := ρ :: x.rgns } }
+
+/-- The callable writes this region. -/
+def accWr (a ρ : Nat) : M Unit := do
+  unless (← get).regions do return
+  accRgn a ρ
+  unless (← get).loans do return
+  let a ← findAcc a
+  let x ← accNode a
+  unless x.wrs.contains ρ do
+    modify fun s => { s with accs := s.accs.set! a { x with wrs := ρ :: x.wrs } }
 
 /-- The callable touches whatever `b` does, except region `ex` if given. -/
 def accSub (a b : Nat) (ex : Option Nat := none) : M Unit := do
@@ -335,6 +351,28 @@ where
     let mut out := out
     let x ← accNode a
     for ρ in x.rgns do
+      let r ← findRg ρ
+      unless ex.contains r || out.contains r do out := r :: out
+    for (b, e) in x.subs do
+      let ex' ← match e with
+        | some q => do pure ((← findRg q) :: ex)
+        | none => pure ex
+      (seen, out) ← go b ex' seen out
+    pure (seen, out)
+
+/-- Every region a callable may write. -/
+partial def accWrSet (a : Nat) : M (List Nat) := do
+  let (_, out) ← go a [] {} []
+  pure out
+where
+  go (a : Nat) (ex : List Nat) (seen : Std.HashSet Nat) (out : List Nat) :
+      M (Std.HashSet Nat × List Nat) := do
+    let a ← findAcc a
+    if seen.contains a then return (seen, out)
+    let mut seen := seen.insert a
+    let mut out := out
+    let x ← accNode a
+    for ρ in x.wrs do
       let r ← findRg ρ
       unless ex.contains r || out.contains r do out := r :: out
     for (b, e) in x.subs do
@@ -747,6 +785,7 @@ partial def copyAcc (sch : Scheme) (a : Nat) : M Nat := do
       modify fun s => { s with renAcc := s.renAcc.insert a a' }
       let x ← accNode a
       let rgns ← x.rgns.mapM (copyRg sch)
+      let wrs ← x.wrs.mapM (copyRg sch)
       let subs ← x.subs.mapM fun (b, e) => do
         pure (← copyAcc sch b, ← match e with
           | some q => some <$> copyRg sch q
@@ -754,7 +793,7 @@ partial def copyAcc (sch : Scheme) (a : Nat) : M Nat := do
       let binder ← match x.binder with
         | some q => some <$> copyRg sch q
         | none => pure none
-      modify fun s => { s with accs := s.accs.set! a' { rgns, subs, binder } }
+      modify fun s => { s with accs := s.accs.set! a' { rgns, wrs, subs, binder } }
       pure a'
 
 mutual
@@ -1207,30 +1246,27 @@ partial def inferTm (self : Nat) (amb : IRow) (τ : ITy) (Γ : Array ITy) : Core
     let εt ← freshRow
     celled Γ init thunk τ εt
     needs εt [] amb
-  | .lend _ r thunk body => do
-    -- For now a lent reference is the reference: same cell, same region.
+  | .lend uniq r thunk body => do
     let ρt ← freshTy
     let εt ← freshRow
-    let a ← freshAcc
-    unify (← atomTy Γ thunk) (.func [← atomTy Γ r] ρt εt (← freshCls) (← freshTy) a)
-    unify (← atomTy Γ r) (.ref (← freshRg) (← freshTy))
+    lent Γ uniq r thunk ρt εt
     needs εt [] amb
-    accSub self a
-    hint (.result ρt ρt)
     inferTm self amb τ (Γ.push ρt) body
   | .mem op args body => do
     let ts ← args.mapM (atomTy Γ)
     let ρ ← freshRg
-    accRgn self ρ
     let σ ← match op, ts with
       | .load, [t] => do
+        accRgn self ρ
         let σ ← freshTy
         unify t (.ref ρ σ)
         pure σ
       | .store, [t, v] => do
+        accWr self ρ
         unify t (.ref ρ v)
         pure .unit
       | .swap, [t, v] => do
+        accWr self ρ
         unify t (.ref ρ v)
         pure v
       | _, _ => throw "a memory operation has the wrong number of arguments"
@@ -1306,6 +1342,24 @@ where
     unify (← atomTy Γ thunk)
       (.func [.ref cell (← atomTy Γ init)] ρ εt (← freshCls) (← freshTy) a)
     accSub self a (some cell)
+  /-- The scope of a borrow. Under the rules for borrows the callable it runs
+  is given a reference whose region is the callable's own, as for a cell; the
+  code making the scope touches what the callable does but for the borrow, and
+  what is lent. Otherwise the callable is given the reference lent. -/
+  lent (Γ : Array ITy) (uniq : Bool) (r thunk : Atom) (ρt : ITy) (εt : IRow) : M Unit := do
+    let σ ← freshTy
+    let source ← freshRg
+    unify (← atomTy Γ r) (.ref source σ)
+    let a ← freshAcc
+    if (← get).regions && (← get).loans then
+      let loan ← freshAtom
+      modify fun s => { s with accs := s.accs.set! a { binder := some loan } }
+      unify (← atomTy Γ thunk) (.func [.ref loan σ] ρt εt (← freshCls) (← freshTy) a)
+      accSub self a (some loan)
+    else
+      unify (← atomTy Γ thunk) (.func [.ref source σ] ρt εt (← freshCls) (← freshTy) a)
+      accSub self a
+    if uniq then accWr self source else accRgn self source
 
 end
 
@@ -1359,21 +1413,36 @@ def zonkRg (pr : Pr) (ρ : Nat) : M Typing.Rgn := do
   | none => pure ((pr.vars.lookup r).getD (.cell 0))
 
 /-- What a callable touches, in a fixed order, so that equal sets are equal
-lists: a region no cell has, then cells from the oldest, then bound regions. -/
+lists: a region no cell has, then cells from the oldest, then bound regions;
+and after each region, leave to write it if the callable may. -/
 def zonkAcc (pr : Pr) (a : Nat) : M (List Typing.Rgn) := do
   unless (← get).regions do return []
   let sorted := (← accSet a).mergeSort (· ≤ ·)
+  let written ← accWrSet a
   let mut unknown := false
-  let mut frees : List Typing.Rgn := []
-  let mut bounds : List Typing.Rgn := []
+  let mut unknownWr := false
+  let mut frees : List (Typing.Rgn × Bool) := []
+  let mut bounds : List (Typing.Rgn × Bool) := []
   for r in sorted do
-    if !(← isAtom r) then unknown := true
+    let w := written.contains r
+    if !(← isAtom r) then
+      unknown := true
+      unknownWr := unknownWr || w
     else
       match ← zonkRg pr r with
-      | .bound i => unless bounds.contains (.bound i) do bounds := bounds ++ [.bound i]
-      | .cell _ => unknown := true
-      | x => unless frees.contains x do frees := frees ++ [x]
-  pure ((if unknown then [.cell 0] else []) ++ frees ++ bounds)
+      | .bound i =>
+        match bounds.find? (·.1 == .bound i) with
+        | some _ => bounds := bounds.map fun (x, v) => if x == .bound i then (x, v || w) else (x, v)
+        | none => bounds := bounds ++ [(.bound i, w)]
+      | .cell _ =>
+        unknown := true
+        unknownWr := unknownWr || w
+      | x =>
+        match frees.find? (·.1 == x) with
+        | some _ => frees := frees.map fun (y, v) => if y == x then (y, v || w) else (y, v)
+        | none => frees := frees ++ [(x, w)]
+  let all := (if unknown then [(Typing.Rgn.cell 0, unknownWr)] else []) ++ frees ++ bounds
+  pure (all.flatMap fun (x, w) => if w then [x, .wr x] else [x])
 
 mutual
 
@@ -1539,7 +1608,9 @@ def ofRg (env : RgEnv) : Typing.Rgn → M Nat
 def ofAcc (env : RgEnv) (acc : List Typing.Rgn) : M Nat := do
   let a ← freshAcc
   for r in acc do
-    accRgn a (← ofRg env r)
+    match r with
+    | .wr x => accWr a (← ofRg env x)
+    | _ => accRgn a (← ofRg env r)
   pure a
 
 partial def ofTy (env : RgEnv) : Ty → M ITy
@@ -1660,11 +1731,15 @@ def hintOps : Hint → List (Nat × List Ty)
   | .rgns _ => []
 
 def canonRg (r : Typing.Rgn) : StateM Nat Typing.Rgn :=
-  if r.free then do
-    let k ← get
-    set (k + 1)
-    pure (.var k)
-  else pure r
+  match r with
+  -- Leave to write a region comes right after the region.
+  | .wr x => do if x.free then pure (.wr (.var ((← get) - 1))) else pure r
+  | _ =>
+    if r.free then do
+      let k ← get
+      set (k + 1)
+      pure (.var k)
+    else pure r
 
 /-- A type with each of its regions made a variable of its own, numbered in the
 order `Ty.frees` lists them: the form a declared type is recorded at, which
@@ -1940,15 +2015,17 @@ def certifyM (items : List Item) (g : Elab.Globals) (p : Core.Program)
       ++ entries.flatMap fun e => e.sig.eff ++ e.hints.flatMap (·.flatMap hintOps)
   let (datas, ops) ← declsFor types opsUsed [] []
   let strict := (← get).strict
-  pure ⟨entries, dupFlags datas, ops, mainTy, mainHints, strict, (← get).regions, false⟩
+  pure ⟨entries, dupFlags datas, ops, mainTy, mainHints, strict, (← get).regions,
+    (← get).regions && (← get).loans⟩
 
 /-- Find a certificate for an elaborated program, with the ownership rules or
 without, and with the region rules or without. -/
 def certify (items : List Item) (p : Core.Program) (strict : Bool)
-    (envSizes : List (Nat × Nat) := []) (regions : Bool := false) : Except String Cert := do
+    (envSizes : List (Nat × Nat) := []) (regions : Bool := false) (loans : Bool := false) :
+    Except String Cert := do
   let (g, _, _) ← Elab.collect items
   let (cert, _) ← (certifyM items g p envSizes).run
-    { fns := p.fns.toArray, strict := strict, regions := regions }
+    { fns := p.fns.toArray, strict := strict, regions := regions, loans := loans }
   pure cert
 
 /-- Which part of a program a certificate fails on, for reporting a defect in

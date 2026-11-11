@@ -789,27 +789,63 @@ shape is said in terms of those regions, numbered in order; `frees` gives them
 back. Instantiating region variables changes neither the shape nor the order.
 -/
 
-/-- A type with every region that is not bound replaced by the same one. -/
-def Ty.shape (t : Ty) : Ty := Ty.mapR (fun _ r => if r.free then .cell 0 else r) 0 t
+/-- A region that is not bound, forgotten. Leave to write stays leave to write. -/
+def Rgn.shape : Rgn → Rgn
+  | .wr r => .wr r.shape
+  | .var _ => .cell 0
+  | .bound k => .bound k
+  | .cell _ => .cell 0
+  | .lab _ => .cell 0
+  | .loan _ => .cell 0
 
-/-- The regions of a type that are not bound, in order. -/
-def Ty.frees (t : Ty) : List Rgn := ((Ty.regionsAt 0 t).map (·.2)).filter Rgn.free
+def Rgn.isWr : Rgn → Bool
+  | .wr _ => true
+  | _ => false
+
+theorem Rgn.clean_shape (o : Option Rgn) : (Rgn.clean o).shape = .cell 0 := by
+  cases o with
+  | none => rfl
+  | some r => cases r <;> rfl
+
+theorem Rgn.clean_isWr (o : Option Rgn) : (Rgn.clean o).isWr = false := by
+  cases o with
+  | none => rfl
+  | some r => cases r <;> rfl
+
+theorem Rgn.shape_inst (θ : List Rgn) (r : Rgn) : (r.inst θ).shape = r.shape := by
+  induction r with
+  | var i => exact Rgn.clean_shape _
+  | bound k => rfl
+  | cell a => rfl
+  | lab id => rfl
+  | loan b => rfl
+  | wr r ih => exact congrArg Rgn.wr ih
+
+theorem Rgn.isWr_inst (θ : List Rgn) (r : Rgn) : (r.inst θ).isWr = r.isWr := by
+  cases r with
+  | var i => exact Rgn.clean_isWr _
+  | _ => rfl
+
+/-- A type with every region that is not bound replaced by the same one. -/
+def Ty.shape (t : Ty) : Ty := Ty.mapR (fun _ r => r.shape) 0 t
+
+/-- The regions of a type that are not bound, in order. Leave to write a region
+is not a region of its own: it is written in terms of the region. -/
+def Ty.frees (t : Ty) : List Rgn :=
+  ((Ty.regionsAt 0 t).map (·.2)).filter fun r => r.free && !r.isWr
 
 theorem Ty.shape_inst (θ : List Rgn) (t : Ty) : (t.inst θ).shape = t.shape := by
   simp only [Ty.shape, Ty.inst, Ty.mapR_comp]
   congr 1
   funext _ r
-  rw [Rgn.inst_free]
-  by_cases hf : r.free = true
-  · simp [hf]
-  · have hf' : r.free = false := by simpa using hf
-    simp [hf', Rgn.inst_bound hf']
+  exact Rgn.shape_inst θ r
 
 theorem Ty.frees_inst (θ : List Rgn) (t : Ty) : (t.inst θ).frees = t.frees.map (Rgn.inst θ) := by
   simp only [Ty.frees, Ty.inst, Ty.regionsAt_mapR, List.map_map, List.filter_map]
   congr 1
   apply List.filter_congr
   intro x _
-  exact Rgn.inst_free θ x.2
+  show ((Rgn.inst θ x.2).free && !(Rgn.inst θ x.2).isWr) = (x.2.free && !x.2.isWr)
+  rw [Rgn.inst_free, Rgn.isWr_inst]
 
 end Glorious.Typing

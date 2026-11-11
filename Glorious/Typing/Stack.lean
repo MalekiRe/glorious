@@ -164,18 +164,23 @@ theorem find_ok {S : StoreTy} {st : List Frame} {τ : Ty} {ε : Row} {ϕ : List 
       ∧ StackOk Δ S d.below ρ εb ϕb ∧ Row.le ε₀ εb ∧ Sub Φ ϕb
       ∧ (∃ fr, fr ∈ st ∧ fr.isTarget (.handler d.id) = true)
       ∧ (∀ S', S.Le S' → ∀ st' ε' ϕ', StackOk Δ S' st' ρ ε' ϕ' → Row.le ε₀ ε' → Sub Φ ϕ' →
-          StackOk Δ S' (d.above ++ .handler d.id d.handler :: st') τ ε ϕ) := by
+          StackOk Δ S' (d.above ++ .handler d.id d.handler :: st') τ ε ϕ)
+      ∧ (Δ.regions ∧ Δ.loans → ∀ uniq a b, Frame.lend uniq a b ∉ d.above) := by
   induction hst with
   | nil => intro op targs hl; simp [List.lookup] at hl
   | @call env body st Γ σ τ εb ε ϕb ϕ henv hbody hrow hsub _ ih =>
     intro op targs hl
     obtain ⟨d, ρ, ε₀, Φ, εb', ϕb', Cs, Ps, r, hf, hid, hcaps, hdup, hop, hent, hbelow, hble, hΦ,
-      ⟨fr, hfr, hft⟩, hre⟩ := ih hl
+      ⟨fr, hfr, hft⟩, hre, hq⟩ := ih hl
     exact ⟨_, ρ, ε₀, Φ, εb', ϕb', Cs, Ps, r,
       findHandler_skip (by simp [handles, Frame.asHandler]) hf, hid,
       hcaps, hdup, hop, hent, hbelow, hble, hΦ, ⟨fr, List.mem_cons_of_mem _ hfr, hft⟩,
       fun S' hle st' ε' ϕ' hst' hr hs =>
-        .call (henv.mono hle) hbody hrow hsub (hre S' hle st' ε' ϕ' hst' hr hs)⟩
+        .call (henv.mono hle) hbody hrow hsub (hre S' hle st' ε' ϕ' hst' hr hs),
+      fun hB u a' b' hm => by
+        rcases List.mem_cons.mp hm with h | h
+        · cases h
+        · exact hq hB u a' b' h⟩
   | @handler id h st σ ρ H ε₀ ε Φ ϕ hid hh hrow hsub hrest ih =>
     intro op targs hl
     obtain ⟨Cs, hcaps, hok⟩ := hh
@@ -185,14 +190,18 @@ theorem find_ok {S : StoreTy} {st : List Frame} {τ : Ty} {ε : Row} {ϕ : List 
       rw [hH] at hl
       have hl' : ε.lookup op = some targs := hrow _ _ (by simpa using hl)
       obtain ⟨d, ρ', ε₀', Φ', εb', ϕb', Cs', Ps, r, hf, hid', hcaps', hdup, hop, hent, hbelow,
-        hble, hΦ, ⟨fr, hfr, hft⟩, hre⟩ := ih hl'
+        hble, hΦ, ⟨fr, hfr, hft⟩, hre, hq⟩ := ih hl'
       have hskip : handles Frame.asHandler op (.handler id h) = none := by
         simp [handles, Frame.asHandler, hok.arms.lookup_none hH]
       exact ⟨_, ρ', ε₀', Φ', εb', ϕb', Cs', Ps, r, findHandler_skip hskip hf, hid', hcaps', hdup,
         hop, hent, hbelow, hble, hΦ, ⟨fr, List.mem_cons_of_mem _ hfr, hft⟩,
         fun S' hle st' ε' ϕ' hst' hr hs =>
           .handler (hle.handlers _ _ hid) (HandlerRt.mono hle ⟨Cs, hcaps, hok⟩) hrow hsub
-            (hre S' hle st' ε' ϕ' hst' hr hs)⟩
+            (hre S' hle st' ε' ϕ' hst' hr hs),
+      fun hB u a' b' hm => by
+        rcases List.mem_cons.mp hm with h | h
+        · cases h
+        · exact hq hB u a' b' h⟩
     | some found =>
       rw [hH] at hl
       have e : found = targs := by simpa using hl
@@ -204,47 +213,52 @@ theorem find_ok {S : StoreTy} {st : List Frame} {τ : Ty} {ε : Row} {ϕ : List 
       exact ⟨_, ρ, ε₀, Φ, ε, ϕ, Cs, Ps, r, hfind, hid, hcaps, hok.dup, hop, hent, hrest, hrow,
         hsub, ⟨.handler id h, List.mem_cons_self .., by simp [Frame.isTarget]⟩,
         fun S' hle st' ε' ϕ' hst' hr hs =>
-          .handler (hle.handlers _ _ hid) (HandlerRt.mono hle ⟨Cs, hcaps, hok⟩) hr hs hst'⟩
+          .handler (hle.handlers _ _ hid) (HandlerRt.mono hle ⟨Cs, hcaps, hok⟩) hr hs hst',
+        fun _ _ _ _ hm => by cases hm⟩
   | @label id st τ ε ϕ hid _ ih =>
     intro op targs hl
     obtain ⟨d, ρ, ε₀, Φ, εb', ϕb', Cs, Ps, r, hf, hid', hcaps, hdup, hop, hent, hbelow, hble, hΦ,
-      ⟨fr, hfr, hft⟩, hre⟩ := ih hl
+      ⟨fr, hfr, hft⟩, hre, hq⟩ := ih hl
     exact ⟨_, ρ, ε₀, Φ, εb', ϕb', Cs, Ps, r,
       findHandler_skip (by simp [handles, Frame.asHandler]) hf, hid',
       hcaps, hdup, hop, hent, hbelow, hble, hΦ, ⟨fr, List.mem_cons_of_mem _ hfr, hft⟩,
       fun S' hle st' ε' ϕ' hst' hr hs =>
-        .label (hle.labels _ _ hid) (hre S' hle st' ε' ϕ' hst' hr hs)⟩
+        .label (hle.labels _ _ hid) (hre S' hle st' ε' ϕ' hst' hr hs),
+      fun hB u a' b' hm => by
+        rcases List.mem_cons.mp hm with h | h
+        · cases h
+        · exact hq hB u a' b' h⟩
   | @guard fn captures st Cs' σc τ ε ϕ hgs hgc _ ih =>
     intro op targs hl
     obtain ⟨d, ρ, ε₀, Φ, εb', ϕb', Cs, Ps, r, hf, hid', hcaps, hdup, hop, hent, hbelow, hble, hΦ,
-      ⟨fr, hfr, hft⟩, hre⟩ := ih hl
+      ⟨fr, hfr, hft⟩, hre, hq⟩ := ih hl
     exact ⟨_, ρ, ε₀, Φ, εb', ϕb', Cs, Ps, r,
       findHandler_skip (by simp [handles, Frame.asHandler]) hf, hid',
       hcaps, hdup, hop, hent, hbelow, hble, hΦ, ⟨fr, List.mem_cons_of_mem _ hfr, hft⟩,
       fun S' hle st' ε' ϕ' hst' hr hs =>
-        .guard hgs (hgc.mono hle) (hre S' hle st' ε' ϕ' hst' hr hs)⟩
+        .guard hgs (hgc.mono hle) (hre S' hle st' ε' ϕ' hst' hr hs),
+      fun hB u a' b' hm => by
+        rcases List.mem_cons.mp hm with h | h
+        · cases h
+        · exact hq hB u a' b' h⟩
   | @cell a st σ τ ε ϕ hc _ ih =>
     intro op targs hl
     obtain ⟨d, ρ, ε₀, Φ, εb', ϕb', Cs, Ps, r, hf, hid', hcaps, hdup, hop, hent, hbelow, hble, hΦ,
-      ⟨fr, hfr, hft⟩, hre⟩ := ih hl
+      ⟨fr, hfr, hft⟩, hre, hq⟩ := ih hl
     exact ⟨_, ρ, ε₀, Φ, εb', ϕb', Cs, Ps, r,
       findHandler_skip (by simp [handles, Frame.asHandler]) hf, hid',
       hcaps, hdup, hop, hent, hbelow, hble, hΦ, ⟨fr, List.mem_cons_of_mem _ hfr, hft⟩,
       fun S' hle st' ε' ϕ' hst' hr hs =>
-        .cell (hle.cells _ _ hc) (hre S' hle st' ε' ϕ' hst' hr hs)⟩
-  | @lend uniq a b st τ ε ϕ ρl hlo hb hon hρ hw _ ih =>
-    intro op targs hl
-    obtain ⟨d, ρ, ε₀, Φ, εb', ϕb', Cs, Ps, r, hf, hid', hcaps, hdup, hop, hent, hbelow, hble, hΦ,
-      ⟨fr, hfr, hft⟩, hre⟩ := ih hl
-    exact ⟨_, ρ, ε₀, Φ, εb', ϕb', Cs, Ps, r,
-      findHandler_skip (by simp [handles, Frame.asHandler]) hf, hid',
-      hcaps, hdup, hop, hent, hbelow, hble, hΦ, ⟨fr, List.mem_cons_of_mem _ hfr, hft⟩,
-      fun S' hle st' ε' ϕ' hst' hr hs =>
-        .lend (hle.loans _ _ hlo) hb (hon.mono hle) hρ hw (hre S' hle st' ε' ϕ' hst' hr hs)⟩
+        .cell (hle.cells _ _ hc) (hre S' hle st' ε' ϕ' hst' hr hs),
+      fun hB u a' b' hm => by
+        rcases List.mem_cons.mp hm with h | h
+        · cases h
+        · exact hq hB u a' b' h⟩
+  | lend _ _ _ _ _ _ _ => intro op targs hl; simp [List.lookup] at hl
   | @lendLoose uniq a b st τ ε ϕ hn hlo hon _ ih =>
     intro op targs hl
     obtain ⟨d, ρ, ε₀, Φ, εb', ϕb', Cs, Ps, r, hf, hid', hcaps, hdup, hop, hent, hbelow, hble, hΦ,
-      ⟨fr, hfr, hft⟩, hre⟩ := ih hl
+      ⟨fr, hfr, hft⟩, hre, hq⟩ := ih hl
     exact ⟨_, ρ, ε₀, Φ, εb', ϕb', Cs, Ps, r,
       findHandler_skip (by simp [handles, Frame.asHandler]) hf, hid',
       hcaps, hdup, hop, hent, hbelow, hble, hΦ, ⟨fr, List.mem_cons_of_mem _ hfr, hft⟩,
@@ -252,23 +266,28 @@ theorem find_ok {S : StoreTy} {st : List Frame} {τ : Ty} {ε : Row} {ϕ : List 
         .lendLoose hn (hle.loans _ _ hlo)
           (fun hR => by
             obtain ⟨ρ', h1, h2⟩ := hon hR
-            exact ⟨ρ', h1.mono hle, h2⟩) (hre S' hle st' ε' ϕ' hst' hr hs)⟩
+            exact ⟨ρ', h1.mono hle, h2⟩) (hre S' hle st' ε' ϕ' hst' hr hs),
+      fun hB => absurd hB hn⟩
   | @yield w st σ τ ε ϕ hw _ ih =>
     intro op targs hl
     obtain ⟨d, ρ, ε₀, Φ, εb', ϕb', Cs, Ps, r, hf, hid', hcaps, hdup, hop, hent, hbelow, hble, hΦ,
-      ⟨fr, hfr, hft⟩, hre⟩ := ih hl
+      ⟨fr, hfr, hft⟩, hre, hq⟩ := ih hl
     exact ⟨_, ρ, ε₀, Φ, εb', ϕb', Cs, Ps, r,
       findHandler_skip (by simp [handles, Frame.asHandler]) hf, hid',
       hcaps, hdup, hop, hent, hbelow, hble, hΦ, ⟨fr, List.mem_cons_of_mem _ hfr, hft⟩,
       fun S' hle st' ε' ϕ' hst' hr hs =>
-        .yield (hw.mono hle) (hre S' hle st' ε' ϕ' hst' hr hs)⟩
+        .yield (hw.mono hle) (hre S' hle st' ε' ϕ' hst' hr hs),
+      fun hB u a' b' hm => by
+        rcases List.mem_cons.mp hm with h | h
+        · cases h
+        · exact hq hB u a' b' h⟩
   | exit _ _ _ _ => intro op targs hl; simp [List.lookup] at hl
   | never _ ih =>
     intro op targs hl
     obtain ⟨d, ρ, ε₀, Φ, εb', ϕb', Cs, Ps, r, hf, hid', hcaps, hdup, hop, hent, hbelow, hble, hΦ,
-      hin, hre⟩ := ih hl
+      hin, hre, hq⟩ := ih hl
     exact ⟨d, ρ, ε₀, Φ, εb', ϕb', Cs, Ps, r, hf, hid', hcaps, hdup, hop, hent, hbelow, hble, hΦ,
-      hin, fun S' hle st' ε' ϕ' hst' hr hs => .never (hre S' hle st' ε' ϕ' hst' hr hs)⟩
+      hin, fun S' hle st' ε' ϕ' hst' hr hs => .never (hre S' hle st' ε' ϕ' hst' hr hs), hq⟩
 
 /-! ## Delivering and leaving -/
 
@@ -386,7 +405,7 @@ theorem StackOk.known {S : StoreTy} {st : List Frame} {τ : Ty} {ε : Row} {ϕ :
 /-- Releasing a cell keeps the store typed: a released cell keeps its type. -/
 theorem StoreOk.release {S : StoreTy} {store : Store Frame} (hs : StoreOk Δ S store) (a : Nat) :
     StoreOk Δ S (store.release a) := by
-  refine ⟨hs.conts, hs.labels, hs.handlers, fun a' τ' h => ?_, hs.loans⟩
+  refine ⟨hs.conts, hs.labels, hs.handlers, fun a' τ' h => ?_, hs.loans, hs.quiet⟩
   obtain ⟨hlt, hv⟩ := hs.cells a' τ' h
   refine ⟨by simpa [Store.release] using hlt, fun v hg => ?_⟩
   simp only [Store.release] at hg
@@ -600,7 +619,16 @@ inductive Faulty (st : List Frame) (store : Store Frame) : Callee → Prop where
 theorem StoreOk.take {S : StoreTy} {conts : Conts Frame} {labels : Nat} {cells : Cells}
     (hs : StoreOk Δ S ⟨conts, labels, cells⟩) (id : Nat) :
     StoreOk Δ S ⟨conts.set id none, labels, cells⟩ := by
-  refine ⟨fun id' o ρ ε₀ Φ h => ?_, hs.labels, hs.handlers, hs.cells, hs.loans⟩
+  refine ⟨fun id' o ρ ε₀ Φ h => ?_, hs.labels, hs.handlers, hs.cells, hs.loans,
+    fun hB k seg hk => hs.quiet hB k seg (by
+      have hk' : (conts.set id none)[k]? = some (some seg) := hk
+      rw [List.getElem?_set] at hk'
+      by_cases he : id = k
+      · subst he
+        by_cases hlt : id < conts.length
+        · simp [hlt] at hk'
+        · simp [hlt] at hk'
+      · simpa [he] using hk')⟩
   obtain ⟨hlt, hseg⟩ := hs.conts id' o ρ ε₀ Φ h
   refine ⟨by simpa using hlt, fun seg hget => ?_⟩
   rw [List.getElem?_set] at hget

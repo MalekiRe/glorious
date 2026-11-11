@@ -725,14 +725,16 @@ theorem labelOk_sound {ϕ : List Rgn} {n : Nat} {σ : Ty} {εt : Row} {accl acc 
 /-- The conditions on the callable a borrow's scope runs. Without the rules for
 borrows it may take the reference lent. With them it is polymorphic in the
 borrow's region; what is lent is something the code may touch, and may write if
-it is lent for writing; and of what the code may touch the callable touches
-nothing that was lent: not to write, and not at all if it was lent for writing. -/
+it is lent for writing; of what the code may touch the callable touches
+nothing that was lent: not to write, and not at all if it was lent for writing;
+and it performs no operation it does not handle itself. -/
 def lendOk (C : Cert) (ϕ : List Rgn) (uniq : Bool) (n : Nat) (ρ κ : Rgn) (σ ρt : Ty) (εt : Row)
     (acc : List Rgn) : Bool :=
   σ.lc && ρt.lc && εt.lc && ((n == 0 && κ == ρ) || (n == 1 && κ == .bound 0))
     && regionOk C ϕ ρ
     && (!C.loans
-      || (n == 1 && ϕ.contains ρ && (!uniq || ϕ.contains (.wr ρ)) && decide acc.Nodup))
+      || (n == 1 && ϕ.contains ρ && (!uniq || ϕ.contains (.wr ρ)) && decide acc.Nodup
+        && εt.isEmpty))
     && acc.all fun x =>
       (n == 1 && (x == .bound 0 || (uniq && x == .wr (.bound 0))))
         || (x.free && ϕ.contains x && (!C.loans || (x != .wr ρ && (!uniq || x != ρ))))
@@ -741,7 +743,7 @@ theorem lendOk_sound {ϕ : List Rgn} {uniq : Bool} {n : Nat} {ρ κ : Rgn} {σ �
     {acc : List Rgn} (h : lendOk C ϕ uniq n ρ κ σ ρt εt acc = true) :
     σ.lc = true ∧ ρt.lc = true ∧ εt.lc = true ∧ ((n = 0 ∧ κ = ρ) ∨ (n = 1 ∧ κ = .bound 0))
       ∧ (C.ctx.regions → ρ ∈ ϕ)
-      ∧ (C.ctx.loans → n = 1 ∧ ρ ∈ ϕ ∧ (uniq = true → .wr ρ ∈ ϕ) ∧ acc.Nodup)
+      ∧ (C.ctx.loans → n = 1 ∧ ρ ∈ ϕ ∧ (uniq = true → .wr ρ ∈ ϕ) ∧ acc.Nodup ∧ εt = [])
       ∧ (∀ x, x ∈ acc → (n = 1 ∧ (x = .bound 0 ∨ (uniq = true ∧ x = .wr (.bound 0))))
         ∨ (x.free = true ∧ x ∈ ϕ ∧ (C.ctx.loans → x ≠ .wr ρ ∧ (uniq = true → x ≠ ρ)))) := by
   simp only [lendOk, Bool.and_eq_true] at h
@@ -750,10 +752,10 @@ theorem lendOk_sound {ϕ : List Rgn} {uniq : Bool} {n : Nat} {ρ κ : Rgn} {σ �
     List.all_eq_true, List.contains_eq_mem, decide_eq_true_eq, bne_iff_ne, ne_eq] at hn hloan hacc
   refine ⟨hσ, hρ, hε, hn, regionOk_sound hreg, fun hL => ?_, fun x hx => ?_⟩
   · have hL' : C.loans = true := hL
-    rcases hloan with h | ⟨⟨⟨h1, h2⟩, h3⟩, h4⟩
+    rcases hloan with h | ⟨⟨⟨⟨h1, h2⟩, h3⟩, h4⟩, h5⟩
     · rw [hL'] at h
       cases h
-    · refine ⟨h1, h2, fun hu => ?_, h4⟩
+    · refine ⟨h1, h2, fun hu => ?_, h4, List.isEmpty_iff.mp h5⟩
       rcases h3 with h | h
       · rw [hu] at h
         cases h

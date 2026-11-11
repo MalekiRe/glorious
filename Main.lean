@@ -14,8 +14,11 @@ import Glorious.Bytecode.Encode
   shows: that it is well typed, and whether it also follows the ownership rules
   and the region rules, which the proofs need to say that no resumption is used
   twice and that no mutable variable or label is used after its block has ended.
-  With both, the program can go wrong only by arithmetic overflow. Every command
-  that compiles a program does this check; this one only reports it.
+  With both, the program can go wrong only by arithmetic overflow. It also says
+  how many borrows are scopes of their own in Core under the rules for borrows:
+  of those the proofs say that what is lent is used only through the borrow.
+  Every command that compiles a program does this check; this one only reports
+  it.
 * `glorious selftest [VM]` runs the test programs on the Core machine and the
   Lean bytecode machine, and on the Rust VM if its path is given.
 -/
@@ -130,7 +133,12 @@ def main (args : List String) : IO UInt32 := do
       let borrows :=
         if regions then "its mutable variables and labels shown never to be used after their blocks end"
         else "its mutable variables and labels not shown to stay within their blocks"
-      IO.println s!"{path}: {how} in Core, {borrows}, with {n} function signatures"
+      let loans := (c.cert.map (·.loans)).getD false
+      let lent :=
+        if !loans then "the rules for borrows not shown to hold"
+        else if c.lent == 0 then "no borrow made a scope of its own"
+        else s!"{c.lent} borrows shown to be the only way to what they borrow while they last"
+      IO.println s!"{path}: {how} in Core, {borrows}, {lent}, with {n} function signatures"
       pure 0
     | .error e =>
       IO.eprintln s!"{path}: {e}"

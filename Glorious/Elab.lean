@@ -61,6 +61,10 @@ structure Globals where
   bodies : List (String × List Clause) := []
   /-- What the checker learnt about the program's blocks, if it was run. -/
   blocks : Option Blocks := none
+  /-- Which calls of functions with borrows written as arguments, counted in
+  the order they are elaborated, have each borrow made a scope of its own in
+  Core, which lasts as long as the call. -/
+  lends : Nat → Bool := fun _ => false
 
 /-- Machine intrinsics by surface name, with their argument counts. -/
 def prims : List (String × Prim × Nat) :=
@@ -102,6 +106,10 @@ structure St where
   /-- Functions that are only ever given the environment of another, with how
   many values that environment has. -/
   envSizes : List (Nat × Nat) := []
+  /-- How many borrows were made scopes of their own. -/
+  lent : Nat := 0
+  /-- How many calls of functions with borrows written as arguments there were. -/
+  sites : Nat := 0
 
 abbrev M := ReaderT Globals (StateT St (Except String))
 
@@ -552,6 +560,31 @@ partial def elabApply (scope : Scope) (isTail : Bool) (callee : Atom) (args : Li
     pure (.int 0)
   else emit (.call callee atoms)
 
+/-- A call of function `idx` some of whose arguments are borrows: each borrow,
+from the first, is a scope that lasts as long as the call. The callable a scope
+runs captured the arguments and is given the borrow; the innermost one makes
+the call. The function is named inside it, so that the function can be used at
+a type that mentions the borrows. -/
+partial def lendCall (idx : Nat) (atoms : List Atom) : List (Nat × Bool) → M Atom
+  | [] => do
+    let callee ← emit (.let_ (.closure idx []))
+    terminate (.tail callee atoms)
+    pure (.int 0)
+  | (i, uniq) :: rest => do
+    let lentRef := atoms[i]?.getD (.int 0)
+    let inner := (atoms.zip (List.range atoms.length)).map fun (a, j) =>
+      if j == i then Atom.var 0
+      else match a with
+        | .int n => .int n
+        | .var _ => .var (1 + j)
+    let tm ← withBuilder (1 + atoms.length) do
+      let r ← withNoTail none (lendCall idx inner rest)
+      finish r
+    let f ← addFn ⟨[⟨[.wild], tm⟩]⟩ s!"a borrow in `{(← get).owner}`"
+    modify fun s => { s with lent := s.lent + 1 }
+    let thunk ← emit (.let_ (.closure f atoms))
+    emit (.lend uniq lentRef thunk)
+
 partial def elabCall (scope : Scope) (isTail : Bool) (f : Expr) (args : List Expr) : M Atom := do
   match f with
   | .name q x =>
@@ -561,8 +594,19 @@ partial def elabCall (scope : Scope) (isTail : Bool) (f : Expr) (args : List Exp
       let callee ← emit (.mem .load [c])
       elabApply scope isTail callee args
     | .fn idx => do
-      let callee ← emit (.let_ (.closure idx []))
-      elabApply scope isTail callee args (givesOne (((← read).bodies.lookup x).getD []))
+      let gives := givesOne (((← read).bodies.lookup x).getD [])
+      let borrows := (args.zip (List.range args.length)).filterMap fun (a, i) =>
+        match a with
+        | .ref uniq _ => some (i, uniq)
+        | _ => none
+      let site := (← get).sites
+      if !isTail && !borrows.isEmpty then modify fun s => { s with sites := s.sites + 1 }
+      if !isTail && !borrows.isEmpty && (← read).lends site then
+        let atoms ← elabArgs scope args gives
+        if (← get).b.done.isSome then pure (.int 0) else lendCall idx atoms borrows
+      else
+        let callee ← emit (.let_ (.closure idx []))
+        elabApply scope isTail callee args gives
     | .ctor info => do
       if isTail then throw s!"`tail` applies to calls, not to the constructor `{x}`"
       if info.arity != args.length then
@@ -913,6 +957,10 @@ structure Output where
   /-- Functions that are only ever given the environment of another, with how
   many values that environment has. -/
   envSizes : List (Nat × Nat)
+  /-- How many borrows were made scopes of their own. -/
+  lent : Nat := 0
+  /-- How many calls of functions with borrows written as arguments there were. -/
+  sites : Nat := 0
 
 /-- Collect the global declarations. -/
 def collect (items : List Item) :
@@ -959,9 +1007,10 @@ private def withSelfLabel (name : String) : Clause → Clause
 
 /-- Elaborate a program. `blocks` is what the checker learnt about its blocks;
 without it, every block captures what it mentions for itself. -/
-def elabProgram (items : List Item) (blocks : Option Blocks := none) : Except String Output := do
+def elabProgram (items : List Item) (blocks : Option Blocks := none)
+    (lends : Nat → Bool := fun _ => false) : Except String Output := do
   let (g, fns, names) ← collect items
-  let g := { g with blocks := blocks }
+  let g := { g with blocks := blocks, lends := lends }
   let coercions := (blocks.getD {}).coercions
   let fns := fns.map fun (name, clauses) => (name, coerceFn coercions name clauses)
   let mainIdx ← match g.fns.lookup "main" with
@@ -993,6 +1042,6 @@ def elabProgram (items : List Item) (blocks : Option Blocks := none) : Except St
       out := out.set! info.id name
     pure out
   pure ⟨⟨st.fns.toList, .let_ (.closure mainIdx []) (.tail (.var 0) [])⟩, names, st.names,
-    opNames, st.envSizes⟩
+    opNames, st.envSizes, st.lent, st.sites⟩
 
 end Glorious.Elab

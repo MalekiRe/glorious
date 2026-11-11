@@ -527,7 +527,8 @@ theorem lender_checked : checkProgram lenderCert lender = true := by decide
 
 /-- So whenever `lender` uses a reference, no newer borrow in scope excludes it. -/
 theorem lender_exclusive (input : List Int) {c : Config}
-    (h : Machine.Reaches (stepIO lender) (initIO lender input) c) : ¬ Aliased c.state :=
+    (h : Machine.Reaches (stepIO lender) (initIO lender input) c) :
+    ¬ Aliased c.state ∧ ¬ Suspended c.state :=
   checked_exclusive_safety lender_checked rfl rfl input h
 
 /--

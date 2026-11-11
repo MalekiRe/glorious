@@ -435,13 +435,15 @@ inductive HasTm (Δ : Ctx) (ϕ : List Rgn) : TEnv → Tm → Ty → Row → Prop
   for the scope. Under the rules for borrows the callable is polymorphic in the
   region of the borrow, and the callable may not, meanwhile, write what was
   lent, nor read it if it was lent for writing: it has the borrow instead. Lending
-  for writing needs leave to write. -/
+  for writing needs leave to write. And the callable performs no operation it
+  does not handle itself: so the scope is never among the frames a resumption
+  captures, and no handler runs while the borrow is set aside. -/
   | lend {Γ : TEnv} {uniq : Bool} {r thunk : Atom} {body : Tm} {n : Nat} {ρ κ : Rgn}
       {σ ρt τ : Ty} {εt ε : Row} {once : Bool} {env : Option (List Ty)} {acc : List Rgn} :
       HasAtom Γ r (.ref ρ σ) → HasAtom Γ thunk (.fn n [.ref κ σ] ρt εt once env acc) →
       σ.lc = true → ρt.lc = true → εt.lc = true →
       ((n = 0 ∧ κ = ρ) ∨ (n = 1 ∧ κ = .bound 0)) → (Δ.regions → ρ ∈ ϕ) →
-      (Δ.loans → n = 1 ∧ ρ ∈ ϕ ∧ (uniq = true → .wr ρ ∈ ϕ) ∧ acc.Nodup) →
+      (Δ.loans → n = 1 ∧ ρ ∈ ϕ ∧ (uniq = true → .wr ρ ∈ ϕ) ∧ acc.Nodup ∧ εt = []) →
       (∀ x, x ∈ acc → (n = 1 ∧ (x = .bound 0 ∨ (uniq = true ∧ x = .wr (.bound 0))))
         ∨ (x.free = true ∧ x ∈ ϕ ∧ (Δ.loans → x ≠ .wr ρ ∧ (uniq = true → x ≠ ρ)))) →
       Row.le εt ε → Linear Δ Γ (atomVars [thunk]) (fv body) →

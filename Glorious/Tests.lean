@@ -191,4 +191,48 @@ def notTail (n : Nat) : String :=
 #guard borrowChecked "fn main() { let mut x = 1; let get = { x }; let mut y = 2;
     let both = { x + y }; let pick = if(x < y) { get } else { both }; pick() }" == some false
 
+-- A borrow written as an argument of a call of a function is a scope of its
+-- own in Core, which lasts as long as the call, where the program's Core can
+-- then be shown to follow the rules for borrows. `checked_exclusive_safety` is
+-- about those: while one lasts, what it borrows is used only through it.
+#guard lentBorrows "fn incr(p) { *p = *p + 1 }
+  fn main() { let mut x = 5; incr(&mut x); incr(&mut x); x }" == some 2
+#guard lentBorrows "fn swap(a, b) { let t = *a; *a = *b; *b = t; }
+  fn main() { let mut x = 1; let mut y = 2; swap(&mut x, &mut y); (x, y) }" == some 2
+-- Two borrows for reading of one variable are two scopes, one inside the other.
+#guard lentBorrows "fn add(a: &Int, b: &Int) { *a + *b }
+  fn main() { let mut x = 4; add(&x, &x) }" == some 2
+#guard lentBorrows "fn bump(p: &mut Int, by: &Int) { *p = *p + *by }
+  fn main() { let mut a = 1; let mut b = 10; bump(&mut a, &b); bump(&mut b, &a); (a, b) }"
+  == some 4
+-- The function may pass the borrow on, and may handle operations itself.
+#guard lentBorrows "fn incr(p) { *p = *p + 1 }
+  fn twice(p) { incr(p); incr(p) }
+  fn main() { let mut x = 1; twice(&mut x); x }" == some 1
+#guard lentBorrows "effect Tick { tick() }
+  fn work(p) { *p = *p + 1; handle { tick(); *p } () { tick(k) => k(()) } }
+  fn main() { let mut n = 0; work(&mut n) }" == some 1
+-- A borrow is not made a scope where the program would not then pass: where
+-- the call gives the borrow back, so that it outlasts the call;
+#guard lentBorrows "fn id(p: &mut Int) -> &mut Int { p }
+  fn main() { let mut x = 1; let q = id(&mut x); *q = 5; x }" == some 0
+-- where the function performs an operation handled outside the call, since
+-- the handler would run while the borrow is set aside;
+#guard lentBorrows "effect Tick { tick() }
+  fn work(p) { tick(); *p = *p + 1; tick(); *p }
+  fn main() { let mut n = 0; handle work(&mut n) { tick(k) => k(()) } }" == some 0
+-- and where a callable made before the call is given the borrow.
+#guard lentBorrows "fn apply(f, p) { f(p) }
+  fn main() { let mut n = 0; apply({ q => *q = 7; }, &mut n); n }" == some 0
+-- Each call is decided alone.
+#guard lentBorrows "fn incr(p) { *p = *p + 1 }
+  fn id(p: &mut Int) -> &mut Int { p }
+  fn main() { let mut x = 1; incr(&mut x); let q = id(&mut x); *q = *q + 5; x }" == some 1
+-- A borrow bound by `let` is not a scope: in Core it is the variable's own
+-- reference, and only the checker of the source text keeps it exclusive.
+#guard lentBorrows "fn main() { let mut x = 1; let p = &mut x; *p = 2; x }" == some 0
+-- A program that does not pass the region rules does not pass these.
+#guard lentBorrows "fn go(r, n) { let mut y = n; if(0 < n) { go(&mut y, n - 1) + *r } else { *r } }
+  fn main() { let mut t = 5; go(&mut t, 3) }" == none
+
 end Glorious.Tests

@@ -19,9 +19,10 @@ takes it away from the code above it and grants the borrow's region instead;
 so among the regions granted, one that may be written is the only one of its
 cell. Code uses a reference only if it was granted the reference's region.
 
-Borrows whose scopes were captured in a resumption are not on the stack, and
-`allowed` does not see them: a handler's function may use a cell that the
-computation it suspended had lent.
+A scope that a resumption captured would not be on the stack, and `allowed`
+would not see it. There is none: the callable a borrow's scope runs performs
+no operation it does not handle itself, so the frames a resumption captures
+never include the scope, and no handler runs while a borrow is set aside.
 -/
 
 namespace Glorious.Typing
@@ -59,6 +60,12 @@ def Aliased (s : State) : Prop :=
       ∧ evalAtoms s.env args = some (.ref a b :: vs) ∧ allowed a b (writes op) s.stack = false)
     ∨ (∃ uniq r thunk body a b, s.tm = .lend uniq r thunk body
       ∧ r.eval s.env = some (.ref a b) ∧ allowed a b uniq s.stack = false)
+
+/-- The scope of a borrow is among the frames a resumption captured: the borrow
+is set aside, and code outside its scope can run before it is taken up again. -/
+def Suspended (s : State) : Prop :=
+  ∃ (k : Nat) (seg : List Frame) (uniq : Bool) (a b : Nat),
+    s.store.conts[k]? = some (some seg) ∧ Frame.lend uniq a b ∈ seg
 
 /-- What a typed stack's grants say of borrows. A region that may be written
 is the only granted region of its cell. A granted region's reference may be
@@ -324,19 +331,29 @@ theorem TypedAt.not_aliased {S : StoreTy} {s : State} (hR : Δ.regions) (hL : Δ
         have := hwrite _ a b (hsub _ ((hloan hL).2.2.1 rfl)) htag
         simp [this] at hno
 
+/-- Under the same rules no resumption of a typed state captured the scope of a
+borrow. -/
+theorem TypedAt.not_suspended {S : StoreTy} {s : State} (hR : Δ.regions) (hL : Δ.loans)
+    (ht : TypedAt Δ S s) : ¬ Suspended s := by
+  obtain @⟨tm, env, stack, store, Γ, τ, ε, ε', ϕ, ϕ', henv, hty, hle, hsub, hst, hs⟩ := ht
+  rintro ⟨k, seg, uniq, a, b, hk, hm⟩
+  exact hs.quiet ⟨hR, hL⟩ k seg hk uniq a b hm
+
 /--
 **Exclusive borrows.** A program accepted with the region rules and the rules
 for borrows never reaches a state about to use a reference it may not. Whenever
 it reads a cell, every borrow of the cell newer than the reference it reads
 through is for reading; whenever it writes one, or lends it for writing, there
 is no newer borrow, and the reference is the cell's own or a borrow for
-writing; and every borrow it uses is still in scope.
+writing; and every borrow it uses is still in scope. Nor is the scope of a
+borrow ever set aside in a resumption: every borrow there is, is on the stack.
 -/
 theorem exclusive_safety {p : Program} (hp : ProgramOk Δ p) (hR : Δ.regions) (hL : Δ.loans)
     (input : List Int) {c : Config} (h : Machine.Reaches (stepIO p) (initIO p input) c) :
-    ¬ Aliased c.state := by
+    ¬ Aliased c.state ∧ ¬ Suspended c.state := by
   obtain ⟨n, hn⟩ := h
   obtain ⟨S, ht⟩ := run_typed hp n (c := initIO p input) (typed_init hp) hn
-  exact ht.not_aliased hR hL (run_owns n (c := initIO p input) (owns_init p) hn)
+  exact ⟨ht.not_aliased hR hL (run_owns n (c := initIO p input) (owns_init p) hn),
+    ht.not_suspended hR hL⟩
 
 end Glorious.Typing

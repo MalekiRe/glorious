@@ -23,8 +23,13 @@ structure Compiled where
   /-- The typing of `core` that `Typing.checkProgram` accepted, when the program
   was checked. With it, `Typing.checked_safety` applies to `core`; if the
   certificate is `strict`, so does `Typing.checked_owned_safety`; and if it has
-  `regions`, so does `Typing.checked_borrow_safety`. -/
+  `regions`, so does `Typing.checked_borrow_safety`; and if it has `loans`,
+  so does `Typing.checked_exclusive_safety`. -/
   cert : Option Typing.Cert := none
+  /-- How many borrows are scopes of their own in `core`: those written as
+  arguments of calls of functions, if the program could then be shown to
+  follow the rules for borrows. `checked_exclusive_safety` is about these. -/
+  lent : Nat := 0
 
 /-- Find a certificate for a program's Core and have the proved checker accept
 it: with the ownership rules and the region rules if the program can be shown
@@ -32,13 +37,15 @@ to meet them, and otherwise with those of them it can, or as a typing only.
 An error here is a defect in the compiler, not in the program. -/
 def certifyProgram (items : List Syntax.Item) (p : Core.Program)
     (envSizes : List (Nat × Nat) := []) : Except String Typing.Cert := do
-  let attempt (strict regions : Bool) : Option Typing.Cert :=
-    match Infer.certify items p strict envSizes regions with
+  let attempt (strict regions loans : Bool) : Option Typing.Cert :=
+    match Infer.certify items p strict envSizes regions loans with
     | .ok cert => if Typing.checkProgram cert p then some cert else none
     | .error _ => none
-  if let some cert := attempt true true then return cert
-  if let some cert := attempt true false then return cert
-  if let some cert := attempt false true then return cert
+  if let some cert := attempt true true true then return cert
+  if let some cert := attempt true true false then return cert
+  if let some cert := attempt true false false then return cert
+  if let some cert := attempt false true true then return cert
+  if let some cert := attempt false true false then return cert
   let cert ← match Infer.certify items p false envSizes with
     | .ok cert => pure cert
     | .error e => throw s!"no certificate was found: {e}"
@@ -59,7 +66,7 @@ def compileSource (src : String) (check : Bool := true) : Except String Compiled
   let blocks ← match Check.checkProgram all with
     | .ok blocks => pure (some blocks)
     | .error e => if check then throw e else pure none
-  let build := fun (blocks : Option Elab.Blocks) => do
+  let plain := fun (blocks : Option Elab.Blocks) => do
     let out ← Elab.elabProgram all blocks
     let cert ← if check then
         match certifyProgram all out.program out.envSizes with
@@ -67,7 +74,33 @@ def compileSource (src : String) (check : Bool := true) : Except String Compiled
         | .error e =>
           throw s!"the checker accepted this program, but its Core could not be shown to be well typed: {e}. This is a defect in the compiler"
       else pure none
-    pure (⟨out.program, out.ctorNames, out.fnNames, out.opNames, cert⟩ : Compiled)
+    pure (⟨out.program, out.ctorNames, out.fnNames, out.opNames, cert, 0⟩ : Compiled)
+  -- A borrow written as an argument of a call of a function is a scope of its
+  -- own in Core if the program can then be shown to follow every rule. Where
+  -- it cannot, the borrow is the reference it borrows, as in a program that is
+  -- not checked: first every such call is tried, then those that pass alone.
+  let lending := fun (blocks : Option Elab.Blocks) (sites : Nat → Bool) =>
+    match Elab.elabProgram all blocks sites with
+    | .ok out =>
+      match Infer.certify all out.program true out.envSizes true true with
+      | .ok cert =>
+        if out.lent != 0 && Typing.checkProgram cert out.program then
+          some (⟨out.program, out.ctorNames, out.fnNames, out.opNames, some cert, out.lent⟩ :
+            Compiled)
+        else none
+      | .error _ => none
+    | .error _ => none
+  let build := fun (blocks : Option Elab.Blocks) => do
+    if check then
+      if let .ok out := Elab.elabProgram all blocks (fun _ => true) then
+        if out.lent != 0 then
+          if let some c := lending blocks (fun _ => true) then return c
+          if 1 < out.sites && out.sites ≤ 32 then
+            let alone := (List.range out.sites).filter fun i =>
+              (lending blocks (· == i)).isSome
+            if !alone.isEmpty then
+              if let some c := lending blocks alone.contains then return c
+    plain blocks
   -- Blocks can share an environment only where a type can state it. Where one
   -- cannot, as when what a block is given may also be a function that is not a
   -- block, every block captures for itself, as it would without the sharing.
@@ -89,6 +122,14 @@ def owned (src : String) : Option Bool :=
 def borrowChecked (src : String) : Option Bool :=
   match compileSource src with
   | .ok c => c.cert.map (·.regions)
+  | .error _ => none
+
+/-- How many of a program's borrows are scopes of their own in its Core, which
+was then shown to follow the rules for borrows: `none` if the program does not
+compile or its Core was not shown to follow them. -/
+def lentBorrows (src : String) : Option Nat :=
+  match compileSource src with
+  | .ok c => if (c.cert.map (·.loans)).getD false then some c.lent else none
   | .error _ => none
 
 partial def showValue (names : Array String) : Value → String

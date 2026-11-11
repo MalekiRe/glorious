@@ -587,9 +587,10 @@ the programs it accepts.
    and the program goes wrong, then it is at an arithmetic operation whose
    result does not fit in 64 bits.** `checked_compiled_full_safety` says the
    same of its bytecode. 133 of the 140 test programs get this.
-5. **Exclusive references.** In progress: see "References are exclusive"
-   below. The surface checker enforces it; Core does not know of it yet, so
-   nothing is proved about it.
+5. **Exclusive references.** Done for borrows written as arguments of calls
+   of functions: see "References are exclusive" below. The surface checker
+   enforces the rule for every borrow; Core has rules for it, a theorem about
+   them, and the elaborator uses them for those borrows.
 
 The specification's lifetimes (language specification section 9) are the
 surface form of this; written lifetime parameters, variance and outlives
@@ -629,16 +630,54 @@ callable holds a reference, and they do not run at the same time. What is lost
 is only that two callables over one variable may exist together; no reference
 can be made to see a change it should not.
 
-What the rule is not, yet:
+What is proved, and of what. Core has rules for borrows
+(`Glorious/Typing/Loans.lean`, `checked_exclusive_safety`): a program whose
+Core is accepted with them never reaches a state about to read, write or lend a
+variable through a reference that a newer borrow in scope excludes, or through
+a borrow whose scope has ended; and no borrow's scope is ever set aside in a
+resumption. The machine does not enforce any of this, and a borrow costs
+nothing at run time beyond a frame: the theorem is about what an accepted
+program does.
 
-- **It is not proved.** It is a check in `Check.lean`, like the checks on
-  scopes that it sits beside. The kernel has what a proof needs to be stated,
-  but nothing is proved with it yet and the elaborator does not use it: a
-  reference value carries the borrow it is (zero for a variable's own), and
-  `lend` runs a callable with a reference that is a new borrow, inside a frame
-  that marks where the borrow ends. Neither changes what a program computes.
+- **In Core a borrow is a scope.** A reference value carries the borrow it is
+  (zero for a variable's own), and `lend` runs a callable with a reference that
+  is a new borrow, inside a frame that marks where the borrow ends. The
+  callable is polymorphic in the borrow's region, as the callable a variable's
+  block runs is in the variable's, so the borrow cannot leave; and of the
+  regions around it the callable may touch none that was lent.
+- **Leave to write a region is a region.** What a computation may touch is a
+  list of regions, as before; `wr r` in the list is leave to write `r`. A
+  variable's block grants both, a borrow for writing takes both away and grants
+  both of the borrow's, and a borrow for reading takes away only leave to write.
+- **Regions that a function touches are different regions where it is
+  called.** Taking a region away means nothing if the same variable can be
+  reached under another name. Region inference already gives a function a
+  signature for each pattern of regions it is used at, so this costs nothing.
+- **The callable a borrow's scope runs performs no operation it does not
+  handle itself.** Otherwise a handler outside the scope could run while the
+  borrow is set aside in a resumption, and use the variable.
+- **Which borrows are scopes.** A borrow written as an argument of a call of a
+  function, `f(&mut x)`: the scope is the call. The elaborator makes it one if
+  the program's Core then passes every rule, deciding each call alone; `glorious
+  certify` says how many there are. Every other borrow is, in Core, the
+  variable's own reference: one bound by `let`, one passed in a `tail` call or
+  to a callable that is not a function named there, one given back by the call
+  it was passed to, one passed to a function that performs an operation handled
+  outside the call. Of those the theorem says nothing, and only the check
+  below keeps them exclusive.
+
+What the rule is not:
+
+- **The check of the source text is not proved.** It is a check in
+  `Check.lean`, like the checks on scopes that it sits beside. It is what
+  rejects a program; the Core rules never do, and a borrow they cannot accept
+  is simply not made a scope.
 - An operation that can be resumed, performed while a borrow is held, runs a
-  handler's arm; if the arm uses the borrowed variable, that is not noticed.
+  handler's arm; if the arm uses the borrowed variable, the check of the source
+  text does not notice. Core does: such a borrow is not made a scope.
+- The theorem is stated of the Core machine. The bytecode machine is shown to
+  compute what the Core machine does, but the statement about borrows is not
+  carried over to its states.
 - A `&mut` reference is lent only where its type is known when it is used. One
   copied before that, or inside a tuple or a declared type, or by a function
   generic in its type, is copied: the copies are one borrow.

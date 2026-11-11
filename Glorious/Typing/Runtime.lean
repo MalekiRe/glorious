@@ -185,11 +185,12 @@ inductive StackOk (Δ : Ctx) (S : StoreTy) : List Frame → Ty → Row → List 
       S.cells a = some σ → StackOk Δ S st τ ε ϕ →
       StackOk Δ S (.cell a :: st) τ ε (.cell a :: .wr (.cell a) :: ϕ)
   /-- The scope of a borrow passes its result on. It grants the borrow, and
-  takes away what was lent: `ρ`, which the code below could touch. -/
+  takes away what was lent: `ρ`, which the code below could touch. It serves
+  nothing, so it is never among the frames a resumption captures. -/
   | lend {uniq : Bool} {a b : Nat} {st : List Frame} {τ : Ty} {ε : Row} {ϕ : List Rgn}
       {ρ : Rgn} :
       S.loans b = some a → 0 < b → OnCell S ρ a → ρ ∈ ϕ → (uniq = true → .wr ρ ∈ ϕ) →
-      StackOk Δ S st τ ε ϕ → StackOk Δ S (.lend uniq a b :: st) τ ε (lent uniq ρ b ϕ)
+      StackOk Δ S st τ ε ϕ → StackOk Δ S (.lend uniq a b :: st) τ [] (lent uniq ρ b ϕ)
   /-- Without the rules for borrows it takes nothing away. -/
   | lendLoose {uniq : Bool} {a b : Nat} {st : List Frame} {τ : Ty} {ε : Row} {ϕ : List Rgn} :
       ¬ (Δ.regions ∧ Δ.loans) → S.loans b = some a → (Δ.regions → ∃ ρ, OnCell S ρ a ∧ ρ ∈ ϕ) →
@@ -228,6 +229,9 @@ structure StoreOk (Δ : Ctx) (S : StoreTy) (store : Store Frame) : Prop where
   cells : ∀ a τ, S.cells a = some τ →
     a < store.cells.length ∧ ∀ v, store.cells[a]? = some (some v) → HasVal Δ S v τ
   loans : ∀ b a, S.loans b = some a → b ≤ store.labels
+  /-- Under the rules for borrows no resumption captured the scope of one. -/
+  quiet : Δ.regions ∧ Δ.loans → ∀ (id : Nat) (seg : List Frame),
+    store.conts[id]? = some (some seg) → ∀ uniq a b, Frame.lend uniq a b ∉ seg
 
 /-- A machine state is well typed under a store typing. Its code may touch
 regions the stack grants. -/

@@ -232,12 +232,13 @@ theorem checked_compiled_scoped_safety {p : Program} (h : checkProgram C p = tru
 and the rules for borrows and the checker accepts, the program never reaches a
 state about to use a reference it may not: it reads, writes and lends a cell
 only through a reference that no newer borrow in scope excludes, and through no
-borrow whose scope has ended. Nothing is assumed about the certificate or the
-program.
+borrow whose scope has ended. And no borrow's scope is ever set aside in a
+resumption. Nothing is assumed about the certificate or the program.
 -/
 theorem checked_exclusive_safety {p : Program} (h : checkProgram C p = true)
     (hr : C.regions = true) (hl : C.loans = true) (input : List Int) {c : Config}
-    (hc : Machine.Reaches (stepIO p) (initIO p input) c) : ¬ Aliased c.state :=
+    (hc : Machine.Reaches (stepIO p) (initIO p input) c) :
+    ¬ Aliased c.state ∧ ¬ Suspended c.state :=
   exclusive_safety (checkProgram_sound h) hr hl input hc
 
 /--
