@@ -165,6 +165,10 @@ structure St where
   block that was not run is handed on: the block's identity and the capture
   variable of what it is given. -/
   unrun : Array (Nat × Nat) := #[]
+  /-- The functions declared as coercions, in the order declared. -/
+  coercing : List String := []
+  /-- The coercions applied, each with the place it is applied at. -/
+  coercions : Array (Elab.Site × String) := #[]
 
 abbrev M := StateT St (Except String)
 
@@ -688,6 +692,7 @@ def declare (items : List Item) : M Unit := do
       if ((← get).types.lookup name).isSome then throw s!"type `{name}` is declared twice"
       modify fun s => { s with types := (name, ⟨params.length, [name]⟩) :: s.types }
     | .alias name value => modify fun s => { s with aliases := (name, value) :: s.aliases }
+    | .coerce name => modify fun s => { s with coercing := s.coercing ++ [name] }
     | _ => pure ()
   for item in items do
     match item with
@@ -744,7 +749,7 @@ partial def resolveCtor (name : String) (qual : Option String) : M (Option (Stri
 partial def exprToPat : Expr → M Pattern
   | .int n => pure (.int n)
   | .name q x => pure (if q.isSome then .ctor x q [] else .var x)
-  | .call (.name q x) args => do
+  | .call _ (.name q x) args => do
     pure (.ctor x q (← args.mapM exprToPat))
   | .tuple args => do
     pure (.tuple (← args.mapM exprToPat))
@@ -1028,9 +1033,9 @@ partial def usesExpr (resumptive : String → Bool) (x : String) : Expr → Nat
   | .int _ => 0
   | .name q y => if q.isNone && y == x then 1 else 0
   | .label _ => 0
-  | .call f args =>
+  | .call _ f args =>
     (args.map (usesExpr resumptive x)).foldl addUses (usesExpr resumptive x f)
-  | .tailCall f args =>
+  | .tailCall _ f args =>
     (args.map (usesExpr resumptive x)).foldl addUses (usesExpr resumptive x f)
   | .tuple args => (args.map (usesExpr resumptive x)).foldl addUses 0
   | .proj e _ => usesExpr resumptive x e
@@ -1123,7 +1128,7 @@ partial def ACtx.ctorOf (ctx : ACtx) (name : String) : Option String :=
 private partial def constPat : Expr → Option Pattern
   | .int n => some (.int n)
   | .name q x => some (if q.isSome then .ctor x q [] else .var x)
-  | .call (.name q x) args => do
+  | .call _ (.name q x) args => do
     some (.ctor x q (← args.mapM constPat))
   | .tuple args => do
     some (.tuple (← args.mapM constPat))
@@ -1326,8 +1331,8 @@ partial def runExpr (ctx : ACtx) (depth : Nat) (env : List (String × AVal)) : E
       | .data _ args => (args.getD idx .unknown, n)
       | .tracked => (.unknown, n + 1)
       | _ => (.unknown, n))
-  | .call f args => runCall ctx depth env f args
-  | .tailCall f args => runCall ctx depth env f args
+  | .call _ f args => runCall ctx depth env f args
+  | .tailCall _ f args => runCall ctx depth env f args
   | .closure _ clauses => pure [(.clo clauses env, 0)]
   | .handle subject arms => do
     let subject ← runExpr ctx depth env subject
@@ -1569,6 +1574,74 @@ private def arguments (n : Nat) : String :=
 private def arityError (what : String) (expected found : Nat) : M Unit :=
   throw s!"{what} takes {arguments expected}, but is given {found}"
 
+/-! ## Coercions
+
+A program declares a function a coercion with `coerce name`. Where a value does
+not have the type expected of it, and exactly one declared coercion takes what
+was found to what is expected, that function is applied, as if the call had
+been written. Nothing is converted in more than one step, and a coercion is not
+applied where its name means something else.
+-/
+
+/-- The declared coercions that take what was found to what is expected. If
+there is exactly one, the types are made to fit it: it is applied. -/
+def coerceTo (scope : Scope) (amb : Row) (expected actual : Ty) : M (List String) := do
+  let s ← get
+  let mut fits : List String := []
+  for name in s.coercing do
+    if (scope.lookup name).isNone then
+      if let some scheme := s.fns.lookup name then
+        let saved ← get
+        let ok ← try
+            (do
+              match ← find (← instantiate scheme (some name)) with
+              | .fn [a] b _ _ _ => do
+                unify a actual
+                unify b expected
+                pure true
+              | _ => pure false)
+          catch _ => pure false
+        set saved
+        if ok then fits := name :: fits
+  match fits with
+  | [name] =>
+    match s.fns.lookup name with
+    | some scheme =>
+      match ← find (← instantiate scheme (some name)) with
+      | .fn [a] b effs tail _ => do
+        unify a actual
+        unify b expected
+        includeRow ⟨effs, tail⟩ amb s!"`{name}`"
+        pure [name]
+      | _ => pure []
+    | none => pure []
+  | several => pure several.reverse
+
+/-- Marks a failure as a body's result not being the type wanted, which the
+clause the body belongs to can still answer by looking at its clauses in
+another order. -/
+def resultMark : String := "\x01"
+
+/-- Make what was found the type expected, by a declared coercion at `site` if
+the two differ. Gives the mismatch if neither works. -/
+def fitAt (scope : Scope) (amb : Row) (what : String) (site : Option Elab.Site)
+    (expected actual : Ty) : M (Option String) := do
+  try
+    unifyAt what expected actual
+    pure none
+  catch e =>
+    match site with
+    | none => pure (some e)
+    | some site =>
+      match ← coerceTo scope amb expected actual with
+      | [name] =>
+        modify fun s => { s with coercions := s.coercions.push (site, name) }
+        pure none
+      | [] => pure (some e)
+      | several =>
+        let names := ", ".intercalate (several.map fun name => s!"`{name}`")
+        pure (some s!"{e} (the coercions {names} all apply here, so none is chosen)")
+
 mutual
 
 partial def inferExpr (scope : Scope) (amb : Row) : Expr → M Ty
@@ -1607,10 +1680,10 @@ partial def inferExpr (scope : Scope) (amb : Row) : Expr → M Ty
       let t ← freshTy
       modify fun s => { s with projections := s.projections.push (subject, idx, t, s.pos) }
       pure t
-  | .call f args => inferCall scope amb f args
-  | .tailCall f args => inferCall scope amb f args
+  | .call id f args => inferCall scope amb f args id
+  | .tailCall id f args => inferCall scope amb f args id
   | .closure id clauses => do
-    let t ← inferCallable scope [] none none clauses "the clauses of this callable do"
+    let t ← inferCallable scope [] none none clauses "the clauses of this callable do" id
     if let .fn _ _ _ _ cap := t then
       modify fun s => { s with blockCaps := s.blockCaps.push (id, cap) }
     pure t
@@ -1637,33 +1710,65 @@ partial def inferExpr (scope : Scope) (amb : Row) : Expr → M Ty
     mustDup inner "reading through a reference copies the value (`replace` takes it out instead)"
     pure inner
 
-/-- Check the arguments of a call against the parameter types. -/
-partial def checkArgs (scope : Scope) (amb : Row) (what : String) (params : List Ty)
-    (args : List Expr) : M Unit := do
-  unless params.length == args.length do arityError what params.length args.length
-  let mut i := 1
-  for (p, a) in params.zip args do
-    match Elab.plainBlock a, ← find p with
-    | some (id, body), .fn [input] _ _ _ _ =>
-      -- A callable taking one argument is expected, and a block is written
-      -- without parameters: it takes the argument without naming it.
-      let t ← inferCallable scope [some input] none none [.mk [.wild] body]
-        "the clauses of this callable do"
-      unifyAt s!"argument {i} of {what}" p t
+/-- Check one argument. Gives the mismatch if it does not fit. -/
+partial def checkArg (scope : Scope) (amb : Row) (what : String) (p : Ty) (a : Expr)
+    (site : Option Elab.Site) : M (Option String) := do
+  match Elab.plainBlock a, ← find p with
+  | some (id, body), .fn [input] _ _ _ _ =>
+    -- A callable taking one argument is expected, and a block is written
+    -- without parameters: it takes the argument without naming it.
+    let t ← inferCallable scope [some input] none none [.mk [.wild] body]
+      "the clauses of this callable do" id
+    match ← fitAt scope amb what none p t with
+    | some e => pure (some e)
+    | none =>
       modify fun s => { s with given := s.given.push id }
       -- A callable that takes no arguments, given to a block: a block that was
       -- not run, whose environment this one can take over.
       if let .fn [] _ _ _ cap ← find input then
         modify fun s => { s with unrun := s.unrun.push (id, cap) }
-    | _, _ => unifyAt s!"argument {i} of {what}" p (← inferExpr scope amb a)
-    i := i + 1
+      pure none
+  | _, _ => fitAt scope amb what site p (← inferExpr scope amb a)
+
+/-- Check arguments in the given order. Gives the first that does not fit. -/
+partial def checkArgsIn (scope : Scope) (amb : Row) (what : String) (params : List Ty)
+    (args : List Expr) (call : Nat) (order : List Nat) : M (Option (Nat × String)) := do
+  for i in order do
+    match params[i]?, args[i]? with
+    | some p, some a =>
+      let site := if call == 0 then none else some (Elab.Site.arg call i)
+      if let some e ← checkArg scope amb s!"argument {i + 1} of {what}" p a site then
+        return some (i, e)
+    | _, _ => pure ()
+  return none
+
+/-- Check the arguments of a call against the parameter types. An argument that
+does not fit is converted by a coercion the program declares, if one applies.
+If none does, the arguments are checked once more with that one first: what it
+needs is then known when the others are looked at, and one of them may be what
+has to be converted. -/
+partial def checkArgs (scope : Scope) (amb : Row) (what : String) (params : List Ty)
+    (args : List Expr) (call : Nat := 0) : M Unit := do
+  unless params.length == args.length do arityError what params.length args.length
+  let order := List.range args.length
+  let saved ← get
+  match ← checkArgsIn scope amb what params args call order with
+  | none => pure ()
+  | some (i, e) =>
+    set saved
+    if saved.coercing.isEmpty then throw e
+    match ← checkArgsIn scope amb what params args call (i :: order.erase i) with
+    | none => pure ()
+    | some _ =>
+      set saved
+      throw e
 
 /-- Apply a callee of a given type in the ambient effects. -/
-partial def applyTy (scope : Scope) (amb : Row) (what : String) (callee : Ty) (args : List Expr) :
-    M Ty := do
+partial def applyTy (scope : Scope) (amb : Row) (what : String) (callee : Ty) (args : List Expr)
+    (call : Nat := 0) : M Ty := do
   match ← find callee with
   | .fn ps r effs tail _ => do
-    checkArgs scope amb what ps args
+    checkArgs scope amb what ps args call
     includeRow ⟨effs, tail⟩ amb what
     pure r
   | t => do
@@ -1675,13 +1780,14 @@ partial def applyTy (scope : Scope) (amb : Row) (what : String) (callee : Ty) (a
     includeRow row amb what
     pure r
 
-partial def inferCall (scope : Scope) (amb : Row) (f : Expr) (args : List Expr) : M Ty := do
+partial def inferCall (scope : Scope) (amb : Row) (f : Expr) (args : List Expr)
+    (call : Nat := 0) : M Ty := do
   match f with
   | .name q x =>
     match ← resolveName scope q x with
     | .ctor sig => do
       let (fields, result) ← instCtor sig
-      checkArgs scope amb s!"constructor `{x}`" fields args
+      checkArgs scope amb s!"constructor `{x}`" fields args call
       pure result
     | .op sig => do
       let decl := ((← get).effects.lookup sig.effect).getD ⟨[], []⟩
@@ -1689,25 +1795,25 @@ partial def inferCall (scope : Scope) (amb : Row) (f : Expr) (args : List Expr) 
       let (payload, result) := instOp sig inst
       try unifyRow amb ⟨[(sig.effect, inst)], some (← freshRowVar)⟩
       catch e => throw s!"operation `{x}` cannot be performed here: {e}"
-      checkArgs scope amb s!"operation `{x}`" payload args
+      checkArgs scope amb s!"operation `{x}`" payload args call
       match result with
       | some r => pure r
       | none => freshTy
     | .prim => do
-      checkArgs scope amb s!"intrinsic `{x}`" [.int, .int] args
+      checkArgs scope amb s!"intrinsic `{x}`" [.int, .int] args call
       pure .int
     | .host id => do
       if id == 0 then
-        checkArgs scope amb s!"`{x}`" [← freshTy] args
+        checkArgs scope amb s!"`{x}`" [← freshTy] args call
         pure .unit
       else
-        checkArgs scope amb s!"`{x}`" [] args
+        checkArgs scope amb s!"`{x}`" [] args call
         pure (.tuple [.int, .int])
     | .cancel => do
       -- Giving up a callable: a resumption, or anything else applied to one value.
       let row ← freshRow
       let given := Ty.func [← freshTy] (← freshTy) row (← freshCap)
-      checkArgs scope amb "`cancel`" [given] args
+      checkArgs scope amb "`cancel`" [given] args call
       -- A cleanup of a cancelled computation may jump to a label inside it, and
       -- the computation then runs on from there, where it is being cancelled.
       -- So what it may perform must be handled here, as if it were called.
@@ -1715,40 +1821,52 @@ partial def inferCall (scope : Scope) (amb : Row) (f : Expr) (args : List Expr) 
       pure .unit
     | .replace => do
       let t ← freshTy
-      checkArgs scope amb "`replace`" [.ref t (← freshCap), t] args
+      checkArgs scope amb "`replace`" [.ref t (← freshCap), t] args call
       pure t
-    | .local (.val t) => applyTy scope amb s!"`{x}`" t args
+    | .local (.val t) => applyTy scope amb s!"`{x}`" t args call
     | .local (.cell t _) => do
       mustDup t (readsCell x)
-      applyTy scope amb s!"`{x}`" t args
+      applyTy scope amb s!"`{x}`" t args call
     | .local (.label t brand) => do
-      applyTy scope amb s!"the label `{x}`" (← labelType t brand) args
+      applyTy scope amb s!"the label `{x}`" (← labelType t brand) args call
     | .local (.poly s) => do
-      applyTy scope amb s!"`{x}`" (← instantiate s (some x)) args
-    | .fn t => applyTy scope amb s!"`{x}`" t args
+      applyTy scope amb s!"`{x}`" (← instantiate s (some x)) args call
+    | .fn t => applyTy scope amb s!"`{x}`" t args call
     | .const e => do
-      applyTy scope amb s!"`{x}`" (← inferExpr [] amb e) args
+      applyTy scope amb s!"`{x}`" (← inferExpr [] amb e) args call
   | .label l => do
-    applyTy scope amb s!"the label `@{l}`" (← inferExpr scope amb f) args
+    applyTy scope amb s!"the label `@{l}`" (← inferExpr scope amb f) args call
   | _ => do
-    applyTy scope amb "this callee" (← inferExpr scope amb f) args
+    applyTy scope amb "this callee" (← inferExpr scope amb f) args call
 
 /-- The type of a block: that of its last expression, or unit. -/
-partial def inferStmts (scope : Scope) (amb : Row) : List Stmt → M Ty
-  | [] => pure .unit
+partial def inferStmts (scope : Scope) (amb : Row) (stmts : List Stmt)
+    (want : Option (Ty × Option Elab.Site) := none) : M Ty := do
+  -- The value a body ends with is made the type wanted of it where it is
+  -- computed, inside whatever the body's statements have put around it.
+  let finish := fun (t : Ty) (convertible : Bool) => (do
+    match want with
+    | none => pure t
+    | some (expected, site) =>
+      let site := if convertible then site else none
+      match ← fitAt scope amb "the result of a clause" site expected t with
+      | none => pure expected
+      | some e => throw (resultMark ++ e) : M Ty)
+  match stmts with
+  | [] => finish .unit false
   | .located line col s :: rest => do
     modify fun st => { st with pos := s!"{line}:{col}: " }
-    try inferStmts scope amb (s :: rest)
+    try inferStmts scope amb (s :: rest) want
     catch e => throw (positioned line col e)
-  | [.expr e] => inferExpr scope amb e
+  | [.expr e] => do finish (← inferExpr scope amb e) true
   | .expr e :: rest => do
     let _ ← inferExpr scope amb e
-    inferStmts scope amb rest
+    inferStmts scope amb rest want
   | .let_ (.var x) (.closure id clauses) :: rest => do
     let t ← inferExpr scope amb (.closure id clauses)
     if (← resolveCtor x none).isSome || ((← get).aliases.lookup x).isSome then
       let binds ← inferPat (.var x) t
-      inferStmts (binds ++ scope) amb rest
+      inferStmts (binds ++ scope) amb rest want
     else
       -- A callable bound by `let` is a value, so it can be used at several types.
       -- Everything its surroundings already depend on stays fixed.
@@ -1774,7 +1892,7 @@ partial def inferStmts (scope : Scope) (amb : Row) : List Stmt → M Ty
         keep := .func [] .unit callee (← freshCap) :: .func [] .unit permitted (← freshCap) :: keep
       let scheme ← generalize t keep (top := false)
       let here := (← get).pos
-      let result ← inferStmts ((x, .poly scheme) :: scope) amb rest
+      let result ← inferStmts ((x, .poly scheme) :: scope) amb rest want
       checkUses here scope [(x, .poly scheme)] rest
       pure result
   | .let_ pat value :: rest => do
@@ -1783,7 +1901,7 @@ partial def inferStmts (scope : Scope) (amb : Row) : List Stmt → M Ty
     let check : Pending := ⟨(← get).pos, "the pattern of this `let` does", [t], [[pat]]⟩
     modify fun s => { s with pending := s.pending.push check }
     let here := (← get).pos
-    let result ← inferStmts (binds ++ scope) amb rest
+    let result ← inferStmts (binds ++ scope) amb rest want
     checkUses here scope binds rest
     pure result
   | .letMut x value :: rest => do
@@ -1791,7 +1909,7 @@ partial def inferStmts (scope : Scope) (amb : Row) : List Stmt → M Ty
     -- The variable lives until the end of this block: nothing that can reach
     -- it may be left over afterwards.
     let brand ← freshBrand
-    let result ← inferStmts ((x, .cell t brand) :: scope) amb rest
+    let result ← inferStmts ((x, .cell t brand) :: scope) amb rest want
     checkEscape brand s!"`{x}` could be used after its block has ended"
       (("something that uses it is the block's result", result) :: scopeRoots scope) amb
     pure result
@@ -1809,14 +1927,14 @@ partial def inferStmts (scope : Scope) (amb : Row) : List Stmt → M Ty
         pure inner
       | _ => throw "only a mutable variable or `*reference` can be assigned"
     unifyAt "the assigned value" expected (← inferExpr scope amb value)
-    inferStmts scope amb rest
+    inferStmts scope amb rest want
   | .defer e :: rest => do
     -- A cleanup performs no effects: it may run while its surroundings are
     -- being left, when no handler should be asked to do anything.
     try
       let _ ← inferExpr scope ⟨[], none⟩ e
     catch err => throw s!"a `defer` cannot perform effects: {err}"
-    inferStmts scope amb rest
+    inferStmts scope amb rest want
 
 /-- Check a pattern against a type; the names it binds. -/
 partial def inferPat (p : Pattern) (t : Ty) : M Scope := do
@@ -1858,7 +1976,7 @@ partial def inferPats (ps : List Pattern) (ts : List Ty) : M Scope := do
 /-- The type of a callable given by clauses. Parameter and result annotations
 are checked if present; the clauses must cover every argument. -/
 partial def inferCallable (scope : Scope) (annots : List (Option Ty)) (ret : Option Ty)
-    (self : Option String) (clauses : List Clause) (what : String) : M Ty := do
+    (self : Option String) (clauses : List Clause) (what : String) (id : Nat := 0) : M Ty := do
   let arity := match clauses with
     | .mk pats _ :: _ => pats.length
     | [] => 0
@@ -1877,15 +1995,53 @@ partial def inferCallable (scope : Scope) (annots : List (Option Ty)) (ret : Opt
   let scope := match self with
     | some name => ("@" ++ name, Binding.label result brand) :: scope
     | none => scope
-  for clause in clauses do
-    match clause with
-    | .mk pats body =>
+  -- Where the result of clause `j` can be converted, if this callable is one
+  -- the elaborator can be told about.
+  let site := fun (j : Nat) => match self with
+    | some name => some (Elab.Site.fnResult name j)
+    | none => if id == 0 then none else some (Elab.Site.result id j)
+  let checkClause := fun (j : Nat) => (do
+    match clauses[j]? with
+    | none => pure none
+    | some (.mk pats body) =>
       unless pats.length == arity do
         throw "the clauses of a callable take different numbers of arguments"
       let binds ← inferPats pats params
       let here := (← get).pos
-      unifyAt "the result of a clause" result (← inferStmts (binds ++ scope) row body)
-      checkUses here scope binds body
+      let at_ := if (Elab.wrapResult "" body).isSome then site j else none
+      let failure ← try
+          (do
+            let _ ← inferStmts (binds ++ scope) row body (some (result, at_))
+            pure none)
+        catch e =>
+          if (e.splitOn resultMark).length > 1 then pure (some (e.replace resultMark ""))
+          else throw e
+      match failure with
+      | some e => pure (some e)
+      | none =>
+        -- Uses are counted in the body as it will be elaborated.
+        let cs := (← get).coercions.toList
+        let body := if cs.isEmpty then body else
+          match Elab.coerceClause cs ((site j).bind fun k => List.lookup k cs) (.mk pats body) with
+          | .mk _ body => body
+        checkUses here scope binds body
+        pure none : M (Option String))
+  -- As with arguments: a clause whose result does not fit is looked at first
+  -- on a second attempt, so that the others can be converted to what it gives.
+  let order := List.range clauses.length
+  let saved ← get
+  let mut failed : Option (Nat × String) := none
+  for j in order do
+    if let some e ← checkClause j then
+      failed := some (j, e)
+      break
+  if let some (j, e) := failed then
+    set saved
+    if saved.coercing.isEmpty then throw e
+    for k in j :: order.erase j do
+      if (← checkClause k).isSome then
+        set saved
+        throw e
   let check : Pending := ⟨(← get).pos, what, params, clauses.map fun
     | .mk pats _ => pats⟩
   modify fun s => { s with pending := s.pending.push check }
@@ -2055,6 +2211,13 @@ def checkGroup (decls : List FnDecl) : M Unit := do
   for d in decls do
     let scheme ← generalize ((group.lookup d.name).getD .unit)
     modify fun s => { s with fns := (d.name, scheme) :: s.fns }
+  -- Later functions follow calls into these as they will be elaborated.
+  let cs := (← get).coercions.toList
+  unless cs.isEmpty do
+    modify fun s =>
+      { s with fnBodies := s.fnBodies.map fun (name, clauses) =>
+          if decls.any (·.name == name) then (name, Elab.coerceFn cs name clauses)
+          else (name, clauses) }
   -- A later function can still decide a requirement made here, through a
   -- declaration whose field types are inferred, so each is checked again at
   -- the end of the program.
@@ -2071,10 +2234,25 @@ def checkProgram (items : List Item) : Except String Elab.Blocks := do
     | .fn name params annots ret clauses => some ⟨name, params, annots, ret, clauses⟩
     | _ => none
   let names := decls.map (·.name)
-  let deps := fun (name : String) =>
+  let mentions := fun (name : String) =>
     match decls.find? (·.name == name) with
     | some d => ((d.clauses.flatMap (Elab.fvClause [])).filter names.contains).eraseDups
     | none => []
+  let coercing := items.filterMap fun
+    | .coerce name => some name
+    | _ => none
+  for c in coercing do
+    unless names.contains c do throw s!"`coerce {c}`: there is no function `{c}`"
+  -- A coercion can be applied in any function, so the coercions are checked
+  -- before all the others: all, that is, but the functions the coercions are
+  -- themselves built from, in which none is applied.
+  let builtFrom := Id.run do
+    let mut seen := coercing
+    for _ in [0:names.length] do
+      seen := (seen ++ seen.flatMap mentions).eraseDups
+    pure seen
+  let deps := fun (name : String) =>
+    if builtFrom.contains name then mentions name else (mentions name ++ coercing).eraseDups
   let action : M Elab.Blocks := do
     modify fun s => { s with fnBodies := decls.map fun d => (d.name, d.clauses) }
     declare items
@@ -2099,7 +2277,7 @@ def checkProgram (items : List Item) : Except String Elab.Blocks := do
         if owner != id && owner != 0 && (← findCap c) == root && !owners.contains owner then
           owners := owner :: owners
       if let [owner] := owners then links := (id, owner) :: links
-    pure ⟨s.given.toList, links⟩
+    pure ⟨s.given.toList, links, s.coercions.toList⟩
   let (blocks, _) ← action.run {}
   pure blocks
 

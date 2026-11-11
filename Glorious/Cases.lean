@@ -75,6 +75,48 @@ def cases : List Case := [
     fn pick(c, a, b) { match(c) { Ok(_) => a(), Err(_) => b(a) } }
     fn main() { handle ask() + 1 { ask(k) => pick(2 < 1, { k(1) }, { k(2) }) } }",
     [], "3"⟩,
+  -- Coercions. The prelude declares that any failure can be forgotten, so a
+  -- `Result` fits where an `Option` is expected: here the subject of a `match`,
+  -- an argument, a declared result, and the result of a clause.
+  ⟨"fn main() { match(if(2 < 1) { 10 }) { Some(n) => n, None => 0 } }",
+    [], "0"⟩,
+  ⟨"enum E { Bad(Int) }
+    fn parse(n) { match(n) { 0 => Err(Bad(n)), _ => Ok(n) } }
+    fn get(o) { match(o) { Some(n) => n, None => 7 } }
+    fn main() { get(parse(0)) + get(parse(3)) + get(if(1 < 2) { 1 }) }",
+    [], "11"⟩,
+  ⟨"fn bump(flag) -> Result<(), ()> { let mut n = 0; if(flag) { n = n + 1 } }
+    fn main() { bump(1 < 2); 0 }",
+    [], "0"⟩,
+  ⟨"fn main() {
+      let r = match(2 < 1) { Ok(_) => if(2 < 1) { 2 }, Err(_) => None };
+      match(r) { Some(n) => n, None => 5 }
+    }",
+    [], "5"⟩,
+  -- A program declares its own the same way. One is applied only where
+  -- exactly one fits, in one step, and where its name still means it.
+  ⟨"struct Meters(Int)
+    coerce meters
+    fn meters(n: Int) -> Meters { Meters(n) }
+    fn show(m) { match(m) { Meters(n) => n + 1 } }
+    fn main() { show(5) + show(Meters(1)) }",
+    [], "8"⟩,
+  ⟨"struct Meters(Int)  struct Feet(Int)
+    coerce meters  fn meters(n: Int) -> Meters { Meters(n) }
+    coerce feet  fn feet(m: Meters) -> Feet { match(m) { Meters(n) => Feet(n * 3) } }
+    fn show(f) { match(f) { Feet(n) => n } }
+    fn main() { show(2) }",
+    [], "error: 5:17: in `main`: argument 1 of `show`: expected `Feet`, found `Int`"⟩,
+  ⟨"struct Meters(Int)
+    coerce a  fn a(n: Int) -> Meters { Meters(n) }
+    coerce b  fn b(n: Int) -> Meters { Meters(n + 1) }
+    fn show(m) { match(m) { Meters(n) => n } }
+    fn main() { show(5) }",
+    [], "error: 5:17: in `main`: argument 1 of `show`: expected `Meters`, found `Int` (the coercions `a`, `b` all apply here, so none is chosen)"⟩,
+  ⟨"fn main() { let option = 5; match(if(1 < 2) { 10 }) { Some(n) => n, None => 0 } }",
+    [], "error: 1:29: in `main`: argument 2 of `match`: expected `fn(Result<Int, fn() -> Int>) -> _`, found `fn(Result<Int, ()>) -> Int`"⟩,
+  ⟨"coerce nope  fn main() { 1 }",
+    [], "error: `coerce nope`: there is no function `nope`"⟩,
   -- A failed `if` gives back its body, which was not run and still can be.
   ⟨"fn main() { match(if(1 != 1) { 10 }) { Ok(n) => n, Err(body) => body() + 1 } }",
     [], "11"⟩,
@@ -365,11 +407,11 @@ def cases : List Case := [
   ⟨"fn double(x: Int) -> Int { x * 2 }  fn main() { double((1, 2)) }",
     [], "error: 1:49: in `main`: argument 1 of `double`: expected `Int`, found `(Int, Int)`"⟩,
   ⟨"fn double(x: Int) -> (Int, Int) { x * 2 }  fn main() { double(1) }",
-    [], "error: in `double`: the result of a clause: expected `(Int, Int)`, found `Int`"⟩,
+    [], "error: 1:35: in `double`: the result of a clause: expected `(Int, Int)`, found `Int`"⟩,
   ⟨"fn id<T>(x: T) -> T { x }  fn main() { (id(1), id((1, 2))) }",
     [], "(1, (1, 2))"⟩,
   ⟨"fn bad<T>(x: T) -> T { 1 }  fn main() { bad(2) }",
-    [], "error: in `bad`: the result of a clause: expected `T`, found `Int`"⟩,
+    [], "error: 1:24: in `bad`: the result of a clause: expected `T`, found `Int`"⟩,
   ⟨"fn swap<A, B>(pair: (A, B)) -> (B, A) { (pair.1, pair.0) }  fn main() { swap((1, (2, 3))) }",
     [], "((2, 3), 1)"⟩,
   ⟨"fn incr(p: &mut Int) { *p = *p + 1 }  fn main() { let mut x = 1; incr(&mut x); x }",
@@ -377,7 +419,7 @@ def cases : List Case := [
   ⟨"fn twice(f: fn(Int) -> Int, x: Int) -> Int { f(f(x)) }  fn main() { twice({ n => n + 3 }, 1) }",
     [], "7"⟩,
   ⟨"fn main() -> Int { (1, 2) }",
-    [], "error: in `main`: the result of a clause: expected `Int`, found `(Int, Int)`"⟩,
+    [], "error: 1:20: in `main`: the result of a clause: expected `Int`, found `(Int, Int)`"⟩,
   ⟨"fn f(x: Nope) { x }  fn main() { f(1) }",
     [], "error: in `f`: unknown type `Nope`"⟩,
 

@@ -40,6 +40,16 @@ fn else(value, fallback) {
     }
 }
 
+// Any failure can be forgotten: a `Result` is an `Option` wherever one is
+// expected, and what failed is dropped.
+coerce option
+fn option(value) {
+    match(value) {
+        Ok(result) => Ok(result),
+        Err(_) => None
+    }
+}
+
 // The right operands of `and` and `or` are callables, run only when needed.
 infixr 3 and
 fn and(left, right) {

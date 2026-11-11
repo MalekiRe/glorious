@@ -31,6 +31,15 @@ structure OpInfo where
   arity : Nat
   terminal : Bool
 
+/-- A place where a function a program declares as a coercion can be applied
+without being written: an argument of a call, or the result of a clause of a
+callable literal or of a top-level function. -/
+inductive Site where
+  | arg (call index : Nat)
+  | result (closure clause : Nat)
+  | fnResult (fn : String) (clause : Nat)
+  deriving BEq
+
 /-- What the checker tells the elaborator about the blocks of a program, each
 named by its identity. -/
 structure Blocks where
@@ -40,6 +49,8 @@ structure Blocks where
   /-- Those of them whose argument is a block that was not run: each with the
   identity of that block, whose environment it can take over. -/
   links : List (Nat × Nat) := []
+  /-- The coercions to apply, each with the place it is applied at. -/
+  coercions : List (Site × String) := []
 
 structure Globals where
   ctors : List (String × CtorInfo) := []
@@ -204,8 +215,8 @@ partial def fvExpr (bound : List String) : Expr → List String
   | .int _ => []
   | .name qual x => if qual.isNone && !bound.contains x then [x] else []
   | .label l => if bound.contains (labelName l) then [] else [labelName l]
-  | .call f args => fvExpr bound f ++ args.flatMap (fvExpr bound)
-  | .tailCall f args => fvExpr bound f ++ args.flatMap (fvExpr bound)
+  | .call _ f args => fvExpr bound f ++ args.flatMap (fvExpr bound)
+  | .tailCall _ f args => fvExpr bound f ++ args.flatMap (fvExpr bound)
   | .tuple args => args.flatMap (fvExpr bound)
   | .proj e _ => fvExpr bound e
   | .closure _ clauses => clauses.flatMap (fvClause bound)
@@ -238,8 +249,8 @@ partial def appliedExpr (p : String) : Expr → List Nat
   | .int _ => []
   | .name _ _ => []
   | .label _ => []
-  | .call f args => appliedCall p f args
-  | .tailCall f args => appliedCall p f args
+  | .call _ f args => appliedCall p f args
+  | .tailCall _ f args => appliedCall p f args
   | .tuple args => args.flatMap (appliedExpr p)
   | .proj e _ => appliedExpr p e
   | .closure _ clauses => clauses.flatMap (appliedClause p)
@@ -293,6 +304,65 @@ def plainBlock : Expr → Option (Nat × List Stmt)
   | .closure id [.mk [] body] => if id == 0 then none else some (id, body)
   | _ => none
 
+/-! ## Coercions -/
+
+/-- Apply `fn` to the value a body ends with. A body that ends with a statement,
+or with a `tail` call, which must stay the last thing done, has no such value. -/
+partial def wrapResult (fn : String) : List Stmt → Option (List Stmt)
+  | [] => none
+  | [.expr (.tailCall _ _ _)] => none
+  | [.expr e] => some [.expr (.call 0 (.name none fn) [e])]
+  | [.located line col s] => (wrapResult fn [s]).map fun ss => ss.map (.located line col)
+  | [_] => none
+  | s :: rest => (wrapResult fn rest).map (s :: ·)
+
+mutual
+
+/-- Write out the coercions the checker decided on, as the calls they are. -/
+partial def coerceExpr (cs : List (Site × String)) : Expr → Expr
+  | .call id f args => .call id (coerceExpr cs f) (coerceArgs cs id args)
+  | .tailCall id f args => .tailCall id (coerceExpr cs f) (coerceArgs cs id args)
+  | .tuple args => .tuple (args.map (coerceExpr cs))
+  | .proj e idx => .proj (coerceExpr cs e) idx
+  | .closure id clauses =>
+    .closure id ((clauses.zip (List.range clauses.length)).map fun (c, j) =>
+      coerceClause cs (cs.lookup (.result id j)) c)
+  | .handle subject arms => .handle (coerceExpr cs subject) (arms.map (coerceClause cs none))
+  | .labelScope l body => .labelScope l (coerceStmts cs body)
+  | .deref e => .deref (coerceExpr cs e)
+  | e => e
+
+partial def coerceArgs (cs : List (Site × String)) (call : Nat) (args : List Expr) : List Expr :=
+  (args.zip (List.range args.length)).map fun (a, i) =>
+    let a := coerceExpr cs a
+    match cs.lookup (.arg call i) with
+    | some fn => .call 0 (.name none fn) [a]
+    | none => a
+
+partial def coerceClause (cs : List (Site × String)) (result : Option String) : Clause → Clause
+  | .mk pats body =>
+    let body := coerceStmts cs body
+    .mk pats ((result.bind fun fn => wrapResult fn body).getD body)
+
+partial def coerceStmts (cs : List (Site × String)) (body : List Stmt) : List Stmt :=
+  body.map (coerceStmt cs)
+
+partial def coerceStmt (cs : List (Site × String)) : Stmt → Stmt
+  | .let_ pat value => .let_ pat (coerceExpr cs value)
+  | .expr e => .expr (coerceExpr cs e)
+  | .defer e => .defer (coerceExpr cs e)
+  | .letMut x value => .letMut x (coerceExpr cs value)
+  | .assign target value => .assign (coerceExpr cs target) (coerceExpr cs value)
+  | .located line col s => .located line col (coerceStmt cs s)
+
+end
+
+/-- The clauses of a top-level function with its coercions written out. -/
+def coerceFn (cs : List (Site × String)) (name : String) (clauses : List Clause) : List Clause :=
+  if cs.isEmpty then clauses
+  else (clauses.zip (List.range clauses.length)).map fun (c, j) =>
+    coerceClause cs (cs.lookup (.fnResult name j)) c
+
 /-! ## Names and patterns -/
 
 /-- Resolve a name to a constructor, following constructor aliases. -/
@@ -328,7 +398,7 @@ partial def irrefutable : Pattern → M Bool
 partial def exprToPat : Expr → M Pattern
   | .int n => pure (.int n)
   | .name q x => pure (if q.isSome then .ctor x q [] else .var x)
-  | .call (.name q x) args => do
+  | .call _ (.name q x) args => do
     pure (.ctor x q (← args.mapM exprToPat))
   | .tuple args => do
     pure (.tuple (← args.mapM exprToPat))
@@ -437,8 +507,8 @@ partial def elabExpr (scope : Scope) (tailPos : Bool) : Expr → M Atom
     match ← elabExpr scope false e with
     | .var i => emit (.let_ (.place ⟨i, [idx]⟩))
     | .int _ => throw "an integer has no fields"
-  | .call f args => elabCall scope false f args
-  | .tailCall f args => do
+  | .call _ f args => elabCall scope false f args
+  | .tailCall _ f args => do
     unless tailPos do throw "`tail` call is not in tail position"
     if let some why := (← get).noTail then
       throw s!"`tail` cannot be used here: {why}"
@@ -872,6 +942,7 @@ def collect (items : List Item) :
       fns := fns.push (name, clauses)
     | .alias name value => g := { g with aliases := (name, value) :: g.aliases }
     | .fixity => pure ()
+    | .coerce _ => pure ()
   pure (g, fns.toList, names)
 
 /-- A function whose body mentions its own label `@name` runs inside that label's
@@ -887,6 +958,8 @@ without it, every block captures what it mentions for itself. -/
 def elabProgram (items : List Item) (blocks : Option Blocks := none) : Except String Output := do
   let (g, fns, names) ← collect items
   let g := { g with blocks := blocks }
+  let coercions := (blocks.getD {}).coercions
+  let fns := fns.map fun (name, clauses) => (name, coerceFn coercions name clauses)
   let mainIdx ← match g.fns.lookup "main" with
     | some idx => pure idx
     | none => throw "the program has no `main` function"

@@ -25,9 +25,11 @@ inductive Expr where
   | name (qual : Option String) (name : String)
   /-- The label `@name` as a value. -/
   | label (name : String)
-  | call (f : Expr) (args : List Expr)
+  /-- A call. One written in the source has an identity that is not zero, by
+  which the checker can tell the elaborator about its arguments. -/
+  | call (id : Nat) (f : Expr) (args : List Expr)
   /-- `tail f(args)`. -/
-  | tailCall (f : Expr) (args : List Expr)
+  | tailCall (id : Nat) (f : Expr) (args : List Expr)
   | tuple (args : List Expr)
   /-- `e.N`. -/
   | proj (e : Expr) (idx : Nat)
@@ -132,5 +134,8 @@ inductive Item where
   | alias (name : String) (value : Expr)
   /-- A fixity declaration; already collected before parsing. -/
   | fixity
+  /-- `coerce name`: the function `name` is applied without being written, where
+  a value of its parameter's type is found and one of its result's type expected. -/
+  | coerce (name : String)
 
 end Glorious.Syntax

@@ -49,8 +49,8 @@ language, in `Glorious/Prelude.lean`, and so are `true`, `false`, `Some`,
 `None`, `Result` and the arithmetic and comparison operators.
 
 The only words the parser treats specially are `fn`, `let`, `mut`, `enum`,
-`struct`, `effect`, `handle`, `tail`, `defer`, `_`, and the fixity words
-`infixl`, `infixr`, `infix`, `prefix`. The elaborator and checker additionally
+`struct`, `effect`, `handle`, `tail`, `defer`, `coerce`, `_`, and the fixity
+words `infixl`, `infixr`, `infix`, `prefix`. The elaborator and checker additionally
 know `cancel`, `replace`, `Int`, the machine intrinsics (`int_add` and so on)
 and the two host operations. A word operator such as `else` or `and` is declared with a
 fixity like any other operator.
@@ -71,7 +71,9 @@ body itself, which was not run (see "Blocks that share an environment"). An
 `Result`. In a recursive function that is a type containing itself; and since
 the value holds the body, a body that uses a `let mut` variable or a label of
 the enclosing block would carry it out of that block, which the checker
-rejects. Write `if(c) { a };` when the `if` is run only for its effect.
+rejects. Write `if(c) { a };` when the `if` is run only for its effect, or
+declare the function's result an option (`-> Result<T, ()>`), to which the
+value is then converted (see "Coercions are declared by the program").
 Function results stay inferred; there is no `return` keyword, and
 `@function_name(value)` leaves a function early.
 
@@ -322,8 +324,8 @@ the whole of liveness; no dead-variable sets are carried in the typing.
 (`Cert.strict`), and the stronger theorem applies. A program that only the
 surface checker's path-following accepts still compiles, certified as well
 typed only, and for it a second use of a resumption is excluded by the unproved
-surface check alone. `glorious certify FILE` says which. Of the 135 accepted
-programs in the corpus 131 are in the first tier, and so are all five examples.
+surface check alone. `glorious certify FILE` says which. Of the 140 accepted
+programs in the corpus 136 are in the first tier, and so are all five examples.
 
 What the rules do not cover, and why those four programs fall back:
 
@@ -380,9 +382,10 @@ then well owned.
 
 Consequences to know about:
 
-- `if(c) { a }` with no `else` is a `Result<T, fn() -> T>`, not an option. Its
-  failure can be matched and the body still called. Matching it against `None`
-  is a type error.
+- `if(c) { a }` with no `else` is a `Result<T, fn() -> T>`. Its failure can be
+  matched and the body still called. Where an option is expected, as when it is
+  matched against `Some` and `None`, it is converted to one by the prelude's
+  coercion (next section).
 - That value holds the body, so it holds what the body captured: see "A
   trailing `;` discards a value".
 
@@ -410,6 +413,49 @@ program is compiled again with every block capturing for itself.
 A program the checker rejects can still be elaborated and run to see it go
 wrong. There are no types then, so whether a block takes an argument is read
 off the definition of the function it is passed to (`Elab.givesOne`).
+
+## Coercions are declared by the program
+
+**Decision (user).** A function can be declared a coercion: `coerce name`, next
+to an ordinary `fn name`. Where a value does not have the type expected of it,
+and a declared coercion takes what was found to what is expected, the function
+is applied as if the call had been written. The compiler knows no coercion by
+name; the prelude declares one, and a program declares its own the same way.
+
+The prelude's is `option`: it takes any `Result<T, E>` to `Result<T, ()>`,
+dropping what failed. So a `Result` is an option wherever one is expected, and
+`if(c) { a }` without `else` can be matched against `Some` and `None`.
+
+This overrides the specifications, which make `Option<T>` an alias of
+`Result<T, ()>` and rule out conversions between `Result` instantiations
+(language specification sections 4.3 and 14; standard library conformance row
+S02). Their one automatic conversion, `available_to_unit` (section 8.5), drops
+the witness of an unspent environment; with environments carried in values
+here, forgetting a failure covers that case and every other.
+
+The rules, chosen to keep it predictable:
+
+- **Where.** At an argument of a call, and at the value a clause ends with, for
+  a callable written in braces or a top-level function (so also against a
+  declared result type). Not at an assignment, not at the result of a `tail`
+  call, which has to stay the last thing done, and not in a handler's arms.
+- **Which.** Exactly one declared coercion must fit. If several do, none is
+  applied and the mismatch is reported, naming them.
+- **One step.** Coercions are not chained.
+- **By name.** A coercion is not applied where a local has taken its name.
+- **Order.** An argument, or a clause, that does not fit is looked at first on
+  a second attempt, so that the others can be converted to what it needs. That
+  is how the subject of `match(x) { Some(v) => ..., None => ... }` is converted
+  although the mismatch only shows in the second argument.
+- A coercion is checked before every function that is not part of its own
+  definition; inside those, none is applied.
+
+It is a rule of the unproved surface checker, which tells the elaborator where
+to write the calls. Core never sees a coercion, only the call, so the proofs
+are untouched. A program the checker rejects is elaborated without them.
+
+To know about: this drops errors silently. A `Result<T, IoError>` passed where
+an option is expected loses its error with nothing written at the call.
 
 ## Other standing decisions
 

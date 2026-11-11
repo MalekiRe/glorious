@@ -9,7 +9,8 @@ declared by the program, so they are collected from the token stream first.
 
 Braces in expression position always denote a callable: `{ x => body }` and
 `{ P => a, Q => b }` take one argument, a plain block `{ body }` takes none
-unless one is expected of it, which the checker decides. A
+unless one is expected of it, which the checker decides. `coerce name` declares
+the function `name` a coercion. A
 callable of several arguments is written `fn(x, y) { body }`. A block written
 directly after a call is passed as its last argument, and `f { body }` calls `f`
 with the block.
@@ -148,12 +149,14 @@ private partial def parseBinary (minPrec : Nat) (noBlock : Bool) : P Expr := do
     match ← infixOf t with
     | some (name, prec, assoc) =>
       if prec < minPrec then break
+      -- Each call is known by the token that makes it one.
+      let id := (← read).base + (← get) + 1
       advance
       let next := match assoc with
         | .right => prec
         | _ => prec + 1
       let rhs ← parseBinary next noBlock
-      lhs := .call (.name none name) [lhs, rhs]
+      lhs := .call id (.name none name) [lhs, rhs]
     | none =>
       match t with
       | .op s => failAt s!"operator `{s}` has no infix fixity"
@@ -171,9 +174,10 @@ private partial def parseUnary (noBlock : Bool) : P Expr := do
   | some s =>
     match fix.prefixes.lookup s with
     | some prec =>
+      let id := (← read).base + (← get) + 1
       advance
       let operand ← parseBinary prec noBlock
-      pure (.call (.name none s) [operand])
+      pure (.call id (.name none s) [operand])
     | none =>
       if t == .op "-" then
         match ← peek 1 with
@@ -197,18 +201,20 @@ private partial def parsePostfix (noBlock : Bool) : P Expr := do
   repeat
     match ← peek with
     | .punct "(" =>
+      let id := (← read).base + (← get) + 1
       advance
       let mut args ← parseArgs
       while !noBlock && (← peek) == .punct "{" do
         args := args ++ [← parseBraces]
-      e := .call e args
+      e := .call id e args
     | .punct "{" =>
       -- `f { body }` is `f({ body })`.
       if noBlock then break
+      let id := (← read).base + (← get) + 1
       let mut args : List Expr := []
       while (← peek) == .punct "{" do
         args := args ++ [← parseBraces]
-      e := .call e args
+      e := .call id e args
     | .punct "." =>
       match ← peek 1 with
       | .int n =>
@@ -227,7 +233,7 @@ private partial def parsePrimary (noBlock : Bool) : P Expr := do
   | .ident "tail" =>
     advance
     match ← parsePostfix noBlock with
-    | .call f args => pure (.tailCall f args)
+    | .call id f args => pure (.tailCall id f args)
     | _ => failAt "`tail` must be followed by a call"
   | .ident "handle" =>
     advance
@@ -515,6 +521,18 @@ private partial def parseItem : P Item := do
     let value ← parseBinary 0 false
     expectPunct ";"
     pure (.alias name value)
+  | .ident "coerce" =>
+    advance
+    let name ← match ← peek with
+      | .ident s => do
+        advance
+        pure s
+      | .op s => do
+        advance
+        pure s
+      | _ => failAt "expected the name of a function"
+    let _ ← acceptPunct ";"
+    pure (.coerce name)
   | .ident kind =>
     if fixityKinds.contains kind then
       advance
