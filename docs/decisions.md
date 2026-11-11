@@ -202,14 +202,15 @@ What is proved (`Typing/Safety.lean`, `Typing/Compiled.lean`,
   `compile_correct`.
 - `checked_safety` and `checked_compiled_safety`: the same for any program the
   function `checkProgram` accepts, with nothing else assumed.
-- `Typing/Witness.lean` types a program with nested handlers, a resumptive and
-  a terminal operation, by hand and through the checker, so the theorems are
+- `Typing/Witness.lean` runs the checker, in the kernel, on a program with
+  nested handlers, a resumptive and a terminal operation, so the theorems are
   not about an empty set of programs.
 
 The four faults are what types alone do not rule out: integer overflow, use of
 a freed cell, a second use of a resumption, and a label applied after its scope
-ended. The front-end has checks for the last three (scoped `let mut`, use-once,
-capture sets). Those checks are not proved.
+ended. The third is ruled out by the ownership rules below, for programs that
+follow them. The front-end has checks for the second and fourth (scoped
+`let mut`, capture sets). Those checks are not proved.
 
 How the typing is set up, and why:
 
@@ -274,8 +275,65 @@ What the theorems do not say:
   `checkProgram`; that the compiled code computes it is trusted.
 - `covers` is proved sound, not complete. It searches to a bounded depth, and
   a set of clauses that covers its parameters could in principle be turned away.
-- The four faults remain possible as far as any proof goes.
+- Overflow, use of a freed cell and a label applied after its scope ended remain
+  possible as far as any proof goes; so does a second use of a resumption, for
+  a program compiled without the ownership rules.
 
+## Ownership: a resumption is held in one place
+
+**Decision.** The ownership rules are part of Core's typing, and their
+soundness is proved: `owned_safety` and `checked_owned_safety`. This is the
+affine part of the language specification's section 7 (use at most once), for
+the one kind of value the kernel makes that must not be duplicated: a
+resumption, and anything that holds one.
+
+What the rules are:
+
+- A callable's type says whether it may be called once only. A resumption may,
+  and so may a function that captured something that cannot be duplicated.
+- A type is duplicable or not. Integers, references, labels and callables that
+  may be called many times are; a tuple or a declared type is if all its fields
+  are. Nothing is declared: it follows from the types.
+- A step of a computation moves the locals it passes on, stores, captures or
+  calls. A local whose type is not duplicable is moved at most once by a step
+  and not mentioned by the steps after it.
+- Reading a field or a cell copies, so what is read must be duplicable. A value
+  that is not is taken out of a cell with `replace`, which is why the kernel has
+  a `swap` operation.
+- A handler's functions can run many times with the same captures, so a
+  handler's captures are duplicable.
+- A clause's body uses what its patterns bind, not also the argument they took
+  apart.
+
+What is proved: count, for a resumption, the places in a machine state that
+hold it and can still use it: locals the rest of the computation mentions,
+frames, memory, frames captured in other resumptions. Under the rules that
+count never exceeds one, and a resumption that is held has not been used. So
+whatever is about to resume or cancel one finds it unused. "Still mentions" is
+the whole of liveness; no dead-variable sets are carried in the typing.
+
+**Two tiers.** A program whose Core follows the rules is certified with them
+(`Cert.strict`), and the stronger theorem applies. A program that only the
+surface checker's path-following accepts still compiles, certified as well
+typed only, and for it a second use of a resumption is excluded by the unproved
+surface check alone. `glorious certify FILE` says which. Of the 127 accepted
+programs in the corpus 119 are in the first tier, and so are all five examples.
+
+What the rules do not cover yet, and why those eight programs fall back:
+
+- **Two callables of which only one runs**, both using the resumption:
+  `if(c) { k(1) } else { k(2) }`. Each block captures `k`, so `k` is moved
+  twice. The surface checker accepts this by following the calls (see "Values
+  that hold a resumption are used at most once"); Core has nothing like the
+  specification's correlated alternatives (section 8.3). One callable with two
+  clauses, as in `match`, is within the rules.
+- **Taking apart a tuple that holds a resumption with `let`**: the elaborator
+  reads each field, and reading copies. This needs partial moves (section 7.5).
+
+Not attempted: the exact-once class (a value that must be used), `Drop`, moves
+out of references, user-declared resource types, and any ownership for
+references themselves. A reference stays freely copyable; what keeps a cell
+alive long enough is still the unproved scoping check.
 
 ## Other standing decisions
 

@@ -21,13 +21,18 @@ structure Compiled where
   fnNames : Array String
   opNames : Array String
   /-- The typing of `core` that `Typing.checkProgram` accepted, when the program
-  was checked. With it, `Typing.checked_safety` applies to `core`. -/
+  was checked. With it, `Typing.checked_safety` applies to `core`; and if the
+  certificate is `strict`, so does `Typing.checked_owned_safety`. -/
   cert : Option Typing.Cert := none
 
 /-- Find a certificate for a program's Core and have the proved checker accept
-it. An error here is a defect in the compiler, not in the program. -/
+it: with the ownership rules if the program meets them, and otherwise as a
+typing only. An error here is a defect in the compiler, not in the program. -/
 def certifyProgram (items : List Syntax.Item) (p : Core.Program) : Except String Typing.Cert := do
-  let cert ← match Infer.certify items p with
+  match Infer.certify items p true with
+  | .ok cert => if Typing.checkProgram cert p then return cert
+  | .error _ => pure ()
+  let cert ← match Infer.certify items p false with
     | .ok cert => pure cert
     | .error e => throw s!"no certificate was found: {e}"
   if Typing.checkProgram cert p then pure cert
@@ -50,6 +55,13 @@ def compileSource (src : String) (check : Bool := true) : Except String Compiled
         throw s!"the checker accepted this program, but its Core could not be shown to be well typed: {e}. This is a defect in the compiler"
     else pure none
   pure ⟨out.program, out.ctorNames, out.fnNames, out.opNames, cert⟩
+
+/-- Whether a program's Core was shown to follow the ownership rules: `some true`
+if so, `some false` if it was only shown to be well typed, `none` if it does not compile. -/
+def owned (src : String) : Option Bool :=
+  match compileSource src with
+  | .ok c => c.cert.map (·.strict)
+  | .error _ => none
 
 partial def showValue (names : Array String) : Value → String
   | .int n => toString n

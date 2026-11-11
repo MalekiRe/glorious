@@ -20,4 +20,12 @@ theorem compiled_type_safety {Δ : Ctx} {p : Core.Program} (hp : ProgramOk Δ p)
   type_safety hp input
     (Classical.byContradiction fun hn => (compile_correct p input hn).2.2 h)
 
+/-- The same, with ownership: the fault is not a second use of a resumption. -/
+theorem compiled_owned_safety {Δ : Ctx} {p : Core.Program} (hp : ProgramOk Δ p)
+    (hD : DupSound Δ) (input : List Int) (h : Bytecode.GoesWrong (compile p) input) :
+    ∃ c, Machine.Reaches (Core.stepIO p) (Core.initIO p input) c ∧ Core.stepIO p c = .stuck
+      ∧ Fault c.state ∧ ¬ Resumed c.state :=
+  owned_safety hp hD input
+    (Classical.byContradiction fun hn => (compile_correct p input hn).2.2 h)
+
 end Glorious.Typing

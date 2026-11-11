@@ -52,7 +52,7 @@ def ctorsOf (C : Cert) : Ty → Option (List (Nat × List Ty))
   | .tuple Fs => some [(0, Fs)]
   | .data name args => findData C.datas name args
   | .int => none
-  | .fn _ _ _ => none
+  | .fn _ _ _ _ => none
   | .ref _ => none
   | .never => none
 
@@ -184,7 +184,7 @@ theorem ctorsOf_value {S : StoreTy} {v : Value} {T : Ty} {ctors : List (Nat × L
         rw [hc] at hF'
         exact ⟨t, fields, Fs', rfl, lookup_mem hF', hf⟩
   | int => simp [ctorsOf] at hc
-  | fn _ _ _ => simp [ctorsOf] at hc
+  | fn _ _ _ _ => simp [ctorsOf] at hc
   | ref _ => simp [ctorsOf] at hc
   | never => simp [ctorsOf] at hc
 

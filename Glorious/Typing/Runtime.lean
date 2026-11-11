@@ -41,13 +41,16 @@ inductive HasVal (Δ : Ctx) (S : StoreTy) : Value → Ty → Prop where
   | int {n : Int} : HasVal Δ S (.int n) .int
   | data {tag : Nat} {fields : List Value} {T : Ty} {Fs : List Ty} :
       CtorOf Δ tag T Fs → HasVals Δ S fields Fs → HasVal Δ S (.data tag fields) T
-  | clo {fn : Nat} {captures : List Value} {sig : FnSig} :
+  /-- A function that may be called many times captured only duplicable values. -/
+  | clo {fn : Nat} {captures : List Value} {sig : FnSig} {once : Bool} :
       Δ.fnSig fn sig → HasVals Δ S captures sig.caps →
-      HasVal Δ S (.clo fn captures) (.fn sig.params sig.ret sig.eff)
+      (once = false → ∀ c, c ∈ sig.caps → Δ.dup c) →
+      HasVal Δ S (.clo fn captures) (.fn sig.params sig.ret sig.eff once)
+  /-- A resumption may be called once. -/
   | cont {id : Nat} {o ρ : Ty} {ε : Row} :
-      S.conts id = some (o, ρ, ε) → HasVal Δ S (.cont id) (.fn [o] ρ ε)
-  | label {id : Nat} {σ ρ : Ty} {ε : Row} :
-      S.labels id = some σ → HasVal Δ S (.label id) (.fn [σ] ρ ε)
+      S.conts id = some (o, ρ, ε) → HasVal Δ S (.cont id) (.fn [o] ρ ε true)
+  | label {id : Nat} {σ ρ : Ty} {ε : Row} {once : Bool} :
+      S.labels id = some σ → HasVal Δ S (.label id) (.fn [σ] ρ ε once)
   | ref {a : Nat} {τ : Ty} : S.cells a = some τ → HasVal Δ S (.ref a) (.ref τ)
 
 inductive HasVals (Δ : Ctx) (S : StoreTy) : List Value → List Ty → Prop where

@@ -121,7 +121,9 @@ def main (args : List String) : IO UInt32 := do
     match compileSource (← IO.FS.readFile path) with
     | .ok c =>
       let n := (c.cert.map (·.sigs.length)).getD 0
-      IO.println s!"{path}: well typed in Core, with {n} function signatures"
+      let owned := (c.cert.map (·.strict)).getD false
+      let how := if owned then "well typed and well owned" else "well typed, not shown well owned,"
+      IO.println s!"{path}: {how} in Core, with {n} function signatures"
       pure 0
     | .error e =>
       IO.eprintln s!"{path}: {e}"

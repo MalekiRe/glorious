@@ -93,4 +93,26 @@ def notTail (n : Nat) : String :=
   fn work() { defer stop(2); stop(1) }
   fn main() { handle work() { stop(v) => v } }" == "did not go wrong"
 
+-- Ownership. A program whose Core follows the ownership rules is certified with
+-- them, and the proof then says it never uses a resumption twice. That covers a
+-- resumption used on one path, passed on, kept in a mutable variable and taken
+-- out again, or captured by a callable that is called once.
+#guard owned "effect Ask { ask() -> Int }  fn main() { handle ask() + 1 { ask(k) => k(1) } }"
+  == some true
+#guard owned "effect Ask { ask() -> Int }
+  fn main() { handle ask() + 1 { ask(k) => let f = { k(1) }; f() } }" == some true
+#guard owned "effect Ask { ask() -> Int }
+  fn main() { handle ask() + 1 { ask(k) => if(1 < 2) { k(10) }; 0 } }" == some true
+#guard owned "effect Ask { ask() -> Int }
+  fn main() { handle ask() + 1 { ask(k) => match(1 < 2) { Ok(_) => k(1), Err(_) => k(2) } } }"
+  == some true
+#guard owned "effect Ask { ask() -> Int }
+  fn main() { let mut slot = None; handle ask() + 1 { ask(k) => replace(&mut slot, Some(k)); 0 };
+    match(replace(&mut slot, None)) { Some(k) => k(5), None => 0 } }" == some true
+-- Two callables of which a function runs only one may both use a resumption:
+-- the surface checker follows that, the ownership rules of Core do not yet.
+-- Such a program compiles, typed but not shown well owned.
+#guard owned "effect Ask { ask() -> Int }
+  fn main() { handle ask() + 1 { ask(k) => if(1 < 2) { k(10) } else { k(20) } } }" == some false
+
 end Glorious.Tests

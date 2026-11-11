@@ -1,4 +1,4 @@
-import Glorious.Typing.Runtime
+import Glorious.Typing.Owned
 
 /-!
 # Typed values evaluate
@@ -45,7 +45,7 @@ theorem HasVal.mono {S S' : StoreTy} (hle : S.Le S') :
     ∀ {v : Value} {τ : Ty}, HasVal Δ S v τ → HasVal Δ S' v τ
   | _, _, .int => .int
   | _, _, .data hc hf => .data hc (HasVals.mono hle hf)
-  | _, _, .clo hsig hc => .clo hsig (HasVals.mono hle hc)
+  | _, _, .clo hsig hc hq => .clo hsig (HasVals.mono hle hc) hq
   | _, _, .cont h => .cont (hle.conts _ _ h)
   | _, _, .label h => .label (hle.labels _ _ h)
   | _, _, .ref h => .ref (hle.cells _ _ h)
@@ -89,8 +89,8 @@ theorem HasVals.get {S : StoreTy} :
 theorem CtorOf.not_int {tag : Nat} {Fs : List Ty} (h : CtorOf Δ tag .int Fs) : False := by
   rcases h with ⟨_, hT⟩ | ⟨_, _, _, hT, _⟩ <;> cases hT
 
-theorem CtorOf.not_fn {tag : Nat} {Fs Ps : List Ty} {σ : Ty} {ε : Row}
-    (h : CtorOf Δ tag (.fn Ps σ ε) Fs) : False := by
+theorem CtorOf.not_fn {tag : Nat} {Fs Ps : List Ty} {σ : Ty} {ε : Row} {once : Bool}
+    (h : CtorOf Δ tag (.fn Ps σ ε once) Fs) : False := by
   rcases h with ⟨_, hT⟩ | ⟨_, _, _, hT, _⟩ <;> cases hT
 
 theorem CtorOf.not_ref {tag : Nat} {Fs : List Ty} {τ : Ty} (h : CtorOf Δ tag (.ref τ) Fs) :
@@ -118,15 +118,15 @@ theorem HasVal.ref_inv {S : StoreTy} {v : Value} {τ : Ty} (h : HasVal Δ S v (.
 
 /-- A value of a callable type is a function at a signature of that type, a
 resumption or a label. -/
-theorem HasVal.fn_inv {S : StoreTy} {v : Value} {Ps : List Ty} {σ : Ty} {ε : Row}
-    (h : HasVal Δ S v (.fn Ps σ ε)) :
+theorem HasVal.fn_inv {S : StoreTy} {v : Value} {Ps : List Ty} {σ : Ty} {ε : Row} {once : Bool}
+    (h : HasVal Δ S v (.fn Ps σ ε once)) :
     (∃ fn captures Cs, v = .clo fn captures ∧ Δ.fnSig fn ⟨Cs, Ps, σ, ε⟩
         ∧ HasVals Δ S captures Cs)
       ∨ (∃ id o, v = .cont id ∧ Ps = [o] ∧ S.conts id = some (o, σ, ε))
       ∨ (∃ id τ, v = .label id ∧ Ps = [τ] ∧ S.labels id = some τ) := by
   cases h with
   | data hc _ => exact hc.not_fn.elim
-  | clo hsig hc => exact .inl ⟨_, _, _, rfl, hsig, hc⟩
+  | clo hsig hc _ => exact .inl ⟨_, _, _, rfl, hsig, hc⟩
   | cont hk => exact .inr (.inl ⟨_, _, rfl, rfl, hk⟩)
   | label hl => exact .inr (.inr ⟨_, _, rfl, rfl, hl⟩)
 
@@ -137,7 +137,7 @@ theorem HasVal.ctor_inv {S : StoreTy} {v : Value} {T : Ty} {tag : Nat} {Fs : Lis
   cases h with
   | int => exact hc.not_int.elim
   | data hc' hf => exact ⟨_, _, _, rfl, hc', hf⟩
-  | clo _ _ => exact hc.not_fn.elim
+  | clo _ _ _ => exact hc.not_fn.elim
   | cont _ => exact hc.not_fn.elim
   | label _ => exact hc.not_fn.elim
   | ref _ => exact hc.not_ref.elim
@@ -225,13 +225,44 @@ theorem rhs_ok {S : StoreTy} {env : Env} {Γ : TEnv} {rhs : Rhs} {τ : Ty}
   | construct hc hargs =>
     obtain ⟨vs, hvs, hvst⟩ := atoms_ok henv hargs
     exact .inl ⟨_, by simp [Rhs.eval, hvs], .data hc hvst⟩
-  | place hv hpl =>
+  | place hv hpl _ =>
     obtain ⟨v, hv', hvt⟩ := henv.get hv
     obtain ⟨w, hw, hwt⟩ := follow_ok hpl hvt
     exact .inl ⟨w, by simp [Rhs.eval, Place.eval, hv', hw], hwt⟩
-  | closure hsig hcaps =>
+  | closure hsig hcaps hq =>
     obtain ⟨vs, hvs, hvst⟩ := atoms_ok henv hcaps
-    exact .inl ⟨_, by simp [Rhs.eval, hvs], .clo hsig hvst⟩
+    exact .inl ⟨_, by simp [Rhs.eval, hvs], .clo hsig hvst hq⟩
+
+/-- The value of a control-free computation holds no more than the locals it moves. -/
+theorem rhs_occ {S : StoreTy} {env : Env} {Γ : TEnv} {rhs : Rhs} {σ : Ty} {v : Value}
+    (hD : DupSound Δ) (henv : HasVals Δ S env Γ) (h : HasRhs Δ Γ rhs σ)
+    (hv : rhs.eval env = some v) (id : Nat) : occ id v ≤ sumAt id env (rhsMoves rhs) := by
+  cases h with
+  | atom ha => exact Nat.le_of_eq (occ_eval id env hv)
+  | @prim p a b ha hb =>
+    obtain ⟨va, hva, hvat⟩ := atom_ok henv ha
+    obtain ⟨vb, hvb, hvbt⟩ := atom_ok henv hb
+    obtain ⟨m, rfl⟩ := hvat.int_inv
+    obtain ⟨n, rfl⟩ := hvbt.int_inv
+    simp [Rhs.eval, evalAtoms, hva, hvb] at hv
+    obtain ⟨k, rfl⟩ := prim_int hv
+    simp [occ]
+  | construct hc hargs =>
+    obtain ⟨vs, hvs, _⟩ := atoms_ok (S := S) henv hargs
+    simp [Rhs.eval, hvs] at hv
+    subst hv
+    exact Nat.le_of_eq (by simpa [occ, rhsMoves] using occs_evalAtoms id env _ hvs)
+  | place hx hpl hdup =>
+    obtain ⟨x, hx', hxt⟩ := henv.get hx
+    obtain ⟨w, hw, hwt⟩ := follow_ok hpl hxt
+    simp [Rhs.eval, Place.eval, hx', hw] at hv
+    subst hv
+    simp [hD _ _ _ hwt hdup id]
+  | closure hsig hcaps hq =>
+    obtain ⟨vs, hvs, _⟩ := atoms_ok (S := S) henv hcaps
+    simp [Rhs.eval, hvs] at hv
+    subst hv
+    exact Nat.le_of_eq (by simpa [occ, rhsMoves] using occs_evalAtoms id env _ hvs)
 
 /-! ## Patterns and entering a function -/
 
@@ -284,52 +315,73 @@ theorem PatsOk.length_eq :
   | _, _, _, .nil => rfl
   | _, _, _, .cons _ hps => by simp [PatsOk.length_eq hps]
 
-/-- The clause selected for typed arguments has a typed body, in the
-environment the machine starts it in. -/
-theorem select_ok {S : StoreTy} {sig : FnSig} {vs : List Value}
-    (hvs : HasVals Δ S vs sig.params) :
-    ∀ (cs : List Clause), (∀ c, c ∈ cs → ClauseOk Δ sig c) → ∀ {body : Tm} {bs : List Value},
-      selectClause cs vs = some (body, bs) →
-      ∃ Bs, HasVals Δ S bs Bs ∧ HasTm Δ (sig.params ++ sig.caps ++ Bs) body sig.ret sig.eff := by
+/-- The clause the machine selects is one of the function's clauses, and its
+patterns match the arguments. -/
+theorem select_mem {vs : List Value} : ∀ (cs : List Clause) {body : Tm} {bs : List Value},
+    selectClause cs vs = some (body, bs) →
+    ∃ c, c ∈ cs ∧ c.body = body ∧ Pat.matchVals c.pats vs = some bs
+      ∧ c.pats.length = vs.length := by
   intro cs
   induction cs with
-  | nil => intro _ body bs h; simp [selectClause] at h
+  | nil => intro body bs h; simp [selectClause] at h
   | cons c cs ih =>
-    intro hall body bs h
-    obtain ⟨Bs, hpats, hbody⟩ := hall c (List.mem_cons_self ..)
-    have hlen : c.pats.length = vs.length := by
-      rw [hpats.length_eq, hvs.length_eq]
-    cases hm : Pat.matchVals c.pats vs with
-    | none =>
-      simp [selectClause, hlen, hm] at h
-      exact ih (fun c' hc' => hall c' (List.mem_cons_of_mem _ hc')) h
-    | some bs' =>
-      simp [selectClause, hlen, hm] at h
-      obtain ⟨rfl, rfl⟩ := h
-      exact ⟨Bs, hpats.binds hvs hm, hbody⟩
+    intro body bs h
+    by_cases hlen : c.pats.length = vs.length
+    · cases hm : Pat.matchVals c.pats vs with
+      | none =>
+        simp [selectClause, hlen, hm] at h
+        obtain ⟨c', hc', hrest⟩ := ih h
+        exact ⟨c', List.mem_cons_of_mem _ hc', hrest⟩
+      | some bs' =>
+        simp [selectClause, hlen, hm] at h
+        obtain ⟨rfl, rfl⟩ := h
+        exact ⟨c, List.mem_cons_self .., rfl, hm, hlen⟩
+    · simp [selectClause, hlen] at h
 
-/-- A step that leaves a well-typed state, or a result: not a stuck machine. -/
-def Safe (Δ : Ctx) (S : StoreTy) : Step State Value → Prop
-  | .next s => TypedAt Δ S s
+/-- A step that leaves a well-typed state, or a result: not a stuck machine. The
+state it leaves has the given store, and its locals and stack hold each
+resumption no more often than `budget` allows. -/
+def Safe (Δ : Ctx) (S : StoreTy) (budget : Nat → Nat) (store : Store Frame) :
+    Step State Value → Prop
+  | .next s =>
+    TypedAt Δ S s ∧ s.store = store
+      ∧ ∀ id, occEnv id s.env (fv s.tm) + occStack id s.stack ≤ budget id
   | .halt _ => True
   | .stuck => False
 
+theorem Safe.weaken {S : StoreTy} {b b' : Nat → Nat} {store : Store Frame}
+    {r : Step State Value} (h : Safe Δ S b store r) (hb : ∀ id, b id ≤ b' id) :
+    Safe Δ S b' store r := by
+  cases r with
+  | next s => exact ⟨h.1, h.2.1, fun id => Nat.le_trans (h.2.2 id) (hb id)⟩
+  | halt v => exact True.intro
+  | stuck => exact h.elim
+
 /-- Entering a function at one of its signatures, on a stack that takes its
-result and serves its operations, gives a well-typed state. -/
+result and serves its operations, gives a well-typed state, which holds no more
+than the arguments, the captures and the stack did. -/
 theorem callFn_safe {p : Program} {S : StoreTy} {fn : Nat} {sig : FnSig}
     {captures vs : List Value} {st : List Frame} {store : Store Frame} {ε : Row}
     (hp : ProgramOk Δ p) (hsig : Δ.fnSig fn sig) (hc : HasVals Δ S captures sig.caps)
     (hv : HasVals Δ S vs sig.params) (hle : Row.le sig.eff ε) (hst : StackOk Δ S st sig.ret ε)
-    (hs : StoreOk Δ S store) : Safe Δ S (callFn p fn captures vs st store) := by
+    (hs : StoreOk Δ S store) :
+    Safe Δ S (fun id => occs id vs + occs id captures + occStack id st) store
+      (callFn p fn captures vs st store) := by
   obtain ⟨F, hF, hty, hex⟩ := hp.fns fn sig hsig
   cases hsel : selectClause F.clauses vs with
   | none => exact absurd hsel (hex S vs hv)
   | some r =>
     obtain ⟨body, bs⟩ := r
-    obtain ⟨Bs, hbs, hbody⟩ := select_ok hv F.clauses hty hsel
-    have h1 : callFn p fn captures vs st store = .next ⟨body, vs ++ captures ++ bs, st, store⟩ := by
+    obtain ⟨c, hcm, rfl, hm, hlen⟩ := select_mem F.clauses hsel
+    obtain ⟨⟨Bs, hpats, hbody⟩, hwild⟩ := hty c hcm
+    have hbs := hpats.binds hv hm
+    have h1 : callFn p fn captures vs st store = .next ⟨c.body, vs ++ captures ++ bs, st, store⟩ := by
       simp [callFn, invoke, hF, hsel]
     rw [h1]
-    exact .mk ((hv.append hc).append hbs) hbody hle hst hs
+    refine ⟨.mk ((hv.append hc).append hbs) hbody hle hst hs, rfl, fun id => ?_⟩
+    have := clause_env_le id (captures := captures) (live := fv c.body) hm hlen hwild
+    show occEnv id (vs ++ captures ++ bs) (fv c.body) + occStack id st
+      ≤ occs id vs + occs id captures + occStack id st
+    omega
 
 end Glorious.Typing

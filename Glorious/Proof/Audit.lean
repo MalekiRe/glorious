@@ -50,7 +50,7 @@ three standard axioms, in particular on `sorryAx` or a declared `axiom`.
 #guard_msgs in
 #print axioms Glorious.Typing.compiled_type_safety
 
-/-- info: 'Glorious.Typing.Witness.effects_ok' depends on axioms: [propext, Quot.sound] -/
+/-- info: 'Glorious.Typing.Witness.effects_ok' depends on axioms: [propext, Classical.choice, Quot.sound] -/
 #guard_msgs in
 #print axioms Glorious.Typing.Witness.effects_ok
 
@@ -65,3 +65,15 @@ three standard axioms, in particular on `sorryAx` or a declared `axiom`.
 /-- info: 'Glorious.Typing.Witness.effects_checked' depends on axioms: [propext, Classical.choice, Quot.sound] -/
 #guard_msgs in
 #print axioms Glorious.Typing.Witness.effects_checked
+
+/-- info: 'Glorious.Typing.owned_safety' depends on axioms: [propext, Classical.choice, Quot.sound] -/
+#guard_msgs in
+#print axioms Glorious.Typing.owned_safety
+
+/-- info: 'Glorious.Typing.checked_owned_safety' depends on axioms: [propext, Classical.choice, Quot.sound] -/
+#guard_msgs in
+#print axioms Glorious.Typing.checked_owned_safety
+
+/-- info: 'Glorious.Typing.checked_compiled_owned_safety' depends on axioms: [propext, Classical.choice, Quot.sound] -/
+#guard_msgs in
+#print axioms Glorious.Typing.checked_compiled_owned_safety

@@ -17,7 +17,7 @@ def Ty.beq : Ty → Ty → Bool
   | .int, .int => true
   | .tuple a, .tuple b => Ty.beqList a b
   | .data n a, .data m b => n == m && Ty.beqList a b
-  | .fn p r e, .fn p' r' e' => Ty.beqList p p' && Ty.beq r r' && Ty.beqRow e e'
+  | .fn p r e q, .fn p' r' e' q' => Ty.beqList p p' && Ty.beq r r' && Ty.beqRow e e' && q == q'
   | .ref a, .ref b => Ty.beq a b
   | .never, .never => true
   | _, _ => false
@@ -51,21 +51,21 @@ theorem Ty.beq_eq : ∀ (a b : Ty), Ty.beq a b = true → a = b
   | .data n a, .data m b, h => by
     simp only [Ty.beq, Bool.and_eq_true, beq_iff_eq] at h
     rw [h.1, Ty.beqList_eq a b h.2]
-  | .fn p r e, .fn p' r' e', h => by
-    simp only [Ty.beq, Bool.and_eq_true] at h
-    rw [Ty.beqList_eq p p' h.1.1, Ty.beq_eq r r' h.1.2, Ty.beqRow_eq e e' h.2]
+  | .fn p r e q, .fn p' r' e' q', h => by
+    simp only [Ty.beq, Bool.and_eq_true, beq_iff_eq] at h
+    rw [Ty.beqList_eq p p' h.1.1.1, Ty.beq_eq r r' h.1.1.2, Ty.beqRow_eq e e' h.1.2, h.2]
   | .ref a, .ref b, h => by
     simp only [Ty.beq] at h
     rw [Ty.beq_eq a b h]
   | .never, .never, _ => rfl
-  | .int, .tuple _, h | .int, .data _ _, h | .int, .fn _ _ _, h | .int, .ref _, h
-  | .int, .never, h | .tuple _, .int, h | .tuple _, .data _ _, h | .tuple _, .fn _ _ _, h
+  | .int, .tuple _, h | .int, .data _ _, h | .int, .fn _ _ _ _, h | .int, .ref _, h
+  | .int, .never, h | .tuple _, .int, h | .tuple _, .data _ _, h | .tuple _, .fn _ _ _ _, h
   | .tuple _, .ref _, h | .tuple _, .never, h | .data _ _, .int, h | .data _ _, .tuple _, h
-  | .data _ _, .fn _ _ _, h | .data _ _, .ref _, h | .data _ _, .never, h | .fn _ _ _, .int, h
-  | .fn _ _ _, .tuple _, h | .fn _ _ _, .data _ _, h | .fn _ _ _, .ref _, h | .fn _ _ _, .never, h
-  | .ref _, .int, h | .ref _, .tuple _, h | .ref _, .data _ _, h | .ref _, .fn _ _ _, h
+  | .data _ _, .fn _ _ _ _, h | .data _ _, .ref _, h | .data _ _, .never, h | .fn _ _ _ _, .int, h
+  | .fn _ _ _ _, .tuple _, h | .fn _ _ _ _, .data _ _, h | .fn _ _ _ _, .ref _, h | .fn _ _ _ _, .never, h
+  | .ref _, .int, h | .ref _, .tuple _, h | .ref _, .data _ _, h | .ref _, .fn _ _ _ _, h
   | .ref _, .never, h | .never, .int, h | .never, .tuple _, h | .never, .data _ _, h
-  | .never, .fn _ _ _, h | .never, .ref _, h => by
+  | .never, .fn _ _ _ _, h | .never, .ref _, h => by
     simp [Ty.beq] at h
 
 theorem Ty.beqList_eq : ∀ (a b : List Ty), Ty.beqList a b = true → a = b
@@ -95,7 +95,7 @@ theorem Ty.beq_refl : ∀ (a : Ty), Ty.beq a a = true
   | .int => by simp [Ty.beq]
   | .tuple a => by simp only [Ty.beq, Ty.beqList_refl a]
   | .data n a => by simp [Ty.beq, Ty.beqList_refl a]
-  | .fn p r e => by simp [Ty.beq, Ty.beqList_refl p, Ty.beq_refl r, Ty.beqRow_refl e]
+  | .fn p r e q => by simp [Ty.beq, Ty.beqList_refl p, Ty.beq_refl r, Ty.beqRow_refl e]
   | .ref a => by simp only [Ty.beq, Ty.beq_refl a]
   | .never => by simp [Ty.beq]
 
