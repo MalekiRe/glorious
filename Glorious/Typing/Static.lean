@@ -231,6 +231,9 @@ inductive HasTm (Δ : Ctx) : TEnv → Tm → Ty → Row → Prop where
   | store {Γ : TEnv} {a b : Atom} {body : Tm} {σ τ : Ty} {ε : Row} :
       HasAtom Γ a (.ref σ) → HasAtom Γ b σ → HasTm Δ (Γ ++ [.unit]) body τ ε →
       HasTm Δ Γ (.mem .store [a, b] body) τ ε
+  | swap {Γ : TEnv} {a b : Atom} {body : Tm} {σ τ : Ty} {ε : Row} :
+      HasAtom Γ a (.ref σ) → HasAtom Γ b σ → HasTm Δ (Γ ++ [σ]) body τ ε →
+      HasTm Δ Γ (.mem .swap [a, b] body) τ ε
   | free {Γ : TEnv} {a : Atom} {body : Tm} {σ τ : Ty} {ε : Row} :
       HasAtom Γ a (.ref σ) → HasTm Δ (Γ ++ [.unit]) body τ ε →
       HasTm Δ Γ (.mem .free [a] body) τ ε

@@ -71,6 +71,7 @@ enum MemOp {
     Load,
     Store,
     Free,
+    Swap,
 }
 
 enum Rhs {
@@ -263,6 +264,7 @@ impl Reader<'_> {
                     1 => MemOp::Load,
                     2 => MemOp::Store,
                     3 => MemOp::Free,
+                    4 => MemOp::Swap,
                     t => return Err(format!("unknown memory operation {t}")),
                 };
                 Ok(Instr::Mem(op, self.atoms()?))
@@ -537,6 +539,12 @@ impl Vm {
             (MemOp::Free, [Value::Ref(a)]) => {
                 *self.cell(*a)? = None;
                 Ok(unit())
+            }
+            (MemOp::Swap, [Value::Ref(a), _]) => {
+                // The old value is moved out, not copied.
+                let addr = *a;
+                let new = args.pop();
+                Ok(std::mem::replace(self.cell(addr)?, new).unwrap())
             }
             _ => wrong(),
         }

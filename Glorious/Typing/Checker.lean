@@ -452,6 +452,10 @@ def checkTm (C : Cert) : TEnv → Tm → List Hint → Ty → Row → Bool
       match atomTy Γ a with
       | some (.ref _) => checkTm C (Γ ++ [.unit]) body hs τ ε
       | _ => false
+    | .swap, [a, b] =>
+      match atomTy Γ a with
+      | some (.ref σ) => atomTy Γ b == some σ && checkTm C (Γ ++ [σ]) body hs τ ε
+      | _ => false
     | _, _ => false
   | Γ, .host id args body, hs, τ, ε =>
     match id, args with
@@ -604,6 +608,11 @@ theorem checkTm_sound : ∀ (tm : Tm) {Γ : TEnv} {hs : List Hint} {τ : Ty} {ε
     · split at h
       · rename_i σ ha
         exact .free (atomTy_sound ha) (ih h)
+      · simp at h
+    · split at h
+      · rename_i σ ha
+        simp only [Bool.and_eq_true, beq_iff_eq] at h
+        exact .swap (atomTy_sound ha) (atomTy_sound h.1) (ih h.2)
       · simp at h
     · simp at h
   | host id args body ih =>

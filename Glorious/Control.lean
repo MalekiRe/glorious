@@ -145,6 +145,10 @@ inductive MemOp where
   | store
   /-- Release a cell. Using it afterwards has no meaning. -/
   | free
+  /-- Replace the value a reference points to, giving back the value that was
+  there. The old value is moved out, not copied, so a cell can hold something
+  that must not be duplicated. -/
+  | swap
 
 /-- Memory: a cell is live with a value, or has been freed. Addresses are never reused. -/
 abbrev Cells := List (Option Value)
@@ -163,6 +167,10 @@ def MemOp.eval (cells : Cells) : MemOp → List Value → Option (Value × Cells
   | .free, [.ref a] =>
     match cells[a]? with
     | some (some _) => some (.unit, cells.set a none)
+    | _ => none
+  | .swap, [.ref a, v] =>
+    match cells[a]? with
+    | some (some old) => some (old, cells.set a (some v))
     | _ => none
   | _, _ => none
 

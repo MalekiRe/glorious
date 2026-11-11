@@ -807,6 +807,9 @@ partial def inferTm (amb : IRow) (τ : ITy) (Γ : Array ITy) : Core.Tm → M Uni
       | .free, [t] => do
         unify t (.ref (← freshTy))
         pure .unit
+      | .swap, [t, v] => do
+        unify t (.ref v)
+        pure v
       | _, _ => throw "a memory operation has the wrong number of arguments"
     inferTm amb τ (Γ.push σ) body
   | .host id args body => do

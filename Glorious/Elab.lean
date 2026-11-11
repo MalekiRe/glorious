@@ -415,9 +415,7 @@ partial def elabCall (scope : Scope) (isTail : Bool) (f : Expr) (args : List Exp
       | [target, value] => do
         let cell ← elabExpr scope false target
         let new ← elabExpr scope false value
-        let old ← emit (.mem .load [cell])
-        let _ ← emit (.mem .store [cell, new])
-        pure old
+        emit (.mem .swap [cell, new])
       | _ => throw "`replace` takes a reference and a value"
     | .const e => do
       let callee ← elabExpr [] false e

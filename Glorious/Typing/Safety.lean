@@ -524,6 +524,29 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
         rw [h1]
         exact .next (.mk (henv.snoc .unit) hbody hle hst
           (hs.set_cell hcell (fun u hu => by cases hu; exact hwt)))
+  | @swap _ a b body σ _ _ ha hb hbody =>
+    obtain ⟨v, hv, hvt⟩ := atom_ok henv ha
+    obtain ⟨w, hw, hwt⟩ := atom_ok henv hb
+    obtain ⟨addr, rfl, hcell⟩ := hvt.ref_inv
+    obtain ⟨hlt, hval⟩ := hs.cells addr σ hcell
+    cases hget : cells[addr]? with
+    | none => exact absurd hlt (by simpa using List.getElem?_eq_none_iff.mp hget)
+    | some x =>
+      cases x with
+      | none =>
+        have h1 : step p ⟨.mem .swap [a, b] body, env, stack, ⟨conts, labels, cells⟩⟩
+            = .stuck := by
+          simp [step, evalAtoms, hv, hw, MemOp.eval, hget]
+        rw [h1]
+        exact Fault.freed (a := addr) (vs := [w]) (by simp [evalAtoms, hv, hw]) hget
+      | some old =>
+        have h1 : step p ⟨.mem .swap [a, b] body, env, stack, ⟨conts, labels, cells⟩⟩
+            = .next ⟨body, env ++ [old], stack,
+                ⟨conts, labels, cells.set addr (some w)⟩⟩ := by
+          simp [step, evalAtoms, hv, hw, MemOp.eval, hget]
+        rw [h1]
+        exact .next (.mk (henv.snoc (hval old hget)) hbody hle hst
+          (hs.set_cell hcell (fun u hu => by cases hu; exact hwt)))
   | @free _ a body σ _ _ ha hbody =>
     obtain ⟨v, hv, hvt⟩ := atom_ok henv ha
     obtain ⟨addr, rfl, hcell⟩ := hvt.ref_inv
