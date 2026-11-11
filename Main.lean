@@ -10,6 +10,9 @@ import Glorious.Bytecode.Encode
 * `glorious check FILE [INPUT...]` runs it on both machines and reports whether
   they agree.
 * `glorious build FILE OUT` compiles it to a bytecode file for the Rust VM.
+* `glorious certify FILE` compiles it and says how many function signatures the
+  typing of its Core has. Every command that compiles a program does this check;
+  this one only reports it.
 * `glorious selftest [VM]` runs the test programs on the Core machine and the
   Lean bytecode machine, and on the Rust VM if its path is given.
 -/
@@ -41,7 +44,8 @@ partial def stuckAt (p : Core.Program) (cfg : Core.Config) : Core.Config :=
 
 def usage : String :=
   "usage: glorious run FILE [INPUT...]\n       glorious check FILE [INPUT...]\n" ++
-  "       glorious build FILE OUT\n       glorious selftest [VM]"
+  "       glorious build FILE OUT\n       glorious certify FILE\n" ++
+  "       glorious selftest [VM]"
 
 def writeBytecode (c : Compiled) (out : System.FilePath) : IO Unit :=
   IO.FS.writeBinFile out
@@ -113,21 +117,15 @@ def parseInput (args : List String) : Except String (List Int) :=
 
 def main (args : List String) : IO UInt32 := do
   match args with
-  | ["certifytest"] =>
-    let examples ← exampleCases "examples"
-    let mut bad := 0
-    let mut ran := 0
-    for c in cases ++ examples do
-      let got := certifySource c.src
-      if got.startsWith "CERTIFY" then
-        bad := bad + 1
-        IO.eprintln s!"{got}\n  for: {c.src}\n"
-      if got.startsWith "ok" || got.startsWith "CERTIFY" then ran := ran + 1
-    IO.println s!"{ran} programs the checker accepts: {bad} without a certificate"
-    pure (if bad == 0 then 0 else 1)
   | ["certify", path] =>
-    IO.println (certifySource (← IO.FS.readFile path))
-    pure 0
+    match compileSource (← IO.FS.readFile path) with
+    | .ok c =>
+      let n := (c.cert.map (·.sigs.length)).getD 0
+      IO.println s!"{path}: well typed in Core, with {n} function signatures"
+      pure 0
+    | .error e =>
+      IO.eprintln s!"{path}: {e}"
+      pure 1
   | ["selftest"] => selftest none
   | ["selftest", vm] => selftest (some vm)
   | ["build", path, out] =>

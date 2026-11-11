@@ -20,18 +20,9 @@ structure Compiled where
   ctorNames : Array String
   fnNames : Array String
   opNames : Array String
-
-/-- Parse, check and elaborate a program together with the prelude. With
-`check := false` the type checker is skipped, so that programs which go wrong
-can still be run. -/
-def compileSource (src : String) (check : Bool := true) : Except String Compiled := do
-  let (prelude, fix) ← match Syntax.parse {} Prelude.source with
-    | .ok r => pure r
-    | .error e => throw s!"prelude: {e}"
-  let (items, _) ← Syntax.parse fix src
-  if check then Check.checkProgram (prelude ++ items)
-  let out ← Elab.elabProgram (prelude ++ items)
-  pure ⟨out.program, out.ctorNames, out.fnNames, out.opNames⟩
+  /-- The typing of `core` that `Typing.checkProgram` accepted, when the program
+  was checked. With it, `Typing.checked_safety` applies to `core`. -/
+  cert : Option Typing.Cert := none
 
 /-- Find a certificate for a program's Core and have the proved checker accept
 it. An error here is a defect in the compiler, not in the program. -/
@@ -42,21 +33,23 @@ def certifyProgram (items : List Syntax.Item) (p : Core.Program) : Except String
   if Typing.checkProgram cert p then pure cert
   else throw s!"the certificate was rejected: {Infer.rejected cert p}"
 
-/-- Compile a program and certify its Core, reporting how that went. -/
-def certifySource (src : String) : String :=
-  let run : Except String Typing.Cert := do
-    let (prelude, fix) ← match Syntax.parse {} Prelude.source with
-      | .ok r => pure r
-      | .error e => throw s!"prelude: {e}"
-    let (items, _) ← Syntax.parse fix src
-    Check.checkProgram (prelude ++ items)
-    let out ← Elab.elabProgram (prelude ++ items)
-    match certifyProgram (prelude ++ items) out.program with
-    | .ok cert => pure cert
-    | .error e => throw s!"CERTIFY: {e}"
-  match run with
-  | .ok cert => s!"ok ({cert.sigs.length} signatures)"
-  | .error e => e
+/-- Parse, check and elaborate a program together with the prelude, and have the
+proved Core type checker accept the result. With `check := false` both checks
+are skipped, so that programs which go wrong can still be run. -/
+def compileSource (src : String) (check : Bool := true) : Except String Compiled := do
+  let (prelude, fix) ← match Syntax.parse {} Prelude.source with
+    | .ok r => pure r
+    | .error e => throw s!"prelude: {e}"
+  let (items, _) ← Syntax.parse fix src
+  if check then Check.checkProgram (prelude ++ items)
+  let out ← Elab.elabProgram (prelude ++ items)
+  let cert ← if check then
+      match certifyProgram (prelude ++ items) out.program with
+      | .ok cert => pure (some cert)
+      | .error e =>
+        throw s!"the checker accepted this program, but its Core could not be shown to be well typed: {e}. This is a defect in the compiler"
+    else pure none
+  pure ⟨out.program, out.ctorNames, out.fnNames, out.opNames, cert⟩
 
 partial def showValue (names : Array String) : Value → String
   | .int n => toString n

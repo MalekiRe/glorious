@@ -258,14 +258,23 @@ callable literal is built again at each use, so that it can be used at several
 types; and a handler arm that cannot fail has no forwarding clause, which
 would otherwise make the arm need its own operation from outside.
 
+**Compiling a program checks its Core.** `compileSource` runs the certificate
+search on the elaborated Core and then `checkProgram`, and fails if either
+does. So for every program that compiles, `checked_safety` and
+`checked_compiled_safety` apply to the Core and to the bytecode it is compiled
+to. If the surface checker accepts a program and this step refuses it, that is
+reported as a defect in the compiler. `check := false` skips both checks, for
+running programs that are meant to go wrong.
+
 What the theorems do not say:
 
-- They are about a Core program and a certificate `checkProgram` accepts.
-  `glorious certifytest` finds and checks one for every program in the corpus
-  that the surface checker accepts, but compiling a program does not do this
-  yet. Until it does, a normal compile proves nothing about the program.
+- The statement is about the Core program. That the Core means what the source
+  says is the elaborator's job, and the elaborator is not proved.
+- The check is run by compiled Lean code. The proof is about the function
+  `checkProgram`; that the compiled code computes it is trusted.
 - `covers` is proved sound, not complete. It searches to a bounded depth, and
   a set of clauses that covers its parameters could in principle be turned away.
+- The four faults remain possible as far as any proof goes.
 
 
 ## Other standing decisions
