@@ -115,9 +115,9 @@ theorem HasVal.int_inv {S : StoreTy} {v : Value} (h : HasVal Δ S v .int) : ∃ 
 
 theorem HasVal.ref_inv {S : StoreTy} {v : Value} {r : Rgn} {τ : Ty}
     (h : HasVal Δ S v (.ref r τ)) :
-    ∃ a, v = .ref a ∧ S.cells a = some τ ∧ (Δ.regions → r = .cell a) := by
+    ∃ a b, v = .ref a b ∧ S.cells a = some τ ∧ (Δ.regions → r = .cell a) := by
   cases h with
-  | ref ha hr => exact ⟨_, rfl, ha, hr⟩
+  | ref ha hr => exact ⟨_, _, rfl, ha, hr⟩
   | data hc _ => exact hc.not_ref.elim
   | clo _ _ _ _ _ hτ => cases hτ
 

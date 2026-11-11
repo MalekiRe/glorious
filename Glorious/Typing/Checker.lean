@@ -806,6 +806,13 @@ def checkTm (C : Cert) (ϕ : List Rgn) : TEnv → Tm → List Hint → Ty → Ro
       σ' == σ && ρ == τ && cellOk C ϕ n r σ ρ εt acc && rowLe εt ε
         && linearB C Γ (atomVars [init, thunk]) []
     | _, _ => false
+  | Γ, .lend _ r thunk body, hs, τ, ε =>
+    match atomTy Γ r, atomTy Γ thunk with
+    | some (.ref ρ σ), some (.fn 0 [.ref ρ' σ'] ρt εt _ _ acc) =>
+      ρ' == ρ && σ' == σ && rowLe εt ε && subB acc ϕ
+        && linearB C Γ (atomVars [thunk]) (fv body)
+        && checkTm C ϕ (Γ ++ [ρt]) body hs τ ε
+    | _, _ => false
   | Γ, .mem op args body, hs, τ, ε =>
     match op, args with
     | .load, [a] =>
@@ -1000,6 +1007,16 @@ theorem checkTm_sound {ϕ : List Rgn} : ∀ (tm : Tm) {Γ : TEnv} {hs : List Hin
       obtain ⟨hσ, hρ, hε, hn, hreg, hacc⟩ := cellOk_sound hcell
       exact .cellTail (atomTy_sound hinit) (atomTy_sound hthunk) hσ hρ hε hn hreg hacc
         (rowLe_sound hrow) (linearB_sound hlin)
+    · simp at h
+  | lend uniq r thunk body ih =>
+    intro Γ hs τ ε h
+    simp only [checkTm] at h
+    split at h
+    · rename_i ρ σ ρ' σ' ρt εt once env acc hr hthunk
+      simp only [Bool.and_eq_true, beq_iff_eq] at h
+      obtain ⟨⟨⟨⟨⟨rfl, rfl⟩, hrow⟩, hacc⟩, hlin⟩, hbody⟩ := h
+      exact .lend (atomTy_sound hr) (atomTy_sound hthunk) (rowLe_sound hrow) (subB_sound hacc)
+        (linearB_sound hlin) (ih hbody)
     · simp at h
   | mem op args body ih =>
     intro Γ hs τ ε h

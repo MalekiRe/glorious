@@ -102,7 +102,7 @@ partial def showValue (names : Array String) : Value → String
   | .clo fn _ => s!"<fn {fn}>"
   | .cont id => s!"<resumption {id}>"
   | .label id => s!"<label {id}>"
-  | .ref addr => s!"<ref {addr}>"
+  | .ref addr _ => s!"<ref {addr}>"
 
 /-- Everything the program wrote, one value per line, then its result. -/
 def showResult (names : Array String) (r : Result) : String :=
@@ -189,11 +189,16 @@ def explainStuck (c : Compiled) (cfg : Core.Config) : String :=
   | .raise op _ => performed op
   | .perform op _ _ => performed op
   | .cancel _ _ => "`cancel` is applied to something that is not a usable resumption"
-  | .cell _ thunk _ => applied thunk (some [.ref s.store.cells.length])
-  | .cellTail _ thunk => applied thunk (some [.ref s.store.cells.length])
+  | .cell _ thunk _ => applied thunk (some [.ref s.store.cells.length 0])
+  | .cellTail _ thunk => applied thunk (some [.ref s.store.cells.length 0])
+  | .lend _ r thunk _ =>
+    match r.eval s.env with
+    | some (.ref a _) => applied thunk (some [.ref a (s.store.labels + 1)])
+    | some v => s!"`{showValue c.ctorNames v}` is lent, but it is not a reference"
+    | none => unbound
   | .mem _ args _ =>
     match evalAtoms s.env args with
-    | some (.ref _ :: _) => "a reference is used after the cell it points to was freed"
+    | some (.ref _ _ :: _) => "a reference is used after the cell it points to was freed"
     | some vs => s!"a memory operation is applied to ({shown vs}), which is not a reference"
     | none => unbound
   | .host id _ _ => s!"host operation {id} rejected its arguments"

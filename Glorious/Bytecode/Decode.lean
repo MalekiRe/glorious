@@ -160,6 +160,12 @@ def instr : Bytes → Option (Instr × Bytes)
     let (init, bs) ← atom bs
     let (thunk, bs) ← atom bs
     pure (.cellTail init thunk, bs)
+  | 19 :: u :: bs => do
+    let (r, bs) ← atom bs
+    let (thunk, bs) ← atom bs
+    if u = 1 then pure (.lend true r thunk, bs)
+    else if u = 0 then pure (.lend false r thunk, bs)
+    else none
   | _ => none
 
 def code (bs : Bytes) : Option (Code × Bytes) := list instr bs
@@ -250,7 +256,9 @@ theorem list_encode {α : Type} {enc : α → Bytes} {dec : Bytes → Option (α
 
 @[simp] theorem instr_encode (i : Instr) (rest : Bytes) :
     instr (Encode.instr i ++ rest) = some (i, rest) := by
-  cases i <;> simp [instr, Encode.instr]
+  cases i with
+  | lend uniq r thunk => cases uniq <;> simp [instr, Encode.instr]
+  | _ => simp [instr, Encode.instr]
 
 @[simp] theorem code_encode (c : Code) (rest : Bytes) :
     code (Encode.code c ++ rest) = some (c, rest) :=

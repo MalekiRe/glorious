@@ -97,6 +97,7 @@ enum Instr {
     TestInt(Place, i64, usize),
     Mem(MemOp, Vec<Atom>),
     Cell { init: Atom, thunk: Atom, tail: bool },
+    Lend { r: Atom, thunk: Atom },
 }
 
 // ---------------------------------------------------------------- decoding
@@ -279,6 +280,16 @@ impl Reader<'_> {
             }
             17 => self.cell(false),
             18 => self.cell(true),
+            19 => {
+                // Whether the borrow is for writing too: the machine does not use it.
+                let uniq = self.byte()?;
+                if uniq > 1 {
+                    return Err(format!("unknown kind of borrow {uniq}"));
+                }
+                let r = self.atom()?;
+                let thunk = self.atom()?;
+                Ok(Instr::Lend { r, thunk })
+            }
             t => Err(format!("unknown instruction {t}")),
         }
     }
@@ -303,7 +314,7 @@ fn decode(bytes: &[u8]) -> Decoded<Program> {
     if bytes.len() < 5 || &bytes[..4] != b"GLBC" {
         return Err("not a Glorious bytecode file".into());
     }
-    if bytes[4] != 3 {
+    if bytes[4] != 4 {
         return Err(format!("unsupported bytecode version {}", bytes[4]));
     }
     let mut r = Reader { bytes, pos: 5 };
@@ -348,6 +359,8 @@ enum Frame {
     Guard { func: usize, caps: Vec<Value> },
     /// The scope of a memory cell: the cell is released when this frame is removed.
     Cell(usize),
+    /// The scope of a borrow. It marks where the borrow ends and does nothing.
+    Lend,
     /// A pending result: what is delivered here is discarded and this is delivered.
     Yield(Value),
     /// An exit in progress: a cleanup was running above this frame. What it
@@ -471,6 +484,7 @@ impl Vm {
                     return self.call_fn(func, &caps, Vec::new());
                 }
                 Some(Frame::Cell(addr)) => self.release(addr),
+                Some(Frame::Lend) => {}
                 Some(Frame::Yield(w)) => v = w,
                 Some(Frame::Exit { target, after }) => return self.leave(target, after),
             }
@@ -671,6 +685,19 @@ impl Vm {
                 let addr = self.cells.len();
                 self.cells.push(Some(value));
                 self.frames.push(Frame::Cell(addr));
+                self.apply(callee, vec![Value::Ref(addr)])
+            }
+            Instr::Lend { r, thunk } => {
+                let Value::Ref(addr) = self.atom(r)? else {
+                    return wrong();
+                };
+                // Any callable taking one value will do; `apply` rejects the rest.
+                let callee = self.atom(thunk)?;
+                self.push_ret();
+                // A borrow has an identity, as a label has. Nothing here looks
+                // at it, but it is taken from the same counter.
+                self.labels += 1;
+                self.frames.push(Frame::Lend);
                 self.apply(callee, vec![Value::Ref(addr)])
             }
             Instr::Cancel(k) => {

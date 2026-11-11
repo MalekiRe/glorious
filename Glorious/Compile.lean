@@ -29,6 +29,7 @@ def compileTm : Core.Tm → Code
   | .guardTail cleanup thunk => [.guardTail cleanup thunk]
   | .cancel k body => .cancel k :: compileTm body
   | .cell init thunk body => .cell init thunk :: compileTm body
+  | .lend uniq r thunk body => .lend uniq r thunk :: compileTm body
   | .cellTail init thunk => [.cellTail init thunk]
   | .mem op args body => .mem op args :: compileTm body
   | .host id args body => .host id args :: compileTm body

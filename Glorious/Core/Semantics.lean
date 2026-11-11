@@ -23,13 +23,13 @@ def Pat.matchVal : Pat → Value → Option (List Value)
   | .int _, .clo _ _ => none
   | .int _, .cont _ => none
   | .int _, .label _ => none
-  | .int _, .ref _ => none
+  | .int _, .ref _ _ => none
   | .ctor tag ps, .data t fields => if tag = t then Pat.matchVals ps fields else none
   | .ctor _ _, .int _ => none
   | .ctor _ _, .clo _ _ => none
   | .ctor _ _, .cont _ => none
   | .ctor _ _, .label _ => none
-  | .ctor _ _, .ref _ => none
+  | .ctor _ _, .ref _ _ => none
 
 /-- Match values against patterns pointwise. The two lists must have the same length. -/
 def Pat.matchVals : List Pat → List Value → Option (List Value)
@@ -66,6 +66,8 @@ inductive Frame where
   | guard (fn : Nat) (captures : List Value)
   /-- The scope of a memory cell: the cell is released when this frame is removed. -/
   | cell (addr : Nat)
+  /-- The scope of a borrow of the cell at `addr`: for writing too if `uniq`. -/
+  | lend (uniq : Bool) (addr borrow : Nat)
   /-- A pending result: whatever is delivered here is discarded and `v` is delivered. -/
   | yield (v : Value)
   /-- An exit in progress. A cleanup was running above this frame; whatever it
@@ -79,6 +81,7 @@ def Frame.asHandler : Frame → Option (Nat × Handler)
   | .label _ => none
   | .guard _ _ => none
   | .cell _ => none
+  | .lend _ _ _ => none
   | .yield _ => none
   | .exit _ _ => none
 
@@ -88,6 +91,7 @@ def Frame.asLabel : Frame → Option Nat
   | .handler _ _ => none
   | .guard _ _ => none
   | .cell _ => none
+  | .lend _ _ _ => none
   | .yield _ => none
   | .exit _ _ => none
 
@@ -134,6 +138,7 @@ def deliver (p : Program) : Value → List Frame → Store Frame → Step State 
   | v, .label _ :: stack, store => deliver p v stack store
   | v, .guard fn captures :: stack, store => callFn p fn captures [] (.yield v :: stack) store
   | v, .cell a :: stack, store => deliver p v stack (store.release a)
+  | v, .lend _ _ _ :: stack, store => deliver p v stack store
   | _, .yield w :: stack, store => deliver p w stack store
   | _, .exit target after :: stack, store => leave p target after stack store
 
@@ -269,14 +274,21 @@ def step (p : Program) (s : State) : Step State Value :=
           ⟨conts, s.store.labels + 1, s.store.cells⟩
       | none => .stuck
   | .cell init thunk body =>
-    match init.eval s.env, evalScope s.env thunk (.ref s.store.cells.length) with
+    match init.eval s.env, evalScope s.env thunk (.ref s.store.cells.length 0) with
     | some v, some c =>
       apply p c (.cell s.store.cells.length :: .call s.env body :: s.stack) (s.store.alloc v)
     | _, _ => .stuck
   | .cellTail init thunk =>
-    match init.eval s.env, evalScope s.env thunk (.ref s.store.cells.length) with
+    match init.eval s.env, evalScope s.env thunk (.ref s.store.cells.length 0) with
     | some v, some c => apply p c (.cell s.store.cells.length :: s.stack) (s.store.alloc v)
     | _, _ => .stuck
+  | .lend uniq r thunk body =>
+    match evalLend s.env r thunk (s.store.labels + 1) with
+    | none => .stuck
+    | some (a, c) =>
+      -- The borrow's identity is new, as a label's is, and not zero.
+      apply p c (.lend uniq a (s.store.labels + 1) :: .call s.env body :: s.stack)
+        ⟨s.store.conts, s.store.labels + 1, s.store.cells⟩
   | .mem op args body =>
     match evalAtoms s.env args with
     | none => .stuck

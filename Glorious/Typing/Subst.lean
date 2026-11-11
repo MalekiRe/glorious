@@ -403,6 +403,12 @@ theorem HasTm.inst (hΔ : Δ.Stable) (θ : List Rgn) {ϕ : List Rgn} {Γ : TEnv}
       rcases hacc x₀ hx₀ with ⟨h1, rfl⟩ | ⟨hfree, hmem⟩
       · exact .inl ⟨h1, rfl⟩
       · exact .inr ⟨by rw [Rgn.inst_free]; exact hfree, List.mem_map.mpr ⟨x₀, hmem, rfl⟩⟩
+  | lend hr hthunk hrow hacc hlin _ ih =>
+    have hr' := hr.inst θ
+    have ht' := hthunk.inst θ
+    simp only [Ty.inst_fn, List.map_cons, List.map_nil, Ty.inst_ref] at hr' ht'
+    rw [snoc_inst] at ih
+    exact .lend hr' ht' (Row.le_inst hrow θ) (hacc.map _) (hlin.inst hΔ θ) ih
   | load ha hr hd _ ih =>
     have ha' := ha.inst θ
     rw [Ty.inst_ref] at ha'

@@ -28,6 +28,7 @@ variable {Δ : Ctx}
 /-- Whether a frame is the scope of cell `a`: one if so. -/
 def ownFrame (a : Nat) : Frame → Nat
   | .cell b => if b = a then 1 else 0
+  | .lend _ _ _ => 0
   | .call _ _ => 0
   | .handler _ _ => 0
   | .label _ => 0
@@ -186,6 +187,9 @@ theorem deliver_leave_owns (p : Program) : ∀ (st : List Frame) {store : Store 
       | cell a =>
         simp only [deliver] at h
         exact (ih ho.release).1 h
+      | lend uniq a b =>
+        simp only [deliver] at h
+        exact (ih ho.drop).1 h
       | yield w =>
         simp only [deliver] at h
         exact (ih ho.drop).1 h
@@ -213,6 +217,9 @@ theorem deliver_leave_owns (p : Program) : ∀ (st : List Frame) {store : Store 
         | cell a =>
           simp only [leave, ht] at h
           exact (ih ho.release).2 h
+        | lend uniq a b =>
+          simp only [leave, ht] at h
+          exact (ih ho.drop).2 h
         | call env body =>
           simp only [leave, ht] at h
           exact (ih ho.drop).2 h
@@ -428,6 +435,12 @@ theorem step_owns {p : Program} {s s' : State} (ho : Owns s) (h : step p s = .ne
     · exact apply_owns (st := .cell cells.length :: stack)
         (OwnsAt.alloc (store := ⟨conts, labels, cells⟩) ho' _) h
     · cases h
+  | lend uniq r thunk body =>
+    simp only [step] at h
+    split at h
+    · cases h
+    · exact apply_owns (((ho'.push (fr := .call env body) (fun _ => rfl)).push
+        (fun _ => rfl)).labels) h
   | mem op args body =>
     simp only [step] at h
     split at h
@@ -511,6 +524,7 @@ theorem StackOk.granted {S : StoreTy} {st : List Frame} {τ : Ty} {ε : Row} {ϕ
     · exact .inr ⟨id, rfl, List.mem_cons_self ..⟩
     · exact (ih r hr).cons _
   | guard _ _ _ ih => exact fun r hr => (ih r hr).cons _
+  | lend _ ih => exact fun r hr => (ih r hr).cons _
   | @cell b st τ ε ϕ _ ih =>
     intro r hr
     rcases List.mem_cons.mp hr with rfl | hr
@@ -522,26 +536,26 @@ theorem StackOk.granted {S : StoreTy} {st : List Frame} {τ : Ty} {ε : Row} {ϕ
 
 /-- A released cell is about to be read or written. -/
 def Freed (s : State) : Prop :=
-  ∃ op args body a vs, s.tm = .mem op args body ∧ evalAtoms s.env args = some (.ref a :: vs)
-    ∧ s.store.cells[a]? = some none
+  ∃ op args body a b vs, s.tm = .mem op args body
+    ∧ evalAtoms s.env args = some (.ref a b :: vs) ∧ s.store.cells[a]? = some none
 
 /-- Under the region rules, a typed state in which every scope's cell is live
 is not about to read or write a released cell: the reference it goes through
 has a region the code was granted, which is a cell with a scope on the stack. -/
 theorem TypedAt.not_freed {S : StoreTy} {s : State} (hR : Δ.regions) (ht : TypedAt Δ S s)
     (ho : Owns s) : ¬ Freed s := by
-  rintro ⟨op, args, body, a, vs, htm, hev, hnone⟩
+  rintro ⟨op, args, body, a, tag, vs, htm, hev, hnone⟩
   obtain @⟨tm, env, stack, store, Γ, τ, ε, ε', ϕ, ϕ', henv, hty, hle, hsub, hst, hs⟩ := ht
   simp only at htm hev hnone
   subst htm
   have key : ∀ {x : Atom} {r : Rgn} {σ : Ty}, HasAtom Γ x (.ref r σ) → r ∈ ϕ →
-      ∀ {w : Value}, x.eval env = some w → w = .ref a → False := by
+      ∀ {w : Value}, x.eval env = some w → w = .ref a tag → False := by
     intro x r σ hx hr w hw hwa
     obtain ⟨v, hv, hvt⟩ := atom_ok henv hx
     rw [hw] at hv
     cases hv
     subst hwa
-    obtain ⟨b, hb, _, hreg⟩ := hvt.ref_inv
+    obtain ⟨b, _, hb, _, hreg⟩ := hvt.ref_inv
     cases hb
     rcases hst.granted _ (hsub _ (hreg hR ▸ hr)) with ⟨c, hc, hpos⟩ | ⟨_, hc, _⟩
     case inr => cases hc
@@ -679,6 +693,9 @@ theorem TypedAt.not_dead {S : StoreTy} {s : State} (hR : Δ.regions) (ht : Typed
   | cellTail _ hthunk _ _ _ _ hreg _ _ _ =>
     cases hcallee
     exact scoped' (acc := []) (isLabel rfl hthunk).1 (fun h => ⟨(hreg h).1, trivial⟩)
+  | lend _ hthunk _ hacc _ _ =>
+    cases hcallee
+    exact found (hacc _ (isLabel rfl hthunk).2)
   | load _ _ _ _ => cases hcallee
   | store _ _ _ _ _ => cases hcallee
   | swap _ _ _ _ _ => cases hcallee
@@ -746,7 +763,7 @@ theorem Fault.overflow_of {s : State} (hf : Fault s) (h1 : ¬ Resumed s) (h2 : �
     (h3 : ¬ Dead s) : Overflow s := by
   cases hf with
   | overflow hargs hq => exact ⟨_, _, _, _, _, rfl, hargs, hq⟩
-  | freed hev hget => exact absurd ⟨_, _, _, _, _, rfl, hev, hget⟩ h2
+  | freed hev hget => exact absurd ⟨_, _, _, _, _, _, rfl, hev, hget⟩ h2
   | resumed hc hev hget => exact absurd ⟨_, _, hc, hev, hget⟩ h1
   | dead hc hev hnone => exact absurd ⟨_, _, hc, hev, hnone⟩ h3
 

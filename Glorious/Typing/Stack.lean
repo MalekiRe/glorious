@@ -38,6 +38,7 @@ theorem StackOk.mono {S S' : StoreTy} (hle : S.Le S') {st : List Frame} {τ : Ty
   | label hid _ ih => exact .label (hle.labels _ _ hid) ih
   | guard hent hc _ ih => exact .guard hent (hc.mono hle) ih
   | cell _ ih => exact .cell ih
+  | lend _ ih => exact .lend ih
   | yield hw _ ih => exact .yield (hw.mono hle) ih
   | exit hx hin _ ih => exact .exit (hx.mono hle) hin ih
   | never _ ih => exact .never ih
@@ -57,6 +58,7 @@ theorem StackOk.tail {S : StoreTy} {st : List Frame} {τ : Ty} {ε : Row} {ϕ : 
   | label _ h _ => intro fr st' e; cases e; exact ⟨_, _, _, h⟩
   | guard _ _ h _ => intro fr st' e; cases e; exact ⟨_, _, _, h⟩
   | cell h _ => intro fr st' e; cases e; exact ⟨_, _, _, h⟩
+  | lend h _ => intro fr st' e; cases e; exact ⟨_, _, _, h⟩
   | yield _ h _ => intro fr st' e; cases e; exact ⟨_, _, _, h⟩
   | exit _ _ h _ => intro fr st' e; cases e; exact ⟨_, _, _, h⟩
   | never _ ih => intro fr st' e; exact ih e
@@ -223,6 +225,14 @@ theorem find_ok {S : StoreTy} {st : List Frame} {τ : Ty} {ε : Row} {ϕ : List 
       findHandler_skip (by simp [handles, Frame.asHandler]) hf, hid',
       hcaps, hdup, hop, hent, hbelow, hble, hΦ, ⟨fr, List.mem_cons_of_mem _ hfr, hft⟩,
       fun S' hle st' ε' ϕ' hst' hr hs => .cell (hre S' hle st' ε' ϕ' hst' hr hs)⟩
+  | @lend uniq a b st τ ε ϕ _ ih =>
+    intro op targs hl
+    obtain ⟨d, ρ, ε₀, Φ, εb', ϕb', Cs, Ps, r, hf, hid', hcaps, hdup, hop, hent, hbelow, hble, hΦ,
+      ⟨fr, hfr, hft⟩, hre⟩ := ih hl
+    exact ⟨_, ρ, ε₀, Φ, εb', ϕb', Cs, Ps, r,
+      findHandler_skip (by simp [handles, Frame.asHandler]) hf, hid',
+      hcaps, hdup, hop, hent, hbelow, hble, hΦ, ⟨fr, List.mem_cons_of_mem _ hfr, hft⟩,
+      fun S' hle st' ε' ϕ' hst' hr hs => .lend (hre S' hle st' ε' ϕ' hst' hr hs)⟩
   | @yield w st σ τ ε ϕ hw _ ih =>
     intro op targs hl
     obtain ⟨d, ρ, ε₀, Φ, εb', ϕb', Cs, Ps, r, hf, hid', hcaps, hdup, hop, hent, hbelow, hble, hΦ,
@@ -371,6 +381,8 @@ theorem deliver_leave_safe {p : Program} {S : StoreTy} (hp : ProgramOk Δ p) :
       | @cell a _ _ _ _ hrest =>
         exact (((ih (hs.release a)).1 hrest hv).release).weaken
           fun id => by simp only [occStack, occFrame]; omega
+      | lend hrest =>
+        exact (ihd hrest hv).weaken fun id => by simp only [occStack, occFrame]; omega
       | yield hw hrest =>
         exact (ihd hrest hw).weaken fun id => by simp only [occStack, occFrame]; omega
       | exit hx hin hrest =>
@@ -412,6 +424,11 @@ theorem deliver_leave_safe {p : Program} {S : StoreTy} (hp : ProgramOk Δ p) :
           exact (ihl hrest hx hin').weaken fun id => by simp only [occStack]; omega
         | label id =>
           have h1 : leave p target after (.label id :: st) store
+              = leave p target after st store := by simp [leave, ht]
+          rw [h1]
+          exact (ihl hrest hx hin').weaken fun id => by simp only [occStack]; omega
+        | lend uniq a b =>
+          have h1 : leave p target after (.lend uniq a b :: st) store
               = leave p target after st store := by simp [leave, ht]
           rw [h1]
           exact (ihl hrest hx hin').weaken fun id => by simp only [occStack]; omega

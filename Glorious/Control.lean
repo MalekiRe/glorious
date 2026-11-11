@@ -58,6 +58,16 @@ def evalScope (ρ : Env) (thunk : Atom) (label : Value) : Option Callee :=
   | some (.label id) => some (.label id label)
   | _ => none
 
+/-- Evaluate a reference being lent and the callable its scope runs, applied to
+a reference to the same cell as the borrow `borrow`: the address, and the callee. -/
+def evalLend (ρ : Env) (r thunk : Atom) (borrow : Nat) : Option (Nat × Callee) :=
+  match r.eval ρ with
+  | some (.ref a _) =>
+    match evalScope ρ thunk (.ref a borrow) with
+    | some c => some (a, c)
+    | none => none
+  | _ => none
+
 /-- Evaluate an operand that must be a function closure. -/
 def evalClosure (ρ : Env) (a : Atom) : Option (Nat × List Value) :=
   match a.eval ρ with
@@ -152,15 +162,15 @@ abbrev Cells := List (Option Value)
 
 /-- Perform a memory operation: its result and the memory afterwards. -/
 def MemOp.eval (cells : Cells) : MemOp → List Value → Option (Value × Cells)
-  | .load, [.ref a] =>
+  | .load, [.ref a _] =>
     match cells[a]? with
     | some (some v) => some (v, cells)
     | _ => none
-  | .store, [.ref a, v] =>
+  | .store, [.ref a _, v] =>
     match cells[a]? with
     | some (some _) => some (.unit, cells.set a (some v))
     | _ => none
-  | .swap, [.ref a, v] =>
+  | .swap, [.ref a _, v] =>
     match cells[a]? with
     | some (some old) => some (old, cells.set a (some v))
     | _ => none

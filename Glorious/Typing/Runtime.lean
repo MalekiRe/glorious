@@ -66,8 +66,8 @@ inductive HasVal (Δ : Ctx) (S : StoreTy) : Value → Ty → Prop where
       S.labels id = some σ → (Δ.regions → .lab id ∈ acc) →
       HasVal Δ S (.label id) (.fn 0 [σ] ρ ε once none acc)
   /-- Under the region rules a reference's region is the cell it points to. -/
-  | ref {a : Nat} {r : Rgn} {τ : Ty} :
-      S.cells a = some τ → (Δ.regions → r = .cell a) → HasVal Δ S (.ref a) (.ref r τ)
+  | ref {a b : Nat} {r : Rgn} {τ : Ty} :
+      S.cells a = some τ → (Δ.regions → r = .cell a) → HasVal Δ S (.ref a b) (.ref r τ)
 
 inductive HasVals (Δ : Ctx) (S : StoreTy) : List Value → List Ty → Prop where
   | nil : HasVals Δ S [] []
@@ -124,6 +124,9 @@ inductive StackOk (Δ : Ctx) (S : StoreTy) : List Frame → Ty → Row → List 
   /-- The scope of a cell passes its result on, and grants its cell. -/
   | cell {a : Nat} {st : List Frame} {τ : Ty} {ε : Row} {ϕ : List Rgn} :
       StackOk Δ S st τ ε ϕ → StackOk Δ S (.cell a :: st) τ ε (.cell a :: ϕ)
+  /-- The scope of a borrow passes its result on. -/
+  | lend {uniq : Bool} {a b : Nat} {st : List Frame} {τ : Ty} {ε : Row} {ϕ : List Rgn} :
+      StackOk Δ S st τ ε ϕ → StackOk Δ S (.lend uniq a b :: st) τ ε ϕ
   /-- A pending result takes anything, since it discards it. -/
   | yield {w : Value} {st : List Frame} {σ τ : Ty} {ε : Row} {ϕ : List Rgn} :
       HasVal Δ S w σ → StackOk Δ S st σ ε ϕ → StackOk Δ S (.yield w :: st) τ ε ϕ
@@ -189,6 +192,7 @@ def calleeAtom : Tm → Option Atom
   | .labelTail thunk => some thunk
   | .cancel k _ => some k
   | .cell _ thunk _ => some thunk
+  | .lend _ _ thunk _ => some thunk
   | .cellTail _ thunk => some thunk
   | .ret _ => none
   | .let_ _ _ => none
@@ -212,8 +216,8 @@ inductive Fault : State → Prop where
       Fault ⟨.let_ (.prim p args) body, env, stack, store⟩
   /-- A memory cell is used after it was freed. -/
   | freed {op : MemOp} {args : List Atom} {body : Tm} {env : Env} {stack : List Frame}
-      {store : Store Frame} {a : Nat} {vs : List Value} :
-      evalAtoms env args = some (.ref a :: vs) → store.cells[a]? = some none →
+      {store : Store Frame} {a b : Nat} {vs : List Value} :
+      evalAtoms env args = some (.ref a b :: vs) → store.cells[a]? = some none →
       Fault ⟨.mem op args body, env, stack, store⟩
   /-- A resumption is resumed or cancelled after it was already used. -/
   | resumed {s : State} {f : Atom} {id : Nat} :

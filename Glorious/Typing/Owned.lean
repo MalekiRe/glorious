@@ -28,7 +28,7 @@ def occ (id : Nat) : Value → Nat
   | .clo _ captures => occs id captures
   | .cont k => if k = id then 1 else 0
   | .label _ => 0
-  | .ref _ => 0
+  | .ref _ _ => 0
 
 def occs (id : Nat) : List Value → Nat
   | [] => 0
@@ -485,6 +485,7 @@ def occFrame (id : Nat) : Frame → Nat
   | .label _ => 0
   | .guard _ captures => occs id captures
   | .cell _ => 0
+  | .lend _ _ _ => 0
   | .yield w => occ id w
   | .exit _ after => occAfter id after
 
@@ -695,6 +696,10 @@ theorem calleeAtom_fv {tm : Tm} {i : Nat} (h : calleeAtom tm = some (.var i)) : 
     simp only [calleeAtom, Option.some.injEq] at h
     subst h
     cases init <;> simp [fv, atomVars]
+  | lend uniq r thunk body =>
+    simp only [calleeAtom, Option.some.injEq] at h
+    subst h
+    cases r <;> simp [fv, atomVars]
   | _ => simp [calleeAtom] at h <;> subst h <;> simp [fv, atomVars]
 
 /-- A resumption that some part of the computation is about to use is held, so it is unused. -/

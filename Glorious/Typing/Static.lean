@@ -184,6 +184,7 @@ def fv : Tm → List Nat
   | .cancel k body => atomVars [k] ++ fv body
   | .cell init thunk body => atomVars [init, thunk] ++ fv body
   | .cellTail init thunk => atomVars [init, thunk]
+  | .lend _ r thunk body => atomVars [r, thunk] ++ fv body
   | .mem _ args body => atomVars args ++ fv body
   | .host _ args body => atomVars args ++ fv body
 
@@ -406,6 +407,12 @@ inductive HasTm (Δ : Ctx) (ϕ : List Rgn) : TEnv → Tm → Ty → Row → Prop
       (∀ x, x ∈ acc → (n = 1 ∧ x = .bound 0) ∨ (x.free = true ∧ x ∈ ϕ)) →
       Row.le εt ε → Linear Δ Γ (atomVars [init, thunk]) [] →
       HasTm Δ ϕ Γ (.cellTail init thunk) τ ε
+  /-- Lending a reference runs a callable with a reference to the same cell. -/
+  | lend {Γ : TEnv} {uniq : Bool} {r thunk : Atom} {body : Tm} {ρ : Rgn} {σ ρt τ : Ty}
+      {εt ε : Row} {once : Bool} {env : Option (List Ty)} {acc : List Rgn} :
+      HasAtom Γ r (.ref ρ σ) → HasAtom Γ thunk (.fn 0 [.ref ρ σ] ρt εt once env acc) →
+      Row.le εt ε → Sub acc ϕ → Linear Δ Γ (atomVars [thunk]) (fv body) →
+      HasTm Δ ϕ (Γ ++ [ρt]) body τ ε → HasTm Δ ϕ Γ (.lend uniq r thunk body) τ ε
   /-- Reading a cell copies its value, so the value must be duplicable. A value
   that is not is taken out with `swap`. Under the region rules, reading or
   writing a cell needs its region. -/

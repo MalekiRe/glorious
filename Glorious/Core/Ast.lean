@@ -71,6 +71,12 @@ inductive Tm where
   | cell (init : Atom) (thunk : Atom) (body : Tm)
   /-- `cell` whose result is the result of the current activation. -/
   | cellTail (init : Atom) (thunk : Atom)
+  /-- Lend a reference: run the callable `thunk` with a reference to the same
+  cell that is a borrow of its own, and bind the result. The borrow lasts as
+  long as the scope does; `uniq` says whether it is for writing too. The scope
+  changes nothing the program computes. It is there, with the borrow a
+  reference carries, so that respecting a borrow has a meaning. -/
+  | lend (uniq : Bool) (r : Atom) (thunk : Atom) (body : Tm)
   /-- Perform a memory operation and bind its result. -/
   | mem (op : MemOp) (args : List Atom) (body : Tm)
   /-- Ask the host to perform operation `id` and bind its result. -/

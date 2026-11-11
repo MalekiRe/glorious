@@ -42,6 +42,9 @@ inductive Instr where
   | cell (init : Atom) (thunk : Atom)
   /-- Push the scope of a fresh memory cell and enter `thunk`, reusing the current frame. -/
   | cellTail (init : Atom) (thunk : Atom)
+  /-- Push a return frame and the scope of a new borrow of the cell `r` refers
+  to, then enter `thunk` with a reference that is that borrow. -/
+  | lend (uniq : Bool) (r : Atom) (thunk : Atom)
   /-- Perform a memory operation; its result becomes the next local. -/
   | mem (op : MemOp) (args : List Atom)
   /-- Ask the host to perform operation `id`; its result becomes the next local. -/

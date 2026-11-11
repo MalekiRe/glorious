@@ -1207,6 +1207,17 @@ partial def inferTm (self : Nat) (amb : IRow) (τ : ITy) (Γ : Array ITy) : Core
     let εt ← freshRow
     celled Γ init thunk τ εt
     needs εt [] amb
+  | .lend _ r thunk body => do
+    -- For now a lent reference is the reference: same cell, same region.
+    let ρt ← freshTy
+    let εt ← freshRow
+    let a ← freshAcc
+    unify (← atomTy Γ thunk) (.func [← atomTy Γ r] ρt εt (← freshCls) (← freshTy) a)
+    unify (← atomTy Γ r) (.ref (← freshRg) (← freshTy))
+    needs εt [] amb
+    accSub self a
+    hint (.result ρt ρt)
+    inferTm self amb τ (Γ.push ρt) body
   | .mem op args body => do
     let ts ← args.mapM (atomTy Γ)
     let ρ ← freshRg
@@ -1811,6 +1822,7 @@ partial def tmRefs : Core.Tm → List Nat
   | .label _ body => tmRefs body
   | .labelTail _ => []
   | .cell _ _ body => tmRefs body
+  | .lend _ _ _ body => tmRefs body
   | .cellTail _ _ => []
   | .guard _ _ body => tmRefs body
   | .guardTail _ _ => []
@@ -1877,6 +1889,7 @@ def captureCounts (p : Core.Program) : Array Nat := Id.run do
     | .label _ body => visit out body
     | .labelTail _ => out
     | .cell _ _ body => visit out body
+    | .lend _ _ _ body => visit out body
     | .cellTail _ _ => out
     | .guard _ _ body => visit out body
     | .guardTail _ _ => out

@@ -164,6 +164,34 @@ def escapedLabel : Core.Program where
 theorem escapedLabel_goesWrong : Core.GoesWrong escapedLabel [] := ⟨20, rfl⟩
 
 /--
+Lending a reference: the callable is given a reference to the same cell, as a
+borrow of its own, for as long as it runs.
+```
+bump(r) = r := *r + 1
+body(c) = lend c to bump; *c
+main    = cell 5 in body
+```
+-/
+def lends : Core.Program where
+  fns := [
+    ⟨[ ⟨[.wild],
+          .mem .load [.var 0] <|
+          .let_ (.prim .intAdd [.var 1, .int 1]) <|
+          .mem .store [.var 0, .var 2] <|
+          .ret (.var 3)⟩ ]⟩,
+    ⟨[ ⟨[.wild],
+          .let_ (.closure 0 []) <|
+          .lend true (.var 0) (.var 1) <|
+          .mem .load [.var 0] <|
+          .ret (.var 3)⟩ ]⟩
+  ]
+  main := .let_ (.closure 1 []) <| .cellTail (.int 5) (.var 0)
+
+theorem lends_core : Core.Halts lends [] ⟨.int 6, ⟨[], []⟩⟩ := ⟨40, rfl⟩
+
+theorem lends_bytecode : Bytecode.Halts (compile lends) [] ⟨.int 6, ⟨[], []⟩⟩ := ⟨40, rfl⟩
+
+/--
 Reading and writing through the host.
 ```
 main = let (_, a) = read() in let (_, b) = read() in write(a + b); write(a * b); a + b

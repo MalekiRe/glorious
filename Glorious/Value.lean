@@ -20,8 +20,11 @@ inductive Value where
   | cont (id : Nat)
   /-- A label: the identity of a label scope. -/
   | label (id : Nat)
-  /-- A reference: the address of a memory cell. -/
-  | ref (addr : Nat)
+  /-- A reference: the address of a memory cell, and which borrow of the cell
+  it is. The cell's own reference is borrow zero. Nothing the machine does
+  depends on the borrow: it is there so that what it means for a borrow to be
+  respected can be said. -/
+  | ref (addr : Nat) (borrow : Nat)
 
 /-- The locals of one activation, oldest first. -/
 abbrev Env := List Value
@@ -75,7 +78,7 @@ def follow : Value → List Nat → Option Value
   | .clo _ _, _ :: _ => none
   | .cont _, _ :: _ => none
   | .label _, _ :: _ => none
-  | .ref _, _ :: _ => none
+  | .ref _ _, _ :: _ => none
 
 /-- Is this value built by constructor `tag` with exactly `arity` fields? -/
 def isCtor (v : Value) (tag arity : Nat) : Bool :=
@@ -85,7 +88,7 @@ def isCtor (v : Value) (tag arity : Nat) : Bool :=
   | .clo _ _ => false
   | .cont _ => false
   | .label _ => false
-  | .ref _ => false
+  | .ref _ _ => false
 
 /-- Is this value the integer `n`? -/
 def isInt (v : Value) (n : Int) : Bool :=
@@ -95,7 +98,7 @@ def isInt (v : Value) (n : Int) : Bool :=
   | .clo _ _ => false
   | .cont _ => false
   | .label _ => false
-  | .ref _ => false
+  | .ref _ _ => false
 
 end Value
 

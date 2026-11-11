@@ -77,6 +77,7 @@ def instr : Instr → Bytes
   | .mem op args => 16 :: memOp op ++ list atom args
   | .cell init thunk => 17 :: atom init ++ atom thunk
   | .cellTail init thunk => 18 :: atom init ++ atom thunk
+  | .lend uniq r thunk => 19 :: (if uniq then 1 else 0) :: atom r ++ atom thunk
 
 def code (c : Code) : Bytes := list instr c
 
@@ -87,6 +88,6 @@ def string (s : String) : Bytes := list (fun b => [b.toNat]) s.toUTF8.toList
 /-- A bytecode file: the magic `GLBC`, a format version, the constructor names
 used to print values, and the program. -/
 def file (ctorNames : List String) (p : Program) : Bytes :=
-  [0x47, 0x4C, 0x42, 0x43, 3] ++ list string ctorNames ++ program p
+  [0x47, 0x4C, 0x42, 0x43, 4] ++ list string ctorNames ++ program p
 
 end Glorious.Bytecode.Encode

@@ -632,8 +632,11 @@ can be made to see a change it should not.
 What the rule is not, yet:
 
 - **It is not proved.** It is a check in `Check.lean`, like the checks on
-  scopes that it sits beside. Core's references have one kind and are freely
-  copied.
+  scopes that it sits beside. The kernel has what a proof needs to be stated,
+  but nothing is proved with it yet and the elaborator does not use it: a
+  reference value carries the borrow it is (zero for a variable's own), and
+  `lend` runs a callable with a reference that is a new borrow, inside a frame
+  that marks where the borrow ends. Neither changes what a program computes.
 - An operation that can be resumed, performed while a borrow is held, runs a
   handler's arm; if the arm uses the borrowed variable, that is not noticed.
 - A `&mut` reference is lent only where its type is known when it is used. One

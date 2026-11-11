@@ -171,6 +171,12 @@ theorem StoreOk.push_handler {S : StoreTy} {conts : Conts Frame} {labels : Nat} 
   · obtain ⟨hlt, hv⟩ := hs.cells a τ h
     exact ⟨hlt, fun v hg => (hv v hg).mono hle⟩
 
+/-- Using up an identity that the typing says nothing of. -/
+theorem StoreOk.bump {S : StoreTy} {conts : Conts Frame} {labels : Nat} {cells : Cells}
+    (hs : StoreOk Δ S ⟨conts, labels, cells⟩) : StoreOk Δ S ⟨conts, labels + 1, cells⟩ :=
+  ⟨hs.conts, fun id τ h => Nat.lt_succ_of_lt (hs.labels id τ h),
+    fun id x h => Nat.lt_succ_of_lt (hs.handlers id x h), hs.cells⟩
+
 theorem StoreOk.push_label {S : StoreTy} {conts : Conts Frame} {labels : Nat} {cells : Cells}
     (hs : StoreOk Δ S ⟨conts, labels, cells⟩) (x : Ty) :
     ∃ S', S.Le S' ∧ S'.labels labels = some x ∧ StoreOk Δ S' ⟨conts, labels + 1, cells⟩ := by
@@ -418,7 +424,7 @@ theorem cell_enter {S : StoreTy} {a n : Nat} {r : Rgn} {σ ρ : Ty} {εt : Row}
     (hε : εt.lc = true) (hn : n = 0 ∨ (n = 1 ∧ r = .bound 0))
     (hreg : Δ.regions → n = 1 ∧ r = .bound 0)
     (hacc : ∀ x, x ∈ acc → (n = 1 ∧ x = .bound 0) ∨ (x.free = true ∧ x ∈ ϕ)) (hsub : Sub ϕ ϕ') :
-    ∃ rs, rs.length = n ∧ HasVal Δ S (.ref a) ((Ty.ref r σ).open rs) ∧ ρ.open rs = ρ
+    ∃ rs, rs.length = n ∧ HasVal Δ S (.ref a 0) ((Ty.ref r σ).open rs) ∧ ρ.open rs = ρ
       ∧ εt.open rs = εt ∧ Sub (acc.map (Rgn.openAt 0 rs)) (.cell a :: ϕ') := by
   rcases hn with rfl | ⟨rfl, rfl⟩
   · refine ⟨[], rfl, ?_, Ty.open_nil _, Row.open_nil _, ?_⟩
@@ -784,7 +790,7 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
     obtain ⟨rs, hrs, hl, hρo, hεo, hgrant⟩ :=
       cell_enter (Δ := Δ) hcell hσ hρ hε hn hreg hacc hsub
     obtain ⟨c, hc, hcok, hck, hcl, hocc⟩ :=
-      evalScope_ok (S := S') (l := .ref cells.length) (henv.mono hS) hthunk hrs hl
+      evalScope_ok (S := S') (l := .ref cells.length 0) (henv.mono hS) hthunk hrs hl
     rw [hρo, hεo] at hcok
     have h1 : step p ⟨.cell init thunk body, env, stack, ⟨conts, labels, cells⟩⟩
         = apply p c (.cell cells.length :: .call env body :: stack)
@@ -808,7 +814,7 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
     obtain ⟨rs, hrs, hl, hρo, hεo, hgrant⟩ :=
       cell_enter (Δ := Δ) hcell hσ hτ hε hn hreg hacc hsub
     obtain ⟨c, hc, hcok, hck, hcl, hocc⟩ :=
-      evalScope_ok (S := S') (l := .ref cells.length) (henv.mono hS) hthunk hrs hl
+      evalScope_ok (S := S') (l := .ref cells.length 0) (henv.mono hS) hthunk hrs hl
     rw [hρo, hεo] at hcok
     have h1 : step p ⟨.cellTail init thunk, env, stack, ⟨conts, labels, cells⟩⟩
         = apply p c (.cell cells.length :: stack) ⟨conts, labels, cells ++ [some v]⟩ := by
@@ -825,9 +831,33 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
       omega
     · exact hfa.fault (s := ⟨.cellTail init thunk, env, stack, ⟨conts, labels, cells⟩⟩) rfl hck
         hcl rfl (fun _ h => findLabel_cons_none h)
+  | @lend _ uniq r thunk body ρ σ ρt _ εt _ once fenv acc hr hthunk hrow hacc hlin hbody =>
+    obtain ⟨rv, hrv, hrt⟩ := atom_ok henv hr
+    obtain ⟨a, b, rfl, hcell, hreg⟩ := hrt.ref_inv
+    obtain ⟨c, hc, hcok, hck, hcl, hocc⟩ :=
+      evalScope_ok (S := S) (l := .ref a (labels + 1)) (rs := []) henv hthunk rfl
+        (by rw [Ty.open_nil]; exact .ref hcell hreg)
+    rw [Ty.open_nil, Row.open_nil, acc_open_nil] at hcok
+    have h1 : step p ⟨.lend uniq r thunk body, env, stack, ⟨conts, labels, cells⟩⟩
+        = apply p c (.lend uniq a (labels + 1) :: .call env body :: stack)
+            ⟨conts, labels + 1, cells⟩ := by
+      simp [step, evalLend, hrv, hc]
+    rw [h1]
+    refine .of_apply
+      (apply_ok hp hs.bump hcok (.lend (.call henv hbody hle hsub hst))
+        (Row.le_trans hrow hle) (hacc.trans hsub)) rfl (fun hD id => ?_) (fun hfa => ?_)
+    · have h2 := moved_live hD henv hlin (live := fv (.lend uniq r thunk body))
+        (fun i hi => by
+          rcases List.mem_append.mp hi with h | h
+          · exact List.mem_append_left _ (atomVars_tail_sub h)
+          · exact List.mem_append_right _ h) id
+      simp only [hocc id, occ, occStack, occFrame]
+      omega
+    · exact hfa.fault (s := ⟨.lend uniq r thunk body, env, stack, ⟨conts, labels, cells⟩⟩) rfl hck
+        hcl rfl (fun _ h => findLabel_cons_none (findLabel_cons_none h))
   | @load _ a body r σ _ _ ha _ hdup hbody =>
     obtain ⟨v, hv, hvt⟩ := atom_ok henv ha
-    obtain ⟨addr, rfl, hcell, _⟩ := hvt.ref_inv
+    obtain ⟨addr, tag, rfl, hcell, _⟩ := hvt.ref_inv
     obtain ⟨hlt, hval⟩ := hs.cells addr σ hcell
     cases hget : cells[addr]? with
     | none => exact absurd hlt (by simpa using List.getElem?_eq_none_iff.mp hget)
@@ -837,7 +867,7 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
         have h1 : step p ⟨.mem .load [a] body, env, stack, ⟨conts, labels, cells⟩⟩ = .stuck := by
           simp [step, evalAtoms, hv, MemOp.eval, hget]
         rw [h1]
-        exact Fault.freed (a := addr) (vs := []) (by simp [evalAtoms, hv]) hget
+        exact Fault.freed (a := addr) (b := tag) (vs := []) (by simp [evalAtoms, hv]) hget
       | some w =>
         have h1 : step p ⟨.mem .load [a] body, env, stack, ⟨conts, labels, cells⟩⟩
             = .next ⟨body, env ++ [w], stack, ⟨conts, labels, cells⟩⟩ := by
@@ -854,7 +884,7 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
   | @store _ a b body r σ _ _ ha _ hb hlin hbody =>
     obtain ⟨v, hv, hvt⟩ := atom_ok henv ha
     obtain ⟨w, hw, hwt⟩ := atom_ok henv hb
-    obtain ⟨addr, rfl, hcell, _⟩ := hvt.ref_inv
+    obtain ⟨addr, tag, rfl, hcell, _⟩ := hvt.ref_inv
     obtain ⟨hlt, hval⟩ := hs.cells addr σ hcell
     cases hget : cells[addr]? with
     | none => exact absurd hlt (by simpa using List.getElem?_eq_none_iff.mp hget)
@@ -865,7 +895,7 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
             = .stuck := by
           simp [step, evalAtoms, hv, hw, MemOp.eval, hget]
         rw [h1]
-        exact Fault.freed (a := addr) (vs := [w]) (by simp [evalAtoms, hv, hw]) hget
+        exact Fault.freed (a := addr) (b := tag) (vs := [w]) (by simp [evalAtoms, hv, hw]) hget
       | some old =>
         have h1 : step p ⟨.mem .store [a, b] body, env, stack, ⟨conts, labels, cells⟩⟩
             = .next ⟨body, env ++ [Value.unit], stack,
@@ -890,7 +920,7 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
   | @swap _ a b body r σ _ _ ha _ hb hlin hbody =>
     obtain ⟨v, hv, hvt⟩ := atom_ok henv ha
     obtain ⟨w, hw, hwt⟩ := atom_ok henv hb
-    obtain ⟨addr, rfl, hcell, _⟩ := hvt.ref_inv
+    obtain ⟨addr, tag, rfl, hcell, _⟩ := hvt.ref_inv
     obtain ⟨hlt, hval⟩ := hs.cells addr σ hcell
     cases hget : cells[addr]? with
     | none => exact absurd hlt (by simpa using List.getElem?_eq_none_iff.mp hget)
@@ -901,7 +931,7 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
             = .stuck := by
           simp [step, evalAtoms, hv, hw, MemOp.eval, hget]
         rw [h1]
-        exact Fault.freed (a := addr) (vs := [w]) (by simp [evalAtoms, hv, hw]) hget
+        exact Fault.freed (a := addr) (b := tag) (vs := [w]) (by simp [evalAtoms, hv, hw]) hget
       | some old =>
         have h1 : step p ⟨.mem .swap [a, b] body, env, stack, ⟨conts, labels, cells⟩⟩
             = .next ⟨body, env ++ [old], stack,
