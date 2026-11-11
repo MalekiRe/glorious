@@ -27,6 +27,11 @@ inductive Rgn where
   | cell (a : Nat)
   /-- At run time: the label scope with this identity. -/
   | lab (id : Nat)
+  /-- At run time: the borrow with this identity. -/
+  | loan (b : Nat)
+  /-- Not a place but a permission: to write what `r` is. Being allowed to
+  touch `r` is being allowed to read it. -/
+  | wr (r : Rgn)
   deriving DecidableEq
 
 inductive Ty where
@@ -72,17 +77,21 @@ def free : Rgn → Bool
   | .var _ => true
   | .cell _ => true
   | .lab _ => true
+  | .loan _ => true
+  | .wr r => r.free
 
 /-- A region to put in place of another: never one that would be bound where
-it lands. -/
+it lands, and a place, not a permission. -/
 def clean : Option Rgn → Rgn
   | some (.bound _) => .cell 0
+  | some (.wr _) => .cell 0
   | some r => r
   | none => .cell 0
 
 /-- Put regions in place of a function's region variables. -/
 def inst (θ : List Rgn) : Rgn → Rgn
   | .var i => clean θ[i]?
+  | .wr r => .wr (inst θ r)
   | r => r
 
 /-- Put regions in place of those bound by the outermost callable type, seen
@@ -94,6 +103,7 @@ def openAt (d : Nat) (rs : List Rgn) : Rgn → Rgn
       match rs[j - d]? with
       | some r => clean (some r)
       | none => .bound (j - rs.length)
+  | .wr r => .wr (openAt d rs r)
   | r => r
 
 theorem clean_free (o : Option Rgn) : (clean o).free = true := by
@@ -107,25 +117,29 @@ theorem clean_clean (o : Option Rgn) : clean (some (clean o)) = clean o := by
   | some r => cases r <;> rfl
 
 theorem inst_free (θ : List Rgn) (r : Rgn) : (r.inst θ).free = r.free := by
-  cases r with
+  induction r with
   | var i => exact clean_free _
   | bound k => rfl
   | cell a => rfl
   | lab id => rfl
+  | loan b => rfl
+  | wr r ih => exact ih
 
 /-- Opening leaves a region that is not bound alone. -/
 theorem openAt_free {r : Rgn} (h : r.free = true) (d : Nat) (rs : List Rgn) :
     r.openAt d rs = r := by
-  cases r with
+  induction r with
   | var i => rfl
   | bound k => cases h
   | cell a => rfl
   | lab id => rfl
+  | loan b => rfl
+  | wr r ih => exact congrArg Rgn.wr (ih h)
 
 /-- Instantiating twice is instantiating once, by the regions instantiated. -/
 theorem inst_inst (θ η : List Rgn) (r : Rgn) :
     (r.inst θ).inst η = r.inst (θ.map (inst η)) := by
-  cases r with
+  induction r with
   | var i =>
     show (clean θ[i]?).inst η = clean ((θ.map (inst η))[i]?)
     rw [List.getElem?_map]
@@ -137,14 +151,18 @@ theorem inst_inst (θ η : List Rgn) (r : Rgn) :
       | bound k => rfl
       | cell a => rfl
       | lab id => rfl
+      | loan b => rfl
+      | wr y => rfl
   | bound k => rfl
   | cell a => rfl
   | lab id => rfl
+  | loan b => rfl
+  | wr r ih => exact congrArg Rgn.wr ih
 
 /-- Opening and then instantiating is instantiating and then opening. -/
 theorem openAt_inst (d : Nat) (rs η : List Rgn) (r : Rgn) :
     (r.openAt d rs).inst η = (r.inst η).openAt d (rs.map (inst η)) := by
-  cases r with
+  induction r with
   | var i => exact (openAt_free (clean_free _) d _).symm
   | bound j =>
     by_cases hj : j < d
@@ -163,17 +181,23 @@ theorem openAt_inst (d : Nat) (rs η : List Rgn) (r : Rgn) :
         | bound k => rfl
         | cell a => rfl
         | lab id => rfl
+        | loan b => rfl
+        | wr y => rfl
   | cell a => rfl
   | lab id => rfl
+  | loan b => rfl
+  | wr r ih => exact congrArg Rgn.wr ih
 
 /-- Opening with no regions changes nothing. -/
 theorem openAt_nil (d : Nat) (r : Rgn) : r.openAt d [] = r := by
-  cases r with
+  induction r with
   | var i => rfl
   | bound j =>
     by_cases hj : j < d <;> simp [openAt, hj]
   | cell a => rfl
   | lab id => rfl
+  | loan b => rfl
+  | wr r ih => exact congrArg Rgn.wr ih
 
 /-- The variables a function's call regions are opened to in its body: those
 after its `c` capture regions. -/
@@ -187,13 +211,15 @@ def within (c : Nat) : Rgn → Bool
   | .bound _ => true
   | .cell _ => true
   | .lab _ => true
+  | .loan _ => true
+  | .wr r => within c r
 
 /-- A function's body is typed with its call regions as variables. Entered
 with capture regions `θ` and call regions `rs`, a region of its signature means
 what the signature's type, instantiated and opened, says. -/
 theorem open_callVars_inst (d : Nat) (θ rs : List Rgn) (r : Rgn) (hr : r.within θ.length = true) :
     (r.openAt d (callVars θ.length rs.length)).inst (θ ++ rs) = (r.inst θ).openAt d rs := by
-  cases r with
+  induction r with
   | var i =>
     have hi : i < θ.length := by simpa [within] using hr
     show clean (θ ++ rs)[i]? = (clean θ[i]?).openAt d rs
@@ -227,6 +253,43 @@ theorem open_callVars_inst (d : Nat) (θ rs : List Rgn) (r : Rgn) (hr : r.within
         simp [openAt, hj, h1, h2, inst, callVars_length]
   | cell a => rfl
   | lab id => rfl
+  | loan b => rfl
+  | wr r ih => exact congrArg Rgn.wr (ih hr)
+
+/-- A region that is bound is left as it is. -/
+theorem inst_bound {r : Rgn} (h : r.free = false) (θ : List Rgn) : r.inst θ = r := by
+  induction r with
+  | var i => cases h
+  | bound k => rfl
+  | cell a => cases h
+  | lab id => cases h
+  | loan b => cases h
+  | wr r ih => exact congrArg Rgn.wr (ih h)
+
+/-- No part of the region is bound more than `d` callable types out. -/
+def lcAt (d : Nat) : Rgn → Bool
+  | .bound j => decide (j < d)
+  | .wr r => lcAt d r
+  | _ => true
+
+theorem lcAt_inst {d : Nat} {r : Rgn} (h : r.lcAt d = true) (θ : List Rgn) :
+    (r.inst θ).lcAt d = true := by
+  induction r with
+  | var i =>
+    have := clean_free θ[i]?
+    show (clean θ[i]?).lcAt d = true
+    cases hc : clean θ[i]? with
+    | bound k => rw [hc] at this; cases this
+    | wr y =>
+      cases hθ : θ[i]? with
+      | none => rw [hθ] at hc; cases hc
+      | some x => rw [hθ] at hc; cases x <;> cases hc
+    | _ => rfl
+  | bound k => exact h
+  | cell a => rfl
+  | lab id => rfl
+  | loan b => rfl
+  | wr r ih => exact ih h
 
 end Rgn
 
@@ -645,29 +708,21 @@ theorem Row.le_inst {a b : Row} (h : Row.le a b) (θ : List Rgn) :
 /-! ## Types with no dangling bound region, and types of a signature -/
 
 /-- No region of the type is bound outside it. -/
-def Ty.lc (t : Ty) : Bool :=
-  (Ty.regionsAt 0 t).all fun x =>
-    match x.2 with
-    | .bound j => decide (j < x.1)
-    | _ => true
+def Ty.lc (t : Ty) : Bool := (Ty.regionsAt 0 t).all fun x => x.2.lcAt x.1
 
-def Row.lc (e : Row) : Bool :=
-  (Ty.regionsRow 0 e).all fun x =>
-    match x.2 with
-    | .bound j => decide (j < x.1)
-    | _ => true
+def Row.lc (e : Row) : Bool := (Ty.regionsRow 0 e).all fun x => x.2.lcAt x.1
 
-theorem Rgn.openAt_lc {d : Nat} {r : Rgn} (rs : List Rgn)
-    (h : (match r with
-      | .bound j => decide (j < d)
-      | _ => true) = true) : r.openAt d rs = r := by
-  cases r with
+theorem Rgn.openAt_lc {d : Nat} {r : Rgn} (rs : List Rgn) (h : r.lcAt d = true) :
+    r.openAt d rs = r := by
+  induction r with
   | var i => rfl
   | bound j =>
-    have hj : j < d := by simpa using h
+    have hj : j < d := by simpa [Rgn.lcAt] using h
     simp [Rgn.openAt, hj]
   | cell a => rfl
   | lab id => rfl
+  | loan b => rfl
+  | wr r ih => exact congrArg Rgn.wr (ih h)
 
 /-- Opening a type none of whose regions is bound outside it changes nothing. -/
 theorem Ty.open_lc {t : Ty} (h : t.lc = true) (rs : List Rgn) : t.open rs = t := by
@@ -682,37 +737,11 @@ theorem Row.open_lc {e : Row} (h : e.lc = true) (rs : List Rgn) : e.open rs = e 
 
 theorem Ty.lc_inst {t : Ty} (h : t.lc = true) (θ : List Rgn) : (t.inst θ).lc = true := by
   simp only [Ty.lc, Ty.inst, Ty.regionsAt_mapR, List.all_map] at h ⊢
-  refine List.all_eq_true.mpr fun x hx => ?_
-  have hx' := List.all_eq_true.mp h x hx
-  cases hr : x.2 with
-  | var i =>
-    have := Rgn.clean_free θ[i]?
-    simp only [Function.comp, hr, Rgn.inst]
-    cases hc : Rgn.clean θ[i]? with
-    | var j => rfl
-    | bound k => rw [hc] at this; cases this
-    | cell a => rfl
-    | lab id => rfl
-  | bound j => simpa [Function.comp, hr, Rgn.inst] using hx'
-  | cell a => simp [Function.comp, hr, Rgn.inst]
-  | lab id => simp [Function.comp, hr, Rgn.inst]
+  exact List.all_eq_true.mpr fun x hx => Rgn.lcAt_inst (List.all_eq_true.mp h x hx) θ
 
 theorem Row.lc_inst {e : Row} (h : e.lc = true) (θ : List Rgn) : (e.inst θ).lc = true := by
   simp only [Row.lc, Row.inst, Ty.regionsRow_mapRow, List.all_map] at h ⊢
-  refine List.all_eq_true.mpr fun x hx => ?_
-  have hx' := List.all_eq_true.mp h x hx
-  cases hr : x.2 with
-  | var i =>
-    have := Rgn.clean_free θ[i]?
-    simp only [Function.comp, hr, Rgn.inst]
-    cases hc : Rgn.clean θ[i]? with
-    | var j => rfl
-    | bound k => rw [hc] at this; cases this
-    | cell a => rfl
-    | lab id => rfl
-  | bound j => simpa [Function.comp, hr, Rgn.inst] using hx'
-  | cell a => simp [Function.comp, hr, Rgn.inst]
-  | lab id => simp [Function.comp, hr, Rgn.inst]
+  exact List.all_eq_true.mpr fun x hx => Rgn.lcAt_inst (List.all_eq_true.mp h x hx) θ
 
 /-- Every region variable of the type is below `c`. -/
 def Ty.within (c : Nat) (t : Ty) : Bool := (Ty.regionsAt 0 t).all fun x => x.2.within c
@@ -721,7 +750,7 @@ def Row.within (c : Nat) (e : Row) : Bool := (Ty.regionsRow 0 e).all fun x => x.
 
 theorem Rgn.inst_append {θ : List Rgn} {r : Rgn} (h : r.within θ.length = true) (rs : List Rgn) :
     r.inst (θ ++ rs) = r.inst θ := by
-  cases r with
+  induction r with
   | var i =>
     have hi : i < θ.length := by simpa [Rgn.within] using h
     show Rgn.clean (θ ++ rs)[i]? = Rgn.clean θ[i]?
@@ -729,6 +758,8 @@ theorem Rgn.inst_append {θ : List Rgn} {r : Rgn} (h : r.within θ.length = true
   | bound k => rfl
   | cell a => rfl
   | lab id => rfl
+  | loan b => rfl
+  | wr r ih => exact congrArg Rgn.wr (ih h)
 
 theorem Ty.inst_append {θ : List Rgn} {t : Ty} (h : t.within θ.length = true) (rs : List Rgn) :
     t.inst (θ ++ rs) = t.inst θ :=
@@ -769,7 +800,10 @@ theorem Ty.shape_inst (θ : List Rgn) (t : Ty) : (t.inst θ).shape = t.shape := 
   congr 1
   funext _ r
   rw [Rgn.inst_free]
-  cases r <;> simp [Rgn.free, Rgn.inst]
+  by_cases hf : r.free = true
+  · simp [hf]
+  · have hf' : r.free = false := by simpa using hf
+    simp [hf', Rgn.inst_bound hf']
 
 theorem Ty.frees_inst (θ : List Rgn) (t : Ty) : (t.inst θ).frees = t.frees.map (Rgn.inst θ) := by
   simp only [Ty.frees, Ty.inst, Ty.regionsAt_mapR, List.map_map, List.filter_map]

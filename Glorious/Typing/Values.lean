@@ -29,12 +29,13 @@ theorem Row.le_append_left (a b : Row) : Row.le a (a ++ b) := fun op sig h => by
   rfl
 
 theorem StoreTy.Le.refl (S : StoreTy) : S.Le S :=
-  ⟨fun _ _ h => h, fun _ _ h => h, fun _ _ h => h, fun _ _ h => h⟩
+  ⟨fun _ _ h => h, fun _ _ h => h, fun _ _ h => h, fun _ _ h => h, fun _ _ h => h⟩
 
 theorem StoreTy.Le.trans {S₁ S₂ S₃ : StoreTy} (h₁ : S₁.Le S₂) (h₂ : S₂.Le S₃) : S₁.Le S₃ :=
   ⟨fun id x h => h₂.conts id x (h₁.conts id x h), fun id x h => h₂.labels id x (h₁.labels id x h),
     fun id x h => h₂.handlers id x (h₁.handlers id x h),
-    fun id x h => h₂.cells id x (h₁.cells id x h)⟩
+    fun id x h => h₂.cells id x (h₁.cells id x h),
+    fun id x h => h₂.loans id x (h₁.loans id x h)⟩
 
 /-! ## Values -/
 
@@ -48,7 +49,8 @@ theorem HasVal.mono {S S' : StoreTy} (hle : S.Le S') :
   | _, _, .clo hsig hθ hc hq he hτ => .clo hsig hθ (HasVals.mono hle hc) hq he hτ
   | _, _, .cont h => .cont (hle.conts _ _ h)
   | _, _, .label h hr => .label (hle.labels _ _ h) hr
-  | _, _, .ref h hr => .ref (hle.cells _ _ h) hr
+  | _, _, .ref h hr hl =>
+    .ref (hle.cells _ _ h) (fun hR => (hr hR).mono hle) (fun hR hL => (hl hR hL).mono hle)
 
 theorem HasVals.mono {S S' : StoreTy} (hle : S.Le S') :
     ∀ {vs : List Value} {τs : List Ty}, HasVals Δ S vs τs → HasVals Δ S' vs τs
@@ -115,9 +117,10 @@ theorem HasVal.int_inv {S : StoreTy} {v : Value} (h : HasVal Δ S v .int) : ∃ 
 
 theorem HasVal.ref_inv {S : StoreTy} {v : Value} {r : Rgn} {τ : Ty}
     (h : HasVal Δ S v (.ref r τ)) :
-    ∃ a b, v = .ref a b ∧ S.cells a = some τ ∧ (Δ.regions → r = .cell a) := by
+    ∃ a b, v = .ref a b ∧ S.cells a = some τ ∧ (Δ.regions → OnCell S r a)
+      ∧ (Δ.regions → Δ.loans → Tagged S r a b) := by
   cases h with
-  | ref ha hr => exact ⟨_, _, rfl, ha, hr⟩
+  | ref ha hr hl => exact ⟨_, _, rfl, ha, hr, hl⟩
   | data hc _ => exact hc.not_ref.elim
   | clo _ _ _ _ _ hτ => cases hτ
 
@@ -426,12 +429,13 @@ theorem callFn_safe {p : Program} {S : StoreTy} {fn : Nat} {sig : FnSig} {θ rs 
     (hv : HasVals Δ S vs ((sig.params.map (Ty.inst θ)).map (Ty.open rs)))
     (hle : Row.le ((sig.eff.inst θ).open rs) ε)
     (hacc : Sub ((sig.acc.map (Rgn.inst θ)).map (Rgn.openAt 0 rs)) ϕ)
+    (hnd : Δ.loans → ((sig.acc.map (Rgn.inst θ)).map (Rgn.openAt 0 rs)).Nodup)
     (hst : StackOk Δ S st ((sig.ret.inst θ).open rs) ε ϕ) (hs : StoreOk Δ S store) :
     Safe Δ S (fun id => occs id vs + occs id captures + occStack id st) store
       (callFn p fn captures vs st store) := by
   obtain ⟨hwf, F, hF, hty, hex⟩ := hp.fns fn sig hsig
   simp only [FnSig.wf, Bool.and_eq_true, List.all_eq_true] at hwf
-  obtain ⟨⟨⟨⟨hwc, hwp⟩, hwr⟩, hwe⟩, hwa⟩ := hwf
+  obtain ⟨⟨⟨⟨⟨hwc, hwp⟩, hwr⟩, hwe⟩, hwa⟩, hcl⟩ := hwf
   have hvars : sig.vars = Rgn.callVars θ.length rs.length := by simp [FnSig.vars, hθ, hrs]
   have hparams : (sig.params.map (Ty.open sig.vars)).map (Ty.inst (θ ++ rs))
       = (sig.params.map (Ty.inst θ)).map (Ty.open rs) := by
@@ -461,7 +465,8 @@ theorem callFn_safe {p : Program} {S : StoreTy} {fn : Nat} {sig : FnSig} {θ rs 
     obtain ⟨c, hcm, rfl, hm, hlen⟩ := select_mem F.clauses hsel
     obtain ⟨⟨Bs, hpats, hbody⟩, hwild⟩ := hty c hcm
     have hbs := (hpats.inst hp.stable (θ ++ rs)).binds hv' hm
-    have hb := hbody.inst hp.stable (θ ++ rs)
+    have hb := hbody.inst hp.stable (θ ++ rs) fun hL =>
+      ⟨InjOn.of_nodup (by rw [hac]; exact hnd hL), closed_open (by simpa [closed] using hcl) _ _⟩
     rw [List.map_append, List.map_append, hcaps, hret, heff, hac] at hb
     have h1 : callFn p fn captures vs st store = .next ⟨c.body, vs ++ captures ++ bs, st, store⟩ := by
       simp [callFn, invoke, hF, hsel]
@@ -481,7 +486,7 @@ theorem enter_safe {p : Program} {S : StoreTy} {fn : Nat} {Cs Ps : List Ty} {ρ 
     (hst : StackOk Δ S st ρ ε ϕ) (hs : StoreOk Δ S store) :
     Safe Δ S (fun id => occs id vs + occs id captures + occStack id st) store
       (callFn p fn captures vs st store) := by
-  obtain ⟨sig, θ, hsig, hθ, hr, rfl, rfl, rfl, hrow, hsub⟩ := he
+  obtain ⟨sig, θ, hsig, hθ, hr, rfl, rfl, rfl, hrow, hsub, hnd⟩ := he
   have hps : (sig.params.map (Ty.inst θ)).map (Ty.open []) = sig.params.map (Ty.inst θ) := by
     rw [List.map_map]
     exact List.map_congr_left fun t _ => Ty.open_nil _
@@ -490,6 +495,7 @@ theorem enter_safe {p : Program} {S : StoreTy} {fn : Nat} {Cs Ps : List Ty} {ρ 
     exact List.map_congr_left fun r _ => Rgn.openAt_nil 0 _
   exact callFn_safe (rs := []) (ε := ε) (ϕ := ϕ) hp hsig hθ (by simp [hr]) hc
     (by rw [hps]; exact hv) (by rw [Row.open_nil]; exact Row.le_trans hrow hle)
-    (by rw [hac]; exact hsub.trans hΦ) (by rw [Ty.open_nil]; exact hst) hs
+    (by rw [hac]; exact hsub.trans hΦ) (by rw [hac]; exact hnd)
+    (by rw [Ty.open_nil]; exact hst) hs
 
 end Glorious.Typing

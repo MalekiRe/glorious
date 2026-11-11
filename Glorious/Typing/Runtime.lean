@@ -31,6 +31,8 @@ structure StoreTy where
   handlers : Nat → Option (Ty × Row × List Rgn)
   /-- A memory cell: the type of its contents. -/
   cells : Nat → Option Ty
+  /-- A borrow: the address of the cell it is a borrow of. -/
+  loans : Nat → Option Nat
 
 /-- `S'` knows everything `S` knows. -/
 structure StoreTy.Le (S S' : StoreTy) : Prop where
@@ -38,6 +40,59 @@ structure StoreTy.Le (S S' : StoreTy) : Prop where
   labels : ∀ id x, S.labels id = some x → S'.labels id = some x
   handlers : ∀ id x, S.handlers id = some x → S'.handlers id = some x
   cells : ∀ id x, S.cells id = some x → S'.cells id = some x
+  loans : ∀ id x, S.loans id = some x → S'.loans id = some x
+
+/-- The region is of the cell at `a`: the cell's own, or that of a borrow of it. -/
+def OnCell (S : StoreTy) (r : Rgn) (a : Nat) : Prop :=
+  r = .cell a ∨ ∃ b, r = .loan b ∧ S.loans b = some a
+
+/-- The reference to the cell at `a` that is borrow `b` is of the region `r`:
+the cell's own reference is of the cell's region, and a borrow's of the borrow's. -/
+def Tagged (S : StoreTy) (r : Rgn) (a b : Nat) : Prop :=
+  (r = .cell a ∧ b = 0) ∨ (r = .loan b ∧ S.loans b = some a)
+
+theorem Tagged.onCell {S : StoreTy} {r : Rgn} {a b : Nat} (h : Tagged S r a b) : OnCell S r a := by
+  rcases h with ⟨h, _⟩ | ⟨h, hl⟩
+  · exact .inl h
+  · exact .inr ⟨b, h, hl⟩
+
+theorem OnCell.mono {S S' : StoreTy} (hle : S.Le S') {r : Rgn} {a : Nat} (h : OnCell S r a) :
+    OnCell S' r a := by
+  rcases h with h | ⟨b, h, hl⟩
+  · exact .inl h
+  · exact .inr ⟨b, h, hle.loans _ _ hl⟩
+
+theorem Tagged.mono {S S' : StoreTy} (hle : S.Le S') {r : Rgn} {a b : Nat} (h : Tagged S r a b) :
+    Tagged S' r a b := by
+  rcases h with h | ⟨h, hl⟩
+  · exact .inl h
+  · exact .inr ⟨h, hle.loans _ _ hl⟩
+
+/-- What the code above a borrow's scope may touch: the borrow, to write too if
+it is one for writing, and whatever the code below may, except that it may not
+write what was lent, nor read it if it was lent for writing. -/
+def lent (uniq : Bool) (ρ : Rgn) (b : Nat) (ϕ : List Rgn) : List Rgn :=
+  .loan b :: ((if uniq then [.wr (.loan b)] else [])
+    ++ ϕ.filter fun x =>
+      x != .wr ρ && (!uniq || x != ρ) && x != .loan b && x != .wr (.loan b))
+
+/-- The region is of something the store typing knows. -/
+def Known (S : StoreTy) : Rgn → Prop
+  | .cell a => ∃ τ, S.cells a = some τ
+  | .lab id => ∃ τ, S.labels id = some τ
+  | .loan b => ∃ a, S.loans b = some a
+  | .wr r => Known S r
+  | .var _ => False
+  | .bound _ => False
+
+theorem Known.mono {S S' : StoreTy} (hle : S.Le S') {r : Rgn} (h : Known S r) : Known S' r := by
+  induction r with
+  | var i => exact h
+  | bound k => exact h
+  | cell a => exact h.imp fun τ h => hle.cells _ _ h
+  | lab id => exact h.imp fun τ h => hle.labels _ _ h
+  | loan b => exact h.imp fun a h => hle.loans _ _ h
+  | wr r ih => exact ih h
 
 mutual
 
@@ -65,9 +120,12 @@ inductive HasVal (Δ : Ctx) (S : StoreTy) : Value → Ty → Prop where
   | label {id : Nat} {σ ρ : Ty} {ε : Row} {once : Bool} {acc : List Rgn} :
       S.labels id = some σ → (Δ.regions → .lab id ∈ acc) →
       HasVal Δ S (.label id) (.fn 0 [σ] ρ ε once none acc)
-  /-- Under the region rules a reference's region is the cell it points to. -/
+  /-- Under the region rules a reference's region is of the cell it points to;
+  under the rules for borrows it is the region of the borrow the reference is. -/
   | ref {a b : Nat} {r : Rgn} {τ : Ty} :
-      S.cells a = some τ → (Δ.regions → r = .cell a) → HasVal Δ S (.ref a b) (.ref r τ)
+      S.cells a = some τ → (Δ.regions → OnCell S r a) →
+      (Δ.regions → Δ.loans → Tagged S r a b) →
+      HasVal Δ S (.ref a b) (.ref r τ)
 
 inductive HasVals (Δ : Ctx) (S : StoreTy) : List Value → List Ty → Prop where
   | nil : HasVals Δ S [] []
@@ -121,12 +179,22 @@ inductive StackOk (Δ : Ctx) (S : StoreTy) : List Frame → Ty → Row → List 
       {ε : Row} {ϕ : List Rgn} :
       Enters Δ fn Cs [] σc [] ϕ → HasVals Δ S captures Cs → StackOk Δ S st τ ε ϕ →
       StackOk Δ S (.guard fn captures :: st) τ ε ϕ
-  /-- The scope of a cell passes its result on, and grants its cell. -/
-  | cell {a : Nat} {st : List Frame} {τ : Ty} {ε : Row} {ϕ : List Rgn} :
-      StackOk Δ S st τ ε ϕ → StackOk Δ S (.cell a :: st) τ ε (.cell a :: ϕ)
-  /-- The scope of a borrow passes its result on. -/
-  | lend {uniq : Bool} {a b : Nat} {st : List Frame} {τ : Ty} {ε : Row} {ϕ : List Rgn} :
-      StackOk Δ S st τ ε ϕ → StackOk Δ S (.lend uniq a b :: st) τ ε ϕ
+  /-- The scope of a cell passes its result on, and grants its cell, to read
+  and to write. -/
+  | cell {a : Nat} {st : List Frame} {σ τ : Ty} {ε : Row} {ϕ : List Rgn} :
+      S.cells a = some σ → StackOk Δ S st τ ε ϕ →
+      StackOk Δ S (.cell a :: st) τ ε (.cell a :: .wr (.cell a) :: ϕ)
+  /-- The scope of a borrow passes its result on. It grants the borrow, and
+  takes away what was lent: `ρ`, which the code below could touch. -/
+  | lend {uniq : Bool} {a b : Nat} {st : List Frame} {τ : Ty} {ε : Row} {ϕ : List Rgn}
+      {ρ : Rgn} :
+      S.loans b = some a → 0 < b → OnCell S ρ a → ρ ∈ ϕ → (uniq = true → .wr ρ ∈ ϕ) →
+      StackOk Δ S st τ ε ϕ → StackOk Δ S (.lend uniq a b :: st) τ ε (lent uniq ρ b ϕ)
+  /-- Without the rules for borrows it takes nothing away. -/
+  | lendLoose {uniq : Bool} {a b : Nat} {st : List Frame} {τ : Ty} {ε : Row} {ϕ : List Rgn} :
+      ¬ (Δ.regions ∧ Δ.loans) → S.loans b = some a → (Δ.regions → ∃ ρ, OnCell S ρ a ∧ ρ ∈ ϕ) →
+      StackOk Δ S st τ ε ϕ →
+      StackOk Δ S (.lend uniq a b :: st) τ ε (.loan b :: .wr (.loan b) :: ϕ)
   /-- A pending result takes anything, since it discards it. -/
   | yield {w : Value} {st : List Frame} {σ τ : Ty} {ε : Row} {ϕ : List Rgn} :
       HasVal Δ S w σ → StackOk Δ S st σ ε ϕ → StackOk Δ S (.yield w :: st) τ ε ϕ
@@ -159,6 +227,7 @@ structure StoreOk (Δ : Ctx) (S : StoreTy) (store : Store Frame) : Prop where
   handlers : ∀ id x, S.handlers id = some x → id < store.labels
   cells : ∀ a τ, S.cells a = some τ →
     a < store.cells.length ∧ ∀ v, store.cells[a]? = some (some v) → HasVal Δ S v τ
+  loans : ∀ b a, S.loans b = some a → b ≤ store.labels
 
 /-- A machine state is well typed under a store typing. Its code may touch
 regions the stack grants. -/

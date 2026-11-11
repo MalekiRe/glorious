@@ -1,5 +1,6 @@
 import Glorious.Typing.Covers
 import Glorious.Typing.Compiled
+import Glorious.Typing.Loans
 
 /-!
 # Checking a whole program
@@ -139,7 +140,7 @@ theorem dup_occ (hs : C.strict = true) (hd : dataOk C = true) :
     · exact h
   | _, _, _, .cont _, hdup, _ => by simp [dupTy] at hdup
   | _, _, _, .label _ _, _, id => by simp [occ]
-  | _, _, _, .ref _ _, _, id => by simp [occ]
+  | _, _, _, .ref _ _ _, _, id => by simp [occ]
 
 theorem dups_occ (hs : C.strict = true) (hd : dataOk C = true) :
     ∀ {S : StoreTy} {vs : List Value} {τs : List Ty}, HasVals C.ctx S vs τs →
@@ -225,6 +226,19 @@ theorem checked_compiled_scoped_safety {p : Program} (h : checkProgram C p = tru
     ∃ c, Machine.Reaches (stepIO p) (initIO p input) c ∧ stepIO p c = .stuck ∧ Fault c.state
       ∧ ¬ Freed c.state ∧ ¬ Dead c.state :=
   compiled_scoped_safety (checkProgram_sound h) hr input hw
+
+/--
+**Exclusive borrows, checked.** If the certificate asks for the region rules
+and the rules for borrows and the checker accepts, the program never reaches a
+state about to use a reference it may not: it reads, writes and lends a cell
+only through a reference that no newer borrow in scope excludes, and through no
+borrow whose scope has ended. Nothing is assumed about the certificate or the
+program.
+-/
+theorem checked_exclusive_safety {p : Program} (h : checkProgram C p = true)
+    (hr : C.regions = true) (hl : C.loans = true) (input : List Int) {c : Config}
+    (hc : Machine.Reaches (stepIO p) (initIO p input) c) : ¬ Aliased c.state :=
+  exclusive_safety (checkProgram_sound h) hr hl input hc
 
 /--
 **Soundness, checked.** If the certificate asks for the ownership rules and

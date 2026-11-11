@@ -20,6 +20,7 @@ import Glorious.Typing.Values
 import Glorious.Typing.Stack
 import Glorious.Typing.Safety
 import Glorious.Typing.Cells
+import Glorious.Typing.Loans
 import Glorious.Typing.Compiled
 import Glorious.Typing.Equality
 import Glorious.Typing.Checker

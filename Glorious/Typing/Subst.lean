@@ -65,6 +65,119 @@ theorem acc_open_inst (acc rs θ : List Rgn) :
   rw [List.map_map, List.map_map]
   exact List.map_congr_left fun r _ => Rgn.openAt_inst 0 rs θ r
 
+/-! ## Regions that stay apart -/
+
+/-- Different regions among `ϕ` stay different when `θ` is put in. -/
+def InjOn (ϕ θ : List Rgn) : Prop :=
+  ∀ x y, x ∈ ϕ → y ∈ ϕ → x.inst θ = y.inst θ → x = y
+
+theorem InjOn.mono {ϕ ϕ' θ : List Rgn} (h : InjOn ϕ θ) (hsub : Sub ϕ' ϕ) : InjOn ϕ' θ :=
+  fun x y hx hy => h x y (hsub x hx) (hsub y hy)
+
+/-- A list without repeats, of regions that stay apart, has none afterwards. -/
+theorem InjOn.nodup {ϕ θ : List Rgn} (h : InjOn ϕ θ) : ∀ {l : List Rgn}, Sub l ϕ → l.Nodup →
+    (l.map (Rgn.inst θ)).Nodup
+  | [], _, _ => List.nodup_nil
+  | a :: l, hsub, hnd => by
+    obtain ⟨ha, hl⟩ := List.nodup_cons.mp hnd
+    refine List.nodup_cons.mpr ⟨fun hm => ?_, h.nodup (fun x hx => hsub x (List.mem_cons_of_mem _ hx)) hl⟩
+    obtain ⟨b, hb, he⟩ := List.mem_map.mp hm
+    have := h b a (hsub b (List.mem_cons_of_mem _ hb)) (hsub a (List.mem_cons_self ..)) he
+    subst this
+    exact ha hb
+
+/-- The same when some of the list is bound, which instantiating leaves alone. -/
+theorem InjOn.nodup_scope {ϕ θ : List Rgn} (h : InjOn ϕ θ) : ∀ {l : List Rgn},
+    (∀ x, x ∈ l → x.free = false ∨ x ∈ ϕ) → l.Nodup → (l.map (Rgn.inst θ)).Nodup
+  | [], _, _ => List.nodup_nil
+  | a :: l, hin, hnd => by
+    obtain ⟨ha, hl⟩ := List.nodup_cons.mp hnd
+    refine List.nodup_cons.mpr
+      ⟨fun hm => ?_, h.nodup_scope (fun x hx => hin x (List.mem_cons_of_mem _ hx)) hl⟩
+    obtain ⟨b, hb, he⟩ := List.mem_map.mp hm
+    have hfree : (b.inst θ).free = (a.inst θ).free := by rw [he]
+    rw [Rgn.inst_free, Rgn.inst_free] at hfree
+    rcases hin a (List.mem_cons_self ..) with hfa | hpa
+    · rw [hfa] at hfree
+      rw [Rgn.inst_bound hfree, Rgn.inst_bound hfa] at he
+      subst he
+      exact ha hb
+    · rcases hin b (List.mem_cons_of_mem _ hb) with hfb | hpb
+      · rw [hfb] at hfree
+        rw [Rgn.inst_bound hfb, Rgn.inst_bound hfree.symm] at he
+        subst he
+        exact ha hb
+      · have := h b a hpb hpa he
+        subst this
+        exact ha hb
+
+/-- A region that becomes leave to write was leave to write. -/
+theorem Rgn.inst_eq_wr {θ : List Rgn} {x z : Rgn} (h : x.inst θ = .wr z) :
+    ∃ y, x = .wr y ∧ y.inst θ = z := by
+  cases x with
+  | var i =>
+    have hc : Rgn.clean θ[i]? = .wr z := h
+    cases hθ : θ[i]? with
+    | none => rw [hθ] at hc; cases hc
+    | some w => rw [hθ] at hc; cases w <;> cases hc
+  | bound k => cases h
+  | cell a => cases h
+  | lab id => cases h
+  | loan b => cases h
+  | wr y => exact ⟨y, rfl, Rgn.wr.inj h⟩
+
+/-- Among regions that stay apart and say that what may be written may be
+read, nothing becomes leave to write `ρ` that was not. -/
+theorem InjOn.ne_wr {ϕ θ : List Rgn} (h : InjOn ϕ θ) (hc : closed ϕ = true) {x ρ : Rgn}
+    (hx : x ∈ ϕ) (hρ : ρ ∈ ϕ) (hne : x ≠ .wr ρ) : x.inst θ ≠ .wr (ρ.inst θ) := by
+  intro he
+  obtain ⟨y, rfl, hy⟩ := Rgn.inst_eq_wr he
+  exact hne (congrArg Rgn.wr (h y ρ (closed_mem hc hx) hρ hy))
+
+/-- Regions whose images do not repeat stay apart. -/
+theorem InjOn.of_nodup {θ : List Rgn} : ∀ {l : List Rgn}, (l.map (Rgn.inst θ)).Nodup → InjOn l θ
+  | [], _ => fun x _ hx => by cases hx
+  | a :: l, h => by
+    obtain ⟨ha, hl⟩ := List.nodup_cons.mp h
+    intro x y hx hy he
+    rcases List.mem_cons.mp hx with hxa | hxl
+    · rcases List.mem_cons.mp hy with hya | hyl
+      · rw [hxa, hya]
+      · subst hxa
+        exact absurd (List.mem_map.mpr ⟨y, hyl, he.symm⟩) ha
+    · rcases List.mem_cons.mp hy with hya | hyl
+      · subst hya
+        exact absurd (List.mem_map.mpr ⟨x, hxl, he⟩) ha
+      · exact InjOn.of_nodup hl x y hxl hyl he
+
+theorem Rgn.openAt_eq_wr {d : Nat} {rs : List Rgn} {x z : Rgn} (h : x.openAt d rs = .wr z) :
+    ∃ y, x = .wr y ∧ y.openAt d rs = z := by
+  cases x with
+  | var i => cases h
+  | bound j =>
+    by_cases hj : j < d
+    · simp [Rgn.openAt, hj] at h
+    · cases hr : rs[j - d]? with
+      | none => simp [Rgn.openAt, hj, hr] at h
+      | some w =>
+        have : Rgn.clean (some w) = .wr z := by simpa [Rgn.openAt, hj, hr] using h
+        cases w <;> cases this
+  | cell a => cases h
+  | lab id => cases h
+  | loan b => cases h
+  | wr y => exact ⟨y, rfl, Rgn.wr.inj h⟩
+
+/-- Opening keeps a list saying that what may be written may be read. -/
+theorem closed_open {l : List Rgn} (h : closed l = true) (d : Nat) (rs : List Rgn) :
+    closed (l.map (Rgn.openAt d rs)) = true := by
+  refine List.all_eq_true.mpr fun x hx => ?_
+  cases x with
+  | wr z =>
+    obtain ⟨x₀, hx₀, he⟩ := List.mem_map.mp hx
+    obtain ⟨y, rfl, rfl⟩ := Rgn.openAt_eq_wr he
+    simpa using List.mem_map.mpr ⟨y, closed_mem h hx₀, rfl⟩
+  | _ => rfl
+
 /-! ## Values of a declared type -/
 
 theorem CtorOf.inst (hΔ : Δ.Stable) {tag : Nat} {T : Ty} {Fs : List Ty} (θ : List Rgn)
@@ -194,46 +307,52 @@ end
 /-! ## Handlers -/
 
 theorem Enters.inst {fn : Nat} {Cs Ps : List Ty} {ρ : Ty} {ε : Row} {Φ : List Rgn}
-    (θ : List Rgn) (h : Enters Δ fn Cs Ps ρ ε Φ) :
+    (θ : List Rgn) (hinj : Δ.loans → InjOn Φ θ) (h : Enters Δ fn Cs Ps ρ ε Φ) :
     Enters Δ fn (Cs.map (Ty.inst θ)) (Ps.map (Ty.inst θ)) (ρ.inst θ) (ε.inst θ)
       (Φ.map (Rgn.inst θ)) := by
-  obtain ⟨sig, θ', hsig, hlen, hr, rfl, rfl, rfl, hle, hsub⟩ := h
+  obtain ⟨sig, θ', hsig, hlen, hr, rfl, rfl, rfl, hle, hsub, hnd⟩ := h
+  have hacc : (sig.acc.map (Rgn.inst θ')).map (Rgn.inst θ)
+      = sig.acc.map (Rgn.inst (θ'.map (Rgn.inst θ))) := by
+    rw [List.map_map]
+    exact List.map_congr_left fun r _ => Rgn.inst_inst _ _ _
   refine ⟨sig, θ'.map (Rgn.inst θ), hsig, by simpa using hlen, hr, caps_inst _ _ _,
-    caps_inst _ _ _, Ty.inst_inst _ _ _, ?_, ?_⟩
+    caps_inst _ _ _, Ty.inst_inst _ _ _, ?_, ?_, ?_⟩
   · rw [← Row.inst_inst]
     exact Row.le_inst hle θ
-  · have := hsub.map (Rgn.inst θ)
-    rw [List.map_map] at this
-    intro r hr'
-    refine this r ?_
-    obtain ⟨x, hx, rfl⟩ := List.mem_map.mp hr'
-    exact List.mem_map.mpr ⟨x, hx, (Rgn.inst_inst _ _ _)⟩
+  · rw [← hacc]
+    exact hsub.map _
+  · intro hL
+    rw [← hacc]
+    exact (hinj hL).nodup hsub (hnd hL)
 
 theorem ArmsOk.inst (hΔ : Δ.Stable) {Cs : List Ty} {ρ : Ty} {ε : Row} {Φ : List Rgn}
-    (θ : List Rgn) : ∀ {ops : List (Nat × Nat)} {H : Row}, ArmsOk Δ Cs ρ ε Φ ops H →
+    (θ : List Rgn) (hinj : Δ.loans → InjOn Φ θ) :
+    ∀ {ops : List (Nat × Nat)} {H : Row}, ArmsOk Δ Cs ρ ε Φ ops H →
     ArmsOk Δ (Cs.map (Ty.inst θ)) (ρ.inst θ) (ε.inst θ) (Φ.map (Rgn.inst θ)) ops (H.inst θ)
   | _, _, .nil => by
     rw [Row.inst_nil]
     exact .nil
   | _, _, .terminal (Ps := Ps) hop hent hrest => by
     rw [Row.inst_cons]
-    refine .terminal (Ps := Ps.map (Ty.inst θ)) ?_ (hent.inst θ) (ArmsOk.inst hΔ θ hrest)
+    refine .terminal (Ps := Ps.map (Ty.inst θ)) ?_ (hent.inst θ hinj)
+      (ArmsOk.inst hΔ θ hinj hrest)
     rw [hΔ.op, hop]
     rfl
   | _, _, .resumptive (Ps := Ps) (o := o) hop hent hrest => by
     rw [Row.inst_cons]
-    refine .resumptive (Ps := Ps.map (Ty.inst θ)) (o := o.inst θ) ?_ ?_ (ArmsOk.inst hΔ θ hrest)
+    refine .resumptive (Ps := Ps.map (Ty.inst θ)) (o := o.inst θ) ?_ ?_
+      (ArmsOk.inst hΔ θ hinj hrest)
     · rw [hΔ.op, hop]
       rfl
-    · have := hent.inst θ
+    · have := hent.inst θ hinj
       simpa [Ty.inst_fn] using this
 
 theorem HandlerOk.inst (hΔ : Δ.Stable) {Cs : List Ty} {ret : Nat} {ops : List (Nat × Nat)}
-    {σ ρ : Ty} {H ε : Row} {Φ : List Rgn} (θ : List Rgn)
+    {σ ρ : Ty} {H ε : Row} {Φ : List Rgn} (θ : List Rgn) (hinj : Δ.loans → InjOn Φ θ)
     (h : HandlerOk Δ Cs ret ops σ ρ H ε Φ) :
     HandlerOk Δ (Cs.map (Ty.inst θ)) ret ops (σ.inst θ) (ρ.inst θ) (H.inst θ) (ε.inst θ)
       (Φ.map (Rgn.inst θ)) := by
-  refine ⟨by simpa using h.ret.inst θ, h.arms.inst hΔ θ, fun c hc => ?_⟩
+  refine ⟨by simpa using h.ret.inst θ hinj, h.arms.inst hΔ θ hinj, fun c hc => ?_⟩
   obtain ⟨c₀, hc₀, rfl⟩ := List.mem_map.mp hc
   exact (hΔ.dup c₀ θ).mpr (h.dup c₀ hc₀)
 
@@ -242,8 +361,12 @@ theorem HandlerOk.inst (hΔ : Δ.Stable) {Cs : List Ty} {ret : Nat} {ops : List 
 theorem snoc_inst (Γ : TEnv) (σ : Ty) (θ : List Rgn) :
     (Γ ++ [σ]).map (Ty.inst θ) = Γ.map (Ty.inst θ) ++ [σ.inst θ] := by simp
 
-/-- **Typing is closed under instantiating regions.** -/
-theorem HasTm.inst (hΔ : Δ.Stable) (θ : List Rgn) {ϕ : List Rgn} {Γ : TEnv} {tm : Tm} {τ : Ty}
+/-- **Typing is closed under instantiating regions.** Under the rules for
+borrows the regions the computation may touch have to stay apart: a borrow
+takes away leave to use what was lent, which means nothing if what was lent
+can also be reached under another name. -/
+theorem HasTm.inst (hΔ : Δ.Stable) (θ : List Rgn) {ϕ : List Rgn}
+    (hinj : Δ.loans → InjOn ϕ θ ∧ closed ϕ = true) {Γ : TEnv} {tm : Tm} {τ : Ty}
     {ε : Row} (h : HasTm Δ ϕ Γ tm τ ε) :
     HasTm Δ (ϕ.map (Rgn.inst θ)) (Γ.map (Ty.inst θ)) tm (τ.inst θ) (ε.inst θ) := by
   induction h with
@@ -251,33 +374,11 @@ theorem HasTm.inst (hΔ : Δ.Stable) (θ : List Rgn) {ϕ : List Rgn} {Γ : TEnv}
   | let_ hrhs hlin _ ih =>
     rw [snoc_inst] at ih
     exact .let_ (hrhs.inst hΔ θ) (hlin.inst hΔ θ) ih
-  | @call Γ f args body n rs Ps σ τ ε' ε once env acc hf hn hargs hrow hacc hlin _ ih =>
+  | @call Γ f args body n rs Ps σ τ ε' ε once env acc hf hn hargs hrow hacc hnd hlin _ ih =>
     have hf' := hf.inst θ
     rw [Ty.inst_fn] at hf'
     rw [snoc_inst, Ty.open_inst] at ih
-    refine .call (rs := rs.map (Rgn.inst θ)) hf' (by simpa using hn) ?_ ?_ ?_ (hlin.inst hΔ θ) ih
-    · rw [← opens_inst]
-      exact hargs.inst θ
-    · rw [← Row.open_inst]
-      exact Row.le_inst hrow θ
-    · rw [← acc_open_inst]
-      exact hacc.map _
-  | @tail Γ f args n rs Ps σ τ ε' ε once env acc hf hn hret hargs hrow hacc hlin =>
-    have hf' := hf.inst θ
-    rw [Ty.inst_fn] at hf'
-    refine .tail (rs := rs.map (Rgn.inst θ)) hf' (by simpa using hn) ?_ ?_ ?_ ?_ (hlin.inst hΔ θ)
-    · rw [← Ty.open_inst, hret]
-    · rw [← opens_inst]
-      exact hargs.inst θ
-    · rw [← Row.open_inst]
-      exact Row.le_inst hrow θ
-    · rw [← acc_open_inst]
-      exact hacc.map _
-  | @callNever Γ f args body n rs Ps σ τ ε' ε once env acc hf hn hargs hrow hacc hlin _ ih =>
-    have hf' := hf.inst θ
-    rw [Ty.inst_fn, Ty.inst_never] at hf'
-    rw [snoc_inst] at ih
-    refine .callNever (rs := rs.map (Rgn.inst θ)) hf' (by simpa using hn) ?_ ?_ ?_
+    refine .call (rs := rs.map (Rgn.inst θ)) hf' (by simpa using hn) ?_ ?_ ?_ ?_
       (hlin.inst hΔ θ) ih
     · rw [← opens_inst]
       exact hargs.inst θ
@@ -285,10 +386,43 @@ theorem HasTm.inst (hΔ : Δ.Stable) (θ : List Rgn) {ϕ : List Rgn} {Γ : TEnv}
       exact Row.le_inst hrow θ
     · rw [← acc_open_inst]
       exact hacc.map _
-  | @tailNever Γ f args n rs Ps τ ε' ε once env acc hf hn hargs hrow hacc hlin =>
+    · intro hL
+      rw [← acc_open_inst]
+      exact (hinj hL).1.nodup hacc (hnd hL)
+  | @tail Γ f args n rs Ps σ τ ε' ε once env acc hf hn hret hargs hrow hacc hnd hlin =>
+    have hf' := hf.inst θ
+    rw [Ty.inst_fn] at hf'
+    refine .tail (rs := rs.map (Rgn.inst θ)) hf' (by simpa using hn) ?_ ?_ ?_ ?_ ?_
+      (hlin.inst hΔ θ)
+    · rw [← Ty.open_inst, hret]
+    · rw [← opens_inst]
+      exact hargs.inst θ
+    · rw [← Row.open_inst]
+      exact Row.le_inst hrow θ
+    · rw [← acc_open_inst]
+      exact hacc.map _
+    · intro hL
+      rw [← acc_open_inst]
+      exact (hinj hL).1.nodup hacc (hnd hL)
+  | @callNever Γ f args body n rs Ps σ τ ε' ε once env acc hf hn hargs hrow hacc hnd hlin _ ih =>
     have hf' := hf.inst θ
     rw [Ty.inst_fn, Ty.inst_never] at hf'
-    refine .tailNever (rs := rs.map (Rgn.inst θ)) hf' (by simpa using hn) ?_ ?_ ?_
+    rw [snoc_inst] at ih
+    refine .callNever (rs := rs.map (Rgn.inst θ)) hf' (by simpa using hn) ?_ ?_ ?_ ?_
+      (hlin.inst hΔ θ) ih
+    · rw [← opens_inst]
+      exact hargs.inst θ
+    · rw [← Row.open_inst]
+      exact Row.le_inst hrow θ
+    · rw [← acc_open_inst]
+      exact hacc.map _
+    · intro hL
+      rw [← acc_open_inst]
+      exact (hinj hL).1.nodup hacc (hnd hL)
+  | @tailNever Γ f args n rs Ps τ ε' ε once env acc hf hn hargs hrow hacc hnd hlin =>
+    have hf' := hf.inst θ
+    rw [Ty.inst_fn, Ty.inst_never] at hf'
+    refine .tailNever (rs := rs.map (Rgn.inst θ)) hf' (by simpa using hn) ?_ ?_ ?_ ?_
       (hlin.inst hΔ θ)
     · rw [← opens_inst]
       exact hargs.inst θ
@@ -296,21 +430,26 @@ theorem HasTm.inst (hΔ : Δ.Stable) (θ : List Rgn) {ϕ : List Rgn} {Γ : TEnv}
       exact Row.le_inst hrow θ
     · rw [← acc_open_inst]
       exact hacc.map _
-  | handle hthunk hcaps hok hrow hacc hΦ hlin _ ih =>
+    · intro hL
+      rw [← acc_open_inst]
+      exact (hinj hL).1.nodup hacc (hnd hL)
+  | handle hthunk hcaps hok hrow hacc hΦ hnd hlin _ ih =>
     have ht' := hthunk.inst θ
     rw [Ty.inst_fn] at ht'
     rw [snoc_inst] at ih
     have hrow' := Row.le_inst hrow θ
     rw [Row.inst_append] at hrow'
-    exact .handle (by simpa using ht') (hcaps.inst θ) (hok.inst hΔ θ) hrow' (hacc.map _)
-      (hΦ.map _) (hlin.inst hΔ θ) ih
-  | handleTail hthunk hcaps hok hrow hacc hΦ =>
+    exact .handle (by simpa using ht') (hcaps.inst θ)
+      (hok.inst hΔ θ fun hL => (hinj hL).1.mono hΦ) hrow' (hacc.map _) (hΦ.map _)
+      (fun hL => (hinj hL).1.nodup (hacc.trans hΦ) (hnd hL)) (hlin.inst hΔ θ) ih
+  | handleTail hthunk hcaps hok hrow hacc hΦ hnd =>
     have ht' := hthunk.inst θ
     rw [Ty.inst_fn] at ht'
     have hrow' := Row.le_inst hrow θ
     rw [Row.inst_append] at hrow'
-    exact .handleTail (by simpa using ht') (hcaps.inst θ) (hok.inst hΔ θ) hrow' (hacc.map _)
-      (hΦ.map _)
+    exact .handleTail (by simpa using ht') (hcaps.inst θ)
+      (hok.inst hΔ θ fun hL => (hinj hL).1.mono hΦ) hrow' (hacc.map _) (hΦ.map _)
+      (fun hL => (hinj hL).1.nodup (hacc.trans hΦ) (hnd hL))
   | @raise Γ op args targs Ps τ ε hl hop hargs hlin =>
     refine .raise (targs := targs.map (Ty.inst θ)) (Ps := Ps.map (Ty.inst θ)) ?_ ?_
       (hargs.inst θ) (hlin.inst hΔ θ)
@@ -326,11 +465,11 @@ theorem HasTm.inst (hΔ : Δ.Stable) (θ : List Rgn) {ϕ : List Rgn} {Γ : TEnv}
       rfl
     · rw [hΔ.op, hop]
       rfl
-  | label hthunk hσ hε hn hreg hacc hrow hlin _ ih =>
+  | label hthunk hσ hε hn hreg hacc hnd hrow hlin _ ih =>
     have ht' := hthunk.inst θ
     simp only [Ty.inst_fn, List.map_cons, List.map_nil, Option.map_none] at ht'
     rw [snoc_inst] at ih
-    refine .label ht' (Ty.lc_inst hσ θ) (Row.lc_inst hε θ) hn ?_ ?_ (Row.le_inst hrow θ)
+    refine .label ht' (Ty.lc_inst hσ θ) (Row.lc_inst hε θ) hn ?_ ?_ ?_ (Row.le_inst hrow θ)
       (hlin.inst hΔ θ) ih
     · intro hr
       exact ⟨(hreg hr).1, List.mem_map.mpr ⟨_, (hreg hr).2, rfl⟩⟩
@@ -339,10 +478,15 @@ theorem HasTm.inst (hΔ : Δ.Stable) (θ : List Rgn) {ϕ : List Rgn} {Γ : TEnv}
       rcases hacc x₀ hx₀ with ⟨h1, rfl⟩ | ⟨hfree, hmem⟩
       · exact .inl ⟨h1, rfl⟩
       · exact .inr ⟨by rw [Rgn.inst_free]; exact hfree, List.mem_map.mpr ⟨x₀, hmem, rfl⟩⟩
-  | labelTail hthunk hσ hε hn hreg hacc hrow =>
+    · intro hL
+      refine (hinj hL).1.nodup_scope (fun x hx => ?_) (hnd hL)
+      rcases hacc x hx with ⟨_, rfl⟩ | ⟨_, hmem⟩
+      · exact .inl rfl
+      · exact .inr hmem
+  | labelTail hthunk hσ hε hn hreg hacc hnd hrow =>
     have ht' := hthunk.inst θ
     simp only [Ty.inst_fn, List.map_cons, List.map_nil, Option.map_none] at ht'
-    refine .labelTail ht' (Ty.lc_inst hσ θ) (Row.lc_inst hε θ) hn ?_ ?_ (Row.le_inst hrow θ)
+    refine .labelTail ht' (Ty.lc_inst hσ θ) (Row.lc_inst hε θ) hn ?_ ?_ ?_ (Row.le_inst hrow θ)
     · intro hr
       exact ⟨(hreg hr).1, List.mem_map.mpr ⟨_, (hreg hr).2, rfl⟩⟩
     · intro x hx
@@ -350,17 +494,26 @@ theorem HasTm.inst (hΔ : Δ.Stable) (θ : List Rgn) {ϕ : List Rgn} {Γ : TEnv}
       rcases hacc x₀ hx₀ with ⟨h1, rfl⟩ | ⟨hfree, hmem⟩
       · exact .inl ⟨h1, rfl⟩
       · exact .inr ⟨by rw [Rgn.inst_free]; exact hfree, List.mem_map.mpr ⟨x₀, hmem, rfl⟩⟩
-  | guard hcl hthunk hrow haccc hacc hlin _ ih =>
+    · intro hL
+      refine (hinj hL).1.nodup_scope (fun x hx => ?_) (hnd hL)
+      rcases hacc x hx with ⟨_, rfl⟩ | ⟨_, hmem⟩
+      · exact .inl rfl
+      · exact .inr hmem
+  | guard hcl hthunk hrow haccc hacc hnd hlin _ ih =>
     have hc' := hcl.inst θ
     have ht' := hthunk.inst θ
     simp only [Ty.inst_fn, List.map_nil, Row.inst_nil] at hc' ht'
     rw [snoc_inst] at ih
-    exact .guard hc' ht' (Row.le_inst hrow θ) (haccc.map _) (hacc.map _) (hlin.inst hΔ θ) ih
-  | guardTail hcl hthunk hrow haccc hacc hlin =>
+    exact .guard hc' ht' (Row.le_inst hrow θ) (haccc.map _) (hacc.map _)
+      (fun hL => ⟨(hinj hL).1.nodup haccc (hnd hL).1, (hinj hL).1.nodup hacc (hnd hL).2⟩)
+      (hlin.inst hΔ θ) ih
+  | guardTail hcl hthunk hrow haccc hacc hnd hlin =>
     have hc' := hcl.inst θ
     have ht' := hthunk.inst θ
     simp only [Ty.inst_fn, List.map_nil, Row.inst_nil] at hc' ht'
-    exact .guardTail hc' ht' (Row.le_inst hrow θ) (haccc.map _) (hacc.map _) (hlin.inst hΔ θ)
+    exact .guardTail hc' ht' (Row.le_inst hrow θ) (haccc.map _) (hacc.map _)
+      (fun hL => ⟨(hinj hL).1.nodup haccc (hnd hL).1, (hinj hL).1.nodup hacc (hnd hL).2⟩)
+      (hlin.inst hΔ θ)
   | cancel hk hrow hacc hlin _ ih =>
     have hk' := hk.inst θ
     simp only [Ty.inst_fn, List.map_cons, List.map_nil] at hk'
@@ -368,13 +521,13 @@ theorem HasTm.inst (hΔ : Δ.Stable) (θ : List Rgn) {ϕ : List Rgn} {Γ : TEnv}
     have hu : Ty.unit.inst θ = Ty.unit := by simp [Ty.unit, Ty.inst_tuple]
     rw [hu] at ih
     exact .cancel hk' (Row.le_inst hrow θ) (hacc.map _) (hlin.inst hΔ θ) ih
-  | @cell Γ init thunk body n r σ ρ τ εt ε once env acc hinit hthunk hσ hρ hε hn hreg hacc hrow
-      hlin _ ih =>
+  | @cell Γ init thunk body n r σ ρ τ εt ε once env acc hinit hthunk hσ hρ hε hn hreg hacc hnd
+      hrow hlin _ ih =>
     have ht' := hthunk.inst θ
     simp only [Ty.inst_fn, List.map_cons, List.map_nil, Ty.inst_ref] at ht'
     rw [snoc_inst] at ih
     refine .cell (hinit.inst θ) ht' (Ty.lc_inst hσ θ) (Ty.lc_inst hρ θ) (Row.lc_inst hε θ) ?_ ?_ ?_
-      (Row.le_inst hrow θ) (hlin.inst hΔ θ) ih
+      ?_ (Row.le_inst hrow θ) (hlin.inst hΔ θ) ih
     · rcases hn with h0 | ⟨h1, rfl⟩
       · exact .inl h0
       · exact .inr ⟨h1, rfl⟩
@@ -383,15 +536,22 @@ theorem HasTm.inst (hΔ : Δ.Stable) (θ : List Rgn) {ϕ : List Rgn} {Γ : TEnv}
       exact ⟨h1, rfl⟩
     · intro x hx
       obtain ⟨x₀, hx₀, rfl⟩ := List.mem_map.mp hx
-      rcases hacc x₀ hx₀ with ⟨h1, rfl⟩ | ⟨hfree, hmem⟩
-      · exact .inl ⟨h1, rfl⟩
+      rcases hacc x₀ hx₀ with ⟨h1, rfl | rfl⟩ | ⟨hfree, hmem⟩
+      · exact .inl ⟨h1, .inl rfl⟩
+      · exact .inl ⟨h1, .inr rfl⟩
       · exact .inr ⟨by rw [Rgn.inst_free]; exact hfree, List.mem_map.mpr ⟨x₀, hmem, rfl⟩⟩
-  | @cellTail Γ init thunk n r σ τ εt ε once env acc hinit hthunk hσ hτ hε hn hreg hacc hrow
+    · intro hL
+      refine (hinj hL).1.nodup_scope (fun x hx => ?_) (hnd hL)
+      rcases hacc x hx with ⟨_, rfl | rfl⟩ | ⟨_, hmem⟩
+      · exact .inl rfl
+      · exact .inl rfl
+      · exact .inr hmem
+  | @cellTail Γ init thunk n r σ τ εt ε once env acc hinit hthunk hσ hτ hε hn hreg hacc hnd hrow
       hlin =>
     have ht' := hthunk.inst θ
     simp only [Ty.inst_fn, List.map_cons, List.map_nil, Ty.inst_ref] at ht'
     refine .cellTail (hinit.inst θ) ht' (Ty.lc_inst hσ θ) (Ty.lc_inst hτ θ) (Row.lc_inst hε θ)
-      ?_ ?_ ?_ (Row.le_inst hrow θ) (hlin.inst hΔ θ)
+      ?_ ?_ ?_ ?_ (Row.le_inst hrow θ) (hlin.inst hΔ θ)
     · rcases hn with h0 | ⟨h1, rfl⟩
       · exact .inl h0
       · exact .inr ⟨h1, rfl⟩
@@ -400,32 +560,67 @@ theorem HasTm.inst (hΔ : Δ.Stable) (θ : List Rgn) {ϕ : List Rgn} {Γ : TEnv}
       exact ⟨h1, rfl⟩
     · intro x hx
       obtain ⟨x₀, hx₀, rfl⟩ := List.mem_map.mp hx
-      rcases hacc x₀ hx₀ with ⟨h1, rfl⟩ | ⟨hfree, hmem⟩
-      · exact .inl ⟨h1, rfl⟩
+      rcases hacc x₀ hx₀ with ⟨h1, rfl | rfl⟩ | ⟨hfree, hmem⟩
+      · exact .inl ⟨h1, .inl rfl⟩
+      · exact .inl ⟨h1, .inr rfl⟩
       · exact .inr ⟨by rw [Rgn.inst_free]; exact hfree, List.mem_map.mpr ⟨x₀, hmem, rfl⟩⟩
-  | lend hr hthunk hrow hacc hlin _ ih =>
+    · intro hL
+      refine (hinj hL).1.nodup_scope (fun x hx => ?_) (hnd hL)
+      rcases hacc x hx with ⟨_, rfl | rfl⟩ | ⟨_, hmem⟩
+      · exact .inl rfl
+      · exact .inl rfl
+      · exact .inr hmem
+  | @lend Γ uniq r thunk body n ρ κ σ ρt τ εt ε once env acc hr hthunk hσ hρ hε hn hreg hloan
+      hacc hrow hlin _ ih =>
     have hr' := hr.inst θ
     have ht' := hthunk.inst θ
     simp only [Ty.inst_fn, List.map_cons, List.map_nil, Ty.inst_ref] at hr' ht'
     rw [snoc_inst] at ih
-    exact .lend hr' ht' (Row.le_inst hrow θ) (hacc.map _) (hlin.inst hΔ θ) ih
+    refine .lend hr' ht' (Ty.lc_inst hσ θ) (Ty.lc_inst hρ θ) (Row.lc_inst hε θ) ?_ ?_ ?_ ?_
+      (Row.le_inst hrow θ) (hlin.inst hΔ θ) ih
+    · rcases hn with ⟨h0, rfl⟩ | ⟨h1, rfl⟩
+      · exact .inl ⟨h0, rfl⟩
+      · exact .inr ⟨h1, rfl⟩
+    · exact fun hR => List.mem_map.mpr ⟨_, hreg hR, rfl⟩
+    · intro hL
+      obtain ⟨h1, hρϕ, hw, hnd⟩ := hloan hL
+      refine ⟨h1, List.mem_map.mpr ⟨_, hρϕ, rfl⟩,
+        fun hu => List.mem_map.mpr ⟨_, hw hu, rfl⟩, ?_⟩
+      refine (hinj hL).1.nodup_scope (fun x hx => ?_) hnd
+      rcases hacc x hx with ⟨_, rfl | ⟨_, rfl⟩⟩ | ⟨_, hmem, _⟩
+      · exact .inl rfl
+      · exact .inl rfl
+      · exact .inr hmem
+    · intro x hx
+      obtain ⟨x₀, hx₀, rfl⟩ := List.mem_map.mp hx
+      rcases hacc x₀ hx₀ with ⟨h1, rfl | ⟨hu, rfl⟩⟩ | ⟨hfree, hmem, hne⟩
+      · exact .inl ⟨h1, .inl rfl⟩
+      · exact .inl ⟨h1, .inr ⟨hu, rfl⟩⟩
+      · refine .inr ⟨by rw [Rgn.inst_free]; exact hfree, List.mem_map.mpr ⟨x₀, hmem, rfl⟩,
+          fun hL => ?_⟩
+        obtain ⟨hinj', hcl⟩ := hinj hL
+        obtain ⟨_, hρϕ, _, _⟩ := hloan hL
+        refine ⟨hinj'.ne_wr hcl hmem hρϕ (hne hL).1, fun hu he => ?_⟩
+        exact (hne hL).2 hu (hinj' x₀ ρ hmem hρϕ he)
   | load ha hr hd _ ih =>
     have ha' := ha.inst θ
     rw [Ty.inst_ref] at ha'
     rw [snoc_inst] at ih
     exact .load ha' (fun h => List.mem_map.mpr ⟨_, hr h, rfl⟩) ((hΔ.dup _ θ).mpr hd) ih
-  | store ha hr hb hlin _ ih =>
+  | store ha hr hw hb hlin _ ih =>
     have ha' := ha.inst θ
     rw [Ty.inst_ref] at ha'
     rw [snoc_inst] at ih
     have hu : Ty.unit.inst θ = Ty.unit := by simp [Ty.unit, Ty.inst_tuple]
     rw [hu] at ih
-    exact .store ha' (fun h => List.mem_map.mpr ⟨_, hr h, rfl⟩) (hb.inst θ) (hlin.inst hΔ θ) ih
-  | swap ha hr hb hlin _ ih =>
+    exact .store ha' (fun h => List.mem_map.mpr ⟨_, hr h, rfl⟩)
+      (fun h => List.mem_map.mpr ⟨_, hw h, rfl⟩) (hb.inst θ) (hlin.inst hΔ θ) ih
+  | swap ha hr hw hb hlin _ ih =>
     have ha' := ha.inst θ
     rw [Ty.inst_ref] at ha'
     rw [snoc_inst] at ih
-    exact .swap ha' (fun h => List.mem_map.mpr ⟨_, hr h, rfl⟩) (hb.inst θ) (hlin.inst hΔ θ) ih
+    exact .swap ha' (fun h => List.mem_map.mpr ⟨_, hr h, rfl⟩)
+      (fun h => List.mem_map.mpr ⟨_, hw h, rfl⟩) (hb.inst θ) (hlin.inst hΔ θ) ih
   | write ha _ ih =>
     rw [snoc_inst] at ih
     have hu : Ty.unit.inst θ = Ty.unit := by simp [Ty.unit, Ty.inst_tuple]

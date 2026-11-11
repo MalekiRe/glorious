@@ -37,8 +37,13 @@ theorem StackOk.mono {S S' : StoreTy} (hle : S.Le S') {st : List Frame} {τ : Ty
     exact .handler (hle.handlers _ _ hid) (hh.mono hle) hrow hsub ih
   | label hid _ ih => exact .label (hle.labels _ _ hid) ih
   | guard hent hc _ ih => exact .guard hent (hc.mono hle) ih
-  | cell _ ih => exact .cell ih
-  | lend _ ih => exact .lend ih
+  | cell hc _ ih => exact .cell (hle.cells _ _ hc) ih
+  | lend hl hb hon hρ hw _ ih => exact .lend (hle.loans _ _ hl) hb (hon.mono hle) hρ hw ih
+  | lendLoose hn hl hon _ ih =>
+    exact .lendLoose hn (hle.loans _ _ hl)
+      (fun hR => by
+        obtain ⟨ρ, h1, h2⟩ := hon hR
+        exact ⟨ρ, h1.mono hle, h2⟩) ih
   | yield hw _ ih => exact .yield (hw.mono hle) ih
   | exit hx hin _ ih => exact .exit (hx.mono hle) hin ih
   | never _ ih => exact .never ih
@@ -57,8 +62,9 @@ theorem StackOk.tail {S : StoreTy} {st : List Frame} {τ : Ty} {ε : Row} {ϕ : 
   | handler _ _ _ _ h _ => intro fr st' e; cases e; exact ⟨_, _, _, h⟩
   | label _ h _ => intro fr st' e; cases e; exact ⟨_, _, _, h⟩
   | guard _ _ h _ => intro fr st' e; cases e; exact ⟨_, _, _, h⟩
-  | cell h _ => intro fr st' e; cases e; exact ⟨_, _, _, h⟩
-  | lend h _ => intro fr st' e; cases e; exact ⟨_, _, _, h⟩
+  | cell _ h _ => intro fr st' e; cases e; exact ⟨_, _, _, h⟩
+  | lend _ _ _ _ _ h _ => intro fr st' e; cases e; exact ⟨_, _, _, h⟩
+  | lendLoose _ _ _ h _ => intro fr st' e; cases e; exact ⟨_, _, _, h⟩
   | yield _ h _ => intro fr st' e; cases e; exact ⟨_, _, _, h⟩
   | exit _ _ h _ => intro fr st' e; cases e; exact ⟨_, _, _, h⟩
   | never _ ih => intro fr st' e; exact ih e
@@ -217,22 +223,36 @@ theorem find_ok {S : StoreTy} {st : List Frame} {τ : Ty} {ε : Row} {ϕ : List 
       hcaps, hdup, hop, hent, hbelow, hble, hΦ, ⟨fr, List.mem_cons_of_mem _ hfr, hft⟩,
       fun S' hle st' ε' ϕ' hst' hr hs =>
         .guard hgs (hgc.mono hle) (hre S' hle st' ε' ϕ' hst' hr hs)⟩
-  | @cell a st τ ε ϕ _ ih =>
+  | @cell a st σ τ ε ϕ hc _ ih =>
     intro op targs hl
     obtain ⟨d, ρ, ε₀, Φ, εb', ϕb', Cs, Ps, r, hf, hid', hcaps, hdup, hop, hent, hbelow, hble, hΦ,
       ⟨fr, hfr, hft⟩, hre⟩ := ih hl
     exact ⟨_, ρ, ε₀, Φ, εb', ϕb', Cs, Ps, r,
       findHandler_skip (by simp [handles, Frame.asHandler]) hf, hid',
       hcaps, hdup, hop, hent, hbelow, hble, hΦ, ⟨fr, List.mem_cons_of_mem _ hfr, hft⟩,
-      fun S' hle st' ε' ϕ' hst' hr hs => .cell (hre S' hle st' ε' ϕ' hst' hr hs)⟩
-  | @lend uniq a b st τ ε ϕ _ ih =>
+      fun S' hle st' ε' ϕ' hst' hr hs =>
+        .cell (hle.cells _ _ hc) (hre S' hle st' ε' ϕ' hst' hr hs)⟩
+  | @lend uniq a b st τ ε ϕ ρl hlo hb hon hρ hw _ ih =>
     intro op targs hl
     obtain ⟨d, ρ, ε₀, Φ, εb', ϕb', Cs, Ps, r, hf, hid', hcaps, hdup, hop, hent, hbelow, hble, hΦ,
       ⟨fr, hfr, hft⟩, hre⟩ := ih hl
     exact ⟨_, ρ, ε₀, Φ, εb', ϕb', Cs, Ps, r,
       findHandler_skip (by simp [handles, Frame.asHandler]) hf, hid',
       hcaps, hdup, hop, hent, hbelow, hble, hΦ, ⟨fr, List.mem_cons_of_mem _ hfr, hft⟩,
-      fun S' hle st' ε' ϕ' hst' hr hs => .lend (hre S' hle st' ε' ϕ' hst' hr hs)⟩
+      fun S' hle st' ε' ϕ' hst' hr hs =>
+        .lend (hle.loans _ _ hlo) hb (hon.mono hle) hρ hw (hre S' hle st' ε' ϕ' hst' hr hs)⟩
+  | @lendLoose uniq a b st τ ε ϕ hn hlo hon _ ih =>
+    intro op targs hl
+    obtain ⟨d, ρ, ε₀, Φ, εb', ϕb', Cs, Ps, r, hf, hid', hcaps, hdup, hop, hent, hbelow, hble, hΦ,
+      ⟨fr, hfr, hft⟩, hre⟩ := ih hl
+    exact ⟨_, ρ, ε₀, Φ, εb', ϕb', Cs, Ps, r,
+      findHandler_skip (by simp [handles, Frame.asHandler]) hf, hid',
+      hcaps, hdup, hop, hent, hbelow, hble, hΦ, ⟨fr, List.mem_cons_of_mem _ hfr, hft⟩,
+      fun S' hle st' ε' ϕ' hst' hr hs =>
+        .lendLoose hn (hle.loans _ _ hlo)
+          (fun hR => by
+            obtain ⟨ρ', h1, h2⟩ := hon hR
+            exact ⟨ρ', h1.mono hle, h2⟩) (hre S' hle st' ε' ϕ' hst' hr hs)⟩
   | @yield w st σ τ ε ϕ hw _ ih =>
     intro op targs hl
     obtain ⟨d, ρ, ε₀, Φ, εb', ϕb', Cs, Ps, r, hf, hid', hcaps, hdup, hop, hent, hbelow, hble, hΦ,
@@ -319,10 +339,54 @@ theorem StackOk.guard_inv {S : StoreTy} {st : List Frame} {τ : Ty} {ε : Row} {
   | never _ ih => intro fn captures st' e; exact ih e
   | _ => intro fn captures st' e; cases e
 
+/-- A stack grants only regions of things the store typing knows: so a new
+cell, label or borrow is none of them. -/
+theorem StackOk.known {S : StoreTy} {st : List Frame} {τ : Ty} {ε : Row} {ϕ : List Rgn}
+    (h : StackOk Δ S st τ ε ϕ) : ∀ x, x ∈ ϕ → Known S x := by
+  induction h with
+  | nil => intro x hx; cases hx
+  | call _ _ _ _ _ ih => exact ih
+  | handler _ _ _ hΦ _ ih => exact fun x hx => ih x (hΦ x hx)
+  | label hl _ ih =>
+    intro x hx
+    rcases List.mem_cons.mp hx with rfl | hx
+    · exact ⟨_, hl⟩
+    · exact ih x hx
+  | guard _ _ _ ih => exact ih
+  | cell hc _ ih =>
+    intro x hx
+    rcases List.mem_cons.mp hx with rfl | hx
+    · exact ⟨_, hc⟩
+    · rcases List.mem_cons.mp hx with rfl | hx
+      · exact ⟨_, hc⟩
+      · exact ih x hx
+  | @lend uniq a b st τ ε ϕ ρ hl _ _ _ _ _ ih =>
+    intro x hx
+    rcases List.mem_cons.mp hx with rfl | hx
+    · exact ⟨_, hl⟩
+    · rcases List.mem_append.mp hx with hx | hx
+      · cases uniq with
+        | false => cases hx
+        | true =>
+          rcases List.mem_cons.mp hx with rfl | hx
+          · exact ⟨_, hl⟩
+          · cases hx
+      · exact ih x (List.mem_filter.mp hx).1
+  | lendLoose _ hl _ _ ih =>
+    intro x hx
+    rcases List.mem_cons.mp hx with rfl | hx
+    · exact ⟨_, hl⟩
+    · rcases List.mem_cons.mp hx with rfl | hx
+      · exact ⟨_, hl⟩
+      · exact ih x hx
+  | yield _ _ ih => exact ih
+  | exit _ _ _ ih => exact ih
+  | never _ ih => exact ih
+
 /-- Releasing a cell keeps the store typed: a released cell keeps its type. -/
 theorem StoreOk.release {S : StoreTy} {store : Store Frame} (hs : StoreOk Δ S store) (a : Nat) :
     StoreOk Δ S (store.release a) := by
-  refine ⟨hs.conts, hs.labels, hs.handlers, fun a' τ' h => ?_⟩
+  refine ⟨hs.conts, hs.labels, hs.handlers, fun a' τ' h => ?_, hs.loans⟩
   obtain ⟨hlt, hv⟩ := hs.cells a' τ' h
   refine ⟨by simpa [Store.release] using hlt, fun v hg => ?_⟩
   simp only [Store.release] at hg
@@ -378,10 +442,12 @@ theorem deliver_leave_safe {p : Program} {S : StoreTy} (hp : ProgramOk Δ p) :
       | guard hent hc hrest =>
         exact (enter_safe hp hent hc .nil (Row.nil_le _) (Sub.refl _) (.yield hv hrest) hs).weaken
           fun id => by simp only [occStack, occFrame, occs]; omega
-      | @cell a _ _ _ _ hrest =>
+      | @cell a _ _ _ _ _ _ hrest =>
         exact (((ih (hs.release a)).1 hrest hv).release).weaken
           fun id => by simp only [occStack, occFrame]; omega
-      | lend hrest =>
+      | lend _ _ _ _ _ hrest =>
+        exact (ihd hrest hv).weaken fun id => by simp only [occStack, occFrame]; omega
+      | lendLoose _ _ _ hrest =>
         exact (ihd hrest hv).weaken fun id => by simp only [occStack, occFrame]; omega
       | yield hw hrest =>
         exact (ihd hrest hw).weaken fun id => by simp only [occStack, occFrame]; omega
@@ -534,7 +600,7 @@ inductive Faulty (st : List Frame) (store : Store Frame) : Callee → Prop where
 theorem StoreOk.take {S : StoreTy} {conts : Conts Frame} {labels : Nat} {cells : Cells}
     (hs : StoreOk Δ S ⟨conts, labels, cells⟩) (id : Nat) :
     StoreOk Δ S ⟨conts.set id none, labels, cells⟩ := by
-  refine ⟨fun id' o ρ ε₀ Φ h => ?_, hs.labels, hs.handlers, hs.cells⟩
+  refine ⟨fun id' o ρ ε₀ Φ h => ?_, hs.labels, hs.handlers, hs.cells, hs.loans⟩
   obtain ⟨hlt, hseg⟩ := hs.conts id' o ρ ε₀ Φ h
   refine ⟨by simpa using hlt, fun seg hget => ?_⟩
   rw [List.getElem?_set] at hget
@@ -558,7 +624,7 @@ the store. -/
 theorem apply_ok {p : Program} {S : StoreTy} {store : Store Frame} {st : List Frame}
     {c : Callee} {σ : Ty} {ε' ε : Row} {ϕ' ϕ : List Rgn} (hp : ProgramOk Δ p)
     (hs : StoreOk Δ S store) (hc : CalleeOk Δ S c σ ε' ϕ') (hst : StackOk Δ S st σ ε ϕ)
-    (hle : Row.le ε' ε) (hsub : Sub ϕ' ϕ) :
+    (hle : Row.le ε' ε) (hsub : Sub ϕ' ϕ) (hnd : Δ.loans → ϕ'.Nodup) :
     ((∀ k v, c ≠ .cont k v)
         ∧ Safe Δ S (fun id => occCallee id c + occStack id st) store (apply p c st store))
       ∨ (∃ k v seg, c = .cont k v ∧ store.conts[k]? = some (some seg)
@@ -568,7 +634,7 @@ theorem apply_ok {p : Program} {S : StoreTy} {store : Store Frame} {st : List Fr
   cases hc with
   | fn hsig hθ hrs hcaps hvs =>
     exact .inl ⟨(fun _ _ h => by cases h),
-      (callFn_safe hp hsig hθ hrs hcaps hvs hle hsub hst hs).weaken
+      (callFn_safe hp hsig hθ hrs hcaps hvs hle hsub hnd hst hs).weaken
         fun id => by simp only [occCallee]; omega⟩
   | @cont id v o ρ ε' _ hk hv =>
     obtain ⟨conts, labels, cells⟩ := store

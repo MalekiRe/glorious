@@ -30,8 +30,8 @@ theorem acc_open_nil (acc : List Rgn) : acc.map (Rgn.openAt 0 []) = acc := by
 theorem Enters.weaken {fn : Nat} {Cs Ps : List Ty} {ρ : Ty} {ε ε' : Row} {Φ Φ' : List Rgn}
     (h : Enters Δ fn Cs Ps ρ ε Φ) (hle : Row.le ε ε') (hΦ : Sub Φ Φ') :
     Enters Δ fn Cs Ps ρ ε' Φ' := by
-  obtain ⟨sig, θ, hsig, hθ, hr, hCs, hPs, hρ, hrow, hsub⟩ := h
-  exact ⟨sig, θ, hsig, hθ, hr, hCs, hPs, hρ, Row.le_trans hrow hle, hsub.trans hΦ⟩
+  obtain ⟨sig, θ, hsig, hθ, hr, hCs, hPs, hρ, hrow, hsub, hnd⟩ := h
+  exact ⟨sig, θ, hsig, hθ, hr, hCs, hPs, hρ, Row.le_trans hrow hle, hsub.trans hΦ, hnd⟩
 
 /-- The callee of a typed call evaluates, and is typed at the callable's result,
 operations and regions, with the regions the call chose. It holds what the
@@ -118,14 +118,14 @@ theorem evalScope_ok {S : StoreTy} {env : Env} {Γ : TEnv} {thunk : Atom} {l : V
 /-- A callable that takes no arguments and binds no regions is a function. -/
 theorem evalThunk_ok {S : StoreTy} {env : Env} {Γ : TEnv} {f : Atom} {σ : Ty} {ε : Row}
     {once : Bool} {fenv : Option (List Ty)} {acc : List Rgn} (henv : HasVals Δ S env Γ)
-    (hf : HasAtom Γ f (.fn 0 [] σ ε once fenv acc)) :
+    (hf : HasAtom Γ f (.fn 0 [] σ ε once fenv acc)) (hnd : Δ.loans → acc.Nodup) :
     ∃ fn caps Cs, evalCall env f [] = some (.fn fn caps []) ∧ f.eval env = some (.clo fn caps)
       ∧ Enters Δ fn Cs [] σ ε acc ∧ HasVals Δ S caps Cs := by
   obtain ⟨fv, hfv, hft⟩ := atom_ok henv hf
   rcases hft.fn_inv with ⟨fn, caps, sig, θ, rfl, hsig, hθ, hcaps, hn, hPs, rfl, rfl, rfl⟩
     | ⟨id, o, rfl, _, hPs, hk⟩ | ⟨id, τ, rfl, _, hPs, hlab⟩
   · exact ⟨fn, caps, _, by simp [evalCall, evalAtoms, hfv], hfv,
-      ⟨sig, θ, hsig, hθ, hn.symm, rfl, hPs, rfl, Row.le_refl _, Sub.refl _⟩, hcaps⟩
+      ⟨sig, θ, hsig, hθ, hn.symm, rfl, hPs, rfl, Row.le_refl _, Sub.refl _, hnd⟩, hcaps⟩
   · cases hPs
   · cases hPs
 
@@ -156,9 +156,10 @@ theorem StoreOk.push_handler {S : StoreTy} {conts : Conts Frame} {labels : Nat} 
     · subst he
       rw [hfresh] at h
       cases h
-    · simp [he, h], fun _ _ h => h⟩
+    · simp [he, h], fun _ _ h => h, fun _ _ h => h⟩
   refine ⟨S', hle, by show (if labels = labels then some x else _) = some x; simp, ?_⟩
-  refine ⟨fun id o ρ ε₀ Φ h => ?_, fun id τ h => ?_, fun id y h => ?_, fun a τ h => ?_⟩
+  refine ⟨fun id o ρ ε₀ Φ h => ?_, fun id τ h => ?_, fun id y h => ?_, fun a τ h => ?_,
+    fun b a h => Nat.le_succ_of_le (hs.loans b a h)⟩
   · obtain ⟨hlt, hseg⟩ := hs.conts id o ρ ε₀ Φ h
     exact ⟨hlt, fun seg hg => (hseg seg hg).mono hle⟩
   · exact Nat.lt_succ_of_lt (hs.labels id τ h)
@@ -175,7 +176,40 @@ theorem StoreOk.push_handler {S : StoreTy} {conts : Conts Frame} {labels : Nat} 
 theorem StoreOk.bump {S : StoreTy} {conts : Conts Frame} {labels : Nat} {cells : Cells}
     (hs : StoreOk Δ S ⟨conts, labels, cells⟩) : StoreOk Δ S ⟨conts, labels + 1, cells⟩ :=
   ⟨hs.conts, fun id τ h => Nat.lt_succ_of_lt (hs.labels id τ h),
-    fun id x h => Nat.lt_succ_of_lt (hs.handlers id x h), hs.cells⟩
+    fun id x h => Nat.lt_succ_of_lt (hs.handlers id x h), hs.cells,
+    fun b a h => Nat.le_succ_of_le (hs.loans b a h)⟩
+
+/-- A new borrow takes the next identity. -/
+theorem StoreOk.push_loan {S : StoreTy} {conts : Conts Frame} {labels : Nat} {cells : Cells}
+    (hs : StoreOk Δ S ⟨conts, labels, cells⟩) (a : Nat) :
+    ∃ S', S.Le S' ∧ S'.loans (labels + 1) = some a ∧ StoreOk Δ S' ⟨conts, labels + 1, cells⟩ := by
+  have hfresh : S.loans (labels + 1) = none := by
+    cases h : S.loans (labels + 1) with
+    | none => rfl
+    | some y => exact absurd (hs.loans _ _ h) (Nat.not_succ_le_self _)
+  let S' : StoreTy :=
+    { S with loans := fun i => if i = labels + 1 then some a else S.loans i }
+  have hle : S.Le S' := ⟨fun _ _ h => h, fun _ _ h => h, fun _ _ h => h, fun _ _ h => h,
+    fun i y h => by
+      show (if i = labels + 1 then some a else S.loans i) = some y
+      by_cases he : i = labels + 1
+      · subst he
+        rw [hfresh] at h
+        cases h
+      · simp [he, h]⟩
+  refine ⟨S', hle, by show (if labels + 1 = labels + 1 then some a else _) = some a; simp, ?_⟩
+  refine ⟨fun id o ρ ε₀ Φ h => ?_, fun id τ h => Nat.lt_succ_of_lt (hs.labels id τ h),
+    fun id y h => Nat.lt_succ_of_lt (hs.handlers id y h), fun a' τ h => ?_, fun b a' h => ?_⟩
+  · obtain ⟨hlt, hseg⟩ := hs.conts id o ρ ε₀ Φ h
+    exact ⟨hlt, fun seg hg => (hseg seg hg).mono hle⟩
+  · obtain ⟨hlt, hv⟩ := hs.cells a' τ h
+    exact ⟨hlt, fun v hg => (hv v hg).mono hle⟩
+  · have h' : (if b = labels + 1 then some a else S.loans b) = some a' := h
+    by_cases he : b = labels + 1
+    · subst he
+      exact Nat.le_refl _
+    · simp [he] at h'
+      exact Nat.le_succ_of_le (hs.loans b a' h')
 
 theorem StoreOk.push_label {S : StoreTy} {conts : Conts Frame} {labels : Nat} {cells : Cells}
     (hs : StoreOk Δ S ⟨conts, labels, cells⟩) (x : Ty) :
@@ -191,9 +225,10 @@ theorem StoreOk.push_label {S : StoreTy} {conts : Conts Frame} {labels : Nat} {c
     · subst he
       rw [hfresh] at h
       cases h
-    · simp [he, h], fun _ _ h => h, fun _ _ h => h⟩
+    · simp [he, h], fun _ _ h => h, fun _ _ h => h, fun _ _ h => h⟩
   refine ⟨S', hle, by show (if labels = labels then some x else _) = some x; simp, ?_⟩
-  refine ⟨fun id o ρ ε₀ Φ h => ?_, fun id y h => ?_, fun id τ h => ?_, fun a τ h => ?_⟩
+  refine ⟨fun id o ρ ε₀ Φ h => ?_, fun id y h => ?_, fun id τ h => ?_, fun a τ h => ?_,
+    fun b a h => Nat.le_succ_of_le (hs.loans b a h)⟩
   · obtain ⟨hlt, hseg⟩ := hs.conts id o ρ ε₀ Φ h
     exact ⟨hlt, fun seg hg => (hseg seg hg).mono hle⟩
   · have h' : (if id = labels then some x else S.labels id) = some y := h
@@ -225,10 +260,10 @@ theorem StoreOk.push_cont {S : StoreTy} {conts : Conts Frame} {labels : Nat} {ce
     · subst he
       rw [hfresh] at h
       cases h
-    · simp [he, h], fun _ _ h => h, fun _ _ h => h, fun _ _ h => h⟩
+    · simp [he, h], fun _ _ h => h, fun _ _ h => h, fun _ _ h => h, fun _ _ h => h⟩
   refine ⟨S', hle,
     by show (if conts.length = conts.length then some (o, ρ, ε₀, Φ) else _) = _; simp, ?_⟩
-  refine ⟨fun id o' ρ' ε' Φ' h => ?_, hs.labels, hs.handlers, fun a τ h => ?_⟩
+  refine ⟨fun id o' ρ' ε' Φ' h => ?_, hs.labels, hs.handlers, fun a τ h => ?_, hs.loans⟩
   · have h' : (if id = conts.length then some (o, ρ, ε₀, Φ) else S.conts id)
         = some (o', ρ', ε', Φ') := h
     by_cases he : id = conts.length
@@ -264,9 +299,9 @@ theorem StoreOk.push_cell {S : StoreTy} {conts : Conts Frame} {labels : Nat} {ce
     · subst he
       rw [hfresh] at h
       cases h
-    · simp [he, h]⟩
+    · simp [he, h], fun _ _ h => h⟩
   refine ⟨S', hle, by show (if cells.length = cells.length then some σ else _) = _; simp, ?_⟩
-  refine ⟨fun id o ρ ε₀ Φ h => ?_, hs.labels, hs.handlers, fun a τ h => ?_⟩
+  refine ⟨fun id o ρ ε₀ Φ h => ?_, hs.labels, hs.handlers, fun a τ h => ?_, hs.loans⟩
   · obtain ⟨hlt, hseg⟩ := hs.conts id o ρ ε₀ Φ h
     exact ⟨hlt, fun seg hg => (hseg seg hg).mono hle⟩
   · have h' : (if a = cells.length then some σ else S.cells a) = some τ := h
@@ -290,7 +325,7 @@ theorem StoreOk.set_cell {S : StoreTy} {conts : Conts Frame} {labels : Nat} {cel
     {a : Nat} {τ : Ty} {x : Option Value} (hs : StoreOk Δ S ⟨conts, labels, cells⟩)
     (ha : S.cells a = some τ) (hx : ∀ v, x = some v → HasVal Δ S v τ) :
     StoreOk Δ S ⟨conts, labels, cells.set a x⟩ := by
-  refine ⟨hs.conts, hs.labels, hs.handlers, fun a' τ' h => ?_⟩
+  refine ⟨hs.conts, hs.labels, hs.handlers, fun a' τ' h => ?_, hs.loans⟩
   obtain ⟨hlt, hv⟩ := hs.cells a' τ' h
   refine ⟨by simpa using hlt, fun v hg => ?_⟩
   rw [List.getElem?_set] at hg
@@ -416,6 +451,49 @@ theorem mem_skip {a b c : List Nat} {i : Nat} (h : i ∈ a ++ c) : i ∈ a ++ (b
   · exact List.mem_append_left _ h
   · exact List.mem_append_right _ (List.mem_append_right _ h)
 
+/-- A stack grants nothing of what the store typing does not know. -/
+theorem StackOk.fresh {S : StoreTy} {st : List Frame} {τ : Ty} {ε : Row} {ϕ : List Rgn}
+    (h : StackOk Δ S st τ ε ϕ) {r : Rgn} (hr : ¬ Known S r) : r ∉ ϕ ∧ .wr r ∉ ϕ :=
+  ⟨fun hx => hr (h.known _ hx), fun hx => hr (h.known (.wr r) hx)⟩
+
+theorem nodup_map {α β : Type} {f : α → β} : ∀ {l : List α},
+    (∀ x y, x ∈ l → y ∈ l → f x = f y → x = y) → l.Nodup → (l.map f).Nodup
+  | [], _, _ => List.nodup_nil
+  | a :: l, h, hnd => by
+    obtain ⟨ha, hl⟩ := List.nodup_cons.mp hnd
+    refine List.nodup_cons.mpr ⟨fun hm => ?_, nodup_map (fun x y hx hy =>
+      h x y (List.mem_cons_of_mem _ hx) (List.mem_cons_of_mem _ hy)) hl⟩
+    obtain ⟨b, hb, he⟩ := List.mem_map.mp hm
+    have := h b a (List.mem_cons_of_mem _ hb) (List.mem_cons_self ..) he
+    subst this
+    exact ha hb
+
+/-- Putting a scope's own region for the one its callable binds keeps the
+regions the callable touches apart, the scope's own being new. -/
+theorem open_scope_nodup {acc ϕ : List Rgn} {r : Rgn}
+    (hb : (Rgn.bound 0).openAt 0 [r] = r) (hne : r ≠ .wr r)
+    (hacc : ∀ x, x ∈ acc → x = .bound 0 ∨ x = .wr (.bound 0) ∨ (x.free = true ∧ x ∈ ϕ))
+    (hr : r ∉ ϕ ∧ .wr r ∉ ϕ) (hnd : acc.Nodup) : (acc.map (Rgn.openAt 0 [r])).Nodup := by
+  have hwb : (Rgn.wr (.bound 0)).openAt 0 [r] = .wr r := congrArg Rgn.wr hb
+  refine nodup_map (fun x y hx hy he => ?_) hnd
+  rcases hacc x hx with hx0 | hx0 | ⟨hfx, hxϕ⟩ <;> rcases hacc y hy with hy0 | hy0 | ⟨hfy, hyϕ⟩
+  · rw [hx0, hy0]
+  · rw [hx0, hy0, hb, hwb] at he
+    exact absurd he hne
+  · rw [hx0, hb, Rgn.openAt_free hfy] at he
+    exact absurd (by rw [he]; exact hyϕ) hr.1
+  · rw [hx0, hy0, hb, hwb] at he
+    exact absurd he.symm hne
+  · rw [hx0, hy0]
+  · rw [hx0, hwb, Rgn.openAt_free hfy] at he
+    exact absurd (by rw [he]; exact hyϕ) hr.2
+  · rw [hy0, hb, Rgn.openAt_free hfx] at he
+    exact absurd (by rw [← he]; exact hxϕ) hr.1
+  · rw [hy0, hwb, Rgn.openAt_free hfx] at he
+    exact absurd (by rw [← he]; exact hxϕ) hr.2
+  · rw [Rgn.openAt_free hfx, Rgn.openAt_free hfy] at he
+    exact he
+
 /-- What the callable a cell's scope runs is given, and what running it needs:
 a reference to the cell at the type the callable takes, and no region but the
 cell's and those the code making the scope may touch. -/
@@ -423,38 +501,53 @@ theorem cell_enter {S : StoreTy} {a n : Nat} {r : Rgn} {σ ρ : Ty} {εt : Row}
     {acc ϕ ϕ' : List Rgn} (hcell : S.cells a = some σ) (hσ : σ.lc = true) (hρ : ρ.lc = true)
     (hε : εt.lc = true) (hn : n = 0 ∨ (n = 1 ∧ r = .bound 0))
     (hreg : Δ.regions → n = 1 ∧ r = .bound 0)
-    (hacc : ∀ x, x ∈ acc → (n = 1 ∧ x = .bound 0) ∨ (x.free = true ∧ x ∈ ϕ)) (hsub : Sub ϕ ϕ') :
+    (hacc : ∀ x, x ∈ acc → (n = 1 ∧ (x = .bound 0 ∨ x = .wr (.bound 0)))
+      ∨ (x.free = true ∧ x ∈ ϕ)) (hsub : Sub ϕ ϕ') (hnd : Δ.loans → acc.Nodup)
+    (hfr : .cell a ∉ ϕ' ∧ .wr (.cell a) ∉ ϕ') :
     ∃ rs, rs.length = n ∧ HasVal Δ S (.ref a 0) ((Ty.ref r σ).open rs) ∧ ρ.open rs = ρ
-      ∧ εt.open rs = εt ∧ Sub (acc.map (Rgn.openAt 0 rs)) (.cell a :: ϕ') := by
+      ∧ εt.open rs = εt ∧ Sub (acc.map (Rgn.openAt 0 rs)) (.cell a :: .wr (.cell a) :: ϕ')
+      ∧ (Δ.loans → (acc.map (Rgn.openAt 0 rs)).Nodup) := by
   rcases hn with rfl | ⟨rfl, rfl⟩
-  · refine ⟨[], rfl, ?_, Ty.open_nil _, Row.open_nil _, ?_⟩
+  · refine ⟨[], rfl, ?_, Ty.open_nil _, Row.open_nil _, ?_, ?_⟩
     · rw [Ty.open_nil]
       exact .ref hcell (fun hR => absurd (hreg hR).1 (by simp))
+        (fun hR _ => absurd (hreg hR).1 (by simp))
     · rw [acc_open_nil]
       intro x hx
       rcases hacc x hx with ⟨h, _⟩ | ⟨_, h⟩
       · cases h
-      · exact List.mem_cons_of_mem _ (hsub x h)
-  · refine ⟨[.cell a], rfl, ?_, Ty.open_lc hρ _, Row.open_lc hε _, ?_⟩
+      · exact List.mem_cons_of_mem _ (List.mem_cons_of_mem _ (hsub x h))
+    · rw [acc_open_nil]
+      exact hnd
+  · refine ⟨[.cell a], rfl, ?_, Ty.open_lc hρ _, Row.open_lc hε _, ?_, ?_⟩
     · rw [Ty.open_ref, Ty.open_lc hσ]
-      exact .ref hcell (fun _ => rfl)
+      exact .ref hcell (fun _ => .inl rfl) (fun _ _ => .inl ⟨rfl, rfl⟩)
     · intro x hx
       obtain ⟨x₀, hx₀, rfl⟩ := List.mem_map.mp hx
-      rcases hacc x₀ hx₀ with ⟨_, rfl⟩ | ⟨hfree, h⟩
+      rcases hacc x₀ hx₀ with ⟨_, rfl | rfl⟩ | ⟨hfree, h⟩
       · exact List.mem_cons_self ..
+      · exact List.mem_cons_of_mem _ (List.mem_cons_self ..)
       · rw [Rgn.openAt_free hfree]
-        exact List.mem_cons_of_mem _ (hsub x₀ h)
+        exact List.mem_cons_of_mem _ (List.mem_cons_of_mem _ (hsub x₀ h))
+    · intro hL
+      refine open_scope_nodup (ϕ := ϕ') rfl (fun h => by cases h) (fun x hx => ?_) hfr (hnd hL)
+      rcases hacc x hx with ⟨_, h | h⟩ | ⟨hfree, h⟩
+      · exact .inl h
+      · exact .inr (.inl h)
+      · exact .inr (.inr ⟨hfree, hsub x h⟩)
 
 /-- The same for the callable a label's scope runs: it is given the label, and
 needs no region but the scope's and those the code making the scope may touch. -/
 theorem label_enter {S : StoreTy} {id n : Nat} {σ ρ : Ty} {εl εt : Row} {once' : Bool}
     {accl acc ϕ ϕ' : List Rgn} (hlab : S.labels id = some σ) (hσ : σ.lc = true)
     (hε : εt.lc = true) (hn : n = 0 ∨ n = 1) (hreg : Δ.regions → n = 1 ∧ .bound 0 ∈ accl)
-    (hacc : ∀ x, x ∈ acc → (n = 1 ∧ x = .bound 0) ∨ (x.free = true ∧ x ∈ ϕ)) (hsub : Sub ϕ ϕ') :
+    (hacc : ∀ x, x ∈ acc → (n = 1 ∧ x = .bound 0) ∨ (x.free = true ∧ x ∈ ϕ)) (hsub : Sub ϕ ϕ')
+    (hnd : Δ.loans → acc.Nodup) (hfr : .lab id ∉ ϕ' ∧ .wr (.lab id) ∉ ϕ') :
     ∃ rs, rs.length = n ∧ HasVal Δ S (.label id) ((Ty.fn 0 [σ] ρ εl once' none accl).open rs)
-      ∧ σ.open rs = σ ∧ εt.open rs = εt ∧ Sub (acc.map (Rgn.openAt 0 rs)) (.lab id :: ϕ') := by
+      ∧ σ.open rs = σ ∧ εt.open rs = εt ∧ Sub (acc.map (Rgn.openAt 0 rs)) (.lab id :: ϕ')
+      ∧ (Δ.loans → (acc.map (Rgn.openAt 0 rs)).Nodup) := by
   rcases hn with rfl | rfl
-  · refine ⟨[], rfl, ?_, Ty.open_nil _, Row.open_nil _, ?_⟩
+  · refine ⟨[], rfl, ?_, Ty.open_nil _, Row.open_nil _, ?_, ?_⟩
     · rw [Ty.open_nil]
       exact .label hlab (fun hR => absurd (hreg hR).1 (by simp))
     · rw [acc_open_nil]
@@ -462,7 +555,9 @@ theorem label_enter {S : StoreTy} {id n : Nat} {σ ρ : Ty} {εl εt : Row} {onc
       rcases hacc x hx with ⟨h, _⟩ | ⟨_, h⟩
       · cases h
       · exact List.mem_cons_of_mem _ (hsub x h)
-  · refine ⟨[.lab id], rfl, ?_, Ty.open_lc hσ _, Row.open_lc hε _, ?_⟩
+    · rw [acc_open_nil]
+      exact hnd
+  · refine ⟨[.lab id], rfl, ?_, Ty.open_lc hσ _, Row.open_lc hε _, ?_, ?_⟩
     · rw [Ty.open_fn0]
       simp only [List.map_cons, List.map_nil, Ty.open_lc hσ]
       exact .label hlab (fun hR => List.mem_map.mpr ⟨.bound 0, (hreg hR).2, rfl⟩)
@@ -472,6 +567,88 @@ theorem label_enter {S : StoreTy} {id n : Nat} {σ ρ : Ty} {εl εt : Row} {onc
       · exact List.mem_cons_self ..
       · rw [Rgn.openAt_free hfree]
         exact List.mem_cons_of_mem _ (hsub x₀ h)
+    · intro hL
+      refine open_scope_nodup (ϕ := ϕ') rfl (fun h => by cases h) (fun x hx => ?_) hfr (hnd hL)
+      rcases hacc x hx with ⟨_, h⟩ | ⟨hfree, h⟩
+      · exact .inl h
+      · exact .inr (.inr ⟨hfree, hsub x h⟩)
+
+/-- The same for the callable a borrow's scope runs: it is given the borrow.
+Under the rules for borrows it may not touch what was lent, and the stack it
+runs on does not grant it. -/
+theorem lend_enter {S : StoreTy} {uniq : Bool} {a b n : Nat} {ρ κ : Rgn} {σ ρt : Ty}
+    {εt ε' : Row} {acc ϕ ϕ' : List Rgn} {st : List Frame} (hcell : S.cells a = some σ)
+    (hl : S.loans b = some a) (hb : 0 < b) (hon : Δ.regions → OnCell S ρ a)
+    (hσ : σ.lc = true) (hρt : ρt.lc = true) (hε : εt.lc = true)
+    (hn : (n = 0 ∧ κ = ρ) ∨ (n = 1 ∧ κ = .bound 0)) (hreg : Δ.regions → ρ ∈ ϕ)
+    (hloan : Δ.loans → n = 1 ∧ ρ ∈ ϕ ∧ (uniq = true → .wr ρ ∈ ϕ) ∧ acc.Nodup)
+    (hacc : ∀ x, x ∈ acc → (n = 1 ∧ (x = .bound 0 ∨ (uniq = true ∧ x = .wr (.bound 0))))
+      ∨ (x.free = true ∧ x ∈ ϕ ∧ (Δ.loans → x ≠ .wr ρ ∧ (uniq = true → x ≠ ρ))))
+    (hsub : Sub ϕ ϕ') (hfr : .loan b ∉ ϕ' ∧ .wr (.loan b) ∉ ϕ')
+    (hst : StackOk Δ S st ρt ε' ϕ') :
+    ∃ rs G, rs.length = n ∧ HasVal Δ S (.ref a b) ((Ty.ref κ σ).open rs) ∧ ρt.open rs = ρt
+      ∧ εt.open rs = εt ∧ Sub (acc.map (Rgn.openAt 0 rs)) G
+      ∧ (Δ.loans → (acc.map (Rgn.openAt 0 rs)).Nodup)
+      ∧ StackOk Δ S (.lend uniq a b :: st) ρt ε' G := by
+  have hnd1 : n = 1 → Δ.loans → (acc.map (Rgn.openAt 0 [.loan b])).Nodup := by
+    intro h1 hL
+    refine open_scope_nodup (ϕ := ϕ') rfl (fun h => by cases h) (fun x hx => ?_) hfr
+      (hloan hL).2.2.2
+    rcases hacc x hx with ⟨_, h | ⟨_, h⟩⟩ | ⟨hfree, h, _⟩
+    · exact .inl h
+    · exact .inr (.inl h)
+    · exact .inr (.inr ⟨hfree, hsub x h⟩)
+  by_cases hB : Δ.regions ∧ Δ.loans
+  · obtain ⟨h1, hρϕ, hw, _⟩ := hloan hB.2
+    subst h1
+    have hκ : κ = .bound 0 := by
+      rcases hn with ⟨h0, _⟩ | ⟨_, h⟩
+      · cases h0
+      · exact h
+    subst hκ
+    refine ⟨[.loan b], lent uniq ρ b ϕ', rfl, ?_, Ty.open_lc hρt _, Row.open_lc hε _, ?_,
+      hnd1 rfl, .lend hl hb (hon hB.1) (hsub _ hρϕ) (fun hu => hsub _ (hw hu)) hst⟩
+    · rw [Ty.open_ref, Ty.open_lc hσ]
+      exact .ref hcell (fun _ => .inr ⟨b, rfl, hl⟩) (fun _ _ => .inr ⟨rfl, hl⟩)
+    · intro x hx
+      obtain ⟨x₀, hx₀, rfl⟩ := List.mem_map.mp hx
+      rcases hacc x₀ hx₀ with ⟨_, rfl | ⟨hu, rfl⟩⟩ | ⟨hfree, hmem, hne⟩
+      · exact List.mem_cons_self ..
+      · subst hu
+        exact List.mem_cons_of_mem _ (List.mem_append_left _ (List.mem_cons_self ..))
+      · rw [Rgn.openAt_free hfree]
+        refine List.mem_cons_of_mem _ (List.mem_append_right _
+          (List.mem_filter.mpr ⟨hsub _ hmem, ?_⟩))
+        have h1 := (hne hB.2).1
+        have h2 := (hne hB.2).2
+        have h3 : x₀ ≠ .loan b := fun h => hfr.1 (h ▸ hsub _ hmem)
+        have h4 : x₀ ≠ .wr (.loan b) := fun h => hfr.2 (h ▸ hsub _ hmem)
+        cases uniq with
+        | false => simp [h1, h3, h4]
+        | true => simp [h1, h3, h4, h2 rfl]
+  · have hstk : StackOk Δ S (.lend uniq a b :: st) ρt ε' (.loan b :: .wr (.loan b) :: ϕ') :=
+      .lendLoose hB hl (fun hR => ⟨ρ, hon hR, hsub _ (hreg hR)⟩) hst
+    rcases hn with ⟨rfl, rfl⟩ | ⟨rfl, rfl⟩
+    · refine ⟨[], _, rfl, ?_, Ty.open_nil _, Row.open_nil _, ?_, ?_, hstk⟩
+      · rw [Ty.open_nil]
+        exact .ref hcell hon (fun hR hL => absurd ⟨hR, hL⟩ hB)
+      · rw [acc_open_nil]
+        intro x hx
+        rcases hacc x hx with ⟨h, _⟩ | ⟨_, h, _⟩
+        · cases h
+        · exact List.mem_cons_of_mem _ (List.mem_cons_of_mem _ (hsub x h))
+      · intro hL
+        exact absurd (hloan hL).1 (by simp)
+    · refine ⟨[.loan b], _, rfl, ?_, Ty.open_lc hρt _, Row.open_lc hε _, ?_, hnd1 rfl, hstk⟩
+      · rw [Ty.open_ref, Ty.open_lc hσ]
+        exact .ref hcell (fun _ => .inr ⟨b, rfl, hl⟩) (fun hR hL => absurd ⟨hR, hL⟩ hB)
+      · intro x hx
+        obtain ⟨x₀, hx₀, rfl⟩ := List.mem_map.mp hx
+        rcases hacc x₀ hx₀ with ⟨_, rfl | ⟨_, rfl⟩⟩ | ⟨hfree, hmem, _⟩
+        · exact List.mem_cons_self ..
+        · exact List.mem_cons_of_mem _ (List.mem_cons_self ..)
+        · rw [Rgn.openAt_free hfree]
+          exact List.mem_cons_of_mem _ (List.mem_cons_of_mem _ (hsub _ hmem))
 
 /-- A well-typed state that is not at a host operation steps to a well-typed
 state, halts, or is a fault. -/
@@ -510,26 +687,26 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
           = .stuck := by simp [step, hnone]
       rw [h1]
       exact Fault.overflow hargs hq
-  | @call _ f args body n rs Ps σ _ ε₁ _ once fenv acc hf hn hargs hrow hacc hlin hbody =>
+  | @call _ f args body n rs Ps σ _ ε₁ _ once fenv acc hf hn hargs hrow hacc hnd hlin hbody =>
     obtain ⟨c, hc, hcok, hck, hcl, hocc⟩ := evalCall_ok (S := S) henv hf hn hargs
     have h1 : step p ⟨.call f args body, env, stack, ⟨conts, labels, cells⟩⟩
         = apply p c (.call env body :: stack) ⟨conts, labels, cells⟩ := by simp [step, hc]
     rw [h1]
     refine .of_apply
       (apply_ok hp hs hcok (.call henv hbody hle hsub hst) (Row.le_trans hrow hle)
-        (hacc.trans hsub)) rfl (fun hD id => ?_) (fun hfa => ?_)
+        (hacc.trans hsub) hnd) rfl (fun hD id => ?_) (fun hfa => ?_)
     · have h2 := moved_live hD henv hlin (live := fv (.call f args body)) (fun i hi => hi) id
       simp only [hocc id, occStack, occFrame]
       omega
     · exact hfa.fault (s := ⟨.call f args body, env, stack, ⟨conts, labels, cells⟩⟩) rfl hck hcl
         rfl (fun _ h => findLabel_cons_none h)
-  | @tail _ f args n rs Ps σ _ ε₁ _ once fenv acc hf hn hret hargs hrow hacc hlin =>
+  | @tail _ f args n rs Ps σ _ ε₁ _ once fenv acc hf hn hret hargs hrow hacc hnd hlin =>
     obtain ⟨c, hc, hcok, hck, hcl, hocc⟩ := evalCall_ok (S := S) henv hf hn hargs
     have h1 : step p ⟨.tail f args, env, stack, ⟨conts, labels, cells⟩⟩
         = apply p c stack ⟨conts, labels, cells⟩ := by simp [step, hc]
     rw [h1]
     rw [hret] at hcok
-    refine .of_apply (apply_ok hp hs hcok hst (Row.le_trans hrow hle) (hacc.trans hsub)) rfl
+    refine .of_apply (apply_ok hp hs hcok hst (Row.le_trans hrow hle) (hacc.trans hsub) hnd) rfl
       (fun hD id => ?_) (fun hfa => ?_)
     · have h2 := moved_live hD henv hlin (live := fv (.tail f args))
         (fun i hi => by simpa [fv] using hi) id
@@ -537,7 +714,8 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
       omega
     · exact hfa.fault (s := ⟨.tail f args, env, stack, ⟨conts, labels, cells⟩⟩) rfl hck hcl
         rfl (fun _ h => h)
-  | @callNever _ f args body n rs Ps σ _ ε₁ _ once fenv acc hf hn hargs hrow hacc hlin hbody =>
+  | @callNever _ f args body n rs Ps σ _ ε₁ _ once fenv acc hf hn hargs hrow hacc hnd hlin
+      hbody =>
     obtain ⟨c, hc, hcok, hck, hcl, hocc⟩ := evalCall_ok (S := S) henv hf hn hargs
     have h1 : step p ⟨.call f args body, env, stack, ⟨conts, labels, cells⟩⟩
         = apply p c (.call env body :: stack) ⟨conts, labels, cells⟩ := by simp [step, hc]
@@ -545,20 +723,20 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
     rw [Ty.open_never] at hcok
     refine .of_apply
       (apply_ok hp hs hcok (.never (.call henv hbody hle hsub hst)) (Row.le_trans hrow hle)
-        (hacc.trans hsub)) rfl (fun hD id => ?_) (fun hfa => ?_)
+        (hacc.trans hsub) hnd) rfl (fun hD id => ?_) (fun hfa => ?_)
     · have h2 := moved_live hD henv hlin (live := fv (.call f args body)) (fun i hi => hi) id
       simp only [hocc id, occStack, occFrame]
       omega
     · exact hfa.fault (s := ⟨.call f args body, env, stack, ⟨conts, labels, cells⟩⟩) rfl hck hcl
         rfl (fun _ h => findLabel_cons_none h)
-  | @tailNever _ f args n rs Ps _ ε₁ _ once fenv acc hf hn hargs hrow hacc hlin =>
+  | @tailNever _ f args n rs Ps _ ε₁ _ once fenv acc hf hn hargs hrow hacc hnd hlin =>
     obtain ⟨c, hc, hcok, hck, hcl, hocc⟩ := evalCall_ok (S := S) henv hf hn hargs
     have h1 : step p ⟨.tail f args, env, stack, ⟨conts, labels, cells⟩⟩
         = apply p c stack ⟨conts, labels, cells⟩ := by simp [step, hc]
     rw [h1]
     rw [Ty.open_never] at hcok
     refine .of_apply (apply_ok hp hs hcok (.never hst) (Row.le_trans hrow hle)
-      (hacc.trans hsub)) rfl (fun hD id => ?_) (fun hfa => ?_)
+      (hacc.trans hsub) hnd) rfl (fun hD id => ?_) (fun hfa => ?_)
     · have h2 := moved_live hD henv hlin (live := fv (.tail f args))
         (fun i hi => by simpa [fv] using hi) id
       simp only [hocc id]
@@ -566,9 +744,9 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
     · exact hfa.fault (s := ⟨.tail f args, env, stack, ⟨conts, labels, cells⟩⟩) rfl hck hcl
         rfl (fun _ h => h)
   | @handle _ ret ops captures thunk body Cs σ ρ _ εt H _ once fenv acc Φ hthunk hcaps hok hrow
-      hacc hΦ hlin hbody =>
+      hacc hΦ hnd hlin hbody =>
     obtain ⟨caps, hcv, hcvt⟩ := atoms_ok (S := S) henv hcaps
-    obtain ⟨fn, tcaps, TCs, hcall, hteval, hent, htc⟩ := evalThunk_ok (S := S) henv hthunk
+    obtain ⟨fn, tcaps, TCs, hcall, hteval, hent, htc⟩ := evalThunk_ok (S := S) henv hthunk hnd
     have h1 : step p ⟨.handle ret ops captures thunk body, env, stack, ⟨conts, labels, cells⟩⟩
         = callFn p fn tcaps [] (.handler labels ⟨ret, ops, caps⟩ :: .call env body :: stack)
             ⟨conts, labels + 1, cells⟩ := by
@@ -585,9 +763,9 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
     simp only [occStack, occFrame, occs]
     omega
   | @handleTail _ ret ops captures thunk Cs σ _ εt H _ once fenv acc Φ hthunk hcaps hok hrow
-      hacc hΦ =>
+      hacc hΦ hnd =>
     obtain ⟨caps, hcv, hcvt⟩ := atoms_ok (S := S) henv hcaps
-    obtain ⟨fn, tcaps, TCs, hcall, hteval, hent, htc⟩ := evalThunk_ok (S := S) henv hthunk
+    obtain ⟨fn, tcaps, TCs, hcall, hteval, hent, htc⟩ := evalThunk_ok (S := S) henv hthunk hnd
     have h1 : step p ⟨.handleTail ret ops captures thunk, env, stack, ⟨conts, labels, cells⟩⟩
         = callFn p fn tcaps [] (.handler labels ⟨ret, ops, caps⟩ :: stack)
             ⟨conts, labels + 1, cells⟩ := by
@@ -650,11 +828,14 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
       simpa [occStack_append, occStack, occFrame] using this
     simp only [occs_append, occs, occ, occStack, occFrame, occStack_append]
     omega
-  | @label _ thunk body n σ ρ _ εl εt _ once once' fenv accl acc hthunk hσ hε hn hreg hacc hrow
-      hlin hbody =>
+  | @label _ thunk body n σ ρ _ εl εt _ once once' fenv accl acc hthunk hσ hε hn hreg hacc hnd
+      hrow hlin hbody =>
+    have hfr := hst.fresh (r := .lab labels)
+      fun ⟨_, h⟩ => absurd (hs.labels _ _ h) (Nat.lt_irrefl _)
     obtain ⟨S', hS, hlab, hs'⟩ := hs.push_label σ
-    obtain ⟨rs, hrs, hl, hσo, hεo, hgrant⟩ :=
+    obtain ⟨rs, hrs, hl, hσo, hεo, hgrant, hnd'⟩ :=
       label_enter (Δ := Δ) (ρ := ρ) (εl := εl) (once' := once') hlab hσ hε hn hreg hacc hsub
+        hnd hfr
     obtain ⟨c, hc, hcok, hck, hcl, hocc⟩ :=
       evalScope_ok (S := S') (l := .label labels) (henv.mono hS) hthunk hrs hl
     rw [hσo, hεo] at hcok
@@ -664,16 +845,20 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
     rw [h1]
     refine .of_apply
       (apply_ok hp hs' hcok (.label hlab (.call (henv.mono hS) hbody hle hsub (hst.mono hS)))
-        (Row.le_trans hrow hle) hgrant) rfl (fun hD id => ?_) (fun hfa => ?_)
+        (Row.le_trans hrow hle) hgrant hnd') rfl (fun hD id => ?_) (fun hfa => ?_)
     · have h2 := moved_live hD henv hlin (live := fv (.label thunk body)) (fun i hi => hi) id
       simp only [hocc id, occ, occStack, occFrame]
       omega
     · exact hfa.fault (s := ⟨.label thunk body, env, stack, ⟨conts, labels, cells⟩⟩) rfl hck hcl
         rfl (fun _ h => findLabel_cons_none (findLabel_cons_none h))
-  | @labelTail _ thunk n ρ _ εl εt _ once once' fenv accl acc hthunk hσ hε hn hreg hacc hrow =>
+  | @labelTail _ thunk n ρ _ εl εt _ once once' fenv accl acc hthunk hσ hε hn hreg hacc hnd
+      hrow =>
+    have hfr := hst.fresh (r := .lab labels)
+      fun ⟨_, h⟩ => absurd (hs.labels _ _ h) (Nat.lt_irrefl _)
     obtain ⟨S', hS, hlab, hs'⟩ := hs.push_label τ
-    obtain ⟨rs, hrs, hl, hσo, hεo, hgrant⟩ :=
+    obtain ⟨rs, hrs, hl, hσo, hεo, hgrant, hnd'⟩ :=
       label_enter (Δ := Δ) (ρ := ρ) (εl := εl) (once' := once') hlab hσ hε hn hreg hacc hsub
+        hnd hfr
     obtain ⟨c, hc, hcok, hck, hcl, hocc⟩ :=
       evalScope_ok (S := S') (l := .label labels) (henv.mono hS) hthunk hrs hl
     rw [hσo, hεo] at hcok
@@ -682,7 +867,7 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
       simp [step, hc]
     rw [h1]
     refine .of_apply
-      (apply_ok hp hs' hcok (.label hlab (hst.mono hS)) (Row.le_trans hrow hle) hgrant) rfl
+      (apply_ok hp hs' hcok (.label hlab (hst.mono hS)) (Row.le_trans hrow hle) hgrant hnd') rfl
       (fun hD id => ?_) (fun hfa => ?_)
     · have h2 := moved_live hD henv (Linear.single thunk) (live := fv (.labelTail thunk))
         (fun i hi => by simpa [fv] using hi) id
@@ -691,9 +876,11 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
     · exact hfa.fault (s := ⟨.labelTail thunk, env, stack, ⟨conts, labels, cells⟩⟩) rfl hck hcl
         rfl (fun _ h => findLabel_cons_none h)
   | @guard _ cleanup thunk body σc σ _ εt _ once once' fenv fenv' accc acc hcl hthunk hrow haccc
-      hacc hlin hbody =>
-    obtain ⟨gfn, gcaps, GCs, _, hgev, hgent, hgc⟩ := evalThunk_ok (S := S) henv hcl
-    obtain ⟨fn, tcaps, TCs, hcall, hteval, hent, htc⟩ := evalThunk_ok (S := S) henv hthunk
+      hacc hnd hlin hbody =>
+    obtain ⟨gfn, gcaps, GCs, _, hgev, hgent, hgc⟩ :=
+      evalThunk_ok (S := S) henv hcl fun h => (hnd h).1
+    obtain ⟨fn, tcaps, TCs, hcall, hteval, hent, htc⟩ :=
+      evalThunk_ok (S := S) henv hthunk fun h => (hnd h).2
     have h1 : step p ⟨.guard cleanup thunk body, env, stack, ⟨conts, labels, cells⟩⟩
         = callFn p fn tcaps [] (.guard gfn gcaps :: .call env body :: stack)
             ⟨conts, labels, cells⟩ := by
@@ -710,9 +897,11 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
     simp only [occStack, occFrame, occs]
     omega
   | @guardTail _ cleanup thunk σc _ εt _ once once' fenv fenv' accc acc hcl hthunk hrow haccc
-      hacc hlin =>
-    obtain ⟨gfn, gcaps, GCs, _, hgev, hgent, hgc⟩ := evalThunk_ok (S := S) henv hcl
-    obtain ⟨fn, tcaps, TCs, hcall, hteval, hent, htc⟩ := evalThunk_ok (S := S) henv hthunk
+      hacc hnd hlin =>
+    obtain ⟨gfn, gcaps, GCs, _, hgev, hgent, hgc⟩ :=
+      evalThunk_ok (S := S) henv hcl fun h => (hnd h).1
+    obtain ⟨fn, tcaps, TCs, hcall, hteval, hent, htc⟩ :=
+      evalThunk_ok (S := S) henv hthunk fun h => (hnd h).2
     have h1 : step p ⟨.guardTail cleanup thunk, env, stack, ⟨conts, labels, cells⟩⟩
         = callFn p fn tcaps [] (.guard gfn gcaps :: stack) ⟨conts, labels, cells⟩ := by
       simp [step, evalClosure, hgev, hcall, apply]
@@ -783,12 +972,14 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
         simp [step, evalCont, hkv]
       rw [h1]
       exact .next (.mk (henv.snoc .unit) hbody hle hsub hst hs) (fun _ hu => hu.mono rfl hquiet)
-  | @cell _ init thunk body n r σ ρ _ εt _ once fenv acc hinit hthunk hσ hρ hε hn hreg hacc hrow
-      hlin hbody =>
+  | @cell _ init thunk body n r σ ρ _ εt _ once fenv acc hinit hthunk hσ hρ hε hn hreg hacc hnd
+      hrow hlin hbody =>
     obtain ⟨v, hv, hvt⟩ := atom_ok henv hinit
+    have hfr := hst.fresh (r := .cell cells.length)
+      fun ⟨_, h⟩ => absurd (hs.cells _ _ h).1 (Nat.lt_irrefl _)
     obtain ⟨S', hS, hcell, hs'⟩ := hs.push_cell hvt
-    obtain ⟨rs, hrs, hl, hρo, hεo, hgrant⟩ :=
-      cell_enter (Δ := Δ) hcell hσ hρ hε hn hreg hacc hsub
+    obtain ⟨rs, hrs, hl, hρo, hεo, hgrant, hnd'⟩ :=
+      cell_enter (Δ := Δ) hcell hσ hρ hε hn hreg hacc hsub hnd hfr
     obtain ⟨c, hc, hcok, hck, hcl, hocc⟩ :=
       evalScope_ok (S := S') (l := .ref cells.length 0) (henv.mono hS) hthunk hrs hl
     rw [hρo, hεo] at hcok
@@ -798,8 +989,8 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
       simp [step, hv, hc, Store.alloc]
     rw [h1]
     refine .of_apply
-      (apply_ok hp hs' hcok (.cell (.call (henv.mono hS) hbody hle hsub (hst.mono hS)))
-        (Row.le_trans hrow hle) hgrant) rfl (fun hD id => ?_) (fun hfa => ?_)
+      (apply_ok hp hs' hcok (.cell hcell (.call (henv.mono hS) hbody hle hsub (hst.mono hS)))
+        (Row.le_trans hrow hle) hgrant hnd') rfl (fun hD id => ?_) (fun hfa => ?_)
     · have h2 := moved_live hD henv hlin (live := fv (.cell init thunk body)) (fun i hi => hi) id
       have h3 := sumAt_pair id env init thunk
       have h4 := occ_eval id env hv
@@ -807,12 +998,14 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
       omega
     · exact hfa.fault (s := ⟨.cell init thunk body, env, stack, ⟨conts, labels, cells⟩⟩) rfl hck
         hcl rfl (fun _ h => findLabel_cons_none (findLabel_cons_none h))
-  | @cellTail _ init thunk n r σ _ εt _ once fenv acc hinit hthunk hσ hτ hε hn hreg hacc hrow
+  | @cellTail _ init thunk n r σ _ εt _ once fenv acc hinit hthunk hσ hτ hε hn hreg hacc hnd hrow
       hlin =>
     obtain ⟨v, hv, hvt⟩ := atom_ok henv hinit
+    have hfr := hst.fresh (r := .cell cells.length)
+      fun ⟨_, h⟩ => absurd (hs.cells _ _ h).1 (Nat.lt_irrefl _)
     obtain ⟨S', hS, hcell, hs'⟩ := hs.push_cell hvt
-    obtain ⟨rs, hrs, hl, hρo, hεo, hgrant⟩ :=
-      cell_enter (Δ := Δ) hcell hσ hτ hε hn hreg hacc hsub
+    obtain ⟨rs, hrs, hl, hρo, hεo, hgrant, hnd'⟩ :=
+      cell_enter (Δ := Δ) hcell hσ hτ hε hn hreg hacc hsub hnd hfr
     obtain ⟨c, hc, hcok, hck, hcl, hocc⟩ :=
       evalScope_ok (S := S') (l := .ref cells.length 0) (henv.mono hS) hthunk hrs hl
     rw [hρo, hεo] at hcok
@@ -821,7 +1014,7 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
       simp [step, hv, hc, Store.alloc]
     rw [h1]
     refine .of_apply
-      (apply_ok hp hs' hcok (.cell (hst.mono hS)) (Row.le_trans hrow hle) hgrant) rfl
+      (apply_ok hp hs' hcok (.cell hcell (hst.mono hS)) (Row.le_trans hrow hle) hgrant hnd') rfl
       (fun hD id => ?_) (fun hfa => ?_)
     · have h2 := moved_live hD henv hlin (live := fv (.cellTail init thunk))
         (fun i hi => by simpa [fv] using hi) id
@@ -831,21 +1024,27 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
       omega
     · exact hfa.fault (s := ⟨.cellTail init thunk, env, stack, ⟨conts, labels, cells⟩⟩) rfl hck
         hcl rfl (fun _ h => findLabel_cons_none h)
-  | @lend _ uniq r thunk body ρ σ ρt _ εt _ once fenv acc hr hthunk hrow hacc hlin hbody =>
+  | @lend _ uniq r thunk body n ρ κ σ ρt _ εt _ once fenv acc hr hthunk hσ hρ hε hn hreg hloan
+      hacc hrow hlin hbody =>
     obtain ⟨rv, hrv, hrt⟩ := atom_ok henv hr
-    obtain ⟨a, b, rfl, hcell, hreg⟩ := hrt.ref_inv
+    obtain ⟨a, b, rfl, hcell, hon, _⟩ := hrt.ref_inv
+    have hfr := hst.fresh (r := .loan (labels + 1))
+      fun ⟨_, h⟩ => absurd (hs.loans _ _ h) (Nat.not_succ_le_self _)
+    obtain ⟨S', hS, hl, hs'⟩ := hs.push_loan a
+    obtain ⟨rs, G, hrs, hl', hρo, hεo, hgrant, hnd', hst'⟩ :=
+      lend_enter (Δ := Δ) (uniq := uniq) (hS.cells _ _ hcell) hl (Nat.succ_pos _)
+        (fun hR => (hon hR).mono hS) hσ hρ hε hn hreg hloan hacc hsub hfr
+        (.call (henv.mono hS) hbody hle hsub (hst.mono hS))
     obtain ⟨c, hc, hcok, hck, hcl, hocc⟩ :=
-      evalScope_ok (S := S) (l := .ref a (labels + 1)) (rs := []) henv hthunk rfl
-        (by rw [Ty.open_nil]; exact .ref hcell hreg)
-    rw [Ty.open_nil, Row.open_nil, acc_open_nil] at hcok
+      evalScope_ok (S := S') (l := .ref a (labels + 1)) (henv.mono hS) hthunk hrs hl'
+    rw [hρo, hεo] at hcok
     have h1 : step p ⟨.lend uniq r thunk body, env, stack, ⟨conts, labels, cells⟩⟩
         = apply p c (.lend uniq a (labels + 1) :: .call env body :: stack)
             ⟨conts, labels + 1, cells⟩ := by
       simp [step, evalLend, hrv, hc]
     rw [h1]
-    refine .of_apply
-      (apply_ok hp hs.bump hcok (.lend (.call henv hbody hle hsub hst))
-        (Row.le_trans hrow hle) (hacc.trans hsub)) rfl (fun hD id => ?_) (fun hfa => ?_)
+    refine .of_apply (apply_ok hp hs' hcok hst' (Row.le_trans hrow hle) hgrant hnd') rfl
+      (fun hD id => ?_) (fun hfa => ?_)
     · have h2 := moved_live hD henv hlin (live := fv (.lend uniq r thunk body))
         (fun i hi => by
           rcases List.mem_append.mp hi with h | h
@@ -857,7 +1056,7 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
         hcl rfl (fun _ h => findLabel_cons_none (findLabel_cons_none h))
   | @load _ a body r σ _ _ ha _ hdup hbody =>
     obtain ⟨v, hv, hvt⟩ := atom_ok henv ha
-    obtain ⟨addr, tag, rfl, hcell, _⟩ := hvt.ref_inv
+    obtain ⟨addr, tag, rfl, hcell, _, _⟩ := hvt.ref_inv
     obtain ⟨hlt, hval⟩ := hs.cells addr σ hcell
     cases hget : cells[addr]? with
     | none => exact absurd hlt (by simpa using List.getElem?_eq_none_iff.mp hget)
@@ -881,10 +1080,10 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
         have h4 := hD _ _ _ (hval w hget) hdup id
         simp only [occState]
         omega
-  | @store _ a b body r σ _ _ ha _ hb hlin hbody =>
+  | @store _ a b body r σ _ _ ha _ _ hb hlin hbody =>
     obtain ⟨v, hv, hvt⟩ := atom_ok henv ha
     obtain ⟨w, hw, hwt⟩ := atom_ok henv hb
-    obtain ⟨addr, tag, rfl, hcell, _⟩ := hvt.ref_inv
+    obtain ⟨addr, tag, rfl, hcell, _, _⟩ := hvt.ref_inv
     obtain ⟨hlt, hval⟩ := hs.cells addr σ hcell
     cases hget : cells[addr]? with
     | none => exact absurd hlt (by simpa using List.getElem?_eq_none_iff.mp hget)
@@ -917,10 +1116,10 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
         simp only [oweight] at h5
         simp only [occState]
         omega
-  | @swap _ a b body r σ _ _ ha _ hb hlin hbody =>
+  | @swap _ a b body r σ _ _ ha _ _ hb hlin hbody =>
     obtain ⟨v, hv, hvt⟩ := atom_ok henv ha
     obtain ⟨w, hw, hwt⟩ := atom_ok henv hb
-    obtain ⟨addr, tag, rfl, hcell, _⟩ := hvt.ref_inv
+    obtain ⟨addr, tag, rfl, hcell, _, _⟩ := hvt.ref_inv
     obtain ⟨hlt, hval⟩ := hs.cells addr σ hcell
     cases hget : cells[addr]? with
     | none => exact absurd hlt (by simpa using List.getElem?_eq_none_iff.mp hget)
@@ -1026,9 +1225,11 @@ theorem stepIO_ok {p : Program} {c : Config} (hp : ProgramOk Δ p) (ht : Typed �
 /-- The program about to start is well typed. -/
 theorem typed_init {p : Program} (hp : ProgramOk Δ p) : Typed Δ (init p) := by
   obtain ⟨τ, hmain⟩ := hp.main
-  refine ⟨⟨fun _ => none, fun _ => none, fun _ => none, fun _ => none⟩, ?_⟩
-  refine .mk .nil hmain (Row.le_refl _) (Sub.refl _) .nil ⟨?_, ?_, ?_, ?_⟩
+  refine ⟨⟨fun _ => none, fun _ => none, fun _ => none, fun _ => none, fun _ => none⟩, ?_⟩
+  refine .mk .nil hmain (Row.le_refl _) (Sub.refl _) .nil ⟨?_, ?_, ?_, ?_, ?_⟩
   · intro _ _ _ _ _ h
+    simp at h
+  · intro _ _ h
     simp at h
   · intro _ _ h
     simp at h

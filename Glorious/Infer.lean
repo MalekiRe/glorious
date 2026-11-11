@@ -1533,6 +1533,8 @@ def ofRg (env : RgEnv) : Typing.Rgn → M Nat
     | none => freshRg
   | .cell _ => freshRg
   | .lab _ => freshRg
+  | .loan _ => freshRg
+  | .wr _ => freshRg
 
 def ofAcc (env : RgEnv) (acc : List Typing.Rgn) : M Nat := do
   let a ← freshAcc
@@ -1862,7 +1864,7 @@ def sccs (fns : Array Core.Fn) : Array Nat := Id.run do
 /-- Say which uses of declared types are duplicable: all of them, except those
 with a field that is not, found by taking flags away until nothing changes. -/
 partial def dupFlags (datas : List DataInst) : List DataInst :=
-  let C : Cert := ⟨[], datas, [], .int, [], true, false⟩
+  let C : Cert := ⟨[], datas, [], .int, [], true, false, false⟩
   let next := datas.map fun d =>
     { d with dup := d.dup && d.ctors.all fun c => Typing.dupTys C c.2 }
   if next.zip datas |>.all (fun (a, b) => a.dup == b.dup) then next else dupFlags next
@@ -1938,7 +1940,7 @@ def certifyM (items : List Item) (g : Elab.Globals) (p : Core.Program)
       ++ entries.flatMap fun e => e.sig.eff ++ e.hints.flatMap (·.flatMap hintOps)
   let (datas, ops) ← declsFor types opsUsed [] []
   let strict := (← get).strict
-  pure ⟨entries, dupFlags datas, ops, mainTy, mainHints, strict, (← get).regions⟩
+  pure ⟨entries, dupFlags datas, ops, mainTy, mainHints, strict, (← get).regions, false⟩
 
 /-- Find a certificate for an elaborated program, with the ownership rules or
 without, and with the region rules or without. -/

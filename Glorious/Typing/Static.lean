@@ -61,10 +61,23 @@ def FnSig.ty (sig : FnSig) (θ : List Rgn) (once : Bool) (env : Option (List Ty)
   .fn sig.rgns (sig.params.map (Ty.inst θ)) (sig.ret.inst θ) (sig.eff.inst θ) once env
     (sig.acc.map (Rgn.inst θ))
 
-/-- A signature mentions no region variable but those fixed when a closure is made. -/
+/-- Whoever may write a region may read it. -/
+def closed (l : List Rgn) : Bool :=
+  l.all fun x =>
+    match x with
+    | .wr r => l.contains r
+    | _ => true
+
+theorem closed_mem {l : List Rgn} (h : closed l = true) {r : Rgn} (hr : .wr r ∈ l) : r ∈ l := by
+  have := List.all_eq_true.mp h _ hr
+  simpa using this
+
+/-- A signature mentions no region variable but those fixed when a closure is
+made, and its function may read what it may write. -/
 def FnSig.wf (sig : FnSig) : Bool :=
   sig.caps.all (Ty.within sig.crgns) && sig.params.all (Ty.within sig.crgns)
     && sig.ret.within sig.crgns && sig.eff.within sig.crgns && sig.acc.all (Rgn.within sig.crgns)
+    && closed sig.acc
 
 /-- What a program declares: the signatures of its functions, the fields of its
 data constructors and the types of its operations. -/
@@ -81,6 +94,10 @@ structure Ctx where
   /-- Whether the region rules are to hold. Without them a reference's region
   means nothing and nothing is shown about how long a cell is used. -/
   regions : Prop
+  /-- Whether the rules for borrows are to hold. Without them a lent reference
+  is the reference it was lent from, and nothing is shown about who uses a cell
+  while it is lent. -/
+  loans : Prop
 
 /-- What a context says of a type does not depend on which regions stand for
 its region variables. -/
@@ -258,6 +275,7 @@ def Enters (Δ : Ctx) (fn : Nat) (Cs Ps : List Ty) (ρ : Ty) (ε : Row) (Φ : Li
   ∃ sig θ, Δ.fnSig fn sig ∧ θ.length = sig.crgns ∧ sig.rgns = 0
     ∧ Cs = sig.caps.map (Ty.inst θ) ∧ Ps = sig.params.map (Ty.inst θ) ∧ ρ = sig.ret.inst θ
     ∧ Row.le (sig.eff.inst θ) ε ∧ Sub (sig.acc.map (Rgn.inst θ)) Φ
+    ∧ (Δ.loans → (sig.acc.map (Rgn.inst θ)).Nodup)
 
 /-- The functions serving a handler's operations, against the type each
 operation is declared to have. A resumptive operation's function also receives
@@ -300,13 +318,15 @@ inductive HasTm (Δ : Ctx) (ϕ : List Rgn) : TEnv → Tm → Ty → Row → Prop
       {acc : List Rgn} :
       HasAtom Γ f (.fn n Ps σ ε' once env acc) → rs.length = n →
       HasAtoms Γ args (Ps.map (Ty.open rs)) → Row.le (ε'.open rs) ε →
-      Sub (acc.map (Rgn.openAt 0 rs)) ϕ → Linear Δ Γ (atomVars (f :: args)) (fv body) →
+      Sub (acc.map (Rgn.openAt 0 rs)) ϕ → (Δ.loans → (acc.map (Rgn.openAt 0 rs)).Nodup) →
+      Linear Δ Γ (atomVars (f :: args)) (fv body) →
       HasTm Δ ϕ (Γ ++ [σ.open rs]) body τ ε → HasTm Δ ϕ Γ (.call f args body) τ ε
   | tail {Γ : TEnv} {f : Atom} {args : List Atom} {n : Nat} {rs : List Rgn} {Ps : List Ty}
       {σ τ : Ty} {ε' ε : Row} {once : Bool} {env : Option (List Ty)} {acc : List Rgn} :
       HasAtom Γ f (.fn n Ps σ ε' once env acc) → rs.length = n → σ.open rs = τ →
       HasAtoms Γ args (Ps.map (Ty.open rs)) → Row.le (ε'.open rs) ε →
-      Sub (acc.map (Rgn.openAt 0 rs)) ϕ → Linear Δ Γ (atomVars (f :: args)) [] →
+      Sub (acc.map (Rgn.openAt 0 rs)) ϕ → (Δ.loans → (acc.map (Rgn.openAt 0 rs)).Nodup) →
+      Linear Δ Γ (atomVars (f :: args)) [] →
       HasTm Δ ϕ Γ (.tail f args) τ ε
   /-- A call that does not return can stand where a result of any type is
   expected, and the code after it can take its result to be of any type. This is
@@ -316,13 +336,15 @@ inductive HasTm (Δ : Ctx) (ϕ : List Rgn) : TEnv → Tm → Ty → Row → Prop
       {acc : List Rgn} :
       HasAtom Γ f (.fn n Ps .never ε' once env acc) → rs.length = n →
       HasAtoms Γ args (Ps.map (Ty.open rs)) → Row.le (ε'.open rs) ε →
-      Sub (acc.map (Rgn.openAt 0 rs)) ϕ → Linear Δ Γ (atomVars (f :: args)) (fv body) →
+      Sub (acc.map (Rgn.openAt 0 rs)) ϕ → (Δ.loans → (acc.map (Rgn.openAt 0 rs)).Nodup) →
+      Linear Δ Γ (atomVars (f :: args)) (fv body) →
       HasTm Δ ϕ (Γ ++ [σ]) body τ ε → HasTm Δ ϕ Γ (.call f args body) τ ε
   | tailNever {Γ : TEnv} {f : Atom} {args : List Atom} {n : Nat} {rs : List Rgn} {Ps : List Ty}
       {τ : Ty} {ε' ε : Row} {once : Bool} {env : Option (List Ty)} {acc : List Rgn} :
       HasAtom Γ f (.fn n Ps .never ε' once env acc) → rs.length = n →
       HasAtoms Γ args (Ps.map (Ty.open rs)) → Row.le (ε'.open rs) ε →
-      Sub (acc.map (Rgn.openAt 0 rs)) ϕ → Linear Δ Γ (atomVars (f :: args)) [] →
+      Sub (acc.map (Rgn.openAt 0 rs)) ϕ → (Δ.loans → (acc.map (Rgn.openAt 0 rs)).Nodup) →
+      Linear Δ Γ (atomVars (f :: args)) [] →
       HasTm Δ ϕ Γ (.tail f args) τ ε
   /-- The handled computation and the handler's functions touch within `Φ`,
   which the code installing the handler may touch. -/
@@ -331,14 +353,14 @@ inductive HasTm (Δ : Ctx) (ϕ : List Rgn) : TEnv → Tm → Ty → Row → Prop
       {env : Option (List Ty)} {acc Φ : List Rgn} :
       HasAtom Γ thunk (.fn 0 [] σ εt once env acc) → HasAtoms Γ captures Cs →
       HandlerOk Δ Cs ret ops σ ρ H ε Φ → Row.le εt (H ++ ε) → Sub acc Φ → Sub Φ ϕ →
-      Linear Δ Γ (atomVars [thunk]) (fv body) →
+      (Δ.loans → acc.Nodup) → Linear Δ Γ (atomVars [thunk]) (fv body) →
       HasTm Δ ϕ (Γ ++ [ρ]) body τ ε → HasTm Δ ϕ Γ (.handle ret ops captures thunk body) τ ε
   | handleTail {Γ : TEnv} {ret : Nat} {ops : List (Nat × Nat)} {captures : List Atom}
       {thunk : Atom} {Cs : List Ty} {σ τ : Ty} {εt H ε : Row} {once : Bool}
       {env : Option (List Ty)} {acc Φ : List Rgn} :
       HasAtom Γ thunk (.fn 0 [] σ εt once env acc) → HasAtoms Γ captures Cs →
       HandlerOk Δ Cs ret ops σ τ H ε Φ → Row.le εt (H ++ ε) → Sub acc Φ → Sub Φ ϕ →
-      HasTm Δ ϕ Γ (.handleTail ret ops captures thunk) τ ε
+      (Δ.loans → acc.Nodup) → HasTm Δ ϕ Γ (.handleTail ret ops captures thunk) τ ε
   | raise {Γ : TEnv} {op : Nat} {args : List Atom} {targs Ps : List Ty} {τ : Ty} {ε : Row} :
       ε.lookup op = some targs → Δ.opSig op targs = some (Ps, none) → HasAtoms Γ args Ps →
       Linear Δ Γ (atomVars args) [] → HasTm Δ ϕ Γ (.raise op args) τ ε
@@ -357,27 +379,28 @@ inductive HasTm (Δ : Ctx) (ϕ : List Rgn) : TEnv → Tm → Ty → Row → Prop
       HasAtom Γ thunk (.fn n [.fn 0 [σ] ρ εl once' none accl] σ εt once env acc) →
       σ.lc = true → εt.lc = true → (n = 0 ∨ n = 1) → (Δ.regions → n = 1 ∧ .bound 0 ∈ accl) →
       (∀ x, x ∈ acc → (n = 1 ∧ x = .bound 0) ∨ (x.free = true ∧ x ∈ ϕ)) →
-      Row.le εt ε → Linear Δ Γ (atomVars [thunk]) (fv body) →
+      (Δ.loans → acc.Nodup) → Row.le εt ε → Linear Δ Γ (atomVars [thunk]) (fv body) →
       HasTm Δ ϕ (Γ ++ [σ]) body τ ε → HasTm Δ ϕ Γ (.label thunk body) τ ε
   | labelTail {Γ : TEnv} {thunk : Atom} {n : Nat} {ρ τ : Ty} {εl εt ε : Row}
       {once once' : Bool} {env : Option (List Ty)} {accl acc : List Rgn} :
       HasAtom Γ thunk (.fn n [.fn 0 [τ] ρ εl once' none accl] τ εt once env acc) →
       τ.lc = true → εt.lc = true → (n = 0 ∨ n = 1) → (Δ.regions → n = 1 ∧ .bound 0 ∈ accl) →
       (∀ x, x ∈ acc → (n = 1 ∧ x = .bound 0) ∨ (x.free = true ∧ x ∈ ϕ)) →
-      Row.le εt ε → HasTm Δ ϕ Γ (.labelTail thunk) τ ε
+      (Δ.loans → acc.Nodup) → Row.le εt ε → HasTm Δ ϕ Γ (.labelTail thunk) τ ε
   /-- A cleanup performs no operations. -/
   | guard {Γ : TEnv} {cleanup thunk : Atom} {body : Tm} {σc σ τ : Ty} {εt ε : Row}
       {once once' : Bool} {env env' : Option (List Ty)} {accc acc : List Rgn} :
       HasAtom Γ cleanup (.fn 0 [] σc [] once' env' accc) →
       HasAtom Γ thunk (.fn 0 [] σ εt once env acc) →
-      Row.le εt ε → Sub accc ϕ → Sub acc ϕ →
+      Row.le εt ε → Sub accc ϕ → Sub acc ϕ → (Δ.loans → accc.Nodup ∧ acc.Nodup) →
       Linear Δ Γ (atomVars [cleanup, thunk]) (fv body) →
       HasTm Δ ϕ (Γ ++ [σ]) body τ ε → HasTm Δ ϕ Γ (.guard cleanup thunk body) τ ε
   | guardTail {Γ : TEnv} {cleanup thunk : Atom} {σc τ : Ty} {εt ε : Row} {once once' : Bool}
       {env env' : Option (List Ty)} {accc acc : List Rgn} :
       HasAtom Γ cleanup (.fn 0 [] σc [] once' env' accc) →
       HasAtom Γ thunk (.fn 0 [] τ εt once env acc) →
-      Row.le εt ε → Sub accc ϕ → Sub acc ϕ → Linear Δ Γ (atomVars [cleanup, thunk]) [] →
+      Row.le εt ε → Sub accc ϕ → Sub acc ϕ → (Δ.loans → accc.Nodup ∧ acc.Nodup) →
+      Linear Δ Γ (atomVars [cleanup, thunk]) [] →
       HasTm Δ ϕ Γ (.guardTail cleanup thunk) τ ε
   /-- Giving up a callable may run the cleanups of what it captured, among
   whatever that could still perform and touch. -/
@@ -390,41 +413,52 @@ inductive HasTm (Δ : Ctx) (ϕ : List Rgn) : TEnv → Tm → Ty → Row → Prop
   is given a reference to the cell, which holds `init` to begin with. Under the
   region rules the callable is polymorphic in the cell's region, and neither
   what it gives back, nor what it performs, nor what the cell holds mentions
-  that region: so nothing typed outside the scope can. -/
+  that region: so nothing typed outside the scope can. The callable may read
+  and write the cell. -/
   | cell {Γ : TEnv} {init thunk : Atom} {body : Tm} {n : Nat} {r : Rgn} {σ ρ τ : Ty}
       {εt ε : Row} {once : Bool} {env : Option (List Ty)} {acc : List Rgn} :
       HasAtom Γ init σ → HasAtom Γ thunk (.fn n [.ref r σ] ρ εt once env acc) →
       σ.lc = true → ρ.lc = true → εt.lc = true →
       (n = 0 ∨ (n = 1 ∧ r = .bound 0)) → (Δ.regions → n = 1 ∧ r = .bound 0) →
-      (∀ x, x ∈ acc → (n = 1 ∧ x = .bound 0) ∨ (x.free = true ∧ x ∈ ϕ)) →
-      Row.le εt ε → Linear Δ Γ (atomVars [init, thunk]) (fv body) →
+      (∀ x, x ∈ acc → (n = 1 ∧ (x = .bound 0 ∨ x = .wr (.bound 0))) ∨ (x.free = true ∧ x ∈ ϕ)) →
+      (Δ.loans → acc.Nodup) → Row.le εt ε → Linear Δ Γ (atomVars [init, thunk]) (fv body) →
       HasTm Δ ϕ (Γ ++ [ρ]) body τ ε → HasTm Δ ϕ Γ (.cell init thunk body) τ ε
   | cellTail {Γ : TEnv} {init thunk : Atom} {n : Nat} {r : Rgn} {σ τ : Ty} {εt ε : Row}
       {once : Bool} {env : Option (List Ty)} {acc : List Rgn} :
       HasAtom Γ init σ → HasAtom Γ thunk (.fn n [.ref r σ] τ εt once env acc) →
       σ.lc = true → τ.lc = true → εt.lc = true →
       (n = 0 ∨ (n = 1 ∧ r = .bound 0)) → (Δ.regions → n = 1 ∧ r = .bound 0) →
-      (∀ x, x ∈ acc → (n = 1 ∧ x = .bound 0) ∨ (x.free = true ∧ x ∈ ϕ)) →
-      Row.le εt ε → Linear Δ Γ (atomVars [init, thunk]) [] →
+      (∀ x, x ∈ acc → (n = 1 ∧ (x = .bound 0 ∨ x = .wr (.bound 0))) ∨ (x.free = true ∧ x ∈ ϕ)) →
+      (Δ.loans → acc.Nodup) → Row.le εt ε → Linear Δ Γ (atomVars [init, thunk]) [] →
       HasTm Δ ϕ Γ (.cellTail init thunk) τ ε
-  /-- Lending a reference runs a callable with a reference to the same cell. -/
-  | lend {Γ : TEnv} {uniq : Bool} {r thunk : Atom} {body : Tm} {ρ : Rgn} {σ ρt τ : Ty}
-      {εt ε : Row} {once : Bool} {env : Option (List Ty)} {acc : List Rgn} :
-      HasAtom Γ r (.ref ρ σ) → HasAtom Γ thunk (.fn 0 [.ref ρ σ] ρt εt once env acc) →
-      Row.le εt ε → Sub acc ϕ → Linear Δ Γ (atomVars [thunk]) (fv body) →
+  /-- Lending a reference runs a callable with a reference to the same cell,
+  for the scope. Under the rules for borrows the callable is polymorphic in the
+  region of the borrow, and the callable may not, meanwhile, write what was
+  lent, nor read it if it was lent for writing: it has the borrow instead. Lending
+  for writing needs leave to write. -/
+  | lend {Γ : TEnv} {uniq : Bool} {r thunk : Atom} {body : Tm} {n : Nat} {ρ κ : Rgn}
+      {σ ρt τ : Ty} {εt ε : Row} {once : Bool} {env : Option (List Ty)} {acc : List Rgn} :
+      HasAtom Γ r (.ref ρ σ) → HasAtom Γ thunk (.fn n [.ref κ σ] ρt εt once env acc) →
+      σ.lc = true → ρt.lc = true → εt.lc = true →
+      ((n = 0 ∧ κ = ρ) ∨ (n = 1 ∧ κ = .bound 0)) → (Δ.regions → ρ ∈ ϕ) →
+      (Δ.loans → n = 1 ∧ ρ ∈ ϕ ∧ (uniq = true → .wr ρ ∈ ϕ) ∧ acc.Nodup) →
+      (∀ x, x ∈ acc → (n = 1 ∧ (x = .bound 0 ∨ (uniq = true ∧ x = .wr (.bound 0))))
+        ∨ (x.free = true ∧ x ∈ ϕ ∧ (Δ.loans → x ≠ .wr ρ ∧ (uniq = true → x ≠ ρ)))) →
+      Row.le εt ε → Linear Δ Γ (atomVars [thunk]) (fv body) →
       HasTm Δ ϕ (Γ ++ [ρt]) body τ ε → HasTm Δ ϕ Γ (.lend uniq r thunk body) τ ε
   /-- Reading a cell copies its value, so the value must be duplicable. A value
   that is not is taken out with `swap`. Under the region rules, reading or
-  writing a cell needs its region. -/
+  writing a cell needs its region; under the rules for borrows, writing it needs
+  leave to write the region. -/
   | load {Γ : TEnv} {a : Atom} {body : Tm} {r : Rgn} {σ τ : Ty} {ε : Row} :
       HasAtom Γ a (.ref r σ) → (Δ.regions → r ∈ ϕ) → Δ.dup σ →
       HasTm Δ ϕ (Γ ++ [σ]) body τ ε → HasTm Δ ϕ Γ (.mem .load [a] body) τ ε
   | store {Γ : TEnv} {a b : Atom} {body : Tm} {r : Rgn} {σ τ : Ty} {ε : Row} :
-      HasAtom Γ a (.ref r σ) → (Δ.regions → r ∈ ϕ) → HasAtom Γ b σ →
+      HasAtom Γ a (.ref r σ) → (Δ.regions → r ∈ ϕ) → (Δ.loans → .wr r ∈ ϕ) → HasAtom Γ b σ →
       Linear Δ Γ (atomVars [b]) (fv body) →
       HasTm Δ ϕ (Γ ++ [.unit]) body τ ε → HasTm Δ ϕ Γ (.mem .store [a, b] body) τ ε
   | swap {Γ : TEnv} {a b : Atom} {body : Tm} {r : Rgn} {σ τ : Ty} {ε : Row} :
-      HasAtom Γ a (.ref r σ) → (Δ.regions → r ∈ ϕ) → HasAtom Γ b σ →
+      HasAtom Γ a (.ref r σ) → (Δ.regions → r ∈ ϕ) → (Δ.loans → .wr r ∈ ϕ) → HasAtom Γ b σ →
       Linear Δ Γ (atomVars [b]) (fv body) →
       HasTm Δ ϕ (Γ ++ [σ]) body τ ε → HasTm Δ ϕ Γ (.mem .swap [a, b] body) τ ε
   | write {Γ : TEnv} {a : Atom} {body : Tm} {σ τ : Ty} {ε : Row} :
