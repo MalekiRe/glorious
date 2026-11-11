@@ -473,9 +473,8 @@ the programs it accepts.
 1. **Cells are scoped in the kernel.** Done: see "A mutable variable ends with
    its block". A cell cannot be released twice or left unreleased by a scope
    that ends.
-2. **Regions.** Done in Core, in the checker and in the proofs; the certificate
-   search does not use them yet (stage 3), so today only programs with a
-   certificate written by hand get the theorem (`Typing/Witness.lean` has four:
+2. **Regions.** Done in Core, in the checker and in the proofs
+   (`Typing/Witness.lean` has four programs with certificates written by hand:
    two accepted, two that go wrong and are turned away). A reference's type
    names the region (the cell) it
    points into; a callable's type lists the regions it may touch when called,
@@ -534,9 +533,40 @@ the programs it accepts.
      that binds regions is preceded by a hint with its region arguments, and a
      handler hint carries what the handler may touch and the regions each of
      its functions is entered with.
-3. **Inference of regions** for the certificate, so that programs get the
-   theorem without annotations. A program whose regions cannot be inferred is
-   still compiled, typed as before.
+3. **Inference of regions** for the certificate. Done, in `Infer.lean`, which
+   is not proved and need not be: what it finds goes to the checker. A program
+   whose regions it cannot find is still compiled, with a certificate without
+   the region rules, as a program that does not meet the ownership rules is;
+   `glorious certify` says which a program got. Of the 140 test programs that
+   compile, 138 get the region rules, and so the theorem.
+
+   **Decision: a failure to find regions is not an error of the program.** The
+   surface checker already rejects, with the variable named, a program in
+   which something that can reach a mutable variable outlives its block. The
+   region rules are stricter in ways that are artefacts of how they are
+   written, so a program they turn away may be a good one, and it keeps
+   compiling without the theorem. What they have no type for:
+
+   - a reference that may be to one variable or to another;
+   - a function that passes a reference to its own variable to itself: a
+     function's regions are the same throughout its recursive group;
+   - a variable that holds something whose type mentions the variable's own
+     region, such as a queue of tasks that use the queue;
+   - a callable given the same type as another that uses a variable declared
+     later: two callables of one type touch the same regions;
+   - a reference, or a callable that touches a variable, kept in a declared
+     type whose field is written as `&T`, as a `fn` type, or left to be
+     inferred, rather than as a type parameter.
+
+   How it works. Regions and "what a callable touches" are two more kinds of
+   unknown beside types, rows and call-once flags. A cell's scope makes a
+   region that is equal to no other; the callable the scope runs is marked as
+   binding it. What a callable touches is a set with inclusions, solved when
+   types are written out. A function is written with its regions numbered in
+   the order its cells were made, so that two functions that share cells write
+   their lists in the same order; a use of a function carries the cells its
+   numbered regions are at that use. A declared type is recorded once for each
+   shape of its arguments, with a region variable for each region in them.
 4. **Labels as regions**, by the same rule: a label is not applied after its
    scope has ended.
 5. **Unique references**: a `&mut` is the only way to its cell while it lives.

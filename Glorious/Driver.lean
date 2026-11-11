@@ -21,18 +21,24 @@ structure Compiled where
   fnNames : Array String
   opNames : Array String
   /-- The typing of `core` that `Typing.checkProgram` accepted, when the program
-  was checked. With it, `Typing.checked_safety` applies to `core`; and if the
-  certificate is `strict`, so does `Typing.checked_owned_safety`. -/
+  was checked. With it, `Typing.checked_safety` applies to `core`; if the
+  certificate is `strict`, so does `Typing.checked_owned_safety`; and if it has
+  `regions`, so does `Typing.checked_borrow_safety`. -/
   cert : Option Typing.Cert := none
 
 /-- Find a certificate for a program's Core and have the proved checker accept
-it: with the ownership rules if the program meets them, and otherwise as a
-typing only. An error here is a defect in the compiler, not in the program. -/
+it: with the ownership rules and the region rules if the program can be shown
+to meet them, and otherwise with those of them it can, or as a typing only.
+An error here is a defect in the compiler, not in the program. -/
 def certifyProgram (items : List Syntax.Item) (p : Core.Program)
     (envSizes : List (Nat × Nat) := []) : Except String Typing.Cert := do
-  match Infer.certify items p true envSizes with
-  | .ok cert => if Typing.checkProgram cert p then return cert
-  | .error _ => pure ()
+  let attempt (strict regions : Bool) : Option Typing.Cert :=
+    match Infer.certify items p strict envSizes regions with
+    | .ok cert => if Typing.checkProgram cert p then some cert else none
+    | .error _ => none
+  if let some cert := attempt true true then return cert
+  if let some cert := attempt true false then return cert
+  if let some cert := attempt false true then return cert
   let cert ← match Infer.certify items p false envSizes with
     | .ok cert => pure cert
     | .error e => throw s!"no certificate was found: {e}"
@@ -77,6 +83,12 @@ if so, `some false` if it was only shown to be well typed, `none` if it does not
 def owned (src : String) : Option Bool :=
   match compileSource src with
   | .ok c => c.cert.map (·.strict)
+  | .error _ => none
+
+/-- Whether a program's Core was shown to follow the region rules, likewise. -/
+def borrowChecked (src : String) : Option Bool :=
+  match compileSource src with
+  | .ok c => c.cert.map (·.regions)
   | .error _ => none
 
 partial def showValue (names : Array String) : Value → String

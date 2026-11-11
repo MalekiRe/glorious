@@ -10,9 +10,11 @@ import Glorious.Bytecode.Encode
 * `glorious check FILE [INPUT...]` runs it on both machines and reports whether
   they agree.
 * `glorious build FILE OUT` compiles it to a bytecode file for the Rust VM.
-* `glorious certify FILE` compiles it and says how many function signatures the
-  typing of its Core has. Every command that compiles a program does this check;
-  this one only reports it.
+* `glorious certify FILE` compiles it and says what the typing of its Core
+  shows: that it is well typed, and whether it also follows the ownership rules
+  and the region rules, which the proofs need to say that no resumption is used
+  twice and that no mutable variable is used after its block has ended. Every
+  command that compiles a program does this check; this one only reports it.
 * `glorious selftest [VM]` runs the test programs on the Core machine and the
   Lean bytecode machine, and on the Rust VM if its path is given.
 -/
@@ -122,8 +124,11 @@ def main (args : List String) : IO UInt32 := do
     | .ok c =>
       let n := (c.cert.map (·.sigs.length)).getD 0
       let owned := (c.cert.map (·.strict)).getD false
+      let regions := (c.cert.map (·.regions)).getD false
       let how := if owned then "well typed and well owned" else "well typed, not shown well owned,"
-      IO.println s!"{path}: {how} in Core, with {n} function signatures"
+      let borrows := if regions then "its references shown never to outlive their variables"
+        else "its references not shown to stay within their variables' blocks"
+      IO.println s!"{path}: {how} in Core, {borrows}, with {n} function signatures"
       pure 0
     | .error e =>
       IO.eprintln s!"{path}: {e}"

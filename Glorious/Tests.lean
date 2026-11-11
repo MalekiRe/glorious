@@ -139,4 +139,44 @@ def notTail (n : Nat) : String :=
   fn main() { handle ask() + 1 { ask(k) =>
     let a = { k(1) }; let b = { k(2) }; if(1 < 2) { a() } else { b() } } }" == some false
 
+-- Regions. A program whose Core follows the region rules is certified with
+-- them, and the proof then says it never reads or writes a mutable variable
+-- whose block has ended. That covers a variable used by the blocks and
+-- functions it is passed to, by reference or captured, however many variables
+-- a function is used with, through loops, handlers and data.
+#guard borrowChecked "fn incr(p) { *p = *p + 1 }
+  fn main() { let mut a = 1; let mut b = 2; incr(&mut a); incr(&mut b); incr(&mut a); a + b }"
+  == some true
+#guard borrowChecked "fn swap(a, b) { let t = *a; *a = *b; *b = t; }
+  fn main() { let mut x = 1; let mut y = 2; swap(&mut x, &mut y); x * 10 + y }" == some true
+#guard borrowChecked "fn main() { let mut n = 0; let bump = { n = n + 1; }; bump(); bump(); n }"
+  == some true
+#guard borrowChecked "fn apply(f) { f() }
+  fn main() { let mut x = 1; apply({ x = x + 1; }); apply({ x = x * 10; }); x }" == some true
+#guard borrowChecked "fn fact(n) { let mut acc = 1; let mut i = n;
+    while({ 0 < i }) { acc = acc * i; i = i - 1; }; acc }
+  fn main() { fact(5) }" == some true
+#guard borrowChecked "fn go(r, n) { if(0 < n) { *r = *r + n; go(r, n - 1) } else { *r } }
+  fn main() { let mut t = 0; go(&mut t, 4) }" == some true
+#guard borrowChecked "fn main() { let mut x = 1; let s = Some(&mut x);
+    match(s) { Some(p) => *p = 5, None => () }; x }" == some true
+#guard borrowChecked "effect Tick { tick() }
+  fn work() { tick(); tick(); 3 }
+  fn main() { let mut count = 0; let r = handle work() { tick(k) => count = count + 1; k(()) };
+    r + count }" == some true
+-- What the region rules have no type for compiles as before, without that
+-- proof: a reference that may be to one variable or to another, a function that
+-- passes a reference to its own variable to itself, and a variable that holds
+-- something that uses the variable.
+#guard borrowChecked "fn main() { let mut a = 1; let mut b = 2;
+    let p = if(a < b) { &mut a } else { &mut b }; *p = 9; a + b }" == some false
+#guard borrowChecked "fn go(r, n) { let mut y = n; if(0 < n) { go(&mut y, n - 1) + *r } else { *r } }
+  fn main() { let mut t = 5; go(&mut t, 3) }" == some false
+#guard borrowChecked "effect Yield { yield(Int) }
+  fn main() { let mut saved = None; handle (yield(1) + 1) { yield(v, k) => saved = Some(k); 0 };
+    match(replace(&mut saved, None)) { Some(k) => k(41), None => 0 } }" == some false
+-- A callable given the type of another that uses a later variable is one more.
+#guard borrowChecked "fn main() { let mut x = 1; let get = { x }; let mut y = 2;
+    let both = { x + y }; let pick = if(x < y) { get } else { both }; pick() }" == some false
+
 end Glorious.Tests
