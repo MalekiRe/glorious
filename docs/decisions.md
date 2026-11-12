@@ -755,6 +755,72 @@ own recursive group is given captures of its own, related to the function's as
 any other use is, so that what a function passes to itself is not taken to be
 what it was passed.
 
+## Scalars are integers the checker tells apart
+
+**Decision: Core gets primitives, not types.** A value of `i8 i16 i32 isize
+u8 u16 u32 usize`, of `f32 f64`, or of `char` is an integer on both machines:
+the number itself, the bits of the IEEE 754 encoding, the code. The checker
+knows the eleven names as types and keeps them apart; Core and its typing see
+integers. For each there are two names that do nothing, `i8_bits(x)`, the
+`Int` an `i8` is held as, and `i8_of(n)`, the other way: with them the
+prelude says what each type's operations are, in Glorious. `i64` is another
+name for `Int`.
+
+Core has sixteen more primitives, each two integers to an integer as the
+five before: `intDiv` and `intRem` (towards zero), `intFit` (the integer, if
+it fits a width), and thirteen for floating point. One that has no result
+has no meaning there, as overflow already had none: a result that does not
+fit its type, a zero divisor, the whole part of an infinity. The typing rule
+for a primitive and every theorem are as they were.
+
+**Decision: what floating point means is written out.** `Glorious/Float.lean`
+defines each operation exactly, on natural numbers: the true result rounded
+to the nearest number the format holds, a tie to the even one, and one NaN.
+It is not Lean's `Float`: the kernel cannot compute with that, and its
+equality would bring `Classical.choice` into theorems about one step. The
+Rust VM uses native arithmetic; the two agree on every program of the corpus
+that computes with floating point, and the definition agrees with native
+arithmetic on 51120 pairs of special and random numbers. 32-bit operations
+are the 64-bit ones brought back to 32 bits, which is the nearest to the true
+result for these four.
+
+**Decision: the operators are traits of the prelude.** `+ - * / %` and the
+comparisons are functions of `Add`, `Sub`, `Mul`, `Div`, `Rem`, `Eq`, `Ord`,
+which `Int` and each scalar type implement. Where the type is known the
+implementation is called by name, as before; a function that adds what it is
+given is now a function of any type with `Add`. No program of the corpus
+changed its result or what Core could show of it. A program run without the
+checker has no traits, so it is given a prelude whose operators are `Int`'s.
+
+Literals. `5u8` is a whole number of that type and has to fit; `0x`, `0o`,
+`0b` and `_` between digits; `1.5`, `2e-3`, `1.5f32` are the nearest number
+of their type, and one too large is an error; `'a'` and its escapes; `-`
+straight before a number is part of it. Each may be a pattern, but not a
+floating point number.
+
+Text. `"..."` is a `Str`, which the prelude declares as the characters one
+after another; the compiler writes a literal with that type's two
+constructors, which it names as the prelude's whatever the program declares.
+`show` gives a value as text (`Show`), `say` writes it. A floating point
+number is shown with the fewest digits that give it back, found in the
+prelude with the primitives that give a number to so many digits and take
+digits to a number. Where a value is shown, a `Str` is shown as its
+characters: the two printers know its constructors by names no program can
+write. `print` still writes a value as the machine holds it, so a floating
+point number as its bits: `say` is for people.
+
+The first module may declare a name the prelude has; the prelude's is then
+`prelude::name` in the whole program. What only the prelude needs is in a
+module inside it and cannot be named.
+
+Not built. `u64`, `i128`, `u128`: the machines' integers are 64 bits with a
+sign; and `usize` is 63 bits for the same reason. A literal without a type
+is an `Int`, whatever is expected of it. `-` before anything but a number.
+Byte literals, block comments. Conversion other than through `Int`
+(`u8(n)`, `int(x)`, `f64(n)`, `widen`, `narrow`, `char(code)`). Operations
+on bits; square root and the like. `Show` for `Bool`, tuples and
+`Result`. A `Str` is a list: there are no arrays, so its length is counted.
+
 ## A module is a unit, and modules have no cycle
 
 **Decision (the user's): a module is like a crate.** A module is a file, or

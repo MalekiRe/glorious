@@ -103,7 +103,9 @@ def key (p : List String) : String := "::".intercalate p
 
 /-- The name a declaration has in the whole program. -/
 def mangle (home : List String) (name : String) : String :=
-  if home.isEmpty || home == preludePath then name else s!"{key home}::{name}"
+  if home.isEmpty || home == preludePath then name
+  else if home.head? == preludePath.head? then s!"prelude::{key (home.drop 1)}::{name}"
+  else s!"{key home}::{name}"
 
 def visible (v : Vis) (home viewer : List String) : Bool :=
   viewer == home || v == .pub || (v == .parent && viewer == home.dropLast && !home.isEmpty)
@@ -123,15 +125,17 @@ structure St where
 
 abbrev R := StateT St (Except String)
 
-/-- What a module declares. `taken` are the names the prelude has: the first
-module may declare one again, and its own is then `crate::name` in the whole
-program. -/
+/-- What a module declares. `taken` are the names the first module has: it
+may declare a name the prelude has, and the prelude's is then `prelude::name`
+in the whole program. -/
 def declared (path : List String) (items : List Item) (taken : List String := []) :
     List Bound × List (String × List String × List String × List Bool) := Id.run do
   let mangle := fun (path : List String) (name : String) =>
-    if path.isEmpty && taken.contains name then s!"crate::{name}" else mangle path name
+    if path == preludePath && taken.contains name then s!"prelude::{name}" else mangle path name
   let mut out : Array Bound := #[]
   let mut fields : Array (String × List String × List String × List Bool) := #[]
+  -- What the prelude declares is for every module; a module written inside
+  -- the prelude is a module like any other.
   let everyone := path == preludePath
   for item in items do
     let (vis, item) := match item with
@@ -172,7 +176,7 @@ def unitOf (p : List String) : R (Option Module) := do
   pure ((← get).units.find? (·.path == p))
 
 def noteEdge (viewer target : List String) : R Unit := do
-  if viewer == target || target == preludePath || viewer == preludePath then return
+  if viewer == target || target.head? == preludePath.head? || viewer.head? == preludePath.head? then return
   unless (← get).edges.any (· == (viewer, target)) do
     modify fun s => { s with edges := (viewer, target) :: s.edges }
 
@@ -217,6 +221,8 @@ partial def moduleAt (viewer : List String) (scope : List Bound) (segs : List St
     R (Option (List String)) := do
   let some head := segs.head? | return none
   let start ← match head with
+    -- What the compiler itself writes of the prelude, whatever is in scope.
+    | "%prelude" => pure (some preludePath)
     | "crate" => pure (some [])
     | "self" => pure (some viewer)
     | "super" =>
@@ -664,10 +670,10 @@ structure Resolved where
 see above. `prelude` is a module every other can name without `use`. -/
 def resolve (prelude root : List Item) : Except String Resolved := do
   let mods ← gather [] root
-  let mods := (preludePath, prelude) :: mods
+  let mods := (← gather preludePath prelude) ++ mods
   let mut units : List Module := []
   let mut fields : List (String × List String × List String × List Bool) := []
-  let taken := (declared preludePath prelude).1.map (·.name)
+  let taken := (declared [] root).1.map (·.name)
   for (path, items) in mods do
     let (own, fs) := declared path items taken
     units := units ++ [⟨path, items, own⟩]
@@ -687,6 +693,13 @@ def resolve (prelude root : List Item) : Except String Resolved := do
       if q.isEmpty then "the first module" else "::".intercalate q)
     throw s!"modules use each other in a circle ({chain}); which module uses which must have no cycle"
   let fieldVis := fields.map fun (ctor, home, _, pubs) => (ctor, key home, pubs)
-  pure ⟨items, ⟨st.homes, fieldVis⟩⟩
+  -- The constructors of the prelude's text, by the names they have here.
+  let preludeOwn := ((units.find? (·.path == preludePath)).map (·.own)).getD []
+  let ctor := fun (name : String) =>
+    (preludeOwn.find? fun b => b.name == name && b.entry.kind == Kind.ctor).map (·.entry.global)
+  let text := match ctor "StrEnd", ctor "StrChar" with
+    | some e, some c => some (e, c)
+    | _, _ => none
+  pure ⟨items, ⟨st.homes, fieldVis, text⟩⟩
 
 end Glorious.Syntax.Modules

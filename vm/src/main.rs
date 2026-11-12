@@ -922,11 +922,70 @@ fn decimal(a: i64, p: i64) -> Option<(i64, i64)> {
     Some((digits, exponent - (p as i64 - 1)))
 }
 
+/// The name a constructor is shown under.
+fn ctor_name(names: &[String], tag: u64) -> Option<&str> {
+    usize::try_from(tag)
+        .ok()
+        .and_then(|i| names.get(i))
+        .map(String::as_str)
+}
+
+/// The characters of a text, if the value is one: the prelude's `Str`, whose
+/// constructors are shown under names no program can write.
+fn text_of(names: &[String], v: &Value) -> Option<String> {
+    let mut out = String::new();
+    let mut at = v;
+    loop {
+        let Value::Data(d) = at else { return None };
+        match (ctor_name(names, d.tag as u64)?, d.fields.as_slice()) {
+            ("%end", []) => return Some(out),
+            ("%char", [Value::Int(code), rest]) => {
+                // A code that is no character is U+FFFD.
+                out.push(
+                    u32::try_from(*code)
+                        .ok()
+                        .and_then(char::from_u32)
+                        .unwrap_or('\u{FFFD}'),
+                );
+                at = rest;
+            }
+            _ => return None,
+        }
+    }
+}
+
+/// A text inside another value: in quotes.
+fn quoted(text: &str) -> String {
+    let mut out = String::from("\"");
+    for c in text.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// A value as it is shown. A text is shown as its characters; inside another
+/// value, in quotes.
 fn show(names: &[String], v: &Value) -> String {
+    match text_of(names, v) {
+        Some(text) => text,
+        None => show_inner(names, v),
+    }
+}
+
+fn show_inner(names: &[String], v: &Value) -> String {
     match v {
         Value::Int(n) => n.to_string(),
         Value::Data(d) => {
-            let args: Vec<String> = d.fields.iter().map(|f| show(names, f)).collect();
+            if let Some(text) = text_of(names, v) {
+                return quoted(&text);
+            }
+            let args: Vec<String> = d.fields.iter().map(|f| show_inner(names, f)).collect();
             let args = args.join(", ");
             if d.tag == 0 {
                 return format!("({args})");

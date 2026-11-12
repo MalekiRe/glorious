@@ -138,6 +138,15 @@ def scalarCast (name : String) : Option (String × Bool) :=
     else if name == t ++ "_bits" then some (t, false)
     else none
 
+/-- A scalar written as a pattern, `'a'` or `5u8`: its type and the integer
+it is held as. It is the pattern `char_of(97)`. -/
+def scalarPattern : Pattern → Option (String × Int)
+  | .ctor name none [.int n] =>
+    match scalarCast name with
+    | some (t, true) => some (t, n)
+    | _ => none
+  | _ => none
+
 /-- What the checker is told of a program's modules, which it otherwise does
 not see: the module each function is written in, and for each constructor with
 fields its module and which fields are `pub`. A field that is not can be read
@@ -145,6 +154,16 @@ or borrowed only in the constructor's module. -/
 structure ModuleInfo where
   homes : List (String × String) := []
   fieldVis : List (String × String × List Bool) := []
+  /-- The two constructors of the prelude's text, the end and a character
+  before the rest, by the names they have in the whole program: for showing a
+  text as text. -/
+  text : Option (String × String) := none
+
+/-- How the constructors of a text are named where values are shown: no
+program can write these names. -/
+def textEndName : String := "%end"
+
+def textCharName : String := "%char"
 
 /-- A name without the module it is in: how a value is shown. -/
 def lastSegment (name : String) : String :=

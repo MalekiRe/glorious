@@ -658,6 +658,8 @@ partial def toCorePat : Pattern → M (Core.Pat × List String)
       | some e => do toCorePat (← exprToPat e)
       | none => pure (.bind, [x])
   | .ctor x q args => do
+    -- A scalar is the integer it is held as.
+    if let some (_, n) := Syntax.scalarPattern (.ctor x q args) then return (.int n, [])
     match ← resolveCtor x q with
     | some info =>
       if info.arity != args.length then

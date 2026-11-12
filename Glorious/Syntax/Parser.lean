@@ -1,5 +1,6 @@
 import Glorious.Syntax.Ast
 import Glorious.Syntax.Lexer
+import Glorious.Value
 
 /-!
 # Parser
@@ -82,6 +83,76 @@ private def splitPath (segs : List String) : Option String × String :=
   | [x] => (none, x)
   | x :: before => (some ("::".intercalate before.reverse), x)
 
+/-- A whole number as written, with its sign: it has to fit in 64 bits. -/
+private def plainInt (neg : Bool) (n : Nat) : P Int := do
+  let v : Int := if neg then -(n : Int) else n
+  unless Glorious.fits v 64 do failAt s!"`{v}` does not fit in 64 bits"
+  pure v
+
+/-- A whole number written with a type, `5u8`: it has to fit, and is then a
+value of that type. The name of the type's value and the number. -/
+private def typedInt (neg : Bool) (n : Nat) (suffix : String) : P (Option String × Int) := do
+  let v : Int := if neg then -(n : Int) else n
+  if suffix == "i64" || suffix == "Int" then return (none, ← plainInt neg n)
+  match scalars.lookup suffix with
+  | some (some width) =>
+    unless Glorious.fits v width do failAt s!"`{v}` does not fit in `{suffix}`"
+    pure (some (suffix ++ "_of"), v)
+  | _ => failAt s!"`{suffix}` is not a type of whole numbers"
+
+/-- A number with a point or an exponent: the nearest number its type holds,
+as the name of the type's value and its bits. One too large to hold is an
+error. -/
+private def floatBits (neg : Bool) (digits : Nat) (exp10 : Int) (suffix : String) :
+    P (String × Int) := do
+  let format ← if suffix == "" || suffix == "f64" then pure Ieee.binary64
+    else if suffix == "f32" then pure Ieee.binary32
+    else failAt s!"`{suffix}` is not a floating point type"
+  let d : Int := if neg then -(digits : Int) else digits
+  let bits := if digits == 0 then format.zeroBits neg else Ieee.ofDecimal format d exp10
+  if bits == format.infBits neg then failAt "this number is too large for its type"
+  pure (if suffix == "f32" then "f32_of" else "f64_of", Ieee.ofBits bits)
+
+/-- The value a scalar's name makes of an integer. -/
+private def scalarValue (name : String) (n : Int) : Expr := .call 0 (.name none name) [.int n]
+
+/-- A text as a value: its characters, one after another. -/
+private def textValue (codes : List Nat) : Expr :=
+  codes.foldr (fun (c : Nat) rest =>
+      .call 0 (.name (some "%prelude::Str") "StrChar") [scalarValue "char_of" (c : Int), rest])
+    (.name (some "%prelude::Str") "StrEnd")
+
+/-- A literal other than a plain whole number, if one is next, perhaps after
+a `-` already read. -/
+private def scalarLiteral (neg : Bool) : P (Option Expr) := do
+  match ← peek with
+  | .typed n suffix =>
+    let (name, v) ← typedInt neg n suffix
+    advance
+    pure (some (match name with
+      | some name => scalarValue name v
+      | none => .int v))
+  | .float digits exp10 suffix =>
+    let (name, bits) ← floatBits neg digits exp10 suffix
+    advance
+    pure (some (scalarValue name bits))
+  | .char code =>
+    if neg then failAt "a character has no sign"
+    advance
+    pure (some (scalarValue "char_of" code))
+  | .str codes =>
+    if neg then failAt "a text has no sign"
+    advance
+    pure (some (textValue codes))
+  | _ => pure none
+
+/-- A literal as a pattern: the value it is, to be compared with. -/
+private partial def literalPattern : Expr → Option Pattern
+  | .int n => some (.int n)
+  | .call _ (.name qual name) args => (args.mapM literalPattern).map (.ctor name qual)
+  | .name (some qual) name => some (.ctor name (some qual) [])
+  | _ => none
+
 /-- Does the block starting at token `i` have clauses (`... => ...`) rather than statements? -/
 private partial def scanClauseForm (toks : Array Token) (i depth : Nat) : Bool :=
   match toks[i]? with
@@ -141,15 +212,27 @@ private partial def parsePattern : P Pattern := do
     else if qual.isSome then pure (.ctor name qual [])
     else pure (.var name)
   | .int n =>
+    let v ← plainInt false n
     advance
-    pure (.int n)
+    pure (.int v)
   | .op "-" =>
     match ← peek 1 with
     | .int n =>
       advance
+      let v ← plainInt true n
       advance
-      pure (.int (-(n : Int)))
+      pure (.int v)
+    | .typed _ _ =>
+      advance
+      match (← scalarLiteral true).bind literalPattern with
+      | some p => pure p
+      | none => failAt "expected a pattern"
     | _ => failAt "expected a pattern"
+  | .typed _ _ | .char _ | .str _ =>
+    match (← scalarLiteral false).bind literalPattern with
+    | some p => pure p
+    | none => failAt "expected a pattern"
+  | .float _ _ _ => failAt "a floating point number is not a pattern: compare it instead"
   | .punct "(" =>
     advance
     let args ← parsePatternList
@@ -221,8 +304,14 @@ private partial def parseUnary (noBlock : Bool) : P Expr := do
         match ← peek 1 with
         | .int n =>
           advance
+          let v ← plainInt true n
           advance
-          pure (.int (-(n : Int)))
+          pure (.int v)
+        | .typed _ _ | .float _ _ _ =>
+          advance
+          match ← scalarLiteral true with
+          | some e => pure e
+          | none => failAt "expected a number"
         | _ => failAt "operator `-` has no prefix fixity"
       else if t == .op "&" then
         advance
@@ -324,8 +413,13 @@ private partial def parsePostfix (noBlock : Bool) : P Expr := do
 private partial def parsePrimary (noBlock : Bool) : P Expr := do
   match ← peek with
   | .int n =>
+    let v ← plainInt false n
     advance
-    pure (.int n)
+    pure (.int v)
+  | .typed _ _ | .float _ _ _ | .char _ | .str _ =>
+    match ← scalarLiteral false with
+    | some e => pure e
+    | none => failAt "expected a value"
   | .ident "tail" =>
     advance
     match ← parsePostfix noBlock with
@@ -706,7 +800,11 @@ private partial def parseItem : P Item := do
       match ← peek with
       | .ident "fn" => advance
       | _ => failAt "expected `fn`: a trait lists the functions a type must have"
-      let m ← expectIdent
+      let m ← match ← peek with
+        | .op s => do
+          advance
+          pure s
+        | _ => expectIdent
       expectPunct "("
       let params ← parseTypeList ")"
       let ret ← if ← acceptPunct "->" then some <$> parseType else pure none

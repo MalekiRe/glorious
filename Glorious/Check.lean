@@ -1314,6 +1314,7 @@ partial def normPat : Pattern → M NPat
       | some e => do normPat (← exprToPat e)
       | none => pure .any
   | .ctor x q ps => do
+    if let some (_, n) := Syntax.scalarPattern (.ctor x q ps) then return .int n
     match ← resolveCtor x q with
     | some (name, _) => do
       pure (.ctor name (← ps.mapM normPat))
@@ -3930,6 +3931,9 @@ partial def inferPat (p : Pattern) (t : Ty) : M Scope := do
         let id ← freshBrand
         pure [(x, .val t id)]
   | .ctor x q ps => do
+    if let some (scalar, _) := Syntax.scalarPattern (.ctor x q ps) then
+      unifyAt s!"a pattern of type `{scalar}`" (.con scalar []) t
+      return []
     match ← resolveCtor x q with
     | some (_, sig) => do
       let (fields, result) ← instCtor sig

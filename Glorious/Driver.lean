@@ -61,9 +61,9 @@ def certifyProgram (items : List Syntax.Item) (p : Core.Program)
 /-- The prelude and a program as written: the first module's text, and the
 texts of the modules that are files of their own, each with its path. Where
 the program says `mod name;` the items of that module's text are put. -/
-def parseProgram (src : String) (files : List (List String × String)) :
+def parseProgram (src : String) (files : List (List String × String)) (check : Bool := true) :
     Except String (List Syntax.Item × List Syntax.Item) := do
-  let (prelude, fix) ← match Syntax.parse {} Prelude.source with
+  let (prelude, fix) ← match Syntax.parse {} (if check then Prelude.source else Prelude.unchecked) with
     | .ok r => pure r
     | .error e => throw s!"prelude: {e}"
   -- Operators and the constructors with named fields are known to every
@@ -103,9 +103,18 @@ proved Core type checker accept the result. With `check := false` both checks
 are skipped, so that programs which go wrong can still be run. -/
 def compileSource (src : String) (check : Bool := true)
     (files : List (List String × String) := []) : Except String Compiled := do
-  let (prelude, items) ← parseProgram src files
+  let (prelude, items) ← parseProgram src files check
   -- Every name is given its meaning: the modules become one list of items.
   let resolved ← Syntax.Modules.resolve prelude items
+  -- How a constructor is named where a value is shown: without its module,
+  -- and the two of the prelude's text under names that mark them.
+  let shownName := fun (name : String) =>
+    match resolved.info.text with
+    | some (textEnd, textChar) =>
+      if name == textEnd then Syntax.textEndName
+      else if name == textChar then Syntax.textCharName
+      else Syntax.lastSegment name
+    | none => Syntax.lastSegment name
   -- A type alias is written out wherever it is used.
   let all ← Syntax.expandAliases resolved.items
   -- What the checker learnt about blocks that share an environment. A program
@@ -131,7 +140,7 @@ def compileSource (src : String) (check : Bool := true)
         | .error e =>
           throw s!"the checker accepted this program, but its Core could not be shown to be well typed: {e}. This is a defect in the compiler"
       else pure none
-    pure (⟨out.program, out.ctorNames.map Syntax.lastSegment, out.fnNames, out.opNames, cert, 0, out.plain⟩ : Compiled)
+    pure (⟨out.program, out.ctorNames.map shownName, out.fnNames, out.opNames, cert, 0, out.plain⟩ : Compiled)
   -- A borrow given a name, or written as an argument of a call of a function,
   -- is a scope of its own in Core if the program can then be shown to follow
   -- every rule. Where it cannot, the borrow is the reference it borrows, as in
@@ -143,7 +152,7 @@ def compileSource (src : String) (check : Bool := true)
       match Infer.certify all out.program true out.envSizes true true with
       | .ok cert =>
         if out.lent != 0 && Typing.checkProgram cert out.program then
-          some (⟨out.program, out.ctorNames.map Syntax.lastSegment, out.fnNames, out.opNames, some cert, out.lent,
+          some (⟨out.program, out.ctorNames.map shownName, out.fnNames, out.opNames, some cert, out.lent,
             out.plain⟩ : Compiled)
         else none
       | .error _ => none
@@ -225,18 +234,47 @@ def borrowFns (src : String) : Option Nat :=
   | .ok c => some (c.fnNames.toList.filter fun n => (n.splitOn "borrow").length > 1).length
   | .error _ => none
 
-partial def showValue (names : Array String) : Value → String
+/-- The characters of a text, if the value is one: the prelude's `Str`, whose
+constructors are shown under names no program can write. -/
+partial def textOf (names : Array String) : Value → Option (List Nat)
+  | .data tag [] => if names[tag]? == some Syntax.textEndName then some [] else none
+  | .data tag [.int c, rest] =>
+    if names[tag]? == some Syntax.textCharName then (textOf names rest).map (c.toNat :: ·) else none
+  | _ => none
+
+/-- Characters as a string; a code that is no character is U+FFFD. -/
+def textString (codes : List Nat) : String :=
+  String.ofList (codes.map fun c =>
+    if c < 0xD800 || (0xE000 ≤ c && c ≤ 0x10FFFF) then Char.ofNat c else Char.ofNat 0xFFFD)
+
+/-- A text inside another value: in quotes. -/
+def quoted (s : String) : String :=
+  "\"" ++ s.foldl (fun acc c =>
+    acc ++ (if c == '"' then "\\\"" else if c == '\\' then "\\\\" else if c == '\n' then "\\n"
+      else String.singleton c)) "" ++ "\""
+
+partial def showInner (names : Array String) : Value → String
   | .int n => toString n
   | .data tag fields =>
-    let args := ", ".intercalate (fields.map (showValue names))
-    if tag == 0 then s!"({args})"
-    else
-      let name := names[tag]?.getD s!"#{tag}"
-      if fields.isEmpty then name else s!"{name}({args})"
+    match textOf names (.data tag fields) with
+    | some codes => quoted (textString codes)
+    | none =>
+      let args := ", ".intercalate (fields.map (showInner names))
+      if tag == 0 then s!"({args})"
+      else
+        let name := names[tag]?.getD s!"#{tag}"
+        if fields.isEmpty then name else s!"{name}({args})"
   | .clo fn _ => s!"<fn {fn}>"
   | .cont id => s!"<resumption {id}>"
   | .label id => s!"<label {id}>"
   | .ref addr _ => s!"<ref {addr}>"
+
+/-- A value as it is shown. A text is shown as its characters; inside another
+value, in quotes. -/
+def showValue (names : Array String) (v : Value) : String :=
+  match textOf names v with
+  | some codes => textString codes
+  | none => showInner names v
 
 /-- Everything the program wrote, one value per line, then its result. -/
 def showResult (names : Array String) (r : Result) : String :=
