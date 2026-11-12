@@ -118,6 +118,27 @@ def packName (names : List String) : String := "%is:" ++ ",".intercalate names
 def packNames (name : String) : Option (List String) :=
   if name.startsWith "%is:" then some (((name.drop 4).toString.splitOn ",").filter (· != "")) else none
 
+/-- `&mut base.0`, where `base` is not a name but an expression that gives a
+reference, leaves the parser's reading of an expression as the call
+`%through(base, (steps), uniq)`. Where its statement is done being read, the
+reference is given a name of its own first, and the borrow is through that. -/
+def throughMark : String := "%through"
+
+/-- `&mut Pattern` and `&Pattern`: what a reference points to is matched, and
+the pattern's names are references to its parts. It is the pattern
+`%refmut(Pattern)` or `%ref(Pattern)` until names are resolved. -/
+def byRefMark (uniq : Bool) : String := if uniq then "%refmut" else "%ref"
+
+/-- A step to a field of one of a type's several constructors, `Circle#0`:
+only where a value was just found to be made by that constructor. -/
+def ctorStep (ctor : String) (i : Nat) : String := s!"{ctor}#{i}"
+
+/-- The constructor and the field of such a step, if it is one. -/
+def splitCtorStep (step : String) : Option (String × Nat) :=
+  match step.splitOn "#" with
+  | [ctor, i] => i.toNat?.map fun i => (ctor, i)
+  | _ => none
+
 /-- The name that marks a call or a pattern as written with field names. -/
 def recordMark : String := "%record"
 

@@ -126,12 +126,12 @@ def compileSource (src : String) (check : Bool := true)
   let all := Elab.eraseLifetimes all
   -- From here on the program has no traits: the checker said how each bound
   -- is met, and each is now a value passed where it is needed.
-  let (all, blocks) := match blocks with
-    | some b =>
+  let (all, blocks) ← match blocks with
+    | some b => do
       let (items, b) := Elab.untrait b all
       -- Nor a borrow of a field: each is a variable of its own by now.
-      (Elab.unfield b items, some b)
-    | none => (all, none)
+      pure (← Elab.unfield b items, some b)
+    | none => pure (all, none)
   let plain := fun (blocks : Option Elab.Blocks) => do
     let out ← Elab.elabProgram all blocks
     let cert ← if check then

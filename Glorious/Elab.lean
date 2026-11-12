@@ -110,6 +110,8 @@ structure Blocks where
   envFns : List (String × List (List String)) := []
   /-- Calls that give a name where such a callable is wanted, and where. -/
   envWraps : List (Nat × List Nat) := []
+  /-- The fields read by name of what a named reference points to. -/
+  derefReads : List Nat := []
 
 structure Globals where
   ctors : List (String × CtorInfo) := []
@@ -1612,20 +1614,42 @@ checker has made sure that nothing else uses the field meanwhile, so nothing
 can tell.
 -/
 
-private def fieldPath (root : Expr) (path : List Nat) : Expr :=
-  path.foldl (fun e i => .proj e i) root
+/-- A function that never comes back, for the case that cannot be. -/
+def neverName : String := "%never"
 
-/-- The value at `root`, with the field reached by `rest` (after `done`)
-replaced by `new` and everything else as it is. -/
-private def rebuildField (root : Expr) : List Nat → List Nat → List (Option String × Nat) → Expr → Expr
-  | done, i :: rest, (ctor, n) :: shape, new =>
+/-- Field `i` of a value, which `step` says is a tuple, a value of a type with
+one constructor, or (marked `#`) a value made by one of several: that one's
+field is taken by matching, since which constructor made a value cannot be
+read off it. -/
+private def fieldStep (step : Option String × Nat) (e : Expr) (i : Nat) : Expr :=
+  match step with
+  | (some c, n) =>
+    if c.startsWith "#" then
+      -- The value is made by this constructor: the checker saw it found so,
+      -- and nothing else could change it since. What stands for the other
+      -- case never comes back, so it can be of the field's type.
+      let pats := (List.range n).map fun j => if j == i then Pattern.var "%part" else .wild
+      .call 0 (.closure 0
+        [.mk [.ctor (c.drop 1).toString none pats] [.expr (.name none "%part")],
+         .mk [.wild] [.expr (.tailCall 0 (.name none neverName) [])]]) [e]
+    else .proj e i
+  | _ => .proj e i
+
+private def fieldPath (root : Expr) (path : List Nat) (shape : List (Option String × Nat)) : Expr :=
+  (path.zip (shape ++ path.map fun _ => (none, 0))).foldl (fun e (i, step) => fieldStep step e i) root
+
+/-- The value at `root`, with the field reached by `rest` (after `done`, which
+went through `gone`) replaced by `new` and everything else as it is. -/
+private def rebuildField (root : Expr) :
+    List Nat → List (Option String × Nat) → List Nat → List (Option String × Nat) → Expr → Expr
+  | done, gone, i :: rest, (ctor, n) :: shape, new =>
     let parts := (List.range n).map fun j =>
-      if j == i then rebuildField root (done ++ [i]) rest shape new
-      else fieldPath root (done ++ [j])
+      if j == i then rebuildField root (done ++ [i]) (gone ++ [(ctor, n)]) rest shape new
+      else fieldPath root (done ++ [j]) (gone ++ [(ctor, n)])
     match ctor with
     | none => .tuple parts
-    | some c => .call 0 (.name none c) parts
-  | _, _, _, new => new
+    | some c => .call 0 (.name none (if c.startsWith "#" then (c.drop 1).toString else c)) parts
+  | _, _, _, _, new => new
 
 private def plainExpr : Expr → Bool
   | .name _ _ => true
@@ -1712,6 +1736,8 @@ structure FieldInfo where
   /-- Calls that give a name where a callable sharing an environment is
   wanted, and where. -/
   wraps : List (Nat × List Nat) := []
+  /-- The fields read by name of what a named reference points to. -/
+  derefs : List Nat := []
 
 /-- A call as it is where callables share an environment. In a function given
 such callables, a call of one that does not hold the environment gives it the
@@ -1747,7 +1773,10 @@ private partial def unfieldExpr (info : FieldInfo) : Expr → Expr
   | .fieldOf id e name =>
     -- The checker said which field the name is.
     match info.reads.lookup id with
-    | some i => .proj (unfieldExpr info e) i
+    | some i =>
+      -- Of what a reference points to, if the checker found it so.
+      if info.derefs.contains id then .proj (.deref (unfieldExpr info e)) i
+      else .proj (unfieldExpr info e) i
     | none => .fieldOf id (unfieldExpr info e) name
   | .deref e => .deref (unfieldExpr info e)
   | .reborrow u e => .reborrow u (unfieldExpr info e)
@@ -1782,6 +1811,27 @@ private partial def unfieldStmts (info : FieldInfo) :
         let (wrap, inner) := peel s
         (fun x => .located line col (wrap x), inner)
       | s => (id, s)
+    -- Borrows of fields written one straight after another: the one that
+    -- lasts longest is made first, so that the time each lasts is inside
+    -- that of the one before. None of them does anything but borrow.
+    let borrowed := fun (s : Stmt) =>
+      match (peel s).2 with
+      | .let_ (.var p) (.refField _ _ _ _ _) => some p
+      | _ => none
+    let run := (s :: rest).takeWhile fun s => (borrowed s).isSome
+    let more := (s :: rest).drop run.length
+    let lasts := run.map fun s => scopeExtent ((borrowed s).getD "") more true
+    let longest := lasts.foldl max 0
+    let swapped :=
+      if run.length ≥ 2 && lasts.head? != some longest then
+        match (run.zip lasts).find? (·.2 == longest) with
+        | some (first, _) =>
+          -- The first of those that last longest, then the others as they were.
+          let k := ((run.zip lasts).findIdx? (·.2 == longest)).getD 0
+          some (first :: (run.take k ++ run.drop (k + 1)) ++ more)
+        | none => none
+      else none
+    if let some reordered := swapped then unfieldStmts info reordered else
     let (wrap, s) := peel s
     let s := match s with
       | .expr e => Stmt.expr (unfieldExpr info e)
@@ -1812,6 +1862,15 @@ private partial def unfieldStmts (info : FieldInfo) :
         let after := following.drop k
         let used := fvStmts [] after
         let out := ((letNames inner).filter used.contains).eraseDups
+        -- A borrow of a field made while this one lasts and used after it:
+        -- neither lasts inside the other. Left as a mark, to be refused.
+        let crossing := (following.take k).filterMap fun s =>
+          match unlocated s with
+          | .let_ (.var q) (.refField _ _ _ _ _) => if used.contains q then some q else none
+          | _ => none
+        let before := match crossing.head? with
+          | some q => before ++ [.expr (.name none s!"%crossing:{q}")]
+          | none => before
         let (result, pat) : List Stmt × Option Pattern :=
           if after.isEmpty then ([], none)
           else match out with
@@ -1821,9 +1880,9 @@ private partial def unfieldStmts (info : FieldInfo) :
         let putBack : List Stmt :=
           if uniq then
             [.defer (.call 0 (.closure 0 [.mk []
-              [.assign root (rebuildField root [] path shape (.name none cell))]]) [])]
+              [.assign root (rebuildField root [] [] path shape (.name none cell))]]) [])]
           else []
-        let block := .letMut cell (fieldPath root path) :: putBack
+        let block := .letMut cell (fieldPath root path shape) :: putBack
           ++ .let_ (.var ref) (.ref uniq cell) :: unfieldStmts info inner ++ result
         let scope := Expr.labelScope s!"%field{id}" block
         match pat with
@@ -1834,9 +1893,17 @@ end
 
 /-- Write out every borrow of a field: see above. `shapes` is what the checker
 found each borrow goes through. -/
-def unfield (b : Blocks) (items : List Item) : List Item :=
-  if b.fields.isEmpty && b.fieldReads.isEmpty && b.packs.isEmpty && b.envFns.isEmpty then items
-  else items.map fun
+def unfield (b : Blocks) (items : List Item) : Except String (List Item) := do
+  if b.fields.isEmpty && b.fieldReads.isEmpty && b.packs.isEmpty && b.envFns.isEmpty then
+    return items
+  -- Where a field of one of several constructors is taken, the function for
+  -- the case that cannot be.
+  let several := b.fields.any fun (_, _, _, shape) =>
+    shape.any fun (c, _) => ((c.map (·.startsWith "#")).getD false)
+  let never : List Item :=
+    if several then [.fn neverName [] [] none [.mk [] [.expr (.tailCall 0 (.name none neverName) [])]]]
+    else []
+  let out := never ++ items.map fun
     | .fn name params annots ret clauses =>
       -- Each callable that does not hold its environment, with the one that does.
       let members := ((b.envFns.lookup name).getD []).flatMap fun group =>
@@ -1844,8 +1911,16 @@ def unfield (b : Blocks) (items : List Item) : List Item :=
         | holder :: rest => rest.map (·, holder)
         | [] => []
       .fn name params annots ret
-        (clauses.map (unfieldClause ⟨b.fields, b.fieldReads, b.packs, members, b.envWraps⟩))
+        (clauses.map (unfieldClause ⟨b.fields, b.fieldReads, b.packs, members, b.envWraps, b.derefReads⟩))
     | item => item
+  -- Two borrows of fields that overlap, neither lasting inside the other and
+  -- with other statements between them, cannot be written out as blocks.
+  for item in out do
+    if let .fn name _ _ _ clauses := item then
+      for x in clauses.flatMap (fvClause []) do
+        if x.startsWith "%crossing:" then
+          throw (Syntax.inFunction name s!"the borrow of a field kept in `{(x.drop 10).toString}` is made while another lasts and is used after that one is done with: make it before the other, or straight after it")
+  pure out
 
 /-- Collect the global declarations. -/
 def collect (items : List Item) :

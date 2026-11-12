@@ -375,11 +375,13 @@ structure St where
   runs: where, the function, and the capture variable of each block. What
   has to be used and is held by one has to be held by every one. -/
   envHeld : Array (String × String × List Nat) := #[]
+  /-- The fields read by name of what a named reference points to. -/
+  derefReads : Array Nat := #[]
   /-- For each field read by name, which field it is: for the elaborator. -/
   fieldReads : Array (Nat × Nat) := #[]
   /-- Borrows of a field, to settle once the type is known: the borrow, the
   type of what the variable holds, the way to the field, and where. -/
-  fieldSites : Array (Nat × Bool × Ty × List Nat × String × String) := #[]
+  fieldSites : Array (Nat × Bool × Ty × List Nat × List (Option String) × String × String) := #[]
   /-- For each, what is gone through to reach the field: at each step the
   constructor, or none for a tuple, and how many fields it has. -/
   fieldTable : Array (Nat × Bool × List Nat × List (Option String × Nat)) := #[]
@@ -3233,19 +3235,33 @@ def fieldIndex (t : Ty) (step : String) : M (Option Nat) := do
 /-- The type of the field reached by `path` in a value of type `t`, and the
 way to it by number. Where `t` is not known yet, a step by number is settled
 once the rest of the function is inferred. -/
-def fieldAt (t : Ty) (path : List String) : M (Ty × List Nat) := do
+def fieldAt (t : Ty) (path : List String) : M (Ty × List Nat × List (Option String)) := do
   let mut cur := t
   let mut numbered : Array Nat := #[]
+  let mut chosen : Array (Option String) := #[]
   for step in path do
+    -- A field of one of several constructors: the value was just found to
+    -- be made by that one.
+    if let some (ctor, idx) := Syntax.splitCtorStep step then
+      match (← get).ctors.lookup ctor with
+      | some sig =>
+        let (fields, result) ← instCtor sig
+        unifyAt s!"a field of a `{Syntax.lastSegment ctor}`" result cur
+        numbered := numbered.push idx
+        chosen := chosen.push (some ctor)
+        cur := fields.getD idx .unit
+      | none => throw s!"unknown constructor `{ctor}`"
+      continue
     let idx := (← fieldIndex cur step).getD 0
     numbered := numbered.push idx
+    chosen := chosen.push none
     match ← fieldType cur idx with
     | some field => cur := field
     | none =>
       let field ← freshTy
       modify fun s => { s with projections := s.projections.push (cur, idx, field, s.pos) }
       cur := field
-  pure (cur, numbered.toList)
+  pure (cur, numbered.toList, chosen.toList)
 
 /-- Note, for each step that was a name, which field it turned out to be. -/
 def noteFieldReads (path : List (String × Option Nat)) (numbered : List Nat) : M Unit := do
@@ -3687,13 +3703,13 @@ partial def inferExpr (scope : Scope) (amb : Row) : Expr → M Ty
     | some (.cell t brand) => do
       if star then
         throw s!"`{x}` is a mutable variable, not a reference: its field is `{x}.{path.headD ""}`"
-      let (field, numbered) ← fieldAt t path
+      let (field, numbered, chosen) ← fieldAt t path
       use scope (.var brand x (if uniq then .lend else .share) numbered)
       let cap ← freshCap
       captures cap (.brand brand)
       captures cap (.loan (← freshLoan (some brand) uniq none numbered))
       modify fun s =>
-        { s with fieldSites := s.fieldSites.push (id, false, t, numbered, s.owner, s.pos) }
+        { s with fieldSites := s.fieldSites.push (id, false, t, numbered, chosen, s.owner, s.pos) }
       pure (.ref (if uniq then .uniq else .shared) field cap)
     | some (.val t _) => do
       -- A field of what a reference points to: borrowed from the reference,
@@ -3704,18 +3720,24 @@ partial def inferExpr (scope : Scope) (amb : Row) : Expr → M Ty
       match ← find t with
       | .ref _ _ _ => pure ()
       | .var _ => pure ()
-      | _ => throw s!"`{x}` is not a mutable variable or a reference, so no field of it can be borrowed"
+      | _ =>
+        if x.startsWith "%through" then
+          throw "what a field is borrowed of here is a value that nothing holds, not a reference: give it a `let mut` first"
+        throw s!"`{x}` is not a mutable variable or a reference, so no field of it can be borrowed"
       unifyAt (if uniq then "a field is borrowed for writing through a `&mut` reference"
         else "a field is borrowed through a reference") (.ref how whole cap) t
-      let (field, numbered) ← fieldAt whole path
+      let (field, numbered, chosen) ← fieldAt whole path
       use scope (.through cap s!"`{x}`" uniq numbered)
       let cap' ← freshCap
       captures cap' (.loan (← freshLoan none uniq (some (cap, cap')) numbered))
       captures cap' (.ty t)
       modify fun s =>
-        { s with fieldSites := s.fieldSites.push (id, true, whole, numbered, s.owner, s.pos) }
+        { s with fieldSites := s.fieldSites.push (id, true, whole, numbered, chosen, s.owner, s.pos) }
       pure (.ref (if uniq then .uniq else .shared) field cap')
-    | some _ => throw s!"`{x}` is not a mutable variable or a reference, so no field of it can be borrowed"
+    | some _ => do
+      if x.startsWith "%through" then
+        throw "what a field is borrowed of here is a value that nothing holds, not a reference: give it a `let mut` first"
+      throw s!"`{x}` is not a mutable variable or a reference, so no field of it can be borrowed"
     | none => throw s!"unknown name `{x}`"
   | .fieldOf id e name => do
     if let some field ← inferFieldOfPlace scope (.fieldOf id e name) then return field
@@ -3796,17 +3818,29 @@ field is in the way. None if the expression is not that. -/
 partial def inferFieldOfPlace (scope : Scope) (whole : Expr) : M (Option Ty) := do
   if let some (x, path) := fieldOfName whole then
     if let some (.cell t brand) := scope.lookup x then
-      let (field, numbered) ← fieldAt t (path.map (·.1))
+      let (field, numbered, _) ← fieldAt t (path.map (·.1))
       noteFieldReads path numbered
       mustDup field (readsCell x)
       use scope (.var brand x .read numbered)
       return some field
+    -- `p.name` where `p` is a reference: the field of what it points to.
+    -- Only where the first field is read by name, which is how the
+    -- elaborator is told.
+    if let some (.val t _) := scope.lookup x then
+      if let .ref _ inner cap ← find t then
+        if let some (_, some first) := path.head? then
+          let (field, numbered, _) ← fieldAt inner (path.map (·.1))
+          noteFieldReads path numbered
+          modify fun s => { s with derefReads := s.derefReads.push first }
+          mustDup field "reading through a reference copies the value (`replace` takes it out instead)"
+          use scope (.through cap s!"`{x}`" false numbered)
+          return some field
   if let some (x, path) := fieldOfDeref whole then
     if let some (.val t _) := scope.lookup x then
       let inner ← freshTy
       let cap ← freshCap
       unifyAt "`*` reads through a reference" (.ref (← freshTy) inner cap) t
-      let (field, numbered) ← fieldAt inner (path.map (·.1))
+      let (field, numbered, _) ← fieldAt inner (path.map (·.1))
       noteFieldReads path numbered
       mustDup field "reading through a reference copies the value (`replace` takes it out instead)"
       use scope (.through cap s!"`{x}`" false numbered)
@@ -4580,26 +4614,32 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
   -- What is gone through to reach each borrowed field, for the elaborator.
   let sites := (← get).fieldSites
   modify fun s => { s with fieldSites := #[] }
-  for (id, viaRef, ty, path, owner, pos) in sites do
+  for (id, viaRef, ty, path, chosen, owner, pos) in sites do
     -- (the way to the field is by number by now)
     let mut cur ← zonk ty
     let mut steps : Array (Option String × Nat) := #[]
-    for idx in path do
+    for (idx, said) in path.zip (chosen ++ path.map fun _ => none) do
       match cur with
       | .tuple ts =>
         steps := steps.push (none, ts.length)
         cur := ts.getD idx .unit
       | .con n args =>
-        let ctor := match (← get).types.lookup n with
-          | some decl => match decl.ctors with
-            | [c] => some c
-            | _ => none
-          | none => none
+        let declared := (← get).types
+        let ctor := match said with
+          | some c => some c
+          | none =>
+            match declared.lookup n with
+            | some decl => match decl.ctors with
+              | [c] => some c
+              | _ => none
+            | none => none
         let known := (← get).ctors
         match ctor.bind fun c => (known.lookup c).map fun sig => (c, sig) with
         | some (c, sig) =>
           let fields := sig.fieldsAt args
-          steps := steps.push (some c, fields.length)
+          -- `#` marks one of several constructors: its fields are taken by
+          -- matching, since which a value has cannot be read off it.
+          steps := steps.push (some (if said.isSome then "#" ++ c else c), fields.length)
           cur ← zonk (fields.getD idx .unit)
         | none =>
           throw (inFunction owner (pos ++ s!"a field of a `{showTy cur}` cannot be borrowed: it has more than one constructor"))
@@ -5050,7 +5090,8 @@ def checkProgram (items : List Item) (modules : Syntax.ModuleInfo := {}) :
         Elab.ImplE)
     pure ⟨s.given.toList, links ++ s.envLinks.toList, s.coercions.toList,
       ⟨s.dictTable.toList, s.methodCalls.toList, s.fnBounds, implEs, s.dropSites.toList⟩,
-      s.fieldTable.toList, s.fieldReads.toList, s.packs.toList, s.envFns, s.envWraps.toList⟩
+      s.fieldTable.toList, s.fieldReads.toList, s.packs.toList, s.envFns, s.envWraps.toList,
+      s.derefReads.toList⟩
   let (blocks, _) ← action.run {}
   pure blocks
 

@@ -1075,16 +1075,50 @@ ones, and are scopes in Core where any borrow would be.
 
 What it is not:
 
-- The reference gone through has to have a name; and a type with several
-  constructors has no field to borrow, since which fields a value has depends
-  on which constructor made it. That needs a pattern that binds by reference,
-  which there is not.
+- Since "Field borrows, finished" below, the reference gone through need not
+  have a name, and a part of one of a type's several constructors is borrowed
+  by a pattern that binds by reference.
 - It costs a variable, a cleanup and a scope where a real reference into the
   value would cost nothing.
 - Where the value holds something that can be used only once beside the
   field, the program's Core reads the other fields to rebuild it, and is then
   not accepted with the ownership rules.
 - The writing-out is in the unproved elaborator.
+
+## Field borrows, finished
+
+- **Through any reference.** `&mut f(x).0`, `(*f(x)).0 = v`: the field of what
+  an expression that gives a reference points to. Where the statement is
+  read, the reference is given a name first and the borrow is through that
+  name, as before. So the reference is computed before the rest of its
+  statement, and that is allowed only where nothing else in the statement
+  would have been computed before it; otherwise the program is told to give
+  it a `let` of its own. In an assignment the place is found before the
+  value is computed.
+- **`p.name` where `p` is a reference** reads the field of what it points
+  to, as `&mut p.name` already borrowed it.
+- **A pattern that binds by reference.** As a parameter of a clause,
+  `&mut Pattern` or `&Pattern` matches what a reference points to, and each
+  name in the pattern is a reference to the part it names. The callable
+  takes the reference, looks at what it points to to choose a clause, and in
+  the clause each name is a borrow of its part through the reference, by the
+  machinery there was. That is what lets a part of one of several
+  constructors be borrowed: inside the clause the value is known to be made
+  by that constructor, and nothing else can change it meanwhile. A step to
+  such a part says which constructor, and where it is written out the part
+  is taken by matching; the case that cannot be is a function that never
+  comes back, so that Core's rule that clauses cover their parameters holds.
+- **Borrows made one after another** are written out longest-lasting first,
+  so that they can be done with in any order.
+
+Limits. A pattern that binds by reference is written around the whole
+pattern, of a clause's parameter, and every clause of the callable has one
+there; it gives a constructor's fields in order, not by name. What is
+pointed to is copied to choose the clause, so it has to be a value that can
+be copied. A reference bound by a pattern lasts for its clause. Two borrows
+of fields that overlap with other statements between them, neither lasting
+inside the other, are refused, with what to write instead. `p.0` by number
+through a reference is still written `(*p).0`.
 
 ## The conditions on a form of computation have names
 

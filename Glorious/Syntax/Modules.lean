@@ -122,6 +122,8 @@ structure St where
   it has names, and which fields are `pub`. -/
   fields : List (String × List String × List String × List Bool) := []
   homes : List (String × String) := []
+  /-- How many names this pass has made up. -/
+  fresh : Nat := 0
 
 abbrev R := StateT St (Except String)
 
@@ -425,6 +427,128 @@ def fieldNamesOf (written : String) (e : Option Entry) : R (List String) := do
   | some names => if names.isEmpty then throw s!"the fields of `{written}` have no names" else pure names
   | none => throw s!"`{written}` is not a constructor whose fields have names"
 
+/-- A number no other use of this gets: for a name, or for the identity of a
+borrow, well above any the parser gives. -/
+def freshId : R Nat := do
+  let n := (← get).fresh
+  modify fun s => { s with fresh := n + 1 }
+  pure n
+
+/-- Is this pattern one that binds by reference, and for writing? -/
+def byRef? : Pattern → Option (Bool × Pattern)
+  | .ctor name none [p] =>
+    if name == byRefMark true then some (true, p)
+    else if name == byRefMark false then some (false, p)
+    else none
+  | _ => none
+
+/-- The constructor a constant is another name of, if it is one: `let Some =
+Ok;`. -/
+partial def aliased (fuel : Nat) (e : Entry) : R (Option String) := do
+  if e.kind == .ctor then return some e.global
+  if e.kind != .const || fuel == 0 then return none
+  let some unit ← unitOf e.home | return none
+  let scope ← scopeOf e.home
+  let value := unit.items.findSome? fun item =>
+    let item := match item with
+      | .pub _ i => i
+      | i => i
+    match item with
+    | .alias name (.name none target) =>
+      if mangle e.home name == e.global || s!"prelude::{name}" == e.global then some target else none
+    | _ => none
+  match value.bind fun target => lookupIn scope .value target with
+  | some next => aliased (fuel - 1) next
+  | none => pure none
+
+/-- A pattern as the test of a value's shape that it is, its names left out;
+and for each name, the way to the part it names: through tuples by number,
+through constructors by constructor and number. -/
+partial def shapeOf (ctx : Ctx) (way : List String) : Pattern → R (Pattern × List (String × List String))
+  | .wild => pure (.wild, [])
+  | .int n => pure (.int n, [])
+  | .var x => do
+    -- A constructor or a constant is a test; a new name names this part.
+    match lookupIn ctx.scope .value x with
+    | some e => if e.kind == .ctor || e.kind == .const then pure (.var x, []) else pure (.wild, [(x, way)])
+    | none => pure (.wild, [(x, way)])
+  | .tuple args => do
+    let mut pats : Array Pattern := #[]
+    let mut names : List (String × List String) := []
+    for (p, i) in args.zip (List.range args.length) do
+      let (p, ns) ← shapeOf ctx (way ++ [toString i]) p
+      pats := pats.push p
+      names := names ++ ns
+    pure (.tuple pats.toList, names)
+  | .ctor name qual args => do
+    if (byRef? (.ctor name qual args)).isSome then
+      throw "a pattern that binds by reference is written once, around the whole pattern"
+    if args.any fun
+        | .var mark => mark == recordMark
+        | _ => false then
+      throw "a pattern that binds by reference gives a constructor's fields in order, not by name"
+    let (_, global, entry) ← resolveValue ctx [] qual name
+    -- A name declared for a constructor, `let Some = Ok;`, is that one.
+    let global ← match entry with
+      | some e =>
+        if e.kind == .ctor then pure global
+        else
+          let found ← aliased 8 e
+          match found with
+          | some g => pure g
+          | none => throw s!"`{name}` is not a constructor: a pattern that binds by reference is made of constructors, tuples and names"
+      | none => throw s!"`{name}` is not a constructor: a pattern that binds by reference is made of constructors, tuples and names"
+    let mut pats : Array Pattern := #[]
+    let mut names : List (String × List String) := []
+    for (p, i) in args.zip (List.range args.length) do
+      let (p, ns) ← shapeOf ctx (way ++ [ctorStep global i]) p
+      pats := pats.push p
+      names := names ++ ns
+    pure (.ctor name qual pats.toList, names)
+
+/-- The clauses of a callable in which a parameter binds by reference,
+`&mut Circle(r) => ..`: the callable takes the reference, looks at what it
+points to to choose a clause, and in the clause each name of the pattern is a
+borrow of the part it names, through the reference. So a part of one of a
+type's several constructors can be borrowed, once the value is known to be
+made by that one. Clauses without such a parameter are as they are. -/
+def byReference (ctx : Ctx) (clauses : List Clause) : R (List Clause) := do
+  let arity := match clauses.head? with
+    | some (.mk pats _) => pats.length
+    | none => 0
+  let places := (List.range arity).filter fun i => clauses.any fun
+    | .mk pats _ => ((pats[i]?).bind byRef?).isSome
+  if places.isEmpty then return clauses
+  let k ← freshId
+  let outer := (List.range arity).map fun i => s!"%given{k}_{i}"
+  let mut inner : Array Clause := #[]
+  for clause in clauses do
+    let .mk pats body := clause
+    unless pats.length == arity do
+      throw "the clauses of a callable take different numbers of arguments"
+    let mut tests : Array Pattern := #[]
+    let mut binds : Array Stmt := #[]
+    for (p, i) in pats.zip (List.range arity) do
+      if places.contains i then
+        match byRef? p with
+        | some (uniq, p) =>
+          let (test, names) ← shapeOf ctx [] p
+          tests := tests.push test
+          for (x, way) in names do
+            let id := 900000000 + (← freshId)
+            if way.isEmpty then
+              -- The whole of what is pointed to: the reference itself, lent.
+              binds := binds.push (.let_ (.var x) (.reborrow uniq (.name none s!"%given{k}_{i}")))
+            else
+              binds := binds.push (.let_ (.var x) (.refField id uniq s!"%given{k}_{i}" way true))
+        | none =>
+          throw "where one clause binds a parameter by reference, `&mut Pattern`, every clause does"
+      else tests := tests.push p
+    inner := inner.push (.mk tests.toList (binds.toList ++ body))
+  let args := (outer.zip (List.range arity)).map fun (x, i) =>
+    if places.contains i then Expr.deref (.name none x) else .name none x
+  pure [.mk (outer.map Pattern.var) [.expr (.call 0 (.closure 0 inner.toList) args)]]
+
 /-- A pattern with its names resolved, and the names it binds. -/
 partial def resolvePattern (ctx : Ctx) : Pattern → R (Pattern × List String)
   | .wild => pure (.wild, [])
@@ -443,6 +567,8 @@ partial def resolvePattern (ctx : Ctx) : Pattern → R (Pattern × List String)
     let args ← args.mapM (resolvePattern ctx)
     pure (.tuple (args.map (·.1)), args.flatMap (·.2))
   | .ctor name qual args => do
+    if (byRef? (.ctor name qual args)).isSome then
+      throw "a pattern that binds by reference, `&mut Pattern`, is written as a parameter of a clause"
     let (qual', name', entry) ← resolveValue ctx [] qual name
     match args with
     | .var mark :: gave =>
@@ -518,7 +644,8 @@ partial def resolveExpr (ctx : Ctx) (bound : List String) : Expr → R Expr
   | .fieldOf id e name => do pure (.fieldOf id (← resolveExpr ctx bound e) name)
   | .deref e => .deref <$> resolveExpr ctx bound e
   | .reborrow uniq e => .reborrow uniq <$> resolveExpr ctx bound e
-  | .closure id clauses => .closure id <$> clauses.mapM (resolveClause ctx bound)
+  | .closure id clauses => do
+    pure (.closure id (← (← byReference ctx clauses).mapM (resolveClause ctx bound)))
   | .handle subject arms => do
     pure (.handle (← resolveExpr ctx bound subject) (← arms.mapM (resolveClause ctx bound)))
   | .labelScope l body => .labelScope l <$> resolveStmts ctx bound body
@@ -569,7 +696,7 @@ def resolveFn (ctx : Ctx) (global : String) (generics : List String) :
     let generics := genericParams ps ++ generics
     let annots ← annots.mapM fun a => a.mapM (resolveType ctx generics)
     let ret ← ret.mapM (resolveType ctx generics)
-    let run := (clauses.mapM (resolveClause ctx [])).run (← get)
+    let run := (do (← byReference ctx clauses).mapM (resolveClause ctx [])).run (← get)
     match run with
     | .ok (clauses, st) =>
       set st

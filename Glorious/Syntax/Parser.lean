@@ -153,6 +153,136 @@ private partial def literalPattern : Expr → Option Pattern
   | .name (some qual) name => some (.ctor name (some qual) [])
   | _ => none
 
+/-- What a field is a field of: a named variable, a named reference written
+`(*p)`, or what an expression that gives a reference points to. -/
+private inductive FieldRoot where
+  | named (x : String) (star : Bool)
+  | through (base : Expr)
+
+/-- `root.a.0` as its root and the way to the field, if it is a field. -/
+private partial def fieldRoot : Expr → Option (FieldRoot × List String)
+  | .proj e idx => step e (toString idx)
+  | .fieldOf _ e name => step e name
+  | _ => none
+where
+  step (e : Expr) (s : String) : Option (FieldRoot × List String) :=
+    match e with
+    | .name none x => some (.named x false, [s])
+    | .deref (.name none x) => some (.named x true, [s])
+    | .proj _ _ => (fieldRoot e).map fun (root, path) => (root, path ++ [s])
+    | .fieldOf _ _ _ => (fieldRoot e).map fun (root, path) => (root, path ++ [s])
+    | .deref base => some (.through base, [s])
+    | base => some (.through base, [s])
+
+/-- A borrow of a field: of a variable or a named reference as it is, of what
+an expression points to as a mark for its statement to settle. -/
+private def fieldBorrow (id : Nat) (uniq : Bool) (root : FieldRoot) (path : List String) : Expr :=
+  match root with
+  | .named x star => .refField id uniq x path star
+  | .through base =>
+    .call id (.name none throughMark)
+      [base, .tuple (path.map fun s => Expr.name none s), .int (if uniq then 1 else 0)]
+
+/-- What a statement's expression leaves to settle: the references to be
+named first, whether anything that does something has been come to, and
+whether a reference would be computed out of turn. -/
+private structure Hoist where
+  lets : Array (String × Expr) := #[]
+  seen : Bool := false
+  bad : Bool := false
+
+/-- Is a borrow through an expression written anywhere in this, outside the
+statements of a block or a callable? -/
+private partial def hasThrough : Expr → Bool
+  | .call _ (.name none f) args => f == throughMark || args.any hasThrough
+  | .call _ f args => hasThrough f || args.any hasThrough
+  | .tailCall _ f args => hasThrough f || args.any hasThrough
+  | .tuple es => es.any hasThrough
+  | .proj e _ => hasThrough e
+  | .fieldOf _ e _ => hasThrough e
+  | .deref e => hasThrough e
+  | .reborrow _ e => hasThrough e
+  | .handle subject _ => hasThrough subject
+  | _ => false
+
+/-- An expression with each borrow through an expression made a borrow
+through a name, the expressions to be given those names noted in the order
+they are computed. Nothing that does something may come before one: its
+reference is computed before the statement it is in. -/
+private partial def hoistExpr (h : Hoist) : Expr → Expr × Hoist
+  | .call id (.name none f) args =>
+    if f == throughMark then
+      match args with
+      | [base, .tuple steps, .int uniq] =>
+        let before := h.seen
+        let (base, h) := hoistExpr { h with seen := false } base
+        let name := s!"%through{id}"
+        let path := steps.filterMap fun
+          | .name none s => some s
+          | _ => none
+        (.refField id (uniq == 1) name path true,
+          { h with lets := h.lets.push (name, base), seen := before, bad := h.bad || before })
+      | _ => (.call id (.name none f) args, h)
+    else
+      let (args, h) := hoistAll h args
+      (.call id (.name none f) args, { h with seen := true })
+  | .call id f args =>
+    let (f, h) := hoistExpr h f
+    let (args, h) := hoistAll h args
+    (.call id f args, { h with seen := true })
+  | .tailCall id f args =>
+    let (parts, h) := hoistAll h (f :: args)
+    (.tailCall id (parts.headD f) (parts.drop 1), { h with seen := true })
+  | .tuple es =>
+    let (es, h) := hoistAll h es
+    (.tuple es, h)
+  | .proj e i =>
+    let (e, h) := hoistExpr h e
+    (.proj e i, h)
+  | .fieldOf id e name =>
+    let (e, h) := hoistExpr h e
+    (.fieldOf id e name, h)
+  | .deref e =>
+    let (e, h) := hoistExpr h e
+    (.deref e, { h with seen := true })
+  | .reborrow u e =>
+    let (e, h) := hoistExpr h e
+    (.reborrow u e, h)
+  | .handle subject arms =>
+    -- What is handled is computed under the handler, not before it.
+    (.handle subject arms, { h with seen := true, bad := h.bad || hasThrough subject })
+  | .name q x => (.name q x, { h with seen := true })
+  | e => (e, h)
+where
+  hoistAll (h : Hoist) (es : List Expr) : List Expr × Hoist :=
+    es.foldl (fun (acc : List Expr × Hoist) e =>
+      let (e, h) := hoistExpr acc.2 e
+      (acc.1 ++ [e], h)) ([], h)
+
+/-- A statement, and before it the references its borrows go through, each
+given a name. In an assignment the place is found before the value is
+computed. None if a reference would be computed out of turn. -/
+private def hoistStmt (s : Stmt) : Option (List Stmt × Stmt) :=
+  let done := fun (h : Hoist) (s : Stmt) =>
+    if h.bad then none
+    else some (h.lets.toList.map fun (name, base) => Stmt.let_ (.var name) base, s)
+  match s with
+  | .let_ pat value =>
+    let (value, h) := hoistExpr {} value
+    done h (.let_ pat value)
+  | .letMut x value =>
+    let (value, h) := hoistExpr {} value
+    done h (.letMut x value)
+  | .expr e =>
+    let (e, h) := hoistExpr {} e
+    done h (.expr e)
+  | .assign target value =>
+    let (target, h) := hoistExpr {} target
+    let (value, h) := hoistExpr { h with seen := true } value
+    done h (.assign target value)
+  | .defer e => if hasThrough e then none else some ([], .defer e)
+  | s => some ([], s)
+
 /-- Does the block starting at token `i` have clauses (`... => ...`) rather than statements? -/
 private partial def scanClauseForm (toks : Array Token) (i depth : Nat) : Bool :=
   match toks[i]? with
@@ -233,6 +363,12 @@ private partial def parsePattern : P Pattern := do
     | some p => pure p
     | none => failAt "expected a pattern"
   | .float _ _ _ => failAt "a floating point number is not a pattern: compare it instead"
+  | .op "&" =>
+    -- `&mut Pattern`: what a reference points to, its names references.
+    advance
+    let uniq := (← peek) == .ident "mut"
+    if uniq then advance
+    pure (.ctor (byRefMark uniq) none [← parsePattern])
   | .punct "(" =>
     advance
     let args ← parsePatternList
@@ -329,32 +465,14 @@ private partial def parseUnary (noBlock : Bool) : P Expr := do
           pure (.reborrow uniq (← parseUnary noBlock))
         else
           let id := (← read).base + (← get) + 1
-          -- `&(*p).0` goes through the reference `p`.
-          let star ← match ← peek, ← peek 1, ← peek 2, ← peek 3 with
-            | .punct "(", .op "*", .ident _, .punct ")" => do
-              advance
-              advance
-              pure true
-            | _, _, _, _ => pure false
-          let x ← expectIdent
-          if star then expectPunct ")"
-          -- `&x.0.1` borrows a field of what `x` holds.
-          let mut path : Array String := #[]
-          repeat
-            match ← peek, ← peek 1 with
-            | .punct ".", .int n =>
-              advance
-              advance
-              path := path.push (toString n)
-            | .punct ".", .ident field =>
-              advance
-              advance
-              path := path.push field
-            | _, _ => break
-          if path.isEmpty then
-            if star then failAt "expected a field: `&(*p).0`"
-            pure (.ref uniq x)
-          else pure (.refField id uniq x path.toList star)
+          -- `&x`, `&x.0.1`, `&(*p).0`, or `&f().0` through what an
+          -- expression gives.
+          match ← parsePostfix true with
+          | .name none x => pure (.ref uniq x)
+          | e =>
+            match fieldRoot e with
+            | some (root, path) => pure (fieldBorrow id uniq root path)
+            | none => failAt "`&` is followed by a variable, a field of one, or a field of what a reference points to"
       else if t == .op "&*" then
         -- `&*e`, which the lexer reads as one symbol.
         advance
@@ -512,6 +630,11 @@ private partial def parseStmts : P (List Stmt) := do
     if t == .punct "}" || t == .punct "," || t == .eof then break
     let here ← peekTok
     let mark := fun (s : Stmt) => Stmt.located here.line here.col s
+    -- A borrow of a field of what an expression points to: the reference is
+    -- given a name first.
+    let settle := fun (s : Stmt) => (match hoistStmt s with
+      | some (lets, s) => pure (lets.map mark ++ [mark s])
+      | none => throw s!"{here.line}:{here.col}: a field is borrowed of what an expression points to, after something else in the statement is computed: give the reference a `let` of its own first" : P (List Stmt))
     if t == .ident "let" then
       advance
       if (← peek) == .ident "mut" then
@@ -520,40 +643,32 @@ private partial def parseStmts : P (List Stmt) := do
         expectPunct "="
         let value ← parseBinary 0 false
         expectPunct ";"
-        out := out.push (mark (.letMut name value))
+        out := out ++ (← settle (.letMut name value)).toArray
       else
         let pat ← parsePattern
         expectPunct "="
         let value ← parseBinary 0 false
         expectPunct ";"
-        out := out.push (mark (.let_ pat value))
+        out := out ++ (← settle (.let_ pat value)).toArray
     else if t == .ident "defer" then
       advance
       let e ← parseBinary 0 false
       expectPunct ";"
-      out := out.push (mark (.defer e))
+      out := out ++ (← settle (.defer e)).toArray
     else
       let e ← parseBinary 0 false
       if ← acceptPunct "=" then
         let id := (← read).base + (← get) + 1
         let value ← parseBinary 0 false
         -- `x.0 = v` and `(*p).0 = v` assign through a borrow of the field.
-        let rec field : Expr → Option (String × List String × Bool)
-          | .proj (.name none x) idx => some (x, [toString idx], false)
-          | .proj (.deref (.name none x)) idx => some (x, [toString idx], true)
-          | .proj e idx => (field e).map fun (x, path, star) => (x, path ++ [toString idx], star)
-          | .fieldOf _ (.name none x) name => some (x, [name], false)
-          | .fieldOf _ (.deref (.name none x)) name => some (x, [name], true)
-          | .fieldOf _ e name => (field e).map fun (x, path, star) => (x, path ++ [name], star)
-          | _ => none
-        let target := match field e with
-          | some (x, path, star) => Expr.deref (.refField id true x path star)
+        let target := match fieldRoot e with
+          | some (root, path) => Expr.deref (fieldBorrow id true root path)
           | none => e
-        out := out.push (mark (.assign target value))
+        out := out ++ (← settle (.assign target value)).toArray
         -- An assignment may end a block; its value is unit.
         if !(← acceptPunct ";") then break
       else
-        out := out.push (mark (.expr e))
+        out := out ++ (← settle (.expr e)).toArray
         if ← acceptPunct ";" then
           let t' ← peek
           if t' == .punct "}" || t' == .punct "," then
