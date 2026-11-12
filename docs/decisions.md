@@ -691,8 +691,8 @@ an address.
   Such a borrow is, in Core, the variable's own reference: the theorem says
   nothing of it, and only the check below keeps it exclusive.
   `glorious certify` lists every one, and `glorious certify --strict` fails if
-  there is any. Of the 25 programs in the corpus that borrow, 19 have every
-  borrow a scope; 25 borrows are scopes and 8 are not.
+  there is any. Of the 26 programs in the corpus that borrow, 19 have every
+  borrow a scope; 25 borrows are scopes and 9 are not.
 - **`replace(&mut x, v)` is not a borrow.** It puts a value in the variable and
   gives back the old one, as an assignment does; nothing outlasts it.
 
