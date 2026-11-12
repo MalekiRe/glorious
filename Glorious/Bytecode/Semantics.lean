@@ -25,8 +25,6 @@ inductive Frame where
   | guard (fn : Nat) (captures : List Value)
   /-- The scope of a memory cell: the cell is released when this frame is removed. -/
   | cell (addr : Nat)
-  /-- The scope of a borrow of the cell at `addr`: for writing too if `uniq`. -/
-  | lend (uniq : Bool) (addr borrow : Nat)
   /-- A pending result: whatever is delivered here is discarded and `v` is delivered. -/
   | yield (v : Value)
   /-- An exit in progress. A cleanup was running above this frame; whatever it
@@ -39,7 +37,6 @@ def Frame.asHandler : Frame → Option (Nat × Handler)
   | .label _ => none
   | .guard _ _ => none
   | .cell _ => none
-  | .lend _ _ _ => none
   | .yield _ => none
   | .exit _ _ => none
 
@@ -49,7 +46,6 @@ def Frame.asLabel : Frame → Option Nat
   | .handler _ _ => none
   | .guard _ _ => none
   | .cell _ => none
-  | .lend _ _ _ => none
   | .yield _ => none
   | .exit _ _ => none
 
@@ -93,7 +89,6 @@ def deliver (p : Program) : Value → List Frame → Store Frame → Step State 
   | v, .label _ :: frames, store => deliver p v frames store
   | v, .guard fn captures :: frames, store => callFn p fn captures [] (.yield v :: frames) store
   | v, .cell a :: frames, store => deliver p v frames (store.release a)
-  | v, .lend _ _ _ :: frames, store => deliver p v frames store
   | _, .yield w :: frames, store => deliver p w frames store
   | _, .exit target after :: frames, store => leave p target after frames store
 
@@ -241,11 +236,13 @@ def step (p : Program) (s : State) : Step State Value :=
     match init.eval s.locals, evalScope s.locals thunk (.ref s.store.cells.length 0) with
     | some v, some c => apply p c (.cell s.store.cells.length :: s.frames) (s.store.alloc v)
     | _, _ => .stuck
-  | some (.lend uniq r thunk pre post) =>
+  | some (.lend _ r thunk pre post) =>
     match evalLend s.locals r thunk pre post (s.store.labels + 1) with
     | none => .stuck
-    | some (a, c) =>
-      apply p c (.lend uniq a (s.store.labels + 1) :: .ret s.code (s.pc + 1) s.locals :: s.frames)
+    | some (_, c) =>
+      -- The scope of the borrow is nothing here: this is the call, and a
+      -- counter that gives the borrow its identity.
+      apply p c (.ret s.code (s.pc + 1) s.locals :: s.frames)
         ⟨s.store.conts, s.store.labels + 1, s.store.cells⟩
   | some (.mem op args) =>
     match evalAtoms s.locals args with

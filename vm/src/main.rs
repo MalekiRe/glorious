@@ -361,8 +361,6 @@ enum Frame {
     Guard { func: usize, caps: Vec<Value> },
     /// The scope of a memory cell: the cell is released when this frame is removed.
     Cell(usize),
-    /// The scope of a borrow. It marks where the borrow ends and does nothing.
-    Lend,
     /// A pending result: what is delivered here is discarded and this is delivered.
     Yield(Value),
     /// An exit in progress: a cleanup was running above this frame. What it
@@ -486,7 +484,6 @@ impl Vm {
                     return self.call_fn(func, &caps, Vec::new());
                 }
                 Some(Frame::Cell(addr)) => self.release(addr),
-                Some(Frame::Lend) => {}
                 Some(Frame::Yield(w)) => v = w,
                 Some(Frame::Exit { target, after }) => return self.leave(target, after),
             }
@@ -700,9 +697,10 @@ impl Vm {
                 args.extend(self.atoms(post)?);
                 self.push_ret();
                 // A borrow has an identity, as a label has. Nothing here looks
-                // at it, but it is taken from the same counter.
+                // at it, but it is taken from the same counter. The scope of
+                // the borrow is a frame only in Core, where it is what the
+                // proof about borrows reads; here it would do nothing.
                 self.labels += 1;
-                self.frames.push(Frame::Lend);
                 self.apply(callee, args)
             }
             Instr::Cancel(k) => {

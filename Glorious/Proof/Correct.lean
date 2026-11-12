@@ -17,7 +17,8 @@ open Bytecode (Instr Code)
 /-! ## The simulation relation -/
 
 /-- A suspended Core caller is a return frame that resumes its compiled code
-with the same locals. Every other kind of frame is identical in both machines. -/
+with the same locals. Every other kind of frame the bytecode has is identical
+in both machines. -/
 inductive MatchFrame : Core.Frame → Bytecode.Frame → Prop where
   | call {body : Core.Tm} {ρ : Env} {code : Code} {pc : Nat} :
       CodeAt code pc (compileTm body) → MatchFrame (.call ρ body) (.ret code pc ρ)
@@ -26,7 +27,6 @@ inductive MatchFrame : Core.Frame → Bytecode.Frame → Prop where
   | guard {fn : Nat} {captures : List Value} :
       MatchFrame (.guard fn captures) (.guard fn captures)
   | cell {a : Nat} : MatchFrame (.cell a) (.cell a)
-  | lend {uniq : Bool} {a b : Nat} : MatchFrame (.lend uniq a b) (.lend uniq a b)
   | yield {v : Value} : MatchFrame (.yield v) (.yield v)
   | exit {target : Target} {after : After} :
       MatchFrame (.exit target after) (.exit target after)
@@ -43,24 +43,30 @@ theorem MatchFrame.isTarget_eq {f : Core.Frame} {f' : Bytecode.Frame} (h : Match
     (target : Target) : f.isTarget target = f'.isTarget target := by
   cases h <;> cases target <;> rfl
 
-/-- Stacks correspond frame by frame. -/
+/-- Stacks correspond frame by frame, but for the scopes of borrows: Core marks
+where a borrow ends with a frame, which nothing reads, and the bytecode has no
+such frame. -/
 inductive MatchFrames : List Core.Frame → List Bytecode.Frame → Prop where
   | nil : MatchFrames [] []
   | cons {f : Core.Frame} {f' : Bytecode.Frame} {stack : List Core.Frame}
       {frames : List Bytecode.Frame} :
       MatchFrame f f' → MatchFrames stack frames → MatchFrames (f :: stack) (f' :: frames)
+  | lend {uniq : Bool} {a b : Nat} {stack : List Core.Frame} {frames : List Bytecode.Frame} :
+      MatchFrames stack frames → MatchFrames (.lend uniq a b :: stack) frames
 
-theorem MatchFrames.length_eq {a : List Core.Frame} {a' : List Bytecode.Frame}
-    (h : MatchFrames a a') : a.length = a'.length := by
+theorem MatchFrames.length_le {a : List Core.Frame} {a' : List Bytecode.Frame}
+    (h : MatchFrames a a') : a'.length ≤ a.length := by
   induction h with
-  | nil => rfl
-  | cons _ _ ih => simp [ih]
+  | nil => exact Nat.le_refl _
+  | cons _ _ ih => simpa using ih
+  | lend _ ih => exact Nat.le_succ_of_le ih
 
 theorem MatchFrames.append {a b : List Core.Frame} {a' b' : List Bytecode.Frame}
     (ha : MatchFrames a a') (hb : MatchFrames b b') : MatchFrames (a ++ b) (a' ++ b') := by
   induction ha with
   | nil => exact hb
   | cons hf _ ih => exact .cons hf ih
+  | lend _ ih => exact .lend ih
 
 /-- A store entry is used up in both machines, or holds corresponding stacks. -/
 inductive MatchCont :
@@ -150,6 +156,15 @@ theorem find_sim {op : Nat} {stack : List Core.Frame} {frames : List Bytecode.Fr
         subst hd
         obtain ⟨above', below', hv, ha, hb⟩ := ih hf₀
         exact ⟨f' :: above', below', by simp [findHandler, hh, hx, hv], .cons hf ha, hb⟩
+  | @lend uniq a b stack frames hrest ih =>
+    intro d hd
+    cases hf₀ : findHandler Core.Frame.asHandler op stack with
+    | none => simp [findHandler, handles, Core.Frame.asHandler, hf₀] at hd
+    | some d₀ =>
+      simp [findHandler, handles, Core.Frame.asHandler, hf₀] at hd
+      subst hd
+      obtain ⟨above', below', hv, ha, hb⟩ := ih hf₀
+      exact ⟨above', below', hv, .lend ha, hb⟩
 
 /-- Searching corresponding stacks for a label scope finds it in both, with
 corresponding frames above and below it. -/
@@ -175,6 +190,16 @@ theorem findLabel_sim {id : Nat} {stack : List Core.Frame} {frames : List Byteco
         obtain ⟨rfl, rfl⟩ := hb
         obtain ⟨above', below', hv, ha, hbm⟩ := ih hr
         exact ⟨f' :: above', below', by simp [findLabel, hl, he, hv], .cons hf ha, hbm⟩
+  | @lend uniq a b stack frames hrest ih =>
+    intro above below hb
+    cases hr : findLabel Core.Frame.asLabel id stack with
+    | none => simp [findLabel, Core.Frame.asLabel, hr] at hb
+    | some r =>
+      obtain ⟨above₀, below₀⟩ := r
+      simp [findLabel, Core.Frame.asLabel, hr] at hb
+      obtain ⟨rfl, rfl⟩ := hb
+      obtain ⟨above', below', hv, ha, hbm⟩ := ih hr
+      exact ⟨above', below', hv, .lend ha, hbm⟩
 
 /-- The stores correspond: matching continuation entries, the same label counter
 and the same memory. -/
@@ -299,7 +324,6 @@ theorem deliver_leave_sim (hfr : MatchFrames stack frames) (hks : MatchStore sto
       | label => exact ihd v
       | guard => exact callFn_sim (.cons .yield hrest) hks
       | @cell a => exact (ih (hks.release a)).1 v
-      | lend => exact ihd v
       | yield => exact ihd _
       | exit => exact ihl _ _
     · by_cases ht : f.isTarget target = true
@@ -363,14 +387,6 @@ theorem deliver_leave_sim (hfr : MatchFrames stack frames) (hks : MatchStore sto
             simp [Bytecode.leave, ht']
           rw [h1, h2]
           exact (ih (hks.release a)).2 _ _
-        | @lend uniq a b =>
-          have h1 : Core.leave p target after (.lend uniq a b :: stack) store
-              = Core.leave p target after stack store := by simp [Core.leave, ht]
-          have h2 : Bytecode.leave (compile p) target after (.lend uniq a b :: frames) store'
-              = Bytecode.leave (compile p) target after frames store' := by
-            simp [Bytecode.leave, ht']
-          rw [h1, h2]
-          exact ihl _ _
         | @yield w =>
           have h1 : Core.leave p target after (.yield w :: stack) store
               = Core.leave p target after stack store := by simp [Core.leave, ht]
@@ -387,6 +403,15 @@ theorem deliver_leave_sim (hfr : MatchFrames stack frames) (hks : MatchStore sto
             simp [Bytecode.leave, ht']
           rw [h1, h2]
           exact ihl _ _
+
+  | @lend uniq a b stack frames hrest ih =>
+    obtain ⟨ihd, ihl⟩ := ih hks
+    refine ⟨fun v => ihd v, fun target after => ?_⟩
+    have h1 : Core.leave p target after (.lend uniq a b :: stack) store
+        = Core.leave p target after stack store := by
+      cases target <;> simp [Core.leave, Core.Frame.isTarget]
+    rw [h1]
+    exact ihl _ _
 
 theorem deliver_sim (hfr : MatchFrames stack frames) (hks : MatchStore store store')
     {v : Value} :
@@ -645,11 +670,10 @@ theorem step_sim (p : Core.Program) {s : Core.State} {t : Bytecode.State} (hm : 
         simp [Core.step, he]
       have h2 : Bytecode.step (compile p) ⟨code, pc, ρ, frames, ⟨conts', labels, cells⟩⟩
           = Bytecode.apply (compile p) c
-              (.lend uniq a (labels + 1) :: .ret code (pc + 1) ρ :: frames)
-              ⟨conts', labels + 1, cells⟩ := by
+              (.ret code (pc + 1) ρ :: frames) ⟨conts', labels + 1, cells⟩ := by
         simp [Bytecode.step, hi, he]
       rw [h1, h2]
-      exact apply_sim (.cons .lend (.cons (.call hc.tail) hfr)) (.mk hcs)
+      exact apply_sim (.lend (.cons (.call hc.tail) hfr)) (.mk hcs)
   | handleTail ret ops captures thunk =>
     have hc : CodeAt code pc [Instr.handleTail ret ops captures thunk] := hcode
     have hi := hc.head
@@ -1101,16 +1125,16 @@ theorem forwardSim (p : Core.Program) :
     | halt => exact ⟨0, run_one_halt hstep⟩
 
 /-- The same simulation, also accounting for the bytecode's intermediate
-states: whatever state it is in, its stack is as deep as the stack of the Core
-state it is at or on its way to. -/
+states: whatever state it is in, its stack is no deeper than the stack of the
+Core state it is at or on its way to. -/
 theorem forwardSimThrough (p : Core.Program) :
     ForwardSimThrough (Core.stepIO p) (Bytecode.stepIO (compile p)) MatchIO
-      (fun c d => d.state.frames.length = c.state.stack.length) where
+      (fun c d => d.state.frames.length ≤ c.state.stack.length) where
   rel := by
     intro c d hm
     obtain @⟨s, t, w, hst⟩ := hm
     obtain ⟨_, hfr, _⟩ := hst
-    exact hfr.length_eq.symm
+    exact hfr.length_le
   next := by
     intro c d c' hm hs
     have h := stepIO_sim p hm
@@ -1118,10 +1142,10 @@ theorem forwardSimThrough (p : Core.Program) :
     generalize hstep : Bytecode.stepIO (compile p) d = r at h
     cases h with
     | @next _ d₀ d' k hk hm' =>
-      have hlen : d'.state.frames.length = c'.state.stack.length := by
+      have hlen : d'.state.frames.length ≤ c'.state.stack.length := by
         obtain @⟨s, t, w, hst⟩ := hm'
         obtain ⟨_, hfr, _⟩ := hst
-        exact hfr.length_eq.symm
+        exact hfr.length_le
       exact ⟨k, d₀, d', rfl, hk.imp (fun x hx => by rw [hx]; exact hlen), hm'⟩
   halt := by
     intro c d r hm hs
@@ -1200,12 +1224,14 @@ Core's stack discipline is what makes a tail call, a tail handler or a tail
 label scope keep no frame. This theorem carries that discipline to the bytecode.
 -/
 
-/-- Every stack depth the bytecode reaches is a depth the Core program reaches.
-The bytecode therefore never uses a deeper stack than the Core semantics does. -/
+/-- Every stack the bytecode reaches is no deeper than one the Core program
+reaches: shallower only by the scopes of borrows, which the bytecode does not
+keep. The bytecode therefore never uses a deeper stack than the Core semantics
+does. -/
 theorem compile_stack_depth (safe : ¬ Core.GoesWrong p input) {d : Bytecode.Config}
     (h : Reaches (Bytecode.stepIO (compile p)) (Bytecode.initIO (compile p) input) d) :
     ∃ c, Reaches (Core.stepIO p) (Core.initIO p input) c
-      ∧ d.state.frames.length = c.state.stack.length := by
+      ∧ d.state.frames.length ≤ c.state.stack.length := by
   obtain ⟨m, hm⟩ := h
   exact (forwardSimThrough p).reflect m (matchIO_init p input) safe hm
 

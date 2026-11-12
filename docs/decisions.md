@@ -636,11 +636,19 @@ Core is accepted with them never reaches a state about to read, write or lend a
 variable through a reference that a newer borrow in scope excludes, or through
 a borrow whose scope has ended; and no borrow's scope is ever set aside in a
 resumption. The machine does not enforce any of this: the theorem is about
-what an accepted program does. Nothing reads what a scope adds at run time.
-A call with one borrow among its arguments is a call: `lend` takes the other
-arguments and calls the function itself. A second borrow in the same call, and
-a borrow given a name, each make one callable and one more call, as a mutable
-variable's block does. A borrow that is not a scope is the copy of an address.
+what an accepted program does.
+
+What a borrow costs at run time. Nothing reads what a scope adds, and the
+compiled code does not keep it: the frame that marks where a borrow ends is in
+the Core machine only, and `compile_correct` is proved with the bytecode having
+no such frame. What is left in the bytecode is the counter that gives a borrow
+its identity, one addition, because the proof relates the two machines' values
+exactly and a reference says which borrow it is; the Rust VM's references do
+not carry it. So a call with one borrow among its arguments is a call: `lend`
+takes the other arguments and calls the function itself. A second borrow in the
+same call, and a borrow given a name, each make one callable and one more call,
+as a mutable variable's block does. A borrow that is not a scope is the copy of
+an address.
 
 - **In Core a borrow is a scope.** A reference value carries the borrow it is
   (zero for a variable's own), and `lend` runs a callable with a reference that
