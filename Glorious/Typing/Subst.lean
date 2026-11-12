@@ -655,7 +655,7 @@ theorem HasTm.inst (hΔ : Δ.Stable) (θ : List Rgn) {ϕ : List Rgn}
       · exact .inl rfl
       · exact .inl rfl
       · exact .inr hmem
-  | @lend Γ uniq r thunk body n ρ κ σ ρt τ εt ε once env acc hform hlin _ ih =>
+  | @lend Γ uniq r thunk pre post body n ρ κ σ ρt τ Pre Post εt ε once env acc hform hlin _ ih =>
     have hr := hform.ref
     have hthunk := hform.thunk
     have hσ := hform.lcHeld
@@ -668,10 +668,16 @@ theorem HasTm.inst (hΔ : Δ.Stable) (θ : List Rgn) {ϕ : List Rgn}
     have hrow := hform.row
     have hr' := hr.inst θ
     have ht' := hthunk.inst θ
-    simp only [Ty.inst_fn, List.map_cons, List.map_nil, Ty.inst_ref] at hr' ht'
+    simp only [Ty.inst_fn, List.map_append, List.map_cons, Ty.inst_ref] at hr' ht'
     rw [snoc_inst] at ih
-    refine .lend ⟨hr', ht', (Ty.lc_inst hσ θ), (Ty.lc_inst hρ θ), (Row.lc_inst hε θ), ?_, ?_, ?_,
-      ?_, (Row.le_inst hrow θ)⟩ (hlin.inst hΔ θ) ih
+    have hlc : ∀ t, t ∈ Pre.map (Ty.inst θ) ++ Post.map (Ty.inst θ) → t.lc = true := by
+      intro t ht
+      rw [← List.map_append] at ht
+      obtain ⟨t₀, h₀, rfl⟩ := List.mem_map.mp ht
+      exact Ty.lc_inst (hform.lcArgs t₀ h₀) θ
+    refine .lend ⟨hr', ht', hform.before.inst θ, hform.after.inst θ, hlc, (Ty.lc_inst hσ θ),
+      (Ty.lc_inst hρ θ), (Row.lc_inst hε θ), ?_, ?_, ?_, ?_, (Row.le_inst hrow θ)⟩
+      (hlin.inst hΔ θ) ih
     · rcases hn with ⟨h0, rfl⟩ | ⟨h1, rfl⟩
       · exact .inl ⟨h0, rfl⟩
       · exact .inr ⟨h1, rfl⟩

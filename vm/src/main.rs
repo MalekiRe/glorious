@@ -97,7 +97,7 @@ enum Instr {
     TestInt(Place, i64, usize),
     Mem(MemOp, Vec<Atom>),
     Cell { init: Atom, thunk: Atom, tail: bool },
-    Lend { r: Atom, thunk: Atom },
+    Lend { r: Atom, thunk: Atom, pre: Vec<Atom>, post: Vec<Atom> },
 }
 
 // ---------------------------------------------------------------- decoding
@@ -288,7 +288,9 @@ impl Reader<'_> {
                 }
                 let r = self.atom()?;
                 let thunk = self.atom()?;
-                Ok(Instr::Lend { r, thunk })
+                let pre = self.atoms()?;
+                let post = self.atoms()?;
+                Ok(Instr::Lend { r, thunk, pre, post })
             }
             t => Err(format!("unknown instruction {t}")),
         }
@@ -314,7 +316,7 @@ fn decode(bytes: &[u8]) -> Decoded<Program> {
     if bytes.len() < 5 || &bytes[..4] != b"GLBC" {
         return Err("not a Glorious bytecode file".into());
     }
-    if bytes[4] != 4 {
+    if bytes[4] != 5 {
         return Err(format!("unsupported bytecode version {}", bytes[4]));
     }
     let mut r = Reader { bytes, pos: 5 };
@@ -687,18 +689,21 @@ impl Vm {
                 self.frames.push(Frame::Cell(addr));
                 self.apply(callee, vec![Value::Ref(addr)])
             }
-            Instr::Lend { r, thunk } => {
+            Instr::Lend { r, thunk, pre, post } => {
                 let Value::Ref(addr) = self.atom(r)? else {
                     return wrong();
                 };
-                // Any callable taking one value will do; `apply` rejects the rest.
+                // A call, with the borrow between the other arguments.
                 let callee = self.atom(thunk)?;
+                let mut args = self.atoms(pre)?;
+                args.push(Value::Ref(addr));
+                args.extend(self.atoms(post)?);
                 self.push_ret();
                 // A borrow has an identity, as a label has. Nothing here looks
                 // at it, but it is taken from the same counter.
                 self.labels += 1;
                 self.frames.push(Frame::Lend);
-                self.apply(callee, vec![Value::Ref(addr)])
+                self.apply(callee, args)
             }
             Instr::Cancel(k) => {
                 let id = match self.atom(k)? {

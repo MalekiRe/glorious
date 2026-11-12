@@ -1246,10 +1246,10 @@ partial def inferTm (self : Nat) (amb : IRow) (τ : ITy) (Γ : Array ITy) : Core
     let εt ← freshRow
     celled Γ init thunk τ εt
     needs εt [] amb
-  | .lend uniq r thunk body => do
+  | .lend uniq r thunk pre post body => do
     let ρt ← freshTy
     let εt ← freshRow
-    lent Γ uniq r thunk ρt εt
+    lent Γ uniq r thunk pre post ρt εt
     needs εt [] amb
     inferTm self amb τ (Γ.push ρt) body
   | .mem op args body => do
@@ -1346,18 +1346,23 @@ where
   is given a reference whose region is the callable's own, as for a cell; the
   code making the scope touches what the callable does but for the borrow, and
   what is lent. Otherwise the callable is given the reference lent. -/
-  lent (Γ : Array ITy) (uniq : Bool) (r thunk : Atom) (ρt : ITy) (εt : IRow) : M Unit := do
+  lent (Γ : Array ITy) (uniq : Bool) (r thunk : Atom) (pre post : List Atom) (ρt : ITy)
+      (εt : IRow) : M Unit := do
     let σ ← freshTy
     let source ← freshRg
     unify (← atomTy Γ r) (.ref source σ)
+    let before ← pre.mapM (atomTy Γ)
+    let after ← post.mapM (atomTy Γ)
     let a ← freshAcc
     if (← get).regions && (← get).loans then
       let loan ← freshAtom
       modify fun s => { s with accs := s.accs.set! a { binder := some loan } }
-      unify (← atomTy Γ thunk) (.func [.ref loan σ] ρt εt (← freshCls) (← freshTy) a)
+      unify (← atomTy Γ thunk)
+        (.func (before ++ .ref loan σ :: after) ρt εt (← freshCls) (← freshTy) a)
       accSub self a (some loan)
     else
-      unify (← atomTy Γ thunk) (.func [.ref source σ] ρt εt (← freshCls) (← freshTy) a)
+      unify (← atomTy Γ thunk)
+        (.func (before ++ .ref source σ :: after) ρt εt (← freshCls) (← freshTy) a)
       accSub self a
     if uniq then accWr self source else accRgn self source
 
@@ -1899,7 +1904,7 @@ partial def tmRefs : Core.Tm → List Nat
   | .label _ body => tmRefs body
   | .labelTail _ => []
   | .cell _ _ body => tmRefs body
-  | .lend _ _ _ body => tmRefs body
+  | .lend _ _ _ _ _ body => tmRefs body
   | .cellTail _ _ => []
   | .guard _ _ body => tmRefs body
   | .guardTail _ _ => []
@@ -1966,7 +1971,7 @@ def captureCounts (p : Core.Program) : Array Nat := Id.run do
     | .label _ body => visit out body
     | .labelTail _ => out
     | .cell _ _ body => visit out body
-    | .lend _ _ _ body => visit out body
+    | .lend _ _ _ _ _ body => visit out body
     | .cellTail _ _ => out
     | .guard _ _ body => visit out body
     | .guardTail _ _ => out

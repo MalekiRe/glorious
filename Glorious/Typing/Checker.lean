@@ -888,12 +888,18 @@ def checkTm (C : Cert) (ϕ : List Rgn) : TEnv → Tm → List Hint → Ty → Ro
       σ' == σ && ρ == τ && cellOk C ϕ n r σ ρ εt acc && rowLe εt ε
         && linearB C Γ (atomVars [init, thunk]) []
     | _, _ => false
-  | Γ, .lend uniq r thunk body, hs, τ, ε =>
+  | Γ, .lend uniq r thunk pre post body, hs, τ, ε =>
     match atomTy Γ r, atomTy Γ thunk with
-    | some (.ref ρ σ), some (.fn n [.ref κ σ'] ρt εt _ _ acc) =>
-      σ' == σ && lendOk C ϕ uniq n ρ κ σ ρt εt acc && rowLe εt ε
-        && linearB C Γ (atomVars [thunk]) (fv body)
-        && checkTm C ϕ (Γ ++ [ρt]) body hs τ ε
+    | some (.ref ρ σ), some (.fn n Ps ρt εt _ _ acc) =>
+      -- The borrow is the argument after `pre`.
+      match Ps.drop pre.length with
+      | .ref κ σ' :: Post =>
+        σ' == σ && atomsTy Γ pre == some (Ps.take pre.length) && atomsTy Γ post == some Post
+          && (Ps.take pre.length ++ Post).all Ty.lc
+          && lendOk C ϕ uniq n ρ κ σ ρt εt acc && rowLe εt ε
+          && linearB C Γ (atomVars (thunk :: pre ++ post)) (fv body)
+          && checkTm C ϕ (Γ ++ [ρt]) body hs τ ε
+      | _ => false
     | _, _ => false
   | Γ, .mem op args body, hs, τ, ε =>
     match op, args with
@@ -1095,16 +1101,23 @@ theorem checkTm_sound {ϕ : List Rgn} : ∀ (tm : Tm) {Γ : TEnv} {hs : List Hin
       exact .cellTail ⟨atomTy_sound hinit, atomTy_sound hthunk, hσ, hρ, hε, hn, hreg, hacc, hnd,
         rowLe_sound hrow⟩ (linearB_sound hlin)
     · simp at h
-  | lend uniq r thunk body ih =>
+  | lend uniq r thunk pre post body ih =>
     intro Γ hs τ ε h
     simp only [checkTm] at h
     split at h
-    · rename_i ρ σ n κ σ' ρt εt once env acc hr hthunk
-      simp only [Bool.and_eq_true, beq_iff_eq] at h
-      obtain ⟨⟨⟨⟨rfl, hlend⟩, hrow⟩, hlin⟩, hbody⟩ := h
-      obtain ⟨hσ, hρ, hε, hn, hreg, hloan, hacc⟩ := lendOk_sound hlend
-      exact .lend ⟨atomTy_sound hr, atomTy_sound hthunk, hσ, hρ, hε, hn, hreg, hloan, hacc,
-        rowLe_sound hrow⟩ (linearB_sound hlin) (ih hbody)
+    · rename_i ρ σ n Ps ρt εt once env acc hr hthunk
+      split at h
+      · rename_i κ σ' Post hdrop
+        simp only [Bool.and_eq_true, beq_iff_eq, List.all_eq_true] at h
+        obtain ⟨⟨⟨⟨⟨⟨⟨rfl, hpre⟩, hpost⟩, hlc⟩, hlend⟩, hrow⟩, hlin⟩, hbody⟩ := h
+        obtain ⟨hσ, hρ, hε, hn, hreg, hloan, hacc⟩ := lendOk_sound hlend
+        have hPs : Ps = Ps.take pre.length ++ .ref κ σ' :: Post := by
+          rw [← hdrop, List.take_append_drop]
+        have hthunk' := atomTy_sound hthunk
+        rw [hPs] at hthunk'
+        exact .lend ⟨atomTy_sound hr, hthunk', atomsTy_sound hpre, atomsTy_sound hpost, hlc,
+          hσ, hρ, hε, hn, hreg, hloan, hacc, rowLe_sound hrow⟩ (linearB_sound hlin) (ih hbody)
+      · simp at h
     · simp at h
   | mem op args body ih =>
     intro Γ hs τ ε h

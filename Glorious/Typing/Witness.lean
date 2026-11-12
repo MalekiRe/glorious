@@ -494,9 +494,9 @@ def lender : Program where
     ⟨[ ⟨[.wild], .mem .load [.var 0] <| .ret (.var 1)⟩ ]⟩,
     ⟨[ ⟨[.wild],
           .let_ (.closure 0 []) <|
-          .lend true (.var 0) (.var 1) <|
+          .lend true (.var 0) (.var 1) [] [] <|
           .let_ (.closure 1 []) <|
-          .lend false (.var 0) (.var 3) <|
+          .lend false (.var 0) (.var 3) [] [] <|
           .mem .load [.var 0] <|
           .let_ (.prim .intAdd [.var 4, .var 5]) <|
           .ret (.var 6)⟩ ]⟩ ]
@@ -543,7 +543,7 @@ main       = cell 5 in body
 def alias : Program where
   fns := [
     ⟨[ ⟨[.wild], .mem .store [.var 1, .int 9] <| .mem .load [.var 0] <| .ret (.var 3)⟩ ]⟩,
-    ⟨[ ⟨[.wild], .let_ (.closure 0 [.var 0]) <| .lend true (.var 0) (.var 1) <| .ret (.var 2)⟩ ]⟩ ]
+    ⟨[ ⟨[.wild], .let_ (.closure 0 [.var 0]) <| .lend true (.var 0) (.var 1) [] [] <| .ret (.var 2)⟩ ]⟩ ]
   main := .let_ (.closure 1 []) <| .cellTail (.int 5) (.var 0)
 
 /-- It runs: nothing in the machine stops it. -/

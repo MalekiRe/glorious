@@ -243,6 +243,44 @@ theorem sumAt_append (id : Nat) (env : Env) : ∀ (a b : List Nat),
   | [], b => by simp [sumAt]
   | i :: a, b => by simp [sumAt, sumAt_append id env a b, Nat.add_assoc]
 
+/-- One more local that holds no resumption changes no count. -/
+theorem occAt_snoc_quiet {id : Nat} (env : Env) {x : Value} (hx : occ id x = 0) (i : Nat) :
+    occAt id (env ++ [x]) i = occAt id env i := by
+  rcases Nat.lt_trichotomy i env.length with h | h | h
+  · simp [occAt, List.getElem?_append_left h]
+  · subst h
+    simp [occAt, hx]
+  · have h1 : (env ++ [x]).length ≤ i := by
+      simp
+      omega
+    rw [occAt_none h1, occAt_none (Nat.le_of_lt h)]
+
+theorem sumAt_snoc_quiet {id : Nat} (env : Env) {x : Value} (hx : occ id x = 0) :
+    ∀ vars, sumAt id (env ++ [x]) vars = sumAt id env vars
+  | [] => rfl
+  | i :: vars => by
+    simp [sumAt, occAt_snoc_quiet env hx i, sumAt_snoc_quiet env hx vars]
+
+theorem atomVars_append : ∀ (a b : List Atom), atomVars (a ++ b) = atomVars a ++ atomVars b
+  | [], _ => rfl
+  | .var i :: a, b => by simp [atomVars, atomVars_append a b]
+  | .int _ :: a, b => by simp [atomVars, atomVars_append a b]
+
+/-- A local past the end of the environment, among the operands, counts for nothing. -/
+theorem sumAt_insert (id : Nat) (env : Env) (f : Atom) (pre post : List Atom) :
+    sumAt id env (atomVars (f :: (pre ++ .var env.length :: post)))
+      = sumAt id env (atomVars (f :: (pre ++ post))) := by
+  have e1 : atomVars (f :: (pre ++ .var env.length :: post))
+      = atomVars [f] ++ (atomVars pre ++ env.length :: atomVars post) := by
+    rw [show f :: (pre ++ .var env.length :: post) = [f] ++ (pre ++ .var env.length :: post)
+      from rfl, atomVars_append, atomVars_append]
+    rfl
+  have e2 : atomVars (f :: (pre ++ post)) = atomVars [f] ++ (atomVars pre ++ atomVars post) := by
+    rw [show f :: (pre ++ post) = [f] ++ (pre ++ post) from rfl, atomVars_append, atomVars_append]
+  rw [e1, e2]
+  simp only [sumAt_append, sumAt, occAt_none (Nat.le_refl _)]
+  omega
+
 /-- What evaluated operands hold is what the locals they name hold. -/
 theorem occs_evalAtoms (id : Nat) (env : Env) : ∀ (as : List Atom) {vs : List Value},
     evalAtoms env as = some vs → occs id vs = sumAt id env (atomVars as)
@@ -696,7 +734,7 @@ theorem calleeAtom_fv {tm : Tm} {i : Nat} (h : calleeAtom tm = some (.var i)) : 
     simp only [calleeAtom, Option.some.injEq] at h
     subst h
     cases init <;> simp [fv, atomVars]
-  | lend uniq r thunk body =>
+  | lend uniq r thunk pre post body =>
     simp only [calleeAtom, Option.some.injEq] at h
     subst h
     cases r <;> simp [fv, atomVars]

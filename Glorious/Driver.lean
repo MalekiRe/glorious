@@ -163,6 +163,14 @@ def unprovedBorrows (src : String) : Option (List Elab.Borrow) :=
     some c.plain
   | .error _ => none
 
+/-- How many functions the elaborator made for a program's borrows: one for a
+borrow that is given a name, and one for each borrow but the last among the
+arguments of a call. A call with one borrow needs none. -/
+def borrowFns (src : String) : Option Nat :=
+  match compileSource src with
+  | .ok c => some (c.fnNames.toList.filter fun n => (n.splitOn "borrow").length > 1).length
+  | .error _ => none
+
 partial def showValue (names : Array String) : Value → String
   | .int n => toString n
   | .data tag fields =>
@@ -263,9 +271,11 @@ def explainStuck (c : Compiled) (cfg : Core.Config) : String :=
   | .cancel _ _ => "`cancel` is applied to something that is not a usable resumption"
   | .cell _ thunk _ => applied thunk (some [.ref s.store.cells.length 0])
   | .cellTail _ thunk => applied thunk (some [.ref s.store.cells.length 0])
-  | .lend _ r thunk _ =>
+  | .lend _ r thunk pre post _ =>
     match r.eval s.env with
-    | some (.ref a _) => applied thunk (some [.ref a (s.store.labels + 1)])
+    | some (.ref a _) =>
+      applied thunk (do
+        pure ((← evalAtoms s.env pre) ++ .ref a (s.store.labels + 1) :: (← evalAtoms s.env post)))
     | some v => s!"`{showValue c.ctorNames v}` is lent, but it is not a reference"
     | none => unbound
   | .mem _ args _ =>

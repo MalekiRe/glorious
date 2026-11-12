@@ -58,7 +58,7 @@ excludes, or through a borrow whose scope has ended. -/
 def Aliased (s : State) : Prop :=
   (∃ op args body a b vs, s.tm = .mem op args body
       ∧ evalAtoms s.env args = some (.ref a b :: vs) ∧ allowed a b (writes op) s.stack = false)
-    ∨ (∃ uniq r thunk body a b, s.tm = .lend uniq r thunk body
+    ∨ (∃ uniq r thunk pre post body a b, s.tm = .lend uniq r thunk pre post body
       ∧ r.eval s.env = some (.ref a b) ∧ allowed a b uniq s.stack = false)
 
 /-- The scope of a borrow is among the frames a resumption captured: the borrow
@@ -284,7 +284,8 @@ theorem TypedAt.not_aliased {S : StoreTy} {s : State} (hR : Δ.regions) (hL : Δ
     obtain ⟨a', b', he, _, _, htag⟩ := hvt.ref_inv
     cases he
     exact htag hR hL
-  rintro (⟨op, args, body, a, b, vs, htm, hev, hno⟩ | ⟨uniq, r, thunk, body, a, b, htm, hev, hno⟩)
+  rintro (⟨op, args, body, a, b, vs, htm, hev, hno⟩
+    | ⟨uniq, r, thunk, pre, post, body, a, b, htm, hev, hno⟩)
   · simp only at htm hev hno
     subst htm
     cases hty with

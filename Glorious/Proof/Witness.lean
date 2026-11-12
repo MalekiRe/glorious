@@ -181,7 +181,7 @@ def lends : Core.Program where
           .ret (.var 3)⟩ ]⟩,
     ⟨[ ⟨[.wild],
           .let_ (.closure 0 []) <|
-          .lend true (.var 0) (.var 1) <|
+          .lend true (.var 0) (.var 1) [] [] <|
           .mem .load [.var 0] <|
           .ret (.var 3)⟩ ]⟩
   ]

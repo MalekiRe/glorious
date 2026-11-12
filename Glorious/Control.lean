@@ -58,12 +58,15 @@ def evalScope (ρ : Env) (thunk : Atom) (label : Value) : Option Callee :=
   | some (.label id) => some (.label id label)
   | _ => none
 
-/-- Evaluate a reference being lent and the callable its scope runs, applied to
-a reference to the same cell as the borrow `borrow`: the address, and the callee. -/
-def evalLend (ρ : Env) (r thunk : Atom) (borrow : Nat) : Option (Nat × Callee) :=
+/-- Evaluate a reference being lent and the call its scope makes: the callable
+applied to `pre`, a reference to the same cell as the borrow `borrow`, and
+`post`. Gives the address and the callee. The new reference is one more local
+for as long as this takes, which makes it a call like any other. -/
+def evalLend (ρ : Env) (r thunk : Atom) (pre post : List Atom) (borrow : Nat) :
+    Option (Nat × Callee) :=
   match r.eval ρ with
   | some (.ref a _) =>
-    match evalScope ρ thunk (.ref a borrow) with
+    match evalCall (ρ ++ [.ref a borrow]) thunk (pre ++ .var ρ.length :: post) with
     | some c => some (a, c)
     | none => none
   | _ => none

@@ -435,7 +435,7 @@ theorem step_owns {p : Program} {s s' : State} (ho : Owns s) (h : step p s = .ne
     · exact apply_owns (st := .cell cells.length :: stack)
         (OwnsAt.alloc (store := ⟨conts, labels, cells⟩) ho' _) h
     · cases h
-  | lend uniq r thunk body =>
+  | lend uniq r thunk pre post body =>
     simp only [step] at h
     split at h
     · cases h

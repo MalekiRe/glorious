@@ -175,6 +175,36 @@ theorem HasVal.unit {S : StoreTy} : HasVal Δ S Value.unit Ty.unit :=
 
 /-! ## Operands and control-free computations -/
 
+theorem HasAtom.snoc {Γ : TEnv} {a : Atom} {τ : Ty} (σ : Ty) (h : HasAtom Γ a τ) :
+    HasAtom (Γ ++ [σ]) a τ := by
+  cases h with
+  | var h =>
+    obtain ⟨hlt, _⟩ := List.getElem?_eq_some_iff.mp h
+    exact .var (by rw [List.getElem?_append_left hlt]; exact h)
+  | int => exact .int
+
+theorem HasAtoms.snoc {Γ : TEnv} (σ : Ty) : ∀ {as : List Atom} {τs : List Ty},
+    HasAtoms Γ as τs → HasAtoms (Γ ++ [σ]) as τs
+  | _, _, .nil => .nil
+  | _, _, .cons h hs => .cons (h.snoc σ) (HasAtoms.snoc σ hs)
+
+theorem HasAtoms.append {Γ : TEnv} : ∀ {as : List Atom} {τs : List Ty} {bs : List Atom}
+    {σs : List Ty}, HasAtoms Γ as τs → HasAtoms Γ bs σs → HasAtoms Γ (as ++ bs) (τs ++ σs)
+  | _, _, _, _, .nil, hb => hb
+  | _, _, _, _, .cons h hs, hb => .cons h (HasAtoms.append hs hb)
+
+/-- An operand that has a value has it still when a local is added. -/
+theorem eval_snoc {env : Env} {a : Atom} {v : Value} (x : Value) (h : a.eval env = some v) :
+    a.eval (env ++ [x]) = some v := by
+  cases a with
+  | var i =>
+    have h' : env[i]? = some v := h
+    obtain ⟨hlt, _⟩ := List.getElem?_eq_some_iff.mp h'
+    show (env ++ [x])[i]? = some v
+    rw [List.getElem?_append_left hlt]
+    exact h'
+  | int n => exact h
+
 theorem atom_ok {S : StoreTy} {env : Env} {Γ : TEnv} {a : Atom} {τ : Ty}
     (henv : HasVals Δ S env Γ) (h : HasAtom Γ a τ) :
     ∃ v, a.eval env = some v ∧ HasVal Δ S v τ := by

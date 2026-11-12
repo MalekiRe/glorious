@@ -201,7 +201,7 @@ def fv : Tm → List Nat
   | .cancel k body => atomVars [k] ++ fv body
   | .cell init thunk body => atomVars [init, thunk] ++ fv body
   | .cellTail init thunk => atomVars [init, thunk]
-  | .lend _ r thunk body => atomVars [r, thunk] ++ fv body
+  | .lend _ r thunk pre post body => atomVars (r :: thunk :: pre ++ post) ++ fv body
   | .mem _ args body => atomVars args ++ fv body
   | .host _ args body => atomVars args ++ fv body
 
@@ -393,18 +393,22 @@ structure CellOk (Δ : Ctx) (ϕ : List Rgn) (Γ : TEnv) (init thunk : Atom) (n :
   apart : Δ.loans → acc.Nodup
   row : Row.le εt ε
 
-/-- Lending a reference runs a callable with a reference to the same cell,
-for the scope. Under the rules for borrows the callable is polymorphic in the
-region of the borrow, and the callable may not, meanwhile, write what was
+/-- Lending a reference calls a callable with a reference to the same cell,
+among the arguments `pre` and `post`, for the scope. Under the rules for
+borrows the callable is polymorphic in the region of the borrow, which no other
+argument's type mentions, and the callable may not, meanwhile, write what was
 lent, nor read it if it was lent for writing: it has the borrow instead. Lending
 for writing needs leave to write. And the callable performs no operation it
 does not handle itself: so the scope is never among the frames a resumption
 captures, and no handler runs while the borrow is set aside. -/
-structure LendOk (Δ : Ctx) (ϕ : List Rgn) (Γ : TEnv) (uniq : Bool) (r thunk : Atom) (n : Nat)
-    (ρ κ : Rgn) (σ ρt : Ty) (εt ε : Row) (once : Bool) (env : Option (List Ty))
-    (acc : List Rgn) : Prop where
+structure LendOk (Δ : Ctx) (ϕ : List Rgn) (Γ : TEnv) (uniq : Bool) (r thunk : Atom)
+    (pre post : List Atom) (n : Nat) (ρ κ : Rgn) (σ ρt : Ty) (Pre Post : List Ty) (εt ε : Row)
+    (once : Bool) (env : Option (List Ty)) (acc : List Rgn) : Prop where
   ref : HasAtom Γ r (.ref ρ σ)
-  thunk : HasAtom Γ thunk (.fn n [.ref κ σ] ρt εt once env acc)
+  thunk : HasAtom Γ thunk (.fn n (Pre ++ .ref κ σ :: Post) ρt εt once env acc)
+  before : HasAtoms Γ pre Pre
+  after : HasAtoms Γ post Post
+  lcArgs : ∀ t, t ∈ Pre ++ Post → t.lc = true
   lcHeld : σ.lc = true
   lcGiven : ρt.lc = true
   lcRow : εt.lc = true
@@ -517,11 +521,12 @@ inductive HasTm (Δ : Ctx) (ϕ : List Rgn) : TEnv → Tm → Ty → Row → Prop
       CellOk Δ ϕ Γ init thunk n r σ τ εt ε once env acc →
       Linear Δ Γ (atomVars [init, thunk]) [] →
       HasTm Δ ϕ Γ (.cellTail init thunk) τ ε
-  | lend {Γ : TEnv} {uniq : Bool} {r thunk : Atom} {body : Tm} {n : Nat} {ρ κ : Rgn}
-      {σ ρt τ : Ty} {εt ε : Row} {once : Bool} {env : Option (List Ty)} {acc : List Rgn} :
-      LendOk Δ ϕ Γ uniq r thunk n ρ κ σ ρt εt ε once env acc →
-      Linear Δ Γ (atomVars [thunk]) (fv body) →
-      HasTm Δ ϕ (Γ ++ [ρt]) body τ ε → HasTm Δ ϕ Γ (.lend uniq r thunk body) τ ε
+  | lend {Γ : TEnv} {uniq : Bool} {r thunk : Atom} {pre post : List Atom} {body : Tm} {n : Nat}
+      {ρ κ : Rgn} {σ ρt τ : Ty} {Pre Post : List Ty} {εt ε : Row} {once : Bool}
+      {env : Option (List Ty)} {acc : List Rgn} :
+      LendOk Δ ϕ Γ uniq r thunk pre post n ρ κ σ ρt Pre Post εt ε once env acc →
+      Linear Δ Γ (atomVars (thunk :: pre ++ post)) (fv body) →
+      HasTm Δ ϕ (Γ ++ [ρt]) body τ ε → HasTm Δ ϕ Γ (.lend uniq r thunk pre post body) τ ε
   /-- Reading a cell copies its value, so the value must be duplicable. A value
   that is not is taken out with `swap`. Under the region rules, reading a cell
   needs its region. -/

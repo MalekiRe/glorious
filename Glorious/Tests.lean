@@ -256,6 +256,14 @@ def notTail (n : Nat) : String :=
 -- A program that does not pass the region rules does not pass these.
 #guard lentBorrows "fn go(r, n) { let mut y = n; if(0 < n) { go(&mut y, n - 1) + *r } else { *r } }
   fn main() { let mut t = 5; go(&mut t, 3) }" == none
+-- A call with one borrow among its arguments is, in Core, a call with a scope
+-- around it: nothing is made for it. A second borrow costs a callable, and so
+-- does one given a name, whose scope is some statements and not a call.
+#guard borrowFns "fn f(a, p, b) { *p = *p + a + b }
+  fn main() { let mut x = 5; f(1, &mut x, 2); x }" == some 0
+#guard borrowFns "fn swap(a, b) { let t = *a; *a = *b; *b = t; }
+  fn main() { let mut x = 1; let mut y = 2; swap(&mut x, &mut y); (x, y) }" == some 1
+#guard borrowFns "fn main() { let mut x = 1; let p = &mut x; *p = 2; x }" == some 1
 -- Putting a new value in a variable and taking the old one is not a borrow.
 #guard unprovedBorrows "fn main() { let mut x = 1; let old = replace(&mut x, 5); (old, x) }"
   == some []

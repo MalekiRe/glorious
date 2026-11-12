@@ -637,16 +637,19 @@ partial def elabApply (scope : Scope) (isTail : Bool) (callee : Atom) (args : Li
     pure (.int 0)
   else emit (.call callee atoms)
 
-/-- A call of function `idx` some of whose arguments are borrows: each borrow,
-from the first, is a scope that lasts as long as the call. The callable a scope
-runs captured the arguments and is given the borrow; the innermost one makes
-the call. The function is named inside it, so that the function can be used at
-a type that mentions the borrows. -/
+/-- A call of function `idx` some of whose arguments are borrows: each borrow
+is a scope that lasts as long as the call. The last borrow's scope is the call
+itself, with the borrow among the arguments. The scope of one before it runs a
+callable that captured the arguments and is given that borrow. -/
 partial def lendCall (idx : Nat) (atoms : List Atom) : List (Nat × Bool) → M Atom
   | [] => do
     let callee ← emit (.let_ (.closure idx []))
     terminate (.tail callee atoms)
     pure (.int 0)
+  | [(i, uniq)] => do
+    let callee ← emit (.let_ (.closure idx []))
+    modify fun s => { s with lent := s.lent + 1 }
+    emit (.lend uniq (atoms[i]?.getD (.int 0)) callee (atoms.take i) (atoms.drop (i + 1)))
   | (i, uniq) :: rest => do
     let lentRef := atoms[i]?.getD (.int 0)
     let inner := (atoms.zip (List.range atoms.length)).map fun (a, j) =>
@@ -660,7 +663,7 @@ partial def lendCall (idx : Nat) (atoms : List Atom) : List (Nat × Bool) → M 
     let f ← addFn ⟨[⟨[.wild], tm⟩]⟩ s!"a borrow in `{(← get).owner}`"
     modify fun s => { s with lent := s.lent + 1 }
     let thunk ← emit (.let_ (.closure f atoms))
-    emit (.lend uniq lentRef thunk)
+    emit (.lend uniq lentRef thunk [] [])
 
 partial def elabCall (scope : Scope) (isTail : Bool) (f : Expr) (args : List Expr) : M Atom := do
   match f with
@@ -898,7 +901,7 @@ partial def elabBorrowScope (scope : Scope) (tailPos : Bool) (p : String) (uniq 
   let captured ← (captures.filterMap (fun y => scope.lookup y)).mapM useLocal
   let thunk ← emit (.let_ (.closure idx captured))
   modify fun s => { s with lent := s.lent + 1 }
-  let r ← emit (.lend uniq cell thunk)
+  let r ← emit (.lend uniq cell thunk [] [])
   match pat with
   | none => pure r
   | some pat =>

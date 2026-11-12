@@ -282,8 +282,8 @@ def step (p : Program) (s : State) : Step State Value :=
     match init.eval s.env, evalScope s.env thunk (.ref s.store.cells.length 0) with
     | some v, some c => apply p c (.cell s.store.cells.length :: s.stack) (s.store.alloc v)
     | _, _ => .stuck
-  | .lend uniq r thunk body =>
-    match evalLend s.env r thunk (s.store.labels + 1) with
+  | .lend uniq r thunk pre post body =>
+    match evalLend s.env r thunk pre post (s.store.labels + 1) with
     | none => .stuck
     | some (a, c) =>
       -- The borrow's identity is new, as a label's is, and not zero.

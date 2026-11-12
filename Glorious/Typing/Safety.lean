@@ -1128,17 +1128,10 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
       omega
     · exact hfa.fault (s := ⟨.cellTail init thunk, env, stack, ⟨conts, labels, cells⟩⟩) rfl hck
         hcl rfl (fun _ h => findLabel_cons_none h)
-  | @lend _ uniq r thunk body n ρ κ σ ρt _ εt _ once fenv acc hform hlin hbody =>
+  | @lend _ uniq r thunk pre post body n ρ κ σ ρt _ Pre Post εt _ once fenv acc hform hlin
+      hbody =>
     have hr := hform.ref
     have hthunk := hform.thunk
-    have hσ := hform.lcHeld
-    have hρ := hform.lcGiven
-    have hε := hform.lcRow
-    have hn := hform.arity
-    have hreg := hform.region
-    have hloan := hform.loan
-    have hacc := hform.touches
-    have hrow := hform.row
     obtain ⟨rv, hrv, hrt⟩ := atom_ok henv hr
     obtain ⟨a, b, rfl, hcell, hon, _⟩ := hrt.ref_inv
     have hfr := hst.fresh (r := .loan (labels + 1))
@@ -1146,27 +1139,49 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
     obtain ⟨S', hS, hl, hs'⟩ := hs.push_loan a
     obtain ⟨rs, G, ε'', hrs, hl', hρo, hεo, hgrant, hnd', hrow', hst'⟩ :=
       lend_enter (Δ := Δ) (uniq := uniq) (hS.cells _ _ hcell) hl (Nat.succ_pos _)
-        (fun hR => (hon hR).mono hS) hσ hρ hε hn hreg hacc hloan hsub hfr (Row.le_trans hrow hle)
+        (fun hR => (hon hR).mono hS) hform.lcHeld hform.lcGiven hform.lcRow hform.arity
+        hform.region hform.touches hform.loan hsub hfr (Row.le_trans hform.row hle)
         (.call (henv.mono hS) hbody hle hsub (hst.mono hS))
+    -- The call is one whose locals are those here and the borrow.
+    have hpre : Pre.map (Ty.open rs) = Pre :=
+      (List.map_congr_left fun t ht =>
+        Ty.open_lc (hform.lcArgs t (List.mem_append_left _ ht)) rs).trans (List.map_id _)
+    have hpost : Post.map (Ty.open rs) = Post :=
+      (List.map_congr_left fun t ht =>
+        Ty.open_lc (hform.lcArgs t (List.mem_append_right _ ht)) rs).trans (List.map_id _)
+    have hargs : HasAtoms (Γ ++ [(Ty.ref κ σ).open rs]) (pre ++ .var env.length :: post)
+        ((Pre ++ .ref κ σ :: Post).map (Ty.open rs)) := by
+      rw [List.map_append, List.map_cons, hpre, hpost]
+      exact (hform.before.snoc _).append
+        (.cons (.var (by rw [henv.length_eq]; simp)) (hform.after.snoc _))
     obtain ⟨c, hc, hcok, hck, hcl, hocc⟩ :=
-      evalScope_ok (S := S') (l := .ref a (labels + 1)) (henv.mono hS) hthunk hrs hl'
+      evalCall_ok (S := S') ((henv.mono hS).snoc hl') (hthunk.snoc _) hrs hargs
     rw [hρo, hεo] at hcok
-    have h1 : step p ⟨.lend uniq r thunk body, env, stack, ⟨conts, labels, cells⟩⟩
+    obtain ⟨tv, htv, _⟩ := atom_ok henv hthunk
+    have htv' := eval_snoc (.ref a (labels + 1)) htv
+    have h1 : step p ⟨.lend uniq r thunk pre post body, env, stack, ⟨conts, labels, cells⟩⟩
         = apply p c (.lend uniq a (labels + 1) :: .call env body :: stack)
             ⟨conts, labels + 1, cells⟩ := by
       simp [step, evalLend, hrv, hc]
     rw [h1]
+    have hocc' : ∀ id, occCallee id c = sumAt id env (atomVars (thunk :: pre ++ post)) :=
+      fun id => by
+        rw [hocc id, sumAt_snoc_quiet env (by simp [occ]), sumAt_insert]
+        rfl
     refine .of_apply (apply_ok hp hs' hcok hst' hrow' hgrant hnd') rfl
       (fun hD id => ?_) (fun hfa => ?_)
-    · have h2 := moved_live hD henv hlin (live := fv (.lend uniq r thunk body))
+    · have h2 := moved_live hD henv hlin (live := fv (.lend uniq r thunk pre post body))
         (fun i hi => by
           rcases List.mem_append.mp hi with h | h
           · exact List.mem_append_left _ (atomVars_tail_sub h)
           · exact List.mem_append_right _ h) id
-      simp only [hocc id, occ, occStack, occFrame]
+      simp only [hocc' id, occStack, occFrame]
       omega
-    · exact hfa.fault (s := ⟨.lend uniq r thunk body, env, stack, ⟨conts, labels, cells⟩⟩) rfl hck
-        hcl rfl (fun _ h => findLabel_cons_none (findLabel_cons_none h))
+    · exact hfa.fault (s := ⟨.lend uniq r thunk pre post body, env, stack,
+          ⟨conts, labels, cells⟩⟩) rfl
+        (fun id v h => by have := hck id v h; rw [htv'] at this; rw [htv]; exact this)
+        (fun id v h => by have := hcl id v h; rw [htv'] at this; rw [htv]; exact this) rfl
+        (fun _ h => findLabel_cons_none (findLabel_cons_none h))
   | @load _ a body r σ _ _ ha _ hdup hbody =>
     obtain ⟨v, hv, hvt⟩ := atom_ok henv ha
     obtain ⟨addr, tag, rfl, hcell, _, _⟩ := hvt.ref_inv

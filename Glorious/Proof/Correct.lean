@@ -627,19 +627,19 @@ theorem step_sim (p : Core.Program) {s : Core.State} {t : Bytecode.State} (hm : 
         simp [Bytecode.step, hi, he]
       rw [h1, h2]
       exact apply_sim (.cons .label (.cons (.call hc.tail) hfr)) (.mk hcs)
-  | lend uniq r thunk body =>
-    have hc : CodeAt code pc (Instr.lend uniq r thunk :: compileTm body) := hcode
+  | lend uniq r thunk pre post body =>
+    have hc : CodeAt code pc (Instr.lend uniq r thunk pre post :: compileTm body) := hcode
     have hi := hc.head
-    cases he : evalLend ρ r thunk (labels + 1) with
+    cases he : evalLend ρ r thunk pre post (labels + 1) with
     | none =>
-      have h1 : Core.step p ⟨.lend uniq r thunk body, ρ, stack, ⟨conts, labels, cells⟩⟩
+      have h1 : Core.step p ⟨.lend uniq r thunk pre post body, ρ, stack, ⟨conts, labels, cells⟩⟩
           = .stuck := by
         simp [Core.step, he]
       rw [h1]
       exact .stuck
     | some x =>
       obtain ⟨a, c⟩ := x
-      have h1 : Core.step p ⟨.lend uniq r thunk body, ρ, stack, ⟨conts, labels, cells⟩⟩
+      have h1 : Core.step p ⟨.lend uniq r thunk pre post body, ρ, stack, ⟨conts, labels, cells⟩⟩
           = Core.apply p c (.lend uniq a (labels + 1) :: .call ρ body :: stack)
               ⟨conts, labels + 1, cells⟩ := by
         simp [Core.step, he]
