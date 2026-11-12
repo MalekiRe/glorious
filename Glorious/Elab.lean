@@ -1566,6 +1566,12 @@ it: nothing after the checker reads one.
 
 private partial def eraseLifetimesTy : TypeExpr → TypeExpr
   | .name x args =>
+    -- A callable for every lifetime is, without them, the callable.
+    if x == Syntax.rankedMark then
+      match args.getLast? with
+      | some inner => eraseLifetimesTy inner
+      | none => .name x []
+    else
     .name x ((args.filter fun
       | .name n [] => !n.startsWith "'"
       | _ => true).map eraseLifetimesTy)

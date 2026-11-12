@@ -1196,7 +1196,7 @@ def cases : List Case := [
   ⟨"struct Holder<'a>(&'a Int)\nfn f(h: Holder<Int>) { 0 }\nfn main() { 0 }",
     [], "error: in `f`: type `Holder` takes a lifetime where a type is written"⟩,
   ⟨"effect E<'a> { op() }\nfn main() { 0 }",
-    [], "error: effect `E`: an effect cannot yet take a lifetime"⟩,
+    [], "0"⟩,
   -- A longer lifetime will do for a shorter where the type depends on it the
   -- same way round: in a reference, in what a shared reference points to, in
   -- what a callable gives, and in a declared type whose fields make it so.
@@ -1509,6 +1509,77 @@ def cases : List Case := [
     [], "3"⟩,
   ⟨"fn f<T>(x: T) -> Int where T: Nope { 0 }\nfn main() { f(3) }",
     [], "error: in `f`: `T: Nope`: unknown trait `Nope`"⟩,
+  -- Where references meet at a call their lifetimes are related, not made
+  -- one: `r` is not taken to borrow `b` for having been given beside it.
+  ⟨"fn same<'a>(x: &'a Int, y: &'a Int) -> Int { *x + *y }\nfn main() { let mut a = 1; let mut b = 2; let r = &a; let n = same(r, &b); b = 5; *r + n }",
+    [], "4"⟩,
+  ⟨"fn pick<'a>(x: &'a Int, y: &'a Int) -> &'a Int { x }\nfn main() { let mut a = 1; let mut b = 2; let r = &a; let q = pick(r, &b); b = 5; *r }",
+    [], "1"⟩,
+  ⟨"fn pick<'a>(x: &'a Int, y: &'a Int) -> &'a Int { x }\nfn main() { let mut a = 1; let mut b = 2; let r = &a; let q = pick(r, &b); b = 5; *q }",
+    [], "error: 2:76: in `main`: `b` is assigned while `q` holds a reference to it"⟩,
+  -- A trait's function has no body to find its lifetimes from: the
+  -- unwritten ones are one, and an implementation is held to what is
+  -- written.
+  ⟨"trait Same { fn same(&Self) -> &Self }\nimpl Same for Int { fn same(r) { r } }\nfn main() { let mut x = 1; let r = same(&x); x = 2; *r }",
+    [], "error: 3:46: in `main`: `x` is assigned while `r` holds a reference to it"⟩,
+  ⟨"trait Same { fn same(&Self) -> &Self }\nimpl Same for Int { fn same(r) { r } }\nfn main() { let mut x = 1; let r = same(&x); *r }",
+    [], "1"⟩,
+  ⟨"trait Pick { fn first(&'a Self, &'b Self) -> &'a Self }\nimpl Pick for Int { fn first(x, y) { x } }\nfn main() { let mut a = 1; let mut b = 2; let r = first(&a, &b); b = 5; *r }",
+    [], "1"⟩,
+  ⟨"trait Pick { fn first(&'a Self, &'b Self) -> &'a Self }\nimpl Pick for Int { fn first(x, y) { y } }\nfn main() { 0 }",
+    [], "error: in `Pick::first@Int`: this is not the function `Pick` declares, which takes its arguments, gives its result and performs nothing: lifetime `the trait's 'b` is not `the trait's 'a`: a reference that lasts for one is used where one that lasts for the other is wanted"⟩,
+  ⟨"trait Pick { fn any(&Self, &Self) -> &Self }\nimpl Pick for Int { fn any(x, y) { y } }\nfn main() { let mut a = 1; let mut b = 2; let r = any(&a, &b); b = 5; *r }",
+    [], "error: 3:64: in `main`: `b` is assigned while `r` holds a reference to it"⟩,
+  -- `T: 'a`: what lasts for `'a` may hold a `T`.
+  ⟨"fn keep<'a, T: 'a>(r: &'a Int, v: T) -> &'a Int { r }\nfn main() { let mut x = 1; let mut y = 2; let q = keep(&x, &y); y = 5; *q }",
+    [], "error: 2:65: in `main`: `y` is assigned while `q` holds a reference to it"⟩,
+  ⟨"fn keep<'a, T>(r: &'a Int, v: T) -> &'a Int { r }\nfn main() { let mut x = 1; let mut y = 2; let q = keep(&x, &y); y = 5; *q }",
+    [], "1"⟩,
+  ⟨"fn keep<'a, T>(r: &'a Int, v: T) -> &'a Int where T: 'a { r }\nfn main() { let mut x = 1; let q = keep(&x, 7); *q }",
+    [], "1"⟩,
+  -- `for<'a>`: a callable for references of every lifetime can be given a
+  -- reference to a variable of the function it is given to, and cannot
+  -- keep it.
+  ⟨"fn apply(f: for<'a> fn(&'a Int) -> Int) -> Int { let mut x = 1; let mut y = 2; f(&x) + f(&y) }\nfn main() { apply({ r => *r + 1 }) }",
+    [], "5"⟩,
+  ⟨"fn apply<F>(f: F) -> Int where F: for<'a> Fn<(&'a Int,), Output = Int> { let mut x = 5; f(&x) }\nfn main() { apply({ r => *r * 2 }) }",
+    [], "10"⟩,
+  ⟨"fn apply(f: for<'a> fn(&'a Int) -> &'a Int) -> Int { let mut x = 1; let r = f(&x); *r }\nfn main() { apply({ r => r }) }",
+    [], "1"⟩,
+  ⟨"fn apply(f: for<'a> fn(&'a Int) -> Int) -> Int { let mut x = 1; f(&x) }\nfn main() { let mut keep = None; let mut z = 0; let n = apply({ r => keep = Some(r); 0 }); n }",
+    [], "error: 2:49: in `main`: argument 1 of `apply`: a reference this callable is given is kept in `keep`, and the callable is wanted for references of any lifetime"⟩,
+  ⟨"fn apply(f: for<'a, 'b> fn(&'a Int, &'b Int) -> &'a Int) -> Int { let mut x = 1; let mut y = 2; *f(&x, &y) }\nfn main() { apply(fn(a, b) { b }) }",
+    [], "error: 2:13: in `main`: argument 1 of `apply`: lifetime `'b` is not known to last as long as `'a`: say `'b: 'a`"⟩,
+  ⟨"fn apply(f: for<'a, 'b> fn(&'a Int, &'b Int) -> &'a Int) -> Int { let mut x = 1; let mut y = 2; let r = f(&x, &y); y = 7; *r + y }\nfn main() { apply(fn(a, b) { a }) }",
+    [], "8"⟩,
+  ⟨"fn apply(f: for<'a> fn(&'a mut Int)) { let mut x = 1; f(&mut x); print(x) }\nfn main() { apply({ r => *r = *r + 41 }); 0 }",
+    [], "42\n0"⟩,
+  ⟨"fn inner(f: for<'a> fn(&'a Int) -> Int) -> Int { let mut x = 3; f(&x) }\nfn outer(g: for<'a> fn(&'a Int) -> Int) -> Int { inner(g) + 1 }\nfn main() { outer({ r => *r }) }",
+    [], "4"⟩,
+  ⟨"fn apply(f: for<'a> fn(&'a Int) -> &'a Int) -> Int { let mut x = 1; let mut y = 2; let r = f(&x); x = 5; *r }\nfn main() { apply({ r => r }) }",
+    [], "error: 1:99: in `apply`: `x` is assigned while `r` holds a reference to it"⟩,
+  ⟨"fn bad(f: Option<for<'a> fn(&'a Int) -> Int>) -> Int { 0 }\nfn main() { 0 }",
+    [], "error: in `bad`: `for<..>` is written of the type of a parameter, not inside another type"⟩,
+  ⟨"fn f() -> for<'a> fn(&'a Int) -> Int { { r => *r } }\nfn main() { let mut x = 6; f()(&x) }",
+    [], "6"⟩,
+  -- An effect can take a lifetime: what its operations give may borrow
+  -- from where the effect is handled.
+  ⟨"effect Reader<'a> { ask() -> &'a Int }\nfn use_it() -> Int { *ask() + 1 }\nfn main() { let mut x = 41; handle use_it() { ask(k) => k(&x) } }",
+    [], "42"⟩,
+  ⟨"effect Reader { ask() -> &Int }\nfn use_it() -> Int { *ask() + 1 }\nfn main() { let mut x = 41; handle use_it() { ask(k) => k(&x) } }",
+    [], "error: 3:13: in `main`: `x` could be used after its block has ended: it is stored in a declaration's `fn` field; give that declaration a type parameter for the field"⟩,
+  ⟨"effect Reader { ask() -> &Int }\nfn main() { let mut x = 41; let mut y = 1; let a = handle *ask() { ask(k) => k(&x) }; let b = handle *ask() { ask(k) => k(&y) }; x = 2; a + b }",
+    [], "error: 2:29: in `main`: `y` could be used after its block has ended: it is stored in a declaration's `fn` field; give that declaration a type parameter for the field"⟩,
+  ⟨"effect Reader<'a> { ask() -> &'a Int }\nfn main() { let mut x = 41; let mut y = 1; let a = handle *ask() { ask(k) => k(&x) }; let b = handle *ask() { ask(k) => k(&y) }; x = 2; a + b }",
+    [], "42"⟩,
+  ⟨"effect Reader<'a> { ask() -> &'a Int }\nfn both() -> Int { let r = ask(); let s = ask(); *r + *s }\nfn main() { let mut x = 20; handle both() { ask(k) => k(&x) } }",
+    [], "40"⟩,
+  ⟨"effect Reader<'a> { ask() -> &'a Int }\nfn leak() -> &Int { ask() }\nfn main() { let mut x = 20; let r = handle leak() { ask(k) => k(&x) }; x = 5; *r }",
+    [], "error: 3:72: in `main`: `x` is assigned while `r` holds a reference to it"⟩,
+  ⟨"effect Slot<'a> { slot() -> &'a mut Int }\nfn bump() { let p = slot(); *p = *p + 1 }\nfn main() { let mut x = 1; handle bump() { slot(k) => k(&mut x) }; x }",
+    [], "error: 3:55: in `main`: calling `k` may assign or borrow `x` while a value this expression is still using holds a `&mut` reference to it"⟩,
+  ⟨"effect Reader<'a, T> { ask() -> &'a T }\nfn get() -> Int / {Reader<'_, Int>} { *ask() }\nfn main() { let mut x = 9; handle get() { ask(k) => k(&x) } }",
+    [], "9"⟩,
   -- `drop` is not for a program to call.
   ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nfn main() { let mut f = File(7); drop(&mut f); 0 }",
     [], "error: 3:34: in `main`: `drop` is run when what holds a value ends; a program does not call it"⟩,

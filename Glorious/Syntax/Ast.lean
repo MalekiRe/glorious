@@ -262,6 +262,13 @@ structure Bound where
   args : List TypeExpr := []
   assoc : List (String × TypeExpr) := []
   quantity : Option (Nat × Option Nat) := none
+  /-- `for<'a>` before a callable bound: the lifetimes it is asked for at
+  every one of. -/
+  ranked : List String := []
+
+/-- `for<'a, 'b> fn(&'a T) -> &'a T`, a callable that takes any lifetimes for
+those named, is the type `%for<'a, 'b, fn(&'a T) -> &'a T>`. -/
+def rankedMark : String := "%for"
 
 inductive Item where
   /-- An enum: its type parameters and its constructors with their fields. -/

@@ -599,6 +599,19 @@ private partial def parseType : P TypeExpr := do
     pure (.fn params ret)
   | .ident x =>
     advance
+    if x == "for" && (← isOp "<") then
+      -- `for<'a> fn(&'a T) -> R`: a callable for every such lifetime.
+      advance
+      let mut lifetimes : Array TypeExpr := #[]
+      repeat
+        if ← isOp ">" then break
+        let l ← expectIdent
+        unless l.startsWith "'" do failAt "expected a lifetime: `for<'a>`"
+        lifetimes := lifetimes.push (.name l [])
+        if !(← acceptPunct ",") then break
+      expectOp ">"
+      let inner ← parseType
+      return .name rankedMark (lifetimes.toList ++ [inner])
     let x := "::".intercalate (← parsePathRest x)
     if ← isOp "<" then
       advance
@@ -753,19 +766,32 @@ private partial def parseAssoc : P (List (String × TypeExpr)) := do
 private partial def parseBoundsOf (subject : String) : P (List Bound) := do
   let mut out : Array Bound := #[]
   repeat
-    let tr ← expectPath
+    let mut tr ← expectPath
+    -- `for<'a>` before a callable: it is asked for at every such lifetime.
+    let mut ranked : Array String := #[]
+    if tr == "for" && (← isOp "<") then
+      advance
+      repeat
+        if ← isOp ">" then break
+        let l ← expectIdent
+        unless l.startsWith "'" do failAt "expected a lifetime: `for<'a>`"
+        ranked := ranked.push l
+        if !(← acceptPunct ",") then break
+      expectOp ">"
+      tr ← expectPath
+      unless tr == "Fn" || tr == "RunsIn" do failAt "`for<..>` is written before `Fn` or `RunsIn`"
     if tr == "Fn" then
       if !(← isOp "<") then failAt "expected `<`: `Fn<(A, B), Output = R>`"
       advance
       let pack ← parsePack
-      out := out.push { subject, trait := tr, args := pack, assoc := ← parseAssoc }
+      out := out.push { subject, trait := tr, args := pack, assoc := ← parseAssoc, ranked := ranked.toList }
     else if tr == "RunsIn" then
       if !(← isOp "<") then failAt "expected `<`: `RunsIn<E, (A, B), Output = R>`"
       advance
       let access ← parseType
       expectPunct ","
       let pack ← parsePack
-      out := out.push { subject, trait := tr, args := access :: pack, assoc := ← parseAssoc }
+      out := out.push { subject, trait := tr, args := access :: pack, assoc := ← parseAssoc, ranked := ranked.toList }
     else if tr == "Use" then
       if !(← isOp "<") then failAt "expected `<`: `Use<[1, 1]>`"
       advance

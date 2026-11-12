@@ -1000,18 +1000,55 @@ lifetime of nothing a program can borrow, since there are no statics.
 
 What it is not:
 
-- Where a function is called, lifetimes are inferred, and two that meet are
-  made one rather than related by variance. That is safe and can be stricter
-  than Rust: a borrow may be taken to last as long as another it met.
-- Variance is used where a value is fitted to a type that is wanted (an
-  argument, a result, a pattern's type) and only after the two were found not
-  to be the same.
-- Not built: `T: 'a`, higher-ranked `for<'a>`, a lifetime on an effect or a
-  trait, elision rules beyond "unwritten is inferred".
+- Variance is used where a value is fitted to a type that is wanted: an
+  argument, a result, a pattern's type. Since "Lifetimes, finished" below it
+  is tried first wherever a reference is involved.
+- Elision is inference: an unwritten lifetime of a function is found from its
+  body. Only a trait's function, which has none, has a rule.
 - Lifetimes are taken out of the program once it is checked. Core's regions
   are found again from the code, and a program that keeps a reference in a
   declared type is, as before, not certified with the region rules.
 - All of it is the unproved checker.
+
+## Lifetimes, finished
+
+What "Lifetimes can be written" left out.
+
+- **Related, not made one.** Where a value that holds a reference is given
+  for a type that is wanted, the lifetimes are related as their positions ask
+  before anything is made equal. So a reference given beside another is no
+  longer taken to borrow what the other borrows: after `same(r, &b)`, `b` can
+  be assigned while `r` lives. What a callable captured is still made one
+  with what it meets, since two blocks are told to be one block by it.
+- **A trait's function** has no body its lifetimes could be found from. Its
+  unwritten lifetimes are all one: what it gives may borrow whatever anything
+  it takes borrows. A lifetime written with a name is its own, with no need
+  to declare it. An implementation is held to them as a function is to its
+  own. Before this, what a trait's function gave was taken to borrow nothing,
+  and a variable could be assigned while a reference into it from such a
+  call lived: that was a hole, and is closed.
+- **`T: 'a`** says what lasts for `'a` may hold a `T`. A caller's `T` then
+  has to last as long: whatever it borrows, `'a` is taken to borrow.
+- **`for<'a> fn(&'a T) -> R`**, and `F: for<'a> Fn<(&'a T,), Output = R>`, is
+  a callable for every lifetime. Each call of it is at lifetimes of that
+  call's own, so a function can give it a reference to its own variable,
+  which nothing else allows. What is given where one is wanted must do for
+  any lifetime: it is checked at lifetimes that are each itself, and nothing
+  in scope may come to hold one of them, so it cannot keep the reference. It
+  is written of a parameter's type or of a function's result.
+- **An effect can take a lifetime**, `effect Reader<'a> { ask() -> &'a T }`:
+  given where the effect is handled, so what an operation gives may borrow
+  from there, and each handling has its own.
+
+Limits. Core has no callable type for every region, and no region in an
+effect's type. A program that gives a callable a reference to a local of the
+function it was given to, or resumes with a reference to a local of the
+handler's function, is checked by the unproved checker and certified in Core
+without the region rules: Core shows it well typed and well owned, not that
+its variables are not used after their blocks. A resumption cannot be given
+a `&mut` reference to a variable the handled computation may also reach,
+which the checker cannot yet tell apart from two uses. `for<..>` cannot be
+written inside another type. There is no `'a` on a trait itself.
 
 ## A field can be borrowed
 

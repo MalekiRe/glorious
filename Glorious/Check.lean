@@ -111,6 +111,8 @@ structure Scheme where
   /-- The traits the function needs of its type parameters, in the order it is
   given the evidence: each a trait and one of `tvars`. -/
   bounds : List (String × Ty) := []
+  /-- The callables in the type that are for every lifetime: see `St.ranked`. -/
+  ranked : List (Nat × List (Nat × String)) := []
 
 /-- How a type depends on one of its parameters, for telling when a value of
 the type at one argument will do where the type at another is wanted. -/
@@ -175,10 +177,16 @@ structure OpSig where
   result : Option Ty
   /-- Declared `[1, 1]`: its resumption has to be resumed or cancelled. -/
   must : Bool := false
+  /-- For each parameter of the effect, in order: the capture variable it is
+  in the types above if it is a lifetime, none if it is a type. -/
+  lifetimes : List (Option Nat) := []
 
+/-- An effect: a variable for each of its parameters, a lifetime's standing
+for nothing, and which of them are lifetimes. -/
 structure EffectDecl where
   tvars : List Nat
   ops : List String
+  lifetimes : List Bool := []
 
 /-- What a local name stands for. -/
 inductive Binding where
@@ -254,6 +262,9 @@ structure MethodSig where
   self : Nat
   params : List Ty
   ret : Ty
+  /-- Its lifetimes as written, by their capture variables; `'_` is the one
+  every unwritten lifetime is. -/
+  lifetimes : List (Nat × String) := []
 
 structure ImplDecl where
   trait : String
@@ -333,6 +344,13 @@ structure St where
   modules : Syntax.ModuleInfo := {}
   /-- The names of the fields of each constructor declared with names. -/
   fieldNames : List (String × List String) := []
+  /-- Callable types that are for every lifetime: by the capture variable of
+  the callable, the lifetimes it is for, each with its name. Applied, it is
+  at new lifetimes each time; given, it must do for any. -/
+  ranked : List (Nat × List (Nat × String)) := []
+  /-- While a function is read that has no body to find its lifetimes from, a
+  trait's: the one lifetime every unwritten lifetime of it is. -/
+  elided : Option Nat := none
   /-- The blocks given what an `is` found, each with the names it then has. -/
   packs : Array (Nat × List String) := #[]
   /-- The callables a function is given that run in one environment it is
@@ -651,6 +669,12 @@ def CtorSig.fieldsAt (sig : CtorSig) (args : List Ty) : List Ty :=
     let cm := (sig.cvars.zip caps).filterMap fun (c, cap) => cap.map fun cap => (c, cap)
     sig.fields.map (subst (sig.tvars.zip types) [] cm)
 
+/-- Arguments for an effect, all new: a type for each type parameter, a
+lifetime for each lifetime. -/
+def EffectDecl.fresh (d : EffectDecl) : M (List Ty) := do
+  (d.tvars.zip (d.lifetimes ++ d.tvars.map fun _ => false)).mapM fun (_, life) => do
+    if life then pure (Ty.life (← freshCap)) else freshTy
+
 /-- A type with every capture variable replaced by a new one. -/
 def freshenCaps (t : Ty) : M Ty := do
   let t ← zonk t
@@ -693,6 +717,9 @@ def instantiate (s : Scheme) (via : Option String := none) : M Ty := do
       | none => why
     modify fun st => { st with dups := st.dups.push (subst tm rm cm t, why) }
   modify fun st => { st with lastBounds := s.bounds.map fun (tr, t) => (tr, subst tm rm cm t) }
+  for (cap, lifetimes) in s.ranked do
+    let here := ((cm.lookup cap).getD cap, lifetimes.map fun (q, name) => ((cm.lookup q).getD q, name))
+    modify fun st => { st with ranked := here :: st.ranked }
   pure (subst tm rm cm s.ty)
 
 /-- Replace a function's own type parameters, which stood for themselves while
@@ -1014,6 +1041,23 @@ partial def resolveType (params : List (String × Ty)) (decl : Bool) : TypeExpr 
       if args.isEmpty then pure t else throw s!"type parameter `{x}` takes no arguments"
     | none =>
       if x.startsWith "'" then Ty.life <$> lifetimeCap params decl (some x)
+      else if x == Syntax.rankedMark then
+        -- `for<'a> fn(&'a T) -> R`: the callable, noted as one for every `'a`.
+        let mut scope := params
+        let mut lifetimes : List (Nat × String) := []
+        for a in args.dropLast do
+          if let .name l [] := a then
+            let cap ← freshCap
+            scope := (l, Ty.life cap) :: scope
+            lifetimes := lifetimes ++ [(cap, l)]
+        match args.getLast? with
+        | some inner =>
+          match ← resolveType scope decl inner with
+          | .fn ps r effs tail cap =>
+            modify fun s => { s with ranked := (cap, lifetimes) :: s.ranked }
+            pure (.fn ps r effs tail cap)
+          | _ => throw "`for<..>` is written before the type of a callable: `for<'a> fn(&'a T) -> R`"
+        | none => throw "`for<..>` is written before the type of a callable"
       else if x == "Int" then
         if args.isEmpty then pure .int else throw "`Int` takes no arguments"
       else if Syntax.isScalar x then
@@ -1066,6 +1110,7 @@ of the type. -/
 partial def lifetimeCap (params : List (String × Ty)) (decl : Bool) (life : Option String) :
     M Nat := do
   let unnamed : M Nat := do
+    if let some cap := (← get).elided then return cap
     let cap ← freshCap
     if decl then modify fun s => { s with monoCaps := cap :: s.monoCaps }
     pure cap
@@ -1096,7 +1141,7 @@ partial def resolveEffects (params : List (String × Ty)) (decl : Bool)
     | none => throw s!"unknown effect `{name}`"
     | some d =>
       if args.isEmpty then
-        pure (name, ← d.tvars.mapM fun _ => freshTy)
+        pure (name, ← d.fresh)
       else
         unless d.tvars.length == args.length do
           throw s!"effect `{name}` takes {d.tvars.length} arguments, but is given {args.length}"
@@ -1133,6 +1178,18 @@ partial def closeRows : Ty → Ty
   | .fn ps r _ _ cap => .fn (ps.map closeRows) (closeRows r) [] none cap
   | .ref how t cap => .ref how (closeRows t) cap
 
+/-- The lifetimes a type names, but for `'_` and `'static`. -/
+partial def lifetimesOf : TypeExpr → List String
+  | .name x args => (if isLifetime x && x != "'_" && x != "'static" then [x] else []) ++ args.flatMap lifetimesOf
+  | .tuple args => args.flatMap lifetimesOf
+  | .fn ps r => ps.flatMap lifetimesOf ++ lifetimesOf r
+  | .performs r effects => lifetimesOf r ++ effects.flatMap fun (_, args) => args.flatMap lifetimesOf
+  | .ref _ t life =>
+    (match life with
+      | some l => if l != "'_" && l != "'static" then [l] else []
+      | none => []) ++ lifetimesOf t
+  | _ => []
+
 /-- Read the traits and their implementations. Types are declared by now. -/
 def declareTraits (items : List Item) : M Unit := do
   -- `Drop` is the compiler's: its function is run on what a variable holds
@@ -1144,7 +1201,7 @@ def declareTraits (items : List Item) : M Unit := do
   modify fun s =>
     { s with
       traits := ("Drop", ["drop"]) :: s.traits
-      methods := ("drop", ⟨"Drop", 0, dropSelf, [.ref .uniq (.var dropSelf) dropCap], .unit⟩)
+      methods := ("drop", ⟨"Drop", 0, dropSelf, [.ref .uniq (.var dropSelf) dropCap], .unit, []⟩)
         :: s.methods }
   for item in items do
     if let .trait name methods := item then
@@ -1156,11 +1213,24 @@ def declareTraits (items : List Item) : M Unit := do
       for (m, params, ret) in methods do
         if ((← get).methods.lookup m).isSome then
           throw s!"`{m}` is declared twice as a function of a trait"
-        let ps ← params.mapM fun p => closeRows <$> resolveType [("Self", .var self)] false p
+        -- A trait's function has no body its lifetimes could be found from,
+        -- so the unwritten ones are one: what it gives may borrow whatever
+        -- anything it takes borrows. A lifetime written with a name is its own.
+        let named := (params ++ ret.toList).flatMap lifetimesOf
+        let mut scope : List (String × Ty) := [("Self", .var self)]
+        for l in named.eraseDups do
+          scope := scope ++ [(l, Ty.life (← freshCap))]
+        let one ← freshCap
+        modify fun s => { s with elided := some one }
+        let ps ← params.mapM fun p => closeRows <$> resolveType scope false p
         let r ← match ret with
-          | some r => closeRows <$> resolveType [("Self", .var self)] false r
+          | some r => closeRows <$> resolveType scope false r
           | none => pure .unit
-        let sig : MethodSig := ⟨name, index, self, ps, r⟩
+        modify fun s => { s with elided := none }
+        let written := scope.filterMap fun
+          | (l, .ref _ _ cap) => some (cap, l)
+          | _ => none
+        let sig : MethodSig := ⟨name, index, self, ps, r, (one, "'_") :: written⟩
         modify fun s => { s with methods := (m, sig) :: s.methods }
         index := index + 1
       modify fun s => { s with traits := (name, methods.map (·.1)) :: s.traits }
@@ -1242,9 +1312,22 @@ def declare (items : List Item) : M Unit := do
         { s with ctors :=
             (name, ⟨name, ids, fields, .con name (pmap.map (·.2)), caps, kinds⟩) :: s.ctors }
     | .effect name params ops =>
-      if params.any (·.startsWith "'") then
-        throw s!"effect `{name}`: an effect cannot yet take a lifetime"
-      let (pmap, ids, _) ← freshParams params
+      -- A lifetime of an effect is given where the effect is handled: what
+      -- an operation gives or takes may borrow for that long.
+      let (pmap, _, _) ← freshParams params
+      let mut ids : List Nat := []
+      let mut lifetimes : List (Option Nat) := []
+      for (_, t) in pmap do
+        match t with
+        | .var id =>
+          ids := ids ++ [id]
+          lifetimes := lifetimes ++ [none]
+        | .ref _ _ cap =>
+          ids := ids ++ [match ← freshTy with
+            | .var id => id
+            | _ => 0]
+          lifetimes := lifetimes ++ [some cap]
+        | _ => pure ()
       for op in ops do
         let payload ← op.payload.mapM (resolveType pmap true)
         let result ← if op.terminal then pure none
@@ -1262,8 +1345,9 @@ def declare (items : List Item) : M Unit := do
               throw s!"operation `{op.name}`: a resumption is used at most once, so write `[0, 1]` or `[1, 1]`"
             pure (lower == 1)
         if must then modify fun s => { s with anyMust := true }
-        modify fun s => { s with ops := (op.name, ⟨name, ids, payload, result, must⟩) :: s.ops }
-      modify fun s => { s with effects := (name, ⟨ids, ops.map (·.name)⟩) :: s.effects }
+        modify fun s => { s with ops := (op.name, ⟨name, ids, payload, result, must, lifetimes⟩) :: s.ops }
+      modify fun s =>
+        { s with effects := (name, ⟨ids, ops.map (·.name), lifetimes.map (·.isSome)⟩) :: s.effects }
     | .use head lower upper =>
       unless ((← get).types.lookup head).isSome do
         throw s!"`impl Use` for `{head}`: there is no such declared type"
@@ -1288,7 +1372,11 @@ def instCtor (sig : CtorSig) : M (List Ty × Ty) := do
 /-- An operation's payload and result types at the given effect arguments. -/
 def instOp (sig : OpSig) (inst : List Ty) : List Ty × Option Ty :=
   let tm := sig.tvars.zip inst
-  (sig.payload.map (subst tm [] []), sig.result.map (subst tm [] []))
+  -- A lifetime of the effect is the one it is given.
+  let cm := (sig.lifetimes.zip inst).filterMap fun
+    | (some cap, .ref _ _ given) => some (cap, given)
+    | _ => none
+  (sig.payload.map (subst tm [] cm), sig.result.map (subst tm [] cm))
 
 /-- Resolve a name to a constructor, following constructor aliases. -/
 partial def resolveCtor (name : String) (qual : Option String) : M (Option (String × CtorSig)) := do
@@ -3300,7 +3388,8 @@ its lifetime the same way round, and so does a shared reference on what it
 points to; a `&mut` reference does not vary in what it points to; a callable
 depends on what it takes the other way round and on what it gives the same
 way; a declared type depends on each parameter as its fields make it. -/
-partial def fitLifetimes (pos : Variance) (expected actual : Ty) : M Unit := do
+partial def fitLifetimes (pos : Variance) (expected actual : Ty) (whole : Bool := false) :
+    M Unit := do
   let e ← find expected
   let a ← find actual
   if pos == .inv then
@@ -3311,22 +3400,24 @@ partial def fitLifetimes (pos : Variance) (expected actual : Ty) : M Unit := do
     unify how how'
     lifeFits pos cap cap'
     match ← find how with
-    | .con "&" [] => fitLifetimes pos t t'
+    | .con "&" [] => fitLifetimes pos t t' whole
     | .con "'" [] => pure ()
     | _ => unify t t'
   | .tuple es, .tuple as =>
     if es.length != as.length then unify e a
     else
       for (x, y) in es.zip as do
-        fitLifetimes pos x y
+        fitLifetimes pos x y whole
   | .con n es, .con m as =>
     if n != m || es.length != as.length then unify e a
     else
       let variances := (((← get).types.lookup n).map (·.variances)).getD []
       for ((x, y), i) in (es.zip as).zipIdx do
-        fitLifetimes (pos.through (variances.getD i .inv)) x y
+        fitLifetimes (pos.through (variances.getD i .inv)) x y whole
   | .fn ps r effs tail cap, .fn ps' r' effs' tail' cap' =>
-    if ps.length != ps'.length then unify e a
+    -- What a callable captured is one thing wherever the callable goes: two
+    -- blocks are told to be one by it.
+    if whole || ps.length != ps'.length then unify e a
     else
       for (x, y) in ps.zip ps' do
         fitLifetimes pos.flip x y
@@ -3336,14 +3427,23 @@ partial def fitLifetimes (pos : Variance) (expected actual : Ty) : M Unit := do
   | _, _ => unify e a
 
 /-- Try that, changing nothing if it does not work: then why not. -/
-def tryLifetimes (expected actual : Ty) : M (Option String) := do
+def tryLifetimes (expected actual : Ty) (whole : Bool := false) : M (Option String) := do
   let saved ← get
   try
-    fitLifetimes .co expected actual
+    fitLifetimes .co expected actual whole
     pure none
   catch e =>
     set saved
     pure (some e)
+
+/-- Does a type, as far as it is known, hold a reference or name a lifetime? -/
+partial def mentionsRef (t : Ty) : M Bool := do
+  match ← find t with
+  | .ref _ _ _ => pure true
+  | .tuple ts => ts.anyM mentionsRef
+  | .con "'" _ => pure true
+  | .con _ args => args.anyM mentionsRef
+  | _ => pure false
 
 /-- How each declared type depends on each of its parameters: found from the
 fields of its constructors, and for a type that mentions itself or another,
@@ -3422,6 +3522,58 @@ def checkLifetimes : M Unit := do
         unless ← outlasts b a do
           throw s!"what lasts for `{x}` is made to depend on what lasts for `{y}`: say `{y}: {x}` if `{y}` lasts at least as long"
 
+/-- The lifetimes a callable type is for every one of, if it is such a type. -/
+def rankedOf (cap : Nat) : M (List (Nat × String)) := do
+  let root ← findCap cap
+  for (c, lifetimes) in (← get).ranked do
+    if (← findCap c) == root then return lifetimes
+  return []
+
+/-- A callable type that is for every lifetime, at lifetimes of its own: new
+ones, each holding what every one of them was said to hold. With `rigid` the
+new ones are each itself and no other, as a function's own lifetimes are:
+that is how a callable given where such a type is wanted is held to it. Gives
+the type and the new lifetimes. -/
+def openRanked (t : Ty) (rigid : Bool := false) : M (Ty × List Nat) := do
+  match ← find t with
+  | .fn ps r effs tail cap =>
+    let lifetimes ← rankedOf cap
+    if lifetimes.isEmpty then return (t, [])
+    let mut cm : List (Nat × Nat) := []
+    for (q, name) in lifetimes do
+      let root ← findCap q
+      let fresh ← freshCap
+      cm := (root, fresh) :: cm
+      for (src, what) in (← get).capEdges do
+        if (← findCap src) == root then captures fresh what
+      if rigid then
+        modify fun s => { s with rigidCaps := (fresh, name) :: s.rigidCaps }
+    match ← zonk (.fn ps r effs tail cap) with
+    | .fn ps r effs tail cap =>
+      pure (.fn (ps.map (subst [] [] cm)) (subst [] [] cm r) effs tail cap, cm.map (·.2))
+    | t => pure (t, [])
+  | t => pure (t, [])
+
+/-- The capture variables reachable from a type through what they hold. -/
+def capsReached (t : Ty) : M (List Nat) := do
+  let s ← get
+  let mut reach : List Nat := []
+  for c in freeCaps (← zonk t) do
+    let root ← findCap c
+    unless reach.contains root do reach := root :: reach
+  let mut todo := reach
+  while !todo.isEmpty do
+    let mut next : List Nat := []
+    for (src, what) in s.capEdges do
+      if let .ty held := what then
+        if todo.contains (← findCap src) then
+          for c in freeCaps (← zonk held) do
+            let root ← findCap c
+            unless reach.contains root || next.contains root do next := root :: next
+    reach := reach ++ next
+    todo := next
+  pure reach
+
 /-- Marks a failure as a body's result not being the type wanted, which the
 clause the body belongs to can still answer by looking at its clauses in
 another order. -/
@@ -3429,8 +3581,13 @@ def resultMark : String := "\x01"
 
 /-- Make what was found the type expected, by a declared coercion at `site` if
 the two differ. Gives the mismatch if neither works. -/
-def fitAt (scope : Scope) (amb : Row) (what : String) (site : Option Elab.Site)
+def fitAtCore (scope : Scope) (amb : Row) (what : String) (site : Option Elab.Site)
     (expected actual : Ty) : M (Option String) := do
+  -- Where references meet, their lifetimes are related as the position asks,
+  -- not made one: a reference given where a shorter one will do is not
+  -- thereby taken to borrow what the other one borrows.
+  if (← mentionsRef expected) || (← mentionsRef actual) then
+    if (← tryLifetimes expected actual true).isNone then return none
   try
     unifyAt what expected actual
     pure none
@@ -3454,6 +3611,29 @@ def fitAt (scope : Scope) (amb : Row) (what : String) (site : Option Elab.Site)
       | several =>
         let names := ", ".intercalate (several.map fun name => s!"`{name}`")
         pure (some s!"{e} (the coercions {names} all apply here, so none is chosen)")
+
+/-- Make what was found the type expected. Where a callable for every lifetime
+is wanted, what is given must do for any: it is fitted at lifetimes that are
+each itself, and nothing in scope may come to hold one of them, since a
+reference the callable is given later would then be kept. A callable for
+every lifetime that is given is given at lifetimes of its own. -/
+def fitAt (scope : Scope) (amb : Row) (what : String) (site : Option Elab.Site)
+    (expected actual : Ty) : M (Option String) := do
+  let (expected, held) ← openRanked expected true
+  let (actual, _) ← openRanked actual
+  let found ← fitAtCore scope amb what site expected actual
+  if found.isNone && !held.isEmpty then
+    for (x, b) in scope do
+      let t := match b with
+        | .val t _ => some t
+        | .cell t _ => some t
+        | _ => none
+      if let some t := t then
+        let reached ← capsReached t
+        for q in held do
+          if reached.contains (← findCap q) then
+            return some s!"{what}: a reference this callable is given is kept in `{x}`, and the callable is wanted for references of any lifetime"
+  pure found
 
 mutual
 
@@ -3742,6 +3922,8 @@ partial def applyTy (scope : Scope) (amb : Row) (what : String) (callee : Ty) (a
     (call : Nat := 0) : M Ty := do
   abandons (← get).anon what call
   pushTemp callee
+  -- A callable for every lifetime is called at lifetimes of this call's own.
+  let (callee, _) ← openRanked callee
   match ← find callee with
   | .fn ps r effs tail _ => do
     checkArgs scope amb what ps args call
@@ -3783,8 +3965,8 @@ partial def inferCall (scope : Scope) (amb : Row) (f : Expr) (args : List Expr)
       pure result
     | .op sig => do
       abandons (← get).anon s!"operation `{x}`"
-      let decl := ((← get).effects.lookup sig.effect).getD ⟨[], []⟩
-      let inst ← decl.tvars.mapM fun _ => freshTy
+      let decl := ((← get).effects.lookup sig.effect).getD ⟨[], [], []⟩
+      let inst ← decl.fresh
       let (payload, result) := instOp sig inst
       try unifyRow amb ⟨[(sig.effect, inst)], some (← freshRowVar)⟩
       catch e => throw s!"operation `{x}` cannot be performed here: {e}"
@@ -4206,8 +4388,8 @@ partial def inferHandle (scope : Scope) (amb : Row) (subject : Expr) (arms : Lis
   -- One instance of each handled effect.
   let mut insts : List (String × List Ty) := []
   for e in (opArms.toList.map (·.2.1.effect)).eraseDups do
-    let decl := (s.effects.lookup e).getD ⟨[], []⟩
-    insts := insts ++ [(e, ← decl.tvars.mapM fun _ => freshTy)]
+    let decl := (s.effects.lookup e).getD ⟨[], [], []⟩
+    insts := insts ++ [(e, ← decl.fresh)]
   let ambFlat ← flattenRow amb
   -- An arm can run whenever the subject performs, and the subject goes on
   -- when an arm resumes it: what either mentions is still to be used
@@ -4279,7 +4461,7 @@ partial def inferHandle (scope : Scope) (amb : Row) (subject : Expr) (arms : Lis
         if ← ps.allM irrefutable then covered := x :: covered
       else arityError s!"an arm for the operation `{x}`" payload.length ps.length
   for (e, inst) in insts do
-    let decl := (s.effects.lookup e).getD ⟨[], []⟩
+    let decl := (s.effects.lookup e).getD ⟨[], [], []⟩
     unless decl.ops.all covered.contains do
       try unifyRow amb ⟨[(e, inst)], some (← freshRowVar)⟩
       catch err =>
@@ -4435,6 +4617,19 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
     let t0 ← zonk ((defs.lookup d.name).getD .unit)
     let (t1, seen) ← openParams [] t0
     let scheme ← generalize t1 [] false
+    -- What a lifetime is said to hold of a type parameter, it holds of the
+    -- type the parameter is at each use.
+    let mut edges : Array (Nat × Captured) := #[]
+    for (cap, what) in scheme.edges do
+      match what with
+      | .ty target => edges := edges.push (cap, .ty (← openParams seen target).1)
+      | other => edges := edges.push (cap, other)
+    let mut ranked : List (Nat × List (Nat × String)) := []
+    for (cap, lifetimes) in (← get).ranked do
+      let root ← findCap cap
+      if scheme.cvars.contains root && !ranked.any (·.1 == root) then
+        ranked := (root, ← lifetimes.mapM fun (q, name) => do pure (← findCap q, name)) :: ranked
+    let scheme := { scheme with edges := edges.toList, ranked }
     let mine : List (String × Nat × Ty) ← match d.impl with
       | some (im, _) =>
         -- An implementation says what it assumes.
@@ -4595,9 +4790,17 @@ def checkGroup (decls : List FnDecl) : M Unit := do
           let result := match b.assoc.lookup "Effects" with
             | some (.performs _ effects) => TypeExpr.performs out effects
             | _ => out
-          let said ← resolveType rigid false (.fn args result)
+          let written : TypeExpr := .fn args result
+          let said ← resolveType rigid false
+            (if b.ranked.isEmpty then written
+             else .name Syntax.rankedMark (b.ranked.map (TypeExpr.name · []) ++ [written]))
           unifyAt s!"`{b.subject}` is said twice to be a callable" ((rigid.lookup b.subject).getD said) said
         else if b.trait == "Environment" || b.trait == "Use" then pure ()
+        else if b.trait.startsWith "'" then
+          -- `T: 'a`: what lasts for `'a` may hold a `T`, so a `T` given here
+          -- has to last as long: whatever it borrows, `'a` is taken to.
+          let cap ← lifetimeCap rigid false (some b.trait)
+          captures cap (.ty ((rigid.lookup b.subject).getD .unit))
         else
           unless ((← get).traits.lookup b.trait).isSome do
             throw s!"`{b.subject}: {b.trait}`: unknown trait `{b.trait}`"
@@ -4658,9 +4861,18 @@ def checkGroup (decls : List FnDecl) : M Unit := do
             unless environments.contains e do
               throw s!"`{b.subject}: RunsIn<{e}, ..>`: `{e}` is not said to be an environment (`{e}: Environment<'e>`)"
           | none => throw s!"`{b.subject}: RunsIn<..>`: the environment is `E`, `&E` or `&mut E`"
+      let rankedBefore := (← get).ranked.length
       let annots ← d.annots.mapM fun
         | some t => some <$> resolveType rigid false t
         | none => pure none
+      -- A callable for every lifetime is asked for as a parameter, where
+      -- what is given can be held to it; not inside another type.
+      let asked := annots.filterMap fun
+        | some (.fn _ _ _ _ cap) => some cap
+        | _ => none
+      for (cap, _) in (← get).ranked.take ((← get).ranked.length - rankedBefore) do
+        unless asked.contains cap do
+          throw "`for<..>` is written of the type of a parameter, not inside another type"
       -- The result may say what the function performs: that, and no more.
       let (retExpr, declared) := match d.ret with
         | some (.performs t effects) => (some t, some effects)
@@ -4680,8 +4892,16 @@ def checkGroup (decls : List FnDecl) : M Unit := do
       -- at the implementation's type.
       if let some (im, sig) := d.impl then
         let tm := [(sig.self, Ty.con im.head (rigid.map (·.2)))]
-        let want ← freshenCaps
-          (.func (sig.params.map (subst tm [] [])) (subst tm [] [] sig.ret) ⟨[], none⟩ (← freshCap))
+        -- The trait's lifetimes are each itself here, as a function's own
+        -- are: what the trait says is borrowed from one thing may not be
+        -- borrowed from another.
+        let declared ← zonk (.func (sig.params.map (subst tm [] [])) (subst tm [] [] sig.ret) ⟨[], none⟩ (← freshCap))
+        let cm ← (freeCaps declared).eraseDups.mapM fun c => do pure (c, ← freshCap)
+        let want := subst [] [] cm declared
+        let theirs := cm.filterMap fun (old, new) =>
+          (sig.lifetimes.lookup old).map fun l =>
+            (new, if l == "'_" then "the lifetime the trait leaves unwritten" else s!"the trait's {l}")
+        modify fun s => { s with rigidCaps := s.rigidCaps ++ theirs }
         try unify t want
         catch e =>
           throw s!"this is not the function `{sig.trait}` declares, which takes its arguments, gives its result and performs nothing: {e}"
