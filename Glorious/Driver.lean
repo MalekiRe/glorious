@@ -75,7 +75,8 @@ def compileSource (src : String) (check : Bool := true) : Except String Compiled
   let (all, blocks) := match blocks with
     | some b =>
       let (items, b) := Elab.untrait b all
-      (items, some b)
+      -- Nor a borrow of a field: each is a variable of its own by now.
+      (Elab.unfield b.fields items, some b)
     | none => (all, none)
   let plain := fun (blocks : Option Elab.Blocks) => do
     let out ← Elab.elabProgram all blocks

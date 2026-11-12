@@ -47,6 +47,10 @@ inductive Expr where
   | deref (e : Expr)
   /-- `&mut *e` or `&*e`: a reference borrowed from the reference `e`. -/
   | reborrow (uniq : Bool) (e : Expr)
+  /-- `&x.0` or `&mut x.1.0`: a reference to a field of what a mutable variable
+  holds, the field found by going through `path`. `id` tells this borrow from
+  every other. -/
+  | refField (id : Nat) (uniq : Bool) (name : String) (path : List Nat)
 
 inductive Stmt where
   | let_ (pat : Pattern) (value : Expr)

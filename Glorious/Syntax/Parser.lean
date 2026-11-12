@@ -193,7 +193,19 @@ private partial def parseUnary (noBlock : Bool) : P Expr := do
         if (← peek) == .op "*" then
           advance
           pure (.reborrow uniq (← parseUnary noBlock))
-        else pure (.ref uniq (← expectIdent))
+        else
+          let id := (← read).base + (← get) + 1
+          let x ← expectIdent
+          -- `&x.0.1` borrows a field of what `x` holds.
+          let mut path : Array Nat := #[]
+          repeat
+            match ← peek, ← peek 1 with
+            | .punct ".", .int n =>
+              advance
+              advance
+              path := path.push n
+            | _, _ => break
+          if path.isEmpty then pure (.ref uniq x) else pure (.refField id uniq x path.toList)
       else if t == .op "&*" then
         -- `&*e`, which the lexer reads as one symbol.
         advance
