@@ -285,7 +285,9 @@ def cases : List Case := [
     [], "0\n42\n1\n42"⟩,
 
   -- Cancelling a resumption runs the cleanups of the continuation it captured.
-  -- Merely dropping it does not; the type system will have to require one or the other.
+  -- An arm that does not use its resumption cancels it before anything else.
+  -- A resumption that is given a name and then forgotten some other way is
+  -- still simply dropped.
   ⟨"effect Ask { ask() }
   fn work() { defer print(1); defer print(2); ask(); print(99); 0 }
   fn main() { handle work() { ask(k) => cancel(k); 7 } }",
@@ -293,6 +295,15 @@ def cases : List Case := [
   ⟨"effect Ask { ask() }
   fn work() { defer print(1); ask(); print(99); 0 }
   fn main() { handle work() { ask(k) => 7 } }",
+    [], "1\n7"⟩,
+  ⟨"effect Ask { ask() }
+  fn work() { defer print(1); ask(); print(99); 0 }
+  fn main() { handle work() { ask(_) => print(5); 7 } }",
+    [], "1\n5\n7"⟩,
+  ⟨"effect Ask { ask() }
+  fn work() { defer print(1); ask(); print(99); 0 }
+  fn keep(k) { 7 }
+  fn main() { handle work() { ask(k) => keep(k) } }",
     [], "7"⟩,
   ⟨"effect Ask { ask() }
   fn work() { defer print(1); ask() }

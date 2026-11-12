@@ -1173,7 +1173,18 @@ partial def elabHandle (scope : Scope) (tailPos : Bool) (subject : Expr) (arms :
             throw s!"an arm for a terminal operation with {n} arguments has {ps.length} patterns"
           mkClause captures ps (fun sc => elabStmts sc true body)
         else if ps.length == n + 1 then
-          mkClause captures ps (fun sc => elabStmts sc true body)
+          -- An arm that does not use its resumption gives it up first: the
+          -- computation it suspended is left as an exit would leave it, and
+          -- its cleanups run. Otherwise it would simply be forgotten.
+          let unused := match ps.getLast? with
+            | some .wild => true
+            | some (.var k) => !(fvStmts [] body).contains k
+            | _ => false
+          if unused then
+            mkClause captures ps (fun sc => do
+              let _ ← emit (.cancel (.var n))
+              elabStmts sc true body)
+          else mkClause captures ps (fun sc => elabStmts sc true body)
         else if ps.length == n then
           mkClause captures (ps ++ [.wild]) (fun sc => do
             let r ← elabStmts sc false body

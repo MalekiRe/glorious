@@ -80,9 +80,15 @@ def notTail (n : Nat) : String :=
   fn main() { handle work() { fail(e) => e } }" == some 0
 #guard liveCells "effect Ask { ask() -> Int }  fn work() { let mut x = 7; x + ask() }
   fn main() { handle work() { ask(k) => cancel(k); 3 } }" == some 0
--- A resumption that is dropped keeps what it captured: a known leak.
+-- An arm that does not use its resumption cancels it, which releases what the
+-- suspended computation held.
 #guard liveCells "effect Ask { ask() -> Int }  fn work() { let mut x = 7; x + ask() }
-  fn main() { handle work() { ask(k) => 3 } }" == some 1
+  fn main() { handle work() { ask(k) => 3 } }" == some 0
+-- A resumption passed to something that forgets it keeps what it captured: a
+-- known leak.
+#guard liveCells "effect Ask { ask() -> Int }  fn work() { let mut x = 7; x + ask() }
+  fn forget(k) { 3 }
+  fn main() { handle work() { ask(k) => forget(k) } }" == some 1
 -- Without the checker, a callable that outlives its variable finds the cell gone.
 #guard diagnose "fn mk() { let mut n = 0; { n = n + 1; n } }  fn main() { mk()() }"
   == "a reference is used after the cell it points to was freed"
