@@ -59,6 +59,10 @@ private partial def lexLoop (cs : Array Char) (i line col : Nat) (acc : Array To
     else if isIdentStart c then
       let j := spanWhile cs isIdentRest i
       lexLoop cs j line (col + (j - i)) (acc.push ⟨.ident (slice cs i j), line, col⟩)
+    else if c == '\'' && (cs[i + 1]?.map isIdentStart).getD false then
+      -- A lifetime, `'a`: a name that keeps its mark.
+      let j := spanWhile cs isIdentRest (i + 1)
+      lexLoop cs j line (col + (j - i)) (acc.push ⟨.ident (slice cs i j), line, col⟩)
     else if isOpChar c then
       let j := spanWhile cs isOpChar i
       let s := slice cs i j

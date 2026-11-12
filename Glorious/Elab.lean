@@ -1511,6 +1511,43 @@ def untrait (blocks : Blocks) (items : List Item) : List Item × Blocks :=
     | _ => (site, fn)
   (out, { blocks with coercions := coercions })
 
+/-! ## Lifetimes
+
+Lifetimes are the checker's. Once a program is checked they are taken out of
+it: nothing after the checker reads one.
+-/
+
+private partial def eraseLifetimesTy : TypeExpr → TypeExpr
+  | .name x args =>
+    .name x ((args.filter fun
+      | .name n [] => !n.startsWith "'"
+      | _ => true).map eraseLifetimesTy)
+  | .tuple args => .tuple (args.map eraseLifetimesTy)
+  | .fn ps r => .fn (ps.map eraseLifetimesTy) (eraseLifetimesTy r)
+  | .performs r effects =>
+    .performs (eraseLifetimesTy r) (effects.map fun (e, args) => (e, args.map eraseLifetimesTy))
+  | .ref uniq t _ => .ref uniq (eraseLifetimesTy t) none
+  | t => t
+
+partial def eraseLifetimes (items : List Item) : List Item :=
+  let params := fun (ps : List String) => ps.filter fun p => !p.startsWith "'"
+  items.map fun
+    | .enum name ps ctors =>
+      .enum name (params ps) (ctors.map fun (c, fields) => (c, fields.map eraseLifetimesTy))
+    | .struct name ps fields => .struct name (params ps) (fields.map eraseLifetimesTy)
+    | .effect name ps ops =>
+      .effect name (params ps) (ops.map fun op =>
+        { op with payload := op.payload.map eraseLifetimesTy,
+                  result := op.result.map eraseLifetimesTy })
+    | .fn name ps annots ret clauses =>
+      .fn name (params ps) (annots.map (·.map eraseLifetimesTy)) (ret.map eraseLifetimesTy) clauses
+    | .trait name methods =>
+      .trait name (methods.map fun (m, ps, r) =>
+        (m, ps.map eraseLifetimesTy, r.map eraseLifetimesTy))
+    | .impl ps tr head args context methods =>
+      .impl (params ps) tr head (params args) context (eraseLifetimes methods)
+    | item => item
+
 /-! ## Borrows of a field
 
 The machine's references are to whole variables. A borrow of a field,

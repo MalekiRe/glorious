@@ -271,6 +271,7 @@ private partial def parsePrimary (noBlock : Bool) : P Expr := do
     expectPunct "}"
     pure (.closure 0 [.mk pats body])
   | .ident x =>
+    if x.startsWith "'" then failAt "a lifetime is not a value"
     advance
     if ← acceptPunct "::" then
       let y ← expectIdent
@@ -380,16 +381,38 @@ private def isOp (s : String) : P Bool := do
 private def expectOp (s : String) : P Unit := do
   if (← peek) == .op s then advance else failAt s!"expected `{s}`"
 
-/-- Type parameters `<A, B>`, if present. -/
+/-- Generic parameters `<'a, 'b: 'a, T>`, if present: type parameters and
+lifetimes, a lifetime perhaps with one it lasts at least as long as. -/
 private partial def parseGenerics : P (List String) := do
   if !(← isOp "<") then return []
   advance
   let mut out : Array String := #[]
   repeat
     if ← isOp ">" then break
-    out := out.push (← expectIdent)
+    let x ← expectIdent
+    out := out.push x
+    if x.startsWith "'" && (← peek) == .punct ":" then
+      advance
+      let y ← expectIdent
+      unless y.startsWith "'" do failAt "expected a lifetime: `'b: 'a`"
+      out := out.push s!"{x}: {y}"
     if !(← acceptPunct ",") then break
   expectOp ">"
+  pure out.toList
+
+/-- `where 'b: 'a, ...` after a function's result, if present. -/
+private partial def parseLifetimeBounds : P (List String) := do
+  if (← peek) != .ident "where" then return []
+  advance
+  let mut out : Array String := #[]
+  repeat
+    let x ← expectIdent
+    expectPunct ":"
+    let y ← expectIdent
+    unless x.startsWith "'" && y.startsWith "'" do
+      failAt "only a bound between lifetimes can be written here: `where 'b: 'a`"
+    out := out.push s!"{x}: {y}"
+    if !(← acceptPunct ",") then break
   pure out.toList
 
 mutual
@@ -401,9 +424,16 @@ private partial def parseType : P TypeExpr := do
     pure .never
   | .op "&" =>
     advance
+    let life ← match ← peek with
+      | .ident x =>
+        if x.startsWith "'" then
+          advance
+          pure (some x)
+        else pure none
+      | _ => pure none
     let uniq := (← peek) == .ident "mut"
     if uniq then advance
-    pure (.ref uniq (← parseType))
+    pure (.ref uniq (← parseType) life)
   | .ident "_" =>
     advance
     pure .hole
@@ -581,6 +611,7 @@ private partial def parseItem : P Item := do
         if !(← acceptPunct ",") then break
       expectPunct ")"
       let ret ← if ← acceptPunct "->" then some <$> parseResult else pure none
+      let params := params ++ (← parseLifetimeBounds)
       expectPunct "{"
       let body ← parseStmts
       expectPunct "}"

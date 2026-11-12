@@ -606,8 +606,9 @@ the programs it accepts.
    them, and the elaborator uses them for those borrows.
 
 The specification's lifetimes (language specification section 9) are the
-surface form of this; written lifetime parameters, variance and outlives
-bounds are not part of the plan above.
+surface form of this. Written lifetimes, bounds between them and variance are
+in the checker of source text: see "Lifetimes can be written". Core's regions
+know nothing of them.
 
 ## References are exclusive
 
@@ -753,6 +754,51 @@ end of the function, when the types are known. A use of a function inside its
 own recursive group is given captures of its own, related to the function's as
 any other use is, so that what a function passes to itself is not taken to be
 what it was passed.
+
+## Lifetimes can be written
+
+**Decision: a lifetime names what a reference may be holding borrows of.** The
+checker already gave every reference type a variable for that, to be inferred.
+`'a` names one: `&'a T`, `&'a mut T`, and as a parameter of a function or of a
+declared type, `fn first<'a, 'b>(..)`, `struct Holder<'a>(&'a Int)`. A bound
+`'b: 'a`, among the parameters or after `where`, says `'b` lasts at least as
+long as `'a`. `'_` and an unwritten lifetime are inferred; `'static` is the
+lifetime of nothing a program can borrow, since there are no statics.
+
+- **A function is held to what it writes.** While it is checked, each
+  lifetime it declares is itself and no other. A reference that lasts for one
+  is not one that lasts for another, and what lasts for one may come to depend
+  on what lasts for another only where a bound says so. Its callers then rely
+  on it: the result of `first<'a, 'b>(x: &'a Int, y: &'b Int) -> &'a Int`
+  borrows what `x` borrowed and nothing of `y`.
+- **Variance, as Rust has it** (decision, user). Where a value is wanted at
+  one type and has another that differs only in lifetimes, it will do if each
+  pair of lifetimes is related as its position asks. A reference depends on
+  its lifetime the same way round (a longer will do for a shorter), and a
+  shared reference on what it points to; a `&mut` reference does not vary in
+  what it points to; a callable depends on what it takes the other way round
+  and on what it gives the same way; a tuple the same way. A declared type
+  depends on each parameter as its fields make it, found from the fields and,
+  for types that mention each other, by starting from no dependence and
+  adding until nothing changes.
+- **A declared type's lifetime is part of its type.** A value of
+  `Holder<'a>` holds what `'a` says, so a borrow kept in one is seen wherever
+  the value goes, and a `&T` field no longer has to be a type parameter.
+
+What it is not:
+
+- Where a function is called, lifetimes are inferred, and two that meet are
+  made one rather than related by variance. That is safe and can be stricter
+  than Rust: a borrow may be taken to last as long as another it met.
+- Variance is used where a value is fitted to a type that is wanted (an
+  argument, a result, a pattern's type) and only after the two were found not
+  to be the same.
+- Not built: `T: 'a`, higher-ranked `for<'a>`, a lifetime on an effect or a
+  trait, elision rules beyond "unwritten is inferred".
+- Lifetimes are taken out of the program once it is checked. Core's regions
+  are found again from the code, and a program that keeps a reference in a
+  declared type is, as before, not certified with the region rules.
+- All of it is the unproved checker.
 
 ## A field can be borrowed
 

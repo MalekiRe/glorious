@@ -103,13 +103,31 @@ inductive TypeExpr where
   the effects it performs, all of them. `/ {}` is a callable that performs
   nothing. -/
   | performs (ret : TypeExpr) (effects : List (String × List TypeExpr))
-  /-- `&T` or `&mut T`. -/
-  | ref (uniq : Bool) (t : TypeExpr)
+  /-- `&T` or `&mut T`, or with a lifetime `&'a T`, `&'a mut T`. -/
+  | ref (uniq : Bool) (t : TypeExpr) (life : Option String)
   /-- `!`. -/
   | never
   /-- `_`: to be inferred. -/
   | hole
   deriving Inhabited
+
+/-! Generic parameters are written in one list: type parameters, lifetimes
+(`'a`), and the bounds on lifetimes, each kept as `'b: 'a`, which says `'b`
+lasts at least as long as `'a`. -/
+
+/-- Is this generic parameter a lifetime, or a type argument a lifetime's name? -/
+def isLifetime (p : String) : Bool := p.startsWith "'" && !p.contains ':'
+
+/-- `'b: 'a` as its two lifetimes, if this entry is a bound. -/
+def lifetimeBound (p : String) : Option (String × String) :=
+  if p.startsWith "'" then
+    match p.splitOn ": " with
+    | [longer, shorter] => some (longer, shorter)
+    | _ => none
+  else none
+
+/-- A parameter list without the bounds: what a use gives arguments for. -/
+def genericParams (ps : List String) : List String := ps.filter fun p => !p.contains ':'
 
 /-- An operation of an effect. -/
 structure OpDecl where

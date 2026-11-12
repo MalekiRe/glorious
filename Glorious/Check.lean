@@ -68,6 +68,11 @@ def Ty.shared : Ty := .con "&" []
 def Ty.func (params : List Ty) (ret : Ty) (row : Row) (cap : Nat) : Ty :=
   .fn params ret row.effs row.tail cap
 
+/-- A lifetime, where a type is expected: as an argument of a declared type.
+It is a capture variable, as a reference's is, and says what a value of the
+type may be holding borrows of. -/
+def Ty.life (cap : Nat) : Ty := .ref (.con "'" []) (.tuple []) cap
+
 /-- Something a callable has captured: a label, by the brand of its scope, or a
 value of some type. -/
 inductive Captured where
@@ -107,15 +112,60 @@ structure Scheme where
   given the evidence: each a trait and one of `tvars`. -/
   bounds : List (String × Ty) := []
 
+/-- How a type depends on one of its parameters, for telling when a value of
+the type at one argument will do where the type at another is wanted. -/
+inductive Variance where
+  /-- Not at all: the parameter is not used. -/
+  | bi
+  /-- The same way round: a longer lifetime will do for a shorter. -/
+  | co
+  /-- The other way round. -/
+  | contra
+  /-- Neither: the arguments must be the same. -/
+  | inv
+  deriving BEq, Inhabited
+
+def Variance.flip : Variance → Variance
+  | .co => .contra
+  | .contra => .co
+  | v => v
+
+/-- The dependence through a position that depends `outer` on something that
+depends `inner` on the parameter. -/
+def Variance.through (outer inner : Variance) : Variance :=
+  match outer, inner with
+  | .bi, _ => .bi
+  | _, .bi => .bi
+  | .inv, _ => .inv
+  | _, .inv => .inv
+  | .co, v => v
+  | .contra, v => v.flip
+
+/-- Both dependences at once. -/
+def Variance.both : Variance → Variance → Variance
+  | .bi, v => v
+  | v, .bi => v
+  | .co, .co => .co
+  | .contra, .contra => .contra
+  | _, _ => .inv
+
 structure TypeDecl where
   arity : Nat
   ctors : List String
+  /-- Which of its parameters are lifetimes. -/
+  kinds : List Bool := []
+  /-- How it depends on each parameter, found from its fields. -/
+  variances : List Variance := []
 
 structure CtorSig where
   owner : String
   tvars : List Nat
   fields : List Ty
   result : Ty
+  /-- The capture variables that stand for the type's lifetime parameters,
+  in order, and which of the type's parameters are lifetimes. -/
+  cvars : List Nat := []
+  kinds : List Bool := []
 
 structure OpSig where
   effect : String
@@ -270,6 +320,14 @@ structure St where
   /-- Values the expression being checked has computed, has no name for, and
   has not yet passed on. -/
   anon : List Ty := []
+  /-- The lifetimes the function being checked declares: each stands for
+  itself there, and is no other. With its name. -/
+  rigidCaps : List (Nat × String) := []
+  /-- The bounds written between them: the first lasts at least as long as
+  the second. -/
+  outlives : List (Nat × Nat) := []
+  /-- `'static`, once it has been written. -/
+  staticCap : Option Nat := none
   /-- Borrows of a field, to settle once the type is known: the borrow, the
   type of what the variable holds, the way to the field, and where. -/
   fieldSites : Array (Nat × Ty × List Nat × String × String) := #[]
@@ -415,7 +473,14 @@ def unifyCap (a b : Nat) : M Unit := do
   let ra ← findCap a
   let rb ← findCap b
   unless ra == rb do
-    modify fun s => { s with caps := s.caps.set! ra (some rb) }
+    let s ← get
+    -- A lifetime a function declares stays what it is: it can be what an
+    -- unknown one turns out to be, but not another declared one.
+    match s.rigidCaps.lookup ra, s.rigidCaps.lookup rb with
+    | some x, some y =>
+      throw s!"lifetime `{x}` is not `{y}`: a reference that lasts for one is used where one that lasts for the other is wanted"
+    | some _, none => modify fun s => { s with caps := s.caps.set! rb (some ra) }
+    | _, _ => modify fun s => { s with caps := s.caps.set! ra (some rb) }
 
 def captures (cap : Nat) (what : Captured) (name : Option (String × Nat) := none) : M Unit :=
   modify fun s =>
@@ -487,6 +552,7 @@ partial def showTy : Ty → String
     let sig := s!"fn({", ".intercalate (ps.map showTy)}) -> {showTy r}"
     if effs.isEmpty then sig else s!"{sig} / {showEffs effs}"
   | .ref (.con "&mut" []) t _ => s!"&mut {showTy t}"
+  | .ref (.con "'" []) _ _ => "'_"
   | .ref _ t _ => s!"&{showTy t}"
 
 partial def showEffs (effs : List (String × List Ty)) : String :=
@@ -539,6 +605,20 @@ partial def subst (tm : List (Nat × Ty)) (rm cm : List (Nat × Nat)) : Ty → T
       (tail.map fun id => (rm.lookup id).getD id)
       ((cm.lookup cap).getD cap)
   | .ref how t cap => .ref (subst tm rm cm how) (subst tm rm cm t) ((cm.lookup cap).getD cap)
+
+/-- A constructor's field types in a value of its type applied to `args`,
+which are types and, where the type has lifetime parameters, lifetimes. -/
+def CtorSig.fieldsAt (sig : CtorSig) (args : List Ty) : List Ty :=
+  if sig.cvars.isEmpty then sig.fields.map (subst (sig.tvars.zip args) [] [])
+  else
+    let paired := sig.kinds.zip args
+    let types := paired.filterMap fun (life, a) => if life then none else some a
+    let caps := (paired.filter (·.1)).map fun (_, a) =>
+      match a with
+      | .ref _ _ cap => some cap
+      | _ => none
+    let cm := (sig.cvars.zip caps).filterMap fun (c, cap) => cap.map fun cap => (c, cap)
+    sig.fields.map (subst (sig.tvars.zip types) [] cm)
 
 /-- A type with every capture variable replaced by a new one. -/
 def freshenCaps (t : Ty) : M Ty := do
@@ -804,7 +884,8 @@ end
 def unifyAt (what : String) (expected actual : Ty) : M Unit := do
   try unify expected actual
   catch e =>
-    let detail := if e.startsWith "effect" || e.startsWith "this would" then s!" ({e})" else ""
+    let detail := if e.startsWith "effect" || e.startsWith "this would" || e.startsWith "lifetime"
+      then s!" ({e})" else ""
     throw s!"{what}: expected `{showTy (← zonk expected)}`, found `{showTy (← zonk actual)}`{detail}"
 
 /-! ## The effects of a callee
@@ -901,13 +982,21 @@ partial def resolveType (params : List (String × Ty)) (decl : Bool) : TypeExpr 
     | some t =>
       if args.isEmpty then pure t else throw s!"type parameter `{x}` takes no arguments"
     | none =>
-      if x == "Int" then
+      if x.startsWith "'" then Ty.life <$> lifetimeCap params decl (some x)
+      else if x == "Int" then
         if args.isEmpty then pure .int else throw "`Int` takes no arguments"
       else
         match (← get).types.lookup x with
         | some d =>
           if d.arity != args.length then
             throw s!"type `{x}` takes {d.arity} arguments, but is given {args.length}"
+          for (life, a) in d.kinds.zip args do
+            let written := match a with
+              | .name n [] => n.startsWith "'"
+              | _ => false
+            unless life == written do
+              throw (if life then s!"type `{x}` takes a lifetime where a type is written"
+                else s!"type `{x}` takes a type where a lifetime is written")
           pure (.con x (← args.mapM (resolveType params decl)))
         | none =>
           if decl && args.isEmpty then inferredTy
@@ -932,12 +1021,38 @@ partial def resolveType (params : List (String × Ty)) (decl : Bool) : TypeExpr 
       pure (.fn ps r [] (some tail) cap)
   | .performs _ _ =>
     throw "what a callable performs is written after its result: `fn(A) -> R / {Effect}`"
-  | .ref uniq t => do
-    let cap ← freshCap
-    if decl then modify fun s => { s with monoCaps := cap :: s.monoCaps }
+  | .ref uniq t life => do
+    let cap ← lifetimeCap params decl life
     pure (.ref (if uniq then .uniq else .shared) (← resolveType params decl t) cap)
   | .never => throw "`!` can only be the result of an operation"
   | .hole => if decl then inferredTy else freshTy
+
+/-- The capture variable a written lifetime stands for. Unwritten, or `'_`,
+it is a new one, to be inferred; in a declaration that is one for every value
+of the type. -/
+partial def lifetimeCap (params : List (String × Ty)) (decl : Bool) (life : Option String) :
+    M Nat := do
+  let unnamed : M Nat := do
+    let cap ← freshCap
+    if decl then modify fun s => { s with monoCaps := cap :: s.monoCaps }
+    pure cap
+  match life with
+  | none => unnamed
+  | some "'_" => unnamed
+  | some "'static" =>
+    match (← get).staticCap with
+    | some cap => pure cap
+    | none =>
+      -- A lifetime that is no borrow's: nothing borrowed from a variable has it.
+      let cap ← freshCap
+      modify fun s =>
+        { s with staticCap := some cap, rigidCaps := (cap, "'static") :: s.rigidCaps,
+                 monoCaps := cap :: s.monoCaps }
+      pure cap
+  | some x =>
+    match params.lookup x with
+    | some (.ref _ _ cap) => pure cap
+    | _ => throw s!"unknown lifetime `{x}`: a lifetime is declared with the type parameters, `<{x}>`"
 
 /-- The effects written after a callable's result. An effect's arguments may
 be left out, to be inferred. -/
@@ -956,16 +1071,25 @@ partial def resolveEffects (params : List (String × Ty)) (decl : Bool)
 
 end
 
-private def freshParams (names : List String) : M (List (String × Ty) × List Nat) := do
+/-- Variables for the parameters of a declaration: a type variable for each
+type parameter and a capture variable for each lifetime. -/
+private def freshParams (names : List String) :
+    M (List (String × Ty) × List Nat × List Nat) := do
   let mut pairs : Array (String × Ty) := #[]
   let mut ids : Array Nat := #[]
-  for n in names do
-    match ← freshTy with
-    | .var id =>
-      pairs := pairs.push (n, .var id)
-      ids := ids.push id
-    | _ => pure ()
-  pure (pairs.toList, ids.toList)
+  let mut caps : Array Nat := #[]
+  for n in genericParams names do
+    if isLifetime n then
+      let cap ← freshCap
+      pairs := pairs.push (n, Ty.life cap)
+      caps := caps.push cap
+    else
+      match ← freshTy with
+      | .var id =>
+        pairs := pairs.push (n, .var id)
+        ids := ids.push id
+      | _ => pure ()
+  pure (pairs.toList, ids.toList, caps.toList)
 
 /-- A type with every callable in it performing nothing: what a trait's
 function is given performs nothing its caller would have to handle. -/
@@ -1052,29 +1176,39 @@ def declare (items : List Item) : M Unit := do
     match item with
     | .enum name params ctors =>
       if ((← get).types.lookup name).isSome then throw s!"type `{name}` is declared twice"
+      let params := genericParams params
       modify fun s =>
-        { s with types := (name, ⟨params.length, ctors.map (·.1)⟩) :: s.types }
+        { s with types :=
+            (name, ⟨params.length, ctors.map (·.1), params.map isLifetime, []⟩) :: s.types }
     | .struct name params _ =>
       if ((← get).types.lookup name).isSome then throw s!"type `{name}` is declared twice"
-      modify fun s => { s with types := (name, ⟨params.length, [name]⟩) :: s.types }
+      let params := genericParams params
+      modify fun s =>
+        { s with types := (name, ⟨params.length, [name], params.map isLifetime, []⟩) :: s.types }
     | .alias name value => modify fun s => { s with aliases := (name, value) :: s.aliases }
     | .coerce name => modify fun s => { s with coercing := s.coercing ++ [name] }
     | _ => pure ()
   for item in items do
     match item with
     | .enum name params ctors =>
-      let (pmap, ids) ← freshParams params
+      let (pmap, ids, caps) ← freshParams params
+      let kinds := (genericParams params).map isLifetime
       let result := Ty.con name (pmap.map (·.2))
       for (c, fields) in ctors do
         let fields ← fields.mapM (resolveType pmap true)
-        modify fun s => { s with ctors := (c, ⟨name, ids, fields, result⟩) :: s.ctors }
+        modify fun s =>
+          { s with ctors := (c, ⟨name, ids, fields, result, caps, kinds⟩) :: s.ctors }
     | .struct name params fields =>
-      let (pmap, ids) ← freshParams params
+      let (pmap, ids, caps) ← freshParams params
+      let kinds := (genericParams params).map isLifetime
       let fields ← fields.mapM (resolveType pmap true)
       modify fun s =>
-        { s with ctors := (name, ⟨name, ids, fields, .con name (pmap.map (·.2))⟩) :: s.ctors }
+        { s with ctors :=
+            (name, ⟨name, ids, fields, .con name (pmap.map (·.2)), caps, kinds⟩) :: s.ctors }
     | .effect name params ops =>
-      let (pmap, ids) ← freshParams params
+      if params.any (·.startsWith "'") then
+        throw s!"effect `{name}`: an effect cannot yet take a lifetime"
+      let (pmap, ids, _) ← freshParams params
       for op in ops do
         let payload ← op.payload.mapM (resolveType pmap true)
         let result ← if op.terminal then pure none
@@ -1111,7 +1245,9 @@ def declare (items : List Item) : M Unit := do
 def instCtor (sig : CtorSig) : M (List Ty × Ty) := do
   let tm ← sig.tvars.mapM fun id => do
     pure (id, ← freshTy)
-  pure (sig.fields.map (subst tm [] []), subst tm [] [] sig.result)
+  let cm ← sig.cvars.mapM fun c => do
+    pure (c, ← freshCap)
+  pure (sig.fields.map (subst tm [] cm), subst tm [] cm sig.result)
 
 /-- An operation's payload and result types at the given effect arguments. -/
 def instOp (sig : OpSig) (inst : List Ty) : List Ty × Option Ty :=
@@ -1198,7 +1334,7 @@ partial def exhaustive (tys : List Ty) (rows : List (List NPat)) : M Bool := do
           match (← get).ctors.lookup c with
           | none => pure false
           | some sig =>
-            let fields := sig.fields.map (subst (sig.tvars.zip args) [] [])
+            let fields := sig.fieldsAt args
             exhaustive (fields ++ rest) (rows.filterMap fun
               | .ctor c' ps :: tl => if c' == c then some (ps ++ tl) else none
               | .any :: tl => some (List.replicate fields.length .any ++ tl)
@@ -1217,7 +1353,7 @@ def fieldType (t : Ty) (idx : Nat) : M (Option Ty) := do
   | .con name args =>
     match (← get).ctors.lookup name with
     | some sig =>
-      match (sig.fields.map (subst (sig.tvars.zip args) [] []))[idx]? with
+      match (sig.fieldsAt args)[idx]? with
       | some t => pure (some t)
       | none => throw s!"`{name}` has no field {idx}"
     | none => throw s!"`{bareName name}` has no fields to read with `.{idx}`"
@@ -1331,6 +1467,10 @@ def checkEscape (brand : Nat) (what : String) (roots : List (String × Ty)) (amb
     if ← holds (.var id) then
       escape "it is stored in a declaration whose field types are inferred; \
         give that declaration a type parameter"
+  if let some cap := s.staticCap then
+    modify fun s => { s with seen := [] }
+    if ← capHolds brand cap then
+      escape "it is borrowed for `'static`, and no variable lasts that long"
   for cap in s.monoCaps do
     modify fun s => { s with seen := [] }
     if ← capHolds brand cap then
@@ -1407,7 +1547,7 @@ partial def tyOwnsOnce (visiting : List String) (t : Ty) : M Bool := do
         match (← get).ctors.lookup c with
         | none => pure false
         | some sig =>
-          (sig.fields.map (subst (sig.tvars.zip args) [] [])).anyM
+          (sig.fieldsAt args).anyM
             (tyOwnsOnce (name :: visiting))
 
 end
@@ -1433,7 +1573,7 @@ partial def onceBy (visiting : List String) (t : Ty) : M (Option String) := do
         match (← get).ctors.lookup c with
         | none => pure none
         | some sig =>
-          (sig.fields.map (subst (sig.tvars.zip args) [] [])).findSomeM?
+          (sig.fieldsAt args).findSomeM?
             (onceBy (name :: visiting))
   | _ => pure none
 
@@ -1521,7 +1661,7 @@ partial def tyMustUse (info : MustInfo) (visiting : List String) (t : Ty) :
         match (← get).ctors.lookup c with
         | none => pure none
         | some sig =>
-          (sig.fields.map (subst (sig.tvars.zip args) [] [])).findSomeM?
+          (sig.fieldsAt args).findSomeM?
             (tyMustUse info (name :: visiting))
 
 /-- Record that a value of this type is let go unused here. -/
@@ -2644,7 +2784,7 @@ partial def bothAtOnce (loan brand : Nat) (write : Bool) (t : Ty) : M Bool := do
         match (← get).ctors.lookup c with
         | none => return true
         | some sig =>
-          if ← together (sig.fields.map (subst (sig.tvars.zip args) [] [])) then return true
+          if ← together (sig.fieldsAt args) then return true
       return false
   | _ => pure true
 
@@ -2964,6 +3104,168 @@ def shareRef (scope : Scope) (expected actual : Ty) : M Bool := do
     | _, _ => pure false
   | _, _ => pure false
 
+/-- Does the lifetime `a` last at least as long as `b`, by the bounds the
+function wrote? `'static` outlasts every lifetime. -/
+partial def outlasts (a b : Nat) : M Bool := do
+  let s ← get
+  if a == b || s.staticCap == some a then return true
+  let rec go (seen : List Nat) (x : Nat) : Bool :=
+    x == b || s.outlives.any fun (longer, shorter) =>
+      longer == x && !seen.contains shorter && go (x :: seen) shorter
+  pure (go [] a)
+
+/-- Require that the lifetime `long` lasts at least as long as `short`. Between
+two lifetimes a function declares, a bound must say so. Otherwise it is made
+so: what lasts for the shorter holds what lasts for the longer. -/
+def outlivesReq (long short : Nat) : M Unit := do
+  let rl ← findCap long
+  let rs ← findCap short
+  if rl == rs then return
+  let s ← get
+  match s.rigidCaps.lookup rl, s.rigidCaps.lookup rs with
+  | some x, some y =>
+    unless ← outlasts rl rs do
+      throw s!"lifetime `{x}` is not known to last as long as `{y}`: say `{x}: {y}`"
+  | _, _ => captures short (.ty (Ty.life long))
+
+/-- Relate the lifetime wanted and the lifetime given, at a position that
+depends on it as `pos` says. -/
+def lifeFits (pos : Variance) (wanted had : Nat) : M Unit := do
+  match pos with
+  | .bi => pure ()
+  | .co => outlivesReq had wanted
+  | .contra => outlivesReq wanted had
+  | .inv => unifyCap wanted had
+
+/-- Make a value of type `actual` do where `expected` is wanted, as far as
+lifetimes go: the two types must be the same but for their lifetimes, and each
+pair of lifetimes is related by the position it is in. A reference depends on
+its lifetime the same way round, and so does a shared reference on what it
+points to; a `&mut` reference does not vary in what it points to; a callable
+depends on what it takes the other way round and on what it gives the same
+way; a declared type depends on each parameter as its fields make it. -/
+partial def fitLifetimes (pos : Variance) (expected actual : Ty) : M Unit := do
+  let e ← find expected
+  let a ← find actual
+  if pos == .inv then
+    unify e a
+    return
+  match e, a with
+  | .ref how t cap, .ref how' t' cap' => do
+    unify how how'
+    lifeFits pos cap cap'
+    match ← find how with
+    | .con "&" [] => fitLifetimes pos t t'
+    | .con "'" [] => pure ()
+    | _ => unify t t'
+  | .tuple es, .tuple as =>
+    if es.length != as.length then unify e a
+    else
+      for (x, y) in es.zip as do
+        fitLifetimes pos x y
+  | .con n es, .con m as =>
+    if n != m || es.length != as.length then unify e a
+    else
+      let variances := (((← get).types.lookup n).map (·.variances)).getD []
+      for ((x, y), i) in (es.zip as).zipIdx do
+        fitLifetimes (pos.through (variances.getD i .inv)) x y
+  | .fn ps r effs tail cap, .fn ps' r' effs' tail' cap' =>
+    if ps.length != ps'.length then unify e a
+    else
+      for (x, y) in ps.zip ps' do
+        fitLifetimes pos.flip x y
+      fitLifetimes pos r r'
+      unifyRow ⟨effs, tail⟩ ⟨effs', tail'⟩
+      lifeFits pos cap cap'
+  | _, _ => unify e a
+
+/-- Try that, changing nothing if it does not work: then why not. -/
+def tryLifetimes (expected actual : Ty) : M (Option String) := do
+  let saved ← get
+  try
+    fitLifetimes .co expected actual
+    pure none
+  catch e =>
+    set saved
+    pure (some e)
+
+/-- How each declared type depends on each of its parameters: found from the
+fields of its constructors, and for a type that mentions itself or another,
+by starting from no dependence and adding until nothing changes. -/
+partial def computeVariances : M Unit := do
+  let names := (← get).types.map (·.1)
+  -- A parameter is a type variable or a lifetime's capture variable.
+  let keysOf := fun (sig : CtorSig) =>
+    let rec go : List Bool → List Nat → List Nat → List (Bool × Nat)
+      | true :: ks, ts, c :: cs => (true, c) :: go ks ts cs
+      | false :: ks, t :: ts, cs => (false, t) :: go ks ts cs
+      | _, _, _ => []
+    go sig.kinds sig.tvars sig.cvars
+  let mut changed := true
+  let mut rounds := 0
+  while changed && rounds < 16 do
+    changed := false
+    rounds := rounds + 1
+    for name in names do
+      let s ← get
+      let some decl := s.types.lookup name | continue
+      let mut found : List ((Bool × Nat) × Variance) := []
+      let mut keys : List (Bool × Nat) := []
+      for c in decl.ctors do
+        let some sig := s.ctors.lookup c | continue
+        keys := keysOf sig
+        for field in sig.fields do
+          found := found ++ occurrences s .co field
+      let variances := keys.map fun k =>
+        (found.filter (·.1 == k)).foldl (fun acc x => acc.both x.2) Variance.bi
+      unless variances == decl.variances || keys.isEmpty do
+        changed := true
+        modify fun st =>
+          { st with types := st.types.map fun (n, d) =>
+              if n == name then (n, { d with variances := variances }) else (n, d) }
+where
+  /-- Where a type mentions type variables and capture variables, and how. -/
+  occurrences (s : St) (pos : Variance) : Ty → List ((Bool × Nat) × Variance)
+    | .var id => [((false, id), pos)]
+    | .tuple ts => ts.flatMap (occurrences s pos)
+    | .ref how inner cap =>
+      ((true, cap), pos) :: (match how with
+        | .con "&" [] => occurrences s pos inner
+        | .con "'" [] => []
+        | _ => occurrences s (pos.through .inv) inner)
+    | .fn ps r effs _ cap =>
+      ((true, cap), pos) :: ps.flatMap (occurrences s pos.flip) ++ occurrences s pos r
+        ++ effs.flatMap fun (_, args) => args.flatMap (occurrences s (pos.through .inv))
+    | .con n args =>
+      let variances := ((s.types.lookup n).map (·.variances)).getD []
+      (args.zip (List.range args.length)).flatMap fun (arg, i) =>
+        occurrences s (pos.through (variances.getD i .bi)) arg
+
+/-- A function is held to the lifetimes it writes: what lasts for one of them
+may come to depend on what lasts for another only where a bound says the
+other lasts at least as long. -/
+def checkLifetimes : M Unit := do
+  let s ← get
+  for (a, x) in s.rigidCaps do
+    if x == "'static" then continue
+    -- The capture variables reachable from `a` through what it holds.
+    let mut reach : List Nat := [a]
+    let mut todo : List Nat := [a]
+    while !todo.isEmpty do
+      let mut next : List Nat := []
+      for (src, what) in s.capEdges do
+        if let .ty held := what then
+          if todo.contains (← findCap src) then
+            for c in freeCaps (← zonk held) do
+              let root ← findCap c
+              unless reach.contains root || next.contains root do next := root :: next
+      reach := reach ++ next
+      todo := next
+    for (b, y) in s.rigidCaps do
+      if b != a && reach.contains b then
+        unless ← outlasts b a do
+          throw s!"what lasts for `{x}` is made to depend on what lasts for `{y}`: say `{y}: {x}` if `{y}` lasts at least as long"
+
 /-- Marks a failure as a body's result not being the type wanted, which the
 clause the body belongs to can still answer by looking at its clauses in
 another order. -/
@@ -2977,7 +3279,14 @@ def fitAt (scope : Scope) (amb : Row) (what : String) (site : Option Elab.Site)
     unifyAt what expected actual
     pure none
   catch e =>
+    -- The same type but for lifetimes will do if each lifetime is related as
+    -- its position asks.
+    let lifetimes ← tryLifetimes expected actual
+    if lifetimes.isNone then return none
     if ← shareRef scope expected actual then return none
+    let e := match lifetimes with
+      | some why => if why.startsWith "lifetime" then s!"{what}: {why}" else e
+      | none => e
     match site with
     | none => pure (some e)
     | some site =>
@@ -3792,7 +4101,7 @@ def partsOf (t : Ty) : M (List Ty) := do
       decl.ctors.flatMapM fun c => do
         match (← get).ctors.lookup c with
         | none => pure []
-        | some sig => pure (sig.fields.map (subst (sig.tvars.zip args) [] []))
+        | some sig => pure (sig.fieldsAt args)
   | _ => pure []
 
 /-- Meet the bounds of the group just inferred, and give each of its functions
@@ -3831,7 +4140,7 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
         let known := (← get).ctors
         match ctor.bind fun c => (known.lookup c).map fun sig => (c, sig) with
         | some (c, sig) =>
-          let fields := sig.fields.map (subst (sig.tvars.zip args) [] [])
+          let fields := sig.fieldsAt args
           steps := steps.push (some c, fields.length)
           cur ← zonk (fields.getD idx .unit)
         | none =>
@@ -3970,7 +4279,27 @@ def checkGroup (decls : List FnDecl) : M Unit := do
   for d in decls do
     try
       modify fun s => { s with pos := "", owner := d.name, later := [], temps := [], anon := [] }
-      let rigid := d.params.map fun p => (p, Ty.con s!"'{p}@{d.name}" [])
+      -- The function's own type parameters stand for themselves while it is
+      -- checked, and so do its lifetimes: each is no other.
+      let mut rigid : List (String × Ty) := []
+      let mut lifetimes : List (Nat × String) := []
+      for p in genericParams d.params do
+        if isLifetime p then
+          let cap ← freshCap
+          rigid := rigid ++ [(p, Ty.life cap)]
+          lifetimes := (cap, p) :: lifetimes
+        else rigid := rigid ++ [(p, Ty.con s!"'{p}@{d.name}" [])]
+      let mut bounds : List (Nat × Nat) := []
+      for p in d.params do
+        if let some (longer, shorter) := lifetimeBound p then
+          let a ← lifetimeCap rigid false (some longer)
+          let b ← lifetimeCap rigid false (some shorter)
+          bounds := (a, b) :: bounds
+          -- What lasts for the shorter may hold what lasts for the longer.
+          captures b (.ty (Ty.life a))
+      modify fun s =>
+        { s with rigidCaps := lifetimes ++ s.rigidCaps.filter (·.2 == "'static"),
+                 outlives := bounds }
       let annots ← d.annots.mapM fun
         | some t => some <$> resolveType rigid false t
         | none => pure none
@@ -4012,6 +4341,9 @@ def checkGroup (decls : List FnDecl) : M Unit := do
       checkDups (← get).dups
       checkDrops (← get).drops
       checkStays (← get).stays
+      checkLifetimes
+      modify fun s =>
+        { s with rigidCaps := s.rigidCaps.filter (·.2 == "'static"), outlives := [] }
     catch e =>
       -- The usual cause: the body ends in an expression run only for its effect,
       -- whose value has become the function's result.
@@ -4079,6 +4411,7 @@ def checkProgram (items : List Item) : Except String Elab.Blocks := do
   let action : M Elab.Blocks := do
     modify fun s => { s with fnBodies := decls.map fun d => (d.name, d.clauses) }
     declare items
+    computeVariances
     declareTraits items
     checkUseDecls
     for comp in components names deps do
