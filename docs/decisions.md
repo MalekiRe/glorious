@@ -635,9 +635,12 @@ What is proved, and of what. Core has rules for borrows
 Core is accepted with them never reaches a state about to read, write or lend a
 variable through a reference that a newer borrow in scope excludes, or through
 a borrow whose scope has ended; and no borrow's scope is ever set aside in a
-resumption. The machine does not enforce any of this, and a borrow costs
-nothing at run time beyond a frame: the theorem is about what an accepted
-program does.
+resumption. The machine does not enforce any of this: the theorem is about
+what an accepted program does. A borrow that is a scope is not free at run
+time, though nothing reads what it adds: it makes one callable, pushes one
+frame and makes one more call than the call it is written as. A borrow that is
+not a scope is the copy of an address. Nothing has been done to compile scopes
+away.
 
 - **In Core a borrow is a scope.** A reference value carries the borrow it is
   (zero for a variable's own), and `lend` runs a callable with a reference that
@@ -673,8 +676,10 @@ What the rule is not:
   rejects a program; the Core rules never do, and a borrow they cannot accept
   is simply not made a scope.
 - An operation that can be resumed, performed while a borrow is held, runs a
-  handler's arm; if the arm uses the borrowed variable, the check of the source
-  text does not notice. Core does: such a borrow is not made a scope.
+  handler's arm; if the arm uses the borrowed variable, or runs a callable the
+  operation was given that does, the check of the source text does not notice,
+  and the program compiles and reads through the borrow a value written behind
+  it. Core does notice: such a borrow is not made a scope.
 - The theorem is stated of the Core machine. The bytecode machine is shown to
   compute what the Core machine does, but the statement about borrows is not
   carried over to its states.
