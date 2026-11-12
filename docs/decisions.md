@@ -704,11 +704,13 @@ What the rule is not:
   `Check.lean`, like the checks on scopes that it sits beside. It is what
   rejects a program; the Core rules never do, and a borrow they cannot accept
   is simply not made a scope.
-- An operation that can be resumed, performed while a borrow is held, runs a
-  handler's arm; if the arm uses the borrowed variable, or runs a callable the
-  operation was given that does, the check of the source text does not notice,
-  and the program compiles and reads through the borrow a value written behind
-  it. Core does notice: such a borrow is not made a scope.
+- An operation performed while a borrow is held runs a handler's arm. The
+  check of the source text now covers this: a resumption holds the borrows the
+  computation it suspended had made (those written in the handled expression,
+  and those any callable it mentions makes while it runs), so an arm that uses
+  what they exclude while the resumption is still to be used is refused; and
+  performing an operation counts as calling whatever callables it is given. In
+  Core such a borrow is still not a scope.
 - The theorem is stated of the Core machine. The bytecode machine is shown to
   compute what the Core machine does, but the statement about borrows is not
   carried over to its states.

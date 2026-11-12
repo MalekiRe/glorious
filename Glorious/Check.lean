@@ -83,6 +83,10 @@ inductive Captured where
   /-- A mutable variable, by the brand of its block, that a callable reads or
   assigns when it runs. -/
   | touch (brand : Nat) (write : Bool)
+  /-- A borrow, by its identity, that a callable makes while it runs. The
+  callable does not hold it; a computation suspended inside the callable
+  does. -/
+  | inner (id : Nat)
 
 /-- A type with some of its variables generalised. `edges` records what the
 generalised capture variables capture, to be repeated at each use. -/
@@ -547,7 +551,8 @@ def instantiate (s : Scheme) (via : Option String := none) : M Ty := do
       | .once => .once
       | .must => .must
       | .loan l => .loan l
-      | .touch b w => .touch b w)
+      | .touch b w => .touch b w
+      | .inner l => .inner l)
   let pos := (← get).pos
   for (t, why) in s.drops do
     let why := match via with
@@ -658,6 +663,7 @@ def generalize (t : Ty) (keep : List Ty := []) (top : Bool := true) : M Scheme :
     | .must => all := all.push (root, .must)
     | .loan l => all := all.push (root, .loan l)
     | .touch b w => all := all.push (root, .touch b w)
+    | .inner l => all := all.push (root, .inner l)
   -- What must be free to use more than once is part of the function's
   -- contract, so the capture variables it mentions are generalised too.
   let mut dups : Array (Ty × String) := #[]
@@ -1271,6 +1277,7 @@ partial def capHolds (brand : Nat) (cap : Nat) : M Bool := do
       | .must => pure ()
       | .loan _ => pure ()
       | .touch _ _ => pure ()
+      | .inner _ => pure ()
   return false
 
 /-- Does the type mention a callable that holds the brand? -/
@@ -1366,6 +1373,7 @@ partial def capOwnsOnce (cap : Nat) : M Bool := do
       | .brand _ => pure ()
       | .loan _ => pure ()
       | .touch _ _ => pure ()
+      | .inner _ => pure ()
   return false
 
 /-- Can a value of this type be used only once? One that holds a resumption,
@@ -2467,39 +2475,53 @@ def freshLoan (root : Option Nat) (uniq : Bool) (parent : Option (Nat × Nat)) :
 
 mutual
 
-partial def capHoldsLoan (loan : Nat) (cap : Nat) : M Bool := do
+partial def capHoldsLoan (loan : Nat) (cap : Nat) (suspended : Bool := false)
+    (plain : Bool := false) : M Bool := do
   let root ← findCap cap
-  if (← get).seen.contains root then return false
-  modify fun s => { s with seen := root :: s.seen }
-  for (src, what) in (← get).capEdges do
+  let s ← get
+  -- A resumption is a computation set aside: the borrows its callables make
+  -- while they run are borrows it holds. `plain` asks only for what a value
+  -- holds as a value.
+  let mut suspended := suspended
+  unless suspended || plain do
+    for (src, what) in s.capEdges do
+      if let .once := what then
+        if (← findCap src) == root then suspended := true
+  let mark := 2 * root + (if suspended then 1 else 0)
+  if s.seen.contains mark then return false
+  modify fun s => { s with seen := mark :: s.seen }
+  for (src, what) in s.capEdges do
     if (← findCap src) == root then
       match what with
       | .loan l => if l == loan then return true
-      | .ty t => if ← tyHoldsLoan loan t then return true
-      | .brand b => if ← cellHoldsLoan loan b then return true
-      | .touch b _ => if ← cellHoldsLoan loan b then return true
+      | .inner l => if suspended && l == loan then return true
+      | .ty t => if ← tyHoldsLoan loan t suspended plain then return true
+      | .brand b => if ← cellHoldsLoan loan b suspended plain then return true
+      | .touch b _ => if ← cellHoldsLoan loan b suspended plain then return true
       | .once => pure ()
       | .must => pure ()
   return false
 
 /-- A callable that uses a mutable variable can reach what the variable holds. -/
-partial def cellHoldsLoan (loan : Nat) (brand : Nat) : M Bool := do
+partial def cellHoldsLoan (loan : Nat) (brand : Nat) (suspended : Bool := false)
+    (plain : Bool := false) : M Bool := do
   for (b, _, t) in (← get).cells do
     if b == brand then
-      if ← tyHoldsLoan loan t then return true
+      if ← tyHoldsLoan loan t suspended plain then return true
   return false
 
 /-- Does a value of this type hold the borrow? What a callable takes and gives
 back is not what it holds: only what it captured is. -/
-partial def tyHoldsLoan (loan : Nat) (t : Ty) : M Bool := do
+partial def tyHoldsLoan (loan : Nat) (t : Ty) (suspended : Bool := false)
+    (plain : Bool := false) : M Bool := do
   match ← find t with
   | .var _ => pure false
-  | .con _ args => args.anyM (tyHoldsLoan loan)
-  | .tuple args => args.anyM (tyHoldsLoan loan)
-  | .fn _ _ _ _ cap => capHoldsLoan loan cap
+  | .con _ args => args.anyM (tyHoldsLoan loan · suspended plain)
+  | .tuple args => args.anyM (tyHoldsLoan loan · suspended plain)
+  | .fn _ _ _ _ cap => capHoldsLoan loan cap suspended plain
   | .ref _ t cap => do
-    if ← capHoldsLoan loan cap then return true
-    tyHoldsLoan loan t
+    if ← capHoldsLoan loan cap suspended plain then return true
+    tyHoldsLoan loan t suspended plain
 
 end
 
@@ -2569,7 +2591,9 @@ def tempHolds (loan : Nat) (u : Use) (t : Ty) (made : Nat) : M Bool := do
 def holderOf (loan : Nat) (u : Use) : M (Option String) := do
   for name in u.later.eraseDups do
     if let some t := (u.scope.lookup name).bind Binding.held then
-      if ← holdsLoan loan t then return some s!"`{name}`"
+      if ← holdsLoan loan t then
+        if name == "%resumed" then return some "the computation this arm resumes"
+        return some s!"`{name}`"
   for (t, made) in u.temps do
     if ← tempHolds loan u t made then return some "a value this expression is still using"
   return none
@@ -2646,7 +2670,12 @@ def checkLoans : M Unit := do
               for ((t', made), j) in mine.zipIdx do
                 if found.isNone then
                   if ← tempHolds l.id u t' made then
-                    if i != j || (← bothAtOnce l.id brand write t') then
+                    -- A resumption both holds the borrows of the computation
+                    -- it suspended and uses what that computation uses:
+                    -- resuming it is that computation going on.
+                    modify fun st => { st with seen := [] }
+                    let own ← if i == j then tyHoldsLoan l.id t' false true else pure true
+                    if i != j || (own && (← bothAtOnce l.id brand write t')) then
                       found := some "a value this expression is still using"
               if let some who := found then
                 let x := ((s.cells.toList.find? (·.1 == brand)).map (·.2.1)).getD "a variable"
@@ -3101,6 +3130,8 @@ partial def inferCall (scope : Scope) (amb : Row) (f : Expr) (args : List Expr)
       try unifyRow amb ⟨[(sig.effect, inst)], some (← freshRowVar)⟩
       catch e => throw s!"operation `{x}` cannot be performed here: {e}"
       checkArgs scope amb s!"operation `{x}`" payload args call
+      -- The handler may run a callable it is given, there and then.
+      use scope (.call s!"operation `{x}`" payload)
       match result with
       | some r => pure r
       | none => freshTy
@@ -3357,6 +3388,7 @@ partial def inferCallable (scope : Scope) (annots : List (Option Ty)) (ret : Opt
   -- What the callable captures from the scope it is written in.
   let cap ← freshCap
   captureAll scope cap (clauses.flatMap (Elab.fvClause [])) fun x => clauses.any (assignsClause x)
+  let loansBefore := (← get).loans.size
   let brand ← freshBrand
   let scope := match self with
     | some name => ("@" ++ name, Binding.label result brand) :: scope
@@ -3417,6 +3449,10 @@ partial def inferCallable (scope : Scope) (annots : List (Option Ty)) (ret : Opt
     let roots := ("it is returned from the function", result) ::
       params.map fun p => ("the caller could hold it through a parameter", p)
     checkEscape brand (jumpsAfter name) roots row
+  -- The borrows made while it runs: a computation suspended inside it holds
+  -- them.
+  for id in [loansBefore:(← get).loans.size] do
+    captures cap (.inner id)
   modify fun s => { s with later := outerLater, temps := outerTemps, anon := outerAnon }
   pure (.func params result row cap)
 
@@ -3453,7 +3489,11 @@ partial def inferHandle (scope : Scope) (amb : Row) (subject : Expr) (arms : Lis
   -- throughout the other.
   let outerLater := (← get).later
   modify fun st => { st with later := Elab.fvExpr [] (.handle subject arms) ++ outerLater }
+  let loansBefore := (← get).loans.size
   let subjectTy ← inferExpr scope ⟨insts ++ ambFlat.effs, ambFlat.tail⟩ subject
+  -- The borrows the handled computation makes. While it is suspended in an
+  -- arm, its resumption holds them: the arm must not use what they exclude.
+  let suspendedLoans := (List.range (← get).loans.size).drop loansBefore
   let result ← freshTy
   if completions.isEmpty then unify result subjectTy
   else
@@ -3486,6 +3526,8 @@ partial def inferHandle (scope : Scope) (amb : Row) (subject : Expr) (arms : Lis
         let held ← freshCap
         captures held .once
         if sig.must then captures held .must
+        for id in suspendedLoans do
+          captures held (.inner id)
         captureAll scope held (Elab.fvExpr [] (.handle subject arms)) fun x =>
           assignsExpr x (.handle subject arms)
         let binds ← inferPats ps (payload ++ [.func [o] result amb held])
@@ -3497,8 +3539,17 @@ partial def inferHandle (scope : Scope) (amb : Row) (subject : Expr) (arms : Lis
       else if ps.length == payload.length then
         let binds ← inferPats ps payload
         let here := (← get).pos
+        -- The arm resumes with what it gives: the computation is suspended,
+        -- holding its borrows, for as long as the arm runs.
+        let held ← freshCap
+        captures held .once
+        for id in suspendedLoans do
+          captures held (.inner id)
+        captureAll scope held (Elab.fvExpr [] (.handle subject arms)) fun x =>
+          assignsExpr x (.handle subject arms)
+        let resumption := ("%resumed", Binding.val (.func [o] result amb held))
         unifyAt s!"the value the arm for `{x}` resumes with" o
-          (← inferStmts (binds ++ scope) amb body)
+          (← withLater ["%resumed"] (inferStmts (binds ++ resumption :: scope) amb body))
         checkUses here scope binds body
         if ← ps.allM irrefutable then covered := x :: covered
       else arityError s!"an arm for the operation `{x}`" payload.length ps.length
