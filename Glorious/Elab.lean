@@ -309,6 +309,7 @@ partial def fvExpr (bound : List String) : Expr → List String
   | .labelScope l body => fvStmts (labelName l :: bound) body
   | .ref _ x => if bound.contains x then [] else [x]
   | .deref e => fvExpr bound e
+  | .reborrow _ e => fvExpr bound e
 
 partial def fvClause (bound : List String) : Clause → List String
   | .mk pats body => fvStmts (pats.flatMap patVars ++ bound) body
@@ -392,6 +393,7 @@ partial def appliedExpr (p : String) : Expr → List Nat
   | .labelScope _ body => appliedStmts p body
   | .ref _ _ => []
   | .deref e => appliedExpr p e
+  | .reborrow _ e => appliedExpr p e
 
 partial def appliedCall (p : String) (f : Expr) (args : List Expr) : List Nat :=
   let here := match f with
@@ -464,6 +466,7 @@ partial def coerceExpr (cs : List (Site × String)) : Expr → Expr
   | .handle subject arms => .handle (coerceExpr cs subject) (arms.map (coerceClause cs none))
   | .labelScope l body => .labelScope l (coerceStmts cs body)
   | .deref e => .deref (coerceExpr cs e)
+  | .reborrow uniq e => .reborrow uniq (coerceExpr cs e)
   | e => e
 
 partial def coerceArgs (cs : List (Site × String)) (call : Nat) (args : List Expr) : List Expr :=
@@ -668,6 +671,8 @@ partial def elabExpr (scope : Scope) (tailPos : Bool) : Expr → M Atom
       pure c
     | some (false, _, _) => throw s!"`{x}` is not a mutable variable, so it cannot be borrowed"
     | none => throw s!"unknown name `{x}`"
+  -- A reference borrowed from a reference is, to the machine, that reference.
+  | .reborrow _ e => elabExpr scope false e
   | .deref e => do
     let p ← elabExpr scope false e
     emit (.mem .load [p])
@@ -1268,6 +1273,7 @@ private partial def untraitExpr (tr : TraitInfo) (owner : String) : Expr → Exp
     .handle (untraitExpr tr owner subject) (arms.map (untraitClause tr owner))
   | .labelScope l body => .labelScope l (untraitStmts tr owner (0, 0) body)
   | .deref e => .deref (untraitExpr tr owner e)
+  | .reborrow uniq e => .reborrow uniq (untraitExpr tr owner e)
   | e => e
 
 private partial def untraitCall (tr : TraitInfo) (owner : String) (id : Nat) (f : Expr)

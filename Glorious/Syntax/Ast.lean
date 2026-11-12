@@ -45,6 +45,8 @@ inductive Expr where
   | ref (uniq : Bool) (name : String)
   /-- `*e`: the value a reference points to. -/
   | deref (e : Expr)
+  /-- `&mut *e` or `&*e`: a reference borrowed from the reference `e`. -/
+  | reborrow (uniq : Bool) (e : Expr)
 
 inductive Stmt where
   | let_ (pat : Pattern) (value : Expr)

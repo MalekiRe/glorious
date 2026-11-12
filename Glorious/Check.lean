@@ -1558,6 +1558,7 @@ partial def usesExpr (resumptive : String → Bool) (x : String) : Expr → Nat
   | .labelScope _ body => usesStmts resumptive x body
   | .ref _ _ => 0
   | .deref e => usesExpr resumptive x e
+  | .reborrow _ e => usesExpr resumptive x e
 
 partial def usesClause (resumptive : String → Bool) (x : String) : Clause → Nat
   | .mk pats body =>
@@ -1963,6 +1964,10 @@ partial def runExpr (ctx : ACtx) (depth : Nat) (env : List (String × AVal)) : E
       -- Leaving through the label gives a value the count does not follow.
       pure (alts ++ [(.unknown, maxUses alts)])
   | .ref _ _ => pure [(.unknown, 0)]
+  -- Borrowing from a reference is no use of it.
+  | .reborrow _ e => do
+    let alts ← runExpr ctx depth env e
+    pure (alts.map fun (v, n) => if isGone v then (v, n) else (AVal.unknown, n))
   | .deref e => do
     let alts ← runExpr ctx depth env e
     let (on, left) ← settle ctx depth alts
@@ -2699,6 +2704,7 @@ partial def assignsExpr (x : String) : Expr → Bool
   | .labelScope _ body => assignsStmts x body
   | .ref uniq y => uniq && y == x
   | .deref e => assignsExpr x e
+  | .reborrow _ e => assignsExpr x e
 
 partial def assignsClause (x : String) : Clause → Bool
   | .mk _ body => assignsStmts x body
@@ -2982,6 +2988,25 @@ partial def inferExpr (scope : Scope) (amb : Row) : Expr → M Ty
       pure (.ref (if uniq then .uniq else .shared) t cap)
     | some _ => throw s!"`{x}` is not a mutable variable, so it cannot be borrowed"
     | none => throw s!"unknown name `{x}`"
+  | .reborrow uniq e => do
+    -- What is borrowed from is the reference itself, not one lent from it.
+    let t ← inferPlace scope amb e
+    let inner ← freshTy
+    let cap ← freshCap
+    let how ← freshTy
+    unifyAt "`&*` borrows from a reference" (.ref how inner cap) t
+    let cap' ← freshCap
+    if uniq then
+      unifyAt "`&mut *` borrows from a `&mut` reference" (.ref .uniq inner cap) t
+      use scope (.through cap (placeName e) true)
+      captures cap' (.loan (← freshLoan none true (some (cap, cap'))))
+      captures cap' (.ty t)
+      pure (.ref .uniq inner cap')
+    else
+      use scope (.through cap (placeName e) false)
+      captures cap' (.loan (← freshLoan none false (some (cap, cap'))))
+      captures cap' (.ty t)
+      pure (.ref .shared inner cap')
   | .deref e => do
     let t ← inferPlace scope amb e
     let inner ← freshTy

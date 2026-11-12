@@ -190,7 +190,14 @@ private partial def parseUnary (noBlock : Bool) : P Expr := do
         advance
         let uniq := (← peek) == .ident "mut"
         if uniq then advance
-        pure (.ref uniq (← expectIdent))
+        if (← peek) == .op "*" then
+          advance
+          pure (.reborrow uniq (← parseUnary noBlock))
+        else pure (.ref uniq (← expectIdent))
+      else if t == .op "&*" then
+        -- `&*e`, which the lexer reads as one symbol.
+        advance
+        pure (.reborrow false (← parseUnary noBlock))
       else if t == .op "*" then
         advance
         pure (.deref (← parseUnary noBlock))
