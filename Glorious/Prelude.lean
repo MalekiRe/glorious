@@ -28,11 +28,14 @@ let false = Err(());
 // Matching is applying a pattern callable.
 fn match(subject, arms) { tail arms(subject) }
 
-// `if` gives the result of its body on success. On failure it gives the body
-// back: it was not run, so whatever it captured is still there to be used.
+// `if` gives the result of its body on success, and gives the body what the
+// test found: nothing, for a comparison; for `value is Pattern`, what the
+// pattern's names stand for, which a block then has under those names. On
+// failure it gives the body back: it was not run, so whatever it captured is
+// still there to be used.
 fn if(condition, body) {
     match(condition) {
-        Ok(_) => Ok(body()),
+        Ok(found) => Ok(body(found)),
         Err(_) => Err(body)
     }
 }
@@ -59,10 +62,11 @@ fn option(value) {
 }
 
 // The right operands of `and` and `or` are callables, run only when needed.
+// That of `and` is given what the left one found, as the body of an `if` is.
 infixl 3 and
 fn and(left, right) {
     match(left) {
-        Ok(_) => tail right(),
+        Ok(found) => tail right(found),
         Err(error) => Err(error)
     }
 }
@@ -204,7 +208,10 @@ fn loop(body) {
 
 fn while(condition, body) {
     loop {
-        if(condition()) { body() } else { break(()) }
+        match(condition()) {
+            Ok(found) => body(found),
+            Err(_) => break(())
+        }
     }
 }
 "#

@@ -103,6 +103,21 @@ def inFunction (name : String) (msg : String) : String :=
 
 instance : Inhabited Clause := ⟨.mk [] []⟩
 
+/-- `subject is Pattern` leaves the parser as the call `%is(subject, { Pattern
+=> })`. Where names are resolved, and so which names of the pattern are new,
+it becomes a pattern callable applied to the subject: on a match `Ok` of the
+values of those names, else `Err(())`. -/
+def isMark : String := "%is"
+
+/-- The values an `is` found, under the names it found them by: `%is:a,b` is
+the name of what builds them and of their type. A block that is given them
+without naming them has those names. -/
+def packName (names : List String) : String := "%is:" ++ ",".intercalate names
+
+/-- The names of a pack, if this is the name of one. -/
+def packNames (name : String) : Option (List String) :=
+  if name.startsWith "%is:" then some (((name.drop 4).toString.splitOn ",").filter (· != "")) else none
+
 /-- The name that marks a call or a pattern as written with field names. -/
 def recordMark : String := "%record"
 

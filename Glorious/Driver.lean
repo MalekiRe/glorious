@@ -42,7 +42,7 @@ it: with the ownership rules and the region rules if the program can be shown
 to meet them, and otherwise with those of them it can, or as a typing only.
 An error here is a defect in the compiler, not in the program. -/
 def certifyProgram (items : List Syntax.Item) (p : Core.Program)
-    (envSizes : List (Nat × Nat) := []) : Except String Typing.Cert := do
+    (envSizes : List (Nat × Nat × Nat) := []) : Except String Typing.Cert := do
   let attempt (strict regions loans : Bool) : Option Typing.Cert :=
     match Infer.certify items p strict envSizes regions loans with
     | .ok cert => if Typing.checkProgram cert p then some cert else none
@@ -130,7 +130,7 @@ def compileSource (src : String) (check : Bool := true)
     | some b =>
       let (items, b) := Elab.untrait b all
       -- Nor a borrow of a field: each is a variable of its own by now.
-      (Elab.unfield b.fields b.fieldReads items, some b)
+      (Elab.unfield b.fields b.fieldReads b.packs items, some b)
     | none => (all, none)
   let plain := fun (blocks : Option Elab.Blocks) => do
     let out ← Elab.elabProgram all blocks

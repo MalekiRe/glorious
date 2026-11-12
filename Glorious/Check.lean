@@ -333,6 +333,8 @@ structure St where
   modules : Syntax.ModuleInfo := {}
   /-- The names of the fields of each constructor declared with names. -/
   fieldNames : List (String × List String) := []
+  /-- The blocks given what an `is` found, each with the names it then has. -/
+  packs : Array (Nat × List String) := #[]
   /-- For each field read by name, which field it is: for the elaborator. -/
   fieldReads : Array (Nat × Nat) := #[]
   /-- Borrows of a field, to settle once the type is known: the borrow, the
@@ -1315,6 +1317,8 @@ partial def normPat : Pattern → M NPat
       | none => pure .any
   | .ctor x q ps => do
     if let some (_, n) := Syntax.scalarPattern (.ctor x q ps) then return .int n
+    -- What an `is` found, taken apart: its names, which nothing can fail.
+    if (Syntax.packNames x).isSome then return .any
     match ← resolveCtor x q with
     | some (name, _) => do
       pure (.ctor name (← ps.mapM normPat))
@@ -2985,6 +2989,8 @@ inductive Head where
   | prim
   /-- A scalar as the integer it is held as, or, if `into`, back. -/
   | cast (scalar : String) (into : Bool)
+  /-- What an `is` found: the values, under the names in `name`. -/
+  | pack (name : String)
   | host (id : Nat)
   | cancel
   | replace
@@ -3009,6 +3015,7 @@ def resolveName (scope : Scope) (qual : Option String) (x : String) : M Head := 
     return .fn t (← get).lastBounds false
   if (Elab.prims.lookup x).isSome then return .prim
   if let some (scalar, into) := Syntax.scalarCast x then return .cast scalar into
+  if (Syntax.packNames x).isSome then return .pack x
   if let some (id, _) := Elab.hosts.lookup x then return .host id
   if x == "cancel" then return .cancel
   if x == "replace" then return .replace
@@ -3407,6 +3414,7 @@ partial def inferExpr (scope : Scope) (amb : Row) : Expr → M Ty
     | .op _ => throw s!"operation `{x}` must be called"
     | .prim => throw s!"intrinsic `{x}` must be called"
     | .cast _ _ => throw s!"intrinsic `{x}` must be called"
+    | .pack _ => throw "what an `is` found is built where it is found"
     | .host _ => throw s!"host operation `{x}` must be called"
     | .cancel => throw "`cancel` must be applied to a resumption"
     | .replace => throw "`replace` must be called"
@@ -3569,8 +3577,15 @@ partial def checkArg (scope : Scope) (amb : Row) (what : String) (p : Ty) (a : E
   match Elab.plainBlock a, ← find p with
   | some (id, body), .fn [input] _ _ _ _ =>
     -- A callable taking one argument is expected, and a block is written
-    -- without parameters: it takes the argument without naming it.
-    let t ← inferCallable scope [some input] none none [.mk [.var "%given"] body]
+    -- without parameters: it takes the argument without naming it. Given
+    -- what an `is` found, it has the names that found.
+    let pack ← match ← find input with
+      | .con name _ => pure ((Syntax.packNames name).map fun names => (name, names))
+      | _ => pure none
+    let taken := match pack with
+      | some (name, names) => Pattern.ctor name none (names.map Pattern.var)
+      | none => .var "%given"
+    let t ← inferCallable scope [some input] none none [.mk [taken] body]
       "the clauses of this callable do" id
     let own := match t with
       | .fn _ _ _ _ c => c
@@ -3578,7 +3593,12 @@ partial def checkArg (scope : Scope) (amb : Row) (what : String) (p : Ty) (a : E
     match ← fitAt scope amb what none p t with
     | some e => pure (some e)
     | none =>
-      modify fun s => { s with given := s.given.push id }
+      if let some (_, names) := pack then
+        modify fun s =>
+          { s with packs := s.packs.push (id, names), blockCaps := s.blockCaps.push (id, own) }
+        return none
+      -- It is a block like any other to one that is given it unrun.
+      modify fun s => { s with given := s.given.push id, blockCaps := s.blockCaps.push (id, own) }
       -- What it is given and does not name, it lets go. Given a block that
       -- was not run, it lets go of what that block held and it does not
       -- itself mention: looked at once the types are known.
@@ -3589,7 +3609,7 @@ partial def checkArg (scope : Scope) (amb : Row) (what : String) (p : Ty) (a : E
         | some (.val _ id) => some (x, id)
         | _ => none
       match ← find input with
-      | .fn [] _ _ _ cap =>
+      | .fn _ _ _ _ cap =>
         if (← get).anyMust then
           modify fun s =>
             { s with unrunGiven :=
@@ -3597,7 +3617,7 @@ partial def checkArg (scope : Scope) (amb : Row) (what : String) (p : Ty) (a : E
       | _ => mustDrop input why
       -- A callable that takes no arguments, given to a block: a block that was
       -- not run, whose environment this one can take over.
-      if let .fn [] _ _ _ cap ← find input then
+      if let .fn _ _ _ _ cap ← find input then
         modify fun s => { s with unrun := s.unrun.push (id, cap) }
       pure none
   | _, _ => do
@@ -3706,6 +3726,10 @@ partial def inferCall (scope : Scope) (amb : Row) (f : Expr) (args : List Expr)
     | .prim => do
       checkArgs scope amb s!"intrinsic `{x}`" [.int, .int] args call
       pure .int
+    | .pack name => do
+      let ts ← args.mapM fun _ => freshTy
+      checkArgs scope amb "what an `is` found" ts args call
+      pure (.con name ts)
     | .cast scalar into => do
       checkArgs scope amb s!"intrinsic `{x}`" [if into then .int else .con scalar []] args call
       pure (if into then .con scalar [] else .int)
@@ -3934,6 +3958,10 @@ partial def inferPat (p : Pattern) (t : Ty) : M Scope := do
     if let some (scalar, _) := Syntax.scalarPattern (.ctor x q ps) then
       unifyAt s!"a pattern of type `{scalar}`" (.con scalar []) t
       return []
+    if (Syntax.packNames x).isSome then
+      let ts ← ps.mapM fun _ => freshTy
+      unifyAt "what an `is` found" (.con x ts) t
+      return ← inferPats ps ts
     match ← resolveCtor x q with
     | some (_, sig) => do
       let (fields, result) ← instCtor sig
@@ -4603,7 +4631,7 @@ def checkProgram (items : List Item) (modules : Syntax.ModuleInfo := {}) :
         Elab.ImplE)
     pure ⟨s.given.toList, links, s.coercions.toList,
       ⟨s.dictTable.toList, s.methodCalls.toList, s.fnBounds, implEs, s.dropSites.toList⟩,
-      s.fieldTable.toList, s.fieldReads.toList⟩
+      s.fieldTable.toList, s.fieldReads.toList, s.packs.toList⟩
   let (blocks, _) ← action.run {}
   pure blocks
 

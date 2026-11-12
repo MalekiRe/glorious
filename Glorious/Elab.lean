@@ -103,6 +103,8 @@ structure Blocks where
   fields : List (Nat × Bool × List Nat × List (Option String × Nat)) := []
   /-- For each field read by name, which field it is. -/
   fieldReads : List (Nat × Nat) := []
+  /-- The blocks given what an `is` found, each with the names it then has. -/
+  packs : List (Nat × List String) := []
 
 structure Globals where
   ctors : List (String × CtorInfo) := []
@@ -188,8 +190,8 @@ structure St where
   was built in, and each captured name with the local it stood for there. -/
   layouts : List (Nat × Nat × List (String × Atom × List (Nat × Atom))) := []
   /-- Functions that are only ever given the environment of another, with how
-  many values that environment has. -/
-  envSizes : List (Nat × Nat) := []
+  many values that environment has and how many arguments the other took. -/
+  envSizes : List (Nat × Nat × Nat) := []
   /-- How many borrows were made scopes of their own. -/
   lent : Nat := 0
   /-- How many places a borrow could be made a scope there were. -/
@@ -688,6 +690,8 @@ inductive Head where
   | prim (p : Prim) (arity : Nat)
   /-- A scalar as the integer it is held as, or back: nothing is done. -/
   | cast
+  /-- What an `is` found: the values, together. -/
+  | pack
   | host (id : Nat) (arity : Nat)
   | cancel
   | replace
@@ -708,6 +712,7 @@ def resolveName (scope : Scope) (qual : Option String) (x : String) : M Head := 
   if let some idx := g.fns.lookup x then return .fn idx
   if let some (p, n) := prims.lookup x then return .prim p n
   if (Syntax.scalarCast x).isSome then return .cast
+  if (Syntax.packNames x).isSome then return .pack
   if let some (id, n) := hosts.lookup x then return .host id n
   if x == "cancel" then return .cancel
   if x == "replace" then return .replace
@@ -733,6 +738,7 @@ partial def elabExpr (scope : Scope) (tailPos : Bool) : Expr → M Atom
     | .op _ => throw s!"operation `{x}` must be called"
     | .prim _ _ => throw s!"intrinsic `{x}` must be called"
     | .cast => throw s!"intrinsic `{x}` must be called"
+    | .pack => throw "what an `is` found is built where it is found"
     | .host _ _ => throw s!"host operation `{x}` must be called"
     | .cancel => throw "`cancel` must be applied to a resumption"
     | .replace => throw "`replace` must be called"
@@ -883,6 +889,9 @@ partial def elabCall (scope : Scope) (isTail : Bool) (f : Expr) (args : List Exp
         throw s!"intrinsic `{x}` takes {n} arguments, but is given {args.length}"
       let atoms ← elabArgs scope args
       emit (.let_ (.prim p atoms))
+    | .pack => do
+      let atoms ← elabArgs scope args
+      emit (.let_ (.construct 0 atoms))
     | .cast => do
       if isTail then throw s!"`tail` applies to calls, not to the intrinsic `{x}`"
       match ← elabArgs scope args with
@@ -1239,7 +1248,7 @@ partial def elabGiven (scope : Scope) (id : Nat) (body : List Stmt) : M Atom := 
     | _, _ => false
   let free := captureNames scope (fvStmts [] body)
   let taken := free.filter fun x => layout.any fun (y, a) => x == y && shared y a
-  if taken.isEmpty then elabClosure scope [.mk [.wild] body]
+  if taken.isEmpty then elabClosure scope [.mk [.wild] body] id
   else
     let own := free.filter fun x => !taken.contains x
     -- The body, as a function over the other block's environment: what this
@@ -1263,7 +1272,14 @@ partial def elabGiven (scope : Scope) (id : Nat) (body : List Stmt) : M Atom := 
       let r ← withNoTail none (elabStmts (indexed names 0) true body)
       finish r
     let code ← addFn ⟨[⟨own.map fun _ => .wild, tm⟩]⟩ s!"a block in `{s.owner}`"
-    modify fun s => { s with envSizes := (code, layout.length) :: s.envSizes }
+    -- The block given up took what it was given, if it was itself given
+    -- something it did not name.
+    let blocks := (← read).blocks.getD {}
+    let arity := match blocks.links.lookup id with
+      | some owner =>
+        if blocks.given.contains owner || (blocks.packs.lookup owner).isSome then 1 else 0
+      | none => 0
+    modify fun s => { s with envSizes := (code, layout.length, arity) :: s.envSizes }
     -- The callable passed along: given the block that was not run, it runs the
     -- body in that block's place.
     let n := own.length
@@ -1374,8 +1390,8 @@ structure Output where
   /-- Operation names by identity, for diagnostics. -/
   opNames : Array String
   /-- Functions that are only ever given the environment of another, with how
-  many values that environment has. -/
-  envSizes : List (Nat × Nat)
+  many values that environment has and how many arguments the other took. -/
+  envSizes : List (Nat × Nat × Nat)
   /-- How many borrows were made scopes of their own. -/
   lent : Nat := 0
   /-- How many calls of functions with borrows written as arguments there were. -/
@@ -1677,6 +1693,8 @@ through; and for each field read by name, which field it is. -/
 structure FieldInfo where
   shapes : List (Nat × Bool × List Nat × List (Option String × Nat))
   reads : List (Nat × Nat)
+  /-- The blocks given what an `is` found, each with the names it then has. -/
+  packs : List (Nat × List String) := []
 
 mutual
 
@@ -1694,7 +1712,12 @@ private partial def unfieldExpr (info : FieldInfo) : Expr → Expr
     | none => .fieldOf id (unfieldExpr info e) name
   | .deref e => .deref (unfieldExpr info e)
   | .reborrow u e => .reborrow u (unfieldExpr info e)
-  | .closure id clauses => .closure id (clauses.map (unfieldClause info))
+  | .closure id clauses =>
+    -- A block given what an `is` found takes it apart under its names.
+    match info.packs.lookup id, clauses with
+    | some names, [.mk [] body] =>
+      .closure id [.mk [.tuple (names.map Pattern.var)] (unfieldStmts info body)]
+    | _, _ => .closure id (clauses.map (unfieldClause info))
   | .labelScope l body => .labelScope l (unfieldStmts info body)
   | .handle subject arms =>
     .handle (unfieldBlock info subject) (arms.map (unfieldClause info))
@@ -1773,11 +1796,12 @@ end
 /-- Write out every borrow of a field: see above. `shapes` is what the checker
 found each borrow goes through. -/
 def unfield (shapes : List (Nat × Bool × List Nat × List (Option String × Nat)))
-    (reads : List (Nat × Nat)) (items : List Item) : List Item :=
-  if shapes.isEmpty && reads.isEmpty then items
+    (reads : List (Nat × Nat)) (packs : List (Nat × List String)) (items : List Item) :
+    List Item :=
+  if shapes.isEmpty && reads.isEmpty && packs.isEmpty then items
   else items.map fun
     | .fn name params annots ret clauses =>
-      .fn name params annots ret (clauses.map (unfieldClause ⟨shapes, reads⟩))
+      .fn name params annots ret (clauses.map (unfieldClause ⟨shapes, reads, packs⟩))
     | item => item
 
 /-- Collect the global declarations. -/

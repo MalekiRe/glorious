@@ -166,6 +166,9 @@ structure St where
   scc : Array Nat := #[]
   /-- How many values each function captures. -/
   ncaps : Array Nat := #[]
+  /-- For a function given the environment of a block: how many arguments
+  that block took. -/
+  givenUp : List (Nat × Nat) := []
   ctors : Array (Option CtorDecl) := #[]
   ops : Array (Option OpDecl) := #[]
   /-- The constructor tags of each declared type. -/
@@ -1127,11 +1130,13 @@ partial def inferRhs (Γ : Array ITy) : Rhs → M (ITy × Option ISig)
     modify fun s => { s with shows := s.shows.push (env, sig.caps) }
     pure (.func sig.params sig.ret sig.row cls env sig.acc, some sig)
   -- The elaborator gives another function only the environment of a block,
-  -- which takes no arguments, so that is the only shape looked for.
+  -- and says how many arguments the block took: none, or the one it did not
+  -- name.
   | .rebind a fn => do
     let sig ← refSig fn
+    let arity := ((← get).givenUp.lookup fn).getD 0
     unify (← atomTy Γ a)
-      (.func [] (← freshTy) (← freshRow) (← freshCls) (.tuple sig.caps) (← freshAcc))
+      (.func (← freshTys arity) (← freshTy) (← freshRow) (← freshCls) (.tuple sig.caps) (← freshAcc))
     let cls ← freshCls
     if (← get).strict then modify fun s => { s with onces := s.onces.push (cls, sig.caps) }
     let env ← freshTy
@@ -1986,12 +1991,13 @@ def captureCounts (p : Core.Program) : Array Nat := Id.run do
   visit out p.main
 
 def certifyM (items : List Item) (g : Elab.Globals) (p : Core.Program)
-    (envSizes : List (Nat × Nat)) : M Cert := do
+    (envSizes : List (Nat × Nat × Nat)) : M Cert := do
   declare items g
   modify fun s =>
     { s with
       scc := sccs s.fns
-      ncaps := envSizes.foldl (fun acc (fn, n) => acc.setIfInBounds fn n) (captureCounts p)
+      ncaps := envSizes.foldl (fun acc (fn, n, _) => acc.setIfInBounds fn n) (captureCounts p)
+      givenUp := envSizes.map fun (fn, _, arity) => (fn, arity)
       globalTys := s.tys.size, globalRows := s.rows.size, globalClss := s.clss.size
       globalAccs := s.accs.size }
   let τ ← freshTy
@@ -2028,7 +2034,7 @@ def certifyM (items : List Item) (g : Elab.Globals) (p : Core.Program)
 /-- Find a certificate for an elaborated program, with the ownership rules or
 without, and with the region rules or without. -/
 def certify (items : List Item) (p : Core.Program) (strict : Bool)
-    (envSizes : List (Nat × Nat) := []) (regions : Bool := false) (loans : Bool := false) :
+    (envSizes : List (Nat × Nat × Nat) := []) (regions : Bool := false) (loans : Bool := false) :
     Except String Cert := do
   let (g, _, _) ← Elab.collect items
   let (cert, _) ← (certifyM items g p envSizes).run

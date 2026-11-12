@@ -281,6 +281,13 @@ private partial def parseBinary (minPrec : Nat) (noBlock : Bool) : P Expr := do
     | none =>
       match t with
       | .op s => failAt s!"operator `{s}` has no infix fixity"
+      | .ident "is" =>
+        -- `subject is Pattern`, which binds as a comparison does.
+        if 4 < minPrec then break
+        let id := (← read).base + (← get) + 1
+        advance
+        let pat ← parsePattern
+        lhs := .call id (.name none isMark) [lhs, .closure 0 [.mk [pat] []]]
       | _ => break
   pure lhs
 

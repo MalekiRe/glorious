@@ -755,6 +755,40 @@ own recursive group is given captures of its own, related to the function's as
 any other use is, so that what a function passes to itself is not taken to be
 what it was passed.
 
+## `is` gives what it found to the block that runs
+
+**Decision: an `is` is a pattern callable, and its names travel as a value.**
+`subject is Pattern` is the subject given to a callable of two clauses: on a
+match, `Ok` of what the pattern's new names stand for; else `Err(())`. So it
+moves and lets go exactly as a pattern does, and the subject is computed
+once. What it found has a type that carries the names, `%is:a,b`, which no
+program can write.
+
+The prelude's `if` gives its body what the test found: `()` for a comparison,
+this for an `is`. A block written without parameters already took what it was
+given without naming it; given what an `is` found, it has the names. That is
+the whole rule, and it names no function: `and` gives its right operand what
+its left found, `while` its body what its condition found, and a function a
+program defines can do the same. In `if(v is Some(n)) { n } else { .. }` the
+name is the body's and not the fallback's, because `if` gives the fallback
+the body, not what was found.
+
+This changed `if`: its body takes one argument, so a body that was not run is
+a callable of one argument. A block given that takes over its environment as
+before; the certifier is told how many arguments the block given up took.
+What Core shows of the corpus is unchanged.
+
+Departures from the specification's section 9.3. An `is` moves what it binds
+out of the subject, rather than copying what can be copied and borrowing the
+rest; so a subject that has to be used is refused, since a failed test would
+let it go. `and` does not keep what its left operand found for the body of an
+`if` after it, and there is no negative context. A name is told from another
+by its spelling.
+
+Limits. The test has to be written before the block in the arguments of a
+call, since the block is read knowing what it is given. A program run without
+the checker has no names from an `is`.
+
 ## Scalars are integers the checker tells apart
 
 **Decision: Core gets primitives, not types.** A value of `i8 i16 i32 isize

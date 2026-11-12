@@ -62,7 +62,7 @@ def cases : List Case := [
     fn main() { let b = Box({ 5 }); match(b) { Box(f) => f(1) } }",
     [], "5"⟩,
   -- What a block is given need not be the body of an `if`.
-  ⟨"fn zero() { 0 }
+  ⟨"fn zero(_) { 0 }
     fn main() {
       let n = 3;
       let r = if(2 < 1) { n };
@@ -114,11 +114,11 @@ def cases : List Case := [
     fn main() { show(5) }",
     [], "error: 5:17: in `main`: argument 1 of `show`: expected `Meters`, found `Int` (the coercions `a`, `b` all apply here, so none is chosen)"⟩,
   ⟨"fn main() { let option = 5; match(if(1 < 2) { 10 }) { Some(n) => n, None => 0 } }",
-    [], "error: 1:29: in `main`: argument 2 of `match`: expected `fn(Result<Int, fn() -> Int>) -> _`, found `fn(Result<Int, ()>) -> Int`"⟩,
+    [], "error: 1:29: in `main`: argument 2 of `match`: expected `fn(Result<Int, fn(()) -> Int>) -> _`, found `fn(Result<Int, ()>) -> Int`"⟩,
   ⟨"coerce nope  fn main() { 1 }",
     [], "error: `coerce nope`: there is no function `nope`"⟩,
   -- A failed `if` gives back its body, which was not run and still can be.
-  ⟨"fn main() { match(if(1 != 1) { 10 }) { Ok(n) => n, Err(body) => body() + 1 } }",
+  ⟨"fn main() { match(if(1 != 1) { 10 }) { Ok(n) => n, Err(body) => body(()) + 1 } }",
     [], "11"⟩,
   ⟨"effect Boom { boom() -> ! }
   fn main() { handle (if(1 < 2) { 1 } else { boom() }) { boom() => 0 } }",
@@ -517,7 +517,7 @@ def cases : List Case := [
   ⟨"fn each(f, n) { if(n > 0) { f(n); each(f, n - 1) }; }  fn main() { each(print, 3) }",
     [], "3\n2\n1\n()"⟩,
   ⟨"fn each(f, n) { if(n > 0) { f(n); each(f, n - 1) } }  fn main() { each(print, 3) }",
-    [], "error: in `each`: `each` is used recursively at a different type: expected `fn(fn(Int) -> _, Int) -> _`, found `fn(fn(Int) -> _, Int) -> Result<_, fn() -> _>` (this would need a type that contains itself); if the last expression of the body is not meant as the result, end it with `;`"⟩,
+    [], "error: in `each`: `each` is used recursively at a different type: expected `fn(fn(Int) -> _, Int) -> _`, found `fn(fn(Int) -> _, Int) -> Result<_, fn(()) -> _>` (this would need a type that contains itself); if the last expression of the body is not meant as the result, end it with `;`"⟩,
   ⟨"fn log(x) { if(x > 0) { print(x) } }  fn main() { log(1) }",
     [], "1\nOk(())"⟩,
   ⟨"fn log(x) { if(x > 0) { print(x) }; }  fn main() { log(1) }",
@@ -1419,6 +1419,44 @@ def cases : List Case := [
     [], "2.5\n2"⟩,
   ⟨"enum Str { A, B }\nfn main() { say(\"text\"); match(A) { A => 1, B => 2 } }",
     [], "text\n1"⟩,
+  -- `value is Pattern` is a test: it gives what the pattern's names stand
+  -- for, or fails. `if` gives its body what the test found, and a block
+  -- given that has those names. No rule names `if`: a function a program
+  -- defines does the same.
+  ⟨"fn main() { let v = Some(4); if(v is Some(n)) { n + 1 } else { 0 } }",
+    [], "5"⟩,
+  ⟨"fn main() { let v = None; if(v is Some(n)) { n + 1 } else { 0 } }",
+    [], "0"⟩,
+  ⟨"enum Shape { Circle(Int), Rect(Int, Int) }\nfn area(s) { if(s is Rect(w, h)) { w * h } or { if(s is Circle(r)) { 3 * r * r } } else { 0 } }\nfn main() { area(Rect(2, 5)) + area(Circle(1)) }",
+    [], "13"⟩,
+  ⟨"fn main() { let p = (1, 2); if(p is (a, 2)) { a } else { 9 } }",
+    [], "1"⟩,
+  ⟨"fn main() { let v = Some(4); if(v is Some(n)) { 1 } else { n } }",
+    [], "error: 1:60: in `main`: unknown name `n`"⟩,
+  ⟨"fn main() { let v = Some(4); let t = v is Some(n); match(t) { Ok(_) => 1, Err(_) => 0 } }",
+    [], "1"⟩,
+  ⟨"fn main() { let n = 100; let v = Some(4); if(v is Some(n)) { n } else { n } }",
+    [], "4"⟩,
+  ⟨"fn main() { let v = Some(3); if(v is None) { 0 } else { 1 } }",
+    [], "1"⟩,
+  ⟨"fn count(xs, n) { if(xs is Some(rest)) { n + rest } else { n } }\nfn main() { count(Some(5), 1) + count(None, 1) }",
+    [], "7"⟩,
+  ⟨"fn main() { let c = 'x'; if(c is 'x') { 1 } else { 0 } }",
+    [], "1"⟩,
+  ⟨"fn main() { let v = Some(4); if(v is Some(n) and { n > 3 }) { 1 } else { 0 } }",
+    [], "1"⟩,
+  ⟨"fn next(i) { if(i < 3) { i + 1 } }\nfn main() { let mut i = 0; let mut sum = 0; while({ next(i) is Ok(j) }) { i = j; sum = sum + j; }; sum }",
+    [], "6"⟩,
+  ⟨"struct File(Int)\nimpl Use<[1, 1]> for File {}\nfn close(File(fd)) { host_write(fd) }\nfn main() { let f = Some(File(3)); if(f is Some(g)) { close(g); 1 } else { 0 } }",
+    [], "error: 4:36: in `main`: `_` lets go of a value, but a `File` has to be used"⟩,
+  ⟨"struct File(Int)\nimpl Use<[1, 1]> for File {}\nfn close(File(fd)) { host_write(fd) }\nfn main() { let f = Some(File(3)); if(f is Some(g)) { 1 } else { 0 } }",
+    [], "error: 4:36: in `main`: `g` is not used on every path, but a `File` has to be used"⟩,
+  ⟨"effect Ask { ask() -> Int }\nfn main() { handle ask() + 1 { ask(k) => let v = Some(2); if(v is Some(n)) { k(n) } else { k(0) } } }",
+    [], "3"⟩,
+  ⟨"fn main() { let v = Some((1, 2)); if(v is Some((a, b))) { a + b } else { 0 } }",
+    [], "3"⟩,
+  ⟨"fn pick(t, f) { match(t) { Ok(found) => f(found), Err(_) => 0 } }\nfn main() { pick(Some(7) is Some(n)) { n * 2 } }",
+    [], "14"⟩,
   -- `drop` is not for a program to call.
   ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nfn main() { let mut f = File(7); drop(&mut f); 0 }",
     [], "error: 3:34: in `main`: `drop` is run when what holds a value ends; a program does not call it"⟩,

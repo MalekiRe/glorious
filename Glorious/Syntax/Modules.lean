@@ -473,6 +473,22 @@ partial def resolveExpr (ctx : Ctx) (bound : List String) : Expr → R Expr
     pure (.name qual name)
   | .call id f args => do
     match f, args with
+    | .name none mark, [subject, .closure _ [.mk [pat] _]] =>
+      if mark == isMark then
+        -- `subject is Pattern`: a pattern callable applied to the subject,
+        -- which gives what the pattern's new names stand for, or fails.
+        let subject ← resolveExpr ctx bound subject
+        let (pat, names) ← resolvePattern ctx pat
+        let result := fun (ctor : String) (payload : Expr) => do
+          let (qual, name, _) ← resolveValue ctx [] (some "%prelude::Result") ctor
+          pure (Expr.call 0 (.name qual name) [payload])
+        let found := if names.isEmpty then Expr.tuple []
+          else .call 0 (.name none (packName names)) (names.map fun x => .name none x)
+        return .call id (.closure 0
+          [.mk [pat] [.expr (← result "Ok" found)], .mk [.wild] [.expr (← result "Err" (.tuple []))]])
+          [subject]
+    | _, _ => pure ()
+    match f, args with
     | .name qual name, .name none mark :: gave =>
       if mark == recordMark then
         -- `Point { y: 2, x: 1 }`: computed as written, kept as declared.
