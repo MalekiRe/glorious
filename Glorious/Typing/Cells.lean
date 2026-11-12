@@ -676,7 +676,9 @@ theorem TypedAt.not_freed {S : StoreTy} {s : State} (hR : Δ.regions) (ht : Type
     | some w =>
       simp [evalAtoms, hx] at hev
       exact key ha (hr hR) hx hev.1
-  | @store _ x y _ r σ _ _ ha hr _ _ _ _ =>
+  | @store _ x y _ r σ _ _ hform _ _ =>
+    have ha := hform.ref
+    have hr := hform.region
     cases hx : Atom.eval env x with
     | none => simp [evalAtoms, hx] at hev
     | some w =>
@@ -685,7 +687,9 @@ theorem TypedAt.not_freed {S : StoreTy} {s : State} (hR : Δ.regions) (ht : Type
       | some w' =>
         simp [evalAtoms, hx, hy] at hev
         exact key ha (hr hR) hx hev.1
-  | @swap _ x y _ r σ _ _ ha hr _ _ _ _ =>
+  | @swap _ x y _ r σ _ _ hform _ _ =>
+    have ha := hform.ref
+    have hr := hform.region
     cases hx : Atom.eval env x with
     | none => simp [evalAtoms, hx] at hev
     | some w =>
@@ -757,52 +761,74 @@ theorem TypedAt.not_dead {S : StoreTy} {s : State} (hR : Δ.regions) (ht : Typed
   cases hty with
   | ret _ => cases hcallee
   | let_ _ _ _ => cases hcallee
-  | call hf hn _ _ hacc _ _ _ =>
+  | call hform _ _ =>
+    have hf := hform.callee
+    have hn := hform.len
+    have hacc := hform.touches
     cases hcallee
     obtain ⟨h0, hin⟩ := isLabel rfl hf
     exact opened h0 hn hin hacc
-  | tail hf hn _ _ _ hacc _ _ =>
+  | tail hform _ _ =>
+    have hf := hform.callee
+    have hn := hform.len
+    have hacc := hform.touches
     cases hcallee
     obtain ⟨h0, hin⟩ := isLabel rfl hf
     exact opened h0 hn hin hacc
-  | callNever hf hn _ _ hacc _ _ _ =>
+  | callNever hform _ _ =>
+    have hf := hform.callee
+    have hn := hform.len
+    have hacc := hform.touches
     cases hcallee
     obtain ⟨h0, hin⟩ := isLabel rfl hf
     exact opened h0 hn hin hacc
-  | tailNever hf hn _ _ hacc _ _ =>
+  | tailNever hform _ =>
+    have hf := hform.callee
+    have hn := hform.len
+    have hacc := hform.touches
     cases hcallee
     obtain ⟨h0, hin⟩ := isLabel rfl hf
     exact opened h0 hn hin hacc
-  | handle _ _ _ _ _ _ _ _ _ => cases hcallee
-  | handleTail _ _ _ _ _ _ _ => cases hcallee
+  | handle _ _ _ => cases hcallee
+  | handleTail _ => cases hcallee
   | raise _ _ _ _ => cases hcallee
   | perform _ _ _ _ _ => cases hcallee
-  | label hthunk _ _ _ hreg _ _ _ _ _ =>
+  | label hform _ _ =>
+    have hthunk := hform.thunk
+    have hreg := hform.region
     cases hcallee
     exact scoped' (acc := []) (isLabel rfl hthunk).1 (fun h => ⟨(hreg h).1, trivial⟩)
-  | labelTail hthunk _ _ _ hreg _ _ _ =>
+  | labelTail hform =>
+    have hthunk := hform.thunk
+    have hreg := hform.region
     cases hcallee
     exact scoped' (acc := []) (isLabel rfl hthunk).1 (fun h => ⟨(hreg h).1, trivial⟩)
-  | guard _ _ _ _ _ _ _ _ => cases hcallee
-  | guardTail _ _ _ _ _ _ _ => cases hcallee
+  | guard _ _ _ => cases hcallee
+  | guardTail _ _ => cases hcallee
   | cancel hk _ hacc _ _ =>
     cases hcallee
     exact found (hacc _ (isLabel rfl hk).2)
-  | cell _ hthunk _ _ _ _ hreg _ _ _ _ _ =>
+  | cell hform _ _ =>
+    have hthunk := hform.thunk
+    have hreg := hform.region
     cases hcallee
     exact scoped' (acc := []) (isLabel rfl hthunk).1 (fun h => ⟨(hreg h).1, trivial⟩)
-  | cellTail _ hthunk _ _ _ _ hreg _ _ _ _ =>
+  | cellTail hform _ =>
+    have hthunk := hform.thunk
+    have hreg := hform.region
     cases hcallee
     exact scoped' (acc := []) (isLabel rfl hthunk).1 (fun h => ⟨(hreg h).1, trivial⟩)
-  | lend _ hthunk _ _ _ hn _ _ hacc _ _ _ =>
+  | lend hform _ _ =>
+    have hthunk := hform.thunk
+    have hacc := hform.touches
     cases hcallee
     obtain ⟨h0, hin⟩ := isLabel rfl hthunk
     rcases hacc _ hin with ⟨h1, _⟩ | ⟨_, hmem, _⟩
     · omega
     · exact found hmem
   | load _ _ _ _ => cases hcallee
-  | store _ _ _ _ _ _ => cases hcallee
-  | swap _ _ _ _ _ _ => cases hcallee
+  | store _ _ _ => cases hcallee
+  | swap _ _ _ => cases hcallee
   | write _ _ => cases hcallee
   | read _ => cases hcallee
 

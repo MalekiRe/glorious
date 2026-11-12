@@ -721,6 +721,26 @@ own recursive group is given captures of its own, related to the function's as
 any other use is, so that what a function passes to itself is not taken to be
 what it was passed.
 
+## The conditions on a form of computation have names
+
+**Decision: what a rule of the Core typing needs is a record, not a list.**
+`CallOk`, `InstallOk`, `LabelOk`, `GuardOk`, `CellOk`, `LendOk` and `WriteOk`
+in `Glorious/Typing/Static.lean` each gather the conditions on one form: what
+the typing needs, what the region rules add, what the rules for borrows add.
+A rule takes the record, then what the ownership rules need, then the typing
+of what follows.
+
+The reason is what adding the rules for borrows cost. Each new condition was
+one more unnamed premise of a rule, and every proof that takes a rule apart
+names its premises by position: about ninety places broke for each. Now a proof
+names the conditions it uses, and a new condition is a new field: the two
+places that build the record say what it is, and nothing else changes.
+
+It is one record for each form, not one for each set of rules. A record for
+each set of rules would make a new set of rules a new premise again. What the
+ownership rules need stays beside the record because it is one condition, the
+same for every form, and the proofs about it are about nothing else.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by

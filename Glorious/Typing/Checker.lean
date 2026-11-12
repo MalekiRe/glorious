@@ -954,12 +954,11 @@ theorem checkTm_sound {ϕ : List Rgn} : ∀ (tm : Tm) {Γ : TEnv} {hs : List Hin
         · rename_i hσ
           subst hσ
           split at hbody
-          · exact .callNever (rs := rs) (atomTy_sound hf) hn (atomsTy_sound hargs)
-              (rowLe_sound hrow) (subB_sound hacc) (nodupOk_sound hnd) (linearB_sound hlin)
-              (ih hbody)
+          · exact .callNever (rs := rs) ⟨atomTy_sound hf, hn, atomsTy_sound hargs, rowLe_sound hrow,
+              subB_sound hacc, nodupOk_sound hnd⟩ (linearB_sound hlin) (ih hbody)
           · simp at hbody
-        · exact .call (rs := rs) (atomTy_sound hf) hn (atomsTy_sound hargs) (rowLe_sound hrow)
-            (subB_sound hacc) (nodupOk_sound hnd) (linearB_sound hlin) (ih hbody)
+        · exact .call (rs := rs) ⟨atomTy_sound hf, hn, atomsTy_sound hargs, rowLe_sound hrow,
+            subB_sound hacc, nodupOk_sound hnd⟩ (linearB_sound hlin) (ih hbody)
       · simp at h
     · simp at h
   | tail f args =>
@@ -973,10 +972,10 @@ theorem checkTm_sound {ϕ : List Rgn} : ∀ (tm : Tm) {Γ : TEnv} {hs : List Hin
         simp only [Bool.and_eq_true, Bool.or_eq_true, beq_iff_eq] at h
         obtain ⟨⟨⟨⟨⟨hσ, hargs⟩, hrow⟩, hacc⟩, hnd⟩, hlin⟩ := h
         rcases hσ with hσ | rfl
-        · exact .tail (rs := rs) (atomTy_sound hf) hn hσ (atomsTy_sound hargs)
-            (rowLe_sound hrow) (subB_sound hacc) (nodupOk_sound hnd) (linearB_sound hlin)
-        · exact .tailNever (rs := rs) (atomTy_sound hf) hn (atomsTy_sound hargs)
-            (rowLe_sound hrow) (subB_sound hacc) (nodupOk_sound hnd) (linearB_sound hlin)
+        · exact .tail (rs := rs) ⟨atomTy_sound hf, hn, atomsTy_sound hargs, rowLe_sound hrow,
+            subB_sound hacc, nodupOk_sound hnd⟩ hσ (linearB_sound hlin)
+        · exact .tailNever (rs := rs) ⟨atomTy_sound hf, hn, atomsTy_sound hargs, rowLe_sound hrow,
+            subB_sound hacc, nodupOk_sound hnd⟩ (linearB_sound hlin)
       · simp at h
     · simp at h
   | handle ret ops captures thunk body ih =>
@@ -986,9 +985,9 @@ theorem checkTm_sound {ϕ : List Rgn} : ∀ (tm : Tm) {Γ : TEnv} {hs : List Hin
     · rename_i ρ H Φ θs hs' σ εt once env acc Cs hthunk hcaps
       simp only [Bool.and_eq_true] at h
       obtain ⟨⟨⟨⟨⟨⟨hh, hrow⟩, hacc⟩, hΦ⟩, hnd⟩, hlin⟩, hbody⟩ := h
-      exact .handle (atomTy_sound hthunk) (atomsTy_sound hcaps) (checkHandler_sound hh)
-        (rowLe_sound hrow) (subB_sound hacc) (subB_sound hΦ) (nodupOk_sound hnd)
-        (linearB_sound hlin) (ih hbody)
+      exact .handle ⟨atomTy_sound hthunk, atomsTy_sound hcaps, checkHandler_sound hh,
+        rowLe_sound hrow, subB_sound hacc, subB_sound hΦ, nodupOk_sound hnd⟩ (linearB_sound hlin)
+        (ih hbody)
     · simp at h
   | handleTail ret ops captures thunk =>
     intro Γ hs τ ε h
@@ -997,8 +996,8 @@ theorem checkTm_sound {ϕ : List Rgn} : ∀ (tm : Tm) {Γ : TEnv} {hs : List Hin
     · rename_i ρ H Φ θs hs' σ εt once env acc Cs hthunk hcaps
       simp only [Bool.and_eq_true] at h
       obtain ⟨⟨⟨⟨hh, hrow⟩, hacc⟩, hΦ⟩, hnd⟩ := h
-      exact .handleTail (atomTy_sound hthunk) (atomsTy_sound hcaps) (checkHandler_sound hh)
-        (rowLe_sound hrow) (subB_sound hacc) (subB_sound hΦ) (nodupOk_sound hnd)
+      exact .handleTail ⟨atomTy_sound hthunk, atomsTy_sound hcaps, checkHandler_sound hh,
+        rowLe_sound hrow, subB_sound hacc, subB_sound hΦ, nodupOk_sound hnd⟩
     · simp at h
   | raise op args =>
     intro Γ hs τ ε h
@@ -1030,7 +1029,7 @@ theorem checkTm_sound {ϕ : List Rgn} : ∀ (tm : Tm) {Γ : TEnv} {hs : List Hin
       simp only [Bool.and_eq_true, beq_iff_eq] at h
       obtain ⟨⟨⟨⟨rfl, hlab⟩, hrow⟩, hlin⟩, hbody⟩ := h
       obtain ⟨hσ, hε, hn, hreg, hacc, hnd⟩ := labelOk_sound hlab
-      exact .label (atomTy_sound hthunk) hσ hε hn hreg hacc hnd (rowLe_sound hrow)
+      exact .label ⟨atomTy_sound hthunk, hσ, hε, hn, hreg, hacc, hnd, rowLe_sound hrow⟩
         (linearB_sound hlin) (ih hbody)
     · simp at h
   | labelTail thunk =>
@@ -1041,7 +1040,7 @@ theorem checkTm_sound {ϕ : List Rgn} : ∀ (tm : Tm) {Γ : TEnv} {hs : List Hin
       simp only [Bool.and_eq_true, beq_iff_eq] at h
       obtain ⟨⟨⟨rfl, rfl⟩, hlab⟩, hrow⟩ := h
       obtain ⟨hσ, hε, hn, hreg, hacc, hnd⟩ := labelOk_sound hlab
-      exact .labelTail (atomTy_sound hthunk) hσ hε hn hreg hacc hnd (rowLe_sound hrow)
+      exact .labelTail ⟨atomTy_sound hthunk, hσ, hε, hn, hreg, hacc, hnd, rowLe_sound hrow⟩
     · simp at h
   | guard cleanup thunk body ih =>
     intro Γ hs τ ε h
@@ -1050,10 +1049,9 @@ theorem checkTm_sound {ϕ : List Rgn} : ∀ (tm : Tm) {Γ : TEnv} {hs : List Hin
     · rename_i σc once' env' accc σ εt once env acc hcl hthunk
       simp only [Bool.and_eq_true] at h
       obtain ⟨⟨⟨⟨⟨⟨hrow, haccc⟩, hacc⟩, hnd1⟩, hnd2⟩, hlin⟩, hbody⟩ := h
-      exact .guard (atomTy_sound hcl) (atomTy_sound hthunk) (rowLe_sound hrow)
-        (subB_sound haccc) (subB_sound hacc)
-        (fun hL => ⟨nodupOk_sound hnd1 hL, nodupOk_sound hnd2 hL⟩) (linearB_sound hlin)
-        (ih hbody)
+      exact .guard ⟨atomTy_sound hcl, atomTy_sound hthunk, rowLe_sound hrow, subB_sound haccc,
+        subB_sound hacc, (fun hL => ⟨nodupOk_sound hnd1 hL, nodupOk_sound hnd2 hL⟩)⟩
+        (linearB_sound hlin) (ih hbody)
     · simp at h
   | guardTail cleanup thunk =>
     intro Γ hs τ ε h
@@ -1062,9 +1060,9 @@ theorem checkTm_sound {ϕ : List Rgn} : ∀ (tm : Tm) {Γ : TEnv} {hs : List Hin
     · rename_i σc once' env' accc σ εt once env acc hcl hthunk
       simp only [Bool.and_eq_true, beq_iff_eq] at h
       obtain ⟨⟨⟨⟨⟨⟨rfl, hrow⟩, haccc⟩, hacc⟩, hnd1⟩, hnd2⟩, hlin⟩ := h
-      exact .guardTail (atomTy_sound hcl) (atomTy_sound hthunk) (rowLe_sound hrow)
-        (subB_sound haccc) (subB_sound hacc)
-        (fun hL => ⟨nodupOk_sound hnd1 hL, nodupOk_sound hnd2 hL⟩) (linearB_sound hlin)
+      exact .guardTail ⟨atomTy_sound hcl, atomTy_sound hthunk, rowLe_sound hrow, subB_sound haccc,
+        subB_sound hacc, (fun hL => ⟨nodupOk_sound hnd1 hL, nodupOk_sound hnd2 hL⟩)⟩
+        (linearB_sound hlin)
     · simp at h
   | cancel k body ih =>
     intro Γ hs τ ε h
@@ -1083,8 +1081,8 @@ theorem checkTm_sound {ϕ : List Rgn} : ∀ (tm : Tm) {Γ : TEnv} {hs : List Hin
       simp only [Bool.and_eq_true, beq_iff_eq] at h
       obtain ⟨⟨⟨⟨rfl, hcell⟩, hrow⟩, hlin⟩, hbody⟩ := h
       obtain ⟨hσ, hρ, hε, hn, hreg, hacc, hnd⟩ := cellOk_sound hcell
-      exact .cell (atomTy_sound hinit) (atomTy_sound hthunk) hσ hρ hε hn hreg hacc hnd
-        (rowLe_sound hrow) (linearB_sound hlin) (ih hbody)
+      exact .cell ⟨atomTy_sound hinit, atomTy_sound hthunk, hσ, hρ, hε, hn, hreg, hacc, hnd,
+        rowLe_sound hrow⟩ (linearB_sound hlin) (ih hbody)
     · simp at h
   | cellTail init thunk =>
     intro Γ hs τ ε h
@@ -1094,8 +1092,8 @@ theorem checkTm_sound {ϕ : List Rgn} : ∀ (tm : Tm) {Γ : TEnv} {hs : List Hin
       simp only [Bool.and_eq_true, beq_iff_eq] at h
       obtain ⟨⟨⟨⟨rfl, rfl⟩, hcell⟩, hrow⟩, hlin⟩ := h
       obtain ⟨hσ, hρ, hε, hn, hreg, hacc, hnd⟩ := cellOk_sound hcell
-      exact .cellTail (atomTy_sound hinit) (atomTy_sound hthunk) hσ hρ hε hn hreg hacc hnd
-        (rowLe_sound hrow) (linearB_sound hlin)
+      exact .cellTail ⟨atomTy_sound hinit, atomTy_sound hthunk, hσ, hρ, hε, hn, hreg, hacc, hnd,
+        rowLe_sound hrow⟩ (linearB_sound hlin)
     · simp at h
   | lend uniq r thunk body ih =>
     intro Γ hs τ ε h
@@ -1105,8 +1103,8 @@ theorem checkTm_sound {ϕ : List Rgn} : ∀ (tm : Tm) {Γ : TEnv} {hs : List Hin
       simp only [Bool.and_eq_true, beq_iff_eq] at h
       obtain ⟨⟨⟨⟨rfl, hlend⟩, hrow⟩, hlin⟩, hbody⟩ := h
       obtain ⟨hσ, hρ, hε, hn, hreg, hloan, hacc⟩ := lendOk_sound hlend
-      exact .lend (atomTy_sound hr) (atomTy_sound hthunk) hσ hρ hε hn hreg hloan hacc
-        (rowLe_sound hrow) (linearB_sound hlin) (ih hbody)
+      exact .lend ⟨atomTy_sound hr, atomTy_sound hthunk, hσ, hρ, hε, hn, hreg, hloan, hacc,
+        rowLe_sound hrow⟩ (linearB_sound hlin) (ih hbody)
     · simp at h
   | mem op args body ih =>
     intro Γ hs τ ε h
@@ -1120,14 +1118,14 @@ theorem checkTm_sound {ϕ : List Rgn} : ∀ (tm : Tm) {Γ : TEnv} {hs : List Hin
     · split at h
       · rename_i r σ ha
         simp only [Bool.and_eq_true, beq_iff_eq] at h
-        exact .store (atomTy_sound ha) (regionOk_sound h.1.1.1.1) (writeOk_sound h.1.1.1.2)
-          (atomTy_sound h.1.1.2) (linearB_sound h.1.2) (ih h.2)
+        exact .store ⟨atomTy_sound ha, regionOk_sound h.1.1.1.1, writeOk_sound h.1.1.1.2,
+          atomTy_sound h.1.1.2⟩ (linearB_sound h.1.2) (ih h.2)
       · simp at h
     · split at h
       · rename_i r σ ha
         simp only [Bool.and_eq_true, beq_iff_eq] at h
-        exact .swap (atomTy_sound ha) (regionOk_sound h.1.1.1.1) (writeOk_sound h.1.1.1.2)
-          (atomTy_sound h.1.1.2) (linearB_sound h.1.2) (ih h.2)
+        exact .swap ⟨atomTy_sound ha, regionOk_sound h.1.1.1.1, writeOk_sound h.1.1.1.2,
+          atomTy_sound h.1.1.2⟩ (linearB_sound h.1.2) (ih h.2)
       · simp at h
     · simp at h
   | host id args body ih =>

@@ -296,7 +296,9 @@ theorem TypedAt.not_aliased {S : StoreTy} {s : State} (hR : Δ.regions) (hL : Δ
         rw [hev.1] at hx
         have := hread r a b (hsub _ (hr hR)) (key ha hx)
         simp [writes, this] at hno
-    | @store _ x y _ r σ _ _ ha hr hw _ _ _ =>
+    | @store _ x y _ r σ _ _ hform _ _ =>
+      have ha := hform.ref
+      have hw := hform.write
       cases hx : Atom.eval env x with
       | none => simp [evalAtoms, hx] at hev
       | some w =>
@@ -307,7 +309,9 @@ theorem TypedAt.not_aliased {S : StoreTy} {s : State} (hR : Δ.regions) (hL : Δ
           rw [hev.1] at hx
           have := hwrite r a b (hsub _ (hw hL)) (key ha hx)
           simp [writes, this] at hno
-    | @swap _ x y _ r σ _ _ ha hr hw _ _ _ =>
+    | @swap _ x y _ r σ _ _ hform _ _ =>
+      have ha := hform.ref
+      have hw := hform.write
       cases hx : Atom.eval env x with
       | none => simp [evalAtoms, hx] at hev
       | some w =>
@@ -321,7 +325,10 @@ theorem TypedAt.not_aliased {S : StoreTy} {s : State} (hR : Δ.regions) (hL : Δ
   · simp only at htm hev hno
     subst htm
     cases hty with
-    | lend hr _ _ _ _ _ hreg hloan _ _ _ _ =>
+    | lend hform _ _ =>
+      have hr := hform.ref
+      have hreg := hform.region
+      have hloan := hform.loan
       have htag := key hr hev
       cases uniq with
       | false =>
