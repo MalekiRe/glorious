@@ -123,9 +123,13 @@ structure St where
 
 abbrev R := StateT St (Except String)
 
-/-- What a module declares. -/
-def declared (path : List String) (items : List Item) :
+/-- What a module declares. `taken` are the names the prelude has: the first
+module may declare one again, and its own is then `crate::name` in the whole
+program. -/
+def declared (path : List String) (items : List Item) (taken : List String := []) :
     List Bound × List (String × List String × List String × List Bool) := Id.run do
+  let mangle := fun (path : List String) (name : String) =>
+    if path.isEmpty && taken.contains name then s!"crate::{name}" else mangle path name
   let mut out : Array Bound := #[]
   let mut fields : Array (String × List String × List String × List Bool) := #[]
   let everyone := path == preludePath
@@ -529,6 +533,13 @@ partial def resolveStmts (ctx : Ctx) (bound : List String) : List Stmt → R (Li
 
 end
 
+/-- The name in the whole program of what this module declares as `name`. -/
+def ownName (ctx : Ctx) (space : Space) (name : String) : String :=
+  match ctx.scope.find? fun b =>
+      b.name == name && b.entry.home == ctx.here && b.entry.kind.space == space && b.rank == 0 with
+  | some b => b.entry.global
+  | none => mangle ctx.here name
+
 /-- A function with its names resolved, under the name it has in the program. -/
 def resolveFn (ctx : Ctx) (global : String) (generics : List String) :
     Item → R Item
@@ -551,29 +562,29 @@ partial def resolveItem (ctx : Ctx) : Item → R (List Item)
   | .module _ _ => pure []
   | .import _ _ _ => pure []
   | .fn name ps annots ret clauses => do
-    pure [← resolveFn ctx (mangle ctx.here name) [] (.fn name ps annots ret clauses)]
+    pure [← resolveFn ctx (ownName ctx .value name) [] (.fn name ps annots ret clauses)]
   | .enum name ps ctors => do
     let generics := genericParams ps
     let ctors ← ctors.mapM fun (c, fields) => do
-      pure (mangle ctx.here c, ← fields.mapM (resolveType ctx generics))
-    pure [.enum (mangle ctx.here name) ps ctors]
+      pure (ownName ctx .value c, ← fields.mapM (resolveType ctx generics))
+    pure [.enum (ownName ctx .type name) ps ctors]
   | .struct name ps fields => do
-    pure [.struct (mangle ctx.here name) ps (← fields.mapM (resolveType ctx (genericParams ps)))]
+    pure [.struct (ownName ctx .type name) ps (← fields.mapM (resolveType ctx (genericParams ps)))]
   | .effect name ps ops => do
     let generics := genericParams ps
     let ops ← ops.mapM fun op => do
       pure { op with
-        name := mangle ctx.here op.name
+        name := ownName ctx .value op.name
         payload := ← op.payload.mapM (resolveType ctx generics)
         result := ← op.result.mapM (resolveType ctx generics) }
-    pure [.effect (mangle ctx.here name) ps ops]
-  | .alias name value => do pure [.alias (mangle ctx.here name) (← resolveExpr ctx [] value)]
+    pure [.effect (ownName ctx .effect name) ps ops]
+  | .alias name value => do pure [.alias (ownName ctx .value name) (← resolveExpr ctx [] value)]
   | .coerce name => do pure [.coerce (← resolveValue ctx [] none name).2.1]
   | .trait name methods => do
     let methods ← methods.mapM fun (m, ps, r) => do
-      pure (mangle ctx.here m, ← ps.mapM (resolveType ctx ["Self"]),
+      pure (ownName ctx .value m, ← ps.mapM (resolveType ctx ["Self"]),
         ← r.mapM (resolveType ctx ["Self"]))
-    pure [.trait (mangle ctx.here name) methods]
+    pure [.trait (ownName ctx .trait name) methods]
   | .impl ps tr head args context methods => do
     let (tr', trEntry) ← resolveNamed ctx .trait [] tr
     let (head', headEntry) ← resolveNamed ctx .type [] head
@@ -610,9 +621,9 @@ partial def resolveItem (ctx : Ctx) : Item → R (List Item)
       unless e.home == ctx.here do
         throw s!"`impl Use for {head}` is written in {showPath ctx.here}: how often a type is used is said in its module, {showPath e.home}"
     pure [.use head' lower upper]
-  | .fieldNames ctor names pubs => pure [.fieldNames (mangle ctx.here ctor) names pubs]
+  | .fieldNames ctor names pubs => pure [.fieldNames (ownName ctx .value ctor) names pubs]
   | .typeAlias name ps body => do
-    pure [.typeAlias (mangle ctx.here name) ps (← resolveType ctx (genericParams ps) body)]
+    pure [.typeAlias (ownName ctx .type name) ps (← resolveType ctx (genericParams ps) body)]
   | item => pure [item]
 
 /-- The modules of a program, each with its items: `root` is the first, and a
@@ -656,8 +667,9 @@ def resolve (prelude root : List Item) : Except String Resolved := do
   let mods := (preludePath, prelude) :: mods
   let mut units : List Module := []
   let mut fields : List (String × List String × List String × List Bool) := []
+  let taken := (declared preludePath prelude).1.map (·.name)
   for (path, items) in mods do
-    let (own, fs) := declared path items
+    let (own, fs) := declared path items taken
     units := units ++ [⟨path, items, own⟩]
     fields := fields ++ fs
   let run : R (List Item) := do

@@ -254,10 +254,23 @@ theorem follow_ok {S : StoreTy} {σ τ : Ty} {path : List Nat} (h : PlaceOk Δ �
 /-- An arithmetic intrinsic on two integers gives an integer, when it gives anything. -/
 theorem prim_int {p : Prim} {m n : Int} {v : Value} (h : p.eval [.int m, .int n] = some v) :
     ∃ k, v = .int k := by
-  cases p <;> simp only [Prim.eval, checked] at h
+  have ok : ∀ {k : Int}, checked k = some v → ∃ k, v = .int k := by
+    intro k hk
+    simp only [checked] at hk
+    split at hk
+    · cases hk; exact ⟨_, rfl⟩
+    · cases hk
+  have opt : ∀ {o : Option Int}, checkedOpt o = some v → ∃ k, v = .int k := by
+    intro o ho
+    cases o with
+    | none => simp [checkedOpt] at ho
+    | some k => exact ok ho
+  cases p <;> simp only [Prim.eval] at h
   all_goals first
+    | exact ok h
+    | exact opt h
     | (cases h; exact ⟨_, rfl⟩)
-    | (split at h <;> first | (cases h; exact ⟨_, rfl⟩) | cases h)
+    | (split at h <;> first | exact ok h | cases h)
 
 /-- A typed control-free computation gives a value of its type, unless it is
 arithmetic that overflows. -/

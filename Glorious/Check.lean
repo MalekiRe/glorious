@@ -992,6 +992,8 @@ partial def resolveType (params : List (String × Ty)) (decl : Bool) : TypeExpr 
       if x.startsWith "'" then Ty.life <$> lifetimeCap params decl (some x)
       else if x == "Int" then
         if args.isEmpty then pure .int else throw "`Int` takes no arguments"
+      else if Syntax.isScalar x then
+        if args.isEmpty then pure (.con x []) else throw s!"`{x}` takes no arguments"
       else
         match (← get).types.lookup x with
         | some d =>
@@ -1144,7 +1146,7 @@ def declareTraits (items : List Item) : M Unit := do
       let names ← match (← get).traits.lookup tr with
         | some ns => pure ns
         | none => throw s!"{what}: unknown trait `{tr}`"
-      let arity ← if head == "Int" then pure 0
+      let arity ← if head == "Int" || Syntax.isScalar head then pure 0
         else match (← get).types.lookup head with
           | some d => pure d.arity
           | none => throw s!"{what}: unknown type `{head}`"
@@ -1687,6 +1689,8 @@ def mustDrop (t : Ty) (why : String) : M Unit := do
   match ← find t with
   | .con "Int" [] => pure ()
   | .tuple [] => pure ()
+  | .con name [] => unless Syntax.isScalar name do
+      modify fun s => { s with drops := s.drops.push (t, s.pos ++ why) }
   | .ref _ _ _ => pure ()
   | _ => modify fun s => { s with drops := s.drops.push (t, s.pos ++ why) }
 
@@ -2402,7 +2406,7 @@ def checkUses (pos : String) (outer : Scope) (binds : Scope) (body : List Stmt) 
     | some sig => sig.result.isSome
     | none => false
   -- What only computes: the machine's own operations and what builds a value.
-  let intrinsics := Elab.prims.map (·.1) ++ Elab.hosts.map (·.1) ++ ["cancel", "replace"]
+  let intrinsics := Elab.prims.map (·.1) ++ Elab.casts ++ Elab.hosts.map (·.1) ++ ["cancel", "replace"]
   let ctx : ACtx :=
     { fns := s.fnBodies, ctors := s.ctors.map (·.1), aliases := s.aliases,
       ops := s.ops.map fun (name, sig) => (name, sig.result.isSome), quiet := intrinsics }
@@ -2502,7 +2506,7 @@ def runLowerChecks (fnTy : Ty) : M Unit := do
     match s.ops.lookup name with
     | some sig => sig.result.isSome
     | none => false
-  let intrinsics := Elab.prims.map (·.1) ++ Elab.hosts.map (·.1) ++ ["cancel", "replace"]
+  let intrinsics := Elab.prims.map (·.1) ++ Elab.casts ++ Elab.hosts.map (·.1) ++ ["cancel", "replace"]
   let ctx : ACtx :=
     { fns := s.fnBodies, ctors := s.ctors.map (·.1), aliases := s.aliases,
       ops := s.ops.map fun (name, sig) => (name, sig.result.isSome), quiet := intrinsics,
@@ -2978,6 +2982,8 @@ inductive Head where
   | ctor (sig : CtorSig)
   | op (sig : OpSig)
   | prim
+  /-- A scalar as the integer it is held as, or, if `into`, back. -/
+  | cast (scalar : String) (into : Bool)
   | host (id : Nat)
   | cancel
   | replace
@@ -3001,6 +3007,7 @@ def resolveName (scope : Scope) (qual : Option String) (x : String) : M Head := 
     let t ← instantiate scheme (some x)
     return .fn t (← get).lastBounds false
   if (Elab.prims.lookup x).isSome then return .prim
+  if let some (scalar, into) := Syntax.scalarCast x then return .cast scalar into
   if let some (id, _) := Elab.hosts.lookup x then return .host id
   if x == "cancel" then return .cancel
   if x == "replace" then return .replace
@@ -3398,6 +3405,7 @@ partial def inferExpr (scope : Scope) (amb : Row) : Expr → M Ty
       pure result
     | .op _ => throw s!"operation `{x}` must be called"
     | .prim => throw s!"intrinsic `{x}` must be called"
+    | .cast _ _ => throw s!"intrinsic `{x}` must be called"
     | .host _ => throw s!"host operation `{x}` must be called"
     | .cancel => throw "`cancel` must be applied to a resumption"
     | .replace => throw "`replace` must be called"
@@ -3697,6 +3705,9 @@ partial def inferCall (scope : Scope) (amb : Row) (f : Expr) (args : List Expr)
     | .prim => do
       checkArgs scope amb s!"intrinsic `{x}`" [.int, .int] args call
       pure .int
+    | .cast scalar into => do
+      checkArgs scope amb s!"intrinsic `{x}`" [if into then .int else .con scalar []] args call
+      pure (if into then .con scalar [] else .int)
     | .host id => do
       if id == 0 then
         checkArgs scope amb s!"`{x}`" [← freshTy] args call

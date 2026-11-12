@@ -138,7 +138,18 @@ def Borrow.show (b : Borrow) : String :=
 /-- Machine intrinsics by surface name, with their argument counts. -/
 def prims : List (String × Prim × Nat) :=
   [("int_add", .intAdd, 2), ("int_sub", .intSub, 2), ("int_mul", .intMul, 2),
-   ("int_lt", .intLt, 2), ("int_eq", .intEq, 2)]
+   ("int_lt", .intLt, 2), ("int_eq", .intEq, 2),
+   ("int_div", .intDiv, 2), ("int_rem", .intRem, 2), ("int_fit", .intFit, 2),
+   ("f64_add", .f64Add, 2), ("f64_sub", .f64Sub, 2), ("f64_mul", .f64Mul, 2),
+   ("f64_div", .f64Div, 2), ("f64_lt", .f64Lt, 2), ("f64_eq", .f64Eq, 2),
+   ("f64_of_int", .f64OfInt, 2), ("f64_to_int", .f64ToInt, 2),
+   ("f64_narrow", .f64Narrow, 2), ("f64_widen", .f64Widen, 2),
+   ("f64_of_decimal", .f64OfDecimal, 2), ("f64_digits", .f64Digits, 2),
+   ("f64_exp10", .f64Exp10, 2)]
+
+/-- The names that take a scalar to the integer it is held as, and back. -/
+def casts : List String :=
+  Syntax.scalars.flatMap fun (t, _) => [t ++ "_of", t ++ "_bits"]
 
 /-- Host operations by surface name: their identity and argument count. -/
 def hosts : List (String × Nat × Nat) :=
@@ -673,6 +684,8 @@ inductive Head where
   | ctor (info : CtorInfo)
   | op (info : OpInfo)
   | prim (p : Prim) (arity : Nat)
+  /-- A scalar as the integer it is held as, or back: nothing is done. -/
+  | cast
   | host (id : Nat) (arity : Nat)
   | cancel
   | replace
@@ -692,6 +705,7 @@ def resolveName (scope : Scope) (qual : Option String) (x : String) : M Head := 
     return .op info
   if let some idx := g.fns.lookup x then return .fn idx
   if let some (p, n) := prims.lookup x then return .prim p n
+  if (Syntax.scalarCast x).isSome then return .cast
   if let some (id, n) := hosts.lookup x then return .host id n
   if x == "cancel" then return .cancel
   if x == "replace" then return .replace
@@ -716,6 +730,7 @@ partial def elabExpr (scope : Scope) (tailPos : Bool) : Expr → M Atom
       else throw s!"constructor `{x}` takes {info.arity} arguments"
     | .op _ => throw s!"operation `{x}` must be called"
     | .prim _ _ => throw s!"intrinsic `{x}` must be called"
+    | .cast => throw s!"intrinsic `{x}` must be called"
     | .host _ _ => throw s!"host operation `{x}` must be called"
     | .cancel => throw "`cancel` must be applied to a resumption"
     | .replace => throw "`replace` must be called"
@@ -866,6 +881,11 @@ partial def elabCall (scope : Scope) (isTail : Bool) (f : Expr) (args : List Exp
         throw s!"intrinsic `{x}` takes {n} arguments, but is given {args.length}"
       let atoms ← elabArgs scope args
       emit (.let_ (.prim p atoms))
+    | .cast => do
+      if isTail then throw s!"`tail` applies to calls, not to the intrinsic `{x}`"
+      match ← elabArgs scope args with
+      | [a] => emit (.let_ (.atom a))
+      | _ => throw s!"intrinsic `{x}` takes 1 argument, but is given {args.length}"
     | .host id n => do
       if isTail then throw s!"`tail` applies to calls, not to the host operation `{x}`"
       if n != args.length then

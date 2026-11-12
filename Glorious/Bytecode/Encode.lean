@@ -39,6 +39,22 @@ def prim : Prim → Bytes
   | .intMul => [2]
   | .intLt => [3]
   | .intEq => [4]
+  | .intDiv => [5]
+  | .intRem => [6]
+  | .intFit => [7]
+  | .f64Add => [8]
+  | .f64Sub => [9]
+  | .f64Mul => [10]
+  | .f64Div => [11]
+  | .f64Lt => [12]
+  | .f64Eq => [13]
+  | .f64OfInt => [14]
+  | .f64ToInt => [15]
+  | .f64Narrow => [16]
+  | .f64Widen => [17]
+  | .f64OfDecimal => [18]
+  | .f64Digits => [19]
+  | .f64Exp10 => [20]
 
 def rhs : Rhs → Bytes
   | .atom a => 0 :: atom a

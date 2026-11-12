@@ -116,6 +116,28 @@ def fieldMark (field : String) : String := s!"%field:{field}"
 def fieldOfMark (name : String) : Option String :=
   if name.startsWith "%field:" then some (name.drop 7).toString else none
 
+/-- The scalar types beside `Int`. A value of each is held as an integer: an
+integer type's own value, the code of a character, the bits of a floating
+point number. With an integer type is the width `int_fit` is asked whether a
+value fits: so many bits with a sign if positive, without one if negative.
+`usize` is 63 bits: the machines' integers have 64 with a sign. -/
+def scalars : List (String × Option Int) :=
+  [("i8", some 8), ("i16", some 16), ("i32", some 32), ("isize", some 64),
+   ("u8", some (-8)), ("u16", some (-16)), ("u32", some (-32)), ("usize", some (-63)),
+   ("f32", none), ("f64", none), ("char", none)]
+
+def isScalar (name : String) : Bool := (scalars.lookup name).isSome
+
+/-- `i8_of` takes an `Int` to be an `i8` as it is, and `i8_bits` gives the
+`Int` an `i8` is held as; so for each scalar type. Neither does anything: they
+are how the prelude says what a scalar's operations are. The type, and
+whether the name is the one into it. -/
+def scalarCast (name : String) : Option (String × Bool) :=
+  scalars.findSome? fun (t, _) =>
+    if name == t ++ "_of" then some (t, true)
+    else if name == t ++ "_bits" then some (t, false)
+    else none
+
 /-- What the checker is told of a program's modules, which it otherwise does
 not see: the module each function is written in, and for each constructor with
 fields its module and which fields are `pub`. A field that is not can be read

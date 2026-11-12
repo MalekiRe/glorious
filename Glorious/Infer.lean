@@ -1826,7 +1826,7 @@ partial def resolveType (typeNames params : List String) : TypeExpr → M ITy
     match params.idxOf? x with
     | some i => pure (.param i)
     | none =>
-      if x == "Int" then pure .int
+      if x == "Int" || Syntax.isScalar x then pure .int
       else
         match typeNames.idxOf? x with
         | some id => do pure (.data id (← args.mapM (resolveType typeNames params)))

@@ -63,6 +63,22 @@ enum Prim {
     Mul,
     Lt,
     Eq,
+    Div,
+    Rem,
+    Fit,
+    FAdd,
+    FSub,
+    FMul,
+    FDiv,
+    FLt,
+    FEq,
+    FOfInt,
+    FToInt,
+    FNarrow,
+    FWiden,
+    FOfDecimal,
+    FDigits,
+    FExp10,
 }
 
 #[derive(Clone, Copy)]
@@ -179,6 +195,22 @@ impl Reader<'_> {
             2 => Ok(Prim::Mul),
             3 => Ok(Prim::Lt),
             4 => Ok(Prim::Eq),
+            5 => Ok(Prim::Div),
+            6 => Ok(Prim::Rem),
+            7 => Ok(Prim::Fit),
+            8 => Ok(Prim::FAdd),
+            9 => Ok(Prim::FSub),
+            10 => Ok(Prim::FMul),
+            11 => Ok(Prim::FDiv),
+            12 => Ok(Prim::FLt),
+            13 => Ok(Prim::FEq),
+            14 => Ok(Prim::FOfInt),
+            15 => Ok(Prim::FToInt),
+            16 => Ok(Prim::FNarrow),
+            17 => Ok(Prim::FWiden),
+            18 => Ok(Prim::FOfDecimal),
+            19 => Ok(Prim::FDigits),
+            20 => Ok(Prim::FExp10),
             t => Err(format!("unknown intrinsic {t}")),
         }
     }
@@ -773,14 +805,121 @@ fn prim(p: Prim, args: &[Value]) -> Step<Value> {
     let [Value::Int(a), Value::Int(b)] = args else {
         return wrong();
     };
+    let (a, b) = (*a, *b);
     let result = match p {
-        Prim::Add => a.checked_add(*b),
-        Prim::Sub => a.checked_sub(*b),
-        Prim::Mul => a.checked_mul(*b),
+        Prim::Add => a.checked_add(b),
+        Prim::Sub => a.checked_sub(b),
+        Prim::Mul => a.checked_mul(b),
         Prim::Lt => Some(i64::from(a < b)),
         Prim::Eq => Some(i64::from(a == b)),
+        // Towards zero. The least integer divided by -1 does not fit; what is
+        // left of that division is zero.
+        Prim::Div => {
+            if b == 0 {
+                None
+            } else {
+                a.checked_div(b)
+            }
+        }
+        Prim::Rem => match b {
+            0 => None,
+            -1 => Some(0),
+            _ => a.checked_rem(b),
+        },
+        Prim::Fit => fits(a, b).then_some(a),
+        Prim::FAdd => Some(bits(float(a) + float(b))),
+        Prim::FSub => Some(bits(float(a) - float(b))),
+        Prim::FMul => Some(bits(float(a) * float(b))),
+        Prim::FDiv => Some(bits(float(a) / float(b))),
+        Prim::FLt => Some(i64::from(float(a) < float(b))),
+        Prim::FEq => Some(i64::from(float(a) == float(b))),
+        Prim::FOfInt => Some(bits(a as f64)),
+        Prim::FToInt => {
+            let whole = float(a).trunc();
+            // Both bounds are powers of two, so they are exact.
+            (whole >= -9223372036854775808.0 && whole < 9223372036854775808.0)
+                .then_some(whole as i64)
+        }
+        Prim::FNarrow => {
+            let narrow = float(a) as f32;
+            Some(if narrow.is_nan() {
+                0x7FC0_0000
+            } else {
+                i64::from(narrow.to_bits())
+            })
+        }
+        Prim::FWiden => Some(bits(f64::from(f32::from_bits(a as u64 as u32)))),
+        Prim::FOfDecimal => Some(bits(of_decimal(a, b))),
+        Prim::FDigits => decimal(a, b).map(|(digits, _)| digits),
+        Prim::FExp10 => decimal(a, b).map(|(_, exp10)| exp10),
     };
     result.map(Value::Int).ok_or(Stop::Wrong)
+}
+
+/// Does an integer fit in a width: so many bits with a sign if the width is
+/// positive, without one if it is negative?
+fn fits(a: i64, width: i64) -> bool {
+    if width > 0 {
+        width >= 64 || (-(1i64 << (width - 1)) <= a && a < (1i64 << (width - 1)))
+    } else if width < 0 {
+        let width = width.unsigned_abs();
+        a >= 0 && (width >= 63 || a < (1i64 << width))
+    } else {
+        false
+    }
+}
+
+/// A floating point number is held as the integer with its bits.
+fn float(bits: i64) -> f64 {
+    f64::from_bits(bits as u64)
+}
+
+/// There is one NaN: quiet, with no sign and no payload.
+fn bits(x: f64) -> i64 {
+    if x.is_nan() {
+        0x7FF8_0000_0000_0000
+    } else {
+        x.to_bits() as i64
+    }
+}
+
+/// `digits * 10^exp10`, to the nearest number.
+fn of_decimal(digits: i64, exp10: i64) -> f64 {
+    if digits == 0 {
+        0.0
+    } else if exp10 > 400 {
+        if digits < 0 {
+            f64::NEG_INFINITY
+        } else {
+            f64::INFINITY
+        }
+    } else if exp10 < -400 {
+        if digits < 0 {
+            -0.0
+        } else {
+            0.0
+        }
+    } else {
+        format!("{digits}e{exp10}").parse().unwrap_or(f64::NAN)
+    }
+}
+
+/// A number to `p` digits, 1 to 17: the digits as an integer, without the
+/// sign, and the power of ten they are to be multiplied by. Zero is `(0, 0)`.
+fn decimal(a: i64, p: i64) -> Option<(i64, i64)> {
+    let x = float(a).abs();
+    if !(1..=17).contains(&p) || !x.is_finite() {
+        return None;
+    }
+    if x == 0.0 {
+        return Some((0, 0));
+    }
+    let p = p as usize;
+    let text = format!("{:.*e}", p - 1, x);
+    let (mantissa, exponent) = text.split_once('e')?;
+    let digits: i64 = mantissa.replace('.', "").parse().ok()?;
+    let exponent: i64 = exponent.parse().ok()?;
+    Some((digits, exponent - (p as i64 - 1)))
 }
 
 fn show(names: &[String], v: &Value) -> String {
