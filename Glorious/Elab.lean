@@ -104,7 +104,9 @@ structure Blocks where
   traits : TraitInfo := {}
   /-- For each borrow of a field, what is gone through to reach the field: at
   each step the constructor, or none for a tuple, and how many fields it has. -/
-  fields : List (Nat × Bool × List (Option String × Nat)) := []
+  fields : List (Nat × Bool × List Nat × List (Option String × Nat)) := []
+  /-- For each field read by name, which field it is. -/
+  fieldReads : List (Nat × Nat) := []
 
 structure Globals where
   ctors : List (String × CtorInfo) := []
@@ -318,6 +320,7 @@ partial def fvExpr (bound : List String) : Expr → List String
   | .deref e => fvExpr bound e
   | .reborrow _ e => fvExpr bound e
   | .refField _ _ x _ _ => if bound.contains x then [] else [x]
+  | .fieldOf _ e _ => fvExpr bound e
 
 partial def fvClause (bound : List String) : Clause → List String
   | .mk pats body => fvStmts (pats.flatMap patVars ++ bound) body
@@ -480,6 +483,7 @@ partial def appliedExpr (p : String) : Expr → List Nat
   | .deref e => appliedExpr p e
   | .reborrow _ e => appliedExpr p e
   | .refField _ _ _ _ _ => []
+  | .fieldOf _ e _ => appliedExpr p e
 
 partial def appliedCall (p : String) (f : Expr) (args : List Expr) : List Nat :=
   let here := match f with
@@ -553,6 +557,7 @@ partial def coerceExpr (cs : List (Site × String)) : Expr → Expr
   | .labelScope l body => .labelScope l (coerceStmts cs body)
   | .deref e => .deref (coerceExpr cs e)
   | .reborrow uniq e => .reborrow uniq (coerceExpr cs e)
+  | .fieldOf id e name => .fieldOf id (coerceExpr cs e) name
   | e => e
 
 partial def coerceArgs (cs : List (Site × String)) (call : Nat) (args : List Expr) : List Expr :=
@@ -761,6 +766,8 @@ partial def elabExpr (scope : Scope) (tailPos : Bool) : Expr → M Atom
   | .reborrow _ e => elabExpr scope false e
   | .refField _ _ x _ _ =>
     throw s!"a borrow of a field of `{x}` is elaborated only after the program is checked"
+  | .fieldOf _ _ name =>
+    throw s!"the field `{name}` is found by the checker: the program is elaborated only after it"
   | .deref e => do
     let p ← elabExpr scope false e
     emit (.mem .load [p])
@@ -1404,6 +1411,7 @@ private partial def untraitExpr (tr : TraitInfo) (owner : String) : Expr → Exp
   | .labelScope l body => .labelScope l (untraitStmts tr owner (0, 0) body)
   | .deref e => .deref (untraitExpr tr owner e)
   | .reborrow uniq e => .reborrow uniq (untraitExpr tr owner e)
+  | .fieldOf id e name => .fieldOf id (untraitExpr tr owner e) name
   | e => e
 
 private partial def untraitCall (tr : TraitInfo) (owner : String) (id : Nat) (f : Expr)
@@ -1586,7 +1594,7 @@ private def fieldRefName (id : Nat) : String := s!"%fieldref{id}"
 
 /-- A borrow of a field: its identity, whether for writing, the variable, and
 the way to the field. -/
-private abbrev FieldBorrow := Nat × Bool × String × List Nat
+private abbrev FieldBorrow := Nat × Bool × String
 
 mutual
 
@@ -1595,7 +1603,7 @@ expression with a name in its place, and the parts of the expression that are
 evaluated before it and do something, each given a name so that they still
 are. -/
 private partial def liftField : Expr → Option (List Stmt × Expr × FieldBorrow)
-  | .refField id uniq x path _ => some ([], .name none (fieldRefName id), (id, uniq, x, path))
+  | .refField id uniq x _ _ => some ([], .name none (fieldRefName id), (id, uniq, x))
   | .call cid f args =>
     (liftParts (f :: args)).map fun (lets, parts, b) =>
       (lets, .call cid (parts.headD f) (parts.drop 1), b)
@@ -1604,6 +1612,7 @@ private partial def liftField : Expr → Option (List Stmt × Expr × FieldBorro
       (lets, .call cid (parts.headD f) (parts.drop 1), b)
   | .tuple es => (liftParts es).map fun (lets, parts, b) => (lets, .tuple parts, b)
   | .proj e i => (liftField e).map fun (lets, e, b) => (lets, .proj e i, b)
+  | .fieldOf id e name => (liftField e).map fun (lets, e, b) => (lets, .fieldOf id e name, b)
   | .deref e => (liftField e).map fun (lets, e, b) => (lets, .deref e, b)
   | .reborrow u e => (liftField e).map fun (lets, e, b) => (lets, .reborrow u e, b)
   | _ => none
@@ -1644,35 +1653,47 @@ private def liftFieldStmt : Stmt → Option (List Stmt × Stmt × FieldBorrow)
       | _ => none
   | _ => none
 
+/-- What the checker found about fields: for each borrow of one, whether it
+goes through a reference, the way to the field by number, and what is gone
+through; and for each field read by name, which field it is. -/
+structure FieldInfo where
+  shapes : List (Nat × Bool × List Nat × List (Option String × Nat))
+  reads : List (Nat × Nat)
+
 mutual
 
 /-- The callables and scopes written inside an expression, with the borrows of
 fields in them written out. -/
-private partial def unfieldExpr (shapes : List (Nat × Bool × List (Option String × Nat))) : Expr → Expr
-  | .call id f args => .call id (unfieldExpr shapes f) (args.map (unfieldExpr shapes))
-  | .tailCall id f args => .tailCall id (unfieldExpr shapes f) (args.map (unfieldExpr shapes))
-  | .tuple es => .tuple (es.map (unfieldExpr shapes))
-  | .proj e i => .proj (unfieldExpr shapes e) i
-  | .deref e => .deref (unfieldExpr shapes e)
-  | .reborrow u e => .reborrow u (unfieldExpr shapes e)
-  | .closure id clauses => .closure id (clauses.map (unfieldClause shapes))
-  | .labelScope l body => .labelScope l (unfieldStmts shapes body)
+private partial def unfieldExpr (info : FieldInfo) : Expr → Expr
+  | .call id f args => .call id (unfieldExpr info f) (args.map (unfieldExpr info))
+  | .tailCall id f args => .tailCall id (unfieldExpr info f) (args.map (unfieldExpr info))
+  | .tuple es => .tuple (es.map (unfieldExpr info))
+  | .proj e i => .proj (unfieldExpr info e) i
+  | .fieldOf id e name =>
+    -- The checker said which field the name is.
+    match info.reads.lookup id with
+    | some i => .proj (unfieldExpr info e) i
+    | none => .fieldOf id (unfieldExpr info e) name
+  | .deref e => .deref (unfieldExpr info e)
+  | .reborrow u e => .reborrow u (unfieldExpr info e)
+  | .closure id clauses => .closure id (clauses.map (unfieldClause info))
+  | .labelScope l body => .labelScope l (unfieldStmts info body)
   | .handle subject arms =>
-    .handle (unfieldBlock shapes subject) (arms.map (unfieldClause shapes))
+    .handle (unfieldBlock info subject) (arms.map (unfieldClause info))
   | e => e
 
 /-- An expression that is run as a body of its own: if it borrows a field, it
 becomes a block. -/
-private partial def unfieldBlock (shapes : List (Nat × Bool × List (Option String × Nat))) (e : Expr) :
+private partial def unfieldBlock (info : FieldInfo) (e : Expr) :
     Expr :=
-  let e := unfieldExpr shapes e
-  if (liftField e).isSome then .labelScope "%block" (unfieldStmts shapes [.expr e]) else e
+  let e := unfieldExpr info e
+  if (liftField e).isSome then .labelScope "%block" (unfieldStmts info [.expr e]) else e
 
-private partial def unfieldClause (shapes : List (Nat × Bool × List (Option String × Nat))) :
+private partial def unfieldClause (info : FieldInfo) :
     Clause → Clause
-  | .mk pats body => .mk pats (unfieldStmts shapes body)
+  | .mk pats body => .mk pats (unfieldStmts info body)
 
-private partial def unfieldStmts (shapes : List (Nat × Bool × List (Option String × Nat))) :
+private partial def unfieldStmts (info : FieldInfo) :
     List Stmt → List Stmt
   | [] => []
   | s :: rest =>
@@ -1683,18 +1704,18 @@ private partial def unfieldStmts (shapes : List (Nat × Bool × List (Option Str
       | s => (id, s)
     let (wrap, s) := peel s
     let s := match s with
-      | .expr e => Stmt.expr (unfieldExpr shapes e)
-      | .let_ pat e => .let_ pat (unfieldExpr shapes e)
-      | .letMut y e => .letMut y (unfieldExpr shapes e)
-      | .assign target e => .assign (unfieldExpr shapes target) (unfieldExpr shapes e)
-      | .defer e => .defer (unfieldBlock shapes e)
+      | .expr e => Stmt.expr (unfieldExpr info e)
+      | .let_ pat e => .let_ pat (unfieldExpr info e)
+      | .letMut y e => .letMut y (unfieldExpr info e)
+      | .assign target e => .assign (unfieldExpr info target) (unfieldExpr info e)
+      | .defer e => .defer (unfieldBlock info e)
       | s => s
     match liftFieldStmt s with
-    | none => wrap s :: unfieldStmts shapes rest
-    | some (before, s, (id, uniq, x, path)) =>
-      match shapes.lookup id with
-      | none => wrap s :: unfieldStmts shapes rest
-      | some (viaRef, shape) =>
+    | none => wrap s :: unfieldStmts info rest
+    | some (before, s, (id, uniq, x)) =>
+      match info.shapes.lookup id with
+      | none => wrap s :: unfieldStmts info rest
+      | some (viaRef, path, shape) =>
         -- What the field is a field of: what the variable holds, or what the
         -- reference points to.
         let root := if viaRef then Expr.deref (.name none x) else Expr.name none x
@@ -1723,21 +1744,22 @@ private partial def unfieldStmts (shapes : List (Nat × Bool × List (Option Str
               [.assign root (rebuildField root [] path shape (.name none cell))]]) [])]
           else []
         let block := .letMut cell (fieldPath root path) :: putBack
-          ++ .let_ (.var ref) (.ref uniq cell) :: unfieldStmts shapes inner ++ result
+          ++ .let_ (.var ref) (.ref uniq cell) :: unfieldStmts info inner ++ result
         let scope := Expr.labelScope s!"%field{id}" block
         match pat with
         | none => before ++ [.expr scope]
-        | some pat => before ++ .let_ pat scope :: unfieldStmts shapes after
+        | some pat => before ++ .let_ pat scope :: unfieldStmts info after
 
 end
 
 /-- Write out every borrow of a field: see above. `shapes` is what the checker
 found each borrow goes through. -/
-def unfield (shapes : List (Nat × Bool × List (Option String × Nat))) (items : List Item) : List Item :=
-  if shapes.isEmpty then items
+def unfield (shapes : List (Nat × Bool × List Nat × List (Option String × Nat)))
+    (reads : List (Nat × Nat)) (items : List Item) : List Item :=
+  if shapes.isEmpty && reads.isEmpty then items
   else items.map fun
     | .fn name params annots ret clauses =>
-      .fn name params annots ret (clauses.map (unfieldClause shapes))
+      .fn name params annots ret (clauses.map (unfieldClause ⟨shapes, reads⟩))
     | item => item
 
 /-- Collect the global declarations. -/
@@ -1775,6 +1797,10 @@ def collect (items : List Item) :
     | .coerce _ => pure ()
     -- How often a value is to be used is the checker's business.
     | .use _ _ _ => pure ()
+    -- So are the names of fields, and by now every field is a number.
+    | .fieldNames _ _ _ => pure ()
+    | .typeAlias _ _ _ => pure ()
+    | .pub _ => pure ()
     | .trait name _ =>
       throw s!"trait `{name}`: a program with traits is elaborated only after it is checked"
     | .impl _ tr _ _ _ _ =>

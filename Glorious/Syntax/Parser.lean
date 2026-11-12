@@ -21,6 +21,10 @@ namespace Glorious.Syntax
 structure PCtx where
   toks : Array Token
   fix : Fixities
+  /-- The constructors declared with named fields, each with the names in
+  order: found before parsing, since `Point { x: 1 }` is otherwise a call
+  given a block. -/
+  records : List (String × List String) := []
   /-- Added to the identity of each callable literal, so that the literals of
   texts parsed separately stay distinct. -/
   base : Nat
@@ -99,6 +103,32 @@ private partial def parsePattern : P Pattern := do
       else pure (none, x)
     if ← acceptPunct "(" then
       let args ← parsePatternList
+      pure (.ctor name qual args)
+    else if (← peek) == .punct "{" && ((← read).records.lookup name).isSome then
+      -- `Point { x, y: p }`: each field by name, `x` alone binding `x`; `..`
+      -- lets the fields not named go.
+      let names := ((← read).records.lookup name).getD []
+      advance
+      let mut given : List (String × Pattern) := []
+      let mut rest := false
+      repeat
+        if (← peek) == .punct "}" then break
+        if (← peek) == .punct "." && (← peek 1) == .punct "." then
+          advance
+          advance
+          rest := true
+          break
+        let field ← expectIdent
+        unless names.contains field do failAt s!"`{name}` has no field `{field}`"
+        if given.any (·.1 == field) then failAt s!"field `{field}` is written twice"
+        let pat ← if ← acceptPunct ":" then parsePattern else pure (.var field)
+        given := given ++ [(field, pat)]
+        if !(← acceptPunct ",") then break
+      expectPunct "}"
+      let args ← names.mapM fun field =>
+        match given.lookup field with
+        | some pat => pure pat
+        | none => if rest then pure Pattern.wild else failAt s!"field `{field}` of `{name}` is missing (`..` lets the rest go)"
       pure (.ctor name qual args)
     else if qual.isSome then pure (.ctor name qual [])
     else pure (.var name)
@@ -205,13 +235,17 @@ private partial def parseUnary (noBlock : Bool) : P Expr := do
           let x ← expectIdent
           if star then expectPunct ")"
           -- `&x.0.1` borrows a field of what `x` holds.
-          let mut path : Array Nat := #[]
+          let mut path : Array String := #[]
           repeat
             match ← peek, ← peek 1 with
             | .punct ".", .int n =>
               advance
               advance
-              path := path.push n
+              path := path.push (toString n)
+            | .punct ".", .ident field =>
+              advance
+              advance
+              path := path.push field
             | _, _ => break
           if path.isEmpty then
             if star then failAt "expected a field: `&(*p).0`"
@@ -239,6 +273,36 @@ private partial def parsePostfix (noBlock : Bool) : P Expr := do
         args := args ++ [← parseBraces]
       e := .call id e args
     | .punct "{" =>
+      -- `Point { x: 1, y: 2 }` builds a value of a type declared with names.
+      let records := (← read).records
+      let record := match e with
+        | .name _ x => (records.lookup x).map fun names => (x, names)
+        | _ => none
+      if let some (x, names) := record then
+        let id := (← read).base + (← get) + 1
+        advance
+        let mut given : List (String × Expr) := []
+        repeat
+          if (← peek) == .punct "}" then break
+          let field ← expectIdent
+          unless names.contains field do failAt s!"`{x}` has no field `{field}`"
+          if given.any (·.1 == field) then failAt s!"field `{field}` is written twice"
+          let value ← if ← acceptPunct ":" then parseBinary 0 false else pure (.name none field)
+          given := given ++ [(field, value)]
+          if !(← acceptPunct ",") then break
+        expectPunct "}"
+        for field in names do
+          unless given.any (·.1 == field) do failAt s!"field `{field}` of `{x}` is missing"
+        if given.map (·.1) == names then
+          e := .call id e (given.map (·.2))
+        else
+          -- Written in another order: computed in the order written, then
+          -- put in the declared one.
+          let temps := given.map fun (field, _) => s!"%{field}"
+          e := .call id (.closure 0 [.mk (temps.map Pattern.var)
+            [.expr (.call (id + 1) e (names.map fun field => .name none s!"%{field}"))]])
+            (given.map (·.2))
+        continue
       -- `f { body }` is `f({ body })`.
       if noBlock then break
       let id := (← read).base + (← get) + 1
@@ -252,7 +316,12 @@ private partial def parsePostfix (noBlock : Bool) : P Expr := do
         advance
         advance
         e := .proj e n
-      | _ => failAt "expected a field index after `.`"
+      | .ident field =>
+        let id := (← read).base + (← get) + 1
+        advance
+        advance
+        e := .fieldOf id e field
+      | _ => failAt "expected a field after `.`"
     | _ => break
   pure e
 
@@ -374,10 +443,13 @@ private partial def parseStmts : P (List Stmt) := do
         let id := (← read).base + (← get) + 1
         let value ← parseBinary 0 false
         -- `x.0 = v` and `(*p).0 = v` assign through a borrow of the field.
-        let rec field : Expr → Option (String × List Nat × Bool)
-          | .proj (.name none x) idx => some (x, [idx], false)
-          | .proj (.deref (.name none x)) idx => some (x, [idx], true)
-          | .proj e idx => (field e).map fun (x, path, star) => (x, path ++ [idx], star)
+        let rec field : Expr → Option (String × List String × Bool)
+          | .proj (.name none x) idx => some (x, [toString idx], false)
+          | .proj (.deref (.name none x)) idx => some (x, [toString idx], true)
+          | .proj e idx => (field e).map fun (x, path, star) => (x, path ++ [toString idx], star)
+          | .fieldOf _ (.name none x) name => some (x, [name], false)
+          | .fieldOf _ (.deref (.name none x)) name => some (x, [name], true)
+          | .fieldOf _ e name => (field e).map fun (x, path, star) => (x, path ++ [name], star)
           | _ => none
         let target := match field e with
           | some (x, path, star) => Expr.deref (.refField id true x path star)
@@ -566,26 +638,6 @@ private def parseQuantity : P (Nat × Option Nat) := do
 
 private partial def parseItem : P Item := do
   match ← peek with
-  | .ident "enum" =>
-    advance
-    let name ← expectIdent
-    let params ← parseGenerics
-    expectPunct "{"
-    let mut ctors : Array (String × List TypeExpr) := #[]
-    repeat
-      if (← peek) == .punct "}" then break
-      let c ← expectIdent
-      ctors := ctors.push (c, ← parseFields)
-      if !(← acceptPunct ",") then break
-    expectPunct "}"
-    pure (.enum name params ctors.toList)
-  | .ident "struct" =>
-    advance
-    let name ← expectIdent
-    let params ← parseGenerics
-    let fields ← parseFields
-    let _ ← acceptPunct ";"
-    pure (.struct name params fields)
   | .ident "effect" =>
     advance
     let name ← expectIdent
@@ -727,12 +779,158 @@ private partial def parseItem : P Item := do
     else failAt "expected a declaration"
   | _ => failAt "expected a declaration"
 
+/-- `pub`, with or without `(crate)` or `(super)`, if it is next. -/
+private def acceptPub : P Bool := do
+  if (← peek) != .ident "pub" then return false
+  advance
+  if (← peek) == .punct "(" then
+    advance
+    let _ ← expectIdent
+    expectPunct ")"
+  pure true
+
+/-- The fields of a struct or of an enum's constructor: none, `(A, B)`, or
+`{ a: A, b: B }`. Each may be `pub`. Gives the types, the names if they were
+written with names, and which are `pub`. -/
+private partial def parseFieldDecls : P (List TypeExpr × List String × List Bool) := do
+  if ← acceptPunct "(" then
+    let mut types : Array TypeExpr := #[]
+    let mut pubs : Array Bool := #[]
+    repeat
+      if (← peek) == .punct ")" then break
+      pubs := pubs.push (← acceptPub)
+      match ← peek, ← peek 1 with
+      | .ident _, .punct ":" =>
+        advance
+        advance
+      | _, _ => pure ()
+      types := types.push (← parseType)
+      if !(← acceptPunct ",") then break
+    expectPunct ")"
+    pure (types.toList, [], pubs.toList)
+  else if ← acceptPunct "{" then
+    let mut types : Array TypeExpr := #[]
+    let mut names : Array String := #[]
+    let mut pubs : Array Bool := #[]
+    repeat
+      if (← peek) == .punct "}" then break
+      pubs := pubs.push (← acceptPub)
+      let field ← expectIdent
+      if names.contains field then failAt s!"field `{field}` is declared twice"
+      names := names.push field
+      expectPunct ":"
+      types := types.push (← parseType)
+      if !(← acceptPunct ",") then break
+    expectPunct "}"
+    pure (types.toList, names.toList, pubs.toList)
+  else pure ([], [], [])
+
+/-- A declaration, and with it what was written beside it. -/
+private partial def parseItemGroup : P (List Item) := do
+  match ← peek with
+  | .ident "pub" =>
+    let _ ← acceptPub
+    match ← parseItemGroup with
+    | item :: more => pure (.pub item :: more)
+    | [] => pure []
+  | .ident "struct" =>
+    advance
+    let name ← expectIdent
+    let params ← parseGenerics
+    let (fields, names, pubs) ← parseFieldDecls
+    let _ ← acceptPunct ";"
+    pure [.struct name params fields, .fieldNames name names pubs]
+  | .ident "enum" =>
+    advance
+    let name ← expectIdent
+    let params ← parseGenerics
+    expectPunct "{"
+    let mut ctors : Array (String × List TypeExpr) := #[]
+    let mut named : Array Item := #[]
+    repeat
+      if (← peek) == .punct "}" then break
+      let c ← expectIdent
+      let (fields, names, _) ← parseFieldDecls
+      ctors := ctors.push (c, fields)
+      -- A constructor's fields are as visible as the type.
+      unless names.isEmpty do named := named.push (.fieldNames c names (fields.map fun _ => true))
+      if !(← acceptPunct ",") then break
+    expectPunct "}"
+    pure (.enum name params ctors.toList :: named.toList)
+  | .ident "type" =>
+    advance
+    let name ← expectIdent
+    let params ← parseGenerics
+    expectPunct "="
+    let body ← parseType
+    let _ ← acceptPunct ";"
+    pure [.typeAlias name params body]
+  | _ => pure [← parseItem]
+
 private partial def parseItems : P (List Item) := do
   let mut out : Array Item := #[]
   repeat
     if (← peek) == .eof then break
-    out := out.push (← parseItem)
+    out := out ++ (← parseItemGroup).toArray
   pure out.toList
+
+/-- The constructors a token stream declares with named fields, each with the
+names in order: `struct Name { a: A }` and, inside an enum, `Name { a: A }`. -/
+private def collectRecords (toks : Array Token) : List (String × List String) := Id.run do
+  let tok := fun (i : Nat) => (toks[i]?.map (·.tok)).getD .eof
+  -- The names of the fields in the braces opened at `i`.
+  let fieldsAt := fun (i : Nat) => Id.run do
+    let mut names : Array String := #[]
+    let mut depth := 0
+    let mut j := i + 1
+    while j < toks.size do
+      match tok j with
+      | .punct "}" => if depth == 0 then break else depth := depth - 1
+      | .punct "{" => depth := depth + 1
+      | .punct "(" => depth := depth + 1
+      | .punct ")" => depth := depth - 1
+      | .op "<" => depth := depth + 1
+      | .op ">" => depth := depth - 1
+      | .ident x => if depth == 0 && tok (j + 1) == .punct ":" then names := names.push x
+      | _ => pure ()
+      j := j + 1
+    names.toList
+  -- Past `<...>`, if it starts at `i`.
+  let pastGenerics := fun (i : Nat) => Id.run do
+    if tok i != .op "<" then return i
+    let mut j := i + 1
+    let mut depth := 1
+    while j < toks.size && depth != 0 do
+      match tok j with
+      | .op "<" => depth := depth + 1
+      | .op ">" => depth := depth - 1
+      | _ => pure ()
+      j := j + 1
+    j
+  let mut out : List (String × List String) := []
+  for i in [0:toks.size] do
+    match tok i, tok (i + 1) with
+    | .ident "struct", .ident name =>
+      let j := pastGenerics (i + 2)
+      if tok j == .punct "{" then out := (name, fieldsAt j) :: out
+    | .ident "enum", .ident _ =>
+      -- Each constructor at the top of the enum's braces that has braces.
+      let mut j := pastGenerics (i + 2)
+      if tok j == .punct "{" then
+        let mut depth := 0
+        j := j + 1
+        while j < toks.size do
+          match tok j with
+          | .punct "}" => if depth == 0 then break else depth := depth - 1
+          | .punct "(" => depth := depth + 1
+          | .punct ")" => depth := depth - 1
+          | .punct "{" => depth := depth + 1
+          | .ident c =>
+            if depth == 0 && tok (j + 1) == .punct "{" then out := (c, fieldsAt (j + 1)) :: out
+          | _ => pure ()
+          j := j + 1
+    | _, _ => pure ()
+  out
 
 /-- Collect the fixity declarations of a token stream. -/
 private def collectFixities (toks : Array Token) (fix : Fixities) : Except String Fixities := do
@@ -761,7 +959,7 @@ def parse (fix : Fixities) (src : String) (base : Nat := 0) :
     Except String (List Item × Fixities) := do
   let toks ← lex src
   let fix ← collectFixities toks fix
-  let (items, _) ← (parseItems.run ⟨toks, fix, base⟩).run 0
+  let (items, _) ← (parseItems.run ⟨toks, fix, collectRecords toks, base⟩).run 0
   pure (items, fix)
 
 end Glorious.Syntax

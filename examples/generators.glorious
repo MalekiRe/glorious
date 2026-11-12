@@ -28,7 +28,7 @@ fn fold(generator, initial, step) {
 // rest of the generator is cancelled, which runs its cleanups. `wanted` is
 // called while the generator is held, so its type says it performs nothing:
 // it comes back, and the generator is not left behind.
-fn find(generator, wanted: fn(Int) -> Result<(), ()> / {}) {
+fn find(generator, wanted: fn(Int) -> Bool / {}) {
     handle generator() {
         _ => None,
         yield(value, k) => if(wanted(value)) { cancel(k); Some(value) } else { k(()) }

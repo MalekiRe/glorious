@@ -755,6 +755,27 @@ own recursive group is given captures of its own, related to the function's as
 any other use is, so that what a function passes to itself is not taken to be
 what it was passed.
 
+## Fields have names, and a type can have another name
+
+**Decision: a name for a field is the checker's; after it a field is a
+number.** `struct Point { x: Int, y: Int }` and an enum's constructor
+`Branch { left: Int, right: Int }` name their fields. A value is built by
+name, `Point { x: 1, y: 2 }`, in any order, computed in the order written; a
+pattern takes fields by name, `Point { x, y: p }`, with `..` for the rest;
+`p.x` reads a field, and a field is borrowed and assigned by name as by
+number. Building and patterns are settled where they are parsed, from the
+declaration. Which field `p.x` is depends on the type of `p`: the checker
+finds it and tells the elaborator, which sees only numbers. So the type has
+to be known where a field is named.
+
+`type Name<T> = Type;` gives a type another way to be written: it is written
+out before the program is checked, and is the same type. `Bool` and
+`Option<T>` are such names in the prelude.
+
+Not built: control of layout (`#[repr(..)]` and the like). There is no native
+code and no foreign interface for a layout to matter to; a value is a tagged
+list of values on both machines.
+
 ## Lifetimes can be written
 
 **Decision: a lifetime names what a reference may be holding borrows of.** The

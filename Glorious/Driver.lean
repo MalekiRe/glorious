@@ -1,4 +1,5 @@
 import Glorious.Syntax.Parser
+import Glorious.Syntax.Resolve
 import Glorious.Elab
 import Glorious.Check
 import Glorious.Infer
@@ -64,7 +65,8 @@ def compileSource (src : String) (check : Bool := true) : Except String Compiled
     | .ok r => pure r
     | .error e => throw s!"prelude: {e}"
   let (items, _) ← Syntax.parse fix src (base := 1000000)
-  let all := prelude ++ items
+  -- A type alias is written out wherever it is used.
+  let all ← Syntax.expandAliases (Syntax.stripPub (prelude ++ items))
   -- What the checker learnt about blocks that share an environment. A program
   -- it rejects is elaborated without that.
   let blocks ← match Check.checkProgram all with
@@ -78,7 +80,7 @@ def compileSource (src : String) (check : Bool := true) : Except String Compiled
     | some b =>
       let (items, b) := Elab.untrait b all
       -- Nor a borrow of a field: each is a variable of its own by now.
-      (Elab.unfield b.fields items, some b)
+      (Elab.unfield b.fields b.fieldReads items, some b)
     | none => (all, none)
   let plain := fun (blocks : Option Elab.Blocks) => do
     let out ← Elab.elabProgram all blocks

@@ -47,11 +47,14 @@ inductive Expr where
   | deref (e : Expr)
   /-- `&mut *e` or `&*e`: a reference borrowed from the reference `e`. -/
   | reborrow (uniq : Bool) (e : Expr)
-  /-- `&x.0` or `&mut x.1.0`: a reference to a field of what a mutable variable
-  holds, or of what a reference points to, the field found by going through
-  `path`. With `star` it was written `&(*x).0`, which only a reference can be.
-  `id` tells this borrow from every other. -/
-  | refField (id : Nat) (uniq : Bool) (name : String) (path : List Nat) (star : Bool)
+  /-- `&x.0` or `&mut x.left.0`: a reference to a field of what a mutable
+  variable holds, or of what a reference points to, the field found by going
+  through `path`, each step a field's number or its name. With `star` it was
+  written `&(*x).0`, which only a reference can be. `id` tells this borrow from
+  every other. -/
+  | refField (id : Nat) (uniq : Bool) (name : String) (path : List String) (star : Bool)
+  /-- `e.name`: the field of that name. `id` tells this read from every other. -/
+  | fieldOf (id : Nat) (e : Expr) (name : String)
 
 inductive Stmt where
   | let_ (pat : Pattern) (value : Expr)
@@ -180,5 +183,12 @@ inductive Item where
   /-- `impl Use<[lower, upper]> for Head {}`: how often a value of a declared
   type is to be used; no upper bound is `infinity`. -/
   | use (head : String) (lower : Nat) (upper : Option Nat)
+  /-- The names of a constructor's fields, if it was declared with names, and
+  for each field whether it is `pub`. Written out beside the declaration. -/
+  | fieldNames (ctor : String) (names : List String) (pubs : List Bool)
+  /-- `type Name<T> = Type;`: another way to write a type, not a new one. -/
+  | typeAlias (name : String) (params : List String) (body : TypeExpr)
+  /-- `pub item`: the item can be named from outside its module. -/
+  | pub (item : Item)
 
 end Glorious.Syntax
