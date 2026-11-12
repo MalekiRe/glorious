@@ -790,6 +790,39 @@ What it is not:
   rewriting passes the value it found, is not proved; nor that `solve` finds
   evidence whenever there is some.
 
+## A variable destroys what it holds
+
+**Decision: `Drop` is the compiler's trait, and a value is destroyed where a
+variable holding it ends.** `impl Drop for T { fn drop(p) { ... } }` says what
+is done to a `T` when it is destroyed; `p` is a `&mut T`. The function is run
+
+- when a `let mut` variable's block is left, by any path, on what it then holds;
+- likewise for a `let` whose name nothing afterwards uses: the name owns it;
+- before a variable is assigned, on what it held, once the new value is computed.
+
+A value whose type has `Drop`, or holds one that has, has one owner: it is used
+at most once, as a value that holds a resumption is. A program does not call
+`drop`. Later variables end first.
+
+It is built from what was there. Once the source text is checked, a place where
+a value is destroyed is a cleanup (`defer`) that calls the implementation's
+function with a borrow of the variable, written by the same rewriting that
+removes traits; Core is told nothing new.
+
+What it is not:
+
+- **It is the hook only.** A type without `Drop` that holds one with it is not
+  taken apart when it is destroyed.
+- **A value that never comes to rest in a variable is not destroyed.** One
+  given to a function that ignores it, one a function generic in its type puts
+  in a variable, one put in a value that is forgotten, the unused result of a
+  call, and one taken apart by a pattern all end without the function being
+  run. Nothing is proved about how often it runs.
+- **The word `defer` stays.** A guard written in the language
+  (`struct Deferred(fn() -> ())` with `Drop`) works for a callable that touches
+  no mutable variable. One that does cannot be kept in a declared type: the
+  type would have to say which variable, and declared types have no way to.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by

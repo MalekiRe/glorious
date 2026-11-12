@@ -56,6 +56,20 @@ structure ImplE where
   conditions : Nat
   methods : List (String × Nat)
 
+/-- A place where what a variable holds is destroyed: where the variable is
+declared, for the end of its block, or where it is assigned, for what it held. -/
+structure DropSite where
+  owner : String
+  line : Nat
+  col : Nat
+  name : String
+  assign : Bool
+  deriving BEq
+
+/-- The identity given to the calls of `Drop`'s function that the compiler
+writes, so that the borrow each passes is not taken for one the program wrote. -/
+def dropCallId : Nat := 4000000000
+
 /-- What the checker tells the elaborator about a program's traits. -/
 structure TraitInfo where
   /-- For a call, by its identity: how the bounds it needs are met. -/
@@ -65,6 +79,9 @@ structure TraitInfo where
   /-- The functions that need bounds of their type parameters, and how many. -/
   bounded : List (String × Nat) := []
   impls : List ImplE := []
+  /-- Where a value whose type has `Drop` is destroyed, each with the identity
+  under which `dicts` says which implementation runs. -/
+  drops : List (DropSite × Nat) := []
 
 /-- The function an implementation's function is, as a top-level function. -/
 def implFnName (trait head method : String) : String := s!"{trait}::{method}@{head}"
@@ -623,7 +640,13 @@ partial def elabExpr (scope : Scope) (tailPos : Bool) : Expr → M Atom
     match ← elabExpr scope false e with
     | .var i => emit (.let_ (.place ⟨i, [idx]⟩))
     | .int _ => throw "an integer has no fields"
-  | .call _ f args => elabCall scope false f args
+  | .call id f args => do
+    let before := (← get).plain.length
+    let r ← elabCall scope false f args
+    -- The borrow a destruction passes is the compiler's, not the program's.
+    if id == dropCallId then
+      modify fun s => { s with plain := s.plain.drop (s.plain.length - before) }
+    pure r
   | .tailCall _ f args => do
     unless tailPos do throw "`tail` call is not in tail position"
     if let some why := (← get).noTail then
@@ -1211,39 +1234,82 @@ private partial def dictExpr : DictE → Expr
   | .param k => .name none s!"%dict{k}"
   | .impl fn subs => .call 0 (.name none fn) (subs.map dictExpr)
 
+/-- The call that destroys what `x` holds, if this is a place where that
+happens: `Drop`'s function, given the variable. -/
+private def dropHook (tr : TraitInfo) (site : DropSite) : Option Expr :=
+  match tr.drops.lookup site with
+  | some id =>
+    match tr.dicts.lookup id with
+    | some [d] => some (.call dropCallId (.proj (dictExpr d) 0) [.ref true site.name])
+    | _ => none
+  | none => none
+
 mutual
 
-private partial def untraitExpr (tr : TraitInfo) : Expr → Expr
-  | .call id f args => untraitCall tr id f args false
-  | .tailCall id f args => untraitCall tr id f args true
-  | .tuple args => .tuple (args.map (untraitExpr tr))
-  | .proj e idx => .proj (untraitExpr tr e) idx
-  | .closure id clauses => .closure id (clauses.map (untraitClause tr))
-  | .handle subject arms => .handle (untraitExpr tr subject) (arms.map (untraitClause tr))
-  | .labelScope l body => .labelScope l (body.map (untraitStmt tr))
-  | .deref e => .deref (untraitExpr tr e)
+private partial def untraitExpr (tr : TraitInfo) (owner : String) : Expr → Expr
+  | .call id f args => untraitCall tr owner id f args false
+  | .tailCall id f args => untraitCall tr owner id f args true
+  | .tuple args => .tuple (args.map (untraitExpr tr owner))
+  | .proj e idx => .proj (untraitExpr tr owner e) idx
+  | .closure id clauses => .closure id (clauses.map (untraitClause tr owner))
+  | .handle subject arms =>
+    .handle (untraitExpr tr owner subject) (arms.map (untraitClause tr owner))
+  | .labelScope l body => .labelScope l (untraitStmts tr owner (0, 0) body)
+  | .deref e => .deref (untraitExpr tr owner e)
   | e => e
 
-private partial def untraitCall (tr : TraitInfo) (id : Nat) (f : Expr) (args : List Expr)
-    (isTail : Bool) : Expr :=
-  let args := args.map (untraitExpr tr)
+private partial def untraitCall (tr : TraitInfo) (owner : String) (id : Nat) (f : Expr)
+    (args : List Expr) (isTail : Bool) : Expr :=
+  let args := args.map (untraitExpr tr owner)
   let mk := fun (f : Expr) (args : List Expr) =>
     if isTail then Expr.tailCall id f args else Expr.call id f args
   match tr.dicts.lookup id, tr.methods.lookup id with
   | some [d], some idx => mk (.proj (dictExpr d) idx) args
-  | some ds, none => mk (untraitExpr tr f) (ds.map dictExpr ++ args)
-  | _, _ => mk (untraitExpr tr f) args
+  | some ds, none => mk (untraitExpr tr owner f) (ds.map dictExpr ++ args)
+  | _, _ => mk (untraitExpr tr owner f) args
 
-private partial def untraitClause (tr : TraitInfo) : Clause → Clause
-  | .mk pats body => .mk pats (body.map (untraitStmt tr))
+private partial def untraitClause (tr : TraitInfo) (owner : String) : Clause → Clause
+  | .mk pats body => .mk pats (untraitStmts tr owner (0, 0) body)
 
-private partial def untraitStmt (tr : TraitInfo) : Stmt → Stmt
-  | .let_ pat value => .let_ pat (untraitExpr tr value)
-  | .expr e => .expr (untraitExpr tr e)
-  | .defer e => .defer (untraitExpr tr e)
-  | .letMut x value => .letMut x (untraitExpr tr value)
-  | .assign target value => .assign (untraitExpr tr target) (untraitExpr tr value)
-  | .located line col s => .located line col (untraitStmt tr s)
+/-- The statements of a block. A variable whose value is to be destroyed is
+followed by a cleanup that does it when the block is left; an assignment to one
+destroys what it held, once the new value is computed. -/
+private partial def untraitStmts (tr : TraitInfo) (owner : String) (pos : Nat × Nat) :
+    List Stmt → List Stmt
+  | [] => []
+  | .located line col s :: rest =>
+    match untraitStmts tr owner (line, col) (s :: rest) with
+    | first :: more => .located line col first :: more
+    | [] => []
+  | .letMut x value :: rest =>
+    let value := untraitExpr tr owner value
+    let rest := untraitStmts tr owner pos rest
+    match dropHook tr ⟨owner, pos.1, pos.2, x, false⟩ with
+    | some hook => .letMut x value :: .defer hook :: rest
+    | none => .letMut x value :: rest
+  | .let_ pat value :: rest =>
+    let value := untraitExpr tr owner value
+    let rest := untraitStmts tr owner pos rest
+    match pat with
+    | .var x =>
+      match dropHook tr ⟨owner, pos.1, pos.2, x, false⟩ with
+      | some hook => .letMut x value :: .defer hook :: rest
+      | none => .let_ pat value :: rest
+    | _ => .let_ pat value :: rest
+  | .assign target value :: rest =>
+    let value := untraitExpr tr owner value
+    let target := untraitExpr tr owner target
+    let rest := untraitStmts tr owner pos rest
+    match target with
+    | .name none x =>
+      match dropHook tr ⟨owner, pos.1, pos.2, x, true⟩ with
+      | some hook =>
+        .let_ (.var "%assigned") value :: .expr hook
+          :: .assign target (.name none "%assigned") :: rest
+      | none => .assign target value :: rest
+    | _ => .assign target value :: rest
+  | .expr e :: rest => .expr (untraitExpr tr owner e) :: untraitStmts tr owner pos rest
+  | .defer e :: rest => .defer (untraitExpr tr owner e) :: untraitStmts tr owner pos rest
 
 end
 
@@ -1260,7 +1326,7 @@ def untrait (blocks : Blocks) (items : List Item) : List Item × Blocks :=
       (ret : Option TypeExpr) (clauses : List Clause) =>
     let n := (tr.bounded.lookup name).getD 0
     Item.fn name params ((List.replicate n none) ++ annots) ret
-      (withDicts n (clauses.map (untraitClause tr)))
+      (withDicts n (clauses.map (untraitClause tr name)))
   let out := items.flatMap fun
     | .trait _ _ => []
     | .impl params trait head _ context methods =>

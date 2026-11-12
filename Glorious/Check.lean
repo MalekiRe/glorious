@@ -295,6 +295,12 @@ structure St where
   rigidKeys : Array String := #[]
   /-- What the implementation being checked assumes of its type parameters. -/
   implGivens : Option (List (String × Ty)) := none
+  /-- Where the statement being checked starts. -/
+  at_ : Nat × Nat := (0, 0)
+  /-- Variables whose value is destroyed if its type turns out to have `Drop`:
+  the place, the type, and where to report a failure. -/
+  dropCands : Array (Elab.DropSite × Ty × String) := #[]
+  dropSites : Array (Elab.DropSite × Nat) := #[]
   /-- How each call's bounds are met, for the elaborator. -/
   dictTable : Array (Nat × List Elab.DictE) := #[]
   methodCalls : Array (Nat × Nat) := #[]
@@ -838,6 +844,17 @@ partial def closeRows : Ty → Ty
 
 /-- Read the traits and their implementations. Types are declared by now. -/
 def declareTraits (items : List Item) : M Unit := do
+  -- `Drop` is the compiler's: its function is run on what a variable holds
+  -- when the variable's block ends.
+  let dropSelf ← match ← freshTy with
+    | .var id => pure id
+    | _ => pure 0
+  let dropCap ← freshCap
+  modify fun s =>
+    { s with
+      traits := ("Drop", ["drop"]) :: s.traits
+      methods := ("drop", ⟨"Drop", 0, dropSelf, [.ref .uniq (.var dropSelf) dropCap], .unit⟩)
+        :: s.methods }
   for item in items do
     if let .trait name methods := item then
       if ((← get).traits.lookup name).isSome then throw s!"trait `{name}` is declared twice"
@@ -1210,7 +1227,8 @@ partial def capOwnsOnce (cap : Nat) : M Bool := do
       | .touch _ _ => pure ()
   return false
 
-/-- Does a value of this type hold a resumption? -/
+/-- Does a value of this type hold a resumption, or something that is destroyed
+when its owner ends? Either has one owner. -/
 partial def tyOwnsOnce (visiting : List String) (t : Ty) : M Bool := do
   match ← find t with
   | .var _ => pure false
@@ -1218,6 +1236,8 @@ partial def tyOwnsOnce (visiting : List String) (t : Ty) : M Bool := do
   | .fn _ _ _ _ cap => capOwnsOnce cap
   | .ref _ _ _ => pure false
   | .con name args => do
+    -- A value that is destroyed when its owner ends has one owner.
+    if (← get).kimpls.any fun I => I.trait == "Drop" && I.head == name then return true
     if ← args.anyM (tyOwnsOnce visiting) then return true
     if visiting.contains name then return false
     match (← get).types.lookup name with
@@ -1236,10 +1256,31 @@ end
 def mustDup (t : Ty) (why : String) : M Unit :=
   modify fun s => { s with dups := s.dups.push (t, s.pos ++ why) }
 
+/-- Is it a value that is destroyed when its owner ends that makes this type
+one of a single owner? Only to say why. -/
+partial def holdsDrop (visiting : List String) (t : Ty) : M Bool := do
+  match ← find t with
+  | .tuple args => args.anyM (holdsDrop visiting)
+  | .con name args => do
+    if (← get).kimpls.any fun I => I.trait == "Drop" && I.head == name then return true
+    if ← args.anyM (holdsDrop visiting) then return true
+    if visiting.contains name then return false
+    match (← get).types.lookup name with
+    | none => pure false
+    | some decl =>
+      decl.ctors.anyM fun c => do
+        match (← get).ctors.lookup c with
+        | none => pure false
+        | some sig =>
+          (sig.fields.map (subst (sig.tvars.zip args) [] [])).anyM (holdsDrop (name :: visiting))
+  | _ => pure false
+
 def checkDups (dups : Array (Ty × String)) : M Unit := do
   for (t, why) in dups do
     modify fun s => { s with seen := [] }
     if ← tyOwnsOnce [] t then
+      if ← holdsDrop [] t then
+        throw s!"{why}, but a value that is destroyed when its owner ends can be used only once"
       throw s!"{why}, but a value that holds a resumption can be used only once"
 
 private def addUses (a b : Nat) : Nat := min 2 (a + b)
@@ -2430,6 +2471,8 @@ partial def inferCall (scope : Scope) (amb : Row) (f : Expr) (args : List Expr)
         modify fun s => { s with groupUses := s.groupUses.push ⟨call, x, s.owner, s.pos⟩ }
       pure r
     | .method sig => do
+      if sig.trait == "Drop" then
+        throw s!"`{x}` is run when what holds a value ends; a program does not call it"
       -- A trait's function at the type it is used at, which must have the trait.
       let self ← freshTy
       let tm := [(sig.self, self)]
@@ -2462,7 +2505,7 @@ partial def inferStmts (scope : Scope) (amb : Row) (stmts : List Stmt)
   match stmts with
   | [] => finish .unit false
   | .located line col s :: rest => do
-    modify fun st => { st with pos := s!"{line}:{col}: " }
+    modify fun st => { st with pos := s!"{line}:{col}: ", at_ := (line, col) }
     try inferStmts scope amb (s :: rest) want
     catch e => throw (positioned line col e)
   | [.expr e] => do finish (← inferExpr scope amb e) true
@@ -2503,7 +2546,15 @@ partial def inferStmts (scope : Scope) (amb : Row) (stmts : List Stmt)
       checkUses here scope [(x, .poly scheme)] rest
       pure result
   | .let_ pat value :: rest => do
+    let (at_, pos) := ((← get).at_, (← get).pos)
     let t ← withLater (Elab.fvStmts (Elab.patVars pat) rest) (inferExpr scope amb value)
+    -- A value given a name that nothing then uses is owned by the name: if it
+    -- is one to destroy, that happens when the block ends.
+    if let .var x := pat then
+      unless (Elab.fvStmts [] rest).contains x || (← resolveCtor x none).isSome
+          || ((← get).aliases.lookup x).isSome do
+        modify fun s =>
+          { s with dropCands := s.dropCands.push (⟨s.owner, at_.1, at_.2, x, false⟩, t, pos) }
     let binds ← inferPat pat t
     let check : Pending := ⟨(← get).pos, "the pattern of this `let` does", [t], [[pat]]⟩
     modify fun s => { s with pending := s.pending.push check }
@@ -2512,11 +2563,16 @@ partial def inferStmts (scope : Scope) (amb : Row) (stmts : List Stmt)
     checkUses here scope binds rest
     pure result
   | .letMut x value :: rest => do
+    let (at_, pos) := ((← get).at_, (← get).pos)
     let t ← withLater (Elab.fvStmts [x] rest) (inferExpr scope amb value)
     -- The variable lives until the end of this block: nothing that can reach
     -- it may be left over afterwards.
     let brand ← freshBrand
-    modify fun s => { s with cells := s.cells.push (brand, x, t) }
+    modify fun s =>
+      { s with
+        cells := s.cells.push (brand, x, t)
+        -- A variable owns what it holds.
+        dropCands := s.dropCands.push (⟨s.owner, at_.1, at_.2, x, false⟩, t, pos) }
     let result ← inferStmts ((x, .cell t brand) :: scope) amb rest want
     checkEscape brand s!"`{x}` could be used after its block has ended"
       (("something that uses it is the block's result", result) :: scopeRoots scope) amb
@@ -2527,7 +2583,12 @@ partial def inferStmts (scope : Scope) (amb : Row) (stmts : List Stmt)
       let (expected, written) ← match target with
         | .name none x =>
           match scope.lookup x with
-          | some (.cell t brand) => pure (t, UseKind.var brand x .write)
+          | some (.cell t brand) => do
+            -- What the variable held is destroyed.
+            modify fun s =>
+              { s with dropCands :=
+                  s.dropCands.push (⟨s.owner, s.at_.1, s.at_.2, x, true⟩, t, s.pos) }
+            pure (t, UseKind.var brand x .write)
           | some _ => throw s!"`{x}` is not a mutable variable"
           | none => throw s!"unknown name `{x}`"
         | .deref e => do
@@ -2845,9 +2906,18 @@ partial def toDictE (impls : Array ImplDecl) : Traits.Dict → Elab.DictE
 its type. A bound on a type the function is generic in becomes something the
 function is given; every other is met by `Traits.solve`. -/
 def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := do
-  let pending := (← get).bounds
+  let mut pending := (← get).bounds
   let uses := (← get).groupUses
-  modify fun s => { s with bounds := #[], groupUses := #[] }
+  let cands := (← get).dropCands
+  modify fun s => { s with bounds := #[], groupUses := #[], dropCands := #[] }
+  -- A variable whose value's type has `Drop` needs the implementation, to run
+  -- its function when the value is destroyed.
+  for (site, ty, pos) in cands do
+    if let .con n _ ← find ty then
+      if (← get).kimpls.any fun I => I.trait == "Drop" && I.head == n then
+        let id := 2000000000 + (← get).dropSites.size
+        pending := pending.push ⟨"Drop", ty, id, 0, site.owner, pos⟩
+        modify fun s => { s with dropSites := s.dropSites.push (site, id) }
   -- What the group's functions need of the types they are generic in.
   let mut leafs : Array (String × Nat × Ty) := #[]
   for b in pending do
@@ -3096,7 +3166,7 @@ def checkProgram (items : List Item) : Except String Elab.Blocks := do
         (Elab.implFnName im.trait im.head m, ((s.methods.lookup m).map (·.params.length)).getD 0)⟩ :
         Elab.ImplE)
     pure ⟨s.given.toList, links, s.coercions.toList,
-      ⟨s.dictTable.toList, s.methodCalls.toList, s.fnBounds, implEs⟩⟩
+      ⟨s.dictTable.toList, s.methodCalls.toList, s.fnBounds, implEs, s.dropSites.toList⟩⟩
   let (blocks, _) ← action.run {}
   pure blocks
 

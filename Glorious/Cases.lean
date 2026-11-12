@@ -841,6 +841,34 @@ def cases : List Case := [
     [], "error: 4:13: in `main`: `show` is a function of the trait `Show`, so it is called where it is named: write a block that calls it"⟩,
   ⟨"trait Show { fn show(Self) -> Int }\nimpl Show for Int { fn show(x) { x } }\nfn apply(f, x) { f(x) }\nfn main() { apply({ v => show(v) }, 1) }",
     [], "1"⟩,
+  -- `Drop`. A type may say what is done when a value of it is destroyed. That
+  -- happens when a variable holding the value ends, however its block is left,
+  -- and before the variable is assigned again. Later variables end first.
+  ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nfn main() { let mut f = File(7); host_write(1); 2 }",
+    [], "1\n7\n2"⟩,
+  ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nfn main() { let a = File(1); let b = File(2); host_write(3); 0 }",
+    [], "3\n2\n1\n0"⟩,
+  ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nfn main() { let mut f = File(1); f = File(2); host_write(9); 0 }",
+    [], "1\n9\n2\n0"⟩,
+  ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nfn main() { @out { let f = File(4); @out(1); 2 } }",
+    [], "4\n1"⟩,
+  ⟨"effect Fail { fail() -> ! }\nstruct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nfn work() { let f = File(4); fail(); 2 }\nfn main() { handle work() { fail() => 8 } }",
+    [], "4\n8"⟩,
+  -- A value given away is destroyed where it comes to rest.
+  ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nfn keep(f: File) { let mut mine = f; host_write(5); }\nfn main() { let f = File(7); keep(f); host_write(1); 2 }",
+    [], "5\n7\n1\n2"⟩,
+  ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nfn main() { let mut f = File(1); let old = replace(&mut f, File(2)); host_write(9); 0 }",
+    [], "9\n1\n2\n0"⟩,
+  -- A guard that runs a callable when its block ends, written in the language.
+  ⟨"struct Deferred(fn() -> ())\nimpl Drop for Deferred { fn drop(d) { match(replace(d, Deferred({ () }))) { Deferred(f) => f() } } }\nfn deferred(f) { Deferred(f) }\nfn main() { let g = deferred({ host_write(9); }); host_write(1); 2 }",
+    [], "1\n9\n2"⟩,
+  -- Such a value has one owner, and `drop` is not for a program to call.
+  ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nfn keep2(a: File, b: File) { let mut x = a; let mut y = b; 0 }\nfn main() { let f = File(7); keep2(f, f) }",
+    [], "error: 4:13: in `main`: `f` is used more than once, but a value that is destroyed when its owner ends can be used only once"⟩,
+  ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nfn main() { let mut f = File(7); let g = f; 0 }",
+    [], "error: 3:34: in `main`: reading the mutable variable `f` copies its value (`replace` takes it out instead), but a value that is destroyed when its owner ends can be used only once"⟩,
+  ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nfn main() { let mut f = File(7); drop(&mut f); 0 }",
+    [], "error: 3:34: in `main`: `drop` is run when what holds a value ends; a program does not call it"⟩,
   ⟨"fn f() { 1 }",
     [], "error: the program has no `main` function"⟩
 ]
