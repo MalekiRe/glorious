@@ -75,6 +75,8 @@ inductive Captured where
   | ty (t : Ty)
   /-- A resumption: whatever holds it can be used only once. -/
   | once
+  /-- A resumption that has to be resumed or cancelled. -/
+  | must
   /-- A borrow of a mutable variable, by its identity: whatever holds it keeps
   the borrow going. -/
   | loan (id : Nat)
@@ -92,6 +94,8 @@ structure Scheme where
   /-- Types that must be free to use more than once, with the reason. -/
   dups : List (Ty × String)
   ty : Ty
+  /-- Types whose values must be free to go unused, with the reason. -/
+  drops : List (Ty × String) := []
   /-- The traits the function needs of its type parameters, in the order it is
   given the evidence: each a trait and one of `tvars`. -/
   bounds : List (String × Ty) := []
@@ -112,6 +116,8 @@ structure OpSig where
   payload : List Ty
   /-- What the operation returns to its performer; none if it never returns. -/
   result : Option Ty
+  /-- Declared `[1, 1]`: its resumption has to be resumed or cancelled. -/
+  must : Bool := false
 
 structure EffectDecl where
   tvars : List Nat
@@ -225,6 +231,9 @@ structure St where
   caps : Array (Option Nat) := #[]
   /-- What each capture variable is known to capture. -/
   capEdges : Array (Nat × Captured) := #[]
+  /-- For each of `capEdges`, the name captured, where a callable written in
+  the program captured a name. -/
+  capEdgeNames : Array (Option String) := #[]
   brands : Nat := 0
   /-- Capture variables already visited by the search in progress. -/
   seen : List Nat := []
@@ -233,6 +242,53 @@ structure St where
   dups : Array (Ty × String) := #[]
   /-- The same, for types that later functions can still affect. -/
   lateDups : Array (Ty × String) := #[]
+  /-- Types whose values must be free to go unused, with the reason; checked
+  once the types are known. -/
+  drops : Array (Ty × String) := #[]
+  lateDrops : Array (Ty × String) := #[]
+  /-- What `impl Use<[lower, upper]>` says of a declared type: whether a value
+  has to be used, and whether it can be used only once. -/
+  useDecls : List (String × Bool × Bool) := []
+  /-- Whether the program declares anything that has to be used. Without it
+  nothing can have to be, and nothing is checked. -/
+  anyMust : Bool := false
+  /-- Values the expression being checked has computed, has no name for, and
+  has not yet passed on. -/
+  anon : List Ty := []
+  /-- Every call of a callee with a type, by the call's identity, and whether
+  the callee was then seen to perform nothing: its effects were a variable of
+  its own that none of its parameters mention. -/
+  calls : Array (Nat × Ty × Bool) := #[]
+  /-- Effect variables made by using a generalised type: nothing supplies
+  effects to one unless a parameter of that type mentions it. -/
+  instRows : List Nat := []
+  /-- Blocks that do not name what they are given, given a block that was not
+  run: the block, the capture variable and type of what it is given, the names
+  it mentions, and a message. What the other block held that this one does not
+  mention is let go. -/
+  unrunGiven : Array (Nat × Nat × Ty × List String × String × Nat) := #[]
+  /-- Captures, by their place in `capEdges`, of a block that runs in place of
+  another: what both mention is held once, by the other. -/
+  sharedEdges : List Nat := []
+  /-- Of those, the ones taken to be given one particular block, to be
+  confirmed when the whole program is known. -/
+  assumedLinks : Array (Nat × Nat × Ty × String) := #[]
+  /-- Values that are let go if a call does not come back: the call, the type,
+  and the message. -/
+  abandoned : Array (Nat × Ty × String) := #[]
+  /-- The calls that certainly come back if they end at all: the callee
+  performs nothing and can jump to no label. -/
+  sure : List Nat := []
+  /-- Bindings whose use on every path is still to be looked at, once the
+  types of the function they are in are known: where, the name, its type, the
+  other names in scope, and the code the name is in scope of. -/
+  lowerChecks : Array (String × String × Ty × List String × List Stmt) := #[]
+  /-- Uses of `destroy`, to settle once the type is known: the call, the type,
+  the function it is in, and where. -/
+  destroys : Array (Nat × Ty × String × String) := #[]
+  /-- Each use of `destroy`, with the identity under which `dictTable` has the
+  `Drop` implementation to run, if the type has one. -/
+  destroySites : Array (Nat × Option Nat) := #[]
   /-- The clauses of every top-level function, for following calls when uses
   are counted. -/
   fnBodies : List (String × List Clause) := []
@@ -345,8 +401,9 @@ def unifyCap (a b : Nat) : M Unit := do
   unless ra == rb do
     modify fun s => { s with caps := s.caps.set! ra (some rb) }
 
-def captures (cap : Nat) (what : Captured) : M Unit :=
-  modify fun s => { s with capEdges := s.capEdges.push (cap, what) }
+def captures (cap : Nat) (what : Captured) (name : Option String := none) : M Unit :=
+  modify fun s =>
+    { s with capEdges := s.capEdges.push (cap, what), capEdgeNames := s.capEdgeNames.push name }
 
 /-- Follow a type variable to what it stands for. -/
 partial def find (t : Ty) : M Ty := do
@@ -478,6 +535,8 @@ def instantiate (s : Scheme) (via : Option String := none) : M Ty := do
     pure (id, ← freshTy)
   let rm ← s.rvars.mapM fun id => do
     pure (id, ← freshRowVar)
+  if (← get).anyMust then
+    modify fun st => { st with instRows := rm.map (·.2) ++ st.instRows }
   let cm ← s.cvars.mapM fun id => do
     pure (id, ← freshCap)
   for (cap, what) in s.edges do
@@ -485,9 +544,15 @@ def instantiate (s : Scheme) (via : Option String := none) : M Ty := do
       | .ty t => .ty (subst tm rm cm t)
       | .brand b => .brand b
       | .once => .once
+      | .must => .must
       | .loan l => .loan l
       | .touch b w => .touch b w)
   let pos := (← get).pos
+  for (t, why) in s.drops do
+    let why := match via with
+      | some f => s!"{pos}`{f}` may leave what it is given unused"
+      | none => why
+    modify fun st => { st with drops := st.drops.push (subst tm rm cm t, why) }
   for (t, why) in s.dups do
     -- At a use, the reason is the function's need rather than its inner detail.
     let why := match via with
@@ -581,6 +646,7 @@ def generalize (t : Ty) (keep : List Ty := []) (top : Bool := true) : M Scheme :
       all := all.push (root, .ty target)
     | .brand b => all := all.push (root, .brand b)
     | .once => all := all.push (root, .once)
+    | .must => all := all.push (root, .must)
     | .loan l => all := all.push (root, .loan l)
     | .touch b w => all := all.push (root, .touch b w)
   -- What must be free to use more than once is part of the function's
@@ -588,7 +654,11 @@ def generalize (t : Ty) (keep : List Ty := []) (top : Bool := true) : M Scheme :
   let mut dups : Array (Ty × String) := #[]
   for (d, why) in s.dups do
     dups := dups.push (← zonk d, why)
-  let mut reach : List Nat := (freeCaps t ++ dups.toList.flatMap (freeCaps ·.1)).eraseDups
+  let mut drops : Array (Ty × String) := #[]
+  for (d, why) in s.drops do
+    drops := drops.push (← zonk d, why)
+  let mut reach : List Nat := (freeCaps t ++ dups.toList.flatMap (freeCaps ·.1)
+    ++ drops.toList.flatMap (freeCaps ·.1)).eraseDups
   let mut todo := reach
   while !todo.isEmpty do
     let mut next : List Nat := []
@@ -602,8 +672,11 @@ def generalize (t : Ty) (keep : List Ty := []) (top : Bool := true) : M Scheme :
   let tvars := (freeTys t).eraseDups.filter (!fixedTys.contains ·)
   let mine := dups.toList.filter fun (d, _) =>
     (freeTys d).any tvars.contains || (freeCaps d).any cvars.contains
+  let unused := drops.toList.filter fun (d, _) =>
+    (freeTys d).any tvars.contains || (freeCaps d).any cvars.contains
   pure { tvars, rvars := (freeRows t).eraseDups.filter (!fixedRows.contains ·), cvars,
-         edges := all.toList.filter (cvars.contains ·.1), dups := mine, ty := t }
+         edges := all.toList.filter (cvars.contains ·.1), dups := mine, ty := t,
+         drops := unused }
 
 /-! ## Unification -/
 
@@ -947,8 +1020,30 @@ def declare (items : List Item) : M Unit := do
           else match op.result with
             | some t => some <$> resolveType pmap true t
             | none => some <$> resolveType pmap true .hole
-        modify fun s => { s with ops := (op.name, ⟨name, ids, payload, result⟩) :: s.ops }
+        -- A resumption is resumed at most once, so the most uses is one; the
+        -- fewest says whether it may simply be let go.
+        let must ← match op.quantity with
+          | none => pure false
+          | some (lower, upper) =>
+            if op.terminal then
+              throw s!"operation `{op.name}` does not return, so it has no resumption to say this of"
+            unless upper == some 1 do
+              throw s!"operation `{op.name}`: a resumption is used at most once, so write `[0, 1]` or `[1, 1]`"
+            pure (lower == 1)
+        if must then modify fun s => { s with anyMust := true }
+        modify fun s => { s with ops := (op.name, ⟨name, ids, payload, result, must⟩) :: s.ops }
       modify fun s => { s with effects := (name, ⟨ids, ops.map (·.name)⟩) :: s.effects }
+    | .use head lower upper =>
+      unless ((← get).types.lookup head).isSome do
+        throw s!"`impl Use` for `{head}`: there is no such declared type"
+      if ((← get).useDecls.lookup head).isSome then
+        throw s!"`impl Use` for `{head}` is written twice"
+      -- Counting stops at one: the bounds a type can ask for are none or one
+      -- use at least, and one use or any number at most.
+      unless lower ≤ 1 && (upper == some 1 || upper == none) do
+        throw s!"`impl Use` for `{head}`: the fewest uses can be 0 or 1 and the most 1 or `infinity`; other bounds are not counted yet"
+      if lower == 1 then modify fun s => { s with anyMust := true }
+      modify fun s => { s with useDecls := (head, lower == 1, upper == some 1) :: s.useDecls }
     | _ => pure ()
 
 /-- A constructor's field types and result type at fresh type arguments. -/
@@ -1129,6 +1224,7 @@ partial def capHolds (brand : Nat) (cap : Nat) : M Bool := do
       | .brand b => if b == brand then return true
       | .ty t => if ← tyHolds brand t then return true
       | .once => pure ()
+      | .must => pure ()
       | .loan _ => pure ()
       | .touch _ _ => pure ()
   return false
@@ -1221,14 +1317,15 @@ partial def capOwnsOnce (cap : Nat) : M Bool := do
     if (← findCap src) == root then
       match what with
       | .once => return true
+      | .must => pure ()
       | .ty t => if ← tyOwnsOnce [] t then return true
       | .brand _ => pure ()
       | .loan _ => pure ()
       | .touch _ _ => pure ()
   return false
 
-/-- Does a value of this type hold a resumption, or something that is destroyed
-when its owner ends? Either has one owner. -/
+/-- Can a value of this type be used only once? One that holds a resumption,
+and one of a declared type that says so. -/
 partial def tyOwnsOnce (visiting : List String) (t : Ty) : M Bool := do
   match ← find t with
   | .var _ => pure false
@@ -1236,8 +1333,8 @@ partial def tyOwnsOnce (visiting : List String) (t : Ty) : M Bool := do
   | .fn _ _ _ _ cap => capOwnsOnce cap
   | .ref _ _ _ => pure false
   | .con name args => do
-    -- A value that is destroyed when its owner ends has one owner.
-    if (← get).kimpls.any fun I => I.trait == "Drop" && I.head == name then return true
+    if let some (_, once) := (← get).useDecls.lookup name then
+      if once then return true
     if ← args.anyM (tyOwnsOnce visiting) then return true
     if visiting.contains name then return false
     match (← get).types.lookup name with
@@ -1256,32 +1353,130 @@ end
 def mustDup (t : Ty) (why : String) : M Unit :=
   modify fun s => { s with dups := s.dups.push (t, s.pos ++ why) }
 
-/-- Is it a value that is destroyed when its owner ends that makes this type
-one of a single owner? Only to say why. -/
-partial def holdsDrop (visiting : List String) (t : Ty) : M Bool := do
+/-- The declared type, if any, that makes a type one whose values are used
+only once. Only to say why. -/
+partial def onceBy (visiting : List String) (t : Ty) : M (Option String) := do
   match ← find t with
-  | .tuple args => args.anyM (holdsDrop visiting)
+  | .tuple args => args.findSomeM? (onceBy visiting)
   | .con name args => do
-    if (← get).kimpls.any fun I => I.trait == "Drop" && I.head == name then return true
-    if ← args.anyM (holdsDrop visiting) then return true
-    if visiting.contains name then return false
+    if let some (_, once) := (← get).useDecls.lookup name then
+      if once then return some name
+    if let some n ← args.findSomeM? (onceBy visiting) then return some n
+    if visiting.contains name then return none
     match (← get).types.lookup name with
-    | none => pure false
+    | none => pure none
     | some decl =>
-      decl.ctors.anyM fun c => do
+      decl.ctors.findSomeM? fun c => do
         match (← get).ctors.lookup c with
-        | none => pure false
+        | none => pure none
         | some sig =>
-          (sig.fields.map (subst (sig.tvars.zip args) [] [])).anyM (holdsDrop (name :: visiting))
-  | _ => pure false
+          (sig.fields.map (subst (sig.tvars.zip args) [] [])).findSomeM?
+            (onceBy (name :: visiting))
+  | _ => pure none
 
 def checkDups (dups : Array (Ty × String)) : M Unit := do
   for (t, why) in dups do
     modify fun s => { s with seen := [] }
     if ← tyOwnsOnce [] t then
-      if ← holdsDrop [] t then
-        throw s!"{why}, but a value that is destroyed when its owner ends can be used only once"
+      if let some name ← onceBy [] t then
+        throw s!"{why}, but a `{name}` can be used only once"
       throw s!"{why}, but a value that holds a resumption can be used only once"
+
+/-! ## Values that have to be used
+
+A type may say that its values have to be used: `impl Use<[1, 1]> for T {}`.
+An operation may say it of its resumption: `[1, 1] op()`. A value that holds
+one of either has to be used too. Wherever a value is let go without being
+used, its type is recorded, and once types are known none of them may be such
+a type. For a type that depends on a function's parameters the requirement is
+part of the function's contract, as for use more than once.
+
+A callable that mentions such a value does not thereby have to be called: the
+value's own uses are counted along the paths the program can take, through the
+callables that mention it.
+-/
+
+/-- What the capture variables say about having to be used, gathered once. -/
+structure MustInfo where
+  /-- Those that are a resumption which has to be used. -/
+  roots : List Nat := []
+  /-- Those that are a resumption at all. What one mentions is the computation
+  it suspended, not something it holds. -/
+  resumptions : List Nat := []
+  /-- Those of callables written in the program. -/
+  blocks : List Nat := []
+  /-- The types of what each captures. -/
+  held : Array (Nat × Ty) := #[]
+
+def mustInfo : M MustInfo := do
+  let s ← get
+  let mut info : MustInfo := {}
+  unless s.anyMust do return info
+  for ((src, what), i) in s.capEdges.zipIdx do
+    let root ← findCap src
+    match what with
+    | .must => unless info.roots.contains root do info := { info with roots := root :: info.roots }
+    | .once =>
+      unless info.resumptions.contains root do
+        info := { info with resumptions := root :: info.resumptions }
+    | .ty t => unless s.sharedEdges.contains i do info := { info with held := info.held.push (root, t) }
+    | _ => pure ()
+  for (_, c) in s.blockCaps do
+    let root ← findCap c
+    unless info.blocks.contains root do info := { info with blocks := root :: info.blocks }
+  pure info
+
+/-- What in a type has to be used, if anything: said for the message. A
+callable has to be called if it holds something that has to be used. -/
+partial def tyMustUse (info : MustInfo) (visiting : List String) (t : Ty) :
+    M (Option String) := do
+  match ← find t with
+  | .var _ => pure none
+  | .tuple args => args.findSomeM? (tyMustUse info visiting)
+  | .fn _ _ _ _ cap => do
+    let root ← findCap cap
+    if info.roots.contains root then
+      return some "a resumption of an operation declared `[1, 1]`"
+    if info.resumptions.contains root && !info.blocks.contains root then return none
+    if (← get).seen.contains root then return none
+    modify fun s => { s with seen := root :: s.seen }
+    for (r, held) in info.held do
+      if r == root then
+        if let some what ← tyMustUse info visiting held then
+          return some s!"a callable that holds {what}"
+    return none
+  | .ref _ _ _ => pure none
+  | .con name args => do
+    if let some (must, _) := (← get).useDecls.lookup name then
+      if must then return some s!"a `{bareName name}`"
+    if let some w ← args.findSomeM? (tyMustUse info visiting) then return some w
+    if visiting.contains name then return none
+    match (← get).types.lookup name with
+    | none => pure none
+    | some decl =>
+      decl.ctors.findSomeM? fun c => do
+        match (← get).ctors.lookup c with
+        | none => pure none
+        | some sig =>
+          (sig.fields.map (subst (sig.tvars.zip args) [] [])).findSomeM?
+            (tyMustUse info (name :: visiting))
+
+/-- Record that a value of this type is let go unused here. -/
+def mustDrop (t : Ty) (why : String) : M Unit := do
+  unless (← get).anyMust do return
+  match ← find t with
+  | .con "Int" [] => pure ()
+  | .tuple [] => pure ()
+  | .ref _ _ _ => pure ()
+  | _ => modify fun s => { s with drops := s.drops.push (t, s.pos ++ why) }
+
+def checkDrops (drops : Array (Ty × String)) : M Unit := do
+  if drops.isEmpty then return
+  let info ← mustInfo
+  for (t, why) in drops do
+    modify fun s => { s with seen := [] }
+    if let some what ← tyMustUse info [] t then
+      throw s!"{why}, but {what} has to be used"
 
 private def addUses (a b : Nat) : Nat := min 2 (a + b)
 
@@ -1359,6 +1554,9 @@ inductive AVal where
   | data (tag : String) (args : List AVal)
   | clo (clauses : List Clause) (env : List (String × AVal))
   | fn (name : String)
+  /-- No value: the path left for somewhere else, an operation's handler
+  (named by the operation), a label's scope (`@name`), or somewhere unknown. -/
+  | gone (target : String)
   deriving Inhabited
 
 structure ACtx where
@@ -1366,6 +1564,29 @@ structure ACtx where
   ctors : List String
   aliases : List (String × Expr)
   ops : List (String × Bool)
+  /-- Count the fewest uses along any path instead of the most. Then a call
+  that cannot be followed may also not come back, a callable that leaves the
+  count may never be called, and a path that leaves ends with what it has. -/
+  lower : Bool := false
+  /-- Names whose calls only compute: they always come back. -/
+  quiet : List String := []
+  /-- Calls, by identity, whose types say they come back. -/
+  sure : List Nat := []
+
+private def isGone : AVal → Bool
+  | .gone _ => true
+  | _ => false
+
+/-- The target of the first value that is no value, if any is. -/
+private def goneOf (vs : List AVal) : Option String :=
+  vs.findSome? fun
+    | .gone t => some t
+    | _ => none
+
+/-- The most, or in the other direction the fewest, of some counts. -/
+private def ACtx.fold (ctx : ACtx) : List Nat → Nat
+  | [] => 0
+  | n :: ns => if ctx.lower then ns.foldl min n else ns.foldl max n
 
 /-- A budget of steps; running out abandons the count. -/
 abbrev A := StateT Nat Option
@@ -1471,44 +1692,73 @@ partial def takenApart (ctx : ACtx) : Pattern → AVal → Nat
     ((ps.zip args).map fun (p, v) => takenApart ctx p v).foldl (· + ·) 0
   | _, _ => 0
 
+/-- Can a use of the binding come of this value? -/
+partial def holdsTracked : AVal → Bool
+  | .tracked => true
+  | .data _ args => args.any holdsTracked
+  | .clo clauses env =>
+    (clauses.flatMap (Elab.fvClause [])).eraseDups.any fun y =>
+      match env.lookup y with
+      | some v => holdsTracked v
+      | none => false
+  | _ => false
+
 mutual
 
-/-- The uses made if a value goes somewhere the count cannot follow: every
-callable in it is taken to be called. -/
+/-- The uses made if a value goes somewhere the count cannot follow. For the
+most uses, every callable in it is taken to be called; for the fewest, none. -/
 partial def escapes (ctx : ACtx) (depth : Nat) : AVal → A Nat
   | .tracked => pure 1
   | .data _ args => do
     let ns ← args.mapM (escapes ctx depth)
     pure (ns.foldl (· + ·) 0)
   | .clo clauses env => do
+    -- For the fewest uses: a callable that mentions the binding has to be
+    -- called, since the binding has to be used; one that does not, need not.
+    if ctx.lower && !holdsTracked (.clo clauses env) then return 0
     tick
-    let mut worst := 0
+    let mut ns : List Nat := []
     for clause in clauses do
       match clause with
       | .mk pats body =>
         let params := (pats.flatMap (binders ctx)).map (·, AVal.unknown)
         let found ← runStmts ctx depth (params ++ env) body
         for (v, n) in found do
-          worst := max worst (n + (← escapes ctx depth v))
-    pure worst
+          ns := (n + (← escapes ctx depth v)) :: ns
+    pure (ctx.fold ns)
   | _ => pure 0
+
+/-- The paths that go on merged into one count, with what each yields going
+where the count cannot follow; and the paths that have left. -/
+partial def settle (ctx : ACtx) (depth : Nat) (alts : Alts) (leaves : Bool := true) :
+    A (Option Nat × Alts) := do
+  let mut ns : List Nat := []
+  let mut left : Alts := []
+  for (v, n) in alts do
+    if isGone v then left := (v, n) :: left
+    else if leaves then ns := (n + (← escapes ctx depth v)) :: ns
+    else ns := n :: ns
+  pure (if ns.isEmpty then none else some (ctx.fold ns), left)
 
 /-- Keep the number of paths small: beyond a limit, merge them into one whose
 value is unknown and whose uses are the most any of them made. -/
 partial def cap (ctx : ACtx) (depth : Nat) (alts : Alts) : A Alts := do
   if alts.length ≤ 16 then pure alts
   else
-    let mut worst := 0
-    for (v, n) in alts do
-      worst := max worst (n + (← escapes ctx depth v))
-    pure [(.unknown, worst)]
+    let (on, left) ← settle ctx depth alts
+    let merged : Alts := match on with
+      | some n => [(.unknown, n)]
+      | none => []
+    pure (merged ++ (if left.isEmpty then [] else [(.gone "*", ctx.fold (left.map (·.2)))]))
 
 /-- A call the count cannot follow: its arguments escape. -/
-partial def unfollowed (ctx : ACtx) (depth : Nat) (args : List AVal) : A Alts := do
+partial def unfollowed (ctx : ACtx) (depth : Nat) (args : List AVal) (quiet : Bool := false) :
+    A Alts := do
   let mut n := 0
   for a in args do
     n := n + (← escapes ctx depth a)
-  pure [(.unknown, n)]
+  -- What is called may not come back.
+  pure (if ctx.lower && !quiet then [(.unknown, n), (.gone "*", n)] else [(.unknown, n)])
 
 partial def applyClauses (ctx : ACtx) (depth : Nat) (clauses : List Clause)
     (env : List (String × AVal)) (args : List AVal) : A Alts := do
@@ -1546,23 +1796,34 @@ partial def callValue (ctx : ACtx) (depth : Nat) (f : AVal) (args : List AVal) :
     | _, _ => unfollowed ctx depth args
   | _ => unfollowed ctx depth args
 
-/-- Evaluate expressions left to right, over every combination of paths. -/
+/-- Evaluate expressions left to right, over every combination of paths. A
+path that left on the way has only the value that says so. -/
 partial def runList (ctx : ACtx) (depth : Nat) (env : List (String × AVal)) :
     List Expr → A (List (List AVal × Nat))
   | [] => pure [([], 0)]
   | e :: es => do
     let heads ← runExpr ctx depth env e
-    let tails ← runList ctx depth env es
-    let out := heads.flatMap fun (v, n) => tails.map fun (vs, m) => (v :: vs, n + m)
+    let mut out : List (List AVal × Nat) := []
+    for (v, n) in heads do
+      if isGone v then out := ([v], n) :: out
+    let on := heads.filter fun (v, _) => !isGone v
+    unless on.isEmpty do
+      let tails ← runList ctx depth env es
+      out := out ++ on.flatMap fun (v, n) => tails.map fun (vs, m) =>
+        if (goneOf vs).isSome then (vs, n + m) else (v :: vs, n + m)
     if out.length ≤ 16 then pure out
     else
-      let mut worst := 0
+      let mut ns : List Nat := []
+      let mut left : List Nat := []
       for (vs, n) in out do
-        let mut total := n
-        for v in vs do
-          total := total + (← escapes ctx depth v)
-        worst := max worst total
-      pure [((e :: es).map fun _ => AVal.unknown, worst)]
+        if (goneOf vs).isSome then left := n :: left
+        else
+          let mut total := n
+          for v in vs do
+            total := total + (← escapes ctx depth v)
+          ns := total :: ns
+      let merged := if ns.isEmpty then [] else [((e :: es).map fun _ => AVal.unknown, ctx.fold ns)]
+      pure (merged ++ (if left.isEmpty then [] else [([AVal.gone "*"], ctx.fold left)]))
 
 partial def runExpr (ctx : ACtx) (depth : Nat) (env : List (String × AVal)) : Expr → A Alts
   | .int _ => pure [(.unknown, 0)]
@@ -1583,86 +1844,154 @@ partial def runExpr (ctx : ACtx) (depth : Nat) (env : List (String × AVal)) : E
   | .label _ => pure [(.unknown, 0)]
   | .tuple es => do
     let alts ← runList ctx depth env es
-    pure (alts.map fun (vs, n) => (.data "" vs, n))
+    pure (alts.map fun (vs, n) =>
+      match goneOf vs with
+      | some t => (.gone t, n)
+      | none => (.data "" vs, n))
   | .proj e idx => do
     let alts ← runExpr ctx depth env e
     pure (alts.map fun (v, n) =>
       match v with
       | .data _ args => (args.getD idx .unknown, n)
       | .tracked => (.unknown, n + 1)
+      | .gone t => (.gone t, n)
       | _ => (.unknown, n))
-  | .call _ f args => runCall ctx depth env f args
-  | .tailCall _ f args => runCall ctx depth env f args
+  | .call id f args => runCall ctx depth env f args id
+  | .tailCall id f args => runCall ctx depth env f args id
   | .closure _ clauses => pure [(.clo clauses env, 0)]
   | .handle subject arms => do
     let subject ← runExpr ctx depth env subject
     let mut completions : List Clause := []
     let mut repeated := 0
     let mut terminal : Alts := []
+    let mut handled : List String := []
     for arm in arms do
       match arm with
       | .mk [.ctor name q ps] body =>
         match ctx.ops.lookup name with
         | some resumptive =>
+          handled := name :: handled
           let params := (ps.flatMap (binders ctx)).map (·, AVal.unknown)
           let alts ← runStmts ctx depth (params ++ env) body
           if resumptive then
-            -- May run any number of times: one use there is already too many.
-            for (v, n) in alts do
-              if n + (← escapes ctx depth v) > 0 then repeated := 2
+            -- May run any number of times: one use there is already too many,
+            -- and none there can be relied on.
+            unless ctx.lower do
+              for (v, n) in alts do
+                if n + (← escapes ctx depth v) > 0 then repeated := 2
           else terminal := terminal ++ alts
         | none => completions := completions ++ [.mk [.ctor name q ps] body]
       | other => completions := completions ++ [other]
+    -- A path that left for an operation handled here goes on from here.
+    let subject := subject.map fun (v, n) =>
+      match v with
+      | .gone t => if handled.contains t then (AVal.unknown, n) else (v, n)
+      | _ => (v, n)
     let mut done : Alts := []
-    if completions.isEmpty then done := subject
-    else
-      for (v, n) in subject do
+    for (v, n) in subject do
+      if isGone v || completions.isEmpty then done := (v, n) :: done
+      else
         let found ← applyClauses ctx depth completions env [v]
         for (v', n') in found do
           done := (v', n + n') :: done
-    let before := maxUses subject
+    -- How much of the subject ran before an arm that does not resume is not
+    -- known: for the fewest uses, none of it.
+    let before := if ctx.lower then 0 else maxUses subject
     let all := done ++ terminal.map fun (v, n) => (v, n + before)
     cap ctx depth (all.map fun (v, n) => (v, n + repeated))
-  | .labelScope _ body => do
+  | .labelScope l body => do
     let alts ← runStmts ctx depth env body
-    -- Leaving through the label gives a value the count does not follow.
-    pure (alts ++ [(.unknown, maxUses alts)])
+    if ctx.lower then
+      -- A path that left for this label goes on from here.
+      pure (alts.map fun (v, n) =>
+        match v with
+        | .gone t => if t == "@" ++ l then (AVal.unknown, n) else (v, n)
+        | _ => (v, n))
+    else
+      -- Leaving through the label gives a value the count does not follow.
+      pure (alts ++ [(.unknown, maxUses alts)])
   | .ref _ _ => pure [(.unknown, 0)]
   | .deref e => do
     let alts ← runExpr ctx depth env e
-    let mut worst := 0
-    for (v, n) in alts do
-      worst := max worst (n + (← escapes ctx depth v))
-    pure [(.unknown, worst)]
+    let (on, left) ← settle ctx depth alts
+    pure ((match on with
+      | some n => [(AVal.unknown, n)]
+      | none => []) ++ left)
 
 partial def runCall (ctx : ACtx) (depth : Nat) (env : List (String × AVal)) (f : Expr)
-    (args : List Expr) : A Alts := do
+    (args : List Expr) (id : Nat) : A Alts := do
   tick
+  let sure := ctx.lower && ctx.sure.contains id
+  let alts ← runCallee ctx depth env f args sure
+  -- A call whose type says it comes back does, whatever was lost track of
+  -- inside it.
+  if sure then
+    pure (alts.map fun (v, n) => if isGone v then (AVal.unknown, n) else (v, n))
+  else pure alts
+
+partial def runCallee (ctx : ACtx) (depth : Nat) (env : List (String × AVal)) (f : Expr)
+    (args : List Expr) (sure : Bool) : A Alts := do
   let general : A Alts := do
     let mut out : Alts := []
     let found ← runExpr ctx depth env f
     for (fv, n) in found do
-      let found ← runList ctx depth env args
-      for (vs, m) in found do
-        let found ← callValue ctx depth fv vs
-        for (v, k) in found do
-          out := (v, n + m + k) :: out
+      if isGone fv then out := (fv, n) :: out
+      else
+        let found ← runList ctx depth env args
+        for (vs, m) in found do
+          match goneOf vs with
+          | some t => out := (.gone t, n + m) :: out
+          | none =>
+            -- A call that comes back and is given nothing a use could come
+            -- of need not be followed.
+            if sure && !holdsTracked fv && !vs.any holdsTracked then
+              out := (.unknown, n + m) :: out
+            else
+              let found ← callValue ctx depth fv vs
+              for (v, k) in found do
+                out := (v, n + m + k) :: out
     cap ctx depth out
+  -- The arguments go to something that is not followed; `after` says what
+  -- becomes of the path once they have.
+  let handedOn := fun (after : Nat → Alts) => (do
+    let mut out : Alts := []
+    let found ← runList ctx depth env args
+    for (vs, n) in found do
+      match goneOf vs with
+      | some t => out := (.gone t, n) :: out
+      | none =>
+        let mut k := n
+        for v in vs do
+          k := k + (← escapes ctx depth v)
+        out := out ++ after k
+    cap ctx depth out : A Alts)
   match f with
+  | .label l =>
+    -- Applying a label leaves for its scope.
+    if ctx.lower then handedOn fun n => [(.gone ("@" ++ l), n)] else general
   | .name q x =>
     if q.isNone && (env.lookup x).isSome then general
     else if let some c := ctx.ctorOf x then
       let alts ← runList ctx depth env args
-      pure (alts.map fun (vs, n) => (.data c vs, n))
-    else if (ctx.ops.lookup x).isSome then
+      pure (alts.map fun (vs, n) =>
+        match goneOf vs with
+        | some t => (.gone t, n)
+        | none => (.data c vs, n))
+    else if let some resumptive := ctx.ops.lookup x then
       -- Performing an operation hands its payload to a handler.
-      let mut worst := 0
-      let found ← runList ctx depth env args
-      for (vs, n) in found do
-        let found ← unfollowed ctx depth vs
-        for (_, k) in found do
-          worst := max worst (n + k)
-      pure [(.unknown, worst)]
+      if ctx.lower then
+        -- The handler need not resume: the path may end here.
+        handedOn fun n => (if resumptive then [(AVal.unknown, n)] else []) ++ [(.gone x, n)]
+      else
+        let mut worst := 0
+        let found ← runList ctx depth env args
+        for (vs, n) in found do
+          let found ← unfollowed ctx depth vs
+          for (_, k) in found do
+            worst := max worst (n + k)
+        pure [(.unknown, worst)]
+    else if ctx.lower && ctx.quiet.contains x && (ctx.fns.lookup x).isNone then
+      handedOn fun n => [(.unknown, n)]
     else general
   | _ => general
 
@@ -1673,66 +2002,157 @@ partial def runStmts (ctx : ACtx) (depth : Nat) (env : List (String × AVal)) :
   | [.expr e] => runExpr ctx depth env e
   | .expr e :: rest => do
     -- The value is dropped, so the rest does not depend on which path was taken.
-    let first := maxUses (← runExpr ctx depth env e)
-    let alts ← runStmts ctx depth env rest
-    pure (alts.map fun (v, n) => (v, n + first))
+    let (on, left) ← settle ctx depth (← runExpr ctx depth env e) (leaves := false)
+    match on with
+    | none => pure left
+    | some first =>
+      let alts ← runStmts ctx depth env rest
+      pure ((alts.map fun (v, n) => (v, n + first)) ++ left)
   | .let_ pat value :: rest => do
     let mut out : Alts := []
     let found ← runExpr ctx depth env value
     for (v, n) in found do
-      let (_, binds) := fit ctx pat v
-      let bound := binds.map (·.1)
-      let others := ((binders ctx pat).filter (!bound.contains ·)).map (·, AVal.unknown)
-      let taken := takenApart ctx pat v
-      let found ← runStmts ctx depth (binds ++ others ++ env) rest
-      for (v', n') in found do
-        out := (v', n + n' + taken) :: out
+      if isGone v then out := (v, n) :: out
+      else
+        let (_, binds) := fit ctx pat v
+        let bound := binds.map (·.1)
+        let others := ((binders ctx pat).filter (!bound.contains ·)).map (·, AVal.unknown)
+        let taken := takenApart ctx pat v
+        let found ← runStmts ctx depth (binds ++ others ++ env) rest
+        for (v', n') in found do
+          out := (v', n + n' + taken) :: out
     cap ctx depth out
   | .letMut x value :: rest => do
     -- The value goes into a cell, where the count does not follow it.
-    let mut first := 0
-    let found ← runExpr ctx depth env value
-    for (v, n) in found do
-      first := max first (n + (← escapes ctx depth v))
-    let alts ← runStmts ctx depth ((x, .unknown) :: env) rest
-    pure (alts.map fun (v, n) => (v, n + first))
+    let (on, left) ← settle ctx depth (← runExpr ctx depth env value)
+    match on with
+    | none => pure left
+    | some first =>
+      let alts ← runStmts ctx depth ((x, .unknown) :: env) rest
+      pure ((alts.map fun (v, n) => (v, n + first)) ++ left)
   | .assign target value :: rest => do
-    let mut first := 0
-    let found ← runExpr ctx depth env value
-    for (v, n) in found do
-      first := max first (n + (← escapes ctx depth v))
-    let inTarget ← match target with
-      | .deref e => do
-        let mut worst := 0
-        let found ← runExpr ctx depth env e
-        for (v, n) in found do
-          worst := max worst (n + (← escapes ctx depth v))
-        pure worst
-      | _ => pure 0
-    let alts ← runStmts ctx depth env rest
-    pure (alts.map fun (v, n) => (v, n + first + inTarget))
+    let (on, left) ← settle ctx depth (← runExpr ctx depth env value)
+    match on with
+    | none => pure left
+    | some first =>
+      let (inTarget, left') ← match target with
+        | .deref e => settle ctx depth (← runExpr ctx depth env e)
+        | _ => pure (some 0, [])
+      match inTarget with
+      | none => pure (left ++ left'.map fun (v, n) => (v, n + first))
+      | some inTarget =>
+        let alts ← runStmts ctx depth env rest
+        pure ((alts.map fun (v, n) => (v, n + first + inTarget)) ++ left
+          ++ left'.map fun (v, n) => (v, n + first))
   | .defer e :: rest => do
-    let mut first := 0
-    let found ← runExpr ctx depth env e
-    for (v, n) in found do
-      first := max first (n + (← escapes ctx depth v))
+    -- A cleanup runs however the rest is left.
+    let mut ns : List Nat := []
+    for (v, n) in ← runExpr ctx depth env e do
+      ns := (n + (← escapes ctx depth v)) :: ns
+    let first := ctx.fold ns
     let alts ← runStmts ctx depth env rest
     pure (alts.map fun (v, n) => (v, n + first))
 
 end
 
-/-- The most uses of `x` along any path through `body`, if the count finishes.
-`outer` are the other local names in scope, about which nothing is known. -/
+/-- The most uses of `x` along any path through `body`, or with `ctx.lower` the
+fewest, if the count finishes. `outer` are the other local names in scope,
+about which nothing is known. -/
 def pathUses (ctx : ACtx) (outer : List String) (x : String) (body : List Stmt) : Option Nat :=
   let env := (x, AVal.tracked) :: outer.map (·, AVal.unknown)
   let count : A Nat := do
-    let mut worst := 0
+    let mut ns : List Nat := []
     let found ← runStmts ctx 8 env body
     for (v, n) in found do
       -- What the body yields leaves the region being counted.
-      worst := max worst (n + (← escapes ctx 8 v))
-    pure worst
+      ns := (n + (← escapes ctx 8 v)) :: ns
+    pure (ctx.fold ns)
   (count.run 20000).map (·.1)
+
+/-- Does evaluating this run nothing at all? `quiet` names what only builds a
+value. -/
+private partial def stillExpr (quiet : String → Bool) : Expr → Bool
+  | .int _ => true
+  | .name _ _ => true
+  | .label _ => true
+  | .closure _ _ => true
+  | .ref _ _ => true
+  | .tuple es => es.all (stillExpr quiet)
+  | .call _ (.name _ f) args => quiet f && args.all (stillExpr quiet)
+  | _ => false
+
+private def isName (x : String) : Expr → Bool
+  | .name none y => y == x
+  | _ => false
+
+mutual
+
+/-- Whether `x` is used by this expression before anything in it could fail to
+come back: `some true` if so, `some false` if something that may not come back
+runs first, `none` if neither happens. -/
+private partial def firstUse (quiet : String → Bool) (x : String) : Expr → Option Bool
+  | .tuple es => firstParts quiet x true false es
+  | .call _ f args =>
+    firstParts quiet x (match f with
+      | .name _ g => quiet g
+      | _ => false) false (f :: args)
+  | .tailCall _ f args =>
+    firstParts quiet x (match f with
+      | .name _ g => quiet g
+      | _ => false) false (f :: args)
+  | .proj e _ => if isName x e then some true else firstUse quiet x e
+  | .deref e => if isName x e then none else firstUse quiet x e
+  | .handle _ _ => some false
+  | .labelScope _ _ => some false
+  | _ => none
+
+/-- The parts of a tuple or call, in order. `x` among them is handed on once
+all are computed, so nothing after it may fail to come back. `builds` says the
+whole only builds a value; otherwise it is a call that may not come back. -/
+private partial def firstParts (quiet : String → Bool) (x : String) (builds pending : Bool) :
+    List Expr → Option Bool
+  | [] => if pending then some true else if builds then none else some false
+  | e :: rest =>
+    if isName x e then firstParts quiet x builds true rest
+    else if stillExpr quiet e then firstParts quiet x builds pending rest
+    else
+      match firstUse quiet x e with
+      | some true => if pending then some false else some true
+      | some false => some false
+      | none => if pending then some false else firstParts quiet x builds pending rest
+
+end
+
+/-- Is `x` certainly used before anything in these statements could fail to
+come back? Decided from their shape, in the order they are evaluated: a quick
+yes that saves counting along paths. -/
+partial def usedFirst (quiet : String → Bool) (x : String) : List Stmt → Bool
+  | [] => false
+  | .located _ _ s :: rest => usedFirst quiet x (s :: rest)
+  | [.expr e] => isName x e || firstUse quiet x e == some true
+  | .expr e :: rest =>
+    match firstUse quiet x e with
+    | some b => b
+    | none => usedFirst quiet x rest
+  | .let_ pat value :: rest =>
+    if isName x value then true
+    else
+      match firstUse quiet x value with
+      | some b => b
+      | none => !(Elab.patVars pat).contains x && usedFirst quiet x rest
+  | .letMut y value :: rest =>
+    if isName x value then true
+    else
+      match firstUse quiet x value with
+      | some b => b
+      | none => y != x && usedFirst quiet x rest
+  | .assign _ value :: rest =>
+    if isName x value then true
+    else
+      match firstUse quiet x value with
+      | some b => b
+      | none => usedFirst quiet x rest
+  | .defer _ :: rest => usedFirst quiet x rest
 
 /-- Record, for each binding used more than once in `body`, that its type must
 allow that. `outer` is the scope the bindings are added to. A binding whose
@@ -1746,8 +2166,11 @@ def checkUses (pos : String) (outer : Scope) (binds : Scope) (body : List Stmt) 
     match s.ops.lookup name with
     | some sig => sig.result.isSome
     | none => false
-  let ctx : ACtx := ⟨s.fnBodies, s.ctors.map (·.1), s.aliases,
-    s.ops.map fun (name, sig) => (name, sig.result.isSome)⟩
+  -- What only computes: the machine's own operations and what builds a value.
+  let intrinsics := Elab.prims.map (·.1) ++ Elab.hosts.map (·.1) ++ ["cancel", "replace", "destroy"]
+  let ctx : ACtx :=
+    { fns := s.fnBodies, ctors := s.ctors.map (·.1), aliases := s.aliases,
+      ops := s.ops.map fun (name, sig) => (name, sig.result.isSome), quiet := intrinsics }
   let names := (binds ++ outer).map (·.1)
   for (x, b) in binds do
     let t := match b with
@@ -1755,7 +2178,8 @@ def checkUses (pos : String) (outer : Scope) (binds : Scope) (body : List Stmt) 
       | .poly p => some p.ty
       | _ => none
     if let some t := t then
-      if usesStmts resumptive x body ≥ 2 then
+      let mentions := usesStmts resumptive x body
+      if mentions ≥ 2 then
         let t ← zonk t
         modify fun st => { st with seen := [] }
         let settled := (freeTys t).isEmpty && (freeCaps t).isEmpty && !(← tyOwnsOnce [] t)
@@ -1763,6 +2187,126 @@ def checkUses (pos : String) (outer : Scope) (binds : Scope) (body : List Stmt) 
           match pathUses ctx (names.filter (· != x)) x body with
           | some n => if n ≥ 2 then mustDup t s!"`{x}` is used more than once"
           | none => mustDup t s!"`{x}` is used more than once"
+      -- A value that has to be used: is it, however the body goes? Looked at
+      -- once the function's types are known. A name the compiler made up
+      -- stands for nothing the program wrote.
+      if s.anyMust && !x.startsWith "%" then
+        modify fun st =>
+          { st with lowerChecks := st.lowerChecks.push (pos, x, t, names.filter (· != x), body) }
+
+/-- Does a value of this type hold a callable that can jump to a label? -/
+partial def tyJumps (t : Ty) : M Bool := do
+  match ← find t with
+  | .var _ => pure false
+  | .con _ args => args.anyM tyJumps
+  | .tuple args => args.anyM tyJumps
+  | .ref _ inner _ => tyJumps inner
+  | .fn ps r _ _ cap => do
+    if ← ps.anyM tyJumps then return true
+    if ← tyJumps r then return true
+    let root ← findCap cap
+    if (← get).seen.contains root then return false
+    modify fun s => { s with seen := root :: s.seen }
+    for (src, what) in (← get).capEdges do
+      if (← findCap src) == root then
+        match what with
+        | .brand b => unless (← get).cells.any (·.1 == b) do return true
+        | .ty t => if ← tyJumps t then return true
+        | _ => pure ()
+    return false
+
+/-- With the types of a function known: note which of its calls certainly come
+back, and look at each binding that may have to be used. `fnTy` is the
+function's type.
+
+A call comes back if its callee performs no operation and can jump to no
+label. Effects not yet named are none at all unless something can supply
+them: a callable the function was given, or one kept in a declared type. -/
+def runLowerChecks (fnTy : Ty) : M Unit := do
+  let s ← get
+  modify fun st => { st with calls := #[], lowerChecks := #[], abandoned := #[] }
+  unless s.anyMust do return
+  let mut sources : List Nat := []
+  if let .fn ps _ _ _ _ ← zonk fnTy then
+    sources := ps.flatMap freeRows
+  for id in s.monoRows do
+    sources := sources ++ (← zonkRow ⟨[], some id⟩).tail.toList
+  let mut sure := s.sure
+  for (id, callee, silent) in s.calls do
+    if let .fn _ _ effs tail _ ← zonk callee then
+      modify fun st => { st with seen := [] }
+      let silent := silent || (effs.isEmpty && match tail with
+        | none => true
+        | some ρ => !sources.contains ρ)
+      if silent && !(← tyJumps callee) then sure := id :: sure
+  modify fun st => { st with sure := sure }
+  for (id, t, why) in s.abandoned do
+    unless sure.contains id do
+      modify fun st => { st with drops := st.drops.push (t, why) }
+  let resumptive := fun (name : String) =>
+    match s.ops.lookup name with
+    | some sig => sig.result.isSome
+    | none => false
+  let intrinsics := Elab.prims.map (·.1) ++ Elab.hosts.map (·.1) ++ ["cancel", "replace", "destroy"]
+  let ctx : ACtx :=
+    { fns := s.fnBodies, ctors := s.ctors.map (·.1), aliases := s.aliases,
+      ops := s.ops.map fun (name, sig) => (name, sig.result.isSome), quiet := intrinsics,
+      lower := true, sure := sure }
+  let quiet := fun (f : String) =>
+    (ctx.ctorOf f).isSome || (intrinsics.contains f && (ctx.fns.lookup f).isNone)
+  let roots ← mustInfo
+  -- What is found here is said first: it names the binding.
+  let earlier := (← get).drops
+  modify fun st => { st with drops := #[] }
+  for (pos, x, t, names, body) in s.lowerChecks do
+    let t ← zonk t
+    -- Only a type that has to be used, or one not yet known, needs the count.
+    let free := !(freeTys t).isEmpty || !(freeCaps t).isEmpty
+    unless free || (← tyMustUse roots [] t).isSome do continue
+    let unused :=
+      if usesStmts resumptive x body == 0 then true
+      else if usedFirst quiet x body then false
+      else
+        match pathUses ctx names x body with
+        | some n => n == 0
+        | none => true
+    if unused then
+      modify fun st => { st with pos := pos }
+      mustDrop t s!"`{x}` is not used on every path"
+  modify fun st => { st with drops := st.drops ++ earlier }
+  -- A block given a block that was not run. If only one block of the program
+  -- so far can be that one, the second runs in its place: what the first held
+  -- under a name the second also mentions is the second's to use, and is held
+  -- once, by the first; the rest of what the first held is let go. Otherwise
+  -- all of it is.
+  modify fun st => { st with unrunGiven := #[] }
+  for (id, cap, input, mentioned, why, own) in s.unrunGiven do
+    let root ← findCap cap
+    let mut owners : List (Nat × Nat) := []
+    for (owner, c) in s.blockCaps do
+      if owner != id && owner != 0 && (← findCap c) == root && !owners.any (·.1 == owner) then
+        owners := (owner, c) :: owners
+    match owners with
+    | [(owner, c)] =>
+      let mut theirs : List String := []
+      for ((src, what), name) in s.capEdges.zip s.capEdgeNames do
+        if src == c then
+          if let .ty held := what then
+            if let some n := name then theirs := n :: theirs
+            let covered := match name with
+              | some n => mentioned.contains n
+              | none => false
+            unless covered do
+              modify fun st => { st with drops := st.drops.push (held,
+                why ++ ", and the block it is given was not run and holds a value this one does not mention") }
+      for (((src, what), name), i) in (s.capEdges.zip s.capEdgeNames).zipIdx do
+        if src == own then
+          if let .ty _ := what then
+            if let some n := name then
+              if theirs.contains n then
+                modify fun st => { st with sharedEdges := i :: st.sharedEdges }
+      modify fun st => { st with assumedLinks := st.assumedLinks.push (id, owner, input, why) }
+    | _ => modify fun st => { st with drops := st.drops.push (input, why) }
 
 /-- Can this pattern fail to match? Decided from its shape alone. -/
 partial def irrefutable : Pattern → M Bool
@@ -1805,11 +2349,34 @@ def withLater {α : Type} (names : List String) (act : M α) : M α := do
 /-- Run a part of an expression, forgetting the values it computed on the way. -/
 def withTemps {α : Type} (act : M α) : M α := do
   let outer := (← get).temps
+  let anon := (← get).anon
   let r ← act
-  modify fun s => { s with temps := outer }
+  modify fun s => { s with temps := outer, anon := anon }
   pure r
 
 def pushTemp (t : Ty) : M Unit := modify fun s => { s with temps := (t, s.loans.size) :: s.temps }
+
+/-- A value just computed that has no name: until it is passed on, nothing
+but the expression holds it. A name's value is the name's to account for. -/
+def pushAnon (e : Expr) (t : Ty) : M Unit := do
+  unless (← get).anyMust do return
+  match e with
+  | .name _ _ => pure ()
+  | .int _ => pure ()
+  | .label _ => pure ()
+  | .closure _ _ => pure ()
+  | .ref _ _ => pure ()
+  | _ => modify fun s => { s with anon := t :: s.anon }
+
+/-- Something that may not come back is about to run: the values still waiting
+are let go if it does not. -/
+def abandons (waiting : List Ty) (what : String) (call : Nat := 0) : M Unit := do
+  unless (← get).anyMust do return
+  for t in waiting do
+    let why := s!"a value computed before {what} is let go if that does not return (give it a name first)"
+    -- A call with an identity is looked at again once its type is known.
+    if call == 0 then mustDrop t why
+    else modify fun s => { s with abandoned := s.abandoned.push (call, t, s.pos ++ why) }
 
 def use (scope : Scope) (kind : UseKind) : M Unit :=
   modify fun s =>
@@ -1834,6 +2401,7 @@ partial def capHoldsLoan (loan : Nat) (cap : Nat) : M Bool := do
       | .brand b => if ← cellHoldsLoan loan b then return true
       | .touch b _ => if ← cellHoldsLoan loan b then return true
       | .once => pure ()
+      | .must => pure ()
   return false
 
 /-- A callable that uses a mutable variable can reach what the variable holds. -/
@@ -2072,6 +2640,8 @@ inductive Head where
   | host (id : Nat)
   | cancel
   | replace
+  /-- `destroy(value)`: the value is used, by being destroyed. -/
+  | destroy
   | const (e : Expr)
 
 def resolveName (scope : Scope) (qual : Option String) (x : String) : M Head := do
@@ -2095,6 +2665,7 @@ def resolveName (scope : Scope) (qual : Option String) (x : String) : M Head := 
   if let some (id, _) := Elab.hosts.lookup x then return .host id
   if x == "cancel" then return .cancel
   if x == "replace" then return .replace
+  if x == "destroy" then return .destroy
   if let some e := s.aliases.lookup x then return .const e
   throw s!"unknown name `{x}`"
 
@@ -2116,12 +2687,12 @@ def captureAll (scope : Scope) (cap : Nat) (names : List String) (assigns : Stri
   -- the callable reads or assigns the variable when it runs.
   for name in names.eraseDups do
     match scope.lookup name with
-    | some (.val t) => captures cap (.ty t)
+    | some (.val t) => captures cap (.ty t) (some name)
     | some (.cell _ brand) =>
       captures cap (.brand brand)
       captures cap (.touch brand (assigns name))
     | some (.label _ brand) => captures cap (.brand brand)
-    | some (.poly s) => captures cap (.ty s.ty)
+    | some (.poly s) => captures cap (.ty s.ty) (some name)
     | none => pure ()
 
 private def placeName : Expr → String
@@ -2259,6 +2830,7 @@ partial def inferExpr (scope : Scope) (amb : Row) : Expr → M Ty
     | .host _ => throw s!"host operation `{x}` must be called"
     | .cancel => throw "`cancel` must be applied to a resumption"
     | .replace => throw "`replace` must be called"
+    | .destroy => throw "`destroy` must be called"
     | .const e => inferExpr [] amb e
   | .label l =>
     match scope.lookup ("@" ++ l) with
@@ -2269,10 +2841,12 @@ partial def inferExpr (scope : Scope) (amb : Row) : Expr → M Ty
     for e in es do
       let t ← inferExpr scope amb e
       pushTemp t
+      pushAnon e t
       ts := ts.push t
     pure (.tuple ts.toList)
   | .proj e idx => do
     let subject ← inferExpr scope amb e
+    mustDrop subject "taking one field of a value lets go of the rest"
     match ← fieldType subject idx with
     | some t => pure t
     | none => do
@@ -2330,12 +2904,26 @@ partial def checkArg (scope : Scope) (amb : Row) (what : String) (p : Ty) (a : E
   | some (id, body), .fn [input] _ _ _ _ =>
     -- A callable taking one argument is expected, and a block is written
     -- without parameters: it takes the argument without naming it.
-    let t ← inferCallable scope [some input] none none [.mk [.wild] body]
+    let t ← inferCallable scope [some input] none none [.mk [.var "%given"] body]
       "the clauses of this callable do" id
+    let own := match t with
+      | .fn _ _ _ _ c => c
+      | _ => 0
     match ← fitAt scope amb what none p t with
     | some e => pure (some e)
     | none =>
       modify fun s => { s with given := s.given.push id }
+      -- What it is given and does not name, it lets go. Given a block that
+      -- was not run, it lets go of what that block held and it does not
+      -- itself mention: looked at once the types are known.
+      let why := "a block that does not name what it is given lets it go"
+      match ← find input with
+      | .fn [] _ _ _ cap =>
+        if (← get).anyMust then
+          modify fun s =>
+            { s with unrunGiven :=
+                s.unrunGiven.push (id, cap, input, Elab.fvStmts [] body, s.pos ++ why, own) }
+      | _ => mustDrop input why
       -- A callable that takes no arguments, given to a block: a block that was
       -- not run, whose environment this one can take over.
       if let .fn [] _ _ _ cap ← find input then
@@ -2362,6 +2950,7 @@ partial def checkArgsIn (scope : Scope) (amb : Row) (what : String) (params : Li
       if let some e ← checkArg scope amb s!"argument {i + 1} of {what}" p a site then
         return some (i, e)
       pushTemp p
+      pushAnon a p
     | _, _ => pure ()
   return none
 
@@ -2389,10 +2978,21 @@ partial def checkArgs (scope : Scope) (amb : Row) (what : String) (params : List
 /-- Apply a callee of a given type in the ambient effects. -/
 partial def applyTy (scope : Scope) (amb : Row) (what : String) (callee : Ty) (args : List Expr)
     (call : Nat := 0) : M Ty := do
+  abandons (← get).anon what call
   pushTemp callee
   match ← find callee with
   | .fn ps r effs tail _ => do
     checkArgs scope amb what ps args call
+    if call != 0 && (← get).anyMust then
+      let row ← flattenRow ⟨effs, tail⟩
+      let silent ← match row.effs.isEmpty, row.tail with
+        | true, none => pure true
+        | true, some ρ => do
+          if (← get).instRows.contains ρ then
+            pure !((← ps.mapM zonk).flatMap freeRows).contains ρ
+          else pure false
+        | false, _ => pure false
+      modify fun s => { s with calls := s.calls.push (call, callee, silent) }
     use scope (.call what (callee :: ps))
     includeRow ⟨effs, tail⟩ amb what
     pure r
@@ -2420,6 +3020,7 @@ partial def inferCall (scope : Scope) (amb : Row) (f : Expr) (args : List Expr)
       checkArgs scope amb s!"constructor `{x}`" fields args call
       pure result
     | .op sig => do
+      abandons (← get).anon s!"operation `{x}`"
       let decl := ((← get).effects.lookup sig.effect).getD ⟨[], []⟩
       let inst ← decl.tvars.mapM fun _ => freshTy
       let (payload, result) := instOp sig inst
@@ -2455,6 +3056,12 @@ partial def inferCall (scope : Scope) (amb : Row) (f : Expr) (args : List Expr)
       checkArgs scope amb "`replace`" [.ref .uniq t cap, t] args call
       use scope (.through cap "the reference given to `replace`" true)
       pure t
+    | .destroy => do
+      let t ← freshTy
+      checkArgs scope amb "`destroy`" [t] args call
+      if call == 0 then throw "`destroy` is used where the checker has no name for the call; this is a compiler defect"
+      modify fun s => { s with destroys := s.destroys.push (call, t, s.owner, s.pos) }
+      pure .unit
     | .local (.val t) => applyTy scope amb s!"`{x}`" t args call
     | .local (.cell t brand) => do
       mustDup t (readsCell x)
@@ -2510,7 +3117,8 @@ partial def inferStmts (scope : Scope) (amb : Row) (stmts : List Stmt)
     catch e => throw (positioned line col e)
   | [.expr e] => do finish (← inferExpr scope amb e) true
   | .expr e :: rest => do
-    let _ ← withLater (Elab.fvStmts [] rest) (inferExpr scope amb e)
+    let t ← withLater (Elab.fvStmts [] rest) (inferExpr scope amb e)
+    mustDrop t "the value of a statement is let go"
     inferStmts scope amb rest want
   | .let_ (.var x) (.closure id clauses) :: rest => do
     let t ← withLater (Elab.fvStmts [x] rest) (inferExpr scope amb (.closure id clauses))
@@ -2573,6 +3181,9 @@ partial def inferStmts (scope : Scope) (amb : Row) (stmts : List Stmt)
         cells := s.cells.push (brand, x, t)
         -- A variable owns what it holds.
         dropCands := s.dropCands.push (⟨s.owner, at_.1, at_.2, x, false⟩, t, pos) }
+    -- Nothing says the variable is empty when its block ends, or when it is
+    -- assigned: what it holds then is let go.
+    mustDrop t s!"the mutable variable `{x}` lets go of what it holds when it is assigned or its block ends"
     let result ← inferStmts ((x, .cell t brand) :: scope) amb rest want
     checkEscape brand s!"`{x}` could be used after its block has ended"
       (("something that uses it is the block's result", result) :: scopeRoots scope) amb
@@ -2596,6 +3207,7 @@ partial def inferStmts (scope : Scope) (amb : Row) (stmts : List Stmt)
           let cap ← freshCap
           unifyAt "`*` assigns through a reference" (.ref .uniq inner cap)
             (← inferPlace scope amb e)
+          mustDrop inner "assigning through a reference lets go of what was there"
           pure (inner, UseKind.through cap (placeName e) true)
         | _ => throw "only a mutable variable or `*reference` can be assigned"
       unifyAt "the assigned value" expected (← inferExpr scope amb value)
@@ -2605,7 +3217,8 @@ partial def inferStmts (scope : Scope) (amb : Row) (stmts : List Stmt)
     -- A cleanup performs no effects: it may run while its surroundings are
     -- being left, when no handler should be asked to do anything.
     try
-      let _ ← withLater (Elab.fvStmts [] rest) (inferExpr scope ⟨[], none⟩ e)
+      let t ← withLater (Elab.fvStmts [] rest) (inferExpr scope ⟨[], none⟩ e)
+      mustDrop t "what a `defer` gives is let go"
     catch err => throw s!"a `defer` cannot perform effects: {err}"
     -- It runs when the rest is left, so what it mentions is still to be used
     -- throughout the rest.
@@ -2614,7 +3227,9 @@ partial def inferStmts (scope : Scope) (amb : Row) (stmts : List Stmt)
 /-- Check a pattern against a type; the names it binds. -/
 partial def inferPat (p : Pattern) (t : Ty) : M Scope := do
   match p with
-  | .wild => pure []
+  | .wild => do
+    mustDrop t "`_` lets go of a value"
+    pure []
   | .int _ => do
     unifyAt "an integer pattern" .int t
     pure []
@@ -2668,8 +3283,9 @@ partial def inferCallable (scope : Scope) (annots : List (Option Ty)) (ret : Opt
   -- and the values the expression around it has computed are not its concern.
   let outerLater := (← get).later
   let outerTemps := (← get).temps
+  let outerAnon := (← get).anon
   modify fun s =>
-    { s with later := (clauses.flatMap (Elab.fvClause [])).eraseDups, temps := [] }
+    { s with later := (clauses.flatMap (Elab.fvClause [])).eraseDups, temps := [], anon := [] }
   -- What the callable captures from the scope it is written in.
   let cap ← freshCap
   captureAll scope cap (clauses.flatMap (Elab.fvClause [])) fun x => clauses.any (assignsClause x)
@@ -2733,7 +3349,7 @@ partial def inferCallable (scope : Scope) (annots : List (Option Ty)) (ret : Opt
     let roots := ("it is returned from the function", result) ::
       params.map fun p => ("the caller could hold it through a parameter", p)
     checkEscape brand (jumpsAfter name) roots row
-  modify fun s => { s with later := outerLater, temps := outerTemps }
+  modify fun s => { s with later := outerLater, temps := outerTemps, anon := outerAnon }
   pure (.func params result row cap)
 
 /--
@@ -2801,6 +3417,7 @@ partial def inferHandle (scope : Scope) (amb : Row) (subject : Expr) (arms : Lis
         -- reinstalls the handler, the arms too: everything either of them uses.
         let held ← freshCap
         captures held .once
+        if sig.must then captures held .must
         captureAll scope held (Elab.fvExpr [] (.handle subject arms)) fun x =>
           assignsExpr x (.handle subject arms)
         let binds ← inferPats ps (payload ++ [.func [o] result amb held])
@@ -2902,6 +3519,44 @@ partial def toDictE (impls : Array ImplDecl) : Traits.Dict → Elab.DictE
   | .given k => .param k
   | .impl i subs => .impl ((impls[i]?.map (·.dictFn)).getD "") (subs.map (toDictE impls))
 
+/-- Does destroying a value of this type call for more than letting it go: is
+there in it a resumption, a value that has to be used, or one whose type has
+`Drop`? -/
+partial def needsCare (roots : MustInfo) (visiting : List String) (t : Ty) : M Bool := do
+  modify fun s => { s with seen := [] }
+  if ← tyOwnsOnce [] t then return true
+  if (← tyMustUse roots [] t).isSome then return true
+  match ← find t with
+  | .tuple args => args.anyM (needsCare roots visiting)
+  | .con name args => do
+    if (← get).kimpls.any fun I => I.trait == "Drop" && I.head == name then return true
+    if ← args.anyM (needsCare roots visiting) then return true
+    if visiting.contains name then return false
+    match (← get).types.lookup name with
+    | none => pure false
+    | some decl =>
+      decl.ctors.anyM fun c => do
+        match (← get).ctors.lookup c with
+        | none => pure false
+        | some sig =>
+          (sig.fields.map (subst (sig.tvars.zip args) [] [])).anyM
+            (needsCare roots (name :: visiting))
+  | _ => pure false
+
+/-- The types a value of this type directly holds. -/
+def partsOf (t : Ty) : M (List Ty) := do
+  match ← find t with
+  | .tuple args => pure args
+  | .con name args =>
+    match (← get).types.lookup name with
+    | none => pure []
+    | some decl =>
+      decl.ctors.flatMapM fun c => do
+        match (← get).ctors.lookup c with
+        | none => pure []
+        | some sig => pure (sig.fields.map (subst (sig.tvars.zip args) [] []))
+  | _ => pure []
+
 /-- Meet the bounds of the group just inferred, and give each of its functions
 its type. A bound on a type the function is generic in becomes something the
 function is given; every other is met by `Traits.solve`. -/
@@ -2918,6 +3573,30 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
         let id := 2000000000 + (← get).dropSites.size
         pending := pending.push ⟨"Drop", ty, id, 0, site.owner, pos⟩
         modify fun s => { s with dropSites := s.dropSites.push (site, id) }
+  -- `destroy(value)` runs the type's `drop`, if it has one. It does not take
+  -- the value apart, so what the value holds must need nothing done.
+  let destroys := (← get).destroys
+  modify fun s => { s with destroys := #[] }
+  let roots ← mustInfo
+  for (call, ty, owner, pos) in destroys do
+    let ty ← zonk ty
+    let fail := fun (msg : String) => (throw (inFunction owner (pos ++ msg)) : M Unit)
+    match ty with
+    | .fn _ _ _ _ _ => fail "a callable is given up with `cancel`, not `destroy`"
+    | .var _ => fail "`destroy` is given a value whose type is not known here: say what it is"
+    | _ => pure ()
+    for part in ← partsOf ty do
+      if ← needsCare roots [] part then
+        fail s!"`destroy` does not take a `{showTy ty}` apart, and it holds a `{showTy (← zonk part)}`, which needs more than letting go: take it apart with a pattern"
+    let hook ← match ty with
+      | .con n _ =>
+        if (← get).kimpls.any fun I => I.trait == "Drop" && I.head == n then
+          let id := 3000000000 + (← get).destroySites.size
+          pending := pending.push ⟨"Drop", ty, id, 0, owner, pos⟩
+          pure (some id)
+        else pure none
+      | _ => pure none
+    modify fun s => { s with destroySites := s.destroySites.push (call, hook) }
   -- What the group's functions need of the types they are generic in.
   let mut leafs : Array (String × Nat × Ty) := #[]
   for b in pending do
@@ -2993,6 +3672,20 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
             s!"{u.pos}`{u.callee}` needs `{g.1}` of a type that `{u.owner}` is not given")
   modify fun s => { s with dictTable := s.dictTable ++ table.toArray }
 
+/-- What a type says of its own uses may only narrow what its fields allow. -/
+def checkUseDecls : M Unit := do
+  for (head, must, once) in (← get).useDecls do
+    let arity := (((← get).types.lookup head).map (·.arity)).getD 0
+    let args ← (List.range arity).mapM fun _ => freshTy
+    for part in ← partsOf (.con head args) do
+      unless must do
+        if let some what ← tyMustUse {} [head] part then
+          throw s!"`impl Use` for `{head}`: it holds {what}, which has to be used, so the fewest uses of a `{head}` cannot be 0"
+      unless once do
+        modify fun s => { s with seen := [] }
+        if ← tyOwnsOnce [head] part then
+          throw s!"`impl Use` for `{head}`: it holds a value that can be used only once, so the most uses of a `{head}` cannot be `infinity`"
+
 /-- Strongly connected components of the call graph, callees first. -/
 partial def components (names : List String) (deps : String → List String) : List (List String) :=
   let rec visit (v : String) (st : Nat × List String × List (String × Nat × Nat) × List (List String)) :
@@ -3034,7 +3727,7 @@ def checkGroup (decls : List FnDecl) : M Unit := do
   let mut reused : List (String × Ty) := []
   for d in decls do
     try
-      modify fun s => { s with pos := "", owner := d.name, later := [], temps := [] }
+      modify fun s => { s with pos := "", owner := d.name, later := [], temps := [], anon := [] }
       let rigid := d.params.map fun p => (p, Ty.con s!"'{p}@{d.name}" [])
       let annots ← d.annots.mapM fun
         | some t => some <$> resolveType rigid false t
@@ -3062,7 +3755,9 @@ def checkGroup (decls : List FnDecl) : M Unit := do
         reused := (d.name, used) :: reused
       defs := (d.name, t) :: defs
       runPending
+      runLowerChecks t
       checkDups (← get).dups
+      checkDrops (← get).drops
     catch e =>
       -- The usual cause: the body ends in an expression run only for its effect,
       -- whose value has become the function's result.
@@ -3092,7 +3787,10 @@ def checkGroup (decls : List FnDecl) : M Unit := do
   -- the end of the program.
   let owner := (decls.head?.map (·.name)).getD "the program"
   let late := (← get).dups.map fun (t, why) => (t, inFunction owner why)
-  modify fun s => { s with group := [], dups := #[], lateDups := s.lateDups ++ late }
+  let lateDrops := (← get).drops.map fun (t, why) => (t, inFunction owner why)
+  modify fun s =>
+    { s with group := [], dups := #[], lateDups := s.lateDups ++ late, drops := #[],
+             lateDrops := s.lateDrops ++ lateDrops }
 
 /-- Check a whole program. Gives what the elaborator needs to know about its
 blocks: which take an argument they do not name, and for each that is handed a
@@ -3126,6 +3824,7 @@ def checkProgram (items : List Item) : Except String Elab.Blocks := do
     modify fun s => { s with fnBodies := decls.map fun d => (d.name, d.clauses) }
     declare items
     declareTraits items
+    checkUseDecls
     for comp in components names deps do
       checkGroup (comp.filterMap fun n => decls.find? (·.name == n))
     -- The functions implementations give, each on its own: any function may
@@ -3142,14 +3841,19 @@ def checkProgram (items : List Item) : Except String Elab.Blocks := do
     unless (((← get).fnBounds.lookup "main").getD 0) == 0 do
       throw "`main` needs a trait of a type that nothing decides"
     checkDups (← get).lateDups
+    checkDrops (← get).lateDrops
     match (← get).fns.lookup "main" with
     | none => pure ()
     | some scheme =>
       match ← zonk (← instantiate scheme) with
-      | .fn ps _ effs _ _ =>
+      | .fn ps r effs _ _ =>
         unless ps.isEmpty do throw "`main` takes no arguments"
         unless effs.isEmpty do
           throw s!"`main` performs effects that nothing handles: {showEffs effs}"
+        -- Nothing uses what the program gives.
+        modify fun s => { s with pos := "", drops := #[] }
+        mustDrop r "the result of `main` is let go when the program ends"
+        checkDrops (← get).drops
       | _ => pure ()
     let s ← get
     let mut links : List (Nat × Nat) := []
@@ -3160,13 +3864,20 @@ def checkProgram (items : List Item) : Except String Elab.Blocks := do
         if owner != id && owner != 0 && (← findCap c) == root && !owners.contains owner then
           owners := owner :: owners
       if let [owner] := owners then links := (id, owner) :: links
+    -- A block taken to be given one particular block, where in the end it
+    -- may be given another, lets go of whatever it is given.
+    let mut unlinked : Array (Ty × String) := #[]
+    for (id, owner, input, why) in s.assumedLinks do
+      unless links.contains (id, owner) do unlinked := unlinked.push (input, why)
+    checkDrops unlinked
     let implEs := s.impls.toList.map fun im =>
       let names := (s.traits.lookup im.trait).getD []
       (⟨im.dictFn, im.context.length, names.map fun m =>
         (Elab.implFnName im.trait im.head m, ((s.methods.lookup m).map (·.params.length)).getD 0)⟩ :
         Elab.ImplE)
     pure ⟨s.given.toList, links, s.coercions.toList,
-      ⟨s.dictTable.toList, s.methodCalls.toList, s.fnBounds, implEs, s.dropSites.toList⟩⟩
+      ⟨s.dictTable.toList, s.methodCalls.toList, s.fnBounds, implEs, s.dropSites.toList,
+        s.destroySites.toList⟩⟩
   let (blocks, _) ← action.run {}
   pure blocks
 

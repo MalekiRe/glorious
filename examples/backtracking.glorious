@@ -7,7 +7,8 @@
 // A list of lists appears below, so the element type is a parameter.
 enum List<T> { Nil, Cons(T, List<T>) }
 
-effect Search<T> { found(T) }
+// `[1, 1]`: whoever handles `found` has to resume the search or cancel it.
+effect Search<T> { [1, 1] found(T) }
 
 // Report every subset of the items. `picked` holds the items chosen so far,
 // most recent first.

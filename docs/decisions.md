@@ -8,8 +8,10 @@ file is the current intent for this branch.
 ## Resumptions are one-shot
 
 **Decision (user, with the kernel rewrite).** A resumption can be used at most
-once: resumed once, or cancelled once. There is no multi-shot resumption, and
-no `[n, n]` quantity on operation declarations.
+once: resumed once, or cancelled once. There is no multi-shot resumption. An
+operation may say how often its resumption is used, but the most is always
+one: `[0, 1]`, which is what an operation that says nothing has, or `[1, 1]`
+(see "How often a value is used"). Any other quantity is refused.
 
 This departs from the language specification §10.6, which admits exact finite
 `[n, n]`, and from the usage-multiplication rules in the kernel draft §3.6.
@@ -800,9 +802,11 @@ is done to a `T` when it is destroyed; `p` is a `&mut T`. The function is run
 - likewise for a `let` whose name nothing afterwards uses: the name owns it;
 - before a variable is assigned, on what it held, once the new value is computed.
 
-A value whose type has `Drop`, or holds one that has, has one owner: it is used
-at most once, as a value that holds a resumption is. A program does not call
-`drop`. Later variables end first.
+`Drop` says nothing about how often a value is used; that is the type's `Use`
+interval (next section), as the specification has it. A type that has `Drop`
+and says no more can be copied, and each copy that comes to rest in a variable
+is destroyed. A program does not call `drop`; it writes `destroy(value)`, which
+is a use of the value and runs the function. Later variables end first.
 
 It is built from what was there. Once the source text is checked, a place where
 a value is destroyed is a cleanup (`defer`) that calls the implementation's
@@ -822,6 +826,63 @@ What it is not:
   (`struct Deferred(fn() -> ())` with `Drop`) works for a callable that touches
   no mutable variable. One that does cannot be kept in a declared type: the
   type would have to say which variable, and declared types have no way to.
+
+## How often a value is used
+
+**Decision (user): build the specification's `Use` intervals, with the lower
+bound, before proving anything about dropped resumptions.**
+
+What is built, in the checker for source text:
+
+- `impl Use<[fewest, most]> for T {}` on a declared type, and `[fewest, most]`
+  before a resumptive operation, for its resumption. The fewest is 0 or 1, the
+  most 1 or `infinity` (a resumption's is always 1). So there are four kinds:
+  any number of uses, at most one, exactly one, at least one.
+- A type that says nothing has what its fields allow; one that says something
+  may only narrow that. A tuple, a declared type and a callable hold what is
+  in them: a callable that mentions a value that has to be used has to be
+  called.
+- **Fewest uses.** Wherever a value is let go without being used, its type
+  must allow that: a name not used on some path, `_`, a statement's value, a
+  field read that leaves the rest, a block that does not name what it is
+  given, a mutable variable when it is assigned or ends, the result of `main`.
+  For a type a function is generic in, this is part of the function's
+  contract and is checked where it is called, as use more than once already
+  was.
+- **Paths.** Whether a name is used on every path is counted along the paths
+  the program can take, through the functions and callables it goes to, as
+  the most uses already were. A path that leaves (an operation that need not
+  be resumed, a jump to a label, a call that may not come back) ends with the
+  uses it has made. A call comes back if its type says its callee performs
+  nothing and can jump to no label.
+- `destroy(value)` is a use. It runs the type's `drop` if it has one, and
+  refuses a value that holds something needing more than letting go.
+- A program that declares nothing that has to be used is checked exactly as
+  before, and pays nothing.
+
+How this differs from the specification:
+
+- Counting stops at one. `[2, 3]`, `[0, 0]` and the like are refused.
+- `destroy` does not take a value apart; there is no destruction of fields in
+  order. A value that holds something to destroy is taken apart by a pattern.
+  Taking a value apart by a pattern is a use and does not run its `drop`.
+- A value let go where that is allowed is simply forgotten, except a
+  resumption its arm does not use (cancelled) and a value at rest in a
+  variable whose type has `Drop` (its function runs). The specification
+  destroys at every such place.
+- A value that has to be used cannot be kept in a mutable variable: nothing
+  tracks whether the variable is empty when it ends.
+- A value that has to be used cannot wait across a call to a callable the
+  function was given, nor across an operation: either may not come back.
+  There is no way yet to write that a callable performs nothing.
+- References are as before: `&mut` is not a use-once value.
+- All of this is the unproved checker. Core is told nothing about it.
+
+What this does for the examples, with their operations declared `[1, 1]`:
+`backtracking` is accepted as it stands and now says so. In `generators`, the
+fold that threads its state through the resumptions is accepted; `find`, which
+calls a predicate it was given while holding the resumption, is not. `tasks`
+keeps resumptions in a mutable queue and is not.
 
 ## Cleanups are counted, and none is lost
 
@@ -845,17 +906,16 @@ way to drop one. A resumption can still be dropped by passing it to something
 that ignores it, by leaving it in a mutable variable, or by leaving the block
 that holds it before it is used.
 
-**What would rule the rest out, measured and not proved.** Treating a
-resumption as a value that must be used (the specification's lower bound of
-one), a program never drops one if: every local that holds one is handed on;
-no pattern ignores one; none is put in a mutable variable; and while one is
-held, nothing is called that performs an operation or touches an outside
-variable or label. Of the 180 test programs certified strictly, 173 obey these
-rules as written. Of the five examples two do; `generators` (a resumption
-captured by a branch not taken), `tasks` (resumptions in a mutable queue) and
-`backtracking` (one held across a call that touches a variable) do not. Those
-need the environment states that differ by path which the specification
-describes, and which are not built.
+**What would rule the rest out in Core, measured and not proved.** Treating a
+resumption as a value that must be used, a Core program never drops one if:
+every local that holds one is handed on; no pattern ignores one; none is put
+in a mutable variable; and while one is held, nothing is called that performs
+an operation or touches an outside variable or label. Of the 180 test programs
+certified strictly at the time, 173 obeyed these rules as written; of the five
+examples, two. The source checker now has the corresponding rule (previous
+section), which follows calls and so accepts more. Nothing connects the two
+yet: that a program the source checker accepts with every operation `[1, 1]`
+leaves no resumption untaken is not proved.
 
 ## Other standing decisions
 

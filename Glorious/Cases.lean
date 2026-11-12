@@ -357,7 +357,7 @@ def cases : List Case := [
   fn main() { handle choose() { choose(k) => cancel(k); k(true) } }",
     [], "error: 2:15: in `main`: `k` is used more than once, but a value that holds a resumption can be used only once"⟩,
   ⟨"effect Choice { [2, 2] choose() }  fn main() { 0 }",
-    [], "error: 1:17: expected an operation name (there are no quantities: a resumption is used once), found `[`"⟩,
+    [], "error: operation `choose`: a resumption is used at most once, so write `[0, 1]` or `[1, 1]`"⟩,
 
   -- Types and effects are inferred. Mistakes that used to surface when a program
   -- ran are now reported before it does.
@@ -873,11 +873,127 @@ def cases : List Case := [
   -- A guard that runs a callable when its block ends, written in the language.
   ⟨"struct Deferred(fn() -> ())\nimpl Drop for Deferred { fn drop(d) { match(replace(d, Deferred({ () }))) { Deferred(f) => f() } } }\nfn deferred(f) { Deferred(f) }\nfn main() { let g = deferred({ host_write(9); }); host_write(1); 2 }",
     [], "1\n9\n2"⟩,
-  -- Such a value has one owner, and `drop` is not for a program to call.
-  ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nfn keep2(a: File, b: File) { let mut x = a; let mut y = b; 0 }\nfn main() { let f = File(7); keep2(f, f) }",
-    [], "error: 4:13: in `main`: `f` is used more than once, but a value that is destroyed when its owner ends can be used only once"⟩,
+  -- How often a value is used. A declared type may say: `impl Use<[fewest, most]>`.
+  -- `Drop` says nothing about it: a type that has `Drop` and says no more can be
+  -- copied, and each copy is destroyed.
   ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nfn main() { let mut f = File(7); let g = f; 0 }",
-    [], "error: 3:34: in `main`: reading the mutable variable `f` copies its value (`replace` takes it out instead), but a value that is destroyed when its owner ends can be used only once"⟩,
+    [], "7\n7\n0"⟩,
+  -- At most once.
+  ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nimpl Use<[0, 1]> for File {}\nfn keep2(a: File, b: File) { let mut x = a; let mut y = b; 0 }\nfn main() { let f = File(7); keep2(f, f) }",
+    [], "error: 5:13: in `main`: `f` is used more than once, but a `File` can be used only once"⟩,
+  ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nimpl Use<[0, 1]> for File {}\nfn main() { let mut f = File(7); let g = f; 0 }",
+    [], "error: 4:34: in `main`: reading the mutable variable `f` copies its value (`replace` takes it out instead), but a `File` can be used only once"⟩,
+  -- At least once: a value that is let go without being used is an error,
+  -- wherever it happens. `destroy(value)` is a use; it runs the type's `drop`.
+  ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nimpl Use<[1, 1]> for File {}\nfn main() { let f = File(7); 0 }",
+    [], "error: 4:13: in `main`: `f` is not used on every path, but a `File` has to be used"⟩,
+  ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nimpl Use<[1, 1]> for File {}\nfn main() { let f = File(7); host_write(1); destroy(f); 0 }",
+    [], "1\n7\n0"⟩,
+  ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nimpl Use<[1, 1]> for File {}\nfn main() { File(7); 0 }",
+    [], "error: 4:13: in `main`: the value of a statement is let go, but a `File` has to be used"⟩,
+  ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nimpl Use<[1, 1]> for File {}\nfn main() { let _ = File(7); 0 }",
+    [], "error: 4:13: in `main`: `_` lets go of a value, but a `File` has to be used"⟩,
+  ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nimpl Use<[1, 1]> for File {}\nfn main() { let mut f = File(7); 0 }",
+    [], "error: 4:13: in `main`: the mutable variable `f` lets go of what it holds when it is assigned or its block ends, but a `File` has to be used"⟩,
+  ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nimpl Use<[1, 1]> for File {}\nfn main() { let p = (File(3), 4); p.1 }",
+    [], "error: 4:35: in `main`: taking one field of a value lets go of the rest, but a `File` has to be used"⟩,
+  ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nimpl Use<[1, 1]> for File {}\nfn main() { let p = (File(3), 4); let (f, n) = p; destroy(f); n }",
+    [], "3\n4"⟩,
+  -- It is part of a function's contract that it may leave an argument unused.
+  ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nimpl Use<[1, 1]> for File {}\nfn ignore(x) { 0 }\nfn main() { ignore(File(7)) }",
+    [], "error: 5:13: in `main`: `ignore` may leave what it is given unused, but a `File` has to be used"⟩,
+  ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nimpl Use<[1, 1]> for File {}\nfn id(x) { x }\nfn main() { destroy(id(File(7))); 0 }",
+    [], "7\n0"⟩,
+  -- Every path counts: both branches, and a way out before the use.
+  ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nimpl Use<[1, 1]> for File {}\nfn main() { let f = File(7); if(1 < 2) { destroy(f); 1 } else { destroy(f); 2 } }",
+    [], "7\n1"⟩,
+  ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nimpl Use<[1, 1]> for File {}\nfn main() { let f = File(7); if(1 < 2) { destroy(f); 1 } else { 2 } }",
+    [], "error: 4:13: in `main`: `f` is not used on every path, but a `File` has to be used"⟩,
+  ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nimpl Use<[1, 1]> for File {}\neffect Fail { fail() -> ! }\nfn work() { let f = File(7); fail(); destroy(f); 0 }\nfn main() { handle work() { fail() => 1 } }",
+    [], "error: 5:13: in `work`: `f` is not used on every path, but a `File` has to be used"⟩,
+  ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nimpl Use<[1, 1]> for File {}\neffect Fail { fail() -> ! }\nfn work() { let f = File(7); destroy(f); fail(); 0 }\nfn main() { handle work() { fail() => 1 } }",
+    [], "7\n1"⟩,
+  ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nimpl Use<[1, 1]> for File {}\nfn main() { @out { let f = File(7); @out(1); destroy(f); 2 } }",
+    [], "error: 4:20: in `main`: `f` is not used on every path, but a `File` has to be used"⟩,
+  ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nimpl Use<[1, 1]> for File {}\nfn main() { let f = File(7); defer destroy(f); host_write(1); 0 }",
+    [], "1\n7\n0"⟩,
+  -- A call that performs nothing and can jump nowhere comes back, so a value
+  -- may wait across it; one that may not come back lets the value go.
+  ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nimpl Use<[1, 1]> for File {}\nfn main() { let f = File(7); let mut i = 0; while({ i < 3 }) { i = i + 1; }; destroy(f); i }",
+    [], "7\n3"⟩,
+  ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nimpl Use<[1, 1]> for File {}\nfn each(f, n) { if(n < 1) { 0 } else { f(n); each(f, n - 1) } }\nfn main() { @out { let t = File(7); each({ x => @out(x) }, 3); destroy(t); 0 } }",
+    [], "error: 5:20: in `main`: `t` is not used on every path, but a `File` has to be used"⟩,
+  ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nimpl Use<[1, 1]> for File {}\neffect Log { log(Int) }\nfn work() { let f = File(7); log(1); destroy(f); 0 }\nfn main() { handle work() { log(x) => print(x) } }",
+    [], "error: 5:13: in `work`: `f` is not used on every path, but a `File` has to be used"⟩,
+  ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nimpl Use<[1, 1]> for File {}\nfn run(h, f: File) { h(); destroy(f); 0 }\nfn main() { run({ 1 }, File(7)) }",
+    [], "error: in `run`: `f` is not used on every path, but a `File` has to be used"⟩,
+  -- A value that holds one has to be used too, and `destroy` does not take a
+  -- value apart.
+  ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nimpl Use<[1, 1]> for File {}\nenum L { N, C(File, L) }\nfn free { N => 0, C(f, rest) => destroy(f); free(rest) }\nfn main() { free(C(File(1), C(File(2), N))) }",
+    [], "1\n2\n0"⟩,
+  ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nimpl Use<[1, 1]> for File {}\nenum L { N, C(File, L) }\nfn main() { let l = C(File(1), N); 0 }",
+    [], "error: 5:13: in `main`: `l` is not used on every path, but a `File` has to be used"⟩,
+  ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nimpl Use<[1, 1]> for File {}\nstruct Pair(File, Int)\nfn main() { let p = Pair(File(1), 2); destroy(p); 0 }",
+    [], "error: 5:39: in `main`: `destroy` does not take a `Pair` apart, and it holds a `File`, which needs more than letting go: take it apart with a pattern"⟩,
+  -- Any number of times, but at least once.
+  ⟨"struct Ticket(Int)\nimpl Use<[1, infinity]> for Ticket {}\nfn show(t: Ticket) { match(t) { Ticket(n) => n } }\nfn main() { let t = Ticket(4); show(t) + show(t) }",
+    [], "8"⟩,
+  ⟨"struct Ticket(Int)\nimpl Use<[1, infinity]> for Ticket {}\nfn main() { let t = Ticket(4); 0 }",
+    [], "error: 3:13: in `main`: `t` is not used on every path, but a `Ticket` has to be used"⟩,
+  -- What a type says may only narrow what its fields allow, and counting stops at one.
+  ⟨"struct Ticket(Int)\nimpl Use<[1, 1]> for Ticket {}\nstruct Box(Ticket)\nimpl Use<[0, 1]> for Box {}\nfn main() { 0 }",
+    [], "error: `impl Use` for `Box`: it holds a `Ticket`, which has to be used, so the fewest uses of a `Box` cannot be 0"⟩,
+  ⟨"struct Ticket(Int)\nimpl Use<[0, 1]> for Ticket {}\nstruct Box(Ticket)\nimpl Use<[0, infinity]> for Box {}\nfn main() { 0 }",
+    [], "error: `impl Use` for `Box`: it holds a value that can be used only once, so the most uses of a `Box` cannot be `infinity`"⟩,
+  ⟨"struct Ticket(Int)\nimpl Use<[2, 3]> for Ticket {}\nfn main() { 5 }",
+    [], "error: `impl Use` for `Ticket`: the fewest uses can be 0 or 1 and the most 1 or `infinity`; other bounds are not counted yet"⟩,
+  -- An operation says how often its resumption is used: `[1, 1]` has to be
+  -- resumed or cancelled, on every path. Unsaid, it may be let go, and is then
+  -- cancelled.
+  ⟨"effect Ask { [1, 1] ask() -> Int }\nfn main() { handle ask() + 1 { ask(k) => k(41) } }",
+    [], "42"⟩,
+  ⟨"effect Ask { [1, 1] ask() -> Int }\nfn main() { handle ask() + 1 { ask(k) => 7 } }",
+    [], "error: 2:13: in `main`: `k` is not used on every path, but a resumption of an operation declared `[1, 1]` has to be used"⟩,
+  ⟨"effect Ask { [1, 1] ask() -> Int }\nfn main() { handle ask() + 1 { ask(_) => 7 } }",
+    [], "error: 2:13: in `main`: `_` lets go of a value, but a resumption of an operation declared `[1, 1]` has to be used"⟩,
+  ⟨"effect Ask { [0, 1] ask() -> Int }\nfn main() { handle ask() + 1 { ask(k) => 7 } }",
+    [], "7"⟩,
+  ⟨"effect Ask { [1, 1] ask() -> Int }\nfn main() { handle ask() + 1 { ask(k) => cancel(k); 7 } }",
+    [], "7"⟩,
+  ⟨"effect Ask { [1, 1] ask() -> Int }\nfn main() { handle ask() + 1 { ask(k) => if(1 < 2) { k(10) } else { k(20) } } }",
+    [], "11"⟩,
+  ⟨"effect Ask { [1, 1] ask() -> Int }\nfn main() { handle ask() + 1 { ask(k) => if(1 < 2) { k(10) } else { 0 } } }",
+    [], "error: 2:13: in `main`: `k` is not used on every path, but a resumption of an operation declared `[1, 1]` has to be used"⟩,
+  ⟨"effect Ask { [1, 1] ask() -> Int }\nfn main() { handle ask() + 1 { ask(k) => print(0); k(2 * 21) } }",
+    [], "0\n43"⟩,
+  ⟨"effect Ask { [1, 1] ask() -> Int }\nfn keep(k) { 7 }\nfn main() { handle ask() + 1 { ask(k) => keep(k) } }",
+    [], "error: 3:42: in `main`: `keep` may leave what it is given unused, but a resumption of an operation declared `[1, 1]` has to be used"⟩,
+  ⟨"effect Ask { [1, 1] ask() -> Int }\neffect Log { log(Int) }\nfn main() { handle (handle ask() + 1 { ask(k) => log(1); k(1) }) { log(x) => print(x) } }",
+    [], "error: 3:13: in `main`: `k` is not used on every path, but a resumption of an operation declared `[1, 1]` has to be used"⟩,
+  ⟨"effect Ask { [1, 1] ask() -> Int }\nfn main() { let mut saved = None; handle (ask() + 1) { ask(k) => saved = Some(k); 0 }; match(replace(&mut saved, None)) { Some(k) => k(41), None => 0 } }",
+    [], "error: 2:13: in `main`: the mutable variable `saved` lets go of what it holds when it is assigned or its block ends, but a resumption of an operation declared `[1, 1]` has to be used"⟩,
+  ⟨"effect Ask { [1, 1] ask() -> ! }\nfn main() { 0 }",
+    [], "error: operation `ask` does not return, so it has no resumption to say this of"⟩,
+  -- A callable that holds such a value has to be called, wherever it goes.
+  ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nimpl Use<[1, 1]> for File {}\nfn mk(f: File) { { destroy(f); 1 } }\nfn main() { mk(File(7))() }",
+    [], "7\n1"⟩,
+  ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nimpl Use<[1, 1]> for File {}\nfn mk(f: File) { { destroy(f); 1 } }\nfn main() { let g = mk(File(7)); 0 }",
+    [], "error: 5:13: in `main`: `g` is not used on every path, but a callable that holds a `File` has to be used"⟩,
+  ⟨"effect Ask { [1, 1] ask() -> Int }\nfn main() { let run = handle { ask() + 1 }() { r => { n => r + n }, ask(k) => { n => (k(n))(n + 1) } }; run(5) }",
+    [], "12"⟩,
+  ⟨"effect Ask { [1, 1] ask() -> Int }\nfn main() { let run = handle { ask() + 1 }() { r => { n => r + n }, ask(k) => { n => (k(n))(n + 1) } }; 5 }",
+    [], "error: 2:13: in `main`: `run` is not used on every path, but a callable that holds a resumption of an operation declared `[1, 1]` has to be used"⟩,
+  -- Of two blocks of which one runs, the second runs in the first's place:
+  -- what both mention is held once, and what only the first mentions is let go
+  -- when the second runs.
+  ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nimpl Use<[1, 1]> for File {}\nfn main() { let f = File(1); let g = File(2); if(1 < 2) { destroy(f); destroy(g); 1 } else { destroy(f); 2 } }",
+    [], "error: 4:30: in `main`: `g` is not used on every path, but a `File` has to be used"⟩,
+  ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nimpl Use<[1, 1]> for File {}\nfn main() { let f = File(1); let r = if(1 < 2) { destroy(f); 1 }; let f = File(2); r else { destroy(f); 2 } }",
+    [], "error: 4:67: in `main`: `f` is not used on every path, but a `File` has to be used"⟩,
+  -- What `main` gives is let go.
+  ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nimpl Use<[1, 1]> for File {}\nfn main() { File(1) }",
+    [], "error: the result of `main` is let go when the program ends, but a `File` has to be used"⟩,
+  -- `drop` is not for a program to call.
   ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nfn main() { let mut f = File(7); drop(&mut f); 0 }",
     [], "error: 3:34: in `main`: `drop` is run when what holds a value ends; a program does not call it"⟩,
   ⟨"fn f() { 1 }",

@@ -438,6 +438,29 @@ private def parseFields : P (List TypeExpr) := do
 
 private def fixityKinds : List String := ["infixl", "infixr", "infix", "prefix"]
 
+/-- `[lower, upper]`: how often something is to be used. `infinity` is no upper
+bound. -/
+private def parseQuantity : P (Nat × Option Nat) := do
+  expectPunct "["
+  let lower ← match ← peek with
+    | .int n => do
+      advance
+      pure n
+    | _ => failAt "expected the fewest uses, a number"
+  expectPunct ","
+  let upper ← match ← peek with
+    | .int n => do
+      advance
+      pure (some n)
+    | .ident "infinity" => do
+      advance
+      pure none
+    | _ => failAt "expected the most uses, a number or `infinity`"
+  expectPunct "]"
+  if let some n := upper then
+    if n < lower then failAt "the most uses cannot be fewer than the fewest"
+  pure (lower, upper)
+
 private partial def parseItem : P Item := do
   match ← peek with
   | .ident "enum" =>
@@ -468,8 +491,7 @@ private partial def parseItem : P Item := do
     let mut ops : Array OpDecl := #[]
     repeat
       if (← peek) == .punct "}" then break
-      if (← peek) == .punct "[" then
-        failAt "expected an operation name (there are no quantities: a resumption is used once)"
+      let quantity ← if (← peek) == .punct "[" then some <$> parseQuantity else pure none
       let op ← expectIdent
       expectPunct "("
       let payload ← parseTypeList ")"
@@ -481,7 +503,7 @@ private partial def parseItem : P Item := do
           terminal := true
         else
           result := some (← parseType)
-      ops := ops.push ⟨op, payload, result, terminal⟩
+      ops := ops.push ⟨op, payload, result, terminal, quantity⟩
       if !(← acceptPunct ",") then
         if !(← acceptPunct ";") then break
     expectPunct "}"
@@ -545,6 +567,18 @@ private partial def parseItem : P Item := do
     advance
     let params ← parseGenerics
     let tr ← expectIdent
+    if tr == "Use" && (← isOp "<") then
+      advance
+      let (lower, upper) ← parseQuantity
+      if ← isOp ">" then advance else failAt "expected `>`"
+      match ← peek with
+      | .ident "for" => advance
+      | _ => failAt "expected `for`: `impl Use<[1, 1]> for Type {}`"
+      let head ← expectIdent
+      let _ ← parseGenerics
+      expectPunct "{"
+      expectPunct "}"
+      return .use head lower upper
     match ← peek with
     | .ident "for" => advance
     | _ => failAt "expected `for`: `impl Trait for Type`"

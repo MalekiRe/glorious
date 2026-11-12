@@ -109,6 +109,9 @@ structure OpDecl where
   result : Option TypeExpr
   /-- Declared `-> !`: the operation never returns. -/
   terminal : Bool
+  /-- How often its resumption is to be used, where written before the name:
+  the fewest times and the most, none for no limit. -/
+  quantity : Option (Nat × Option Nat) := none
 
 inductive Assoc where
   | left
@@ -145,5 +148,8 @@ inductive Item where
   `where`, each a type parameter and a trait it must have. -/
   | impl (params : List String) (trait : String) (head : String) (args : List String)
       (context : List (String × String)) (methods : List Item)
+  /-- `impl Use<[lower, upper]> for Head {}`: how often a value of a declared
+  type is to be used; no upper bound is `infinity`. -/
+  | use (head : String) (lower : Nat) (upper : Option Nat)
 
 end Glorious.Syntax
