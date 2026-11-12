@@ -5,6 +5,7 @@ import Glorious.Infer
 import Glorious.Prelude
 import Glorious.Compile
 import Glorious.Core.Semantics
+import Glorious.Core.Cleanup
 import Glorious.Bytecode.Semantics
 
 /-!
@@ -344,5 +345,23 @@ def liveCells (src : String) (input : List Int := []) (fuel : Nat := 4000000) : 
             (cells[a]?.getD none).isSome && !leaving.contains a).length
         | .stuck => none
     go fuel (Bytecode.initIO bytecode input)
+
+/-- The cleanups of a finished program: how many guards it installed, how many
+cleanups it started, and how many guards were left in resumptions never taken.
+`Core.cleanup_accounting` proves the first is the sum of the other two. -/
+def cleanups (src : String) (input : List Int := []) (fuel : Nat := 4000000) :
+    Option (Nat × Nat × Nat) :=
+  match compileSource src with
+  | .error _ => none
+  | .ok c =>
+    let rec go : Nat → Nat → Nat → Core.Config → Option (Nat × Nat × Nat)
+      | 0, _, _, _ => none
+      | n + 1, installed, started, cfg =>
+        match Core.stepIO c.core cfg with
+        | .next cfg' =>
+          go n (installed + Core.installs cfg.state) (started + Core.starts cfg.state) cfg'
+        | .halt _ => some (installed, started, Core.held cfg.state.store.conts)
+        | .stuck => none
+    go fuel 0 0 (Core.initIO c.core input)
 
 end Glorious

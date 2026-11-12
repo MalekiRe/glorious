@@ -89,6 +89,18 @@ def notTail (n : Nat) : String :=
 #guard liveCells "effect Ask { ask() -> Int }  fn work() { let mut x = 7; x + ask() }
   fn forget(k) { 3 }
   fn main() { handle work() { ask(k) => forget(k) } }" == some 1
+-- Cleanups: installed, started, and left in a resumption that was never taken.
+-- The first is always the sum of the other two (`Core.cleanup_accounting`).
+#guard cleanups "effect Ask { ask() }  fn work() { defer print(1); ask(); 0 }
+  fn main() { handle work() { ask(k) => k(()) } }" == some (1, 1, 0)
+#guard cleanups "effect Ask { ask() }  fn work() { defer print(1); ask(); 0 }
+  fn main() { handle work() { ask(k) => 7 } }" == some (1, 1, 0)
+#guard cleanups "effect Ask { ask() }  fn work() { defer print(1); defer print(2); ask(); 0 }
+  fn forget(k) { 7 }
+  fn main() { handle work() { ask(k) => forget(k) } }" == some (2, 0, 2)
+#guard cleanups "effect Fail { fail() -> ! }  fn work() { defer print(1); fail(); 0 }
+  fn main() { handle work() { fail() => 7 } }" == some (1, 1, 0)
+
 -- Without the checker, a callable that outlives its variable finds the cell gone.
 #guard diagnose "fn mk() { let mut n = 0; { n = n + 1; n } }  fn main() { mk()() }"
   == "a reference is used after the cell it points to was freed"

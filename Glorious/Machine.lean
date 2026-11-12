@@ -126,6 +126,24 @@ theorem halt_unique {n m : Nat} {s : σ} {v w : ν}
   rw [a] at b
   exact Step.halt.inj b
 
+/-- A machine that halts does so in one step from the last state it was in. -/
+theorem halt_last {n : Nat} {s : σ} {v : ν} (h : run step n s = .halt v) :
+    ∃ m c, run step m s = .next c ∧ step c = .halt v := by
+  induction n generalizing s with
+  | zero => rw [run_zero] at h; cases h
+  | succ n ih =>
+    rw [run_succ] at h
+    cases hs : step s with
+    | next s₁ =>
+      rw [hs, Step.bind_next] at h
+      obtain ⟨m, c, hm, hc⟩ := ih h
+      exact ⟨m + 1, c, by rw [run_succ, hs, Step.bind_next]; exact hm, hc⟩
+    | halt w =>
+      rw [hs, Step.bind_halt] at h
+      cases h
+      exact ⟨0, s, rfl, hs⟩
+    | stuck => rw [hs] at h; simp at h
+
 /-- A run of `k` steps from `s` to `s'` along which every state, both ends
 included, satisfies `I`. -/
 def RunsThrough (step : σ → Step σ ν) (I : σ → Prop) (k : Nat) (s s' : σ) : Prop :=

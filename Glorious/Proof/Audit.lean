@@ -1,3 +1,4 @@
+import Glorious.Core.Cleanup
 import Glorious.Proof.Correct
 import Glorious.Bytecode.Decode
 import Glorious.Typing.Compiled
@@ -166,3 +167,19 @@ three standard axioms, in particular on `sorryAx` or a declared `axiom`.
 /-- info: 'Glorious.Traits.solve_unique' depends on axioms: [propext, Quot.sound] -/
 #guard_msgs in
 #print axioms Glorious.Traits.solve_unique
+
+/-- info: 'Glorious.Core.step_accounts' depends on axioms: [propext, Quot.sound] -/
+#guard_msgs in
+#print axioms Glorious.Core.step_accounts
+
+/-- info: 'Glorious.Core.cleanup_accounting' depends on axioms: [propext, Classical.choice, Quot.sound] -/
+#guard_msgs in
+#print axioms Glorious.Core.cleanup_accounting
+
+/-- info: 'Glorious.Core.halts_cleanup_accounting' depends on axioms: [propext, Classical.choice, Quot.sound] -/
+#guard_msgs in
+#print axioms Glorious.Core.halts_cleanup_accounting
+
+/-- info: 'Glorious.Core.cleanup_exact' depends on axioms: [propext, Classical.choice, Quot.sound] -/
+#guard_msgs in
+#print axioms Glorious.Core.cleanup_exact

@@ -4,6 +4,7 @@ import Glorious.Control
 import Glorious.Host
 import Glorious.Core.Ast
 import Glorious.Core.Semantics
+import Glorious.Core.Cleanup
 import Glorious.Bytecode.Ast
 import Glorious.Bytecode.Semantics
 import Glorious.Compile

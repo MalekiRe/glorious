@@ -823,6 +823,40 @@ What it is not:
   no mutable variable. One that does cannot be kept in a declared type: the
   type would have to say which variable, and declared types have no way to.
 
+## Cleanups are counted, and none is lost
+
+**Decision: what is proved about cleanups is an account, and it is proved of
+the machine, not of typed programs.** `Core.cleanup_accounting`: when a program
+finishes, the guards it installed are the cleanups that were started plus the
+guards left inside resumptions that were never resumed or cancelled. Each step
+keeps the account (`Core.step_accounts`): a guard leaves the stack only by
+having its cleanup started, and moves between the stack and a resumption only
+whole. So the only way a cleanup fails to run in a program that finishes is a
+resumption that is dropped, and `Core.cleanup_exact` says that with none
+dropped, as many cleanups start as were installed.
+
+It counts cleanups started; one that is started may not finish. It counts
+guards and does not tell them apart. It is about the Core machine; the
+bytecode machine agrees with it only through `compile_correct`, which relates
+results and output, not these counts.
+
+**An arm that does not use its resumption cancels it.** That closes the common
+way to drop one. A resumption can still be dropped by passing it to something
+that ignores it, by leaving it in a mutable variable, or by leaving the block
+that holds it before it is used.
+
+**What would rule the rest out, measured and not proved.** Treating a
+resumption as a value that must be used (the specification's lower bound of
+one), a program never drops one if: every local that holds one is handed on;
+no pattern ignores one; none is put in a mutable variable; and while one is
+held, nothing is called that performs an operation or touches an outside
+variable or label. Of the 180 test programs certified strictly, 173 obey these
+rules as written. Of the five examples two do; `generators` (a resumption
+captured by a branch not taken), `tasks` (resumptions in a mutable queue) and
+`backtracking` (one held across a call that touches a variable) do not. Those
+need the environment states that differ by path which the specification
+describes, and which are not built.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by
