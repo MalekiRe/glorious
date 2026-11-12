@@ -523,6 +523,50 @@ private partial def parseItem : P Item := do
     let value ← parseBinary 0 false
     expectPunct ";"
     pure (.alias name value)
+  | .ident "trait" =>
+    advance
+    let name ← expectIdent
+    expectPunct "{"
+    let mut methods : Array (String × List TypeExpr × Option TypeExpr) := #[]
+    repeat
+      if (← peek) == .punct "}" then break
+      match ← peek with
+      | .ident "fn" => advance
+      | _ => failAt "expected `fn`: a trait lists the functions a type must have"
+      let m ← expectIdent
+      expectPunct "("
+      let params ← parseTypeList ")"
+      let ret ← if ← acceptPunct "->" then some <$> parseType else pure none
+      methods := methods.push (m, params, ret)
+      let _ ← acceptPunct ";"
+    expectPunct "}"
+    pure (.trait name methods.toList)
+  | .ident "impl" =>
+    advance
+    let params ← parseGenerics
+    let tr ← expectIdent
+    match ← peek with
+    | .ident "for" => advance
+    | _ => failAt "expected `for`: `impl Trait for Type`"
+    let head ← expectIdent
+    let args ← parseGenerics
+    let mut context : Array (String × String) := #[]
+    if (← peek) == .ident "where" then
+      advance
+      repeat
+        let p ← expectIdent
+        expectPunct ":"
+        context := context.push (p, ← expectIdent)
+        if !(← acceptPunct ",") then break
+    expectPunct "{"
+    let mut methods : Array Item := #[]
+    repeat
+      if (← peek) == .punct "}" then break
+      match ← peek with
+      | .ident "fn" => methods := methods.push (← parseItem)
+      | _ => failAt "expected `fn`: an implementation gives the trait's functions"
+    expectPunct "}"
+    pure (.impl params tr head args context.toList methods.toList)
   | .ident "coerce" =>
     advance
     let name ← match ← peek with

@@ -749,6 +749,47 @@ each set of rules would make a new set of rules a new premise again. What the
 ownership rules need stays beside the record because it is one condition, the
 same for every form, and the proofs about it are about nothing else.
 
+## Traits are settled before Core
+
+**Decision: Core knows nothing of traits.** A trait is some functions a type
+may have; `impl Trait for Head<T, ...> where T: Other` gives them for every
+type made with `Head`. After the source text is checked a program has none:
+a bound is met by a value, a tuple of the implementation's functions; a
+function that needs a bound of a type it is generic in takes that value before
+its own arguments; a call of it passes the value; a call of a trait's function
+takes the function out of the value (`Elab.untrait`). What Core is then given is
+checked like any other program's, so a wrong choice of value that is ill typed
+is caught for each program.
+
+- **Bounds are inferred.** A function that uses a trait's function at a type
+  it is generic in needs the trait of that type; nothing is written. An
+  implementation says its conditions after `where`, because they decide what
+  the type has before any body is read.
+- **Which implementation is found by a proved function.** `Traits.solve`
+  (`Glorious/Traits.lean`) is what the checker calls. `solve_sound`: what it
+  finds is evidence that the bound is met. `coherent`: a bound is met in at
+  most one way, if no two implementations are for the same trait and head and
+  nothing is assumed twice; the checker runs both checks. So which
+  implementation runs does not depend on how it was looked for.
+- **A trait's function performs nothing its caller would have to handle**, nor
+  does a callable it is given. A trait says nothing of effects yet, and a use
+  of its function cannot know which implementation it will get.
+
+What it is not:
+
+- The only type a trait is about is `Self`: no type parameters of a trait, no
+  associated types, supertraits, default bodies, functions generic beyond
+  `Self`, negative implementations or orphan rule. An implementation is for
+  `Int` or a declared type applied to distinct type parameters.
+- A trait's function, and a function that needs a bound, is called where it is
+  named; to pass one, write a block that calls it. A local callable that uses a
+  trait is used at one type.
+- A borrow passed to a trait's function is not a scope in Core: the function
+  called is taken from a value, not named.
+- That the checker asks `Traits.solve` the right question, and that the
+  rewriting passes the value it found, is not proved; nor that `solve` finds
+  evidence whenever there is some.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by

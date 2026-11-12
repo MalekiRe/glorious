@@ -2,6 +2,7 @@ import Glorious.Proof.Correct
 import Glorious.Bytecode.Decode
 import Glorious.Typing.Compiled
 import Glorious.Typing.Witness
+import Glorious.Traits
 
 /-!
 # Axiom audit
@@ -153,3 +154,15 @@ three standard axioms, in particular on `sorryAx` or a declared `axiom`.
 /-- info: 'Glorious.Typing.Witness.alias_aliased' depends on axioms: [propext] -/
 #guard_msgs in
 #print axioms Glorious.Typing.Witness.alias_aliased
+
+/-- info: 'Glorious.Traits.solve_sound' depends on axioms: [propext] -/
+#guard_msgs in
+#print axioms Glorious.Traits.solve_sound
+
+/-- info: 'Glorious.Traits.coherent' depends on axioms: [propext] -/
+#guard_msgs in
+#print axioms Glorious.Traits.coherent
+
+/-- info: 'Glorious.Traits.solve_unique' depends on axioms: [propext, Quot.sound] -/
+#guard_msgs in
+#print axioms Glorious.Traits.solve_unique

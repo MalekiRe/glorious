@@ -1,5 +1,6 @@
 import Glorious.Syntax.Ast
 import Glorious.Elab
+import Glorious.Traits
 
 /-!
 # Type and effect inference
@@ -18,6 +19,10 @@ ended, that nothing able to reach a mutable variable outlives the block the
 variable is declared in, that a variable is not used against a borrow of it
 that is still held, and that nothing holding a resumption is used more than
 once. This pass is not proved.
+
+A trait's function is used at a type that has the trait. Which implementation
+a use needs is found by `Traits.solve`, which is proved to find only evidence
+that the bound is met, and evidence that is the only evidence there is.
 -/
 
 namespace Glorious.Check
@@ -87,6 +92,9 @@ structure Scheme where
   /-- Types that must be free to use more than once, with the reason. -/
   dups : List (Ty × String)
   ty : Ty
+  /-- The traits the function needs of its type parameters, in the order it is
+  given the evidence: each a trait and one of `tvars`. -/
+  bounds : List (String × Ty) := []
 
 structure TypeDecl where
   arity : Nat
@@ -169,6 +177,42 @@ structure Pending where
   tys : List Ty
   rows : List (List Pattern)
 
+/-- A trait's function: which trait, which of its functions, and its type with
+a variable standing for the type that has the trait. -/
+structure MethodSig where
+  trait : String
+  index : Nat
+  self : Nat
+  params : List Ty
+  ret : Ty
+
+structure ImplDecl where
+  trait : String
+  head : String
+  params : List String
+  /-- The conditions: each a trait and which of the head's arguments must have it. -/
+  context : List (String × Nat)
+  methods : List Item
+  dictFn : String
+
+/-- A trait needed of a type at a call: of the type a trait's function is used
+at, or of a type parameter of the function called. -/
+structure Bound where
+  trait : String
+  ty : Ty
+  call : Nat
+  slot : Nat
+  owner : String
+  pos : String
+
+/-- A use of a function inside the group it is inferred with: its bounds are
+not known until the group is done. `call` is zero where it is not called. -/
+structure GroupUse where
+  call : Nat
+  callee : String
+  owner : String
+  pos : String
+
 structure St where
   tys : Array (Option Ty) := #[]
   rows : Array (Option Row) := #[]
@@ -235,6 +279,26 @@ structure St where
   cells : Array (Nat × String × Ty) := #[]
   /-- Uses to check against the borrows once the types are known. -/
   uses : Array Use := #[]
+  /-- The functions of each trait, in order. -/
+  traits : List (String × List String) := []
+  methods : List (String × MethodSig) := []
+  impls : Array ImplDecl := #[]
+  /-- The implementations as `Traits.solve` sees them, in the same order. -/
+  kimpls : List Traits.Impl := []
+  /-- The bounds of the scheme last instantiated, at that use. -/
+  lastBounds : List (String × Ty) := []
+  /-- Bounds to meet once the types of the group being inferred are known. -/
+  bounds : Array Bound := #[]
+  groupUses : Array GroupUse := #[]
+  /-- A function's own type parameters that bounds were needed of, each with
+  the number it has for `Traits.solve`. -/
+  rigidKeys : Array String := #[]
+  /-- What the implementation being checked assumes of its type parameters. -/
+  implGivens : Option (List (String × Ty)) := none
+  /-- How each call's bounds are met, for the elaborator. -/
+  dictTable : Array (Nat × List Elab.DictE) := #[]
+  methodCalls : Array (Nat × Nat) := #[]
+  fnBounds : List (String × Nat) := []
 
 abbrev M := StateT St (Except String)
 
@@ -424,6 +488,7 @@ def instantiate (s : Scheme) (via : Option String := none) : M Ty := do
       | some f => s!"{pos}`{f}` may use what it is given more than once"
       | none => why
     modify fun st => { st with dups := st.dups.push (subst tm rm cm t, why) }
+  modify fun st => { st with lastBounds := s.bounds.map fun (tr, t) => (tr, subst tm rm cm t) }
   pure (subst tm rm cm s.ty)
 
 /-- Replace a function's own type parameters, which stood for themselves while
@@ -482,7 +547,10 @@ def generalize (t : Ty) (keep : List Ty := []) (top : Bool := true) : M Scheme :
   let mut fixedCaps : List Nat := []
   for id in s.monoCaps do
     fixedCaps := (← findCap id) :: fixedCaps
-  for m in keep ++ s.mono.map Ty.var do
+  -- A local callable is used at one type where a trait is needed of it: the
+  -- evidence is found for the function it is written in, once.
+  let bounded := if top then [] else s.bounds.toList.map (·.ty)
+  for m in keep ++ bounded ++ s.mono.map Ty.var do
     let m ← zonk m
     fixedTys := fixedTys ++ freeTys m
     fixedRows := fixedRows ++ freeRows m
@@ -528,8 +596,8 @@ def generalize (t : Ty) (keep : List Ty := []) (top : Bool := true) : M Scheme :
   let tvars := (freeTys t).eraseDups.filter (!fixedTys.contains ·)
   let mine := dups.toList.filter fun (d, _) =>
     (freeTys d).any tvars.contains || (freeCaps d).any cvars.contains
-  pure ⟨tvars, (freeRows t).eraseDups.filter (!fixedRows.contains ·), cvars,
-    all.toList.filter (cvars.contains ·.1), mine, t⟩
+  pure { tvars, rvars := (freeRows t).eraseDups.filter (!fixedRows.contains ·), cvars,
+         edges := all.toList.filter (cvars.contains ·.1), dups := mine, ty := t }
 
 /-! ## Unification -/
 
@@ -758,6 +826,74 @@ private def freshParams (names : List String) : M (List (String × Ty) × List N
       ids := ids.push id
     | _ => pure ()
   pure (pairs.toList, ids.toList)
+
+/-- A type with every callable in it performing nothing: what a trait's
+function is given performs nothing its caller would have to handle. -/
+partial def closeRows : Ty → Ty
+  | .var id => .var id
+  | .con n args => .con n (args.map closeRows)
+  | .tuple args => .tuple (args.map closeRows)
+  | .fn ps r _ _ cap => .fn (ps.map closeRows) (closeRows r) [] none cap
+  | .ref how t cap => .ref how (closeRows t) cap
+
+/-- Read the traits and their implementations. Types are declared by now. -/
+def declareTraits (items : List Item) : M Unit := do
+  for item in items do
+    if let .trait name methods := item then
+      if ((← get).traits.lookup name).isSome then throw s!"trait `{name}` is declared twice"
+      let self ← match ← freshTy with
+        | .var id => pure id
+        | _ => pure 0
+      let mut index := 0
+      for (m, params, ret) in methods do
+        if ((← get).methods.lookup m).isSome then
+          throw s!"`{m}` is declared twice as a function of a trait"
+        let ps ← params.mapM fun p => closeRows <$> resolveType [("Self", .var self)] false p
+        let r ← match ret with
+          | some r => closeRows <$> resolveType [("Self", .var self)] false r
+          | none => pure .unit
+        let sig : MethodSig := ⟨name, index, self, ps, r⟩
+        modify fun s => { s with methods := (m, sig) :: s.methods }
+        index := index + 1
+      modify fun s => { s with traits := (name, methods.map (·.1)) :: s.traits }
+  for item in items do
+    if let .impl params tr head args context methods := item then
+      let what := s!"`impl {tr} for {head}`"
+      let names ← match (← get).traits.lookup tr with
+        | some ns => pure ns
+        | none => throw s!"{what}: unknown trait `{tr}`"
+      let arity ← if head == "Int" then pure 0
+        else match (← get).types.lookup head with
+          | some d => pure d.arity
+          | none => throw s!"{what}: unknown type `{head}`"
+      unless args.length == arity do
+        throw s!"{what}: `{head}` takes {arity} type arguments, but is given {args.length}"
+      unless args.eraseDups.length == args.length && args.all params.contains
+          && params.all args.contains do
+        throw s!"{what}: the arguments of `{head}` must be the type parameters after `impl`, each once"
+      let ctx ← context.mapM fun (p, t') => do
+        unless ((← get).traits.lookup t').isSome do throw s!"{what}: unknown trait `{t'}`"
+        match args.idxOf? p with
+        | some j => pure (t', j)
+        | none => throw s!"{what}: `{p}` is not one of its type parameters"
+      let given := methods.filterMap fun
+        | .fn m _ _ _ _ => some m
+        | _ => none
+      for m in names do
+        unless given.contains m do throw s!"{what} lacks the function `{m}`"
+      for m in given do
+        unless names.contains m do throw s!"{what}: `{m}` is not a function of `{tr}`"
+      unless given.eraseDups.length == given.length do
+        throw s!"{what} gives a function twice"
+      if (← get).kimpls.any fun I => I.trait == tr && I.head == head then
+        throw s!"`{tr}` is implemented twice for `{head}`"
+      modify fun s =>
+        { s with
+          impls := s.impls.push ⟨tr, head, args, ctx, methods, Elab.implDictName tr head⟩
+          kimpls := s.kimpls ++ [⟨tr, head, arity, ctx⟩] }
+  -- What `Traits.coherent` asks of the implementations.
+  unless Traits.noOverlap (← get).kimpls do
+    throw "two implementations are for the same trait and type"
 
 def declare (items : List Item) : M Unit := do
   -- Names first, so that declarations may refer to each other.
@@ -1885,7 +2021,10 @@ def lend (scope : Scope) (x : String) (t : Ty) : M Ty := do
 /-- What a name in an expression refers to. -/
 inductive Head where
   | local (b : Binding)
-  | fn (t : Ty)
+  /-- A function: its type at this use, the traits that use needs, and whether
+  it is one of the group being inferred, whose needs are not yet known. -/
+  | fn (t : Ty) (bounds : List (String × Ty)) (inGroup : Bool)
+  | method (sig : MethodSig)
   | ctor (sig : CtorSig)
   | op (sig : OpSig)
   | prim
@@ -1903,14 +2042,30 @@ def resolveName (scope : Scope) (qual : Option String) (x : String) : M Head := 
     if let some q := qual then
       unless q == sig.effect do throw s!"`{x}` is not an operation of `{q}`"
     return .op sig
-  if let some t := s.group.lookup x then return .fn t
-  if let some scheme := s.fns.lookup x then return .fn (← instantiate scheme (some x))
+  if let some sig := s.methods.lookup x then
+    if let some q := qual then
+      unless q == sig.trait do throw s!"`{x}` is not a function of `{q}`"
+    return .method sig
+  if let some t := s.group.lookup x then return .fn t [] true
+  if let some scheme := s.fns.lookup x then
+    let t ← instantiate scheme (some x)
+    return .fn t (← get).lastBounds false
   if (Elab.prims.lookup x).isSome then return .prim
   if let some (id, _) := Elab.hosts.lookup x then return .host id
   if x == "cancel" then return .cancel
   if x == "replace" then return .replace
   if let some e := s.aliases.lookup x then return .const e
   throw s!"unknown name `{x}`"
+
+/-- A call needs these traits of these types: to be met when the types are known. -/
+def needBounds (call : Nat) (bs : List (String × Ty)) : M Unit := do
+  if bs.isEmpty then return
+  if call == 0 then
+    throw "a trait is needed at a call the checker has no name for; this is a compiler defect"
+  let s ← get
+  let news := (bs.zip (List.range bs.length)).map fun ((tr, ty), k) =>
+    (⟨tr, ty, call, k, s.owner, s.pos⟩ : Bound)
+  set { s with bounds := s.bounds ++ news.toArray }
 
 /-- Record that `cap` captures the named bindings: a value by its type, a label
 or a mutable variable by the brand of its scope as well. -/
@@ -2046,7 +2201,14 @@ partial def inferExpr (scope : Scope) (amb : Row) : Expr → M Ty
       pure t
     | .local (.label t brand) => labelType t brand
     | .local (.poly s) => instantiate s (some x)
-    | .fn t => pure t
+    | .fn t bounds inGroup => do
+      unless bounds.isEmpty do
+        throw s!"`{x}` needs a trait of a type it is used at, so it is called where it is named: write a block that calls it"
+      if inGroup then
+        modify fun s => { s with groupUses := s.groupUses.push ⟨0, x, s.owner, s.pos⟩ }
+      pure t
+    | .method sig =>
+      throw s!"`{x}` is a function of the trait `{sig.trait}`, so it is called where it is named: write a block that calls it"
     | .ctor sig => do
       let (fields, result) ← instCtor sig
       unless fields.isEmpty do arityError s!"constructor `{x}`" fields.length 0
@@ -2261,7 +2423,22 @@ partial def inferCall (scope : Scope) (amb : Row) (f : Expr) (args : List Expr)
       applyTy scope amb s!"the label `{x}`" (← labelType t brand) args call
     | .local (.poly s) => do
       applyTy scope amb s!"`{x}`" (← instantiate s (some x)) args call
-    | .fn t => applyTy scope amb s!"`{x}`" t args call
+    | .fn t bounds inGroup => do
+      let r ← applyTy scope amb s!"`{x}`" t args call
+      needBounds call bounds
+      if inGroup then
+        modify fun s => { s with groupUses := s.groupUses.push ⟨call, x, s.owner, s.pos⟩ }
+      pure r
+    | .method sig => do
+      -- A trait's function at the type it is used at, which must have the trait.
+      let self ← freshTy
+      let tm := [(sig.self, self)]
+      let callee ← freshenCaps
+        (.func (sig.params.map (subst tm [] [])) (subst tm [] [] sig.ret) ⟨[], none⟩ (← freshCap))
+      let r ← applyTy scope amb s!"`{x}`" callee args call
+      needBounds call [(sig.trait, self)]
+      modify fun s => { s with methodCalls := s.methodCalls.push (call, sig.index) }
+      pure r
     | .const e => do
       applyTy scope amb s!"`{x}`" (← inferExpr [] amb e) args call
   | .label l => do
@@ -2599,6 +2776,152 @@ structure FnDecl where
   annots : List (Option TypeExpr)
   ret : Option TypeExpr
   clauses : List Clause
+  /-- For a function an implementation gives: the implementation, and the
+  trait's function it is. -/
+  impl : Option (ImplDecl × MethodSig) := none
+
+/-! ## Traits
+
+A bound is a trait needed of a type. Where the type is made with a name, an
+implementation meets it, on its conditions; where it is one the function is
+generic in, the function is given the evidence, and so needs the bound of
+whoever calls it. -/
+
+/-- The number `Traits.solve` knows a type by, if it is one a function is
+generic in: a type nothing has decided, or one of the function's own type
+parameters. -/
+def keyOf (t : Ty) : M (Option Nat) := do
+  match ← find t with
+  | .var id => pure (some (2 * id))
+  | .con n [] =>
+    if n.startsWith "'" then
+      let keys := (← get).rigidKeys
+      match keys.toList.idxOf? n with
+      | some i => pure (some (2 * i + 1))
+      | none =>
+        modify fun s => { s with rigidKeys := s.rigidKeys.push n }
+        pure (some (2 * keys.size + 1))
+    else pure none
+  | _ => pure none
+
+partial def toSTy (t : Ty) : M Traits.STy := do
+  let t ← find t
+  match ← keyOf t with
+  | some k => pure (.var k)
+  | none =>
+    match t with
+    | .con n args => pure (.con n (← args.mapM toSTy))
+    | .tuple args => pure (.con "(tuple)" (← args.mapM toSTy))
+    | .fn _ _ _ _ _ => pure (.con "(callable)" [])
+    | .ref _ _ _ => pure (.con "(reference)" [])
+    | .var _ => pure (.var 0)
+
+/-- The bounds on types a function is generic in that a bound comes down to,
+each with the number of its type. This is only to say what a function needs
+and to explain a failure: the evidence itself is `Traits.solve`'s. -/
+partial def leaves (pos trait : String) (t : Ty) : M (List (String × Nat × Ty)) := do
+  let t ← find t
+  match ← keyOf t with
+  | some k => pure [(trait, k, t)]
+  | none =>
+    let missing : M (List (String × Nat × Ty)) := do
+      throw s!"{pos}`{showTy (← zonk t)}` does not implement `{trait}`"
+    match t with
+    | .con n args =>
+      match Traits.findImpl trait n args.length (← get).kimpls with
+      | some (_, I) =>
+        let mut out : List (String × Nat × Ty) := []
+        for (tr', j) in I.context do
+          out := out ++ (← leaves pos tr' (args[j]?.getD .unit))
+        pure out
+      | none => missing
+    | _ => missing
+
+partial def toDictE (impls : Array ImplDecl) : Traits.Dict → Elab.DictE
+  | .given k => .param k
+  | .impl i subs => .impl ((impls[i]?.map (·.dictFn)).getD "") (subs.map (toDictE impls))
+
+/-- Meet the bounds of the group just inferred, and give each of its functions
+its type. A bound on a type the function is generic in becomes something the
+function is given; every other is met by `Traits.solve`. -/
+def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := do
+  let pending := (← get).bounds
+  let uses := (← get).groupUses
+  modify fun s => { s with bounds := #[], groupUses := #[] }
+  -- What the group's functions need of the types they are generic in.
+  let mut leafs : Array (String × Nat × Ty) := #[]
+  for b in pending do
+    let ls ← try leaves b.pos b.trait b.ty catch e => throw (inFunction b.owner e)
+    for l in ls do
+      unless leafs.any (fun x => x.1 == l.1 && x.2.1 == l.2.1) do leafs := leafs.push l
+  let mut givensOf : List (String × List (String × Nat)) := []
+  for d in decls do
+    let t0 ← zonk ((defs.lookup d.name).getD .unit)
+    let (t1, seen) ← openParams [] t0
+    let scheme ← generalize t1 [] false
+    let mine : List (String × Nat × Ty) ← match d.impl with
+      | some (im, _) =>
+        -- An implementation says what it assumes.
+        im.context.mapM fun (tr, j) => do
+          let t := Ty.con s!"'{(im.params[j]?).getD ""}@{d.name}" []
+          pure (tr, ((← keyOf t).getD 0), t)
+      | none =>
+        pure (leafs.toList.filter fun (_, _, k) =>
+          match k with
+          | .var id => scheme.tvars.contains id
+          | .con n [] => (seen.lookup n).isSome
+          | _ => false)
+    let bounds := mine.map fun (tr, _, k) =>
+      (tr, match k with
+        | .con n [] => (seen.lookup n).getD k
+        | k => k)
+    givensOf := (d.name, mine.map fun (tr, k, _) => (tr, k)) :: givensOf
+    modify fun s =>
+      { s with
+        fns := (d.name, { scheme with bounds := bounds }) :: s.fns
+        fnBounds := (d.name, mine.length) :: s.fnBounds }
+  let impls := (← get).impls
+  let kimpls := (← get).kimpls
+  let mut table : List (Nat × List Elab.DictE) := []
+  let record := fun (table : List (Nat × List Elab.DictE)) (call : Nat) (d : Elab.DictE) =>
+    match table.lookup call with
+    | some ds => (call, ds ++ [d]) :: table.filter (·.1 != call)
+    | none => (call, [d]) :: table
+  for b in pending do
+    let givens := (givensOf.lookup b.owner).getD []
+    -- What `Traits.coherent` asks of the assumptions.
+    unless Traits.distinct givens do
+      throw (inFunction b.owner s!"{b.pos}a bound is assumed twice; this is a compiler defect")
+    match Traits.solve kimpls givens 100000 b.trait (← toSTy b.ty) with
+    | some d => table := record table b.call (toDictE impls d)
+    | none =>
+      for (tr, k, t) in ← leaves b.pos b.trait b.ty do
+        unless givens.contains (tr, k) do
+          match t with
+          | .con n [] =>
+            let hint := if (decls.find? (·.name == b.owner)).any (·.impl.isSome) then
+              s!": add `where {bareName n}: {tr}` to the implementation" else ""
+            throw (inFunction b.owner
+              s!"{b.pos}`{bareName n}` is not known to implement `{tr}`{hint}")
+          | _ =>
+            throw (inFunction b.owner
+              s!"{b.pos}`{tr}` is needed of a type that nothing here decides")
+      throw (inFunction b.owner s!"{b.pos}no implementation of `{b.trait}` was found; this is a compiler defect")
+  -- A use of one of the group's functions inside the group passes on what the
+  -- function it is in was given.
+  for u in uses do
+    let theirs := (givensOf.lookup u.callee).getD []
+    unless theirs.isEmpty do
+      if u.call == 0 then
+        throw (inFunction u.owner s!"{u.pos}`{u.callee}` needs a trait of a type it is used at, so it is called where it is named: write a block that calls it")
+      let mine := (givensOf.lookup u.owner).getD []
+      for g in theirs do
+        match mine.idxOf? g with
+        | some i => table := record table u.call (.param i)
+        | none =>
+          throw (inFunction u.owner
+            s!"{u.pos}`{u.callee}` needs `{g.1}` of a type that `{u.owner}` is not given")
+  modify fun s => { s with dictTable := s.dictTable ++ table.toArray }
 
 /-- Strongly connected components of the call graph, callees first. -/
 partial def components (names : List String) (deps : String → List String) : List (List String) :=
@@ -2650,6 +2973,15 @@ def checkGroup (decls : List FnDecl) : M Unit := do
         | some t => some <$> resolveType rigid false t
         | none => pure none
       let t ← inferCallable [] annots ret (some d.name) d.clauses s!"the clauses of `{d.name}` do"
+      -- A function an implementation gives is the function its trait declares,
+      -- at the implementation's type.
+      if let some (im, sig) := d.impl then
+        let tm := [(sig.self, Ty.con im.head (rigid.map (·.2)))]
+        let want ← freshenCaps
+          (.func (sig.params.map (subst tm [] [])) (subst tm [] [] sig.ret) ⟨[], none⟩ (← freshCap))
+        try unify t want
+        catch e =>
+          throw s!"this is not the function `{sig.trait}` declares, which takes its arguments, gives its result and performs nothing: {e}"
       -- A use of the function inside its group has the function's type, but
       -- what it is given there need not be what the function itself was given:
       -- the captures of the two are kept apart, and related below.
@@ -2677,9 +3009,7 @@ def checkGroup (decls : List FnDecl) : M Unit := do
       try unify (← instantiate (← generalize t) (some name)) used
       catch e => throw (inFunction name s!"`{name}` is used recursively at a different type: {e}")
   checkLoans
-  for d in decls do
-    let scheme ← generalize ((defs.lookup d.name).getD .unit)
-    modify fun s => { s with fns := (d.name, scheme) :: s.fns }
+  settleBounds decls defs
   -- Later functions follow calls into these as they will be elaborated.
   let cs := (← get).coercions.toList
   unless cs.isEmpty do
@@ -2700,7 +3030,7 @@ block which was not run, the identity of that block if it can only be one. The
 elaborator then lets those two share what they capture. -/
 def checkProgram (items : List Item) : Except String Elab.Blocks := do
   let decls : List FnDecl := items.filterMap fun
-    | .fn name params annots ret clauses => some ⟨name, params, annots, ret, clauses⟩
+    | .fn name params annots ret clauses => some { name, params, annots, ret, clauses }
     | _ => none
   let names := decls.map (·.name)
   let mentions := fun (name : String) =>
@@ -2725,8 +3055,22 @@ def checkProgram (items : List Item) : Except String Elab.Blocks := do
   let action : M Elab.Blocks := do
     modify fun s => { s with fnBodies := decls.map fun d => (d.name, d.clauses) }
     declare items
+    declareTraits items
     for comp in components names deps do
       checkGroup (comp.filterMap fun n => decls.find? (·.name == n))
+    -- The functions implementations give, each on its own: any function may
+    -- call them, but only through a trait, whose types are declared.
+    for im in (← get).impls do
+      for item in im.methods do
+        if let .fn m _ annots ret clauses := item then
+          if let some sig := (← get).methods.lookup m then
+            checkGroup [{ name := Elab.implFnName im.trait im.head m, params := im.params, annots,
+                          ret, clauses, impl := some (im, sig) }]
+    for c in coercing do
+      unless (((← get).fnBounds.lookup c).getD 0) == 0 do
+        throw s!"`coerce {c}`: a coercion cannot need a trait of a type it is used at"
+    unless (((← get).fnBounds.lookup "main").getD 0) == 0 do
+      throw "`main` needs a trait of a type that nothing decides"
     checkDups (← get).lateDups
     match (← get).fns.lookup "main" with
     | none => pure ()
@@ -2746,7 +3090,13 @@ def checkProgram (items : List Item) : Except String Elab.Blocks := do
         if owner != id && owner != 0 && (← findCap c) == root && !owners.contains owner then
           owners := owner :: owners
       if let [owner] := owners then links := (id, owner) :: links
-    pure ⟨s.given.toList, links, s.coercions.toList⟩
+    let implEs := s.impls.toList.map fun im =>
+      let names := (s.traits.lookup im.trait).getD []
+      (⟨im.dictFn, im.context.length, names.map fun m =>
+        (Elab.implFnName im.trait im.head m, ((s.methods.lookup m).map (·.params.length)).getD 0)⟩ :
+        Elab.ImplE)
+    pure ⟨s.given.toList, links, s.coercions.toList,
+      ⟨s.dictTable.toList, s.methodCalls.toList, s.fnBounds, implEs⟩⟩
   let (blocks, _) ← action.run {}
   pure blocks
 

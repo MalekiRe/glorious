@@ -789,6 +789,58 @@ def cases : List Case := [
     [], "error: 1:16: expected an expression, found end of input"⟩,
   ⟨"fn main() { 1 $ 2 }",
     [], "error: 1:15: unexpected character `$`"⟩,
+  -- Traits. A trait is some functions a type may have, and an `impl` gives them
+  -- for a type. A function that uses one at a type it is generic in is given
+  -- the implementation by whoever calls it; which is found from the types.
+  ⟨"trait Show { fn show(Self) -> Int }\nimpl Show for Int { fn show(x) { x } }\nfn main() { show(41) + 1 }",
+    [], "42"⟩,
+  ⟨"enum Maybe<T> { Nothing, Just(T) }\ntrait Show { fn show(Self) -> Int }\nimpl Show for Int { fn show(x) { x } }\nimpl<T> Show for Maybe<T> where T: Show { fn show(o) { match(o) { Just(v) => show(v) + 100, Nothing => 0 } } }\nfn twice(x) { show(x) + show(x) }\nfn main() { twice(1) + twice(Just(2)) + twice(Just(Just(3))) }",
+    [], "612"⟩,
+  ⟨"enum List<T> { Nil, Cons(T, List<T>) }\ntrait Sum { fn sum(Self) -> Int }\nimpl Sum for Int { fn sum(x) { x } }\nimpl<T> Sum for List<T> where T: Sum { fn sum(l) { match(l) { Nil => 0, Cons(h, t) => sum(h) + sum(t) } } }\nfn main() { sum(Cons(Cons(1, Cons(2, Nil)), Cons(Cons(3, Nil), Nil))) }",
+    [], "6"⟩,
+  -- A trait's function need not take the type: what it gives decides.
+  ⟨"trait Num { fn zero() -> Self; fn add(Self, Self) -> Self }\nimpl Num for Int { fn zero() { 0 } fn add(a, b) { a + b } }\nenum Pair<T> { P(T, T) }\nimpl<T> Num for Pair<T> where T: Num { fn zero() { P(zero(), zero()) } fn add(a, b) { match(a) { P(x, y) => match(b) { P(u, v) => P(add(x, u), add(y, v)) } } } }\nfn double(x) { add(x, x) }\nfn main() { match(double(add(P(1, 2), zero()))) { P(a, b) => a * 10 + b } }",
+    [], "24"⟩,
+  -- Functions that call each other pass on what they were given.
+  ⟨"trait Show { fn show(Self) -> Int }\nimpl Show for Int { fn show(x) { x } }\nfn even(n, x) { if(n == 0) { show(x) } else { odd(n - 1, x) } }\nfn odd(n, x) { if(n == 0) { 0 - show(x) } else { even(n - 1, x) } }\nfn main() { even(3, 5) + even(2, 7) }",
+    [], "2"⟩,
+  ⟨"enum Maybe<T> { Nothing, Just(T) }\ntrait Show { fn show(Self) -> Int }\nimpl Show for Int { fn show(x) { x } }\nfn show_both<A, B>(a: A, b: B) -> Int { show(a) * 10 + show(b) }\nimpl<T> Show for Maybe<T> where T: Show { fn show(o) { match(o) { Just(v) => show(v) + 1, Nothing => 0 } } }\nfn main() { show_both(4, Just(1)) }",
+    [], "42"⟩,
+  ⟨"trait Show { fn show(Self) -> Int }\nimpl Show for Int { fn show(x) { x * 2 } }\nfn main() { Show::show(4) }",
+    [], "8"⟩,
+  ⟨"struct Point(Int, Int)\ntrait Norm { fn norm(Self) -> Int }\nimpl Norm for Point { fn norm(p) { match(p) { Point(x, y) => x * x + y * y } } }\nfn main() { norm(Point(3, 4)) }",
+    [], "25"⟩,
+  ⟨"trait Show { fn show(Self) -> Int }\nimpl Show for Int { fn show(x) { x } }\nfn each(x, y) { let f = { v => show(v) + 1 }; f(x) + f(y) }\nfn main() { each(1, 2) }",
+    [], "5"⟩,
+  ⟨"effect Ask { ask() -> Int }\ntrait Show { fn show(Self) -> Int }\nimpl Show for Int { fn show(x) { x + 1 } }\nfn main() { handle show(ask()) + show(ask()) { ask(k) => k(20) } }",
+    [], "42"⟩,
+  ⟨"trait Reset { fn reset(&mut Self) }\nimpl Reset for Int { fn reset(p) { *p = 0; } }\nfn main() { let mut n = 5; reset(&mut n); n }",
+    [], "0"⟩,
+  -- A type has a trait only if an implementation says so, on its conditions.
+  ⟨"enum Maybe<T> { Nothing, Just(T) }\ntrait Show { fn show(Self) -> Int }\nimpl Show for Int { fn show(x) { x } }\nfn main() { show(Just(1)) }",
+    [], "error: 4:13: in `main`: `Maybe<Int>` does not implement `Show`"⟩,
+  ⟨"enum Maybe<T> { Nothing, Just(T) }\ntrait Show { fn show(Self) -> Int }\nimpl Show for Int { fn show(x) { x } }\nimpl<T> Show for Maybe<T> where T: Show { fn show(o) { match(o) { Just(v) => show(v) + 100, Nothing => 0 } } }\nfn main() { show(Just(Just({ 1 }))) }",
+    [], "error: 5:13: in `main`: `fn() -> Int` does not implement `Show`"⟩,
+  ⟨"enum Maybe<T> { Nothing, Just(T) }\ntrait Show { fn show(Self) -> Int }\nimpl Show for Int { fn show(x) { x } }\nimpl<T> Show for Maybe<T> { fn show(o) { match(o) { Just(v) => show(v), Nothing => 0 } } }\nfn main() { 0 }",
+    [], "error: 4:64: in `Show::show@Maybe`: `T` is not known to implement `Show`: add `where T: Show` to the implementation"⟩,
+  -- No two implementations are for the same trait and type: which one a use
+  -- gets never depends on how it was looked for.
+  ⟨"trait Show { fn show(Self) -> Int }\nimpl Show for Int { fn show(x) { x } }\nimpl Show for Int { fn show(x) { x + 1 } }\nfn main() { show(1) }",
+    [], "error: `Show` is implemented twice for `Int`"⟩,
+  ⟨"trait Default { fn default() -> Self }\ntrait Show { fn show(Self) -> Int }\nimpl Show for Int { fn show(x) { x } }\nimpl Default for Int { fn default() { 7 } }\nfn main() { show(default()) }",
+    [], "error: 5:13: in `main`: `Default` is needed of a type that nothing here decides"⟩,
+  ⟨"trait Show { fn show(Self) -> Int }\nimpl Show for Int { }\nfn main() { 0 }",
+    [], "error: `impl Show for Int` lacks the function `show`"⟩,
+  ⟨"trait Show { fn show(Self) -> Int }\nimpl Show for Int { fn show(x) { Some(x) } }\nfn main() { 0 }",
+    [], "error: in `Show::show@Int`: this is not the function `Show` declares, which takes its arguments, gives its result and performs nothing: `Result<Int, _>` is not `Int`"⟩,
+  -- A trait's function performs nothing its caller would have to handle, and
+  -- is called where it is named.
+  ⟨"effect Ask { ask() -> Int }\ntrait Show { fn show(Self) -> Int }\nimpl Show for Int { fn show(x) { x + ask() } }\nfn main() { handle show(1) { ask(k) => k(1) } }",
+    [], "error: in `Show::show@Int`: this is not the function `Show` declares, which takes its arguments, gives its result and performs nothing: effect `Ask` is not handled here"⟩,
+  ⟨"trait Show { fn show(Self) -> Int }\nimpl Show for Int { fn show(x) { x } }\nfn apply(f, x) { f(x) }\nfn main() { apply(show, 1) }",
+    [], "error: 4:13: in `main`: `show` is a function of the trait `Show`, so it is called where it is named: write a block that calls it"⟩,
+  ⟨"trait Show { fn show(Self) -> Int }\nimpl Show for Int { fn show(x) { x } }\nfn apply(f, x) { f(x) }\nfn main() { apply({ v => show(v) }, 1) }",
+    [], "1"⟩,
   ⟨"fn f() { 1 }",
     [], "error: the program has no `main` function"⟩
 ]

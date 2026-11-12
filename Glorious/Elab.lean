@@ -40,6 +40,38 @@ inductive Site where
   | fnResult (fn : String) (clause : Nat)
   deriving BEq
 
+/-- How a trait bound is met, for the elaborator: by the `k`-th of the bounds
+the function being elaborated is given, or by an implementation, named by the
+function that makes it a value, given how each of its conditions is met. -/
+inductive DictE where
+  | param (k : Nat)
+  | impl (fn : String) (subs : List DictE)
+  deriving Inhabited
+
+/-- An implementation of a trait: the function that makes it a value, how many
+conditions it has, and the function for each of the trait's, in the trait's
+order, with how many arguments it takes. -/
+structure ImplE where
+  dictFn : String
+  conditions : Nat
+  methods : List (String × Nat)
+
+/-- What the checker tells the elaborator about a program's traits. -/
+structure TraitInfo where
+  /-- For a call, by its identity: how the bounds it needs are met. -/
+  dicts : List (Nat × List DictE) := []
+  /-- The calls of a trait's function, each with which of the trait's it is. -/
+  methods : List (Nat × Nat) := []
+  /-- The functions that need bounds of their type parameters, and how many. -/
+  bounded : List (String × Nat) := []
+  impls : List ImplE := []
+
+/-- The function an implementation's function is, as a top-level function. -/
+def implFnName (trait head method : String) : String := s!"{trait}::{method}@{head}"
+
+/-- The function that makes an implementation a value. -/
+def implDictName (trait head : String) : String := s!"impl {trait} for {head}"
+
 /-- What the checker tells the elaborator about the blocks of a program, each
 named by its identity. -/
 structure Blocks where
@@ -51,6 +83,7 @@ structure Blocks where
   links : List (Nat × Nat) := []
   /-- The coercions to apply, each with the place it is applied at. -/
   coercions : List (Site × String) := []
+  traits : TraitInfo := {}
 
 structure Globals where
   ctors : List (String × CtorInfo) := []
@@ -1166,6 +1199,94 @@ structure Output where
   /-- The borrows that are not scopes of their own, in the order written. -/
   plain : List Borrow := []
 
+/-! ## Traits
+
+A trait bound is met by a value: a tuple of the implementation's functions. A
+function that needs a bound of one of its type parameters takes that value as
+an argument, before its own; a call of it passes the value; a call of one of a
+trait's functions takes the function out of the value. The checker said, for
+each call, which value. After this rewriting a program has no traits. -/
+
+private partial def dictExpr : DictE → Expr
+  | .param k => .name none s!"%dict{k}"
+  | .impl fn subs => .call 0 (.name none fn) (subs.map dictExpr)
+
+mutual
+
+private partial def untraitExpr (tr : TraitInfo) : Expr → Expr
+  | .call id f args => untraitCall tr id f args false
+  | .tailCall id f args => untraitCall tr id f args true
+  | .tuple args => .tuple (args.map (untraitExpr tr))
+  | .proj e idx => .proj (untraitExpr tr e) idx
+  | .closure id clauses => .closure id (clauses.map (untraitClause tr))
+  | .handle subject arms => .handle (untraitExpr tr subject) (arms.map (untraitClause tr))
+  | .labelScope l body => .labelScope l (body.map (untraitStmt tr))
+  | .deref e => .deref (untraitExpr tr e)
+  | e => e
+
+private partial def untraitCall (tr : TraitInfo) (id : Nat) (f : Expr) (args : List Expr)
+    (isTail : Bool) : Expr :=
+  let args := args.map (untraitExpr tr)
+  let mk := fun (f : Expr) (args : List Expr) =>
+    if isTail then Expr.tailCall id f args else Expr.call id f args
+  match tr.dicts.lookup id, tr.methods.lookup id with
+  | some [d], some idx => mk (.proj (dictExpr d) idx) args
+  | some ds, none => mk (untraitExpr tr f) (ds.map dictExpr ++ args)
+  | _, _ => mk (untraitExpr tr f) args
+
+private partial def untraitClause (tr : TraitInfo) : Clause → Clause
+  | .mk pats body => .mk pats (body.map (untraitStmt tr))
+
+private partial def untraitStmt (tr : TraitInfo) : Stmt → Stmt
+  | .let_ pat value => .let_ pat (untraitExpr tr value)
+  | .expr e => .expr (untraitExpr tr e)
+  | .defer e => .defer (untraitExpr tr e)
+  | .letMut x value => .letMut x (untraitExpr tr value)
+  | .assign target value => .assign (untraitExpr tr target) (untraitExpr tr value)
+  | .located line col s => .located line col (untraitStmt tr s)
+
+end
+
+/-- The clauses of a function that is given `n` bounds: each takes them first. -/
+private def withDicts (n : Nat) (clauses : List Clause) : List Clause :=
+  clauses.map fun
+    | .mk pats body => .mk ((List.range n).map (fun k => Pattern.var s!"%dict{k}") ++ pats) body
+
+/-- A program without its traits, and what the checker said of it with the
+places of arguments moved to where they now are. -/
+def untrait (blocks : Blocks) (items : List Item) : List Item × Blocks :=
+  let tr := blocks.traits
+  let fnItem := fun (name : String) (params : List String) (annots : List (Option TypeExpr))
+      (ret : Option TypeExpr) (clauses : List Clause) =>
+    let n := (tr.bounded.lookup name).getD 0
+    Item.fn name params ((List.replicate n none) ++ annots) ret
+      (withDicts n (clauses.map (untraitClause tr)))
+  let out := items.flatMap fun
+    | .trait _ _ => []
+    | .impl params trait head _ context methods =>
+      let own := methods.filterMap fun
+        | .fn m _ annots ret clauses =>
+          some (fnItem (implFnName trait head m) params annots ret clauses)
+        | _ => none
+      let dictFn := implDictName trait head
+      let dicts := (List.range context.length).map fun k => s!"%dict{k}"
+      let fns := ((tr.impls.find? (·.dictFn == dictFn)).map (·.methods)).getD []
+      let closures := fns.map fun (fn, arity) =>
+        let argNames := (List.range arity).map fun k => s!"%arg{k}"
+        Expr.closure 0 [.mk (argNames.map Pattern.var)
+          [.expr (.call 0 (.name none fn) ((dicts ++ argNames).map (Expr.name none)))]]
+      own ++ [Item.fn dictFn [] [] none [.mk (dicts.map Pattern.var) [.expr (.tuple closures)]]]
+    | .fn name params annots ret clauses => [fnItem name params annots ret clauses]
+    | item => [item]
+  let coercions := blocks.coercions.map fun (site, fn) =>
+    match site with
+    | .arg call index =>
+      match tr.dicts.lookup call, tr.methods.lookup call with
+      | some ds, none => (Site.arg call (index + ds.length), fn)
+      | _, _ => (site, fn)
+    | _ => (site, fn)
+  (out, { blocks with coercions := coercions })
+
 /-- Collect the global declarations. -/
 def collect (items : List Item) :
     Except String (Globals × List (String × List Clause) × Array String) := do
@@ -1199,6 +1320,10 @@ def collect (items : List Item) :
     | .alias name value => g := { g with aliases := (name, value) :: g.aliases }
     | .fixity => pure ()
     | .coerce _ => pure ()
+    | .trait name _ =>
+      throw s!"trait `{name}`: a program with traits is elaborated only after it is checked"
+    | .impl _ tr _ _ _ _ =>
+      throw s!"an implementation of `{tr}`: a program with traits is elaborated only after it is checked"
   pure (g, fns.toList, names)
 
 /-- A function whose body mentions its own label `@name` runs inside that label's

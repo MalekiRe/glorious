@@ -69,6 +69,13 @@ def compileSource (src : String) (check : Bool := true) : Except String Compiled
   let blocks ← match Check.checkProgram all with
     | .ok blocks => pure (some blocks)
     | .error e => if check then throw e else pure none
+  -- From here on the program has no traits: the checker said how each bound
+  -- is met, and each is now a value passed where it is needed.
+  let (all, blocks) := match blocks with
+    | some b =>
+      let (items, b) := Elab.untrait b all
+      (items, some b)
+    | none => (all, none)
   let plain := fun (blocks : Option Elab.Blocks) => do
     let out ← Elab.elabProgram all blocks
     let cert ← if check then

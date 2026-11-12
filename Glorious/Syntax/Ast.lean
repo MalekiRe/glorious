@@ -137,5 +137,13 @@ inductive Item where
   /-- `coerce name`: the function `name` is applied without being written, where
   a value of its parameter's type is found and one of its result's type expected. -/
   | coerce (name : String)
+  /-- `trait Name { fn method(A, B) -> R; ... }`: functions a type may have.
+  `Self` in a method's types is the type that has them. -/
+  | trait (name : String) (methods : List (String × List TypeExpr × Option TypeExpr))
+  /-- `impl<T, ...> Trait for Head<T, ...> where T: Other, ... { fn ... }`: the
+  trait's functions for every type made with `Head`, on the conditions after
+  `where`, each a type parameter and a trait it must have. -/
+  | impl (params : List String) (trait : String) (head : String) (args : List String)
+      (context : List (String × String)) (methods : List Item)
 
 end Glorious.Syntax
