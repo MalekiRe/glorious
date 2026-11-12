@@ -643,6 +643,22 @@ partial def resolveItem (ctx : Ctx) : Item → R (List Item)
       unless e.home == ctx.here do
         throw s!"`impl Use for {head}` is written in {showPath ctx.here}: how often a type is used is said in its module, {showPath e.home}"
     pure [.use head' lower upper]
+  | .bounds fn bounds => do
+    -- The types written of a function's type parameters, read as the
+    -- function's own types are.
+    let generics := match (← unitOf ctx.here).bind fun u => u.items.findSome? fun
+        | .fn name ps _ _ _ => if name == fn then some ps else none
+        | .pub _ (.fn name ps _ _ _) => if name == fn then some ps else none
+        | _ => none with
+      | some ps => genericParams ps
+      | none => []
+    let bounds ← bounds.mapM fun b => do
+      let sealed_ := ["Fn", "RunsIn", "Environment", "Use"].contains b.trait
+      let trait ← if sealed_ then pure b.trait else (·.1) <$> resolveNamed ctx .trait [] b.trait
+      let args ← b.args.mapM (resolveType ctx generics)
+      let assoc ← b.assoc.mapM fun (name, t) => do pure (name, ← resolveType ctx generics t)
+      pure { b with trait, args, assoc }
+    pure [.bounds (ownName ctx .value fn) bounds]
   | .fieldNames ctor names pubs => pure [.fieldNames (ownName ctx .value ctor) names pubs]
   | .typeAlias name ps body => do
     pure [.typeAlias (ownName ctx .type name) ps (← resolveType ctx (genericParams ps) body)]

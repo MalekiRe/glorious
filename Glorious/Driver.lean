@@ -130,7 +130,7 @@ def compileSource (src : String) (check : Bool := true)
     | some b =>
       let (items, b) := Elab.untrait b all
       -- Nor a borrow of a field: each is a variable of its own by now.
-      (Elab.unfield b.fields b.fieldReads b.packs items, some b)
+      (Elab.unfield b items, some b)
     | none => (all, none)
   let plain := fun (blocks : Option Elab.Blocks) => do
     let out ← Elab.elabProgram all blocks

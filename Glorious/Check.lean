@@ -335,6 +335,28 @@ structure St where
   fieldNames : List (String × List String) := []
   /-- The blocks given what an `is` found, each with the names it then has. -/
   packs : Array (Nat × List String) := #[]
+  /-- The callables a function is given that run in one environment it is
+  given whole: the environment's name, each callable with how many arguments
+  it takes, whether one of them has to be called, the other names in scope,
+  and the function's body. At most one of them can be called on a path. -/
+  envGroups : Array (String × List (String × Nat) × Bool × List String × List Stmt) := #[]
+  /-- For a function whose callables share an environment and take no
+  arguments: which of its parameters they are, the first being the one that
+  holds the environment; and the same by name. A caller builds the others
+  over what the first captured. -/
+  fnGroups : List (String × List (List Nat)) := []
+  envFns : List (String × List (List String)) := []
+  /-- Blocks built over the environment of another block of the same call. -/
+  envLinks : Array (Nat × Nat) := #[]
+  /-- Calls that give a name where a callable sharing an environment is
+  wanted: the call, and which arguments. -/
+  envWraps : Array (Nat × List Nat) := #[]
+  /-- Of such functions, those of whose callables one is certainly called. -/
+  envMust : List String := []
+  /-- Blocks given to such a function at one call, of which one certainly
+  runs: where, the function, and the capture variable of each block. What
+  has to be used and is held by one has to be held by every one. -/
+  envHeld : Array (String × String × List Nat) := #[]
   /-- For each field read by name, which field it is: for the elaborator. -/
   fieldReads : Array (Nat × Nat) := #[]
   /-- Borrows of a field, to settle once the type is known: the borrow, the
@@ -2302,8 +2324,9 @@ end
 /-- The most uses of `x` along any path through `body`, or with `ctx.lower` the
 fewest, if the count finishes. `outer` are the other local names in scope,
 about which nothing is known. -/
-def pathUses (ctx : ACtx) (outer : List String) (x : String) (body : List Stmt) : Option Nat :=
-  let env := (x, AVal.tracked) :: outer.map (·, AVal.unknown)
+def pathUses (ctx : ACtx) (outer : List String) (x : String) (body : List Stmt)
+    (known : List (String × AVal) := []) : Option Nat :=
+  let env := known ++ (x, AVal.tracked) :: outer.map (·, AVal.unknown)
   let count : A Nat := do
     let mut ns : List Nat := []
     let found ← runStmts ctx 8 env body
@@ -2475,8 +2498,8 @@ label. Effects not yet named are none at all unless something can supply
 them: a callable the function was given, or one kept in a declared type. -/
 def runLowerChecks (fnTy : Ty) : M Unit := do
   let s ← get
-  modify fun st => { st with calls := #[], lowerChecks := #[], abandoned := #[] }
-  unless s.anyMust do return
+  modify fun st => { st with calls := #[], lowerChecks := #[], abandoned := #[], envGroups := #[] }
+  unless s.anyMust || !s.envGroups.isEmpty do return
   let mut sources : List Nat := []
   if let .fn ps _ _ _ _ ← zonk fnTy then
     sources := ps.flatMap freeRows
@@ -2523,7 +2546,12 @@ def runLowerChecks (fnTy : Ty) : M Unit := do
   let earlier := (← get).drops
   modify fun st => { st with drops := #[] }
   let mut relied := false
+  -- Callables of which one is certainly called, sharing what they hold: that
+  -- the others are then let go is no loss. Whoever gives them is asked that
+  -- each holds what has to be used.
+  let certain := (s.envGroups.toList.filter (·.2.2.1)).flatMap fun g => g.2.1.map (·.1)
   for (pos, x, t, names, body) in s.lowerChecks do
+    if certain.contains x then continue
     let t ← zonk t
     -- Only a type that has to be used, or one not yet known, needs the count.
     let free := !(freeTys t).isEmpty || !(freeCaps t).isEmpty
@@ -2548,6 +2576,47 @@ def runLowerChecks (fnTy : Ty) : M Unit := do
       modify fun st => { st with pos := pos }
       mustDrop t s!"`{x}` is not used on every path"
   modify fun st => { st with drops := st.drops ++ earlier }
+  -- Blocks of which one certainly runs: each has to hold what has to be used.
+  modify fun st => { st with envHeld := #[] }
+  for (pos, callee, caps) in s.envHeld do
+    let mut held : List (List String) := []
+    for cap in caps do
+      let root ← findCap cap
+      let mut names : List String := []
+      for ((src, what), name) in s.capEdges.zip s.capEdgeNames do
+        if (← findCap src) == root then
+          if let .ty t := what then
+            modify fun st => { st with seen := [] }
+            if (← tyMustUse roots [] t).isSome then
+              names := ((name.map (·.1)).getD "%unnamed") :: names
+      held := held ++ [names]
+    for names in held do
+      for x in names do
+        unless x != "%unnamed" && held.all (·.contains x) do
+          let what := if x == "%unnamed" then "a value" else s!"`{x}`"
+          throw s!"{pos}{what} has to be used, and one of the blocks given to `{callee}` holds it but not every one: only one of them runs"
+  -- Callables that run in one environment, given whole: calling one uses it
+  -- up. Each is taken to use the environment when called, and the uses are
+  -- counted along every path, as for any value used once.
+  for (env, members, must, names, body) in s.envGroups do
+    let listed := ", ".intercalate (members.map fun (x, _) => s!"`{x}`")
+    let known := members.map fun (x, arity) =>
+      (x, AVal.clo [.mk (List.replicate arity Pattern.wild) [.expr (.proj (.name none "%env") 0)]]
+        [("%env", AVal.tracked)])
+    let outer := names.filter fun n => !members.any (·.1 == n)
+    match pathUses { ctx with lower := false } outer "%env" body known with
+    | some n =>
+      if n ≥ 2 then
+        throw s!"{listed} run in the environment `{env}`, which is used up by the first that is called: on some path more than one call is made"
+    | none =>
+      throw s!"{listed} run in the environment `{env}`, which is used up by the first that is called: it could not be shown that no path calls more than one"
+    if must then
+      match pathUses ctx outer "%env" body known with
+      | some n =>
+        if n == 0 then
+          throw s!"the environment `{env}` has to be used: on some path none of {listed} is called"
+      | none =>
+        throw s!"the environment `{env}` has to be used: it could not be shown that every path calls one of {listed}"
   if relied then
     for (_, callee) in conditional do
       modify fun st => { st with stays := st.stays.push (callee,
@@ -3402,6 +3471,8 @@ partial def inferExpr (scope : Scope) (amb : Row) : Expr → M Ty
     | .fn t bounds inGroup => do
       unless bounds.isEmpty do
         throw s!"`{x}` needs a trait of a type it is used at, so it is called where it is named: write a block that calls it"
+      if ((← get).fnGroups.lookup x).isSome then
+        throw s!"`{x}` gives callables one environment to share, so it is called where it is named: write a block that calls it"
       if inGroup then
         modify fun s => { s with groupUses := s.groupUses.push ⟨0, x, s.owner, s.pos⟩ }
       pure t
@@ -3766,7 +3837,47 @@ partial def inferCall (scope : Scope) (amb : Row) (f : Expr) (args : List Expr)
     | .local (.poly s) => do
       applyTy scope amb s!"`{x}`" (← instantiate s (some x)) args call
     | .fn t bounds inGroup => do
+      -- Callables that share an environment: the first holds it, and each
+      -- other is built over what the first captured, to run in its place.
+      for group in ((← get).fnGroups.lookup x).getD [] do
+        let holder := (group.head?.bind fun i => args[i]?).bind Elab.plainBlock
+        let mut named : List Nat := []
+        for i in group.drop 1 do
+          match args[i]? with
+          | some (.name none _) => named := named ++ [i]
+          | some a =>
+            match Elab.plainBlock a with
+            | some (id, _) =>
+              modify fun s => { s with given := s.given.push id }
+              if let some (owner, _) := holder then
+                modify fun s => { s with envLinks := s.envLinks.push (id, owner) }
+            | none =>
+              throw s!"argument {i + 1} of `{x}` shares an environment with another: write a block there, or a name"
+          | none => pure ()
+        unless named.isEmpty do
+          if call == 0 then throw s!"`{x}` is called where the checker has no name for the call; this is a compiler defect"
+          modify fun s => { s with envWraps := s.envWraps.push (call, named) }
+      let before := (← get).blockCaps.size
       let r ← applyTy scope amb s!"`{x}`" t args call
+      -- One of them is certainly called, and the rest let go: what has to be
+      -- used must then be held by every one, and nothing but a block may
+      -- hold such a thing.
+      if (← get).envMust.contains x then
+        for group in ((← get).fnGroups.lookup x).getD [] do
+          let mut caps : List Nat := []
+          for i in group do
+            match args[i]? with
+            | some a =>
+              match Elab.plainBlock a with
+              | some (id, _) =>
+                let made := ((← get).blockCaps.toList.drop before).filter (·.1 == id)
+                caps := caps ++ made.map (·.2)
+              | none =>
+                if let .fn ps _ _ _ _ ← find t then
+                  if let some p := ps[i]? then
+                    mustDrop p s!"argument {i + 1} of `{x}` may not be the one that is called"
+            | none => pure ()
+          modify fun s => { s with envHeld := s.envHeld.push (s.pos, x, caps) }
       needBounds call bounds
       if inGroup then
         modify fun s => { s with groupUses := s.groupUses.push ⟨call, x, s.owner, s.pos⟩ }
@@ -4190,6 +4301,8 @@ structure FnDecl where
   /-- For a function an implementation gives: the implementation, and the
   trait's function it is. -/
   impl : Option (ImplDecl × MethodSig) := none
+  /-- What is written of its type parameters. -/
+  bounds : List Syntax.Bound := []
 
 /-! ## Traits
 
@@ -4463,6 +4576,88 @@ def checkGroup (decls : List FnDecl) : M Unit := do
       modify fun s =>
         { s with rigidCaps := lifetimes ++ s.rigidCaps.filter (·.2 == "'static"),
                  outlives := bounds }
+      -- A type parameter said to be a callable is the type of that callable:
+      -- `F: Fn<(A, B), Output = R, Effects = {E}>` is `fn(A, B) -> R / {E}`.
+      let callable := fun (b : Syntax.Bound) => b.trait == "Fn" || b.trait == "RunsIn"
+      for b in d.bounds do
+        unless (genericParams d.params).contains b.subject do
+          throw s!"`{b.subject}: {b.trait}`: `{b.subject}` is not a type parameter of `{d.name}`"
+        if callable b then
+          let t ← freshTy
+          rigid := rigid.map fun (p, old) => if p == b.subject then (p, t) else (p, old)
+      for b in d.bounds do
+        if callable b then
+          for (name, _) in b.assoc do
+            unless name == "Output" || name == "Effects" do
+              throw s!"`{b.subject}: {b.trait}`: `{name}` cannot be said of a callable here (`Output` and `Effects` can)"
+          let args := if b.trait == "RunsIn" then b.args.drop 1 else b.args
+          let out := (b.assoc.lookup "Output").getD .hole
+          let result := match b.assoc.lookup "Effects" with
+            | some (.performs _ effects) => TypeExpr.performs out effects
+            | _ => out
+          let said ← resolveType rigid false (.fn args result)
+          unifyAt s!"`{b.subject}` is said twice to be a callable" ((rigid.lookup b.subject).getD said) said
+        else if b.trait == "Environment" || b.trait == "Use" then pure ()
+        else
+          unless ((← get).traits.lookup b.trait).isSome do
+            throw s!"`{b.subject}: {b.trait}`: unknown trait `{b.trait}`"
+      -- Callables that run in an environment the function is given whole.
+      let environments := (d.bounds.filter (·.trait == "Environment")).map (·.subject)
+      for b in d.bounds do
+        if b.trait == "Use" then
+          unless environments.contains b.subject do
+            throw s!"`{b.subject}: Use<..>`: how often it is used can be said here only of an environment, `{b.subject}: Environment<'e>`"
+      for env in environments do
+        let quantity := (d.bounds.find? fun b => b.trait == "Use" && b.subject == env).bind (·.quantity)
+        let (must, once) : Bool × Bool := match quantity with
+          | some (lower, upper) => (decide (lower ≥ 1), upper == some 1)
+          | none => (false, true)
+        if once then
+          -- The type parameters whose callables are given the environment itself.
+          let owners := d.bounds.filterMap fun b =>
+            match b.trait, b.args.head? with
+            | "RunsIn", some (.name e []) => if e == env then some (b.subject, b.args.length - 1) else none
+            | _, _ => none
+          let (pats, body) := match d.clauses with
+            | [.mk pats body] => (pats, body)
+            | _ => ([], [])
+          let mut members : List (String × Nat) := []
+          for (pat, annot) in pats.zip d.annots do
+            match annot with
+            | some (.name f []) =>
+              if let some arity := owners.lookup f then
+                match pat with
+                | .var x => members := members ++ [(x, arity)]
+                | _ => throw s!"a parameter of type `{f}`, which runs in the environment `{env}`, has to be given a name"
+            | _ => pure ()
+          unless members.isEmpty do
+            let names := pats.flatMap Elab.patVars
+            modify fun s => { s with envGroups := s.envGroups.push (env, members, must, names, body) }
+            -- Several that take nothing: a caller can build them over one
+            -- environment, which the first holds.
+            if members.length ≥ 2 && members.all (·.2 == 0) then
+              let places := members.filterMap fun (x, _) =>
+                pats.findIdx? fun
+                  | .var y => y == x
+                  | _ => false
+              if must then modify fun s => { s with envMust := d.name :: s.envMust }
+              modify fun s =>
+                { s with
+                  fnGroups := (d.name, places :: ((s.fnGroups.lookup d.name).getD []))
+                    :: s.fnGroups.filter (·.1 != d.name)
+                  envFns := (d.name, members.map (·.1) :: ((s.envFns.lookup d.name).getD []))
+                    :: s.envFns.filter (·.1 != d.name) }
+      for b in d.bounds do
+        if b.trait == "RunsIn" then
+          let env := match b.args.head? with
+            | some (.name e []) => some e
+            | some (.ref _ (.name e []) _) => some e
+            | _ => none
+          match env with
+          | some e =>
+            unless environments.contains e do
+              throw s!"`{b.subject}: RunsIn<{e}, ..>`: `{e}` is not said to be an environment (`{e}: Environment<'e>`)"
+          | none => throw s!"`{b.subject}: RunsIn<..>`: the environment is `E`, `&E` or `&mut E`"
       let annots ← d.annots.mapM fun
         | some t => some <$> resolveType rigid false t
         | none => pure none
@@ -4549,8 +4744,12 @@ block which was not run, the identity of that block if it can only be one. The
 elaborator then lets those two share what they capture. -/
 def checkProgram (items : List Item) (modules : Syntax.ModuleInfo := {}) :
     Except String Elab.Blocks := do
+  let written := items.filterMap fun
+    | .bounds fn bounds => some (fn, bounds)
+    | _ => none
   let decls : List FnDecl := items.filterMap fun
-    | .fn name params annots ret clauses => some { name, params, annots, ret, clauses }
+    | .fn name params annots ret clauses =>
+      some { name, params, annots, ret, clauses, bounds := (written.lookup name).getD [] }
     | _ => none
   let names := decls.map (·.name)
   let mentions := fun (name : String) =>
@@ -4629,9 +4828,9 @@ def checkProgram (items : List Item) (modules : Syntax.ModuleInfo := {}) :
       (⟨im.dictFn, im.context.length, names.map fun m =>
         (Syntax.implFnName im.trait im.head m, ((s.methods.lookup m).map (·.params.length)).getD 0)⟩ :
         Elab.ImplE)
-    pure ⟨s.given.toList, links, s.coercions.toList,
+    pure ⟨s.given.toList, links ++ s.envLinks.toList, s.coercions.toList,
       ⟨s.dictTable.toList, s.methodCalls.toList, s.fnBounds, implEs, s.dropSites.toList⟩,
-      s.fieldTable.toList, s.fieldReads.toList, s.packs.toList⟩
+      s.fieldTable.toList, s.fieldReads.toList, s.packs.toList, s.envFns, s.envWraps.toList⟩
   let (blocks, _) ← action.run {}
   pure blocks
 

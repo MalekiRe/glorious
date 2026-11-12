@@ -105,6 +105,11 @@ structure Blocks where
   fieldReads : List (Nat × Nat) := []
   /-- The blocks given what an `is` found, each with the names it then has. -/
   packs : List (Nat × List String) := []
+  /-- For a function whose callables share an environment: each group of
+  them by name, the first the one that holds it. -/
+  envFns : List (String × List (List String)) := []
+  /-- Calls that give a name where such a callable is wanted, and where. -/
+  envWraps : List (Nat × List Nat) := []
 
 structure Globals where
   ctors : List (String × CtorInfo) := []
@@ -1695,14 +1700,42 @@ structure FieldInfo where
   reads : List (Nat × Nat)
   /-- The blocks given what an `is` found, each with the names it then has. -/
   packs : List (Nat × List String) := []
+  /-- In the function being written out: each callable that runs in an
+  environment another holds, with the one that holds it. -/
+  members : List (String × String) := []
+  /-- Calls that give a name where a callable sharing an environment is
+  wanted, and where. -/
+  wraps : List (Nat × List Nat) := []
+
+/-- A call as it is where callables share an environment. In a function given
+such callables, a call of one that does not hold the environment gives it the
+one that does, to run in its place. And where a name is given for such a
+callable, it is given as a callable that takes what holds the environment and
+calls the name. -/
+def shareEnv (info : FieldInfo) (id : Nat) (f : Expr) (args : List Expr) : Expr × List Expr :=
+  let args := match info.wraps.lookup id with
+    | some places =>
+      (args.zip (List.range args.length)).map fun (a, i) =>
+        if places.contains i then Expr.closure 0 [.mk [.wild] [.expr (.call 0 a [])]] else a
+    | none => args
+  match f, args with
+  | .name none b, [] =>
+    match info.members.lookup b with
+    | some holder => (f, [.name none holder])
+    | none => (f, args)
+  | _, _ => (f, args)
 
 mutual
 
 /-- The callables and scopes written inside an expression, with the borrows of
 fields in them written out. -/
 private partial def unfieldExpr (info : FieldInfo) : Expr → Expr
-  | .call id f args => .call id (unfieldExpr info f) (args.map (unfieldExpr info))
-  | .tailCall id f args => .tailCall id (unfieldExpr info f) (args.map (unfieldExpr info))
+  | .call id f args =>
+    let (f, args) := shareEnv info id f args
+    .call id (unfieldExpr info f) (args.map (unfieldExpr info))
+  | .tailCall id f args =>
+    let (f, args) := shareEnv info id f args
+    .tailCall id (unfieldExpr info f) (args.map (unfieldExpr info))
   | .tuple es => .tuple (es.map (unfieldExpr info))
   | .proj e i => .proj (unfieldExpr info e) i
   | .fieldOf id e name =>
@@ -1795,13 +1828,17 @@ end
 
 /-- Write out every borrow of a field: see above. `shapes` is what the checker
 found each borrow goes through. -/
-def unfield (shapes : List (Nat × Bool × List Nat × List (Option String × Nat)))
-    (reads : List (Nat × Nat)) (packs : List (Nat × List String)) (items : List Item) :
-    List Item :=
-  if shapes.isEmpty && reads.isEmpty && packs.isEmpty then items
+def unfield (b : Blocks) (items : List Item) : List Item :=
+  if b.fields.isEmpty && b.fieldReads.isEmpty && b.packs.isEmpty && b.envFns.isEmpty then items
   else items.map fun
     | .fn name params annots ret clauses =>
-      .fn name params annots ret (clauses.map (unfieldClause ⟨shapes, reads, packs⟩))
+      -- Each callable that does not hold its environment, with the one that does.
+      let members := ((b.envFns.lookup name).getD []).flatMap fun group =>
+        match group with
+        | holder :: rest => rest.map (·, holder)
+        | [] => []
+      .fn name params annots ret
+        (clauses.map (unfieldClause ⟨b.fields, b.fieldReads, b.packs, members, b.envWraps⟩))
     | item => item
 
 /-- Collect the global declarations. -/
@@ -1844,6 +1881,7 @@ def collect (items : List Item) :
     | .typeAlias _ _ _ => pure ()
     -- And modules: every name is one name of the whole program by now.
     | .pub _ _ => pure ()
+    | .bounds _ _ => pure ()
     | .module _ _ => pure ()
     | .import _ _ _ => pure ()
     | .trait name _ =>

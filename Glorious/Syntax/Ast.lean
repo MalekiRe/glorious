@@ -249,6 +249,20 @@ structure Fixities where
   infixes : List (String × Nat × Assoc) := []
   prefixes : List (String × Nat) := []
 
+/-- `subject: Trait<args, Name = Type>` written of a type parameter of a
+function. The compiler's own: `F: Fn<(A, B), Output = R, Effects = {E}>`, a
+callable taking those and giving that, its arguments here taken out of their
+tuple; `F: RunsIn<Access, (A, B), Output = R>`, such a callable that runs in
+the environment `Access` names (`E`, `&E` or `&mut E`), the access first among
+`args`; `E: Environment<'e>`; and `E: Use<[lower, upper]>`, how often the
+environment is used. -/
+structure Bound where
+  subject : String
+  trait : String
+  args : List TypeExpr := []
+  assoc : List (String × TypeExpr) := []
+  quantity : Option (Nat × Option Nat) := none
+
 inductive Item where
   /-- An enum: its type parameters and its constructors with their fields. -/
   | enum (name : String) (params : List String) (ctors : List (String × List TypeExpr))
@@ -282,6 +296,9 @@ inductive Item where
   | fieldNames (ctor : String) (names : List String) (pubs : List Bool)
   /-- `type Name<T> = Type;`: another way to write a type, not a new one. -/
   | typeAlias (name : String) (params : List String) (body : TypeExpr)
+  /-- What is written of the type parameters of the function `fn`, beside
+  the function. -/
+  | bounds (fn : String) (bounds : List Bound)
   /-- `pub item`: the item can be named from outside its module; with
   `pub(super)`, only from the module its module is written in. -/
   | pub (parent : Bool) (item : Item)

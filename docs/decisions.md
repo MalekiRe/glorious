@@ -403,14 +403,11 @@ Consequences to know about:
 
 How this differs from the specification:
 
-- There is no `Environment` or `RunsIn` trait and no erased `Available`
-  witness. The environment is what the first block captured, and the block that
-  was not run is itself the evidence that the environment is unspent. It is a
-  real value at run time. To have them as the specification writes them, a
-  trait would need parameters and associated types (`Fn<Args>` with `Output`
-  and `Effects`, `RunsIn<Access, Args>` with `After`), each callable would
-  need a type of its own that a bound can name, and bounds would need
-  lifetimes. The trait system here has none of the three.
+- There is no erased `Available` witness. The environment is what the first
+  block captured, and the block that was not run is itself the evidence that
+  the environment is unspent. It is a real value at run time. `Fn`, `RunsIn`
+  and `Environment` can be written of a function's type parameters since: see
+  "A callable can be asked for by a bound".
 - There are no post-environments (`After`): nothing describes what a body
   that ran has left for the next. What is covered is alternatives, including
   chains of them. `or` gives what failed to its right operand as `else` does,
@@ -754,6 +751,50 @@ end of the function, when the types are known. A use of a function inside its
 own recursive group is given captures of its own, related to the function's as
 any other use is, so that what a function passes to itself is not taken to be
 what it was passed.
+
+## A callable can be asked for by a bound
+
+**Decision: `Fn`, `RunsIn` and `Environment` are the compiler's, and say
+what the checker already had ways to say.** They are written of a function's
+type parameters, in `<..>` or after `where`. They are not traits a program
+can implement, and there is no general trait with parameters or associated
+types behind them.
+
+`F: Fn<(A, B), Output = R, Effects = {E}>` says the type parameter `F` is a
+callable of those arguments, result and effects: it is `fn(A, B) -> R / {E}`.
+Without `Effects`, what it performs is inferred, as for `fn(A, B) -> R`. One
+argument is written `(A,)`.
+
+`E: Environment<'e>` names an environment, and `F: RunsIn<E, (A, B), Output =
+R>` says `F` is such a callable and runs in it. Given `E` itself, a callable
+uses the environment up, so of the callables given one environment at most
+one is called on any path; with `E: Use<[1, 1]>` exactly one is. Given `&E` or
+`&mut E`, a callable may be called again. The function's body is counted
+against this as a value used once is counted: each such callable is taken to
+use the environment when called, and the uses are counted along every path.
+
+This states in a signature what `if` and `else` do by handing a block that
+was not run to another. And it is built the same way: where blocks are
+written for callables that share an environment and take no arguments, the
+first holds what it captured and each other is built over that, so a value
+used once that several of them mention is captured once; in the function, a
+call of one that does not hold the environment gives it the one that does.
+Core's ownership rules accept the result: `pick(c, { k(1) }, { k(2) })` with
+`pick`'s two callables in one environment is well owned in Core, where
+without the bound it is only well typed. With `Use<[1, 1]>` the blocks may
+hold a value that has to be used, if every one of them holds it.
+
+Limits. A function with callables that share an environment is called where
+it is named, and is given blocks or names for them. `After` is not built:
+nothing says what an environment is once a callable has run in it, so a
+callable given `E` cannot be followed by another given what the first left.
+Callables given `&E` or `&mut E` are not counted at all, nor ordered against
+one given `E`. The lifetime of `Environment<'e>` is read and not used. A
+callable of a trait's function, `Label<T>`, and `unsafe Fn` are not built. An
+ordinary trait written of a type parameter is checked to exist; which traits
+a function needs is still inferred. The caller is still checked by following
+the function's body, so the bound is checked of the function but not yet
+relied on alone.
 
 ## `is` gives what it found to the block that runs
 
