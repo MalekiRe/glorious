@@ -1339,6 +1339,17 @@ private partial def dictExpr : DictE → Expr
   | .param k => .name none s!"%dict{k}"
   | .impl fn subs => .call 0 (.name none fn) (subs.map dictExpr)
 
+/-- The function an implementation gives for the trait's function `idx`, and
+the evidence its conditions need, if the evidence is an implementation and not
+something the enclosing function was given. -/
+def staticMethod (tr : TraitInfo) (d : DictE) (idx : Nat) : Option (String × List DictE) :=
+  match d with
+  | .impl dictFn subs =>
+    match tr.impls.find? (·.dictFn == dictFn) with
+    | some im => (im.methods[idx]?).map fun (fn, _) => (fn, subs)
+    | none => none
+  | .param _ => none
+
 /-- The call that destroys what `x` holds, if this is a place where that
 happens: `Drop`'s function, given the variable. -/
 private def dropHook (tr : TraitInfo) (site : DropSite) : Option Expr :=
@@ -1370,7 +1381,13 @@ private partial def untraitCall (tr : TraitInfo) (owner : String) (id : Nat) (f 
   let mk := fun (f : Expr) (args : List Expr) =>
     if isTail then Expr.tailCall id f args else Expr.call id f args
   match tr.dicts.lookup id, tr.methods.lookup id with
-  | some [d], some idx => mk (.proj (dictExpr d) idx) args
+  | some [d], some idx =>
+    -- Where the implementation is known, its function is called by name,
+    -- given what the implementation's conditions need: a call like any other,
+    -- so that a borrow passed to it can be a scope.
+    match staticMethod tr d idx with
+    | some (fn, subs) => mk (.name none fn) (subs.map dictExpr ++ args)
+    | none => mk (.proj (dictExpr d) idx) args
   | some ds, none => mk (untraitExpr tr owner f) (ds.map dictExpr ++ args)
   | _, _ => mk (untraitExpr tr owner f) args
 
@@ -1455,6 +1472,10 @@ def untrait (blocks : Blocks) (items : List Item) : List Item × Blocks :=
     | .arg call index =>
       match tr.dicts.lookup call, tr.methods.lookup call with
       | some ds, none => (Site.arg call (index + ds.length), fn)
+      | some [d], some idx =>
+        match staticMethod tr d idx with
+        | some (_, subs) => (Site.arg call (index + subs.length), fn)
+        | none => (site, fn)
       | _, _ => (site, fn)
     | _ => (site, fn)
   (out, { blocks with coercions := coercions })

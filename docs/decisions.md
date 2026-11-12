@@ -683,18 +683,28 @@ an address.
     tuple or a constructor that is given a name: each borrow is named first
     and is a scope that lasts while the result is used.
 
-  A scope is whole statements and scopes nest. So a borrow is not a scope where
-  the variable is borrowed again in the statement that last uses it, and of two
-  borrows that overlap without one ending inside the other only one is. Nor is
-  it one where the callable performs an operation handled outside the scope,
-  where a `defer` follows it in a block that uses the variable later, where it
-  is passed in a `tail` call or to a callable made before it, or where the
-  region rules have no type for it: a reference to one of two variables, say.
-  Such a borrow is, in Core, the variable's own reference: the theorem says
-  nothing of it, and only the check below keeps it exclusive.
+  A scope is statements, and scopes nest; the elaborator arranges the code so
+  that this costs little. A named borrow is made just before the first
+  statement that mentions it, since making a reference does nothing: so two
+  borrows written together and used one after the other do not overlap, and a
+  `defer` or an operation between a borrow and its first use is outside the
+  scope. Where the last statement of a scope is a call whose later arguments
+  do not mention the borrow, the arguments up to the last that does are
+  computed first and the scope ends with them: so the variable can be borrowed
+  again later in that statement. A trait's function, where the implementation
+  is known, is called by name, so a borrow passed to it is a scope like any
+  other.
+
+  What is still not a scope: a borrow that is in use across an operation
+  handled outside it (the rule above); a reference that may be to one of two
+  variables, and a function that passes a reference to its own variable to
+  itself, for neither of which the region rules have a type; and a borrow
+  passed in a `tail` call or to a callable made before it. Such a borrow is,
+  in Core, the variable's own reference: the theorem says nothing of it, and
+  only the check of the source text keeps it exclusive.
   `glorious certify` lists every one, and `glorious certify --strict` fails if
-  there is any. Of the 26 programs in the corpus that borrow, 19 have every
-  borrow a scope; 25 borrows are scopes and 9 are not.
+  there is any. Of the 33 programs in the corpus that borrow, 29 have every
+  borrow a scope; 35 borrows are scopes and 6 are not.
 - **`replace(&mut x, v)` is not a borrow.** It puts a value in the variable and
   gives back the old one, as an assignment does; nothing outlasts it.
 
