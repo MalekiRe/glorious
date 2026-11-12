@@ -155,6 +155,10 @@ structure Builder where
   unused : List Nat := []
   /-- Which activation this is, among those elaborated so far. -/
   uid : Nat := 0
+  /-- Locals of this activation that stand for a local of an activation around
+  it, because a block that runs in another's place took them from what the
+  other captured: each such activation and the local there, nearest first. -/
+  origins : List (Atom × List (Nat × Atom)) := []
 
 structure St where
   fns : Array Core.Fn
@@ -170,7 +174,7 @@ structure St where
   activations : Nat := 0
   /-- What each callable literal captured, by its identity: the activation it
   was built in, and each captured name with the local it stood for there. -/
-  layouts : List (Nat × Nat × List (String × Atom)) := []
+  layouts : List (Nat × Nat × List (String × Atom × List (Nat × Atom))) := []
   /-- Functions that are only ever given the environment of another, with how
   many values that environment has. -/
   envSizes : List (Nat × Nat) := []
@@ -1158,7 +1162,9 @@ partial def elabClosure (scope : Scope) (clauses : List Clause) (id : Nat := 0) 
     | .mk pats body => mkClause captures pats (fun sc => elabStmts sc true body)
   let idx ← addFn ⟨coreClauses⟩ s!"a callable in `{(← get).owner}`"
   unless id == 0 do
-    let layout := captures.filterMap fun x => (scope.lookup x).map fun a => (x, a)
+    let origins := (← get).b.origins
+    let layout := captures.filterMap fun x => (scope.lookup x).map fun a =>
+      (x, a, ((origins.find? fun o => sameAtom o.1 a).map (·.2)).getD [])
     modify fun s => { s with layouts := (id, s.b.uid, layout) :: s.layouts }
   -- Capturing a name is a use of it, like any other.
   let captured ← (captures.filterMap (fun x => scope.lookup x)).mapM useLocal
@@ -1182,17 +1188,23 @@ used once can be used by each. Otherwise the argument is dropped.
 -/
 partial def elabGiven (scope : Scope) (id : Nat) (body : List Stmt) : M Atom := do
   let s ← get
-  let layout := match ((← read).blocks.getD {}).links.lookup id with
+  -- What the other block captured: each name with the local of this
+  -- activation it stood for, if it was captured here or taken, in an
+  -- activation inside this one, from what a block of this one captured.
+  let layout : List (String × Option Atom) :=
+    match ((← read).blocks.getD {}).links.lookup id with
     | some owner =>
       match s.layouts.lookup owner with
-      | some (uid, layout) => if uid == s.b.uid then layout else []
+      | some (uid, layout) =>
+        layout.map fun (y, a, origins) =>
+          (y, if uid == s.b.uid then some a else (origins.find? (·.1 == s.b.uid)).map (·.2))
       | none => []
     | none => []
   -- A name is shared if it still stands for the local the other block captured.
-  let shared := fun (x : String) (a : Atom) =>
-    match scope.lookup x with
-    | some b => sameAtom a b
-    | none => false
+  let shared := fun (x : String) (a : Option Atom) =>
+    match a, scope.lookup x with
+    | some a, some b => sameAtom a b
+    | _, _ => false
   let free := captureNames scope (fvStmts [] body)
   let taken := free.filter fun x => layout.any fun (y, a) => x == y && shared y a
   if taken.isEmpty then elabClosure scope [.mk [.wild] body]
@@ -1203,7 +1215,19 @@ partial def elabGiven (scope : Scope) (id : Nat) (body : List Stmt) : M Atom := 
     let slots := (layout.zip (List.range layout.length)).map fun ((y, a), k) =>
       if shared y a then y else s!"\x00{k}"
     let names := own ++ slots
+    -- Inside it, a name taken from the other block still stands for the local
+    -- it stood for here, and for whatever that stood for further out.
+    let outer := s.b
+    let origins := (slots.zip (List.range slots.length)).filterMap fun (y, k) =>
+      match scope.lookup y with
+      | some a =>
+        if taken.contains y then
+          some (Atom.var (own.length + k),
+            (outer.uid, a) :: ((outer.origins.find? fun o => sameAtom o.1 a).map (·.2)).getD [])
+        else none
+      | none => none
     let tm ← withBuilder names.length do
+      modify fun st => { st with b := { st.b with origins := origins } }
       let r ← withNoTail none (elabStmts (indexed names 0) true body)
       finish r
     let code ← addFn ⟨[⟨own.map fun _ => .wild, tm⟩]⟩ s!"a block in `{s.owner}`"

@@ -144,6 +144,21 @@ def notTail (n : Nat) : String :=
 #guard owned "effect Ask { ask() -> Int }
   fn decide(c, k) { if(c) { k(1) } else { k(2) } }
   fn main() { handle ask() + 1 { ask(k) => decide(1 < 2, k) } }" == some true
+-- A chain of alternatives: `or` gives the body that was not run to its right
+-- operand, which runs in its place and gives back, if it fails too, a body
+-- made from what it took over. The block after `else` takes over from that
+-- one, though it was made in another activation.
+#guard owned "effect Ask { ask() -> Int }
+  fn main() { handle ask() + 1 { ask(k) =>
+    if(2 < 1) { k(1) } or { if(1 < 2) { k(2) } } else { k(3) } } }" == some true
+#guard owned "effect Ask { ask() -> Int }
+  fn main() { handle ask() + 1 { ask(k) =>
+    if(2 < 1) { k(1) } or { if(2 < 1) { k(2) } } or { if(1 < 2) { k(3) } } else { k(4) } } }"
+  == some true
+-- A function that selects among three and hands the first on does the same.
+#guard owned "effect Ask { ask() -> Int }
+  fn pick3(n, a, b, c) { match(n) { 0 => a(), 1 => b(a), _ => c(a) } }
+  fn main() { handle ask() + 1 { ask(k) => pick3(1, { k(1) }, { k(2) }, { k(3) }) } }" == some true
 #guard owned "effect Ask { ask() -> Int }
   fn pick(c, a, b) { match(c) { Ok(_) => a(), Err(_) => b(a) } }
   fn main() { handle ask() + 1 { ask(k) => pick(2 < 1, { k(1) }, { k(2) }) } }" == some true

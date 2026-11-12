@@ -1068,6 +1068,23 @@ def cases : List Case := [
     [], "error: 1:57: in `main`: `p` is used while `a`, which borrows from it, is still in use"⟩,
   ⟨"fn main() { let y = 5; let q = &*y; 0 }",
     [], "error: 1:24: in `main`: `&*` borrows from a reference: expected `&_`, found `Int`"⟩,
+  -- Alternatives chain: `or` gives what failed to its right operand, as `else`
+  -- does, and both group to the left.
+  ⟨"effect Ask { ask() -> Int }\nfn main() { handle ask() + 1 { ask(k) => if(2 < 1) { k(1) } or { if(2 < 1) { k(2) } } or { if(1 < 2) { k(3) } } else { k(4) } } }",
+    [], "4"⟩,
+  ⟨"effect Ask { [1, 1] ask() -> Int }\nfn main() { handle ask() + 1 { ask(k) => if(2 < 1) { k(1) } or { if(1 < 2) { k(2) } } else { k(3) } } }",
+    [], "3"⟩,
+  ⟨"effect Ask { [1, 1] ask() -> Int }\nfn main() { handle ask() + 1 { ask(k) => if(2 < 1) { k(1) } or { if(2 < 1) { k(2) } } else { 0 } } }",
+    [], "error: 2:13: in `main`: `k` is not used on every path, but a resumption of an operation declared `[1, 1]` has to be used"⟩,
+  ⟨"fn main() { match((2 < 1) or { 2 < 1 } or { 1 < 2 }) { Ok(_) => 1, Err(_) => 0 } }",
+    [], "1"⟩,
+  ⟨"fn main() { match((1 < 2) and { 2 < 3 } and { 4 < 3 }) { Ok(_) => 1, Err(_) => 0 } }",
+    [], "0"⟩,
+  ⟨"fn main() { let x = Err(7) or { e => Ok(e + 1) }; x else { 0 } }",
+    [], "8"⟩,
+  -- A name both blocks mention is the same thing only if it is the same binding.
+  ⟨"struct File(Int)\nimpl Use<[1, 1]> for File {}\nfn close(File(fd)) { host_write(fd) }\nfn main() { let f = File(1); let r = { let f = File(2); if(2 < 1) { close(f); 1 } }(); r else { close(f); 3 } }",
+    [], "error: 4:13: in `main`: `f` is not used on every path, but a `File` has to be used"⟩,
   -- `drop` is not for a program to call.
   ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nfn main() { let mut f = File(7); drop(&mut f); 0 }",
     [], "error: 3:34: in `main`: `drop` is run when what holds a value ends; a program does not call it"⟩,

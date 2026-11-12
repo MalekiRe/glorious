@@ -407,9 +407,14 @@ How this differs from the specification:
   witness. The environment is what the first block captured, and the block that
   was not run is itself the evidence that the environment is unspent. It is a
   real value at run time.
-- There are no post-environments (`After`). So this covers alternatives, not a
-  body that runs and then hands on what is left: `and`/`or` chains and
-  sequential use are as before.
+- There are no post-environments (`After`): nothing describes what a body
+  that ran has left for the next. What is covered is alternatives, including
+  chains of them. `or` gives what failed to its right operand as `else` does,
+  so in `if(a) { .. } or { if(b) { .. } } else { .. }` each block runs in the
+  place of the one before; a block may take over from one that was made
+  inside another block's run, from what that one had itself taken over. Two
+  bodies that both run, one after the other, each capture what they mention,
+  so a value that can be used once can be mentioned by only one of them.
 - Bodies stored as independent closures follow normal capture rules, as in the
   specification.
 
@@ -418,7 +423,9 @@ type system, and every compiled program's Core is checked against it. Which
 block a block is given is found by the unproved surface checker from its
 capture variables, and the rewriting is done by the unproved elaborator. They
 link two blocks only when exactly one block of the program can be what is
-given, and both are built in the same activation. If the linked Core cannot be
+given, and a name both mention stands for the same local: in the activation
+both are built in, or, for a block built inside one that ran in another's
+place, the local the name was taken from. If the linked Core cannot be
 typed, as when the value may also be a function that is not a block, the
 program is compiled again with every block capturing for itself.
 
