@@ -368,6 +368,83 @@ where
       let k' := k'.getD rest.length
       if k' == k && tracked'.length == tracked.length then k else go tracked' k'
 
+/-- The statements of a block with each `let p = &x` moved to just before the
+first statement that mentions `p`. Making a reference does nothing, and the
+later it is made the less its scope has to take in: two borrows that overlapped
+need not, and a `defer` between a borrow and its use is no longer inside the
+borrow's scope. One that nothing mentions, or that would pass a statement
+giving `p` or `x` another meaning, stays. Doing this twice changes nothing. -/
+partial def sinkBorrows (stmts : List Stmt) : List Stmt :=
+  let arr := stmts.toArray
+  -- Where each statement is to go: before the statement at this index.
+  let target := fun (i : Nat) =>
+    match arr[i]?.map unlocated with
+    | some (.let_ (.var p) (.ref _ x)) =>
+      let later := (List.range arr.size).drop (i + 1)
+      match later.find? fun j => (fvStmts [] [arr.getD j (.expr (.tuple []))]).contains p with
+      | none => none
+      | some j =>
+        let between := (later.takeWhile (· < j)).map fun k => unlocated (arr.getD k (.expr (.tuple [])))
+        let rebinds := between.any fun
+          | .let_ pat _ => (patVars pat).contains p || (patVars pat).contains x
+          | .letMut y _ => y == p || y == x
+          | _ => false
+        if rebinds || j == i + 1 then none else some j
+    | _ => none
+  let targets := (List.range arr.size).map target
+  if targets.all Option.isNone then stmts
+  else
+    -- The statements moved to before `j`, each after those moved to before it.
+    let rec before (j : Nat) : List Stmt :=
+      (List.range j).flatMap fun i =>
+        if targets.getD i none == some j then before i ++ [arr.getD i (.expr (.tuple []))] else []
+    (List.range arr.size).flatMap fun j =>
+      if (targets.getD j none).isSome then [] else before j ++ [arr.getD j (.expr (.tuple []))]
+
+/-- A statement that ends in a call some of whose arguments mention `p` and are
+followed by arguments that do not: those up to the last that does, each given a
+name, and the statement with the names in their place. -/
+private def splitCallOn (p : String) (site : Nat) (s : Stmt) : Option (List Stmt × Stmt) :=
+  let split := fun (e : Expr) =>
+    match e with
+    | .call id (.name q g) args =>
+      if g == p then none
+      else
+        let last := (List.range args.length).reverse.find? fun i =>
+          (fvExpr [] (args.getD i (.int 0))).contains p
+        match last with
+        | none => none
+        | some j =>
+          if j + 1 == args.length then none
+          else
+            let named : List (Expr × Option (String × Expr)) :=
+              (args.zip (List.range args.length)).map fun (a, i) =>
+                let plain := match a with
+                  | Expr.name _ _ => true
+                  | Expr.int _ => true
+                  | _ => false
+                if i ≤ j && !plain then
+                  (Expr.name none s!"%part{site}.{i}", some (s!"%part{site}.{i}", a))
+                else (a, none)
+            -- An argument that is `p` itself would still be mentioned.
+            if (named.take (j + 1)).any fun (x : Expr × Option (String × Expr)) =>
+                (fvExpr [] x.1).contains p then none
+            else
+              let lets : List Stmt := named.filterMap fun (x : Expr × Option (String × Expr)) =>
+                x.2.map fun (na : String × Expr) => Stmt.let_ (.var na.1) na.2
+              some (lets, Expr.call id (.name q g) (named.map fun (x : Expr × Option (String × Expr)) => x.1))
+    | _ => none
+  let rec go (s : Stmt) : Option (List Stmt × Stmt) :=
+    match s with
+    | .located line col s => (go s).map fun (lets, last) => (lets, .located line col last)
+    | .expr e => (split e).map fun (lets, e) => (lets, .expr e)
+    | .let_ pat e => (split e).map fun (lets, e) => (lets, .let_ pat e)
+    | .assign target e =>
+      if (fvExpr [] target).contains p then none
+      else (split e).map fun (lets, e) => (lets, .assign target e)
+    | _ => none
+  go s
+
 /-- The names the statements of a block bind with `let`. -/
 private def letNames (ss : List Stmt) : List String :=
   ss.flatMap fun s =>
@@ -815,9 +892,13 @@ partial def elabCall (scope : Scope) (isTail : Bool) (f : Expr) (args : List Exp
 partial def elabStmts (scope : Scope) (tailPos : Bool) : List Stmt → M Atom
   | [] => emit (.let_ (.construct 0 []))
   | .located line col s :: rest => do
-    modify fun st => { st with pos := (line, col) }
-    try elabStmts scope tailPos (s :: rest)
-    catch e => throw (positioned line col e)
+    -- A borrow given a name is made where it is first used.
+    match sinkBorrows (.located line col s :: rest) with
+    | .located line col s :: rest =>
+      modify fun st => { st with pos := (line, col) }
+      try elabStmts scope tailPos (s :: rest)
+      catch e => throw (positioned line col e)
+    | other => elabStmts scope tailPos other
   | [.expr e] => elabExpr scope tailPos e
   | .expr e :: rest => do
     let _ ← elabExpr scope false e
@@ -948,6 +1029,13 @@ partial def elabBorrowScope (scope : Scope) (tailPos : Bool) (p : String) (uniq 
   let k := scopeExtent p rest wide
   let inner := rest.take k
   let after := rest.drop k
+  -- If the last statement of the scope is a call whose later arguments do not
+  -- mention the borrow, the scope ends before them: the arguments up to the
+  -- last that does are computed first and given names.
+  let (inner, after) := match inner.getLast?.map (splitCallOn p (← get).sites) with
+    | some (some (lets, last)) =>
+      if wide then (inner, after) else (inner.dropLast ++ lets, last :: after)
+    | _ => (inner, after)
   let used := fvStmts [] after
   let out := ((letNames inner).filter used.contains).eraseDups
   let (inner, pat) : List Stmt × Option Pattern :=

@@ -258,14 +258,22 @@ def notTail (n : Nat) : String :=
 -- a callable made before the call cannot be given the borrow;
 #guard lentBorrows "fn apply(f, p) { f(p) }
   fn main() { let mut n = 0; apply({ q => *q = 7; }, &mut n); n }" == some 0
--- a scope is whole statements, and here the variable is borrowed again in the
--- statement that last uses `p`;
+-- A scope need not be whole statements at its end: where the variable is
+-- borrowed again in the statement that last uses `p`, the arguments that use
+-- `p` are computed first, and the scope ends with them.
 #guard (unprovedBorrows "fn get(r: &Int) { *r }
-  fn main() { let mut x = 7; let p = &mut x; get(p) + get(&x) }").map (·.length) == some 1
--- and scopes nest, so of two borrows that overlap without one ending inside
--- the other, one is a scope.
+  fn main() { let mut x = 7; let p = &mut x; get(p) + get(&x) }").map (·.length) == some 0
+-- A borrow is made where it is first used, so two borrows written one after
+-- the other and used one after the other do not overlap;
 #guard (unprovedBorrows "fn main() { let mut a = 1; let mut b = 2; let p = &mut a; let q = &mut b;
-    *p = 10; a = a + 1; *q = 20; a + b }").map (·.length) == some 1
+    *p = 10; a = a + 1; *q = 20; a + b }").map (·.length) == some 0
+-- nor does a `defer` or an operation that comes before the first use fall
+-- inside the scope.
+#guard (unprovedBorrows "fn main() { let mut x = 1; let p = &mut x; defer host_write(9); *p = 2; x }").map
+  (·.length) == some 0
+#guard (unprovedBorrows "effect Ask { ask() }
+  fn main() { let mut x = 0; handle { let p = &mut x; ask(); *p = 1; 0 }() { ask(k) => k(()) } }").map
+  (·.length) == some 0
 -- Each place is decided alone.
 #guard lentBorrows "fn incr(p) { *p = *p + 1 }
   fn main() { let mut x = 1; let mut n = 0;
