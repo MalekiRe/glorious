@@ -406,7 +406,11 @@ How this differs from the specification:
 - There is no `Environment` or `RunsIn` trait and no erased `Available`
   witness. The environment is what the first block captured, and the block that
   was not run is itself the evidence that the environment is unspent. It is a
-  real value at run time.
+  real value at run time. To have them as the specification writes them, a
+  trait would need parameters and associated types (`Fn<Args>` with `Output`
+  and `Effects`, `RunsIn<Access, Args>` with `After`), each callable would
+  need a type of its own that a bound can name, and bounds would need
+  lifetimes. The trait system here has none of the three.
 - There are no post-environments (`After`): nothing describes what a body
   that ran has left for the next. What is covered is alternatives, including
   chains of them. `or` gives what failed to its right operand as `else` does,
