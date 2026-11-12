@@ -4,7 +4,8 @@ import Glorious.Syntax.Ast
 # What is settled before a program is checked
 
 A type alias is another way to write a type, not a type: every use is replaced
-by what it stands for, and the checker never sees one.
+by what it stands for, and the checker never sees one. This is done once the
+names of the program are resolved, so an alias is found like any other name.
 -/
 
 namespace Glorious.Syntax
@@ -55,7 +56,6 @@ partial def expandTypeExpr (aliases : List (String × List String × TypeExpr))
 partial def expandAliases (items : List Item) : Except String (List Item) := do
   let aliases := items.filterMap fun
     | .typeAlias name params body => some (name, params, body)
-    | .pub (.typeAlias name params body) => some (name, params, body)
     | _ => none
   for (name, _, _) in aliases do
     if (aliases.filter (·.1 == name)).length > 1 then
@@ -65,8 +65,6 @@ partial def expandAliases (items : List Item) : Except String (List Item) := do
   let declared := items.filterMap fun
     | .enum name _ _ => some name
     | .struct name _ _ => some name
-    | .pub (.enum name _ _) => some name
-    | .pub (.struct name _ _) => some name
     | _ => none
   let aliases := aliases.filter fun (name, _, _) => !declared.contains name
   if aliases.isEmpty then return items
@@ -86,18 +84,10 @@ partial def expandAliases (items : List Item) : Except String (List Item) := do
         pure (m, ← ps.mapM ty, ← r.mapM ty)))
     | .impl ps tr head args context methods => do
       pure (.impl ps tr head args context (← methods.mapM item))
-    | .pub i => .pub <$> item i
     | i => pure i
   let rest := items.filter fun
     | .typeAlias _ _ _ => false
-    | .pub (.typeAlias _ _ _) => false
     | _ => true
   rest.mapM item
-
-/-- A program with `pub` taken off its items: for where visibility is not asked. -/
-partial def stripPub (items : List Item) : List Item :=
-  items.map fun
-    | .pub item => (stripPub [item]).headD item
-    | item => item
 
 end Glorious.Syntax

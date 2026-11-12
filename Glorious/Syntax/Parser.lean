@@ -21,10 +21,9 @@ namespace Glorious.Syntax
 structure PCtx where
   toks : Array Token
   fix : Fixities
-  /-- The constructors declared with named fields, each with the names in
-  order: found before parsing, since `Point { x: 1 }` is otherwise a call
-  given a block. -/
-  records : List (String × List String) := []
+  /-- The constructors declared with named fields, in any module: found
+  before parsing, since `Point { x: 1 }` is otherwise a call given a block. -/
+  records : List String := []
   /-- Added to the identity of each callable literal, so that the literals of
   texts parsed separately stay distinct. -/
   base : Nat
@@ -63,6 +62,26 @@ private def expectIdent : P String := do
     pure s
   | _ => failAt "expected a name"
 
+/-- The rest of a path `a::b::c` whose first name was read: all its names. -/
+private partial def parsePathRest (first : String) : P (List String) := do
+  match ← peek, ← peek 1 with
+  | .punct "::", .ident y =>
+    advance
+    advance
+    pure (first :: (← parsePathRest y))
+  | _, _ => pure [first]
+
+/-- A name, perhaps with the path of the module it is in, as one string. -/
+private def expectPath : P String := do
+  pure ("::".intercalate (← parsePathRest (← expectIdent)))
+
+/-- A path as the name at its end and what is before it. -/
+private def splitPath (segs : List String) : Option String × String :=
+  match segs.reverse with
+  | [] => (none, "")
+  | [x] => (none, x)
+  | x :: before => (some ("::".intercalate before.reverse), x)
+
 /-- Does the block starting at token `i` have clauses (`... => ...`) rather than statements? -/
 private partial def scanClauseForm (toks : Array Token) (i depth : Nat) : Bool :=
   match toks[i]? with
@@ -97,39 +116,28 @@ private partial def parsePattern : P Pattern := do
     pure .wild
   | .ident x =>
     advance
-    let (qual, name) ← if ← acceptPunct "::" then do
-        let y ← expectIdent
-        pure (some x, y)
-      else pure (none, x)
+    let (qual, name) := splitPath (← parsePathRest x)
     if ← acceptPunct "(" then
       let args ← parsePatternList
       pure (.ctor name qual args)
-    else if (← peek) == .punct "{" && ((← read).records.lookup name).isSome then
+    else if (← peek) == .punct "{" && (← read).records.contains name then
       -- `Point { x, y: p }`: each field by name, `x` alone binding `x`; `..`
       -- lets the fields not named go.
-      let names := ((← read).records.lookup name).getD []
       advance
-      let mut given : List (String × Pattern) := []
-      let mut rest := false
+      let mut given : Array Pattern := #[.var recordMark]
       repeat
         if (← peek) == .punct "}" then break
         if (← peek) == .punct "." && (← peek 1) == .punct "." then
           advance
           advance
-          rest := true
+          given := given.push (.var restMark)
           break
         let field ← expectIdent
-        unless names.contains field do failAt s!"`{name}` has no field `{field}`"
-        if given.any (·.1 == field) then failAt s!"field `{field}` is written twice"
         let pat ← if ← acceptPunct ":" then parsePattern else pure (.var field)
-        given := given ++ [(field, pat)]
+        given := given.push (.ctor (fieldMark field) none [pat])
         if !(← acceptPunct ",") then break
       expectPunct "}"
-      let args ← names.mapM fun field =>
-        match given.lookup field with
-        | some pat => pure pat
-        | none => if rest then pure Pattern.wild else failAt s!"field `{field}` of `{name}` is missing (`..` lets the rest go)"
-      pure (.ctor name qual args)
+      pure (.ctor name qual given.toList)
     else if qual.isSome then pure (.ctor name qual [])
     else pure (.var name)
   | .int n =>
@@ -275,33 +283,21 @@ private partial def parsePostfix (noBlock : Bool) : P Expr := do
     | .punct "{" =>
       -- `Point { x: 1, y: 2 }` builds a value of a type declared with names.
       let records := (← read).records
-      let record := match e with
-        | .name _ x => (records.lookup x).map fun names => (x, names)
-        | _ => none
-      if let some (x, names) := record then
+      let isRecord := match e with
+        | .name _ x => records.contains x
+        | _ => false
+      if isRecord then
         let id := (← read).base + (← get) + 1
         advance
-        let mut given : List (String × Expr) := []
+        let mut given : Array Expr := #[.name none recordMark]
         repeat
           if (← peek) == .punct "}" then break
           let field ← expectIdent
-          unless names.contains field do failAt s!"`{x}` has no field `{field}`"
-          if given.any (·.1 == field) then failAt s!"field `{field}` is written twice"
           let value ← if ← acceptPunct ":" then parseBinary 0 false else pure (.name none field)
-          given := given ++ [(field, value)]
+          given := given.push (.call 0 (.name none (fieldMark field)) [value])
           if !(← acceptPunct ",") then break
         expectPunct "}"
-        for field in names do
-          unless given.any (·.1 == field) do failAt s!"field `{field}` of `{x}` is missing"
-        if given.map (·.1) == names then
-          e := .call id e (given.map (·.2))
-        else
-          -- Written in another order: computed in the order written, then
-          -- put in the declared one.
-          let temps := given.map fun (field, _) => s!"%{field}"
-          e := .call id (.closure 0 [.mk (temps.map Pattern.var)
-            [.expr (.call (id + 1) e (names.map fun field => .name none s!"%{field}"))]])
-            (given.map (·.2))
+        e := .call id e given.toList
         continue
       -- `f { body }` is `f({ body })`.
       if noBlock then break
@@ -353,10 +349,8 @@ private partial def parsePrimary (noBlock : Bool) : P Expr := do
   | .ident x =>
     if x.startsWith "'" then failAt "a lifetime is not a value"
     advance
-    if ← acceptPunct "::" then
-      let y ← expectIdent
-      pure (.name (some x) y)
-    else pure (.name none x)
+    let (qual, name) := splitPath (← parsePathRest x)
+    pure (.name qual name)
   | .punct "@" =>
     advance
     let l ← expectIdent
@@ -538,6 +532,7 @@ private partial def parseType : P TypeExpr := do
     pure (.fn params ret)
   | .ident x =>
     advance
+    let x := "::".intercalate (← parsePathRest x)
     if ← isOp "<" then
       advance
       let mut args : Array TypeExpr := #[]
@@ -572,7 +567,7 @@ private partial def parseResult : P TypeExpr := do
     let mut effects : Array (String × List TypeExpr) := #[]
     repeat
       if (← peek) == .punct "}" then break
-      let name ← expectIdent
+      let name ← expectPath
       let mut args : Array TypeExpr := #[]
       if (← peek) == .op "<" then
         advance
@@ -722,7 +717,7 @@ private partial def parseItem : P Item := do
   | .ident "impl" =>
     advance
     let params ← parseGenerics
-    let tr ← expectIdent
+    let tr ← expectPath
     if tr == "Use" && (← isOp "<") then
       advance
       let (lower, upper) ← parseQuantity
@@ -730,7 +725,7 @@ private partial def parseItem : P Item := do
       match ← peek with
       | .ident "for" => advance
       | _ => failAt "expected `for`: `impl Use<[1, 1]> for Type {}`"
-      let head ← expectIdent
+      let head ← expectPath
       let _ ← parseGenerics
       expectPunct "{"
       expectPunct "}"
@@ -738,7 +733,7 @@ private partial def parseItem : P Item := do
     match ← peek with
     | .ident "for" => advance
     | _ => failAt "expected `for`: `impl Trait for Type`"
-    let head ← expectIdent
+    let head ← expectPath
     let args ← parseGenerics
     let mut context : Array (String × String) := #[]
     if (← peek) == .ident "where" then
@@ -746,7 +741,7 @@ private partial def parseItem : P Item := do
       repeat
         let p ← expectIdent
         expectPunct ":"
-        context := context.push (p, ← expectIdent)
+        context := context.push (p, ← expectPath)
         if !(← acceptPunct ",") then break
     expectPunct "{"
     let mut methods : Array Item := #[]
@@ -779,15 +774,49 @@ private partial def parseItem : P Item := do
     else failAt "expected a declaration"
   | _ => failAt "expected a declaration"
 
-/-- `pub`, with or without `(crate)` or `(super)`, if it is next. -/
-private def acceptPub : P Bool := do
-  if (← peek) != .ident "pub" then return false
+/-- `pub`, if it is next: whether it is `pub(super)`, which lets only the
+module this one is written in see. `pub(crate)` is `pub`: there is one package. -/
+private def acceptPub : P (Option Bool) := do
+  if (← peek) != .ident "pub" then return none
   advance
   if (← peek) == .punct "(" then
     advance
-    let _ ← expectIdent
+    let scope ← expectIdent
+    unless scope == "crate" || scope == "super" do
+      failAt "expected `pub(crate)` or `pub(super)`"
     expectPunct ")"
-  pure true
+    return some (scope == "super")
+  pure (some false)
+
+/-- What follows `use`: a path, perhaps renamed with `as`, `*` for every name
+of a module, or names in braces that share what is before them. -/
+private partial def parseUseTree (before : List String) : P (List Item) := do
+  if ← acceptPunct "{" then
+    let mut out : Array Item := #[]
+    repeat
+      if (← peek) == .punct "}" then break
+      out := out ++ (← parseUseTree before).toArray
+      if !(← acceptPunct ",") then break
+    expectPunct "}"
+    pure out.toList
+  else if (← peek) == .op "*" then
+    advance
+    pure [.import before none true]
+  else
+    -- An operator is a name like any other.
+    if let .op s := ← peek then
+      advance
+      return [.import (before ++ [s]) none false]
+    let seg ← expectIdent
+    if ← acceptPunct "::" then parseUseTree (before ++ [seg])
+    else
+      let rename ← if (← peek) == .ident "as" then do
+          advance
+          some <$> expectIdent
+        else pure none
+      -- `use a::{self}` is `use a`.
+      let path := if seg == "self" && !before.isEmpty then before else before ++ [seg]
+      pure [.import path rename false]
 
 /-- The fields of a struct or of an enum's constructor: none, `(A, B)`, or
 `{ a: A, b: B }`. Each may be `pub`. Gives the types, the names if they were
@@ -798,7 +827,7 @@ private partial def parseFieldDecls : P (List TypeExpr × List String × List Bo
     let mut pubs : Array Bool := #[]
     repeat
       if (← peek) == .punct ")" then break
-      pubs := pubs.push (← acceptPub)
+      pubs := pubs.push (← acceptPub).isSome
       match ← peek, ← peek 1 with
       | .ident _, .punct ":" =>
         advance
@@ -814,7 +843,7 @@ private partial def parseFieldDecls : P (List TypeExpr × List String × List Bo
     let mut pubs : Array Bool := #[]
     repeat
       if (← peek) == .punct "}" then break
-      pubs := pubs.push (← acceptPub)
+      pubs := pubs.push (← acceptPub).isSome
       let field ← expectIdent
       if names.contains field then failAt s!"field `{field}` is declared twice"
       names := names.push field
@@ -829,10 +858,29 @@ private partial def parseFieldDecls : P (List TypeExpr × List String × List Bo
 private partial def parseItemGroup : P (List Item) := do
   match ← peek with
   | .ident "pub" =>
-    let _ ← acceptPub
+    let parent := (← acceptPub).getD false
+    -- `pub use a::{b, c}` is `pub` for each; with a declaration, for it and
+    -- not for what is written out beside it.
     match ← parseItemGroup with
-    | item :: more => pure (.pub item :: more)
+    | items@(.import _ _ _ :: _) => pure (items.map (.pub parent))
+    | item :: more => pure (.pub parent item :: more)
     | [] => pure []
+  | .ident "mod" =>
+    advance
+    let name ← expectIdent
+    if ← acceptPunct ";" then return [.module name none]
+    expectPunct "{"
+    let mut items : Array Item := #[]
+    repeat
+      if (← peek) == .punct "}" then break
+      items := items ++ (← parseItemGroup).toArray
+    expectPunct "}"
+    pure [.module name (some items.toList)]
+  | .ident "use" =>
+    advance
+    let items ← parseUseTree []
+    expectPunct ";"
+    pure items
   | .ident "struct" =>
     advance
     let name ← expectIdent
@@ -874,27 +922,10 @@ private partial def parseItems : P (List Item) := do
     out := out ++ (← parseItemGroup).toArray
   pure out.toList
 
-/-- The constructors a token stream declares with named fields, each with the
-names in order: `struct Name { a: A }` and, inside an enum, `Name { a: A }`. -/
-private def collectRecords (toks : Array Token) : List (String × List String) := Id.run do
+/-- The constructors a token stream declares with named fields: `struct Name
+{ a: A }` and, inside an enum, `Name { a: A }`. -/
+private def collectRecords (toks : Array Token) : List String := Id.run do
   let tok := fun (i : Nat) => (toks[i]?.map (·.tok)).getD .eof
-  -- The names of the fields in the braces opened at `i`.
-  let fieldsAt := fun (i : Nat) => Id.run do
-    let mut names : Array String := #[]
-    let mut depth := 0
-    let mut j := i + 1
-    while j < toks.size do
-      match tok j with
-      | .punct "}" => if depth == 0 then break else depth := depth - 1
-      | .punct "{" => depth := depth + 1
-      | .punct "(" => depth := depth + 1
-      | .punct ")" => depth := depth - 1
-      | .op "<" => depth := depth + 1
-      | .op ">" => depth := depth - 1
-      | .ident x => if depth == 0 && tok (j + 1) == .punct ":" then names := names.push x
-      | _ => pure ()
-      j := j + 1
-    names.toList
   -- Past `<...>`, if it starts at `i`.
   let pastGenerics := fun (i : Nat) => Id.run do
     if tok i != .op "<" then return i
@@ -907,12 +938,11 @@ private def collectRecords (toks : Array Token) : List (String × List String) :
       | _ => pure ()
       j := j + 1
     j
-  let mut out : List (String × List String) := []
+  let mut out : List String := []
   for i in [0:toks.size] do
     match tok i, tok (i + 1) with
     | .ident "struct", .ident name =>
-      let j := pastGenerics (i + 2)
-      if tok j == .punct "{" then out := (name, fieldsAt j) :: out
+      if tok (pastGenerics (i + 2)) == .punct "{" then out := name :: out
     | .ident "enum", .ident _ =>
       -- Each constructor at the top of the enum's braces that has braces.
       let mut j := pastGenerics (i + 2)
@@ -925,8 +955,7 @@ private def collectRecords (toks : Array Token) : List (String × List String) :
           | .punct "(" => depth := depth + 1
           | .punct ")" => depth := depth - 1
           | .punct "{" => depth := depth + 1
-          | .ident c =>
-            if depth == 0 && tok (j + 1) == .punct "{" then out := (c, fieldsAt (j + 1)) :: out
+          | .ident c => if depth == 0 && tok (j + 1) == .punct "{" then out := c :: out
           | _ => pure ()
           j := j + 1
     | _, _ => pure ()
@@ -952,14 +981,43 @@ private def collectFixities (toks : Array Token) (fix : Fixities) : Except Strin
     | _, _, _ => pure ()
   pure fix
 
+/-- What a text declares that has to be known before any text of the program
+is parsed: its operators, added to `fix`, and its constructors with named
+fields. -/
+def declaredSyntax (fix : Fixities) (src : String) : Except String (Fixities × List String) := do
+  let toks ← lex src
+  pure (← collectFixities toks fix, collectRecords toks)
+
+/-- The modules a text says are files of their own, `mod name;`: each as its
+path from the module the text is, through the modules written in the text. -/
+def fileModules (src : String) : Except String (List (List String)) := do
+  let toks ← lex src
+  let tok := fun (i : Nat) => (toks[i]?.map (·.tok)).getD .eof
+  let mut out : Array (List String) := #[]
+  -- The modules being read, each with how deep in braces its own are.
+  let mut inside : List (String × Nat) := []
+  let mut depth := 0
+  for i in [0:toks.size] do
+    match tok i, tok (i + 1), tok (i + 2) with
+    | .ident "mod", .ident name, .punct ";" =>
+      out := out.push ((inside.map (·.1)).reverse ++ [name])
+    | .ident "mod", .ident name, .punct "{" =>
+      inside := (name, depth + 1) :: inside
+    | .punct "{", _, _ => depth := depth + 1
+    | .punct "}", _, _ =>
+      if (inside.head?.map (·.2)) == some depth then inside := inside.drop 1
+      depth := depth - 1
+    | _, _, _ => pure ()
+  pure out.toList
+
 /-- Parse a source text, given the fixities already in scope. Returns the items
 and the fixities including those it declares. `base` keeps the identities of
 this text's callable literals apart from those of a text parsed before it. -/
-def parse (fix : Fixities) (src : String) (base : Nat := 0) :
+def parse (fix : Fixities) (src : String) (base : Nat := 0) (records : List String := []) :
     Except String (List Item × Fixities) := do
   let toks ← lex src
   let fix ← collectFixities toks fix
-  let (items, _) ← (parseItems.run ⟨toks, fix, collectRecords toks, base⟩).run 0
+  let (items, _) ← (parseItems.run ⟨toks, fix, collectRecords toks ++ records, base⟩).run 0
   pure (items, fix)
 
 end Glorious.Syntax

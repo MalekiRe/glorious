@@ -329,6 +329,8 @@ structure St where
   outlives : List (Nat × Nat) := []
   /-- `'static`, once it has been written. -/
   staticCap : Option Nat := none
+  /-- What is known of the program's modules: see `ModuleInfo`. -/
+  modules : Syntax.ModuleInfo := {}
   /-- The names of the fields of each constructor declared with names. -/
   fieldNames : List (String × List String) := []
   /-- For each field read by name, which field it is: for the elaborator. -/
@@ -1361,6 +1363,13 @@ def fieldType (t : Ty) (idx : Nat) : M (Option Ty) := do
   | .con name args =>
     match (← get).ctors.lookup name with
     | some sig =>
+      -- A field that is not `pub` is its module's to read and to borrow.
+      let s ← get
+      if let some (home, pubs) := s.modules.fieldVis.lookup name then
+        if pubs[idx]? == some false then
+          if let some here := s.modules.homes.lookup s.owner then
+            unless here == home do
+              throw s!"this field of `{Syntax.lastSegment name}` is not `pub`: only the module that declares `{Syntax.lastSegment name}` can read or borrow it"
       match (sig.fieldsAt args)[idx]? with
       | some t => pure (some t)
       | none => throw s!"`{name}` has no field {idx}"
@@ -4495,7 +4504,8 @@ def checkGroup (decls : List FnDecl) : M Unit := do
 blocks: which take an argument they do not name, and for each that is handed a
 block which was not run, the identity of that block if it can only be one. The
 elaborator then lets those two share what they capture. -/
-def checkProgram (items : List Item) : Except String Elab.Blocks := do
+def checkProgram (items : List Item) (modules : Syntax.ModuleInfo := {}) :
+    Except String Elab.Blocks := do
   let decls : List FnDecl := items.filterMap fun
     | .fn name params annots ret clauses => some { name, params, annots, ret, clauses }
     | _ => none
@@ -4520,7 +4530,7 @@ def checkProgram (items : List Item) : Except String Elab.Blocks := do
   let deps := fun (name : String) =>
     if builtFrom.contains name then mentions name else (mentions name ++ coercing).eraseDups
   let action : M Elab.Blocks := do
-    modify fun s => { s with fnBodies := decls.map fun d => (d.name, d.clauses) }
+    modify fun s => { s with fnBodies := decls.map fun d => (d.name, d.clauses), modules }
     declare items
     computeVariances
     declareTraits items
@@ -4533,7 +4543,7 @@ def checkProgram (items : List Item) : Except String Elab.Blocks := do
       for item in im.methods do
         if let .fn m _ annots ret clauses := item then
           if let some sig := (← get).methods.lookup m then
-            checkGroup [{ name := Elab.implFnName im.trait im.head m, params := im.params, annots,
+            checkGroup [{ name := Syntax.implFnName im.trait im.head m, params := im.params, annots,
                           ret, clauses, impl := some (im, sig) }]
     for c in coercing do
       unless (((← get).fnBounds.lookup c).getD 0) == 0 do
@@ -4574,7 +4584,7 @@ def checkProgram (items : List Item) : Except String Elab.Blocks := do
     let implEs := s.impls.toList.map fun im =>
       let names := (s.traits.lookup im.trait).getD []
       (⟨im.dictFn, im.context.length, names.map fun m =>
-        (Elab.implFnName im.trait im.head m, ((s.methods.lookup m).map (·.params.length)).getD 0)⟩ :
+        (Syntax.implFnName im.trait im.head m, ((s.methods.lookup m).map (·.params.length)).getD 0)⟩ :
         Elab.ImplE)
     pure ⟨s.given.toList, links, s.coercions.toList,
       ⟨s.dictTable.toList, s.methodCalls.toList, s.fnBounds, implEs, s.dropSites.toList⟩,

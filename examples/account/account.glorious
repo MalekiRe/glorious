@@ -1,0 +1,14 @@
+// An account is made, changed and closed only here: its field is private,
+// and a value of it has to be used, so one that is opened is closed.
+mod ledger;
+
+pub struct Account(Int)
+impl Use<[1, 1]> for Account {}
+
+pub fn open(amount: Int) -> Account { Account(amount) }
+
+pub fn deposit(Account(n), amount: Int) -> Account { Account(ledger::add(n, amount)) }
+
+pub fn withdraw(Account(n), amount: Int) -> Account { Account(ledger::add(n, 0 - amount)) }
+
+pub fn close(Account(n)) -> Int { n }

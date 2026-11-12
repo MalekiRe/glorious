@@ -8,7 +8,11 @@ Core, and Core is what has a semantics.
 namespace Glorious.Syntax
 
 /-- A surface pattern. A bare name is a binder unless it resolves to a
-constructor or a declared constant. -/
+constructor or a declared constant.
+
+A pattern written with field names, `Point { x, y: p, .. }`, leaves the parser
+as `Point(%record, %field:x(x), %field:y(p), %rest)`; where the program's names
+are resolved, and the declaration known, it becomes `Point(x, p)`. -/
 inductive Pattern where
   | wild
   | var (name : String)
@@ -26,7 +30,11 @@ inductive Expr where
   /-- The label `@name` as a value. -/
   | label (name : String)
   /-- A call. One written in the source has an identity that is not zero, by
-  which the checker can tell the elaborator about its arguments. -/
+  which the checker can tell the elaborator about its arguments.
+
+  A value built by field names, `Point { y: 2, x: 1 }`, leaves the parser as
+  the call `Point(%record, %field:y(2), %field:x(1))`; where the program's
+  names are resolved it becomes `Point(1, 2)`, computed in the order written. -/
   | call (id : Nat) (f : Expr) (args : List Expr)
   /-- `tail f(args)`. -/
   | tailCall (id : Nat) (f : Expr) (args : List Expr)
@@ -94,6 +102,36 @@ def inFunction (name : String) (msg : String) : String :=
   else s!"in `{name}`: {msg}"
 
 instance : Inhabited Clause := ⟨.mk [] []⟩
+
+/-- The name that marks a call or a pattern as written with field names. -/
+def recordMark : String := "%record"
+
+/-- The name that stands for `..` in a pattern written with field names. -/
+def restMark : String := "%rest"
+
+/-- The name that wraps the value or pattern given for a field. -/
+def fieldMark (field : String) : String := s!"%field:{field}"
+
+/-- The field a marker names, if it is one. -/
+def fieldOfMark (name : String) : Option String :=
+  if name.startsWith "%field:" then some (name.drop 7).toString else none
+
+/-- What the checker is told of a program's modules, which it otherwise does
+not see: the module each function is written in, and for each constructor with
+fields its module and which fields are `pub`. A field that is not can be read
+or borrowed only in the constructor's module. -/
+structure ModuleInfo where
+  homes : List (String × String) := []
+  fieldVis : List (String × String × List Bool) := []
+
+/-- A name without the module it is in: how a value is shown. -/
+def lastSegment (name : String) : String :=
+  match name.splitOn "::" with
+  | [] => name
+  | parts => parts.getLast!
+
+/-- The function of an implementation: `method` of `trait` for `head`. -/
+def implFnName (trait head method : String) : String := s!"{trait}::{method}@{head}"
 
 /-- A type as written in the source. -/
 inductive TypeExpr where
@@ -188,7 +226,14 @@ inductive Item where
   | fieldNames (ctor : String) (names : List String) (pubs : List Bool)
   /-- `type Name<T> = Type;`: another way to write a type, not a new one. -/
   | typeAlias (name : String) (params : List String) (body : TypeExpr)
-  /-- `pub item`: the item can be named from outside its module. -/
-  | pub (item : Item)
+  /-- `pub item`: the item can be named from outside its module; with
+  `pub(super)`, only from the module its module is written in. -/
+  | pub (parent : Bool) (item : Item)
+  /-- `mod name { items }`, or `mod name;` for a module in a file of its own. -/
+  | module (name : String) (body : Option (List Item))
+  /-- `use a::b::name;`, `use a::b::name as other;` or `use a::b::*;`: names of
+  another module, to be written here without their path. `use a::{b, c}` is one
+  of these for each. -/
+  | import (path : List String) (rename : Option String) (glob : Bool)
 
 end Glorious.Syntax

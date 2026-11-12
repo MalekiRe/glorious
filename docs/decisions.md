@@ -755,6 +755,57 @@ own recursive group is given captures of its own, related to the function's as
 any other use is, so that what a function passes to itself is not taken to be
 what it was passed.
 
+## A module is a unit, and modules have no cycle
+
+**Decision (the user's): a module is like a crate.** A module is a file, or
+`mod name { .. }`. What it declares is its own unless it says `pub`, and that
+is the whole of privacy: a module written inside another sees no more of it
+than a stranger does, and the outer one sees only what the inner says is
+`pub`. A module uses another by naming what it declares, `a::b::name` or
+`use a::b::name;`, and which module uses which must have no cycle, the first
+module among them. So a module can be understood knowing only the public face
+of those it uses, and they come first. Two things that refer to each other are
+in one module.
+
+This is not the language specification's section 2, where modules are a tree
+in which a module sees the private names of those it is written in, and
+modules beside each other may use each other freely. That design needs names
+resolved to a fixed point; this one resolves them in one pass.
+
+What is built. `mod name { .. }` and `mod name;`, the second the file
+`D/name/name.glorious` where `D` is the directory of the module it is written
+in. `pub`, `pub(crate)` (the same: there is one package) and `pub(super)`.
+`use` with a path from `crate`, `self`, `super`, a module in scope or a module
+of the first module; with `as`, with `{a, b}`, with `*`; `pub use` to name a
+thing again as one's own. Paths in expressions, patterns and types. A
+constructor of an enum, an operation of an effect and a function of a trait
+are names of the module that declares them, as visible as the enum, effect or
+trait, and are brought in by name like the rest. The prelude is a module
+every module can name without `use`; what a module declares is meant before
+it.
+
+A field is private unless it is `pub`. A constructor with a private field can
+be written, in an expression or a pattern, only in its module, and such a
+field read or borrowed only there. That is what makes a type that has to be
+used enforceable: `impl Use<..> for T` is written in the module of `T` and
+nowhere else, and nobody outside can take a `T` apart to be rid of it.
+
+An implementation is written in the module of its trait or of its type.
+
+How. `Glorious/Syntax/Modules.lean` runs before the checker: it finds what
+each name means, refuses what is private or circular, and writes the program
+out as one list of items in which `name` of the module `a::b` is the name
+`a::b::name`. The checker, the elaborator and Core see no modules. Only the
+privacy of a field read with `.` needs the type, so the checker is told which
+module each function is in and which fields are `pub`.
+
+Limits. A module is not compiled alone: every module becomes part of one
+Core program, since the checker's counting of uses follows calls into bodies
+and Core's theorems are about whole programs. A module itself is not private:
+any module can be named, only its items are `pub` or not. A private type can
+appear in the type of a `pub` function. A coercion declared in any module
+applies in all. Operators and their fixities are the whole program's.
+
 ## Fields have names, and a type can have another name
 
 **Decision: a name for a field is the checker's; after it a field is a

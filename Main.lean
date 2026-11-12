@@ -75,16 +75,43 @@ def parseExpectation (src : String) : Option (List Int × String) := Id.run do
       expect := expect.push (line.drop 3).toString
   if found then some (input, "\n".intercalate expect.toList) else none
 
+/-- The texts of the modules of the program at `path` that are files of their
+own, each with its path as a module. The module `child` of a module whose
+modules are in the directory `D` is the file `D/child/child.glorious`, and its
+own modules are in `D/child`. -/
+partial def moduleFiles (path : System.FilePath) : IO (List (List String × String)) := do
+  let root := path.parent.getD "."
+  let rec load (here : List String) (src : String) : IO (List (List String × String)) := do
+    let named ← match Syntax.fileModules src with
+      | .ok named => pure named
+      | .error _ => pure []
+    let mut out : List (List String × String) := []
+    for rel in named do
+      let whole := here ++ rel
+      let name := whole.getLast!
+      let dir := whole.foldl (fun (dir : System.FilePath) (seg : String) => dir / seg) root
+      let file := dir / s!"{name}.glorious"
+      if ← file.pathExists then
+        let text ← IO.FS.readFile file
+        out := out ++ [(whole, text)] ++ (← load whole text)
+    pure out
+  load [] (← IO.FS.readFile path)
+
+/-- Compile the program at `path`, with the modules it has in other files. -/
+def compileFile (path : String) : IO (Except String Compiled) := do
+  pure (compileSource (← IO.FS.readFile path) true (← moduleFiles path))
+
 /-- The example programs that state what they must print. -/
-def exampleCases (dir : System.FilePath) : IO (List Case) := do
+def exampleCases (dir : System.FilePath) :
+    IO (List (Case × List (List String × String))) := do
   if !(← dir.pathExists) then return []
   let entries := (← dir.readDir).qsort (fun a b => a.fileName < b.fileName)
-  let mut out : Array Case := #[]
+  let mut out : Array (Case × List (List String × String)) := #[]
   for entry in entries do
     if entry.fileName.endsWith ".glorious" then
       let src ← IO.FS.readFile entry.path
       if let some (input, expect) := parseExpectation src then
-        out := out.push ⟨src, input, expect⟩
+        out := out.push (⟨src, input, expect⟩, ← moduleFiles entry.path)
   pure out.toList
 
 /-- Run every test program and every example on the Lean machines, and on the
@@ -95,14 +122,14 @@ def selftest (vm : Option String) : IO UInt32 := do
   let tmp : System.FilePath := (← IO.getEnv "TMPDIR").getD "/tmp"
   let file := tmp / s!"glorious-selftest-{← IO.monoMsNow}.glbc"
   let examples ← exampleCases "examples"
-  for c in cases ++ examples do
+  for (c, files) in cases.map (·, []) ++ examples do
     ran := ran + 1
-    let got := evalSource c.src c.input
+    let got := evalSource c.src c.input (files := files)
     if got != c.expect then
       failures := failures + 1
       IO.eprintln s!"lean machines: expected\n{c.expect}\ngot\n{got}\nfor\n{c.src}\n"
     if let some vm := vm then
-      match compileSource c.src with
+      match compileSource c.src true files with
       | .error _ => pure ()
       | .ok compiled =>
         writeBytecode compiled file
@@ -120,7 +147,7 @@ def selftest (vm : Option String) : IO UInt32 := do
 /-- Say what the typing of a program's Core shows. With `strict`, fail if some
 borrow is not covered by the proof about borrows. -/
 def certify (path : String) (strict : Bool) : IO UInt32 := do
-  match compileSource (← IO.FS.readFile path) with
+  match ← compileFile path with
   | .ok c =>
     let n := (c.cert.map (·.sigs.length)).getD 0
     let owned := (c.cert.map (·.strict)).getD false
@@ -158,7 +185,7 @@ def main (args : List String) : IO UInt32 := do
   | ["selftest"] => selftest none
   | ["selftest", vm] => selftest (some vm)
   | ["build", path, out] =>
-    match compileSource (← IO.FS.readFile path) with
+    match ← compileFile path with
     | .ok c =>
       writeBytecode c out
       pure 0
@@ -171,7 +198,7 @@ def main (args : List String) : IO UInt32 := do
       | .error e =>
         IO.eprintln e
         return 64
-    let c ← match compileSource (← IO.FS.readFile path) with
+    let c ← match ← compileFile path with
       | .ok c => pure c
       | .error e =>
         IO.eprintln s!"{path}: {e}"

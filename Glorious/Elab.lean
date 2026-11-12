@@ -83,10 +83,6 @@ structure TraitInfo where
   under which `dicts` says which implementation runs. -/
   drops : List (DropSite × Nat) := []
 
-
-/-- The function an implementation's function is, as a top-level function. -/
-def implFnName (trait head method : String) : String := s!"{trait}::{method}@{head}"
-
 /-- The function that makes an implementation a value. -/
 def implDictName (trait head : String) : String := s!"impl {trait} for {head}"
 
@@ -1800,7 +1796,10 @@ def collect (items : List Item) :
     -- So are the names of fields, and by now every field is a number.
     | .fieldNames _ _ _ => pure ()
     | .typeAlias _ _ _ => pure ()
-    | .pub _ => pure ()
+    -- And modules: every name is one name of the whole program by now.
+    | .pub _ _ => pure ()
+    | .module _ _ => pure ()
+    | .import _ _ _ => pure ()
     | .trait name _ =>
       throw s!"trait `{name}`: a program with traits is elaborated only after it is checked"
     | .impl _ tr _ _ _ _ =>

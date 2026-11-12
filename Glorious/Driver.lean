@@ -1,5 +1,6 @@
 import Glorious.Syntax.Parser
 import Glorious.Syntax.Resolve
+import Glorious.Syntax.Modules
 import Glorious.Elab
 import Glorious.Check
 import Glorious.Infer
@@ -57,19 +58,59 @@ def certifyProgram (items : List Syntax.Item) (p : Core.Program)
   if Typing.checkProgram cert p then pure cert
   else throw s!"the certificate was rejected: {Infer.rejected cert p}"
 
-/-- Parse, check and elaborate a program together with the prelude, and have the
-proved Core type checker accept the result. With `check := false` both checks
-are skipped, so that programs which go wrong can still be run. -/
-def compileSource (src : String) (check : Bool := true) : Except String Compiled := do
+/-- The prelude and a program as written: the first module's text, and the
+texts of the modules that are files of their own, each with its path. Where
+the program says `mod name;` the items of that module's text are put. -/
+def parseProgram (src : String) (files : List (List String × String)) :
+    Except String (List Syntax.Item × List Syntax.Item) := do
   let (prelude, fix) ← match Syntax.parse {} Prelude.source with
     | .ok r => pure r
     | .error e => throw s!"prelude: {e}"
-  let (items, _) ← Syntax.parse fix src (base := 1000000)
+  -- Operators and the constructors with named fields are known to every
+  -- text, whichever declares them.
+  let mut fix := fix
+  let mut records : List String := []
+  for text in src :: files.map (·.2) do
+    let (f, r) ← Syntax.declaredSyntax fix text
+    fix := f
+    records := records ++ r
+  let (items, _) ← Syntax.parse fix src (base := 1000000) (records := records)
+  let rec fill (fuel : Nat) (path : List String) (items : List Syntax.Item) :
+      Except String (List Syntax.Item) :=
+    items.mapM fun item => do
+      let (wrap, inner) : (Syntax.Item → Syntax.Item) × Syntax.Item := match item with
+        | .pub parent i => (Syntax.Item.pub parent, i)
+        | i => (id, i)
+      match inner, fuel with
+      | .module name none, fuel + 1 =>
+        let here := path ++ [name]
+        let shown := "::".intercalate here
+        match files.findIdx? (·.1 == here) with
+        | some k =>
+          let text := ((files[k]?).map (·.2)).getD ""
+          let parsed ← match Syntax.parse fix text (base := 1000000 * (k + 2)) (records := records) with
+            | .ok (items, _) => pure items
+            | .error e => throw s!"module `{shown}`: {e}"
+          pure (wrap (.module name (some (← fill fuel here parsed))))
+        | none => throw s!"module `{shown}` has no file"
+      | .module name (some body), fuel + 1 =>
+        pure (wrap (.module name (some (← fill fuel (path ++ [name]) body))))
+      | _, _ => pure item
+  pure (prelude, ← fill 64 [] items)
+
+/-- Parse, check and elaborate a program together with the prelude, and have the
+proved Core type checker accept the result. With `check := false` both checks
+are skipped, so that programs which go wrong can still be run. -/
+def compileSource (src : String) (check : Bool := true)
+    (files : List (List String × String) := []) : Except String Compiled := do
+  let (prelude, items) ← parseProgram src files
+  -- Every name is given its meaning: the modules become one list of items.
+  let resolved ← Syntax.Modules.resolve prelude items
   -- A type alias is written out wherever it is used.
-  let all ← Syntax.expandAliases (Syntax.stripPub (prelude ++ items))
+  let all ← Syntax.expandAliases resolved.items
   -- What the checker learnt about blocks that share an environment. A program
   -- it rejects is elaborated without that.
-  let blocks ← match Check.checkProgram all with
+  let blocks ← match Check.checkProgram all resolved.info with
     | .ok blocks => pure (some blocks)
     | .error e => if check then throw e else pure none
   -- Lifetimes were the checker's to read.
@@ -90,7 +131,7 @@ def compileSource (src : String) (check : Bool := true) : Except String Compiled
         | .error e =>
           throw s!"the checker accepted this program, but its Core could not be shown to be well typed: {e}. This is a defect in the compiler"
       else pure none
-    pure (⟨out.program, out.ctorNames, out.fnNames, out.opNames, cert, 0, out.plain⟩ : Compiled)
+    pure (⟨out.program, out.ctorNames.map Syntax.lastSegment, out.fnNames, out.opNames, cert, 0, out.plain⟩ : Compiled)
   -- A borrow given a name, or written as an argument of a call of a function,
   -- is a scope of its own in Core if the program can then be shown to follow
   -- every rule. Where it cannot, the borrow is the reference it borrows, as in
@@ -102,7 +143,7 @@ def compileSource (src : String) (check : Bool := true) : Except String Compiled
       match Infer.certify all out.program true out.envSizes true true with
       | .ok cert =>
         if out.lent != 0 && Typing.checkProgram cert out.program then
-          some (⟨out.program, out.ctorNames, out.fnNames, out.opNames, some cert, out.lent,
+          some (⟨out.program, out.ctorNames.map Syntax.lastSegment, out.fnNames, out.opNames, some cert, out.lent,
             out.plain⟩ : Compiled)
         else none
       | .error _ => none
@@ -211,8 +252,9 @@ Compile a program and run it on both machines with the given input. The result
 is what it wrote followed by its value, or a description of what went wrong; if
 the machines disagree, both are shown.
 -/
-def evalSource (src : String) (input : List Int := []) (fuel : Nat := 200000) : String :=
-  match compileSource src with
+def evalSource (src : String) (input : List Int := []) (fuel : Nat := 200000)
+    (files : List (List String × String) := []) : String :=
+  match compileSource src true files with
   | .error e => s!"error: {e}"
   | .ok c =>
     let bytecode := compile c.core

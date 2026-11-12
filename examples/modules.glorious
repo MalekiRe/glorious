@@ -1,0 +1,26 @@
+// Modules. Each is a unit: what it does not say is `pub` is its own, and
+// which module uses which has no cycle. `account` is a file of its own,
+// `account/account.glorious`, and the module written in it another,
+// `account/ledger/ledger.glorious`.
+// expect:
+// 70
+// 70
+mod account;
+
+mod report {
+    // `pub` here, so that `main` can call it.
+    pub fn show(amount: Int) -> Int {
+        print(amount);
+        amount
+    }
+}
+
+use account::{open, deposit, withdraw, close};
+
+fn main() {
+    let a = deposit(open(100), 20);
+    let a = withdraw(a, 50);
+    // An account has to be closed, and only `account` can take one apart:
+    // `let Account(n) = a` here is refused, and so is `a.0`.
+    report::show(close(a))
+}
