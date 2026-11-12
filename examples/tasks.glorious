@@ -19,21 +19,30 @@ fn append(a, b) {
 }
 
 effect Task {
-    yield_now(),
-    spawn(task)
+    [1, 1] yield_now(),
+    [1, 1] spawn(task)
 }
 
-// A waiting task holds a resumption, which can be used only once, so the
-// queue is taken out of its variable with `replace` rather than copied.
+// Run every task in a list, in turn.
+fn run_all(tasks) {
+    match(tasks) {
+        Nil => (),
+        Cons(task, rest) => task(); run_all(rest)
+    }
+}
+
+// A waiting task holds a resumption, which has to be used, and once. So the
+// queue is never copied or overwritten: what it holds is taken out with
+// `replace`, and whatever `replace` gives back is run.
 fn push(queue, task) {
     let waiting = replace(queue, Nil);
-    *queue = append(waiting, Cons(task, Nil))
+    run_all(replace(queue, append(waiting, Cons(task, Nil))))
 }
 
 fn run_next(queue) {
     match(replace(queue, Nil)) {
         Nil => (),
-        Cons(task, rest) => *queue = rest; task()
+        Cons(task, rest) => run_all(replace(queue, rest)); task()
     }
 }
 
@@ -47,8 +56,10 @@ fn run_task(queue, task) {
     }
 }
 
+// The queue ends empty; the cleanup says what happens to a task if it does not.
 fn run(main_task) {
     let mut queue = Nil;
+    defer run_all(replace(&mut queue, Nil));
     run_task(&mut queue, main_task)
 }
 

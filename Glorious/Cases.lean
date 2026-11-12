@@ -894,7 +894,7 @@ def cases : List Case := [
   ⟨"struct File(Int)\nimpl Use<[1, 1]> for File {}\nfn close(File(fd)) { host_write(fd) }\nfn main() { let _ = File(7); 0 }",
     [], "error: 4:13: in `main`: `_` lets go of a value, but a `File` has to be used"⟩,
   ⟨"struct File(Int)\nimpl Use<[1, 1]> for File {}\nfn close(File(fd)) { host_write(fd) }\nfn main() { let mut f = File(7); 0 }",
-    [], "error: 4:13: in `main`: the mutable variable `f` lets go of what it holds when it is assigned or its block ends, but a `File` has to be used"⟩,
+    [], "error: 4:13: in `main`: the mutable variable `f` lets go of what it holds when its block ends (a `defer` straight after it can take that out with `replace`), but a `File` has to be used"⟩,
   ⟨"struct File(Int)\nimpl Use<[1, 1]> for File {}\nfn close(File(fd)) { host_write(fd) }\nfn main() { let p = (File(3), 4); p.1 }",
     [], "error: 4:35: in `main`: taking one field of a value lets go of the rest, but a `File` has to be used"⟩,
   ⟨"struct File(Int)\nimpl Use<[1, 1]> for File {}\nfn close(File(fd)) { host_write(fd) }\nfn main() { let p = (File(3), 4); let (f, n) = p; close(f); n }",
@@ -968,7 +968,7 @@ def cases : List Case := [
   ⟨"effect Ask { [1, 1] ask() -> Int }\neffect Log { log(Int) }\nfn main() { handle (handle ask() + 1 { ask(k) => log(1); k(1) }) { log(x) => print(x) } }",
     [], "error: 3:13: in `main`: `k` is not used on every path, but a resumption of an operation declared `[1, 1]` has to be used"⟩,
   ⟨"effect Ask { [1, 1] ask() -> Int }\nfn main() { let mut saved = None; handle (ask() + 1) { ask(k) => saved = Some(k); 0 }; match(replace(&mut saved, None)) { Some(k) => k(41), None => 0 } }",
-    [], "error: 2:13: in `main`: the mutable variable `saved` lets go of what it holds when it is assigned or its block ends, but a resumption of an operation declared `[1, 1]` has to be used"⟩,
+    [], "error: 2:13: in `main`: the mutable variable `saved` lets go of what it holds when its block ends (a `defer` straight after it can take that out with `replace`), but a resumption of an operation declared `[1, 1]` has to be used"⟩,
   ⟨"effect Ask { [1, 1] ask() -> ! }\nfn main() { 0 }",
     [], "error: operation `ask` does not return, so it has no resumption to say this of"⟩,
   -- A callable that holds such a value has to be called, wherever it goes.
@@ -1085,6 +1085,22 @@ def cases : List Case := [
   -- A name both blocks mention is the same thing only if it is the same binding.
   ⟨"struct File(Int)\nimpl Use<[1, 1]> for File {}\nfn close(File(fd)) { host_write(fd) }\nfn main() { let f = File(1); let r = { let f = File(2); if(2 < 1) { close(f); 1 } }(); r else { close(f); 3 } }",
     [], "error: 4:13: in `main`: `f` is not used on every path, but a `File` has to be used"⟩,
+  -- A value that has to be used can be kept in a mutable variable if a cleanup
+  -- written straight after the variable takes it out again, leaving something
+  -- that holds nothing. It is never assigned over: `replace` gives back what
+  -- was there.
+  ⟨"struct File(Int)\nimpl Use<[1, 1]> for File {}\nfn close(File(fd)) { host_write(fd) }\nfn drain { Ok(f) => close(f), Err(_) => () }\nfn main() { let mut slot = None; defer drain(replace(&mut slot, None)); let old = replace(&mut slot, Some(File(3))); drain(old); host_write(1); 0 }",
+    [], "1\n3\n0"⟩,
+  ⟨"struct File(Int)\nimpl Use<[1, 1]> for File {}\nfn close(File(fd)) { host_write(fd) }\nfn drain { Ok(f) => close(f), Err(_) => () }\nfn main() { let mut slot = None; let old = replace(&mut slot, Some(File(3))); drain(old); 0 }",
+    [], "error: 5:13: in `main`: the mutable variable `slot` lets go of what it holds when its block ends (a `defer` straight after it can take that out with `replace`), but a `File` has to be used"⟩,
+  ⟨"struct File(Int)\nimpl Use<[1, 1]> for File {}\nfn close(File(fd)) { host_write(fd) }\nfn drain { Ok(f) => close(f), Err(_) => () }\nfn main() { let mut slot = None; defer drain(replace(&mut slot, None)); slot = Some(File(3)); 0 }",
+    [], "error: 5:73: in `main`: assigning to `slot` lets go of what it holds (`replace` takes it out instead), but a `File` has to be used"⟩,
+  ⟨"struct File(Int)\nimpl Use<[1, 1]> for File {}\nfn close(File(fd)) { host_write(fd) }\nfn drain { Ok(f) => close(f), Err(_) => () }\nfn main() { let mut slot = Some(File(2)); defer drain(replace(&mut slot, Some(File(9)))); 0 }",
+    [], "error: 5:13: in `main`: the mutable variable `slot` lets go of what it holds when its block ends (a `defer` straight after it can take that out with `replace`), but a `File` has to be used"⟩,
+  ⟨"struct File(Int)\nimpl Use<[1, 1]> for File {}\nfn close(File(fd)) { host_write(fd) }\nfn drain { Ok(f) => close(f), Err(_) => () }\nfn main() { @out { let mut slot = Some(File(2)); defer drain(replace(&mut slot, None)); @out(1); 0 } }",
+    [], "2\n1"⟩,
+  ⟨"struct File(Int)\nimpl Use<[1, 1]> for File {}\nfn close(File(fd)) { host_write(fd) }\nfn drain { Ok(f) => close(f), Err(_) => () }\nfn put(p, f) { drain(replace(p, Some(f))) }\nfn main() { let mut slot = None; defer drain(replace(&mut slot, None)); put(&mut slot, File(5)); put(&mut slot, File(6)); 0 }",
+    [], "5\n6\n0"⟩,
   -- `drop` is not for a program to call.
   ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nfn main() { let mut f = File(7); drop(&mut f); 0 }",
     [], "error: 3:34: in `main`: `drop` is run when what holds a value ends; a program does not call it"⟩,

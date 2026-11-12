@@ -332,7 +332,7 @@ end
 
 /-! ## How long a borrow lasts -/
 
-private partial def unlocated : Stmt → Stmt
+partial def unlocated : Stmt → Stmt
   | .located _ _ s => unlocated s
   | s => s
 

@@ -895,8 +895,15 @@ How this differs from the specification:
   resumption its arm does not use (cancelled) and a value at rest in a
   variable whose type has `Drop` (its function runs). The specification
   destroys at every such place.
-- A value that has to be used cannot be kept in a mutable variable: nothing
-  tracks whether the variable is empty when it ends.
+- Nothing tracks what a mutable variable holds from one statement to the
+  next. So a value that has to be used can be kept in one only on two
+  conditions that need no tracking: the statement straight after the variable
+  is a `defer` that takes what it holds out with `replace`, leaving a value
+  written out that holds nothing, so that whatever is there when the block is
+  left, by any path, is dealt with; and the variable is never assigned, only
+  swapped with `replace`, which gives back what was there to be used. The
+  specification's states of a place that differ from path to path are not
+  built.
 - A value that has to be used cannot wait across an operation, which may not
   be resumed. It can wait across a call of a callable the function was given
   only if that callable's type says it performs nothing (`/ {}`, see "What a
@@ -905,10 +912,11 @@ How this differs from the specification:
 - References are as before: `&mut` is not a use-once value.
 - All of this is the unproved checker. Core is told nothing about it.
 
-What this does for the examples: `backtracking` and `generators` declare their
+What this does for the examples: all three that use resumptions declare their
 operations `[1, 1]`. For that, `find` in `generators` cancels the generator it
-stops early and says its predicate performs nothing. `tasks` keeps resumptions
-in a mutable queue and cannot.
+stops early and says its predicate performs nothing; and `tasks`, which keeps
+resumptions in a mutable queue, swaps the queue rather than assigning it and
+has a cleanup that runs whatever is left in it.
 
 ## What a callable performs can be written
 

@@ -2739,6 +2739,50 @@ def lend (scope : Scope) (x : String) (t : Ty) : M Ty := do
     | _ => pure t
   | _ => pure t
 
+/-- Does evaluating this certainly take what the mutable variable `x` holds
+out of it, with `replace(&mut x, e)`, before anything else could happen? Then
+`e`, what is put in its place. -/
+partial def takesOut (x : String) : Expr → Option Expr
+  | .call _ (.name none "replace") [.ref true y, e] => if y == x then some e else none
+  | .call _ (.name _ _) args => first args
+  | .tailCall _ (.name _ _) args => first args
+  | .tuple es => first es
+  | _ => none
+where
+  -- The first part that is not just a name or a number is the one evaluated
+  -- first that does anything.
+  first : List Expr → Option Expr
+    | [] => none
+    | .name _ _ :: rest => first rest
+    | .int _ :: rest => first rest
+    | e :: _ => takesOut x e
+
+/-- Is this a value written out that holds nothing but numbers and
+constructors: nothing, that is, that could have to be used? -/
+partial def holdsNothing : Expr → M Bool
+  | .int _ => pure true
+  | .tuple es => es.allM holdsNothing
+  | .name q x => do
+    match ← resolveCtor x q with
+    | some (_, sig) => pure (sig.fields.isEmpty && !(← mustByDecl sig.owner))
+    | none =>
+      match (← get).aliases.lookup x with
+      | some e => holdsNothing e
+      | none => pure false
+  | .call _ (.name q x) args => do
+    match ← resolveCtor x q with
+    | some (_, sig) => do
+      if ← mustByDecl sig.owner then return false
+      args.allM holdsNothing
+    | none => pure false
+  | _ => pure false
+where
+  -- A value of a type that says it has to be used is one, whatever is in it.
+  mustByDecl (owner : String) : M Bool := do
+    pure (match (← get).useDecls.lookup owner with
+      | some (must, _) => must
+      | none => false)
+
 /-! ## Expressions -/
 
 /-- What a name in an expression refers to. -/
@@ -3311,9 +3355,18 @@ partial def inferStmts (scope : Scope) (amb : Row) (stmts : List Stmt)
         cells := s.cells.push (brand, x, t)
         -- A variable owns what it holds.
         dropCands := s.dropCands.push (⟨s.owner, at_.1, at_.2, x, false⟩, t, pos) }
-    -- Nothing says the variable is empty when its block ends, or when it is
-    -- assigned: what it holds then is let go.
-    mustDrop t s!"the mutable variable `{x}` lets go of what it holds when it is assigned or its block ends"
+    -- Nothing says the variable is empty when its block ends: what it holds
+    -- then is let go. Unless the very next statement is a cleanup that takes
+    -- it out, leaving something that holds nothing: that runs last of all
+    -- that the block does to the variable, however the block is left.
+    let finalised ← match rest.head?.map Elab.unlocated with
+      | some (.defer e) =>
+        match takesOut x e with
+        | some put => holdsNothing put
+        | none => pure false
+      | _ => pure false
+    unless finalised do
+      mustDrop t s!"the mutable variable `{x}` lets go of what it holds when its block ends (a `defer` straight after it can take that out with `replace`)"
     let result ← inferStmts ((x, .cell t brand) :: scope) amb rest want
     checkEscape brand s!"`{x}` could be used after its block has ended"
       (("something that uses it is the block's result", result) :: scopeRoots scope) amb
@@ -3329,6 +3382,7 @@ partial def inferStmts (scope : Scope) (amb : Row) (stmts : List Stmt)
             modify fun s =>
               { s with dropCands :=
                   s.dropCands.push (⟨s.owner, s.at_.1, s.at_.2, x, true⟩, t, s.pos) }
+            mustDrop t s!"assigning to `{x}` lets go of what it holds (`replace` takes it out instead)"
             pure (t, UseKind.var brand x .write)
           | some _ => throw s!"`{x}` is not a mutable variable"
           | none => throw s!"unknown name `{x}`"
