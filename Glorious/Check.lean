@@ -132,7 +132,8 @@ structure EffectDecl where
 
 /-- What a local name stands for. -/
 inductive Binding where
-  | val (t : Ty)
+  /-- A value. `id` tells this binding from any other of the same name. -/
+  | val (t : Ty) (id : Nat := 0)
   /-- A mutable variable holding a `t`; `brand` identifies its block. -/
   | cell (t : Ty) (brand : Nat)
   /-- A label whose scope yields a `t`; `brand` identifies the scope. -/
@@ -240,7 +241,7 @@ structure St where
   capEdges : Array (Nat × Captured) := #[]
   /-- For each of `capEdges`, the name captured, where a callable written in
   the program captured a name. -/
-  capEdgeNames : Array (Option String) := #[]
+  capEdgeNames : Array (Option (String × Nat)) := #[]
   brands : Nat := 0
   /-- Capture variables already visited by the search in progress. -/
   seen : List Nat := []
@@ -276,7 +277,7 @@ structure St where
   run: the block, the capture variable and type of what it is given, the names
   it mentions, and a message. What the other block held that this one does not
   mention is let go. -/
-  unrunGiven : Array (Nat × Nat × Ty × List String × String × Nat) := #[]
+  unrunGiven : Array (Nat × Nat × Ty × List (String × Nat) × String × Nat) := #[]
   /-- Captures, by their place in `capEdges`, of a block that runs in place of
   another: what both mention is held once, by the other. -/
   sharedEdges : List Nat := []
@@ -406,7 +407,7 @@ def unifyCap (a b : Nat) : M Unit := do
   unless ra == rb do
     modify fun s => { s with caps := s.caps.set! ra (some rb) }
 
-def captures (cap : Nat) (what : Captured) (name : Option String := none) : M Unit :=
+def captures (cap : Nat) (what : Captured) (name : Option (String × Nat) := none) : M Unit :=
   modify fun s =>
     { s with capEdges := s.capEdges.push (cap, what), capEdgeNames := s.capEdgeNames.push name }
 
@@ -1333,7 +1334,7 @@ def jumpsAfter (label : String) : String :=
 def scopeRoots (scope : Scope) : List (String × Ty) :=
   scope.map fun (name, b) =>
     match b with
-    | .val t => (s!"`{name}`, which outlives the scope, could hold it", t)
+    | .val t _ => (s!"`{name}`, which outlives the scope, could hold it", t)
     | .cell t _ => (s!"`{name}`, which outlives the scope, could hold it", t)
     | .label t _ => (s!"it can be passed out through `{name}`", t)
     | .poly s => (s!"`{name}`, which outlives the scope, could hold it", s.ty)
@@ -2231,7 +2232,7 @@ def checkUses (pos : String) (outer : Scope) (binds : Scope) (body : List Stmt) 
   let names := (binds ++ outer).map (·.1)
   for (x, b) in binds do
     let t := match b with
-      | .val t => some t
+      | .val t _ => some t
       | .poly p => some p.ty
       | _ => none
     if let some t := t then
@@ -2379,7 +2380,7 @@ def runLowerChecks (fnTy : Ty) : M Unit := do
         owners := (owner, c) :: owners
     match owners with
     | [(owner, c)] =>
-      let mut theirs : List String := []
+      let mut theirs : List (String × Nat) := []
       for ((src, what), name) in s.capEdges.zip s.capEdgeNames do
         if src == c then
           if let .ty held := what then
@@ -2567,7 +2568,7 @@ def Using.forbiddenBy (how : Using) (uniq : Bool) : Bool :=
 
 /-- The types a binding's value has, for looking into what it holds. -/
 private def Binding.held : Binding → Option Ty
-  | .val t => some t
+  | .val t _ => some t
   | .cell t _ => some t
   | .poly s => some s.ty
   | .label _ _ => none
@@ -2797,12 +2798,12 @@ def captureAll (scope : Scope) (cap : Nat) (names : List String) (assigns : Stri
   -- the callable reads or assigns the variable when it runs.
   for name in names.eraseDups do
     match scope.lookup name with
-    | some (.val t) => captures cap (.ty t) (some name)
+    | some (.val t id) => captures cap (.ty t) (some (name, id))
     | some (.cell _ brand) =>
       captures cap (.brand brand)
       captures cap (.touch brand (assigns name))
     | some (.label _ brand) => captures cap (.brand brand)
-    | some (.poly s) => captures cap (.ty s.ty) (some name)
+    | some (.poly s) => captures cap (.ty s.ty) (some (name, 0))
     | none => pure ()
 
 private def placeName : Expr → String
@@ -2916,7 +2917,7 @@ partial def inferExpr (scope : Scope) (amb : Row) : Expr → M Ty
   | .int _ => pure .int
   | .name q x => do
     match ← resolveName scope q x with
-    | .local (.val t) => lend scope x t
+    | .local (.val t _) => lend scope x t
     | .local (.cell t brand) => do
       mustDup t (readsCell x)
       use scope (.var brand x .read)
@@ -3021,7 +3022,7 @@ for, not one lent from it. -/
 partial def inferPlace (scope : Scope) (amb : Row) : Expr → M Ty
   | .name none x => do
     match scope.lookup x with
-    | some (.val t) => pure t
+    | some (.val t _) => pure t
     | _ => inferExpr scope amb (.name none x)
   | e => inferExpr scope amb e
 
@@ -3045,12 +3046,17 @@ partial def checkArg (scope : Scope) (amb : Row) (what : String) (p : Ty) (a : E
       -- was not run, it lets go of what that block held and it does not
       -- itself mention: looked at once the types are known.
       let why := "a block that does not name what it is given lets it go"
+      -- The bindings the block mentions, each told from others of its name.
+      let mentioned := (Elab.fvStmts [] body).filterMap fun x =>
+        match scope.lookup x with
+        | some (.val _ id) => some (x, id)
+        | _ => none
       match ← find input with
       | .fn [] _ _ _ cap =>
         if (← get).anyMust then
           modify fun s =>
             { s with unrunGiven :=
-                s.unrunGiven.push (id, cap, input, Elab.fvStmts [] body, s.pos ++ why, own) }
+                s.unrunGiven.push (id, cap, input, mentioned, s.pos ++ why, own) }
       | _ => mustDrop input why
       -- A callable that takes no arguments, given to a block: a block that was
       -- not run, whose environment this one can take over.
@@ -3061,7 +3067,7 @@ partial def checkArg (scope : Scope) (amb : Row) (what : String) (p : Ty) (a : E
     -- A name whose type is not known yet, where a `&mut` reference is wanted:
     -- it is one, so it is lent rather than handed over.
     if let .name none x := a then
-      if let some (.val t) := scope.lookup x then
+      if let some (.val t _) := scope.lookup x then
         if let .var _ ← find t then
           if let .ref how inner _ ← find p then
             if let .con "&mut" [] ← find how then
@@ -3186,7 +3192,7 @@ partial def inferCall (scope : Scope) (amb : Row) (f : Expr) (args : List Expr)
       checkArgs scope amb "`replace`" [.ref .uniq t cap, t] args call
       use scope (.through cap "the reference given to `replace`" true)
       pure t
-    | .local (.val t) => applyTy scope amb s!"`{x}`" t args call
+    | .local (.val t _) => applyTy scope amb s!"`{x}`" t args call
     | .local (.cell t brand) => do
       mustDup t (readsCell x)
       use scope (.var brand x .read)
@@ -3256,7 +3262,7 @@ partial def inferStmts (scope : Scope) (amb : Row) (stmts : List Stmt)
       let mut keep : List Ty := [.func [] .unit amb (← freshCap)]
       for (_, b) in scope do
         keep := (match b with
-          | .val t => t
+          | .val t _ => t
           | .cell t _ => t
           | .label t _ => t
           | .poly p => p.ty) :: keep
@@ -3371,7 +3377,9 @@ partial def inferPat (p : Pattern) (t : Ty) : M Scope := do
     | none =>
       match (← get).aliases.lookup x with
       | some e => do inferPat (← exprToPat e) t
-      | none => pure [(x, .val t)]
+      | none => do
+        let id ← freshBrand
+        pure [(x, .val t id)]
   | .ctor x q ps => do
     match ← resolveCtor x q with
     | some (_, sig) => do

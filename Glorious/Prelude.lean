@@ -51,7 +51,7 @@ fn option(value) {
 }
 
 // The right operands of `and` and `or` are callables, run only when needed.
-infixr 3 and
+infixl 3 and
 fn and(left, right) {
     match(left) {
         Ok(_) => tail right(),
@@ -59,11 +59,15 @@ fn and(left, right) {
     }
 }
 
-infixr 2 or
+// `or` gives what failed to its right operand, as `else` does: after an `if`
+// that is the body that was not run, and a plain block runs in its place. So
+// `if(a) { .. } or { if(b) { .. } } else { .. }` is a chain of alternatives
+// over what the first body captured.
+infixl 2 or
 fn or(left, right) {
     match(left) {
         Ok(value) => Ok(value),
-        Err(_) => tail right()
+        Err(failure) => tail right(failure)
     }
 }
 
