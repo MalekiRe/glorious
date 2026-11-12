@@ -917,6 +917,20 @@ section), which follows calls and so accepts more. Nothing connects the two
 yet: that a program the source checker accepts with every operation `[1, 1]`
 leaves no resumption untaken is not proved.
 
+What stands between this and a proof, in order:
+
+1. Core's regions do not say whether one is a variable or a label. The Core
+   rule has to let a resumption wait across a call that touches a variable
+   and refuse one that can jump to a label; as measured it refuses both, which
+   is the only thing it holds against `backtracking`. Every other program the
+   source checker accepted with `[1, 1]`, the state-threading fold included,
+   the Core rules accept as written.
+2. The rules have to become premises of Core's typing rules and of the typing
+   of stack frames (what a call frame holds, what a pending result and an exit
+   in progress carry), with the safety proofs repaired around them.
+3. Then the invariant itself: every resumption not yet taken is held where it
+   will still be handed on, and no frame holding one is ever left or captured.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by
