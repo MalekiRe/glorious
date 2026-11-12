@@ -30,6 +30,9 @@ structure Compiled where
   arguments of calls of functions, if the program could then be shown to
   follow the rules for borrows. `checked_exclusive_safety` is about these. -/
   lent : Nat := 0
+  /-- The borrows that are not: each is, in `core`, the reference it borrows,
+  and only the check of the source text keeps it exclusive. -/
+  plain : List Elab.Borrow := []
 
 /-- Find a certificate for a program's Core and have the proved checker accept
 it: with the ownership rules and the region rules if the program can be shown
@@ -74,32 +77,48 @@ def compileSource (src : String) (check : Bool := true) : Except String Compiled
         | .error e =>
           throw s!"the checker accepted this program, but its Core could not be shown to be well typed: {e}. This is a defect in the compiler"
       else pure none
-    pure (⟨out.program, out.ctorNames, out.fnNames, out.opNames, cert, 0⟩ : Compiled)
-  -- A borrow written as an argument of a call of a function is a scope of its
-  -- own in Core if the program can then be shown to follow every rule. Where
-  -- it cannot, the borrow is the reference it borrows, as in a program that is
-  -- not checked: first every such call is tried, then those that pass alone.
-  let lending := fun (blocks : Option Elab.Blocks) (sites : Nat → Bool) =>
+    pure (⟨out.program, out.ctorNames, out.fnNames, out.opNames, cert, 0, out.plain⟩ : Compiled)
+  -- A borrow given a name, or written as an argument of a call of a function,
+  -- is a scope of its own in Core if the program can then be shown to follow
+  -- every rule. Where it cannot, the borrow is the reference it borrows, as in
+  -- a program that is not checked: first every place is tried with the
+  -- narrower scope, then each as it passes alone.
+  let lending := fun (blocks : Option Elab.Blocks) (sites : Nat → Nat) =>
     match Elab.elabProgram all blocks sites with
     | .ok out =>
       match Infer.certify all out.program true out.envSizes true true with
       | .ok cert =>
         if out.lent != 0 && Typing.checkProgram cert out.program then
-          some (⟨out.program, out.ctorNames, out.fnNames, out.opNames, some cert, out.lent⟩ :
-            Compiled)
+          some (⟨out.program, out.ctorNames, out.fnNames, out.opNames, some cert, out.lent,
+            out.plain⟩ : Compiled)
         else none
       | .error _ => none
     | .error _ => none
   let build := fun (blocks : Option Elab.Blocks) => do
     if check then
-      if let .ok out := Elab.elabProgram all blocks (fun _ => true) then
+      if let .ok out := Elab.elabProgram all blocks (fun _ => 1) then
         if out.lent != 0 then
-          if let some c := lending blocks (fun _ => true) then return c
-          if 1 < out.sites && out.sites ≤ 32 then
-            let alone := (List.range out.sites).filter fun i =>
-              (lending blocks (· == i)).isSome
-            if !alone.isEmpty then
-              if let some c := lending blocks alone.contains then return c
+          if let some c := lending blocks (fun _ => 1) then return c
+          if out.sites ≤ 32 then
+            -- How each place fares alone, trying the narrower scope first.
+            let alone := (List.range out.sites).map fun i =>
+              if (lending blocks (fun j => if j == i then 1 else 0)).isSome then 1
+              else if (lending blocks (fun j => if j == i then 2 else 0)).isSome then 2
+              else 0
+            if alone.any (· != 0) then
+              if let some c := lending blocks (fun j => alone[j]?.getD 0) then return c
+              -- Not all at once: take them one at a time, keeping each that
+              -- passes with those kept before it.
+              let mut kept : List Nat := List.replicate out.sites 0
+              let mut best : Option Compiled := none
+              for i in [0:out.sites] do
+                let mode := alone[i]?.getD 0
+                if mode != 0 then
+                  let next := kept.set i mode
+                  if let some c := lending blocks (fun j => next[j]?.getD 0) then
+                    kept := next
+                    best := some c
+              if let some c := best then return c
     plain blocks
   -- Blocks can share an environment only where a type can state it. Where one
   -- cannot, as when what a block is given may also be a function that is not a
@@ -130,6 +149,18 @@ compile or its Core was not shown to follow them. -/
 def lentBorrows (src : String) : Option Nat :=
   match compileSource src with
   | .ok c => if (c.cert.map (·.loans)).getD false then some c.lent else none
+  | .error _ => none
+
+/-- The borrows of a program that nothing is proved about: those that are not
+scopes of their own in its Core, or every one if the Core was not shown to
+follow the rules for borrows. `none` if the program does not compile. A program
+for which this is empty has every borrow covered by `checked_exclusive_safety`. -/
+def unprovedBorrows (src : String) : Option (List Elab.Borrow) :=
+  match compileSource src with
+  | .ok c =>
+    -- Where the rules were not shown to hold no borrow is a scope, and `plain`
+    -- lists every one.
+    some c.plain
   | .error _ => none
 
 partial def showValue (names : Array String) : Value → String

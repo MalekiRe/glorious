@@ -17,6 +17,8 @@ import Glorious.Bytecode.Encode
   With both, the program can go wrong only by arithmetic overflow. It also says
   how many borrows are scopes of their own in Core under the rules for borrows:
   of those the proofs say that what is lent is used only through the borrow.
+  It lists every borrow that is not one; with `--strict` it fails if there is
+  any.
   Every command that compiles a program does this check; this one only reports
   it.
 * `glorious selftest [VM]` runs the test programs on the Core machine and the
@@ -50,7 +52,7 @@ partial def stuckAt (p : Core.Program) (cfg : Core.Config) : Core.Config :=
 
 def usage : String :=
   "usage: glorious run FILE [INPUT...]\n       glorious check FILE [INPUT...]\n" ++
-  "       glorious build FILE OUT\n       glorious certify FILE\n" ++
+  "       glorious build FILE OUT\n       glorious certify [--strict] FILE\n" ++
   "       glorious selftest [VM]"
 
 def writeBytecode (c : Compiled) (out : System.FilePath) : IO Unit :=
@@ -115,6 +117,34 @@ def selftest (vm : Option String) : IO UInt32 := do
   IO.println s!"{ran} programs ({examples.length} examples) on {machines}: {failures} failures"
   pure (if failures == 0 then 0 else 1)
 
+/-- Say what the typing of a program's Core shows. With `strict`, fail if some
+borrow is not covered by the proof about borrows. -/
+def certify (path : String) (strict : Bool) : IO UInt32 := do
+  match compileSource (← IO.FS.readFile path) with
+  | .ok c =>
+    let n := (c.cert.map (·.sigs.length)).getD 0
+    let owned := (c.cert.map (·.strict)).getD false
+    let regions := (c.cert.map (·.regions)).getD false
+    let how := if owned then "well typed and well owned" else "well typed, not shown well owned,"
+    let borrows :=
+      if regions then "its mutable variables and labels shown never to be used after their blocks end"
+      else "its mutable variables and labels not shown to stay within their blocks"
+    let loans := (c.cert.map (·.loans)).getD false
+    let lent :=
+      if !loans then "the rules for borrows not shown to hold"
+      else if c.lent == 0 then "no borrow made a scope of its own"
+      else s!"{c.lent} borrows shown to be the only way to what they borrow while they last"
+    IO.println s!"{path}: {how} in Core, {borrows}, {lent}, with {n} function signatures"
+    for b in c.plain do
+      IO.println s!"{path}:{b.show} is not shown exclusive in Core"
+    if strict && !c.plain.isEmpty then
+      IO.eprintln s!"{path}: {c.plain.length} borrows are kept exclusive only by the check of the source text"
+      pure 1
+    else pure 0
+  | .error e =>
+    IO.eprintln s!"{path}: {e}"
+    pure 1
+
 def parseInput (args : List String) : Except String (List Int) :=
   args.mapM fun a =>
     match a.toInt? with
@@ -123,26 +153,8 @@ def parseInput (args : List String) : Except String (List Int) :=
 
 def main (args : List String) : IO UInt32 := do
   match args with
-  | ["certify", path] =>
-    match compileSource (← IO.FS.readFile path) with
-    | .ok c =>
-      let n := (c.cert.map (·.sigs.length)).getD 0
-      let owned := (c.cert.map (·.strict)).getD false
-      let regions := (c.cert.map (·.regions)).getD false
-      let how := if owned then "well typed and well owned" else "well typed, not shown well owned,"
-      let borrows :=
-        if regions then "its mutable variables and labels shown never to be used after their blocks end"
-        else "its mutable variables and labels not shown to stay within their blocks"
-      let loans := (c.cert.map (·.loans)).getD false
-      let lent :=
-        if !loans then "the rules for borrows not shown to hold"
-        else if c.lent == 0 then "no borrow made a scope of its own"
-        else s!"{c.lent} borrows shown to be the only way to what they borrow while they last"
-      IO.println s!"{path}: {how} in Core, {borrows}, {lent}, with {n} function signatures"
-      pure 0
-    | .error e =>
-      IO.eprintln s!"{path}: {e}"
-      pure 1
+  | ["certify", path] => certify path false
+  | ["certify", "--strict", path] => certify path true
   | ["selftest"] => selftest none
   | ["selftest", vm] => selftest (some vm)
   | ["build", path, out] =>

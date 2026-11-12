@@ -191,10 +191,10 @@ def notTail (n : Nat) : String :=
 #guard borrowChecked "fn main() { let mut x = 1; let get = { x }; let mut y = 2;
     let both = { x + y }; let pick = if(x < y) { get } else { both }; pick() }" == some false
 
--- A borrow written as an argument of a call of a function is a scope of its
--- own in Core, which lasts as long as the call, where the program's Core can
--- then be shown to follow the rules for borrows. `checked_exclusive_safety` is
--- about those: while one lasts, what it borrows is used only through it.
+-- A borrow is a scope of its own in Core where the program's Core can then be
+-- shown to follow the rules for borrows. `checked_exclusive_safety` is about
+-- those: while one lasts, what it borrows is used only through it. Written as
+-- an argument of a call of a function, the scope is the call.
 #guard lentBorrows "fn incr(p) { *p = *p + 1 }
   fn main() { let mut x = 5; incr(&mut x); incr(&mut x); x }" == some 2
 #guard lentBorrows "fn swap(a, b) { let t = *a; *a = *b; *b = t; }
@@ -212,27 +212,52 @@ def notTail (n : Nat) : String :=
 #guard lentBorrows "effect Tick { tick() }
   fn work(p) { *p = *p + 1; handle { tick(); *p } () { tick(k) => k(()) } }
   fn main() { let mut n = 0; work(&mut n) }" == some 1
--- A borrow is not made a scope where the program would not then pass: where
--- the call gives the borrow back, so that it outlasts the call;
-#guard lentBorrows "fn id(p: &mut Int) -> &mut Int { p }
-  fn main() { let mut x = 1; let q = id(&mut x); *q = 5; x }" == some 0
--- where the function performs an operation handled outside the call, since
--- the handler would run while the borrow is set aside;
+-- Given a name, the scope is the statements up to the last that mentions the
+-- name; the variable can be used again after them.
+#guard unprovedBorrows "fn main() { let mut x = 1; let p = &mut x; *p = 2; x }" == some []
+#guard unprovedBorrows "fn main() { let mut x = 1; let r = &x; let s = &x; *r + *s + x }"
+  == some []
+-- What the statements bind and the rest of the block uses, the scope gives back.
+#guard unprovedBorrows "fn main() { let mut x = 1; let p = &mut x; let v = *p + 1; *p = v;
+    let w = v * 2; x = w; x + v }" == some []
+-- Where something made from the borrow is used later, the scope takes that in.
+#guard unprovedBorrows "fn main() { let mut x = 1; let p = &mut x; let q = p; *q = 2; *p = 3; x }"
+  == some []
+-- So it does where a call gives the borrow back, or the borrow is put in a value.
+#guard unprovedBorrows "fn id(p: &mut Int) -> &mut Int { p }
+  fn main() { let mut x = 1; let q = id(&mut x); *q = 5; x }" == some []
+#guard unprovedBorrows "fn main() { let mut x = 1; let s = Some(&mut x);
+    match(s) { Some(p) => *p = 4, None => () }; x }" == some []
+-- A callable that reads the variable can run while it is lent for reading.
+#guard unprovedBorrows "fn main() { let mut x = 3; let r = &x; let get = { x }; get() + *r }"
+  == some []
+-- A borrow is not made a scope where the program would not then pass. Where
+-- the function performs an operation handled outside the call, the handler
+-- would run while the borrow is set aside;
 #guard lentBorrows "effect Tick { tick() }
   fn work(p) { tick(); *p = *p + 1; tick(); *p }
   fn main() { let mut n = 0; handle work(&mut n) { tick(k) => k(()) } }" == some 0
--- and where a callable made before the call is given the borrow.
+-- a callable made before the call cannot be given the borrow;
 #guard lentBorrows "fn apply(f, p) { f(p) }
   fn main() { let mut n = 0; apply({ q => *q = 7; }, &mut n); n }" == some 0
--- Each call is decided alone.
+-- a scope is whole statements, and here the variable is borrowed again in the
+-- statement that last uses `p`;
+#guard (unprovedBorrows "fn get(r: &Int) { *r }
+  fn main() { let mut x = 7; let p = &mut x; get(p) + get(&x) }").map (·.length) == some 1
+-- and scopes nest, so of two borrows that overlap without one ending inside
+-- the other, one is a scope.
+#guard (unprovedBorrows "fn main() { let mut a = 1; let mut b = 2; let p = &mut a; let q = &mut b;
+    *p = 10; a = a + 1; *q = 20; a + b }").map (·.length) == some 1
+-- Each place is decided alone.
 #guard lentBorrows "fn incr(p) { *p = *p + 1 }
-  fn id(p: &mut Int) -> &mut Int { p }
-  fn main() { let mut x = 1; incr(&mut x); let q = id(&mut x); *q = *q + 5; x }" == some 1
--- A borrow bound by `let` is not a scope: in Core it is the variable's own
--- reference, and only the checker of the source text keeps it exclusive.
-#guard lentBorrows "fn main() { let mut x = 1; let p = &mut x; *p = 2; x }" == some 0
+  fn main() { let mut x = 1; let mut n = 0;
+    incr(&mut x); apply({ q => *q = 7; }, &mut n); x + n }
+  fn apply(f, p) { f(p) }" == some 1
 -- A program that does not pass the region rules does not pass these.
 #guard lentBorrows "fn go(r, n) { let mut y = n; if(0 < n) { go(&mut y, n - 1) + *r } else { *r } }
   fn main() { let mut t = 5; go(&mut t, 3) }" == none
+-- Putting a new value in a variable and taking the old one is not a borrow.
+#guard unprovedBorrows "fn main() { let mut x = 1; let old = replace(&mut x, 5); (old, x) }"
+  == some []
 
 end Glorious.Tests

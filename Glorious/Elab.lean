@@ -61,10 +61,27 @@ structure Globals where
   bodies : List (String × List Clause) := []
   /-- What the checker learnt about the program's blocks, if it was run. -/
   blocks : Option Blocks := none
-  /-- Which calls of functions with borrows written as arguments, counted in
-  the order they are elaborated, have each borrow made a scope of its own in
-  Core, which lasts as long as the call. -/
-  lends : Nat → Bool := fun _ => false
+  /-- How each place a borrow is written, counted in the order they are
+  elaborated, is made a scope of its own in Core. `0`: it is not; the borrow is
+  the reference it borrows. For a call of a function with borrows as arguments,
+  `1`: each is a scope that lasts as long as the call; `2`: each is a scope
+  that lasts while what the call gave is used. For `let p = &x`, `1`: a scope
+  that lasts while `p` is mentioned; `2`: while `p` or anything made from it
+  is. -/
+  lends : Nat → Nat := fun _ => 0
+
+/-- A borrow written in the source: where, of which variable, and whether for
+writing. -/
+structure Borrow where
+  owner : String
+  line : Nat
+  col : Nat
+  name : String
+  uniq : Bool
+  deriving BEq, Repr
+
+def Borrow.show (b : Borrow) : String :=
+  s!"{b.line}:{b.col}: in `{b.owner}`: `{if b.uniq then "&mut " else "&"}{b.name}`"
 
 /-- Machine intrinsics by surface name, with their argument counts. -/
 def prims : List (String × Prim × Nat) :=
@@ -108,8 +125,17 @@ structure St where
   envSizes : List (Nat × Nat) := []
   /-- How many borrows were made scopes of their own. -/
   lent : Nat := 0
-  /-- How many calls of functions with borrows written as arguments there were. -/
+  /-- How many places a borrow could be made a scope there were. -/
   sites : Nat := 0
+  /-- How many of the next `let p = &x` are scopes that last while anything
+  made from `p` is used, whatever `lends` says: they were written by the
+  elaborator for the arguments of a call, and are not places of their own. -/
+  hoisted : Nat := 0
+  /-- Where the statement being elaborated starts. -/
+  pos : Nat × Nat := (0, 0)
+  /-- The borrows that are not scopes of their own: each is the reference it
+  borrows. -/
+  plain : List Borrow := []
 
 abbrev M := ReaderT Globals (StateT St (Except String))
 
@@ -247,6 +273,55 @@ partial def fvStmts (bound : List String) : List Stmt → List String
     fvExpr bound target ++ fvExpr bound value ++ fvStmts bound rest
 
 end
+
+/-! ## How long a borrow lasts -/
+
+private partial def unlocated : Stmt → Stmt
+  | .located _ _ s => unlocated s
+  | s => s
+
+/-- The names a statement gives values that may hold what `tracked` names hold. -/
+private def madeFrom (tracked : List String) (s : Stmt) : List String :=
+  match unlocated s with
+  | .let_ pat value => if (fvExpr [] value).any tracked.contains then patVars pat else []
+  | .letMut y value => if (fvExpr [] value).any tracked.contains then [y] else []
+  | .assign (.name none y) value => if (fvExpr [] value).any tracked.contains then [y] else []
+  | _ => []
+
+/--
+How many of the statements after `let p = &x` the borrow's scope takes in: up
+to the last that mentions `p`, and with `wide`, anything made from `p`. A
+mutable variable declared inside the scope ends with it, so the scope also
+takes in every statement that mentions one; and a `defer` inside it would run
+when the scope ends, so a scope that has one takes in the whole block.
+-/
+partial def scopeExtent (p : String) (rest : List Stmt) (wide : Bool) : Nat :=
+  go [p] 0
+where
+  go (tracked : List String) (k : Nat) : Nat :=
+    let inner := (rest.take k).map unlocated
+    let defers := inner.any fun
+      | .defer _ => true
+      | _ => false
+    if defers then rest.length
+    else
+      let muts := inner.filterMap fun
+        | .letMut y _ => some y
+        | _ => none
+      let made :=
+        if wide then inner.foldl (fun acc s => acc ++ madeFrom acc s) tracked else tracked
+      let tracked' := (made ++ muts).eraseDups
+      let k' := ((List.range (rest.length + 1)).drop k).find? fun j =>
+        !(fvStmts [] (rest.drop j)).any tracked'.contains
+      let k' := k'.getD rest.length
+      if k' == k && tracked'.length == tracked.length then k else go tracked' k'
+
+/-- The names the statements of a block bind with `let`. -/
+private def letNames (ss : List Stmt) : List String :=
+  ss.flatMap fun s =>
+    match unlocated s with
+    | .let_ pat _ => patVars pat
+    | _ => []
 
 /-! ## What a function gives a callable it is passed -/
 
@@ -529,9 +604,11 @@ partial def elabExpr (scope : Scope) (tailPos : Bool) : Expr → M Atom
       terminate (.labelTail thunk)
       pure (.int 0)
     else emit (.label thunk)
-  | .ref _ x =>
+  | .ref uniq x =>
     match lookupVar scope x with
-    | some (true, _, c) => pure c
+    | some (true, _, c) => do
+      modify fun s => { s with plain := ⟨s.owner, s.pos.1, s.pos.2, x, uniq⟩ :: s.plain }
+      pure c
     | some (false, _, _) => throw s!"`{x}` is not a mutable variable, so it cannot be borrowed"
     | none => throw s!"unknown name `{x}`"
   | .deref e => do
@@ -601,8 +678,13 @@ partial def elabCall (scope : Scope) (isTail : Bool) (f : Expr) (args : List Exp
         | _ => none
       let site := (← get).sites
       if !isTail && !borrows.isEmpty then modify fun s => { s with sites := s.sites + 1 }
-      if !isTail && !borrows.isEmpty && (← read).lends site then
+      if !isTail && !borrows.isEmpty && (← read).lends site != 0 then
         let atoms ← elabArgs scope args gives
+        -- These borrows are scopes: take back what elaborating them noted.
+        for a in args do
+          if let .ref uniq y := a then
+            modify fun s =>
+              { s with plain := s.plain.erase ⟨s.owner, s.pos.1, s.pos.2, y, uniq⟩ }
         if (← get).b.done.isSome then pure (.int 0) else lendCall idx atoms borrows
       else
         let callee ← emit (.let_ (.closure idx []))
@@ -646,9 +728,15 @@ partial def elabCall (scope : Scope) (isTail : Bool) (f : Expr) (args : List Exp
       -- Take the value out of a cell and put another in its place.
       if isTail then throw "`tail` applies to calls, not to `replace`"
       match args with
-      | [_, _] => do
+      | [target, _] => do
         match ← elabArgs scope args with
-        | [cell, new] => emit (.mem .swap [cell, new])
+        | [cell, new] =>
+          -- Written on a variable this is an assignment that gives the old
+          -- value back: the reference does not outlast it.
+          if let .ref uniq y := target then
+            modify fun s =>
+              { s with plain := s.plain.erase ⟨s.owner, s.pos.1, s.pos.2, y, uniq⟩ }
+          emit (.mem .swap [cell, new])
         | _ => throw "`replace` takes a reference and a value"
       | _ => throw "`replace` takes a reference and a value"
     | .const e => do
@@ -662,6 +750,7 @@ partial def elabCall (scope : Scope) (isTail : Bool) (f : Expr) (args : List Exp
 partial def elabStmts (scope : Scope) (tailPos : Bool) : List Stmt → M Atom
   | [] => emit (.let_ (.construct 0 []))
   | .located line col s :: rest => do
+    modify fun st => { st with pos := (line, col) }
     try elabStmts scope tailPos (s :: rest)
     catch e => throw (positioned line col e)
   | [.expr e] => elabExpr scope tailPos e
@@ -669,6 +758,46 @@ partial def elabStmts (scope : Scope) (tailPos : Bool) : List Stmt → M Atom
     let _ ← elabExpr scope false e
     elabStmts scope tailPos rest
   | .let_ pat value :: rest => do
+    -- A borrow given a name can be a scope of its own.
+    if let (.var p, .ref uniq x) := (pat, value) then
+      if let some (true, _, c) := lookupVar scope x then
+        if ← isBinder p then
+          if (← get).hoisted != 0 then
+            modify fun s => { s with hoisted := s.hoisted - 1 }
+            return ← elabBorrowScope scope tailPos p uniq c rest true
+          let site := (← get).sites
+          modify fun s => { s with sites := s.sites + 1 }
+          let mode := (← read).lends site
+          if mode != 0 then
+            return ← elabBorrowScope scope tailPos p uniq c rest (mode == 2)
+    -- So can the borrows given to a function whose result is given a name,
+    -- lasting while the result is used: each is named first.
+    if let .call id (.name q f) args := value then
+      let borrows := args.filter fun
+        | .ref _ _ => true
+        | _ => false
+      if !borrows.isEmpty && (← read).lends (← get).sites == 2 then
+        if let .fn _ ← resolveName scope q f then
+          let site := (← get).sites
+          let named := (args.zip (List.range args.length)).map fun (a, i) =>
+            match a with
+            | .ref uniq y => (Expr.name none s!"%borrow{site}.{i}", some (uniq, y, i))
+            | _ => (a, none)
+          let lets := named.filterMap fun (_, b) =>
+            b.map fun (uniq, y, i) => Stmt.let_ (.var s!"%borrow{site}.{i}") (.ref uniq y)
+          modify fun s => { s with sites := s.sites + 1, hoisted := s.hoisted + lets.length }
+          return ← elabStmts scope tailPos
+            (lets ++ .let_ pat (.call id (.name q f) (named.map (·.1))) :: rest)
+    -- And the borrows put straight into a tuple or a constructor that is given
+    -- a name, lasting while it is used.
+    let (value', found) ← nameBorrows scope (← get).sites value
+    if !found.isEmpty then
+      let site := (← get).sites
+      modify fun s => { s with sites := s.sites + 1 }
+      if (← read).lends site != 0 then
+        let lets := found.map fun (n, uniq, y) => Stmt.let_ (.var n) (.ref uniq y)
+        modify fun s => { s with hoisted := s.hoisted + lets.length }
+        return ← elabStmts scope tailPos (lets ++ .let_ pat value' :: rest)
     let a ← elabExpr scope false value
     let scope ← bindLet scope pat a
     elabStmts scope tailPos rest
@@ -705,6 +834,76 @@ partial def elabStmts (scope : Scope) (tailPos : Bool) : List Stmt → M Atom
     -- The rest of the block runs under a guard whose cleanup is `e`.
     let cleanup ← elabClosure scope [.mk [] [.expr e]]
     elabGuarded scope tailPos cleanup rest "a `defer` runs after the call returns"
+
+/-- An expression with each borrow written straight in a tuple or as an
+argument of a constructor replaced by a name, and what each name is to be. -/
+partial def nameBorrows (scope : Scope) (site : Nat) (e : Expr) :
+    M (Expr × List (String × Bool × String)) := do
+  let (e, found) ← go e []
+  pure (e, found.reverse)
+where
+  go (e : Expr) (found : List (String × Bool × String)) :
+      M (Expr × List (String × Bool × String)) := do
+    match e with
+    | .tuple args => do
+      let (args, found) ← goArgs args found
+      pure (.tuple args, found)
+    | .call id (.name q f) args => do
+      if (lookupVar scope f).isSome && q.isNone then return (e, found)
+      match ← (resolveCtor f q) with
+      | some _ =>
+        let (args, found) ← goArgs args found
+        pure (.call id (.name q f) args, found)
+      | none => pure (e, found)
+    | _ => pure (e, found)
+  goArgs (args : List Expr) (found : List (String × Bool × String)) :
+      M (List Expr × List (String × Bool × String)) := do
+    let mut out : Array Expr := #[]
+    let mut found := found
+    for a in args do
+      match a with
+      | .ref uniq y =>
+        if let some (true, _, _) := lookupVar scope y then
+          let n := s!"%borrow{site}.{found.length}"
+          out := out.push (.name none n)
+          found := (n, uniq, y) :: found
+        else out := out.push a
+      | _ =>
+        let (a', found') ← go a found
+        out := out.push a'
+        found := found'
+    pure (out.toList, found)
+
+/-- The scope of a borrow given a name: the statements it takes in run in a
+callable that is given the borrow, and gives back what they bound that the
+rest of the block uses. A `tail` call written directly in them would leave the
+scope behind, so it is refused. -/
+partial def elabBorrowScope (scope : Scope) (tailPos : Bool) (p : String) (uniq : Bool)
+    (cell : Atom) (rest : List Stmt) (wide : Bool) : M Atom := do
+  let k := scopeExtent p rest wide
+  let inner := rest.take k
+  let after := rest.drop k
+  let used := fvStmts [] after
+  let out := ((letNames inner).filter used.contains).eraseDups
+  let (inner, pat) : List Stmt × Option Pattern :=
+    if after.isEmpty then (inner, none)
+    else match out with
+      | [] => (inner ++ [.expr (.tuple [])], some .wild)
+      | [n] => (inner ++ [.expr (.name none n)], some (.var n))
+      | ns => (inner ++ [.expr (.tuple (ns.map (.name none)))], some (.tuple (ns.map .var)))
+  let why := s!"the borrow `{p}` ends after the call returns"
+  let captures := captureNames scope (fvStmts [p] inner)
+  let body ← mkClause captures [.var p] (fun sc => withNoTail (some why) (elabStmts sc true inner))
+  let idx ← addFn ⟨[body]⟩ s!"the scope of the borrow `{p}` in `{(← get).owner}`"
+  let captured ← (captures.filterMap (fun y => scope.lookup y)).mapM useLocal
+  let thunk ← emit (.let_ (.closure idx captured))
+  modify fun s => { s with lent := s.lent + 1 }
+  let r ← emit (.lend uniq cell thunk)
+  match pat with
+  | none => pure r
+  | some pat =>
+    let scope ← bindLet scope pat r
+    elabStmts scope tailPos after
 
 /-- Run the rest of a block under a guard. A `tail` call written directly in
 that rest would leave the guard behind on every iteration, so it is refused. -/
@@ -961,6 +1160,8 @@ structure Output where
   lent : Nat := 0
   /-- How many calls of functions with borrows written as arguments there were. -/
   sites : Nat := 0
+  /-- The borrows that are not scopes of their own, in the order written. -/
+  plain : List Borrow := []
 
 /-- Collect the global declarations. -/
 def collect (items : List Item) :
@@ -1008,7 +1209,7 @@ private def withSelfLabel (name : String) : Clause → Clause
 /-- Elaborate a program. `blocks` is what the checker learnt about its blocks;
 without it, every block captures what it mentions for itself. -/
 def elabProgram (items : List Item) (blocks : Option Blocks := none)
-    (lends : Nat → Bool := fun _ => false) : Except String Output := do
+    (lends : Nat → Nat := fun _ => 0) : Except String Output := do
   let (g, fns, names) ← collect items
   let g := { g with blocks := blocks, lends := lends }
   let coercions := (blocks.getD {}).coercions
@@ -1042,6 +1243,6 @@ def elabProgram (items : List Item) (blocks : Option Blocks := none)
       out := out.set! info.id name
     pure out
   pure ⟨⟨st.fns.toList, .let_ (.closure mainIdx []) (.tail (.var 0) [])⟩, names, st.names,
-    opNames, st.envSizes, st.lent, st.sites⟩
+    opNames, st.envSizes, st.lent, st.sites, st.plain.reverse⟩
 
 end Glorious.Elab

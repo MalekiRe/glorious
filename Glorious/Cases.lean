@@ -720,6 +720,32 @@ def cases : List Case := [
     [], "6"⟩,
   ⟨"fn go(r, n) { let mut y = n; if(0 < n) { go(&mut y, n - 1) + *r } else { *r } }\n  fn main() { let mut t = 5; go(&mut t, 3) }",
     [], "11"⟩,
+  -- A borrow that is given a name is, in Core, a callable run with the borrow:
+  -- the statements up to the last that uses it. These run as they did before.
+  ⟨"fn main() { let mut x = 1; let p = &mut x; let v = *p + 1; *p = v; let w = v * 2; x = w; x + v }",
+    [], "6"⟩,
+  ⟨"fn main() { let mut a = 1; let mut b = 2; let p = &mut a; let q = &mut b; *p = 10; a = a + 1; *q = 20; a + b }",
+    [], "31"⟩,
+  ⟨"fn main() { let mut x = 1; let p = &mut x; let mut y = *p; y = y + 1; *p = y; x + 0 }",
+    [], "2"⟩,
+  ⟨"fn main() { let mut x = 1; let s = Some(&mut x); match(s) { Some(p) => *p = 4, None => () }; x }",
+    [], "4"⟩,
+  ⟨"fn main() { let mut x = 0; let p = &mut x; let mut i = 0; while({ i < 3 }) { *p = *p + i; i = i + 1; }; x }",
+    [], "3"⟩,
+  ⟨"fn main() { let mut x = 1; let r = @out { let p = &mut x; *p = 5; if(*p == 5) { @out(7) }; 0 }; r + x }",
+    [], "12"⟩,
+  ⟨"fn main() { let mut x = 1; let p = &mut x; defer host_write(9); *p = 2; x }",
+    [], "9\n2"⟩,
+  ⟨"fn main() { let mut x = 1; let p = &mut x; let f = { *p = *p + 10; }; f(); f(); x }",
+    [], "21"⟩,
+  ⟨"effect Ask { ask() -> Int }\n  fn main() { let mut x = 1; handle { let p = &mut x; *p = ask() + *p; *p } () { ask(k) => k(41) } }",
+    [], "42"⟩,
+  ⟨"effect Ask { ask() -> Int }\n  fn main() { let mut x = 1; let p = &mut x; let v = handle { ask() + *p } () { ask(k) => k(41) }; *p = v; x }",
+    [], "42"⟩,
+  ⟨"fn first(a: &mut Int, b: &mut Int) -> &mut Int { a }\n  fn main() { let mut x = 1; let mut y = 2; let q = first(&mut x, &mut y); *q = 9; x + y }",
+    [], "11"⟩,
+  ⟨"fn main() { let mut x = 1; let t = (&x, 5); let (r, n) = t; *r + n + x }",
+    [], "7"⟩,
   -- While a `&mut` borrow lasts the variable is used only through it, and
   -- while a `&` borrow lasts the variable is not assigned. A call counts as a
   -- use of every variable that a callable it is given may use.

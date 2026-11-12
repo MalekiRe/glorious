@@ -659,15 +659,34 @@ away.
 - **The callable a borrow's scope runs performs no operation it does not
   handle itself.** Otherwise a handler outside the scope could run while the
   borrow is set aside in a resumption, and use the variable.
-- **Which borrows are scopes.** A borrow written as an argument of a call of a
-  function, `f(&mut x)`: the scope is the call. The elaborator makes it one if
-  the program's Core then passes every rule, deciding each call alone; `glorious
-  certify` says how many there are. Every other borrow is, in Core, the
-  variable's own reference: one bound by `let`, one passed in a `tail` call or
-  to a callable that is not a function named there, one given back by the call
-  it was passed to, one passed to a function that performs an operation handled
-  outside the call. Of those the theorem says nothing, and only the check
-  below keeps them exclusive.
+- **Which borrows are scopes.** The elaborator makes a borrow a scope where
+  the program's Core then passes every rule, deciding each place alone and
+  then taking the places one at a time.
+  - Written as an argument of a call of a function, `f(&mut x)`: the scope is
+    the call.
+  - Given a name, `let p = &mut x`: the scope is the statements up to the last
+    that mentions `p`, run in a callable that is given the borrow and gives
+    back what they bound that the rest of the block uses. If that does not
+    pass, the scope is tried again taking in the statements that mention
+    anything made from `p`.
+  - Given to a function whose result is given a name, or put straight in a
+    tuple or a constructor that is given a name: each borrow is named first
+    and is a scope that lasts while the result is used.
+
+  A scope is whole statements and scopes nest. So a borrow is not a scope where
+  the variable is borrowed again in the statement that last uses it, and of two
+  borrows that overlap without one ending inside the other only one is. Nor is
+  it one where the callable performs an operation handled outside the scope,
+  where a `defer` follows it in a block that uses the variable later, where it
+  is passed in a `tail` call or to a callable made before it, or where the
+  region rules have no type for it: a reference to one of two variables, say.
+  Such a borrow is, in Core, the variable's own reference: the theorem says
+  nothing of it, and only the check below keeps it exclusive.
+  `glorious certify` lists every one, and `glorious certify --strict` fails if
+  there is any. Of the 25 programs in the corpus that borrow, 19 have every
+  borrow a scope; 25 borrows are scopes and 8 are not.
+- **`replace(&mut x, v)` is not a borrow.** It puts a value in the variable and
+  gives back the old one, as an assignment does; nothing outlasts it.
 
 What the rule is not:
 
