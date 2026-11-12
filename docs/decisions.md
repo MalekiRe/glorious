@@ -804,7 +804,10 @@ What it is not:
 
 **Decision: a borrow of a field is a variable of its own for as long as it
 lasts.** `&x.0` and `&mut x.1.0` borrow a field of what a mutable variable
-holds: a tuple's, or that of a declared type with one constructor. The checker
+holds, or of what a reference points to (`&mut p.0`, or `&mut (*p).0` to say
+so): a tuple's, or that of a declared type with one constructor. A field is
+assigned with `x.0 = v` or `(*p).0 = v`, which is an assignment through such a
+borrow; and `(*p).0` reads the one field. The checker
 treats it as a borrow of the variable that is in the way only of that field,
 of anything inside it, and of the variable as a whole; so two fields can be
 borrowed at once, and another field can be read meanwhile. Reading `x.0` copies
@@ -822,14 +825,15 @@ ones, and are scopes in Core where any borrow would be.
 
 What it is not:
 
-- Only a field of a mutable variable: not of what a reference points to
-  (`&mut (*p).0`), and not of a type with several constructors.
+- The reference gone through has to have a name; and a type with several
+  constructors has no field to borrow, since which fields a value has depends
+  on which constructor made it. That needs a pattern that binds by reference,
+  which there is not.
 - It costs a variable, a cleanup and a scope where a real reference into the
   value would cost nothing.
 - Where the value holds something that can be used only once beside the
   field, the program's Core reads the other fields to rebuild it, and is then
   not accepted with the ownership rules.
-- There is no assignment to a field, `x.0 = v`; `*(&mut x.0) = v` does it.
 - The writing-out is in the unproved elaborator.
 
 ## The conditions on a form of computation have names

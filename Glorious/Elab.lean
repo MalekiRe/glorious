@@ -104,7 +104,7 @@ structure Blocks where
   traits : TraitInfo := {}
   /-- For each borrow of a field, what is gone through to reach the field: at
   each step the constructor, or none for a tuple, and how many fields it has. -/
-  fields : List (Nat × List (Option String × Nat)) := []
+  fields : List (Nat × Bool × List (Option String × Nat)) := []
 
 structure Globals where
   ctors : List (String × CtorInfo) := []
@@ -317,7 +317,7 @@ partial def fvExpr (bound : List String) : Expr → List String
   | .ref _ x => if bound.contains x then [] else [x]
   | .deref e => fvExpr bound e
   | .reborrow _ e => fvExpr bound e
-  | .refField _ _ x _ => if bound.contains x then [] else [x]
+  | .refField _ _ x _ _ => if bound.contains x then [] else [x]
 
 partial def fvClause (bound : List String) : Clause → List String
   | .mk pats body => fvStmts (pats.flatMap patVars ++ bound) body
@@ -479,7 +479,7 @@ partial def appliedExpr (p : String) : Expr → List Nat
   | .ref _ _ => []
   | .deref e => appliedExpr p e
   | .reborrow _ e => appliedExpr p e
-  | .refField _ _ _ _ => []
+  | .refField _ _ _ _ _ => []
 
 partial def appliedCall (p : String) (f : Expr) (args : List Expr) : List Nat :=
   let here := match f with
@@ -759,7 +759,7 @@ partial def elabExpr (scope : Scope) (tailPos : Bool) : Expr → M Atom
     | none => throw s!"unknown name `{x}`"
   -- A reference borrowed from a reference is, to the machine, that reference.
   | .reborrow _ e => elabExpr scope false e
-  | .refField _ _ x _ =>
+  | .refField _ _ x _ _ =>
     throw s!"a borrow of a field of `{x}` is elaborated only after the program is checked"
   | .deref e => do
     let p ← elabExpr scope false e
@@ -1559,15 +1559,16 @@ checker has made sure that nothing else uses the field meanwhile, so nothing
 can tell.
 -/
 
-private def fieldPath (x : String) (path : List Nat) : Expr :=
-  path.foldl (fun e i => .proj e i) (.name none x)
+private def fieldPath (root : Expr) (path : List Nat) : Expr :=
+  path.foldl (fun e i => .proj e i) root
 
-/-- What `x` holds, with the field reached by `rest` (after `done`) replaced
-by `new` and everything else as it is. -/
-private def rebuildField (x : String) : List Nat → List Nat → List (Option String × Nat) → Expr → Expr
+/-- The value at `root`, with the field reached by `rest` (after `done`)
+replaced by `new` and everything else as it is. -/
+private def rebuildField (root : Expr) : List Nat → List Nat → List (Option String × Nat) → Expr → Expr
   | done, i :: rest, (ctor, n) :: shape, new =>
     let parts := (List.range n).map fun j =>
-      if j == i then rebuildField x (done ++ [i]) rest shape new else fieldPath x (done ++ [j])
+      if j == i then rebuildField root (done ++ [i]) rest shape new
+      else fieldPath root (done ++ [j])
     match ctor with
     | none => .tuple parts
     | some c => .call 0 (.name none c) parts
@@ -1594,7 +1595,7 @@ expression with a name in its place, and the parts of the expression that are
 evaluated before it and do something, each given a name so that they still
 are. -/
 private partial def liftField : Expr → Option (List Stmt × Expr × FieldBorrow)
-  | .refField id uniq x path => some ([], .name none (fieldRefName id), (id, uniq, x, path))
+  | .refField id uniq x path _ => some ([], .name none (fieldRefName id), (id, uniq, x, path))
   | .call cid f args =>
     (liftParts (f :: args)).map fun (lets, parts, b) =>
       (lets, .call cid (parts.headD f) (parts.drop 1), b)
@@ -1647,7 +1648,7 @@ mutual
 
 /-- The callables and scopes written inside an expression, with the borrows of
 fields in them written out. -/
-private partial def unfieldExpr (shapes : List (Nat × List (Option String × Nat))) : Expr → Expr
+private partial def unfieldExpr (shapes : List (Nat × Bool × List (Option String × Nat))) : Expr → Expr
   | .call id f args => .call id (unfieldExpr shapes f) (args.map (unfieldExpr shapes))
   | .tailCall id f args => .tailCall id (unfieldExpr shapes f) (args.map (unfieldExpr shapes))
   | .tuple es => .tuple (es.map (unfieldExpr shapes))
@@ -1662,16 +1663,16 @@ private partial def unfieldExpr (shapes : List (Nat × List (Option String × Na
 
 /-- An expression that is run as a body of its own: if it borrows a field, it
 becomes a block. -/
-private partial def unfieldBlock (shapes : List (Nat × List (Option String × Nat))) (e : Expr) :
+private partial def unfieldBlock (shapes : List (Nat × Bool × List (Option String × Nat))) (e : Expr) :
     Expr :=
   let e := unfieldExpr shapes e
   if (liftField e).isSome then .labelScope "%block" (unfieldStmts shapes [.expr e]) else e
 
-private partial def unfieldClause (shapes : List (Nat × List (Option String × Nat))) :
+private partial def unfieldClause (shapes : List (Nat × Bool × List (Option String × Nat))) :
     Clause → Clause
   | .mk pats body => .mk pats (unfieldStmts shapes body)
 
-private partial def unfieldStmts (shapes : List (Nat × List (Option String × Nat))) :
+private partial def unfieldStmts (shapes : List (Nat × Bool × List (Option String × Nat))) :
     List Stmt → List Stmt
   | [] => []
   | s :: rest =>
@@ -1693,7 +1694,10 @@ private partial def unfieldStmts (shapes : List (Nat × List (Option String × N
     | some (before, s, (id, uniq, x, path)) =>
       match shapes.lookup id with
       | none => wrap s :: unfieldStmts shapes rest
-      | some shape =>
+      | some (viaRef, shape) =>
+        -- What the field is a field of: what the variable holds, or what the
+        -- reference points to.
+        let root := if viaRef then Expr.deref (.name none x) else Expr.name none x
         let cell := s!"%field{id}"
         let ref := fieldRefName id
         -- The borrow lasts while anything made from it is still used.
@@ -1716,9 +1720,9 @@ private partial def unfieldStmts (shapes : List (Nat × List (Option String × N
         let putBack : List Stmt :=
           if uniq then
             [.defer (.call 0 (.closure 0 [.mk []
-              [.assign (.name none x) (rebuildField x [] path shape (.name none cell))]]) [])]
+              [.assign root (rebuildField root [] path shape (.name none cell))]]) [])]
           else []
-        let block := .letMut cell (fieldPath x path) :: putBack
+        let block := .letMut cell (fieldPath root path) :: putBack
           ++ .let_ (.var ref) (.ref uniq cell) :: unfieldStmts shapes inner ++ result
         let scope := Expr.labelScope s!"%field{id}" block
         match pat with
@@ -1729,7 +1733,7 @@ end
 
 /-- Write out every borrow of a field: see above. `shapes` is what the checker
 found each borrow goes through. -/
-def unfield (shapes : List (Nat × List (Option String × Nat))) (items : List Item) : List Item :=
+def unfield (shapes : List (Nat × Bool × List (Option String × Nat))) (items : List Item) : List Item :=
   if shapes.isEmpty then items
   else items.map fun
     | .fn name params annots ret clauses =>

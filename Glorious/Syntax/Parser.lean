@@ -195,7 +195,15 @@ private partial def parseUnary (noBlock : Bool) : P Expr := do
           pure (.reborrow uniq (← parseUnary noBlock))
         else
           let id := (← read).base + (← get) + 1
+          -- `&(*p).0` goes through the reference `p`.
+          let star ← match ← peek, ← peek 1, ← peek 2, ← peek 3 with
+            | .punct "(", .op "*", .ident _, .punct ")" => do
+              advance
+              advance
+              pure true
+            | _, _, _, _ => pure false
           let x ← expectIdent
+          if star then expectPunct ")"
           -- `&x.0.1` borrows a field of what `x` holds.
           let mut path : Array Nat := #[]
           repeat
@@ -205,7 +213,10 @@ private partial def parseUnary (noBlock : Bool) : P Expr := do
               advance
               path := path.push n
             | _, _ => break
-          if path.isEmpty then pure (.ref uniq x) else pure (.refField id uniq x path.toList)
+          if path.isEmpty then
+            if star then failAt "expected a field: `&(*p).0`"
+            pure (.ref uniq x)
+          else pure (.refField id uniq x path.toList star)
       else if t == .op "&*" then
         -- `&*e`, which the lexer reads as one symbol.
         advance
@@ -360,8 +371,18 @@ private partial def parseStmts : P (List Stmt) := do
     else
       let e ← parseBinary 0 false
       if ← acceptPunct "=" then
+        let id := (← read).base + (← get) + 1
         let value ← parseBinary 0 false
-        out := out.push (mark (.assign e value))
+        -- `x.0 = v` and `(*p).0 = v` assign through a borrow of the field.
+        let rec field : Expr → Option (String × List Nat × Bool)
+          | .proj (.name none x) idx => some (x, [idx], false)
+          | .proj (.deref (.name none x)) idx => some (x, [idx], true)
+          | .proj e idx => (field e).map fun (x, path, star) => (x, path ++ [idx], star)
+          | _ => none
+        let target := match field e with
+          | some (x, path, star) => Expr.deref (.refField id true x path star)
+          | none => e
+        out := out.push (mark (.assign target value))
         -- An assignment may end a block; its value is unit.
         if !(← acceptPunct ";") then break
       else
