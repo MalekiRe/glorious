@@ -990,6 +990,41 @@ def cases : List Case := [
   -- What `main` gives is let go.
   ⟨"struct File(Int)\nimpl Use<[1, 1]> for File {}\nfn close(File(fd)) { host_write(fd) }\nfn main() { File(1) }",
     [], "error: the result of `main` is let go when the program ends, but a `File` has to be used"⟩,
+  -- What a callable performs can be written after its result: these effects and
+  -- no others. `/ {}` is a callable that performs nothing. Unwritten, it is inferred.
+  ⟨"effect Log { log(Int) }\nfn f(x) -> Int / {Log} { log(x); x }\nfn main() { handle f(3) { log(v) => print(v) } }",
+    [], "3\n3"⟩,
+  ⟨"effect Log { log(Int) }\nfn f(x) -> Int / {} { log(x); x }\nfn main() { handle f(3) { log(v) => print(v) } }",
+    [], "error: in `f`: `f` says it performs nothing, and that is not what it performs: effect `Log` is not handled here"⟩,
+  ⟨"effect Log { log(Int) }\neffect Ask { ask() -> Int }\nfn f(x) -> Int / {Log} { log(x); ask() }\nfn main() { 0 }",
+    [], "error: in `f`: `f` says it performs {Log}, and that is not what it performs: effect `Ask` is not handled here"⟩,
+  ⟨"effect Log { log(Int) }\nfn f(x) -> / {Log} { log(x) }\nfn main() { handle f(3) { log(v) => print(v) } }",
+    [], "3\n()"⟩,
+  ⟨"fn f(x) -> { print(x) }\nfn main() { f(3) }",
+    [], "3\n()"⟩,
+  ⟨"effect Log { log(Int) }\nfn run(g: fn() -> Int / {}) { g() }\nfn main() { run({ 5 }) }",
+    [], "5"⟩,
+  ⟨"effect Log { log(Int) }\nfn run(g: fn() -> Int / {}) { g() }\nfn main() { handle run({ log(1); 5 }) { log(v) => print(v) } }",
+    [], "error: 3:13: in `main`: argument 1 of `run`: expected `fn() -> Int`, found `fn() -> Int / {Log}` (effect `Log` is not handled here)"⟩,
+  ⟨"effect Log { log(Int) }\nfn run(g: fn() -> Int / {Log}) { g() }\nfn main() { handle run({ log(1); 5 }) { log(v) => print(v) } }",
+    [], "1\n5"⟩,
+  ⟨"effect St<T> { get() -> T }\nfn run(g: fn() -> Int / {St<Int>}) { g() }\nfn main() { handle run({ get() + 1 }) { get(k) => k(4) } }",
+    [], "5"⟩,
+  ⟨"effect St<T> { get() -> T }\nfn run(g: fn() -> Int / {St}) { g() }\nfn main() { handle run({ get() + 1 }) { get(k) => k(4) } }",
+    [], "5"⟩,
+  ⟨"fn run(g: fn() -> Int / {Nope}) { g() }\nfn main() { 0 }",
+    [], "error: in `run`: unknown effect `Nope`"⟩,
+  ⟨"struct Job(fn(Int) -> Int / {})\nfn main() { match(Job({ x => x + 1 })) { Job(f) => f(2) } }",
+    [], "3"⟩,
+  -- A value that has to be used may wait across a call of a callable the
+  -- function was given if that callable performs nothing; and then whoever
+  -- gives one may not give one that jumps to a label.
+  ⟨"effect Yield { [1, 1] yield(Int) }\nfn gen() { yield(1); yield(2); () }\nfn find(generator, wanted: fn(Int) -> Result<(), ()> / {}) { handle generator() { _ => None, yield(value, k) => if(wanted(value)) { cancel(k); Some(value) } else { k(()) } } }\nfn main() { find({ gen() }, { x => x > 1 }) }",
+    [], "Ok(2)"⟩,
+  ⟨"effect Yield { [1, 1] yield(Int) }\nfn gen() { yield(1); yield(2); () }\nfn find(generator, wanted) { handle generator() { _ => None, yield(value, k) => if(wanted(value)) { cancel(k); Some(value) } else { k(()) } } }\nfn main() { find({ gen() }, { x => x > 1 }) }",
+    [], "error: 3:30: in `find`: `k` is not used on every path, but a resumption of an operation declared `[1, 1]` has to be used"⟩,
+  ⟨"effect Yield { [1, 1] yield(Int) }\nfn gen() { yield(1); yield(2); () }\nfn find(generator, wanted: fn(Int) -> Result<(), ()> / {}) { handle generator() { _ => None, yield(value, k) => if(wanted(value)) { cancel(k); Some(value) } else { k(()) } } }\nfn main() { @out { find({ gen() }, { x => @out(None) }) } }",
+    [], "error: 4:20: in `main`: `find` holds a value that has to be used while it calls what it is given, but what it is given here can jump to a label and not come back"⟩,
   -- `drop` is not for a program to call.
   ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nfn main() { let mut f = File(7); drop(&mut f); 0 }",
     [], "error: 3:34: in `main`: `drop` is run when what holds a value ends; a program does not call it"⟩,

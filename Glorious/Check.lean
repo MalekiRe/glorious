@@ -96,6 +96,9 @@ structure Scheme where
   ty : Ty
   /-- Types whose values must be free to go unused, with the reason. -/
   drops : List (Ty × String) := []
+  /-- Types of callables that must come back when called: they may hold no
+  label to jump to. With the reason. -/
+  stays : List (Ty × String) := []
   /-- The traits the function needs of its type parameters, in the order it is
   given the evidence: each a trait and one of `tvars`. -/
   bounds : List (String × Ty) := []
@@ -246,6 +249,9 @@ structure St where
   once the types are known. -/
   drops : Array (Ty × String) := #[]
   lateDrops : Array (Ty × String) := #[]
+  /-- Types of callables that must come back when called, with the reason. -/
+  stays : Array (Ty × String) := #[]
+  lateStays : Array (Ty × String) := #[]
   /-- What `impl Use<[lower, upper]>` says of a declared type: whether a value
   has to be used, and whether it can be used only once. -/
   useDecls : List (String × Bool × Bool) := []
@@ -548,6 +554,11 @@ def instantiate (s : Scheme) (via : Option String := none) : M Ty := do
       | some f => s!"{pos}`{f}` may leave what it is given unused"
       | none => why
     modify fun st => { st with drops := st.drops.push (subst tm rm cm t, why) }
+  for (t, why) in s.stays do
+    let why := match via with
+      | some f => s!"{pos}`{f}` holds a value that has to be used while it calls what it is given"
+      | none => why
+    modify fun st => { st with stays := st.stays.push (subst tm rm cm t, why) }
   for (t, why) in s.dups do
     -- At a use, the reason is the function's need rather than its inner detail.
     let why := match via with
@@ -632,10 +643,13 @@ def generalize (t : Ty) (keep : List Ty := []) (top : Bool := true) : M Scheme :
   -- Capture variables reachable from the type through what they capture.
   let mut edges : Array (Nat × Ty) := #[]
   let mut all : Array (Nat × Captured) := #[]
-  for (cap, what) in s.capEdges do
+  for ((cap, what), i) in s.capEdges.zipIdx do
     let root ← findCap cap
     match what with
     | .ty target =>
+      -- What a block shares with the block it runs in place of, the other
+      -- holds: it is no part of what this one's type says it holds.
+      if s.sharedEdges.contains i then continue
       let target ← zonk target
       edges := edges.push (root, target)
       all := all.push (root, .ty target)
@@ -652,8 +666,11 @@ def generalize (t : Ty) (keep : List Ty := []) (top : Bool := true) : M Scheme :
   let mut drops : Array (Ty × String) := #[]
   for (d, why) in s.drops do
     drops := drops.push (← zonk d, why)
+  let mut stays : Array (Ty × String) := #[]
+  for (d, why) in s.stays do
+    stays := stays.push (← zonk d, why)
   let mut reach : List Nat := (freeCaps t ++ dups.toList.flatMap (freeCaps ·.1)
-    ++ drops.toList.flatMap (freeCaps ·.1)).eraseDups
+    ++ drops.toList.flatMap (freeCaps ·.1) ++ stays.toList.flatMap (freeCaps ·.1)).eraseDups
   let mut todo := reach
   while !todo.isEmpty do
     let mut next : List Nat := []
@@ -671,7 +688,9 @@ def generalize (t : Ty) (keep : List Ty := []) (top : Bool := true) : M Scheme :
     (freeTys d).any tvars.contains || (freeCaps d).any cvars.contains
   pure { tvars, rvars := (freeRows t).eraseDups.filter (!fixedRows.contains ·), cvars,
          edges := all.toList.filter (cvars.contains ·.1), dups := mine, ty := t,
-         drops := unused }
+         drops := unused,
+         stays := stays.toList.filter fun (d, _) =>
+           (freeTys d).any tvars.contains || (freeCaps d).any cvars.contains }
 
 /-! ## Unification -/
 
@@ -847,6 +866,16 @@ partial def settleRows (bind : Option (Nat → Bool)) (final : Bool) : M Unit :=
 
 /-! ## Declarations -/
 
+/-- A type left to be inferred from how the program uses a declaration. -/
+private def inferredTy : M Ty := do
+  let t ← freshTy
+  match t with
+  | .var id => modify fun s => { s with mono := id :: s.mono }
+  | _ => pure ()
+  pure t
+
+mutual
+
 /-- Read a type as written. In a declaration, a bare unknown name is a field
 whose type is inferred; elsewhere it is an error. -/
 partial def resolveType (params : List (String × Ty)) (decl : Bool) : TypeExpr → M Ty
@@ -864,31 +893,51 @@ partial def resolveType (params : List (String × Ty)) (decl : Bool) : TypeExpr 
             throw s!"type `{x}` takes {d.arity} arguments, but is given {args.length}"
           pure (.con x (← args.mapM (resolveType params decl)))
         | none =>
-          if decl && args.isEmpty then inferred
+          if decl && args.isEmpty then inferredTy
           else throw s!"unknown type `{x}`"
   | .tuple args => do
     pure (.tuple (← args.mapM (resolveType params decl)))
   | .fn ps r => do
     let ps ← ps.mapM (resolveType params decl)
-    let r ← resolveType params decl r
-    let tail ← freshRowVar
     let cap ← freshCap
-    if decl then
-      modify fun s => { s with monoRows := tail :: s.monoRows, monoCaps := cap :: s.monoCaps }
-    pure (.fn ps r [] (some tail) cap)
+    match r with
+    | .performs r effects =>
+      -- What it performs is said: these effects and no others.
+      let r ← resolveType params decl r
+      let effs ← resolveEffects params decl effects
+      if decl then modify fun s => { s with monoCaps := cap :: s.monoCaps }
+      pure (.fn ps r effs none cap)
+    | _ =>
+      let r ← resolveType params decl r
+      let tail ← freshRowVar
+      if decl then
+        modify fun s => { s with monoRows := tail :: s.monoRows, monoCaps := cap :: s.monoCaps }
+      pure (.fn ps r [] (some tail) cap)
+  | .performs _ _ =>
+    throw "what a callable performs is written after its result: `fn(A) -> R / {Effect}`"
   | .ref uniq t => do
     let cap ← freshCap
     if decl then modify fun s => { s with monoCaps := cap :: s.monoCaps }
     pure (.ref (if uniq then .uniq else .shared) (← resolveType params decl t) cap)
   | .never => throw "`!` can only be the result of an operation"
-  | .hole => if decl then inferred else freshTy
-where
-  inferred : M Ty := do
-    let t ← freshTy
-    match t with
-    | .var id => modify fun s => { s with mono := id :: s.mono }
-    | _ => pure ()
-    pure t
+  | .hole => if decl then inferredTy else freshTy
+
+/-- The effects written after a callable's result. An effect's arguments may
+be left out, to be inferred. -/
+partial def resolveEffects (params : List (String × Ty)) (decl : Bool)
+    (effects : List (String × List TypeExpr)) : M (List (String × List Ty)) := do
+  effects.mapM fun (name, args) => do
+    match (← get).effects.lookup name with
+    | none => throw s!"unknown effect `{name}`"
+    | some d =>
+      if args.isEmpty then
+        pure (name, ← d.tvars.mapM fun _ => freshTy)
+      else
+        unless d.tvars.length == args.length do
+          throw s!"effect `{name}` takes {d.tvars.length} arguments, but is given {args.length}"
+        pure (name, ← args.mapM (resolveType params decl))
+
+end
 
 private def freshParams (names : List String) : M (List (String × Ty) × List Nat) := do
   let mut pairs : Array (String × Ty) := #[]
@@ -2210,6 +2259,13 @@ partial def tyJumps (t : Ty) : M Bool := do
         | _ => pure ()
     return false
 
+/-- A callable that has to come back when called may hold no label. -/
+def checkStays (stays : Array (Ty × String)) : M Unit := do
+  for (t, why) in stays do
+    modify fun s => { s with seen := [] }
+    if ← tyJumps t then
+      throw s!"{why}, but what it is given here can jump to a label and not come back"
+
 /-- With the types of a function known: note which of its calls certainly come
 back, and look at each binding that may have to be used. `fnTy` is the
 function's type.
@@ -2226,14 +2282,27 @@ def runLowerChecks (fnTy : Ty) : M Unit := do
     sources := ps.flatMap freeRows
   for id in s.monoRows do
     sources := sources ++ (← zonkRow ⟨[], some id⟩).tail.toList
+  -- A callable the function was given holds whatever its caller gave it: it
+  -- comes back only if that holds no label.
+  let mut given : List Nat := []
+  if let .fn ps _ _ _ _ ← zonk fnTy then
+    for c in ps.flatMap freeCaps do
+      given := (← findCap c) :: given
   let mut sure := s.sure
+  let mut conditional : List (Nat × Ty) := []
   for (id, callee, silent) in s.calls do
-    if let .fn _ _ effs tail _ ← zonk callee then
+    let callee ← zonk callee
+    if let .fn _ _ effs tail _ := callee then
       modify fun st => { st with seen := [] }
       let silent := silent || (effs.isEmpty && match tail with
         | none => true
         | some ρ => !sources.contains ρ)
-      if silent && !(← tyJumps callee) then sure := id :: sure
+      if silent && !(← tyJumps callee) then
+        let mut theirs := false
+        for c in freeCaps callee do
+          if given.contains (← findCap c) then theirs := true
+        if theirs then conditional := (id, callee) :: conditional
+        else sure := id :: sure
   modify fun st => { st with sure := sure }
   for (id, t, why) in s.abandoned do
     unless sure.contains id do
@@ -2253,22 +2322,36 @@ def runLowerChecks (fnTy : Ty) : M Unit := do
   -- What is found here is said first: it names the binding.
   let earlier := (← get).drops
   modify fun st => { st with drops := #[] }
+  let mut relied := false
   for (pos, x, t, names, body) in s.lowerChecks do
     let t ← zonk t
     -- Only a type that has to be used, or one not yet known, needs the count.
     let free := !(freeTys t).isEmpty || !(freeCaps t).isEmpty
+    modify fun st => { st with seen := [] }
     unless free || (← tyMustUse roots [] t).isSome do continue
-    let unused :=
-      if usesStmts resumptive x body == 0 then true
-      else if usedFirst quiet x body then false
-      else
-        match pathUses ctx names x body with
+    let mut unused := false
+    if usesStmts resumptive x body == 0 then unused := true
+    else if usedFirst quiet x body then unused := false
+    else
+      let counted := fun (c : ACtx) =>
+        match pathUses c names x body with
         | some n => n == 0
         | none => true
+      unused := counted ctx
+      -- Used on every path if the callables the function was given come
+      -- back: then that is asked of whoever gives them.
+      if unused && !conditional.isEmpty then
+        unless counted { ctx with sure := conditional.map (·.1) ++ sure } do
+          unused := false
+          relied := true
     if unused then
       modify fun st => { st with pos := pos }
       mustDrop t s!"`{x}` is not used on every path"
   modify fun st => { st with drops := st.drops ++ earlier }
+  if relied then
+    for (_, callee) in conditional do
+      modify fun st => { st with stays := st.stays.push (callee,
+        "a value that has to be used is held while a callable the function was given is called") }
   -- A block given a block that was not run. If only one block of the program
   -- so far can be that one, the second runs in its place: what the first held
   -- under a name the second also mentions is the second's to use, and is held
@@ -3669,10 +3752,21 @@ def checkGroup (decls : List FnDecl) : M Unit := do
       let annots ← d.annots.mapM fun
         | some t => some <$> resolveType rigid false t
         | none => pure none
-      let ret ← match d.ret with
+      -- The result may say what the function performs: that, and no more.
+      let (retExpr, declared) := match d.ret with
+        | some (.performs t effects) => (some t, some effects)
+        | other => (other, none)
+      let ret ← match retExpr with
         | some t => some <$> resolveType rigid false t
         | none => pure none
       let t ← inferCallable [] annots ret (some d.name) d.clauses s!"the clauses of `{d.name}` do"
+      if let some effects := declared then
+        let effects ← resolveEffects rigid false effects
+        if let .fn _ _ effs tail _ ← find t then
+          try unifyRow ⟨effs, tail⟩ ⟨effects, none⟩
+          catch e =>
+            let said := if effects.isEmpty then "nothing" else showEffs effects
+            throw s!"`{d.name}` says it performs {said}, and that is not what it performs: {e}"
       -- A function an implementation gives is the function its trait declares,
       -- at the implementation's type.
       if let some (im, sig) := d.impl then
@@ -3695,6 +3789,7 @@ def checkGroup (decls : List FnDecl) : M Unit := do
       runLowerChecks t
       checkDups (← get).dups
       checkDrops (← get).drops
+      checkStays (← get).stays
     catch e =>
       -- The usual cause: the body ends in an expression run only for its effect,
       -- whose value has become the function's result.
@@ -3725,9 +3820,11 @@ def checkGroup (decls : List FnDecl) : M Unit := do
   let owner := (decls.head?.map (·.name)).getD "the program"
   let late := (← get).dups.map fun (t, why) => (t, inFunction owner why)
   let lateDrops := (← get).drops.map fun (t, why) => (t, inFunction owner why)
+  let lateStays := (← get).stays.map fun (t, why) => (t, inFunction owner why)
   modify fun s =>
     { s with group := [], dups := #[], lateDups := s.lateDups ++ late, drops := #[],
-             lateDrops := s.lateDrops ++ lateDrops }
+             lateDrops := s.lateDrops ++ lateDrops, stays := #[],
+             lateStays := s.lateStays ++ lateStays }
 
 /-- Check a whole program. Gives what the elaborator needs to know about its
 blocks: which take an argument they do not name, and for each that is handed a
@@ -3779,6 +3876,7 @@ def checkProgram (items : List Item) : Except String Elab.Blocks := do
       throw "`main` needs a trait of a type that nothing decides"
     checkDups (← get).lateDups
     checkDrops (← get).lateDrops
+    checkStays (← get).lateStays
     match (← get).fns.lookup "main" with
     | none => pure ()
     | some scheme =>

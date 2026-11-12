@@ -91,8 +91,12 @@ inductive TypeExpr where
   declaration, a bare field name whose type is to be inferred. -/
   | name (name : String) (args : List TypeExpr)
   | tuple (args : List TypeExpr)
-  /-- `fn(A, B) -> R`. Its effects are inferred. -/
+  /-- `fn(A, B) -> R`. Its effects are inferred, unless the result says them. -/
   | fn (params : List TypeExpr) (ret : TypeExpr)
+  /-- `R / {E, F<T>}`, written as the result of a callable: what it gives and
+  the effects it performs, all of them. `/ {}` is a callable that performs
+  nothing. -/
+  | performs (ret : TypeExpr) (effects : List (String × List TypeExpr))
   /-- `&T` or `&mut T`. -/
   | ref (uniq : Bool) (t : TypeExpr)
   /-- `!`. -/

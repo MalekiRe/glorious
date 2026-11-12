@@ -392,7 +392,7 @@ private partial def parseType : P TypeExpr := do
     advance
     expectPunct "("
     let params ← parseTypeList ")"
-    let ret ← if ← acceptPunct "->" then parseType else pure (.tuple [])
+    let ret ← if ← acceptPunct "->" then parseResult else pure (.tuple [])
     pure (.fn params ret)
   | .ident x =>
     advance
@@ -413,6 +413,39 @@ private partial def parseType : P TypeExpr := do
     | [t] => pure t
     | _ => pure (.tuple args)
   | _ => failAt "expected a type"
+
+/-- What follows `->` in a callable: its result, which may be left out when
+it is unit, and then `/ {Effect, ...}` if what it performs is to be said. -/
+private partial def parseResult : P TypeExpr := do
+  let startsType := match ← peek with
+    | .ident _ => true
+    | .punct "(" => true
+    | .op "!" => true
+    | .op "&" => true
+    | _ => false
+  let ret ← if startsType then parseType else pure (.tuple [])
+  if (← peek) == .op "/" then
+    advance
+    expectPunct "{"
+    let mut effects : Array (String × List TypeExpr) := #[]
+    repeat
+      if (← peek) == .punct "}" then break
+      let name ← expectIdent
+      let mut args : Array TypeExpr := #[]
+      if (← peek) == .op "<" then
+        advance
+        repeat
+          if (← peek) == .op ">" then break
+          args := args.push (← parseType)
+          if !(← acceptPunct ",") then break
+        match ← peek with
+        | .op ">" => advance
+        | _ => failAt "expected `>`"
+      effects := effects.push (name, args.toList)
+      if !(← acceptPunct ",") then break
+    expectPunct "}"
+    pure (.performs ret effects.toList)
+  else pure ret
 
 /-- Types separated by commas up to and including the closing punctuation. An
 item may be written `name: Type`. -/
@@ -528,7 +561,7 @@ private partial def parseItem : P Item := do
         annots := annots.push (← if ← acceptPunct ":" then some <$> parseType else pure none)
         if !(← acceptPunct ",") then break
       expectPunct ")"
-      let ret ← if ← acceptPunct "->" then some <$> parseType else pure none
+      let ret ← if ← acceptPunct "->" then some <$> parseResult else pure none
       expectPunct "{"
       let body ← parseStmts
       expectPunct "}"

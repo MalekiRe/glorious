@@ -878,17 +878,33 @@ How this differs from the specification:
   destroys at every such place.
 - A value that has to be used cannot be kept in a mutable variable: nothing
   tracks whether the variable is empty when it ends.
-- A value that has to be used cannot wait across a call to a callable the
-  function was given, nor across an operation: either may not come back.
-  There is no way yet to write that a callable performs nothing.
+- A value that has to be used cannot wait across an operation, which may not
+  be resumed. It can wait across a call of a callable the function was given
+  only if that callable's type says it performs nothing (`/ {}`, see "What a
+  callable performs can be written"); it is then part of the function's
+  contract that what it is given holds no label to jump to.
 - References are as before: `&mut` is not a use-once value.
 - All of this is the unproved checker. Core is told nothing about it.
 
-What this does for the examples, with their operations declared `[1, 1]`:
-`backtracking` is accepted as it stands and now says so. In `generators`, the
-fold that threads its state through the resumptions is accepted; `find`, which
-calls a predicate it was given while holding the resumption, is not. `tasks`
-keeps resumptions in a mutable queue and is not.
+What this does for the examples: `backtracking` and `generators` declare their
+operations `[1, 1]`. For that, `find` in `generators` cancels the generator it
+stops early and says its predicate performs nothing. `tasks` keeps resumptions
+in a mutable queue and cannot.
+
+## What a callable performs can be written
+
+**Decision: a written row is exact; an unwritten one is inferred.** After the
+result of a callable, in a type or on a function, `/ {Effect, Other<T>}` says
+what it performs: those effects and no others. `/ {}` is a callable that
+performs nothing. The result may be left out before it when it is unit:
+`fn(Int) -> / {Log}`. An effect's arguments may be left out and are inferred.
+
+This departs from the specification (§2.2), where a signature without an
+annotation performs nothing. Here annotations are optional throughout and what
+is not written is inferred, so the same holds for effects: writing nothing
+after a result asks nothing.
+
+There is no way to write "these effects and possibly more".
 
 ## Cleanups are counted, and none is lost
 

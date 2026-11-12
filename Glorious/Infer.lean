@@ -1839,6 +1839,8 @@ partial def resolveType (typeNames params : List String) : TypeExpr → M ITy
   | .ref _ t => do pure (.ref (← freshRg) (← resolveType typeNames params t))
   | .never => freshTy
   | .hole => freshTy
+  -- What a callable performs is found again for Core, not read.
+  | .performs r _ => resolveType typeNames params r
 
 def declare (items : List Item) (g : Elab.Globals) : M Unit := do
   let typeNames := items.filterMap fun

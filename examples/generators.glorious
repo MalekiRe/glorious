@@ -2,7 +2,8 @@
 // expect:
 // (385, Ok(15))
 
-effect Yield { yield(value) }
+// `[1, 1]`: whoever handles `yield` has to resume the generator or cancel it.
+effect Yield { [1, 1] yield(value) }
 
 // Yield the integers from `i` up to but not including `to`.
 fn count(i, to) {
@@ -23,11 +24,14 @@ fn fold(generator, initial, step) {
     run(initial)
 }
 
-// Stop a generator early: the first value satisfying `wanted`, if any.
-fn find(generator, wanted) {
+// Stop a generator early: the first value satisfying `wanted`, if any. The
+// rest of the generator is cancelled, which runs its cleanups. `wanted` is
+// called while the generator is held, so its type says it performs nothing:
+// it comes back, and the generator is not left behind.
+fn find(generator, wanted: fn(Int) -> Result<(), ()> / {}) {
     handle generator() {
         _ => None,
-        yield(value, k) => if(wanted(value)) { Some(value) } else { k(()) }
+        yield(value, k) => if(wanted(value)) { cancel(k); Some(value) } else { k(()) }
     }
 }
 
