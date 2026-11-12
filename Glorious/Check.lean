@@ -283,12 +283,7 @@ structure St where
   types of the function they are in are known: where, the name, its type, the
   other names in scope, and the code the name is in scope of. -/
   lowerChecks : Array (String × String × Ty × List String × List Stmt) := #[]
-  /-- Uses of `destroy`, to settle once the type is known: the call, the type,
-  the function it is in, and where. -/
-  destroys : Array (Nat × Ty × String × String) := #[]
-  /-- Each use of `destroy`, with the identity under which `dictTable` has the
-  `Drop` implementation to run, if the type has one. -/
-  destroySites : Array (Nat × Option Nat) := #[]
+
   /-- The clauses of every top-level function, for following calls when uses
   are counted. -/
   fnBodies : List (String × List Clause) := []
@@ -2167,7 +2162,7 @@ def checkUses (pos : String) (outer : Scope) (binds : Scope) (body : List Stmt) 
     | some sig => sig.result.isSome
     | none => false
   -- What only computes: the machine's own operations and what builds a value.
-  let intrinsics := Elab.prims.map (·.1) ++ Elab.hosts.map (·.1) ++ ["cancel", "replace", "destroy"]
+  let intrinsics := Elab.prims.map (·.1) ++ Elab.hosts.map (·.1) ++ ["cancel", "replace"]
   let ctx : ACtx :=
     { fns := s.fnBodies, ctors := s.ctors.map (·.1), aliases := s.aliases,
       ops := s.ops.map fun (name, sig) => (name, sig.result.isSome), quiet := intrinsics }
@@ -2247,7 +2242,7 @@ def runLowerChecks (fnTy : Ty) : M Unit := do
     match s.ops.lookup name with
     | some sig => sig.result.isSome
     | none => false
-  let intrinsics := Elab.prims.map (·.1) ++ Elab.hosts.map (·.1) ++ ["cancel", "replace", "destroy"]
+  let intrinsics := Elab.prims.map (·.1) ++ Elab.hosts.map (·.1) ++ ["cancel", "replace"]
   let ctx : ACtx :=
     { fns := s.fnBodies, ctors := s.ctors.map (·.1), aliases := s.aliases,
       ops := s.ops.map fun (name, sig) => (name, sig.result.isSome), quiet := intrinsics,
@@ -2640,8 +2635,6 @@ inductive Head where
   | host (id : Nat)
   | cancel
   | replace
-  /-- `destroy(value)`: the value is used, by being destroyed. -/
-  | destroy
   | const (e : Expr)
 
 def resolveName (scope : Scope) (qual : Option String) (x : String) : M Head := do
@@ -2665,7 +2658,6 @@ def resolveName (scope : Scope) (qual : Option String) (x : String) : M Head := 
   if let some (id, _) := Elab.hosts.lookup x then return .host id
   if x == "cancel" then return .cancel
   if x == "replace" then return .replace
-  if x == "destroy" then return .destroy
   if let some e := s.aliases.lookup x then return .const e
   throw s!"unknown name `{x}`"
 
@@ -2830,7 +2822,6 @@ partial def inferExpr (scope : Scope) (amb : Row) : Expr → M Ty
     | .host _ => throw s!"host operation `{x}` must be called"
     | .cancel => throw "`cancel` must be applied to a resumption"
     | .replace => throw "`replace` must be called"
-    | .destroy => throw "`destroy` must be called"
     | .const e => inferExpr [] amb e
   | .label l =>
     match scope.lookup ("@" ++ l) with
@@ -3056,12 +3047,6 @@ partial def inferCall (scope : Scope) (amb : Row) (f : Expr) (args : List Expr)
       checkArgs scope amb "`replace`" [.ref .uniq t cap, t] args call
       use scope (.through cap "the reference given to `replace`" true)
       pure t
-    | .destroy => do
-      let t ← freshTy
-      checkArgs scope amb "`destroy`" [t] args call
-      if call == 0 then throw "`destroy` is used where the checker has no name for the call; this is a compiler defect"
-      modify fun s => { s with destroys := s.destroys.push (call, t, s.owner, s.pos) }
-      pure .unit
     | .local (.val t) => applyTy scope amb s!"`{x}`" t args call
     | .local (.cell t brand) => do
       mustDup t (readsCell x)
@@ -3519,30 +3504,6 @@ partial def toDictE (impls : Array ImplDecl) : Traits.Dict → Elab.DictE
   | .given k => .param k
   | .impl i subs => .impl ((impls[i]?.map (·.dictFn)).getD "") (subs.map (toDictE impls))
 
-/-- Does destroying a value of this type call for more than letting it go: is
-there in it a resumption, a value that has to be used, or one whose type has
-`Drop`? -/
-partial def needsCare (roots : MustInfo) (visiting : List String) (t : Ty) : M Bool := do
-  modify fun s => { s with seen := [] }
-  if ← tyOwnsOnce [] t then return true
-  if (← tyMustUse roots [] t).isSome then return true
-  match ← find t with
-  | .tuple args => args.anyM (needsCare roots visiting)
-  | .con name args => do
-    if (← get).kimpls.any fun I => I.trait == "Drop" && I.head == name then return true
-    if ← args.anyM (needsCare roots visiting) then return true
-    if visiting.contains name then return false
-    match (← get).types.lookup name with
-    | none => pure false
-    | some decl =>
-      decl.ctors.anyM fun c => do
-        match (← get).ctors.lookup c with
-        | none => pure false
-        | some sig =>
-          (sig.fields.map (subst (sig.tvars.zip args) [] [])).anyM
-            (needsCare roots (name :: visiting))
-  | _ => pure false
-
 /-- The types a value of this type directly holds. -/
 def partsOf (t : Ty) : M (List Ty) := do
   match ← find t with
@@ -3573,30 +3534,6 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
         let id := 2000000000 + (← get).dropSites.size
         pending := pending.push ⟨"Drop", ty, id, 0, site.owner, pos⟩
         modify fun s => { s with dropSites := s.dropSites.push (site, id) }
-  -- `destroy(value)` runs the type's `drop`, if it has one. It does not take
-  -- the value apart, so what the value holds must need nothing done.
-  let destroys := (← get).destroys
-  modify fun s => { s with destroys := #[] }
-  let roots ← mustInfo
-  for (call, ty, owner, pos) in destroys do
-    let ty ← zonk ty
-    let fail := fun (msg : String) => (throw (inFunction owner (pos ++ msg)) : M Unit)
-    match ty with
-    | .fn _ _ _ _ _ => fail "a callable is given up with `cancel`, not `destroy`"
-    | .var _ => fail "`destroy` is given a value whose type is not known here: say what it is"
-    | _ => pure ()
-    for part in ← partsOf ty do
-      if ← needsCare roots [] part then
-        fail s!"`destroy` does not take a `{showTy ty}` apart, and it holds a `{showTy (← zonk part)}`, which needs more than letting go: take it apart with a pattern"
-    let hook ← match ty with
-      | .con n _ =>
-        if (← get).kimpls.any fun I => I.trait == "Drop" && I.head == n then
-          let id := 3000000000 + (← get).destroySites.size
-          pending := pending.push ⟨"Drop", ty, id, 0, owner, pos⟩
-          pure (some id)
-        else pure none
-      | _ => pure none
-    modify fun s => { s with destroySites := s.destroySites.push (call, hook) }
   -- What the group's functions need of the types they are generic in.
   let mut leafs : Array (String × Nat × Ty) := #[]
   for b in pending do
@@ -3876,8 +3813,7 @@ def checkProgram (items : List Item) : Except String Elab.Blocks := do
         (Elab.implFnName im.trait im.head m, ((s.methods.lookup m).map (·.params.length)).getD 0)⟩ :
         Elab.ImplE)
     pure ⟨s.given.toList, links, s.coercions.toList,
-      ⟨s.dictTable.toList, s.methodCalls.toList, s.fnBounds, implEs, s.dropSites.toList,
-        s.destroySites.toList⟩⟩
+      ⟨s.dictTable.toList, s.methodCalls.toList, s.fnBounds, implEs, s.dropSites.toList⟩⟩
   let (blocks, _) ← action.run {}
   pure blocks
 

@@ -82,8 +82,7 @@ structure TraitInfo where
   /-- Where a value whose type has `Drop` is destroyed, each with the identity
   under which `dicts` says which implementation runs. -/
   drops : List (DropSite × Nat) := []
-  /-- The uses of `destroy`, each with that identity if its type has `Drop`. -/
-  destroys : List (Nat × Option Nat) := []
+
 
 /-- The function an implementation's function is, as a top-level function. -/
 def implFnName (trait head method : String) : String := s!"{trait}::{method}@{head}"
@@ -1276,17 +1275,6 @@ private partial def untraitCall (tr : TraitInfo) (owner : String) (id : Nat) (f 
   let args := args.map (untraitExpr tr owner)
   let mk := fun (f : Expr) (args : List Expr) =>
     if isTail then Expr.tailCall id f args else Expr.call id f args
-  -- `destroy(value)`: the value is computed and given up. If its type has
-  -- `Drop`, it is put in a variable for the type's function to be given.
-  if let some hook := tr.destroys.lookup id then
-    let value := args.headD (.tuple [])
-    match hook.bind fun h => tr.dicts.lookup h with
-    | some [d] =>
-      .labelScope "%destroy"
-        [.letMut "%destroyed" value,
-         .expr (.call dropCallId (.proj (dictExpr d) 0) [.ref true "%destroyed"])]
-    | _ => .proj (.tuple [.tuple [], value]) 0
-  else
   match tr.dicts.lookup id, tr.methods.lookup id with
   | some [d], some idx => mk (.proj (dictExpr d) idx) args
   | some ds, none => mk (untraitExpr tr owner f) (ds.map dictExpr ++ args)

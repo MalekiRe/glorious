@@ -805,8 +805,7 @@ is done to a `T` when it is destroyed; `p` is a `&mut T`. The function is run
 `Drop` says nothing about how often a value is used; that is the type's `Use`
 interval (next section), as the specification has it. A type that has `Drop`
 and says no more can be copied, and each copy that comes to rest in a variable
-is destroyed. A program does not call `drop`; it writes `destroy(value)`, which
-is a use of the value and runs the function. Later variables end first.
+is destroyed. A program does not call `drop`. Later variables end first.
 
 It is built from what was there. Once the source text is checked, a place where
 a value is destroyed is a cleanup (`defer`) that calls the implementation's
@@ -855,17 +854,24 @@ What is built, in the checker for source text:
   be resumed, a jump to a label, a call that may not come back) ends with the
   uses it has made. A call comes back if its type says its callee performs
   nothing and can jump to no label.
-- `destroy(value)` is a use. It runs the type's `drop` if it has one, and
-  refuses a value that holds something needing more than letting go.
+- **Taking a value apart is the use that ends it** (decision, user). There is
+  no built-in that destroys a value: the specification's `destroy(value)` is
+  deliberately not provided. A value that has to be used is ended by a
+  pattern that takes it apart, so once fields can be private, only the code
+  that can see them can end it, and everyone else has to hand the value to a
+  function that code provides. A built-in anyone could call would defeat that.
 - A program that declares nothing that has to be used is checked exactly as
   before, and pays nothing.
 
 How this differs from the specification:
 
 - Counting stops at one. `[2, 3]`, `[0, 0]` and the like are refused.
-- `destroy` does not take a value apart; there is no destruction of fields in
-  order. A value that holds something to destroy is taken apart by a pattern.
-  Taking a value apart by a pattern is a use and does not run its `drop`.
+- There is no `destroy`, as said above, and no destruction of fields in order.
+  Taking a value apart by a pattern does not run its `drop`. Since a value
+  that has to be used cannot be let go, and letting go is the only thing that
+  runs `drop`, a `drop` on such a type never runs.
+- Fields cannot be made private yet (there are no modules), so today any code
+  can take any value apart.
 - A value let go where that is allowed is simply forgotten, except a
   resumption its arm does not use (cancelled) and a value at rest in a
   variable whose type has `Drop` (its function runs). The specification
