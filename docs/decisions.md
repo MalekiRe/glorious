@@ -968,6 +968,17 @@ What is built, in the checker for source text:
 - A program that declares nothing that has to be used is checked exactly as
   before, and pays nothing.
 
+**Decision: an operation that says nothing has a resumption that may be let
+go, `[0, 1]`.** The language specification makes `[1, 1]` the default. That
+was tried: of the 76 test programs with effects that run, 12 are then refused.
+Five of them do drop a resumption. The other seven are sound and are refused
+because the rules for a value that has to be used are cautious: a resumption
+taken out of a mutable variable again, two callables of which one runs, one
+held across an operation that is handled. Until those rules are finer, making
+every resumption subject to them would turn away ordinary handlers; and a
+resumption an arm lets go is cancelled, so the common case loses nothing. An
+operation says `[1, 1]` where it matters.
+
 How this differs from the specification:
 
 - Counting stops at one. `[2, 3]`, `[0, 0]` and the like are refused.
