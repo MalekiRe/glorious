@@ -400,7 +400,9 @@ inductive Head where
   it is one of the group being inferred, whose needs are not yet known. -/
   | fn (t : Ty) (bounds : List (String × Ty)) (inGroup : Bool)
   | method (sig : MethodSig)
-  | ctor (sig : CtorSig)
+  /-- A constructor, and the type its name was written with, if the name is
+  one given to it with a type. -/
+  | ctor (sig : CtorSig) (written : Option Expr := none)
   | op (sig : OpSig)
   | prim
   /-- A scalar as the integer it is held as, or, if `into`, back. -/
@@ -415,6 +417,16 @@ inductive Head where
 def resolveName (scope : Scope) (qual : Option String) (x : String) : M Head := do
   if qual.isNone then
     if let some b := scope.lookup x then return .local b
+    -- A name for a constructor that was written with a type is of that
+    -- type where it is used as a value; a pattern looks through it.
+    if let some e := (← get).aliases.lookup x then
+      if Syntax.aliasTyped e then
+        match e, Syntax.aliasValue e with
+        | .call _ _ [_, ty], .name q y =>
+          -- (Of a constructor's own name: the constructor, at that type.)
+          if let some (_, sig) ← resolveCtor y q then return .ctor sig (some ty)
+          return .const e
+        | _, _ => return .const e
   if let some (_, sig) ← resolveCtor x qual then return .ctor sig
   let s ← get
   if let some sig := s.ops.lookup x then

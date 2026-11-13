@@ -2261,7 +2261,7 @@ def cases : List Case := [
   ⟨"trait Zero { fn zero() -> Self }\nimpl Zero for Int { fn zero() -> Int { 0 } }\nfn main() { <Bool as Zero>::zero(); 0 }",
     [], "error: 3:13: in `main`: `Result<(), ()>` does not implement `Zero`"⟩,
   ⟨"trait Dbl { fn dbl(x: Self) -> Self }\nimpl Dbl for Int { fn dbl(x: Int) -> Int { x * 2 } }\nfn main() { <Int as Dbl>::dbl(true) }",
-    [], "error: 3:13: in `main`: argument 1 of `dbl`: expected `Int`, found `Result<(), _>`"⟩,
+    [], "error: 3:13: in `main`: argument 1 of `dbl`: expected `Int`, found `Result<(), ()>`"⟩,
   -- An operation, or a trait's function, named where it is not called is a callable that performs or calls it.
   ⟨"effect C { read() -> Int }\nfn ap(f: fn() -> Int / { C }) -> Int / { C } { f() }\nfn main() { handle { ap(read) }() { read(k) => k(3) } }",
     [], "3"⟩,
@@ -2299,7 +2299,7 @@ def cases : List Case := [
   ⟨"fn main() { let mut i = 0; @outer { loop { loop { i = i + 1; if(i == 3) { break_at(i, @outer) } } } } }",
     [], "3"⟩,
   ⟨"fn parse(n: Int) -> Int { return(true, @parse) }\nfn main() { parse(1) }",
-    [], "error: 1:27: in `parse`: argument 2 of `return`: expected `fn(Result<(), _>) -> _`, found `fn(Int) -> _`"⟩,
+    [], "error: 1:27: in `parse`: argument 2 of `return`: expected `fn(Result<(), ()>) -> _`, found `fn(Int) -> _`"⟩,
   ⟨"fn return(x: Int) -> Int { x + 1 }\nfn main() { return(1) }",
     [], "2"⟩,
   -- A block where a value that is no callable is wanted is run there.
@@ -2343,7 +2343,7 @@ def cases : List Case := [
   ⟨"struct P<A, B = A>(A, B)\nfn f(p: P<Int>) -> Int { p.0 + p.1 }\nfn main() { f(P(1, 2)) }",
     [], "3"⟩,
   ⟨"struct W<T = Int>(T)\nfn main() { let w: W = W(true); 0 }",
-    [], "error: 2:13: in `main`: the value of a `let` with a type: expected `W<Int>`, found `W<Result<(), _>>`"⟩,
+    [], "error: 2:13: in `main`: the value of a `let` with a type: expected `W<Int>`, found `W<Result<(), ()>>`"⟩,
   ⟨"struct W<T = Int, U>(T, U)\nfn main() { 0 }",
     [], "error: 1:20: a parameter that is always written comes before those that need not be, found `>`"⟩,
   ⟨"enum E<T = Int> { A(T), B }\nfn f(e: E) -> Int { match(e) { A(n) => n, B => 0 } }\nfn main() { f(A(4)) }",
@@ -2781,6 +2781,56 @@ def cases : List Case := [
   -- Conformance L17: err post state.
   ⟨"fn step(n: &mut Int) -> Result<Int, Str> { *n = *n + 1; Err(\"no\") }\nfn main() -> Int { let mut n = 0; match(step(&mut n)) { Ok(v) => v, Err(_) => n } }",
     [], "1"⟩,
+  -- Library conformance S01: alias identity.
+  ⟨"fn f(b: Bool) -> Option<()> { b }\nfn g(o: Option<()>) -> Result<(), ()> { o }\nfn main() { g(f(1 < 2)) }",
+    [], "Ok(())"⟩,
+  -- Library conformance S02: true is some.
+  ⟨"fn main() -> Bool { true == Some(()) }",
+    [], "Ok(())"⟩,
+  -- Library conformance S02: no convert.
+  ⟨"fn f(r: Result<(), Str>) -> Int { 0 }\nfn main() -> Int { f(true) }",
+    [], "error: 2:20: in `main`: argument 1 of `f`: expected `Result<(), Str>`, found `Result<(), ()>`"⟩,
+  -- Library conformance S03: none generic.
+  ⟨"fn first<T>(a: [T]) -> Option<T> { match(a) { [] => None, _ => None } }\nfn main() -> Int { match(first([1])) { None => 0, Some(n) => n } }",
+    [], "0"⟩,
+  -- Library conformance S09: if no else linear.
+  ⟨"struct Ticket(Int);\nimpl Use<[1, 1]> for Ticket {}\nfn redeem(t: Ticket) -> Int { match(t) { Ticket(n) => n } }\nfn main() -> Int { let t = Ticket(1); if(1 < 2) { redeem(t); }; 0 }",
+    [], "error: 4:20: in `main`: `t` is not used on every path, but a `Ticket` has to be used"⟩,
+  -- Library conformance S12: and or.
+  ⟨"fn main() -> Int { let mut n = 0; let a = and(1 < 2, { n = n + 1; 2 < 1 }); let b = or(a, { n = n + 10; true }); if(b) { n } else { 0 - 1 } }",
+    [], "11"⟩,
+  -- Library conformance S20: match fn arg.
+  ⟨"fn pick(o: Option<Int>, f: fn(Option<Int>) -> Int) -> Int { f(o) }\nfn main() -> Int { pick(Some(3), { Some(n) => n, None => 0 }) }",
+    [], "3"⟩,
+  -- Library conformance S31: min neg.
+  ⟨"fn main() -> Int { let m = 0 - 9223372036854775807 - 1; 0 - m }",
+    [], "went wrong"⟩,
+  -- Library conformance S31: div zero.
+  ⟨"fn main() -> Int { let z = 0; 1 / z }",
+    [], "went wrong"⟩,
+  -- Library conformance S31: shift.
+  ⟨"fn main() -> Int { shl(1, 70) }",
+    [], "went wrong"⟩,
+  -- Library conformance S33: nan unordered.
+  ⟨"fn main() { let z = 0.0; let n = z / z; say(n < 1.0); say(n > 1.0); say(n == n); say(0.0 == 0.0 - 0.0); 0 }",
+    [], "Err(())\nErr(())\nErr(())\nOk(())\n0"⟩,
+  -- Library conformance S33: float no ord hash.
+  ⟨"use std::hash::{HashMap, new};\nfn main() -> Int { let mut m = new(); HashMap::set(&mut m, 1.5, 1); 0 }",
+    [], "error: 2:39: in `main`: `f64` does not implement `std::hash::Hash`"⟩,
+  -- Library conformance S36: utf8 bad.
+  ⟨"use alloc::string::{String};\nfn main() { let bad: [u8] = [u8(255), u8(65)]; match(String::from_utf8(bad)) { Ok(_) => 0, Err(bytes) => len(bytes) } }",
+    [], "2"⟩,
+  -- Library conformance S53: none keeps state.
+  ⟨"use core::iter::{Iterator, range, next};\nfn main() -> Int { let mut r = range(0, 1); let a = next(&mut r); let b = next(&mut r); let c = next(&mut r); match(c) { None => 7, Some(_) => 0 } }",
+    [], "7"⟩,
+  -- Library conformance S07: a function that lets go of what it is given cannot be given a value that has to be used.
+  ⟨"struct Ticket(Int);\nimpl Use<[1, 1]> for Ticket {}\nfn redeem(t: Ticket) -> Int { match(t) { Ticket(n) => n } }\nfn throw_away<T>(x: T) { () }\nfn main() -> Int { throw_away(Ticket(1)); 0 }",
+    [], "error: 5:20: in `main`: `throw_away` may leave what it is given unused, but a `Ticket` has to be used"⟩,
+  -- A name given to a constructor with a type builds at that type, and is still that constructor in a pattern.
+  ⟨"let Just: fn(_) -> Result<_, ()> = Ok;\nfn main() -> Int { let a = Just(3); match(a) { Just(n) => n, None => 0 } }",
+    [], "3"⟩,
+  ⟨"let Just: fn(_) -> Result<_, ()> = Ok;\nfn main() -> Int { let a: Result<Int, Str> = Just(3); 0 }",
+    [], "error: 2:20: in `main`: the value of a `let` with a type: expected `Result<Int, Str>`, found `Result<Int, ()>`"⟩,
   -- `drop` is not for a program to call.
   ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nfn main() { let mut f = File(7); drop(&mut f); 0 }",
     [], "error: 3:34: in `main`: `drop` is run when what holds a value ends; a program does not call it"⟩,

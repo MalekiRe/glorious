@@ -22,8 +22,8 @@ type Option<T> = Result<T, ()>;
 type Bool = Result<(), ()>;
 let Some = Ok;
 let None = Err(());
-let true = Ok(());
-let false = Err(());
+let true: Result<(), ()> = Ok(());
+let false: Result<(), ()> = Err(());
 
 // Matching is applying a pattern callable.
 fn match(subject, arms) { tail arms(subject) }

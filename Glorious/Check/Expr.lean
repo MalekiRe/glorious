@@ -27,9 +27,11 @@ partial def inferExpr (scope : Scope) (amb : Row) : Expr → M Ty
       pure t
     | .method sig =>
       throw s!"`{x}` is a function of the trait `{sig.trait}`, so it is called where it is named: write a block that calls it"
-    | .ctor sig => do
+    | .ctor sig written => do
       let (fields, result) ← instCtor sig
       unless fields.isEmpty do arityError s!"constructor `{x}`" fields.length 0
+      if let some ty := written then
+        unifyAt s!"`{x}` is written with a type" (← resolveType [] false (TypeExpr.ofExpr ty)) result
       pure result
     | .op _ => throw s!"operation `{x}` must be called"
     | .prim => throw s!"intrinsic `{x}` must be called"
@@ -523,8 +525,12 @@ partial def inferCall (scope : Scope) (amb : Row) (f : Expr) (args : List Expr)
   match f with
   | .name q x =>
     match ← resolveName scope q x with
-    | .ctor sig => do
+    | .ctor sig written => do
       let (fields, result) ← instCtor sig
+      -- A name given to the constructor with a type: built at that type.
+      if let some ty := written then
+        let said ← resolveType [] false (TypeExpr.ofExpr ty)
+        unifyAt s!"`{x}` is written with a type" said (.fn fields result [] none (← freshCap))
       checkArgs scope amb s!"constructor `{x}`" fields args call
       -- What the type's declaration asks of its parameters.
       if let .con owner targs := result then

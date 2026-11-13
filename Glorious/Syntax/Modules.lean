@@ -580,8 +580,12 @@ partial def aliased (fuel : Nat) (e : Entry) : R (Option String) := do
       | .pub _ i => i
       | i => i
     match item with
-    | .alias name (.name none target) =>
-      if mangle e.home name == e.global || s!"prelude::{name}" == e.global then some target else none
+    | .alias name value =>
+      -- (A name given with a type stands for the same constructor.)
+      match aliasValue value with
+      | .name none target =>
+        if mangle e.home name == e.global || s!"prelude::{name}" == e.global then some target else none
+      | _ => none
     | _ => none
   match value.bind fun target => lookupIn scope .value target with
   | some next => aliased (fuel - 1) next

@@ -270,7 +270,7 @@ abbrev Alts := List (AVal × Nat)
 partial def ACtx.ctorOf (ctx : ACtx) (name : String) : Option String :=
   if ctx.ctors.contains name then some name
   else
-    match ctx.aliases.lookup name with
+    match (ctx.aliases.lookup name).map Syntax.aliasValue with
     | some (.name _ y) => ctx.ctorOf y
     | _ => none
 

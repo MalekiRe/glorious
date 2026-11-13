@@ -708,7 +708,7 @@ partial def resolveCtor (name : String) (qual : Option String) : M (Option CtorI
     -- many elements.
     if let some n := Syntax.arrayPatLen name then
       return some { owner := "", tag := arrayBase + n, arity := n, single := false }
-    match g.aliases.lookup name with
+    match (g.aliases.lookup name).map Syntax.aliasValue with
     | some (.name q y) => resolveCtor y q
     | _ => pure none
 

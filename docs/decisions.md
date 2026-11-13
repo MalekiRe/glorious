@@ -2540,6 +2540,25 @@ L..". Where one is not met, this is how.
   resumption used more than once, and no raw memory beyond addresses given
   to and by C.
 
+## The library specification's required cases
+
+The library specification lists ninety-six (33). Most are about modules this
+library does not have. Those that could be tried against what there is are
+kept among the cases under "Library conformance S..": S01 to S03, S07, S09,
+S12, S20, S31, S33, S36 and S53 are met as tried.
+
+- **S02** was not: `true` and `false` were names for `Ok(())` and `Err(())`
+  at any error type, so `true` could be given where a `Result<(), Str>` was
+  wanted. They are now written with their type, `Result<(), ()>`, as the
+  specification's constants are. `Some` stays a name for `Ok` itself, as
+  the specification has it.
+- A name given to a constructor can be written with a type,
+  `let Just: fn(_) -> Result<_, ()> = Ok;`: it builds at that type, and in a
+  pattern it is still the constructor.
+- **S06.** `replace` asks nothing of the type. There is no `swap` of two
+  references: it cannot be written with `replace`, and the machine has no
+  operation for it.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by

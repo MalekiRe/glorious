@@ -361,6 +361,18 @@ def instMark : String := "%inst"
 that the name fixes, by its place. -/
 def fixedArgName (j : Nat) : String := s!"%fixed:{j}"
 
+/-- What a name given to a value stands for, apart from the type it was
+written with: `let yes: Bool = Ok(());` stands for `Ok(())`. -/
+partial def aliasValue : Expr → Expr
+  | .call id (.name none mark) (value :: rest) =>
+    if mark == ascribeMark then aliasValue value else .call id (.name none mark) (value :: rest)
+  | e => e
+
+/-- Was the name given a value written with its type? -/
+def aliasTyped : Expr → Bool
+  | .call _ (.name none mark) (_ :: _) => mark == ascribeMark
+  | _ => false
+
 /-- In an implementation: what one of its conditions says a type left to the
 implementations of a trait is, `where I: Iterator<Item = A>`. The name says
 which condition, by its place, and which type. -/

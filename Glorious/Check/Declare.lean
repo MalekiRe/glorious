@@ -624,7 +624,7 @@ partial def resolveCtor (name : String) (qual : Option String) : M (Option (Stri
     if let (some n, some array) := (Syntax.arrayPatLen name, s.arrayType) then
       if let some sig := s.ctors.lookup array then
         return some (name, { sig with fields := List.replicate n (sig.fields.headD .unit) })
-    match s.aliases.lookup name with
+    match (s.aliases.lookup name).map Syntax.aliasValue with
     | some (.name q y) => resolveCtor y q
     | _ => pure none
 
