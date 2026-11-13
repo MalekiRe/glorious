@@ -684,7 +684,12 @@ partial def runCallee (ctx : ACtx) (depth : Nat) (env : List (String × AVal)) (
     -- Applying a label leaves for its scope.
     if ctx.lower then handedOn fun n => [(.gone ("@" ++ l), n)] else general
   | .name q x =>
-    if q.isNone && (env.lookup x).isSome then general
+    -- A value written with its type is the value: nothing is called.
+    if q.isNone && x == Syntax.ascribeMark then
+      match args with
+      | value :: _ => runExpr ctx depth env value
+      | [] => pure [(.unknown, 0)]
+    else if q.isNone && (env.lookup x).isSome then general
     else if let some c := ctx.ctorOf x then
       let alts ← runList ctx depth env args
       pure (alts.map fun (vs, n) =>

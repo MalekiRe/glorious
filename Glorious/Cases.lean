@@ -1966,6 +1966,13 @@ def cases : List Case := [
   -- A function with a loop and a callable given its environment.
   ⟨"fn f<'e, E, B>(b: B) -> Int where E: Environment<'e>, B: RunsIn<E, (), Output = Int> { let mut i = 0; while({ i < 3 }) { i = i + 1 }; b() }\nfn main() { let mut n = 1; f({ n * 10 }) }",
     [], "10"⟩,
+  -- A value written with its type between a value that has to be used and its use.
+  ⟨"struct File(Int)\nimpl Use<[1, 1]> for File {}\nfn open() -> File { File(1) }\nfn close(f: File) -> Int { match(f) { File(n) => n } }\nfn main() { let f = open(); let c: Option<Int> = Some(2); close(f) }",
+    [], "1"⟩,
+  ⟨"struct File(Int)\nimpl Use<[1, 1]> for File {}\nfn open() -> File { File(1) }\nfn close(f: File) -> Int { match(f) { File(n) => n } }\nfn main() { let f = open(); let c: Option<Int> = Some(2); match(c) { Some(n) => close(f), None => close(f) } }",
+    [], "1"⟩,
+  ⟨"struct File(Int)\nimpl Use<[1, 1]> for File {}\nfn open() -> File { File(1) }\nfn close(f: File) -> Int { match(f) { File(n) => n } }\nfn main() { let f = open(); let c: Option<Int> = Some(2); if(c is Some(n)) { n + close(f) } else { close(f) } }",
+    [], "3"⟩,
   -- `drop` is not for a program to call.
   ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nfn main() { let mut f = File(7); drop(&mut f); 0 }",
     [], "error: 3:34: in `main`: `drop` is run when what holds a value ends; a program does not call it"⟩,
