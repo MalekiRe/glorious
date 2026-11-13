@@ -2238,9 +2238,14 @@ gives. The callable performs nothing: an effect cannot pass C, nor can a jump
 to a label, and the checker holds the callable to that. The callable and the
 code at the address are never let go of.
 
-- **No records.** `#[repr(C)]` is read and does nothing: a value built by a
-  constructor is not laid out in memory as C would lay it out, so C is given
-  an address the program filled with `ptr_write`.
+- **Records are copied in and out.** A value built by a constructor is not
+  laid out in memory as C would lay it out. `#[repr(C)]` on a struct whose
+  fields are whole numbers, floats and addresses gives it
+  `Type::c_size()`, `Type::c_write(value, at)` and `Type::c_read(at)`, which
+  put it at an address and read it back as C lays such a struct out on
+  x86-64 Linux: each field at the next multiple of its size, the whole a
+  multiple of the largest. A struct inside a struct, an array, or a type
+  parameter is not laid out, and the attribute then does nothing.
 - **Nothing is exported.** `#[export_name]` is read and does nothing: the
   program is not a library C can link against, only one that C can call back
   into while it is being called.

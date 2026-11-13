@@ -2612,7 +2612,10 @@ def foreignCases : List Case := [
     [], "hello, host\none\ntwo\n\nno file: 2\nHOME is set\nthe clock goes on\n8\nsomewhere\nstarted\n0"⟩,
   -- The same under the names the specification gives the modules.
   ⟨"use std::io::{println};\nuse std::fs::{read_text, write_text};\nuse std::host::{run_host};\nfn main() { run_host({ write_text(\"/tmp/glorious-ns-test.txt\", \"names\"); println(match(read_text(\"/tmp/glorious-ns-test.txt\")) { Ok(t) => t, Err(_) => \"?\" }); 0 }) }",
-    [], "names\n0"⟩
+    [], "names\n0"⟩,
+  -- A `#[repr(C)]` struct is written to memory and read from it as C lays it out.
+  ⟨"#[repr(C)]\nstruct Timespec { sec: i64, nsec: i64 }\n#[repr(C)]\nstruct Mixed { a: u8, b: i32, c: f64, d: u16 }\nextern \"C\" { fn malloc(n: usize) -> usize; fn free(p: usize); fn clock_gettime(clock: i32, at: usize) -> i32; }\nfn main() { unsafe {\n    say(Mixed::c_size());\n    let p = malloc(Mixed::c_size());\n    Mixed::c_write(Mixed { a: 7u8, b: 0i32 - 5i32, c: 2.5, d: 65535u16 }, p);\n    say(ptr_read(p + 4usize, 32));\n    let m = Mixed::c_read(p);\n    say(m.a); say(m.b); say(m.c); say(m.d);\n    free(p);\n    let t = malloc(Timespec::c_size());\n    clock_gettime(0i32, t);\n    let now = Timespec::c_read(t);\n    free(t);\n    say(now.sec > 1000000000);\n    0 } }",
+    [], "24\n-5\n7\n-5\n2.5\n65535\nOk(())\n0"⟩
 ]
 
 end Glorious
