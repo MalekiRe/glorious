@@ -33,7 +33,9 @@ structure PCtx where
   tables : List (List String × Fixities) := []
   path : List String := []
 
-abbrev P := ReaderT PCtx (StateT Nat (Except String))
+/-- Where the parser is, and beneath that the functions written inside
+blocks, on their way to the module the block is in. -/
+abbrev P := ReaderT PCtx (StateT Nat (StateT (Array Item) (Except String)))
 
 instance {α : Type} : Inhabited (P α) := ⟨throw "parser: unreachable"⟩
 
@@ -467,6 +469,207 @@ private partial def parseTypeList (close : String) : P (List TypeExpr) := do
   pure out.toList
 
 end
+
+
+
+/-- The fields of a constructor, struct or operation, if any are written. -/
+private def parseFields : P (List TypeExpr) := do
+  if ← acceptPunct "(" then parseTypeList ")" else pure []
+
+private def fixityKinds : List String := ["infixl", "infixr", "infix", "prefix"]
+
+/-- `[lower, upper]`: how often something is to be used. `infinity` is no upper
+bound. -/
+private def parseQuantity : P (Nat × Option Nat) := do
+  expectPunct "["
+  let lower ← match ← peek with
+    | .int n => do
+      advance
+      pure n
+    | _ => failAt "expected the fewest uses, a number"
+  expectPunct ","
+  let upper ← match ← peek with
+    | .int n => do
+      advance
+      pure (some n)
+    | .ident "infinity" => do
+      advance
+      pure none
+    | .op "*" => do
+      advance
+      pure none
+    | _ => failAt "expected the most uses, a number, `*` or `infinity`"
+  expectPunct "]"
+  if let some n := upper then
+    if n < lower then failAt "the most uses cannot be fewer than the fewest"
+  pure (lower, upper)
+
+/-- A row of effects in braces, `{E, F<T>}`. -/
+private partial def parseRow : P (List (String × List TypeExpr)) := do
+  expectPunct "{"
+  let mut effects : Array (String × List TypeExpr) := #[]
+  repeat
+    if (← peek) == .punct "}" then break
+    let name ← expectPath
+    let mut args : Array TypeExpr := #[]
+    if (← peek) == .op "<" then
+      advance
+      repeat
+        if (← peek) == .op ">" then break
+        args := args.push (← parseType)
+        if !(← acceptPunct ",") then break
+      match ← peek with
+      | .op ">" => advance
+      | _ => failAt "expected `>`"
+    effects := effects.push (name, args.toList)
+    if !(← acceptPunct ",") then break
+  expectPunct "}"
+  pure effects.toList
+
+/-- The arguments of a callable as a bound writes them: `()`, `(A,)`,
+`(A, B)`. One argument has the comma, so that it is not `A` in brackets. -/
+private partial def parsePack : P (List TypeExpr) := do
+  expectPunct "("
+  let mut out : Array TypeExpr := #[]
+  let mut comma := false
+  repeat
+    if (← peek) == .punct ")" then break
+    out := out.push (← parseType)
+    comma := ← acceptPunct ","
+    if !comma then break
+  if out.size == 1 && !comma then
+    failAt "a callable of one argument is written `Fn<(T,)>`: without the comma `(T)` is `T` in brackets"
+  expectPunct ")"
+  pure out.toList
+
+/-- `, Name = Type` as often as it is written, up to the closing `>`. -/
+private partial def parseAssoc : P (List (String × TypeExpr)) := do
+  let mut out : Array (String × TypeExpr) := #[]
+  while ← acceptPunct "," do
+    let name ← expectIdent
+    expectPunct "="
+    if name == "Effects" then out := out.push (name, .performs (.tuple []) (← parseRow))
+    else out := out.push (name, ← parseType)
+  match ← peek with
+  | .op ">" => advance
+  | _ => failAt "expected `>`"
+  pure out.toList
+
+/-- What is written after `Name:` of a type parameter: bounds joined by `+`. -/
+private partial def parseBoundsOf (subject : String) : P (List Bound) := do
+  let mut out : Array Bound := #[]
+  repeat
+    let mut tr ← expectPath
+    -- `for<'a>` before a callable: it is asked for at every such lifetime.
+    let mut ranked : Array String := #[]
+    if tr == "for" && (← isOp "<") then
+      advance
+      repeat
+        if ← isOp ">" then break
+        let l ← expectIdent
+        unless l.startsWith "'" do failAt "expected a lifetime: `for<'a>`"
+        ranked := ranked.push l
+        if !(← acceptPunct ",") then break
+      expectOp ">"
+      tr ← expectPath
+      unless tr == "Fn" || tr == "RunsIn" do failAt "`for<..>` is written before `Fn` or `RunsIn`"
+    if tr == "Fn" then
+      if !(← isOp "<") then failAt "expected `<`: `Fn<(A, B), Output = R>`"
+      advance
+      let pack ← parsePack
+      out := out.push { subject, trait := tr, args := pack, assoc := ← parseAssoc, ranked := ranked.toList }
+    else if tr == "RunsIn" then
+      if !(← isOp "<") then failAt "expected `<`: `RunsIn<E, (A, B), Output = R>`"
+      advance
+      let access ← parseType
+      expectPunct ","
+      let pack ← parsePack
+      out := out.push { subject, trait := tr, args := access :: pack, assoc := ← parseAssoc, ranked := ranked.toList }
+    else if tr == "Use" then
+      if !(← isOp "<") then failAt "expected `<`: `Use<[1, 1]>`"
+      advance
+      let quantity ← parseQuantity
+      if ← isOp ">" then advance else failAt "expected `>`"
+      out := out.push { subject, trait := tr, quantity := some quantity }
+    else
+      let mut args : Array TypeExpr := #[]
+      let mut said : Array (String × TypeExpr) := #[]
+      if ← isOp "<" then
+        advance
+        repeat
+          if ← isOp ">" then break
+          -- `Item = Type`: what the trait leaves to an implementation is
+          -- said to be that type.
+          match ← peek, ← peek 1 with
+          | .ident name, .punct "=" =>
+            advance
+            advance
+            said := said.push (name, ← parseType)
+          | _, _ => args := args.push (← parseType)
+          if !(← acceptPunct ",") then break
+        if ← isOp ">" then advance else failAt "expected `>`"
+      out := out.push { subject, trait := tr, args := args.toList, assoc := said.toList }
+    if ← isOp "+" then advance else break
+  pure out.toList
+
+/-- Generic parameters `<'a, 'b: 'a, T, F: Fn<(T,)>>`, if present: type
+parameters and lifetimes, a lifetime perhaps with one it lasts at least as
+long as, a type parameter perhaps with what is asked of it. -/
+private partial def parseGenericsWith : P (List String × List Bound) := do
+  if !(← isOp "<") then return ([], [])
+  advance
+  let mut out : Array String := #[]
+  let mut bounds : Array Bound := #[]
+  repeat
+    if ← isOp ">" then break
+    let x ← expectIdent
+    out := out.push x
+    if (← peek) == .punct ":" then
+      advance
+      if x.startsWith "'" then
+        let y ← expectIdent
+        unless y.startsWith "'" do failAt "expected a lifetime: `'b: 'a`"
+        out := out.push s!"{x}: {y}"
+      else bounds := bounds ++ (← parseBoundsOf x).toArray
+    if !(← acceptPunct ",") then break
+  expectOp ">"
+  pure (out.toList, bounds.toList)
+
+private partial def parseGenerics : P (List String) := do
+  let (params, bounds) ← parseGenericsWith
+  unless bounds.isEmpty do failAt "what is asked of a type parameter is written on a function"
+  pure params
+
+/-- `where 'b: 'a, F: Fn<(T,)>, ...` after a function's result, if present. -/
+private partial def parseWhere : P (List String × List Bound) := do
+  if (← peek) != .ident "where" then return ([], [])
+  advance
+  let mut out : Array String := #[]
+  let mut bounds : Array Bound := #[]
+  repeat
+    let x ← expectIdent
+    expectPunct ":"
+    if x.startsWith "'" then
+      let y ← expectIdent
+      unless y.startsWith "'" do failAt "expected a lifetime: `where 'b: 'a`"
+      out := out.push s!"{x}: {y}"
+    else bounds := bounds ++ (← parseBoundsOf x).toArray
+    if !(← acceptPunct ",") then break
+  pure (out.toList, bounds.toList)
+
+/-- `pub`, if it is next: whether it is `pub(super)`, which lets only the
+module this one is written in see. `pub(crate)` is `pub`: there is one package. -/
+private def acceptPub : P (Option Bool) := do
+  if (← peek) != .ident "pub" then return none
+  advance
+  if (← peek) == .punct "(" then
+    advance
+    let scope ← expectIdent
+    unless scope == "crate" || scope == "super" do
+      failAt "expected `pub(crate)` or `pub(super)`"
+    expectPunct ")"
+    return some (scope == "super")
+  pure (some false)
 
 mutual
 
@@ -948,9 +1151,29 @@ private partial def parseClause : P Clause := do
 /-- Statements up to a `}` or a `,`. A trailing `;` makes the value unit. -/
 private partial def parseStmts : P (List Stmt) := do
   let mut out : Array Stmt := #[]
+  -- The functions written in this block, each with the name it has as a
+  -- function of the module.
+  let mut local_ : Array (String × String) := #[]
+  let madeBefore := (← getThe (Array Item)).size
   repeat
     let t ← peek
     if t == .punct "}" || t == .punct "," || t == .eof then break
+    -- `fn name(..) { .. }` in a block: a function of the module, which only
+    -- this block can name. It uses nothing of the block's.
+    if t == .ident "fn" then
+      match ← peek 1, ← peek 2 with
+      | .ident name, .punct "(" | .ident name, .op "<" =>
+        let own := s!"{name}%{(← read).base + (← get)}"
+        let (item, bounds) ← parseFn
+        let _ ← acceptPunct ";"
+        match item with
+        | .fn _ ps annots ret clauses =>
+          modifyThe (Array Item) fun made =>
+            (made.push (.fn own ps annots ret clauses)) ++ (if bounds.isEmpty then #[] else #[.bounds own bounds])
+          local_ := local_.push (name, own)
+        | _ => pure ()
+        continue
+      | _, _ => pure ()
     let here ← peekTok
     let mark := fun (s : Stmt) => Stmt.located here.line here.col s
     -- A borrow of a field of what an expression points to: the reference is
@@ -1015,209 +1238,22 @@ private partial def parseStmts : P (List Stmt) := do
           if t' == .punct "}" || t' == .punct "," then
             out := out.push (.expr (.tuple []))
         else break
-  pure out.toList
+  -- The functions written in this block are named, in it and in each
+  -- other, by the names they have as functions of the module.
+  if local_.isEmpty then return out.toList
+  let named := fun (stmts : List Stmt) =>
+    local_.foldl (fun stmts (name, own) => renameStmts name own [] stmts) stmts
+  modifyThe (Array Item) fun made =>
+    made.mapIdx fun k item =>
+      if k < madeBefore then item
+      else match item with
+        | .fn f ps annots ret clauses =>
+          .fn f ps annots ret (clauses.map fun
+            | .mk pats body => .mk pats (local_.foldl (fun body (name, own) =>
+                renameStmts name own (pats.flatMap patternNames) body) body))
+        | other => other
+  pure (named out.toList)
 
-end
-
-
-/-- The fields of a constructor, struct or operation, if any are written. -/
-private def parseFields : P (List TypeExpr) := do
-  if ← acceptPunct "(" then parseTypeList ")" else pure []
-
-private def fixityKinds : List String := ["infixl", "infixr", "infix", "prefix"]
-
-/-- `[lower, upper]`: how often something is to be used. `infinity` is no upper
-bound. -/
-private def parseQuantity : P (Nat × Option Nat) := do
-  expectPunct "["
-  let lower ← match ← peek with
-    | .int n => do
-      advance
-      pure n
-    | _ => failAt "expected the fewest uses, a number"
-  expectPunct ","
-  let upper ← match ← peek with
-    | .int n => do
-      advance
-      pure (some n)
-    | .ident "infinity" => do
-      advance
-      pure none
-    | .op "*" => do
-      advance
-      pure none
-    | _ => failAt "expected the most uses, a number, `*` or `infinity`"
-  expectPunct "]"
-  if let some n := upper then
-    if n < lower then failAt "the most uses cannot be fewer than the fewest"
-  pure (lower, upper)
-
-/-- A row of effects in braces, `{E, F<T>}`. -/
-private partial def parseRow : P (List (String × List TypeExpr)) := do
-  expectPunct "{"
-  let mut effects : Array (String × List TypeExpr) := #[]
-  repeat
-    if (← peek) == .punct "}" then break
-    let name ← expectPath
-    let mut args : Array TypeExpr := #[]
-    if (← peek) == .op "<" then
-      advance
-      repeat
-        if (← peek) == .op ">" then break
-        args := args.push (← parseType)
-        if !(← acceptPunct ",") then break
-      match ← peek with
-      | .op ">" => advance
-      | _ => failAt "expected `>`"
-    effects := effects.push (name, args.toList)
-    if !(← acceptPunct ",") then break
-  expectPunct "}"
-  pure effects.toList
-
-/-- The arguments of a callable as a bound writes them: `()`, `(A,)`,
-`(A, B)`. One argument has the comma, so that it is not `A` in brackets. -/
-private partial def parsePack : P (List TypeExpr) := do
-  expectPunct "("
-  let mut out : Array TypeExpr := #[]
-  let mut comma := false
-  repeat
-    if (← peek) == .punct ")" then break
-    out := out.push (← parseType)
-    comma := ← acceptPunct ","
-    if !comma then break
-  if out.size == 1 && !comma then
-    failAt "a callable of one argument is written `Fn<(T,)>`: without the comma `(T)` is `T` in brackets"
-  expectPunct ")"
-  pure out.toList
-
-/-- `, Name = Type` as often as it is written, up to the closing `>`. -/
-private partial def parseAssoc : P (List (String × TypeExpr)) := do
-  let mut out : Array (String × TypeExpr) := #[]
-  while ← acceptPunct "," do
-    let name ← expectIdent
-    expectPunct "="
-    if name == "Effects" then out := out.push (name, .performs (.tuple []) (← parseRow))
-    else out := out.push (name, ← parseType)
-  match ← peek with
-  | .op ">" => advance
-  | _ => failAt "expected `>`"
-  pure out.toList
-
-/-- What is written after `Name:` of a type parameter: bounds joined by `+`. -/
-private partial def parseBoundsOf (subject : String) : P (List Bound) := do
-  let mut out : Array Bound := #[]
-  repeat
-    let mut tr ← expectPath
-    -- `for<'a>` before a callable: it is asked for at every such lifetime.
-    let mut ranked : Array String := #[]
-    if tr == "for" && (← isOp "<") then
-      advance
-      repeat
-        if ← isOp ">" then break
-        let l ← expectIdent
-        unless l.startsWith "'" do failAt "expected a lifetime: `for<'a>`"
-        ranked := ranked.push l
-        if !(← acceptPunct ",") then break
-      expectOp ">"
-      tr ← expectPath
-      unless tr == "Fn" || tr == "RunsIn" do failAt "`for<..>` is written before `Fn` or `RunsIn`"
-    if tr == "Fn" then
-      if !(← isOp "<") then failAt "expected `<`: `Fn<(A, B), Output = R>`"
-      advance
-      let pack ← parsePack
-      out := out.push { subject, trait := tr, args := pack, assoc := ← parseAssoc, ranked := ranked.toList }
-    else if tr == "RunsIn" then
-      if !(← isOp "<") then failAt "expected `<`: `RunsIn<E, (A, B), Output = R>`"
-      advance
-      let access ← parseType
-      expectPunct ","
-      let pack ← parsePack
-      out := out.push { subject, trait := tr, args := access :: pack, assoc := ← parseAssoc, ranked := ranked.toList }
-    else if tr == "Use" then
-      if !(← isOp "<") then failAt "expected `<`: `Use<[1, 1]>`"
-      advance
-      let quantity ← parseQuantity
-      if ← isOp ">" then advance else failAt "expected `>`"
-      out := out.push { subject, trait := tr, quantity := some quantity }
-    else
-      let mut args : Array TypeExpr := #[]
-      let mut said : Array (String × TypeExpr) := #[]
-      if ← isOp "<" then
-        advance
-        repeat
-          if ← isOp ">" then break
-          -- `Item = Type`: what the trait leaves to an implementation is
-          -- said to be that type.
-          match ← peek, ← peek 1 with
-          | .ident name, .punct "=" =>
-            advance
-            advance
-            said := said.push (name, ← parseType)
-          | _, _ => args := args.push (← parseType)
-          if !(← acceptPunct ",") then break
-        if ← isOp ">" then advance else failAt "expected `>`"
-      out := out.push { subject, trait := tr, args := args.toList, assoc := said.toList }
-    if ← isOp "+" then advance else break
-  pure out.toList
-
-/-- Generic parameters `<'a, 'b: 'a, T, F: Fn<(T,)>>`, if present: type
-parameters and lifetimes, a lifetime perhaps with one it lasts at least as
-long as, a type parameter perhaps with what is asked of it. -/
-private partial def parseGenericsWith : P (List String × List Bound) := do
-  if !(← isOp "<") then return ([], [])
-  advance
-  let mut out : Array String := #[]
-  let mut bounds : Array Bound := #[]
-  repeat
-    if ← isOp ">" then break
-    let x ← expectIdent
-    out := out.push x
-    if (← peek) == .punct ":" then
-      advance
-      if x.startsWith "'" then
-        let y ← expectIdent
-        unless y.startsWith "'" do failAt "expected a lifetime: `'b: 'a`"
-        out := out.push s!"{x}: {y}"
-      else bounds := bounds ++ (← parseBoundsOf x).toArray
-    if !(← acceptPunct ",") then break
-  expectOp ">"
-  pure (out.toList, bounds.toList)
-
-private partial def parseGenerics : P (List String) := do
-  let (params, bounds) ← parseGenericsWith
-  unless bounds.isEmpty do failAt "what is asked of a type parameter is written on a function"
-  pure params
-
-/-- `where 'b: 'a, F: Fn<(T,)>, ...` after a function's result, if present. -/
-private partial def parseWhere : P (List String × List Bound) := do
-  if (← peek) != .ident "where" then return ([], [])
-  advance
-  let mut out : Array String := #[]
-  let mut bounds : Array Bound := #[]
-  repeat
-    let x ← expectIdent
-    expectPunct ":"
-    if x.startsWith "'" then
-      let y ← expectIdent
-      unless y.startsWith "'" do failAt "expected a lifetime: `where 'b: 'a`"
-      out := out.push s!"{x}: {y}"
-    else bounds := bounds ++ (← parseBoundsOf x).toArray
-    if !(← acceptPunct ",") then break
-  pure (out.toList, bounds.toList)
-
-/-- `pub`, if it is next: whether it is `pub(super)`, which lets only the
-module this one is written in see. `pub(crate)` is `pub`: there is one package. -/
-private def acceptPub : P (Option Bool) := do
-  if (← peek) != .ident "pub" then return none
-  advance
-  if (← peek) == .punct "(" then
-    advance
-    let scope ← expectIdent
-    unless scope == "crate" || scope == "super" do
-      failAt "expected `pub(crate)` or `pub(super)`"
-    expectPunct ")"
-    return some (scope == "super")
-  pure (some false)
 
 /-- A function, and what is written of its type parameters. -/
 private partial def parseFn : P (Item × List Bound) := do
@@ -1259,6 +1295,8 @@ private partial def parseFn : P (Item × List Bound) := do
     let clauses ← parseClauses
     expectPunct "}"
     pure (.fn name params [] none clauses, bounds)
+
+end
 
 private partial def parseItem : P Item := do
   match ← peek with
@@ -1643,6 +1681,8 @@ private partial def parseItemGroup : P (List Item) := do
     let ctx ← read
     let inner := ctx.path ++ [name]
     let fix := (ctx.tables.lookup inner).getD ctx.fix
+    -- The functions written in blocks of this module are the module's.
+    let madeBefore := (← getThe (Array Item)).size
     let items ← withReader (fun r => { r with path := inner, fix }) do
       let mut items : Array Item := #[]
       repeat
@@ -1650,7 +1690,9 @@ private partial def parseItemGroup : P (List Item) := do
         items := items ++ (← parseItemGroup).toArray
       pure items
     expectPunct "}"
-    pure [.module name (some items.toList)]
+    let made ← getThe (Array Item)
+    modifyThe (Array Item) (·.extract 0 madeBefore)
+    pure [.module name (some (items.toList ++ (made.extract madeBefore made.size).toList))]
   | .ident "use" =>
     advance
     let items ← parseUseTree []
@@ -2010,8 +2052,8 @@ def parse (fix : Fixities) (src : String) (base : Nat := 0) (records : List Stri
     Except String (List Item × Fixities) := do
   let toks ← lex src
   let fix ← if tables.isEmpty then collectFixities toks fix else pure ((tables.lookup path).getD fix)
-  let (items, _) ← (parseItems.run
-    { toks, fix, records := collectRecords toks ++ records, base, tables, path }).run 0
-  pure (items, fix)
+  let ((items, _), local_) ← ((parseItems.run
+    { toks, fix, records := collectRecords toks ++ records, base, tables, path }).run 0).run #[]
+  pure (items ++ local_.toList, fix)
 
 end Glorious.Syntax

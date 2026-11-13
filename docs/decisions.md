@@ -1063,6 +1063,21 @@ Limits. Where the type wanted is a type parameter with nothing asked of it,
 the block is still a callable; the specification has it run there.
 `continue_at(@outer)` waits for loops that are named, with the library.
 
+## A function written in a block
+
+**Decision: `fn name(..) { .. }` among a block's statements is a function of
+the module the block is in, which only that block can name** (20). The
+parser gives it a name of its own and writes that name wherever the block,
+and the functions written beside it, mean it; so it can call itself and
+them, has type parameters like any function, and two blocks may each have
+one of the same name. It uses nothing of the block's: it is not a callable
+that holds what is around it, and `let f = fn(..) { .. }` is the way to
+write one of those.
+
+Limits. Only functions are written in a block: a type, a constant or an
+`impl` there is not read. A message names such a function with the number
+the parser gave it.
+
 ## What the specification's audit turned away
 
 An audit of the language specification against the compiler, section by

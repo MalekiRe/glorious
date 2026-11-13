@@ -240,54 +240,6 @@ partial def unforce : Pattern → Pattern
   | .tuple args => .tuple (args.map unforce)
   | p => p
 
-/-- Every name a pattern could bind. -/
-partial def patternNames : Pattern → List String
-  | .var x => [x]
-  | .ctor _ _ args => args.flatMap patternNames
-  | .tuple args => args.flatMap patternNames
-  | _ => []
-
-mutual
-
-/-- An expression with `x` written `y` wherever it means what it means
-outside: not under a pattern, a `let` or a parameter that names `x` anew. -/
-partial def renameExpr (x y : String) (bound : List String) : Expr → Expr
-  | .name none z => if z == x && !bound.contains x then .name none y else .name none z
-  | .call id f args => .call id (renameExpr x y bound f) (args.map (renameExpr x y bound))
-  | .tailCall id f args => .tailCall id (renameExpr x y bound f) (args.map (renameExpr x y bound))
-  | .tuple args => .tuple (args.map (renameExpr x y bound))
-  | .proj e i => .proj (renameExpr x y bound e) i
-  | .closure id clauses => .closure id (clauses.map (renameClause x y bound))
-  | .handle subject arms => .handle (renameExpr x y bound subject) (arms.map (renameClause x y bound))
-  | .labelScope l body => .labelScope l (renameStmts x y bound body)
-  | .ref uniq z => .ref uniq (if z == x && !bound.contains x then y else z)
-  | .deref e => .deref (renameExpr x y bound e)
-  | .reborrow uniq e => .reborrow uniq (renameExpr x y bound e)
-  | .refField id uniq z path star =>
-    .refField id uniq (if z == x && !bound.contains x then y else z) path star
-  | .fieldOf id e name => .fieldOf id (renameExpr x y bound e) name
-  | e => e
-
-partial def renameClause (x y : String) (bound : List String) : Clause → Clause
-  | .mk pats body => .mk pats (renameStmts x y (pats.flatMap patternNames ++ bound) body)
-
-partial def renameStmts (x y : String) (bound : List String) : List Stmt → List Stmt
-  | [] => []
-  | .let_ pat value :: rest =>
-    .let_ pat (renameExpr x y bound value) :: renameStmts x y (patternNames pat ++ bound) rest
-  | .letMut z value :: rest =>
-    .letMut z (renameExpr x y bound value) :: renameStmts x y (z :: bound) rest
-  | .expr e :: rest => .expr (renameExpr x y bound e) :: renameStmts x y bound rest
-  | .defer e :: rest => .defer (renameExpr x y bound e) :: renameStmts x y bound rest
-  | .located line col s :: rest =>
-    match renameStmts x y bound (s :: rest) with
-    | first :: more => .located line col first :: more
-    | [] => []
-  | .assign target value :: rest =>
-    .assign (renameExpr x y bound target) (renameExpr x y bound value) :: renameStmts x y bound rest
-
-end
-
 mutual
 
 /-- Everything a module can write: what it declares, the modules written in
