@@ -127,6 +127,9 @@ structure St where
   hidden : List (List String) := []
   /-- The coercions, each with the module that declares it. -/
   coerced : List (List String × String) := []
+  /-- `#![no_implicit_prelude]` or `#![no_std]`: the program's modules have
+  the prelude's names only where they `use` them. -/
+  bare : Bool := false
   /-- How many names this pass has made up. -/
   fresh : Nat := 0
 
@@ -251,7 +254,7 @@ partial def scopeOf (p : List String) : R (List Bound) := do
           for o in ← opsOf b.entry do
             unless out.any (fun x => x.name == o.name && x.entry.global == o.entry.global && x.rank == 0) do
               out := out ++ [{ o with shown, rank := 0 }]
-  if p != preludePath then
+  if p != preludePath && !((← get).bare && p.head? != some "std" && p.head? != preludePath.head?) then
     if let some prelude ← unitOf preludePath then
       out := out ++ prelude.own.map fun b => { b with shown := .priv, rank := 2 }
   modify fun s => { s with busy := s.busy.filter (· != p), scopes := (p, out) :: s.scopes }
@@ -272,6 +275,15 @@ partial def moduleAt (viewer : List String) (scope : List Bound) (segs : List St
   let start ← match head with
     -- What the compiler itself writes of the prelude, whatever is in scope.
     | "%prelude" => pure (some preludePath)
+    -- The prelude by name, where the program has no module of that name.
+    | "prelude" =>
+      if (← unitOf ["prelude"]).isSome || (lookupIn scope .module "prelude").isSome then
+        match lookupIn scope .module head with
+        | some e => pure (some e.home)
+        | none =>
+          enter viewer [head]
+          pure (some [head])
+      else pure (some preludePath)
     | "crate" => pure (some [])
     | "self" => pure (some viewer)
     | "super" =>
@@ -392,7 +404,13 @@ def resolveValue (ctx : Ctx) (bound : List String) (qual : Option String) (name 
       noteUse ctx.here e
       checkSealed ctx name e
       pure (none, e.global, some e)
-    | none => pure (none, name, none)
+    | none =>
+      -- Without the prelude brought in, its names are not there to write.
+      if (← get).bare && ctx.here.head? != preludePath.head? && ctx.here.head? != some "std" then
+        if let some prelude ← unitOf preludePath then
+          if prelude.own.any fun b => b.name == name && b.entry.kind.space == .value then
+            throw s!"unknown name `{name}`: the prelude is not brought in here (`use prelude::{name};`)"
+      pure (none, name, none)
   | some q =>
     let segs := q.splitOn "::"
     if let some m ← moduleAt ctx.here ctx.scope segs then
@@ -458,7 +476,12 @@ def resolveNamed (ctx : Ctx) (space : Space) (generics : List String) (written :
     | some e =>
       noteUse ctx.here e
       pure (e.global, some e)
-    | none => pure (written, none)
+    | none =>
+      if (← get).bare && ctx.here.head? != preludePath.head? && ctx.here.head? != some "std" then
+        if let some prelude ← unitOf preludePath then
+          if prelude.own.any fun b => b.name == written && b.entry.kind.space == space then
+            throw s!"unknown name `{written}`: the prelude is not brought in here (`use prelude::{written};`)"
+      pure (written, none)
   else
     let last := segs.getLast!
     let before := segs.dropLast
@@ -1114,7 +1137,10 @@ def resolve (prelude root : List Item) : Except String Resolved := do
         then some g else none
       applies := applies ++ [(key u.path, here)]
     pure (out.toList, applies)
-  let ((items, coercions), st) ← match run.run { units, fields, hidden } with
+  let bare := root.any fun
+    | .fieldNames mark _ _ => mark == attrMark "no_std" || mark == attrMark "no_implicit_prelude"
+    | _ => false
+  let ((items, coercions), st) ← match run.run { units, fields, hidden, bare } with
     | .ok r => pure r
     | .error e => throw e
   if let some cycle := findCycle st.edges then

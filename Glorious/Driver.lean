@@ -78,7 +78,8 @@ the program says `mod name;` the items of that module's text are put. -/
 def parseProgram (src : String) (files : List (List String × String)) (check : Bool := true) :
     Except String (List Syntax.Item × List Syntax.Item) := do
   -- The library's texts are files of the program, before its own.
-  let std := usesStd src files
+  -- (`#![no_std]`: without the library, whatever the text mentions.)
+  let std := usesStd src files && (src.splitOn "#![no_std]").length == 1
   let files := if std then Std.texts ++ files else files
   let (prelude, fix) ← match Syntax.parse {} (if check then Prelude.source else Prelude.unchecked) with
     | .ok r => pure r
@@ -160,7 +161,8 @@ def compileSource (src : String) (check : Bool := true)
   let all := Syntax.fillDefaults all
   -- What the checker learnt about blocks that share an environment. A program
   -- it rejects is elaborated without that.
-  let first := if usesStd src files then checkedStd.get else checkedPrelude.get
+  let first := if usesStd src files && (src.splitOn "#![no_std]").length == 1 then checkedStd.get
+    else checkedPrelude.get
   let checked := match check && !resolved.info.shadowed, first with
     | true, .ok (count, first) => Check.checkAfter first (all.drop count) resolved.info
     | _, _ => Check.checkProgram all resolved.info

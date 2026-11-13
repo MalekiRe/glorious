@@ -909,6 +909,28 @@ From the audit of the specification (2.3, 2.4).
   named, as the way out. An arm of a handler is written with the name the
   operation has here. It is the same operation however it was brought.
 
+## Attributes, and a program without the prelude
+
+From the audit of the specification (2.5, 20).
+
+- **`#![no_implicit_prelude]`** at the top of the first module: the modules
+  of the program have the prelude's names only where they bring them in.
+  **The prelude is the module `prelude`** where the program has no module of
+  that name, so `use prelude::{if as when, else, <, +};` brings and renames
+  what is wanted, and a program can give `if` a meaning of its own.
+  **`#![no_std]`** is that, and the library's modules are not there.
+- **`#[non_exhaustive]`, `#[repr(C)]`, `#[repr(transparent)]`,
+  `#[export_name = ".."]`** are read before a type or a function and kept
+  beside it. No other attribute is known, and one is an error.
+
+Limits. What a text or a number written in the program is made of still
+comes from the prelude, brought in or not. The prelude's operators are still
+read as operators without being brought in; the function an operator stands
+for has to be. `#[non_exhaustive]` changes nothing while there is one
+package. The other three are kept for the C interface and do nothing yet.
+When the library takes the shape its specification gives it, `core`, `alloc`
+and `std`, the prelude's names will be theirs, and `prelude` a selection.
+
 ## What the specification's audit turned away
 
 An audit of the language specification against the compiler, section by

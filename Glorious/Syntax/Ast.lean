@@ -300,6 +300,12 @@ the type written as an expression so that it can sit among expressions: see
 stands alone. -/
 def ascribeMark : String := "%as"
 
+/-- An attribute, `#[name]` before a declaration or `#![name]` at the top of a
+text, is kept beside the declarations as the names of a constructor's fields
+are: under this mark and its name, with what it is written of and what it is
+given. -/
+def attrMark (name : String) : String := "%attr:" ++ name
+
 /-- The type parameter a function written `-> !` gives: whatever is wanted. -/
 def neverParam : String := "%never"
 

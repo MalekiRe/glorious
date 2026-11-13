@@ -1464,6 +1464,50 @@ private partial def parseTrait : P (List Item) := do
 /-- A declaration, and with it what was written beside it. -/
 private partial def parseItemGroup : P (List Item) := do
   match ← peek with
+  | .punct "#" =>
+    -- `#[name]`, `#[name(arg)]`, `#[name = "text"]` before a declaration;
+    -- `#![name]` of the whole text.
+    advance
+    let inner ← isOp "!"
+    if inner then advance
+    expectPunct "["
+    let name ← expectIdent
+    let mut arg : String := ""
+    if ← acceptPunct "(" then
+      arg ← expectIdent
+      expectPunct ")"
+    else if ← acceptPunct "=" then
+      match ← peek with
+      | .str codes =>
+        advance
+        arg := String.ofList (codes.map Char.ofNat)
+      | _ => failAt "expected a text: `#[export_name = \"name\"]`"
+    expectPunct "]"
+    if inner then
+      unless name == "no_std" || name == "no_implicit_prelude" do
+        failAt s!"`#![{name}]` is not known: `#![no_std]` and `#![no_implicit_prelude]` are"
+      return [.fieldNames (attrMark name) [] []]
+    let known := match name, arg with
+      | "non_exhaustive", "" => true
+      | "repr", "C" => true
+      | "repr", "transparent" => true
+      | "export_name", a => a != ""
+      | _, _ => false
+    unless known do
+      failAt s!"`#[{name}]` is not known: `#[non_exhaustive]`, `#[repr(C)]`, `#[repr(transparent)]` and `#[export_name = \"..\"]` are"
+    let items ← parseItemGroup
+    let subject := items.findSome? fun item =>
+      let item := match item with
+        | .pub _ i => i
+        | i => i
+      match item with
+      | .enum n _ _ => some n
+      | .struct n _ _ => some n
+      | .fn n _ _ _ _ => some n
+      | _ => none
+    match subject with
+    | some n => pure (items ++ [.fieldNames (attrMark name) [n, arg] []])
+    | none => failAt s!"`#[{name}]` is written before a type or a function"
   | .ident "pub" =>
     let parent := (← acceptPub).getD false
     -- `pub extern "C" { .. }`: each of its functions is `pub`.
