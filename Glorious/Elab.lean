@@ -793,6 +793,7 @@ inductive Head where
   | host (id : Nat) (arity : Nat)
   | cancel
   | replace
+  | swap
   | const (e : Expr)
 
 def resolveName (scope : Scope) (qual : Option String) (x : String) : M Head := do
@@ -815,6 +816,7 @@ def resolveName (scope : Scope) (qual : Option String) (x : String) : M Head := 
   if x == Syntax.foreignCall then return .host 2 0
   if x == "cancel" then return .cancel
   if x == "replace" then return .replace
+  if x == "swap" then return .swap
   if let some e := g.aliases.lookup x then return .const e
   throw s!"unknown name `{x}`"
 
@@ -844,6 +846,7 @@ partial def elabExpr (scope : Scope) (tailPos : Bool) : Expr → M Atom
     | .host _ _ => throw s!"host operation `{x}` must be called"
     | .cancel => throw "`cancel` must be applied to a resumption"
     | .replace => throw "`replace` must be called"
+    | .swap => throw "`swap` must be called"
     | .const e => elabExpr [] false e
   | .label l =>
     match scope.lookup (labelName l) with
@@ -1090,6 +1093,16 @@ partial def elabCall (scope : Scope) (isTail : Bool) (f : Expr) (args : List Exp
           emit (.mem .swap [cell, new])
         | _ => throw "`replace` takes a reference and a value"
       | _ => throw "`replace` takes a reference and a value"
+    | .swap => do
+      -- What two references point to, exchanged: the second is read, put
+      -- where the first points, and what was there put where it was read.
+      if isTail then throw "`tail` applies to calls, not to `swap`"
+      match ← elabArgs scope args with
+      | [first, second] =>
+        let held ← emit (.mem .load [second])
+        let was ← emit (.mem .swap [first, held])
+        emit (.mem .store [second, was])
+      | _ => throw "`swap` takes two references"
     | .const e => do
       let callee ← elabExpr [] false e
       elabApply scope isTail callee args

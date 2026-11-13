@@ -40,6 +40,7 @@ partial def inferExpr (scope : Scope) (amb : Row) : Expr → M Ty
     | .host _ => throw s!"host operation `{x}` must be called"
     | .cancel => throw "`cancel` must be applied to a resumption"
     | .replace => throw "`replace` must be called"
+    | .swap => throw "`swap` must be called"
     | .const e => inferExpr [] amb e
   | .label l =>
     match scope.lookup ("@" ++ l) with
@@ -657,6 +658,16 @@ partial def inferCall (scope : Scope) (amb : Row) (f : Expr) (args : List Expr)
       checkArgs scope amb "`replace`" [.ref .uniq t cap, t] args call
       use scope (.through cap "the reference given to `replace`" true)
       pure t
+    | .swap => do
+      -- What two references point to, exchanged: nothing is asked of the
+      -- type, since nothing is copied or let go.
+      let t ← freshTy
+      let first ← freshCap
+      let second ← freshCap
+      checkArgs scope amb "`swap`" [.ref .uniq t first, .ref .uniq t second] args call
+      use scope (.through first "the first reference given to `swap`" true)
+      use scope (.through second "the second reference given to `swap`" true)
+      pure .unit
     | .local (.val t _) => applyTy scope amb s!"`{x}`" t args call
     | .local (.cell t brand) => do
       mustDup t (readsCell x)

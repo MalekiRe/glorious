@@ -23,6 +23,7 @@ pub mod iter;
 pub mod c;
 pub mod fmt;
 pub mod stream;
+pub mod value;
 pub mod iterator;
 pub mod slice;
 pub mod collections;
@@ -1806,6 +1807,31 @@ pub fn read_to_end<R: Read>(reader: &mut R, limit: Int)
 }
 "#
 
+private def valueText : String := r#"// The small things the rest is built from, as the library specification
+// lists them (3).
+
+// One of two.
+pub enum Either<A, B> { Left(A), Right(B) }
+
+// What was refused, given back with why.
+pub struct Rejected<T, E> { pub value: T, pub error: E }
+
+pub fn identity<T>(value: T) -> T { value }
+
+// A type with a value to start from.
+pub trait Default {
+    fn default() -> Self;
+}
+
+impl Default for Int { fn default() { 0 } }
+impl Default for Str { fn default() { "" } }
+// (`Bool` is an `Option<()>`: its start is `false`.)
+impl<A> Default for Option<A> { fn default() { None } }
+
+// What a reference points to, taken; the type's start is left in its place.
+pub fn take<T: Default>(target: &mut T) -> T { replace(target, default()) }
+"#
+
 private def cText : String := r#"// What C has: its memory, and texts as it writes them. Everything here is
 // unsafe: an address is whatever a program says it is.
 
@@ -2057,6 +2083,7 @@ def texts : List (List String × String) :=
    (["std", "c"], cText),
    (["std", "fmt"], fmtText),
    (["std", "stream"], streamText),
+   (["std", "value"], valueText),
    (["std", "iterator"], iteratorText),
    (["std", "slice"], sliceText),
    (["std", "collections"], collectionsText),
@@ -2070,7 +2097,8 @@ def texts : List (List String × String) :=
    (["std", "time"], "pub use std::host::Clock;\n"),
    (["std", "random"], "pub use std::host::Entropy;\n"),
    (["std", "ffi"], "pub use std::c::*;\n"),
-   (["core"], "pub mod option;\npub mod result;\npub mod cmp;\npub mod num;\npub mod char;\npub mod iter;\npub mod slice;\npub mod hash;\n"),
+   (["core"], "pub mod option;\npub mod result;\npub mod cmp;\npub mod num;\npub mod char;\npub mod iter;\npub mod slice;\npub mod hash;\npub mod value;\n"),
+   (["core", "value"], "pub use std::value::*;\n"),
    (["core", "option"], "pub use std::option::*;\n"),
    (["core", "result"], "pub use std::result::*;\n"),
    (["core", "cmp"], "pub use std::cmp::*;\n"),

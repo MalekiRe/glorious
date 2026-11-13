@@ -2621,9 +2621,15 @@ S12, S20, S31, S33, S36 and S53 are met as tried.
   as a use of it, since nothing is taken. A `Vec` of such values in a
   mutable variable still needs that variable's rule: a `defer` straight
   after it that swaps in a value written out, which a `Vec` has none of.
-- **S06.** `replace` asks nothing of the type. There is no `swap` of two
-  references: it cannot be written with `replace`, and the machine has no
-  operation for it.
+- **S06.** `replace` asks nothing of the type, and neither does `swap`,
+  which the compiler knows as it knows `replace`: it is a read of the second
+  place, an exchange with the first, and a write to the second. Core's rule
+  for a read wants a type that can be copied, which in Core is any type
+  with no resumption or callable inside; a program that swaps one of those
+  is accepted and not certified as well owned.
+- `core::value` has the specification's `Either`, `Rejected`, `identity`,
+  `Default` and `take` (3). `Default` is given for `Int`, `Str` and
+  `Option<A>`, which covers `Bool`.
 
 ## Other standing decisions
 

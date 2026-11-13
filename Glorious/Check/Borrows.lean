@@ -352,6 +352,15 @@ out of it, with `replace(&mut x, e)`, before anything else could happen? Then
 `e`, what is put in its place. -/
 partial def takesOut (x : String) : Expr → Option Expr
   | .call _ (.name none "replace") [.ref true y, e] => if y == x then some e else none
+  -- (A block that is run where it is written: its first statement.)
+  | .call _ (.closure _ [.mk [] (s :: _)]) [] =>
+    let rec inner : Stmt → Option Expr
+      | .located _ _ s => inner s
+      | .expr e => takesOut x e
+      | .let_ _ e => takesOut x e
+      | .letMut _ e => takesOut x e
+      | _ => none
+    inner s
   | .call _ (.name _ _) args => first args
   | .tailCall _ (.name _ _) args => first args
   | .tuple es => first es
@@ -367,7 +376,9 @@ where
 
 /-- Is this a value written out that holds nothing but numbers and
 constructors: nothing, that is, that could have to be used? -/
-partial def holdsNothing : Expr → M Bool
+partial def holdsNothing (e : Expr) : M Bool :=
+  -- (A value written with its type is that value.)
+  match Syntax.aliasValue e with
   | .int _ => pure true
   | .tuple es => es.allM holdsNothing
   | .name q x => do
@@ -412,6 +423,7 @@ inductive Head where
   | host (id : Nat)
   | cancel
   | replace
+  | swap
   | const (e : Expr)
 
 def resolveName (scope : Scope) (qual : Option String) (x : String) : M Head := do
@@ -461,6 +473,7 @@ def resolveName (scope : Scope) (qual : Option String) (x : String) : M Head := 
   if x == Syntax.foreignCall then return .host 2
   if x == "cancel" then return .cancel
   if x == "replace" then return .replace
+  if x == "swap" then return .swap
   if let some e := s.aliases.lookup x then return .const e
   throw s!"unknown name `{x}`"
 

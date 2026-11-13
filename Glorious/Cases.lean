@@ -2877,6 +2877,23 @@ def cases : List Case := [
   -- Streams: bytes written to memory and read back, performing nothing.
   ⟨"use std::stream::{Read, Write, MemoryCursor, write_all, write_str, read_to_end, read};\nuse alloc::string::{String};\nfn main() -> Int {\n    let mut c = MemoryCursor::new([]);\n    write_str(&mut c, \"hello, \");\n    write_str(&mut c, \"streams\");\n    let first = match(read(&mut c, 5)) { Ok(b) => len(b), Err(_) => 0 - 1 };\n    let rest = match(read_to_end(&mut c, 1000)) { Ok(b) => b, Err(_) => [] };\n    say(match(String::from_utf8(rest)) { Ok(s) => String::to_str(&s), Err(_) => \"?\" });\n    first * 100 + MemoryCursor::position(&c) }",
     [], ", streams\n514"⟩,
+  -- Library conformance S06: `swap` exchanges what two references point to and asks nothing of the type.
+  ⟨"fn main() -> Int { let mut a = 1; let mut b = 20; swap(&mut a, &mut b); a * 100 + b }",
+    [], "2001"⟩,
+  ⟨"struct Ticket(Int);\nimpl Use<[1, 1]> for Ticket {}\nfn redeem(t: Ticket) -> Int { match(t) { Ticket(n) => n } }\nfn main() -> Int { let mut a = Some(Ticket(1)); defer { match(replace(&mut a, None)) { Some(t) => redeem(t), None => 0 }; } let mut b = Some(Ticket(20)); defer { match(replace(&mut b, None)) { Some(t) => redeem(t), None => 0 }; } swap(&mut a, &mut b); match(replace(&mut a, None)) { Some(t) => redeem(t), None => 0 } }",
+    [], "20"⟩,
+  ⟨"struct P { x: [Int], y: [Int] }\nfn flip(p: &mut P) { swap(&mut p.x, &mut p.y) }\nfn main() -> Int { let mut p = P { x: [1], y: [2, 3] }; flip(&mut p); len(p.x) * 10 + len(p.y) }",
+    [], "21"⟩,
+  ⟨"fn main() -> Int { let mut a = 1; swap(&mut a, &mut a); a }",
+    [], "error: 1:35: in `main`: `a` is borrowed with `&mut` while a value this expression is still using holds a `&mut` reference to it"⟩,
+  ⟨"fn main() -> Int { let mut a = 1; let mut b = \"x\"; swap(&mut a, &mut b); a }",
+    [], "error: 1:52: in `main`: argument 2 of `swap`: expected `&mut Int`, found `&mut Str`"⟩,
+  -- The specification's small things: `take`, `Default`, `Either`, `identity`.
+  ⟨"use core::value::{take, Default, Either, identity};\nfn main() -> Int { let mut n = 7; let was = take(&mut n); let mut o = Some(3); let had = take(&mut o); let e: Either<Int, Str> = Either::Left(identity(1)); was * 100 + n * 10 + match(had) { Some(v) => v, None => 0 } + match(o) { Some(_) => 50, None => 0 } }",
+    [], "703"⟩,
+  -- A `defer` block that takes out what a variable holds is the cleanup the variable needs.
+  ⟨"struct Ticket(Int);\nimpl Use<[1, 1]> for Ticket {}\nfn redeem(t: Ticket) -> Int { match(t) { Ticket(n) => n } }\nfn main() -> Int { let mut held = Some(Ticket(3)); defer { match(replace(&mut held, None)) { Some(t) => redeem(t), None => 0 }; } match(replace(&mut held, None)) { Some(t) => redeem(t), None => 0 } }",
+    [], "3"⟩,
   -- `drop` is not for a program to call.
   ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nfn main() { let mut f = File(7); drop(&mut f); 0 }",
     [], "error: 3:34: in `main`: `drop` is run when what holds a value ends; a program does not call it"⟩,
