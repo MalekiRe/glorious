@@ -2172,6 +2172,36 @@ machine here, so nothing needs to be said about where the nested value lives.
 The native ABI will have to say it. Recursion through a generic type's
 argument (`struct S { w: Wrap<S> }`) is not seen.
 
+## Two backends, one contract
+
+The Rust VM compiles bytecode to x86-64 in memory and to LLVM IR, under the
+contract in `docs/abi.md`. The choice that shapes it: an activation's locals
+and the control stack stay the runtime's, whichever engine runs the function.
+A compiled body runs the instructions between calls and asks the runtime for
+every call, return and effect. So the three engines are interchangeable per
+function with nothing converted between them, and resumptions, label jumps
+and cleanups work through any mixture, which is what was asked of the ABI.
+
+- **What it costs.** Calls are no faster than the interpreter's, and this
+  language makes control flow out of calls: `if` is a function given two
+  blocks. Measured on a recursive Fibonacci, each call of `fib` is 34
+  instructions, of which about eight are calls and six make a closure; the
+  compiled program takes as long as the interpreted one. The x86-64 backend
+  does what it was asked for, which is to compile at once: a program is
+  machine code microseconds after it is read.
+- **What would make it fast**, in the order of what each is worth: (1) in
+  the compiler, calling a function that is known without making a closure
+  of it, and writing library control flow (`if`, `match`, the loops) in
+  place where it is called with blocks written out; (2) in the ABI, a
+  convention for calls between compiled functions that keeps arguments in
+  registers and frames on the machine stack, with the runtime's stack kept
+  for what can be captured; (3) the flat layouts of specification 17.2. None
+  of these is built.
+- **Bytecode is the input** of both backends, not Core: the bytecode is what
+  is proved to behave as the Core program does, and the VM already reads
+  it. A backend sees no types, so it checks at run time that an integer is
+  one before working on it in place.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by

@@ -81,6 +81,7 @@ fn unit() -> Value {
 
 // ---------------------------------------------------------------- code
 
+#[derive(Debug)]
 enum Atom {
     Var(usize),
     /// The local, which nothing reads again: its value is moved, not copied.
@@ -89,12 +90,13 @@ enum Atom {
     Int(i128),
 }
 
+#[derive(Debug)]
 struct Place {
     var: usize,
     path: Vec<usize>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 enum Prim {
     Add,
     Sub,
@@ -143,7 +145,7 @@ enum Prim {
     ArrPop,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 enum MemOp {
     Load,
     Store,
@@ -152,6 +154,7 @@ enum MemOp {
     Focus,
 }
 
+#[derive(Debug)]
 enum Rhs {
     Atom(Atom),
     Prim(Prim, Vec<Atom>),
@@ -161,6 +164,7 @@ enum Rhs {
     Rebind(Atom, usize),
 }
 
+#[derive(Debug)]
 enum Instr {
     Op(Rhs),
     Call(Atom, Vec<Atom>),
@@ -1572,12 +1576,14 @@ pub fn cli_main() -> ExitCode {
         _ => Backend::Interp,
     };
     let mut emit = false;
+    let mut dump = false;
     while let Some(first) = args.first() {
         match first.as_str() {
             "--backend=interp" => backend = Backend::Interp,
             "--backend=x86" => backend = Backend::X86,
             "--backend=mix" => backend = Backend::Mix,
             "--emit-llvm" => emit = true,
+            "--dump" => dump = true,
             _ => break,
         }
         args.remove(0);
@@ -1607,6 +1613,16 @@ pub fn cli_main() -> ExitCode {
             return ExitCode::from(1);
         }
     };
+    if dump {
+        // The instructions as they were read, for whoever works on a backend.
+        for (f, code) in program.codes.iter().enumerate() {
+            println!("function {f}");
+            for (pc, instr) in code.iter().enumerate() {
+                println!("  {pc}: {instr:?}");
+            }
+        }
+        return ExitCode::SUCCESS;
+    }
     if emit {
         print!("{}", llvm::emit(&program, &bytes));
         return ExitCode::SUCCESS;
