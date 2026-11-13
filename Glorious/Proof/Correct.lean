@@ -732,7 +732,7 @@ theorem step_sim (p : Core.Program) {s : Core.State} {t : Bytecode.State} (hm : 
       rw [h1]
       exact .stuck
     | some v =>
-      cases he : evalScope ρ thunk (.ref cells.length 0) with
+      cases he : evalScope ρ thunk (.ref cells.length 0 []) with
       | none =>
         have h1 : Core.step p ⟨.cell init thunk body, ρ, stack, ⟨conts, labels, cells⟩⟩
             = .stuck := by
@@ -761,7 +761,7 @@ theorem step_sim (p : Core.Program) {s : Core.State} {t : Bytecode.State} (hm : 
       rw [h1]
       exact .stuck
     | some v =>
-      cases he : evalScope ρ thunk (.ref cells.length 0) with
+      cases he : evalScope ρ thunk (.ref cells.length 0 []) with
       | none =>
         have h1 : Core.step p ⟨.cellTail init thunk, ρ, stack, ⟨conts, labels, cells⟩⟩
             = .stuck := by

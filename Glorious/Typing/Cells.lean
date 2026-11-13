@@ -300,29 +300,46 @@ theorem live_set {cells : Cells} {a b : Nat} {x : Value} (h : Live cells a) :
     exact ⟨x, by rw [List.getElem?_set_self (List.getElem?_eq_some_iff.mp hw).1]⟩
   · exact ⟨w, by rw [List.getElem?_set_ne hb]; exact hw⟩
 
+/-- A memory operation leaves the cells as they are or sets one of them. -/
+theorem mem_cells {op : MemOp} {cells cells' : Cells} {vs : List Value} {r : Value}
+    (h : op.eval cells vs = some (r, cells')) :
+    cells' = cells ∨ ∃ a x, cells' = cells.set a (some x) := by
+  unfold MemOp.eval at h
+  split at h
+  · split at h
+    · simp only [Option.map_eq_some_iff, Prod.mk.injEq] at h
+      obtain ⟨_, _, _, rfl⟩ := h
+      exact .inl rfl
+    · cases h
+  · split at h
+    · simp only [Option.map_eq_some_iff, Prod.mk.injEq] at h
+      obtain ⟨_, _, _, rfl⟩ := h
+      exact .inr ⟨_, _, rfl⟩
+    · cases h
+  · split at h
+    · split at h
+      · cases h
+        exact .inr ⟨_, _, rfl⟩
+      · cases h
+    · cases h
+  · split at h
+    · simp only [Option.map_eq_some_iff, Prod.mk.injEq] at h
+      obtain ⟨_, _, _, rfl⟩ := h
+      exact .inl rfl
+    · cases h
+  · split at h
+    · cases h
+      exact .inl rfl
+    · cases h
+  · cases h
+
 /-- A memory operation releases nothing. -/
 theorem mem_live {op : MemOp} {cells cells' : Cells} {vs : List Value} {r : Value}
     (h : op.eval cells vs = some (r, cells')) : ∀ a, Live cells a → Live cells' a := by
   intro a hl
-  unfold MemOp.eval at h
-  split at h
-  · split at h
-    · cases h
-      exact hl
-    · cases h
-  · split at h
-    · cases h
-      exact live_set hl
-    · cases h
-  · split at h
-    · cases h
-      exact live_set hl
-    · cases h
-  · split at h
-    · cases h
-      exact hl
-    · cases h
-  · cases h
+  rcases mem_cells h with rfl | ⟨_, _, rfl⟩
+  · exact hl
+  · exact live_set hl
 
 /-- **Every step of the machine keeps every scope's cell live.** Nothing here
 depends on the program being typed. -/
@@ -646,26 +663,26 @@ theorem StackOk.labelled {S : StoreTy} {st : List Frame} {τ : Ty} {ε : Row} {�
 
 /-- A released cell is about to be read or written. -/
 def Freed (s : State) : Prop :=
-  ∃ op args body a b vs, s.tm = .mem op args body
-    ∧ evalAtoms s.env args = some (.ref a b :: vs) ∧ s.store.cells[a]? = some none
+  ∃ op args body a b path vs, s.tm = .mem op args body
+    ∧ evalAtoms s.env args = some (.ref a b path :: vs) ∧ s.store.cells[a]? = some none
 
 /-- Under the region rules, a typed state in which every scope's cell is live
 is not about to read or write a released cell: the reference it goes through
 has a region the code was granted, which is a cell with a scope on the stack. -/
 theorem TypedAt.not_freed {S : StoreTy} {s : State} (hR : Δ.regions) (ht : TypedAt Δ S s)
     (ho : Owns s) : ¬ Freed s := by
-  rintro ⟨op, args, body, a, tag, vs, htm, hev, hnone⟩
+  rintro ⟨op, args, body, a, tag, pth, vs, htm, hev, hnone⟩
   obtain @⟨tm, env, stack, store, Γ, τ, ε, ε', ϕ, ϕ', henv, hty, hle, hsub, hst, hs⟩ := ht
   simp only at htm hev hnone
   subst htm
   have key : ∀ {x : Atom} {r : Rgn} {σ : Ty}, HasAtom Γ x (.ref r σ) → r ∈ ϕ →
-      ∀ {w : Value}, x.eval env = some w → w = .ref a tag → False := by
+      ∀ {w : Value}, x.eval env = some w → w = .ref a tag pth → False := by
     intro x r σ hx hr w hw hwa
     obtain ⟨v, hv, hvt⟩ := atom_ok henv hx
     rw [hw] at hv
     cases hv
     subst hwa
-    obtain ⟨b, _, hb, _, hreg, _⟩ := hvt.ref_inv
+    obtain ⟨b, _, _, _, hb, _, _, hreg, _⟩ := hvt.ref_inv
     cases hb
     have hpos := hst.onCell hR r a (.inl (hsub _ hr)) (hreg hR)
     obtain ⟨u, hu⟩ := ((ho a).2 (by
@@ -689,6 +706,13 @@ theorem TypedAt.not_freed {S : StoreTy} {s : State} (hR : Δ.regions) (ht : Type
       | some ws =>
         simp [evalAtoms, hx, hp] at hev
         exact key ha (hr hR) hx hev.1
+  | @focus _ x i _ r σ _ _ _ ha hr _ _ =>
+    cases hx : Atom.eval env x with
+    | none => simp [evalAtoms, hx] at hev
+    | some w =>
+      have hi : (Atom.int (i : Int)).eval env = some (.int i) := rfl
+      simp [evalAtoms, hx, hi] at hev
+      exact key ha (hr hR) hx hev.1
   | @store _ x y _ r σ _ _ hform _ _ =>
     have ha := hform.ref
     have hr := hform.region
@@ -841,6 +865,7 @@ theorem TypedAt.not_dead {S : StoreTy} {s : State} (hR : Δ.regions) (ht : Typed
     · exact found hmem
   | load _ _ _ _ => cases hcallee
   | tag _ _ _ _ => cases hcallee
+  | focus _ _ _ _ => cases hcallee
   | store _ _ _ => cases hcallee
   | swap _ _ _ => cases hcallee
   | write _ _ => cases hcallee
@@ -908,7 +933,7 @@ theorem Fault.overflow_of {s : State} (hf : Fault s) (h1 : ¬ Resumed s) (h2 : �
     (h3 : ¬ Dead s) : Overflow s := by
   cases hf with
   | overflow hargs hq => exact ⟨_, _, _, _, rfl, hargs, hq⟩
-  | freed hev hget => exact absurd ⟨_, _, _, _, _, _, rfl, hev, hget⟩ h2
+  | freed hev hget => exact absurd ⟨_, _, _, _, _, _, _, rfl, hev, hget⟩ h2
   | resumed hc hev hget => exact absurd ⟨_, _, hc, hev, hget⟩ h1
   | dead hc hev hnone => exact absurd ⟨_, _, hc, hev, hnone⟩ h3
 

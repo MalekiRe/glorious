@@ -157,7 +157,7 @@ theorem dup_occ (hs : C.strict = true) (hd : dataOk C = true) :
     · exact h
   | _, _, _, .cont _, hdup, _ => by simp [dupTy] at hdup
   | _, _, _, .label _ _, _, id => by simp [occ]
-  | _, _, _, .ref _ _ _, _, id => by simp [occ]
+  | _, _, _, .ref _ _ _ _, _, id => by simp [occ]
 
 theorem dups_occ (hs : C.strict = true) (hd : dataOk C = true) :
     ∀ {S : StoreTy} {vs : List Value} {τs : List Ty}, HasVals C.ctx S vs τs →

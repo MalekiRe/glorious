@@ -37,6 +37,7 @@ def writes : MemOp → Bool
   | .store => true
   | .swap => true
   | .tag => false
+  | .focus => false
 
 /-- Whether the reference to cell `a` that is borrow `b`, or the cell's own
 reference if `b` is `0`, may be used on this stack: to write if `write`, and
@@ -57,10 +58,11 @@ def allowed (a b : Nat) (write : Bool) : List Frame → Bool
 read, written or lent through a reference that a newer borrow in scope
 excludes, or through a borrow whose scope has ended. -/
 def Aliased (s : State) : Prop :=
-  (∃ op args body a b vs, s.tm = .mem op args body
-      ∧ evalAtoms s.env args = some (.ref a b :: vs) ∧ allowed a b (writes op) s.stack = false)
-    ∨ (∃ uniq r thunk pre post body a b, s.tm = .lend uniq r thunk pre post body
-      ∧ r.eval s.env = some (.ref a b) ∧ allowed a b uniq s.stack = false)
+  (∃ op args body a b path vs, s.tm = .mem op args body
+      ∧ evalAtoms s.env args = some (.ref a b path :: vs)
+      ∧ allowed a b (writes op) s.stack = false)
+    ∨ (∃ uniq r thunk pre post body a b path, s.tm = .lend uniq r thunk pre post body
+      ∧ r.eval s.env = some (.ref a b path) ∧ allowed a b uniq s.stack = false)
 
 /-- The scope of a borrow is among the frames a resumption captured: the borrow
 is set aside, and code outside its scope can run before it is taken up again. -/
@@ -276,17 +278,17 @@ theorem TypedAt.not_aliased {S : StoreTy} {s : State} (hR : Δ.regions) (hL : Δ
     have : ownStack a stack + osum (ownStack a) store.conts ≤ 1 := (ho a).1
     omega
   obtain ⟨_, hread, hwrite, _⟩ := hst.exclusive hR hL hown
-  have key : ∀ {x : Atom} {r : Rgn} {σ : Ty} {a b : Nat}, HasAtom Γ x (.ref r σ) →
-      x.eval env = some (.ref a b) → Tagged S r a b := by
-    intro x r σ a b hx hw
+  have key : ∀ {x : Atom} {r : Rgn} {σ : Ty} {a b : Nat} {pth : List Nat},
+      HasAtom Γ x (.ref r σ) → x.eval env = some (.ref a b pth) → Tagged S r a b := by
+    intro x r σ a b pth hx hw
     obtain ⟨v, hv, hvt⟩ := atom_ok henv hx
     rw [hw] at hv
     cases hv
-    obtain ⟨a', b', he, _, _, htag⟩ := hvt.ref_inv
+    obtain ⟨a', b', _, _, he, _, _, _, htag⟩ := hvt.ref_inv
     cases he
     exact htag hR hL
-  rintro (⟨op, args, body, a, b, vs, htm, hev, hno⟩
-    | ⟨uniq, r, thunk, pre, post, body, a, b, htm, hev, hno⟩)
+  rintro (⟨op, args, body, a, b, pth, vs, htm, hev, hno⟩
+    | ⟨uniq, r, thunk, pre, post, body, a, b, pth, htm, hev, hno⟩)
   · simp only at htm hev hno
     subst htm
     cases hty with
@@ -309,6 +311,15 @@ theorem TypedAt.not_aliased {S : StoreTy} {s : State} (hR : Δ.regions) (hL : Δ
           rw [hev.1] at hx
           have := hread r a b (hsub _ (hr hR)) (key ha hx)
           simp [writes, this] at hno
+    | @focus _ x i _ r σ _ _ _ ha hr _ _ =>
+      cases hx : Atom.eval env x with
+      | none => simp [evalAtoms, hx] at hev
+      | some w =>
+        have hi : (Atom.int (i : Int)).eval env = some (.int i) := rfl
+        simp [evalAtoms, hx, hi] at hev
+        rw [hev.1] at hx
+        have := hread r a b (hsub _ (hr hR)) (key ha hx)
+        simp [writes, this] at hno
     | @store _ x y _ r σ _ _ hform _ _ =>
       have ha := hform.ref
       have hw := hform.write

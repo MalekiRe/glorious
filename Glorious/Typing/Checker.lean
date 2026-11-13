@@ -1118,6 +1118,13 @@ def checkTm (C : Cert) (ϕ : List Rgn) : TEnv → Tm → List Hint → Ty → Ro
       match atomTy Γ a, atomsTy Γ path with
       | some (.ref r _), some _ => regionOk C ϕ r && checkTm C ϕ (Γ ++ [.int]) body hs τ ε
       | _, _ => false
+    | .focus, [a, .int (.ofNat i)] =>
+      match atomTy Γ a with
+      | some (.ref r σ) =>
+        match placeTy C σ [i] with
+        | some σ' => regionOk C ϕ r && checkTm C ϕ (Γ ++ [.ref r σ']) body hs τ ε
+        | none => false
+      | _ => false
     | _, _ => false
   | Γ, .host id args body, hs, τ, ε =>
     match id, args with
@@ -1340,6 +1347,14 @@ theorem checkTm_sound {ϕ : List Rgn} : ∀ (tm : Tm) {Γ : TEnv} {hs : List Hin
       · rename_i r σ Ps ha hp
         simp only [Bool.and_eq_true] at h
         exact .tag (atomTy_sound ha) (regionOk_sound h.1) (atomsTy_sound hp) (ih h.2)
+      · simp at h
+    · split at h
+      · rename_i r σ ha
+        split at h
+        · rename_i σ' hpl
+          simp only [Bool.and_eq_true] at h
+          exact .focus (atomTy_sound ha) (regionOk_sound h.1) (placeTy_sound hpl) (ih h.2)
+        · simp at h
       · simp at h
     · simp at h
   | host id args body ih =>

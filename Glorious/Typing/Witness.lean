@@ -552,7 +552,7 @@ theorem alias_core : Halts alias [] ⟨.int 9, ⟨[], []⟩⟩ := ⟨40, rfl⟩
 /-- But on the way it writes the cell behind the borrow's back. -/
 theorem alias_aliased : ∃ c, Machine.Reaches (stepIO alias) (initIO alias []) c
     ∧ Aliased c.state :=
-  ⟨_, ⟨4, rfl⟩, .inl ⟨_, _, _, _, _, _, rfl, rfl, rfl⟩⟩
+  ⟨_, ⟨4, rfl⟩, .inl ⟨_, _, _, _, _, _, _, rfl, rfl, rfl⟩⟩
 
 /-- Without the rules for borrows the borrow is the reference it was lent from. -/
 def aliasCert (loans : Bool) : Cert where

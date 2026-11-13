@@ -28,7 +28,7 @@ def occ (id : Nat) : Value → Nat
   | .clo _ captures => occs id captures
   | .cont k => if k = id then 1 else 0
   | .label _ => 0
-  | .ref _ _ => 0
+  | .ref _ _ _ => 0
 
 def occs (id : Nat) : List Value → Nat
   | [] => 0
@@ -39,6 +39,52 @@ end
 theorem occs_append (id : Nat) : ∀ (a b : List Value), occs id (a ++ b) = occs id a + occs id b
   | [], b => by simp [occs]
   | v :: a, b => by simp [occs, occs_append id a b, Nat.add_assoc]
+
+theorem occs_set (id : Nat) : ∀ {vs : List Value} {i : Nat} {x : Value} (y : Value),
+    vs[i]? = some x → occs id (vs.set i y) + occ id x = occs id vs + occ id y
+  | [], _, _, _, h => by simp at h
+  | v :: vs, 0, x, y, h => by
+    simp only [List.getElem?_cons_zero, Option.some.injEq] at h
+    subst h
+    simp only [List.set_cons_zero, occs]
+    omega
+  | v :: vs, i + 1, x, y, h => by
+    simp only [List.getElem?_cons_succ] at h
+    have := occs_set id y h
+    simp only [List.set_cons_succ, occs]
+    omega
+
+/-- Replacing a part of a value takes out what the part held and puts in what
+the new part holds. -/
+theorem occ_put (id : Nat) : ∀ {v : Value} {path : List Nat} {w old v' : Value},
+    v.follow path = some old → v.put path w = some v' →
+      occ id v' + occ id old = occ id v + occ id w
+  | v, [], w, old, v', hf, hp => by
+    simp only [Value.follow, Option.some.injEq] at hf
+    simp only [Value.put, Option.some.injEq] at hp
+    subst hf; subst hp
+    omega
+  | .data tag fields, i :: path, w, old, v', hf, hp => by
+    simp only [Value.follow] at hf
+    simp only [Value.put] at hp
+    cases hx : fields[i]? with
+    | none => simp [hx] at hf
+    | some x =>
+      simp only [hx] at hf hp
+      cases hx' : x.put path w with
+      | none => simp [hx'] at hp
+      | some x' =>
+        simp only [hx', Option.some.injEq] at hp
+        subst hp
+        have h1 := occ_put id hf hx'
+        have h2 := occs_set id x' hx
+        simp only [occ]
+        omega
+  | .int _, _ :: _, _, _, _, hf, _ => by simp [Value.follow] at hf
+  | .clo _ _, _ :: _, _, _, _, hf, _ => by simp [Value.follow] at hf
+  | .cont _, _ :: _, _, _, _, hf, _ => by simp [Value.follow] at hf
+  | .label _, _ :: _, _, _, _, hf, _ => by simp [Value.follow] at hf
+  | .ref _ _ _, _ :: _, _, _, _, hf, _ => by simp [Value.follow] at hf
 
 /-! ## Sums over the first `n` numbers -/
 

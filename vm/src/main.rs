@@ -23,9 +23,40 @@ enum Value {
     Clo(Rc<Clo>),
     Cont(usize),
     Label(u64),
-    Ref(usize),
+    /// A cell, and the fields to go through to the part of what it holds
+    /// that the reference is to: none for the whole.
+    Ref(usize, Path),
 }
 
+type Path = Option<Rc<[usize]>>;
+
+fn steps(path: &Path) -> &[usize] {
+    path.as_deref().unwrap_or(&[])
+}
+
+/// The part of a value a path of fields leads to.
+fn part<'a>(mut v: &'a Value, path: &[usize]) -> Step<&'a Value> {
+    for &i in path {
+        match v {
+            Value::Data(d) => v = d.fields.get(i).ok_or(Stop::Wrong)?,
+            _ => return wrong(),
+        }
+    }
+    Ok(v)
+}
+
+/// The same part, to change: a value that is shared is copied on the way.
+fn part_mut<'a>(mut v: &'a mut Value, path: &[usize]) -> Step<&'a mut Value> {
+    for &i in path {
+        match v {
+            Value::Data(d) => v = Rc::make_mut(d).fields.get_mut(i).ok_or(Stop::Wrong)?,
+            _ => return wrong(),
+        }
+    }
+    Ok(v)
+}
+
+#[derive(Clone)]
 struct Data {
     tag: u64,
     fields: Vec<Value>,
@@ -114,6 +145,7 @@ enum MemOp {
     Store,
     Swap,
     Tag,
+    Focus,
 }
 
 enum Rhs {
@@ -377,6 +409,7 @@ impl Reader<'_> {
                     1 => MemOp::Store,
                     2 => MemOp::Swap,
                     3 => MemOp::Tag,
+                    4 => MemOp::Focus,
                     t => return Err(format!("unknown memory operation {t}")),
                 };
                 Ok(Instr::Mem(op, self.atoms()?))
@@ -875,24 +908,39 @@ impl Vm {
 
     fn mem(&mut self, op: MemOp, mut args: Vec<Value>) -> Step<Value> {
         match (op, args.as_mut_slice()) {
-            (MemOp::Load, [Value::Ref(a)]) => Ok(self.cell(*a)?.clone().unwrap()),
-            (MemOp::Store, [Value::Ref(a), _]) => {
-                let addr = *a;
-                *self.cell(addr)? = args.pop();
+            (MemOp::Load, [Value::Ref(a, p)]) => {
+                let (addr, p) = (*a, p.clone());
+                let whole = self.cell(addr)?.as_ref().ok_or(Stop::Wrong)?;
+                Ok(part(whole, steps(&p))?.clone())
+            }
+            (MemOp::Store, [Value::Ref(a, p), _]) => {
+                let (addr, p) = (*a, p.clone());
+                let new = args.pop().ok_or(Stop::Wrong)?;
+                let whole = self.cell(addr)?.as_mut().ok_or(Stop::Wrong)?;
+                *part_mut(whole, steps(&p))? = new;
                 Ok(unit())
             }
-            (MemOp::Swap, [Value::Ref(a), _]) => {
+            (MemOp::Swap, [Value::Ref(a, p), _]) => {
                 // The old value is moved out, not copied.
-                let addr = *a;
-                let new = args.pop();
-                Ok(std::mem::replace(self.cell(addr)?, new).unwrap())
+                let (addr, p) = (*a, p.clone());
+                let new = args.pop().ok_or(Stop::Wrong)?;
+                let whole = self.cell(addr)?.as_mut().ok_or(Stop::Wrong)?;
+                Ok(std::mem::replace(part_mut(whole, steps(&p))?, new))
             }
-            (MemOp::Tag, [Value::Ref(a), ..]) => {
-                // Which constructor built what the cell holds, or the field a
-                // path of field numbers leads to; -1 where it leads nowhere.
-                let addr = *a;
+            (MemOp::Focus, [Value::Ref(a, p), Value::Int(i)]) => {
+                let i = usize::try_from(*i).map_err(|_| Stop::Wrong)?;
+                let mut path = steps(p).to_vec();
+                path.push(i);
+                Ok(Value::Ref(*a, Some(path.into())))
+            }
+            (MemOp::Tag, [Value::Ref(a, p), ..]) => {
+                // Which constructor built what the reference is to, or the
+                // field a path of field numbers leads to; -1 where it leads
+                // nowhere.
+                let (addr, p) = (*a, p.clone());
                 let path: Vec<Value> = args.drain(1..).collect();
-                let mut at = self.cell(addr)?.as_ref().ok_or(Stop::Wrong)?;
+                let whole = self.cell(addr)?.as_ref().ok_or(Stop::Wrong)?;
+                let mut at = part(whole, steps(&p))?;
                 for step in &path {
                     let next = match (at, step) {
                         (Value::Data(d), Value::Int(i)) => {
@@ -1013,16 +1061,16 @@ impl Vm {
                 let addr = self.cells.len();
                 self.cells.push(Some(value));
                 self.frames.push(Frame::Cell(addr));
-                self.apply(callee, vec![Value::Ref(addr)])
+                self.apply(callee, vec![Value::Ref(addr, None)])
             }
             Instr::Lend { r, thunk, pre, post } => {
-                let Value::Ref(addr) = self.atom(r)? else {
+                let Value::Ref(addr, path) = self.atom(r)? else {
                     return wrong();
                 };
                 // A call, with the borrow between the other arguments.
                 let callee = self.atom(thunk)?;
                 let mut args = self.atoms(pre)?;
-                args.push(Value::Ref(addr));
+                args.push(Value::Ref(addr, path));
                 args.extend(self.atoms(post)?);
                 self.push_ret();
                 // A borrow has an identity, as a label has. Nothing here looks
@@ -1414,7 +1462,7 @@ fn show_inner(names: &[String], v: &Value) -> String {
         Value::Clo(c) => format!("<fn {}>", c.func),
         Value::Cont(id) => format!("<resumption {id}>"),
         Value::Label(id) => format!("<label {id}>"),
-        Value::Ref(addr) => format!("<ref {addr}>"),
+        Value::Ref(addr, _) => format!("<ref {addr}>"),
     }
 }
 

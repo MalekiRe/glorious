@@ -121,11 +121,13 @@ inductive HasVal (Δ : Ctx) (S : StoreTy) : Value → Ty → Prop where
       S.labels id = some σ → (Δ.regions → .lab id ∈ acc) →
       HasVal Δ S (.label id) (.fn 0 [σ] ρ ε once none acc)
   /-- Under the region rules a reference's region is of the cell it points to;
-  under the rules for borrows it is the region of the borrow the reference is. -/
-  | ref {a b : Nat} {r : Rgn} {τ : Ty} :
-      S.cells a = some τ → (Δ.regions → OnCell S r a) →
+  under the rules for borrows it is the region of the borrow the reference is.
+  What it is a reference to is the part of what the cell holds that its path
+  leads to. -/
+  | ref {a b : Nat} {r : Rgn} {τ₀ τ : Ty} {path : List Nat} :
+      S.cells a = some τ₀ → PlaceOk Δ τ₀ path τ → (Δ.regions → OnCell S r a) →
       (Δ.regions → Δ.loans → Tagged S r a b) →
-      HasVal Δ S (.ref a b) (.ref r τ)
+      HasVal Δ S (.ref a b path) (.ref r τ)
 
 inductive HasVals (Δ : Ctx) (S : StoreTy) : List Value → List Ty → Prop where
   | nil : HasVals Δ S [] []
@@ -290,8 +292,8 @@ inductive Fault : State → Prop where
       Fault ⟨.let_ (.prim p args) body, env, stack, store⟩
   /-- A memory cell is used after it was freed. -/
   | freed {op : MemOp} {args : List Atom} {body : Tm} {env : Env} {stack : List Frame}
-      {store : Store Frame} {a b : Nat} {vs : List Value} :
-      evalAtoms env args = some (.ref a b :: vs) → store.cells[a]? = some none →
+      {store : Store Frame} {a b : Nat} {path : List Nat} {vs : List Value} :
+      evalAtoms env args = some (.ref a b path :: vs) → store.cells[a]? = some none →
       Fault ⟨.mem op args body, env, stack, store⟩
   /-- A resumption is resumed or cancelled after it was already used. -/
   | resumed {s : State} {f : Atom} {id : Nat} :

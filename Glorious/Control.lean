@@ -65,8 +65,8 @@ for as long as this takes, which makes it a call like any other. -/
 def evalLend (ρ : Env) (r thunk : Atom) (pre post : List Atom) (borrow : Nat) :
     Option (Nat × Callee) :=
   match r.eval ρ with
-  | some (.ref a _) =>
-    match evalCall (ρ ++ [.ref a borrow]) thunk (pre ++ .var ρ.length :: post) with
+  | some (.ref a _ path) =>
+    match evalCall (ρ ++ [.ref a borrow path]) thunk (pre ++ .var ρ.length :: post) with
     | some c => some (a, c)
     | none => none
   | _ => none
@@ -163,6 +163,9 @@ inductive MemOp where
   that a path of field numbers leads to. Nothing is read out: a cell can be
   asked this whatever it holds. -/
   | tag
+  /-- A reference to a field of what a reference points to: the same cell and
+  the same borrow, one field further in. Nothing is read. -/
+  | focus
 
 /-- The constructor of the value a path of field numbers leads to; `-1` if the
 path leads nowhere, or to something no constructor built. -/
@@ -181,22 +184,27 @@ abbrev Cells := List (Option Value)
 
 /-- Perform a memory operation: its result and the memory afterwards. -/
 def MemOp.eval (cells : Cells) : MemOp → List Value → Option (Value × Cells)
-  | .load, [.ref a _] =>
+  | .load, [.ref a _ p] =>
     match cells[a]? with
-    | some (some v) => some (v, cells)
+    | some (some v) => (v.follow p).map (·, cells)
     | _ => none
-  | .store, [.ref a _, v] =>
+  | .store, [.ref a _ p, w] =>
     match cells[a]? with
-    | some (some _) => some (.unit, cells.set a (some v))
+    | some (some v) => (v.put p w).map fun v' => (.unit, cells.set a (some v'))
     | _ => none
-  | .swap, [.ref a _, v] =>
+  | .swap, [.ref a _ p, w] =>
     match cells[a]? with
-    | some (some old) => some (old, cells.set a (some v))
+    | some (some v) =>
+      match v.follow p, v.put p w with
+      | some old, some v' => some (old, cells.set a (some v'))
+      | _, _ => none
     | _ => none
-  | .tag, .ref a _ :: path =>
+  | .tag, .ref a _ p :: path =>
     match cells[a]? with
-    | some (some v) => some (.int (tagAt v path), cells)
+    | some (some v) => (v.follow p).map fun w => (.int (tagAt w path), cells)
     | _ => none
+  | .focus, [.ref a b p, .int i] =>
+    if 0 ≤ i then some (.ref a b (p ++ [i.toNat]), cells) else none
   | _, _ => none
 
 /-- The machine state that is not on the stack. -/

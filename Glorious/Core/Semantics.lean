@@ -23,13 +23,13 @@ def Pat.matchVal : Pat → Value → Option (List Value)
   | .int _, .clo _ _ => none
   | .int _, .cont _ => none
   | .int _, .label _ => none
-  | .int _, .ref _ _ => none
+  | .int _, .ref _ _ _ => none
   | .ctor tag ps, .data t fields => if tag = t then Pat.matchVals ps fields else none
   | .ctor _ _, .int _ => none
   | .ctor _ _, .clo _ _ => none
   | .ctor _ _, .cont _ => none
   | .ctor _ _, .label _ => none
-  | .ctor _ _, .ref _ _ => none
+  | .ctor _ _, .ref _ _ _ => none
 
 /-- Match values against patterns pointwise. The two lists must have the same length. -/
 def Pat.matchVals : List Pat → List Value → Option (List Value)
@@ -274,12 +274,12 @@ def step (p : Program) (s : State) : Step State Value :=
           ⟨conts, s.store.labels + 1, s.store.cells⟩
       | none => .stuck
   | .cell init thunk body =>
-    match init.eval s.env, evalScope s.env thunk (.ref s.store.cells.length 0) with
+    match init.eval s.env, evalScope s.env thunk (.ref s.store.cells.length 0 []) with
     | some v, some c =>
       apply p c (.cell s.store.cells.length :: .call s.env body :: s.stack) (s.store.alloc v)
     | _, _ => .stuck
   | .cellTail init thunk =>
-    match init.eval s.env, evalScope s.env thunk (.ref s.store.cells.length 0) with
+    match init.eval s.env, evalScope s.env thunk (.ref s.store.cells.length 0 []) with
     | some v, some c => apply p c (.cell s.store.cells.length :: s.stack) (s.store.alloc v)
     | _, _ => .stuck
   | .lend uniq r thunk pre post body =>

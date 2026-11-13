@@ -49,8 +49,8 @@ theorem HasVal.mono {S S' : StoreTy} (hle : S.Le S') :
   | _, _, .clo hsig hθ hc hq he hτ => .clo hsig hθ (HasVals.mono hle hc) hq he hτ
   | _, _, .cont h => .cont (hle.conts _ _ h)
   | _, _, .label h hr => .label (hle.labels _ _ h) hr
-  | _, _, .ref h hr hl =>
-    .ref (hle.cells _ _ h) (fun hR => (hr hR).mono hle) (fun hR hL => (hl hR hL).mono hle)
+  | _, _, .ref h hp hr hl =>
+    .ref (hle.cells _ _ h) hp (fun hR => (hr hR).mono hle) (fun hR hL => (hl hR hL).mono hle)
 
 theorem HasVals.mono {S S' : StoreTy} (hle : S.Le S') :
     ∀ {vs : List Value} {τs : List Ty}, HasVals Δ S vs τs → HasVals Δ S' vs τs
@@ -138,10 +138,10 @@ theorem HasVal.int_inv {S : StoreTy} {v : Value} (h : HasVal Δ S v .int) : ∃ 
 
 theorem HasVal.ref_inv {S : StoreTy} {v : Value} {r : Rgn} {τ : Ty}
     (h : HasVal Δ S v (.ref r τ)) :
-    ∃ a b, v = .ref a b ∧ S.cells a = some τ ∧ (Δ.regions → OnCell S r a)
-      ∧ (Δ.regions → Δ.loans → Tagged S r a b) := by
+    ∃ a b path τ₀, v = .ref a b path ∧ S.cells a = some τ₀ ∧ PlaceOk Δ τ₀ path τ
+      ∧ (Δ.regions → OnCell S r a) ∧ (Δ.regions → Δ.loans → Tagged S r a b) := by
   cases h with
-  | ref ha hr hl => exact ⟨_, _, rfl, ha, hr, hl⟩
+  | ref ha hp hr hl => exact ⟨_, _, _, _, rfl, ha, hp, hr, hl⟩
   | data hc _ => exact hc.not_ref.elim
   | clo _ _ _ _ _ hτ => cases hτ
 
@@ -271,6 +271,47 @@ theorem follow_ok {S : StoreTy} {σ τ : Ty} {path : List Nat} (h : PlaceOk Δ �
       obtain ⟨x, hx, hxt⟩ := hf.get hi
       obtain ⟨w, hw, hwt⟩ := ih hxt
       exact ⟨w, by simp [Value.follow, hx, hw], hwt⟩
+
+theorem HasVals.set {S : StoreTy} {v : Value} {σ : Ty} (hv : HasVal Δ S v σ) :
+    ∀ {vs : List Value} {τs : List Ty} (i : Nat), HasVals Δ S vs τs → τs[i]? = some σ →
+      HasVals Δ S (vs.set i v) τs
+  | _, _, _, .nil, h => by simp at h
+  | _, _, 0, .cons _ hs, h => by
+    simp only [List.getElem?_cons_zero, Option.some.injEq] at h
+    subst h
+    exact .cons hv hs
+  | _, _, i + 1, .cons hx hs, h => by
+    simp only [List.getElem?_cons_succ] at h
+    exact .cons hx (HasVals.set hv i hs h)
+
+/-- Replacing what a typed field path leads to, by a value of the type found
+there, leaves a value of the type it had. -/
+theorem put_ok {S : StoreTy} {σ τ : Ty} {path : List Nat} (h : PlaceOk Δ σ path τ) :
+    ∀ {v w : Value}, HasVal Δ S v σ → HasVal Δ S w τ →
+      ∃ v', v.put path w = some v' ∧ HasVal Δ S v' σ := by
+  induction h with
+  | here => intro v w _ hw; exact ⟨w, by simp [Value.put], hw⟩
+  | tuple hi _ ih =>
+    intro v w hv hw
+    obtain ⟨t, fields, Fs', rfl, hc, hf⟩ := hv.ctor_inv (tag := 0) (.inl ⟨rfl, rfl⟩)
+    have e := CtorOf.unique hc (.inl ⟨(by
+      rcases hc with ⟨h0, _⟩ | ⟨_, _, _, hT, _⟩
+      · exact h0
+      · cases hT), rfl⟩)
+    subst e
+    obtain ⟨x, hx, hxt⟩ := hf.get hi
+    obtain ⟨x', hx', hxt'⟩ := ih hxt hw
+    exact ⟨_, by simp [Value.put, hx, hx'], .data hc (HasVals.set hxt' _ hf hi)⟩
+  | @field name args Fs i path σ τ hall hi _ ih =>
+    intro v w hv hw
+    cases hv with
+    | clo _ _ _ _ _ hτ => cases hτ
+    | data hc hf =>
+      have e := hall _ _ hc
+      subst e
+      obtain ⟨x, hx, hxt⟩ := hf.get hi
+      obtain ⟨x', hx', hxt'⟩ := ih hxt hw
+      exact ⟨_, by simp [Value.put, hx, hx'], .data hc (HasVals.set hxt' _ hf hi)⟩
 
 /-- An arithmetic intrinsic on two integers gives an integer, when it gives anything. -/
 theorem prim_int {p : Prim} {m n : Int} {v : Value} (h : p.eval [.int m, .int n] = some v) :

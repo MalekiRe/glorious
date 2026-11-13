@@ -396,7 +396,7 @@ partial def showInner (names : Array String) : Value → String
   | .clo fn _ => s!"<fn {fn}>"
   | .cont id => s!"<resumption {id}>"
   | .label id => s!"<label {id}>"
-  | .ref addr _ => s!"<ref {addr}>"
+  | .ref addr _ _ => s!"<ref {addr}>"
 
 /-- A value as it is shown. A text is shown as its characters; inside another
 value, in quotes. -/
@@ -508,18 +508,19 @@ def explainStuck (c : Compiled) (cfg : Core.Config) : String :=
   | .raise op _ => performed op
   | .perform op _ _ => performed op
   | .cancel _ _ => "`cancel` is applied to something that is not a usable resumption"
-  | .cell _ thunk _ => applied thunk (some [.ref s.store.cells.length 0])
-  | .cellTail _ thunk => applied thunk (some [.ref s.store.cells.length 0])
+  | .cell _ thunk _ => applied thunk (some [.ref s.store.cells.length 0 []])
+  | .cellTail _ thunk => applied thunk (some [.ref s.store.cells.length 0 []])
   | .lend _ r thunk pre post _ =>
     match r.eval s.env with
-    | some (.ref a _) =>
+    | some (.ref a _ path) =>
       applied thunk (do
-        pure ((← evalAtoms s.env pre) ++ .ref a (s.store.labels + 1) :: (← evalAtoms s.env post)))
+        pure ((← evalAtoms s.env pre) ++ .ref a (s.store.labels + 1) path
+          :: (← evalAtoms s.env post)))
     | some v => s!"`{showValue c.ctorNames v}` is lent, but it is not a reference"
     | none => unbound
   | .mem _ args _ =>
     match evalAtoms s.env args with
-    | some (.ref _ _ :: _) => "a reference is used after the cell it points to was freed"
+    | some (.ref _ _ _ :: _) => "a reference is used after the cell it points to was freed"
     | some vs => s!"a memory operation is applied to ({shown vs}), which is not a reference"
     | none => unbound
   | .host id _ _ =>

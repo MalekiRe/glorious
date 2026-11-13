@@ -146,12 +146,12 @@ def starts (s : State) : Nat :=
       | none => 0
     | _ => 0
   | .cell init thunk body =>
-    match init.eval s.env, evalScope s.env thunk (.ref s.store.cells.length 0) with
+    match init.eval s.env, evalScope s.env thunk (.ref s.store.cells.length 0 []) with
     | some v, some c =>
       applyStarts c (.cell s.store.cells.length :: .call s.env body :: s.stack) (s.store.alloc v)
     | _, _ => 0
   | .cellTail init thunk =>
-    match init.eval s.env, evalScope s.env thunk (.ref s.store.cells.length 0) with
+    match init.eval s.env, evalScope s.env thunk (.ref s.store.cells.length 0 []) with
     | some v, some c => applyStarts c (.cell s.store.cells.length :: s.stack) (s.store.alloc v)
     | _, _ => 0
   | .lend uniq r thunk pre post body =>
@@ -621,7 +621,7 @@ theorem step_accounts {p : Program} {s s' : State} (h : step p s = .next s') :
     cases hv : init.eval env with
     | none => rw [hv] at h; cases h
     | some v =>
-      cases hc : evalScope env thunk (.ref store.cells.length 0) with
+      cases hc : evalScope env thunk (.ref store.cells.length 0 []) with
       | none => rw [hv, hc] at h; cases h
       | some c =>
         rw [hv, hc] at h
@@ -633,7 +633,7 @@ theorem step_accounts {p : Program} {s s' : State} (h : step p s = .next s') :
     cases hv : init.eval env with
     | none => rw [hv] at h; cases h
     | some v =>
-      cases hc : evalScope env thunk (.ref store.cells.length 0) with
+      cases hc : evalScope env thunk (.ref store.cells.length 0 []) with
       | none => rw [hv, hc] at h; cases h
       | some c =>
         rw [hv, hc] at h
@@ -780,7 +780,7 @@ theorem step_halt {p : Program} {s : State} {w : Value} (h : step p s = .halt w)
     cases hv : init.eval env with
     | none => rw [hv] at h; cases h
     | some v =>
-      cases hc : evalScope env thunk (.ref store.cells.length 0) with
+      cases hc : evalScope env thunk (.ref store.cells.length 0 []) with
       | none => rw [hv, hc] at h; cases h
       | some c => rw [hv, hc] at h; simpa [guards] using apply_halt h
   | cellTail init thunk =>
@@ -788,7 +788,7 @@ theorem step_halt {p : Program} {s : State} {w : Value} (h : step p s = .halt w)
     cases hv : init.eval env with
     | none => rw [hv] at h; cases h
     | some v =>
-      cases hc : evalScope env thunk (.ref store.cells.length 0) with
+      cases hc : evalScope env thunk (.ref store.cells.length 0 []) with
       | none => rw [hv, hc] at h; cases h
       | some c => rw [hv, hc] at h; simpa [guards] using apply_halt h
   | lend uniq r thunk pre post body =>

@@ -227,13 +227,13 @@ def step (p : Program) (s : State) : Step State Value :=
           ⟨conts, s.store.labels + 1, s.store.cells⟩
       | none => .stuck
   | some (.cell init thunk) =>
-    match init.eval s.locals, evalScope s.locals thunk (.ref s.store.cells.length 0) with
+    match init.eval s.locals, evalScope s.locals thunk (.ref s.store.cells.length 0 []) with
     | some v, some c =>
       apply p c (.cell s.store.cells.length :: .ret s.code (s.pc + 1) s.locals :: s.frames)
         (s.store.alloc v)
     | _, _ => .stuck
   | some (.cellTail init thunk) =>
-    match init.eval s.locals, evalScope s.locals thunk (.ref s.store.cells.length 0) with
+    match init.eval s.locals, evalScope s.locals thunk (.ref s.store.cells.length 0 []) with
     | some v, some c => apply p c (.cell s.store.cells.length :: s.frames) (s.store.alloc v)
     | _, _ => .stuck
   | some (.lend _ r thunk pre post) =>

@@ -22,11 +22,12 @@ inductive Value where
   | cont (id : Nat)
   /-- A label: the identity of a label scope. -/
   | label (id : Nat)
-  /-- A reference: the address of a memory cell, and which borrow of the cell
-  it is. The cell's own reference is borrow zero. Nothing the machine does
-  depends on the borrow: it is there so that what it means for a borrow to be
-  respected can be said. -/
-  | ref (addr : Nat) (borrow : Nat)
+  /-- A reference: the address of a memory cell, which borrow of the cell it
+  is, and the way from what the cell holds to the part of it the reference is
+  to: the fields to go through, none for the whole. The cell's own reference
+  is borrow zero. Nothing the machine does depends on the borrow: it is there
+  so that what it means for a borrow to be respected can be said. -/
+  | ref (addr : Nat) (borrow : Nat) (path : List Nat)
 
 /-- The constructors that build arrays: the one that takes `n` elements is
 `arrayBase + n`, above every constructor a program declares. And the name
@@ -168,7 +169,23 @@ def follow : Value → List Nat → Option Value
   | .clo _ _, _ :: _ => none
   | .cont _, _ :: _ => none
   | .label _, _ :: _ => none
-  | .ref _ _, _ :: _ => none
+  | .ref _ _ _, _ :: _ => none
+
+/-- A value with the part a field path leads to replaced. -/
+def put : Value → List Nat → Value → Option Value
+  | _, [], w => some w
+  | .data tag fields, i :: path, w =>
+    match fields[i]? with
+    | some field =>
+      match field.put path w with
+      | some field' => some (.data tag (fields.set i field'))
+      | none => none
+    | none => none
+  | .int _, _ :: _, _ => none
+  | .clo _ _, _ :: _, _ => none
+  | .cont _, _ :: _, _ => none
+  | .label _, _ :: _, _ => none
+  | .ref _ _ _, _ :: _, _ => none
 
 /-- Is this value built by constructor `tag` with exactly `arity` fields? -/
 def isCtor (v : Value) (tag arity : Nat) : Bool :=
@@ -178,7 +195,7 @@ def isCtor (v : Value) (tag arity : Nat) : Bool :=
   | .clo _ _ => false
   | .cont _ => false
   | .label _ => false
-  | .ref _ _ => false
+  | .ref _ _ _ => false
 
 /-- Is this value the integer `n`? -/
 def isInt (v : Value) (n : Int) : Bool :=
@@ -188,7 +205,7 @@ def isInt (v : Value) (n : Int) : Bool :=
   | .clo _ _ => false
   | .cont _ => false
   | .label _ => false
-  | .ref _ _ => false
+  | .ref _ _ _ => false
 
 end Value
 

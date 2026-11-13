@@ -157,6 +157,13 @@ inductive PlaceOk (Δ : Ctx) : Ty → List Nat → Ty → Prop where
       (∀ tag Fs', CtorOf Δ tag (.data name args) Fs' → Fs' = Fs) → Fs[i]? = some σ →
       PlaceOk Δ σ path τ → PlaceOk Δ (.data name args) (i :: path) τ
 
+theorem PlaceOk.append {Δ : Ctx} {σ τ υ : Ty} {p q : List Nat} (h : PlaceOk Δ σ p τ)
+    (h' : PlaceOk Δ τ q υ) : PlaceOk Δ σ (p ++ q) υ := by
+  induction h with
+  | here => exact h'
+  | tuple hi _ ih => exact .tuple hi (ih h')
+  | field hall hi _ ih => exact .field hall hi (ih h')
+
 /-! ## The locals a computation mentions -/
 
 def atomVars : List Atom → List Nat
@@ -578,6 +585,13 @@ inductive HasTm (Δ : Ctx) (ϕ : List Rgn) : TEnv → Tm → Ty → Row → Prop
       {Ps : List Ty} :
       HasAtom Γ a (.ref r σ) → (Δ.regions → r ∈ ϕ) → HasAtoms Γ path Ps →
       HasTm Δ ϕ (Γ ++ [.int]) body τ ε → HasTm Δ ϕ Γ (.mem .tag (a :: path) body) τ ε
+  /-- A reference to a field of what a reference points to, of the same region.
+  Nothing is read, but under the region rules it needs the cell's region, as
+  reading does. -/
+  | focus {Γ : TEnv} {a : Atom} {i : Nat} {body : Tm} {r : Rgn} {σ σ' τ : Ty} {ε : Row} :
+      HasAtom Γ a (.ref r σ) → (Δ.regions → r ∈ ϕ) → PlaceOk Δ σ [i] σ' →
+      HasTm Δ ϕ (Γ ++ [.ref r σ']) body τ ε →
+      HasTm Δ ϕ Γ (.mem .focus [a, .int i] body) τ ε
   | write {Γ : TEnv} {a : Atom} {body : Tm} {σ τ : Ty} {ε : Row} :
       HasAtom Γ a σ → HasTm Δ ϕ (Γ ++ [.unit]) body τ ε → HasTm Δ ϕ Γ (.host 0 [a] body) τ ε
   | read {Γ : TEnv} {body : Tm} {τ : Ty} {ε : Row} :
