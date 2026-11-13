@@ -113,6 +113,7 @@ enum MemOp {
     Load,
     Store,
     Swap,
+    Tag,
 }
 
 enum Rhs {
@@ -375,6 +376,7 @@ impl Reader<'_> {
                     0 => MemOp::Load,
                     1 => MemOp::Store,
                     2 => MemOp::Swap,
+                    3 => MemOp::Tag,
                     t => return Err(format!("unknown memory operation {t}")),
                 };
                 Ok(Instr::Mem(op, self.atoms()?))
@@ -884,6 +886,29 @@ impl Vm {
                 let addr = *a;
                 let new = args.pop();
                 Ok(std::mem::replace(self.cell(addr)?, new).unwrap())
+            }
+            (MemOp::Tag, [Value::Ref(a), ..]) => {
+                // Which constructor built what the cell holds, or the field a
+                // path of field numbers leads to; -1 where it leads nowhere.
+                let addr = *a;
+                let path: Vec<Value> = args.drain(1..).collect();
+                let mut at = self.cell(addr)?.as_ref().ok_or(Stop::Wrong)?;
+                for step in &path {
+                    let next = match (at, step) {
+                        (Value::Data(d), Value::Int(i)) => {
+                            usize::try_from(*i).ok().and_then(|i| d.fields.get(i))
+                        }
+                        _ => None,
+                    };
+                    match next {
+                        Some(v) => at = v,
+                        None => return Ok(Value::Int(-1)),
+                    }
+                }
+                Ok(match at {
+                    Value::Data(d) => Value::Int(i128::from(d.tag)),
+                    _ => Value::Int(-1),
+                })
             }
             _ => wrong(),
         }

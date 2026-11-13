@@ -771,6 +771,11 @@ theorem HasTm.inst (hΔ : Δ.Stable) (θ : List Rgn) {ϕ : List Rgn}
     rw [Ty.inst_ref] at ha'
     rw [snoc_inst] at ih
     exact .load ha' (fun h => List.mem_map.mpr ⟨_, hr h, rfl⟩) ((hΔ.dup _ θ).mpr hd) ih
+  | tag ha hr hp _ ih =>
+    have ha' := ha.inst θ
+    rw [Ty.inst_ref] at ha'
+    rw [snoc_inst, Ty.inst_int] at ih
+    exact .tag ha' (fun h => List.mem_map.mpr ⟨_, hr h, rfl⟩) (hp.inst θ) ih
   | store hform hlin _ ih =>
     have ha := hform.ref
     have hr := hform.region

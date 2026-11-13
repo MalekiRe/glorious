@@ -541,6 +541,34 @@ partial def shapeOf (ctx : Ctx) (way : List String) : Pattern → R (Pattern × 
       names := names ++ ns
     pure (.ctor name qual pats.toList, names)
 
+/-- What a shape asks of a value: at each path of field numbers where it names
+a constructor, that constructor. None if it asks for a number, which has to be
+read to be compared. -/
+partial def shapeTests (ctx : Ctx) (path : List Nat) :
+    Pattern → R (Option (List (List Nat × Expr)))
+  | .wild => pure (some [])
+  | .int _ => pure none
+  | .var x => do
+    match lookupIn ctx.scope .value x with
+    | some e => pure (if e.kind == .ctor then some [(path, .name none x)] else none)
+    | none => pure (some [])
+  | .tuple args => do
+    let mut out : List (List Nat × Expr) := []
+    for (p, i) in args.zipIdx do
+      match ← shapeTests ctx (path ++ [i]) p with
+      | some more => out := out ++ more
+      | none => return none
+    pure (some out)
+  | .ctor name qual args => do
+    let (_, _, entry) ← resolveValue ctx [] qual name
+    unless (entry.map (·.kind == .ctor)).getD false do return none
+    let mut out : List (List Nat × Expr) := [(path, .name qual name)]
+    for (p, i) in args.zipIdx do
+      match ← shapeTests ctx (path ++ [i]) p with
+      | some more => out := out ++ more
+      | none => return none
+    pure (some out)
+
 /-- The clauses of a callable in which a parameter binds by reference,
 `&mut Circle(r) => ..`: the callable takes the reference, looks at what it
 points to to choose a clause, and in the clause each name of the pattern is a
@@ -556,6 +584,28 @@ def byReference (ctx : Ctx) (clauses : List Clause) : R (List Clause) := do
   if places.isEmpty then return clauses
   let k ← freshId
   let outer := (List.range arity).map fun i => s!"%given{k}_{i}"
+  -- What the clauses ask of what each reference points to: each constructor
+  -- at each place. A clause is chosen by asking the cell, which reads
+  -- nothing out of it, so what is pointed to need not be a value that can be
+  -- copied. Where a clause asks for a number, the value is read instead.
+  let mut asked : List (Nat × List (List Nat × Expr)) := []
+  let mut byTest := true
+  let same := fun (a b : List Nat × Expr) =>
+    a.1 == b.1 && (match a.2, b.2 with
+      | .name q x, .name q' x' => q == q' && x == x'
+      | _, _ => false)
+  for clause in clauses do
+    let .mk pats _ := clause
+    for (p, i) in pats.zip (List.range arity) do
+      if places.contains i then
+        if let some (_, p) := byRef? p then
+          let (shape, _) ← shapeOf ctx [] p
+          match ← shapeTests ctx [] shape with
+          | some found =>
+            let so := (asked.lookup i).getD []
+            let more := found.filter fun f => !so.any (same f)
+            asked := (i, so ++ more) :: asked.filter (·.1 != i)
+          | none => byTest := false
   let mut inner : Array Clause := #[]
   for clause in clauses do
     let .mk pats body := clause
@@ -568,7 +618,11 @@ def byReference (ctx : Ctx) (clauses : List Clause) : R (List Clause) := do
         match byRef? p with
         | some (uniq, p) =>
           let (test, names) ← shapeOf ctx [] p
-          tests := tests.push test
+          if byTest then
+            let mine := ((← shapeTests ctx [] test).getD [])
+            tests := tests.push (.tuple (((asked.lookup i).getD []).map fun a =>
+              if mine.any (same a) then Pattern.int 1 else Pattern.wild))
+          else tests := tests.push test
           for (x, way) in names do
             let id := 900000000 + (← freshId)
             if way.isEmpty then
@@ -590,9 +644,35 @@ def byReference (ctx : Ctx) (clauses : List Clause) : R (List Clause) := do
             throw "where one clause binds a parameter by reference, `&mut Pattern`, every clause does, or takes the reference whole"
       else tests := tests.push p
     inner := inner.push (.mk tests.toList (binds.toList ++ body))
+  -- Asked of the cells, the clauses' tests are of numbers, which say nothing
+  -- of whether every case is covered: the patterns as written say that, to
+  -- the checker; and a last clause, never reached, stands for the rest.
+  let shapes ← if byTest then do
+      let mut rows : Array Clause := #[]
+      for clause in clauses do
+        let .mk pats _ := clause
+        let mut row : Array Pattern := #[]
+        for (p, i) in pats.zip (List.range arity) do
+          match (if places.contains i then byRef? p else none) with
+          | some (_, p) => row := row.push (← shapeOf ctx [] p).1
+          | none => row := row.push (if places.contains i then Pattern.wild else p)
+        rows := rows.push (.mk row.toList [])
+      pure [Stmt.expr (.call 0 (.name none "%shapes")
+        ((outer.zip (List.range arity)).map (fun (x, i) =>
+          if places.contains i then Expr.deref (.name none x) else Expr.name none x)
+          ++ [.closure 0 rows.toList]))]
+    else pure []
+  if byTest then
+    inner := inner.push (.mk (List.replicate arity Pattern.wild)
+      [.expr (.tailCall 0 (.name none "%never") [])])
   let args := (outer.zip (List.range arity)).map fun (x, i) =>
-    if places.contains i then Expr.deref (.name none x) else .name none x
-  pure [.mk (outer.map Pattern.var) [.expr (.call 0 (.closure 0 inner.toList) args)]]
+    if !places.contains i then Expr.name none x
+    else if byTest then
+      .tuple (((asked.lookup i).getD []).map fun (path, ctor) =>
+        .call 0 (.name none ctorIsMark)
+          ([Expr.name none x] ++ path.map (fun (n : Nat) => Expr.int (n : Int)) ++ [ctor]))
+    else Expr.deref (.name none x)
+  pure [.mk (outer.map Pattern.var) (shapes ++ [.expr (.call 0 (.closure 0 inner.toList) args)])]
 
 /-- A pattern with its names resolved, and the names it binds. -/
 partial def resolvePattern (ctx : Ctx) : Pattern → R (Pattern × List String)

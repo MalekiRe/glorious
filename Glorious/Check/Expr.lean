@@ -118,8 +118,46 @@ partial def inferExpr (scope : Scope) (amb : Row) : Expr → M Ty
       let t ← freshTy
       modify fun s => { s with projections := s.projections.push (subject, idx, t, s.pos) }
       pure t
-  | .call id f args => withTemps (inferCall scope amb f args id)
-  | .tailCall id f args => withTemps (inferCall scope amb f args id)
+  | .call id f args => do
+    -- Whether what a reference points to was built by a constructor: the
+    -- compiler's question where a pattern binds by reference. The reference
+    -- is not used up, and nothing is read out of what it points to.
+    if let (.name none mark, r :: _) := (f, args) then
+      if mark == Syntax.ctorIsMark then
+        let inner ← freshTy
+        unifyAt "a pattern that binds by reference" (.ref (← freshTy) inner (← freshCap))
+          (← inferPlace scope amb r)
+        return .int
+    -- What the clauses of such a callable ask of the values they are given,
+    -- as patterns: these have to cover every case, and say what the types
+    -- are. A value written `*r` is what the reference points to.
+    if let .name none "%shapes" := f then
+      if let some (.closure _ clauses) := args.getLast? then
+        let mut tys : Array Ty := #[]
+        for a in args.dropLast do
+          match a with
+          | .deref r =>
+            let inner ← freshTy
+            unifyAt "a pattern that binds by reference" (.ref (← freshTy) inner (← freshCap))
+              (← inferPlace scope amb r)
+            tys := tys.push inner
+          | a => tys := tys.push (← inferPlace scope amb a)
+        -- What a pattern lets go of is let go of by the clause, not here.
+        let drops := (← get).drops
+        for c in clauses do
+          let .mk pats _ := c
+          let _ ← inferPats pats tys.toList
+        modify fun s => { s with drops := drops }
+        let check : Pending := ⟨(← get).pos, "the clauses of this callable do", tys.toList,
+          clauses.map fun
+            | .mk pats _ => pats⟩
+        modify fun s => { s with pending := s.pending.push check }
+      return .unit
+    withTemps (inferCall scope amb f args id)
+  | .tailCall id f args => do
+    -- The case that cannot be: of whatever type is wanted.
+    if let .name none "%never" := f then return ← freshTy
+    withTemps (inferCall scope amb f args id)
   | .closure id clauses => do
     let t ← inferCallable scope [] none none clauses "the clauses of this callable do" id
     if let .fn _ _ _ _ cap := t then

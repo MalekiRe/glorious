@@ -1485,9 +1485,20 @@ variable itself. `p.0` reads through a reference. And a borrow of a field
 through a reference cannot be given back by the function that makes it or
 kept in what it is given: it is a variable of that function's.
 
+Since: what is pointed to is no longer copied to choose a clause. Core has
+a memory operation, `tag`, that asks a cell which constructor built what it
+holds, or the field of it a path of field numbers leads to, and reads nothing
+out; it is typed like a read without the condition that the value can be
+copied, and type safety, the region rules and the rules for borrows were
+proved of it as of the other three. A callable whose clauses bind by
+reference asks the cell each constructor its clauses name, and chooses a
+clause by the answers. Whether the clauses cover every case is still said by
+the patterns as written, which the checker reads beside them. So a `&mut`
+pattern works on a value that cannot be copied, a resource or something that
+holds a callable. A clause that asks for a number still reads the value.
+
 Limits. A pattern that binds by reference is written around the whole
-pattern. What is pointed to is copied to choose the clause, so it has to be a
-value that can be copied. A reference bound by a pattern lasts for its
+pattern. A reference bound by a pattern lasts for its
 clause, and one to a field for its function. Two borrows of fields that
 overlap, with a statement between them that looks at the variable, are
 refused, with what to write instead.

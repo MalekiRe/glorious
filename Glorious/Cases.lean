@@ -1911,6 +1911,25 @@ def cases : List Case := [
     [], "error: 2:83: in `main`: calling `k` may assign or borrow `x` while a value this expression is still using holds a `&mut` reference to it"⟩,
   ⟨"effect Tick<'a> { tick(&'a mut Int) }\nfn main() { let mut x = 1; handle { tick(&mut x); tick(&mut x); 0 }() { tick(r, k) => *r = *r + 1; k(()) }; x }",
     [], "3"⟩,
+  -- A pattern that binds by reference asks the cell which constructor built
+  -- what it holds, and reads nothing: the value need not be one that can be
+  -- copied.
+  ⟨"struct File(Int)\nimpl Use<[0, 1]> for File {}\nenum Slot { Empty, Full(File, Int) }\nfn count(s: &mut Slot) -> Int { match(s) { &mut Full(_, n) => *n = *n + 1; *n, &mut Empty => 0 } }\nfn main() { let mut a = Full(File(3), 1); let mut b = Empty; count(&mut a) + count(&mut a) + count(&mut b) }",
+    [], "5"⟩,
+  ⟨"effect Ask { ask() -> Int }\nenum Job { Idle, Waiting(fn(Int) -> Int, Int) }\nfn peek(j: &Job) -> Int { match(j) { &Waiting(_, n) => *n, &Idle => 0 } }\nfn main() { let mut j = Idle; let a = peek(&j); j = Waiting({ x => x + 1 }, 7); a + peek(&j) }",
+    [], "7"⟩,
+  ⟨"enum Shape { Circle(Int), Rect { w: Int, h: Int } }\nfn area(s: &Shape) -> Int { match(s) { &Circle(r) => *r * *r * 3, &Rect { w, h } => *w * *h } }\nfn main() { let mut a = Circle(2); let mut b = Rect { w: 2, h: 5 }; area(&a) + area(&b) }",
+    [], "22"⟩,
+  ⟨"enum Tree { Leaf(Int), Node((Tree, Tree)) }\nfn bump(t: &mut Tree) { match(t) { &mut Leaf(n) => *n = *n + 1, &mut Node((Leaf(a), _)) => *a = *a + 10, _ => () } }\nfn main() { let mut x = Node((Leaf(1), Leaf(2))); bump(&mut x); let mut y = Leaf(5); bump(&mut y); (x, y) }",
+    [], "(Node((Leaf(11), Leaf(2))), Leaf(6))"⟩,
+  ⟨"enum Shape { Circle(Int), Rect(Int, Int), Dot }\nfn f(s: &Shape) -> Int { match(s) { &Circle(r) => *r, &Rect(w, _) => *w } }\nfn main() { 0 }",
+    [], "error: 2:26: in `f`: the clauses of this callable do not cover every case"⟩,
+  ⟨"struct File(Int)\nimpl Use<[0, 1]> for File {}\nenum Slot { Empty, Full(File, Int) }\nfn id_of(s: &Slot) -> Int { match(s) { &Full(f, _) => (*f).0, &Empty => 0 } }\nfn main() { let mut a = Full(File(3), 1); id_of(&a) + id_of(&a) }",
+    [], "6"⟩,
+  ⟨"enum E { A(Int), B(Int) }\nfn f(e: &E, n: Int) -> Int { match((n, 0)) { (0, _) => 0, _ => match(e) { &A(x) => *x, &B(y) => *y + 100 } } }\nfn main() { let mut e = B(2); f(&e, 0) + f(&e, 1) }",
+    [], "102"⟩,
+  ⟨"fn f(p: &Option<Int>) -> Int { match(p) { &Some(5) => 1, &Some(n) => *n, &None => 0 } }\nfn main() { let mut a = Some(5); let mut b = Some(9); f(&a) + f(&b) }",
+    [], "10"⟩,
   -- `drop` is not for a program to call.
   ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nfn main() { let mut f = File(7); drop(&mut f); 0 }",
     [], "error: 3:34: in `main`: `drop` is run when what holds a value ends; a program does not call it"⟩,

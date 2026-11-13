@@ -571,6 +571,13 @@ inductive HasTm (Δ : Ctx) (ϕ : List Rgn) : TEnv → Tm → Ty → Row → Prop
   | swap {Γ : TEnv} {a b : Atom} {body : Tm} {r : Rgn} {σ τ : Ty} {ε : Row} :
       WriteOk Δ ϕ Γ a b r σ → Linear Δ Γ (atomVars [b]) (fv body) →
       HasTm Δ ϕ (Γ ++ [σ]) body τ ε → HasTm Δ ϕ Γ (.mem .swap [a, b] body) τ ε
+  /-- Asking a cell which constructor built what it holds, or a field of it:
+  nothing is copied, so the value may be anything. Under the region rules it
+  needs the cell's region, as reading does. -/
+  | tag {Γ : TEnv} {a : Atom} {path : List Atom} {body : Tm} {r : Rgn} {σ τ : Ty} {ε : Row}
+      {Ps : List Ty} :
+      HasAtom Γ a (.ref r σ) → (Δ.regions → r ∈ ϕ) → HasAtoms Γ path Ps →
+      HasTm Δ ϕ (Γ ++ [.int]) body τ ε → HasTm Δ ϕ Γ (.mem .tag (a :: path) body) τ ε
   | write {Γ : TEnv} {a : Atom} {body : Tm} {σ τ : Ty} {ε : Row} :
       HasAtom Γ a σ → HasTm Δ ϕ (Γ ++ [.unit]) body τ ε → HasTm Δ ϕ Γ (.host 0 [a] body) τ ε
   | read {Γ : TEnv} {body : Tm} {τ : Ty} {ε : Row} :

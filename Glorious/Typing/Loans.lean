@@ -36,6 +36,7 @@ def writes : MemOp → Bool
   | .load => false
   | .store => true
   | .swap => true
+  | .tag => false
 
 /-- Whether the reference to cell `a` that is borrow `b`, or the cell's own
 reference if `b` is `0`, may be used on this stack: to write if `write`, and
@@ -297,6 +298,17 @@ theorem TypedAt.not_aliased {S : StoreTy} {s : State} (hR : Δ.regions) (hL : Δ
         rw [hev.1] at hx
         have := hread r a b (hsub _ (hr hR)) (key ha hx)
         simp [writes, this] at hno
+    | @tag _ x path _ r σ _ _ _ ha hr _ _ =>
+      cases hx : Atom.eval env x with
+      | none => simp [evalAtoms, hx] at hev
+      | some w =>
+        cases hp : evalAtoms env path with
+        | none => simp [evalAtoms, hx, hp] at hev
+        | some ws =>
+          simp [evalAtoms, hx, hp] at hev
+          rw [hev.1] at hx
+          have := hread r a b (hsub _ (hr hR)) (key ha hx)
+          simp [writes, this] at hno
     | @store _ x y _ r σ _ _ hform _ _ =>
       have ha := hform.ref
       have hw := hform.write

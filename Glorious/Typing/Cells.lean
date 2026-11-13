@@ -318,6 +318,10 @@ theorem mem_live {op : MemOp} {cells cells' : Cells} {vs : List Value} {r : Valu
     · cases h
       exact live_set hl
     · cases h
+  · split at h
+    · cases h
+      exact hl
+    · cases h
   · cases h
 
 /-- **Every step of the machine keeps every scope's cell live.** Nothing here
@@ -676,6 +680,15 @@ theorem TypedAt.not_freed {S : StoreTy} {s : State} (hR : Δ.regions) (ht : Type
     | some w =>
       simp [evalAtoms, hx] at hev
       exact key ha (hr hR) hx hev.1
+  | @tag _ x path _ r σ _ _ _ ha hr _ _ =>
+    cases hx : Atom.eval env x with
+    | none => simp [evalAtoms, hx] at hev
+    | some w =>
+      cases hp : evalAtoms env path with
+      | none => simp [evalAtoms, hx, hp] at hev
+      | some ws =>
+        simp [evalAtoms, hx, hp] at hev
+        exact key ha (hr hR) hx hev.1
   | @store _ x y _ r σ _ _ hform _ _ =>
     have ha := hform.ref
     have hr := hform.region
@@ -827,6 +840,7 @@ theorem TypedAt.not_dead {S : StoreTy} {s : State} (hR : Δ.regions) (ht : Typed
     · omega
     · exact found hmem
   | load _ _ _ _ => cases hcallee
+  | tag _ _ _ _ => cases hcallee
   | store _ _ _ => cases hcallee
   | swap _ _ _ => cases hcallee
   | write _ _ => cases hcallee

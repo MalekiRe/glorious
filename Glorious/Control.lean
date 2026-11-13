@@ -159,6 +159,22 @@ inductive MemOp where
   there. The old value is moved out, not copied, so a cell can hold something
   that must not be duplicated. -/
   | swap
+  /-- Which constructor built what a reference points to, or the field of it
+  that a path of field numbers leads to. Nothing is read out: a cell can be
+  asked this whatever it holds. -/
+  | tag
+
+/-- The constructor of the value a path of field numbers leads to; `-1` if the
+path leads nowhere, or to something no constructor built. -/
+def tagAt : Value → List Value → Int
+  | .data tag _, [] => tag
+  | .data _ fields, .int i :: path =>
+    if 0 ≤ i then
+      match fields[i.toNat]? with
+      | some field => tagAt field path
+      | none => -1
+    else -1
+  | _, _ => -1
 
 /-- Memory: a cell is live with a value, or has been freed. Addresses are never reused. -/
 abbrev Cells := List (Option Value)
@@ -176,6 +192,10 @@ def MemOp.eval (cells : Cells) : MemOp → List Value → Option (Value × Cells
   | .swap, [.ref a _, v] =>
     match cells[a]? with
     | some (some old) => some (old, cells.set a (some v))
+    | _ => none
+  | .tag, .ref a _ :: path =>
+    match cells[a]? with
+    | some (some v) => some (.int (tagAt v path), cells)
     | _ => none
   | _, _ => none
 

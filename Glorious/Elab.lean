@@ -882,6 +882,26 @@ partial def lendCall (idx : Nat) (atoms : List Atom) : List (Nat × Bool) → M 
     emit (.lend uniq lentRef thunk [] [])
 
 partial def elabCall (scope : Scope) (isTail : Bool) (f : Expr) (args : List Expr) : M Atom := do
+  -- Whether what a reference points to was built by a constructor, at a
+  -- path of field numbers: the cell is asked, and nothing is read out of it.
+  -- What the clauses of a callable that binds by reference ask of the values:
+  -- the checker's to read, and nothing to do.
+  if let .name none "%shapes" := f then
+    return ← emit (.let_ (.construct 0 []))
+  if let (.name none mark, r :: rest) := (f, args) then
+    if mark == Syntax.ctorIsMark then
+      let cell ← elabExpr scope false r
+      let path := rest.dropLast.filterMap fun
+        | .int n => some (Atom.int n)
+        | _ => none
+      let tag ← match rest.getLast? with
+        | some (.name q c) =>
+          match ← resolveCtor c q with
+          | some info => pure (info.tag : Int)
+          | none => throw s!"`{c}` is not a constructor"
+        | _ => throw "a test of a constructor names the constructor"
+      let found ← emit (.mem .tag (cell :: path))
+      return ← emit (.let_ (.prim .intEq [found, .int tag]))
   match f with
   | .name q x =>
     match ← resolveName scope q x with
@@ -2129,6 +2149,17 @@ private def withSelfLabel (name : String) : Clause → Clause
 /-- The program without the functions nothing reaches from `main` or from a
 coercion, which a call may be given without its being written. -/
 def reachable (roots : List String) (items : List Item) : List Item := Id.run do
+  -- The function for a case that cannot be, if something is written with it
+  -- and it is not yet there.
+  let defined := items.any fun
+    | .fn name _ _ _ _ => name == neverName
+    | _ => false
+  let wanted := items.any fun
+    | .fn _ _ _ _ clauses => (clauses.flatMap (fvClause [])).contains neverName
+    | _ => false
+  let items := if wanted && !defined then
+      Item.fn neverName [] [] none [.mk [] [.expr (.tailCall 0 (.name none neverName) [])]] :: items
+    else items
   let bodies : Std.HashMap String (List String) := items.foldl (init := {}) fun acc item =>
     match item with
     | .fn name _ _ _ clauses =>

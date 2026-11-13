@@ -1562,6 +1562,10 @@ partial def inferTm (self : Nat) (amb : IRow) (τ : ITy) (Γ : Array ITy) : Core
         accWr self ρ
         unify t (.ref ρ v)
         pure v
+      | .tag, t :: _ => do
+        accRgn self ρ
+        unify t (.ref ρ (← freshTy))
+        pure .int
       | _, _ => throw "a memory operation has the wrong number of arguments"
     inferTm self amb τ (Γ.push σ) body
   | .host id args body => do

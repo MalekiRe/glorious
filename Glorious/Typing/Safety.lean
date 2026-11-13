@@ -1208,6 +1208,34 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
         have h4 := hD _ _ _ (hval w hget) hdup id
         simp only [occState]
         omega
+  | @tag _ a path body r σ _ _ Ps ha _ hpath hbody =>
+    obtain ⟨v, hv, hvt⟩ := atom_ok henv ha
+    obtain ⟨vs, hvs, _⟩ := atoms_ok henv hpath
+    obtain ⟨addr, tg, rfl, hcell, _, _⟩ := hvt.ref_inv
+    obtain ⟨hlt, hval⟩ := hs.cells addr σ hcell
+    cases hget : cells[addr]? with
+    | none => exact absurd hlt (by simpa using List.getElem?_eq_none_iff.mp hget)
+    | some x =>
+      cases x with
+      | none =>
+        have h1 : step p ⟨.mem .tag (a :: path) body, env, stack, ⟨conts, labels, cells⟩⟩
+            = .stuck := by
+          simp [step, evalAtoms, hv, hvs, MemOp.eval, hget]
+        rw [h1]
+        exact Fault.freed (a := addr) (b := tg) (vs := vs) (by simp [evalAtoms, hv, hvs]) hget
+      | some w =>
+        have h1 : step p ⟨.mem .tag (a :: path) body, env, stack, ⟨conts, labels, cells⟩⟩
+            = .next ⟨body, env ++ [.int (tagAt w vs)], stack, ⟨conts, labels, cells⟩⟩ := by
+          simp [step, evalAtoms, hv, hvs, MemOp.eval, hget]
+        rw [h1]
+        refine .next (.mk (henv.snoc .int) hbody hle hsub hst hs)
+          (fun hD hu => hu.mono rfl fun id => ?_)
+        have h2 := occEnv_push id env (.int (tagAt w vs)) (fv body)
+        have h3 := occEnv_mono (id := id) (env := env) (a := fv body)
+          (b := fv (.mem .tag (a :: path) body)) (fun i hi => List.mem_append_right _ hi)
+        have h4 : occ id (Value.int (tagAt w vs)) = 0 := by simp [occ]
+        simp only [occState]
+        omega
   | @store _ a b body r σ _ _ hform hlin hbody =>
     have ha := hform.ref
     have hb := hform.value

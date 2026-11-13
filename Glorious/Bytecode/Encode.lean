@@ -94,6 +94,7 @@ def memOp : MemOp → Bytes
   | .load => [0]
   | .store => [1]
   | .swap => [2]
+  | .tag => [3]
 
 def instr : Instr → Bytes
   | .op r => 0 :: rhs r

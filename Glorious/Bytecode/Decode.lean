@@ -129,6 +129,7 @@ def memOp : Bytes → Option (MemOp × Bytes)
   | 0 :: bs => some (.load, bs)
   | 1 :: bs => some (.store, bs)
   | 2 :: bs => some (.swap, bs)
+  | 3 :: bs => some (.tag, bs)
   | _ => none
 
 def instr : Bytes → Option (Instr × Bytes)

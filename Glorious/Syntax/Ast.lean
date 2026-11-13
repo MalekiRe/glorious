@@ -214,6 +214,11 @@ def textEndName : String := "%end"
 it in the block may name what is unsafe. -/
 def unsafeMark : String := "%unsafe"
 
+/-- Whether what a reference points to was built by a constructor, at a path
+of field numbers: `%ctor_is(r, 0, 1, Some)`. The compiler writes this where a
+pattern binds by reference; it reads nothing out of the cell. -/
+def ctorIsMark : String := "%ctor_is"
+
 /-- How the resolver says which type is the prelude's type of arrays, whatever
 a program has named its own: a list of names under this mark. -/
 def arrayMark : String := "%array"
