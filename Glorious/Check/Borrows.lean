@@ -585,7 +585,7 @@ def labelType (t : Ty) (brand : Nat) : M Ty := do
   pure (.func [t] (← freshTy) (← freshRow) cap)
 
 def readsCell (x : String) : String :=
-  s!"reading the mutable variable `{x}` copies its value (`replace` takes it out instead)"
+  s!"reading the variable `{x}` copies its value (`replace` takes it out instead)"
 
 def arguments (n : Nat) : String :=
   if n == 1 then "1 argument" else s!"{n} arguments"
