@@ -397,6 +397,12 @@ structure St where
   checked: what each holds, and where. Such a borrow is a variable of the
   function's while it lasts, so it cannot leave the function. -/
   fieldCaps : Array (Nat × String) := #[]
+  /-- The type parameters each function of a module declares, in the order
+  written, as its type has them; none for one its type does not mention. -/
+  typeParams : List (String × List (Option Nat)) := []
+  /-- The types a call writes for the type parameters of the function it
+  calls, `f<A, B>(..)`, until the function is found. -/
+  instWith : Option (List Ty) := none
   /-- Every borrow of a field, through a reference or of a variable: it is
   written out as a variable of the block it is made in, so it cannot leave
   that block. With where it is made. -/
@@ -713,9 +719,13 @@ def freshenCaps (t : Ty) : M Ty := do
   let cm ← (freeCaps t).eraseDups.mapM fun c => do pure (c, ← freshCap)
   pure (subst [] [] cm t)
 
-def instantiate (s : Scheme) (via : Option String := none) : M Ty := do
+def instantiate (s : Scheme) (via : Option String := none) (fixed : List (Nat × Ty) := []) :
+    M Ty := do
+  -- (`fixed`: the type parameters the call wrote types for.)
   let tm ← s.tvars.mapM fun id => do
-    pure (id, ← freshTy)
+    match fixed.lookup id with
+    | some t => pure (id, t)
+    | none => pure (id, ← freshTy)
   let rm ← s.rvars.mapM fun id => do
     pure (id, ← freshRowVar)
   if (← get).anyMust then

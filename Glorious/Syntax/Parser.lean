@@ -661,6 +661,39 @@ private partial def parsePostfix (noBlock : Bool) : P Expr := do
   let mut e ← parsePrimary noBlock
   repeat
     match ← peek with
+    | .op "<" =>
+      -- `f<A, B>(args)`: types written for the function's type parameters.
+      -- It is that, and not a comparison, if what follows reads as types
+      -- closed by `>` with `(` straight after.
+      let isName := match e with
+        | .name _ _ => true
+        | _ => false
+      if !isName then break
+      let saved ← get
+      let attempt : P (Option (List TypeExpr)) :=
+        try
+          advance
+          let mut tys : Array TypeExpr := #[]
+          repeat
+            if ← isOp ">" then break
+            tys := tys.push (← parseType)
+            if !(← acceptPunct ",") then break
+          if !(← isOp ">") then pure none
+          else
+            advance
+            if (← peek) != .punct "(" then pure none else pure (some tys.toList)
+        catch _ => pure none
+      match ← attempt with
+      | none =>
+        set saved
+        break
+      | some tys =>
+        let id := (← read).base + (← get) + 1
+        advance
+        let mut args ← parseArgs
+        while !noBlock && (← peek) == .punct "{" do
+          args := args ++ [← parseBraces]
+        e := .call 0 (.name none instMark) [.call id e args, (TypeExpr.tuple tys).asExpr]
     | .punct "(" =>
       let id := (← read).base + (← get) + 1
       advance
@@ -759,13 +792,28 @@ private partial def parsePrimary (noBlock : Bool) : P Expr := do
     expectPunct "}"
     pure (.handle subject arms)
   | .ident "fn" =>
+    -- `fn(a: A, b) -> R / {E} { body }`: a callable written out. A type may
+    -- be written of a parameter, and what it gives and performs after.
     advance
     expectPunct "("
-    let pats ← parsePatternList
+    let mut pats : Array Pattern := #[]
+    let mut annots : Array (Option TypeExpr) := #[]
+    repeat
+      if (← peek) == .punct ")" then break
+      pats := pats.push (← parsePattern)
+      annots := annots.push (← if ← acceptPunct ":" then some <$> parseType else pure none)
+      if !(← acceptPunct ",") then break
+    expectPunct ")"
+    let ret ← if (← acceptPunct "->") || (← peek) == .op "/" then some <$> parseResult else pure none
     expectPunct "{"
     let body ← parseStmts
     expectPunct "}"
-    pure (.closure 0 [.mk pats body])
+    let written := Expr.closure 0 [.mk pats.toList body]
+    if annots.all Option.isNone && ret.isNone then pure written
+    else
+      -- With types written it is the callable, of the type they make.
+      let ty := TypeExpr.fn (annots.toList.map (·.getD .hole)) (ret.getD .hole)
+      pure (.call 0 (.name none ascribeMark) [written, ty.asExpr])
   | .ident x =>
     if x.startsWith "'" then failAt "a lifetime is not a value"
     if x == "unsafe" && (← peek 1) == .punct "{" then

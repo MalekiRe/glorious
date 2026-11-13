@@ -300,6 +300,15 @@ the type written as an expression so that it can sit among expressions: see
 stands alone. -/
 def ascribeMark : String := "%as"
 
+/-- Said of a block, where the names of what an `is` found are said: its
+clauses each take one tuple, and it is given where a callable of that many
+arguments is wanted, so each clause takes the arguments as its tuple's parts. -/
+def spreadMark : String := "%spread"
+
+/-- `f<A, B>(args)`: the call, and beside it the types written, as a value
+written with its type is: `%inst(f(args), (A, B))`. -/
+def instMark : String := "%inst"
+
 /-- An attribute, `#[name]` before a declaration or `#![name]` at the top of a
 text, is kept beside the declarations as the names of a constructor's fields
 are: under this mark and its name, with what it is written of and what it is

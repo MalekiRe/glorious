@@ -267,6 +267,12 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
       if scheme.cvars.contains root && !ranked.any (·.1 == root) then
         ranked := (root, ← lifetimes.mapM fun (q, name) => do pure (← findCap q, name)) :: ranked
     let scheme := { scheme with edges := edges.toList, ranked }
+    -- The type parameters as written, for a call that writes types for them.
+    let written := (d.params.filter fun p => !p.startsWith "'").map fun p =>
+      match seen.lookup s!"'{p}@{d.name}" with
+      | some (.var id) => if scheme.tvars.contains id then some id else none
+      | _ => none
+    modify fun s => { s with typeParams := (d.name, written) :: s.typeParams }
     let mine : List (String × Nat × Ty) ← match d.impl with
       | some (im, _) =>
         -- An implementation says what it assumes.

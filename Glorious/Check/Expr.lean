@@ -316,6 +316,19 @@ partial def checkArg (scope : Scope) (amb : Row) (what : String) (p : Ty) (a : E
           if let .ref how inner _ ← find p then
             if let .con "&mut" [] ← find how then
               unify t (.ref how inner (← freshCap))
+    -- `{ (x, y) => .. }` where a callable of several arguments is wanted:
+    -- each clause's one tuple is the arguments (5.4).
+    if let (.closure id clauses, .fn ps _ _ _ _) := (a, ← find p) then
+      let spread := clauses.filterMap fun
+        | .mk [.tuple parts] body => if parts.length == ps.length then some (Clause.mk parts body) else none
+        | _ => none
+      if ps.length ≥ 2 && !clauses.isEmpty && spread.length == clauses.length then
+        let t ← inferCallable scope (ps.map some) none none spread "the clauses of this callable do" id
+        if let .fn _ _ _ _ cap := t then
+          modify fun s =>
+            { s with blockCaps := s.blockCaps.push (id, cap)
+                     packs := s.packs.push (id, [Syntax.spreadMark]) }
+        return ← fitAt scope amb what site p t
     -- A callable written where one is wanted whose parameters are types of
     -- whole numbers: a whole number among its patterns is of that type.
     if let (.closure id clauses, .fn ps _ _ _ _) := (a, ← find p) then
@@ -421,6 +434,20 @@ partial def inferCall (scope : Scope) (amb : Row) (f : Expr) (args : List Expr)
     (call : Nat := 0) : M Ty := do
   -- `let x: Type = value`: the value is made that type.
   if let (.name none mark, [value, ty]) := (f, args) then
+    if mark == Syntax.instMark then
+      -- `f<A, B>(..)`: the call, with the types written kept for when the
+      -- function called is found.
+      let tys ← match TypeExpr.ofExpr ty with
+        | .tuple tys => (tys.filter fun
+            | .name l [] => !l.startsWith "'"
+            | _ => true).mapM (resolveType (← get).rigidParams false)
+        | _ => pure []
+      modify fun s => { s with instWith := some tys }
+      let t ← inferExpr scope amb value
+      if (← get).instWith.isSome then
+        modify fun s => { s with instWith := none }
+        throw "types are written, `f<A, B>(..)`, for a function of a module that has type parameters; what is called here is not one"
+      return t
     if mark == Syntax.ascribeMark then
       let expected ← resolveType (← get).rigidParams false (TypeExpr.ofExpr ty)
       if let .int n := value then

@@ -810,7 +810,7 @@ partial def resolveExpr (ctx : Ctx) (bound : List String) : Expr → R Expr
   | .call id f args => do
     match f, args with
     | .name none mark, [value, ty] =>
-      if mark == ascribeMark then
+      if mark == ascribeMark || mark == instMark then
         -- `let x: Type = value`: the type's names are resolved as types.
         let ty ← resolveType ctx ctx.generics (TypeExpr.ofExpr ty)
         return .call id f [← resolveExpr ctx bound value, ty.asExpr]

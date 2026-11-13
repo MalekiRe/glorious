@@ -931,6 +931,41 @@ package. The other three are kept for the C interface and do nothing yet.
 When the library takes the shape its specification gives it, `core`, `alloc`
 and `std`, the prelude's names will be theirs, and `prelude` a selection.
 
+## Types written at a call
+
+**Decision: `f<A, B>(args)` writes types for the first type parameters of the
+function called, in the order the function declares them.** The rest are
+found as before, so a prefix is enough (13.1). Lifetimes written there are
+read and not used. It is for a function of a module that declares type
+parameters, a type's own functions among them; written of anything else it
+is an error, as is one type too many. With it `as<T>(value)` is a function
+anyone can write, `fn as<T, S>(v: S) -> T where T: From<S>`.
+
+`f<A>(x)` is read as that, and not as two comparisons, where what follows
+`<` reads as types closed by `>` with `(` straight after. So `a < b` and
+`both(a < b, c > d)` are comparisons still.
+
+Limits. `both(a < b, c > (d))` is read as a call with types written, and is
+then an error: the bracket after `>` is what decides. Types cannot be
+written for a trait's function, an operation or a constructor.
+
+## Clauses of one tuple for several arguments; types on `fn(..) { .. }`
+
+From the audit of the specification (5.4, 6.1).
+
+- **`{ (x, y) => .. }` given where a callable of two arguments is wanted
+  takes them as `x` and `y`**: where every clause of a block is one tuple of
+  as many parts as the callable wanted has parameters, the parts are the
+  parameters. Where a callable of one tuple is wanted, the same text is that.
+  The two stay different types; which is meant is decided where the block is
+  an argument, by what the parameter asks.
+- **`fn(a: A, b) -> R / {E} { .. }`** may write the type of a parameter, and
+  what it gives and performs: it is then the callable, of the type those
+  make, as a value written with its type is.
+
+Limits. A block of one-tuple clauses is taken for several arguments only as
+an argument of a call, not where a `let` says the type.
+
 ## What the specification's audit turned away
 
 An audit of the language specification against the compiler, section by

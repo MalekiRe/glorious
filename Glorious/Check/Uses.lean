@@ -448,6 +448,11 @@ partial def applyClauses (ctx : ACtx) (depth : Nat) (clauses : List Clause)
     | .mk pats body =>
       -- A block without parameters that is given one argument drops it.
       let pats := if pats.isEmpty && args.length == 1 then [Pattern.wild] else pats
+      -- A clause of one tuple, given that many arguments, takes them as its
+      -- parts.
+      let pats := match pats with
+        | [.tuple parts] => if args.length ≥ 2 && parts.length == args.length then parts else pats
+        | _ => pats
       if pats.length == args.length then
         let (fitness, binds) := fitAll ctx pats args
         -- A value a `probe` may be in is not followed through a pattern.
@@ -685,7 +690,7 @@ partial def runCallee (ctx : ACtx) (depth : Nat) (env : List (String × AVal)) (
     if ctx.lower then handedOn fun n => [(.gone ("@" ++ l), n)] else general
   | .name q x =>
     -- A value written with its type is the value: nothing is called.
-    if q.isNone && x == Syntax.ascribeMark then
+    if q.isNone && (x == Syntax.ascribeMark || x == Syntax.instMark) then
       match args with
       | value :: _ => runExpr ctx depth env value
       | [] => pure [(.unknown, 0)]

@@ -57,7 +57,7 @@ mutual
 /-- An expression with each type written in it, `let x: Type = ..`, changed. -/
 partial def mapTypesExpr (f : TypeExpr → Except String TypeExpr) : Expr → Except String Expr
   | .call id (.name none mark) [value, ty] => do
-    if mark == ascribeMark then
+    if mark == ascribeMark || mark == instMark then
       pure (.call id (.name none mark) [← mapTypesExpr f value, (← f (TypeExpr.ofExpr ty)).asExpr])
     else pure (.call id (.name none mark) [← mapTypesExpr f value, ← mapTypesExpr f ty])
   | .call id g args => do pure (.call id (← mapTypesExpr f g) (← args.mapM (mapTypesExpr f)))

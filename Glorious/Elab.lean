@@ -794,7 +794,8 @@ partial def elabExpr (scope : Scope) (tailPos : Bool) : Expr → M Atom
   | .call id f args => do
     -- A value written with its type is the value: the type was the checker's.
     if let (.name none mark, [value, _]) := (f, args) then
-      if mark == Syntax.ascribeMark then return ← elabExpr scope tailPos value
+      if mark == Syntax.ascribeMark || mark == Syntax.instMark then
+        return ← elabExpr scope tailPos value
     let before := (← get).plain.length
     let r ← elabCall scope false f args
     -- The borrow a destruction passes is the compiler's, not the program's.
@@ -1367,7 +1368,8 @@ partial def elabGiven (scope : Scope) (id : Nat) (body : List Stmt) : M Atom := 
     let blocks := (← read).blocks.getD {}
     let arity := match blocks.links.lookup id with
       | some owner =>
-        if blocks.given.contains owner || (blocks.packs.lookup owner).isSome then 1 else 0
+        if blocks.given.contains owner
+            || ((blocks.packs.lookup owner).map (· != [Syntax.spreadMark])).getD false then 1 else 0
       | none => 0
     modify fun s => { s with envSizes := (code, layout.length, arity) :: s.envSizes }
     -- The callable passed along: given the block that was not run, it runs the
@@ -1931,6 +1933,14 @@ private partial def unfieldExpr (info : FieldInfo) : Expr → Expr
     match info.packs.lookup id, clauses with
     | some names, [.mk [] body] =>
       .closure id [.mk [.tuple (names.map Pattern.var)] (unfieldStmts info body)]
+    | some names, _ =>
+      -- Clauses of one tuple given several arguments: the tuple's parts are
+      -- the parameters.
+      if names == [Syntax.spreadMark] then
+        .closure id (clauses.map fun
+          | .mk [.tuple parts] body => unfieldClause info (.mk parts body)
+          | c => unfieldClause info c)
+      else .closure id (clauses.map (unfieldClause info))
     | _, _ => .closure id (clauses.map (unfieldClause info))
   | .labelScope l body => .labelScope l (unfieldStmts info body)
   | .handle subject arms =>

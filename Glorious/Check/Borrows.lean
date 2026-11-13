@@ -421,7 +421,18 @@ def resolveName (scope : Scope) (qual : Option String) (x : String) : M Head := 
   if let some scheme := s.fns.lookup x then
     if s.unsafeFns.contains x && !(s.unsafeBlock || s.unsafeFns.contains s.owner) then
       throw s!"`{Syntax.lastSegment x}` is unsafe: it can be named only in `unsafe \{ .. }` or in an `unsafe fn`"
-    let t ← instantiate scheme (some x)
+    -- `x<A, B>(..)`: the first type parameters are the types written.
+    let fixed ← match s.instWith with
+      | none => pure []
+      | some tys => do
+        modify fun st => { st with instWith := none }
+        let ids := (s.typeParams.lookup x).getD []
+        if tys.length > ids.length then
+          throw s!"`{Syntax.lastSegment x}` has {ids.length} type parameter{if ids.length == 1 then "" else "s"}, and is given {tys.length}"
+        pure ((ids.zip tys).filterMap fun
+          | (some id, t) => some (id, t)
+          | (none, _) => none)
+    let t ← instantiate scheme (some x) fixed
     return .fn t (← get).lastBounds false
   if (Elab.prims.lookup x).isSome then return .prim
   if let some (scalar, into) := Syntax.scalarCast x then return .cast scalar into
