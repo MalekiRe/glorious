@@ -946,10 +946,13 @@ tried the old way.
 Of the 451 test programs that compile, 437 are now shown to follow all of
 Core's rules, from 432.
 
-Limits. One region for a callable type: `for<'a, 'b> fn(&'a T, &'b U)` is
-not found. A function that calls itself with a reference to its own variable
-(the region differs at each depth) is not either: its own type would have to
-bind the region, and it is taken as it is while its group is looked at.
+Since: a callable type binds as many regions as the references it is given
+have (up to three), so `for<'a, 'b> fn(&'a T, &'b U)` is found.
+
+Limits. A function that calls itself with a reference to its own variable
+(the region differs at each depth) is not shown: its own type would have to
+bind the region. The search now gives it such a type, and the checker turns
+the result away; why is not yet understood.
 
 ## A lifetime of a declared type is an argument in Core
 

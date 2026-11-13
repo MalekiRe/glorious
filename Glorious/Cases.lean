@@ -1930,6 +1930,9 @@ def cases : List Case := [
     [], "102"⟩,
   ⟨"fn f(p: &Option<Int>) -> Int { match(p) { &Some(5) => 1, &Some(n) => *n, &None => 0 } }\nfn main() { let mut a = Some(5); let mut b = Some(9); f(&a) + f(&b) }",
     [], "10"⟩,
+  -- A callable given two references: its type binds both regions.
+  ⟨"fn both(f: for<'a, 'b> fn(&'a Int, &'b Int) -> Int) -> Int { let mut x = 3; let mut y = 4; f(&x, &y) }\nfn main() { both(fn(a, b) { *a * 10 + *b }) }",
+    [], "34"⟩,
   -- `drop` is not for a program to call.
   ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nfn main() { let mut f = File(7); drop(&mut f); 0 }",
     [], "error: 3:34: in `main`: `drop` is run when what holds a value ends; a program does not call it"⟩,
