@@ -4,7 +4,7 @@ import Glorious.Typing.Stack
 # Type safety for Core
 
 A well-typed machine state steps to a well-typed state, or halts, or is one of
-the four faults in `Fault`. So a well-typed program that goes wrong went wrong
+the five faults in `Fault`. So a well-typed program that goes wrong went wrong
 by one of those, and by nothing else: `type_safety`.
 
 If the context's notion of a duplicable type is sound, the same steps keep every
@@ -596,7 +596,7 @@ Under the rules for borrows it may not touch what was lent, and the stack it
 runs on does not grant it. -/
 theorem lend_enter {S : StoreTy} {uniq : Bool} {a b n : Nat} {ρ κ : Rgn} {σ ρt : Ty}
     {εt ε' : Row} {acc ϕ ϕ' : List Rgn} {st : List Frame} {σ₀ : Ty} {path : List Nat}
-    (hcell : S.cells a = some σ₀) (hp : PlaceOk Δ σ₀ path σ)
+    (hcell : S.cells a = some σ₀) (hp : PartOk Δ σ₀ path σ)
     (hl : S.loans b = some a) (hb : 0 < b) (hon : Δ.regions → OnCell S ρ a)
     (hσ : σ.lc = true) (hρt : ρt.lc = true) (hε : εt.lc = true)
     (hn : (n = 0 ∧ κ = ρ) ∨ (n = 1 ∧ κ = .bound 0)) (hreg : Δ.regions → ρ ∈ ϕ)
@@ -1197,7 +1197,14 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
         rw [h1]
         exact Fault.freed (a := addr) (b := tag) (path := pth) (vs := []) (by simp [evalAtoms, hv]) hget
       | some w₀ =>
-        obtain ⟨w, hfw, hwt⟩ := follow_ok hpl (hval w₀ hget)
+        rcases hfw : w₀.follow pth with _ | w
+        · have h1 : step p ⟨.mem .load [a] body, env, stack, ⟨conts, labels, cells⟩⟩
+              = .stuck := by
+            simp [step, evalAtoms, hv, MemOp.eval, hget, hfw]
+          rw [h1]
+          exact Fault.absent (a := addr) (b := tag) (path := pth) (vs := [])
+            (by simp [evalAtoms, hv]) hget hfw
+        have hwt := follow_part hpl (hval w₀ hget) hfw
         have h1 : step p ⟨.mem .load [a] body, env, stack, ⟨conts, labels, cells⟩⟩
             = .next ⟨body, env ++ [w], stack, ⟨conts, labels, cells⟩⟩ := by
           simp [step, evalAtoms, hv, MemOp.eval, hget, hfw]
@@ -1226,7 +1233,13 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
         rw [h1]
         exact Fault.freed (a := addr) (b := tg) (path := pth) (vs := vs) (by simp [evalAtoms, hv, hvs]) hget
       | some w₀ =>
-        obtain ⟨w, hfw, _⟩ := follow_ok hpl (hval w₀ hget)
+        rcases hfw : w₀.follow pth with _ | w
+        · have h1 : step p ⟨.mem .tag (a :: path) body, env, stack, ⟨conts, labels, cells⟩⟩
+              = .stuck := by
+            simp [step, evalAtoms, hv, hvs, MemOp.eval, hget, hfw]
+          rw [h1]
+          exact Fault.absent (a := addr) (b := tg) (path := pth) (vs := vs)
+            (by simp [evalAtoms, hv, hvs]) hget hfw
         have h1 : step p ⟨.mem .tag (a :: path) body, env, stack, ⟨conts, labels, cells⟩⟩
             = .next ⟨body, env ++ [.int (tagAt w vs)], stack, ⟨conts, labels, cells⟩⟩ := by
           simp [step, evalAtoms, hv, hvs, MemOp.eval, hget, hfw]
@@ -1257,8 +1270,15 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
         rw [h1]
         exact Fault.freed (a := addr) (b := tag) (path := pth) (vs := [w]) (by simp [evalAtoms, hv, hw]) hget
       | some old₀ =>
-        obtain ⟨old, hfo, _⟩ := follow_ok hpl (hval old₀ hget)
-        obtain ⟨v', hput, hvt'⟩ := put_ok hpl (hval old₀ hget) hwt
+        rcases hfo : old₀.follow pth with _ | old
+        · have h1 : step p ⟨.mem .store [a, b] body, env, stack, ⟨conts, labels, cells⟩⟩
+              = .stuck := by
+            simp [step, evalAtoms, hv, hw, MemOp.eval, hget, put_none_of_follow w hfo]
+          rw [h1]
+          exact Fault.absent (a := addr) (b := tag) (path := pth) (vs := [w])
+            (by simp [evalAtoms, hv, hw]) hget hfo
+        obtain ⟨v', hput⟩ := put_of_follow w hfo
+        have hvt' := put_part hpl (hval old₀ hget) hwt hput
         have h1 : step p ⟨.mem .store [a, b] body, env, stack, ⟨conts, labels, cells⟩⟩
             = .next ⟨body, env ++ [Value.unit], stack,
                 ⟨conts, labels, cells.set addr (some v')⟩⟩ := by
@@ -1298,8 +1318,16 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
         rw [h1]
         exact Fault.freed (a := addr) (b := tag) (path := pth) (vs := [w]) (by simp [evalAtoms, hv, hw]) hget
       | some old₀ =>
-        obtain ⟨old, hfo, hot⟩ := follow_ok hpl (hval old₀ hget)
-        obtain ⟨v', hput, hvt'⟩ := put_ok hpl (hval old₀ hget) hwt
+        rcases hfo : old₀.follow pth with _ | old
+        · have h1 : step p ⟨.mem .swap [a, b] body, env, stack, ⟨conts, labels, cells⟩⟩
+              = .stuck := by
+            simp [step, evalAtoms, hv, hw, MemOp.eval, hget, hfo, put_none_of_follow w hfo]
+          rw [h1]
+          exact Fault.absent (a := addr) (b := tag) (path := pth) (vs := [w])
+            (by simp [evalAtoms, hv, hw]) hget hfo
+        have hot := follow_part hpl (hval old₀ hget) hfo
+        obtain ⟨v', hput⟩ := put_of_follow w hfo
+        have hvt' := put_part hpl (hval old₀ hget) hwt hput
         have h1 : step p ⟨.mem .swap [a, b] body, env, stack, ⟨conts, labels, cells⟩⟩
             = .next ⟨body, env ++ [old], stack,
                 ⟨conts, labels, cells.set addr (some v')⟩⟩ := by
@@ -1334,6 +1362,24 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
     have h3 := occEnv_mono (id := id) (env := env) (a := fv body)
       (b := fv (.mem .focus [a, .int i] body)) (fun i hi => List.mem_append_right _ hi)
     have h4 : occ id (Value.ref addr tg (pth ++ [i])) = 0 := by simp [occ]
+    simp only [occState]
+    omega
+  | @focusAt _ a ix body r σ σ' _ _ ha hix _ hu hbody =>
+    obtain ⟨v, hv, hvt⟩ := atom_ok henv ha
+    obtain ⟨iv, hiv, hivt⟩ := atom_ok henv hix
+    obtain ⟨n, rfl⟩ := hivt.int_inv
+    obtain ⟨addr, tg, pth, σ₀, rfl, hcell, hpl, hon, hl⟩ := hvt.ref_inv
+    have h1 : step p ⟨.mem .focus [a, ix] body, env, stack, ⟨conts, labels, cells⟩⟩
+        = .next ⟨body, env ++ [.ref addr tg (pth ++ [n.toNat])], stack,
+            ⟨conts, labels, cells⟩⟩ := by
+      simp [step, evalAtoms, hv, hiv, MemOp.eval]
+    rw [h1]
+    refine .next (.mk (henv.snoc (.ref hcell (hpl.append (.elem hu .here)) hon hl)) hbody hle
+      hsub hst hs) (fun hD hu' => hu'.mono rfl fun id => ?_)
+    have h2 := occEnv_push id env (.ref addr tg (pth ++ [n.toNat])) (fv body)
+    have h3 := occEnv_mono (id := id) (env := env) (a := fv body)
+      (b := fv (.mem .focus [a, ix] body)) (fun i hi => List.mem_append_right _ hi)
+    have h4 : occ id (Value.ref addr tg (pth ++ [n.toNat])) = 0 := by simp [occ]
     simp only [occState]
     omega
   | write _ _ => exact absurd rfl (hnh _ _ _)
@@ -1465,8 +1511,9 @@ theorem run_ok {p : Program} (hp : ProgramOk Δ p) : ∀ (n : Nat) {c : Config},
 
 /--
 **Type safety.** If a well-typed program goes wrong, the state it could not
-step from is one of the four faults: arithmetic overflow, use of a freed cell,
-a second use of a resumption, or a label applied after its scope ended.
+step from is one of the five faults: arithmetic overflow, a part of a value
+that is not there, use of a freed cell, a second use of a resumption, or a
+label applied after its scope ended.
 Everything else the machine gives no meaning to cannot happen: an unbound
 local, a value of the wrong shape, a missing function or clause, an operation
 with no handler, an exit with no target.

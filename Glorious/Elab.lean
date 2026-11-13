@@ -190,7 +190,13 @@ def prims : List (String × Prim × Nat) :=
    -- Arrays. `arr_new` is not an intrinsic of the machines: it is the array of
    -- no elements, built like any value.
    ("arr_get", .arrGet, 2), ("arr_set", .arrSet, 3), ("arr_len", .arrLen, 2),
-   ("arr_push", .arrPush, 2), ("arr_pop", .arrPop, 2), ("arr_new", .arrLen, 0)]
+   ("arr_push", .arrPush, 2), ("arr_pop", .arrPop, 2), ("arr_new", .arrLen, 0),
+   -- The reference to a place of an array, from a reference to the array:
+   -- not an intrinsic of the machines either, but an operation on memory.
+   ("arr_at", .arrLen, 2),
+   -- How many elements the array a reference points to has: the cell is
+   -- asked, and nothing is read out of it.
+   ("arr_len_at", .arrLen, 1)]
 
 /-- The names that take a scalar to the integer it is held as, and back. -/
 def casts : List String :=
@@ -1014,6 +1020,21 @@ partial def elabCall (scope : Scope) (isTail : Bool) (f : Expr) (args : List Exp
         throw s!"intrinsic `{x}` takes {n} arguments, but is given {args.length}"
       let atoms ← elabArgs scope args
       if x == "arr_new" then emit (.let_ (.construct arrayBase []))
+      else if x == "arr_at" then
+        -- The place is a local, so that it is plainly one found when the
+        -- program runs, and not a field's number.
+        match atoms with
+        | [r, i] =>
+          let at_ ← match i with
+            | .int _ => emit (.let_ (.atom i))
+            | _ => pure i
+          emit (.mem .focus [r, at_])
+        | _ => throw "intrinsic `arr_at` takes 2 arguments"
+      else if x == "arr_len_at" then
+        -- The constructor that builds an array of `n` elements is the first
+        -- of them and `n`.
+        let built ← emit (.mem .tag atoms)
+        emit (.let_ (.prim .intSub [built, .int arrayBase]))
       else emit (.let_ (.prim p atoms))
     | .pack => do
       let atoms ← elabArgs scope args
@@ -2132,13 +2153,16 @@ private partial def unfieldStmts (info : FieldInfo) :
     | some (before, s, (id, uniq, x)) =>
       match info.shapes.lookup id with
       | none => wrap s :: unfieldStmts info rest
-      | some (true, path, _) =>
-        -- A field of what a reference points to: the reference, further in.
-        -- Nothing is taken out, so the borrow can outlive the function.
-        unfieldStmts info (before ++ Stmt.let_ (.var (fieldRefName id))
-          (.call 0 (.name none Syntax.focusMark) (.name none x :: path.map fun n => Expr.int (Int.ofNat n)))
-          :: s :: rest)
       | some (viaRef, path, shape) =>
+        -- A field of what a reference points to, found without asking which
+        -- constructor built anything on the way: the reference, further in.
+        -- Nothing is taken out, so the borrow can outlive the function.
+        if viaRef && !shape.any (fun (c, _) => (c.getD "").startsWith "#") then
+          unfieldStmts info (before ++ Stmt.let_ (.var (fieldRefName id))
+            (.call 0 (.name none Syntax.focusMark)
+              (.name none x :: path.map fun n => Expr.int (Int.ofNat n)))
+            :: s :: rest)
+        else
         -- What the field is a field of: what the variable holds, or what the
         -- reference points to.
         let root := if viaRef then Expr.deref (.name none x) else Expr.name none x

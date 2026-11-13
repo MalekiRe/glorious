@@ -928,7 +928,9 @@ impl Vm {
                 Ok(std::mem::replace(part_mut(whole, steps(&p))?, new))
             }
             (MemOp::Focus, [Value::Ref(a, p), Value::Int(i)]) => {
-                let i = usize::try_from(*i).map_err(|_| Stop::Wrong)?;
+                // A number below zero is taken for zero, as the proved
+                // machines take it.
+                let i = usize::try_from(*i).unwrap_or(if *i < 0 { 0 } else { usize::MAX });
                 let mut path = steps(p).to_vec();
                 path.push(i);
                 Ok(Value::Ref(*a, Some(path.into())))

@@ -573,6 +573,25 @@ fn get(a, i) {
     }
 }
 
+// How many elements the array a reference points to has.
+fn len_at<T>(a: &Array<T>) -> Int { arr_len_at(a) }
+
+// The element at a place, by reference, if the place is there.
+fn element<T>(a: &Array<T>, i: Int) -> Option<&T> {
+    match(int_mul(int_lt(-1, i), int_lt(i, arr_len_at(a)))) {
+        0 => None,
+        _ => Some(arr_at(a, i))
+    }
+}
+
+// The same to write through.
+fn element_mut<T>(a: &mut Array<T>, i: Int) -> Option<&mut T> {
+    match(int_mul(int_lt(-1, i), int_lt(i, arr_len_at(&*a)))) {
+        0 => None,
+        _ => Some(arr_at(a, i))
+    }
+}
+
 // The elements from one place up to, not including, another.
 fn slice(a, from, to) { slice_onto(a, from, to, array_empty()) }
 fn slice_onto(a, i, to, out) {

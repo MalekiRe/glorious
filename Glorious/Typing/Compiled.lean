@@ -38,12 +38,12 @@ theorem compiled_scoped_safety {Δ : Ctx} {p : Core.Program} (hp : ProgramOk Δ 
     (Classical.byContradiction fun hn => (compile_correct p input hn).2.2 h)
 
 /-- With both: bytecode compiled from such a program goes wrong only if the
-program overflows. -/
+program overflows or looks for a part of a value that is not there. -/
 theorem compiled_sound_safety {Δ : Ctx} {p : Core.Program} (hp : ProgramOk Δ p)
     (hD : DupSound Δ) (hR : Δ.regions) (input : List Int)
     (h : Bytecode.GoesWrong (compile p) input) :
     ∃ c, Machine.Reaches (Core.stepIO p) (Core.initIO p input) c ∧ Core.stepIO p c = .stuck
-      ∧ Overflow c.state :=
+      ∧ (Overflow c.state ∨ Absent c.state) :=
   sound_safety hp hD hR input
     (Classical.byContradiction fun hn => (compile_correct p input hn).2.2 h)
 

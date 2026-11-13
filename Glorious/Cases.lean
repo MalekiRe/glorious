@@ -1984,9 +1984,11 @@ def cases : List Case := [
     [], "error: 2:35: in `outer`: argument 1 of `run`: lifetime `'y` is not known to last as long as `'a`: say `'y: 'a`"⟩,
   ⟨"fn ap<F>(f: F) -> Int where F: for<'a> Fn<(&'a Int,), Output = &'a Int> { let mut x = 3; *f(&x) }\nfn main() { let mut g = 9; ap({ r => &g }) }",
     [], "error: 2:28: in `main`: argument 1 of `ap`: what this callable gives back borrows a variable, and the callable is wanted for references of any lifetime: it can give back only what borrows from what it is given"⟩,
-  -- A borrow of a field cannot leave the block that makes it.
+  -- A borrow of a field through a reference can leave the block that makes it; one of a variable's field cannot.
   ⟨"fn main() { let mut x = (4, 5); let r = match(&x) { &(a, b) => a }; *r }",
-    [], "error: 1:33: in `main`: a borrow of a field lasts only inside the block that makes it, and here the block gives it back: give back the whole reference, or the field's value, or borrow the field where it is used"⟩,
+    [], "4"⟩,
+  ⟨"fn main() { let mut x = (4, 5); let r = { &x.0 }(); *r }",
+    [], "error: 1:43: in `main`: a borrow of a field lasts only inside the block that makes it, and here the block gives it back: give back the whole reference, or the field's value, or borrow the field where it is used"⟩,
   ⟨"fn main() { let mut x = (4, 5); let r = { &x.0 }(); *r }",
     [], "error: 1:43: in `main`: a borrow of a field lasts only inside the block that makes it, and here the block gives it back: give back the whole reference, or the field's value, or borrow the field where it is used"⟩,
   ⟨"fn main() { let mut x = (4, 5); let mut y = 1; let mut keep = &y; let f = { keep = &x.0; 0 }; f(); *keep }",
@@ -2431,6 +2433,31 @@ def cases : List Case := [
     [], "error: 2:49: in `f`: `p` is used while `r`, which borrows from it, is still in use"⟩,
   ⟨"struct Pair<A, B> { a: A, b: B }\nfn first<A, B>(p: &Pair<A, B>) -> &A { &p.a }\nfn main() -> Int { let mut p = Pair { a: 7, b: (1, 2) }; *first(&p) }",
     [], "7"⟩,
+  -- A pattern that takes a struct apart by reference gives references further in, which can be given back.
+  ⟨"struct P { x: Int, y: Int }\nfn gx(p: &mut P) -> &mut Int { match(p) { &mut P { x, y } => x } }\nfn main() { let mut p = P { x: 1, y: 2 }; let r = gx(&mut p); *r = 7; p.x }",
+    [], "7"⟩,
+  -- A field of one of several constructors is still taken out while its borrow lasts.
+  ⟨"enum Shape { Circle(Int), Rect(Int, Int) }\nfn rad(s: &mut Shape) -> &mut Int { match(s) { &mut Circle(r) => r, &mut Rect(w, h) => w } }\nfn main() { let mut a = Circle(1); let r = rad(&mut a); *r = 5; a }",
+    [], "error: 2:37: in `rad`: a borrow of a field lasts only inside the block that makes it, and here the block gives it back: give back the whole reference, or the field's value, or borrow the field where it is used"⟩,
+  -- A reference to a place of an array, from a reference to the array.
+  ⟨"fn at<T>(a: &mut Array<T>, i: Int) -> &mut T { arr_at(a, i) }\nfn main() { let mut a = [1, 2, 3]; let r = at(&mut a, 1); *r = 20; a }",
+    [], "[1, 20, 3]"⟩,
+  ⟨"fn main() { let mut a = [1, 2, 3]; let r = arr_at(&a, 2); *r + 1 }",
+    [], "4"⟩,
+  -- A place that is not there is found when the reference is used.
+  ⟨"fn main() { let mut a = [1, 2, 3]; let r = arr_at(&a, 5); *r + 1 }",
+    [], "went wrong"⟩,
+  -- The prelude asks first.
+  ⟨"fn main() { let mut a = [10, 20, 30]; match(element(&a, 1)) { Some(r) => *r, None => 0 - 1 } }",
+    [], "20"⟩,
+  ⟨"fn main() { let mut a = [10, 20, 30]; match(element(&a, 3)) { Some(r) => *r, None => 0 - 1 } }",
+    [], "-1"⟩,
+  ⟨"fn main() { let mut a = [10, 20, 30]; match(element_mut(&mut a, 2)) { Some(r) => *r = *r + 5, None => () }; a }",
+    [], "[10, 20, 35]"⟩,
+  ⟨"fn main() { let mut a = [10, 20, 30]; len_at(&a) }",
+    [], "3"⟩,
+  ⟨"fn main() { let mut a = [10, 20, 30]; let r = element_mut(&mut a, 2); a = push(a, 4); match(r) { Some(x) => *x, None => 0 } }",
+    [], "error: 1:71: in `main`: `a` is read while `r` holds a `&mut` reference to it"⟩,
   -- `drop` is not for a program to call.
   ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nfn main() { let mut f = File(7); drop(&mut f); 0 }",
     [], "error: 3:34: in `main`: `drop` is run when what holds a value ends; a program does not call it"⟩,

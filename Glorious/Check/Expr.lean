@@ -87,6 +87,20 @@ partial def inferExpr (scope : Scope) (amb : Row) : Expr → M Ty
       captures cap' (.ty t)
       modify fun s =>
         { s with fieldSites := s.fieldSites.push (id, true, whole, numbered, chosen, s.owner, s.pos) }
+      -- A field of one of several constructors is not found by going further
+      -- in: it is taken out while the borrow lasts, in a variable of the
+      -- function's, so the borrow cannot leave its block.
+      let known ← get
+      let variant := chosen.any fun
+        | some c =>
+          match known.ctors.lookup c with
+          | some sig => ((known.types.lookup sig.owner).map (·.ctors.length != 1)).getD true
+          | none => true
+        | none => false
+      if variant then
+        modify fun s =>
+          { s with fieldCaps := s.fieldCaps.push (cap', s.pos)
+                   blockFieldCaps := s.blockFieldCaps.push (cap', s.pos) }
       pure (.ref (if uniq then .uniq else .shared) field cap')
     | some _ => do
       if x.startsWith "%through" || x.startsWith "%given" then
@@ -523,6 +537,16 @@ partial def inferCall (scope : Scope) (amb : Row) (f : Expr) (args : List Expr)
       | "arr_new" =>
         checkArgs scope amb s!"intrinsic `{x}`" [] args call
         pure (array t)
+      | "arr_at" =>
+        -- The reference to a place of an array, from a reference to the
+        -- array: the same kind of reference, borrowing from the same things.
+        let how ← freshTy
+        let cap ← freshCap
+        checkArgs scope amb s!"intrinsic `{x}`" [.ref how (array t) cap, .int] args call
+        pure (.ref how t cap)
+      | "arr_len_at" =>
+        checkArgs scope amb s!"intrinsic `{x}`" [.ref (← freshTy) (array t) (← freshCap)] args call
+        pure .int
       | "arr_get" =>
         checkArgs scope amb s!"intrinsic `{x}`" [array t, .int] args call
         mustDrop t "reading a place of an array lets go of the rest of it"

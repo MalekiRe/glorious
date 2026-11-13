@@ -327,10 +327,8 @@ theorem mem_cells {op : MemOp} {cells cells' : Cells} {vs : List Value} {r : Val
       obtain ⟨_, _, _, rfl⟩ := h
       exact .inl rfl
     · cases h
-  · split at h
-    · cases h
-      exact .inl rfl
-    · cases h
+  · cases h
+    exact .inl rfl
   · cases h
 
 /-- A memory operation releases nothing. -/
@@ -713,6 +711,15 @@ theorem TypedAt.not_freed {S : StoreTy} {s : State} (hR : Δ.regions) (ht : Type
       have hi : (Atom.int (i : Int)).eval env = some (.int i) := rfl
       simp [evalAtoms, hx, hi] at hev
       exact key ha (hr hR) hx hev.1
+  | @focusAt _ x ix _ r σ _ _ _ ha _ hr _ _ =>
+    cases hx : Atom.eval env x with
+    | none => simp [evalAtoms, hx] at hev
+    | some w =>
+      cases hi : Atom.eval env ix with
+      | none => simp [evalAtoms, hx, hi] at hev
+      | some w' =>
+        simp [evalAtoms, hx, hi] at hev
+        exact key ha (hr hR) hx hev.1
   | @store _ x y _ r σ _ _ hform _ _ =>
     have ha := hform.ref
     have hr := hform.region
@@ -866,6 +873,7 @@ theorem TypedAt.not_dead {S : StoreTy} {s : State} (hR : Δ.regions) (ht : Typed
   | load _ _ _ _ => cases hcallee
   | tag _ _ _ _ => cases hcallee
   | focus _ _ _ _ => cases hcallee
+  | focusAt _ _ _ _ _ => cases hcallee
   | store _ _ _ => cases hcallee
   | swap _ _ _ => cases hcallee
   | write _ _ => cases hcallee
@@ -928,25 +936,35 @@ def Overflow (s : State) : Prop :=
   ∃ q args body vs, s.tm = .let_ (.prim q args) body
     ∧ evalAtoms s.env args = some vs ∧ q.eval vs = none
 
-/-- Of the four faults, overflow is the one that is none of the other three. -/
+/-- A part of a value is about to be read or written through a reference, and
+it is not there: a place past the end of an array. -/
+def Absent (s : State) : Prop :=
+  ∃ op args body a b path vs v, s.tm = .mem op args body
+    ∧ evalAtoms s.env args = some (.ref a b path :: vs)
+    ∧ s.store.cells[a]? = some (some v) ∧ v.follow path = none
+
+/-- Of the five faults, the two of something not fitting or not being there are
+the ones that are none of the other three. -/
 theorem Fault.overflow_of {s : State} (hf : Fault s) (h1 : ¬ Resumed s) (h2 : ¬ Freed s)
-    (h3 : ¬ Dead s) : Overflow s := by
+    (h3 : ¬ Dead s) : Overflow s ∨ Absent s := by
   cases hf with
-  | overflow hargs hq => exact ⟨_, _, _, _, rfl, hargs, hq⟩
+  | overflow hargs hq => exact .inl ⟨_, _, _, _, rfl, hargs, hq⟩
+  | absent hev hget hf => exact .inr ⟨_, _, _, _, _, _, _, _, rfl, hev, hget, hf⟩
   | freed hev hget => exact absurd ⟨_, _, _, _, _, _, _, rfl, hev, hget⟩ h2
   | resumed hc hev hget => exact absurd ⟨_, _, hc, hev, hget⟩ h1
   | dead hc hev hnone => exact absurd ⟨_, _, hc, hev, hnone⟩ h3
 
 /--
 **Soundness.** A program accepted with the ownership rules and the region
-rules goes wrong in one way only: an arithmetic result does not fit. It uses no
+rules goes wrong in two ways only: an arithmetic result does not fit, or a part
+of a value is not there, a place past the end of an array. It uses no
 resumption twice, no cell after it was released, and no label after its scope
 ended.
 -/
 theorem sound_safety {p : Program} (hp : ProgramOk Δ p) (hD : DupSound Δ) (hR : Δ.regions)
     (input : List Int) (h : GoesWrong p input) :
     ∃ c, Machine.Reaches (stepIO p) (initIO p input) c ∧ stepIO p c = .stuck
-      ∧ Overflow c.state := by
+      ∧ (Overflow c.state ∨ Absent c.state) := by
   obtain ⟨c, hreach, hstuck, hf, hres⟩ := owned_safety hp hD input h
   exact ⟨c, hreach, hstuck, hf.overflow_of hres (borrow_safety hp hR input hreach)
     (label_safety hp hR input hreach)⟩

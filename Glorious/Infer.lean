@@ -1629,7 +1629,13 @@ partial def inferTm (self : Nat) (amb : IRow) (τ : ITy) (Γ : Array ITy) : Core
         unify t (.ref ρ σ)
         match args with
         | [_, .int i] => pure (.ref ρ (← field σ i.toNat))
-        | _ => throw "which field a reference is made to is not a number written out"
+        | [_, ix] =>
+          -- A place found when the program runs: of an array.
+          unify (← atomTy Γ ix) .int
+          let elem ← freshTy
+          unify σ (.data arrayName [elem])
+          pure (.ref ρ elem)
+        | _ => throw "a memory operation has the wrong number of arguments"
       | _, _ => throw "a memory operation has the wrong number of arguments"
     inferTm self amb τ (Γ.push σ) body
   | .host id args body => do

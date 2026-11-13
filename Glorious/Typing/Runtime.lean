@@ -125,7 +125,7 @@ inductive HasVal (Δ : Ctx) (S : StoreTy) : Value → Ty → Prop where
   What it is a reference to is the part of what the cell holds that its path
   leads to. -/
   | ref {a b : Nat} {r : Rgn} {τ₀ τ : Ty} {path : List Nat} :
-      S.cells a = some τ₀ → PlaceOk Δ τ₀ path τ → (Δ.regions → OnCell S r a) →
+      S.cells a = some τ₀ → PartOk Δ τ₀ path τ → (Δ.regions → OnCell S r a) →
       (Δ.regions → Δ.loans → Tagged S r a b) →
       HasVal Δ S (.ref a b path) (.ref r τ)
 
@@ -295,6 +295,12 @@ inductive Fault : State → Prop where
       {store : Store Frame} {a b : Nat} {path : List Nat} {vs : List Value} :
       evalAtoms env args = some (.ref a b path :: vs) → store.cells[a]? = some none →
       Fault ⟨.mem op args body, env, stack, store⟩
+  /-- A reference is to a part of a value that is not there: a place past the
+  end of an array. -/
+  | absent {op : MemOp} {args : List Atom} {body : Tm} {env : Env} {stack : List Frame}
+      {store : Store Frame} {a b : Nat} {path : List Nat} {vs : List Value} {v : Value} :
+      evalAtoms env args = some (.ref a b path :: vs) → store.cells[a]? = some (some v) →
+      v.follow path = none → Fault ⟨.mem op args body, env, stack, store⟩
   /-- A resumption is resumed or cancelled after it was already used. -/
   | resumed {s : State} {f : Atom} {id : Nat} :
       calleeAtom s.tm = some f → f.eval s.env = some (.cont id) →

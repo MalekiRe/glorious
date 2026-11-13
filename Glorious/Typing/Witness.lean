@@ -417,10 +417,10 @@ def jumpsCert : Cert where
 
 theorem jumps_checked : checkProgram jumpsCert jumps = true := by decide
 
-/-- So `jumps` goes wrong in no way but overflow. -/
+/-- So `jumps` goes wrong in no way but the two a checked program can. -/
 theorem jumps_sound (input : List Int) (h : GoesWrong jumps input) :
     ∃ c, Machine.Reaches (stepIO jumps) (initIO jumps input) c
-      ∧ stepIO jumps c = .stuck ∧ Overflow c.state :=
+      ∧ stepIO jumps c = .stuck ∧ (Overflow c.state ∨ Absent c.state) :=
   checked_full_safety jumps_checked rfl rfl input h
 
 /--

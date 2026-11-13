@@ -260,14 +260,15 @@ theorem checked_exclusive_safety {p : Program} (h : checkProgram C p = true)
 
 /--
 **Soundness, checked.** If the certificate asks for the ownership rules and
-the region rules and the checker accepts, the program goes wrong in one way
-only: an arithmetic result does not fit in 64 bits. Nothing is assumed about
-the certificate or the program.
+the region rules and the checker accepts, the program goes wrong in two ways
+only: an arithmetic result does not fit in 64 bits, or a part of a value is
+not there, a place past the end of an array. Nothing is assumed about the
+certificate or the program.
 -/
 theorem checked_full_safety {p : Program} (h : checkProgram C p = true) (hs : C.strict = true)
     (hr : C.regions = true) (input : List Int) (hw : GoesWrong p input) :
     ∃ c, Machine.Reaches (stepIO p) (initIO p input) c ∧ stepIO p c = .stuck
-      ∧ Overflow c.state :=
+      ∧ (Overflow c.state ∨ Absent c.state) :=
   sound_safety (checkProgram_sound h) (dupSound_of_check h hs) hr input hw
 
 /-- The same for the compiled bytecode. -/
@@ -275,7 +276,7 @@ theorem checked_compiled_full_safety {p : Program} (h : checkProgram C p = true)
     (hs : C.strict = true) (hr : C.regions = true) (input : List Int)
     (hw : Bytecode.GoesWrong (compile p) input) :
     ∃ c, Machine.Reaches (stepIO p) (initIO p input) c ∧ stepIO p c = .stuck
-      ∧ Overflow c.state :=
+      ∧ (Overflow c.state ∨ Absent c.state) :=
   compiled_sound_safety (checkProgram_sound h) (dupSound_of_check h hs) hr input hw
 
 end Glorious.Typing

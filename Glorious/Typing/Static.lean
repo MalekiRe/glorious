@@ -157,13 +157,6 @@ inductive PlaceOk (Δ : Ctx) : Ty → List Nat → Ty → Prop where
       (∀ tag Fs', CtorOf Δ tag (.data name args) Fs' → Fs' = Fs) → Fs[i]? = some σ →
       PlaceOk Δ σ path τ → PlaceOk Δ (.data name args) (i :: path) τ
 
-theorem PlaceOk.append {Δ : Ctx} {σ τ υ : Ty} {p q : List Nat} (h : PlaceOk Δ σ p τ)
-    (h' : PlaceOk Δ τ q υ) : PlaceOk Δ σ (p ++ q) υ := by
-  induction h with
-  | here => exact h'
-  | tuple hi _ ih => exact .tuple hi (ih h')
-  | field hall hi _ ih => exact .field hall hi (ih h')
-
 /-! ## The locals a computation mentions -/
 
 def atomVars : List Atom → List Nat
@@ -233,6 +226,34 @@ def isWild : Pat → Bool
 type `τ`: such a value can be read at a place found when the program runs. -/
 def Uniform (Δ : Ctx) (T τ : Ty) : Prop :=
   ∀ tag Fs, CtorOf Δ tag T Fs → ∀ σ, σ ∈ Fs → σ = τ
+
+/-- The type found by following a path of fields from a type, where a field may
+be one that is there only if the program finds it there: a place of an array.
+This is what a reference to a part of a value goes through. -/
+inductive PartOk (Δ : Ctx) : Ty → List Nat → Ty → Prop where
+  | here {τ : Ty} : PartOk Δ τ [] τ
+  | tuple {Fs : List Ty} {i : Nat} {path : List Nat} {σ τ : Ty} :
+      Fs[i]? = some σ → PartOk Δ σ path τ → PartOk Δ (.tuple Fs) (i :: path) τ
+  | field {name : Nat} {args Fs : List Ty} {i : Nat} {path : List Nat} {σ τ : Ty} :
+      (∀ tag Fs', CtorOf Δ tag (.data name args) Fs' → Fs' = Fs) → Fs[i]? = some σ →
+      PartOk Δ σ path τ → PartOk Δ (.data name args) (i :: path) τ
+  | elem {T σ τ : Ty} {i : Nat} {path : List Nat} :
+      Uniform Δ T σ → PartOk Δ σ path τ → PartOk Δ T (i :: path) τ
+
+theorem PlaceOk.part {Δ : Ctx} {σ τ : Ty} {p : List Nat} (h : PlaceOk Δ σ p τ) :
+    PartOk Δ σ p τ := by
+  induction h with
+  | here => exact .here
+  | tuple hi _ ih => exact .tuple hi ih
+  | field hall hi _ ih => exact .field hall hi ih
+
+theorem PartOk.append {Δ : Ctx} {σ τ υ : Ty} {p q : List Nat} (h : PartOk Δ σ p τ)
+    (h' : PartOk Δ τ q υ) : PartOk Δ σ (p ++ q) υ := by
+  induction h with
+  | here => exact h'
+  | tuple hi _ ih => exact .tuple hi (ih h')
+  | field hall hi _ ih => exact .field hall hi (ih h')
+  | elem hu _ ih => exact .elem hu (ih h')
 
 /-- After each constructor of `T` comes one that takes a `τ` more. -/
 def Grows (Δ : Ctx) (T τ : Ty) : Prop :=
@@ -589,9 +610,16 @@ inductive HasTm (Δ : Ctx) (ϕ : List Rgn) : TEnv → Tm → Ty → Row → Prop
   Nothing is read, but under the region rules it needs the cell's region, as
   reading does. -/
   | focus {Γ : TEnv} {a : Atom} {i : Nat} {body : Tm} {r : Rgn} {σ σ' τ : Ty} {ε : Row} :
-      HasAtom Γ a (.ref r σ) → (Δ.regions → r ∈ ϕ) → PlaceOk Δ σ [i] σ' →
+      HasAtom Γ a (.ref r σ) → (Δ.regions → r ∈ ϕ) → PartOk Δ σ [i] σ' →
       HasTm Δ ϕ (Γ ++ [.ref r σ']) body τ ε →
       HasTm Δ ϕ Γ (.mem .focus [a, .int i] body) τ ε
+  /-- The same to a place found when the program runs, of a value every field
+  of which has one type: an array. Whether the place is there is found when
+  the reference is used. -/
+  | focusAt {Γ : TEnv} {a ix : Atom} {body : Tm} {r : Rgn} {σ σ' τ : Ty} {ε : Row} :
+      HasAtom Γ a (.ref r σ) → HasAtom Γ ix .int → (Δ.regions → r ∈ ϕ) → Uniform Δ σ σ' →
+      HasTm Δ ϕ (Γ ++ [.ref r σ']) body τ ε →
+      HasTm Δ ϕ Γ (.mem .focus [a, ix] body) τ ε
   | write {Γ : TEnv} {a : Atom} {body : Tm} {σ τ : Ty} {ε : Row} :
       HasAtom Γ a σ → HasTm Δ ϕ (Γ ++ [.unit]) body τ ε → HasTm Δ ϕ Γ (.host 0 [a] body) τ ε
   | read {Γ : TEnv} {body : Tm} {τ : Ty} {ε : Row} :

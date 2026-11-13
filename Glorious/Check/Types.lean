@@ -393,6 +393,11 @@ structure St where
   envHeld : Array (String × String × List Nat) := #[]
   /-- The fields read by name of what a named reference points to. -/
   derefReads : Array Nat := #[]
+  /-- The borrows made through a reference of a field of one of several
+  constructors, in the function being checked: what each holds, and where.
+  Such a borrow is a variable of the function's while it lasts, so it cannot
+  leave the function. -/
+  fieldCaps : Array (Nat × String) := #[]
   /-- What is asked of the type parameters of a declared type, where a value
   of it is built: for each such type, a trait and which parameter. -/
   typeBounds : List (String × List (String × Nat)) := []

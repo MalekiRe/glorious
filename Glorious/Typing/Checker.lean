@@ -614,6 +614,32 @@ theorem arrayElem_uniform {T t : Ty} (h : arrayElem T = some t) : Uniform C.ctx 
   obtain ⟨_, rfl⟩ := array_ctor hc
   exact List.eq_of_mem_replicate hσ
 
+/-- The type of the field a reference is made to: a field found by number in
+a type with one shape, or a place of an array, which may be found by the
+program. -/
+def focusTy (C : Cert) (Γ : TEnv) (σ : Ty) : Atom → Option Ty
+  | .int (.ofNat i) =>
+    match placeTy C σ [i] with
+    | some σ' => some σ'
+    | none => arrayElem σ
+  | ix => if atomTy Γ ix == some .int then arrayElem σ else none
+
+theorem focusTy_sound {Γ : TEnv} {σ σ' : Ty} {ix : Atom} (h : focusTy C Γ σ ix = some σ') :
+    (∃ i : Nat, ix = .int i ∧ PartOk C.ctx σ [i] σ')
+      ∨ (HasAtom Γ ix .int ∧ Uniform C.ctx σ σ') := by
+  unfold focusTy at h
+  split at h
+  · rename_i i
+    split at h
+    · rename_i τ hp
+      cases h
+      exact .inl ⟨i, rfl, (placeTy_sound hp).part⟩
+    · exact .inr ⟨.int, arrayElem_uniform h⟩
+  · split at h
+    · rename_i hi
+      exact .inr ⟨atomTy_sound (by simpa using hi), arrayElem_uniform h⟩
+    · cases h
+
 theorem arrayElem_grows {T t : Ty} (h : arrayElem T = some t) : Grows C.ctx T t := by
   rw [arrayElem_eq h]
   intro tag Fs hc
@@ -1118,10 +1144,10 @@ def checkTm (C : Cert) (ϕ : List Rgn) : TEnv → Tm → List Hint → Ty → Ro
       match atomTy Γ a, atomsTy Γ path with
       | some (.ref r _), some _ => regionOk C ϕ r && checkTm C ϕ (Γ ++ [.int]) body hs τ ε
       | _, _ => false
-    | .focus, [a, .int (.ofNat i)] =>
+    | .focus, [a, ix] =>
       match atomTy Γ a with
       | some (.ref r σ) =>
-        match placeTy C σ [i] with
+        match focusTy C Γ σ ix with
         | some σ' => regionOk C ϕ r && checkTm C ϕ (Γ ++ [.ref r σ']) body hs τ ε
         | none => false
       | _ => false
@@ -1351,9 +1377,11 @@ theorem checkTm_sound {ϕ : List Rgn} : ∀ (tm : Tm) {Γ : TEnv} {hs : List Hin
     · split at h
       · rename_i r σ ha
         split at h
-        · rename_i σ' hpl
+        · rename_i σ' hf
           simp only [Bool.and_eq_true] at h
-          exact .focus (atomTy_sound ha) (regionOk_sound h.1) (placeTy_sound hpl) (ih h.2)
+          rcases focusTy_sound hf with ⟨i, rfl, hpl⟩ | ⟨hix, hu⟩
+          · exact .focus (atomTy_sound ha) (regionOk_sound h.1) hpl (ih h.2)
+          · exact .focusAt (atomTy_sound ha) hix (regionOk_sound h.1) hu (ih h.2)
         · simp at h
       · simp at h
     · simp at h

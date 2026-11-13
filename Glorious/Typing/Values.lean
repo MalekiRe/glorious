@@ -138,7 +138,7 @@ theorem HasVal.int_inv {S : StoreTy} {v : Value} (h : HasVal Δ S v .int) : ∃ 
 
 theorem HasVal.ref_inv {S : StoreTy} {v : Value} {r : Rgn} {τ : Ty}
     (h : HasVal Δ S v (.ref r τ)) :
-    ∃ a b path τ₀, v = .ref a b path ∧ S.cells a = some τ₀ ∧ PlaceOk Δ τ₀ path τ
+    ∃ a b path τ₀, v = .ref a b path ∧ S.cells a = some τ₀ ∧ PartOk Δ τ₀ path τ
       ∧ (Δ.regions → OnCell S r a) ∧ (Δ.regions → Δ.loans → Tagged S r a b) := by
   cases h with
   | ref ha hp hr hl => exact ⟨_, _, _, _, rfl, ha, hp, hr, hl⟩
@@ -312,6 +312,150 @@ theorem put_ok {S : StoreTy} {σ τ : Ty} {path : List Nat} (h : PlaceOk Δ σ p
       obtain ⟨x, hx, hxt⟩ := hf.get hi
       obtain ⟨x', hx', hxt'⟩ := ih hxt hw
       exact ⟨_, by simp [Value.put, hx, hx'], .data hc (HasVals.set hxt' _ hf hi)⟩
+
+/-- What a typed path to a part finds in a typed value, if it finds anything,
+is a typed value. -/
+theorem follow_part {S : StoreTy} {σ τ : Ty} {path : List Nat} (h : PartOk Δ σ path τ) :
+    ∀ {v w : Value}, HasVal Δ S v σ → v.follow path = some w → HasVal Δ S w τ := by
+  induction h with
+  | here =>
+    intro v w hv hf
+    simp only [Value.follow, Option.some.injEq] at hf
+    exact hf ▸ hv
+  | @tuple Fs i path σ τ hi _ ih =>
+    intro v w hv hf
+    obtain ⟨t, fields, Fs', rfl, hc, hfs⟩ := hv.ctor_inv (tag := 0) (.inl ⟨rfl, rfl⟩)
+    have e := CtorOf.unique hc (.inl ⟨(by
+      rcases hc with ⟨h0, _⟩ | ⟨_, _, _, hT, _⟩
+      · exact h0
+      · cases hT), rfl⟩)
+    subst e
+    simp only [Value.follow] at hf
+    cases hx : fields[i]? with
+    | none => simp [hx] at hf
+    | some x =>
+      simp only [hx] at hf
+      obtain ⟨σ', hσ', hxt⟩ := HasVals.get' hfs hx
+      rw [hi] at hσ'
+      cases hσ'
+      exact ih hxt hf
+  | @field name args Fs i path σ τ hall hi _ ih =>
+    intro v w hv hf
+    cases hv with
+    | clo _ _ _ _ _ hτ => cases hτ
+    | data hc hfs =>
+      have e := hall _ _ hc
+      subst e
+      simp only [Value.follow] at hf
+      rename_i fields _
+      cases hx : fields[i]? with
+      | none => simp [hx] at hf
+      | some x =>
+        simp only [hx] at hf
+        obtain ⟨σ', hσ', hxt⟩ := HasVals.get' hfs hx
+        rw [hi] at hσ'
+        cases hσ'
+        exact ih hxt hf
+  | @elem T σ τ i path hu _ ih =>
+    intro v w hv hf
+    cases v with
+    | data t fields =>
+      simp only [Value.follow] at hf
+      cases hx : fields[i]? with
+      | none => simp [hx] at hf
+      | some x =>
+        simp only [hx] at hf
+        cases hv with
+        | data hc hfs =>
+          obtain ⟨σ', hσ', hxt⟩ := HasVals.get' hfs hx
+          have e := hu _ _ hc σ' (List.mem_of_getElem? hσ')
+          subst e
+          exact ih hxt hf
+    | int _ => simp [Value.follow] at hf
+    | clo _ _ => simp [Value.follow] at hf
+    | cont _ => simp [Value.follow] at hf
+    | label _ => simp [Value.follow] at hf
+    | ref _ _ _ => simp [Value.follow] at hf
+
+/-- Replacing the part a typed path leads to, when it is there, by a value of
+the type found there, leaves a value of the type it had. -/
+theorem put_part {S : StoreTy} {σ τ : Ty} {path : List Nat} (h : PartOk Δ σ path τ) :
+    ∀ {v w v' : Value}, HasVal Δ S v σ → HasVal Δ S w τ → v.put path w = some v' →
+      HasVal Δ S v' σ := by
+  induction h with
+  | here =>
+    intro v w v' _ hw hp
+    simp only [Value.put, Option.some.injEq] at hp
+    exact hp ▸ hw
+  | @tuple Fs i path σ τ hi _ ih =>
+    intro v w v' hv hw hp
+    obtain ⟨t, fields, Fs', rfl, hc, hfs⟩ := hv.ctor_inv (tag := 0) (.inl ⟨rfl, rfl⟩)
+    have e := CtorOf.unique hc (.inl ⟨(by
+      rcases hc with ⟨h0, _⟩ | ⟨_, _, _, hT, _⟩
+      · exact h0
+      · cases hT), rfl⟩)
+    subst e
+    simp only [Value.put] at hp
+    cases hx : fields[i]? with
+    | none => simp [hx] at hp
+    | some x =>
+      simp only [hx] at hp
+      cases hx' : x.put path w with
+      | none => simp [hx'] at hp
+      | some x' =>
+        simp only [hx', Option.some.injEq] at hp
+        subst hp
+        obtain ⟨σ', hσ', hxt⟩ := HasVals.get' hfs hx
+        rw [hi] at hσ'
+        cases hσ'
+        exact .data hc (HasVals.set (ih hxt hw hx') _ hfs hi)
+  | @field name args Fs i path σ τ hall hi _ ih =>
+    intro v w v' hv hw hp
+    cases hv with
+    | clo _ _ _ _ _ hτ => cases hτ
+    | data hc hfs =>
+      have e := hall _ _ hc
+      subst e
+      simp only [Value.put] at hp
+      rename_i fields _
+      cases hx : fields[i]? with
+      | none => simp [hx] at hp
+      | some x =>
+        simp only [hx] at hp
+        cases hx' : x.put path w with
+        | none => simp [hx'] at hp
+        | some x' =>
+          simp only [hx', Option.some.injEq] at hp
+          subst hp
+          obtain ⟨σ', hσ', hxt⟩ := HasVals.get' hfs hx
+          rw [hi] at hσ'
+          cases hσ'
+          exact .data hc (HasVals.set (ih hxt hw hx') _ hfs hi)
+  | @elem T σ τ i path hu _ ih =>
+    intro v w v' hv hw hp
+    cases v with
+    | data t fields =>
+      simp only [Value.put] at hp
+      cases hx : fields[i]? with
+      | none => simp [hx] at hp
+      | some x =>
+        simp only [hx] at hp
+        cases hx' : x.put path w with
+        | none => simp [hx'] at hp
+        | some x' =>
+          simp only [hx', Option.some.injEq] at hp
+          subst hp
+          cases hv with
+          | data hc hfs =>
+            obtain ⟨σ', hσ', hxt⟩ := HasVals.get' hfs hx
+            have e := hu _ _ hc σ' (List.mem_of_getElem? hσ')
+            subst e
+            exact .data hc (HasVals.set (ih hxt hw hx') _ hfs hσ')
+    | int _ => simp [Value.put] at hp
+    | clo _ _ => simp [Value.put] at hp
+    | cont _ => simp [Value.put] at hp
+    | label _ => simp [Value.put] at hp
+    | ref _ _ _ => simp [Value.put] at hp
 
 /-- An arithmetic intrinsic on two integers gives an integer, when it gives anything. -/
 theorem prim_int {p : Prim} {m n : Int} {v : Value} (h : p.eval [.int m, .int n] = some v) :

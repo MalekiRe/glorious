@@ -320,6 +320,17 @@ theorem TypedAt.not_aliased {S : StoreTy} {s : State} (hR : Δ.regions) (hL : Δ
         rw [hev.1] at hx
         have := hread r a b (hsub _ (hr hR)) (key ha hx)
         simp [writes, this] at hno
+    | @focusAt _ x ix _ r σ _ _ _ ha _ hr _ _ =>
+      cases hx : Atom.eval env x with
+      | none => simp [evalAtoms, hx] at hev
+      | some w =>
+        cases hi : Atom.eval env ix with
+        | none => simp [evalAtoms, hx, hi] at hev
+        | some w' =>
+          simp [evalAtoms, hx, hi] at hev
+          rw [hev.1] at hx
+          have := hread r a b (hsub _ (hr hR)) (key ha hx)
+          simp [writes, this] at hno
     | @store _ x y _ r σ _ _ hform _ _ =>
       have ha := hform.ref
       have hw := hform.write
