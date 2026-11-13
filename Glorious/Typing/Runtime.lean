@@ -124,7 +124,7 @@ inductive HasVal (Δ : Ctx) (S : StoreTy) : Value → Ty → Prop where
   under the rules for borrows it is the region of the borrow the reference is.
   What it is a reference to is the part of what the cell holds that its path
   leads to. -/
-  | ref {a b : Nat} {r : Rgn} {τ₀ τ : Ty} {path : List Nat} :
+  | ref {a b : Nat} {r : Rgn} {τ₀ τ : Ty} {path : List PathStep} :
       S.cells a = some τ₀ → PartOk Δ τ₀ path τ → (Δ.regions → OnCell S r a) →
       (Δ.regions → Δ.loans → Tagged S r a b) →
       HasVal Δ S (.ref a b path) (.ref r τ)
@@ -292,18 +292,18 @@ inductive Fault : State → Prop where
       Fault ⟨.let_ (.prim p args) body, env, stack, store⟩
   /-- A memory cell is used after it was freed. -/
   | freed {op : MemOp} {args : List Atom} {body : Tm} {env : Env} {stack : List Frame}
-      {store : Store Frame} {a b : Nat} {path : List Nat} {vs : List Value} :
+      {store : Store Frame} {a b : Nat} {path : List PathStep} {vs : List Value} :
       evalAtoms env args = some (.ref a b path :: vs) → store.cells[a]? = some none →
       Fault ⟨.mem op args body, env, stack, store⟩
   /-- A reference is to a part of a value that is not there: a place past the
   end of an array. -/
   | absent {op : MemOp} {args : List Atom} {body : Tm} {env : Env} {stack : List Frame}
-      {store : Store Frame} {a b : Nat} {path : List Nat} {vs : List Value} {v : Value} :
+      {store : Store Frame} {a b : Nat} {path : List PathStep} {vs : List Value} {v : Value} :
       evalAtoms env args = some (.ref a b path :: vs) → store.cells[a]? = some (some v) →
-      v.follow path = none → Fault ⟨.mem op args body, env, stack, store⟩
+      v.part path = none → Fault ⟨.mem op args body, env, stack, store⟩
   /-- A reference is asked for to a place below zero. -/
   | below {args : List Atom} {body : Tm} {env : Env} {stack : List Frame}
-      {store : Store Frame} {a b : Nat} {path : List Nat} {i : Int} :
+      {store : Store Frame} {a b : Nat} {path : List PathStep} {i : Int} :
       evalAtoms env args = some [.ref a b path, .int i] → i < 0 →
       Fault ⟨.mem .focus args body, env, stack, store⟩
   /-- A resumption is resumed or cancelled after it was already used. -/

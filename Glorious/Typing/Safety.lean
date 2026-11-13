@@ -595,7 +595,7 @@ theorem label_enter {S : StoreTy} {id n : Nat} {σ ρ : Ty} {εl εt : Row} {onc
 Under the rules for borrows it may not touch what was lent, and the stack it
 runs on does not grant it. -/
 theorem lend_enter {S : StoreTy} {uniq : Bool} {a b n : Nat} {ρ κ : Rgn} {σ ρt : Ty}
-    {εt ε' : Row} {acc ϕ ϕ' : List Rgn} {st : List Frame} {σ₀ : Ty} {path : List Nat}
+    {εt ε' : Row} {acc ϕ ϕ' : List Rgn} {st : List Frame} {σ₀ : Ty} {path : List PathStep}
     (hcell : S.cells a = some σ₀) (hp : PartOk Δ σ₀ path σ)
     (hl : S.loans b = some a) (hb : 0 < b) (hon : Δ.regions → OnCell S ρ a)
     (hσ : σ.lc = true) (hρt : ρt.lc = true) (hε : εt.lc = true)
@@ -1197,14 +1197,14 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
         rw [h1]
         exact Fault.freed (a := addr) (b := tag) (path := pth) (vs := []) (by simp [evalAtoms, hv]) hget
       | some w₀ =>
-        rcases hfw : w₀.follow pth with _ | w
+        rcases hfw : w₀.part pth with _ | w
         · have h1 : step p ⟨.mem .load [a] body, env, stack, ⟨conts, labels, cells⟩⟩
               = .stuck := by
             simp [step, evalAtoms, hv, MemOp.eval, hget, hfw]
           rw [h1]
           exact Fault.absent (a := addr) (b := tag) (path := pth) (vs := [])
             (by simp [evalAtoms, hv]) hget hfw
-        have hwt := follow_part hpl (hval w₀ hget) hfw
+        have hwt := part_ok hpl (hval w₀ hget) hfw
         have h1 : step p ⟨.mem .load [a] body, env, stack, ⟨conts, labels, cells⟩⟩
             = .next ⟨body, env ++ [w], stack, ⟨conts, labels, cells⟩⟩ := by
           simp [step, evalAtoms, hv, MemOp.eval, hget, hfw]
@@ -1233,7 +1233,7 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
         rw [h1]
         exact Fault.freed (a := addr) (b := tg) (path := pth) (vs := vs) (by simp [evalAtoms, hv, hvs]) hget
       | some w₀ =>
-        rcases hfw : w₀.follow pth with _ | w
+        rcases hfw : w₀.part pth with _ | w
         · have h1 : step p ⟨.mem .tag (a :: path) body, env, stack, ⟨conts, labels, cells⟩⟩
               = .stuck := by
             simp [step, evalAtoms, hv, hvs, MemOp.eval, hget, hfw]
@@ -1270,15 +1270,15 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
         rw [h1]
         exact Fault.freed (a := addr) (b := tag) (path := pth) (vs := [w]) (by simp [evalAtoms, hv, hw]) hget
       | some old₀ =>
-        rcases hfo : old₀.follow pth with _ | old
+        rcases hfo : old₀.part pth with _ | old
         · have h1 : step p ⟨.mem .store [a, b] body, env, stack, ⟨conts, labels, cells⟩⟩
               = .stuck := by
-            simp [step, evalAtoms, hv, hw, MemOp.eval, hget, put_none_of_follow w hfo]
+            simp [step, evalAtoms, hv, hw, MemOp.eval, hget, Value.putPart_none_of_part w hfo]
           rw [h1]
           exact Fault.absent (a := addr) (b := tag) (path := pth) (vs := [w])
             (by simp [evalAtoms, hv, hw]) hget hfo
-        obtain ⟨v', hput⟩ := put_of_follow w hfo
-        have hvt' := put_part hpl (hval old₀ hget) hwt hput
+        obtain ⟨v', hput⟩ := Value.putPart_of_part w hfo
+        have hvt' := putPart_ok hpl (hval old₀ hget) hwt hput
         have h1 : step p ⟨.mem .store [a, b] body, env, stack, ⟨conts, labels, cells⟩⟩
             = .next ⟨body, env ++ [Value.unit], stack,
                 ⟨conts, labels, cells.set addr (some v')⟩⟩ := by
@@ -1296,7 +1296,7 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
         have h4 := occ_eval id env hw
         have h5 := occCells_set id hget (some v')
         have h6 := occ_unit id
-        have h7 := occ_put id hfo hput
+        have h7 := occ_putPart id hfo hput
         simp only [oweight] at h5
         simp only [occState]
         omega
@@ -1318,16 +1318,16 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
         rw [h1]
         exact Fault.freed (a := addr) (b := tag) (path := pth) (vs := [w]) (by simp [evalAtoms, hv, hw]) hget
       | some old₀ =>
-        rcases hfo : old₀.follow pth with _ | old
+        rcases hfo : old₀.part pth with _ | old
         · have h1 : step p ⟨.mem .swap [a, b] body, env, stack, ⟨conts, labels, cells⟩⟩
               = .stuck := by
-            simp [step, evalAtoms, hv, hw, MemOp.eval, hget, hfo, put_none_of_follow w hfo]
+            simp [step, evalAtoms, hv, hw, MemOp.eval, hget, hfo, Value.putPart_none_of_part w hfo]
           rw [h1]
           exact Fault.absent (a := addr) (b := tag) (path := pth) (vs := [w])
             (by simp [evalAtoms, hv, hw]) hget hfo
-        have hot := follow_part hpl (hval old₀ hget) hfo
-        obtain ⟨v', hput⟩ := put_of_follow w hfo
-        have hvt' := put_part hpl (hval old₀ hget) hwt hput
+        have hot := part_ok hpl (hval old₀ hget) hfo
+        obtain ⟨v', hput⟩ := Value.putPart_of_part w hfo
+        have hvt' := putPart_ok hpl (hval old₀ hget) hwt hput
         have h1 : step p ⟨.mem .swap [a, b] body, env, stack, ⟨conts, labels, cells⟩⟩
             = .next ⟨body, env ++ [old], stack,
                 ⟨conts, labels, cells.set addr (some v')⟩⟩ := by
@@ -1344,7 +1344,7 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
         have h3 := occEnv_push id env old (fv body)
         have h4 := occ_eval id env hw
         have h5 := occCells_set id hget (some v')
-        have h7 := occ_put id hfo hput
+        have h7 := occ_putPart id hfo hput
         simp only [oweight] at h5
         simp only [occState]
         omega
@@ -1352,16 +1352,34 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
     obtain ⟨v, hv, hvt⟩ := atom_ok henv ha
     obtain ⟨addr, tg, pth, σ₀, rfl, hcell, hpl, hon, hl⟩ := hvt.ref_inv
     have h1 : step p ⟨.mem .focus [a, .int i] body, env, stack, ⟨conts, labels, cells⟩⟩
-        = .next ⟨body, env ++ [.ref addr tg (pth ++ [i])], stack, ⟨conts, labels, cells⟩⟩ := by
+        = .next ⟨body, env ++ [.ref addr tg (pth ++ [⟨none, i⟩])], stack, ⟨conts, labels, cells⟩⟩ := by
       have hi : (Atom.int (i : Int)).eval env = some (.int i) := rfl
       simp [step, evalAtoms, hv, hi, MemOp.eval]
     rw [h1]
     refine .next (.mk (henv.snoc (.ref hcell (hpl.append hpl') hon hl)) hbody hle hsub hst hs)
       (fun hD hu => hu.mono rfl fun id => ?_)
-    have h2 := occEnv_push id env (.ref addr tg (pth ++ [i])) (fv body)
+    have h2 := occEnv_push id env (.ref addr tg (pth ++ [⟨none, i⟩])) (fv body)
     have h3 := occEnv_mono (id := id) (env := env) (a := fv body)
       (b := fv (.mem .focus [a, .int i] body)) (fun i hi => List.mem_append_right _ hi)
-    have h4 : occ id (Value.ref addr tg (pth ++ [i])) = 0 := by simp [occ]
+    have h4 : occ id (Value.ref addr tg (pth ++ [⟨none, i⟩])) = 0 := by simp [occ]
+    simp only [occState]
+    omega
+  | @focusIn _ a i built body r σ σ' _ _ Fs ha _ hc hfi hbody =>
+    obtain ⟨v, hv, hvt⟩ := atom_ok henv ha
+    obtain ⟨addr, tg, pth, σ₀, rfl, hcell, hpl, hon, hl⟩ := hvt.ref_inv
+    have h1 : step p ⟨.mem .focus [a, .int i, .int built] body, env, stack, ⟨conts, labels, cells⟩⟩
+        = .next ⟨body, env ++ [.ref addr tg (pth ++ [⟨some built, i⟩])], stack,
+            ⟨conts, labels, cells⟩⟩ := by
+      have hi : (Atom.int (i : Int)).eval env = some (.int i) := rfl
+      have hb : (Atom.int (built : Int)).eval env = some (.int built) := rfl
+      simp [step, evalAtoms, hv, hi, hb, MemOp.eval]
+    rw [h1]
+    refine .next (.mk (henv.snoc (.ref hcell (hpl.append (.variant hc hfi .here)) hon hl)) hbody
+      hle hsub hst hs) (fun hD hu => hu.mono rfl fun id => ?_)
+    have h2 := occEnv_push id env (.ref addr tg (pth ++ [⟨some built, i⟩])) (fv body)
+    have h3 := occEnv_mono (id := id) (env := env) (a := fv body)
+      (b := fv (.mem .focus [a, .int i, .int built] body)) (fun i hi => List.mem_append_right _ hi)
+    have h4 : occ id (Value.ref addr tg (pth ++ [⟨some built, i⟩])) = 0 := by simp [occ]
     simp only [occState]
     omega
   | @focusAt _ a ix body r σ σ' _ _ ha hix _ hu hbody =>
@@ -1378,16 +1396,16 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
       exact Fault.below (a := addr) (b := tg) (path := pth) (i := n)
         (by simp [evalAtoms, hv, hiv]) (by omega)
     have h1 : step p ⟨.mem .focus [a, ix] body, env, stack, ⟨conts, labels, cells⟩⟩
-        = .next ⟨body, env ++ [.ref addr tg (pth ++ [n.toNat])], stack,
+        = .next ⟨body, env ++ [.ref addr tg (pth ++ [⟨none, n.toNat⟩])], stack,
             ⟨conts, labels, cells⟩⟩ := by
       simp [step, evalAtoms, hv, hiv, MemOp.eval, hn]
     rw [h1]
     refine .next (.mk (henv.snoc (.ref hcell (hpl.append (.elem hu .here)) hon hl)) hbody hle
       hsub hst hs) (fun hD hu' => hu'.mono rfl fun id => ?_)
-    have h2 := occEnv_push id env (.ref addr tg (pth ++ [n.toNat])) (fv body)
+    have h2 := occEnv_push id env (.ref addr tg (pth ++ [⟨none, n.toNat⟩])) (fv body)
     have h3 := occEnv_mono (id := id) (env := env) (a := fv body)
       (b := fv (.mem .focus [a, ix] body)) (fun i hi => List.mem_append_right _ hi)
-    have h4 : occ id (Value.ref addr tg (pth ++ [n.toNat])) = 0 := by simp [occ]
+    have h4 : occ id (Value.ref addr tg (pth ++ [⟨none, n.toNat⟩])) = 0 := by simp [occ]
     simp only [occState]
     omega
   | write _ _ => exact absurd rfl (hnh _ _ _)

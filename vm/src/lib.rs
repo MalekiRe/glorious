@@ -27,22 +27,27 @@ pub enum Value {
     Clo(Rc<Clo>) = 2,
     Cont(usize) = 3,
     Label(u64) = 4,
-    /// A cell, and the fields to go through to the part of what it holds
-    /// that the reference is to: none for the whole.
+    /// A cell, and the steps to take to the part of what it holds that the
+    /// reference is to: none for the whole.
     Ref(usize, Path) = 5,
 }
 
-pub type Path = Option<Rc<[usize]>>;
+/// A step to a field: the constructor the value has to have been built by,
+/// plus one, or zero for any; and the field's number.
+pub type PathStep = (u64, usize);
+pub type Path = Option<Rc<[PathStep]>>;
 
-fn steps(path: &Path) -> &[usize] {
+fn steps(path: &Path) -> &[PathStep] {
     path.as_deref().unwrap_or(&[])
 }
 
-/// The part of a value a path of fields leads to.
-fn part<'a>(mut v: &'a Value, path: &[usize]) -> Step<&'a Value> {
-    for &i in path {
+/// The part of a value that steps lead to.
+fn part<'a>(mut v: &'a Value, path: &[PathStep]) -> Step<&'a Value> {
+    for &(built, i) in path {
         match v {
-            Value::Data(d) => v = d.fields.get(i).ok_or(Stop::Wrong)?,
+            Value::Data(d) if built == 0 || d.tag == built - 1 => {
+                v = d.fields.get(i).ok_or(Stop::Wrong)?
+            }
             _ => return wrong(),
         }
     }
@@ -50,10 +55,12 @@ fn part<'a>(mut v: &'a Value, path: &[usize]) -> Step<&'a Value> {
 }
 
 /// The same part, to change: a value that is shared is copied on the way.
-fn part_mut<'a>(mut v: &'a mut Value, path: &[usize]) -> Step<&'a mut Value> {
-    for &i in path {
+fn part_mut<'a>(mut v: &'a mut Value, path: &[PathStep]) -> Step<&'a mut Value> {
+    for &(built, i) in path {
         match v {
-            Value::Data(d) => v = Rc::make_mut(d).fields.get_mut(i).ok_or(Stop::Wrong)?,
+            Value::Data(d) if built == 0 || d.tag == built - 1 => {
+                v = Rc::make_mut(d).fields.get_mut(i).ok_or(Stop::Wrong)?
+            }
             _ => return wrong(),
         }
     }
@@ -1243,7 +1250,18 @@ impl Vm {
                 }
                 let i = usize::try_from(*i).unwrap_or(usize::MAX);
                 let mut path = steps(p).to_vec();
-                path.push(i);
+                path.push((0, i));
+                Ok(Value::Ref(*a, Some(path.into())))
+            }
+            // A field of one of a type's several constructors: the step
+            // says which, and leads nowhere in a value built by another.
+            (MemOp::Focus, [Value::Ref(a, p), Value::Int(i), Value::Int(built)]) => {
+                if *i < 0 || *built < 0 {
+                    return wrong();
+                }
+                let i = usize::try_from(*i).unwrap_or(usize::MAX);
+                let mut path = steps(p).to_vec();
+                path.push((*built as u64 + 1, i));
                 Ok(Value::Ref(*a, Some(path.into())))
             }
             (MemOp::Tag, [Value::Ref(a, p), ..]) => {

@@ -2136,16 +2136,49 @@ be a number the program computes, is there or not when the reference is used.
   a `&mut` to a part excludes the reference it came from while it lasts, is
   the surface checker's doing, as it was. Nothing unsound follows if it were
   wrong: a write through a path keeps the cell's type.
-- **A path does not go into a variant.** A field of one of several
-  constructors, borrowed through a reference by a pattern, is still taken out
-  into a variable of the function's while the borrow lasts, and still cannot
-  be given back. A path step would have to say which constructor it expects.
+- **A path goes into a variant** since "References into one of several
+  constructors" below; it did not at first.
 - **A field of a local variable** is still borrowed as a variable of its own
   while the borrow lasts, which is what lets two fields of one variable be
   lent at once in Core, where a borrow is of a cell.
 - **A place below zero** asked of `focus` stops the machine there, a fault of
   the same kind (`Fault.below`, counted under `Absent`). A place past the end
   is found only when the reference is used.
+
+## References into one of several constructors
+
+A step of a reference's path now says, where the type has several
+constructors, which one the value has to have been built by (`PathStep`:
+that constructor or none, and the field's number). `focus` given a
+constructor makes such a step, and one more rule types it (`HasTm.focusIn`,
+`PartOk.variant`): the field's type is that constructor's. Reading or writing
+through the reference finds the part only while the value is built by that
+constructor, and is `Fault.absent` otherwise, the fault there already was for
+a place past the end of an array. The soundness theorems are as they were.
+
+On the surface a pattern that binds by reference, gone through a reference,
+gives references that can be given back whatever the type:
+
+```
+fn inner(o: &mut Option<Int>) -> Option<&mut Int> {
+    match(o) { &mut Some(x) => Some(x), &mut None => None }
+}
+```
+
+and the same through a recursive type, to a value inside a tree. The refusal
+"a borrow of a field of one of several constructors lasts only inside the
+function that makes it" is gone.
+
+- **Nothing asks, when the reference is made, whether the value is built by
+  the constructor.** A pattern has asked just before. That the value is not
+  rebuilt by another while the reference is held is the surface checker's
+  doing, as for an array that might shrink; if it were wrong the machine
+  would stop, not read something of the wrong type.
+- **Through a variable that is not a reference** a field of one of several
+  constructors is still taken out into a variable while the borrow lasts.
+- The Rust VM's path steps carry the constructor too; compiled code reads
+  only references to whole cells in place and leaves the rest to the runtime,
+  so the ABI's layout of values is as it was.
 
 ## Rows of effects have names
 

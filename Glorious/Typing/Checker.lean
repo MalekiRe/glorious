@@ -625,7 +625,7 @@ def focusTy (C : Cert) (Γ : TEnv) (σ : Ty) : Atom → Option Ty
   | ix => if atomTy Γ ix == some .int then arrayElem σ else none
 
 theorem focusTy_sound {Γ : TEnv} {σ σ' : Ty} {ix : Atom} (h : focusTy C Γ σ ix = some σ') :
-    (∃ i : Nat, ix = .int i ∧ PartOk C.ctx σ [i] σ')
+    (∃ i : Nat, ix = .int i ∧ PartOk C.ctx σ [⟨none, i⟩] σ')
       ∨ (HasAtom Γ ix .int ∧ Uniform C.ctx σ σ') := by
   unfold focusTy at h
   split at h
@@ -1151,6 +1151,16 @@ def checkTm (C : Cert) (ϕ : List Rgn) : TEnv → Tm → List Hint → Ty → Ro
         | some σ' => regionOk C ϕ r && checkTm C ϕ (Γ ++ [.ref r σ']) body hs τ ε
         | none => false
       | _ => false
+    | .focus, [a, .int (.ofNat i), .int (.ofNat built)] =>
+      match atomTy Γ a with
+      | some (.ref r σ) =>
+        match ctorFieldsOf C built σ with
+        | some Fs =>
+          match Fs[i]? with
+          | some σ' => regionOk C ϕ r && checkTm C ϕ (Γ ++ [.ref r σ']) body hs τ ε
+          | none => false
+        | none => false
+      | _ => false
     | _, _ => false
   | Γ, .host id args body, hs, τ, ε =>
     match id, args with
@@ -1382,6 +1392,18 @@ theorem checkTm_sound {ϕ : List Rgn} : ∀ (tm : Tm) {Γ : TEnv} {hs : List Hin
           rcases focusTy_sound hf with ⟨i, rfl, hpl⟩ | ⟨hix, hu⟩
           · exact .focus (atomTy_sound ha) (regionOk_sound h.1) hpl (ih h.2)
           · exact .focusAt (atomTy_sound ha) hix (regionOk_sound h.1) hu (ih h.2)
+        · simp at h
+      · simp at h
+    · split at h
+      · rename_i r σ ha
+        split at h
+        · rename_i Fs hc
+          split at h
+          · rename_i σ' hi
+            simp only [Bool.and_eq_true] at h
+            exact .focusIn (atomTy_sound ha) (regionOk_sound h.1) (ctorFieldsOf_sound hc) hi
+              (ih h.2)
+          · simp at h
         · simp at h
       · simp at h
     · simp at h

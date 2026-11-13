@@ -331,6 +331,10 @@ theorem mem_cells {op : MemOp} {cells cells' : Cells} {vs : List Value} {r : Val
     · cases h
       exact .inl rfl
     · cases h
+  · split at h
+    · cases h
+      exact .inl rfl
+    · cases h
   · cases h
 
 /-- A memory operation releases nothing. -/
@@ -713,6 +717,14 @@ theorem TypedAt.not_freed {S : StoreTy} {s : State} (hR : Δ.regions) (ht : Type
       have hi : (Atom.int (i : Int)).eval env = some (.int i) := rfl
       simp [evalAtoms, hx, hi] at hev
       exact key ha (hr hR) hx hev.1
+  | @focusIn _ x i built _ r σ _ _ _ _ ha hr _ _ _ =>
+    cases hx : Atom.eval env x with
+    | none => simp [evalAtoms, hx] at hev
+    | some w =>
+      have hi : (Atom.int (i : Int)).eval env = some (.int i) := rfl
+      have hb : (Atom.int (built : Int)).eval env = some (.int built) := rfl
+      simp [evalAtoms, hx, hi, hb] at hev
+      exact key ha (hr hR) hx hev.1
   | @focusAt _ x ix _ r σ _ _ _ ha _ hr _ _ =>
     cases hx : Atom.eval env x with
     | none => simp [evalAtoms, hx] at hev
@@ -876,6 +888,7 @@ theorem TypedAt.not_dead {S : StoreTy} {s : State} (hR : Δ.regions) (ht : Typed
   | tag _ _ _ _ => cases hcallee
   | focus _ _ _ _ => cases hcallee
   | focusAt _ _ _ _ _ => cases hcallee
+  | focusIn _ _ _ _ _ => cases hcallee
   | store _ _ _ => cases hcallee
   | swap _ _ _ => cases hcallee
   | write _ _ => cases hcallee
@@ -944,7 +957,7 @@ to a place below zero. -/
 def Absent (s : State) : Prop :=
   (∃ op args body a b path vs v, s.tm = .mem op args body
     ∧ evalAtoms s.env args = some (.ref a b path :: vs)
-    ∧ s.store.cells[a]? = some (some v) ∧ v.follow path = none)
+    ∧ s.store.cells[a]? = some (some v) ∧ v.part path = none)
   ∨ (∃ args body a b path i, s.tm = .mem .focus args body
     ∧ evalAtoms s.env args = some [.ref a b path, .int i] ∧ i < 0)
 

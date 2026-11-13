@@ -10,6 +10,19 @@ position in that environment.
 
 namespace Glorious
 
+/-- A step from a value to one of its fields: the field's number, and the
+constructor the value has to have been built by for the field to be the one
+meant, where a type has several. -/
+structure PathStep where
+  tag : Option Nat
+  field : Nat
+
+/-- Does a value built by constructor `built` have the field a step means? -/
+def PathStep.fits (s : PathStep) (built : Nat) : Bool :=
+  match s.tag with
+  | none => true
+  | some t => t == built
+
 /-- A runtime value. -/
 inductive Value where
   /-- An integer. Arithmetic keeps it within 64 bits; see `checked`. -/
@@ -24,10 +37,10 @@ inductive Value where
   | label (id : Nat)
   /-- A reference: the address of a memory cell, which borrow of the cell it
   is, and the way from what the cell holds to the part of it the reference is
-  to: the fields to go through, none for the whole. The cell's own reference
+  to: the steps to take, none for the whole. The cell's own reference
   is borrow zero. Nothing the machine does depends on the borrow: it is there
   so that what it means for a borrow to be respected can be said. -/
-  | ref (addr : Nat) (borrow : Nat) (path : List Nat)
+  | ref (addr : Nat) (borrow : Nat) (path : List PathStep)
 
 /-- The constructors that build arrays: the one that takes `n` elements is
 `arrayBase + n`, above every constructor a program declares. And the name
@@ -186,6 +199,126 @@ def put : Value → List Nat → Value → Option Value
   | .cont _, _ :: _, _ => none
   | .label _, _ :: _, _ => none
   | .ref _ _ _, _ :: _, _ => none
+
+/-- The part of a value that steps lead to. There is none where a field is
+not there, or where the value was built by another constructor than a step
+expects. -/
+def part : Value → List PathStep → Option Value
+  | v, [] => some v
+  | .data tag fields, s :: path =>
+    match s.fits tag, fields[s.field]? with
+    | true, some field => field.part path
+    | _, _ => none
+  | .int _, _ :: _ => none
+  | .clo _ _, _ :: _ => none
+  | .cont _, _ :: _ => none
+  | .label _, _ :: _ => none
+  | .ref _ _ _, _ :: _ => none
+
+/-- A value with the part that steps lead to replaced. -/
+def putPart : Value → List PathStep → Value → Option Value
+  | _, [], w => some w
+  | .data tag fields, s :: path, w =>
+    match s.fits tag, fields[s.field]? with
+    | true, some field =>
+      match field.putPart path w with
+      | some field' => some (.data tag (fields.set s.field field'))
+      | none => none
+    | _, _ => none
+  | .int _, _ :: _, _ => none
+  | .clo _ _, _ :: _, _ => none
+  | .cont _, _ :: _, _ => none
+  | .label _, _ :: _, _ => none
+  | .ref _ _ _, _ :: _, _ => none
+
+/-- A step with no constructor in mind fits any. -/
+@[simp] theorem _root_.Glorious.PathStep.fits_none (i built : Nat) : (PathStep.mk none i).fits built = true := rfl
+
+/-- A step with a constructor in mind fits that one. -/
+theorem _root_.Glorious.PathStep.fits_some {tag i built : Nat} :
+    (PathStep.mk (some tag) i).fits built = true ↔ tag = built := by
+  simp [PathStep.fits]
+
+/-- What it is for a step and then more to lead somewhere. -/
+theorem part_cons {v : Value} {s : PathStep} {path : List PathStep} {w : Value}
+    (h : v.part (s :: path) = some w) :
+    ∃ tag fields x, v = .data tag fields ∧ s.fits tag = true ∧ fields[s.field]? = some x ∧
+      x.part path = some w := by
+  cases v with
+  | data tag fields =>
+    simp only [part] at h
+    cases hfit : s.fits tag with
+    | false => simp [hfit] at h
+    | true =>
+      cases hx : fields[s.field]? with
+      | none => simp [hfit, hx] at h
+      | some x =>
+        simp only [hfit, hx] at h
+        exact ⟨tag, fields, x, rfl, hfit, hx, h⟩
+  | int _ => simp [part] at h
+  | clo _ _ => simp [part] at h
+  | cont _ => simp [part] at h
+  | label _ => simp [part] at h
+  | ref _ _ _ => simp [part] at h
+
+theorem part_data {tag : Nat} {fields : List Value} {s : PathStep} {x : Value} (path : List PathStep)
+    (hfit : s.fits tag = true) (hx : fields[s.field]? = some x) :
+    (Value.data tag fields).part (s :: path) = x.part path := by
+  simp [part, hfit, hx]
+
+theorem putPart_data {tag : Nat} {fields : List Value} {s : PathStep} {x : Value} (path : List PathStep)
+    (w : Value) (hfit : s.fits tag = true) (hx : fields[s.field]? = some x) :
+    (Value.data tag fields).putPart (s :: path) w
+      = (x.putPart path w).map fun x' => .data tag (fields.set s.field x') := by
+  simp only [putPart, hfit, hx]
+  cases x.putPart path w <;> rfl
+
+/-- What it is for a part a step and then more leads to, to have been replaced. -/
+theorem putPart_cons {v : Value} {s : PathStep} {path : List PathStep} {w v' : Value}
+    (h : v.putPart (s :: path) w = some v') :
+    ∃ tag fields x x', v = .data tag fields ∧ s.fits tag = true ∧ fields[s.field]? = some x ∧
+      x.putPart path w = some x' ∧ v' = .data tag (fields.set s.field x') := by
+  cases v with
+  | data tag fields =>
+    cases hfit : s.fits tag with
+    | false => simp [putPart, hfit] at h
+    | true =>
+      cases hx : fields[s.field]? with
+      | none => simp [putPart, hfit, hx] at h
+      | some x =>
+        rw [putPart_data path w hfit hx] at h
+        cases hx' : x.putPart path w with
+        | none => simp [hx'] at h
+        | some x' =>
+          simp only [hx', Option.map_some, Option.some.injEq] at h
+          exact ⟨tag, fields, x, x', rfl, hfit, hx, hx', h.symm⟩
+  | int _ => simp [putPart] at h
+  | clo _ _ => simp [putPart] at h
+  | cont _ => simp [putPart] at h
+  | label _ => simp [putPart] at h
+  | ref _ _ _ => simp [putPart] at h
+
+/-- A part that is there can be replaced. -/
+theorem putPart_of_part : ∀ {path : List PathStep} {v old : Value} (w : Value),
+    v.part path = some old → ∃ v', v.putPart path w = some v'
+  | [], _, _, w, _ => ⟨w, by simp [putPart]⟩
+  | s :: path, v, _, w, h => by
+    obtain ⟨tag, fields, x, rfl, hfit, hx, hp⟩ := part_cons h
+    obtain ⟨x', hx'⟩ := putPart_of_part (path := path) w hp
+    exact ⟨_, by rw [putPart_data path w hfit hx, hx']; rfl⟩
+
+/-- A part that is not there cannot be. -/
+theorem putPart_none_of_part : ∀ {path : List PathStep} {v : Value} (w : Value),
+    v.part path = none → v.putPart path w = none
+  | [], _, _, h => by simp [part] at h
+  | s :: path, v, w, h => by
+    cases hp : v.putPart (s :: path) w with
+    | none => rfl
+    | some v' =>
+      obtain ⟨tag, fields, x, x', rfl, hfit, hx, hx', _⟩ := putPart_cons hp
+      rw [part_data path hfit hx] at h
+      rw [putPart_none_of_part (path := path) w h] at hx'
+      cases hx'
 
 /-- Is this value built by constructor `tag` with exactly `arity` fields? -/
 def isCtor (v : Value) (tag arity : Nat) : Bool :=

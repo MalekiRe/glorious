@@ -227,33 +227,38 @@ type `τ`: such a value can be read at a place found when the program runs. -/
 def Uniform (Δ : Ctx) (T τ : Ty) : Prop :=
   ∀ tag Fs, CtorOf Δ tag T Fs → ∀ σ, σ ∈ Fs → σ = τ
 
-/-- The type found by following a path of fields from a type, where a field may
-be one that is there only if the program finds it there: a place of an array.
-This is what a reference to a part of a value goes through. -/
-inductive PartOk (Δ : Ctx) : Ty → List Nat → Ty → Prop where
+/-- The type found by taking steps from a type to a part of it. A step may be
+to a field that is there only if the program finds it there: a place of an
+array, or a field of one of a type's several constructors. This is what a
+reference to a part of a value goes through. -/
+inductive PartOk (Δ : Ctx) : Ty → List PathStep → Ty → Prop where
   | here {τ : Ty} : PartOk Δ τ [] τ
-  | tuple {Fs : List Ty} {i : Nat} {path : List Nat} {σ τ : Ty} :
-      Fs[i]? = some σ → PartOk Δ σ path τ → PartOk Δ (.tuple Fs) (i :: path) τ
-  | field {name : Nat} {args Fs : List Ty} {i : Nat} {path : List Nat} {σ τ : Ty} :
+  | tuple {Fs : List Ty} {i : Nat} {path : List PathStep} {σ τ : Ty} :
+      Fs[i]? = some σ → PartOk Δ σ path τ → PartOk Δ (.tuple Fs) (⟨none, i⟩ :: path) τ
+  | field {name : Nat} {args Fs : List Ty} {i : Nat} {path : List PathStep} {σ τ : Ty} :
       (∀ tag Fs', CtorOf Δ tag (.data name args) Fs' → Fs' = Fs) → Fs[i]? = some σ →
-      PartOk Δ σ path τ → PartOk Δ (.data name args) (i :: path) τ
-  | elem {T σ τ : Ty} {i : Nat} {path : List Nat} :
-      Uniform Δ T σ → PartOk Δ σ path τ → PartOk Δ T (i :: path) τ
+      PartOk Δ σ path τ → PartOk Δ (.data name args) (⟨none, i⟩ :: path) τ
+  | elem {T σ τ : Ty} {i : Nat} {path : List PathStep} :
+      Uniform Δ T σ → PartOk Δ σ path τ → PartOk Δ T (⟨none, i⟩ :: path) τ
+  | variant {T : Ty} {tag : Nat} {Fs : List Ty} {i : Nat} {path : List PathStep} {σ τ : Ty} :
+      CtorOf Δ tag T Fs → Fs[i]? = some σ → PartOk Δ σ path τ →
+      PartOk Δ T (⟨some tag, i⟩ :: path) τ
 
 theorem PlaceOk.part {Δ : Ctx} {σ τ : Ty} {p : List Nat} (h : PlaceOk Δ σ p τ) :
-    PartOk Δ σ p τ := by
+    PartOk Δ σ (p.map (PathStep.mk none)) τ := by
   induction h with
   | here => exact .here
   | tuple hi _ ih => exact .tuple hi ih
   | field hall hi _ ih => exact .field hall hi ih
 
-theorem PartOk.append {Δ : Ctx} {σ τ υ : Ty} {p q : List Nat} (h : PartOk Δ σ p τ)
+theorem PartOk.append {Δ : Ctx} {σ τ υ : Ty} {p q : List PathStep} (h : PartOk Δ σ p τ)
     (h' : PartOk Δ τ q υ) : PartOk Δ σ (p ++ q) υ := by
   induction h with
   | here => exact h'
   | tuple hi _ ih => exact .tuple hi (ih h')
   | field hall hi _ ih => exact .field hall hi (ih h')
   | elem hu _ ih => exact .elem hu (ih h')
+  | variant hc hi _ ih => exact .variant hc hi (ih h')
 
 /-- After each constructor of `T` comes one that takes a `τ` more. -/
 def Grows (Δ : Ctx) (T τ : Ty) : Prop :=
@@ -610,9 +615,17 @@ inductive HasTm (Δ : Ctx) (ϕ : List Rgn) : TEnv → Tm → Ty → Row → Prop
   Nothing is read, but under the region rules it needs the cell's region, as
   reading does. -/
   | focus {Γ : TEnv} {a : Atom} {i : Nat} {body : Tm} {r : Rgn} {σ σ' τ : Ty} {ε : Row} :
-      HasAtom Γ a (.ref r σ) → (Δ.regions → r ∈ ϕ) → PartOk Δ σ [i] σ' →
+      HasAtom Γ a (.ref r σ) → (Δ.regions → r ∈ ϕ) → PartOk Δ σ [⟨none, i⟩] σ' →
       HasTm Δ ϕ (Γ ++ [.ref r σ']) body τ ε →
       HasTm Δ ϕ Γ (.mem .focus [a, .int i] body) τ ε
+  /-- The same to a field of one of a type's several constructors. The
+  reference leads somewhere only while the value is built by that one:
+  whether it is, is found when the reference is used. -/
+  | focusIn {Γ : TEnv} {a : Atom} {i tag : Nat} {body : Tm} {r : Rgn} {σ σ' τ : Ty} {ε : Row}
+      {Fs : List Ty} :
+      HasAtom Γ a (.ref r σ) → (Δ.regions → r ∈ ϕ) → CtorOf Δ tag σ Fs → Fs[i]? = some σ' →
+      HasTm Δ ϕ (Γ ++ [.ref r σ']) body τ ε →
+      HasTm Δ ϕ Γ (.mem .focus [a, .int i, .int tag] body) τ ε
   /-- The same to a place found when the program runs, of a value every field
   of which has one type: an array. Whether the place is there is found when
   the reference is used. -/

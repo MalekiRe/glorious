@@ -1640,6 +1640,19 @@ partial def inferTm (self : Nat) (amb : IRow) (τ : ITy) (Γ : Array ITy) : Core
           unify σ (.data arrayName [elem])
           pure (.ref ρ elem)
         | _ => throw "a memory operation has the wrong number of arguments"
+      | .focus, [t, _, _] => do
+        -- A field of one of a type's several constructors.
+        accRgn self ρ
+        match args with
+        | [_, .int i, .int built] =>
+          if built ≤ 0 || arrayBase ≤ built.toNat then
+            throw "a reference into a constructor's field names no constructor"
+          let (whole, fields) ← instCtor built.toNat
+          unify t (.ref ρ whole)
+          match fields[i.toNat]? with
+          | some σ => pure (.ref ρ σ)
+          | none => throw s!"constructor {built} has no field {i}"
+        | _ => throw "a memory operation has the wrong number of arguments"
       | _, _ => throw "a memory operation has the wrong number of arguments"
     inferTm self amb τ (Γ.push σ) body
   | .host id args body => do

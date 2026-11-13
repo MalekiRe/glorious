@@ -278,7 +278,7 @@ theorem TypedAt.not_aliased {S : StoreTy} {s : State} (hR : Δ.regions) (hL : Δ
     have : ownStack a stack + osum (ownStack a) store.conts ≤ 1 := (ho a).1
     omega
   obtain ⟨_, hread, hwrite, _⟩ := hst.exclusive hR hL hown
-  have key : ∀ {x : Atom} {r : Rgn} {σ : Ty} {a b : Nat} {pth : List Nat},
+  have key : ∀ {x : Atom} {r : Rgn} {σ : Ty} {a b : Nat} {pth : List PathStep},
       HasAtom Γ x (.ref r σ) → x.eval env = some (.ref a b pth) → Tagged S r a b := by
     intro x r σ a b pth hx hw
     obtain ⟨v, hv, hvt⟩ := atom_ok henv hx
@@ -317,6 +317,16 @@ theorem TypedAt.not_aliased {S : StoreTy} {s : State} (hR : Δ.regions) (hL : Δ
       | some w =>
         have hi : (Atom.int (i : Int)).eval env = some (.int i) := rfl
         simp [evalAtoms, hx, hi] at hev
+        rw [hev.1] at hx
+        have := hread r a b (hsub _ (hr hR)) (key ha hx)
+        simp [writes, this] at hno
+    | @focusIn _ x i built _ r σ _ _ _ _ ha hr _ _ _ =>
+      cases hx : Atom.eval env x with
+      | none => simp [evalAtoms, hx] at hev
+      | some w =>
+        have hi : (Atom.int (i : Int)).eval env = some (.int i) := rfl
+        have hb : (Atom.int (built : Int)).eval env = some (.int built) := rfl
+        simp [evalAtoms, hx, hi, hb] at hev
         rw [hev.1] at hx
         have := hread r a b (hsub _ (hr hR)) (key ha hx)
         simp [writes, this] at hno

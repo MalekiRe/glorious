@@ -56,71 +56,21 @@ theorem occs_set (id : Nat) : ∀ {vs : List Value} {i : Nat} {x : Value} (y : V
 
 /-- Replacing a part of a value takes out what the part held and puts in what
 the new part holds. -/
-theorem occ_put (id : Nat) : ∀ {v : Value} {path : List Nat} {w old v' : Value},
-    v.follow path = some old → v.put path w = some v' →
+theorem occ_putPart (id : Nat) : ∀ {path : List PathStep} {v w old v' : Value},
+    v.part path = some old → v.putPart path w = some v' →
       occ id v' + occ id old = occ id v + occ id w
-  | v, [], w, old, v', hf, hp => by
-    simp only [Value.follow, Option.some.injEq] at hf
-    simp only [Value.put, Option.some.injEq] at hp
+  | [], v, w, old, v', hf, hp => by
+    simp only [Value.part, Option.some.injEq] at hf
+    simp only [Value.putPart, Option.some.injEq] at hp
     subst hf; subst hp
     omega
-  | .data tag fields, i :: path, w, old, v', hf, hp => by
-    simp only [Value.follow] at hf
-    simp only [Value.put] at hp
-    cases hx : fields[i]? with
-    | none => simp [hx] at hf
-    | some x =>
-      simp only [hx] at hf hp
-      cases hx' : x.put path w with
-      | none => simp [hx'] at hp
-      | some x' =>
-        simp only [hx', Option.some.injEq] at hp
-        subst hp
-        have h1 := occ_put id hf hx'
-        have h2 := occs_set id x' hx
-        simp only [occ]
-        omega
-  | .int _, _ :: _, _, _, _, hf, _ => by simp [Value.follow] at hf
-  | .clo _ _, _ :: _, _, _, _, hf, _ => by simp [Value.follow] at hf
-  | .cont _, _ :: _, _, _, _, hf, _ => by simp [Value.follow] at hf
-  | .label _, _ :: _, _, _, _, hf, _ => by simp [Value.follow] at hf
-  | .ref _ _ _, _ :: _, _, _, _, hf, _ => by simp [Value.follow] at hf
-
-/-- A part that can be found can be replaced. -/
-theorem put_of_follow : ∀ {v : Value} {path : List Nat} {old : Value} (w : Value),
-    v.follow path = some old → ∃ v', v.put path w = some v'
-  | _, [], _, w, _ => ⟨w, by simp [Value.put]⟩
-  | .data tag fields, i :: path, old, w, hf => by
-    simp only [Value.follow] at hf
-    cases hx : fields[i]? with
-    | none => simp [hx] at hf
-    | some x =>
-      simp only [hx] at hf
-      obtain ⟨x', hx'⟩ := put_of_follow w hf
-      exact ⟨.data tag (fields.set i x'), by simp [Value.put, hx, hx']⟩
-  | .int _, _ :: _, _, _, hf => by simp [Value.follow] at hf
-  | .clo _ _, _ :: _, _, _, hf => by simp [Value.follow] at hf
-  | .cont _, _ :: _, _, _, hf => by simp [Value.follow] at hf
-  | .label _, _ :: _, _, _, hf => by simp [Value.follow] at hf
-  | .ref _ _ _, _ :: _, _, _, hf => by simp [Value.follow] at hf
-
-/-- A part that cannot be found cannot be replaced. -/
-theorem put_none_of_follow : ∀ {v : Value} {path : List Nat} (w : Value),
-    v.follow path = none → v.put path w = none
-  | _, [], _, hf => by simp [Value.follow] at hf
-  | .data tag fields, i :: path, w, hf => by
-    simp only [Value.follow] at hf
-    simp only [Value.put]
-    cases hx : fields[i]? with
-    | none => rfl
-    | some x =>
-      simp only [hx] at hf
-      simp [put_none_of_follow w hf]
-  | .int _, _ :: _, _, _ => by simp [Value.put]
-  | .clo _ _, _ :: _, _, _ => by simp [Value.put]
-  | .cont _, _ :: _, _, _ => by simp [Value.put]
-  | .label _, _ :: _, _, _ => by simp [Value.put]
-  | .ref _ _ _, _ :: _, _, _ => by simp [Value.put]
+  | s :: path, v, w, old, v', hf, hp => by
+    obtain ⟨tag, fields, x, x', rfl, hfit, hx, hx', rfl⟩ := Value.putPart_cons hp
+    rw [Value.part_data path hfit hx] at hf
+    have h1 := occ_putPart id (path := path) hf hx'
+    have h2 := occs_set id x' hx
+    simp only [occ]
+    omega
 
 /-! ## Sums over the first `n` numbers -/
 

@@ -2435,9 +2435,9 @@ def cases : List Case := [
   -- A pattern that takes a struct apart by reference gives references further in, which can be given back.
   ⟨"struct P { x: Int, y: Int }\nfn gx(p: &mut P) -> &mut Int { match(p) { &mut P { x, y } => x } }\nfn main() { let mut p = P { x: 1, y: 2 }; let r = gx(&mut p); *r = 7; p.x }",
     [], "7"⟩,
-  -- A field of one of several constructors is still taken out while its borrow lasts.
+  -- A reference to a field of one of several constructors, given back: it leads there while the value is built by that one.
   ⟨"enum Shape { Circle(Int), Rect(Int, Int) }\nfn rad(s: &mut Shape) -> &mut Int { match(s) { &mut Circle(r) => r, &mut Rect(w, h) => w } }\nfn main() { let mut a = Circle(1); let r = rad(&mut a); *r = 5; a }",
-    [], "error: 2:37: in `rad`: a borrow of a field lasts only inside the block that makes it, and here the block gives it back: give back the whole reference, or the field's value, or borrow the field where it is used"⟩,
+    [], "Circle(5)"⟩,
   -- A reference to a place of an array, from a reference to the array.
   ⟨"fn at<T>(a: &mut Array<T>, i: Int) -> &mut T { arr_at(a, i) }\nfn main() { let mut a = [1, 2, 3]; let r = at(&mut a, 1); *r = 20; a }",
     [], "[1, 20, 3]"⟩,
@@ -2613,6 +2613,16 @@ def cases : List Case := [
     [], "3"⟩,
   ⟨"fn total(a: &[Int]) -> Int { len_at(a) }\nfn main() -> Int { if(1 < 2) { total(&[1, 2, 3]) } else { 0 } }",
     [], "3"⟩,
+  -- References into one of several constructors that leave the function: `Option<&mut T>` from `&mut Option<T>`.
+  ⟨"fn inner(o: &mut Option<Int>) -> Option<&mut Int> { match(o) { &mut Some(x) => Some(x), &mut None => None } }\nfn main() -> Int {\n    let mut a = Some(4);\n    match(inner(&mut a)) { Some(r) => *r = *r + 10;, None => () };\n    match(a) { Some(n) => n, None => 0 } }",
+    [], "14"⟩,
+  ⟨"fn inner<T>(o: &Option<T>) -> Option<&T> { match(o) { &Some(x) => Some(x), &None => None } }\nfn main() -> Int {\n    let a = Some([1, 2, 3]);\n    match(inner(&a)) { Some(r) => len_at(r), None => 0 } }",
+    [], "3"⟩,
+  ⟨"enum Shape { Circle(Int), Rect(Int, Int) }\nfn width(s: &mut Shape) -> &mut Int { match(s) { &mut Circle(r) => r, &mut Rect(w, h) => w } }\nfn main() -> Int {\n    let mut s = Rect(3, 4);\n    let w = width(&mut s);\n    *w = 30;\n    match(s) { Circle(r) => r, Rect(w, h) => w + h } }",
+    [], "34"⟩,
+  -- And to a value inside a tree, found by going down it.
+  ⟨"enum Tree { Leaf, Node(Tree, Int, Tree) }\nfn leftmost(t: &mut Tree) -> Option<&mut Int> {\n    match(t) {\n        &mut Leaf => None,\n        &mut Node(l, v, r) => match(leftmost(l)) { Some(found) => Some(found), None => Some(v) }\n    } }\nfn main() -> Int {\n    let mut t = Node(Node(Leaf, 2, Leaf), 5, Leaf);\n    match(leftmost(&mut t)) { Some(v) => *v = 9;, None => () };\n    match(t) { Leaf => 0, Node(l, v, r) => match(l) { Leaf => v, Node(a, w, b) => w * 10 + v } } }",
+    [], "95"⟩,
   -- `drop` is not for a program to call.
   ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nfn main() { let mut f = File(7); drop(&mut f); 0 }",
     [], "error: 3:34: in `main`: `drop` is run when what holds a value ends; a program does not call it"⟩,

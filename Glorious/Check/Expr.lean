@@ -87,20 +87,6 @@ partial def inferExpr (scope : Scope) (amb : Row) : Expr → M Ty
       captures cap' (.ty t)
       modify fun s =>
         { s with fieldSites := s.fieldSites.push (id, true, whole, numbered, chosen, s.owner, s.pos) }
-      -- A field of one of several constructors is not found by going further
-      -- in: it is taken out while the borrow lasts, in a variable of the
-      -- function's, so the borrow cannot leave its block.
-      let known ← get
-      let variant := chosen.any fun
-        | some c =>
-          match known.ctors.lookup c with
-          | some sig => ((known.types.lookup sig.owner).map (·.ctors.length != 1)).getD true
-          | none => true
-        | none => false
-      if variant then
-        modify fun s =>
-          { s with fieldCaps := s.fieldCaps.push (cap', s.pos)
-                   blockFieldCaps := s.blockFieldCaps.push (cap', s.pos) }
       pure (.ref (if uniq then .uniq else .shared) field cap')
     | some _ => do
       if x.startsWith "%through" || x.startsWith "%given" then

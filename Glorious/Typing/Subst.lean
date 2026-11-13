@@ -277,7 +277,7 @@ theorem Uniform.inst (hΔ : Δ.Stable) {T τ : Ty} (θ : List Rgn) (h : Uniform 
   obtain ⟨σ₀, hσ₀, rfl⟩ := List.mem_map.mp hσ
   rw [h tag Fs₀ hc₀ σ₀ hσ₀]
 
-theorem PartOk.inst (hΔ : Δ.Stable) (θ : List Rgn) : ∀ {σ : Ty} {path : List Nat} {τ : Ty},
+theorem PartOk.inst (hΔ : Δ.Stable) (θ : List Rgn) : ∀ {σ : Ty} {path : List PathStep} {τ : Ty},
     PartOk Δ σ path τ → PartOk Δ (σ.inst θ) path (τ.inst θ)
   | _, _, _, .here => .here
   | _, _, _, .tuple (Fs := Fs) hi hp => by
@@ -290,6 +290,8 @@ theorem PartOk.inst (hΔ : Δ.Stable) (θ : List Rgn) : ∀ {σ : Ty} {path : Li
     obtain ⟨Fs₀, hc₀, rfl⟩ := CtorOf.of_inst hΔ hc
     rw [hall tag Fs₀ hc₀]
   | _, _, _, .elem hu hp => .elem (hu.inst hΔ θ) (PartOk.inst hΔ θ hp)
+  | _, _, _, .variant hc hi hp =>
+    .variant (hc.inst hΔ θ) (by simp [hi]) (PartOk.inst hΔ θ hp)
 
 theorem Grows.inst (hΔ : Δ.Stable) {T τ : Ty} (θ : List Rgn) (h : Grows Δ T τ) :
     Grows Δ (T.inst θ) (τ.inst θ) := by
@@ -795,6 +797,11 @@ theorem HasTm.inst (hΔ : Δ.Stable) (θ : List Rgn) {ϕ : List Rgn}
     rw [Ty.inst_ref] at ha'
     rw [snoc_inst, Ty.inst_ref] at ih
     exact .focus ha' (fun h => List.mem_map.mpr ⟨_, hr h, rfl⟩) (hp.inst hΔ θ) ih
+  | focusIn ha hr hc hi _ ih =>
+    have ha' := ha.inst θ
+    rw [Ty.inst_ref] at ha'
+    rw [snoc_inst, Ty.inst_ref] at ih
+    exact .focusIn ha' (fun h => List.mem_map.mpr ⟨_, hr h, rfl⟩) (hc.inst hΔ θ) (by simp [hi]) ih
   | focusAt ha hix hr hu _ ih =>
     have ha' := ha.inst θ
     rw [Ty.inst_ref] at ha'

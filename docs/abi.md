@@ -23,7 +23,7 @@ A value is 32 bytes, aligned to 16. Byte 0 is its tag.
 | 2 | closure | pointer to the runtime's object | unused |
 | 3 | resumption | its number | unused |
 | 4 | label | its identity | unused |
-| 5 | reference | the cell's number | the path to the part, or nothing |
+| 5 | reference | the cell's number | the steps to the part, or nothing |
 
 Compiled code may read and write integers in place: check the tag, read
 bytes 16..32. An integer of type `Int` fits in 64 bits, so the high half is

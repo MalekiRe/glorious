@@ -964,8 +964,16 @@ partial def elabCall (scope : Scope) (isTail : Bool) (f : Expr) (args : List Exp
     -- one field further in at each step.
     if mark == Syntax.focusMark then
       let mut at_ ← elabExpr scope false r
-      for step in rest do
-        if let .int i := step then at_ ← emit (.mem .focus [at_, .int i])
+      -- A step into one of a type's several constructors is followed by the
+      -- constructor's name.
+      for (step, next) in rest.zip (rest.drop 1 ++ [.int 0]) do
+        if let .int i := step then
+          match next with
+          | .name q c =>
+            match ← resolveCtor c q with
+            | some info => at_ ← emit (.mem .focus [at_, .int i, .int (info.tag : Int)])
+            | none => throw s!"`{c}` is not a constructor"
+          | _ => at_ ← emit (.mem .focus [at_, .int i])
       return at_
     if mark == Syntax.ctorIsMark then
       let cell ← elabExpr scope false r
@@ -2161,13 +2169,19 @@ private partial def unfieldStmts (info : FieldInfo) :
       match info.shapes.lookup id with
       | none => wrap s :: unfieldStmts info rest
       | some (viaRef, path, shape) =>
-        -- A field of what a reference points to, found without asking which
-        -- constructor built anything on the way: the reference, further in.
-        -- Nothing is taken out, so the borrow can outlive the function.
-        if viaRef && !shape.any (fun (c, _) => (c.getD "").startsWith "#") then
+        -- A field of what a reference points to: the reference, further in.
+        -- Nothing is taken out, so the borrow can outlive the function. Into
+        -- one of a type's several constructors, the reference leads
+        -- somewhere while the value is built by that one.
+        if viaRef then
+          let steps := (path.zip (shape ++ path.map fun _ => (none, 0))).flatMap fun (n, c, _) =>
+            match c with
+            | some c =>
+              if c.startsWith "#" then [Expr.int (Int.ofNat n), .name none (c.drop 1).toString]
+              else [Expr.int (Int.ofNat n)]
+            | none => [Expr.int (Int.ofNat n)]
           unfieldStmts info (before ++ Stmt.let_ (.var (fieldRefName id))
-            (.call 0 (.name none Syntax.focusMark)
-              (.name none x :: path.map fun n => Expr.int (Int.ofNat n)))
+            (.call 0 (.name none Syntax.focusMark) (.name none x :: steps))
             :: s :: rest)
         else
         -- What the field is a field of: what the variable holds, or what the

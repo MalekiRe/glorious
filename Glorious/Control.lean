@@ -166,7 +166,8 @@ inductive MemOp where
   /-- A reference to a field of what a reference points to: the same cell and
   the same borrow, one field further in. Nothing is read, so whether the field
   is there is found when the reference is used. No field has a number below
-  zero. -/
+  zero. Given a constructor as well, the field is that constructor's: the
+  reference then leads somewhere only while the value is built by it. -/
   | focus
 
 /-- The constructor of the value a path of field numbers leads to; `-1` if the
@@ -188,25 +189,28 @@ abbrev Cells := List (Option Value)
 def MemOp.eval (cells : Cells) : MemOp → List Value → Option (Value × Cells)
   | .load, [.ref a _ p] =>
     match cells[a]? with
-    | some (some v) => (v.follow p).map (·, cells)
+    | some (some v) => (v.part p).map (·, cells)
     | _ => none
   | .store, [.ref a _ p, w] =>
     match cells[a]? with
-    | some (some v) => (v.put p w).map fun v' => (.unit, cells.set a (some v'))
+    | some (some v) => (v.putPart p w).map fun v' => (.unit, cells.set a (some v'))
     | _ => none
   | .swap, [.ref a _ p, w] =>
     match cells[a]? with
     | some (some v) =>
-      match v.follow p, v.put p w with
+      match v.part p, v.putPart p w with
       | some old, some v' => some (old, cells.set a (some v'))
       | _, _ => none
     | _ => none
   | .tag, .ref a _ p :: path =>
     match cells[a]? with
-    | some (some v) => (v.follow p).map fun w => (.int (tagAt w path), cells)
+    | some (some v) => (v.part p).map fun w => (.int (tagAt w path), cells)
     | _ => none
   | .focus, [.ref a b p, .int i] =>
-    if 0 ≤ i then some (.ref a b (p ++ [i.toNat]), cells) else none
+    if 0 ≤ i then some (.ref a b (p ++ [⟨none, i.toNat⟩]), cells) else none
+  -- The field of one of several constructors: the step says which.
+  | .focus, [.ref a b p, .int i, .int built] =>
+    if 0 ≤ i ∧ 0 ≤ built then some (.ref a b (p ++ [⟨some built.toNat, i.toNat⟩]), cells) else none
   | _, _ => none
 
 /-- The machine state that is not on the stack. -/
