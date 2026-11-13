@@ -2421,12 +2421,9 @@ iterated: `fold`, `for_each`, `count`, `collect`, `map_collect`, `find_map`,
   specification's matrix need an implementation whose conditions say that a
   type parameter is a callable taking another's `Item`; an implementation's
   conditions are a trait of a parameter and nothing more.
-- **No `find` with a test that borrows.** A function that takes a dictionary
-  for `I: Iterator` and lends a value it got from `next` to a callable
-  written `for<'a> fn(&'a T) -> Bool` is accepted and runs, but the search
-  for its regions fails, so a program using it would be certified as well
-  owned and no further. `find_map`, which gives the value to the function,
-  is there instead.
+- `find` takes a test that borrows the value, `find_map` a function that is
+  given it. (`find` was left out at first: see "Regions through two calls"
+  below.)
 - A fault was fixed on the way: `Self::Item` in a trait's function was one
   type for every implementation in a program, so two iterated types with
   different items could not be used together.
@@ -2443,11 +2440,8 @@ thing on a line.
   unwritten lifetimes of what it takes. `fn fmt(&Self, &mut Formatter)` had
   one lifetime for both, so its body could not use the value while it wrote
   to the sink.
-- **`format` is certified as well owned and no further.** A function that is
-  given a dictionary and lends a variable of its own to one of the
-  dictionary's functions (`let mut out = ..; fmt(value, &mut out)`) is
-  accepted and runs, but no regions are found for the program that calls it.
-  The same holds, as it did before, for any generic function of that shape.
+- A program that calls `format` was at first certified as well owned and no
+  further; see "Regions through two calls" below.
 - **Not built**: `Debug`, format options and output limits, the diagnostics
   types.
 
@@ -2464,6 +2458,28 @@ statement it is in starts and borrows that.
   the end of the statement.
 - **It is made before the rest of its statement**: in `g(a(), &b())`, `b()`
   runs before `a()`.
+
+## Regions through two calls
+
+The search for a program's regions failed for a generic function that lends
+a variable of its own to a function of a trait: `let mut out = ..;
+fmt(value, &mut out)`. What a callable touches is found by going through
+what it calls, and a callable called at a region its caller chose is renamed
+to that region on the way. Through two such calls, an implementation's
+function called by the function the dictionary holds, the region was renamed
+once: the inner one's region became the outer one's bound region and stayed
+that, so the variable's scope seemed to touch a region that was no one's.
+Each call on the way now renames in turn (`renamed` in `Infer.lean`).
+
+This is in the search for a certificate, which proves nothing itself; the
+checker that accepts what it finds is unchanged. Programs that call `format`,
+`find`, or any generic function of that shape now get all three
+certificates.
+
+- Still not found: a callable given two references at once, one to the
+  caller's variable and one the caller was itself given
+  (`for<'a, 'b> fn(&'a T, &'b mut Int)` called with a parameter and a
+  variable). The program is accepted and certified as well owned.
 
 ## Other standing decisions
 

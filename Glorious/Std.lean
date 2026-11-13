@@ -1379,6 +1379,14 @@ fn map_onto<I: Iterator, B>(it: &mut I, f: fn(I::Item) -> B, out: [B]) -> [B] {
     }
 }
 
+// The first value a test passes, if one does; those before it are let go.
+pub fn find<I: Iterator>(it: &mut I, wanted: for<'a> fn(&'a I::Item) -> Bool) -> Option<I::Item> {
+    match(next(it)) {
+        Some(x) => if(wanted(&x)) { Some(x) } else { tail find(it, wanted) },
+        None => None
+    }
+}
+
 // The first thing a function makes of a value, where it makes anything; the
 // values before that are let go.
 pub fn find_map<I: Iterator, B>(it: &mut I, f: fn(I::Item) -> Option<B>) -> Option<B> {

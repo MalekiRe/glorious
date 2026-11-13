@@ -2647,6 +2647,16 @@ def cases : List Case := [
   -- An iterator by reference over a list a program declares.
   ⟨"use core::iter::{Iterator, fold};\nenum List<T> { Nil, Cons(T, List<T>) }\nstruct Links<'a, T> { at: &'a List<T> }\nimpl<'a, T> Iterator for Links<'a, T> {\n    type Item = &'a T;\n    fn next(it) {\n        match(it.at) {\n            &Cons(x, rest) => it.at = rest; Some(x),\n            &Nil => None\n        }\n    }\n}\nfn main() -> Int {\n    let l = Cons(1, Cons(2, Cons(3, Nil)));\n    let mut it = Links { at: &l };\n    fold(&mut it, 0, { (acc, x) => acc * 10 + *x }) }",
     [], "123"⟩,
+  -- A generic function lends a variable of its own to a function of a trait: regions are found through both calls.
+  ⟨"trait Put { fn put(Self, &mut Int); }\nimpl Put for Int { fn put(n, o) { *o = n + 1; } }\nfn g<T: Put>(value: T) -> Int { let mut out = 0; put(value, &mut out); out }\nfn main() -> Int { g(5) }",
+    [], "6"⟩,
+  ⟨"trait Put { fn put(&Self, &mut Int); }\nimpl Put for Int { fn put(n, o) { *o = *n + 1; } }\nfn g<T: Put>(value: &T) -> Int { let mut out = 0; put(value, &mut out); out }\nfn main() -> Int { let n = 5; g(&n) }",
+    [], "6"⟩,
+  ⟨"use alloc::fmt::{Formatter, Display, format};\nuse alloc::string::{String};\nfn main() { let n = 5; let written = format(&n); say(String::to_str(&written)); 0 }",
+    [], "5\n0"⟩,
+  -- `find` with a test that borrows the value.
+  ⟨"use core::iter::{Iterator, range, into_iter, find, find_map};\nfn main() -> Int {\n    let mut r = range(0, 50);\n    say(find(&mut r, { (n) => *n * *n > 200 }));\n    let mut words = into_iter([\"a\", \"bb\", \"ccc\"]);\n    say(find(&mut words, { (w) => length(*w) == 2 }));\n    say(find(&mut words, { (w) => length(*w) == 9 }));\n    0 }",
+    [], "Ok(15)\nOk(bb)\nErr(())\n0"⟩,
   -- `drop` is not for a program to call.
   ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nfn main() { let mut f = File(7); drop(&mut f); 0 }",
     [], "error: 3:34: in `main`: `drop` is run when what holds a value ends; a program does not call it"⟩,

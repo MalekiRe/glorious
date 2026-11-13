@@ -399,6 +399,16 @@ def accInst (a sub : Nat) (chosen : List (Nat × Nat)) : M Unit := do
   let x ← accNode a
   modify fun s => { s with accs := s.accs.set! a { x with insts := (sub, chosen) :: x.insts } }
 
+/-- A region of a callable reached through calls, as the outermost caller has
+it: each call on the way, innermost first, says which of the caller's regions
+stands for each the callee's type binds. A callable called at a region its
+own caller chose is renamed twice. -/
+def renamed (ren : List (List (Nat × Nat))) (r : Nat) : M Nat :=
+  ren.foldlM (fun r level => do
+    match level.lookup r with
+    | some to => findRg to
+    | none => pure r) r
+
 /-- Every region a callable may touch: its own and those of what it includes.
 What a callable called at a region of the caller's choosing touches is
 touched with that region for the one its type binds. -/
@@ -406,7 +416,7 @@ partial def accSet (a : Nat) : M (List Nat) := do
   let (_, out) ← go a [] [] [] {} []
   pure out
 where
-  go (a : Nat) (ex : List Nat) (ren : List (Nat × Nat)) (stack : List Nat)
+  go (a : Nat) (ex : List Nat) (ren : List (List (Nat × Nat))) (stack : List Nat)
       (seen : Std.HashSet Nat) (out : List Nat) : M (Std.HashSet Nat × List Nat) := do
     let a ← findAcc a
     if seen.contains a then return (seen, out)
@@ -415,13 +425,11 @@ where
     let x ← accNode a
     for ρ in x.rgns do
       let r ← findRg ρ
-      let r ← match ren.lookup r with
-        | some to => findRg to
-        | none => pure r
+      let r ← renamed ren r
       unless ex.contains r || out.contains r do out := r :: out
     for (b, e) in x.subs do
       let ex' ← match e with
-        | some q => do pure ((← findRg q) :: ex)
+        | some q => do pure ((← renamed ren (← findRg q)) :: ex)
         | none => pure ex
       (seen, out) ← go b ex' ren stack seen out
     for (sub, chosen) in x.insts do
@@ -429,7 +437,7 @@ where
       -- (a callable that calls itself is not gone through again)
       unless stack.contains s do
         let chosen ← chosen.mapM fun (bound, actual) => do pure (← findRg bound, actual)
-        let (_, more) ← go s ex (chosen ++ ren) (s :: stack) {} out
+        let (_, more) ← go s ex (chosen :: ren) (s :: stack) {} out
         out := more
     pure (seen, out)
 
@@ -438,7 +446,7 @@ partial def accWrSet (a : Nat) : M (List Nat) := do
   let (_, out) ← go a [] [] [] {} []
   pure out
 where
-  go (a : Nat) (ex : List Nat) (ren : List (Nat × Nat)) (stack : List Nat)
+  go (a : Nat) (ex : List Nat) (ren : List (List (Nat × Nat))) (stack : List Nat)
       (seen : Std.HashSet Nat) (out : List Nat) : M (Std.HashSet Nat × List Nat) := do
     let a ← findAcc a
     if seen.contains a then return (seen, out)
@@ -447,20 +455,18 @@ where
     let x ← accNode a
     for ρ in x.wrs do
       let r ← findRg ρ
-      let r ← match ren.lookup r with
-        | some to => findRg to
-        | none => pure r
+      let r ← renamed ren r
       unless ex.contains r || out.contains r do out := r :: out
     for (b, e) in x.subs do
       let ex' ← match e with
-        | some q => do pure ((← findRg q) :: ex)
+        | some q => do pure ((← renamed ren (← findRg q)) :: ex)
         | none => pure ex
       (seen, out) ← go b ex' ren stack seen out
     for (sub, chosen) in x.insts do
       let s ← findAcc sub
       unless stack.contains s do
         let chosen ← chosen.mapM fun (bound, actual) => do pure (← findRg bound, actual)
-        let (_, more) ← go s ex (chosen ++ ren) (s :: stack) {} out
+        let (_, more) ← go s ex (chosen :: ren) (s :: stack) {} out
         out := more
     pure (seen, out)
 
