@@ -45,10 +45,13 @@ to meet them, and otherwise with those of them it can, or as a typing only.
 An error here is a defect in the compiler, not in the program. -/
 def certifyProgram (items : List Syntax.Item) (p : Core.Program)
     (envSizes : List (Nat × Nat × Nat) := []) : Except String Typing.Cert := do
+  -- With the region rules, first with callables taken to bind a region
+  -- where they are given a reference to a cell, and then without.
   let attempt (strict regions loans : Bool) : Option Typing.Cert :=
-    match Infer.certify items p strict envSizes regions loans with
-    | .ok cert => if Typing.checkProgram cert p then some cert else none
-    | .error _ => none
+    (if regions then [true, false] else [false]).findSome? fun ranked =>
+      match Infer.certify items p strict envSizes regions loans ranked with
+      | .ok cert => if Typing.checkProgram cert p then some cert else none
+      | .error _ => none
   if let some cert := attempt true true true then return cert
   if let some cert := attempt true true false then return cert
   if let some cert := attempt true false false then return cert

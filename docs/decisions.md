@@ -902,6 +902,41 @@ Not built. Conversion other than through `Int` (`u8(n)`, `int(x)`, `f64(n)`,
 `widen`, `narrow`, `char(code)`). A `Str` is a list: there are no arrays, so
 its length is counted.
 
+## A callable's type binds a region where it has to
+
+**Decision: when a certificate is looked for, a callable given a reference is
+first taken to be one whose type binds the reference's region, `for<'a>
+fn(&'a T)`; and if no certificate is found that way, as before.** Core's
+callable types have always been able to bind regions (the callable a cell's
+scope runs binds the cell's), a call chooses them, and the checker reads the
+choice from a hint. What was missing was the search: a callable passed to a
+function and given there a reference to one of the function's own variables
+was taken to want a reference to one particular cell, which could then only
+be that variable, whose region its own function's signature cannot mention.
+
+What the search now does. A call whose callable is not yet known is kept
+until it is, or until what it is given is. If what it is given has a
+reference in it, the callable's type binds that reference's region: what the
+call gives is the callable's result with the call's region for the bound one,
+found from whichever of the two is known first. A callable literal that
+takes a reference to a region nothing it captured mentions binds that region
+too. What a function touches through such a call is what the callable
+touches, with the same exchange. All of this is part of a function's general
+type and is found again for each use of it. The regions bound are not cells:
+they stand for whichever cell a call chooses.
+
+Nothing here is trusted: the checker reads the certificate as before, and a
+program for which this search finds none, or one the checker turns away, is
+tried the old way.
+
+Of the 451 test programs that compile, 437 are now shown to follow all of
+Core's rules, from 432.
+
+Limits. One region for a callable type: `for<'a, 'b> fn(&'a T, &'b U)` is
+not found. A function that calls itself with a reference to its own variable
+(the region differs at each depth) is not either: its own type would have to
+bind the region, and it is taken as it is while its group is looked at.
+
 ## A lifetime of a declared type is an argument in Core
 
 **Decision: Core's declared types and effects take no regions, and do not
@@ -922,10 +957,9 @@ handled an effect with one, could not be shown to follow the region rules.
 Of the 451 test programs that compile, 432 are now shown to follow all of
 Core's rules, from 424.
 
-What is still not shown, 19 programs: a callable given a reference to a
-variable of the function it is passed to (six, `for<'a>`: the callable's
-type has to bind a region, which Core's types can and the search for a
-certificate cannot yet); a reference to one of two variables (four: Core has
+What was still not shown then, 19 programs: a callable given a reference to
+a variable of the function it is passed to (six, `for<'a>`; five of them are
+shown since, see above); a reference to one of two variables (four: Core has
 no region that is either of two cells); a resumption kept in a pair or
 taken by two callables of which one runs (four, ownership); a resumption or
 a label kept in a variable (three); and two others.

@@ -204,30 +204,6 @@ def probe (paths : List String) : IO UInt32 := do
     IO.println "--"
   pure 0
 
-partial def showRgn : Typing.Rgn → String
-  | .var i => s!"r{i}"
-  | .bound k => s!"b{k}"
-  | .cell a => s!"cell{a}"
-  | .lab id => s!"lab{id}"
-  | .loan b => s!"loan{b}"
-  | .wr r => s!"wr({showRgn r})"
-
-partial def showCoreTy : Typing.Ty → String
-  | .int => "int"
-  | .tuple fs => "(" ++ ", ".intercalate (fs.map showCoreTy) ++ ")"
-  | .data n args => s!"#{n}<" ++ ", ".intercalate (args.map showCoreTy) ++ ">"
-  | .fn n ps r eff once env acc =>
-    s!"fn[{n}](" ++ ", ".intercalate (ps.map showCoreTy) ++ ") -> " ++ showCoreTy r
-      ++ (if eff.isEmpty then "" else " / {" ++ ", ".intercalate (eff.map fun (op, ts) =>
-        s!"op{op}<" ++ ", ".intercalate (ts.map showCoreTy) ++ ">") ++ "}")
-      ++ (if once then " once" else "")
-      ++ (match env with
-        | some cs => " env(" ++ ", ".intercalate (cs.map showCoreTy) ++ ")"
-        | none => "")
-      ++ " touches [" ++ ", ".intercalate (acc.map showRgn) ++ "]"
-  | .ref ρ t => s!"&{showRgn ρ} {showCoreTy t}"
-  | .never => "!"
-
 /-- Why a program's Core is not shown to follow every rule: what stops the
 certificate with all of them asked for. -/
 def why (path : String) : IO UInt32 := do
@@ -246,7 +222,7 @@ def why (path : String) : IO UInt32 := do
   let declared := Elab.withDeclared written all
   for lends in [1, 0] do
     let .ok out := Elab.elabProgram all (some blocks) (fun _ => lends) | IO.println "elab failed"; return 1
-    match Infer.certify declared out.program true out.envSizes true true with
+    match Infer.certify declared out.program true out.envSizes true true true with
     | .ok cert =>
       if Typing.checkProgram cert out.program then IO.println s!"lends={lends}: accepted"
       else
@@ -254,7 +230,7 @@ def why (path : String) : IO UInt32 := do
         for e in cert.sigs do
           if let some F := out.program.fns[e.fn]? then
             unless Typing.checkFn cert e F do
-              IO.println s!"  {out.fnNames[e.fn]?.getD ""} (function {e.fn}): caps ({", ".intercalate (e.sig.caps.map showCoreTy)}) params ({", ".intercalate (e.sig.params.map showCoreTy)}) -> {showCoreTy e.sig.ret}; fixed {e.sig.crgns}, bound {e.sig.rgns}; touches [{", ".intercalate (e.sig.acc.map showRgn)}]"
+              IO.println s!"  {out.fnNames[e.fn]?.getD ""} (function {e.fn}): caps ({", ".intercalate (e.sig.caps.map Infer.showCoreTy)}) params ({", ".intercalate (e.sig.params.map Infer.showCoreTy)}) -> {Infer.showCoreTy e.sig.ret}; fixed {e.sig.crgns}, bound {e.sig.rgns}; touches [{", ".intercalate (e.sig.acc.map Infer.showRgn)}]"
     | .error e => IO.println s!"lends={lends}: no certificate: {e}"
   pure 0
 
@@ -271,7 +247,11 @@ def survey : IO UInt32 := do
   let mut plain := 0
   let mut withPlain := 0
   let mut weak : List String := []
+  let trace := (← IO.getEnv "GLORIOUS_TRACE").isSome
   for (c, files) in cases.map (·, []) ++ examples do
+    if trace then
+      IO.eprintln s!"-- {c.src}"
+      (← IO.getStderr).flush
     if let .ok out := compileSource c.src true files then
       compiled := compiled + 1
       let has := fun (f : Typing.Cert → Bool) => (out.cert.map f).getD false
@@ -344,6 +324,21 @@ def main (args : List String) : IO UInt32 := do
   | ["stages", path] => stages path
   | ["survey"] => survey
   | ["why", path] => why path
+  | ["sigs", path] =>
+    match ← compileFile path with
+    | .ok c =>
+      match c.cert with
+      | some cert =>
+        IO.println s!"strict={cert.strict} regions={cert.regions} loans={cert.loans}"
+        for e in cert.sigs do
+          IO.println s!"{c.fnNames[e.fn]?.getD ""} ({e.fn}): {Infer.showSig e.sig}"
+        pure 0
+      | none =>
+        IO.println "no certificate"
+        pure 1
+    | .error e =>
+      IO.eprintln s!"{path}: {e}"
+      pure 1
   | ["selftest"] => selftest none
   | ["selftest", vm] => selftest (some vm)
   | ["build", path, out] =>

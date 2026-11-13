@@ -1888,6 +1888,19 @@ def cases : List Case := [
     [], "went wrong"⟩,
   ⟨"struct Array(Int)\nfn main() { let a = [1, 2]; match(Array(7)) { Array(n) => n + a[1] } }",
     [], "9"⟩,
+  -- A callable given a reference to a variable of the function it is passed
+  -- to: its type binds the region, and the program is shown to follow the
+  -- region rules (`glorious survey` counts them).
+  ⟨"fn apply<F>(f: F) -> Int where F: for<'a> Fn<(&'a Int,), Output = Int> { let mut x = 5; f(&x) }\nfn main() { apply({ r => *r * 2 }) }",
+    [], "10"⟩,
+  ⟨"fn apply(f: for<'a> fn(&'a mut Int)) { let mut x = 1; f(&mut x); print(x) }\nfn main() { apply({ r => *r = *r + 41 }); 0 }",
+    [], "42\n0"⟩,
+  ⟨"fn inner(f: for<'a> fn(&'a Int) -> Int) -> Int { let mut x = 3; f(&x) }\nfn outer(g: for<'a> fn(&'a Int) -> Int) -> Int { inner(g) + 1 }\nfn main() { outer({ r => *r }) }",
+    [], "4"⟩,
+  ⟨"fn main() { let f = { r => *r * 2 }; let mut x = 5; let mut y = 6; f(&x) + f(&y) }",
+    [], "22"⟩,
+  ⟨"fn twice(f, r: &mut Int) { f(r); f(r) }\nfn main() { let mut n = 1; twice({ p => *p = *p * 3 }, &mut n); n }",
+    [], "9"⟩,
   -- `drop` is not for a program to call.
   ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nfn main() { let mut f = File(7); drop(&mut f); 0 }",
     [], "error: 3:34: in `main`: `drop` is run when what holds a value ends; a program does not call it"⟩,
