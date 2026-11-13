@@ -62,9 +62,14 @@ u64 body(Vm *vm, Value *locals, u64 pc, u64 len)
 
 System V calling convention. `locals` is the activation's array with `len`
 values in it and room for one more for each instruction of the function, so
-it does not move while the body runs. `pc` is the instruction to start from;
-a body can be entered at any instruction of its function. The result is not
-looked at.
+it does not move while the body runs. `pc` is the instruction to start from.
+A body gives 0 when it has run, and 1, having done nothing, if it cannot
+start from that instruction: the runtime then interprets that one
+instruction and asks again. A body must be able to start from the first
+instruction and from the one after any instruction at which control can
+leave the activation and come back (a call, an effect performed, a scope
+entered); the LLVM bodies start nowhere else, and the x86-64 bodies start
+anywhere.
 
 The body runs instructions from `pc`. After one that gives a value there is
 one more local. It must return as soon as control has left the activation or

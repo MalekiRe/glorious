@@ -366,9 +366,9 @@ impl Asm {
         // clause goes: the interpreter says what that is.
         self.at.push(self.buf.len());
         self.generic(code.len(), None);
-        // Every way out: pop and return.
+        // Every way out: pop and return, saying it was entered.
         let exit = self.buf.len();
-        self.b(&[0x41, 0x5D, 0x41, 0x5C, 0x5B, 0xC3]);
+        self.b(&[0x31, 0xC0, 0x41, 0x5D, 0x41, 0x5C, 0x5B, 0xC3]);
         for (site, pc) in std::mem::take(&mut self.jumps) {
             let target = self.at.get(pc).copied().unwrap_or(exit);
             let rel = target as i64 - (site as i64 + 4);

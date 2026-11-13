@@ -278,8 +278,14 @@ impl Emit {
         );
         self.line("%len = alloca i64");
         self.line("store i64 %len0, ptr %len");
-        let cases: String = (0..code.len()).map(|pc| format!(" i64 {pc}, label %pc{pc}")).collect();
-        self.line(&format!("switch i64 %pc, label %exit [{cases} ]"));
+        // A body starts where an activation can be taken up: nowhere else,
+        // so that the rest is straight code to LLVM.
+        let starts = native::starts_at(code);
+        let cases: String = (0..code.len())
+            .filter(|pc| starts[*pc])
+            .map(|pc| format!(" i64 {pc}, label %pc{pc}"))
+            .collect();
+        self.line(&format!("switch i64 %pc, label %elsewhere [{cases} ]"));
         for (pc, instr) in code.iter().enumerate() {
             self.label(&format!("pc{pc}"));
             self.instr(pc, instr, &format!("pc{}", pc + 1));
@@ -290,6 +296,8 @@ impl Emit {
         self.generic(code.len(), "exit", None);
         self.label("exit");
         self.line("ret i64 0");
+        self.label("elsewhere");
+        self.line("ret i64 1");
         self.out.push_str("}\n\n");
     }
 }

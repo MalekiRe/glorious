@@ -14,8 +14,9 @@ use super::*;
 pub const ABI: u64 = 1;
 
 /// A function's compiled body: the machine, the activation's locals, the
-/// instruction to start from, and how many locals there are. It returns when
-/// control has left the activation or the machine has stopped.
+/// instruction to start from, and how many locals there are. It returns 0
+/// when control has left the activation or the machine has stopped, and 1,
+/// having done nothing, if it cannot start from that instruction.
 pub type Body = unsafe extern "C" fn(vm: *mut Vm, locals: *mut Value, pc: u64, len: u64) -> u64;
 
 /// What a step did: whether compiled code goes on, and with how many locals.
@@ -45,9 +46,16 @@ impl Vm {
                     // move while it pushes one for each instruction.
                     self.locals.reserve(self.codes[self.code].len() + 1);
                     let (pc, len) = (self.pc as u64, self.locals.len() as u64);
-                    unsafe { body(self, self.locals.as_mut_ptr(), pc, len) };
+                    let entered = unsafe { body(self, self.locals.as_mut_ptr(), pc, len) };
                     if let Some(stop) = self.stop.take() {
                         return stop;
+                    }
+                    // A body need not start from every instruction: where
+                    // it does not, the interpreter runs that one.
+                    if entered != 0 {
+                        if let Err(stop) = self.step() {
+                            return stop;
+                        }
                     }
                 }
             }
@@ -182,6 +190,28 @@ pub unsafe extern "C" fn glo_store(vm: *mut Vm, locals: *mut Value, r: u64, v: u
         }
         _ => 0,
     }
+}
+
+/// The instructions a body may be asked to start from: the first, and each
+/// that follows one control can leave the activation at and come back to.
+pub fn starts_at(code: &[Instr]) -> Vec<bool> {
+    (0..code.len())
+        .map(|pc| {
+            pc == 0
+                || !matches!(
+                    code[pc - 1],
+                    Instr::Op(_)
+                        | Instr::TestCtor(..)
+                        | Instr::TestInt(..)
+                        | Instr::Mem(..)
+                        | Instr::Jump(_)
+                        | Instr::Again(..)
+                        | Instr::Enter { .. }
+                        | Instr::Leave
+                        | Instr::Stuck
+                )
+        })
+        .collect()
 }
 
 /// A program built ahead of time: its bytecode, and the compiled body of
