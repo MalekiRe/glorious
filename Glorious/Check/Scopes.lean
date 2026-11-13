@@ -315,16 +315,15 @@ partial def capHolds (brand : Nat) (cap : Nat) : M Bool := do
   let root ← findCap cap
   if (← get).seen.contains root then return false
   modify fun s => { s with seen := root :: s.seen }
-  for (src, what) in (← get).capEdges do
-    if (← findCap src) == root then
-      match what with
-      | .brand b => if b == brand then return true
-      | .ty t => if ← tyHolds brand t then return true
-      | .once => pure ()
-      | .must => pure ()
-      | .loan _ => pure ()
-      | .touch _ _ => pure ()
-      | .inner _ => pure ()
+  for (_, what) in ← edgesFrom root do
+    match what with
+    | .brand b => if b == brand then return true
+    | .ty t => if ← tyHolds brand t then return true
+    | .once => pure ()
+    | .must => pure ()
+    | .loan _ => pure ()
+    | .touch _ _ => pure ()
+    | .inner _ => pure ()
   return false
 
 /-- Does the type mention a callable that holds the brand? -/
@@ -415,16 +414,15 @@ partial def capOwnsOnce (cap : Nat) : M Bool := do
   let root ← findCap cap
   if (← get).seen.contains root then return false
   modify fun s => { s with seen := root :: s.seen }
-  for (src, what) in (← get).capEdges do
-    if (← findCap src) == root then
-      match what with
-      | .once => return true
-      | .must => pure ()
-      | .ty t => if ← tyOwnsOnce [] t then return true
-      | .brand _ => pure ()
-      | .loan _ => pure ()
-      | .touch _ _ => pure ()
-      | .inner _ => pure ()
+  for (_, what) in ← edgesFrom root do
+    match what with
+    | .once => return true
+    | .must => pure ()
+    | .ty t => if ← tyOwnsOnce [] t then return true
+    | .brand _ => pure ()
+    | .loan _ => pure ()
+    | .touch _ _ => pure ()
+    | .inner _ => pure ()
   return false
 
 /-- Can a value of this type be used only once? One that holds a resumption,
@@ -512,10 +510,9 @@ partial def tyHasDrop (visiting : List String) (t : Ty) : M (Option String) := d
     let root ← findCap cap
     if (← get).seen.contains root then return none
     modify fun s => { s with seen := root :: s.seen }
-    for (src, what) in (← get).capEdges do
-      if (← findCap src) == root then
-        if let .ty held := what then
-          if let some name ← tyHasDrop visiting held then return some name
+    for (_, what) in ← edgesFrom root do
+      if let .ty held := what then
+        if let some name ← tyHasDrop visiting held then return some name
     return none
   | .con name args => do
     if (← get).kimpls.any (fun I => I.trait == "Drop" && I.head == name) then

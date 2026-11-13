@@ -198,6 +198,13 @@ structure Scheme where
 
 structure St where
   fns : Array Core.Fn
+  /-- Counts the changes to what callables touch and to which regions are
+  one: what was worked out from them is kept until the next. -/
+  accVer : Nat := 0
+  /-- The regions each callable may touch (`false`) or write (`true`), as
+  worked out when `accVer` was `accMemoAt`. -/
+  accMemo : Std.HashMap (Nat × Bool) (List Nat) := {}
+  accMemoAt : Nat := 0
   /-- For each function, an identity shared by the functions it is mutually recursive with. -/
   scc : Array Nat := #[]
   /-- How many values each function captures. -/
@@ -328,12 +335,12 @@ def unifyRg (a b : Nat) : M Unit := do
   if ← isAtom a then
     if ← isAtom b then
       throw "region: references to two different mutable variables are used as one"
-    modify fun s => { s with rgs := s.rgs.set! b (some (.link a)) }
+    modify fun s => { s with accVer := s.accVer + 1, rgs := s.rgs.set! b (some (.link a)) }
   else if ← isAtom b then
-    modify fun s => { s with rgs := s.rgs.set! a (some (.link b)) }
+    modify fun s => { s with accVer := s.accVer + 1, rgs := s.rgs.set! a (some (.link b)) }
   else
     let (lo, hi) := if a < b then (a, b) else (b, a)
-    modify fun s => { s with rgs := s.rgs.set! hi (some (.link lo)) }
+    modify fun s => { s with accVer := s.accVer + 1, rgs := s.rgs.set! hi (some (.link lo)) }
 
 def freshAcc : M Nat := do
   -- (in one step: the state is not held twice, so the array is not copied)
@@ -360,6 +367,7 @@ def unifyAcc (a b : Nat) : M Unit := do
     unifyRg p q
   modify fun s =>
     { s with
+      accVer := s.accVer + 1
       accs := (s.accs.set! lo
         { rgns := x.rgns ++ y.rgns, wrs := x.wrs ++ y.wrs, subs := x.subs ++ y.subs
           binder := x.binder <|> y.binder, more := if x.more.isEmpty then y.more else x.more
@@ -372,7 +380,7 @@ def accRgn (a ρ : Nat) : M Unit := do
   let a ← findAcc a
   let x ← accNode a
   unless x.rgns.contains ρ do
-    modify fun s => { s with accs := s.accs.set! a { x with rgns := ρ :: x.rgns } }
+    modify fun s => { s with accVer := s.accVer + 1, accs := s.accs.set! a { x with rgns := ρ :: x.rgns } }
 
 /-- The callable writes this region. -/
 def accWr (a ρ : Nat) : M Unit := do
@@ -382,14 +390,14 @@ def accWr (a ρ : Nat) : M Unit := do
   let a ← findAcc a
   let x ← accNode a
   unless x.wrs.contains ρ do
-    modify fun s => { s with accs := s.accs.set! a { x with wrs := ρ :: x.wrs } }
+    modify fun s => { s with accVer := s.accVer + 1, accs := s.accs.set! a { x with wrs := ρ :: x.wrs } }
 
 /-- The callable touches whatever `b` does, except region `ex` if given. -/
 def accSub (a b : Nat) (ex : Option Nat := none) : M Unit := do
   unless (← get).regions do return
   let a ← findAcc a
   let x ← accNode a
-  modify fun s => { s with accs := s.accs.set! a { x with subs := (b, ex) :: x.subs } }
+  modify fun s => { s with accVer := s.accVer + 1, accs := s.accs.set! a { x with subs := (b, ex) :: x.subs } }
 
 /-- The callable calls one that touches what `sub` does, with `actual` for the
 region `bound` that one's type binds. -/
@@ -397,78 +405,73 @@ def accInst (a sub : Nat) (chosen : List (Nat × Nat)) : M Unit := do
   unless (← get).regions do return
   let a ← findAcc a
   let x ← accNode a
-  modify fun s => { s with accs := s.accs.set! a { x with insts := (sub, chosen) :: x.insts } }
+  modify fun s => { s with accVer := s.accVer + 1, accs := s.accs.set! a { x with insts := (sub, chosen) :: x.insts } }
 
-/-- A region of a callable reached through calls, as the outermost caller has
-it: each call on the way, innermost first, says which of the caller's regions
-stands for each the callee's type binds. A callable called at a region its
-own caller chose is renamed twice. -/
-def renamed (ren : List (List (Nat × Nat))) (r : Nat) : M Nat :=
-  ren.foldlM (fun r level => do
-    match level.lookup r with
-    | some to => findRg to
-    | none => pure r) r
+/-- Every region a callable may touch, or may write: its own and those of
+what it includes. What a callable called at a region of the caller's
+choosing touches is touched with that region for the one its type binds.
 
-/-- Every region a callable may touch: its own and those of what it includes.
-What a callable called at a region of the caller's choosing touches is
-touched with that region for the one its type binds. -/
-partial def accSet (a : Nat) : M (List Nat) := do
-  let (_, out) ← go a [] [] [] {} []
-  pure out
-where
-  go (a : Nat) (ex : List Nat) (ren : List (List (Nat × Nat))) (stack : List Nat)
-      (seen : Std.HashSet Nat) (out : List Nat) : M (Std.HashSet Nat × List Nat) := do
-    let a ← findAcc a
-    if seen.contains a then return (seen, out)
-    let mut seen := seen.insert a
-    let mut out := out
-    let x ← accNode a
-    for ρ in x.rgns do
-      let r ← findRg ρ
-      let r ← renamed ren r
-      unless ex.contains r || out.contains r do out := r :: out
-    for (b, e) in x.subs do
-      let ex' ← match e with
-        | some q => do pure ((← renamed ren (← findRg q)) :: ex)
-        | none => pure ex
-      (seen, out) ← go b ex' ren stack seen out
-    for (sub, chosen) in x.insts do
-      let s ← findAcc sub
-      -- (a callable that calls itself is not gone through again)
-      unless stack.contains s do
+The callables reached are found first, and then each one's regions are
+worked out from the others' until nothing more is added: a callable that
+calls itself, or two that call each other, are gone round as often as that
+takes and no oftener. (Going down every chain of calls separately, as this
+did, took a time that grew with the number of chains, which for a handful of
+functions that call each other is very many.) -/
+def accSolve (writes : Bool) (a : Nat) : M (List Nat) := do
+  let a ← findAcc a
+  -- (Asked again for every type a certificate writes out: what was worked
+  -- out is kept while nothing it was worked out from has changed.)
+  if (← get).accMemoAt != (← get).accVer then
+    modify fun s => { s with accMemo := {}, accMemoAt := s.accVer }
+  if let some known := (← get).accMemo[(a, writes)]? then return known
+  -- The callables reached, by what each includes and calls.
+  let mut nodes : Array Nat := #[a]
+  let mut seen : Std.HashSet Nat := ({} : Std.HashSet Nat).insert a
+  let mut at_ := 0
+  while at_ < nodes.size do
+    let x ← accNode (nodes[at_]!)
+    at_ := at_ + 1
+    for next in x.subs.map (·.1) ++ x.insts.map (·.1) do
+      let n ← findAcc next
+      unless seen.contains n do
+        seen := seen.insert n
+        nodes := nodes.push n
+  let mut sets : Std.HashMap Nat (Std.HashSet Nat) := {}
+  let mut changed := true
+  while changed do
+    changed := false
+    -- (From the last found back: what is included is mostly found later.)
+    for n in nodes.reverse do
+      let x ← accNode n
+      let mut mine := sets.getD n {}
+      let before := mine.size
+      for ρ in (if writes then x.wrs else x.rgns) do
+        mine := mine.insert (← findRg ρ)
+      for (b, e) in x.subs do
+        let ex ← e.mapM findRg
+        for r in (sets.getD (← findAcc b) {}).toList do
+          unless ex == some r do mine := mine.insert r
+      for (sub, chosen) in x.insts do
         let chosen ← chosen.mapM fun (bound, actual) => do pure (← findRg bound, actual)
-        let (_, more) ← go s ex (chosen :: ren) (s :: stack) {} out
-        out := more
-    pure (seen, out)
+        for r in (sets.getD (← findAcc sub) {}).toList do
+          match chosen.lookup r with
+          | some to => mine := mine.insert (← findRg to)
+          | none => mine := mine.insert r
+      if mine.size != before then
+        sets := sets.insert n mine
+        changed := true
+  -- (Every callable reached was worked out on the way.)
+  let mut memo := (← get).accMemo
+  for n in nodes do
+    memo := memo.insert (n, writes) (sets.getD n {}).toList
+  modify fun s => { s with accMemo := memo }
+  pure (sets.getD a {}).toList
+
+/-- Every region a callable may touch. -/
+def accSet (a : Nat) : M (List Nat) := accSolve false a
 
 /-- Every region a callable may write. -/
-partial def accWrSet (a : Nat) : M (List Nat) := do
-  let (_, out) ← go a [] [] [] {} []
-  pure out
-where
-  go (a : Nat) (ex : List Nat) (ren : List (List (Nat × Nat))) (stack : List Nat)
-      (seen : Std.HashSet Nat) (out : List Nat) : M (Std.HashSet Nat × List Nat) := do
-    let a ← findAcc a
-    if seen.contains a then return (seen, out)
-    let mut seen := seen.insert a
-    let mut out := out
-    let x ← accNode a
-    for ρ in x.wrs do
-      let r ← findRg ρ
-      let r ← renamed ren r
-      unless ex.contains r || out.contains r do out := r :: out
-    for (b, e) in x.subs do
-      let ex' ← match e with
-        | some q => do pure ((← renamed ren (← findRg q)) :: ex)
-        | none => pure ex
-      (seen, out) ← go b ex' ren stack seen out
-    for (sub, chosen) in x.insts do
-      let s ← findAcc sub
-      unless stack.contains s do
-        let chosen ← chosen.mapM fun (bound, actual) => do pure (← findRg bound, actual)
-        let (_, more) ← go s ex (chosen :: ren) (s :: stack) {} out
-        out := more
-    pure (seen, out)
+def accWrSet (a : Nat) : M (List Nat) := accSolve true a
 
 /-- A region is one a callable type binds for whoever calls it. -/
 def markRank (r : Nat) : M Unit :=
@@ -917,7 +920,7 @@ partial def copyAcc (sch : Scheme) (a : Nat) : M Nat := do
       let insts ← x.insts.mapM fun (sub, chosen) => do
         pure (← copyAcc sch sub, ← chosen.mapM fun (bound, actual) => do
           pure (← copyRg sch bound, ← copyRg sch actual))
-      modify fun s => { s with accs := s.accs.set! a' { rgns, wrs, subs, binder, more, insts } }
+      modify fun s => { s with accVer := s.accVer + 1, accs := s.accs.set! a' { rgns, wrs, subs, binder, more, insts } }
       pure a'
 
 mutual
@@ -1104,7 +1107,7 @@ partial def tryCall (c : Call) : M Bool := do
         let bound ← freshRg
         markRank bound
         let a ← findAcc acc
-        modify fun s => { s with accs := s.accs.modify a fun x => { x with binder := some bound } }
+        modify fun s => { s with accVer := s.accVer + 1, accs := s.accs.modify a fun x => { x with binder := some bound } }
         unify p (← reregion region bound g)
         tryCall c
       | none =>
@@ -1122,7 +1125,7 @@ partial def tryCall (c : Call) : M Bool := do
           | some region =>
             markRank region
             let a ← findAcc acc
-            modify fun s => { s with accs := s.accs.modify a fun x => { x with binder := some region } }
+            modify fun s => { s with accVer := s.accVer + 1, accs := s.accs.modify a fun x => { x with binder := some region } }
             tryCall c
           | none =>
             plainCall c
@@ -1149,7 +1152,7 @@ partial def tryCall (c : Call) : M Bool := do
         markRank b
       let a ← findAcc c.acc
       modify fun s =>
-        { s with accs := s.accs.modify a fun x =>
+        { s with accVer := s.accVer + 1, accs := s.accs.modify a fun x =>
             { x with binder := bounds.head?, more := bounds.drop 1 } }
       for (actual, region) in c.actuals.zip found do
         unifyRg actual region
@@ -1478,7 +1481,7 @@ partial def inferRhs (Γ : Array ITy) : Rhs → M (ITy × Option ISig)
         if let some region := chosen then
           markRank region
           let a ← findAcc sig.acc
-          modify fun s => { s with accs := s.accs.modify a fun x => { x with binder := some region } }
+          modify fun s => { s with accVer := s.accVer + 1, accs := s.accs.modify a fun x => { x with binder := some region } }
     let cls ← freshCls
     if (← get).strict then modify fun s => { s with onces := s.onces.push (cls, sig.caps) }
     let env ← freshTy
@@ -1712,7 +1715,7 @@ where
     let applying ← freshAcc
     let own ← if (← get).regions then some <$> freshAtom else pure none
     if let some r := own then
-      modify fun s => { s with accs := s.accs.set! a { binder := some r } }
+      modify fun s => { s with accVer := s.accVer + 1, accs := s.accs.set! a { binder := some r } }
       accRgn applying r
     unify (← atomTy Γ thunk)
       (.func [.func [σ] ρ (← freshRow) (.lit false) .never applying] σ εt (← freshCls)
@@ -1739,7 +1742,7 @@ where
     let cell ← if (← get).regions then freshAtom else freshRg
     let a ← freshAcc
     if (← get).regions then
-      modify fun s => { s with accs := s.accs.set! a { binder := some cell } }
+      modify fun s => { s with accVer := s.accVer + 1, accs := s.accs.set! a { binder := some cell } }
     unify (← atomTy Γ thunk)
       (.func [.ref cell (← atomTy Γ init)] ρ εt (← freshCls) (← freshTy) a)
     accSub self a (some cell)
@@ -1771,7 +1774,7 @@ where
           markRank r
           pure r
         else freshAtom
-      modify fun s => { s with accs := s.accs.set! a { binder := some loan } }
+      modify fun s => { s with accVer := s.accVer + 1, accs := s.accs.set! a { binder := some loan } }
       unify (← atomTy Γ thunk)
         (.func (before ++ .ref loan σ :: after) ρt εt (← freshCls) (← freshTy) a)
       accSub self a (some loan)
@@ -2089,7 +2092,7 @@ partial def ofTy (env : RgEnv) : Ty → M ITy
     let a ← ofAcc env acc
     unless binders.isEmpty do
       modify fun s =>
-        { s with accs := s.accs.modify a fun x =>
+        { s with accVer := s.accVer + 1, accs := s.accs.modify a fun x =>
             { x with binder := binders.head?, more := binders.drop 1 } }
     pure (.fn (← ps.mapM (ofTy env)) (← ofTy env r) ops none (.lit once) stated a)
   | .ref ρ t => do pure (.ref (← ofRg env ρ) (← ofTy env t))
@@ -2104,7 +2107,7 @@ def ofSig (use : Use) : M ISig := do
   let acc ← ofAcc env sig.acc
   if (← get).regions then
     modify fun s =>
-      { s with accs := s.accs.modify acc fun x => { x with binder := use.own, more := use.more } }
+      { s with accVer := s.accVer + 1, accs := s.accs.modify acc fun x => { x with binder := use.own, more := use.more } }
   let ops ← sig.eff.mapM fun (op, targs) => do pure (op, ← targs.mapM (ofTy env))
   pure ⟨← sig.caps.mapM (ofTy env), ← sig.params.mapM (ofTy env), ← ofTy env sig.ret,
     ⟨ops, none⟩, acc⟩
@@ -2341,7 +2344,7 @@ partial def resolveType (typeNames params : List String) (locals : List (String 
           if let .fn _ _ _ _ _ _ acc := t then
             let a ← findAcc acc
             modify fun s =>
-              { s with accs := s.accs.modify a fun x =>
+              { s with accVer := s.accVer + 1, accs := s.accs.modify a fun x =>
                   { x with binder := bound.head?, more := bound.drop 1 } }
           return t
         else return ← resolveType typeNames params locals inner

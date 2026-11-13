@@ -1,3 +1,4 @@
+import Std.Data.HashSet
 import Glorious.Check.Scopes
 
 namespace Glorious.Check
@@ -20,39 +21,18 @@ callables that mention it.
 
 /-- What the capture variables say about having to be used, gathered once. -/
 structure MustInfo where
-  /-- Those that are a resumption which has to be used. -/
-  roots : List Nat := []
-  /-- Those that are a resumption at all. What one mentions is the computation
-  it suspended, not something it holds. -/
-  resumptions : List Nat := []
-  /-- Those of callables written in the program. -/
-  blocks : List Nat := []
-  /-- The types of what each captures. -/
-  held : Array (Nat × Ty) := #[]
-  /-- Of those, the ones that are a variable's value, which the variable
-  destroys if the callable does not use it. -/
-  flagged : Array (Nat × Ty) := #[]
+  /-- The capture variables of callables written in the program. -/
+  blocks : Std.HashSet Nat := {}
 
+/-- What is asked of every type that is let go: found once for a function,
+since the callables written do not change while its types are looked at. -/
 def mustInfo : M MustInfo := do
   let s ← get
-  let mut info : MustInfo := {}
-  unless s.anyMust do return info
-  for ((src, what), i) in s.capEdges.zipIdx do
-    let root ← findCap src
-    match what with
-    | .must => unless info.roots.contains root do info := { info with roots := root :: info.roots }
-    | .once =>
-      unless info.resumptions.contains root do
-        info := { info with resumptions := root :: info.resumptions }
-    | .ty t =>
-      unless s.sharedEdges.contains i do
-        if s.givenEdges.contains i then info := { info with flagged := info.flagged.push (root, t) }
-        else info := { info with held := info.held.push (root, t) }
-    | _ => pure ()
+  unless s.anyMust do return {}
+  let mut blocks : Std.HashSet Nat := {}
   for (_, c) in s.blockCaps do
-    let root ← findCap c
-    unless info.blocks.contains root do info := { info with blocks := root :: info.blocks }
-  pure info
+    blocks := blocks.insert (← findCap c)
+  pure { blocks }
 
 /-- What in a type has to be used, if anything: said for the message. A
 callable has to be called if it holds something that has to be used, or
@@ -65,24 +45,34 @@ partial def tyMustUse (info : MustInfo) (visiting : List String) (t : Ty) :
   | .tuple args => args.findSomeM? (tyMustUse info visiting)
   | .fn _ _ _ _ cap => do
     let root ← findCap cap
-    if info.roots.contains root then
+    -- What it captures, by place among the program's captures.
+    let s ← get
+    let mine := (s.capOut.getD root #[]).filterMap fun i => (s.capEdges[i]?).map fun e => (i, e.2)
+    -- A resumption that has to be used.
+    if mine.any (fun (_, what) => match what with | .must => true | _ => false) then
       return some "a resumption of an operation declared `[1, 1]`"
-    if info.resumptions.contains root && !info.blocks.contains root then return none
-    if (← get).seen.contains root then return none
+    -- A resumption at all: what one mentions is the computation it
+    -- suspended, not something it holds.
+    if mine.any (fun (_, what) => match what with | .once => true | _ => false)
+        && !info.blocks.contains root then return none
+    if s.seen.contains root then return none
     modify fun s => { s with seen := root :: s.seen }
-    for (r, held) in info.held do
-      if r == root then
-        if let some what ← tyMustUse info visiting held then
-          return some s!"a callable that holds {what}"
-        if let some name ← tyHasDrop [] held then
-          return some s!"a callable that holds a `{name}`, whose `drop` would then not run,"
+    -- (What a block shares with the one it runs in place of, the other holds.)
+    for (i, what) in mine do
+      if let .ty held := what then
+        unless s.sharedEdges.contains i || s.givenEdges.contains i do
+          if let some what ← tyMustUse info visiting held then
+            return some s!"a callable that holds {what}"
+          if let some name ← tyHasDrop [] held then
+            return some s!"a callable that holds a `{name}`, whose `drop` would then not run,"
     -- The value of a variable that gives it away: the variable's cleanup
     -- runs its `drop` where the callable did not use it, so only what has
     -- to be used makes the callable one that has to be called.
-    for (r, held) in info.flagged do
-      if r == root then
-        if let some what ← tyMustUse info visiting held then
-          return some s!"a callable that holds {what}"
+    for (i, what) in mine do
+      if let .ty held := what then
+        if s.givenEdges.contains i && !s.sharedEdges.contains i then
+          if let some what ← tyMustUse info visiting held then
+            return some s!"a callable that holds {what}"
     return none
   | .ref _ _ _ => pure none
   | .con name args => do
@@ -1109,12 +1099,11 @@ partial def tyJumps (t : Ty) : M Bool := do
     let root ← findCap cap
     if (← get).seen.contains root then return false
     modify fun s => { s with seen := root :: s.seen }
-    for (src, what) in (← get).capEdges do
-      if (← findCap src) == root then
-        match what with
-        | .brand b => unless (← get).cells.any (·.1 == b) do return true
-        | .ty t => if ← tyJumps t then return true
-        | _ => pure ()
+    for (_, what) in ← edgesFrom root do
+      match what with
+      | .brand b => unless (← get).cells.any (·.1 == b) do return true
+      | .ty t => if ← tyJumps t then return true
+      | _ => pure ()
     return false
 
 /-- A callable that has to come back when called may hold no label. -/
@@ -1352,7 +1341,7 @@ def runLowerChecks (fnTy : Ty) : M Unit := do
           if let .ty _ := what then
             if let some n := name then
               if theirs.contains n then
-                modify fun st => { st with sharedEdges := i :: st.sharedEdges }
+                modify fun st => { st with sharedEdges := st.sharedEdges.insert i }
       modify fun st => { st with assumedLinks := st.assumedLinks.push (id, owner, input, why) }
     | _ => modify fun st => { st with drops := st.drops.push (input, why) }
 

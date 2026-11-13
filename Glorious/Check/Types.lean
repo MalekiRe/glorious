@@ -1,3 +1,4 @@
+import Std.Data.HashSet
 import Glorious.Syntax.Ast
 import Glorious.Elab
 import Glorious.Traits
@@ -321,6 +322,11 @@ structure St where
   caps : Array (Option Nat) := #[]
   /-- What each capture variable is known to capture. -/
   capEdges : Array (Nat × Captured) := #[]
+  /-- For each capture variable that stands for itself, the places in
+  `capEdges` of what it captures, whichever variable of its class the edge
+  was made on: so that what one captures is found without going through
+  every edge of the program. -/
+  capOut : Array (Array Nat) := #[]
   /-- For each of `capEdges`, the name captured, where a callable written in
   the program captured a name. -/
   capEdgeNames : Array (Option (String × Nat)) := #[]
@@ -369,7 +375,7 @@ structure St where
   /-- Among what callables hold, by place in `capEdges`: the values of such
   variables. A callable that holds one need not be called for its `drop`'s
   sake, since the variable's cleanup destroys what was not given away. -/
-  givenEdges : List Nat := []
+  givenEdges : Std.HashSet Nat := {}
   /-- The callables that are where a variable's value goes: each by what it
   captures with, and the variable. -/
   givers : List (Nat × Nat) := []
@@ -488,7 +494,7 @@ structure St where
   unrunGiven : Array (Nat × Nat × Ty × List (String × Nat) × String × Nat) := #[]
   /-- Captures, by their place in `capEdges`, of a block that runs in place of
   another: what both mention is held once, by the other. -/
-  sharedEdges : List Nat := []
+  sharedEdges : Std.HashSet Nat := {}
   /-- Of those, the ones taken to be given one particular block, to be
   confirmed when the whole program is known. -/
   assumedLinks : Array (Nat × Nat × Ty × String) := #[]
@@ -635,7 +641,7 @@ def freshRow : M Row := do
 
 def freshCap : M Nat := do
   -- (in one step: the state is not held twice, so the array is not copied)
-  modifyGet fun s => (s.caps.size, { s with caps := s.caps.push none })
+  modifyGet fun s => (s.caps.size, { s with caps := s.caps.push none, capOut := s.capOut.push #[] })
 
 def freshBrand : M Nat := do
   modifyGet fun s => (s.brands, { s with brands := s.brands + 1 })
@@ -656,12 +662,30 @@ def unifyCap (a b : Nat) : M Unit := do
     match s.rigidCaps.lookup ra, s.rigidCaps.lookup rb with
     | some x, some y =>
       throw s!"lifetime `{x}` is not `{y}`: a reference that lasts for one is used where one that lasts for the other is wanted"
-    | some _, none => modify fun s => { s with caps := s.caps.set! rb (some ra) }
-    | _, _ => modify fun s => { s with caps := s.caps.set! ra (some rb) }
+    -- (What the one that gives way captured is the other's from now on.)
+    -- (Each array is taken out before the store is written, so that the
+    -- store is the only holder of itself and is changed where it is.)
+    | some _, none => modify fun s =>
+        let moved := s.capOut.getD rb #[]
+        let out := s.capOut.set! rb #[]
+        { s with caps := s.caps.set! rb (some ra), capOut := out.modify ra (· ++ moved) }
+    | _, _ => modify fun s =>
+        let moved := s.capOut.getD ra #[]
+        let out := s.capOut.set! ra #[]
+        { s with caps := s.caps.set! ra (some rb), capOut := out.modify rb (· ++ moved) }
 
-def captures (cap : Nat) (what : Captured) (name : Option (String × Nat) := none) : M Unit :=
+def captures (cap : Nat) (what : Captured) (name : Option (String × Nat) := none) : M Unit := do
+  let root ← findCap cap
   modify fun s =>
-    { s with capEdges := s.capEdges.push (cap, what), capEdgeNames := s.capEdgeNames.push name }
+    let at_ := s.capEdges.size
+    { s with capEdges := s.capEdges.push (cap, what), capEdgeNames := s.capEdgeNames.push name,
+             capOut := s.capOut.modify root (·.push at_) }
+
+/-- What a capture variable captures: the edges made on any variable of its
+class, in the order they were made. `root` stands for itself. -/
+def edgesFrom (root : Nat) : M (Array (Nat × Captured)) := do
+  let s ← get
+  pure ((s.capOut.getD root #[]).filterMap fun i => s.capEdges[i]?)
 
 /-- Follow a type variable to what it stands for. -/
 partial def find (t : Ty) : M Ty := do
@@ -937,25 +961,6 @@ def generalize (t : Ty) (keep : List Ty := []) (top : Bool := true) : M Scheme :
         fixedTys := fixedTys ++ freeTys a
         fixedRows := fixedRows ++ freeRows a
         fixedCaps := fixedCaps ++ freeCaps a
-  -- Capture variables reachable from the type through what they capture.
-  let mut edges : Array (Nat × Ty) := #[]
-  let mut all : Array (Nat × Captured) := #[]
-  for ((cap, what), i) in s.capEdges.zipIdx do
-    let root ← findCap cap
-    match what with
-    | .ty target =>
-      -- What a block shares with the block it runs in place of, the other
-      -- holds: it is no part of what this one's type says it holds.
-      if s.sharedEdges.contains i then continue
-      let target ← zonk target
-      edges := edges.push (root, target)
-      all := all.push (root, .ty target)
-    | .brand b => all := all.push (root, .brand b)
-    | .once => all := all.push (root, .once)
-    | .must => all := all.push (root, .must)
-    | .loan l => all := all.push (root, .loan l)
-    | .touch b w => all := all.push (root, .touch b w)
-    | .inner l => all := all.push (root, .inner l)
   -- What must be free to use more than once is part of the function's
   -- contract, so the capture variables it mentions are generalised too.
   let mut dups : Array (Ty × String) := #[]
@@ -967,17 +972,33 @@ def generalize (t : Ty) (keep : List Ty := []) (top : Bool := true) : M Scheme :
   let mut stays : Array (Ty × String) := #[]
   for (d, why) in s.stays do
     stays := stays.push (← zonk d, why)
+  -- Capture variables reachable from the type through what they capture,
+  -- and what each captures: found from the type outwards, not by going
+  -- through every edge of the program.
   let mut reach : List Nat := (freeCaps t ++ dups.toList.flatMap (freeCaps ·.1)
     ++ drops.toList.flatMap (freeCaps ·.1) ++ stays.toList.flatMap (freeCaps ·.1)).eraseDups
   let mut todo := reach
+  let mut found : Array (Nat × Nat × Captured) := #[]
   while !todo.isEmpty do
     let mut next : List Nat := []
-    for (cap, target) in edges do
-      if todo.contains cap then
-        for c in freeCaps target do
-          unless reach.contains c || next.contains c do next := c :: next
+    for c in todo do
+      let root ← findCap c
+      for i in s.capOut.getD root #[] do
+        match s.capEdges[i]? with
+        | some (_, .ty target) =>
+          -- What a block shares with the block it runs in place of, the
+          -- other holds: it is no part of what this one's type says it holds.
+          if s.sharedEdges.contains i then continue
+          let target ← zonk target
+          found := found.push (i, root, .ty target)
+          for c in freeCaps target do
+            unless reach.contains c || next.contains c do next := c :: next
+        | some (_, what) => found := found.push (i, root, what)
+        | none => pure ()
     reach := reach ++ next
     todo := next
+  -- (In the order the edges were made.)
+  let all := (found.qsort fun a b => a.1 < b.1).map fun (_, root, what) => (root, what)
   let cvars := reach.filter (!fixedCaps.contains ·)
   let tvars := (freeTys t).eraseDups.filter (!fixedTys.contains ·)
   let mine := dups.toList.filter fun (d, _) =>

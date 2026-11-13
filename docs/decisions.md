@@ -2713,6 +2713,33 @@ from being an `Id<Block>`.
 - Not built: base64; `ByteReader::read_u128_le` is, the signed widths
   other than `read_i64_le` are not in the specification.
 
+## How long a program that names the library takes
+
+A program that only named `std` took thirty seconds to compile, after the
+library doubled in a day: every part of it is checked for every program
+(what is checked first is then the same for all, so that it can be kept).
+Four things made that grow much faster than the library:
+
+- What a callable captures was found by going through every capture of the
+  program, for each callable asked about. Each capture variable now has the
+  places of its own captures (`capOut`), kept when two become one.
+- Generalising a type went through every capture, and asked of each whether
+  it was shared by looking through a list. It now starts from the type and
+  follows what is reachable.
+- Whether an edge is shared or a variable's value was a search of a list;
+  both are sets now.
+- What has to be used was gathered from every capture for every function;
+  it is asked of each capture variable when a type is looked at.
+
+That program now takes under three seconds, and the test programs half as
+long. The regions a callable touches (`accSet`) are worked out to a fixed
+point over the callables reached, and kept while nothing they depend on
+changes, instead of chain by chain of calls.
+
+- **Not fixed:** a program with many calls of one function that leads into
+  much of the library still takes long in the certificate search (a small
+  calculator, a minute); see the calculator among the examples' notes.
+
 ## Paths, futures, buffers, base64
 
 - **`std::path`** (29.1) is `PathBuf` over a text, for paths written with

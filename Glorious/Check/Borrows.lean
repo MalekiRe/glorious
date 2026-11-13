@@ -85,30 +85,28 @@ partial def capHoldsLoan (loan : Nat) (cap : Nat) (suspended : Bool := false)
   -- holds as a value.
   let mut suspended := suspended
   unless suspended || plain do
-    for (src, what) in s.capEdges do
-      if let .once := what then
-        if (← findCap src) == root then suspended := true
+    for (_, what) in ← edgesFrom root do
+      if let .once := what then suspended := true
   let mark := 2 * root + (if suspended then 1 else 0)
   if s.seen.contains mark then return false
   modify fun s => { s with seen := mark :: s.seen }
-  for (src, what) in s.capEdges do
-    if (← findCap src) == root then
-      match what with
-      | .loan l => if l == loan then return true
-      | .inner l => if suspended && l == loan then return true
-      | .ty t =>
-        -- What a function gives back at a lifetime it declares is not
-        -- thereby held by everything else of that lifetime: a parameter
-        -- holds what it was given, and what is put into it.
-        let given := match t with
-          | .ref (.con "'given" []) (.tuple []) _ => true
-          | _ => false
-        if !given then
-          if ← tyHoldsLoan loan t suspended plain then return true
-      | .brand b => if ← cellHoldsLoan loan b suspended plain then return true
-      | .touch b _ => if ← cellHoldsLoan loan b suspended plain then return true
-      | .once => pure ()
-      | .must => pure ()
+  for (_, what) in ← edgesFrom root do
+    match what with
+    | .loan l => if l == loan then return true
+    | .inner l => if suspended && l == loan then return true
+    | .ty t =>
+      -- What a function gives back at a lifetime it declares is not
+      -- thereby held by everything else of that lifetime: a parameter
+      -- holds what it was given, and what is put into it.
+      let given := match t with
+        | .ref (.con "'given" []) (.tuple []) _ => true
+        | _ => false
+      if !given then
+        if ← tyHoldsLoan loan t suspended plain then return true
+    | .brand b => if ← cellHoldsLoan loan b suspended plain then return true
+    | .touch b _ => if ← cellHoldsLoan loan b suspended plain then return true
+    | .once => pure ()
+    | .must => pure ()
   return false
 
 /-- A callable that uses a mutable variable can reach what the variable holds. -/
@@ -141,12 +139,11 @@ partial def capTouches (cap : Nat) (out : List (Nat × Bool)) : M (List (Nat × 
   if (← get).seen.contains root then return out
   modify fun s => { s with seen := root :: s.seen }
   let mut out := out
-  for (src, what) in (← get).capEdges do
-    if (← findCap src) == root then
-      match what with
-      | .touch b w => unless out.contains (b, w) do out := (b, w) :: out
-      | .ty t => out ← tyTouches t out
-      | _ => pure ()
+  for (_, what) in ← edgesFrom root do
+    match what with
+    | .touch b w => unless out.contains (b, w) do out := (b, w) :: out
+    | .ty t => out ← tyTouches t out
+    | _ => pure ()
   return out
 
 /-- The mutable variables that running the callables a value holds may read or
@@ -173,12 +170,11 @@ partial def capLooks (brand : Nat) (cap : Nat) : M Bool := do
   let mut takes := false
   for (c, b) in (← get).givers do
     if b == brand && (← findCap c) == root then takes := true
-  for (src, what) in (← get).capEdges do
-    if (← findCap src) == root then
-      match what with
-      | .touch b _ => if b == brand && !takes then return true
-      | .ty t => if ← tyLooks brand t then return true
-      | _ => pure ()
+  for (_, what) in ← edgesFrom root do
+    match what with
+    | .touch b _ => if b == brand && !takes then return true
+    | .ty t => if ← tyLooks brand t then return true
+    | _ => pure ()
   return false
 
 partial def tyLooks (brand : Nat) (t : Ty) : M Bool := do
@@ -617,7 +613,7 @@ def captureAll (scope : Scope) (cap : Nat) (names : List String) (assigns : Stri
       -- A variable that gives its value away, where the callable is what
       -- uses the value: the callable holds it, as it would a name's.
       if (← get).movedCells.contains brand && gives name then
-        modify fun s => { s with givenEdges := s.capEdges.size :: s.givenEdges, givers := (cap, brand) :: s.givers }
+        modify fun s => { s with givenEdges := s.givenEdges.insert s.capEdges.size, givers := (cap, brand) :: s.givers }
         captures cap (.ty t) (some (name, brand))
     | some (.label _ brand) => captures cap (.brand brand)
     | some (.poly s) => captures cap (.ty s.ty) (some (name, 0))
@@ -875,9 +871,9 @@ def checkLifetimes : M Unit := do
     let mut todo : List Nat := [a]
     while !todo.isEmpty do
       let mut next : List Nat := []
-      for (src, what) in s.capEdges do
-        if let .ty held := what then
-          if todo.contains (← findCap src) then
+      for from_ in todo do
+        for (_, what) in ← edgesFrom (← findCap from_) do
+          if let .ty held := what then
             for c in freeCaps (← zonk held) do
               let root ← findCap c
               unless reach.contains root || next.contains root do next := root :: next
@@ -924,8 +920,8 @@ def openRanked (t : Ty) (rigid : Bool := false) : M (Ty × List Nat) := do
       let root ← findCap q
       let fresh ← freshCap
       cm := (root, fresh) :: cm
-      for (src, what) in (← get).capEdges do
-        if (← findCap src) == root then captures fresh what
+      for (_, what) in ← edgesFrom root do
+        captures fresh what
       if rigid then
         modify fun s => { s with rigidCaps := (fresh, name) :: s.rigidCaps }
     match ← zonk (.fn ps r effs tail cap) with
@@ -936,7 +932,6 @@ def openRanked (t : Ty) (rigid : Bool := false) : M (Ty × List Nat) := do
 
 /-- The capture variables reachable from a type through what they hold. -/
 def capsReached (t : Ty) : M (List Nat) := do
-  let s ← get
   let mut reach : List Nat := []
   for c in freeCaps (← zonk t) do
     let root ← findCap c
@@ -944,9 +939,9 @@ def capsReached (t : Ty) : M (List Nat) := do
   let mut todo := reach
   while !todo.isEmpty do
     let mut next : List Nat := []
-    for (src, what) in s.capEdges do
-      if let .ty held := what then
-        if todo.contains (← findCap src) then
+    for from_ in todo do
+      for (_, what) in ← edgesFrom (← findCap from_) do
+        if let .ty held := what then
           for c in freeCaps (← zonk held) do
             let root ← findCap c
             unless reach.contains root || next.contains root do next := root :: next
@@ -1022,17 +1017,18 @@ def fitAt (scope : Scope) (amb : Row) (what : String) (site : Option Elab.Site)
     let mut todo : List Nat := heldRoots
     while !todo.isEmpty do
       let mut next : List Nat := []
-      for (src, held) in s.capEdges do
-        if let .ty held := held then
-          if todo.contains (← findCap src) then
+      for from_ in todo do
+        for (_, held) in ← edgesFrom (← findCap from_) do
+          if let .ty held := held then
             for c in freeCaps (← zonk held) do
               let root ← findCap c
               unless reach.contains root || next.contains root do next := root :: next
       reach := reach ++ next
       todo := next
-    for (src, held) in s.capEdges do
+    for from_ in reach do
+     for (_, held) in ← edgesFrom (← findCap from_) do
       if let .loan id := held then
-        if reach.contains (← findCap src) && (s.loans[id]?.bind (·.root)).isSome then
+        if (s.loans[id]?.bind (·.root)).isSome then
           return some s!"{what}: what this callable gives back borrows a variable, and the callable is wanted for references of any lifetime: it can give back only what borrows from what it is given"
     for (b, y) in s.rigidCaps do
       let root ← findCap b
