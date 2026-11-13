@@ -489,11 +489,23 @@ partial def shapeOf (ctx : Ctx) (way : List String) : Pattern → R (Pattern × 
   | .ctor name qual args => do
     if (byRef? (.ctor name qual args)).isSome then
       throw "a pattern that binds by reference is written once, around the whole pattern"
-    if args.any fun
-        | .var mark => mark == recordMark
-        | _ => false then
-      throw "a pattern that binds by reference gives a constructor's fields in order, not by name"
     let (_, global, entry) ← resolveValue ctx [] qual name
+    -- Fields given by name are put in the declared order first.
+    let args ← match args with
+      | .var mark :: gave =>
+        if mark == recordMark then
+          let names ← fieldNamesOf name entry
+          let rest := gave.any fun
+            | .var r => r == restMark
+            | _ => false
+          let gave := gave.filterMap fun
+            | .ctor mark none [p] => (fieldOfMark mark).map fun field => (field, p)
+            | _ => none
+          match orderFields name names gave (if rest then some Pattern.wild else none) with
+          | .ok ps => pure ps
+          | .error e => throw e
+        else pure args
+      | _ => pure args
     -- A name declared for a constructor, `let Some = Ok;`, is that one.
     let global ← match entry with
       | some e =>
@@ -548,7 +560,17 @@ def byReference (ctx : Ctx) (clauses : List Clause) : R (List Clause) := do
             else
               binds := binds.push (.let_ (.var x) (.refField id uniq s!"%given{k}_{i}" way true))
         | none =>
-          throw "where one clause binds a parameter by reference, `&mut Pattern`, every clause does"
+          -- A clause that takes the reference as it is, or lets it go.
+          match p with
+          | .wild => tests := tests.push .wild
+          | .var x =>
+            match lookupIn ctx.scope .value x with
+            | some _ => throw "where one clause binds a parameter by reference, `&mut Pattern`, every clause does, or takes the reference whole"
+            | none =>
+              tests := tests.push .wild
+              binds := binds.push (.let_ (.var x) (.name none s!"%given{k}_{i}"))
+          | _ =>
+            throw "where one clause binds a parameter by reference, `&mut Pattern`, every clause does, or takes the reference whole"
       else tests := tests.push p
     inner := inner.push (.mk tests.toList (binds.toList ++ body))
   let args := (outer.zip (List.range arity)).map fun (x, i) =>
@@ -672,6 +694,9 @@ partial def resolveClause (ctx : Ctx) (bound : List String) : Clause → R Claus
 /-- A statement with its names resolved, and the names it binds for the rest. -/
 partial def resolveStmt (ctx : Ctx) (bound : List String) : Stmt → R (Stmt × List String)
   | .let_ pat value => do
+    if (byRef? pat).isSome then
+      throw "`let &mut Pattern = ..` is written as several statements: this is a compiler defect"
+
     let value ← resolveExpr ctx bound value
     let (pat, names) ← resolvePattern ctx pat
     pure (.let_ pat value, names)
@@ -690,6 +715,23 @@ partial def resolveStmt (ctx : Ctx) (bound : List String) : Stmt → R (Stmt × 
 partial def resolveStmts (ctx : Ctx) (bound : List String) : List Stmt → R (List Stmt)
   | [] => pure []
   | s :: rest => do
+    -- `let &mut (a, b) = r;`: the reference is given a name, and each name
+    -- of the pattern is a borrow of its part through it. The pattern has to
+    -- be one that cannot fail.
+    let rec peel : Stmt → Option ((Stmt → Stmt) × Bool × Pattern × Expr)
+      | .located line col s => (peel s).map fun (wrap, u, p, v) => (fun x => .located line col (wrap x), u, p, v)
+      | .let_ pat value => (byRef? pat).map fun (uniq, p) => (id, uniq, p, value)
+      | _ => none
+    if let some (wrap, uniq, pat, value) := peel s then
+      let k ← freshId
+      let holder := s!"%given{k}_0"
+      let (_, names) ← shapeOf ctx [] pat
+      let mut lets : List Stmt := [wrap (.let_ (.var holder) value)]
+      for (x, way) in names do
+        let id := 900000000 + (← freshId)
+        lets := lets ++ [wrap (.let_ (.var x)
+          (if way.isEmpty then .reborrow uniq (.name none holder) else .refField id uniq holder way true))]
+      return ← resolveStmts ctx bound (lets ++ rest)
     let (s, names) ← resolveStmt ctx bound s
     pure (s :: (← resolveStmts ctx (names ++ bound) rest))
 

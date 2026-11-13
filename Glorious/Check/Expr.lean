@@ -74,7 +74,7 @@ partial def inferExpr (scope : Scope) (amb : Row) : Expr → M Ty
       | .ref _ _ _ => pure ()
       | .var _ => pure ()
       | _ =>
-        if x.startsWith "%through" then
+        if x.startsWith "%through" || x.startsWith "%given" then
           throw "what a field is borrowed of here is a value that nothing holds, not a reference: give it a `let mut` first"
         throw s!"`{x}` is not a mutable variable or a reference, so no field of it can be borrowed"
       unifyAt (if uniq then "a field is borrowed for writing through a `&mut` reference"
@@ -89,7 +89,7 @@ partial def inferExpr (scope : Scope) (amb : Row) : Expr → M Ty
                  fieldCaps := s.fieldCaps.push (cap', s.pos) }
       pure (.ref (if uniq then .uniq else .shared) field cap')
     | some _ => do
-      if x.startsWith "%through" then
+      if x.startsWith "%through" || x.startsWith "%given" then
         throw "what a field is borrowed of here is a value that nothing holds, not a reference: give it a `let mut` first"
       throw s!"`{x}` is not a mutable variable or a reference, so no field of it can be borrowed"
     | none => throw s!"unknown name `{x}`"

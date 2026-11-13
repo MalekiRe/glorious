@@ -1868,7 +1868,27 @@ private partial def unfieldStmts (info : FieldInfo) :
         let ref := fieldRefName id
         -- The borrow lasts while anything made from it is still used.
         let following := wrap s :: rest
-        let k := scopeExtent ref following true
+        let k0 := scopeExtent ref following true
+        -- A borrow of a field made while this one lasts and used after it is
+        -- done with: this one is kept until that one is done with too, if
+        -- nothing in between looks at the variable itself, which holds the
+        -- old value of this field until the borrow ends.
+        let rec widen (fuel : Nat) (k : Nat) : Nat :=
+          match fuel with
+          | 0 => k
+          | fuel + 1 =>
+            let later := fvStmts [] (following.drop k)
+            let crossing := (following.take k).filterMap fun s =>
+              match unlocated s with
+              | .let_ (.var q) (.refField _ _ _ _ _) => if later.contains q then some q else none
+              | _ => none
+            match crossing with
+            | [] => k
+            | qs =>
+              let need := qs.foldl (fun acc q => max acc (k + scopeExtent q (following.drop k) true)) k
+              if need == k || (fvStmts [] ((following.take need).drop k)).contains x then k
+              else widen fuel need
+        let k := widen 8 k0
         let inner := (following.take k).map fun
           | .expr (.tailCall cid f args) => Stmt.expr (.call cid f args)
           | .located line col (.expr (.tailCall cid f args)) =>

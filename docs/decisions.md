@@ -1230,14 +1230,20 @@ What it is not:
 - **Borrows made one after another** are written out longest-lasting first,
   so that they can be done with in any order.
 
+Since: such a pattern may give fields by name, stand beside a clause that
+takes the reference whole (`_` or a name), and be written in a `let` if it
+cannot fail (`let &mut (a, b) = p;`). A borrow of a field is kept until one
+made while it lasts is done with, where nothing between looks at the
+variable itself. `p.0` reads through a reference. And a borrow of a field
+through a reference cannot be given back by the function that makes it or
+kept in what it is given: it is a variable of that function's.
+
 Limits. A pattern that binds by reference is written around the whole
-pattern, of a clause's parameter, and every clause of the callable has one
-there; it gives a constructor's fields in order, not by name. What is
-pointed to is copied to choose the clause, so it has to be a value that can
-be copied. A reference bound by a pattern lasts for its clause. Two borrows
-of fields that overlap with other statements between them, neither lasting
-inside the other, are refused, with what to write instead. `p.0` by number
-through a reference is still written `(*p).0`.
+pattern. What is pointed to is copied to choose the clause, so it has to be a
+value that can be copied. A reference bound by a pattern lasts for its
+clause, and one to a field for its function. Two borrows of fields that
+overlap, with a statement between them that looks at the variable, are
+refused, with what to write instead.
 
 ## The conditions on a form of computation have names
 

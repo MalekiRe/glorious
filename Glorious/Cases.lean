@@ -1606,9 +1606,9 @@ def cases : List Case := [
   ⟨"fn swap(p: &mut (Int, Int)) { match(p) { &mut (a, b) => let t = *a; *a = *b; *b = t } }\nfn main() { let mut p = (1, 2); swap(&mut p); p }",
     [], "(2, 1)"⟩,
   ⟨"enum Shape { Circle(Int), Rect(Int, Int) }\nfn bad(s: &mut Shape) { match(s) { &mut Circle(r) => *r = 1, Rect(w, h) => () } }\nfn main() { 0 }",
-    [], "error: 2:25: in `bad`: where one clause binds a parameter by reference, `&mut Pattern`, every clause does"⟩,
+    [], "error: 2:25: in `bad`: where one clause binds a parameter by reference, `&mut Pattern`, every clause does, or takes the reference whole"⟩,
   ⟨"fn main() { let &mut (a, b) = (1, 2); 0 }",
-    [], "error: 1:13: in `main`: a pattern that binds by reference, `&mut Pattern`, is written as a parameter of a clause"⟩,
+    [], "error: 1:13: in `main`: what a field is borrowed of here is a value that nothing holds, not a reference: give it a `let mut` first"⟩,
   ⟨"fn whole(s: &mut Int) { match(s) { &mut n => *n = *n + 1 } }\nfn main() { let mut x = 1; whole(&mut x); x }",
     [], "2"⟩,
   ⟨"enum Shape { Circle(Int), Rect(Int, Int) }\nfn f(s: &mut Shape) -> Int { match(s) { &mut Circle(r) => *r, &mut Rect(w, h) => let big = if(*w < *h) { h } else { w }; *big = 0; 1 } }\nfn main() { let mut b = Rect(2, 3); f(&mut b); b }",
@@ -1618,9 +1618,7 @@ def cases : List Case := [
   -- Borrows of fields made one after another may be done with in any order.
   ⟨"fn main() { let mut x = (1, 2, 3); let a = &mut x.0; let b = &mut x.1; let c = &mut x.2; *b = 5; *a = 4; *c = 6; x }",
     [], "(4, 5, 6)"⟩,
-  ⟨"fn main() { let mut x = (1, 2); let a = &mut x.0; print(7); let b = &mut x.1; *a = 5; *b = 6; x }",
-    [], "error: in `main`: the borrow of a field kept in `b` is made while another lasts and is used after that one is done with: make it before the other, or straight after it"⟩,
-  -- Comments in `/* */`, which may hold others; `-` before any value; a
+    -- Comments in `/* */`, which may hold others; `-` before any value; a
   -- byte; a field by number of what a reference points to.
   ⟨"/* a comment /* inside another */ still */ fn main() { let x = 5; /* here */ -x + - (2 * 3) - -1 }",
     [], "-10"⟩,
@@ -1765,6 +1763,22 @@ def cases : List Case := [
     [], "[2, 3, 4]\ne\nJello\nel\n5"⟩,
   ⟨"fn main() { let a: [Int; 3] = [1, 2, 3]; 0 }",
     [], "error: 1:24: an array's type does not say how long it is: write `[T]`, found `;`"⟩,
+  -- A pattern that binds by reference may give fields by name, be beside a
+  -- clause that takes the reference whole, and be in a `let`.
+  ⟨"enum Shape { Circle(Int), Rect { w: Int, h: Int } }\nfn grow(s: &mut Shape) { match(s) { &mut Rect { w, .. } => *w = *w * 2, _ => () } }\nfn main() { let mut a = Circle(1); let mut b = Rect { w: 2, h: 3 }; grow(&mut a); grow(&mut b); (a, b) }",
+    [], "(Circle(1), Rect(4, 3))"⟩,
+  ⟨"fn swap(p: &mut (Int, Int)) { let &mut (a, b) = p; let t = *a; *a = *b; *b = t }\nfn main() { let mut p = (1, 2); swap(&mut p); p }",
+    [], "(2, 1)"⟩,
+  ⟨"fn first(p: &(Int, Int)) -> Int { let &(a, _) = p; *a }\nfn main() { let mut p = (4, 5); first(&p) }",
+    [], "4"⟩,
+  ⟨"fn f(s: &mut Option<Int>) -> Int { match(s) { &mut Some(n) => *n = *n + 1; 1, r => 0 } }\nfn main() { let mut x = Some(1); let mut y = None; f(&mut x) + f(&mut y) + (x else { 0 }) }",
+    [], "3"⟩,
+  -- A borrow of a field is kept until one made while it lasts is done with,
+  -- if nothing between looks at the variable itself.
+  ⟨"fn main() { let mut x = (1, 2); let a = &mut x.0; print(7); let b = &mut x.1; *a = 5; *b = 6; x }",
+    [], "7\n(5, 6)"⟩,
+  ⟨"fn main() { let mut x = (1, 2); let a = &mut x.0; print(7); let b = &mut x.1; *a = 5; print(x.0); *b = 6; x }",
+    [], "error: in `main`: the borrow of a field kept in `b` is made while another lasts and is used after that one is done with: make it before the other, or straight after it"⟩,
   -- `drop` is not for a program to call.
   ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nfn main() { let mut f = File(7); drop(&mut f); 0 }",
     [], "error: 3:34: in `main`: `drop` is run when what holds a value ends; a program does not call it"⟩,
