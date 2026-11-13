@@ -2842,6 +2842,14 @@ def cases : List Case := [
     [], "6"⟩,
   ⟨"struct Ticket(Int);\nimpl Use<[1, 1]> for Ticket {}\nfn redeem(t: Ticket) -> Int { match(t) { Ticket(n) => n } }\neffect Stop { stop() -> Int }\nfn body(t: Ticket) -> Int / {Stop} { let x = stop(); redeem(t) + x }\nfn main() -> Int { let t = Ticket(1); handle body(t) { stop(k) => k(5) } }",
     [], "error: in `body`: `t` is not used on every path, but a `Ticket` has to be used"⟩,
+  -- Library conformance S44: taking the last element off an array of values that have to be used hands each on.
+  ⟨"struct Ticket(Int);\nimpl Use<[1, 1]> for Ticket {}\nfn redeem(t: Ticket) -> Int { match(t) { Ticket(n) => n } }\nfn drain(items: [Ticket], total: Int) -> Int { match(pop(items)) { Some((rest, t)) => let got = redeem(t); tail drain(rest, total + got), None => total } }\nfn main() -> Int { drain([Ticket(1), Ticket(2)], 0) }",
+    [], "3"⟩,
+  ⟨"struct Ticket(Int);\nimpl Use<[1, 1]> for Ticket {}\nfn redeem(t: Ticket) -> Int { match(t) { Ticket(n) => n } }\nfn eat(items: [Ticket]) -> Int { match(pop(items)) { Some((rest, t)) => redeem(t) + len(rest), None => 0 } }\nfn main() -> Int { eat([Ticket(1)]) }",
+    [], "1"⟩,
+  -- Asking an array's length is not a use of it; taking it apart twice is.
+  ⟨"struct Ticket(Int);\nimpl Use<[1, 1]> for Ticket {}\nfn redeem(t: Ticket) -> Int { match(t) { Ticket(n) => n } }\nfn main() -> Int { let v = [Ticket(1)]; let a = pop(v); let b = pop(v); 0 }",
+    [], "error: 4:20: in `main`: `v` is used more than once, but a `Ticket` can be used only once"⟩,
   -- `drop` is not for a program to call.
   ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nfn main() { let mut f = File(7); drop(&mut f); 0 }",
     [], "error: 3:34: in `main`: `drop` is run when what holds a value ends; a program does not call it"⟩,

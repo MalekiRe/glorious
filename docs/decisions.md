@@ -2579,6 +2579,12 @@ S12, S20, S31, S33, S36 and S53 are met as tried.
 - A name given to a constructor can be written with a type,
   `let Just: fn(_) -> Result<_, ()> = Ok;`: it builds at that type, and in a
   pattern it is still the constructor.
+- **S44.** `pop` used its array twice, once to ask its length, so an array
+  of values that have to be used could not be emptied. It now takes the
+  array apart by pattern, and asking an array's length is no longer counted
+  as a use of it, since nothing is taken. A `Vec` of such values in a
+  mutable variable still needs that variable's rule: a `defer` straight
+  after it that swaps in a value written out, which a `Vec` has none of.
 - **S06.** `replace` asks nothing of the type. There is no `swap` of two
   references: it cannot be written with `replace`, and the machine has no
   operation for it.

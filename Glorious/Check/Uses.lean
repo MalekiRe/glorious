@@ -730,6 +730,14 @@ partial def runCallee (ctx : ACtx) (depth : Nat) (env : List (String × AVal)) (
         match goneOf vs with
         | some t => (.gone t, n)
         | none => (.data c vs, n))
+    else if x == "arr_len" && (ctx.fns.lookup x).isNone then
+      -- Asking how long an array is only looks at it: the array is still
+      -- whoever's it was.
+      let found ← runList ctx depth env args
+      pure (found.map fun (vs, n) =>
+        match goneOf vs with
+        | some t => (.gone t, n)
+        | none => (.unknown, n))
     else if let some resumptive := ctx.ops.lookup x then
       -- Performing an operation hands its payload to a handler.
       if ctx.lower then

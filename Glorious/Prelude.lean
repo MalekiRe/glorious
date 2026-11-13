@@ -578,9 +578,9 @@ fn push(a, v) { arr_push(a, v) }
 
 // The array without its last element, and that element; nothing if it is empty.
 fn pop(a) {
-    match(arr_len(a, 0)) {
-        0 => None,
-        _ => Some(arr_pop(a, 0))
+    match(a) {
+        [] => None,
+        some => Some(arr_pop(some, 0))
     }
 }
 
