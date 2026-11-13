@@ -947,6 +947,13 @@ partial def elabCall (scope : Scope) (isTail : Bool) (f : Expr) (args : List Exp
   if let .name none "%shapes" := f then
     return ← emit (.let_ (.construct 0 []))
   if let (.name none mark, r :: rest) := (f, args) then
+    -- A reference to a field of what a reference points to: the reference,
+    -- one field further in at each step.
+    if mark == Syntax.focusMark then
+      let mut at_ ← elabExpr scope false r
+      for step in rest do
+        if let .int i := step then at_ ← emit (.mem .focus [at_, .int i])
+      return at_
     if mark == Syntax.ctorIsMark then
       let cell ← elabExpr scope false r
       let path := rest.dropLast.filterMap fun
@@ -2125,6 +2132,12 @@ private partial def unfieldStmts (info : FieldInfo) :
     | some (before, s, (id, uniq, x)) =>
       match info.shapes.lookup id with
       | none => wrap s :: unfieldStmts info rest
+      | some (true, path, _) =>
+        -- A field of what a reference points to: the reference, further in.
+        -- Nothing is taken out, so the borrow can outlive the function.
+        unfieldStmts info (before ++ Stmt.let_ (.var (fieldRefName id))
+          (.call 0 (.name none Syntax.focusMark) (.name none x :: path.map fun n => Expr.int (Int.ofNat n)))
+          :: s :: rest)
       | some (viaRef, path, shape) =>
         -- What the field is a field of: what the variable holds, or what the
         -- reference points to.

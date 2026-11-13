@@ -86,9 +86,7 @@ partial def inferExpr (scope : Scope) (amb : Row) : Expr → M Ty
       captures cap' (.loan (← freshLoan none uniq (some (cap, cap')) numbered))
       captures cap' (.ty t)
       modify fun s =>
-        { s with fieldSites := s.fieldSites.push (id, true, whole, numbered, chosen, s.owner, s.pos)
-                 fieldCaps := s.fieldCaps.push (cap', s.pos)
-                 blockFieldCaps := s.blockFieldCaps.push (cap', s.pos) }
+        { s with fieldSites := s.fieldSites.push (id, true, whole, numbered, chosen, s.owner, s.pos) }
       pure (.ref (if uniq then .uniq else .shared) field cap')
     | some _ => do
       if x.startsWith "%through" || x.startsWith "%given" then

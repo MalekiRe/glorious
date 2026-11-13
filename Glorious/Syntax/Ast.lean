@@ -219,6 +219,10 @@ of field numbers: `%ctor_is(r, 0, 1, Some)`. The compiler writes this where a
 pattern binds by reference; it reads nothing out of the cell. -/
 def ctorIsMark : String := "%ctor_is"
 
+/-- The reference to a field of what a reference points to: the reference, and
+the fields to go through by number. -/
+def focusMark : String := "%focus"
+
 /-- How the resolver says which type is the prelude's type of arrays, whatever
 a program has named its own: a list of names under this mark. -/
 def arrayMark : String := "%array"

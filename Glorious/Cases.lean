@@ -2407,6 +2407,30 @@ def cases : List Case := [
     [], "8"⟩,
   ⟨"fn main() { let q: *mut Int = PtrMut(usize_of(8)); 0 }",
     [], "error: 1:13: in `main`: `PtrMut` has private fields: only the prelude can build one or take one apart"⟩,
+  -- A reference to a field of what a reference points to is that reference, further in: it can be given back.
+  ⟨"struct P { x: Int, y: Int }\nfn gety(p: &mut P) -> &mut Int { &mut p.y }\nfn main() -> Int { let mut p = P { x: 3, y: 4 }; let r = gety(&mut p); *r = 40; p.x + p.y }",
+    [], "43"⟩,
+  ⟨"struct P { x: Int, y: Int }\nfn getx(p: &P) -> &Int { &p.x }\nfn main() -> Int { let mut p = P { x: 3, y: 4 }; *getx(&p) }",
+    [], "3"⟩,
+  ⟨"struct In { a: Int, b: Int }\nstruct Out { i: In, k: Int }\nfn deep(o: &mut Out) -> &mut Int { &mut o.i.b }\nfn main() -> Int { let mut o = Out { i: In { a: 1, b: 2 }, k: 3 }; let r = deep(&mut o); *r = *r + 100; o.i.b }",
+    [], "102"⟩,
+  ⟨"fn snd(p: &mut (Int, Int)) -> &mut Int { &mut p.1 }\nfn main() -> Int { let mut p = (1, 2); let r = snd(&mut p); *r = 9; p.0 * 10 + p.1 }",
+    [], "19"⟩,
+  -- Kept in a value that is given back.
+  ⟨"struct P { x: Int, y: Int }\nstruct Holder<'a> { r: &'a mut Int }\nfn hold<'a>(p: &'a mut P) -> Holder<'a> { Holder { r: &mut p.y } }\nfn main() -> Int { let mut p = P { x: 3, y: 4 }; let h = hold(&mut p); let Holder { r } = h; *r = 50; p.x + p.y }",
+    [], "53"⟩,
+  -- Two of them, to fields apart.
+  ⟨"struct P { x: Int, y: Int }\nfn both(p: &mut P) -> (&mut Int, &mut Int) { (&mut p.x, &mut p.y) }\nfn main() -> Int { let mut p = P { x: 3, y: 4 }; let (a, b) = both(&mut p); *a = 1; *b = 2; p.x * 10 + p.y }",
+    [], "12"⟩,
+  -- The rules for borrows are the ones a borrow that stays has.
+  ⟨"struct P { x: Int, y: Int }\nfn gety(p: &mut P) -> &mut Int { &mut p.y }\nfn main() -> Int { let mut p = P { x: 3, y: 4 }; let r = gety(&mut p); p.y = 9; *r = 40; p.x + p.y }",
+    [], "error: 3:72: in `main`: `p` is borrowed with `&mut` while `r` holds a `&mut` reference to it"⟩,
+  ⟨"struct P { x: Int, y: Int }\nfn both(p: &mut P) -> (&mut Int, &mut Int) { (&mut p.y, &mut p.y) }\nfn main() -> Int { let mut p = P { x: 3, y: 4 }; let (a, b) = both(&mut p); *a = 1; *b = 2; p.y }",
+    [], "error: 2:46: in `both`: `p` is used while a value this expression is still using, which borrows from it, is still in use"⟩,
+  ⟨"struct P { x: Int, y: Int }\nfn f(p: &mut P) -> &mut Int { let r = &mut p.y; p.y = 3; r }\nfn main() -> Int { let mut p = P { x: 3, y: 4 }; *f(&mut p) }",
+    [], "error: 2:49: in `f`: `p` is used while `r`, which borrows from it, is still in use"⟩,
+  ⟨"struct Pair<A, B> { a: A, b: B }\nfn first<A, B>(p: &Pair<A, B>) -> &A { &p.a }\nfn main() -> Int { let mut p = Pair { a: 7, b: (1, 2) }; *first(&p) }",
+    [], "7"⟩,
   -- `drop` is not for a program to call.
   ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nfn main() { let mut f = File(7); drop(&mut f); 0 }",
     [], "error: 3:34: in `main`: `drop` is run when what holds a value ends; a program does not call it"⟩,

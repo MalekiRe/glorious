@@ -663,15 +663,7 @@ def checkGroup (decls : List FnDecl) : M Unit := do
       let ret ← match retExpr with
         | some t => some <$> resolveType rigid false t
         | none => pure none
-      modify fun s => { s with fieldCaps := #[] }
       let t ← inferCallable [] annots ret (some d.name) d.clauses s!"the clauses of `{d.name}` do"
-      -- A borrow of a field through a reference is written out as a variable
-      -- of this function's, so nothing the function gives back or is given
-      -- may come to hold it.
-      let reached ← capsReached t
-      for (cap, pos) in (← get).fieldCaps do
-        if reached.contains (← findCap cap) then
-          throw (pos ++ "a borrow of a field of what a reference points to lasts only inside the function that makes it, and here it is given back or kept: give back the reference itself, or the field's value")
       if let some effects := declared then
         let effects ← resolveEffects rigid false effects
         if let .fn _ _ effs tail _ ← find t then
