@@ -361,6 +361,10 @@ def instMark : String := "%inst"
 that the name fixes, by its place. -/
 def fixedArgName (j : Nat) : String := s!"%fixed:{j}"
 
+/-- `<T as Trait>::Name`, the type or row the trait leaves to `T`'s
+implementation under that name, is the type `%assocOf<T, Trait, Name>`. -/
+def assocOfMark : String := "%assocOf"
+
 /-- What a name given to a value stands for, apart from the type it was
 written with: `let yes: Bool = Ok(());` stands for `Ok(())`. -/
 partial def aliasValue : Expr → Expr

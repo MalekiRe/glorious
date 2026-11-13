@@ -248,6 +248,13 @@ structure MethodSig where
   parameters, and for the types the trait leaves to an implementation. -/
   tparams : List Nat := []
   assocs : List (String × Nat) := []
+  /-- What the function may perform: nothing, unless the trait says. -/
+  row : Row := ⟨[], none⟩
+  /-- The rows the trait leaves to an implementation, `type Effects:
+  EffectRow;`: each by name, as the row variable that stands for it. Such a
+  row is also among `assocs`, as the type of a callable that takes nothing,
+  gives nothing and performs the row. -/
+  rowAssocs : List (String × Nat) := []
 
 structure ImplDecl where
   trait : String

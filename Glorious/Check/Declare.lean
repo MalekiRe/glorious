@@ -20,6 +20,21 @@ mutual
 whose type is inferred; elsewhere it is an error. -/
 partial def resolveType (params : List (String × Ty)) (decl : Bool) : TypeExpr → M Ty
   | .name x args => do
+    -- `<T as Trait>::Item`: the same, with the trait said.
+    if x == Syntax.assocOfMark then
+      match args with
+      | [self, .name tr [], .name name []] =>
+        let self ← resolveType params decl self
+        match (← get).traitShape.find? fun (t', _, _) => t' == tr with
+        | some (_, arity, assocs) =>
+          unless arity == 0 do throw s!"`<.. as {Syntax.lastSegment tr}>::{name}`: a trait with arguments is not asked this way"
+          unless assocs.contains name do
+            throw s!"`{Syntax.lastSegment tr}` leaves no `{name}` to its implementations"
+          let a ← freshTy
+          modify fun s => { s with assocUses := s.assocUses.push (tr, self, name, a, s.owner, s.pos) }
+          return a
+        | none => throw s!"unknown trait `{tr}`"
+      | _ => throw "`<Type as Trait>::Name` names a trait and what it leaves to an implementation"
     -- `T::Item`: the type a trait of `T` leaves to its implementation.
     if let [p, name] := x.splitOn "::" then
       if let some self := params.lookup p then
@@ -137,22 +152,45 @@ partial def lifetimeCap (params : List (String × Ty)) (decl : Bool) (life : Opt
 rest of it, if one is written (`e`, `{A | e}`). -/
 partial def resolveRow (params : List (String × Ty)) (decl : Bool)
     (effects : List (String × List TypeExpr)) : M (List (String × List Ty) × Option Nat) := do
-  let named := fun (entry : String × List TypeExpr) =>
+  -- What stands for the rest of the row: a row parameter by its name, or
+  -- the row a trait leaves to a type's implementation.
+  let restOf := fun (entry : String × List TypeExpr) =>
     match entry with
-    | (name, [.name e []]) => if name == Syntax.rowMark then some e else none
+    | (name, [t]) => if name == Syntax.rowMark then some t else none
     | (name, []) =>
       match params.lookup name with
-      | some (.fn [] _ [] (some _) _) => some name
+      | some (.fn [] _ [] (some _) _) => some (TypeExpr.name name [])
       | _ => none
     | _ => none
-  let rows := effects.filterMap named
-  let effs ← resolveEffects params decl (effects.filter fun e => (named e).isNone)
+  let rows := effects.filterMap restOf
+  let effs ← resolveEffects params decl (effects.filter fun e => (restOf e).isNone)
   match rows with
   | [] => pure (effs, none)
-  | [e] =>
-    match params.lookup e with
+  | [t] =>
+    let written := match t with
+      | .name e [] => e
+      | _ => "what is written after `|`"
+    let param := match t with
+      | .name e [] => params.lookup e
+      | _ => none
+    match param with
     | some (.fn [] _ [] (some k) _) => pure (effs, some k)
-    | _ => throw s!"`{e}` is not a row parameter here: one is declared `{e}: EffectRow`"
+    | _ =>
+      -- `T::Effects`, `<T as Trait>::Effects`: the row a trait of `T` leaves
+      -- to its implementation, held as the type of a callable that
+      -- performs it.
+      let asked := match t with
+        | .name e args => e == Syntax.assocOfMark && !args.isEmpty || (e.splitOn "::").length == 2
+        | _ => false
+      if asked then
+        let held ← resolveType params decl t
+        match held with
+        | .fn [] _ [] (some own) _ => return (effs, some own)
+        | _ =>
+          let k ← freshRowVar
+          unify held (.fn [] .unit [] (some k) (← freshCap))
+          return (effs, some k)
+      throw s!"`{written}` is not a row parameter here: one is declared `{written}: EffectRow`"
   | _ => throw "a row is written with one row parameter for the rest of it; the union of several is not supported"
 
 /-- The effects written after a callable's result. An effect's arguments may
@@ -246,7 +284,7 @@ def declareTraits (items : List Item) : M Unit := do
     modify fun s =>
       { s with
         traits := ("Drop", ["drop"]) :: s.traits
-        methods := ("drop", ⟨"Drop", 0, dropSelf, [.ref .uniq (.var dropSelf) dropCap], .unit, [], [], []⟩)
+        methods := ("drop", ⟨"Drop", 0, dropSelf, [.ref .uniq (.var dropSelf) dropCap], .unit, [], [], [], ⟨[], none⟩, []⟩)
           :: s.methods }
   for item in items do
     if let .trait name methods := item then
@@ -271,9 +309,26 @@ def declareTraits (items : List Item) : M Unit := do
         if let .var id ← freshTy then
           extra := extra ++ [(p, .var id)]
           tparams := tparams ++ [id]
+      -- A name its functions write after `|` in what they perform is a row
+      -- it leaves to an implementation: held as the type of a callable that
+      -- takes nothing, gives nothing and performs that row.
+      let asRows := methods.flatMap fun (_, _, ret) =>
+        match ret with
+        | some (.performs _ effects) => effects.filterMap fun
+          | (mark, [.name e []]) =>
+            match e.splitOn "::" with
+            | ["Self", a] => if mark == Syntax.rowMark then some a else none
+            | _ => none
+          | _ => none
+        | _ => []
+      let mut rowVars : List (String × Nat) := []
       for a in assocNames do
         if let .var id ← freshTy then
-          extra := extra ++ [(a, .var id)]
+          if asRows.contains a then
+            let k ← freshRowVar
+            extra := extra ++ [(a, .fn [] .unit [] (some k) (← freshCap))]
+            rowVars := rowVars ++ [(a, k)]
+          else extra := extra ++ [(a, .var id)]
           assocVars := assocVars ++ [(a, id)]
       modify fun s => { s with traitShape := (name, tparams.length, assocNames) :: s.traitShape }
       let mut index := 0
@@ -292,6 +347,13 @@ def declareTraits (items : List Item) : M Unit := do
         -- together: each unwritten lifetime is then its own.)
         modify fun s => { s with elided := if (ret.map writesRef).getD false then some one else none }
         let ps ← params.mapM fun p => closeRows <$> resolveType scope false p
+        -- What it performs, where the trait says: those effects, and the
+        -- row it leaves to an implementation if it names one.
+        let (ret, row) ← match ret with
+          | some (.performs r effects) => do
+            let (effs, tail) ← resolveRow scope false effects
+            pure (some r, (⟨effs, tail⟩ : Row))
+          | other => pure (other, (⟨[], none⟩ : Row))
         let r ← match ret with
           | some r => closeRows <$> resolveType scope false r
           | none => pure .unit
@@ -299,7 +361,8 @@ def declareTraits (items : List Item) : M Unit := do
         let written := scope.filterMap fun
           | (l, .ref _ _ cap) => some (cap, l)
           | _ => none
-        let sig : MethodSig := ⟨name, index, self, ps, r, (one, "'_") :: written, tparams, assocVars⟩
+        let sig : MethodSig :=
+          ⟨name, index, self, ps, r, (one, "'_") :: written, tparams, assocVars, row, rowVars⟩
         modify fun s => { s with methods := (m, sig) :: s.methods }
         index := index + 1
       modify fun s => { s with traits := (name, methods.map (·.1)) :: s.traits }

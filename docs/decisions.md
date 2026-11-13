@@ -2536,6 +2536,42 @@ L..". Where one is not met, this is how.
   resumption used more than once, and no raw memory beyond addresses given
   to and by C.
 
+## What a trait's function performs
+
+A trait's function performed nothing: an implementation that performed an
+effect was refused, whatever the trait said, and the trait could say nothing.
+Now it can, in two ways.
+
+- **A row written on the function.** `fn emit(Self) / {Out};`. Every
+  implementation may perform those effects and no others, and a use of the
+  function performs them.
+- **A row left to the implementation** (the specification's associated
+  effect rows, 13.1 and the library's stream traits). The trait declares
+  `type Effects: EffectRow;` and its functions write
+  `/ { | Self::Effects }`; an implementation says `type Effects = {};` or
+  `type Effects = {Console};`. A generic function writes
+  `/ { | <W as Write>::Effects }`, or `W::Effects` where one trait only
+  has that name, and performs whatever the type it is used at says: nothing
+  for a stream in memory, the host's effect for standard output.
+
+How it is done: such a row is held as a type the trait leaves to the
+implementation, the type of a callable that takes nothing, gives nothing and
+performs the row. So everything that was there for those types, the
+question asked once per type and answered by the implementation, carries the
+row. `<T as Trait>::Name` is new syntax for both kinds.
+
+- A name is taken to be a row if one of the trait's functions writes it
+  after `|`; what is written after `type Effects:` is read and not kept.
+- **One row after `|`.** A function over a reader and a writer would perform
+  both their rows, and a row has one unknown part: the specification's
+  `copy_stream` cannot be given its type.
+- A callable among a trait function's parameters still performs nothing.
+
+`std::stream` has the specification's `Read` and `Write` (28) in this shape,
+with `MemoryCursor`, `Stdout`, `Stderr`, `Stdin`, `write_all`, `write_str`
+and `read_to_end`. Reading gives the bytes read instead of filling a buffer
+it is lent, since there is no slice for writing.
+
 ## Exactly once is resumed
 
 **Changed.** A resumption of an operation declared `[1, 1]` had to be used,

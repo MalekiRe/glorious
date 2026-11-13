@@ -728,14 +728,27 @@ partial def inferCall (scope : Scope) (amb : Row) (f : Expr) (args : List Expr)
           throw s!"`{x}` is a function of `{Syntax.lastSegment sig.trait}`, which takes {targs.length} argument{if targs.length == 1 then "" else "s"}"
         for (w, t) in written.zip (self :: targs) do
           unifyAt s!"the type written for `{x}`" t w
-      let found ← sig.assocs.mapM fun _ => freshTy
+      -- (A row it leaves to an implementation is asked for as the type of a
+      -- callable that performs it.)
+      let mut rm : List (Nat × Nat) := []
+      let mut found : List Ty := []
+      for (name, _) in sig.assocs do
+        match sig.rowAssocs.lookup name with
+        | some k =>
+          let k' ← freshRowVar
+          rm := (k, k') :: rm
+          found := found ++ [.fn [] .unit [] (some k') (← freshCap)]
+        | none => found := found ++ [← freshTy]
       let tm := (sig.self, self) :: sig.tparams.zip targs ++ (sig.assocs.map (·.2)).zip found
       let subject := if targs.isEmpty then self else Ty.tuple (self :: targs)
       for ((name, _), a) in sig.assocs.zip found do
         modify fun s =>
           { s with assocUses := s.assocUses.push (sig.trait, subject, name, a, s.owner, s.pos) }
+      let row : Row :=
+        ⟨sig.row.effs.map fun (e, args) => (e, args.map (subst tm rm [])),
+          sig.row.tail.map fun k => (rm.lookup k).getD k⟩
       let callee ← freshenCaps
-        (.func (sig.params.map (subst tm [] [])) (subst tm [] [] sig.ret) ⟨[], none⟩ (← freshCap))
+        (.func (sig.params.map (subst tm rm [])) (subst tm rm [] sig.ret) row (← freshCap))
       let r ← applyTy scope amb s!"`{x}`" callee args call
       needBounds call [(sig.trait, subject)]
       modify fun s => { s with methodCalls := s.methodCalls.push (call, sig.index) }

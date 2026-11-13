@@ -354,6 +354,17 @@ private partial def parseType : P TypeExpr := do
   | .op "!" =>
     advance
     pure .never
+  | .op "<" =>
+    -- `<T as Trait>::Name`: what the trait leaves to `T`'s implementation.
+    advance
+    let self ← parseType
+    unless (← peek) == .ident "as" do failAt "expected `as`: `<Type as Trait>::Name`"
+    advance
+    let trait ← expectPath
+    if ← isOp ">" then advance else failAt "expected `>`"
+    expectPunct "::"
+    let name ← expectIdent
+    pure (.name assocOfMark [self, .name trait [], .name name []])
   | .op "&" =>
     advance
     let life ← match ← peek with
@@ -449,7 +460,7 @@ private partial def parseResult : P TypeExpr := do
       -- `| e`: and whatever the row parameter `e` stands for.
       if braced && ((← peek) == .op "|" || (← peek) == .punct "|") then
         advance
-        effects := effects.push (rowMark, [.name (← expectIdent) []])
+        effects := effects.push (rowMark, [← if ← isOp "<" then parseType else do pure (.name (← expectPath) [])])
         break
       let name ← expectPath
       let mut args : Array TypeExpr := #[]
@@ -531,7 +542,7 @@ private partial def parseRow : P (List (String × List TypeExpr)) := do
     -- `| e`: and whatever the row parameter `e` stands for.
     if (← peek) == .op "|" || (← peek) == .punct "|" then
       advance
-      effects := effects.push (rowMark, [.name (← expectIdent) []])
+      effects := effects.push (rowMark, [← if ← isOp "<" then parseType else do pure (.name (← expectPath) [])])
       break
     let name ← expectPath
     let mut args : Array TypeExpr := #[]
@@ -1549,7 +1560,11 @@ private partial def parseItem : P Item := do
         advance
         let name ← expectIdent
         expectPunct "="
-        let body ← parseType
+        -- `type Effects = {Log};`: a row, kept as the type of a callable
+        -- that takes nothing, gives nothing and performs it.
+        let body ← if (← peek) == .punct "{" then do
+            pure (TypeExpr.fn [] (.performs (.tuple []) (← parseRow)))
+          else parseType
         let _ ← acceptPunct ";"
         methods := methods.push (.typeAlias name [] body)
       | _ => failAt "expected `fn`: an implementation gives the trait's functions"
@@ -1674,6 +1689,10 @@ private partial def parseTrait : P (List Item) := do
     if (← peek) == .ident "type" then
       advance
       assocs := assocs.push (← expectIdent)
+      -- `type Effects: EffectRow;`: what is said of it is read and not kept;
+      -- a row is known by where the trait's functions use it.
+      if ← acceptPunct ":" then
+        let _ ← expectPath
       let _ ← acceptPunct ";"
       continue
     match ← peek with
@@ -1698,7 +1717,8 @@ private partial def parseTrait : P (List Item) := do
       types := types.push (← parseType)
       if !(← acceptPunct ",") then break
     expectPunct ")"
-    let ret ← if ← acceptPunct "->" then some <$> parseType else pure none
+    -- `-> R`, `-> R / {E}`, or `/ {E}` alone for a function that gives `()`.
+    let ret ← if (← acceptPunct "->") || (← peek) == .op "/" then some <$> parseResult else pure none
     methods := methods.push (m, types.toList, ret)
     if (← peek) == .punct "{" then
       -- A body: what an implementation gets if it does not write its own.

@@ -843,11 +843,11 @@ def cases : List Case := [
   ⟨"trait Show { fn show(Self) -> Int }\nimpl Show for Int { }\nfn main() { 0 }",
     [], "error: `impl Show for Int` lacks the function `show`"⟩,
   ⟨"trait Show { fn show(Self) -> Int }\nimpl Show for Int { fn show(x) { Some(x) } }\nfn main() { 0 }",
-    [], "error: in `Show::show@Int`: this is not the function `Show` declares, which takes its arguments, gives its result and performs nothing: `Result<Int, _>` is not `Int`"⟩,
+    [], "error: in `Show::show@Int`: this is not the function `Show` declares, in what it takes, gives or performs: `Result<Int, _>` is not `Int`"⟩,
   -- A trait's function performs nothing its caller would have to handle, and
   -- is called where it is named.
   ⟨"effect Ask { ask() -> Int }\ntrait Show { fn show(Self) -> Int }\nimpl Show for Int { fn show(x) { x + ask() } }\nfn main() { handle show(1) { ask(k) => k(1) } }",
-    [], "error: in `Show::show@Int`: this is not the function `Show` declares, which takes its arguments, gives its result and performs nothing: effect `Ask` is not handled here"⟩,
+    [], "error: in `Show::show@Int`: this is not the function `Show` declares, in what it takes, gives or performs: effect `Ask` is not handled here"⟩,
   ⟨"trait Show { fn show(Self) -> Int }\nimpl Show for Int { fn show(x) { x } }\nfn apply(f, x) { f(x) }\nfn main() { apply(show, 1) }",
     [], "1"⟩,
   ⟨"trait Show { fn show(Self) -> Int }\nimpl Show for Int { fn show(x) { x } }\nfn apply(f, x) { f(x) }\nfn main() { apply({ v => show(v) }, 1) }",
@@ -1529,7 +1529,7 @@ def cases : List Case := [
   ⟨"trait Pick { fn first(&'a Self, &'b Self) -> &'a Self }\nimpl Pick for Int { fn first(x, y) { x } }\nfn main() { let mut a = 1; let mut b = 2; let r = first(&a, &b); b = 5; *r }",
     [], "1"⟩,
   ⟨"trait Pick { fn first(&'a Self, &'b Self) -> &'a Self }\nimpl Pick for Int { fn first(x, y) { y } }\nfn main() { 0 }",
-    [], "error: in `Pick::first@Int`: this is not the function `Pick` declares, which takes its arguments, gives its result and performs nothing: lifetime `the trait's 'b` is not `the trait's 'a`: a reference that lasts for one is used where one that lasts for the other is wanted"⟩,
+    [], "error: in `Pick::first@Int`: this is not the function `Pick` declares, in what it takes, gives or performs: lifetime `the trait's 'b` is not `the trait's 'a`: a reference that lasts for one is used where one that lasts for the other is wanted"⟩,
   ⟨"trait Pick { fn any(&Self, &Self) -> &Self }\nimpl Pick for Int { fn any(x, y) { y } }\nfn main() { let mut a = 1; let mut b = 2; let r = any(&a, &b); b = 5; *r }",
     [], "error: 3:64: in `main`: `b` is assigned while `r` holds a reference to it"⟩,
   -- `T: 'a`: what lasts for `'a` may hold a `T`.
@@ -2850,6 +2850,33 @@ def cases : List Case := [
   -- Asking an array's length is not a use of it; taking it apart twice is.
   ⟨"struct Ticket(Int);\nimpl Use<[1, 1]> for Ticket {}\nfn redeem(t: Ticket) -> Int { match(t) { Ticket(n) => n } }\nfn main() -> Int { let v = [Ticket(1)]; let a = pop(v); let b = pop(v); 0 }",
     [], "error: 4:20: in `main`: `v` is used more than once, but a `Ticket` can be used only once"⟩,
+  -- A trait's function says what it performs.
+  ⟨"effect Out { out(Int) }\ntrait Emit { fn emit(Self) / {Out}; }\nimpl Emit for Int { fn emit(n) { out(n) } }\nfn main() -> Int { handle { emit(3); 0 }() { out(v, k) => v + k(()) } }",
+    [], "3"⟩,
+  ⟨"effect Out { out(Int) }\ntrait Emit { fn emit(Self) -> Int / {Out}; }\nimpl Emit for Int { fn emit(n) { out(n); n } }\nfn twice<T: Emit>(a: T, b: T) -> Int / {Out} { emit(a) + emit(b) }\nfn main() -> Int { handle twice(1, 2) { out(v, k) => 10 * v + k(()) } }",
+    [], "33"⟩,
+  ⟨"effect Out { out(Int) }\ntrait Emit { fn emit(Self) / {Out}; }\nimpl Emit for Int { fn emit(n) { () } }\nfn main() -> Int { handle { emit(3); 7 }() { out(v, k) => v + k(()) } }",
+    [], "7"⟩,
+  ⟨"effect Out { out(Int) }\ntrait Emit { fn emit(Self) / {Out}; }\nimpl Emit for Int { fn emit(n) { out(n) } }\nfn main() -> Int { emit(3); 0 }",
+    [], "error: `main` performs effects that nothing handles: {Out}"⟩,
+  ⟨"effect Out { out(Int) }\ntrait Emit { fn emit(Self); }\nimpl Emit for Int { fn emit(n) { out(n) } }\nfn main() -> Int { handle { emit(3); 0 }() { out(v, k) => v + k(()) } }",
+    [], "error: in `Emit::emit@Int`: this is not the function `Emit` declares, in what it takes, gives or performs: effect `Out` is not handled here"⟩,
+  -- A row of effects a trait leaves to an implementation: one function over a sink that performs nothing and one that does.
+  ⟨"effect Out { out(Int) }\ntrait Sink {\n    type Effects: EffectRow;\n    fn put(&mut Self, Int) / { | Self::Effects };\n}\nstruct Total(Int)\nimpl Sink for Total { type Effects = {}; fn put(t, n) { t.0 = t.0 + n; } }\nstruct Loud\nimpl Sink for Loud { type Effects = {Out}; fn put(l, n) { out(n) } }\nfn feed<S: Sink>(s: &mut S, upto: Int) / { | S::Effects } { if(upto > 0) { put(s, upto); feed(s, upto - 1) } else { () } }\nfn main() -> Int {\n    let mut t = Total(0);\n    feed(&mut t, 4);\n    let mut l = Loud;\n    let heard = handle { feed(&mut l, 3); 0 }() { out(v, k) => v + k(()) };\n    t.0 * 100 + heard }",
+    [], "1006"⟩,
+  ⟨"effect Out { out(Int) }\ntrait Sink {\n    type Effects: EffectRow;\n    fn put(&mut Self, Int) / { | Self::Effects };\n}\nstruct Total(Int)\nimpl Sink for Total { type Effects = {}; fn put(t, n) { t.0 = t.0 + n; } }\nstruct Loud\nimpl Sink for Loud { type Effects = {Out}; fn put(l, n) { out(n) } }\nfn feed<S: Sink>(s: &mut S, upto: Int) / { | <S as Sink>::Effects } { if(upto > 0) { put(s, upto); feed(s, upto - 1) } else { () } }\nfn main() -> Int {\n    let mut t = Total(0);\n    feed(&mut t, 4);\n    let mut l = Loud;\n    let heard = handle { feed(&mut l, 3); 0 }() { out(v, k) => v + k(()) };\n    t.0 * 100 + heard }",
+    [], "1006"⟩,
+  ⟨"effect Out { out(Int) }\ntrait Sink {\n    type Effects: EffectRow;\n    fn put(&mut Self, Int) / { | Self::Effects };\n}\nstruct Total(Int)\nimpl Sink for Total { type Effects = {}; fn put(t, n) { t.0 = t.0 + n; } }\nstruct Loud\nimpl Sink for Loud { type Effects = {}; fn put(l, n) { out(n) } }\nfn feed<S: Sink>(s: &mut S, upto: Int) / { | S::Effects } { if(upto > 0) { put(s, upto); feed(s, upto - 1) } else { () } }\nfn main() -> Int {\n    let mut t = Total(0);\n    feed(&mut t, 4);\n    let mut l = Loud;\n    let heard = handle { feed(&mut l, 3); 0 }() { out(v, k) => v + k(()) };\n    t.0 * 100 + heard }",
+    [], "error: in `Sink::put@Loud`: this is not the function `Sink` declares, in what it takes, gives or performs: effect `Out` is not handled here"⟩,
+  ⟨"effect Out { out(Int) }\ntrait Sink {\n    type Effects: EffectRow;\n    fn put(&mut Self, Int) / { | Self::Effects };\n}\nstruct Total(Int)\nimpl Sink for Total { type Effects = {}; fn put(t, n) { t.0 = t.0 + n; } }\nstruct Loud\nimpl Sink for Loud { type Effects = {Out}; fn put(l, n) { out(n) } }\nfn feed<S: Sink>(s: &mut S, upto: Int) / { | S::Effects } { if(upto > 0) { put(s, upto); feed(s, upto - 1) } else { () } }\nfn main() -> Int {\n    let mut t = Total(0);\n    feed(&mut t, 4);\n    let mut l = Loud;\n    feed(&mut l, 3); let heard = 0;\n    t.0 * 100 + heard }",
+    [], "error: `main` performs effects that nothing handles: {Out}"⟩,
+  ⟨"effect Out { out(Int) }\ntrait Sink {\n    type Effects: EffectRow;\n    fn put(&mut Self, Int) / { | Self::Effects };\n}\nstruct Total(Int)\nimpl Sink for Total { fn put(t, n) { t.0 = t.0 + n; } }\nstruct Loud\nimpl Sink for Loud { type Effects = {Out}; fn put(l, n) { out(n) } }\nfn feed<S: Sink>(s: &mut S, upto: Int) / { | S::Effects } { if(upto > 0) { put(s, upto); feed(s, upto - 1) } else { () } }\nfn main() -> Int {\n    let mut t = Total(0);\n    feed(&mut t, 4);\n    let mut l = Loud;\n    let heard = handle { feed(&mut l, 3); 0 }() { out(v, k) => v + k(()) };\n    t.0 * 100 + heard }",
+    [], "error: `impl Sink for Total` does not say what `Effects` is: write `type Effects = ..;`"⟩,
+  ⟨"effect Out { out(Int) }\ntrait Sink {\n    type Effects: EffectRow;\n    fn put(&mut Self, Int) / { | Self::Effects };\n}\nstruct Total(Int)\nimpl Sink for Total { type Effects = Int; fn put(t, n) { t.0 = t.0 + n; } }\nstruct Loud\nimpl Sink for Loud { type Effects = {Out}; fn put(l, n) { out(n) } }\nfn feed<S: Sink>(s: &mut S, upto: Int) / { | S::Effects } { if(upto > 0) { put(s, upto); feed(s, upto - 1) } else { () } }\nfn main() -> Int {\n    let mut t = Total(0);\n    feed(&mut t, 4);\n    let mut l = Loud;\n    let heard = handle { feed(&mut l, 3); 0 }() { out(v, k) => v + k(()) };\n    t.0 * 100 + heard }",
+    [], "error: 13:5: in `main`: `Effects` of `Sink` for `Total`: expected `Int`, found `fn() -> ()`"⟩,
+  -- Streams: bytes written to memory and read back, performing nothing.
+  ⟨"use std::stream::{Read, Write, MemoryCursor, write_all, write_str, read_to_end, read};\nuse alloc::string::{String};\nfn main() -> Int {\n    let mut c = MemoryCursor::new([]);\n    write_str(&mut c, \"hello, \");\n    write_str(&mut c, \"streams\");\n    let first = match(read(&mut c, 5)) { Ok(b) => len(b), Err(_) => 0 - 1 };\n    let rest = match(read_to_end(&mut c, 1000)) { Ok(b) => b, Err(_) => [] };\n    say(match(String::from_utf8(rest)) { Ok(s) => String::to_str(&s), Err(_) => \"?\" });\n    first * 100 + MemoryCursor::position(&c) }",
+    [], ", streams\n514"⟩,
   -- `drop` is not for a program to call.
   ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nfn main() { let mut f = File(7); drop(&mut f); 0 }",
     [], "error: 3:34: in `main`: `drop` is run when what holds a value ends; a program does not call it"⟩,

@@ -22,6 +22,7 @@ pub mod set;
 pub mod iter;
 pub mod c;
 pub mod fmt;
+pub mod stream;
 pub mod iterator;
 pub mod slice;
 pub mod collections;
@@ -1662,6 +1663,149 @@ impl Display for char { fn fmt(c, out) { Formatter::write_char(out, *c) } }
 impl Display for String { fn fmt(text, out) { Formatter::write_str(out, String::to_str(text)) } }
 "#
 
+private def streamText : String := r#"// Streams of bytes, in the shape the library specification gives them (28): a
+// trait for what can be read from and one for what can be written to. Each
+// leaves to its implementation the row of effects its functions perform, so
+// a stream held in memory performs nothing and one of the host's performs
+// the host's effect, under the same functions.
+
+use std::host::{IoError, Console, write_stdout, write_stderr, read_stdin};
+use std::text::{utf8};
+
+pub trait Read {
+    type Effects: EffectRow;
+    // Up to so many bytes. None, asked for some, is the end of the stream.
+    fn read(&mut Self, Int) -> Result<[u8], IoError> / { | Self::Effects };
+}
+
+pub trait Write {
+    type Effects: EffectRow;
+    // How many of the bytes were taken, from the first of them.
+    fn write(&mut Self, [u8]) -> Result<Int, IoError> / { | Self::Effects };
+    fn flush(&mut Self) -> Result<(), IoError> / { | Self::Effects };
+}
+
+// The bytes of an array from one place up to another.
+fn piece(bytes: &[u8], from: Int, upto: Int, out: [u8]) -> [u8] {
+    if(from >= upto) { out } else {
+        match(element(bytes, from)) {
+            Some(b) => tail piece(bytes, from + 1, upto, push(out, *b)),
+            None => out
+        }
+    }
+}
+
+// One array's bytes after another's.
+fn joined(onto: [u8], more: &[u8], i: Int) -> [u8] {
+    match(element(more, i)) {
+        Some(b) => tail joined(push(onto, *b), more, i + 1),
+        None => onto
+    }
+}
+
+// Bytes held in memory: read from where the last read stopped, written at
+// the end.
+pub struct MemoryCursor { bytes: [u8], at: Int }
+
+impl MemoryCursor {
+    pub fn new(bytes: [u8]) -> Self { Self { bytes: bytes, at: 0 } }
+    pub fn position(value: &Self) -> Int { value.at }
+    pub fn into_inner(value: Self) -> [u8] { match(value) { MemoryCursor { bytes, at } => bytes } }
+}
+
+impl Read for MemoryCursor {
+    type Effects = {};
+    fn read(cursor, most) {
+        let from = cursor.at;
+        let n = len_at(&cursor.bytes);
+        let upto = if(from + most > n) { n } else { from + most };
+        cursor.at = upto;
+        Ok(piece(&cursor.bytes, from, upto, []))
+    }
+}
+
+impl Write for MemoryCursor {
+    type Effects = {};
+    fn write(cursor, bytes) {
+        let held = &mut cursor.bytes;
+        *held = joined(replace(held, []), &bytes, 0);
+        Ok(len(bytes))
+    }
+    fn flush(cursor) { Ok(()) }
+}
+
+// The host's standard streams.
+pub struct Stdout
+pub struct Stderr
+pub struct Stdin
+
+impl Write for Stdout {
+    type Effects = {Console};
+    fn write(out, bytes) { write_stdout(bytes) }
+    fn flush(out) { Ok(()) }
+}
+
+impl Write for Stderr {
+    type Effects = {Console};
+    fn write(out, bytes) { write_stderr(bytes) }
+    fn flush(out) { Ok(()) }
+}
+
+impl Read for Stdin {
+    type Effects = {Console};
+    fn read(from, most) { read_stdin(most) }
+}
+
+// How far `write_all` got before it failed.
+pub struct WriteAllError { pub written: Int, pub error: IoError }
+
+fn write_from<W: Write>(writer: &mut W, bytes: [u8], done: Int)
+    -> Result<(), WriteAllError> / { | <W as Write>::Effects } {
+    let n = len(bytes);
+    if(done >= n) { Ok(()) } else {
+        match(write(writer, piece(&bytes, done, n, []))) {
+            // A writer that takes nothing has failed: going round again
+            // would never end.
+            Ok(took) =>
+                if(took <= 0) { Err(WriteAllError { written: done, error: IoError { code: 0 } }) }
+                else { tail write_from(writer, bytes, done + took) },
+            Err(e) => Err(WriteAllError { written: done, error: e })
+        }
+    }
+}
+
+// Every byte written, or how many were when it failed.
+pub fn write_all<W: Write>(writer: &mut W, bytes: [u8])
+    -> Result<(), WriteAllError> / { | <W as Write>::Effects } {
+    write_from(writer, bytes, 0)
+}
+
+// A text written as its UTF-8 bytes.
+pub fn write_str<W: Write>(writer: &mut W, text: Str)
+    -> Result<(), WriteAllError> / { | <W as Write>::Effects } {
+    write_from(writer, utf8(text), 0)
+}
+
+fn read_more<R: Read>(reader: &mut R, out: [u8], limit: Int)
+    -> Result<[u8], IoError> / { | <R as Read>::Effects } {
+    let left = limit - len(out);
+    if(left <= 0) { Ok(out) } else {
+        match(read(reader, if(left > 4096) { 4096 } else { left })) {
+            Ok(got) =>
+                if(len(got) == 0) { Ok(out) }
+                else { tail read_more(reader, joined(out, &got, 0), limit) },
+            Err(e) => Err(e)
+        }
+    }
+}
+
+// Everything a stream still has, up to so many bytes.
+pub fn read_to_end<R: Read>(reader: &mut R, limit: Int)
+    -> Result<[u8], IoError> / { | <R as Read>::Effects } {
+    read_more(reader, [], limit)
+}
+"#
+
 private def cText : String := r#"// What C has: its memory, and texts as it writes them. Everything here is
 // unsafe: an address is whatever a program says it is.
 
@@ -1912,6 +2056,7 @@ def texts : List (List String × String) :=
    (["std", "iter"], iterText),
    (["std", "c"], cText),
    (["std", "fmt"], fmtText),
+   (["std", "stream"], streamText),
    (["std", "iterator"], iteratorText),
    (["std", "slice"], sliceText),
    (["std", "collections"], collectionsText),

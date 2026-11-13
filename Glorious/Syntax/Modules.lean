@@ -521,6 +521,12 @@ def resolveNamed (ctx : Ctx) (space : Space) (generics : List String) (written :
 
 partial def resolveType (ctx : Ctx) (generics : List String) : TypeExpr → R TypeExpr
   | .name x args => do
+    -- `<T as Trait>::Name`: the trait is a trait, and the name is the trait's.
+    if x == assocOfMark then
+      match args with
+      | [self, .name tr [], name] =>
+        return .name x [← resolveType ctx generics self, .name (← resolveNamed ctx .trait [] tr).1 [], name]
+      | _ => throw "`<Type as Trait>::Name` names a trait and what it leaves to an implementation"
     pure (.name (← resolveNamed ctx .type generics x).1 (← args.mapM (resolveType ctx generics)))
   | .tuple args => .tuple <$> args.mapM (resolveType ctx generics)
   | .fn ps r => do

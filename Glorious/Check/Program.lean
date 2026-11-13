@@ -743,7 +743,20 @@ def checkGroup (decls : List FnDecl) : M Unit := do
           -- The trait's lifetimes are each itself here, as a function's own
           -- are: what the trait says is borrowed from one thing may not be
           -- borrowed from another.
-          let declared ← zonk (.func (sig.params.map (subst tm [] [])) (subst tm [] [] sig.ret) ⟨[], none⟩ (← freshCap))
+          -- What it may perform is what the trait says, with a row the trait
+          -- leaves to the implementation as the implementation says it.
+          let mut rm : List (Nat × Nat) := []
+          for (a, k) in sig.rowAssocs do
+            let k' ← freshRowVar
+            rm := (k, k') :: rm
+            if let some said := im.assocs.lookup a then
+              try unify (.fn [] .unit [] (some k') (← freshCap)) (subst own [] [] said)
+              catch _ =>
+                throw (inFunction d.name s!"`{a}` is a row of effects here: write `type {a} = \{Effect, ..};`")
+          let row : Row :=
+            ⟨sig.row.effs.map fun (e, args) => (e, args.map (subst tm rm [])),
+              sig.row.tail.map fun k => (rm.lookup k).getD k⟩
+          let declared ← zonk (.func (sig.params.map (subst tm rm [])) (subst tm rm [] sig.ret) row (← freshCap))
           let cm ← (freeCaps declared).eraseDups.mapM fun c => do pure (c, ← freshCap)
           let want := subst [] [] cm declared
           let theirs := cm.filterMap fun (old, new) =>
@@ -769,7 +782,7 @@ def checkGroup (decls : List FnDecl) : M Unit := do
       if let some (want, trait) := wanted then
         try unify t want
         catch e =>
-          throw s!"this is not the function `{trait}` declares, which takes its arguments, gives its result and performs nothing: {e}"
+          throw s!"this is not the function `{trait}` declares, in what it takes, gives or performs: {e}"
       -- A use of the function inside its group has the function's type, but
       -- what it is given there need not be what the function itself was given:
       -- the captures of the two are kept apart, and related below.
