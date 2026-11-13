@@ -1038,6 +1038,10 @@ From the audit of the specification (10.8, 20).
   elaborator refuses (`tail` out of place), and then left out of the program
   as before.
 
+- **`effect Out<T> where T: Show { .. }`**: what is asked of an effect's
+  parameter is asked where one of its operations is performed. The
+  operations of an effect may follow each other with `,`, `;` or nothing
+  between, as the specification writes them (10.1).
 - **`struct W<T = Int>`**: a declared type written with fewer arguments than
   it has parameters has, for the rest, what its declaration says; a default
   may mention the parameters before it, and comes after every parameter that

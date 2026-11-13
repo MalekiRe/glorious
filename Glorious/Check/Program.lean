@@ -785,6 +785,7 @@ def checkItems (items : List Item) : M Unit := do
   let asked := items.filterMap fun
     | .struct name params _ => (written.lookup name).map (name, params, ·)
     | .enum name params _ => (written.lookup name).map (name, params, ·)
+    | .effect name params _ => (written.lookup name).map (name, params, ·)
     | _ => none
   modify fun s =>
     { s with typeBounds := s.typeBounds ++ asked.map fun (name, params, bounds) =>

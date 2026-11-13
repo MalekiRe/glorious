@@ -504,6 +504,10 @@ partial def inferCall (scope : Scope) (amb : Row) (f : Expr) (args : List Expr)
       let (payload, result) := instOp sig inst
       try unifyRow amb ⟨[(sig.effect, inst)], some (← freshRowVar)⟩
       catch e => throw s!"operation `{x}` cannot be performed here: {e}"
+      -- What the effect's declaration asks of its parameters.
+      if let some asked := (← get).typeBounds.lookup sig.effect then
+        if call != 0 then
+          needBounds (100000000000000000 + call) (asked.filterMap fun (tr, i) => inst[i]?.map (tr, ·))
       checkArgs scope amb s!"operation `{x}`" payload args call
       -- The handler may run a callable it is given, there and then.
       use scope (.call s!"operation `{x}`" payload)

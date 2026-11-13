@@ -2349,6 +2349,15 @@ def cases : List Case := [
     [], "4"⟩,
   ⟨"mod m { pub struct W<T = Int>(pub T); }\nfn f(w: m::W) -> Int { w.0 }\nfn main() { f(m::W(6)) }",
     [], "6"⟩,
+  -- What is asked of an effect's parameter is asked where an operation is performed; operations need no separator.
+  ⟨"effect Out<T> where T: Show { put(T) }\nfn main() { handle { put(5); 0 }() { put(v, k) => len(show(v)) } }",
+    [], "1"⟩,
+  ⟨"struct NoShow(Int)\neffect Out<T> where T: Show { put(T) }\nfn main() { handle { put(NoShow(1)); 0 }() { put(v, k) => 1 } }",
+    [], "error: 3:22: in `main`: `NoShow` does not implement `Show`"⟩,
+  ⟨"effect Console {\n    read() -> Int\n    write(Int)\n}\nfn main() { handle { write(read() + 1); 0 }() { read(k) => k(4), write(v, k) => v } }",
+    [], "5"⟩,
+  ⟨"struct NoShow(Int)\neffect Out<T: Show> { put(T) }\nfn main() { handle { put(NoShow(1)); 0 }() { put(v, k) => 1 } }",
+    [], "error: 3:22: in `main`: `NoShow` does not implement `Show`"⟩,
   -- `drop` is not for a program to call.
   ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nfn main() { let mut f = File(7); drop(&mut f); 0 }",
     [], "error: 3:34: in `main`: `drop` is run when what holds a value ends; a program does not call it"⟩,

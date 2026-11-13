@@ -1100,15 +1100,16 @@ partial def resolveItem (ctx : Ctx) : Item → R (List Item)
         | .pub _ i => i
         | i => i
       match item with
-      | .struct name ps _ => if name == fn then some ps else none
-      | .enum name ps _ => if name == fn then some ps else none
+      | .struct name ps _ => if name == fn then some (ps, Space.type) else none
+      | .enum name ps _ => if name == fn then some (ps, Space.type) else none
+      | .effect name ps _ => if name == fn then some (ps, Space.effect) else none
       | _ => none
     let generics := match (← unitOf ctx.here).bind fun u => u.items.findSome? fun
         | .fn name ps _ _ _ => if name == fn then some ps else none
         | .pub _ (.fn name ps _ _ _) => if name == fn then some ps else none
         | _ => none with
       | some ps => genericParams ps
-      | none => genericParams (ofType.getD [])
+      | none => genericParams ((ofType.map (·.1)).getD [])
     let bounds ← bounds.mapM fun b => do
       let sealed_ := ["Fn", "RunsIn", "Environment", "Use", "Label"].contains b.trait || b.trait.startsWith "'"
       let trait ← if sealed_ then pure b.trait else (·.1) <$> resolveNamed ctx .trait [] b.trait
@@ -1116,7 +1117,7 @@ partial def resolveItem (ctx : Ctx) : Item → R (List Item)
       let assoc ← b.assoc.mapM fun (name, t) => do pure (name, ← resolveType ctx generics t)
       pure { b with trait, args, assoc }
     -- (written of a type: under the type's name)
-    pure [.bounds (ownName ctx (if ofType.isSome then .type else .value) fn) bounds]
+    pure [.bounds (ownName ctx ((ofType.map (·.2)).getD .value) fn) bounds]
   | .fieldNames ctor names pubs => pure [.fieldNames (ownName ctx .value ctor) names pubs]
   | .typeAlias name ps body => do
     pure [.typeAlias (ownName ctx .type name) ps (← resolveType ctx (genericParams ps) body)]

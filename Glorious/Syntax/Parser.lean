@@ -1318,7 +1318,11 @@ private partial def parseItem : P Item := do
   | .ident "effect" =>
     advance
     let name ← expectIdent
-    let params ← parseGenerics
+    -- What is asked of an effect's parameter is asked where one of its
+    -- operations is performed.
+    let (params, bounds) ← parseGenericsWith
+    let (_, more) ← parseWhere
+    let asked := bounds ++ more
     expectPunct "{"
     let mut ops : Array OpDecl := #[]
     repeat
@@ -1336,10 +1340,12 @@ private partial def parseItem : P Item := do
         else
           result := some (← parseType)
       ops := ops.push ⟨op, payload, result, terminal, quantity⟩
+      -- An operation ends with `,` or `;`, or with nothing at all.
       if !(← acceptPunct ",") then
-        if !(← acceptPunct ";") then break
+        let _ ← acceptPunct ";"
     expectPunct "}"
-    pure (.effect name params ops.toList)
+    if asked.isEmpty then pure (.effect name params ops.toList)
+    else pure (.module inherentMark (some [.effect name params ops.toList, .bounds name asked]))
   | .ident "fn" =>
     let (item, bounds) ← parseFn
     unless bounds.isEmpty do
