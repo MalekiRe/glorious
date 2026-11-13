@@ -1708,6 +1708,24 @@ partial def eraseLifetimes (items : List Item) : List Item :=
       .impl (params ps) tr head (params args) context (eraseLifetimes methods)
     | item => item
 
+/-- The items with each declared type and effect as it was written, lifetimes
+and all: the regions of Core are found from those. -/
+def withDeclared (written items : List Item) : List Item :=
+  items.map fun
+    | .enum name ps ctors =>
+      (written.find? fun
+        | .enum n _ _ => n == name
+        | _ => false).getD (.enum name ps ctors)
+    | .struct name ps fields =>
+      (written.find? fun
+        | .struct n _ _ => n == name
+        | _ => false).getD (.struct name ps fields)
+    | .effect name ps ops =>
+      (written.find? fun
+        | .effect n _ _ => n == name
+        | _ => false).getD (.effect name ps ops)
+    | item => item
+
 /-! ## Borrows of a field
 
 The machine's references are to whole variables. A borrow of a field,

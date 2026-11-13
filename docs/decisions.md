@@ -902,6 +902,34 @@ Not built. Conversion other than through `Int` (`u8(n)`, `int(x)`, `f64(n)`,
 `widen`, `narrow`, `char(code)`). A `Str` is a list: there are no arrays, so
 its length is counted.
 
+## A lifetime of a declared type is an argument in Core
+
+**Decision: Core's declared types and effects take no regions, and do not
+need to: a lifetime parameter is a type argument that carries a region.**
+`struct Holder<'a>(&'a Int)` is, for the certificate, a type of one argument,
+and `Holder<'a>` at a variable `x` is that type at `&ρ ()`, with `ρ` the
+region of `x`'s cell. The field is `&ρ Int`, where a certificate already
+writes a declared type's fields: in terms of the regions of its arguments.
+The same for `effect Reader<'a> { ask() -> &'a Int }`. Nothing in Core
+changed; where certificates are found, a declaration's lifetimes are now
+read (they used to be taken out with every other lifetime before that), and
+a reference for a lifetime the declaration takes points where that argument
+says.
+
+Before this, a reference in a declared type was of one region for the whole
+program, so a program that kept a borrow of a variable in a `struct`, or
+handled an effect with one, could not be shown to follow the region rules.
+Of the 451 test programs that compile, 432 are now shown to follow all of
+Core's rules, from 424.
+
+What is still not shown, 19 programs: a callable given a reference to a
+variable of the function it is passed to (six, `for<'a>`: the callable's
+type has to bind a region, which Core's types can and the search for a
+certificate cannot yet); a reference to one of two variables (four: Core has
+no region that is either of two cells); a resumption kept in a pair or
+taken by two callables of which one runs (four, ownership); a resumption or
+a label kept in a variable (three); and two others.
+
 ## A program the checker rejects has no traits
 
 **Decision: running a program without the checker stays what it is, a way

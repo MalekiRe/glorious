@@ -164,7 +164,9 @@ def compileSource (src : String) (check : Bool := true)
   let blocks ← match checked with
     | .ok blocks => pure (some blocks)
     | .error e => if check then throw e else pure none
-  -- Lifetimes were the checker's to read.
+  -- Lifetimes were the checker's to read; and, of what is declared, the
+  -- certificate's.
+  let written := all
   let all := Elab.eraseLifetimes all
   -- From here on the program has no traits: the checker said how each bound
   -- is met, and each is now a value passed where it is needed.
@@ -176,13 +178,14 @@ def compileSource (src : String) (check : Bool := true)
     | none => pure (all, none)
   -- What nothing reaches is not part of the program that runs.
   let all := Elab.reachable ("main" :: ((blocks.map (·.coercions)).getD []).map (·.2)) all
+  let declared := Elab.withDeclared written all
   let plain := fun (blocks : Option Elab.Blocks) => do
     let out ← Elab.elabProgram all blocks
     -- What is unsafe is outside what Core's rules are about: a program that
     -- calls a foreign function or reads memory at an address has no
     -- certificate.
     let cert ← if check && !out.foreign then
-        match certifyProgram all out.program out.envSizes with
+        match certifyProgram declared out.program out.envSizes with
         | .ok cert => pure (some cert)
         | .error e =>
           throw s!"the checker accepted this program, but its Core could not be shown to be well typed: {e}. This is a defect in the compiler"
@@ -196,7 +199,7 @@ def compileSource (src : String) (check : Bool := true)
   let lending := fun (blocks : Option Elab.Blocks) (sites : Nat → Nat) =>
     match Elab.elabProgram all blocks sites with
     | .ok out =>
-      match Infer.certify all out.program true out.envSizes true true with
+      match Infer.certify declared out.program true out.envSizes true true with
       | .ok cert =>
         if out.lent != 0 && Typing.checkProgram cert out.program then
           some (⟨out.program, out.ctorNames.map shownName, out.fnNames, out.opNames, some cert, out.lent,

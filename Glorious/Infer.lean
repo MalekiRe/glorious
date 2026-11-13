@@ -104,16 +104,26 @@ inductive IHint where
   result to be. The checker is told the second only if the first is `never`. -/
   | result (r b : ITy)
 
+/-- A lifetime a declared type or an effect is given is one of its arguments
+in Core: a type that carries the region, `&ρ ()`. In the declaration's own
+types the region of its `i`-th parameter is written as this plus `i`, which
+no region of a program is; `subst` puts the argument's region there. -/
+def lifetimeBase : Nat := 1099511627776
+
 structure CtorDecl where
   owner : Nat
   arity : Nat
   fields : List ITy
+  /-- Which of the type's parameters are lifetimes. -/
+  lifetimes : List Bool := []
 
 structure OpDecl where
   effect : Nat
   arity : Nat
   payload : List ITy
   result : Option ITy
+  /-- Which of the effect's parameters are lifetimes. -/
+  lifetimes : List Bool := []
 
 /-- Every operation of `sub` must be served at the same type: by `under` if it
 lists the operation, and by `sup` otherwise. -/
@@ -196,6 +206,8 @@ structure St where
   schemes : Std.HashMap Nat Scheme := {}
   /-- The prelude's type of arrays, by its name in this program. -/
   arrayType : Option String := none
+  /-- For each declared type, which of its parameters are lifetimes. -/
+  typeLifetimes : Array (List Bool) := #[]
   /-- The group being inferred, and the signatures of its functions. -/
   curScc : Option Nat := none
   cur : List (Nat × ISig) := []
@@ -553,7 +565,13 @@ partial def subst (args : List ITy) : ITy → ITy
   | .fn ps r ops tail cls env acc =>
     .fn (ps.map (subst args)) (subst args r)
       (ops.map fun (op, targs) => (op, targs.map (subst args))) tail cls (subst args env) acc
-  | .ref ρ t => .ref ρ (subst args t)
+  | .ref ρ t =>
+    -- The region of a lifetime parameter is its argument's.
+    if lifetimeBase ≤ ρ then
+      match args[ρ - lifetimeBase]? with
+      | some (.ref ρ' _) => .ref ρ' (subst args t)
+      | _ => .ref ρ (subst args t)
+    else .ref ρ (subst args t)
   | .never => .never
 
 def ctorDecl (tag : Nat) : M CtorDecl := do
@@ -566,10 +584,16 @@ def opDecl (op : Nat) : M OpDecl := do
   | some (some d) => pure d
   | _ => throw s!"operation {op} has no declaration"
 
+/-- Arguments not yet known for a declaration's parameters: a type for each,
+and for a lifetime a type that carries a region. -/
+def argsFor (arity : Nat) (lifetimes : List Bool) : M (List ITy) :=
+  (List.range arity).mapM fun i => do
+    if lifetimes.getD i false then pure (.ref (← freshRg) (.tuple [])) else freshTy
+
 /-- The type a constructor builds and its field types, at fresh type arguments. -/
 def instCtor (tag : Nat) : M (ITy × List ITy) := do
   let d ← ctorDecl tag
-  let args ← freshTys d.arity
+  let args ← argsFor d.arity d.lifetimes
   pure (.data d.owner args, d.fields.map (subst args))
 
 /-- An operation at type arguments: those arguments, what it takes, and what it
@@ -581,7 +605,7 @@ def instOp (shared : List (Nat × List ITy)) (op : Nat) :
   let (args, shared) ← match shared.lookup d.effect with
     | some args => pure (args, shared)
     | none => do
-      let args ← freshTys d.arity
+      let args ← argsFor d.arity d.lifetimes
       pure (args, (d.effect, args) :: shared)
   pure ((args, d.payload.map (subst args), d.result.map (subst args)), shared)
 
@@ -1855,22 +1879,52 @@ partial def declsFor (types : List Ty) (opsTodo : List (Nat × List Ty)) (datas 
 inferred: one type for the whole program. -/
 partial def resolveType (typeNames params : List String) : TypeExpr → M ITy
   | .name x args => do
+    -- A callable for every lifetime: here, the callable.
+    if x == Syntax.rankedMark then
+      match args.getLast? with
+      | some inner => return ← resolveType typeNames params inner
+      | none => return ← freshTy
     match params.idxOf? x with
     | some i => pure (.param i)
     | none =>
-      if x == "Int" || Syntax.isScalar x then pure .int
+      -- A lifetime that is no parameter of the declaration: a region of its own.
+      if x.startsWith "'" then pure (.ref (← freshRg) (.tuple []))
+      else if x == "Int" || Syntax.isScalar x then pure .int
       else if (← get).arrayType == some x then
         pure (.data arrayName (← args.mapM (resolveType typeNames params)))
       else
         match typeNames.idxOf? x with
-        | some id => do pure (.data id (← args.mapM (resolveType typeNames params)))
+        | some id => do
+          let given ← args.mapM (resolveType typeNames params)
+          -- A lifetime the type takes that is not written is one of its own.
+          let lifetimes := (← get).typeLifetimes[id]?.getD []
+          let mut missing := lifetimes.length - given.length
+          let mut rest := given
+          let mut out : Array ITy := #[]
+          for isLifetime in lifetimes do
+            if isLifetime && missing > 0 then
+              out := out.push (.ref (← freshRg) (.tuple []))
+              missing := missing - 1
+            else
+              match rest with
+              | a :: more =>
+                out := out.push a
+                rest := more
+              | [] => out := out.push (← freshTy)
+          pure (.data id (out.toList ++ rest))
         | none => freshTy
   | .tuple args => do pure (.tuple (← args.mapM (resolveType typeNames params)))
   | .fn ps r => do
     let row ← freshRow
     pure (.func (← ps.mapM (resolveType typeNames params)) (← resolveType typeNames params r) row
       (← freshCls) (← freshTy) (← freshAcc))
-  | .ref _ t _ => do pure (.ref (← freshRg) (← resolveType typeNames params t))
+  | .ref _ t life => do
+    -- A reference for a lifetime the declaration takes points where that
+    -- argument says.
+    let region ← match life.bind params.idxOf? with
+      | some j => pure (lifetimeBase + j)
+      | none => freshRg
+    pure (.ref region (← resolveType typeNames params t))
   | .never => freshTy
   | .hole => freshTy
   -- What a callable performs is found again for Core, not read.
@@ -1890,7 +1944,13 @@ def declare (items : List Item) (g : Elab.Globals) : M Unit := do
     | _ => none
   let setAt {α : Type} (arr : Array (Option α)) (i : Nat) (x : α) : Array (Option α) :=
     (if arr.size ≤ i then arr ++ Array.replicate (i + 1 - arr.size) none else arr).set! i (some x)
-  modify fun s => { s with types := Array.replicate typeNames.length [] }
+  let lifetimesOf := fun (params : List String) => params.map (·.startsWith "'")
+  let typeLifetimes := items.filterMap fun
+    | .enum _ params _ => some (lifetimesOf params)
+    | .struct _ params _ => some (lifetimesOf params)
+    | _ => none
+  modify fun s =>
+    { s with types := Array.replicate typeNames.length [], typeLifetimes := typeLifetimes.toArray }
   for item in items do
     match item with
     | .enum name params ctors =>
@@ -1901,7 +1961,7 @@ def declare (items : List Item) (g : Elab.Globals) : M Unit := do
           let fields ← fields.mapM (resolveType typeNames params)
           modify fun s =>
             { s with
-              ctors := setAt s.ctors info.tag ⟨owner, params.length, fields⟩
+              ctors := setAt s.ctors info.tag ⟨owner, params.length, fields, lifetimesOf params⟩
               types := s.types.modify owner (· ++ [info.tag]) }
         | none => throw s!"constructor `{c}` was not collected"
     | .struct name params fields =>
@@ -1911,7 +1971,7 @@ def declare (items : List Item) (g : Elab.Globals) : M Unit := do
         let fields ← fields.mapM (resolveType typeNames params)
         modify fun s =>
           { s with
-            ctors := setAt s.ctors info.tag ⟨owner, params.length, fields⟩
+            ctors := setAt s.ctors info.tag ⟨owner, params.length, fields, lifetimesOf params⟩
             types := s.types.modify owner (· ++ [info.tag]) }
       | none => throw s!"constructor `{name}` was not collected"
     | .effect name params ops =>
@@ -1922,7 +1982,8 @@ def declare (items : List Item) (g : Elab.Globals) : M Unit := do
           let payload ← op.payload.mapM (resolveType typeNames params)
           let result ← if op.terminal then pure none
             else some <$> resolveType typeNames params (op.result.getD .hole)
-          modify fun s => { s with ops := setAt s.ops info.id ⟨effect, params.length, payload, result⟩ }
+          modify fun s =>
+            { s with ops := setAt s.ops info.id ⟨effect, params.length, payload, result, lifetimesOf params⟩ }
         | none => throw s!"operation `{op.name}` was not collected"
     | _ => pure ()
 
