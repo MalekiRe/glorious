@@ -3244,6 +3244,18 @@ def cases : List Case := [
     [], "error: 6:20: in `main`: `t` is not used on every path, but a `Ticket` has to be used"⟩,
   ⟨"struct Ticket(Int);\nimpl Use<[1, 1]> for Ticket {}\nfn redeem(t: Ticket) -> Int { match(t) { Ticket(n) => n } }\nfn peek(t: &Ticket) -> Int { 1 }\nfn both(a: fn() -> Int, b: fn() -> Int) -> Int { a() + b() }\nfn main() -> Int { let t = Ticket(1); let a = peek(&t); both({ redeem(t) }, { redeem(t) + 1 }) }",
     [], "error: 6:20: in `main`: `t` is used more than once, but a `Ticket` can be used only once"⟩,
+  -- `Box`, for programs written where a value has to be put somewhere of its own (library 22.3).
+  ⟨"use std::boxed::{Box};\nenum Tree { Leaf(Int), Node(Box<Tree>, Box<Tree>) }\nfn sum(t: &Tree) -> Int { match(t) { &Tree::Leaf(n) => *n, &Tree::Node(l, r) => sum(Box::as_ref(l)) + sum(Box::as_ref(r)) } }\nfn main() -> Int { let mut t = Tree::Node(Box::new(Tree::Leaf(1)), Box::new(Tree::Node(Box::new(Tree::Leaf(20)), Box::new(Tree::Leaf(300))))); let mut b = Box::new(5); *Box::as_mut(&mut b) = 6; sum(&t) * 10 + Box::into_inner(b) }",
+    [], "3216"⟩,
+  -- Taking one field of a value lets go of the others, not of the one taken.
+  ⟨"struct Ticket(Int);\nimpl Use<[1, 1]> for Ticket {}\nfn redeem(t: Ticket) -> Int { match(t) { Ticket(n) => n } }\nstruct File { fd: Ticket, written: Int }\nfn close(f: File) -> Int { redeem(f.fd) }\nfn main() -> Int { close(File { fd: Ticket(3), written: 0 }) }",
+    [], "3"⟩,
+  ⟨"struct Ticket(Int);\nimpl Use<[1, 1]> for Ticket {}\nfn redeem(t: Ticket) -> Int { match(t) { Ticket(n) => n } }\nstruct File { fd: Ticket, written: Int }\nfn size(f: File) -> Int { f.written }\nfn main() -> Int { size(File { fd: Ticket(3), written: 0 }) }",
+    [], "error: 5:27: in `size`: taking one field of a value lets go of the rest, but a `Ticket` has to be used"⟩,
+  ⟨"struct Ticket(Int);\nimpl Use<[1, 1]> for Ticket {}\nfn redeem(t: Ticket) -> Int { match(t) { Ticket(n) => n } }\nfn main() -> Int { let p = (Ticket(4), 9); redeem(p.0) }",
+    [], "4"⟩,
+  ⟨"struct Ticket(Int);\nimpl Use<[1, 1]> for Ticket {}\nfn redeem(t: Ticket) -> Int { match(t) { Ticket(n) => n } }\nfn main() -> Int { let p = (Ticket(4), 9); p.1 }",
+    [], "error: 4:44: in `main`: taking one field of a value lets go of the rest, but a `Ticket` has to be used"⟩,
   -- `drop` is not for a program to call.
   ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nfn main() { let mut f = File(7); drop(&mut f); 0 }",
     [], "error: 3:34: in `main`: `drop` is run when what holds a value ends; a program does not call it"⟩,
@@ -3310,7 +3322,10 @@ def foreignCases : List Case := [
     [], "copied606"⟩,
   -- A function over two streams called from another over two.
   ⟨"use std::stream::{Read, Write, MemoryCursor, read, write, write_str, read_to_end};\nuse std::host::{IoError, run_host};\nuse std::stream::{Stdout};\nfn copy<R: Read, W: Write>(reader: &mut R, writer: &mut W, done: Int) -> Result<Int, IoError> {\n    match(read(reader, 4)) {\n        Ok(got) =>\n            if(len(got) == 0) { Ok(done) }\n            else { match(write(writer, got)) { Ok(n) => copy(reader, writer, done + n), Err(e) => Err(e) } },\n        Err(e) => Err(e)\n    }\n}\nfn twice<A: Read, B: Write>(a: &mut A, b: &mut B) -> Int { match(copy(a, b, 0)) { Ok(n) => n * 2, Err(_) => 0 } }\nfn main() -> Int {\n    let mut from = MemoryCursor::new([]);\n    write_str(&mut from, \"0123456789\");\n    run_host({ let mut to = Stdout; twice(&mut from, &mut to) }) }",
-    [], "012345678920"⟩
+    [], "012345678920"⟩,
+  -- Texts for C in memory of their own, C's truth value, and memory filled and copied (library 22.2, 22.4).
+  ⟨"use std::ffi::{CString, CStr, CStrError, NulError, c_bool_from_bool, bool_from_c_bool, null, ptr_is_null, ptr_add, ptr_write_bytes, ptr_copy, read_bytes, bytes_at, Layout, allocate, Allocation};\nuse std::slice::{Slice};\nuse std::value::{Rejected};\nextern \"C\" { fn strlen(s: usize) -> usize; fn toupper(c: i32) -> i32; }\nfn main() -> Int {\n    // A text given to C, and its bytes taken back.\n    match(CString::from_str(\"hello\")) {\n        Err(_) => 0 - 1,\n        Ok(text) =>\n            say(unsafe { strlen(CString::as_ptr(&text)) });\n            say(match(unsafe { bytes_at(CString::as_ptr(&text), 100) }) { Ok(bytes) => len(bytes), Err(_) => 0 - 1 });\n            say(CString::into_bytes(text));\n            // A zero inside is refused, and says where.\n            say(match(CString::from_vec([104u8, 0u8, 105u8])) { Ok(made) => CString::release(made); 0 - 1, Err(Rejected { value, error }) => error.position * 10 + len(value) });\n            let raw = [111u8, 107u8, 0u8];\n            say(match(CStr::from_bytes_with_nul(Slice::of(&raw))) { Ok(view) => match(CStr::to_str(view)) { Some(s) => s, None => \"?\" }, Err(_) => \"bad\" });\n            let cut = [111u8, 107u8];\n            say(match(CStr::from_bytes_with_nul(Slice::of(&cut))) { Ok(_) => \"ok\", Err(CStrError::MissingTerminator) => \"no zero\", Err(_) => \"bad\" });\n            say(bool_from_c_bool(c_bool_from_bool(true)));\n            say(ptr_is_null(null()));\n            // Memory filled, and copied along itself.\n            match(Layout::from_size_align(8, 1)) {\n                Err(_) => 0 - 2,\n                Ok(layout) => match(allocate(layout)) {\n                    Err(_) => 0 - 3,\n                    Ok(memory) =>\n                        let at = Allocation::as_ptr(&memory);\n                        unsafe { ptr_write_bytes(at, 7u8, 8) };\n                        unsafe { ptr_write_bytes(at, 1u8, 2) };\n                        unsafe { ptr_copy(at, ptr_add(at, 1), 4) };\n                        say(unsafe { read_bytes(at, 8) });\n                        Allocation::release(memory);\n                        0\n                }\n            }\n    }\n}\n",
+    [], "5\n6\n[104, 101, 108, 108, 111]\n13\nok\nno zero\nOk(())\nOk(())\n[1, 1, 1, 7, 7, 7, 7, 7]\n0"⟩
 ]
 
 end Glorious

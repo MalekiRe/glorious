@@ -32,6 +32,7 @@ pub mod budget;
 pub mod parse;
 pub mod graph;
 pub mod source;
+pub mod boxed;
 pub mod iterator;
 pub mod slice;
 pub mod collections;
@@ -3078,6 +3079,25 @@ impl SourceMap {
 }
 "#
 
+private def boxedText : String := r#"// One value kept as its owner's alone, as the library specification has it
+// (22.3). Every value here is kept somewhere of its own already, so a `Box`
+// is the value under another name: it is for programs written to be read
+// where that is not so.
+
+use std::value::{Rejected};
+use std::c::{AllocError};
+
+pub struct Box<T> { held: T }
+
+impl<T> Box<T> {
+    pub fn new(value: T) -> Self { Self { held: value } }
+    pub fn try_new(value: T) -> Result<Self, Rejected<T, AllocError>> { Ok(Self { held: value }) }
+    pub fn as_ref<'a>(value: &'a Self) -> &'a T { &value.held }
+    pub fn as_mut<'a>(value: &'a mut Self) -> &'a mut T { &mut value.held }
+    pub fn into_inner(value: Self) -> T { match(value) { Box { held } => held } }
+}
+"#
+
 private def generatorText : String := r#"// Generators, in the shape the library specification gives them (30.2): a
 // computation that yields is owned as a value, and resuming it uses that
 // value up and gives either what it yielded with the generator that goes
@@ -3152,6 +3172,9 @@ pub fn iterate<G: Generator>(g: G) -> Generated<G, G::Yield> {
 
 private def cText : String := r#"// What C has: its memory, and texts as it writes them. Everything here is
 // unsafe: an address is whatever a program says it is.
+
+use std::slice::{Slice};
+use std::value::{Rejected};
 
 // C's names for its types, as they are on x86-64 Linux.
 pub type c_char = i8;
@@ -3264,6 +3287,135 @@ impl Allocation {
     pub fn as_ptr(value: &Self) -> usize { value.at }
     // The memory given back.
     pub fn release(value: Self) { match(value) { Allocation { at, layout } => unsafe { free(at) } } }
+}
+
+// C's own truth value: a byte that is nothing or one. Not `Bool`.
+pub struct c_bool(u8);
+pub fn c_bool_from_bool(value: Bool) -> c_bool { c_bool(if(value) { 1u8 } else { 0u8 }) }
+pub fn bool_from_c_bool(value: c_bool) -> Bool { value.0 != 0u8 }
+
+// Addresses: the one that is nowhere, and one so many bytes on from another.
+pub fn null() -> usize { 0usize }
+pub fn ptr_is_null(at: usize) -> Bool { at == 0usize }
+pub fn ptr_add(at: usize, count: Int) -> usize { at + usize(count) }
+
+extern "C" {
+    fn memset(at: usize, byte: i32, count: usize) -> usize;
+    fn memmove(to: usize, from: usize, count: usize) -> usize;
+    fn memcpy(to: usize, from: usize, count: usize) -> usize;
+}
+
+// So many bytes at an address made one byte.
+pub unsafe fn ptr_write_bytes(at: usize, byte: u8, count: Int) { memset(at, to(byte), usize(count)); }
+// So many bytes copied from one address to another; the two stretches may
+// share bytes.
+pub unsafe fn ptr_copy(from: usize, to_: usize, count: Int) { memmove(to_, from, usize(count)); }
+// The same where they share none.
+pub unsafe fn ptr_copy_nonoverlapping(from: usize, to_: usize, count: Int) { memcpy(to_, from, usize(count)); }
+
+// Where a zero byte was found that should not be there.
+pub struct NulError { pub position: Int }
+pub enum CStrError { MissingTerminator, InteriorNul(NulError) }
+
+// The first zero among some bytes from a place on.
+fn first_zero<'a>(bytes: &Slice<'a, u8>, i: Int) -> Option<Int> {
+    match(Slice::get(bytes, i)) {
+        Some(b) => if(*b == 0u8) { Some(i) } else { tail first_zero(bytes, i + 1) },
+        None => None
+    }
+}
+
+fn zero_in(bytes: &[u8], i: Int) -> Option<Int> {
+    match(element(bytes, i)) {
+        Some(b) => if(*b == 0u8) { Some(i) } else { tail zero_in(bytes, i + 1) },
+        None => None
+    }
+}
+
+fn slice_bytes<'a>(bytes: &Slice<'a, u8>, i: Int, out: [u8]) -> [u8] {
+    match(Slice::get(bytes, i)) { Some(b) => tail slice_bytes(bytes, i + 1, push(out, *b)), None => out }
+}
+
+// Bytes that end in a zero and have no other: a text as C reads one, looked
+// at where it is.
+pub struct CStr<'a> { bytes: Slice<'a, u8> }
+
+impl<'a> CStr<'a> {
+    pub fn from_bytes_with_nul(value: Slice<'a, u8>) -> Result<Self, CStrError> {
+        match(first_zero(&value, 0)) {
+            None => Err(CStrError::MissingTerminator),
+            Some(at) =>
+                if(at + 1 == Slice::len(&value)) { Ok(Self { bytes: value }) }
+                else { Err(CStrError::InteriorNul(NulError { position: at })) }
+        }
+    }
+    // The bytes without the zero, and with it.
+    pub fn bytes(value: Self) -> Slice<'a, u8> {
+        let all = value.bytes;
+        match(Slice::sub(&all, 0, Slice::len(&all) - 1)) { Some(found) => found, None => all }
+    }
+    pub fn bytes_with_nul(value: Self) -> Slice<'a, u8> { value.bytes }
+    pub fn len(value: &Self) -> Int { Slice::len(&value.bytes) - 1 }
+    // The text, if the bytes are UTF-8.
+    pub fn to_str(value: Self) -> Option<Str> {
+        let found = CStr::bytes(value);
+        std::text::from_utf8(slice_bytes(&found, 0, []))
+    }
+}
+
+// The bytes C has at an address, up to its zero: copied out, the zero
+// with them. Unsafe: the address has to be one where that many bytes can
+// be read.
+pub unsafe fn bytes_at(at: usize, maximum_length: Int) -> Result<[u8], CStrError> { until_zero(at, maximum_length, []) }
+unsafe fn until_zero(at: usize, left: Int, out: [u8]) -> Result<[u8], CStrError> {
+    if(left <= 0) { Err(CStrError::MissingTerminator) } else {
+        let b = read_byte(at);
+        if(b == 0u8) { Ok(push(out, b)) } else { tail until_zero(at + 1usize, left - 1, push(out, b)) }
+    }
+}
+
+// A text for C in memory of its own: its bytes and a zero after them. It
+// has to be given back, with `release` or by taking its bytes out.
+pub struct CString { memory: Allocation, length: Int }
+
+impl CString {
+    // From bytes with no zero among them; with one, the bytes come back.
+    pub fn from_vec(bytes: [u8]) -> Result<Self, Rejected<[u8], NulError>> {
+        match(zero_in(&bytes, 0)) {
+            Some(at) => Err(Rejected { value: bytes, error: NulError { position: at } }),
+            None =>
+                let n = len(bytes);
+                match(Layout::from_size_align(n + 1, 1)) {
+                    Err(_) => Err(Rejected { value: bytes, error: NulError { position: n } }),
+                    Ok(layout) => match(allocate(layout)) {
+                        Err(_) => Err(Rejected { value: bytes, error: NulError { position: n } }),
+                        Ok(memory) =>
+                            unsafe { write_bytes(Allocation::as_ptr(&memory), push(bytes, 0u8)) };
+                            Ok(Self { memory: memory, length: n })
+                    }
+                }
+        }
+    }
+    pub fn from_str(text: Str) -> Result<Self, NulError> {
+        match(CString::from_vec(std::text::utf8(text))) { Ok(found) => Ok(found), Err(rejected) => Err(rejected.error) }
+    }
+    // Where C can read it, for as long as this is kept.
+    pub fn as_ptr(value: &Self) -> usize { Allocation::as_ptr(&value.memory) }
+    pub fn len(value: &Self) -> Int { value.length }
+    pub fn release(value: Self) { match(value) { CString { memory, length: _ } => Allocation::release(memory) } }
+    // Its bytes, without the zero and with it; the memory is given back.
+    pub fn into_bytes(value: Self) -> [u8] {
+        match(value) { CString { memory, length } =>
+            let bytes = unsafe { read_bytes(Allocation::as_ptr(&memory), length) };
+            Allocation::release(memory);
+            bytes }
+    }
+    pub fn into_bytes_with_nul(value: Self) -> [u8] {
+        match(value) { CString { memory, length } =>
+            let bytes = unsafe { read_bytes(Allocation::as_ptr(&memory), length + 1) };
+            Allocation::release(memory);
+            bytes }
+    }
 }
 "#
 
@@ -3472,6 +3624,8 @@ def texts : List (List String × String) :=
    (["std", "parse"], parseText),
    (["std", "graph"], graphText),
    (["std", "source"], sourceText),
+   (["std", "boxed"], boxedText),
+   (["alloc", "boxed"], "pub use std::boxed::*;\n"),
    (["std", "iterator"], iteratorText),
    (["std", "slice"], sliceText),
    (["std", "collections"], collectionsText),
@@ -3495,7 +3649,7 @@ def texts : List (List String × String) :=
    (["core", "iter"], "pub use std::iterator::*;\n"),
    (["core", "slice"], "pub use std::slice::*;\n"),
    (["core", "hash"], "pub use std::hash::*;\n"),
-   (["alloc"], "pub mod vec;\npub mod string;\npub mod collections;\npub mod fmt;\n"),
+   (["alloc"], "pub mod vec;\npub mod string;\npub mod collections;\npub mod fmt;\npub mod boxed;\n"),
    (["alloc", "fmt"], "pub use std::fmt::*;\n"),
    (["alloc", "vec"], "pub use std::vec::*;\n"),
    (["alloc", "string"], "pub use std::text::*;\n"),

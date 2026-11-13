@@ -2751,6 +2751,33 @@ callables that mutually call each other, which is why each traversal is
 one function: two functions that call each other are checked as one
 group, at one type.
 
+## C strings, addresses and `Box`
+
+From the specification's memory and C support (22.2 to 22.4), added to
+`std::ffi`: `CString`, a text for C in memory of its own, which has to be
+given back (`release`, or `into_bytes`); `CStr<'a>`, bytes that end in
+their one zero, looked at where they are; `NulError`, `CStrError`;
+`c_bool`; `null`, `ptr_is_null`, `ptr_add`, `ptr_write_bytes`, `ptr_copy`,
+`ptr_copy_nonoverlapping`. `std::boxed::Box<T>` is in `alloc::boxed` too.
+
+- **An address is a `usize`**, as in the rest of this module: there is no
+  `*const T`, since a value here is not bytes at an address. So the
+  specification's pointer functions that read and write a `T`
+  (`ptr_read<T>`, `ptr_as_ref`, `slice_from_raw`, `Box::into_raw`) are not
+  built; bytes and whole numbers are read and written by width.
+- **`CStr::from_ptr` is `bytes_at`**, which copies the bytes out: a slice
+  cannot point into memory that is C's.
+- **`Box<T>` is the value under another name.** Every value here is kept
+  somewhere of its own already; `Box` is there so that a type written
+  `Node(Box<Tree>, Box<Tree>)` reads as it does elsewhere.
+- `CString` has no `drop`: the library has none (see "Generators"), so it
+  is given back by name.
+
+Taking a field out of a value, `f.fd`, was said to let go of the whole
+value, the field taken included: `redeem(f.fd)` was refused for a ticket
+that has to be used, in a value whose other fields are numbers. It lets go
+of the other fields, and is refused only when one of those has to be used.
+
 ## A row with several unknown parts
 
 `copy_stream` performs what reading its one stream does and what writing

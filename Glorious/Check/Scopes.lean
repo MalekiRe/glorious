@@ -70,6 +70,17 @@ partial def exhaustive (tys : List Ty) (rows : List (List NPat)) : M Bool := do
       | none => fallback
     | _ => fallback
 
+/-- The types of a value's fields other than one, where they are known: what
+is let go when that one is taken. -/
+def otherFields (t : Ty) (idx : Nat) : M (Option (List Ty)) := do
+  match ← find t with
+  | .tuple ts => pure (some ((ts.zipIdx.filter (·.2 != idx)).map (·.1)))
+  | .con name args =>
+    match (← get).ctors.lookup name with
+    | some sig => pure (some (((sig.fieldsAt args).zipIdx.filter (·.2 != idx)).map (·.1)))
+    | none => pure none
+  | _ => pure none
+
 /-- The type of field `idx` of a value of type `t`, if `t` is known. -/
 def fieldType (t : Ty) (idx : Nat) : M (Option Ty) := do
   match ← find t with

@@ -111,7 +111,6 @@ partial def inferExpr (scope : Scope) (amb : Row) : Expr → M Ty
       modify fun s => { s with fieldReads := s.fieldReads.push (id, n) }
       return ← inferExpr scope amb (.proj e n)
     let subject ← inferExpr scope amb e
-    mustDrop subject "taking one field of a value lets go of the rest"
     modify fun s => { s with aparts := s.aparts.push (subject, s.pos) }
     let unknown := match ← find subject with
       | .var _ => true
@@ -126,21 +125,30 @@ partial def inferExpr (scope : Scope) (amb : Row) : Expr → M Ty
     match known with
     | some (idx, t) =>
       modify fun s => { s with fieldReads := s.fieldReads.push (id, idx) }
+      -- The fields not taken are what is let go.
+      match ← otherFields subject idx with
+      | some rest => for r in rest do mustDrop r "taking one field of a value lets go of the rest"
+      | none => mustDrop subject "taking one field of a value lets go of the rest"
       pure t
     | none =>
       -- Not known yet: settled once the rest of the function is inferred.
+      mustDrop subject "taking one field of a value lets go of the rest"
       let t ← freshTy
       modify fun s => { s with namedReads := s.namedReads.push (subject, name, t, id, s.pos) }
       pure t
   | .proj e idx => do
     if let some field ← inferFieldOfPlace scope (.proj e idx) then return field
     let subject ← inferExpr scope amb e
-    mustDrop subject "taking one field of a value lets go of the rest"
     modify fun s => { s with aparts := s.aparts.push (subject, s.pos) }
     match ← fieldType subject idx with
-    | some t => pure t
+    | some t =>
+      match ← otherFields subject idx with
+      | some rest => for r in rest do mustDrop r "taking one field of a value lets go of the rest"
+      | none => mustDrop subject "taking one field of a value lets go of the rest"
+      pure t
     | none => do
       -- Not known yet: settle it once the rest of the function is inferred.
+      mustDrop subject "taking one field of a value lets go of the rest"
       let t ← freshTy
       modify fun s => { s with projections := s.projections.push (subject, idx, t, s.pos) }
       pure t
