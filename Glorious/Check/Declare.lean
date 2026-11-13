@@ -23,6 +23,11 @@ partial def resolveType (params : List (String × Ty)) (decl : Bool) : TypeExpr 
     -- `T::Item`: the type a trait of `T` leaves to its implementation.
     if let [p, name] := x.splitOn "::" then
       if let some self := params.lookup p then
+        -- In a trait's own declaration, `Self::Item` is the type the trait
+        -- leaves open: the one every use of the trait gives its own answer
+        -- for, not one answer shared by them all.
+        if p == "Self" then
+          if let some own := params.lookup name then return own
         let traits := (← get).traitShape.filter fun (_, arity, assocs) => arity == 0 && assocs.contains name
         match traits with
         | [(tr, _, _)] =>

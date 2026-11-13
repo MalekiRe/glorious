@@ -2361,6 +2361,31 @@ written. That is all it does: nothing is concluded from it elsewhere, and a
 trait asked of the type is refused as it would have been, for want of an
 implementation.
 
+## Slices and iteration
+
+`core::slice::Slice<'a, T>` (`std::slice`) is a stretch of an array, borrowed:
+`of`, `len`, `get`, `first`, `last`, `sub`, `split_at`, `iter`, and
+`Vec::as_slice`. `core::iter::Iterator` (`std::iterator`) is the
+specification's trait: `type Item` and `next(&mut Self) -> Option<Item>`, with
+`Range`, `IntoIter` for an array's elements given away, and `SliceIter` for a
+slice's by reference. What is done with the values is functions over anything
+iterated: `fold`, `for_each`, `count`, `collect`, `map_collect`, `find_map`,
+`nth`. The lazy streams this library had are still `std::iter`.
+
+- **No adapter types.** `Map<I, F>`, `Filter<I, F>` and the rest of the
+  specification's matrix need an implementation whose conditions say that a
+  type parameter is a callable taking another's `Item`; an implementation's
+  conditions are a trait of a parameter and nothing more.
+- **No `find` with a test that borrows.** A function that takes a dictionary
+  for `I: Iterator` and lends a value it got from `next` to a callable
+  written `for<'a> fn(&'a T) -> Bool` is accepted and runs, but the search
+  for its regions fails, so a program using it would be certified as well
+  owned and no further. `find_map`, which gives the value to the function,
+  is there instead.
+- A fault was fixed on the way: `Self::Item` in a trait's function was one
+  type for every implementation in a program, so two iterated types with
+  different items could not be used together.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by

@@ -21,6 +21,8 @@ pub mod map;
 pub mod set;
 pub mod iter;
 pub mod c;
+pub mod iterator;
+pub mod slice;
 pub mod collections;
 pub mod host;
 pub mod hash;
@@ -321,6 +323,8 @@ pub fn len_of<T>(a: [T]) -> Int { len(a) }
 // A growable array changed where it is, in the shape the library
 // specification gives it (15): functions of the type, `&mut Self` to change
 // one, `Option<&T>` to look at an element. Sizes and places are `Int`.
+use std::slice::{Slice};
+
 pub struct Vec<T> { items: [T] }
 
 // The last `n` elements of an array taken off, last first, and what is left.
@@ -422,6 +426,8 @@ impl<T> Vec<T> {
         let items = &mut value.items;
         *items = [];
     }
+    // The elements as a slice: looked at where they are.
+    pub fn as_slice<'a>(value: &'a Self) -> Slice<'a, T> { Slice::of(&value.items) }
 }
 "#
 
@@ -1244,6 +1250,162 @@ impl<T> BinaryHeap<T> {
 }
 "#
 
+private def iteratorText : String := r#"// One value at a time, asked for through a `&mut` reference: the shape the
+// library specification gives iteration (18). What is iterated says what its
+// values are (`Item`); what uses them is a function over anything iterated.
+
+pub trait Iterator {
+    type Item;
+    fn next(&mut Self) -> Option<Self::Item>;
+}
+
+// The whole numbers from one up to, not including, another.
+pub struct Range { at: Int, end: Int }
+pub fn range(from: Int, to: Int) -> Range { Range { at: from, end: to } }
+impl Iterator for Range {
+    type Item = Int;
+    fn next(r) { if(r.at < r.end) { let v = r.at; r.at = v + 1; Some(v) } else { None } }
+}
+
+fn turned<T>(from: [T], onto: [T]) -> [T] {
+    match(pop(from)) {
+        Some((rest, last)) => tail turned(rest, push(onto, last)),
+        None => onto
+    }
+}
+
+// The elements of an array, each given away, first to last.
+pub struct IntoIter<T> { rest: [T] }
+pub fn into_iter<T>(items: [T]) -> IntoIter<T> { IntoIter { rest: turned(items, []) } }
+impl<T> Iterator for IntoIter<T> {
+    type Item = T;
+    fn next(it) {
+        let rest = &mut it.rest;
+        match(pop(replace(rest, []))) {
+            Some((left, x)) => *rest = left; Some(x),
+            None => None
+        }
+    }
+}
+
+// Every value, folded into one.
+pub fn fold<I: Iterator, A>(it: &mut I, acc: A, f: fn(A, I::Item) -> A) -> A {
+    match(next(it)) {
+        Some(x) => tail fold(it, f(acc, x), f),
+        None => acc
+    }
+}
+
+// Something done with every value.
+pub fn for_each<I: Iterator>(it: &mut I, f: fn(I::Item) -> ()) {
+    match(next(it)) {
+        Some(x) => f(x); tail for_each(it, f),
+        None => ()
+    }
+}
+
+// How many values are left; they are let go.
+pub fn count<I: Iterator>(it: &mut I) -> Int { count_from(it, 0) }
+fn count_from<I: Iterator>(it: &mut I, n: Int) -> Int {
+    match(next(it)) {
+        Some(_) => tail count_from(it, n + 1),
+        None => n
+    }
+}
+
+// The values left, as an array.
+pub fn collect<I: Iterator>(it: &mut I) -> [I::Item] { collect_onto(it, []) }
+fn collect_onto<I: Iterator>(it: &mut I, out: [I::Item]) -> [I::Item] {
+    match(next(it)) {
+        Some(x) => tail collect_onto(it, push(out, x)),
+        None => out
+    }
+}
+
+// What a function makes of each value, as an array.
+pub fn map_collect<I: Iterator, B>(it: &mut I, f: fn(I::Item) -> B) -> [B] { map_onto(it, f, []) }
+fn map_onto<I: Iterator, B>(it: &mut I, f: fn(I::Item) -> B, out: [B]) -> [B] {
+    match(next(it)) {
+        Some(x) => tail map_onto(it, f, push(out, f(x))),
+        None => out
+    }
+}
+
+// The first thing a function makes of a value, where it makes anything; the
+// values before that are let go.
+pub fn find_map<I: Iterator, B>(it: &mut I, f: fn(I::Item) -> Option<B>) -> Option<B> {
+    match(next(it)) {
+        Some(x) => match(f(x)) {
+            Some(found) => Some(found),
+            None => tail find_map(it, f)
+        },
+        None => None
+    }
+}
+
+// The value so many further on.
+pub fn nth<I: Iterator>(it: &mut I, n: Int) -> Option<I::Item> {
+    match(next(it)) {
+        Some(x) => if(n <= 0) { Some(x) } else { tail nth(it, n - 1) },
+        None => None
+    }
+}
+"#
+
+private def sliceText : String := r#"// A stretch of an array, borrowed: the array is not copied, and an element is
+// looked at where it is. The shape the library specification gives a slice
+// (14); places and lengths are `Int`.
+
+use std::iterator::{Iterator};
+
+pub struct Slice<'a, T> { items: &'a [T], from: Int, to: Int }
+
+impl<'a, T> Slice<'a, T> {
+    // The whole of an array.
+    pub fn of(items: &'a [T]) -> Self { Self { items: items, from: 0, to: len_at(items) } }
+    pub fn len(s: &Self) -> Int { s.to - s.from }
+    pub fn is_empty(s: &Self) -> Bool { s.to == s.from }
+    pub fn get(s: &Self, i: Int) -> Option<&'a T> {
+        if(i < 0) { None } else {
+            if(s.from + i < s.to) { element(s.items, s.from + i) } else { None }
+        }
+    }
+    pub fn first(s: &Self) -> Option<&'a T> { Slice::get(s, 0) }
+    pub fn last(s: &Self) -> Option<&'a T> { Slice::get(s, s.to - s.from - 1) }
+    // The stretch from one place of this one up to, not including, another.
+    pub fn sub(s: &Self, from: Int, to: Int) -> Option<Slice<'a, T>> {
+        if(from < 0) { None } else {
+            if(to < from) { None } else {
+                if(s.from + to > s.to) { None } else {
+                    Some(Slice { items: s.items, from: s.from + from, to: s.from + to })
+                }
+            }
+        }
+    }
+    // What is before a place, and what is from it on.
+    pub fn split_at(s: &Self, mid: Int) -> Option<(Slice<'a, T>, Slice<'a, T>)> {
+        match(Slice::sub(s, 0, mid)) {
+            Some(before) => match(Slice::sub(s, mid, s.to - s.from)) {
+                Some(after) => Some((before, after)),
+                None => None
+            },
+            None => None
+        }
+    }
+    pub fn iter(s: &Self) -> SliceIter<'a, T> { SliceIter { items: s.items, at: s.from, end: s.to } }
+}
+
+// The elements of a slice by reference, first to last.
+pub struct SliceIter<'a, T> { items: &'a [T], at: Int, end: Int }
+
+impl<'a, T> Iterator for SliceIter<'a, T> {
+    type Item = &'a T;
+    fn next(it) {
+        if(it.at < it.end) { let i = it.at; it.at = i + 1; element(it.items, i) } else { None }
+    }
+}
+"#
+
 private def cText : String := r#"// What C has: its memory, and texts as it writes them. Everything here is
 // unsafe: an address is whatever a program says it is.
 
@@ -1471,6 +1633,8 @@ def texts : List (List String × String) :=
    (["std", "set"], setText),
    (["std", "iter"], iterText),
    (["std", "c"], cText),
+   (["std", "iterator"], iteratorText),
+   (["std", "slice"], sliceText),
    (["std", "collections"], collectionsText),
    (["std", "host"], hostText),
    (["std", "hash"], hash),
@@ -1482,13 +1646,14 @@ def texts : List (List String × String) :=
    (["std", "time"], "pub use std::host::Clock;\n"),
    (["std", "random"], "pub use std::host::Entropy;\n"),
    (["std", "ffi"], "pub use std::c::*;\n"),
-   (["core"], "pub mod option;\npub mod result;\npub mod cmp;\npub mod num;\npub mod char;\npub mod iter;\npub mod hash;\n"),
+   (["core"], "pub mod option;\npub mod result;\npub mod cmp;\npub mod num;\npub mod char;\npub mod iter;\npub mod slice;\npub mod hash;\n"),
    (["core", "option"], "pub use std::option::*;\n"),
    (["core", "result"], "pub use std::result::*;\n"),
    (["core", "cmp"], "pub use std::cmp::*;\n"),
    (["core", "num"], "pub use std::int::*;\n"),
    (["core", "char"], "pub use std::char::*;\n"),
-   (["core", "iter"], "pub use std::iter::*;\n"),
+   (["core", "iter"], "pub use std::iterator::*;\n"),
+   (["core", "slice"], "pub use std::slice::*;\n"),
    (["core", "hash"], "pub use std::hash::*;\n"),
    (["alloc"], "pub mod vec;\npub mod string;\npub mod collections;\n"),
    (["alloc", "vec"], "pub use std::vec::*;\n"),
