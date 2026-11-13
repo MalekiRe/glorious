@@ -1878,8 +1878,75 @@ fn inputs(rest: &[String]) -> Result<VecDeque<i64>, String> {
     Ok(input)
 }
 
+/// What marks a program put at the end of this executable, before its length.
+const BUNDLE: &[u8; 8] = b"GLBUNDLE";
+
+/// The program at the end of this executable, if one was put there, and how
+/// long the executable is without it.
+fn bundled() -> Option<(Vec<u8>, u64)> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = std::fs::File::open(std::env::current_exe().ok()?).ok()?;
+    let size = file.metadata().ok()?.len();
+    if size < 16 {
+        return None;
+    }
+    let mut tail = [0u8; 16];
+    file.seek(SeekFrom::Start(size - 16)).ok()?;
+    file.read_exact(&mut tail).ok()?;
+    if &tail[..8] != BUNDLE {
+        return None;
+    }
+    let length = u64::from_le_bytes(tail[8..].try_into().ok()?);
+    let start = size.checked_sub(16 + length)?;
+    let mut bytes = vec![0u8; length as usize];
+    file.seek(SeekFrom::Start(start)).ok()?;
+    file.read_exact(&mut bytes).ok()?;
+    Some((bytes, start))
+}
+
+/// Write an executable that is this one with a program at its end: run, it
+/// runs the program, compiled when it starts.
+fn bundle(program: &[u8], out: &str) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let mut exe = std::fs::read(std::env::current_exe()?)?;
+    if let Some((_, own)) = bundled() {
+        exe.truncate(own as usize);
+    }
+    exe.extend_from_slice(program);
+    exe.extend_from_slice(BUNDLE);
+    exe.extend_from_slice(&(program.len() as u64).to_le_bytes());
+    std::fs::write(out, exe)?;
+    std::fs::set_permissions(out, std::fs::Permissions::from_mode(0o755))
+}
+
 pub fn cli_main() -> ExitCode {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
+    // An executable with a program at its end is that program: what it is
+    // given is the program's input.
+    if let Some((bytes, _)) = bundled() {
+        let input = match inputs(&args) {
+            Ok(input) => input,
+            Err(e) => {
+                eprintln!("{e}");
+                return ExitCode::from(64);
+            }
+        };
+        let rewrite = std::env::var("GLORIOUS_OPT").as_deref() != Ok("0");
+        let program = match decode(&bytes, rewrite) {
+            Ok(program) => program,
+            Err(e) => {
+                eprintln!("{e}");
+                return ExitCode::from(1);
+            }
+        };
+        let bodies = match std::env::var("GLORIOUS_BACKEND").as_deref() {
+            Ok("interp") => Vec::new(),
+            Ok("mix") => x86::compile(&program.codes, |f| f % 3 != 1),
+            _ => x86::compile(&program.codes, |_| true),
+        };
+        let mut vm = machine(program, input);
+        return ExitCode::from(finish(&mut vm, &bodies));
+    }
     // Compiled where there is a backend for the machine, unless told otherwise.
     let mut backend = match std::env::var("GLORIOUS_BACKEND").as_deref() {
         Ok("x86") => Backend::X86,
@@ -1889,6 +1956,7 @@ pub fn cli_main() -> ExitCode {
         _ => Backend::Interp,
     };
     let mut emit = false;
+    let mut bundling = false;
     let mut dump = false;
     let mut rewrite = std::env::var("GLORIOUS_OPT").as_deref() != Ok("0");
     while let Some(first) = args.first() {
@@ -1897,6 +1965,7 @@ pub fn cli_main() -> ExitCode {
             "--backend=x86" => backend = Backend::X86,
             "--backend=mix" => backend = Backend::Mix,
             "--emit-llvm" => emit = true,
+            "--bundle" => bundling = true,
             "--dump" => dump = true,
             "--no-opt" => rewrite = false,
             _ => break,
@@ -1904,10 +1973,11 @@ pub fn cli_main() -> ExitCode {
         args.remove(0);
     }
     let Some((path, rest)) = args.split_first() else {
-        eprintln!("usage: glorious-vm [--backend=interp|x86|mix] [--no-opt] [--emit-llvm] [--dump] FILE [INPUT...]");
+        eprintln!("usage: glorious-vm [--backend=interp|x86|mix] [--no-opt] [--emit-llvm] [--dump] FILE [INPUT...]\n       glorious-vm --bundle FILE OUT");
         return ExitCode::from(64);
     };
-    let input = match inputs(rest) {
+    // (What follows the file is the program's input, or where to write.)
+    let input = match inputs(if bundling { &[] } else { rest }) {
         Ok(input) => input,
         Err(e) => {
             eprintln!("{e}");
@@ -1921,6 +1991,25 @@ pub fn cli_main() -> ExitCode {
             return ExitCode::from(1);
         }
     };
+    if bundling {
+        // `--bundle FILE OUT`: an executable of the program's own, written
+        // here with no other tool.
+        let Some(out) = rest.first() else {
+            eprintln!("usage: glorious-vm --bundle FILE OUT");
+            return ExitCode::from(64);
+        };
+        if let Err(e) = decode(&bytes, false) {
+            eprintln!("{path}: {e}");
+            return ExitCode::from(1);
+        }
+        return match bundle(&bytes, out) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("{out}: {e}");
+                ExitCode::from(1)
+            }
+        };
+    }
     let program = match decode(&bytes, rewrite) {
         Ok(program) => program,
         Err(e) => {

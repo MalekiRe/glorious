@@ -116,11 +116,25 @@ partial def inferExpr (scope : Scope) (amb : Row) : Expr → M Ty
       return ← inferExpr scope amb (.proj e n)
     let subject ← inferExpr scope amb e
     mustDrop subject "taking one field of a value lets go of the rest"
-    let idx := (← fieldIndex subject name).getD 0
-    modify fun s => { s with fieldReads := s.fieldReads.push (id, idx) }
-    match ← fieldType subject idx with
-    | some t => pure t
-    | none => throw s!"the field `{name}` is read from a value whose type is not known here; annotate it"
+    let unknown := match ← find subject with
+      | .var _ => true
+      | _ => false
+    let known ← if unknown then pure none else
+      match ← fieldIndex subject name with
+      | some idx => do
+        match ← fieldType subject idx with
+        | some t => pure (some (idx, t))
+        | none => pure none
+      | none => pure none
+    match known with
+    | some (idx, t) =>
+      modify fun s => { s with fieldReads := s.fieldReads.push (id, idx) }
+      pure t
+    | none =>
+      -- Not known yet: settled once the rest of the function is inferred.
+      let t ← freshTy
+      modify fun s => { s with namedReads := s.namedReads.push (subject, name, t, id, s.pos) }
+      pure t
   | .proj e idx => do
     if let some field ← inferFieldOfPlace scope (.proj e idx) then return field
     let subject ← inferExpr scope amb e

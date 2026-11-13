@@ -2513,6 +2513,15 @@ def cases : List Case := [
   -- `core` and `alloc` are the library's other names for what `std` has.
   ⟨"use core::option::{is_some, unwrap_or};\nuse alloc::vec::{sort, reverse};\nuse alloc::collections::{VecDeque};\nuse alloc::collections::map;\nfn main() { let mut q = VecDeque::new(); VecDeque::push_back(&mut q, 3); say(sort([3, 1, 2])); say(unwrap_or(VecDeque::pop_front(&mut q), 0)); let m = map::insert(map::new(), 1, 2); say(map::len(m)); 0 }",
     [], "[1, 2, 3]\n3\n1\n0"⟩,
+  -- A field read by name from a value whose type is known only later: an element of an array.
+  ⟨"struct P { x: Int, y: Int }\nfn main() -> Int { let mut a = [P { x: 1, y: 2 }, P { x: 3, y: 4 }]; match(element_mut(&mut a, 1)) { Some(r) => r.y = 9, None => () }; a[1].y + a[0].y }",
+    [], "11"⟩,
+  ⟨"struct P { x: Int, y: Int }\nfn main() -> Int { let ps = [P { x: 1, y: 2 }]; fold(ps, 0, { (acc, p) => acc + p.x + p.y }) }",
+    [], "3"⟩,
+  ⟨"struct P { x: Int, y: Int }\nfn f(g) -> Int { g().x }\nfn main() -> Int { f({ P { x: 5, y: 6 } }) }",
+    [], "error: 2:18: in `f`: the field `x` is read from a value whose type is not known here; annotate it"⟩,
+  ⟨"fn main() -> Int { let a = [1]; a[0].nope }",
+    [], "error: 1:33: in `main`: `Int` has no field `nope`: its fields have no names"⟩,
   -- `drop` is not for a program to call.
   ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nfn main() { let mut f = File(7); drop(&mut f); 0 }",
     [], "error: 3:34: in `main`: `drop` is run when what holds a value ends; a program does not call it"⟩,

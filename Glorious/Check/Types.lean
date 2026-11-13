@@ -470,6 +470,9 @@ structure St where
   /-- Field reads whose subject was not yet known: subject, index, field type,
   and where the read is. -/
   projections : Array (Ty × Nat × Ty × String) := #[]
+  /-- Fields read by name from values whose type was not known yet: the
+  value's type, the name, the field's type, the read, and where. -/
+  namedReads : Array (Ty × String × Ty × Nat × String) := #[]
   /-- Where the statement being checked starts, as a prefix for messages that
   are only raised later. -/
   pos : String := ""

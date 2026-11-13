@@ -100,8 +100,14 @@ It is decided per function, when the program starts. `glorious-vm
 function to x86-64 in memory, or does the one for two functions in three and
 the other for the rest. On x86-64 Linux it compiles unless told otherwise.
 
+`glorious-vm --bundle FILE OUT` writes an executable with no other tool: the
+VM itself with the program at its end. Run, it compiles the program to
+x86-64 in memory and runs it; what it is given is the program's input.
+`glorious exe prog.glorious prog` does both steps.
+
 `glorious-vm --emit-llvm FILE` writes an LLVM module with a body for every
-function, the bytecode, and a `main`:
+function, the bytecode, and a `main` (`glorious native prog.glorious prog`
+does all three steps):
 
 ```
 glorious build prog.glorious prog.gbc

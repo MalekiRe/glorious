@@ -94,9 +94,57 @@ def fieldType (t : Ty) (idx : Nat) : M (Option Ty) := do
     | none => throw s!"`{bareName name}` has no fields to read with `.{idx}`"
   | t => throw s!"`.{idx}` reads a field, but `{showTy (← zonk t)}` has none"
 
+/-- Which field of a value of type `t` a step is: its number, or the place of
+its name among the fields of the type's one constructor. None if the type is
+not known yet and the step is a number. -/
+def fieldIndex (t : Ty) (step : String) : M (Option Nat) := do
+  if let some n := step.toNat? then return some n
+  match ← find t with
+  | .con name _ =>
+    let ctor := match (← get).types.lookup name with
+      | some decl => match decl.ctors with
+        | [c] => some c
+        | _ => none
+      | none => none
+    let declared := (← get).fieldNames
+    match ctor.bind fun c => declared.lookup c with
+    | some names =>
+      match names.idxOf? step with
+      | some i => pure (some i)
+      | none => throw s!"`{showTy (← zonk t)}` has no field `{step}`"
+    | none => throw s!"`{showTy (← zonk t)}` has no field `{step}`: its fields have no names"
+  | .var _ =>
+    throw s!"the field `{step}` is read from a value whose type is not known here; annotate it"
+  | t => throw s!"`{showTy (← zonk t)}` has no field `{step}`"
+
 /-- Settle the field reads that were waiting for their subject's type. When
 `final`, one that still cannot be settled is an error. -/
 partial def runProjections (final : Bool) : M Unit := do
+  -- Fields read by name first: which field a name is depends on the type.
+  let named := (← get).namedReads
+  modify fun s => { s with namedReads := #[] }
+  let mut unnamed : Array (Ty × String × Ty × Nat × String) := #[]
+  for (subject, name, result, id, pos) in named do
+    let unknown := match ← find subject with
+      | .var _ => true
+      | _ => false
+    let found ← if unknown then pure none else
+      match ← (try fieldIndex subject name catch e => throw (pos ++ e)) with
+      | some idx => do
+        match ← fieldType subject idx with
+        | some t => pure (some (idx, t))
+        | none => pure none
+      | none => pure none
+    match found with
+    | some (idx, t) =>
+      try unifyAt s!"the field `{name}`" result t
+      catch e => throw (pos ++ e)
+      modify fun s => { s with fieldReads := s.fieldReads.push (id, idx) }
+    | none => unnamed := unnamed.push (subject, name, result, id, pos)
+  if final then
+    if let some (_, name, _, _, pos) := unnamed[0]? then
+      throw s!"{pos}the field `{name}` is read from a value whose type is not known here; annotate it"
+  modify fun s => { s with namedReads := unnamed ++ s.namedReads }
   let waiting := (← get).projections
   modify fun s => { s with projections := #[] }
   let mut left : Array (Ty × Nat × Ty × String) := #[]

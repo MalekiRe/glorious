@@ -10,6 +10,9 @@ import Glorious.Bytecode.Encode
 * `glorious check FILE [INPUT...]` runs it on both machines and reports whether
   they agree.
 * `glorious build FILE OUT` compiles it to a bytecode file for the Rust VM.
+* `glorious exe FILE OUT` writes an executable of the program's own with no
+  other tool: the VM with the program at its end, compiled to x86-64 when it
+  starts. Needs the VM built.
 * `glorious native FILE OUT` builds it as a program of its own: bytecode, a
   body for each function made by LLVM, and the runtime. Needs `clang`, and the
   VM built (`cargo build --release` in `vm`).
@@ -387,6 +390,29 @@ def main (args : List String) : IO UInt32 := do
             (dir / "libglorious_vm.a").toString, "-o", out, "-lpthread", "-ldl", "-lm"] }
       if cc.exitCode != 0 then
         IO.eprintln s!"clang: {cc.stderr}"
+        return 1
+      pure 0
+    | .error e =>
+      IO.eprintln s!"{path}: {e}"
+      pure 1
+  | ["exe", path, out] =>
+    -- An executable of the program's own with no other tool: the VM with
+    -- the program at its end, compiled to machine code when it starts.
+    match ← compileFile path with
+    | .ok c => do
+      let dir ← match ← IO.getEnv "GLORIOUS_VM_DIR" with
+        | some d => pure (System.FilePath.mk d)
+        | none => do
+          let exe ← IO.appPath
+          let root := (((exe.parent.bind (·.parent)).bind (·.parent)).bind (·.parent)).getD "."
+          pure (root / "vm" / "target" / "release")
+      let gbc := out ++ ".gbc"
+      writeBytecode c gbc
+      let made ← IO.Process.output
+        { cmd := (dir / "glorious-vm").toString, args := #["--bundle", gbc, out] }
+      IO.FS.removeFile gbc
+      if made.exitCode != 0 then
+        IO.eprintln s!"glorious-vm: {made.stderr}"
         return 1
       pure 0
     | .error e =>

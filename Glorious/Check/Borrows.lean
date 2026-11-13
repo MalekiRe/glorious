@@ -472,29 +472,6 @@ def fieldOfDeref : Expr → Option (String × List (String × Option Nat))
   | .fieldOf id e name => (fieldOfDeref e).map fun (x, path) => (x, path ++ [(name, some id)])
   | _ => none
 
-/-- Which field of a value of type `t` a step is: its number, or the place of
-its name among the fields of the type's one constructor. None if the type is
-not known yet and the step is a number. -/
-def fieldIndex (t : Ty) (step : String) : M (Option Nat) := do
-  if let some n := step.toNat? then return some n
-  match ← find t with
-  | .con name _ =>
-    let ctor := match (← get).types.lookup name with
-      | some decl => match decl.ctors with
-        | [c] => some c
-        | _ => none
-      | none => none
-    let declared := (← get).fieldNames
-    match ctor.bind fun c => declared.lookup c with
-    | some names =>
-      match names.idxOf? step with
-      | some i => pure (some i)
-      | none => throw s!"`{showTy (← zonk t)}` has no field `{step}`"
-    | none => throw s!"`{showTy (← zonk t)}` has no field `{step}`: its fields have no names"
-  | .var _ =>
-    throw s!"the field `{step}` is read from a value whose type is not known here; annotate it"
-  | t => throw s!"`{showTy (← zonk t)}` has no field `{step}`"
-
 /-- The type of the field reached by `path` in a value of type `t`, and the
 way to it by number. Where `t` is not known yet, a step by number is settled
 once the rest of the function is inferred. -/
