@@ -223,6 +223,9 @@ structure ACtx where
   lower : Bool := false
   /-- Names whose calls only compute: they always come back. -/
   quiet : List String := []
+  /-- The operations declared `[1, 1]`: whoever handles one resumes it, so
+  performing it comes back. -/
+  exact : List String := []
   /-- Calls, by identity, whose types say they come back. -/
   sure : List Nat := []
   /-- The count is of what comes before a call of a `probe`: a path ends at
@@ -730,8 +733,10 @@ partial def runCallee (ctx : ACtx) (depth : Nat) (env : List (String × AVal)) (
     else if let some resumptive := ctx.ops.lookup x then
       -- Performing an operation hands its payload to a handler.
       if ctx.lower then
-        -- The handler need not resume: the path may end here.
-        handedOn fun n => (if resumptive then [(AVal.unknown, n)] else []) ++ [(.gone x, n)]
+        -- The handler need not resume: the path may end here. Unless the
+        -- operation is declared `[1, 1]`: then it has to.
+        if resumptive && ctx.exact.contains x then handedOn fun n => [(AVal.unknown, n)]
+        else handedOn fun n => (if resumptive then [(AVal.unknown, n)] else []) ++ [(.gone x, n)]
       else
         let mut worst := 0
         let found ← runList ctx depth env args
@@ -946,7 +951,8 @@ def checkUses (pos : String) (outer : Scope) (binds : Scope) (body : List Stmt) 
   let intrinsics := Elab.prims.map (·.1) ++ Elab.casts ++ Elab.hosts.map (·.1) ++ ["cancel", "replace", Syntax.foreignCall, Syntax.ctorIsMark, "%shapes", "%never"]
   let ctx : ACtx :=
     { fns := s.fnBodies, ctors := s.ctors.map (·.1), aliases := s.aliases,
-      ops := s.ops.map fun (name, sig) => (name, sig.result.isSome), quiet := intrinsics
+      ops := s.ops.map fun (name, sig) => (name, sig.result.isSome), quiet := intrinsics,
+      exact := s.ops.filterMap fun (name, sig) => if sig.must && sig.result.isSome then some name else none
       now := s.packs.toList.filterMap fun (id, names) =>
         if names == [Syntax.nowMark] then some id else none }
   let names := (binds ++ outer).map (·.1)
@@ -1031,7 +1037,12 @@ def runLowerChecks (fnTy : Ty) : M Unit := do
     let callee ← zonk callee
     if let .fn _ _ effs tail _ := callee then
       modify fun st => { st with seen := [] }
-      let silent := silent || (effs.isEmpty && match tail with
+      -- (An effect all of whose operations are declared `[1, 1]` is always
+      -- resumed: a callable that performs nothing else comes back.)
+      let resumed := effs.all fun (e, _) =>
+        let mine := s.ops.filter fun (_, sig) => sig.effect == e
+        !mine.isEmpty && mine.all fun (_, sig) => sig.must && sig.result.isSome
+      let silent := silent || (resumed && match tail with
         | none => true
         | some ρ => !sources.contains ρ)
       if silent && !(← tyJumps callee) then
@@ -1052,6 +1063,7 @@ def runLowerChecks (fnTy : Ty) : M Unit := do
   let ctx : ACtx :=
     { fns := s.fnBodies, ctors := s.ctors.map (·.1), aliases := s.aliases,
       ops := s.ops.map fun (name, sig) => (name, sig.result.isSome), quiet := intrinsics,
+      exact := s.ops.filterMap fun (name, sig) => if sig.must && sig.result.isSome then some name else none,
       lower := true, sure := sure }
   let quiet := fun (f : String) =>
     (ctx.ctorOf f).isSome || (intrinsics.contains f && (ctx.fns.lookup f).isNone)

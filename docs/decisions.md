@@ -2030,19 +2030,20 @@ How this differs from the specification:
   swapped with `replace`, which gives back what was there to be used. The
   specification's states of a place that differ from path to path are not
   built.
-- A value that has to be used cannot wait across an operation, which may not
-  be resumed. It can wait across a call of a callable the function was given
+- A value that has to be used cannot wait across an operation that may not
+  be resumed. It can across one declared `[1, 1]` (see "Exactly once is
+  resumed" below). It can wait across a call of a callable the function was given
   only if that callable's type says it performs nothing (`/ {}`, see "What a
   callable performs can be written"); it is then part of the function's
   contract that what it is given holds no label to jump to.
 - References are as before: `&mut` is not a use-once value.
 - All of this is the unproved checker. Core is told nothing about it.
 
-What this does for the examples: all three that use resumptions declare their
-operations `[1, 1]`. For that, `find` in `generators` cancels the generator it
-stops early and says its predicate performs nothing; and `tasks`, which keeps
-resumptions in a mutable queue, swaps the queue rather than assigning it and
-has a cleanup that runs whatever is left in it.
+What this does for the examples: `backtracking` and `tasks` declare their
+operations `[1, 1]`; `tasks`, which keeps resumptions in a mutable queue,
+swaps the queue rather than assigning it and has a cleanup that runs
+whatever is left in it. `generators` stops a generator early, so its `yield`
+says nothing (see "Exactly once is resumed" below).
 
 ## What a callable performs can be written
 
@@ -2509,8 +2510,8 @@ L..". Where one is not met, this is how.
 
 | | |
 |---|---|
-| Met as tried | L01 to L17, L19 to L22, L25, L26, L28 to L31, L35 to L39, L42, L45, L48 |
-| Met in part | L23, L32, L33, L43, L44, L47 |
+| Met as tried | L01 to L17, L19 to L22, L25, L26, L28 to L31, L33, L35 to L39, L42, L45, L48 |
+| Met in part | L23, L32, L43, L44, L47 |
 | Not offered | L18, L24, L34, L40 |
 | Not tried | L27, L41, L46 |
 
@@ -2521,13 +2522,8 @@ L..". Where one is not met, this is how.
   specification asks for `unsafe` there.
 - **L32.** An arm without a resumption resumes with what it gives. Exact
   finite counts above one are not offered, so there is nothing to refuse.
-- **L33.** A computation that could be cancelled cannot hold a value that
-  has to be used: met. But `[1, 1]` here means resumed or cancelled, each
-  written out, so a value that has to be used cannot be held across any
-  operation, and the specification's exact-once suspension that carries
-  such a value is not offered. Making `[1, 1]` mean resumed would need a
-  resumption that is let go to cancel itself, which needs callables to be
-  destroyed with what they hold.
+- **L33.** Not met when first tried, and now met: see "Exactly once is
+  resumed" below.
 - **L35.** Met, and a fault found on the way: `defer { .. }` made the block
   a callable and let it go, running nothing. It now runs the block.
 - **L43, L44.** One runtime holds every value whichever engine runs a
@@ -2539,6 +2535,34 @@ L..". Where one is not met, this is how.
   in what a reference points to (`replace` puts something back at once), no
   resumption used more than once, and no raw memory beyond addresses given
   to and by C.
+
+## Exactly once is resumed
+
+**Changed.** A resumption of an operation declared `[1, 1]` had to be used,
+and `cancel(k)` counted as a use: resumed or cancelled, each written out. So
+performing such an operation might not come back, and a value that has to be
+used could not wait across it. The specification means something else by
+exact one-shot (10.6): the resumption is invoked, a computation suspended on
+it can carry what a cancellable one cannot, and its required cases L33 and
+S90 ask for exactly that.
+
+Now `[1, 1]` means resumed. `cancel` given such a resumption is refused, as
+letting it go already was. Performing an operation declared `[1, 1]` comes
+back, so a value that has to be used may wait across it, and across a call
+of a callable that performs only such operations.
+
+- An operation that says nothing is as before: its resumption may be
+  resumed, cancelled with `cancel`, or let go by an arm, which cancels it.
+  A generator that can be stopped early is this kind; `examples/generators`
+  now is.
+- What makes this hold is the rule for any value that has to be used: a
+  resumption of a `[1, 1]` operation cannot be dropped, ignored by a
+  pattern, left in a variable, kept by a callable that may not run, or held
+  while something runs that may not come back. That is the unproved
+  checker's rule, as before; Core is told nothing of it.
+- A resumption that is let go somewhere other than its arm is still simply
+  forgotten, without its cleanups running: callables do not yet say how
+  they are destroyed.
 
 ## The library specification's required cases
 

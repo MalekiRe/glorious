@@ -956,6 +956,8 @@ def cases : List Case := [
   ⟨"effect Ask { [0, 1] ask() -> Int }\nfn main() { handle ask() + 1 { ask(k) => 7 } }",
     [], "7"⟩,
   ⟨"effect Ask { [1, 1] ask() -> Int }\nfn main() { handle ask() + 1 { ask(k) => cancel(k); 7 } }",
+    [], "error: 2:42: in `main`: `cancel` lets go of what it is given, but a resumption of an operation declared `[1, 1]` has to be used"⟩,
+  ⟨"effect Ask { ask() -> Int }\nfn main() { handle ask() + 1 { ask(k) => cancel(k); 7 } }",
     [], "7"⟩,
   ⟨"effect Ask { [1, 1] ask() -> Int }\nfn main() { handle ask() + 1 { ask(k) => if(1 < 2) { k(10) } else { k(20) } } }",
     [], "11"⟩,
@@ -1019,12 +1021,12 @@ def cases : List Case := [
   -- A value that has to be used may wait across a call of a callable the
   -- function was given if that callable performs nothing; and then whoever
   -- gives one may not give one that jumps to a label.
-  ⟨"effect Yield { [1, 1] yield(Int) }\nfn gen() { yield(1); yield(2); () }\nfn find(generator, wanted: fn(Int) -> Result<(), ()> / {}) { handle generator() { _ => None, yield(value, k) => if(wanted(value)) { cancel(k); Some(value) } else { k(()) } } }\nfn main() { find({ gen() }, { x => x > 1 }) }",
-    [], "Ok(2)"⟩,
-  ⟨"effect Yield { [1, 1] yield(Int) }\nfn gen() { yield(1); yield(2); () }\nfn find(generator, wanted) { handle generator() { _ => None, yield(value, k) => if(wanted(value)) { cancel(k); Some(value) } else { k(()) } } }\nfn main() { find({ gen() }, { x => x > 1 }) }",
-    [], "error: 3:30: in `find`: `k` is not used on every path, but a resumption of an operation declared `[1, 1]` has to be used"⟩,
-  ⟨"effect Yield { [1, 1] yield(Int) }\nfn gen() { yield(1); yield(2); () }\nfn find(generator, wanted: fn(Int) -> Result<(), ()> / {}) { handle generator() { _ => None, yield(value, k) => if(wanted(value)) { cancel(k); Some(value) } else { k(()) } } }\nfn main() { @out { find({ gen() }, { x => @out(None) }) } }",
-    [], "error: 4:20: in `main`: `find` holds a value that has to be used while it calls what it is given, but what it is given here can jump to a label and not come back"⟩,
+  ⟨"effect Yield { [1, 1] yield(Int) }\nfn gen() { yield(1); yield(2); () }\nfn tally(generator, wanted: fn(Int) -> Result<(), ()> / {}) { handle generator() { _ => 0, yield(value, k) => if(wanted(value)) { 1 + k(()) } else { k(()) } } }\nfn main() { tally({ gen() }, { x => x > 1 }) }",
+    [], "1"⟩,
+  ⟨"effect Yield { [1, 1] yield(Int) }\nfn gen() { yield(1); yield(2); () }\nfn tally(generator, wanted) { handle generator() { _ => 0, yield(value, k) => if(wanted(value)) { 1 + k(()) } else { k(()) } } }\nfn main() { tally({ gen() }, { x => x > 1 }) }",
+    [], "error: 3:31: in `tally`: `k` is not used on every path, but a resumption of an operation declared `[1, 1]` has to be used"⟩,
+  ⟨"effect Yield { [1, 1] yield(Int) }\nfn gen() { yield(1); yield(2); () }\nfn tally(generator, wanted: fn(Int) -> Result<(), ()> / {}) { handle generator() { _ => 0, yield(value, k) => if(wanted(value)) { 1 + k(()) } else { k(()) } } }\nfn main() { @out { tally({ gen() }, { x => @out(0) }) } }",
+    [], "error: 4:20: in `main`: `tally` holds a value that has to be used while it calls what it is given, but what it is given here can jump to a label and not come back"⟩,
   -- While a handled computation is suspended in an arm, it still holds the
   -- borrows it made: the arm may not use what they exclude, nor may a callable
   -- the operation was given. Once it has been resumed and is done, they are over.
@@ -2831,6 +2833,15 @@ def cases : List Case := [
     [], "3"⟩,
   ⟨"let Just: fn(_) -> Result<_, ()> = Ok;\nfn main() -> Int { let a: Result<Int, Str> = Just(3); 0 }",
     [], "error: 2:20: in `main`: the value of a `let` with a type: expected `Result<Int, Str>`, found `Result<Int, ()>`"⟩,
+  -- An operation that says nothing can be stopped early; one declared `[1, 1]` is always resumed, so a value that has to be used can wait across it.
+  ⟨"effect Yield { yield(Int) }\nfn gen() { yield(1); yield(2); () }\nfn find(generator, wanted) { handle generator() { _ => None, yield(value, k) => if(wanted(value)) { cancel(k); Some(value) } else { k(()) } } }\nfn main() { find({ gen() }, { x => x > 1 }) }",
+    [], "Ok(2)"⟩,
+  ⟨"struct Ticket(Int);\nimpl Use<[1, 1]> for Ticket {}\nfn redeem(t: Ticket) -> Int { match(t) { Ticket(n) => n } }\neffect Stop { [1, 1] stop() -> Int }\nfn main() -> Int { let t = Ticket(1); handle { let x = stop(); redeem(t) + x }() { stop(k) => k(5) } }",
+    [], "6"⟩,
+  ⟨"struct Ticket(Int);\nimpl Use<[1, 1]> for Ticket {}\nfn redeem(t: Ticket) -> Int { match(t) { Ticket(n) => n } }\neffect Stop { [1, 1] stop() -> Int }\nfn body(t: Ticket) -> Int / {Stop} { let x = stop(); redeem(t) + x }\nfn main() -> Int { let t = Ticket(1); handle body(t) { stop(k) => k(5) } }",
+    [], "6"⟩,
+  ⟨"struct Ticket(Int);\nimpl Use<[1, 1]> for Ticket {}\nfn redeem(t: Ticket) -> Int { match(t) { Ticket(n) => n } }\neffect Stop { stop() -> Int }\nfn body(t: Ticket) -> Int / {Stop} { let x = stop(); redeem(t) + x }\nfn main() -> Int { let t = Ticket(1); handle body(t) { stop(k) => k(5) } }",
+    [], "error: in `body`: `t` is not used on every path, but a `Ticket` has to be used"⟩,
   -- `drop` is not for a program to call.
   ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nfn main() { let mut f = File(7); drop(&mut f); 0 }",
     [], "error: 3:34: in `main`: `drop` is run when what holds a value ends; a program does not call it"⟩,

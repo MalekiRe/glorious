@@ -540,7 +540,8 @@ partial def inferCall (scope : Scope) (amb : Row) (f : Expr) (args : List Expr)
             needBounds (100000000000000000 + call) (asked.filterMap fun (tr, i) => targs[i]?.map (tr, ·))
       pure result
     | .op sig => do
-      abandons (← get).anon s!"operation `{x}`"
+      -- (An operation declared `[1, 1]` comes back: its resumption is resumed.)
+      unless sig.must && sig.result.isSome do abandons (← get).anon s!"operation `{x}`"
       let decl := ((← get).effects.lookup sig.effect).getD ⟨[], [], []⟩
       let inst ← decl.fresh
       let (payload, result) := instOp sig inst
@@ -642,6 +643,9 @@ partial def inferCall (scope : Scope) (amb : Row) (f : Expr) (args : List Expr)
       let row ← freshRow
       let given := Ty.func [← freshTy] (← freshTy) row (← freshCap)
       checkArgs scope amb "`cancel`" [given] args call
+      -- A resumption of an operation declared `[1, 1]` is resumed: giving
+      -- it up is letting it go.
+      mustDrop given "`cancel` lets go of what it is given"
       -- A cleanup of a cancelled computation may jump to a label inside it, and
       -- the computation then runs on from there, where it is being cancelled.
       -- So what it may perform must be handled here, as if it were called.

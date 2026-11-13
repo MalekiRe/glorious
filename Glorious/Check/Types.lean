@@ -57,7 +57,7 @@ inductive Captured where
   | ty (t : Ty)
   /-- A resumption: whatever holds it can be used only once. -/
   | once
-  /-- A resumption that has to be resumed or cancelled. -/
+  /-- A resumption that has to be resumed. -/
   | must
   /-- A borrow of a mutable variable, by its identity: whatever holds it keeps
   the borrow going. -/
@@ -154,7 +154,7 @@ structure OpSig where
   payload : List Ty
   /-- What the operation returns to its performer; none if it never returns. -/
   result : Option Ty
-  /-- Declared `[1, 1]`: its resumption has to be resumed or cancelled. -/
+  /-- Declared `[1, 1]`: its resumption has to be resumed. -/
   must : Bool := false
   /-- For each parameter of the effect, in order: the capture variable it is
   in the types above if it is a lifetime, none if it is a type. -/
