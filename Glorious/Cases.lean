@@ -1863,11 +1863,36 @@ def cases : List Case := [
     [], "Ok(())\nErr(())\nOk(())\nOk(())\nOk(())\nErr(())\nOk(())\nErr(())\nOk(())"⟩,
   ⟨"mod std { pub fn answer() -> Int { 42 } }\nfn main() { std::answer() }",
     [], "42"⟩,
+  -- What is unsafe can be named only where `unsafe` is written.
+  ⟨"extern \"C\" { fn abs(n: i32) -> i32; }\nfn main() { abs(3i32) }",
+    [], "error: 2:13: in `main`: `abs` is unsafe: it can be named only in `unsafe { .. }` or in an `unsafe fn`"⟩,
+  ⟨"unsafe fn risky(n: Int) -> Int { n + 1 }\nfn main() { risky(1) }",
+    [], "error: 2:13: in `main`: `risky` is unsafe: it can be named only in `unsafe { .. }` or in an `unsafe fn`"⟩,
+  ⟨"unsafe fn risky(n: Int) -> Int { n + 1 }\nfn safe(n: Int) -> Int { unsafe { risky(n) } }\nfn main() { safe(1) }",
+    [], "2"⟩,
+  ⟨"fn main() { ptr_read(0usize, 8) }",
+    [], "error: 1:13: in `main`: `ptr_read` is unsafe: it can be named only in `unsafe { .. }` or in an `unsafe fn`"⟩,
+  ⟨"use std::text::{utf8, from_utf8};\nfn main() { say(utf8(\"h\\u{e9}\\u{20ac}\")); say(from_utf8([104u8, 105u8])); from_utf8(utf8(\"h\\u{e9}llo \\u{1F600}\")) == Some(\"h\\u{e9}llo \\u{1F600}\") }",
+    [], "[104, 195, 169, 226, 130, 172]\nOk(hi)\nOk(())"⟩,
+  ⟨"extern \"C\" { fn sin(x: f64) -> f64; }\nfn main() { 0 }",
+    [], "error: 1:37: a foreign function takes and gives whole numbers, an `Int` or a type such as `i32` or `usize`, not `f64`, found `}`"⟩,
   -- `drop` is not for a program to call.
   ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nfn main() { let mut f = File(7); drop(&mut f); 0 }",
     [], "error: 3:34: in `main`: `drop` is run when what holds a value ends; a program does not call it"⟩,
   ⟨"fn f() { 1 }",
     [], "error: the program has no `main` function"⟩
+]
+
+/-- Programs that call foreign functions and read and write memory at an
+address. The proved machines give these no meaning, so they are run on the
+Rust VM alone. -/
+def foreignCases : List Case := [
+  ⟨"extern \"C\" { fn abs(n: i32) -> i32; fn getpid() -> i32; }\nfn main() { unsafe { say(abs(0 - 5i32)); getpid() > 0i32 } }",
+    [], "5\nOk(())"⟩,
+  ⟨"extern \"C\" { fn malloc(n: usize) -> usize; fn free(p: usize); fn strlen(s: usize) -> usize; fn puts(s: usize) -> i32; }\nfn main() { unsafe { let p = malloc(6usize); ptr_write(p, 8, 72); ptr_write(p + 1usize, 8, 105); ptr_write(p + 2usize, 8, 0); puts(p); say(strlen(p)); say(ptr_read(p + 1usize, 8)); ptr_write(p, 32, 0 - 2); say(ptr_read(p, 32)); say(ptr_read(p, -32)); free(p); 0 } }",
+    [], "Hi\n2\n105\n-2\n4294967294\n0"⟩,
+  ⟨"use std::c::{c_string, text_at, free};\nuse std::text::{utf8, from_utf8};\nextern \"C\" { fn puts(s: usize) -> i32; fn toupper(c: i32) -> i32; fn getenv(name: usize) -> usize; }\nfn main() { say(utf8(\"h\\u{e9}\\u{20ac}\")); say(from_utf8(utf8(\"h\\u{e9}llo \\u{1F600}\")) == Some(\"h\\u{e9}llo \\u{1F600}\")); unsafe { let s = c_string(\"hello from C\"); puts(s); say(text_at(s)); free(s); let name = c_string(\"GLORIOUS_TEST\"); say(getenv(name) == 0usize); free(name); toupper(97i32) } }",
+    [], "[104, 195, 169, 226, 130, 172]\nOk(())\nhello from C\nOk(hello from C)\nOk(())\n65"⟩
 ]
 
 end Glorious

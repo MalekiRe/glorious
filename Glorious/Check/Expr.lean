@@ -423,8 +423,22 @@ partial def inferCall (scope : Scope) (amb : Row) (f : Expr) (args : List Expr)
       checkArgs scope amb s!"intrinsic `{x}`" [if into then .int else .con scalar []] args call
       pure (if into then .con scalar [] else .int)
     | .host id => do
+      if id ≥ 2 then
+        let s ← get
+        unless s.unsafeBlock || s.unsafeFns.contains s.owner do
+          throw s!"`{x}` is unsafe: it can be named only in `unsafe \{ .. }` or in an `unsafe fn`"
       if id == 0 then
         checkArgs scope amb s!"`{x}`" [← freshTy] args call
+        pure .unit
+      else if id == 2 then
+        -- A foreign function's name, how many bits it gives, and what it is given.
+        checkArgs scope amb s!"`{x}`" (args.map fun _ => Ty.int) args call
+        pure .int
+      else if id == 3 then
+        checkArgs scope amb s!"`{x}`" [.con "usize" [], .int] args call
+        pure .int
+      else if id == 4 then
+        checkArgs scope amb s!"`{x}`" [.con "usize" [], .int, .int] args call
         pure .unit
       else
         checkArgs scope amb s!"`{x}`" [] args call
@@ -546,6 +560,13 @@ partial def inferStmts (scope : Scope) (amb : Row) (stmts : List Stmt)
     modify fun st => { st with pos := s!"{line}:{col}: ", at_ := (line, col) }
     try inferStmts scope amb (s :: rest) want
     catch e => throw (positioned line col e)
+  | .expr (.name none "%unsafe") :: rest => do
+    -- What follows in this block may name what is unsafe.
+    let before := (← get).unsafeBlock
+    modify fun s => { s with unsafeBlock := true }
+    let t ← inferStmts scope amb rest want
+    modify fun s => { s with unsafeBlock := before }
+    pure t
   | [.expr e] => do
     -- A whole number a body ends with is of the type wanted of the body.
     if let (.int n, some (expected, _)) := (e, want) then

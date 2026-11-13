@@ -175,7 +175,9 @@ def casts : List String :=
 
 /-- Host operations by surface name: their identity and argument count. -/
 def hosts : List (String × Nat × Nat) :=
-  [("host_write", 0, 1), ("host_read", 1, 0)]
+  [("host_write", 0, 1), ("host_read", 1, 0),
+   -- Unsafe: the bits at an address, read and written, so many of them.
+   ("ptr_read", 3, 2), ("ptr_write", 4, 3)]
 
 /-- The Core computation under construction: binding forms awaiting their
 continuation, the number of locals so far, and the terminator once one is known. -/
@@ -225,6 +227,9 @@ structure St where
   /-- The borrows that are not scopes of their own: each is the reference it
   borrows. -/
   plain : List Borrow := []
+  /-- Does the program call a foreign function, or read or write memory at an
+  address? -/
+  foreign : Bool := false
 
 abbrev M := ReaderT Globals (StateT St (Except String))
 
@@ -732,6 +737,7 @@ def resolveName (scope : Scope) (qual : Option String) (x : String) : M Head := 
   if (Syntax.scalarCast x).isSome then return .cast
   if (Syntax.packNames x).isSome then return .pack
   if let some (id, n) := hosts.lookup x then return .host id n
+  if x == Syntax.foreignCall then return .host 2 0
   if x == "cancel" then return .cancel
   if x == "replace" then return .replace
   if let some e := g.aliases.lookup x then return .const e
@@ -926,9 +932,11 @@ partial def elabCall (scope : Scope) (isTail : Bool) (f : Expr) (args : List Exp
       | _ => throw s!"intrinsic `{x}` takes 1 argument, but is given {args.length}"
     | .host id n => do
       if isTail then throw s!"`tail` applies to calls, not to the host operation `{x}`"
-      if n != args.length then
+      if n != args.length && id != 2 then
         throw s!"host operation `{x}` takes {n} arguments, but is given {args.length}"
       let atoms ← elabArgs scope args
+      -- What is unsafe is outside what Core's rules are about.
+      if id ≥ 2 then modify fun s => { s with foreign := true }
       emit (.host id atoms)
     | .cancel => do
       if isTail then throw "`tail` applies to calls, not to `cancel`"
@@ -971,6 +979,9 @@ partial def elabStmts (scope : Scope) (tailPos : Bool) : List Stmt → M Atom
       try elabStmts scope tailPos (s :: rest)
       catch e => throw (positioned line col e)
     | other => elabStmts scope tailPos other
+  -- Where `unsafe { .. }` begins: nothing to do.
+  | [.expr (.name none "%unsafe")] => emit (.let_ (.construct 0 []))
+  | .expr (.name none "%unsafe") :: rest => elabStmts scope tailPos rest
   | [.expr e] => elabExpr scope tailPos e
   | .expr e :: rest => do
     let _ ← elabExpr scope false e
@@ -1425,6 +1436,8 @@ structure Output where
   sites : Nat := 0
   /-- The borrows that are not scopes of their own, in the order written. -/
   plain : List Borrow := []
+  /-- Does the program do what is unsafe? Core's rules say nothing of it. -/
+  foreign : Bool := false
 
 /-! ## Traits
 
@@ -2029,6 +2042,7 @@ def collect (items : List Item) :
     | .typeAlias _ _ _ => pure ()
     -- And modules: every name is one name of the whole program by now.
     | .pub _ _ => pure ()
+    | .unsafeFn _ => pure ()
     | .bounds _ _ => pure ()
     | .traitInfo _ _ _ _ _ => pure ()
     | .module _ _ => pure ()
@@ -2108,6 +2122,6 @@ def elabProgram (items : List Item) (blocks : Option Blocks := none)
       out := out.set! info.id name
     pure out
   pure ⟨⟨st.fns.toList, .let_ (.closure mainIdx []) (.tail (.var 0) [])⟩, names, st.names,
-    opNames, st.envSizes, st.lent, st.sites, st.plain.reverse⟩
+    opNames, st.envSizes, st.lent, st.sites, st.plain.reverse, st.foreign⟩
 
 end Glorious.Elab

@@ -178,7 +178,10 @@ def compileSource (src : String) (check : Bool := true)
   let all := Elab.reachable ("main" :: ((blocks.map (·.coercions)).getD []).map (·.2)) all
   let plain := fun (blocks : Option Elab.Blocks) => do
     let out ← Elab.elabProgram all blocks
-    let cert ← if check then
+    -- What is unsafe is outside what Core's rules are about: a program that
+    -- calls a foreign function or reads memory at an address has no
+    -- certificate.
+    let cert ← if check && !out.foreign then
         match certifyProgram all out.program out.envSizes with
         | .ok cert => pure (some cert)
         | .error e =>
@@ -204,7 +207,7 @@ def compileSource (src : String) (check : Bool := true)
   let build := fun (blocks : Option Elab.Blocks) => do
     if check then
       if let .ok out := Elab.elabProgram all blocks (fun _ => 1) then
-        if out.lent != 0 then
+        if out.lent != 0 && !out.foreign then
           if let some c := lending blocks (fun _ => 1) then return c
           if out.sites ≤ 32 then
             -- How each place fares alone, trying the narrower scope first.
@@ -437,7 +440,9 @@ def explainStuck (c : Compiled) (cfg : Core.Config) : String :=
     | some (.ref _ _ :: _) => "a reference is used after the cell it points to was freed"
     | some vs => s!"a memory operation is applied to ({shown vs}), which is not a reference"
     | none => unbound
-  | .host id _ _ => s!"host operation {id} rejected its arguments"
+  | .host id _ _ =>
+    if id ≥ 2 then "a foreign function or memory at an address has no meaning on this machine: build the program and run it on the Rust VM"
+    else s!"host operation {id} rejected its arguments"
 
 /-- Run a program on the Core machine and, if it goes wrong, say why. -/
 def diagnose (src : String) (input : List Int := []) (fuel : Nat := 200000) : String :=

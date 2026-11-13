@@ -210,6 +210,14 @@ structure ModuleInfo where
 program can write these names. -/
 def textEndName : String := "%end"
 
+/-- The statement a block written `unsafe { .. }` begins with: what follows
+it in the block may name what is unsafe. -/
+def unsafeMark : String := "%unsafe"
+
+/-- The host operations that are unsafe, by name: a call of a foreign
+function, and reading and writing memory at an address. -/
+def foreignCall : String := "foreign_call"
+
 def textCharName : String := "%char"
 
 /-- A name without the module it is in: how a value is shown. -/
@@ -418,6 +426,8 @@ inductive Item where
   /-- `pub item`: the item can be named from outside its module; with
   `pub(super)`, only from the module its module is written in. -/
   | pub (parent : Bool) (item : Item)
+  /-- A function that can be named only where `unsafe` is written. -/
+  | unsafeFn (name : String)
   /-- `mod name { items }`, or `mod name;` for a module in a file of its own. -/
   | module (name : String) (body : Option (List Item))
   /-- `use a::b::name;`, `use a::b::name as other;` or `use a::b::*;`: names of

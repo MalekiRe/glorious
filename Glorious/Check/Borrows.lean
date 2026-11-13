@@ -419,12 +419,15 @@ def resolveName (scope : Scope) (qual : Option String) (x : String) : M Head := 
     return .method sig
   if let some t := s.group.lookup x then return .fn t [] true
   if let some scheme := s.fns.lookup x then
+    if s.unsafeFns.contains x && !(s.unsafeBlock || s.unsafeFns.contains s.owner) then
+      throw s!"`{Syntax.lastSegment x}` is unsafe: it can be named only in `unsafe \{ .. }` or in an `unsafe fn`"
     let t ← instantiate scheme (some x)
     return .fn t (← get).lastBounds false
   if (Elab.prims.lookup x).isSome then return .prim
   if let some (scalar, into) := Syntax.scalarCast x then return .cast scalar into
   if (Syntax.packNames x).isSome then return .pack x
   if let some (id, _) := Elab.hosts.lookup x then return .host id
+  if x == Syntax.foreignCall then return .host 2
   if x == "cancel" then return .cancel
   if x == "replace" then return .replace
   if let some e := s.aliases.lookup x then return .const e

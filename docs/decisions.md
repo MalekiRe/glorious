@@ -902,6 +902,44 @@ Not built. Conversion other than through `Int` (`u8(n)`, `int(x)`, `f64(n)`,
 `widen`, `narrow`, `char(code)`). A `Str` is a list: there are no arrays, so
 its length is counted.
 
+## What is unsafe
+
+**Decision: `unsafe` marks what the proofs say nothing of, and a program
+that does any of it has no certificate.** Three things are unsafe: calling a
+function that is not written in the language, reading the bits at an address,
+and writing them. The checker lets them be named only in `unsafe { .. }` or
+in the body of an `unsafe fn`, which is itself unsafe to name. Everything
+else about such a program is checked as before; its Core is not shown to
+follow Core's rules, because Core's host has no such operations: on the
+proved machines the program stops there, and says so. The Rust VM runs it.
+
+- `extern "C" { fn strlen(s: usize) -> usize; }` declares functions by the
+  names C has for them. Each is an ordinary function of the language whose
+  body is one host operation: the name, how many bits come back, and the
+  values. The VM finds the name among what the process has loaded and calls
+  it. What goes across is whole numbers of a stated width, and addresses,
+  which are `usize`; at most six.
+- `ptr_read(at, width)` and `ptr_write(at, width, value)` read and write so
+  many bits at an address: with a sign if the width is positive, without if
+  negative.
+- `unsafe { .. }` is a block run where it is written. `unsafe fn` is a
+  function. There is no `unsafe Fn` bound: a function is unsafe to name, and
+  once it is a value the one who named it has answered for it.
+- `std::c` has `malloc`, `free`, `strlen`, bytes at an address, and texts as
+  C has them (`c_string`, `text_at`), over `std::text::utf8` and `from_utf8`.
+
+Why nothing in Lean. A foreign function is not something Core's host can be
+said to do: `Host.call` is a function, and the proofs are about it. Giving
+foreign calls a meaning there would be an axiom about C. So they have none,
+and the line between what is proved and what is not is the word `unsafe`.
+
+Limits, against the specification (15, 16): no typed pointers (`*T`), no
+layouts (`repr`), no floating point or structures across the boundary, no
+callbacks from C, no functions with a varying number of arguments, no
+linking of a library by name (what the process has loaded is what there is),
+and no rules for when unsafe code is sound: a safe function with an `unsafe`
+block inside is trusted, as it is everywhere.
+
 ## The standard library is written in the language
 
 **Decision: `std` is a module the compiler has the texts of, and a program

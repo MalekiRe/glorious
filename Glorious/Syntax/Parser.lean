@@ -747,6 +747,16 @@ private partial def parsePrimary (noBlock : Bool) : P Expr := do
     pure (.closure 0 [.mk pats body])
   | .ident x =>
     if x.startsWith "'" then failAt "a lifetime is not a value"
+    if x == "unsafe" && (← peek 1) == .punct "{" then
+      -- `unsafe { .. }`: a block run where it is written, in which what is
+      -- unsafe may be named.
+      let call := (← read).base + (← get) + 1
+      advance
+      advance
+      let id := (← read).base + (← get)
+      let body ← parseStmts
+      expectPunct "}"
+      return .call call (.closure id [.mk [] (.expr (.name none unsafeMark) :: body)]) []
     advance
     let (qual, name) := splitPath (← parsePathRest x)
     pure (.name qual name)
@@ -1366,6 +1376,11 @@ private partial def parseItemGroup : P (List Item) := do
   match ← peek with
   | .ident "pub" =>
     let parent := (← acceptPub).getD false
+    -- `pub extern "C" { .. }`: each of its functions is `pub`.
+    if (← peek) == .ident "extern" then
+      return (← parseItemGroup).map fun
+        | .fn name ps annots ret clauses => .pub parent (.fn name ps annots ret clauses)
+        | item => item
     -- `pub use a::{b, c}` is `pub` for each; with a declaration, for it and
     -- not for what is written out beside it.
     match ← parseItemGroup with
@@ -1395,6 +1410,65 @@ private partial def parseItemGroup : P (List Item) := do
     let items ← parseUseTree []
     expectPunct ";"
     pure items
+  | .ident "unsafe" =>
+    -- `unsafe fn`: a function that can be named only where `unsafe` is written.
+    advance
+    match ← parseItemGroup with
+    | items@(.fn name _ _ _ _ :: _) => pure (items ++ [.unsafeFn name])
+    | _ => failAt "`unsafe` is written before `fn`, or before a block"
+  | .ident "extern" =>
+    -- `extern "C" { fn name(a: usize) -> i32; }`: functions that are not
+    -- written in the language, each called by its name as C has it.
+    advance
+    if let .str _ := ← peek then advance
+    expectPunct "{"
+    let mut items : Array Item := #[]
+    repeat
+      if (← peek) == .punct "}" then break
+      unless (← peek) == .ident "fn" do failAt "expected `fn`: a foreign function"
+      advance
+      let name ← expectIdent
+      expectPunct "("
+      let mut params : Array TypeExpr := #[]
+      repeat
+        if (← peek) == .punct ")" then break
+        let _ ← expectIdent
+        expectPunct ":"
+        params := params.push (← parseType)
+        if !(← acceptPunct ",") then break
+      expectPunct ")"
+      let ret ← if ← acceptPunct "->" then parseType else pure (.tuple [])
+      expectPunct ";"
+      -- How a type is given to C and taken from it: as so many bits.
+      let width : TypeExpr → P (Option String × Int) := fun
+        | .name "Int" [] => pure (none, 64)
+        | .name "i64" [] => pure (none, 64)
+        | .name t [] =>
+          match scalars.lookup t with
+          | some (some w) => pure (some t, w)
+          | _ => failAt s!"a foreign function takes and gives whole numbers, an `Int` or a type such as `i32` or `usize`, not `{t}`"
+        | _ => failAt "a foreign function takes and gives whole numbers, an `Int` or a type such as `i32` or `usize`"
+      let mut args : Array Expr := #[]
+      for (p, i) in params.toList.zipIdx do
+        let (cast, _) ← width p
+        let x := Expr.name none s!"%a{i}"
+        args := args.push (match cast with
+          | some t => .call 0 (.name none (t ++ "_bits")) [x]
+          | none => x)
+      let (back, bits) ← match ret with
+        | .tuple [] => pure (none, 0)
+        | t => width t
+      let symbol := name.toUTF8.toList.map fun b => Expr.int b.toNat
+      let call := Expr.call 0 (.name none foreignCall) (symbol ++ [.int 0, .int bits] ++ args.toList)
+      let body : List Stmt := match ret, back with
+        | .tuple [], _ => [.expr call, .expr (.tuple [])]
+        | _, some t => [.expr (.call 0 (.name none (t ++ "_of")) [call])]
+        | _, none => [.expr call]
+      let pats := (List.range params.size).map fun i => Pattern.var s!"%a{i}"
+      items := items.push (.fn name [] (params.toList.map some) (some ret) [.mk pats body])
+      items := items.push (.unsafeFn name)
+    expectPunct "}"
+    pure items.toList
   | .ident "struct" =>
     advance
     let name ← expectIdent

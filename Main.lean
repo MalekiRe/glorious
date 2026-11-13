@@ -139,6 +139,23 @@ def selftest (vm : Option String) : IO UInt32 := do
         if got != c.expect ++ "\n" then
           failures := failures + 1
           IO.eprintln s!"rust vm: expected\n{c.expect}\ngot\n{got}\n{out.stderr}for\n{c.src}\n"
+  -- What is unsafe runs on the Rust VM alone, and the proved machines say so.
+  if let some vm := vm then
+    for c in foreignCases do
+      ran := ran + 1
+      match compileSource c.src true [] with
+      | .error e =>
+        failures := failures + 1
+        IO.eprintln s!"foreign: {e}\nfor\n{c.src}\n"
+      | .ok compiled =>
+        if compiled.cert.isSome then
+          failures := failures + 1
+          IO.eprintln s!"foreign: a program that calls a foreign function has a certificate\nfor\n{c.src}\n"
+        writeBytecode compiled file
+        let out ← IO.Process.output { cmd := vm, args := #[file.toString] }
+        if out.stdout != c.expect ++ "\n" then
+          failures := failures + 1
+          IO.eprintln s!"rust vm: expected\n{c.expect}\ngot\n{out.stdout}\n{out.stderr}for\n{c.src}\n"
   if vm.isSome then IO.FS.removeFile file
   let machines := if vm.isSome then "Core, Lean bytecode and Rust VM" else "Core and Lean bytecode"
   IO.println s!"{ran} programs ({examples.length} examples) on {machines}: {failures} failures"

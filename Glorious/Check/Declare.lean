@@ -381,6 +381,7 @@ def declare (items : List Item) : M Unit := do
         { s with types := (name, ⟨params.length, [name], params.map isLifetime, []⟩) :: s.types }
     | .alias name value => modify fun s => { s with aliases := (name, value) :: s.aliases }
     | .coerce name => modify fun s => { s with coercing := s.coercing ++ [name] }
+    | .unsafeFn name => modify fun s => { s with unsafeFns := name :: s.unsafeFns }
     | .fieldNames ctor names _ =>
       unless names.isEmpty do
         modify fun s => { s with fieldNames := (ctor, names) :: s.fieldNames }

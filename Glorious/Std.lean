@@ -20,9 +20,10 @@ pub mod text;
 pub mod map;
 pub mod set;
 pub mod iter;
+pub mod c;
 "#
 
-private def option : String := r#"// An `Option<T>` is a `Result<T, ()>`: `Some(x)` or `None`.
+private def optionText : String := r#"// An `Option<T>` is a `Result<T, ()>`: `Some(x)` or `None`.
 
 pub fn is_some(o) { match(o) { Some(_) => true, None => false } }
 pub fn is_none(o) { match(o) { Some(_) => false, None => true } }
@@ -63,7 +64,7 @@ pub fn ok_or(o, error) { match(o) { Some(x) => Ok(x), None => Err(error) } }
 pub fn fold(o, init, f) { match(o) { Some(x) => f(init, x), None => init } }
 "#
 
-private def result : String := r#"// `Result<T, E>`: `Ok(value)` or `Err(error)`.
+private def resultText : String := r#"// `Result<T, E>`: `Ok(value)` or `Err(error)`.
 
 pub fn is_ok(r) { match(r) { Ok(_) => true, Err(_) => false } }
 pub fn is_err(r) { match(r) { Ok(_) => false, Err(_) => true } }
@@ -87,7 +88,7 @@ pub fn ok(r) { match(r) { Ok(x) => Some(x), Err(_) => None } }
 pub fn err(r) { match(r) { Ok(_) => None, Err(e) => Some(e) } }
 "#
 
-private def cmp : String := r#"// Putting values in order.
+private def cmpText : String := r#"// Putting values in order.
 
 pub enum Ordering { Less, Equal, Greater }
 
@@ -113,7 +114,7 @@ pub fn is_equal(o) { match(o) { Equal => true, _ => false } }
 pub fn is_greater(o) { match(o) { Greater => true, _ => false } }
 "#
 
-private def int : String := r#"// Whole numbers.
+private def intText : String := r#"// Whole numbers.
 
 pub fn abs(n: Int) -> Int { if(n < 0) { 0 - n } else { n } }
 
@@ -156,7 +157,7 @@ fn sqrt_from(n: Int, guess: Int) -> Int {
 }
 "#
 
-private def char : String := r#"// Characters. What is said of letters and digits here is said of ASCII.
+private def charText : String := r#"// Characters. What is said of letters and digits here is said of ASCII.
 
 pub fn code(c: char) -> Int { int(c) }
 
@@ -179,7 +180,7 @@ pub fn to_upper(c: char) -> char { if(is_lower(c)) { char(int(c) - 32) else { c 
 pub fn to_lower(c: char) -> char { if(is_upper(c)) { char(int(c) + 32) else { c } } else { c } }
 "#
 
-private def vec : String := r#"// Arrays: `[T]`. Nothing here changes an array it is given; each gives a new one.
+private def vecText : String := r#"// Arrays: `[T]`. Nothing here changes an array it is given; each gives a new one.
 
 pub fn is_empty(a) { len(a) == 0 }
 
@@ -306,7 +307,7 @@ pub fn dedup(a) {
 pub fn fold_pairs(pairs, init, f) { fold(pairs, init, fn(acc, pair) { match(pair) { (a, b) => f(acc, a, b) } }) }
 "#
 
-private def text : String := r#"// Texts: `Str`.
+private def textText : String := r#"// Texts: `Str`.
 
 use std::vec;
 
@@ -410,9 +411,62 @@ pub fn pad_start(text: Str, width: Int, with: char) -> Str {
 pub fn pad_end(text: Str, width: Int, with: char) -> Str {
     reverse(pad_start(reverse(text), width, with))
 }
+
+// A text as bytes: each character as UTF-8 has it.
+pub fn utf8(text: Str) -> [u8] { utf8_onto(text, []) }
+fn utf8_onto(text: Str, out: [u8]) -> [u8] {
+    match(text) {
+        StrEnd => out,
+        StrChar(c, rest) => tail utf8_onto(rest, encode(int(c), out))
+    }
+}
+fn byte(n: Int) -> u8 { u8(n) }
+fn encode(code: Int, out: [u8]) -> [u8] {
+    if(code < 128) { push(out, byte(code)) } else {
+        if(code < 2048) { push(push(out, byte(192 + code / 64)), byte(128 + code % 64)) } else {
+            if(code < 65536) {
+                push(push(push(out, byte(224 + code / 4096)), byte(128 + code / 64 % 64)), byte(128 + code % 64))
+            } else {
+                push(push(push(push(out, byte(240 + code / 262144)), byte(128 + code / 4096 % 64)),
+                    byte(128 + code / 64 % 64)), byte(128 + code % 64))
+            }
+        }
+    }
+}
+
+// The text some bytes are, if they are UTF-8.
+pub fn from_utf8(bytes: [u8]) -> Option<Str> { decode(bytes, len(bytes), "") }
+// Read from the end, so that the text is built from its last character back.
+fn decode(bytes: [u8], end: Int, out: Str) -> Option<Str> {
+    if(end == 0) { Some(out) } else {
+        let last = int(bytes[end - 1]);
+        if(last < 128) { tail decode_one(bytes, end - 1, last, out) } else {
+            if(end < 2) { None } else {
+                let b1 = int(bytes[end - 2]);
+                if(b1 >= 192) { tail decode_one(bytes, end - 2, (b1 - 192) * 64 + (last - 128), out) } else {
+                    if(end < 3) { None } else {
+                        let b2 = int(bytes[end - 3]);
+                        if(b2 >= 224) {
+                            tail decode_one(bytes, end - 3, ((b2 - 224) * 64 + (b1 - 128)) * 64 + (last - 128), out)
+                        } else {
+                            if(end < 4) { None } else {
+                                let b3 = int(bytes[end - 4]);
+                                tail decode_one(bytes, end - 4,
+                                    (((b3 - 240) * 64 + (b2 - 128)) * 64 + (b1 - 128)) * 64 + (last - 128), out)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+fn decode_one(bytes: [u8], end: Int, code: Int, out: Str) -> Option<Str> {
+    match(char(code)) { Some(c) => tail decode(bytes, end, StrChar(c, out)), None => None }
+}
 "#
 
-private def map : String := r#"// A map from keys to values, the keys kept in order: a tree that stays
+private def mapText : String := r#"// A map from keys to values, the keys kept in order: a tree that stays
 // balanced, so finding, adding and taking away go through as many keys as the
 // number of keys has bits. A key is a type with `<`.
 
@@ -548,7 +602,7 @@ pub fn least(m) { match(entries(m)) { es => std::vec::first(es) } }
 pub fn greatest(m) { match(entries(m)) { es => std::vec::last(es) } }
 "#
 
-private def set : String := r#"// A set of values kept in order: a map from each to nothing.
+private def setText : String := r#"// A set of values kept in order: a map from each to nothing.
 
 use std::map;
 use std::map::Map;
@@ -578,7 +632,7 @@ pub fn difference(a, b) { fold_set(b, a, fn(s, x) { remove(s, x) }) }
 pub fn is_subset(a, b) { fold_set(a, true, fn(ok, x) { ok and { contains(b, x) } }) }
 "#
 
-private def iter : String := r#"// Values one at a time, each made when it is asked for. An `Iter<T>` is asked
+private def iterText : String := r#"// Values one at a time, each made when it is asked for. An `Iter<T>` is asked
 // with `next`, which gives the next value and what is left.
 
 pub struct Iter<T>(fn() -> Option<(T, Iter<T>)>)
@@ -666,18 +720,57 @@ pub fn any(it, wanted) { match(find(it, wanted)) { Some(_) => true, None => fals
 pub fn all(it, wanted) { not any(it, { x => not wanted(x) }) }
 "#
 
+private def cText : String := r#"// What C has: its memory, and texts as it writes them. Everything here is
+// unsafe: an address is whatever a program says it is.
+
+pub extern "C" {
+    fn malloc(n: usize) -> usize;
+    fn free(p: usize);
+    fn strlen(s: usize) -> usize;
+}
+
+// One byte at an address, read and written.
+pub unsafe fn read_byte(at: usize) -> u8 { u8(ptr_read(at, -8)) }
+pub unsafe fn write_byte(at: usize, b: u8) { ptr_write(at, 8, int(b)) }
+
+// The bytes of an array at an address, one after another.
+pub unsafe fn write_bytes(at: usize, bytes: [u8]) { write_from(at, bytes, 0) }
+unsafe fn write_from(at: usize, bytes: [u8], i: Int) {
+    if(i < len(bytes)) { write_byte(at, bytes[i]); tail write_from(at + 1usize, bytes, i + 1) } else { () }
+}
+
+// So many bytes from an address.
+pub unsafe fn read_bytes(at: usize, n: Int) -> [u8] { read_onto(at, n, []) }
+unsafe fn read_onto(at: usize, n: Int, out: [u8]) -> [u8] {
+    if(n <= 0) { out } else { tail read_onto(at + 1usize, n - 1, push(out, read_byte(at))) }
+}
+
+// A text as C has it: its bytes and a zero after them, in memory that is the
+// caller's to `free`.
+pub unsafe fn c_string(text: Str) -> usize {
+    let bytes = std::text::utf8(text);
+    let at = malloc(usize(len(bytes) + 1));
+    write_bytes(at, push(bytes, 0u8));
+    at
+}
+
+// The text C has at an address: the bytes up to a zero, if they are UTF-8.
+pub unsafe fn text_at(at: usize) -> Option<Str> { std::text::from_utf8(read_bytes(at, int(strlen(at)))) }
+"#
+
 /-- The texts of the library, each with the module it is. -/
 def texts : List (List String × String) :=
   [(["std"], root),
-   (["std", "option"], option),
-   (["std", "result"], result),
-   (["std", "cmp"], cmp),
-   (["std", "int"], int),
-   (["std", "char"], char),
-   (["std", "vec"], vec),
-   (["std", "text"], text),
-   (["std", "map"], map),
-   (["std", "set"], set),
-   (["std", "iter"], iter)]
+   (["std", "option"], optionText),
+   (["std", "result"], resultText),
+   (["std", "cmp"], cmpText),
+   (["std", "int"], intText),
+   (["std", "char"], charText),
+   (["std", "vec"], vecText),
+   (["std", "text"], textText),
+   (["std", "map"], mapText),
+   (["std", "set"], setText),
+   (["std", "iter"], iterText),
+   (["std", "c"], cText)]
 
 end Glorious.Std

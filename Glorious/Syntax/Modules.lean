@@ -801,6 +801,7 @@ partial def resolveItem (ctx : Ctx) : Item → R (List Item)
         result := ← op.result.mapM (resolveType ctx generics) }
     pure [.effect (ownName ctx .effect name) ps ops]
   | .alias name value => do pure [.alias (ownName ctx .value name) (← resolveExpr ctx [] value)]
+  | .unsafeFn name => pure [.unsafeFn (ownName ctx .value name)]
   | .coerce name => do
     let global := (← resolveValue ctx [] none name).2.1
     modify fun s => { s with coerced := s.coerced ++ [(ctx.here, global)] }

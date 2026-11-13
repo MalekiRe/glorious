@@ -807,7 +807,7 @@ def checkUses (pos : String) (outer : Scope) (binds : Scope) (body : List Stmt) 
     | some sig => sig.result.isSome
     | none => false
   -- What only computes: the machine's own operations and what builds a value.
-  let intrinsics := Elab.prims.map (·.1) ++ Elab.casts ++ Elab.hosts.map (·.1) ++ ["cancel", "replace"]
+  let intrinsics := Elab.prims.map (·.1) ++ Elab.casts ++ Elab.hosts.map (·.1) ++ ["cancel", "replace", Syntax.foreignCall]
   let ctx : ACtx :=
     { fns := s.fnBodies, ctors := s.ctors.map (·.1), aliases := s.aliases,
       ops := s.ops.map fun (name, sig) => (name, sig.result.isSome), quiet := intrinsics }
@@ -908,7 +908,7 @@ def runLowerChecks (fnTy : Ty) : M Unit := do
     match s.ops.lookup name with
     | some sig => sig.result.isSome
     | none => false
-  let intrinsics := Elab.prims.map (·.1) ++ Elab.casts ++ Elab.hosts.map (·.1) ++ ["cancel", "replace"]
+  let intrinsics := Elab.prims.map (·.1) ++ Elab.casts ++ Elab.hosts.map (·.1) ++ ["cancel", "replace", Syntax.foreignCall]
   let ctx : ACtx :=
     { fns := s.fnBodies, ctors := s.ctors.map (·.1), aliases := s.aliases,
       ops := s.ops.map fun (name, sig) => (name, sig.result.isSome), quiet := intrinsics,

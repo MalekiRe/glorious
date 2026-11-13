@@ -497,6 +497,10 @@ structure St where
   /-- Variables whose value is destroyed if its type turns out to have `Drop`:
   the place, the type, and where to report a failure. -/
   dropCands : Array (Elab.DropSite × Ty × String) := #[]
+  /-- The functions that can be named only where `unsafe` is written, and
+  whether what is being checked is in a block written `unsafe { .. }`. -/
+  unsafeFns : List String := []
+  unsafeBlock : Bool := false
   dropSites : Array (Elab.DropSite × String) := #[]
   /-- How each type that is destroyed somewhere is destroyed (`TraitInfo.glue`). -/
   glue : Array (String × Option Nat × List (String × List (Option String))) := #[]

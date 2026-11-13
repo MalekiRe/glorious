@@ -478,6 +478,93 @@ fn wrong<T>() -> Step<T> {
     Err(Stop::Wrong)
 }
 
+// The foreign boundary. Nothing here is checked: an address is whatever the
+// program says it is, and a foreign function is whatever the name finds.
+
+extern "C" {
+    fn dlsym(handle: *mut u8, symbol: *const u8) -> *mut u8;
+    fn fflush(stream: *mut u8) -> i32;
+}
+
+/// The low `width` bits of what C gave: with a sign if `width` is positive,
+/// without one if it is negative.
+fn sized(raw: u128, width: i128) -> i128 {
+    let bits = width.unsigned_abs() as u32;
+    if bits == 0 || bits >= 128 {
+        return raw as i128;
+    }
+    let low = raw & ((1u128 << bits) - 1);
+    if width > 0 && low >> (bits - 1) == 1 {
+        (low as i128) - (1i128 << bits)
+    } else {
+        low as i128
+    }
+}
+
+fn read_at(at: usize, bytes: usize) -> u128 {
+    let mut out = [0u8; 16];
+    let n = bytes.min(16);
+    // SAFETY: none. The program said this address holds so many bytes.
+    unsafe { std::ptr::copy_nonoverlapping(at as *const u8, out.as_mut_ptr(), n) };
+    u128::from_le_bytes(out)
+}
+
+fn write_at(at: usize, bytes: usize, v: u128) {
+    let n = bytes.min(16);
+    // SAFETY: none. The program said this address has room for so many bytes.
+    unsafe { std::ptr::copy_nonoverlapping(v.to_le_bytes().as_ptr(), at as *mut u8, n) };
+}
+
+/// Call the C function whose name the first values spell, up to a zero; then
+/// how many bits it gives, and what it is given: up to six whole numbers.
+fn foreign_call(vs: &[Value]) -> Option<Value> {
+    let ints: Vec<i128> = vs
+        .iter()
+        .map(|v| match v {
+            Value::Int(n) => Some(*n),
+            _ => None,
+        })
+        .collect::<Option<_>>()?;
+    let end = ints.iter().position(|n| *n == 0)?;
+    let mut name: Vec<u8> = ints[..end].iter().map(|n| *n as u8).collect();
+    name.push(0);
+    let width = *ints.get(end + 1)?;
+    let a: Vec<usize> = ints[end + 2..].iter().map(|n| *n as usize).collect();
+    // SAFETY: none beyond the name being found. The program said what the
+    // function takes.
+    let raw = unsafe {
+        let f = dlsym(std::ptr::null_mut(), name.as_ptr());
+        if f.is_null() {
+            eprintln!("no foreign function `{}`", String::from_utf8_lossy(&name[..end]));
+            return None;
+        }
+        type F0 = extern "C" fn() -> usize;
+        type F1 = extern "C" fn(usize) -> usize;
+        type F2 = extern "C" fn(usize, usize) -> usize;
+        type F3 = extern "C" fn(usize, usize, usize) -> usize;
+        type F4 = extern "C" fn(usize, usize, usize, usize) -> usize;
+        type F5 = extern "C" fn(usize, usize, usize, usize, usize) -> usize;
+        type F6 = extern "C" fn(usize, usize, usize, usize, usize, usize) -> usize;
+        match a.as_slice() {
+            [] => std::mem::transmute::<*mut u8, F0>(f)(),
+            [x] => std::mem::transmute::<*mut u8, F1>(f)(*x),
+            [x, y] => std::mem::transmute::<*mut u8, F2>(f)(*x, *y),
+            [x, y, z] => std::mem::transmute::<*mut u8, F3>(f)(*x, *y, *z),
+            [x, y, z, w] => std::mem::transmute::<*mut u8, F4>(f)(*x, *y, *z, *w),
+            [x, y, z, w, v] => std::mem::transmute::<*mut u8, F5>(f)(*x, *y, *z, *w, *v),
+            [x, y, z, w, v, u] => std::mem::transmute::<*mut u8, F6>(f)(*x, *y, *z, *w, *v, *u),
+            _ => {
+                eprintln!("a foreign function is given at most six values");
+                return None;
+            }
+        }
+    };
+    // What C wrote comes before what is written here next.
+    // SAFETY: a null stream is every stream.
+    unsafe { fflush(std::ptr::null_mut()) };
+    Some(if width == 0 { unit() } else { Value::Int(sized(raw as u128, width)) })
+}
+
 struct Vm {
     codes: Rc<Vec<Vec<Instr>>>,
     functions: usize,
@@ -826,6 +913,19 @@ impl Vm {
                         Some(n) => data(0, vec![Value::Int(1), Value::Int(i128::from(n))]),
                         None => data(0, vec![Value::Int(0), Value::Int(0)]),
                     },
+                    // What is unsafe. The proved machines give these no meaning.
+                    (2, vs) => {
+                        // What C writes comes after what was written here.
+                        self.out.flush().expect("cannot write to standard output");
+                        foreign_call(vs).ok_or(Stop::Wrong)?
+                    }
+                    (3, [Value::Int(at), Value::Int(width)]) => {
+                        Value::Int(sized(read_at(*at as usize, width.unsigned_abs() as usize / 8), *width))
+                    }
+                    (4, [Value::Int(at), Value::Int(width), Value::Int(v)]) => {
+                        write_at(*at as usize, width.unsigned_abs() as usize / 8, *v as u128);
+                        unit()
+                    }
                     _ => return wrong(),
                 };
                 self.locals.push(result);
