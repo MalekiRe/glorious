@@ -286,9 +286,13 @@ def notTail (n : Nat) : String :=
 #guard lentBorrows "effect Tick { tick() }
   fn work(p) { tick(); *p = *p + 1; tick(); *p }
   fn main() { let mut n = 0; handle work(&mut n) { tick(k) => k(()) } }" == some 0
--- a callable made before the call cannot be given the borrow;
+-- A callable made before the call can be given the borrow: its type binds
+-- the region of the reference it takes.
 #guard lentBorrows "fn apply(f, p) { f(p) }
-  fn main() { let mut n = 0; apply({ q => *q = 7; }, &mut n); n }" == some 0
+  fn main() { let mut n = 0; apply({ q => *q = 7; }, &mut n); n }" == some 1
+-- So can a function that lends to itself.
+#guard lentBorrows "fn go(r, n) { if(0 < n) { let mut y = n; go(&mut y, n - 1) } else { *r } }
+  fn main() { let mut t = 5; go(&mut t, 3) }" == some 2
 -- A scope need not be whole statements at its end: where the variable is
 -- borrowed again in the statement that last uses `p`, the arguments that use
 -- `p` are computed first, and the scope ends with them.
@@ -306,10 +310,11 @@ def notTail (n : Nat) : String :=
   fn main() { let mut x = 0; handle { let p = &mut x; ask(); *p = 1; 0 }() { ask(k) => k(()) } }").map
   (·.length) == some 0
 -- Each place is decided alone.
-#guard lentBorrows "fn incr(p) { *p = *p + 1 }
-  fn main() { let mut x = 1; let mut n = 0;
-    incr(&mut x); apply({ q => *q = 7; }, &mut n); x + n }
-  fn apply(f, p) { f(p) }" == some 1
+#guard lentBorrows "effect Tick { tick() }
+  fn incr(p) { *p = *p + 1 }
+  fn work(p) { tick(); *p = *p + 1; tick(); *p }
+  fn main() { let mut x = 1; let mut n = 0; incr(&mut x);
+    let r = handle work(&mut n) { tick(k) => k(()) }; r + x }" == some 1
 -- A program that does not pass the region rules does not pass these.
 #guard lentBorrows "fn main() { let mut a = 1; let mut b = 2;
     let p = if(a < b) { &mut a } else { &mut b }; *p = 9; a + b }" == none

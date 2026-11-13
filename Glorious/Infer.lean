@@ -1720,7 +1720,21 @@ where
     let after ← post.mapM (atomTy Γ)
     let a ← freshAcc
     if (← get).regions && (← get).loans then
-      let loan ← freshAtom
+      -- The callable binds the borrow's region. It may be a function that is
+      -- lent to more than once, itself among the lenders: then the region
+      -- is no one borrow's.
+      -- (A resumption's type binds none: it is no function.)
+      let resumption ← match ← find (← atomTy Γ thunk) with
+        | .fn _ _ _ _ _ env _ => do
+          match ← find env with
+          | .never => pure true
+          | _ => pure false
+        | _ => pure false
+      let loan ← if (← get).ranked && !resumption then do
+          let r ← freshRg
+          markRank r
+          pure r
+        else freshAtom
       modify fun s => { s with accs := s.accs.set! a { binder := some loan } }
       unify (← atomTy Γ thunk)
         (.func (before ++ .ref loan σ :: after) ρt εt (← freshCls) (← freshTy) a)

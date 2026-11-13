@@ -966,8 +966,16 @@ is known: it may be a reference to a cell, and then the callable's type binds
 the region. Before, the variable in a block of the function was taken to be
 the one cell the function's parameter could point to.
 
-Limits. Such a function is shown to follow the rules with its borrows as the
-references they borrow, not as scopes of their own.
+A function may be lent to directly, `go(&mut y, n - 1)`: the scope of the
+borrow runs the function itself. Then the region of the borrow is one the
+function's type binds, not one borrow's own, since the function is lent to
+from elsewhere too. A resumption lent to binds none. And the search with
+borrows as scopes of their own is run with callables taken to bind regions
+where it fails without. So such a function's borrows are scopes of their own.
+
+Limits. With callables taken to bind regions, a handler whose operation
+gives a reference of an effect's lifetime is not shown; it is without, so a
+program that needs both is not.
 
 ## A lifetime of a declared type is an argument in Core
 

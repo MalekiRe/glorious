@@ -202,13 +202,16 @@ def compileSource (src : String) (check : Bool := true)
   let lending := fun (blocks : Option Elab.Blocks) (sites : Nat → Nat) =>
     match Elab.elabProgram all blocks sites with
     | .ok out =>
-      match Infer.certify declared out.program true out.envSizes true true with
-      | .ok cert =>
-        if out.lent != 0 && Typing.checkProgram cert out.program then
-          some (⟨out.program, out.ctorNames.map shownName, out.fnNames, out.opNames, some cert, out.lent,
-            out.plain⟩ : Compiled)
-        else none
-      | .error _ => none
+      -- As it is, and then with callables taken to bind the regions of the
+      -- references they are given: a function lent to by itself needs that.
+      [false, true].findSome? fun ranked =>
+        match Infer.certify declared out.program true out.envSizes true true ranked with
+        | .ok cert =>
+          if out.lent != 0 && Typing.checkProgram cert out.program then
+            some (⟨out.program, out.ctorNames.map shownName, out.fnNames, out.opNames, some cert, out.lent,
+              out.plain⟩ : Compiled)
+          else none
+        | .error _ => none
     | .error _ => none
   let build := fun (blocks : Option Elab.Blocks) => do
     if check then
