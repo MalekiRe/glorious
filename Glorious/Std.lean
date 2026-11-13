@@ -34,6 +34,8 @@ pub mod graph;
 pub mod source;
 pub mod boxed;
 pub mod task;
+pub mod path;
+pub mod future;
 pub mod iterator;
 pub mod slice;
 pub mod collections;
@@ -1834,6 +1836,100 @@ pub fn copy_stream<R: Read, W: Write>(reader: &mut R, writer: &mut W, limit: Int
     -> Result<Int, CopyError> / { | <R as Read>::Effects, <W as Write>::Effects } {
     copy_more(reader, writer, limit, 0)
 }
+
+// What was left when a buffered writer could not finish: the writer, the
+// bytes not written, and why.
+pub struct FinishWriteFailure<W> { pub writer: W, pub pending: [u8], pub error: IoError }
+
+// Bytes kept until there are enough to be worth writing. Letting one go
+// writes nothing: `finish` asks for what is kept to be written, and
+// `into_parts` gives it back.
+pub struct BufferWriter<W> { inner: W, held: [u8], capacity: Int }
+
+impl<W> BufferWriter<W> {
+    pub fn new(writer: W, capacity: Int) -> Self {
+        Self { inner: writer, held: [], capacity: if(capacity < 1) { 1 } else { capacity } }
+    }
+    pub fn get_ref<'a>(value: &'a Self) -> &'a W { &value.inner }
+    // How many bytes are kept.
+    pub fn buffered(value: &Self) -> Int { len_at(&value.held) }
+    pub fn pending(value: &Self) -> [u8] { value.held }
+    pub fn into_parts(value: Self) -> (W, [u8]) { match(value) { BufferWriter { inner, held, capacity: _ } => (inner, held) } }
+    // What is kept written, and the writer given back; or all three of what
+    // there was, where it could not be.
+    pub fn finish(value: Self) -> Result<W, FinishWriteFailure<W>> / { | <W as Write>::Effects } where W: Write {
+        match(value) {
+            BufferWriter { inner, held, capacity: _ } =>
+                let mut writer = inner;
+                match(write_from(&mut writer, held, 0)) {
+                    Ok(_) => match(flush(&mut writer)) {
+                        Ok(_) => Ok(writer),
+                        Err(e) => Err(FinishWriteFailure { writer: writer, pending: [], error: e })
+                    },
+                    Err(e) => Err(FinishWriteFailure { writer: writer, pending: piece(&held, e.written, len(held), []), error: e.error })
+                }
+        }
+    }
+}
+
+impl<W> Write for BufferWriter<W> where W: Write {
+    type Effects = { | <W as Write>::Effects };
+    fn write(b, bytes) {
+        b.held = joined(b.held, &bytes, 0);
+        if(len_at(&b.held) >= b.capacity) {
+            match(write_from(&mut b.inner, b.held, 0)) {
+                Ok(_) => b.held = []; Ok(len(bytes)),
+                // (What the writer took is no longer kept.)
+                Err(e) => b.held = piece(&b.held, e.written, len_at(&b.held), []); Err(e.error)
+            }
+        } else { Ok(len(bytes)) }
+    }
+    fn flush(b) {
+        match(write_from(&mut b.inner, b.held, 0)) {
+            Ok(_) => b.held = []; flush(&mut b.inner),
+            Err(e) => b.held = piece(&b.held, e.written, len_at(&b.held), []); Err(e.error)
+        }
+    }
+}
+
+// Bytes read ahead, so that a little is not asked of the reader each time.
+pub struct BufferReader<R> { inner: R, held: [u8], at: Int, capacity: Int }
+
+impl<R> BufferReader<R> {
+    pub fn new(reader: R, capacity: Int) -> Self {
+        Self { inner: reader, held: [], at: 0, capacity: if(capacity < 1) { 1 } else { capacity } }
+    }
+    pub fn get_ref<'a>(value: &'a Self) -> &'a R { &value.inner }
+    // The reader, and the bytes read from it that nothing has asked for yet.
+    pub fn into_parts(value: Self) -> (R, [u8]) {
+        match(value) { BufferReader { inner, held, at, capacity: _ } => (inner, piece(&held, at, len(held), [])) }
+    }
+}
+
+impl<R> Read for BufferReader<R> where R: Read {
+    type Effects = { | <R as Read>::Effects };
+    fn read(b, most) {
+        if(b.at < len_at(&b.held)) {
+            let from = b.at;
+            let n = len_at(&b.held);
+            let upto = if(from + most > n) { n } else { from + most };
+            b.at = upto;
+            Ok(piece(&b.held, from, upto, []))
+        } else {
+            // Nothing kept: more is read, as much as is kept at a time or
+            // as much as is asked for, whichever is more.
+            match(read(&mut b.inner, if(most > b.capacity) { most } else { b.capacity })) {
+                Err(e) => Err(e),
+                Ok(got) =>
+                    let n = len(got);
+                    let upto = if(most > n) { n } else { most };
+                    b.held = got;
+                    b.at = upto;
+                    Ok(piece(&b.held, 0, upto, []))
+            }
+        }
+    }
+}
 "#
 
 private def valueText : String := r#"// The small things the rest is built from, as the library specification
@@ -2168,6 +2264,127 @@ fn hex_from(text: Str, at: Int, out: [u8]) -> Result<[u8], HexError> {
 
 // The bytes a text of hexadecimal digits says, or where it stops being one.
 pub fn hex_decode(text: Str) -> Result<[u8], HexError> { hex_from(text, 0, []) }
+
+// Bytes as text six bits to a character.
+pub enum Base64Alphabet { Standard, UrlSafe }
+pub enum Padding { Required, Optional, Forbidden }
+pub struct Base64Options { pub alphabet: Base64Alphabet, pub padding: Padding }
+pub enum Base64ErrorKind { InvalidDigit, InvalidPadding, NonCanonicalTail, IncorrectLength }
+pub struct Base64Error { pub offset: Int, pub kind: Base64ErrorKind }
+
+fn is_url(options: &Base64Options) -> Bool { match(options.alphabet) { Base64Alphabet::UrlSafe => true, Base64Alphabet::Standard => false } }
+
+fn letter(n: Int) -> char { match(char(n)) { Some(c) => c, None => '?' } }
+
+fn digit64(n: Int, url: Bool) -> char {
+    if(n < 26) { letter(65 + n) } else {
+        if(n < 52) { letter(71 + n) } else {
+            if(n < 62) { letter(n - 4) } else {
+                if(n == 62) { if(url) { '-' } else { '+' } } else { if(url) { '_' } else { '/' } }
+            }
+        }
+    }
+}
+
+fn value64(c: char, url: Bool) -> Option<Int> {
+    let n = int(c);
+    if(65 <= n and { n <= 90 }) { Some(n - 65) } else {
+        if(97 <= n and { n <= 122 }) { Some(n - 71) } else {
+            if(48 <= n and { n <= 57 }) { Some(n + 4) } else {
+                if(c == (if(url) { '-' } else { '+' })) { Some(62) } else {
+                    if(c == (if(url) { '_' } else { '/' })) { Some(63) } else { None }
+                }
+            }
+        }
+    }
+}
+
+// The digits of the bytes from a place on, three bytes to four digits; the
+// last one or two bytes to two or three.
+fn digits64<'a>(bytes: &Slice<'a, u8>, at: Int, out: [Int]) -> [Int] {
+    let left = Slice::len(bytes) - at;
+    if(left <= 0) { out } else {
+        let a = byte_at(bytes, at);
+        if(left == 1) { push(push(out, a / 4), (a % 4) * 16) } else {
+            let b = byte_at(bytes, at + 1);
+            if(left == 2) { push(push(push(out, a / 4), (a % 4) * 16 + b / 16), (b % 16) * 4) } else {
+                let c = byte_at(bytes, at + 2);
+                tail digits64(bytes, at + 3, push(push(push(push(out, a / 4), (a % 4) * 16 + b / 16), (b % 16) * 4 + c / 64), c % 64))
+            }
+        }
+    }
+}
+
+fn padded(n: Int, out: Str) -> Str { if(n % 4 == 0) { out } else { tail padded(n + 1, StrChar('=', out)) } }
+
+fn text64(digits: &[Int], i: Int, url: Bool, out: Str) -> Str {
+    if(i <= 0) { out } else {
+        tail text64(digits, i - 1, url, StrChar(digit64(match(element(digits, i - 1)) { Some(d) => *d, None => 0 }, url), out))
+    }
+}
+
+pub fn base64_encode<'a>(bytes: Slice<'a, u8>, options: Base64Options) -> Str {
+    let digits = digits64(&bytes, 0, []);
+    let n = len(digits);
+    let end = match(options.padding) { Padding::Required => padded(n, ""), Padding::Optional => padded(n, ""), Padding::Forbidden => "" };
+    text64(&digits, n, is_url(&options), end)
+}
+
+// The digits a text has before its padding, and how many `=` follow them:
+// or the place of a character that is neither.
+fn read64(text: Str, at: Int, url: Bool, digits: [Int], pads: Int) -> Result<([Int], Int), Base64Error> {
+    match(text) {
+        StrEnd => Ok((digits, pads)),
+        StrChar(c, rest) =>
+            if(c == '=') { tail read64(rest, at + 1, url, digits, pads + 1) } else {
+                // A digit after padding is not where one can be.
+                if(pads > 0) { Err(Base64Error { offset: at, kind: Base64ErrorKind::InvalidPadding }) } else {
+                    match(value64(c, url)) {
+                        Some(v) => tail read64(rest, at + 1, url, push(digits, v), 0),
+                        None => Err(Base64Error { offset: at, kind: Base64ErrorKind::InvalidDigit })
+                    }
+                }
+            }
+    }
+}
+
+fn bytes64(digits: &[Int], at: Int, out: [u8]) -> Result<[u8], Base64Error> {
+    let left = len_at(digits) - at;
+    let d = fn(i: Int) -> Int { match(element(digits, at + i)) { Some(v) => *v, None => 0 } };
+    if(left <= 0) { Ok(out) } else {
+        if(left == 1) { Err(Base64Error { offset: at, kind: Base64ErrorKind::IncorrectLength }) } else {
+            let first = u8(d(0) * 4 + d(1) / 16);
+            if(left == 2) {
+                // (Bits left over have to be nothing: the one way to write it.)
+                if(d(1) % 16 != 0) { Err(Base64Error { offset: at + 1, kind: Base64ErrorKind::NonCanonicalTail }) } else { Ok(push(out, first)) }
+            } else {
+                let second = u8((d(1) % 16) * 16 + d(2) / 4);
+                if(left == 3) {
+                    if(d(2) % 4 != 0) { Err(Base64Error { offset: at + 2, kind: Base64ErrorKind::NonCanonicalTail }) } else { Ok(push(push(out, first), second)) }
+                } else {
+                    bytes64(digits, at + 4, push(push(push(out, first), second), u8((d(2) % 4) * 64 + d(3))))
+                }
+            }
+        }
+    }
+}
+
+// The bytes a text says, or where it stops being one: nothing is skipped,
+// and padding is taken as the options say.
+pub fn base64_decode(text: Str, options: Base64Options) -> Result<[u8], Base64Error> {
+    match(read64(text, 0, is_url(&options), [], 0)) {
+        Err(e) => Err(e),
+        Ok((digits, pads)) =>
+            let n = len(digits);
+            let wanted = (4 - n % 4) % 4;
+            let fits = match(options.padding) {
+                Padding::Required => pads == wanted,
+                Padding::Optional => pads == 0 or { pads == wanted },
+                Padding::Forbidden => pads == 0
+            };
+            if(fits) { bytes64(&digits, 0, []) } else { Err(Base64Error { offset: n, kind: Base64ErrorKind::InvalidPadding }) }
+    }
+}
 "#
 
 private def indexText : String := r#"// Tables whose places cannot be mixed up with another table's, and the sets
@@ -3185,6 +3402,141 @@ pub fn round_robin<T>(tasks: [Coroutine<(), (), T>]) -> [T] {
 }
 "#
 
+private def pathText : String := r#"// Paths taken apart and put together as text, as the library specification
+// has them (29.1), for paths written with `/`. Nothing here looks at a file
+// system: a link is not followed, and a path is not shown to stay inside
+// another.
+
+use std::text::{split, join, starts_with, is_empty};
+
+// A path, kept as it is written.
+pub struct PathBuf { text: Str }
+
+pub enum PathComponent { Root, Current, Parent, Normal(Str) }
+pub enum PathError { InvalidEncoding, InvalidComponent, UnsupportedPrefix }
+
+// The names between the `/`s, those that are nothing left out.
+fn names(text: Str) -> [Str] { kept(split(text, '/'), 0, []) }
+fn kept(parts: [Str], i: Int, out: [Str]) -> [Str] {
+    if(i >= len(parts)) { out } else { tail kept(parts, i + 1, if(is_empty(parts[i])) { out } else { push(out, parts[i]) }) }
+}
+
+fn component(name: Str) -> PathComponent {
+    if(name == ".") { PathComponent::Current } else { if(name == "..") { PathComponent::Parent } else { PathComponent::Normal(name) } }
+}
+
+fn components_of(parts: [Str], i: Int, out: [PathComponent]) -> [PathComponent] {
+    if(i >= len(parts)) { out } else { tail components_of(parts, i + 1, push(out, component(parts[i]))) }
+}
+
+fn upto(parts: [Str], n: Int, i: Int, out: [Str]) -> [Str] {
+    if(i >= n) { out } else { tail upto(parts, n, i + 1, push(out, parts[i])) }
+}
+
+// The place of the last `.` in a name, if it has one after its first
+// character: a name that only begins with one has no extension.
+fn last_dot(name: Str, i: Int, found: Int) -> Int {
+    match(name) {
+        StrEnd => found,
+        StrChar(c, rest) => tail last_dot(rest, i + 1, if(c == '.' and { i > 0 }) { i } else { found })
+    }
+}
+
+impl PathBuf {
+    pub fn new() -> Self { Self { text: "" } }
+    pub fn from_str(text: Str) -> Self { Self { text: text } }
+    pub fn as_str(p: &Self) -> Str { p.text }
+    pub fn is_absolute(p: &Self) -> Bool { starts_with(p.text, "/") }
+    // What it is made of, in order: the root if it starts at it, then each
+    // name, with `.` and `..` told from the others.
+    pub fn components(p: &Self) -> [PathComponent] {
+        components_of(names(p.text), 0, if(starts_with(p.text, "/")) { [PathComponent::Root] } else { [] })
+    }
+    // The last name, if the path ends in one.
+    pub fn file_name(p: &Self) -> Option<Str> {
+        let parts = names(p.text);
+        let n = len(parts);
+        if(n == 0) { None } else {
+            let last = parts[n - 1];
+            if(last == "." or { last == ".." }) { None } else { Some(last) }
+        }
+    }
+    // What follows the last `.` of the last name.
+    pub fn extension(p: &Self) -> Option<Str> {
+        match(PathBuf::file_name(p)) {
+            None => None,
+            Some(name) =>
+                let at = last_dot(name, 0, 0 - 1);
+                if(at < 0) { None } else { Some(std::text::drop(name, at + 1)) }
+        }
+    }
+    // The path without its last name: none for the root and for a path of
+    // no names.
+    pub fn parent(p: &Self) -> Option<PathBuf> {
+        let parts = names(p.text);
+        let n = len(parts);
+        if(n == 0) { None } else {
+            let before = join(upto(parts, n - 1, 0, []), "/");
+            Some(PathBuf { text: if(starts_with(p.text, "/")) { "/" ++ before } else { before } })
+        }
+    }
+    // Another path after this one; one that starts at the root takes its
+    // place.
+    pub fn join(p: &Self, other: &Self) -> PathBuf {
+        if(starts_with(other.text, "/") or { is_empty(p.text) }) { PathBuf { text: other.text } } else {
+            if(is_empty(other.text)) { PathBuf { text: p.text } } else {
+                PathBuf { text: if(std::text::ends_with(p.text, "/")) { p.text ++ other.text } else { p.text ++ "/" ++ other.text } }
+            }
+        }
+    }
+    pub fn push(p: &mut Self, other: &Self) -> Result<(), PathError> {
+        let joined = PathBuf::join(&*p, other);
+        p.text = joined.text;
+        Ok(())
+    }
+    // The last name taken off: whether there was one.
+    pub fn pop(p: &mut Self) -> Bool {
+        match(PathBuf::parent(&*p)) { Some(up) => p.text = up.text; true, None => false }
+    }
+}
+"#
+
+private def futureText : String := r#"// Computations that may not be done yet, as the library specification has
+// them (30.3): polling one uses it up, and gives its result or the future
+// that goes on. Who polls, and when, is whoever handles `await`.
+
+pub enum FutureStep<T, F> { Ready(T), Pending(F) }
+
+pub trait Future {
+    type Output;
+    fn poll(Self) -> FutureStep<Self::Output, Self>
+}
+
+// Waiting for a future's result. Whoever asks is always answered, with what
+// the future made: a handler drives the future, or hands it on, and resumes
+// once.
+pub effect Await<F, T> { [1, 1] await(F) -> T }
+
+// A future that is done already.
+pub struct Ready<T> { value: T }
+pub fn ready<T>(value: T) -> Ready<T> { Ready { value: value } }
+impl<T> Future for Ready<T> {
+    type Output = T;
+    fn poll(r) { match(r) { Ready { value } => FutureStep::Ready(value) } }
+}
+
+// A future polled until it is done.
+pub fn drive<T, F: Future<Output = T>>(future: F) -> T {
+    match(poll(future)) { FutureStep::Ready(value) => value, FutureStep::Pending(rest) => drive(rest) }
+}
+
+// The simplest provider: a future awaited is driven to its end where it is
+// awaited.
+pub fn block_on<T, F: Future<Output = T>, R>(body: fn() -> R / {Await<F, T>}) -> R {
+    handle body() { await(future, k) => k(drive(future)) }
+}
+"#
+
 private def generatorText : String := r#"// Generators, in the shape the library specification gives them (30.2): a
 // computation that yields is owned as a value, and resuming it uses that
 // value up and gives either what it yielded with the generator that goes
@@ -3713,6 +4065,8 @@ def texts : List (List String × String) :=
    (["std", "source"], sourceText),
    (["std", "boxed"], boxedText),
    (["std", "task"], taskText),
+   (["std", "path"], pathText),
+   (["std", "future"], futureText),
    (["alloc", "boxed"], "pub use std::boxed::*;\n"),
    (["std", "iterator"], iteratorText),
    (["std", "slice"], sliceText),

@@ -2713,6 +2713,32 @@ from being an `Id<Block>`.
 - Not built: base64; `ByteReader::read_u128_le` is, the signed widths
   other than `read_i64_le` are not in the specification.
 
+## Paths, futures, buffers, base64
+
+- **`std::path`** (29.1) is `PathBuf` over a text, for paths written with
+  `/`: `components`, `file_name`, `extension`, `parent`, `join`, `push`,
+  `pop`. There is one path type, not `Path<'a>` and `PathBuf`, and no
+  `OsString`: a text here is not a view of bytes, and every text is valid.
+- **`std::future`** (30.3) has `Future`, `FutureStep`, `Await`, `ready`,
+  `drive` and `block_on`. `Await<F, T>` says the result type beside the
+  future's, where the specification has `Await<F> where F: Future` giving
+  `F::Output`: an effect's operation cannot yet name a type a trait leaves
+  to an implementation. `poll` takes the future alone: there is no
+  `PollContext` or wake key, since nothing here wakes anything.
+- **`BufferWriter` and `BufferReader`** are in `std::stream` (28.2), each
+  with its inner stream's effects. `new` cannot fail and gives the buffer
+  itself. `finish` writes what is kept and gives the writer back, or gives
+  back the writer, the bytes not written and why; letting a buffer go
+  writes nothing.
+- **`base64_encode` and `base64_decode`** are in `std::bytes` (23), with
+  both alphabets and the three padding rules; a text that says its last
+  bytes with bits left over is refused as not the one way to write them.
+
+`vm/check-backends.sh` now remembers each program that agreed on every
+engine, by a hash of its bytecode, its input, the VM and the C compiler,
+and does not run it again while those are the same. It was taking most of
+each verification. `GLORIOUS_BACKENDS_CACHE=` runs everything.
+
 ## Constructors that share a name
 
 `enum Token { Plus, Minus }` and `enum Op { Plus, Minus }` in one module,
