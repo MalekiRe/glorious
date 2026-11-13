@@ -516,6 +516,18 @@ impl<T, E> Show for Result<T, E> where T: Show, E: Show {
 // is a value: changing one makes another.
 struct Array<T>(T)
 
+// An address, with what is said to be there: `*const T` and `*mut T`. To
+// have one says nothing of what is at the address; reading and writing
+// there is unsafe, and the library's to give.
+struct Ptr<T>(usize)
+struct PtrMut<T>(usize)
+
+fn ptr_at<T>(address: usize) -> *const T { Ptr(address) }
+fn ptr_mut_at<T>(address: usize) -> *mut T { PtrMut(address) }
+fn ptr_address<T>(p: *const T) -> usize { p.0 }
+fn ptr_mut_address<T>(p: *mut T) -> usize { p.0 }
+fn ptr_const<T>(p: *mut T) -> *const T { Ptr(p.0) }
+
 // `a[i]` is `index(a, i)`, and `a[i] = v` makes `a` be `index_set(a, i, v)`.
 // A place that is not there has no meaning: the program stops.
 trait Index {

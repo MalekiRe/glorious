@@ -2398,6 +2398,15 @@ def cases : List Case := [
     [], "3\n5"⟩,
   ⟨"struct D(Int)\nimpl Drop for D { fn drop(d: &mut D) { host_write(d.0) } }\nfn sink<T>(t: T) { }\nfn main() { sink(D(5)); 0 }",
     [], "5\n0"⟩,
+  -- `*const T` and `*mut T`: an address with what is said to be there; the prelude makes them.
+  ⟨"fn addr(p: *mut Int) -> usize { ptr_mut_address(p) }\nfn main() { let p: *mut Int = ptr_mut_at(usize_of(64)); usize_bits(addr(p)) }",
+    [], "64"⟩,
+  ⟨"fn f(p: *const Int) -> Int { 0 }\nfn main() { let q: *mut Int = ptr_mut_at(usize_of(8)); f(q) }",
+    [], "error: 2:56: in `main`: argument 1 of `f`: expected `Ptr<Int>`, found `PtrMut<Int>`"⟩,
+  ⟨"fn f(p: *const Int) -> usize { ptr_address(p) }\nfn main() { let q: *mut Int = ptr_mut_at(usize_of(8)); usize_bits(f(ptr_const(q))) }",
+    [], "8"⟩,
+  ⟨"fn main() { let q: *mut Int = PtrMut(usize_of(8)); 0 }",
+    [], "error: 1:13: in `main`: `PtrMut` has private fields: only the prelude can build one or take one apart"⟩,
   -- `drop` is not for a program to call.
   ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nfn main() { let mut f = File(7); drop(&mut f); 0 }",
     [], "error: 3:34: in `main`: `drop` is run when what holds a value ends; a program does not call it"⟩,

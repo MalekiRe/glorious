@@ -414,6 +414,17 @@ private partial def parseType : P TypeExpr := do
     if (← peek) == .punct ";" then failAt "an array's type does not say how long it is: write `[T]`"
     expectPunct "]"
     pure (.name "%prelude::Array" [element])
+  | .op "*" =>
+    -- `*const T`, `*mut T`: an address, with what is said to be there.
+    advance
+    match ← peek with
+    | .ident "const" =>
+      advance
+      pure (.name "%prelude::Ptr" [← parseType])
+    | .ident "mut" =>
+      advance
+      pure (.name "%prelude::PtrMut" [← parseType])
+    | _ => failAt "expected `const` or `mut`: `*const T`, `*mut T`"
   | _ => failAt "expected a type"
 
 /-- What follows `->` in a callable: its result, which may be left out when
@@ -425,6 +436,7 @@ private partial def parseResult : P TypeExpr := do
     | .punct "[" => true
     | .op "!" => true
     | .op "&" => true
+    | .op "*" => true
     | _ => false
   let ret ← if startsType then parseType else pure (.tuple [])
   if (← peek) == .op "/" then

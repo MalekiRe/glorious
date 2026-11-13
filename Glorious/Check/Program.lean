@@ -348,10 +348,17 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
     -- What `Traits.coherent` asks of the assumptions.
     unless Traits.distinct givens do
       throw (inFunction b.owner s!"{b.pos}a bound is assumed twice; this is a compiler defect")
-    match Traits.solve kimpls givens 100000 b.trait (← toSTy b.ty) with
+    -- How a value is destroyed: a part of its type that nothing decides, and
+    -- the function is not given, has nothing to destroy.
+    let sty ← if b.trait == Syntax.destroyTrait then do
+        let rec settle : Traits.STy → Traits.STy
+          | .var k => if givens.contains (Syntax.destroyTrait, k) then .var k else .con "(reference)" []
+          | .con n args => .con n (args.map settle)
+        pure (settle (← toSTy b.ty))
+      else toSTy b.ty
+    match Traits.solve kimpls givens 100000 b.trait sty with
     | some d => table := record table b.call (toDictE impls d)
     | none =>
-      -- A value of a type nothing here decides is not destroyed.
       if b.trait == Syntax.destroyTrait then continue
       for (tr, k, t) in ← leaves b.pos b.trait b.ty do
         unless givens.contains (tr, k) do

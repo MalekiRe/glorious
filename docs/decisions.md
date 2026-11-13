@@ -1042,6 +1042,10 @@ From the audit of the specification (10.8, 20).
   parameter is asked where one of its operations is performed. The
   operations of an effect may follow each other with `,`, `;` or nothing
   between, as the specification writes them (10.1).
+- **`*const T` and `*mut T`** are types of the prelude: an address, with what
+  is said to be there. The prelude makes one from an address and gives its
+  address back; a `*mut T` is made a `*const T` by a function. A reference
+  is not made a pointer: on the machines here a reference is no address.
 - **`struct W<T = Int>`**: a declared type written with fewer arguments than
   it has parameters has, for the rest, what its declaration says; a default
   may mention the parameters before it, and comes after every parameter that
