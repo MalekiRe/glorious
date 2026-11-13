@@ -597,6 +597,26 @@ partial def aliased (fuel : Nat) (e : Entry) : R (Option String) := do
   | some next => aliased (fuel - 1) next
   | none => pure none
 
+/-- The patterns of a constructor's fields with `..` written out: a `_` for
+each field it stands for. -/
+def restWritten (written : String) (e : Option Entry) (args : List Pattern) : R (List Pattern) := do
+  let isRest := fun (p : Pattern) => match p with
+    | .var r => r == restMark
+    | _ => false
+  unless args.any isRest do return args
+  if (args.filter isRest).length > 1 then throw s!"`{written}(..)`: `..` is written once"
+  -- (A name given to a constructor, `let Some = Ok;`, is that constructor.)
+  let ctor ← match e with
+    | some e => aliased 8 e
+    | none => pure none
+  let fields := (← get).fields
+  match (ctor.bind fun c => fields.lookup c).map (·.2.2.length) with
+  | some n =>
+    let given := args.length - 1
+    if given > n then throw s!"`{written}` has {n} fields, and more than that are written"
+    pure (args.flatMap fun p => if isRest p then List.replicate (n - given) Pattern.wild else [p])
+  | none => throw s!"`..` stands for the rest of a constructor's fields, and `{written}` is not a constructor of a declared type"
+
 /-- A pattern as the test of a value's shape that it is, its names left out;
 and for each name, the way to the part it names: through tuples by number,
 through constructors by constructor and number. -/
@@ -634,8 +654,8 @@ partial def shapeOf (ctx : Ctx) (way : List String) : Pattern → R (Pattern × 
           match orderFields name names gave (if rest then some Pattern.wild else none) with
           | .ok ps => pure ps
           | .error e => throw e
-        else pure args
-      | _ => pure args
+        else restWritten name entry args
+      | _ => restWritten name entry args
     -- A name declared for a constructor, `let Some = Ok;`, is that one.
     let global ← match entry with
       | some e =>
@@ -828,6 +848,7 @@ partial def resolvePattern (ctx : Ctx) : Pattern → R (Pattern × List String)
         let args ← ordered.mapM (resolvePattern ctx)
         return (.ctor name' qual' (args.map (·.1)), args.flatMap (·.2))
     | _ => pure ()
+    let args ← restWritten name entry args
     let args ← args.mapM (resolvePattern ctx)
     pure (.ctor name' qual' (args.map (·.1)), args.flatMap (·.2))
 

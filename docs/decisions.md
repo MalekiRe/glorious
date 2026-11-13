@@ -2611,6 +2611,21 @@ nothing silently.
   the type unknown.
 - A program with no `Drop` is checked as before.
 
+## `..` in a pattern
+
+`Rect(w, ..)`, `P(.., z)` and `P(a, .., d)` stand for the fields of a
+constructor that are not written, each let go as `_` lets one go. It is
+written out where names are given their meaning, from how many fields the
+constructor was declared with; a name given to a constructor (`Some(..)`)
+is that constructor, and a pattern that binds by reference may use it.
+
+- **Not of a tuple.** How many parts a tuple has is known only once types
+  are, and a pattern is read by everything that counts uses and borrows
+  before that. `(a, ..)` is refused, with the reason.
+- **Not of an array.** An array's pattern is for one length; `[first, ..]`
+  would be for every length from one up, which the machine's patterns do
+  not have.
+
 ## Generators
 
 `std::generator` has the specification's generators (30.2): the effects

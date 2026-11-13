@@ -803,6 +803,12 @@ private partial def parsePattern : P Pattern := do
   | .punct "(" =>
     advance
     let args ← parsePatternList
+    -- How many parts a tuple has is not written anywhere a pattern could
+    -- read it: `..` is for a constructor's fields.
+    if args.any (fun p => match p with
+        | .var r => r == restMark
+        | _ => false) then
+      failAt "`..` stands for the rest of a constructor's fields; of a tuple each part is written, `_` for one that is not wanted"
     match args with
     | [p] => if ← closedAfterComma then pure (.tuple [p]) else pure p
     | _ => pure (.tuple args)
@@ -813,7 +819,12 @@ private partial def parsePatternList : P (List Pattern) := do
   let mut out : Array Pattern := #[]
   repeat
     if (← peek) == .punct ")" then break
-    out := out.push (← parsePattern)
+    -- `..`: the fields not written, let go.
+    if (← peek) == .punct "." && (← peek 1) == .punct "." then
+      advance
+      advance
+      out := out.push (.var restMark)
+    else out := out.push (← parsePattern)
     if !(← acceptPunct ",") then break
   expectPunct ")"
   pure out.toList
@@ -2021,7 +2032,9 @@ private partial def parseItemGroup : P (List Item) := do
       let (fields, names, _) ← parseFieldDecls
       ctors := ctors.push (c, fields)
       -- A constructor's fields are as visible as the type.
-      unless names.isEmpty do named := named.push (.fieldNames c names (fields.map fun _ => true))
+      -- (Kept for one without names too: how many fields it has is what
+      -- `..` in a pattern stands for the rest of.)
+      named := named.push (.fieldNames c names (fields.map fun _ => true))
       if !(← acceptPunct ",") then break
     expectPunct "}"
     pure (.enum name params ctors.toList :: named.toList
