@@ -163,7 +163,12 @@ def scalars : List (String × Option Int) :=
    ("usize", some (-64)), ("u128", some (-128)),
    ("f32", none), ("f64", none), ("char", none)]
 
-def isScalar (name : String) : Bool := (scalars.lookup name).isSome
+def isScalar (name : String) : Bool :=
+  -- (Asked of every type name there is: told by its first letter before the
+  -- table is looked through.)
+  match name.front with
+  | 'i' | 'u' | 'f' | 'c' => (scalars.lookup name).isSome
+  | _ => false
 
 /-- `i8_of` takes an `Int` to be an `i8` as it is, and `i8_bits` gives the
 `Int` an `i8` is held as; so for each scalar type. Neither does anything: they

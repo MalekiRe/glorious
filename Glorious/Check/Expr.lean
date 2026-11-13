@@ -465,23 +465,31 @@ partial def checkArgs (scope : Scope) (amb : Row) (what : String) (params : List
     | _ => false
   let natural := List.range args.length
   let later := natural.filter (!written ·) ++ natural.filter written
-  let saved ← get
+  -- (What was known before is kept only where there may be a second try: in
+  -- another order, or with a coercion the program declares. Keeping it makes
+  -- every table that is then written a copy of itself, which for the calls
+  -- of a whole program is most of the work.)
+  let again := later != natural || !(← get).coercing.isEmpty
+  let saved ← if again then some <$> get else pure none
+  let back := fun (saved : Option St) => match saved with
+    | some s => set s
+    | none => pure ()
   -- What does not fit so is said of the arguments in the order written.
   let order ← if later == natural then pure natural else
     match ← checkArgsIn scope amb what params args call later with
     | none => return
     | some _ => do
-      set saved
+      back saved
       pure natural
   match ← checkArgsIn scope amb what params args call order with
   | none => pure ()
   | some (i, e) =>
-    set saved
-    if saved.coercing.isEmpty then throw e
+    back saved
+    if (← get).coercing.isEmpty then throw e
     match ← checkArgsIn scope amb what params args call (i :: order.erase i) with
     | none => pure ()
     | some _ =>
-      set saved
+      back saved
       throw e
 
 /-- Apply a callee of a given type in the ambient effects. -/
@@ -1189,19 +1197,22 @@ partial def inferCallable (scope : Scope) (annots : List (Option Ty)) (ret : Opt
   -- As with arguments: a clause whose result does not fit is looked at first
   -- on a second attempt, so that the others can be converted to what it gives.
   let order := List.range clauses.length
-  let saved ← get
+  -- (Kept only where a coercion could make a second attempt worth it.)
+  let saved ← if (← get).coercing.isEmpty then pure none else some <$> get
   let mut failed : Option (Nat × String) := none
   for j in order do
     if let some e ← checkClause j then
       failed := some (j, e)
       break
   if let some (j, e) := failed then
-    set saved
-    if saved.coercing.isEmpty then throw e
-    for k in j :: order.erase j do
-      if (← checkClause k).isSome then
-        set saved
-        throw e
+    match saved with
+    | none => throw e
+    | some saved =>
+      set saved
+      for k in j :: order.erase j do
+        if (← checkClause k).isSome then
+          set saved
+          throw e
   let check : Pending := ⟨(← get).pos, what, params, clauses.map fun
     | .mk pats _ => pats⟩
   modify fun s => { s with pending := s.pending.push check }
