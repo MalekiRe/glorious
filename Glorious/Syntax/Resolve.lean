@@ -111,6 +111,22 @@ partial def expandAliases (items : List Item) : Except String (List Item) := do
   let aliases := aliases.filter fun (name, _, _) => !declared.contains name
   if aliases.isEmpty then return items
   let ty := expandTypeExpr aliases []
+  -- An argument of an implementation's type that is not one of its type
+  -- parameters is a type: `impl T for Option<Int>`. It is fixed, as an
+  -- argument another name of the type fixes is.
+  let concrete := fun (ps : List String) (tr head : String) (args : List String)
+      (context : List (String × String)) (methods : List Item) => do
+    let mut newArgs : Array String := #[]
+    let mut fresh : Array String := #[]
+    let mut fixed : Array Item := #[]
+    for (a, j) in args.zipIdx do
+      if ps.contains a || head.startsWith "(tuple" then newArgs := newArgs.push a
+      else
+        let name := s!"%fixed{j}"
+        newArgs := newArgs.push name
+        fresh := fresh.push name
+        fixed := fixed.push (.typeAlias (fixedArgName j) [] (← ty (.name a [])))
+    pure (Item.impl (ps ++ fresh.toList) tr head newArgs.toList context (methods ++ fixed.toList))
   let rec item : Item → Except String Item
     | .enum name ps ctors => do
       pure (.enum name ps (← ctors.mapM fun (c, fields) => do pure (c, ← fields.mapM ty)))
@@ -129,7 +145,28 @@ partial def expandAliases (items : List Item) : Except String (List Item) := do
       let methods ← methods.mapM fun
         | .typeAlias name aps body => do pure (.typeAlias name aps (← ty body))
         | m => item m
-      pure (.impl ps tr head args context methods)
+      -- An implementation for another name of a type, `impl T for
+      -- Option<A>`, is one for the type the name stands for, with the
+      -- arguments the name fixes said beside it.
+      match aliases.find? (·.1 == head) with
+      | some (_, aps, .name target targs) =>
+        let given := aps.zip args
+        let mut newArgs : Array String := #[]
+        let mut fresh : Array String := #[]
+        let mut fixed : Array Item := #[]
+        for (targ, j) in targs.zipIdx do
+          let named := match targ with
+            | .name p [] => given.lookup p
+            | _ => none
+          match named with
+          | some a => newArgs := newArgs.push a
+          | none =>
+            let name := s!"%fixed{j}"
+            newArgs := newArgs.push name
+            fresh := fresh.push name
+            fixed := fixed.push (.typeAlias (fixedArgName j) [] (← ty targ))
+        concrete (ps ++ fresh.toList) tr target newArgs.toList context (methods ++ fixed.toList)
+      | _ => concrete ps tr head args context methods
     | i => pure i
   let rest := items.filter fun
     | .typeAlias _ _ _ => false

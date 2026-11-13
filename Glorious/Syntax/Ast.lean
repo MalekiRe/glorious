@@ -350,6 +350,10 @@ def spreadMark : String := "%spread"
 written with its type is: `%inst(f(args), (A, B))`. -/
 def instMark : String := "%inst"
 
+/-- In an implementation for another name of a type: the argument of the type
+that the name fixes, by its place. -/
+def fixedArgName (j : Nat) : String := s!"%fixed:{j}"
+
 /-- In a written row, the row parameter that stands for the rest of it. -/
 def rowMark : String := "%row"
 

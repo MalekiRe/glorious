@@ -2303,6 +2303,24 @@ with a program whenever the library does.
 it writes the bytecode, asks the VM for the LLVM module, and has `clang`
 compile and link it with the runtime.
 
+## An implementation for some of a type
+
+`impl T for Option<A>` and `impl T for Bool` name a type by another of its
+names: `Option<A>` is `Result<A, ()>` and `Bool` is `Result<(), ()>`. Such an
+implementation is one for the type the name stands for with some of its
+arguments fixed, and so is `impl T for Pair<Int, B>`, where an argument is
+written as a type. The proved solver still finds an implementation by the
+type's head; what it is asked of is then held to the fixed arguments, and
+`T` of a `Result<Int, Int>` is refused where `T` is implemented for
+`Option<A>`.
+
+- **A type has one implementation of a trait**, as before: not one for
+  `Option<A>` and another for `Result<A, E>`, nor one for `Pair<Int, B>` and
+  another for `Pair<Str, B>`. The solver is proved for implementations told
+  apart by head, and this keeps it so.
+- **A fixed argument is a type with no parameters of the implementation in
+  it**, written as one name.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by

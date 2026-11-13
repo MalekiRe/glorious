@@ -372,9 +372,23 @@ def declareTraits (items : List Item) : M Unit := do
         if let .typeAlias n _ _ := m then
           unless n.startsWith "%" || assocNames.contains n do
             throw s!"{what}: `{n}` is not a type `{base}` leaves to an implementation"
+      -- The arguments fixed by the name the implementation was written for.
+      let mut fixed : List (Nat × Ty) := []
+      for j in List.range arity do
+        match methods.findSome? fun
+            | .typeAlias n _ body => if n == Syntax.fixedArgName j then some body else none
+            | _ => none with
+        | some body => fixed := fixed ++ [(j, ← resolveType pmap false body)]
+        | none => pure ()
+      if let some other := (← get).impls.find? fun I => I.trait == tr && I.head == head then
+        unless fixed.isEmpty && other.fixed.isEmpty do
+          throw s!"{what}: `{head}` already has an implementation of `{base}`, under this name or another of its names; a type has one"
+
       modify fun s =>
         { s with
-          impls := s.impls.push ⟨tr, head, args, ctx, methods, Elab.implDictName tr head, targs, assocs, pvars⟩
+          impls := s.impls.push
+            { trait := tr, head, params := args, context := ctx, methods,
+              dictFn := Elab.implDictName tr head, targs, assocs, pvars, fixed }
           kimpls := s.kimpls ++ [⟨tr, head, arity, ctx⟩] }
   -- Every type can be destroyed: by nothing at all, by its own `Drop` and
   -- then its parts', or part by part. Said as an implementation for each
@@ -403,7 +417,7 @@ def declareTraits (items : List Item) : M Unit := do
           { s with
             impls := s.impls.push
               ⟨Syntax.destroyTrait, head, (List.range arity).map (s!"T{·}"), ctx, [],
-                Elab.implDictName Syntax.destroyTrait head, [], [], []⟩
+                Elab.implDictName Syntax.destroyTrait head, [], [], [], []⟩
             kimpls := s.kimpls ++ [⟨Syntax.destroyTrait, head, arity, ctx⟩] }
   -- What `Traits.coherent` asks of the implementations.
   unless Traits.noOverlap (← get).kimpls do

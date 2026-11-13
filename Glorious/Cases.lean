@@ -2522,6 +2522,22 @@ def cases : List Case := [
     [], "error: 2:18: in `f`: the field `x` is read from a value whose type is not known here; annotate it"⟩,
   ⟨"fn main() -> Int { let a = [1]; a[0].nope }",
     [], "error: 1:33: in `main`: `Int` has no field `nope`: its fields have no names"⟩,
+  -- An implementation for another name of a type: `Option<A>` is `Result<A, ()>`, and it is for that.
+  ⟨"trait Count { fn count(Self) -> Int; }\nimpl<A> Count for Option<A> { fn count(o) { match(o) { Some(_) => 1, None => 0 } } }\nfn main() -> Int { count(Some(\"x\")) + count(Some(3)) }",
+    [], "2"⟩,
+  ⟨"trait Describe { fn describe(Self) -> Int; }\nimpl Describe for Option<Int> { fn describe(o) { match(o) { Some(n) => n, None => 0 } } }\nfn main() -> Int { describe(Some(4)) + describe(None) }",
+    [], "4"⟩,
+  ⟨"trait Describe { fn describe(Self) -> Int; }\nimpl Describe for Bool { fn describe(b) { if(b) { 1 } else { 0 } } }\nfn main() -> Int { describe(true) + describe(1 < 2) }",
+    [], "2"⟩,
+  ⟨"trait Count { fn count(Self) -> Int; }\nimpl<A> Count for Option<A> { fn count(o) { match(o) { Some(_) => 1, None => 0 } } }\nfn main() -> Int { let r: Result<Int, Int> = Err(3); count(r) }",
+    [], "error: 3:54: in `main`: `Count` is implemented for `Result<Int, ()>`, not for `Result<Int, Int>`"⟩,
+  ⟨"trait Count { fn count(Self) -> Int; }\nimpl<A> Count for Option<A> { fn count(o) { 1 } }\nimpl<A, E> Count for Result<A, E> { fn count(o) { 2 } }\nfn main() -> Int { 0 }",
+    [], "error: `Count` is implemented twice for `Result`"⟩,
+  -- An argument of an implementation's type may be a type.
+  ⟨"struct Pair<A, B> { a: A, b: B }\ntrait Sum { fn sum(Self) -> Int; }\nimpl<B> Sum for Pair<Int, B> { fn sum(p) { p.a } }\nfn main() -> Int { sum(Pair { a: 4, b: \"x\" }) }",
+    [], "4"⟩,
+  ⟨"struct Pair<A, B> { a: A, b: B }\ntrait Sum { fn sum(Self) -> Int; }\nimpl<B> Sum for Pair<Int, B> { fn sum(p) { p.a } }\nfn main() -> Int { sum(Pair { a: \"no\", b: \"x\" }) }",
+    [], "error: 4:20: in `main`: `Sum` is implemented for `Pair<Int, Str>`, not for `Pair<Str, Str>`"⟩,
   -- `drop` is not for a program to call.
   ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nfn main() { let mut f = File(7); drop(&mut f); 0 }",
     [], "error: 3:34: in `main`: `drop` is run when what holds a value ends; a program does not call it"⟩,

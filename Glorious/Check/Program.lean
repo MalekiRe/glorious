@@ -205,6 +205,19 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
       | .fn _ _ effs _ _ =>
         throw (inFunction owner s!"the row `{e}` is whatever the caller chooses, and what is written needs it to hold {showEffs effs}")
       | _ => pure ()
+  -- An implementation for another name of a type, `impl T for Option<A>`,
+  -- is one for the type with some of its arguments fixed: a type it is asked
+  -- of has those.
+  for b in pending do
+    if let .con h args ← zonk b.ty then
+      for im in (← get).impls do
+        if im.trait == b.trait && im.head == h then
+          for (j, want) in im.fixed do
+            if let some got := args[j]? then
+              try unify got want
+              catch _ =>
+                throw (inFunction b.owner
+                  s!"{b.pos}`{b.trait}` is implemented for `{showTy (.con h (args.set j want))}`, not for `{showTy (← zonk b.ty)}`")
   -- A trait with arguments is asked of a type together with them: from here
   -- on it is the trait at those arguments, asked of the type.
   settleAssocs
@@ -484,6 +497,12 @@ def checkGroup (decls : List FnDecl) : M Unit := do
           rigid := rigid ++ [(p, Ty.life cap)]
           lifetimes := (cap, p) :: lifetimes
         else rigid := rigid ++ [(p, Ty.con s!"'{p}@{d.name}" [])]
+      -- An implementation written for another name of its type: the
+      -- arguments the name fixes are those types here, not parameters.
+      if let some (im, _) := d.impl then
+        for (j, fixed) in im.fixed do
+          if let some name := im.params[j]? then
+            rigid := rigid.map fun (p, old) => if p == name then (p, fixed) else (p, old)
       -- A row parameter stands for a row no one here knows: it is held as
       -- the row of a callable type that is nothing else.
       let mut rowParams : List (String × Ty) := []

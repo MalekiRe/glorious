@@ -262,6 +262,10 @@ structure ImplDecl where
   /-- The types its trait leaves to it, `type Item = ..`, which may mention
   its type parameters: each of those by name, as the variable in `pvars`. -/
   assocs : List (String × Ty) := []
+  /-- The arguments of the head that are fixed, where the implementation was
+  written for another name of the type: `impl T for Option<A>` is for
+  `Result<A, ()>`. -/
+  fixed : List (Nat × Ty) := []
   pvars : List (String × Nat) := []
 
 /-- A trait needed of a type at a call: of the type a trait's function is used
