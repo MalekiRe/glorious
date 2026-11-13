@@ -300,6 +300,10 @@ the type written as an expression so that it can sit among expressions: see
 stands alone. -/
 def ascribeMark : String := "%as"
 
+/-- `let name` in a pattern: `name` is a new name there, not the constant or
+constructor of that name. -/
+def letMark : String := "%let"
+
 /-- Said of a block, as `spreadMark` is: it is written where a value that is
 no callable is wanted, so it is run there and is its value. -/
 def nowMark : String := "%now"

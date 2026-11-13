@@ -2310,6 +2310,15 @@ def cases : List Case := [
     [], "1"⟩,
   ⟨"struct P(Int, Int)\nfn main() { let p = P({ 1 + 1 }, 3); p.0 }",
     [], "2"⟩,
+  -- `let name` in a pattern is a new name, whatever constant has that name.
+  ⟨"fn main() { let x: Option<Int> = Some(3); match(x) { let None => match(None) { Some(v) => v, None => 0 } } }",
+    [], "3"⟩,
+  ⟨"fn main() { match(7) { let true => true + 1 } }",
+    [], "8"⟩,
+  ⟨"const K: Int = 3;\nfn main() { match((3, 4)) { (K, let K) => K, (_, _) => 0 } }",
+    [], "4"⟩,
+  ⟨"const K: Int = 3;\nfn main() { match(4) { K => 1, _ => 0 } }",
+    [], "0"⟩,
   -- `drop` is not for a program to call.
   ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nfn main() { let mut f = File(7); drop(&mut f); 0 }",
     [], "error: 3:34: in `main`: `drop` is run when what holds a value ends; a program does not call it"⟩,

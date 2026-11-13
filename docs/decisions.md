@@ -1055,6 +1055,10 @@ From the audit of the specification (5.4, 5.5, 11).
   are functions like any other: each takes a label and goes to it. A program
   may have a `return` of its own.
 
+- **`let name` in a pattern** is a new name there, whatever constant or
+  constructor is spelled so (4.3): the resolver writes the name another way
+  in the pattern and wherever its clause means it.
+
 Limits. Where the type wanted is a type parameter with nothing asked of it,
 the block is still a callable; the specification has it run there.
 `continue_at(@outer)` waits for loops that are named, with the library.

@@ -475,6 +475,10 @@ private partial def parsePattern : P Pattern := do
   | .ident "_" =>
     advance
     pure .wild
+  | .ident "let" =>
+    -- `let name`: a new name, whatever constant or constructor has it.
+    advance
+    pure (.ctor letMark none [.var (← expectIdent)])
   | .ident x =>
     advance
     let (qual, name) := splitPath (← parsePathRest x)
