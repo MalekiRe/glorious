@@ -10,6 +10,11 @@ import Glorious.Bytecode.Encode
 * `glorious check FILE [INPUT...]` runs it on both machines and reports whether
   they agree.
 * `glorious build FILE OUT` compiles it to a bytecode file for the Rust VM.
+* `glorious native FILE OUT` builds it as a program of its own: bytecode, a
+  body for each function made by LLVM, and the runtime. Needs `clang`, and the
+  VM built (`cargo build --release` in `vm`).
+* `glorious cases DIR` writes every test program, with its bytecode where it
+  compiles, for what runs them from outside.
 * `glorious certify FILE` compiles it and says what the typing of its Core
   shows: that it is well typed, and whether it also follows the ownership rules
   and the region rules, which the proofs need to say that no resumption is used
@@ -353,6 +358,37 @@ def main (args : List String) : IO UInt32 := do
       | none =>
         IO.println "no certificate"
         pure 1
+    | .error e =>
+      IO.eprintln s!"{path}: {e}"
+      pure 1
+  | ["native", path, out] =>
+    -- A program of its own: the bytecode, a body for every function made by
+    -- LLVM, and the runtime, linked. The VM and its library are looked for
+    -- in `GLORIOUS_VM_DIR`, or where the repository builds them.
+    match ← compileFile path with
+    | .ok c => do
+      let dir ← match ← IO.getEnv "GLORIOUS_VM_DIR" with
+        | some d => pure (System.FilePath.mk d)
+        | none => do
+          let exe ← IO.appPath
+          let root := (((exe.parent.bind (·.parent)).bind (·.parent)).bind (·.parent)).getD "."
+          pure (root / "vm" / "target" / "release")
+      let gbc := out ++ ".gbc"
+      writeBytecode c gbc
+      let ir ← IO.Process.output
+        { cmd := (dir / "glorious-vm").toString, args := #["--emit-llvm", gbc] }
+      if ir.exitCode != 0 then
+        IO.eprintln s!"glorious-vm: {ir.stderr}"
+        return 1
+      IO.FS.writeFile (out ++ ".ll") ir.stdout
+      let cc ← IO.Process.output
+        { cmd := "clang",
+          args := #["-O2", "-Wno-override-module", out ++ ".ll",
+            (dir / "libglorious_vm.a").toString, "-o", out, "-lpthread", "-ldl", "-lm"] }
+      if cc.exitCode != 0 then
+        IO.eprintln s!"clang: {cc.stderr}"
+        return 1
+      pure 0
     | .error e =>
       IO.eprintln s!"{path}: {e}"
       pure 1

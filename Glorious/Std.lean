@@ -24,6 +24,12 @@ pub mod c;
 pub mod collections;
 pub mod host;
 pub mod hash;
+pub mod io;
+pub mod fs;
+pub mod env;
+pub mod time;
+pub mod random;
+pub mod ffi;
 "#
 
 private def optionText : String := r#"// An `Option<T>` is a `Result<T, ()>`: `Some(x)` or `None`.
@@ -1295,6 +1301,28 @@ def texts : List (List String × String) :=
    (["std", "c"], cText),
    (["std", "collections"], collectionsText),
    (["std", "host"], hostText),
-   (["std", "hash"], hash)]
+   (["std", "hash"], hash),
+   -- The names the library specification gives its modules (1.2): the same
+   -- declarations, under `core`, `alloc` and more of `std`.
+   (["std", "io"], "pub use std::host::{Console, IoError, print, println, eprintln, read_line};\n"),
+   (["std", "fs"], "pub use std::host::{FileRead, FileWrite, IoError, read_text, write_text};\n"),
+   (["std", "env"], "pub use std::host::{ProcessEnvironment, ProcessArgs};\n"),
+   (["std", "time"], "pub use std::host::Clock;\n"),
+   (["std", "random"], "pub use std::host::Entropy;\n"),
+   (["std", "ffi"], "pub use std::c::*;\n"),
+   (["core"], "pub mod option;\npub mod result;\npub mod cmp;\npub mod num;\npub mod char;\npub mod iter;\npub mod hash;\n"),
+   (["core", "option"], "pub use std::option::*;\n"),
+   (["core", "result"], "pub use std::result::*;\n"),
+   (["core", "cmp"], "pub use std::cmp::*;\n"),
+   (["core", "num"], "pub use std::int::*;\n"),
+   (["core", "char"], "pub use std::char::*;\n"),
+   (["core", "iter"], "pub use std::iter::*;\n"),
+   (["core", "hash"], "pub use std::hash::*;\n"),
+   (["alloc"], "pub mod vec;\npub mod string;\npub mod collections;\n"),
+   (["alloc", "vec"], "pub use std::vec::*;\n"),
+   (["alloc", "string"], "pub use std::text::*;\n"),
+   (["alloc", "collections"], "pub use std::collections::*;\npub mod map;\npub mod set;\n"),
+   (["alloc", "collections", "map"], "pub use std::map::*;\n"),
+   (["alloc", "collections", "set"], "pub use std::set::*;\n")]
 
 end Glorious.Std

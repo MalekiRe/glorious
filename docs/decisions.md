@@ -2283,6 +2283,26 @@ references to parts of values were for.
   specification's sections 13 to 19 in this shape: `Vec`, `String`, slices,
   maps and iterators are still the functions over values they were.
 
+## The library's names
+
+The library specification names its modules under `core`, `alloc` and `std`
+(1.2). Those names exist: `core::{option, result, cmp, num, char, iter, hash}`,
+`alloc::{vec, string, collections}` with `collections::{map, set}`, and
+`std::{io, fs, env, time, random, ffi}`. Each is the declarations of a module
+this library already had, brought in again under the name, so a declaration
+has one identity whichever name it is reached by. `core` and `alloc` come
+with a program whenever the library does.
+
+- **The names are there; what the specification puts under them mostly is
+  not.** `core::num` is the functions on `Int` this library has, not the
+  scalar families; `alloc::string` is the functions on `Str`, not `String`.
+- **No profiles.** There is one library: `core` does not stand without
+  `alloc`, nor `alloc` without `std`.
+
+`glorious native FILE OUT` builds a program of its own with the LLVM backend:
+it writes the bytecode, asks the VM for the LLVM module, and has `clang`
+compile and link it with the runtime.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by

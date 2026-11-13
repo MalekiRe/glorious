@@ -66,7 +66,9 @@ def certifyProgram (items : List Syntax.Item) (p : Core.Program)
 /-- Does a program have the standard library: does it name `std`, and have no
 module `std` of its own? -/
 def usesStd (src : String) (files : List (List String × String)) : Bool :=
-  let named := fun (text : String) => (text.splitOn "std").length > 1
+  let named := fun (text : String) =>
+    (text.splitOn "std").length > 1 || (text.splitOn "core::").length > 1
+      || (text.splitOn "alloc::").length > 1
   let own := fun (text : String) =>
     (text.splitOn "mod std {").length > 1 || (text.splitOn "mod std{").length > 1
   (named src || files.any fun (_, text) => named text)
@@ -120,7 +122,11 @@ def parseProgram (src : String) (files : List (List String × String)) (check : 
   let declares := items.any fun
     | .module "std" _ | .pub _ (.module "std" _) => true
     | _ => false
-  let items := if std && !declares then items ++ [.pub false (.module "std" none)] else items
+  -- (`core` and `alloc` are the library's too: its other names for the same.)
+  let items := if std && !declares then
+      items ++ [.pub false (.module "std" none), .pub false (.module "core" none),
+        .pub false (.module "alloc" none)]
+    else items
   let rec fill (fuel : Nat) (path : List String) (items : List Syntax.Item) :
       Except String (List Syntax.Item) :=
     items.mapM fun item => do

@@ -1163,7 +1163,8 @@ def resolve (prelude root : List Item) : Except String Resolved := do
   let mods ← gather [] root
   -- The library's modules come straight after the prelude's, whatever the
   -- program is: what is checked first is then the same for every program.
-  let library := fun (m : List String × List Item) => m.1.head? == some "std"
+  let library := fun (m : List String × List Item) =>
+    m.1.head? == some "std" || m.1.head? == some "core" || m.1.head? == some "alloc"
   let mods := (← gather preludePath prelude) ++ mods.filter library ++ mods.filter (!library ·)
   let mut units : List Module := []
   let mut fields : List (String × List String × List String × List Bool) := []

@@ -2510,6 +2510,9 @@ def cases : List Case := [
   -- Queues and heaps, changed where they are through a `&mut` reference.
   ⟨"use std::collections::{VecDeque, BinaryHeap};\nfn main() {\n    let mut q = VecDeque::new();\n    VecDeque::push_back(&mut q, 2); VecDeque::push_back(&mut q, 3); VecDeque::push_front(&mut q, 1);\n    say(VecDeque::len(&q));\n    say(match(VecDeque::front(&q)) { Some(r) => *r, None => 0 });\n    say(match(VecDeque::back(&q)) { Some(r) => *r, None => 0 });\n    say(VecDeque::pop_front(&mut q)); say(VecDeque::pop_back(&mut q)); say(VecDeque::pop_front(&mut q)); say(VecDeque::pop_front(&mut q));\n    VecDeque::push_back(&mut q, 7); VecDeque::push_back(&mut q, 8);\n    say(VecDeque::into_vec(q));\n    let mut h = BinaryHeap::new();\n    BinaryHeap::push(&mut h, 5); BinaryHeap::push(&mut h, 9); BinaryHeap::push(&mut h, 1); BinaryHeap::push(&mut h, 7);\n    say(match(BinaryHeap::peek(&h)) { Some(r) => *r, None => 0 });\n    say(BinaryHeap::pop(&mut h)); say(BinaryHeap::len(&h));\n    say(BinaryHeap::into_sorted_vec(h));\n    say(BinaryHeap::into_sorted_vec(BinaryHeap::from_vec([3, 8, 2, 9, 4])));\n    0 }",
     [], "3\n1\n3\nOk(1)\nOk(3)\nOk(2)\nErr(())\n[7, 8]\n9\nOk(9)\n3\n[7, 5, 1]\n[9, 8, 4, 3, 2]\n0"⟩,
+  -- `core` and `alloc` are the library's other names for what `std` has.
+  ⟨"use core::option::{is_some, unwrap_or};\nuse alloc::vec::{sort, reverse};\nuse alloc::collections::{VecDeque};\nuse alloc::collections::map;\nfn main() { let mut q = VecDeque::new(); VecDeque::push_back(&mut q, 3); say(sort([3, 1, 2])); say(unwrap_or(VecDeque::pop_front(&mut q), 0)); let m = map::insert(map::new(), 1, 2); say(map::len(m)); 0 }",
+    [], "[1, 2, 3]\n3\n1\n0"⟩,
   -- `drop` is not for a program to call.
   ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nfn main() { let mut f = File(7); drop(&mut f); 0 }",
     [], "error: 3:34: in `main`: `drop` is run when what holds a value ends; a program does not call it"⟩,
@@ -2552,7 +2555,10 @@ def foreignCases : List Case := [
     [], "3\n1\n0"⟩,
   -- What a program asks of the machine it runs on is effects, which `run_host` answers with the operating system.
   ⟨"use std::host::{run_host, println, read_text, write_text, env, now, monotonic, random_bytes, current_dir, args};\nfn main() { run_host({\n    println(\"hello, host\");\n    let wrote = write_text(\"/tmp/glorious-host-test.txt\", \"one\\ntwo\\n\");\n    let back = read_text(\"/tmp/glorious-host-test.txt\");\n    println(match(back) { Ok(text) => text, Err(e) => \"error\" });\n    let missing = read_text(\"/tmp/glorious-no-such-file\");\n    println(match(missing) { Ok(_) => \"found\", Err(e) => \"no file: \" ++ show(e.code) });\n    let home = env(\"HOME\");\n    println(match(home) { Ok(Some(_)) => \"HOME is set\", _ => \"no HOME\" });\n    let a = monotonic(); let b = monotonic();\n    println(if(b >= a) { \"the clock goes on\" } else { \"the clock went back\" });\n    println(match(random_bytes(8)) { Ok(bytes) => show(len(bytes)), Err(_) => \"no chance\" });\n    println(match(current_dir()) { Ok(_) => \"somewhere\", Err(_) => \"nowhere\" });\n    println(match(args()) { Ok(a) => if(len(a) > 0) { \"started\" } else { \"?\" }, Err(_) => \"?\" });\n    0 }) }",
-    [], "hello, host\none\ntwo\n\nno file: 2\nHOME is set\nthe clock goes on\n8\nsomewhere\nstarted\n0"⟩
+    [], "hello, host\none\ntwo\n\nno file: 2\nHOME is set\nthe clock goes on\n8\nsomewhere\nstarted\n0"⟩,
+  -- The same under the names the specification gives the modules.
+  ⟨"use std::io::{println};\nuse std::fs::{read_text, write_text};\nuse std::host::{run_host};\nfn main() { run_host({ write_text(\"/tmp/glorious-ns-test.txt\", \"names\"); println(match(read_text(\"/tmp/glorious-ns-test.txt\")) { Ok(t) => t, Err(_) => \"?\" }); 0 }) }",
+    [], "names\n0"⟩
 ]
 
 end Glorious
