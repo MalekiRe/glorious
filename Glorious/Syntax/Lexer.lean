@@ -84,7 +84,8 @@ private partial def lexDigits (cs : Array Char) (base : Nat) (i : Nat) (n count 
 
 /-- What is written after `\` in a character or a text: the code it stands
 for and where it ends. -/
-private partial def lexEscape (cs : Array Char) (i line col : Nat) : Except String (Nat × Nat) :=
+private partial def lexEscape (cs : Array Char) (i line col : Nat) (byte : Bool := false) :
+    Except String (Nat × Nat) :=
   match cs[i]? with
   | some 'n' => pure (10, i + 1)
   | some 'r' => pure (13, i + 1)
@@ -96,7 +97,8 @@ private partial def lexEscape (cs : Array Char) (i line col : Nat) : Except Stri
   | some 'x' =>
     match cs[i + 1]?.bind digitOf, cs[i + 2]?.bind digitOf with
     | some a, some b =>
-      if a * 16 + b < 128 then pure (a * 16 + b, i + 3)
+      -- (a byte may be any code that fits one)
+      if a * 16 + b < 128 || byte then pure (a * 16 + b, i + 3)
       else throw s!"{line}:{col}: `\\x` is for the codes below 80; write `\\u\{..}`"
     | _, _ => throw s!"{line}:{col}: `\\x` is followed by two digits in base 16"
   | some 'u' =>
@@ -112,16 +114,16 @@ private partial def lexEscape (cs : Array Char) (i line col : Nat) : Except Stri
 
 /-- The characters of a text from `i` up to its closing `"`: their codes, and
 where the text ends. -/
-private partial def lexText (cs : Array Char) (i line col : Nat) (acc : Array Nat) :
-    Except String (List Nat × Nat) :=
+private partial def lexText (cs : Array Char) (i line col : Nat) (acc : Array Nat)
+    (byte : Bool := false) : Except String (List Nat × Nat) :=
   match cs[i]? with
   | none => throw s!"{line}:{col}: this text is not closed"
   | some '\n' => throw s!"{line}:{col}: this text is not closed on its line (`\\n` is a new line)"
   | some '"' => pure (acc.toList, i + 1)
   | some '\\' => do
-    let (code, j) ← lexEscape cs (i + 1) line col
-    lexText cs j line col (acc.push code)
-  | some c => lexText cs (i + 1) line col (acc.push c.toNat)
+    let (code, j) ← lexEscape cs (i + 1) line col byte
+    lexText cs j line col (acc.push code) byte
+  | some c => lexText cs (i + 1) line col (acc.push c.toNat) byte
 
 /-- Past a `/* .. */` comment whose inside starts at `i`, `depth` deep:
 where it ends, and the line and column there. -/
@@ -151,17 +153,20 @@ private partial def lexLoop (cs : Array Char) (i line col : Nat) (acc : Array To
       | none => throw s!"{line}:{col}: this comment is not closed"
     else if c == 'b' && cs[i + 1]? == some '"' then
       -- `b"abc"`: bytes, each a character below 128 or `\xNN`.
-      match lexText cs (i + 2) line col #[] with
+      match lexText cs (i + 2) line col #[] true with
       | .ok (codes, j) =>
-        if codes.any (· > 255) then throw s!"{line}:{col}: a byte is a character below 128, or `\\xNN`"
+        if codes.any (· > 255) || ((cs.extract (i + 2) j).any fun ch => ch.toNat > 127) then
+          throw s!"{line}:{col}: a byte is a character below 128, or `\\xNN`"
         else lexLoop cs j line (col + (j - i)) (acc.push ⟨.bytes codes, line, col⟩)
       | .error e => throw e
     else if c == 'b' && cs[i + 1]? == some '\'' then
       -- `b'x'`: a byte, which is a `u8`.
       let read : Except String (Nat × Nat) :=
-        if cs[i + 2]? == some '\\' then lexEscape cs (i + 3) line col
+        if cs[i + 2]? == some '\\' then lexEscape cs (i + 3) line col true
         else match cs[i + 2]? with
-          | some ch => pure (ch.toNat, i + 3)
+          | some ch =>
+            if ch.toNat > 127 then throw s!"{line}:{col}: a byte is a character below 128, or `\\xNN`"
+            else pure (ch.toNat, i + 3)
           | none => throw s!"{line}:{col}: a byte is closed with `'`"
       match read with
       | .ok (code, j) =>
@@ -242,6 +247,8 @@ private partial def lexLoop (cs : Array Char) (i line col : Nat) (acc : Array To
     else throw s!"{line}:{col}: unexpected character `{c}`"
 
 def lex (src : String) : Except String (Array Token) :=
-  lexLoop src.toList.toArray 0 1 1 #[]
+  -- A byte-order mark at the very start is not part of the text.
+  let cs := src.toList.toArray
+  lexLoop cs (if cs[0]? == some '\uFEFF' then 1 else 0) 1 1 #[]
 
 end Glorious.Syntax

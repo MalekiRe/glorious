@@ -857,6 +857,10 @@ partial def inferCallable (scope : Scope) (annots : List (Option Ty)) (ret : Opt
   let cap ← freshCap
   captureAll scope cap (clauses.flatMap (Elab.fvClause [])) fun x => clauses.any (assignsClause x)
   let loansBefore := (← get).loans.size
+  -- What `unsafe { .. }` allows is allowed where it is written, not in a
+  -- callable written inside it, which runs later.
+  let unsafeBefore := (← get).unsafeBlock
+  modify fun s => { s with unsafeBlock := false }
   let fieldsBefore := (← get).blockFieldCaps.size
   let outerScope := scope
   let brand ← freshBrand
@@ -875,6 +879,9 @@ partial def inferCallable (scope : Scope) (annots : List (Option Ty)) (ret : Opt
       unless pats.length == arity do
         throw "the clauses of a callable take different numbers of arguments"
       let binds ← inferPats pats params
+      let names := binds.map (·.1)
+      if let some x := names.find? fun x => (names.filter (· == x)).length > 1 then
+        throw s!"`{x}` is bound twice by the patterns of one clause"
       let here := (← get).pos
       let at_ := if (Elab.wrapResult "" body).isSome then site j else none
       let failure ← try
@@ -941,7 +948,8 @@ partial def inferCallable (scope : Scope) (annots : List (Option Ty)) (ret : Opt
   -- them.
   for id in [loansBefore:(← get).loans.size] do
     captures cap (.inner id)
-  modify fun s => { s with later := outerLater, temps := outerTemps, anon := outerAnon }
+  modify fun s =>
+    { s with later := outerLater, temps := outerTemps, anon := outerAnon, unsafeBlock := unsafeBefore }
   pure (.func params result row cap)
 
 /--

@@ -852,6 +852,23 @@ Limits. The test has to be written before the block in the arguments of a
 call, since the block is read knowing what it is given. A program run without
 the checker has no names from an `is`.
 
+## What the specification's audit turned away
+
+An audit of the language specification against the compiler, section by
+section, is the source of these. Each was accepted before and is refused now,
+as the text says:
+
+- a byte literal or byte string with a character above 127 that is not
+  written `\xNN` (and `\xNN` in one may now be any code that fits a byte);
+- two operators of one precedence in a row where either is `infix`, or where
+  they group opposite ways;
+- a precedence above 255;
+- a name bound twice by the patterns of one clause;
+- what is unsafe, named in a callable written inside `unsafe { .. }`: the
+  callable runs later, and `unsafe` is written again inside it.
+
+A byte-order mark at the start of a text is skipped.
+
 ## Scalars are integers the checker tells apart
 
 **Decision: Core gets primitives, not types.** A value of `i8 i16 i32 isize

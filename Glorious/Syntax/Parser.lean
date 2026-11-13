@@ -550,20 +550,32 @@ private partial def parseArgs : P (List Expr) := do
 
 /-- Binary operators by precedence climbing. With `noBlock`, a `{` after a call
 is not taken as a trailing block. -/
-private partial def parseBinary (minPrec : Nat) (noBlock : Bool) : P Expr := do
+private partial def parseBinary (minPrec : Nat) (noBlock : Bool)
+    (before : Option (Nat × Assoc) := none) : P Expr := do
   let mut lhs ← parseUnary noBlock
+  -- The operator this operand follows, at its precedence.
+  let mut last := before
   repeat
     let t ← peek
     match ← infixOf t with
     | some (name, prec, assoc) =>
       if prec < minPrec then break
+      -- Two operators of one precedence in a row group one way or need
+      -- brackets.
+      if let some (prec', assoc') := last then
+        if prec' == prec then
+          if assoc == .non || assoc' == .non then
+            failAt s!"`{name}` does not group with an operator of its own precedence: write brackets"
+          if assoc != assoc' then
+            failAt s!"`{name}` and the operator before it have one precedence and group opposite ways: write brackets"
+      last := some (prec, assoc)
       -- Each call is known by the token that makes it one.
       let id := (← read).base + (← get) + 1
       advance
       let next := match assoc with
         | .right => prec
         | _ => prec + 1
-      let rhs ← parseBinary next noBlock
+      let rhs ← parseBinary next noBlock (some (prec, assoc))
       lhs := .call id (.name none ((← read).fix.function name false)) [lhs, rhs]
     | none =>
       match t with
@@ -1567,6 +1579,8 @@ private def collectFixities (toks : Array Token) (fix : Fixities)
           | .ident s => pure s
           | .op s => pure s
           | _ => throw s!"{(toks[i]?.getD default).line}: a fixity declaration needs an operator name"
+        if prec > 255 then
+          throw s!"{(toks[i]?.getD default).line}: a precedence is from 0 to 255, and `{name}` is given {prec}"
         if kind == "prefix" then
           fix := { fix with prefixes := (name, prec) :: fix.prefixes }
         else
