@@ -2611,6 +2611,22 @@ nothing silently.
   the type unknown.
 - A program with no `Drop` is checked as before.
 
+## Trait arguments of an implementation's own
+
+`impl<T> From<T> for Wrap<T>` was refused: the arguments an implementation
+gives its trait had to be types written out, since an implementation is
+known by its trait at those arguments and the head of its type. One whose
+arguments are made of its own type parameters is now the trait's one
+implementation for that type, at whatever the type's own arguments make
+them: where the trait is asked of `Wrap<Int>` at some argument, the
+argument is made `Int`, and the implementation is found under its own name.
+The solver still finds it by a name and a head, so what is proved of it
+holds.
+
+- **No other implementation of the trait for that type**: `impl From<Int>
+  for Wrap<Str>` beside it is refused, since which applies would depend on
+  more than the head.
+
 ## `..` in a pattern
 
 `Rect(w, ..)`, `P(.., z)` and `P(a, .., d)` stand for the fields of a
@@ -2639,9 +2655,11 @@ None of it is known to the compiler: a generator is a resumption in a
 struct.
 
 - **What a generator is resumed with is left to the implementation**
-  (`type Resume`), where the specification has `Generator<R>`: an
-  implementation cannot give its trait an argument that is one of its own
-  type parameters.
+  (`type Resume`), where the specification has `Generator<R>`. The language
+  takes the specification's form since "Trait arguments of an
+  implementation's own" below; the library keeps `type Resume` because
+  `iterate` needs a condition that names the trait, and a condition of an
+  implementation names a trait without arguments.
 - **A coroutine's body performs `Yield` and nothing else.** The row of its
   other effects would be a parameter of `Coroutine`, and a declared type
   has no row parameters.

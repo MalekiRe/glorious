@@ -235,7 +235,8 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
     let (self, args) ← subjectOf b.trait b.ty
     if args.isEmpty then split := split.push b
     else
-      let key ← traitKey b.trait args
+      let key ← try implKey b.trait self args
+        catch e => throw (inFunction b.owner (b.pos ++ e))
       unless keyed.any (·.1 == key) do keyed := (key, b.trait, args) :: keyed
       split := split.push { b with trait := key, ty := self }
   pending := split
@@ -737,7 +738,7 @@ def checkGroup (decls : List FnDecl) : M Unit := do
           -- The trait at the arguments the implementation gives it, and the
           -- types it leaves to the implementation as the implementation says.
           let own := im.pvars.filterMap fun (p, id) => (rigid.lookup p).map fun t => (id, t)
-          let tm := (sig.self, self) :: sig.tparams.zip im.targs
+          let tm := (sig.self, self) :: sig.tparams.zip (im.targs.map (subst own [] []))
             ++ sig.assocs.filterMap fun (a, id) =>
               (im.assocs.lookup a).map fun t => (id, subst own [] [] t)
           -- The trait's lifetimes are each itself here, as a function's own

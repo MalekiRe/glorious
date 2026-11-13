@@ -280,6 +280,11 @@ structure ImplDecl where
   trait, the type's name, and what it is. -/
   equal : List (Nat × String × String × Ty) := []
   pvars : List (String × Nat) := []
+  /-- Whether the arguments it gives its trait mention its own type
+  parameters, `impl<T> From<T> for Wrap<T>`: it is then the one
+  implementation of the trait for its type, at whatever arguments the
+  type's own make them. -/
+  generic : Bool := false
 
 /-- A trait needed of a type at a call: of the type a trait's function is used
 at, or of a type parameter of the function called. -/

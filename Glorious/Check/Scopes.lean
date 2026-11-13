@@ -196,6 +196,33 @@ def subjectOf (trait : String) (subject : Ty) : M (Ty × List Ty) := do
 def traitKey (trait : String) (args : List Ty) : M String := do
   pure (Syntax.traitAt trait (← args.mapM spellTy))
 
+/-- The name of an implementation of a trait at arguments for a type. Where
+the type's implementation gives the trait arguments made of its own type
+parameters (`impl<T> From<T> for Wrap<T>`), the arguments asked are made
+those, and the name is that implementation's. -/
+def implKey (trait : String) (self : Ty) (args : List Ty) : M String := do
+  let head ← match ← find self with
+    | .con n hargs => pure (some (n, hargs))
+    | .tuple parts => pure (some (s!"(tuple{parts.length})", parts))
+    | _ => pure none
+  if let some (h, hargs) := head then
+    if let some im := (← get).impls.toList.find? fun im =>
+        im.generic && Syntax.traitBase im.trait == trait && im.head == h then
+      let at_ := (im.params.zip hargs).filterMap fun (p, a) => (im.pvars.lookup p).map (·, a)
+      for (want, got) in (im.targs.map (subst at_ [] [])).zip args do
+        unifyAt s!"`{bareName trait}` for `{bareName h}`" want got
+      return im.trait
+  traitKey trait args
+
+/-- Does the type asked have an implementation of the trait for every
+argument? Then what the arguments are need not be known to find it. -/
+def hasGenericImpl (trait : String) (self : Ty) : M Bool := do
+  match ← find self with
+  | .con h _ =>
+    pure ((← get).impls.toList.any fun im =>
+      im.generic && Syntax.traitBase im.trait == trait && im.head == h)
+  | _ => pure false
+
 /-- Settle what can be settled of the types traits leave to implementations:
 where the type asked of is known, the answer is what its implementation says;
 and the same question asked twice has one answer. -/
@@ -210,9 +237,10 @@ def settleAssocs : M Unit := do
       | .tuple parts => pure (some (s!"(tuple{parts.length})", parts))
       | _ => pure none
     let ground ← args.allM fun x => do pure (freeTys (← zonk x)).isEmpty
+    let ground := ground || (← hasGenericImpl tr self)
     match known, ground with
     | some (head, hargs), true =>
-      let key ← traitKey tr args
+      let key ← implKey tr self args
       match (← get).impls.toList.find? fun im => im.trait == key && im.head == head with
       | some im =>
         match im.assocs.lookup name with

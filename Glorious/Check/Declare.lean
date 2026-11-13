@@ -438,14 +438,19 @@ def declareTraits (items : List Item) : M Unit := do
             | _ => none with
         | some body =>
           let t ← zonk (← resolveType pmap false body)
-          unless (freeTys t).isEmpty do
-            throw s!"{what}: an argument given to the trait is a type without the implementation's type parameters"
           targs := targs ++ [t]
         | none => throw s!"{what}: `{base}` takes {arityOfTrait} type arguments"
       if (methods.any fun
           | .typeAlias n _ _ => n == Syntax.traitArgName arityOfTrait
           | _ => false) then
         throw s!"{what}: `{base}` takes {arityOfTrait} type arguments"
+      -- An implementation that gives its trait arguments made of its own
+      -- type parameters is for the type at all of them: it is the only one
+      -- of the trait for the type.
+      let generic := targs.any fun t => !(freeTys t).isEmpty
+      if let some other := (← get).impls.find? fun I =>
+          Syntax.traitBase I.trait == base && I.head == head && (generic || I.generic) then
+        throw s!"{what}: `{head}` has an implementation of `{base}` for every argument (`{other.trait}`), so it has no other"
       let mut assocs : List (String × Ty) := []
       for a in assocNames do
         match methods.findSome? fun
@@ -488,7 +493,7 @@ def declareTraits (items : List Item) : M Unit := do
         { s with
           impls := s.impls.push
             { trait := tr, head, params := args, context := ctx, methods,
-              dictFn := Elab.implDictName tr head, targs, assocs, pvars, fixed, equal }
+              dictFn := Elab.implDictName tr head, targs, assocs, pvars, fixed, equal, generic }
           kimpls := s.kimpls ++ [⟨tr, head, arity, ctx⟩] }
   -- Every type can be destroyed: by nothing at all, by its own `Drop` and
   -- then its parts', or part by part. Said as an implementation for each
@@ -517,7 +522,7 @@ def declareTraits (items : List Item) : M Unit := do
           { s with
             impls := s.impls.push
               ⟨Syntax.destroyTrait, head, (List.range arity).map (s!"T{·}"), ctx, [],
-                Elab.implDictName Syntax.destroyTrait head, [], [], [], [], []⟩
+                Elab.implDictName Syntax.destroyTrait head, [], [], [], [], [], false⟩
             kimpls := s.kimpls ++ [⟨Syntax.destroyTrait, head, arity, ctx⟩] }
   -- What `Traits.coherent` asks of the implementations.
   unless Traits.noOverlap (← get).kimpls do
