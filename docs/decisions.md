@@ -973,7 +973,14 @@ from elsewhere too. A resumption lent to binds none. And the search with
 borrows as scopes of their own is run with callables taken to bind regions
 where it fails without. So such a function's borrows are scopes of their own.
 
-Limits. With callables taken to bind regions, a handler whose operation
+`for<'a> fn(&'a T) -> R` written of a field of a declared type binds its
+regions in the certificate as it does of a parameter; a callable kept there
+may touch those regions and no other.
+
+Limits. `for<..>` as an argument of another type in a function's signature,
+`Option<for<'a> fn(&'a T)>`, is refused by the checker with a message: what
+is given is held to every lifetime only where it is given to a parameter or
+a field. With callables taken to bind regions, a handler whose operation
 gives a reference of an effect's lifetime is not shown; it is without, so a
 program that needs both is not.
 

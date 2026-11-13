@@ -1938,6 +1938,13 @@ def cases : List Case := [
     [], "1"⟩,
   ⟨"fn go(r: &Int, n: Int) -> Int { if(0 < n) { let mut y = n; go(&y, n - 1) } else { *r } }\nfn main() { let mut t = 5; go(&t, 3) }",
     [], "1"⟩,
+  -- A callable for every lifetime kept in a declared type.
+  ⟨"struct V(for<'a> fn(&'a Int) -> Int)\nfn run(v: V) -> Int { match(v) { V(f) => let mut x = 4; f(&x) } }\nfn main() { run(V({ r => *r + 1 })) }",
+    [], "5"⟩,
+  ⟨"struct V(for<'a> fn(&'a Int) -> Int)\nfn run(v: V) -> Int { match(v) { V(f) => let mut x = 4; let mut y = 6; f(&x) + f(&y) } }\nfn main() { run(V({ r => *r + 1 })) }",
+    [], "12"⟩,
+  ⟨"struct V(for<'a> fn(&'a Int) -> &'a Int)\nfn run(v: V) -> Int { match(v) { V(f) => let mut x = 4; *f(&x) } }\nfn main() { run(V({ r => r })) }",
+    [], "4"⟩,
   -- `drop` is not for a program to call.
   ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nfn main() { let mut f = File(7); drop(&mut f); 0 }",
     [], "error: 3:34: in `main`: `drop` is run when what holds a value ends; a program does not call it"⟩,

@@ -213,6 +213,11 @@ def notTail (n : Nat) : String :=
   fn main() { apply({ r => *r + 1 }) }" == some true
 #guard borrowChecked "fn both(f: for<'a, 'b> fn(&'a Int, &'b Int) -> Int) -> Int { let mut x = 3; let mut y = 4; f(&x, &y) }
   fn main() { both(fn(a, b) { *a * 10 + *b }) }" == some true
+-- A callable for every lifetime kept in a declared type binds its regions
+-- there too.
+#guard borrowChecked "struct V(for<'a> fn(&'a Int) -> Int)
+  fn run(v: V) -> Int { match(v) { V(f) => let mut x = 4; let mut y = 6; f(&x) + f(&y) } }
+  fn main() { run(V({ r => *r + 1 })) }" == some true
 -- A reference kept in a declared type, or given by an effect, is of the
 -- region its lifetime says.
 #guard borrowChecked "struct Holder<'a>(&'a Int)

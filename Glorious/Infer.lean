@@ -2285,12 +2285,30 @@ partial def declsFor (types : List Ty) (opsTodo : List (Nat × List Ty)) (datas 
 
 /-- Read a declared type. A bare unknown name, or `_`, is a field whose type is
 inferred: one type for the whole program. -/
-partial def resolveType (typeNames params : List String) : TypeExpr → M ITy
+partial def resolveType (typeNames params : List String) (locals : List (String × Nat)) :
+    TypeExpr → M ITy
   | .name x args => do
     -- A callable for every lifetime: here, the callable.
     if x == Syntax.rankedMark then
       match args.getLast? with
-      | some inner => return ← resolveType typeNames params inner
+      | some inner =>
+        -- Where callables are taken to bind regions, it binds one for each
+        -- lifetime written.
+        if (← get).regions && (← get).ranked then
+          let names := args.dropLast.filterMap fun
+            | .name l [] => some l
+            | _ => none
+          let bound ← names.mapM fun _ => freshRg
+          for b in bound do
+            markRank b
+          let t ← resolveType typeNames params (names.zip bound ++ locals) inner
+          if let .fn _ _ _ _ _ _ acc := t then
+            let a ← findAcc acc
+            modify fun s =>
+              { s with accs := s.accs.modify a fun x =>
+                  { x with binder := bound.head?, more := bound.drop 1 } }
+          return t
+        else return ← resolveType typeNames params locals inner
       | none => return ← freshTy
     match params.idxOf? x with
     | some i => pure (.param i)
@@ -2299,11 +2317,11 @@ partial def resolveType (typeNames params : List String) : TypeExpr → M ITy
       if x.startsWith "'" then pure (.ref (← freshRg) (.tuple []))
       else if x == "Int" || Syntax.isScalar x then pure .int
       else if (← get).arrayType == some x then
-        pure (.data arrayName (← args.mapM (resolveType typeNames params)))
+        pure (.data arrayName (← args.mapM (resolveType typeNames params locals)))
       else
         match typeNames.idxOf? x with
         | some id => do
-          let given ← args.mapM (resolveType typeNames params)
+          let given ← args.mapM (resolveType typeNames params locals)
           -- A lifetime the type takes that is not written is one of its own.
           let lifetimes := (← get).typeLifetimes[id]?.getD []
           let mut missing := lifetimes.length - given.length
@@ -2321,22 +2339,25 @@ partial def resolveType (typeNames params : List String) : TypeExpr → M ITy
               | [] => out := out.push (← freshTy)
           pure (.data id (out.toList ++ rest))
         | none => freshTy
-  | .tuple args => do pure (.tuple (← args.mapM (resolveType typeNames params)))
+  | .tuple args => do pure (.tuple (← args.mapM (resolveType typeNames params locals)))
   | .fn ps r => do
     let row ← freshRow
-    pure (.func (← ps.mapM (resolveType typeNames params)) (← resolveType typeNames params r) row
+    pure (.func (← ps.mapM (resolveType typeNames params locals)) (← resolveType typeNames params locals r) row
       (← freshCls) (← freshTy) (← freshAcc))
   | .ref _ t life => do
     -- A reference for a lifetime the declaration takes points where that
     -- argument says.
-    let region ← match life.bind params.idxOf? with
-      | some j => pure (lifetimeBase + j)
-      | none => freshRg
-    pure (.ref region (← resolveType typeNames params t))
+    let region ← match life.bind (fun l => locals.lookup l) with
+      | some r => pure r
+      | none =>
+        match life.bind params.idxOf? with
+        | some j => pure (lifetimeBase + j)
+        | none => freshRg
+    pure (.ref region (← resolveType typeNames params locals t))
   | .never => freshTy
   | .hole => freshTy
   -- What a callable performs is found again for Core, not read.
-  | .performs r _ => resolveType typeNames params r
+  | .performs r _ => resolveType typeNames params locals r
 
 def declare (items : List Item) (g : Elab.Globals) : M Unit := do
   let arrays := items.findSome? fun
@@ -2366,7 +2387,7 @@ def declare (items : List Item) (g : Elab.Globals) : M Unit := do
       for (c, fields) in ctors do
         match g.ctors.lookup c with
         | some info =>
-          let fields ← fields.mapM (resolveType typeNames params)
+          let fields ← fields.mapM (resolveType typeNames params [])
           modify fun s =>
             { s with
               ctors := setAt s.ctors info.tag ⟨owner, params.length, fields, lifetimesOf params⟩
@@ -2376,7 +2397,7 @@ def declare (items : List Item) (g : Elab.Globals) : M Unit := do
       let owner := (typeNames.idxOf? name).getD 0
       match g.ctors.lookup name with
       | some info =>
-        let fields ← fields.mapM (resolveType typeNames params)
+        let fields ← fields.mapM (resolveType typeNames params [])
         modify fun s =>
           { s with
             ctors := setAt s.ctors info.tag ⟨owner, params.length, fields, lifetimesOf params⟩
@@ -2387,9 +2408,9 @@ def declare (items : List Item) (g : Elab.Globals) : M Unit := do
       for op in ops do
         match g.ops.lookup op.name with
         | some info =>
-          let payload ← op.payload.mapM (resolveType typeNames params)
+          let payload ← op.payload.mapM (resolveType typeNames params [])
           let result ← if op.terminal then pure none
-            else some <$> resolveType typeNames params (op.result.getD .hole)
+            else some <$> resolveType typeNames params [] (op.result.getD .hole)
           modify fun s =>
             { s with ops := setAt s.ops info.id ⟨effect, params.length, payload, result, lifetimesOf params⟩ }
         | none => throw s!"operation `{op.name}` was not collected"
@@ -2509,8 +2530,10 @@ def certifyM (items : List Item) (g : Elab.Globals) (p : Core.Program)
   settleAll
   -- A callable type a declaration writes says nothing of regions, so a callable
   -- kept in such a place can touch none.
+  -- (But for the regions its own type binds.)
   for g in [0:(← get).globalAccs] do
-    unless (← accSet g).isEmpty do
+    let own ← bindersOf g
+    unless ((← accSet g).filter fun r => !own.contains r).isEmpty do
       throw "region: a callable kept in a declared type touches a mutable variable"
   let mainTy ← zonk {} τ
   let mainHints ← zonkHints {} mainHints
