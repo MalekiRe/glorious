@@ -90,6 +90,15 @@ partial def checkUnsafeImpls (items : List Syntax.Item) : Except String Unit := 
     | .fieldNames mark [tr, head] _ =>
       if mark == Syntax.attrMark "unsafe_impl" then some (last tr, last head) else none
     | _ => none
+  -- `impl !Trait for Type {}`: no implementation says otherwise.
+  let denied := all.filterMap fun
+    | .fieldNames mark [tr, head] _ =>
+      if mark == Syntax.attrMark "negative_impl" then some (last tr, last head) else none
+    | _ => none
+  for item in all do
+    if let .impl _ tr head _ _ _ := item then
+      if denied.contains (last tr, last head) then
+        throw s!"`{last head}` is said not to have `{last tr}` (`impl !{last tr} for {last head}`), and an implementation says it does"
   for item in all do
     if let .impl _ tr head _ _ _ := item then
       let said := promised.contains (last tr, last head)

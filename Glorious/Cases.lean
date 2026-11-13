@@ -2560,6 +2560,13 @@ def cases : List Case := [
     [], "error: 1:20: in `main`: the clauses of this callable do not cover every case"⟩,
   ⟨"fn main() -> Int { let [a, b] = [5, 6]; a * b }",
     [], "error: 1:20: in `main`: the pattern of this `let` does not cover every case"⟩,
+  -- `impl !Trait for Type {}`: the type does not have the trait, and no implementation may say it does.
+  ⟨"trait Mark { fn mark(Self) -> Int; }\nstruct A(Int)\nimpl !Mark for A {}\nimpl Mark for Int { fn mark(n) { n } }\nfn main() -> Int { mark(3) }",
+    [], "3"⟩,
+  ⟨"trait Mark { fn mark(Self) -> Int; }\nstruct A(Int)\nimpl !Mark for A {}\nimpl Mark for A { fn mark(a) { 1 } }\nfn main() -> Int { 0 }",
+    [], "error: `A` is said not to have `Mark` (`impl !Mark for A`), and an implementation says it does"⟩,
+  ⟨"trait Mark { fn mark(Self) -> Int; }\nstruct A(Int)\nimpl !Mark for A {}\nfn main() -> Int { mark(A(1)) }",
+    [], "error: 4:20: in `main`: `A` does not implement `Mark`"⟩,
   -- `drop` is not for a program to call.
   ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nfn main() { let mut f = File(7); drop(&mut f); 0 }",
     [], "error: 3:34: in `main`: `drop` is run when what holds a value ends; a program does not call it"⟩,

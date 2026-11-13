@@ -1413,6 +1413,19 @@ private partial def parseItem : P Item := do
   | .ident "impl" =>
     advance
     let params ← parseGenerics
+    -- `impl !Trait for Type {}`: the type does not have the trait, and no
+    -- implementation may say it does.
+    if ← isOp "!" then
+      advance
+      let tr ← expectPath
+      match ← peek with
+      | .ident "for" => advance
+      | _ => failAt "expected `for`: `impl !Trait for Type {}`"
+      let head ← expectPath
+      let _ ← parseGenerics
+      expectPunct "{"
+      expectPunct "}"
+      return .fieldNames (attrMark "negative_impl") [tr, head] []
     let tr ← expectPath
     -- `impl From<Int> for u8`: the trait's own arguments, kept among what
     -- the implementation declares.

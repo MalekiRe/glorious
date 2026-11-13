@@ -2345,6 +2345,14 @@ whatever is left, and a `let` cannot have one.
   an array.
 - **Fixed arrays `[T; N]` and const generics** are still not built.
 
+## A type can be said not to have a trait
+
+`impl !Trait for Type {}` says the type does not have the trait. An
+implementation of the trait for the type is then refused, wherever it is
+written. That is all it does: nothing is concluded from it elsewhere, and a
+trait asked of the type is refused as it would have been, for want of an
+implementation.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by
