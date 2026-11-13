@@ -2567,6 +2567,9 @@ def cases : List Case := [
     [], "error: `A` is said not to have `Mark` (`impl !Mark for A`), and an implementation says it does"⟩,
   ⟨"trait Mark { fn mark(Self) -> Int; }\nstruct A(Int)\nimpl !Mark for A {}\nfn main() -> Int { mark(A(1)) }",
     [], "error: 4:20: in `main`: `A` does not implement `Mark`"⟩,
+  -- A hash map changed where it is, and what a key stands for looked at where it is.
+  ⟨"use std::hash::{HashMap, new, get};\nfn main() {\n    let mut m = new();\n    HashMap::set(&mut m, \"one\", 1); HashMap::set(&mut m, \"two\", 2); HashMap::set(&mut m, \"three\", 3);\n    say(HashMap::count(&m));\n    say(match(HashMap::get_ref(&m, \"two\")) { Some(r) => *r, None => 0 });\n    say(HashMap::has(&m, \"four\"));\n    HashMap::unset(&mut m, \"one\");\n    HashMap::set(&mut m, \"two\", 22);\n    say(HashMap::count(&m));\n    say(match(HashMap::get_ref(&m, \"two\")) { Some(r) => *r, None => 0 });\n    say(get(m, \"one\"));\n    0 }",
+    [], "3\n2\nErr(())\n2\n22\nErr(())\n0"⟩,
   -- `drop` is not for a program to call.
   ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nfn main() { let mut f = File(7); drop(&mut f); 0 }",
     [], "error: 3:34: in `main`: `drop` is run when what holds a value ends; a program does not call it"⟩,

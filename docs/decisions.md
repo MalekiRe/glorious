@@ -2291,6 +2291,9 @@ references to parts of values were for.
   which holds its text as UTF-8 bytes. An item that cannot be put where it
   was asked to go is given back as it is, `Err(item)`, not wrapped in the
   specification's `Rejected`.
+- **`HashMap<K, V>`** (`std::hash`) has `set`, `unset`, `count`, `has` and
+  `get_ref`, which gives `Option<&V>` into the map, beside the functions over
+  values it had. Keys are copied when they are compared.
 - **Not built**: capacities and `reserve`, slices and iterators in this
   shape, `rotate`, `split_off`, `drain`, `retain` and the functions that take
   a callable, `as_slices`, `front_mut`, `replace_top`, and maps and sets,

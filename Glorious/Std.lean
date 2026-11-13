@@ -1422,6 +1422,39 @@ pub fn keys(m) { fold_map(m, [], fn(out, k, v) { push(out, k) }) }
 pub fn values(m) { fold_map(m, [], fn(out, k, v) { push(out, v) }) }
 pub fn entries(m) { fold_map(m, [], fn(out, k, v) { push(out, (k, v)) }) }
 pub fn from(pairs) { fold(pairs, new(), fn(m, pair) { match(pair) { (k, v) => insert(m, k, v) } }) }
+
+// The same map changed where it is and looked into by reference, in the
+// shape the library specification gives its maps (17).
+fn slot_of<'a, K, V>(bucket: &'a [(K, V)], key: K, i: Int) -> Option<&'a V> where K: Eq {
+    match(element(bucket, i)) {
+        Some(pair) => if(pair.0 == key) { Some(&pair.1) } else { tail slot_of(bucket, key, i + 1) },
+        None => None
+    }
+}
+
+impl<K, V> HashMap<K, V> {
+    // How many keys.
+    pub fn count(value: &Self) -> Int { value.1 }
+    // What a key stands for, where it is.
+    pub fn get_ref<'a>(value: &'a Self, key: K) -> Option<&'a V> where K: Hash, K: Eq {
+        let buckets = &value.0;
+        match(element(buckets, int_rem(hash(key), len_at(buckets)))) {
+            Some(bucket) => slot_of(bucket, key, 0),
+            None => None
+        }
+    }
+    pub fn has(value: &Self, key: K) -> Bool where K: Hash, K: Eq {
+        match(HashMap::get_ref(value, key)) { Some(_) => true, None => false }
+    }
+    // The key standing for the item from now on.
+    pub fn set(value: &mut Self, key: K, item: V) where K: Hash, K: Eq {
+        *value = insert(replace(value, new()), key, item);
+    }
+    // The key standing for nothing from now on.
+    pub fn unset(value: &mut Self, key: K) where K: Hash, K: Eq {
+        *value = remove(replace(value, new()), key);
+    }
+}
 "#
 
 /-- The texts of the library, each with the module it is. -/
