@@ -2586,7 +2586,10 @@ flag is not set. The flag and the cleanup are there only where the count of
 uses finds a path that does not use the value. This is the specification's place that may or may not hold
 its value, with a cleanup that depends on a flag (7.4). A value bound with
 `let` and never borrowed is not kept in a variable; for it both paths still
-have to say, and the message says to write `let mut`.
+have to say, and the message says to write `let mut`. The flag is a
+variable of the same block, and a callable that sets it must not outlive
+the block: that is checked for callables that use a variable, and not for
+ones that hold a name's value, which may be given back.
 
 A callable that holds such a variable's value need not be called for the
 `drop`'s sake: what it did not use the variable destroys. It is still used
