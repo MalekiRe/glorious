@@ -359,14 +359,31 @@ partial def checkArg (scope : Scope) (amb : Row) (what : String) (p : Ty) (a : E
       let arity := match clauses.head? with
         | some (.mk pats _) => pats.length
         | none => 0
-      -- So is a parameter known to be of a declared type: what the clauses
-      -- do with it, a field read by name, is then looked at knowing it.
       let mut annots : List (Option Ty) := []
+      -- A parameter known to be of a declared type is said too, so that
+      -- what the clauses do with it, a field read by name, is looked at
+      -- knowing it. That is tried, and given up where it does not fit:
+      -- what is given may yet be converted to what is wanted.
+      let mut wider : List (Option Ty) := []
+      let mut widened := false
       for q in ps do
         let declared := match ← find q with
           | .con _ _ => true
           | _ => false
-        annots := annots ++ [if declared || (← literalAt q 0).isSome then some q else none]
+        let whole := (← literalAt q 0).isSome
+        annots := annots ++ [if whole then some q else none]
+        wider := wider ++ [if declared || whole then some q else none]
+        if declared && !whole then widened := true
+      if arity == ps.length && widened then
+        let saved ← get
+        let tried ← try
+            let t ← inferCallable scope wider none none clauses "the clauses of this callable do" id
+            if let .fn _ _ _ _ cap := t then
+              modify fun s => { s with blockCaps := s.blockCaps.push (id, cap) }
+            pure ((← fitAt scope amb what site p t).isNone)
+          catch _ => pure false
+        if tried then return none
+        set saved
       if arity == ps.length && annots.any (·.isSome) then
         let t ← inferCallable scope annots none none clauses "the clauses of this callable do" id
         if let .fn _ _ _ _ cap := t then

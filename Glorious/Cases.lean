@@ -2507,6 +2507,9 @@ def cases : List Case := [
   -- Asking the host for what nothing answers is an effect that is not handled.
   ⟨"use std::host::{println};\nfn main() { println(\"hi\"); 0 }",
     [], "error: `main` performs effects that nothing handles: {std::host::Console}"⟩,
+  -- Queues and heaps, changed where they are through a `&mut` reference.
+  ⟨"use std::collections::{VecDeque, BinaryHeap};\nfn main() {\n    let mut q = VecDeque::new();\n    VecDeque::push_back(&mut q, 2); VecDeque::push_back(&mut q, 3); VecDeque::push_front(&mut q, 1);\n    say(VecDeque::len(&q));\n    say(match(VecDeque::front(&q)) { Some(r) => *r, None => 0 });\n    say(match(VecDeque::back(&q)) { Some(r) => *r, None => 0 });\n    say(VecDeque::pop_front(&mut q)); say(VecDeque::pop_back(&mut q)); say(VecDeque::pop_front(&mut q)); say(VecDeque::pop_front(&mut q));\n    VecDeque::push_back(&mut q, 7); VecDeque::push_back(&mut q, 8);\n    say(VecDeque::into_vec(q));\n    let mut h = BinaryHeap::new();\n    BinaryHeap::push(&mut h, 5); BinaryHeap::push(&mut h, 9); BinaryHeap::push(&mut h, 1); BinaryHeap::push(&mut h, 7);\n    say(match(BinaryHeap::peek(&h)) { Some(r) => *r, None => 0 });\n    say(BinaryHeap::pop(&mut h)); say(BinaryHeap::len(&h));\n    say(BinaryHeap::into_sorted_vec(h));\n    say(BinaryHeap::into_sorted_vec(BinaryHeap::from_vec([3, 8, 2, 9, 4])));\n    0 }",
+    [], "3\n1\n3\nOk(1)\nOk(3)\nOk(2)\nErr(())\n[7, 8]\n9\nOk(9)\n3\n[7, 5, 1]\n[9, 8, 4, 3, 2]\n0"⟩,
   -- `drop` is not for a program to call.
   ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nfn main() { let mut f = File(7); drop(&mut f); 0 }",
     [], "error: 3:34: in `main`: `drop` is run when what holds a value ends; a program does not call it"⟩,

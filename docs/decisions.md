@@ -2256,6 +2256,22 @@ with another handler that answers from memory.
   time, which is slow for large files.
 - **Not on the proved machines**, like everything that calls C.
 
+## Collections in the specification's shape
+
+`std::collections` has `VecDeque` and `BinaryHeap` written as the library
+specification writes its collections (16): functions of the type, `&mut Self`
+to change one where it is, `Option<&'a T>` to look at an element. They are
+written in the language, with nothing new in the compiler, which is what the
+references to parts of values were for.
+
+- **Sizes are `Int`**, not `usize`, as everywhere else in this library.
+- **A `BinaryHeap`'s elements are copied** when they are compared and moved,
+  so they are of a type used any number of times.
+- **Not built**: capacities and `reserve`, `insert`, `remove`, `rotate`,
+  `split_off`, `as_slices`, `front_mut`, `replace_top`, and the rest of the
+  specification's sections 13 to 19 in this shape: `Vec`, `String`, slices,
+  maps and iterators are still the functions over values they were.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by

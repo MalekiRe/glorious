@@ -21,6 +21,7 @@ pub mod map;
 pub mod set;
 pub mod iter;
 pub mod c;
+pub mod collections;
 pub mod host;
 pub mod hash;
 "#
@@ -969,6 +970,135 @@ fn line_from(line: [u8], any: Bool) -> Option<Str> {
 }
 "#
 
+private def collectionsText : String := r#"// Queues and heaps: collections changed where they are, through a `&mut`
+// reference, in the shape the library specification gives them (16).
+
+use std::vec::{swap};
+
+// A queue with two ends. What is at the front is kept turned round, so that
+// both ends are the ends of an array: putting and taking at either end takes
+// time that does not grow with the queue, counted over many of them.
+pub struct VecDeque<T> { front: [T], back: [T] }
+
+// The elements of one array onto another, last first.
+fn turned<T>(from: [T], onto: [T]) -> [T] {
+    match(pop(from)) {
+        Some((rest, last)) => tail turned(rest, push(onto, last)),
+        None => onto
+    }
+}
+
+impl<T> VecDeque<T> {
+    pub fn new() -> Self { Self { front: [], back: [] } }
+    pub fn from_vec(items: [T]) -> Self { Self { front: [], back: items } }
+    pub fn into_vec(value: Self) -> [T] {
+        match(value) { VecDeque { front, back } => turned(turned(back, []), turned(front, [])) }
+    }
+    pub fn len(value: &Self) -> Int { len_at(&value.front) + len_at(&value.back) }
+    pub fn is_empty(value: &Self) -> Bool { VecDeque::len(value) == 0 }
+    pub fn push_back(value: &mut Self, item: T) {
+        let back = &mut value.back;
+        *back = push(replace(back, []), item);
+    }
+    pub fn push_front(value: &mut Self, item: T) {
+        let front = &mut value.front;
+        *front = push(replace(front, []), item);
+    }
+    pub fn pop_front(value: &mut Self) -> Option<T> {
+        // With nothing kept at the front, what is at the back is turned
+        // round to be it.
+        let front = &mut value.front;
+        let back = &mut value.back;
+        let ready = if(len_at(&*front) == 0) { turned(replace(back, []), []) } else { replace(front, []) };
+        match(pop(ready)) {
+            Some((rest, first)) => *front = rest; Some(first),
+            None => None
+        }
+    }
+    pub fn pop_back(value: &mut Self) -> Option<T> {
+        let front = &mut value.front;
+        let back = &mut value.back;
+        let ready = if(len_at(&*back) == 0) { turned(replace(front, []), []) } else { replace(back, []) };
+        match(pop(ready)) {
+            Some((rest, last)) => *back = rest; Some(last),
+            None => None
+        }
+    }
+    // The element so far from the front, by reference.
+    pub fn get<'a>(value: &'a Self, index: Int) -> Option<&'a T> {
+        let ahead = len_at(&value.front);
+        if(index < ahead) { element(&value.front, ahead - 1 - index) } else { element(&value.back, index - ahead) }
+    }
+    pub fn front<'a>(value: &'a Self) -> Option<&'a T> { VecDeque::get(value, 0) }
+    pub fn back<'a>(value: &'a Self) -> Option<&'a T> { VecDeque::get(value, VecDeque::len(value) - 1) }
+}
+
+// A heap: the greatest element is the one taken. Its elements are compared
+// and moved by copying, so they are of a type used any number of times.
+pub struct BinaryHeap<T> { items: [T] }
+
+// The element at `i` moved up to where nothing above it is smaller.
+fn risen<T>(a: [T], i: Int) -> [T] where T: Ord {
+    if(i == 0) { a } else {
+        let parent = (i - 1) / 2;
+        if(a[parent] < a[i]) { tail risen(swap(a, parent, i), parent) } else { a }
+    }
+}
+
+// The element at `i` moved down to where nothing below it is greater.
+fn sunk<T>(a: [T], i: Int, n: Int) -> [T] where T: Ord {
+    let left = 2 * i + 1;
+    let right = left + 1;
+    let over_left = if(left < n) { if(a[i] < a[left]) { left } else { i } } else { i };
+    let most = if(right < n) { if(a[over_left] < a[right]) { right } else { over_left } } else { over_left };
+    if(most == i) { a } else { tail sunk(swap(a, i, most), most, n) }
+}
+
+fn heaped<T>(a: [T], i: Int) -> [T] where T: Ord {
+    if(i < 0) { a } else { let n = len(a); tail heaped(sunk(a, i, n), i - 1) }
+}
+
+fn drained<T>(a: [T], out: [T]) -> [T] where T: Ord {
+    let n = len(a);
+    if(n == 0) { out } else {
+        let top = a[0];
+        let moved = swap(a, 0, n - 1);
+        match(pop(moved)) {
+            Some((rest, _)) => tail drained(sunk(rest, 0, n - 1), push(out, top)),
+            None => out
+        }
+    }
+}
+
+impl<T> BinaryHeap<T> {
+    pub fn new() -> Self { Self { items: [] } }
+    pub fn from_vec(items: [T]) -> Self where T: Ord { let n = len(items); Self { items: heaped(items, n / 2) } }
+    pub fn into_vec(value: Self) -> [T] { match(value) { BinaryHeap { items } => items } }
+    // Greatest first.
+    pub fn into_sorted_vec(value: Self) -> [T] where T: Ord { match(value) { BinaryHeap { items } => drained(items, []) } }
+    pub fn len(value: &Self) -> Int { len_at(&value.items) }
+    pub fn is_empty(value: &Self) -> Bool { len_at(&value.items) == 0 }
+    pub fn peek<'a>(value: &'a Self) -> Option<&'a T> { element(&value.items, 0) }
+    pub fn push(value: &mut Self, item: T) where T: Ord {
+        let items = &mut value.items;
+        let with = push(replace(items, []), item);
+        let n = len(with);
+        *items = risen(with, n - 1);
+    }
+    pub fn pop(value: &mut Self) -> Option<T> where T: Ord {
+        let items = &mut value.items;
+        let all = replace(items, []);
+        let n = len(all);
+        if(n == 0) { None } else {
+            match(pop(swap(all, 0, n - 1))) {
+                Some((rest, top)) => *items = sunk(rest, 0, n - 1); Some(top),
+                None => None
+            }
+        }
+    }
+}
+"#
+
 private def cText : String := r#"// What C has: its memory, and texts as it writes them. Everything here is
 // unsafe: an address is whatever a program says it is.
 
@@ -1163,6 +1293,7 @@ def texts : List (List String × String) :=
    (["std", "set"], setText),
    (["std", "iter"], iterText),
    (["std", "c"], cText),
+   (["std", "collections"], collectionsText),
    (["std", "host"], hostText),
    (["std", "hash"], hash)]
 
