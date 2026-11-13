@@ -634,6 +634,74 @@ partial def selfStmt (self : String) (trait : Option (String × Expr)) : Stmt �
 end
 
 
+/-- `&value` and `&mut value` where the value has no name. -/
+def borrowMark : String := "%borrow"
+def borrowMutMark : String := "%borrow_mut"
+
+mutual
+
+/-- A value that is borrowed where it is made, `&f(x)`, is given a name first:
+the statement it is in is preceded by the `let` that binds it, and what was
+written is a borrow of that name. The value then lasts to the end of the
+block the statement is in. -/
+partial def nameBorrows : Expr → Expr × List Stmt
+  | .call id f args =>
+    match f, args with
+    | .name none mark, [e] =>
+      if mark == borrowMark || mark == borrowMutMark then
+        let (e, before) := nameBorrows e
+        let x := s!"borrowed%{id}"
+        let uniq := mark == borrowMutMark
+        (.ref uniq x, before ++ [if uniq then Stmt.letMut x e else .let_ (.var x) e])
+      else
+        let (e, before) := nameBorrows e
+        (.call id f [e], before)
+    | _, _ =>
+      let (f, before) := nameBorrows f
+      let parts := args.map nameBorrows
+      (.call id f (parts.map (·.1)), before ++ parts.flatMap (·.2))
+  | .tailCall id f args =>
+    let (f, before) := nameBorrows f
+    let parts := args.map nameBorrows
+    (.tailCall id f (parts.map (·.1)), before ++ parts.flatMap (·.2))
+  | .tuple args =>
+    let parts := args.map nameBorrows
+    (.tuple (parts.map (·.1)), parts.flatMap (·.2))
+  | .proj e i => let (e, before) := nameBorrows e; (.proj e i, before)
+  | .deref e => let (e, before) := nameBorrows e; (.deref e, before)
+  | .reborrow uniq e => let (e, before) := nameBorrows e; (.reborrow uniq e, before)
+  | .fieldOf id e name => let (e, before) := nameBorrows e; (.fieldOf id e name, before)
+  | .closure id clauses => (.closure id (clauses.map nameBorrowsClause), [])
+  | .handle subject arms =>
+    -- What is handled is run under the handler: so is what it borrows.
+    let (subject, before) := nameBorrows subject
+    let subject := if before.isEmpty then subject else .labelScope "%block" (before ++ [.expr subject])
+    (.handle subject (arms.map nameBorrowsClause), [])
+  | .labelScope l body => (.labelScope l (nameBorrowsStmts body), [])
+  | e => (e, [])
+
+partial def nameBorrowsClause : Clause → Clause
+  | .mk pats body => .mk pats (nameBorrowsStmts body)
+
+partial def nameBorrowsStmt : Stmt → List Stmt
+  | .let_ pat e => let (e, before) := nameBorrows e; before ++ [.let_ pat e]
+  | .letMut x e => let (e, before) := nameBorrows e; before ++ [.letMut x e]
+  | .expr e => let (e, before) := nameBorrows e; before ++ [.expr e]
+  | .defer e => let (e, before) := nameBorrows e; before ++ [.defer e]
+  | .assign target e =>
+    let (target, first) := nameBorrows target
+    let (e, second) := nameBorrows e
+    first ++ second ++ [.assign target e]
+  | .located line col s =>
+    match (nameBorrowsStmt s).reverse with
+    | last :: before => before.reverse ++ [.located line col last]
+    | [] => []
+
+partial def nameBorrowsStmts (body : List Stmt) : List Stmt :=
+  body.flatMap nameBorrowsStmt
+
+end
+
 /-- How a name is used in what follows where it is bound: borrowed with `&`,
 changed or borrowed with `&mut`, a field of it borrowed, bound again. -/
 structure NameUse where
@@ -751,7 +819,8 @@ end
 /-- The same for every function of a text. -/
 partial def promoteItems (items : List Item) : List Item :=
   items.map fun
-    | .fn name ps annots ret clauses => .fn name ps annots ret (clauses.map promoteClause)
+    | .fn name ps annots ret clauses =>
+      .fn name ps annots ret (clauses.map fun c => promoteClause (nameBorrowsClause c))
     | .pub parent item => .pub parent ((promoteItems [item]).headD item)
     | .module name (some inner) => .module name (some (promoteItems inner))
     | .impl ps tr head args context methods => .impl ps tr head args context (promoteItems methods)

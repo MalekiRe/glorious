@@ -908,7 +908,9 @@ private partial def parseUnary (noBlock : Bool) : P Expr := do
           | e =>
             match fieldRoot e with
             | some (root, path) => pure (fieldBorrow id uniq root path)
-            | none => failAt "`&` is followed by a variable, a field of one, or a field of what a reference points to"
+            -- A value with no name: it is given one where the statement
+            -- starts, and that is borrowed.
+            | none => pure (.call id (.name none (if uniq then borrowMutMark else borrowMark)) [e])
       else if t == .op "&*" then
         -- `&*e`, which the lexer reads as one symbol.
         advance

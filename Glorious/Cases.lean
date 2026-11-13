@@ -2606,6 +2606,13 @@ def cases : List Case := [
   -- A trait's function that takes two references and gives none: what it takes is not tied together.
   ⟨"trait Put { fn put(&Self, &mut Int); }\nimpl Put for Int { fn put(n, o) { *o = *n + 1; } }\nfn g<T: Put>(value: &T, out: &mut Int) { put(value, out) }\nfn main() -> Int { let n = 5; let mut out = 0; g(&n, &mut out); out }",
     [], "6"⟩,
+  -- `&` of a value that has no name: it is named where the statement starts, and lasts to the end of its block.
+  ⟨"fn total(a: &[Int]) -> Int { len_at(a) }\nfn make() -> [Int] { [1, 2, 3] }\nfn main() -> Int { total(&make()) + total(&[4, 5]) }",
+    [], "5"⟩,
+  ⟨"fn fill(a: &mut [Int]) -> Int { *a = push(replace(a, []), 9); len_at(&*a) }\nfn main() -> Int { fill(&mut [1, 2]) }",
+    [], "3"⟩,
+  ⟨"fn total(a: &[Int]) -> Int { len_at(a) }\nfn main() -> Int { if(1 < 2) { total(&[1, 2, 3]) } else { 0 } }",
+    [], "3"⟩,
   -- `drop` is not for a program to call.
   ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nfn main() { let mut f = File(7); drop(&mut f); 0 }",
     [], "error: 3:34: in `main`: `drop` is run when what holds a value ends; a program does not call it"⟩,

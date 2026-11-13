@@ -2404,8 +2404,21 @@ thing on a line.
   accepted and runs, but no regions are found for the program that calls it.
   The same holds, as it did before, for any generic function of that shape.
 - **Not built**: `Debug`, format options and output limits, the diagnostics
-  types, and `&` of a value that has no name: `&format(&p)` has to be
-  `let s = format(&p); &s`.
+  types.
+
+## Borrowing what has no name, and what is not a variable
+
+`&x` needed `x` to be `let mut`. Now a value bound with `let`, by a pattern or
+as a parameter, that is borrowed with `&` and never assigned to, borrowed
+with `&mut` or bound again, is kept as a variable is, where a reference can
+point; nothing can assign to it, since nothing does. And `&f(x)` or
+`&mut [1, 2]`, a borrow of a value with no name, names the value where the
+statement it is in starts and borrows that.
+
+- **The value lasts to the end of the block** its statement is in, not to
+  the end of the statement.
+- **It is made before the rest of its statement**: in `g(a(), &b())`, `b()`
+  runs before `a()`.
 
 ## Other standing decisions
 
