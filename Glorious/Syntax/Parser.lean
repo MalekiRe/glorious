@@ -615,14 +615,19 @@ private partial def parseBoundsOf (subject : String) : P (List Bound) := do
 /-- Generic parameters `<'a, 'b: 'a, T, F: Fn<(T,)>>`, if present: type
 parameters and lifetimes, a lifetime perhaps with one it lasts at least as
 long as, a type parameter perhaps with what is asked of it. -/
-private partial def parseGenericsWith : P (List String × List Bound) := do
-  if !(← isOp "<") then return ([], [])
+private partial def parseGenericsFull :
+    P (List String × List Bound × List (Nat × List String × TypeExpr)) := do
+  if !(← isOp "<") then return ([], [], [])
   advance
   let mut out : Array String := #[]
   let mut bounds : Array Bound := #[]
+  -- `T = Type`: what the parameter is where it is not written, with its
+  -- place and the parameters before it, which the type may mention.
+  let mut defaults : Array (Nat × List String × TypeExpr) := #[]
   repeat
     if ← isOp ">" then break
     let x ← expectIdent
+    let before := out.toList
     out := out.push x
     if (← peek) == .punct ":" then
       advance
@@ -631,9 +636,19 @@ private partial def parseGenericsWith : P (List String × List Bound) := do
         unless y.startsWith "'" do failAt "expected a lifetime: `'b: 'a`"
         out := out.push s!"{x}: {y}"
       else bounds := bounds ++ (← parseBoundsOf x).toArray
+    if ← acceptPunct "=" then
+      defaults := defaults.push ((genericParams before).length, genericParams before, ← parseType)
+    else unless defaults.isEmpty do
+      failAt "a parameter that is always written comes before those that need not be"
     if !(← acceptPunct ",") then break
   expectOp ">"
-  pure (out.toList, bounds.toList)
+  pure (out.toList, bounds.toList, defaults.toList)
+
+private partial def parseGenericsWith : P (List String × List Bound) := do
+  let (params, bounds, defaults) ← parseGenericsFull
+  unless defaults.isEmpty do
+    failAt "what a parameter is where it is not written, `T = Type`, is said of a declared type's"
+  pure (params, bounds)
 
 private partial def parseGenerics : P (List String) := do
   let (params, bounds) ← parseGenericsWith
@@ -1767,18 +1782,19 @@ private partial def parseItemGroup : P (List Item) := do
     let name ← expectIdent
     -- What is asked of a type parameter, `struct W<T: Show>` or `where T:
     -- Show` before or after the fields, is asked where a `W` is built.
-    let (params, bounds) ← parseGenericsWith
+    let (params, bounds, defaults) ← parseGenericsFull
     let (_, before) ← parseWhere
     let (fields, names, pubs) ← parseFieldDecls
     let (_, after) ← parseWhere
     let _ ← acceptPunct ";"
     let asked := bounds ++ before ++ after
     pure ([.struct name params fields, .fieldNames name names pubs]
-      ++ (if asked.isEmpty then [] else [.bounds name asked]))
+      ++ (if asked.isEmpty then [] else [.bounds name asked])
+      ++ defaults.map fun (i, earlier, ty) => .typeAlias (defaultName name i) earlier ty)
   | .ident "enum" =>
     advance
     let name ← expectIdent
-    let (params, bounds) ← parseGenericsWith
+    let (params, bounds, defaults) ← parseGenericsFull
     let (_, more) ← parseWhere
     let asked := bounds ++ more
     expectPunct "{"
@@ -1794,7 +1810,8 @@ private partial def parseItemGroup : P (List Item) := do
       if !(← acceptPunct ",") then break
     expectPunct "}"
     pure (.enum name params ctors.toList :: named.toList
-      ++ (if asked.isEmpty then [] else [.bounds name asked]))
+      ++ (if asked.isEmpty then [] else [.bounds name asked])
+      ++ defaults.map fun (i, earlier, ty) => .typeAlias (defaultName name i) earlier ty)
   | .ident "type" =>
     advance
     let name ← expectIdent

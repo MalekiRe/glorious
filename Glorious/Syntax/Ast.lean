@@ -300,6 +300,16 @@ the type written as an expression so that it can sit among expressions: see
 stands alone. -/
 def ascribeMark : String := "%as"
 
+/-- The name under which the type a declared type's parameter is, where it is
+not written, is kept: an alias beside the declaration. `i` counts the
+parameters from none. -/
+def defaultName (type : String) (i : Nat) : String := s!"%default:{type}:{i}"
+
+/-- That name for a type known by its whole name, module and all. -/
+def defaultKey (global : String) (i : Nat) : String :=
+  let segs := global.splitOn "::"
+  "::".intercalate (segs.dropLast ++ [defaultName (segs.getLast!) i])
+
 /-- `let name` in a pattern: `name` is a new name there, not the constant or
 constructor of that name. -/
 def letMark : String := "%let"

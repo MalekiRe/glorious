@@ -33,7 +33,15 @@ written out already: one that stands for itself has no meaning. -/
 partial def expandTypeExpr (aliases : List (String × List String × TypeExpr))
     (seen : List String) : TypeExpr → Except String TypeExpr
   | .name x args => do
-    let args ← args.mapM (expandTypeExpr aliases seen)
+    let mut args ← args.mapM (expandTypeExpr aliases seen)
+    -- A declared type written with fewer arguments than it has parameters:
+    -- the rest are what its declaration says they are where not written.
+    repeat
+      match aliases.lookup (defaultKey x args.length) with
+      | some (params, body) =>
+        let given := (genericParams params).zip args
+        args := args ++ [← expandTypeExpr aliases seen (substTypeExpr given body)]
+      | none => break
     match aliases.lookup x with
     | none => pure (.name x args)
     | some (params, body) =>

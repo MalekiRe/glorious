@@ -1038,6 +1038,11 @@ From the audit of the specification (10.8, 20).
   elaborator refuses (`tail` out of place), and then left out of the program
   as before.
 
+- **`struct W<T = Int>`**: a declared type written with fewer arguments than
+  it has parameters has, for the rest, what its declaration says; a default
+  may mention the parameters before it, and comes after every parameter that
+  is always written (13.1).
+
 Limits. A function that needs a trait of a type it is generic in is still
 called where it is named. A declared type's bounds are not assumed inside a
 function that is given one: the function says them again. Only traits
