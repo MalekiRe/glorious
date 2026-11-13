@@ -2538,6 +2538,11 @@ def cases : List Case := [
     [], "4"⟩,
   ⟨"struct Pair<A, B> { a: A, b: B }\ntrait Sum { fn sum(Self) -> Int; }\nimpl<B> Sum for Pair<Int, B> { fn sum(p) { p.a } }\nfn main() -> Int { sum(Pair { a: \"no\", b: \"x\" }) }",
     [], "error: 4:20: in `main`: `Sum` is implemented for `Pair<Int, Str>`, not for `Pair<Str, Str>`"⟩,
+  -- A loop that hands its state on, and a body run so many times.
+  ⟨"fn main() -> Int { loop_state((0, 0), { (state) => match(state) { (i, total) => if(i == 5) { Break(total) } else { Continue((i + 1, total + i)) } } }) }",
+    [], "10"⟩,
+  ⟨"fn main() -> Int { let mut n = 0; repeat_n(4, { n = n + 3; }); n }",
+    [], "12"⟩,
   -- `drop` is not for a program to call.
   ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nfn main() { let mut f = File(7); drop(&mut f); 0 }",
     [], "error: 3:34: in `main`: `drop` is run when what holds a value ends; a program does not call it"⟩,

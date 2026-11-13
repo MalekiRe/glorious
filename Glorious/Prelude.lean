@@ -244,6 +244,25 @@ fn break_at<T, L>(value: T, target: L) -> ! where L: Label<T> {
     target(value)
 }
 
+// A loop that hands its state on: each turn gives the state for the next, or
+// what the loop gives.
+enum LoopStep<S, B> { Continue(S), Break(B) }
+
+fn loop_state(initial, body) {
+    match(body(initial)) {
+        Continue(next) => tail loop_state(next, body),
+        Break(value) => value
+    }
+}
+
+// The body so many times.
+fn repeat_n(count: Int, body) {
+    match(int_lt(0, count)) {
+        0 => (),
+        _ => body(); tail repeat_n(int_sub(count, 1), body)
+    }
+}
+
 fn while(condition, body) {
     loop {
         match(condition()) {
