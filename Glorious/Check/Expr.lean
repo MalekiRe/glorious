@@ -15,6 +15,7 @@ partial def inferExpr (scope : Scope) (amb : Row) : Expr → M Ty
       -- What a variable that is never changed holds can be given away:
       -- that is counted as a use of the value, as a name's is.
       if (← get).movedCells.contains brand then
+        modify fun s => { s with givenReads := s.givenReads.push (t, s.pos ++ readsCell x) }
         use scope (.var brand x .move)
       else
         mustDup t (readsCell x)
@@ -892,9 +893,10 @@ partial def inferStmts (scope : Scope) (amb : Row) (stmts : List Stmt)
       { s with
         cells := s.cells.push (brand, x, t)
         movedCells := if given then brand :: s.movedCells else s.movedCells
-        -- A variable owns what it holds.
-        dropCands := if given then s.dropCands
-          else s.dropCands.push (⟨s.owner, at_.1, at_.2, x, false⟩, t, pos) }
+        -- A variable owns what it holds; one that gives it away owns it
+        -- where it has not, which its cleanup asks.
+        dropCands := s.dropCands.push
+          (⟨s.owner, at_.1, at_.2, if given then Syntax.givenSite x else x, false⟩, t, pos) }
     -- Nothing says the variable is empty when its block ends: what it holds
     -- then is let go. Unless the very next statement is a cleanup that takes
     -- it out, leaving something that holds nothing: that runs last of all
@@ -908,6 +910,7 @@ partial def inferStmts (scope : Scope) (amb : Row) (stmts : List Stmt)
     unless finalised || given do
       mustDrop t s!"the mutable variable `{x}` lets go of what it holds when its block ends (a `defer` straight after it can take that out with `replace`)"
     let here := (← get).pos
+    if given then modify fun s => { s with flagged := here :: s.flagged }
     let result ← inferStmts ((x, .cell t brand) :: scope) amb rest want
     if given then checkUses here scope [(x, .val t brand)] rest
     checkEscape brand s!"`{x}` could be used after its block has ended"

@@ -915,6 +915,47 @@ partial def splitDefersStmts : List Stmt → List Stmt × List Stmt
 
 end
 
+/-- The variable that says whether what a variable held has been given away,
+and the name the variable's cleanup is known by where it is one that asks. -/
+def movedFlag (x : String) : String := s!"%moved:{x}"
+def givenSite (x : String) : String := s!"%given:{x}"
+
+mutual
+
+/-- Every use of a variable's value marked: the flag is set, and then the
+value read. Borrows of the variable are left as they are. -/
+partial def markMoves (x : String) : Expr → Expr
+  | .name none y =>
+    if y == x then
+      .labelScope "%block" [.assign (.name none (movedFlag x)) (.int 1), .expr (.name none x)]
+    else .name none y
+  | .call id f args => .call id (markMoves x f) (args.map (markMoves x))
+  | .tailCall id f args => .tailCall id (markMoves x f) (args.map (markMoves x))
+  | .tuple args => .tuple (args.map (markMoves x))
+  | .proj e i => .proj (markMoves x e) i
+  | .deref e => .deref (markMoves x e)
+  | .reborrow u e => .reborrow u (markMoves x e)
+  | .fieldOf id e n => .fieldOf id (markMoves x e) n
+  | .closure id clauses => .closure id (clauses.map fun
+      | .mk pats body => .mk pats (markMovesStmts x body))
+  | .handle subject arms => .handle (markMoves x subject) (arms.map fun
+      | .mk pats body => .mk pats (markMovesStmts x body))
+  | .labelScope l body => .labelScope l (markMovesStmts x body)
+  | e => e
+
+partial def markMovesStmts (x : String) (body : List Stmt) : List Stmt :=
+  body.map (markMovesStmt x)
+
+partial def markMovesStmt (x : String) : Stmt → Stmt
+  | .let_ p e => .let_ p (markMoves x e)
+  | .letMut y e => .letMut y (markMoves x e)
+  | .expr e => .expr (markMoves x e)
+  | .defer e => .defer (markMoves x e)
+  | .located l c s => .located l c (markMovesStmt x s)
+  | .assign target e => .assign target (markMoves x e)
+
+end
+
 /-- Is the value a name holds used as it is, with no borrow of the name
 after? Then the name gives its value away where it is used. A cleanup runs
 after what follows it: one that borrows the name is a borrow after any use

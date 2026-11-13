@@ -1117,9 +1117,11 @@ def runLowerChecks (fnTy : Ty) : M Unit := do
       -- paths are callables and it is theirs. (One no path uses stays in
       -- its variable, and is destroyed there.)
       if let some name ← tyHasDrop [] t then
-        unless usesStmts resumptive x body == 0 || usedFirst quiet x body do
+        -- (A variable that gives its value away asks, when its block ends,
+        -- whether it did: it may on some paths and not on others.)
+        unless s.flagged.contains pos || usesStmts resumptive x body == 0 || usedFirst quiet x body do
           if (pathUses { ctx with handed := true } names x body) == some 0 then
-            throw s!"{pos}`{x}` is used on one path and not on another, and a `{name}` has a `drop` to run: where it is not used nothing would run it. Use it on every path, or let it go there with a function that takes it"
+            throw s!"{pos}`{x}` is used on one path and not on another, and a `{name}` has a `drop` to run: where it is not used nothing would run it. Use it on every path, let it go there with a function that takes it, or keep it in a variable (`let mut {x}`), which is destroyed where it was not used"
       continue
     let mut unused := false
     if usesStmts resumptive x body == 0 then unused := true

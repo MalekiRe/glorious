@@ -1785,7 +1785,20 @@ private partial def untraitStmts (tr : TraitInfo) (owner : String) (pos : Nat ×
     let rest := untraitStmts tr owner pos rest
     match dropHook tr ⟨owner, pos.1, pos.2, x, false⟩ with
     | some hook => .letMut x value :: .defer hook :: rest
-    | none => .letMut x value :: rest
+    | none =>
+      -- A variable that gives its value away where it is used: what it
+      -- holds is destroyed when its block is left only if it was not. A
+      -- flag says, set wherever the value is used.
+      match (tr.drops.lookup ⟨owner, pos.1, pos.2, Syntax.givenSite x, false⟩).bind
+          fun id => tr.dicts.lookup id with
+      | some [d] =>
+        let flag := Syntax.movedFlag x
+        let unless_moved := Expr.call 0 (.closure 0
+          [.mk [.int 0] [.expr (destroyCall tr d (.name none x))],
+           .mk [.wild] [.expr (.tuple [])]]) [.name none flag]
+        .letMut x value :: .letMut flag (.int 0) :: .defer unless_moved
+          :: Syntax.markMovesStmts x rest
+      | _ => .letMut x value :: rest
   | .let_ pat value :: rest =>
     let value := untraitExpr tr owner value
     let rest := untraitStmts tr owner pos rest

@@ -348,6 +348,14 @@ structure St where
   value is given away where they are: reading one is a use of the value, as
   of a name's, and not a copy. -/
   movedCells : List Nat := []
+  /-- Where such variables are, as the count of uses knows a binding: one of
+  them may hold a value with `Drop` that some paths use and others do not,
+  since its cleanup asks whether it was. -/
+  flagged : List String := []
+  /-- What was read out of such a variable: a value that holds a resumption
+  cannot be, since the machine's read is a copy and a resumption is not
+  copied. -/
+  givenReads : Array (Ty × String) := #[]
   /-- The values a field was taken out of, leaving the rest: their types and
   where. One with `Drop` is taken apart only where it is declared. -/
   aparts : Array (Ty × String) := #[]

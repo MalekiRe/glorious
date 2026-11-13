@@ -489,4 +489,18 @@ def checkDups (dups : Array (Ty × String)) : M Unit := do
         throw s!"{why}, but a `{name}` has a `drop`, which would then run once for each"
       throw s!"{why}, but a value that holds a resumption can be used only once"
 
+/-- What a variable gives away is read out of it by the machine, which is a
+copy: fine for a value that is counted as used once here and can be copied
+there, and not for one that holds a resumption. -/
+def checkGivenReads : M Unit := do
+  let reads := (← get).givenReads
+  modify fun s => { s with givenReads := #[] }
+  for (t, why) in reads do
+    modify fun s => { s with seen := [] }
+    if ← tyOwnsOnce [] t then
+      if (← onceBy [] t).isNone then
+        modify fun s => { s with seen := [] }
+        if (← tyHasDrop [] t).isNone then
+          throw s!"{why}, but a value that holds a resumption can be used only once"
+
 end Glorious.Check

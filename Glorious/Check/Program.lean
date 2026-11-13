@@ -795,6 +795,7 @@ def checkGroup (decls : List FnDecl) : M Unit := do
       runPending
       runLowerChecks t
       checkDups (← get).dups
+      checkGivenReads
       checkDrops (← get).drops
       checkAparts
       checkStays (← get).stays

@@ -2578,13 +2578,24 @@ of the value, in the order the block is written, with a `defer` counted
 last; otherwise reading the variable is the copy it was, and refused for a
 value that is used once.
 
+**Used on some paths.** Such a variable may give its value away on some
+paths and not on others: `let mut n = ..; if(c) { eat(n) } else { 7 }`. Its
+cleanup asks whether it did. A flag beside the variable is set wherever the
+value is used, and when the block is left the value is destroyed if the
+flag is not set. This is the specification's place that may or may not hold
+its value, with a cleanup that depends on a flag (7.4). A value bound with
+`let` and never borrowed is not kept in a variable; for it both paths still
+have to say, and the message says to write `let mut`.
+
+A value that holds a resumption is still not read out of a variable: the
+machine's read is a copy, and Core does not copy a resumption.
+
 `let _ = value;` now lets the value go as `value;` does, running its `drop`;
 it kept it unnamed and never destroyed it.
 
 This is in place of callables that say how they are destroyed, which the
 specification has and which needs the machine to know, for each callable,
-what to run. The specification also lets a value be moved on one path and
-cleaned up on the other by a flag (7.4); here both paths have to say. It refuses programs the specification accepts and loses
+what to run. It refuses programs the specification accepts and loses
 nothing silently.
 
 - Not covered: a value with `Drop` given to a function generic in its type
