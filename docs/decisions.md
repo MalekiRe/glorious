@@ -2582,7 +2582,8 @@ value that is used once.
 paths and not on others: `let mut n = ..; if(c) { eat(n) } else { 7 }`. Its
 cleanup asks whether it did. A flag beside the variable is set wherever the
 value is used, and when the block is left the value is destroyed if the
-flag is not set. This is the specification's place that may or may not hold
+flag is not set. The flag and the cleanup are there only where the count of
+uses finds a path that does not use the value. This is the specification's place that may or may not hold
 its value, with a cleanup that depends on a flag (7.4). A value bound with
 `let` and never borrowed is not kept in a variable; for it both paths still
 have to say, and the message says to write `let mut`.

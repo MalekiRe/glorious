@@ -1119,6 +1119,15 @@ def runLowerChecks (fnTy : Ty) : M Unit := do
   -- each holds what has to be used.
   let certain := (s.envGroups.toList.filter (·.2.2.1)).flatMap fun g => g.2.1.map (·.1)
   for (pos, x, t, names, body) in s.lowerChecks do
+    -- A variable that gives its value away: if some path does not use the
+    -- value, the variable is given a cleanup that destroys it there.
+    if let some (site, held, at_) := s.givenSites.lookup pos then
+      unless usedFirst quiet x body do
+        let somewhere_not := match pathUses { ctx with handed := true } names x body with
+          | some n => n == 0
+          | none => true
+        if somewhere_not then
+          modify fun st => { st with dropCands := st.dropCands.push (site, held, at_) }
     if certain.contains x then continue
     let t ← zonk t
     -- Only a type that has to be used, or one not yet known, needs the count.

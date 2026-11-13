@@ -352,6 +352,10 @@ structure St where
   them may hold a value with `Drop` that some paths use and others do not,
   since its cleanup asks whether it was. -/
   flagged : List String := []
+  /-- For each of them, where its cleanup would go: it is put there only if
+  some path does not use the value, which is known once the function's
+  uses are counted. -/
+  givenSites : List (String × Elab.DropSite × Ty × String) := []
   /-- Among what callables hold, by place in `capEdges`: the values of such
   variables. A callable that holds one need not be called for its `drop`'s
   sake, since the variable's cleanup destroys what was not given away. -/
