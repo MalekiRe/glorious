@@ -327,8 +327,10 @@ theorem mem_cells {op : MemOp} {cells cells' : Cells} {vs : List Value} {r : Val
       obtain ⟨_, _, _, rfl⟩ := h
       exact .inl rfl
     · cases h
-  · cases h
-    exact .inl rfl
+  · split at h
+    · cases h
+      exact .inl rfl
+    · cases h
   · cases h
 
 /-- A memory operation releases nothing. -/
@@ -937,19 +939,23 @@ def Overflow (s : State) : Prop :=
     ∧ evalAtoms s.env args = some vs ∧ q.eval vs = none
 
 /-- A part of a value is about to be read or written through a reference, and
-it is not there: a place past the end of an array. -/
+it is not there: a place past the end of an array. Or a reference is asked for
+to a place below zero. -/
 def Absent (s : State) : Prop :=
-  ∃ op args body a b path vs v, s.tm = .mem op args body
+  (∃ op args body a b path vs v, s.tm = .mem op args body
     ∧ evalAtoms s.env args = some (.ref a b path :: vs)
-    ∧ s.store.cells[a]? = some (some v) ∧ v.follow path = none
+    ∧ s.store.cells[a]? = some (some v) ∧ v.follow path = none)
+  ∨ (∃ args body a b path i, s.tm = .mem .focus args body
+    ∧ evalAtoms s.env args = some [.ref a b path, .int i] ∧ i < 0)
 
-/-- Of the five faults, the two of something not fitting or not being there are
-the ones that are none of the other three. -/
+/-- Of the faults, those of something not fitting or not being there are the
+ones that are none of the other three. -/
 theorem Fault.overflow_of {s : State} (hf : Fault s) (h1 : ¬ Resumed s) (h2 : ¬ Freed s)
     (h3 : ¬ Dead s) : Overflow s ∨ Absent s := by
   cases hf with
   | overflow hargs hq => exact .inl ⟨_, _, _, _, rfl, hargs, hq⟩
-  | absent hev hget hf => exact .inr ⟨_, _, _, _, _, _, _, _, rfl, hev, hget, hf⟩
+  | absent hev hget hf => exact .inr (.inl ⟨_, _, _, _, _, _, _, _, rfl, hev, hget, hf⟩)
+  | below hev hi => exact .inr (.inr ⟨_, _, _, _, _, _, rfl, hev, hi⟩)
   | freed hev hget => exact absurd ⟨_, _, _, _, _, _, _, rfl, hev, hget⟩ h2
   | resumed hc hev hget => exact absurd ⟨_, _, hc, hev, hget⟩ h1
   | dead hc hev hnone => exact absurd ⟨_, _, hc, hev, hnone⟩ h3

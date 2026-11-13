@@ -165,8 +165,8 @@ inductive MemOp where
   | tag
   /-- A reference to a field of what a reference points to: the same cell and
   the same borrow, one field further in. Nothing is read, so whether the field
-  is there is found when the reference is used. A number below zero is taken
-  for zero. -/
+  is there is found when the reference is used. No field has a number below
+  zero. -/
   | focus
 
 /-- The constructor of the value a path of field numbers leads to; `-1` if the
@@ -205,7 +205,8 @@ def MemOp.eval (cells : Cells) : MemOp → List Value → Option (Value × Cells
     match cells[a]? with
     | some (some v) => (v.follow p).map fun w => (.int (tagAt w path), cells)
     | _ => none
-  | .focus, [.ref a b p, .int i] => some (.ref a b (p ++ [i.toNat]), cells)
+  | .focus, [.ref a b p, .int i] =>
+    if 0 ≤ i then some (.ref a b (p ++ [i.toNat]), cells) else none
   | _, _ => none
 
 /-- The machine state that is not on the stack. -/

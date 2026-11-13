@@ -2458,6 +2458,9 @@ def cases : List Case := [
     [], "3"⟩,
   ⟨"fn main() { let mut a = [10, 20, 30]; let r = element_mut(&mut a, 2); a = push(a, 4); match(r) { Some(x) => *x, None => 0 } }",
     [], "error: 1:71: in `main`: `a` is read while `r` holds a `&mut` reference to it"⟩,
+  -- A place below zero is not there either.
+  ⟨"fn main() { let mut a = [1, 2, 3]; let r = arr_at(&a, 0 - 1); *r + 1 }",
+    [], "went wrong"⟩,
   -- `drop` is not for a program to call.
   ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nfn main() { let mut f = File(7); drop(&mut f); 0 }",
     [], "error: 3:34: in `main`: `drop` is run when what holds a value ends; a program does not call it"⟩,

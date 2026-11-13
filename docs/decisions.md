@@ -2106,6 +2106,47 @@ What stands between this and a proof, in order:
 3. Then the invariant itself: every resumption not yet taken is held where it
    will still be handed on, and no frame holding one is ever left or captured.
 
+## A reference can be to a part of a value
+
+A reference in Core was to a whole cell. So `&mut p.x`, where `p` is a
+reference, had to be written out as a variable of the function's that held
+the field while the borrow lasted, and such a borrow could not be given back;
+and nothing could refer to an element of an array at all, which the standard
+library's slices and collections need.
+
+A reference value now carries the fields to go through from what its cell
+holds to the part it is to. Reading, writing and swapping go through that
+path. `focus` makes, from a reference, the reference one field further in:
+the same cell and the same borrow, so the rules for borrows in Core see it as
+the reference it came from. Two rules type it. A field by number, of a tuple
+or of a type with one shape, is always there. A place of an array, which may
+be a number the program computes, is there or not when the reference is used.
+
+- **Two more faults.** Reading or writing through a reference whose part is
+  not there stops the machine: `Fault.absent`. The soundness theorem for the
+  ownership and region rules now names two ways to go wrong, an intrinsic
+  with no result and a part that is not there (`Absent`); both are a place of
+  an array that is not there, or arithmetic. The checker on the surface keeps
+  the array from changing while a reference into it is held, so a checked
+  surface program does not reach the second by letting the array shrink; this
+  is not proved. The prelude's `element` and `element_mut` ask whether the
+  place is there before making the reference.
+- **Borrows are of the cell.** In Core a borrow of a part is a borrow of the
+  whole cell. That two borrows of fields apart may be held together, and that
+  a `&mut` to a part excludes the reference it came from while it lasts, is
+  the surface checker's doing, as it was. Nothing unsound follows if it were
+  wrong: a write through a path keeps the cell's type.
+- **A path does not go into a variant.** A field of one of several
+  constructors, borrowed through a reference by a pattern, is still taken out
+  into a variable of the function's while the borrow lasts, and still cannot
+  be given back. A path step would have to say which constructor it expects.
+- **A field of a local variable** is still borrowed as a variable of its own
+  while the borrow lasts, which is what lets two fields of one variable be
+  lent at once in Core, where a borrow is of a cell.
+- **A place below zero** asked of `focus` stops the machine there, a fault of
+  the same kind (`Fault.below`, counted under `Absent`). A place past the end
+  is found only when the reference is used.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by

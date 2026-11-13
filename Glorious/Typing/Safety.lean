@@ -4,7 +4,7 @@ import Glorious.Typing.Stack
 # Type safety for Core
 
 A well-typed machine state steps to a well-typed state, or halts, or is one of
-the five faults in `Fault`. So a well-typed program that goes wrong went wrong
+the faults in `Fault`. So a well-typed program that goes wrong went wrong
 by one of those, and by nothing else: `type_safety`.
 
 If the context's notion of a duplicable type is sound, the same steps keep every
@@ -1369,10 +1369,18 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
     obtain ⟨iv, hiv, hivt⟩ := atom_ok henv hix
     obtain ⟨n, rfl⟩ := hivt.int_inv
     obtain ⟨addr, tg, pth, σ₀, rfl, hcell, hpl, hon, hl⟩ := hvt.ref_inv
+    by_cases hn : 0 ≤ n
+    case neg =>
+      have h1 : step p ⟨.mem .focus [a, ix] body, env, stack, ⟨conts, labels, cells⟩⟩
+          = .stuck := by
+        simp [step, evalAtoms, hv, hiv, MemOp.eval, hn]
+      rw [h1]
+      exact Fault.below (a := addr) (b := tg) (path := pth) (i := n)
+        (by simp [evalAtoms, hv, hiv]) (by omega)
     have h1 : step p ⟨.mem .focus [a, ix] body, env, stack, ⟨conts, labels, cells⟩⟩
         = .next ⟨body, env ++ [.ref addr tg (pth ++ [n.toNat])], stack,
             ⟨conts, labels, cells⟩⟩ := by
-      simp [step, evalAtoms, hv, hiv, MemOp.eval]
+      simp [step, evalAtoms, hv, hiv, MemOp.eval, hn]
     rw [h1]
     refine .next (.mk (henv.snoc (.ref hcell (hpl.append (.elem hu .here)) hon hl)) hbody hle
       hsub hst hs) (fun hD hu' => hu'.mono rfl fun id => ?_)
@@ -1511,8 +1519,8 @@ theorem run_ok {p : Program} (hp : ProgramOk Δ p) : ∀ (n : Nat) {c : Config},
 
 /--
 **Type safety.** If a well-typed program goes wrong, the state it could not
-step from is one of the five faults: arithmetic overflow, a part of a value
-that is not there, use of a freed cell, a second use of a resumption, or a
+step from is one of the faults in `Fault`: arithmetic overflow, a part of a
+value that is not there, use of a freed cell, a second use of a resumption, or a
 label applied after its scope ended.
 Everything else the machine gives no meaning to cannot happen: an unbound
 local, a value of the wrong shape, a missing function or clause, an operation

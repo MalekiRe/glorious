@@ -301,6 +301,11 @@ inductive Fault : State → Prop where
       {store : Store Frame} {a b : Nat} {path : List Nat} {vs : List Value} {v : Value} :
       evalAtoms env args = some (.ref a b path :: vs) → store.cells[a]? = some (some v) →
       v.follow path = none → Fault ⟨.mem op args body, env, stack, store⟩
+  /-- A reference is asked for to a place below zero. -/
+  | below {args : List Atom} {body : Tm} {env : Env} {stack : List Frame}
+      {store : Store Frame} {a b : Nat} {path : List Nat} {i : Int} :
+      evalAtoms env args = some [.ref a b path, .int i] → i < 0 →
+      Fault ⟨.mem .focus args body, env, stack, store⟩
   /-- A resumption is resumed or cancelled after it was already used. -/
   | resumed {s : State} {f : Atom} {id : Nat} :
       calleeAtom s.tm = some f → f.eval s.env = some (.cont id) →
