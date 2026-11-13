@@ -48,25 +48,6 @@ def mustInfo : M MustInfo := do
     unless info.blocks.contains root do info := { info with blocks := root :: info.blocks }
   pure info
 
-/-- A type whose values have a `drop` of their own to run, or hold one that
-has: the name of the first such type found. -/
-partial def tyHasDrop (visiting : List String) (t : Ty) : M (Option String) := do
-  match ← find t with
-  | .tuple args => args.findSomeM? (tyHasDrop visiting)
-  | .con name args => do
-    if (← get).kimpls.any (fun I => I.trait == "Drop" && I.head == name) then
-      return some (bareName name)
-    if let some w ← args.findSomeM? (tyHasDrop visiting) then return some w
-    if visiting.contains name then return none
-    match (← get).types.lookup name with
-    | none => pure none
-    | some decl =>
-      decl.ctors.findSomeM? fun c => do
-        match (← get).ctors.lookup c with
-        | none => pure none
-        | some sig => (sig.fieldsAt args).findSomeM? (tyHasDrop (name :: visiting))
-  | _ => pure none
-
 /-- What in a type has to be used, if anything: said for the message. A
 callable has to be called if it holds something that has to be used, or
 something with a `drop` to run: nothing destroys what a callable holds, so
@@ -718,8 +699,12 @@ partial def runCallee (ctx : ACtx) (depth : Nat) (env : List (String × AVal)) (
             if ctx.handed && vs.any (fun v => match v with
                 | .tracked => true
                 | _ => false) then
-              -- Given away: it is whoever takes it that has it now.
-              out := (.unknown, n + m + 1) :: out
+              -- Given away: it is whoever takes it that has it now. (As
+              -- often as it is given.)
+              let given := (vs.filter fun v => match v with
+                | .tracked => true
+                | _ => false).length
+              out := (.unknown, n + m + given) :: out
             else
             -- A call that comes back and is given nothing a use could come
             -- of need not be followed.
@@ -1006,10 +991,14 @@ def checkUses (pos : String) (outer : Scope) (binds : Scope) (body : List Stmt) 
       if mentions ≥ 2 then
         let t ← zonk t
         modify fun st => { st with seen := [] }
+        -- (A value with a `drop` to run is used where it is given away,
+        -- whatever takes it does: giving it away twice would run it twice.)
+        let dropped := (← tyHasDrop [] t).isSome
         let settled := (freeTys t).isEmpty && (freeCaps t).isEmpty && !hasParam t
-          && !(← tyOwnsOnce [] t)
+          && !(← tyOwnsOnce [] t) && !dropped
         unless settled do
-          match pathUses ctx (names.filter (· != x)) x body with
+          match pathUses (if dropped then { ctx with handed := true } else ctx)
+              (names.filter (· != x)) x body with
           | some n => if n ≥ 2 then mustDup t s!"`{x}` is used more than once"
           | none => mustDup t s!"`{x}` is used more than once"
       -- A value that has to be used: is it, however the body goes? Looked at

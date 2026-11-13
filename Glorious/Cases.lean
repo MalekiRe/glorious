@@ -874,14 +874,19 @@ def cases : List Case := [
   ⟨"struct Deferred(fn() -> ())\nimpl Drop for Deferred { fn drop(d) { match(replace(d, Deferred({ () }))) { Deferred(f) => f() } } }\nfn deferred(f) { Deferred(f) }\nfn main() { let g = deferred({ host_write(9); }); host_write(1); 2 }",
     [], "1\n9\n2"⟩,
   -- How often a value is used. A declared type may say: `impl Use<[fewest, most]>`.
-  -- `Drop` says nothing about it: a type that has `Drop` and says no more can be
-  -- copied, and each copy is destroyed.
+  -- A type that has `Drop` is used at most once, as the specification's
+  -- `trait Drop: Use<[0, 1]>` says: a copy would run its `drop` again. What a
+  -- variable that is never changed holds is given away, not copied.
   ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nfn main() { let mut f = File(7); let g = f; 0 }",
-    [], "7\n7\n0"⟩,
+    [], "7\n0"⟩,
+  ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nfn main() { let mut f = File(7); let g = f; f = File(8); 0 }",
+    [], "error: 3:34: in `main`: reading the mutable variable `f` copies its value (`replace` takes it out instead), but a `File` has a `drop`, which would then run once for each"⟩,
   -- At most once.
   ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nimpl Use<[0, 1]> for File {}\nfn keep2(a: File, b: File) { let mut x = a; let mut y = b; 0 }\nfn main() { let f = File(7); keep2(f, f) }",
     [], "error: 5:13: in `main`: `f` is used more than once, but a `File` can be used only once"⟩,
   ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nimpl Use<[0, 1]> for File {}\nfn main() { let mut f = File(7); let g = f; 0 }",
+    [], "7\n0"⟩,
+  ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nimpl Use<[0, 1]> for File {}\nfn main() { let mut f = File(7); let g = f; f = File(8); 0 }",
     [], "error: 4:34: in `main`: reading the mutable variable `f` copies its value (`replace` takes it out instead), but a `File` can be used only once"⟩,
   -- At least once: a value that is let go without being used is an error,
   -- wherever it happens. Taking it apart with a pattern is a use.
@@ -892,7 +897,7 @@ def cases : List Case := [
   ⟨"struct File(Int)\nimpl Use<[1, 1]> for File {}\nfn close(File(fd)) { host_write(fd) }\nfn main() { File(7); 0 }",
     [], "error: 4:13: in `main`: the value of a statement is let go, but a `File` has to be used"⟩,
   ⟨"struct File(Int)\nimpl Use<[1, 1]> for File {}\nfn close(File(fd)) { host_write(fd) }\nfn main() { let _ = File(7); 0 }",
-    [], "error: 4:13: in `main`: `_` lets go of a value, but a `File` has to be used"⟩,
+    [], "error: 4:13: in `main`: the value of a statement is let go, but a `File` has to be used"⟩,
   ⟨"struct File(Int)\nimpl Use<[1, 1]> for File {}\nfn close(File(fd)) { host_write(fd) }\nfn main() { let mut f = File(7); 0 }",
     [], "error: 4:13: in `main`: the mutable variable `f` lets go of what it holds when its block ends (a `defer` straight after it can take that out with `replace`), but a `File` has to be used"⟩,
   ⟨"struct File(Int)\nimpl Use<[1, 1]> for File {}\nfn close(File(fd)) { host_write(fd) }\nfn main() { let p = (File(3), 4); p.1 }",
@@ -2918,6 +2923,38 @@ def cases : List Case := [
     [], "1\n3"⟩,
   ⟨"struct Noisy(Int);\nimpl Drop for Noisy { fn drop(n) { say(n.0) } }\nfn eat(n: Noisy) -> Int { 5 }\nfn main() -> Int { let n = Noisy(1); @out { if(1 < 2) { @out(0) } else { () }; eat(n) } }",
     [], "error: 4:20: in `main`: `n` is used on one path and not on another, and a `Noisy` has a `drop` to run: where it is not used nothing would run it. Use it on every path, or let it go there with a function that takes it"⟩,
+  -- A value with `Drop` is not copied: read out of a variable, used twice, or given away twice.
+  ⟨"struct Noisy(Int);\nimpl Drop for Noisy { fn drop(n) { say(n.0) } }\nfn eat(n: Noisy) -> Int { 5 }\nfn main() -> Int { let mut n = Noisy(1); eat(n) }",
+    [], "1\n5"⟩,
+  ⟨"struct Noisy(Int);\nimpl Drop for Noisy { fn drop(n) { say(n.0) } }\nfn eat(n: Noisy) -> Int { 5 }\nfn main() -> Int { let n = Noisy(1); eat(n) + eat(n) }",
+    [], "error: 4:20: in `main`: `n` is used more than once, but a `Noisy` has a `drop`, which would then run once for each"⟩,
+  ⟨"struct Noisy(Int);\nimpl Drop for Noisy { fn drop(n) { say(n.0) } }\nfn eat(n: Noisy) -> Int { 5 }\nfn main() -> Int { let mut n = Some(Noisy(1)); match(replace(&mut n, None)) { Some(x) => eat(x), None => 0 } }",
+    [], "1\n5"⟩,
+  -- `let _ = value;` lets the value go, running its `drop`.
+  ⟨"struct Noisy(Int);\nimpl Drop for Noisy { fn drop(n) { say(n.0) } }\nfn eat(n: Noisy) -> Int { 5 }\nfn main() -> Int { let _ = Noisy(1); 0 }",
+    [], "1\n0"⟩,
+  -- A value that is borrowed and then given away: the variable it is kept in is never changed, so it gives the value away where it is used.
+  ⟨"struct Noisy(Int);\nimpl Drop for Noisy { fn drop(n) { say(n.0) } }\nfn eat(n: Noisy) -> Int { 5 }\nfn peek(n: &Noisy) -> Int { n.0 }\nfn main() -> Int { let n = Noisy(1); let a = peek(&n); a + eat(n) }",
+    [], "1\n6"⟩,
+  ⟨"struct Ticket(Int);\nimpl Use<[1, 1]> for Ticket {}\nfn redeem(t: Ticket) -> Int { match(t) { Ticket(n) => n } }\nfn peek(t: &Ticket) -> Int { 1 }\nfn main() -> Int { let t = Ticket(4); let a = peek(&t); a + redeem(t) }",
+    [], "5"⟩,
+  ⟨"struct Noisy(Int);\nimpl Drop for Noisy { fn drop(n) { say(n.0) } }\nfn eat(n: Noisy) -> Int { 5 }\nfn peek(n: &Noisy) -> Int { n.0 }\nfn main() -> Int { let n = Noisy(1); peek(&n) + eat(n) }",
+    [], "1\n6"⟩,
+  -- Refused: given away while a reference is held, borrowed after, given away twice, or in a callable.
+  ⟨"struct Noisy(Int);\nimpl Drop for Noisy { fn drop(n) { say(n.0) } }\nfn eat(n: Noisy) -> Int { 5 }\nfn peek(n: &Noisy) -> Int { n.0 }\nfn main() -> Int { let n = Noisy(1); let r = &n; let a = eat(n); a + peek(r) }",
+    [], "error: 5:50: in `main`: `n` is given away while `r` holds a reference to it"⟩,
+  ⟨"struct Noisy(Int);\nimpl Drop for Noisy { fn drop(n) { say(n.0) } }\nfn eat(n: Noisy) -> Int { 5 }\nfn peek(n: &Noisy) -> Int { n.0 }\nfn main() -> Int { let n = Noisy(1); let a = peek(&n); let b = eat(n); a + b + peek(&n) }",
+    [], "error: 5:56: in `main`: reading the mutable variable `n` copies its value (`replace` takes it out instead), but a `Noisy` has a `drop`, which would then run once for each"⟩,
+  ⟨"struct Noisy(Int);\nimpl Drop for Noisy { fn drop(n) { say(n.0) } }\nfn eat(n: Noisy) -> Int { 5 }\nfn peek(n: &Noisy) -> Int { n.0 }\nfn main() -> Int { let n = Noisy(1); let a = peek(&n); eat(n) + eat(n) + a }",
+    [], "error: 5:20: in `main`: `n` is used more than once, but a `Noisy` has a `drop`, which would then run once for each"⟩,
+  ⟨"struct Noisy(Int);\nimpl Drop for Noisy { fn drop(n) { say(n.0) } }\nfn eat(n: Noisy) -> Int { 5 }\nfn peek(n: &Noisy) -> Int { n.0 }\nfn main() -> Int { let n = Noisy(1); let a = peek(&n); if(a > 0) { eat(n) } else { 0 } }",
+    [], "error: 5:68: in `main`: reading the mutable variable `n` copies its value (`replace` takes it out instead), but a `Noisy` has a `drop`, which would then run once for each"⟩,
+  ⟨"struct Noisy(Int);\nimpl Drop for Noisy { fn drop(n) { say(n.0) } }\nfn eat(n: Noisy) -> Int { 5 }\nfn peek(n: &Noisy) -> Int { n.0 }\nfn main() -> Int { let n = Noisy(1); eat(n) + peek(&n) }",
+    [], "error: 5:38: in `main`: reading the mutable variable `n` copies its value (`replace` takes it out instead), but a `Noisy` has a `drop`, which would then run once for each"⟩,
+  ⟨"struct Noisy(Int);\nimpl Drop for Noisy { fn drop(n) { say(n.0) } }\nfn eat(n: Noisy) -> Int { 5 }\nfn peek(n: &Noisy) -> Int { n.0 }\nfn main() -> Int { let n = Noisy(1); defer { say(peek(&n)); } eat(n) }",
+    [], "error: 5:63: in `main`: reading the mutable variable `n` copies its value (`replace` takes it out instead), but a `Noisy` has a `drop`, which would then run once for each"⟩,
+  ⟨"fn main() -> Int { let mut a = 3; let b = a; let r = &a; b + *r + a }",
+    [], "9"⟩,
   -- `drop` is not for a program to call.
   ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nfn main() { let mut f = File(7); drop(&mut f); 0 }",
     [], "error: 3:34: in `main`: `drop` is run when what holds a value ends; a program does not call it"⟩,
@@ -2966,7 +3003,13 @@ def foreignCases : List Case := [
     [], "names\n0"⟩,
   -- A `#[repr(C)]` struct is written to memory and read from it as C lays it out.
   ⟨"#[repr(C)]\nstruct Timespec { sec: i64, nsec: i64 }\n#[repr(C)]\nstruct Mixed { a: u8, b: i32, c: f64, d: u16 }\nextern \"C\" { fn malloc(n: usize) -> usize; fn free(p: usize); fn clock_gettime(clock: i32, at: usize) -> i32; }\nfn main() { unsafe {\n    say(Mixed::c_size());\n    let p = malloc(Mixed::c_size());\n    Mixed::c_write(Mixed { a: 7u8, b: 0i32 - 5i32, c: 2.5, d: 65535u16 }, p);\n    say(ptr_read(p + 4usize, 32));\n    let m = Mixed::c_read(p);\n    say(m.a); say(m.b); say(m.c); say(m.d);\n    free(p);\n    let t = malloc(Timespec::c_size());\n    clock_gettime(0i32, t);\n    let now = Timespec::c_read(t);\n    free(t);\n    say(now.sec > 1000000000);\n    0 } }",
-    [], "24\n-5\n7\n-5\n2.5\n65535\nOk(())\n0"⟩
+    [], "24\n-5\n7\n-5\n2.5\n65535\nOk(())\n0"⟩,
+  -- Memory that has to be given back: an `Allocation` is borrowed for its address and then released.
+  ⟨"use std::ffi::{Layout, Allocation, allocate, write_bytes, read_bytes};\nfn sum_at(at: usize) -> Int {\n    unsafe { write_bytes(at, [1u8, 2u8, 3u8]) };\n    let back = unsafe { read_bytes(at, 3) };\n    int(back[0]) + int(back[1]) + int(back[2])\n}\nfn work(memory: Allocation) -> Int {\n    let n = sum_at(Allocation::as_ptr(&memory));\n    Allocation::release(memory);\n    n\n}\nfn main() -> Int {\n    match(Layout::from_size_align(16, 8)) {\n        Ok(layout) => match(allocate(layout)) { Ok(memory) => work(memory), Err(_) => 0 - 1 },\n        Err(_) => 0 - 2\n    }\n}",
+    [], "6"⟩,
+  -- One function over a stream in memory, which performs nothing, and the host's standard output.
+  ⟨"use std::stream::{Write, Stdout, MemoryCursor, write_str};\nuse std::host::{run_host};\nfn greet<W: Write>(w: &mut W) / { | <W as Write>::Effects } { write_str(w, \"hi from a stream\\n\"); () }\nfn main() -> Int {\n    let mut memory = MemoryCursor::new([]);\n    greet(&mut memory);\n    let n = len(MemoryCursor::into_inner(memory));\n    run_host({ let mut out = Stdout; greet(&mut out); n }) }",
+    [], "hi from a stream\n17"⟩
 ]
 
 end Glorious

@@ -1893,10 +1893,14 @@ is done to a `T` when it is destroyed; `p` is a `&mut T`. The function is run
 - likewise for a `let` whose name nothing afterwards uses: the name owns it;
 - before a variable is assigned, on what it held, once the new value is computed.
 
-`Drop` says nothing about how often a value is used; that is the type's `Use`
-interval (next section), as the specification has it. A type that has `Drop`
-and says no more can be copied, and each copy that comes to rest in a variable
-is destroyed. A program does not call `drop`. Later variables end first.
+A type that has `Drop` is used at most once, as the specification's
+`trait Drop: Use<[0, 1]>` has it (7.6). At first it was not: such a type
+could be copied, and each copy that came to rest in a variable was destroyed,
+so `let mut f = File(7); let g = f;` closed the file twice. Reading such a
+value out of a variable, using it twice or giving it away twice is now
+refused; the module that declares the type may still read one through a
+reference, as its `drop` does to see what to do. A program does not call
+`drop`. Later variables end first.
 
 It is built from what was there. Once the source text is checked, a place where
 a value is destroyed is a cleanup (`defer`) that calls the implementation's
@@ -2557,9 +2561,25 @@ have to be used:
   `core::value::discard` takes a value and lets it go, which runs its
   `drop`. Here "used" is "given to something": what takes a value has it.
 
+**Borrowed, then given away.** A value that is borrowed is kept in a
+variable, and what a variable holds was copied when it was read: so
+`let a = peek(&n); eat(n)` could not be written for a value that is used
+once, which is how every resource is used. Now a variable that is never
+assigned, borrowed for writing or bound again gives its value away where the
+value is used: the use is counted as a name's is, a borrow still held then is
+refused ("`n` is given away while `r` holds a reference to it"), and the
+variable no longer destroys what it held. This needs the uses of the value
+to be outside any callable written in the block and no borrow of the name
+to follow; otherwise reading the variable is the copy it was, and refused
+for a value that is used once.
+
+`let _ = value;` now lets the value go as `value;` does, running its `drop`;
+it kept it unnamed and never destroyed it.
+
 This is in place of callables that say how they are destroyed, which the
 specification has and which needs the machine to know, for each callable,
-what to run. It refuses programs the specification accepts and loses
+what to run. The specification also lets a value be moved on one path and
+cleaned up on the other by a flag (7.4); here both paths have to say. It refuses programs the specification accepts and loses
 nothing silently.
 
 - Not covered: a value with `Drop` given to a function generic in its type
@@ -2658,6 +2678,11 @@ S12, S20, S31, S33, S36 and S53 are met as tried.
   for a read wants a type that can be copied, which in Core is any type
   with no resumption or callable inside; a program that swaps one of those
   is accepted and not certified as well owned.
+- `std::ffi` has the specification's `Layout` and `Allocation` (22.1):
+  `Layout::from_size_align`, `extend`, `padded`; `allocate`; and
+  `Allocation::as_ptr`, `layout` and `release`. An `Allocation` has to be
+  used: it cannot be let go, only released. Sizes are whole numbers, and
+  there is no `Layout::of<T>`, since values are not laid out flat.
 - `core::value` has the specification's `Either`, `Rejected`, `identity`,
   `Default` and `take` (3). `Default` is given for `Int`, `Str` and
   `Option<A>`, which covers `Bool`.

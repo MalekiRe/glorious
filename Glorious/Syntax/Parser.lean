@@ -1270,7 +1270,15 @@ private partial def parseStmts : P (List Stmt) := do
           | some ty => Expr.call 0 (.name none ascribeMark) [value, ty.asExpr]
           | none => value
         expectPunct ";"
-        out := out ++ (← settle (.let_ pat value)).toArray
+        match pat with
+        | .wild =>
+          -- `let _ = value;` is the value computed and let go, as `value;`
+          -- is: what it is has its `drop` run, where a name would keep it.
+          out := out ++ (← settle (.expr value)).toArray
+          let t' ← peek
+          if t' == .punct "}" || t' == .punct "," then
+            out := out.push (.expr (.tuple []))
+        | _ => out := out ++ (← settle (.let_ pat value)).toArray
     else if t == .ident "defer" then
       advance
       let e ← parseBinary 0 false

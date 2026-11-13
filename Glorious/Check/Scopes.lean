@@ -438,6 +438,25 @@ partial def onceBy (visiting : List String) (t : Ty) : M (Option String) := do
             (onceBy (name :: visiting))
   | _ => pure none
 
+/-- A type whose values have a `drop` of their own to run, or hold one that
+has: the name of the first such type found. -/
+partial def tyHasDrop (visiting : List String) (t : Ty) : M (Option String) := do
+  match ← find t with
+  | .tuple args => args.findSomeM? (tyHasDrop visiting)
+  | .con name args => do
+    if (← get).kimpls.any (fun I => I.trait == "Drop" && I.head == name) then
+      return some (bareName name)
+    if let some w ← args.findSomeM? (tyHasDrop visiting) then return some w
+    if visiting.contains name then return none
+    match (← get).types.lookup name with
+    | none => pure none
+    | some decl =>
+      decl.ctors.findSomeM? fun c => do
+        match (← get).ctors.lookup c with
+        | none => pure none
+        | some sig => (sig.fieldsAt args).findSomeM? (tyHasDrop (name :: visiting))
+  | _ => pure none
+
 def checkDups (dups : Array (Ty × String)) : M Unit := do
   for (t, why) in dups do
     modify fun s => { s with seen := [] }
@@ -445,5 +464,16 @@ def checkDups (dups : Array (Ty × String)) : M Unit := do
       if let some name ← onceBy [] t then
         throw s!"{why}, but a `{name}` can be used only once"
       throw s!"{why}, but a value that holds a resumption can be used only once"
+    -- A value with a `drop` to run is not copied: each copy would run it.
+    -- (The module that declares the type may read one through a reference,
+    -- as it may take one apart: its `drop` does, to see what to do.)
+    if let some name ← tyHasDrop [] t then
+      let s ← get
+      let through := (why.splitOn "reading through a reference").length > 1
+      let home := s.kimpls.any fun I =>
+        I.trait == "Drop" && bareName I.head == name
+          && s.modules.homes.lookup s.owner == some ("::".intercalate ((I.head.splitOn "::").dropLast))
+      unless through && home do
+        throw s!"{why}, but a `{name}` has a `drop`, which would then run once for each"
 
 end Glorious.Check

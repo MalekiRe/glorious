@@ -1888,6 +1888,68 @@ pub unsafe fn c_string(text: Str) -> usize {
 
 // The text C has at an address: the bytes up to a zero, if they are UTF-8.
 pub unsafe fn text_at(at: usize) -> Option<Str> { std::text::from_utf8(read_bytes(at, int(strlen(at)))) }
+
+// How much memory, and how it has to be placed: the library specification's
+// `Layout` (22.1). Sizes are whole numbers here.
+pub struct Layout { size: Int, align: Int }
+pub enum LayoutError { ZeroAlignment, NonPowerOfTwoAlignment, SizeOverflow }
+pub enum AllocError { Exhausted, UnsupportedAlignment, LimitExceeded }
+
+fn power_of_two(n: Int) -> Bool {
+    if(n == 1) { true } else { if(n % 2 == 0) { power_of_two(n / 2) } else { false } }
+}
+
+// The next multiple of `align` at or after `n`.
+fn rounded(n: Int, align: Int) -> Int { ((n + align - 1) / align) * align }
+
+impl Layout {
+    pub fn from_size_align(size: Int, align: Int) -> Result<Self, LayoutError> {
+        if(align <= 0) { Err(ZeroAlignment) } else {
+            if(power_of_two(align)) {
+                if(size < 0) { Err(SizeOverflow) } else { Ok(Self { size: size, align: align }) }
+            } else { Err(NonPowerOfTwoAlignment) }
+        }
+    }
+    pub fn size(value: &Self) -> Int { value.size }
+    pub fn align(value: &Self) -> Int { value.align }
+    // This and another after it: the layout of both, and where the other
+    // starts.
+    pub fn extend(value: Self, other: Self) -> Result<(Self, Int), LayoutError> {
+        let at = rounded(value.size, other.align);
+        let align = if(value.align > other.align) { value.align } else { other.align };
+        Ok((Self { size: at + other.size, align: align }, at))
+    }
+    // Rounded up to a multiple of its alignment.
+    pub fn padded(value: Self) -> Result<Self, LayoutError> {
+        Ok(Self { size: rounded(value.size, value.align), align: value.align })
+    }
+}
+
+extern "C" {
+    fn aligned_alloc(align: usize, size: usize) -> usize;
+}
+
+// Memory that is this value's to give back. It has to be: an `Allocation`
+// cannot be let go, only given to `release` or to whatever takes it over.
+pub struct Allocation { at: usize, layout: Layout }
+impl Use<[1, 1]> for Allocation {}
+
+pub fn allocate(layout: Layout) -> Result<Allocation, AllocError> {
+    if(layout.align > 4096) { Err(UnsupportedAlignment) } else {
+        // (C wants a size that is a multiple of the alignment, and not none.)
+        let asked = rounded(if(layout.size == 0) { 1 } else { layout.size }, layout.align);
+        let at = unsafe { aligned_alloc(usize(layout.align), usize(asked)) };
+        if(at == 0usize) { Err(Exhausted) } else { Ok(Allocation { at: at, layout: layout }) }
+    }
+}
+
+impl Allocation {
+    pub fn layout(value: &Self) -> Layout { Layout { size: value.layout.size, align: value.layout.align } }
+    // Where the memory is.
+    pub fn as_ptr(value: &Self) -> usize { value.at }
+    // The memory given back.
+    pub fn release(value: Self) { match(value) { Allocation { at, layout } => unsafe { free(at) } } }
+}
 "#
 
 private def hash : String := r#"// Hashing, and a map and a set that find a key in a step or two: an array of

@@ -198,6 +198,8 @@ structure Loan where
 inductive Using where
   | read
   | write
+  /-- Given away: what a variable that is never changed holds, taken once. -/
+  | move
   /-- `&x`. -/
   | share
   /-- `&mut x`. -/
@@ -342,6 +344,10 @@ structure St where
   /-- Whether what is being fitted is what a body ends with, to the type the
   body is to give. -/
   givingBack : Bool := false
+  /-- The variables, by their blocks' brands, that are never changed and whose
+  value is given away where they are: reading one is a use of the value, as
+  of a name's, and not a copy. -/
+  movedCells : List Nat := []
   /-- The values a field was taken out of, leaving the rest: their types and
   where. One with `Drop` is taken apart only where it is declared. -/
   aparts : Array (Ty × String) := #[]

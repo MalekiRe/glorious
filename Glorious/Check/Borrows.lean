@@ -167,6 +167,7 @@ def Using.forbiddenBy (how : Using) (uniq : Bool) : Bool :=
   | .read => uniq
   | .share => uniq
   | .write => true
+  | .move => true
   | .lend => true
 
 /-- The types a binding's value has, for looking into what it holds. -/
@@ -247,6 +248,15 @@ def checkLoans : M Unit := do
   for u in s.uses do
     match u.kind with
     | .var brand x how path =>
+      -- Giving away a value that can be copied is reading it.
+      let how ← match how with
+        | .move => do
+          match s.cells.toList.find? (·.1 == brand) with
+          | some (_, _, t) =>
+            modify fun st => { st with seen := [] }
+            if (← tyOwnsOnce [] t) || (← tyHasDrop [] t).isSome then pure Using.move else pure Using.read
+          | none => pure Using.read
+        | other => pure other
       for l in s.loans do
         -- Two fields get in each other's way only if one is inside the other.
         let meet := path.isPrefixOf l.path || l.path.isPrefixOf path
@@ -255,6 +265,7 @@ def checkLoans : M Unit := do
             let kind := if l.uniq then "`&mut` reference" else "reference"
             fail u (match how with
               | .read => s!"`{x}` is read while {who} holds a {kind} to it"
+              | .move => s!"`{x}` is given away while {who} holds a {kind} to it"
               | .write => s!"`{x}` is assigned while {who} holds a {kind} to it"
               | .share => s!"`{x}` is borrowed while {who} holds a {kind} to it"
               | .lend => s!"`{x}` is borrowed with `&mut` while {who} holds a {kind} to it")
