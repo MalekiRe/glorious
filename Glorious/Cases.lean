@@ -2948,13 +2948,38 @@ def cases : List Case := [
   ⟨"struct Noisy(Int);\nimpl Drop for Noisy { fn drop(n) { say(n.0) } }\nfn eat(n: Noisy) -> Int { 5 }\nfn peek(n: &Noisy) -> Int { n.0 }\nfn main() -> Int { let n = Noisy(1); let a = peek(&n); eat(n) + eat(n) + a }",
     [], "error: 5:20: in `main`: `n` is used more than once, but a `Noisy` has a `drop`, which would then run once for each"⟩,
   ⟨"struct Noisy(Int);\nimpl Drop for Noisy { fn drop(n) { say(n.0) } }\nfn eat(n: Noisy) -> Int { 5 }\nfn peek(n: &Noisy) -> Int { n.0 }\nfn main() -> Int { let n = Noisy(1); let a = peek(&n); if(a > 0) { eat(n) } else { 0 } }",
-    [], "error: 5:68: in `main`: reading the mutable variable `n` copies its value (`replace` takes it out instead), but a `Noisy` has a `drop`, which would then run once for each"⟩,
+    [], "error: 5:20: in `main`: `n` is used on one path and not on another, and a `Noisy` has a `drop` to run: where it is not used nothing would run it. Use it on every path, or let it go there with a function that takes it"⟩,
   ⟨"struct Noisy(Int);\nimpl Drop for Noisy { fn drop(n) { say(n.0) } }\nfn eat(n: Noisy) -> Int { 5 }\nfn peek(n: &Noisy) -> Int { n.0 }\nfn main() -> Int { let n = Noisy(1); eat(n) + peek(&n) }",
     [], "error: 5:38: in `main`: reading the mutable variable `n` copies its value (`replace` takes it out instead), but a `Noisy` has a `drop`, which would then run once for each"⟩,
   ⟨"struct Noisy(Int);\nimpl Drop for Noisy { fn drop(n) { say(n.0) } }\nfn eat(n: Noisy) -> Int { 5 }\nfn peek(n: &Noisy) -> Int { n.0 }\nfn main() -> Int { let n = Noisy(1); defer { say(peek(&n)); } eat(n) }",
     [], "error: 5:63: in `main`: reading the mutable variable `n` copies its value (`replace` takes it out instead), but a `Noisy` has a `drop`, which would then run once for each"⟩,
   ⟨"fn main() -> Int { let mut a = 3; let b = a; let r = &a; b + *r + a }",
     [], "9"⟩,
+  -- A callable may be what gives a variable's value away: a cleanup, the arms of a choice, a block that is called. It is then used once.
+  ⟨"struct Noisy(Int);\nimpl Drop for Noisy { fn drop(n) { say(n.0) } }\nfn eat(n: Noisy) -> Int { 5 }\nfn peek(n: &Noisy) -> Int { n.0 }\nfn main() -> Int { let n = Noisy(1); defer { eat(n); } peek(&n) }",
+    [], "1\n1"⟩,
+  ⟨"struct Noisy(Int);\nimpl Drop for Noisy { fn drop(n) { say(n.0) } }\nfn eat(n: Noisy) -> Int { 5 }\nfn peek(n: &Noisy) -> Int { n.0 }\nfn main() -> Int { let n = Noisy(1); let a = peek(&n); if(a > 0) { eat(n) } else { eat(n) + 1 } }",
+    [], "1\n5"⟩,
+  ⟨"struct Noisy(Int);\nimpl Drop for Noisy { fn drop(n) { say(n.0) } }\nfn eat(n: Noisy) -> Int { 5 }\nfn peek(n: &Noisy) -> Int { n.0 }\nfn main() -> Int { let n = Noisy(1); let a = peek(&n); match(Some(a)) { Some(v) => eat(n) + v, None => eat(n) } }",
+    [], "1\n6"⟩,
+  ⟨"struct Noisy(Int);\nimpl Drop for Noisy { fn drop(n) { say(n.0) } }\nfn eat(n: Noisy) -> Int { 5 }\nfn peek(n: &Noisy) -> Int { n.0 }\nfn main() -> Int { let n = Noisy(1); let a = peek(&n); let f = { eat(n) }; f() + a }",
+    [], "1\n6"⟩,
+  ⟨"struct Ticket(Int);\nimpl Use<[1, 1]> for Ticket {}\nfn redeem(t: Ticket) -> Int { match(t) { Ticket(n) => n } }\nfn peek(t: &Ticket) -> Int { 1 }\nfn main() -> Int { let t = Ticket(3); defer { redeem(t); } peek(&t) }",
+    [], "1"⟩,
+  ⟨"struct Noisy(Int);\nimpl Drop for Noisy { fn drop(n) { say(n.0) } }\nfn eat(n: Noisy) -> Int { 5 }\nfn peek(n: &Noisy) -> Int { n.0 }\nfn f(n: Noisy) -> Int { let a = peek(&n); a + eat(n) }\nfn main() -> Int { f(Noisy(2)) }",
+    [], "2\n7"⟩,
+  ⟨"struct Noisy(Int);\nimpl Drop for Noisy { fn drop(n) { say(n.0) } }\nfn eat(n: Noisy) -> Int { 5 }\nfn peek(n: &Noisy) -> Int { n.0 }\nfn main() -> Int { let n = Noisy(1); defer { say(peek(&n)); eat(n); } peek(&n) + 10 }",
+    [], "1\n1\n11"⟩,
+  ⟨"struct Noisy(Int);\nimpl Drop for Noisy { fn drop(n) { say(n.0) } }\nfn eat(n: Noisy) -> Int { 5 }\nfn peek(n: &Noisy) -> Int { n.0 }\nfn main() -> Int { let n = Noisy(1); let a = peek(&n); if(a > 0) { eat(n) } else { 0 } }",
+    [], "error: 5:20: in `main`: `n` is used on one path and not on another, and a `Noisy` has a `drop` to run: where it is not used nothing would run it. Use it on every path, or let it go there with a function that takes it"⟩,
+  ⟨"struct Noisy(Int);\nimpl Drop for Noisy { fn drop(n) { say(n.0) } }\nfn eat(n: Noisy) -> Int { 5 }\nfn peek(n: &Noisy) -> Int { n.0 }\nfn main() -> Int { let n = Noisy(1); let a = peek(&n); let f = { eat(n) }; a }",
+    [], "error: 5:20: in `main`: `n` is used on one path and not on another, and a `Noisy` has a `drop` to run: where it is not used nothing would run it. Use it on every path, or let it go there with a function that takes it"⟩,
+  ⟨"struct Noisy(Int);\nimpl Drop for Noisy { fn drop(n) { say(n.0) } }\nfn eat(n: Noisy) -> Int { 5 }\nfn peek(n: &Noisy) -> Int { n.0 }\nfn main() -> Int { let n = Noisy(1); let a = peek(&n); let f = { eat(n) }; f() + f() }",
+    [], "error: 5:56: in `main`: `f` is used more than once, but a `Noisy` has a `drop`, which would then run once for each"⟩,
+  ⟨"struct Noisy(Int);\nimpl Drop for Noisy { fn drop(n) { say(n.0) } }\nfn eat(n: Noisy) -> Int { 5 }\nfn peek(n: &Noisy) -> Int { n.0 }\nfn main() -> Int { let n = Noisy(1); let f = { eat(n) }; let a = peek(&n); f() + a }",
+    [], "error: 5:48: in `main`: reading the mutable variable `n` copies its value (`replace` takes it out instead), but a `Noisy` has a `drop`, which would then run once for each"⟩,
+  ⟨"struct Noisy(Int);\nimpl Drop for Noisy { fn drop(n) { say(n.0) } }\nfn eat(n: Noisy) -> Int { 5 }\nfn peek(n: &Noisy) -> Int { n.0 }\nfn main() -> Int { let n = Noisy(1); defer { eat(n); } peek(&n) + eat(n) }",
+    [], "error: 5:20: in `main`: `n` is used more than once, but a `Noisy` has a `drop`, which would then run once for each"⟩,
   -- `drop` is not for a program to call.
   ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nfn main() { let mut f = File(7); drop(&mut f); 0 }",
     [], "error: 3:34: in `main`: `drop` is run when what holds a value ends; a program does not call it"⟩,
@@ -3009,7 +3034,10 @@ def foreignCases : List Case := [
     [], "6"⟩,
   -- One function over a stream in memory, which performs nothing, and the host's standard output.
   ⟨"use std::stream::{Write, Stdout, MemoryCursor, write_str};\nuse std::host::{run_host};\nfn greet<W: Write>(w: &mut W) / { | <W as Write>::Effects } { write_str(w, \"hi from a stream\\n\"); () }\nfn main() -> Int {\n    let mut memory = MemoryCursor::new([]);\n    greet(&mut memory);\n    let n = len(MemoryCursor::into_inner(memory));\n    run_host({ let mut out = Stdout; greet(&mut out); n }) }",
-    [], "hi from a stream\n17"⟩
+    [], "hi from a stream\n17"⟩,
+  -- The same with the release written as a cleanup, before the memory is used.
+  ⟨"use std::ffi::{Layout, Allocation, allocate, write_bytes, read_bytes};\nfn sum_at(at: usize) -> Int {\n    unsafe { write_bytes(at, [1u8, 2u8, 3u8]) };\n    let back = unsafe { read_bytes(at, 3) };\n    int(back[0]) + int(back[1]) + int(back[2])\n}\nfn work(memory: Allocation) -> Int {\n    defer { Allocation::release(memory); }\n    sum_at(Allocation::as_ptr(&memory))\n}\nfn main() -> Int {\n    match(Layout::from_size_align(16, 8)) {\n        Ok(layout) => match(allocate(layout)) { Ok(memory) => work(memory), Err(_) => 0 - 1 },\n        Err(_) => 0 - 2\n    }\n}",
+    [], "6"⟩
 ]
 
 end Glorious

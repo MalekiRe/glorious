@@ -555,16 +555,20 @@ def noteFieldReads (path : List (String × Option Nat)) (numbered : List Nat) : 
 
 /-- Record that `cap` captures the named bindings: a value by its type, a label
 or a mutable variable by the brand of its scope as well. -/
-def captureAll (scope : Scope) (cap : Nat) (names : List String) (assigns : String → Bool) :
-    M Unit := do
+def captureAll (scope : Scope) (cap : Nat) (names : List String) (assigns : String → Bool)
+    (gives : String → Bool := fun _ => false) : M Unit := do
   -- Capturing a mutable variable holds the variable, not what is in it; and
   -- the callable reads or assigns the variable when it runs.
   for name in names.eraseDups do
     match scope.lookup name with
     | some (.val t id) => captures cap (.ty t) (some (name, id))
-    | some (.cell _ brand) =>
+    | some (.cell t brand) =>
       captures cap (.brand brand)
       captures cap (.touch brand (assigns name))
+      -- A variable that gives its value away, where the callable is what
+      -- uses the value: the callable holds it, as it would a name's.
+      if (← get).movedCells.contains brand && gives name then
+        captures cap (.ty t) (some (name, brand))
     | some (.label _ brand) => captures cap (.brand brand)
     | some (.poly s) => captures cap (.ty s.ty) (some (name, 0))
     | none => pure ()

@@ -1068,7 +1068,10 @@ partial def inferCallable (scope : Scope) (annots : List (Option Ty)) (ret : Opt
     { s with later := (clauses.flatMap (Elab.fvClause [])).eraseDups, temps := [], anon := [] }
   -- What the callable captures from the scope it is written in.
   let cap ← freshCap
-  captureAll scope cap (clauses.flatMap (Elab.fvClause [])) fun x => clauses.any (assignsClause x)
+  captureAll scope cap (clauses.flatMap (Elab.fvClause [])) (fun x => clauses.any (assignsClause x))
+    (fun x => clauses.any fun c =>
+      let u := Syntax.nameUseClause x c
+      u.valued || u.valuedInside)
   let loansBefore := (← get).loans.size
   -- What `unsafe { .. }` allows is allowed where it is written, not in a
   -- callable written inside it, which runs later.

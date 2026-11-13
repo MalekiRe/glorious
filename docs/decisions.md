@@ -2568,10 +2568,15 @@ once, which is how every resource is used. Now a variable that is never
 assigned, borrowed for writing or bound again gives its value away where the
 value is used: the use is counted as a name's is, a borrow still held then is
 refused ("`n` is given away while `r` holds a reference to it"), and the
-variable no longer destroys what it held. This needs the uses of the value
-to be outside any callable written in the block and no borrow of the name
-to follow; otherwise reading the variable is the copy it was, and refused
-for a value that is used once.
+variable no longer destroys what it held. A callable written in the block
+may be what uses the value, a `defer` among them: `defer { release(m); }`
+after `let m = ..;` is how a resource is given back however the block is
+left, with `&m` used in between. Such a callable holds the value, so it is
+itself used once and, for a value that has to be used or has a `drop`, has
+to be called. What this needs is that no borrow of the name follows a use
+of the value, in the order the block is written, with a `defer` counted
+last; otherwise reading the variable is the copy it was, and refused for a
+value that is used once.
 
 `let _ = value;` now lets the value go as `value;` does, running its `drop`;
 it kept it unnamed and never destroyed it.

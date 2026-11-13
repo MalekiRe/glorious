@@ -399,6 +399,8 @@ partial def tyOwnsOnce (visiting : List String) (t : Ty) : M Bool := do
   | .con name args => do
     if let some (_, once) := (← get).useDecls.lookup name then
       if once then return true
+    -- A type with a `drop` of its own: a copy would run it again.
+    if (← get).kimpls.any (fun I => I.trait == "Drop" && I.head == name) then return true
     if ← args.anyM (tyOwnsOnce visiting) then return true
     if visiting.contains name then return false
     match (← get).types.lookup name with
@@ -439,10 +441,20 @@ partial def onceBy (visiting : List String) (t : Ty) : M (Option String) := do
   | _ => pure none
 
 /-- A type whose values have a `drop` of their own to run, or hold one that
-has: the name of the first such type found. -/
+has: the name of the first such type found. A callable holds what it has
+taken hold of. -/
 partial def tyHasDrop (visiting : List String) (t : Ty) : M (Option String) := do
   match ← find t with
   | .tuple args => args.findSomeM? (tyHasDrop visiting)
+  | .fn _ _ _ _ cap => do
+    let root ← findCap cap
+    if (← get).seen.contains root then return none
+    modify fun s => { s with seen := root :: s.seen }
+    for (src, what) in (← get).capEdges do
+      if (← findCap src) == root then
+        if let .ty held := what then
+          if let some name ← tyHasDrop visiting held then return some name
+    return none
   | .con name args => do
     if (← get).kimpls.any (fun I => I.trait == "Drop" && I.head == name) then
       return some (bareName name)
@@ -463,17 +475,18 @@ def checkDups (dups : Array (Ty × String)) : M Unit := do
     if ← tyOwnsOnce [] t then
       if let some name ← onceBy [] t then
         throw s!"{why}, but a `{name}` can be used only once"
-      throw s!"{why}, but a value that holds a resumption can be used only once"
-    -- A value with a `drop` to run is not copied: each copy would run it.
-    -- (The module that declares the type may read one through a reference,
-    -- as it may take one apart: its `drop` does, to see what to do.)
-    if let some name ← tyHasDrop [] t then
-      let s ← get
-      let through := (why.splitOn "reading through a reference").length > 1
-      let home := s.kimpls.any fun I =>
-        I.trait == "Drop" && bareName I.head == name
-          && s.modules.homes.lookup s.owner == some ("::".intercalate ((I.head.splitOn "::").dropLast))
-      unless through && home do
+      -- A value with a `drop` to run is not copied: each copy would run it.
+      -- (The module that declares the type may read one through a reference,
+      -- as it may take one apart: its `drop` does, to see what to do.)
+      modify fun s => { s with seen := [] }
+      if let some name ← tyHasDrop [] t then
+        let s ← get
+        let through := (why.splitOn "reading through a reference").length > 1
+        let home := s.kimpls.any fun I =>
+          I.trait == "Drop" && bareName I.head == name
+            && s.modules.homes.lookup s.owner == some ("::".intercalate ((I.head.splitOn "::").dropLast))
+        if through && home then continue
         throw s!"{why}, but a `{name}` has a `drop`, which would then run once for each"
+      throw s!"{why}, but a value that holds a resumption can be used only once"
 
 end Glorious.Check

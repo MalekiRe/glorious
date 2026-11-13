@@ -824,12 +824,13 @@ partial def borrowAfterValue (x : String) (seen : Bool) : Expr → Bool × Bool
   | .reborrow _ e => borrowAfterValue x seen e
   | .fieldOf _ e _ => borrowAfterValue x seen e
   | .closure id clauses =>
+    -- (One that uses the value may do so whenever it runs: from here on.)
     let u := nameUseExpr x (.closure id clauses)
-    (seen, u.shared || u.changed || u.fielded)
+    (seen || u.valuedInside, u.shared || u.changed || u.fielded)
   | .handle subject arms =>
     let (seen, bad) := borrowAfterValue x seen subject
     let u := arms.foldl (fun u c => u.or (nameUseClause x c)) ({} : NameUse)
-    (seen, bad || u.shared || u.changed || u.fielded)
+    (seen || u.valued || u.valuedInside, bad || u.shared || u.changed || u.fielded)
   | .labelScope _ body =>
     body.foldl (fun (seen, bad) s =>
       let (seen', bad') := borrowAfterValueStmt x seen s
@@ -846,22 +847,90 @@ partial def borrowAfterValueStmt (x : String) (seen : Bool) : Stmt → Bool × B
   | .letMut _ e => borrowAfterValue x seen e
   | .expr e => borrowAfterValue x seen e
   | .defer e =>
-    -- (A cleanup runs last of all.)
-    let u := nameUseExpr x e
-    (seen, u.shared || u.changed || u.fielded)
+    -- A cleanup runs last of all: what it borrows it borrows after any use
+    -- of the value before it, and a use of the value in it comes after
+    -- every borrow outside it. A block is gone through in its own order.
+    match e with
+    | .call _ (.closure _ [.mk [] body]) [] =>
+      let (_, bad) := body.foldl (fun (seen, bad) s =>
+        let (seen', bad') := borrowAfterValueStmt x seen s
+        (seen', bad || bad')) (seen, false)
+      (seen, bad)
+    | e =>
+      let (_, bad) := borrowAfterValue x seen e
+      (seen, bad)
   | .located _ _ s => borrowAfterValueStmt x seen s
   | .assign target e => borrowAfterValues x seen [e, target]
 
 end
 
+mutual
+
+/-- The cleanups written in an expression, at any depth, and the expression
+without them. -/
+partial def splitDefers : Expr → Expr × List Stmt
+  | .call id f args =>
+    let (f, ds) := splitDefers f
+    let parts := args.map splitDefers
+    (.call id f (parts.map (·.1)), ds ++ parts.flatMap (·.2))
+  | .tailCall id f args =>
+    let (f, ds) := splitDefers f
+    let parts := args.map splitDefers
+    (.tailCall id f (parts.map (·.1)), ds ++ parts.flatMap (·.2))
+  | .tuple args =>
+    let parts := args.map splitDefers
+    (.tuple (parts.map (·.1)), parts.flatMap (·.2))
+  | .proj e i => let (e, ds) := splitDefers e; (.proj e i, ds)
+  | .deref e => let (e, ds) := splitDefers e; (.deref e, ds)
+  | .reborrow u e => let (e, ds) := splitDefers e; (.reborrow u e, ds)
+  | .fieldOf id e n => let (e, ds) := splitDefers e; (.fieldOf id e n, ds)
+  | .closure id clauses =>
+    let parts := clauses.map fun
+      | .mk pats body => let (body, ds) := splitDefersStmts body; (Clause.mk pats body, ds)
+    (.closure id (parts.map (·.1)), parts.flatMap (·.2))
+  | .handle subject arms =>
+    let (subject, ds) := splitDefers subject
+    let parts := arms.map fun
+      | .mk pats body => let (body, ds) := splitDefersStmts body; (Clause.mk pats body, ds)
+    (.handle subject (parts.map (·.1)), ds ++ parts.flatMap (·.2))
+  | .labelScope l body => let (body, ds) := splitDefersStmts body; (.labelScope l body, ds)
+  | e => (e, [])
+
+partial def splitDefersStmts : List Stmt → List Stmt × List Stmt
+  | [] => ([], [])
+  | s :: rest =>
+    let (rest, more) := splitDefersStmts rest
+    let rec one : Stmt → List Stmt × List Stmt
+      | .defer e => ([], [.defer e])
+      | .located l c s => let (kept, ds) := one s; (kept.map (.located l c), ds)
+      | .let_ p e => let (e, ds) := splitDefers e; ([.let_ p e], ds)
+      | .letMut y e => let (e, ds) := splitDefers e; ([.letMut y e], ds)
+      | .expr e => let (e, ds) := splitDefers e; ([.expr e], ds)
+      | .assign target e =>
+        let (target, d1) := splitDefers target
+        let (e, d2) := splitDefers e
+        ([.assign target e], d1 ++ d2)
+    let (kept, ds) := one s
+    (kept ++ rest, ds ++ more)
+
+end
+
 /-- Is the value a name holds used as it is, with no borrow of the name
-after? Then the name gives its value away where it is used. -/
+after? Then the name gives its value away where it is used. A cleanup runs
+after what follows it: one that borrows the name is a borrow after any use
+of the value outside it. -/
 def givenAway (x : String) (rest : List Stmt) : Bool :=
+  let (outside, cleanups) := splitDefersStmts rest
+  let late := cleanups.any fun d =>
+    let v := nameUseStmt x d
+    v.shared || v.fielded || v.changed
+  let early := nameUseStmts x outside
+  if late && (early.valued || early.valuedInside) then false else
   let u := nameUseStmts x rest
-  let (seen, bad) := rest.foldl (fun (seen, bad) s =>
+  let (_, bad) := rest.foldl (fun (seen, bad) s =>
     let (seen', bad') := borrowAfterValueStmt x seen s
     (seen', bad || bad')) (false, false)
-  !u.changed && !u.fielded && !u.rebound && u.valued && !u.valuedInside && seen && !bad
+  !u.changed && !u.fielded && !u.rebound && (u.valued || u.valuedInside) && !bad
 
 /-- Is a name bound here one that what follows borrows with `&` and never
 changes? It is then kept where a reference can point: as a variable is. -/
