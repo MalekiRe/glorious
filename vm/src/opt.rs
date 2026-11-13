@@ -79,11 +79,6 @@ fn untake(code: &mut [Instr]) {
     }
 }
 
-/// Does the instruction give a value, which is then the next local?
-fn pushes(instr: &Instr) -> bool {
-    !instr.last() && instr.fail().is_none() && !matches!(instr, Instr::Jump(_))
-}
-
 /// The instruction with its locals numbered from `base` and its places in
 /// the code moved by `shift`.
 fn moved(instr: &Instr, base: usize, shift: usize) -> Instr {
@@ -133,20 +128,158 @@ fn clauses_start_bare(code: &[Instr]) -> bool {
     true
 }
 
+/// What an argument is known to be where a function is called: anything, or
+/// a closure of a function with captures known so far in turn.
+#[derive(Clone, PartialEq, Eq, Hash)]
+enum Shape {
+    Any,
+    Clo(usize, Vec<Shape>),
+}
+
+/// How deep closures inside closures are looked at.
+const NEST: usize = 3;
+/// The most functions made for particular arguments.
+const SPECIAL: usize = 400;
+
+/// The functions as they were read, with no moves marked, and the ones made
+/// since for arguments known to be closures.
+struct World {
+    codes: Vec<Vec<Instr>>,
+    starts: Vec<Option<usize>>,
+    bare: Vec<bool>,
+    /// Whether a function installs a handler as the last thing it does.
+    handles: Vec<bool>,
+    /// For a function made for particular arguments: where the code of the
+    /// function it was made from starts, and how many locals there are then.
+    entry: Vec<Option<(usize, usize)>>,
+    /// The function a function was made from; itself if it was read.
+    origin: Vec<usize>,
+    made: HashMap<(usize, Vec<Shape>), usize>,
+}
+
+impl World {
+    /// The function `f` for arguments of these shapes: its parameters are
+    /// what the closures among them captured, and it starts by making the
+    /// closures again, which is then known of them all through its code.
+    fn special(&mut self, f: usize, shapes: &[Shape]) -> Option<usize> {
+        let key = (f, shapes.to_vec());
+        if let Some(made) = self.made.get(&key) {
+            return Some(*made);
+        }
+        if self.made.len() >= SPECIAL || !self.bare[f] || self.starts[f] != Some(shapes.len()) {
+            return None;
+        }
+        fn leaves(s: &Shape) -> usize {
+            match s {
+                Shape::Any => 1,
+                Shape::Clo(_, inner) => inner.iter().map(leaves).sum(),
+            }
+        }
+        let params: usize = shapes.iter().map(leaves).sum();
+        let mut code: Vec<Instr> = Vec::new();
+        // A closure inside a closure is made first, as a local of its own.
+        fn inner(s: &Shape, next: &mut usize, params: usize, code: &mut Vec<Instr>) -> Atom {
+            match s {
+                Shape::Any => {
+                    *next += 1;
+                    Atom::Var(*next - 1)
+                }
+                Shape::Clo(g, parts) => {
+                    let caps: Vec<Atom> = parts.iter().map(|p| inner(p, next, params, code)).collect();
+                    code.push(Instr::Op(Rhs::Closure(*g, caps)));
+                    Atom::Var(params + code.len() - 1)
+                }
+            }
+        }
+        let mut next = 0;
+        let mut given: Vec<Instr> = Vec::new();
+        for s in shapes {
+            match s {
+                Shape::Any => {
+                    given.push(Instr::Op(Rhs::Atom(Atom::Var(next))));
+                    next += 1;
+                }
+                Shape::Clo(g, parts) => {
+                    let caps: Vec<Atom> = parts.iter().map(|p| inner(p, &mut next, params, &mut code)).collect();
+                    given.push(Instr::Op(Rhs::Closure(*g, caps)));
+                }
+            }
+        }
+        // Then the arguments in order, as the function's code numbers them.
+        let base = params + code.len();
+        code.extend(given);
+        let body = code.len();
+        if body + self.codes[f].len() >= LIMIT {
+            return None;
+        }
+        let moved_code: Vec<Instr> = self.codes[f].iter().map(|i| moved(i, base, body)).collect();
+        code.extend(moved_code);
+        let made = self.codes.len();
+        self.codes.push(code);
+        self.starts.push(Some(params));
+        self.bare.push(false);
+        self.handles.push(self.handles[f]);
+        self.entry.push(Some((body, base + shapes.len())));
+        self.origin.push(self.origin[f]);
+        self.made.insert(key, made);
+        Some(made)
+    }
+}
+
 struct Opt<'a> {
-    /// The functions as they were read, with no moves marked.
-    codes: &'a [Vec<Instr>],
-    starts: &'a [Option<usize>],
-    bare: &'a [bool],
+    world: &'a mut World,
     out: Vec<Instr>,
 }
 
 impl Opt<'_> {
+    /// What a value given where a function is called is known to be.
+    fn shape(&self, a: &Atom, known: &HashMap<usize, Known>, depth: usize) -> Shape {
+        match a {
+            Atom::Var(x) if depth < NEST => match known.get(x) {
+                Some(Known::Clo(g, caps)) => {
+                    Shape::Clo(*g, caps.iter().map(|c| self.shape(c, known, depth + 1)).collect())
+                }
+                _ => Shape::Any,
+            },
+            _ => Shape::Any,
+        }
+    }
+
+    /// The values a function made for these shapes is given: what the
+    /// closures captured, in order.
+    fn flat(&self, a: &Atom, s: &Shape, known: &HashMap<usize, Known>, out: &mut Vec<Atom>) {
+        match (s, a) {
+            (Shape::Clo(_, parts), Atom::Var(x)) => {
+                if let Some(Known::Clo(_, caps)) = known.get(x) {
+                    for (c, p) in caps.iter().zip(parts) {
+                        self.flat(c, p, known, out);
+                    }
+                }
+            }
+            _ => out.push(a.clone()),
+        }
+    }
+
+    /// The function to call, and what to give it, when some of what `f` is
+    /// given are known closures.
+    fn specialise(&mut self, f: usize, given: &[Atom], known: &HashMap<usize, Known>) -> Option<(usize, Vec<Atom>)> {
+        let shapes: Vec<Shape> = given.iter().map(|a| self.shape(a, known, 0)).collect();
+        if shapes.iter().all(|s| *s == Shape::Any) {
+            return None;
+        }
+        let made = self.world.special(f, &shapes)?;
+        let mut flat = Vec::new();
+        for (a, s) in given.iter().zip(&shapes) {
+            self.flat(a, s, known, &mut flat);
+        }
+        Some((made, flat))
+    }
+
     /// A function that is one computation of its arguments, given back, or
     /// that gives back one of them.
     fn leaf(&self, f: usize, given: &[Atom]) -> Option<Instr> {
-        let code = &self.codes[f];
-        if self.starts[f] != Some(given.len()) {
+        let code = &self.world.codes[f];
+        if self.world.starts[f] != Some(given.len()) {
             return None;
         }
         let rhs = match code.as_slice() {
@@ -172,14 +305,18 @@ impl Opt<'_> {
     /// May the code of `f` be written in place of a call given `given`
     /// values, with `follow` to be written after each way it comes back?
     fn can_inline(&self, f: usize, given: usize, chain: &[usize], follow: usize) -> bool {
-        let code = &self.codes[f];
+        let code = &self.world.codes[f];
         let ends = code.iter().filter(|i| i.last()).count();
         code.len() <= CALLEE
-            && self.bare[f]
-            && self.starts[f] == Some(given)
+            && self.world.bare[f]
+            && self.world.starts[f] == Some(given)
             && !chain.contains(&f)
             && chain.len() < DEPTH
             && self.out.len() + code.len() + given + ends * follow < LIMIT
+            // A handler is written in place only where nothing follows it, so
+            // a function that installs one is left a function where
+            // something does.
+            && !(follow > 0 && self.world.handles[f])
     }
 
     /// Write the code of `f` at the end, its locals numbered from `h`, where
@@ -192,8 +329,10 @@ impl Opt<'_> {
         known: &HashMap<usize, Known>,
         chain: &[usize],
         follow: Option<Rc<Follow>>,
+        first: Option<Instr>,
     ) -> usize {
         let at = self.out.len();
+        self.out.extend(first);
         let mut inner = known.clone();
         for (k, a) in given.iter().enumerate() {
             if let Atom::Var(x) = a {
@@ -204,7 +343,7 @@ impl Opt<'_> {
             self.out.push(Instr::Op(Rhs::Atom(a.clone())));
         }
         let body = self.out.len();
-        let code = &self.codes[f];
+        let code = &self.world.codes[f];
         self.out.extend(code.iter().map(|i| moved(i, h, body)));
         let end = self.out.len();
         // Where a test that fails in its last clause goes: not into what is
@@ -356,20 +495,25 @@ impl Opt<'_> {
                     match target {
                         Some((f, given)) if last || returned => {
                             if self.can_inline(f, given.len(), chain, weight) {
-                                let at = self.inline(f, &given, h, &known, chain, follow.clone());
+                                let at = self.inline(f, &given, h, &known, chain, follow.clone(), None);
                                 self.out[pc] = Instr::Jump(at);
                                 dead = true;
-                            } else if let Some(k) = &follow {
-                                if last {
-                                    let at = self.resume(Instr::CallFn(f, given), h, &known, k);
-                                    self.out[pc] = Instr::Jump(at);
-                                    dead = true;
-                                } else {
-                                    self.out[pc] = Instr::CallFn(f, given);
-                                }
                             } else {
-                                self.out[pc] = Instr::TailFn(f, given);
-                                dead = true;
+                                // The function made for the closures it is
+                                // given, if it is given any.
+                                let (f, given) = self.specialise(f, &given, &known).unwrap_or((f, given));
+                                if let Some(k) = &follow {
+                                    if last {
+                                        let at = self.resume(Instr::CallFn(f, given), h, &known, k);
+                                        self.out[pc] = Instr::Jump(at);
+                                        dead = true;
+                                    } else {
+                                        self.out[pc] = Instr::CallFn(f, given);
+                                    }
+                                } else {
+                                    self.out[pc] = Instr::TailFn(f, given);
+                                    dead = true;
+                                }
                             }
                         }
                         Some((f, given)) => {
@@ -392,11 +536,14 @@ impl Opt<'_> {
                                             chain: chain.to_vec(),
                                             next: follow.clone(),
                                         });
-                                        let at = self.inline(f, &given, h, &known, chain, Some(k));
+                                        let at = self.inline(f, &given, h, &known, chain, Some(k), None);
                                         self.out[pc] = Instr::Jump(at);
                                         dead = true;
                                     }
-                                    None => self.out[pc] = Instr::CallFn(f, given),
+                                    None => {
+                                        let (f, given) = self.specialise(f, &given, &known).unwrap_or((f, given));
+                                        self.out[pc] = Instr::CallFn(f, given);
+                                    }
                                 }
                             }
                         }
@@ -414,6 +561,32 @@ impl Opt<'_> {
                             }
                         }
                     }
+                }
+                // A handler installed as the last thing, around a callable
+                // that is known and with nothing to follow: the handler is
+                // installed and the callable's code written here. Where it
+                // gives a value the handler is removed and the handler's
+                // clause for a value is called with it, as it would be.
+                Instr::Handle { ret, ops, caps, thunk: Atom::Var(i), tail: true }
+                    if follow.is_none()
+                        && matches!(known.get(i), Some(Known::Clo(t, tcaps))
+                            if self.can_inline(*t, tcaps.len(), chain, 6)) =>
+                {
+                    let Some(Known::Clo(t, tcaps)) = known.get(i).cloned() else { unreachable!() };
+                    let leave = Rc::new(Follow {
+                        code: vec![
+                            Instr::Leave,
+                            Instr::Op(Rhs::Closure(*ret, caps.clone())),
+                            Instr::Tail(Atom::Var(h + 1), vec![Atom::Var(h)]),
+                        ],
+                        base: h,
+                        chain: chain.to_vec(),
+                        next: None,
+                    });
+                    let enter = Instr::Enter { ret: *ret, ops: ops.clone(), caps: caps.clone() };
+                    let at = self.inline(t, &tcaps, h, &known, chain, Some(leave), Some(enter));
+                    self.out[pc] = Instr::Jump(at);
+                    dead = true;
                 }
                 // Whatever else ends the activation by running something
                 // whose result is the activation's: with something to
@@ -452,80 +625,12 @@ impl Opt<'_> {
     }
 }
 
-/// What reads each local from each instruction on: one pass from the end,
-/// every place an instruction leads to being further on.
-fn read_from(code: &mut [Instr]) -> Option<Vec<HashSet<usize>>> {
-    let n = code.len();
-    let mut from: Vec<HashSet<usize>> = vec![HashSet::new(); n + 1];
-    for pc in (0..n).rev() {
-        let mut after = HashSet::new();
-        match &code[pc] {
-            Instr::Jump(t) => {
-                if *t <= pc || *t > n {
-                    return None;
-                }
-                after.extend(from[*t].iter().copied());
-            }
-            instr => {
-                if !instr.last() {
-                    after.extend(from[pc + 1].iter().copied());
-                }
-                if let Some(t) = instr.fail() {
-                    if t <= pc || t > n {
-                        return None;
-                    }
-                    after.extend(from[t].iter().copied());
-                }
-            }
-        }
-        after.extend(code[pc].place_var());
-        for a in code[pc].atoms_mut() {
-            if let Atom::Var(i) | Atom::Take(i) = *a {
-                after.insert(i);
-            }
-        }
-        from[pc] = after;
-    }
-    Some(from)
-}
-
-/// How many locals there are before each instruction, if the code agrees
-/// with itself about that.
-fn heights(code: &[Instr], start: usize) -> Option<Vec<usize>> {
-    let n = code.len();
-    let mut h: Vec<Option<usize>> = vec![None; n + 1];
-    h[0] = Some(start);
-    let set = |h: &mut Vec<Option<usize>>, at: usize, v: usize| -> bool {
-        match h[at] {
-            Some(old) => old == v,
-            None => {
-                h[at] = Some(v);
-                true
-            }
-        }
-    };
-    for pc in 0..n {
-        let Some(here) = h[pc] else { continue };
-        let instr = &code[pc];
-        let ok = match instr {
-            Instr::Jump(t) => *t <= n && set(&mut h, *t, here),
-            _ => {
-                let through = instr.last() || set(&mut h, pc + 1, here + usize::from(pushes(instr)));
-                through && instr.fail().is_none_or(|t| t <= n && set(&mut h, t, here))
-            }
-        };
-        if !ok {
-            return None;
-        }
-    }
-    Some(h.into_iter().map(|x| x.unwrap_or(usize::MAX)).collect())
-}
-
 /// Do not make what nothing reads: a closure, a copy, a value built. What
 /// made it gives an integer instead, so that the locals keep their numbers.
 fn sweep(code: &mut [Instr], start: usize) {
     loop {
-        let (Some(h), Some(from)) = (heights(code, start), read_from(code)) else { return };
+        let Some(h) = heights(code, start) else { return };
+        let from = read_from(code, Some(start));
         let mut changed = false;
         for pc in 0..code.len() {
             // (Rebinding what is not a closure goes wrong, and so is not
@@ -538,8 +643,6 @@ fn sweep(code: &mut [Instr], start: usize) {
                     | Instr::Op(Rhs::Atom(Atom::Var(_)))
             );
             if pure && h[pc] != usize::MAX && !from[pc + 1].contains(&h[pc]) {
-                // (Code jumped to from here is what `from[pc + 1]` holds only
-                // if this is not a jump, which it is not.)
                 code[pc] = Instr::Op(Rhs::Atom(Atom::Int(0)));
                 changed = true;
             }
@@ -550,31 +653,145 @@ fn sweep(code: &mut [Instr], start: usize) {
     }
 }
 
+/// The instruction run after this one where there is one and only one way on
+/// and nothing is done but to go there or to make a value.
+fn next_plain(code: &[Instr], pc: usize) -> Option<usize> {
+    match &code[pc] {
+        Instr::Jump(t) => Some(*t),
+        Instr::Op(_) => Some(pc + 1),
+        _ => None,
+    }
+}
+
+/// A function that calls itself last, with what it was given, goes back to
+/// its start instead, letting go of the locals it made since. If it starts
+/// by installing a handler, and removes it before it calls itself, the
+/// handler is left where it is and the function goes back to just after it
+/// was installed: what would be installed again is the same.
+fn again(code: &mut [Instr], f: usize, start: usize) {
+    let own = |given: &[Atom]| {
+        given.len() == start && given.iter().enumerate().all(|(k, a)| matches!(a, Atom::Var(i) if *i == k))
+    };
+    let Some(h) = heights(code, start) else { return };
+    // The one handler installed, if it is installed on the way in, before
+    // anything but values are made.
+    let enters: Vec<usize> = (0..code.len()).filter(|pc| matches!(code[*pc], Instr::Enter { .. })).collect();
+    let mut at = 0;
+    while at < code.len() && !matches!(code[at], Instr::Enter { .. }) {
+        match next_plain(code, at) {
+            Some(next) if next > at => at = next,
+            _ => break,
+        }
+    }
+    let entered = (enters.len() == 1 && enters[0] == at).then_some(at);
+    for pc in 0..code.len() {
+        if h[pc] == usize::MAX {
+            continue;
+        }
+        match &code[pc] {
+            Instr::TailFn(g, given) if *g == f && own(given) => {
+                code[pc] = Instr::Again(0, start);
+            }
+            Instr::Leave => {
+                // From the handler's removal on to the call, nothing but
+                // values made.
+                let Some(enter) = entered else { continue };
+                let mut q = pc + 1;
+                let mut steps = 0;
+                while steps < 64 && q < code.len() {
+                    match &code[q] {
+                        Instr::TailFn(g, given) if *g == f && own(given) => {
+                            code[q] = Instr::Again(enter + 1, h[enter + 1]);
+                            code[pc] = Instr::Jump(pc + 1);
+                            break;
+                        }
+                        _ => match next_plain(code, q) {
+                            Some(next) => q = next,
+                            None => break,
+                        },
+                    }
+                    steps += 1;
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 /// Rewrite every function of the program that says how many locals it
-/// starts with.
+/// starts with, and the functions made for particular arguments on the way.
 pub fn optimise(program: &mut Program) {
     let mut plain = program.codes.clone();
     for code in &mut plain {
         untake(code);
     }
     let bare: Vec<bool> = plain.iter().map(|code| clauses_start_bare(code)).collect();
-    for f in 0..plain.len() {
-        let Some(start) = program.starts[f] else { continue };
-        if !bare[f] {
-            continue;
+    let handles: Vec<bool> =
+        plain.iter().map(|code| code.iter().any(|i| matches!(i, Instr::Handle { .. }))).collect();
+    let mut world = World {
+        entry: vec![None; plain.len()],
+        origin: (0..plain.len()).collect(),
+        codes: plain,
+        starts: program.starts.clone(),
+        bare,
+        handles,
+        made: HashMap::new(),
+    };
+    let mut f = 0;
+    while f < world.codes.len() {
+        let done = rewrite(&mut world, f);
+        if f < program.codes.len() {
+            if let Some(code) = done {
+                program.codes[f] = code;
+            }
+        } else {
+            // A function made here has no code but what is written for it.
+            // (Moves are marked once: marking reads a move as no reading.)
+            let code = done.unwrap_or_else(|| {
+                let mut code = world.codes[f].clone();
+                mark_takes(&mut code, None);
+                code
+            });
+            program.codes.push(code);
+            program.starts.push(world.starts[f]);
         }
-        let mut opt = Opt { codes: &plain, starts: &program.starts, bare: &bare, out: plain[f].clone() };
-        let end = opt.out.len();
-        opt.out.push(Instr::Stuck);
-        opt.region(0, end, start, &HashMap::new(), &[f], None);
-        let mut out = opt.out;
-        // What was written must still agree with itself about its locals;
-        // if it does not, the function is left as it was read.
-        if heights(&out, start).is_none() {
-            continue;
-        }
-        sweep(&mut out, start);
-        mark_takes(&mut out);
-        program.codes[f] = out;
+        f += 1;
     }
+}
+
+/// The function's code rewritten, or nothing if it is left as it was read.
+fn rewrite(world: &mut World, f: usize) -> Option<Vec<Instr>> {
+    let start = world.starts[f]?;
+    let mut out = world.codes[f].clone();
+    let end = out.len();
+    out.push(Instr::Stuck);
+    let mut opt = Opt { world, out };
+    match opt.world.entry[f] {
+        None => {
+            if !opt.world.bare[f] {
+                return None;
+            }
+            opt.region(0, end, start, &HashMap::new(), &[f], None);
+        }
+        Some((body, height)) => {
+            // Made for particular arguments: it starts by making them, and
+            // what they are is known in the code that follows.
+            let mut known = HashMap::new();
+            for pc in 0..body {
+                if let Instr::Op(Rhs::Closure(g, caps)) = &opt.out[pc] {
+                    known.insert(start + pc, Known::Clo(*g, caps.clone()));
+                }
+            }
+            let origin = opt.world.origin[f];
+            opt.region(body, end, height, &known, &[f, origin], None);
+        }
+    }
+    let mut out = opt.out;
+    again(&mut out, f, start);
+    // What was written must still agree with itself about its locals; if
+    // it does not, the function is left as it was read.
+    heights(&out, start)?;
+    sweep(&mut out, start);
+    mark_takes(&mut out, Some(start));
+    Some(out)
 }

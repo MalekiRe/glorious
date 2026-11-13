@@ -119,6 +119,20 @@ impl Emit {
         self.line(&format!("switch i64 {st}, label %exit [ i64 0, label %{next}{failed} ]"));
     }
 
+    /// After a call that did the instruction if it was simple, and said so:
+    /// one more local, or the instruction as the interpreter runs it.
+    fn simple_or_generic(&mut self, pc: usize, next: &str, done: &str, l: &str) {
+        let was = self.name();
+        let (simple, not) = (format!("p{pc}"), format!("s{pc}"));
+        self.line(&format!("{was} = icmp ne i64 {done}, 0"));
+        self.line(&format!("br i1 {was}, label %{simple}, label %{not}"));
+        self.label(&simple);
+        self.pushed(l);
+        self.line(&format!("br label %{next}"));
+        self.label(&not);
+        self.generic(pc, next, None);
+    }
+
     fn instr(&mut self, pc: usize, instr: &Instr, next: &str) {
         match instr {
             Instr::Op(Rhs::Atom(Atom::Int(n))) => {
@@ -223,6 +237,35 @@ impl Emit {
                 self.line(&format!("br i1 {is}, label %{next}, label %pc{fail}"));
             }
             Instr::Jump(t) => self.line(&format!("br label %pc{t}")),
+            Instr::Again(to, keep) => {
+                let l = self.len();
+                self.line(&format!("call void @glo_again(ptr %vm, i64 {l}, i64 {keep})"));
+                self.line(&format!("store i64 {keep}, ptr %len"));
+                self.line(&format!("br label %pc{to}"));
+            }
+            Instr::Mem(MemOp::Load, args) if matches!(args.as_slice(), [Atom::Var(_) | Atom::Take(_)]) => {
+                let (Atom::Var(r) | Atom::Take(r)) = args[0] else { unreachable!() };
+                let l = self.len();
+                let done = self.name();
+                self.line(&format!("{done} = call i64 @glo_load(ptr %vm, ptr %locals, i64 {r}, i64 {l})"));
+                self.simple_or_generic(pc, next, &done, &l);
+            }
+            Instr::Mem(MemOp::Store, args)
+                if matches!(args.as_slice(), [Atom::Var(_) | Atom::Take(_), Atom::Var(_) | Atom::Take(_)]) =>
+            {
+                let (Atom::Var(r) | Atom::Take(r)) = args[0] else { unreachable!() };
+                let (v, take) = match args[1] {
+                    Atom::Take(v) => (v, 1),
+                    Atom::Var(v) => (v, 0),
+                    Atom::Int(_) => unreachable!(),
+                };
+                let l = self.len();
+                let done = self.name();
+                self.line(&format!(
+                    "{done} = call i64 @glo_store(ptr %vm, ptr %locals, i64 {r}, i64 {v}, i64 {take}, i64 {l})"
+                ));
+                self.simple_or_generic(pc, next, &done, &l);
+            }
             other => self.generic(pc, next, other.fail()),
         }
     }
@@ -264,6 +307,9 @@ pub fn emit(program: &Program, bytes: &[u8]) -> String {
          declare void @glo_copy(ptr, i64, i64)\n\
          declare i64 @glo_is_ctor(ptr, i64, i64)\n\
          declare i64 @glo_field(ptr, i64, i64, i64)\n\
+         declare void @glo_again(ptr, i64, i64)\n\
+         declare i64 @glo_load(ptr, ptr, i64, i64)\n\
+         declare i64 @glo_store(ptr, ptr, i64, i64, i64, i64)\n\
          declare i32 @glo_main(i64, ptr, i64, ptr, i64, i32, ptr)\n\
          declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)\n\
          declare { i64, i1 } @llvm.sadd.with.overflow.i64(i64, i64)\n\

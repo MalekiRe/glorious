@@ -9,7 +9,7 @@
 //! Registers: `rbx` the machine, `r13` the locals, `r12` how many there are.
 
 use super::*;
-use native::{glo_copy, glo_field, glo_is_ctor, glo_step, Body};
+use native::{glo_again, glo_copy, glo_field, glo_is_ctor, glo_load, glo_step, glo_store, Body};
 
 extern "C" {
     fn mmap(addr: *mut u8, len: usize, prot: i32, flags: i32, fd: i32, off: i64) -> *mut u8;
@@ -183,6 +183,18 @@ impl Asm {
         }
     }
 
+    /// After a call that did the instruction if it was simple, and said so:
+    /// one more local, or the instruction as the interpreter runs it.
+    fn simple_or_generic(&mut self, pc: usize) {
+        self.b(&[0x48, 0x85, 0xC0]); // test rax, rax
+        let not = self.jcc(0x84);
+        self.pushed();
+        let done = self.jmp();
+        self.land(not);
+        self.generic(pc, None);
+        self.land(done);
+    }
+
     /// The code for one instruction. What has no code of its own is run as
     /// the interpreter runs it.
     fn instr(&mut self, pc: usize, instr: &Instr) {
@@ -287,6 +299,44 @@ impl Asm {
             Instr::Jump(t) => {
                 let site = self.jmp();
                 self.jumps.push((site, *t));
+            }
+            Instr::Again(to, keep) => {
+                self.b(&[0x48, 0x89, 0xDF]); // mov rdi, rbx
+                self.b(&[0x4C, 0x89, 0xE6]); // mov rsi, r12
+                self.rdx(*keep as u64);
+                self.call(glo_again as *const () as usize);
+                self.b(&[0x49, 0xBC]); // mov r12, keep
+                self.q(*keep as u64);
+                let site = self.jmp();
+                self.jumps.push((site, *to));
+            }
+            Instr::Mem(MemOp::Load, args) if matches!(args.as_slice(), [Atom::Var(_) | Atom::Take(_)]) => {
+                let (Atom::Var(r) | Atom::Take(r)) = args[0] else { unreachable!() };
+                self.b(&[0x48, 0x89, 0xDF]); // mov rdi, rbx
+                self.b(&[0x4C, 0x89, 0xEE]); // mov rsi, r13
+                self.rdx(r as u64);
+                self.b(&[0x4C, 0x89, 0xE1]); // mov rcx, r12
+                self.call(glo_load as *const () as usize);
+                self.simple_or_generic(pc);
+            }
+            Instr::Mem(MemOp::Store, args)
+                if matches!(args.as_slice(), [Atom::Var(_) | Atom::Take(_), Atom::Var(_) | Atom::Take(_)]) =>
+            {
+                let (Atom::Var(r) | Atom::Take(r)) = args[0] else { unreachable!() };
+                let (v, take) = match args[1] {
+                    Atom::Take(v) => (v, 1u64),
+                    Atom::Var(v) => (v, 0),
+                    Atom::Int(_) => unreachable!(),
+                };
+                self.b(&[0x48, 0x89, 0xDF]); // mov rdi, rbx
+                self.b(&[0x4C, 0x89, 0xEE]); // mov rsi, r13
+                self.rdx(r as u64);
+                self.rcx(v as u64);
+                self.b(&[0x49, 0xB8]); // mov r8, take
+                self.q(take);
+                self.b(&[0x4D, 0x89, 0xE1]); // mov r9, r12
+                self.call(glo_store as *const () as usize);
+                self.simple_or_generic(pc);
             }
             other => self.generic(pc, other.fail()),
         }

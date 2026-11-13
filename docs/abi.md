@@ -77,7 +77,8 @@ A body may do an instruction itself only if what it does is what the
 interpreter does. Both backends do these themselves: an integer written out;
 a local moved or copied; `+ - * < ==` on two integers that fit in 64 bits
 when the result does; a test of a local against an integer; a test of a
-local's constructor; a field of a local. Everything else is `glo_step`.
+local's constructor; a field of a local; a whole cell read or written; a
+jump. Everything else is `glo_step`.
 
 ## The runtime's entry points
 
@@ -87,6 +88,9 @@ local's constructor; a field of a local. Everything else is `glo_step`.
 | `void glo_copy(Value *locals, u64 i, u64 len)` | A copy of local `i` as local `len`. |
 | `u64 glo_is_ctor(const Value*, u64 tag, u64 arity)` | 1 if the value was built by that constructor with that many fields. |
 | `u64 glo_field(Value *locals, u64 i, u64 field, u64 len)` | A copy of a field of local `i` as local `len`; 0 if it is not there. |
+| `u64 glo_load(Vm*, Value *locals, u64 r, u64 len)` | What the cell local `r` refers to holds, as local `len`; 0 if the reference is to a part or the cell is gone, and the instruction is then `glo_step`'s. |
+| `u64 glo_store(Vm*, Value *locals, u64 r, u64 v, u64 take, u64 len)` | Local `v`, moved if `take`, into the cell local `r` refers to; local `len` is the value with no parts. 0 as for `glo_load`. |
+| `void glo_again(Vm*, u64 len, u64 keep)` | Let go of the locals from `keep` on. |
 | `i32 glo_main(u64 abi, const u8 *bytes, u64 size, Body *bodies, u64 count, i32 argc, char **argv)` | Run a program built ahead of time: its bytecode, and for each function its body or null. The result is the process's exit code. |
 
 ## Which engine runs a function
@@ -94,7 +98,7 @@ local's constructor; a field of a local. Everything else is `glo_step`.
 It is decided per function, when the program starts. `glorious-vm
 --backend=interp|x86|mix FILE` interprets every function, compiles every
 function to x86-64 in memory, or does the one for two functions in three and
-the other for the rest.
+the other for the rest. On x86-64 Linux it compiles unless told otherwise.
 
 `glorious-vm --emit-llvm FILE` writes an LLVM module with a body for every
 function, the bytecode, and a `main`:
@@ -116,8 +120,14 @@ A program's bytecode is rewritten when it is loaded (`vm/src/opt.rs`): a call
 of a function that can be read off the code does not make a closure, a
 function that is one computation is done where it is called, and small
 functions are written in place of calls of them, with what follows the call
-written after each way they come back. Every engine runs the rewritten code,
-so they still agree on every activation's locals. `--no-opt`, or
+written after each way they come back. A function called with closures that
+can be read off the code is made again for those closures, taking what they
+captured instead; a handler installed last around such a closure is
+installed in place, with the closure's code after it; and a function that
+ends by calling itself with what it was given goes back to its start
+instead. The functions made this way come after the program's own. Every
+engine runs the rewritten code, so they still agree on every activation's
+locals. `--no-opt`, or
 `GLORIOUS_OPT=0` for a program built ahead of time, runs the bytecode as it
 was written. A file says how many locals each function starts with, after
 the program, for this.
@@ -135,11 +145,11 @@ resumptions and unwinding through functions of all three engines.
 ## What this is not
 
 - **Not fast calls.** A call goes through the runtime, which is what makes
-  the three engines interchangeable and also what a program made of small
-  functions spends its time in. Compiled code is faster than interpreted
-  code on the instructions between calls and no faster on calls. Compiling
-  is fast: the x86-64 backend is one pass with no tool, and a program is
-  compiled when it starts.
+  the three engines interchangeable. Compiled code is faster than
+  interpreted code on the instructions between calls and no faster on calls;
+  what makes programs fast is that the rewriting above leaves few calls.
+  Compiling is fast: the x86-64 backend is one pass with no tool, and a
+  program is compiled when it starts.
 - **Not the layout contract of specification 17.2.** A value built by a
   constructor is the runtime's object. There are no declared sizes, offsets
   or tag widths for a program's types, no `repr(C)` records, and so nothing

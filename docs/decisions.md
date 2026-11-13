@@ -2194,10 +2194,21 @@ and cleanups work through any mixture, which is what was asked of the ABI.
   place with what follows them, tests of what was just built decided. With
   it `fib` is a comparison, two subtractions, an addition and two calls, and
   the same program runs 6 times faster compiled to x86-64 (1.04 s to 0.17 s
-  for `fib(27)`) and twice as fast interpreted. A loop written with `while`
-  is not helped much: `while` calls itself, and a function is not written in
-  place inside itself. The rewriting is not proved; every test program is
-  run with and without it.
+  for `fib(27)`) and twice as fast interpreted.
+- **Loops are functions made for their blocks.** `while` is `loop`, which
+  installs a handler for `break` and `continue` around each turn and calls
+  itself. Where a function is called with closures that can be read off the
+  code, it is made again for those closures; in the `loop` made for a
+  `while`'s condition and body, the handler is installed in place with both
+  written after it, and the call of itself at the end becomes a jump back
+  that leaves the handler installed. Three million turns of a `while` that
+  adds to two variables take 0.46 s compiled to x86-64, against 4.5 s
+  interpreted as written; appending to an array and summing it, 0.14 s
+  against 0.86 s. Interpreted, the rewritten code is not much faster than it
+  was: what is written in place leaves instructions that only keep the
+  locals' numbers, which compiled code skips and the interpreter runs.
+- The rewriting is not proved; every test program is run with and without
+  it. The VM compiles to x86-64 unless told otherwise.
 - **What would make it fast**, in the order of what each is worth: (1) in
   the compiler, calling a function that is known without making a closure
   of it, and writing library control flow (`if`, `match`, the loops) in

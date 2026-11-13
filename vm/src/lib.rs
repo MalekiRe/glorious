@@ -72,11 +72,18 @@ pub struct Clo {
 }
 
 fn data(tag: u64, fields: Vec<Value>) -> Value {
+    if tag == 0 && fields.is_empty() {
+        return unit();
+    }
     Value::Data(Rc::new(Data { tag, fields }))
 }
 
+/// The value with no parts. There is one, made once.
 fn unit() -> Value {
-    data(0, Vec::new())
+    thread_local! {
+        static UNIT: Value = Value::Data(Rc::new(Data { tag: 0, fields: Vec::new() }));
+    }
+    UNIT.with(Value::clone)
 }
 
 // ---------------------------------------------------------------- code
@@ -193,6 +200,14 @@ enum Instr {
     /// Where a test that fails in a function's last clause goes: the program
     /// has gone wrong.
     Stuck,
+    /// Install a handler around what this activation does next.
+    Enter { ret: usize, ops: Vec<(u64, usize)>, caps: Vec<Atom> },
+    /// Remove the handler this activation installed.
+    Leave,
+    /// Go back to an instruction with only so many locals: the rest are
+    /// let go of. What a function that calls itself last, with what it was
+    /// given, comes to.
+    Again(usize, usize),
 }
 
 // ---------------------------------------------------------------- decoding
@@ -485,7 +500,8 @@ impl Instr {
             | Instr::Mem(_, xs)
             | Instr::CallFn(_, xs)
             | Instr::TailFn(_, xs) => xs.iter_mut().collect(),
-            Instr::Jump(_) | Instr::Stuck => vec![],
+            Instr::Jump(_) | Instr::Stuck | Instr::Leave | Instr::Again(..) => vec![],
+            Instr::Enter { caps, .. } => caps.iter_mut().collect(),
             Instr::Label { thunk, .. } => vec![thunk],
             Instr::Guard { cleanup, thunk, .. } => vec![cleanup, thunk],
             Instr::TestCtor(..) | Instr::TestInt(..) => vec![],
@@ -527,30 +543,114 @@ impl Instr {
     }
 }
 
-/// Make each reading of a local that nothing reads afterwards a move. An
-/// instruction is followed by the next, or by where its test fails, and every
-/// such place is further on: so one pass from the end finds, for each
-/// instruction, the locals read after it. Where a place is not further on,
-/// nothing is changed.
-fn mark_takes(code: &mut [Instr]) {
-    let n = code.len();
-    let ahead = |pc: usize, t: usize| t > pc && t <= n;
-    if code.iter().enumerate().any(|(pc, i)| match i {
-        Instr::Jump(t) => !ahead(pc, *t),
-        _ => i.fail().is_some_and(|t| !ahead(pc, t)),
-    }) {
-        return;
-    }
-    let mut read_from: Vec<std::collections::HashSet<usize>> = vec![Default::default(); n + 1];
-    for pc in (0..n).rev() {
-        let mut after = std::collections::HashSet::new();
-        if let Instr::Jump(t) = code[pc] {
-            after.extend(read_from[t].iter().copied());
-        } else if !code[pc].last() {
-            after.extend(read_from[pc + 1].iter().copied());
+/// Where an instruction may be followed from: the next, where its test
+/// fails, where it jumps.
+fn follows(code: &[Instr], pc: usize) -> Vec<usize> {
+    match &code[pc] {
+        Instr::Jump(t) | Instr::Again(t, _) => vec![*t],
+        instr => {
+            let mut out = Vec::new();
+            if !instr.last() {
+                out.push(pc + 1);
+            }
+            out.extend(instr.fail());
+            out
         }
-        if let Some(t) = code[pc].fail() {
-            after.extend(read_from[t].iter().copied());
+    }
+}
+
+/// Does the instruction give a value, which is then the next local?
+fn pushes(instr: &Instr) -> bool {
+    !instr.last()
+        && instr.fail().is_none()
+        && !matches!(instr, Instr::Jump(_) | Instr::Enter { .. } | Instr::Leave | Instr::Again(..))
+}
+
+/// How many locals there are before each instruction, if the code agrees
+/// with itself about that.
+fn heights(code: &[Instr], start: usize) -> Option<Vec<usize>> {
+    let n = code.len();
+    let mut h: Vec<Option<usize>> = vec![None; n + 1];
+    h[0] = Some(start);
+    let set = |h: &mut Vec<Option<usize>>, at: usize, v: usize| -> bool {
+        match h[at] {
+            Some(old) => old == v,
+            None => {
+                h[at] = Some(v);
+                true
+            }
+        }
+    };
+    for pc in 0..n {
+        let Some(here) = h[pc] else { continue };
+        let instr = &code[pc];
+        let ok = match instr {
+            Instr::Jump(t) => *t <= n && set(&mut h, *t, here),
+            Instr::Again(t, keep) => *t <= n && *keep <= here && set(&mut h, *t, *keep),
+            _ => {
+                let through = instr.last() || set(&mut h, pc + 1, here + usize::from(pushes(instr)));
+                through && instr.fail().is_none_or(|t| t <= n && set(&mut h, t, here))
+            }
+        };
+        if !ok {
+            return None;
+        }
+    }
+    Some(h.into_iter().map(|x| x.unwrap_or(usize::MAX)).collect())
+}
+
+/// The locals read from each instruction on, a move counting as a reading.
+/// Code may go back, so this is gone over until nothing changes. Where the
+/// number of locals the code starts with is known, so is the local each
+/// instruction makes, and a local is not read before it is made.
+fn read_from(code: &mut [Instr], start: Option<usize>) -> Vec<std::collections::HashSet<usize>> {
+    let n = code.len();
+    let made: Vec<Option<usize>> = match start.and_then(|s| heights(code, s)) {
+        Some(h) => (0..n).map(|pc| (pushes(&code[pc]) && h[pc] != usize::MAX).then_some(h[pc])).collect(),
+        None => vec![None; n],
+    };
+    let mut from: Vec<std::collections::HashSet<usize>> = vec![Default::default(); n + 1];
+    let reads: Vec<Vec<usize>> = (0..n)
+        .map(|pc| {
+            let mut r: Vec<usize> = code[pc].place_var().into_iter().collect();
+            for a in code[pc].atoms_mut() {
+                if let Atom::Var(i) | Atom::Take(i) = *a {
+                    r.push(i);
+                }
+            }
+            r
+        })
+        .collect();
+    loop {
+        let mut changed = false;
+        for pc in (0..n).rev() {
+            let mut here: std::collections::HashSet<usize> = reads[pc].iter().copied().collect();
+            for next in follows(code, pc) {
+                if next <= n {
+                    here.extend(from[next].iter().copied().filter(|i| Some(*i) != made[pc]));
+                }
+            }
+            if here.len() != from[pc].len() {
+                from[pc] = here;
+                changed = true;
+            }
+        }
+        if !changed {
+            return from;
+        }
+    }
+}
+
+/// Make each reading of a local that nothing reads afterwards a move.
+fn mark_takes(code: &mut [Instr], start: Option<usize>) {
+    let from = read_from(code, start);
+    let n = code.len();
+    for pc in 0..n {
+        let mut after = std::collections::HashSet::new();
+        for next in follows(code, pc) {
+            if next <= n {
+                after.extend(from[next].iter().copied());
+            }
         }
         let place = code[pc].place_var();
         let mut times: std::collections::HashMap<usize, usize> = Default::default();
@@ -566,9 +666,6 @@ fn mark_takes(code: &mut [Instr]) {
                 }
             }
         }
-        after.extend(times.keys().copied());
-        after.extend(place);
-        read_from[pc] = after;
     }
 }
 
@@ -578,6 +675,9 @@ struct Program {
     codes: Vec<Vec<Instr>>,
     /// How many locals each function starts with, where the file says.
     starts: Vec<Option<usize>>,
+    /// Which of `codes` is the main code: the last as the file has them.
+    /// Functions made when the program is loaded come after it.
+    main: usize,
 }
 
 fn decode(bytes: &[u8], rewrite: bool) -> Decoded<Program> {
@@ -592,7 +692,7 @@ fn decode(bytes: &[u8], rewrite: bool) -> Decoded<Program> {
     let mut codes = r.list(Reader::code)?;
     codes.push(r.code()?);
     for code in &mut codes {
-        mark_takes(code);
+        mark_takes(code, None);
     }
     // What follows the program, if anything does: how many locals each
     // function starts with, and one more, or zero where that is not known.
@@ -609,7 +709,8 @@ fn decode(bytes: &[u8], rewrite: bool) -> Decoded<Program> {
     if r.pos != bytes.len() {
         return Err("trailing bytes after the program".into());
     }
-    let mut program = Program { names, codes, starts };
+    let main = codes.len() - 1;
+    let mut program = Program { names, codes, starts, main };
     if rewrite {
         opt::optimise(&mut program);
     }
@@ -1215,6 +1316,27 @@ impl Vm {
                 Ok(())
             }
             Instr::Stuck => wrong(),
+            Instr::Enter { ret, ops, caps } => {
+                let caps = self.atoms(caps)?;
+                let handler = Rc::new(Handler { ret: *ret, ops: ops.clone(), caps });
+                let id = self.labels;
+                self.labels += 1;
+                self.frames.push(Frame::Handler { id, handler });
+                self.pc += 1;
+                Ok(())
+            }
+            Instr::Again(to, keep) => {
+                self.locals.truncate(*keep);
+                self.pc = *to;
+                Ok(())
+            }
+            Instr::Leave => match self.frames.pop() {
+                Some(Frame::Handler { .. }) => {
+                    self.pc += 1;
+                    Ok(())
+                }
+                _ => wrong(),
+            },
             Instr::Ret(a) => {
                 let v = self.atom(a)?;
                 self.deliver(v)
@@ -1709,11 +1831,11 @@ enum Backend {
 }
 
 fn machine(program: Program, input: VecDeque<i64>) -> Vm {
-    let functions = program.codes.len() - 1;
+    let functions = program.codes.len();
     Vm {
         codes: Rc::new(program.codes),
         functions,
-        code: functions,
+        code: program.main,
         pc: 0,
         locals: Vec::new(),
         frames: Vec::new(),
@@ -1758,9 +1880,12 @@ fn inputs(rest: &[String]) -> Result<VecDeque<i64>, String> {
 
 pub fn cli_main() -> ExitCode {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
+    // Compiled where there is a backend for the machine, unless told otherwise.
     let mut backend = match std::env::var("GLORIOUS_BACKEND").as_deref() {
         Ok("x86") => Backend::X86,
         Ok("mix") => Backend::Mix,
+        Ok("interp") => Backend::Interp,
+        _ if cfg!(all(target_arch = "x86_64", target_os = "linux")) => Backend::X86,
         _ => Backend::Interp,
     };
     let mut emit = false;

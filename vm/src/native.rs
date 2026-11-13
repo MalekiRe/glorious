@@ -130,6 +130,60 @@ pub unsafe extern "C" fn glo_field(locals: *mut Value, i: u64, field: u64, len: 
     }
 }
 
+/// Let go of the locals from `keep` on.
+///
+/// # Safety
+/// As `glo_step`.
+#[no_mangle]
+pub unsafe extern "C" fn glo_again(vm: *mut Vm, len: u64, keep: u64) {
+    let vm = &mut *vm;
+    vm.locals.set_len(len as usize);
+    vm.locals.truncate(keep as usize);
+}
+
+/// What the cell local `r` refers to holds, as the next local. Gives 0 if
+/// it is not as simple as that: the reference is to a part, or the cell is
+/// not there.
+///
+/// # Safety
+/// As `glo_copy`, and `vm` is the machine.
+#[no_mangle]
+pub unsafe extern "C" fn glo_load(vm: *mut Vm, locals: *mut Value, r: u64, len: u64) -> u64 {
+    let vm = &mut *vm;
+    match &*locals.add(r as usize) {
+        Value::Ref(addr, None) => match vm.cells.get(*addr) {
+            Some(Some(v)) => {
+                std::ptr::write(locals.add(len as usize), v.clone());
+                1
+            }
+            _ => 0,
+        },
+        _ => 0,
+    }
+}
+
+/// Put local `v` in the cell local `r` refers to, moving it if `take`; the
+/// next local is the value with no parts. Gives 0 if it is not as simple
+/// as that.
+///
+/// # Safety
+/// As `glo_load`.
+#[no_mangle]
+pub unsafe extern "C" fn glo_store(vm: *mut Vm, locals: *mut Value, r: u64, v: u64, take: u64, len: u64) -> u64 {
+    let vm = &mut *vm;
+    let Value::Ref(addr, None) = &*locals.add(r as usize) else { return 0 };
+    match vm.cells.get_mut(*addr) {
+        Some(cell @ Some(_)) => {
+            let from = locals.add(v as usize);
+            let value = if take != 0 { std::mem::replace(&mut *from, Value::Int(0)) } else { (*from).clone() };
+            *cell = Some(value);
+            std::ptr::write(locals.add(len as usize), unit());
+            1
+        }
+        _ => 0,
+    }
+}
+
 /// A program built ahead of time: its bytecode, and the compiled body of
 /// each function that has one. This is what the `main` of such a program
 /// calls.
