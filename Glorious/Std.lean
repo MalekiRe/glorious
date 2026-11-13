@@ -25,6 +25,9 @@ pub mod fmt;
 pub mod stream;
 pub mod value;
 pub mod generator;
+pub mod bytes;
+pub mod error;
+pub mod index;
 pub mod iterator;
 pub mod slice;
 pub mod collections;
@@ -392,15 +395,10 @@ impl<T> Vec<T> {
         element(&value.items, len_at(&value.items) - 1)
     }
     pub fn push(value: &mut Self, item: T) {
-        let items = &mut value.items;
-        *items = push(replace(items, []), item);
+        push_at(&mut value.items, item);
     }
     pub fn pop(value: &mut Self) -> Option<T> {
-        let items = &mut value.items;
-        match(pop(replace(items, []))) {
-            Some((rest, last)) => *items = rest; Some(last),
-            None => None
-        }
+        pop_at(&mut value.items)
     }
     // The item put at a place, what was there and after it moving up; the
     // item given back if there is no such place.
@@ -410,7 +408,7 @@ impl<T> Vec<T> {
         if(index < 0) { Err(item) } else {
             if(index > n) { Err(item) } else {
                 match(taken_off(replace(items, []), n - index, [])) {
-                    (before, off) => *items = put_back(push(before, item), off); Ok(())
+                    (before, off) => unsafe { restore_at(items, put_back(push(before, item), off)) }; Ok(())
                 }
             }
         }
@@ -423,7 +421,7 @@ impl<T> Vec<T> {
             if(index >= n) { None } else {
                 match(taken_off(replace(items, []), n - index - 1, [])) {
                     (upto, off) => match(pop(upto)) {
-                        Some((before, taken)) => *items = put_back(before, off); Some(taken),
+                        Some((before, taken)) => unsafe { restore_at(items, put_back(before, off)) }; Some(taken),
                         None => None
                     }
                 }
@@ -433,11 +431,12 @@ impl<T> Vec<T> {
     // Everything of another put after what is here.
     pub fn append(value: &mut Self, source: Self) {
         let items = &mut value.items;
-        match(source) { Vec { items: more } => *items = put_back(replace(items, []), turned(more, [])) }
+        match(source) { Vec { items: more } => let all = put_back(replace(items, []), turned(more, [])); unsafe { restore_at(items, all) } }
     }
     pub fn reverse(value: &mut Self) {
         let items = &mut value.items;
-        *items = turned(replace(items, []), []);
+        let all = turned(replace(items, []), []);
+        unsafe { restore_at(items, all) };
     }
     // Only so many kept: the rest are let go.
     pub fn truncate(value: &mut Self, length: Int) {
@@ -1201,12 +1200,10 @@ impl<T> VecDeque<T> {
     pub fn len(value: &Self) -> Int { len_at(&value.front) + len_at(&value.back) }
     pub fn is_empty(value: &Self) -> Bool { VecDeque::len(value) == 0 }
     pub fn push_back(value: &mut Self, item: T) {
-        let back = &mut value.back;
-        *back = push(replace(back, []), item);
+        push_at(&mut value.back, item);
     }
     pub fn push_front(value: &mut Self, item: T) {
-        let front = &mut value.front;
-        *front = push(replace(front, []), item);
+        push_at(&mut value.front, item);
     }
     pub fn pop_front(value: &mut Self) -> Option<T> {
         // With nothing kept at the front, what is at the back is turned
@@ -1215,7 +1212,7 @@ impl<T> VecDeque<T> {
         let back = &mut value.back;
         let ready = if(len_at(&*front) == 0) { turned(replace(back, []), []) } else { replace(front, []) };
         match(pop(ready)) {
-            Some((rest, first)) => *front = rest; Some(first),
+            Some((rest, first)) => unsafe { restore_at(front, rest) }; Some(first),
             None => None
         }
     }
@@ -1224,7 +1221,7 @@ impl<T> VecDeque<T> {
         let back = &mut value.back;
         let ready = if(len_at(&*back) == 0) { turned(replace(front, []), []) } else { replace(back, []) };
         match(pop(ready)) {
-            Some((rest, last)) => *back = rest; Some(last),
+            Some((rest, last)) => unsafe { restore_at(back, rest) }; Some(last),
             None => None
         }
     }
@@ -1333,11 +1330,7 @@ pub fn into_iter<T>(items: [T]) -> IntoIter<T> { IntoIter { rest: turned(items, 
 impl<T> Iterator for IntoIter<T> {
     type Item = T;
     fn next(it) {
-        let rest = &mut it.rest;
-        match(pop(replace(rest, []))) {
-            Some((left, x)) => *rest = left; Some(x),
-            None => None
-        }
+        pop_at(&mut it.rest)
     }
 }
 
@@ -1865,6 +1858,687 @@ impl<A> Default for Option<A> { fn default() { None } }
 pub fn take<T: Default>(target: &mut T) -> T { replace(target, default()) }
 "#
 
+private def errorText : String := r#"// Failures several modules share, as the library specification lists them
+// (32).
+
+// A mark used on what it was not taken from, or after that was cut back.
+pub enum MarkError { WrongOwner, Stale, OutOfRange, NotTop }
+// A stretch that is not within what it is a stretch of.
+pub struct RangeError { pub offset: Int, pub length: Int }
+// Room that could not be made.
+pub enum ReserveError { CapacityOverflow }
+// More things than a place can number.
+pub struct IndexOverflow;
+"#
+
+private def bytesText : String := r#"// Bytes read and written a number at a time, as the library specification
+// has them (23). Places and lengths are `Int`.
+
+use std::slice::{Slice};
+use std::text::{from_utf8};
+
+pub enum DecodeErrorKind { Truncated, Overflow, NonCanonical, InvalidTag, InvalidUtf8, LimitExceeded }
+pub struct DecodeError { pub offset: Int, pub kind: DecodeErrorKind }
+pub use std::error::{MarkError, RangeError, ReserveError};
+pub enum ByteWriteError { Range(RangeError), Reserve(ReserveError), InvalidAlignment }
+
+// A place in some bytes, read from front to back. A read that fails leaves
+// the place where it was.
+pub struct ByteReader<'a> { bytes: Slice<'a, u8>, at: Int }
+
+// Where a reader was, to go back to.
+pub struct ReaderMark { at: Int, length: Int }
+
+fn fails<T>(at: Int, kind: DecodeErrorKind) -> Result<T, DecodeError> { Err(DecodeError { offset: at, kind: kind }) }
+
+fn byte_at<'a>(bytes: &Slice<'a, u8>, i: Int) -> Int {
+    match(Slice::get(bytes, i)) { Some(b) => int(*b), None => 0 }
+}
+
+fn wide(n: Int) -> u128 { to(n) }
+
+// The number so many bytes from a place are, the first the least.
+fn le_from<'a>(bytes: &Slice<'a, u8>, at: Int, width: Int) -> u128 {
+    if(width <= 0) { 0u128 } else { wide(byte_at(bytes, at)) + 256u128 * le_from(bytes, at + 1, width - 1) }
+}
+
+// And the first the greatest.
+fn be_from<'a>(bytes: &Slice<'a, u8>, at: Int, width: Int, so_far: u128) -> u128 {
+    if(width <= 0) { so_far } else { tail be_from(bytes, at + 1, width - 1, so_far * 256u128 + wide(byte_at(bytes, at))) }
+}
+
+impl<'a> ByteReader<'a> {
+    pub fn new(bytes: Slice<'a, u8>) -> Self { Self { bytes: bytes, at: 0 } }
+    pub fn position(r: &Self) -> Int { r.at }
+    pub fn remaining_len(r: &Self) -> Int { Slice::len(&r.bytes) - r.at }
+    pub fn remaining(r: &Self) -> Slice<'a, u8> {
+        match(Slice::sub(&r.bytes, r.at, Slice::len(&r.bytes))) { Some(rest) => rest, None => r.bytes }
+    }
+    pub fn mark(r: &Self) -> ReaderMark { ReaderMark { at: r.at, length: Slice::len(&r.bytes) } }
+    pub fn restore(r: &mut Self, mark: ReaderMark) -> Result<(), MarkError> {
+        if(mark.length != Slice::len(&r.bytes)) { Err(MarkError::WrongOwner) } else {
+            if(mark.at > mark.length) { Err(MarkError::OutOfRange) } else { r.at = mark.at; Ok(()) }
+        }
+    }
+    // So many bytes on, if there are that many.
+    fn step(r: &mut Self, width: Int) -> Result<Int, DecodeError> {
+        let at = r.at;
+        if(width < 0) { fails(at, DecodeErrorKind::Overflow) } else {
+            if(at + width > Slice::len(&r.bytes)) { fails(at, DecodeErrorKind::Truncated) } else { r.at = at + width; Ok(at) }
+        }
+    }
+    pub fn read_u8(r: &mut Self) -> Result<u8, DecodeError> {
+        match(ByteReader::step(r, 1)) { Ok(at) => Ok(u8(byte_at(&r.bytes, at))), Err(e) => Err(e) }
+    }
+    pub fn read_u16_le(r: &mut Self) -> Result<u16, DecodeError> {
+        match(ByteReader::step(r, 2)) { Ok(at) => Ok(to(le_from(&r.bytes, at, 2))), Err(e) => Err(e) }
+    }
+    pub fn read_u32_le(r: &mut Self) -> Result<u32, DecodeError> {
+        match(ByteReader::step(r, 4)) { Ok(at) => Ok(to(le_from(&r.bytes, at, 4))), Err(e) => Err(e) }
+    }
+    pub fn read_u64_le(r: &mut Self) -> Result<u64, DecodeError> {
+        match(ByteReader::step(r, 8)) { Ok(at) => Ok(to(le_from(&r.bytes, at, 8))), Err(e) => Err(e) }
+    }
+    pub fn read_u128_le(r: &mut Self) -> Result<u128, DecodeError> {
+        match(ByteReader::step(r, 16)) { Ok(at) => Ok(to(le_from(&r.bytes, at, 16))), Err(e) => Err(e) }
+    }
+    pub fn read_u16_be(r: &mut Self) -> Result<u16, DecodeError> {
+        match(ByteReader::step(r, 2)) { Ok(at) => Ok(to(be_from(&r.bytes, at, 2, 0u128))), Err(e) => Err(e) }
+    }
+    pub fn read_u32_be(r: &mut Self) -> Result<u32, DecodeError> {
+        match(ByteReader::step(r, 4)) { Ok(at) => Ok(to(be_from(&r.bytes, at, 4, 0u128))), Err(e) => Err(e) }
+    }
+    pub fn read_u64_be(r: &mut Self) -> Result<u64, DecodeError> {
+        match(ByteReader::step(r, 8)) { Ok(at) => Ok(to(be_from(&r.bytes, at, 8, 0u128))), Err(e) => Err(e) }
+    }
+    pub fn read_i64_le(r: &mut Self) -> Result<i64, DecodeError> {
+        match(ByteReader::step(r, 8)) {
+            Ok(at) => // (Two's complement: the upper half of what eight bytes can
+                // say is the numbers below nothing.)
+                let n: i128 = to(le_from(&r.bytes, at, 8));
+                Ok(to(if(n >= 9223372036854775808i128) { n - 18446744073709551616i128 } else { n })),
+            Err(e) => Err(e)
+        }
+    }
+    // A number written seven bits to a byte, the least first, each byte but
+    // the last with its top bit set: the one shortest way of writing it, in
+    // ten bytes at most.
+    pub fn read_var_u64(r: &mut Self) -> Result<u64, DecodeError> {
+        let start = r.at;
+        match(var_from(&r.bytes, start, 0u128, 1u128, 0)) {
+            Ok((value, width)) => r.at = start + width; Ok(to(value)),
+            Err(kind) => fails(start, kind)
+        }
+    }
+    pub fn read_exact(r: &mut Self, length: Int) -> Result<Slice<'a, u8>, DecodeError> {
+        match(ByteReader::step(r, length)) {
+            Ok(at) => match(Slice::sub(&r.bytes, at, at + length)) { Some(found) => Ok(found), None => fails(at, DecodeErrorKind::Truncated) },
+            Err(e) => Err(e)
+        }
+    }
+    // So many bytes as the text they are in UTF-8.
+    pub fn read_str(r: &mut Self, length: Int) -> Result<Str, DecodeError> {
+        let start = r.at;
+        match(ByteReader::step(r, length)) {
+            Ok(at) => match(from_utf8(copied(&r.bytes, at, at + length, []))) {
+                Some(text) => Ok(text),
+                None => r.at = start; fails(start, DecodeErrorKind::InvalidUtf8)
+            },
+            Err(e) => Err(e)
+        }
+    }
+    pub fn skip(r: &mut Self, length: Int) -> Result<(), DecodeError> {
+        match(ByteReader::step(r, length)) { Ok(_) => Ok(()), Err(e) => Err(e) }
+    }
+    // A reader of the next so many bytes alone; this one goes on after them.
+    pub fn subreader(r: &mut Self, length: Int) -> Result<ByteReader<'a>, DecodeError> {
+        match(ByteReader::read_exact(r, length)) { Ok(part) => Ok(ByteReader { bytes: part, at: 0 }), Err(e) => Err(e) }
+    }
+    // Done, with nothing left unread.
+    pub fn finish(r: Self) -> Result<(), DecodeError> {
+        if(ByteReader::remaining_len(&r) == 0) { Ok(()) } else { fails(ByteReader::position(&r), DecodeErrorKind::LimitExceeded) }
+    }
+}
+
+fn copied<'a>(bytes: &Slice<'a, u8>, at: Int, end: Int, out: [u8]) -> [u8] {
+    if(at >= end) { out } else { tail copied(bytes, at + 1, end, push(out, u8(byte_at(bytes, at)))) }
+}
+
+fn var_from<'a>(bytes: &Slice<'a, u8>, at: Int, value: u128, scale: u128, width: Int) -> Result<(u128, Int), DecodeErrorKind> {
+    if(at >= Slice::len(bytes)) { Err(DecodeErrorKind::Truncated) } else {
+        if(width >= 10) { Err(DecodeErrorKind::Overflow) } else {
+            let b = byte_at(bytes, at);
+            let next = value + wide(b % 128) * scale;
+            if(b >= 128) { tail var_from(bytes, at + 1, next, scale * 128u128, width + 1) } else {
+                if(next >= 18446744073709551616u128) { Err(DecodeErrorKind::Overflow) } else {
+                    // A last byte of nothing, after others, says the same
+                    // number a byte shorter.
+                    if(b == 0 and { width > 0 }) { Err(DecodeErrorKind::NonCanonical) } else { Ok((next, width + 1)) }
+                }
+            }
+        }
+    }
+}
+
+// Bytes built from front to back.
+pub struct ByteBuf { bytes: [u8] }
+
+// How long a buffer was, to cut it back to.
+pub struct BufferMark { length: Int }
+
+fn low(value: u128, modulus: u128) -> u8 { to(value % modulus) }
+
+fn le_onto(out: [u8], value: u128, width: Int) -> [u8] {
+    if(width <= 0) { out } else { tail le_onto(push(out, low(value, 256u128)), value / 256u128, width - 1) }
+}
+
+fn be_onto(out: [u8], value: u128, width: Int) -> [u8] {
+    if(width <= 0) { out } else { push(be_onto(out, value / 256u128, width - 1), low(value, 256u128)) }
+}
+
+fn var_onto(out: [u8], value: u128) -> [u8] {
+    if(value < 128u128) { push(out, low(value, 128u128)) }
+    else { tail var_onto(push(out, u8(128 + int(low(value, 128u128)))), value / 128u128) }
+}
+
+fn zeros_onto(out: [u8], count: Int) -> [u8] {
+    if(count <= 0) { out } else { tail zeros_onto(push(out, 0u8), count - 1) }
+}
+
+fn slice_onto<'a>(out: [u8], bytes: &Slice<'a, u8>, at: Int) -> [u8] {
+    if(at >= Slice::len(bytes)) { out } else { tail slice_onto(push(out, u8(byte_at(bytes, at))), bytes, at + 1) }
+}
+
+// The bytes with those from a place on replaced by a number's, the least first.
+fn patched(bytes: [u8], at: Int, value: u128, width: Int) -> [u8] {
+    if(width <= 0) { bytes } else { tail patched(with_byte(bytes, at, low(value, 256u128)), at + 1, value / 256u128, width - 1) }
+}
+
+fn with_byte(bytes: [u8], at: Int, byte: u8) -> [u8] { let mut next = bytes; next[at] = byte; next }
+
+// The bytes from one place up to another.
+fn piece(bytes: &[u8], from: Int, upto: Int, out: [u8]) -> [u8] {
+    if(from >= upto) { out } else {
+        match(element(bytes, from)) {
+            Some(b) => tail piece(bytes, from + 1, upto, push(out, *b)),
+            None => out
+        }
+    }
+}
+
+fn is_power_of_two(n: Int) -> Bool { if(n <= 0) { false } else { if(n == 1) { true } else { if(n % 2 == 0) { is_power_of_two(n / 2) } else { false } } } }
+
+impl ByteBuf {
+    pub fn new() -> Self { Self { bytes: [] } }
+    pub fn with_capacity(capacity: Int) -> Result<Self, ReserveError> {
+        if(capacity < 0) { Err(ReserveError::CapacityOverflow) } else { Ok(Self { bytes: [] }) }
+    }
+    pub fn len(b: &Self) -> Int { len_at(&b.bytes) }
+    pub fn as_slice<'a>(b: &'a Self) -> Slice<'a, u8> { Slice::of(&b.bytes) }
+    pub fn reserve(b: &mut Self, additional: Int) -> Result<(), ReserveError> {
+        if(additional < 0) { Err(ReserveError::CapacityOverflow) } else { Ok(()) }
+    }
+    pub fn push(b: &mut Self, byte: u8) -> Result<(), ReserveError> { b.bytes = push(b.bytes, byte); Ok(()) }
+    pub fn extend<'a>(b: &mut Self, bytes: Slice<'a, u8>) -> Result<(), ReserveError> { b.bytes = slice_onto(b.bytes, &bytes, 0); Ok(()) }
+    pub fn write_u16_le(b: &mut Self, input: u16) -> Result<(), ReserveError> { b.bytes = le_onto(b.bytes, to(input), 2); Ok(()) }
+    pub fn write_u32_le(b: &mut Self, input: u32) -> Result<(), ReserveError> { b.bytes = le_onto(b.bytes, to(input), 4); Ok(()) }
+    pub fn write_u64_le(b: &mut Self, input: u64) -> Result<(), ReserveError> { b.bytes = le_onto(b.bytes, to(input), 8); Ok(()) }
+    pub fn write_u128_le(b: &mut Self, input: u128) -> Result<(), ReserveError> { b.bytes = le_onto(b.bytes, to(input), 16); Ok(()) }
+    pub fn write_u16_be(b: &mut Self, input: u16) -> Result<(), ReserveError> { b.bytes = be_onto(b.bytes, to(input), 2); Ok(()) }
+    pub fn write_u32_be(b: &mut Self, input: u32) -> Result<(), ReserveError> { b.bytes = be_onto(b.bytes, to(input), 4); Ok(()) }
+    pub fn write_u64_be(b: &mut Self, input: u64) -> Result<(), ReserveError> { b.bytes = be_onto(b.bytes, to(input), 8); Ok(()) }
+    pub fn write_var_u64(b: &mut Self, input: u64) -> Result<(), ReserveError> { b.bytes = var_onto(b.bytes, to(input)); Ok(()) }
+    // A number written over bytes already there; all of them, or none.
+    fn patch(b: &mut Self, offset: Int, value: u128, width: Int) -> Result<(), RangeError> {
+        if(offset < 0 or { offset + width > len_at(&b.bytes) }) { Err(RangeError { offset: offset, length: width }) }
+        else { b.bytes = patched(b.bytes, offset, value, width); Ok(()) }
+    }
+    pub fn patch_u16_le(b: &mut Self, offset: Int, input: u16) -> Result<(), RangeError> { ByteBuf::patch(b, offset, to(input), 2) }
+    pub fn patch_u32_le(b: &mut Self, offset: Int, input: u32) -> Result<(), RangeError> { ByteBuf::patch(b, offset, to(input), 4) }
+    pub fn patch_u64_le(b: &mut Self, offset: Int, input: u64) -> Result<(), RangeError> { ByteBuf::patch(b, offset, to(input), 8) }
+    // Zeros up to the next multiple of a power of two.
+    pub fn align_zeroed(b: &mut Self, alignment: Int) -> Result<(), ByteWriteError> {
+        if(is_power_of_two(alignment)) {
+            let over = len_at(&b.bytes) % alignment;
+            b.bytes = zeros_onto(b.bytes, (alignment - over) % alignment);
+            Ok(())
+        } else { Err(ByteWriteError::InvalidAlignment) }
+    }
+    // Made so long: with zeros added, or cut short.
+    pub fn resize_zeroed(b: &mut Self, length: Int) -> Result<(), ReserveError> {
+        if(length < 0) { Err(ReserveError::CapacityOverflow) } else {
+            let n = len_at(&b.bytes);
+            b.bytes = if(length >= n) { zeros_onto(b.bytes, length - n) } else { piece(&b.bytes, 0, length, []) };
+            Ok(())
+        }
+    }
+    pub fn mark(b: &Self) -> BufferMark { BufferMark { length: len_at(&b.bytes) } }
+    pub fn truncate_to(b: &mut Self, mark: BufferMark) -> Result<(), MarkError> {
+        if(mark.length > len_at(&b.bytes)) { Err(MarkError::Stale) } else { b.bytes = piece(&b.bytes, 0, mark.length, []); Ok(()) }
+    }
+    pub fn finish(b: Self) -> [u8] { b.bytes }
+}
+
+pub enum HexErrorKind { InvalidDigit, OddLength, IncorrectLength }
+pub struct HexError { pub offset: Int, pub kind: HexErrorKind }
+
+fn hex_digit(n: Int) -> char { match(char(if(n < 10) { 48 + n } else { 87 + n })) { Some(c) => c, None => '0' } }
+
+// (From the last byte back: a text is built from its end.)
+fn hex_onto<'a>(bytes: &Slice<'a, u8>, at: Int, out: Str) -> Str {
+    if(at <= 0) { out } else {
+        let b = byte_at(bytes, at - 1);
+        tail hex_onto(bytes, at - 1, StrChar(hex_digit(b / 16), StrChar(hex_digit(b % 16), out)))
+    }
+}
+
+// Bytes as text, two digits each, the letters small.
+pub fn hex_encode<'a>(bytes: Slice<'a, u8>) -> Str { hex_onto(&bytes, Slice::len(&bytes), "") }
+
+fn hex_value(c: char) -> Option<Int> {
+    let n = int(c);
+    if(48 <= n and { n <= 57 }) { Some(n - 48) } else {
+        if(97 <= n and { n <= 102 }) { Some(n - 87) } else {
+            if(65 <= n and { n <= 70 }) { Some(n - 55) } else { None }
+        }
+    }
+}
+
+fn hex_from(text: Str, at: Int, out: [u8]) -> Result<[u8], HexError> {
+    match(text) {
+        StrEnd => Ok(out),
+        StrChar(a, rest) => match(rest) {
+            StrEnd => Err(HexError { offset: at, kind: HexErrorKind::OddLength }),
+            StrChar(b, more) => match(hex_value(a)) {
+                None => Err(HexError { offset: at, kind: HexErrorKind::InvalidDigit }),
+                Some(high) => match(hex_value(b)) {
+                    None => Err(HexError { offset: at + 1, kind: HexErrorKind::InvalidDigit }),
+                    Some(low) => tail hex_from(more, at + 2, push(out, u8(high * 16 + low)))
+                }
+            }
+        }
+    }
+}
+
+// The bytes a text of hexadecimal digits says, or where it stops being one.
+pub fn hex_decode(text: Str) -> Result<[u8], HexError> { hex_from(text, 0, []) }
+"#
+
+private def indexText : String := r#"// Tables whose places cannot be mixed up with another table's, and the sets
+// and queues of such places a compiler is built from, as the library
+// specification has them (24). Places and lengths are `Int`.
+
+use std::value::{Rejected};
+use std::slice::{Slice};
+use std::hash::{Hash, HashMap};
+pub use std::error::{MarkError, IndexOverflow};
+
+// A place among the things of one kind. `Tag` says which kind and is only a
+// name: an `Id<Function>` is not an `Id<Block>`.
+pub struct Id<Tag>(u32);
+
+fn numbered<Tag>(n: Int) -> Id<Tag> { Id(to(n)) }
+
+impl<Tag> Id<Tag> {
+    pub fn from_u32(value: u32) -> Self { Id(value) }
+    pub fn to_u32(id: Self) -> u32 { id.0 }
+    pub fn from_usize(value: usize) -> Result<Self, IndexOverflow> { Id::at(int(value)) }
+    pub fn to_usize(id: Self) -> usize { to(id.0) }
+    // As a place counted in `Int`, which is what this library counts in.
+    pub fn index(id: Self) -> Int { int(id.0) }
+    pub fn at(index: Int) -> Result<Self, IndexOverflow> {
+        if(index < 0 or { index > 4294967295 }) { Err(IndexOverflow) } else { Ok(numbered(index)) }
+    }
+}
+
+// Things of one kind, each at the place it was given when it was added.
+pub struct IndexVec<Tag, T> { items: [T] }
+
+impl<Tag, T> IndexVec<Tag, T> {
+    pub fn new() -> Self { Self { items: [] } }
+    pub fn len(v: &Self) -> Int { len_at(&v.items) }
+    pub fn push(v: &mut Self, item: T) -> Result<Id<Tag>, Rejected<T, IndexOverflow>> {
+        let n = len_at(&v.items);
+        if(n > 4294967295) { Err(Rejected { value: item, error: IndexOverflow }) } else {
+            push_at(&mut v.items, item);
+            Ok(numbered(n))
+        }
+    }
+    pub fn get<'a>(v: &'a Self, id: Id<Tag>) -> Option<&'a T> { element(&v.items, int(id.0)) }
+    pub fn get_mut<'a>(v: &'a mut Self, id: Id<Tag>) -> Option<&'a mut T> { element_mut(&mut v.items, int(id.0)) }
+    pub fn as_slice<'a>(v: &'a Self) -> Slice<'a, T> { Slice::of(&v.items) }
+    pub fn into_vec(v: Self) -> [T] { match(v) { IndexVec { items } => items } }
+}
+
+// The last so many of some things onto others: what is left, and what was
+// taken with the last taken first.
+fn taken_from<T>(items: [T], count: Int, taken: [T]) -> ([T], [T]) {
+    if(count <= 0) { (items, taken) } else {
+        match(pop(items)) {
+            Some((rest, last)) => tail taken_from(rest, count - 1, push(taken, last)),
+            None => ([], taken)
+        }
+    }
+}
+
+fn turned<T>(from: [T], onto: [T]) -> [T] {
+    match(pop(from)) { Some((rest, last)) => tail turned(rest, push(onto, last)), None => onto }
+}
+
+// Things added and never moved, which can be cut back to how many there
+// were at a mark.
+pub struct Arena<Tag, T> { items: [T] }
+
+// How many things an arena had.
+pub struct ArenaMark<Tag> { length: Int }
+
+impl<Tag, T> Arena<Tag, T> {
+    pub fn new() -> Self { Self { items: [] } }
+    pub fn len(a: &Self) -> Int { len_at(&a.items) }
+    pub fn insert(a: &mut Self, item: T) -> Result<Id<Tag>, Rejected<T, IndexOverflow>> {
+        let n = len_at(&a.items);
+        if(n > 4294967295) { Err(Rejected { value: item, error: IndexOverflow }) } else {
+            push_at(&mut a.items, item);
+            Ok(numbered(n))
+        }
+    }
+    pub fn get<'a>(a: &'a Self, id: Id<Tag>) -> Option<&'a T> { element(&a.items, int(id.0)) }
+    pub fn get_mut<'a>(a: &'a mut Self, id: Id<Tag>) -> Option<&'a mut T> { element_mut(&mut a.items, int(id.0)) }
+    pub fn mark(a: &Self) -> ArenaMark<Tag> { ArenaMark { length: len_at(&a.items) } }
+    // What was added since a mark, taken back out in the order it went in.
+    pub fn rollback_take(a: &mut Self, mark: ArenaMark<Tag>) -> Result<[T], MarkError> {
+        if(mark.length > len_at(&a.items)) { Err(MarkError::Stale) } else {
+            let count = len_at(&a.items) - mark.length;
+            let items = &mut a.items;
+            match(taken_from(replace(items, []), count, [])) {
+                (kept, taken) => unsafe { restore_at(items, kept) }; Ok(turned(taken, []))
+            }
+        }
+    }
+    // The same, with what was added let go.
+    pub fn truncate(a: &mut Self, mark: ArenaMark<Tag>) -> Result<(), MarkError> where T: Use<[0, 1]> {
+        match(Arena::rollback_take(a, mark)) { Ok(_) => Ok(()), Err(e) => Err(e) }
+    }
+    pub fn into_vec(a: Self) -> [T] { match(a) { Arena { items } => items } }
+}
+
+// A place in an arena whose places are used again: it says which use of
+// the place it was given for, and is refused once that thing is gone.
+pub struct GenId<Tag> { index: u32, generation: u32 }
+
+enum Slot<T> { Full(Int, T), Empty(Int) }
+
+// Things that can be taken out again, their places used for others.
+pub struct GenArena<Tag, T> { slots: [Slot<T>], free: [Int] }
+
+fn slot_generation<T>(slot: &Slot<T>) -> Int {
+    match(slot) { &Slot::Full(g, _) => *g, &Slot::Empty(g) => *g }
+}
+
+fn live<T>(slots: [Slot<T>], out: [T]) -> [T] {
+    match(pop(slots)) {
+        Some((rest, Slot::Full(_, item))) => tail live(rest, push(out, item)),
+        Some((rest, Slot::Empty(_))) => tail live(rest, out),
+        None => turned(out, [])
+    }
+}
+
+impl<Tag, T> GenArena<Tag, T> {
+    pub fn new() -> Self { Self { slots: [], free: [] } }
+    pub fn insert(a: &mut Self, item: T) -> Result<GenId<Tag>, Rejected<T, IndexOverflow>> {
+        match(pop(a.free)) {
+            Some((rest, i)) => a.free = rest;
+                match(element_mut(&mut a.slots, i)) {
+                    Some(slot) =>
+                        let g = slot_generation(slot);
+                        match(replace(slot, Slot::Full(g, item))) {
+                            Slot::Empty(_) => Ok(GenId { index: to(i), generation: to(g) }),
+                            // (A place that is free holds nothing. If one
+                            // did, what it held is not let go: it is what
+                            // comes back.)
+                            Slot::Full(_, was) => Err(Rejected { value: was, error: IndexOverflow })
+                        },
+                    None => Err(Rejected { value: item, error: IndexOverflow })
+                },
+            None => let n = len_at(&a.slots);
+                if(n > 4294967295) { Err(Rejected { value: item, error: IndexOverflow }) } else {
+                    push_at(&mut a.slots, Slot::Full(0, item));
+                    Ok(GenId { index: to(n), generation: 0u32 })
+                }
+        }
+    }
+    pub fn contains(a: &Self, id: GenId<Tag>) -> Bool {
+        match(element(&a.slots, int(id.index))) {
+            Some(slot) => match(slot) { &Slot::Full(g, _) => *g == int(id.generation), &Slot::Empty(_) => false },
+            None => false
+        }
+    }
+    pub fn get<'a>(a: &'a Self, id: GenId<Tag>) -> Option<&'a T> {
+        match(element(&a.slots, int(id.index))) {
+            Some(slot) => match(slot) {
+                &Slot::Full(g, item) => if(*g == int(id.generation)) { Some(item) } else { None },
+                &Slot::Empty(_) => None
+            },
+            None => None
+        }
+    }
+    pub fn get_mut<'a>(a: &'a mut Self, id: GenId<Tag>) -> Option<&'a mut T> {
+        match(element_mut(&mut a.slots, int(id.index))) {
+            Some(slot) => match(slot) {
+                &mut Slot::Full(g, item) => if(*g == int(id.generation)) { Some(item) } else { None },
+                &mut Slot::Empty(_) => None
+            },
+            None => None
+        }
+    }
+    // The thing taken out; its place is for another, and this name for it
+    // is refused from now on.
+    pub fn remove(a: &mut Self, id: GenId<Tag>) -> Option<T> {
+        if(GenArena::contains(a, id)) {
+            let i = int(id.index);
+            match(element_mut(&mut a.slots, i)) {
+                Some(slot) => match(replace(slot, Slot::Empty(int(id.generation) + 1))) {
+                    Slot::Full(_, item) => a.free = push(a.free, i); Some(item),
+                    Slot::Empty(_) => None
+                },
+                None => None
+            }
+        } else { None }
+    }
+    // What is still in it, in the order of its places.
+    pub fn into_vec(a: Self) -> [T] { match(a) { GenArena { slots, free: _ } => live(slots, []) } }
+}
+
+// What interning found: a new place, or the place of an equal thing already
+// there, with the one given handed back.
+pub enum InternOutcome<Tag, T> { Inserted(Id<Tag>), Existing { id: Id<Tag>, unused: T } }
+
+// Equal things kept once, each with a place.
+pub struct Interner<Tag, T> { values: [T], places: HashMap<T, Int> }
+
+impl<Tag, T> Interner<Tag, T> where T: Eq + Hash {
+    pub fn new() -> Self { Self { values: [], places: std::hash::new() } }
+    pub fn len(i: &Self) -> Int { len_at(&i.values) }
+    pub fn find(i: &Self, item: T) -> Option<Id<Tag>> {
+        match(std::hash::get(i.places, item)) { Some(n) => Some(numbered(n)), None => None }
+    }
+    pub fn intern(i: &mut Self, item: T) -> Result<InternOutcome<Tag, T>, Rejected<T, IndexOverflow>> {
+        match(std::hash::get(i.places, item)) {
+            Some(n) => Ok(InternOutcome::Existing { id: numbered(n), unused: item }),
+            None => let n = len_at(&i.values);
+                if(n > 4294967295) { Err(Rejected { value: item, error: IndexOverflow }) } else {
+                    i.values = push(i.values, item);
+                    i.places = std::hash::insert(i.places, item, n);
+                    Ok(InternOutcome::Inserted(numbered(n)))
+                }
+        }
+    }
+    // The place alone, whichever it was.
+    pub fn intern_discarding(i: &mut Self, item: T) -> Result<Id<Tag>, Rejected<T, IndexOverflow>> {
+        match(Interner::intern(i, item)) {
+            Ok(InternOutcome::Inserted(id)) => Ok(id),
+            Ok(InternOutcome::Existing { id, unused: _ }) => Ok(id),
+            Err(e) => Err(e)
+        }
+    }
+    pub fn get<'a>(i: &'a Self, id: Id<Tag>) -> Option<&'a T> { element(&i.values, int(id.0)) }
+    pub fn into_values(i: Self) -> [T] { i.values }
+}
+
+// Texts kept once each.
+pub struct StringInterner<Tag> { texts: Interner<Tag, Str> }
+
+impl<Tag> StringInterner<Tag> {
+    pub fn new() -> Self { Self { texts: Interner::new() } }
+    pub fn len(i: &Self) -> Int { Interner::len(&i.texts) }
+    pub fn intern(i: &mut Self, text: Str) -> Result<Id<Tag>, IndexOverflow> {
+        match(Interner::intern_discarding(&mut i.texts, text)) { Ok(id) => Ok(id), Err(_) => Err(IndexOverflow) }
+    }
+    pub fn find(i: &Self, text: Str) -> Option<Id<Tag>> { Interner::find(&i.texts, text) }
+    pub fn get(i: &Self, id: Id<Tag>) -> Option<Str> {
+        match(Interner::get(&i.texts, id)) { Some(text) => Some(*text), None => None }
+    }
+}
+
+// Whether a place of so many is in: one flag each.
+pub struct BitSet<Tag> { flags: [Bool], count: Int }
+
+fn flag_at(flags: &[Bool], i: Int) -> Bool { match(element(flags, i)) { Some(f) => *f, None => false } }
+
+fn grown(flags: [Bool], length: Int) -> [Bool] {
+    if(len(flags) >= length) { flags } else { tail grown(push(flags, false), length) }
+}
+
+fn with_flag(flags: [Bool], i: Int, flag: Bool) -> [Bool] { let mut next = grown(flags, i + 1); next[i] = flag; next }
+
+fn places_of<Tag>(flags: &[Bool], i: Int, out: [Id<Tag>]) -> [Id<Tag>] {
+    if(i >= len_at(flags)) { out } else { tail places_of(flags, i + 1, if(flag_at(flags, i)) { push(out, numbered(i)) } else { out }) }
+}
+
+// One set changed by another, a place at a time: `keep(mine, theirs)` is
+// whether a place is in afterwards. How many places changed.
+fn merged(mine: [Bool], theirs: &[Bool], i: Int, changed: Int, keep: fn(Bool, Bool) -> Bool) -> ([Bool], Int) {
+    if(i >= len(mine) and { i >= len_at(theirs) }) { (mine, changed) } else {
+        let was = flag_at(&mine, i);
+        let now = keep(was, flag_at(theirs, i));
+        if(was == now) { tail merged(mine, theirs, i + 1, changed, keep) }
+        else { tail merged(with_flag(mine, i, now), theirs, i + 1, changed + 1, keep) }
+    }
+}
+
+fn counted(flags: &[Bool], i: Int, n: Int) -> Int {
+    if(i >= len_at(flags)) { n } else { tail counted(flags, i + 1, if(flag_at(flags, i)) { n + 1 } else { n }) }
+}
+
+impl<Tag> BitSet<Tag> {
+    pub fn new() -> Self { Self { flags: [], count: 0 } }
+    pub fn len(s: &Self) -> Int { s.count }
+    pub fn contains(s: &Self, id: Id<Tag>) -> Bool { flag_at(&s.flags, int(id.0)) }
+    // Put in: whether it was not in before.
+    pub fn insert(s: &mut Self, id: Id<Tag>) -> Bool {
+        if(flag_at(&s.flags, int(id.0))) { false } else { s.flags = with_flag(s.flags, int(id.0), true); s.count = s.count + 1; true }
+    }
+    // Taken out: whether it was in.
+    pub fn remove(s: &mut Self, id: Id<Tag>) -> Bool {
+        if(flag_at(&s.flags, int(id.0))) { s.flags = with_flag(s.flags, int(id.0), false); s.count = s.count - 1; true } else { false }
+    }
+    pub fn clear(s: &mut Self) { s.flags = []; s.count = 0; }
+    fn merge(s: &mut Self, other: &Self, keep: fn(Bool, Bool) -> Bool) -> Bool {
+        match(merged(s.flags, &other.flags, 0, 0, keep)) {
+            (flags, changed) => s.count = counted(&flags, 0, 0); s.flags = flags; changed > 0
+        }
+    }
+    // Each says whether the set changed.
+    pub fn union_with(s: &mut Self, other: &Self) -> Bool { BitSet::merge(s, other, fn(mine, theirs) { mine or { theirs } }) }
+    pub fn intersect_with(s: &mut Self, other: &Self) -> Bool { BitSet::merge(s, other, fn(mine, theirs) { mine and { theirs } }) }
+    pub fn subtract(s: &mut Self, other: &Self) -> Bool { BitSet::merge(s, other, fn(mine, theirs) { mine and { not theirs } }) }
+    pub fn is_subset(s: &Self, other: &Self) -> Bool { subset_from(&s.flags, &other.flags, 0) }
+    // The places in it, least first.
+    pub fn to_vec(s: &Self) -> [Id<Tag>] { places_of(&s.flags, 0, []) }
+}
+
+fn subset_from(mine: &[Bool], theirs: &[Bool], i: Int) -> Bool {
+    if(i >= len_at(mine)) { true } else {
+        if(flag_at(mine, i) and { not flag_at(theirs, i) }) { false } else { tail subset_from(mine, theirs, i + 1) }
+    }
+}
+
+// A set of places that is gone through and emptied quickly: the places in
+// it side by side, and for each place where it is among them.
+pub struct SparseSet<Tag> { dense: [Int], sparse: [Int] }
+
+fn int_at(items: &[Int], i: Int) -> Int { match(element(items, i)) { Some(n) => *n, None => 0 - 1 } }
+
+fn grown_ints(items: [Int], length: Int) -> [Int] {
+    if(len(items) >= length) { items } else { tail grown_ints(push(items, 0 - 1), length) }
+}
+
+fn with_int(items: [Int], i: Int, n: Int) -> [Int] { let mut next = grown_ints(items, i + 1); next[i] = n; next }
+
+fn ids_of<Tag>(items: &[Int], i: Int, out: [Id<Tag>]) -> [Id<Tag>] {
+    if(i >= len_at(items)) { out } else { tail ids_of(items, i + 1, push(out, numbered(int_at(items, i)))) }
+}
+
+impl<Tag> SparseSet<Tag> {
+    pub fn new() -> Self { Self { dense: [], sparse: [] } }
+    pub fn len(s: &Self) -> Int { len_at(&s.dense) }
+    pub fn contains(s: &Self, id: Id<Tag>) -> Bool {
+        let at = int_at(&s.sparse, int(id.0));
+        if(at < 0) { false } else { int_at(&s.dense, at) == int(id.0) }
+    }
+    pub fn insert(s: &mut Self, id: Id<Tag>) -> Bool {
+        if(SparseSet::contains(s, id)) { false } else {
+            s.sparse = with_int(s.sparse, int(id.0), len_at(&s.dense));
+            s.dense = push(s.dense, int(id.0));
+            true
+        }
+    }
+    // The last among them takes the place of the one taken out.
+    pub fn remove(s: &mut Self, id: Id<Tag>) -> Bool {
+        if(SparseSet::contains(s, id)) {
+            let at = int_at(&s.sparse, int(id.0));
+            match(pop(s.dense)) {
+                Some((rest, last)) => s.dense = if(at < len(rest)) { with_int(rest, at, last) } else { rest };
+                    s.sparse = with_int(with_int(s.sparse, last, at), int(id.0), 0 - 1);
+                    true,
+                None => false
+            }
+        } else { false }
+    }
+    pub fn clear(s: &mut Self) { s.dense = []; s.sparse = []; }
+    pub fn to_vec(s: &Self) -> [Id<Tag>] { ids_of(&s.dense, 0, []) }
+}
+
+// Places waiting to be seen to, first in first out, each waiting once.
+pub struct WorkQueue<Tag> { waiting: [Int], next: Int, pending: [Bool] }
+
+impl<Tag> WorkQueue<Tag> {
+    pub fn new() -> Self { Self { waiting: [], next: 0, pending: [] } }
+    pub fn contains(q: &Self, id: Id<Tag>) -> Bool { flag_at(&q.pending, int(id.0)) }
+    pub fn is_empty(q: &Self) -> Bool { q.next >= len_at(&q.waiting) }
+    // Whether it was not already waiting.
+    pub fn push(q: &mut Self, id: Id<Tag>) -> Bool {
+        if(flag_at(&q.pending, int(id.0))) { false } else {
+            q.pending = with_flag(q.pending, int(id.0), true);
+            q.waiting = push(q.waiting, int(id.0));
+            true
+        }
+    }
+    // The one that has waited longest, no longer waiting.
+    pub fn pop(q: &mut Self) -> Option<Id<Tag>> {
+        if(q.next >= len_at(&q.waiting)) { None } else {
+            let i = int_at(&q.waiting, q.next);
+            q.pending = with_flag(q.pending, i, false);
+            q.next = q.next + 1;
+            // (Nothing waiting: start again from the front.)
+            if(q.next >= len_at(&q.waiting)) { q.waiting = []; q.next = 0; } else { };
+            Some(numbered(i))
+        }
+    }
+    pub fn clear(q: &mut Self) { q.waiting = []; q.next = 0; q.pending = []; }
+}
+"#
+
 private def generatorText : String := r#"// Generators, in the shape the library specification gives them (30.2): a
 // computation that yields is owned as a value, and resuming it uses that
 // value up and gives either what it yielded with the generator that goes
@@ -2252,6 +2926,9 @@ def texts : List (List String × String) :=
    (["std", "stream"], streamText),
    (["std", "value"], valueText),
    (["std", "generator"], generatorText),
+   (["std", "bytes"], bytesText),
+   (["std", "error"], errorText),
+   (["std", "index"], indexText),
    (["std", "iterator"], iteratorText),
    (["std", "slice"], sliceText),
    (["std", "collections"], collectionsText),

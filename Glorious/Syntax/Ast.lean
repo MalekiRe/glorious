@@ -742,11 +742,14 @@ structure NameUse where
   valued : Bool := false
   /-- Its value is used in a callable, which may run later, again or never. -/
   valuedInside : Bool := false
+  /-- A part of it is read where it is, `x.f`: a look at it, as through a
+  borrow, and not a use of the whole. -/
+  looked : Bool := false
   deriving Inhabited
 
 def NameUse.or (a b : NameUse) : NameUse :=
   ⟨a.shared || b.shared, a.changed || b.changed, a.fielded || b.fielded, a.rebound || b.rebound,
-    a.valued || b.valued, a.valuedInside || b.valuedInside⟩
+    a.valued || b.valued, a.valuedInside || b.valuedInside, a.looked || b.looked⟩
 
 /-- What a callable's uses are to the code it is written in. -/
 def NameUse.inside (u : NameUse) : NameUse :=
@@ -769,10 +772,12 @@ partial def nameUseExpr (x : String) : Expr → NameUse
   | .call _ f args => (f :: args).foldl (fun u e => u.or (nameUseExpr x e)) {}
   | .tailCall _ f args => (f :: args).foldl (fun u e => u.or (nameUseExpr x e)) {}
   | .tuple args => args.foldl (fun u e => u.or (nameUseExpr x e)) {}
-  | .proj e _ => nameUseExpr x e
+  -- A part of the variable read where it is: a look at it, as through a
+  -- borrow, and not a use of the whole.
+  | .proj e _ => if placeRoot e == some x then { looked := true } else nameUseExpr x e
   | .deref e => nameUseExpr x e
   | .reborrow _ e => nameUseExpr x e
-  | .fieldOf _ e _ => nameUseExpr x e
+  | .fieldOf _ e _ => if placeRoot e == some x then { looked := true } else nameUseExpr x e
   | .closure _ clauses =>
     NameUse.inside (clauses.foldl (fun u c => u.or (nameUseClause x c)) ({} : NameUse))
   | .handle subject arms =>
@@ -800,8 +805,9 @@ partial def nameUseStmt (x : String) : Stmt → NameUse
   | .defer e => nameUseExpr x e
   | .located _ _ s => nameUseStmt x s
   | .assign target e =>
-    let u := (nameUseExpr x target).or (nameUseExpr x e)
-    if placeRoot target == some x then { u with changed := true } else u
+    -- (The variable written, or a part of it, is not its value used.)
+    if placeRoot target == some x then { nameUseExpr x e with changed := true }
+    else (nameUseExpr x target).or (nameUseExpr x e)
 
 end
 
@@ -819,18 +825,23 @@ partial def borrowAfterValue (x : String) (seen : Bool) : Expr → Bool × Bool
   | .call _ f args => borrowAfterValues x seen (f :: args)
   | .tailCall _ f args => borrowAfterValues x seen (f :: args)
   | .tuple args => borrowAfterValues x seen args
-  | .proj e _ => borrowAfterValue x seen e
+  | .proj e _ => if placeRoot e == some x then (seen, seen) else borrowAfterValue x seen e
   | .deref e => borrowAfterValue x seen e
   | .reborrow _ e => borrowAfterValue x seen e
-  | .fieldOf _ e _ => borrowAfterValue x seen e
+  | .fieldOf _ e _ => if placeRoot e == some x then (seen, seen) else borrowAfterValue x seen e
   | .closure id clauses =>
     -- (One that uses the value may do so whenever it runs: from here on.)
+    -- One that looks at the name or writes it, written after the value is
+    -- used or using the value itself, could do so once the value is gone.
+    -- (One written before that does neither is seen to where the value is
+    -- given away: it must not be something that can still be called.)
     let u := nameUseExpr x (.closure id clauses)
-    (seen || u.valuedInside, u.shared || u.changed || u.fielded)
+    (seen || u.valuedInside,
+      (seen || u.valuedInside) && (u.shared || u.changed || u.fielded || u.looked))
   | .handle subject arms =>
     let (seen, bad) := borrowAfterValue x seen subject
     let u := arms.foldl (fun u c => u.or (nameUseClause x c)) ({} : NameUse)
-    (seen || u.valued || u.valuedInside, bad || u.shared || u.changed || u.fielded)
+    (seen || u.valued || u.valuedInside, bad || u.shared || u.changed || u.fielded || u.looked)
   | .labelScope _ body =>
     body.foldl (fun (seen, bad) s =>
       let (seen', bad') := borrowAfterValueStmt x seen s
@@ -860,7 +871,13 @@ partial def borrowAfterValueStmt (x : String) (seen : Bool) : Stmt → Bool × B
       let (_, bad) := borrowAfterValue x seen e
       (seen, bad)
   | .located _ _ s => borrowAfterValueStmt x seen s
-  | .assign target e => borrowAfterValues x seen [e, target]
+  | .assign target e =>
+    -- Writing the variable, or a place of it, once its value has been used
+    -- is as a borrow after is. The value written is computed first.
+    if placeRoot target == some x then
+      let (seen, bad) := borrowAfterValue x seen e
+      (seen, bad || seen)
+    else borrowAfterValues x seen [e, target]
 
 end
 
@@ -932,10 +949,11 @@ partial def markMoves (x : String) : Expr → Expr
   | .call id f args => .call id (markMoves x f) (args.map (markMoves x))
   | .tailCall id f args => .tailCall id (markMoves x f) (args.map (markMoves x))
   | .tuple args => .tuple (args.map (markMoves x))
-  | .proj e i => .proj (markMoves x e) i
+  -- (A part of the variable read where it is is not its value used.)
+  | .proj e i => if placeRoot e == some x then .proj e i else .proj (markMoves x e) i
   | .deref e => .deref (markMoves x e)
   | .reborrow u e => .reborrow u (markMoves x e)
-  | .fieldOf id e n => .fieldOf id (markMoves x e) n
+  | .fieldOf id e n => if placeRoot e == some x then .fieldOf id e n else .fieldOf id (markMoves x e) n
   | .closure id clauses => .closure id (clauses.map fun
       | .mk pats body => .mk pats (markMovesStmts x body))
   | .handle subject arms => .handle (markMoves x subject) (arms.map fun
@@ -956,22 +974,56 @@ partial def markMovesStmt (x : String) : Stmt → Stmt
 
 end
 
-/-- Is the value a name holds used as it is, with no borrow of the name
-after? Then the name gives its value away where it is used. A cleanup runs
-after what follows it: one that borrows the name is a borrow after any use
-of the value outside it. -/
+mutual
+
+/-- What follows a variable with each read of a part of it, `x.f`, left out:
+what remains is where the variable's whole value is used. -/
+partial def lessParts (x : String) : Expr → Expr
+  | .call id f args => .call id (lessParts x f) (args.map (lessParts x))
+  | .tailCall id f args => .tailCall id (lessParts x f) (args.map (lessParts x))
+  | .tuple args => .tuple (args.map (lessParts x))
+  | .proj e i => if placeRoot e == some x then .int 0 else .proj (lessParts x e) i
+  | .deref e => .deref (lessParts x e)
+  | .reborrow u e => .reborrow u (lessParts x e)
+  | .fieldOf id e n => if placeRoot e == some x then .int 0 else .fieldOf id (lessParts x e) n
+  | .closure id clauses => .closure id (clauses.map fun
+      | .mk pats body => .mk pats (lessPartsStmts x body))
+  | .handle subject arms => .handle (lessParts x subject) (arms.map fun
+      | .mk pats body => .mk pats (lessPartsStmts x body))
+  | .labelScope l body => .labelScope l (lessPartsStmts x body)
+  | e => e
+
+partial def lessPartsStmts (x : String) (body : List Stmt) : List Stmt :=
+  body.map (lessPartsStmt x)
+
+partial def lessPartsStmt (x : String) : Stmt → Stmt
+  | .let_ p e => .let_ p (lessParts x e)
+  | .letMut y e => .letMut y (lessParts x e)
+  | .expr e => .expr (lessParts x e)
+  | .defer e => .defer (lessParts x e)
+  | .located l c s => .located l c (lessPartsStmt x s)
+  | .assign target e =>
+    -- (Nor is a part of it written.)
+    .assign (if placeRoot target == some x then .name none "%place" else lessParts x target) (lessParts x e)
+
+end
+
+/-- Is the value a name holds used as it is, with no borrow of the name and
+nothing written to it after? Then the name gives its value away where it is
+used. A cleanup runs after what follows it: one that borrows the name is a
+borrow after any use of the value outside it. -/
 def givenAway (x : String) (rest : List Stmt) : Bool :=
   let (outside, cleanups) := splitDefersStmts rest
   let late := cleanups.any fun d =>
     let v := nameUseStmt x d
-    v.shared || v.fielded || v.changed
+    v.shared || v.fielded || v.changed || v.looked
   let early := nameUseStmts x outside
   if late && (early.valued || early.valuedInside) then false else
   let u := nameUseStmts x rest
   let (_, bad) := rest.foldl (fun (seen, bad) s =>
     let (seen', bad') := borrowAfterValueStmt x seen s
     (seen', bad || bad')) (false, false)
-  !u.changed && !u.fielded && !u.rebound && (u.valued || u.valuedInside) && !bad
+  !u.rebound && (u.valued || u.valuedInside) && !bad
 
 /-- Is a name bound here one that what follows borrows with `&` and never
 changes? It is then kept where a reference can point: as a variable is. -/

@@ -47,6 +47,7 @@ partial def inferExpr (scope : Scope) (amb : Row) : Expr → M Ty
     | .cancel => throw "`cancel` must be applied to a resumption"
     | .replace => throw "`replace` must be called"
     | .swap => throw "`swap` must be called"
+    | .overwrite => throw "`overwrite` must be called"
     | .const e => inferExpr [] amb e
   | .label l =>
     match scope.lookup ("@" ++ l) with
@@ -674,6 +675,18 @@ partial def inferCall (scope : Scope) (amb : Row) (f : Expr) (args : List Expr)
       use scope (.through first "the first reference given to `swap`" true)
       use scope (.through second "the second reference given to `swap`" true)
       pure .unit
+    | .overwrite => do
+      -- A value put where a reference points, with what was there neither
+      -- given back nor destroyed. Nothing is asked of the type, which is
+      -- why it is unsafe: whoever writes it says that nothing is there.
+      let s ← get
+      unless s.unsafeBlock || s.unsafeFns.contains s.owner do
+        throw "`overwrite` is unsafe: what the reference pointed to is neither given back nor destroyed. It can be named only in `unsafe { .. }` or in an `unsafe fn`; `replace` gives what was there back"
+      let t ← freshTy
+      let cap ← freshCap
+      checkArgs scope amb "`overwrite`" [.ref .uniq t cap, t] args call
+      use scope (.through cap "the reference given to `overwrite`" true)
+      pure .unit
     | .local (.val t _) => applyTy scope amb s!"`{x}`" t args call
     | .local (.cell t brand) => do
       mustDup t (readsCell x)
@@ -917,7 +930,7 @@ partial def inferStmts (scope : Scope) (amb : Row) (stmts : List Stmt)
           flagged := here :: s.flagged
           givenSites := (here, ⟨s.owner, at_.1, at_.2, Syntax.givenSite x, false⟩, t, pos) :: s.givenSites }
     let result ← inferStmts ((x, .cell t brand) :: scope) amb rest want
-    if given then checkUses here scope [(x, .val t brand)] rest
+    if given then checkUses here scope [(x, .val t brand)] (Syntax.lessPartsStmts x rest)
     checkEscape brand s!"`{x}` could be used after its block has ended"
       (("something that uses it is the block's result", result) :: scopeRoots scope) amb
     pure result

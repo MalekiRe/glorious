@@ -2564,11 +2564,12 @@ have to be used:
 **Borrowed, then given away.** A value that is borrowed is kept in a
 variable, and what a variable holds was copied when it was read: so
 `let a = peek(&n); eat(n)` could not be written for a value that is used
-once, which is how every resource is used. Now a variable that is never
-assigned, borrowed for writing or bound again gives its value away where the
-value is used: the use is counted as a name's is, a borrow still held then is
-refused ("`n` is given away while `r` holds a reference to it"), and the
-variable no longer destroys what it held. A callable written in the block
+once, which is how every resource is used. Now a variable that is not bound
+again gives its value away where the value is used: the use is counted as a
+name's is, a borrow still held then is refused ("`n` is given away while `r`
+holds a reference to it"), and the variable no longer destroys what it held.
+(At first this was only for a variable never assigned or borrowed for
+writing; see "Written, then given away" below.) A callable written in the block
 may be what uses the value, a `defer` among them: `defer { release(m); }`
 after `let m = ..;` is how a resource is given back however the block is
 left, with `&m` used in between. Such a callable holds the value, so it is
@@ -2610,6 +2611,90 @@ nothing silently.
   that puts it in a callable and lets that go. The function is checked with
   the type unknown.
 - A program with no `Drop` is checked as before.
+
+## Written, then given away
+
+`let mut f = open(); write(&mut f, ..); close(f)` is how a resource is
+used, and was refused: a variable that was assigned or borrowed for writing
+did not give its value away, so `close(f)` was a copy. So was a `Vec` of
+such values filled and then consumed. Now any variable gives its value
+away, on the same condition as before, with writing counted as borrowing
+is: in the order the block is written, nothing borrows the variable, writes
+it, or reads a part of it after its value is used.
+
+- **A part read where it is, `f.written`, is a look and not a use**: it
+  does not give the value away, and may come before the use that does. It
+  was counted as a use of the whole.
+- **A callable written before the value is used may borrow the variable**,
+  which is what a loop's body does: `while(.., { write(&mut f, ..) });
+  close(f)`. What was refused for every such callable is now refused where
+  the value is given away, for a callable that could still run after:
+  "`f` is given away while `g`, which uses it, can still be called". This
+  is seen from types, as held borrows are: whatever is still to be used,
+  and whatever the expression has computed, must not hold a callable that
+  uses the variable.
+- A callable that both uses the value and borrows the variable, or one that
+  borrows it written after the use, is as before: the read is then a copy.
+- An arm of a handler that borrows the variable still counts as coming
+  after, wherever it is written: when it runs is the handled code's to say.
+
+## Collections of what has to be used
+
+The library's `Vec`, `VecDeque`, `IntoIter` and the tables of `std::index`
+took their array out with `replace`, changed it, and assigned it back; the
+assignment let go of the empty array left meanwhile, which for a type that
+has to be used is letting go of that type. So a `Vec<Ticket>` could not be
+pushed to. Four things were in the way, each fixed:
+
+- **`overwrite(reference, value)`**, an intrinsic: the value put where the
+  reference points, what was there neither given back nor destroyed. It is
+  `unsafe`, as that is a value lost unless nothing was there. The prelude
+  has over it `push_at` and `pop_at`, which are safe (they take the array
+  out, leave an empty one, and write over that), and `restore_at`, which
+  is unsafe and is what the library uses to put an array back.
+- **An array written out, `[a, b]`, of values that have to be used** was
+  refused: each element is pushed by a call, and an element computed
+  before a call is let go if the call does not return. The calls a literal
+  stands for had no identity for "this one always returns" to be found
+  for; now they have.
+- **What is needed of a reference to a `T` is not needed of a `T`.** A
+  function with `T: Use<[0, 1]>` that used a `&mut [T]` twice was told `T`
+  is used more than once. A type parameter is now asked only of what holds
+  values of it: not through a reference, nor as what a callable takes.
+- Taking one field of a value, `v.items`, lets go of the rest; the
+  library's `into_vec` functions take the value apart by pattern instead.
+
+## `impl` with conditions for all its functions
+
+`impl<T> Interner<T> where T: Eq + Hash { .. }` was a syntax error: only an
+implementation of a trait took `where`. On a type's own functions the
+conditions are now asked of each function, as though written on each.
+
+## `std::bytes`, `std::index`, `std::error`
+
+The specification's binary readers and buffers (23) and its tables for
+building compilers (24): `ByteReader`, `ByteBuf`, hexadecimal; `Id<Tag>`,
+`IndexVec`, `Arena`, `GenArena`, `Interner`, `StringInterner`, `BitSet`,
+`SparseSet`, `WorkQueue`. All are ordinary source over arrays; `Tag` is a
+type parameter no field uses, which is enough to keep an `Id<Function>`
+from being an `Id<Block>`.
+
+- **Places and lengths are `Int`**, as everywhere in this library; an `Id`
+  holds a `u32` as specified and has `index` and `at` beside the
+  specification's conversions.
+- **Arrays where the specification has `Vec`**: `finish`, `into_vec`,
+  `hex_decode` give `[T]`, as the stream functions do.
+- **`read_str` gives a `Str` of its own**, not one borrowed from the bytes:
+  a text here is not a view of bytes.
+- **A mark knows how long what it was taken from was**, and no more: one
+  used on another reader of the same length is not refused. A `GenId` is
+  checked in full, by its generation.
+- **`Interner::find` takes its key by value**, as `Hash` and `Eq` do.
+- **`BitSet` keeps a flag for each place**, not bits packed in words.
+- Reserving room never fails here; the functions that say `ReserveError`
+  give it only for a size below nothing.
+- Not built: base64; `ByteReader::read_u128_le` is, the signed widths
+  other than `read_i64_le` are not in the specification.
 
 ## A row with several unknown parts
 

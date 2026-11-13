@@ -142,9 +142,13 @@ private def textValue (codes : List Nat) : Expr :=
 with, whatever the program has in scope. -/
 private def preludeFn (name : String) : Expr := .name (some "%prelude") name
 
-/-- `[a, b, c]` as a value: the empty array with each pushed on. -/
-private def arrayValue (elements : List Expr) : Expr :=
-  elements.foldl (fun acc e => .call 0 (preludeFn "push") [acc, e]) (.call 0 (preludeFn "array_empty") [])
+/-- `[a, b, c]` as a value: the empty array with each pushed on. The calls
+have identities where they are given, so that they are known to return: an
+element computed before the next is then not one that could be left
+behind. -/
+private def arrayValue (elements : List Expr) (empty : Nat := 0) (pushes : List Nat := []) : Expr :=
+  (elements.zipIdx.foldl (fun acc (e, i) => .call (pushes.getD i 0) (preludeFn "push") [acc, e])
+    (.call empty (preludeFn "array_empty") []))
 
 /-- `a[i]`, if this is one: the array and the place. -/
 private def indexed? : Expr → Option (Nat × Expr × Expr)
@@ -1057,8 +1061,15 @@ private partial def parsePrimary (noBlock : Bool) : P Expr := do
     | none => failAt "expected a value"
   | .punct "[" =>
     -- `[a, b, c]`, or `[x; n]`: `n` of `x`.
+    -- (The calls a literal stands for are numbered from where it is, apart
+    -- from the numbers of what is written; in a file too long for that
+    -- they go without.)
+    let base := (← read).base
+    let numbered := fun (at_ offset : Nat) => if at_ < 100000 then base + at_ + offset else 0
+    let empty := numbered (← get) 600000
     advance
-    if ← acceptPunct "]" then return arrayValue []
+    if ← acceptPunct "]" then return arrayValue [] empty
+    let mut starts : Array Nat := #[numbered (← get) 700000]
     let first ← parseBinary 0 false
     if ← acceptPunct ";" then
       let count ← parseBinary 0 false
@@ -1067,9 +1078,10 @@ private partial def parsePrimary (noBlock : Bool) : P Expr := do
     let mut elements : Array Expr := #[first]
     while ← acceptPunct "," do
       if (← peek) == .punct "]" then break
+      starts := starts.push (numbered (← get) 700000)
       elements := elements.push (← parseBinary 0 false)
     expectPunct "]"
-    pure (arrayValue elements.toList)
+    pure (arrayValue elements.toList empty starts.toList)
   | .ident "tail" =>
     advance
     match ← parsePostfix noBlock with
@@ -1512,6 +1524,8 @@ private partial def parseItem : P Item := do
     -- `impl Type { fn .. }`: functions of the type's own. Each is a function
     -- of this module named `Type::f`, and is written that way where it is
     -- called.
+    -- (`impl<T> Type<T> where T: Hash { .. }`: asked of each of its functions.)
+    let (_, shared) ← if (← peek) == .ident "where" then parseWhere else pure ([], [])
     if (← peek) == .punct "{" then
       advance
       let self := TypeExpr.name tr selfArgs.toList
@@ -1531,6 +1545,7 @@ private partial def parseItem : P Item := do
           items := items.push (match vis with
             | some parent => .pub parent f
             | none => f)
+          let bounds := bounds ++ shared
           unless bounds.isEmpty do items := items.push (.bounds own bounds)
         | other => items := items.push other
       expectPunct "}"

@@ -243,8 +243,23 @@ partial def bothAtOnce (loan brand : Nat) (write : Bool) (t : Ty) : M Bool := do
 def checkLoans : M Unit := do
   let s ← get
   modify fun st => { st with uses := #[] }
-  if s.loans.isEmpty then return
   let fail := fun (u : Use) (msg : String) => (throw (inFunction u.owner (u.pos ++ msg)) : M Unit)
+  -- A variable that gives its value away is not looked at again: a callable
+  -- that uses the variable, written before, must not be able to run after.
+  for u in s.uses do
+    if let .var brand x .move _ := u.kind then
+      if let some (_, _, t) := s.cells.toList.find? (·.1 == brand) then
+        modify fun st => { st with seen := [] }
+        if (← tyOwnsOnce [] t) || (← tyHasDrop [] t).isSome then
+          for name in u.later.eraseDups do
+            if name != x then
+              if let some held := (u.scope.lookup name).bind Binding.held then
+                if ← touchesVar brand false held then
+                  fail u s!"`{x}` is given away while `{name}`, which uses it, can still be called"
+          for (held, _) in u.temps do
+            if ← touchesVar brand false held then
+              fail u s!"`{x}` is given away while a callable this expression is still using uses it"
+  if s.loans.isEmpty then return
   for u in s.uses do
     match u.kind with
     | .var brand x how path =>
@@ -435,6 +450,7 @@ inductive Head where
   | cancel
   | replace
   | swap
+  | overwrite
   | const (e : Expr)
 
 def resolveName (scope : Scope) (qual : Option String) (x : String) : M Head := do
@@ -485,6 +501,7 @@ def resolveName (scope : Scope) (qual : Option String) (x : String) : M Head := 
   if x == "cancel" then return .cancel
   if x == "replace" then return .replace
   if x == "swap" then return .swap
+  if x == "overwrite" then return .overwrite
   if let some e := s.aliases.lookup x then return .const e
   throw s!"unknown name `{x}`"
 

@@ -611,6 +611,27 @@ fn element_mut<T>(a: &mut Array<T>, i: Int) -> Option<&mut T> {
     }
 }
 
+// An array put back where a reference points, after it was taken out with
+// `replace` to be changed, an empty one left in its place. The empty one is
+// written over: it holds nothing, so nothing is lost, whatever an element is.
+// Unsafe, since that is for whoever calls it to have seen to: an array that
+// was not taken out would be lost with all it holds.
+unsafe fn restore_at<T>(a: &mut Array<T>, items: Array<T>) { overwrite(a, items) }
+
+// An element added to the array a reference points to.
+fn push_at<T>(a: &mut Array<T>, x: T) {
+    let more = push(replace(a, array_empty()), x);
+    unsafe { restore_at(a, more) }
+}
+
+// The last element taken off it, if it has one.
+fn pop_at<T>(a: &mut Array<T>) -> Option<T> {
+    match(pop(replace(a, array_empty()))) {
+        Some((rest, last)) => unsafe { restore_at(a, rest) }; Some(last),
+        None => None
+    }
+}
+
 // The elements from one place up to, not including, another.
 fn slice(a, from, to) { slice_onto(a, from, to, array_empty()) }
 fn slice_onto(a, i, to, out) {

@@ -794,6 +794,7 @@ inductive Head where
   | cancel
   | replace
   | swap
+  | overwrite
   | const (e : Expr)
 
 def resolveName (scope : Scope) (qual : Option String) (x : String) : M Head := do
@@ -817,6 +818,7 @@ def resolveName (scope : Scope) (qual : Option String) (x : String) : M Head := 
   if x == "cancel" then return .cancel
   if x == "replace" then return .replace
   if x == "swap" then return .swap
+  if x == "overwrite" then return .overwrite
   if let some e := g.aliases.lookup x then return .const e
   throw s!"unknown name `{x}`"
 
@@ -847,6 +849,7 @@ partial def elabExpr (scope : Scope) (tailPos : Bool) : Expr → M Atom
     | .cancel => throw "`cancel` must be applied to a resumption"
     | .replace => throw "`replace` must be called"
     | .swap => throw "`swap` must be called"
+    | .overwrite => throw "`overwrite` must be called"
     | .const e => elabExpr [] false e
   | .label l =>
     match scope.lookup (labelName l) with
@@ -1103,6 +1106,13 @@ partial def elabCall (scope : Scope) (isTail : Bool) (f : Expr) (args : List Exp
         let was ← emit (.mem .swap [first, held])
         emit (.mem .store [second, was])
       | _ => throw "`swap` takes two references"
+    | .overwrite => do
+      -- A value put where a reference points, what was there neither read
+      -- nor given back.
+      if isTail then throw "`tail` applies to calls, not to `overwrite`"
+      match ← elabArgs scope args with
+      | [target, value] => emit (.mem .store [target, value])
+      | _ => throw "`overwrite` takes a reference and a value"
     | .const e => do
       let callee ← elabExpr [] false e
       elabApply scope isTail callee args

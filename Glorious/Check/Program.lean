@@ -301,14 +301,15 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
     for b in d.bounds do
       if b.trait == "Use" then
         if let (some (lower, upper), some param) := (b.quantity, seen.lookup s!"'{b.subject}@{d.name}") then
-          let mentions := fun (need : Ty) => match param with
-            | .var id => (freeTys need).contains id
-            | _ => false
+          -- (What is needed of a reference to a `T` is not needed of a `T`.)
+          let mentions := fun (need : Ty) => show M Bool from match param with
+            | .var id => tyHoldsVar [] id need
+            | _ => pure false
           if lower ≥ 1 then
-            if let some (_, why) := (opened.getD 1 #[]).find? fun (need, _) => mentions need then
+            if let some (_, why) ← (opened.getD 1 #[]).findM? fun (need, _) => mentions need then
               throw (inFunction d.name s!"`{b.subject}: Use<[{lower}, ..]>` says a `{b.subject}` has to be used, but {why}")
           if upper.isSome then
-            if let some (_, why) := (opened.getD 0 #[]).find? fun (need, _) => mentions need then
+            if let some (_, why) ← (opened.getD 0 #[]).findM? fun (need, _) => mentions need then
               throw (inFunction d.name s!"`{b.subject}: Use<[.., 1]>` says a `{b.subject}` is used at most once, but {why}")
           said := said.push (param, lower == 0, upper.isNone)
     modify fun s =>

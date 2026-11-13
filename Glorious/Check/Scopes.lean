@@ -443,6 +443,29 @@ partial def tyOwnsOnce (visiting : List String) (t : Ty) : M Bool := do
 
 end
 
+/-- Does a value of a type hold values of a type variable? Not through a
+reference, which is another's value, nor as what a callable takes or gives.
+So a `&mut [T]` used twice is not a `T` used twice. -/
+partial def tyHoldsVar (visiting : List String) (id : Nat) (t : Ty) : M Bool := do
+  match ← find t with
+  | .var v => pure (v == id)
+  | .tuple args => args.anyM (tyHoldsVar visiting id)
+  | .fn _ _ _ _ _ => pure false
+  | .ref _ _ _ => pure false
+  | .con name args => do
+    if visiting.contains name then return false
+    match (← get).types.lookup name with
+    | none => args.anyM (tyHoldsVar visiting id)
+    | some decl =>
+      let s ← get
+      -- (A type whose constructors are not known here is taken to hold
+      -- what it is given.)
+      if decl.ctors.isEmpty then return ← args.anyM (tyHoldsVar visiting id)
+      decl.ctors.anyM fun c => do
+        match s.ctors.lookup c with
+        | none => args.anyM (tyHoldsVar visiting id)
+        | some sig => (sig.fieldsAt args).anyM (tyHoldsVar (name :: visiting) id)
+
 /-- Require that values of a type may be used more than once. -/
 def mustDup (t : Ty) (why : String) : M Unit :=
   modify fun s => { s with dups := s.dups.push (t, s.pos ++ why) }
