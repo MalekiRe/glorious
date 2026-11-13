@@ -362,6 +362,8 @@ def explainStuck (c : Compiled) (cfg : Core.Config) : String :=
           else if code == 7 then
             let kind := if second < 0 then s!"{second.natAbs} bits without a sign" else s!"{second} bits"
             s!"`{first}` does not fit its type, which has {kind}"
+          else if code == 39 then
+            s!"place `{first}` is asked of something that has {second}"
           else s!"an operation on ({shown vs}) has no result: it would not fit, or there is none"
         else s!"an arithmetic intrinsic is applied to ({shown vs})"
       | none => unbound

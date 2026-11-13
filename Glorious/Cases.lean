@@ -1745,6 +1745,26 @@ def cases : List Case := [
   -- that makes it.
   ⟨"struct W(Int)\nfn get(w: &W) -> &Int { &(*w).0 }\nfn main() { let mut w = W(5); *get(&w) }",
     [], "error: 2:25: in `get`: a borrow of a field of what a reference points to lasts only inside the function that makes it, and here it is given back or kept: give back the reference itself, or the field's value"⟩,
+  -- Arrays: `[a, b]`, `[x; n]`, `a[i]`, `a[i] = v`, `[T]`. An array is a
+  -- value; a place that is not there stops the program.
+  ⟨"fn main() { let a = [10, 20, 30]; say(a); say(len(a)); say(a[1]); let b = push(a, 40); say(b); say(a); say([1.5; 3]); say(b\"hi\"); a[0] + b[3] }",
+    [], "[10, 20, 30]\n3\n20\n[10, 20, 30, 40]\n[10, 20, 30]\n[1.5, 1.5, 1.5]\n[104, 105]\n50"⟩,
+  ⟨"fn main() { let mut a = [1, 2, 3]; a[1] = 20; a[2] = a[1] + a[0]; say(a); let mut grid = [[0; 2]; 2]; grid[1][0] = 7; say(grid); grid[1][0] }",
+    [], "[1, 20, 21]\n[[0, 0], [7, 0]]\n7"⟩,
+  ⟨"fn main() { let a = [1, 2, 3]; a[3] }",
+    [], "went wrong"⟩,
+  ⟨"fn sum(a: [Int]) -> Int { fold(a, 0, fn(acc, x) { acc + x }) }\nfn main() { let mut a: [Int] = []; a = push(a, 4); a = push(a, 5); say(get(a, 1)); say(get(a, 2)); match(pop(a)) { Some((rest, last)) => sum(rest) * 10 + last, None => 0 } }",
+    [], "Ok(5)\nErr(())\n45"⟩,
+  ⟨"fn fill(n, a) { if(n == 0) { a } else { fill(n - 1, push(a, n * n)) } }\nfn main() { let a = fill(100, []); each([1, 2], { x => print(x) }); a[0] + a[99] + len(a) }",
+    [], "1\n2\n10101"⟩,
+  ⟨"struct P { xs: [Int], n: Int }\nfn main() { let mut p = P { xs: [1, 2], n: 0 }; p.xs[1] = 9; p.xs[0] + p.xs[1] }",
+    [], "10"⟩,
+  ⟨"fn main() { let s = \"héllo\"; len(s) + len([s, s]) }",
+    [], "7"⟩,
+  ⟨"fn main() { let a = [1, 2, 3, 4, 5]; say(slice(a, 1, 4)); let cs = chars(\"hello\"); say(cs[1]); let mut up = cs; up[0] = 'J'; say(text(up)); say(text(slice(up, 1, 3))); len(cs) }",
+    [], "[2, 3, 4]\ne\nJello\nel\n5"⟩,
+  ⟨"fn main() { let a: [Int; 3] = [1, 2, 3]; 0 }",
+    [], "error: 1:24: an array's type does not say how long it is: write `[T]`, found `;`"⟩,
   -- `drop` is not for a program to call.
   ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nfn main() { let mut f = File(7); drop(&mut f); 0 }",
     [], "error: 3:34: in `main`: `drop` is run when what holds a value ends; a program does not call it"⟩,

@@ -160,7 +160,7 @@ def prims : List (String × Prim × Nat) :=
    ("int_shl", .intShl, 2), ("int_shr", .intShr, 2),
    ("uw_add", .uwAdd, 2), ("uw_sub", .uwSub, 2), ("uw_mul", .uwMul, 2),
    ("uw_div", .uwDiv, 2), ("uw_rem", .uwRem, 2), ("uw_lt", .uwLt, 2),
-   ("uw_shl", .uwShl, 2), ("uw_shr", .uwShr, 2)]
+   ("uw_shl", .uwShl, 2), ("uw_shr", .uwShr, 2), ("int_below", .intBelow, 2)]
 
 /-- The names that take a scalar to the integer it is held as, and back. -/
 def casts : List String :=

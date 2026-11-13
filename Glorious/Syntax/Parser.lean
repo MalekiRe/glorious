@@ -125,6 +125,19 @@ private def textValue (codes : List Nat) : Expr :=
       .call 0 (.name (some "%prelude::Str") "StrChar") [scalarValue "char_of" (c : Int), rest])
     (.name (some "%prelude::Str") "StrEnd")
 
+/-- A function of the prelude that the compiler writes a literal or an index
+with, whatever the program has in scope. -/
+private def preludeFn (name : String) : Expr := .name (some "%prelude") name
+
+/-- `[a, b, c]` as a value: the empty array with each pushed on. -/
+private def arrayValue (elements : List Expr) : Expr :=
+  elements.foldl (fun acc e => .call 0 (preludeFn "push") [acc, e]) (.call 0 (preludeFn "array_empty") [])
+
+/-- `a[i]`, if this is one: the array and the place. -/
+private def indexed? : Expr → Option (Nat × Expr × Expr)
+  | .call id (.name (some "%prelude") "index") [a, i] => some (id, a, i)
+  | _ => none
+
 /-- A literal other than a plain whole number, if one is next, perhaps after
 a `-` already read. -/
 private def scalarLiteral (neg : Bool) : P (Option Expr) := do
@@ -147,6 +160,10 @@ private def scalarLiteral (neg : Bool) : P (Option Expr) := do
     if neg then failAt "a text has no sign"
     advance
     pure (some (textValue codes))
+  | .bytes codes =>
+    if neg then failAt "bytes have no sign"
+    advance
+    pure (some (arrayValue (codes.map fun (c : Nat) => scalarValue "u8_of" (c : Int))))
   | _ => pure none
 
 /-- A literal as a pattern: the value it is, to be compared with. -/
@@ -377,6 +394,13 @@ private partial def parseType : P TypeExpr := do
     match args with
     | [t] => pure t
     | _ => pure (.tuple args)
+  | .punct "[" =>
+    -- `[T]`: an array of `T`.
+    advance
+    let element ← parseType
+    if (← peek) == .punct ";" then failAt "an array's type does not say how long it is: write `[T]`"
+    expectPunct "]"
+    pure (.name "%prelude::Array" [element])
   | _ => failAt "expected a type"
 
 /-- What follows `->` in a callable: its result, which may be left out when
@@ -644,6 +668,13 @@ private partial def parsePostfix (noBlock : Bool) : P Expr := do
       while (← peek) == .punct "{" do
         args := args ++ [← parseBraces]
       e := .call id e args
+    | .punct "[" =>
+      -- `a[i]`: the element at a place.
+      let id := (← read).base + (← get) + 1
+      advance
+      let place ← parseBinary 0 false
+      expectPunct "]"
+      e := .call id (preludeFn "index") [e, place]
     | .punct "." =>
       match ← peek 1 with
       | .int n =>
@@ -670,10 +701,25 @@ private partial def parsePrimary (noBlock : Bool) : P Expr := do
     let v ← plainInt false n
     advance
     pure (.int v)
-  | .typed _ _ | .float _ _ _ | .char _ | .str _ =>
+  | .typed _ _ | .float _ _ _ | .char _ | .str _ | .bytes _ =>
     match ← scalarLiteral false with
     | some e => pure e
     | none => failAt "expected a value"
+  | .punct "[" =>
+    -- `[a, b, c]`, or `[x; n]`: `n` of `x`.
+    advance
+    if ← acceptPunct "]" then return arrayValue []
+    let first ← parseBinary 0 false
+    if ← acceptPunct ";" then
+      let count ← parseBinary 0 false
+      expectPunct "]"
+      return .call 0 (preludeFn "array_repeat") [first, count]
+    let mut elements : Array Expr := #[first]
+    while ← acceptPunct "," do
+      if (← peek) == .punct "]" then break
+      elements := elements.push (← parseBinary 0 false)
+    expectPunct "]"
+    pure (arrayValue elements.toList)
   | .ident "tail" =>
     advance
     match ← parsePostfix noBlock with
@@ -799,6 +845,15 @@ private partial def parseStmts : P (List Stmt) := do
         let id := (← read).base + (← get) + 1
         let value ← parseBinary 0 false
         -- `x.0 = v` and `(*p).0 = v` assign through a borrow of the field.
+        -- `a[i] = v` makes `a` the array with `v` at that place: `a =
+        -- index_set(a, i, v)`, and so on outwards for `a[i][j] = v`.
+        let rec lower (fuel : Nat) (target value : Expr) : Expr × Expr :=
+          match fuel, indexed? target with
+          | fuel + 1, some (at_, inner, place) =>
+            -- Known by the identity of the `[`, moved clear of every token's.
+            lower fuel inner (.call (at_ + 500000) (preludeFn "index_set") [inner, place, value])
+          | _, _ => (target, value)
+        let (e, value) := lower 16 e value
         let target := match fieldRoot e with
           | some (root, path) => Expr.deref (fieldBorrow id true root path)
           | none => e

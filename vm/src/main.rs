@@ -97,6 +97,7 @@ enum Prim {
     ULt,
     UShl,
     UShr,
+    Below,
 }
 
 #[derive(Clone, Copy)]
@@ -265,6 +266,7 @@ impl Reader<'_> {
             36 => Ok(Prim::ULt),
             37 => Ok(Prim::UShl),
             38 => Ok(Prim::UShr),
+            39 => Ok(Prim::Below),
             t => Err(format!("unknown intrinsic {t}")),
         }
     }
@@ -953,6 +955,7 @@ fn prim(p: Prim, args: &[Value]) -> Step<Value> {
                 unsigned(Some(ua >> b))
             }
         }
+        Prim::Below => (0 <= a && a < b).then_some(a),
     };
     result.map(Value::Int).ok_or(Stop::Wrong)
 }

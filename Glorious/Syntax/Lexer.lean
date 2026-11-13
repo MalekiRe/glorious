@@ -17,6 +17,8 @@ inductive Tok where
   | char (code : Nat)
   /-- A text, `"abc"`: the codes of its characters. -/
   | str (codes : List Nat)
+  /-- Bytes, `b"abc"`: each below 256. -/
+  | bytes (codes : List Nat)
   /-- A symbolic operator such as `+` or `==`. -/
   | op (s : String)
   /-- Punctuation: `( ) { } [ ] , ; . @ : :: = => ->`. -/
@@ -37,6 +39,7 @@ def Tok.describe : Tok → String
   | .float _ _ _ => "a number"
   | .char _ => "a character"
   | .str _ => "a text"
+  | .bytes _ => "bytes"
   | .op s => s!"`{s}`"
   | .punct s => s!"`{s}`"
   | .eof => "end of input"
@@ -146,6 +149,13 @@ private partial def lexLoop (cs : Array Char) (i line col : Nat) (acc : Array To
       match skipComment cs (i + 2) line (col + 2) 1 with
       | some (j, line', col') => lexLoop cs j line' col' acc
       | none => throw s!"{line}:{col}: this comment is not closed"
+    else if c == 'b' && cs[i + 1]? == some '"' then
+      -- `b"abc"`: bytes, each a character below 128 or `\xNN`.
+      match lexText cs (i + 2) line col #[] with
+      | .ok (codes, j) =>
+        if codes.any (· > 255) then throw s!"{line}:{col}: a byte is a character below 128, or `\\xNN`"
+        else lexLoop cs j line (col + (j - i)) (acc.push ⟨.bytes codes, line, col⟩)
+      | .error e => throw e
     else if c == 'b' && cs[i + 1]? == some '\'' then
       -- `b'x'`: a byte, which is a `u8`.
       let read : Except String (Nat × Nat) :=

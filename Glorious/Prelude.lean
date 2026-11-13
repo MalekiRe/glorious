@@ -499,6 +499,155 @@ impl<T, E> Show for Result<T, E> where T: Show, E: Show {
     }
 }
 
+// An array: how many elements it has, and the elements as a tree in which
+// place 0 is at the top, the odd places are on the left and the even ones on
+// the right. To read or change a place goes through as many elements as the
+// length has bits; an array is a value, and changing one makes another that
+// shares all but that path with it.
+mod array_tree {
+    pub enum Tree<T> { Tip, Fork(T, Tree<T>, Tree<T>) }
+
+    pub fn tree_get(t, i) {
+        match(t) {
+            Fork(x, l, r) => match(i) {
+                0 => x,
+                _ => match(int_and(i, 1)) {
+                    1 => tail tree_get(l, int_shr(i, 1)),
+                    _ => tail tree_get(r, int_sub(int_shr(i, 1), 1))
+                }
+            },
+            // The place was asked to be below the length, so this cannot be.
+            Tip => tail tree_get(Tip, int_below(i, 0))
+        }
+    }
+
+    // One past the last place makes the tree one longer.
+    pub fn tree_set(t, i, v) {
+        match(t) {
+            Fork(x, l, r) => match(i) {
+                0 => Fork(v, l, r),
+                _ => match(int_and(i, 1)) {
+                    1 => Fork(x, tree_set(l, int_shr(i, 1), v), r),
+                    _ => Fork(x, l, tree_set(r, int_sub(int_shr(i, 1), 1), v))
+                }
+            },
+            Tip => Fork(v, Tip, Tip)
+        }
+    }
+
+    // Without the element at the last place, `i`, and that element.
+    pub fn tree_pop(t, i) {
+        match(t) {
+            Fork(x, l, r) => match(i) {
+                0 => (Tip, x),
+                _ => match(int_and(i, 1)) {
+                    1 => match(tree_pop(l, int_shr(i, 1))) { (rest, last) => (Fork(x, rest, r), last) },
+                    _ => match(tree_pop(r, int_sub(int_shr(i, 1), 1))) { (rest, last) => (Fork(x, l, rest), last) }
+                }
+            },
+            Tip => tail tree_pop(Tip, int_below(i, 0))
+        }
+    }
+
+    pub fn tree_fold(t, n, i, acc, f) {
+        match(int_lt(i, n)) {
+            0 => acc,
+            _ => tail tree_fold(t, n, int_add(i, 1), f(acc, tree_get(t, i)), f)
+        }
+    }
+}
+use array_tree::{Tree, Tip, Fork, tree_get, tree_set, tree_pop, tree_fold};
+
+struct Array<T>(Int, Tree<T>)
+
+// `a[i]` is `index(a, i)`, and `a[i] = v` makes `a` be `index_set(a, i, v)`.
+// A place that is not there has no meaning: the program stops.
+trait Index {
+    type Elem;
+    fn index(Self, Int) -> Elem
+    fn index_set(Self, Int, Elem) -> Self
+}
+impl<T> Index for Array<T> {
+    type Elem = T;
+    fn index(a, i) { match(a) { Array(n, t) => tree_get(t, int_below(i, n)) } }
+    fn index_set(a, i, v) { match(a) { Array(n, t) => Array(n, tree_set(t, int_below(i, n), v)) } }
+}
+
+trait Len { fn len(Self) -> Int }
+impl<T> Len for Array<T> { fn len(a) { match(a) { Array(n, _) => n } } }
+impl Len for Str { fn len(text) { length(text) } }
+
+// What `[a, b]` and `[x; n]` are made with.
+fn array_empty() { Array(0, Tip) }
+fn array_repeat(x, n) {
+    match(int_lt(0, n)) {
+        0 => Array(0, Tip),
+        _ => push(array_repeat(x, int_sub(n, 1)), x)
+    }
+}
+
+fn push(a, v) { match(a) { Array(n, t) => Array(int_add(n, 1), tree_set(t, n, v)) } }
+
+// The array without its last element, and that element; nothing if it is empty.
+fn pop(a) {
+    match(a) {
+        Array(n, t) => match(n) {
+            0 => None,
+            _ => match(tree_pop(t, int_sub(n, 1))) { (rest, last) => Some((Array(int_sub(n, 1), rest), last)) }
+        }
+    }
+}
+
+// The element at a place, if the place is there.
+fn get(a, i) {
+    match(a) {
+        Array(n, t) => match(int_mul(int_lt(-1, i), int_lt(i, n))) {
+            0 => None,
+            _ => Some(tree_get(t, i))
+        }
+    }
+}
+
+// The elements from one place up to, not including, another.
+fn slice(a, from, to) { slice_onto(a, from, to, array_empty()) }
+fn slice_onto(a, i, to, out) {
+    match(int_lt(i, to)) {
+        0 => out,
+        _ => tail slice_onto(a, int_add(i, 1), to, push(out, index(a, i)))
+    }
+}
+
+// A text as its characters, and characters as a text.
+fn chars(text) { chars_onto(text, array_empty()) }
+fn chars_onto(text, out) {
+    match(text) {
+        StrEnd => out,
+        StrChar(c, rest) => tail chars_onto(rest, push(out, c))
+    }
+}
+fn text(a) { text_before(a, len(a), StrEnd) }
+fn text_before(a, i, rest) {
+    match(i) {
+        0 => rest,
+        _ => tail text_before(a, int_sub(i, 1), StrChar(index(a, int_sub(i, 1)), rest))
+    }
+}
+
+// `f(f(f(init, a[0]), a[1]), ..)`.
+fn fold(a, init, f) { match(a) { Array(n, t) => tree_fold(t, n, 0, init, f) } }
+fn each(a, f) { fold(a, (), fn(done, x) { f(x) }) }
+
+impl<T> Show for Array<T> where T: Show {
+    fn show(a) {
+        "[" ++ fold(a, "", fn(text, x) {
+            match(text) {
+                StrEnd => show(x),
+                _ => text ++ ", " ++ show(x)
+            }
+        }) ++ "]"
+    }
+}
+
 // Write a value as text.
 fn say(value) { host_write(show(value)) }
 

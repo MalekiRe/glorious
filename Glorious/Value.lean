@@ -113,6 +113,9 @@ inductive Prim where
   | uwLt
   | uwShl
   | uwShr
+  /-- The first integer, if it is at least zero and below the second: a place
+  in something of that many places. Else no meaning. -/
+  | intBelow
 
 /-- A computation that produces a value without transferring control. -/
 inductive Rhs where
@@ -256,6 +259,7 @@ def Prim.eval : Prim → List Value → Option Value
   | .uwShl, [.int a, .int b] =>
     if 0 ≤ b ∧ b < 128 then ofUnsigned (unsigned a * 2 ^ b.toNat) else none
   | .uwShr, [.int a, .int b] => if 0 ≤ b then ofUnsigned (unsigned a / 2 ^ b.toNat) else none
+  | .intBelow, [.int a, .int b] => if 0 ≤ a ∧ a < b then checkedWide a else none
   | _, _ => none
 
 def Atom.eval (ρ : Env) : Atom → Option Value

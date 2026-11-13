@@ -91,6 +91,7 @@ def prim : Bytes → Option (Prim × Bytes)
   | 36 :: bs => some (.uwLt, bs)
   | 37 :: bs => some (.uwShl, bs)
   | 38 :: bs => some (.uwShr, bs)
+  | 39 :: bs => some (.intBelow, bs)
   | _ => none
 
 def rhs : Bytes → Option (Rhs × Bytes)

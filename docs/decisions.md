@@ -897,6 +897,38 @@ Not built. Conversion other than through `Int` (`u8(n)`, `int(x)`, `f64(n)`,
 `widen`, `narrow`, `char(code)`). A `Str` is a list: there are no arrays, so
 its length is counted.
 
+## Arrays are the prelude's
+
+**Decision: an array is a value the prelude builds, not one the machines
+have.** `[a, b, c]`, `[x; n]`, `a[i]`, `a[i] = v`, the type `[T]`, and
+`b"bytes"` (a `[u8]`) are written by the compiler with the prelude's
+`Array<T>`, `push`, `index` and `index_set`, whatever the program has in
+scope, as a text is with `Str`'s constructors. An `Array<T>` is its length
+and a tree in which place 0 is at the top, the odd places on the left and the
+even on the right; reading or changing a place goes through as many elements
+as the length has bits. It is a value: `a[i] = v` makes `a` another array
+that shares all but one path with the old one, so an array can be kept,
+passed and compared like a number, and no borrow is needed to change one.
+`a[i]` is `index(a, i)` of the trait `Index`, which leaves `Elem` to its
+implementations, so a program's own type can be indexed.
+
+A place that is not there has no meaning: Core has one more primitive,
+`intBelow`, which gives its first integer if it is at least zero and below
+its second.
+
+Also: `len` (trait `Len`, of arrays and texts), `get` (an `Option`), `pop`,
+`fold`, `each`, `slice`, `chars` and `text`, and `Show`.
+
+Why not in Core. A real array needs a type, four computations and their
+bytecode, and a case in every theorem of the typing and of the compiler's
+correctness. That is on the list of what is left for Core; this gives the
+language arrays now, with every program still certified as before.
+
+Limits. Reading and changing cost the logarithm of the length, not a
+constant. `[T; N]`, an array whose type says how long it is, is not built. A
+slice is a new array. A `Str` is still a list of characters; `chars` and
+`text` go between the two. In `b"..."` each byte is a character below 128.
+
 ## Traits, filled out
 
 **Decision: every addition is settled before the solver, which is as it
