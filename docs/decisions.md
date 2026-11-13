@@ -988,6 +988,28 @@ Limits. `move x` of a mutable variable, and `move *reference`, are refused
 with `replace` as what to write: a variable that holds nothing for a while is
 not followed. A use of `x` later in the statement that moves it is not seen.
 
+## What a function needs of a type parameter it wrote
+
+**A hole, closed.** A function with its type parameters written,
+`fn twice<T>(t: T) -> (T, T) { (t, t) }`, could use a `T` twice or let one go,
+and be called with a type that has to be used exactly once: a `File` was
+duplicated, or dropped (the specification's case L20). A type parameter that
+is written was taken for a type already known, of which nothing more needed
+asking. It is now what an unwritten one always was: what the body needs of it,
+to go unused or to be used more than once, is part of the function's type and
+is asked of the type it is at each call.
+
+**Decision: `T: Use<[fewest, most]>` says it.** Written of a type parameter,
+it is all the body may need: `Use<[1, 1]>` and the body can neither let a `T`
+go nor use one twice; `Use<[0, 1]>` and it can let one go; `Use<[0, *]>` and
+it can do both. And it is what a caller has to give, whether or not the body
+makes use of it. Where nothing is written, what the body needs is found, as
+the traits it needs are.
+
+Limits. The specification has a type parameter with nothing written be one
+that has to be used; here that is found from the body instead, so a function
+may be given more freedom than it wrote down.
+
 ## What the specification's audit turned away
 
 An audit of the language specification against the compiler, section by

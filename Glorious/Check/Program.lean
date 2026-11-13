@@ -253,7 +253,45 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
   for d in decls do
     let t0 ← zonk ((defs.lookup d.name).getD .unit)
     let (t1, seen) ← openParams [] t0
+    -- What the body needs of a type parameter it wrote, to be let go or to
+    -- be used more than once, it needs of the type the parameter is at each
+    -- use: said of the parameter as the function's type has it.
+    let before ← get
+    let mut seen := seen
+    let mut opened : Array (Array (Ty × String)) := #[]
+    for needs in [before.dups, before.drops, before.stays] do
+      let mut out : Array (Ty × String) := #[]
+      for (need, why) in needs do
+        let (need, seen') ← openParams seen (← zonk need)
+        seen := seen'
+        out := out.push (need, why)
+      opened := opened.push out
+    modify fun s =>
+      { s with dups := opened.getD 0 #[], drops := opened.getD 1 #[], stays := opened.getD 2 #[] }
+    -- `T: Use<[fewest, most]>`: what is said of a type parameter is all the
+    -- body may need of it, and is what a caller has to give.
+    let mut said : Array (Ty × Bool × Bool) := #[]
+    for b in d.bounds do
+      if b.trait == "Use" then
+        if let (some (lower, upper), some param) := (b.quantity, seen.lookup s!"'{b.subject}@{d.name}") then
+          let mentions := fun (need : Ty) => match param with
+            | .var id => (freeTys need).contains id
+            | _ => false
+          if lower ≥ 1 then
+            if let some (_, why) := (opened.getD 1 #[]).find? fun (need, _) => mentions need then
+              throw (inFunction d.name s!"`{b.subject}: Use<[{lower}, ..]>` says a `{b.subject}` has to be used, but {why}")
+          if upper.isSome then
+            if let some (_, why) := (opened.getD 0 #[]).find? fun (need, _) => mentions need then
+              throw (inFunction d.name s!"`{b.subject}: Use<[.., 1]>` says a `{b.subject}` is used at most once, but {why}")
+          said := said.push (param, lower == 0, upper.isNone)
+    modify fun s =>
+      { s with
+        drops := s.drops ++ said.filterMap fun (param, drops, _) =>
+          if drops then some (param, "its type parameter is said to be one that can go unused") else none
+        dups := s.dups ++ said.filterMap fun (param, _, dups) =>
+          if dups then some (param, "its type parameter is said to be one that can be used more than once") else none }
     let scheme ← generalize t1 [] false
+    modify fun s => { s with dups := before.dups, drops := before.drops, stays := before.stays }
     -- What a lifetime is said to hold of a type parameter, it holds of the
     -- type the parameter is at each use.
     let mut edges : Array (Nat × Captured) := #[]
@@ -502,8 +540,9 @@ def checkGroup (decls : List FnDecl) : M Unit := do
       let environments := (d.bounds.filter (·.trait == "Environment")).map (·.subject)
       for b in d.bounds do
         if b.trait == "Use" then
-          unless environments.contains b.subject do
-            throw s!"`{b.subject}: Use<..>`: how often it is used can be said here only of an environment, `{b.subject}: Environment<'e>`"
+          -- Of an environment, or of a type parameter.
+          unless environments.contains b.subject || (genericParams d.params).contains b.subject do
+            throw s!"`{b.subject}: Use<..>`: how often it is used is said of a type parameter or an environment of `{d.name}`"
       for env in environments do
         let quantity := (d.bounds.find? fun b => b.trait == "Use" && b.subject == env).bind (·.quantity)
         let (must, once) : Bool × Bool := match quantity with

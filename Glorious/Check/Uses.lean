@@ -83,6 +83,16 @@ partial def tyMustUse (info : MustInfo) (visiting : List String) (t : Ty) :
           (sig.fieldsAt args).findSomeM?
             (tyMustUse info (name :: visiting))
 
+/-- Does a type mention a type parameter the function being checked wrote?
+What such a type is, is known only where the function is used. -/
+partial def hasParam : Ty → Bool
+  | .con n [] => n.startsWith "'" && n.length > 1
+  | .con _ args => args.any hasParam
+  | .tuple args => args.any hasParam
+  | .fn ps r _ _ _ => ps.any hasParam || hasParam r
+  | .ref _ t _ => hasParam t
+  | _ => false
+
 /-- Record that a value of this type is let go unused here. -/
 def mustDrop (t : Ty) (why : String) : M Unit := do
   unless (← get).anyMust do return
@@ -932,7 +942,8 @@ def checkUses (pos : String) (outer : Scope) (binds : Scope) (body : List Stmt) 
       if mentions ≥ 2 then
         let t ← zonk t
         modify fun st => { st with seen := [] }
-        let settled := (freeTys t).isEmpty && (freeCaps t).isEmpty && !(← tyOwnsOnce [] t)
+        let settled := (freeTys t).isEmpty && (freeCaps t).isEmpty && !hasParam t
+          && !(← tyOwnsOnce [] t)
         unless settled do
           match pathUses ctx (names.filter (· != x)) x body with
           | some n => if n ≥ 2 then mustDup t s!"`{x}` is used more than once"
@@ -1039,7 +1050,7 @@ def runLowerChecks (fnTy : Ty) : M Unit := do
     if certain.contains x then continue
     let t ← zonk t
     -- Only a type that has to be used, or one not yet known, needs the count.
-    let free := !(freeTys t).isEmpty || !(freeCaps t).isEmpty
+    let free := !(freeTys t).isEmpty || !(freeCaps t).isEmpty || hasParam t
     modify fun st => { st with seen := [] }
     unless free || (← tyMustUse roots [] t).isSome do continue
     let mut unused := false
