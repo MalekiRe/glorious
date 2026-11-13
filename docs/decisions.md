@@ -852,6 +852,30 @@ Limits. The test has to be written before the block in the arguments of a
 call, since the block is read knowing what it is given. A program run without
 the checker has no names from an `is`.
 
+## A type's own functions are its module's, named after it
+
+**Decision: `impl Type { fn f(..) }` declares a function of the module the
+implementation is written in, named `Type::f`.** It is called `Type::f(..)`,
+and is as private as it is written: without `pub`, the module's. The type's
+parameters after `impl` are the function's first type parameters, and `Self`
+in what the function takes and gives is the type. Two functions of one name
+in a type's implementations are a function declared twice, whatever they
+take, as the text asks. The call has an explicit receiver; there is no
+`value.f(..)`.
+
+A module for the type's functions, beside the type, was tried first and does
+not work: it would use the module it is in, which uses it, and modules do not
+use each other in a circle.
+
+`Self` is also the type in the functions of `impl Trait for Type`.
+
+`const NAME: Type = value;` and `let NAME: Type = value;` at the top of a
+module are a value with a name, of that type; either can be a pattern.
+
+Limits. `Self::f(..)` is not read where a function is called: the type is
+written. `impl<T: Bound> Type<T>` is not; the bound is written on the
+function. A constant is computed where it is named, each time.
+
 ## What the specification's audit turned away
 
 An audit of the language specification against the compiler, section by

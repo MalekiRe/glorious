@@ -1073,6 +1073,20 @@ private partial def parseWhere : P (List String × List Bound) := do
     if !(← acceptPunct ",") then break
   pure (out.toList, bounds.toList)
 
+/-- `pub`, if it is next: whether it is `pub(super)`, which lets only the
+module this one is written in see. `pub(crate)` is `pub`: there is one package. -/
+private def acceptPub : P (Option Bool) := do
+  if (← peek) != .ident "pub" then return none
+  advance
+  if (← peek) == .punct "(" then
+    advance
+    let scope ← expectIdent
+    unless scope == "crate" || scope == "super" do
+      failAt "expected `pub(crate)` or `pub(super)`"
+    expectPunct ")"
+    return some (scope == "super")
+  pure (some false)
+
 /-- A function, and what is written of its type parameters. -/
 private partial def parseFn : P (Item × List Bound) := do
   advance
@@ -1141,10 +1155,24 @@ private partial def parseItem : P Item := do
   | .ident "let" =>
     advance
     let name ← expectIdent
+    -- `let NAME: Type = value;`: the value, of that type.
+    let ty ← if ← acceptPunct ":" then some <$> parseType else pure none
     expectPunct "="
     let value ← parseBinary 0 false
     expectPunct ";"
-    pure (.alias name value)
+    pure (.alias name (match ty with
+      | some ty => Expr.call 0 (.name none ascribeMark) [value, ty.asExpr]
+      | none => value))
+  | .ident "const" =>
+    -- `const NAME: Type = value;`: a value with a name, as `let` is here.
+    advance
+    let name ← expectIdent
+    expectPunct ":"
+    let ty ← parseType
+    expectPunct "="
+    let value ← parseBinary 0 false
+    expectPunct ";"
+    pure (.alias name (Expr.call 0 (.name none ascribeMark) [value, ty.asExpr]))
   | .ident "impl" =>
     advance
     let params ← parseGenerics
@@ -1176,9 +1204,37 @@ private partial def parseItem : P Item := do
       expectPunct "{"
       expectPunct "}"
       return .use head lower upper
+    -- `impl Type { fn .. }`: functions of the type's own. Each is a function
+    -- of this module named `Type::f`, and is written that way where it is
+    -- called.
+    if (← peek) == .punct "{" then
+      advance
+      let argNames := given.toList.filterMap fun
+        | .typeAlias _ _ (.name x []) => some x
+        | _ => none
+      let self := TypeExpr.name tr (argNames.map (TypeExpr.name · []))
+      let mut items : Array Item := #[]
+      repeat
+        if (← peek) == .punct "}" then break
+        let vis ← acceptPub
+        if (← peek) != .ident "fn" then failAt "expected `fn`: an implementation gives functions"
+        let (item, bounds) ← parseFn
+        match item with
+        | .fn name ps annots ret clauses =>
+          let ps := params ++ ps.filter (!params.contains ·)
+          let own := s!"{tr}::{name}"
+          let f := Item.fn own ps (annots.map (·.map (TypeExpr.withSelf self)))
+            (ret.map (TypeExpr.withSelf self)) clauses
+          items := items.push (match vis with
+            | some parent => .pub parent f
+            | none => f)
+          unless bounds.isEmpty do items := items.push (.bounds own bounds)
+        | other => items := items.push other
+      expectPunct "}"
+      return .module inherentMark (some items.toList)
     match ← peek with
     | .ident "for" => advance
-    | _ => failAt "expected `for`: `impl Trait for Type`"
+    | _ => failAt "expected `for`: `impl Trait for Type`, or `{`: `impl Type { fn .. }`"
     -- `impl Trait for (A, B)`: for the tuples of so many parts.
     let (head, args) ← if ← acceptPunct "(" then do
         let mut names : Array String := #[]
@@ -1215,7 +1271,15 @@ private partial def parseItem : P Item := do
         methods := methods.push (.typeAlias name [] body)
       | _ => failAt "expected `fn`: an implementation gives the trait's functions"
     expectPunct "}"
-    pure (.impl params tr head args context.toList methods.toList)
+    -- `Self` is the type the implementation is for.
+    let self := if head.startsWith "(tuple" then TypeExpr.tuple (args.map (TypeExpr.name · []))
+      else TypeExpr.name head (args.map (TypeExpr.name · []))
+    let written := methods.toList.map fun
+      | .fn name ps annots ret clauses =>
+        Item.fn name ps (annots.map (·.map (TypeExpr.withSelf self))) (ret.map (TypeExpr.withSelf self))
+          clauses
+      | other => other
+    pure (.impl params tr head args context.toList written)
   | .ident "coerce" =>
     advance
     let name ← match ← peek with
@@ -1239,20 +1303,6 @@ private partial def parseItem : P Item := do
       pure .fixity
     else failAt "expected a declaration"
   | _ => failAt "expected a declaration"
-
-/-- `pub`, if it is next: whether it is `pub(super)`, which lets only the
-module this one is written in see. `pub(crate)` is `pub`: there is one package. -/
-private def acceptPub : P (Option Bool) := do
-  if (← peek) != .ident "pub" then return none
-  advance
-  if (← peek) == .punct "(" then
-    advance
-    let scope ← expectIdent
-    unless scope == "crate" || scope == "super" do
-      failAt "expected `pub(crate)` or `pub(super)`"
-    expectPunct ")"
-    return some (scope == "super")
-  pure (some false)
 
 /-- What follows `use`: a path, perhaps renamed with `as`, `*` for every name
 of a module, or names in braces that share what is before them. -/
@@ -1519,7 +1569,11 @@ private partial def parseItemGroup : P (List Item) := do
     | .fn name _ _ _ _, _ :: _ => pure [item, .bounds name bounds]
     | _, _ => pure [item]
   | .ident "trait" => parseTrait
-  | _ => pure [← parseItem]
+  | _ =>
+    match ← parseItem with
+    -- The functions of `impl Type { .. }` are this module's.
+    | .module name (some items) => if name == inherentMark then pure items else pure [.module name (some items)]
+    | item => pure [item]
 
 private partial def parseItems : P (List Item) := do
   let mut out : Array Item := #[]

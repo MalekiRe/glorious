@@ -666,6 +666,9 @@ partial def exprToPat : Expr → M Pattern
   | .int n => pure (.int n)
   | .name q x => pure (if q.isSome then .ctor x q [] else .var x)
   | .call _ (.name q x) args => do
+    -- A constant written with its type is its value.
+    if q.isNone && x == Syntax.ascribeMark then
+      if let value :: _ := args then return ← exprToPat value
     pure (.ctor x q (← args.mapM exprToPat))
   | .tuple args => do
     pure (.tuple (← args.mapM exprToPat))

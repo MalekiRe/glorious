@@ -378,6 +378,16 @@ def resolveValue (ctx : Ctx) (bound : List String) (qual : Option String) (name 
     | none => pure (some q, name, none)
     | some o =>
       noteUse ctx.here o
+      -- A function of the type's own, `impl Type { fn name .. }`: it is one
+      -- of the type's module, named after both, and as private as it is
+      -- written.
+      let inherent := (← unitOf o.home).bind fun u =>
+        u.own.find? fun b => b.name == s!"{last}::{name}" && b.entry.kind.space == .value
+      if let some b := inherent then
+        unless o.home == ctx.here || visible b.shown o.home ctx.here do
+          throw s!"`{last}::{name}` is private to {showPath o.home}: only what is `pub` can be named from outside"
+        noteUse ctx.here b.entry
+        return (none, b.entry.global, some b.entry)
       let member := ((← unitOf o.home).bind fun u =>
         u.own.find? fun b => b.name == name && b.entry.kind.space == .value).map (·.entry)
       match member with

@@ -258,6 +258,18 @@ inductive TypeExpr where
   | hole
   deriving Inhabited
 
+/-- A type with `Self` written out as the type an implementation is for. -/
+partial def TypeExpr.withSelf (self : TypeExpr) : TypeExpr → TypeExpr
+  | .name "Self" [] => self
+  | .name x args => .name x (args.map (withSelf self))
+  | .tuple args => .tuple (args.map (withSelf self))
+  | .fn ps r => .fn (ps.map (withSelf self)) (withSelf self r)
+  | .performs r effects =>
+    .performs (withSelf self r) (effects.map fun (e, args) => (e, args.map (withSelf self)))
+  | .ref uniq t life => .ref uniq (withSelf self t) life
+  | .never => .never
+  | .hole => .hole
+
 /-- A type as it is written in the name of a trait at its arguments,
 `From<Option<Int>>`: one spelling for one type. -/
 partial def TypeExpr.spell : TypeExpr → String
@@ -287,6 +299,10 @@ the type written as an expression so that it can sit among expressions: see
 `TypeExpr.asExpr`. The checker makes the value that type; after it the value
 stands alone. -/
 def ascribeMark : String := "%as"
+
+/-- What the parser wraps the functions of `impl Type { .. }` in, on their way
+to the module the implementation is written in. -/
+def inherentMark : String := "%inherent"
 
 /-- A type as an expression, for the one place a type sits among expressions. -/
 partial def TypeExpr.asExpr : TypeExpr → Expr
