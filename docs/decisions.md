@@ -1032,7 +1032,9 @@ value that may not be there); `std::cmp` (`Ordering`, `compare`, `min`, `max`,
 `std::text` (searching, cutting, splitting and joining texts, `parse_int`,
 padding); `std::vec` (arrays: `map`, `filter`, `sort`, `binary_search`, `zip`
 and the rest); `std::map` and `std::set` (kept in order, in a balanced tree,
-for keys with `<`); `std::iter` (values one at a time, made when asked for).
+for keys with `<`); `std::iter` (values one at a time, made when asked for);
+`std::hash` (the trait `Hash`, and a map over an array of buckets, which
+arrays read in a step make worth having); `std::c` (see what is unsafe).
 The prelude gained `Eq` for `()`, pairs, triples, `Result` and arrays, and
 `Ord` for pairs and texts.
 
@@ -1047,8 +1049,7 @@ the time went with the square of a program's size. A program of 150
 functions took 3.9 s to certify and now takes 0.1 s.
 
 Limits, against the specification of the library (3000 lines): this is a
-tenth of it. No `String` that owns a buffer, no hash map (there is no
-hashing), no slices that borrow, no streams, files, paths, clocks or
+tenth of it. No `String` that owns a buffer, no slices that borrow, no streams, files, paths, clocks or
 processes, no formatting traits beyond `Show`, no generators or tasks, and
 none of the structures for writing a compiler. A function in a trait cannot
 have a type parameter of its own, so `map` over an iterator is a function

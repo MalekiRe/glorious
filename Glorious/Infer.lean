@@ -1022,7 +1022,7 @@ type's with that region. A callable nothing is known of, given a reference,
 is taken to be one whose type binds the reference's region, so that it can
 be given a reference to any cell: as one a function is passed has to be,
 when the cell is the function's own. -/
-def tryCall (c : Call) : M Bool := do
+partial def tryCall (c : Call) : M Bool := do
   let callee ← find c.callee
   match callee with
   | .fn ps r ops tail _ _ acc =>
@@ -1039,8 +1039,24 @@ def tryCall (c : Call) : M Bool := do
       accInst c.self c.acc bound c.actual
       pure true
     | none =>
-      plainCall c
-      pure true
+      -- A callable whose own parameter is not known yet, given a reference
+      -- there: a function that calls itself with a reference to a variable
+      -- of its own. Its type binds the region.
+      let mut chosen : Option (ITy × ITy × Nat) := none
+      if ps.length == c.given.length then
+        for (p, g) in ps.zip c.given do
+          if let (.var _, .ref ρ _) := (← find p, ← find g) then
+            if chosen.isNone then chosen := some (p, g, ρ)
+      match chosen with
+      | some (p, g, region) =>
+        let bound ← freshRg
+        let a ← findAcc acc
+        modify fun s => { s with accs := s.accs.modify a fun x => { x with binder := some bound } }
+        unify p (← reregion region bound g)
+        tryCall c
+      | none =>
+        plainCall c
+        pure true
   | .var _ =>
     let given ← c.given.mapM find
     let mut found : Option Nat := none

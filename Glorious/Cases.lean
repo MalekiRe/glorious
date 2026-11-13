@@ -1901,6 +1901,9 @@ def cases : List Case := [
     [], "22"⟩,
   ⟨"fn twice(f, r: &mut Int) { f(r); f(r) }\nfn main() { let mut n = 1; twice({ p => *p = *p * 3 }, &mut n); n }",
     [], "9"⟩,
+  -- `std::hash`: hashing, and a map that finds a key in a step or two.
+  ⟨"use std::hash;\nfn main() { let m = hash::from([(\"one\", 1), (\"two\", 2), (\"three\", 3)]); say(hash::get(m, \"two\")); say(hash::get(m, \"four\")); let big = fold(std::vec::range(0, 60), hash::new(), fn(acc, i) { hash::insert(acc, i * 7, i) }); say(hash::len(big)); say(hash::get(big, 21 * 7)); let fewer = hash::remove(hash::remove(big, 7), 1000); say(hash::len(fewer)); say(hash::contains_key(fewer, 7)); say(std::vec::sort(hash::keys(hash::insert(m, \"two\", 22)))); std::vec::sum(hash::values(hash::insert(m, \"two\", 22))) }",
+    [], "Ok(2)\nErr(())\n60\nOk(21)\n59\nErr(())\n[one, three, two]\n26"⟩,
   -- `drop` is not for a program to call.
   ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nfn main() { let mut f = File(7); drop(&mut f); 0 }",
     [], "error: 3:34: in `main`: `drop` is run when what holds a value ends; a program does not call it"⟩,

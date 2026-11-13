@@ -21,6 +21,7 @@ pub mod map;
 pub mod set;
 pub mod iter;
 pub mod c;
+pub mod hash;
 "#
 
 private def optionText : String := r#"// An `Option<T>` is a `Result<T, ()>`: `Some(x)` or `None`.
@@ -305,6 +306,9 @@ pub fn dedup(a) {
 
 // `f(f(init, a0, b0), a1, b1)` and so on, of an array of pairs.
 pub fn fold_pairs(pairs, init, f) { fold(pairs, init, fn(acc, pair) { match(pair) { (a, b) => f(acc, a, b) } }) }
+
+// How long an array is (the prelude's `len`, of arrays alone).
+pub fn len_of<T>(a: [T]) -> Int { len(a) }
 "#
 
 private def textText : String := r#"// Texts: `Str`.
@@ -758,6 +762,131 @@ pub unsafe fn c_string(text: Str) -> usize {
 pub unsafe fn text_at(at: usize) -> Option<Str> { std::text::from_utf8(read_bytes(at, int(strlen(at)))) }
 "#
 
+private def hash : String := r#"// Hashing, and a map and a set that find a key in a step or two: an array of
+// buckets, each the keys whose hash falls there, doubled when it fills.
+
+// A whole number for a value: equal values have equal numbers.
+pub trait Hash { fn hash(Self) -> Int }
+
+// Mixing, kept within what `Int` holds: a multiply and a fold of the high
+// bits into the low ones.
+fn mix(h: Int) -> Int {
+    let m = int_and(wide_mul(int_and(h, 4294967295), 2654435761), 9223372036854775807);
+    int_xor(m, int_shr(m, 29))
+}
+pub fn combine(a: Int, b: Int) -> Int { mix(int_xor(mix(a), int_add(int_and(b, 4611686018427387903), 1))) }
+
+impl Hash for Int { fn hash(n) { mix(int_and(n, 9223372036854775807)) } }
+impl Hash for char { fn hash(c) { mix(int(c)) } }
+impl Hash for () { fn hash(u) { 7 } }
+impl Hash for Str {
+    fn hash(text) { hash_text(text, 5381) }
+}
+fn hash_text(text: Str, h: Int) -> Int {
+    match(text) { StrEnd => h, StrChar(c, rest) => tail hash_text(rest, combine(h, int(c))) }
+}
+impl<A, B> Hash for (A, B) where A: Hash, B: Hash {
+    fn hash(p) { match(p) { (a, b) => combine(hash(a), hash(b)) } }
+}
+impl<T> Hash for Array<T> where T: Hash {
+    fn hash(a) { fold(a, 17, fn(h, x) { combine(h, hash(x)) }) }
+}
+
+// A map: its buckets, and how many keys it has.
+pub struct HashMap<K, V>([[(K, V)]], Int)
+
+pub fn new() { HashMap([[]; 8], 0) }
+
+pub fn len(m) { match(m) { HashMap(_, n) => n } }
+pub fn is_empty(m) { len(m) == 0 }
+
+fn bucket_of(key, buckets) -> Int { int_rem(hash(key), std::vec::len_of(buckets)) }
+
+// What `key` stands for.
+pub fn get(m, key) {
+    match(m) {
+        HashMap(buckets, _) => in_bucket(buckets[bucket_of(key, buckets)], key, 0)
+    }
+}
+fn in_bucket(bucket, key, i: Int) {
+    if(i < std::vec::len_of(bucket)) {
+        match(bucket[i]) { (k, v) => if(k == key) { Some(v) } else { tail in_bucket(bucket, key, i + 1) } }
+    } else { None }
+}
+
+pub fn contains_key(m, key) { match(get(m, key)) { Some(_) => true, None => false } }
+
+// Where `key` is in a bucket.
+fn place_in(bucket, key, i: Int) -> Option<Int> {
+    if(i < std::vec::len_of(bucket)) {
+        match(bucket[i]) { (k, _) => if(k == key) { Some(i) } else { tail place_in(bucket, key, i + 1) } }
+    } else { None }
+}
+
+// The map with `key` standing for `value`, whatever it stood for.
+pub fn insert(m, key, value) {
+    match(m) {
+        HashMap(buckets, n) =>
+            let at = bucket_of(key, buckets);
+            let bucket = buckets[at];
+            match(place_in(bucket, key, 0)) {
+                Some(i) => HashMap(index_set(buckets, at, index_set(bucket, i, (key, value))), n),
+                None => grown(HashMap(index_set(buckets, at, push(bucket, (key, value))), n + 1))
+            }
+    }
+}
+
+// With twice the buckets, once there are more keys than buckets.
+fn grown(m) {
+    match(m) {
+        HashMap(buckets, n) =>
+            if(n <= std::vec::len_of(buckets)) { m } else {
+                fold(buckets, HashMap([[]; std::vec::len_of(buckets) * 2], 0), fn(out, bucket) {
+                    fold(bucket, out, fn(acc, pair) { match(pair) { (k, v) => put_new(acc, k, v) } })
+                })
+            }
+    }
+}
+// A key the map is known not to have.
+fn put_new(m, key, value) {
+    match(m) {
+        HashMap(buckets, n) =>
+            let at = bucket_of(key, buckets);
+            HashMap(index_set(buckets, at, push(buckets[at], (key, value))), n + 1)
+    }
+}
+
+// The map without `key`.
+pub fn remove(m, key) {
+    match(m) {
+        HashMap(buckets, n) =>
+            let at = bucket_of(key, buckets);
+            let bucket = buckets[at];
+            match(place_in(bucket, key, 0)) {
+                // The last of the bucket takes the place, and the bucket is one shorter.
+                Some(i) =>
+                    let last = std::vec::len_of(bucket) - 1;
+                    let moved = index_set(bucket, i, bucket[last]);
+                    HashMap(index_set(buckets, at, std::vec::take(moved, last)), n - 1),
+                None => m
+            }
+    }
+}
+
+// `f(f(init, k0, v0), k1, v1)` and so on, in no order one can rely on.
+pub fn fold_map(m, init, f) {
+    match(m) {
+        HashMap(buckets, _) => fold(buckets, init, fn(acc, bucket) {
+            fold(bucket, acc, fn(a, pair) { match(pair) { (k, v) => f(a, k, v) } })
+        })
+    }
+}
+pub fn keys(m) { fold_map(m, [], fn(out, k, v) { push(out, k) }) }
+pub fn values(m) { fold_map(m, [], fn(out, k, v) { push(out, v) }) }
+pub fn entries(m) { fold_map(m, [], fn(out, k, v) { push(out, (k, v)) }) }
+pub fn from(pairs) { fold(pairs, new(), fn(m, pair) { match(pair) { (k, v) => insert(m, k, v) } }) }
+"#
+
 /-- The texts of the library, each with the module it is. -/
 def texts : List (List String × String) :=
   [(["std"], root),
@@ -771,6 +900,7 @@ def texts : List (List String × String) :=
    (["std", "map"], mapText),
    (["std", "set"], setText),
    (["std", "iter"], iterText),
-   (["std", "c"], cText)]
+   (["std", "c"], cText),
+   (["std", "hash"], hash)]
 
 end Glorious.Std
