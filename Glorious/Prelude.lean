@@ -603,6 +603,11 @@ fn element<T>(a: &Array<T>, i: Int) -> Option<&T> {
     }
 }
 
+// `&a[i]` and `&mut a[i]`: the element where it is. A place that is not
+// there has no meaning: the program stops, as it does for `a[i]`.
+fn element_at<T>(a: &Array<T>, i: Int) -> &T { arr_at(a, i) }
+fn element_at_mut<T>(a: &mut Array<T>, i: Int) -> &mut T { arr_at(a, i) }
+
 // The same to write through.
 fn element_mut<T>(a: &mut Array<T>, i: Int) -> Option<&mut T> {
     match(int_mul(int_lt(-1, i), int_lt(i, arr_len_at(&*a)))) {

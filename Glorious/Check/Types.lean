@@ -480,6 +480,12 @@ structure St where
   /-- For each, what is gone through to reach the field: at each step the
   constructor, or none for a tuple, and how many fields it has. -/
   fieldTable : Array (Nat × Bool × List Nat × List (Option String × Nat)) := #[]
+  /-- A field of a variable was borrowed for writing in the functions being
+  checked: from then on each call is kept with the type of what it gives. -/
+  fieldLocal : Bool := false
+  callTys : Array (Nat × Ty) := #[]
+  /-- The calls that give a value that can hold no borrow. -/
+  plainCalls : Array Nat := #[]
   /-- Every call of a callee with a type, by the call's identity, and whether
   the callee was then seen to perform nothing: its effects were a variable of
   its own that none of its parameters mention. -/

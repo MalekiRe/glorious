@@ -135,6 +135,8 @@ structure Blocks where
   envWraps : List (Nat × List Nat) := []
   /-- The fields read by name of what a named reference points to. -/
   derefReads : List Nat := []
+  /-- The calls that give a value that can hold no borrow. -/
+  plainCalls : List Nat := []
 
 structure Globals where
   ctors : List (String × CtorInfo) := []
@@ -443,12 +445,17 @@ partial def unlocated : Stmt → Stmt
   | .located _ _ s => unlocated s
   | s => s
 
-/-- The names a statement gives values that may hold what `tracked` names hold. -/
-private def madeFrom (tracked : List String) (s : Stmt) : List String :=
+/-- The names a statement gives values that may hold what `tracked` names
+hold. What a call in `plain` gives holds no borrow, whatever it was given. -/
+private def madeFrom (plain : Std.HashSet Nat) (tracked : List String) (s : Stmt) : List String :=
+  let holds := fun (value : Expr) =>
+    (match value with
+      | .call id _ _ => !plain.contains id
+      | _ => true) && (fvExpr [] value).any tracked.contains
   match unlocated s with
-  | .let_ pat value => if (fvExpr [] value).any tracked.contains then patVars pat else []
-  | .letMut y value => if (fvExpr [] value).any tracked.contains then [y] else []
-  | .assign (.name none y) value => if (fvExpr [] value).any tracked.contains then [y] else []
+  | .let_ pat value => if holds value then patVars pat else []
+  | .letMut y value => if holds value then [y] else []
+  | .assign (.name none y) value => if holds value then [y] else []
   | _ => []
 
 /--
@@ -458,7 +465,8 @@ mutable variable declared inside the scope ends with it, so the scope also
 takes in every statement that mentions one; and a `defer` inside it would run
 when the scope ends, so a scope that has one takes in the whole block.
 -/
-partial def scopeExtent (p : String) (rest : List Stmt) (wide : Bool) : Nat :=
+partial def scopeExtent (p : String) (rest : List Stmt) (wide : Bool)
+    (plain : Std.HashSet Nat := {}) : Nat :=
   go [p] 0
 where
   go (tracked : List String) (k : Nat) : Nat :=
@@ -472,7 +480,7 @@ where
         | .letMut y _ => some y
         | _ => none
       let made :=
-        if wide then inner.foldl (fun acc s => acc ++ madeFrom acc s) tracked else tracked
+        if wide then inner.foldl (fun acc s => acc ++ madeFrom plain acc s) tracked else tracked
       let tracked' := (made ++ muts).eraseDups
       let k' := ((List.range (rest.length + 1)).drop k).find? fun j =>
         !(fvStmts [] (rest.drop j)).any tracked'.contains
@@ -2065,31 +2073,38 @@ mutual
 expression with a name in its place, and the parts of the expression that are
 evaluated before it and do something, each given a name so that they still
 are. -/
-private partial def liftField (depth : Nat) : Expr → Option (List Stmt × Expr × FieldBorrow)
+private partial def liftField (muts : List String) (depth : Nat) :
+    Expr → Option (List Stmt × Expr × FieldBorrow)
   | .refField id uniq x _ _ => some ([], .name none (fieldRefName id), (id, uniq, x))
   | .call cid f args =>
-    (liftParts depth (f :: args)).map fun (lets, parts, b) =>
+    (liftParts muts depth (f :: args)).map fun (lets, parts, b) =>
       (lets, .call cid (parts.headD f) (parts.drop 1), b)
   | .tailCall cid f args =>
-    (liftParts depth (f :: args)).map fun (lets, parts, b) =>
+    (liftParts muts depth (f :: args)).map fun (lets, parts, b) =>
       (lets, .call cid (parts.headD f) (parts.drop 1), b)
-  | .tuple es => (liftParts depth es).map fun (lets, parts, b) => (lets, .tuple parts, b)
-  | .proj e i => (liftField depth e).map fun (lets, e, b) => (lets, .proj e i, b)
-  | .fieldOf id e name => (liftField depth e).map fun (lets, e, b) => (lets, .fieldOf id e name, b)
-  | .deref e => (liftField depth e).map fun (lets, e, b) => (lets, .deref e, b)
-  | .reborrow u e => (liftField depth e).map fun (lets, e, b) => (lets, .reborrow u e, b)
+  | .tuple es => (liftParts muts depth es).map fun (lets, parts, b) => (lets, .tuple parts, b)
+  | .proj e i => (liftField muts depth e).map fun (lets, e, b) => (lets, .proj e i, b)
+  | .fieldOf id e name =>
+    (liftField muts depth e).map fun (lets, e, b) => (lets, .fieldOf id e name, b)
+  | .deref e => (liftField muts depth e).map fun (lets, e, b) => (lets, .deref e, b)
+  | .reborrow u e => (liftField muts depth e).map fun (lets, e, b) => (lets, .reborrow u e, b)
   | _ => none
 
-private partial def liftParts (depth : Nat) (parts : List Expr) :
+private partial def liftParts (muts : List String) (depth : Nat) (parts : List Expr) :
     Option (List Stmt × List Expr × FieldBorrow) :=
   let rec go (before : List Expr) : List Expr → Option (List Stmt × List Expr × FieldBorrow)
     | [] => none
     | e :: rest =>
-      match liftField (depth + 1) e with
+      match liftField muts (depth + 1) e with
       | some (lets, e', b) =>
         let named : List (Expr × Option Stmt) := (before.zip (List.range before.length)).map
           fun (a, j) =>
-            if plainExpr a then (a, none)
+            -- (A variable that can change is read where it was written:
+            -- what follows may change it, or be moved to run before here.)
+            let fixed := match a with
+              | .name none y => !muts.contains y
+              | a => plainExpr a
+            if fixed then (a, none)
             else
               -- (Named by how deep the call is as well as by its place in
               -- it: a call inside a call has parts at the same places.)
@@ -2102,21 +2117,88 @@ private partial def liftParts (depth : Nat) (parts : List Expr) :
 end
 
 /-- The same for a statement. -/
-private def liftFieldStmt : Stmt → Option (List Stmt × Stmt × FieldBorrow)
-  | .expr e => (liftField 0 e).map fun (lets, e, b) => (lets, .expr e, b)
-  | .let_ pat e => (liftField 0 e).map fun (lets, e, b) => (lets, .let_ pat e, b)
-  | .letMut y e => (liftField 0 e).map fun (lets, e, b) => (lets, .letMut y e, b)
+private def liftFieldStmt (muts : List String) : Stmt → Option (List Stmt × Stmt × FieldBorrow)
+  | .expr e => (liftField muts 0 e).map fun (lets, e, b) => (lets, .expr e, b)
+  | .let_ pat e => (liftField muts 0 e).map fun (lets, e, b) => (lets, .let_ pat e, b)
+  | .letMut y e => (liftField muts 0 e).map fun (lets, e, b) => (lets, .letMut y e, b)
   | .assign target e =>
-    match liftField 0 e with
+    match liftField muts 0 e with
     | some (lets, e, b) => some (lets, .assign target e, b)
     | none =>
       -- The value is computed before the place is found.
       match target with
       | .deref place =>
-        (liftField 0 place).map fun (lets, place, b) =>
+        (liftField muts 0 place).map fun (lets, place, b) =>
           let n := s!"%value{b.1}"
           (Stmt.let_ (.var n) e :: lets, .assign (.deref place) (.name none n), b)
       | _ => none
+  | _ => none
+
+mutual
+
+/-- The mutable variables an expression declares or writes. -/
+private partial def mutsExpr : Expr → List String
+  | .call _ f args => (f :: args).flatMap mutsExpr
+  | .tailCall _ f args => (f :: args).flatMap mutsExpr
+  | .tuple es => es.flatMap mutsExpr
+  | .proj e _ => mutsExpr e
+  | .fieldOf _ e _ => mutsExpr e
+  | .deref e => mutsExpr e
+  | .reborrow _ e => mutsExpr e
+  | .closure _ clauses => clauses.flatMap fun
+      | .mk _ body => body.flatMap mutsStmt
+  | .handle subject arms => mutsExpr subject ++ arms.flatMap fun
+      | .mk _ body => body.flatMap mutsStmt
+  | .labelScope _ body => body.flatMap mutsStmt
+  | _ => []
+
+private partial def mutsStmt : Stmt → List String
+  | .let_ _ e => mutsExpr e
+  | .letMut y e => y :: mutsExpr e
+  | .expr e => mutsExpr e
+  | .defer e => mutsExpr e
+  | .located _ _ s => mutsStmt s
+  | .assign (.name none y) e => y :: mutsExpr e
+  | .assign target e => mutsExpr target ++ mutsExpr e
+
+end
+
+/-- The smallest call around a borrow whose result can hold no borrow, taken
+out of an expression: the expression with a name in the call's place, and the
+call. The borrow is done with when that call is. None where there is no such
+call, or where it is the whole of the expression. -/
+private partial def narrowTo (plain : Std.HashSet Nat) (ref temp : String) (top : Bool) :
+    Expr → Option (Expr × Expr)
+  | .call cid f args =>
+    let parts := f :: args
+    match parts.findIdx? fun p => (fvExpr [] p).contains ref with
+    | none => none
+    | some i =>
+      match narrowTo plain ref temp false (parts.getD i f) with
+      | some (part, c) =>
+        let parts := parts.set i part
+        some (.call cid (parts.headD f) (parts.drop 1), c)
+      | none =>
+        if !top && cid != 0 && plain.contains cid then some (.name none temp, .call cid f args)
+        else none
+  | .tailCall cid f args =>
+    let parts := f :: args
+    match parts.findIdx? fun p => (fvExpr [] p).contains ref with
+    | none => none
+    | some i =>
+      (narrowTo plain ref temp false (parts.getD i f)).map fun (part, c) =>
+        let parts := parts.set i part
+        (.tailCall cid (parts.headD f) (parts.drop 1), c)
+  | .tuple es =>
+    match es.findIdx? fun p => (fvExpr [] p).contains ref with
+    | none => none
+    | some i =>
+      (narrowTo plain ref temp false (es.getD i (.tuple []))).map fun (part, c) =>
+        (.tuple (es.set i part), c)
+  | .proj e i => (narrowTo plain ref temp false e).map fun (e, c) => (.proj e i, c)
+  | .fieldOf id e name => (narrowTo plain ref temp false e).map fun (e, c) => (.fieldOf id e name, c)
+  | .deref e => (narrowTo plain ref temp false e).map fun (e, c) => (.deref e, c)
+  | .reborrow u e => (narrowTo plain ref temp false e).map fun (e, c) => (.reborrow u e, c)
   | _ => none
 
 /-- What the checker found about fields: for each borrow of one, whether it
@@ -2135,6 +2217,10 @@ structure FieldInfo where
   wraps : List (Nat × List Nat) := []
   /-- The fields read by name of what a named reference points to. -/
   derefs : List Nat := []
+  /-- The calls that give a value that can hold no borrow. -/
+  plain : Std.HashSet Nat := {}
+  /-- The mutable variables of the function being written out. -/
+  muts : List String := []
 
 /-- A call as it is where callables share an environment. In a function given
 such callables, a call of one that does not hold the environment gives it the
@@ -2153,6 +2239,134 @@ def shareEnv (info : FieldInfo) (id : Nat) (f : Expr) (args : List Expr) : Expr 
     | some holder => (f, [.name none holder])
     | none => (f, args)
   | _, _ => (f, args)
+
+/-- The way from a variable to the part of it an expression reads, by number. -/
+private partial def wayFrom (info : FieldInfo) (x : String) : Expr → Option (List Nat)
+  | .name none y => if y == x then some [] else none
+  | .proj e i => (wayFrom info x e).map (· ++ [i])
+  | .fieldOf id e _ =>
+    match info.reads.lookup id with
+    | some i => if info.derefs.contains id then none else (wayFrom info x e).map (· ++ [i])
+    | none => none
+  | _ => none
+
+/-- Does a statement give a name another meaning for what follows it? -/
+private def rebinds (x : String) (s : Stmt) : Bool :=
+  match unlocated s with
+  | .let_ pat _ => (patVars pat).contains x
+  | .letMut y _ => y == x
+  | _ => false
+
+mutual
+
+/-- An expression run while a field of `x` is kept in a variable of its own,
+`cell`, with what it reads and writes of that field read and written there:
+that variable is where the field is until the borrow's scope ends. Where the
+whole of `x` is read, it is `whole`: the value with the field as it is now. -/
+private partial def toCell (info : FieldInfo) (x : String) (path : List Nat) (cell : String)
+    (whole : Expr) : Expr → Expr
+  | .name none y => if y == x then whole else .name none y
+  | .call id f args =>
+    .call id (toCell info x path cell whole f) (args.map (toCell info x path cell whole))
+  | .tailCall id f args =>
+    .tailCall id (toCell info x path cell whole f) (args.map (toCell info x path cell whole))
+  | .tuple es => .tuple (es.map (toCell info x path cell whole))
+  | .proj e i =>
+    match wayFrom info x (.proj e i) with
+    | some way =>
+      if way == path then .name none cell
+      -- (Another part of the variable is where it was.)
+      else if way.take (min way.length path.length) != path.take (min way.length path.length) then
+        .proj e i
+      else .proj (toCell info x path cell whole e) i
+    | none => .proj (toCell info x path cell whole e) i
+  | .fieldOf id e name =>
+    match wayFrom info x (.fieldOf id e name) with
+    | some way =>
+      if way == path then .name none cell
+      else if way.take (min way.length path.length) != path.take (min way.length path.length) then
+        .fieldOf id e name
+      else .fieldOf id (toCell info x path cell whole e) name
+    | none => .fieldOf id (toCell info x path cell whole e) name
+  | .deref e => .deref (toCell info x path cell whole e)
+  | .reborrow u e => .reborrow u (toCell info x path cell whole e)
+  | .refField id u y way star =>
+    -- The same field borrowed again: a borrow of the variable it is in.
+    if y == x && (info.shapes.lookup id).map (·.2.1) == some path then .ref u cell
+    else .refField id u y way star
+  | .labelScope l body => .labelScope l (toCellStmts info x path cell whole body)
+  | .handle subject arms => .handle (toCell info x path cell whole subject) arms
+  | e => e
+
+private partial def toCellStmts (info : FieldInfo) (x : String) (path : List Nat) (cell : String)
+    (whole : Expr) : List Stmt → List Stmt
+  | [] => []
+  | s :: rest =>
+    let rec one : Stmt → Stmt
+      | .let_ pat e => .let_ pat (toCell info x path cell whole e)
+      | .letMut y e => .letMut y (toCell info x path cell whole e)
+      | .expr e => .expr (toCell info x path cell whole e)
+      | .defer e => .defer e
+      | .located line col s => .located line col (one s)
+      | .assign target e =>
+        -- (A write of the whole, or of a part the field is in, stays as it
+        -- is: it is what cannot be done here.)
+        let inside := match wayFrom info x target with
+          | some way => way.length < path.length && way == path.take way.length
+          | none => false
+        .assign (if inside then target else toCell info x path cell whole target)
+          (toCell info x path cell whole e)
+    -- (After a statement that gives the name another meaning, it is not
+    -- this variable.)
+    one s :: (if rebinds x s then rest else toCellStmts info x path cell whole rest)
+
+end
+
+mutual
+
+/-- Does an expression use `x` in a way that the field kept elsewhere would
+make wrong: the whole of it, or a part that holds that field or is inside it? -/
+private partial def staleIn (info : FieldInfo) (x : String) (path : List Nat) : Expr → Bool
+  | .name none y => y == x
+  | .ref _ y => y == x
+  | .refField id _ y _ _ =>
+    y == x && match info.shapes.lookup id with
+      | some (_, way, _) => let n := min way.length path.length; way.take n == path.take n
+      | none => true
+  | .proj e i =>
+    match wayFrom info x (.proj e i) with
+    | some way => let n := min way.length path.length; way.take n == path.take n
+    | none => staleIn info x path e
+  | .fieldOf id e name =>
+    match wayFrom info x (.fieldOf id e name) with
+    | some way => let n := min way.length path.length; way.take n == path.take n
+    | none => staleIn info x path e
+  | .call _ f args => (f :: args).any (staleIn info x path)
+  | .tailCall _ f args => (f :: args).any (staleIn info x path)
+  | .tuple es => es.any (staleIn info x path)
+  | .deref e => staleIn info x path e
+  | .reborrow _ e => staleIn info x path e
+  | .closure _ clauses => clauses.any fun
+      | .mk pats body => !(pats.flatMap patVars).contains x && staleStmts info x path body
+  | .handle subject arms => staleIn info x path subject || arms.any fun
+      | .mk pats body => !(pats.flatMap patVars).contains x && staleStmts info x path body
+  | .labelScope _ body => staleStmts info x path body
+  | _ => false
+
+private partial def staleStmts (info : FieldInfo) (x : String) (path : List Nat) :
+    List Stmt → Bool
+  | [] => false
+  | s :: rest =>
+    let rec one : Stmt → Bool
+      | .let_ _ e => staleIn info x path e
+      | .letMut _ e => staleIn info x path e
+      | .expr e => staleIn info x path e
+      | .defer e => staleIn info x path e
+      | .located _ _ s => one s
+      | .assign target e => staleIn info x path target || staleIn info x path e
+    one s || (!rebinds x s && staleStmts info x path rest)
+
+end
 
 mutual
 
@@ -2205,7 +2419,7 @@ becomes a block. -/
 private partial def unfieldBlock (info : FieldInfo) (e : Expr) :
     Expr :=
   let e := unfieldExpr info e
-  if (liftField 0 e).isSome then .labelScope "%block" (unfieldStmts info [.expr e]) else e
+  if (liftField info.muts 0 e).isSome then .labelScope "%block" (unfieldStmts info [.expr e]) else e
 
 private partial def unfieldClause (info : FieldInfo) :
     Clause → Clause
@@ -2249,7 +2463,7 @@ private partial def unfieldStmts (info : FieldInfo) :
       | .assign target e => .assign (unfieldExpr info target) (unfieldExpr info e)
       | .defer e => .defer (unfieldBlock info e)
       | s => s
-    match liftFieldStmt s with
+    match liftFieldStmt info.muts s with
     | none => wrap s :: unfieldStmts info rest
     | some (before, s, (id, uniq, x)) =>
       match info.shapes.lookup id with
@@ -2275,9 +2489,25 @@ private partial def unfieldStmts (info : FieldInfo) :
         let root := if viaRef then Expr.deref (.name none x) else Expr.name none x
         let cell := s!"%field{id}"
         let ref := fieldRefName id
+        -- A field lent for writing to a call that gives back what can hold
+        -- no borrow is back when the call is: the call is a statement of its
+        -- own, and what is left of this one runs after the borrow is over.
+        let taken := s!"%taken{id}"
+        let split : Option (Stmt × Stmt) :=
+          if !uniq then none else
+          let on := fun (e : Expr) (mk : Expr → Stmt) =>
+            (narrowTo info.plain ref taken true e).map fun (e, c) => (Stmt.let_ (.var taken) c, mk e)
+          match s with
+          | .expr e => on e .expr
+          | .let_ pat e => on e (.let_ pat)
+          | .letMut y e => on e (.letMut y)
+          | .assign target e => if (fvExpr [] target).contains ref then none else on e (.assign target)
+          | _ => none
         -- The borrow lasts while anything made from it is still used.
-        let following := wrap s :: rest
-        let k0 := scopeExtent ref following true
+        let following := match split with
+          | some (first, second) => wrap first :: wrap second :: rest
+          | none => wrap s :: rest
+        let k0 := scopeExtent ref following true info.plain
         -- A borrow of a field made while this one lasts and used after it is
         -- done with: this one is kept until that one is done with too, if
         -- nothing in between looks at the variable itself, which holds the
@@ -2294,7 +2524,7 @@ private partial def unfieldStmts (info : FieldInfo) :
             match crossing with
             | [] => k
             | qs =>
-              let need := qs.foldl (fun acc q => max acc (k + scopeExtent q (following.drop k) true)) k
+              let need := qs.foldl (fun acc q => max acc (k + scopeExtent q (following.drop k) true info.plain)) k
               if need == k || (fvStmts [] ((following.take need).drop k)).contains x then k
               else widen fuel need
         let k := widen 8 k0
@@ -2303,6 +2533,17 @@ private partial def unfieldStmts (info : FieldInfo) :
           | .located line col (.expr (.tailCall cid f args)) =>
             .located line col (.expr (.call cid f args))
           | s => s
+        -- While a field lent for writing is in a variable of its own, that
+        -- variable is where it is read and written. Any other use of the
+        -- whole, or of a part the field is in, would find the old value:
+        -- left as a mark, to be refused.
+        let inner :=
+          if uniq then
+            toCellStmts info x path cell (rebuildField root [] [] path shape (.name none cell)) inner
+          else inner
+        let before :=
+          if uniq && staleStmts info x path inner then before ++ [.expr (.name none s!"%stale:{x}")]
+          else before
         let after := following.drop k
         let used := fvStmts [] after
         let out := ((letNames inner).filter used.contains).eraseDups
@@ -2347,6 +2588,7 @@ def unfield (b : Blocks) (items : List Item) : Except String (List Item) := do
   let never : List Item :=
     if several then [.fn neverName [] [] none [.mk [] [.expr (.tailCall 0 (.name none neverName) [])]]]
     else []
+  let plain : Std.HashSet Nat := b.plainCalls.foldl (fun acc id => acc.insert id) {}
   let out := never ++ items.map fun
     | .fn name params annots ret clauses =>
       -- Each callable that does not hold its environment, with the one that does.
@@ -2354,8 +2596,18 @@ def unfield (b : Blocks) (items : List Item) : Except String (List Item) := do
         match group with
         | holder :: rest => rest.map (·, holder)
         | [] => []
-      .fn name params annots ret
-        (clauses.map (unfieldClause ⟨b.fields, b.fieldReads, b.packs, members, b.envWraps, b.derefReads⟩))
+      let muts := (clauses.flatMap fun
+        | .mk _ body => body.flatMap mutsStmt).eraseDups
+      let info : FieldInfo :=
+        { shapes := b.fields
+          reads := b.fieldReads
+          packs := b.packs
+          members := members
+          wraps := b.envWraps
+          derefs := b.derefReads
+          plain := plain
+          muts := muts }
+      .fn name params annots ret (clauses.map (unfieldClause info))
     | item => item
   -- Two borrows of fields that overlap, neither lasting inside the other and
   -- with other statements between them, cannot be written out as blocks.
@@ -2364,6 +2616,9 @@ def unfield (b : Blocks) (items : List Item) : Except String (List Item) := do
       for x in clauses.flatMap (fvClause []) do
         if x.startsWith "%crossing:" then
           throw (Syntax.inFunction name s!"the borrow of a field kept in `{(x.drop 10).toString}` is made while another lasts and is used after that one is done with: make it before the other, or straight after it")
+        if x.startsWith "%stale:" then
+          let v := (x.drop 7).toString
+          throw (Syntax.inFunction name s!"a field of `{v}` is borrowed with `&mut`, and while something that may hold that borrow can still be used `{v}` is used as a whole, or a part of it that the field is in: use what holds the borrow for the last time first, or keep it in a block of its own")
   pure out
 
 /-- Collect the global declarations. -/

@@ -2713,6 +2713,39 @@ from being an `Id<Block>`.
 - Not built: base64; `ByteReader::read_u128_le` is, the signed widths
   other than `read_i64_le` are not in the specification.
 
+## Wrong answers: a field of a variable lent for writing
+
+`let x = bump(&mut c.n); x + c.n * 100` read the old `c.n`, and so did
+`bump(&mut c.n) + c.n`. A field of a variable that is borrowed is taken out
+into a variable of its own for as long as the borrow may last, and put back
+after; how long that is was read off the text, as far as the last use of
+anything made from the reference, and `x`, a number, counted as made from
+it. Until then the variable still held the old field. Every engine agreed,
+since all were given the same program, and no test had read the field again
+in those places.
+
+- The checker now says which calls give a value that can hold no borrow (no
+  reference, callable or lifetime in its type). A field lent for writing to
+  such a call is back when the call is: the call becomes a statement of its
+  own, and the rest of the statement runs after. What such a call gives is
+  not something made from the reference.
+- While a field is out, what reads or writes that field of the variable
+  reads and writes where the field is; the whole variable read is the value
+  with the field as it is now.
+- What is left is refused, with why, rather than run wrong: the variable
+  borrowed whole, or written whole, or used in a callable, while something
+  that may hold the borrow can still be used.
+- A variable that can change, written before the borrow in the same
+  statement, is read where it was written.
+
+`&mut a[i]` borrowed a copy of the element, so writing through it changed
+nothing. `&a[i]` and `&mut a[i]` are now references to the element where it
+is, when `a` is a variable, a field, `*r` or an element in turn. Through a
+reference it is `&mut (*r)[i]`, as reading is `(*r)[i]`.
+
+Found by writing programs whose answers were worked out by hand; forty of
+them are now cases.
+
 ## A wrong answer: what is computed before a borrow of a field
 
 `"<" ++ pair.0 ++ ">" ++ written(&pair.1)` gave `>>>` and not `<ab>`. A

@@ -220,6 +220,22 @@ private def fieldBorrow (id : Nat) (uniq : Bool) (root : FieldRoot) (path : List
     .call id (.name none throughMark)
       [base, .tuple (path.map fun s => Expr.name none s), .int (if uniq then 1 else 0)]
 
+/-- `&a[i]` and `&mut a[i]`: a reference to the element where it is, if `a`
+is a place: a variable, a field, what a reference points to, or an element
+in turn. Of anything else the element is a value with no name. -/
+private partial def elementBorrow (uniq : Bool) (e : Expr) : Option Expr :=
+  match indexed? e with
+  | none => none
+  | some (id, a, i) =>
+    let base : Option Expr := match a with
+      | .name none x => some (.ref uniq x)
+      | .deref r => some (.reborrow uniq r)
+      | a =>
+        match fieldRoot a with
+        | some (root, path) => some (fieldBorrow (id + 800000) uniq root path)
+        | none => elementBorrow uniq a
+    base.map fun b => .call id (preludeFn (if uniq then "element_at_mut" else "element_at")) [b, i]
+
 /-- What a statement's expression leaves to settle: the references to be
 named first, whether anything that does something has been come to, and
 whether a reference would be computed out of turn. -/
@@ -937,6 +953,7 @@ private partial def parseUnary (noBlock : Bool) : P Expr := do
           match ← parsePostfix true with
           | .name none x => pure (.ref uniq x)
           | e =>
+            if let some at_ := elementBorrow uniq e then return at_
             match fieldRoot e with
             | some (root, path) => pure (fieldBorrow id uniq root path)
             -- A value with no name: it is given one where the statement

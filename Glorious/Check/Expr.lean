@@ -73,7 +73,8 @@ partial def inferExpr (scope : Scope) (amb : Row) : Expr → M Ty
       captures cap (.loan (← freshLoan (some brand) uniq none numbered))
       modify fun s =>
         { s with fieldSites := s.fieldSites.push (id, false, t, numbered, chosen, s.owner, s.pos)
-                 blockFieldCaps := s.blockFieldCaps.push (cap, s.pos) }
+                 blockFieldCaps := s.blockFieldCaps.push (cap, s.pos)
+                 fieldLocal := s.fieldLocal || uniq }
       pure (.ref (if uniq then .uniq else .shared) field cap)
     | some (.val t _) => do
       -- A field of what a reference points to: borrowed from the reference,
@@ -218,7 +219,12 @@ partial def inferExpr (scope : Scope) (amb : Row) : Expr → M Ty
             | .mk pats _ => pats⟩
         modify fun s => { s with pending := s.pending.push check }
       return .unit
-    withTemps (inferCall scope amb f args id)
+    let given ← withTemps (inferCall scope amb f args id)
+    -- (What a call gives, where a field of a variable is borrowed for
+    -- writing: a value that can hold no borrow ends those given to the call.)
+    if id != 0 && (← get).fieldLocal then
+      modify fun s => { s with callTys := s.callTys.push (id, given) }
+    pure given
   | .tailCall id f args => do
     -- The case that cannot be: of whatever type is wanted.
     if let .name none "%never" := f then return ← freshTy
