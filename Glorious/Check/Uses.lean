@@ -1259,11 +1259,14 @@ def runLowerChecks (fnTy : Ty) : M Unit := do
     match owners with
     | [(owner, c)] =>
       let mut theirs : List (String × Nat) := []
-      for ((src, what), name) in s.capEdges.zip s.capEdgeNames do
+      for (((src, what), name), i) in (s.capEdges.zip s.capEdgeNames).zipIdx do
         if src == c then
           if let .ty held := what then
             if let some n := name then theirs := n :: theirs
-            let covered := match name with
+            -- (What a variable would have given a block that was not run
+            -- is still the variable's: whether it is used on this path is
+            -- seen where the variable's uses are counted.)
+            let covered := s.givenEdges.contains i || match name with
               | some n => mentioned.contains n
               | none => false
             unless covered do

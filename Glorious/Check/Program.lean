@@ -339,6 +339,14 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
       | some (.var id) => if scheme.tvars.contains id then some id else none
       | _ => none
     modify fun s => { s with typeParams := (d.name, written) :: s.typeParams }
+    -- A type parameter may be in the function's type only as what a trait's
+    -- type is said to be, `X: Graph<Node = N>`: it is one of the function's
+    -- all the same, and what is written of it holds.
+    for (_, subject, _, a, owner, _) in (← get).assocUses do
+      if owner == d.name then
+        let (_, seen') ← openParams seen (← zonk subject)
+        let (_, seen'') ← openParams seen' (← zonk a)
+        seen := seen''
     let mine : List (String × Nat × Ty) ← match d.impl with
       | some (im, _) =>
         -- An implementation says what it assumes.

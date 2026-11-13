@@ -1206,6 +1206,11 @@ def resolve (prelude root : List Item) : Except String Resolved := do
   let taken := (declared [] root).1.map (·.name)
   for (path, items) in mods do
     let (own, fs) := declared path items taken
+    -- A constructor has one name in its module: a `struct` is its own, and
+    -- an `enum`'s are written without the type's name.
+    let ctors := (own.filter (·.entry.kind == .ctor)).map (·.name)
+    if let some twice := ctors.find? fun c => (ctors.filter (· == c)).length > 1 then
+      throw s!"`{twice}` is the name of two constructors in one module (a `struct` is the constructor of its own name, and those of an `enum` are named as they are written): give one of them another name"
     units := units ++ [⟨path, items, own⟩]
     fields := fields ++ fs
   let hidden := mods.flatMap fun (path, items) =>

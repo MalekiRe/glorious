@@ -2638,6 +2638,23 @@ it, or reads a part of it after its value is used.
 - An arm of a handler that borrows the variable still counts as coming
   after, wherever it is written: when it runs is the handled code's to say.
 
+Three more things this needed, found by trying to break it:
+
+- **A callable that takes the value is where the value goes**, whenever it
+  runs. So where one is written, nothing still to be used may be a callable
+  that looks at the variable: `let w = { write(&mut f, 1) }; let c = {
+  close(f) }; c(); w()` is refused at `c`. This refuses `w(); c()` after
+  both are written, too: write `c` after the last use of `w`.
+- **Callables that each take the value are not in each other's way**: both
+  branches of an `if` may. Which of them runs is counted, as it is for a
+  name's value.
+- **A block that was not run never took the variable's value.** A block
+  given to `if` beside one that ran was said to hold the value and let it
+  go, so `if(c) { close(f) } else { close(f) }` was refused for a value
+  that has to be used once anything had borrowed `f`. The value is the
+  variable's until a block that takes it runs; whether every path uses it
+  is seen where the variable's uses are counted.
+
 ## Collections of what has to be used
 
 The library's `Vec`, `VecDeque`, `IntoIter` and the tables of `std::index`
@@ -2695,6 +2712,44 @@ from being an `Id<Block>`.
   give it only for a size below nothing.
 - Not built: base64; `ByteReader::read_u128_le` is, the signed widths
   other than `read_i64_le` are not in the specification.
+
+## Budgets, cursors, graphs and source maps
+
+`std::budget` (25.2, 25.3), `std::parse` (26.1), `std::graph` (26.2) and
+`std::source` (25.1), as ordinary source.
+
+- **A memory charge and a depth permit have to be used**, and only their
+  module can take one apart: the one thing to do with one is give it back.
+  A budget made with `named(limit, id)` tells its tickets from another's
+  by the number; `new` gives every budget the number 0, since nothing here
+  hands out fresh identities.
+- **`many` stops with `Limit` when it has found as many as it may and input
+  is left**, without trying the parser again: what one more try found
+  would have nowhere to go.
+- **A parser is a callable given by value**, `fn(&mut Cursor<'a, T>) ->
+  ParseStep<U, E> / e`; the specification's `&mut F` with `Fn` and `RunsIn`
+  conditions says the same of a callable kept in a variable.
+- **`Graph::successors` gives an array**, not a slice borrowed from the
+  graph, and the functions over a graph are written `N: Eq + Hash, G:
+  Graph<Node = N>`: a condition cannot be put on `G::Node` itself.
+- **`GraphError::Cyclic`** where the specification has `Cycle`, which is
+  also the name of the type it holds: a constructor has one name in its
+  module, and two of one name are now refused as that (they were reported
+  as a type that holds itself).
+- The groups of `strongly_connected_components` come sinks first.
+- A source's text is kept as its bytes; `text` and `slice` give a `Str`
+  made from them, and `line_range` a pair.
+
+Writing these found that **a type parameter that is in a function's type
+only as what a trait's type is said to be** (`N` in `fn f<N: Hash, G:
+Graph<Node = N>>(g: &G)`) lost the traits written of it: "`N` is not known
+to implement `Hash`". Such a parameter is now one of the function's like
+any other.
+
+Not built from this part of the specification: functions generic over
+callables that mutually call each other, which is why each traversal is
+one function: two functions that call each other are checked as one
+group, at one type.
 
 ## A row with several unknown parts
 

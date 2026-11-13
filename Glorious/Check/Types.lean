@@ -370,6 +370,9 @@ structure St where
   variables. A callable that holds one need not be called for its `drop`'s
   sake, since the variable's cleanup destroys what was not given away. -/
   givenEdges : List Nat := []
+  /-- The callables that are where a variable's value goes: each by what it
+  captures with, and the variable. -/
+  givers : List (Nat × Nat) := []
   /-- What was read out of such a variable: a value that holds a resumption
   cannot be, since the machine's read is a copy and a resumption is not
   copied. -/
@@ -549,6 +552,10 @@ structure St where
   cells : Array (Nat × String × Ty) := #[]
   /-- Uses to check against the borrows once the types are known. -/
   uses : Array Use := #[]
+  /-- Where a callable that uses a variable's value is written: from there
+  on the value may go whenever the callable runs, so nothing that could
+  look at the variable may still be callable. -/
+  heldMoves : Array Use := #[]
   /-- The functions of each trait, in order. -/
   traits : List (String × List String) := []
   methods : List (String × MethodSig) := []

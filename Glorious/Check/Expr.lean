@@ -1085,6 +1085,16 @@ partial def inferCallable (scope : Scope) (annots : List (Option Ty)) (ret : Opt
   let outerLater := (← get).later
   let outerTemps := (← get).temps
   let outerAnon := (← get).anon
+  -- A callable that uses a variable's value is where the value may go, any
+  -- time from here on: what is still to be used here must not be able to
+  -- look at the variable.
+  for x in (clauses.flatMap (Elab.fvClause [])).eraseDups do
+    if let some (.cell _ brand) := scope.lookup x then
+      if (← get).movedCells.contains brand then
+        let u := clauses.foldl (fun u c => u.or (Syntax.nameUseClause x c)) ({} : Syntax.NameUse)
+        if u.valued || u.valuedInside then
+          modify fun s =>
+            { s with heldMoves := s.heldMoves.push ⟨s.owner, s.pos, .var brand x .move [], scope, s.later, s.temps⟩ }
   modify fun s =>
     { s with later := (clauses.flatMap (Elab.fvClause [])).eraseDups, temps := [], anon := [] }
   -- What the callable captures from the scope it is written in.

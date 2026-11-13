@@ -28,6 +28,10 @@ pub mod generator;
 pub mod bytes;
 pub mod error;
 pub mod index;
+pub mod budget;
+pub mod parse;
+pub mod graph;
+pub mod source;
 pub mod iterator;
 pub mod slice;
 pub mod collections;
@@ -2539,6 +2543,541 @@ impl<Tag> WorkQueue<Tag> {
 }
 "#
 
+private def budgetText : String := r#"// What a piece of work may use, counted: steps, memory, depth; and a log of
+// what to undo, as the library specification has them (25.2, 25.3). Amounts
+// are `Int`.
+
+use std::value::{Rejected};
+pub use std::error::{MarkError};
+
+pub enum BudgetKind { Steps, Depth, Memory, Diagnostics, Items }
+pub struct BudgetExceeded { pub kind: BudgetKind, pub requested: Int, pub remaining: Int }
+
+// Steps that may still be taken.
+pub struct StepBudget { left: Int }
+
+impl StepBudget {
+    pub fn new(limit: Int) -> Self { Self { left: if(limit < 0) { 0 } else { limit } } }
+    pub fn remaining(b: &Self) -> Int { b.left }
+    // So many taken, or none of them if that is more than are left.
+    pub fn charge(b: &mut Self, steps: Int) -> Result<(), BudgetExceeded> {
+        if(steps < 0 or { steps > b.left }) { Err(BudgetExceeded { kind: BudgetKind::Steps, requested: steps, remaining: b.left }) }
+        else { b.left = b.left - steps; Ok(()) }
+    }
+}
+
+// Memory that may still be asked for. What is asked for is held as a
+// charge, which has to be given back to the budget it came from.
+pub struct MemoryBudget { left: Int, out: Int, id: Int }
+pub struct MemoryCharge { bytes: Int, of: Int }
+impl Use<[1, 1]> for MemoryCharge {}
+
+impl MemoryBudget {
+    // (`id` tells this budget's charges from another's: a release checks it.)
+    pub fn new(limit: Int) -> Self { Self { left: if(limit < 0) { 0 } else { limit }, out: 0, id: 0 } }
+    pub fn named(limit: Int, id: Int) -> Self { Self { left: if(limit < 0) { 0 } else { limit }, out: 0, id: id } }
+    pub fn remaining(b: &Self) -> Int { b.left }
+    pub fn charge(b: &mut Self, bytes: Int) -> Result<MemoryCharge, BudgetExceeded> {
+        if(bytes < 0 or { bytes > b.left }) { Err(BudgetExceeded { kind: BudgetKind::Memory, requested: bytes, remaining: b.left }) }
+        else { b.left = b.left - bytes; b.out = b.out + bytes; Ok(MemoryCharge { bytes: bytes, of: b.id }) }
+    }
+    // A charge given back; one that is another budget's comes back as it was.
+    pub fn release(b: &mut Self, charge: MemoryCharge) -> Result<(), Rejected<MemoryCharge, MarkError>> {
+        match(charge) {
+            MemoryCharge { bytes, of } =>
+                if(of != b.id or { bytes > b.out }) { Err(Rejected { value: MemoryCharge { bytes: bytes, of: of }, error: MarkError::WrongOwner }) }
+                else { b.left = b.left + bytes; b.out = b.out - bytes; Ok(()) }
+        }
+    }
+}
+
+// How deep work may still go. Going in gives a permit, which has to be
+// given back on the way out, the last given first.
+pub struct DepthBudget { limit: Int, depth: Int, id: Int }
+pub struct DepthPermit { level: Int, of: Int }
+impl Use<[1, 1]> for DepthPermit {}
+
+impl DepthBudget {
+    pub fn new(limit: Int) -> Self { Self { limit: if(limit < 0) { 0 } else { limit }, depth: 0, id: 0 } }
+    pub fn named(limit: Int, id: Int) -> Self { Self { limit: if(limit < 0) { 0 } else { limit }, depth: 0, id: id } }
+    pub fn depth(b: &Self) -> Int { b.depth }
+    pub fn enter(b: &mut Self) -> Result<DepthPermit, BudgetExceeded> {
+        if(b.depth >= b.limit) { Err(BudgetExceeded { kind: BudgetKind::Depth, requested: 1, remaining: 0 }) }
+        else { b.depth = b.depth + 1; Ok(DepthPermit { level: b.depth, of: b.id }) }
+    }
+    pub fn leave(b: &mut Self, permit: DepthPermit) -> Result<(), Rejected<DepthPermit, MarkError>> {
+        match(permit) {
+            DepthPermit { level, of } =>
+                if(of != b.id) { Err(Rejected { value: DepthPermit { level: level, of: of }, error: MarkError::WrongOwner }) } else {
+                    if(level != b.depth) { Err(Rejected { value: DepthPermit { level: level, of: of }, error: MarkError::NotTop }) }
+                    else { b.depth = b.depth - 1; Ok(()) }
+                }
+        }
+    }
+}
+
+// Whether to go on.
+pub enum ControlSignal { Proceed, CancelRequested }
+pub effect RequestControl { poll() -> ControlSignal }
+
+// Records of what was done, to undo back to a mark. It does not know what
+// undoing one is: it gives the records back, the last made first.
+pub struct UndoLog<T> { records: [T] }
+pub struct UndoMark { length: Int }
+
+fn last_onto<T>(items: [T], count: Int, taken: [T]) -> ([T], [T]) {
+    if(count <= 0) { (items, taken) } else {
+        match(pop(items)) {
+            Some((rest, last)) => tail last_onto(rest, count - 1, push(taken, last)),
+            None => ([], taken)
+        }
+    }
+}
+
+fn turned<T>(from: [T], onto: [T]) -> [T] {
+    match(pop(from)) { Some((rest, last)) => tail turned(rest, push(onto, last)), None => onto }
+}
+
+impl<T> UndoLog<T> {
+    pub fn new() -> Self { Self { records: [] } }
+    pub fn len(log: &Self) -> Int { len_at(&log.records) }
+    pub fn mark(log: &Self) -> UndoMark { UndoMark { length: len_at(&log.records) } }
+    pub fn push(log: &mut Self, item: T) { push_at(&mut log.records, item); }
+    // The records since a mark, the last made first, for undoing.
+    pub fn rollback_take(log: &mut Self, mark: UndoMark) -> Result<[T], MarkError> {
+        if(mark.length > len_at(&log.records)) { Err(MarkError::Stale) } else {
+            let count = len_at(&log.records) - mark.length;
+            let records = &mut log.records;
+            let none = [];
+            match(last_onto(replace(records, []), count, none)) {
+                (kept, taken) => unsafe { restore_at(records, kept) }; Ok(taken)
+            }
+        }
+    }
+    // The same records in the order they were made: no longer needed.
+    pub fn commit(log: &mut Self, mark: UndoMark) -> Result<[T], MarkError> {
+        match(UndoLog::rollback_take(log, mark)) { Ok(taken) => Ok(turned(taken, [])), Err(e) => Err(e) }
+    }
+    pub fn clear(log: &mut Self) where T: Use<[0, 1]> { log.records = []; }
+}
+"#
+
+private def parseText : String := r#"// A place in a row of things, and parsers tried from it, as the library
+// specification has them (26.1). Places are `Int`.
+
+use std::slice::{Slice};
+use std::budget::{BudgetExceeded, BudgetKind};
+pub use std::error::{MarkError};
+
+// A row of things read from front to back.
+pub struct Cursor<'a, T> { input: Slice<'a, T>, at: Int }
+pub struct CursorMark { at: Int, length: Int }
+
+// What a parser found: something, nothing here (and it may be tried
+// elsewhere), or something wrong.
+pub enum ParseStep<T, E> { Matched(T), NoMatch, Failed(E) }
+pub enum ParseError<E> { User(E), NoProgress, Limit(BudgetExceeded) }
+
+impl<'a, T> Cursor<'a, T> {
+    pub fn new(input: Slice<'a, T>) -> Self { Self { input: input, at: 0 } }
+    pub fn position(c: &Self) -> Int { c.at }
+    pub fn is_done(c: &Self) -> Bool { c.at >= Slice::len(&c.input) }
+    pub fn remaining(c: &Self) -> Slice<'a, T> {
+        match(Slice::sub(&c.input, c.at, Slice::len(&c.input))) { Some(rest) => rest, None => c.input }
+    }
+    pub fn peek(c: &Self) -> Option<&'a T> { Slice::get(&c.input, c.at) }
+    pub fn next(c: &mut Self) -> Option<&'a T> {
+        match(Slice::get(&c.input, c.at)) { Some(item) => c.at = c.at + 1; Some(item), None => None }
+    }
+    pub fn mark(c: &Self) -> CursorMark { CursorMark { at: c.at, length: Slice::len(&c.input) } }
+    pub fn restore(c: &mut Self, mark: CursorMark) -> Result<(), MarkError> {
+        if(mark.length != Slice::len(&c.input)) { Err(MarkError::WrongOwner) } else {
+            if(mark.at > mark.length) { Err(MarkError::OutOfRange) } else { c.at = mark.at; Ok(()) }
+        }
+    }
+}
+
+// A parser tried. Where it finds nothing the cursor is put back where it
+// was; what else the parser did is not undone.
+pub fn attempt<'a, T, U, E, e: EffectRow>(cursor: &mut Cursor<'a, T>, parse: fn(&mut Cursor<'a, T>) -> ParseStep<U, E> / e)
+    -> ParseStep<U, E> / { | e } {
+    let at = cursor.at;
+    match(parse(cursor)) {
+        ParseStep::NoMatch => cursor.at = at; ParseStep::NoMatch,
+        found => found
+    }
+}
+
+fn many_onto<'a, T, U, E, e: EffectRow>(cursor: &mut Cursor<'a, T>, limit: Int,
+    parse: fn(&mut Cursor<'a, T>) -> ParseStep<U, E> / e, out: [U], count: Int)
+    -> Result<[U], ([U], ParseError<E>)> / { | e } {
+    if(Cursor::is_done(cursor)) { Ok(out) } else {
+        if(count >= limit) {
+            Err((out, ParseError::Limit(BudgetExceeded { kind: BudgetKind::Items, requested: count + 1, remaining: 0 })))
+        } else {
+            let before = cursor.at;
+            match(attempt(cursor, parse)) {
+                ParseStep::Matched(item) =>
+                    // One that found something without moving on would
+                    // find it again for ever.
+                    if(cursor.at == before) { Err((push(out, item), ParseError::NoProgress)) }
+                    else { many_onto(cursor, limit, parse, push(out, item), count + 1) },
+                ParseStep::NoMatch => Ok(out),
+                ParseStep::Failed(e) => Err((out, ParseError::User(e)))
+            }
+        }
+    }
+}
+
+// A parser as many times as it finds something, up to so many: what it
+// found each time. What was found is given back with what went wrong, too.
+pub fn many<'a, T, U, E, e: EffectRow>(cursor: &mut Cursor<'a, T>, limit: Int,
+    parse: fn(&mut Cursor<'a, T>) -> ParseStep<U, E> / e)
+    -> Result<[U], ([U], ParseError<E>)> / { | e } {
+    many_onto(cursor, limit, parse, [], 0)
+}
+"#
+
+private def graphText : String := r#"// Going over a graph from what each node leads to, as the library
+// specification has it (26.2). The order found is the order the nodes and
+// what they lead to are given in, never a table's.
+
+use std::hash::{Hash, HashMap};
+use std::slice::{Slice};
+use std::budget::{StepBudget, BudgetExceeded};
+
+// Something with nodes, each leading to others.
+pub trait Graph {
+    type Node;
+    fn successors(&Self, Self::Node) -> [Self::Node]
+}
+
+// Nodes that lead round to the first of them.
+pub struct Cycle<N> { pub nodes: [N] }
+// (`Cyclic`, where the specification has `Cycle`: a constructor here has one
+// name in its module, and `Cycle` is the type's.)
+pub enum GraphError<N> { Cyclic(Cycle<N>), Limit(BudgetExceeded) }
+
+// More onto a stack so that the first of them comes off first.
+fn stacked<N>(stack: [N], more: [N], i: Int) -> [N] {
+    if(i <= 0) { stack } else { tail stacked(push(stack, more[i - 1]), more, i - 1) }
+}
+
+fn reach<N: Eq + Hash, G: Graph<Node = N>>(graph: &G, stack: [N], seen: HashMap<N, ()>, out: [N], budget: &mut StepBudget)
+    -> Result<[N], BudgetExceeded> {
+    match(pop(stack)) {
+        None => Ok(out),
+        Some((rest, node)) => match(StepBudget::charge(budget, 1)) {
+            Err(e) => Err(e),
+            Ok(_) =>
+                if(std::hash::contains_key(seen, node)) { tail reach(graph, rest, seen, out, budget) } else {
+                    let next = successors(graph, node);
+                    tail reach(graph, stacked(rest, next, len(next)), std::hash::insert(seen, node, ()), push(out, node), budget)
+                }
+        }
+    }
+}
+
+// Every node that can be got to from one, itself first, each once. A step
+// is charged for each node looked at.
+pub fn reachable<N: Eq + Hash, G: Graph<Node = N>>(graph: &G, start: N, budget: &mut StepBudget)
+    -> Result<[N], BudgetExceeded> {
+    reach(graph, [start], std::hash::new(), [], budget)
+}
+
+// The nodes on the way from one of them to the end of the way.
+fn way_from<N: Eq>(way: [N], node: N, i: Int, found: Bool, out: [N]) -> [N] {
+    if(i >= len(way)) { out } else {
+        let here = found or { way[i] == node };
+        tail way_from(way, node, i + 1, here, if(here) { push(out, way[i]) } else { out })
+    }
+}
+
+// Each of some nodes looked at in turn, and from it what it leads to: the
+// nodes done with, each after all it leads to. (A node is being looked at,
+// `1`, or done with, `2`; one met again while being looked at is on a way
+// that comes back to itself.)
+fn visit_each<N: Eq + Hash, G: Graph<Node = N>>(graph: &G, nodes: [N], i: Int, state: HashMap<N, Int>, done: [N], way: [N], budget: &mut StepBudget)
+    -> Result<(HashMap<N, Int>, [N]), GraphError<N>> {
+    if(i >= len(nodes)) { Ok((state, done)) } else {
+        let node = nodes[i];
+        match(StepBudget::charge(budget, 1)) {
+            Err(e) => Err(GraphError::Limit(e)),
+            Ok(_) => match(std::hash::get(state, node)) {
+                Some(2) => visit_each(graph, nodes, i + 1, state, done, way, budget),
+                Some(_) => Err(GraphError::Cyclic(Cycle { nodes: way_from(way, node, 0, false, []) })),
+                None => match(visit_each(graph, successors(graph, node), 0, std::hash::insert(state, node, 1), done, push(way, node), budget)) {
+                    Ok((after, found)) => visit_each(graph, nodes, i + 1, std::hash::insert(after, node, 2), push(found, node), way, budget),
+                    Err(e) => Err(e)
+                }
+            }
+        }
+    }
+}
+
+fn back_to_front<N>(items: [N], i: Int, out: [N]) -> [N] {
+    if(i <= 0) { out } else { tail back_to_front(items, i - 1, push(out, items[i - 1])) }
+}
+
+fn copied<'a, N>(nodes: &Slice<'a, N>, i: Int, out: [N]) -> [N] {
+    match(Slice::get(nodes, i)) { Some(node) => tail copied(nodes, i + 1, push(out, *node)), None => out }
+}
+
+// The nodes that can be got to from those given, each before every node it
+// leads to; or nodes that lead round in a circle, where there are some.
+pub fn topological_order<'a, N: Eq + Hash, G: Graph<Node = N>>(graph: &G, nodes: Slice<'a, N>, budget: &mut StepBudget)
+    -> Result<[N], GraphError<N>> {
+    match(visit_each(graph, copied(&nodes, 0, []), 0, std::hash::new(), [], [], budget)) {
+        Ok((_, done)) => Ok(back_to_front(done, len(done), [])),
+        Err(e) => Err(e)
+    }
+}
+
+// What is known while the groups are looked for: when each node was first
+// seen, the earliest it can get back to, the nodes not yet in a group.
+struct Search<N> { seen: HashMap<N, Int>, low: HashMap<N, Int>, open: HashMap<N, Bool>, stack: [N], next: Int, groups: [[N]] }
+
+fn number<N: Eq + Hash>(m: HashMap<N, Int>, node: N) -> Int { match(std::hash::get(m, node)) { Some(n) => n, None => 0 - 1 } }
+
+fn lower<N: Eq + Hash>(s: Search<N>, node: N, to: Int) -> Search<N> {
+    let mut next = s;
+    if(to < number(next.low, node)) { next.low = std::hash::insert(next.low, node, to); } else { };
+    next
+}
+
+// The nodes at the top of the stack down to one of them, as a group.
+fn closed<N: Eq + Hash>(s: Search<N>, root: N, group: [N]) -> Search<N> {
+    let mut next = s;
+    match(pop(next.stack)) {
+        None => next.groups = push(next.groups, group); next,
+        Some((rest, node)) =>
+            next.stack = rest;
+            next.open = std::hash::insert(next.open, node, false);
+            if(node == root) { next.groups = push(next.groups, push(group, node)); next }
+            else { closed(next, root, push(group, node)) }
+    }
+}
+
+// A node seen for the first time: numbered, and not yet in a group.
+fn entered<N: Eq + Hash>(s: Search<N>, node: N) -> Search<N> {
+    let mut next = s;
+    let at = next.next;
+    next.seen = std::hash::insert(next.seen, node, at);
+    next.low = std::hash::insert(next.low, node, at);
+    next.open = std::hash::insert(next.open, node, true);
+    next.stack = push(next.stack, node);
+    next.next = at + 1;
+    next
+}
+
+fn lowered<N: Eq + Hash>(s: Search<N>, from: Option<N>, to: Int) -> Search<N> {
+    match(from) { Some(node) => lower(s, node, to), None => s }
+}
+
+// Each of the nodes one leads to, in turn. One not seen before is gone into,
+// and is the root of a group if nothing under it gets back above it.
+fn search_each<N: Eq + Hash, G: Graph<Node = N>>(graph: &G, from: Option<N>, nodes: [N], i: Int, s: Search<N>, budget: &mut StepBudget)
+    -> Result<Search<N>, BudgetExceeded> {
+    if(i >= len(nodes)) { Ok(s) } else {
+        let to = nodes[i];
+        let first = number(s.seen, to);
+        if(first < 0) {
+            match(StepBudget::charge(budget, 1)) {
+                Err(e) => Err(e),
+                Ok(_) => match(search_each(graph, Some(to), successors(graph, to), 0, entered(s, to), budget)) {
+                    Err(e) => Err(e),
+                    Ok(after) =>
+                        let reached = number(after.low, to);
+                        let settled = if(reached == number(after.seen, to)) { closed(after, to, []) } else { after };
+                        search_each(graph, from, nodes, i + 1, lowered(settled, from, reached), budget)
+                }
+            }
+        } else {
+            let still = match(std::hash::get(s.open, to)) { Some(open) => open, None => false };
+            search_each(graph, from, nodes, i + 1, if(still) { lowered(s, from, first) } else { s }, budget)
+        }
+    }
+}
+
+// The nodes that can be got to from those given, in groups: two nodes are
+// in one group when each can be got to from the other. A group comes before
+// any group that leads to it.
+pub fn strongly_connected_components<'a, N: Eq + Hash, G: Graph<Node = N>>(graph: &G, nodes: Slice<'a, N>, budget: &mut StepBudget)
+    -> Result<[[N]], BudgetExceeded> {
+    let start = Search { seen: std::hash::new(), low: std::hash::new(), open: std::hash::new(), stack: [], next: 0, groups: [] };
+    match(search_each(graph, None, copied(&nodes, 0, []), 0, start, budget)) { Ok(s) => Ok(s.groups), Err(e) => Err(e) }
+}
+"#
+
+private def sourceText : String := r#"// Texts by number, and places in them by line, as the library specification
+// has them (25.1). Places are bytes of the text as UTF-8, counted from
+// nothing, as lines and columns are; they are `Int`.
+
+use std::value::{Rejected};
+use std::text::{utf8, from_utf8};
+
+pub struct SourceId(u32);
+// A stretch of a text: from one place up to, not including, another.
+pub struct SourceSpan { pub source: SourceId, pub start: Int, pub end: Int }
+pub struct SourceLocation { pub source: SourceId, pub line: Int, pub column_bytes: Int }
+// A place as editors count it: the column in units of UTF-16.
+pub struct Utf16Location { pub line: Int, pub column_units: Int }
+pub enum SourceError { UnknownSource, InvalidRange, InvalidBoundary, IndexOverflow }
+
+struct Source { name: Str, bytes: [u8], lines: [Int] }
+
+// Texts, each given a number when it is put in. It reads no files.
+pub struct SourceMap { sources: [Source] }
+
+fn byte_at(bytes: &[u8], i: Int) -> Int { match(element(bytes, i)) { Some(b) => int(*b), None => 0 } }
+
+// Where each line starts: after each end of line, and at the start.
+fn line_starts(bytes: &[u8], i: Int, out: [Int]) -> [Int] {
+    if(i >= len_at(bytes)) { out } else {
+        tail line_starts(bytes, i + 1, if(byte_at(bytes, i) == 10) { push(out, i + 1) } else { out })
+    }
+}
+
+fn piece(bytes: &[u8], from: Int, upto: Int, out: [u8]) -> [u8] {
+    if(from >= upto) { out } else {
+        match(element(bytes, from)) {
+            Some(b) => tail piece(bytes, from + 1, upto, push(out, *b)),
+            None => out
+        }
+    }
+}
+
+// Is a place between two characters, and not inside one? A byte that goes
+// on a character begun before it is `10` and six bits.
+fn on_boundary(bytes: &[u8], at: Int) -> Bool {
+    if(at == len_at(bytes)) { true } else { let b = byte_at(bytes, at); b < 128 or { b >= 192 } }
+}
+
+// The last line that starts at or before a place.
+fn line_of(lines: &[Int], at: Int, low: Int, high: Int) -> Int {
+    if(low + 1 >= high) { low } else {
+        let mid = (low + high) / 2;
+        match(element(lines, mid)) {
+            Some(start) => if(*start <= at) { tail line_of(lines, at, mid, high) } else { tail line_of(lines, at, low, mid) },
+            None => low
+        }
+    }
+}
+
+fn int_at(items: &[Int], i: Int) -> Int { match(element(items, i)) { Some(n) => *n, None => 0 } }
+
+// How many units of UTF-16 the characters from one place to another are: a
+// character of four bytes is two, any other one.
+fn units_between(bytes: &[u8], at: Int, end: Int, units: Int) -> Int {
+    if(at >= end) { units } else {
+        let b = byte_at(bytes, at);
+        if(b < 128) { tail units_between(bytes, at + 1, end, units + 1) } else {
+            if(b < 224) { tail units_between(bytes, at + 2, end, units + 1) } else {
+                if(b < 240) { tail units_between(bytes, at + 3, end, units + 1) }
+                else { tail units_between(bytes, at + 4, end, units + 2) }
+            }
+        }
+    }
+}
+
+// The place so many units of UTF-16 on from another, if that is between
+// two characters and before a limit.
+fn after_units(bytes: &[u8], at: Int, limit: Int, units: Int) -> Option<Int> {
+    if(units == 0) { Some(at) } else {
+        if(units < 0 or { at >= limit }) { None } else {
+            let b = byte_at(bytes, at);
+            if(b < 128) { tail after_units(bytes, at + 1, limit, units - 1) } else {
+                if(b < 224) { tail after_units(bytes, at + 2, limit, units - 1) } else {
+                    if(b < 240) { tail after_units(bytes, at + 3, limit, units - 1) }
+                    else { tail after_units(bytes, at + 4, limit, units - 2) }
+                }
+            }
+        }
+    }
+}
+
+impl SourceMap {
+    pub fn new() -> Self { Self { sources: [] } }
+    pub fn len(m: &Self) -> Int { len_at(&m.sources) }
+    pub fn insert(m: &mut Self, name: Str, text: Str) -> Result<SourceId, Rejected<(Str, Str), SourceError>> {
+        let n = len_at(&m.sources);
+        if(n > 4294967295) { Err(Rejected { value: (name, text), error: SourceError::IndexOverflow }) } else {
+            let bytes = utf8(text);
+            let lines = line_starts(&bytes, 0, [0]);
+            push_at(&mut m.sources, Source { name: name, bytes: bytes, lines: lines });
+            Ok(SourceId(to(n)))
+        }
+    }
+    fn source<'a>(m: &'a Self, id: SourceId) -> Option<&'a Source> { element(&m.sources, int(id.0)) }
+    pub fn name(m: &Self, id: SourceId) -> Option<Str> {
+        match(SourceMap::source(m, id)) { Some(s) => Some(s.name), None => None }
+    }
+    pub fn text(m: &Self, id: SourceId) -> Option<Str> {
+        match(SourceMap::source(m, id)) { Some(s) => from_utf8(s.bytes), None => None }
+    }
+    // The text of a stretch, which has to begin and end between characters.
+    pub fn slice(m: &Self, span: SourceSpan) -> Result<Str, SourceError> {
+        match(SourceMap::source(m, span.source)) {
+            None => Err(SourceError::UnknownSource),
+            Some(s) =>
+                if(span.start < 0 or { span.end < span.start or { span.end > len_at(&s.bytes) } }) { Err(SourceError::InvalidRange) } else {
+                    if(on_boundary(&s.bytes, span.start) and { on_boundary(&s.bytes, span.end) }) {
+                        match(from_utf8(piece(&s.bytes, span.start, span.end, []))) { Some(text) => Ok(text), None => Err(SourceError::InvalidBoundary) }
+                    } else { Err(SourceError::InvalidBoundary) }
+                }
+        }
+    }
+    // The line a place is on, and how many bytes into it.
+    pub fn locate(m: &Self, id: SourceId, offset: Int) -> Result<SourceLocation, SourceError> {
+        match(SourceMap::source(m, id)) {
+            None => Err(SourceError::UnknownSource),
+            Some(s) =>
+                if(offset < 0 or { offset > len_at(&s.bytes) }) { Err(SourceError::InvalidRange) } else {
+                    if(on_boundary(&s.bytes, offset)) {
+                        let line = line_of(&s.lines, offset, 0, len_at(&s.lines));
+                        Ok(SourceLocation { source: id, line: line, column_bytes: offset - int_at(&s.lines, line) })
+                    } else { Err(SourceError::InvalidBoundary) }
+                }
+        }
+    }
+    pub fn to_utf16(m: &Self, id: SourceId, offset: Int) -> Result<Utf16Location, SourceError> {
+        match(SourceMap::locate(m, id, offset)) {
+            Err(e) => Err(e),
+            Ok(at) => match(SourceMap::source(m, id)) {
+                None => Err(SourceError::UnknownSource),
+                Some(s) => Ok(Utf16Location { line: at.line, column_units: units_between(&s.bytes, offset - at.column_bytes, offset, 0) })
+            }
+        }
+    }
+    // The place a line and a column of UTF-16 are: not one inside a
+    // character that is two units, nor past the line's end.
+    pub fn from_utf16(m: &Self, id: SourceId, location: Utf16Location) -> Result<Int, SourceError> {
+        match(SourceMap::line_range(m, id, location.line)) {
+            Err(e) => Err(e),
+            Ok((start, end)) => match(SourceMap::source(m, id)) {
+                None => Err(SourceError::UnknownSource),
+                Some(s) => match(after_units(&s.bytes, start, end, location.column_units)) {
+                    Some(at) => Ok(at),
+                    None => Err(if(location.column_units > units_between(&s.bytes, start, end, 0)) { SourceError::InvalidRange } else { SourceError::InvalidBoundary })
+                }
+            }
+        }
+    }
+    // Where a line starts and where it ends, its end of line not counted.
+    pub fn line_range(m: &Self, id: SourceId, line: Int) -> Result<(Int, Int), SourceError> {
+        match(SourceMap::source(m, id)) {
+            None => Err(SourceError::UnknownSource),
+            Some(s) =>
+                if(line < 0 or { line >= len_at(&s.lines) }) { Err(SourceError::InvalidRange) } else {
+                    let start = int_at(&s.lines, line);
+                    let next = if(line + 1 < len_at(&s.lines)) { int_at(&s.lines, line + 1) - 1 } else { len_at(&s.bytes) };
+                    Ok((start, next))
+                }
+        }
+    }
+}
+"#
+
 private def generatorText : String := r#"// Generators, in the shape the library specification gives them (30.2): a
 // computation that yields is owned as a value, and resuming it uses that
 // value up and gives either what it yielded with the generator that goes
@@ -2929,6 +3468,10 @@ def texts : List (List String × String) :=
    (["std", "bytes"], bytesText),
    (["std", "error"], errorText),
    (["std", "index"], indexText),
+   (["std", "budget"], budgetText),
+   (["std", "parse"], parseText),
+   (["std", "graph"], graphText),
+   (["std", "source"], sourceText),
    (["std", "iterator"], iteratorText),
    (["std", "slice"], sliceText),
    (["std", "collections"], collectionsText),

@@ -161,6 +161,36 @@ partial def tyTouches (t : Ty) (out : List (Nat × Bool)) : M (List (Nat × Bool
 
 end
 
+mutual
+
+/-- Could running a callable look at a variable other than by being where its
+value goes? One that takes the value uses the variable for that alone, or it
+would not be given the value. -/
+partial def capLooks (brand : Nat) (cap : Nat) : M Bool := do
+  let root ← findCap cap
+  if (← get).seen.contains root then return false
+  modify fun s => { s with seen := root :: s.seen }
+  let mut takes := false
+  for (c, b) in (← get).givers do
+    if b == brand && (← findCap c) == root then takes := true
+  for (src, what) in (← get).capEdges do
+    if (← findCap src) == root then
+      match what with
+      | .touch b _ => if b == brand && !takes then return true
+      | .ty t => if ← tyLooks brand t then return true
+      | _ => pure ()
+  return false
+
+partial def tyLooks (brand : Nat) (t : Ty) : M Bool := do
+  match ← find t with
+  | .var _ => pure false
+  | .con _ args => args.anyM (tyLooks brand)
+  | .tuple args => args.anyM (tyLooks brand)
+  | .fn _ _ _ _ cap => capLooks brand cap
+  | .ref _ t _ => tyLooks brand t
+
+end
+
 /-- Whether doing this to a variable is forbidden by a borrow of it. -/
 def Using.forbiddenBy (how : Using) (uniq : Bool) : Bool :=
   match how with
@@ -242,11 +272,11 @@ partial def bothAtOnce (loan brand : Nat) (write : Bool) (t : Ty) : M Bool := do
 /-- Check the uses recorded against the borrows, now that types are known. -/
 def checkLoans : M Unit := do
   let s ← get
-  modify fun st => { st with uses := #[] }
+  modify fun st => { st with uses := #[], heldMoves := #[] }
   let fail := fun (u : Use) (msg : String) => (throw (inFunction u.owner (u.pos ++ msg)) : M Unit)
   -- A variable that gives its value away is not looked at again: a callable
   -- that uses the variable, written before, must not be able to run after.
-  for u in s.uses do
+  for u in s.uses ++ s.heldMoves do
     if let .var brand x .move _ := u.kind then
       if let some (_, _, t) := s.cells.toList.find? (·.1 == brand) then
         modify fun st => { st with seen := [] }
@@ -254,10 +284,12 @@ def checkLoans : M Unit := do
           for name in u.later.eraseDups do
             if name != x then
               if let some held := (u.scope.lookup name).bind Binding.held then
-                if ← touchesVar brand false held then
+                modify fun st => { st with seen := [] }
+                if ← tyLooks brand held then
                   fail u s!"`{x}` is given away while `{name}`, which uses it, can still be called"
           for (held, _) in u.temps do
-            if ← touchesVar brand false held then
+            modify fun st => { st with seen := [] }
+            if ← tyLooks brand held then
               fail u s!"`{x}` is given away while a callable this expression is still using uses it"
   if s.loans.isEmpty then return
   for u in s.uses do
@@ -585,7 +617,7 @@ def captureAll (scope : Scope) (cap : Nat) (names : List String) (assigns : Stri
       -- A variable that gives its value away, where the callable is what
       -- uses the value: the callable holds it, as it would a name's.
       if (← get).movedCells.contains brand && gives name then
-        modify fun s => { s with givenEdges := s.capEdges.size :: s.givenEdges }
+        modify fun s => { s with givenEdges := s.capEdges.size :: s.givenEdges, givers := (cap, brand) :: s.givers }
         captures cap (.ty t) (some (name, brand))
     | some (.label _ brand) => captures cap (.brand brand)
     | some (.poly s) => captures cap (.ty s.ty) (some (name, 0))
