@@ -127,6 +127,9 @@ structure St where
   hidden : List (List String) := []
   /-- The coercions, each with the module that declares it. -/
   coerced : List (List String × String) := []
+  /-- How many callables the resolver has written out so far, each known by
+  a number of its own. -/
+  made : Nat := 0
   /-- `#![no_implicit_prelude]` or `#![no_std]`: the program's modules have
   the prelude's names only where they `use` them. -/
   bare : Bool := false
@@ -805,8 +808,30 @@ partial def resolveExpr (ctx : Ctx) (bound : List String) : Expr → R Expr
   | .int n => pure (.int n)
   | .label l => pure (.label l)
   | .name qual name => do
-    let (qual, name, _) ← resolveValue ctx bound qual name
-    pure (.name qual name)
+    let (qual', name', entry) ← resolveValue ctx bound qual name
+    -- An operation, or a trait's function, named where it is not called: a
+    -- callable that performs it, or calls it, with what it is given (10.8).
+    if true then
+      if let some e := entry then
+        if e.kind == .op || e.kind == .method then
+          let written := (← unitOf e.home).bind fun u =>
+            (u.own.find? fun b => b.entry.global == e.global && b.entry.kind == e.kind).map (u, ·.name)
+          let arity := written.bind fun (u, own) =>
+            u.items.findSome? fun item =>
+              let item := match item with
+                | .pub _ i => i
+                | i => i
+              match item with
+              | .effect _ _ ops => (ops.find? (·.name == own)).map (·.payload.length)
+              | .trait _ methods => (methods.find? (·.1 == own)).map (·.2.1.length)
+              | _ => none
+          if let some n := arity then
+            let made := (← get).made
+            modify fun s => { s with made := made + 1 }
+            let params := (List.range n).map fun i => s!"%arg{i}"
+            return .closure 0 [.mk (params.map Pattern.var)
+              [.expr (.call (7000000000000 + made) (.name qual' name') (params.map (Expr.name none)))]]
+    pure (.name qual' name')
   | .call id f args => do
     match f, args with
     | .name none mark, [value, ty] =>
@@ -853,9 +878,20 @@ partial def resolveExpr (ctx : Ctx) (bound : List String) : Expr → R Expr
           [.expr (.call (id + 1) (.name qual' name') (names.map fun field => .name none s!"%{field}"))]])
           (gave.map (·.2))
     | _, _ => pure ()
-    pure (.call id (← resolveExpr ctx bound f) (← args.mapM (resolveExpr ctx bound)))
+    -- What is called is named as it is.
+    let called ← match f with
+      | .name q x => do
+        let (q, x, _) ← resolveValue ctx bound q x
+        pure (Expr.name q x)
+      | _ => resolveExpr ctx bound f
+    pure (.call id called (← args.mapM (resolveExpr ctx bound)))
   | .tailCall id f args => do
-    pure (.tailCall id (← resolveExpr ctx bound f) (← args.mapM (resolveExpr ctx bound)))
+    let called ← match f with
+      | .name q x => do
+        let (q, x, _) ← resolveValue ctx bound q x
+        pure (Expr.name q x)
+      | _ => resolveExpr ctx bound f
+    pure (.tailCall id called (← args.mapM (resolveExpr ctx bound)))
   | .tuple args => .tuple <$> args.mapM (resolveExpr ctx bound)
   | .proj e i => do pure (.proj (← resolveExpr ctx bound e) i)
   | .fieldOf id e name => do pure (.fieldOf id (← resolveExpr ctx bound e) name)
@@ -1038,19 +1074,28 @@ partial def resolveItem (ctx : Ctx) : Item → R (List Item)
   | .bounds fn bounds => do
     -- The types written of a function's type parameters, read as the
     -- function's own types are.
+    let ofType := (← unitOf ctx.here).bind fun u => u.items.findSome? fun item =>
+      let item := match item with
+        | .pub _ i => i
+        | i => i
+      match item with
+      | .struct name ps _ => if name == fn then some ps else none
+      | .enum name ps _ => if name == fn then some ps else none
+      | _ => none
     let generics := match (← unitOf ctx.here).bind fun u => u.items.findSome? fun
         | .fn name ps _ _ _ => if name == fn then some ps else none
         | .pub _ (.fn name ps _ _ _) => if name == fn then some ps else none
         | _ => none with
       | some ps => genericParams ps
-      | none => []
+      | none => genericParams (ofType.getD [])
     let bounds ← bounds.mapM fun b => do
       let sealed_ := ["Fn", "RunsIn", "Environment", "Use", "Label"].contains b.trait || b.trait.startsWith "'"
       let trait ← if sealed_ then pure b.trait else (·.1) <$> resolveNamed ctx .trait [] b.trait
       let args ← b.args.mapM (resolveType ctx generics)
       let assoc ← b.assoc.mapM fun (name, t) => do pure (name, ← resolveType ctx generics t)
       pure { b with trait, args, assoc }
-    pure [.bounds (ownName ctx .value fn) bounds]
+    -- (written of a type: under the type's name)
+    pure [.bounds (ownName ctx (if ofType.isSome then .type else .value) fn) bounds]
   | .fieldNames ctor names pubs => pure [.fieldNames (ownName ctx .value ctor) names pubs]
   | .typeAlias name ps body => do
     pure [.typeAlias (ownName ctx .type name) ps (← resolveType ctx (genericParams ps) body)]

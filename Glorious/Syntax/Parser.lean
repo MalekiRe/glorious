@@ -1719,14 +1719,22 @@ private partial def parseItemGroup : P (List Item) := do
   | .ident "struct" =>
     advance
     let name ← expectIdent
-    let params ← parseGenerics
+    -- What is asked of a type parameter, `struct W<T: Show>` or `where T:
+    -- Show` before or after the fields, is asked where a `W` is built.
+    let (params, bounds) ← parseGenericsWith
+    let (_, before) ← parseWhere
     let (fields, names, pubs) ← parseFieldDecls
+    let (_, after) ← parseWhere
     let _ ← acceptPunct ";"
-    pure [.struct name params fields, .fieldNames name names pubs]
+    let asked := bounds ++ before ++ after
+    pure ([.struct name params fields, .fieldNames name names pubs]
+      ++ (if asked.isEmpty then [] else [.bounds name asked]))
   | .ident "enum" =>
     advance
     let name ← expectIdent
-    let params ← parseGenerics
+    let (params, bounds) ← parseGenericsWith
+    let (_, more) ← parseWhere
+    let asked := bounds ++ more
     expectPunct "{"
     let mut ctors : Array (String × List TypeExpr) := #[]
     let mut named : Array Item := #[]
@@ -1739,7 +1747,8 @@ private partial def parseItemGroup : P (List Item) := do
       unless names.isEmpty do named := named.push (.fieldNames c names (fields.map fun _ => true))
       if !(← acceptPunct ",") then break
     expectPunct "}"
-    pure (.enum name params ctors.toList :: named.toList)
+    pure (.enum name params ctors.toList :: named.toList
+      ++ (if asked.isEmpty then [] else [.bounds name asked]))
   | .ident "type" =>
     advance
     let name ← expectIdent
@@ -1783,14 +1792,28 @@ private def collectRecords (toks : Array Token) : List String := Id.run do
       | _ => pure ()
       j := j + 1
     j
+  -- Past `where ..`, if it starts at `i`: up to the brace, bracket or `;`
+  -- that ends it.
+  let pastWhere := fun (i : Nat) => Id.run do
+    if tok i != .ident "where" then return i
+    let mut j := i + 1
+    let mut depth := 0
+    while j < toks.size do
+      match tok j with
+      | .op "<" => depth := depth + 1
+      | .op ">" => depth := depth - 1
+      | .punct "{" | .punct ";" => if depth == 0 then break
+      | _ => pure ()
+      j := j + 1
+    j
   let mut out : List String := []
   for i in [0:toks.size] do
     match tok i, tok (i + 1) with
     | .ident "struct", .ident name =>
-      if tok (pastGenerics (i + 2)) == .punct "{" then out := name :: out
+      if tok (pastWhere (pastGenerics (i + 2))) == .punct "{" then out := name :: out
     | .ident "enum", .ident _ =>
       -- Each constructor at the top of the enum's braces that has braces.
-      let mut j := pastGenerics (i + 2)
+      let mut j := pastWhere (pastGenerics (i + 2))
       if tok j == .punct "{" then
         let mut depth := 0
         j := j + 1

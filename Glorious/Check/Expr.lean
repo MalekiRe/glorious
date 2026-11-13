@@ -478,6 +478,12 @@ partial def inferCall (scope : Scope) (amb : Row) (f : Expr) (args : List Expr)
     | .ctor sig => do
       let (fields, result) ← instCtor sig
       checkArgs scope amb s!"constructor `{x}`" fields args call
+      -- What the type's declaration asks of its parameters.
+      if let .con owner targs := result then
+        if let some asked := (← get).typeBounds.lookup owner then
+          -- (Asked, and not handed over: under a number no call has.)
+          if call != 0 then
+            needBounds (100000000000000000 + call) (asked.filterMap fun (tr, i) => targs[i]?.map (tr, ·))
       pure result
     | .op sig => do
       abandons (← get).anon s!"operation `{x}`"

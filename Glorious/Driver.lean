@@ -207,8 +207,25 @@ def compileSource (src : String) (check : Bool := true)
       -- Nor a borrow of a field: each is a variable of its own by now.
       pure (← Elab.unfield b items, some b)
     | none => pure (all, none)
-  -- What nothing reaches is not part of the program that runs.
-  let all := Elab.reachable ("main" :: ((blocks.map (·.coercions)).getD []).map (·.2)) all
+  -- What nothing reaches is not part of the program that runs. But what the
+  -- program's own functions say is looked at wherever they are: one that
+  -- `main` does not reach is elaborated too, for what the elaborator alone
+  -- refuses, and then left out.
+  let roots := "main" :: ((blocks.map (·.coercions)).getD []).map (·.2)
+  if check then
+    let named := fun (items : List Syntax.Item) => items.filterMap fun
+      | Syntax.Item.fn name _ _ _ _ => some name
+      | _ => none
+    let own := match first with
+      | .ok (count, _) => named (written.drop count)
+      | .error _ => []
+    let reached := named (Elab.reachable roots all)
+    let missing := own.filter (!reached.contains ·)
+    unless missing.isEmpty do
+      match Elab.elabProgram (Elab.reachable (roots ++ missing) all) blocks with
+      | .error e => throw e
+      | .ok _ => pure ()
+  let all := Elab.reachable roots all
   let declared := Elab.withDeclared written all
   let plain := fun (blocks : Option Elab.Blocks) => do
     let out ← Elab.elabProgram all blocks

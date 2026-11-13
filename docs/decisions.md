@@ -1021,6 +1021,28 @@ From the audit of the specification (13.2).
   written, with the trait's arguments written; `Trait::f(args)` already named
   it by its trait and found the type.
 
+## Operations as values; what a type asks of its parameters
+
+From the audit of the specification (10.8, 20).
+
+- **An operation named where it is not called is a callable that performs
+  it** with what it is given, and a trait's function named so is a callable
+  that calls it. The resolver writes the callable out; it is the same
+  operation, and its effect is the callable's.
+- **`struct W<T: Show>(T)`, `struct W<T> where T: Show { .. }`, and the same
+  of an `enum`**: what is asked of a type parameter is asked where a value
+  of the type is built, and nothing is handed to the constructor for it.
+  `T: 'a` is read.
+
+- **A function `main` does not reach is elaborated too**, for what only the
+  elaborator refuses (`tail` out of place), and then left out of the program
+  as before.
+
+Limits. A function that needs a trait of a type it is generic in is still
+called where it is named. A declared type's bounds are not assumed inside a
+function that is given one: the function says them again. Only traits
+without arguments of their own are asked of a type's parameter.
+
 ## What the specification's audit turned away
 
 An audit of the language specification against the compiler, section by

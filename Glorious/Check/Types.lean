@@ -397,6 +397,9 @@ structure St where
   checked: what each holds, and where. Such a borrow is a variable of the
   function's while it lasts, so it cannot leave the function. -/
   fieldCaps : Array (Nat × String) := #[]
+  /-- What is asked of the type parameters of a declared type, where a value
+  of it is built: for each such type, a trait and which parameter. -/
+  typeBounds : List (String × List (String × Nat)) := []
   /-- The type parameters each function of a module declares, in the order
   written, as its type has them; none for one its type does not mention. -/
   typeParams : List (String × List (Option Nat)) := []

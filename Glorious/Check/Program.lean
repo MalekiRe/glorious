@@ -780,6 +780,17 @@ def checkItems (items : List Item) : M Unit := do
     | .fn name params annots ret clauses =>
       some { name, params, annots, ret, clauses, bounds := (written.lookup name).getD [] }
     | _ => none
+  -- What is asked of a declared type's parameters: a trait without arguments
+  -- of its own, of the parameter at a place.
+  let asked := items.filterMap fun
+    | .struct name params _ => (written.lookup name).map (name, params, ·)
+    | .enum name params _ => (written.lookup name).map (name, params, ·)
+    | _ => none
+  modify fun s =>
+    { s with typeBounds := s.typeBounds ++ asked.map fun (name, params, bounds) =>
+        (name, bounds.filterMap fun b =>
+          if b.trait.startsWith "'" || !b.args.isEmpty then none
+          else (params.idxOf? b.subject).map (b.trait, ·)) }
   let names := decls.map (·.name)
   let mentions := fun (name : String) =>
     match decls.find? (·.name == name) with
