@@ -21,6 +21,7 @@ pub mod map;
 pub mod set;
 pub mod iter;
 pub mod c;
+pub mod fmt;
 pub mod iterator;
 pub mod slice;
 pub mod collections;
@@ -1406,6 +1407,84 @@ impl<'a, T> Iterator for SliceIter<'a, T> {
 }
 "#
 
+private def fmtText : String := r#"// Text built up piece by piece into a sink the caller owns: the shape the
+// library specification gives formatting (21). A type says how it is written
+// by implementing `Display`.
+
+use std::text::{String, is_empty};
+
+pub enum FormatError { OutputLimit, InvalidIndent }
+
+// The sink: the text so far, how deep the indentation is, how wide a step of
+// it is, and whether the line being written has nothing on it yet.
+pub struct Formatter { text: String, depth: Int, width: Int, fresh: Bool }
+
+pub trait Display {
+    fn fmt(&Self, &mut Formatter);
+}
+
+fn spaces(n: Int, out: Str) -> Str {
+    if(n <= 0) { out } else { tail spaces(n - 1, " " ++ out) }
+}
+
+// A text with what would end or break a quoted text written out.
+fn escaped(text: Str) -> Str {
+    match(text) {
+        StrEnd => "",
+        StrChar(c, rest) =>
+            let piece = match(int(c)) {
+                34 => "\\\"",
+                92 => "\\\\",
+                10 => "\\n",
+                _ => show(c)
+            };
+            piece ++ escaped(rest)
+    }
+}
+
+impl Formatter {
+    pub fn new() -> Self { Self { text: String::new(), depth: 0, width: 4, fresh: true } }
+    // Indentation is written before the first thing on a line, not on a
+    // line that stays empty.
+    pub fn write_str(value: &mut Self, text: Str) {
+        let starts = if(value.fresh) { not(is_empty(text)) } else { false };
+        let before = if(starts) { spaces(value.depth * value.width, "") } else { "" };
+        value.fresh = if(starts) { false } else { value.fresh };
+        String::push_str(&mut value.text, before ++ text);
+    }
+    pub fn write_char(value: &mut Self, character: char) { Formatter::write_str(value, show(character)) }
+    pub fn newline(value: &mut Self) {
+        String::push_str(&mut value.text, "\n");
+        value.fresh = true;
+    }
+    pub fn indent(value: &mut Self) -> Result<(), FormatError> {
+        value.depth = value.depth + 1;
+        Ok(())
+    }
+    pub fn dedent(value: &mut Self) -> Result<(), FormatError> {
+        let depth = value.depth;
+        value.depth = if(depth > 0) { depth - 1 } else { 0 };
+        if(depth > 0) { Ok(()) } else { Err(InvalidIndent) }
+    }
+    pub fn quoted(value: &mut Self, text: Str) { Formatter::write_str(value, "\"" ++ escaped(text) ++ "\"") }
+    pub fn display<T: Display>(value: &mut Self, item: &T) { fmt(item, value) }
+    pub fn finish(value: Self) -> Result<String, FormatError> {
+        match(value) { Formatter { text, depth, width, fresh } => Ok(text) }
+    }
+}
+
+// What a value is written as.
+pub fn format<T: Display>(value: &T) -> String {
+    let mut out = Formatter::new();
+    fmt(value, &mut out);
+    match(out) { Formatter { text, depth, width, fresh } => text }
+}
+
+impl Display for Int { fn fmt(n, out) { Formatter::write_str(out, show(*n)) } }
+impl Display for Str { fn fmt(text, out) { Formatter::write_str(out, *text) } }
+impl Display for char { fn fmt(c, out) { Formatter::write_char(out, *c) } }
+"#
+
 private def cText : String := r#"// What C has: its memory, and texts as it writes them. Everything here is
 // unsafe: an address is whatever a program says it is.
 
@@ -1633,6 +1712,7 @@ def texts : List (List String × String) :=
    (["std", "set"], setText),
    (["std", "iter"], iterText),
    (["std", "c"], cText),
+   (["std", "fmt"], fmtText),
    (["std", "iterator"], iteratorText),
    (["std", "slice"], sliceText),
    (["std", "collections"], collectionsText),
@@ -1655,7 +1735,8 @@ def texts : List (List String × String) :=
    (["core", "iter"], "pub use std::iterator::*;\n"),
    (["core", "slice"], "pub use std::slice::*;\n"),
    (["core", "hash"], "pub use std::hash::*;\n"),
-   (["alloc"], "pub mod vec;\npub mod string;\npub mod collections;\n"),
+   (["alloc"], "pub mod vec;\npub mod string;\npub mod collections;\npub mod fmt;\n"),
+   (["alloc", "fmt"], "pub use std::fmt::*;\n"),
    (["alloc", "vec"], "pub use std::vec::*;\n"),
    (["alloc", "string"], "pub use std::text::*;\n"),
    (["alloc", "collections"], "pub use std::collections::*;\npub mod map;\npub mod set;\n"),

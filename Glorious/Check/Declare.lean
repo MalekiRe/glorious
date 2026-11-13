@@ -225,6 +225,15 @@ partial def lifetimesOf : TypeExpr → List String
       | none => []) ++ lifetimesOf t
   | _ => []
 
+/-- Is a reference written anywhere in a type? -/
+partial def writesRef : TypeExpr → Bool
+  | .ref _ _ _ => true
+  | .name _ args => args.any writesRef
+  | .tuple args => args.any writesRef
+  | .fn ps r => ps.any writesRef || writesRef r
+  | .performs r _ => writesRef r
+  | _ => false
+
 /-- Read the traits and their implementations. Types are declared by now. -/
 def declareTraits (items : List Item) : M Unit := do
   -- `Drop` is the compiler's: its function is run on what a variable holds
@@ -279,7 +288,9 @@ def declareTraits (items : List Item) : M Unit := do
         for l in named.eraseDups do
           scope := scope ++ [(l, Ty.life (← freshCap))]
         let one ← freshCap
-        modify fun s => { s with elided := some one }
+        -- (Where nothing it gives is a reference, nothing ties what it takes
+        -- together: each unwritten lifetime is then its own.)
+        modify fun s => { s with elided := if (ret.map writesRef).getD false then some one else none }
         let ps ← params.mapM fun p => closeRows <$> resolveType scope false p
         let r ← match ret with
           | some r => closeRows <$> resolveType scope false r

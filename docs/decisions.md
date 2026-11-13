@@ -2386,6 +2386,27 @@ iterated: `fold`, `for_each`, `count`, `collect`, `map_collect`, `find_map`,
   type for every implementation in a program, so two iterated types with
   different items could not be used together.
 
+## Formatting
+
+`alloc::fmt` (`std::fmt`) has the specification's `Formatter` (21): `new`,
+`write_str`, `write_char`, `newline`, `indent`, `dedent`, `quoted`, `display`,
+`finish`, with `Display` for a type to say how it is written and `format` for
+the text of a value. Indentation is four spaces, written before the first
+thing on a line.
+
+- **A trait's function that gives no reference** no longer ties together the
+  unwritten lifetimes of what it takes. `fn fmt(&Self, &mut Formatter)` had
+  one lifetime for both, so its body could not use the value while it wrote
+  to the sink.
+- **`format` is certified as well owned and no further.** A function that is
+  given a dictionary and lends a variable of its own to one of the
+  dictionary's functions (`let mut out = ..; fmt(value, &mut out)`) is
+  accepted and runs, but no regions are found for the program that calls it.
+  The same holds, as it did before, for any generic function of that shape.
+- **Not built**: `Debug`, format options and output limits, the diagnostics
+  types, and `&` of a value that has no name: `&format(&p)` has to be
+  `let s = format(&p); &s`.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by
