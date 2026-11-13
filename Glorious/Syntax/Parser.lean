@@ -721,6 +721,16 @@ private partial def parsePattern : P Pattern := do
   | .ident "_" =>
     advance
     pure .wild
+  | .punct "[" =>
+    -- `[a, b, c]`: an array of exactly so many elements.
+    advance
+    let mut ps : Array Pattern := #[]
+    repeat
+      if (← peek) == .punct "]" then break
+      ps := ps.push (← parsePattern)
+      if !(← acceptPunct ",") then break
+    expectPunct "]"
+    pure (.ctor (arrayPatName ps.size) none ps.toList)
   | .ident "let" =>
     -- `let name`: a new name, whatever constant or constructor has it.
     advance

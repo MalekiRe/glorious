@@ -2329,6 +2329,22 @@ type's head; what it is asked of is then held to the fixed arguments, and
 - **A fixed argument is a type with no parameters of the implementation in
   it**, written as one name.
 
+## An array is taken apart by its length
+
+`[a, b, c]` in a pattern is an array of exactly three elements. An array of
+`n` elements is built by a constructor of its own in Core, so this is a
+constructor pattern like any other, and the certificate covers it. There is
+an array of every length, so clauses of such patterns need one that takes
+whatever is left, and a `let` cannot have one.
+
+- **No `..`**: `[first, ..]`, and `(a, ..)` for a tuple, are not built. The
+  first would be a test that the array is at least so long, which Core's
+  patterns do not have; the second needs the tuple's length, which the
+  elaborator is not told.
+- **Not by reference**: a pattern that binds by reference does not go into
+  an array.
+- **Fixed arrays `[T; N]` and const generics** are still not built.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by

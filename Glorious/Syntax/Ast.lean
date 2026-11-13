@@ -227,6 +227,13 @@ def focusMark : String := "%focus"
 a program has named its own: a list of names under this mark. -/
 def arrayMark : String := "%array"
 
+/-- The constructor an array of exactly `n` elements is taken apart by, in a
+pattern `[a, b, c]`. -/
+def arrayPatName (n : Nat) : String := s!"%array:{n}"
+
+def arrayPatLen (name : String) : Option Nat :=
+  if name.startsWith "%array:" then (name.drop 7).toString.toNat? else none
+
 /-- The host operations that are unsafe, by name: a call of a foreign
 function, and reading and writing memory at an address. -/
 def foreignCall : String := "foreign_call"

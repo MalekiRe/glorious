@@ -588,6 +588,11 @@ partial def resolveCtor (name : String) (qual : Option String) : M (Option (Stri
       else throw s!"`{name}` is not a constructor of `{q}`"
     | none => pure (some (name, sig))
   | none =>
+    -- `[a, b, c]` in a pattern: the array type's constructor of so many
+    -- elements, each of the element's type.
+    if let (some n, some array) := (Syntax.arrayPatLen name, s.arrayType) then
+      if let some sig := s.ctors.lookup array then
+        return some (name, { sig with fields := List.replicate n (sig.fields.headD .unit) })
     match s.aliases.lookup name with
     | some (.name q y) => resolveCtor y q
     | _ => pure none

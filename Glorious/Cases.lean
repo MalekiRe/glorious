@@ -2548,6 +2548,18 @@ def cases : List Case := [
     [], "Ok(())\n4\n20\nOk(30)\nOk(40)\n9\nErr(5)\n[9, 8, 7, 20]\n0"⟩,
   ⟨"use alloc::string::{String};\nfn main() {\n    let mut s = String::from_str(\"héllo\");\n    String::push_str(&mut s, \", wörld\");\n    String::push(&mut s, '!');\n    say(String::len(&s));\n    say(String::to_str(&s));\n    say(String::is_empty(&s));\n    String::clear(&mut s);\n    say(String::len(&s));\n    0 }",
     [], "15\nhéllo, wörld!\nErr(())\n0\n0"⟩,
+  -- An array of exactly so many elements, taken apart by a pattern.
+  ⟨"fn main() -> Int { match([1, 2, 3]) { [a, b, c] => a + b + c, _ => 0 } }",
+    [], "6"⟩,
+  ⟨"fn describe(a: [Int]) -> Int { match(a) { [] => 0, [x] => x, [x, y] => x * 10 + y, _ => 0 - 1 } }\nfn main() -> Int { describe([]) + describe([7]) * 100 + describe([4, 2]) * 1000 + describe([1, 2, 3]) }",
+    [], "42699"⟩,
+  ⟨"fn main() -> Int { match([Some(1), None]) { [Some(a), None] => a, _ => 0 } }",
+    [], "1"⟩,
+  -- There are arrays of every length: such patterns never cover every case by themselves.
+  ⟨"fn main() -> Int { match([1, 2]) { [a, b] => a + b } }",
+    [], "error: 1:20: in `main`: the clauses of this callable do not cover every case"⟩,
+  ⟨"fn main() -> Int { let [a, b] = [5, 6]; a * b }",
+    [], "error: 1:20: in `main`: the pattern of this `let` does not cover every case"⟩,
   -- `drop` is not for a program to call.
   ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nfn main() { let mut f = File(7); drop(&mut f); 0 }",
     [], "error: 3:34: in `main`: `drop` is run when what holds a value ends; a program does not call it"⟩,

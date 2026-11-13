@@ -795,6 +795,10 @@ partial def resolvePattern (ctx : Ctx) : Pattern → R (Pattern × List String)
     let args ← args.mapM (resolvePattern ctx)
     pure (.tuple (args.map (·.1)), args.flatMap (·.2))
   | .ctor name qual args => do
+    -- An array of so many elements: its parts are patterns like any.
+    if (arrayPatLen name).isSome then
+      let args ← args.mapM (resolvePattern ctx)
+      return (.ctor name none (args.map (·.1)), args.flatMap (·.2))
     if (byRef? (.ctor name qual args)).isSome then
       throw "a pattern that binds by reference, `&mut Pattern`, is written as a parameter of a clause"
     let (qual', name', entry) ← resolveValue ctx [] qual name
