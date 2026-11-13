@@ -1,0 +1,163 @@
+// Values written as text, read into a tree and written out again.
+// expect:
+// {"name": "glorious", "tags": ["a", "b"], "size": 42, "ok": true, "none": null}
+// 42
+// 2
+// 1:15: a value
+// 1:7: `,` or `]`
+// 0
+
+use std::text::{join};
+
+enum Json { Null, Bool(Bool), Num(Int), Text(Str), List([Json]), Object([(Str, Json)]) }
+
+struct ParseError { at: Int, wanted: Str }
+
+// Where reading has got to in the text.
+struct Reader { chars: [char], at: Int }
+
+fn peek(r: &Reader) -> Option<char> { match(element(&r.chars, r.at)) { Some(c) => Some(*c), None => None } }
+
+fn skip_spaces(r: &mut Reader) {
+    match(peek(&*r)) { Some(' ') => r.at = r.at + 1; skip_spaces(r), _ => () }
+}
+
+fn expect(r: &mut Reader, c: char, wanted: Str) -> Result<(), ParseError> {
+    skip_spaces(r);
+    if(peek(&*r) is Some(found) and { found == c }) { r.at = r.at + 1; Ok(()) } else { Err(ParseError { at: r.at, wanted: wanted }) }
+}
+
+fn word(r: &mut Reader, text: Str, value: Json) -> Result<Json, ParseError> {
+    let letters = chars(text);
+    if(matches(&*r, &letters, 0)) { r.at = r.at + len(letters); Ok(value) } else { Err(ParseError { at: r.at, wanted: "a value" }) }
+}
+
+fn matches(r: &Reader, letters: &[char], i: Int) -> Bool {
+    match(element(letters, i)) {
+        None => true,
+        Some(c) => match(element(&r.chars, r.at + i)) { Some(d) => if(*c == *d) { matches(r, letters, i + 1) } else { false }, None => false }
+    }
+}
+
+fn digits(r: &mut Reader, value: Int) -> Int {
+    match(peek(&*r)) {
+        Some(c) => if('0' <= c and { c <= '9' }) { r.at = r.at + 1; digits(r, value * 10 + (int(c) - int('0'))) } else { value },
+        None => value
+    }
+}
+
+fn text(r: &mut Reader, out: Str) -> Result<Str, ParseError> {
+    match(peek(&*r)) {
+        None => Err(ParseError { at: r.at, wanted: "`\"` to end the text" }),
+        Some('"') => r.at = r.at + 1; Ok(out),
+        Some(c) => r.at = r.at + 1; text(r, out ++ show(c))
+    }
+}
+
+fn value(r: &mut Reader) -> Result<Json, ParseError> {
+    skip_spaces(r);
+    match(peek(&*r)) {
+        Some('n') => word(r, "null", Json::Null),
+        Some('t') => word(r, "true", Json::Bool(true)),
+        Some('f') => word(r, "false", Json::Bool(false)),
+        Some('"') => r.at = r.at + 1; match(text(r, "")) { Ok(s) => Ok(Json::Text(s)), Err(e) => Err(e) },
+        Some('[') => r.at = r.at + 1; items(r, []),
+        Some('{') => r.at = r.at + 1; fields(r, []),
+        Some(c) => if('0' <= c and { c <= '9' }) { Ok(Json::Num(digits(r, 0))) } else { Err(ParseError { at: r.at, wanted: "a value" }) },
+        None => Err(ParseError { at: r.at, wanted: "a value" })
+    }
+}
+
+fn items(r: &mut Reader, out: [Json]) -> Result<Json, ParseError> {
+    skip_spaces(r);
+    if(peek(&*r) is Some(']')) { r.at = r.at + 1; Ok(Json::List(out)) } else {
+        match(value(r)) {
+            Err(e) => Err(e),
+            Ok(item) =>
+                skip_spaces(r);
+                match(peek(&*r)) {
+                    Some(',') => r.at = r.at + 1; items(r, push(out, item)),
+                    Some(']') => r.at = r.at + 1; Ok(Json::List(push(out, item))),
+                    _ => Err(ParseError { at: r.at, wanted: "`,` or `]`" })
+                }
+        }
+    }
+}
+
+fn fields(r: &mut Reader, out: [(Str, Json)]) -> Result<Json, ParseError> {
+    skip_spaces(r);
+    if(peek(&*r) is Some('}')) { r.at = r.at + 1; Ok(Json::Object(out)) } else {
+        match(expect(r, '"', "a name")) {
+            Err(e) => Err(e),
+            Ok(_) => match(text(r, "")) {
+                Err(e) => Err(e),
+                Ok(name) => match(expect(r, ':', "`:`")) {
+                    Err(e) => Err(e),
+                    Ok(_) => match(value(r)) {
+                        Err(e) => Err(e),
+                        Ok(item) =>
+                            skip_spaces(r);
+                            match(peek(&*r)) {
+                                Some(',') => r.at = r.at + 1; fields(r, push(out, (name, item))),
+                                Some('}') => r.at = r.at + 1; Ok(Json::Object(push(out, (name, item)))),
+                                _ => Err(ParseError { at: r.at, wanted: "`,` or `}`" })
+                            }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn parse(text: Str) -> Result<Json, ParseError> {
+    let mut r = Reader { chars: chars(text), at: 0 };
+    value(&mut r)
+}
+
+fn written(j: &Json) -> Str {
+    match(j) {
+        &Json::Null => "null",
+        &Json::Bool(b) => if(*b) { "true" } else { "false" },
+        &Json::Num(n) => show(*n),
+        &Json::Text(s) => "\"" ++ *s ++ "\"",
+        &Json::List(items) => "[" ++ join(each(items, 0, []), ", ") ++ "]",
+        &Json::Object(pairs) => "{" ++ join(each_field(pairs, 0, []), ", ") ++ "}"
+    }
+}
+fn each(items: &[Json], i: Int, out: [Str]) -> [Str] {
+    match(element(items, i)) { Some(item) => each(items, i + 1, push(out, written(item))), None => out }
+}
+fn each_field(pairs: &[(Str, Json)], i: Int, out: [Str]) -> [Str] {
+    match(element(pairs, i)) {
+        Some(pair) => each_field(pairs, i + 1, push(out, "\"" ++ pair.0 ++ "\": " ++ written(&pair.1))),
+        None => out
+    }
+}
+
+// The value under a name, of an object.
+fn get<'a>(j: &'a Json, name: Str) -> Option<&'a Json> {
+    match(j) { &Json::Object(pairs) => find(pairs, name, 0), _ => None }
+}
+fn find<'a>(pairs: &'a [(Str, Json)], name: Str, i: Int) -> Option<&'a Json> {
+    match(element(pairs, i)) {
+        Some(pair) => if(pair.0 == name) { Some(&pair.1) } else { find(pairs, name, i + 1) },
+        None => None
+    }
+}
+
+fn report(text: Str) -> Str {
+    match(parse(text)) { Ok(_) => "fine", Err(e) => "1:" ++ show(e.at + 1) ++ ": " ++ e.wanted }
+}
+
+fn main() -> Int {
+    match(parse("{\"name\": \"glorious\", \"tags\": [\"a\", \"b\"], \"size\": 42, \"ok\": true, \"none\": null}")) {
+        Err(e) => say(e.wanted); 0 - 1,
+        Ok(doc) =>
+            say(written(&doc));
+            say(match(get(&doc, "size")) { Some(&Json::Num(n)) => *n, _ => 0 - 1 });
+            say(match(get(&doc, "tags")) { Some(&Json::List(items)) => len_at(items), _ => 0 - 1 });
+            say(report("{\"a\": 1, \"b\": }"));
+            say(report("[1, 2 3]"));
+            0
+    }
+}

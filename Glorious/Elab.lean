@@ -2065,32 +2065,35 @@ mutual
 expression with a name in its place, and the parts of the expression that are
 evaluated before it and do something, each given a name so that they still
 are. -/
-private partial def liftField : Expr → Option (List Stmt × Expr × FieldBorrow)
+private partial def liftField (depth : Nat) : Expr → Option (List Stmt × Expr × FieldBorrow)
   | .refField id uniq x _ _ => some ([], .name none (fieldRefName id), (id, uniq, x))
   | .call cid f args =>
-    (liftParts (f :: args)).map fun (lets, parts, b) =>
+    (liftParts depth (f :: args)).map fun (lets, parts, b) =>
       (lets, .call cid (parts.headD f) (parts.drop 1), b)
   | .tailCall cid f args =>
-    (liftParts (f :: args)).map fun (lets, parts, b) =>
+    (liftParts depth (f :: args)).map fun (lets, parts, b) =>
       (lets, .call cid (parts.headD f) (parts.drop 1), b)
-  | .tuple es => (liftParts es).map fun (lets, parts, b) => (lets, .tuple parts, b)
-  | .proj e i => (liftField e).map fun (lets, e, b) => (lets, .proj e i, b)
-  | .fieldOf id e name => (liftField e).map fun (lets, e, b) => (lets, .fieldOf id e name, b)
-  | .deref e => (liftField e).map fun (lets, e, b) => (lets, .deref e, b)
-  | .reborrow u e => (liftField e).map fun (lets, e, b) => (lets, .reborrow u e, b)
+  | .tuple es => (liftParts depth es).map fun (lets, parts, b) => (lets, .tuple parts, b)
+  | .proj e i => (liftField depth e).map fun (lets, e, b) => (lets, .proj e i, b)
+  | .fieldOf id e name => (liftField depth e).map fun (lets, e, b) => (lets, .fieldOf id e name, b)
+  | .deref e => (liftField depth e).map fun (lets, e, b) => (lets, .deref e, b)
+  | .reborrow u e => (liftField depth e).map fun (lets, e, b) => (lets, .reborrow u e, b)
   | _ => none
 
-private partial def liftParts (parts : List Expr) : Option (List Stmt × List Expr × FieldBorrow) :=
+private partial def liftParts (depth : Nat) (parts : List Expr) :
+    Option (List Stmt × List Expr × FieldBorrow) :=
   let rec go (before : List Expr) : List Expr → Option (List Stmt × List Expr × FieldBorrow)
     | [] => none
     | e :: rest =>
-      match liftField e with
+      match liftField (depth + 1) e with
       | some (lets, e', b) =>
         let named : List (Expr × Option Stmt) := (before.zip (List.range before.length)).map
           fun (a, j) =>
             if plainExpr a then (a, none)
             else
-              let n := s!"%before{b.1}.{j}"
+              -- (Named by how deep the call is as well as by its place in
+              -- it: a call inside a call has parts at the same places.)
+              let n := s!"%before{b.1}.{depth}.{j}"
               (Expr.name none n, some (Stmt.let_ (.var n) a))
         some (named.filterMap (·.2) ++ lets, named.map (·.1) ++ e' :: rest, b)
       | none => go (before ++ [e]) rest
@@ -2100,17 +2103,17 @@ end
 
 /-- The same for a statement. -/
 private def liftFieldStmt : Stmt → Option (List Stmt × Stmt × FieldBorrow)
-  | .expr e => (liftField e).map fun (lets, e, b) => (lets, .expr e, b)
-  | .let_ pat e => (liftField e).map fun (lets, e, b) => (lets, .let_ pat e, b)
-  | .letMut y e => (liftField e).map fun (lets, e, b) => (lets, .letMut y e, b)
+  | .expr e => (liftField 0 e).map fun (lets, e, b) => (lets, .expr e, b)
+  | .let_ pat e => (liftField 0 e).map fun (lets, e, b) => (lets, .let_ pat e, b)
+  | .letMut y e => (liftField 0 e).map fun (lets, e, b) => (lets, .letMut y e, b)
   | .assign target e =>
-    match liftField e with
+    match liftField 0 e with
     | some (lets, e, b) => some (lets, .assign target e, b)
     | none =>
       -- The value is computed before the place is found.
       match target with
       | .deref place =>
-        (liftField place).map fun (lets, place, b) =>
+        (liftField 0 place).map fun (lets, place, b) =>
           let n := s!"%value{b.1}"
           (Stmt.let_ (.var n) e :: lets, .assign (.deref place) (.name none n), b)
       | _ => none
@@ -2202,7 +2205,7 @@ becomes a block. -/
 private partial def unfieldBlock (info : FieldInfo) (e : Expr) :
     Expr :=
   let e := unfieldExpr info e
-  if (liftField e).isSome then .labelScope "%block" (unfieldStmts info [.expr e]) else e
+  if (liftField 0 e).isSome then .labelScope "%block" (unfieldStmts info [.expr e]) else e
 
 private partial def unfieldClause (info : FieldInfo) :
     Clause → Clause

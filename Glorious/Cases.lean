@@ -3349,6 +3349,9 @@ def cases : List Case := [
     [], "error: 2:31: in `both`: the clauses of this callable do not cover every case"⟩,
   ⟨"struct Ticket(Int);\nimpl Use<[1, 1]> for Ticket {}\nfn redeem(t: Ticket) -> Int { match(t) { Ticket(n) => n } }\nenum E { A(Int), B(Int) }\nfn f(p: (Ticket, &E)) -> Int { match(p) { (t, &A(x)) => redeem(t) + *x, (t, _) => redeem(t) } }\nfn main() -> Int { let e = A(4); f((Ticket(1), &e)) }",
     [], "error: 5:32: in `f`: a clause reaches through a reference inside the value, and where it is not for what it finds the clauses after it are given the value again, but a `Ticket` can be used only once"⟩,
+  -- What is computed before a borrow of a field, in a call inside a call inside a call: each kept under a name of its own.
+  ⟨"struct J { n: Int }\nfn w(j: &J) -> Str { show(j.n) }\nfn f(pair: &(Str, J)) -> Str { \"<\" ++ pair.0 ++ \">\" ++ w(&pair.1) }\nfn main() -> Int { let p = (\"ab\", J { n: 7 }); say(f(&p)); 0 }",
+    [], "<ab>7\n0"⟩,
   -- `drop` is not for a program to call.
   ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nfn main() { let mut f = File(7); drop(&mut f); 0 }",
     [], "error: 3:34: in `main`: `drop` is run when what holds a value ends; a program does not call it"⟩,

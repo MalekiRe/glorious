@@ -1,0 +1,66 @@
+// Orders taken, totalled by customer and written out; a ledger that says
+// when it is closed.
+// expect:
+// ada: 9.10
+// bo: 4.50
+// [4.50, 5.50]
+// 5.55
+// closed march after 2 lines
+// 2
+
+use std::vec::{Vec};
+use std::iterator::{Iterator, next, into_iter, map, filter, fold, collect};
+use std::map::{Map};
+use std::fmt::{Display, format};
+
+struct Order { customer: Str, item: Str, cents: Int, count: Int }
+
+trait Priced { fn total(&Self) -> Int }
+impl Priced for Order { fn total(o) { o.cents * o.count } }
+
+// A sum of money, written with its pence.
+struct Money(Int)
+impl Add for Money { fn +(a, b) { Money(a.0 + b.0) } }
+fn shown(m: Money) -> Str {
+    let pence = m.0 % 100;
+    show(m.0 / 100) ++ "." ++ (if(pence < 10) { "0" } else { "" }) ++ show(pence)
+}
+
+// A ledger: closing it is said, once, however it is let go.
+struct Ledger { name: Str, lines: Int }
+impl Drop for Ledger { fn drop(l) { say("closed " ++ l.name ++ " after " ++ show(l.lines) ++ " lines") } }
+
+fn record(ledger: &mut Ledger, text: Str) { say(text); ledger.lines = ledger.lines + 1; }
+
+fn totals(orders: &[Order], i: Int, so_far: Map<Str, Int>) -> Map<Str, Int> {
+    match(element(orders, i)) {
+        None => so_far,
+        Some(order) =>
+            let before = match(std::map::get(so_far, order.customer)) { Some(n) => n, None => 0 };
+            totals(orders, i + 1, std::map::insert(so_far, order.customer, before + total(order)))
+    }
+}
+
+fn largest<T: Priced>(items: &[T], i: Int, best: Int) -> Int {
+    match(element(items, i)) { Some(item) => largest(items, i + 1, if(total(item) > best) { total(item) } else { best }), None => best }
+}
+
+fn main() -> Int {
+    let orders = [
+        Order { customer: "ada", item: "pen", cents: 120, count: 3 },
+        Order { customer: "bo", item: "ink", cents: 450, count: 1 },
+        Order { customer: "ada", item: "pad", cents: 275, count: 2 }
+    ];
+    let mut ledger = Ledger { name: "march", lines: 0 };
+    let by_customer = totals(&orders, 0, std::map::new());
+    let names = std::map::keys(by_customer);
+    let mut it = into_iter(names);
+    let written = fold(&mut it, 0, { (n, name) =>
+        let cents = match(std::map::get(by_customer, name)) { Some(c) => c, None => 0 };
+        record(&mut ledger, name ++ ": " ++ shown(Money(cents)));
+        n + 1 });
+    let big = collect(&mut map(filter(into_iter([120 * 3, 450, 275 * 2]), { (c) => *c >= 400 }), { (c) => shown(Money(c)) }));
+    say(big);
+    say(shown(Money(largest(&orders, 0, 0)) + Money(5)));
+    written
+}

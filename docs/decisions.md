@@ -2713,6 +2713,21 @@ from being an `Id<Block>`.
 - Not built: base64; `ByteReader::read_u128_le` is, the signed widths
   other than `read_i64_le` are not in the specification.
 
+## A wrong answer: what is computed before a borrow of a field
+
+`"<" ++ pair.0 ++ ">" ++ written(&pair.1)` gave `>>>` and not `<ab>`. A
+borrow of a field is taken out of the statement it is in, and what the
+statement computes before it is kept under names so that it is still
+computed first; the names said which borrow and which place in a call,
+and not which call, so in a call inside a call inside a call three values
+had one name and the last was read three times. The names now say how deep
+the call is. Every engine agreed on the wrong answer, since they were
+given the same program; it was found by writing a larger program
+(`examples/json.glorious`) and reading what it printed.
+
+Three such programs are now among the examples, with what they should
+print: `json`, `orders` and `shapes`.
+
 ## Patterns that reach through a reference inside a value
 
 `match(Cursor::peek(c)) { Some(&Spot { token: Token::Let, at }) => .. }`

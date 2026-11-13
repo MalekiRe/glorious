@@ -1,0 +1,61 @@
+// Shapes behind a trait, a generic container, effects for logging and
+// failing, and a generator of primes.
+// expect:
+// square of 16
+// shape of 10
+// took 4
+// took 3
+// 7
+// -1
+// [2, 3, 5, 7, 11, 13]
+// 2
+
+use std::generator::{Yield, yield, Coroutine, generator, iterate};
+use std::iterator::{Iterator, take, collect, next};
+use std::vec::{Vec};
+
+trait Shape { fn area(&Self) -> Int; fn name(s: &Self) -> Str { "shape" } }
+struct Square(Int)
+struct Rect { w: Int, h: Int }
+impl Shape for Square { fn area(s) { s.0 * s.0 } fn name(s) { "square" } }
+impl Shape for Rect { fn area(r) { r.w * r.h } }
+
+fn describe<S: Shape>(s: &S) -> Str { name(s) ++ " of " ++ show(area(s)) }
+
+// A stack that says when it is asked for more than it has.
+effect Empty { empty() -> ! }
+struct Stack<T> { items: Vec<T> }
+impl<T> Stack<T> {
+    fn new() -> Self { Self { items: Vec::new() } }
+    fn push(s: &mut Self, item: T) { Vec::push(&mut s.items, item); }
+    fn pop(s: &mut Self) -> T / {Empty} { match(Vec::pop(&mut s.items)) { Some(item) => item, None => empty() } }
+    fn len(s: &Self) -> Int { Vec::len(&s.items) }
+}
+
+effect Log { log(Str) }
+
+fn sum_all(s: &mut Stack<Int>, total: Int) -> Int / {Empty, Log} {
+    if(Stack::len(&*s) == 0) { total } else {
+        let top = Stack::pop(s);
+        log("took " ++ show(top));
+        sum_all(s, total + top)
+    }
+}
+
+fn is_prime(n: Int, d: Int) -> Bool { if(d * d > n) { true } else { if(n % d == 0) { false } else { is_prime(n, d + 1) } } }
+fn primes_from(n: Int) -> () / {Yield<Int, ()>} { if(is_prime(n, 2)) { yield(n); } else { }; primes_from(n + 1) }
+
+fn main() -> Int {
+    say(describe(&Square(4)));
+    say(describe(&Rect { w: 2, h: 5 }));
+    let mut stack = Stack::new();
+    Stack::push(&mut stack, 3);
+    Stack::push(&mut stack, 4);
+    let mut lines = 0;
+    let total = handle (handle sum_all(&mut stack, 0) { log(text) => say(text); lines = lines + 1 }) { empty() => 0 - 1 };
+    say(total);
+    let none = handle Stack::pop(&mut stack) { empty() => 0 - 1 };
+    say(none);
+    say(collect(&mut take(iterate(generator({ primes_from(2) })), 6)));
+    lines
+}

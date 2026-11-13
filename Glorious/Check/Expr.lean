@@ -204,10 +204,15 @@ partial def inferExpr (scope : Scope) (amb : Row) : Expr → M Ty
         -- What a pattern lets go of is let go of by the clause, not here.
         let drops := (← get).drops
         modify fun s => { s with shapes := true }
-        for c in clauses do
-          let .mk pats _ := c
-          let _ ← inferPats pats tys.toList
+        -- (Whatever goes wrong, patterns are read as usual again after.)
+        let wrong ← try
+            for c in clauses do
+              let .mk pats _ := c
+              let _ ← inferPats pats tys.toList
+            pure none
+          catch e => pure (some e)
         modify fun s => { s with drops := drops, shapes := false }
+        if let some e := wrong then throw e
         let check : Pending := ⟨(← get).pos, "the clauses of this callable do", tys.toList,
           clauses.map fun
             | .mk pats _ => pats⟩
