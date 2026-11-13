@@ -231,6 +231,14 @@ def arrayMark : String := "%array"
 function, and reading and writing memory at an address. -/
 def foreignCall : String := "foreign_call"
 
+/-- C's names for its types, and the types they are on the one target there
+is: x86-64 Linux. -/
+def cTypes : List (String × String) :=
+  [("c_char", "i8"), ("c_schar", "i8"), ("c_uchar", "u8"), ("c_short", "i16"), ("c_ushort", "u16"),
+   ("c_int", "i32"), ("c_uint", "u32"), ("c_long", "i64"), ("c_ulong", "u64"),
+   ("c_longlong", "i64"), ("c_ulonglong", "u64"), ("c_size_t", "usize"), ("c_ssize_t", "isize"),
+   ("c_float", "f32"), ("c_double", "f64")]
+
 def textCharName : String := "%char"
 
 /-- A name without the module it is in: how a value is shown. -/

@@ -653,6 +653,9 @@ enum Frame {
     /// An exit in progress: a cleanup was running above this frame. What it
     /// delivers is discarded and the exit continues towards its target.
     Exit { target: Target, after: After },
+    /// Below this, a foreign function is waiting for what it called to give
+    /// a value. Nothing passes it but that value: no effect, no exit.
+    Boundary,
 }
 
 impl Frame {
@@ -669,6 +672,8 @@ impl Frame {
 enum Stop {
     Halt(Value),
     Wrong,
+    /// What a foreign function called has given its value.
+    Back(Value),
 }
 
 type Step<T> = Result<T, Stop>;
@@ -682,6 +687,7 @@ fn wrong<T>() -> Step<T> {
 
 extern "C" {
     fn dlsym(handle: *mut u8, symbol: *const u8) -> *mut u8;
+    fn dlopen(name: *const u8, flags: i32) -> *mut u8;
     fn fflush(stream: *mut u8) -> i32;
 }
 
@@ -728,40 +734,135 @@ fn foreign_call(vs: &[Value]) -> Option<Value> {
     let mut name: Vec<u8> = ints[..end].iter().map(|n| *n as u8).collect();
     name.push(0);
     let width = *ints.get(end + 1)?;
-    let a: Vec<usize> = ints[end + 2..].iter().map(|n| *n as usize).collect();
+    // Where C takes each value: digit `i` in base three is 0 for a whole
+    // number or an address, 1 for a double, 2 for a float.
+    let mut classes = *ints.get(end + 2)?;
+    let mut whole = [0usize; 6];
+    let mut real = [0f64; 8];
+    let (mut wholes, mut reals) = (0, 0);
+    for n in &ints[end + 3..] {
+        let class = classes % 3;
+        classes /= 3;
+        if class == 0 {
+            if wholes == 6 {
+                eprintln!("a foreign function is given at most six whole numbers and addresses");
+                return None;
+            }
+            whole[wholes] = *n as usize;
+            wholes += 1;
+        } else {
+            if reals == 8 {
+                eprintln!("a foreign function is given at most eight floats");
+                return None;
+            }
+            // A float is the low half of the place a double would be in.
+            let bits = if class == 1 { *n as u64 } else { u64::from(*n as u32) };
+            real[reals] = f64::from_bits(bits);
+            reals += 1;
+        }
+    }
     // SAFETY: none beyond the name being found. The program said what the
-    // function takes.
-    let raw = unsafe {
-        let f = dlsym(std::ptr::null_mut(), name.as_ptr());
+    // function takes. Every place C could look for a value is given one:
+    // a function reads only those it takes.
+    let raw: u128 = unsafe {
+        let mut f = dlsym(std::ptr::null_mut(), name.as_ptr());
+        if f.is_null() {
+            // What is not in the process yet may be in C's library of
+            // mathematics, which a program names without saying so.
+            let math = dlopen(b"libm.so.6\0".as_ptr(), 2);
+            if !math.is_null() {
+                f = dlsym(math, name.as_ptr());
+            }
+        }
         if f.is_null() {
             eprintln!("no foreign function `{}`", String::from_utf8_lossy(&name[..end]));
             return None;
         }
-        type F0 = extern "C" fn() -> usize;
-        type F1 = extern "C" fn(usize) -> usize;
-        type F2 = extern "C" fn(usize, usize) -> usize;
-        type F3 = extern "C" fn(usize, usize, usize) -> usize;
-        type F4 = extern "C" fn(usize, usize, usize, usize) -> usize;
-        type F5 = extern "C" fn(usize, usize, usize, usize, usize) -> usize;
-        type F6 = extern "C" fn(usize, usize, usize, usize, usize, usize) -> usize;
-        match a.as_slice() {
-            [] => std::mem::transmute::<*mut u8, F0>(f)(),
-            [x] => std::mem::transmute::<*mut u8, F1>(f)(*x),
-            [x, y] => std::mem::transmute::<*mut u8, F2>(f)(*x, *y),
-            [x, y, z] => std::mem::transmute::<*mut u8, F3>(f)(*x, *y, *z),
-            [x, y, z, w] => std::mem::transmute::<*mut u8, F4>(f)(*x, *y, *z, *w),
-            [x, y, z, w, v] => std::mem::transmute::<*mut u8, F5>(f)(*x, *y, *z, *w, *v),
-            [x, y, z, w, v, u] => std::mem::transmute::<*mut u8, F6>(f)(*x, *y, *z, *w, *v, *u),
-            _ => {
-                eprintln!("a foreign function is given at most six values");
-                return None;
-            }
+        type Given = (usize, usize, usize, usize, usize, usize, f64, f64, f64, f64, f64, f64, f64, f64);
+        let g: Given = (
+            whole[0], whole[1], whole[2], whole[3], whole[4], whole[5], real[0], real[1], real[2],
+            real[3], real[4], real[5], real[6], real[7],
+        );
+        macro_rules! call {
+            ($ret:ty) => {{
+                type F = extern "C" fn(
+                    usize, usize, usize, usize, usize, usize, f64, f64, f64, f64, f64, f64, f64, f64,
+                ) -> $ret;
+                std::mem::transmute::<*mut u8, F>(f)(
+                    g.0, g.1, g.2, g.3, g.4, g.5, g.6, g.7, g.8, g.9, g.10, g.11, g.12, g.13,
+                )
+            }};
+        }
+        match width {
+            1000 => u128::from(call!(f64).to_bits()),
+            1001 => u128::from(call!(f32).to_bits()),
+            _ => call!(usize) as u128,
         }
     };
     // What C wrote comes before what is written here next.
     // SAFETY: a null stream is every stream.
     unsafe { fflush(std::ptr::null_mut()) };
-    Some(if width == 0 { unit() } else { Value::Int(sized(raw as u128, width)) })
+    Some(match width {
+        0 => unit(),
+        1000 | 1001 => Value::Int(raw as i128),
+        _ => Value::Int(sized(raw, width)),
+    })
+}
+
+/// What C calls when it calls a callable of the program's: the callable, and
+/// how many values it takes.
+struct Callback {
+    vm: *mut Vm,
+    callee: Value,
+    arity: usize,
+}
+
+/// # Safety
+/// Called by the code `callback` writes, while the machine `ctx` names is in
+/// a foreign call.
+unsafe extern "C" fn called_back(ctx: *const Callback, a: usize, b: usize, c: usize, d: usize, e: usize) -> u64 {
+    let cb = &*ctx;
+    let vm = &mut *cb.vm;
+    let args = [a, b, c, d, e][..cb.arity].iter().map(|x| Value::Int(*x as i128)).collect();
+    match vm.call_back(cb.callee.clone(), args) {
+        Some(Value::Int(n)) => n as u64,
+        Some(_) => 0,
+        None => {
+            // C cannot be told: there is nowhere to go on from.
+            let _ = vm.out.flush();
+            eprintln!("the program went wrong in a function C called");
+            std::process::exit(2);
+        }
+    }
+}
+
+/// The address of code that C can call with up to five whole numbers, which
+/// runs the callable with them and gives back the whole number it gives.
+/// Neither the code nor the callable is ever let go of.
+fn callback(vm: &mut Vm, callee: Value, arity: usize) -> Step<usize> {
+    extern "C" {
+        fn mmap(addr: *mut u8, len: usize, prot: i32, flags: i32, fd: i32, off: i64) -> *mut u8;
+    }
+    let ctx = Box::into_raw(Box::new(Callback { vm, callee, arity }));
+    // The values C gives move over by one, the first becomes `ctx`, and
+    // `called_back` is jumped to: mov r9, r8; mov r8, rcx; mov rcx, rdx;
+    // mov rdx, rsi; mov rsi, rdi; mov rdi, ctx; mov rax, called_back; jmp rax.
+    let mut code: Vec<u8> = vec![
+        0x4D, 0x89, 0xC1, 0x49, 0x89, 0xC8, 0x48, 0x89, 0xD1, 0x48, 0x89, 0xF2, 0x48, 0x89, 0xFE, 0x48, 0xBF,
+    ];
+    code.extend_from_slice(&(ctx as u64).to_le_bytes());
+    code.extend_from_slice(&[0x48, 0xB8]);
+    code.extend_from_slice(&(called_back as *const () as u64).to_le_bytes());
+    code.extend_from_slice(&[0xFF, 0xE0]);
+    // SAFETY: a page of its own, readable, writable and executable.
+    unsafe {
+        let page = mmap(std::ptr::null_mut(), 4096, 7, 0x22, -1, 0);
+        if page as isize == -1 {
+            return wrong();
+        }
+        std::ptr::copy_nonoverlapping(code.as_ptr(), page, code.len());
+        Ok(page as usize)
+    }
 }
 
 pub struct Vm {
@@ -904,6 +1005,7 @@ impl Vm {
                 Some(Frame::Cell(addr)) => self.release(addr),
                 Some(Frame::Yield(w)) => v = w,
                 Some(Frame::Exit { target, after }) => return self.leave(target, after),
+                Some(Frame::Boundary) => return Err(Stop::Back(v)),
             }
         }
     }
@@ -927,8 +1029,32 @@ impl Vm {
                     return self.call_fn(func, &caps, Vec::new());
                 }
                 Frame::Cell(addr) => self.release(addr),
+                // An exit does not pass a foreign function.
+                Frame::Boundary => return wrong(),
                 _ => {}
             }
+        }
+    }
+
+    /// Run a callable to its result while a foreign function waits for it:
+    /// the activation that called the foreign function is set aside and
+    /// taken up again as it was.
+    fn call_back(&mut self, callee: Value, args: Vec<Value>) -> Option<Value> {
+        let (code, pc) = (self.code, self.pc);
+        let locals = std::mem::take(&mut self.locals);
+        let depth = self.frames.len();
+        self.frames.push(Frame::Boundary);
+        let mut step = self.apply(callee, args);
+        while step.is_ok() {
+            step = self.step();
+        }
+        self.frames.truncate(depth);
+        self.code = code;
+        self.pc = pc;
+        self.locals = locals;
+        match step {
+            Err(Stop::Back(v)) => Some(v),
+            _ => None,
         }
     }
 
@@ -968,6 +1094,10 @@ impl Vm {
     /// the handler, the arm.
     fn find_handler(&self, op: u64) -> Step<(usize, u64, Rc<Handler>, usize)> {
         for (at, frame) in self.frames.iter().enumerate().rev() {
+            // An effect does not pass a foreign function.
+            if matches!(frame, Frame::Boundary) {
+                break;
+            }
             if let Frame::Handler { id, handler } = frame {
                 if let Some(&(_, arm)) = handler.ops.iter().find(|(o, _)| *o == op) {
                     return Ok((at, *id, Rc::clone(handler), arm));
@@ -1224,6 +1354,11 @@ impl Vm {
                     (4, [Value::Int(at), Value::Int(width), Value::Int(v)]) => {
                         write_at(*at as usize, width.unsigned_abs() as usize / 8, *v as u128);
                         unit()
+                    }
+                    // An address C can call, which runs a callable of so
+                    // many whole numbers that gives one.
+                    (5, [callee, Value::Int(arity)]) if (0..=5).contains(arity) => {
+                        Value::Int(callback(self, callee.clone(), *arity as usize)? as i128)
                     }
                     _ => return wrong(),
                 };
@@ -1602,7 +1737,7 @@ fn finish(vm: &mut Vm, bodies: &[Option<native::Body>]) -> u8 {
             vm.out.flush().expect("cannot write to standard output");
             0
         }
-        Stop::Wrong => {
+        Stop::Wrong | Stop::Back(_) => {
             vm.out.flush().expect("cannot write to standard output");
             eprintln!("the program went wrong");
             2

@@ -2498,6 +2498,9 @@ def cases : List Case := [
     [], "error: in `f`: unknown effect `e`"⟩,
   ⟨"fn pure_only<e: EffectRow>(g: fn() -> Int / e) -> Int { 3 }\nfn main() -> Int { pure_only({ 4 }) }",
     [], "3"⟩,
+  -- An effect cannot pass C, so what C calls performs none.
+  ⟨"effect Ask { ask() -> Int }\nextern \"C\" { fn qsort(base: usize, n: usize, size: usize, cmp: usize); fn malloc(n: usize) -> usize; }\nfn main() { handle(unsafe {\n    let p = malloc(16usize);\n    ptr_write(p, 64, 3); ptr_write(p + 8usize, 64, 1);\n    qsort(p, 2usize, 8usize, c_callback({ (a, b) => ask() }, 2)); 0 }) { ask(k) => k(1), x => x } }",
+    [], "error: 6:5: in `main`: argument 1 of `c_callback`: expected `fn(usize, usize) -> Int`, found `fn(usize, usize) -> Int / {Ask}` (effect `Ask` is not handled here)"⟩,
   -- `drop` is not for a program to call.
   ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nfn main() { let mut f = File(7); drop(&mut f); 0 }",
     [], "error: 3:34: in `main`: `drop` is run when what holds a value ends; a program does not call it"⟩,
@@ -2514,7 +2517,30 @@ def foreignCases : List Case := [
   ⟨"extern \"C\" { fn malloc(n: usize) -> usize; fn free(p: usize); fn strlen(s: usize) -> usize; fn puts(s: usize) -> i32; }\nfn main() { unsafe { let p = malloc(6usize); ptr_write(p, 8, 72); ptr_write(p + 1usize, 8, 105); ptr_write(p + 2usize, 8, 0); puts(p); say(strlen(p)); say(ptr_read(p + 1usize, 8)); ptr_write(p, 32, 0 - 2); say(ptr_read(p, 32)); say(ptr_read(p, -32)); free(p); 0 } }",
     [], "Hi\n2\n105\n-2\n4294967294\n0"⟩,
   ⟨"use std::c::{c_string, text_at, free};\nuse std::text::{utf8, from_utf8};\nextern \"C\" { fn puts(s: usize) -> i32; fn toupper(c: i32) -> i32; fn getenv(name: usize) -> usize; }\nfn main() { say(utf8(\"h\\u{e9}\\u{20ac}\")); say(from_utf8(utf8(\"h\\u{e9}llo \\u{1F600}\")) == Some(\"h\\u{e9}llo \\u{1F600}\")); unsafe { let s = c_string(\"hello from C\"); puts(s); say(text_at(s)); free(s); let name = c_string(\"GLORIOUS_TEST\"); say(getenv(name) == 0usize); free(name); toupper(97i32) } }",
-    [], "[104, 195, 169, 226, 130, 172]\nOk(())\nhello from C\nOk(hello from C)\nOk(())\n65"⟩
+    [], "[104, 195, 169, 226, 130, 172]\nOk(())\nhello from C\nOk(hello from C)\nOk(())\n65"⟩,
+  -- Floats are given to C and taken from it where C keeps floats.
+  ⟨"extern \"C\" { fn sqrt(x: f64) -> f64; fn pow(x: f64, y: f64) -> f64; }\nfn main() { unsafe { say(sqrt(2.0)); say(pow(2.0, 10.0)); 0 } }",
+    [], "1.4142135623730951\n1024.0\n0"⟩,
+  ⟨"extern \"C\" { fn sqrtf(x: f32) -> f32; }\nfn main() { unsafe { say(sqrtf(9.0f32)); 0 } }",
+    [], "3.0\n0"⟩,
+  -- Addresses: `*const T` and `*mut T`.
+  ⟨"extern \"C\" { fn strlen(s: *const u8) -> usize; fn malloc(n: usize) -> *mut u8; fn free(p: *mut u8); }\nfn main() { unsafe { let p = malloc(8usize); ptr_write(ptr_mut_address(p), 8, 65); ptr_write(ptr_mut_address(p) + 1usize, 8, 0); let n = strlen(ptr_const(p)); free(p); say(n); 0 } }",
+    [], "1\n0"⟩,
+  ⟨"extern \"C\" { fn memset(p: *mut u8, c: i32, n: usize) -> *mut u8; fn malloc(n: usize) -> *mut u8; fn free(p: *mut u8); }\nfn main() { unsafe { let p = malloc(4usize); let q = memset(p, 7i32, 4usize); say(ptr_read(ptr_mut_address(q) + 3usize, 8)); free(p); 0 } }",
+    [], "7\n0"⟩,
+  -- C's names for its types.
+  ⟨"extern \"C\" { fn abs(n: c_int) -> c_int; }\nfn main() { unsafe { say(abs(0i32 - 7i32)); 0 } }",
+    [], "7\n0"⟩,
+  ⟨"use std::c::{c_int, c_long};\nextern \"C\" { fn labs(n: c_long) -> c_long; fn abs(n: c_int) -> c_int; }\nfn twice(n: c_int) -> c_int { n + n }\nfn main() { unsafe { say(labs(0 - 9)); say(twice(abs(0i32 - 4i32))); 0 } }",
+    [], "9\n8\n0"⟩,
+  -- Whole numbers and floats together, to a function that takes any number of them.
+  ⟨"extern \"C\" { fn ldexp(x: f64, e: i32) -> f64; fn snprintf(buf: *mut u8, n: usize, fmt: *const u8, x: f64, k: i32) -> i32; fn malloc(n: usize) -> *mut u8; fn free(p: *mut u8); fn puts(s: *const u8) -> i32; }\nuse std::c::{c_string};\nfn main() { unsafe { say(ldexp(1.5, 4i32)); let buf = malloc(64usize); let fmt = c_string(\"%.3f and %d\"); let n = snprintf(buf, 64usize, ptr_at(fmt), 3.14159, 42i32); puts(ptr_const(buf)); free(buf); say(n); 0 } }",
+    [], "24.0\n3.142 and 42\n12\n0"⟩,
+  -- C calls back: a function, and a block that holds a value.
+  ⟨"extern \"C\" { fn qsort(base: usize, n: usize, size: usize, cmp: usize); fn malloc(n: usize) -> usize; fn free(p: usize); }\nfn order(a: usize, b: usize) -> Int { unsafe { let x = ptr_read(a, 64); let y = ptr_read(b, 64); if(x < y) { 0 - 1 } else { if(x > y) { 1 } else { 0 } } } }\nfn main() { unsafe {\n    let p = malloc(40usize);\n    ptr_write(p, 64, 30); ptr_write(p + 8usize, 64, 10); ptr_write(p + 16usize, 64, 50); ptr_write(p + 24usize, 64, 20); ptr_write(p + 32usize, 64, 40);\n    let cmp = c_callback(order, 2);\n    qsort(p, 5usize, 8usize, cmp);\n    say(ptr_read(p, 64)); say(ptr_read(p + 8usize, 64)); say(ptr_read(p + 32usize, 64));\n    free(p); 0 } }",
+    [], "10\n20\n50\n0"⟩,
+  ⟨"extern \"C\" { fn qsort(base: usize, n: usize, size: usize, cmp: usize); fn malloc(n: usize) -> usize; fn free(p: usize); }\nfn main() { unsafe {\n    let p = malloc(24usize);\n    ptr_write(p, 64, 3); ptr_write(p + 8usize, 64, 1); ptr_write(p + 16usize, 64, 2);\n    let sign = 0 - 1;\n    let cmp = c_callback({ (a, b) => unsafe { sign * (ptr_read(a, 64) - ptr_read(b, 64)) } }, 2);\n    qsort(p, 3usize, 8usize, cmp);\n    say(ptr_read(p, 64)); say(ptr_read(p + 16usize, 64));\n    free(p); 0 } }",
+    [], "3\n1\n0"⟩
 ]
 
 end Glorious

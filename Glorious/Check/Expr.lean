@@ -592,6 +592,18 @@ partial def inferCall (scope : Scope) (amb : Row) (f : Expr) (args : List Expr)
       else if id == 4 then
         checkArgs scope amb s!"`{x}`" [.con "usize" [], .int, .int] args call
         pure .unit
+      else if id == 5 then
+        -- The callable is given to C for as long as the program runs. What
+        -- it takes and gives is C's to get right: whole numbers and
+        -- addresses, as `usize`.
+        -- An effect cannot pass C, so the callable performs none.
+        let arity ← match args with
+          | [_, .int n] => pure n.toNat
+          | _ => throw s!"`{x}` is given a callable and how many whole numbers C gives it, written out: `{x}(f, 2)`"
+        unless arity ≤ 5 do throw s!"`{x}`: C gives a callable at most five whole numbers"
+        let given := Ty.func (List.replicate arity (.con "usize" [])) .int ⟨[], none⟩ (← freshCap)
+        checkArgs scope amb s!"`{x}`" [given, .int] args call
+        pure (.con "usize" [])
       else
         checkArgs scope amb s!"`{x}`" [] args call
         pure (.tuple [.int, .int])

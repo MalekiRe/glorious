@@ -2211,6 +2211,31 @@ and cleanups work through any mixture, which is what was asked of the ABI.
   it. A backend sees no types, so it checks at run time that an integer is
   one before working on it in place.
 
+## What C is given
+
+An `extern "C"` function takes and gives whole numbers, `f32` and `f64`,
+and addresses written `*const T` and `*mut T`; C's own names for its types
+(`c_int`, `c_long`, `c_double`, ..) are the types they are on x86-64 Linux,
+in `extern` blocks without being imported and elsewhere from `std::c`. Whole
+numbers and addresses go where C keeps those and floats where it keeps
+floats, at most six of the first and eight of the second. A function not in
+the process is looked for in C's library of mathematics.
+
+`c_callback(f, n)` gives an address C can call with `n` whole numbers, at
+most five, which runs the callable `f` and gives back the whole number it
+gives. The callable performs nothing: an effect cannot pass C, nor can a jump
+to a label, and the checker holds the callable to that. The callable and the
+code at the address are never let go of.
+
+- **No records.** `#[repr(C)]` is read and does nothing: a value built by a
+  constructor is not laid out in memory as C would lay it out, so C is given
+  an address the program filled with `ptr_write`.
+- **Nothing is exported.** `#[export_name]` is read and does nothing: the
+  program is not a library C can link against, only one that C can call back
+  into while it is being called.
+- **Not on the proved machines.** A foreign call has no meaning there; these
+  programs run on the Rust VM and the backends alone, and are not certified.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by

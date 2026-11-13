@@ -727,6 +727,23 @@ pub fn all(it, wanted) { not any(it, { x => not wanted(x) }) }
 private def cText : String := r#"// What C has: its memory, and texts as it writes them. Everything here is
 // unsafe: an address is whatever a program says it is.
 
+// C's names for its types, as they are on x86-64 Linux.
+pub type c_char = i8;
+pub type c_schar = i8;
+pub type c_uchar = u8;
+pub type c_short = i16;
+pub type c_ushort = u16;
+pub type c_int = i32;
+pub type c_uint = u32;
+pub type c_long = i64;
+pub type c_ulong = u64;
+pub type c_longlong = i64;
+pub type c_ulonglong = u64;
+pub type c_size_t = usize;
+pub type c_ssize_t = isize;
+pub type c_float = f32;
+pub type c_double = f64;
+
 pub extern "C" {
     fn malloc(n: usize) -> usize;
     fn free(p: usize);

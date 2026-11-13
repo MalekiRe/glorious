@@ -1785,33 +1785,55 @@ private partial def parseItemGroup : P (List Item) := do
       expectPunct ")"
       let ret ← if ← acceptPunct "->" then parseType else pure (.tuple [])
       expectPunct ";"
-      -- How a type is given to C and taken from it: as so many bits.
-      let width : TypeExpr → P (Option String × Int) := fun
-        | .name "Int" [] => pure (none, 64)
-        | .name "i64" [] => pure (none, 64)
-        | .name t [] =>
-          match scalars.lookup t with
-          | some (some w) => pure (some t, w)
-          | _ => failAt s!"a foreign function takes and gives whole numbers, an `Int` or a type such as `i32` or `usize`, not `{t}`"
-        | _ => failAt "a foreign function takes and gives whole numbers, an `Int` or a type such as `i32` or `usize`"
+      -- How a type is given to C and taken from it: the type the function
+      -- is declared with, how a value of it is made the bits C takes, how
+      -- what C gives is made a value of it, what C gives (so many bits; 1000
+      -- a double, 1001 a float), and where C takes it (0 with the whole
+      -- numbers and addresses, 1 as a double, 2 as a float).
+      let call1 := fun (f : String) (x : Expr) => Expr.call 0 (.name none f) [x]
+      let rec kind (fuel : Nat) : TypeExpr →
+          P (TypeExpr × (Expr → Expr) × (Expr → Expr) × Int × Nat) := fun t =>
+        match t with
+        | .name "Int" [] => pure (t, id, id, 64, 0)
+        | .name "i64" [] => pure (t, id, id, 64, 0)
+        | .name "f64" [] => pure (t, call1 "f64_bits", call1 "f64_of", 1000, 1)
+        | .name "f32" [] => pure (t, call1 "f32_bits", call1 "f32_of", 1001, 2)
+        | .name "%prelude::Ptr" [_] =>
+          pure (t, fun x => call1 "usize_bits" (call1 "ptr_address" x),
+            fun r => call1 "ptr_at" (call1 "usize_of" r), 64, 0)
+        | .name "%prelude::PtrMut" [_] =>
+          pure (t, fun x => call1 "usize_bits" (call1 "ptr_mut_address" x),
+            fun r => call1 "ptr_mut_at" (call1 "usize_of" r), 64, 0)
+        | .name name [] =>
+          match scalars.lookup name, cTypes.lookup (lastSegment name), fuel with
+          | some (some w), _, _ => pure (t, call1 (name ++ "_bits"), call1 (name ++ "_of"), w, 0)
+          -- C's own names for its types are the types they are here.
+          | _, some as, fuel + 1 => kind fuel (.name as [])
+          | _, _, _ => failAt s!"a foreign function takes and gives whole numbers, floats and addresses (`Int`, a type such as `i32`, `usize` or `f64`, `*const T`, `*mut T`), not `{name}`"
+        | _ => failAt "a foreign function takes and gives whole numbers, floats and addresses (`Int`, a type such as `i32`, `usize` or `f64`, `*const T`, `*mut T`)"
       let mut args : Array Expr := #[]
+      let mut declared : Array TypeExpr := #[]
+      let mut classes : Nat := 0
+      let mut place : Nat := 1
       for (p, i) in params.toList.zipIdx do
-        let (cast, _) ← width p
-        let x := Expr.name none s!"%a{i}"
-        args := args.push (match cast with
-          | some t => .call 0 (.name none (t ++ "_bits")) [x]
-          | none => x)
-      let (back, bits) ← match ret with
-        | .tuple [] => pure (none, 0)
-        | t => width t
+        let (ty, into, _, _, cls) ← kind 4 p
+        declared := declared.push ty
+        args := args.push (into (Expr.name none s!"%a{i}"))
+        classes := classes + cls * place
+        place := place * 3
+      let (retTy, back, bits) ← match ret with
+        | .tuple [] => pure (TypeExpr.tuple [], (id : Expr → Expr), (0 : Int))
+        | t => do
+          let (ty, _, back, bits, _) ← kind 4 t
+          pure (ty, back, bits)
       let symbol := name.toUTF8.toList.map fun b => Expr.int b.toNat
-      let call := Expr.call 0 (.name none foreignCall) (symbol ++ [.int 0, .int bits] ++ args.toList)
-      let body : List Stmt := match ret, back with
-        | .tuple [], _ => [.expr call, .expr (.tuple [])]
-        | _, some t => [.expr (.call 0 (.name none (t ++ "_of")) [call])]
-        | _, none => [.expr call]
+      let call := Expr.call 0 (.name none foreignCall)
+        (symbol ++ [.int 0, .int bits, .int classes] ++ args.toList)
+      let body : List Stmt := match ret with
+        | .tuple [] => [.expr call, .expr (.tuple [])]
+        | _ => [.expr (back call)]
       let pats := (List.range params.size).map fun i => Pattern.var s!"%a{i}"
-      items := items.push (.fn name [] (params.toList.map some) (some ret) [.mk pats body])
+      items := items.push (.fn name [] (declared.toList.map some) (some retTy) [.mk pats body])
       items := items.push (.unsafeFn name)
     expectPunct "}"
     pure items.toList

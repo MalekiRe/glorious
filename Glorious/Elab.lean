@@ -206,7 +206,10 @@ def casts : List String :=
 def hosts : List (String × Nat × Nat) :=
   [("host_write", 0, 1), ("host_read", 1, 0),
    -- Unsafe: the bits at an address, read and written, so many of them.
-   ("ptr_read", 3, 2), ("ptr_write", 4, 3)]
+   ("ptr_read", 3, 2), ("ptr_write", 4, 3),
+   -- Unsafe: an address C can call, which runs a callable of so many whole
+   -- numbers, at most five, that gives one.
+   ("c_callback", 5, 2)]
 
 /-- The Core computation under construction: binding forms awaiting their
 continuation, the number of locals so far, and the terminator once one is known. -/
