@@ -1825,6 +1825,18 @@ What it is not:
   used cannot have `Drop`, and a value of a type with `Drop` is taken apart
   by a pattern only in the module that declares the type, which stands in
   for the specification's unsafe code there.
+- **Since: what a clause is given under a name and does not mention is
+  destroyed when the clause is done**, a function's parameter or a name
+  bound by a pattern, the last named first; and **the value of a statement
+  that nothing takes is destroyed there**. Before, `fn eat(d: D) -> Int { 7 }`
+  never ran `drop`.
+- **Still not destroyed**: a value named on one path and not on another, in
+  the paths that do not name it; what a callable holds when the callable is
+  let go without being called; and a value whose type is a type parameter
+  or is found only where the callable is used, as a parameter of
+  `let f = fn(d) { .. }` is. The first two need a callable to say how it is
+  destroyed, and the last needs a function to be given how to destroy a
+  type it is generic in, as it is given a trait's functions.
 - **A value that never comes to rest in a variable is not destroyed.** One
   given to a function that ignores it, one a function generic in its type puts
   in a variable, one put in a value that is forgotten, the unused result of a

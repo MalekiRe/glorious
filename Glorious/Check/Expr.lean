@@ -690,6 +690,9 @@ partial def inferStmts (scope : Scope) (amb : Row) (stmts : List Stmt)
   | .expr e :: rest => do
     let t ← withLater (Elab.fvStmts [] rest) (inferExpr scope amb e)
     mustDrop t "the value of a statement is let go"
+    -- If it is one to destroy, that happens here.
+    modify fun s =>
+      { s with dropCands := s.dropCands.push (⟨s.owner, s.at_.1, s.at_.2, Elab.stmtValue, false⟩, t, s.pos) }
     inferStmts scope amb rest want
   | .let_ (.var x) (.closure id clauses) :: rest => do
     let t ← withLater (Elab.fvStmts [x] rest) (inferExpr scope amb (.closure id clauses))
@@ -923,6 +926,16 @@ partial def inferCallable (scope : Scope) (annots : List (Option Ty)) (ret : Opt
       unless pats.length == arity do
         throw "the clauses of a callable take different numbers of arguments"
       let binds ← inferPats pats params
+      -- What a clause is given under a name and does not mention is the
+      -- name's: if it is one to destroy, that happens when the clause is
+      -- done. The place is the clause's first statement.
+      let mentioned := Elab.fvStmts [] body
+      let first := Elab.firstPlace body
+      for (x, b) in binds do
+        if let .val t _ := b then
+          unless mentioned.contains x || x.startsWith "%" do
+            modify fun s =>
+              { s with dropCands := s.dropCands.push (⟨s.owner, first.1, first.2, x, false⟩, t, s.pos) }
       let names := binds.map (·.1)
       if let some x := names.find? fun x => (names.filter (· == x)).length > 1 then
         throw s!"`{x}` is bound twice by the patterns of one clause"

@@ -58,6 +58,9 @@ structure ImplE where
   conditions : Nat
   methods : List (String × Nat)
 
+/-- The name the value of a statement has where it is destroyed. -/
+def stmtValue : String := "%stmt"
+
 /-- A place where what a variable holds is destroyed: where the variable is
 declared, for the end of its block, or where it is assigned, for what it held. -/
 structure DropSite where
@@ -405,6 +408,12 @@ partial def movedStmt : Stmt → List String
   | .assign target value => movedExpr target ++ movedExpr value
 
 end
+
+/-- Where a body starts: the place of its first statement, by which what
+its clause is given is known. -/
+def firstPlace : List Stmt → Nat × Nat
+  | .located line col _ :: _ => (line, col)
+  | _ => (0, 0)
 
 /-! ## How long a borrow lasts -/
 
@@ -1633,7 +1642,13 @@ private partial def untraitCall (tr : TraitInfo) (owner : String) (id : Nat) (f 
   | _, _ => mk (untraitExpr tr owner f) args
 
 private partial def untraitClause (tr : TraitInfo) (owner : String) : Clause → Clause
-  | .mk pats body => .mk pats (untraitStmts tr owner (0, 0) body)
+  | .mk pats body =>
+    -- What the clause is given under a name and does not mention is
+    -- destroyed when the clause is done.
+    let first := firstPlace body
+    let hooks := (pats.flatMap patVars).filterMap fun x =>
+      (dropHook tr ⟨owner, first.1, first.2, x, false⟩).map Stmt.defer
+    .mk pats (hooks ++ untraitStmts tr owner (0, 0) body)
 
 /-- The statements of a block. A variable whose value is to be destroyed is
 followed by a cleanup that does it when the block is left; an assignment to one
@@ -1672,7 +1687,13 @@ private partial def untraitStmts (tr : TraitInfo) (owner : String) (pos : Nat ×
           :: .assign target (.name none "%assigned") :: rest
       | none => .assign target value :: rest
     | _ => .assign target value :: rest
-  | .expr e :: rest => .expr (untraitExpr tr owner e) :: untraitStmts tr owner pos rest
+  | .expr e :: rest =>
+    let e := untraitExpr tr owner e
+    let rest := untraitStmts tr owner pos rest
+    -- A value nothing takes, of a type to destroy, is destroyed there.
+    match (if rest.isEmpty then none else dropHook tr ⟨owner, pos.1, pos.2, stmtValue, false⟩) with
+    | some hook => .let_ (.var stmtValue) e :: .expr hook :: rest
+    | none => .expr e :: rest
   | .defer e :: rest => .defer (untraitExpr tr owner e) :: untraitStmts tr owner pos rest
 
 end
