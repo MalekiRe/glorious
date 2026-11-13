@@ -194,6 +194,7 @@ pub unsafe extern "C" fn glo_store(vm: *mut Vm, locals: *mut Value, r: u64, v: u
 #[no_mangle]
 pub unsafe extern "C" fn glo_main(
     abi: u64,
+    rewritten: u64,
     bytes: *const u8,
     size: u64,
     bodies: *const Option<Body>,
@@ -206,7 +207,9 @@ pub unsafe extern "C" fn glo_main(
         return 1;
     }
     let bytes = std::slice::from_raw_parts(bytes, size as usize);
-    let program = match decode(bytes, std::env::var("GLORIOUS_OPT").as_deref() != Ok("0")) {
+    // The bodies were made from the bytecode as it was rewritten or as it
+    // was written: it is read here the same way, whatever is said now.
+    let program = match decode(bytes, rewritten != 0) {
         Ok(program) => program,
         Err(e) => {
             eprintln!("{e}");

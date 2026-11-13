@@ -91,7 +91,7 @@ jump. Everything else is `glo_step`.
 | `u64 glo_load(Vm*, Value *locals, u64 r, u64 len)` | What the cell local `r` refers to holds, as local `len`; 0 if the reference is to a part or the cell is gone, and the instruction is then `glo_step`'s. |
 | `u64 glo_store(Vm*, Value *locals, u64 r, u64 v, u64 take, u64 len)` | Local `v`, moved if `take`, into the cell local `r` refers to; local `len` is the value with no parts. 0 as for `glo_load`. |
 | `void glo_again(Vm*, u64 len, u64 keep)` | Let go of the locals from `keep` on. |
-| `i32 glo_main(u64 abi, const u8 *bytes, u64 size, Body *bodies, u64 count, i32 argc, char **argv)` | Run a program built ahead of time: its bytecode, and for each function its body or null. The result is the process's exit code. |
+| `i32 glo_main(u64 abi, u64 rewritten, const u8 *bytes, u64 size, Body *bodies, u64 count, i32 argc, char **argv)` | Run a program built ahead of time: its bytecode, whether the bodies were made from it rewritten, and for each function its body or null. The result is the process's exit code. |
 
 ## Which engine runs a function
 
@@ -133,9 +133,9 @@ installed in place, with the closure's code after it; and a function that
 ends by calling itself with what it was given goes back to its start
 instead. The functions made this way come after the program's own. Every
 engine runs the rewritten code, so they still agree on every activation's
-locals. `--no-opt`, or
-`GLORIOUS_OPT=0` for a program built ahead of time, runs the bytecode as it
-was written. A file says how many locals each function starts with, after
+locals. `--no-opt` runs the bytecode as it was written; a module written
+with it says so, and the program built from it reads its bytecode the same
+way. A file says how many locals each function starts with, after
 the program, for this.
 
 ## What is tested

@@ -296,7 +296,7 @@ impl Emit {
 
 /// The module for a program: a body for every function, the bytecode, and a
 /// `main`.
-pub fn emit(program: &Program, bytes: &[u8]) -> String {
+pub fn emit(program: &Program, bytes: &[u8], rewritten: bool) -> String {
     let mut e = Emit { out: String::new(), fresh: 0 };
     e.out.push_str(
         "; Glorious, compiled. Link with libglorious_vm.a.\n\
@@ -310,7 +310,7 @@ pub fn emit(program: &Program, bytes: &[u8]) -> String {
          declare void @glo_again(ptr, i64, i64)\n\
          declare i64 @glo_load(ptr, ptr, i64, i64)\n\
          declare i64 @glo_store(ptr, ptr, i64, i64, i64, i64)\n\
-         declare i32 @glo_main(i64, ptr, i64, ptr, i64, i32, ptr)\n\
+         declare i32 @glo_main(i64, i64, ptr, i64, ptr, i64, i32, ptr)\n\
          declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)\n\
          declare { i64, i1 } @llvm.sadd.with.overflow.i64(i64, i64)\n\
          declare { i64, i1 } @llvm.ssub.with.overflow.i64(i64, i64)\n\
@@ -327,10 +327,11 @@ pub fn emit(program: &Program, bytes: &[u8]) -> String {
         "@glo_bytes = private constant [{n} x i8] c\"{escaped}\"\n\
          @glo_bodies = private constant [{count} x ptr] [{bodies}]\n\n\
          define i32 @main(i32 %argc, ptr %argv) {{\n  \
-         %r = call i32 @glo_main(i64 {abi}, ptr @glo_bytes, i64 {n}, ptr @glo_bodies, i64 {count}, i32 %argc, ptr %argv)\n  \
+         %r = call i32 @glo_main(i64 {abi}, i64 {rewritten}, ptr @glo_bytes, i64 {n}, ptr @glo_bodies, i64 {count}, i32 %argc, ptr %argv)\n  \
          ret i32 %r\n}}\n",
         n = bytes.len(),
         abi = native::ABI,
+        rewritten = u64::from(rewritten),
         bodies = bodies.join(", "),
     );
     e.out

@@ -2028,7 +2028,7 @@ pub fn cli_main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
     if emit {
-        print!("{}", llvm::emit(&program, &bytes));
+        print!("{}", llvm::emit(&program, &bytes, rewrite));
         return ExitCode::SUCCESS;
     }
     let bodies: Vec<Option<native::Body>> = match backend {
