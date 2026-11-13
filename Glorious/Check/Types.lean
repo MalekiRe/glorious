@@ -972,31 +972,56 @@ def generalize (t : Ty) (keep : List Ty := []) (top : Bool := true) : M Scheme :
   let mut stays : Array (Ty × String) := #[]
   for (d, why) in s.stays do
     stays := stays.push (← zonk d, why)
-  -- Capture variables reachable from the type through what they capture,
+-- Capture variables reachable from the type through what they capture,
   -- and what each captures: found from the type outwards, not by going
   -- through every edge of the program.
-  let mut reach : List Nat := (freeCaps t ++ dups.toList.flatMap (freeCaps ·.1)
-    ++ drops.toList.flatMap (freeCaps ·.1) ++ stays.toList.flatMap (freeCaps ·.1)).eraseDups
+  --
+  -- What is needed of a type is part of the function's contract only where
+  -- it is about something whoever uses the function decides: one of the
+  -- type variables the function is general in, or something its type
+  -- holds. The capture variables such a need mentions are then the
+  -- function's too. A need about what the function made for itself was
+  -- settled when the function was checked: passed on, every use of the
+  -- function would ask it again, with a copy of all it mentions, and so
+  -- would every use of whatever used it.
+  let general := (freeTys t).eraseDups.filter (!fixedTys.contains ·)
+  let needs := (dups.toList ++ drops.toList ++ stays.toList).map (·.1)
+  let mut pending := needs.map fun d => (freeTys d, freeCaps d)
+  let mut reach : List Nat := (freeCaps t).eraseDups
   let mut todo := reach
   let mut found : Array (Nat × Nat × Captured) := #[]
-  while !todo.isEmpty do
-    let mut next : List Nat := []
-    for c in todo do
-      let root ← findCap c
-      for i in s.capOut.getD root #[] do
-        match s.capEdges[i]? with
-        | some (_, .ty target) =>
-          -- What a block shares with the block it runs in place of, the
-          -- other holds: it is no part of what this one's type says it holds.
-          if s.sharedEdges.contains i then continue
-          let target ← zonk target
-          found := found.push (i, root, .ty target)
-          for c in freeCaps target do
-            unless reach.contains c || next.contains c do next := c :: next
-        | some (_, what) => found := found.push (i, root, what)
-        | none => pure ()
-    reach := reach ++ next
-    todo := next
+  let mut more := true
+  while more do
+    more := false
+    while !todo.isEmpty do
+      let mut next : List Nat := []
+      for c in todo do
+        let root ← findCap c
+        for i in s.capOut.getD root #[] do
+          match s.capEdges[i]? with
+          | some (_, .ty target) =>
+            -- What a block shares with the block it runs in place of, the
+            -- other holds: it is no part of what this one's type says it holds.
+            if s.sharedEdges.contains i then continue
+            let target ← zonk target
+            found := found.push (i, root, .ty target)
+            for c in freeCaps target do
+              unless reach.contains c || next.contains c do next := c :: next
+          | some (_, what) => found := found.push (i, root, what)
+          | none => pure ()
+      reach := reach ++ next
+      todo := next
+    -- The needs that are about what has been reached so far.
+    let mut rest : List (List Nat × List Nat) := []
+    for (tys, caps) in pending do
+      if tys.any general.contains || caps.any reach.contains then
+        for c in caps do
+          unless reach.contains c || todo.contains c do
+            todo := c :: todo
+        more := true
+      else rest := (tys, caps) :: rest
+    pending := rest
+    reach := reach ++ todo
   -- (In the order the edges were made.)
   let all := (found.qsort fun a b => a.1 < b.1).map fun (_, root, what) => (root, what)
   let cvars := reach.filter (!fixedCaps.contains ·)

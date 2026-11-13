@@ -1,0 +1,183 @@
+// A calculator: text to tokens, tokens to a tree, the tree to a number.
+// Names can be given values with `let`, and what goes wrong is said with
+// the place in the text it went wrong at.
+// expect:
+// 7
+// -9
+// 36
+// 1:4: expected division by nothing
+// 1:10: expected a number, a name or `(`
+// 1:5: expected no value for `y`
+// 1:3: expected a character that means nothing here
+// 1:3: expected nothing more
+// 0
+
+use std::slice::{Slice};
+use std::parse::{Cursor};
+use std::source::{SourceMap, SourceId};
+use std::map::{Map};
+
+enum Token { Num(Int), Name(Str), Plus, Minus, Star, Slash, Open, Close, Let, Equals }
+
+// A token and where it starts.
+struct Spot { token: Token, at: Int }
+
+enum Expr {
+    Num(Int),
+    Name(Str, Int),
+    Neg(Expr),
+    Binary(Op, Expr, Expr, Int),
+    Let(Str, Expr, Expr)
+}
+enum Op { Plus, Minus, Star, Slash }
+
+// What can go wrong, with where.
+effect Fail { fail(message: Str, at: Int) -> ! }
+
+fn is_digit(c: char) -> Bool { '0' <= c and { c <= '9' } }
+fn is_letter(c: char) -> Bool { ('a' <= c and { c <= 'z' }) or { c == '_' } }
+
+// The digits at the front of some characters as a number, and how many.
+fn number(chars: &[char], at: Int, value: Int) -> (Int, Int) {
+    match(element(chars, at)) {
+        Some(c) => if(is_digit(*c)) { tail number(chars, at + 1, value * 10 + (int(*c) - int('0'))) } else { (value, at) },
+        None => (value, at)
+    }
+}
+
+fn word(chars: &[char], at: Int, out: Str) -> (Str, Int) {
+    match(element(chars, at)) {
+        Some(c) => if(is_letter(*c)) { tail word(chars, at + 1, out ++ show(*c)) } else { (out, at) },
+        None => (out, at)
+    }
+}
+
+fn tokens(chars: &[char], at: Int, out: [Spot]) -> [Spot] / {Fail} {
+    match(element(chars, at)) {
+        None => out,
+        Some(c) =>
+            let ch = *c;
+            if(ch == ' ') { tail tokens(chars, at + 1, out) } else {
+                if(is_digit(ch)) { match(number(chars, at, 0)) { (n, end) => tokens(chars, end, push(out, Spot { token: Token::Num(n), at: at })) } } else {
+                    if(is_letter(ch)) {
+                        match(word(chars, at, "")) { (w, end) =>
+                            tokens(chars, end, push(out, Spot { token: if(w == "let") { Token::Let } else { Token::Name(w) }, at: at })) }
+                    } else {
+                        let simple = match(ch) {
+                            '+' => Token::Plus, '-' => Token::Minus, '*' => Token::Star, '/' => Token::Slash,
+                            '(' => Token::Open, ')' => Token::Close, '=' => Token::Equals,
+                            _ => fail("a character that means nothing here", at)
+                        };
+                        tokens(chars, at + 1, push(out, Spot { token: simple, at: at }))
+                    }
+                }
+            }
+    }
+}
+
+// Where the next token is, or the end.
+fn here<'a>(c: &Cursor<'a, Spot>, end: Int) -> Int { match(Cursor::peek(c)) { Some(spot) => spot.at, None => end } }
+
+// The next token and where it is, without going past it; and going past it.
+fn look<'a>(c: &Cursor<'a, Spot>) -> Option<(Token, Int)> { match(Cursor::peek(c)) { Some(spot) => Some((spot.token, spot.at)), None => None } }
+fn take<'a>(c: &mut Cursor<'a, Spot>) -> Option<(Token, Int)> { match(Cursor::next(c)) { Some(spot) => Some((spot.token, spot.at)), None => None } }
+
+// expr := `let` name `=` expr expr | sum
+fn expr<'a>(c: &mut Cursor<'a, Spot>, end: Int) -> Expr / {Fail} {
+    match(look(&*c)) {
+        Some((Token::Let, _)) =>
+            take(c);
+            let name = match(take(c)) { Some((Token::Name(n), _)) => n, _ => fail("a name after `let`", here(&*c, end)) };
+            match(take(c)) { Some((Token::Equals, _)) => (), _ => fail("`=` after the name", here(&*c, end)) };
+            let value = sum(c, end);
+            Expr::Let(name, value, expr(c, end)),
+        _ => sum(c, end)
+    }
+}
+
+// sum := product ((`+` | `-`) product)*
+fn sum<'a>(c: &mut Cursor<'a, Spot>, end: Int) -> Expr / {Fail} { let first = product(c, end); more_sum(c, end, first) }
+fn more_sum<'a>(c: &mut Cursor<'a, Spot>, end: Int, left: Expr) -> Expr / {Fail} {
+    match(look(&*c)) {
+        Some((Token::Plus, at)) => take(c); let right = product(c, end); more_sum(c, end, Expr::Binary(Op::Plus, left, right, at)),
+        Some((Token::Minus, at)) => take(c); let right = product(c, end); more_sum(c, end, Expr::Binary(Op::Minus, left, right, at)),
+        _ => left
+    }
+}
+
+// product := unary ((`*` | `/`) unary)*
+fn product<'a>(c: &mut Cursor<'a, Spot>, end: Int) -> Expr / {Fail} { let first = unary(c, end); more_product(c, end, first) }
+fn more_product<'a>(c: &mut Cursor<'a, Spot>, end: Int, left: Expr) -> Expr / {Fail} {
+    match(look(&*c)) {
+        Some((Token::Star, at)) => take(c); let right = unary(c, end); more_product(c, end, Expr::Binary(Op::Star, left, right, at)),
+        Some((Token::Slash, at)) => take(c); let right = unary(c, end); more_product(c, end, Expr::Binary(Op::Slash, left, right, at)),
+        _ => left
+    }
+}
+
+// unary := `-` unary | number | name | `(` expr `)`
+fn unary<'a>(c: &mut Cursor<'a, Spot>, end: Int) -> Expr / {Fail} {
+    let at = here(&*c, end);
+    match(take(c)) {
+        Some((Token::Minus, _)) => Expr::Neg(unary(c, end)),
+        Some((Token::Num(n), _)) => Expr::Num(n),
+        Some((Token::Name(n), spot)) => Expr::Name(n, spot),
+        Some((Token::Open, _)) =>
+            let inside = expr(c, end);
+            match(take(c)) { Some((Token::Close, _)) => inside, _ => fail("`)` to close", here(&*c, end)) },
+        _ => fail("a number, a name or `(`", at)
+    }
+}
+
+fn eval(e: Expr, names: Map<Str, Int>) -> Int / {Fail} {
+    match(e) {
+        Expr::Num(n) => n,
+        Expr::Name(n, at) => match(std::map::get(names, n)) { Some(v) => v, None => fail("no value for `" ++ n ++ "`", at) },
+        Expr::Neg(inner) => 0 - eval(inner, names),
+        Expr::Binary(op, l, r, at) =>
+            let a = eval(l, names);
+            let b = eval(r, names);
+            match(op) {
+                Op::Plus => a + b, Op::Minus => a - b, Op::Star => a * b,
+                Op::Slash => if(b == 0) { fail("division by nothing", at) } else { a / b }
+            },
+        Expr::Let(name, value, body) => let v = eval(value, names); eval(body, std::map::insert(names, name, v))
+    }
+}
+
+// The value of a text, or what went wrong, said with its line and column.
+fn calculate(text: Str) -> Str {
+    let mut sources = SourceMap::new();
+    match(SourceMap::insert(&mut sources, "input", text)) {
+        Ok(id) => worked_out(text, &sources, id),
+        Err(_) => "too many texts"
+    }
+}
+
+fn worked_out(text: Str, sources: &SourceMap, id: SourceId) -> Str {
+    let chars = chars(text);
+    let end = len(chars);
+    handle {
+        let spots = tokens(&chars, 0, []);
+        let mut c = Cursor::new(Slice::of(&spots));
+        let tree = expr(&mut c, end);
+        if(not Cursor::is_done(&c)) { fail("nothing more", here(&c, end)) } else { show(eval(tree, std::map::new())) }
+    }() {
+        fail(message, at) => match(SourceMap::locate(sources, id, at)) {
+            Ok(place) => show(place.line + 1) ++ ":" ++ show(place.column_bytes + 1) ++ ": expected " ++ message,
+            Err(_) => message
+        }
+    }
+}
+
+fn main() -> Int {
+    say(calculate("1 + 2 * 3"));
+    say(calculate("(1 + 2) * -3"));
+    say(calculate("let x = 6 let y = x * 7 y - x"));
+    say(calculate("10 / (5 - 5)"));
+    say(calculate("2 * (3 + "));
+    say(calculate("4 + y"));
+    say(calculate("7 $ 2"));
+    say(calculate("1 2"));
+    0
+}

@@ -2736,9 +2736,16 @@ long. The regions a callable touches (`accSet`) are worked out to a fixed
 point over the callables reached, and kept while nothing they depend on
 changes, instead of chain by chain of calls.
 
-- **Not fixed:** a program with many calls of one function that leads into
-  much of the library still takes long in the certificate search (a small
-  calculator, a minute); see the calculator among the examples' notes.
+A function's type carried every need the function had of any type, with
+every capture variable the need mentioned, and each use of the function
+asked them all again with copies of everything they mentioned; a function
+that used it carried those copies in turn. A calculator of a hundred lines
+took a minute, five seconds for each place its entry was called. A need is
+now part of a function's contract only where it is about something a
+caller decides: a type variable the function is general in, or something
+its type holds. The rest were settled when the function was checked. The
+calculator (`examples/calculator.glorious`) takes thirteen seconds, most of
+it finding which of its borrows can be scopes of their own.
 
 ## Paths, futures, buffers, base64
 
