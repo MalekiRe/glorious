@@ -184,6 +184,9 @@ inductive AVal where
   /-- No value: the path left for somewhere else, an operation's handler
   (named by the operation), a label's scope (`@name`), or somewhere unknown. -/
   | gone (target : String)
+  /-- A callable that runs in an environment it is lent, or a value one may be
+  in: calling it may be the call whose place on the path is asked about. -/
+  | probe
   deriving Inhabited
 
 structure ACtx where
@@ -199,6 +202,19 @@ structure ACtx where
   quiet : List String := []
   /-- Calls, by identity, whose types say they come back. -/
   sure : List Nat := []
+  /-- The count is of what comes before a call of a `probe`: a path ends at
+  such a call, with the name below for where it left to, and a value one may
+  be in cannot go where the count does not follow. -/
+  probing : Bool := false
+  /-- Where such a value goes is accounted for by whoever lets it go. -/
+  lenient : Bool := false
+  /-- The functions being followed. One that calls itself is not followed
+  again: what it is given goes where the count does not follow, which says
+  of every later round what the first said. -/
+  active : List String := []
+
+/-- Where a path that ends at a call of a `probe` is said to leave to. -/
+def probeTarget : String := "%probe"
 
 def isGone : AVal → Bool
   | .gone _ => true
@@ -330,16 +346,46 @@ partial def holdsTracked : AVal → Bool
       | none => false
   | _ => false
 
+/-- The name under which a callable keeps which functions were being followed
+where it was made. -/
+def activeMark : String := "%active"
+
+/-- A callable runs as part of the functions it was made in, wherever it is
+called: so a function that calls itself from a block it gives away is seen to,
+and a block given to a function may call that function anew. -/
+def ACtx.inside (ctx : ACtx) (env : List (String × AVal)) : ACtx :=
+  match env.lookup activeMark with
+  | some (.data _ fns) =>
+    { ctx with active := fns.filterMap fun
+        | .fn name => some name
+        | _ => none }
+  | _ => ctx
+
+/-- May a call of a `probe` come of this value? -/
+partial def holdsProbe : AVal → Bool
+  | .probe => true
+  | .data _ args => args.any holdsProbe
+  | .clo clauses env =>
+    (clauses.flatMap (Elab.fvClause [])).eraseDups.any fun y =>
+      match env.lookup y with
+      | some v => holdsProbe v
+      | none => false
+  | _ => false
+
 mutual
 
 /-- The uses made if a value goes somewhere the count cannot follow. For the
 most uses, every callable in it is taken to be called; for the fewest, none. -/
 partial def escapes (ctx : ACtx) (depth : Nat) : AVal → A Nat
   | .tracked => pure 1
+  -- When it would be called is then not known.
+  | .probe => if ctx.lenient then pure 0 else failure
   | .data _ args => do
     let ns ← args.mapM (escapes ctx depth)
     pure (ns.foldl (· + ·) 0)
   | .clo clauses env => do
+    if ctx.probing && !ctx.lenient && holdsProbe (.clo clauses env) then failure
+    let ctx := ctx.inside env
     -- For the fewest uses: a callable that mentions the binding has to be
     -- called, since the binding has to be used; one that does not, need not.
     if ctx.lower && !holdsTracked (.clo clauses env) then return 0
@@ -381,6 +427,13 @@ partial def cap (ctx : ACtx) (depth : Nat) (alts : Alts) : A Alts := do
 /-- A call the count cannot follow: its arguments escape. -/
 partial def unfollowed (ctx : ACtx) (depth : Nat) (args : List AVal) (quiet : Bool := false) :
     A Alts := do
+  -- What is called may call a `probe` it is given, now, or keep it in what
+  -- it gives back.
+  if ctx.probing && args.any holdsProbe then
+    let mut n := 0
+    for a in args do
+      n := n + (← escapes { ctx with lenient := true } depth a)
+    return [(.probe, n), (.gone probeTarget, n)]
   let mut n := 0
   for a in args do
     n := n + (← escapes ctx depth a)
@@ -397,6 +450,14 @@ partial def applyClauses (ctx : ACtx) (depth : Nat) (clauses : List Clause)
       let pats := if pats.isEmpty && args.length == 1 then [Pattern.wild] else pats
       if pats.length == args.length then
         let (fitness, binds) := fitAll ctx pats args
+        -- A value a `probe` may be in is not followed through a pattern.
+        if ctx.probing then
+          for (p, v) in pats.zip args do
+            match p, v with
+            | .var _, _ => pure ()
+            | .wild, _ => pure ()
+            | _, .probe => failure
+            | _, _ => pure ()
         let taken := ((pats.zip args).map fun (p, v) => takenApart ctx p v).foldl (· + ·) 0
         let run : A Alts := do
           let alts ← runStmts ctx depth (binds ++ env) body
@@ -416,10 +477,17 @@ partial def callValue (ctx : ACtx) (depth : Nat) (f : AVal) (args : List AVal) :
     -- Calling the binding uses it.
     let alts ← unfollowed ctx depth args
     pure (alts.map fun (v, n) => (v, n + 1))
-  | .clo clauses env => applyClauses ctx depth clauses env args
+  | .probe => do
+    let mut n := 0
+    for a in args do
+      n := n + (← escapes { ctx with lenient := true } depth a)
+    pure [(.gone probeTarget, n), (if args.any holdsProbe then .probe else .unknown, n)]
+  | .clo clauses env => applyClauses (ctx.inside env) depth clauses env args
   | .fn name =>
     match depth, ctx.fns.lookup name with
-    | d + 1, some clauses => applyClauses ctx d clauses [] args
+    | d + 1, some clauses =>
+      if ctx.active.contains name then unfollowed ctx depth args
+      else applyClauses { ctx with active := name :: ctx.active } d clauses [] args
     | _, _ => unfollowed ctx depth args
   | _ => unfollowed ctx depth args
 
@@ -482,10 +550,12 @@ partial def runExpr (ctx : ACtx) (depth : Nat) (env : List (String × AVal)) : E
       | .data _ args => (args.getD idx .unknown, n)
       | .tracked => (.unknown, n + 1)
       | .gone t => (.gone t, n)
+      | .probe => (.probe, n)
       | _ => (.unknown, n))
   | .call id f args => runCall ctx depth env f args id
   | .tailCall id f args => runCall ctx depth env f args id
-  | .closure _ clauses => pure [(.clo clauses env, 0)]
+  | .closure _ clauses =>
+    pure [(.clo clauses ((activeMark, .data activeMark (ctx.active.map AVal.fn)) :: env), 0)]
   | .handle subject arms => do
     let subject ← runExpr ctx depth env subject
     let mut completions : List Clause := []
@@ -505,7 +575,10 @@ partial def runExpr (ctx : ACtx) (depth : Nat) (env : List (String × AVal)) : E
             -- and none there can be relied on.
             unless ctx.lower do
               for (v, n) in alts do
-                if n + (← escapes ctx depth v) > 0 then repeated := 2
+                -- (When it runs is not known either.)
+                if ctx.probing && (holdsProbe v || v matches .gone _) then
+                  terminal := terminal ++ [(.gone probeTarget, n)]
+                else if n + (← escapes ctx depth v) > 0 then repeated := 2
           else terminal := terminal ++ alts
         | none => completions := completions ++ [.mk [.ctor name q ps] body]
       | other => completions := completions ++ [other]
@@ -545,6 +618,7 @@ partial def runExpr (ctx : ACtx) (depth : Nat) (env : List (String × AVal)) : E
       match v with
       | .tracked => (AVal.unknown, n + 1)
       | .gone t => (.gone t, n)
+      | .probe => (.probe, n)
       | _ => (.unknown, n))
   -- Borrowing from a reference is no use of it.
   | .reborrow _ e => do
@@ -583,7 +657,8 @@ partial def runCallee (ctx : ACtx) (depth : Nat) (env : List (String × AVal)) (
           | none =>
             -- A call that comes back and is given nothing a use could come
             -- of need not be followed.
-            if sure && !holdsTracked fv && !vs.any holdsTracked then
+            if sure && !holdsTracked fv && !vs.any holdsTracked
+                && !(ctx.probing && (holdsProbe fv || vs.any holdsProbe)) then
               out := (.unknown, n + m) :: out
             else
               let found ← callValue ctx depth fv vs
@@ -653,6 +728,12 @@ partial def runStmts (ctx : ACtx) (depth : Nat) (env : List (String × AVal)) :
     for (v, n) in found do
       if isGone v then out := (v, n) :: out
       else
+        if ctx.probing then
+          match pat, v with
+          | .var _, _ => pure ()
+          | .wild, _ => pure ()
+          | _, .probe => failure
+          | _, _ => pure ()
         let (_, binds) := fit ctx pat v
         let bound := binds.map (·.1)
         let others := ((binders ctx pat).filter (!bound.contains ·)).map (·, AVal.unknown)
@@ -707,6 +788,25 @@ def pathUses (ctx : ACtx) (outer : List String) (x : String) (body : List Stmt)
       -- What the body yields leaves the region being counted.
       ns := (n + (← escapes ctx 8 v)) :: ns
     pure (ctx.fold ns)
+  (count.run 20000).map (·.1)
+
+/-- The most uses of `x` on any path through `body` up to a call of one of the
+`probes`, if the count finishes: none if no use comes before such a call. A
+path that leaves the body with something a probe may be called through ends
+there too, since the call may follow. -/
+def usesBeforeProbe (ctx : ACtx) (outer : List String) (x : String) (body : List Stmt)
+    (known : List (String × AVal)) : Option Nat :=
+  let ctx := { ctx with lower := false, probing := true }
+  let env := known ++ (x, AVal.tracked) :: outer.map (·, AVal.unknown)
+  let count : A Nat := do
+    let mut worst := 0
+    for (v, n) in ← runStmts ctx 8 env body do
+      match v with
+      | .gone t => if t == probeTarget || t == "*" then worst := max worst n
+      | _ =>
+        if holdsProbe v then
+          worst := max worst (n + (← escapes { ctx with lenient := true } 8 v))
+    pure worst
   (count.run 20000).map (·.1)
 
 /-- Does evaluating this run nothing at all? `quiet` names what only builds a
@@ -872,8 +972,9 @@ them: a callable the function was given, or one kept in a declared type. -/
 def runLowerChecks (fnTy : Ty) : M Unit := do
   let s ← get
   modify fun st =>
-    { st with calls := #[], lowerChecks := #[], abandoned := #[], envGroups := #[], envAfter := #[] }
-  unless s.anyMust || !s.envGroups.isEmpty || !s.envAfter.isEmpty do return
+    { st with calls := #[], lowerChecks := #[], abandoned := #[], envGroups := #[], envAfter := #[],
+              envLent := #[] }
+  unless s.anyMust || !s.envGroups.isEmpty || !s.envAfter.isEmpty || !s.envLent.isEmpty do return
   let mut sources : List Nat := []
   if let .fn ps _ _ _ _ ← zonk fnTy then
     sources := ps.flatMap freeRows
@@ -1008,6 +1109,24 @@ def runLowerChecks (fnTy : Ty) : M Unit := do
     | some 0 => pure ()
     | _ =>
       throw s!"{listed members} runs in the environment `{env}`, which is there only once {listed producers} has run: on some path it is called first"
+  -- An environment given to one callable and lent to others: once it is given
+  -- it is used up, so none it is lent to is called after. A path is followed
+  -- up to each call of one it is lent to, and no call of one it is given to
+  -- may be on it.
+  for (env, owners, borrowers, names, body) in s.envLent do
+    let known :=
+      (owners.map fun (x, arity) =>
+        (x, AVal.clo [.mk (List.replicate arity Pattern.wild) [.expr (.proj (.name none "%env") 0)]]
+          [("%env", AVal.tracked)]))
+      ++ borrowers.map fun (x, _) => (x, AVal.probe)
+    let outer := names.filter fun n => !known.any (·.1 == n)
+    let listed := fun (xs : List (String × Nat)) => ", ".intercalate (xs.map fun (x, _) => s!"`{x}`")
+    match usesBeforeProbe ctx outer "%env" body known with
+    | some 0 => pure ()
+    | some _ =>
+      throw s!"{listed borrowers} runs in the environment `{env}` lent to it, and {listed owners} is given `{env}` and uses it up: on some path {listed borrowers} is called after {listed owners}"
+    | none =>
+      throw s!"{listed borrowers} runs in the environment `{env}` lent to it, and {listed owners} is given `{env}` and uses it up: it could not be shown that {listed borrowers} is never called after {listed owners}"
   if relied then
     for (_, callee) in conditional do
       modify fun st => { st with stays := st.stays.push (callee,

@@ -370,6 +370,10 @@ structure St where
   other names in scope, and the function's body. None of those that run in
   it is called before one of those that leave it. -/
   envAfter : Array (String × List (String × Nat) × List (String × Nat) × List String × List Stmt) := #[]
+  /-- Environments some callables are given whole and others are lent: the
+  environment, those given it, those lent it, the other names in scope, and
+  the function's body. None lent it can be called once one given it has been. -/
+  envLent : Array (String × List (String × Nat) × List (String × Nat) × List String × List Stmt) := #[]
   /-- For a function whose callables share an environment and take no
   arguments: which of its parameters they are, the first being the one that
   holds the environment; and the same by name. A caller builds the others

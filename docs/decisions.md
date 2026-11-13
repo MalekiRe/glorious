@@ -793,8 +793,18 @@ Limits. A function with callables that share an environment is called where
 it is named, and is given blocks or names for them. `After` orders the
 calls and no more: what the first callable captured is not handed to the
 second.
-Callables given `&E` or `&mut E` are not counted at all, nor ordered against
-one given `E`. The lifetime of `Environment<'e>` is read and not used. A
+Since: a callable lent the environment, `&E` or `&mut E`, may be called any
+number of times while it is there, and not once a callable given `E` has
+been called (unless that one says `After = E`). The count follows each path
+up to a call of one that is lent it, and no call of one given it may be on
+it. A callable lent the environment that goes where the count does not
+follow, into a variable or out of the function, is refused as not shown.
+And the count no longer follows a function into itself: what the function
+is given then goes where the count does not follow, which says of every
+later round what the first said. So a loop in a function that is given an
+environment is counted, where before the count gave up.
+
+The lifetime of `Environment<'e>` is read and not used. A
 callable of a trait's function, `Label<T>`, and `unsafe Fn` are not built. An
 ordinary trait written of a type parameter is checked to exist; which traits
 a function needs is still inferred. The caller is still checked by following

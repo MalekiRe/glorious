@@ -1945,6 +1945,27 @@ def cases : List Case := [
     [], "12"⟩,
   ⟨"struct V(for<'a> fn(&'a Int) -> &'a Int)\nfn run(v: V) -> Int { match(v) { V(f) => let mut x = 4; *f(&x) } }\nfn main() { run(V({ r => r })) }",
     [], "4"⟩,
+  -- An environment lent to some callables and given to another: none it is lent to is called once it is given.
+  ⟨"fn ok1<'e, E, A, B>(a: A, b: B) -> Int where E: Environment<'e>, A: RunsIn<&mut E, (), Output = Int>, B: RunsIn<E, (), Output = Int> { let x = a(); x + b() }\nfn main() { let mut n = 1; ok1({ n = n + 1; n }, { n * 10 }) }",
+    [], "22"⟩,
+  ⟨"fn bad1<'e, E, A, B>(a: A, b: B) -> Int where E: Environment<'e>, A: RunsIn<&mut E, (), Output = Int>, B: RunsIn<E, (), Output = Int> { let x = b(); x + a() }\nfn main() { let mut n = 1; bad1({ n = n + 1; n }, { n * 10 }) }",
+    [], "error: in `bad1`: `a` runs in the environment `E` lent to it, and `b` is given `E` and uses it up: on some path `a` is called after `b`"⟩,
+  -- In a loop, and then given.
+  ⟨"fn ok2<'e, E, A, B>(a: A, b: B) -> Int where E: Environment<'e>, A: RunsIn<&mut E, (), Output = Int>, B: RunsIn<E, (), Output = Int> { let mut i = 0; let mut s = 0; while({ i < 3 }) { s = s + a(); i = i + 1 }; s + b() }\nfn main() { let mut n = 1; ok2({ n = n + 1; n }, { n * 10 }) }",
+    [], "49"⟩,
+  ⟨"fn bad2<'e, E, A, B>(a: A, b: B) -> Int where E: Environment<'e>, A: RunsIn<&mut E, (), Output = Int>, B: RunsIn<E, (), Output = Int> { let x = b(); let mut i = 0; while({ i < 3 }) { i = i + a() }; x }\nfn main() { let mut n = 1; bad2({ n = n + 1; n }, { n * 10 }) }",
+    [], "error: in `bad2`: `a` runs in the environment `E` lent to it, and `b` is given `E` and uses it up: on some path `a` is called after `b`"⟩,
+  ⟨"fn ok3<'e, E, A, B>(a: A, b: B) -> Int where E: Environment<'e>, A: RunsIn<&mut E, (), Output = Int>, B: RunsIn<E, (), Output = Int> { if(a() < 3) { a() + b() } else { b() } }\nfn main() { let mut n = 1; ok3({ n = n + 1; n }, { n * 10 }) }",
+    [], "33"⟩,
+  ⟨"fn bad3<'e, E, A, B>(a: A, b: B) -> Int where E: Environment<'e>, A: RunsIn<&mut E, (), Output = Int>, B: RunsIn<E, (), Output = Int> { let x = if(a() < 3) { b() } else { 0 }; x + a() }\nfn main() { let mut n = 1; bad3({ n = n + 1; n }, { n * 10 }) }",
+    [], "error: in `bad3`: `a` runs in the environment `E` lent to it, and `b` is given `E` and uses it up: on some path `a` is called after `b`"⟩,
+  ⟨"fn ok4<'e, E, A, B>(a: A, b: B) -> Int where E: Environment<'e>, A: RunsIn<&mut E, (), Output = Int>, B: RunsIn<E, (), Output = Int> { a() + a() + a() }\nfn main() { let mut n = 1; ok4({ n = n + 1; n }, { n * 10 }) }",
+    [], "9"⟩,
+  ⟨"fn bad4<'e, E, A, B>(a: A, b: B) -> Int where E: Environment<'e>, A: RunsIn<&mut E, (), Output = Int>, B: RunsIn<E, (), Output = Int> { let g = { a() }; let x = b(); x + g() }\nfn main() { let mut n = 1; bad4({ n = n + 1; n }, { n * 10 }) }",
+    [], "error: in `bad4`: `a` runs in the environment `E` lent to it, and `b` is given `E` and uses it up: on some path `a` is called after `b`"⟩,
+  -- A function with a loop and a callable given its environment.
+  ⟨"fn f<'e, E, B>(b: B) -> Int where E: Environment<'e>, B: RunsIn<E, (), Output = Int> { let mut i = 0; while({ i < 3 }) { i = i + 1 }; b() }\nfn main() { let mut n = 1; f({ n * 10 }) }",
+    [], "10"⟩,
   -- `drop` is not for a program to call.
   ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nfn main() { let mut f = File(7); drop(&mut f); 0 }",
     [], "error: 3:34: in `main`: `drop` is run when what holds a value ends; a program does not call it"⟩,

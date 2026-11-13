@@ -552,9 +552,31 @@ def checkGroup (decls : List FnDecl) : M Unit := do
           match b.trait, b.assoc.lookup "After" with
           | "RunsIn", some (.name e []) => if e == env then some (b.subject, b.args.length - 1) else none
           | _, _ => none
-        let running := d.bounds.filterMap fun b =>
+        let lent := d.bounds.filterMap fun b =>
           match b.trait, b.args.head? with
-          | "RunsIn", some (.name e []) => if e == env then some (b.subject, b.args.length - 1) else none
+          | "RunsIn", some (.ref _ (.name e []) _) =>
+            if e == env then some (b.subject, b.args.length - 1) else none
+          | _, _ => none
+        let given := d.bounds.filterMap fun b =>
+          match b.trait, b.args.head? with
+          | "RunsIn", some (.name e []) =>
+            -- (One that leaves the environment as it was does not use it up.)
+            let keeps := match b.assoc.lookup "After" with
+              | some (.name e' []) => e' == env
+              | _ => false
+            if e == env && !keeps then some (b.subject, b.args.length - 1) else none
+          | _, _ => none
+        -- Lent after it was given away: the environment is no longer there.
+        unless lent.isEmpty || given.isEmpty do
+          let owners := given.flatMap fun (f, arity) => (named f).map (·, arity)
+          let borrowers := lent.flatMap fun (f, arity) => (named f).map (·, arity)
+          unless owners.isEmpty || borrowers.isEmpty do
+            modify fun s =>
+              { s with envLent := s.envLent.push (env, owners, borrowers, pats'.flatMap Elab.patVars, body') }
+        let running := given ++ lent ++ d.bounds.filterMap fun b =>
+          match b.trait, b.args.head? with
+          | "RunsIn", some (.name e []) =>
+            if e == env && !given.any (·.1 == b.subject) then some (b.subject, b.args.length - 1) else none
           | _, _ => none
         unless leaving.isEmpty do
           let producers := leaving.flatMap fun (f, arity) => (named f).map (·, arity)
