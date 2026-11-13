@@ -1681,8 +1681,20 @@ private def destroyCall (tr : TraitInfo) (d : DictE) (value : Expr) : Expr :=
 happens and its type has something to destroy. -/
 private def dropHook (tr : TraitInfo) (site : DropSite) : Option Expr :=
   match (tr.drops.lookup site).bind fun id => tr.dicts.lookup id with
-  | some [d] => some (destroyCall tr d (.name none site.name))
+  | some [d] =>
+    -- (A part of a name's value that nothing reads: that part.)
+    some (destroyCall tr d (match Syntax.partOf site.name with
+      | some (x, i) => .proj (.name none x) i
+      | none => .name none site.name))
   | _ => none
+
+/-- The cleanups of the parts of a name's value that are never read, where
+the name is bound at a place. -/
+private def partHooks (tr : TraitInfo) (owner : String) (pos : Nat × Nat) (x : String) : List Expr :=
+  tr.drops.filterMap fun (site, _) =>
+    if site.owner == owner && site.line == pos.1 && site.col == pos.2 && !site.assign
+        && (Syntax.partOf site.name).map (·.1) == some x then dropHook tr site
+    else none
 
 /-- The functions that destroy values, for each type: the one that does it,
 given how each of the type's parameters is destroyed and then the value, and
@@ -1810,8 +1822,8 @@ private partial def untraitClause (tr : TraitInfo) (owner : String) : Clause →
     let first := firstPlace body
     let (pats, _) := nameWilds (fun k => (dropHook tr ⟨owner, first.1, first.2, wildName k, false⟩).isSome) pats 0
     let early := tailsStmts body
-    let hooks := (pats.flatMap patVars).filterMap fun x =>
-      (dropHook tr ⟨owner, first.1, first.2, x, false⟩).map
+    let hooks := (pats.flatMap patVars).flatMap fun x =>
+      ((dropHook tr ⟨owner, first.1, first.2, x, false⟩).toList ++ partHooks tr owner first x).map
         (if early then Stmt.expr else Stmt.defer)
     .mk pats (hooks ++ untraitStmts tr owner (0, 0) body)
 
@@ -1849,11 +1861,9 @@ private partial def untraitStmts (tr : TraitInfo) (owner : String) (pos : Nat ×
     let rest := untraitStmts tr owner pos rest
     match pat with
     | .var x =>
-      match dropHook tr ⟨owner, pos.1, pos.2, x, false⟩ with
+      let hooks := (dropHook tr ⟨owner, pos.1, pos.2, x, false⟩).toList ++ partHooks tr owner pos x
       -- (Before a `tail` call there is no later: see the clause's own.)
-      | some hook =>
-        .let_ pat value :: (if tailsStmts rest then Stmt.expr hook else Stmt.defer hook) :: rest
-      | none => .let_ pat value :: rest
+      .let_ pat value :: hooks.map (if tailsStmts rest then Stmt.expr else Stmt.defer) ++ rest
     | _ => .let_ pat value :: rest
   | .assign target value :: rest =>
     let value := untraitExpr tr owner value

@@ -25,6 +25,16 @@ implementation meets it, on its conditions; where it is one the function is
 generic in, the function is given the evidence, and so needs the bound of
 whoever calls it. -/
 
+/-- Whose a function's type parameters are. Its own; or, for functions that
+call each other, the group's: a parameter two of them write with one name
+is then one type to both, which is what lets one call the other with what
+it was given. -/
+def rigidOwner (decls : List FnDecl) (d : FnDecl) : String :=
+  if d.impl.isSome then d.name else
+  match decls.filter (·.impl.isNone) with
+  | first :: _ :: _ => first.name
+  | _ => d.name
+
 /-- The number `Traits.solve` knows a type by, if it is one a function is
 generic in: a type nothing has decided, or one of the function's own type
 parameters. -/
@@ -300,7 +310,7 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
     let mut said : Array (Ty × Bool × Bool) := #[]
     for b in d.bounds do
       if b.trait == "Use" then
-        if let (some (lower, upper), some param) := (b.quantity, seen.lookup s!"'{b.subject}@{d.name}") then
+        if let (some (lower, upper), some param) := (b.quantity, seen.lookup s!"'{b.subject}@{rigidOwner decls d}") then
           -- (What is needed of a reference to a `T` is not needed of a `T`.)
           let mentions := fun (need : Ty) => show M Bool from match param with
             | .var id => tyHoldsVar [] id need
@@ -335,7 +345,7 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
     let scheme := { scheme with edges := edges.toList, ranked }
     -- The type parameters as written, for a call that writes types for them.
     let written := (d.params.filter fun p => !p.startsWith "'").map fun p =>
-      match seen.lookup s!"'{p}@{d.name}" with
+      match seen.lookup s!"'{p}@{rigidOwner decls d}" with
       | some (.var id) => if scheme.tvars.contains id then some id else none
       | _ => none
     modify fun s => { s with typeParams := (d.name, written) :: s.typeParams }
@@ -368,8 +378,8 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
         else
           let mut written : List (String × Nat × Ty) := []
           for b in ordinary do
-            let t := Ty.con s!"'{b.subject}@{d.name}" []
-            if (seen.lookup s!"'{b.subject}@{d.name}").isSome then
+            let t := Ty.con s!"'{b.subject}@{rigidOwner decls d}" []
+            if (seen.lookup s!"'{b.subject}@{rigidOwner decls d}").isSome then
               let k := (← keyOf t).getD 0
               -- The trait at the arguments written, if it takes some.
               let args := ((← get).writtenArgs.findSome? fun (f, subject, tr, args) =>
@@ -547,7 +557,7 @@ def checkGroup (decls : List FnDecl) : M Unit := do
           let cap ← freshCap
           rigid := rigid ++ [(p, Ty.life cap)]
           lifetimes := (cap, p) :: lifetimes
-        else rigid := rigid ++ [(p, Ty.con s!"'{p}@{d.name}" [])]
+        else rigid := rigid ++ [(p, Ty.con s!"'{p}@{rigidOwner decls d}" [])]
       -- An implementation written for another name of its type: the
       -- arguments the name fixes are those types here, not parameters.
       if let some (im, _) := d.impl then
@@ -841,6 +851,7 @@ def checkGroup (decls : List FnDecl) : M Unit := do
       checkGivenReads
       checkDrops (← get).drops
       checkAparts
+      checkUnrun
       checkStays (← get).stays
       checkLifetimes
       modify fun s =>
@@ -853,6 +864,16 @@ def checkGroup (decls : List FnDecl) : M Unit := do
       let hint := if recursive then
         "; if the last expression of the body is not meant as the result, end it with `;`"
         else ""
+      -- Functions that call each other share the type parameters they name
+      -- alike, and no others.
+      let named := fun (d : FnDecl) => (genericParams d.params).filter (!isLifetime ·)
+      let other := decls.find? fun o => o.name != d.name && o.impl.isNone && named o != named d
+      let hint := match other with
+        | some o =>
+          if d.impl.isNone && !(named d).isEmpty && !(named o).isEmpty && (e.splitOn "expected `").length > 1 then
+            hint ++ s!" (`{d.name}` and `{o.name}` call each other: a type parameter is one type to both only where both give it the same name)"
+          else hint
+        | none => hint
       throw (inFunction d.name (e ++ hint))
   -- Each use inside the group is a use like any other: of the function's type
   -- with captures of its own, which capture what the function's do.

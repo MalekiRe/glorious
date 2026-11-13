@@ -1008,6 +1008,94 @@ partial def lessPartsStmt (x : String) : Stmt → Stmt
 
 end
 
+mutual
+
+/-- Is a name used other than by reading a part of it, `x.f`: as a whole,
+borrowed, or written? -/
+partial def usedWhole (x : String) : Expr → Bool
+  | .name none y => y == x
+  | .ref _ y => y == x
+  | .refField _ _ y _ _ => y == x
+  | .fieldOf _ (.name none _) _ => false
+  | .proj (.name none _) _ => false
+  | .call _ f args => (f :: args).any (usedWhole x)
+  | .tailCall _ f args => (f :: args).any (usedWhole x)
+  | .tuple args => args.any (usedWhole x)
+  | .proj e _ => usedWhole x e
+  | .deref e => usedWhole x e
+  | .reborrow _ e => usedWhole x e
+  | .fieldOf _ e _ => usedWhole x e
+  | .closure _ clauses => clauses.any fun
+      | .mk _ body => body.any (usedWholeStmt x)
+  | .handle subject arms => usedWhole x subject || arms.any fun
+      | .mk _ body => body.any (usedWholeStmt x)
+  | .labelScope _ body => body.any (usedWholeStmt x)
+  | _ => false
+
+partial def usedWholeStmt (x : String) : Stmt → Bool
+  | .let_ _ e => usedWhole x e
+  | .letMut _ e => usedWhole x e
+  | .expr e => usedWhole x e
+  | .defer e => usedWhole x e
+  | .located _ _ s => usedWholeStmt x s
+  | .assign target e => usedWhole x target || usedWhole x e
+
+end
+
+/-- The name a part of a name's value is destroyed under, where the part is
+never read: the name and the part's place among the fields. -/
+def partName (x : String) (i : Nat) : String := s!"{x}.%{i}"
+
+/-- The name and the place such a name is of. -/
+def partOf (name : String) : Option (String × Nat) :=
+  match name.splitOn ".%" with
+  | [x, i] => i.toNat?.map (x, ·)
+  | _ => none
+
+/-- The part of a name an expression reads, if it is `x.f` or `x.0`. -/
+def partRead (x : String) : Expr → Option String
+  | .fieldOf _ (.name none y) f => if y == x then some f else none
+  | .proj (.name none y) i => if y == x then some (toString i) else none
+  | _ => none
+
+mutual
+
+/-- What follows a name with every read of a part of it but one left out:
+where that one part is used. -/
+partial def onlyPart (x part : String) : Expr → Expr
+  | .call id f args => .call id (onlyPart x part f) (args.map (onlyPart x part))
+  | .tailCall id f args => .tailCall id (onlyPart x part f) (args.map (onlyPart x part))
+  | .tuple args => .tuple (args.map (onlyPart x part))
+  | .proj e i =>
+    match partRead x (.proj e i) with
+    | some p => if p == part then .name none x else .int 0
+    | none => .proj (onlyPart x part e) i
+  | .deref e => .deref (onlyPart x part e)
+  | .reborrow u e => .reborrow u (onlyPart x part e)
+  | .fieldOf id e n =>
+    match partRead x (.fieldOf id e n) with
+    | some p => if p == part then .name none x else .int 0
+    | none => .fieldOf id (onlyPart x part e) n
+  | .closure id clauses => .closure id (clauses.map fun
+      | .mk pats body => .mk pats (onlyPartStmts x part body))
+  | .handle subject arms => .handle (onlyPart x part subject) (arms.map fun
+      | .mk pats body => .mk pats (onlyPartStmts x part body))
+  | .labelScope l body => .labelScope l (onlyPartStmts x part body)
+  | e => e
+
+partial def onlyPartStmts (x part : String) (body : List Stmt) : List Stmt :=
+  body.map (onlyPartStmt x part)
+
+partial def onlyPartStmt (x part : String) : Stmt → Stmt
+  | .let_ p e => .let_ p (onlyPart x part e)
+  | .letMut y e => .letMut y (onlyPart x part e)
+  | .expr e => .expr (onlyPart x part e)
+  | .defer e => .defer (onlyPart x part e)
+  | .located l c s => .located l c (onlyPartStmt x part s)
+  | .assign target e => .assign (onlyPart x part target) (onlyPart x part e)
+
+end
+
 /-- Is the value a name holds used as it is, with no borrow of the name and
 nothing written to it after? Then the name gives its value away where it is
 used. A cleanup runs after what follows it: one that borrows the name is a

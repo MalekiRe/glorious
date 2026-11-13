@@ -999,6 +999,81 @@ def checkUses (pos : String) (outer : Scope) (binds : Scope) (body : List Stmt) 
       | .val t _ => some t
       | .poly p => some p.ty
       | _ => none
+    -- Parts of the name's value read, `x.f`. Where the name is used no other
+    -- way, each part is a value of its own: used as often as that part is
+    -- read, and the parts never read are what is let go.
+    let mine : List (Ty × Nat × String × String) := match b with
+      | .val _ bid => s.partReads.toList.filterMap fun (owner, _, subject, idx, part, at_) =>
+          if owner == bid then some (subject, idx, part, at_) else none
+      | _ => []
+    if let .val _ bid := b then
+      unless mine.isEmpty do
+        modify fun st => { st with partReads := st.partReads.filter fun (owner, _, _, _, _, _) => owner != bid }
+    let apart := !mine.isEmpty && !body.any (Syntax.usedWholeStmt x)
+    if apart then
+      let (subject, firstAt) := match mine with
+        | (subject, _, _, at_) :: _ => (subject, at_)
+        | [] => (Ty.unit, pos)
+      let taken := (mine.map fun (_, idx, _, _) => idx).eraseDups
+      -- (The machine counts each read of a value that holds a resumption
+      -- as a use of all of it.)
+      if usesStmts resumptive x body ≥ 2 then
+        modify fun st => { st with takenApart := st.takenApart.push (subject, pos ++ s!"`{x}` is used more than once") }
+      let others ← (try otherFields subject 0 catch _ => pure none)
+      let count := match others with
+        | some rest => rest.length + 1
+        | none => 0
+      let site := match b with
+        | .val _ bid => s.bindSites.lookup bid
+        | _ => none
+      for i in List.range count do
+        unless taken.contains i do
+          if let some ft ← (try fieldType subject i catch _ => pure none) then
+            modify fun st => { st with pos := firstAt }
+            mustDrop ft "taking one field of a value lets go of the rest"
+            -- What is let go is destroyed when the name's block is left,
+            -- as a name nothing uses is; where the name has no such place,
+            -- nothing would destroy it.
+            match site with
+            | some (line, col) =>
+              modify fun st =>
+                { st with dropCands := st.dropCands.push (⟨st.owner, line, col, Syntax.partName x i, false⟩, ft, firstAt) }
+            | none =>
+              modify fun st => { st with leftBehind := st.leftBehind.push (ft, firstAt ++ "taking one field of a value lets go of the rest") }
+            modify fun st => { st with pos := pos }
+      let mut seenParts : List String := []
+      for (_, idx, part, at_) in mine do
+        unless seenParts.contains part do
+          seenParts := part :: seenParts
+          let only := Syntax.onlyPartStmts x part body
+          let ft := (← (try fieldType subject idx catch _ => pure none)).getD subject
+          if usesStmts resumptive x only ≥ 2 then
+            let ft ← zonk ft
+            modify fun st => { st with seen := [] }
+            let dropped := (← tyHasDrop [] ft).isSome
+            let twice : Bool := match pathUses (if dropped then { ctx with handed := true } else ctx)
+                (names.filter (· != x)) x only with
+              | some n => decide (n ≥ 2)
+              | none => true
+            if twice then
+              modify fun st => { st with pos := at_ }
+              mustDup ft s!"`{x}.{part}` is used more than once"
+              modify fun st => { st with pos := pos }
+          if s.anyMust && !x.startsWith "%" then
+            modify fun st =>
+              { st with lowerChecks := st.lowerChecks.push (pos, x, ft, names.filter (· != x), only) }
+    else
+      -- Used as a whole too: each part read lets go of the rest of it.
+      for (subject, idx, _, at_) in mine do
+        modify fun st => { st with pos := at_ }
+        match ← otherFields subject idx with
+        | some rest =>
+          for r in rest do
+            mustDrop r "taking one field of a value lets go of the rest"
+            modify fun st => { st with leftBehind := st.leftBehind.push (r, at_ ++ "taking one field of a value lets go of the rest") }
+        | none => mustDrop subject "taking one field of a value lets go of the rest"
+        modify fun st => { st with pos := pos }
+    if apart then continue
     if let some t := t then
       let mentions := usesStmts resumptive x body
       if mentions ≥ 2 then

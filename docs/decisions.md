@@ -2713,6 +2713,44 @@ from being an `Id<Block>`.
 - Not built: base64; `ByteReader::read_u128_le` is, the signed widths
   other than `read_i64_le` are not in the specification.
 
+## Functions that call each other, and their type parameters
+
+`fn size<T>(t: &Tree<T>)` and `fn sizes<T>(kids: &[Tree<T>], i: Int)`,
+each calling the other, were refused: "expected `&Tree<T>`, found
+`&Tree<T>`". Functions that call each other are checked together, each at
+one type inside the group, and each one's `T` was a type of its own. A type
+parameter that functions of one group write with the same name is now one
+type to all of them, which is what calling each other with what they were
+given needs. Each is still for every `T` to whoever calls it from outside.
+
+- **By name.** `ping<A>` and `pong<B>` calling each other are still
+  refused, and the message says why. Nothing else relates the two.
+- A function of the group used at another type than it is checked at
+  (recursion at a different type) is refused, as before.
+
+## Parts of a value taken separately
+
+`let x = t.a; let y = t.b;` was "`t` is used more than once" for a value
+whose parts are used once, and `redeem(f.fd) * 100 + f.written` likewise;
+the way round was a pattern. Where a name is used only by reading parts of
+its value, each part is now a value of its own: it is used as often as
+that part is read, it has to be used on every path if its type does, and
+the parts never read are what is let go.
+
+- **A part never read is destroyed when the name's block is left**, by the
+  cleanup a name nothing uses has. Before, taking one field of a value
+  left the others undestroyed: a `drop` among them did not run.
+- **Where there is no name with a place to clean up**, a field of a value
+  just computed (`make().a`), of a part of a name (`o.inner.a`), or of a
+  name a pattern bound, the others are still let go there, and a `drop`
+  among them would not run: that is refused, with what to write instead.
+  It was accepted and did not run.
+- **A name used as a whole too** is as before: each part read is a use of
+  the name.
+- **Not for a value that holds a resumption.** The machine counts every
+  read of such a value as a use of all of it, so two parts read is two
+  uses, as before.
+
 ## Budgets, cursors, graphs and source maps
 
 `std::budget` (25.2, 25.3), `std::parse` (26.1), `std::graph` (26.2) and
@@ -2746,10 +2784,9 @@ Graph<Node = N>>(g: &G)`) lost the traits written of it: "`N` is not known
 to implement `Hash`". Such a parameter is now one of the function's like
 any other.
 
-Not built from this part of the specification: functions generic over
-callables that mutually call each other, which is why each traversal is
-one function: two functions that call each other are checked as one
-group, at one type.
+Each traversal is one function. When they were written, two generic
+functions that called each other could not be; they can now (see
+"Functions that call each other, and their type parameters").
 
 ## C strings, addresses and `Box`
 

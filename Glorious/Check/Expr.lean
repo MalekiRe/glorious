@@ -125,10 +125,23 @@ partial def inferExpr (scope : Scope) (amb : Row) : Expr → M Ty
     match known with
     | some (idx, t) =>
       modify fun s => { s with fieldReads := s.fieldReads.push (id, idx) }
-      -- The fields not taken are what is let go.
-      match ← otherFields subject idx with
-      | some rest => for r in rest do mustDrop r "taking one field of a value lets go of the rest"
-      | none => mustDrop subject "taking one field of a value lets go of the rest"
+      -- The fields not taken are what is let go. Of a name, that is seen
+      -- once every part read of it is known: one name may give several.
+      let named := match e with
+        | .name none x => match scope.lookup x with
+          | some (.val _ bid) => some (bid, x)
+          | _ => none
+        | _ => none
+      match named with
+      | some (bid, x) =>
+        modify fun s => { s with partReads := s.partReads.push (bid, x, subject, idx, name, s.pos) }
+      | none =>
+        match ← otherFields subject idx with
+        | some rest =>
+          for r in rest do
+            mustDrop r "taking one field of a value lets go of the rest"
+            modify fun s => { s with leftBehind := s.leftBehind.push (r, s.pos ++ "taking one field of a value lets go of the rest") }
+        | none => mustDrop subject "taking one field of a value lets go of the rest"
       pure t
     | none =>
       -- Not known yet: settled once the rest of the function is inferred.
@@ -142,9 +155,21 @@ partial def inferExpr (scope : Scope) (amb : Row) : Expr → M Ty
     modify fun s => { s with aparts := s.aparts.push (subject, s.pos) }
     match ← fieldType subject idx with
     | some t =>
-      match ← otherFields subject idx with
-      | some rest => for r in rest do mustDrop r "taking one field of a value lets go of the rest"
-      | none => mustDrop subject "taking one field of a value lets go of the rest"
+      let named := match e with
+        | .name none x => match scope.lookup x with
+          | some (.val _ bid) => some (bid, x)
+          | _ => none
+        | _ => none
+      match named with
+      | some (bid, x) =>
+        modify fun s => { s with partReads := s.partReads.push (bid, x, subject, idx, toString idx, s.pos) }
+      | none =>
+        match ← otherFields subject idx with
+        | some rest =>
+          for r in rest do
+            mustDrop r "taking one field of a value lets go of the rest"
+            modify fun s => { s with leftBehind := s.leftBehind.push (r, s.pos ++ "taking one field of a value lets go of the rest") }
+        | none => mustDrop subject "taking one field of a value lets go of the rest"
       pure t
     | none => do
       -- Not known yet: settle it once the rest of the function is inferred.
@@ -891,6 +916,10 @@ partial def inferStmts (scope : Scope) (amb : Row) (stmts : List Stmt)
         modify fun s =>
           { s with dropCands := s.dropCands.push (⟨s.owner, at_.1, at_.2, x, false⟩, t, pos) }
     let binds ← inferPat pat t
+    if let .var _ := pat then
+      for (_, b) in binds do
+        if let .val _ bid := b then
+          modify fun s => { s with bindSites := (bid, at_.1, at_.2) :: s.bindSites }
     let check : Pending := ⟨(← get).pos, "the pattern of this `let` does", [t], [[pat]]⟩
     modify fun s => { s with pending := s.pending.push check }
     let here := (← get).pos
@@ -1060,7 +1089,8 @@ partial def clauseGiven (body : List Stmt) (patterns : M Scope) : M Scope := do
   modify fun s => { s with wildAt := none }
   let mentioned := Elab.fvStmts [] body
   for (x, b) in binds do
-    if let .val t _ := b then
+    if let .val t bid := b then
+      modify fun s => { s with bindSites := (bid, first.1, first.2) :: s.bindSites }
       unless mentioned.contains x || x.startsWith "%" do
         modify fun s =>
           { s with dropCands := s.dropCands.push (⟨s.owner, first.1, first.2, x, false⟩, t, s.pos) }

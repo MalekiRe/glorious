@@ -551,6 +551,40 @@ def checkDups (dups : Array (Ty × String)) : M Unit := do
         throw s!"{why}, but a `{name}` has a `drop`, which would then run once for each"
       throw s!"{why}, but a value that holds a resumption can be used only once"
 
+/-- Does a value of this type hold a callable that can be called only once: a
+resumption, or a callable that holds what is used once? -/
+partial def tyHoldsOnceCallable (visiting : List String) (t : Ty) : M Bool := do
+  match ← find t with
+  | .var _ => pure false
+  | .tuple args => args.anyM (tyHoldsOnceCallable visiting)
+  | .fn _ _ _ _ cap => capOwnsOnce cap
+  | .ref _ _ _ => pure false
+  | .con name args => do
+    if ← args.anyM (tyHoldsOnceCallable visiting) then return true
+    if visiting.contains name then return false
+    match (← get).types.lookup name with
+    | none => pure false
+    | some decl =>
+      decl.ctors.anyM fun c => do
+        match (← get).ctors.lookup c with
+        | none => pure false
+        | some sig => (sig.fieldsAt args).anyM (tyHoldsOnceCallable (name :: visiting))
+
+/-- A field left behind where nothing destroys it has no `drop` to run. -/
+def checkUnrun : M Unit := do
+  let apart := (← get).takenApart
+  modify fun s => { s with takenApart := #[] }
+  for (t, why) in apart do
+    modify fun s => { s with seen := [] }
+    if ← tyHoldsOnceCallable [] t then
+      throw s!"{why}, but a value that holds a resumption can be used only once"
+  let left := (← get).leftBehind
+  modify fun s => { s with leftBehind := #[] }
+  for (t, why) in left do
+    modify fun s => { s with seen := [] }
+    if let some name ← tyHasDrop [] t then
+      throw s!"{why}, and here nothing would run the `drop` of a `{name}` in it: take the value apart with a pattern, which destroys what it does not name"
+
 /-- What a variable gives away is read out of it by the machine, which is a
 copy: fine for a value that is counted as used once here and can be copied
 there, and not for one that holds a resumption. -/

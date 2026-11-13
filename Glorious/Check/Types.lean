@@ -550,6 +550,22 @@ structure St where
   loans : Array Loan := #[]
   /-- Mutable variables, by the brand of their block: the name, and the type held. -/
   cells : Array (Nat × String × Ty) := #[]
+  /-- Where each name was bound, for the cleanup of the parts of its value
+  that are never read: the binding, and the place the elaborator knows it
+  by. -/
+  bindSites : List (Nat × Nat × Nat) := []
+  /-- Values let go where nothing destroys them: the fields left when one is
+  taken out of a value that has no name to clean up under. One with a `drop`
+  is refused. -/
+  leftBehind : Array (Ty × String) := #[]
+  /-- Values whose parts are read more than once in all, each part a value
+  of its own: not one that holds a resumption, of which the machine counts
+  every read as a use of the whole. -/
+  takenApart : Array (Ty × String) := #[]
+  /-- A part of a name's value read, `x.f`: the binding, the value's type,
+  which field, as it is written, and where. What it lets go of is seen once
+  every part read of that name is known. -/
+  partReads : Array (Nat × String × Ty × Nat × String × String) := #[]
   /-- Uses to check against the borrows once the types are known. -/
   uses : Array Use := #[]
   /-- Where a callable that uses a variable's value is written: from there
