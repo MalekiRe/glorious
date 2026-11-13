@@ -335,6 +335,9 @@ structure St where
   /-- Whether what is being fitted is what a body ends with, to the type the
   body is to give. -/
   givingBack : Bool := false
+  /-- The values a field was taken out of, leaving the rest: their types and
+  where. One with `Drop` is taken apart only where it is declared. -/
+  aparts : Array (Ty × String) := #[]
   /-- The bounds written between them: the first lasts at least as long as
   the second. -/
   outlives : List (Nat × Nat) := []

@@ -102,6 +102,7 @@ partial def inferExpr (scope : Scope) (amb : Row) : Expr → M Ty
       return ← inferExpr scope amb (.proj e n)
     let subject ← inferExpr scope amb e
     mustDrop subject "taking one field of a value lets go of the rest"
+    modify fun s => { s with aparts := s.aparts.push (subject, s.pos) }
     let unknown := match ← find subject with
       | .var _ => true
       | _ => false
@@ -125,6 +126,7 @@ partial def inferExpr (scope : Scope) (amb : Row) : Expr → M Ty
     if let some field ← inferFieldOfPlace scope (.proj e idx) then return field
     let subject ← inferExpr scope amb e
     mustDrop subject "taking one field of a value lets go of the rest"
+    modify fun s => { s with aparts := s.aparts.push (subject, s.pos) }
     match ← fieldType subject idx with
     | some t => pure t
     | none => do

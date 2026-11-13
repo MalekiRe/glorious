@@ -104,6 +104,19 @@ def mustDrop (t : Ty) (why : String) : M Unit := do
   | .ref _ _ _ => pure ()
   | _ => modify fun s => { s with drops := s.drops.push (t, s.pos ++ why) }
 
+/-- A value a field is taken out of is let go without its `Drop` being run:
+only the module that declares the type may do that. -/
+def checkAparts : M Unit := do
+  let s ← get
+  modify fun st => { st with aparts := #[] }
+  for (t, pos) in s.aparts do
+    if let .con n _ ← find t then
+      if s.kimpls.any (fun I => I.trait == "Drop" && I.head == n) then
+        if let some here := s.modules.homes.lookup s.owner then
+          let home := "::".intercalate ((n.splitOn "::").dropLast)
+          unless here == home do
+            throw s!"{pos}`{Syntax.lastSegment n}` has `Drop`, so only the module that declares it can take a field out of one: what `drop` does would not be done. Borrow the field, or ask the module for it"
+
 def checkDrops (drops : Array (Ty × String)) : M Unit := do
   if drops.isEmpty then return
   let info ← mustInfo

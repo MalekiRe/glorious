@@ -1263,7 +1263,14 @@ private partial def parseStmts : P (List Stmt) := do
     else if t == .ident "defer" then
       advance
       let e ← parseBinary 0 false
-      expectPunct ";"
+      -- `defer { .. }`: the block is what is run on the way out, not a
+      -- callable to be made then and let go.
+      let (e, block) := match e with
+        | .closure _ [.mk [] _] => (Expr.call 0 e [], true)
+        | e => (e, false)
+      if block then
+        let _ ← acceptPunct ";"
+      else expectPunct ";"
       out := out ++ (← settle (.defer e)).toArray
     else
       let e ← parseBinary 0 false

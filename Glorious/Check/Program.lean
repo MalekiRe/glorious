@@ -783,6 +783,7 @@ def checkGroup (decls : List FnDecl) : M Unit := do
       runLowerChecks t
       checkDups (← get).dups
       checkDrops (← get).drops
+      checkAparts
       checkStays (← get).stays
       checkLifetimes
       modify fun s =>

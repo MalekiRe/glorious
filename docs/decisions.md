@@ -2501,6 +2501,45 @@ that does nothing until asked: `Map`, `Filter`, `Take`, `Skip`, `Enumerate`,
   only where the type is.
 - **`Vec::iter`** gives a vector's elements by reference, one after another.
 
+## The specification's required cases
+
+The language specification lists forty-eight behaviours to be shown (21).
+Each was tried with small programs, kept among the cases under "Conformance
+L..". Where one is not met, this is how.
+
+| | |
+|---|---|
+| Met as tried | L01 to L17, L19 to L22, L25, L26, L28 to L31, L35 to L39, L42, L45, L48 |
+| Met in part | L23, L32, L33, L43, L44, L47 |
+| Not offered | L18, L24, L34, L40 |
+| Not tried | L27, L41, L46 |
+
+- **L23, field moves from a type with `Drop`.** Refused outside the module
+  that declares the type, for patterns and, since this pass, for a field
+  taken out by name or number, which had been let through and skipped the
+  type's `drop`. The declaring module may still take one apart; the
+  specification asks for `unsafe` there.
+- **L32.** An arm without a resumption resumes with what it gives. Exact
+  finite counts above one are not offered, so there is nothing to refuse.
+- **L33.** A computation that could be cancelled cannot hold a value that
+  has to be used: met. But `[1, 1]` here means resumed or cancelled, each
+  written out, so a value that has to be used cannot be held across any
+  operation, and the specification's exact-once suspension that carries
+  such a value is not offered. Making `[1, 1]` mean resumed would need a
+  resumption that is let go to cancel itself, which needs callables to be
+  destroyed with what they hold.
+- **L35.** Met, and a fault found on the way: `defer { .. }` made the block
+  a callable and let it go, running nothing. It now runs the block.
+- **L43, L44.** One runtime holds every value whichever engine runs a
+  function, and artifacts carry the ABI's generation. Values are not laid
+  out flat, and `usize` is 64 bits everywhere.
+- **L47.** A fault stops the machine, and a failure a program handles is a
+  value or an effect; there is no separate abort.
+- **L18, L24, L34, L40.** There are no availability witnesses, no holes left
+  in what a reference points to (`replace` puts something back at once), no
+  resumption used more than once, and no raw memory beyond addresses given
+  to and by C.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by

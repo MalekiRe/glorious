@@ -2670,6 +2670,117 @@ def cases : List Case := [
     [], "error: `impl std::iterator::Iterator for Pass`: `Iterator` leaves no type `Thing` to its implementations"⟩,
   ⟨"use alloc::vec::{Vec};\nuse core::iter::{fold};\nuse alloc::fmt::{format, Display};\nuse alloc::string::{String};\nfn main() -> Int {\n    let mut v = Vec::new();\n    Vec::push(&mut v, 3); Vec::push(&mut v, 4);\n    let mut it = Vec::iter(&v);\n    let total = fold(&mut it, 0, { (acc, r) => acc + *r });\n    let s = String::from_str(\"hi\");\n    say(String::to_str(&format(&s)));\n    total }",
     [], "hi\n7"⟩,
+  -- Conformance L01a: rename if.
+  ⟨"fn main() -> Int { let when = if; when(1 < 2) { 10 } else { 20 } }",
+    [], "10"⟩,
+  -- Conformance L01b: rename match.
+  ⟨"fn main() -> Int { let choose = match; choose(Some(3)) { Some(n) => n, None => 0 } }",
+    [], "3"⟩,
+  -- Conformance L01c: use as.
+  ⟨"use prelude::{if as when};\nfn main() -> Int { when(1 < 2) { 10 } else { 20 } }",
+    [], "10"⟩,
+  -- Conformance L02: dup fn.
+  ⟨"fn f(x: Int) -> Int { x }\nfn f(x: Int, y: Int) -> Int { x + y }\nfn main() -> Int { f(1) }",
+    [], "error: function `f` is declared twice"⟩,
+  -- Conformance L03c: rebind ref.
+  ⟨"fn main() -> Int { let mut a = 1; let mut b = 2; let r = &mut a; r = &mut b; a }",
+    [], "error: 1:66: in `main`: `r` is not a mutable variable"⟩,
+  -- Conformance L04b: not tuple.
+  ⟨"fn f(p: (Int,)) -> Int { p.0 }\nfn main() -> Int { f(7) }",
+    [], "error: 2:20: in `main`: argument 1 of `f`: expected `(Int,)`, found `Int`"⟩,
+  -- Conformance L04c: nested.
+  ⟨"fn f(p: ((Int, Int),)) -> Int { (p.0).0 + (p.0).1 }\nfn main() -> Int { f(((1, 2),)) }",
+    [], "3"⟩,
+  -- Conformance L04d: pair not two.
+  ⟨"fn f(a: Int, b: Int) -> Int { a + b }\nfn main() -> Int { f((1, 2)) }",
+    [], "error: 2:20: in `main`: `f` takes 2 arguments, but is given 1"⟩,
+  -- Conformance L06: not run.
+  ⟨"fn main() -> Int { let c = { say(1); 5 }; let d = { say(2); 6 }; d() }",
+    [], "2\n6"⟩,
+  -- Conformance L08: ambiguous.
+  ⟨"mod a { pub fn f() -> Int { 1 } }\nmod b { pub fn f() -> Int { 2 } }\nuse a::*;\nuse b::*;\nfn main() -> Int { f() }",
+    [], "error: 5:20: in `main`: `f` is two things here, `a::f` and `b::f`: say which with its module"⟩,
+  -- Conformance L10a: nominal.
+  ⟨"struct Meters(Int);\nstruct Feet(Int);\nfn m(x: Meters) -> Int { x.0 }\nfn main() -> Int { m(Feet(3)) }",
+    [], "error: 4:20: in `main`: argument 1 of `m`: expected `Meters`, found `Feet`"⟩,
+  -- Conformance L11b: wild linear.
+  ⟨"struct Ticket(Int);\nimpl Use<[1, 1]> for Ticket {}\nfn redeem(t: Ticket) -> Int { match(t) { Ticket(n) => n } }\nfn main() -> Int { let t = Ticket(1); match(t) { _ => 0 } }",
+    [], "error: 4:39: in `main`: `_` lets go of a value, but a `Ticket` has to be used"⟩,
+  -- Conformance L12: shared capture.
+  ⟨"struct Ticket(Int);\nimpl Use<[1, 1]> for Ticket {}\nfn redeem(t: Ticket) -> Int { match(t) { Ticket(n) => n } }\nfn main() -> Int { let t = Ticket(4); match(Some(1)) { Some(n) => n + redeem(t), None => redeem(t) } }",
+    [], "5"⟩,
+  -- Conformance L15a: inline alts.
+  ⟨"struct Ticket(Int);\nimpl Use<[1, 1]> for Ticket {}\nfn redeem(t: Ticket) -> Int { match(t) { Ticket(n) => n } }\nfn main() -> Int { let t = Ticket(4); if(1 < 2) { redeem(t) } else { redeem(t) + 1 } }",
+    [], "4"⟩,
+  -- Conformance L15c: two closures both.
+  ⟨"struct Ticket(Int);\nimpl Use<[1, 1]> for Ticket {}\nfn redeem(t: Ticket) -> Int { match(t) { Ticket(n) => n } }\nfn main() -> Int { let t = Ticket(4); let a = { redeem(t) }; let b = { redeem(t) }; a() + b() }",
+    [], "error: 4:20: in `main`: `t` is used more than once, but a `Ticket` can be used only once"⟩,
+  -- Conformance L16: sequential.
+  ⟨"struct Ticket(Int);\nimpl Use<[1, 1]> for Ticket {}\nfn redeem(t: Ticket) -> Int { match(t) { Ticket(n) => n } }\nfn both(f: fn() -> Int, g: fn() -> Int) -> Int { f() + g() }\nfn main() -> Int { let t = Ticket(4); both({ redeem(t) }, { redeem(t) }) }",
+    [], "error: 5:20: in `main`: `t` is used more than once, but a `Ticket` can be used only once"⟩,
+  -- Conformance L20b: early return.
+  ⟨"struct Ticket(Int);\nimpl Use<[1, 1]> for Ticket {}\nfn redeem(t: Ticket) -> Int { match(t) { Ticket(n) => n } }\nfn f(t: Ticket, c: Bool) -> Int { @out { if(c) { @out(0) } else { () }; redeem(t) } }\nfn main() -> Int { f(Ticket(1), true) }",
+    [], "error: in `f`: `t` is not used on every path, but a `Ticket` has to be used"⟩,
+  -- Conformance L21: zero sized linear.
+  ⟨"struct Token;\nimpl Use<[1, 1]> for Token {}\nfn spend(t: Token) -> Int { match(t) { Token => 1 } }\nfn main() -> Int { let t = Token; 0 }",
+    [], "error: 4:20: in `main`: `t` is not used on every path, but a `Token` has to be used"⟩,
+  -- Conformance L22: drop order.
+  ⟨"struct Noisy(Int);\nimpl Drop for Noisy { fn drop(n) { say(n.0) } }\nfn main() -> Int { let a = Noisy(1); let b = Noisy(2); 0 }",
+    [], "2\n1\n0"⟩,
+  -- Conformance L23: other module proj.
+  ⟨"mod a { pub struct Holder(pub [Int]); impl Drop for Holder { fn drop(h) { say(0) } } pub fn mk() -> Holder { Holder([1, 2]) } }\nfn main() -> Int { let h = a::mk(); let v = h.0; len(v) }",
+    [], "error: 2:37: in `main`: `Holder` has `Drop`, so only the module that declares it can take a field out of one: what `drop` does would not be done. Borrow the field, or ask the module for it"⟩,
+  -- Conformance L23: other module named.
+  ⟨"mod a { pub struct Holder { pub items: [Int] } impl Drop for Holder { fn drop(h) { say(0) } } pub fn mk() -> Holder { Holder { items: [1, 2] } } }\nfn main() -> Int { let h = a::mk(); let v = h.items; len(v) }",
+    [], "error: 2:37: in `main`: `Holder` has `Drop`, so only the module that declares it can take a field out of one: what `drop` does would not be done. Borrow the field, or ask the module for it"⟩,
+  -- Conformance L26: leak.
+  ⟨"fn apply(f: for<'a> fn(&'a Int) -> Int) -> Int { let mut x = 3; f(&x) }\nfn main() -> Int { let mut slot: Option<&Int> = None; apply({ (r) => slot = Some(r); 0 }) }",
+    [], "error: 2:55: in `main`: argument 1 of `apply`: a reference this callable is given is kept in `slot`, and the callable is wanted for references of any lifetime"⟩,
+  -- Conformance L29: union.
+  ⟨"effect A { a() -> Int }\neffect B { b() -> Int }\nfn both(f: fn() -> Int / {A}, g: fn() -> Int / {B}) -> Int / {A, B} { f() + g() }\nfn main() -> Int { handle (handle both({ a() }, { b() }) { a(k) => k(1) }) { b(k) => k(2) } }",
+    [], "3"⟩,
+  -- Conformance L31: nested same.
+  ⟨"effect Ask { ask() -> Int }\nfn main() -> Int { handle (handle (ask() + ask()) { ask(k) => k(1) }) { ask(k) => k(100) } }",
+    [], "2"⟩,
+  -- Conformance L31: forward.
+  ⟨"effect Ask { ask() -> Int }\neffect Log { log(Int) }\nfn main() -> Int { handle (handle { log(ask()); ask() }() { log(v, k) => k(()) }) { ask(k) => k(7) } }",
+    [], "7"⟩,
+  -- Conformance L32: exact two.
+  ⟨"effect Twice { [2, 2] both() -> Int }\nfn main() -> Int { handle (both() + 1) { both() => 5 } }",
+    [], "error: operation `both`: a resumption is used at most once, so write `[0, 1]` or `[1, 1]`"⟩,
+  -- Conformance L33: cancel linear.
+  ⟨"struct Ticket(Int);\nimpl Use<[1, 1]> for Ticket {}\nfn redeem(t: Ticket) -> Int { match(t) { Ticket(n) => n } }\neffect Stop { stop() -> Int }\nfn main() -> Int { let t = Ticket(1); handle { let x = stop(); redeem(t) + x }() { stop(k) => 0 } }",
+    [], "error: 5:20: in `main`: `t` is not used on every path, but a `Ticket` has to be used"⟩,
+  -- Conformance L35: terminal cleanup.
+  ⟨"effect Fail { fail(Int) -> ! }\nfn work() -> Int / {Fail} { defer { say(1) }; fail(7); 0 }\nfn main() -> Int { handle work() { fail(code) => say(2); code } }",
+    [], "1\n2\n7"⟩,
+  -- Conformance L36: label helper.
+  ⟨"fn find_first(xs: [Int], want: Int) -> Int { @out { each(xs, { (x) => if(x == want) { @out(x) } else { () } }); 0 - 1 } }\nfn main() -> Int { find_first([3, 5, 7], 5) }",
+    [], "5"⟩,
+  -- Conformance L37: post work.
+  ⟨"fn f(n: Int) -> Int { if(n == 0) { 0 } else { tail f(n - 1) + 1 } }\nfn main() -> Int { f(3) }",
+    [], "error: 1:47: `tail` call is not in tail position"⟩,
+  -- Conformance L39: unsafe closure.
+  ⟨"extern \"C\" { fn abs(x: c_int) -> c_int; }\nfn main() -> Int { let c = unsafe { { abs(0 - 3) } }; c() }",
+    [], "error: 2:39: in `main`: `abs` is unsafe: it can be named only in `unsafe { .. }` or in an `unsafe fn`"⟩,
+  -- Conformance L42: non c struct.
+  ⟨"struct P { x: Int }\nextern \"C\" { fn takes(x: P) -> c_int; }\nfn main() -> Int { 0 }",
+    [], "error: 2:39: a foreign function takes and gives whole numbers, floats and addresses (`Int`, a type such as `i32`, `usize` or `f64`, `*const T`, `*mut T`), not `P`, found `}`"⟩,
+  -- Conformance L48: nan.
+  ⟨"fn main() { let z = 0.0; let n = z / z; say(n == n); say(n); say(0.0 - 0.0); say(1.0 / (0.0 - 0.0)); 0 }",
+    [], "Err(())\nNaN\n0.0\ninf\n0"⟩,
+  -- `defer { .. }` runs the block on the way out.
+  ⟨"fn work() -> Int { defer { say(1) }; 0 }\nfn main() -> Int { work() }",
+    [], "1\n0"⟩,
+  -- Conformance L09: imported op.
+  ⟨"mod m { pub effect E { op() -> Int } pub fn run(f: fn() -> Int / {E}) -> Int { handle f() { op(k) => k(41) } } }\nuse m::{op, run};\nfn main() -> Int { run({ op() + 1 }) }",
+    [], "42"⟩,
+  -- Conformance L28b: is negative scope.
+  ⟨"fn main() -> Int { let x = Some(4); if(x is Some(n)) { 1 } else { n } }",
+    [], "error: 1:67: in `main`: unknown name `n`"⟩,
+  -- Conformance L17: err post state.
+  ⟨"fn step(n: &mut Int) -> Result<Int, Str> { *n = *n + 1; Err(\"no\") }\nfn main() -> Int { let mut n = 0; match(step(&mut n)) { Ok(v) => v, Err(_) => n } }",
+    [], "1"⟩,
   -- `drop` is not for a program to call.
   ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nfn main() { let mut f = File(7); drop(&mut f); 0 }",
     [], "error: 3:34: in `main`: `drop` is run when what holds a value ends; a program does not call it"⟩,
