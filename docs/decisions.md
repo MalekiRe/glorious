@@ -1540,6 +1540,16 @@ the patterns as written, which the checker reads beside them. So a `&mut`
 pattern works on a value that cannot be copied, a resource or something that
 holds a callable. A clause that asks for a number still reads the value.
 
+Since: a borrow of a field cannot leave the block it is made in, as it could
+not leave the function: not as what the block gives, nor kept in a variable
+outside it. Before, `let r = { &x.0 }();` and a reference bound by a pattern
+that was its clause's result were accepted and pointed at a variable that was
+gone; the program then stopped at the read. And a callable given where one
+for every lifetime is wanted, `for<'a> fn(&'a T) -> &'a T`, can give back
+only what borrows from what it is given: not a borrow of a variable, nor
+something that lasts for another lifetime of the function, since whoever
+calls it chooses how long `'a` lasts.
+
 Limits. A pattern that binds by reference is written around the whole
 pattern. A reference bound by a pattern lasts for its
 clause, and one to a field for its function. Two borrows of fields that

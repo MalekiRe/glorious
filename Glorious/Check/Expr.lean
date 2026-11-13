@@ -62,7 +62,8 @@ partial def inferExpr (scope : Scope) (amb : Row) : Expr → M Ty
       captures cap (.brand brand)
       captures cap (.loan (← freshLoan (some brand) uniq none numbered))
       modify fun s =>
-        { s with fieldSites := s.fieldSites.push (id, false, t, numbered, chosen, s.owner, s.pos) }
+        { s with fieldSites := s.fieldSites.push (id, false, t, numbered, chosen, s.owner, s.pos)
+                 blockFieldCaps := s.blockFieldCaps.push (cap, s.pos) }
       pure (.ref (if uniq then .uniq else .shared) field cap)
     | some (.val t _) => do
       -- A field of what a reference points to: borrowed from the reference,
@@ -86,7 +87,8 @@ partial def inferExpr (scope : Scope) (amb : Row) : Expr → M Ty
       captures cap' (.ty t)
       modify fun s =>
         { s with fieldSites := s.fieldSites.push (id, true, whole, numbered, chosen, s.owner, s.pos)
-                 fieldCaps := s.fieldCaps.push (cap', s.pos) }
+                 fieldCaps := s.fieldCaps.push (cap', s.pos)
+                 blockFieldCaps := s.blockFieldCaps.push (cap', s.pos) }
       pure (.ref (if uniq then .uniq else .shared) field cap')
     | some _ => do
       if x.startsWith "%through" || x.startsWith "%given" then
@@ -855,6 +857,8 @@ partial def inferCallable (scope : Scope) (annots : List (Option Ty)) (ret : Opt
   let cap ← freshCap
   captureAll scope cap (clauses.flatMap (Elab.fvClause [])) fun x => clauses.any (assignsClause x)
   let loansBefore := (← get).loans.size
+  let fieldsBefore := (← get).blockFieldCaps.size
+  let outerScope := scope
   let brand ← freshBrand
   let scope := match self with
     | some name => ("@" ++ name, Binding.label result brand) :: scope
@@ -915,6 +919,24 @@ partial def inferCallable (scope : Scope) (annots : List (Option Ty)) (ret : Opt
     let roots := ("it is returned from the function", result) ::
       params.map fun p => ("the caller could hold it through a parameter", p)
     checkEscape brand (jumpsAfter name) roots row
+  -- A borrow of a field is a variable of the block it is made in: it cannot
+  -- be what the block gives, nor be kept in something outside the block.
+  let made := (← get).blockFieldCaps.extract fieldsBefore (← get).blockFieldCaps.size
+  unless made.isEmpty do
+    let given ← capsReached result
+    for (c, pos) in made do
+      if given.contains (← findCap c) then
+        throw (pos ++ "a borrow of a field lasts only inside the block that makes it, and here the block gives it back: give back the whole reference, or the field's value, or borrow the field where it is used")
+    for (x, b) in outerScope do
+      let held := match b with
+        | .val t _ => some t
+        | .cell t _ => some t
+        | _ => none
+      if let some held := held then
+        let reached ← capsReached held
+        for (c, pos) in made do
+          if reached.contains (← findCap c) then
+            throw (pos ++ s!"a borrow of a field lasts only inside the block that makes it, and here it is kept in `{x}`, outside the block")
   -- The borrows made while it runs: a computation suspended inside it holds
   -- them.
   for id in [loansBefore:(← get).loans.size] do

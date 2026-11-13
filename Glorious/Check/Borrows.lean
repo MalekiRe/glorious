@@ -918,6 +918,31 @@ def fitAt (scope : Scope) (amb : Row) (what : String) (site : Option Elab.Site)
         for q in held do
           if reached.contains (← findCap q) then
             return some s!"{what}: a reference this callable is given is kept in `{x}`, and the callable is wanted for references of any lifetime"
+    -- And what it gives for one of those lifetimes may borrow only from what
+    -- it is given: whoever calls it chooses how long that lasts, and a
+    -- variable or another lifetime of this function may not last as long.
+    let s ← get
+    let heldRoots ← held.mapM findCap
+    let mut reach : List Nat := heldRoots
+    let mut todo : List Nat := heldRoots
+    while !todo.isEmpty do
+      let mut next : List Nat := []
+      for (src, held) in s.capEdges do
+        if let .ty held := held then
+          if todo.contains (← findCap src) then
+            for c in freeCaps (← zonk held) do
+              let root ← findCap c
+              unless reach.contains root || next.contains root do next := root :: next
+      reach := reach ++ next
+      todo := next
+    for (src, held) in s.capEdges do
+      if let .loan id := held then
+        if reach.contains (← findCap src) && (s.loans[id]?.bind (·.root)).isSome then
+          return some s!"{what}: what this callable gives back borrows a variable, and the callable is wanted for references of any lifetime: it can give back only what borrows from what it is given"
+    for (b, y) in s.rigidCaps do
+      let root ← findCap b
+      if y != "'static" && !heldRoots.contains root && reach.contains root then
+        return some s!"{what}: what this callable gives back lasts for `{y}`, and the callable is wanted for references of any lifetime: it can give back only what borrows from what it is given"
   pure found
 
 end Glorious.Check

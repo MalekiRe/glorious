@@ -397,6 +397,10 @@ structure St where
   checked: what each holds, and where. Such a borrow is a variable of the
   function's while it lasts, so it cannot leave the function. -/
   fieldCaps : Array (Nat × String) := #[]
+  /-- Every borrow of a field, through a reference or of a variable: it is
+  written out as a variable of the block it is made in, so it cannot leave
+  that block. With where it is made. -/
+  blockFieldCaps : Array (Nat × String) := #[]
   /-- For each field read by name, which field it is: for the elaborator. -/
   fieldReads : Array (Nat × Nat) := #[]
   /-- Borrows of a field, to settle once the type is known: the borrow, the

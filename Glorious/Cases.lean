@@ -1742,7 +1742,7 @@ def cases : List Case := [
   -- A borrow of a field through a reference does not leave the function
   -- that makes it.
   ⟨"struct W(Int)\nfn get(w: &W) -> &Int { &(*w).0 }\nfn main() { let mut w = W(5); *get(&w) }",
-    [], "error: 2:25: in `get`: a borrow of a field of what a reference points to lasts only inside the function that makes it, and here it is given back or kept: give back the reference itself, or the field's value"⟩,
+    [], "error: 2:25: in `get`: a borrow of a field lasts only inside the block that makes it, and here the block gives it back: give back the whole reference, or the field's value, or borrow the field where it is used"⟩,
   -- Arrays: `[a, b]`, `[x; n]`, `a[i]`, `a[i] = v`, `[T]`. An array is a
   -- value; a place that is not there stops the program.
   ⟨"fn main() { let a = [10, 20, 30]; say(a); say(len(a)); say(a[1]); let b = push(a, 40); say(b); say(a); say([1.5; 3]); say(b\"hi\"); a[0] + b[3] }",
@@ -1973,6 +1973,28 @@ def cases : List Case := [
     [], "1"⟩,
   ⟨"struct File(Int)\nimpl Use<[1, 1]> for File {}\nfn open() -> File { File(1) }\nfn close(f: File) -> Int { match(f) { File(n) => n } }\nfn main() { let f = open(); let c: Option<Int> = Some(2); if(c is Some(n)) { n + close(f) } else { close(f) } }",
     [], "3"⟩,
+  -- A callable for every lifetime gives back only what borrows from what it is given.
+  ⟨"fn run<'x>(f: for<'a> fn(&'a Int) -> &'a Int, keep: &'x Int) -> &'x Int { f(keep) }\nfn main() { let mut long = 1; let r = { let mut g = 9; run({ r => &g }, &long) }(); *r }",
+    [], "error: 2:56: in `main`: argument 1 of `run`: what this callable gives back borrows a variable, and the callable is wanted for references of any lifetime: it can give back only what borrows from what it is given"⟩,
+  ⟨"fn run(f: for<'a> fn(&'a Int) -> &'a Int) -> Int { let mut x = 4; *f(&x) }\nfn main() { let mut g = 9; run({ r => &g }) }",
+    [], "error: 2:28: in `main`: argument 1 of `run`: what this callable gives back borrows a variable, and the callable is wanted for references of any lifetime: it can give back only what borrows from what it is given"⟩,
+  ⟨"fn run(f: for<'a> fn(&'a Int) -> &'a Int) -> Int { let mut x = 4; *f(&x) }\nfn main() { run({ r => r }) }",
+    [], "4"⟩,
+  ⟨"fn run<'x>(f: for<'a> fn(&'a Int) -> &'a Int, keep: &'x Int) -> Int { *f(keep) }\nfn outer<'y>(k: &'y Int) -> Int { run({ r => k }, k) }\nfn main() { let mut a = 1; outer(&a) }",
+    [], "error: 2:35: in `outer`: argument 1 of `run`: lifetime `'y` is not known to last as long as `'a`: say `'y: 'a`"⟩,
+  ⟨"fn ap<F>(f: F) -> Int where F: for<'a> Fn<(&'a Int,), Output = &'a Int> { let mut x = 3; *f(&x) }\nfn main() { let mut g = 9; ap({ r => &g }) }",
+    [], "error: 2:28: in `main`: argument 1 of `ap`: what this callable gives back borrows a variable, and the callable is wanted for references of any lifetime: it can give back only what borrows from what it is given"⟩,
+  -- A borrow of a field cannot leave the block that makes it.
+  ⟨"fn main() { let mut x = (4, 5); let r = match(&x) { &(a, b) => a }; *r }",
+    [], "error: 1:33: in `main`: a borrow of a field lasts only inside the block that makes it, and here the block gives it back: give back the whole reference, or the field's value, or borrow the field where it is used"⟩,
+  ⟨"fn main() { let mut x = (4, 5); let r = { &x.0 }(); *r }",
+    [], "error: 1:43: in `main`: a borrow of a field lasts only inside the block that makes it, and here the block gives it back: give back the whole reference, or the field's value, or borrow the field where it is used"⟩,
+  ⟨"fn main() { let mut x = (4, 5); let mut y = 1; let mut keep = &y; let f = { keep = &x.0; 0 }; f(); *keep }",
+    [], "error: 1:77: in `main`: a borrow of a field lasts only inside the block that makes it, and here it is kept in `keep`, outside the block"⟩,
+  ⟨"fn main() { let mut p = (1, 2); let r = if(1 < 2) { &mut p.0 } else { &mut p.1 }; *r = 5; p.0 }",
+    [], "error: 1:53: in `main`: a borrow of a field lasts only inside the block that makes it, and here the block gives it back: give back the whole reference, or the field's value, or borrow the field where it is used"⟩,
+  ⟨"fn bump(r: &mut Int) { *r = *r + 1 }\nfn main() { let mut p = (1, 2); if(1 < 2) { bump(&mut p.0) }; p.0 }",
+    [], "2"⟩,
   -- `drop` is not for a program to call.
   ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nfn main() { let mut f = File(7); drop(&mut f); 0 }",
     [], "error: 3:34: in `main`: `drop` is run when what holds a value ends; a program does not call it"⟩,
