@@ -317,6 +317,112 @@ pub fn fold_pairs(pairs, init, f) { fold(pairs, init, fn(acc, pair) { match(pair
 
 // How long an array is (the prelude's `len`, of arrays alone).
 pub fn len_of<T>(a: [T]) -> Int { len(a) }
+
+// A growable array changed where it is, in the shape the library
+// specification gives it (15): functions of the type, `&mut Self` to change
+// one, `Option<&T>` to look at an element. Sizes and places are `Int`.
+pub struct Vec<T> { items: [T] }
+
+// The last `n` elements of an array taken off, last first, and what is left.
+fn taken_off<T>(a: [T], n: Int, off: [T]) -> ([T], [T]) {
+    if(n <= 0) { (a, off) } else {
+        match(pop(a)) {
+            Some((rest, last)) => tail taken_off(rest, n - 1, push(off, last)),
+            None => ([], off)
+        }
+    }
+}
+
+// The elements of one array onto another, last first.
+fn turned<T>(from: [T], onto: [T]) -> [T] {
+    match(pop(from)) {
+        Some((rest, last)) => tail turned(rest, push(onto, last)),
+        None => onto
+    }
+}
+
+// What was taken off, put back in the order it had.
+fn put_back<T>(a: [T], off: [T]) -> [T] {
+    match(pop(off)) {
+        Some((rest, next)) => tail put_back(push(a, next), rest),
+        None => a
+    }
+}
+
+impl<T> Vec<T> {
+    pub fn new() -> Self { Self { items: [] } }
+    pub fn with_capacity(capacity: Int) -> Self { Self { items: [] } }
+    pub fn from_array(items: [T]) -> Self { Self { items: items } }
+    pub fn into_array(value: Self) -> [T] { match(value) { Vec { items } => items } }
+    pub fn len(value: &Self) -> Int { len_at(&value.items) }
+    pub fn is_empty(value: &Self) -> Bool { len_at(&value.items) == 0 }
+    pub fn get<'a>(value: &'a Self, index: Int) -> Option<&'a T> { element(&value.items, index) }
+    pub fn get_mut<'a>(value: &'a mut Self, index: Int) -> Option<&'a mut T> {
+        element_mut(&mut value.items, index)
+    }
+    pub fn first<'a>(value: &'a Self) -> Option<&'a T> { element(&value.items, 0) }
+    pub fn last<'a>(value: &'a Self) -> Option<&'a T> {
+        element(&value.items, len_at(&value.items) - 1)
+    }
+    pub fn push(value: &mut Self, item: T) {
+        let items = &mut value.items;
+        *items = push(replace(items, []), item);
+    }
+    pub fn pop(value: &mut Self) -> Option<T> {
+        let items = &mut value.items;
+        match(pop(replace(items, []))) {
+            Some((rest, last)) => *items = rest; Some(last),
+            None => None
+        }
+    }
+    // The item put at a place, what was there and after it moving up; the
+    // item given back if there is no such place.
+    pub fn insert(value: &mut Self, index: Int, item: T) -> Result<(), T> {
+        let items = &mut value.items;
+        let n = len_at(&*items);
+        if(index < 0) { Err(item) } else {
+            if(index > n) { Err(item) } else {
+                match(taken_off(replace(items, []), n - index, [])) {
+                    (before, off) => *items = put_back(push(before, item), off); Ok(())
+                }
+            }
+        }
+    }
+    // The element at a place taken out, what was after it moving down.
+    pub fn remove(value: &mut Self, index: Int) -> Option<T> {
+        let items = &mut value.items;
+        let n = len_at(&*items);
+        if(index < 0) { None } else {
+            if(index >= n) { None } else {
+                match(taken_off(replace(items, []), n - index - 1, [])) {
+                    (upto, off) => match(pop(upto)) {
+                        Some((before, taken)) => *items = put_back(before, off); Some(taken),
+                        None => None
+                    }
+                }
+            }
+        }
+    }
+    // Everything of another put after what is here.
+    pub fn append(value: &mut Self, source: Self) {
+        let items = &mut value.items;
+        match(source) { Vec { items: more } => *items = put_back(replace(items, []), turned(more, [])) }
+    }
+    pub fn reverse(value: &mut Self) {
+        let items = &mut value.items;
+        *items = turned(replace(items, []), []);
+    }
+    // Only so many kept: the rest are let go.
+    pub fn truncate(value: &mut Self, length: Int) {
+        let items = &mut value.items;
+        let n = len_at(&*items);
+        *items = taken_off(replace(items, []), n - length, []).0;
+    }
+    pub fn clear(value: &mut Self) {
+        let items = &mut value.items;
+        *items = [];
+    }
+}
 "#
 
 private def textText : String := r#"// Texts: `Str`.
@@ -475,6 +581,39 @@ fn decode(bytes: [u8], end: Int, out: Str) -> Option<Str> {
 }
 fn decode_one(bytes: [u8], end: Int, code: Int, out: Str) -> Option<Str> {
     match(char(code)) { Some(c) => tail decode(bytes, end, StrChar(c, out)), None => None }
+}
+
+// An owned text that grows where it is, in the shape the library
+// specification gives it (13): its bytes, which are UTF-8.
+pub struct String { bytes: [u8] }
+
+fn bytes_onto(a: [u8], b: [u8], i: Int) -> [u8] {
+    if(i >= len(b)) { a } else { tail bytes_onto(push(a, b[i]), b, i + 1) }
+}
+
+impl String {
+    pub fn new() -> Self { Self { bytes: [] } }
+    pub fn from_str(text: Str) -> Self { Self { bytes: utf8(text) } }
+    pub fn from_utf8(bytes: [u8]) -> Result<Self, [u8]> {
+        match(from_utf8(bytes)) { Some(_) => Ok(Self { bytes: bytes }), None => Err(bytes) }
+    }
+    pub fn into_bytes(value: Self) -> [u8] { match(value) { String { bytes } => bytes } }
+    // The text as a value of its own.
+    pub fn to_str(value: &Self) -> Str {
+        match(from_utf8(value.bytes)) { Some(text) => text, None => "" }
+    }
+    // How many bytes.
+    pub fn len(value: &Self) -> Int { len_at(&value.bytes) }
+    pub fn is_empty(value: &Self) -> Bool { len_at(&value.bytes) == 0 }
+    pub fn push_str(value: &mut Self, text: Str) {
+        let bytes = &mut value.bytes;
+        *bytes = bytes_onto(replace(bytes, []), utf8(text), 0);
+    }
+    pub fn push(value: &mut Self, c: char) { String::push_str(value, show(c)) }
+    pub fn clear(value: &mut Self) {
+        let bytes = &mut value.bytes;
+        *bytes = [];
+    }
 }
 "#
 

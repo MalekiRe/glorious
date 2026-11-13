@@ -2278,10 +2278,18 @@ references to parts of values were for.
 - **Sizes are `Int`**, not `usize`, as everywhere else in this library.
 - **A `BinaryHeap`'s elements are copied** when they are compared and moved,
   so they are of a type used any number of times.
-- **Not built**: capacities and `reserve`, `insert`, `remove`, `rotate`,
-  `split_off`, `as_slices`, `front_mut`, `replace_top`, and the rest of the
-  specification's sections 13 to 19 in this shape: `Vec`, `String`, slices,
-  maps and iterators are still the functions over values they were.
+- **`Vec<T>` and `String`** are there in the same shape (`std::vec::Vec`,
+  `std::text::String`, and under `alloc::vec` and `alloc::string`): `new`,
+  `len`, `get`, `get_mut`, `first`, `last`, `push`, `pop`, `insert`,
+  `remove`, `append`, `reverse`, `truncate`, `clear` for the one;
+  `from_str`, `to_str`, `push`, `push_str`, `len`, `clear` for the other,
+  which holds its text as UTF-8 bytes. An item that cannot be put where it
+  was asked to go is given back as it is, `Err(item)`, not wrapped in the
+  specification's `Rejected`.
+- **Not built**: capacities and `reserve`, slices and iterators in this
+  shape, `rotate`, `split_off`, `drain`, `retain` and the functions that take
+  a callable, `as_slices`, `front_mut`, `replace_top`, and maps and sets,
+  which are still the functions over values they were.
 
 ## The library's names
 

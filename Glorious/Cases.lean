@@ -2543,6 +2543,11 @@ def cases : List Case := [
     [], "10"⟩,
   ⟨"fn main() -> Int { let mut n = 0; repeat_n(4, { n = n + 3; }); n }",
     [], "12"⟩,
+  -- `Vec` and `String` changed where they are, as the library specification shapes them.
+  ⟨"use alloc::vec::{Vec};\nfn main() {\n    let mut v = Vec::new();\n    Vec::push(&mut v, 10); Vec::push(&mut v, 30); Vec::push(&mut v, 40);\n    say(Vec::insert(&mut v, 1, 20));\n    say(Vec::len(&v));\n    say(match(Vec::get(&v, 1)) { Some(r) => *r, None => 0 });\n    match(Vec::get_mut(&mut v, 0)) { Some(r) => *r = *r + 1, None => () };\n    say(Vec::remove(&mut v, 2));\n    say(Vec::pop(&mut v));\n    Vec::append(&mut v, Vec::from_array([7, 8, 9]));\n    Vec::reverse(&mut v);\n    say(match(Vec::first(&v)) { Some(r) => *r, None => 0 });\n    Vec::truncate(&mut v, 4);\n    say(Vec::insert(&mut v, 99, 5));\n    say(Vec::into_array(v));\n    0 }",
+    [], "Ok(())\n4\n20\nOk(30)\nOk(40)\n9\nErr(5)\n[9, 8, 7, 20]\n0"⟩,
+  ⟨"use alloc::string::{String};\nfn main() {\n    let mut s = String::from_str(\"héllo\");\n    String::push_str(&mut s, \", wörld\");\n    String::push(&mut s, '!');\n    say(String::len(&s));\n    say(String::to_str(&s));\n    say(String::is_empty(&s));\n    String::clear(&mut s);\n    say(String::len(&s));\n    0 }",
+    [], "15\nhéllo, wörld!\nErr(())\n0\n0"⟩,
   -- `drop` is not for a program to call.
   ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nfn main() { let mut f = File(7); drop(&mut f); 0 }",
     [], "error: 3:34: in `main`: `drop` is run when what holds a value ends; a program does not call it"⟩,
