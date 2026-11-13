@@ -58,6 +58,10 @@ structure ImplE where
   conditions : Nat
   methods : List (String × Nat)
 
+/-- The name a `_` has where what it takes is destroyed: its number among
+the `_` of its clause's patterns, read in order. -/
+def wildName (k : Nat) : String := s!"%wild{k}"
+
 /-- The name the value of a statement has where it is destroyed. -/
 def stmtValue : String := "%stmt"
 
@@ -75,6 +79,18 @@ structure DropSite where
 writes, so that the borrow each passes is not taken for one the program wrote. -/
 def dropCallId : Nat := 4000000000
 
+/-- How the values of a type are destroyed: the type, how many things its
+function is given beside the value (how each type parameter is destroyed, and
+what the type's `Drop` asks), how its own `Drop` is found if it has one,
+whether it is the type of arrays, and for each constructor (the empty name for
+a tuple) how each field is destroyed, none for a field with nothing to do. -/
+structure Destroy where
+  head : String
+  given : Nat
+  hook : Option DictE
+  array : Bool
+  ctors : List (String × List (Option DictE))
+
 /-- What the checker tells the elaborator about a program's traits. -/
 structure TraitInfo where
   /-- For a call, by its identity: how the bounds it needs are met. -/
@@ -84,14 +100,11 @@ structure TraitInfo where
   /-- The functions that need bounds of their type parameters, and how many. -/
   bounded : List (String × Nat) := []
   impls : List ImplE := []
-  /-- Where a value whose type has `Drop` is destroyed, each with the identity
-  under which `dicts` says which implementation runs. -/
-  drops : List (DropSite × String) := []
-  /-- How a value of each type that is destroyed somewhere is destroyed, by
-  the type as written: the identity under which `dicts` says which `Drop`
-  runs first, if the type has one, and then for each constructor (the empty
-  name for a tuple) which fields are destroyed in turn, each by its type. -/
-  glue : List (String × Option Nat × List (String × List (Option String))) := []
+  /-- Where a value is destroyed, each with the identity under which `dicts`
+  says how its type is. -/
+  drops : List (DropSite × Nat) := []
+  /-- How each type is destroyed. -/
+  destroys : List Destroy := []
 
 /-- The function that makes an implementation a value. -/
 def implDictName (trait head : String) : String := s!"impl {trait} for {head}"
@@ -1559,57 +1572,104 @@ def staticMethod (tr : TraitInfo) (d : DictE) (idx : Nat) : Option (String × Li
     | none => none
   | .param _ => none
 
-/-- The call that destroys what `x` holds, if this is a place where that
-happens: `Drop`'s function, given the variable. -/
-private def dropHook (tr : TraitInfo) (site : DropSite) : Option Expr :=
-  (tr.drops.lookup site).map fun key =>
-    .call dropCallId (.name none s!"%destroy {key}") [.name none site.name]
+/-- The call that destroys a value, given how its type is destroyed: the
+type's function by name where the type is known, and else the function the
+enclosing one was given. -/
+private def destroyCall (tr : TraitInfo) (d : DictE) (value : Expr) : Expr :=
+  match staticMethod tr d 0 with
+  | some (fn, subs) => .call dropCallId (.name none fn) (subs.map dictExpr ++ [value])
+  | none => .call dropCallId (.proj (dictExpr d) 0) [value]
 
-/-- The functions that destroy values, one for each type that is destroyed
-somewhere: `Drop`'s function for the type first, if it has one, and then each
-field that is to be destroyed, the last declared first. -/
+/-- The call that destroys what `x` holds, if this is a place where that
+happens and its type has something to destroy. -/
+private def dropHook (tr : TraitInfo) (site : DropSite) : Option Expr :=
+  match (tr.drops.lookup site).bind fun id => tr.dicts.lookup id with
+  | some [d] => some (destroyCall tr d (.name none site.name))
+  | _ => none
+
+/-- The functions that destroy values, for each type: the one that does it,
+given how each of the type's parameters is destroyed and then the value, and
+the one that makes it a value to hand to a function generic in the type. The
+type's own `Drop` runs first, if it has one, and then each field that has
+something to destroy, the last declared first. -/
 def destroyers (tr : TraitInfo) : List Item :=
-  tr.glue.flatMap fun (key, hook, ctors) =>
+  tr.destroys.flatMap fun D =>
     let unit := Expr.tuple []
+    let name := fun (x : String) => Expr.name none x
+    let dicts := (List.range D.given).map fun k => s!"%dict{k}"
+    let given := dicts.map Pattern.var
+    let passed := dicts.map name
+    let method := Syntax.implFnName Syntax.destroyTrait D.head Syntax.destroyFn
+    let blank := List.replicate (D.given + 1) (none : Option TypeExpr)
+    -- As a value: the function, given the value.
+    let asValue := Item.fn (implDictName Syntax.destroyTrait D.head) [] (blank.drop 1) none
+      [.mk given [.expr (.tuple [.closure 0 [.mk [.var "%arg0"]
+        [.expr (.call dropCallId (name method) (passed ++ [name "%arg0"]))]]])]]
     -- An array: its elements one by one, from the last.
-    if let [("%each", [some element])] := ctors then
-      let name := fun (x : String) => Expr.name none x
-      let from_ := "%destroy from " ++ key
+    if let (true, [(_, [some element])]) := (D.array, D.ctors) then
+      let from_ := "%destroy from " ++ D.head
       let before := Expr.call dropCallId (name "int_sub") [name "%n", .int 1]
-      [Item.fn ("%destroy " ++ key) [] [none] none
-          [.mk [.var "%value"]
+      [asValue,
+        Item.fn method [] blank none
+          [.mk (given ++ [.var "%value"])
             [.expr (.call dropCallId (name from_)
-              [name "%value", .call dropCallId (name "arr_len") [name "%value", .int 0]])]],
-        Item.fn from_ [] [none, none] none
-          [.mk [.wild, .int 0] [.expr unit],
-            .mk [.var "%value", .var "%n"]
-              [.expr (.call dropCallId (name ("%destroy " ++ element))
-                  [.call dropCallId (name "arr_get") [name "%value", before]]),
-                .expr (.tailCall dropCallId (name from_) [name "%value", before])]]]
+              (passed ++ [name "%value", .call dropCallId (name "arr_len") [name "%value", .int 0]]))]],
+        Item.fn from_ [] (blank ++ [none]) none
+          [.mk (given ++ [.wild, .int 0]) [.expr unit],
+            .mk (given ++ [.var "%value", .var "%n"])
+              [.expr (destroyCall tr element (.call dropCallId (name "arr_get") [name "%value", before])),
+                .expr (.tailCall dropCallId (name from_) (passed ++ [name "%value", before]))]]]
     else
-    let clauses := ctors.map fun (ctor, parts) =>
+    let clauses := D.ctors.map fun (ctor, parts) =>
       let names := (List.range parts.length).map fun k => s!"%part{k}"
       let pats := (names.zip parts).map fun (x, part) =>
         if part.isSome then Pattern.var x else Pattern.wild
       let calls := ((names.zip parts).reverse.filterMap fun (x, part) =>
-        part.map fun key' =>
-          Stmt.expr (.call dropCallId (.name none ("%destroy " ++ key')) [.name none x]))
-      Clause.mk [if ctor.isEmpty then .tuple pats else .ctor ctor none pats] (calls ++ [.expr unit])
-    let inner := ctors.any fun (_, parts) => parts.any (·.isSome)
-    match hook.bind fun id => tr.dicts.lookup id with
-    | some [d] =>
-      let fn := match staticMethod tr d 0 with
+        part.map fun d => Stmt.expr (destroyCall tr d (name x)))
+      Clause.mk (given ++ [if ctor.isEmpty then .tuple pats else .ctor ctor none pats])
+        (calls ++ [.expr unit])
+    -- A type with nothing inside it to look at: nothing to do.
+    let clauses := if clauses.isEmpty then [Clause.mk (given ++ [.wild]) [.expr unit]] else clauses
+    let inner := D.ctors.any fun (_, parts) => parts.any (·.isSome)
+    match D.hook with
+    | some d =>
+      let hook := match staticMethod tr d 0 with
         | some (fn, subs) => fun (args : List Expr) =>
           Expr.call dropCallId (.name none fn) (subs.map dictExpr ++ args)
         | none => fun args => Expr.call dropCallId (.proj (dictExpr d) 0) args
-      let fields := s!"%fields {key}"
-      [Item.fn s!"%destroy {key}" [] [none] none
-          [.mk [.var "%value"]
-            ([.letMut "%held" (.name none "%value"), .expr (fn [.ref true "%held"])]
-              ++ (if inner then [.expr (.call dropCallId (.name none fields) [.name none "%held"])]
+      let fields := s!"%fields {D.head}"
+      [asValue,
+        Item.fn method [] blank none
+          [.mk (given ++ [.var "%value"])
+            ([.letMut "%held" (name "%value"), .expr (hook [.ref true "%held"])]
+              ++ (if inner then [.expr (.call dropCallId (name fields) (passed ++ [name "%held"]))]
                   else [.expr unit]))]]
-        ++ (if inner then [Item.fn fields [] [none] none clauses] else [])
-    | _ => [Item.fn s!"%destroy {key}" [] [none] none clauses]
+        ++ (if inner then [Item.fn fields [] blank none clauses] else [])
+    | none => [asValue, Item.fn method [] blank none clauses]
+
+mutual
+
+/-- Patterns with each `_` whose number `named` picks written as a name: the
+`_` are numbered in the order they are read, from `k`. Gives the number after
+the last. -/
+partial def nameWilds (named : Nat → Bool) : List Pattern → Nat → List Pattern × Nat
+  | [], k => ([], k)
+  | p :: rest, k =>
+    let (p, k) := nameWild named p k
+    let (rest, k) := nameWilds named rest k
+    (p :: rest, k)
+
+partial def nameWild (named : Nat → Bool) : Pattern → Nat → Pattern × Nat
+  | .wild, k => (if named k then .var (wildName k) else .wild, k + 1)
+  | .tuple ps, k =>
+    let (ps, k) := nameWilds named ps k
+    (.tuple ps, k)
+  | .ctor c q ps, k =>
+    let (ps, k) := nameWilds named ps k
+    (.ctor c q ps, k)
+  | p, k => (p, k)
+
+end
 
 mutual
 
@@ -1646,8 +1706,10 @@ private partial def untraitCall (tr : TraitInfo) (owner : String) (id : Nat) (f 
 private partial def untraitClause (tr : TraitInfo) (owner : String) : Clause → Clause
   | .mk pats body =>
     -- What the clause is given under a name and does not mention is
-    -- destroyed when the clause is done.
+    -- destroyed when the clause is done; and so is what a `_` takes, which
+    -- is given a name for it.
     let first := firstPlace body
+    let (pats, _) := nameWilds (fun k => (dropHook tr ⟨owner, first.1, first.2, wildName k, false⟩).isSome) pats 0
     let hooks := (pats.flatMap patVars).filterMap fun x =>
       (dropHook tr ⟨owner, first.1, first.2, x, false⟩).map Stmt.defer
     .mk pats (hooks ++ untraitStmts tr owner (0, 0) body)
@@ -1722,7 +1784,10 @@ def untrait (blocks : Blocks) (items : List Item) : List Item × Blocks :=
           some (fnItem (implFnName trait head m) params annots ret clauses)
         | _ => none
       let dictFn := implDictName trait head
-      let dicts := (List.range context.length).map fun k => s!"%dict{k}"
+      -- (as many as the checker says: how each type parameter is destroyed
+      -- is among them, written or not)
+      let conditions := ((tr.impls.find? (·.dictFn == dictFn)).map (·.conditions)).getD context.length
+      let dicts := (List.range conditions).map fun k => s!"%dict{k}"
       let fns := ((tr.impls.find? (·.dictFn == dictFn)).map (·.methods)).getD []
       let closures := fns.map fun (fn, arity) =>
         let argNames := (List.range arity).map fun k => s!"%arg{k}"

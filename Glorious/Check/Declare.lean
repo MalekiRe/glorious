@@ -300,7 +300,12 @@ def declareTraits (items : List Item) : M Unit := do
       for (t', j) in ctx do
         for s in t' :: (← supersAll t') do
           unless closed.contains (s, j) do closed := closed ++ [(s, j)]
-      let ctx := closed
+      -- A function of the implementation may let go of a value of one of
+      -- its type parameters: it is given how each is destroyed.
+      let ctx := if (← get).dropMode then
+          closed ++ ((List.range args.length).filter fun j => !closed.contains (Syntax.destroyTrait, j)).map
+            fun j => (Syntax.destroyTrait, j)
+        else closed
       let given := methods.filterMap fun
         | .fn m _ _ _ _ => some m
         | _ => none
@@ -348,6 +353,35 @@ def declareTraits (items : List Item) : M Unit := do
         { s with
           impls := s.impls.push ⟨tr, head, args, ctx, methods, Elab.implDictName tr head, targs, assocs, pvars⟩
           kimpls := s.kimpls ++ [⟨tr, head, arity, ctx⟩] }
+  -- Every type can be destroyed: by nothing at all, by its own `Drop` and
+  -- then its parts', or part by part. Said as an implementation for each
+  -- type, on condition that each type parameter can be destroyed, and that
+  -- what its `Drop` asks is met.
+  if (← get).dropMode then
+    unless ((← get).traits.lookup Syntax.destroyTrait).isSome do
+      modify fun s => { s with traits := (Syntax.destroyTrait, [Syntax.destroyFn]) :: s.traits }
+    let builtin := ["Int", "(callable)", "(reference)"] ++ Syntax.scalars.map (·.1)
+      ++ (List.range 13).map fun n => s!"(tuple{n})"
+    let declared := (← get).types.map fun (name, decl) =>
+      -- (which of its parameters are types)
+      (name, decl.arity, (List.range decl.arity).filter fun j => decl.kinds[j]? != some true)
+    let heads := builtin.map (fun h =>
+        if h.startsWith "(tuple" then
+          let n := ((h.drop 6).takeWhile Char.isDigit).toString.toNat!
+          (h, n, List.range n)
+        else (h, 0, []))
+      ++ declared
+    for (head, arity, typeParams) in heads do
+      unless (← get).kimpls.any fun I => I.trait == Syntax.destroyTrait && I.head == head do
+        let own := typeParams.map fun j => (Syntax.destroyTrait, j)
+        let drops := ((← get).kimpls.find? fun I => I.trait == "Drop" && I.head == head).map (·.context)
+        let ctx := own ++ (drops.getD []).filter (!own.contains ·)
+        modify fun s =>
+          { s with
+            impls := s.impls.push
+              ⟨Syntax.destroyTrait, head, (List.range arity).map (s!"T{·}"), ctx, [],
+                Elab.implDictName Syntax.destroyTrait head, [], [], []⟩
+            kimpls := s.kimpls ++ [⟨Syntax.destroyTrait, head, arity, ctx⟩] }
   -- What `Traits.coherent` asks of the implementations.
   unless Traits.noOverlap (← get).kimpls do
     throw "two implementations are for the same trait and type"

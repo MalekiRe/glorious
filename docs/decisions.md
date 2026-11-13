@@ -1917,13 +1917,29 @@ What it is not:
   bound by a pattern, the last named first; and **the value of a statement
   that nothing takes is destroyed there**. Before, `fn eat(d: D) -> Int { 7 }`
   never ran `drop`.
-- **Still not destroyed**: a value named on one path and not on another, in
-  the paths that do not name it; what a callable holds when the callable is
-  let go without being called; and a value whose type is a type parameter
-  or is found only where the callable is used, as a parameter of
-  `let f = fn(d) { .. }` is. The first two need a callable to say how it is
-  destroyed, and the last needs a function to be given how to destroy a
-  type it is generic in, as it is given a trait's functions.
+- **Since: every type has a function that destroys its values, and a
+  function is given how to destroy the types it is generic in.** Being
+  destroyed is a trait of the compiler's own that every type has: by doing
+  nothing, by its own `Drop` and then its parts', or part by part, on
+  condition that each of its type parameters can be destroyed. Where a value
+  is let go, the trait's function for its type is called; where its type is
+  one the function is generic in, the function needs the trait of it, and is
+  given the implementation by whoever calls it, exactly as for a trait the
+  program writes. So `fn sink<T>(t: T) {}` given a value with `Drop` runs
+  it, and so does the prelude where it lets go of what it is given. The
+  functions are found by the proved solver and written by the elaborator
+  from what the checker says of each type. An implementation's functions
+  are given how each of its type parameters is destroyed.
+- **What a `_` takes is destroyed** when its clause is done: it is given a
+  name for that, known by its place among the `_` of the clause.
+- **None of this is there in a program where no type has `Drop`**: the
+  prelude and the library are checked once for each kind of program.
+- **Still not destroyed**: what a callable holds when the callable is let
+  go without being called, which is also what becomes of a value named on
+  one path and not on another, since the paths are callables; a value whose
+  type is found only where a callable written in a `let` is used; and what
+  a coercion lets go of a type it is generic in. A callable would have to
+  say how it is destroyed.
 - **A value that never comes to rest in a variable is not destroyed.** One
   given to a function that ignores it, one a function generic in its type puts
   in a variable, one put in a value that is forgotten, the unused result of a

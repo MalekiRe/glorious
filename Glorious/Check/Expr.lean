@@ -849,6 +849,13 @@ partial def inferPat (p : Pattern) (t : Ty) : M Scope := do
   match p with
   | .wild => do
     mustDrop t "`_` lets go of a value"
+    -- If it is one to destroy, that happens when its clause is done.
+    if let some place := (← get).wildAt then
+      modify fun s =>
+        { s with
+          wildCount := s.wildCount + 1
+          dropCands := s.dropCands.push
+            (⟨s.owner, place.1, place.2, Elab.wildName s.wildCount, false⟩, t, s.pos) }
     pure []
   | .int n => do
     -- A whole number is of the type wanted of it, if that is one of whole
@@ -900,6 +907,23 @@ partial def inferPat (p : Pattern) (t : Ty) : M Scope := do
               throw s!"`{Syntax.lastSegment n}` has `Drop`, so only the module that declares it can take one apart with a pattern: what `drop` does would not be done"
       inferPats ps fields
     | none => throw s!"unknown constructor `{x}` in a pattern"
+
+/-- Read the patterns of a clause whose body is `body`. What the clause is
+given under a name and does not mention is the name's, and what a `_` takes is
+let go: if either is one to destroy, that happens when the clause is done. The
+place it is known by is the clause's first statement. -/
+partial def clauseGiven (body : List Stmt) (patterns : M Scope) : M Scope := do
+  let first := Elab.firstPlace body
+  modify fun s => { s with wildAt := some first, wildCount := 0 }
+  let binds ← patterns
+  modify fun s => { s with wildAt := none }
+  let mentioned := Elab.fvStmts [] body
+  for (x, b) in binds do
+    if let .val t _ := b then
+      unless mentioned.contains x || x.startsWith "%" do
+        modify fun s =>
+          { s with dropCands := s.dropCands.push (⟨s.owner, first.1, first.2, x, false⟩, t, s.pos) }
+  pure binds
 
 partial def inferPats (ps : List Pattern) (ts : List Ty) : M Scope := do
   let mut out : Scope := []
@@ -955,17 +979,7 @@ partial def inferCallable (scope : Scope) (annots : List (Option Ty)) (ret : Opt
     | some (.mk pats body) =>
       unless pats.length == arity do
         throw "the clauses of a callable take different numbers of arguments"
-      let binds ← inferPats pats params
-      -- What a clause is given under a name and does not mention is the
-      -- name's: if it is one to destroy, that happens when the clause is
-      -- done. The place is the clause's first statement.
-      let mentioned := Elab.fvStmts [] body
-      let first := Elab.firstPlace body
-      for (x, b) in binds do
-        if let .val t _ := b then
-          unless mentioned.contains x || x.startsWith "%" do
-            modify fun s =>
-              { s with dropCands := s.dropCands.push (⟨s.owner, first.1, first.2, x, false⟩, t, s.pos) }
+      let binds ← clauseGiven body (inferPats pats params)
       let names := binds.map (·.1)
       if let some x := names.find? fun x => (names.filter (· == x)).length > 1 then
         throw s!"`{x}` is bound twice by the patterns of one clause"
@@ -1081,7 +1095,7 @@ partial def inferHandle (scope : Scope) (amb : Row) (subject : Expr) (arms : Lis
   if completions.isEmpty then unify result subjectTy
   else
     for (p, body) in completions do
-      let binds ← inferPat p subjectTy
+      let binds ← clauseGiven body (inferPat p subjectTy)
       let here := (← get).pos
       unifyAt "the result of a completion clause" result
         (← inferStmts (binds ++ scope) amb body)
@@ -1097,7 +1111,7 @@ partial def inferHandle (scope : Scope) (amb : Row) (subject : Expr) (arms : Lis
     | none =>
       unless ps.length == payload.length do
         arityError s!"an arm for the operation `{x}`" payload.length ps.length
-      let binds ← inferPats ps payload
+      let binds ← clauseGiven body (inferPats ps payload)
       let here := (← get).pos
       unifyAt s!"the result of the arm for `{x}`" result (← inferStmts (binds ++ scope) amb body)
       checkUses here scope binds body
@@ -1113,14 +1127,14 @@ partial def inferHandle (scope : Scope) (amb : Row) (subject : Expr) (arms : Lis
           captures held (.inner id)
         captureAll scope held (Elab.fvExpr [] (.handle subject arms)) fun x =>
           assignsExpr x (.handle subject arms)
-        let binds ← inferPats ps (payload ++ [.func [o] result amb held])
+        let binds ← clauseGiven body (inferPats ps (payload ++ [.func [o] result amb held]))
         let here := (← get).pos
         unifyAt s!"the result of the arm for `{x}`" result
           (← inferStmts (binds ++ scope) amb body)
         checkUses here scope binds body
         if ← (ps.take payload.length).allM irrefutable then covered := x :: covered
       else if ps.length == payload.length then
-        let binds ← inferPats ps payload
+        let binds ← clauseGiven body (inferPats ps payload)
         let here := (← get).pos
         -- The arm resumes with what it gives: the computation is suspended,
         -- holding its borrows, for as long as the arm runs.

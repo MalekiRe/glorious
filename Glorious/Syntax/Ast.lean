@@ -300,6 +300,14 @@ the type written as an expression so that it can sit among expressions: see
 stands alone. -/
 def ascribeMark : String := "%as"
 
+/-- The trait every type has of being destroyed, and its one function. The
+compiler's own: where a value is let go, its type's function is called, and a
+function that lets go of a value of a type it is generic in is given that
+type's, as it is given any trait's functions. -/
+def destroyTrait : String := "%Destroy"
+
+def destroyFn : String := "%destroy"
+
 /-- The name under which the type a declared type's parameter is, where it is
 not written, is kept: an alias beside the declaration. `i` counts the
 parameters from none. -/

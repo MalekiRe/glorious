@@ -163,6 +163,28 @@ def checkedStd : Thunk (Except String (Nat × Check.St)) := Thunk.mk fun _ => do
   let all := Syntax.fillDefaults (← Syntax.expandAliases resolved.items)
   pure (all.length, ← Check.checkFirst all resolved.info)
 
+/-- The same two, for a program in which some type has `Drop`: checked so
+that a function is given how to destroy the types it is generic in. -/
+def checkedPreludeDrop : Thunk (Except String (Nat × Check.St)) := Thunk.mk fun _ => do
+  let (prelude, _) ← Syntax.parse {} Prelude.source
+  let resolved ← Syntax.Modules.resolve prelude []
+  let all := Syntax.fillDefaults (← Syntax.expandAliases resolved.items)
+  pure (all.length, ← Check.checkFirst all resolved.info true)
+
+def checkedStdDrop : Thunk (Except String (Nat × Check.St)) := Thunk.mk fun _ => do
+  let (prelude, items) ← parseProgram "// std" []
+  let resolved ← Syntax.Modules.resolve prelude items
+  let all := Syntax.fillDefaults (← Syntax.expandAliases resolved.items)
+  pure (all.length, ← Check.checkFirst all resolved.info true)
+
+/-- Does some type of a program have `Drop`? -/
+partial def hasDrop : List Syntax.Item → Bool
+  | [] => false
+  | .pub _ i :: rest => hasDrop (i :: rest)
+  | .module _ (some body) :: rest => hasDrop body || hasDrop rest
+  | .impl _ tr _ _ _ _ :: rest => (tr.splitOn "::").getLast! == "Drop" || hasDrop rest
+  | _ :: rest => hasDrop rest
+
 /-- Parse, check and elaborate a program together with the prelude, and have the
 proved Core type checker accept the result. With `check := false` both checks
 are skipped, so that programs which go wrong can still be run. -/
@@ -187,11 +209,16 @@ def compileSource (src : String) (check : Bool := true)
   let all := Syntax.fillDefaults all
   -- What the checker learnt about blocks that share an environment. A program
   -- it rejects is elaborated without that.
-  let first := if usesStd src files && (src.splitOn "#![no_std]").length == 1 then checkedStd.get
-    else checkedPrelude.get
+  let drops := hasDrop items
+  let withStd := usesStd src files && (src.splitOn "#![no_std]").length == 1
+  let first := match withStd, drops with
+    | true, false => checkedStd.get
+    | true, true => checkedStdDrop.get
+    | false, false => checkedPrelude.get
+    | false, true => checkedPreludeDrop.get
   let checked := match check && !resolved.info.shadowed, first with
     | true, .ok (count, first) => Check.checkAfter first (all.drop count) resolved.info
-    | _, _ => Check.checkProgram all resolved.info
+    | _, _ => Check.checkProgram all resolved.info drops
   let blocks ← match checked with
     | .ok blocks => pure (some blocks)
     | .error e => if check then throw e else pure none

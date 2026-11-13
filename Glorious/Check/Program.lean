@@ -87,6 +87,21 @@ partial def toDictE (impls : Array ImplDecl) : Traits.Dict → Elab.DictE
   | .given k => .param k
   | .impl i subs => .impl ((impls[i]?.map (·.dictFn)).getD "") (subs.map (toDictE impls))
 
+instance : Inhabited Traits.STy := ⟨.var 0⟩
+
+/-- A field's type as `Traits.solve` knows types, for finding how the field is
+destroyed: a parameter of the declared type is known by its place among the
+type's parameters. -/
+partial def fieldSTy (tvars places : List Nat) : Ty → Traits.STy
+  | .var id =>
+    match (tvars.idxOf? id).bind (places[·]?) with
+    | some j => .var j
+    | none => .con "(reference)" []
+  | .con n args => .con n (args.map (fieldSTy tvars places))
+  | .tuple args => .con s!"(tuple{args.length})" (args.map (fieldSTy tvars places))
+  | .fn _ _ _ _ _ => .con "(callable)" []
+  | .ref _ _ _ => .con "(reference)" []
+
 /-- The types a value of this type directly holds. -/
 def partsOf (t : Ty) : M (List Ty) := do
   match ← find t with
@@ -114,72 +129,6 @@ partial def needsDestroying (seen : List String) (t : Ty) : M Bool := do
     (← partsOf (.con name args)).anyM (needsDestroying (key :: seen))
   | _ => pure false
 
-/-- How a value of this type is destroyed, written down once for each type,
-under the type as written; and the `Drop`s that then have to be found. -/
-partial def destroyPlan (owner pos : String) (t : Ty) : M (String × Array Bound) := do
-  let t ← zonk t
-  let key ← spellTy t
-  if (← get).glue.any (·.1 == key) then return (key, #[])
-  -- Said first, so that a type that holds itself finds itself.
-  modify fun s => { s with glue := s.glue.push (key, none, []) }
-  let mut asked : Array Bound := #[]
-  let mut hook : Option Nat := none
-  let part := fun (field : Ty) => do
-    if ← needsDestroying [] field then
-      let (k, more) ← destroyPlan owner pos field
-      pure (some k, more)
-    else pure (none, #[])
-  let mut ctors : List (String × List (Option String)) := []
-  let arrays := (← get).arrayType
-  match t with
-  | .tuple args =>
-    let mut parts : List (Option String) := []
-    for a in args do
-      let (p, more) ← part a
-      parts := parts ++ [p]
-      asked := asked ++ more
-    ctors := [("", parts)]
-  | .con name [element] =>
-    if some name == arrays then
-      -- An array: each element, the last first.
-      let (p, more) ← part element
-      asked := asked ++ more
-      ctors := [("%each", [p])]
-    else
-      if (← get).kimpls.any fun I => I.trait == "Drop" && I.head == name then
-        let id := 2000000000 + (← get).dropAsked
-        modify fun s => { s with dropAsked := s.dropAsked + 1 }
-        asked := asked.push ⟨"Drop", t, id, 0, owner, pos⟩
-        hook := some id
-      if let some decl := (← get).types.lookup name then
-        for c in decl.ctors do
-          if let some sig := (← get).ctors.lookup c then
-            let mut parts : List (Option String) := []
-            for a in sig.fieldsAt [element] do
-              let (p, more) ← part a
-              parts := parts ++ [p]
-              asked := asked ++ more
-            ctors := ctors ++ [(c, parts)]
-  | .con name args =>
-    if (← get).kimpls.any fun I => I.trait == "Drop" && I.head == name then
-      let id := 2000000000 + (← get).dropAsked
-      modify fun s => { s with dropAsked := s.dropAsked + 1 }
-      asked := asked.push ⟨"Drop", t, id, 0, owner, pos⟩
-      hook := some id
-    if let some decl := (← get).types.lookup name then
-      for c in decl.ctors do
-        if let some sig := (← get).ctors.lookup c then
-          let mut parts : List (Option String) := []
-          for a in sig.fieldsAt args do
-            let (p, more) ← part a
-            parts := parts ++ [p]
-            asked := asked ++ more
-          ctors := ctors ++ [(c, parts)]
-  | _ => pure ()
-  modify fun s =>
-    { s with glue := s.glue.map fun entry => if entry.1 == key then (key, hook, ctors) else entry }
-  pure (key, asked)
-
 /-- Meet the bounds of the group just inferred, and give each of its functions
 its type. A bound on a type the function is generic in becomes something the
 function is given; every other is met by `Traits.solve`. -/
@@ -190,11 +139,19 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
   modify fun s => { s with bounds := #[], groupUses := #[], dropCands := #[] }
   -- A variable whose value's type has `Drop` needs the implementation, to run
   -- its function when the value is destroyed.
-  for (site, ty, pos) in cands do
-    if ← needsDestroying [] ty then
-      let (key, asked) ← destroyPlan site.owner pos ty
-      pending := pending ++ asked
-      modify fun s => { s with dropSites := s.dropSites.push (site, key) }
+  -- A value that is let go is destroyed by its type's function, if its type
+  -- is one that has something to destroy, or is not yet known: then the
+  -- function it is let go in is given how.
+  if (← get).dropMode then
+    for (site, ty, pos) in cands do
+      -- (A coercion is given nothing: what it lets go of a type it is
+      -- generic in is not destroyed.)
+      let ty ← zonk ty
+      if (← get).coercing.contains site.owner && !(← needsDestroying [] ty) then continue
+      if (← needsDestroying [] ty) || !(freeTys ty).isEmpty || hasParam ty then
+        let id := 2000000000 + (← get).dropAsked
+        modify fun s => { s with dropAsked := s.dropAsked + 1, dropSites := s.dropSites.push (site, id) }
+        pending := pending.push ⟨Syntax.destroyTrait, ty, id, 0, site.owner, pos⟩
   -- What is gone through to reach each borrowed field, for the elaborator.
   let sites := (← get).fieldSites
   modify fun s => { s with fieldSites := #[] }
@@ -246,7 +203,9 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
   -- What the group's functions need of the types they are generic in.
   let mut leafs : Array (String × Nat × Ty) := #[]
   for b in pending do
-    let ls ← try leaves b.pos b.trait b.ty catch e => throw (inFunction b.owner e)
+    -- (How to destroy a type that nothing decides is not asked for.)
+    let ls ← try leaves b.pos b.trait b.ty catch e =>
+      if b.trait == Syntax.destroyTrait then pure [] else throw (inFunction b.owner e)
     for l in ls do
       unless leafs.any (fun x => x.1 == l.1 && x.2.1 == l.2.1) do leafs := leafs.push l
   let mut givensOf : List (String × List (String × Nat)) := []
@@ -345,7 +304,8 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
                   written := written ++ [(tr, k, t)]
           for (tr, k, t) in inferred do
             if let .con n [] := t then
-              unless written.any (fun w => w.1 == tr && w.2.1 == k) do
+              -- (How a type parameter is destroyed is never written.)
+              unless tr == Syntax.destroyTrait || written.any (fun w => w.1 == tr && w.2.1 == k) do
                 throw (inFunction d.name s!"`{bareName n}` is not said to have `{tr}`: write `{bareName n}: {tr}`")
           pure (written ++ inferred.filter fun (tr, k, _) =>
             !written.any (fun w => w.1 == tr && w.2.1 == k))
@@ -391,6 +351,8 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
     match Traits.solve kimpls givens 100000 b.trait (← toSTy b.ty) with
     | some d => table := record table b.call (toDictE impls d)
     | none =>
+      -- A value of a type nothing here decides is not destroyed.
+      if b.trait == Syntax.destroyTrait then continue
       for (tr, k, t) in ← leaves b.pos b.trait b.ty do
         unless givens.contains (tr, k) do
           match t with
@@ -910,10 +872,44 @@ def finish : M Elab.Blocks := do
     let implEs := s.impls.toList.map fun im =>
       let names := (s.traits.lookup (Syntax.traitBase im.trait)).getD []
       (⟨im.dictFn, im.context.length, names.map fun m =>
-        (Syntax.implFnName im.trait im.head m, ((s.methods.lookup m).map (·.params.length)).getD 0)⟩ :
+        (Syntax.implFnName im.trait im.head m,
+          if im.trait == Syntax.destroyTrait then 1
+          else ((s.methods.lookup m).map (·.params.length)).getD 0)⟩ :
         Elab.ImplE)
+    -- How each type is destroyed, for the elaborator to write the function:
+    -- its own `Drop` first, if it has one, and then for each constructor
+    -- which fields are destroyed, each by how its type is.
+    let mut destroys : List Elab.Destroy := []
+    for im in s.impls do
+      if im.trait == Syntax.destroyTrait then
+        let givens : Traits.Givens := im.context
+        let place := fun (j : Nat) => (im.context.idxOf? (Syntax.destroyTrait, j)).map Elab.DictE.param
+        let arity := im.params.length
+        let hook := if s.kimpls.any fun I => I.trait == "Drop" && I.head == im.head then
+            (Traits.solve s.kimpls givens 1000 "Drop"
+              (.con im.head ((List.range arity).map Traits.STy.var))).map (toDictE s.impls)
+          else none
+        let mut ctors : List (String × List (Option Elab.DictE)) := []
+        let isArray := some im.head == s.arrayType
+        if isArray then ctors := [("%each", [place 0])]
+        else if im.head.startsWith "(tuple" then
+          ctors := [("", (List.range arity).map place)]
+        else if let some decl := s.types.lookup im.head then
+          for c in decl.ctors do
+            if let some sig := s.ctors.lookup c then
+              -- A field's type, as the solver knows types: a parameter of
+              -- the type by its place among them.
+              let places := (List.range arity).filter fun j => sig.kinds[j]? != some true
+              let sty := fieldSTy sig.tvars places
+              let mut parts : List (Option Elab.DictE) := []
+              for f in sig.fields do
+                let plain := (freeTys f).isEmpty && !(← needsDestroying [] f)
+                parts := parts ++ [if plain then none
+                  else (Traits.solve s.kimpls givens 1000 Syntax.destroyTrait (sty f)).map (toDictE s.impls)]
+              ctors := ctors ++ [(c, parts)]
+        destroys := destroys ++ [⟨im.head, im.context.length, hook, isArray, ctors⟩]
     pure ⟨s.given.toList, links ++ s.envLinks.toList, s.coercions.toList,
-      ⟨s.dictTable.toList, s.methodCalls.toList, s.fnBounds, implEs, s.dropSites.toList, s.glue.toList⟩,
+      ⟨s.dictTable.toList, s.methodCalls.toList, s.fnBounds, implEs, s.dropSites.toList, destroys⟩,
       s.fieldTable.toList, s.fieldReads.toList, s.packs.toList, s.envFns, s.envWraps.toList,
       s.derefReads.toList⟩
 
@@ -921,22 +917,23 @@ def finish : M Elab.Blocks := do
 blocks: which take an argument they do not name, and for each that is handed a
 block which was not run, the identity of that block if it can only be one. The
 elaborator then lets those two share what they capture. -/
-def checkProgram (items : List Item) (modules : Syntax.ModuleInfo := {}) :
+def checkProgram (items : List Item) (modules : Syntax.ModuleInfo := {}) (drops : Bool := false) :
     Except String Elab.Blocks := do
   let action : M Elab.Blocks := do
     modify fun s => { s with modules }
     checkItems items
     finish
-  let (blocks, _) ← action.run {}
+  let (blocks, _) ← action.run { dropMode := drops }
   pure blocks
 
 /-- What is known once some items are checked: for a program that is checked
 after them, against what they declare. -/
-def checkFirst (items : List Item) (modules : Syntax.ModuleInfo := {}) : Except String St := do
+def checkFirst (items : List Item) (modules : Syntax.ModuleInfo := {}) (drops : Bool := false) :
+    Except String St := do
   let action : M Unit := do
     modify fun s => { s with modules }
     checkItems items
-  let (_, st) ← action.run {}
+  let (_, st) ← action.run { dropMode := drops }
   pure st
 
 /-- Check a program whose first items are already checked. -/

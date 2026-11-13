@@ -520,9 +520,18 @@ structure St where
   unsafeBlock : Bool := false
   /-- The prelude's type of arrays, by its name in this program. -/
   arrayType : Option String := none
-  dropSites : Array (Elab.DropSite × String) := #[]
-  /-- How each type that is destroyed somewhere is destroyed (`TraitInfo.glue`). -/
-  glue : Array (String × Option Nat × List (String × List (Option String))) := #[]
+  dropSites : Array (Elab.DropSite × Nat) := #[]
+  /-- Where the patterns being read are, and how many `_` they have had so
+  far: a value a `_` lets go is destroyed, and is known to the elaborator by
+  that place and number. None while patterns are read whose `_` are not
+  counted the same way there. -/
+  wildAt : Option (Nat × Nat) := none
+  wildCount : Nat := 0
+  /-- A program in which some type has `Drop`: values are destroyed where
+  they are let go, each type by its own function, and a function is given
+  how to destroy the types it is generic in. Without `Drop` anywhere there
+  is nothing to do and none of it is there. -/
+  dropMode : Bool := false
   /-- How many `Drop`s have been asked for, to name each. -/
   dropAsked : Nat := 0
   /-- How each call's bounds are met, for the elaborator. -/
