@@ -1043,6 +1043,22 @@ called where it is named. A declared type's bounds are not assumed inside a
 function that is given one: the function says them again. Only traits
 without arguments of their own are asked of a type's parameter.
 
+## A block where no callable is wanted; `return` and `break_at`
+
+From the audit of the specification (5.4, 5.5, 11).
+
+- **A block written as an argument where the type wanted is known and is no
+  callable is run there, and is its value**: `f({ let a = 2; a * 3 })` for a
+  function of an `Int`. Where a callable is wanted it is one, as before, and
+  is run only when called.
+- **`return(value, @f)` and `break_at(value, @outer)`** are the prelude's, and
+  are functions like any other: each takes a label and goes to it. A program
+  may have a `return` of its own.
+
+Limits. Where the type wanted is a type parameter with nothing asked of it,
+the block is still a callable; the specification has it run there.
+`continue_at(@outer)` waits for loops that are named, with the library.
+
 ## What the specification's audit turned away
 
 An audit of the language specification against the compiler, section by

@@ -1410,7 +1410,9 @@ partial def elabGiven (scope : Scope) (id : Nat) (body : List Stmt) : M Atom := 
     let arity := match blocks.links.lookup id with
       | some owner =>
         if blocks.given.contains owner
-            || ((blocks.packs.lookup owner).map (· != [Syntax.spreadMark])).getD false then 1 else 0
+            || ((blocks.packs.lookup owner).map
+                  (fun names => names != [Syntax.spreadMark] && names != [Syntax.nowMark])).getD false then 1
+        else 0
       | none => 0
     modify fun s => { s with envSizes := (code, layout.length, arity) :: s.envSizes }
     -- The callable passed along: given the block that was not run, it runs the
@@ -1985,7 +1987,9 @@ private partial def unfieldExpr (info : FieldInfo) : Expr → Expr
     -- A block given what an `is` found takes it apart under its names.
     match info.packs.lookup id, clauses with
     | some names, [.mk [] body] =>
-      .closure id [.mk [.tuple (names.map Pattern.var)] (unfieldStmts info body)]
+      -- A block that is run where it is written.
+      if names == [Syntax.nowMark] then .call 0 (.closure id [.mk [] (unfieldStmts info body)]) []
+      else .closure id [.mk [.tuple (names.map Pattern.var)] (unfieldStmts info body)]
     | some names, _ =>
       -- Clauses of one tuple given several arguments: the tuple's parts are
       -- the parameters.
@@ -1993,6 +1997,8 @@ private partial def unfieldExpr (info : FieldInfo) : Expr → Expr
         .closure id (clauses.map fun
           | .mk [.tuple parts] body => unfieldClause info (.mk parts body)
           | c => unfieldClause info c)
+      -- A block that is run where it is written.
+      else if names == [Syntax.nowMark] then .call 0 (.closure id (clauses.map (unfieldClause info))) []
       else .closure id (clauses.map (unfieldClause info))
     | _, _ => .closure id (clauses.map (unfieldClause info))
   | .labelScope l body => .labelScope l (unfieldStmts info body)

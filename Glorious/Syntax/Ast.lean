@@ -300,6 +300,10 @@ the type written as an expression so that it can sit among expressions: see
 stands alone. -/
 def ascribeMark : String := "%as"
 
+/-- Said of a block, as `spreadMark` is: it is written where a value that is
+no callable is wanted, so it is run there and is its value. -/
+def nowMark : String := "%now"
+
 /-- `move x`: the value of `x`, which is then not to be used again. -/
 def moveMark : String := "%move"
 

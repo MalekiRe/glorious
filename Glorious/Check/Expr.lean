@@ -261,6 +261,18 @@ partial def checkArg (scope : Scope) (amb : Row) (what : String) (p : Ty) (a : E
   -- A whole number written where a type of whole numbers is wanted is of it.
   if let .int n := a then
     if let some fits ← literalAt p n then return fits.map fun e => s!"{what}: {e}"
+  -- A block where what is wanted is known and is no callable: it is run
+  -- there, and is its value (5.4).
+  if let some (id, _) := Elab.plainBlock a then
+    let wanted ← find p
+    let callable := match wanted with
+      | .fn _ _ _ _ _ => true
+      | .var _ => true
+      | _ => false
+    unless callable do
+      let t ← inferExpr scope amb (.call 0 a [])
+      modify fun s => { s with packs := s.packs.push (id, [Syntax.nowMark]) }
+      return ← fitAt scope amb what site p t
   match Elab.plainBlock a, ← find p with
   | some (id, body), .fn [input] _ _ _ _ =>
     -- A callable taking one argument is expected, and a block is written

@@ -233,6 +233,17 @@ fn loop(body) {
     }
 }
 
+// Leaving for a label with a value: out of a function, `return(v, @f)`, or
+// out of a scope, `break_at(v, @outer)`. A label is where to go; these are
+// functions like any other.
+fn return<T, L>(value: T, target: L) -> ! where L: Label<T> {
+    target(value)
+}
+
+fn break_at<T, L>(value: T, target: L) -> ! where L: Label<T> {
+    target(value)
+}
+
 fn while(condition, body) {
     loop {
         match(condition()) {

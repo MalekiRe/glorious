@@ -218,6 +218,8 @@ structure ACtx where
   probing : Bool := false
   /-- Where such a value goes is accounted for by whoever lets it go. -/
   lenient : Bool := false
+  /-- The blocks that are run where they are written, by their numbers. -/
+  now : List Nat := []
   /-- The functions being followed. One that calls itself is not followed
   again: what it is given goes where the count does not follow, which says
   of every later round what the first said. -/
@@ -569,8 +571,9 @@ partial def runExpr (ctx : ACtx) (depth : Nat) (env : List (String × AVal)) : E
       | _ => (.unknown, n))
   | .call id f args => runCall ctx depth env f args id
   | .tailCall id f args => runCall ctx depth env f args id
-  | .closure _ clauses =>
-    pure [(.clo clauses ((activeMark, .data activeMark (ctx.active.map AVal.fn)) :: env), 0)]
+  | .closure id clauses =>
+    if id != 0 && ctx.now.contains id then applyClauses ctx depth clauses env []
+    else pure [(.clo clauses ((activeMark, .data activeMark (ctx.active.map AVal.fn)) :: env), 0)]
   | .handle subject arms => do
     let subject ← runExpr ctx depth env subject
     let mut completions : List Clause := []
@@ -930,7 +933,9 @@ def checkUses (pos : String) (outer : Scope) (binds : Scope) (body : List Stmt) 
   let intrinsics := Elab.prims.map (·.1) ++ Elab.casts ++ Elab.hosts.map (·.1) ++ ["cancel", "replace", Syntax.foreignCall, Syntax.ctorIsMark, "%shapes", "%never"]
   let ctx : ACtx :=
     { fns := s.fnBodies, ctors := s.ctors.map (·.1), aliases := s.aliases,
-      ops := s.ops.map fun (name, sig) => (name, sig.result.isSome), quiet := intrinsics }
+      ops := s.ops.map fun (name, sig) => (name, sig.result.isSome), quiet := intrinsics
+      now := s.packs.toList.filterMap fun (id, names) =>
+        if names == [Syntax.nowMark] then some id else none }
   let names := (binds ++ outer).map (·.1)
   for (x, b) in binds do
     let t := match b with
