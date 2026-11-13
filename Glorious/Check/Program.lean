@@ -130,6 +130,7 @@ partial def destroyPlan (owner pos : String) (t : Ty) : M (String × Array Bound
       pure (some k, more)
     else pure (none, #[])
   let mut ctors : List (String × List (Option String)) := []
+  let arrays := (← get).arrayType
   match t with
   | .tuple args =>
     let mut parts : List (Option String) := []
@@ -138,6 +139,27 @@ partial def destroyPlan (owner pos : String) (t : Ty) : M (String × Array Bound
       parts := parts ++ [p]
       asked := asked ++ more
     ctors := [("", parts)]
+  | .con name [element] =>
+    if some name == arrays then
+      -- An array: each element, the last first.
+      let (p, more) ← part element
+      asked := asked ++ more
+      ctors := [("%each", [p])]
+    else
+      if (← get).kimpls.any fun I => I.trait == "Drop" && I.head == name then
+        let id := 2000000000 + (← get).dropAsked
+        modify fun s => { s with dropAsked := s.dropAsked + 1 }
+        asked := asked.push ⟨"Drop", t, id, 0, owner, pos⟩
+        hook := some id
+      if let some decl := (← get).types.lookup name then
+        for c in decl.ctors do
+          if let some sig := (← get).ctors.lookup c then
+            let mut parts : List (Option String) := []
+            for a in sig.fieldsAt [element] do
+              let (p, more) ← part a
+              parts := parts ++ [p]
+              asked := asked ++ more
+            ctors := ctors ++ [(c, parts)]
   | .con name args =>
     if (← get).kimpls.any fun I => I.trait == "Drop" && I.head == name then
       let id := 2000000000 + (← get).dropAsked

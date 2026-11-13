@@ -1029,37 +1029,63 @@ modules of a program are still resolved and checked together, in one list,
 and nothing is written to a file between runs. Counting the uses of a value
 still follows the bodies of the functions it is given to, in whatever module.
 
-## Arrays are the prelude's
+## Arrays are Core's
 
-**Decision: an array is a value the prelude builds, not one the machines
-have.** `[a, b, c]`, `[x; n]`, `a[i]`, `a[i] = v`, the type `[T]`, and
-`b"bytes"` (a `[u8]`) are written by the compiler with the prelude's
-`Array<T>`, `push`, `index` and `index_set`, whatever the program has in
-scope, as a text is with `Str`'s constructors. An `Array<T>` is its length
-and a tree in which place 0 is at the top, the odd places on the left and the
-even on the right; reading or changing a place goes through as many elements
-as the length has bits. It is a value: `a[i] = v` makes `a` another array
-that shares all but one path with the old one, so an array can be kept,
-passed and compared like a number, and no borrow is needed to change one.
-`a[i]` is `index(a, i)` of the trait `Index`, which leaves `Elem` to its
-implementations, so a program's own type can be indexed.
+**Decision: an array is a value Core's machines build, read at a place in one
+step.** It replaces the tree the prelude built (the decision this section
+held before): the surface is the same, `[a, b, c]`, `[x; n]`, `a[i]`,
+`a[i] = v`, `[T]`, `b"bytes"`, `len`, `push`, `pop`, `get`, `fold`, `each`,
+`slice`, and `a[i]` is still `index(a, i)` of the trait `Index`.
 
-A place that is not there has no meaning: Core has one more primitive,
-`intBelow`, which gives its first integer if it is at least zero and below
-its second.
+What Core has. An array is a value made of fields, like any other; what makes
+it an array is its constructor. One name is kept for the type of arrays, and
+it has a constructor for every length: the one that takes `n` elements is
+`arrayBase + n`, above any a program declares. So an array of any length is
+built by the computation that builds every value, typed by the rule that
+types it, and the empty array is the first of these with no fields. Core's
+types did not change, nor what it is for a value to have a type.
 
-Also: `len` (trait `Len`, of arrays and texts), `get` (an `Option`), `pop`,
-`fold`, `each`, `slice`, `chars` and `text`, and `Show`.
+Five intrinsics work on a value made of fields: the field at a place
+(`arrGet`), the value with another field there (`arrSet`), how many
+(`arrLen`), the value with one more, built by the next constructor
+(`arrPush`), and the value without its last, built by the one before, with
+the last (`arrPop`). None has a meaning at a place that is not there. Their
+typing rules do not mention arrays: each asks of the type what it needs, that
+every constructor's fields are of one type (`Uniform`), that after each
+constructor comes one taking one more (`Grows`), that before each comes one
+taking one fewer (`Shrinks`). The type of arrays meets all three, and that is
+proved of the context a certificate describes. An intrinsic copies what it
+reads, so the array and its elements are duplicable where the ownership rules
+are checked.
 
-Why not in Core. A real array needs a type, four computations and their
-bytecode, and a case in every theorem of the typing and of the compiler's
-correctness. That is on the list of what is left for Core; this gives the
-language arrays now, with every program still certified as before.
+What was proved again: that these computations give values of their types
+(`rhs_ok`), hold no resumption they should not (`rhs_occ`), keep their typing
+under other regions (`HasRhs.inst`); that the checker's reading of them is
+sound; and the rest of type safety, which went through unchanged but for one
+thing. A fault of an intrinsic used to be arithmetic on two integers that has
+no result. It is now any intrinsic that has none: a place that is not there
+is one. `compile_correct` needed nothing: both machines share what an
+intrinsic means.
 
-Limits. Reading and changing cost the logarithm of the length, not a
-constant. `[T; N]`, an array whose type says how long it is, is not built. A
-slice is a new array. A `Str` is still a list of characters; `chars` and
-`text` go between the two. In `b"..."` each byte is a character below 128.
+Changing an array where it is. An array is a value, and `a[i] = v` makes `a`
+another array. For an array a `let mut` variable holds, the elaborator takes
+it out of the variable with Core's `swap`, an empty array left in its place,
+changes it, and stores it back: nothing else holds it meanwhile. The Rust VM
+moves a local's value at its last reading instead of copying it (found when
+a program is loaded: an instruction is followed by the next or by where its
+test fails, always further on), and an intrinsic changes fields in place
+when nothing else holds them. So a loop that pushes onto an array or writes
+its places takes time in proportion to the work: 200 000 pushes, 200 000
+writes and 200 000 more pushes in a function that calls itself, 1.3 s. The
+Lean machines copy, as their definition says; they are what the VM is tested
+against, on small programs.
+
+Limits. `[T; N]` is not built. A slice is a new array. A `Str` is still a
+list of characters. An array of values that cannot be copied in Core (it
+holds a resumption) is not shown to follow the ownership rules: the
+intrinsics copy. `pop` and `len` take the array, so of an array whose
+elements can be used once they are of little use. The VM's moving is not
+proved; nothing about the VM is.
 
 ## Traits, filled out
 

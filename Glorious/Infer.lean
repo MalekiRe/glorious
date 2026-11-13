@@ -194,6 +194,8 @@ structure St where
   globalClss : Nat := 0
   globalAccs : Nat := 0
   schemes : Std.HashMap Nat Scheme := {}
+  /-- The prelude's type of arrays, by its name in this program. -/
+  arrayType : Option String := none
   /-- The group being inferred, and the signatures of its functions. -/
   curScc : Option Nat := none
   cur : List (Nat × ISig) := []
@@ -874,7 +876,8 @@ partial def nonDup (seen : List Nat) (t : ITy) : M Bool := do
   | .int => pure false
   | .tuple fs => fs.anyM (nonDup seen)
   | .data name args =>
-    if seen.contains name then pure false
+    if name == arrayName then args.anyM (nonDup seen)
+    else if seen.contains name then pure false
     else
       let tags := (← get).types[name]?.getD []
       tags.anyM fun tag => do
@@ -1098,13 +1101,42 @@ partial def refSig (fn : Nat) : M ISig := do
 
 partial def inferRhs (Γ : Array ITy) : Rhs → M (ITy × Option ISig)
   | .atom a => do pure (← atomTy Γ a, none)
-  | .prim _ args => do
-    for a in args do
-      unify (← atomTy Γ a) .int
-    pure (.int, none)
+  | .prim p args => do
+    -- An array is a value of the type kept for arrays, of its elements' type.
+    let t ← freshTy
+    let array := ITy.data arrayName [t]
+    match p, args with
+    | .arrGet, [a, i] =>
+      unify (← atomTy Γ a) array
+      unify (← atomTy Γ i) .int
+      pure (t, none)
+    | .arrSet, [a, i, v] =>
+      unify (← atomTy Γ a) array
+      unify (← atomTy Γ i) .int
+      unify (← atomTy Γ v) t
+      pure (array, none)
+    | .arrLen, [a, _] =>
+      unify (← atomTy Γ a) array
+      pure (.int, none)
+    | .arrPush, [a, v] =>
+      unify (← atomTy Γ a) array
+      unify (← atomTy Γ v) t
+      pure (array, none)
+    | .arrPop, [a, _] =>
+      unify (← atomTy Γ a) array
+      pure (.tuple [array, t], none)
+    | _, _ =>
+      for a in args do
+        unify (← atomTy Γ a) .int
+      pure (.int, none)
   | .construct tag args => do
     let ts ← args.mapM (atomTy Γ)
     if tag == 0 then pure (.tuple ts, none)
+    else if arrayBase ≤ tag then
+      let t ← freshTy
+      for s in ts do
+        unify s t
+      pure (.data arrayName [t], none)
     else
       let (result, fields) ← instCtor tag
       unifyList ts fields
@@ -1801,8 +1833,9 @@ partial def declsFor (types : List Ty) (opsTodo : List (Nat × List Ty)) (datas 
     match types with
     | [] => pure (datas, ops)
     | t :: rest =>
+      -- (the type of arrays is not one a certificate declares)
       let newData := (dataUses t).filter fun (name, args) =>
-        !datas.any (fun d => d.name == name && d.args == args.map Ty.shape)
+        name != arrayName && !datas.any (fun d => d.name == name && d.args == args.map Ty.shape)
       match newData with
       | [] => declsFor rest (opUses t) datas ops
       | (name, args) :: _ =>
@@ -1826,6 +1859,8 @@ partial def resolveType (typeNames params : List String) : TypeExpr → M ITy
     | some i => pure (.param i)
     | none =>
       if x == "Int" || Syntax.isScalar x then pure .int
+      else if (← get).arrayType == some x then
+        pure (.data arrayName (← args.mapM (resolveType typeNames params)))
       else
         match typeNames.idxOf? x with
         | some id => do pure (.data id (← args.mapM (resolveType typeNames params)))
@@ -1842,6 +1877,10 @@ partial def resolveType (typeNames params : List String) : TypeExpr → M ITy
   | .performs r _ => resolveType typeNames params r
 
 def declare (items : List Item) (g : Elab.Globals) : M Unit := do
+  let arrays := items.findSome? fun
+    | .fieldNames mark (name :: _) _ => if mark == Syntax.arrayMark then some name else none
+    | _ => none
+  modify fun s => { s with arrayType := arrays }
   let typeNames := items.filterMap fun
     | .enum name _ _ => some name
     | .struct name _ _ => some name

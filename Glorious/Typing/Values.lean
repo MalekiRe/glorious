@@ -86,6 +86,27 @@ theorem HasVals.get {S : StoreTy} :
     simp at h
     simpa using HasVals.get hs h
 
+/-- Another value of the one type every field has, at any place. -/
+theorem HasVals.set_uniform {S : StoreTy} {τ : Ty} {v : Value} (hv : HasVal Δ S v τ) :
+    ∀ {vs : List Value} {τs : List Ty} (i : Nat), HasVals Δ S vs τs → (∀ σ, σ ∈ τs → σ = τ) →
+      HasVals Δ S (vs.set i v) τs
+  | _, _, _, .nil, _ => by simpa using HasVals.nil
+  | _, _, 0, .cons _ hs, hu => by
+    have e := hu _ (List.mem_cons_self ..)
+    subst e
+    simpa using HasVals.cons hv hs
+  | _, _, i + 1, .cons h hs, hu => by
+    simpa using HasVals.cons h
+      (HasVals.set_uniform hv i hs fun σ hσ => hu σ (List.mem_cons_of_mem _ hσ))
+
+theorem HasVals.dropLast {S : StoreTy} :
+    ∀ {vs : List Value} {τs : List Ty}, HasVals Δ S vs τs →
+      HasVals Δ S vs.dropLast τs.dropLast
+  | _, _, .nil => .nil
+  | _, _, .cons _ .nil => by simpa using HasVals.nil
+  | _, _, .cons h (.cons h' hs) => by
+    simpa [List.dropLast] using HasVals.cons h (HasVals.dropLast (.cons h' hs))
+
 /-! What a value of each kind of type looks like. -/
 
 theorem CtorOf.not_int {tag : Nat} {Fs : List Ty} (h : CtorOf Δ tag .int Fs) : False := by
@@ -286,19 +307,111 @@ theorem prim_int {p : Prim} {m n : Int} {v : Value} (h : p.eval [.int m, .int n]
     | exact wide h
     | exact uns h
     | (cases h; exact ⟨_, rfl⟩)
+    | cases h
     | (split at h <;> first | exact ok h | exact wide h | exact uns h | cases h)
 
 /-- A typed control-free computation gives a value of its type, unless it is
-arithmetic that overflows. -/
+an intrinsic that has no result: arithmetic that overflows, an array read at
+a place that is not there. -/
 theorem rhs_ok {S : StoreTy} {env : Env} {Γ : TEnv} {rhs : Rhs} {τ : Ty}
     (henv : HasVals Δ S env Γ) (h : HasRhs Δ Γ rhs τ) :
     (∃ v, rhs.eval env = some v ∧ HasVal Δ S v τ)
-      ∨ (∃ p args m n, rhs = .prim p args ∧ evalAtoms env args = some [.int m, .int n]
-          ∧ p.eval [.int m, .int n] = none ∧ rhs.eval env = none) := by
+      ∨ (∃ p args vs, rhs = .prim p args ∧ evalAtoms env args = some vs
+          ∧ p.eval vs = none ∧ rhs.eval env = none) := by
   cases h with
   | atom ha =>
     obtain ⟨v, hv, hvt⟩ := atom_ok henv ha
     exact .inl ⟨v, by simp [Rhs.eval, hv], hvt⟩
+  | @arrGet a i T τ ha hi hu hd =>
+    obtain ⟨va, hva, hvat⟩ := atom_ok henv ha
+    obtain ⟨vi, hvi, hvit⟩ := atom_ok henv hi
+    obtain ⟨n, rfl⟩ := hvit.int_inv
+    have hargs : evalAtoms env [a, i] = some [va, .int n] := by simp [evalAtoms, hva, hvi]
+    cases hp : Prim.arrGet.eval [va, .int n] with
+    | none => exact .inr ⟨_, _, _, rfl, hargs, hp, by simp [Rhs.eval, hargs, hp]⟩
+    | some w =>
+      refine .inl ⟨w, by simp [Rhs.eval, hargs, hp], ?_⟩
+      cases hvat with
+      | data hc hf =>
+        simp only [Prim.eval] at hp
+        split at hp
+        · obtain ⟨σ, hσ, hwt⟩ := HasVals.get' hf hp
+          have e := hu _ _ hc σ (List.mem_of_getElem? hσ)
+          subst e
+          exact hwt
+        · cases hp
+      | _ => simp [Prim.eval] at hp
+  | @arrSet a i x T τ ha hi hx hu hd =>
+    obtain ⟨va, hva, hvat⟩ := atom_ok henv ha
+    obtain ⟨vi, hvi, hvit⟩ := atom_ok henv hi
+    obtain ⟨vx, hvx, hvxt⟩ := atom_ok henv hx
+    obtain ⟨n, rfl⟩ := hvit.int_inv
+    have hargs : evalAtoms env [a, i, x] = some [va, .int n, vx] := by
+      simp [evalAtoms, hva, hvi, hvx]
+    cases hp : Prim.arrSet.eval [va, .int n, vx] with
+    | none => exact .inr ⟨_, _, _, rfl, hargs, hp, by simp [Rhs.eval, hargs, hp]⟩
+    | some w =>
+      refine .inl ⟨w, by simp [Rhs.eval, hargs, hp], ?_⟩
+      cases hvat with
+      | data hc hf =>
+        simp only [Prim.eval] at hp
+        split at hp
+        · cases hp
+          exact .data hc (HasVals.set_uniform hvxt _ hf (hu _ _ hc))
+        · cases hp
+      | _ => simp [Prim.eval] at hp
+  | @arrLen a b T σ ha hb =>
+    obtain ⟨va, hva, hvat⟩ := atom_ok henv ha
+    obtain ⟨vb, hvb, _⟩ := atom_ok henv hb
+    have hargs : evalAtoms env [a, b] = some [va, vb] := by simp [evalAtoms, hva, hvb]
+    cases hp : Prim.arrLen.eval [va, vb] with
+    | none => exact .inr ⟨_, _, _, rfl, hargs, hp, by simp [Rhs.eval, hargs, hp]⟩
+    | some w =>
+      refine .inl ⟨w, by simp [Rhs.eval, hargs, hp], ?_⟩
+      cases hvat with
+      | data hc hf =>
+        simp only [Prim.eval] at hp
+        cases hp
+        exact .int
+      | _ => simp [Prim.eval] at hp
+  | @arrPush a x T τ ha hx hg hd =>
+    obtain ⟨va, hva, hvat⟩ := atom_ok henv ha
+    obtain ⟨vx, hvx, hvxt⟩ := atom_ok henv hx
+    have hargs : evalAtoms env [a, x] = some [va, vx] := by simp [evalAtoms, hva, hvx]
+    cases hp : Prim.arrPush.eval [va, vx] with
+    | none => exact .inr ⟨_, _, _, rfl, hargs, hp, by simp [Rhs.eval, hargs, hp]⟩
+    | some w =>
+      refine .inl ⟨w, by simp [Rhs.eval, hargs, hp], ?_⟩
+      cases hvat with
+      | data hc hf =>
+        simp only [Prim.eval] at hp
+        cases hp
+        exact .data (hg _ _ hc) (hf.snoc hvxt)
+      | _ => simp [Prim.eval] at hp
+  | @arrPop a b T τ σ ha hb hu hs hd =>
+    obtain ⟨va, hva, hvat⟩ := atom_ok henv ha
+    obtain ⟨vb, hvb, _⟩ := atom_ok henv hb
+    have hargs : evalAtoms env [a, b] = some [va, vb] := by simp [evalAtoms, hva, hvb]
+    cases hp : Prim.arrPop.eval [va, vb] with
+    | none => exact .inr ⟨_, _, _, rfl, hargs, hp, by simp [Rhs.eval, hargs, hp]⟩
+    | some w =>
+      refine .inl ⟨w, by simp [Rhs.eval, hargs, hp], ?_⟩
+      cases hvat with
+      | @data tag fields _ Fs hc hf =>
+        simp only [Prim.eval] at hp
+        split at hp
+        · rename_i last hlast
+          cases hp
+          rw [List.getLast?_eq_getElem?] at hlast
+          obtain ⟨σ', hσ', hlt⟩ := HasVals.get' hf hlast
+          have e := hu _ _ hc σ' (List.mem_of_getElem? hσ')
+          subst e
+          have hne : Fs ≠ [] := fun e => by
+            rw [e] at hσ'
+            simp at hσ'
+          exact .data (.inl ⟨rfl, rfl⟩) (.cons (.data (hs _ _ hc hne) hf.dropLast) (.cons hlt .nil))
+        · cases hp
+      | _ => simp [Prim.eval] at hp
   | @prim p a b ha hb =>
     obtain ⟨va, hva, hvat⟩ := atom_ok henv ha
     obtain ⟨vb, hvb, hvbt⟩ := atom_ok henv hb
@@ -306,7 +419,7 @@ theorem rhs_ok {S : StoreTy} {env : Env} {Γ : TEnv} {rhs : Rhs} {τ : Ty}
     obtain ⟨n, rfl⟩ := hvbt.int_inv
     have hargs : evalAtoms env [a, b] = some [.int m, .int n] := by simp [evalAtoms, hva, hvb]
     cases hp : p.eval [.int m, .int n] with
-    | none => exact .inr ⟨p, [a, b], m, n, rfl, hargs, hp, by simp [Rhs.eval, hargs, hp]⟩
+    | none => exact .inr ⟨p, [a, b], _, rfl, hargs, hp, by simp [Rhs.eval, hargs, hp]⟩
     | some v =>
       obtain ⟨k, rfl⟩ := prim_int hp
       exact .inl ⟨.int k, by simp [Rhs.eval, hargs, hp], .int⟩
@@ -329,8 +442,30 @@ theorem rhs_ok {S : StoreTy} {env : Env} {Γ : TEnv} {rhs : Rhs} {τ : Ty}
 theorem rhs_occ {S : StoreTy} {env : Env} {Γ : TEnv} {rhs : Rhs} {σ : Ty} {v : Value}
     (hD : DupSound Δ) (henv : HasVals Δ S env Γ) (h : HasRhs Δ Γ rhs σ)
     (hv : rhs.eval env = some v) (id : Nat) : occ id v ≤ sumAt id env (rhsMoves rhs) := by
+  -- What an array intrinsic gives is of a duplicable type, so it holds no
+  -- resumption, whatever it was made from.
+  have copied : ∀ {τ' : Ty}, HasRhs Δ Γ rhs τ' → Δ.dup τ' → occ id v ≤ sumAt id env (rhsMoves rhs) := by
+    intro τ' h' hd
+    rcases rhs_ok (S := S) henv h' with ⟨w, hw, hwt⟩ | ⟨_, _, _, _, _, _, hnone⟩
+    · rw [hv] at hw
+      cases hw
+      simp [hD _ _ _ hwt hd id]
+    · rw [hv] at hnone
+      cases hnone
   cases h with
   | atom ha => exact Nat.le_of_eq (occ_eval id env hv)
+  | arrGet ha hi hu hd => exact copied (.arrGet ha hi hu hd) hd
+  | arrSet ha hi hx hu hd => exact copied (.arrSet ha hi hx hu hd) hd
+  | arrLen ha hb =>
+    rcases rhs_ok (S := S) henv (.arrLen ha hb) with ⟨w, hw, hwt⟩ | ⟨_, _, _, _, _, _, hnone⟩
+    · rw [hv] at hw
+      cases hw
+      obtain ⟨k, rfl⟩ := hwt.int_inv
+      simp [occ]
+    · rw [hv] at hnone
+      cases hnone
+  | arrPush ha hx hg hd => exact copied (.arrPush ha hx hg hd) hd
+  | arrPop ha hb hu hs hd => exact copied (.arrPop ha hb hu hs hd) hd
   | @prim p a b ha hb =>
     obtain ⟨va, hva, hvat⟩ := atom_ok henv ha
     obtain ⟨vb, hvb, hvbt⟩ := atom_ok henv hb

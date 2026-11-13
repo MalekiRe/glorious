@@ -48,6 +48,9 @@ fn unit() -> Value {
 
 enum Atom {
     Var(usize),
+    /// The local, which nothing reads again: its value is moved, not copied.
+    /// No file has these; they are found when a program is loaded.
+    Take(usize),
     Int(i128),
 }
 
@@ -98,6 +101,11 @@ enum Prim {
     UShl,
     UShr,
     Below,
+    ArrGet,
+    ArrSet,
+    ArrLen,
+    ArrPush,
+    ArrPop,
 }
 
 #[derive(Clone, Copy)]
@@ -267,6 +275,11 @@ impl Reader<'_> {
             37 => Ok(Prim::UShl),
             38 => Ok(Prim::UShr),
             39 => Ok(Prim::Below),
+            40 => Ok(Prim::ArrGet),
+            41 => Ok(Prim::ArrSet),
+            42 => Ok(Prim::ArrLen),
+            43 => Ok(Prim::ArrPush),
+            44 => Ok(Prim::ArrPop),
             t => Err(format!("unknown intrinsic {t}")),
         }
     }
@@ -394,6 +407,107 @@ impl Reader<'_> {
     }
 }
 
+// ------------------------------------------------------------ last readings
+
+impl Instr {
+    /// The operands of an instruction that are values of locals.
+    fn atoms_mut(&mut self) -> Vec<&mut Atom> {
+        match self {
+            Instr::Op(Rhs::Atom(a)) | Instr::Op(Rhs::Rebind(a, _)) => vec![a],
+            Instr::Op(Rhs::Prim(_, xs))
+            | Instr::Op(Rhs::Construct(_, xs))
+            | Instr::Op(Rhs::Closure(_, xs)) => xs.iter_mut().collect(),
+            Instr::Op(Rhs::Place(_)) => vec![],
+            Instr::Call(f, xs) | Instr::Tail(f, xs) => {
+                std::iter::once(f).chain(xs.iter_mut()).collect()
+            }
+            Instr::Ret(a) | Instr::Cancel(a) => vec![a],
+            Instr::Handle { caps, thunk, .. } => {
+                caps.iter_mut().chain(std::iter::once(thunk)).collect()
+            }
+            Instr::Raise(_, xs) | Instr::Perform(_, xs) | Instr::Host(_, xs) | Instr::Mem(_, xs) => {
+                xs.iter_mut().collect()
+            }
+            Instr::Label { thunk, .. } => vec![thunk],
+            Instr::Guard { cleanup, thunk, .. } => vec![cleanup, thunk],
+            Instr::TestCtor(..) | Instr::TestInt(..) => vec![],
+            Instr::Cell { init, thunk, .. } => vec![init, thunk],
+            Instr::Lend { r, thunk, pre, post } => {
+                [r, thunk].into_iter().chain(pre.iter_mut()).chain(post.iter_mut()).collect()
+            }
+        }
+    }
+
+    /// The local an instruction reads a field of, if it reads one.
+    fn place_var(&self) -> Option<usize> {
+        match self {
+            Instr::Op(Rhs::Place(pl)) | Instr::TestCtor(pl, ..) | Instr::TestInt(pl, ..) => {
+                Some(pl.var)
+            }
+            _ => None,
+        }
+    }
+
+    /// Where a test goes when it fails.
+    fn fail(&self) -> Option<usize> {
+        match self {
+            Instr::TestCtor(_, _, _, fail) | Instr::TestInt(_, _, fail) => Some(*fail),
+            _ => None,
+        }
+    }
+
+    /// Does the activation end here, with nothing of it run afterwards?
+    fn last(&self) -> bool {
+        match self {
+            Instr::Tail(..) | Instr::Ret(_) | Instr::Raise(..) => true,
+            Instr::Handle { tail, .. }
+            | Instr::Label { tail, .. }
+            | Instr::Guard { tail, .. }
+            | Instr::Cell { tail, .. } => *tail,
+            _ => false,
+        }
+    }
+}
+
+/// Make each reading of a local that nothing reads afterwards a move. An
+/// instruction is followed by the next, or by where its test fails, and every
+/// such place is further on: so one pass from the end finds, for each
+/// instruction, the locals read after it. Where a place is not further on,
+/// nothing is changed.
+fn mark_takes(code: &mut [Instr]) {
+    let n = code.len();
+    if code.iter().enumerate().any(|(pc, i)| i.fail().is_some_and(|t| t <= pc || t > n)) {
+        return;
+    }
+    let mut read_from: Vec<std::collections::HashSet<usize>> = vec![Default::default(); n + 1];
+    for pc in (0..n).rev() {
+        let mut after = std::collections::HashSet::new();
+        if !code[pc].last() {
+            after.extend(read_from[pc + 1].iter().copied());
+        }
+        if let Some(t) = code[pc].fail() {
+            after.extend(read_from[t].iter().copied());
+        }
+        let place = code[pc].place_var();
+        let mut times: std::collections::HashMap<usize, usize> = Default::default();
+        for a in code[pc].atoms_mut() {
+            if let Atom::Var(i) = a {
+                *times.entry(*i).or_default() += 1;
+            }
+        }
+        for a in code[pc].atoms_mut() {
+            if let Atom::Var(i) = *a {
+                if !after.contains(&i) && times[&i] == 1 && place != Some(i) {
+                    *a = Atom::Take(i);
+                }
+            }
+        }
+        after.extend(times.keys().copied());
+        after.extend(place);
+        read_from[pc] = after;
+    }
+}
+
 struct Program {
     names: Vec<String>,
     /// The functions, followed by the main code.
@@ -411,6 +525,9 @@ fn decode(bytes: &[u8]) -> Decoded<Program> {
     let names = r.list(Reader::string)?;
     let mut codes = r.list(Reader::code)?;
     codes.push(r.code()?);
+    for code in &mut codes {
+        mark_takes(code);
+    }
     if r.pos != bytes.len() {
         return Err("trailing bytes after the program".into());
     }
@@ -586,14 +703,18 @@ struct Vm {
 }
 
 impl Vm {
-    fn atom(&self, a: &Atom) -> Step<Value> {
+    fn atom(&mut self, a: &Atom) -> Step<Value> {
         match a {
             Atom::Var(i) => self.locals.get(*i).cloned().ok_or(Stop::Wrong),
+            Atom::Take(i) => match self.locals.get_mut(*i) {
+                Some(slot) => Ok(std::mem::replace(slot, Value::Int(0))),
+                None => wrong(),
+            },
             Atom::Int(n) => Ok(Value::Int(*n)),
         }
     }
 
-    fn atoms(&self, xs: &[Atom]) -> Step<Vec<Value>> {
+    fn atoms(&mut self, xs: &[Atom]) -> Step<Vec<Value>> {
         xs.iter().map(|a| self.atom(a)).collect()
     }
 
@@ -608,10 +729,18 @@ impl Vm {
         Ok(v.clone())
     }
 
-    fn rhs(&self, r: &Rhs) -> Step<Value> {
+    fn rhs(&mut self, r: &Rhs) -> Step<Value> {
         match r {
             Rhs::Atom(a) => self.atom(a),
-            Rhs::Prim(p, args) => prim(*p, &self.atoms(args)?),
+            Rhs::Prim(p, args) => {
+                let args = self.atoms(args)?;
+                match p {
+                    Prim::ArrGet | Prim::ArrSet | Prim::ArrLen | Prim::ArrPush | Prim::ArrPop => {
+                        array_prim(*p, args)
+                    }
+                    _ => prim(*p, &args),
+                }
+            }
             Rhs::Construct(tag, args) => Ok(data(*tag, self.atoms(args)?)),
             Rhs::Place(pl) => self.place(pl),
             Rhs::Closure(func, caps) => {
@@ -958,6 +1087,47 @@ impl Vm {
 
 /// Intrinsics. An integer is held in 128 bits. The arithmetic of `Int` is
 /// kept to 64; the wide and the unsigned operations to 128.
+/// The fields of a value made of fields, to change: the value's own if
+/// nothing else holds it, else a copy.
+fn fields_of(d: Rc<Data>) -> (u64, Vec<Value>) {
+    match Rc::try_unwrap(d) {
+        Ok(d) => (d.tag, d.fields),
+        Err(d) => (d.tag, d.fields.clone()),
+    }
+}
+
+/// The intrinsics of arrays: a value made of fields, read and changed at a
+/// place.
+fn array_prim(p: Prim, args: Vec<Value>) -> Step<Value> {
+    let mut args = args.into_iter();
+    let Some(Value::Data(d)) = args.next() else {
+        return wrong();
+    };
+    match (p, args.next(), args.next()) {
+        (Prim::ArrGet, Some(Value::Int(i)), None) => {
+            usize::try_from(i).ok().and_then(|i| d.fields.get(i).cloned()).ok_or(Stop::Wrong)
+        }
+        (Prim::ArrSet, Some(Value::Int(i)), Some(v)) => {
+            let i = usize::try_from(i).ok().filter(|i| *i < d.fields.len()).ok_or(Stop::Wrong)?;
+            let (tag, mut fields) = fields_of(d);
+            fields[i] = v;
+            Ok(data(tag, fields))
+        }
+        (Prim::ArrLen, Some(_), None) => Ok(Value::Int(d.fields.len() as i128)),
+        (Prim::ArrPush, Some(v), None) => {
+            let (tag, mut fields) = fields_of(d);
+            fields.push(v);
+            Ok(data(tag + 1, fields))
+        }
+        (Prim::ArrPop, Some(_), None) => {
+            let (tag, mut fields) = fields_of(d);
+            let last = fields.pop().ok_or(Stop::Wrong)?;
+            Ok(data(0, vec![data(tag.wrapping_sub(1), fields), last]))
+        }
+        _ => wrong(),
+    }
+}
+
 fn prim(p: Prim, args: &[Value]) -> Step<Value> {
     let [Value::Int(a), Value::Int(b)] = args else {
         return wrong();
@@ -1056,6 +1226,8 @@ fn prim(p: Prim, args: &[Value]) -> Step<Value> {
             }
         }
         Prim::Below => (0 <= a && a < b).then_some(a),
+        // Of two integers these have no meaning.
+        Prim::ArrGet | Prim::ArrSet | Prim::ArrLen | Prim::ArrPush | Prim::ArrPop => None,
     };
     result.map(Value::Int).ok_or(Stop::Wrong)
 }
@@ -1199,6 +1371,10 @@ fn show_inner(names: &[String], v: &Value) -> String {
             let args = args.join(", ");
             if d.tag == 0 {
                 return format!("({args})");
+            }
+            // The constructors that build arrays are above every declared one.
+            if d.tag >= 4611686018427387904 {
+                return format!("[{args}]");
             }
             let name = usize::try_from(d.tag)
                 .ok()

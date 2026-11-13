@@ -214,6 +214,10 @@ def textEndName : String := "%end"
 it in the block may name what is unsafe. -/
 def unsafeMark : String := "%unsafe"
 
+/-- How the resolver says which type is the prelude's type of arrays, whatever
+a program has named its own: a list of names under this mark. -/
+def arrayMark : String := "%array"
+
 /-- The host operations that are unsafe, by name: a call of a foreign
 function, and reading and writing memory at an address. -/
 def foreignCall : String := "foreign_call"

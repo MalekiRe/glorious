@@ -950,6 +950,16 @@ def resolve (prelude root : List Item) : Except String Resolved := do
       let ctx : Ctx := ⟨u.path, ← scopeOf u.path, []⟩
       for item in u.items do
         out := out ++ (← resolveItem ctx item).toArray
+      -- The prelude's type of arrays, by the name it has in this program.
+      if u.path == preludePath then
+        let named := fun (name : String) (kind : Kind) =>
+          (u.own.find? fun b => b.name == name && b.entry.kind == kind).map (·.entry.global)
+        if let some array := named "Array" .type then
+          -- With it, the function that adds an element and the trait of
+          -- `a[i]`, so that changing an array a variable holds can be done
+          -- where the array is.
+          out := out.push (.fieldNames arrayMark
+            (array :: (named "push" .fn).toList ++ (named "Index" .trait).toList) [])
     -- Where each coercion applies: in the module that declares it, and in
     -- one that brings its function in with `use`.
     let coerced := (← get).coerced

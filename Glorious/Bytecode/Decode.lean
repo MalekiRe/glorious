@@ -92,6 +92,11 @@ def prim : Bytes → Option (Prim × Bytes)
   | 37 :: bs => some (.uwShl, bs)
   | 38 :: bs => some (.uwShr, bs)
   | 39 :: bs => some (.intBelow, bs)
+  | 40 :: bs => some (.arrGet, bs)
+  | 41 :: bs => some (.arrSet, bs)
+  | 42 :: bs => some (.arrLen, bs)
+  | 43 :: bs => some (.arrPush, bs)
+  | 44 :: bs => some (.arrPop, bs)
   | _ => none
 
 def rhs : Bytes → Option (Rhs × Bytes)

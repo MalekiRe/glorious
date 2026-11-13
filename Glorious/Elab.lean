@@ -127,6 +127,9 @@ structure Globals where
   aliases : List (String × Expr) := []
   /-- The clauses of each top-level function, by name. -/
   bodies : List (String × List Clause) := []
+  /-- The prelude's type of arrays, its function that adds an element, and
+  the trait of `a[i]`, by the names they have in this program. -/
+  arrays : Option (String × String × String) := none
   /-- What the checker learnt about the program's blocks, if it was run. -/
   blocks : Option Blocks := none
   /-- How each place a borrow is written, counted in the order they are
@@ -167,7 +170,11 @@ def prims : List (String × Prim × Nat) :=
    ("int_shl", .intShl, 2), ("int_shr", .intShr, 2),
    ("uw_add", .uwAdd, 2), ("uw_sub", .uwSub, 2), ("uw_mul", .uwMul, 2),
    ("uw_div", .uwDiv, 2), ("uw_rem", .uwRem, 2), ("uw_lt", .uwLt, 2),
-   ("uw_shl", .uwShl, 2), ("uw_shr", .uwShr, 2), ("int_below", .intBelow, 2)]
+   ("uw_shl", .uwShl, 2), ("uw_shr", .uwShr, 2), ("int_below", .intBelow, 2),
+   -- Arrays. `arr_new` is not an intrinsic of the machines: it is the array of
+   -- no elements, built like any value.
+   ("arr_get", .arrGet, 2), ("arr_set", .arrSet, 3), ("arr_len", .arrLen, 2),
+   ("arr_push", .arrPush, 2), ("arr_pop", .arrPop, 2), ("arr_new", .arrLen, 0)]
 
 /-- The names that take a scalar to the integer it is held as, and back. -/
 def casts : List String :=
@@ -921,7 +928,8 @@ partial def elabCall (scope : Scope) (isTail : Bool) (f : Expr) (args : List Exp
       if n != args.length then
         throw s!"intrinsic `{x}` takes {n} arguments, but is given {args.length}"
       let atoms ← elabArgs scope args
-      emit (.let_ (.prim p atoms))
+      if x == "arr_new" then emit (.let_ (.construct arrayBase []))
+      else emit (.let_ (.prim p atoms))
     | .pack => do
       let atoms ← elabArgs scope args
       emit (.let_ (.construct 0 atoms))
@@ -1056,8 +1064,29 @@ partial def elabStmts (scope : Scope) (tailPos : Bool) : List Stmt → M Atom
         | none => throw s!"unknown name `{x}`"
       | .deref e => elabExpr scope false e
       | _ => throw "only a mutable variable or `*reference` can be assigned"
-    let a ← elabExpr scope false value
-    let _ ← emit (.mem .store [cell, a])
+    -- `a[i] = v` and `a = push(a, v)`, of an array a variable holds: the
+    -- array is taken out of the variable, an empty one left in its place,
+    -- changed, and put back. Nothing else holds it meanwhile, so a machine
+    -- that can change it where it is may.
+    let inPlace : Option (Prim × List Expr) := match target, value, (← read).arrays with
+      | .name none x, .call _ (.name none f) (.name none y :: more), some (array, push, index) =>
+        if x == y && (lookupVar scope f).isNone then
+          if f == push && more.length == 1 then some (.arrPush, more)
+          else if f == Syntax.implFnName index array "index_set" && more.length == 2 then
+            some (.arrSet, more)
+          else none
+        else none
+      | _, _, _ => none
+    match inPlace with
+    | some (p, more) =>
+      let atoms ← elabArgs scope more
+      let empty ← emit (.let_ (.construct arrayBase []))
+      let old ← emit (.mem .swap [cell, empty])
+      let changed ← emit (.let_ (.prim p (old :: atoms)))
+      let _ ← emit (.mem .store [cell, changed])
+    | none =>
+      let a ← elabExpr scope false value
+      let _ ← emit (.mem .store [cell, a])
     elabStmts scope tailPos rest
   | .defer e :: rest => do
     -- The rest of the block runs under a guard whose cleanup is `e`.
@@ -1474,6 +1503,22 @@ field that is to be destroyed, the last declared first. -/
 def destroyers (tr : TraitInfo) : List Item :=
   tr.glue.flatMap fun (key, hook, ctors) =>
     let unit := Expr.tuple []
+    -- An array: its elements one by one, from the last.
+    if let [("%each", [some element])] := ctors then
+      let name := fun (x : String) => Expr.name none x
+      let from_ := "%destroy from " ++ key
+      let before := Expr.call dropCallId (name "int_sub") [name "%n", .int 1]
+      [Item.fn ("%destroy " ++ key) [] [none] none
+          [.mk [.var "%value"]
+            [.expr (.call dropCallId (name from_)
+              [name "%value", .call dropCallId (name "arr_len") [name "%value", .int 0]])]],
+        Item.fn from_ [] [none, none] none
+          [.mk [.wild, .int 0] [.expr unit],
+            .mk [.var "%value", .var "%n"]
+              [.expr (.call dropCallId (name ("%destroy " ++ element))
+                  [.call dropCallId (name "arr_get") [name "%value", before]]),
+                .expr (.tailCall dropCallId (name from_) [name "%value", before])]]]
+    else
     let clauses := ctors.map fun (ctor, parts) =>
       let names := (List.range parts.length).map fun k => s!"%part{k}"
       let pats := (names.zip parts).map fun (x, part) =>
@@ -2038,7 +2083,9 @@ def collect (items : List Item) :
     -- How often a value is to be used is the checker's business.
     | .use _ _ _ => pure ()
     -- So are the names of fields, and by now every field is a number.
-    | .fieldNames _ _ _ => pure ()
+    | .fieldNames mark known _ =>
+      if mark == Syntax.arrayMark then
+        if let [array, push, index] := known then g := { g with arrays := some (array, push, index) }
     | .typeAlias _ _ _ => pure ()
     -- And modules: every name is one name of the whole program by now.
     | .pub _ _ => pure ()

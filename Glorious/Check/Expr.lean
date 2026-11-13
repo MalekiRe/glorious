@@ -413,8 +413,36 @@ partial def inferCall (scope : Scope) (amb : Row) (f : Expr) (args : List Expr)
       | some r => pure r
       | none => freshTy
     | .prim => do
-      checkArgs scope amb s!"intrinsic `{x}`" [.int, .int] args call
-      pure .int
+      -- The intrinsics of arrays, of whatever their elements are. Reading a
+      -- place and putting another value at one let go of what is not given
+      -- back.
+      let named := ((← get).arrayType).getD "Array"
+      let array := fun (t : Ty) => Ty.con named [t]
+      let t ← freshTy
+      match x with
+      | "arr_new" =>
+        checkArgs scope amb s!"intrinsic `{x}`" [] args call
+        pure (array t)
+      | "arr_get" =>
+        checkArgs scope amb s!"intrinsic `{x}`" [array t, .int] args call
+        mustDrop t "reading a place of an array lets go of the rest of it"
+        pure t
+      | "arr_set" =>
+        checkArgs scope amb s!"intrinsic `{x}`" [array t, .int, t] args call
+        mustDrop t "putting a value at a place of an array lets go of what was there"
+        pure (array t)
+      | "arr_len" =>
+        checkArgs scope amb s!"intrinsic `{x}`" [array t, .int] args call
+        pure .int
+      | "arr_push" =>
+        checkArgs scope amb s!"intrinsic `{x}`" [array t, t] args call
+        pure (array t)
+      | "arr_pop" =>
+        checkArgs scope amb s!"intrinsic `{x}`" [array t, .int] args call
+        pure (.tuple [array t, t])
+      | _ =>
+        checkArgs scope amb s!"intrinsic `{x}`" [.int, .int] args call
+        pure .int
     | .pack name => do
       let ts ← args.mapM fun _ => freshTy
       checkArgs scope amb "what an `is` found" ts args call

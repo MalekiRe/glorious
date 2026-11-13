@@ -383,7 +383,9 @@ def declare (items : List Item) : M Unit := do
     | .coerce name => modify fun s => { s with coercing := s.coercing ++ [name] }
     | .unsafeFn name => modify fun s => { s with unsafeFns := name :: s.unsafeFns }
     | .fieldNames ctor names _ =>
-      unless names.isEmpty do
+      if ctor == Syntax.arrayMark then
+        modify fun s => { s with arrayType := names.head? }
+      else unless names.isEmpty do
         modify fun s => { s with fieldNames := (ctor, names) :: s.fieldNames }
     | _ => pure ()
   for item in items do

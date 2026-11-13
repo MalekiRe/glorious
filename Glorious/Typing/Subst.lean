@@ -206,6 +206,33 @@ theorem CtorOf.of_inst (hΔ : Δ.Stable) {tag name : Nat} {args Fs' : List Ty} {
       rw [hc] at hF
       exact ⟨Fs, .inr ⟨h0, name, args, rfl, hc⟩, (Option.some.inj hF).symm⟩
 
+/-- The same of any type: only a tuple or a declared type has constructors. -/
+theorem CtorOf.of_inst_any (hΔ : Δ.Stable) {tag : Nat} {T : Ty} {Fs' : List Ty} {θ : List Rgn}
+    (h : CtorOf Δ tag (T.inst θ) Fs') :
+    ∃ Fs, CtorOf Δ tag T Fs ∧ Fs' = Fs.map (Ty.inst θ) := by
+  cases T with
+  | int =>
+    rw [Ty.inst_int] at h
+    rcases h with ⟨_, hT⟩ | ⟨_, _, _, hT, _⟩ <;> cases hT
+  | never =>
+    rw [Ty.inst_never] at h
+    rcases h with ⟨_, hT⟩ | ⟨_, _, _, hT, _⟩ <;> cases hT
+  | ref ρ t =>
+    rw [Ty.inst_ref] at h
+    rcases h with ⟨_, hT⟩ | ⟨_, _, _, hT, _⟩ <;> cases hT
+  | fn n ps r e once env acc =>
+    rw [Ty.inst_fn] at h
+    rcases h with ⟨_, hT⟩ | ⟨_, _, _, hT, _⟩ <;> cases hT
+  | tuple fs =>
+    rw [Ty.inst_tuple] at h
+    rcases h with ⟨h0, hT⟩ | ⟨_, _, _, hT, _⟩
+    · injection hT with hT
+      exact ⟨fs, .inl ⟨h0, rfl⟩, hT.symm⟩
+    · cases hT
+  | data name args =>
+    rw [Ty.inst_data] at h
+    exact CtorOf.of_inst hΔ h
+
 theorem HasAtom.inst {Γ : TEnv} {a : Atom} {τ : Ty} (θ : List Rgn) (h : HasAtom Γ a τ) :
     HasAtom (Γ.map (Ty.inst θ)) a (τ.inst θ) := by
   cases h with
@@ -243,10 +270,47 @@ theorem Linear.inst (hΔ : Δ.Stable) {Γ : TEnv} {moved rest : List Nat} (θ : 
     subst hi
     exact h i τ hg (fun hd => hnd ((hΔ.dup τ θ).mpr hd))
 
+theorem Uniform.inst (hΔ : Δ.Stable) {T τ : Ty} (θ : List Rgn) (h : Uniform Δ T τ) :
+    Uniform Δ (T.inst θ) (τ.inst θ) := by
+  intro tag Fs' hc σ hσ
+  obtain ⟨Fs₀, hc₀, rfl⟩ := CtorOf.of_inst_any hΔ hc
+  obtain ⟨σ₀, hσ₀, rfl⟩ := List.mem_map.mp hσ
+  rw [h tag Fs₀ hc₀ σ₀ hσ₀]
+
+theorem Grows.inst (hΔ : Δ.Stable) {T τ : Ty} (θ : List Rgn) (h : Grows Δ T τ) :
+    Grows Δ (T.inst θ) (τ.inst θ) := by
+  intro tag Fs' hc
+  obtain ⟨Fs₀, hc₀, rfl⟩ := CtorOf.of_inst_any hΔ hc
+  simpa using (h tag Fs₀ hc₀).inst hΔ θ
+
+theorem Shrinks.inst (hΔ : Δ.Stable) {T : Ty} (θ : List Rgn) (h : Shrinks Δ T) :
+    Shrinks Δ (T.inst θ) := by
+  intro tag Fs' hc hne
+  obtain ⟨Fs₀, hc₀, rfl⟩ := CtorOf.of_inst_any hΔ hc
+  have hne₀ : Fs₀ ≠ [] := fun e => hne (by simp [e])
+  simpa [List.map_dropLast] using (h tag Fs₀ hc₀ hne₀).inst hΔ θ
+
 theorem HasRhs.inst (hΔ : Δ.Stable) {Γ : TEnv} {rhs : Rhs} {τ : Ty} (θ : List Rgn)
     (h : HasRhs Δ Γ rhs τ) : HasRhs Δ (Γ.map (Ty.inst θ)) rhs (τ.inst θ) := by
   cases h with
   | atom ha => exact .atom (ha.inst θ)
+  | arrGet ha hi hu hd =>
+    have hi' := hi.inst θ
+    rw [Ty.inst_int] at hi'
+    exact .arrGet (ha.inst θ) hi' (hu.inst hΔ θ) ((hΔ.dup _ θ).mpr hd)
+  | arrSet ha hi hv hu hd =>
+    have hi' := hi.inst θ
+    rw [Ty.inst_int] at hi'
+    exact .arrSet (ha.inst θ) hi' (hv.inst θ) (hu.inst hΔ θ) ((hΔ.dup _ θ).mpr hd)
+  | arrLen ha hb =>
+    rw [Ty.inst_int]
+    exact .arrLen (ha.inst θ) (hb.inst θ)
+  | arrPush ha hv hg hd => exact .arrPush (ha.inst θ) (hv.inst θ) (hg.inst hΔ θ) ((hΔ.dup _ θ).mpr hd)
+  | arrPop ha hb hu hs hd =>
+    rw [Ty.inst_tuple]
+    refine .arrPop (ha.inst θ) (hb.inst θ) (hu.inst hΔ θ) (hs.inst hΔ θ) ?_
+    have := (hΔ.dup _ θ).mpr hd
+    rwa [Ty.inst_tuple] at this
   | prim ha hb =>
     have ha' := ha.inst θ
     have hb' := hb.inst θ

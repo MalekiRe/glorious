@@ -74,6 +74,11 @@ def prim : Prim → Bytes
   | .uwShl => [37]
   | .uwShr => [38]
   | .intBelow => [39]
+  | .arrGet => [40]
+  | .arrSet => [41]
+  | .arrLen => [42]
+  | .arrPush => [43]
+  | .arrPop => [44]
 
 def rhs : Rhs → Bytes
   | .atom a => 0 :: atom a

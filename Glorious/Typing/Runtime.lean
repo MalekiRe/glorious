@@ -282,10 +282,11 @@ def calleeAtom : Tm → Option Atom
 the checks on how often a resumption is used and on how long labels and cells
 live are meant to. -/
 inductive Fault : State → Prop where
-  /-- The result of an arithmetic intrinsic does not fit in 64 bits. -/
+  /-- An intrinsic has no result: arithmetic whose result does not fit, a
+  division by zero, an array read at a place that is not there. -/
   | overflow {p : Prim} {args : List Atom} {body : Tm} {env : Env} {stack : List Frame}
-      {store : Store Frame} {m n : Int} :
-      evalAtoms env args = some [.int m, .int n] → p.eval [.int m, .int n] = none →
+      {store : Store Frame} {vs : List Value} :
+      evalAtoms env args = some vs → p.eval vs = none →
       Fault ⟨.let_ (.prim p args) body, env, stack, store⟩
   /-- A memory cell is used after it was freed. -/
   | freed {op : MemOp} {args : List Atom} {body : Tm} {env : Env} {stack : List Frame}

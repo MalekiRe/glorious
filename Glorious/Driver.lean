@@ -308,6 +308,7 @@ partial def showInner (names : Array String) : Value → String
     | none =>
       let args := ", ".intercalate (fields.map (showInner names))
       if tag == 0 then s!"({args})"
+      else if arrayBase ≤ tag then s!"[{args}]"
       else
         let name := names[tag]?.getD s!"#{tag}"
         if fields.isEmpty then name else s!"{name}({args})"

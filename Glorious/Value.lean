@@ -28,6 +28,18 @@ inductive Value where
   respected can be said. -/
   | ref (addr : Nat) (borrow : Nat)
 
+/-- The constructors that build arrays: the one that takes `n` elements is
+`arrayBase + n`, above every constructor a program declares. And the name
+kept for the type of arrays. -/
+def arrayBase : Nat := 4611686018427387904
+
+theorem arrayBase_pos : 0 < arrayBase := by decide
+
+-- Nothing is to count down from it.
+attribute [irreducible] arrayBase
+
+def arrayName : Nat := 4611686018427387904
+
 /-- The locals of one activation, oldest first. -/
 abbrev Env := List Value
 
@@ -116,6 +128,17 @@ inductive Prim where
   /-- The first integer, if it is at least zero and below the second: a place
   in something of that many places. Else no meaning. -/
   | intBelow
+  /-- Arrays. A value made of fields, however many, is read and changed at a
+  place given by an integer: the field at a place; the value with another
+  field there; how many fields; the value with one more field after the
+  last, built by the next constructor; and the value without its last, built
+  by the one before, paired with the last. None has a meaning at a place
+  that is not there, or of a value that is not made of fields. -/
+  | arrGet
+  | arrSet
+  | arrLen
+  | arrPush
+  | arrPop
 
 /-- A computation that produces a value without transferring control. -/
 inductive Rhs where
@@ -260,6 +283,15 @@ def Prim.eval : Prim → List Value → Option Value
     if 0 ≤ b ∧ b < 128 then ofUnsigned (unsigned a * 2 ^ b.toNat) else none
   | .uwShr, [.int a, .int b] => if 0 ≤ b then ofUnsigned (unsigned a / 2 ^ b.toNat) else none
   | .intBelow, [.int a, .int b] => if 0 ≤ a ∧ a < b then checkedWide a else none
+  | .arrGet, [.data _ fields, .int i] => if 0 ≤ i then fields[i.toNat]? else none
+  | .arrSet, [.data tag fields, .int i, v] =>
+    if 0 ≤ i ∧ i.toNat < fields.length then some (.data tag (fields.set i.toNat v)) else none
+  | .arrLen, [.data _ fields, _] => some (.int fields.length)
+  | .arrPush, [.data tag fields, v] => some (.data (tag + 1) (fields ++ [v]))
+  | .arrPop, [.data tag fields, _] =>
+    match fields.getLast? with
+    | some last => some (.data 0 [.data (tag - 1) fields.dropLast, last])
+    | none => none
   | _, _ => none
 
 def Atom.eval (ρ : Env) : Atom → Option Value

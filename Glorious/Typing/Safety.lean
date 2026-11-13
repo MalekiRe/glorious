@@ -688,7 +688,7 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
     dsimp only
     omega
   | @let_ _ rhs body σ _ _ hrhs hlin hbody =>
-    rcases rhs_ok (S := S) henv hrhs with ⟨v, hv, hvt⟩ | ⟨q, args, m, n, rfl, hargs, hq, hnone⟩
+    rcases rhs_ok (S := S) henv hrhs with ⟨v, hv, hvt⟩ | ⟨q, args, vs, rfl, hargs, hq, hnone⟩
     · have h1 : step p ⟨.let_ rhs body, env, stack, ⟨conts, labels, cells⟩⟩
           = .next ⟨body, env ++ [v], stack, ⟨conts, labels, cells⟩⟩ := by simp [step, hv]
       rw [h1]

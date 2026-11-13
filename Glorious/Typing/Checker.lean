@@ -143,6 +143,33 @@ theorem findOp_inst (os : List OpInst) (op : Nat) (args : List Ty) (θ : List Rg
     | none => rfl
     | some r => simp [Ty.inst_inst]
 
+/-! ## Arrays
+
+One name is kept for the type of arrays, applied to the type of the elements.
+It has a constructor for every length: the one that takes `n` elements is
+`arrayBase + n`. So an array of any length is a value of the type, built like
+any other, and a longer one is built by the next constructor. No certificate
+declares this type; what it says of the name is not looked at. -/
+
+/-- The field types of constructor `tag` of the type of arrays at `args`. -/
+def arrayFields (tag : Nat) : List Ty → Option (List Ty)
+  | [t] => if arrayBase ≤ tag then some (List.replicate (tag - arrayBase) t) else none
+  | _ => none
+
+theorem arrayFields_inst (tag : Nat) (args : List Ty) (θ : List Rgn) :
+    arrayFields tag (args.map (Ty.inst θ)) = (arrayFields tag args).map (·.map (Ty.inst θ)) := by
+  match args with
+  | [] => rfl
+  | [t] =>
+    simp only [List.map_cons, List.map_nil, arrayFields]
+    split <;> simp
+  | _ :: _ :: _ => rfl
+
+/-- The field types of a constructor of a declared type, or of the type of arrays. -/
+def Cert.fields (C : Cert) (tag name : Nat) (args : List Ty) : Option (List Ty) :=
+  if name = arrayName then arrayFields tag args
+  else (findData C.datas name args).bind (·.lookup tag)
+
 def dataDup (ds : List DataInst) (name : Nat) (args : List Ty) : Bool :=
   match ds.find? (fun d => d.name == name && d.args == args.map Ty.shape) with
   | some d => d.dup
@@ -155,7 +182,7 @@ is not marked as callable once; a declared type, if the certificate says so. -/
 def dupTy (C : Cert) : Ty → Bool
   | .int => true
   | .tuple fs => dupTys C fs
-  | .data name args => dataDup C.datas name args
+  | .data name args => if name = arrayName then dupTys C args else dataDup C.datas name args
   | .fn _ _ _ _ once _ _ => !once
   | .ref _ _ => true
   | .never => true
@@ -179,7 +206,10 @@ theorem dupTy_inst (C : Cert) (θ : List Rgn) : ∀ t : Ty, dupTy C (t.inst θ) 
     exact dupTys_inst C θ fs
   | .data name args => by
     rw [Ty.inst_data]
-    simp only [dupTy, dataDup, shapes_inst]
+    simp only [dupTy]
+    split
+    · exact dupTys_inst C θ args
+    · simp only [dataDup, shapes_inst]
   | .fn _ _ _ _ _ _ _ => by
     rw [Ty.inst_fn]
     simp only [dupTy]
@@ -202,7 +232,7 @@ def Cert.ctx (C : Cert) : Ctx where
   fnSig fn sig := ∃ e, e ∈ C.sigs ∧ e.fn = fn ∧ e.sig = sig
   opSig op args := findOp C.ops op args
   dup τ := C.strict = false ∨ dupTy C τ = true
-  ctorFields tag name args := (findData C.datas name args).bind (·.lookup tag)
+  ctorFields tag name args := C.fields tag name args
   regions := C.regions = true
   loans := C.loans = true
 
@@ -212,12 +242,15 @@ theorem Cert.ctx_stable (C : Cert) : C.ctx.Stable where
     show (C.strict = false ∨ dupTy C (τ.inst θ) = true) ↔ (C.strict = false ∨ dupTy C τ = true)
     rw [dupTy_inst]
   ctor tag name args θ := by
-    show (findData C.datas name (args.map (Ty.inst θ))).bind (·.lookup tag)
-      = ((findData C.datas name args).bind (·.lookup tag)).map (·.map (Ty.inst θ))
-    rw [findData_inst]
-    cases findData C.datas name args with
-    | none => rfl
-    | some ctors => simp [instCtors_lookup]
+    show C.fields tag name (args.map (Ty.inst θ))
+      = (C.fields tag name args).map (·.map (Ty.inst θ))
+    simp only [Cert.fields]
+    split
+    · exact arrayFields_inst tag args θ
+    · rw [findData_inst]
+      cases findData C.datas name args with
+      | none => rfl
+      | some ctors => simp [instCtors_lookup]
   op op targs θ := findOp_inst C.ops op targs θ
 
 variable {C : Cert}
@@ -323,8 +356,7 @@ theorem atomsTy_sound {Γ : TEnv} : ∀ {as : List Atom} {τs : List Ty},
 /-- The field types of constructor `tag` at a type, if it is a constructor of that type. -/
 def ctorFieldsOf (C : Cert) (tag : Nat) : Ty → Option (List Ty)
   | .tuple Fs => if tag = 0 then some Fs else none
-  | .data name args =>
-    if tag = 0 then none else (findData C.datas name args).bind (·.lookup tag)
+  | .data name args => if tag = 0 then none else C.fields tag name args
   | .int => none
   | .fn _ _ _ _ _ _ _ => none
   | .ref _ _ => none
@@ -363,9 +395,12 @@ constructor built it. -/
 def fieldsOf (C : Cert) : Ty → Option (List Ty)
   | .tuple Fs => some Fs
   | .data name args =>
-    match findData C.datas name args with
-    | some ((_, Fs) :: rest) => if rest.all (fun c => c.2 == Fs) then some Fs else none
-    | _ => none
+    -- An array's fields are not all there is to read: it may have none.
+    if name = arrayName then none
+    else
+      match findData C.datas name args with
+      | some ((_, Fs) :: rest) => if rest.all (fun c => c.2 == Fs) then some Fs else none
+      | _ => none
   | .int => none
   | .fn _ _ _ _ _ _ _ => none
   | .ref _ _ => none
@@ -402,6 +437,9 @@ theorem placeTy_sound : ∀ {path : List Nat} {σ τ : Ty},
         | data name args =>
           simp only [fieldsOf] at hF
           split at hF
+          · cases hF
+          rename_i hname
+          split at hF
           · rename_i t Fs₀ rest hfind
             split at hF
             · rename_i hall
@@ -411,7 +449,8 @@ theorem placeTy_sound : ∀ {path : List Nat} {σ τ : Ty},
               simp only [ctorFieldsOf] at hc'
               split at hc'
               · cases hc'
-              · rw [hfind] at hc'
+              · simp only [Cert.fields, hname, ↓reduceIte] at hc'
+                rw [hfind] at hc'
                 have hm := lookup_mem (show ((t, Fs) :: rest).lookup tag = some Fs' from hc')
                 rcases List.mem_cons.mp hm with he | hm
                 · cases he
@@ -530,12 +569,117 @@ theorem closes_sound {fn : Nat} {Cs : List Ty} {θ : List Rgn} {σ : Ty} {once :
     cases h2
   · exact dupOk_all h2
 
-def checkRhs (C : Cert) (Γ : TEnv) (θ : List Rgn) : Rhs → Ty → Bool
-  | .atom a, σ => atomTy Γ a == some σ
-  | .prim _ args, σ =>
+/-- The type of an array's elements, if this is the type of arrays of some. -/
+def arrayElem : Ty → Option Ty
+  | .data name [t] => if name = arrayName then some t else none
+  | _ => none
+
+theorem arrayElem_eq {T t : Ty} (h : arrayElem T = some t) : T = .data arrayName [t] := by
+  unfold arrayElem at h
+  split at h
+  · split at h
+    · rename_i hn
+      cases h
+      rw [hn]
+    · cases h
+  · cases h
+
+/-- A constructor of the type of arrays takes so many elements. -/
+theorem array_ctor {t : Ty} {tag : Nat} {Fs : List Ty}
+    (h : CtorOf C.ctx tag (.data arrayName [t]) Fs) :
+    arrayBase ≤ tag ∧ Fs = List.replicate (tag - arrayBase) t := by
+  rcases h with ⟨_, hT⟩ | ⟨_, name, args, hT, hF⟩
+  · cases hT
+  · cases hT
+    have hF' : C.fields tag arrayName [t] = some Fs := hF
+    simp only [Cert.fields, ↓reduceIte, arrayFields] at hF'
+    split at hF'
+    · rename_i hle
+      cases hF'
+      exact ⟨hle, rfl⟩
+    · cases hF'
+
+theorem array_ctor_of {t : Ty} {tag : Nat} (h : arrayBase ≤ tag) :
+    CtorOf C.ctx tag (.data arrayName [t]) (List.replicate (tag - arrayBase) t) := by
+  refine .inr ⟨fun e => ?_, arrayName, [t], rfl, ?_⟩
+  · rw [e] at h
+    have := arrayBase_pos
+    omega
+  · show C.fields tag arrayName [t] = _
+    simp [Cert.fields, arrayFields, h]
+
+theorem arrayElem_uniform {T t : Ty} (h : arrayElem T = some t) : Uniform C.ctx T t := by
+  rw [arrayElem_eq h]
+  intro tag Fs hc σ hσ
+  obtain ⟨_, rfl⟩ := array_ctor hc
+  exact List.eq_of_mem_replicate hσ
+
+theorem arrayElem_grows {T t : Ty} (h : arrayElem T = some t) : Grows C.ctx T t := by
+  rw [arrayElem_eq h]
+  intro tag Fs hc
+  obtain ⟨hle, rfl⟩ := array_ctor hc
+  have hc' := array_ctor_of (C := C) (t := t) (tag := tag + 1) (Nat.le_succ_of_le hle)
+  have e : tag + 1 - arrayBase = (tag - arrayBase) + 1 := by omega
+  rw [e, List.replicate_succ'] at hc'
+  exact hc'
+
+theorem arrayElem_shrinks {T t : Ty} (h : arrayElem T = some t) : Shrinks C.ctx T := by
+  rw [arrayElem_eq h]
+  intro tag Fs hc hne
+  obtain ⟨hle, rfl⟩ := array_ctor hc
+  have hpos : tag - arrayBase ≠ 0 := fun e => hne (by simp [e])
+  have hc' := array_ctor_of (C := C) (t := t) (tag := tag - 1) (by omega)
+  have e : tag - 1 - arrayBase = tag - arrayBase - 1 := by omega
+  rw [e] at hc'
+  simpa [List.dropLast_replicate] using hc'
+
+/-- An intrinsic: arithmetic on two integers, or one of those on arrays. -/
+def checkPrim (C : Cert) (Γ : TEnv) (p : Prim) (args : List Atom) (σ : Ty) : Bool :=
+  match p with
+  | .arrGet =>
+    match args with
+    | [a, i] =>
+      match atomTy Γ a with
+      | some T => arrayElem T == some σ && atomTy Γ i == some .int && dupOk C σ
+      | none => false
+    | _ => false
+  | .arrSet =>
+    match args with
+    | [a, i, v] =>
+      match arrayElem σ with
+      | some t =>
+        atomTy Γ a == some σ && atomTy Γ i == some .int && atomTy Γ v == some t && dupOk C σ
+      | none => false
+    | _ => false
+  | .arrLen =>
+    match args with
+    | [a, b] => (atomTy Γ a).isSome && (atomTy Γ b).isSome && σ == .int
+    | _ => false
+  | .arrPush =>
+    match args with
+    | [a, v] =>
+      match arrayElem σ with
+      | some t => atomTy Γ a == some σ && atomTy Γ v == some t && dupOk C σ
+      | none => false
+    | _ => false
+  | .arrPop =>
+    match args with
+    | [a, b] =>
+      match atomTy Γ a with
+      | some T =>
+        match arrayElem T with
+        | some t => σ == .tuple [T, t] && (atomTy Γ b).isSome && dupOk C σ
+        | none => false
+      | none => false
+    | _ => false
+  | _ =>
     match args with
     | [a, b] => atomTy Γ a == some .int && atomTy Γ b == some .int && σ == .int
     | _ => false
+
+def checkRhs (C : Cert) (Γ : TEnv) (θ : List Rgn) : Rhs → Ty → Bool
+  | .atom a, σ => atomTy Γ a == some σ
+  | .prim p args, σ => checkPrim C Γ p args σ
   | .construct tag args, σ =>
     match ctorFieldsOf C tag σ with
     | some Fs => atomsTy Γ args == some Fs
@@ -560,12 +704,60 @@ theorem checkRhs_sound {Γ : TEnv} {θ : List Rgn} {rhs : Rhs} {σ : Ty}
     simp only [checkRhs, beq_iff_eq] at h
     exact .atom (atomTy_sound h)
   | prim p args =>
-    simp only [checkRhs] at h
+    simp only [checkRhs, checkPrim] at h
     split at h
-    · simp only [Bool.and_eq_true, beq_iff_eq] at h
-      obtain ⟨⟨ha, hb⟩, rfl⟩ := h
-      exact .prim (atomTy_sound ha) (atomTy_sound hb)
-    · cases h
+    · split at h
+      · rename_i a i
+        split at h
+        · rename_i T hT
+          simp only [Bool.and_eq_true, beq_iff_eq] at h
+          obtain ⟨⟨he, hi⟩, hd⟩ := h
+          exact .arrGet (atomTy_sound hT) (atomTy_sound hi) (arrayElem_uniform he) (dupOk_sound hd)
+        · cases h
+      · cases h
+    · split at h
+      · rename_i a i v
+        split at h
+        · rename_i t he
+          simp only [Bool.and_eq_true, beq_iff_eq] at h
+          obtain ⟨⟨⟨ha, hi⟩, hv⟩, hd⟩ := h
+          exact .arrSet (atomTy_sound ha) (atomTy_sound hi) (atomTy_sound hv)
+            (arrayElem_uniform he) (dupOk_sound hd)
+        · cases h
+      · cases h
+    · split at h
+      · rename_i a b
+        simp only [Bool.and_eq_true, beq_iff_eq, Option.isSome_iff_exists] at h
+        obtain ⟨⟨⟨T, ha⟩, ⟨U, hb⟩⟩, rfl⟩ := h
+        exact .arrLen (atomTy_sound ha) (atomTy_sound hb)
+      · cases h
+    · split at h
+      · rename_i a v
+        split at h
+        · rename_i t he
+          simp only [Bool.and_eq_true, beq_iff_eq] at h
+          obtain ⟨⟨ha, hv⟩, hd⟩ := h
+          exact .arrPush (atomTy_sound ha) (atomTy_sound hv) (arrayElem_grows he) (dupOk_sound hd)
+        · cases h
+      · cases h
+    · split at h
+      · rename_i a b
+        split at h
+        · rename_i T hT
+          split at h
+          · rename_i t he
+            simp only [Bool.and_eq_true, beq_iff_eq, Option.isSome_iff_exists] at h
+            obtain ⟨⟨rfl, ⟨U, hb⟩⟩, hd⟩ := h
+            exact .arrPop (atomTy_sound hT) (atomTy_sound hb) (arrayElem_uniform he)
+              (arrayElem_shrinks he) (dupOk_sound hd)
+          · cases h
+        · cases h
+      · cases h
+    · split at h
+      · simp only [Bool.and_eq_true, beq_iff_eq] at h
+        obtain ⟨⟨ha, hb⟩, rfl⟩ := h
+        exact .prim (atomTy_sound ha) (atomTy_sound hb)
+      · cases h
   | construct tag args =>
     simp only [checkRhs] at h
     split at h

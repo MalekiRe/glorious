@@ -501,6 +501,8 @@ structure St where
   whether what is being checked is in a block written `unsafe { .. }`. -/
   unsafeFns : List String := []
   unsafeBlock : Bool := false
+  /-- The prelude's type of arrays, by its name in this program. -/
+  arrayType : Option String := none
   dropSites : Array (Elab.DropSite × String) := #[]
   /-- How each type that is destroyed somewhere is destroyed (`TraitInfo.glue`). -/
   glue : Array (String × Option Nat × List (String × List (Option String))) := #[]

@@ -94,9 +94,26 @@ theorem dupTys_all {τs : List Ty} : dupTys C τs = true → ∀ c, c ∈ τs �
 
 /-- A declared type that is duplicable and has this constructor has duplicable fields. -/
 theorem data_fields_dup (hd : dataOk C = true) {name tag : Nat} {args Fs : List Ty}
-    (hdup : dataDup C.datas name args = true)
-    (hF : (findData C.datas name args).bind (·.lookup tag) = some Fs) :
+    (hdup : dupTy C (.data name args) = true)
+    (hF : C.fields tag name args = some Fs) :
     ∀ c, c ∈ Fs → dupTy C c = true := by
+  simp only [dupTy] at hdup
+  simp only [Cert.fields] at hF
+  split at hF
+  · -- An array of what is duplicable.
+    rename_i hname
+    simp only [hname, ↓reduceIte] at hdup
+    unfold arrayFields at hF
+    split at hF
+    · split at hF
+      · cases hF
+        intro c hc
+        rw [List.eq_of_mem_replicate hc]
+        simpa [dupTys] using hdup
+      · cases hF
+    · cases hF
+  rename_i hname
+  simp only [hname, ↓reduceIte] at hdup
   simp only [dataDup, findData] at hdup hF
   cases hf : C.datas.find? (fun d => d.name == name && d.args == args.map Ty.shape) with
   | none => simp [hf] at hdup
@@ -126,7 +143,7 @@ theorem dup_occ (hs : C.strict = true) (hd : dataOk C = true) :
     simp only [occ]
     rcases hc with ⟨_, rfl⟩ | ⟨_, name, args, rfl, hF⟩
     · exact dups_occ hs hd hf (dupTys_all (by simpa [dupTy] using hdup)) id
-    · exact dups_occ hs hd hf (data_fields_dup hd (by simpa [dupTy] using hdup) hF) id
+    · exact dups_occ hs hd hf (data_fields_dup hd hdup hF) id
   | _, _, _, .clo _ _ hc hq _ hτ, hdup, id => by
     subst hτ
     simp only [occ]

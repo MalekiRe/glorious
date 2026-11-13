@@ -1876,6 +1876,18 @@ def cases : List Case := [
     [], "[104, 195, 169, 226, 130, 172]\nOk(hi)\nOk(())"⟩,
   ⟨"extern \"C\" { fn sin(x: f64) -> f64; }\nfn main() { 0 }",
     [], "error: 1:37: a foreign function takes and gives whole numbers, an `Int` or a type such as `i32` or `usize`, not `f64`, found `}`"⟩,
+  -- An array a variable holds is changed where it is; an array of values with
+  -- `Drop` is destroyed element by element, the last first.
+  ⟨"fn main() { let mut a = []; let mut i = 0; while({ i < 50 }) { a = push(a, i * i); i = i + 1 }; a[7] = 0 - 1; say(len(a)); a[7] + a[49] }",
+    [], "50\n2400"⟩,
+  ⟨"fn fill(n: Int, out: [Int]) -> [Int] { if(n == 0) { out } else { tail fill(n - 1, push(out, n)) } }\nfn main() { let a = fill(30, []); let mut b = a; b[0] = 0; say(a[0]); say(b[0]); let mut g = [[1, 2], [3, 4]]; g[1][1] = 9; g[0] = push(g[0], 5); say(g); match(pop(b)) { Some((rest, last)) => len(rest) * 100 + last, None => 0 } }",
+    [], "30\n0\n[[1, 2, 5], [3, 9]]\n2901"⟩,
+  ⟨"fn main() { let a = [1, 2, 3]; a[0 - 1] }",
+    [], "went wrong"⟩,
+  ⟨"fn main() { let mut a = [1]; a[1] = 5; 0 }",
+    [], "went wrong"⟩,
+  ⟨"struct Array(Int)\nfn main() { let a = [1, 2]; match(Array(7)) { Array(n) => n + a[1] } }",
+    [], "9"⟩,
   -- `drop` is not for a program to call.
   ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nfn main() { let mut f = File(7); drop(&mut f); 0 }",
     [], "error: 3:34: in `main`: `drop` is run when what holds a value ends; a program does not call it"⟩,

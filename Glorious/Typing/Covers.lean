@@ -50,7 +50,8 @@ def specialize (tag n : Nat) : List (List Pat) → List (List Pat)
 /-- Every constructor of a type, with its field types. -/
 def ctorsOf (C : Cert) : Ty → Option (List (Nat × List Ty))
   | .tuple Fs => some [(0, Fs)]
-  | .data name args => findData C.datas name args
+  -- The type of arrays has a constructor for every length: no list has them all.
+  | .data name args => if name = arrayName then none else findData C.datas name args
   | .int => none
   | .fn _ _ _ _ _ _ _ => none
   | .ref _ _ => none
@@ -174,13 +175,17 @@ theorem ctorsOf_value {S : StoreTy} {v : Value} {T : Ty} {ctors : List (Nat × L
     · cases hT
   | data name args =>
     simp only [ctorsOf] at hc
+    split at hc
+    · cases hc
+    rename_i hname
     cases hv with
     | data hct hf =>
       rename_i t fields Fs'
       rcases hct with ⟨_, hT⟩ | ⟨_, name', args', hT, hF⟩
       · cases hT
       · cases hT
-        have hF' : (findData C.datas name args).bind (·.lookup t) = some Fs' := hF
+        have hF' : C.fields t name args = some Fs' := hF
+        simp only [Cert.fields, hname, ↓reduceIte] at hF'
         rw [hc] at hF'
         exact ⟨t, fields, Fs', rfl, lookup_mem hF', hf⟩
     | clo _ _ _ _ _ hτ => simp [FnSig.ty] at hτ
@@ -200,8 +205,11 @@ theorem ctorsOf_inst {T : Ty} {ctors : List (Nat × List Ty)} (θ : List Rgn)
     rfl
   | data name args =>
     simp only [ctorsOf] at hc
+    split at hc
+    · cases hc
+    rename_i hname
     rw [Ty.inst_data]
-    simp only [ctorsOf, findData_inst, hc, Option.map_some]
+    simp only [ctorsOf, hname, ↓reduceIte, findData_inst, hc, Option.map_some]
   | int => simp [ctorsOf] at hc
   | fn _ _ _ _ _ _ _ => simp [ctorsOf] at hc
   | ref _ _ => simp [ctorsOf] at hc

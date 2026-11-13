@@ -883,16 +883,17 @@ theorem scoped_safety {p : Program} (hp : ProgramOk Δ p) (hR : Δ.regions) (inp
   obtain ⟨c, hreach, hstuck, hf⟩ := type_safety hp input h
   exact ⟨c, hreach, hstuck, hf, borrow_safety hp hR input hreach, label_safety hp hR input hreach⟩
 
-/-- The result of an arithmetic intrinsic does not fit in 64 bits. -/
+/-- An intrinsic has no result: arithmetic whose result does not fit, a
+division by zero, an array read at a place that is not there. -/
 def Overflow (s : State) : Prop :=
-  ∃ q args body m n, s.tm = .let_ (.prim q args) body
-    ∧ evalAtoms s.env args = some [.int m, .int n] ∧ q.eval [.int m, .int n] = none
+  ∃ q args body vs, s.tm = .let_ (.prim q args) body
+    ∧ evalAtoms s.env args = some vs ∧ q.eval vs = none
 
 /-- Of the four faults, overflow is the one that is none of the other three. -/
 theorem Fault.overflow_of {s : State} (hf : Fault s) (h1 : ¬ Resumed s) (h2 : ¬ Freed s)
     (h3 : ¬ Dead s) : Overflow s := by
   cases hf with
-  | overflow hargs hq => exact ⟨_, _, _, _, _, rfl, hargs, hq⟩
+  | overflow hargs hq => exact ⟨_, _, _, _, rfl, hargs, hq⟩
   | freed hev hget => exact absurd ⟨_, _, _, _, _, _, rfl, hev, hget⟩ h2
   | resumed hc hev hget => exact absurd ⟨_, _, hc, hev, hget⟩ h1
   | dead hc hev hnone => exact absurd ⟨_, _, hc, hev, hnone⟩ h3
