@@ -871,8 +871,9 @@ label. Effects not yet named are none at all unless something can supply
 them: a callable the function was given, or one kept in a declared type. -/
 def runLowerChecks (fnTy : Ty) : M Unit := do
   let s ← get
-  modify fun st => { st with calls := #[], lowerChecks := #[], abandoned := #[], envGroups := #[] }
-  unless s.anyMust || !s.envGroups.isEmpty do return
+  modify fun st =>
+    { st with calls := #[], lowerChecks := #[], abandoned := #[], envGroups := #[], envAfter := #[] }
+  unless s.anyMust || !s.envGroups.isEmpty || !s.envAfter.isEmpty do return
   let mut sources : List Nat := []
   if let .fn ps _ _ _ _ ← zonk fnTy then
     sources := ps.flatMap freeRows
@@ -990,6 +991,23 @@ def runLowerChecks (fnTy : Ty) : M Unit := do
           throw s!"the environment `{env}` has to be used: on some path none of {listed} is called"
       | none =>
         throw s!"the environment `{env}` has to be used: it could not be shown that every path calls one of {listed}"
+  -- An environment that is there only once a callable has run: nothing runs in
+  -- it before. A path is followed up to the first call that leaves the
+  -- environment, and no call of one that runs in it may be on it.
+  for (env, producers, members, names, body) in s.envAfter do
+    let known :=
+      (producers.map fun (x, arity) =>
+        (x, AVal.clo [.mk (List.replicate arity Pattern.wild) [.expr (.name none "%left")]]
+          [("%left", AVal.gone "%after")]))
+      ++ members.map fun (x, arity) =>
+        (x, AVal.clo [.mk (List.replicate arity Pattern.wild) [.expr (.proj (.name none "%env") 0)]]
+          [("%env", AVal.tracked)])
+    let outer := names.filter fun n => !known.any (·.1 == n)
+    let listed := fun (xs : List (String × Nat)) => ", ".intercalate (xs.map fun (x, _) => s!"`{x}`")
+    match pathUses { ctx with lower := false } outer "%env" body known with
+    | some 0 => pure ()
+    | _ =>
+      throw s!"{listed members} runs in the environment `{env}`, which is there only once {listed producers} has run: on some path it is called first"
   if relied then
     for (_, callee) in conditional do
       modify fun st => { st with stays := st.stays.push (callee,

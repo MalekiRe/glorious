@@ -365,6 +365,11 @@ structure St where
   it takes, whether one of them has to be called, the other names in scope,
   and the function's body. At most one of them can be called on a path. -/
   envGroups : Array (String × List (String × Nat) × Bool × List String × List Stmt) := #[]
+  /-- Environments that are there only once a callable has run, `After = E2`:
+  the environment, the callables that leave it, those that run in it, the
+  other names in scope, and the function's body. None of those that run in
+  it is called before one of those that leave it. -/
+  envAfter : Array (String × List (String × Nat) × List (String × Nat) × List String × List Stmt) := #[]
   /-- For a function whose callables share an environment and take no
   arguments: which of its parameters they are, the first being the one that
   holds the environment; and the same by name. A caller builds the others

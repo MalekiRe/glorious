@@ -784,10 +784,15 @@ Core's ownership rules accept the result: `pick(c, { k(1) }, { k(2) })` with
 without the bound it is only well typed. With `Use<[1, 1]>` the blocks may
 hold a value that has to be used, if every one of them holds it.
 
+`After = E2` says what a callable leaves: an environment in which others
+run only once it has. The function's body is followed along each path up to
+the first call that leaves `E2`, and no call of one that runs in `E2` may be
+on it. `L: Label<T>` is a label that takes a `T`.
+
 Limits. A function with callables that share an environment is called where
-it is named, and is given blocks or names for them. `After` is not built:
-nothing says what an environment is once a callable has run in it, so a
-callable given `E` cannot be followed by another given what the first left.
+it is named, and is given blocks or names for them. `After` orders the
+calls and no more: what the first callable captured is not handed to the
+second.
 Callables given `&E` or `&mut E` are not counted at all, nor ordered against
 one given `E`. The lifetime of `Environment<'e>` is read and not used. A
 callable of a trait's function, `Label<T>`, and `unsafe Fn` are not built. An

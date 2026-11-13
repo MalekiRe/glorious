@@ -859,7 +859,7 @@ partial def resolveItem (ctx : Ctx) : Item → R (List Item)
       | some ps => genericParams ps
       | none => []
     let bounds ← bounds.mapM fun b => do
-      let sealed_ := ["Fn", "RunsIn", "Environment", "Use"].contains b.trait || b.trait.startsWith "'"
+      let sealed_ := ["Fn", "RunsIn", "Environment", "Use", "Label"].contains b.trait || b.trait.startsWith "'"
       let trait ← if sealed_ then pure b.trait else (·.1) <$> resolveNamed ctx .trait [] b.trait
       let args ← b.args.mapM (resolveType ctx generics)
       let assoc ← b.assoc.mapM fun (name, t) => do pure (name, ← resolveType ctx generics t)

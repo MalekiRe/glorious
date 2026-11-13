@@ -1779,6 +1779,18 @@ def cases : List Case := [
     [], "7\n(5, 6)"⟩,
   ⟨"fn main() { let mut x = (1, 2); let a = &mut x.0; print(7); let b = &mut x.1; *a = 5; print(x.0); *b = 6; x }",
     [], "error: in `main`: the borrow of a field kept in `b` is made while another lasts and is used after that one is done with: make it before the other, or straight after it"⟩,
+  -- `After = E2`: an environment a callable leaves, in which another runs
+  -- only once it has. `Label<T>`: a label that takes a `T`.
+  ⟨"fn seq<'e, E, E2, A, B>(a: A, b: B) -> Int where E: Environment<'e>, E2: Environment<'e>, A: RunsIn<E, (), Output = Int, After = E2>, B: RunsIn<E2, (), Output = Int> { let x = a(); x + b() }\nfn main() { let mut n = 1; seq({ n = n + 1; n }, { n * 10 }) }",
+    [], "22"⟩,
+  ⟨"fn seq<'e, E, E2, A, B>(a: A, b: B) -> Int where E: Environment<'e>, E2: Environment<'e>, A: RunsIn<E, (), Output = Int, After = E2>, B: RunsIn<E2, (), Output = Int> { let y = b(); y + a() }\nfn main() { 0 }",
+    [], "error: in `seq`: `b` runs in the environment `E2`, which is there only once `a` has run: on some path it is called first"⟩,
+  ⟨"fn seq<'e, E, E2, A, B>(c: Bool, a: A, b: B) -> Int where E: Environment<'e>, E2: Environment<'e>, A: RunsIn<E, (), Output = Int, After = E2>, B: RunsIn<E2, (), Output = Int> { match(c) { Ok(_) => a() + b(), Err(_) => b() } }\nfn main() { 0 }",
+    [], "error: in `seq`: `b` runs in the environment `E2`, which is there only once `a` has run: on some path it is called first"⟩,
+  ⟨"fn seq<'e, E, E2, A, B>(a: A, b: B) -> Int where E: Environment<'e>, E2: Environment<'e>, A: RunsIn<E, (), Output = Int, After = E2>, B: RunsIn<E2, (), Output = Int> { a() + b() + b() }\nfn main() { 0 }",
+    [], "error: in `seq`: `b` run in the environment `E2`, which is used up by the first that is called: on some path more than one call is made"⟩,
+  ⟨"fn jump<L>(out: L) -> Int where L: Label<Int> { out(5); 0 }\nfn main() { @done { jump(@done) + 1 } }",
+    [], "5"⟩,
   -- `drop` is not for a program to call.
   ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nfn main() { let mut f = File(7); drop(&mut f); 0 }",
     [], "error: 3:34: in `main`: `drop` is run when what holds a value ends; a program does not call it"⟩,

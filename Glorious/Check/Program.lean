@@ -376,7 +376,7 @@ def checkGroup (decls : List FnDecl) : M Unit := do
                  outlives := bounds }
       -- A type parameter said to be a callable is the type of that callable:
       -- `F: Fn<(A, B), Output = R, Effects = {E}>` is `fn(A, B) -> R / {E}`.
-      let callable := fun (b : Syntax.Bound) => b.trait == "Fn" || b.trait == "RunsIn"
+      let callable := fun (b : Syntax.Bound) => b.trait == "Fn" || b.trait == "RunsIn" || b.trait == "Label"
       for b in d.bounds do
         unless (genericParams d.params).contains b.subject do
           throw s!"`{b.subject}: {b.trait}`: `{b.subject}` is not a type parameter of `{d.name}`"
@@ -386,7 +386,7 @@ def checkGroup (decls : List FnDecl) : M Unit := do
       for b in d.bounds do
         if callable b then
           for (name, _) in b.assoc do
-            unless name == "Output" || name == "Effects" do
+            unless name == "Output" || name == "Effects" || (name == "After" && b.trait == "RunsIn") do
               throw s!"`{b.subject}: {b.trait}`: `{name}` cannot be said of a callable here (`Output` and `Effects` can)"
           let args := if b.trait == "RunsIn" then b.args.drop 1 else b.args
           let out := (b.assoc.lookup "Output").getD .hole
@@ -458,6 +458,33 @@ def checkGroup (decls : List FnDecl) : M Unit := do
                     :: s.fnGroups.filter (·.1 != d.name)
                   envFns := (d.name, members.map (·.1) :: ((s.envFns.lookup d.name).getD []))
                     :: s.envFns.filter (·.1 != d.name) }
+      -- `After = E2`: the environment a callable leaves, in which others run
+      -- only once it has.
+      let (pats', body') := match d.clauses with
+        | [.mk pats body] => (pats, body)
+        | _ => ([], [])
+      let named := fun (f : String) => (pats'.zip d.annots).filterMap fun (pat, annot) =>
+        match pat, annot with
+        | .var x, some (.name g []) => if g == f then some x else none
+        | _, _ => none
+      for env in environments do
+        let leaving := d.bounds.filterMap fun b =>
+          match b.trait, b.assoc.lookup "After" with
+          | "RunsIn", some (.name e []) => if e == env then some (b.subject, b.args.length - 1) else none
+          | _, _ => none
+        let running := d.bounds.filterMap fun b =>
+          match b.trait, b.args.head? with
+          | "RunsIn", some (.name e []) => if e == env then some (b.subject, b.args.length - 1) else none
+          | _, _ => none
+        unless leaving.isEmpty do
+          let producers := leaving.flatMap fun (f, arity) => (named f).map (·, arity)
+          let members := running.flatMap fun (f, arity) => (named f).map (·, arity)
+          modify fun s =>
+            { s with envAfter := s.envAfter.push (env, producers, members, pats'.flatMap Elab.patVars, body') }
+      for b in d.bounds do
+        if let some (.name e []) := b.assoc.lookup "After" then
+          unless environments.contains e do
+            throw s!"`{b.subject}: RunsIn<.., After = {e}>`: `{e}` is not said to be an environment (`{e}: Environment<'e>`)"
       for b in d.bounds do
         if b.trait == "RunsIn" then
           let env := match b.args.head? with
