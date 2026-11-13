@@ -231,6 +231,66 @@ inductive TypeExpr where
   | hole
   deriving Inhabited
 
+/-- A type as it is written in the name of a trait at its arguments,
+`From<Option<Int>>`: one spelling for one type. -/
+partial def TypeExpr.spell : TypeExpr → String
+  | .name x [] => x
+  | .name x args => s!"{x}<{", ".intercalate (args.map spell)}>"
+  | .tuple args => s!"({", ".intercalate (args.map spell)})"
+  | .fn ps r => s!"fn({", ".intercalate (ps.map spell)}) -> {spell r}"
+  | .performs r _ => spell r
+  | .ref uniq t _ => (if uniq then "&mut " else "&") ++ spell t
+  | .never => "!"
+  | .hole => "_"
+
+/-- A trait at arguments, as one name: `From<Int>`. Without arguments it is
+the trait's own name. -/
+def traitAt (trait : String) (args : List String) : String :=
+  if args.isEmpty then trait else s!"{trait}<{", ".intercalate args}>"
+
+/-- The trait such a name is of. -/
+def traitBase (name : String) : String := (name.splitOn "<").headD name
+
+/-- The name under which an implementation keeps the `i`-th argument it gives
+its trait, among what it declares. -/
+def traitArgName (i : Nat) : String := s!"%traitArg{i}"
+
+/-- `let x: Type = value` leaves the parser as `let x = %as(value, type)`,
+the type written as an expression so that it can sit among expressions: see
+`TypeExpr.asExpr`. The checker makes the value that type; after it the value
+stands alone. -/
+def ascribeMark : String := "%as"
+
+/-- A type as an expression, for the one place a type sits among expressions. -/
+partial def TypeExpr.asExpr : TypeExpr → Expr
+  | .name x args => .call 0 (.name none ("%ty:" ++ x)) (args.map asExpr)
+  | .tuple args => .call 0 (.name none "%ty(tuple)") (args.map asExpr)
+  | .fn ps r => .call 0 (.name none "%ty(fn)") (asExpr r :: ps.map asExpr)
+  | .performs r effects =>
+    .call 0 (.name none "%ty(performs)")
+      (asExpr r :: effects.map fun (e, args) => .call 0 (.name none ("%ty:" ++ e)) (args.map asExpr))
+  | .ref uniq t life =>
+    .call 0 (.name none (if uniq then "%ty(refmut)" else "%ty(ref)"))
+      [asExpr t, .name none ("%ty:" ++ life.getD "")]
+  | .never => .name none "%ty(never)"
+  | .hole => .name none "%ty(hole)"
+
+/-- The type an expression made by `TypeExpr.asExpr` is. -/
+partial def TypeExpr.ofExpr : Expr → TypeExpr
+  | .call _ (.name none "%ty(tuple)") args => .tuple (args.map ofExpr)
+  | .call _ (.name none "%ty(fn)") (r :: ps) => .fn (ps.map ofExpr) (ofExpr r)
+  | .call _ (.name none "%ty(performs)") (r :: effects) =>
+    .performs (ofExpr r) (effects.filterMap fun
+      | .call _ (.name none e) args => some ((e.drop 4).toString, args.map ofExpr)
+      | _ => none)
+  | .call _ (.name none "%ty(refmut)") [t, .name none life] =>
+    .ref true (ofExpr t) (if life == "%ty:" then none else some (life.drop 4).toString)
+  | .call _ (.name none "%ty(ref)") [t, .name none life] =>
+    .ref false (ofExpr t) (if life == "%ty:" then none else some (life.drop 4).toString)
+  | .call _ (.name none x) args => .name (x.drop 4).toString (args.map ofExpr)
+  | .name none "%ty(never)" => .never
+  | _ => .hole
+
 /-! Generic parameters are written in one list: type parameters, lifetimes
 (`'a`), and the bounds on lifetimes, each kept as `'b: 'a`, which says `'b`
 lasts at least as long as `'a`. -/
@@ -335,6 +395,12 @@ inductive Item where
   | fieldNames (ctor : String) (names : List String) (pubs : List Bool)
   /-- `type Name<T> = Type;`: another way to write a type, not a new one. -/
   | typeAlias (name : String) (params : List String) (body : TypeExpr)
+  /-- What a trait has beside its functions: the traits a type must have to
+  have it (`trait Ord: Eq`), the functions it gives a body, which an
+  implementation that does not give them gets, its own type parameters
+  (`trait From<T>`), and the types an implementation is to say (`type Item;`). -/
+  | traitInfo (name : String) (supers : List String) (defaults : List Item)
+      (params : List String) (assocs : List String)
   /-- What is written of the type parameters of the function `fn`, beside
   the function. -/
   | bounds (fn : String) (bounds : List Bound)

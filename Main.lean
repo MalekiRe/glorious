@@ -172,6 +172,21 @@ def certify (path : String) (strict : Bool) : IO UInt32 := do
     IO.eprintln s!"{path}: {e}"
     pure 1
 
+/-- For each file: what Core shows of the program, then what it writes and
+gives, or why it does not compile. For trying programs quickly. -/
+def probe (paths : List String) : IO UInt32 := do
+  for path in paths do
+    let src ← IO.FS.readFile path
+    let files ← moduleFiles path
+    match compileSource src true files with
+    | .error e => IO.println s!"error: {e}"
+    | .ok c =>
+      let cert := c.cert
+      let shown := s!"strict={(cert.map (·.strict)).getD false} regions={(cert.map (·.regions)).getD false} loans={(cert.map (·.loans)).getD false} scopes={c.lent} plain={c.plain.length}"
+      IO.println s!"{shown} => {evalSource src [] 200000 files}"
+    IO.println "--"
+  pure 0
+
 def parseInput (args : List String) : Except String (List Int) :=
   args.mapM fun a =>
     match a.toInt? with
@@ -182,6 +197,7 @@ def main (args : List String) : IO UInt32 := do
   match args with
   | ["certify", path] => certify path false
   | ["certify", "--strict", path] => certify path true
+  | "probe" :: paths => probe paths
   | ["selftest"] => selftest none
   | ["selftest", vm] => selftest (some vm)
   | ["build", path, out] =>

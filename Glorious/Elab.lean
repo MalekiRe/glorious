@@ -771,6 +771,9 @@ partial def elabExpr (scope : Scope) (tailPos : Bool) : Expr → M Atom
     | .var i => emit (.let_ (.place ⟨i, [idx]⟩))
     | .int _ => throw "an integer has no fields"
   | .call id f args => do
+    -- A value written with its type is the value: the type was the checker's.
+    if let (.name none mark, [value, _]) := (f, args) then
+      if mark == Syntax.ascribeMark then return ← elabExpr scope tailPos value
     let before := (← get).plain.length
     let r ← elabCall scope false f args
     -- The borrow a destruction passes is the compiler's, not the program's.
@@ -1975,6 +1978,7 @@ def collect (items : List Item) :
     -- And modules: every name is one name of the whole program by now.
     | .pub _ _ => pure ()
     | .bounds _ _ => pure ()
+    | .traitInfo _ _ _ _ _ => pure ()
     | .module _ _ => pure ()
     | .import _ _ _ => pure ()
     | .trait name _ =>

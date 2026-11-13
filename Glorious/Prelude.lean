@@ -130,15 +130,16 @@ infix 4 <=
 infix 4 >=
 infix 4 ==
 infix 4 !=
+// A type says what `==` and `<` are; the rest follow, unless it says them too.
 trait Eq {
     fn ==(Self, Self) -> Bool
-    fn !=(Self, Self) -> Bool
+    fn !=(a: Self, b: Self) -> Bool { not (a == b) }
 }
-trait Ord {
+trait Ord: Eq {
     fn <(Self, Self) -> Bool
-    fn >(Self, Self) -> Bool
-    fn <=(Self, Self) -> Bool
-    fn >=(Self, Self) -> Bool
+    fn >(a: Self, b: Self) -> Bool { b < a }
+    fn <=(a: Self, b: Self) -> Bool { not (b < a) }
+    fn >=(a: Self, b: Self) -> Bool { not (a < b) }
 }
 
 impl Add for Int { fn +(a, b) { int_add(a, b) } }
@@ -261,16 +262,8 @@ impl Mul for {t} \{ fn *(a, b) {op mul} }
 impl Div for {t} \{ fn /(a, b) {op "int_div"} }
 impl Rem for {t} \{ fn %(a, b) {op "int_rem"} }
 impl Neg for {t} \{ fn negate(a) {test s!"{t}_of(int_fit(wide_sub(0, {t}_bits(a)), {width}))"} }
-impl Eq for {t} \{
-    fn ==(a, b) {test s!"bool(int_eq({t}_bits(a), {t}_bits(b)))"}
-    fn !=(a, b) {test s!"not bool(int_eq({t}_bits(a), {t}_bits(b)))"}
-}
-impl Ord for {t} \{
-    fn <(a, b) {test s!"bool(int_lt({t}_bits(a), {t}_bits(b)))"}
-    fn >(a, b) {test s!"bool(int_lt({t}_bits(b), {t}_bits(a)))"}
-    fn <=(a, b) {test s!"not bool(int_lt({t}_bits(b), {t}_bits(a)))"}
-    fn >=(a, b) {test s!"not bool(int_lt({t}_bits(a), {t}_bits(b)))"}
-}
+impl Eq for {t} \{ fn ==(a, b) {test s!"bool(int_eq({t}_bits(a), {t}_bits(b)))"} }
+impl Ord for {t} \{ fn <(a, b) {test s!"bool(int_lt({t}_bits(a), {t}_bits(b)))"} }
 impl Bits for {t} \{
     fn bit_and(a, b) {test s!"{t}_of(int_and({t}_bits(a), {t}_bits(b)))"}
     fn bit_or(a, b) {test s!"{t}_of(int_or({t}_bits(a), {t}_bits(b)))"}
@@ -279,6 +272,10 @@ impl Bits for {t} \{
     fn shr(a, n) {test s!"{t}_of(int_shr({t}_bits(a), n))"}
 }
 impl ToInt for {t} \{ fn int(x) {test s!"int_fit({t}_bits(x), 64)"} }
+impl Whole for {t} \{
+    fn whole(x) {test s!"i128_of({t}_bits(x))"}
+    fn of_whole(n) {test s!"{t}_of(int_fit(i128_bits(n), {width}))"}
+}
 impl Show for {t} \{ fn show(x) {test s!"show_whole({t}_bits(x))"} }
 fn {t}(n: Int) -> {t} {test s!"{t}_of(int_fit(n, {width}))"}
 "
@@ -295,16 +292,8 @@ impl Sub for {t} \{ fn -(a, b) {op "uw_sub"} }
 impl Mul for {t} \{ fn *(a, b) {op "uw_mul"} }
 impl Div for {t} \{ fn /(a, b) {op "uw_div"} }
 impl Rem for {t} \{ fn %(a, b) {op "uw_rem"} }
-impl Eq for {t} \{
-    fn ==(a, b) {test s!"bool(int_eq({t}_bits(a), {t}_bits(b)))"}
-    fn !=(a, b) {test s!"not bool(int_eq({t}_bits(a), {t}_bits(b)))"}
-}
-impl Ord for {t} \{
-    fn <(a, b) {test s!"bool(uw_lt({t}_bits(a), {t}_bits(b)))"}
-    fn >(a, b) {test s!"bool(uw_lt({t}_bits(b), {t}_bits(a)))"}
-    fn <=(a, b) {test s!"not bool(uw_lt({t}_bits(b), {t}_bits(a)))"}
-    fn >=(a, b) {test s!"not bool(uw_lt({t}_bits(a), {t}_bits(b)))"}
-}
+impl Eq for {t} \{ fn ==(a, b) {test s!"bool(int_eq({t}_bits(a), {t}_bits(b)))"} }
+impl Ord for {t} \{ fn <(a, b) {test s!"bool(uw_lt({t}_bits(a), {t}_bits(b)))"} }
 impl Bits for {t} \{
     fn bit_and(a, b) {op "int_and"}
     fn bit_or(a, b) {op "int_or"}
@@ -313,6 +302,10 @@ impl Bits for {t} \{
     fn shr(a, n) {test s!"{t}_of(uw_shr({t}_bits(a), n))"}
 }
 impl ToInt for {t} \{ fn int(x) {test s!"int_fit({t}_bits(x), -63)"} }
+impl Whole for {t} \{
+    fn whole(x) {test s!"i128_of(int_fit({t}_bits(x), -127))"}
+    fn of_whole(n) {test s!"{t}_of(int_fit(i128_bits(n), -127))"}
+}
 impl Show for {t} \{ fn show(x) {test s!"unsigned_digits({t}_bits(x), StrEnd)"} }
 fn {t}(n: Int) -> {t} {test s!"{t}_of(int_fit(n, -63))"}
 "
@@ -330,6 +323,26 @@ type i64 = Int;
 // what is before its point.
 trait ToInt { fn int(Self) -> Int }
 impl ToInt for Int { fn int(x) { x } }
+
+// A whole number of one type as one of another, `let b: u8 = to(n)`, if it
+// fits: through the widest type, which holds every value but the upper half
+// of `u128`.
+trait Whole {
+    fn whole(Self) -> i128
+    fn of_whole(i128) -> Self
+}
+impl Whole for Int {
+    fn whole(x) { i128_of(x) }
+    fn of_whole(n) { int_fit(i128_bits(n), 64) }
+}
+impl Whole for char {
+    fn whole(c) { i128_of(char_bits(c)) }
+    fn of_whole(n) { char(int_fit(i128_bits(n), 64)) else { '\u{FFFD}' } }
+}
+fn to(x) { of_whole(whole(x)) }
+
+// One type made from another: `impl From<Meters> for Feet`.
+trait From<T> { fn from(T) -> Self }
 
 // Text: the characters, one after another.
 enum Str { StrEnd, StrChar(char, Str) }
@@ -358,7 +371,6 @@ impl Eq for Str {
             _ => false
         }
     }
-    fn !=(a, b) { not (a == b) }
 }
 
 // A value as text.
@@ -491,16 +503,8 @@ impl<T, E> Show for Result<T, E> where T: Show, E: Show {
 fn say(value) { host_write(show(value)) }
 
 // A character is its code: any but the codes kept for pairs, up to 10FFFF.
-impl Eq for char {
-    fn ==(a, b) { bool(int_eq(char_bits(a), char_bits(b))) }
-    fn !=(a, b) { not bool(int_eq(char_bits(a), char_bits(b))) }
-}
-impl Ord for char {
-    fn <(a, b) { bool(int_lt(char_bits(a), char_bits(b))) }
-    fn >(a, b) { bool(int_lt(char_bits(b), char_bits(a))) }
-    fn <=(a, b) { not bool(int_lt(char_bits(b), char_bits(a))) }
-    fn >=(a, b) { not bool(int_lt(char_bits(a), char_bits(b))) }
-}
+impl Eq for char { fn ==(a, b) { bool(int_eq(char_bits(a), char_bits(b))) } }
+impl Ord for char { fn <(a, b) { bool(int_lt(char_bits(a), char_bits(b))) } }
 impl ToInt for char { fn int(c) { char_bits(c) } }
 fn char(code: Int) -> Option<char> {
     match(int_add(int_lt(code, 0), int_add(int_lt(1114111, code),

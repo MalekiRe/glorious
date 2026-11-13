@@ -311,6 +311,125 @@ private def infixOf (t : Tok) : P (Option (String × Nat × Assoc)) := do
   | some s => pure ((fix.infixes.lookup s).map fun (prec, assoc) => (s, prec, assoc))
   | none => pure none
 
+private def isOp (s : String) : P Bool := do
+  pure ((← peek) == .op s)
+
+private def expectOp (s : String) : P Unit := do
+  if (← peek) == .op s then advance else failAt s!"expected `{s}`"
+
+mutual
+
+private partial def parseType : P TypeExpr := do
+  match ← peek with
+  | .op "!" =>
+    advance
+    pure .never
+  | .op "&" =>
+    advance
+    let life ← match ← peek with
+      | .ident x =>
+        if x.startsWith "'" then
+          advance
+          pure (some x)
+        else pure none
+      | _ => pure none
+    let uniq := (← peek) == .ident "mut"
+    if uniq then advance
+    pure (.ref uniq (← parseType) life)
+  | .ident "_" =>
+    advance
+    pure .hole
+  | .ident "fn" =>
+    advance
+    expectPunct "("
+    let params ← parseTypeList ")"
+    let ret ← if ← acceptPunct "->" then parseResult else pure (.tuple [])
+    pure (.fn params ret)
+  | .ident x =>
+    advance
+    if x == "for" && (← isOp "<") then
+      -- `for<'a> fn(&'a T) -> R`: a callable for every such lifetime.
+      advance
+      let mut lifetimes : Array TypeExpr := #[]
+      repeat
+        if ← isOp ">" then break
+        let l ← expectIdent
+        unless l.startsWith "'" do failAt "expected a lifetime: `for<'a>`"
+        lifetimes := lifetimes.push (.name l [])
+        if !(← acceptPunct ",") then break
+      expectOp ">"
+      let inner ← parseType
+      return .name rankedMark (lifetimes.toList ++ [inner])
+    let x := "::".intercalate (← parsePathRest x)
+    if ← isOp "<" then
+      advance
+      let mut args : Array TypeExpr := #[]
+      repeat
+        if ← isOp ">" then break
+        args := args.push (← parseType)
+        if !(← acceptPunct ",") then break
+      expectOp ">"
+      pure (.name x args.toList)
+    else pure (.name x [])
+  | .punct "(" =>
+    advance
+    let args ← parseTypeList ")"
+    match args with
+    | [t] => pure t
+    | _ => pure (.tuple args)
+  | _ => failAt "expected a type"
+
+/-- What follows `->` in a callable: its result, which may be left out when
+it is unit, and then `/ {Effect, ...}` if what it performs is to be said. -/
+private partial def parseResult : P TypeExpr := do
+  let startsType := match ← peek with
+    | .ident _ => true
+    | .punct "(" => true
+    | .op "!" => true
+    | .op "&" => true
+    | _ => false
+  let ret ← if startsType then parseType else pure (.tuple [])
+  if (← peek) == .op "/" then
+    advance
+    expectPunct "{"
+    let mut effects : Array (String × List TypeExpr) := #[]
+    repeat
+      if (← peek) == .punct "}" then break
+      let name ← expectPath
+      let mut args : Array TypeExpr := #[]
+      if (← peek) == .op "<" then
+        advance
+        repeat
+          if (← peek) == .op ">" then break
+          args := args.push (← parseType)
+          if !(← acceptPunct ",") then break
+        match ← peek with
+        | .op ">" => advance
+        | _ => failAt "expected `>`"
+      effects := effects.push (name, args.toList)
+      if !(← acceptPunct ",") then break
+    expectPunct "}"
+    pure (.performs ret effects.toList)
+  else pure ret
+
+/-- Types separated by commas up to and including the closing punctuation. An
+item may be written `name: Type`. -/
+private partial def parseTypeList (close : String) : P (List TypeExpr) := do
+  let mut out : Array TypeExpr := #[]
+  repeat
+    if (← peek) == .punct close then break
+    match ← peek, ← peek 1 with
+    | .ident _, .punct ":" =>
+      advance
+      advance
+    | _, _ => pure ()
+    out := out.push (← parseType)
+    if !(← acceptPunct ",") then break
+  expectPunct close
+  pure out.toList
+
+end
+
 mutual
 
 private partial def parsePattern : P Pattern := do
@@ -650,14 +769,23 @@ private partial def parseStmts : P (List Stmt) := do
       if (← peek) == .ident "mut" then
         advance
         let name ← expectIdent
+        let typed ← if ← acceptPunct ":" then some <$> parseType else pure none
         expectPunct "="
         let value ← parseBinary 0 false
+        let value := match typed with
+          | some ty => Expr.call 0 (.name none ascribeMark) [value, ty.asExpr]
+          | none => value
         expectPunct ";"
         out := out ++ (← settle (.letMut name value)).toArray
       else
         let pat ← parsePattern
+        -- `let x: Type = value`: the value is made that type.
+        let typed ← if ← acceptPunct ":" then some <$> parseType else pure none
         expectPunct "="
         let value ← parseBinary 0 false
+        let value := match typed with
+          | some ty => Expr.call 0 (.name none ascribeMark) [value, ty.asExpr]
+          | none => value
         expectPunct ";"
         out := out ++ (← settle (.let_ pat value)).toArray
     else if t == .ident "defer" then
@@ -688,124 +816,6 @@ private partial def parseStmts : P (List Stmt) := do
 
 end
 
-private def isOp (s : String) : P Bool := do
-  pure ((← peek) == .op s)
-
-private def expectOp (s : String) : P Unit := do
-  if (← peek) == .op s then advance else failAt s!"expected `{s}`"
-
-mutual
-
-private partial def parseType : P TypeExpr := do
-  match ← peek with
-  | .op "!" =>
-    advance
-    pure .never
-  | .op "&" =>
-    advance
-    let life ← match ← peek with
-      | .ident x =>
-        if x.startsWith "'" then
-          advance
-          pure (some x)
-        else pure none
-      | _ => pure none
-    let uniq := (← peek) == .ident "mut"
-    if uniq then advance
-    pure (.ref uniq (← parseType) life)
-  | .ident "_" =>
-    advance
-    pure .hole
-  | .ident "fn" =>
-    advance
-    expectPunct "("
-    let params ← parseTypeList ")"
-    let ret ← if ← acceptPunct "->" then parseResult else pure (.tuple [])
-    pure (.fn params ret)
-  | .ident x =>
-    advance
-    if x == "for" && (← isOp "<") then
-      -- `for<'a> fn(&'a T) -> R`: a callable for every such lifetime.
-      advance
-      let mut lifetimes : Array TypeExpr := #[]
-      repeat
-        if ← isOp ">" then break
-        let l ← expectIdent
-        unless l.startsWith "'" do failAt "expected a lifetime: `for<'a>`"
-        lifetimes := lifetimes.push (.name l [])
-        if !(← acceptPunct ",") then break
-      expectOp ">"
-      let inner ← parseType
-      return .name rankedMark (lifetimes.toList ++ [inner])
-    let x := "::".intercalate (← parsePathRest x)
-    if ← isOp "<" then
-      advance
-      let mut args : Array TypeExpr := #[]
-      repeat
-        if ← isOp ">" then break
-        args := args.push (← parseType)
-        if !(← acceptPunct ",") then break
-      expectOp ">"
-      pure (.name x args.toList)
-    else pure (.name x [])
-  | .punct "(" =>
-    advance
-    let args ← parseTypeList ")"
-    match args with
-    | [t] => pure t
-    | _ => pure (.tuple args)
-  | _ => failAt "expected a type"
-
-/-- What follows `->` in a callable: its result, which may be left out when
-it is unit, and then `/ {Effect, ...}` if what it performs is to be said. -/
-private partial def parseResult : P TypeExpr := do
-  let startsType := match ← peek with
-    | .ident _ => true
-    | .punct "(" => true
-    | .op "!" => true
-    | .op "&" => true
-    | _ => false
-  let ret ← if startsType then parseType else pure (.tuple [])
-  if (← peek) == .op "/" then
-    advance
-    expectPunct "{"
-    let mut effects : Array (String × List TypeExpr) := #[]
-    repeat
-      if (← peek) == .punct "}" then break
-      let name ← expectPath
-      let mut args : Array TypeExpr := #[]
-      if (← peek) == .op "<" then
-        advance
-        repeat
-          if (← peek) == .op ">" then break
-          args := args.push (← parseType)
-          if !(← acceptPunct ",") then break
-        match ← peek with
-        | .op ">" => advance
-        | _ => failAt "expected `>`"
-      effects := effects.push (name, args.toList)
-      if !(← acceptPunct ",") then break
-    expectPunct "}"
-    pure (.performs ret effects.toList)
-  else pure ret
-
-/-- Types separated by commas up to and including the closing punctuation. An
-item may be written `name: Type`. -/
-private partial def parseTypeList (close : String) : P (List TypeExpr) := do
-  let mut out : Array TypeExpr := #[]
-  repeat
-    if (← peek) == .punct close then break
-    match ← peek, ← peek 1 with
-    | .ident _, .punct ":" =>
-      advance
-      advance
-    | _, _ => pure ()
-    out := out.push (← parseType)
-    if !(← acceptPunct ",") then break
-  expectPunct close
-  pure out.toList
-
-end
 
 /-- The fields of a constructor, struct or operation, if any are written. -/
 private def parseFields : P (List TypeExpr) := do
@@ -1053,32 +1063,25 @@ private partial def parseItem : P Item := do
     let value ← parseBinary 0 false
     expectPunct ";"
     pure (.alias name value)
-  | .ident "trait" =>
-    advance
-    let name ← expectIdent
-    expectPunct "{"
-    let mut methods : Array (String × List TypeExpr × Option TypeExpr) := #[]
-    repeat
-      if (← peek) == .punct "}" then break
-      match ← peek with
-      | .ident "fn" => advance
-      | _ => failAt "expected `fn`: a trait lists the functions a type must have"
-      let m ← match ← peek with
-        | .op s => do
-          advance
-          pure s
-        | _ => expectIdent
-      expectPunct "("
-      let params ← parseTypeList ")"
-      let ret ← if ← acceptPunct "->" then some <$> parseType else pure none
-      methods := methods.push (m, params, ret)
-      let _ ← acceptPunct ";"
-    expectPunct "}"
-    pure (.trait name methods.toList)
   | .ident "impl" =>
     advance
     let params ← parseGenerics
     let tr ← expectPath
+    -- `impl From<Int> for u8`: the trait's own arguments, kept among what
+    -- the implementation declares.
+    let mut given : Array Item := #[]
+    if tr != "Use" && (← isOp "<") then
+      advance
+      repeat
+        if ← isOp ">" then break
+        match ← peek with
+        | .ident l =>
+          -- A lifetime here is only a name: nothing is given for it.
+          if l.startsWith "'" then advance
+          else given := given.push (.typeAlias (traitArgName given.size) [] (← parseType))
+        | _ => given := given.push (.typeAlias (traitArgName given.size) [] (← parseType))
+        if !(← acceptPunct ",") then break
+      expectOp ">"
     if tr == "Use" && (← isOp "<") then
       advance
       let (lower, upper) ← parseQuantity
@@ -1115,11 +1118,19 @@ private partial def parseItem : P Item := do
         context := context.push (p, ← expectPath)
         if !(← acceptPunct ",") then break
     expectPunct "{"
-    let mut methods : Array Item := #[]
+    let mut methods : Array Item := given
     repeat
       if (← peek) == .punct "}" then break
       match ← peek with
       | .ident "fn" => methods := methods.push (← parseItem)
+      | .ident "type" =>
+        -- `type Item = Int;`: a type the trait leaves to the implementation.
+        advance
+        let name ← expectIdent
+        expectPunct "="
+        let body ← parseType
+        let _ ← acceptPunct ";"
+        methods := methods.push (.typeAlias name [] body)
       | _ => failAt "expected `fn`: an implementation gives the trait's functions"
     expectPunct "}"
     pure (.impl params tr head args context.toList methods.toList)
@@ -1227,6 +1238,69 @@ private partial def parseFieldDecls : P (List TypeExpr × List String × List Bo
     pure (types.toList, names.toList, pubs.toList)
   else pure ([], [], [])
 
+/-- A trait: its functions, each as the types it takes and gives, and beside
+them what else it says. A function written with a body, its parameters named
+and typed, is given to every implementation that does not write it. -/
+private partial def parseTrait : P (List Item) := do
+  advance
+  let name ← expectIdent
+  let params ← parseGenerics
+  let mut supers : Array String := #[]
+  if ← acceptPunct ":" then
+    repeat
+      supers := supers.push (← expectPath)
+      if ← isOp "+" then advance else break
+  expectPunct "{"
+  let mut methods : Array (String × List TypeExpr × Option TypeExpr) := #[]
+  let mut defaults : Array Item := #[]
+  let mut assocs : Array String := #[]
+  repeat
+    if (← peek) == .punct "}" then break
+    if (← peek) == .ident "type" then
+      advance
+      assocs := assocs.push (← expectIdent)
+      let _ ← acceptPunct ";"
+      continue
+    match ← peek with
+    | .ident "fn" => advance
+    | _ => failAt "expected `fn`: a trait lists the functions a type must have"
+    let m ← match ← peek with
+      | .op s => do
+        advance
+        pure s
+      | _ => expectIdent
+    expectPunct "("
+    let mut types : Array TypeExpr := #[]
+    let mut names : Array (Option String) := #[]
+    repeat
+      if (← peek) == .punct ")" then break
+      match ← peek, ← peek 1 with
+      | .ident x, .punct ":" =>
+        advance
+        advance
+        names := names.push (some x)
+      | _, _ => names := names.push none
+      types := types.push (← parseType)
+      if !(← acceptPunct ",") then break
+    expectPunct ")"
+    let ret ← if ← acceptPunct "->" then some <$> parseType else pure none
+    methods := methods.push (m, types.toList, ret)
+    if (← peek) == .punct "{" then
+      -- A body: what an implementation gets if it does not write its own.
+      let pats ← names.toList.mapM fun
+        | some x => pure (Pattern.var x)
+        | none => failAt s!"`{m}` has a body, so its parameters have names: `{m}(a: Self)`"
+      advance
+      let body ← parseStmts
+      expectPunct "}"
+      defaults := defaults.push (.fn m [] [] none [.mk pats body])
+    let _ ← acceptPunct ";"
+  expectPunct "}"
+  let info : List Item :=
+    if supers.isEmpty && defaults.isEmpty && params.isEmpty && assocs.isEmpty then []
+    else [.traitInfo name supers.toList defaults.toList params assocs.toList]
+  pure (.trait name methods.toList :: info)
+
 /-- A declaration, and with it what was written beside it. -/
 private partial def parseItemGroup : P (List Item) := do
   match ← peek with
@@ -1291,6 +1365,7 @@ private partial def parseItemGroup : P (List Item) := do
     match item, bounds with
     | .fn name _ _ _ _, _ :: _ => pure [item, .bounds name bounds]
     | _, _ => pure [item]
+  | .ident "trait" => parseTrait
   | _ => pure [← parseItem]
 
 private partial def parseItems : P (List Item) := do

@@ -897,6 +897,50 @@ Not built. Conversion other than through `Int` (`u8(n)`, `int(x)`, `f64(n)`,
 `widen`, `narrow`, `char(code)`). A `Str` is a list: there are no arrays, so
 its length is counted.
 
+## Traits, filled out
+
+**Decision: every addition is settled before the solver, which is as it
+was.** `Traits.solve` still finds an implementation by a trait's name and a
+type's head, and its two theorems stand unchanged.
+
+- **A trait can need another**, `trait Ord: Eq`. It means two things and no
+  more: a type that has `Ord` must have `Eq`, on no more conditions; and to
+  write `T: Ord` is to write `T: Eq` too. Evidence is not nested: a function
+  that needs both is given both.
+- **A function with a body in a trait** is given to every implementation that
+  does not write it, as that implementation's own function. `!=`, `>`, `<=`,
+  `>=` are such in the prelude.
+- **Written bounds are all there is.** If a function writes a trait of one of
+  its type parameters, its body may need of its declared type parameters only
+  what is written, or what those traits need. A function that writes none is
+  inferred, as before.
+- **A trait can take types**, `trait From<T>`. `impl From<Int> for u8`
+  implements the trait at those arguments, and that, `From<Int>`, is the name
+  of what it implements from then on: to the solver it is a trait like any
+  other. So an implementation's arguments are types without its own type
+  parameters. A use asks for the trait at whatever its arguments turn out to
+  be; a function generic in them asks its callers.
+- **A trait can leave a type to its implementations**, `type Item;`, said by
+  each with `type Item = ..;`. Where a function of the trait is used, the type
+  is a variable with a question attached: what is `Item` for this type? Once
+  the type is known the answer is the implementation's; until then the same
+  question has one answer, and a function still generic in the type hands the
+  question to its callers with its type. `T::Item` writes it of a type
+  parameter.
+- **`let x: Type = value`**, so that what a use is wanted at can be said.
+- `to(x)` takes a whole number of one type to another, if it fits (`Whole`).
+  `From<T>` is in the prelude with no implementations of its own.
+
+Limits. A function of a trait cannot have type parameters of its own: its
+evidence is one value, and Core has no value that is a function at every
+type. A trait's lifetime, `trait Borrowed<'a>`, is a name its functions' types
+may use, and each function is still taken alone. A trait a trait needs is
+written without arguments. `T::Item` is of a trait without parameters, and a
+trait cannot be written of it (`T::Item: Show`); what is needed of it is
+inferred. A function generic in a type whose `Item` it fixes, by adding it to
+an `Int` say, is accepted, and the callers it cannot serve are refused where
+they call it.
+
 ## Wider integers and what was missing of scalars
 
 **Decision: what holds an integer holds 128 bits; `Int` is still kept to 64.**

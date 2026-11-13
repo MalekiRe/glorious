@@ -1,6 +1,6 @@
 name = "glorious"
 version = "0.1.0"
-defaultTargets = ["Glorious", "glorious"]
+defaultTargets = ["Glorious", "Tests", "glorious"]
 moreLeanArgs = ["-DwarningAsError=true", "-DautoImplicit=false"]
 
 [[lean_lib]]
@@ -10,3 +10,6 @@ precompileModules = true
 [[lean_exe]]
 name = "glorious"
 root = "Main"
+
+[[lean_lib]]
+name = "Tests"

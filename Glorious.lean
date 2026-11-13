@@ -40,4 +40,3 @@ import Glorious.Cases
 import Glorious.Bytecode.Decode
 import Glorious.Traits
 import Glorious.Check
-import Glorious.Tests

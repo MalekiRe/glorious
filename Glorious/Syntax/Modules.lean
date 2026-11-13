@@ -299,6 +299,8 @@ end
 structure Ctx where
   here : List String
   scope : List Bound
+  /-- The type parameters of the function being read. -/
+  generics : List String := []
 
 /-- A constructor some of whose fields are private cannot be built or taken
 apart outside its module. -/
@@ -381,6 +383,10 @@ def resolveNamed (ctx : Ctx) (space : Space) (generics : List String) (written :
   else
     let last := segs.getLast!
     let before := segs.dropLast
+    -- `T::Item`, of a type parameter: a type one of its traits leaves to an
+    -- implementation. The checker finds which.
+    if let [p] := before then
+      if generics.contains p then return (written, none)
     let some m ← moduleAt ctx.here ctx.scope before
       | throw s!"`{written}`: there is no module `{"::".intercalate before}`"
     noteEdge ctx.here m
@@ -599,6 +605,13 @@ partial def resolveExpr (ctx : Ctx) (bound : List String) : Expr → R Expr
     pure (.name qual name)
   | .call id f args => do
     match f, args with
+    | .name none mark, [value, ty] =>
+      if mark == ascribeMark then
+        -- `let x: Type = value`: the type's names are resolved as types.
+        let ty ← resolveType ctx ctx.generics (TypeExpr.ofExpr ty)
+        return .call id f [← resolveExpr ctx bound value, ty.asExpr]
+    | _, _ => pure ()
+    match f, args with
     | .name none mark, [subject, .closure _ [.mk [pat] _]] =>
       if mark == isMark then
         -- `subject is Pattern`: a pattern callable applied to the subject,
@@ -694,6 +707,7 @@ def resolveFn (ctx : Ctx) (global : String) (generics : List String) :
     Item → R Item
   | .fn name ps annots ret clauses => do
     let generics := genericParams ps ++ generics
+    let ctx := { ctx with generics }
     let annots ← annots.mapM fun a => a.mapM (resolveType ctx generics)
     let ret ← ret.mapM (resolveType ctx generics)
     let run := (do (← byReference ctx clauses).mapM (resolveClause ctx [])).run (← get)
@@ -730,10 +744,29 @@ partial def resolveItem (ctx : Ctx) : Item → R (List Item)
   | .alias name value => do pure [.alias (ownName ctx .value name) (← resolveExpr ctx [] value)]
   | .coerce name => do pure [.coerce (← resolveValue ctx [] none name).2.1]
   | .trait name methods => do
+    -- Its own type parameters and the types an implementation says are
+    -- names of its functions' types, as `Self` is.
+    let extra := match (← unitOf ctx.here).bind fun u => u.items.findSome? fun item =>
+        let item := match item with
+          | .pub _ i => i
+          | i => i
+        match item with
+        | .traitInfo n _ _ params assocs => if n == name then some (genericParams params ++ assocs) else none
+        | _ => none with
+      | some names => names
+      | none => []
     let methods ← methods.mapM fun (m, ps, r) => do
-      pure (ownName ctx .value m, ← ps.mapM (resolveType ctx ["Self"]),
-        ← r.mapM (resolveType ctx ["Self"]))
+      pure (ownName ctx .value m, ← ps.mapM (resolveType ctx ("Self" :: extra)),
+        ← r.mapM (resolveType ctx ("Self" :: extra)))
     pure [.trait (ownName ctx .trait name) methods]
+  | .traitInfo name supers defaults params assocs => do
+    let supers ← supers.mapM fun s => (·.1) <$> resolveNamed ctx .trait [] s
+    let generics := "Self" :: genericParams params ++ assocs
+    let defaults ← defaults.mapM fun
+      | .fn m ps annots ret clauses =>
+        resolveFn ctx (ownName ctx .value m) generics (.fn m ps annots ret clauses)
+      | item => pure item
+    pure [.traitInfo (ownName ctx .trait name) supers defaults params assocs]
   | .impl ps tr head args context methods => do
     let (tr', trEntry) ← resolveNamed ctx .trait [] tr
     let (head', headEntry) ← resolveNamed ctx .type [] head
@@ -761,6 +794,10 @@ partial def resolveItem (ctx : Ctx) : Item → R (List Item)
         let item ← resolveFn ctx m' generics (.fn m mps annots ret clauses)
         modify fun s => { s with homes := (implFnName tr' head' m', key ctx.here) :: s.homes }
         pure item
+      -- A type the implementation says: an argument of its trait, or a type
+      -- the trait leaves to it.
+      | .typeAlias name aps body => do
+        pure (.typeAlias name aps (← resolveType ctx (genericParams ps) body))
       | item => pure item
     pure [.impl ps tr' head' args context methods]
   | .use head lower upper => do
@@ -840,7 +877,7 @@ def resolve (prelude root : List Item) : Except String Resolved := do
   let run : R (List Item) := do
     let mut out : Array Item := #[]
     for u in units do
-      let ctx : Ctx := ⟨u.path, ← scopeOf u.path⟩
+      let ctx : Ctx := ⟨u.path, ← scopeOf u.path, []⟩
       for item in u.items do
         out := out ++ (← resolveItem ctx item).toArray
     pure out.toList

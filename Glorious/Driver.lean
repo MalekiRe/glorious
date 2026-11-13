@@ -118,6 +118,9 @@ def compileSource (src : String) (check : Bool := true)
     | none => Syntax.lastSegment name
   -- A type alias is written out wherever it is used.
   let all ← Syntax.expandAliases resolved.items
+  -- An implementation that does not write a function its trait gives a body
+  -- has that body.
+  let all := Syntax.fillDefaults all
   -- What the checker learnt about blocks that share an environment. A program
   -- it rejects is elaborated without that.
   let blocks ← match Check.checkProgram all resolved.info with

@@ -52,6 +52,40 @@ partial def expandTypeExpr (aliases : List (String × List String × TypeExpr))
   | .ref uniq t life => do pure (.ref uniq (← expandTypeExpr aliases seen t) life)
   | t => pure t
 
+mutual
+
+/-- An expression with each type written in it, `let x: Type = ..`, changed. -/
+partial def mapTypesExpr (f : TypeExpr → Except String TypeExpr) : Expr → Except String Expr
+  | .call id (.name none mark) [value, ty] => do
+    if mark == ascribeMark then
+      pure (.call id (.name none mark) [← mapTypesExpr f value, (← f (TypeExpr.ofExpr ty)).asExpr])
+    else pure (.call id (.name none mark) [← mapTypesExpr f value, ← mapTypesExpr f ty])
+  | .call id g args => do pure (.call id (← mapTypesExpr f g) (← args.mapM (mapTypesExpr f)))
+  | .tailCall id g args => do pure (.tailCall id (← mapTypesExpr f g) (← args.mapM (mapTypesExpr f)))
+  | .tuple args => .tuple <$> args.mapM (mapTypesExpr f)
+  | .proj e i => do pure (.proj (← mapTypesExpr f e) i)
+  | .fieldOf id e name => do pure (.fieldOf id (← mapTypesExpr f e) name)
+  | .deref e => .deref <$> mapTypesExpr f e
+  | .reborrow u e => .reborrow u <$> mapTypesExpr f e
+  | .closure id clauses => .closure id <$> clauses.mapM (mapTypesClause f)
+  | .handle subject arms => do
+    pure (.handle (← mapTypesExpr f subject) (← arms.mapM (mapTypesClause f)))
+  | .labelScope l body => .labelScope l <$> body.mapM (mapTypesStmt f)
+  | e => pure e
+
+partial def mapTypesClause (f : TypeExpr → Except String TypeExpr) : Clause → Except String Clause
+  | .mk pats body => .mk pats <$> body.mapM (mapTypesStmt f)
+
+partial def mapTypesStmt (f : TypeExpr → Except String TypeExpr) : Stmt → Except String Stmt
+  | .let_ pat value => .let_ pat <$> mapTypesExpr f value
+  | .letMut x value => .letMut x <$> mapTypesExpr f value
+  | .expr e => .expr <$> mapTypesExpr f e
+  | .defer e => .defer <$> mapTypesExpr f e
+  | .assign target value => do pure (.assign (← mapTypesExpr f target) (← mapTypesExpr f value))
+  | .located line col s => .located line col <$> mapTypesStmt f s
+
+end
+
 /-- A program without its type aliases: each use is what the alias stands for. -/
 partial def expandAliases (items : List Item) : Except String (List Item) := do
   let aliases := items.filterMap fun
@@ -78,16 +112,43 @@ partial def expandAliases (items : List Item) : Except String (List Item) := do
         pure { op with payload := ← op.payload.mapM ty, result := ← op.result.mapM ty }
       pure (.effect name ps ops)
     | .fn name ps annots ret clauses => do
-      pure (.fn name ps (← annots.mapM fun a => a.mapM ty) (← ret.mapM ty) clauses)
+      pure (.fn name ps (← annots.mapM fun a => a.mapM ty) (← ret.mapM ty)
+        (← clauses.mapM (mapTypesClause ty)))
     | .trait name methods => do
       pure (.trait name (← methods.mapM fun (m, ps, r) => do
         pure (m, ← ps.mapM ty, ← r.mapM ty)))
     | .impl ps tr head args context methods => do
-      pure (.impl ps tr head args context (← methods.mapM item))
+      let methods ← methods.mapM fun
+        | .typeAlias name aps body => do pure (.typeAlias name aps (← ty body))
+        | m => item m
+      pure (.impl ps tr head args context methods)
     | i => pure i
   let rest := items.filter fun
     | .typeAlias _ _ _ => false
     | _ => true
   rest.mapM item
+
+/-- Each implementation with the functions its trait gives a body that it
+does not write itself; and, where it gives its trait arguments, `impl
+From<Int> for u8`, as an implementation of the trait at those: `From<Int>` is
+the name of what it implements from here on. -/
+def fillDefaults (items : List Item) : List Item :=
+  let defaults := items.filterMap fun
+    | .traitInfo name _ fns _ _ => some (name, fns)
+    | _ => none
+  items.map fun
+    | .impl ps tr head args context methods =>
+      let written := methods.filterMap fun
+        | .fn m _ _ _ _ => some m
+        | _ => none
+      let missing := ((defaults.lookup tr).getD []).filter fun
+        | .fn m _ _ _ _ => !written.contains m
+        | _ => false
+      let given := (List.range methods.length).filterMap fun i =>
+        methods.findSome? fun
+          | .typeAlias name _ body => if name == traitArgName i then some body.spell else none
+          | _ => none
+      .impl ps (traitAt tr given) head args context (methods ++ missing)
+    | item => item
 
 end Glorious.Syntax
