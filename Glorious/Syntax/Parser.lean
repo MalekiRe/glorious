@@ -1514,7 +1514,19 @@ private partial def parseItem : P Item := do
       repeat
         let p ← expectIdent
         expectPunct ":"
-        context := context.push (p, ← expectPath)
+        let asked ← expectPath
+        context := context.push (p, asked)
+        -- `I: Iterator<Item = A>`: what the trait leaves to `I`'s
+        -- implementation is that type.
+        if ← isOp "<" then
+          advance
+          repeat
+            if ← isOp ">" then break
+            let name ← expectIdent
+            expectPunct "="
+            given := given.push (.typeAlias (equalArgName (context.size - 1) name) [] (← parseType))
+            if !(← acceptPunct ",") then break
+          expectOp ">"
         if !(← acceptPunct ",") then break
     expectPunct "{"
     let mut methods : Array Item := given

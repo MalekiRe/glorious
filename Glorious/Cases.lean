@@ -2657,6 +2657,19 @@ def cases : List Case := [
   -- `find` with a test that borrows the value.
   ⟨"use core::iter::{Iterator, range, into_iter, find, find_map};\nfn main() -> Int {\n    let mut r = range(0, 50);\n    say(find(&mut r, { (n) => *n * *n > 200 }));\n    let mut words = into_iter([\"a\", \"bb\", \"ccc\"]);\n    say(find(&mut words, { (w) => length(*w) == 2 }));\n    say(find(&mut words, { (w) => length(*w) == 9 }));\n    0 }",
     [], "Ok(15)\nOk(bb)\nErr(())\n0"⟩,
+  -- An implementation's condition says what a trait leaves to a parameter's implementation: an iterator made from an iterator.
+  ⟨"use core::iter::{Iterator, range, fold, next};\nstruct Map<I, A, B> { inner: I, f: fn(A) -> B }\nimpl<I, A, B> Iterator for Map<I, A, B> where I: Iterator<Item = A> {\n    type Item = B;\n    fn next(it) {\n        match(next(&mut it.inner)) {\n            Some(x) => Some((it.f)(x)),\n            None => None\n        }\n    }\n}\nfn main() -> Int {\n    let mut m = Map { inner: range(0, 5), f: { (n) => n * n } };\n    fold(&mut m, 0, { (acc, x) => acc + x }) }",
+    [], "30"⟩,
+  -- The library's adapter types, chained; nothing is done until `collect` asks.
+  ⟨"use core::iter::{Iterator, range, into_iter, map, filter, take, skip, enumerate, zip, chain, collect, fold};\nfn main() -> Int {\n    say(collect(&mut take(map(filter(range(0, 100), { (n) => *n % 2 == 0 }), { (n) => n * n }), 5)));\n    say(collect(&mut skip(range(0, 6), 4)));\n    say(collect(&mut enumerate(into_iter([\"a\", \"b\"]))));\n    say(collect(&mut zip(range(0, 10), into_iter([\"x\", \"y\", \"z\"]))));\n    say(collect(&mut chain(range(0, 2), range(7, 9))));\n    fold(&mut map(range(1, 4), { (n) => n * 10 }), 0, { (acc, x) => acc + x }) }",
+    [], "[0, 4, 16, 36, 64]\n[4, 5]\n[(0, a), (1, b)]\n[(0, x), (1, y), (2, z)]\n[0, 1, 7, 8]\n60"⟩,
+  -- Refused: the type given is not the inner iterator's `Item`.
+  ⟨"use core::iter::{Iterator, range, next, collect};\nstruct Pass<I, A> { inner: I, extra: A }\nimpl<I, A> Iterator for Pass<I, A> where I: Iterator<Item = A> { type Item = A; fn next(it) { next(&mut it.inner) } }\nfn main() -> Int { let mut p = Pass { inner: range(0, 3), extra: \"text\" }; say(collect(&mut p)); 0 }",
+    [], "error: 4:76: `Item` of `std::iterator::Iterator` for `std::iterator::Range`: expected `Int`, found `Str`"⟩,
+  ⟨"use core::iter::{Iterator, range, next};\nstruct Pass<I, A> { inner: I, extra: A }\nimpl<I, A> Iterator for Pass<I, A> where I: Iterator<Thing = A> { type Item = A; fn next(it) { next(&mut it.inner) } }\nfn main() -> Int { 0 }",
+    [], "error: `impl std::iterator::Iterator for Pass`: `Iterator` leaves no type `Thing` to its implementations"⟩,
+  ⟨"use alloc::vec::{Vec};\nuse core::iter::{fold};\nuse alloc::fmt::{format, Display};\nuse alloc::string::{String};\nfn main() -> Int {\n    let mut v = Vec::new();\n    Vec::push(&mut v, 3); Vec::push(&mut v, 4);\n    let mut it = Vec::iter(&v);\n    let total = fold(&mut it, 0, { (acc, r) => acc + *r });\n    let s = String::from_str(\"hi\");\n    say(String::to_str(&format(&s)));\n    total }",
+    [], "hi\n7"⟩,
   -- `drop` is not for a program to call.
   ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nfn main() { let mut f = File(7); drop(&mut f); 0 }",
     [], "error: 3:34: in `main`: `drop` is run when what holds a value ends; a program does not call it"⟩,

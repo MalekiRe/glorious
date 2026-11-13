@@ -343,7 +343,7 @@ pub fn len_of<T>(a: [T]) -> Int { len(a) }
 // A growable array changed where it is, in the shape the library
 // specification gives it (15): functions of the type, `&mut Self` to change
 // one, `Option<&T>` to look at an element. Sizes and places are `Int`.
-use std::slice::{Slice};
+use std::slice::{Slice, SliceIter};
 
 pub struct Vec<T> { items: [T] }
 
@@ -448,6 +448,8 @@ impl<T> Vec<T> {
     }
     // The elements as a slice: looked at where they are.
     pub fn as_slice<'a>(value: &'a Self) -> Slice<'a, T> { Slice::of(&value.items) }
+    // The elements one after another, by reference.
+    pub fn iter<'a>(value: &'a Self) -> SliceIter<'a, T> { Slice::iter(&Slice::of(&value.items)) }
 }
 "#
 
@@ -1379,6 +1381,125 @@ fn map_onto<I: Iterator, B>(it: &mut I, f: fn(I::Item) -> B, out: [B]) -> [B] {
     }
 }
 
+// Iterators made from iterators. Each is a type of its own that holds the
+// one it reads from, and gives a value only when asked: nothing is done
+// until something is asked for. `A` is what the inner iterator gives; the
+// implementation says so in its conditions.
+
+// Each value, changed by a function.
+pub struct Map<I, A, B> { inner: I, f: fn(A) -> B }
+impl<I, A, B> Iterator for Map<I, A, B> where I: Iterator<Item = A> {
+    type Item = B;
+    fn next(it) {
+        match(next(&mut it.inner)) {
+            Some(x) => Some((it.f)(x)),
+            None => None
+        }
+    }
+}
+pub fn map<I: Iterator, B>(it: I, f: fn(I::Item) -> B) -> Map<I, I::Item, B> {
+    Map { inner: it, f: f }
+}
+
+// The values a test passes.
+pub struct Filter<I, A> { inner: I, keep: for<'a> fn(&'a A) -> Bool }
+impl<I, A> Iterator for Filter<I, A> where I: Iterator<Item = A> {
+    type Item = A;
+    fn next(it) {
+        match(next(&mut it.inner)) {
+            Some(x) => if((it.keep)(&x)) { Some(x) } else { next(it) },
+            None => None
+        }
+    }
+}
+pub fn filter<I: Iterator>(it: I, keep: for<'a> fn(&'a I::Item) -> Bool) -> Filter<I, I::Item> {
+    Filter { inner: it, keep: keep }
+}
+
+// The first so many values.
+pub struct Take<I, A> { inner: I, left: Int }
+impl<I, A> Iterator for Take<I, A> where I: Iterator<Item = A> {
+    type Item = A;
+    fn next(it) {
+        if(it.left <= 0) { None } else {
+            it.left = it.left - 1;
+            next(&mut it.inner)
+        }
+    }
+}
+pub fn take<I: Iterator>(it: I, n: Int) -> Take<I, I::Item> {
+    Take { inner: it, left: n }
+}
+
+// All but the first so many values.
+pub struct Skip<I, A> { inner: I, left: Int }
+impl<I, A> Iterator for Skip<I, A> where I: Iterator<Item = A> {
+    type Item = A;
+    fn next(it) {
+        if(it.left <= 0) { next(&mut it.inner) } else {
+            it.left = it.left - 1;
+            match(next(&mut it.inner)) {
+                Some(_) => next(it),
+                None => None
+            }
+        }
+    }
+}
+pub fn skip<I: Iterator>(it: I, n: Int) -> Skip<I, I::Item> {
+    Skip { inner: it, left: n }
+}
+
+// Each value with its place, counted from zero.
+pub struct Enumerate<I, A> { inner: I, at: Int }
+impl<I, A> Iterator for Enumerate<I, A> where I: Iterator<Item = A> {
+    type Item = (Int, A);
+    fn next(it) {
+        match(next(&mut it.inner)) {
+            Some(x) =>
+                let i = it.at;
+                it.at = i + 1;
+                Some((i, x)),
+            None => None
+        }
+    }
+}
+pub fn enumerate<I: Iterator>(it: I) -> Enumerate<I, I::Item> {
+    Enumerate { inner: it, at: 0 }
+}
+
+// The values of two iterators in pairs, for as long as both have one.
+pub struct Zip<I, J, A, B> { left: I, right: J }
+impl<I, J, A, B> Iterator for Zip<I, J, A, B> where I: Iterator<Item = A>, J: Iterator<Item = B> {
+    type Item = (A, B);
+    fn next(it) {
+        match(next(&mut it.left)) {
+            Some(a) => match(next(&mut it.right)) {
+                Some(b) => Some((a, b)),
+                None => None
+            },
+            None => None
+        }
+    }
+}
+pub fn zip<I: Iterator, J: Iterator>(a: I, b: J) -> Zip<I, J, I::Item, J::Item> {
+    Zip { left: a, right: b }
+}
+
+// The values of one iterator, then those of another.
+pub struct Chain<I, J, A> { first: I, second: J }
+impl<I, J, A> Iterator for Chain<I, J, A> where I: Iterator<Item = A>, J: Iterator<Item = A> {
+    type Item = A;
+    fn next(it) {
+        match(next(&mut it.first)) {
+            Some(x) => Some(x),
+            None => next(&mut it.second)
+        }
+    }
+}
+pub fn chain<I: Iterator, J: Iterator<Item = I::Item>>(a: I, b: J) -> Chain<I, J, I::Item> {
+    Chain { first: a, second: b }
+}
+
 // The first value a test passes, if one does; those before it are let go.
 pub fn find<I: Iterator>(it: &mut I, wanted: for<'a> fn(&'a I::Item) -> Bool) -> Option<I::Item> {
     match(next(it)) {
@@ -1538,6 +1659,7 @@ pub fn format<T: Display>(value: &T) -> String {
 impl Display for Int { fn fmt(n, out) { Formatter::write_str(out, show(*n)) } }
 impl Display for Str { fn fmt(text, out) { Formatter::write_str(out, *text) } }
 impl Display for char { fn fmt(c, out) { Formatter::write_char(out, *c) } }
+impl Display for String { fn fmt(text, out) { Formatter::write_str(out, String::to_str(text)) } }
 "#
 
 private def cText : String := r#"// What C has: its memory, and texts as it writes them. Everything here is

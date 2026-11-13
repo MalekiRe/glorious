@@ -218,6 +218,14 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
               catch _ =>
                 throw (inFunction b.owner
                   s!"{b.pos}`{b.trait}` is implemented for `{showTy (.con h (args.set j want))}`, not for `{showTy (← zonk b.ty)}`")
+          -- What the implementation's conditions say of a type left to
+          -- another trait's implementations is asked of the arguments.
+          let at_ := (im.params.zip args).filterMap fun (p, h) =>
+            (im.pvars.lookup p).map fun id => (id, h)
+          for (j, asked, name, said) in im.equal do
+            if let some subject := args[j]? then
+              let use := (asked, subject, name, subst at_ [] [] said, b.owner, b.pos)
+              modify fun s => { s with assocUses := s.assocUses.push use }
   -- A trait with arguments is asked of a type together with them: from here
   -- on it is the trait at those arguments, asked of the type.
   settleAssocs
@@ -503,6 +511,15 @@ def checkGroup (decls : List FnDecl) : M Unit := do
         for (j, fixed) in im.fixed do
           if let some name := im.params[j]? then
             rigid := rigid.map fun (p, old) => if p == name then (p, fixed) else (p, old)
+        -- What its conditions say of a type left to another trait's
+        -- implementations holds in its functions.
+        for (j, asked, name, said) in im.equal do
+          match (im.params[j]?).bind fun p => rigid.lookup p with
+          | some subject =>
+            let mine := im.pvars.filterMap fun (p, id) => (rigid.lookup p).map fun t => (id, t)
+            let use := (asked, subject, name, subst mine [] [] said, d.name, "")
+            modify fun s => { s with assocUses := s.assocUses.push use }
+          | none => pure ()
       -- A row parameter stands for a row no one here knows: it is held as
       -- the row of a callable type that is nothing else.
       let mut rowParams : List (String × Ty) := []

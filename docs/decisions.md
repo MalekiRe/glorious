@@ -2417,10 +2417,8 @@ slice's by reference. What is done with the values is functions over anything
 iterated: `fold`, `for_each`, `count`, `collect`, `map_collect`, `find_map`,
 `nth`. The lazy streams this library had are still `std::iter`.
 
-- **No adapter types.** `Map<I, F>`, `Filter<I, F>` and the rest of the
-  specification's matrix need an implementation whose conditions say that a
-  type parameter is a callable taking another's `Item`; an implementation's
-  conditions are a trait of a parameter and nothing more.
+- **Adapter types** came later: see "Conditions that say what a type is"
+  below.
 - `find` takes a test that borrows the value, `find_map` a function that is
   given it. (`find` was left out at first: see "Regions through two calls"
   below.)
@@ -2480,6 +2478,28 @@ certificates.
   caller's variable and one the caller was itself given
   (`for<'a, 'b> fn(&'a T, &'b mut Int)` called with a parameter and a
   variable). The program is accepted and certified as well owned.
+
+## Conditions that say what a type is
+
+An implementation's conditions were a trait of a type parameter and nothing
+more. One may now say what the trait leaves to that parameter's
+implementation: `where I: Iterator<Item = A>`. In the implementation's
+functions `I`'s `Item` is `A`; where the implementation is used, the type
+given for `A` has to be the `Item` of the type given for `I`, or the use is
+refused. Which implementation a bound is met by is found as before, by the
+trait and the head of the type, so what is proved of that is untouched.
+
+That is enough for iterators made from iterators, each a type of its own
+that does nothing until asked: `Map`, `Filter`, `Take`, `Skip`, `Enumerate`,
+`Zip`, `Chain` in `core::iter`, made by `map`, `filter`, `take`, `skip`,
+`enumerate`, `zip`, `chain`.
+
+- **Their types name what the inner iterator gives.** The specification has
+  `Map<I, F>` with `F` any callable; here it is `Map<I, A, B>` holding a
+  `fn(A) -> B`, because a condition cannot yet say that a parameter is a
+  callable. The functions that make them work out `A`, so it is written
+  only where the type is.
+- **`Vec::iter`** gives a vector's elements by reference, one after another.
 
 ## Other standing decisions
 

@@ -361,6 +361,19 @@ def instMark : String := "%inst"
 that the name fixes, by its place. -/
 def fixedArgName (j : Nat) : String := s!"%fixed:{j}"
 
+/-- In an implementation: what one of its conditions says a type left to the
+implementations of a trait is, `where I: Iterator<Item = A>`. The name says
+which condition, by its place, and which type. -/
+def equalArgName (condition : Nat) (name : String) : String := s!"%equal:{condition}:{name}"
+
+/-- The parts of such a name. -/
+def equalArgParts (n : String) : Option (Nat × String) :=
+  if n.startsWith "%equal:" then
+    match (n.drop 7).toString.splitOn ":" with
+    | [k, name] => k.toNat?.map (·, name)
+    | _ => none
+  else none
+
 /-- In a written row, the row parameter that stands for the rest of it. -/
 def rowMark : String := "%row"
 

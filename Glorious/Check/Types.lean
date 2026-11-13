@@ -266,6 +266,10 @@ structure ImplDecl where
   written for another name of the type: `impl T for Option<A>` is for
   `Result<A, ()>`. -/
   fixed : List (Nat × Ty) := []
+  /-- What its conditions say of types left to the implementations of a
+  trait, `where I: Iterator<Item = A>`: which of the head's arguments, the
+  trait, the type's name, and what it is. -/
+  equal : List (Nat × String × String × Ty) := []
   pvars : List (String × Nat) := []
 
 /-- A trait needed of a type at a call: of the type a trait's function is used
