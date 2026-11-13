@@ -29,6 +29,9 @@ structure MustInfo where
   blocks : List Nat := []
   /-- The types of what each captures. -/
   held : Array (Nat × Ty) := #[]
+  /-- Of those, the ones that are a variable's value, which the variable
+  destroys if the callable does not use it. -/
+  flagged : Array (Nat × Ty) := #[]
 
 def mustInfo : M MustInfo := do
   let s ← get
@@ -41,7 +44,10 @@ def mustInfo : M MustInfo := do
     | .once =>
       unless info.resumptions.contains root do
         info := { info with resumptions := root :: info.resumptions }
-    | .ty t => unless s.sharedEdges.contains i do info := { info with held := info.held.push (root, t) }
+    | .ty t =>
+      unless s.sharedEdges.contains i do
+        if s.givenEdges.contains i then info := { info with flagged := info.flagged.push (root, t) }
+        else info := { info with held := info.held.push (root, t) }
     | _ => pure ()
   for (_, c) in s.blockCaps do
     let root ← findCap c
@@ -70,6 +76,13 @@ partial def tyMustUse (info : MustInfo) (visiting : List String) (t : Ty) :
           return some s!"a callable that holds {what}"
         if let some name ← tyHasDrop [] held then
           return some s!"a callable that holds a `{name}`, whose `drop` would then not run,"
+    -- The value of a variable that gives it away: the variable's cleanup
+    -- runs its `drop` where the callable did not use it, so only what has
+    -- to be used makes the callable one that has to be called.
+    for (r, held) in info.flagged do
+      if r == root then
+        if let some what ← tyMustUse info visiting held then
+          return some s!"a callable that holds {what}"
     return none
   | .ref _ _ _ => pure none
   | .con name args => do

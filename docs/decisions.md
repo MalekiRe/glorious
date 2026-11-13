@@ -2587,6 +2587,10 @@ its value, with a cleanup that depends on a flag (7.4). A value bound with
 `let` and never borrowed is not kept in a variable; for it both paths still
 have to say, and the message says to write `let mut`.
 
+A callable that holds such a variable's value need not be called for the
+`drop`'s sake: what it did not use the variable destroys. It is still used
+at most once, and still has to be called where the value has to be used.
+
 A value that holds a resumption is still not read out of a variable: the
 machine's read is a copy, and Core does not copy a resumption.
 

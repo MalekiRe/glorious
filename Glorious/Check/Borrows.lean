@@ -568,6 +568,7 @@ def captureAll (scope : Scope) (cap : Nat) (names : List String) (assigns : Stri
       -- A variable that gives its value away, where the callable is what
       -- uses the value: the callable holds it, as it would a name's.
       if (← get).movedCells.contains brand && gives name then
+        modify fun s => { s with givenEdges := s.capEdges.size :: s.givenEdges }
         captures cap (.ty t) (some (name, brand))
     | some (.label _ brand) => captures cap (.brand brand)
     | some (.poly s) => captures cap (.ty s.ty) (some (name, 0))

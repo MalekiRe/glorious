@@ -352,6 +352,10 @@ structure St where
   them may hold a value with `Drop` that some paths use and others do not,
   since its cleanup asks whether it was. -/
   flagged : List String := []
+  /-- Among what callables hold, by place in `capEdges`: the values of such
+  variables. A callable that holds one need not be called for its `drop`'s
+  sake, since the variable's cleanup destroys what was not given away. -/
+  givenEdges : List Nat := []
   /-- What was read out of such a variable: a value that holds a resumption
   cannot be, since the machine's read is a copy and a resumption is not
   copied. -/
