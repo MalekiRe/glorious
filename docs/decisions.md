@@ -902,6 +902,18 @@ Not built. Conversion other than through `Int` (`u8(n)`, `int(x)`, `f64(n)`,
 `widen`, `narrow`, `char(code)`). A `Str` is a list: there are no arrays, so
 its length is counted.
 
+## A program the checker rejects has no traits
+
+**Decision: running a program without the checker stays what it is, a way
+for the tests to watch a rejected program go wrong, and such a program has
+no traits and no `is`.** Which implementation a call of a trait's function
+means, and what names a block given the result of an `is` has, are decided
+by types. A program the checker rejects has none: there is nothing to decide
+them by, and no way to add them that would not be a second, weaker checker.
+So an unchecked run uses the prelude of `Int` alone, as before, and a
+program that needs a trait is one that has to pass the checker. The command
+line always checks.
+
 ## What is unsafe
 
 **Decision: `unsafe` marks what the proofs say nothing of, and a program
