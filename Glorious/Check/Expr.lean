@@ -630,6 +630,14 @@ partial def inferCall (scope : Scope) (amb : Row) (f : Expr) (args : List Expr)
       -- The trait's own arguments are found from how the function is used,
       -- and so is what each type it leaves to an implementation is.
       let targs ← sig.tparams.mapM fun _ => freshTy
+      -- `<Type as Trait<A>>::f(..)`: the type, and the trait's arguments,
+      -- are the ones written.
+      if let some written := (← get).instWith then
+        modify fun s => { s with instWith := none }
+        if written.length > 1 + targs.length then
+          throw s!"`{x}` is a function of `{Syntax.lastSegment sig.trait}`, which takes {targs.length} argument{if targs.length == 1 then "" else "s"}"
+        for (w, t) in written.zip (self :: targs) do
+          unifyAt s!"the type written for `{x}`" t w
       let found ← sig.assocs.mapM fun _ => freshTy
       let tm := (sig.self, self) :: sig.tparams.zip targs ++ (sig.assocs.map (·.2)).zip found
       let subject := if targs.isEmpty then self else Ty.tuple (self :: targs)

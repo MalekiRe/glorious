@@ -644,6 +644,18 @@ def checkGroup (decls : List FnDecl) : M Unit := do
               throw s!"`{b.subject}: RunsIn<{e}, ..>`: `{e}` is not said to be an environment (`{e}: Environment<'e>`)"
           | none => throw s!"`{b.subject}: RunsIn<..>`: the environment is `E`, `&E` or `&mut E`"
       modify fun s => { s with rigidParams := rigid }
+      -- `T: Trait<Item = Type>`: the type the trait leaves to `T`'s
+      -- implementation is that one, in the body and for whoever calls.
+      for b in d.bounds do
+        unless ["Fn", "RunsIn", "Environment", "Use", "Label"].contains b.trait do
+          for (name, said) in b.assoc do
+            match rigid.lookup b.subject, (← get).traitShape.find? fun (tr, _, _) => tr == b.trait with
+            | some self, some (_, _, assocs) =>
+              unless assocs.contains name do
+                throw s!"`{b.subject}: {Syntax.lastSegment b.trait}<{name} = ..>`: `{Syntax.lastSegment b.trait}` leaves no type `{name}` to its implementations"
+              let a ← resolveType rigid false said
+              modify fun s => { s with assocUses := s.assocUses.push (b.trait, self, name, a, d.name, "") }
+            | _, _ => throw s!"`{b.subject}: {Syntax.lastSegment b.trait}<{name} = ..>`: `{b.subject}` is not a type parameter of `{d.name}`, or `{Syntax.lastSegment b.trait}` is not a trait"
       let rankedBefore := (← get).ranked.length
       let annots ← d.annots.mapM fun
         | some t => some <$> resolveType rigid false t

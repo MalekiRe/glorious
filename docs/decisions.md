@@ -1010,6 +1010,17 @@ Limits. The specification has a type parameter with nothing written be one
 that has to be used; here that is found from the body instead, so a function
 may be given more freedom than it wrote down.
 
+## A trait's type said in a bound; a trait's function for a type written
+
+From the audit of the specification (13.2).
+
+- **`T: Trait<Item = Type>`** says what the type the trait leaves to `T`'s
+  implementation is: in the body `T::Item` is that type, and a caller's
+  implementation has to say the same.
+- **`<Type as Trait<A>>::f(args)`** is the trait's function for the type
+  written, with the trait's arguments written; `Trait::f(args)` already named
+  it by its trait and found the type.
+
 ## What the specification's audit turned away
 
 An audit of the language specification against the compiler, section by

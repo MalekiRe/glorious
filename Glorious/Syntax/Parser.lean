@@ -786,6 +786,26 @@ private partial def parsePrimary (noBlock : Bool) : P Expr := do
     match ← parsePostfix noBlock with
     | .call id f args => pure (.tailCall id f args)
     | _ => failAt "`tail` must be followed by a call"
+  | .op "<" =>
+    -- `<Type as Trait>::function(args)`: the trait's function, for that type.
+    advance
+    let self ← parseType
+    unless (← peek) == .ident "as" do failAt "expected `as`: `<Type as Trait>::function(..)`"
+    advance
+    let (trait, targs) ← match ← parseType with
+      | .name tr targs => pure (tr, targs)
+      | _ => failAt "expected a trait: `<Type as Trait>::function(..)`"
+    if ← isOp ">" then advance else failAt "expected `>`"
+    expectPunct "::"
+    let name ← expectIdent
+    unless (← peek) == .punct "(" do failAt "expected `(`: a trait's function written this way is called"
+    let id := (← read).base + (← get) + 1
+    advance
+    let mut args ← parseArgs
+    while !noBlock && (← peek) == .punct "{" do
+      args := args ++ [← parseBraces]
+    pure (.call 0 (.name none instMark)
+      [.call id (.name (some trait) name) args, (TypeExpr.tuple (self :: targs)).asExpr])
   | .ident "move" =>
     advance
     -- `move (a, b) { body }`: the block, holding the values `a` and `b`
@@ -1117,14 +1137,22 @@ private partial def parseBoundsOf (subject : String) : P (List Bound) := do
       out := out.push { subject, trait := tr, quantity := some quantity }
     else
       let mut args : Array TypeExpr := #[]
+      let mut said : Array (String × TypeExpr) := #[]
       if ← isOp "<" then
         advance
         repeat
           if ← isOp ">" then break
-          args := args.push (← parseType)
+          -- `Item = Type`: what the trait leaves to an implementation is
+          -- said to be that type.
+          match ← peek, ← peek 1 with
+          | .ident name, .punct "=" =>
+            advance
+            advance
+            said := said.push (name, ← parseType)
+          | _, _ => args := args.push (← parseType)
           if !(← acceptPunct ",") then break
         if ← isOp ">" then advance else failAt "expected `>`"
-      out := out.push { subject, trait := tr, args := args.toList }
+      out := out.push { subject, trait := tr, args := args.toList, assoc := said.toList }
     if ← isOp "+" then advance else break
   pure out.toList
 
