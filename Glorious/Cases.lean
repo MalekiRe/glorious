@@ -753,7 +753,7 @@ def cases : List Case := [
     [], "42"⟩,
   ⟨"effect Ask { ask() -> Int }\n  fn main() { let mut x = 1; let p = &mut x; let v = handle { ask() + *p } () { ask(k) => k(41) }; *p = v; x }",
     [], "42"⟩,
-  ⟨"fn first(a: &mut Int, b: &mut Int) -> &mut Int { a }\n  fn main() { let mut x = 1; let mut y = 2; let q = first(&mut x, &mut y); *q = 9; x + y }",
+  ⟨"fn first<'a>(a: &'a mut Int, b: &mut Int) -> &'a mut Int { a }\n  fn main() { let mut x = 1; let mut y = 2; let q = first(&mut x, &mut y); *q = 9; x + y }",
     [], "11"⟩,
   ⟨"fn main() { let mut x = 1; let t = (&x, 5); let (r, n) = t; *r + n + x }",
     [], "7"⟩,
