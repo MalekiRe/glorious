@@ -417,6 +417,10 @@ def declareTraits (items : List Item) : M Unit := do
         unless names.contains m do throw s!"{what}: `{m}` is not a function of `{tr}`"
       unless given.eraseDups.length == given.length do
         throw s!"{what} gives a function twice"
+      -- A callable that takes hold of a value with a `drop` has to be
+      -- called: what is and is not used is then counted, as it is where a
+      -- program declares something that has to be used.
+      if tr == "Drop" then modify fun s => { s with anyMust := true }
       if (← get).kimpls.any fun I => I.trait == tr && I.head == head then
         throw s!"`{tr}` is implemented twice for `{head}`"
       -- The arguments it gives its trait, and the types the trait leaves to it.

@@ -48,8 +48,29 @@ def mustInfo : M MustInfo := do
     unless info.blocks.contains root do info := { info with blocks := root :: info.blocks }
   pure info
 
+/-- A type whose values have a `drop` of their own to run, or hold one that
+has: the name of the first such type found. -/
+partial def tyHasDrop (visiting : List String) (t : Ty) : M (Option String) := do
+  match ← find t with
+  | .tuple args => args.findSomeM? (tyHasDrop visiting)
+  | .con name args => do
+    if (← get).kimpls.any (fun I => I.trait == "Drop" && I.head == name) then
+      return some (bareName name)
+    if let some w ← args.findSomeM? (tyHasDrop visiting) then return some w
+    if visiting.contains name then return none
+    match (← get).types.lookup name with
+    | none => pure none
+    | some decl =>
+      decl.ctors.findSomeM? fun c => do
+        match (← get).ctors.lookup c with
+        | none => pure none
+        | some sig => (sig.fieldsAt args).findSomeM? (tyHasDrop (name :: visiting))
+  | _ => pure none
+
 /-- What in a type has to be used, if anything: said for the message. A
-callable has to be called if it holds something that has to be used. -/
+callable has to be called if it holds something that has to be used, or
+something with a `drop` to run: nothing destroys what a callable holds, so
+one that is let go without being called would take the value with it. -/
 partial def tyMustUse (info : MustInfo) (visiting : List String) (t : Ty) :
     M (Option String) := do
   match ← find t with
@@ -66,6 +87,8 @@ partial def tyMustUse (info : MustInfo) (visiting : List String) (t : Ty) :
       if r == root then
         if let some what ← tyMustUse info visiting held then
           return some s!"a callable that holds {what}"
+        if let some name ← tyHasDrop [] held then
+          return some s!"a callable that holds a `{name}`, whose `drop` would then not run,"
     return none
   | .ref _ _ _ => pure none
   | .con name args => do
@@ -226,6 +249,9 @@ structure ACtx where
   /-- The operations declared `[1, 1]`: whoever handles one resumes it, so
   performing it comes back. -/
   exact : List String := []
+  /-- Count the binding as used where it is given to something, whatever
+  that then does with it: whoever takes a value has it. -/
+  handed : Bool := false
   /-- Calls, by identity, whose types say they come back. -/
   sure : List Nat := []
   /-- The count is of what comes before a call of a `probe`: a path ends at
@@ -689,6 +715,12 @@ partial def runCallee (ctx : ACtx) (depth : Nat) (env : List (String × AVal)) (
           match goneOf vs with
           | some t => out := (.gone t, n + m) :: out
           | none =>
+            if ctx.handed && vs.any (fun v => match v with
+                | .tracked => true
+                | _ => false) then
+              -- Given away: it is whoever takes it that has it now.
+              out := (.unknown, n + m + 1) :: out
+            else
             -- A call that comes back and is given nothing a use could come
             -- of need not be followed.
             if sure && !holdsTracked fv && !vs.any holdsTracked
@@ -1090,7 +1122,16 @@ def runLowerChecks (fnTy : Ty) : M Unit := do
     -- Only a type that has to be used, or one not yet known, needs the count.
     let free := !(freeTys t).isEmpty || !(freeCaps t).isEmpty || hasParam t
     modify fun st => { st with seen := [] }
-    unless free || (← tyMustUse roots [] t).isSome do continue
+    unless free || (← tyMustUse roots [] t).isSome do
+      -- A value with a `drop` to run that is used on one path and not on
+      -- another: where it is not, nothing would run its `drop`, since the
+      -- paths are callables and it is theirs. (One no path uses stays in
+      -- its variable, and is destroyed there.)
+      if let some name ← tyHasDrop [] t then
+        unless usesStmts resumptive x body == 0 || usedFirst quiet x body do
+          if (pathUses { ctx with handed := true } names x body) == some 0 then
+            throw s!"{pos}`{x}` is used on one path and not on another, and a `{name}` has a `drop` to run: where it is not used nothing would run it. Use it on every path, or let it go there with a function that takes it"
+      continue
     let mut unused := false
     if usesStmts resumptive x body == 0 then unused := true
     else if usedFirst quiet x body then unused := false

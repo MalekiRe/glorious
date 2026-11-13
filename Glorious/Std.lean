@@ -1818,6 +1818,9 @@ pub struct Rejected<T, E> { pub value: T, pub error: E }
 
 pub fn identity<T>(value: T) -> T { value }
 
+// A value let go: its `drop` runs, if it has one.
+pub fn discard<T>(value: T) { () }
+
 // A type with a value to start from.
 pub trait Default {
     fn default() -> Self;

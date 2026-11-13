@@ -1938,12 +1938,12 @@ What it is not:
   name for that, known by its place among the `_` of the clause.
 - **None of this is there in a program where no type has `Drop`**: the
   prelude and the library are checked once for each kind of program.
-- **Still not destroyed**: what a callable holds when the callable is let
-  go without being called, which is also what becomes of a value named on
-  one path and not on another, since the paths are callables; a value whose
-  type is found only where a callable written in a `let` is used; and what
-  a coercion lets go of a type it is generic in. A callable would have to
-  say how it is destroyed.
+- **What a callable holds is not destroyed with it**, since a callable does
+  not say how it is destroyed. That was a silent loss; now the two ways to
+  it are refused (see "Values with `Drop` and callables" below).
+- **Still not destroyed**: a value whose type is found only where a callable
+  written in a `let` is used; and what a coercion lets go of a type it is
+  generic in.
 - **A value that never comes to rest in a variable is not destroyed.** One
   given to a function that ignores it, one a function generic in its type puts
   in a variable, one put in a value that is forgotten, the unused result of a
@@ -2535,6 +2535,37 @@ L..". Where one is not met, this is how.
   in what a reference points to (`replace` puts something back at once), no
   resumption used more than once, and no raw memory beyond addresses given
   to and by C.
+
+## Values with `Drop` and callables
+
+Nothing destroys what a callable holds: `let f = { eat(n) };` with `f` never
+called took `n` with it, and `if(c) { eat(n) } else { 7 }` did the same on
+the path that does not run the first block, since the paths are callables.
+A type's `drop` then never ran, and nothing said so.
+
+Both are now refused, by the count of uses that was there for values that
+have to be used:
+
+- **A callable that holds a value with a `drop` to run has to be called**,
+  or given to something that calls it. It is treated as a value that has to
+  be used: letting it go, or giving it to a function that may not call it,
+  is refused. The blocks given to `if` and the like share what they hold
+  with the code around them and are not such callables.
+- **A value with a `drop` to run is used on every path or on none.** Used on
+  none, it stays in its variable and is destroyed when the block ends. Used
+  on some, the others have to use it too: `else { discard(n); 7 }`.
+  `core::value::discard` takes a value and lets it go, which runs its
+  `drop`. Here "used" is "given to something": what takes a value has it.
+
+This is in place of callables that say how they are destroyed, which the
+specification has and which needs the machine to know, for each callable,
+what to run. It refuses programs the specification accepts and loses
+nothing silently.
+
+- Not covered: a value with `Drop` given to a function generic in its type
+  that puts it in a callable and lets that go. The function is checked with
+  the type unknown.
+- A program with no `Drop` is checked as before.
 
 ## What a trait's function performs
 
