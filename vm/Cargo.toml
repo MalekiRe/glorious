@@ -3,6 +3,11 @@ name = "glorious-vm"
 version = "0.1.0"
 edition = "2021"
 
+[lib]
+name = "glorious_vm"
+path = "src/lib.rs"
+crate-type = ["rlib", "staticlib"]
+
 [[bin]]
 name = "glorious-vm"
 path = "src/main.rs"

@@ -346,6 +346,25 @@ def main (args : List String) : IO UInt32 := do
     | .error e =>
       IO.eprintln s!"{path}: {e}"
       pure 1
+  | ["cases", dir] => do
+    -- Every test program as files, for what runs them from outside: the
+    -- bytecode where the program compiles, what it is given, what it gives.
+    IO.FS.createDirAll dir
+    let mut n := 0
+    let mut built := 0
+    for c in Glorious.cases ++ Glorious.foreignCases do
+      n := n + 1
+      let stem := s!"{dir}/{n}"
+      IO.FS.writeFile s!"{stem}.glorious" c.src
+      IO.FS.writeFile s!"{stem}.in" (" ".intercalate (c.input.map toString))
+      IO.FS.writeFile s!"{stem}.out" c.expect
+      match compileSource c.src with
+      | .ok compiled =>
+        writeBytecode compiled s!"{stem}.gbc"
+        built := built + 1
+      | .error _ => pure ()
+    IO.println s!"{n} programs, {built} built, in {dir}"
+    pure 0
   | ["selftest"] => selftest none
   | ["selftest", vm] => selftest (some vm)
   | ["build", path, out] =>
