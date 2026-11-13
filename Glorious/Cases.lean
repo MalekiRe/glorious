@@ -1739,10 +1739,9 @@ def cases : List Case := [
     [], "6"⟩,
   ⟨"fn main() { let e: u8 = to(300); 0 }",
     [], "went wrong"⟩,
-  -- A borrow of a field through a reference does not leave the function
-  -- that makes it.
+  -- A borrow of a field through a reference can leave the function that makes it.
   ⟨"struct W(Int)\nfn get(w: &W) -> &Int { &(*w).0 }\nfn main() { let mut w = W(5); *get(&w) }",
-    [], "error: 2:25: in `get`: a borrow of a field lasts only inside the block that makes it, and here the block gives it back: give back the whole reference, or the field's value, or borrow the field where it is used"⟩,
+    [], "5"⟩,
   -- Arrays: `[a, b]`, `[x; n]`, `a[i]`, `a[i] = v`, `[T]`. An array is a
   -- value; a place that is not there stops the program.
   ⟨"fn main() { let a = [10, 20, 30]; say(a); say(len(a)); say(a[1]); let b = push(a, 40); say(b); say(a); say([1.5; 3]); say(b\"hi\"); a[0] + b[3] }",
