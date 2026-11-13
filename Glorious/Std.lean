@@ -1,0 +1,683 @@
+/-!
+# The standard library
+
+What a program has beyond the prelude, written in the language: the module
+`std` and the modules in it. A program that names `std` has it as a module of
+its own, as though the texts here were files beside it.
+-/
+
+namespace Glorious.Std
+
+private def root : String := r#"// The standard library: what is not in the prelude. A module is brought in
+// by its name: `use std::vec::sort;`.
+pub mod option;
+pub mod result;
+pub mod cmp;
+pub mod int;
+pub mod char;
+pub mod vec;
+pub mod text;
+pub mod map;
+pub mod set;
+pub mod iter;
+"#
+
+private def option : String := r#"// An `Option<T>` is a `Result<T, ()>`: `Some(x)` or `None`.
+
+pub fn is_some(o) { match(o) { Some(_) => true, None => false } }
+pub fn is_none(o) { match(o) { Some(_) => false, None => true } }
+
+// What is there, or a value to use instead.
+pub fn unwrap_or(o, other) { match(o) { Some(x) => x, None => other } }
+
+// What is there, or what a callable gives.
+pub fn unwrap_or_else(o, other) { match(o) { Some(x) => x, None => other() } }
+
+pub fn map(o, f) { match(o) { Some(x) => Some(f(x)), None => None } }
+
+// `f` of what is there, which may itself be nothing.
+pub fn and_then(o, f) { match(o) { Some(x) => f(x), None => None } }
+
+// What is there if `keep` says so.
+pub fn filter(o, keep) {
+    match(o) {
+        Some(x) => if(keep(x)) { Some(x) } else { None },
+        None => None
+    }
+}
+
+// The first that is there.
+pub fn or_else(o, other) { match(o) { Some(x) => Some(x), None => other() } }
+
+// Both, if both are there.
+pub fn zip(a, b) {
+    match(a) {
+        Some(x) => match(b) { Some(y) => Some((x, y)), None => None },
+        None => None
+    }
+}
+
+// A `Result` that fails with `error` where there was nothing.
+pub fn ok_or(o, error) { match(o) { Some(x) => Ok(x), None => Err(error) } }
+
+pub fn fold(o, init, f) { match(o) { Some(x) => f(init, x), None => init } }
+"#
+
+private def result : String := r#"// `Result<T, E>`: `Ok(value)` or `Err(error)`.
+
+pub fn is_ok(r) { match(r) { Ok(_) => true, Err(_) => false } }
+pub fn is_err(r) { match(r) { Ok(_) => false, Err(_) => true } }
+
+pub fn unwrap_or(r, other) { match(r) { Ok(x) => x, Err(_) => other } }
+pub fn unwrap_or_else(r, other) { match(r) { Ok(x) => x, Err(e) => other(e) } }
+
+pub fn map(r, f) { match(r) { Ok(x) => Ok(f(x)), Err(e) => Err(e) } }
+pub fn map_err(r, f) { match(r) { Ok(x) => Ok(x), Err(e) => Err(f(e)) } }
+
+// `f` of what succeeded, which may itself fail.
+pub fn and_then(r, f) { match(r) { Ok(x) => f(x), Err(e) => Err(e) } }
+
+// What succeeded, or what `f` makes of the failure.
+pub fn or_else(r, f) { match(r) { Ok(x) => Ok(x), Err(e) => f(e) } }
+
+// The value, forgetting why there is none.
+pub fn ok(r) { match(r) { Ok(x) => Some(x), Err(_) => None } }
+
+// The failure, if it failed.
+pub fn err(r) { match(r) { Ok(_) => None, Err(e) => Some(e) } }
+"#
+
+private def cmp : String := r#"// Putting values in order.
+
+pub enum Ordering { Less, Equal, Greater }
+
+// How `a` stands to `b`.
+pub fn compare(a, b) {
+    if(a < b) { Less } else { if(a == b) { Equal } else { Greater } }
+}
+
+pub fn min(a, b) { if(b < a) { b } else { a } }
+pub fn max(a, b) { if(b < a) { a } else { b } }
+
+// `x`, kept between `low` and `high`.
+pub fn clamp(x, low, high) { if(x < low) { low } else { if(high < x) { high } else { x } } }
+
+// The order the other way round.
+pub fn reverse(o) { match(o) { Less => Greater, Equal => Equal, Greater => Less } }
+
+// This order, or where it says equal, another.
+pub fn then(o, other) { match(o) { Equal => other, _ => o } }
+
+pub fn is_less(o) { match(o) { Less => true, _ => false } }
+pub fn is_equal(o) { match(o) { Equal => true, _ => false } }
+pub fn is_greater(o) { match(o) { Greater => true, _ => false } }
+"#
+
+private def int : String := r#"// Whole numbers.
+
+pub fn abs(n: Int) -> Int { if(n < 0) { 0 - n } else { n } }
+
+// -1, 0 or 1: the sign of a number.
+pub fn signum(n: Int) -> Int { if(n < 0) { 0 - 1 } else { if(n == 0) { 0 } else { 1 } } }
+
+pub fn is_even(n: Int) -> Bool { n % 2 == 0 }
+pub fn is_odd(n: Int) -> Bool { n % 2 != 0 }
+
+// `base` multiplied by itself `exponent` times; `exponent` is not negative.
+pub fn pow(base: Int, exponent: Int) -> Int { pow_onto(base, exponent, 1) }
+fn pow_onto(base: Int, exponent: Int, acc: Int) -> Int {
+    if(exponent <= 0) { acc } else {
+        if(exponent % 2 == 0) { tail pow_onto(base * base, exponent / 2, acc) }
+        else { tail pow_onto(base, exponent - 1, acc * base) }
+    }
+}
+
+// The greatest number that divides both; never negative.
+pub fn gcd(a: Int, b: Int) -> Int { if(b == 0) { abs(a) } else { tail gcd(b, a % b) } }
+
+// The least number both divide; never negative.
+pub fn lcm(a: Int, b: Int) -> Int { if(a == 0 or { b == 0 }) { 0 } else { abs(a / gcd(a, b) * b) } }
+
+// The quotient rounded down, and what is left, which has the sign of `b`.
+pub fn div_floor(a: Int, b: Int) -> Int {
+    let q = a / b;
+    if(a % b != 0 and { (a < 0) != (b < 0) }) { q - 1 } else { q }
+}
+pub fn mod_floor(a: Int, b: Int) -> Int { a - div_floor(a, b) * b }
+
+// The digits of a number that is not negative, the first first.
+pub fn digits(n: Int) -> [Int] { if(n < 10) { [n] } else { push(digits(n / 10), n % 10) } }
+
+// The whole root: the greatest `r` with `r * r <= n`, for `n` not negative.
+pub fn sqrt(n: Int) -> Int { if(n < 2) { n } else { sqrt_from(n, n) } }
+fn sqrt_from(n: Int, guess: Int) -> Int {
+    let next = (guess + n / guess) / 2;
+    if(next >= guess) { guess } else { tail sqrt_from(n, next) }
+}
+"#
+
+private def char : String := r#"// Characters. What is said of letters and digits here is said of ASCII.
+
+pub fn code(c: char) -> Int { int(c) }
+
+pub fn is_digit(c: char) -> Bool { '0' <= c and { c <= '9' } }
+pub fn is_lower(c: char) -> Bool { 'a' <= c and { c <= 'z' } }
+pub fn is_upper(c: char) -> Bool { 'A' <= c and { c <= 'Z' } }
+pub fn is_alpha(c: char) -> Bool { is_lower(c) or { is_upper(c) } }
+pub fn is_alphanumeric(c: char) -> Bool { is_alpha(c) or { is_digit(c) } }
+pub fn is_space(c: char) -> Bool {
+    c == ' ' or { c == '\n' } or { c == '\t' } or { c == '\r' }
+}
+
+// The number a digit stands for.
+pub fn digit(c: char) -> Option<Int> { if(is_digit(c)) { Some(int(c) - int('0')) } else { None } }
+
+// The digit that stands for a number from 0 to 9.
+pub fn of_digit(n: Int) -> Option<char> { if(0 <= n and { n <= 9 }) { char(int('0') + n) } else { None } }
+
+pub fn to_upper(c: char) -> char { if(is_lower(c)) { char(int(c) - 32) else { c } } else { c } }
+pub fn to_lower(c: char) -> char { if(is_upper(c)) { char(int(c) + 32) else { c } } else { c } }
+"#
+
+private def vec : String := r#"// Arrays: `[T]`. Nothing here changes an array it is given; each gives a new one.
+
+pub fn is_empty(a) { len(a) == 0 }
+
+pub fn first(a) { get(a, 0) }
+pub fn last(a) { get(a, len(a) - 1) }
+
+// The numbers from `from` up to, not including, `to`.
+pub fn range(from: Int, to: Int) -> [Int] { range_onto(from, to, []) }
+fn range_onto(i: Int, to: Int, out: [Int]) -> [Int] {
+    if(i < to) { tail range_onto(i + 1, to, push(out, i)) } else { out }
+}
+
+// `n` elements, the one at each place what `f` gives for the place.
+pub fn from_fn(n: Int, f) { from_fn_onto(n, f, 0, []) }
+fn from_fn_onto(n: Int, f, i: Int, out) {
+    if(i < n) { tail from_fn_onto(n, f, i + 1, push(out, f(i))) } else { out }
+}
+
+pub fn map(a, f) { fold(a, [], fn(out, x) { push(out, f(x)) }) }
+
+// The elements `keep` says yes to.
+pub fn filter(a, keep) { fold(a, [], fn(out, x) { if(keep(x)) { push(out, x) } else { out } }) }
+
+// Each element with its place.
+pub fn enumerate(a) { from_fn(len(a), { i => (i, a[i]) }) }
+
+pub fn reverse(a) { from_fn(len(a), { i => a[len(a) - 1 - i] }) }
+
+// One array after another.
+pub fn append(a, b) { fold(b, a, fn(out, x) { push(out, x) }) }
+
+// The arrays of an array, one after another.
+pub fn concat(parts) { fold(parts, [], fn(out, part) { append(out, part) }) }
+
+// The first `n` elements, and the rest.
+pub fn take(a, n: Int) { slice(a, 0, if(n < len(a)) { n } else { len(a) }) }
+pub fn drop(a, n: Int) { slice(a, if(n < len(a)) { n } else { len(a) }, len(a)) }
+
+// Pairs of the elements at the same places, as many as the shorter has.
+pub fn zip(a, b) { from_fn(if(len(a) < len(b)) { len(a) } else { len(b) }, { i => (a[i], b[i]) }) }
+
+// The place of the first element `wanted` says yes to.
+pub fn position(a, wanted) { position_from(a, wanted, 0) }
+fn position_from(a, wanted, i: Int) -> Option<Int> {
+    if(i < len(a)) {
+        if(wanted(a[i])) { Some(i) } else { tail position_from(a, wanted, i + 1) }
+    } else { None }
+}
+
+// The first element `wanted` says yes to.
+pub fn find(a, wanted) { match(position(a, wanted)) { Some(i) => Some(a[i]), None => None } }
+
+pub fn any(a, wanted) { match(position(a, wanted)) { Some(_) => true, None => false } }
+pub fn all(a, wanted) { not any(a, { x => not wanted(x) }) }
+pub fn contains(a, x) { any(a, { y => y == x }) }
+
+// How many elements `wanted` says yes to.
+pub fn count(a, wanted) { fold(a, 0, fn(n, x) { if(wanted(x)) { n + 1 } else { n } }) }
+
+pub fn sum(a) { fold(a, 0, fn(total, x) { total + x }) }
+pub fn product(a) { fold(a, 1, fn(total, x) { total * x }) }
+
+// The least and the greatest, if there is any element.
+pub fn minimum(a) {
+    if(len(a) == 0) { None } else { Some(fold(a, a[0], fn(m, x) { if(x < m) { x } else { m } })) }
+}
+pub fn maximum(a) {
+    if(len(a) == 0) { None } else { Some(fold(a, a[0], fn(m, x) { if(m < x) { x } else { m } })) }
+}
+
+// The array with the elements at two places changed over.
+pub fn swap(a, i: Int, j: Int) {
+    let x = a[i];
+    let y = a[j];
+    index_set(index_set(a, i, y), j, x)
+}
+
+// The elements in order, by `<`. Elements that are equal stay as they were
+// to each other.
+pub fn sort(a) { sort_by(a, fn(x, y) { x < y }) }
+
+// The elements in the order `before` gives: `before(x, y)` says `x` comes
+// before `y`.
+pub fn sort_by(a, before) {
+    if(len(a) < 2) { a } else {
+        let half = len(a) / 2;
+        merge(sort_by(slice(a, 0, half), before), sort_by(slice(a, half, len(a)), before), before)
+    }
+}
+
+// Two arrays in order as one in order.
+fn merge(a, b, before) { merge_from(a, b, before, 0, 0, []) }
+fn merge_from(a, b, before, i: Int, j: Int, out) {
+    if(i < len(a)) {
+        if(j < len(b)) {
+            if(before(b[j], a[i])) { tail merge_from(a, b, before, i, j + 1, push(out, b[j])) }
+            else { tail merge_from(a, b, before, i + 1, j, push(out, a[i])) }
+        } else { tail merge_from(a, b, before, i + 1, j, push(out, a[i])) }
+    } else {
+        if(j < len(b)) { tail merge_from(a, b, before, i, j + 1, push(out, b[j])) } else { out }
+    }
+}
+
+// Where `x` is in an array in order, or where it would go.
+pub fn binary_search(a, x) -> Result<Int, Int> { search_in(a, x, 0, len(a)) }
+fn search_in(a, x, low: Int, high: Int) -> Result<Int, Int> {
+    if(low < high) {
+        let mid = low + (high - low) / 2;
+        if(a[mid] < x) { tail search_in(a, x, mid + 1, high) }
+        else { if(x < a[mid]) { tail search_in(a, x, low, mid) } else { Ok(mid) } }
+    } else { Err(low) }
+}
+
+// The array without an element that is equal to the one before it.
+pub fn dedup(a) {
+    fold(a, [], fn(out, x) {
+        if(len(out) == 0) { push(out, x) } else {
+            if(out[len(out) - 1] == x) { out } else { push(out, x) }
+        }
+    })
+}
+
+// `f(f(init, a0, b0), a1, b1)` and so on, of an array of pairs.
+pub fn fold_pairs(pairs, init, f) { fold(pairs, init, fn(acc, pair) { match(pair) { (a, b) => f(acc, a, b) } }) }
+"#
+
+private def text : String := r#"// Texts: `Str`.
+
+use std::vec;
+
+pub fn is_empty(text: Str) -> Bool { match(text) { StrEnd => true, _ => false } }
+
+pub fn reverse(text: Str) -> Str { reverse_onto(text, "") }
+fn reverse_onto(text: Str, out: Str) -> Str {
+    match(text) { StrEnd => out, StrChar(c, rest) => tail reverse_onto(rest, StrChar(c, out)) }
+}
+
+// Does a text begin, end, or have somewhere in it, another?
+pub fn starts_with(text: Str, start: Str) -> Bool {
+    match((text, start)) {
+        (_, StrEnd) => true,
+        (StrChar(c, rest), StrChar(d, more)) => if(c == d) { starts_with(rest, more) } else { false },
+        _ => false
+    }
+}
+pub fn ends_with(text: Str, end: Str) -> Bool { starts_with(reverse(text), reverse(end)) }
+pub fn contains(text: Str, part: Str) -> Bool { match(find(text, part)) { Some(_) => true, None => false } }
+
+// Where a part of a text first begins.
+pub fn find(text: Str, part: Str) -> Option<Int> { find_from(text, part, 0) }
+fn find_from(text: Str, part: Str, at: Int) -> Option<Int> {
+    if(starts_with(text, part)) { Some(at) } else {
+        match(text) { StrEnd => None, StrChar(_, rest) => tail find_from(rest, part, at + 1) }
+    }
+}
+
+// The first `n` characters, and the rest.
+pub fn take(text: Str, n: Int) -> Str {
+    if(n <= 0) { "" } else { match(text) { StrEnd => "", StrChar(c, rest) => StrChar(c, take(rest, n - 1)) } }
+}
+pub fn drop(text: Str, n: Int) -> Str {
+    if(n <= 0) { text } else { match(text) { StrEnd => "", StrChar(_, rest) => tail drop(rest, n - 1) } }
+}
+
+pub fn char_at(text: Str, i: Int) -> Option<char> {
+    match(text) { StrEnd => None, StrChar(c, rest) => if(i == 0) { Some(c) } else { tail char_at(rest, i - 1) } }
+}
+
+pub fn map(text: Str, f) -> Str {
+    match(text) { StrEnd => "", StrChar(c, rest) => StrChar(f(c), map(rest, f)) }
+}
+pub fn to_upper(text: Str) -> Str { map(text, std::char::to_upper) }
+pub fn to_lower(text: Str) -> Str { map(text, std::char::to_lower) }
+
+// The text without the spaces at its ends.
+pub fn trim(text: Str) -> Str { reverse(trim_start(reverse(trim_start(text)))) }
+pub fn trim_start(text: Str) -> Str {
+    match(text) {
+        StrEnd => "",
+        StrChar(c, rest) => if(std::char::is_space(c)) { tail trim_start(rest) } else { text }
+    }
+}
+
+// The parts of a text between each two of a character.
+pub fn split(text: Str, at: char) -> [Str] { split_onto(text, at, "", []) }
+fn split_onto(text: Str, at: char, part: Str, out: [Str]) -> [Str] {
+    match(text) {
+        StrEnd => push(out, reverse(part)),
+        StrChar(c, rest) =>
+            if(c == at) { tail split_onto(rest, at, "", push(out, reverse(part))) }
+            else { tail split_onto(rest, at, StrChar(c, part), out) }
+    }
+}
+pub fn lines(text: Str) -> [Str] { split(text, '\n') }
+
+// The words of a text: what is between its spaces.
+pub fn words(text: Str) -> [Str] { vec::filter(split(map(text, { c => if(std::char::is_space(c)) { ' ' } else { c } }), ' '), { w => not is_empty(w) }) }
+
+// Texts one after another, with another between each two.
+pub fn join(parts: [Str], between: Str) -> Str {
+    fold(parts, "", fn(out, part) { if(is_empty(out)) { part } else { out ++ between ++ part } })
+}
+pub fn concat(parts: [Str]) -> Str { fold(parts, "", fn(out, part) { out ++ part }) }
+
+pub fn repeat(text: Str, n: Int) -> Str { if(n <= 0) { "" } else { text ++ repeat(text, n - 1) } }
+
+// The whole number a text writes, if it writes one: digits, perhaps after `-`.
+pub fn parse_int(text: Str) -> Option<Int> {
+    match(text) {
+        StrChar('-', rest) => match(digits_value(rest, 0, 0)) { Some(n) => Some(0 - n), None => None },
+        _ => digits_value(text, 0, 0)
+    }
+}
+fn digits_value(text: Str, seen: Int, value: Int) -> Option<Int> {
+    match(text) {
+        StrEnd => if(seen > 0) { Some(value) } else { None },
+        StrChar(c, rest) => match(std::char::digit(c)) {
+            Some(d) => tail digits_value(rest, seen + 1, value * 10 + d),
+            None => None
+        }
+    }
+}
+
+// A text put to a width with a character before it, or after it.
+pub fn pad_start(text: Str, width: Int, with: char) -> Str {
+    if(length(text) < width) { tail pad_start(StrChar(with, text), width, with) } else { text }
+}
+pub fn pad_end(text: Str, width: Int, with: char) -> Str {
+    reverse(pad_start(reverse(text), width, with))
+}
+"#
+
+private def map : String := r#"// A map from keys to values, the keys kept in order: a tree that stays
+// balanced, so finding, adding and taking away go through as many keys as the
+// number of keys has bits. A key is a type with `<`.
+
+enum Node<K, V> { Leaf, Branch(Node<K, V>, K, V, Node<K, V>, Int) }
+
+pub struct Map<K, V>(Node<K, V>)
+
+pub fn new() { Map(Leaf) }
+
+fn height(n) { match(n) { Leaf => 0, Branch(_, _, _, _, h) => h } }
+
+fn branch(l, k, v, r) {
+    let hl = height(l);
+    let hr = height(r);
+    Branch(l, k, v, r, 1 + (if(hl < hr) { hr } else { hl }))
+}
+
+// A tree with these parts, turned if one side is two deeper than the other.
+fn balance(l, k, v, r) {
+    let hl = height(l);
+    let hr = height(r);
+    if(hl > hr + 1) {
+        match(l) {
+            Branch(ll, lk, lv, lr, _) =>
+                if(height(ll) >= height(lr)) { branch(ll, lk, lv, branch(lr, k, v, r)) }
+                else {
+                    match(lr) {
+                        Branch(lrl, lrk, lrv, lrr, _) =>
+                            branch(branch(ll, lk, lv, lrl), lrk, lrv, branch(lrr, k, v, r)),
+                        Leaf => branch(l, k, v, r)
+                    }
+                },
+            Leaf => branch(l, k, v, r)
+        }
+    } else {
+        if(hr > hl + 1) {
+            match(r) {
+                Branch(rl, rk, rv, rr, _) =>
+                    if(height(rr) >= height(rl)) { branch(branch(l, k, v, rl), rk, rv, rr) }
+                    else {
+                        match(rl) {
+                            Branch(rll, rlk, rlv, rlr, _) =>
+                                branch(branch(l, k, v, rll), rlk, rlv, branch(rlr, rk, rv, rr)),
+                            Leaf => branch(l, k, v, r)
+                        }
+                    },
+                Leaf => branch(l, k, v, r)
+            }
+        } else { branch(l, k, v, r) }
+    }
+}
+
+fn put(n, key, value) {
+    match(n) {
+        Leaf => Branch(Leaf, key, value, Leaf, 1),
+        Branch(l, k, v, r, h) =>
+            if(key < k) { balance(put(l, key, value), k, v, r) }
+            else { if(k < key) { balance(l, k, v, put(r, key, value)) } else { Branch(l, key, value, r, h) } }
+    }
+}
+
+// The map with `key` standing for `value`, whatever it stood for.
+pub fn insert(m, key, value) { match(m) { Map(n) => Map(put(n, key, value)) } }
+
+fn look(n, key) {
+    match(n) {
+        Leaf => None,
+        Branch(l, k, v, r, _) =>
+            if(key < k) { tail look(l, key) } else { if(k < key) { tail look(r, key) } else { Some(v) } }
+    }
+}
+
+// What `key` stands for.
+pub fn get(m, key) { match(m) { Map(n) => look(n, key) } }
+
+pub fn contains_key(m, key) { match(get(m, key)) { Some(_) => true, None => false } }
+
+// The least key of a tree that is not empty, what it stands for, and the rest.
+fn take_least(l, k, v, r) {
+    match(l) {
+        Leaf => (k, v, r),
+        Branch(ll, lk, lv, lr, _) =>
+            match(take_least(ll, lk, lv, lr)) { (mk, mv, rest) => (mk, mv, balance(rest, k, v, r)) }
+    }
+}
+
+fn cut(n, key) {
+    match(n) {
+        Leaf => Leaf,
+        Branch(l, k, v, r, _) =>
+            if(key < k) { balance(cut(l, key), k, v, r) }
+            else {
+                if(k < key) { balance(l, k, v, cut(r, key)) }
+                else {
+                    match(r) {
+                        Leaf => l,
+                        Branch(rl, rk, rv, rr, _) =>
+                            match(take_least(rl, rk, rv, rr)) { (mk, mv, rest) => balance(l, mk, mv, rest) }
+                    }
+                }
+            }
+    }
+}
+
+// The map without `key`.
+pub fn remove(m, key) { match(m) { Map(n) => Map(cut(n, key)) } }
+
+fn walk(n, init, f) {
+    match(n) {
+        Leaf => init,
+        Branch(l, k, v, r, _) => walk(r, f(walk(l, init, f), k, v), f)
+    }
+}
+
+// `f(f(init, k0, v0), k1, v1)` and so on, the keys in order.
+pub fn fold(m, init, f) { match(m) { Map(n) => walk(n, init, f) } }
+
+pub fn len(m) { fold(m, 0, fn(n, k, v) { n + 1 }) }
+pub fn is_empty(m) { match(m) { Map(Leaf) => true, _ => false } }
+
+pub fn keys(m) { fold(m, [], fn(out, k, v) { push(out, k) }) }
+pub fn values(m) { fold(m, [], fn(out, k, v) { push(out, v) }) }
+pub fn entries(m) { fold(m, [], fn(out, k, v) { push(out, (k, v)) }) }
+
+// The map of an array of keys with what each stands for; a later one wins.
+pub fn from(pairs) { std::vec::fold_pairs(pairs, new(), fn(m, k, v) { insert(m, k, v) }) }
+
+// The map with `key` standing for what `f` makes of what it stood for.
+pub fn update(m, key, f) { insert(m, key, f(get(m, key))) }
+
+// The least and the greatest key, each with what it stands for.
+pub fn least(m) { match(entries(m)) { es => std::vec::first(es) } }
+pub fn greatest(m) { match(entries(m)) { es => std::vec::last(es) } }
+"#
+
+private def set : String := r#"// A set of values kept in order: a map from each to nothing.
+
+use std::map;
+use std::map::Map;
+
+pub struct Set<T>(Map<T, ()>)
+
+pub fn new() { Set(map::new()) }
+
+pub fn insert(s, x) { match(s) { Set(m) => Set(map::insert(m, x, ())) } }
+pub fn remove(s, x) { match(s) { Set(m) => Set(map::remove(m, x)) } }
+pub fn contains(s, x) { match(s) { Set(m) => map::contains_key(m, x) } }
+pub fn len(s) { match(s) { Set(m) => map::len(m) } }
+pub fn is_empty(s) { match(s) { Set(m) => map::is_empty(m) } }
+
+// The values, in order.
+pub fn to_array(s) { match(s) { Set(m) => map::keys(m) } }
+
+// The set of the values of an array.
+pub fn from(a) { fold(a, new(), fn(s, x) { insert(s, x) }) }
+
+pub fn fold_set(s, init, f) { match(s) { Set(m) => map::fold(m, init, fn(acc, k, v) { f(acc, k) }) } }
+
+// What is in either, in both, and in the first but not the second.
+pub fn union(a, b) { fold_set(b, a, fn(s, x) { insert(s, x) }) }
+pub fn intersection(a, b) { fold_set(a, new(), fn(s, x) { if(contains(b, x)) { insert(s, x) } else { s } }) }
+pub fn difference(a, b) { fold_set(b, a, fn(s, x) { remove(s, x) }) }
+pub fn is_subset(a, b) { fold_set(a, true, fn(ok, x) { ok and { contains(b, x) } }) }
+"#
+
+private def iter : String := r#"// Values one at a time, each made when it is asked for. An `Iter<T>` is asked
+// with `next`, which gives the next value and what is left.
+
+pub struct Iter<T>(fn() -> Option<(T, Iter<T>)>)
+
+pub fn next(it) { match(it) { Iter(step) => step() } }
+
+pub fn empty() { Iter({ None }) }
+
+// The numbers from `from` up to, not including, `to`.
+pub fn range(from: Int, to: Int) -> Iter<Int> {
+    Iter({ if(from < to) { Some((from, range(from + 1, to))) } else { None } })
+}
+
+// `seed`, `f(seed)`, `f(f(seed))`, without end.
+pub fn iterate(seed, f) { Iter({ Some((seed, iterate(f(seed), f))) }) }
+
+pub fn repeat(x) { Iter({ Some((x, repeat(x))) }) }
+
+// The elements of an array.
+pub fn of(a) { of_from(a, 0) }
+fn of_from(a, i: Int) { Iter({ if(i < len(a)) { Some((a[i], of_from(a, i + 1))) } else { None } }) }
+
+pub fn map(it, f) {
+    Iter({ match(next(it)) { Some((x, rest)) => Some((f(x), map(rest, f))), None => None } })
+}
+
+pub fn filter(it, keep) { Iter({ filter_next(it, keep) }) }
+fn filter_next(it, keep) {
+    match(next(it)) {
+        Some((x, rest)) => if(keep(x)) { Some((x, filter(rest, keep))) } else { tail filter_next(rest, keep) },
+        None => None
+    }
+}
+
+// The first `n`, and what is after them.
+pub fn take(it, n: Int) {
+    Iter({ if(n <= 0) { None } else { match(next(it)) { Some((x, rest)) => Some((x, take(rest, n - 1))), None => None } } })
+}
+pub fn skip(it, n: Int) {
+    if(n <= 0) { it } else { match(next(it)) { Some((_, rest)) => tail skip(rest, n - 1), None => empty() } }
+}
+
+// The values while `keep` says yes.
+pub fn take_while(it, keep) {
+    Iter({ match(next(it)) {
+        Some((x, rest)) => if(keep(x)) { Some((x, take_while(rest, keep))) } else { None },
+        None => None
+    } })
+}
+
+// One after another.
+pub fn chain(a, b) {
+    Iter({ match(next(a)) { Some((x, rest)) => Some((x, chain(rest, b))), None => next(b) } })
+}
+
+// Pairs, as many as the shorter gives.
+pub fn zip(a, b) {
+    Iter({ match(next(a)) {
+        Some((x, ra)) => match(next(b)) { Some((y, rb)) => Some(((x, y), zip(ra, rb))), None => None },
+        None => None
+    } })
+}
+
+// Each value with how many came before it.
+pub fn enumerate(it) { zip(iterate(0, { n => n + 1 }), it) }
+
+// `f(f(init, x0), x1)` and so on, of every value.
+pub fn fold(it, init, f) {
+    match(next(it)) { Some((x, rest)) => tail fold(rest, f(init, x), f), None => init }
+}
+
+pub fn collect(it) { fold(it, [], fn(out, x) { push(out, x) }) }
+pub fn count(it) { fold(it, 0, fn(n, x) { n + 1 }) }
+pub fn sum(it) { fold(it, 0, fn(total, x) { total + x }) }
+pub fn each(it, f) { fold(it, (), fn(done, x) { f(x) }) }
+
+// The first value `wanted` says yes to.
+pub fn find(it, wanted) {
+    match(next(it)) {
+        Some((x, rest)) => if(wanted(x)) { Some(x) } else { tail find(rest, wanted) },
+        None => None
+    }
+}
+pub fn any(it, wanted) { match(find(it, wanted)) { Some(_) => true, None => false } }
+pub fn all(it, wanted) { not any(it, { x => not wanted(x) }) }
+"#
+
+/-- The texts of the library, each with the module it is. -/
+def texts : List (List String × String) :=
+  [(["std"], root),
+   (["std", "option"], option),
+   (["std", "result"], result),
+   (["std", "cmp"], cmp),
+   (["std", "int"], int),
+   (["std", "char"], char),
+   (["std", "vec"], vec),
+   (["std", "text"], text),
+   (["std", "map"], map),
+   (["std", "set"], set),
+   (["std", "iter"], iter)]
+
+end Glorious.Std

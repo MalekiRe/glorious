@@ -5,6 +5,7 @@ import Glorious.Elab
 import Glorious.Check
 import Glorious.Infer
 import Glorious.Prelude
+import Glorious.Std
 import Glorious.Compile
 import Glorious.Core.Semantics
 import Glorious.Core.Cleanup
@@ -59,11 +60,23 @@ def certifyProgram (items : List Syntax.Item) (p : Core.Program)
   if Typing.checkProgram cert p then pure cert
   else throw s!"the certificate was rejected: {Infer.rejected cert p}"
 
+/-- Does a program have the standard library: does it name `std`, and have no
+module `std` of its own? -/
+def usesStd (src : String) (files : List (List String × String)) : Bool :=
+  let named := fun (text : String) => (text.splitOn "std").length > 1
+  let own := fun (text : String) =>
+    (text.splitOn "mod std {").length > 1 || (text.splitOn "mod std{").length > 1
+  (named src || files.any fun (_, text) => named text)
+    && !own src && !files.any fun (path, _) => path.head? == some "std"
+
 /-- The prelude and a program as written: the first module's text, and the
 texts of the modules that are files of their own, each with its path. Where
 the program says `mod name;` the items of that module's text are put. -/
 def parseProgram (src : String) (files : List (List String × String)) (check : Bool := true) :
     Except String (List Syntax.Item × List Syntax.Item) := do
+  -- The library's texts are files of the program, before its own.
+  let std := usesStd src files
+  let files := if std then Std.texts ++ files else files
   let (prelude, fix) ← match Syntax.parse {} (if check then Prelude.source else Prelude.unchecked) with
     | .ok r => pure r
     | .error e => throw s!"prelude: {e}"
@@ -76,6 +89,10 @@ def parseProgram (src : String) (files : List (List String × String)) (check : 
   -- An operator's fixity is its module's.
   let tables ← Syntax.scopedFixities fix (([], src) :: files)
   let (items, _) ← Syntax.parse fix src (base := 1000000) (records := records) (tables := tables)
+  let declares := items.any fun
+    | .module "std" _ | .pub _ (.module "std" _) => true
+    | _ => false
+  let items := if std && !declares then items ++ [.pub false (.module "std" none)] else items
   let rec fill (fuel : Nat) (path : List String) (items : List Syntax.Item) :
       Except String (List Syntax.Item) :=
     items.mapM fun item => do
@@ -109,6 +126,13 @@ def checkedPrelude : Thunk (Except String (Nat × Check.St)) := Thunk.mk fun _ =
   let all := Syntax.fillDefaults (← Syntax.expandAliases resolved.items)
   pure (all.length, ← Check.checkFirst all resolved.info)
 
+/-- The prelude and the standard library checked, once. -/
+def checkedStd : Thunk (Except String (Nat × Check.St)) := Thunk.mk fun _ => do
+  let (prelude, items) ← parseProgram "// std" []
+  let resolved ← Syntax.Modules.resolve prelude items
+  let all := Syntax.fillDefaults (← Syntax.expandAliases resolved.items)
+  pure (all.length, ← Check.checkFirst all resolved.info)
+
 /-- Parse, check and elaborate a program together with the prelude, and have the
 proved Core type checker accept the result. With `check := false` both checks
 are skipped, so that programs which go wrong can still be run. -/
@@ -133,7 +157,8 @@ def compileSource (src : String) (check : Bool := true)
   let all := Syntax.fillDefaults all
   -- What the checker learnt about blocks that share an environment. A program
   -- it rejects is elaborated without that.
-  let checked := match check && !resolved.info.shadowed, checkedPrelude.get with
+  let first := if usesStd src files then checkedStd.get else checkedPrelude.get
+  let checked := match check && !resolved.info.shadowed, first with
     | true, .ok (count, first) => Check.checkAfter first (all.drop count) resolved.info
     | _, _ => Check.checkProgram all resolved.info
   let blocks ← match checked with

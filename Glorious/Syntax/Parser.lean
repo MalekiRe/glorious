@@ -413,6 +413,7 @@ private partial def parseResult : P TypeExpr := do
   let startsType := match ← peek with
     | .ident _ => true
     | .punct "(" => true
+    | .punct "[" => true
     | .op "!" => true
     | .op "&" => true
     | _ => false

@@ -128,6 +128,37 @@ partial def expandAliases (items : List Item) : Except String (List Item) := do
     | _ => true
   rest.mapM item
 
+mutual
+
+/-- An expression with every identity in it moved on by `k`: a copy of a
+function is then told apart from the function and from every other copy. -/
+partial def shiftExpr (k : Nat) : Expr → Expr
+  | .call id g args => .call (id + k) (shiftExpr k g) (args.map (shiftExpr k))
+  | .tailCall id g args => .tailCall (id + k) (shiftExpr k g) (args.map (shiftExpr k))
+  | .tuple args => .tuple (args.map (shiftExpr k))
+  | .proj e i => .proj (shiftExpr k e) i
+  | .fieldOf id e name => .fieldOf (id + k) (shiftExpr k e) name
+  | .refField id uniq name path star => .refField (id + k) uniq name path star
+  | .deref e => .deref (shiftExpr k e)
+  | .reborrow u e => .reborrow u (shiftExpr k e)
+  | .closure id clauses => .closure (id + k) (clauses.map (shiftClause k))
+  | .handle subject arms => .handle (shiftExpr k subject) (arms.map (shiftClause k))
+  | .labelScope l body => .labelScope l (body.map (shiftStmt k))
+  | e => e
+
+partial def shiftClause (k : Nat) : Clause → Clause
+  | .mk pats body => .mk pats (body.map (shiftStmt k))
+
+partial def shiftStmt (k : Nat) : Stmt → Stmt
+  | .let_ pat value => .let_ pat (shiftExpr k value)
+  | .letMut x value => .letMut x (shiftExpr k value)
+  | .expr e => .expr (shiftExpr k e)
+  | .defer e => .defer (shiftExpr k e)
+  | .assign target value => .assign (shiftExpr k target) (shiftExpr k value)
+  | .located line col s => .located line col (shiftStmt k s)
+
+end
+
 /-- Each implementation with the functions its trait gives a body that it
 does not write itself; and, where it gives its trait arguments, `impl
 From<Int> for u8`, as an implementation of the trait at those: `From<Int>` is
@@ -136,8 +167,8 @@ def fillDefaults (items : List Item) : List Item :=
   let defaults := items.filterMap fun
     | .traitInfo name _ fns _ _ => some (name, fns)
     | _ => none
-  items.map fun
-    | .impl ps tr head args context methods =>
+  items.zipIdx.map fun
+    | (.impl ps tr head args context methods, index) =>
       let written := methods.filterMap fun
         | .fn m _ _ _ _ => some m
         | _ => none
@@ -148,7 +179,17 @@ def fillDefaults (items : List Item) : List Item :=
         methods.findSome? fun
           | .typeAlias name _ body => if name == traitArgName i then some body.spell else none
           | _ => none
+      -- A default is written against `Self`; in the implementation its types
+      -- are the trait's at the implementing type, as for a function the
+      -- implementation writes itself without saying them.
+      -- Each implementation has its own copy: the calls in it are met by
+      -- this implementation's types, and are known by their identities.
+      let missing := missing.map fun
+        | .fn m fps annots _ clauses =>
+          Item.fn m fps (annots.map fun _ => none) none
+            (clauses.map (shiftClause (10000000000 * (index + 1))))
+        | item => item
       .impl ps (traitAt tr given) head args context (methods ++ missing)
-    | item => item
+    | (item, _) => item
 
 end Glorious.Syntax

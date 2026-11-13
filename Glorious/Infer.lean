@@ -231,34 +231,29 @@ abbrev M := StateT St (Except String)
 instance {α : Type} : Inhabited (M α) := ⟨throw "certificate: unreachable"⟩
 
 def freshTy : M ITy := do
-  let s ← get
-  set { s with tys := s.tys.push none }
-  pure (.var s.tys.size)
+  -- (in one step: the state is not held twice, so the array is not copied)
+  modifyGet fun s => (.var s.tys.size, { s with tys := s.tys.push none })
 
 def freshTys (n : Nat) : M (List ITy) := (List.range n).mapM fun _ => freshTy
 
 def freshRow : M IRow := do
-  let s ← get
-  set { s with rows := s.rows.push none }
-  pure ⟨[], some s.rows.size⟩
+  -- (in one step: the state is not held twice, so the array is not copied)
+  modifyGet fun s => (⟨[], some s.rows.size⟩, { s with rows := s.rows.push none })
 
 def freshCls : M ICls := do
-  let s ← get
-  set { s with clss := s.clss.push none }
-  pure (.var s.clss.size)
+  -- (in one step: the state is not held twice, so the array is not copied)
+  modifyGet fun s => (.var s.clss.size, { s with clss := s.clss.push none })
 
 /-! ## Regions and what callables touch -/
 
 def freshRg : M Nat := do
-  let s ← get
-  set { s with rgs := s.rgs.push none }
-  pure s.rgs.size
+  -- (in one step: the state is not held twice, so the array is not copied)
+  modifyGet fun s => (s.rgs.size, { s with rgs := s.rgs.push none })
 
 /-- A region that is a cell of its own: no other such region is the same. -/
 def freshAtom : M Nat := do
-  let s ← get
-  set { s with rgs := s.rgs.push (some .atom) }
-  pure s.rgs.size
+  -- (in one step: the state is not held twice, so the array is not copied)
+  modifyGet fun s => (s.rgs.size, { s with rgs := s.rgs.push (some .atom) })
 
 partial def findRg (id : Nat) : M Nat := do
   match (← get).rgs[id]? with
@@ -288,9 +283,8 @@ def unifyRg (a b : Nat) : M Unit := do
     modify fun s => { s with rgs := s.rgs.set! hi (some (.link lo)) }
 
 def freshAcc : M Nat := do
-  let s ← get
-  set { s with accs := s.accs.push {} }
-  pure s.accs.size
+  -- (in one step: the state is not held twice, so the array is not copied)
+  modifyGet fun s => (s.accs.size, { s with accs := s.accs.push {} })
 
 partial def findAcc (id : Nat) : M Nat := do
   match (← get).accs[id]? with

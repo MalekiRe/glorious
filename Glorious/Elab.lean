@@ -294,9 +294,7 @@ def useLocal (a : Atom) : M Atom := do
   | .int _ => pure a
 
 def addFn (f : Core.Fn) (name : String) : M Nat := do
-  let s ← get
-  set { s with fns := s.fns.push f, names := s.names.push name }
-  pure s.fns.size
+  modifyGet fun s => (s.fns.size, { s with fns := s.fns.push f, names := s.names.push name })
 
 private def indexed (names : List String) (base : Nat) : Scope :=
   (names.zip (List.range names.length)).map fun (x, k) => (x, .var (base + k))

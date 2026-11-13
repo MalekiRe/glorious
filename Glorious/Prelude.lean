@@ -651,6 +651,54 @@ impl<T> Show for Array<T> where T: Show {
 // Write a value as text.
 fn say(value) { host_write(show(value)) }
 
+// Values made of values that can be compared can be compared.
+impl Eq for () { fn ==(a, b) { true } }
+impl<A, B> Eq for (A, B) where A: Eq, B: Eq {
+    fn ==(x, y) { match((x, y)) { ((a, b), (c, d)) => a == c and { b == d } } }
+}
+impl<A, B, C> Eq for (A, B, C) where A: Eq, B: Eq, C: Eq {
+    fn ==(x, y) { match((x, y)) { ((a, b, c), (d, e, f)) => a == d and { b == e } and { c == f } } }
+}
+impl<T, E> Eq for Result<T, E> where T: Eq, E: Eq {
+    fn ==(x, y) {
+        match((x, y)) {
+            (Ok(a), Ok(b)) => a == b,
+            (Err(a), Err(b)) => a == b,
+            _ => false
+        }
+    }
+}
+impl<T> Eq for Array<T> where T: Eq {
+    fn ==(a, b) {
+        match(int_eq(len(a), len(b))) { 0 => false, _ => same_from(a, b, 0) }
+    }
+}
+fn same_from<T>(a: Array<T>, b: Array<T>, i: Int) -> Bool where T: Eq {
+    match(int_lt(i, len(a))) {
+        0 => true,
+        _ => match(index(a, i) == index(b, i)) { Ok(_) => tail same_from(a, b, int_add(i, 1)), Err(_) => false }
+    }
+}
+
+// Pairs in order: by the first, and then by the second. Texts as in a
+// dictionary of character codes.
+impl<A, B> Ord for (A, B) where A: Ord, B: Ord {
+    fn <(x, y) { match((x, y)) { ((a, b), (c, d)) => a < c or { a == c and { b < d } } } }
+}
+impl Ord for Str {
+    fn <(a, b) {
+        match((a, b)) {
+            (_, StrEnd) => false,
+            (StrEnd, _) => true,
+            (StrChar(c, x), StrChar(d, y)) =>
+                match(int_lt(char_bits(c), char_bits(d))) {
+                    0 => match(int_eq(char_bits(c), char_bits(d))) { 0 => false, _ => x < y },
+                    _ => true
+                }
+        }
+    }
+}
+
 // A character is its code: any but the codes kept for pairs, up to 10FFFF.
 impl Eq for char { fn ==(a, b) { bool(int_eq(char_bits(a), char_bits(b))) } }
 impl Ord for char { fn <(a, b) { bool(int_lt(char_bits(a), char_bits(b))) } }

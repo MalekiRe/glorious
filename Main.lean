@@ -187,6 +187,59 @@ def probe (paths : List String) : IO UInt32 := do
     IO.println "--"
   pure 0
 
+/-- Why a program's Core is not shown to follow every rule: what stops the
+certificate with all of them asked for. -/
+def why (path : String) : IO UInt32 := do
+  let src ← IO.FS.readFile path
+  let files ← moduleFiles path
+  let .ok (prelude, items) := parseProgram src files | IO.println "parse failed"; return 1
+  let .ok resolved := Syntax.Modules.resolve prelude items | IO.println "resolve failed"; return 1
+  let .ok all := Syntax.expandAliases resolved.items | IO.println "aliases failed"; return 1
+  let all := Syntax.fillDefaults all
+  let .ok blocks := Check.checkProgram all resolved.info | IO.println "check failed"; return 1
+  let all := Elab.eraseLifetimes all
+  let (all, blocks) := Elab.untrait blocks all
+  let .ok all := Elab.unfield blocks all | IO.println "unfield failed"; return 1
+  let all := Elab.reachable ("main" :: blocks.coercions.map (·.2)) all
+  for lends in [1, 0] do
+    let .ok out := Elab.elabProgram all (some blocks) (fun _ => lends) | IO.println "elab failed"; return 1
+    match Infer.certify all out.program true out.envSizes true true with
+    | .ok cert =>
+      if Typing.checkProgram cert out.program then IO.println s!"lends={lends}: accepted"
+      else IO.println s!"lends={lends}: rejected: {Infer.rejected cert out.program}"
+    | .error e => IO.println s!"lends={lends}: no certificate: {e}"
+  pure 0
+
+/-- How many of the test programs compile, and of those how many are shown
+to follow each set of Core's rules. -/
+def survey : IO UInt32 := do
+  let examples ← exampleCases "examples"
+  let mut compiled := 0
+  let mut strict := 0
+  let mut regions := 0
+  let mut loans := 0
+  let mut all := 0
+  let mut scopes := 0
+  let mut plain := 0
+  let mut withPlain := 0
+  let mut weak : List String := []
+  for (c, files) in cases.map (·, []) ++ examples do
+    if let .ok out := compileSource c.src true files then
+      compiled := compiled + 1
+      let has := fun (f : Typing.Cert → Bool) => (out.cert.map f).getD false
+      if has (·.strict) then strict := strict + 1
+      if has (·.regions) then regions := regions + 1
+      if has (·.loans) then loans := loans + 1
+      if has (·.strict) && has (·.regions) && has (·.loans) then all := all + 1
+      else weak := weak ++ [s!"strict={has (·.strict)} regions={has (·.regions)} loans={has (·.loans)}: {c.src}"]
+      scopes := scopes + out.lent
+      plain := plain + out.plain.length
+      unless out.plain.isEmpty do withPlain := withPlain + 1
+  IO.println s!"{compiled} compile; {strict} well owned; {regions} with regions; {loans} with loans; {all} with all three"
+  IO.println s!"{scopes} borrows are scopes of their own; {plain} are not, in {withPlain} programs"
+  for w in weak do IO.println s!"--\n{w}"
+  pure 0
+
 /-- How long each stage of compiling a program takes, in milliseconds. -/
 def stages (path : String) : IO UInt32 := do
   let src ← IO.FS.readFile path
@@ -241,6 +294,8 @@ def main (args : List String) : IO UInt32 := do
   | ["certify", "--strict", path] => certify path true
   | "probe" :: paths => probe paths
   | ["stages", path] => stages path
+  | ["survey"] => survey
+  | ["why", path] => why path
   | ["selftest"] => selftest none
   | ["selftest", vm] => selftest (some vm)
   | ["build", path, out] =>

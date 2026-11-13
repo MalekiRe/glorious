@@ -34,6 +34,7 @@ import Glorious.Syntax.Lexer
 import Glorious.Syntax.Parser
 import Glorious.Elab
 import Glorious.Prelude
+import Glorious.Std
 import Glorious.Driver
 import Glorious.Bytecode.Encode
 import Glorious.Cases

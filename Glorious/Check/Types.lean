@@ -512,27 +512,22 @@ abbrev M := StateT St (Except String)
 instance {α : Type} : Inhabited (M α) := ⟨throw "checker: unreachable"⟩
 
 def freshTy : M Ty := do
-  let s ← get
-  set { s with tys := s.tys.push none }
-  pure (.var s.tys.size)
+  -- (in one step: the state is not held twice, so the array is not copied)
+  modifyGet fun s => (.var s.tys.size, { s with tys := s.tys.push none })
 
 def freshRowVar : M Nat := do
-  let s ← get
-  set { s with rows := s.rows.push none }
-  pure s.rows.size
+  -- (in one step: the state is not held twice, so the array is not copied)
+  modifyGet fun s => (s.rows.size, { s with rows := s.rows.push none })
 
 def freshRow : M Row := do
   pure ⟨[], some (← freshRowVar)⟩
 
 def freshCap : M Nat := do
-  let s ← get
-  set { s with caps := s.caps.push none }
-  pure s.caps.size
+  -- (in one step: the state is not held twice, so the array is not copied)
+  modifyGet fun s => (s.caps.size, { s with caps := s.caps.push none })
 
 def freshBrand : M Nat := do
-  let s ← get
-  set { s with brands := s.brands + 1 }
-  pure s.brands
+  modifyGet fun s => (s.brands, { s with brands := s.brands + 1 })
 
 /-- The representative of a capture variable. -/
 partial def findCap (c : Nat) : M Nat := do

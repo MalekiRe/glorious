@@ -902,6 +902,46 @@ Not built. Conversion other than through `Int` (`u8(n)`, `int(x)`, `f64(n)`,
 `widen`, `narrow`, `char(code)`). A `Str` is a list: there are no arrays, so
 its length is counted.
 
+## The standard library is written in the language
+
+**Decision: `std` is a module the compiler has the texts of, and a program
+that names it has it.** The texts are in `Glorious/Std.lean`, one for each
+module; a program that has the word `std` in it, and no module `std` of its
+own, is compiled with them as files beside it, `pub mod std;` in its first
+module. Nothing else is special about them: they are resolved, checked and
+elaborated as the program's own modules are, and name each other and the
+prelude as any module would. What nothing reaches is left out, so a program
+pays for what it uses.
+
+What is there: `std::option` and `std::result` (the usual functions over a
+value that may not be there); `std::cmp` (`Ordering`, `compare`, `min`, `max`,
+`clamp`); `std::int` (`abs`, `pow`, `gcd`, `lcm`, division rounding down,
+`digits`, the whole root); `std::char` (what a character is, in ASCII);
+`std::text` (searching, cutting, splitting and joining texts, `parse_int`,
+padding); `std::vec` (arrays: `map`, `filter`, `sort`, `binary_search`, `zip`
+and the rest); `std::map` and `std::set` (kept in order, in a balanced tree,
+for keys with `<`); `std::iter` (values one at a time, made when asked for).
+The prelude gained `Eq` for `()`, pairs, triples, `Result` and arrays, and
+`Ord` for pairs and texts.
+
+It is checked once, with the prelude, for as long as the compiler runs.
+
+Found on the way. A default function of a trait was one function shared by
+every implementation that took it, and each call in it was met once, by the
+first implementation's types: `q` of a `char` called `p` of an `Int`. Each
+implementation now has its own copy. Making a fresh variable copied the
+whole table of variables, in the checker and where certificates are found:
+the time went with the square of a program's size. A program of 150
+functions took 3.9 s to certify and now takes 0.1 s.
+
+Limits, against the specification of the library (3000 lines): this is a
+tenth of it. No `String` that owns a buffer, no hash map (there is no
+hashing), no slices that borrow, no streams, files, paths, clocks or
+processes, no formatting traits beyond `Show`, no generators or tasks, and
+none of the structures for writing a compiler. A function in a trait cannot
+have a type parameter of its own, so `map` over an iterator is a function
+and not the trait's.
+
 ## What is a module's own
 
 **Decision: a module that is not `pub`, an operator's fixity and a coercion
