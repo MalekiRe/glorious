@@ -132,6 +132,31 @@ def openTail (callee amb : Row) : M (Option Nat) := do
   | none => pure none
   | some ρ => pure (if a.tail == some ρ then none else some ρ)
 
+/-- The rows a function is given by whoever uses it: its row parameters. -/
+def paramTails : M (List (Nat × String)) := do
+  let mut out : List (Nat × String) := []
+  for (_, rowParams) in (← get).rowChecks do
+    for (e, carrier) in rowParams do
+      if let .fn [] _ [] (some k) _ ← find carrier then
+        let r ← flattenRow ⟨[], some k⟩
+        if r.effs.isEmpty then
+          if let some ρ := r.tail then out := (ρ, e) :: out
+  pure out
+
+/-- The rows of effects that are someone else's to say: a function's row
+parameters, and those left to implementations not yet known, which is what a
+trait says a type parameter performs. Each stays a row of its own, and is
+not made the row of where it is performed: two of them performed in one
+function are then two, and the function performs both. -/
+def assocTails : M (List Nat) := do
+  let mut out : List Nat := (← paramTails).map (·.1)
+  for (_, _, _, a, _, _) in (← get).assocUses do
+    if let .fn [] _ [] (some k) _ ← find a then
+      let r ← flattenRow ⟨[], some k⟩
+      if r.effs.isEmpty then
+        if let some ρ := r.tail then out := ρ :: out
+  pure out
+
 def includeRow (callee amb : Row) (what : String) : M Unit := do
   includeNamed callee amb what
   if (← openTail callee amb).isSome then
@@ -156,7 +181,9 @@ partial def settleRows (bind : Option (Nat → Bool)) (final : Bool) : M Unit :=
   match bind with
   | none => restore
   | some ok =>
-    let candidates := ((left.toList.map (·.2.2.2)).eraseDups.filter ok).mergeSort (· ≥ ·)
+    let held ← assocTails
+    let candidates := ((left.toList.map (·.2.2.2)).eraseDups.filter fun ρ =>
+      ok ρ && !held.contains ρ).mergeSort (· ≥ ·)
     for ρ in candidates do
       let mine := left.toList.filter (·.2.2.2 == ρ)
       let ambs ← mine.mapM fun (_, amb, _, _) => flattenRow amb

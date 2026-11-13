@@ -460,7 +460,10 @@ private partial def parseResult : P TypeExpr := do
       -- `| e`: and whatever the row parameter `e` stands for.
       if braced && ((← peek) == .op "|" || (← peek) == .punct "|") then
         advance
-        effects := effects.push (rowMark, [← if ← isOp "<" then parseType else do pure (.name (← expectPath) [])])
+        -- (Several, with commas: the row has each of them in it.)
+        repeat
+          effects := effects.push (rowMark, [← if ← isOp "<" then parseType else do pure (.name (← expectPath) [])])
+          if !(← acceptPunct ",") then break
         break
       let name ← expectPath
       let mut args : Array TypeExpr := #[]
@@ -542,7 +545,9 @@ private partial def parseRow : P (List (String × List TypeExpr)) := do
     -- `| e`: and whatever the row parameter `e` stands for.
     if (← peek) == .op "|" || (← peek) == .punct "|" then
       advance
-      effects := effects.push (rowMark, [← if ← isOp "<" then parseType else do pure (.name (← expectPath) [])])
+      repeat
+        effects := effects.push (rowMark, [← if ← isOp "<" then parseType else do pure (.name (← expectPath) [])])
+        if !(← acceptPunct ",") then break
       break
     let name ← expectPath
     let mut args : Array TypeExpr := #[]

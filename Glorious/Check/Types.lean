@@ -92,6 +92,11 @@ structure Scheme where
   ranked : List (Nat × List (Nat × String)) := []
   /-- Types left to implementations that the type mentions: see `St.assocUses`. -/
   assocs : List (String × Ty × String × Ty) := []
+  /-- Rows of effects the function performs that are left to implementations:
+  each, as the type of a callable that performs it, with the row it is
+  performed in. A function over two streams performs what both do, and what
+  that is is known where the streams are. -/
+  incls : List (Ty × Ty) := []
 
 /-- How a type depends on one of its parameters, for telling when a value of
 the type at one argument will do where the type at another is wanted. -/
@@ -829,6 +834,12 @@ def instantiate (s : Scheme) (via : Option String := none) (fixed : List (Nat ×
     let use := (tr, subst tm rm cm subject, name, subst tm rm cm a)
     modify fun st =>
       { st with assocUses := st.assocUses.push (use.1, use.2.1, use.2.2.1, use.2.2.2, st.owner, st.pos) }
+  for (callee, amb) in s.incls do
+    if let (.fn _ _ effs tail _, .fn _ _ effs' tail' _) := (subst tm rm cm callee, subst tm rm cm amb) then
+      let what := match via with
+        | some f => s!"`{f}`"
+        | none => "this"
+      modify fun st => { st with rowIncl := st.rowIncl.push (⟨effs, tail⟩, ⟨effs', tail'⟩, st.pos ++ what) }
   pure (subst tm rm cm s.ty)
 
 /-- Replace a function's own type parameters, which stood for themselves while

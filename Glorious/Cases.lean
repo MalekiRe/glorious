@@ -2500,7 +2500,7 @@ def cases : List Case := [
   ⟨"effect Log { log(n: Int) -> () }\nfn f<e: EffectRow>(g: fn() -> Int / e) -> Int / e { log(1); g() }\nfn main() -> Int { 0 }",
     [], "error: in `f`: the row `e` is whatever the caller chooses, and what is written needs it to hold {Log}"⟩,
   ⟨"effect Log { log(n: Int) -> () }\nfn f<a: EffectRow, b: EffectRow>(g: fn() -> Int / a, h: fn() -> Int / b) -> Int / a { g() + h() }\nfn main() -> Int { handle(f({ 1 }, { log(1); 2 })) { log(n, k) => k(()), x => x } }",
-    [], "error: in `f`: the row `b` is taken to be the same as another row parameter: what the function does with them makes them one"⟩,
+    [], "error: 2:87: `h` performs the row `b`, which is whatever the caller chooses, and the row written here does not have it: write it after `|`, with any other after a comma"⟩,
   ⟨"fn f(g: fn() -> Int / e) -> Int { g() }\nfn main() -> Int { 0 }",
     [], "error: in `f`: unknown effect `e`"⟩,
   ⟨"fn pure_only<e: EffectRow>(g: fn() -> Int / e) -> Int { 3 }\nfn main() -> Int { pure_only({ 4 }) }",
@@ -3079,6 +3079,35 @@ def cases : List Case := [
     [], "error: 3:20: in `main`: `From` for `Wrap`: expected `Int`, found `Str`"⟩,
   ⟨"struct Wrap<T>(T)\nimpl<T> From<T> for Wrap<T> { fn from(x) { Wrap(x) } }\nimpl From<Int> for Wrap<Str> { fn from(x) { Wrap(\"n\") } }\nfn main() -> Int { 0 }",
     [], "error: `impl From<Int> for Wrap`: `Wrap` has an implementation of `From` for every argument (`From<T>`), so it has no other"⟩,
+  -- A row with several unknown parts: a function over two streams performs what reading the one and writing the other do.
+  ⟨"use std::stream::{Read, Write, MemoryCursor, read, write, write_str, read_to_end};\nuse std::host::{IoError};\nfn copy<R: Read, W: Write>(reader: &mut R, writer: &mut W, done: Int) -> Result<Int, IoError> {\n    match(read(reader, 4)) {\n        Ok(got) =>\n            if(len(got) == 0) { Ok(done) }\n            else { match(write(writer, got)) { Ok(n) => copy(reader, writer, done + n), Err(e) => Err(e) } },\n        Err(e) => Err(e)\n    }\n}\nfn main() -> Int {\n    let mut from = MemoryCursor::new([]);\n    write_str(&mut from, \"0123456789\");\n    let mut to = MemoryCursor::new([]);\n    match(copy(&mut from, &mut to, 0)) { Ok(n) => n * 100 + len(MemoryCursor::into_inner(to)), Err(_) => 0 - 1 } }",
+    [], "1010"⟩,
+  ⟨"use std::stream::{Read, Write, MemoryCursor, read, write, write_str, read_to_end};\nuse std::host::{IoError};\nfn copy<R: Read, W: Write>(reader: &mut R, writer: &mut W, done: Int) -> Result<Int, IoError> / { | <R as Read>::Effects, <W as Write>::Effects } {\n    match(read(reader, 4)) {\n        Ok(got) =>\n            if(len(got) == 0) { Ok(done) }\n            else { match(write(writer, got)) { Ok(n) => copy(reader, writer, done + n), Err(e) => Err(e) } },\n        Err(e) => Err(e)\n    }\n}\nfn main() -> Int {\n    let mut from = MemoryCursor::new([]);\n    write_str(&mut from, \"0123456789\");\n    let mut to = MemoryCursor::new([]);\n    match(copy(&mut from, &mut to, 0)) { Ok(n) => n * 100 + len(MemoryCursor::into_inner(to)), Err(_) => 0 - 1 } }",
+    [], "1010"⟩,
+  ⟨"use std::stream::{Read, Write, MemoryCursor, read, write, write_str, read_to_end};\nuse std::host::{IoError, run_host};\nuse std::stream::{Stdout};\nfn copy<R: Read, W: Write>(reader: &mut R, writer: &mut W, done: Int) -> Result<Int, IoError> {\n    match(read(reader, 4)) {\n        Ok(got) =>\n            if(len(got) == 0) { Ok(done) }\n            else { match(write(writer, got)) { Ok(n) => copy(reader, writer, done + n), Err(e) => Err(e) } },\n        Err(e) => Err(e)\n    }\n}\nfn main() -> Int {\n    let mut from = MemoryCursor::new([]);\n    write_str(&mut from, \"0123456789\");\n    let mut to = Stdout; match(copy(&mut from, &mut to, 0)) { Ok(n) => n, Err(_) => 0 - 1 } }",
+    [], "error: `main` performs effects that nothing handles: {std::host::Console}"⟩,
+  ⟨"use std::stream::{Read, Write, MemoryCursor, read, write, write_str, read_to_end};\nuse std::host::{IoError};\nfn copy<R: Read, W: Write>(reader: &mut R, writer: &mut W, done: Int) -> Result<Int, IoError> / { | <R as Read>::Effects } {\n    match(read(reader, 4)) {\n        Ok(got) =>\n            if(len(got) == 0) { Ok(done) }\n            else { match(write(writer, got)) { Ok(n) => copy(reader, writer, done + n), Err(e) => Err(e) } },\n        Err(e) => Err(e)\n    }\n}\nfn main() -> Int {\n    let mut from = MemoryCursor::new([]);\n    write_str(&mut from, \"0123456789\");\n    let mut to = MemoryCursor::new([]);\n    match(copy(&mut from, &mut to, 0)) { Ok(n) => n * 100 + len(MemoryCursor::into_inner(to)), Err(_) => 0 - 1 } }",
+    [], "error: 7:20: `std::stream::write` performs what the implementation for a type parameter says it does, and the row written here has another's alone: write each after `|`, as `| <A as Trait>::Effects, <B as Trait>::Effects`"⟩,
+  ⟨"use std::stream::{Read, Write, MemoryCursor, read, write, write_str, read_to_end};\nuse std::host::{IoError};\neffect Tick { tick() }\nfn copy<R: Read, W: Write>(reader: &mut R, writer: &mut W, done: Int) -> Result<Int, IoError> / { Tick | <R as Read>::Effects, <W as Write>::Effects } {\n    tick();\n    match(read(reader, 4)) {\n        Ok(got) =>\n            if(len(got) == 0) { Ok(done) }\n            else { match(write(writer, got)) { Ok(n) => copy(reader, writer, done + n), Err(e) => Err(e) } },\n        Err(e) => Err(e)\n    }\n}\nfn main() -> Int {\n    let mut from = MemoryCursor::new([]);\n    write_str(&mut from, \"0123456789\");\n    let mut to = MemoryCursor::new([]);\n    let mut ticks = 0;\n    let r = handle copy(&mut from, &mut to, 0) { tick() => ticks = ticks + 1 };\n    match(r) { Ok(n) => n * 100 + ticks, Err(_) => 0 - 1 } }",
+    [], "1004"⟩,
+  ⟨"use std::stream::{Read, read, MemoryCursor};\nfn with<R: Read, e: EffectRow>(r: &mut R, f: fn(Int) -> Int / e) -> Int / { | e, <R as Read>::Effects } { match(read(r, 8)) { Ok(got) => f(len(got)), Err(_) => 0 } }\neffect Log { log(Int) }\nfn main() -> Int { let mut c = MemoryCursor::new([1u8, 2u8, 3u8]); let mut seen = 0; let n = handle with(&mut c, { n => log(n); n * 2 }) { log(n) => seen = n }; n * 10 + seen }",
+    [], "63"⟩,
+  -- Two row parameters in one row: two functions that perform different effects, given to one that calls both.
+  ⟨"fn both<a: EffectRow, b: EffectRow>(f: fn() -> Int / a, g: fn() -> Int / b) -> Int / { | a, b } { f() + g() }\neffect A { a() -> Int }\neffect B { b() -> Int }\nfn main() -> Int { handle (handle both({ a() }, { b() }) { a(k) => k(1) }) { b(k) => k(20) } }",
+    [], "21"⟩,
+  ⟨"effect A { a() -> Int }\neffect B { b() -> Int }\nfn one() -> Int / {A} { a() }\nfn two() -> Int / {B} { b() }\nfn both<x: EffectRow, y: EffectRow>(f: fn() -> Int / x, g: fn() -> Int / y) -> Int / { | x, y } { f() + g() }\nfn main() -> Int { handle (handle both(one, two) { a(k) => k(1) }) { b(k) => k(20) } }",
+    [], "21"⟩,
+  ⟨"effect A { a() -> Int }\neffect B { b() -> Int }\nfn one() -> Int / {A} { a() }\nfn two() -> Int / {B} { b() }\nfn both<x: EffectRow, y: EffectRow>(f: fn() -> Int / x, g: fn() -> Int / y) -> Int / { | x, y } { f() + g() }\nfn main() -> Int { handle both(one, two) { a(k) => k(1) } }",
+    [], "error: `main` performs effects that nothing handles: {B}"⟩,
+  ⟨"fn f<e: EffectRow>(g: fn() -> Int / e) -> Int / {} { g() }\nfn main() -> Int { f({ 1 }) }",
+    [], "error: 1:54: `g` performs the row `e`, which is whatever the caller chooses, and the row written here does not have it: write it after `|`, with any other after a comma"⟩,
+  -- A row written closed, for a function over a type parameter whose trait performs: it is for types that perform nothing.
+  ⟨"use std::stream::{Read, read, MemoryCursor};\nfn quiet<R: Read>(r: &mut R) -> Int / {} { match(read(r, 1)) { Ok(got) => len(got), Err(_) => 0 } }\nfn main() -> Int { let mut c = MemoryCursor::new([1u8, 2u8]); quiet(&mut c) }",
+    [], "1"⟩,
+  ⟨"use std::stream::{Read, read, Stdin};\nuse std::host::{run_host};\nfn quiet<R: Read>(r: &mut R) -> Int / {} { match(read(r, 1)) { Ok(got) => len(got), Err(_) => 0 } }\nfn main() -> Int { run_host({ let mut c = Stdin; quiet(&mut c) }) }",
+    [], "error: 4:50: in `main`: `quiet` cannot be called here: effect `std::host::Console` is not handled here"⟩,
+  ⟨"use std::stream::{MemoryCursor, Stdout, write_str, copy_stream};\nuse std::host::{run_host};\nfn main() -> Int {\n    let mut from = MemoryCursor::new([]);\n    write_str(&mut from, \"copied across\\n\");\n    let mut to = MemoryCursor::new([]);\n    let a = match(copy_stream(&mut from, &mut to, 6)) { Ok(n) => n, Err(_) => 0 - 1 };\n    let mut again = MemoryCursor::new(MemoryCursor::into_inner(to));\n    let mut out = Stdout; match(copy_stream(&mut again, &mut out, 100)) { Ok(n) => a * 100 + n, Err(_) => 0 - 1 } }",
+    [], "error: `main` performs effects that nothing handles: {std::host::Console}"⟩,
   -- `drop` is not for a program to call.
   ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nfn main() { let mut f = File(7); drop(&mut f); 0 }",
     [], "error: 3:34: in `main`: `drop` is run when what holds a value ends; a program does not call it"⟩,
@@ -3136,7 +3165,16 @@ def foreignCases : List Case := [
     [], "hi from a stream\n17"⟩,
   -- The same with the release written as a cleanup, before the memory is used.
   ⟨"use std::ffi::{Layout, Allocation, allocate, write_bytes, read_bytes};\nfn sum_at(at: usize) -> Int {\n    unsafe { write_bytes(at, [1u8, 2u8, 3u8]) };\n    let back = unsafe { read_bytes(at, 3) };\n    int(back[0]) + int(back[1]) + int(back[2])\n}\nfn work(memory: Allocation) -> Int {\n    defer { Allocation::release(memory); }\n    sum_at(Allocation::as_ptr(&memory))\n}\nfn main() -> Int {\n    match(Layout::from_size_align(16, 8)) {\n        Ok(layout) => match(allocate(layout)) { Ok(memory) => work(memory), Err(_) => 0 - 1 },\n        Err(_) => 0 - 2\n    }\n}",
-    [], "6"⟩
+    [], "6"⟩,
+  -- One stream in memory and one of the host's: the function over both performs what the host's does.
+  ⟨"use std::stream::{Read, Write, MemoryCursor, read, write, write_str, read_to_end};\nuse std::host::{IoError, run_host};\nuse std::stream::{Stdout};\nfn copy<R: Read, W: Write>(reader: &mut R, writer: &mut W, done: Int) -> Result<Int, IoError> {\n    match(read(reader, 4)) {\n        Ok(got) =>\n            if(len(got) == 0) { Ok(done) }\n            else { match(write(writer, got)) { Ok(n) => copy(reader, writer, done + n), Err(e) => Err(e) } },\n        Err(e) => Err(e)\n    }\n}\nfn main() -> Int {\n    let mut from = MemoryCursor::new([]);\n    write_str(&mut from, \"0123456789\");\n    run_host({ let mut to = Stdout; match(copy(&mut from, &mut to, 0)) { Ok(n) => n, Err(_) => 0 - 1 } }) }",
+    [], "012345678910"⟩,
+  -- `copy_stream`, up to a limit, and then onto the host's output.
+  ⟨"use std::stream::{MemoryCursor, Stdout, write_str, copy_stream};\nuse std::host::{run_host};\nfn main() -> Int {\n    let mut from = MemoryCursor::new([]);\n    write_str(&mut from, \"copied across\\n\");\n    let mut to = MemoryCursor::new([]);\n    let a = match(copy_stream(&mut from, &mut to, 6)) { Ok(n) => n, Err(_) => 0 - 1 };\n    let mut again = MemoryCursor::new(MemoryCursor::into_inner(to));\n    run_host({ let mut out = Stdout; match(copy_stream(&mut again, &mut out, 100)) { Ok(n) => a * 100 + n, Err(_) => 0 - 1 } }) }",
+    [], "copied606"⟩,
+  -- A function over two streams called from another over two.
+  ⟨"use std::stream::{Read, Write, MemoryCursor, read, write, write_str, read_to_end};\nuse std::host::{IoError, run_host};\nuse std::stream::{Stdout};\nfn copy<R: Read, W: Write>(reader: &mut R, writer: &mut W, done: Int) -> Result<Int, IoError> {\n    match(read(reader, 4)) {\n        Ok(got) =>\n            if(len(got) == 0) { Ok(done) }\n            else { match(write(writer, got)) { Ok(n) => copy(reader, writer, done + n), Err(e) => Err(e) } },\n        Err(e) => Err(e)\n    }\n}\nfn twice<A: Read, B: Write>(a: &mut A, b: &mut B) -> Int { match(copy(a, b, 0)) { Ok(n) => n * 2, Err(_) => 0 } }\nfn main() -> Int {\n    let mut from = MemoryCursor::new([]);\n    write_str(&mut from, \"0123456789\");\n    run_host({ let mut to = Stdout; twice(&mut from, &mut to) }) }",
+    [], "012345678920"⟩
 ]
 
 end Glorious

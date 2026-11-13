@@ -193,7 +193,6 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
   -- A row parameter is whatever whoever calls says it is: the function
   -- cannot have found it to hold an effect, or to be another's row.
   let rowChecks := (← get).rowChecks
-  modify fun s => { s with rowChecks := [] }
   for (owner, rowParams) in rowChecks do
     let mut rowsSeen : List Nat := []
     for (e, carrier) in rowParams do
@@ -229,6 +228,8 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
   -- A trait with arguments is asked of a type together with them: from here
   -- on it is the trait at those arguments, asked of the type.
   settleAssocs
+  -- (What an implementation found only now performs is passed on.)
+  settleRows (some fun _ => true) true
   let mut keyed : List (String × String × List Ty) := []
   let mut split : Array Bound := #[]
   for b in pending do
@@ -248,6 +249,33 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
       if b.trait == Syntax.destroyTrait then pure [] else throw (inFunction b.owner e)
     for l in ls do
       unless leafs.any (fun x => x.1 == l.1 && x.2.1 == l.2.1) do leafs := leafs.push l
+  -- What a type parameter's trait says it performs stays a row of its own:
+  -- that it is among what a function performs goes with the function's type,
+  -- and is seen to where the function is used.
+  let mut heldIncl : List (Ty × Ty) := []
+  unless decls.isEmpty do
+    let held ← assocTails
+    let given ← paramTails
+    let mut rest : Array (Row × Row × String) := #[]
+    for (callee, amb, what) in (← get).rowIncl do
+      let c ← flattenRow callee
+      if c.tail.any held.contains then
+        let cap ← freshCap
+        let a ← flattenRow amb
+        -- Where it is performed has to be able to have it: a row written
+        -- without it, or as another parameter's alone, cannot.
+        -- (A row written closed is kept to where the function is used: it
+        -- is then for types whose implementations perform nothing more,
+        -- which is how `impl Iterator` for what wraps a generator says it.)
+        if let some e := c.tail.bind fun ρ => given.lookup ρ then
+          if a.tail.isNone || a.tail.any held.contains then
+            throw s!"{what} performs the row `{e}`, which is whatever the caller chooses, and the row written here does not have it: write it after `|`, with any other after a comma"
+        if a.tail.any held.contains then
+          throw s!"{what} performs what the implementation for a type parameter says it does, and the row written here has another's alone: write each after `|`, as `| <A as Trait>::Effects, <B as Trait>::Effects`"
+        heldIncl := heldIncl ++ [(Ty.func [] .unit c cap, Ty.func [] .unit a cap)]
+      else rest := rest.push (callee, amb, what)
+    modify fun s => { s with rowIncl := rest }
+  modify fun s => { s with rowChecks := [] }
   let mut givensOf : List (String × List (String × Nat)) := []
   for d in decls do
     let t0 ← zonk ((defs.lookup d.name).getD .unit)
@@ -369,8 +397,13 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
           (← openParams seen (← zonk a)).1)]
     -- A type left to an implementation that the function's type does not
     -- mention is still found anew at each use.
-    let found := (assocs.flatMap fun (_, subject, _, a) => freeTys subject ++ freeTys a).eraseDups
-    let scheme := { scheme with assocs, tvars := (scheme.tvars ++ found).eraseDups }
+    let mut incls : List (Ty × Ty) := []
+    for (callee, amb) in heldIncl do
+      incls := incls ++ [((← openParams seen (← zonk callee)).1, (← openParams seen (← zonk amb)).1)]
+    let carried := assocs.map (·.2.2.2) ++ incls.flatMap fun (c, a) => [c, a]
+    let found := ((assocs.flatMap fun (_, subject, _, _) => freeTys subject) ++ carried.flatMap freeTys).eraseDups
+    let scheme := { scheme with assocs, incls, tvars := (scheme.tvars ++ found).eraseDups,
+                                rvars := (scheme.rvars ++ carried.flatMap freeRows).eraseDups }
     givensOf := (d.name, mine.map fun (tr, k, _) => (tr, k)) :: givensOf
     modify fun s =>
       { s with

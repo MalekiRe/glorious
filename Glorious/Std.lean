@@ -1806,6 +1806,35 @@ pub fn read_to_end<R: Read>(reader: &mut R, limit: Int)
     -> Result<[u8], IoError> / { | <R as Read>::Effects } {
     read_more(reader, [], limit)
 }
+
+// Where copying stopped: more may have been read than was written.
+pub struct CopyError { pub read: Int, pub written: Int, pub error: IoError }
+
+fn copy_more<R: Read, W: Write>(reader: &mut R, writer: &mut W, limit: Int, done: Int)
+    -> Result<Int, CopyError> / { | <R as Read>::Effects, <W as Write>::Effects } {
+    let left = limit - done;
+    if(left <= 0) { Ok(done) } else {
+        match(read(reader, if(left > 4096) { 4096 } else { left })) {
+            Ok(got) =>
+                let n = len(got);
+                if(n == 0) { Ok(done) } else {
+                    match(write_from(writer, got, 0)) {
+                        Ok(_) => tail copy_more(reader, writer, limit, done + n),
+                        Err(e) => Err(CopyError { read: done + n, written: done + e.written, error: e.error })
+                    }
+                },
+            Err(e) => Err(CopyError { read: done, written: done, error: e })
+        }
+    }
+}
+
+// One stream into another until the first ends, up to so many bytes: how
+// many went across. It performs what reading the one and writing the other
+// do.
+pub fn copy_stream<R: Read, W: Write>(reader: &mut R, writer: &mut W, limit: Int)
+    -> Result<Int, CopyError> / { | <R as Read>::Effects, <W as Write>::Effects } {
+    copy_more(reader, writer, limit, 0)
+}
 "#
 
 private def valueText : String := r#"// The small things the rest is built from, as the library specification

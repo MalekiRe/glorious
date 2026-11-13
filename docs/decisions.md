@@ -2611,6 +2611,34 @@ nothing silently.
   the type unknown.
 - A program with no `Drop` is checked as before.
 
+## A row with several unknown parts
+
+`copy_stream` performs what reading its one stream does and what writing
+its other does: `/ { | <R as Read>::Effects, <W as Write>::Effects }`. A
+row had one unknown part, so the two were taken to be one row, and a copy
+from memory to the host's output was refused. A row may now be written with
+several after `|`, and need not be written at all.
+
+A row that is someone else's to say (a row parameter, or what a trait
+leaves to the implementation for a type parameter) is no longer made equal
+to the row of where it is performed. That it is *among* what the function
+performs is kept with the function's type, and seen to at each use, where
+the rows are known: the function's row is then at least each of them. So
+`both(one, two)` for two functions that perform different effects performs
+both, and handling only one of them is refused.
+
+- **A row written for a function has to have what the function performs.**
+  `/ { | <R as Read>::Effects }` on a function that also writes `W` is
+  refused where it is declared, as is a row parameter called under a row
+  that does not name it.
+- **A row written closed is the exception**: `fn quiet<R: Read>(..) / {}`
+  that reads `R` is accepted, and is for types whose implementation
+  performs nothing; using it at another is refused there. An
+  implementation has no other way yet to say that of a type parameter, and
+  `impl Iterator` for what wraps a generator needs to.
+- A row in a trait's function with several unknown parts is not kept
+  apart: the parts are one row there, as before.
+
 ## Trait arguments of an implementation's own
 
 `impl<T> From<T> for Wrap<T>` was refused: the arguments an implementation

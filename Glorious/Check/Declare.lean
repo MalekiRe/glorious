@@ -164,9 +164,8 @@ partial def resolveRow (params : List (String × Ty)) (decl : Bool)
     | _ => none
   let rows := effects.filterMap restOf
   let effs ← resolveEffects params decl (effects.filter fun e => (restOf e).isNone)
-  match rows with
-  | [] => pure (effs, none)
-  | [t] =>
+  -- The row one thing written for the rest stands for.
+  let one := fun (t : TypeExpr) => show M Nat from do
     let written := match t with
       | .name e [] => e
       | _ => "what is written after `|`"
@@ -174,7 +173,7 @@ partial def resolveRow (params : List (String × Ty)) (decl : Bool)
       | .name e [] => params.lookup e
       | _ => none
     match param with
-    | some (.fn [] _ [] (some k) _) => pure (effs, some k)
+    | some (.fn [] _ [] (some k) _) => pure k
     | _ =>
       -- `T::Effects`, `<T as Trait>::Effects`: the row a trait of `T` leaves
       -- to its implementation, held as the type of a callable that
@@ -185,13 +184,23 @@ partial def resolveRow (params : List (String × Ty)) (decl : Bool)
       if asked then
         let held ← resolveType params decl t
         match held with
-        | .fn [] _ [] (some own) _ => return (effs, some own)
+        | .fn [] _ [] (some own) _ => return own
         | _ =>
           let k ← freshRowVar
           unify held (.fn [] .unit [] (some k) (← freshCap))
-          return (effs, some k)
+          return k
       throw s!"`{written}` is not a row parameter here: one is declared `{written}: EffectRow`"
-  | _ => throw "a row is written with one row parameter for the rest of it; the union of several is not supported"
+  match rows with
+  | [] => pure (effs, none)
+  | [t] => pure (effs, some (← one t))
+  | _ =>
+    -- Several: a row that has each of them in it. What each is is known
+    -- where the function is used, and the row is then all of them.
+    let all ← freshRowVar
+    for t in rows do
+      let k ← one t
+      modify fun s => { s with rowIncl := s.rowIncl.push (⟨[], some k⟩, ⟨[], some all⟩, s.pos ++ "what is written after `|`") }
+    pure (effs, some all)
 
 /-- The effects written after a callable's result. An effect's arguments may
 be left out, to be inferred. -/
