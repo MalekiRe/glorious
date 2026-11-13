@@ -284,6 +284,10 @@ impl Asm {
                 let site = self.jcc(0x84);
                 self.jumps.push((site, *fail));
             }
+            Instr::Jump(t) => {
+                let site = self.jmp();
+                self.jumps.push((site, *t));
+            }
             other => self.generic(pc, other.fail()),
         }
     }

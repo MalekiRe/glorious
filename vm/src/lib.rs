@@ -81,7 +81,7 @@ fn unit() -> Value {
 
 // ---------------------------------------------------------------- code
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 enum Atom {
     Var(usize),
     /// The local, which nothing reads again: its value is moved, not copied.
@@ -90,7 +90,7 @@ enum Atom {
     Int(i128),
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct Place {
     var: usize,
     path: Vec<usize>,
@@ -154,7 +154,7 @@ enum MemOp {
     Focus,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 enum Rhs {
     Atom(Atom),
     Prim(Prim, Vec<Atom>),
@@ -164,7 +164,7 @@ enum Rhs {
     Rebind(Atom, usize),
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 enum Instr {
     Op(Rhs),
     Call(Atom, Vec<Atom>),
@@ -182,6 +182,17 @@ enum Instr {
     Mem(MemOp, Vec<Atom>),
     Cell { init: Atom, thunk: Atom, tail: bool },
     Lend { r: Atom, thunk: Atom, pre: Vec<Atom>, post: Vec<Atom> },
+    // No file has the three below: they are written when a program is
+    // loaded (`opt.rs`).
+    /// A call of a function that is known: its locals are these values.
+    CallFn(usize, Vec<Atom>),
+    /// The same as the last thing the activation does.
+    TailFn(usize, Vec<Atom>),
+    /// Go on from another instruction of the function.
+    Jump(usize),
+    /// Where a test that fails in a function's last clause goes: the program
+    /// has gone wrong.
+    Stuck,
 }
 
 // ---------------------------------------------------------------- decoding
@@ -468,9 +479,13 @@ impl Instr {
             Instr::Handle { caps, thunk, .. } => {
                 caps.iter_mut().chain(std::iter::once(thunk)).collect()
             }
-            Instr::Raise(_, xs) | Instr::Perform(_, xs) | Instr::Host(_, xs) | Instr::Mem(_, xs) => {
-                xs.iter_mut().collect()
-            }
+            Instr::Raise(_, xs)
+            | Instr::Perform(_, xs)
+            | Instr::Host(_, xs)
+            | Instr::Mem(_, xs)
+            | Instr::CallFn(_, xs)
+            | Instr::TailFn(_, xs) => xs.iter_mut().collect(),
+            Instr::Jump(_) | Instr::Stuck => vec![],
             Instr::Label { thunk, .. } => vec![thunk],
             Instr::Guard { cleanup, thunk, .. } => vec![cleanup, thunk],
             Instr::TestCtor(..) | Instr::TestInt(..) => vec![],
@@ -502,7 +517,7 @@ impl Instr {
     /// Does the activation end here, with nothing of it run afterwards?
     fn last(&self) -> bool {
         match self {
-            Instr::Tail(..) | Instr::Ret(_) | Instr::Raise(..) => true,
+            Instr::Tail(..) | Instr::TailFn(..) | Instr::Ret(_) | Instr::Raise(..) | Instr::Stuck => true,
             Instr::Handle { tail, .. }
             | Instr::Label { tail, .. }
             | Instr::Guard { tail, .. }
@@ -519,13 +534,19 @@ impl Instr {
 /// nothing is changed.
 fn mark_takes(code: &mut [Instr]) {
     let n = code.len();
-    if code.iter().enumerate().any(|(pc, i)| i.fail().is_some_and(|t| t <= pc || t > n)) {
+    let ahead = |pc: usize, t: usize| t > pc && t <= n;
+    if code.iter().enumerate().any(|(pc, i)| match i {
+        Instr::Jump(t) => !ahead(pc, *t),
+        _ => i.fail().is_some_and(|t| !ahead(pc, t)),
+    }) {
         return;
     }
     let mut read_from: Vec<std::collections::HashSet<usize>> = vec![Default::default(); n + 1];
     for pc in (0..n).rev() {
         let mut after = std::collections::HashSet::new();
-        if !code[pc].last() {
+        if let Instr::Jump(t) = code[pc] {
+            after.extend(read_from[t].iter().copied());
+        } else if !code[pc].last() {
             after.extend(read_from[pc + 1].iter().copied());
         }
         if let Some(t) = code[pc].fail() {
@@ -555,9 +576,11 @@ struct Program {
     names: Vec<String>,
     /// The functions, followed by the main code.
     codes: Vec<Vec<Instr>>,
+    /// How many locals each function starts with, where the file says.
+    starts: Vec<Option<usize>>,
 }
 
-fn decode(bytes: &[u8]) -> Decoded<Program> {
+fn decode(bytes: &[u8], rewrite: bool) -> Decoded<Program> {
     if bytes.len() < 5 || &bytes[..4] != b"GLBC" {
         return Err("not a Glorious bytecode file".into());
     }
@@ -571,10 +594,26 @@ fn decode(bytes: &[u8]) -> Decoded<Program> {
     for code in &mut codes {
         mark_takes(code);
     }
+    // What follows the program, if anything does: how many locals each
+    // function starts with, and one more, or zero where that is not known.
+    let mut starts = vec![None; codes.len()];
+    if r.pos != bytes.len() {
+        for (f, n) in r.list(Reader::nat)?.into_iter().enumerate() {
+            if f + 1 < codes.len() && n > 0 {
+                starts[f] = Some(n as usize - 1);
+            }
+        }
+        // The main code starts with none.
+        *starts.last_mut().unwrap() = Some(0);
+    }
     if r.pos != bytes.len() {
         return Err("trailing bytes after the program".into());
     }
-    Ok(Program { names, codes })
+    let mut program = Program { names, codes, starts };
+    if rewrite {
+        opt::optimise(&mut program);
+    }
+    Ok(program)
 }
 
 // ---------------------------------------------------------------- machine
@@ -1032,6 +1071,20 @@ impl Vm {
                 let args = self.atoms(args)?;
                 self.apply(callee, args)
             }
+            Instr::CallFn(f, given) => {
+                let given = self.atoms(given)?;
+                self.push_ret();
+                self.call_fn(*f, &[], given)
+            }
+            Instr::TailFn(f, given) => {
+                let given = self.atoms(given)?;
+                self.call_fn(*f, &[], given)
+            }
+            Instr::Jump(t) => {
+                self.pc = *t;
+                Ok(())
+            }
+            Instr::Stuck => wrong(),
             Instr::Ret(a) => {
                 let v = self.atom(a)?;
                 self.deliver(v)
@@ -1577,6 +1630,7 @@ pub fn cli_main() -> ExitCode {
     };
     let mut emit = false;
     let mut dump = false;
+    let mut rewrite = std::env::var("GLORIOUS_OPT").as_deref() != Ok("0");
     while let Some(first) = args.first() {
         match first.as_str() {
             "--backend=interp" => backend = Backend::Interp,
@@ -1584,12 +1638,13 @@ pub fn cli_main() -> ExitCode {
             "--backend=mix" => backend = Backend::Mix,
             "--emit-llvm" => emit = true,
             "--dump" => dump = true,
+            "--no-opt" => rewrite = false,
             _ => break,
         }
         args.remove(0);
     }
     let Some((path, rest)) = args.split_first() else {
-        eprintln!("usage: glorious-vm [--backend=interp|x86|mix] [--emit-llvm] FILE [INPUT...]");
+        eprintln!("usage: glorious-vm [--backend=interp|x86|mix] [--no-opt] [--emit-llvm] [--dump] FILE [INPUT...]");
         return ExitCode::from(64);
     };
     let input = match inputs(rest) {
@@ -1606,7 +1661,7 @@ pub fn cli_main() -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    let program = match decode(&bytes) {
+    let program = match decode(&bytes, rewrite) {
         Ok(program) => program,
         Err(e) => {
             eprintln!("{path}: {e}");
@@ -1616,7 +1671,7 @@ pub fn cli_main() -> ExitCode {
     if dump {
         // The instructions as they were read, for whoever works on a backend.
         for (f, code) in program.codes.iter().enumerate() {
-            println!("function {f}");
+            println!("function {f} starts {:?}", program.starts[f]);
             for (pc, instr) in code.iter().enumerate() {
                 println!("  {pc}: {instr:?}");
             }
@@ -1638,4 +1693,5 @@ pub fn cli_main() -> ExitCode {
 
 mod llvm;
 mod native;
+mod opt;
 mod x86;

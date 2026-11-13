@@ -1,6 +1,7 @@
 #!/bin/sh
 # Run every test program on every engine and say which differ from the
-# interpreter. Run from the repository's root after `lake build glorious` and
+# interpreter running the bytecode as it was written, without the rewriting
+# done when a program is loaded. Run from the repository's root after `lake build glorious` and
 # `cargo build --release` in `vm`. Needs clang.
 set -eu
 root=$(pwd)
@@ -16,8 +17,8 @@ one() {
     stem=${gbc%.gbc}
     input=$(cat "$stem.in")
     # shellcheck disable=SC2086
-    want=$("$vm" --backend=interp "$gbc" $input 2>&1; echo "exit $?")
-    for backend in x86 mix; do
+    want=$("$vm" --no-opt --backend=interp "$gbc" $input 2>&1; echo "exit $?")
+    for backend in interp x86 mix; do
         # shellcheck disable=SC2086
         got=$("$vm" --backend=$backend "$gbc" $input 2>&1; echo "exit $?")
         [ "$got" = "$want" ] || echo "$gbc: $backend differs"

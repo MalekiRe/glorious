@@ -222,6 +222,7 @@ impl Emit {
                 self.line(&format!("{is} = icmp ne i64 {r}, 0"));
                 self.line(&format!("br i1 {is}, label %{next}, label %pc{fail}"));
             }
+            Instr::Jump(t) => self.line(&format!("br label %pc{t}")),
             other => self.generic(pc, next, other.fail()),
         }
     }

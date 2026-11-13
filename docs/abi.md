@@ -110,11 +110,24 @@ every function runs its LLVM body; `interp`, none does; `x86`, every function
 is compiled again in memory; `mix`, a third of the functions run the LLVM
 body, a third the x86-64 body, a third the interpreter.
 
+## The bytecode an engine runs
+
+A program's bytecode is rewritten when it is loaded (`vm/src/opt.rs`): a call
+of a function that can be read off the code does not make a closure, a
+function that is one computation is done where it is called, and small
+functions are written in place of calls of them, with what follows the call
+written after each way they come back. Every engine runs the rewritten code,
+so they still agree on every activation's locals. `--no-opt`, or
+`GLORIOUS_OPT=0` for a program built ahead of time, runs the bytecode as it
+was written. A file says how many locals each function starts with, after
+the program, for this.
+
 ## What is tested
 
 Every test program that compiles (638 when this was written) is run
-interpreted, compiled to x86-64, mixed, built with LLVM, and built with LLVM
-and mixed three ways, and gives the same output and exit code each time.
+interpreted as written, and then rewritten and interpreted, compiled to
+x86-64, mixed, built with LLVM, and built with LLVM and mixed three ways, and
+gives the same output and exit code each time.
 Those programs handle effects, resume and cancel resumptions, jump to
 labels, run cleanups, lend cells and call C, so the mixed runs take
 resumptions and unwinding through functions of all three engines.

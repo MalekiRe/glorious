@@ -152,7 +152,7 @@ pub unsafe extern "C" fn glo_main(
         return 1;
     }
     let bytes = std::slice::from_raw_parts(bytes, size as usize);
-    let program = match decode(bytes) {
+    let program = match decode(bytes, std::env::var("GLORIOUS_OPT").as_deref() != Ok("0")) {
         Ok(program) => program,
         Err(e) => {
             eprintln!("{e}");

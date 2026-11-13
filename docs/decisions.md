@@ -2185,10 +2185,19 @@ and cleanups work through any mixture, which is what was asked of the ABI.
 - **What it costs.** Calls are no faster than the interpreter's, and this
   language makes control flow out of calls: `if` is a function given two
   blocks. Measured on a recursive Fibonacci, each call of `fib` is 34
-  instructions, of which about eight are calls and six make a closure; the
-  compiled program takes as long as the interpreted one. The x86-64 backend
-  does what it was asked for, which is to compile at once: a program is
-  machine code microseconds after it is read.
+  instructions as compiled, of which about eight are calls and six make a
+  closure, and the compiled program takes as long as the interpreted one.
+  The x86-64 backend does what it was asked for, which is to compile at
+  once: a program is machine code microseconds after it is read.
+- **The bytecode is rewritten when it is loaded** (`vm/src/opt.rs`), for
+  every engine: known calls without closures, small functions written in
+  place with what follows them, tests of what was just built decided. With
+  it `fib` is a comparison, two subtractions, an addition and two calls, and
+  the same program runs 6 times faster compiled to x86-64 (1.04 s to 0.17 s
+  for `fib(27)`) and twice as fast interpreted. A loop written with `while`
+  is not helped much: `while` calls itself, and a function is not written in
+  place inside itself. The rewriting is not proved; every test program is
+  run with and without it.
 - **What would make it fast**, in the order of what each is worth: (1) in
   the compiler, calling a function that is known without making a closure
   of it, and writing library control flow (`if`, `match`, the loops) in

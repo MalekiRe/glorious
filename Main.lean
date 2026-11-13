@@ -55,9 +55,19 @@ def usage : String :=
   "       glorious build FILE OUT\n       glorious certify [--strict] FILE\n" ++
   "       glorious selftest [VM]"
 
+/-- How many locals each function starts with, its arguments and what its
+closure captured, and one more; zero where the certificate does not say.
+What runs the bytecode does not need this: it is for what rewrites it. -/
+def startLocals (c : Compiled) : List Nat :=
+  (List.range c.core.fns.length).map fun i =>
+    match c.cert.bind fun cert => cert.sigs.find? (·.fn == i) with
+    | some entry => entry.sig.params.length + entry.sig.caps.length + 1
+    | none => 0
+
 def writeBytecode (c : Compiled) (out : System.FilePath) : IO Unit :=
   IO.FS.writeBinFile out
-    ⟨((Bytecode.Encode.file c.ctorNames.toList (compile c.core)).map Nat.toUInt8).toArray⟩
+    ⟨((Bytecode.Encode.file c.ctorNames.toList (compile c.core)
+      ++ Bytecode.Encode.list Bytecode.Encode.nat (startLocals c)).map Nat.toUInt8).toArray⟩
 
 /-- The expectation at the top of an example file: an optional `// input: ...`
 line, then `// expect:` followed by one comment line per line of output. -/
