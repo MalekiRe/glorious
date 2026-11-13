@@ -68,6 +68,9 @@ partial def exhaustive (tys : List Ty) (rows : List (List NPat)) : M Bool := do
               | .any :: tl => some (List.replicate fields.length .any ++ tl)
               | _ => none)
       | none => fallback
+    -- What a reference points to is what clauses that reach through it ask
+    -- of: a clause that does not is one that takes any.
+    | .ref _ inner _ => exhaustive (inner :: rest) rows
     | _ => fallback
 
 /-- The types of a value's fields other than one, where they are known: what

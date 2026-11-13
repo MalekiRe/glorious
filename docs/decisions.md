@@ -2713,6 +2713,33 @@ from being an `Id<Block>`.
 - Not built: base64; `ByteReader::read_u128_le` is, the signed widths
   other than `read_i64_le` are not in the specification.
 
+## Patterns that reach through a reference inside a value
+
+`match(Cursor::peek(c)) { Some(&Spot { token: Token::Let, at }) => .. }`
+was refused: a pattern that binds by reference had to be the whole of a
+clause's parameter, and here the reference is inside an `Option`. Such a
+clause is now written out as two steps: the value's own pattern with a name
+where the `&` was, and then clauses of that name by reference. Clauses that
+ask the same of the value and differ only past the references are one
+group; where none of a group is for what the references point to, the
+clauses that follow are tried.
+
+- **The clauses that follow are given the value again**, so with
+  fallthrough the value has to be one that can be looked at twice: one
+  that holds what is used once is refused, with why. A match whose clauses
+  with references come last, or cover every case of what is pointed to, is
+  not affected.
+- Whether the clauses take every case is asked once, of the clauses as
+  written, each pattern reaching through the references in it; a column of
+  references is covered when what they point to is.
+- For some of these Core's regions are not found (a reference kept in an
+  `Option` and matched), as for other references kept in values: the
+  program is checked by the source rules and typed in Core.
+
+Several definitions of one function, `fn get(Some(x)) ..` and `fn
+get(None) ..`, are not clauses of one function here; `fn get { Some(x) =>
+.., None => .. }` is.
+
 ## How long a program that names the library takes
 
 A program that only named `std` took thirty seconds to compile, after the

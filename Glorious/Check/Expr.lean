@@ -203,10 +203,11 @@ partial def inferExpr (scope : Scope) (amb : Row) : Expr → M Ty
           | a => tys := tys.push (← inferPlace scope amb a)
         -- What a pattern lets go of is let go of by the clause, not here.
         let drops := (← get).drops
+        modify fun s => { s with shapes := true }
         for c in clauses do
           let .mk pats _ := c
           let _ ← inferPats pats tys.toList
-        modify fun s => { s with drops := drops }
+        modify fun s => { s with drops := drops, shapes := false }
         let check : Pending := ⟨(← get).pos, "the clauses of this callable do", tys.toList,
           clauses.map fun
             | .mk pats _ => pats⟩
@@ -1024,6 +1025,15 @@ partial def inferStmts (scope : Scope) (amb : Row) (stmts : List Stmt)
 
 /-- Check a pattern against a type; the names it binds. -/
 partial def inferPat (p : Pattern) (t : Ty) : M Scope := do
+  -- (Where patterns only say which cases are taken, one that asks something
+  -- of a value is met by a reference to one: the clauses reach through it.)
+  if (← get).shapes then
+    let through := match p with
+      | .wild => false
+      | .var _ => false
+      | _ => true
+    if through then
+      if let .ref _ inner _ ← find t then return ← inferPat p inner
   match p with
   | .wild => do
     mustDrop t "`_` lets go of a value"

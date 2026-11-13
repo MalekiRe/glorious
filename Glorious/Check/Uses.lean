@@ -984,6 +984,12 @@ def checkUses (pos : String) (outer : Scope) (binds : Scope) (body : List Stmt) 
       now := s.packs.toList.filterMap fun (id, names) =>
         if names == [Syntax.nowMark] then some id else none }
   let names := (binds ++ outer).map (·.1)
+  -- (A value clauses are given again, after one of them reached through a
+  -- reference in it and was not for what it found: said as that.)
+  let twice := fun (x : String) =>
+    if x.startsWith "%again" then
+      "a clause reaches through a reference inside the value, and where it is not for what it finds the clauses after it are given the value again"
+    else s!"`{x}` is used more than once"
   for (x, b) in binds do
     let t := match b with
       | .val t _ => some t
@@ -1077,8 +1083,8 @@ def checkUses (pos : String) (outer : Scope) (binds : Scope) (body : List Stmt) 
         unless settled do
           match pathUses (if dropped then { ctx with handed := true } else ctx)
               (names.filter (· != x)) x body with
-          | some n => if n ≥ 2 then mustDup t s!"`{x}` is used more than once"
-          | none => mustDup t s!"`{x}` is used more than once"
+          | some n => if n ≥ 2 then mustDup t (twice x)
+          | none => mustDup t (twice x)
       -- A value that has to be used: is it, however the body goes? Looked at
       -- once the function's types are known. A name the compiler made up
       -- stands for nothing the program wrote.

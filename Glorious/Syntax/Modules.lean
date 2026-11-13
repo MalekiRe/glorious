@@ -748,6 +748,140 @@ partial def shapeTests (ctx : Ctx) (path : List Nat) :
       | none => return none
     pure (some out)
 
+mutual
+
+/-- A pattern with each `&P` that is inside it, and not the whole of it,
+replaced by a new name: the pattern, and each name with the pattern it
+stands for. -/
+partial def liftRefs (top : Bool) : Pattern → R (Pattern × List (String × Pattern))
+  | .tuple ps => do
+    let (ps, refs) ← liftRefsAll ps
+    pure (.tuple ps, refs)
+  | .ctor name qual args => do
+    if (byRef? (.ctor name qual args)).isSome then
+      if top then return (.ctor name qual args, [])
+      let x := s!"%ref{← freshId}"
+      return (.var x, [(x, .ctor name qual args)])
+    let (args, refs) ← liftRefsAll args
+    pure (.ctor name qual args, refs)
+  | p => pure (p, [])
+
+partial def liftRefsAll (ps : List Pattern) : R (List Pattern × List (String × Pattern)) := do
+  let mut out : Array Pattern := #[]
+  let mut refs : List (String × Pattern) := []
+  for p in ps do
+    let (p, more) ← liftRefs false p
+    out := out.push p
+    refs := refs ++ more
+  pure (out.toList, refs)
+
+end
+
+/-- A pattern with each `&P` in it written `P`: what the clauses ask, for
+seeing that they take every case. -/
+partial def throughRefs : Pattern → Pattern
+  | .tuple ps => .tuple (ps.map throughRefs)
+  | .ctor name qual args =>
+    match byRef? (.ctor name qual args) with
+    | some (_, p) => throughRefs p
+    | none => .ctor name qual (args.map throughRefs)
+  | p => p
+
+/-- A pattern as it is apart from the names it binds: two clauses whose
+patterns are the same so differ only in what they ask of the references
+inside. -/
+partial def patternShape : Pattern → String
+  | .wild => "_"
+  | .int n => toString n
+  | .var x => if x.startsWith "%ref" then "&" else s!"({x})"
+  | .tuple ps => "(" ++ ",".intercalate (ps.map patternShape) ++ ")"
+  | .ctor name qual args =>
+    s!"{qual.getD ""}::{name}(" ++ ",".intercalate (args.map patternShape) ++ ")"
+
+/-- Clauses in which a pattern for a value has `&P` inside it, `Some(&Leaf(n))
+=> ..`, where the value holds a reference: the reference is bound first, and
+what it points to is then asked of it by clauses of its own. Where none of
+those is for what it points to, the clauses that follow are tried, with the
+value the callable was given: so that value is one that can be looked at
+again. Clauses without such a pattern are as they are. -/
+partial def nestedRefs (clauses : List Clause) (within : Bool := false) : R (List Clause) := do
+  let arity := match clauses.head? with
+    | some (.mk pats _) => pats.length
+    | none => 0
+  -- The clauses up to the first with a reference inside a pattern.
+  let mut before : Array Clause := #[]
+  let mut rest := clauses
+  let mut first : Option (List Pattern × List (String × Pattern) × List Stmt) := none
+  while first.isNone && !rest.isEmpty do
+    match rest with
+    | .mk pats body :: more =>
+      let mut skeleton : Array Pattern := #[]
+      let mut refs : List (String × Pattern) := []
+      for p in pats do
+        let (p, found) ← liftRefs true p
+        skeleton := skeleton.push p
+        refs := refs ++ found
+      rest := more
+      if refs.isEmpty then before := before.push (.mk pats body)
+      else first := some (skeleton.toList, refs, body)
+    | [] => pure ()
+  let some (skeleton, refs, body) := first | return clauses
+  -- The clauses after it that ask the same of the value, and differ only
+  -- in what they ask of the references.
+  let shape := skeleton.map patternShape
+  let mut group : Array (List (String × Pattern) × List Stmt) := #[(refs, body)]
+  let mut going := true
+  while going do
+    match rest with
+    | .mk pats body :: more =>
+      let mut theirs : Array Pattern := #[]
+      let mut found : List (String × Pattern) := []
+      for p in pats do
+        let (p, f) ← liftRefs true p
+        theirs := theirs.push p
+        found := found ++ f
+      if !found.isEmpty && theirs.toList.map patternShape == shape && found.length == refs.length then
+        group := group.push (found, body)
+        rest := more
+      else going := false
+    | [] => going := false
+  -- What is tried where none of them is for what the references point to:
+  -- the clauses that follow, given the value again.
+  let k ← freshId
+  let given := (List.range arity).map fun i => s!"%again{k}_{i}"
+  let later := s!"%later{k}"
+  let after ← nestedRefs rest true
+  -- (The clauses that follow are tried only for what is left: that all of
+  -- them together take every case is asked once, of all as written.)
+  let after := if after.isEmpty then after
+    else after ++ [.mk (given.map fun _ => Pattern.wild) [.expr (.tailCall 0 (.name none "%never") [])]]
+  let again := Expr.call 0 (.name none later) (given.map (.name none ·))
+  let names := refs.map (·.1)
+  -- (Where nothing follows, what is left is nothing: the clauses as written
+  -- are asked whether they take every case, not these.)
+  let left := if after.isEmpty then Expr.tailCall 0 (.name none "%never") [] else again
+  let inner := group.toList.map (fun (found, body) => Clause.mk (found.map (·.2)) body)
+    ++ [.mk (names.map fun _ => Pattern.wild) [.expr left]]
+  let chosen := Clause.mk skeleton [.expr (.call 0 (.closure 0 inner) (names.map (.name none ·)))]
+  let outer := before.toList ++ [chosen] ++ [.mk (given.map fun _ => Pattern.wild) [.expr left]]
+  -- Whether the clauses as written take every case: asked of what the
+  -- callable is given, each pattern reaching through the references in it.
+  let asked := if within then [] else
+    [Stmt.expr (.call 0 (.name none "%shapes") (given.map (.name none ·) ++
+      [.closure 0 (clauses.map fun
+        | .mk pats _ => Clause.mk (pats.map fun p =>
+            match byRef? p with
+            | some _ => Pattern.wild
+            | none => throughRefs p) [])]))]
+  -- (Asked after the clauses are gone through: what the value is, and so
+  -- where it holds references, is known from them by then.)
+  let run := Expr.call 0 (.closure 0 outer) (given.map (.name none ·))
+  let result := s!"%result{k}"
+  pure [.mk (given.map Pattern.var)
+    ((if after.isEmpty then [] else [Stmt.let_ (.var later) (.closure 0 after)])
+      ++ (if asked.isEmpty then [.expr run]
+          else [.let_ (.var result) run] ++ asked ++ [.expr (.name none result)]))]
+
 /-- The clauses of a callable in which a parameter binds by reference,
 `&mut Circle(r) => ..`: the callable takes the reference, looks at what it
 points to to choose a clause, and in the clause each name of the pattern is a
@@ -994,7 +1128,7 @@ partial def resolveExpr (ctx : Ctx) (bound : List String) : Expr → R Expr
   | .deref e => .deref <$> resolveExpr ctx bound e
   | .reborrow uniq e => .reborrow uniq <$> resolveExpr ctx bound e
   | .closure id clauses => do
-    pure (.closure id (← (← byReference ctx clauses).mapM (resolveClause ctx bound)))
+    pure (.closure id (← (← byReference ctx (← nestedRefs clauses)).mapM (resolveClause ctx bound)))
   | .handle subject arms => do
     pure (.handle (← resolveExpr ctx bound subject) (← arms.mapM (resolveClause ctx bound)))
   | .labelScope l body => .labelScope l <$> resolveStmts ctx bound body
@@ -1072,7 +1206,7 @@ def resolveFn (ctx : Ctx) (global : String) (generics : List String) :
     let ctx := { ctx with generics }
     let annots ← annots.mapM fun a => a.mapM (resolveType ctx generics)
     let ret ← ret.mapM (resolveType ctx generics)
-    let run := (do (← byReference ctx clauses).mapM (resolveClause ctx [])).run (← get)
+    let run := (do (← byReference ctx (← nestedRefs clauses)).mapM (resolveClause ctx [])).run (← get)
     match run with
     | .ok (clauses, st) =>
       set st

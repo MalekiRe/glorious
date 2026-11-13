@@ -556,6 +556,10 @@ structure St where
   loans : Array Loan := #[]
   /-- Mutable variables, by the brand of their block: the name, and the type held. -/
   cells : Array (Nat × String × Ty) := #[]
+  /-- The patterns being looked at are only to say which cases clauses take:
+  one for a value may be met by a reference to such a value, which the
+  clauses reach through. -/
+  shapes : Bool := false
   /-- Where each name was bound, for the cleanup of the parts of its value
   that are never read: the binding, and the place the elaborator knows it
   by. -/
