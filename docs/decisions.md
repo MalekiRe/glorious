@@ -2147,6 +2147,31 @@ be a number the program computes, is there or not when the reference is used.
   the same kind (`Fault.below`, counted under `Absent`). A place past the end
   is found only when the reference is used.
 
+## Rows of effects have names
+
+A function type written without what it performs was already open: what it
+performs is inferred, and a function given one performs that too. A row can
+now be named, so that a signature can say so: `fn apply<A, B, e: EffectRow>(f:
+fn(A) -> B / e, x: A) -> B / e`, and `{Log | e}` for a row that holds `Log`
+and whatever `e` stands for. A row parameter is not a type parameter: it is
+not counted among the type arguments a call may write.
+
+- **The row is the caller's.** Once the program is checked, a row parameter
+  must still be a row nobody knows: a function that performs an effect under
+  a row it said was `e`, or that uses two row parameters as one, is refused.
+- **One row parameter per row.** `{| e1, e2}`, the union of two, is not
+  supported: a row has one unknown rest in the checker.
+- **Associated rows** of traits are not supported.
+
+## A type has a value
+
+A type every constructor of which holds a value of the type itself, with
+nothing between, is refused: no value of it can be built. A type that holds
+itself in some constructors is accepted, as before; values are trees on every
+machine here, so nothing needs to be said about where the nested value lives.
+The native ABI will have to say it. Recursion through a generic type's
+argument (`struct S { w: Wrap<S> }`) is not seen.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by

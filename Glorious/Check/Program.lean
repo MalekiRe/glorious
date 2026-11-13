@@ -190,6 +190,21 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
       | _ =>
         throw (inFunction owner (pos ++ "the type whose field is borrowed here is not known: say what it is"))
     modify fun s => { s with fieldTable := s.fieldTable.push (id, viaRef, path, steps.toList) }
+  -- A row parameter is whatever whoever calls says it is: the function
+  -- cannot have found it to hold an effect, or to be another's row.
+  let rowChecks := (← get).rowChecks
+  modify fun s => { s with rowChecks := [] }
+  for (owner, rowParams) in rowChecks do
+    let mut rowsSeen : List Nat := []
+    for (e, carrier) in rowParams do
+      match ← zonk carrier with
+      | .fn _ _ [] (some k) _ =>
+        if rowsSeen.contains k then
+          throw (inFunction owner s!"the row `{e}` is taken to be the same as another row parameter: what the function does with them makes them one")
+        rowsSeen := k :: rowsSeen
+      | .fn _ _ effs _ _ =>
+        throw (inFunction owner s!"the row `{e}` is whatever the caller chooses, and what is written needs it to hold {showEffs effs}")
+      | _ => pure ()
   -- A trait with arguments is asked of a type together with them: from here
   -- on it is the trait at those arguments, asked of the type.
   settleAssocs
@@ -469,6 +484,14 @@ def checkGroup (decls : List FnDecl) : M Unit := do
           rigid := rigid ++ [(p, Ty.life cap)]
           lifetimes := (cap, p) :: lifetimes
         else rigid := rigid ++ [(p, Ty.con s!"'{p}@{d.name}" [])]
+      -- A row parameter stands for a row no one here knows: it is held as
+      -- the row of a callable type that is nothing else.
+      let mut rowParams : List (String × Ty) := []
+      for p in d.params do
+        if let some e := Syntax.rowParam p then
+          let carrier := Ty.fn [] (.tuple []) [] (some (← freshRowVar)) (← freshCap)
+          rowParams := rowParams ++ [(e, carrier)]
+          rigid := rigid ++ [(e, carrier)]
       let mut bounds : List (Nat × Nat) := []
       for p in d.params do
         if let some (longer, shorter) := lifetimeBound p then
@@ -676,12 +699,13 @@ def checkGroup (decls : List FnDecl) : M Unit := do
         if reached.contains (← findCap cap) then
           throw (pos ++ "a borrow of a field of one of several constructors lasts only inside the function that makes it, and here it is given back or kept: give back the reference itself, or the field's value")
       if let some effects := declared then
-        let effects ← resolveEffects rigid false effects
+        let (effects, rest) ← resolveRow rigid false effects
         if let .fn _ _ effs tail _ ← find t then
-          try unifyRow ⟨effs, tail⟩ ⟨effects, none⟩
+          try unifyRow ⟨effs, tail⟩ ⟨effects, rest⟩
           catch e =>
             let said := if effects.isEmpty then "nothing" else showEffs effects
             throw s!"`{d.name}` says it performs {said}, and that is not what it performs: {e}"
+      modify fun s => { s with rowChecks := s.rowChecks ++ [(d.name, rowParams)] }
       -- A function an implementation gives is the function its trait declares,
       -- at the implementation's type.
       if let some (im, sig) := d.impl then

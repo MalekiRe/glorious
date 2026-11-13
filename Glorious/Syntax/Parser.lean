@@ -446,6 +446,11 @@ private partial def parseResult : P TypeExpr := do
     let mut effects : Array (String × List TypeExpr) := #[]
     repeat
       if braced && (← peek) == .punct "}" then break
+      -- `| e`: and whatever the row parameter `e` stands for.
+      if braced && ((← peek) == .op "|" || (← peek) == .punct "|") then
+        advance
+        effects := effects.push (rowMark, [.name (← expectIdent) []])
+        break
       let name ← expectPath
       let mut args : Array TypeExpr := #[]
       if (← peek) == .op "<" then
@@ -459,6 +464,7 @@ private partial def parseResult : P TypeExpr := do
         | _ => failAt "expected `>`"
       effects := effects.push (name, args.toList)
       if !braced then break
+      if (← peek) == .op "|" || (← peek) == .punct "|" then continue
       if !(← acceptPunct ",") then break
     if braced then expectPunct "}"
     pure (.performs ret effects.toList)
@@ -522,6 +528,11 @@ private partial def parseRow : P (List (String × List TypeExpr)) := do
   let mut effects : Array (String × List TypeExpr) := #[]
   repeat
     if (← peek) == .punct "}" then break
+    -- `| e`: and whatever the row parameter `e` stands for.
+    if (← peek) == .op "|" || (← peek) == .punct "|" then
+      advance
+      effects := effects.push (rowMark, [.name (← expectIdent) []])
+      break
     let name ← expectPath
     let mut args : Array TypeExpr := #[]
     if (← peek) == .op "<" then
@@ -534,6 +545,7 @@ private partial def parseRow : P (List (String × List TypeExpr)) := do
       | .op ">" => advance
       | _ => failAt "expected `>`"
     effects := effects.push (name, args.toList)
+    if (← peek) == .op "|" || (← peek) == .punct "|" then continue
     if !(← acceptPunct ",") then break
   expectPunct "}"
   pure effects.toList
@@ -647,6 +659,10 @@ private partial def parseGenericsFull :
         let y ← expectIdent
         unless y.startsWith "'" do failAt "expected a lifetime: `'b: 'a`"
         out := out.push s!"{x}: {y}"
+      else if (← peek) == .ident "EffectRow" then
+        -- `e: EffectRow`: a parameter that stands for a row of effects.
+        advance
+        out := out.pop.push s!"{x}: EffectRow"
       else bounds := bounds ++ (← parseBoundsOf x).toArray
     if ← acceptPunct "=" then
       defaults := defaults.push ((genericParams before).length, genericParams before, ← parseType)
@@ -1429,13 +1445,14 @@ private partial def parseItem : P Item := do
         if (← peek) == .punct "}" then break
         let vis ← acceptPub
         if (← peek) != .ident "fn" then failAt "expected `fn`: an implementation gives functions"
-        let (item, bounds) ← parseFn
+        let (item, bounds) ← withReader (fun c =>
+          if c.records.contains tr then { c with records := "Self" :: c.records } else c) parseFn
         match item with
         | .fn name ps annots ret clauses =>
           let ps := params ++ ps.filter (!params.contains ·)
           let own := s!"{tr}::{name}"
           let f := Item.fn own ps (annots.map (·.map (TypeExpr.withSelf self)))
-            (ret.map (TypeExpr.withSelf self)) clauses
+            (ret.map (TypeExpr.withSelf self)) (clauses.map (selfClause tr none))
           items := items.push (match vis with
             | some parent => .pub parent f
             | none => f)
@@ -1471,7 +1488,10 @@ private partial def parseItem : P Item := do
     repeat
       if (← peek) == .punct "}" then break
       match ← peek with
-      | .ident "fn" => methods := methods.push (← parseItem)
+      | .ident "fn" =>
+        methods := methods.push (← withReader (fun c =>
+          if c.records.contains head then { c with records := "Self" :: c.records } else c)
+          parseItem)
       | .ident "type" =>
         -- `type Item = Int;`: a type the trait leaves to the implementation.
         advance
@@ -1488,7 +1508,7 @@ private partial def parseItem : P Item := do
     let written := methods.toList.map fun
       | .fn name ps annots ret clauses =>
         Item.fn name ps (annots.map (·.map (TypeExpr.withSelf self))) (ret.map (TypeExpr.withSelf self))
-          clauses
+          (clauses.map (selfClause head (some (tr, (TypeExpr.tuple [self]).asExpr))))
       | other => other
     pure (.impl params tr head args context.toList written)
   | .ident "coerce" =>

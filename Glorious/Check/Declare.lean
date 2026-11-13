@@ -80,11 +80,12 @@ partial def resolveType (params : List (String × Ty)) (decl : Bool) : TypeExpr 
     let cap ← freshCap
     match r with
     | .performs r effects =>
-      -- What it performs is said: these effects and no others.
+      -- What it performs is said: these effects and no others, or these
+      -- and whatever a row parameter stands for.
       let r ← resolveType params decl r
-      let effs ← resolveEffects params decl effects
+      let (effs, tail) ← resolveRow params decl effects
       if decl then modify fun s => { s with monoCaps := cap :: s.monoCaps }
-      pure (.fn ps r effs none cap)
+      pure (.fn ps r effs tail cap)
     | _ =>
       let r ← resolveType params decl r
       let tail ← freshRowVar
@@ -126,6 +127,28 @@ partial def lifetimeCap (params : List (String × Ty)) (decl : Bool) (life : Opt
     match params.lookup x with
     | some (.ref _ _ cap) => pure cap
     | _ => throw s!"unknown lifetime `{x}`: a lifetime is declared with the type parameters, `<{x}>`"
+
+/-- A written row: its effects, and the row parameter that stands for the
+rest of it, if one is written (`e`, `{A | e}`). -/
+partial def resolveRow (params : List (String × Ty)) (decl : Bool)
+    (effects : List (String × List TypeExpr)) : M (List (String × List Ty) × Option Nat) := do
+  let named := fun (entry : String × List TypeExpr) =>
+    match entry with
+    | (name, [.name e []]) => if name == Syntax.rowMark then some e else none
+    | (name, []) =>
+      match params.lookup name with
+      | some (.fn [] _ [] (some _) _) => some name
+      | _ => none
+    | _ => none
+  let rows := effects.filterMap named
+  let effs ← resolveEffects params decl (effects.filter fun e => (named e).isNone)
+  match rows with
+  | [] => pure (effs, none)
+  | [e] =>
+    match params.lookup e with
+    | some (.fn [] _ [] (some k) _) => pure (effs, some k)
+    | _ => throw s!"`{e}` is not a row parameter here: one is declared `{e}: EffectRow`"
+  | _ => throw "a row is written with one row parameter for the rest of it; the union of several is not supported"
 
 /-- The effects written after a callable's result. An effect's arguments may
 be left out, to be inferred. -/
@@ -488,6 +511,40 @@ def declare (items : List Item) : M Unit := do
       if lower == 1 then modify fun s => { s with anyMust := true }
       modify fun s => { s with useDecls := (head, lower == 1, upper == some 1) :: s.useDecls }
     | _ => pure ()
+  -- A type each constructor of which holds a value of the type itself, with
+  -- nothing between, has no value that can be built: its layout does not end
+  -- (specification 5). A type is founded if one of its constructors holds
+  -- only founded values; what is not a declared type is.
+  let s ← get
+  let rec heads : Ty → List String
+    | .con n _ => [n]
+    | .tuple ts => ts.flatMap heads
+    | _ => []
+  let ctorsOf := fun (n : String) => ((s.types.lookup n).map (·.ctors)).getD []
+  let mut founded : List String := (s.types.filter fun (_, d) => d.ctors.isEmpty).map (·.1)
+  let mut changed := true
+  let mut fuel := s.types.length + 1
+  while changed && fuel > 0 do
+    changed := false
+    fuel := fuel - 1
+    for (n, d) in s.types do
+      unless founded.contains n do
+        let ok := d.ctors.any fun c =>
+          match s.ctors.lookup c with
+          | some sig => (sig.fields.flatMap heads).all fun h =>
+              founded.contains h || (s.types.lookup h).isNone
+          | none => true
+        if ok then
+          founded := n :: founded
+          changed := true
+  for item in items do
+    let name := match item with
+      | .enum name _ _ => some name
+      | .struct name _ _ => some name
+      | _ => none
+    if let some name := name then
+      unless founded.contains name || (ctorsOf name).isEmpty do
+        throw s!"type `{name}` holds a value of itself in every constructor, so no value of it can be built: give it a constructor that does not, or hold the value in an `Array` or behind a reference"
 
 /-- A constructor's field types and result type at fresh type arguments. -/
 def instCtor (sig : CtorSig) : M (List Ty × Ty) := do

@@ -2460,6 +2460,44 @@ def cases : List Case := [
   -- A place below zero is not there either.
   ⟨"fn main() { let mut a = [1, 2, 3]; let r = arr_at(&a, 0 - 1); *r + 1 }",
     [], "went wrong"⟩,
+  -- `Self` in what an implementation's functions do: its functions, and its constructor.
+  ⟨"struct P { x: Int }\nimpl P { fn new(x: Int) -> P { P { x: x } } fn twice(x: Int) -> P { Self::new(x * 2) } }\nfn main() -> Int { let p = P::twice(4); p.x }",
+    [], "8"⟩,
+  ⟨"struct P { x: Int }\nimpl P { fn new(x: Int) -> Self { Self { x: x } } }\nfn main() -> Int { let p = P::new(4); p.x }",
+    [], "4"⟩,
+  ⟨"struct P { x: Int }\nimpl P { fn get(p: Self) -> Int { match(p) { Self { x } => x } } fn mk() -> Self { Self { x: 3 } } }\nfn main() -> Int { P::get(P::mk()) }",
+    [], "3"⟩,
+  ⟨"struct W(Int)\nimpl W { fn mk(n: Int) -> Self { Self(n) } fn un(w: Self) -> Int { match(w) { Self(n) => n } } }\nfn main() -> Int { W::un(W::mk(8)) }",
+    [], "8"⟩,
+  -- In an implementation of a trait, `Self::f(..)` is the trait's function for that type.
+  ⟨"trait Zero { fn zero() -> Self; fn two() -> Self; }\nimpl Zero for Int { fn zero() { 0 } fn two() { Self::zero() + 2 } }\nfn main() -> Int { <Int as Zero>::two() }",
+    [], "2"⟩,
+  ⟨"trait Zero { fn zero() -> Self; fn two() -> Self; }\nstruct W(Int)\nimpl Zero for W { fn zero() { W(0) } fn two() { match(Self::zero()) { W(n) => W(n + 2) } } }\nfn main() -> Int { match(<W as Zero>::two()) { W(n) => n } }",
+    [], "2"⟩,
+  -- A type that holds itself in every constructor has no value.
+  ⟨"struct S { next: S, v: Int }\nfn main() -> Int { 0 }",
+    [], "error: type `S` holds a value of itself in every constructor, so no value of it can be built: give it a constructor that does not, or hold the value in an `Array` or behind a reference"⟩,
+  ⟨"struct A { b: B }\nstruct B { a: A }\nfn main() -> Int { 0 }",
+    [], "error: type `A` holds a value of itself in every constructor, so no value of it can be built: give it a constructor that does not, or hold the value in an `Array` or behind a reference"⟩,
+  ⟨"struct S { next: Array<S>, v: Int }\nfn main() -> Int { let s = S { next: [], v: 3 }; s.v }",
+    [], "3"⟩,
+  -- A parameter that stands for a row of effects.
+  ⟨"fn apply<A, B, e: EffectRow>(f: fn(A) -> B / e, x: A) -> B / e { f(x) }\nfn main() -> Int { apply({ x => x + 1 }, 2) }",
+    [], "3"⟩,
+  ⟨"effect Log { log(n: Int) -> () }\nfn both<e: EffectRow>(f: fn() -> Int / {Log | e}) -> Int / {Log | e} { log(1); f() }\nfn main() -> Int { handle(both({ log(2); 5 })) { log(n, k) => k(()), x => x } }",
+    [], "5"⟩,
+  -- A handler takes its effect out of the row and leaves the rest.
+  ⟨"effect Log { log(n: Int) -> () }\neffect Ask { ask() -> Int }\nfn run<e: EffectRow>(f: fn() -> Int / {Log | e}) -> Int / e { handle(f()) { log(n, k) => k(()), x => x } }\nfn main() -> Int { handle(run({ log(2); ask() + 1 })) { ask(k) => k(41), x => x } }",
+    [], "42"⟩,
+  -- The row is whatever the caller chooses.
+  ⟨"effect Log { log(n: Int) -> () }\nfn f<e: EffectRow>(g: fn() -> Int / e) -> Int / e { log(1); g() }\nfn main() -> Int { 0 }",
+    [], "error: in `f`: the row `e` is whatever the caller chooses, and what is written needs it to hold {Log}"⟩,
+  ⟨"effect Log { log(n: Int) -> () }\nfn f<a: EffectRow, b: EffectRow>(g: fn() -> Int / a, h: fn() -> Int / b) -> Int / a { g() + h() }\nfn main() -> Int { handle(f({ 1 }, { log(1); 2 })) { log(n, k) => k(()), x => x } }",
+    [], "error: in `f`: the row `b` is taken to be the same as another row parameter: what the function does with them makes them one"⟩,
+  ⟨"fn f(g: fn() -> Int / e) -> Int { g() }\nfn main() -> Int { 0 }",
+    [], "error: in `f`: unknown effect `e`"⟩,
+  ⟨"fn pure_only<e: EffectRow>(g: fn() -> Int / e) -> Int { 3 }\nfn main() -> Int { pure_only({ 4 }) }",
+    [], "3"⟩,
   -- `drop` is not for a program to call.
   ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nfn main() { let mut f = File(7); drop(&mut f); 0 }",
     [], "error: 3:34: in `main`: `drop` is run when what holds a value ends; a program does not call it"⟩,

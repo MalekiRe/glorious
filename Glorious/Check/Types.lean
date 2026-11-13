@@ -398,6 +398,10 @@ structure St where
   Such a borrow is a variable of the function's while it lasts, so it cannot
   leave the function. -/
   fieldCaps : Array (Nat × String) := #[]
+  /-- The row parameters of the functions checked, each held as the row of a
+  callable type: once everything is settled, each is still a row nobody
+  knows, and no two of a function's are one. -/
+  rowChecks : List (String × List (String × Ty)) := []
   /-- What is asked of the type parameters of a declared type, where a value
   of it is built: for each such type, a trait and which parameter. -/
   typeBounds : List (String × List (String × Nat)) := []

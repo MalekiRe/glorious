@@ -342,6 +342,13 @@ def spreadMark : String := "%spread"
 written with its type is: `%inst(f(args), (A, B))`. -/
 def instMark : String := "%inst"
 
+/-- In a written row, the row parameter that stands for the rest of it. -/
+def rowMark : String := "%row"
+
+/-- A generic parameter written `e: EffectRow`: the name of the row. -/
+def rowParam (p : String) : Option String :=
+  if p.endsWith ": EffectRow" then some (String.ofList (p.toList.take (p.length - ": EffectRow".length))) else none
+
 /-- An attribute, `#[name]` before a declaration or `#![name]` at the top of a
 text, is kept beside the declarations as the names of a constructor's fields
 are: under this mark and its name, with what it is written of and what it is
@@ -556,6 +563,54 @@ partial def renameStmts (x y : String) (bound : List String) : List Stmt → Lis
     | [] => []
   | .assign target value :: rest =>
     .assign (renameExpr x y bound target) (renameExpr x y bound value) :: renameStmts x y bound rest
+
+end
+
+/-- A pattern with `Self` written out as the type an implementation is for. -/
+partial def selfPattern (self : String) : Pattern → Pattern
+  | .ctor name qual args =>
+    .ctor (if name == "Self" then self else name) (if qual == some "Self" then some self else qual)
+      (args.map (selfPattern self))
+  | .tuple args => .tuple (args.map (selfPattern self))
+  | p => p
+
+mutual
+
+/-- An expression with `Self` written out as the type an implementation is
+for: `Self::f`, `Self { .. }` and `Self(..)`. In an implementation of a trait
+`Self::f(..)` is the trait's function for that type, `<Self as Trait>::f(..)`. -/
+partial def selfExpr (self : String) (trait : Option (String × Expr)) : Expr → Expr
+  | .name qual z =>
+    .name (if qual == some "Self" then some ((trait.map (·.1)).getD self) else qual)
+      (if z == "Self" then self else z)
+  | .call id f args =>
+    let args := args.map (selfExpr self trait)
+    match f, trait with
+    | .name (some "Self") z, some (tr, at_) =>
+      .call 0 (.name none instMark) [.call id (.name (some tr) z) args, at_]
+    | _, _ => .call id (selfExpr self trait f) args
+  | .tailCall id f args => .tailCall id (selfExpr self trait f) (args.map (selfExpr self trait))
+  | .tuple args => .tuple (args.map (selfExpr self trait))
+  | .proj e i => .proj (selfExpr self trait e) i
+  | .closure id clauses => .closure id (clauses.map (selfClause self trait))
+  | .handle subject arms =>
+    .handle (selfExpr self trait subject) (arms.map (selfClause self trait))
+  | .labelScope l body => .labelScope l (body.map (selfStmt self trait))
+  | .deref e => .deref (selfExpr self trait e)
+  | .reborrow uniq e => .reborrow uniq (selfExpr self trait e)
+  | .fieldOf id e name => .fieldOf id (selfExpr self trait e) name
+  | e => e
+
+partial def selfClause (self : String) (trait : Option (String × Expr)) : Clause → Clause
+  | .mk pats body => .mk (pats.map (selfPattern self)) (body.map (selfStmt self trait))
+
+partial def selfStmt (self : String) (trait : Option (String × Expr)) : Stmt → Stmt
+  | .let_ pat value => .let_ (selfPattern self pat) (selfExpr self trait value)
+  | .letMut z value => .letMut z (selfExpr self trait value)
+  | .expr e => .expr (selfExpr self trait e)
+  | .defer e => .defer (selfExpr self trait e)
+  | .located line col s => .located line col (selfStmt self trait s)
+  | .assign target value => .assign (selfExpr self trait target) (selfExpr self trait value)
 
 end
 
