@@ -1430,6 +1430,9 @@ private partial def parseItem : P Item := do
     -- `impl From<Int> for u8`: the trait's own arguments, kept among what
     -- the implementation declares.
     let mut given : Array Item := #[]
+    -- (All that is written between the brackets, lifetimes too: what `Self`
+    -- is where the functions are the type's own.)
+    let mut selfArgs : Array TypeExpr := #[]
     if tr != "Use" && (← isOp "<") then
       advance
       repeat
@@ -1437,9 +1440,17 @@ private partial def parseItem : P Item := do
         match ← peek with
         | .ident l =>
           -- A lifetime here is only a name: nothing is given for it.
-          if l.startsWith "'" then advance
-          else given := given.push (.typeAlias (traitArgName given.size) [] (← parseType))
-        | _ => given := given.push (.typeAlias (traitArgName given.size) [] (← parseType))
+          if l.startsWith "'" then
+            advance
+            selfArgs := selfArgs.push (.name l [])
+          else
+            let arg ← parseType
+            selfArgs := selfArgs.push arg
+            given := given.push (.typeAlias (traitArgName given.size) [] arg)
+        | _ =>
+          let arg ← parseType
+          selfArgs := selfArgs.push arg
+          given := given.push (.typeAlias (traitArgName given.size) [] arg)
         if !(← acceptPunct ",") then break
       expectOp ">"
     if tr == "Use" && (← isOp "<") then
@@ -1459,10 +1470,7 @@ private partial def parseItem : P Item := do
     -- called.
     if (← peek) == .punct "{" then
       advance
-      let argNames := given.toList.filterMap fun
-        | .typeAlias _ _ (.name x []) => some x
-        | _ => none
-      let self := TypeExpr.name tr (argNames.map (TypeExpr.name · []))
+      let self := TypeExpr.name tr selfArgs.toList
       let mut items : Array Item := #[]
       repeat
         if (← peek) == .punct "}" then break
@@ -2229,6 +2237,6 @@ def parse (fix : Fixities) (src : String) (base : Nat := 0) (records : List Stri
   let fix ← if tables.isEmpty then collectFixities toks fix else pure ((tables.lookup path).getD fix)
   let ((items, _), local_) ← ((parseItems.run
     { toks, fix, records := collectRecords toks ++ records, base, tables, path }).run 0).run #[]
-  pure (items ++ local_.toList, fix)
+  pure (promoteItems (items ++ local_.toList), fix)
 
 end Glorious.Syntax

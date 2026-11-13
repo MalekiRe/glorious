@@ -634,4 +634,127 @@ partial def selfStmt (self : String) (trait : Option (String × Expr)) : Stmt �
 end
 
 
+/-- How a name is used in what follows where it is bound: borrowed with `&`,
+changed or borrowed with `&mut`, a field of it borrowed, bound again. -/
+structure NameUse where
+  shared : Bool := false
+  changed : Bool := false
+  fielded : Bool := false
+  rebound : Bool := false
+  deriving Inhabited
+
+def NameUse.or (a b : NameUse) : NameUse :=
+  ⟨a.shared || b.shared, a.changed || b.changed, a.fielded || b.fielded, a.rebound || b.rebound⟩
+
+/-- The variable a place that is assigned to is a place of, if it is one of a
+variable's own and not of what a reference points to. -/
+partial def placeRoot : Expr → Option String
+  | .name none x => some x
+  | .fieldOf _ e _ => placeRoot e
+  | .proj e _ => placeRoot e
+  | _ => none
+
+mutual
+
+partial def nameUseExpr (x : String) : Expr → NameUse
+  | .ref uniq y => if y != x then {} else if uniq then { changed := true } else { shared := true }
+  | .refField _ _ y _ _ => if y == x then { fielded := true } else {}
+  | .call _ f args => (f :: args).foldl (fun u e => u.or (nameUseExpr x e)) {}
+  | .tailCall _ f args => (f :: args).foldl (fun u e => u.or (nameUseExpr x e)) {}
+  | .tuple args => args.foldl (fun u e => u.or (nameUseExpr x e)) {}
+  | .proj e _ => nameUseExpr x e
+  | .deref e => nameUseExpr x e
+  | .reborrow _ e => nameUseExpr x e
+  | .fieldOf _ e _ => nameUseExpr x e
+  | .closure _ clauses => clauses.foldl (fun u c => u.or (nameUseClause x c)) {}
+  | .handle subject arms => arms.foldl (fun u c => u.or (nameUseClause x c)) (nameUseExpr x subject)
+  | .labelScope _ body => nameUseStmts x body
+  | _ => {}
+
+partial def nameUseClause (x : String) : Clause → NameUse
+  | .mk pats body =>
+    let u := nameUseStmts x body
+    if (pats.flatMap patternNames).contains x then { u with rebound := true } else u
+
+partial def nameUseStmts (x : String) (body : List Stmt) : NameUse :=
+  body.foldl (fun u s => u.or (nameUseStmt x s)) {}
+
+partial def nameUseStmt (x : String) : Stmt → NameUse
+  | .let_ pat e =>
+    let u := nameUseExpr x e
+    if (patternNames pat).contains x then { u with rebound := true } else u
+  | .letMut y e =>
+    let u := nameUseExpr x e
+    if y == x then { u with rebound := true } else u
+  | .expr e => nameUseExpr x e
+  | .defer e => nameUseExpr x e
+  | .located _ _ s => nameUseStmt x s
+  | .assign target e =>
+    let u := (nameUseExpr x target).or (nameUseExpr x e)
+    if placeRoot target == some x then { u with changed := true } else u
+
+end
+
+/-- Is a name bound here one that what follows borrows with `&` and never
+changes? It is then kept where a reference can point: as a variable is. -/
+def borrowedOnly (x : String) (after : List Stmt) : Bool :=
+  let u := nameUseStmts x after
+  !x.startsWith "%" && u.shared && !u.changed && !u.fielded && !u.rebound
+
+mutual
+
+/-- A value that is given a name and then borrowed with `&` has to be
+somewhere a reference can point. Where the name is never changed, borrowed
+for writing or bound again, the binding is made a variable's, which is such a
+place; the checker still sees no assignment to it, since there is none. -/
+partial def promoteExpr : Expr → Expr
+  | .call id f args => .call id (promoteExpr f) (args.map promoteExpr)
+  | .tailCall id f args => .tailCall id (promoteExpr f) (args.map promoteExpr)
+  | .tuple args => .tuple (args.map promoteExpr)
+  | .proj e i => .proj (promoteExpr e) i
+  | .closure id clauses => .closure id (clauses.map promoteClause)
+  | .handle subject arms => .handle (promoteExpr subject) (arms.map promoteClause)
+  | .labelScope l body => .labelScope l (promoteStmts body)
+  | .deref e => .deref (promoteExpr e)
+  | .reborrow uniq e => .reborrow uniq (promoteExpr e)
+  | .fieldOf id e name => .fieldOf id (promoteExpr e) name
+  | e => e
+
+partial def promoteClause : Clause → Clause
+  | .mk pats body =>
+    let body := promoteStmts body
+    let held := ((pats.flatMap patternNames).eraseDups).filter (borrowedOnly · body)
+    .mk pats (held.map (fun x => Stmt.letMut x (.name none x)) ++ body)
+
+partial def promoteStmts : List Stmt → List Stmt
+  | [] => []
+  | s :: rest =>
+    let rest := promoteStmts rest
+    let rec here : Stmt → List Stmt
+      | .located line col s =>
+        match here s with
+        | first :: more => .located line col first :: more
+        | [] => []
+      | .let_ (.var x) e =>
+        if borrowedOnly x rest then [.letMut x (promoteExpr e)] else [.let_ (.var x) (promoteExpr e)]
+      | .let_ pat e =>
+        let held := (patternNames pat).eraseDups.filter (borrowedOnly · rest)
+        .let_ pat (promoteExpr e) :: held.map fun x => Stmt.letMut x (.name none x)
+      | .letMut y e => [.letMut y (promoteExpr e)]
+      | .expr e => [.expr (promoteExpr e)]
+      | .defer e => [.defer (promoteExpr e)]
+      | .assign target e => [.assign (promoteExpr target) (promoteExpr e)]
+    here s ++ rest
+
+end
+
+/-- The same for every function of a text. -/
+partial def promoteItems (items : List Item) : List Item :=
+  items.map fun
+    | .fn name ps annots ret clauses => .fn name ps annots ret (clauses.map promoteClause)
+    | .pub parent item => .pub parent ((promoteItems [item]).headD item)
+    | .module name (some inner) => .module name (some (promoteItems inner))
+    | .impl ps tr head args context methods => .impl ps tr head args context (promoteItems methods)
+    | item => item
+
 end Glorious.Syntax

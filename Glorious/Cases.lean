@@ -2570,6 +2570,24 @@ def cases : List Case := [
   -- A hash map changed where it is, and what a key stands for looked at where it is.
   ⟨"use std::hash::{HashMap, new, get};\nfn main() {\n    let mut m = new();\n    HashMap::set(&mut m, \"one\", 1); HashMap::set(&mut m, \"two\", 2); HashMap::set(&mut m, \"three\", 3);\n    say(HashMap::count(&m));\n    say(match(HashMap::get_ref(&m, \"two\")) { Some(r) => *r, None => 0 });\n    say(HashMap::has(&m, \"four\"));\n    HashMap::unset(&mut m, \"one\");\n    HashMap::set(&mut m, \"two\", 22);\n    say(HashMap::count(&m));\n    say(match(HashMap::get_ref(&m, \"two\")) { Some(r) => *r, None => 0 });\n    say(get(m, \"one\"));\n    0 }",
     [], "3\n2\nErr(())\n2\n22\nErr(())\n0"⟩,
+  -- A value bound with `let`, or given as an argument, can be borrowed with `&`: it is kept where a reference can point.
+  ⟨"struct P { x: Int, y: Int }\nfn sum(p: &P) -> Int { p.x + p.y }\nfn main() -> Int { let p = P { x: 3, y: 4 }; sum(&p) + sum(&p) }",
+    [], "14"⟩,
+  ⟨"fn total(a: &[Int]) -> Int { len_at(a) }\nfn f(a: [Int]) -> Int { total(&a) + total(&a) }\nfn main() -> Int { f([1, 2, 3]) }",
+    [], "6"⟩,
+  ⟨"fn first(p: &(Int, Int)) -> Int { p.0 }\nfn main() -> Int { let (a, b) = ((1, 2), 5); first(&a) + b }",
+    [], "6"⟩,
+  -- It is still not a variable: it cannot be assigned to or borrowed with `&mut`.
+  ⟨"fn main() -> Int { let x = 3; let r = &x; x = 4; *r }",
+    [], "error: 1:31: in `main`: `x` is not a mutable variable, so it cannot be borrowed"⟩,
+  ⟨"fn bump(r: &mut Int) { *r = *r + 1; }\nfn main() -> Int { let x = 3; bump(&mut x); x }",
+    [], "error: 2:31: in `main`: `x` is not a mutable variable, so it cannot be borrowed"⟩,
+  -- A type's own functions where the type has a lifetime: a slice that holds a reference to an array.
+  ⟨"struct Slice<'a, T> { items: &'a [T], from: Int, to: Int }\nimpl<'a, T> Slice<'a, T> {\n    fn of(items: &'a [T]) -> Self { Self { items: items, from: 0, to: len_at(items) } }\n    fn len(s: &Self) -> Int { s.to - s.from }\n    fn get(s: &Self, i: Int) -> Option<&'a T> { if(i < 0) { None } else { if(s.from + i < s.to) { element(s.items, s.from + i) } else { None } } }\n}\nfn main() -> Int { let a = [10, 20, 30]; let s = Slice::of(&a); Slice::len(&s) + match(Slice::get(&s, 1)) { Some(r) => *r, None => 0 } }",
+    [], "23"⟩,
+  -- A function of an implementation is told what it is given by its trait before its clauses are looked at.
+  ⟨"trait Iterator { type Item; fn next(&mut Self) -> Option<Self::Item>; }\nstruct Count { n: Int, end: Int }\nimpl Iterator for Count { type Item = Int; fn next(c) { if(c.n < c.end) { let v = c.n; c.n = v + 1; Some(v) } else { None } } }\nfn sum_all<I: Iterator<Item = Int>>(it: &mut I, acc: Int) -> Int { match(next(it)) { Some(x) => tail sum_all(it, acc + x), None => acc } }\nfn main() -> Int { let mut c = Count { n: 0, end: 5 }; sum_all(&mut c, 0) }",
+    [], "10"⟩,
   -- `drop` is not for a program to call.
   ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nfn main() { let mut f = File(7); drop(&mut f); 0 }",
     [], "error: 3:34: in `main`: `drop` is run when what holds a value ends; a program does not call it"⟩,

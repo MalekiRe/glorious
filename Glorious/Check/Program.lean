@@ -709,6 +709,36 @@ def checkGroup (decls : List FnDecl) : M Unit := do
         | some t => some <$> resolveType rigid false t
         | none => pure none
       modify fun s => { s with fieldCaps := #[] }
+      -- A function an implementation gives is the function its trait declares,
+      -- at the implementation's type. What it is given is known from that
+      -- before its clauses are looked at, so they can read a field of it.
+      let wanted ← match d.impl with
+        | none => pure none
+        | some (im, sig) => do
+          -- A tuple is the tuple of its parts; any other is made with its name.
+          let self := if im.head.startsWith "(tuple" then Ty.tuple (rigid.map (·.2))
+            else Ty.con im.head (rigid.map (·.2))
+          -- The trait at the arguments the implementation gives it, and the
+          -- types it leaves to the implementation as the implementation says.
+          let own := im.pvars.filterMap fun (p, id) => (rigid.lookup p).map fun t => (id, t)
+          let tm := (sig.self, self) :: sig.tparams.zip im.targs
+            ++ sig.assocs.filterMap fun (a, id) =>
+              (im.assocs.lookup a).map fun t => (id, subst own [] [] t)
+          -- The trait's lifetimes are each itself here, as a function's own
+          -- are: what the trait says is borrowed from one thing may not be
+          -- borrowed from another.
+          let declared ← zonk (.func (sig.params.map (subst tm [] [])) (subst tm [] [] sig.ret) ⟨[], none⟩ (← freshCap))
+          let cm ← (freeCaps declared).eraseDups.mapM fun c => do pure (c, ← freshCap)
+          let want := subst [] [] cm declared
+          let theirs := cm.filterMap fun (old, new) =>
+            (sig.lifetimes.lookup old).map fun l =>
+              (new, if l == "'_" then "the lifetime the trait leaves unwritten" else s!"the trait's {l}")
+          modify fun s => { s with rigidCaps := s.rigidCaps ++ theirs }
+          pure (some (want, sig.trait))
+      let annots := match wanted with
+        | some (.fn ps _ _ _ _, _) =>
+          if ps.length == annots.length then (annots.zip ps).map fun (a, p) => a <|> some p else annots
+        | _ => annots
       let t ← inferCallable [] annots ret (some d.name) d.clauses s!"the clauses of `{d.name}` do"
       -- A borrow through a reference of a field of one of several
       -- constructors is written out as a variable of this function's, so
@@ -727,29 +757,10 @@ def checkGroup (decls : List FnDecl) : M Unit := do
       modify fun s => { s with rowChecks := s.rowChecks ++ [(d.name, rowParams)] }
       -- A function an implementation gives is the function its trait declares,
       -- at the implementation's type.
-      if let some (im, sig) := d.impl then
-        -- A tuple is the tuple of its parts; any other is made with its name.
-        let self := if im.head.startsWith "(tuple" then Ty.tuple (rigid.map (·.2))
-          else Ty.con im.head (rigid.map (·.2))
-        -- The trait at the arguments the implementation gives it, and the
-        -- types it leaves to the implementation as the implementation says.
-        let own := im.pvars.filterMap fun (p, id) => (rigid.lookup p).map fun t => (id, t)
-        let tm := (sig.self, self) :: sig.tparams.zip im.targs
-          ++ sig.assocs.filterMap fun (a, id) =>
-            (im.assocs.lookup a).map fun t => (id, subst own [] [] t)
-        -- The trait's lifetimes are each itself here, as a function's own
-        -- are: what the trait says is borrowed from one thing may not be
-        -- borrowed from another.
-        let declared ← zonk (.func (sig.params.map (subst tm [] [])) (subst tm [] [] sig.ret) ⟨[], none⟩ (← freshCap))
-        let cm ← (freeCaps declared).eraseDups.mapM fun c => do pure (c, ← freshCap)
-        let want := subst [] [] cm declared
-        let theirs := cm.filterMap fun (old, new) =>
-          (sig.lifetimes.lookup old).map fun l =>
-            (new, if l == "'_" then "the lifetime the trait leaves unwritten" else s!"the trait's {l}")
-        modify fun s => { s with rigidCaps := s.rigidCaps ++ theirs }
+      if let some (want, trait) := wanted then
         try unify t want
         catch e =>
-          throw s!"this is not the function `{sig.trait}` declares, which takes its arguments, gives its result and performs nothing: {e}"
+          throw s!"this is not the function `{trait}` declares, which takes its arguments, gives its result and performs nothing: {e}"
       -- A use of the function inside its group has the function's type, but
       -- what it is given there need not be what the function itself was given:
       -- the captures of the two are kept apart, and related below.
