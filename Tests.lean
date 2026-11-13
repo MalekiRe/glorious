@@ -198,13 +198,27 @@ def notTail (n : Nat) : String :=
   fn main() { let mut count = 0; let r = handle work() { tick(k) => count = count + 1; k(()) };
     r + count }" == some true
 -- What the region rules have no type for compiles as before, without that
--- proof: a reference that may be to one variable or to another, a function that
--- passes a reference to its own variable to itself, and a variable that holds
--- something that uses the variable.
+-- proof: a reference that may be to one variable or to another, and a variable
+-- that holds something that uses the variable.
 #guard borrowChecked "fn main() { let mut a = 1; let mut b = 2;
     let p = if(a < b) { &mut a } else { &mut b }; *p = 9; a + b }" == some false
+-- A function that passes a reference to its own variable to itself has a type
+-- that binds the region; so has a callable a function is passed and gives a
+-- reference to its own variable, or two.
 #guard borrowChecked "fn go(r, n) { let mut y = n; if(0 < n) { go(&mut y, n - 1) + *r } else { *r } }
-  fn main() { let mut t = 5; go(&mut t, 3) }" == some false
+  fn main() { let mut t = 5; go(&mut t, 3) }" == some true
+#guard borrowChecked "fn apply(f: for<'a> fn(&'a Int) -> Int) -> Int { let mut x = 1; let mut y = 2; f(&x) + f(&y) }
+  fn main() { apply({ r => *r + 1 }) }" == some true
+#guard borrowChecked "fn both(f: for<'a, 'b> fn(&'a Int, &'b Int) -> Int) -> Int { let mut x = 3; let mut y = 4; f(&x, &y) }
+  fn main() { both(fn(a, b) { *a * 10 + *b }) }" == some true
+-- A reference kept in a declared type, or given by an effect, is of the
+-- region its lifetime says.
+#guard borrowChecked "struct Holder<'a>(&'a Int)
+  fn get<'a>(h: Holder<'a>) -> &'a Int { match(h) { Holder(r) => r } }
+  fn main() { let mut x = 7; *get(Holder(&x)) }" == some true
+#guard borrowChecked "effect Reader<'a> { ask() -> &'a Int }
+  fn use_it() -> Int { *ask() + 1 }
+  fn main() { let mut x = 41; handle use_it() { ask(k) => k(&x) } }" == some true
 #guard borrowChecked "effect Yield { yield(Int) }
   fn main() { let mut saved = None; handle (yield(1) + 1) { yield(v, k) => saved = Some(k); 0 };
     match(replace(&mut saved, None)) { Some(k) => k(41), None => 0 } }" == some false
@@ -295,8 +309,8 @@ def notTail (n : Nat) : String :=
     incr(&mut x); apply({ q => *q = 7; }, &mut n); x + n }
   fn apply(f, p) { f(p) }" == some 1
 -- A program that does not pass the region rules does not pass these.
-#guard lentBorrows "fn go(r, n) { let mut y = n; if(0 < n) { go(&mut y, n - 1) + *r } else { *r } }
-  fn main() { let mut t = 5; go(&mut t, 3) }" == none
+#guard lentBorrows "fn main() { let mut a = 1; let mut b = 2;
+    let p = if(a < b) { &mut a } else { &mut b }; *p = 9; a + b }" == none
 -- A call with one borrow among its arguments is, in Core, a call with a scope
 -- around it: nothing is made for it. A second borrow costs a callable, and so
 -- does one given a name, whose scope is some statements and not a call.

@@ -949,10 +949,13 @@ Core's rules, from 432.
 Since: a callable type binds as many regions as the references it is given
 have (up to three), so `for<'a, 'b> fn(&'a T, &'b U)` is found.
 
-Limits. A function that calls itself with a reference to its own variable
-(the region differs at each depth) is not shown: its own type would have to
-bind the region. The search now gives it such a type, and the checker turns
-the result away; why is not yet understood.
+And a function that calls itself with a reference to its own variable, where
+the region differs at each depth, has a type that binds the region: a
+function inside one whose type binds a region is told which region that is,
+as it is told which cell.
+
+Limits. Such a function is shown to follow the rules with its borrows as the
+references they borrow, not as scopes of their own.
 
 ## A lifetime of a declared type is an argument in Core
 

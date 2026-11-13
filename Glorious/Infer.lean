@@ -255,6 +255,10 @@ structure St where
   /-- Whether a callable may be taken to bind a region: one it is called at a
   reference to a cell with, where nothing else says what it is. -/
   ranked : Bool := false
+  /-- The regions callable types bind for whoever calls them: no cells, but
+  like cells in that a function inside one that binds such a region has to
+  be told which it is. -/
+  rankBinders : List Nat := []
   /-- Calls of such callables: what the callable gives as its type has it,
   what this call gives, the region the type binds and the one the call
   chooses. One is the other with the region changed, whichever is known first. -/
@@ -459,6 +463,14 @@ where
         let (_, more) ← go s ex (chosen ++ ren) (s :: stack) {} out
         out := more
     pure (seen, out)
+
+/-- A region is one a callable type binds for whoever calls it. -/
+def markRank (r : Nat) : M Unit :=
+  modify fun s => if s.rankBinders.contains r then s else { s with rankBinders := r :: s.rankBinders }
+
+def isRank (r : Nat) : M Bool := do
+  let root ← findRg r
+  (← get).rankBinders.anyM fun b => do pure ((← findRg b) == root)
 
 /-- Every region a callable type binds, the first first. -/
 def bindersOf (a : Nat) : M (List Nat) := do
@@ -868,6 +880,7 @@ def copyRg (sch : Scheme) (ρ : Nat) : M Nat := do
     | none =>
       let r' ← freshRg
       modify fun s => { s with renRg := s.renRg.insert r r' }
+      if ← isRank r then markRank r'
       pure r'
 
 /-- A copy of what a callable of a scheme touches, with everything it includes. -/
@@ -1077,6 +1090,7 @@ partial def tryCall (c : Call) : M Bool := do
       match chosen with
       | some (p, g, region) =>
         let bound ← freshRg
+        markRank bound
         let a ← findAcc acc
         modify fun s => { s with accs := s.accs.modify a fun x => { x with binder := some bound } }
         unify p (← reregion region bound g)
@@ -1094,6 +1108,7 @@ partial def tryCall (c : Call) : M Bool := do
                 if own.isNone && !(← isAtom rp) && (← isAtom (← findRg ρ)) then own := some rp
           match own with
           | some region =>
+            markRank region
             let a ← findAcc acc
             modify fun s => { s with accs := s.accs.modify a fun x => { x with binder := some region } }
             tryCall c
@@ -1118,6 +1133,8 @@ partial def tryCall (c : Call) : M Bool := do
       -- The regions the type binds are no cells': each stands for whichever
       -- cell a call chooses.
       let bounds ← found.mapM fun _ => freshRg
+      for b in bounds do
+        markRank b
       let a ← findAcc c.acc
       modify fun s =>
         { s with accs := s.accs.modify a fun x =>
@@ -1447,6 +1464,7 @@ partial def inferRhs (Γ : Array ITy) : Rhs → M (ITy × Option ISig)
             if chosen.isNone && !(← isAtom root) && !(← sig.caps.anyM (mentionsRg root)) then
               chosen := some root
         if let some region := chosen then
+          markRank region
           let a ← findAcc sig.acc
           modify fun s => { s with accs := s.accs.modify a fun x => { x with binder := some region } }
     let cls ← freshCls
@@ -1790,7 +1808,7 @@ def zonkAcc (pr : Pr) (a : Nat) : M (List Typing.Rgn) := do
   for r in sorted do
     let w := written.contains r
     -- (a region a callable type binds is no cell, and is written as bound)
-    if !(← isAtom r) && !pr.bound.contains r then
+    if !(← isAtom r) && !pr.bound.contains r && (pr.vars.lookup r).isNone then
       unknown := true
       unknownWr := unknownWr || w
     else
@@ -1868,12 +1886,14 @@ partial def atomsOf (t : ITy) (out : List Nat) : M (List Nat) := do
     for (_, targs) in row.ops do
       inner ← targs.foldlM (fun o f => atomsOf f o) inner
     for r in ← accSet acc do
-      if (← isAtom r) && !inner.contains r then inner := r :: inner
+      if ((← isAtom r) || (← isRank r)) && !inner.contains r then inner := r :: inner
     let binders ← bindersOf acc
     pure (inner.foldl (fun o r => if binders.contains r || o.contains r then o else r :: o) out)
   | .ref ρ t => do
     let r ← findRg ρ
-    atomsOf t (if (← isAtom r) && !out.contains r then r :: out else out)
+    -- (a region an enclosing callable's type binds is, to what is inside it,
+    -- a region like a cell's: one it has to be told)
+    atomsOf t (if ((← isAtom r) || (← isRank r)) && !out.contains r then r :: out else out)
   | .never => pure out
 
 /-- How one function writes its regions: in its signature, where a cell scope's
@@ -2006,6 +2026,8 @@ partial def ofTy (env : RgEnv) : Ty → M ITy
     -- A callable type that binds a region has a region of its own.
     let (env, binders) ← if n ≥ 1 && (← get).ranked then do
         let bs ← (List.range n).mapM fun _ => freshRg
+        for b in bs do
+          markRank b
         pure ({ env with bound := bs ++ env.bound }, bs)
       else pure (env, [])
     let ops ← eff.mapM fun (op, targs) => do pure (op, ← targs.mapM (ofTy env))

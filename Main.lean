@@ -230,7 +230,14 @@ def why (path : String) : IO UInt32 := do
         for e in cert.sigs do
           if let some F := out.program.fns[e.fn]? then
             unless Typing.checkFn cert e F do
-              IO.println s!"  {out.fnNames[e.fn]?.getD ""} (function {e.fn}): caps ({", ".intercalate (e.sig.caps.map Infer.showCoreTy)}) params ({", ".intercalate (e.sig.params.map Infer.showCoreTy)}) -> {Infer.showCoreTy e.sig.ret}; fixed {e.sig.crgns}, bound {e.sig.rgns}; touches [{", ".intercalate (e.sig.acc.map Infer.showRgn)}]"
+              IO.println s!"  {out.fnNames[e.fn]?.getD ""} (function {e.fn}): {Infer.showSig e.sig}"
+              for hs in e.hints do
+                for h in hs do
+                  IO.println (match h with
+                    | .ty σ => s!"    : {Infer.showCoreTy σ}"
+                    | .clo σ θ => s!"    closure {Infer.showCoreTy σ} at [{", ".intercalate (θ.map Infer.showRgn)}]"
+                    | .handler _ _ _ _ => "    handler"
+                    | .rgns rs => s!"    call at [{", ".intercalate (rs.map Infer.showRgn)}]")
     | .error e => IO.println s!"lends={lends}: no certificate: {e}"
   pure 0
 
