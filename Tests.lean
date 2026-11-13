@@ -207,6 +207,8 @@ def notTail (n : Nat) : String :=
 -- reference to its own variable, or two.
 #guard borrowChecked "fn go(r, n) { let mut y = n; if(0 < n) { go(&mut y, n - 1) + *r } else { *r } }
   fn main() { let mut t = 5; go(&mut t, 3) }" == some true
+#guard borrowChecked "fn go(r: &Int, n: Int) -> Int { if(0 < n) { let mut y = n; go(&y, n - 1) } else { *r } }
+  fn main() { let mut t = 5; go(&t, 3) }" == some true
 #guard borrowChecked "fn apply(f: for<'a> fn(&'a Int) -> Int) -> Int { let mut x = 1; let mut y = 2; f(&x) + f(&y) }
   fn main() { apply({ r => *r + 1 }) }" == some true
 #guard borrowChecked "fn both(f: for<'a, 'b> fn(&'a Int, &'b Int) -> Int) -> Int { let mut x = 3; let mut y = 4; f(&x, &y) }

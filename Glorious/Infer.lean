@@ -1086,6 +1086,8 @@ partial def tryCall (c : Call) : M Bool := do
           match ← find p, ← find g with
           | .var _, .ref ρ _ => if chosen.isNone then chosen := some (p, g, ρ)
           | .var _, .var _ => unknown := true
+          -- (what it is given there may yet be a reference to a cell)
+          | .ref _ _, .var _ => unknown := true
           | _, _ => pure ()
       match chosen with
       | some (p, g, region) =>

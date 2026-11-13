@@ -961,6 +961,11 @@ the region differs at each depth, has a type that binds the region: a
 function inside one whose type binds a region is told which region that is,
 as it is told which cell.
 
+A call whose callable takes a reference waits until what it is given there
+is known: it may be a reference to a cell, and then the callable's type binds
+the region. Before, the variable in a block of the function was taken to be
+the one cell the function's parameter could point to.
+
 Limits. Such a function is shown to follow the rules with its borrows as the
 references they borrow, not as scopes of their own.
 

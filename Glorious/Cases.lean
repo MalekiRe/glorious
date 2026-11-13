@@ -1933,6 +1933,11 @@ def cases : List Case := [
   -- A callable given two references: its type binds both regions.
   ⟨"fn both(f: for<'a, 'b> fn(&'a Int, &'b Int) -> Int) -> Int { let mut x = 3; let mut y = 4; f(&x, &y) }\nfn main() { both(fn(a, b) { *a * 10 + *b }) }",
     [], "34"⟩,
+  -- A function that calls itself with a reference to a variable of a block of its own.
+  ⟨"fn go(r, n) { if(0 < n) { let mut y = n; go(&mut y, n - 1) } else { *r } }\nfn main() { let mut t = 5; go(&mut t, 3) }",
+    [], "1"⟩,
+  ⟨"fn go(r: &Int, n: Int) -> Int { if(0 < n) { let mut y = n; go(&y, n - 1) } else { *r } }\nfn main() { let mut t = 5; go(&t, 3) }",
+    [], "1"⟩,
   -- `drop` is not for a program to call.
   ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nfn main() { let mut f = File(7); drop(&mut f); 0 }",
     [], "error: 3:34: in `main`: `drop` is run when what holds a value ends; a program does not call it"⟩,
