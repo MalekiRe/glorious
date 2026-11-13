@@ -81,7 +81,12 @@ structure TraitInfo where
   impls : List ImplE := []
   /-- Where a value whose type has `Drop` is destroyed, each with the identity
   under which `dicts` says which implementation runs. -/
-  drops : List (DropSite × Nat) := []
+  drops : List (DropSite × String) := []
+  /-- How a value of each type that is destroyed somewhere is destroyed, by
+  the type as written: the identity under which `dicts` says which `Drop`
+  runs first, if the type has one, and then for each constructor (the empty
+  name for a tuple) which fields are destroyed in turn, each by its type. -/
+  glue : List (String × Option Nat × List (String × List (Option String))) := []
 
 /-- The function that makes an implementation a value. -/
 def implDictName (trait head : String) : String := s!"impl {trait} for {head}"
@@ -1447,12 +1452,38 @@ def staticMethod (tr : TraitInfo) (d : DictE) (idx : Nat) : Option (String × Li
 /-- The call that destroys what `x` holds, if this is a place where that
 happens: `Drop`'s function, given the variable. -/
 private def dropHook (tr : TraitInfo) (site : DropSite) : Option Expr :=
-  match tr.drops.lookup site with
-  | some id =>
-    match tr.dicts.lookup id with
-    | some [d] => some (.call dropCallId (.proj (dictExpr d) 0) [.ref true site.name])
-    | _ => none
-  | none => none
+  (tr.drops.lookup site).map fun key =>
+    .call dropCallId (.name none s!"%destroy {key}") [.name none site.name]
+
+/-- The functions that destroy values, one for each type that is destroyed
+somewhere: `Drop`'s function for the type first, if it has one, and then each
+field that is to be destroyed, the last declared first. -/
+def destroyers (tr : TraitInfo) : List Item :=
+  tr.glue.flatMap fun (key, hook, ctors) =>
+    let unit := Expr.tuple []
+    let clauses := ctors.map fun (ctor, parts) =>
+      let names := (List.range parts.length).map fun k => s!"%part{k}"
+      let pats := (names.zip parts).map fun (x, part) =>
+        if part.isSome then Pattern.var x else Pattern.wild
+      let calls := ((names.zip parts).reverse.filterMap fun (x, part) =>
+        part.map fun key' =>
+          Stmt.expr (.call dropCallId (.name none ("%destroy " ++ key')) [.name none x]))
+      Clause.mk [if ctor.isEmpty then .tuple pats else .ctor ctor none pats] (calls ++ [.expr unit])
+    let inner := ctors.any fun (_, parts) => parts.any (·.isSome)
+    match hook.bind fun id => tr.dicts.lookup id with
+    | some [d] =>
+      let fn := match staticMethod tr d 0 with
+        | some (fn, subs) => fun (args : List Expr) =>
+          Expr.call dropCallId (.name none fn) (subs.map dictExpr ++ args)
+        | none => fun args => Expr.call dropCallId (.proj (dictExpr d) 0) args
+      let fields := s!"%fields {key}"
+      [Item.fn s!"%destroy {key}" [] [none] none
+          [.mk [.var "%value"]
+            ([.letMut "%held" (.name none "%value"), .expr (fn [.ref true "%held"])]
+              ++ (if inner then [.expr (.call dropCallId (.name none fields) [.name none "%held"])]
+                  else [.expr unit]))]]
+        ++ (if inner then [Item.fn fields [] [none] none clauses] else [])
+    | _ => [Item.fn s!"%destroy {key}" [] [none] none clauses]
 
 mutual
 
@@ -1511,7 +1542,7 @@ private partial def untraitStmts (tr : TraitInfo) (owner : String) (pos : Nat ×
     match pat with
     | .var x =>
       match dropHook tr ⟨owner, pos.1, pos.2, x, false⟩ with
-      | some hook => .letMut x value :: .defer hook :: rest
+      | some hook => .let_ pat value :: .defer hook :: rest
       | none => .let_ pat value :: rest
     | _ => .let_ pat value :: rest
   | .assign target value :: rest =>
@@ -1562,6 +1593,7 @@ def untrait (blocks : Blocks) (items : List Item) : List Item × Blocks :=
       own ++ [Item.fn dictFn [] [] none [.mk (dicts.map Pattern.var) [.expr (.tuple closures)]]]
     | .fn name params annots ret clauses => [fnItem name params annots ret clauses]
     | item => [item]
+  let out := out ++ destroyers tr
   let coercions := blocks.coercions.map fun (site, fn) =>
     match site with
     | .arg call index =>

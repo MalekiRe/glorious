@@ -943,7 +943,7 @@ def cases : List Case := [
   ⟨"struct Ticket(Int)\nimpl Use<[0, 1]> for Ticket {}\nstruct Box(Ticket)\nimpl Use<[0, infinity]> for Box {}\nfn main() { 0 }",
     [], "error: `impl Use` for `Box`: it holds a value that can be used only once, so the most uses of a `Box` cannot be `infinity`"⟩,
   ⟨"struct Ticket(Int)\nimpl Use<[2, 3]> for Ticket {}\nfn main() { 5 }",
-    [], "error: `impl Use` for `Ticket`: the fewest uses can be 0 or 1 and the most 1 or `infinity`; other bounds are not counted yet"⟩,
+    [], "error: `impl Use` for `Ticket`: a type is used any number of times (`[0, infinity]`), at most once (`[0, 1]`) or exactly once (`[1, 1]`); the language has no other count"⟩,
   -- An operation says how often its resumption is used: `[1, 1]` has to be
   -- resumed or cancelled, on every path. Unsaid, it may be let go, and is then
   -- cancelled.
@@ -1791,6 +1791,20 @@ def cases : List Case := [
     [], "error: in `seq`: `b` run in the environment `E2`, which is used up by the first that is called: on some path more than one call is made"⟩,
   ⟨"fn jump<L>(out: L) -> Int where L: Label<Int> { out(5); 0 }\nfn main() { @done { jump(@done) + 1 } }",
     [], "5"⟩,
+  -- A value is destroyed part by part: `Drop`'s function for its type first,
+  -- then its fields, the last declared first, whatever holds them.
+  ⟨"struct File(Int)\nimpl Drop for File { fn drop(f) { let File(n) = *f; print(n) } }\nstruct Pair(File, File)\nfn main() { let p = Pair(File(1), File(2)); let q = (File(3), 4, Some(File(5))); 0 }",
+    [], "5\n3\n2\n1\n0"⟩,
+  ⟨"struct File(Int)\nimpl Drop for File { fn drop(f) { let File(n) = *f; print(n) } }\nenum List { Nil, Cons(File, List) }\nfn main() { let mut l = Cons(File(1), Cons(File(2), Nil)); l = Nil; print(9); let m = Cons(File(7), Nil); 0 }",
+    [], "2\n1\n9\n7\n0"⟩,
+  ⟨"struct File(Int)\nimpl Drop for File { fn drop(f) { let File(n) = *f; print(n) } }\nstruct Dir(Int, File)\nimpl Drop for Dir { fn drop(d) { print((*d).0) } }\nfn main() { let d = Dir(10, File(11)); let e = [File(20), File(21)]; 0 }",
+    [], "21\n20\n10\n11\n0"⟩,
+  ⟨"struct T(Int)\nimpl Use<[1, 1]> for T {}\nimpl Drop for T { fn drop(t) { () } }\nfn main() { let T(n) = T(1); n }",
+    [], "error: `impl Drop for T`: a `T` has to be used, so one is never destroyed, and `drop` would never run"⟩,
+  ⟨"mod fs { pub struct File(pub Int) impl Drop for File { fn drop(f) { print((*f).0) } } pub fn open(n: Int) -> File { File(n) } pub fn close(f: File) -> Int { let File(n) = f; n } }\nuse fs::{File, open, close};\nfn main() { let f = open(3); let File(n) = open(4); n }",
+    [], "error: 3:30: in `main`: `File` has `Drop`, so only the module that declares it can take one apart with a pattern: what `drop` does would not be done"⟩,
+  ⟨"mod fs { pub struct File(pub Int) impl Drop for File { fn drop(f) { print((*f).0) } } pub fn open(n: Int) -> File { File(n) } pub fn close(f: File) -> Int { let File(n) = f; n } }\nuse fs::{File, open, close};\nfn main() { let f = open(3); let g = open(4); close(open(5)) }",
+    [], "4\n3\n5"⟩,
   -- `drop` is not for a program to call.
   ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nfn main() { let mut f = File(7); drop(&mut f); 0 }",
     [], "error: 3:34: in `main`: `drop` is run when what holds a value ends; a program does not call it"⟩,

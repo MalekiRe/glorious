@@ -723,6 +723,15 @@ partial def inferPat (p : Pattern) (t : Ty) : M Scope := do
       let (fields, result) ← instCtor sig
       unless fields.length == ps.length do arityError s!"constructor `{x}`" fields.length ps.length
       unifyAt s!"the pattern `{x}(..)`" result t
+      -- A type with `Drop` is taken apart only by the module that declares
+      -- it: anywhere else its function would not have run.
+      if let .con n _ := result then
+        let s ← get
+        if !ps.isEmpty && s.kimpls.any (fun I => I.trait == "Drop" && I.head == n) then
+          if let some here := s.modules.homes.lookup s.owner then
+            let home := "::".intercalate ((n.splitOn "::").dropLast)
+            unless here == home do
+              throw s!"`{Syntax.lastSegment n}` has `Drop`, so only the module that declares it can take one apart with a pattern: what `drop` does would not be done"
       inferPats ps fields
     | none => throw s!"unknown constructor `{x}` in a pattern"
 

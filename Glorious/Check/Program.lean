@@ -101,6 +101,63 @@ def partsOf (t : Ty) : M (List Ty) := do
         | some sig => pure (sig.fieldsAt args)
   | _ => pure []
 
+/-- Is there anything to do when a value of this type is destroyed: is it, or
+does it hold, a value of a type with `Drop`? A type being asked about above
+holds nothing more than was seen on the way. -/
+partial def needsDestroying (seen : List String) (t : Ty) : M Bool := do
+  match ← find t with
+  | .tuple args => args.anyM (needsDestroying seen)
+  | .con name args =>
+    if (← get).kimpls.any fun I => I.trait == "Drop" && I.head == name then return true
+    let key ← spellTy (.con name args)
+    if seen.contains key then return false
+    (← partsOf (.con name args)).anyM (needsDestroying (key :: seen))
+  | _ => pure false
+
+/-- How a value of this type is destroyed, written down once for each type,
+under the type as written; and the `Drop`s that then have to be found. -/
+partial def destroyPlan (owner pos : String) (t : Ty) : M (String × Array Bound) := do
+  let t ← zonk t
+  let key ← spellTy t
+  if (← get).glue.any (·.1 == key) then return (key, #[])
+  -- Said first, so that a type that holds itself finds itself.
+  modify fun s => { s with glue := s.glue.push (key, none, []) }
+  let mut asked : Array Bound := #[]
+  let mut hook : Option Nat := none
+  let part := fun (field : Ty) => do
+    if ← needsDestroying [] field then
+      let (k, more) ← destroyPlan owner pos field
+      pure (some k, more)
+    else pure (none, #[])
+  let mut ctors : List (String × List (Option String)) := []
+  match t with
+  | .tuple args =>
+    let mut parts : List (Option String) := []
+    for a in args do
+      let (p, more) ← part a
+      parts := parts ++ [p]
+      asked := asked ++ more
+    ctors := [("", parts)]
+  | .con name args =>
+    if (← get).kimpls.any fun I => I.trait == "Drop" && I.head == name then
+      let id := 2000000000 + (← get).dropAsked
+      modify fun s => { s with dropAsked := s.dropAsked + 1 }
+      asked := asked.push ⟨"Drop", t, id, 0, owner, pos⟩
+      hook := some id
+    if let some decl := (← get).types.lookup name then
+      for c in decl.ctors do
+        if let some sig := (← get).ctors.lookup c then
+          let mut parts : List (Option String) := []
+          for a in sig.fieldsAt args do
+            let (p, more) ← part a
+            parts := parts ++ [p]
+            asked := asked ++ more
+          ctors := ctors ++ [(c, parts)]
+  | _ => pure ()
+  modify fun s =>
+    { s with glue := s.glue.map fun entry => if entry.1 == key then (key, hook, ctors) else entry }
+  pure (key, asked)
+
 /-- Meet the bounds of the group just inferred, and give each of its functions
 its type. A bound on a type the function is generic in becomes something the
 function is given; every other is met by `Traits.solve`. -/
@@ -112,11 +169,10 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
   -- A variable whose value's type has `Drop` needs the implementation, to run
   -- its function when the value is destroyed.
   for (site, ty, pos) in cands do
-    if let .con n _ ← find ty then
-      if (← get).kimpls.any fun I => I.trait == "Drop" && I.head == n then
-        let id := 2000000000 + (← get).dropSites.size
-        pending := pending.push ⟨"Drop", ty, id, 0, site.owner, pos⟩
-        modify fun s => { s with dropSites := s.dropSites.push (site, id) }
+    if ← needsDestroying [] ty then
+      let (key, asked) ← destroyPlan site.owner pos ty
+      pending := pending ++ asked
+      modify fun s => { s with dropSites := s.dropSites.push (site, key) }
   -- What is gone through to reach each borrowed field, for the elaborator.
   let sites := (← get).fieldSites
   modify fun s => { s with fieldSites := #[] }
@@ -300,6 +356,8 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
 /-- What a type says of its own uses may only narrow what its fields allow. -/
 def checkUseDecls : M Unit := do
   for (head, must, once) in (← get).useDecls do
+    if must && (← get).kimpls.any (fun I => I.trait == "Drop" && I.head == head) then
+      throw s!"`impl Drop for {Syntax.lastSegment head}`: a `{Syntax.lastSegment head}` has to be used, so one is never destroyed, and `drop` would never run"
     let arity := (((← get).types.lookup head).map (·.arity)).getD 0
     let args ← (List.range arity).mapM fun _ => freshTy
     for part in ← partsOf (.con head args) do
@@ -702,7 +760,7 @@ def checkProgram (items : List Item) (modules : Syntax.ModuleInfo := {}) :
         (Syntax.implFnName im.trait im.head m, ((s.methods.lookup m).map (·.params.length)).getD 0)⟩ :
         Elab.ImplE)
     pure ⟨s.given.toList, links ++ s.envLinks.toList, s.coercions.toList,
-      ⟨s.dictTable.toList, s.methodCalls.toList, s.fnBounds, implEs, s.dropSites.toList⟩,
+      ⟨s.dictTable.toList, s.methodCalls.toList, s.fnBounds, implEs, s.dropSites.toList, s.glue.toList⟩,
       s.fieldTable.toList, s.fieldReads.toList, s.packs.toList, s.envFns, s.envWraps.toList,
       s.derefReads.toList⟩
   let (blocks, _) ← action.run {}

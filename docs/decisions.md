@@ -1333,8 +1333,17 @@ removes traits; Core is told nothing new.
 
 What it is not:
 
-- **It is the hook only.** A type without `Drop` that holds one with it is not
-  taken apart when it is destroyed.
+- **Since: a value is destroyed part by part.** `Drop`'s function for its
+  type runs first, if it has one, and then each field that is, or holds, a
+  value of a type with `Drop` is destroyed, the last declared first: so a
+  pair, a `struct`, an `Option` or an array of such values is taken apart
+  where it is destroyed. The checker writes down, once for each type that is
+  destroyed somewhere, how; the elaborator makes a function of it. A part
+  whose type the function is generic in is still not destroyed.
+- **Since: as the specification has it (7.6, L23)**, a type that has to be
+  used cannot have `Drop`, and a value of a type with `Drop` is taken apart
+  by a pattern only in the module that declares the type, which stands in
+  for the specification's unsafe code there.
 - **A value that never comes to rest in a variable is not destroyed.** One
   given to a function that ignores it, one a function generic in its type puts
   in a variable, one put in a value that is forgotten, the unused result of a
@@ -1396,7 +1405,13 @@ operation says `[1, 1]` where it matters.
 How this differs from the specification:
 
 - Counting stops at one. `[2, 3]`, `[0, 0]` and the like are refused.
-- There is no `destroy`, as said above, and no destruction of fields in order.
+- A type's count is one of the specification's three (7.1, D19): any number,
+  at most one, exactly one. A count such as `[2, 3]` is not something left to
+  build: the language does not have it. Of a resumption the specification
+  also admits exactly `n` uses for `n` above one; that needs a machine that
+  can resume a computation twice, which Core's cannot (it takes the
+  computation out of the store when it resumes it), and is not built.
+- There is no `destroy`, as said above.
   Taking a value apart by a pattern does not run its `drop`. Since a value
   that has to be used cannot be let go, and letting go is the only thing that
   runs `drop`, a `drop` on such a type never runs.

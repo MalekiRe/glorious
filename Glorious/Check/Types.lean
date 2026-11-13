@@ -497,7 +497,11 @@ structure St where
   /-- Variables whose value is destroyed if its type turns out to have `Drop`:
   the place, the type, and where to report a failure. -/
   dropCands : Array (Elab.DropSite × Ty × String) := #[]
-  dropSites : Array (Elab.DropSite × Nat) := #[]
+  dropSites : Array (Elab.DropSite × String) := #[]
+  /-- How each type that is destroyed somewhere is destroyed (`TraitInfo.glue`). -/
+  glue : Array (String × Option Nat × List (String × List (Option String))) := #[]
+  /-- How many `Drop`s have been asked for, to name each. -/
+  dropAsked : Nat := 0
   /-- How each call's bounds are met, for the elaborator. -/
   dictTable : Array (Nat × List Elab.DictE) := #[]
   methodCalls : Array (Nat × Nat) := #[]
