@@ -466,6 +466,16 @@ where
   lower (info : List (String × Nat × Nat)) (v : String) (bound : Nat) : List (String × Nat × Nat) :=
     info.map fun (n, idx, low) => if n == v then (n, idx, min low bound) else (n, idx, low)
 
+/-- The lifetime of each reference a written type has in it, none where it is
+not written; not looking inside a callable's type, which has lifetimes of its
+own. -/
+partial def refLives : TypeExpr → List (Option String)
+  | .ref _ t life => life :: refLives t
+  | .name x args => if x == Syntax.rankedMark then [] else args.flatMap refLives
+  | .tuple args => args.flatMap refLives
+  | .performs r _ => refLives r
+  | _ => []
+
 /-- Infer one group of mutually recursive functions and generalise their types. -/
 def checkGroup (decls : List FnDecl) : M Unit := do
   let mut group : List (String × Ty) := []
@@ -643,6 +653,15 @@ def checkGroup (decls : List FnDecl) : M Unit := do
             unless environments.contains e do
               throw s!"`{b.subject}: RunsIn<{e}, ..>`: `{e}` is not said to be an environment (`{e}: Environment<'e>`)"
           | none => throw s!"`{b.subject}: RunsIn<..>`: the environment is `E`, `&E` or `&mut E`"
+      -- A reference given back with no lifetime written lasts as long as
+      -- the one reference the function is given; with several to choose
+      -- from, which one is written (9.2).
+      if d.annots.all Option.isSome then
+        if let some ret := d.ret then
+          let given := d.annots.flatMap fun a => (a.map refLives).getD []
+          let candidates := (given.filterMap id).eraseDups.length + (given.filter Option.isNone).length
+          if (refLives ret).any Option.isNone && candidates ≥ 2 then
+            throw "it gives back a reference and is given more than one: say which the result lasts as long as, `fn f<'a>(x: &'a T, y: &U) -> &'a T`"
       modify fun s => { s with rigidParams := rigid }
       -- `T: Trait<Item = Type>`: the type the trait leaves to `T`'s
       -- implementation is that one, in the body and for whoever calls.

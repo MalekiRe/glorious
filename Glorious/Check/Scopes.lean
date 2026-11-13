@@ -196,6 +196,16 @@ def runPending : M Unit := do
     let rows ← p.rows.mapM (·.mapM normPat)
     unless ← exhaustive p.tys rows do
       throw s!"{p.pos}{p.what} not cover every case"
+    -- A clause that tests for something the clauses before it have already
+    -- taken every case of is never reached (6.2). One that takes whatever
+    -- is left is not said to be: the compiler writes such clauses itself.
+    for i in [1:rows.length] do
+      let tests := (rows.getD i []).any fun
+        | .any => false
+        | _ => true
+      if tests then
+        if ← exhaustive p.tys (rows.take i) then
+          throw s!"{p.pos}clause {i + 1} is never reached: the clauses before it take every case"
 
 /-! ## Scopes that values cannot outlive
 

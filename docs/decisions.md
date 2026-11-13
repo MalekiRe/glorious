@@ -1102,6 +1102,16 @@ as the text says:
 - what is unsafe, named in a callable written inside `unsafe { .. }`: the
   callable runs later, and `unsafe` is written again inside it.
 
+Since:
+
+- a clause that tests for something the clauses before it have already taken
+  every case of (6.2). A clause that takes whatever is left is not said to
+  be unreached, since the compiler writes such clauses itself;
+- a function with every parameter's type written that gives back a reference
+  with no lifetime written and is given more than one reference: which the
+  result lasts as long as has to be said (9.2). With a parameter's type
+  left out it is found, as before.
+
 A byte-order mark at the start of a text is skipped.
 
 ## Scalars are integers the checker tells apart
