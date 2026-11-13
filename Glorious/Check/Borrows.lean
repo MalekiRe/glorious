@@ -96,7 +96,15 @@ partial def capHoldsLoan (loan : Nat) (cap : Nat) (suspended : Bool := false)
       match what with
       | .loan l => if l == loan then return true
       | .inner l => if suspended && l == loan then return true
-      | .ty t => if ← tyHoldsLoan loan t suspended plain then return true
+      | .ty t =>
+        -- What a function gives back at a lifetime it declares is not
+        -- thereby held by everything else of that lifetime: a parameter
+        -- holds what it was given, and what is put into it.
+        let given := match t with
+          | .ref (.con "'given" []) (.tuple []) _ => true
+          | _ => false
+        if !given then
+          if ← tyHoldsLoan loan t suspended plain then return true
       | .brand b => if ← cellHoldsLoan loan b suspended plain then return true
       | .touch b _ => if ← cellHoldsLoan loan b suspended plain then return true
       | .once => pure ()
@@ -629,7 +637,16 @@ def outlivesReq (long short : Nat) : M Unit := do
   | some x, some y =>
     unless ← outlasts rl rs do
       throw s!"lifetime `{x}` is not known to last as long as `{y}`: say `{x}: {y}`"
-  | _, _ => captures short (.ty (Ty.life long))
+  | some _, none =>
+    -- (`short` is the declared one here only where `long` is not.)
+    captures short (.ty (Ty.life long))
+  | none, some _ =>
+    -- What the body of a function ends with, given at a lifetime the
+    -- function declares: marked, so that it is not counted as held by the
+    -- function's other values of that lifetime.
+    if s.givingBack then captures short (.ty (.ref (.con "'given" []) (.tuple []) long))
+    else captures short (.ty (Ty.life long))
+  | none, none => captures short (.ty (Ty.life long))
 
 /-- Relate the lifetime wanted and the lifetime given, at a position that
 depends on it as `pos` says. -/

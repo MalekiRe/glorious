@@ -745,7 +745,11 @@ partial def inferStmts (scope : Scope) (amb : Row) (stmts : List Stmt)
     | none => pure t
     | some (expected, site) =>
       let site := if convertible then site else none
-      match ← fitAt scope amb "the result of a clause" site expected t with
+      let before := (← get).givingBack
+      modify fun s => { s with givingBack := true }
+      let fitted ← fitAt scope amb "the result of a clause" site expected t
+      modify fun s => { s with givingBack := before }
+      match fitted with
       | none => pure expected
       | some e => throw (resultMark ++ e) : M Ty)
   match stmts with

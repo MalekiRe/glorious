@@ -328,6 +328,9 @@ structure St where
   /-- The lifetimes the function being checked declares: each stands for
   itself there, and is no other. With its name. -/
   rigidCaps : List (Nat × String) := []
+  /-- Whether what is being fitted is what a body ends with, to the type the
+  body is to give. -/
+  givingBack : Bool := false
   /-- The bounds written between them: the first lasts at least as long as
   the second. -/
   outlives : List (Nat × Nat) := []

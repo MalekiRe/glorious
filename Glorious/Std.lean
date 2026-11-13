@@ -74,6 +74,17 @@ pub fn zip(a, b) {
 pub fn ok_or(o, error) { match(o) { Some(x) => Ok(x), None => Err(error) } }
 
 pub fn fold(o, init, f) { match(o) { Some(x) => f(init, x), None => init } }
+
+// What is there, where it is: looked at or changed without being taken.
+pub fn as_ref<'a, T>(o: &'a Option<T>) -> Option<&'a T> {
+    match(o) { &Some(x) => Some(x), &None => None }
+}
+pub fn as_mut<'a, T>(o: &'a mut Option<T>) -> Option<&'a mut T> {
+    match(o) { &mut Some(x) => Some(x), &mut None => None }
+}
+
+// What is there, taken; nothing is left.
+pub fn take<T>(o: &mut Option<T>) -> Option<T> { replace(o, None) }
 "#
 
 private def resultText : String := r#"// `Result<T, E>`: `Ok(value)` or `Err(error)`.
@@ -98,6 +109,14 @@ pub fn ok(r) { match(r) { Ok(x) => Some(x), Err(_) => None } }
 
 // The failure, if it failed.
 pub fn err(r) { match(r) { Ok(_) => None, Err(e) => Some(e) } }
+
+// What succeeded or failed, where it is.
+pub fn as_ref<'a, T, E>(r: &'a Result<T, E>) -> Result<&'a T, &'a E> {
+    match(r) { &Ok(x) => Ok(x), &Err(e) => Err(e) }
+}
+pub fn as_mut<'a, T, E>(r: &'a mut Result<T, E>) -> Result<&'a mut T, &'a mut E> {
+    match(r) { &mut Ok(x) => Ok(x), &mut Err(e) => Err(e) }
+}
 "#
 
 private def cmpText : String := r#"// Putting values in order.
@@ -699,6 +718,34 @@ fn look(n, key) {
 
 // What `key` stands for.
 pub fn get(m, key) { match(m) { Map(n) => look(n, key) } }
+
+// What a key stands for, where it is in the tree.
+fn look_ref<'a, K, V>(n: &'a Node<K, V>, key: K) -> Option<&'a V> where K: Ord {
+    match(n) {
+        &Leaf => None,
+        &Branch(l, k, v, r, _) =>
+            if(key < *k) { tail look_ref(l, key) }
+            else { if(*k < key) { tail look_ref(r, key) } else { Some(v) } }
+    }
+}
+
+fn look_mut<'a, K, V>(n: &'a mut Node<K, V>, key: K) -> Option<&'a mut V> where K: Ord {
+    match(n) {
+        &mut Leaf => None,
+        &mut Branch(l, k, v, r, _) =>
+            if(key < *k) { tail look_mut(l, key) }
+            else { if(*k < key) { tail look_mut(r, key) } else { Some(v) } }
+    }
+}
+
+// The same map looked into and changed where it is, in the shape the library
+// specification gives its maps (17).
+impl<K, V> Map<K, V> {
+    pub fn get_ref<'a>(m: &'a Self, key: K) -> Option<&'a V> where K: Ord { look_ref(&m.0, key) }
+    pub fn get_mut<'a>(m: &'a mut Self, key: K) -> Option<&'a mut V> where K: Ord {
+        look_mut(&mut m.0, key)
+    }
+}
 
 pub fn contains_key(m, key) { match(get(m, key)) { Some(_) => true, None => false } }
 
@@ -1673,6 +1720,14 @@ fn slot_of<'a, K, V>(bucket: &'a [(K, V)], key: K, i: Int) -> Option<&'a V> wher
     }
 }
 
+// Where in a bucket a key is, or a place that is not there.
+fn place_of<K, V>(bucket: &[(K, V)], key: K, i: Int) -> Int where K: Eq {
+    match(element(bucket, i)) {
+        Some(pair) => if(pair.0 == key) { i } else { tail place_of(bucket, key, i + 1) },
+        None => 0 - 1
+    }
+}
+
 impl<K, V> HashMap<K, V> {
     // How many keys.
     pub fn count(value: &Self) -> Int { value.1 }
@@ -1686,6 +1741,20 @@ impl<K, V> HashMap<K, V> {
     }
     pub fn has(value: &Self, key: K) -> Bool where K: Hash, K: Eq {
         match(HashMap::get_ref(value, key)) { Some(_) => true, None => false }
+    }
+    // What a key stands for, to change where it is.
+    pub fn get_mut<'a>(value: &'a mut Self, key: K) -> Option<&'a mut V> where K: Hash, K: Eq {
+        let buckets = &mut value.0;
+        let n = len_at(&*buckets);
+        match(element_mut(buckets, int_rem(hash(key), n))) {
+            Some(bucket) =>
+                let i = place_of(&*bucket, key, 0);
+                match(element_mut(bucket, i)) {
+                    Some(pair) => Some(&mut pair.1),
+                    None => None
+                },
+            None => None
+        }
     }
     // The key standing for the item from now on.
     pub fn set(value: &mut Self, key: K, item: V) where K: Hash, K: Eq {

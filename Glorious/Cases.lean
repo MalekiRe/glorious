@@ -2623,6 +2623,30 @@ def cases : List Case := [
   -- And to a value inside a tree, found by going down it.
   ⟨"enum Tree { Leaf, Node(Tree, Int, Tree) }\nfn leftmost(t: &mut Tree) -> Option<&mut Int> {\n    match(t) {\n        &mut Leaf => None,\n        &mut Node(l, v, r) => match(leftmost(l)) { Some(found) => Some(found), None => Some(v) }\n    } }\nfn main() -> Int {\n    let mut t = Node(Node(Leaf, 2, Leaf), 5, Leaf);\n    match(leftmost(&mut t)) { Some(v) => *v = 9;, None => () };\n    match(t) { Leaf => 0, Node(l, v, r) => match(l) { Leaf => v, Node(a, w, b) => w * 10 + v } } }",
     [], "95"⟩,
+  -- A declared lifetime on a `&mut` gone through by a pattern: what is given back at it is not held by the function's other values of that lifetime.
+  ⟨"struct P { x: Int, y: Int }\nfn gx<'a>(p: &'a mut P) -> &'a mut Int { match(p) { &mut P { x, y } => x } }\nfn main() -> Int { let mut p = P { x: 1, y: 2 }; let r = gx(&mut p); *r = 7; p.x }",
+    [], "7"⟩,
+  ⟨"fn inner<'a>(o: &'a mut Option<Int>) -> Option<&'a mut Int> { match(o) { &mut Some(x) => Some(x), &mut None => None } }\nfn main() -> Int { let mut a = Some(4); match(inner(&mut a)) { Some(r) => *r = 5;, None => () }; match(a) { Some(n) => n, None => 0 } }",
+    [], "5"⟩,
+  ⟨"struct P { x: Int, y: Int }\nfn pick<'a>(p: &'a mut P, c: Bool) -> &'a mut Int { if(c) { let x = &mut p.x; x } else { &mut p.y } }\nfn main() -> Int { let mut p = P { x: 1, y: 2 }; let r = pick(&mut p, true); *r = 7; p.x }",
+    [], "7"⟩,
+  -- Still refused: the reference is used while what was borrowed from it is.
+  ⟨"struct P { x: Int, y: Int }\nfn gx<'a>(p: &'a mut P) -> &'a mut Int { let x = &mut p.x; p.x = 3; x }\nfn main() -> Int { let mut p = P { x: 1, y: 2 }; let r = gx(&mut p); *r = 7; p.x }",
+    [], "error: 2:60: in `gx`: `p` is used while `x`, which borrows from it, is still in use"⟩,
+  ⟨"struct P { x: Int, y: Int }\nfn two<'a>(p: &'a mut P) -> (&'a mut Int, &'a mut Int) { let a = &mut p.x; let b = &mut p.x; (a, b) }\nfn main() -> Int { let mut p = P { x: 1, y: 2 }; match(two(&mut p)) { (a, b) => *a + *b } }",
+    [], "error: 2:76: in `two`: `p` is used while `a`, which borrows from it, is still in use"⟩,
+  -- What is there, where it is: `as_ref`, `as_mut`, `take`; and maps looked into and changed in place.
+  ⟨"use core::option::{as_ref, as_mut, take};\nfn main() -> Int {\n    let mut a = Some(4);\n    match(as_mut(&mut a)) { Some(r) => *r = *r * 2;, None => () };\n    let seen = match(as_ref(&a)) { Some(r) => *r, None => 0 };\n    let had = take(&mut a);\n    say(had); say(a);\n    seen }",
+    [], "Ok(8)\nErr(())\n8"⟩,
+  ⟨"use core::result::{as_mut};\nfn main() {\n    let mut r: Result<Int, Str> = Err(\"no\");\n    match(as_mut(&mut r)) { Ok(n) => *n = 1;, Err(e) => *e = \"changed\"; };\n    r }",
+    [], "Err(\"changed\")"⟩,
+  ⟨"use std::hash::{HashMap, new};\nfn main() -> Int {\n    let mut m = new();\n    HashMap::set(&mut m, \"a\", 1);\n    HashMap::set(&mut m, \"b\", 2);\n    match(HashMap::get_mut(&mut m, \"b\")) { Some(v) => *v = *v + 40;, None => () };\n    let missing = match(HashMap::get_mut(&mut m, \"zz\")) { Some(_) => 1, None => 0 };\n    match(HashMap::get_ref(&m, \"b\")) { Some(v) => *v + missing, None => 0 - 1 } }",
+    [], "42"⟩,
+  ⟨"use alloc::collections::map::{Map, new, insert};\nfn main() -> Int {\n    let mut m = insert(insert(insert(new(), 5, 50), 2, 20), 9, 90);\n    match(Map::get_mut(&mut m, 9)) { Some(v) => *v = *v + 1;, None => () };\n    let a = match(Map::get_ref(&m, 9)) { Some(v) => *v, None => 0 };\n    let b = match(Map::get_ref(&m, 7)) { Some(v) => *v, None => 0 - 1 };\n    a * 10 + b }",
+    [], "909"⟩,
+  -- An iterator by reference over a list a program declares.
+  ⟨"use core::iter::{Iterator, fold};\nenum List<T> { Nil, Cons(T, List<T>) }\nstruct Links<'a, T> { at: &'a List<T> }\nimpl<'a, T> Iterator for Links<'a, T> {\n    type Item = &'a T;\n    fn next(it) {\n        match(it.at) {\n            &Cons(x, rest) => it.at = rest; Some(x),\n            &Nil => None\n        }\n    }\n}\nfn main() -> Int {\n    let l = Cons(1, Cons(2, Cons(3, Nil)));\n    let mut it = Links { at: &l };\n    fold(&mut it, 0, { (acc, x) => acc * 10 + *x }) }",
+    [], "123"⟩,
   -- `drop` is not for a program to call.
   ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nfn main() { let mut f = File(7); drop(&mut f); 0 }",
     [], "error: 3:34: in `main`: `drop` is run when what holds a value ends; a program does not call it"⟩,

@@ -2176,6 +2176,18 @@ function that makes it" is gone.
   would stop, not read something of the wrong type.
 - **Through a variable that is not a reference** a field of one of several
   constructors is still taken out into a variable while the borrow lasts.
+- **A declared lifetime no longer gets in the way.** With
+  `fn f<'a>(p: &'a mut P) -> &'a mut Int`, what the body gave back at `'a`
+  was counted as held by every value of lifetime `'a`, `p` among them, so a
+  pattern through `p` or a second branch using `p` was refused with "`p` is
+  used while `p`, which borrows from it, is still in use". What a body ends
+  with, fitted to a declared lifetime, is now marked as given and not as
+  held. A value put into a variable or a place of that lifetime is still
+  held by all of them, which refuses more than it need: `let r: &'a mut Int
+  = &mut p.x` cannot be followed by any use of `p`.
+- In the library this gives `as_ref`, `as_mut` and `take` for options,
+  `as_ref` and `as_mut` for results, `HashMap::get_mut`, and `get_ref` and
+  `get_mut` for the ordered map, which goes down its tree by reference.
 - The Rust VM's path steps carry the constructor too; compiled code reads
   only references to whole cells in place and leaves the rest to the runtime,
   so the ABI's layout of values is as it was.
