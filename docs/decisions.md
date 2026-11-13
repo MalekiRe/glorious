@@ -2713,6 +2713,42 @@ from being an `Id<Block>`.
 - Not built: base64; `ByteReader::read_u128_le` is, the signed widths
   other than `read_i64_le` are not in the specification.
 
+## Constructors that share a name
+
+`enum Token { Plus, Minus }` and `enum Op { Plus, Minus }` in one module,
+or `struct Cycle` beside `GraphError::Cycle(Cycle)`, as the library
+specification itself has: a constructor was one name of its module, so the
+second took the first's place, and what came of it was a wrong message
+about a type holding itself. A constructor of an `enum` whose name another
+constructor of the module has is now named only with its type,
+`Token::Plus`, in expressions and in patterns; written alone, the message
+gives the ways to write it. A `struct` keeps its own name, and a
+constructor that shares its name with nothing is written as before.
+
+## Tasks
+
+`std::task` has the specification's task interface (30.4) as far as it
+goes without what is not built: `Task<T>`, a handle that has to be given
+to `join` or `cancel_task`; `Spawn<T>` and `TaskControl<T>`; `run_inline`,
+a provider that runs work where it is spawned; and `round_robin`, which
+runs coroutines a step at a time in turn (`yield_now` gives way).
+
+- **`Spawn<T>` has its type on the effect**, where the specification has it
+  on the operation, `spawn<T, ..>(F) -> Task<T>`: so the tasks spawned
+  under one provider make one type. **An operation cannot have type
+  parameters of its own.** The proved type system gives an operation one
+  type in each row of effects (`ε.lookup op = some targs`), and a handler's
+  arm is typed against that one. This was built in the checker, with the
+  arm checked for every type and its values kept from outliving it, and
+  taken out again when no certificate could be made for a program that
+  performed such an operation at two types. It is refused with what to
+  write instead.
+- **Spawned work performs nothing** (`fn() -> T / {}`): that is what lets
+  a provider call it and still be sure to answer, which its operations
+  promise (`[1, 1]`).
+- No futures, `await`, wake keys or `LinearTask`: `Await<F> where F:
+  Future` needs a condition on an effect's parameter that an arm can use.
+
 ## Functions that call each other, and their type parameters
 
 `fn size<T>(t: &Tree<T>)` and `fn sizes<T>(kids: &[Tree<T>], i: Int)`,
@@ -2770,10 +2806,8 @@ the parts never read are what is let go.
 - **`Graph::successors` gives an array**, not a slice borrowed from the
   graph, and the functions over a graph are written `N: Eq + Hash, G:
   Graph<Node = N>`: a condition cannot be put on `G::Node` itself.
-- **`GraphError::Cyclic`** where the specification has `Cycle`, which is
-  also the name of the type it holds: a constructor has one name in its
-  module, and two of one name are now refused as that (they were reported
-  as a type that holds itself).
+- `GraphError::Cycle` holds a `Cycle`, as specified: see "Constructors
+  that share a name".
 - The groups of `strongly_connected_components` come sinks first.
 - A source's text is kept as its bytes; `text` and `slice` give a `Str`
   made from them, and `line_range` a pair.
@@ -2987,6 +3021,22 @@ library does not have. Those that could be tried against what there is are
 kept among the cases under "Library conformance S..": S01 to S03, S07, S09,
 S12, S20, S31, S33, S36 and S53 are met as tried.
 
+With the modules added since, more of them have cases: S06 and S44 (a
+`Vec`, an arena and an undo log of values that have to be used, pushed,
+popped and taken back), S08 and S09 (both branches giving a borrowed
+variable away; one branch not), S14 (two callables with different rows
+given to one function), S42 (`Vec::insert` gives the item back), S67
+(`CStr` checks its zero, `to_str` its UTF-8), S70 and S71 (`ByteReader`),
+S72 to S74 (`Arena`, `GenArena`, `Interner`), S75 (`SourceMap`), S76
+(charges and permits), S77 and S78 (`attempt`, `many`), S79 (graphs under
+a step budget), S83 (`write_all`, `copy_stream`), S89 and S90 (`Yield`,
+`YieldOnce`), S93 (`cancel_task` gives what was made).
+
+Not tried, for want of the module: S60 to S62 (streaming hashes, BLAKE3,
+fingerprints), S64 (bounded diagnostics), S84 to S87 (buffered writers,
+files and children, paths, clocks by domain), S91, S92, S94, S95 (futures,
+`await`, linear tasks, poll contexts).
+
 - **S02** was not: `true` and `false` were names for `Ok(())` and `Err(())`
   at any error type, so `true` could be given where a `Result<(), Str>` was
   wanted. They are now written with their type, `Result<(), ()>`, as the
@@ -2998,9 +3048,10 @@ S12, S20, S31, S33, S36 and S53 are met as tried.
 - **S44.** `pop` used its array twice, once to ask its length, so an array
   of values that have to be used could not be emptied. It now takes the
   array apart by pattern, and asking an array's length is no longer counted
-  as a use of it, since nothing is taken. A `Vec` of such values in a
-  mutable variable still needs that variable's rule: a `defer` straight
-  after it that swaps in a value written out, which a `Vec` has none of.
+  as a use of it, since nothing is taken. (A `Vec` of such values in a
+  mutable variable could then still not be given away once it had been
+  pushed to; see "Written, then given away" and "Collections of what has
+  to be used".)
 - **S06.** `replace` asks nothing of the type, and neither does `swap`,
   which the compiler knows as it knows `replace`: it is a read of the second
   place, an exchange with the first, and a write to the second. Core's rule

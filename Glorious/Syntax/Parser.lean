@@ -1423,6 +1423,10 @@ private partial def parseItem : P Item := do
       if (← peek) == .punct "}" then break
       let quantity ← if (← peek) == .punct "[" then some <$> parseQuantity else pure none
       let op ← expectIdent
+      -- (The machine's types give an operation one type wherever an effect
+      -- is handled, so it has no type parameters apart from the effect's.)
+      if ← isOp "<" then
+        failAt s!"the operation `{op}` cannot have type parameters of its own: an operation has one type wherever its effect is handled. Give the effect the parameter, `effect {name}<T> \{ {op}(..) }`"
       expectPunct "("
       let payload ← parseTypeList ")"
       let mut terminal := false

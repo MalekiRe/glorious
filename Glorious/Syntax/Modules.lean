@@ -138,6 +138,45 @@ structure St where
 
 abbrev R := StateT St (Except String)
 
+/-- A constructor of an `enum` whose name another constructor of its module
+has too is named with its type, `TaskError::Cancelled`, here and wherever it
+is written: the items of a module with those renamed so. A `struct` keeps
+its own name. -/
+def qualifyShared (items : List Item) : List Item := Id.run do
+  let plain := fun (item : Item) => match item with
+    | .pub _ i => i
+    | i => i
+  let names := items.flatMap fun item => match plain item with
+    | .enum _ _ ctors => ctors.map (·.1)
+    | .struct name _ _ => [name]
+    | _ => []
+  let shared := names.filter fun c => (names.filter (· == c)).length > 1
+  if shared.isEmpty then return items
+  let mut out : Array Item := #[]
+  -- (The names of a constructor's fields follow the type that declares it.)
+  let mut last : Option (String × List String) := none
+  for item in items do
+    let again := fun (i : Item) => match item with
+      | .pub parent _ => Item.pub parent i
+      | _ => i
+    match plain item with
+    | .enum name ps ctors =>
+      last := some (name, ctors.map (·.1))
+      out := out.push (again (.enum name ps (ctors.map fun (c, fields) =>
+        (if shared.contains c then s!"{name}::{c}" else c, fields))))
+    | .struct name _ _ =>
+      last := some (name, [])
+      out := out.push item
+    | .fieldNames ctor names pubs =>
+      match last with
+      | some (name, ctors) =>
+        if shared.contains ctor && ctors.contains ctor then
+          out := out.push (again (.fieldNames s!"{name}::{ctor}" names pubs))
+        else out := out.push item
+      | none => out := out.push item
+    | _ => out := out.push item
+  out.toList
+
 /-- What a module declares. `taken` are the names the first module has: it
 may declare a name the prelude has, and the prelude's is then `prelude::name`
 in the whole program. -/
@@ -423,6 +462,13 @@ def resolveValue (ctx : Ctx) (bound : List String) (qual : Option String) (name 
       checkSealed ctx name e
       pure (none, e.global, some e)
     | none =>
+      -- A constructor that shares its name with another of its module is
+      -- written with its type.
+      let shared := ctx.scope.filter fun b =>
+        b.entry.kind == .ctor && (b.name.splitOn "::").length == 2 && (b.name.splitOn "::").getLast? == some name
+      unless shared.isEmpty do
+        let ways := " or ".intercalate (shared.map fun b => s!"`{b.name}`")
+        throw s!"`{name}` is a constructor of more than one type here: write {ways}"
       -- Without the prelude brought in, its names are not there to write.
       if (← get).bare && ctx.here.head? != preludePath.head? && ctx.here.head? != some "std" then
         if let some prelude ← unitOf preludePath then
@@ -1204,6 +1250,7 @@ def resolve (prelude root : List Item) : Except String Resolved := do
   let mut units : List Module := []
   let mut fields : List (String × List String × List String × List Bool) := []
   let taken := (declared [] root).1.map (·.name)
+  let mods := mods.map fun (path, items) => (path, qualifyShared items)
   for (path, items) in mods do
     let (own, fs) := declared path items taken
     -- A constructor has one name in its module: a `struct` is its own, and
