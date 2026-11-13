@@ -1,3 +1,5 @@
+import Std.Data.HashMap
+import Std.Data.HashSet
 import Glorious.Syntax.Ast
 import Glorious.Core.Ast
 
@@ -2046,6 +2048,30 @@ private def withSelfLabel (name : String) : Clause → Clause
     if (fvStmts (pats.flatMap patVars) body).contains (labelName name) then
       .mk pats [.expr (.labelScope name body)]
     else .mk pats body
+
+/-- The program without the functions nothing reaches from `main` or from a
+coercion, which a call may be given without its being written. -/
+def reachable (roots : List String) (items : List Item) : List Item := Id.run do
+  let bodies : Std.HashMap String (List String) := items.foldl (init := {}) fun acc item =>
+    match item with
+    | .fn name _ _ _ clauses =>
+      acc.insert name ((acc.getD name []) ++ clauses.flatMap (fvClause []))
+    | _ => acc
+  let mut seen : Std.HashSet String := {}
+  let mut todo := roots
+  let mut fuel := items.length + roots.length + 1
+  while fuel > 0 && !todo.isEmpty do
+    fuel := fuel - 1
+    let mut next : List String := []
+    for name in todo do
+      unless seen.contains name do
+        seen := seen.insert name
+        for m in bodies.getD name [] do
+          if bodies.contains m && !seen.contains m then next := m :: next
+    todo := next
+  items.filter fun
+    | .fn name _ _ _ _ => seen.contains name
+    | _ => true
 
 /-- Elaborate a program. `blocks` is what the checker learnt about its blocks;
 without it, every block captures what it mentions for itself. -/

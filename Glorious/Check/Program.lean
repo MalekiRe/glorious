@@ -669,12 +669,9 @@ def checkGroup (decls : List FnDecl) : M Unit := do
              lateDrops := s.lateDrops ++ lateDrops, stays := #[],
              lateStays := s.lateStays ++ lateStays }
 
-/-- Check a whole program. Gives what the elaborator needs to know about its
-blocks: which take an argument they do not name, and for each that is handed a
-block which was not run, the identity of that block if it can only be one. The
-elaborator then lets those two share what they capture. -/
-def checkProgram (items : List Item) (modules : Syntax.ModuleInfo := {}) :
-    Except String Elab.Blocks := do
+/-- Check some items against what is already known: their declarations, and
+then their functions, each group once those it calls are done. -/
+def checkItems (items : List Item) : M Unit := do
   let written := items.filterMap fun
     | .bounds fn bounds => some (fn, bounds)
     | _ => none
@@ -702,8 +699,9 @@ def checkProgram (items : List Item) (modules : Syntax.ModuleInfo := {}) :
     pure seen
   let deps := fun (name : String) =>
     if builtFrom.contains name then mentions name else (mentions name ++ coercing).eraseDups
-  let action : M Elab.Blocks := do
-    modify fun s => { s with fnBodies := decls.map fun d => (d.name, d.clauses), modules }
+  do
+    let before := (← get).impls.size
+    modify fun s => { s with fnBodies := s.fnBodies ++ decls.map fun d => (d.name, d.clauses) }
     declare items
     computeVariances
     declareTraits items
@@ -712,7 +710,7 @@ def checkProgram (items : List Item) (modules : Syntax.ModuleInfo := {}) :
       checkGroup (comp.filterMap fun n => decls.find? (·.name == n))
     -- The functions implementations give, each on its own: any function may
     -- call them, but only through a trait, whose types are declared.
-    for im in (← get).impls do
+    for im in (← get).impls.toList.drop before do
       for item in im.methods do
         if let .fn m _ annots ret clauses := item then
           if let some sig := (← get).methods.lookup m then
@@ -721,11 +719,34 @@ def checkProgram (items : List Item) (modules : Syntax.ModuleInfo := {}) :
     for c in coercing do
       unless (((← get).fnBounds.lookup c).getD 0) == 0 do
         throw s!"`coerce {c}`: a coercion cannot need a trait of a type it is used at"
-    unless (((← get).fnBounds.lookup "main").getD 0) == 0 do
-      throw "`main` needs a trait of a type that nothing decides"
     checkDups (← get).lateDups
     checkDrops (← get).lateDrops
     checkStays (← get).lateStays
+    modify fun s => { s with lateDups := #[], lateDrops := #[], lateStays := #[] }
+
+/-- The declared types a type is made of. -/
+partial def namedIn : Ty → List String
+  | .var _ => []
+  | .con name args => name :: args.flatMap namedIn
+  | .tuple args => args.flatMap namedIn
+  | .fn params ret effs _ _ =>
+    params.flatMap namedIn ++ namedIn ret ++ effs.flatMap fun (_, args) => args.flatMap namedIn
+  | .ref _ t _ => namedIn t
+
+/-- What the checker tells the elaborator, once every item is checked. -/
+def finish : M Elab.Blocks := do
+  do
+    -- One who calls a `pub` function has to be able to write its type.
+    let info := (← get).modules
+    for f in info.pubFns do
+      if let some scheme := (← get).fns.lookup f then
+        let t ← zonk (← instantiate scheme)
+        for n in namedIn t do
+          if let some home := info.privTypes.lookup n then
+            if info.homes.lookup f == some home then
+              throw s!"`{Syntax.lastSegment f}` is `pub`, but its type, `{showTy t}`, has `{Syntax.lastSegment n}` in it, which is private to its module: one who calls `{Syntax.lastSegment f}` could not write that type (`pub struct` with fields that are not `pub` keeps what is inside private)"
+    unless (((← get).fnBounds.lookup "main").getD 0) == 0 do
+      throw "`main` needs a trait of a type that nothing decides"
     match (← get).fns.lookup "main" with
     | none => pure ()
     | some scheme =>
@@ -763,7 +784,37 @@ def checkProgram (items : List Item) (modules : Syntax.ModuleInfo := {}) :
       ⟨s.dictTable.toList, s.methodCalls.toList, s.fnBounds, implEs, s.dropSites.toList, s.glue.toList⟩,
       s.fieldTable.toList, s.fieldReads.toList, s.packs.toList, s.envFns, s.envWraps.toList,
       s.derefReads.toList⟩
+
+/-- Check a whole program. Gives what the elaborator needs to know about its
+blocks: which take an argument they do not name, and for each that is handed a
+block which was not run, the identity of that block if it can only be one. The
+elaborator then lets those two share what they capture. -/
+def checkProgram (items : List Item) (modules : Syntax.ModuleInfo := {}) :
+    Except String Elab.Blocks := do
+  let action : M Elab.Blocks := do
+    modify fun s => { s with modules }
+    checkItems items
+    finish
   let (blocks, _) ← action.run {}
+  pure blocks
+
+/-- What is known once some items are checked: for a program that is checked
+after them, against what they declare. -/
+def checkFirst (items : List Item) (modules : Syntax.ModuleInfo := {}) : Except String St := do
+  let action : M Unit := do
+    modify fun s => { s with modules }
+    checkItems items
+  let (_, st) ← action.run {}
+  pure st
+
+/-- Check a program whose first items are already checked. -/
+def checkAfter (first : St) (items : List Item) (modules : Syntax.ModuleInfo := {}) :
+    Except String Elab.Blocks := do
+  let action : M Elab.Blocks := do
+    modify fun s => { s with modules }
+    checkItems items
+    finish
+  let (blocks, _) ← action.run first
   pure blocks
 
 end Glorious.Check

@@ -187,6 +187,48 @@ def probe (paths : List String) : IO UInt32 := do
     IO.println "--"
   pure 0
 
+/-- How long each stage of compiling a program takes, in milliseconds. -/
+def stages (path : String) : IO UInt32 := do
+  let src ← IO.FS.readFile path
+  let files ← moduleFiles path
+  let mut last ← IO.monoMsNow
+  let lap := fun (what : String) (last : Nat) => do
+    let now ← IO.monoMsNow
+    IO.println s!"{what}: {now - last} ms"
+    pure now
+  let .ok (prelude, items) := parseProgram src files | IO.println "parse failed"; return 1
+  IO.println s!"{prelude.length + items.length} items"
+  last ← lap "parse" last
+  let .ok resolved := Syntax.Modules.resolve prelude items | IO.println "resolve failed"; return 1
+  IO.println s!"{resolved.items.length} resolved"
+  last ← lap "resolve" last
+  let .ok all := Syntax.expandAliases resolved.items | IO.println "aliases failed"; return 1
+  let all := Syntax.fillDefaults all
+  IO.println s!"{all.length} filled"
+  last ← lap "aliases, defaults" last
+  let .ok blocks := Check.checkProgram all resolved.info | IO.println "check failed"; return 1
+  IO.println s!"{blocks.given.length} given"
+  last ← lap "check" last
+  let all := Elab.eraseLifetimes all
+  let (all, blocks) := Elab.untrait blocks all
+  let .ok all := Elab.unfield blocks all | IO.println "unfield failed"; return 1
+  let all := Elab.reachable ("main" :: blocks.coercions.map (·.2)) all
+  IO.println s!"{all.length} plain"
+  last ← lap "untrait, unfield, reach" last
+  let .ok out := Elab.elabProgram all (some blocks) | IO.println "elab failed"; return 1
+  IO.println s!"{out.program.fns.length} functions"
+  last ← lap "elaborate" last
+  match Infer.certify all out.program true out.envSizes true true with
+  | .ok cert =>
+    last ← lap "infer certificate" last
+    IO.println s!"{Typing.checkProgram cert out.program}"
+    last ← lap "check certificate" last
+  | .error e => IO.println s!"certify: {e}"
+  let bytecode := compile out.program
+  IO.println s!"{bytecode.fns.length} compiled"
+  _ ← lap "compile" last
+  pure 0
+
 def parseInput (args : List String) : Except String (List Int) :=
   args.mapM fun a =>
     match a.toInt? with
@@ -198,6 +240,7 @@ def main (args : List String) : IO UInt32 := do
   | ["certify", path] => certify path false
   | ["certify", "--strict", path] => certify path true
   | "probe" :: paths => probe paths
+  | ["stages", path] => stages path
   | ["selftest"] => selftest none
   | ["selftest", vm] => selftest (some vm)
   | ["build", path, out] =>

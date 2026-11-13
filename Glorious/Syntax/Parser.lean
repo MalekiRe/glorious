@@ -28,6 +28,10 @@ structure PCtx where
   /-- Added to the identity of each callable literal, so that the literals of
   texts parsed separately stay distinct. -/
   base : Nat
+  /-- The operators of each module of the program, where they are not the
+  same in every module, and the module being read. -/
+  tables : List (List String × Fixities) := []
+  path : List String := []
 
 abbrev P := ReaderT PCtx (StateT Nat (Except String))
 
@@ -562,7 +566,7 @@ private partial def parseBinary (minPrec : Nat) (noBlock : Bool) : P Expr := do
       lhs := .call id (.name none ((← read).fix.function name false)) [lhs, rhs]
     | none =>
       match t with
-      | .op s => failAt s!"operator `{s}` has no infix fixity"
+      | .op s => failAt s!"operator `{s}` has no infix fixity in this module (a fixity is its module's: `use` the function the operator stands for)"
       | .ident "is" =>
         -- `subject is Pattern`, which binds as a comparison does.
         if 4 < minPrec then break
@@ -1372,10 +1376,17 @@ private partial def parseItemGroup : P (List Item) := do
     let name ← expectIdent
     if ← acceptPunct ";" then return [.module name none]
     expectPunct "{"
-    let mut items : Array Item := #[]
-    repeat
-      if (← peek) == .punct "}" then break
-      items := items ++ (← parseItemGroup).toArray
+    -- A module has its own operators: those it declares and those it brings
+    -- in, and the prelude's.
+    let ctx ← read
+    let inner := ctx.path ++ [name]
+    let fix := (ctx.tables.lookup inner).getD ctx.fix
+    let items ← withReader (fun r => { r with path := inner, fix }) do
+      let mut items : Array Item := #[]
+      repeat
+        if (← peek) == .punct "}" then break
+        items := items ++ (← parseItemGroup).toArray
+      pure items
     expectPunct "}"
     pure [.module name (some items.toList)]
   | .ident "use" =>
@@ -1470,12 +1481,13 @@ private def collectRecords (toks : Array Token) : List String := Id.run do
   out
 
 /-- Collect the fixity declarations of a token stream. -/
-private def collectFixities (toks : Array Token) (fix : Fixities) : Except String Fixities := do
+private def collectFixities (toks : Array Token) (fix : Fixities)
+    (here : Nat → Bool := fun _ => true) : Except String Fixities := do
   let mut fix := fix
   for i in [0:toks.size] do
     match toks[i]?.map (·.tok), toks[i + 1]?.map (·.tok), toks[i + 2]?.map (·.tok) with
     | some (.ident kind), some (.int prec), some nameTok =>
-      if fixityKinds.contains kind then
+      if fixityKinds.contains kind && here i then
         let name ← match nameTok with
           | .ident s => pure s
           | .op s => pure s
@@ -1523,14 +1535,119 @@ def fileModules (src : String) : Except String (List (List String)) := do
     | _, _, _ => pure ()
   pure out.toList
 
+/-- The module each token of a text is written in, as a path from the text's
+own module. -/
+private def tokenModules (toks : Array Token) : Array (List String) := Id.run do
+  let tok := fun (i : Nat) => (toks[i]?.map (·.tok)).getD .eof
+  let mut out : Array (List String) := #[]
+  let mut inside : List (String × Nat) := []
+  let mut depth := 0
+  for i in [0:toks.size] do
+    match tok i, tok (i + 1), tok (i + 2) with
+    | .ident "mod", .ident name, .punct "{" =>
+      out := out.push (inside.map (·.1)).reverse
+      inside := (name, depth + 1) :: inside
+    | .punct "{", _, _ =>
+      depth := depth + 1
+      out := out.push (inside.map (·.1)).reverse
+    | .punct "}", _, _ =>
+      if (inside.head?.map (·.2)) == some depth then inside := inside.drop 1
+      depth := depth - 1
+      out := out.push (inside.map (·.1)).reverse
+    | _, _, _ => out := out.push (inside.map (·.1)).reverse
+  out
+
+/-- What a `use` written from token `i` on brings: each path, and whether it
+is everything of a module. -/
+private partial def useLeaves (tok : Nat → Tok) (i : Nat) (before : List String) :
+    List (List String × Bool) × Nat :=
+  match tok i with
+  | .punct "{" => Id.run do
+    let mut out : List (List String × Bool) := []
+    let mut at_ := i + 1
+    let mut fuel := 256
+    while fuel > 0 && tok at_ != .punct "}" && tok at_ != .eof do
+      fuel := fuel - 1
+      let (more, next) := useLeaves tok at_ before
+      out := out ++ more
+      at_ := if tok next == .punct "," then next + 1 else next
+    (out, at_ + 1)
+  | .op "*" => ([(before, true)], i + 1)
+  | .op s => ([(before ++ [s], false)], i + 1)
+  | .ident seg =>
+    if tok (i + 1) == .punct "::" then useLeaves tok (i + 2) (before ++ [seg])
+    else
+      let path := if seg == "self" && !before.isEmpty then before else before ++ [seg]
+      ([(path, false)], if tok (i + 1) == .ident "as" then i + 3 else i + 1)
+  | _ => ([], i + 1)
+
+/-- The operators of each module of a program. An operator's fixity holds in
+the module that declares it, and in one that brings in, with `use`, the
+function the operator stands for; the prelude's hold in every module. `texts`
+are the program's texts, each with the module it is. -/
+def scopedFixities (prelude : Fixities) (texts : List (List String × String)) :
+    Except String (List (List String × Fixities)) := do
+  let mut own : List (List String × Fixities) := []
+  let mut uses : List (List String × List String × Bool) := []
+  for (base, src) in texts do
+    let toks ← lex src
+    let mods := tokenModules toks
+    let tok := fun (i : Nat) => (toks[i]?.map (·.tok)).getD .eof
+    for rel in ([] :: mods.toList).eraseDups do
+      own := own ++ [(base ++ rel, ← collectFixities toks {} (fun i => mods[i]? == some rel))]
+    for i in [0:toks.size] do
+      if tok i == .ident "use" then
+        let first := i == 0 || match tok (i - 1) with
+          | .punct ";" | .punct "}" | .punct "{" | .punct ")" | .ident "pub" => true
+          | _ => false
+        if first then
+          uses := uses ++ (useLeaves tok (i + 1) []).1.map fun (p, glob) => (base ++ mods[i]?.getD [], p, glob)
+  own.mapM fun (m, mine) => do
+    let mut fix := mine
+    for (user, path, glob) in uses do
+      if user == m then
+        let (segs, name) := if glob then (path, none) else (path.dropLast, path.getLast?)
+        let target := match segs with
+          | "crate" :: rest => rest
+          | "self" :: rest => m ++ rest
+          | "super" :: rest => m.dropLast ++ rest
+          | _ => if (own.lookup (m ++ segs)).isSome then m ++ segs else segs
+        if let some theirs := own.lookup target then
+          for (op, prec, assoc) in theirs.infixes do
+            if glob || name == some op || name == some (theirs.function op false) then
+              match fix.infixes.lookup op with
+              | some (p, a) =>
+                unless p == prec && a == assoc do
+                  throw s!"the operator `{op}` is brought in with one fixity where it already has another"
+              | none =>
+                fix := { fix with
+                  infixes := (op, prec, assoc) :: fix.infixes
+                  bound := (theirs.bound.filter fun (o, pre, _) => o == op && !pre) ++ fix.bound }
+          for (op, prec) in theirs.prefixes do
+            if glob || name == some op || name == some (theirs.function op true) then
+              match fix.prefixes.lookup op with
+              | some p =>
+                unless p == prec do
+                  throw s!"the operator `{op}` is brought in with one fixity where it already has another"
+              | none =>
+                fix := { fix with
+                  prefixes := (op, prec) :: fix.prefixes
+                  bound := (theirs.bound.filter fun (o, pre, _) => o == op && pre) ++ fix.bound }
+    pure (m, { infixes := fix.infixes ++ prelude.infixes, prefixes := fix.prefixes ++ prelude.prefixes,
+               bound := fix.bound ++ prelude.bound })
+
 /-- Parse a source text, given the fixities already in scope. Returns the items
 and the fixities including those it declares. `base` keeps the identities of
-this text's callable literals apart from those of a text parsed before it. -/
-def parse (fix : Fixities) (src : String) (base : Nat := 0) (records : List String := []) :
+this text's callable literals apart from those of a text parsed before it.
+With `tables`, each module of the text has the operators the table gives it,
+and the text is the module `path`. -/
+def parse (fix : Fixities) (src : String) (base : Nat := 0) (records : List String := [])
+    (tables : List (List String × Fixities) := []) (path : List String := []) :
     Except String (List Item × Fixities) := do
   let toks ← lex src
-  let fix ← collectFixities toks fix
-  let (items, _) ← (parseItems.run ⟨toks, fix, collectRecords toks ++ records, base⟩).run 0
+  let fix ← if tables.isEmpty then collectFixities toks fix else pure ((tables.lookup path).getD fix)
+  let (items, _) ← (parseItems.run
+    { toks, fix, records := collectRecords toks ++ records, base, tables, path }).run 0
   pure (items, fix)
 
 end Glorious.Syntax

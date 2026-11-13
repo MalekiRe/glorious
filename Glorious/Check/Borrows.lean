@@ -568,7 +568,10 @@ there is exactly one, the types are made to fit it: it is applied. -/
 def coerceTo (scope : Scope) (amb : Row) (expected actual : Ty) : M (List String) := do
   let s ← get
   let mut fits : List String := []
-  for name in s.coercing do
+  -- A coercion applies in the module that declares it and in one that brings
+  -- its function in with `use`.
+  let mine := (s.modules.homes.lookup s.owner).bind fun home => s.modules.coercions.lookup home
+  for name in s.coercing.filter fun name => (mine.map (·.contains name)).getD true do
     if (scope.lookup name).isNone then
       if let some scheme := s.fns.lookup name then
         let saved ← get

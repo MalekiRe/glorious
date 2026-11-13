@@ -205,11 +205,12 @@ def declareTraits (items : List Item) : M Unit := do
     | .var id => pure id
     | _ => pure 0
   let dropCap ← freshCap
-  modify fun s =>
-    { s with
-      traits := ("Drop", ["drop"]) :: s.traits
-      methods := ("drop", ⟨"Drop", 0, dropSelf, [.ref .uniq (.var dropSelf) dropCap], .unit, [], [], []⟩)
-        :: s.methods }
+  unless ((← get).traits.lookup "Drop").isSome do
+    modify fun s =>
+      { s with
+        traits := ("Drop", ["drop"]) :: s.traits
+        methods := ("drop", ⟨"Drop", 0, dropSelf, [.ref .uniq (.var dropSelf) dropCap], .unit, [], [], []⟩)
+          :: s.methods }
   for item in items do
     if let .trait name methods := item then
       if ((← get).traits.lookup name).isSome then throw s!"trait `{name}` is declared twice"

@@ -902,6 +902,55 @@ Not built. Conversion other than through `Int` (`u8(n)`, `int(x)`, `f64(n)`,
 `widen`, `narrow`, `char(code)`). A `Str` is a list: there are no arrays, so
 its length is counted.
 
+## What is a module's own
+
+**Decision: a module that is not `pub`, an operator's fixity and a coercion
+are each their module's, as a declaration is.**
+
+- `mod b { .. }` written in `a` without `pub` is named by `a` and by what is
+  written in `b`, and by no other module: not by a module beside it, nor by
+  one written in a module beside it. As with a declaration, being written
+  inside a module gives no right to what that module keeps to itself.
+- A `pub` function's type has no type in it that is private to the
+  function's module, whether the type was written or found. One who calls
+  the function could not write it. A type whose inside is to be kept is a
+  `pub struct` with fields that are not `pub`.
+- A fixity holds in the module that declares it, and not in a module written
+  inside that one. A module that brings in, with `use`, the function an
+  operator stands for (the operator itself, unless the fixity says `=
+  function`) has the operator with its fixity; two that disagree are an
+  error. The prelude's hold in every module (specification 14).
+- A coercion applies in the module that declares it and in a module that
+  brings its function in with `use`. The prelude's apply in every module.
+
+How. The fixities of every module are found from the tokens of all the texts
+before any is parsed, and the parser changes table where a module begins. The
+resolver says which modules are not `pub`, which functions are, which types
+are not, and which coercions apply where; the checker reads that.
+
+## The prelude is checked once
+
+**Decision: the checker checks a list of items against what it already
+knows, and a program is checked after the prelude, which is checked once for
+as long as the compiler runs.** What the checker knows after the prelude is
+kept; a program starts from there. So a program's functions are checked
+against what the prelude declares and what was found of its functions, and
+not with them. A program that declares a name the prelude has (the prelude's
+is then `prelude::name` throughout) is checked with the prelude, as before.
+
+And what nothing reaches from `main` is left out before Core is made: of the
+prelude's nine hundred functions a small program keeps a few dozen. The
+certificate is of the program that runs.
+
+Measured on one small program: checking 42 ms, of which the prelude was
+nearly all; making and certifying Core 16 ms before, 5 ms after. The 701
+test programs on three machines: 17 s, from about 45 s.
+
+Limits. This is one step towards modules compiled apart, not that: the
+modules of a program are still resolved and checked together, in one list,
+and nothing is written to a file between runs. Counting the uses of a value
+still follows the bodies of the functions it is given to, in whatever module.
+
 ## Arrays are the prelude's
 
 **Decision: an array is a value the prelude builds, not one the machines

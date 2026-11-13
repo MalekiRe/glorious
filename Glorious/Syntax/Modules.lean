@@ -122,6 +122,11 @@ structure St where
   it has names, and which fields are `pub`. -/
   fields : List (String × List String × List String × List Bool) := []
   homes : List (String × String) := []
+  /-- The modules that are not `pub`: each can be named by the module it is
+  written in, and by what is written in it. -/
+  hidden : List (List String) := []
+  /-- The coercions, each with the module that declares it. -/
+  coerced : List (List String × String) := []
   /-- How many names this pass has made up. -/
   fresh : Nat := 0
 
@@ -217,6 +222,13 @@ partial def scopeOf (p : List String) : R (List Bound) := do
   modify fun s => { s with busy := s.busy.filter (· != p), scopes := (p, out) :: s.scopes }
   pure out
 
+/-- A module that is not `pub` is named by the module it is written in and by
+what is written in it, and by no other. -/
+partial def enter (viewer target : List String) : R Unit := do
+  if (← get).hidden.contains target then
+    unless viewer == target.dropLast || target.isPrefixOf viewer do
+      throw s!"{showPath viewer} cannot name {showPath target}, which is private to {showPath target.dropLast}: only a `pub mod` can be named from outside the module it is written in"
+
 /-- The module a path names, if its first name is a module: `crate`, `self`
 and `super`, a module that can be written here, or one of the first module's. -/
 partial def moduleAt (viewer : List String) (scope : List Bound) (segs : List String) :
@@ -233,11 +245,16 @@ partial def moduleAt (viewer : List String) (scope : List Bound) (segs : List St
     | _ =>
       match lookupIn scope .module head with
       | some e => pure (some e.home)
-      | none => pure (if (← unitOf [head]).isSome then some [head] else none)
+      | none =>
+        if (← unitOf [head]).isSome then
+          enter viewer [head]
+          pure (some [head])
+        else pure none
   let some start := start | return none
   let mut cur := start
   for seg in segs.drop 1 do
     if (← unitOf (cur ++ [seg])).isSome then
+      enter viewer (cur ++ [seg])
       cur := cur ++ [seg]
     else
       -- A module another module names again with `pub use`.
@@ -784,7 +801,10 @@ partial def resolveItem (ctx : Ctx) : Item → R (List Item)
         result := ← op.result.mapM (resolveType ctx generics) }
     pure [.effect (ownName ctx .effect name) ps ops]
   | .alias name value => do pure [.alias (ownName ctx .value name) (← resolveExpr ctx [] value)]
-  | .coerce name => do pure [.coerce (← resolveValue ctx [] none name).2.1]
+  | .coerce name => do
+    let global := (← resolveValue ctx [] none name).2.1
+    modify fun s => { s with coerced := s.coerced ++ [(ctx.here, global)] }
+    pure [.coerce global]
   | .trait name methods => do
     -- Its own type parameters and the types an implementation says are
     -- names of its functions' types, as `Self` is.
@@ -916,14 +936,29 @@ def resolve (prelude root : List Item) : Except String Resolved := do
     let (own, fs) := declared path items taken
     units := units ++ [⟨path, items, own⟩]
     fields := fields ++ fs
-  let run : R (List Item) := do
+  let hidden := mods.flatMap fun (path, items) =>
+    items.filterMap fun
+      | .module name _ => some (path ++ [name])
+      | _ => none
+  let run : R (List Item × List (String × List String)) := do
     let mut out : Array Item := #[]
     for u in units do
       let ctx : Ctx := ⟨u.path, ← scopeOf u.path, []⟩
       for item in u.items do
         out := out ++ (← resolveItem ctx item).toArray
-    pure out.toList
-  let (items, st) ← match run.run { units, fields } with
+    -- Where each coercion applies: in the module that declares it, and in
+    -- one that brings its function in with `use`.
+    let coerced := (← get).coerced
+    let mut applies : List (String × List String) := []
+    for u in units do
+      let scope ← scopeOf u.path
+      let here := coerced.filterMap fun (home, g) =>
+        if home == u.path || home == preludePath
+            || scope.any (fun b => b.rank ≤ 1 && b.entry.global == g && b.entry.kind == .fn)
+        then some g else none
+      applies := applies ++ [(key u.path, here)]
+    pure (out.toList, applies)
+  let ((items, coercions), st) ← match run.run { units, fields, hidden } with
     | .ok r => pure r
     | .error e => throw e
   if let some cycle := findCycle st.edges then
@@ -938,6 +973,12 @@ def resolve (prelude root : List Item) : Except String Resolved := do
   let text := match ctor "StrEnd", ctor "StrChar" with
     | some e, some c => some (e, c)
     | _, _ => none
-  pure ⟨items, ⟨st.homes, fieldVis, text⟩⟩
+  let preludeNames := (declared preludePath prelude).1.map (·.name)
+  let mine := units.filter (·.path != preludePath)
+  let pubFns := mine.flatMap fun u => u.own.filterMap fun b =>
+    if b.entry.kind == .fn && !(b.entry.vis matches .priv) then some b.entry.global else none
+  let privTypes := mine.flatMap fun u => u.own.filterMap fun b =>
+    if b.entry.kind == .type && (b.entry.vis matches .priv) then some (b.entry.global, key u.path) else none
+  pure ⟨items, ⟨st.homes, fieldVis, text, preludeNames.any taken.contains, pubFns, privTypes, coercions⟩⟩
 
 end Glorious.Syntax.Modules

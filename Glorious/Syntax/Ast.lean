@@ -195,6 +195,16 @@ structure ModuleInfo where
   before the rest, by the names they have in the whole program: for showing a
   text as text. -/
   text : Option (String × String) := none
+  /-- Does the first module declare a name the prelude has? The prelude's
+  own names are then not what they are without the program. -/
+  shadowed : Bool := false
+  /-- The functions that are `pub`. -/
+  pubFns : List String := []
+  /-- The types that are not `pub`, each with its module. -/
+  privTypes : List (String × String) := []
+  /-- For each module, the coercions that apply in it: those it declares, and
+  those of functions it brings in with `use`. -/
+  coercions : List (String × List String) := []
 
 /-- How the constructors of a text are named where values are shown: no
 program can write these names. -/
@@ -325,6 +335,7 @@ inductive Assoc where
   | left
   | right
   | non
+  deriving BEq
 
 /-- Operator fixities declared by the program. -/
 structure Fixities where

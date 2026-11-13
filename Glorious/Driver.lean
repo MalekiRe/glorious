@@ -69,13 +69,13 @@ def parseProgram (src : String) (files : List (List String × String)) (check : 
     | .error e => throw s!"prelude: {e}"
   -- Operators and the constructors with named fields are known to every
   -- text, whichever declares them.
-  let mut fix := fix
   let mut records : List String := []
   for text in src :: files.map (·.2) do
-    let (f, r) ← Syntax.declaredSyntax fix text
-    fix := f
+    let (_, r) ← Syntax.declaredSyntax fix text
     records := records ++ r
-  let (items, _) ← Syntax.parse fix src (base := 1000000) (records := records)
+  -- An operator's fixity is its module's.
+  let tables ← Syntax.scopedFixities fix (([], src) :: files)
+  let (items, _) ← Syntax.parse fix src (base := 1000000) (records := records) (tables := tables)
   let rec fill (fuel : Nat) (path : List String) (items : List Syntax.Item) :
       Except String (List Syntax.Item) :=
     items.mapM fun item => do
@@ -89,7 +89,8 @@ def parseProgram (src : String) (files : List (List String × String)) (check : 
         match files.findIdx? (·.1 == here) with
         | some k =>
           let text := ((files[k]?).map (·.2)).getD ""
-          let parsed ← match Syntax.parse fix text (base := 1000000 * (k + 2)) (records := records) with
+          let parsed ← match Syntax.parse fix text (base := 1000000 * (k + 2)) (records := records)
+              (tables := tables) (path := here) with
             | .ok (items, _) => pure items
             | .error e => throw s!"module `{shown}`: {e}"
           pure (wrap (.module name (some (← fill fuel here parsed))))
@@ -98,6 +99,15 @@ def parseProgram (src : String) (files : List (List String × String)) (check : 
         pure (wrap (.module name (some (← fill fuel (path ++ [name]) body))))
       | _, _ => pure item
   pure (prelude, ← fill 64 [] items)
+
+/-- The prelude checked, once: how many items it is, and what the checker
+knows after it. A program that declares no name the prelude has is checked
+from there, against what the prelude declares. -/
+def checkedPrelude : Thunk (Except String (Nat × Check.St)) := Thunk.mk fun _ => do
+  let (prelude, _) ← Syntax.parse {} Prelude.source
+  let resolved ← Syntax.Modules.resolve prelude []
+  let all := Syntax.fillDefaults (← Syntax.expandAliases resolved.items)
+  pure (all.length, ← Check.checkFirst all resolved.info)
 
 /-- Parse, check and elaborate a program together with the prelude, and have the
 proved Core type checker accept the result. With `check := false` both checks
@@ -123,7 +133,10 @@ def compileSource (src : String) (check : Bool := true)
   let all := Syntax.fillDefaults all
   -- What the checker learnt about blocks that share an environment. A program
   -- it rejects is elaborated without that.
-  let blocks ← match Check.checkProgram all resolved.info with
+  let checked := match check && !resolved.info.shadowed, checkedPrelude.get with
+    | true, .ok (count, first) => Check.checkAfter first (all.drop count) resolved.info
+    | _, _ => Check.checkProgram all resolved.info
+  let blocks ← match checked with
     | .ok blocks => pure (some blocks)
     | .error e => if check then throw e else pure none
   -- Lifetimes were the checker's to read.
@@ -136,6 +149,8 @@ def compileSource (src : String) (check : Bool := true)
       -- Nor a borrow of a field: each is a variable of its own by now.
       pure (← Elab.unfield b items, some b)
     | none => pure (all, none)
+  -- What nothing reaches is not part of the program that runs.
+  let all := Elab.reachable ("main" :: ((blocks.map (·.coercions)).getD []).map (·.2)) all
   let plain := fun (blocks : Option Elab.Blocks) => do
     let out ← Elab.elabProgram all blocks
     let cert ← if check then
