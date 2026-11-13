@@ -1628,6 +1628,37 @@ def staticMethod (tr : TraitInfo) (d : DictE) (idx : Nat) : Option (String × Li
     | none => none
   | .param _ => none
 
+mutual
+
+/-- Is there a `tail` call in an expression, at any depth? -/
+partial def tailsExpr : Expr → Bool
+  | .tailCall _ _ _ => true
+  | .call _ f args => tailsExpr f || args.any tailsExpr
+  | .tuple args => args.any tailsExpr
+  | .proj e _ => tailsExpr e
+  | .deref e => tailsExpr e
+  | .reborrow _ e => tailsExpr e
+  | .fieldOf _ e _ => tailsExpr e
+  | .closure _ clauses => clauses.any fun
+    | .mk _ body => tailsStmts body
+  | .handle subject arms => tailsExpr subject || arms.any fun
+    | .mk _ body => tailsStmts body
+  | .labelScope _ body => tailsStmts body
+  | _ => false
+
+partial def tailsStmts (body : List Stmt) : Bool :=
+  body.any fun s =>
+    let rec one : Stmt → Bool
+      | .let_ _ e => tailsExpr e
+      | .letMut _ e => tailsExpr e
+      | .expr e => tailsExpr e
+      | .defer e => tailsExpr e
+      | .located _ _ s => one s
+      | .assign target e => tailsExpr target || tailsExpr e
+    one s
+
+end
+
 /-- The call that destroys a value, given how its type is destroyed: the
 type's function by name where the type is known, and else the function the
 enclosing one was given. -/
@@ -1763,11 +1794,15 @@ private partial def untraitClause (tr : TraitInfo) (owner : String) : Clause →
   | .mk pats body =>
     -- What the clause is given under a name and does not mention is
     -- destroyed when the clause is done; and so is what a `_` takes, which
-    -- is given a name for it.
+    -- is given a name for it. Where the clause hands its place on with
+    -- `tail`, nothing can be done after: what it does not use is destroyed
+    -- before it starts, which is the cleanup a `tail` call has before it.
     let first := firstPlace body
     let (pats, _) := nameWilds (fun k => (dropHook tr ⟨owner, first.1, first.2, wildName k, false⟩).isSome) pats 0
+    let early := tailsStmts body
     let hooks := (pats.flatMap patVars).filterMap fun x =>
-      (dropHook tr ⟨owner, first.1, first.2, x, false⟩).map Stmt.defer
+      (dropHook tr ⟨owner, first.1, first.2, x, false⟩).map
+        (if early then Stmt.expr else Stmt.defer)
     .mk pats (hooks ++ untraitStmts tr owner (0, 0) body)
 
 /-- The statements of a block. A variable whose value is to be destroyed is
@@ -1805,7 +1840,9 @@ private partial def untraitStmts (tr : TraitInfo) (owner : String) (pos : Nat ×
     match pat with
     | .var x =>
       match dropHook tr ⟨owner, pos.1, pos.2, x, false⟩ with
-      | some hook => .let_ pat value :: .defer hook :: rest
+      -- (Before a `tail` call there is no later: see the clause's own.)
+      | some hook =>
+        .let_ pat value :: (if tailsStmts rest then Stmt.expr hook else Stmt.defer hook) :: rest
       | none => .let_ pat value :: rest
     | _ => .let_ pat value :: rest
   | .assign target value :: rest =>

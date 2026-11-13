@@ -2611,6 +2611,46 @@ nothing silently.
   the type unknown.
 - A program with no `Drop` is checked as before.
 
+## Generators
+
+`std::generator` has the specification's generators (30.2): the effects
+`Yield<Y, R>` and `YieldOnce<Y, R>`, `GeneratorStep`, the `Generator` trait,
+and `Coroutine<Y, R, T>`, which is a computation that yields, stopped where
+it last did. `generator(body)` makes one, `resume` uses it up and gives what
+it yielded with the generator that goes on, or what it finished with.
+`iterate` makes one that is resumed with nothing into an iterator, so an
+endless generator can be taken from: `take(iterate(generator(..)), 4)`.
+None of it is known to the compiler: a generator is a resumption in a
+struct.
+
+- **What a generator is resumed with is left to the implementation**
+  (`type Resume`), where the specification has `Generator<R>`: an
+  implementation cannot give its trait an argument that is one of its own
+  type parameters.
+- **A coroutine's body performs `Yield` and nothing else.** The row of its
+  other effects would be a parameter of `Coroutine`, and a declared type
+  has no row parameters.
+- **A generator let go is forgotten where it stopped**; `close_generator`
+  gives it up and runs its cleanups. Making letting go do that was tried,
+  with `Drop` for `Coroutine`, and works; it is not kept because a `Drop`
+  in the library makes every program that uses the library one that counts
+  uses and destroys values, which costs each of them.
+
+That attempt found two faults in programs that have a `Drop` of their own
+and use the library, both fixed:
+
+- An implementation for a type with a lifetime parameter was given a
+  condition that the lifetime can be destroyed, which nothing can meet:
+  "`'_` does not implement `%Destroy`" for any such program that iterated
+  a slice.
+- **What a clause does not use is destroyed when the clause is done**, by a
+  cleanup, and a `tail` call cannot have a cleanup after it: so a function
+  generic in a type that ignored a value and then called itself with `tail`
+  was refused once any type had `Drop`. Where a clause or the rest of a
+  block has a `tail` call in it, what it does not use is now destroyed
+  first, before the body: the specification has the cleanup of a `tail`
+  call before the transfer (12.2).
+
 ## What a trait's function performs
 
 A trait's function performed nothing: an implementation that performed an

@@ -3021,6 +3021,30 @@ def cases : List Case := [
     [], "1\n5"⟩,
   ⟨"struct Ticket(Int);\nimpl Use<[1, 1]> for Ticket {}\nfn redeem(t: Ticket) -> Int { match(t) { Ticket(n) => n } }\nfn maybe(c: Bool, f: fn() -> Int) -> Int { if(c) { f() } else { 0 } }\nfn main() -> Int { let mut t = Ticket(1); maybe(1 < 2, { redeem(t) }) }",
     [], "error: 5:20: in `main`: `t` is not used on every path, but a `Ticket` has to be used"⟩,
+  -- Generators: a computation that yields is a value; resuming it uses it up.
+  ⟨"use std::generator::*;\nfn main() -> Int {\n    let g = generator({ yield(1); yield(2); 9 });\n    match(resume(g, ())) {\n        Yielded { value, rest } => match(resume(rest, ())) {\n            Yielded { value: second, rest: more } => match(resume(more, ())) { Complete(last) => value * 100 + second * 10 + last, Yielded { value: v, rest: r } => 0 - 1 },\n            Complete(_) => 0 - 2\n        },\n        Complete(_) => 0 - 3\n    } }",
+    [], "129"⟩,
+  ⟨"use std::generator::*;\nuse core::iter::{collect, take};\nfn three() -> Int / {Yield<Int, ()>} { yield(1); yield(2); yield(3); 0 }\nfn main() -> Int { say(collect(&mut iterate(generator({ three() })))); 0 }",
+    [], "[1, 2, 3]\n0"⟩,
+  ⟨"use std::generator::*;\nuse core::iter::{collect, take};\nfn count_from(n: Int) -> Int / {Yield<Int, ()>} { yield(n); tail count_from(n + 1) }\nfn main() -> Int { say(collect(&mut take(iterate(generator({ count_from(10) })), 4))); 0 }",
+    [], "[10, 11, 12, 13]\n0"⟩,
+  -- A generator given up with `close_generator` runs its cleanups.
+  ⟨"use std::generator::*;\nfn noisy() -> Int / {Yield<Int, ()>} { defer { say(77); } yield(1); yield(2); 0 }\nfn main() -> Int {\n    let g = generator({ noisy() });\n    match(resume(g, ())) {\n        Yielded { value, rest } => close_generator(rest); value,\n        Complete(_) => 0\n    } }",
+    [], "77\n1"⟩,
+  -- What a clause does not use is destroyed before a `tail` call, which could not be written there.
+  ⟨"struct Noisy(Int);\nimpl Drop for Noisy { fn drop(n) { say(n.0) } }\nfn eat(n: Noisy) -> Int { 5 }\nfn go(n: Noisy, i: Int) -> Int { if(i == 0) { 0 } else { tail go(Noisy(i), i - 1) } }\nfn main() -> Int { go(Noisy(9), 2) }",
+    [], "9\n2\n1\n0"⟩,
+  ⟨"struct Noisy(Int);\nimpl Drop for Noisy { fn drop(n) { say(n.0) } }\nfn eat(n: Noisy) -> Int { 5 }\nfn count(xs: [Noisy], n: Int) -> Int { match(pop(xs)) { Some((rest, x)) => tail count(rest, n + 1), None => n } }\nfn main() -> Int { count([Noisy(1), Noisy(2)], 0) }",
+    [], "2\n1\n2"⟩,
+  ⟨"struct Noisy(Int);\nimpl Drop for Noisy { fn drop(n) { say(n.0) } }\nfn eat(n: Noisy) -> Int { 5 }\nfn f(i: Int) -> Int { let n = Noisy(i); if(i == 0) { 0 } else { tail f(i - 1) } }\nfn main() -> Int { f(2) }",
+    [], "2\n1\n0\n0"⟩,
+  ⟨"struct Noisy(Int);\nimpl Drop for Noisy { fn drop(n) { say(n.0) } }\nfn eat(n: Noisy) -> Int { 5 }\nfn f(a: Noisy, b: Noisy) -> Int { say(100); 0 }\nfn main() -> Int { f(Noisy(1), Noisy(2)) }",
+    [], "100\n2\n1\n0"⟩,
+  -- The library beside a type with `Drop` of the program's own.
+  ⟨"struct DropModeMark(Int);\nimpl Drop for DropModeMark { fn drop(m) { () } }\nuse alloc::vec::{Vec};\nuse core::slice::{Slice};\nuse core::iter::{fold};\nfn main() -> Int {\n    let mut v = Vec::new();\n    Vec::push(&mut v, 3); Vec::push(&mut v, 4); Vec::push(&mut v, 5);\n    let s = Vec::as_slice(&v);\n    let mut it = Slice::iter(&s);\n    fold(&mut it, 0, { (acc, r) => acc + *r }) }",
+    [], "12"⟩,
+  ⟨"struct DropModeMark(Int);\nimpl Drop for DropModeMark { fn drop(m) { () } }\nuse core::slice::{Slice};\nuse core::iter::{Iterator, range, into_iter, fold, collect, map_collect, count, find_map, for_each};\nfn main() {\n    let a = [10, 20, 30, 40, 50];\n    let s = Slice::of(&a);\n    say(Slice::len(&s));\n    say(match(Slice::last(&s)) { Some(r) => *r, None => 0 });\n    match(Slice::sub(&s, 1, 4)) {\n        Some(mid) =>\n            let mut it = Slice::iter(&mid);\n            say(fold(&mut it, 0, { (acc, r) => acc + *r })),\n        None => say(0 - 1)\n    };\n    let mut r = range(0, 5);\n    say(map_collect(&mut r, { (x) => x * x }));\n    let mut texts = into_iter([\"a\", \"bb\", \"ccc\"]);\n    say(find_map(&mut texts, { (t) => if(length(t) == 2) { Some(t) } else { None } }));\n    say(count(&mut texts));\n    let mut total = 0;\n    let mut again = range(1, 4);\n    for_each(&mut again, { (x) => total = total + x; });\n    say(total);\n    let mut all = Slice::iter(&s);\n    say(count(&mut all));\n    0 }",
+    [], "5\n50\n90\n[0, 1, 4, 9, 16]\nOk(bb)\n1\n6\n5\n0"⟩,
   -- `drop` is not for a program to call.
   ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nfn main() { let mut f = File(7); drop(&mut f); 0 }",
     [], "error: 3:34: in `main`: `drop` is run when what holds a value ends; a program does not call it"⟩,

@@ -24,6 +24,7 @@ pub mod c;
 pub mod fmt;
 pub mod stream;
 pub mod value;
+pub mod generator;
 pub mod iterator;
 pub mod slice;
 pub mod collections;
@@ -1835,6 +1836,78 @@ impl<A> Default for Option<A> { fn default() { None } }
 pub fn take<T: Default>(target: &mut T) -> T { replace(target, default()) }
 "#
 
+private def generatorText : String := r#"// Generators, in the shape the library specification gives them (30.2): a
+// computation that yields is owned as a value, and resuming it uses that
+// value up and gives either what it yielded with the generator that goes
+// on, or what it finished with. Nothing here is known to the compiler:
+// `yield` is an operation, and a generator is its resumption.
+
+use std::iterator::{Iterator};
+
+// A value handed out, and what the computation is resumed with. Whoever
+// handles it may stop the computation there.
+pub effect Yield<Y, R> { yield(Y) -> R }
+
+// The same, for a computation that is always resumed: it can hold what has
+// to be used across the operation.
+pub effect YieldOnce<Y, R> { [1, 1] yield_once(Y) -> R }
+
+pub enum GeneratorStep<Y, T, G> { Yielded { value: Y, rest: G }, Complete(T) }
+
+pub trait Generator {
+    type Yield;
+    type Resume;
+    type Return;
+    type Effects: EffectRow;
+    fn resume(Self, Self::Resume)
+        -> GeneratorStep<Self::Yield, Self::Return, Self> / { | Self::Effects };
+}
+
+// A computation that yields, stopped where it last did.
+pub struct Coroutine<Y, R, T>(fn(R) -> GeneratorStep<Y, T, Coroutine<Y, R, T>>)
+
+impl<Y, R, T> Generator for Coroutine<Y, R, T> {
+    type Yield = Y;
+    type Resume = R;
+    type Return = T;
+    type Effects = {};
+    fn resume(g, input) { match(g) { Coroutine(k) => k(input) } }
+}
+
+// A computation as a generator that has not started. What it is first
+// resumed with starts it and is otherwise not looked at.
+pub fn generator<Y, R, T>(body: fn() -> T / {Yield<Y, R>}) -> Coroutine<Y, R, T> {
+    Coroutine({ (first) => handle body() {
+        done => Complete(done),
+        yield(value, k) => Yielded { value: value, rest: Coroutine(k) }
+    } })
+}
+
+// A generator given up: the computation is left where it stopped, and its
+// cleanups run. One that is merely let go is forgotten where it stopped.
+pub fn close_generator<Y, R, T>(g: Coroutine<Y, R, T>) { match(g) { Coroutine(k) => cancel(k) } }
+
+// A generator that is resumed with nothing, as something to iterate.
+pub struct Generated<G, Y> { state: Option<G>, of: fn() -> Option<Y> }
+
+impl<G, Y> Iterator for Generated<G, Y> where G: Generator<Yield = Y, Resume = ()> {
+    type Item = Y;
+    fn next(it) {
+        match(replace(&mut it.state, None)) {
+            Some(g) => match(resume(g, ())) {
+                Yielded { value, rest } => it.state = Some(rest); Some(value),
+                Complete(_) => None
+            },
+            None => None
+        }
+    }
+}
+
+pub fn iterate<G: Generator>(g: G) -> Generated<G, G::Yield> {
+    Generated { state: Some(g), of: { None } }
+}
+"#
+
 private def cText : String := r#"// What C has: its memory, and texts as it writes them. Everything here is
 // unsafe: an address is whatever a program says it is.
 
@@ -2149,6 +2222,7 @@ def texts : List (List String × String) :=
    (["std", "fmt"], fmtText),
    (["std", "stream"], streamText),
    (["std", "value"], valueText),
+   (["std", "generator"], generatorText),
    (["std", "iterator"], iteratorText),
    (["std", "slice"], sliceText),
    (["std", "collections"], collectionsText),

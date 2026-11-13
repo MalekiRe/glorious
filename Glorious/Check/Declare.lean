@@ -404,8 +404,10 @@ def declareTraits (items : List Item) : M Unit := do
           unless closed.contains (s, j) do closed := closed ++ [(s, j)]
       -- A function of the implementation may let go of a value of one of
       -- its type parameters: it is given how each is destroyed.
+      -- (A lifetime is no value: there is nothing to destroy of one.)
       let ctx := if (← get).dropMode then
-          closed ++ ((List.range args.length).filter fun j => !closed.contains (Syntax.destroyTrait, j)).map
+          closed ++ ((List.range args.length).filter fun j =>
+              !closed.contains (Syntax.destroyTrait, j) && !((args[j]?).getD "").startsWith "'").map
             fun j => (Syntax.destroyTrait, j)
         else closed
       let given := methods.filterMap fun
