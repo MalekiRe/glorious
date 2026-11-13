@@ -11,7 +11,7 @@ use super::*;
 
 /// The generation of the contract between compiled code and this runtime.
 /// Code built for another is refused before any of it runs.
-pub const ABI: u64 = 1;
+pub const ABI: u64 = 2;
 
 /// A function's compiled body: the machine, the activation's locals, the
 /// instruction to start from, and how many locals there are. It returns 0

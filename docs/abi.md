@@ -1,6 +1,6 @@
 # The ABI between compiled code and the runtime
 
-Generation 1. This is what the x86-64 backend (`vm/src/x86.rs`), the LLVM
+Generation 2. This is what the x86-64 backend (`vm/src/x86.rs`), the LLVM
 backend (`vm/src/llvm.rs`) and the interpreter (`vm/src/lib.rs`) agree on, so
 that a function run by any of them can call, be called by, be captured in a
 resumption of, and unwind through a function run by any other. A program
