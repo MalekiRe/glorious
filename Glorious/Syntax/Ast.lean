@@ -300,6 +300,9 @@ the type written as an expression so that it can sit among expressions: see
 stands alone. -/
 def ascribeMark : String := "%as"
 
+/-- The type parameter a function written `-> !` gives: whatever is wanted. -/
+def neverParam : String := "%never"
+
 /-- What the parser wraps the functions of `impl Type { .. }` in, on their way
 to the module the implementation is written in. -/
 def inherentMark : String := "%inherent"

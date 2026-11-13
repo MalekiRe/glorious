@@ -47,6 +47,13 @@ private def peek (k : Nat := 0) : P Tok := do
 
 private def advance : P Unit := modify (· + 1)
 
+/-- Was what was just closed written with a comma before its closing bracket?
+`(x,)` is a tuple of one part, and `(x)` is `x` in brackets. -/
+private def closedAfterComma : P Bool := do
+  let ctx ← read
+  let i ← get
+  pure (i ≥ 2 && (ctx.toks[i - 2]?.map (·.tok)) == some (.punct ","))
+
 private def failAt {α : Type} (msg : String) : P α := do
   let t ← peekTok
   throw s!"{t.line}:{t.col}: {msg}, found {t.tok.describe}"
@@ -396,7 +403,7 @@ private partial def parseType : P TypeExpr := do
     advance
     let args ← parseTypeList ")"
     match args with
-    | [t] => pure t
+    | [t] => if ← closedAfterComma then pure (.tuple [t]) else pure t
     | _ => pure (.tuple args)
   | .punct "[" =>
     -- `[T]`: an array of `T`.
@@ -420,10 +427,11 @@ private partial def parseResult : P TypeExpr := do
   let ret ← if startsType then parseType else pure (.tuple [])
   if (← peek) == .op "/" then
     advance
-    expectPunct "{"
+    -- One effect may be written without braces.
+    let braced ← acceptPunct "{"
     let mut effects : Array (String × List TypeExpr) := #[]
     repeat
-      if (← peek) == .punct "}" then break
+      if braced && (← peek) == .punct "}" then break
       let name ← expectPath
       let mut args : Array TypeExpr := #[]
       if (← peek) == .op "<" then
@@ -436,8 +444,9 @@ private partial def parseResult : P TypeExpr := do
         | .op ">" => advance
         | _ => failAt "expected `>`"
       effects := effects.push (name, args.toList)
+      if !braced then break
       if !(← acceptPunct ",") then break
-    expectPunct "}"
+    if braced then expectPunct "}"
     pure (.performs ret effects.toList)
   else pure ret
 
@@ -524,7 +533,7 @@ private partial def parsePattern : P Pattern := do
     advance
     let args ← parsePatternList
     match args with
-    | [p] => pure p
+    | [p] => if ← closedAfterComma then pure (.tuple [p]) else pure p
     | _ => pure (.tuple args)
   | _ => failAt "expected a pattern"
 
@@ -775,6 +784,14 @@ private partial def parsePrimary (noBlock : Bool) : P Expr := do
   | .punct "@" =>
     advance
     let l ← expectIdent
+    -- `@name: T { .. }`: the scope gives a `T`.
+    if !noBlock && (← peek) == .punct ":" then
+      advance
+      let ty ← parseType
+      expectPunct "{"
+      let body ← parseStmts
+      expectPunct "}"
+      return .call 0 (.name none ascribeMark) [.labelScope l body, ty.asExpr]
     if !noBlock && (← peek) == .punct "{" then
       advance
       let body ← parseStmts
@@ -785,7 +802,7 @@ private partial def parsePrimary (noBlock : Bool) : P Expr := do
     advance
     let args ← parseArgs
     match args with
-    | [e] => pure e
+    | [e] => if ← closedAfterComma then pure (.tuple [e]) else pure e
     | _ => pure (.tuple args)
   | .punct "{" => parseBraces
   | _ => failAt "expected an expression"
@@ -922,7 +939,10 @@ private def parseQuantity : P (Nat × Option Nat) := do
     | .ident "infinity" => do
       advance
       pure none
-    | _ => failAt "expected the most uses, a number or `infinity`"
+    | .op "*" => do
+      advance
+      pure none
+    | _ => failAt "expected the most uses, a number, `*` or `infinity`"
   expectPunct "]"
   if let some n := upper then
     if n < lower then failAt "the most uses cannot be fewer than the fewest"
@@ -1108,11 +1128,19 @@ private partial def parseFn : P (Item × List Bound) := do
       annots := annots.push (← if ← acceptPunct ":" then some <$> parseType else pure none)
       if !(← acceptPunct ",") then break
     expectPunct ")"
-    let ret ← if ← acceptPunct "->" then some <$> parseResult else pure none
+    -- `-> R`, `-> R / {E}`, or `/ {E}` alone for a function that gives `()`.
+    let ret ← if (← acceptPunct "->") || (← peek) == .op "/" then some <$> parseResult else pure none
     let (lifetimes, more) ← parseWhere
     expectPunct "{"
     let body ← parseStmts
     expectPunct "}"
+    -- `-> !`: a function that does not come back gives whatever is wanted
+    -- of it, which only a body that does not come back can.
+    let (params, ret) := match ret with
+      | some .never => (params ++ [neverParam], some (TypeExpr.name neverParam []))
+      | some (.performs .never effects) =>
+        (params ++ [neverParam], some (TypeExpr.performs (.name neverParam []) effects))
+      | other => (params, other)
     pure (.fn name (params ++ lifetimes) annots.toList ret [.mk pats.toList body], bounds ++ more)
   else
     expectPunct "{"

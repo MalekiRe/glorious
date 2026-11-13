@@ -876,6 +876,22 @@ Limits. `Self::f(..)` is not read where a function is called: the type is
 written. `impl<T: Bound> Type<T>` is not; the bound is written on the
 function. A constant is computed where it is named, each time.
 
+## `(x,)`, `-> !`, and a row without braces
+
+From the audit of the specification.
+
+- **`(x,)` is a tuple of one part** in a value, a type and a pattern, and is
+  not `x`; `(x)` is `x` in brackets. Before, the comma was dropped, and a
+  function of one tuple took a plain value.
+- **`fn f(..) -> ! { .. }`** is a function with a type parameter of its own
+  for its result: it gives whatever is wanted where it is called, and only a
+  body that does not come back has every type. So nothing new is typed.
+- **What a function performs** may be written without a result,
+  `fn log(x: Int) / {Diag}`, and one effect without braces, `/ Diag`.
+- **`@name: T { .. }`** is the scope with its type written, as a `let` with a
+  type is.
+- **`[0, *]`** is `[0, infinity]`.
+
 ## What the specification's audit turned away
 
 An audit of the language specification against the compiler, section by

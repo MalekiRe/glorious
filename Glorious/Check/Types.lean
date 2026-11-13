@@ -625,8 +625,9 @@ mutual
 
 partial def showTy : Ty → String
   | .var _ => "_"
-  | .con n [] => bareName n
+  | .con n [] => if bareName n == Syntax.neverParam then "!" else bareName n
   | .con n args => s!"{bareName n}<{", ".intercalate (args.map showTy)}>"
+  | .tuple [one] => s!"({showTy one},)"
   | .tuple args => s!"({", ".intercalate (args.map showTy)})"
   | .fn ps r effs _ _ =>
     let sig := s!"fn({", ".intercalate (ps.map showTy)}) -> {showTy r}"
