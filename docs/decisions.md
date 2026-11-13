@@ -831,6 +831,13 @@ let it go. `and` does not keep what its left operand found for the body of an
 `if` after it, and there is no negative context. A name is told from another
 by its spelling.
 
+**Decision: an `is` that borrows is not built for now.** It would have the
+block that is given the result make the names, from the reference and a
+pattern carried in the result's type: a clause that is never reached for the
+other constructors, and each pattern of an `and` matched twice. A callable
+with a clause that binds by reference, `match(r) { &mut P => .. }`, does what
+it would.
+
 Limits. The test has to be written before the block in the arguments of a
 call, since the block is read knowing what it is given. A program run without
 the checker has no names from an `is`.
