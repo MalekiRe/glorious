@@ -179,8 +179,37 @@ def lookupIn (scope : List Bound) (space : Space) (name : String) : Option Entry
     | none => some b) none
   best.map (·.entry)
 
+/-- Two different meanings a name has here at once: what the module declares
+or names in a `use` twice over, or what two `use ..::*` both bring and nothing
+nearer does. -/
+def clash (scope : List Bound) (space : Space) (name : String) : Option (Entry × Entry) :=
+  let found := scope.filter fun b => b.name == name && b.entry.kind.space == space
+  match found.map (·.rank) with
+  | [] => none
+  | r :: rs =>
+    let best := rs.foldl min r
+    if best > 1 then none
+    else
+      match found.filter (·.rank == best) with
+      | a :: more => (more.find? fun b => b.entry.global != a.entry.global).map fun b => (a.entry, b.entry)
+      | [] => none
+
 def unitOf (p : List String) : R (Option Module) := do
   pure ((← get).units.find? (·.path == p))
+
+/-- The operations of an effect, as its module has them. -/
+def opsOf (e : Entry) : R (List Bound) := do
+  let some unit ← unitOf e.home | return []
+  let some named := unit.own.find? fun b => b.entry.global == e.global && b.entry.kind == .effect
+    | return []
+  let ops := unit.items.findSome? fun item =>
+    let item := match item with
+      | .pub _ i => i
+      | i => i
+    match item with
+    | .effect n _ ops => if n == named.name then some (ops.map (·.name)) else none
+    | _ => none
+  pure (unit.own.filter fun b => b.entry.kind == .op && (ops.getD []).contains b.name)
 
 def noteEdge (viewer target : List String) : R Unit := do
   if viewer == target || target.head? == preludePath.head? || viewer.head? == preludePath.head? then return
@@ -216,6 +245,12 @@ partial def scopeOf (p : List String) : R (List Bound) := do
       for b in found do
         let name := if glob then b.name else rename.getD b.name
         out := out ++ [{ b with name, shown, rank := if glob then 1 else 0 }]
+        -- An effect brings its operations with it, under their own names
+        -- whatever the effect is called here.
+        if !glob && b.entry.kind == .effect then
+          for o in ← opsOf b.entry do
+            unless out.any (fun x => x.name == o.name && x.entry.global == o.entry.global && x.rank == 0) do
+              out := out ++ [{ o with shown, rank := 0 }]
   if p != preludePath then
     if let some prelude ← unitOf preludePath then
       out := out ++ prelude.own.map fun b => { b with shown := .priv, rank := 2 }
@@ -303,6 +338,19 @@ partial def imported (p : List String) (scope : List Bound) (path : List String)
       let seen ← exported p q name
       for b in seen do noteUse p b.entry
       found := found ++ seen.filter fun b => b.entry.kind != .module || asModule.isNone
+  -- `use a::Effect::operation`: one operation of an effect.
+  if found.isEmpty && !before.isEmpty then
+    let effect := before.getLast!
+    let home ← if before.length == 1 then pure (some p) else moduleAt p scope before.dropLast
+    if let some q := home then
+      let named ← if q == p then pure (scope.filter fun b => b.name == effect && b.rank ≤ 1)
+        else exported p q effect
+      if let some eb := named.find? fun b => b.entry.kind == .effect then
+        match (← opsOf eb.entry).find? fun o => o.name == name with
+        | some o =>
+          noteUse p o.entry
+          return [o]
+        | none => throw s!"`use {written}`: the effect `{effect}` has no operation `{name}`"
   if found.isEmpty then
     if before.isEmpty then throw s!"`use {written}`: there is no module `{written}`"
     match ← moduleAt p scope before with
@@ -337,6 +385,8 @@ def resolveValue (ctx : Ctx) (bound : List String) (qual : Option String) (name 
   match qual with
   | none =>
     if bound.contains name then return (none, name, none)
+    if let some (a, b) := clash ctx.scope .value name then
+      throw s!"`{name}` is two things here, `{a.global}` and `{b.global}`: say which with its module"
     match lookupIn ctx.scope .value name with
     | some e =>
       noteUse ctx.here e
@@ -402,6 +452,8 @@ def resolveNamed (ctx : Ctx) (space : Space) (generics : List String) (written :
   let segs := written.splitOn "::"
   if segs.length == 1 then
     if generics.contains written then return (written, none)
+    if let some (a, b) := clash ctx.scope space written then
+      throw s!"`{written}` is two things here, `{a.global}` and `{b.global}`: say which with its module"
     match lookupIn ctx.scope space written with
     | some e =>
       noteUse ctx.here e

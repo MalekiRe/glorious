@@ -892,6 +892,23 @@ From the audit of the specification.
   type is.
 - **`[0, *]`** is `[0, infinity]`.
 
+## A name that is two things is an error; an effect brings its operations
+
+From the audit of the specification (2.3, 2.4).
+
+- **Two meanings at once are not chosen between.** A name the module
+  declares and also names in a `use`, or names in two `use`s of different
+  things, or that two `use ..::*` both bring with nothing nearer, is refused
+  where it is written, with both meanings. Before, the first was taken. What
+  the module declares or names still comes before what `::*` brings, and
+  that before the prelude; a local name still hides them all.
+- **`use p::Effect;` brings the effect's operations** under their own names,
+  whatever the effect is renamed to with `as`. Two effects with an operation
+  of one name are then two meanings, and
+  **`use p::Effect::{read, write as emit};`** brings only the operations
+  named, as the way out. An arm of a handler is written with the name the
+  operation has here. It is the same operation however it was brought.
+
 ## What the specification's audit turned away
 
 An audit of the language specification against the compiler, section by
