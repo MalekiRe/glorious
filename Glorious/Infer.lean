@@ -1043,10 +1043,14 @@ partial def tryCall (c : Call) : M Bool := do
       -- there: a function that calls itself with a reference to a variable
       -- of its own. Its type binds the region.
       let mut chosen : Option (ITy × ITy × Nat) := none
+      -- Whether it is a reference may itself not be known yet.
+      let mut unknown := false
       if ps.length == c.given.length then
         for (p, g) in ps.zip c.given do
-          if let (.var _, .ref ρ _) := (← find p, ← find g) then
-            if chosen.isNone then chosen := some (p, g, ρ)
+          match ← find p, ← find g with
+          | .var _, .ref ρ _ => if chosen.isNone then chosen := some (p, g, ρ)
+          | .var _, .var _ => unknown := true
+          | _, _ => pure ()
       match chosen with
       | some (p, g, region) =>
         let bound ← freshRg
@@ -1055,8 +1059,24 @@ partial def tryCall (c : Call) : M Bool := do
         unify p (← reregion region bound g)
         tryCall c
       | none =>
-        plainCall c
-        pure true
+        if unknown then pure false
+        else
+          -- Or its parameter is known to be a reference, to no cell yet,
+          -- and it is given one to a cell: its type binds that region.
+          let mut own : Option Nat := none
+          if ps.length == c.given.length then
+            for (p, g) in ps.zip c.given do
+              if let (.ref ρp _, .ref ρ _) := (← find p, ← find g) then
+                let rp ← findRg ρp
+                if own.isNone && !(← isAtom rp) && (← isAtom (← findRg ρ)) then own := some rp
+          match own with
+          | some region =>
+            let a ← findAcc acc
+            modify fun s => { s with accs := s.accs.modify a fun x => { x with binder := some region } }
+            tryCall c
+          | none =>
+            plainCall c
+            pure true
   | .var _ =>
     let given ← c.given.mapM find
     let mut found : Option Nat := none

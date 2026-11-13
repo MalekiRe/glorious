@@ -902,6 +902,20 @@ Not built. Conversion other than through `Int` (`u8(n)`, `int(x)`, `f64(n)`,
 `widen`, `narrow`, `char(code)`). A `Str` is a list: there are no arrays, so
 its length is counted.
 
+## A `&mut` reference is not given to a resumption
+
+**Decision: `k(&mut x)` in a handler's arm stays refused, because it is
+wrong.** It was on the list of what the checker refuses without cause. It
+has cause. A handler is deep: the computation `k` resumes runs under the same
+handler, and may perform the operation again, when the arm runs again and
+borrows `x` with `&mut` again, while the computation still holds the first
+reference. `let a = ask(); let b = ask(); *a = 1; *b = 2` would then have two
+`&mut` references to one variable. The message says as much: calling `k` may
+borrow `x` while a value still in use holds a `&mut` reference to it. A
+shared reference can be given (`k(&x)`), and a `&mut` reference can be the
+operation's argument (`tick(&mut x)`), which is lent for the arm and no
+longer.
+
 ## A callable's type binds a region where it has to
 
 **Decision: when a certificate is looked for, a callable given a reference is
