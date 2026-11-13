@@ -2236,6 +2236,26 @@ code at the address are never let go of.
 - **Not on the proved machines.** A foreign call has no meaning there; these
   programs run on the Rust VM and the backends alone, and are not certified.
 
+## The host is effects
+
+`std::host` declares what a program asks of the machine it runs on as effects,
+as the library specification does (27): `Console`, `FileRead`, `FileWrite`,
+`Diagnostic`, `ProcessEnvironment`, `ProcessArgs`, and `Clock` and `Entropy`
+besides. `run_host` answers them all with the operating system, through C.
+A program that asks for a file therefore says so in its type, and can be run
+with another handler that answers from memory.
+
+- **The types are this implementation's**, not the specification's: a path
+  and a text are `Str`, bytes are `[u8]`, an error is the operating system's
+  number for it. `Path`, `OsString`, `Slice` and a structured `IoError` are
+  not built.
+- **`args()` gives what the process was started with**, the interpreter's
+  own arguments included when the program is run by it.
+- **It is the operating system's `open`, `read`, `write`**: there is no
+  buffering beyond a line's, no streams, and a byte goes to or from C at a
+  time, which is slow for large files.
+- **Not on the proved machines**, like everything that calls C.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by

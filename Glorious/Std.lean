@@ -21,6 +21,7 @@ pub mod map;
 pub mod set;
 pub mod iter;
 pub mod c;
+pub mod host;
 pub mod hash;
 "#
 
@@ -724,6 +725,250 @@ pub fn any(it, wanted) { match(find(it, wanted)) { Some(_) => true, None => fals
 pub fn all(it, wanted) { not any(it, { x => not wanted(x) }) }
 "#
 
+private def hostText : String := r#"// What a program asks of the machine it runs on: the console, files, the
+// environment, clocks, chance. Each is an effect, so that a program's type
+// says what it may ask for and whoever runs it decides what it gets.
+// `run_host` answers them all with the operating system, through C: it is
+// the one place here that is unsafe, and it has no meaning on the proved
+// machines.
+
+use std::c::{malloc, free, c_string, text_at, write_bytes, read_byte};
+use std::text::{utf8, from_utf8};
+
+// Why the operating system refused: its number for the reason.
+pub struct IoError { pub code: Int }
+
+pub effect Console {
+    write_stdout(bytes: [u8]) -> Result<Int, IoError>
+    write_stderr(bytes: [u8]) -> Result<Int, IoError>
+    read_stdin(most: Int) -> Result<[u8], IoError>
+}
+pub effect FileRead {
+    read_file(path: Str) -> Result<[u8], IoError>
+}
+pub effect FileWrite {
+    write_file(path: Str, bytes: [u8]) -> Result<(), IoError>
+    write_file_atomic(path: Str, bytes: [u8]) -> Result<(), IoError>
+}
+pub effect Diagnostic {
+    write_diagnostic(text: Str) -> Result<(), IoError>
+}
+pub effect ProcessEnvironment {
+    env(name: Str) -> Result<Option<Str>, IoError>
+    current_dir() -> Result<Str, IoError>
+}
+pub effect ProcessArgs {
+    args() -> Result<[Str], IoError>
+}
+pub effect Clock {
+    now() -> Int
+    monotonic() -> Int
+}
+pub effect Entropy {
+    random_bytes(n: Int) -> Result<[u8], IoError>
+}
+
+extern "C" {
+    fn open(path: usize, flags: i32, mode: i32) -> i32;
+    fn close(fd: i32) -> i32;
+    fn read(fd: i32, buf: usize, n: usize) -> isize;
+    fn write(fd: i32, buf: usize, n: usize) -> isize;
+    fn rename(from: usize, to: usize) -> i32;
+    fn getenv(name: usize) -> usize;
+    fn getcwd(buf: usize, n: usize) -> usize;
+    fn clock_gettime(clock: i32, at: usize) -> i32;
+    fn getrandom(buf: usize, n: usize, flags: u32) -> isize;
+    fn __errno_location() -> usize;
+}
+
+unsafe fn refused() -> IoError { IoError { code: ptr_read(__errno_location(), 32) } }
+
+// Every byte written, or why not.
+unsafe fn write_all(fd: i32, bytes: [u8]) -> Result<Int, IoError> {
+    let n = len(bytes);
+    let at = malloc(usize(n + 1));
+    write_bytes(at, bytes);
+    let done = write_on(fd, at, n, 0);
+    free(at);
+    done
+}
+unsafe fn write_on(fd: i32, at: usize, n: Int, sent: Int) -> Result<Int, IoError> {
+    if(sent >= n) { Ok(n) } else {
+        let k = int(write(fd, at + usize(sent), usize(n - sent)));
+        if(k < 0) { Err(refused()) } else { tail write_on(fd, at, n, sent + k) }
+    }
+}
+
+unsafe fn bytes_at(out: [u8], at: usize, n: Int) -> [u8] {
+    if(n <= 0) { out } else { tail bytes_at(push(out, read_byte(at)), at + 1usize, n - 1) }
+}
+
+// What can be read now, at most so many bytes: none at the end.
+unsafe fn read_some(fd: i32, most: Int) -> Result<[u8], IoError> {
+    let room = if(most < 1) { 1 } else { most };
+    let buf = malloc(usize(room));
+    let k = int(read(fd, buf, usize(room)));
+    let got = if(k < 0) { Err(refused()) } else { Ok(bytes_at([], buf, k)) };
+    free(buf);
+    got
+}
+
+// Everything there is to read.
+unsafe fn read_all(fd: i32, buf: usize, out: [u8]) -> Result<[u8], IoError> {
+    let k = int(read(fd, buf, 65536usize));
+    if(k < 0) { Err(refused()) } else {
+        if(k == 0) { Ok(out) } else { tail read_all(fd, buf, bytes_at(out, buf, k)) }
+    }
+}
+
+unsafe fn read_path(path: Str) -> Result<[u8], IoError> {
+    let p = c_string(path);
+    let fd = open(p, 0i32, 0i32);
+    free(p);
+    if(fd < 0i32) { Err(refused()) } else {
+        let buf = malloc(65536usize);
+        let got = read_all(fd, buf, []);
+        free(buf);
+        close(fd);
+        got
+    }
+}
+
+// Made if it is not there, emptied if it is, readable by all and writable
+// by its owner.
+unsafe fn write_path(path: Str, bytes: [u8]) -> Result<(), IoError> {
+    let p = c_string(path);
+    let fd = open(p, 577i32, 420i32);
+    free(p);
+    if(fd < 0i32) { Err(refused()) } else {
+        let done = write_all(fd, bytes);
+        close(fd);
+        match(done) { Ok(_) => Ok(()), Err(e) => Err(e) }
+    }
+}
+
+// Written beside the file and then given its name, so that the name is
+// never that of half a file.
+unsafe fn write_path_atomic(path: Str, bytes: [u8]) -> Result<(), IoError> {
+    let beside = path ++ ".writing";
+    match(write_path(beside, bytes)) {
+        Err(e) => Err(e),
+        Ok(_) =>
+            let from = c_string(beside);
+            let to = c_string(path);
+            let moved = rename(from, to);
+            free(from);
+            free(to);
+            if(moved < 0i32) { Err(refused()) } else { Ok(()) }
+    }
+}
+
+unsafe fn look_up(name: Str) -> Result<Option<Str>, IoError> {
+    let n = c_string(name);
+    let at = getenv(n);
+    free(n);
+    if(at == 0usize) { Ok(None) } else {
+        match(text_at(at)) { Some(text) => Ok(Some(text)), None => Err(IoError { code: 84 }) }
+    }
+}
+
+unsafe fn where_now() -> Result<Str, IoError> {
+    let buf = malloc(4096usize);
+    let at = getcwd(buf, 4096usize);
+    let got = if(at == 0usize) { Err(refused()) } else {
+        match(text_at(buf)) { Some(text) => Ok(text), None => Err(IoError { code: 84 }) }
+    };
+    free(buf);
+    got
+}
+
+// The texts between zeros.
+fn between_zeros(bytes: [u8], i: Int, word: [u8], out: [Str]) -> [Str] {
+    if(i >= len(bytes)) { out } else {
+        if(int(bytes[i]) == 0) {
+            let text = match(from_utf8(word)) { Some(t) => t, None => "" };
+            tail between_zeros(bytes, i + 1, [], push(out, text))
+        } else { tail between_zeros(bytes, i + 1, push(word, bytes[i]), out) }
+    }
+}
+
+// What the process was started with, as the operating system has it.
+unsafe fn arguments() -> Result<[Str], IoError> {
+    match(read_path("/proc/self/cmdline")) {
+        Ok(bytes) => Ok(between_zeros(bytes, 0, [], [])),
+        Err(e) => Err(e)
+    }
+}
+
+// Nanoseconds on one of the operating system's clocks.
+unsafe fn clock(which: i32) -> Int {
+    let at = malloc(16usize);
+    clock_gettime(which, at);
+    let nanos = ptr_read(at, 64) * 1000000000 + ptr_read(at + 8usize, 64);
+    free(at);
+    nanos
+}
+
+unsafe fn chance(n: Int) -> Result<[u8], IoError> {
+    let room = if(n < 1) { 1 } else { n };
+    let buf = malloc(usize(room));
+    let k = int(getrandom(buf, usize(n), 0u32));
+    let got = if(k < n) { Err(refused()) } else { Ok(bytes_at([], buf, n)) };
+    free(buf);
+    got
+}
+
+// Run a computation with the operating system answering what it asks for.
+pub fn run_host(main) {
+    handle(main()) {
+        write_stdout(bytes, k) => k(unsafe { write_all(1i32, bytes) }),
+        write_stderr(bytes, k) => k(unsafe { write_all(2i32, bytes) }),
+        read_stdin(most, k) => k(unsafe { read_some(0i32, most) }),
+        read_file(path, k) => k(unsafe { read_path(path) }),
+        write_file(path, bytes, k) => k(unsafe { write_path(path, bytes) }),
+        write_file_atomic(path, bytes, k) => k(unsafe { write_path_atomic(path, bytes) }),
+        write_diagnostic(text, k) => k(unsafe {
+            match(write_all(2i32, utf8(text ++ "\n"))) { Ok(_) => Ok(()), Err(e) => Err(e) }
+        }),
+        env(name, k) => k(unsafe { look_up(name) }),
+        current_dir(k) => k(unsafe { where_now() }),
+        args(k) => k(unsafe { arguments() }),
+        now(k) => k(unsafe { clock(0i32) }),
+        monotonic(k) => k(unsafe { clock(1i32) }),
+        random_bytes(n, k) => k(unsafe { chance(n) }),
+        x => x
+    }
+}
+
+// A text on standard output, and the same with a line's end.
+pub fn print(text: Str) { write_stdout(utf8(text)); () }
+pub fn println(text: Str) { print(text ++ "\n") }
+pub fn eprintln(text: Str) { write_stderr(utf8(text ++ "\n")); () }
+
+// A file as text, if it is UTF-8.
+pub fn read_text(path: Str) -> Result<Str, IoError> {
+    match(read_file(path)) {
+        Ok(bytes) => match(from_utf8(bytes)) { Some(text) => Ok(text), None => Err(IoError { code: 84 }) },
+        Err(e) => Err(e)
+    }
+}
+pub fn write_text(path: Str, text: Str) -> Result<(), IoError> { write_file(path, utf8(text)) }
+
+// The next line of standard input without its end, or nothing at the end.
+pub fn read_line() -> Option<Str> { line_from([], false) }
+fn line_from(line: [u8], any: Bool) -> Option<Str> {
+    match(read_stdin(1)) {
+        Err(_) => None,
+        Ok(bytes) =>
+            if(len(bytes) == 0) {
+                if(any) { from_utf8(line) } else { None }
+            } else {
+                if(int(bytes[0]) == 10) { from_utf8(line) } else { tail line_from(push(line, bytes[0]), true) }
+            }
+    }
+}
+"#
+
 private def cText : String := r#"// What C has: its memory, and texts as it writes them. Everything here is
 // unsafe: an address is whatever a program says it is.
 
@@ -918,6 +1163,7 @@ def texts : List (List String × String) :=
    (["std", "set"], setText),
    (["std", "iter"], iterText),
    (["std", "c"], cText),
+   (["std", "host"], hostText),
    (["std", "hash"], hash)]
 
 end Glorious.Std

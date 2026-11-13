@@ -1873,8 +1873,8 @@ def cases : List Case := [
     [], "error: 1:13: in `main`: `ptr_read` is unsafe: it can be named only in `unsafe { .. }` or in an `unsafe fn`"⟩,
   ⟨"use std::text::{utf8, from_utf8};\nfn main() { say(utf8(\"h\\u{e9}\\u{20ac}\")); say(from_utf8([104u8, 105u8])); from_utf8(utf8(\"h\\u{e9}llo \\u{1F600}\")) == Some(\"h\\u{e9}llo \\u{1F600}\") }",
     [], "[104, 195, 169, 226, 130, 172]\nOk(hi)\nOk(())"⟩,
-  ⟨"extern \"C\" { fn sin(x: f64) -> f64; }\nfn main() { 0 }",
-    [], "error: 1:37: a foreign function takes and gives whole numbers, an `Int` or a type such as `i32` or `usize`, not `f64`, found `}`"⟩,
+  ⟨"extern \"C\" { fn f(x: Str) -> Int; }\nfn main() { 0 }",
+    [], "error: 1:35: a foreign function takes and gives whole numbers, floats and addresses (`Int`, a type such as `i32`, `usize` or `f64`, `*const T`, `*mut T`), not `Str`, found `}`"⟩,
   -- An array a variable holds is changed where it is; an array of values with
   -- `Drop` is destroyed element by element, the last first.
   ⟨"fn main() { let mut a = []; let mut i = 0; while({ i < 50 }) { a = push(a, i * i); i = i + 1 }; a[7] = 0 - 1; say(len(a)); a[7] + a[49] }",
@@ -2501,6 +2501,12 @@ def cases : List Case := [
   -- An effect cannot pass C, so what C calls performs none.
   ⟨"effect Ask { ask() -> Int }\nextern \"C\" { fn qsort(base: usize, n: usize, size: usize, cmp: usize); fn malloc(n: usize) -> usize; }\nfn main() { handle(unsafe {\n    let p = malloc(16usize);\n    ptr_write(p, 64, 3); ptr_write(p + 8usize, 64, 1);\n    qsort(p, 2usize, 8usize, c_callback({ (a, b) => ask() }, 2)); 0 }) { ask(k) => k(1), x => x } }",
     [], "error: 6:5: in `main`: argument 1 of `c_callback`: expected `fn(usize, usize) -> Int`, found `fn(usize, usize) -> Int / {Ask}` (effect `Ask` is not handled here)"⟩,
+  -- A field read by name in a clause given a value of a declared type.
+  ⟨"struct E { code: Int }\nfn f(r: Result<Int, E>) -> Int { match(r) { Ok(n) => n, Err(e) => e.code } }\nfn main() -> Int { f(Err(E { code: 7 })) + f(Ok(1)) }",
+    [], "8"⟩,
+  -- Asking the host for what nothing answers is an effect that is not handled.
+  ⟨"use std::host::{println};\nfn main() { println(\"hi\"); 0 }",
+    [], "error: `main` performs effects that nothing handles: {std::host::Console}"⟩,
   -- `drop` is not for a program to call.
   ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nfn main() { let mut f = File(7); drop(&mut f); 0 }",
     [], "error: 3:34: in `main`: `drop` is run when what holds a value ends; a program does not call it"⟩,
@@ -2540,7 +2546,10 @@ def foreignCases : List Case := [
   ⟨"extern \"C\" { fn qsort(base: usize, n: usize, size: usize, cmp: usize); fn malloc(n: usize) -> usize; fn free(p: usize); }\nfn order(a: usize, b: usize) -> Int { unsafe { let x = ptr_read(a, 64); let y = ptr_read(b, 64); if(x < y) { 0 - 1 } else { if(x > y) { 1 } else { 0 } } } }\nfn main() { unsafe {\n    let p = malloc(40usize);\n    ptr_write(p, 64, 30); ptr_write(p + 8usize, 64, 10); ptr_write(p + 16usize, 64, 50); ptr_write(p + 24usize, 64, 20); ptr_write(p + 32usize, 64, 40);\n    let cmp = c_callback(order, 2);\n    qsort(p, 5usize, 8usize, cmp);\n    say(ptr_read(p, 64)); say(ptr_read(p + 8usize, 64)); say(ptr_read(p + 32usize, 64));\n    free(p); 0 } }",
     [], "10\n20\n50\n0"⟩,
   ⟨"extern \"C\" { fn qsort(base: usize, n: usize, size: usize, cmp: usize); fn malloc(n: usize) -> usize; fn free(p: usize); }\nfn main() { unsafe {\n    let p = malloc(24usize);\n    ptr_write(p, 64, 3); ptr_write(p + 8usize, 64, 1); ptr_write(p + 16usize, 64, 2);\n    let sign = 0 - 1;\n    let cmp = c_callback({ (a, b) => unsafe { sign * (ptr_read(a, 64) - ptr_read(b, 64)) } }, 2);\n    qsort(p, 3usize, 8usize, cmp);\n    say(ptr_read(p, 64)); say(ptr_read(p + 16usize, 64));\n    free(p); 0 } }",
-    [], "3\n1\n0"⟩
+    [], "3\n1\n0"⟩,
+  -- What a program asks of the machine it runs on is effects, which `run_host` answers with the operating system.
+  ⟨"use std::host::{run_host, println, read_text, write_text, env, now, monotonic, random_bytes, current_dir, args};\nfn main() { run_host({\n    println(\"hello, host\");\n    let wrote = write_text(\"/tmp/glorious-host-test.txt\", \"one\\ntwo\\n\");\n    let back = read_text(\"/tmp/glorious-host-test.txt\");\n    println(match(back) { Ok(text) => text, Err(e) => \"error\" });\n    let missing = read_text(\"/tmp/glorious-no-such-file\");\n    println(match(missing) { Ok(_) => \"found\", Err(e) => \"no file: \" ++ show(e.code) });\n    let home = env(\"HOME\");\n    println(match(home) { Ok(Some(_)) => \"HOME is set\", _ => \"no HOME\" });\n    let a = monotonic(); let b = monotonic();\n    println(if(b >= a) { \"the clock goes on\" } else { \"the clock went back\" });\n    println(match(random_bytes(8)) { Ok(bytes) => show(len(bytes)), Err(_) => \"no chance\" });\n    println(match(current_dir()) { Ok(_) => \"somewhere\", Err(_) => \"nowhere\" });\n    println(match(args()) { Ok(a) => if(len(a) > 0) { \"started\" } else { \"?\" }, Err(_) => \"?\" });\n    0 }) }",
+    [], "hello, host\none\ntwo\n\nno file: 2\nHOME is set\nthe clock goes on\n8\nsomewhere\nstarted\n0"⟩
 ]
 
 end Glorious

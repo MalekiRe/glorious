@@ -359,9 +359,14 @@ partial def checkArg (scope : Scope) (amb : Row) (what : String) (p : Ty) (a : E
       let arity := match clauses.head? with
         | some (.mk pats _) => pats.length
         | none => 0
+      -- So is a parameter known to be of a declared type: what the clauses
+      -- do with it, a field read by name, is then looked at knowing it.
       let mut annots : List (Option Ty) := []
       for q in ps do
-        annots := annots ++ [if (← literalAt q 0).isSome then some q else none]
+        let declared := match ← find q with
+          | .con _ _ => true
+          | _ => false
+        annots := annots ++ [if declared || (← literalAt q 0).isSome then some q else none]
       if arity == ps.length && annots.any (·.isSome) then
         let t ← inferCallable scope annots none none clauses "the clauses of this callable do" id
         if let .fn _ _ _ _ cap := t then
