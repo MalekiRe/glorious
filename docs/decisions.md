@@ -888,13 +888,56 @@ The first module may declare a name the prelude has; the prelude's is then
 `prelude::name` in the whole program. What only the prelude needs is in a
 module inside it and cannot be named.
 
-Not built. `u64`, `i128`, `u128`: the machines' integers are 64 bits with a
-sign; and `usize` is 63 bits for the same reason. A literal without a type
-is an `Int`, whatever is expected of it. `-` before anything but a number.
-Byte literals, block comments. Conversion other than through `Int`
-(`u8(n)`, `int(x)`, `f64(n)`, `widen`, `narrow`, `char(code)`). Operations
-on bits; square root and the like. `Show` for `Bool`, tuples and
-`Result`. A `Str` is a list: there are no arrays, so its length is counted.
+Since added (see "Wider integers and what was missing of scalars"): `u64`,
+`i128`, `u128`, a `usize` of 64 bits, literals that take the type wanted of
+them, `-` before any value, block comments, `b'x'`, operations on bits,
+square root and rounding, `Show` for tuples and `Result`.
+
+Not built. Conversion other than through `Int` (`u8(n)`, `int(x)`, `f64(n)`,
+`widen`, `narrow`, `char(code)`). A `Str` is a list: there are no arrays, so
+its length is counted.
+
+## Wider integers and what was missing of scalars
+
+**Decision: what holds an integer holds 128 bits; `Int` is still kept to 64.**
+The five operations `Int` had still have no result outside 64 bits, so `Int`
+is as it was and as fast. Three more (`wideAdd`, `wideSub`, `wideMul`) and
+division have none outside 128. `u64`, `usize` and `i128` compute with those
+and ask that the result fit, as every type of whole numbers does. A `u128`
+does not fit 128 bits with a sign, so it is held as the same bits read with
+one, and eight primitives read them without (`uwAdd` .. `uwShr`). The Rust VM
+holds an `i128`.
+
+Bits: `intAnd`, `intOr`, `intXor`, `intShl`, `intShr`, on the two's complement
+of the integers; a shift that loses bits has no result. They are the functions
+`bit_and`, `bit_or`, `bit_xor`, `shl`, `shr` of the trait `Bits`, not
+operators: `&` is a borrow, `>>` closes two lists of type arguments, and `|`
+and `^` alone would be half a set.
+
+Floating point: `f64Sqrt`, by a whole square root of enough bits and one more
+for what it leaves out, and `f64Round` (down, up, towards zero, to nearest),
+both exact in `Glorious/Float.lean` and agreeing with native arithmetic on
+4032 special and random numbers. `sqrt floor ceil trunc round abs` are the
+trait `Real`.
+
+A whole number written without a type has the type that is wanted of it, if
+that is a type of whole numbers and it fits; else it is an `Int`. This is
+settled when the function it is in is done, so a function is never generic
+in what a literal is: `fn inc(x) { x + 1 }` is still of `Int`.
+
+`prefix 9 - = negate` says which function an operator stands for in that
+place, so `-` before a value is `negate` (trait `Neg`) and between two values
+is `-`, with no function taking either one argument or two. `-` straight
+before a number is still part of the number, so that the least value of a
+type can be written.
+
+`/* .. */`, which may hold others. `b'x'` is a `u8`. `p.0` reads a field of
+what a reference `p` points to, as `p.name` did. `impl Trait for (A, B)`:
+tuples can have traits, and `()`, pairs, triples and `Result` have `Show`.
+Truth shows as `Ok(())`, since `Bool` is a `Result`.
+
+A program told what went wrong is told which: a zero divisor, a value that
+does not fit its type, or an overflow.
 
 ## A module is a unit, and modules have no cycle
 

@@ -18,7 +18,7 @@ use std::rc::Rc;
 
 #[derive(Clone)]
 enum Value {
-    Int(i64),
+    Int(i128),
     Data(Rc<Data>),
     Clo(Rc<Clo>),
     Cont(usize),
@@ -48,7 +48,7 @@ fn unit() -> Value {
 
 enum Atom {
     Var(usize),
-    Int(i64),
+    Int(i128),
 }
 
 struct Place {
@@ -79,6 +79,24 @@ enum Prim {
     FOfDecimal,
     FDigits,
     FExp10,
+    FSqrt,
+    FRound,
+    WAdd,
+    WSub,
+    WMul,
+    And,
+    Or,
+    Xor,
+    Shl,
+    Shr,
+    UAdd,
+    USub,
+    UMul,
+    UDiv,
+    URem,
+    ULt,
+    UShl,
+    UShr,
 }
 
 #[derive(Clone, Copy)]
@@ -110,7 +128,7 @@ enum Instr {
     Cancel(Atom),
     Host(u64, Vec<Atom>),
     TestCtor(Place, u64, usize, usize),
-    TestInt(Place, i64, usize),
+    TestInt(Place, i128, usize),
     Mem(MemOp, Vec<Atom>),
     Cell { init: Atom, thunk: Atom, tail: bool },
     Lend { r: Atom, thunk: Atom, pre: Vec<Atom>, post: Vec<Atom> },
@@ -154,10 +172,28 @@ impl Reader<'_> {
         usize::try_from(self.nat()?).map_err(|_| "index too large".into())
     }
 
+    /// A number of up to 128 bits, in the same form.
+    fn wide(&mut self) -> Decoded<u128> {
+        let mut result: u128 = 0;
+        let mut shift = 0u32;
+        loop {
+            let b = self.byte()?;
+            let chunk = u128::from(b & 0x7f);
+            if shift >= 128 || (chunk << shift) >> shift != chunk {
+                return Err("number does not fit in 128 bits".into());
+            }
+            result |= chunk << shift;
+            if b < 128 {
+                return Ok(result);
+            }
+            shift += 7;
+        }
+    }
+
     /// Zigzag: `2m` is `m`, `2m + 1` is `-(m + 1)`.
-    fn int(&mut self) -> Decoded<i64> {
-        let z = self.nat()?;
-        let half = (z >> 1) as i64;
+    fn int(&mut self) -> Decoded<i128> {
+        let z = self.wide()?;
+        let half = (z >> 1) as i128;
         Ok(if z & 1 == 0 { half } else { -half - 1 })
     }
 
@@ -211,6 +247,24 @@ impl Reader<'_> {
             18 => Ok(Prim::FOfDecimal),
             19 => Ok(Prim::FDigits),
             20 => Ok(Prim::FExp10),
+            21 => Ok(Prim::FSqrt),
+            22 => Ok(Prim::FRound),
+            23 => Ok(Prim::WAdd),
+            24 => Ok(Prim::WSub),
+            25 => Ok(Prim::WMul),
+            26 => Ok(Prim::And),
+            27 => Ok(Prim::Or),
+            28 => Ok(Prim::Xor),
+            29 => Ok(Prim::Shl),
+            30 => Ok(Prim::Shr),
+            31 => Ok(Prim::UAdd),
+            32 => Ok(Prim::USub),
+            33 => Ok(Prim::UMul),
+            34 => Ok(Prim::UDiv),
+            35 => Ok(Prim::URem),
+            36 => Ok(Prim::ULt),
+            37 => Ok(Prim::UShl),
+            38 => Ok(Prim::UShr),
             t => Err(format!("unknown intrinsic {t}")),
         }
     }
@@ -767,7 +821,7 @@ impl Vm {
                         unit()
                     }
                     (1, []) => match self.input.pop_front() {
-                        Some(n) => data(0, vec![Value::Int(1), Value::Int(n)]),
+                        Some(n) => data(0, vec![Value::Int(1), Value::Int(i128::from(n))]),
                         None => data(0, vec![Value::Int(0), Value::Int(0)]),
                     },
                     _ => return wrong(),
@@ -800,18 +854,22 @@ impl Vm {
     }
 }
 
-/// Intrinsics. Integers are 64-bit and arithmetic is checked.
+/// Intrinsics. An integer is held in 128 bits. The arithmetic of `Int` is
+/// kept to 64; the wide and the unsigned operations to 128.
 fn prim(p: Prim, args: &[Value]) -> Step<Value> {
     let [Value::Int(a), Value::Int(b)] = args else {
         return wrong();
     };
     let (a, b) = (*a, *b);
+    let narrow = |r: Option<i128>| r.filter(|r| i64::try_from(*r).is_ok());
+    let unsigned = |r: Option<u128>| r.map(|r| r as i128);
+    let (ua, ub) = (a as u128, b as u128);
     let result = match p {
-        Prim::Add => a.checked_add(b),
-        Prim::Sub => a.checked_sub(b),
-        Prim::Mul => a.checked_mul(b),
-        Prim::Lt => Some(i64::from(a < b)),
-        Prim::Eq => Some(i64::from(a == b)),
+        Prim::Add => narrow(a.checked_add(b)),
+        Prim::Sub => narrow(a.checked_sub(b)),
+        Prim::Mul => narrow(a.checked_mul(b)),
+        Prim::Lt => Some(i128::from(a < b)),
+        Prim::Eq => Some(i128::from(a == b)),
         // Towards zero. The least integer divided by -1 does not fit; what is
         // left of that division is zero.
         Prim::Div => {
@@ -827,64 +885,113 @@ fn prim(p: Prim, args: &[Value]) -> Step<Value> {
             _ => a.checked_rem(b),
         },
         Prim::Fit => fits(a, b).then_some(a),
-        Prim::FAdd => Some(bits(float(a) + float(b))),
-        Prim::FSub => Some(bits(float(a) - float(b))),
-        Prim::FMul => Some(bits(float(a) * float(b))),
-        Prim::FDiv => Some(bits(float(a) / float(b))),
-        Prim::FLt => Some(i64::from(float(a) < float(b))),
-        Prim::FEq => Some(i64::from(float(a) == float(b))),
+        Prim::FAdd => float2(a, b, |x, y| x + y),
+        Prim::FSub => float2(a, b, |x, y| x - y),
+        Prim::FMul => float2(a, b, |x, y| x * y),
+        Prim::FDiv => float2(a, b, |x, y| x / y),
+        Prim::FLt => Some(i128::from(float(a) < float(b))),
+        Prim::FEq => Some(i128::from(float(a) == float(b))),
+        // The nearest number to an integer of any size: `as` rounds so.
         Prim::FOfInt => Some(bits(a as f64)),
         Prim::FToInt => {
             let whole = float(a).trunc();
             // Both bounds are powers of two, so they are exact.
             (whole >= -9223372036854775808.0 && whole < 9223372036854775808.0)
-                .then_some(whole as i64)
+                .then_some(whole as i128)
         }
         Prim::FNarrow => {
             let narrow = float(a) as f32;
             Some(if narrow.is_nan() {
                 0x7FC0_0000
             } else {
-                i64::from(narrow.to_bits())
+                i128::from(narrow.to_bits())
             })
         }
-        Prim::FWiden => Some(bits(f64::from(f32::from_bits(a as u64 as u32)))),
+        Prim::FWiden => Some(bits(f64::from(f32::from_bits(ua as u32)))),
         Prim::FOfDecimal => Some(bits(of_decimal(a, b))),
         Prim::FDigits => decimal(a, b).map(|(digits, _)| digits),
         Prim::FExp10 => decimal(a, b).map(|(_, exp10)| exp10),
+        Prim::FSqrt => Some(bits(float(a).sqrt())),
+        Prim::FRound => match b {
+            0 => Some(bits(float(a).floor())),
+            1 => Some(bits(float(a).ceil())),
+            2 => Some(bits(float(a).trunc())),
+            3 => Some(bits(float(a).round_ties_even())),
+            _ => None,
+        },
+        Prim::WAdd => a.checked_add(b),
+        Prim::WSub => a.checked_sub(b),
+        Prim::WMul => a.checked_mul(b),
+        Prim::And => Some(a & b),
+        Prim::Or => Some(a | b),
+        Prim::Xor => Some(a ^ b),
+        // Moved up and back down, an integer is itself only if nothing of
+        // it was lost.
+        Prim::Shl => (0..128).contains(&b).then(|| a << b).filter(|r| r >> b == a),
+        Prim::Shr => {
+            if b < 0 {
+                None
+            } else if b >= 127 {
+                Some(if a < 0 { -1 } else { 0 })
+            } else {
+                Some(a >> b)
+            }
+        }
+        Prim::UAdd => unsigned(ua.checked_add(ub)),
+        Prim::USub => unsigned(ua.checked_sub(ub)),
+        Prim::UMul => unsigned(ua.checked_mul(ub)),
+        Prim::UDiv => unsigned(ua.checked_div(ub)),
+        Prim::URem => unsigned(ua.checked_rem(ub)),
+        Prim::ULt => Some(i128::from(ua < ub)),
+        Prim::UShl => unsigned((0..128).contains(&b).then(|| ua << b).filter(|r| r >> b == ua)),
+        Prim::UShr => {
+            if b < 0 {
+                None
+            } else if b >= 128 {
+                Some(0)
+            } else {
+                unsigned(Some(ua >> b))
+            }
+        }
     };
     result.map(Value::Int).ok_or(Stop::Wrong)
 }
 
 /// Does an integer fit in a width: so many bits with a sign if the width is
 /// positive, without one if it is negative?
-fn fits(a: i64, width: i64) -> bool {
+fn fits(a: i128, width: i128) -> bool {
     if width > 0 {
-        width >= 64 || (-(1i64 << (width - 1)) <= a && a < (1i64 << (width - 1)))
+        width >= 128 || (-(1i128 << (width - 1)) <= a && a < (1i128 << (width - 1)))
     } else if width < 0 {
         let width = width.unsigned_abs();
-        a >= 0 && (width >= 63 || a < (1i64 << width))
+        a >= 0 && (width >= 127 || a < (1i128 << width))
     } else {
         false
     }
 }
 
-/// A floating point number is held as the integer with its bits.
-fn float(bits: i64) -> f64 {
+/// A floating point number is held as the integer with its bits: the low 64
+/// of them.
+fn float(bits: i128) -> f64 {
     f64::from_bits(bits as u64)
 }
 
-/// There is one NaN: quiet, with no sign and no payload.
-fn bits(x: f64) -> i64 {
+/// There is one NaN: quiet, with no sign and no payload. The bits are a
+/// 64-bit integer with a sign.
+fn bits(x: f64) -> i128 {
     if x.is_nan() {
         0x7FF8_0000_0000_0000
     } else {
-        x.to_bits() as i64
+        i128::from(x.to_bits() as i64)
     }
 }
 
+fn float2(a: i128, b: i128, op: impl Fn(f64, f64) -> f64) -> Option<i128> {
+    Some(bits(op(float(a), float(b))))
+}
+
 /// `digits * 10^exp10`, to the nearest number.
-fn of_decimal(digits: i64, exp10: i64) -> f64 {
+fn of_decimal(digits: i128, exp10: i128) -> f64 {
     if digits == 0 {
         0.0
     } else if exp10 > 400 {
@@ -906,7 +1013,7 @@ fn of_decimal(digits: i64, exp10: i64) -> f64 {
 
 /// A number to `p` digits, 1 to 17: the digits as an integer, without the
 /// sign, and the power of ten they are to be multiplied by. Zero is `(0, 0)`.
-fn decimal(a: i64, p: i64) -> Option<(i64, i64)> {
+fn decimal(a: i128, p: i128) -> Option<(i128, i128)> {
     let x = float(a).abs();
     if !(1..=17).contains(&p) || !x.is_finite() {
         return None;
@@ -917,9 +1024,9 @@ fn decimal(a: i64, p: i64) -> Option<(i64, i64)> {
     let p = p as usize;
     let text = format!("{:.*e}", p - 1, x);
     let (mantissa, exponent) = text.split_once('e')?;
-    let digits: i64 = mantissa.replace('.', "").parse().ok()?;
-    let exponent: i64 = exponent.parse().ok()?;
-    Some((digits, exponent - (p as i64 - 1)))
+    let digits: i128 = mantissa.replace('.', "").parse().ok()?;
+    let exponent: i128 = exponent.parse().ok()?;
+    Some((digits, exponent - (p as i128 - 1)))
 }
 
 /// The name a constructor is shown under.

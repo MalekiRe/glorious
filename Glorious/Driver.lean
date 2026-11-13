@@ -9,6 +9,7 @@ import Glorious.Compile
 import Glorious.Core.Semantics
 import Glorious.Core.Cleanup
 import Glorious.Bytecode.Semantics
+import Glorious.Bytecode.Encode
 
 /-!
 # Driver
@@ -339,11 +340,26 @@ def explainStuck (c : Compiled) (cfg : Core.Config) : String :=
       | _ => "a result could not be delivered"
   | .let_ rhs _ =>
     match rhs with
-    | .prim _ args =>
+    | .prim p args =>
       match evalAtoms s.env args with
       | some vs =>
-        if vs.all (fun v => match v with | .int _ => true | _ => false)
-        then s!"integer overflow: the result of an operation on ({shown vs}) does not fit in 64 bits"
+        if vs.all (fun v => match v with | .int _ => true | _ => false) then
+          -- Which intrinsic it is, by its place in the bytecode's table.
+          let code := (Bytecode.Encode.prim p).headD 0
+          let second : Int := match vs with
+            | [_, .int b] => b
+            | _ => 1
+          let first : Int := match vs with
+            | .int a :: _ => a
+            | _ => 0
+          if code ≤ 2 then
+            s!"integer overflow: the result of an operation on ({shown vs}) does not fit in 64 bits"
+          else if second == 0 && (code == 5 || code == 6 || code == 34 || code == 35) then
+            s!"division by zero: ({shown vs})"
+          else if code == 7 then
+            let kind := if second < 0 then s!"{second.natAbs} bits without a sign" else s!"{second} bits"
+            s!"`{first}` does not fit its type, which has {kind}"
+          else s!"an operation on ({shown vs}) has no result: it would not fit, or there is none"
         else s!"an arithmetic intrinsic is applied to ({shown vs})"
       | none => unbound
     | .place pl =>

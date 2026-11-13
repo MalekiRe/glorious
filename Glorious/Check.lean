@@ -1243,6 +1243,7 @@ def declareTraits (items : List Item) : M Unit := do
         | some ns => pure ns
         | none => throw s!"{what}: unknown trait `{tr}`"
       let arity ← if head == "Int" || Syntax.isScalar head then pure 0
+        else if head.startsWith "(tuple" then pure args.length
         else match (← get).types.lookup head with
           | some d => pure d.arity
           | none => throw s!"{what}: unknown type `{head}`"
@@ -3538,6 +3539,20 @@ def checkLifetimes : M Unit := do
         unless ← outlasts b a do
           throw s!"what lasts for `{x}` is made to depend on what lasts for `{y}`: say `{y}: {x}` if `{y}` lasts at least as long"
 
+/-- A whole number written without a type, where a value of type `t` is
+wanted: if `t` is known to be a type of whole numbers, the number is of that
+type, and this is whether it fits. None if `t` is not such a type: then the
+number is an `Int`. -/
+def literalAt (t : Ty) (n : Int) : M (Option (Option String)) := do
+  match ← find t with
+  | .con name [] =>
+    match Syntax.scalars.lookup name with
+    | some (some width) =>
+      if Glorious.fits n width then pure (some none)
+      else pure (some (some s!"`{n}` does not fit in `{name}`"))
+    | _ => pure none
+  | _ => pure none
+
 /-- The lifetimes a callable type is for every one of, if it is such a type. -/
 def rankedOf (cap : Nat) : M (List (Nat × String)) := do
   let root ← findCap cap
@@ -3741,6 +3756,11 @@ partial def inferExpr (scope : Scope) (amb : Row) : Expr → M Ty
     | none => throw s!"unknown name `{x}`"
   | .fieldOf id e name => do
     if let some field ← inferFieldOfPlace scope (.fieldOf id e name) then return field
+    -- A field by number of a value whose type is not known yet is settled
+    -- once the rest of the function is inferred, as `e.0` of any value is.
+    if let some n := name.toNat? then
+      modify fun s => { s with fieldReads := s.fieldReads.push (id, n) }
+      return ← inferExpr scope amb (.proj e n)
     let subject ← inferExpr scope amb e
     mustDrop subject "taking one field of a value lets go of the rest"
     let idx := (← fieldIndex subject name).getD 0
@@ -3859,6 +3879,9 @@ partial def inferPlace (scope : Scope) (amb : Row) : Expr → M Ty
 /-- Check one argument. Gives the mismatch if it does not fit. -/
 partial def checkArg (scope : Scope) (amb : Row) (what : String) (p : Ty) (a : Expr)
     (site : Option Elab.Site) : M (Option String) := do
+  -- A whole number written where a type of whole numbers is wanted is of it.
+  if let .int n := a then
+    if let some fits ← literalAt p n then return fits.map fun e => s!"{what}: {e}"
   match Elab.plainBlock a, ← find p with
   | some (id, body), .fn [input] _ _ _ _ =>
     -- A callable taking one argument is expected, and a block is written
@@ -3914,6 +3937,20 @@ partial def checkArg (scope : Scope) (amb : Row) (what : String) (p : Ty) (a : E
           if let .ref how inner _ ← find p then
             if let .con "&mut" [] ← find how then
               unify t (.ref how inner (← freshCap))
+    -- A callable written where one is wanted whose parameters are types of
+    -- whole numbers: a whole number among its patterns is of that type.
+    if let (.closure id clauses, .fn ps _ _ _ _) := (a, ← find p) then
+      let arity := match clauses.head? with
+        | some (.mk pats _) => pats.length
+        | none => 0
+      let mut annots : List (Option Ty) := []
+      for q in ps do
+        annots := annots ++ [if (← literalAt q 0).isSome then some q else none]
+      if arity == ps.length && annots.any (·.isSome) then
+        let t ← inferCallable scope annots none none clauses "the clauses of this callable do" id
+        if let .fn _ _ _ _ cap := t then
+          modify fun s => { s with blockCaps := s.blockCaps.push (id, cap) }
+        return ← fitAt scope amb what site p t
     fitAt scope amb what site p (← inferExpr scope amb a)
 
 /-- Check arguments in the given order. Gives the first that does not fit. -/
@@ -3938,8 +3975,21 @@ has to be converted. -/
 partial def checkArgs (scope : Scope) (amb : Row) (what : String) (params : List Ty)
     (args : List Expr) (call : Nat := 0) : M Unit := do
   unless params.length == args.length do arityError what params.length args.length
-  let order := List.range args.length
+  -- Whole numbers written without a type are looked at last: by then what
+  -- is wanted of them may be known from the other arguments.
+  let written := fun (i : Nat) => match args[i]? with
+    | some (.int _) => true
+    | _ => false
+  let natural := List.range args.length
+  let later := natural.filter (!written ·) ++ natural.filter written
   let saved ← get
+  -- What does not fit so is said of the arguments in the order written.
+  let order ← if later == natural then pure natural else
+    match ← checkArgsIn scope amb what params args call later with
+    | none => return
+    | some _ => do
+      set saved
+      pure natural
   match ← checkArgsIn scope amb what params args call order with
   | none => pure ()
   | some (i, e) =>
@@ -4136,7 +4186,14 @@ partial def inferStmts (scope : Scope) (amb : Row) (stmts : List Stmt)
     modify fun st => { st with pos := s!"{line}:{col}: ", at_ := (line, col) }
     try inferStmts scope amb (s :: rest) want
     catch e => throw (positioned line col e)
-  | [.expr e] => do finish (← inferExpr scope amb e) true
+  | [.expr e] => do
+    -- A whole number a body ends with is of the type wanted of the body.
+    if let (.int n, some (expected, _)) := (e, want) then
+      match ← literalAt expected n with
+      | some none => return expected
+      | some (some why) => throw (resultMark ++ s!"the result of a clause: {why}")
+      | none => pure ()
+    finish (← inferExpr scope amb e) true
   | .expr e :: rest => do
     let t ← withLater (Elab.fvStmts [] rest) (inferExpr scope amb e)
     mustDrop t "the value of a statement is let go"
@@ -4241,7 +4298,13 @@ partial def inferStmts (scope : Scope) (amb : Row) (stmts : List Stmt)
           mustDrop inner "assigning through a reference lets go of what was there"
           pure (inner, UseKind.through cap (placeName e) true)
         | _ => throw "only a mutable variable or `*reference` can be assigned"
-      unifyAt "the assigned value" expected (← inferExpr scope amb value)
+      let whole ← match value with
+        | .int n => literalAt expected n
+        | _ => pure none
+      match whole with
+      | some none => pure ()
+      | some (some why) => throw s!"the assigned value: {why}"
+      | none => unifyAt "the assigned value" expected (← inferExpr scope amb value)
       use scope written
     inferStmts scope amb rest want
   | .defer e :: rest => do
@@ -4261,9 +4324,15 @@ partial def inferPat (p : Pattern) (t : Ty) : M Scope := do
   | .wild => do
     mustDrop t "`_` lets go of a value"
     pure []
-  | .int _ => do
-    unifyAt "an integer pattern" .int t
-    pure []
+  | .int n => do
+    -- A whole number is of the type wanted of it, if that is one of whole
+    -- numbers; else an `Int`.
+    match ← literalAt t n with
+    | some none => pure []
+    | some (some e) => throw e
+    | none =>
+      unifyAt "an integer pattern" .int t
+      pure []
   | .tuple ps => do
     let ts ← ps.mapM fun _ => freshTy
     unifyAt "a tuple pattern" (.tuple ts) t
@@ -4551,7 +4620,7 @@ partial def toSTy (t : Ty) : M Traits.STy := do
   | none =>
     match t with
     | .con n args => pure (.con n (← args.mapM toSTy))
-    | .tuple args => pure (.con "(tuple)" (← args.mapM toSTy))
+    | .tuple args => pure (.con s!"(tuple{args.length})" (← args.mapM toSTy))
     | .fn _ _ _ _ _ => pure (.con "(callable)" [])
     | .ref _ _ _ => pure (.con "(reference)" [])
     | .var _ => pure (.var 0)
@@ -4569,6 +4638,14 @@ partial def leaves (pos trait : String) (t : Ty) : M (List (String × Nat × Ty)
     match t with
     | .con n args =>
       match Traits.findImpl trait n args.length (← get).kimpls with
+      | some (_, I) =>
+        let mut out : List (String × Nat × Ty) := []
+        for (tr', j) in I.context do
+          out := out ++ (← leaves pos tr' (args[j]?.getD .unit))
+        pure out
+      | none => missing
+    | .tuple args =>
+      match Traits.findImpl trait s!"(tuple{args.length})" args.length (← get).kimpls with
       | some (_, I) =>
         let mut out : List (String × Nat × Ty) := []
         for (tr', j) in I.context do
@@ -4931,7 +5008,10 @@ def checkGroup (decls : List FnDecl) : M Unit := do
       -- A function an implementation gives is the function its trait declares,
       -- at the implementation's type.
       if let some (im, sig) := d.impl then
-        let tm := [(sig.self, Ty.con im.head (rigid.map (·.2)))]
+        -- A tuple is the tuple of its parts; any other is made with its name.
+        let self := if im.head.startsWith "(tuple" then Ty.tuple (rigid.map (·.2))
+          else Ty.con im.head (rigid.map (·.2))
+        let tm := [(sig.self, self)]
         -- The trait's lifetimes are each itself here, as a function's own
         -- are: what the trait says is borrowed from one thing may not be
         -- borrowed from another.

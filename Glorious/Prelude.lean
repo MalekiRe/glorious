@@ -107,6 +107,17 @@ trait Sub { fn -(Self, Self) -> Self }
 trait Mul { fn *(Self, Self) -> Self }
 trait Div { fn /(Self, Self) -> Self }
 trait Rem { fn %(Self, Self) -> Self }
+// `-` before a value is `negate`; between two it is the `-` above.
+prefix 9 - = negate
+trait Neg { fn negate(Self) -> Self }
+// The bits of a whole number; `shl` and `shr` move them up and down.
+trait Bits {
+    fn bit_and(Self, Self) -> Self
+    fn bit_or(Self, Self) -> Self
+    fn bit_xor(Self, Self) -> Self
+    fn shl(Self, Int) -> Self
+    fn shr(Self, Int) -> Self
+}
 
 fn bool {
     0 => false,
@@ -133,8 +144,16 @@ trait Ord {
 impl Add for Int { fn +(a, b) { int_add(a, b) } }
 impl Sub for Int { fn -(a, b) { int_sub(a, b) } }
 impl Mul for Int { fn *(a, b) { int_mul(a, b) } }
-impl Div for Int { fn /(a, b) { int_div(a, b) } }
+impl Div for Int { fn /(a, b) { int_fit(int_div(a, b), 64) } }
 impl Rem for Int { fn %(a, b) { int_rem(a, b) } }
+impl Neg for Int { fn negate(a) { int_sub(0, a) } }
+impl Bits for Int {
+    fn bit_and(a, b) { int_and(a, b) }
+    fn bit_or(a, b) { int_or(a, b) }
+    fn bit_xor(a, b) { int_xor(a, b) }
+    fn shl(a, n) { int_fit(int_shl(a, n), 64) }
+    fn shr(a, n) { int_shr(a, n) }
+}
 impl Eq for Int {
     fn ==(a, b) { bool(int_eq(a, b)) }
     fn !=(a, b) { not bool(int_eq(a, b)) }
@@ -160,6 +179,13 @@ fn -(a, b) { int_sub(a, b) }
 fn *(a, b) { int_mul(a, b) }
 fn /(a, b) { int_div(a, b) }
 fn %(a, b) { int_rem(a, b) }
+prefix 9 - = negate
+fn negate(a) { int_sub(0, a) }
+fn bit_and(a, b) { int_and(a, b) }
+fn bit_or(a, b) { int_or(a, b) }
+fn bit_xor(a, b) { int_xor(a, b) }
+fn shl(a, n) { int_fit(int_shl(a, n), 64) }
+fn shr(a, n) { int_shr(a, n) }
 
 fn bool {
     0 => false,
@@ -217,17 +243,24 @@ fn while(condition, body) {
 "#
 
 /-- What a type of whole numbers has: `Int`'s operations, each result asked to
-fit the type's width; and the way in from an `Int`, which asks the same. -/
+fit the type's width; and the way in from an `Int`, which asks the same. A
+type of 64 bits or more computes within 128, so that a result too large for
+it is seen to be. -/
 private def wholeNumber (t : String) (width : Int) : String :=
+  let wide := width.natAbs ≥ 64
   let op := fun (prim : String) =>
     "{ " ++ s!"{t}_of(int_fit({prim}({t}_bits(a), {t}_bits(b)), {width}))" ++ " }"
+  let add := if wide then "wide_add" else "int_add"
+  let sub := if wide then "wide_sub" else "int_sub"
+  let mul := if wide then "wide_mul" else "int_mul"
   let test := fun (e : String) => "{ " ++ e ++ " }"
   s!"
-impl Add for {t} \{ fn +(a, b) {op "int_add"} }
-impl Sub for {t} \{ fn -(a, b) {op "int_sub"} }
-impl Mul for {t} \{ fn *(a, b) {op "int_mul"} }
+impl Add for {t} \{ fn +(a, b) {op add} }
+impl Sub for {t} \{ fn -(a, b) {op sub} }
+impl Mul for {t} \{ fn *(a, b) {op mul} }
 impl Div for {t} \{ fn /(a, b) {op "int_div"} }
 impl Rem for {t} \{ fn %(a, b) {op "int_rem"} }
+impl Neg for {t} \{ fn negate(a) {test s!"{t}_of(int_fit(wide_sub(0, {t}_bits(a)), {width}))"} }
 impl Eq for {t} \{
     fn ==(a, b) {test s!"bool(int_eq({t}_bits(a), {t}_bits(b)))"}
     fn !=(a, b) {test s!"not bool(int_eq({t}_bits(a), {t}_bits(b)))"}
@@ -238,9 +271,50 @@ impl Ord for {t} \{
     fn <=(a, b) {test s!"not bool(int_lt({t}_bits(b), {t}_bits(a)))"}
     fn >=(a, b) {test s!"not bool(int_lt({t}_bits(a), {t}_bits(b)))"}
 }
-impl ToInt for {t} \{ fn int(x) {test s!"{t}_bits(x)"} }
-impl Show for {t} \{ fn show(x) {test s!"show({t}_bits(x))"} }
+impl Bits for {t} \{
+    fn bit_and(a, b) {test s!"{t}_of(int_and({t}_bits(a), {t}_bits(b)))"}
+    fn bit_or(a, b) {test s!"{t}_of(int_or({t}_bits(a), {t}_bits(b)))"}
+    fn bit_xor(a, b) {test s!"{t}_of(int_xor({t}_bits(a), {t}_bits(b)))"}
+    fn shl(a, n) {test s!"{t}_of(int_fit(int_shl({t}_bits(a), n), {width}))"}
+    fn shr(a, n) {test s!"{t}_of(int_shr({t}_bits(a), n))"}
+}
+impl ToInt for {t} \{ fn int(x) {test s!"int_fit({t}_bits(x), 64)"} }
+impl Show for {t} \{ fn show(x) {test s!"show_whole({t}_bits(x))"} }
 fn {t}(n: Int) -> {t} {test s!"{t}_of(int_fit(n, {width}))"}
+"
+
+/-- 128 bits without a sign: held as the same bits with one, so its
+arithmetic and its order are the machine's operations that read them so. -/
+private def unsigned128 : String :=
+  let t := "u128"
+  let op := fun (prim : String) => "{ " ++ s!"{t}_of({prim}({t}_bits(a), {t}_bits(b)))" ++ " }"
+  let test := fun (e : String) => "{ " ++ e ++ " }"
+  s!"
+impl Add for {t} \{ fn +(a, b) {op "uw_add"} }
+impl Sub for {t} \{ fn -(a, b) {op "uw_sub"} }
+impl Mul for {t} \{ fn *(a, b) {op "uw_mul"} }
+impl Div for {t} \{ fn /(a, b) {op "uw_div"} }
+impl Rem for {t} \{ fn %(a, b) {op "uw_rem"} }
+impl Eq for {t} \{
+    fn ==(a, b) {test s!"bool(int_eq({t}_bits(a), {t}_bits(b)))"}
+    fn !=(a, b) {test s!"not bool(int_eq({t}_bits(a), {t}_bits(b)))"}
+}
+impl Ord for {t} \{
+    fn <(a, b) {test s!"bool(uw_lt({t}_bits(a), {t}_bits(b)))"}
+    fn >(a, b) {test s!"bool(uw_lt({t}_bits(b), {t}_bits(a)))"}
+    fn <=(a, b) {test s!"not bool(uw_lt({t}_bits(b), {t}_bits(a)))"}
+    fn >=(a, b) {test s!"not bool(uw_lt({t}_bits(a), {t}_bits(b)))"}
+}
+impl Bits for {t} \{
+    fn bit_and(a, b) {op "int_and"}
+    fn bit_or(a, b) {op "int_or"}
+    fn bit_xor(a, b) {op "int_xor"}
+    fn shl(a, n) {test s!"{t}_of(uw_shl({t}_bits(a), n))"}
+    fn shr(a, n) {test s!"{t}_of(uw_shr({t}_bits(a), n))"}
+}
+impl ToInt for {t} \{ fn int(x) {test s!"int_fit({t}_bits(x), -63)"} }
+impl Show for {t} \{ fn show(x) {test s!"unsigned_digits({t}_bits(x), StrEnd)"} }
+fn {t}(n: Int) -> {t} {test s!"{t}_of(int_fit(n, -63))"}
 "
 
 /-- The scalar types: what each has. -/
@@ -358,6 +432,15 @@ mod number_text {
         }
     }
 
+    // The digits of 128 bits read without a sign.
+    pub fn unsigned_digits(n, rest) {
+        let digit = char_of(int_add(48, uw_rem(n, 10)));
+        match(uw_div(n, 10)) {
+            0 => StrChar(digit, rest),
+            more => tail unsigned_digits(more, StrChar(digit, rest))
+        }
+    }
+
     pub fn float_text(negative, wide, held, single, infinite) {
         let sign = match(negative) { 0 => "", _ => "-" };
         match(f64_eq(wide, wide)) {
@@ -375,13 +458,31 @@ mod number_text {
         }
     }
 }
-use number_text::{digits_before, float_text};
+use number_text::{digits_before, float_text, unsigned_digits};
 
-impl Show for Int {
-    fn show(n) {
-        match(int_lt(n, 0)) {
-            0 => digits_before(int_sub(0, n), StrEnd),
-            _ => StrChar('-', digits_before(n, StrEnd))
+// A whole number of any width as text.
+fn show_whole(n) {
+    match(int_lt(n, 0)) {
+        0 => digits_before(wide_sub(0, n), StrEnd),
+        _ => StrChar('-', digits_before(n, StrEnd))
+    }
+}
+
+impl Show for Int { fn show(n) { show_whole(n) } }
+
+// A tuple and a `Result` as text, if their parts are. Truth is `Ok(())`.
+impl Show for () { fn show(u) { "()" } }
+impl<A, B> Show for (A, B) where A: Show, B: Show {
+    fn show(p) { match(p) { (a, b) => "(" ++ show(a) ++ ", " ++ show(b) ++ ")" } }
+}
+impl<A, B, C> Show for (A, B, C) where A: Show, B: Show, C: Show {
+    fn show(p) { match(p) { (a, b, c) => "(" ++ show(a) ++ ", " ++ show(b) ++ ", " ++ show(c) ++ ")" } }
+}
+impl<T, E> Show for Result<T, E> where T: Show, E: Show {
+    fn show(r) {
+        match(r) {
+            Ok(value) => "Ok(" ++ show(value) ++ ")",
+            Err(error) => "Err(" ++ show(error) ++ ")"
         }
     }
 }
@@ -414,6 +515,8 @@ impl Add for f64 { fn +(a, b) { f64_of(f64_add(f64_bits(a), f64_bits(b))) } }
 impl Sub for f64 { fn -(a, b) { f64_of(f64_sub(f64_bits(a), f64_bits(b))) } }
 impl Mul for f64 { fn *(a, b) { f64_of(f64_mul(f64_bits(a), f64_bits(b))) } }
 impl Div for f64 { fn /(a, b) { f64_of(f64_div(f64_bits(a), f64_bits(b))) } }
+// Not `0.0 - a`, which is `0.0` where this is `-0.0`.
+impl Neg for f64 { fn negate(a) { f64_of(f64_sub(-9223372036854775808, f64_bits(a))) } }
 impl Eq for f64 {
     fn ==(a, b) { bool(f64_eq(f64_bits(a), f64_bits(b))) }
     fn !=(a, b) { not bool(f64_eq(f64_bits(a), f64_bits(b))) }
@@ -426,6 +529,25 @@ impl Ord for f64 {
     fn >=(a, b) { bool(int_add(f64_lt(f64_bits(b), f64_bits(a)), f64_eq(f64_bits(a), f64_bits(b)))) }
 }
 impl ToInt for f64 { fn int(x) { f64_to_int(f64_bits(x), 0) } }
+
+// What a floating point number has beside arithmetic. `round` is to the
+// nearest whole number, a half to the even one.
+trait Real {
+    fn sqrt(Self) -> Self
+    fn floor(Self) -> Self
+    fn ceil(Self) -> Self
+    fn trunc(Self) -> Self
+    fn round(Self) -> Self
+    fn abs(Self) -> Self
+}
+impl Real for f64 {
+    fn sqrt(x) { f64_of(f64_sqrt(f64_bits(x), 0)) }
+    fn floor(x) { f64_of(f64_round(f64_bits(x), 0)) }
+    fn ceil(x) { f64_of(f64_round(f64_bits(x), 1)) }
+    fn trunc(x) { f64_of(f64_round(f64_bits(x), 2)) }
+    fn round(x) { f64_of(f64_round(f64_bits(x), 3)) }
+    fn abs(x) { f64_of(int_and(f64_bits(x), 9223372036854775807)) }
+}
 fn f64(n: Int) -> f64 { f64_of(f64_of_int(n, 0)) }
 
 // A 32-bit number is computed with as a 64-bit one and the result brought
@@ -436,6 +558,7 @@ impl Add for f32 { fn +(a, b) { narrow(widen(a) + widen(b)) } }
 impl Sub for f32 { fn -(a, b) { narrow(widen(a) - widen(b)) } }
 impl Mul for f32 { fn *(a, b) { narrow(widen(a) * widen(b)) } }
 impl Div for f32 { fn /(a, b) { narrow(widen(a) / widen(b)) } }
+impl Neg for f32 { fn negate(a) { narrow(negate(widen(a))) } }
 impl Eq for f32 {
     fn ==(a, b) { widen(a) == widen(b) }
     fn !=(a, b) { widen(a) != widen(b) }
@@ -447,6 +570,14 @@ impl Ord for f32 {
     fn >=(a, b) { widen(a) >= widen(b) }
 }
 impl ToInt for f32 { fn int(x) { int(widen(x)) } }
+impl Real for f32 {
+    fn sqrt(x) { narrow(sqrt(widen(x))) }
+    fn floor(x) { narrow(floor(widen(x))) }
+    fn ceil(x) { narrow(ceil(widen(x))) }
+    fn trunc(x) { narrow(trunc(widen(x))) }
+    fn round(x) { narrow(round(widen(x))) }
+    fn abs(x) { narrow(abs(widen(x))) }
+}
 fn f32(n: Int) -> f32 { narrow(f64(n)) }
 
 impl Show for f64 {
@@ -472,7 +603,8 @@ impl Show for f32 {
         }
     }
 }
-"# ++ String.join ((Syntax.scalars.filterMap fun (t, width) => width.map fun w => wholeNumber t w))
+"# ++ String.join ((Syntax.scalars.filterMap fun (t, width) => width.map fun w =>
+    if w == -128 then unsigned128 else wholeNumber t w))
 
 def source : String := core ++ operators ++ scalars ++ world
 

@@ -84,6 +84,35 @@ inductive Prim where
   | f64Digits
   /-- With `f64Digits`: the power of ten its digits are to be multiplied by. -/
   | f64Exp10
+  /-- The square root. The second is not read. -/
+  | f64Sqrt
+  /-- The number without what is after its point, the way the second integer
+  says: 0 down, 1 up, 2 towards zero, 3 to the nearest. -/
+  | f64Round
+  /-- Arithmetic kept within 128 bits rather than 64. -/
+  | wideAdd
+  | wideSub
+  | wideMul
+  /-- Bit by bit, on the two's complement of the integers. -/
+  | intAnd
+  | intOr
+  | intXor
+  /-- The first integer with its bits moved up by the second, from 0 to 127;
+  no meaning if the result does not fit in 128 bits. -/
+  | intShl
+  /-- The first integer with its bits moved down by the second, its sign kept. -/
+  | intShr
+  /-- Arithmetic on integers read as 128 bits without a sign. A result that
+  does not fit, or would be below zero, has no meaning. -/
+  | uwAdd
+  | uwSub
+  | uwMul
+  | uwDiv
+  | uwRem
+  /-- `1` if the first is smaller, read so, else `0`. -/
+  | uwLt
+  | uwShl
+  | uwShr
 
 /-- A computation that produces a value without transferring control. -/
 inductive Rhs where
@@ -154,6 +183,22 @@ has no meaning. -/
 def checked (n : Int) : Option Value :=
   if -9223372036854775808 ≤ n ∧ n ≤ 9223372036854775807 then some (.int n) else none
 
+/-- An integer within 128 bits. What holds an integer on either machine holds
+this much; `checked` is what the integers of `Int` are kept to. -/
+def checkedWide (n : Int) : Option Value :=
+  if -170141183460469231731687303715884105728 ≤ n ∧ n ≤ 170141183460469231731687303715884105727
+  then some (.int n) else none
+
+/-- The 128 bits of an integer, read without a sign. -/
+def unsigned (a : Int) : Nat := (a % 340282366920938463463374607431768211456).toNat
+
+/-- The integer whose 128 bits these are, if they fit in 128. -/
+def ofUnsigned (n : Nat) : Option Value :=
+  if n < 170141183460469231731687303715884105728 then some (.int n)
+  else if n < 340282366920938463463374607431768211456 then
+    some (.int ((n : Int) - 340282366920938463463374607431768211456))
+  else none
+
 /-- Does an integer fit in a width: so many bits with a sign if the width is
 positive, without one if it is negative? -/
 def fits (a width : Int) : Bool :=
@@ -172,9 +217,9 @@ def Prim.eval : Prim → List Value → Option Value
   | .intMul, [.int a, .int b] => checked (a * b)
   | .intLt, [.int a, .int b] => some (.int (if a < b then 1 else 0))
   | .intEq, [.int a, .int b] => some (.int (if a = b then 1 else 0))
-  | .intDiv, [.int a, .int b] => if b = 0 then none else checked (Int.tdiv a b)
-  | .intRem, [.int a, .int b] => if b = 0 then none else checked (Int.tmod a b)
-  | .intFit, [.int a, .int b] => if fits a b then checked a else none
+  | .intDiv, [.int a, .int b] => if b = 0 then none else checkedWide (Int.tdiv a b)
+  | .intRem, [.int a, .int b] => if b = 0 then none else checkedWide (Int.tmod a b)
+  | .intFit, [.int a, .int b] => if fits a b then checkedWide a else none
   | .f64Add, [.int a, .int b] => checked (Ieee.f64Add a b)
   | .f64Sub, [.int a, .int b] => checked (Ieee.f64Sub a b)
   | .f64Mul, [.int a, .int b] => checked (Ieee.f64Mul a b)
@@ -188,6 +233,29 @@ def Prim.eval : Prim → List Value → Option Value
   | .f64OfDecimal, [.int a, .int b] => checked (Ieee.f64OfDecimal a b)
   | .f64Digits, [.int a, .int b] => checkedOpt (Ieee.f64Digits a b)
   | .f64Exp10, [.int a, .int b] => checkedOpt (Ieee.f64Exp10 a b)
+  | .f64Sqrt, [.int a, .int _] => checked (Ieee.f64Sqrt a)
+  | .f64Round, [.int a, .int b] => checkedOpt (Ieee.f64Round a b)
+  | .wideAdd, [.int a, .int b] => checkedWide (a + b)
+  | .wideSub, [.int a, .int b] => checkedWide (a - b)
+  | .wideMul, [.int a, .int b] => checkedWide (a * b)
+  | .intAnd, [.int a, .int b] => ofUnsigned (unsigned a &&& unsigned b)
+  | .intOr, [.int a, .int b] => ofUnsigned (unsigned a ||| unsigned b)
+  | .intXor, [.int a, .int b] => ofUnsigned (unsigned a ^^^ unsigned b)
+  | .intShl, [.int a, .int b] =>
+    if 0 ≤ b ∧ b < 128 then checkedWide (a * 2 ^ b.toNat) else none
+  | .intShr, [.int a, .int b] => if 0 ≤ b then checkedWide (a >>> b.toNat) else none
+  | .uwAdd, [.int a, .int b] => ofUnsigned (unsigned a + unsigned b)
+  | .uwSub, [.int a, .int b] =>
+    if unsigned b ≤ unsigned a then ofUnsigned (unsigned a - unsigned b) else none
+  | .uwMul, [.int a, .int b] => ofUnsigned (unsigned a * unsigned b)
+  | .uwDiv, [.int a, .int b] =>
+    if unsigned b = 0 then none else ofUnsigned (unsigned a / unsigned b)
+  | .uwRem, [.int a, .int b] =>
+    if unsigned b = 0 then none else ofUnsigned (unsigned a % unsigned b)
+  | .uwLt, [.int a, .int b] => some (.int (if unsigned a < unsigned b then 1 else 0))
+  | .uwShl, [.int a, .int b] =>
+    if 0 ≤ b ∧ b < 128 then ofUnsigned (unsigned a * 2 ^ b.toNat) else none
+  | .uwShr, [.int a, .int b] => if 0 ≤ b then ofUnsigned (unsigned a / 2 ^ b.toNat) else none
   | _, _ => none
 
 def Atom.eval (ρ : Env) : Atom → Option Value

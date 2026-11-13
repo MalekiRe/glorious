@@ -217,6 +217,43 @@ def decimal (x : Num) (p : Nat) : Option (Nat × Int) :=
         let guess : Int := ((Nat.log2 m : Int) + e) * 30103 / 100000
         some (settle m e p 8 (guess - (p : Int) + 1))
 
+/-- The square root, to the nearest number of the format. -/
+def sqrt (f : Format) : Num → Nat
+  | .nan => f.nanBits
+  | .inf neg => if neg then f.nanBits else f.infBits false
+  | .fin neg m e =>
+    if m == 0 then f.zeroBits neg
+    else if neg then f.nanBits
+    else
+      -- `m * 2^e` as `n * 2^(2k)` with `n` large enough that its whole
+      -- square root has two bits more than the format keeps; what the whole
+      -- root leaves out is one more bit, set if anything is left out.
+      let shift : Nat := 2 * (f.prec + 2) + (e % 2).toNat
+      let n := m * 2 ^ shift
+      let root := Nat.sqrt n
+      let rest := if root * root == n then 0 else 1
+      f.round false (2 * root + rest) 2 ((e - (shift : Int)) / 2)
+
+/-- A number without what is after its point, the way `mode` says: 0 down, 1
+up, 2 towards zero, 3 to the nearest, a half to the even one. None for any
+other `mode`. -/
+def roundWhole (f : Format) (mode : Int) : Num → Option Nat
+  | .nan => some f.nanBits
+  | .inf neg => some (f.infBits neg)
+  | .fin neg m e =>
+    if e ≥ 0 then some (if m == 0 then f.zeroBits neg else f.round neg m 1 e)
+    else
+      let d := 2 ^ (-e).toNat
+      let q := m / d
+      let r := m % d
+      let whole : Option Nat :=
+        if mode.natAbs == 0 then some (if neg && r > 0 then q + 1 else q)
+        else if mode.natAbs == 1 && mode ≥ 0 then some (if !neg && r > 0 then q + 1 else q)
+        else if mode.natAbs == 2 && mode ≥ 0 then some q
+        else if mode.natAbs == 3 && mode ≥ 0 then some (nearest q r d)
+        else none
+      whole.map fun w => if w == 0 then f.zeroBits neg else f.round neg w 1 0
+
 /-! The operations on encodings, as both machines have them: integers in,
 an integer out. -/
 
@@ -245,6 +282,10 @@ def f64Narrow (a : Int) : Int := ofBits (binary32.encode (f64 a))
 def f64Widen (a : Int) : Int := ofBits (binary64.encode (binary32.decode (toBits a % 4294967296)))
 
 def f64OfDecimal (digits exp10 : Int) : Int := ofBits (ofDecimal binary64 digits exp10)
+
+def f64Sqrt (a : Int) : Int := ofBits (sqrt binary64 (f64 a))
+
+def f64Round (a mode : Int) : Option Int := (roundWhole binary64 mode (f64 a)).map ofBits
 
 def f64Digits (a p : Int) : Option Int :=
   if p < 0 then none else (decimal (f64 a) p.toNat).map fun (d, _) => (d : Int)

@@ -265,12 +265,28 @@ theorem prim_int {p : Prim} {m n : Int} {v : Value} (h : p.eval [.int m, .int n]
     cases o with
     | none => simp [checkedOpt] at ho
     | some k => exact ok ho
+  have wide : ∀ {k : Int}, checkedWide k = some v → ∃ k, v = .int k := by
+    intro k hk
+    simp only [checkedWide] at hk
+    split at hk
+    · cases hk; exact ⟨_, rfl⟩
+    · cases hk
+  have uns : ∀ {k : Nat}, ofUnsigned k = some v → ∃ k, v = .int k := by
+    intro k hk
+    simp only [ofUnsigned] at hk
+    split at hk
+    · cases hk; exact ⟨_, rfl⟩
+    · split at hk
+      · cases hk; exact ⟨_, rfl⟩
+      · cases hk
   cases p <;> simp only [Prim.eval] at h
   all_goals first
     | exact ok h
     | exact opt h
+    | exact wide h
+    | exact uns h
     | (cases h; exact ⟨_, rfl⟩)
-    | (split at h <;> first | exact ok h | cases h)
+    | (split at h <;> first | exact ok h | exact wide h | exact uns h | cases h)
 
 /-- A typed control-free computation gives a value of its type, unless it is
 arithmetic that overflows. -/

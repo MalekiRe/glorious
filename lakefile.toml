@@ -5,6 +5,7 @@ moreLeanArgs = ["-DwarningAsError=true", "-DautoImplicit=false"]
 
 [[lean_lib]]
 name = "Glorious"
+precompileModules = true
 
 [[lean_exe]]
 name = "glorious"

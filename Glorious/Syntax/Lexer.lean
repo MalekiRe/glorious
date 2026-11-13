@@ -120,6 +120,18 @@ private partial def lexText (cs : Array Char) (i line col : Nat) (acc : Array Na
     lexText cs j line col (acc.push code)
   | some c => lexText cs (i + 1) line col (acc.push c.toNat)
 
+/-- Past a `/* .. */` comment whose inside starts at `i`, `depth` deep:
+where it ends, and the line and column there. -/
+private partial def skipComment (cs : Array Char) (i line col depth : Nat) :
+    Option (Nat × Nat × Nat) :=
+  match cs[i]?, cs[i + 1]? with
+  | none, _ => none
+  | some '*', some '/' =>
+    if depth == 1 then some (i + 2, line, col + 2) else skipComment cs (i + 2) line (col + 2) (depth - 1)
+  | some '/', some '*' => skipComment cs (i + 2) line (col + 2) (depth + 1)
+  | some '\n', _ => skipComment cs (i + 1) (line + 1) 1 depth
+  | some _, _ => skipComment cs (i + 1) line (col + 1) depth
+
 private partial def lexLoop (cs : Array Char) (i line col : Nat) (acc : Array Token) :
     Except String (Array Token) :=
   match cs[i]? with
@@ -129,6 +141,24 @@ private partial def lexLoop (cs : Array Char) (i line col : Nat) (acc : Array To
     else if c.isWhitespace then lexLoop cs (i + 1) line (col + 1) acc
     else if c == '/' && cs[i + 1]? == some '/' then
       lexLoop cs (spanWhile cs (· != '\n') i) line col acc
+    else if c == '/' && cs[i + 1]? == some '*' then
+      -- `/* .. */`, which may have others inside it.
+      match skipComment cs (i + 2) line (col + 2) 1 with
+      | some (j, line', col') => lexLoop cs j line' col' acc
+      | none => throw s!"{line}:{col}: this comment is not closed"
+    else if c == 'b' && cs[i + 1]? == some '\'' then
+      -- `b'x'`: a byte, which is a `u8`.
+      let read : Except String (Nat × Nat) :=
+        if cs[i + 2]? == some '\\' then lexEscape cs (i + 3) line col
+        else match cs[i + 2]? with
+          | some ch => pure (ch.toNat, i + 3)
+          | none => throw s!"{line}:{col}: a byte is closed with `'`"
+      match read with
+      | .ok (code, j) =>
+        if cs[j]? != some '\'' then throw s!"{line}:{col}: a byte is closed with `'`"
+        else if code > 255 then throw s!"{line}:{col}: a byte is a character below 128, or `\\xNN`"
+        else lexLoop cs (j + 1) line (col + (j + 1 - i)) (acc.push ⟨.typed code "u8", line, col⟩)
+      | .error e => throw e
     else if c.isDigit then
       let next := cs[i + 1]?
       let base := if c == '0' && next == some 'x' then 16 else if c == '0' && next == some 'b' then 2

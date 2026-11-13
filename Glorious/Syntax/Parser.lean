@@ -97,7 +97,10 @@ private def typedInt (neg : Bool) (n : Nat) (suffix : String) : P (Option String
   match scalars.lookup suffix with
   | some (some width) =>
     unless Glorious.fits v width do failAt s!"`{v}` does not fit in `{suffix}`"
-    pure (some (suffix ++ "_of"), v)
+    -- 128 bits without a sign are held as the same bits with one.
+    let held := if width == -128 && v ≥ 170141183460469231731687303715884105728
+      then v - 340282366920938463463374607431768211456 else v
+    pure (some (suffix ++ "_of"), held)
   | _ => failAt s!"`{suffix}` is not a type of whole numbers"
 
 /-- A number with a point or an exponent: the nearest number its type holds,
@@ -413,7 +416,7 @@ private partial def parseBinary (minPrec : Nat) (noBlock : Bool) : P Expr := do
         | .right => prec
         | _ => prec + 1
       let rhs ← parseBinary next noBlock
-      lhs := .call id (.name none name) [lhs, rhs]
+      lhs := .call id (.name none ((← read).fix.function name false)) [lhs, rhs]
     | none =>
       match t with
       | .op s => failAt s!"operator `{s}` has no infix fixity"
@@ -430,6 +433,20 @@ private partial def parseBinary (minPrec : Nat) (noBlock : Bool) : P Expr := do
 private partial def parseUnary (noBlock : Bool) : P Expr := do
   let t ← peek
   let fix := (← read).fix
+  -- `-` straight before a number is part of the number.
+  if t == .op "-" then
+    match ← peek 1 with
+    | .int n =>
+      advance
+      let v ← plainInt true n
+      advance
+      return .int v
+    | .typed _ _ | .float _ _ _ =>
+      advance
+      match ← scalarLiteral true with
+      | some e => return e
+      | none => failAt "expected a number"
+    | _ => pure ()
   let name? := match t with
     | .op s => some s
     | .ident s => some s
@@ -441,21 +458,9 @@ private partial def parseUnary (noBlock : Bool) : P Expr := do
       let id := (← read).base + (← get) + 1
       advance
       let operand ← parseBinary prec noBlock
-      pure (.call id (.name none s) [operand])
+      pure (.call id (.name none (fix.function s true)) [operand])
     | none =>
-      if t == .op "-" then
-        match ← peek 1 with
-        | .int n =>
-          advance
-          let v ← plainInt true n
-          advance
-          pure (.int v)
-        | .typed _ _ | .float _ _ _ =>
-          advance
-          match ← scalarLiteral true with
-          | some e => pure e
-          | none => failAt "expected a number"
-        | _ => failAt "operator `-` has no prefix fixity"
+      if t == .op "-" then failAt "operator `-` has no prefix fixity"
       else if t == .op "&" then
         advance
         let uniq := (← peek) == .ident "mut"
@@ -523,9 +528,14 @@ private partial def parsePostfix (noBlock : Bool) : P Expr := do
     | .punct "." =>
       match ← peek 1 with
       | .int n =>
+        -- A field of what a name stands for is known by an identity, so
+        -- that the checker can say it is read through a reference.
+        let id := (← read).base + (← get) + 1
         advance
         advance
-        e := .proj e n
+        e := match e with
+          | .name none _ => .fieldOf id e (toString n)
+          | _ => .proj e n
       | .ident field =>
         let id := (← read).base + (← get) + 1
         advance
@@ -1084,8 +1094,18 @@ private partial def parseItem : P Item := do
     match ← peek with
     | .ident "for" => advance
     | _ => failAt "expected `for`: `impl Trait for Type`"
-    let head ← expectPath
-    let args ← parseGenerics
+    -- `impl Trait for (A, B)`: for the tuples of so many parts.
+    let (head, args) ← if ← acceptPunct "(" then do
+        let mut names : Array String := #[]
+        repeat
+          if (← peek) == .punct ")" then break
+          names := names.push (← expectIdent)
+          if !(← acceptPunct ",") then break
+        expectPunct ")"
+        pure (s!"(tuple{names.size})", names.toList)
+      else do
+        let head ← expectPath
+        pure (head, ← parseGenerics)
     let mut context : Array (String × String) := #[]
     if (← peek) == .ident "where" then
       advance
@@ -1120,6 +1140,8 @@ private partial def parseItem : P Item := do
       advance
       advance
       advance
+      if ← acceptPunct "=" then
+        let _ ← expectIdent
       let _ ← acceptPunct ";"
       pure .fixity
     else failAt "expected a declaration"
@@ -1334,6 +1356,11 @@ private def collectFixities (toks : Array Token) (fix : Fixities) : Except Strin
           let assoc := if kind == "infixl" then Assoc.left
             else if kind == "infixr" then Assoc.right else Assoc.non
           fix := { fix with infixes := (name, prec, assoc) :: fix.infixes }
+        -- `= function`: the function the operator stands for in this place.
+        match toks[i + 3]?.map (·.tok), toks[i + 4]?.map (·.tok) with
+        | some (Tok.punct "="), some (Tok.ident f) =>
+          fix := { fix with bound := (name, kind == "prefix", f) :: fix.bound }
+        | _, _ => pure ()
     | _, _, _ => pure ()
   pure fix
 

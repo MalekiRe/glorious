@@ -154,7 +154,13 @@ def prims : List (String × Prim × Nat) :=
    ("f64_of_int", .f64OfInt, 2), ("f64_to_int", .f64ToInt, 2),
    ("f64_narrow", .f64Narrow, 2), ("f64_widen", .f64Widen, 2),
    ("f64_of_decimal", .f64OfDecimal, 2), ("f64_digits", .f64Digits, 2),
-   ("f64_exp10", .f64Exp10, 2)]
+   ("f64_exp10", .f64Exp10, 2), ("f64_sqrt", .f64Sqrt, 2), ("f64_round", .f64Round, 2),
+   ("wide_add", .wideAdd, 2), ("wide_sub", .wideSub, 2), ("wide_mul", .wideMul, 2),
+   ("int_and", .intAnd, 2), ("int_or", .intOr, 2), ("int_xor", .intXor, 2),
+   ("int_shl", .intShl, 2), ("int_shr", .intShr, 2),
+   ("uw_add", .uwAdd, 2), ("uw_sub", .uwSub, 2), ("uw_mul", .uwMul, 2),
+   ("uw_div", .uwDiv, 2), ("uw_rem", .uwRem, 2), ("uw_lt", .uwLt, 2),
+   ("uw_shl", .uwShl, 2), ("uw_shr", .uwShr, 2)]
 
 /-- The names that take a scalar to the integer it is held as, and back. -/
 def casts : List String :=
@@ -732,8 +738,11 @@ mutual
 
 partial def elabExpr (scope : Scope) (tailPos : Bool) : Expr → M Atom
   | .int n =>
-    if -9223372036854775808 ≤ n ∧ n ≤ 9223372036854775807 then pure (.int n)
-    else throw s!"integer literal `{n}` does not fit in 64 bits"
+    -- What holds an integer holds 128 bits; a literal's own type was asked
+    -- of it where it was read.
+    if -170141183460469231731687303715884105728 ≤ n ∧ n ≤ 170141183460469231731687303715884105727
+    then pure (.int n)
+    else throw s!"integer literal `{n}` does not fit in 128 bits"
   | .name q x => do
     match ← resolveName scope q x with
     | .local a => useLocal a
@@ -792,8 +801,11 @@ partial def elabExpr (scope : Scope) (tailPos : Bool) : Expr → M Atom
   | .reborrow _ e => elabExpr scope false e
   | .refField _ _ x _ _ =>
     throw s!"a borrow of a field of `{x}` is elaborated only after the program is checked"
-  | .fieldOf _ _ name =>
-    throw s!"the field `{name}` is found by the checker: the program is elaborated only after it"
+  | .fieldOf id e name =>
+    -- A field by number needs no checker to be found.
+    match name.toNat? with
+    | some n => elabExpr scope tailPos (.proj e n)
+    | none => throw s!"the field `{name}` is found by the checker: the program is elaborated only after it (read {id})"
   | .deref e => do
     let p ← elabExpr scope false e
     emit (.mem .load [p])

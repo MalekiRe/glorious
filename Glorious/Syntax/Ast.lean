@@ -156,10 +156,11 @@ def fieldOfMark (name : String) : Option String :=
 integer type's own value, the code of a character, the bits of a floating
 point number. With an integer type is the width `int_fit` is asked whether a
 value fits: so many bits with a sign if positive, without one if negative.
-`usize` is 63 bits: the machines' integers have 64 with a sign. -/
+A `u128` is held as the integer with the same 128 bits, read with a sign. -/
 def scalars : List (String × Option Int) :=
-  [("i8", some 8), ("i16", some 16), ("i32", some 32), ("isize", some 64),
-   ("u8", some (-8)), ("u16", some (-16)), ("u32", some (-32)), ("usize", some (-63)),
+  [("i8", some 8), ("i16", some 16), ("i32", some 32), ("isize", some 64), ("i128", some 128),
+   ("u8", some (-8)), ("u16", some (-16)), ("u32", some (-32)), ("u64", some (-64)),
+   ("usize", some (-64)), ("u128", some (-128)),
    ("f32", none), ("f64", none), ("char", none)]
 
 def isScalar (name : String) : Bool := (scalars.lookup name).isSome
@@ -269,6 +270,16 @@ inductive Assoc where
 structure Fixities where
   infixes : List (String × Nat × Assoc) := []
   prefixes : List (String × Nat) := []
+  /-- The function an operator stands for where a declaration says, `prefix 9
+  - = negate`: the operator, whether as a prefix, and the function. One
+  symbol can so be one function before a value and another between two. -/
+  bound : List (String × Bool × String) := []
+
+/-- The function an operator stands for: itself, unless a declaration says. -/
+def Fixities.function (fix : Fixities) (op : String) (asPrefix : Bool) : String :=
+  match fix.bound.find? fun (o, p, _) => o == op && p == asPrefix with
+  | some (_, _, f) => f
+  | none => op
 
 /-- `subject: Trait<args, Name = Type>` written of a type parameter of a
 function. The compiler's own: `F: Fn<(A, B), Output = R, Effects = {E}>`, a
