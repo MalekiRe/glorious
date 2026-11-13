@@ -72,6 +72,30 @@ def usesStd (src : String) (files : List (List String × String)) : Bool :=
   (named src || files.any fun (_, text) => named text)
     && !own src && !files.any fun (path, _) => path.head? == some "std"
 
+/-- An `unsafe trait` is implemented with `unsafe impl`, and nothing else is. -/
+partial def checkUnsafeImpls (items : List Syntax.Item) : Except String Unit := do
+  let rec flat : List Syntax.Item → List Syntax.Item
+    | [] => []
+    | .pub _ i :: rest => flat (i :: rest)
+    | .module _ (some body) :: rest => flat body ++ flat rest
+    | i :: rest => i :: flat rest
+  let all := flat items
+  let last := fun (s : String) => (s.splitOn "::").getLast!
+  let traits := all.filterMap fun
+    | .fieldNames mark [name] _ => if mark == Syntax.attrMark "unsafe_trait" then some name else none
+    | _ => none
+  let promised := all.filterMap fun
+    | .fieldNames mark [tr, head] _ =>
+      if mark == Syntax.attrMark "unsafe_impl" then some (last tr, last head) else none
+    | _ => none
+  for item in all do
+    if let .impl _ tr head _ _ _ := item then
+      let said := promised.contains (last tr, last head)
+      if traits.contains (last tr) && !said then
+        throw s!"`{last tr}` is an `unsafe trait`: its implementation for `{last head}` is written `unsafe impl {last tr} for {last head}`"
+      if !traits.contains (last tr) && said then
+        throw s!"`unsafe impl {last tr} for {last head}`: `{last tr}` is not an `unsafe trait`"
+
 /-- The prelude and a program as written: the first module's text, and the
 texts of the modules that are files of their own, each with its path. Where
 the program says `mod name;` the items of that module's text are put. -/
@@ -119,7 +143,9 @@ def parseProgram (src : String) (files : List (List String × String)) (check : 
       | .module name (some body), fuel + 1 =>
         pure (wrap (.module name (some (← fill fuel (path ++ [name]) body))))
       | _, _ => pure item
-  pure (prelude, ← fill 64 [] items)
+  let items ← fill 64 [] items
+  checkUnsafeImpls items
+  pure (prelude, items)
 
 /-- The prelude checked, once: how many items it is, and what the checker
 knows after it. A program that declares no name the prelude has is checked

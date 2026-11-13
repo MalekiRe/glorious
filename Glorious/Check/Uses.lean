@@ -690,7 +690,7 @@ partial def runCallee (ctx : ACtx) (depth : Nat) (env : List (String × AVal)) (
     if ctx.lower then handedOn fun n => [(.gone ("@" ++ l), n)] else general
   | .name q x =>
     -- A value written with its type is the value: nothing is called.
-    if q.isNone && (x == Syntax.ascribeMark || x == Syntax.instMark) then
+    if q.isNone && (x == Syntax.ascribeMark || x == Syntax.instMark || x == Syntax.moveMark) then
       match args with
       | value :: _ => runExpr ctx depth env value
       | [] => pure [(.unknown, 0)]

@@ -433,6 +433,19 @@ partial def applyTy (scope : Scope) (amb : Row) (what : String) (callee : Ty) (a
 partial def inferCall (scope : Scope) (amb : Row) (f : Expr) (args : List Expr)
     (call : Nat := 0) : M Ty := do
   -- `let x: Type = value`: the value is made that type.
+  if let (.name none mark, [operand]) := (f, args) then
+    if mark == Syntax.moveMark then
+      -- `move x`: the value of `x`. That `x` is not used after is looked at
+      -- where its statement is.
+      match operand with
+      | .name none x =>
+        match scope.lookup x with
+        | some (.cell _ _) =>
+          throw s!"`move {x}`: `{x}` is a mutable variable, which holds a value while it is there; `replace({x}, value)` takes what it holds and leaves another"
+        | _ => return ← inferExpr scope amb operand
+      | .deref _ =>
+        throw "`move *reference` would leave the reference pointing at nothing until it is written again, and that is not followed: `replace(reference, value)` takes what is there and leaves another"
+      | _ => return ← inferExpr scope amb operand
   if let (.name none mark, [value, ty]) := (f, args) then
     if mark == Syntax.instMark then
       -- `f<A, B>(..)`: the call, with the types written kept for when the
@@ -653,6 +666,10 @@ partial def inferStmts (scope : Scope) (amb : Row) (stmts : List Stmt)
   | [] => finish .unit false
   | .located line col s :: rest => do
     modify fun st => { st with pos := s!"{line}:{col}: ", at_ := (line, col) }
+    -- What `move x` hands on is not there for the statements after.
+    for x in Elab.movedStmt s do
+      if (Elab.fvStmts [] rest).contains x then
+        throw (positioned line col s!"`{x}` is used after `move {x}` handed it on")
     try inferStmts scope amb (s :: rest) want
     catch e => throw (positioned line col e)
   | .expr (.name none "%unsafe") :: rest => do

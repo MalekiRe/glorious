@@ -300,6 +300,9 @@ the type written as an expression so that it can sit among expressions: see
 stands alone. -/
 def ascribeMark : String := "%as"
 
+/-- `move x`: the value of `x`, which is then not to be used again. -/
+def moveMark : String := "%move"
+
 /-- Said of a block, where the names of what an `is` found are said: its
 clauses each take one tuple, and it is given where a callable of that many
 arguments is wanted, so each clause takes the arguments as its tuple's parts. -/

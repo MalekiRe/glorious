@@ -376,6 +376,36 @@ partial def fvStmts (bound : List String) : List Stmt → List String
 
 end
 
+mutual
+
+/-- The names an expression hands on with `move name`, wherever in it. -/
+partial def movedExpr : Expr → List String
+  | .call _ (.name none mark) [.name none x] =>
+    if mark == Syntax.moveMark then [x] else []
+  | .call _ f args => movedExpr f ++ args.flatMap movedExpr
+  | .tailCall _ f args => movedExpr f ++ args.flatMap movedExpr
+  | .tuple args => args.flatMap movedExpr
+  | .proj e _ => movedExpr e
+  | .closure _ clauses => clauses.flatMap fun
+    | .mk _ body => body.flatMap movedStmt
+  | .handle subject arms => movedExpr subject ++ arms.flatMap fun
+    | .mk _ body => body.flatMap movedStmt
+  | .labelScope _ body => body.flatMap movedStmt
+  | .deref e => movedExpr e
+  | .reborrow _ e => movedExpr e
+  | .fieldOf _ e _ => movedExpr e
+  | _ => []
+
+partial def movedStmt : Stmt → List String
+  | .let_ _ value => movedExpr value
+  | .expr e => movedExpr e
+  | .defer e => movedExpr e
+  | .located _ _ s => movedStmt s
+  | .letMut _ value => movedExpr value
+  | .assign target value => movedExpr target ++ movedExpr value
+
+end
+
 /-! ## How long a borrow lasts -/
 
 partial def unlocated : Stmt → Stmt
@@ -796,6 +826,8 @@ partial def elabExpr (scope : Scope) (tailPos : Bool) : Expr → M Atom
     if let (.name none mark, [value, _]) := (f, args) then
       if mark == Syntax.ascribeMark || mark == Syntax.instMark then
         return ← elabExpr scope tailPos value
+    if let (.name none mark, [value]) := (f, args) then
+      if mark == Syntax.moveMark then return ← elabExpr scope tailPos value
     let before := (← get).plain.length
     let r ← elabCall scope false f args
     -- The borrow a destruction passes is the compiler's, not the program's.

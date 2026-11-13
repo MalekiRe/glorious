@@ -966,6 +966,28 @@ From the audit of the specification (5.4, 6.1).
 Limits. A block of one-tuple clauses is taken for several arguments only as
 an argument of a call, not where a `let` says the type.
 
+## `move`, a fixity's function by its path, `unsafe trait`
+
+From the audit of the specification (5.3, 8.2, 14, 15.1).
+
+- **`move x` is the value of `x`, and `x` is not used after**: in the
+  statements that follow the one it is written in, a use of `x` is an error,
+  whatever the type. A value that can be used once was already handed on by
+  being named; `move` says it of one that could be copied.
+- **`move (a, b) { body }`** is the block holding the values `a` and `b`
+  have where it is written: a callable given them at once, which gives the
+  block. A block that mentions a mutable variable otherwise uses the
+  variable as it is when the block runs.
+- **`infixl 30 <-> = numeric::sub;`**: the function a fixity names may be
+  written with its module.
+- **`unsafe trait`** is implemented with **`unsafe impl`**, and nothing else
+  is: the two words are checked to go together, and say what the checker
+  does not see.
+
+Limits. `move x` of a mutable variable, and `move *reference`, are refused
+with `replace` as what to write: a variable that holds nothing for a while is
+not followed. A use of `x` later in the statement that moves it is not seen.
+
 ## What the specification's audit turned away
 
 An audit of the language specification against the compiler, section by

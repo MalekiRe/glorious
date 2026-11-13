@@ -585,7 +585,8 @@ private partial def parseBinary (minPrec : Nat) (noBlock : Bool)
         | .right => prec
         | _ => prec + 1
       let rhs ← parseBinary next noBlock (some (prec, assoc))
-      lhs := .call id (.name none ((← read).fix.function name false)) [lhs, rhs]
+      let (qual, f) := splitPath (((← read).fix.function name false).splitOn "::")
+      lhs := .call id (.name qual f) [lhs, rhs]
     | none =>
       match t with
       | .op s => failAt s!"operator `{s}` has no infix fixity in this module (a fixity is its module's: `use` the function the operator stands for)"
@@ -627,7 +628,8 @@ private partial def parseUnary (noBlock : Bool) : P Expr := do
       let id := (← read).base + (← get) + 1
       advance
       let operand ← parseBinary prec noBlock
-      pure (.call id (.name none (fix.function s true)) [operand])
+      let (qual, f) := splitPath ((fix.function s true).splitOn "::")
+      pure (.call id (.name qual f) [operand])
     | none =>
       if t == .op "-" then failAt "operator `-` has no prefix fixity"
       else if t == .op "&" then
@@ -784,6 +786,36 @@ private partial def parsePrimary (noBlock : Bool) : P Expr := do
     match ← parsePostfix noBlock with
     | .call id f args => pure (.tailCall id f args)
     | _ => failAt "`tail` must be followed by a call"
+  | .ident "move" =>
+    advance
+    -- `move (a, b) { body }`: the block, holding the values `a` and `b`
+    -- have where it is written. It is a callable given them at once.
+    if (← peek) == .punct "(" then
+      let saved ← get
+      advance
+      let mut names : Array String := #[]
+      let mut listed := true
+      repeat
+        match ← peek with
+        | .punct ")" => break
+        | .ident x =>
+          advance
+          names := names.push x
+          if !(← acceptPunct ",") then break
+        | _ =>
+          listed := false
+          break
+      if listed && (← peek) == .punct ")" && (← peek 1) == .punct "{" then
+        advance
+        let id := (← read).base + (← get) + 1
+        let block ← parseBraces
+        return .call id (.closure 0 [.mk (names.toList.map Pattern.var) [.expr block]])
+          (names.toList.map (Expr.name none))
+      set saved
+    -- `move place`: the value, handed on; the place is not used after.
+    let id := (← read).base + (← get) + 1
+    let operand ← parseUnary noBlock
+    pure (.call id (.name none moveMark) [operand])
   | .ident "handle" =>
     advance
     let subject ← parseBinary 0 true
@@ -1374,7 +1406,7 @@ private partial def parseItem : P Item := do
       advance
       advance
       if ← acceptPunct "=" then
-        let _ ← expectIdent
+        let _ ← expectPath
       let _ ← acceptPunct ";"
       pure .fixity
     else failAt "expected a declaration"
@@ -1597,7 +1629,12 @@ private partial def parseItemGroup : P (List Item) := do
     advance
     match ← parseItemGroup with
     | items@(.fn name _ _ _ _ :: _) => pure (items ++ [.unsafeFn name])
-    | _ => failAt "`unsafe` is written before `fn`, or before a block"
+    -- `unsafe trait`: one whose implementations promise more than the
+    -- checker sees; `unsafe impl` is the promise.
+    | items@(.trait name _ :: _) => pure (items ++ [.fieldNames (attrMark "unsafe_trait") [name] []])
+    | items@(.impl _ tr head _ _ _ :: _) =>
+      pure (items ++ [.fieldNames (attrMark "unsafe_impl") [tr, head] []])
+    | _ => failAt "`unsafe` is written before `fn`, `trait` or `impl`, or before a block"
   | .ident "extern" =>
     -- `extern "C" { fn name(a: usize) -> i32; }`: functions that are not
     -- written in the language, each called by its name as C has it.
@@ -1764,7 +1801,16 @@ private def collectFixities (toks : Array Token) (fix : Fixities)
         -- `= function`: the function the operator stands for in this place.
         match toks[i + 3]?.map (·.tok), toks[i + 4]?.map (·.tok) with
         | some (Tok.punct "="), some (Tok.ident f) =>
-          fix := { fix with bound := (name, kind == "prefix", f) :: fix.bound }
+          -- (the function may be written with the module it is in)
+          let mut path := f
+          let mut j := i + 5
+          while (toks[j]?.map (·.tok)) == some (Tok.punct "::") do
+            match toks[j + 1]?.map (·.tok) with
+            | some (Tok.ident g) =>
+              path := path ++ "::" ++ g
+              j := j + 2
+            | _ => break
+          fix := { fix with bound := (name, kind == "prefix", path) :: fix.bound }
         | _, _ => pure ()
     | _, _, _ => pure ()
   pure fix
