@@ -151,6 +151,14 @@ def subKey (trait : String) (ty : Ty) (args : List Ty) : M String := do
     Syntax.traitBase im.trait == trait && some im.head == head).length > 1
   if args.isEmpty && !several then pure trait else implKey trait ty args
 
+/-- The numbers under which a condition of an implementation on a type made
+from its type parameters, `where (A, (B, ())): Fetch<W>`, is known in the
+implementation's functions: one for each function it was said in. -/
+def conditionKeys (key : String) (t : Ty) : M (List Nat) := do
+  let suffix := s!":{key}:{← spellTy (← zonk t)}"
+  pure (((← get).rigidKeys.toList.zipIdx.filter fun (n, _) =>
+    n.startsWith "'%condition:" && n.endsWith suffix).map fun (_, i) => 2 * i + 1)
+
 /-- How a bound is met, where implementations are chosen by fitting types
 (`St.patterned`): as `Traits.solve` finds it, but each condition of the
 implementation found is looked for the same way, with the trait's arguments
@@ -167,6 +175,9 @@ partial def solveFitting (givens : Traits.Givens) (fuel : Nat) (key : String) (t
       | .con n args => .con n (args.map settle)
     return Traits.solve (← get).kimpls givens 100000 key (settle (← toSTy ty))
   if let some k ← keyOf ty then return (Traits.findGiven key k givens).map .given
+  -- (What the function is given of a type made from its type parameters.)
+  for k in ← conditionKeys key ty do
+    if let some g := Traits.findGiven key k givens then return some (.given g)
   -- (A function that performs something is not one an implementation for
   -- functions is for: what is written of `Self` there performs nothing.)
   if let .fn _ _ effs tail _ := ty then
@@ -182,6 +193,13 @@ partial def solveFitting (givens : Traits.Givens) (fuel : Nat) (key : String) (t
   -- those are asked at.)
   for (want, got) in (im.targs.map (subst at_ [] [])).zip args do
     try unify want got catch _ => return none
+  -- (What its conditions say a type left to another trait's implementations
+  -- is: said of this use, which may be what decides a type parameter that
+  -- is only in the conditions.)
+  for (j, asked, name, said) in im.equal do
+    if let some subject := hargs[j]? then
+      if let some found ← assocAt asked subject name then
+        try unify (subst at_ [] [] said) found catch _ => return none
   let mut subs : List Traits.Dict := []
   for (tr, j) in im.context do
     let some arg := hargs[j]? | return none
@@ -195,10 +213,13 @@ partial def solveFitting (givens : Traits.Givens) (fuel : Nat) (key : String) (t
   pure (some (.impl i subs))
 
 /-- `leaves`, where implementations are chosen by fitting types. -/
-partial def leavesFitting (pos key : String) (t : Ty) (args : List Ty) :
+partial def leavesFitting (pos key : String) (t : Ty) (args : List Ty) (owner : String := "") :
     M (List (String × Nat × Ty)) := do
   let t ← find t
   if let some k ← keyOf t then return [(key, k, t)]
+  -- (What the function is given of a type made from its type parameters.)
+  let said := s!"'%condition:{owner}:{key}:{← spellTy (← zonk t)}"
+  if let some i := (← get).rigidKeys.toList.idxOf? said then return [(key, 2 * i + 1, t)]
   let missing : M (List (String × Nat × Ty)) := do
     throw s!"{pos}`{showTy (← zonk t)}` does not implement `{Syntax.traitShown key}`"
   if let .fn _ _ effs tail _ := t then
@@ -213,14 +234,18 @@ partial def leavesFitting (pos key : String) (t : Ty) (args : List Ty) :
       try unify got (← fixedAt at_ want) catch _ => return ← missing
   for (want, got) in (im.targs.map (subst at_ [] [])).zip args do
     try unify want got catch _ => return ← missing
+  for (j, asked, name, said) in im.equal do
+    if let some subject := hargs[j]? then
+      if let some found ← assocAt asked subject name then
+        try unify (subst at_ [] [] said) found catch _ => return ← missing
   let mut out : List (String × Nat × Ty) := []
   for (tr, j) in im.context do
     let arg := hargs[j]?.getD .unit
-    out := out ++ (← leavesFitting pos (← subKey tr arg []) arg [])
+    out := out ++ (← leavesFitting pos (← subKey tr arg []) arg [] owner)
   for (tr, cargs, subject) in im.extra do
     let subject := subst at_ [] [] subject
     let cargs := cargs.map (subst at_ [] [])
-    out := out ++ (← leavesFitting pos (← subKey tr subject cargs) subject cargs)
+    out := out ++ (← leavesFitting pos (← subKey tr subject cargs) subject cargs owner)
   pure out
 
 /-- Meet the bounds of the group just inferred, and give each of its functions
@@ -409,11 +434,22 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
       unless keyed.any (·.1 == key) do keyed := (key, b.trait, args) :: keyed
       split := split.push { b with trait := key, ty := self, args := args }
   pending := split
+  -- (The numbers an implementation's conditions on types made from its type
+  -- parameters are known by in its functions, before what those need is
+  -- looked for.)
+  for d in decls do
+    if let some (im, _) := d.impl then
+      let own := im.pvars.map fun (p, id) => (id, Ty.con s!"'{p}@{d.name}" [])
+      for (tr, cargs, subject) in im.extra do
+        let t := subst own [] [] subject
+        if (← keyOf t).isNone then
+          let key ← if cargs.isEmpty then pure tr else traitKey tr (cargs.map (subst own [] []))
+          let _ ← keyOf (Ty.con s!"'%condition:{d.name}:{key}:{← spellTy t}" [])
   -- What the group's functions need of the types they are generic in.
   let mut leafs : Array (String × Nat × Ty) := #[]
   for b in pending do
     -- (How to destroy a type that nothing decides is not asked for.)
-    let ls ← try (if (← get).patterned && b.trait != Syntax.destroyTrait then leavesFitting b.pos b.trait b.ty b.args
+    let ls ← try (if (← get).patterned && b.trait != Syntax.destroyTrait then leavesFitting b.pos b.trait b.ty b.args b.owner
         else leaves b.pos b.trait b.ty) catch e =>
       if b.trait == Syntax.destroyTrait then pure [] else throw (inFunction b.owner e)
     for l in ls do

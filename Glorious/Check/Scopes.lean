@@ -302,6 +302,25 @@ def hasGenericImpl (trait : String) (self : Ty) : M Bool := do
       im.generic && Syntax.traitBase im.trait == trait && im.head == h)
   | _ => pure false
 
+/-- The type a trait leaves to its implementations, for a type whose
+implementation is known: `Elem` of `Index` for an array of `Int`. Nothing
+where the type is not known enough to say which implementation is its. -/
+def assocAt (tr : String) (subject : Ty) (name : String) : M (Option Ty) := do
+  let (self, args) ← subjectOf tr subject
+  let known ← match ← find self with
+    | .con n hargs => pure (if n.startsWith "'" then none else some (n, hargs))
+    | other => pure other.head
+  let some (head, hargs) := known | return none
+  let key ← try implKey tr self args catch _ => return none
+  let some im := (← get).impls.toList.find? fun im => im.trait == key && im.head == head | return none
+  let some said := im.assocs.lookup name | return none
+  -- (Its type parameters are the type's arguments, or inside them.)
+  let at_ ← implAt im hargs
+  for (j, want) in im.fixed do
+    if let some got := hargs[j]? then
+      try unify got (← fixedAt at_ want) catch _ => return none
+  pure (some (subst at_ [] [] said))
+
 /-- Settle what can be settled of the types traits leave to implementations:
 where the type asked of is known, the answer is what its implementation says;
 and the same question asked twice has one answer. -/
@@ -323,9 +342,12 @@ def settleAssocs : M Unit := do
       | some im =>
         match im.assocs.lookup name with
         | some said =>
-          -- The implementation's type parameters are the type's arguments.
-          let at_ := (im.params.zip hargs).filterMap fun (p, h) =>
-            (im.pvars.lookup p).map fun id => (id, h)
+          -- The implementation's type parameters are the type's arguments,
+          -- or inside them.
+          let at_ ← implAt im hargs
+          for (j, want) in im.fixed do
+            if let some got := hargs[j]? then
+              try unify got (← fixedAt at_ want) catch _ => pure ()
           try unifyAt s!"`{name}` of `{key}` for `{bareName head}`" (subst at_ [] [] said) a
           catch e => throw (pos ++ e)
         | none => left := left.push (tr, subject, name, a, owner, pos)

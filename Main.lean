@@ -194,7 +194,7 @@ partial def moduleFiles (path : System.FilePath) : IO (List (List String × Stri
 
 /-- Compile the program at `path`, with the modules it has in other files. -/
 def compileFile (path : String) : IO (Except String Compiled) := do
-  pure (compileSource (← IO.FS.readFile path) true (← moduleFiles path))
+  pure (compileSource (← IO.FS.readFile path) true (← moduleFiles path) (few := true))
 
 /-- The example programs that state what they must print. -/
 def exampleCases (dir : System.FilePath) :

@@ -2923,6 +2923,29 @@ the order it is being built:
   this is asked for, for `(a, b).chain()` and `app.add_systems(..)`. It is
   the names in scope that decide, not the value's type: a function of a
   type's own, `Vec::len`, is not found this way yet.
+- **covey: a function of any parameters is a system, by one
+  implementation for each number of them.** `Parameter` gives, for a
+  parameter's type, what it asks for without the reference (`Changed<A>`,
+  `Read<A>`, `Emitted`, `Asking`); `Fetch` is implemented for a list of
+  those, one at a time, each taking its column out of the world, lending it
+  on with what was gathered before, and putting it back; at the end of the
+  list the function is called with what was gathered. The references are
+  gathered on the way down, so no type has to be for every lifetime, which
+  generic associated types would otherwise be needed for. That a system
+  takes a component once is asked of the list (`AllApart`). Three things
+  in the checker were needed, none about covey: a condition `where P:
+  Kind<Marker = M>` decides `M` when the implementation is chosen; a
+  condition on a type made from parameters, `where (M, ()): Fetch<..>`, is
+  given to the implementation's functions; and a type left to an
+  implementation for a reference (`impl Kind for &mut T`) is found.
+- **The command line reads only the library modules a program names**, and
+  those they name, checked with the program: the whole library, read and
+  checked once, serves a run of many programs and costs one program 2 s.
+  Measured on a program using two modules: 2.5 s to 0.5 s.
+- **Where no borrow can be a scope the search stops early**: if no run of
+  places passes, twelve spread among them are asked alone, and if none
+  passes the rest are not asked. The count over the tests is unchanged
+  (1156); covey's example went from 42 CPU-seconds to 13.
 - **Tuples of any length are the pairs they are made of** (`std::tuple`).
   No parameter stands for a list of types. `Tuple` gives a tuple's nested
   form, `(A, B, C)` as `(A, (B, (C, ())))`, and back; `Callable` gives a

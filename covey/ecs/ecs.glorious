@@ -178,19 +178,95 @@ pub struct Commands { ended: [Entity] }
 
 pub fn end(commands: &mut Commands, entity: Entity) { push_at(&mut commands.ended, entity) }
 
-// Two different components. `(A, B)` is that unless it is `(A, A)`, which is
-// only if `A` has a trait nothing has: so a system with two parameters of
-// one component does not compile, and the message names the component.
+// What a parameter of a system asks for, without the reference: a column
+// to change, a column to read, the value emitted, or the commands. Found
+// from the parameter's type, so a system is written as any function is.
+pub struct Changed<A>(A)
+pub struct Read<A>(A)
+pub struct Emitted
+pub struct Asking
+pub trait Parameter { type Asks; }
+impl<A> Parameter for &mut Column<A> { type Asks = Changed<A>; }
+impl<A> Parameter for &Column<A> { type Asks = Read<A>; }
+impl Parameter for &mut Commands { type Asks = Asking; }
+// (Any other reference is to the value emitted: the narrower ones above
+// are chosen first.)
+impl<E> Parameter for &E { type Asks = Emitted; }
+
+// A system takes a component once. Two of what it asks for are apart unless
+// they are one column, which is only if the component has a trait nothing
+// has: so such a system does not compile, and the message names the
+// component.
 pub trait ASystemTakesAComponentOnce {}
 pub trait Apart {}
-impl<A, B> Apart for (A, B) {}
-impl<A> Apart for (A, A) where A: ASystemTakesAComponentOnce {}
+impl<X, Y> Apart for (X, Y) {}
+impl<A> Apart for (Changed<A>, Changed<A>) where A: ASystemTakesAComponentOnce {}
+impl<A> Apart for (Changed<A>, Read<A>) where A: ASystemTakesAComponentOnce {}
+impl<A> Apart for (Read<A>, Changed<A>) where A: ASystemTakesAComponentOnce {}
+impl<A> Apart for (Read<A>, Read<A>) where A: ASystemTakesAComponentOnce {}
+// One thing asked for, apart from each of a list; and a list each of whose
+// members is apart from those after it.
+pub trait ApartFrom<X> {}
+impl<X> ApartFrom<X> for () {}
+impl<X, First, Rest> ApartFrom<X> for (First, Rest) where (X, First): Apart, Rest: ApartFrom<X> {}
+pub trait AllApart {}
+impl AllApart for () {}
+impl<First, Rest> AllApart for (First, Rest) where Rest: ApartFrom<First>, Rest: AllApart {}
+
+// A function called with what was gathered for it: its arguments as pairs,
+// the last outermost.
+pub trait CallWith<Gathered> { fn call_with(&Self, Gathered) }
+impl<P> CallWith<((), P)> for fn(P) -> () { fn call_with(f, g) { (*f)(g.1) } }
+impl<P, Q> CallWith<(((), P), Q)> for fn(P, Q) -> () { fn call_with(f, g) { (*f)(g.0.1, g.1) } }
+impl<P, Q, R> CallWith<((((), P), Q), R)> for fn(P, Q, R) -> () {
+    fn call_with(f, g) { (*f)(g.0.0.1, g.0.1, g.1) }
+}
+impl<P, Q, R, T> CallWith<(((((), P), Q), R), T)> for fn(P, Q, R, T) -> () {
+    fn call_with(f, g) { (*f)(g.0.0.0.1, g.0.0.1, g.0.1, g.1) }
+}
+
+// What a list of things asked for is met with, one at a time: a column is
+// taken out of the world, lent, and put back when the system has run. What
+// has been gathered so far goes along, and at the end of the list the
+// function is called with it.
+pub trait Fetch<E, S, Gathered, F> {
+    fn fetch(&E, &mut World<S>, &mut Commands, Gathered, &F)
+}
+impl<E, S, G, F> Fetch<E, S, G, F> for () where F: CallWith<G> {
+    fn fetch(event, world, commands, gathered, f) { call_with(f, gathered) }
+}
+impl<E, S, G, F, A, Rest> Fetch<E, S, G, F> for (Changed<A>, Rest)
+    where S: Get<A>, Rest: Fetch<E, S, (G, &mut Column<A>), F> {
+    fn fetch(event, world, commands, gathered, f) {
+        let mut a = <S as Get<A>>::take(&mut world.columns);
+        <Rest as Fetch<E, S, (G, &mut Column<A>), F>>::fetch(event, world, commands, (gathered, &mut a), f);
+        <S as Get<A>>::put(&mut world.columns, a)
+    }
+}
+impl<E, S, G, F, A, Rest> Fetch<E, S, G, F> for (Read<A>, Rest)
+    where S: Get<A>, Rest: Fetch<E, S, (G, &Column<A>), F> {
+    fn fetch(event, world, commands, gathered, f) {
+        let a = <S as Get<A>>::take(&mut world.columns);
+        <Rest as Fetch<E, S, (G, &Column<A>), F>>::fetch(event, world, commands, (gathered, &a), f);
+        <S as Get<A>>::put(&mut world.columns, a)
+    }
+}
+impl<E, S, G, F, Rest> Fetch<E, S, G, F> for (Emitted, Rest) where Rest: Fetch<E, S, (G, &E), F> {
+    fn fetch(event, world, commands, gathered, f) {
+        <Rest as Fetch<E, S, (G, &E), F>>::fetch(event, world, commands, (gathered, event), f)
+    }
+}
+// (The commands are given once: what comes after has none to give.)
+impl<E, S, G, F, Rest> Fetch<E, S, G, F> for (Asking, Rest) where Rest: Fetch<E, S, (G, &mut Commands), F> {
+    fn fetch(event, world, commands, gathered, f) {
+        let mut none = Commands { ended: [] };
+        <Rest as Fetch<E, S, (G, &mut Commands), F>>::fetch(event, world, &mut none, (gathered, commands), f)
+    }
+}
 
 // Something that runs against a world when `E` is emitted. A function is
-// one, by its parameters: each column it asks for is taken out of the world,
-// lent to it, and put back. A first parameter `&E` is the value emitted, and
-// a last parameter `&mut Commands` the commands. Two systems in a tuple run
-// one after the other.
+// one, whatever its parameters ask for; two systems in a pair run one
+// after the other.
 pub trait System<E, S> {
     fn run(&Self, &E, &mut World<S>, &mut Commands)
 }
@@ -203,59 +279,32 @@ impl<E, S, X, Y> System<E, S> for (X, Y) where X: System<E, S>, Y: System<E, S> 
         <Y as System<E, S>>::run(&pair.1, event, world, commands)
     }
 }
-impl<E, S, A> System<E, S> for fn(&mut Column<A>) -> () where S: Get<A> {
+impl<E, S, P, A> System<E, S> for fn(P) -> ()
+    where P: Parameter<Asks = A>, (A, ()): Fetch<E, S, (), fn(P) -> ()> {
     fn run(f, event, world, commands) {
-        let mut a = <S as Get<A>>::take(&mut world.columns);
-        (*f)(&mut a);
-        <S as Get<A>>::put(&mut world.columns, a)
+        <(A, ()) as Fetch<E, S, (), fn(P) -> ()>>::fetch(event, world, commands, (), f)
     }
 }
-impl<E, S, A> System<E, S> for fn(&Column<A>) -> () where S: Get<A> {
+impl<E, S, P, Q, A, B> System<E, S> for fn(P, Q) -> ()
+    where P: Parameter<Asks = A>, Q: Parameter<Asks = B>, (A, (B, ())): AllApart,
+          (A, (B, ())): Fetch<E, S, (), fn(P, Q) -> ()> {
     fn run(f, event, world, commands) {
-        let a = <S as Get<A>>::take(&mut world.columns);
-        (*f)(&a);
-        <S as Get<A>>::put(&mut world.columns, a)
+        <(A, (B, ())) as Fetch<E, S, (), fn(P, Q) -> ()>>::fetch(event, world, commands, (), f)
     }
 }
-impl<E, S, A, B> System<E, S> for fn(&mut Column<A>, &Column<B>) -> () where S: Get<A>, S: Get<B>, (A, B): Apart {
+impl<E, S, P, Q, R, A, B, C> System<E, S> for fn(P, Q, R) -> ()
+    where P: Parameter<Asks = A>, Q: Parameter<Asks = B>, R: Parameter<Asks = C>, (A, (B, (C, ()))): AllApart,
+          (A, (B, (C, ()))): Fetch<E, S, (), fn(P, Q, R) -> ()> {
     fn run(f, event, world, commands) {
-        let mut a = <S as Get<A>>::take(&mut world.columns);
-        let b = <S as Get<B>>::take(&mut world.columns);
-        (*f)(&mut a, &b);
-        <S as Get<A>>::put(&mut world.columns, a);
-        <S as Get<B>>::put(&mut world.columns, b)
+        <(A, (B, (C, ()))) as Fetch<E, S, (), fn(P, Q, R) -> ()>>::fetch(event, world, commands, (), f)
     }
 }
-impl<E, S, A, B> System<E, S> for fn(&mut Column<A>, &mut Column<B>) -> () where S: Get<A>, S: Get<B>, (A, B): Apart {
+impl<E, S, P, Q, R, T, A, B, C, D> System<E, S> for fn(P, Q, R, T) -> ()
+    where P: Parameter<Asks = A>, Q: Parameter<Asks = B>, R: Parameter<Asks = C>, T: Parameter<Asks = D>,
+          (A, (B, (C, (D, ())))): AllApart,
+          (A, (B, (C, (D, ())))): Fetch<E, S, (), fn(P, Q, R, T) -> ()> {
     fn run(f, event, world, commands) {
-        let mut a = <S as Get<A>>::take(&mut world.columns);
-        let mut b = <S as Get<B>>::take(&mut world.columns);
-        (*f)(&mut a, &mut b);
-        <S as Get<A>>::put(&mut world.columns, a);
-        <S as Get<B>>::put(&mut world.columns, b)
-    }
-}
-// With the value emitted first.
-impl<E, S, A> System<E, S> for fn(&E, &mut Column<A>) -> () where S: Get<A> {
-    fn run(f, event, world, commands) {
-        let mut a = <S as Get<A>>::take(&mut world.columns);
-        (*f)(event, &mut a);
-        <S as Get<A>>::put(&mut world.columns, a)
-    }
-}
-// With the commands last.
-impl<E, S, A> System<E, S> for fn(&Column<A>, &mut Commands) -> () where S: Get<A> {
-    fn run(f, event, world, commands) {
-        let a = <S as Get<A>>::take(&mut world.columns);
-        (*f)(&a, commands);
-        <S as Get<A>>::put(&mut world.columns, a)
-    }
-}
-impl<E, S, A> System<E, S> for fn(&E, &mut Column<A>, &mut Commands) -> () where S: Get<A> {
-    fn run(f, event, world, commands) {
-        let mut a = <S as Get<A>>::take(&mut world.columns);
-        (*f)(event, &mut a, commands);
-        <S as Get<A>>::put(&mut world.columns, a)
+        <(A, (B, (C, (D, ())))) as Fetch<E, S, (), fn(P, Q, R, T) -> ()>>::fetch(event, world, commands, (), f)
     }
 }
 

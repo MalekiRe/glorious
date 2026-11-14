@@ -156,22 +156,67 @@ def saysLength (text : String) : Bool :=
       !word.isEmpty && word.all fun c => c.isAlphanum || c == '_'
     | _ => false
 
+/-- The library's modules a program needs: those its texts name after
+`std::`, `core::` or `alloc::`, and those that these name in turn; with the
+texts of the three roots cut down to them. Nothing where the texts name the
+library some other way (`use std::{a, b}`), and all of it is then read. -/
+def neededStd (texts : List String) : Option (List (List String × String)) :=
+  let roots := ["std", "core", "alloc"]
+  if texts.any (fun text => roots.any fun r => (text.splitOn s!"{r}::\{").length > 1
+      || (text.splitOn s!"{r}::*").length > 1 || (text.splitOn s!"use {r};").length > 1) then none
+  else
+    let named := fun (text : String) => roots.flatMap fun r =>
+      ((text.splitOn s!"{r}::").drop 1).map fun after =>
+        [r, String.ofList (after.toList.takeWhile fun c => c.isAlphanum || c == '_')]
+    let rec close (fuel : Nat) (have_ todo : List (List String)) : List (List String) :=
+      match fuel, todo with
+      | 0, _ => have_
+      | _, [] => have_
+      | fuel + 1, path :: rest =>
+        if have_.contains path then close fuel have_ rest
+        else match Std.texts.lookup path with
+          | some text => close fuel (path :: have_) (named text ++ rest)
+          | none => close fuel have_ rest
+    let needed := close 4096 [] (texts.flatMap named)
+    -- (With the modules inside each, and what those name.)
+    let inside := fun (have_ : List (List String)) =>
+      (Std.texts.filter fun (path, _) => have_.any fun p => p.length < path.length && p.isPrefixOf path)
+    let needed := close 4096 needed
+      (((inside needed).map (·.1)) ++ (inside needed).flatMap fun (_, text) => named text)
+    let needed := needed ++ ((inside needed).map (·.1)).filter (!needed.contains ·)
+    if needed.isEmpty then some []
+    else
+      -- (A root says only which of its modules there are.)
+      let rootOf := fun (r : String) =>
+        (needed.filter fun path => path.head? == some r && path.length == 2).foldl (fun text path =>
+          text ++ s!"pub mod {path.getLastD ""};\n") ""
+      let usedRoots := roots.filter fun r => needed.any (·.head? == some r)
+      some (usedRoots.map (fun r => ([r], rootOf r))
+        ++ Std.texts.filter fun (path, _) => needed.contains path)
+
 /-- The prelude and a program as written: the first module's text, and the
 texts of the modules that are files of their own, each with its path. Where
 the program says `mod name;` the items of that module's text are put. -/
-def parseProgram (src : String) (files : List (List String × String)) (check : Bool := true) :
+def parseProgram (src : String) (files : List (List String × String)) (check : Bool := true)
+    (few : Bool := false) :
     Except String (List Syntax.Item × List Syntax.Item) := do
   -- The library's texts are files of the program, before its own.
   -- (`#![no_std]`: without the library, whatever the text mentions.)
   let std := usesStd src files && (src.splitOn "#![no_std]").length == 1
   let own := files
-  let files := if std then Std.texts ++ files else files
+  -- (`few`: only the library's modules the program needs, read and checked
+  -- with it, where it is one program that is compiled: the whole library
+  -- read once serves many.)
+  let needed := if few && std then neededStd (src :: own.map (·.2)) else none
+  let library := needed.getD Std.texts
+  let files := if std then library ++ files else files
   let (prelude, fix) ← if check then readPrelude.get else
     match Syntax.parse {} Prelude.unchecked with
     | .ok r => pure r
     | .error e => throw s!"prelude: {e}"
   -- The library's texts as they were read once, where the program names it.
-  let read ← if std && check then (do pure (some (← readStd.get)) : Except String (Option StdRead))
+  let read ← if std && check && needed.isNone then
+      (do pure (some (← readStd.get)) : Except String (Option StdRead))
     else pure none
   -- Operators and the constructors with named fields are known to every
   -- text, whichever declares them.
@@ -180,13 +225,13 @@ def parseProgram (src : String) (files : List (List String × String)) (check : 
     Syntax.textSyntax path text
   let unread ← match read with
     | some _ => pure []
-    | none => (if std then Std.texts else []).mapM fun (path, text) => do
+    | none => (if std then library else []).mapM fun (path, text) => do
         let _ ← Syntax.declaredSyntax fix text
         Syntax.textSyntax path text
-  let library := match read with
+  let librarySaid := match read with
     | some r => r.said
     | none => unread
-  let ordered := said.take 1 ++ library ++ said.drop 1
+  let ordered := said.take 1 ++ librarySaid ++ said.drop 1
   let records := ordered.flatMap (·.records)
   -- An operator's fixity is its module's.
   let tables ← Syntax.joinFixities fix ordered
@@ -208,8 +253,8 @@ def parseProgram (src : String) (files : List (List String × String)) (check : 
     | _ => false
   -- (`core` and `alloc` are the library's too: its other names for the same.)
   let items := if std && !declares then
-      items ++ [.pub false (.module "std" none), .pub false (.module "core" none),
-        .pub false (.module "alloc" none)]
+      items ++ (["std", "core", "alloc"].filter fun r => library.any (·.1 == [r])).map fun r =>
+        Syntax.Item.pub false (.module r none)
     else items
   let rec fill (fuel : Nat) (path : List String) (items : List Syntax.Item) :
       Except String (List Syntax.Item) :=
@@ -223,12 +268,12 @@ def parseProgram (src : String) (files : List (List String × String)) (check : 
         let shown := "::".intercalate here
         match files.findIdx? (·.1 == here) with
         | some k =>
-          let parsed ← match (if k < Std.texts.length then kept.bind (·.parsed[k]?) else none) with
+          let parsed ← match (if k < library.length then kept.bind (·.parsed[k]?) else none) with
             | some items => pure items
             | none =>
               let text := ((files[k]?).map (·.2)).getD ""
               match Syntax.parse fix text (base := 1000000 * (k + 2)) (records := records)
-                  (tables := tables) (path := here) (fixed := fixed && k ≥ (if std then Std.texts.length else 0)) with
+                  (tables := tables) (path := here) (fixed := fixed && k ≥ (if std then library.length else 0)) with
               | .ok (items, _) => pure items
               | .error e => throw s!"module `{shown}`: {e}"
           pure (wrap (.module name (some (← fill fuel here parsed))))
@@ -299,8 +344,8 @@ def lowered (b : Elab.Blocks) (written all : List Syntax.Item) :
 proved Core type checker accept the result. With `check := false` both checks
 are skipped, so that programs which go wrong can still be run. -/
 def compileSource (src : String) (check : Bool := true)
-    (files : List (List String × String) := []) : Except String Compiled := do
-  let (prelude, items) ← parseProgram src files check
+    (files : List (List String × String) := []) (few : Bool := false) : Except String Compiled := do
+  let (prelude, items) ← parseProgram src files check few
   -- Every name is given its meaning: the modules become one list of items.
   let resolved ← Syntax.Modules.resolve prelude items
   -- How a constructor is named where a value is shown: without its module,
@@ -320,7 +365,9 @@ def compileSource (src : String) (check : Bool := true)
   -- What the checker learnt about blocks that share an environment. A program
   -- it rejects is elaborated without that.
   let drops := hasDrop items
+  -- (The library read for this program alone is checked with it.)
   let withStd := usesStd src files && (src.splitOn "#![no_std]").length == 1
+    && !(few && (neededStd (src :: files.map (·.2))).isSome)
   let first := match withStd, drops with
     | true, false => checkedStd.get
     | true, true => checkedStdDrop.get
@@ -380,12 +427,20 @@ def compileSource (src : String) (check : Bool := true)
   -- every rule. Where it cannot, the borrow is the reference it borrows, as in
   -- a program that is not checked: first every place is tried with the
   -- narrower scope, then each as it passes alone.
-  let lending := fun (blocks : Option Elab.Blocks) (sites : Nat → Nat) =>
+  -- (Whether the program can be shown at all with callables taken to bind the
+  -- regions of the references they are given, before any borrow is a scope:
+  -- where it cannot, no borrow made a scope will change that, and that way
+  -- is not tried for each.)
+  let rankedAtAll := fun (blocks : Option Elab.Blocks) =>
+    match Elab.elabProgram all blocks (fun _ => 0) with
+    | .ok out => (Infer.certify declared out.program true out.envSizes true true true).toOption.isSome
+    | .error _ => false
+  let lending := fun (blocks : Option Elab.Blocks) (ways : List Bool) (sites : Nat → Nat) =>
     match Elab.elabProgram all blocks sites with
     | .ok out =>
       -- As it is, and then with callables taken to bind the regions of the
       -- references they are given: a function lent to by itself needs that.
-      [false, true].findSome? fun ranked =>
+      ways.findSome? fun ranked =>
         match Infer.certify declared out.program true out.envSizes true true ranked with
         | .ok cert =>
           if out.lent != 0 && Typing.checkProgram cert out.program then
@@ -398,16 +453,18 @@ def compileSource (src : String) (check : Bool := true)
     if check then
       if let .ok out := Elab.elabProgram all blocks (fun _ => 1) then
         if out.lent != 0 && !out.foreign then
-          if let some c := lending blocks (fun _ => 1) then return c
+          if let some c := lending blocks [false, true] (fun _ => 1) then return c
+          let ways := if rankedAtAll blocks then [false, true] else [false]
+          let lending := lending blocks ways
           if out.sites ≤ 160 then
             -- How each place fares alone, trying the narrower scope first.
             -- (Each is asked apart from the others, so all are asked side
             -- by side: the answers are what they would be one at a time.)
             let try_ := fun (i : Nat) =>
-              if (lending blocks (fun j => if j == i then 1 else 0)).isSome then 1
+              if (lending (fun j => if j == i then 1 else 0)).isSome then 1
               -- (The second way, where the place has one.)
               else if !out.twoWays.contains i then 0
-              else if (lending blocks (fun j => if j == i then 2 else 0)).isSome then 2
+              else if (lending (fun j => if j == i then 2 else 0)).isSome then 2
               else 0
             -- A call inside a statement is asked only if the statement's
             -- own place fails: where that passes, the call's borrows are
@@ -420,9 +477,19 @@ def compileSource (src : String) (check : Bool := true)
             let whole : List (Task Bool) :=
               if size == 1 then []
               else (List.range ((out.sites + size - 1) / size)).map fun g => Task.spawn fun _ =>
-                (lending blocks (fun j => if j / size == g then 1 else 0)).isSome
+                (lending (fun j => if j / size == g then 1 else 0)).isSome
             let whole := whole.map Task.get
             let passed := fun (i : Nat) => size != 1 && whole[i / size]?.getD false
+            -- Where no run passes, a few places spread among them are asked
+            -- alone first: if none of those passes either, what fails is not
+            -- some few places, and the rest are not asked.
+            let hopeless :=
+              if size == 1 || whole.any id then false
+              else
+                let sample := ((List.range 12).map fun k => (k * out.sites) / 12).eraseDups
+                let asked := sample.map fun i => Task.spawn fun _ => try_ i
+                (asked.map Task.get).all (· == 0)
+            if hopeless then return ← plain blocks
             let first : List (Task Nat) := (List.range out.sites).map fun i => Task.spawn fun _ =>
               if passed i then 1 else if (out.under.lookup i).isSome then 0 else try_ i
             let first := first.map Task.get
@@ -433,7 +500,7 @@ def compileSource (src : String) (check : Bool := true)
               | none => first[i]?.getD 0
             let alone : List Nat := second.map Task.get
             if alone.any (· != 0) then
-              if let some c := lending blocks (fun j => alone[j]?.getD 0) then return c
+              if let some c := lending (fun j => alone[j]?.getD 0) then return c
               -- Not all at once: keep each that passes with those kept
               -- before it. A run of them is asked whole first, and by halves
               -- where it fails, so that the few that fail are found without
@@ -443,7 +510,7 @@ def compileSource (src : String) (check : Bool := true)
               let with_ := fun (kept : List Nat) (coming : List Nat) =>
                 coming.foldl (fun (k : List Nat) (i : Nat) => k.set i (alone[i]?.getD 0)) kept
               let ask : List Nat → Task (Option Compiled) := fun next =>
-                Task.spawn fun _ => lending blocks (fun j => next[j]?.getD 0)
+                Task.spawn fun _ => lending (fun j => next[j]?.getD 0)
               let rec add (fuel : Nat) (kept : List Nat) (coming : List Nat) (best : Option Compiled)
                   (whole : Task (Option Compiled)) : List Nat × Option Compiled :=
                 match fuel, coming with
