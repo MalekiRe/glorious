@@ -460,8 +460,9 @@ partial def elabStmts (scope : Scope) (tailPos : Bool) : List Stmt → M Atom
             modify fun s =>
               { s with plain := s.plain.erase ⟨s.owner, s.pos.1, s.pos.2, x, uniq⟩ }
             pure c
-          if (← get).hoisted != 0 then
-            modify fun s => { s with hoisted := s.hoisted - 1 }
+          -- (One the elaborator made before a statement is not a place of
+          -- its own: how long it lasts is in its name.)
+          if madeBorrow p then
             return ← elabBorrowScope scope tailPos p uniq (← lent) rest (p.startsWith "%borrow")
           let site := (← get).sites
           modify fun s => { s with sites := s.sites + 1 }
@@ -485,7 +486,7 @@ partial def elabStmts (scope : Scope) (tailPos : Bool) : List Stmt → M Atom
             | none => (a, none)
           let lets := named.filterMap fun (_, b) =>
             b.map fun (i, a) => Stmt.let_ (.var s!"%borrow{site}.{i}") a
-          modify fun s => { s with sites := s.sites + 1, hoisted := s.hoisted + lets.length }
+          modify fun s => { s with sites := s.sites + 1 }
           return ← elabStmts scope tailPos
             (lets ++ .let_ pat (.call id (.name q f) (named.map (·.1))) :: rest)
     let a ← elabExpr scope false value
@@ -619,6 +620,11 @@ where
     | .proj e n => do
       let (es, found) ← goArgs false true false [e] found
       pure (.proj (es.headD e) n, found)
+    -- (What a handler watches: a borrow written in it is made before the
+    -- handler is there, and lasts until it is gone.)
+    | .handle subject arms => do
+      let (subject, found) ← go false subject found
+      pure (.handle subject arms, found)
     | _ => pure (e, found)
   goArgs (stored take held : Bool) (args : List Expr) (found : List (String × Expr)) :
       M (List Expr × List (String × Expr)) := do
@@ -657,11 +663,13 @@ partial def lendWithin (scope : Scope) (s : Stmt) : M (Option (List Stmt)) := do
         | .tuple [target] => target
         | other => other
       pure (.assign target value, found ++ more)
+    -- (Of what is given a name, a borrow lasts while all of it is worked
+    -- out: then, while what is made of it is used.)
     | .let_ pat value => do
-      let (value, found) ← nameBorrows scope site wide all value
+      let (value, found) ← nameBorrows scope site wide true value
       pure (.let_ pat value, found)
     | .letMut x value => do
-      let (value, found) ← nameBorrows scope site wide all value
+      let (value, found) ← nameBorrows scope site wide true value
       pure (.letMut x value, found)
     | other => pure (other, []) : M (Stmt × List (String × Expr)))
   -- (Whether this is a place at all does not depend on how it is tried.)
@@ -670,8 +678,26 @@ partial def lendWithin (scope : Scope) (s : Stmt) : M (Option (List Stmt)) := do
   if mode == 0 then return none
   let (s', found) ← named (mode == 2) (mode == 2)
   if found.isEmpty then return none
-  modify fun st => { st with hoisted := st.hoisted + found.length }
-  pure (some (found.map (fun (n, a) => Stmt.let_ (.var n) a) ++ [s']))
+  -- What the statement works out before any of the borrows is used is
+  -- worked out before they are made.
+  let isCell := fun (x : String) => match lookupVar scope x with
+    | some (true, _, _) => true
+    | _ => false
+  let (s', first) := match s' with
+    | .expr e =>
+      let (e, first) := pullFirst site isCell e
+      (Stmt.expr e, first)
+    | .assign target value =>
+      let (target, first) := pullFirst site isCell target
+      (.assign target value, first)
+    | .let_ pat value =>
+      let (value, first) := pullFirst site isCell value
+      (.let_ pat value, first)
+    | .letMut x value =>
+      let (value, first) := pullFirst site isCell value
+      (.letMut x value, first)
+    | other => (other, [])
+  pure (some ((first ++ found).map (fun (n, a) => Stmt.let_ (.var n) a) ++ [s']))
 
 partial def elabBorrowScope (scope : Scope) (tailPos : Bool) (p : String) (uniq : Bool)
     (cell : Atom) (rest : List Stmt) (wide : Bool) : M Atom := do

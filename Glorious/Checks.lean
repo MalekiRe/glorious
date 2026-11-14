@@ -271,12 +271,18 @@ def all : List (Nat × (Unit → Bool)) := [
   -- A callable that reads the variable can run while it is lent for reading.
   (79, fun _ => unprovedBorrows "fn main() { let mut x = 3; let r = &x; let get = { x }; get() + *r }"
     == some []),
-  -- A borrow is not made a scope where the program would not then pass. Where
-  -- the function performs an operation handled outside the call, the handler
-  -- would run while the borrow is set aside;
+  -- Where the function performs an operation that a handler around the call
+  -- handles, the borrow cannot be a scope that lasts as long as the call:
+  -- the handler would run while it is set aside. It is made before the
+  -- handler is there, and lasts until the handler is gone.
   (80, fun _ => lentBorrows "effect Tick { tick() }
     fn work(p) { tick(); *p = *p + 1; tick(); *p }
-    fn main() { let mut n = 0; handle work(&mut n) { tick(k) => k(()) } }" == some 0),
+    fn main() { let mut n = 0; handle work(&mut n) { tick(k) => k(()) } }" == some 1),
+  -- A handler that itself reaches the variable leaves the borrow no scope:
+  -- here another part of it, which Core's rule does not tell from the whole.
+  (93, fun _ => lentBorrows "effect Tick { tick() }
+    fn work(p) { tick(); *p = *p + 1; tick(); *p }
+    fn main() { let mut n = (0, 5); handle work(&mut n.0) { tick(k) => print(n.1); k(()) } }" == some 0),
   -- A callable made before the call can be given the borrow: its type binds
   -- the region of the reference it takes.
   (81, fun _ => lentBorrows "fn apply(f, p) { f(p) }
@@ -305,7 +311,8 @@ def all : List (Nat × (Unit → Bool)) := [
     fn incr(p) { *p = *p + 1 }
     fn work(p) { tick(); *p = *p + 1; tick(); *p }
     fn main() { let mut x = 1; let mut n = 0; incr(&mut x);
-      let r = handle work(&mut n) { tick(k) => k(()) }; r + x }" == some 1),
+      let mut n = (n, 5);
+      let r = handle work(&mut n.0) { tick(k) => print(n.1); k(()) }; r + x }" == some 1),
   -- A program that does not pass the region rules does not pass these.
   (88, fun _ => lentBorrows "fn main() { let mut a = 1; let mut b = 2;
       let p = if(a < b) { &mut a } else { &mut b }; *p = 9; a + b }" == none),

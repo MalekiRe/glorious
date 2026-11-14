@@ -2908,14 +2908,29 @@ borrow tried).
   the search for a certificate tries: first with the borrows given to
   functions left to their calls, then with those too lasting the whole
   statement, and for a `let`, lasting while what is made of them is used.
-  Of the tests' borrows, 1044 are scopes and 117 are not; before, with ten
-  fewer tests, 731 and 409.
+  Of the tests' borrows, 1065 are scopes and 105 are not, in 59 programs;
+  before, with eighteen fewer tests, 731 and 409, in 156.
 - **What is assigned is computed before the place it goes**, as the
   specification says (§5.3, "Evaluate the RHS first"). It was the other
   way round for `*r = v` and `a[i] = v`: the index was worked out, and its
   bounds checked, before the value. It also means the borrow by which the
   place is reached does not last while the value is worked out, so
   `x.1 = x.0 + 1` and `xs[0] = xs[2] + xs[1]` are scopes too.
+- What the statement works out before any of its borrows is used is worked
+  out before they are made, so that the scope does not last while it runs:
+  `a[len(a) - 1] = v` reads `a` for the index. Only what comes first is
+  taken out, in the order it was written, so the order things happen in is
+  what it was; once a call that is given a borrow has run, what follows
+  stays where it is. Nothing is taken out of what a handler watches.
+- A borrow written in what a handler watches (`handle work(&mut n) { .. }`)
+  is made before the handler is there and lasts until it is gone. As a
+  scope that lasts as long as the call it could not be one: the handler
+  would run while it is set aside.
+- What is left: two parts of one variable borrowed at once (Core's rule is
+  about the whole variable); a borrow that a callable or a branch gives
+  back; of two borrows given to one call, one outliving the other; two
+  variables borrowed under one lifetime name; a reference an operation
+  hands to the computation it is handled for.
 - The search tries each place alone when all at once fails, side by side.
   It gave up on programs with more than 32 places, which with the standard
   library is soon reached, and then no borrow of the program was a scope;

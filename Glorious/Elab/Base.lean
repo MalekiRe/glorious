@@ -259,10 +259,6 @@ structure St where
   the statement's: where the statement's borrows are made scopes, the call's
   are among them. -/
   under : List (Nat × Nat) := []
-  /-- How many of the next `let p = &x` are scopes that last while anything
-  made from `p` is used, whatever `lends` says: they were written by the
-  elaborator for the arguments of a call, and are not places of their own. -/
-  hoisted : Nat := 0
   /-- Where the statement being elaborated starts. -/
   pos : Nat × Nat := (0, 0)
   /-- The borrows that are not scopes of their own: each is the reference it
@@ -487,6 +483,75 @@ where
         !(fvStmts [] (rest.drop j)).any tracked'.contains
       let k' := k'.getD rest.length
       if k' == k && tracked'.length == tracked.length then k else go tracked' k'
+
+/-- Is this the name of a borrow the elaborator made before a statement that
+had it written in it? Such a `let p = &x` is a scope, and not a place of its
+own: the statement was the place. -/
+def madeBorrow (p : String) : Bool :=
+  p.startsWith "%lend" || p.startsWith "%held" || p.startsWith "%borrow"
+
+/-- A statement's expression with what is worked out before its first borrow
+is used taken out and named, in the order it is worked out: so that a borrow
+made a scope around the statement does not last while that runs, which may
+read the variable borrowed. (`a[len(a) - 1] = v`.)
+
+Only what comes first can be taken out without changing the order: once a
+call that is given a borrow has run, what follows stays where it is. Nothing
+is taken out of what a handler watches: it would then run unwatched. -/
+partial def pullFirst (site : Nat) (isCell : String → Bool) (e : Expr) :
+    Expr × List (String × Expr) :=
+  let (e, pulled, _) := go e [] true
+  (e, pulled.reverse)
+where
+  has : Expr → Bool
+    | .name none n => madeBorrow n
+    | .call _ f args => has f || args.any has
+    | .tuple args => args.any has
+    | .deref e => has e
+    | .proj e _ => has e
+    | .handle subject _ => has subject
+    | _ => false
+  /-- Is it worked out at all: not a number, a callable written out, or a
+  name that is not a variable's. -/
+  worth : Expr → Bool
+    | .int _ => false
+    | .closure _ _ => false
+    | .label _ => false
+    | .name none n => isCell n
+    | .name (some _) _ => false
+    | _ => true
+  operand (e : Expr) (pulled : List (String × Expr)) (first : Bool) :
+      Expr × List (String × Expr) × Bool :=
+    if has e then go e pulled first
+    else if first && worth e then
+      let n := s!"%pre{site}.{pulled.length}"
+      (.name none n, (n, e) :: pulled, first)
+    else (e, pulled, first)
+  operands (es : List Expr) (pulled : List (String × Expr)) (first : Bool) :
+      List Expr × List (String × Expr) × Bool :=
+    es.foldl (fun (out, pulled, first) e =>
+      let (e, pulled, first) := operand e pulled first
+      (out ++ [e], pulled, first)) ([], pulled, first)
+  go (e : Expr) (pulled : List (String × Expr)) (first : Bool) :
+      Expr × List (String × Expr) × Bool :=
+    match e with
+    | .call id f args =>
+      let (f, pulled, first) := match f with
+        | .name _ _ => (f, pulled, first)
+        | _ => operand f pulled first
+      let (args, pulled, _) := operands args pulled first
+      -- (The call runs now: nothing after it is first.)
+      (.call id f args, pulled, false)
+    | .tuple args =>
+      let (args, pulled, first) := operands args pulled first
+      (.tuple args, pulled, first)
+    | .deref e =>
+      let (e, pulled, first) := operand e pulled first
+      (.deref e, pulled, first)
+    | .proj e n =>
+      let (e, pulled, first) := operand e pulled first
+      (.proj e n, pulled, first)
+    | other => (other, pulled, false)
 
 /-- The statements of a block with each `let p = &x` moved to just before the
 first statement that mentions `p`. Making a reference does nothing, and the
