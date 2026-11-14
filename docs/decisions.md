@@ -2808,8 +2808,14 @@ borrow tried).
 - `h.t = new` and `*r = new` did not destroy what was there, where assigning
   to a variable did. They now do, once the new value is made and the place
   found.
-- `xs[0] = new` for elements with a `drop` is still refused: it is `xs =
-  index_set(xs, 0, new)`, which reads `xs`.
+- `xs[0] = new` was `xs = index_set(xs, 0, new)`, which reads `xs`: for
+  elements with a `drop` that was refused, and through a reference it copied
+  the array out. Where the array is a place (a variable, a field, `*r`, an
+  element in turn) the element is now written where it is, as `*(&mut
+  xs[0]) = new`: what was there is destroyed. The place is worked out before
+  the array is borrowed, so `xs[len(xs) - 1] = v` is fine. Of the borrows
+  this adds, twelve in the test programs are not scopes of their own in
+  Core: what Core shows of those programs is otherwise what it was.
 - The fields of a value are destroyed the last declared first, and the
   elements of an array the last first. (Rust goes the other way.)
 

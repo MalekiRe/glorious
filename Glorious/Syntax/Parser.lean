@@ -278,7 +278,10 @@ private partial def elementBorrow (uniq : Bool) (e : Expr) : Option Expr :=
         match fieldRoot a with
         | some (root, path) => some (fieldBorrow (id + 800000) uniq root path)
         | none => elementBorrow uniq a
-    base.map fun b => .call id (preludeFn (if uniq then "element_at_mut" else "element_at")) [b, i]
+    -- (For writing, the place is worked out before the array is borrowed:
+    -- `a[len(a) - 1]` reads `a` to say where.)
+    base.map fun b =>
+      if uniq then .call id (preludeFn "place_at") [i, b] else .call id (preludeFn "element_at") [b, i]
 
 /-- What a statement's expression leaves to settle: the references to be
 named first, whether anything that does something has been come to, and
@@ -1394,7 +1397,11 @@ private partial def parseStmts : P (List Stmt) := do
             -- Known by the identity of the `[`, moved clear of every token's.
             lower fuel inner (.call (at_ + 500000) (preludeFn "index_set") [inner, place, value])
           | _, _ => (target, value)
-        let (e, value) := lower 16 e value
+        -- Where the array is a place, the element is written where it is:
+        -- what was there is destroyed, and nothing is read out of the array.
+        let (e, value) := match elementBorrow true e with
+          | some place => (Expr.deref place, value)
+          | none => lower 16 e value
         let target := match fieldRoot e with
           | some (root, path) => Expr.deref (fieldBorrow id true root path)
           | none => e
