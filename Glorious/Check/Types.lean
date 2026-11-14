@@ -101,6 +101,9 @@ structure Scheme where
   bounds : List (String × Ty) := []
   /-- The callables in the type that are for every lifetime: see `St.ranked`. -/
   ranked : List (Nat × List (Nat × String)) := []
+  /-- Types a callable lets go of whatever they are: each use has to be at
+  one with nothing to destroy. With what to say where it is not. -/
+  quiets : List (Ty × String) := []
   /-- Types left to implementations that the type mentions: see `St.assocUses`. -/
   assocs : List (String × Ty × String × Ty) := []
   /-- Rows of effects the function performs that are left to implementations:
@@ -700,6 +703,11 @@ structure St where
   wildLet : Bool := false
   /-- The names bound by the pattern of a `let`, by their bindings. -/
   letBinds : List Nat := []
+  /-- Names of which parts were read before their type was known: where each
+  would be destroyed if it stays whole, its type, the parts read, and where. -/
+  lateKeeps : Array (Elab.DropSite × Ty × List (Ty × Nat) × String) := #[]
+  /-- Types that have to have nothing to destroy, and what to say if one has. -/
+  quiets : Array (Ty × String) := #[]
   /-- A program in which some type has `Drop`: values are destroyed where
   they are let go, each type by its own function, and a function is given
   how to destroy the types it is generic in. Without `Drop` anywhere there
@@ -1101,6 +1109,8 @@ def instantiate (s : Scheme) (via : Option String := none) (fixed : List (Nat ×
       | some f => s!"{pos}`{f}` holds a value that has to be used while it calls what it is given"
       | none => why
     modify fun st => { st with stays := st.stays.push (subst tm rm cm t, why) }
+  for (t, why) in s.quiets do
+    modify fun st => { st with quiets := st.quiets.push (subst tm rm cm t, pos ++ why) }
   for (t, why) in s.dups do
     -- At a use, the reason is the function's need rather than its inner detail.
     let why := match via with

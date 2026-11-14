@@ -1019,6 +1019,13 @@ def checkUses (pos : String) (outer : Scope) (binds : Scope) (body : List Stmt) 
       | .val _ bid => s.partReads.toList.filterMap fun (owner, _, subject, idx, part, at_) =>
           if owner == bid then some (subject, idx, part, at_) else none
       | _ => []
+    -- (A field read by name before its type was known: which field it is.)
+    let mine ← mine.mapM fun (subject, idx, part, at_) => do
+      if idx == Syntax.partUnknown then
+        match ← (try fieldIndex subject part catch _ => pure none) with
+        | some found => pure (subject, found, part, at_)
+        | none => pure (subject, idx, part, at_)
+      else pure (subject, idx, part, at_)
     if let .val _ bid := b then
       unless mine.isEmpty do
         modify fun st => { st with partReads := st.partReads.filter fun (owner, _, _, _, _, _) => owner != bid }
@@ -1051,6 +1058,14 @@ def checkUses (pos : String) (outer : Scope) (binds : Scope) (body : List Stmt) 
                   dropCands := st.dropCands.push
                     (⟨st.owner, line, col, (if st.letBinds.contains bid then Syntax.letSite x else x), false⟩, t, pos)
                   aparts := st.aparts.filter fun (_, _, whose) => whose != some bid }
+        -- (Of a type not known yet, as a callable's parameter may be: asked
+        -- again once the function it is in has been read.)
+        if let .var _ ← find t then
+          if let some (line, col) := s.bindSites.lookup bid then
+            let site : Elab.DropSite :=
+              ⟨s.owner, line, col, (if s.letBinds.contains bid then Syntax.letSite x else x), false⟩
+            let reads : List (Ty × Nat) := mine.map fun (subject, idx, _, _) => (subject, idx)
+            modify fun st => { st with lateKeeps := st.lateKeeps.push (site, t, reads, pos) }
     if kept then continue
     if apart then
       let (subject, firstAt) := match mine with

@@ -171,7 +171,17 @@ partial def inferExpr (scope : Scope) (amb : Row) : Expr → M Ty
       pure t
     | none =>
       -- Not known yet: settled once the rest of the function is inferred.
-      mustDrop subject "taking one field of a value lets go of the rest"
+      -- (Of a name, the part read is noted, by its name until the type
+      -- says which it is.)
+      let named := match e with
+        | .name none x => match scope.lookup x with
+          | some (.val _ bid) => some (bid, x)
+          | _ => none
+        | _ => none
+      match named with
+      | some (bid, x) =>
+        modify fun s => { s with partReads := s.partReads.push (bid, x, subject, Syntax.partUnknown, name, s.pos) }
+      | none => mustDrop subject "taking one field of a value lets go of the rest"
       let t ← freshTy
       modify fun s => { s with namedReads := s.namedReads.push (subject, name, t, id, s.pos) }
       pure t
@@ -208,7 +218,17 @@ partial def inferExpr (scope : Scope) (amb : Row) : Expr → M Ty
       pure t
     | none => do
       -- Not known yet: settle it once the rest of the function is inferred.
-      mustDrop subject "taking one field of a value lets go of the rest"
+      -- (Of a name, the part read is noted as it is where the type is
+      -- known: what the name's value is left with is seen once it is.)
+      let named := match e with
+        | .name none x => match scope.lookup x with
+          | some (.val _ bid) => some (bid, x)
+          | _ => none
+        | _ => none
+      match named with
+      | some (bid, x) =>
+        modify fun s => { s with partReads := s.partReads.push (bid, x, subject, idx, toString idx, s.pos) }
+      | none => mustDrop subject "taking one field of a value lets go of the rest"
       let t ← freshTy
       modify fun s => { s with projections := s.projections.push (subject, idx, t, s.pos) }
       pure t
@@ -453,8 +473,11 @@ partial def checkArg (scope : Scope) (amb : Row) (what : String) (p : Ty) (a : E
       let mut wider : List (Option Ty) := []
       let mut widened := false
       for q in ps do
+        -- (A tuple too: what its parts are is then known where the clauses
+        -- read them.)
         let declared := match ← find q with
           | .con _ _ => true
+          | .tuple (_ :: _) => true
           | _ => false
         let whole := (← literalAt q 0).isSome
         annots := annots ++ [if whole then some q else none]
@@ -1000,6 +1023,16 @@ partial def inferStmts (scope : Scope) (amb : Row) (stmts : List Stmt)
       for (callee, permitted, _) in (← get).rowIncl do
         keep := .func [] .unit callee (← freshCap) :: .func [] .unit permitted (← freshCap) :: keep
       let scheme ← generalize t keep (top := false)
+      -- What it lets go of, or reads a part of, where that is of a type it
+      -- is general in: a callable is given nothing by which it could be
+      -- told how each type is destroyed, so each use is asked that the
+      -- type it is used at has nothing to destroy.
+      let mut quiets : List (Ty × String) := []
+      for held in (← get).dropCands.toList.map (·.2.1) ++ (← get).lateKeeps.toList.map (·.2.1) do
+        let held ← zonk held
+        if (freeTys held).any scheme.tvars.contains then
+          quiets := quiets ++ [(held, s!"`{x}` lets go of what it is given, whatever type that is, and is used here at a type with something to destroy, which it has no way to: say the type where `{x}` takes it, `fn(value: Type) \{ .. }`")]
+      let scheme := { scheme with quiets := quiets }
       let here := (← get).pos
       let result ← inferStmts ((x, .poly scheme) :: scope) amb rest want
       checkUses here scope [(x, .poly scheme)] rest

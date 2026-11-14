@@ -252,6 +252,34 @@ partial def leavesFitting (pos key : String) (t : Ty) (args : List Ty) (owner : 
 its type. A bound on a type the function is generic in becomes something the
 function is given; every other is met by `Traits.solve`. -/
 def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := do
+  -- A name of which parts were read before its type was known, which is now:
+  -- if the type has a `drop` of its own and the parts read can be used any
+  -- number of times, the value stayed whole and is destroyed when its block
+  -- is left. A part that has to be destroyed cannot be moved out of it.
+  for (site, t, reads, pos) in (← get).lateKeeps do
+    if let .con n _ ← find t then
+      if (← get).kimpls.any (fun I => I.trait == "Drop" && I.head == n)
+          && site.owner != Syntax.implFnName "Drop" n "drop" then
+        for (subject, idx) in reads do
+          let plain ← match ← (try fieldType subject idx catch _ => pure none) with
+            | some ft => do
+              let ft ← zonk ft
+              modify fun st => { st with seen := [] }
+              pure ((freeTys ft).isEmpty && (freeCaps ft).isEmpty && !hasParam ft
+                && !(← tyOwnsOnce [] ft) && (← tyHasDrop [] ft).isNone)
+            | none => pure false
+          unless plain do
+            throw (inFunction site.owner s!"{pos}a field that has to be destroyed is moved out of a `{bareName n}`, which has a `drop` of its own to run: say the value's type where it is taken, so that this is seen there")
+        modify fun st => { st with dropCands := st.dropCands.push (site, t, pos) }
+  modify fun s => { s with lateKeeps := #[] }
+  -- A callable that lets go of what it is given whatever its type, used at
+  -- a type with something to destroy: nothing would.
+  let mut later : Array (Ty × String) := #[]
+  for (t, why) in (← get).quiets do
+    let t ← zonk t
+    if !(freeTys t).isEmpty then later := later.push (t, why)
+    else if ← needsDestroying [] t then throw why
+  modify fun s => { s with quiets := later }
   let mut pending := (← get).bounds
   let uses := (← get).groupUses
   let cands := (← get).dropCands

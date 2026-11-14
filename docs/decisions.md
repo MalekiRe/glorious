@@ -3009,6 +3009,21 @@ the order it is being built:
   clause's whole pattern (not inside `Some(..)`, not a function's
   parameter, not `let`); taking the first element off copies the others
   (`sum` over `[x, ..rest]` is quadratic); a tuple has no `..` yet.
+- **Destructors, swept.** Every way of binding two values with a `drop`
+  (a name, a tuple, a struct or array pattern, in `let`, a clause, a
+  callable's parameters) was run against every way of using one (not at
+  all, given away, a field read, borrowed, bound again, let go), 108
+  programs, each asked to run each `drop` once. Fourteen did not. Fixed:
+  a clause whose pattern is a tuple was read without knowing what the tuple
+  held, so a name of it whose field was read was taken to be of no type
+  with a `drop` (the tuple's type is now given to the clause, and where a
+  name's type is still not known when its uses are counted it is asked
+  again once the function has been read). And a callable bound by `let`
+  that is general in a type it lets go of ran no `drop` at any type: it is
+  still general, and a use of it at a type with something to destroy is
+  refused, with what to write. Left as it is, by the specification (7.4,
+  an authorized deconstruction consumes the shell): `match(a) { Loud(n) =>
+  n }` takes a value with a `drop` apart without running it.
 - **Two more skipped destructors.** A name bound by the pattern of a `let`
   of which only fields were read, `let (a, b) = pair(); a.0`, was never
   destroyed (as a clause's name is, it now is when the block ends, and what

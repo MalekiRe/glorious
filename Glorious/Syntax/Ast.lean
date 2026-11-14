@@ -1122,6 +1122,10 @@ partial def usedWholeStmt (x : String) : Stmt → Bool
 
 end
 
+/-- The place of a field read by name before the type it is read from was
+known: found from the name once the type is. -/
+def partUnknown : Nat := 1000000000
+
 /-- The name a part of a name's value is destroyed under, where the part is
 never read: the name and the part's place among the fields. -/
 def partName (x : String) (i : Nat) : String := s!"{x}.%{i}"
