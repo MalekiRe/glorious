@@ -1112,9 +1112,10 @@ private def dropHook (tr : TraitInfo) (site : DropSite) : Option Expr :=
   match (tr.drops.lookup site).bind fun id => tr.dicts.lookup id with
   | some [d] =>
     -- (A part of a name's value that nothing reads: that part.)
-    some (destroyCall tr d (match Syntax.partOf site.name with
-      | some (x, i) => .proj (.name none x) i
-      | none => .name none site.name))
+    some (destroyCall tr d (match Syntax.partOf site.name, Syntax.letSiteOf site.name with
+      | some (x, i), _ => .proj (.name none x) i
+      | none, some x => .name none x
+      | none, none => .name none site.name))
   | _ => none
 
 /-- The cleanups of the parts of a name's value that are never read, where
@@ -1184,6 +1185,13 @@ def destroyers (tr : TraitInfo) : List Item :=
                   else [.expr unit]))]]
         ++ (if inner then [Item.fn fields [] blank none clauses] else [])
     | none => [asValue, Item.fn method [] blank none clauses]
+
+/-- The names given to the `_` of a `let`'s pattern, as that statement's. -/
+partial def letWilds (pos : Nat × Nat) : Pattern → Pattern
+  | .var x => if x.startsWith "%wild" then .var s!"{x}@{pos.1}:{pos.2}" else .var x
+  | .tuple ps => .tuple (ps.map (letWilds pos))
+  | .ctor c q ps => .ctor c q (ps.map (letWilds pos))
+  | p => p
 
 mutual
 
@@ -1303,7 +1311,14 @@ private partial def untraitStmts (tr : TraitInfo) (owner : String) (pos : Nat ×
       let hooks := (dropHook tr ⟨owner, pos.1, pos.2, x, false⟩).toList ++ partHooks tr owner pos x
       -- (Before a `tail` call there is no later: see the clause's own.)
       .let_ pat value :: hooks.map (if tailsStmts rest then Stmt.expr else Stmt.defer) ++ rest
-    | _ => .let_ pat value :: rest
+    | _ =>
+      -- What the pattern takes under a name nothing uses, or under `_`
+      -- (given a name for it), is destroyed likewise.
+      let site := fun (x : String) => (⟨owner, pos.1, pos.2, Syntax.letSite x, false⟩ : DropSite)
+      let (pats, _) := nameWilds (fun k => (dropHook tr (site (letWildName pos.1 pos.2 k))).isSome) [pat] 0
+      let pat := letWilds pos ((pats.head?).getD pat)
+      let hooks := (patVars pat).filterMap fun x => dropHook tr (site x)
+      .let_ pat value :: hooks.map (if tailsStmts rest then Stmt.expr else Stmt.defer) ++ rest
   | .assign target value :: rest =>
     let value := untraitExpr tr owner value
     let target := untraitExpr tr owner target

@@ -797,6 +797,89 @@ private def acceptPub : P (Option Bool) := do
     return some (scope == "super")
   pure (some false)
 
+/-- A pattern of a clause, as one for an array of exactly `j` elements taken
+as a tuple of them: nothing if the pattern is for no such array. -/
+private def asTupleOf (j : Nat) : Pattern → Option Pattern
+  | .wild => some .wild
+  | .var x => some (.var x)
+  | .ctor name none args =>
+    match arrayPatLen name, restPatParts name with
+    | some n, _ => if n == j then some (.tuple args) else none
+    | none, some (k, _, _, _) =>
+      let named := args.length - 1
+      if named ≤ j then
+        some (.tuple (args.take k ++ List.replicate (j - named) Pattern.wild ++ args.drop (k + 1)))
+      else none
+    | none, none => none
+  | _ => none
+
+/-- Clauses with those whose pattern is an array with a rest, `[first,
+..rest] => body`, written out. Such a clause takes any array; it asks the
+prelude whether the array has as many elements as the pattern names, takes
+those off its ends, and the clauses after it are for an array that has not:
+
+    whole => { RestFits(a) => let (first, a) = rest_first(a); let rest = a; body,
+               RestShort(back) => { the clauses after, never => .. }(back)
+             }(rest_fits(whole, 1))
+
+An array with fewer elements than the pattern names has to be some other
+clause's. Whether it is, is the checker's to say, and it cannot of an array:
+so for each such length the clauses' patterns for it are written as patterns
+of a tuple of so many, in a callable nothing calls, which the checker
+refuses if they do not cover every case. With that, `never` is not reached.
+
+The identities of the calls and callables this makes are those of the
+pattern's own tokens and the `=>` after it, which nothing else has. -/
+private partial def restClausesOf (all : List Pattern) : List Clause → List Clause
+  | [] => []
+  | .mk [.ctor name none args] body :: following =>
+    match restPatParts name with
+    | none => .mk [.ctor name none args] body :: restClausesOf all following
+    | some (k, id, line, col) =>
+      let rest := args[k]?.getD .wild
+      let first := args.take k
+      let last := args.drop (k + 1)
+      let count := first.length + last.length
+      let named := fun (j : Nat) => s!"%rest{id}:{j}"
+      let prelude := fun (f : String) => Expr.name (some "%prelude") f
+      -- Without an element named, the pattern is the array.
+      if count == 0 then .mk [rest] body :: restClausesOf all following
+      else
+        -- (Each statement has a place of its own in the pattern: what it
+        -- lets go of is known by it.)
+        let firsts : List Stmt := first.zipIdx.map fun (p, j) =>
+          Stmt.located line (col + 1 + j) (.let_ (.tuple [p, .var (named (j + 1))])
+            (.call (id + 4 + j) (prelude "rest_first") [.name none (named j)]))
+        -- (The last element comes off first.)
+        let lasts : List Stmt := last.reverse.zipIdx.map fun (p, j) =>
+          Stmt.located line (col + 1 + k + j) (.let_ (.tuple [.var (named (k + j + 1)), p])
+            (.call (id + 4 + k + j) (prelude "rest_last") [.name none (named (k + j))]))
+        let whole := named count
+        let fits := Clause.mk [.ctor "RestFits" none [.var (named 0)]]
+          (firsts ++ lasts ++ [Stmt.located line (col + 1 + count) (.let_ rest (.name none whole))] ++ body)
+        let covered : List Stmt := (List.range count).map fun j =>
+          let clauses := (all.filterMap (asTupleOf j)).map fun p => Clause.mk [p] [.expr (.tuple [])]
+          -- (No clause for the length: a callable that covers nothing.)
+          let clauses := if clauses.isEmpty then
+              [Clause.mk [.ctor (arrayPatName 0) none []] [.expr (.tuple [])]]
+            else clauses
+          Stmt.let_ .wild (.closure (id + 4 + count + j) clauses)
+        let never := s!"%rest{id}:never"
+        let unreached := Clause.mk [.var never]
+          (covered ++ [.expr (.call (id + 3) (prelude "rest_unreached") [.name none never])])
+        let back := s!"%rest{id}:back"
+        let short := Clause.mk [.ctor "RestShort" none [.var back]]
+          [.expr (.call 0 (.closure (id + 2) (restClausesOf all following ++ [unreached])) [.name none back])]
+        let taken := s!"%rest{id}:whole"
+        [.mk [.var taken] [.expr (.call 0 (.closure (id + 1) [fits, short])
+          [.call id (prelude "rest_fits") [.name none taken, .int count]])]]
+  | clause :: following => clause :: restClausesOf all following
+
+private def restClauses (clauses : List Clause) : List Clause :=
+  restClausesOf (clauses.filterMap fun
+    | .mk [p] _ => some p
+    | _ => none) clauses
+
 mutual
 
 private partial def parsePattern : P Pattern := do
@@ -805,15 +888,34 @@ private partial def parsePattern : P Pattern := do
     advance
     pure .wild
   | .punct "[" =>
-    -- `[a, b, c]`: an array of exactly so many elements.
+    -- `[a, b, c]`: an array of exactly so many elements. With `..` or
+    -- `..rest` among them, one of at least so many: `[first, ..rest]`.
+    let opened := (← read).base + (← get)
+    let at_ ← peekTok
     advance
     let mut ps : Array Pattern := #[]
+    let mut before : Option Nat := none
     repeat
       if (← peek) == .punct "]" then break
-      ps := ps.push (← parsePattern)
+      if (← peek) == .punct "." && (← peek 1) == .punct "." then
+        if before.isSome then failAt "an array pattern has one `..`"
+        advance
+        advance
+        before := some ps.size
+        match ← peek with
+        | .ident "_" =>
+          advance
+          ps := ps.push .wild
+        | .ident name =>
+          advance
+          ps := ps.push (.var name)
+        | _ => ps := ps.push .wild
+      else ps := ps.push (← parsePattern)
       if !(← acceptPunct ",") then break
     expectPunct "]"
-    pure (.ctor (arrayPatName ps.size) none ps.toList)
+    match before with
+    | some k => pure (.ctor (restPatName k opened at_.line at_.col) none ps.toList)
+    | none => pure (.ctor (arrayPatName ps.size) none ps.toList)
   | .ident "let" =>
     -- `let name`: a new name, whatever constant or constructor has it.
     advance
@@ -1307,7 +1409,7 @@ private partial def parseClauses : P (List Clause) := do
     if (← peek) == .punct "}" then break
     out := out.push (← parseClause)
     if !(← acceptPunct ",") then break
-  pure out.toList
+  pure (restClauses out.toList)
 
 /-- One clause: a single pattern for the argument, or none for a callable taking
 no arguments. Callables of several arguments are written `fn(x, y) { body }`. -/

@@ -37,7 +37,10 @@ partial def normPat : Pattern → M NPat
     match ← resolveCtor x q with
     | some (name, _) => do
       pure (.ctor name (← ps.mapM normPat))
-    | none => throw s!"unknown constructor `{x}` in a pattern"
+    | none =>
+      if (Syntax.restPatParts x).isSome then
+        throw "an array pattern with `..` is a whole clause's pattern, `[first, ..rest] => ..`: it is not read inside another pattern, nor where a function's parameters are"
+      throw s!"unknown constructor `{x}` in a pattern"
 
 /-- Do the rows of patterns cover every value of the column types? -/
 partial def exhaustive (tys : List Ty) (rows : List (List NPat)) : M Bool := do

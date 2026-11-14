@@ -267,6 +267,10 @@ def isGone : AVal → Bool
   | .gone _ => true
   | _ => false
 
+def isTracked : AVal → Bool
+  | .tracked => true
+  | _ => false
+
 /-- The target of the first value that is no value, if any is. -/
 def goneOf (vs : List AVal) : Option String :=
   vs.findSome? fun
@@ -794,12 +798,16 @@ partial def runStmts (ctx : ACtx) (depth : Nat) (env : List (String × AVal)) :
   | [.expr e] => runExpr ctx depth env e
   | .expr e :: rest => do
     -- The value is dropped, so the rest does not depend on which path was taken.
-    let (on, left) ← settle ctx depth (← runExpr ctx depth env e) (leaves := false)
+    let found ← runExpr ctx depth env e
+    -- (Where being let go is a use, as it is of a value with a `drop` to
+    -- run, which the statement then runs: the value itself, let go here.)
+    let letGo := if ctx.handed && !found.isEmpty && found.all (fun (v, _) => isTracked v) then 1 else 0
+    let (on, left) ← settle ctx depth found (leaves := false)
     match on with
     | none => pure left
     | some first =>
       let alts ← runStmts ctx depth env rest
-      pure ((alts.map fun (v, n) => (v, n + first)) ++ left)
+      pure ((alts.map fun (v, n) => (v, n + first + letGo)) ++ left)
   | .let_ pat value :: rest => do
     let mut out : Alts := []
     let found ← runExpr ctx depth env value
@@ -816,6 +824,10 @@ partial def runStmts (ctx : ACtx) (depth : Nat) (env : List (String × AVal)) :
         let bound := binds.map (·.1)
         let others := ((binders ctx pat).filter (!bound.contains ·)).map (·, AVal.unknown)
         let taken := takenApart ctx pat v
+        -- (`let _ = x` lets `x` go, as `x;` does.)
+        let taken := match pat with
+          | .wild => if ctx.handed && isTracked v then taken + 1 else taken
+          | _ => taken
         let found ← runStmts ctx depth (binds ++ others ++ env) rest
         for (v', n') in found do
           out := (v', n + n' + taken) :: out

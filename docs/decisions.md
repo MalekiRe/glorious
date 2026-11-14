@@ -2923,6 +2923,23 @@ the order it is being built:
   this is asked for, for `(a, b).chain()` and `app.add_systems(..)`. It is
   the names in scope that decide, not the value's type: a function of a
   type's own, `Vec::len`, is not found this way yet.
+- **`[first, ..rest]` is written out where it is read.** A clause whose
+  whole pattern is an array with `..` (or `..name`) takes any array, asks
+  the prelude whether it has as many elements as the pattern names
+  (`rest_fits`), and takes those off its ends (`rest_first`, `rest_last`);
+  the clauses after it are for an array that has not. Whether every shorter
+  array is some other clause's is the checker's to say, and of an array it
+  cannot: so for each such length the clauses' patterns for it are written
+  as patterns of a tuple of so many, in a callable nothing calls, and the
+  checker refuses that where it does not cover every case. Limits: only a
+  clause's whole pattern (not inside `Some(..)`, not a function's
+  parameter, not `let`); taking the first element off copies the others
+  (`sum` over `[x, ..rest]` is quadratic); a tuple has no `..` yet.
+- **A destructor was skipped, the fourth time**: what the pattern of a `let`
+  took under a name nothing used, or under `_` (`let (a, b) = pair();`),
+  was not destroyed. It is now, as a clause's is. And `x;` and `let _ = x`
+  for a value with a `drop` to run were refused as "used on one path and
+  not on another"; they let the value go, and its `drop` runs there.
 - **A function is written out for each implementation it is called with.**
   Once traits are values (`untrait`), a call that gives an implementation
   that is known calls a copy of the function made for it, in which the

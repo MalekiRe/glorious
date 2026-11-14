@@ -1008,7 +1008,21 @@ partial def inferStmts (scope : Scope) (amb : Row) (stmts : List Stmt)
           || ((← get).aliases.lookup x).isSome do
         modify fun s =>
           { s with dropCands := s.dropCands.push (⟨s.owner, at_.1, at_.2, x, false⟩, t, pos) }
-    let binds ← inferPat pat t
+    let binds ← match pat with
+      | .var _ => inferPat pat t
+      | _ => do
+        -- What a pattern takes under a name that nothing then uses, or
+        -- under `_`, is destroyed when the block ends, as a clause's is.
+        modify fun s => { s with wildAt := some at_, wildCount := 0, wildLet := true }
+        let binds ← inferPat pat t
+        modify fun s => { s with wildAt := none, wildLet := false }
+        let mentioned := Elab.fvStmts [] rest
+        for (x, b) in binds do
+          if let .val tx _ := b then
+            unless mentioned.contains x || x.startsWith "%" do
+              let site : Elab.DropSite := ⟨(← get).owner, at_.1, at_.2, Syntax.letSite x, false⟩
+              modify fun s => { s with dropCands := s.dropCands.push (site, tx, pos) }
+        pure binds
     if let .var _ := pat then
       for (_, b) in binds do
         if let .val _ bid := b then
@@ -1131,7 +1145,9 @@ partial def inferPat (p : Pattern) (t : Ty) : M Scope := do
         { s with
           wildCount := s.wildCount + 1
           dropCands := s.dropCands.push
-            (⟨s.owner, place.1, place.2, Elab.wildName s.wildCount, false⟩, t, s.pos) }
+            (⟨s.owner, place.1, place.2,
+              (if s.wildLet then Syntax.letSite (Elab.letWildName place.1 place.2 s.wildCount)
+               else Elab.wildName s.wildCount), false⟩, t, s.pos) }
     pure []
   | .int n => do
     -- A whole number is of the type wanted of it, if that is one of whole
@@ -1182,7 +1198,10 @@ partial def inferPat (p : Pattern) (t : Ty) : M Scope := do
             unless here == home do
               throw s!"`{Syntax.lastSegment n}` has `Drop`, so only the module that declares it can take one apart with a pattern: what `drop` does would not be done"
       inferPats ps fields
-    | none => throw s!"unknown constructor `{x}` in a pattern"
+    | none =>
+      if (Syntax.restPatParts x).isSome then
+        throw "an array pattern with `..` is a whole clause's pattern, `[first, ..rest] => ..`: it is not read inside another pattern, nor where a function's parameters are"
+      throw s!"unknown constructor `{x}` in a pattern"
 
 /-- Read the patterns of a clause whose body is `body`. What the clause is
 given under a name and does not mention is the name's, and what a `_` takes is

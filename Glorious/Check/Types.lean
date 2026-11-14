@@ -696,6 +696,8 @@ structure St where
   counted the same way there. -/
   wildAt : Option (Nat × Nat) := none
   wildCount : Nat := 0
+  /-- Whether the pattern being read is a `let`'s. -/
+  wildLet : Bool := false
   /-- A program in which some type has `Drop`: values are destroyed where
   they are let go, each type by its own function, and a function is given
   how to destroy the types it is generic in. Without `Drop` anywhere there

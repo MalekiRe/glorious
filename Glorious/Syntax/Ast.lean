@@ -250,6 +250,25 @@ def arrayMark : String := "%array"
 pattern `[a, b, c]`. -/
 def arrayPatName (n : Nat) : String := s!"%array:{n}"
 
+/-- The name under which a name bound by the pattern of a `let` is known
+where it is destroyed: the place is the statement's, which a clause's own
+names are known by too when the statement is its first. -/
+def letSite (x : String) : String := s!"%let:{x}"
+
+def letSiteOf (name : String) : Option String :=
+  if name.startsWith "%let:" then some (name.drop 5).toString else none
+
+/-- The name an array pattern with a rest has until its clause is written
+out: how many patterns come before the rest, and the identity of its `[`. -/
+def restPatName (before id line col : Nat) : String := s!"%rest:{before}:{id}:{line}:{col}"
+
+def restPatParts (name : String) : Option (Nat × Nat × Nat × Nat) :=
+  if name.startsWith "%rest:" then
+    match ((name.drop 6).toString.splitOn ":").map String.toNat? with
+    | [some k, some id, some line, some col] => some (k, id, line, col)
+    | _ => none
+  else none
+
 def arrayPatLen (name : String) : Option Nat :=
   if name.startsWith "%array:" then (name.drop 7).toString.toNat? else none
 

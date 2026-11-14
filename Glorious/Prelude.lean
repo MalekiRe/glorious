@@ -580,6 +580,29 @@ fn repeat_onto(x, n, out) {
 
 fn push(a, v) { arr_push(a, v) }
 
+// What `[first, ..rest]` in a pattern is read with: whether an array has so
+// many elements, and the array without its first or its last.
+enum ArrayRest<T> { RestFits(Array<T>), RestShort(Array<T>) }
+fn rest_fits<T>(a: Array<T>, n: Int) -> ArrayRest<T> {
+    match(int_lt(arr_len_at(&a), n)) { 0 => RestFits(a), _ => RestShort(a) }
+}
+fn rest_last<T>(a: Array<T>) -> (Array<T>, T) { arr_pop(a, 0) }
+// Where no array comes: the clauses were shown to cover every shorter one.
+fn rest_unreached<T, R>(a: Array<T>) -> R { match(int_div(1, 0)) { _ => tail rest_unreached(a) } }
+fn rest_first<T>(a: Array<T>) -> (T, Array<T>) {
+    let (turned, first) = arr_pop(rest_turn(a, arr_new()), 0);
+    (first, rest_turn(turned, arr_new()))
+}
+fn rest_turn<T>(from: Array<T>, onto: Array<T>) -> Array<T> {
+    match(from) {
+        [] => onto,
+        some => tail rest_turn_one(arr_pop(some, 0), onto)
+    }
+}
+fn rest_turn_one<T>(popped: (Array<T>, T), onto: Array<T>) -> Array<T> {
+    match(popped) { (shorter, x) => tail rest_turn(shorter, arr_push(onto, x)) }
+}
+
 // The array without its last element, and that element; nothing if it is empty.
 fn pop(a) {
     match(a) {

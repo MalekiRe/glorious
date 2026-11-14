@@ -63,6 +63,10 @@ structure ImplE where
 the `_` of its clause's patterns, read in order. -/
 def wildName (k : Nat) : String := s!"%wild{k}"
 
+/-- The name a `_` in the pattern of a `let` has, likewise: with the
+statement's place, as a block has many. -/
+def letWildName (line col k : Nat) : String := s!"{wildName k}@{line}:{col}"
+
 /-- The name the value of a statement has where it is destroyed. -/
 def stmtValue : String := "%stmt"
 
