@@ -3096,9 +3096,16 @@ the order it is being built:
   times: 0.95 s to 0.53 s on x86-64, 1.76 s to 1.31 s on the interpreter.
   covey's example, whose regions Core could not be shown before (an
   implementation that takes implementations whose functions take
-  references), has them shown. Not done: an associated constant is still a
-  call, of a function now known; a copy is made per implementation, not
-  per type, so a function without bounds is one function for all types.
+  references), has them shown. A copy is made per implementation, not per
+  type, so a function without bounds is one function for all types: Core
+  does not tell types apart at run time, so nothing is lost by that.
+- **An associated constant at a known type is its number.** After the
+  copies, a function that takes nothing and whose body is integer
+  arithmetic (`int_add`, `int_sub`, `int_mul`) of numbers and of calls of
+  such functions is worked out once (`Elab.foldConstants`), and every call
+  of it is that number: `N::VALUE` of `[T; 5]` is `5` in Core, not a
+  chain of calls down the binary digits. One whose result would not fit
+  in 64 bits is left as a call, to go wrong when it runs as it would have.
 - **What a dotted call is called on is borrowed** where the function is
   written to take a reference first: `counter.bump()` is `bump(&mut
   counter)`, `game.world.spawn()` is `spawn(&mut game.world)`. Decided once

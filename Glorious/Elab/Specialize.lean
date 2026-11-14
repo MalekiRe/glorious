@@ -202,6 +202,106 @@ partial def specialize (tr : TraitInfo) (items : List Item) (fuel : Nat := 50000
   | some (made, copies) => (roots ++ made.toList, copies.map fun (name, fn, _, _) => (name, fn))
   | none => (items, [])
 
+/-! ## Constants worked out once
+
+After the copies are made, a trait's constant at a known type is a call of a
+function that takes nothing: `<B1<B0<Z>> as Known>::VALUE` is a function
+that adds one to twice another. Such a function whose body is integer
+arithmetic of numbers and of such calls has its number worked out here, and
+every call of it is that number. A result that does not fit in 64 bits is
+left to go wrong when the program runs, as it would have. -/
+
+/-- A function's one clause, if its body is one expression. -/
+def oneExpr : List Clause → Option (List Pattern × Expr)
+  | [.mk pats [.expr body]] => some (pats, body)
+  | [.mk pats [.located _ _ (.expr body)]] => some (pats, body)
+  | _ => none
+
+/-- The number an expression stands for, given the numbers of the names in
+`env` and the functions `fns`, if it is one: numbers, `int_add`, `int_sub`
+and `int_mul` of numbers, and calls of functions whose one clause takes plain
+names and is one expression. `fuel` bounds the calls followed. -/
+partial def foldInt (fns : List (String × List Clause)) (env : List (String × Int)) (fuel : Nat) :
+    Expr → Option Int
+  | .int n => some n
+  | .name none x => env.lookup x
+  | .call _ (.name none f) args => do
+    if fuel == 0 then none
+    -- (A type written for a value, or for a function's parameters, says
+    -- nothing of its number.)
+    if f == Syntax.ascribeMark || f == Syntax.instMark then
+      match args with
+      | a :: _ => foldInt fns env (fuel - 1) a
+      | [] => none
+    else
+      let vals ← args.mapM (foldInt fns env (fuel - 1))
+      let fits := fun (n : Int) =>
+        if -9223372036854775808 ≤ n && n ≤ 9223372036854775807 then some n else none
+      match f, vals with
+      | "int_add", [a, b] => fits (a + b)
+      | "int_sub", [a, b] => fits (a - b)
+      | "int_mul", [a, b] => fits (a * b)
+      | _, _ =>
+        match (fns.lookup f).bind oneExpr with
+        | some (pats, body) =>
+          let names ← pats.mapM fun
+            | .var x => some x
+            | _ => none
+          if names.length != vals.length then none
+          else foldInt fns (names.zip vals) (fuel - 1) body
+        | none => none
+  | _ => none
+
+mutual
+
+partial def foldExpr (known : List (String × Int)) : Expr → Expr
+  | .call id (.name none f) [] => match known.lookup f with
+    | some n => .int n
+    | none => .call id (.name none f) []
+  | .call id (.name none mark) (.call i (.name none f) [] :: rest) =>
+    match known.lookup f with
+    | some n => if mark == Syntax.instMark then .int n else .call id (.name none mark) (.int n :: rest)
+    | none => .call id (.name none mark) (.call i (.name none f) [] :: rest.map (foldExpr known))
+  | .call id f args => .call id (foldExpr known f) (args.map (foldExpr known))
+  | .tailCall id f args => .tailCall id (foldExpr known f) (args.map (foldExpr known))
+  | .tuple args => .tuple (args.map (foldExpr known))
+  | .proj e n => .proj (foldExpr known e) n
+  | .closure id clauses => .closure id (clauses.map (foldClause known))
+  | .handle subject arms => .handle (foldExpr known subject) (arms.map (foldClause known))
+  | .labelScope l body => .labelScope l (body.map (foldStmt known))
+  | .deref e => .deref (foldExpr known e)
+  | .reborrow uniq e => .reborrow uniq (foldExpr known e)
+  | .fieldOf i e name => .fieldOf i (foldExpr known e) name
+  | e => e
+
+partial def foldClause (known : List (String × Int)) : Clause → Clause
+  | .mk pats body => .mk pats (body.map (foldStmt known))
+
+partial def foldStmt (known : List (String × Int)) : Stmt → Stmt
+  | .let_ pat value => .let_ pat (foldExpr known value)
+  | .expr e => .expr (foldExpr known e)
+  | .defer e => .defer (foldExpr known e)
+  | .letMut x value => .letMut x (foldExpr known value)
+  | .assign target value => .assign (foldExpr known target) (foldExpr known value)
+  | .located line col s => .located line col (foldStmt known s)
+
+end
+
+/-- A program with every call of a function that takes nothing and works out
+to a number written as that number. -/
+def foldConstants (items : List Item) : List Item :=
+  let fns : List (String × List Clause) := items.filterMap fun
+    | .fn name _ _ _ clauses => some (name, clauses)
+    | _ => none
+  let known : List (String × Int) := fns.filterMap fun (name, clauses) =>
+    match oneExpr clauses with
+    | some ([], body) => (foldInt fns [] 64 body).map (name, ·)
+    | _ => none
+  if known.isEmpty then items
+  else items.map fun
+    | .fn name ps annots ret clauses => .fn name ps annots ret (clauses.map (foldClause known))
+    | item => item
+
 /-! ## `..` in a tuple pattern
 
 How many parts the `..` of `(first, ..)` stands for is known once the

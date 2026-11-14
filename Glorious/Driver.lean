@@ -340,6 +340,7 @@ def lowered (b : Elab.Blocks) (written all : List Syntax.Item) :
   let items ← Elab.unfield b items
   let items ← Elab.instances b written items
   let (items, copies) := Elab.specialize b.traits items
+  let items := Elab.foldConstants items
   let b := { b with envFns := b.envFns ++ copies.filterMap fun (name, fn) =>
     (b.envFns.lookup fn).map fun groups => (name, groups) }
   pure (items, b)
