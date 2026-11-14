@@ -801,6 +801,18 @@ partial def Ty.same : Ty → Ty → Bool
   | .ref _ x _, .ref _ y _ => x.same y
   | _, _ => false
 
+/-- The name a type is made with, as an implementation is for one, and its
+arguments: a declared type's own; `(tuple2)` and its parts; `(fn2)`, what the
+function is given and then what it gives; `(&)` or `(&mut)` and what the
+reference is to. -/
+def Ty.head : Ty → Option (String × List Ty)
+  | .con n args => some (n, args)
+  | .tuple parts => some (s!"(tuple{parts.length})", parts)
+  | .fn ps r _ _ _ => some (s!"(fn{ps.length})", ps ++ [r])
+  | .ref (.con "&mut" []) t _ => some ("(&mut)", [t])
+  | .ref _ t _ => some ("(&)", [t])
+  | .var _ => none
+
 mutual
 
 /-- Does a pattern fit a type: is there something for each of the pattern's
@@ -822,7 +834,8 @@ partial def Ty.fits (vars : List Nat) (pattern term : Ty) (found : List (Nat × 
   | .tuple as, .tuple bs => if as.length == bs.length then Ty.fitsAll vars as bs found else none
   | .fn ps r _ _ _, .fn qs s _ _ _ =>
     if ps.length == qs.length then Ty.fitsAll vars (r :: ps) (s :: qs) found else none
-  | .ref _ x _, .ref _ y _ => Ty.fits vars x y found
+  -- (`&` and `&mut` are two.)
+  | .ref h x _, .ref k y _ => (Ty.fits vars h k found).bind (Ty.fits vars x y)
   | _, _ => none
 
 partial def Ty.fitsAll (vars : List Nat) (patterns terms : List Ty) (found : List (Nat × Ty)) :
@@ -854,7 +867,7 @@ partial def Ty.meets (a b : Ty) (found : List (Nat × Ty)) : Option (List (Nat �
   | .tuple as, .tuple bs => if as.length == bs.length then Ty.meetAll as bs found else none
   | .fn ps r _ _ _, .fn qs s _ _ _ =>
     if ps.length == qs.length then Ty.meetAll (r :: ps) (s :: qs) found else none
-  | .ref _ x _, .ref _ y _ => Ty.meets x y found
+  | .ref h x _, .ref k y _ => (Ty.meets h k found).bind (Ty.meets x y)
   | _, _ => none
 
 partial def Ty.meetAll (as bs : List Ty) (found : List (Nat × Ty)) : Option (List (Nat × Ty)) :=
@@ -889,7 +902,7 @@ partial def Ty.mayFit (pattern term : Ty) : Bool :=
   | .tuple as, .tuple bs => as.length == bs.length && (as.zip bs).all fun (x, y) => x.mayFit y
   | .fn ps r _ _ _, .fn qs s _ _ _ =>
     ps.length == qs.length && r.mayFit s && (ps.zip qs).all fun (x, y) => x.mayFit y
-  | .ref _ x _, .ref _ y _ => x.mayFit y
+  | .ref h x _, .ref k y _ => h.mayFit k && x.mayFit y
   | _, _ => false
 
 /-- A type as it would be written, if nothing in it is unknown or a type

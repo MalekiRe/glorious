@@ -146,10 +146,7 @@ partial def needsDestroying (seen : List String) (t : Ty) : M Bool := do
 /-- The name of the implementation a condition of another comes down to: the
 trait itself, or the one chosen by fitting where there is a choice. -/
 def subKey (trait : String) (ty : Ty) (args : List Ty) : M String := do
-  let head := match ← find ty with
-    | .con n _ => some n
-    | .tuple parts => some s!"(tuple{parts.length})"
-    | _ => none
+  let head := (← find ty).head.map (·.1)
   let several := ((← get).impls.toList.filter fun im =>
     Syntax.traitBase im.trait == trait && some im.head == head).length > 1
   if args.isEmpty && !several then pure trait else implKey trait ty args
@@ -170,17 +167,17 @@ partial def solveFitting (givens : Traits.Givens) (fuel : Nat) (key : String) (t
       | .con n args => .con n (args.map settle)
     return Traits.solve (← get).kimpls givens 100000 key (settle (← toSTy ty))
   if let some k ← keyOf ty then return (Traits.findGiven key k givens).map .given
-  let named := match ty with
-    | .con h args => some (h, args)
-    | .tuple parts => some (s!"(tuple{parts.length})", parts)
-    | _ => none
-  let some (h, hargs) := named | return none
+  -- (A function that performs something is not one an implementation for
+  -- functions is for: what is written of `Self` there performs nothing.)
+  if let .fn _ _ effs tail _ := ty then
+    try unifyRow ⟨effs, tail⟩ ⟨[], none⟩ catch _ => return none
+  let some (h, hargs) := ty.head | return none
   let some (i, _) := Traits.findImpl key h hargs.length (← get).kimpls | return none
   let some im := (← get).impls[i]? | return none
   let at_ ← implAt im hargs
   for (j, want) in im.fixed do
     if let some got := hargs[j]? then
-      try unify got (subst at_ [] [] want) catch _ => return none
+      try unify got (← fixedAt at_ want) catch _ => return none
   -- (Its type parameters that are only in the trait's arguments are what
   -- those are asked at.)
   for (want, got) in (im.targs.map (subst at_ [] [])).zip args do
@@ -202,19 +199,18 @@ partial def leavesFitting (pos key : String) (t : Ty) (args : List Ty) :
     M (List (String × Nat × Ty)) := do
   let t ← find t
   if let some k ← keyOf t then return [(key, k, t)]
-  let named := match t with
-    | .con h args => some (h, args)
-    | .tuple parts => some (s!"(tuple{parts.length})", parts)
-    | _ => none
   let missing : M (List (String × Nat × Ty)) := do
-    throw s!"{pos}`{showTy (← zonk t)}` does not implement `{key}`"
-  let some (h, hargs) := named | missing
+    throw s!"{pos}`{showTy (← zonk t)}` does not implement `{Syntax.traitShown key}`"
+  if let .fn _ _ effs tail _ := t then
+    try unifyRow ⟨effs, tail⟩ ⟨[], none⟩
+    catch _ => throw s!"{pos}`{showTy (← zonk t)}` performs effects, and `{Syntax.traitShown key}` is implemented for functions that perform none"
+  let some (h, hargs) := t.head | missing
   let some (i, _) := Traits.findImpl key h hargs.length (← get).kimpls | missing
   let some im := (← get).impls[i]? | missing
   let at_ ← implAt im hargs
   for (j, want) in im.fixed do
     if let some got := hargs[j]? then
-      try unify got (subst at_ [] [] want) catch _ => return ← missing
+      try unify got (← fixedAt at_ want) catch _ => return ← missing
   for (want, got) in (im.targs.map (subst at_ [] [])).zip args do
     try unify want got catch _ => return ← missing
   let mut out : List (String × Nat × Ty) := []
@@ -308,10 +304,11 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
   -- of has those.
   for b in pending do
     let goal ← zonk b.ty
+    let fitting := (← get).patterned
     let named := match goal with
       | .con h args => some (h, args)
       | .tuple parts => some (s!"(tuple{parts.length})", parts)
-      | _ => none
+      | _ => if fitting then goal.head else none
     if let some (h, args) := named then
       -- (Where the type has several implementations of the trait, the one
       -- chosen makes the arguments fit when it is chosen.)
@@ -324,7 +321,7 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
           let at_ ← implAt im args
           for (j, want) in im.fixed do
             if let some got := args[j]? then
-              let want := subst at_ [] [] want
+              let want ← fixedAt at_ want
               try unify got want
               catch _ =>
                 let fits ← zonk want
@@ -351,10 +348,7 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
     -- (Where a type has several implementations of the trait, which one
     -- is chosen by fitting, arguments or none.)
     let several ← do
-      let head := match ← find self with
-        | .con n _ => some n
-        | .tuple parts => some s!"(tuple{parts.length})"
-        | _ => none
+      let head := (← find self).head.map (·.1)
       pure ((← get).patterned && ((← get).impls.toList.filter fun im =>
         Syntax.traitBase im.trait == b.trait && some im.head == head).length > 1)
     if args.isEmpty && !several then split := split.push b
@@ -727,7 +721,8 @@ def checkGroup (decls : List FnDecl) : M Unit := do
         let own := im.pvars.filterMap fun (p, id) => (rigid.lookup p).map fun t => (id, t)
         for (j, fixed) in im.fixed do
           if let some name := im.params[j]? then
-            let fixed := subst own [] [] fixed
+            -- (With lifetimes of this function's own.)
+            let fixed ← fixedAt own fixed
             rigid := rigid.map fun (p, old) => if p == name then (p, fixed) else (p, old)
         -- What its conditions say of a type left to another trait's
         -- implementations holds in its functions.
@@ -951,8 +946,23 @@ def checkGroup (decls : List FnDecl) : M Unit := do
         | some (im, sig) => do
           -- A tuple is the tuple of its parts; any other is made with its name.
           let parts := im.params.filterMap fun p => rigid.lookup p
-          let self := if im.head.startsWith "(tuple" then Ty.tuple parts
-            else Ty.con im.head parts
+          let self ← if im.head.startsWith "(tuple" then pure (Ty.tuple parts)
+            -- (A function that performs nothing; a reference with a
+            -- lifetime of its own.)
+            else if im.head.startsWith "(fn" then
+              -- The lifetimes of the references it is given are the
+              -- function's to choose at each call: it is one for every
+              -- lifetime, as `for<'a> fn(&'a T)` is.
+              let cap ← freshCap
+              let given := (parts.dropLast.filterMap fun
+                | .ref _ _ c => some c
+                | _ => none).eraseDups
+              unless given.isEmpty do
+                modify fun s => { s with ranked := (cap, given.map (·, "'_")) :: s.ranked }
+              pure (Ty.fn parts.dropLast (parts.getLast?.getD .unit) [] none cap)
+            else if im.head == "(&mut)" then pure (Ty.ref Ty.uniq (parts.headD .unit) (← freshCap))
+            else if im.head == "(&)" then pure (Ty.ref Ty.shared (parts.headD .unit) (← freshCap))
+            else pure (Ty.con im.head parts)
           -- The trait at the arguments the implementation gives it, and the
           -- types it leaves to the implementation as the implementation says.
           let own := im.pvars.filterMap fun (p, id) => (rigid.lookup p).map fun t => (id, t)
@@ -978,6 +988,12 @@ def checkGroup (decls : List FnDecl) : M Unit := do
           let declared ← zonk (.func (sig.params.map (subst tm rm [])) (subst tm rm [] sig.ret) row (← freshCap))
           let cm ← (freeCaps declared).eraseDups.mapM fun c => do pure (c, ← freshCap)
           let want := subst [] [] cm declared
+          -- (A callable in it that is for every lifetime is one still,
+          -- under the lifetimes' new names.)
+          for (c, every) in (← get).ranked do
+            if let some c' := cm.lookup c then
+              let renamed := every.map fun (q, name) => ((cm.lookup q).getD q, name)
+              modify fun s => { s with ranked := (c', renamed) :: s.ranked }
           let theirs := cm.filterMap fun (old, new) =>
             (sig.lifetimes.lookup old).map fun l =>
               (new, if l == "'_" then "the lifetime the trait leaves unwritten" else s!"the trait's {l}")

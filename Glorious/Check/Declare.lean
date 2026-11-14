@@ -397,6 +397,10 @@ def declareTraits (items : List Item) : M Unit := do
         | none => throw s!"{what}: unknown trait `{base}`"
       let arity ← if head == "Int" || Syntax.isScalar head then pure 0
         else if head.startsWith "(tuple" then pure args.length
+        -- (A function's, with what it gives after what it is given; a
+        -- reference's, with what it is to.)
+        else if head.startsWith "(fn" then pure args.length
+        else if head == "(&)" || head == "(&mut)" then pure 1
         else match (← get).types.lookup head with
           | some d => pure d.arity
           | none => throw s!"{what}: unknown type `{head}`"
@@ -526,7 +530,8 @@ def declareTraits (items : List Item) : M Unit := do
       -- Chosen by fitting types: where an implementation has a condition
       -- kept apart, or shares its trait and type with another.
       let shared := (← get).impls.any fun I => Syntax.traitBase I.trait == base && I.head == head
-      if !extra.isEmpty || shared then modify fun s => { s with patterned := true }
+      if !extra.isEmpty || shared || head.startsWith "(fn" || head.startsWith "(&" then
+        modify fun s => { s with patterned := true }
       -- Two implementations of a trait for one type: no type is both's
       -- (`From<Int>`, `From<Str>`), or one asks more of the type than the
       -- other (`Wrap<Int>`, `Wrap<T>`), and is then the one for the types it

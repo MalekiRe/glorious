@@ -1645,7 +1645,12 @@ private partial def parseItem : P Item := do
     let (head, written) ← match ← parseType with
       | .tuple ts => pure (s!"(tuple{ts.length})", ts)
       | .name h ts => pure (h, ts)
-      | _ => failAt "an implementation is for a type made with a name, or for a tuple"
+      -- `impl<P, R> System for fn(P) -> R`: for the functions of one
+      -- argument that perform nothing. `impl<T> Fetch for &mut T`.
+      | .fn ps r => pure (s!"(fn{ps.length})", ps ++ [r])
+      | .ref true t _ => pure ("(&mut)", [t])
+      | .ref false t _ => pure ("(&)", [t])
+      | _ => failAt "an implementation is for a type made with a name, a tuple, a function or a reference"
     let mut names : Array String := #[]
     let mut fresh : Array String := #[]
     for (t, j) in written.zipIdx do
@@ -1722,8 +1727,7 @@ private partial def parseItem : P Item := do
       | _ => failAt "expected `fn`: an implementation gives the trait's functions"
     expectPunct "}"
     -- `Self` is the type the implementation is for.
-    let self := if head.startsWith "(tuple" then TypeExpr.tuple (args.map (TypeExpr.name · []))
-      else TypeExpr.name head (args.map (TypeExpr.name · []))
+    let self := selfTypeOf head (args.map (TypeExpr.name · []))
     let written := methods.toList.map fun
       | .fn name ps annots ret clauses =>
         Item.fn name ps (annots.map (·.map (TypeExpr.withSelf self))) (ret.map (TypeExpr.withSelf self))

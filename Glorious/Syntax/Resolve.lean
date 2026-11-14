@@ -238,8 +238,7 @@ def fillDefaults (items : List Item) : List Item :=
       -- this implementation's types, and are known by their identities.
       -- (`Self::f(..)` in it is this implementation's `f`, as it is in a
       -- function the implementation writes.)
-      let self := if head.startsWith "(tuple" then TypeExpr.tuple (args.map (TypeExpr.name · []))
-        else TypeExpr.name head (args.map (TypeExpr.name · []))
+      let self := selfTypeOf head (args.map (TypeExpr.name · []))
       let missing := missing.map fun
         | .fn m fps annots _ clauses =>
           Item.fn m fps (annots.map fun _ => none) none

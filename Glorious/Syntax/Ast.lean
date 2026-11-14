@@ -327,6 +327,15 @@ def traitBase (name : String) : String :=
   let whole := (name.splitOn "<").headD name
   (whole.splitOn "#").headD whole
 
+/-- The type an implementation is for, from the name it is made with and its
+arguments: see `Ty.head` in the checker for the names. -/
+def selfTypeOf (head : String) (args : List TypeExpr) : TypeExpr :=
+  if head.startsWith "(tuple" then .tuple args
+  else if head.startsWith "(fn" then .fn args.dropLast (args.getLast?.getD (.tuple []))
+  else if head == "(&mut)" then .ref true (args.headD (.tuple [])) none
+  else if head == "(&)" then .ref false (args.headD (.tuple [])) none
+  else .name head args
+
 /-- The name as it was written: without the number a second implementation
 written the same was given. -/
 def traitShown (name : String) : String :=

@@ -2954,6 +2954,19 @@ the order it is being built:
   the program's Core, as everything the elaborator writes is. A program
   that uses none of it is solved as before.
 
+- **An implementation can be for functions, and for references**: `impl<W,
+  A> System<W> for fn(&mut Column<A>) -> () where W: Get<A>`, `impl<T> Fetch
+  for &mut T`. A function it is for performs nothing (what the
+  implementation's own functions do with it is typed without effects), and
+  takes references of any lifetime, as `for<'a> fn(&'a mut T)` does. With
+  the two above, a plain function is a system: `run(integrate, &mut world)`
+  finds each parameter's column in the world by its type, calls the
+  function, and puts the columns back.
+  - One implementation for each number of parameters, until a list of
+    types can be a parameter.
+  - Two functions of the same parameter types are the same type, so `run`
+    calls the function through its value: nothing is inlined yet.
+
 Still to come: a type of its own for each function
 and closure, with `Fn<(..)>` as a bound; lists of types as parameters, with
 head and rest; an implementation that is preferred over a more general one;

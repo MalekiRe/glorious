@@ -229,6 +229,12 @@ def implAt (im : ImplDecl) (hargs : List Ty) : M (List (Nat × Ty)) := do
       at_ := at_ ++ [(id, ← freshTy)]
   pure at_
 
+/-- A type an implementation says an argument has to be, for one use: its
+type parameters as that use has them, and its lifetimes that use's own. -/
+def fixedAt (at_ : List (Nat × Ty)) (want : Ty) : M Ty := do
+  let cm ← (freeCaps want).eraseDups.mapM fun c => do pure (c, ← freshCap)
+  pure (subst at_ [] cm want)
+
 /-- The trait at its arguments, as the one name an implementation of it has. -/
 def traitKey (trait : String) (args : List Ty) : M String := do
   pure (Syntax.traitAt trait (← args.mapM spellTy))
@@ -238,10 +244,7 @@ the type's implementation gives the trait arguments made of its own type
 parameters (`impl<T> From<T> for Wrap<T>`), the arguments asked are made
 those, and the name is that implementation's. -/
 def implKey (trait : String) (self : Ty) (args : List Ty) : M String := do
-  let head ← match ← find self with
-    | .con n hargs => pure (some (n, hargs))
-    | .tuple parts => pure (some (s!"(tuple{parts.length})", parts))
-    | _ => pure none
+  let head := (← find self).head
   if let some (h, hargs) := head then
     let family := (← get).impls.toList.filter fun im =>
       Syntax.traitBase im.trait == trait && im.head == h && im.targs.length == args.length
@@ -250,7 +253,7 @@ def implKey (trait : String) (self : Ty) (args : List Ty) : M String := do
       let at_ ← implAt im hargs
       for (j, want) in im.fixed do
         if let some got := hargs[j]? then
-          unifyAt s!"`{bareName trait}` for `{bareName h}`" (subst at_ [] [] want) got
+          unifyAt s!"`{bareName trait}` for `{bareName h}`" (← fixedAt at_ want) got
       for (want, got) in (im.targs.map (subst at_ [] [])).zip args do
         unifyAt s!"`{bareName trait}` for `{bareName h}`" want got
       pure im.trait
@@ -307,8 +310,7 @@ def settleAssocs : M Unit := do
     let (self, args) ← subjectOf tr subject
     let known ← match ← find self with
       | .con n hargs => pure (if n.startsWith "'" then none else some (n, hargs))
-      | .tuple parts => pure (some (s!"(tuple{parts.length})", parts))
-      | _ => pure none
+      | other => pure other.head
     let ground ← args.allM fun x => do pure (freeTys (← zonk x)).isEmpty
     let ground := ground || (← hasGenericImpl tr self)
     match known, ground with
