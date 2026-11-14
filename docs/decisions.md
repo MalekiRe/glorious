@@ -2723,11 +2723,11 @@ cores), with the quick build unless said:
 |---|---|---|
 | every test program on the three engines (`selftest`) | 160 s | 16 s; 10 s with the default build |
 | everything checked before a commit (`./verify.sh`) | 6 to 8 min | 28 s |
-| the compiler built from nothing | several minutes, with the tests the build ran | 29 s |
+| the compiler built from nothing | not timed; the build also ran every test program, one after another | 29 s |
 | built again after an edit to the checker | 20 to 35 s | 3 to 8 s for a function that is not in a `mutual` block; 11 s for the inference itself; up to 20 s for a change to what the checker's first module declares |
 | after an edit to the elaborator | 31 s | 9 s |
-| after an edit to the parser | 35 s | 10 s |
-| ten small programs tried | about 40 s | 0.1 s |
+| after an edit to the parser | not timed at first; 18 s once the build no longer ran the tests | 10 s |
+| ten small programs tried | not timed; one process for each, one after another | 0.1 s |
 | one program that names the library | 2.4 s | 2.2 s; 1.5 s with the default build |
 
 What was slow, and what was done:
