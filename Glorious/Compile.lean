@@ -1,5 +1,7 @@
-import Glorious.Core.Ast
-import Glorious.Bytecode.Ast
+module
+
+public import Glorious.Core.Ast
+public import Glorious.Bytecode.Ast
 
 /-!
 # The compiler: Core to bytecode
@@ -8,6 +10,8 @@ A computation becomes straight-line code. A callable becomes its clauses laid
 out one after another; each clause first tests its patterns, jumping to the
 next clause on a mismatch, then loads its bindings, then runs its body.
 -/
+
+@[expose] public section
 
 namespace Glorious
 

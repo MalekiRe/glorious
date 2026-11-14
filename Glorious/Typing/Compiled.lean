@@ -1,5 +1,7 @@
-import Glorious.Typing.Cells
-import Glorious.Proof.Correct
+module
+
+public import Glorious.Typing.Cells
+public import Glorious.Proof.Correct
 
 /-!
 # Type safety of compiled programs
@@ -7,6 +9,8 @@ import Glorious.Proof.Correct
 The two proofs joined: the bytecode of a well-typed Core program goes wrong only
 if the Core program reaches one of the faults.
 -/
+
+@[expose] public section
 
 namespace Glorious.Typing
 

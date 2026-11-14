@@ -1,8 +1,12 @@
-import Std.Data.HashMap
-import Std.Data.HashSet
-import Glorious.Syntax.Ast
-import Glorious.Elab.Base
-import Glorious.Traits
+module
+
+public import Std.Data.HashMap
+public import Std.Data.HashSet
+public import Glorious.Syntax.Ast
+public import Glorious.Elab.Base
+public import Glorious.Traits
+
+public section
 
 namespace Glorious.Check
 

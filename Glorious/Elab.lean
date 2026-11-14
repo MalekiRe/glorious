@@ -1,4 +1,6 @@
-import Glorious.Elab.Base
+module
+
+public import Glorious.Elab.Base
 
 /-!
 # Elaboration: surface syntax to Core
@@ -14,6 +16,8 @@ a block that was not run, it runs in that block's environment (`elabGiven`).
 
 What the checker shares with this pass is in `Glorious/Elab/Base.lean`.
 -/
+
+public section
 
 namespace Glorious.Elab
 

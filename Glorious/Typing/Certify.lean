@@ -1,6 +1,8 @@
-import Glorious.Typing.Covers
-import Glorious.Typing.Compiled
-import Glorious.Typing.Loans
+module
+
+public import Glorious.Typing.Covers
+public import Glorious.Typing.Compiled
+public import Glorious.Typing.Loans
 
 /-!
 # Checking a whole program
@@ -9,6 +11,8 @@ import Glorious.Typing.Loans
 at every signature the certificate gives it. What it accepts is well typed, so
 the safety theorem applies with no assumption left: `checked_safety`.
 -/
+
+@[expose] public section
 
 namespace Glorious.Typing
 

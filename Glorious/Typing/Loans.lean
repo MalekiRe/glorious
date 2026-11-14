@@ -1,4 +1,6 @@
-import Glorious.Typing.Cells
+module
+
+public import Glorious.Typing.Cells
 
 /-!
 # A lent cell is used only through the borrow
@@ -24,6 +26,8 @@ would not see it. There is none: the callable a borrow's scope runs performs
 no operation it does not handle itself, so the frames a resumption captures
 never include the scope, and no handler runs while a borrow is set aside.
 -/
+
+@[expose] public section
 
 namespace Glorious.Typing
 

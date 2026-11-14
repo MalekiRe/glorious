@@ -1,5 +1,9 @@
-import Std.Data.HashSet
-import Glorious.Check.Scopes
+module
+
+public import Std.Data.HashSet
+public import Glorious.Check.Scopes
+
+public section
 
 namespace Glorious.Check
 

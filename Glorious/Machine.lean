@@ -1,3 +1,5 @@
+module
+
 /-!
 # Deterministic machines
 
@@ -6,6 +8,8 @@ function. This file defines what it means to run such a machine and the three
 observable behaviours of a program: it halts with a value, it goes wrong, or it
 runs forever.
 -/
+
+@[expose] public section
 
 namespace Glorious
 

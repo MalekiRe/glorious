@@ -1,4 +1,6 @@
-import Glorious.Syntax.Ast
+module
+
+public import Glorious.Syntax.Ast
 
 /-!
 # The prelude
@@ -11,6 +13,8 @@ Arithmetic and comparison are traits, which the checker resolves. A program
 run without the checker has no traits, so for it there is a second prelude in
 which the operators are `Int`'s alone.
 -/
+
+public section
 
 namespace Glorious.Prelude
 

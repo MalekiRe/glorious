@@ -1,4 +1,8 @@
-import Glorious.Check.Types
+module
+
+public import Glorious.Check.Types
+
+public section
 
 namespace Glorious.Check
 

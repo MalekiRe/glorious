@@ -1,7 +1,9 @@
-import Glorious.Driver
-import Glorious.Cases
-import Glorious.Checks
-import Glorious.Bytecode.Encode
+module
+
+public import Glorious.Driver
+public import Glorious.Cases
+public import Glorious.Checks
+public import Glorious.Bytecode.Encode
 
 /-!
 # Command line
@@ -36,6 +38,8 @@ import Glorious.Bytecode.Encode
   what Core shows of them. The programs are gone through side by side, on as
   many cores as there are.
 -/
+
+public section
 
 open Glorious
 

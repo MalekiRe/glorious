@@ -1,7 +1,9 @@
-import Glorious.Machine
-import Glorious.Control
-import Glorious.Host
-import Glorious.Bytecode.Ast
+module
+
+public import Glorious.Machine
+public import Glorious.Control
+public import Glorious.Host
+public import Glorious.Bytecode.Ast
 
 /-!
 # Bytecode semantics
@@ -10,6 +12,8 @@ The virtual machine: a program counter into the current function's code, the
 current frame's locals, a stack of return frames and handler delimiters, and
 the store of captured continuations.
 -/
+
+@[expose] public section
 
 namespace Glorious.Bytecode
 

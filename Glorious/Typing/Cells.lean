@@ -1,4 +1,6 @@
-import Glorious.Typing.Safety
+module
+
+public import Glorious.Typing.Safety
 
 /-!
 # A cell lives as long as its scope
@@ -16,6 +18,8 @@ The second is about typing: the regions a typed stack grants the code on top of
 it are cells whose scopes are on that stack. Code reads and writes only through
 references whose region it was granted.
 -/
+
+@[expose] public section
 
 namespace Glorious.Typing
 

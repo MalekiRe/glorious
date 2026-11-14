@@ -1,5 +1,7 @@
-import Std.Data.HashMap
-import Glorious.Syntax.Ast
+module
+
+public import Std.Data.HashMap
+public import Glorious.Syntax.Ast
 
 /-!
 # Modules
@@ -24,6 +26,8 @@ declaration a name is: `Point { y: 2, x: 1 }` becomes `Point(1, 2)`.
 Not done here, and not done: a module is not compiled alone. Every module of
 a program becomes part of one Core program.
 -/
+
+public section
 
 namespace Glorious.Syntax.Modules
 

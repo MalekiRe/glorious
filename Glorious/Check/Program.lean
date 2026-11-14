@@ -1,4 +1,8 @@
-import Glorious.Check.Expr
+module
+
+public import Glorious.Check.Expr
+
+public section
 
 namespace Glorious.Check
 

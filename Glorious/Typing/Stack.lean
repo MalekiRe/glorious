@@ -1,4 +1,6 @@
-import Glorious.Typing.Values
+module
+
+public import Glorious.Typing.Values
 
 /-!
 # Typed stacks deliver, leave and dispatch
@@ -7,6 +9,8 @@ A value delivered to a typed stack, an exit through a typed stack and an
 operation performed on a typed stack all end in a typed state. These are the
 facts about whole stacks that the safety theorem needs.
 -/
+
+@[expose] public section
 
 namespace Glorious.Typing
 

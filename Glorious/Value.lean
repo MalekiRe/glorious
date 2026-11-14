@@ -1,4 +1,6 @@
-import Glorious.Float
+module
+
+public import Glorious.Float
 
 /-!
 # Runtime values and operands
@@ -7,6 +9,8 @@ Core and bytecode share one notion of runtime value and one notion of operand.
 An activation's environment only grows, so an operand names a local by its
 position in that environment.
 -/
+
+@[expose] public section
 
 namespace Glorious
 

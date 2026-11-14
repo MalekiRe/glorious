@@ -1,4 +1,6 @@
-import Glorious.Bytecode.Ast
+module
+
+public import Glorious.Bytecode.Ast
 
 /-!
 # Binary encoding of bytecode
@@ -7,6 +9,8 @@ Numbers are little-endian base-128 with a continuation bit; signed integers are
 zigzag-coded first. A list is its length followed by its items. Every
 alternative starts with a one-byte tag.
 -/
+
+@[expose] public section
 
 namespace Glorious.Bytecode.Encode
 

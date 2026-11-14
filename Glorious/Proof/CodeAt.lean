@@ -1,10 +1,14 @@
-import Glorious.Bytecode.Ast
+module
+
+public import Glorious.Bytecode.Ast
 
 /-!
 # Code positions
 
 `CodeAt code pc is` says the instructions `is` sit in `code` starting at `pc`.
 -/
+
+@[expose] public section
 
 namespace Glorious
 

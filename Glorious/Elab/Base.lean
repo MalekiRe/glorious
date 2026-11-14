@@ -1,7 +1,9 @@
-import Std.Data.HashMap
-import Std.Data.HashSet
-import Glorious.Syntax.Ast
-import Glorious.Core.Ast
+module
+
+public import Std.Data.HashMap
+public import Std.Data.HashSet
+public import Glorious.Syntax.Ast
+public import Glorious.Core.Ast
 
 /-!
 # What the elaborator and the checker share
@@ -12,6 +14,8 @@ elaborator's own state. The checker reads this file and not the elaborator:
 a change to how a program is written out does not have the checker built
 again.
 -/
+
+public section
 
 namespace Glorious.Elab
 

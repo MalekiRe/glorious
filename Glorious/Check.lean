@@ -1,4 +1,6 @@
-import Glorious.Check.Program
+module
+
+public import Glorious.Check.Program
 
 /-!
 # Type and effect inference
@@ -22,3 +24,5 @@ A trait's function is used at a type that has the trait. Which implementation
 a use needs is found by `Traits.solve`, which is proved to find only evidence
 that the bound is met, and evidence that is the only evidence there is.
 -/
+
+public section

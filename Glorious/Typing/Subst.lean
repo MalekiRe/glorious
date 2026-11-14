@@ -1,4 +1,6 @@
-import Glorious.Typing.Static
+module
+
+public import Glorious.Typing.Static
 
 /-!
 # Typing does not depend on which regions stand for a function's region variables
@@ -8,6 +10,8 @@ regions it is entered with, the same derivation types it with those regions in
 place of the variables. So at run time every type is one whose regions are
 cells, and nothing has to carry an assignment of regions to variables around.
 -/
+
+@[expose] public section
 
 namespace Glorious.Typing
 

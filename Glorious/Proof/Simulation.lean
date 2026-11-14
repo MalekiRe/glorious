@@ -1,4 +1,6 @@
-import Glorious.Machine
+module
+
+public import Glorious.Machine
 
 /-!
 # Forward simulation between deterministic machines
@@ -8,6 +10,8 @@ machine takes at least one step and the two stay related. Because both machines
 are deterministic, this one-directional fact is enough to transfer every
 behaviour in both directions.
 -/
+
+@[expose] public section
 
 namespace Glorious
 

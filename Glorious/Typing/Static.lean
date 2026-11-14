@@ -1,4 +1,6 @@
-import Glorious.Typing.Types
+module
+
+public import Glorious.Typing.Types
 
 /-!
 # Typing Core
@@ -35,6 +37,8 @@ function is polymorphic in regions, though in nothing else: some are fixed when
 a closure of it is made, the others chosen at each call. The scope of a cell
 gives the callable it runs a region no type outside the scope can mention.
 -/
+
+@[expose] public section
 
 namespace Glorious.Typing
 

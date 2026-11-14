@@ -1,4 +1,6 @@
-import Glorious.Typing.Owned
+module
+
+public import Glorious.Typing.Owned
 
 /-!
 # Typed values evaluate
@@ -7,6 +9,8 @@ Operands, control-free computations and patterns of a typed activation evaluate
 to values of their types, and entering a function at one of its signatures
 gives a typed activation.
 -/
+
+@[expose] public section
 
 namespace Glorious.Typing
 

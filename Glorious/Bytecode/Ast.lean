@@ -1,4 +1,6 @@
-import Glorious.Control
+module
+
+public import Glorious.Control
 
 /-!
 # Bytecode syntax
@@ -6,6 +8,8 @@ import Glorious.Control
 Flat code addressed by a program counter. Every value-producing instruction
 writes the next free local of the current frame.
 -/
+
+@[expose] public section
 
 namespace Glorious.Bytecode
 

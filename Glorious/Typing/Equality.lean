@@ -1,4 +1,6 @@
-import Glorious.Typing.Static
+module
+
+public import Glorious.Typing.Static
 
 /-!
 # Deciding whether two types are equal
@@ -8,6 +10,8 @@ which the `deriving` handler does not cover, so the comparison is written out
 and proved to decide equality. There is one function for each shape a type is
 nested in, so that the recursion is structural and the kernel can run it.
 -/
+
+@[expose] public section
 
 namespace Glorious.Typing
 

@@ -1,3 +1,5 @@
+module
+
 /-!
 # The standard library
 
@@ -5,6 +7,8 @@ What a program has beyond the prelude, written in the language: the module
 `std` and the modules in it. A program that names `std` has it as a module of
 its own, as though the texts here were files beside it.
 -/
+
+public section
 
 namespace Glorious.Std
 

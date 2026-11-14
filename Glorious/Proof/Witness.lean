@@ -1,4 +1,6 @@
-import Glorious.Proof.Correct
+module
+
+public import Glorious.Proof.Correct
 
 /-!
 # Non-vacuity witnesses
@@ -7,6 +9,8 @@ import Glorious.Proof.Correct
 meaning. These programs between them use every construct, and the kernel checks
 that both machines run each to the same result.
 -/
+
+@[expose] public section
 
 namespace Glorious.Witness
 

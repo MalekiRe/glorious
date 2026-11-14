@@ -1,4 +1,6 @@
-import Glorious.Typing.Subst
+module
+
+public import Glorious.Typing.Subst
 
 /-!
 # Types for machine states
@@ -12,6 +14,8 @@ At run time a region is a cell: every type here is one in which the region
 variables of the functions running have been replaced by the cells they stand
 for.
 -/
+
+@[expose] public section
 
 namespace Glorious.Typing
 

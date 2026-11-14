@@ -1,4 +1,6 @@
-import Glorious.Typing.Runtime
+module
+
+public import Glorious.Typing.Runtime
 
 /-!
 # Counting the holders of a resumption
@@ -14,6 +16,8 @@ than one, and that a resumption held anywhere has not been used yet.
 Nothing here mentions types. Types come in only through `DupSound`: a value of
 a type the context calls duplicable holds no resumption.
 -/
+
+@[expose] public section
 
 namespace Glorious.Typing
 

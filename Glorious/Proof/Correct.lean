@@ -1,5 +1,7 @@
-import Glorious.Proof.Simulation
-import Glorious.Proof.Patterns
+module
+
+public import Glorious.Proof.Simulation
+public import Glorious.Proof.Patterns
 
 /-!
 # Compiler correctness
@@ -8,6 +10,8 @@ The bytecode produced by `compile` has exactly the behaviour of the Core program
 it was compiled from. The final statements are `compile_correct`,
 `compile_emits` and `compile_emits_reflect`.
 -/
+
+@[expose] public section
 
 namespace Glorious
 

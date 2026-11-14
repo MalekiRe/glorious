@@ -1,4 +1,8 @@
-import Glorious.Check.Unify
+module
+
+public import Glorious.Check.Unify
+
+public section
 
 namespace Glorious.Check
 

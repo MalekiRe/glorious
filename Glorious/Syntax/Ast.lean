@@ -1,9 +1,13 @@
+module
+
 /-!
 # Surface syntax
 
 What the parser produces. Nothing here is trusted: the elaborator turns it into
 Core, and Core is what has a semantics.
 -/
+
+public section
 
 namespace Glorious.Syntax
 

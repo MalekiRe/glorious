@@ -1,5 +1,7 @@
-import Glorious.Typing.Equality
-import Glorious.Typing.Stack
+module
+
+public import Glorious.Typing.Equality
+public import Glorious.Typing.Stack
 
 /-!
 # A type checker for Core
@@ -10,6 +12,8 @@ not determine. `checkTm_sound` and its companions say that what the checker
 accepts has a typing derivation. The certificate is not trusted: a wrong one is
 rejected, or describes another valid typing.
 -/
+
+@[expose] public section
 
 namespace Glorious.Typing
 

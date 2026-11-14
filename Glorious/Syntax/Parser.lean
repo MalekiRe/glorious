@@ -1,6 +1,8 @@
-import Glorious.Syntax.Ast
-import Glorious.Syntax.Lexer
-import Glorious.Value
+module
+
+public import Glorious.Syntax.Ast
+public import Glorious.Syntax.Lexer
+public import Glorious.Value
 
 /-!
 # Parser
@@ -16,6 +18,8 @@ callable of several arguments is written `fn(x, y) { body }`. A block written
 directly after a call is passed as its last argument, and `f { body }` calls `f`
 with the block.
 -/
+
+public section
 
 namespace Glorious.Syntax
 
@@ -33,9 +37,49 @@ structure PCtx where
   tables : List (List String × Fixities) := []
   path : List String := []
 
-/-- Where the parser is, and beneath that the functions written inside
-blocks, on their way to the module the block is in. -/
-abbrev P := ReaderT PCtx (StateT Nat (StateT (Array Item) (Except String)))
+/-- What the parser does: given what it reads from, where it is, and the
+functions written inside blocks so far (on their way to the module the block
+is in), it fails or gives a value with where it then is and those functions.
+One monad of its own and not four stacked: what Lean compiles of this file
+is a third the size. -/
+@[expose] def P (α : Type) : Type := PCtx → Nat → Array Item → Except String (α × Nat × Array Item)
+
+instance : Monad P where
+  pure a := fun _ i made => .ok (a, i, made)
+  bind x f := fun ctx i made =>
+    match x ctx i made with
+    | .ok (a, i, made) => f a ctx i made
+    | .error e => .error e
+
+instance : MonadReaderOf PCtx P where
+  read := fun ctx i made => .ok (ctx, i, made)
+
+instance : MonadWithReaderOf PCtx P where
+  withReader f x := fun ctx i made => x (f ctx) i made
+
+instance : MonadStateOf (Array Item) P where
+  get := fun _ i made => .ok (made, i, made)
+  set made := fun _ i _ => .ok ((), i, made)
+  modifyGet f := fun _ i made =>
+    let (a, made) := f made
+    .ok (a, i, made)
+
+/-- (Declared last: `get` and `set` with nothing said are of where the
+parser is.) -/
+instance : MonadStateOf Nat P where
+  get := fun _ i made => .ok (i, i, made)
+  set i := fun _ _ made => .ok ((), i, made)
+  modifyGet f := fun _ i made =>
+    let (a, i) := f i
+    .ok (a, i, made)
+
+/-- What is tried and fails leaves the parser where it was. -/
+instance : MonadExceptOf String P where
+  throw e := fun _ _ _ => .error e
+  tryCatch x handle := fun ctx i made =>
+    match x ctx i made with
+    | .ok r => .ok r
+    | .error e => handle e ctx i made
 
 instance {α : Type} : Inhabited (P α) := ⟨throw "parser: unreachable"⟩
 
@@ -1796,128 +1840,211 @@ private partial def parseTrait : P (List Item) := do
     else [.traitInfo name supers.toList defaults.toList params assocs.toList]
   pure (.trait name methods.toList :: info)
 
+/-- What is written before a declaration in `#[..]`, and the declaration:
+`next` reads the declaration. A function of its own, as the one below is,
+so that Lean reads each in a second and not all three in ten. -/
+private partial def parseAttributed (next : P (List Item)) : P (List Item) := do
+  -- `#[name]`, `#[name(arg)]`, `#[name = "text"]` before a declaration;
+  -- `#![name]` of the whole text.
+  advance
+  let inner ← isOp "!"
+  if inner then advance
+  expectPunct "["
+  let name ← expectIdent
+  let mut arg : String := ""
+  if ← acceptPunct "(" then
+    arg ← expectIdent
+    expectPunct ")"
+  else if ← acceptPunct "=" then
+    match ← peek with
+    | .str codes =>
+      advance
+      arg := String.ofList (codes.map Char.ofNat)
+    | _ => failAt "expected a text: `#[export_name = \"name\"]`"
+  expectPunct "]"
+  if inner then
+    unless name == "no_std" || name == "no_implicit_prelude" do
+      failAt s!"`#![{name}]` is not known: `#![no_std]` and `#![no_implicit_prelude]` are"
+    return [.fieldNames (attrMark name) [] []]
+  let known := match name, arg with
+    | "non_exhaustive", "" => true
+    | "repr", "C" => true
+    | "repr", "transparent" => true
+    | "export_name", a => a != ""
+    | _, _ => false
+  unless known do
+    failAt s!"`#[{name}]` is not known: `#[non_exhaustive]`, `#[repr(C)]`, `#[repr(transparent)]` and `#[export_name = \"..\"]` are"
+  let items ← next
+  let subject := items.findSome? fun item =>
+    let item := match item with
+      | .pub _ i => i
+      | i => i
+    match item with
+    | .enum n _ _ => some n
+    | .struct n _ _ => some n
+    | .fn n _ _ _ _ => some n
+    | _ => none
+  -- `#[repr(C)]` on a struct of whole numbers, floats and addresses: the
+  -- struct can be written to memory and read from it as C lays it out,
+  -- by `Type::c_write(value, at)`, `Type::c_read(at)` and `Type::c_size()`.
+  let mut made : List Item := []
+  if name == "repr" && arg == "C" then
+    let plain := items.map fun
+      | .pub _ i => i
+      | i => i
+    let found := plain.findSome? fun
+      | .struct n [] fields => some (n, fields)
+      | _ => none
+    if let some (n, fields) := found then
+      let names := (plain.findSome? fun
+        | .fieldNames owner names _ => if owner == n && !names.isEmpty then some names else none
+        | _ => none)
+      let call1 := fun (f : String) (x : Expr) => Expr.call 0 (.name none f) [x]
+      -- How a field lies in memory: its bytes, how a value of it is made
+      -- the bits there, how the bits are made a value of it, and how they
+      -- are read (so many bits, without a sign if below zero).
+      let rec lies (fuel : Nat) : TypeExpr → Option (Nat × (Expr → Expr) × (Expr → Expr) × Int)
+        | .name "Int" [] => some (8, id, id, 64)
+        | .name "i64" [] => some (8, id, id, 64)
+        | .name "f64" [] => some (8, call1 "f64_bits", call1 "f64_of", 64)
+        | .name "f32" [] => some (4, call1 "f32_bits", call1 "f32_of", -32)
+        | .name "%prelude::Ptr" [_] =>
+          some (8, fun x => call1 "usize_bits" (call1 "ptr_address" x),
+            fun r => call1 "ptr_at" (call1 "usize_of" r), -64)
+        | .name "%prelude::PtrMut" [_] =>
+          some (8, fun x => call1 "usize_bits" (call1 "ptr_mut_address" x),
+            fun r => call1 "ptr_mut_at" (call1 "usize_of" r), -64)
+        | .name t [] =>
+          match scalars.lookup t, cTypes.lookup (lastSegment t), fuel with
+          | some (some w), _, _ => some (w.natAbs / 8, call1 (t ++ "_bits"), call1 (t ++ "_of"), w)
+          | _, some as, fuel + 1 => lies fuel (.name as [])
+          | _, _, _ => none
+        | _ => none
+      let laid := fields.map (lies 4)
+      if laid.all Option.isSome && !fields.isEmpty then
+        -- Each field at the next place that is a multiple of its size;
+        -- the whole a multiple of the largest.
+        let mut at_ : Nat := 0
+        let mut most : Nat := 1
+        let mut places : Array (Nat × (Expr → Expr) × (Expr → Expr) × Int × Nat) := #[]
+        for l in laid do
+          if let some (size, into, back, how) := l then
+            at_ := (at_ + size - 1) / size * size
+            places := places.push (at_, into, back, how, size)
+            at_ := at_ + size
+            most := max most size
+        let size := (at_ + most - 1) / most * most
+        let place := fun (off : Nat) =>
+          call1 "usize_of" (.call 0 (.name none "int_add") [call1 "usize_bits" (.name none "%at"), .int off])
+        let vars := (List.range fields.length).map fun i => s!"%f{i}"
+        let taken : Pattern := match names with
+          | some ns =>
+            .ctor n none (.var recordMark :: (ns.zip vars).map fun (f, v) => .ctor (fieldMark f) none [.var v])
+          | none => .ctor n none (vars.map Pattern.var)
+        let writes : List Stmt := (places.toList.zip vars).map fun ((off, into, _, _, bytes), v) =>
+          .expr (.call 0 (.name none "ptr_write") [place off, .int (8 * bytes), into (.name none v)])
+        let reads : List Expr := places.toList.map fun (off, _, back, how, _) =>
+          back (.call 0 (.name none "ptr_read") [place off, .int how])
+        let built : Expr := match names with
+          | some ns =>
+            .call 0 (.name none n)
+              (.name none recordMark :: (ns.zip reads).map fun (f, r) => .call 0 (.name none (fieldMark f)) [r])
+          | none => .call 0 (.name none n) reads
+        let self := TypeExpr.name n []
+        let usize := TypeExpr.name "usize" []
+        made := [
+          .fn s!"{n}::c_size" [] [] (some usize) [.mk [] [.expr (call1 "usize_of" (.int size))]],
+          .fn s!"{n}::c_write" [] [some self, some usize] (some (.tuple []))
+            [.mk [taken, .var "%at"] (writes ++ [.expr (.tuple [])])],
+          .unsafeFn s!"{n}::c_write",
+          .fn s!"{n}::c_read" [] [some usize] (some self) [.mk [.var "%at"] [.expr built]],
+          .unsafeFn s!"{n}::c_read"]
+  match subject with
+  | some n => pure (items ++ made ++ [.fieldNames (attrMark name) [n, arg] []])
+  | none => failAt s!"`#[{name}]` is written before a type or a function"
+
+/-- `extern "C" { .. }`: the functions it declares. -/
+private partial def parseExtern : P (List Item) := do
+  -- `extern "C" { fn name(a: usize) -> i32; }`: functions that are not
+  -- written in the language, each called by its name as C has it.
+  advance
+  if let .str _ := ← peek then advance
+  expectPunct "{"
+  let mut items : Array Item := #[]
+  repeat
+    if (← peek) == .punct "}" then break
+    unless (← peek) == .ident "fn" do failAt "expected `fn`: a foreign function"
+    advance
+    let name ← expectIdent
+    expectPunct "("
+    let mut params : Array TypeExpr := #[]
+    repeat
+      if (← peek) == .punct ")" then break
+      let _ ← expectIdent
+      expectPunct ":"
+      params := params.push (← parseType)
+      if !(← acceptPunct ",") then break
+    expectPunct ")"
+    let ret ← if ← acceptPunct "->" then parseType else pure (.tuple [])
+    expectPunct ";"
+    -- How a type is given to C and taken from it: the type the function
+    -- is declared with, how a value of it is made the bits C takes, how
+    -- what C gives is made a value of it, what C gives (so many bits; 1000
+    -- a double, 1001 a float), and where C takes it (0 with the whole
+    -- numbers and addresses, 1 as a double, 2 as a float).
+    let call1 := fun (f : String) (x : Expr) => Expr.call 0 (.name none f) [x]
+    let rec kind (fuel : Nat) : TypeExpr →
+        P (TypeExpr × (Expr → Expr) × (Expr → Expr) × Int × Nat) := fun t =>
+      match t with
+      | .name "Int" [] => pure (t, id, id, 64, 0)
+      | .name "i64" [] => pure (t, id, id, 64, 0)
+      | .name "f64" [] => pure (t, call1 "f64_bits", call1 "f64_of", 1000, 1)
+      | .name "f32" [] => pure (t, call1 "f32_bits", call1 "f32_of", 1001, 2)
+      | .name "%prelude::Ptr" [_] =>
+        pure (t, fun x => call1 "usize_bits" (call1 "ptr_address" x),
+          fun r => call1 "ptr_at" (call1 "usize_of" r), 64, 0)
+      | .name "%prelude::PtrMut" [_] =>
+        pure (t, fun x => call1 "usize_bits" (call1 "ptr_mut_address" x),
+          fun r => call1 "ptr_mut_at" (call1 "usize_of" r), 64, 0)
+      | .name name [] =>
+        match scalars.lookup name, cTypes.lookup (lastSegment name), fuel with
+        | some (some w), _, _ => pure (t, call1 (name ++ "_bits"), call1 (name ++ "_of"), w, 0)
+        -- C's own names for its types are the types they are here.
+        | _, some as, fuel + 1 => kind fuel (.name as [])
+        | _, _, _ => failAt s!"a foreign function takes and gives whole numbers, floats and addresses (`Int`, a type such as `i32`, `usize` or `f64`, `*const T`, `*mut T`), not `{name}`"
+      | _ => failAt "a foreign function takes and gives whole numbers, floats and addresses (`Int`, a type such as `i32`, `usize` or `f64`, `*const T`, `*mut T`)"
+    let mut args : Array Expr := #[]
+    let mut declared : Array TypeExpr := #[]
+    let mut classes : Nat := 0
+    let mut place : Nat := 1
+    for (p, i) in params.toList.zipIdx do
+      let (ty, into, _, _, cls) ← kind 4 p
+      declared := declared.push ty
+      args := args.push (into (Expr.name none s!"%a{i}"))
+      classes := classes + cls * place
+      place := place * 3
+    let (retTy, back, bits) ← match ret with
+      | .tuple [] => pure (TypeExpr.tuple [], (id : Expr → Expr), (0 : Int))
+      | t => do
+        let (ty, _, back, bits, _) ← kind 4 t
+        pure (ty, back, bits)
+    let symbol := name.toUTF8.toList.map fun b => Expr.int b.toNat
+    let call := Expr.call 0 (.name none foreignCall)
+      (symbol ++ [.int 0, .int bits, .int classes] ++ args.toList)
+    let body : List Stmt := match ret with
+      | .tuple [] => [.expr call, .expr (.tuple [])]
+      | _ => [.expr (back call)]
+    let pats := (List.range params.size).map fun i => Pattern.var s!"%a{i}"
+    items := items.push (.fn name [] (declared.toList.map some) (some retTy) [.mk pats body])
+    items := items.push (.unsafeFn name)
+  expectPunct "}"
+  pure items.toList
+
 /-- A declaration, and with it what was written beside it. -/
 private partial def parseItemGroup : P (List Item) := do
   match ← peek with
   | .punct "#" =>
-    -- `#[name]`, `#[name(arg)]`, `#[name = "text"]` before a declaration;
-    -- `#![name]` of the whole text.
-    advance
-    let inner ← isOp "!"
-    if inner then advance
-    expectPunct "["
-    let name ← expectIdent
-    let mut arg : String := ""
-    if ← acceptPunct "(" then
-      arg ← expectIdent
-      expectPunct ")"
-    else if ← acceptPunct "=" then
-      match ← peek with
-      | .str codes =>
-        advance
-        arg := String.ofList (codes.map Char.ofNat)
-      | _ => failAt "expected a text: `#[export_name = \"name\"]`"
-    expectPunct "]"
-    if inner then
-      unless name == "no_std" || name == "no_implicit_prelude" do
-        failAt s!"`#![{name}]` is not known: `#![no_std]` and `#![no_implicit_prelude]` are"
-      return [.fieldNames (attrMark name) [] []]
-    let known := match name, arg with
-      | "non_exhaustive", "" => true
-      | "repr", "C" => true
-      | "repr", "transparent" => true
-      | "export_name", a => a != ""
-      | _, _ => false
-    unless known do
-      failAt s!"`#[{name}]` is not known: `#[non_exhaustive]`, `#[repr(C)]`, `#[repr(transparent)]` and `#[export_name = \"..\"]` are"
-    let items ← parseItemGroup
-    let subject := items.findSome? fun item =>
-      let item := match item with
-        | .pub _ i => i
-        | i => i
-      match item with
-      | .enum n _ _ => some n
-      | .struct n _ _ => some n
-      | .fn n _ _ _ _ => some n
-      | _ => none
-    -- `#[repr(C)]` on a struct of whole numbers, floats and addresses: the
-    -- struct can be written to memory and read from it as C lays it out,
-    -- by `Type::c_write(value, at)`, `Type::c_read(at)` and `Type::c_size()`.
-    let mut made : List Item := []
-    if name == "repr" && arg == "C" then
-      let plain := items.map fun
-        | .pub _ i => i
-        | i => i
-      let found := plain.findSome? fun
-        | .struct n [] fields => some (n, fields)
-        | _ => none
-      if let some (n, fields) := found then
-        let names := (plain.findSome? fun
-          | .fieldNames owner names _ => if owner == n && !names.isEmpty then some names else none
-          | _ => none)
-        let call1 := fun (f : String) (x : Expr) => Expr.call 0 (.name none f) [x]
-        -- How a field lies in memory: its bytes, how a value of it is made
-        -- the bits there, how the bits are made a value of it, and how they
-        -- are read (so many bits, without a sign if below zero).
-        let rec lies (fuel : Nat) : TypeExpr → Option (Nat × (Expr → Expr) × (Expr → Expr) × Int)
-          | .name "Int" [] => some (8, id, id, 64)
-          | .name "i64" [] => some (8, id, id, 64)
-          | .name "f64" [] => some (8, call1 "f64_bits", call1 "f64_of", 64)
-          | .name "f32" [] => some (4, call1 "f32_bits", call1 "f32_of", -32)
-          | .name "%prelude::Ptr" [_] =>
-            some (8, fun x => call1 "usize_bits" (call1 "ptr_address" x),
-              fun r => call1 "ptr_at" (call1 "usize_of" r), -64)
-          | .name "%prelude::PtrMut" [_] =>
-            some (8, fun x => call1 "usize_bits" (call1 "ptr_mut_address" x),
-              fun r => call1 "ptr_mut_at" (call1 "usize_of" r), -64)
-          | .name t [] =>
-            match scalars.lookup t, cTypes.lookup (lastSegment t), fuel with
-            | some (some w), _, _ => some (w.natAbs / 8, call1 (t ++ "_bits"), call1 (t ++ "_of"), w)
-            | _, some as, fuel + 1 => lies fuel (.name as [])
-            | _, _, _ => none
-          | _ => none
-        let laid := fields.map (lies 4)
-        if laid.all Option.isSome && !fields.isEmpty then
-          -- Each field at the next place that is a multiple of its size;
-          -- the whole a multiple of the largest.
-          let mut at_ : Nat := 0
-          let mut most : Nat := 1
-          let mut places : Array (Nat × (Expr → Expr) × (Expr → Expr) × Int × Nat) := #[]
-          for l in laid do
-            if let some (size, into, back, how) := l then
-              at_ := (at_ + size - 1) / size * size
-              places := places.push (at_, into, back, how, size)
-              at_ := at_ + size
-              most := max most size
-          let size := (at_ + most - 1) / most * most
-          let place := fun (off : Nat) =>
-            call1 "usize_of" (.call 0 (.name none "int_add") [call1 "usize_bits" (.name none "%at"), .int off])
-          let vars := (List.range fields.length).map fun i => s!"%f{i}"
-          let taken : Pattern := match names with
-            | some ns =>
-              .ctor n none (.var recordMark :: (ns.zip vars).map fun (f, v) => .ctor (fieldMark f) none [.var v])
-            | none => .ctor n none (vars.map Pattern.var)
-          let writes : List Stmt := (places.toList.zip vars).map fun ((off, into, _, _, bytes), v) =>
-            .expr (.call 0 (.name none "ptr_write") [place off, .int (8 * bytes), into (.name none v)])
-          let reads : List Expr := places.toList.map fun (off, _, back, how, _) =>
-            back (.call 0 (.name none "ptr_read") [place off, .int how])
-          let built : Expr := match names with
-            | some ns =>
-              .call 0 (.name none n)
-                (.name none recordMark :: (ns.zip reads).map fun (f, r) => .call 0 (.name none (fieldMark f)) [r])
-            | none => .call 0 (.name none n) reads
-          let self := TypeExpr.name n []
-          let usize := TypeExpr.name "usize" []
-          made := [
-            .fn s!"{n}::c_size" [] [] (some usize) [.mk [] [.expr (call1 "usize_of" (.int size))]],
-            .fn s!"{n}::c_write" [] [some self, some usize] (some (.tuple []))
-              [.mk [taken, .var "%at"] (writes ++ [.expr (.tuple [])])],
-            .unsafeFn s!"{n}::c_write",
-            .fn s!"{n}::c_read" [] [some usize] (some self) [.mk [.var "%at"] [.expr built]],
-            .unsafeFn s!"{n}::c_read"]
-    match subject with
-    | some n => pure (items ++ made ++ [.fieldNames (attrMark name) [n, arg] []])
-    | none => failAt s!"`#[{name}]` is written before a type or a function"
+    parseAttributed parseItemGroup
   | .ident "pub" =>
     let parent := (← acceptPub).getD false
     -- `pub extern "C" { .. }`: each of its functions is `pub`.
@@ -1970,80 +2097,7 @@ private partial def parseItemGroup : P (List Item) := do
       pure (items ++ [.fieldNames (attrMark "unsafe_impl") [tr, head] []])
     | _ => failAt "`unsafe` is written before `fn`, `trait` or `impl`, or before a block"
   | .ident "extern" =>
-    -- `extern "C" { fn name(a: usize) -> i32; }`: functions that are not
-    -- written in the language, each called by its name as C has it.
-    advance
-    if let .str _ := ← peek then advance
-    expectPunct "{"
-    let mut items : Array Item := #[]
-    repeat
-      if (← peek) == .punct "}" then break
-      unless (← peek) == .ident "fn" do failAt "expected `fn`: a foreign function"
-      advance
-      let name ← expectIdent
-      expectPunct "("
-      let mut params : Array TypeExpr := #[]
-      repeat
-        if (← peek) == .punct ")" then break
-        let _ ← expectIdent
-        expectPunct ":"
-        params := params.push (← parseType)
-        if !(← acceptPunct ",") then break
-      expectPunct ")"
-      let ret ← if ← acceptPunct "->" then parseType else pure (.tuple [])
-      expectPunct ";"
-      -- How a type is given to C and taken from it: the type the function
-      -- is declared with, how a value of it is made the bits C takes, how
-      -- what C gives is made a value of it, what C gives (so many bits; 1000
-      -- a double, 1001 a float), and where C takes it (0 with the whole
-      -- numbers and addresses, 1 as a double, 2 as a float).
-      let call1 := fun (f : String) (x : Expr) => Expr.call 0 (.name none f) [x]
-      let rec kind (fuel : Nat) : TypeExpr →
-          P (TypeExpr × (Expr → Expr) × (Expr → Expr) × Int × Nat) := fun t =>
-        match t with
-        | .name "Int" [] => pure (t, id, id, 64, 0)
-        | .name "i64" [] => pure (t, id, id, 64, 0)
-        | .name "f64" [] => pure (t, call1 "f64_bits", call1 "f64_of", 1000, 1)
-        | .name "f32" [] => pure (t, call1 "f32_bits", call1 "f32_of", 1001, 2)
-        | .name "%prelude::Ptr" [_] =>
-          pure (t, fun x => call1 "usize_bits" (call1 "ptr_address" x),
-            fun r => call1 "ptr_at" (call1 "usize_of" r), 64, 0)
-        | .name "%prelude::PtrMut" [_] =>
-          pure (t, fun x => call1 "usize_bits" (call1 "ptr_mut_address" x),
-            fun r => call1 "ptr_mut_at" (call1 "usize_of" r), 64, 0)
-        | .name name [] =>
-          match scalars.lookup name, cTypes.lookup (lastSegment name), fuel with
-          | some (some w), _, _ => pure (t, call1 (name ++ "_bits"), call1 (name ++ "_of"), w, 0)
-          -- C's own names for its types are the types they are here.
-          | _, some as, fuel + 1 => kind fuel (.name as [])
-          | _, _, _ => failAt s!"a foreign function takes and gives whole numbers, floats and addresses (`Int`, a type such as `i32`, `usize` or `f64`, `*const T`, `*mut T`), not `{name}`"
-        | _ => failAt "a foreign function takes and gives whole numbers, floats and addresses (`Int`, a type such as `i32`, `usize` or `f64`, `*const T`, `*mut T`)"
-      let mut args : Array Expr := #[]
-      let mut declared : Array TypeExpr := #[]
-      let mut classes : Nat := 0
-      let mut place : Nat := 1
-      for (p, i) in params.toList.zipIdx do
-        let (ty, into, _, _, cls) ← kind 4 p
-        declared := declared.push ty
-        args := args.push (into (Expr.name none s!"%a{i}"))
-        classes := classes + cls * place
-        place := place * 3
-      let (retTy, back, bits) ← match ret with
-        | .tuple [] => pure (TypeExpr.tuple [], (id : Expr → Expr), (0 : Int))
-        | t => do
-          let (ty, _, back, bits, _) ← kind 4 t
-          pure (ty, back, bits)
-      let symbol := name.toUTF8.toList.map fun b => Expr.int b.toNat
-      let call := Expr.call 0 (.name none foreignCall)
-        (symbol ++ [.int 0, .int bits, .int classes] ++ args.toList)
-      let body : List Stmt := match ret with
-        | .tuple [] => [.expr call, .expr (.tuple [])]
-        | _ => [.expr (back call)]
-      let pats := (List.range params.size).map fun i => Pattern.var s!"%a{i}"
-      items := items.push (.fn name [] (declared.toList.map some) (some retTy) [.mk pats body])
-      items := items.push (.unsafeFn name)
-    expectPunct "}"
-    pure items.toList
+    parseExtern
   | .ident "struct" =>
     advance
     let name ← expectIdent
@@ -2361,8 +2415,8 @@ def parse (fix : Fixities) (src : String) (base : Nat := 0) (records : List Stri
     Except String (List Item × Fixities) := do
   let toks ← lex src
   let fix ← if tables.isEmpty then collectFixities toks fix else pure ((tables.lookup path).getD fix)
-  let ((items, _), local_) ← ((parseItems.run
-    { toks, fix, records := collectRecords toks ++ records, base, tables, path }).run 0).run #[]
+  let (items, _, local_) ← parseItems
+    { toks, fix, records := collectRecords toks ++ records, base, tables, path } 0 #[]
   pure (promoteItems (items ++ local_.toList), fix)
 
 end Glorious.Syntax

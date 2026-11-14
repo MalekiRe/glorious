@@ -2716,45 +2716,74 @@ from being an `Id<Block>`.
 ## How long a change takes to try
 
 Trying a change took one to two minutes, and checking one before keeping it
-six to eight. What was slow, and what was done:
+six to eight. What it takes now, on the machine this is written on (24
+cores), with the quick build unless said:
 
 | | before | now |
 |---|---|---|
-| every test program on the three engines (`selftest`) | 160 s | 25 s, 36 s with the quick build |
-| everything checked before a commit (`./verify.sh`) | 6 to 8 min | 55 s |
-| the compiler built again after an edit to the checker | 20 to 35 s | 8 to 19 s |
+| every test program on the three engines (`selftest`) | 160 s | 16 s; 10 s with the default build |
+| everything checked before a commit (`./verify.sh`) | 6 to 8 min | 28 s |
+| the compiler built from nothing | several minutes, with the tests the build ran | 29 s |
+| built again after an edit to the checker | 20 to 35 s | 3 to 8 s for a function that is not in a `mutual` block; 11 s for the inference itself; up to 20 s for a change to what the checker's first module declares |
 | after an edit to the elaborator | 31 s | 9 s |
-| ten small programs tried | about 40 s | 0.1 s; a few seconds if they name the library |
+| after an edit to the parser | 35 s | 10 s |
+| ten small programs tried | about 40 s | 0.1 s |
+| one program that names the library | 2.4 s | 2.2 s; 1.5 s with the default build |
+
+What was slow, and what was done:
 
 - **The test programs are gone through side by side**, on every core, and
   each is compiled once: it was compiled once for the Lean machines, again
   for the Rust VM, again for the count of what Core shows, and again for the
   other back ends. `selftest` now says that count too. So do `survey`,
   `cases` and `probe` go side by side.
+- **The Rust VM is started for all the programs by one small process.**
+  Started from the test run's own process, each start waited a hundredth of
+  a second for a gigabyte of memory to be copied, one at a time.
 - **The tests the build ran are checks the executable runs**
   (`Glorious/Checks.lean`, numbered). The build ran every test program one
   after another before it was done, and to do that every module was also
   compiled into a library of its own, which each module after it waited for.
+- **Every file is a Lean `module`.** What the files of the front end
+  declare is public and what their functions do is not, so a change to what
+  a function does rebuilds its own file and nothing that reads it. This
+  does not hold for functions in a `mutual` block: Lean puts those in what
+  the file shows, so a change to one still rebuilds what follows. The files
+  of the kernel and its proofs show everything, as before.
 - **The checker reads `Glorious/Elab/Base.lean`**, what it shares with the
-  elaborator, and not the elaborator: a change to how a program is written
-  out no longer has the checker built again.
-- **`lake build -Kquick=1`** compiles the C that Lean writes with the cheap
-  code generator. The largest files took ten to sixteen seconds each in the
-  C compiler, nearly all of it in a few very large functions; they take
-  half that or less, and the compiler built runs at a little over half the
-  speed. The build without it is the one to use; `./verify.sh` uses the
-  quick one unless told `QUICK=0`.
+  elaborator, and not the elaborator.
+- **`lake build -R -Kquick=1`** compiles the C that Lean writes with the
+  cheap code generator and keeps frame pointers. The largest files took ten
+  to sixteen seconds each in the C compiler, nearly all of it in a few very
+  large functions; they take six or seven, and the compiler built runs at a
+  little over half the speed. The build without it is the one to use;
+  `./verify.sh` uses the quick one unless told `QUICK=0`.
+- **The parser's largest function is three.** Lean took ten seconds over
+  one function of three hundred lines, and takes three over the file now.
+  Its monad is one of its own and not four stacked, which made what Lean
+  compiles of it a third the size.
+- **The library's texts are read once in a process**: each program that
+  names it lexed every text three times and parsed it once, a quarter of
+  the whole test run. A program reads them the same unless one of its own
+  constructors with named fields is a name the library writes, or it
+  changes the operators of a library module; then they are read again.
+- **Lists that were searched are sets and maps**: what the count of uses
+  reads of the declarations (built again from lists at every binding
+  looked at), the calls sure to come back, the names a module can write,
+  the regions callables bind.
 - **The search for borrows that can be scopes of their own asks side by
   side**: each place alone, and then each round of taking them one at a
   time. The answers are what one at a time would give.
 - **One tree.** A commit was checked in a second worktree, built again
   there, and the first could not be built meanwhile. It is checked where it
-  is made, with nothing uncommitted.
+  is made.
 
-What still takes the time: the checker's own chain of modules (an edit to
-its first is nineteen seconds), the parser (eleven seconds for Lean to read
-it), checking the library once in each process (five seconds for all four
-kinds of program), and the largest examples (the calculator is eight).
+What still takes the time: the C compiler on the file of the inference
+(seven seconds), functions in `mutual` blocks rebuilding what reads them,
+checking the library once in each process (two seconds for one kind of
+program, four and a half for all four), and the largest example (the
+calculator, seven seconds, most of it certifying its Core again for each
+borrow tried).
 
 ## Reading a part of a value with `drop`; writing over what a reference points to
 

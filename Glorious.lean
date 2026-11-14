@@ -1,43 +1,47 @@
-import Glorious.Machine
-import Glorious.Value
-import Glorious.Control
-import Glorious.Host
-import Glorious.Core.Ast
-import Glorious.Core.Semantics
-import Glorious.Core.Cleanup
-import Glorious.Bytecode.Ast
-import Glorious.Bytecode.Semantics
-import Glorious.Compile
-import Glorious.Proof.Simulation
-import Glorious.Proof.CodeAt
-import Glorious.Proof.Patterns
-import Glorious.Proof.Correct
-import Glorious.Proof.Witness
-import Glorious.Typing.Types
-import Glorious.Typing.Static
-import Glorious.Typing.Subst
-import Glorious.Typing.Runtime
-import Glorious.Typing.Values
-import Glorious.Typing.Stack
-import Glorious.Typing.Safety
-import Glorious.Typing.Cells
-import Glorious.Typing.Loans
-import Glorious.Typing.Compiled
-import Glorious.Typing.Equality
-import Glorious.Typing.Checker
-import Glorious.Typing.Covers
-import Glorious.Typing.Certify
-import Glorious.Typing.Witness
-import Glorious.Proof.Audit
-import Glorious.Syntax.Ast
-import Glorious.Syntax.Lexer
-import Glorious.Syntax.Parser
-import Glorious.Elab
-import Glorious.Prelude
-import Glorious.Std
-import Glorious.Driver
-import Glorious.Bytecode.Encode
-import Glorious.Cases
-import Glorious.Bytecode.Decode
-import Glorious.Traits
-import Glorious.Check
+module
+
+public import Glorious.Machine
+public import Glorious.Value
+public import Glorious.Control
+public import Glorious.Host
+public import Glorious.Core.Ast
+public import Glorious.Core.Semantics
+public import Glorious.Core.Cleanup
+public import Glorious.Bytecode.Ast
+public import Glorious.Bytecode.Semantics
+public import Glorious.Compile
+public import Glorious.Proof.Simulation
+public import Glorious.Proof.CodeAt
+public import Glorious.Proof.Patterns
+public import Glorious.Proof.Correct
+public import Glorious.Proof.Witness
+public import Glorious.Typing.Types
+public import Glorious.Typing.Static
+public import Glorious.Typing.Subst
+public import Glorious.Typing.Runtime
+public import Glorious.Typing.Values
+public import Glorious.Typing.Stack
+public import Glorious.Typing.Safety
+public import Glorious.Typing.Cells
+public import Glorious.Typing.Loans
+public import Glorious.Typing.Compiled
+public import Glorious.Typing.Equality
+public import Glorious.Typing.Checker
+public import Glorious.Typing.Covers
+public import Glorious.Typing.Certify
+public import Glorious.Typing.Witness
+public import Glorious.Proof.Audit
+public import Glorious.Syntax.Ast
+public import Glorious.Syntax.Lexer
+public import Glorious.Syntax.Parser
+public import Glorious.Elab
+public import Glorious.Prelude
+public import Glorious.Std
+public import Glorious.Driver
+public import Glorious.Bytecode.Encode
+public import Glorious.Cases
+public import Glorious.Bytecode.Decode
+public import Glorious.Traits
+public import Glorious.Check
+
+@[expose] public section

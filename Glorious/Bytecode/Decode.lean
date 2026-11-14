@@ -1,4 +1,6 @@
-import Glorious.Bytecode.Encode
+module
+
+public import Glorious.Bytecode.Encode
 
 /-!
 # Decoding bytecode
@@ -6,6 +8,8 @@ import Glorious.Bytecode.Encode
 The inverse of `Encode`, and the proof that it is one: decoding an encoded
 program gives back the program. The format therefore loses nothing.
 -/
+
+@[expose] public section
 
 namespace Glorious.Bytecode.Decode
 

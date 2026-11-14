@@ -1,7 +1,9 @@
-import Glorious.Machine
-import Glorious.Control
-import Glorious.Host
-import Glorious.Core.Ast
+module
+
+public import Glorious.Machine
+public import Glorious.Control
+public import Glorious.Host
+public import Glorious.Core.Ast
 
 /-!
 # Core semantics
@@ -9,6 +11,8 @@ import Glorious.Core.Ast
 The meaning of a Core program, as an abstract machine. This file is the
 definition the compiler is proved against.
 -/
+
+@[expose] public section
 
 namespace Glorious.Core
 

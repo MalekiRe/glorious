@@ -1,4 +1,6 @@
-import Glorious.Value
+module
+
+public import Glorious.Value
 
 /-!
 # The host boundary
@@ -6,6 +8,8 @@ import Glorious.Value
 The finite set of things a program can ask of the outside world. Both machines
 call the same `Host.call`, and nothing else touches the world.
 -/
+
+@[expose] public section
 
 namespace Glorious
 

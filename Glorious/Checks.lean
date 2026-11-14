@@ -1,4 +1,6 @@
-import Glorious.Driver
+module
+
+public import Glorious.Driver
 
 /-!
 # What is asked of the front end besides what programs give
@@ -9,6 +11,8 @@ goes wrong, which cells are still live at the end, how many cleanups ran, and
 what the typing of a program's Core shows. Each is numbered, to be named when
 it does not hold.
 -/
+
+public section
 
 namespace Glorious.Checks
 

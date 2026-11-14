@@ -1,4 +1,6 @@
-import Glorious.Core.Semantics
+module
+
+public import Glorious.Core.Semantics
 
 /-!
 # Types for Core, and the regions in them
@@ -12,6 +14,8 @@ Everything done to the regions of a type is one of two traversals, `mapR` and
 `regionsAt`, so that the facts about instantiating region variables and
 opening a callable's bound regions are each proved once about those.
 -/
+
+@[expose] public section
 
 namespace Glorious.Typing
 

@@ -1,3 +1,5 @@
+module
+
 /-!
 # Which implementation a trait bound is met by
 
@@ -18,6 +20,8 @@ value, a tuple of the implementation's functions, and passes it where the bound
 is needed; that the result is well typed is checked for each program, with the
 rest of its Core.
 -/
+
+@[expose] public section
 
 namespace Glorious.Traits
 

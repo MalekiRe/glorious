@@ -1,4 +1,8 @@
-import Glorious.Check.Uses
+module
+
+public import Glorious.Check.Uses
+
+public section
 
 namespace Glorious.Check
 

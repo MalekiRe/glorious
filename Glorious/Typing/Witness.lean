@@ -1,5 +1,7 @@
-import Glorious.Typing.Certify
-import Glorious.Proof.Witness
+module
+
+public import Glorious.Typing.Certify
+public import Glorious.Proof.Witness
 
 /-!
 # Programs the checker accepts, and programs it turns away
@@ -19,6 +21,8 @@ Last are programs that lend a cell: one that uses it only through the borrow
 while it is lent, which the rules for borrows accept, and one that writes it
 behind the borrow's back, which they turn away.
 -/
+
+@[expose] public section
 
 namespace Glorious.Typing.Witness
 

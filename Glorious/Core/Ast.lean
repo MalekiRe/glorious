@@ -1,4 +1,6 @@
-import Glorious.Control
+module
+
+public import Glorious.Control
 
 /-!
 # Core syntax
@@ -9,6 +11,8 @@ covers data, closures, calls, tail calls, pattern callables, and effects with
 handlers and resumptions, label scopes, guaranteed cleanup, and host
 operations.
 -/
+
+@[expose] public section
 
 namespace Glorious.Core
 

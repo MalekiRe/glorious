@@ -1,6 +1,10 @@
+module
+
 /-!
 # Lexer
 -/
+
+public section
 
 namespace Glorious.Syntax
 

@@ -1,4 +1,6 @@
-import Glorious.Typing.Stack
+module
+
+public import Glorious.Typing.Stack
 
 /-!
 # Type safety for Core
@@ -11,6 +13,8 @@ If the context's notion of a duplicable type is sound, the same steps keep every
 resumption held in at most one place, so a resumption is never used a second
 time: `owned_safety` leaves three faults.
 -/
+
+@[expose] public section
 
 namespace Glorious.Typing
 

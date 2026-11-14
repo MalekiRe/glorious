@@ -1,8 +1,10 @@
-import Std.Data.HashMap
-import Std.Data.HashSet
-import Glorious.Syntax.Ast
-import Glorious.Elab
-import Glorious.Typing.Certify
+module
+
+public import Std.Data.HashMap
+public import Std.Data.HashSet
+public import Glorious.Syntax.Ast
+public import Glorious.Elab
+public import Glorious.Typing.Certify
 
 /-!
 # Finding a certificate for a Core program
@@ -20,6 +22,8 @@ function from outside its group takes a fresh copy of that type. Then, starting
 from `main`, each function is given a signature for every ground type it is
 actually used at, and its hints are read off at that type.
 -/
+
+public section
 
 namespace Glorious.Infer
 

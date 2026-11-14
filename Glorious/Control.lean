@@ -1,4 +1,6 @@
-import Glorious.Value
+module
+
+public import Glorious.Value
 
 /-!
 # Control structures shared by both machines
@@ -7,6 +9,8 @@ Handlers, the search for the handler of an operation, the search for a label
 scope, the store of captured continuations, and memory. Both machines use these definitions on their own kind
 of stack frame.
 -/
+
+@[expose] public section
 
 namespace Glorious
 

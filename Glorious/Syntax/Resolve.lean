@@ -1,4 +1,6 @@
-import Glorious.Syntax.Ast
+module
+
+public import Glorious.Syntax.Ast
 
 /-!
 # What is settled before a program is checked
@@ -7,6 +9,8 @@ A type alias is another way to write a type, not a type: every use is replaced
 by what it stands for, and the checker never sees one. This is done once the
 names of the program are resolved, so an alias is found like any other name.
 -/
+
+public section
 
 namespace Glorious.Syntax
 

@@ -1,9 +1,11 @@
-import Glorious.Core.Cleanup
-import Glorious.Proof.Correct
-import Glorious.Bytecode.Decode
-import Glorious.Typing.Compiled
-import Glorious.Typing.Witness
-import Glorious.Traits
+module
+
+public import Glorious.Core.Cleanup
+public import Glorious.Proof.Correct
+public import Glorious.Bytecode.Decode
+public import Glorious.Typing.Compiled
+public import Glorious.Typing.Witness
+public import Glorious.Traits
 
 /-!
 # Axiom audit
@@ -11,6 +13,8 @@ import Glorious.Traits
 The build fails if the public theorems come to depend on anything beyond Lean's
 three standard axioms, in particular on `sorryAx` or a declared `axiom`.
 -/
+
+@[expose] public section
 
 /-- info: 'Glorious.compile_correct' depends on axioms: [propext, Classical.choice, Quot.sound] -/
 #guard_msgs in

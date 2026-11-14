@@ -1,4 +1,6 @@
-import Glorious.Core.Semantics
+module
+
+public import Glorious.Core.Semantics
 
 /-!
 # Every cleanup is accounted for
@@ -16,6 +18,8 @@ The count is of cleanups started. One that is started may itself not finish.
 Guards are counted, not told apart: the statement is that none is lost and none
 is made from nothing, which leaves no room for one to run twice.
 -/
+
+@[expose] public section
 
 namespace Glorious.Core
 

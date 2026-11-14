@@ -1,4 +1,8 @@
-import Glorious.Check.Borrows
+module
+
+public import Glorious.Check.Borrows
+
+public section
 
 namespace Glorious.Check
 

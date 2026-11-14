@@ -1,3 +1,5 @@
+module
+
 /-!
 # Floating point, written out
 
@@ -10,6 +12,8 @@ is zero. Nothing here is Lean's `Float`, which the kernel cannot compute with.
 Every operation that would give a NaN gives the one quiet NaN with no sign and
 no payload, so that a program cannot tell two machines apart by one.
 -/
+
+@[expose] public section
 
 namespace Glorious.Ieee
 

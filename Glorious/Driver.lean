@@ -1,22 +1,26 @@
-import Glorious.Syntax.Parser
-import Glorious.Syntax.Resolve
-import Glorious.Syntax.Modules
-import Glorious.Elab
-import Glorious.Check
-import Glorious.Infer
-import Glorious.Prelude
-import Glorious.Std
-import Glorious.Compile
-import Glorious.Core.Semantics
-import Glorious.Core.Cleanup
-import Glorious.Bytecode.Semantics
-import Glorious.Bytecode.Encode
+module
+
+public import Glorious.Syntax.Parser
+public import Glorious.Syntax.Resolve
+public import Glorious.Syntax.Modules
+public import Glorious.Elab
+public import Glorious.Check
+public import Glorious.Infer
+public import Glorious.Prelude
+public import Glorious.Std
+public import Glorious.Compile
+public import Glorious.Core.Semantics
+public import Glorious.Core.Cleanup
+public import Glorious.Bytecode.Semantics
+public import Glorious.Bytecode.Encode
 
 /-!
 # Driver
 
 Source text to Core, and helpers to run a program on both machines.
 -/
+
+public section
 
 namespace Glorious
 

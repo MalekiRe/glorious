@@ -1,4 +1,6 @@
-import Glorious.Typing.Checker
+module
+
+public import Glorious.Typing.Checker
 
 /-!
 # Clauses that cover every argument
@@ -9,6 +11,8 @@ typing. The check is the usual one: look at the first column; either the rows
 that match anything there cover the rest, or every constructor of the column's
 type is covered once its fields are put in front.
 -/
+
+@[expose] public section
 
 namespace Glorious.Typing
 

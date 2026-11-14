@@ -1,3 +1,5 @@
+module
+
 /-!
 # Test programs
 
@@ -5,6 +7,8 @@ Each case is a program, its input, and what it must print followed by its
 value. The same cases are run on the Core machine, the Lean bytecode machine
 and the Rust VM.
 -/
+
+public section
 
 namespace Glorious
 

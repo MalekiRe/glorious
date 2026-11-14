@@ -1,7 +1,9 @@
-import Glorious.Compile
-import Glorious.Core.Semantics
-import Glorious.Bytecode.Semantics
-import Glorious.Proof.CodeAt
+module
+
+public import Glorious.Compile
+public import Glorious.Core.Semantics
+public import Glorious.Bytecode.Semantics
+public import Glorious.Proof.CodeAt
 
 /-!
 # Pattern compilation
@@ -12,6 +14,8 @@ and that the machine executes them accordingly: a matching clause reaches its
 body with the bindings loaded, a failing clause reaches the next clause with
 the locals untouched.
 -/
+
+@[expose] public section
 
 namespace Glorious
 
