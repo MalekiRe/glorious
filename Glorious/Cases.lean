@@ -4207,6 +4207,12 @@ def cases : List Case := [
     [], "4"⟩,
   ⟨"effect Stop { stop(&Int) -> ! }\nfn main() -> Int { let x = 1; handle stop(&x) { stop(r) => *r } }",
     [], "error: 2:31: in `main`: the operation `stop` does not return, so its performer is gone before an arm runs: what it is given cannot borrow"⟩,
+  -- A list of types has no longest length: a tuple of thirty
+  ⟨"trait Count { fn count(Self) -> Int }\nimpl Count for () { fn count(t) { 0 } }\nimpl<H, ..R> Count for (H, ..R) where (..R): Count { fn count(t) { let (h, ..r) = t; 1 + count((..r)) } }\nfn main() -> Int { let t = (1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30); count(t) }",
+    [], "30"⟩,
+  -- Two tuples joined are longer than any the program writes
+  ⟨"trait Join<B> { type Out; fn join(Self, B) -> Out }\nimpl<..A, ..B> Join<(..B)> for (..A) { type Out = (..A, ..B); fn join(left, right) { let (..a) = left; let (..b) = right; (..a, ..b) } }\ntrait Count { fn count(Self) -> Int }\nimpl Count for () { fn count(t) { 0 } }\nimpl<H, ..R> Count for (H, ..R) where (..R): Count { fn count(t) { let (h, ..r) = t; 1 + count((..r)) } }\nfn main() -> Int { count(join((1, 2, 3), (4, 5, 6))) }",
+    [], "6"⟩,
   -- `drop` is not for a program to call.
   ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nfn main() { let mut f = File(7); drop(&mut f); 0 }",
     [], "error: 3:34: in `main`: `drop` is run when what holds a value ends; a program does not call it"⟩,

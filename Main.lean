@@ -650,8 +650,8 @@ def parseInput (args : List String) : Except String (List Int) :=
 
 /-- Compile the program at `path` again whenever its text or a module of it
 changes, and run it. What does not change between compiles is kept: the
-prelude and the whole library, checked once; and what the last compile found
-of where borrows can be scopes of their own. -/
+prelude, checked once, and what the last compile found of where borrows can
+be scopes of their own. -/
 partial def watch (path : String) (input : List Int) : IO UInt32 := do
   let file ← placesFile path
   let mut known ← readPlaces file
@@ -667,7 +667,7 @@ partial def watch (path : String) (input : List Int) : IO UInt32 := do
       if now != last then
         last := now
         let start ← IO.monoMsNow
-        match compileSource src true files (few := false) known with
+        match compileSource src true files (few := true) known with
         | .error e => IO.eprintln s!"{path}: {e}"
         | .ok c =>
           known := c.places

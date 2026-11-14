@@ -301,8 +301,13 @@ def neededStd (texts : List String) : Option (List (List String × String)) :=
 texts of the modules that are files of their own, each with its path. Where
 the program says `mod name;` the items of that module's text are put. -/
 def parseProgram (src : String) (files : List (List String × String)) (check : Bool := true)
-    (few : Bool := false) :
+    (few : Bool := false) (packs : Nat := 0) :
     Except String (List Syntax.Item × List Syntax.Item) := do
+  -- Lists of types are written out to the longest list the program's texts
+  -- write, unless told longer.
+  let packs ← if packs != 0 then pure packs else
+    (src :: files.map (·.2)).foldlM (fun m text => do
+      pure (max m (Syntax.longestList (← Syntax.lex text)))) 2
   -- The library's texts are files of the program, before its own.
   -- (`#![no_std]`: without the library, whatever the text mentions.)
   let std := usesStd src files && (src.splitOn "#![no_std]").length == 1
@@ -350,7 +355,7 @@ def parseProgram (src : String) (files : List (List String × String)) (check : 
   -- `[a, b, c]` is depends on what is wanted of it.
   let fixed := ((src :: own.map (·.2)).any saysLength)
   let (items, _) ← Syntax.parse fix src (base := 1000000) (records := records) (tables := tables)
-    (fixed := fixed)
+    (fixed := fixed) (packs := packs)
   let declares := items.any fun
     | .module "std" _ | .pub _ (.module "std" _) => true
     | _ => false
@@ -376,7 +381,8 @@ def parseProgram (src : String) (files : List (List String × String)) (check : 
             | none =>
               let text := ((files[k]?).map (·.2)).getD ""
               match Syntax.parse fix text (base := 1000000 * (k + 2)) (records := records)
-                  (tables := tables) (path := here) (fixed := fixed && k ≥ (if std then library.length else 0)) with
+                  (tables := tables) (path := here) (fixed := fixed && k ≥ (if std then library.length else 0))
+                  (packs := packs) with
               | .ok (items, _) => pure items
               | .error e => throw s!"module `{shown}`: {e}"
           pure (wrap (.module name (some (← fill fuel here parsed))))
@@ -447,10 +453,10 @@ def lowered (b : Elab.Blocks) (written all : List Syntax.Item) :
 /-- Parse, check and elaborate a program together with the prelude, and have the
 proved Core type checker accept the result. With `check := false` both checks
 are skipped, so that programs which go wrong can still be run. -/
-def compileSource (src : String) (check : Bool := true)
+def compileSourceAt (src : String) (check : Bool := true)
     (files : List (List String × String) := []) (few : Bool := false)
-    (known : List ((String × Nat) × Nat) := []) : Except String Compiled := do
-  let (prelude, items) ← parseProgram src files check few
+    (known : List ((String × Nat) × Nat) := []) (packs : Nat := 0) : Except String Compiled := do
+  let (prelude, items) ← parseProgram src files check few packs
   -- Every name is given its meaning: the modules become one list of items.
   let resolved ← Syntax.Modules.resolve prelude items
   -- How a constructor is named where a value is shown: without its module,
@@ -697,6 +703,59 @@ def compileSource (src : String) (check : Bool := true)
     match blocks with
     | some b => if b.links.isEmpty then throw e else build (some { b with links := [] })
     | none => throw e
+
+/-- How many parts the first parentheses of a written type have at their top. -/
+def partsWritten (ty : List Char) : Nat :=
+  let inner := (ty.dropWhile (· != '(')).drop 1
+  let rec count (cs : List Char) (depth parts : Nat) : Nat :=
+    match cs with
+    | [] => parts
+    | c :: rest =>
+      if c == '(' || c == '<' || c == '[' then count rest (depth + 1) parts
+      else if c == ')' || c == '>' || c == ']' then
+        if depth == 0 then parts else count rest (depth - 1) parts
+      else if c == ',' && depth == 0 then count rest depth (parts + 1)
+      else count rest depth parts
+  if inner.isEmpty then 0 else count inner 0 1
+
+/-- How long a list of types an error says is missing an implementation may
+need: the parts of the type, and of the tuple the trait is given, together
+(one made by joining two is as long as both). -/
+def longestUnimplemented (e : String) : Nat :=
+  ((e.splitOn "` does not implement `").zip ((e.splitOn "` does not implement `").drop 1)).foldl
+    (fun most (before, after) =>
+      let ty := ((before.splitOn "`").getLastD "").toList
+      let trait := ((after.splitOn "`").headD "").toList
+      max most (partsWritten ty + partsWritten (trait.dropWhile (· != '<'))))
+    0
+
+/-- Compile a program. A list of types (`impl<..T>`) stands for a list of
+any length: it is written out, first, to the longest list the program's
+texts write; where the checker then finds a longer tuple or list of
+parameters with no implementation, as one made by joining two, the program
+is read again with lists that long. -/
+def compileSource (src : String) (check : Bool := true)
+    (files : List (List String × String) := []) (few : Bool := false)
+    (known : List ((String × Nat) × Nat) := []) : Except String Compiled := do
+  let packs ← (src :: files.map (·.2)).foldlM (fun m text => do
+    pure (max m (Syntax.longestList (← Syntax.lex text)))) 2
+  -- (An implementation over several lists, as one that joins two, is
+  -- written out to as many times as long: what it makes can be that long.)
+  let lists := ((src :: files.map (·.2)).flatMap fun text =>
+    ((text.splitOn "impl<").drop 1).map fun after =>
+      (((after.takeWhile (· != '>')).toString.splitOn "..").length - 1)).foldl max 0
+  let packs := packs * max 1 lists
+  -- (Only a program that has such an implementation is read again.)
+  let lists := lists != 0
+  let rec go (fuel packs : Nat) : Except String Compiled :=
+    match compileSourceAt src check files few known packs with
+    | .error e =>
+      let wanted := longestUnimplemented e
+      match fuel with
+      | fuel + 1 => if lists && wanted > packs then go fuel (max wanted (2 * packs)) else .error e
+      | 0 => .error e
+    | .ok c => .ok c
+  go 8 packs
 
 /-- Whether a program's Core was shown to follow the ownership rules: `some true`
 if so, `some false` if it was only shown to be well typed, `none` if it does not compile. -/

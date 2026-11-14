@@ -60,7 +60,7 @@ did. calculator 1.43 s to 1.26 s.
 **Implementations are found by their trait's name.** The checker kept
 them in one array and, for each condition it settled, went through every
 implementation comparing trait names (made each time from the written
-name). Programs over lists of types have many: each `impl<..T>` is twelve.
+name). Programs over lists of types have many: each `impl<..T>` is one for each length.
 They are now also kept by trait, as they are declared. covey 0.88 s to
 0.57 s.
 
@@ -3165,9 +3165,10 @@ the order it is being built:
   does not tell types apart at run time, so nothing is lost by that.
 - **Lists of types as parameters, `..R`, in implementations.**
   `impl<H, ..R> Size for (H, ..R) where (..R): Size { .. }` is written out,
-  before it is read, once for each length of `R` up to twelve (with two
-  lists, every pair of lengths whose sum is at most twelve; with more, six;
-  lists named after one `..` together are as long as each other). `..R`
+  before it is read, once for each length of `R` the program can need
+  (with two lists, every pair of lengths whose sum is no more than that;
+  lists named after one `..` together are as long as each other: see
+  below for how long that is). `..R`
   stands for `R0, R1, ..` wherever it is written in brackets or in the
   conditions after `where`: in types, patterns (`let (h, ..rest) = t`) and
   what is built (`(x, ..rest)`, `[..show(r)]`). What follows `..` may be
@@ -3176,9 +3177,25 @@ the order it is being built:
   is in another case, or the first. So `join` of two tuples is one
   implementation and no recursion, and a tuple of types can be mapped.
   This is a rewriting of the text, not a kind of type: a function cannot
-  take a list of types (only implementations can), lengths above twelve
-  have no implementation, and a message about one of the copies names
-  `R0`, `R1`. Found on the way: in an implementation's function, a type
+  take a list of types (only implementations can), and a message about one
+  of the copies names `R0`, `R1`.
+
+  **(Later, by the user: a list of types has no longest length.)** It was
+  written out to twelve. Now it is written out to the most things the
+  program's own texts write between one pair of parentheses (a tuple, a
+  function's parameters or arguments; two at least), times the most lists
+  one implementation takes (one that joins two makes what is as long as
+  both), and where the checker
+  then finds a tuple or list of parameters with no implementation that is
+  longer than that, counting the trait's tuple with the type's (as joining
+  two makes), the program is read again with lists that long, up to eight
+  times, each at least twice as long. So a thirty-tuple has `Count`, and
+  `join((1, "x"), (3, 4, 5))` has an implementation. What is
+  written out is what the program can need, which is less than twelve for
+  most: a program pays for the lengths it uses. Still a rewriting: each
+  length is checked as its own implementation; a list whose length nothing
+  written or joined says (a recursion that makes ever longer tuples) is
+  not found. Found on the way: in an implementation's function, a type
   made of the function's own parameters, `(R0,)`, was taken to have the
   trait by the one other implementation for tuples of one, and refused;
   it is now left to what the function assumes.

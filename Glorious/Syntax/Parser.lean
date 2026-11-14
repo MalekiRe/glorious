@@ -2677,8 +2677,8 @@ def scopedFixities (prelude : Fixities) (texts : List (List String × String)) :
 /-! ## Lists of types as parameters
 
 `impl<H, ..R> Count for (H, ..R) where (..R): Count { .. }` is an
-implementation for tuples of every length up to `packArity`: it is written
-out once for each, before it is read, with `..R` standing for `R0, R1, ..`
+implementation for tuples of every length: it is written out once for each
+length the program can need, before it is read, with `..R` standing for `R0, R1, ..`
 wherever it is written in parentheses or angle brackets: in types, in
 patterns (`let (h, ..rest) = t` binds `rest0`, `rest1`, ..), and in what is
 built (`(x, ..rest)`). What follows `..` may be more than a name: it is
@@ -2688,12 +2688,38 @@ list of values is as long as the list of types of its name in other case,
 or the first. A `..` in square brackets is an array's rest, and one before
 no list is a pattern's, as before. -/
 
-/-- The longest tuple a list of types stands for. -/
-def packArity : Nat := 12
+/-- The most things written between one pair of brackets: a tuple's parts,
+a function's parameters or arguments. A list of types is written out for
+every length up to this, at first (see `compileSource` for when it is not
+enough). -/
+def longestList (toks : Array Token) : Nat := Id.run do
+  let tok := fun (i : Nat) => (toks[i]?.map (·.tok)).getD .eof
+  -- (For each bracket open, how many parts it has so far.)
+  let mut open_ : List Nat := []
+  let mut most := 0
+  for i in [0:toks.size] do
+    match tok i with
+    | .punct "(" => open_ := 1 :: open_
+    | .punct "[" => open_ := 1 :: open_
+    | .punct "{" => open_ := 1 :: open_
+    | .punct "," =>
+      match open_ with
+      | n :: rest => open_ := (n + 1) :: rest
+      | [] => pure ()
+    | .punct ")" | .punct "]" | .punct "}" =>
+      match open_ with
+      | n :: rest =>
+        -- (Only parentheses: `[..]` and `{..}` are counted apart.)
+        if tok i == .punct ")" then most := max most n
+        open_ := rest
+      | [] => pure ()
+    | _ => pure ()
+  pure most
 
 /-- The tokens with each implementation that has a list of types as a
-parameter written out for every length. -/
-def expandPacks (toks : Array Token) : Array Token := Id.run do
+parameter written out for every length up to `most`: together, where it has
+more than one list. -/
+def expandPacks (toks : Array Token) (most : Nat) : Array Token := Id.run do
   let tok := fun (i : Nat) => (toks[i]?.map (·.tok)).getD .eof
   let isDots := fun (i : Nat) => tok i == .punct "." && tok (i + 1) == .punct "."
   let mut out : Array Token := #[]
@@ -2731,8 +2757,7 @@ def expandPacks (toks : Array Token) : Array Token := Id.run do
       let together := linked body packs
       let leaders := packs.filter fun p => (together.lookup p).getD p == p
       -- Every length for each list, as long as together they are no
-      -- longer than `packArity` (fewer where there are more than two).
-      let most := if leaders.length ≤ 2 then packArity else 6
+      -- longer than `most`.
       let rec lengths : List String → Nat → List (List (String × Nat))
         | [], _ => [[]]
         | p :: ps, left => (List.range (left + 1)).flatMap fun n =>
@@ -2917,9 +2942,12 @@ With `tables`, each module of the text has the operators the table gives it,
 and the text is the module `path`. -/
 def parse (fix : Fixities) (src : String) (base : Nat := 0) (records : List String := [])
     (tables : List (List String × Fixities) := []) (path : List String := [])
-    (fixed : Bool := false) :
+    (fixed : Bool := false) (packs : Nat := 0) :
     Except String (List Item × Fixities) := do
-  let toks := expandPacks (← lex src)
+  -- (`packs`: how long lists of types are written out to; by default, as
+  -- long as the longest list this text writes.)
+  let toks ← lex src
+  let toks := expandPacks toks (if packs == 0 then max 2 (longestList toks) else packs)
   let fix ← if tables.isEmpty then collectFixities toks fix else pure ((tables.lookup path).getD fix)
   let (items, _, local_) ← parseItems
     { toks, fix, records := collectRecords toks ++ records, base, tables, path, fixed } 0 #[]
