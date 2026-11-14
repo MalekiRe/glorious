@@ -273,6 +273,11 @@ def tupleRestFound (id count : Nat) : String := s!"%tuplerest:{id}:{count}%"
 `F::Of<Int>`: the type it is asked of, and then those. -/
 def gatMark : String := "%gat"
 
+/-- `<T as Trait>::Name` kept as written in what an implementation says one of
+its trait's types is, where `T` is one of its type parameters: answered at
+each use of the implementation, once `T` is known there. -/
+def projMark : String := "%proj"
+
 /-- How a trait's function says it has type parameters of its own, `fn
 single<T>(T) -> Of<T>`: what it gives is written under this mark, with the
 parameters after it. -/

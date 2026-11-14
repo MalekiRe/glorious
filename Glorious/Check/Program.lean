@@ -536,6 +536,10 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
     modify fun s => { s with rowIncl := rest }
   modify fun s => { s with rowChecks := [] }
   let mut givensOf : List (String × List (String × Nat)) := []
+  -- Conditions of an implementation on a type made from its parameters,
+  -- `(A, B): Apart`, by the function and the trait at its arguments: the
+  -- type as written, and the number it is known by in the function.
+  let mut compound : List (String × String × String × Ty) := []
   for d in decls do
     let t0 ← zonk ((defs.lookup d.name).getD .unit)
     let (t1, seen) ← openParams [] t0
@@ -656,9 +660,13 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
           | none =>
             -- Of a type made from them, `(A, B): Apart`: whoever uses the
             -- implementation has to meet it. In here it is known by a
-            -- number of its own, and nothing asks for it.
+            -- number of its own, which a need of the trait of that very
+            -- type is met by.
             let own ← keyOf (Ty.con s!"'%condition:{d.name}:{key}:{← spellTy t}" [])
             pure (key, own.getD 0, t)
+        for (key, _, t) in apart do
+          if (← keyOf t).isNone then
+            compound := (d.name, key, ← spellTy t, Ty.con s!"'%condition:{d.name}:{key}:{← spellTy t}" []) :: compound
         pure (plain ++ apart)
       | none =>
         let inferred := leafs.toList.filter fun (_, _, k) =>
@@ -749,8 +757,20 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
           | .con n args => .con n (args.map settle)
         pure (settle (← toSTy b.ty))
       else toSTy b.ty
-    let solved ← if (← get).patterned && b.trait != Syntax.destroyTrait then solveFitting givens 200 b.trait b.ty b.args
-      else pure (Traits.solve kimpls givens 100000 b.trait sty)
+    -- (A need of the trait of a type the implementation said has it: met by
+    -- what it said.)
+    let spelled ← spellTy b.ty
+    let said := compound.find? fun (owner, key, ty, _) =>
+      owner == b.owner && Syntax.traitBase key == Syntax.traitBase b.trait && ty == spelled
+    let solve := fun (trait : String) (ty : Ty) (sty : Traits.STy) => do
+      if (← get).patterned && b.trait != Syntax.destroyTrait then solveFitting givens 200 trait ty b.args
+      else pure (Traits.solve kimpls givens 100000 trait sty)
+    let solved ← match ← solve b.trait b.ty sty with
+      | some d => pure (some d)
+      | none =>
+        match said with
+        | some (_, key, _, cond) => solve key cond (← toSTy cond)
+        | none => pure none
     match solved with
     | some d => table := record table b.call (toDictE impls d)
     | none =>
@@ -1124,6 +1144,7 @@ def checkGroup (decls : List FnDecl) : M Unit := do
             let tm := (sig.self, self) :: sig.tparams.zip (im.targs.map (subst own [] []))
               ++ sig.assocs.filterMap fun (a, id) =>
                 (im.assocs.lookup a).map fun t => (id, subst own [] [] t)
+            let tm ← tm.mapM fun (id, t) => do pure (id, ← unproject t)
             -- Its own type parameters are the function's, each itself here;
             -- and where its types ask a type the trait leaves at types, that
             -- is what the implementation says at them.
@@ -1131,6 +1152,7 @@ def checkGroup (decls : List FnDecl) : M Unit := do
             let tm := tm ++ sig.gats.filterMap fun (a, asked, id) =>
               (im.assocs.lookup a).map fun said =>
                 (id, gatAt own ((im.gatParams.lookup a).getD []) (asked.map (subst tm [] [])) said)
+            let tm ← tm.mapM fun (id, t) => do pure (id, ← unproject t)
             -- The trait's lifetimes are each itself here, as a function's own
             -- are: what the trait says is borrowed from one thing may not be
             -- borrowed from another.
@@ -1141,13 +1163,14 @@ def checkGroup (decls : List FnDecl) : M Unit := do
               let k' ← freshRowVar
               rm := (k, k') :: rm
               if let some said := im.assocs.lookup a then
-                try unify (.fn [] .unit [] (some k') (← freshCap)) (subst own [] [] said)
+                try unify (.fn [] .unit [] (some k') (← freshCap)) (← unproject (subst own [] [] said))
                 catch _ =>
                   throw (inFunction d.name s!"`{a}` is a row of effects here: write `type {a} = \{Effect, ..};`")
             let row : Row :=
               ⟨sig.row.effs.map fun (e, args) => (e, args.map (subst tm rm [])),
                 sig.row.tail.map fun k => (rm.lookup k).getD k⟩
-            let declared ← zonk (.func (sig.params.map (subst tm rm [])) (subst tm rm [] sig.ret) row (← freshCap))
+            let declared ← zonk (← unproject
+              (.func (sig.params.map (subst tm rm [])) (subst tm rm [] sig.ret) row (← freshCap)))
             let cm ← (freeCaps declared).eraseDups.mapM fun c => do pure (c, ← freshCap)
             let want := subst [] [] cm declared
             -- (A callable in it that is for every lifetime is one still,

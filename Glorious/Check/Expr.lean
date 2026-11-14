@@ -944,8 +944,8 @@ partial def inferCall (scope : Scope) (amb : Row) (f : Expr) (args : List Expr)
       -- is the one of this use: the function's lifetimes and those asked
       -- are made new together.)
       let asking := sig.gats.map fun (_, asked, _) => Ty.tuple (asked.map (subst tm [] []))
-      let both ← freshenCaps (.tuple
-        (.func (sig.params.map (subst tm rm [])) (subst tm rm [] sig.ret) row (← freshCap) :: asking))
+      let both ← freshenCaps (← unproject (.tuple
+        (.func (sig.params.map (subst tm rm [])) (subst tm rm [] sig.ret) row (← freshCap) :: asking)))
       let (callee, asking) := match both with
         | .tuple (c :: rest) => (c, rest)
         | other => (other, asking)
@@ -1251,6 +1251,11 @@ partial def inferPat (p : Pattern) (t : Ty) : M Scope := do
           throw s!"a tuple pattern with {ps.length - 1} parts and `..`, of a tuple of {parts.length}"
         throw (Syntax.tupleRestFound id (parts.length + 1 - ps.length))
       | _ => throw "`..` in a tuple pattern stands for the parts not written, and how many the tuple has is not known here: say its type"
+    -- (`()` of a reference to `()`: there is nothing in it to borrow.)
+    if ps.isEmpty then
+      if let .ref _ inner _ ← find t then
+        unifyAt "a tuple pattern" (.tuple []) inner
+        return []
     let ts ← ps.mapM fun _ => freshTy
     unifyAt "a tuple pattern" (.tuple ts) t
     inferPats ps ts

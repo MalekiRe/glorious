@@ -733,6 +733,10 @@ structure St where
   /-- While a trait's functions are read: the types it leaves to
   implementations, and where one is asked at types, as `MethodSig.gats`. -/
   gatScope : List String := []
+  /-- Reading what an implementation says one of its trait's types is: a type
+  that names another trait's type of one of its parameters is kept as written
+  (`Syntax.projMark`). -/
+  projecting : List Nat := []
   gatOccs : Array (String × List Ty × Nat) := #[]
   /-- A type a trait leaves at a lifetime, not yet known (`L::Item<'a>` where
   `L` is a type parameter): by its variable, the lifetimes it was asked at.
@@ -1124,6 +1128,27 @@ def gatAt (own : List (Nat × Ty)) (takes : List (Bool × Nat)) (asked : List Ty
     | true, .ref _ _ c => some (id, c)
     | _, _ => none
   subst (own ++ tm) [] cm said
+
+/-- A type with each `Syntax.projMark` in it a new variable, asked of its
+trait for the type it names: what an implementation says one of its trait's
+types is, at one use of it. -/
+partial def unproject : Ty → M Ty
+  | .con n args => do
+    if n == Syntax.projMark then
+      match args with
+      | [self, .con tr [], .con name []] =>
+        let self ← unproject self
+        let a ← freshTy
+        modify fun s => { s with assocUses := s.assocUses.push (tr, self, name, a, s.owner, s.pos) }
+        pure a
+      | _ => pure (.con n args)
+    else pure (.con n (← args.mapM unproject))
+  | .tuple ps => do pure (.tuple (← ps.mapM unproject))
+  | .fn ps r effs tail cap => do
+    pure (.fn (← ps.mapM unproject) (← unproject r)
+      (← effs.mapM fun (e, args) => do pure (e, ← args.mapM unproject)) tail cap)
+  | .ref how t cap => do pure (.ref how (← unproject t) cap)
+  | t => pure t
 
 /-- A type with every capture variable replaced by a new one. -/
 def freshenCaps (t : Ty) : M Ty := do

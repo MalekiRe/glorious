@@ -106,3 +106,4 @@ fn main() -> Int {
     match(game.world.with_resource(fn(ended: &mut Ended) -> Int { ended.0 })) { Some(n) => print(n), None => () };
     game.world.fold_all(0, fn(sum: Int, position: &Position) -> Int { sum + position.0 })
 }
+

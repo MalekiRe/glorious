@@ -1,0 +1,33 @@
+// Queries: a system asks for several columns at once, an entity at a time,
+// as `Query<(&mut Position, &Velocity)>`: each entity that has both.
+// expect:
+// 112
+// 7
+mod ecs;
+
+use ecs::{Entity, Query, for_each, app, register, add_systems, emit, spawn_with, fold_all};
+
+struct Position(Int)
+struct Velocity(Int)
+struct Tick
+
+fn movement(query: &mut Query<(&mut Position, &Velocity)>) {
+    query.for_each(fn(entity: Entity, got: (&mut Position, &Velocity)) {
+        let (position, velocity) = got;
+        position.0 = position.0 + velocity.0;
+    })
+}
+
+fn main() -> Int {
+    let mut game = app()
+        .register<Position>()
+        .register<Velocity>()
+        .add_systems(Tick, movement);
+    game.world.spawn_with((Position(100), Velocity(4)));
+    game.world.spawn_with((Position(7),));
+    game.emit(Tick);
+    game.emit(Tick);
+    game.emit(Tick);
+    print(game.world.fold_all(0, fn(sum: Int, p: &Position) -> Int { if(p.0 > 50) { sum + p.0 } else { sum } }));
+    game.world.fold_all(0, fn(sum: Int, p: &Position) -> Int { if(p.0 < 50) { sum + p.0 } else { sum } })
+}

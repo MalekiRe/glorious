@@ -336,7 +336,7 @@ def assocAt (tr : String) (subject : Ty) (name : String) : M (Option Ty) := do
     if let some got := hargs[j]? then
       try unify got (← fixedAt at_ want) catch _ => return none
   conditionUses im at_ hargs (← get).owner (← get).pos
-  pure (some (gatAt at_ ((im.gatParams.lookup name).getD []) asked said))
+  pure (some (← unproject (gatAt at_ ((im.gatParams.lookup name).getD []) asked said)))
 
 /-- Settle what can be settled of the types traits leave to implementations:
 where the type asked of is known, the answer is what its implementation says;
@@ -376,7 +376,7 @@ def settleAssocs : M Unit := do
             if let some got := hargs[j]? then
               try unify got (← fixedAt at_ want) catch _ => pure ()
           conditionUses im at_ hargs owner pos
-          try unifyAt s!"`{name}` of `{key}` for `{bareName head}`" (subst at_ [] [] said) a
+          try unifyAt s!"`{name}` of `{key}` for `{bareName head}`" (← unproject (subst at_ [] [] said)) a
           catch e => throw (pos ++ e)
         | none => left := left.push (tr, subject, name, a, owner, pos)
       | none => left := left.push (tr, subject, name, a, owner, pos)

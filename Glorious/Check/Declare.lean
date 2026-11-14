@@ -34,6 +34,10 @@ partial def resolveType (params : List (String × Ty)) (decl : Bool) : TypeExpr 
           unless arity == 0 do throw s!"`<.. as {Syntax.lastSegment tr}>::{name}`: a trait with arguments is not asked this way"
           unless assocs.contains name do
             throw s!"`{Syntax.lastSegment tr}` leaves no `{name}` to its implementations"
+          -- (Of a type parameter of an implementation whose types are being
+          -- read: kept as written, to be answered at each use.)
+          if (freeTys self).any (← get).projecting.contains then
+            return .con Syntax.projMark [self, .con tr [], .con name []]
           let a ← freshTy
           modify fun s => { s with assocUses := s.assocUses.push (tr, self, name, a, s.owner, s.pos) }
           return a
@@ -52,6 +56,8 @@ partial def resolveType (params : List (String × Ty)) (decl : Bool) : TypeExpr 
         let traits := (← get).traitShape.filter fun (_, arity, assocs) => arity == 0 && assocs.contains name
         match traits with
         | [(tr, _, _)] =>
+          if args.isEmpty && (freeTys self).any (← get).projecting.contains then
+            return .con Syntax.projMark [self, .con tr [], .con name []]
           let a ← freshTy
           -- (`F::Of<Int>`: asked at types, which go with the type asked.)
           let asked ← args.mapM (resolveType params decl)
@@ -168,6 +174,16 @@ partial def lifetimeCap (params : List (String × Ty)) (decl : Bool) (life : Opt
 /-- A written row: its effects, and the row parameter that stands for the
 rest of it, if one is written (`e`, `{A | e}`). -/
 partial def resolveRow (params : List (String × Ty)) (decl : Bool)
+    (effects : List (String × List TypeExpr)) : M (List (String × List Ty) × Option Nat) := do
+  -- (A row a trait leaves, named of a type parameter of an implementation
+  -- being read, is one variable, as any row: not kept as written.)
+  let projecting := (← get).projecting
+  modify fun s => { s with projecting := [] }
+  let r ← resolveRowIn params decl effects
+  modify fun s => { s with projecting := projecting }
+  pure r
+
+partial def resolveRowIn (params : List (String × Ty)) (decl : Bool)
     (effects : List (String × List TypeExpr)) : M (List (String × List Ty) × Option Nat) := do
   -- What stands for the rest of the row: a row parameter by its name, or
   -- the row a trait leaves to a type's implementation.
@@ -380,6 +396,9 @@ def declareTraits (items : List Item) : M Unit := do
         -- (Where nothing it gives is a reference, nothing ties what it takes
         -- together: each unwritten lifetime is then its own.)
         modify fun s => { s with elided := if (ret.map writesRef).getD false then some one else none }
+        -- (A type another trait of `Self` leaves, `Self::Store` of a trait
+        -- this one asks: kept as written, for each implementation and use.)
+        modify fun s => { s with projecting := [self] }
         let ps ← params.mapM fun p => closeRows <$> resolveType scope false p
         -- What it performs, where the trait says: those effects, and the
         -- row it leaves to an implementation if it names one.
@@ -391,7 +410,7 @@ def declareTraits (items : List Item) : M Unit := do
         let r ← match ret with
           | some r => closeRows <$> resolveType scope false r
           | none => pure .unit
-        modify fun s => { s with elided := none }
+        modify fun s => { s with elided := none, projecting := [] }
         let written := scope.filterMap fun
           | (l, .ref _ _ cap) => some (cap, l)
           | _ => none
@@ -536,7 +555,12 @@ def declareTraits (items : List Item) : M Unit := do
               own := own ++ [(p, .var id)]
               ids := ids ++ [(false, id)]
           unless ids.isEmpty do gatParams := gatParams ++ [(a, ids)]
-          assocs := assocs ++ [(a, ← resolveType (own ++ pmap) false body)]
+          modify fun s => { s with projecting := pmap.filterMap fun (_, t) => match t with
+            | .var id => some id
+            | _ => none }
+          let said ← resolveType (own ++ pmap) false body
+          modify fun s => { s with projecting := [] }
+          assocs := assocs ++ [(a, said)]
         | none => throw s!"{what} does not say what `{a}` is: write `type {a} = ..;`"
       for m in methods do
         if let .typeAlias n _ _ := m then

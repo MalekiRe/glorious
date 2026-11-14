@@ -250,6 +250,104 @@ pub fn each2<A, B>(first: &mut Column<A>, second: &Column<B>, f: for<'a, 'b> fn(
     }
 }
 
+// A query: several columns, an entity at a time. `Query<(&mut Position,
+// &Velocity)>` changes positions and reads velocities, of each entity that
+// has both: as many columns as are written, each `&mut` or `&`.
+pub trait Item {
+    type Store;
+    type Got<'a>;
+    fn item_at<'a>(&'a mut Store, Entity) -> Option<Got<'a>>
+}
+impl<A> Item for &mut A {
+    type Store = Column<A>;
+    type Got<'a> = &'a mut A;
+    fn item_at(store, entity) {
+        let at = slot_of(&*store, entity);
+        if(at >= 0) { Some(&mut store.dense[at]) } else { None }
+    }
+}
+impl<A> Item for &A {
+    type Store = Column<A>;
+    type Got<'a> = &'a A;
+    fn item_at(store, entity) {
+        let at = slot_of(&*store, entity);
+        if(at >= 0) { Some(&store.dense[at]) } else { None }
+    }
+}
+impl Item for () {
+    type Store = ();
+    type Got<'a> = ();
+    fn item_at(store, entity) { Some(()) }
+}
+// (The columns as a pair of the first and the rest's, so that each is a
+// field of its own to borrow.)
+impl<H, ..R> Item for (H, ..R) where H: Item, (..R): Item {
+    type Store = (H::Store, <(..R) as Item>::Store);
+    type Got<'a> = (H::Got<'a>, ..R::Got<'a>);
+    fn item_at(store, entity) {
+        match(<H as Item>::item_at(&mut store.0, entity)) {
+            Some(h) => match(<(..R) as Item>::item_at(&mut store.1, entity)) {
+                Some(rest) => let (..r) = rest; Some((h, ..r)),
+                None => None
+            },
+            None => None
+        }
+    }
+}
+
+// The columns a query asks for, taken out of the world while it is used and
+// put back after: each is found as a column is.
+pub trait Fill<S>: Item {
+    fn fill(&mut S) -> Self::Store
+    fn unfill(&mut S, Self::Store)
+}
+impl<A, S> Fill<S> for &mut A where S: Get<A> {
+    fn fill(columns) { <S as Get<A>>::take(columns) }
+    fn unfill(columns, column) { <S as Get<A>>::put(columns, column) }
+}
+impl<A, S> Fill<S> for &A where S: Get<A> {
+    fn fill(columns) { <S as Get<A>>::take(columns) }
+    fn unfill(columns, column) { <S as Get<A>>::put(columns, column) }
+}
+impl<S> Fill<S> for () {
+    fn fill(columns) { () }
+    fn unfill(columns, store) { () }
+}
+impl<H, ..R, S> Fill<S> for (H, ..R) where H: Fill<S>, (..R): Fill<S>, H: Item, (..R): Item, ..R: Item {
+    fn fill(columns) { (<H as Fill<S>>::fill(columns), <(..R) as Fill<S>>::fill(columns)) }
+    fn unfill(columns, store) {
+        let (h, rest) = store;
+        <H as Fill<S>>::unfill(columns, h);
+        <(..R) as Fill<S>>::unfill(columns, rest)
+    }
+}
+
+pub struct Query<Q, St = <Q as Item>::Store> { store: St, entities: [Entity] }
+
+// Each entity that has every column the query asks for, with them.
+pub fn for_each<Q>(query: &mut Query<Q>, f: for<'a> fn(Entity, Q::Got<'a>)) where Q: Item {
+    let mut i = 0;
+    while({ i < len_at(&query.entities) }) {
+        let entity = query.entities[i];
+        match(<Q as Item>::item_at(&mut query.store, entity)) { Some(got) => f(entity, got), None => () };
+        i = i + 1
+    }
+}
+
+// The entities a world has, oldest place first.
+pub fn entities<S>(world: &World<S>) -> [Entity] {
+    let mut out = [];
+    let mut i = 0;
+    while({ i < len_at(&world.generations) }) {
+        let mut free = false;
+        let mut j = 0;
+        while({ j < len_at(&world.free) }) { if(world.free[j] == i) { free = true } else { () }; j = j + 1 };
+        if(not(free)) { push_at(&mut out, Entity { index: i, generation: world.generations[i] }) } else { () };
+        i = i + 1
+    };
+    out
+}
+
 // What a system asks to be done to the world once the systems have run:
 // a system has no hold on the world itself.
 pub struct Commands { ended: [Entity] }
@@ -262,12 +360,14 @@ pub fn end(commands: &mut Commands, entity: Entity) { push_at(&mut commands.ende
 pub struct Changed<A>(A)
 pub struct Read<A>(A)
 pub struct Asking
+pub struct Querying<Q, St>(Q, St)
 pub struct Shared<X>(X)
 pub struct Owned<X>(X)
 pub trait Parameter { type Asks; }
 impl<A> Parameter for &mut Column<A> { type Asks = Changed<A>; }
 impl<A> Parameter for &Column<A> { type Asks = Read<A>; }
 impl Parameter for &mut Commands { type Asks = Asking; }
+impl<Q, St> Parameter for &mut Query<Q, St> { type Asks = Querying<Q, St>; }
 // (Any other reference is to a resource, or for reading to the value
 // emitted, which is told apart where the label is known: the narrower ones
 // above are chosen first.)
@@ -380,6 +480,18 @@ impl<E, S, G, F, O, X, Rest> Fetch<E, S, G, F, O> for (Owned<X>, Rest)
     }
 }
 // (The commands are given once: what comes after has none to give.)
+impl<E, S, G, F, O, Q, St, Rest> Fetch<E, S, G, F, O> for (Querying<Q, St>, Rest)
+    where Q: Item<Store = St>, Q: Fill<S>, Rest: Fetch<E, S, (G, &mut Query<Q, St>), F, O> {
+    fn fetch(event, world, commands, gathered, f) {
+        let found = entities(&*world);
+        let store = <Q as Fill<S>>::fill(&mut world.columns);
+        let mut query = Query { store: store, entities: found };
+        let made = <Rest as Fetch<E, S, (G, &mut Query<Q, St>), F, O>>::fetch(event, world, commands, (gathered, &mut query), f);
+        let Query { store, entities } = query;
+        <Q as Fill<S>>::unfill(&mut world.columns, store);
+        made
+    }
+}
 impl<E, S, G, F, O, Rest> Fetch<E, S, G, F, O> for (Asking, Rest) where Rest: Fetch<E, S, (G, &mut Commands), F, O> {
     fn fetch(event, world, commands, gathered, f) {
         let mut none = Commands { ended: [] };

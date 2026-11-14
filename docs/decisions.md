@@ -5,6 +5,36 @@ open, or that deliberately depart from them. Read it before changing the
 kernel. Where it disagrees with a specification in the repository root, this
 file is the current intent for this branch.
 
+## Queries in covey, and what they needed of the checker
+
+**covey has `Query<(&mut Position, &Velocity)>`** as a system's parameter: the
+world's columns for each `&mut` or `&` written, taken out while the system
+runs and put back, with `for_each` giving each entity that has every one of
+them. Built from traits over lists of types: `Item` says what a column of a
+query stores and what it gives for an entity (a lifetime GAT, `Got<'a>`);
+the tuple's is written as head and rest, its columns as nested pairs, so that
+each column is a field of its own to borrow; `Fill<S>` takes them out of a
+world and puts them back. `Query<Q, St = <Q as Item>::Store>` says what it
+holds with a default type parameter. `covey/query.glorious` is an example.
+
+What the checker lacked, found on the way:
+- An implementation's function did not know, while its body was checked,
+  the result its trait declares, so a borrow given back inside a value
+  (`Some(&mut store.dense[i])`) was taken to end with the call it was given to.
+- A type a trait leaves to an implementation, said by the implementation in
+  terms of its own type parameters (`type Store = (H::Store, ..)`), and a
+  trait's function naming another trait's type of `Self` (`Self::Store`),
+  were each one variable for every use: the first use decided it for all.
+  They are now kept as written (`Syntax.projMark`) and asked anew at each use.
+- A condition on a type made from an implementation's parameters,
+  `(..R): Fill<S>`, could not meet a need of that trait of that type in the
+  implementation's functions; now it does, where nothing else does.
+- `()` as a pattern of a reference to `()`.
+
+Limits. Core's region rules are not shown for a program that gives a system
+with a query as a callable (as covey's `emit` does): the simulation keeps
+`each2` for that, and `query.glorious` is certified without them.
+
 ## The compiler stays in Lean, and is to be fast and incremental
 
 **Decision (user): there is to be no self-hosted compiler.** The compiler
