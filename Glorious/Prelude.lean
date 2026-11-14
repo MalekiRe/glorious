@@ -24,7 +24,7 @@ enum Result<T, E> { Ok(T), Err(E) }
 // Truth is success. `Option<T>` is `Result<T, ()>` and `Bool` is `Option<()>`.
 type Option<T> = Result<T, ()>;
 type Bool = Result<(), ()>;
-let Some = Ok;
+let Some: fn(_) -> Result<_, ()> = Ok;
 let None = Err(());
 let true: Result<(), ()> = Ok(());
 let false: Result<(), ()> = Err(());

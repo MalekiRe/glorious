@@ -171,6 +171,9 @@ partial def expandAliases (items : List Item) : Except String (List Item) := do
             fixed := fixed.push (.typeAlias (fixedArgName j) [] (← ty targ))
         concrete (ps ++ fresh.toList) tr target newArgs.toList context (methods ++ fixed.toList)
       | _ => concrete ps tr head args context methods
+    -- A name given a value with its type written, `let Just: fn(Int) ->
+    -- Option<Int> = Ok;`.
+    | .alias name value => do pure (.alias name (← mapTypesExpr ty value))
     | i => pure i
   let rest := items.filter fun
     | .typeAlias _ _ _ => false

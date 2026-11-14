@@ -2713,6 +2713,15 @@ from being an `Id<Block>`.
 - Not built: base64; `ByteReader::read_u128_le` is, the signed widths
   other than `read_i64_le` are not in the specification.
 
+## `Some(x)` is an `Option`
+
+`say(Some(3))` was refused: `Some` was another name for `Ok`, and nothing
+said what `Ok(3)` could have failed with, so no way to show it was found.
+`Some` is now `Ok` with its type written, `fn(_) -> Result<_, ()>`, and a
+name given a value with its type written may use another name for a type
+there (`let Just: fn(Int) -> Option<Int> = Ok;` said `Option` was unknown).
+A truth value is still shown as what it is, `Ok(())` or `Err(())`.
+
 ## How long a change takes to try
 
 Trying a change took one to two minutes, and checking one before keeping it
