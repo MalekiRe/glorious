@@ -778,7 +778,7 @@ mutual
 partial def nameUseExpr (x : String) : Expr → NameUse
   | .name none y => if y == x then { valued := true } else {}
   | .ref uniq y => if y != x then {} else if uniq then { changed := true } else { shared := true }
-  | .refField _ _ y _ _ => if y == x then { fielded := true } else {}
+  | .refField _ uniq y _ _ => if y == x then { fielded := true, changed := uniq } else {}
   | .call _ f args => (f :: args).foldl (fun u e => u.or (nameUseExpr x e)) {}
   | .tailCall _ f args => (f :: args).foldl (fun u e => u.or (nameUseExpr x e)) {}
   | .tuple args => args.foldl (fun u e => u.or (nameUseExpr x e)) {}
@@ -1129,6 +1129,27 @@ def borrowedOnly (x : String) (after : List Stmt) : Bool :=
   let u := nameUseStmts x after
   !x.startsWith "%" && u.shared && !u.changed && !u.fielded && !u.rebound
 
+/-- Is a name bound here one of which what follows borrows a field with `&`,
+and never changes? If what it is bound to is a value and not a reference, it
+is kept where a reference can point, as one borrowed whole is. -/
+def fieldBorrowedOnly (x : String) (after : List Stmt) : Bool :=
+  let u := nameUseStmts x after
+  !x.startsWith "%" && u.fielded && !u.changed && !u.rebound
+
+/-- Is what an expression gives plainly a value, by how it is written: built
+by a constructor or a function named with its type, a tuple, or given a type
+that is not a reference's? (A call of some other function may give a
+reference: of a name bound to one, a field is borrowed through it.) -/
+def valueLike : Expr → Bool
+  | .tuple (_ :: _) => true
+  | .call _ (.name none mark) [_, ty] =>
+    mark == ascribeMark && (match TypeExpr.ofExpr ty with
+      | .ref _ _ _ => false
+      | _ => true)
+  | .call _ (.name (some _) _) _ => true
+  | .call _ (.name none f) _ => (f.front.isUpper)
+  | _ => false
+
 mutual
 
 /-- A value that is given a name and then borrowed with `&` has to be
@@ -1140,31 +1161,36 @@ partial def promoteExpr : Expr → Expr
   | .tailCall id f args => .tailCall id (promoteExpr f) (args.map promoteExpr)
   | .tuple args => .tuple (args.map promoteExpr)
   | .proj e i => .proj (promoteExpr e) i
-  | .closure id clauses => .closure id (clauses.map promoteClause)
-  | .handle subject arms => .handle (promoteExpr subject) (arms.map promoteClause)
+  | .closure id clauses => .closure id (clauses.map (promoteClause []))
+  | .handle subject arms => .handle (promoteExpr subject) (arms.map (promoteClause []))
   | .labelScope l body => .labelScope l (promoteStmts body)
   | .deref e => .deref (promoteExpr e)
   | .reborrow uniq e => .reborrow uniq (promoteExpr e)
   | .fieldOf id e name => .fieldOf id (promoteExpr e) name
   | e => e
 
-partial def promoteClause : Clause → Clause
+partial def promoteClause (values : List String) : Clause → Clause
   | .mk pats body =>
     let body := promoteStmts body
-    let held := ((pats.flatMap patternNames).eraseDups).filter (borrowedOnly · body)
-    .mk pats (held.map (fun x => Stmt.letMut x (.name none x)) ++ body)
+    -- (`values`: the parameters whose written types are not references'.)
+    let held := ((pats.flatMap patternNames).eraseDups).filter fun x =>
+      borrowedOnly x body || (values.contains x && fieldBorrowedOnly x body)
+    -- (Each is where the clause's first statement is: what the variable
+    -- holds when the clause is done is destroyed by that place's name.)
+    let placed := fun (s : Stmt) => match body with
+      | .located line col _ :: _ => Stmt.located line col s
+      | _ => s
+    .mk pats (held.map (fun x => placed (.letMut x (.name none x))) ++ body)
 
 partial def promoteStmts : List Stmt → List Stmt
   | [] => []
   | s :: rest =>
     let rest := promoteStmts rest
     let rec here : Stmt → List Stmt
-      | .located line col s =>
-        match here s with
-        | first :: more => .located line col first :: more
-        | [] => []
+      | .located line col s => (here s).map (.located line col)
       | .let_ (.var x) e =>
-        if borrowedOnly x rest then [.letMut x (promoteExpr e)] else [.let_ (.var x) (promoteExpr e)]
+        if borrowedOnly x rest || (valueLike e && fieldBorrowedOnly x rest) then [.letMut x (promoteExpr e)]
+        else [.let_ (.var x) (promoteExpr e)]
       | .let_ pat e =>
         let held := (patternNames pat).eraseDups.filter (borrowedOnly · rest)
         .let_ pat (promoteExpr e) :: held.map fun x => Stmt.letMut x (.name none x)
@@ -1180,7 +1206,14 @@ end
 partial def promoteItems (items : List Item) : List Item :=
   items.map fun
     | .fn name ps annots ret clauses =>
-      .fn name ps annots ret (clauses.map fun c => promoteClause (nameBorrowsClause c))
+      .fn name ps annots ret (clauses.map fun c =>
+        -- A parameter written with a type that is no reference's is a value.
+        let values := match c with
+          | .mk pats _ => (pats.zip annots).filterMap fun
+            | (.var _, some (.ref _ _ _)) => none
+            | (.var x, some _) => some x
+            | _ => none
+        promoteClause values (nameBorrowsClause c))
     | .pub parent item => .pub parent ((promoteItems [item]).headD item)
     | .module name (some inner) => .module name (some (promoteItems inner))
     | .impl ps tr head args context methods => .impl ps tr head args context (promoteItems methods)

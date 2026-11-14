@@ -8,6 +8,25 @@ namespace Glorious.Check
 
 open Syntax
 
+/-- A borrow of a field of what a reference points to: borrowed from the
+reference, which is in the way only of that field meanwhile. `t` is the type
+of what holds the reference, the name `x`. -/
+def fieldThrough (scope : Scope) (id : Nat) (uniq : Bool) (x : String) (path : List String)
+    (t : Ty) : M Ty := do
+  let whole ← freshTy
+  let cap ← freshCap
+  let how ← if uniq then pure Ty.uniq else freshTy
+  unifyAt (if uniq then "a field is borrowed for writing through a `&mut` reference"
+    else "a field is borrowed through a reference") (.ref how whole cap) t
+  let (field, numbered, chosen) ← fieldAt whole path
+  use scope (.through cap s!"`{x}`" uniq numbered)
+  let cap' ← freshCap
+  captures cap' (.loan (← freshLoan none uniq (some (cap, cap')) numbered))
+  captures cap' (.ty t)
+  modify fun s =>
+    { s with fieldSites := s.fieldSites.push (id, true, whole, numbered, chosen, s.owner, s.pos) }
+  pure (.ref (if uniq then .uniq else .shared) field cap')
+
 mutual
 
 partial def inferExpr (scope : Scope) (amb : Row) : Expr → M Ty
@@ -68,6 +87,11 @@ partial def inferExpr (scope : Scope) (amb : Row) : Expr → M Ty
   | .refField id uniq x path star =>
     match scope.lookup x with
     | some (.cell t brand) => do
+      -- A variable that holds a reference: the field is of what that points
+      -- to, and the variable is read for the reference.
+      if let .ref _ _ _ ← find t then
+        use scope (.var brand x .read)
+        return ← fieldThrough scope id uniq x path t
       if star then
         throw s!"`{x}` is a mutable variable, not a reference: its field is `{x}.{path.headD ""}`"
       let (field, numbered, chosen) ← fieldAt t path
@@ -79,28 +103,14 @@ partial def inferExpr (scope : Scope) (amb : Row) : Expr → M Ty
         { s with fieldSites := s.fieldSites.push (id, false, t, numbered, chosen, s.owner, s.pos) }
       pure (.ref (if uniq then .uniq else .shared) field cap)
     | some (.val t _) => do
-      -- A field of what a reference points to: borrowed from the reference,
-      -- which is in the way only of that field meanwhile.
-      let whole ← freshTy
-      let cap ← freshCap
-      let how ← if uniq then pure Ty.uniq else freshTy
       match ← find t with
       | .ref _ _ _ => pure ()
       | .var _ => pure ()
       | _ =>
         if x.startsWith "%through" || x.startsWith "%given" then
           throw "what a field is borrowed of here is a value that nothing holds, not a reference: give it a `let mut` first"
-        throw s!"`{x}` is not a mutable variable or a reference, so no field of it can be borrowed"
-      unifyAt (if uniq then "a field is borrowed for writing through a `&mut` reference"
-        else "a field is borrowed through a reference") (.ref how whole cap) t
-      let (field, numbered, chosen) ← fieldAt whole path
-      use scope (.through cap s!"`{x}`" uniq numbered)
-      let cap' ← freshCap
-      captures cap' (.loan (← freshLoan none uniq (some (cap, cap')) numbered))
-      captures cap' (.ty t)
-      modify fun s =>
-        { s with fieldSites := s.fieldSites.push (id, true, whole, numbered, chosen, s.owner, s.pos) }
-      pure (.ref (if uniq then .uniq else .shared) field cap')
+        throw s!"`{x}` is neither a variable nor a reference, so no field of it can be borrowed here: say what it is where it is bound (`let {x}: Type = ..`), or bind it with `let mut`"
+      fieldThrough scope id uniq x path t
     | some _ => do
       if x.startsWith "%through" || x.startsWith "%given" then
         throw "what a field is borrowed of here is a value that nothing holds, not a reference: give it a `let mut` first"

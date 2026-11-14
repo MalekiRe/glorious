@@ -1117,7 +1117,17 @@ private partial def untraitClause (tr : TraitInfo) (owner : String) : Clause →
     let first := firstPlace body
     let (pats, _) := nameWilds (fun k => (dropHook tr ⟨owner, first.1, first.2, wildName k, false⟩).isSome) pats 0
     let early := tailsStmts body
-    let hooks := (pats.flatMap patVars).flatMap fun x =>
+    -- (A name the clause straight away makes a variable of the same name,
+    -- to be borrowed, is the variable's to destroy: the place and the name
+    -- are the same for both.)
+    let variables := (body.takeWhile fun s =>
+      match unlocated s with
+      | .letMut y (.name none y') => y == y'
+      | _ => false).filterMap fun s =>
+        match unlocated s with
+        | .letMut y _ => some y
+        | _ => none
+    let hooks := ((pats.flatMap patVars).filter (!variables.contains ·)).flatMap fun x =>
       ((dropHook tr ⟨owner, first.1, first.2, x, false⟩).toList ++ partHooks tr owner first x).map
         (if early then Stmt.expr else Stmt.defer)
     .mk pats (hooks ++ untraitStmts tr owner (0, 0) body)

@@ -2890,6 +2890,25 @@ borrow tried).
 - The fields of a value are destroyed the last declared first, and the
   elements of an array the last first. (Rust goes the other way.)
 
+## A field of a value borrowed; a parameter that is only borrowed
+
+- `let c = C { .. }; len_at(&c.xs)` and `fn f(c: C) { len_at(&c.xs) }` said
+  `c` was not a mutable variable or a reference. A name that is borrowed
+  whole and never changed was already kept where a reference can point; one
+  whose field is borrowed with `&` now is too, where it is plainly bound to
+  a value: by a constructor, a tuple, a function named with its type, with
+  a written type that is not a reference's, or as a parameter with such a
+  type. A name bound to what some other call gives, or by a pattern, may be
+  a reference, of which a field is borrowed through it; for those the
+  message says to write the type. (Where a name kept so turns out to hold a
+  reference, the field is borrowed through the reference it holds.)
+- **A third `drop` that did not run.** `fn f(h: H) -> Int { size(&h) }`,
+  with `H` holding a value with `drop`: the parameter is made a variable so
+  that it can be borrowed, and the variable's cleanup was looked for at a
+  place of the text that no statement had. It was never found, so what `f`
+  was given was never destroyed. The variable is now at the clause's first
+  statement, and is the one cleanup for the name.
+
 ## A borrow of a field is the variable's reference narrowed
 
 `&mut c.n`, where `c` is a variable, was written out before elaboration as
