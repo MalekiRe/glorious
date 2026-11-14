@@ -3118,6 +3118,22 @@ the order it is being built:
   made of the function's own parameters, `(R0,)`, was taken to have the
   trait by the one other implementation for tuples of one, and refused;
   it is now left to what the function assumes.
+- **A condition may say what a type made of the implementation's type
+  parameters leaves to its implementation**, or one of its parameters
+  that is not the head's: `where (..A): Tuple<Nested = L>`, `F: Then<X,
+  Out = Y>`. It is met where the implementation is used, deciding `L` or
+  `Y` there, and wherever the implementation's own associated type is
+  asked, so a type found by a chain of implementations is found; inside
+  the implementation's functions it is not assumed, as nothing there
+  needs it to be.
+- **covey is written with lists of types**: the function a system is,
+  however many parameters it has, is one implementation of `System`, of
+  `CallWith` and of `Condition`, where it was one for each number of
+  parameters; what has been gathered for it is flattened by `Gathered` and
+  `Then` (a tuple with one more part at the end). It takes 2.6 s to run
+  the simulation where it took 2.5; writing the gathering itself with
+  lists took 3.1, there being then an implementation of `Fetch` for each
+  length of what was gathered.
 - **An associated constant at a known type is its number.** After the
   copies, a function that takes nothing and whose body is integer
   arithmetic (`int_add`, `int_sub`, `int_mul`) of numbers and of calls of

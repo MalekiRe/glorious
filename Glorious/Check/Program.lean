@@ -200,15 +200,26 @@ partial def solveFitting (givens : Traits.Givens) (fuel : Nat) (key : String) (t
     if let some subject := hargs[j]? then
       if let some found ← assocAt asked subject name then
         try unify (subst at_ [] [] said) found catch _ => return none
+  for (whole, asked, name, said) in im.extraEqual do
+    match ← assocAt asked (subst at_ [] [] whole) name with
+    | some found => try unify (subst at_ [] [] said) found catch _ => return none
+    | none =>
+      -- (Found once what it is asked of is known.)
+      let use := (asked, subst at_ [] [] whole, name, subst at_ [] [] said, (← get).owner, "")
+      modify fun s => { s with assocUses := s.assocUses.push use }
+  -- (What those decide, before the conditions on what they decide.)
+  unless im.equal.isEmpty && im.extraEqual.isEmpty do settleAssocsAll
   let mut subs : List Traits.Dict := []
   for (tr, j) in im.context do
     let some arg := hargs[j]? | return none
-    let some d ← solveFitting givens (fuel - 1) (← subKey tr arg []) arg [] | return none
+    let some d ← solveFitting givens (fuel - 1) (← subKey tr arg []) arg []
+      | return none
     subs := subs ++ [d]
   for (tr, cargs, subject) in im.extra do
     let subject := subst at_ [] [] subject
     let cargs := cargs.map (subst at_ [] [])
-    let some d ← solveFitting givens (fuel - 1) (← subKey tr subject cargs) subject cargs | return none
+    let some d ← solveFitting givens (fuel - 1) (← subKey tr subject cargs) subject cargs
+      | return none
     subs := subs ++ [d]
   pure (some (.impl i subs))
 
@@ -238,6 +249,15 @@ partial def leavesFitting (pos key : String) (t : Ty) (args : List Ty) (owner : 
     if let some subject := hargs[j]? then
       if let some found ← assocAt asked subject name then
         try unify (subst at_ [] [] said) found catch _ => return ← missing
+  for (whole, asked, name, said) in im.extraEqual do
+    match ← assocAt asked (subst at_ [] [] whole) name with
+    | some found => try unify (subst at_ [] [] said) found catch _ => return ← missing
+    | none =>
+      -- (Found once what it is asked of is known.)
+      let use := (asked, subst at_ [] [] whole, name, subst at_ [] [] said, owner, pos)
+      modify fun s => { s with assocUses := s.assocUses.push use }
+  -- (What those decide, before the conditions on what they decide.)
+  unless im.equal.isEmpty && im.extraEqual.isEmpty do settleAssocsAll
   let mut out : List (String × Nat × Ty) := []
   for (tr, j) in im.context do
     let arg := hargs[j]?.getD .unit
@@ -445,6 +465,9 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
               if let some subject := args[j]? then
                 let use := (asked, subject, name, subst at_ [] [] said, b.owner, b.pos)
                 modify fun s => { s with assocUses := s.assocUses.push use }
+            for (whole, asked, name, said) in im.extraEqual do
+              let use := (asked, subst at_ [] [] whole, name, subst at_ [] [] said, b.owner, b.pos)
+              modify fun s => { s with assocUses := s.assocUses.push use }
   -- A trait with arguments is asked of a type together with them: from here
   -- on it is the trait at those arguments, asked of the type.
   settleAssocs

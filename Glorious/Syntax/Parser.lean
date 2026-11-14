@@ -2793,18 +2793,28 @@ where
         | some (_, n) => n
         | none => (lengths.head?.map (·.2)).getD 0
     let mut out : Array Token := #[]
-    -- What each open bracket is, innermost last.
-    let mut stack : List String := []
+    -- What each open bracket is, innermost last: its kind, where it is in
+    -- what is written out, and whether a list was spread in it.
+    let mut stack : List (String × Nat × Bool) := []
     -- Lists of values, by the names they were given (`let (..xs) = t`).
     let mut values : List String := []
+    -- Is the bracket opened `opened` in what is written out a call's or a function
+    -- type's arguments, rather than a tuple?
+    let callLike := fun (out : Array Token) (opened : Nat) =>
+      match (if opened == 0 then none else out[opened - 1]?.map (·.tok)) with
+      | some (.ident w) => !keywords.contains w
+      | some (.punct ")") => true
+      | some (.punct "]") => true
+      | some (.op ">") => true
+      | _ => false
     let mut i := 0
     while i < body.size do
       let t := body[i]!
       -- (In brackets, or in the conditions after `where`, outside any.)
       let inside := match stack with
-        | "(" :: _ => true
-        | "<" :: _ => true
-        | "[" :: _ => true
+        | ("(", _) :: _ => true
+        | ("<", _) :: _ => true
+        | ("[", _) :: _ => true
         | [] => true
         | _ => false
       if inside && t.tok == .punct "." && tok (i + 1) == .punct "." then
@@ -2837,47 +2847,56 @@ where
           out := out.push t
           i := i + 1
         | x :: _ =>
+          stack := match stack with
+            | (k, opened, _) :: rest => (k, opened, true) :: rest
+            | [] => []
           let n := lengthOf x
           if n == 0 then
-            -- (and the comma after it; one before it is kept, so that
-            -- `(h, ..r)` is still a tuple, of one; and a `where` with
-            -- nothing left after it)
+            -- (and the comma after it, or the one before it; and a `where`
+            -- with nothing left after it)
             if tok j == .punct "{" && (out.back?.map (·.tok)) == some (.ident "where") then
               out := out.pop
-            if tok j == .punct "{" && (out.back?.map (·.tok)) == some (.punct ",") then
+            if tok j != .punct "," && (out.back?.map (·.tok)) == some (.punct ",") then
               out := out.pop
             i := if tok j == .punct "," then j + 1 else j
             continue
-          let before := out.size - 1
           for k in [0:n] do
             if k > 0 then out := out.push ⟨.punct ",", t.line, t.col⟩
             for tk in span do
               out := out.push (match tk.tok with
                 | .ident y => if isPack y then ⟨.ident s!"{y}{k}", tk.line, tk.col⟩ else tk
                 | _ => tk)
-          -- `(..x)` of one is a tuple of one: `(x0,)`, but not where it is
-          -- a call's or a function type's arguments.
-          let opener := out[before]?.map (·.tok)
-          let preceding := if before == 0 then none else out[before - 1]?.map (·.tok)
-          let callLike := match preceding with
-            | some (.ident w) => !keywords.contains w
-            | some (.punct ")") => true
-            | some (.punct "]") => true
-            | some (.op ">") => true
-            | _ => false
-          if n == 1 && opener == some (.punct "(") && tok j == .punct ")" && !callLike then
-            out := out.push ⟨.punct ",", t.line, t.col⟩
           i := j
           continue
       match t.tok with
-      | .punct "(" => stack := "(" :: stack
-      | .punct "[" => stack := "[" :: stack
-      | .punct "{" => stack := "{" :: stack
-      | .op "<" => stack := "<" :: stack
-      | .punct ")" => stack := (stack.dropWhile (· != "(")).drop 1
-      | .punct "]" => stack := (stack.dropWhile (· != "[")).drop 1
-      | .punct "}" => stack := (stack.dropWhile (· != "{")).drop 1
-      | .op ">" => if stack.head? == some "<" then stack := stack.drop 1
+      | .punct "(" => stack := ("(", out.size, false) :: stack
+      | .punct "[" => stack := ("[", out.size, false) :: stack
+      | .punct "{" => stack := ("{", out.size, false) :: stack
+      | .op "<" => stack := ("<", out.size, false) :: stack
+      | .punct ")" =>
+        -- A tuple a list was spread in that is left with one part is a
+        -- tuple of one: `(x0,)`.
+        match stack.dropWhile (·.1 != "(") with
+        | (_, opened, true) :: _ =>
+          let mut depth : Int := 0
+          let mut commas := 0
+          for k in [opened + 1:out.size] do
+            match (out[k]?.map (·.tok)).getD .eof with
+            | .punct "(" => depth := depth + 1
+            | .punct "[" => depth := depth + 1
+            | .punct "{" => depth := depth + 1
+            | .punct ")" => depth := depth - 1
+            | .punct "]" => depth := depth - 1
+            | .punct "}" => depth := depth - 1
+            | .punct "," => if depth == 0 then commas := commas + 1
+            | _ => pure ()
+          if commas == 0 && out.size > opened + 1 && !callLike out opened then
+            out := out.push ⟨.punct ",", t.line, t.col⟩
+        | _ => pure ()
+        stack := (stack.dropWhile (·.1 != "(")).drop 1
+      | .punct "]" => stack := (stack.dropWhile (·.1 != "[")).drop 1
+      | .punct "}" => stack := (stack.dropWhile (·.1 != "{")).drop 1
+      | .op ">" => if (stack.head?.map (·.1)) == some "<" then stack := stack.drop 1
       | _ => pure ()
       out := out.push t
       i := i + 1

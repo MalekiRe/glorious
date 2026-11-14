@@ -320,6 +320,11 @@ structure ImplDecl where
   in `assocs` for what it takes, each a variable, or for a lifetime
   (`type Item<'a> = &'a T;`, marked `true`) a capture variable. -/
   gatParams : List (String × List (Bool × Nat)) := []
+  /-- What its conditions say of a type left to an implementation of a type
+  that is not one of the head's arguments, `(A, B): Tuple<Nested = L>`:
+  the type asked of, the trait, the name and what it is, in its own type
+  parameters. Met where the implementation is used, not assumed in it. -/
+  extraEqual : List (Ty × String × String × Ty) := []
 
 /-- A trait needed of a type at a call: of the type a trait's function is used
 at, or of a type parameter of the function called. -/

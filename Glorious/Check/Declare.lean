@@ -552,18 +552,37 @@ def declareTraits (items : List Item) : M Unit := do
         | none => pure ()
       -- What its conditions say of types left to implementations.
       let mut equal : List (Nat × String × String × Ty) := []
+      let mut extraEqual : List (Ty × String × String × Ty) := []
       for m in methods do
         if let .typeAlias n _ body := m then
           if let some (k, name) := Syntax.equalArgParts n then
             match context[k]? with
             | some (subject, asked) =>
+              let left := (((← get).traitShape.lookup asked).map (·.2)).getD []
+              unless left.contains name do
+                throw s!"{what}: `{Syntax.lastSegment asked}` leaves no type `{name}` to its implementations"
               match args.idxOf? subject with
-              | some j =>
-                let left := (((← get).traitShape.lookup asked).map (·.2)).getD []
-                unless left.contains name do
-                  throw s!"{what}: `{Syntax.lastSegment asked}` leaves no type `{name}` to its implementations"
-                equal := equal ++ [(j, asked, name, ← resolveType pmap false body)]
-              | none => throw s!"{what}: `{subject}` is not one of its type parameters"
+              | some j => equal := equal ++ [(j, asked, name, ← resolveType pmap false body)]
+              | none =>
+                -- (Of another type parameter, or of a type made of them.)
+                let whole ← match pmap.lookup subject with
+                  | some t => pure t
+                  | none =>
+                    match methods.findSome? fun
+                        | .typeAlias n _ b => if n == Syntax.ctxSubjectName k then some b else none
+                        | _ => none with
+                    | some b => zonk (← resolveType pmap false b)
+                    | none => throw s!"{what}: `{subject}` is not one of its type parameters"
+                -- (The trait's own arguments go with the type asked of.)
+                let mut cargs : List Ty := []
+                for i in List.range ((((← get).traitShape.lookup asked).map (·.1)).getD 0) do
+                  match methods.findSome? fun
+                      | .typeAlias n _ b => if n == Syntax.ctxArgName k i then some b else none
+                      | _ => none with
+                  | some b => cargs := cargs ++ [← zonk (← resolveType pmap false b)]
+                  | none => pure ()
+                let whole := if cargs.isEmpty then whole else Ty.tuple (whole :: cargs)
+                extraEqual := extraEqual ++ [(whole, asked, name, ← resolveType pmap false body)]
             | none => pure ()
       if let some other := (← get).impls.find? fun I => I.trait == tr && I.head == head then
         unless fixed.isEmpty && other.fixed.isEmpty do
@@ -600,7 +619,7 @@ def declareTraits (items : List Item) : M Unit := do
           impls := s.impls.push
             { trait := tr, head, params := args, context := ctx, methods,
               dictFn := Elab.implDictName tr head, targs, assocs, pvars, fixed, equal, generic, extra,
-              gatParams }
+              gatParams, extraEqual }
           kimpls := s.kimpls ++ [⟨tr, head, arity, ctx⟩] }
   -- Every type can be destroyed: by nothing at all, by its own `Drop` and
   -- then its parts', or part by part. Said as an implementation for each
@@ -629,7 +648,7 @@ def declareTraits (items : List Item) : M Unit := do
           { s with
             impls := s.impls.push
               ⟨Syntax.destroyTrait, head, (List.range arity).map (s!"T{·}"), ctx, [],
-                Elab.implDictName Syntax.destroyTrait head, [], [], [], [], [], false, [], []⟩
+                Elab.implDictName Syntax.destroyTrait head, [], [], [], [], [], false, [], [], []⟩
             kimpls := s.kimpls ++ [⟨Syntax.destroyTrait, head, arity, ctx⟩] }
   -- What `Traits.coherent` asks of the implementations.
   unless Traits.noOverlap (← get).kimpls do

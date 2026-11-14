@@ -302,6 +302,19 @@ def hasGenericImpl (trait : String) (self : Ty) : M Bool := do
       im.generic && Syntax.traitBase im.trait == trait && im.head == h)
   | _ => pure false
 
+/-- What an implementation's conditions say of types left to other traits'
+implementations, for one use of it (`at_`): asked, to be found when they
+can be, so that a type parameter only they decide is decided. -/
+def conditionUses (im : ImplDecl) (at_ : List (Nat × Ty)) (hargs : List Ty) (owner pos : String) :
+    M Unit := do
+  for (j, asked, name, said) in im.equal do
+    if let some subject := hargs[j]? then
+      let use := (asked, subject, name, subst at_ [] [] said, owner, pos)
+      modify fun s => { s with assocUses := s.assocUses.push use }
+  for (whole, asked, name, said) in im.extraEqual do
+    let use := (asked, subst at_ [] [] whole, name, subst at_ [] [] said, owner, pos)
+    modify fun s => { s with assocUses := s.assocUses.push use }
+
 /-- The type a trait leaves to its implementations, for a type whose
 implementation is known: `Elem` of `Index` for an array of `Int`. Nothing
 where the type is not known enough to say which implementation is its. -/
@@ -323,6 +336,7 @@ def assocAt (tr : String) (subject : Ty) (name : String) : M (Option Ty) := do
   for (j, want) in im.fixed do
     if let some got := hargs[j]? then
       try unify got (← fixedAt at_ want) catch _ => return none
+  conditionUses im at_ hargs (← get).owner (← get).pos
   pure (some (gatAt at_ ((im.gatParams.lookup name).getD []) asked said))
 
 /-- Settle what can be settled of the types traits leave to implementations:
@@ -362,6 +376,7 @@ def settleAssocs : M Unit := do
           for (j, want) in im.fixed do
             if let some got := hargs[j]? then
               try unify got (← fixedAt at_ want) catch _ => pure ()
+          conditionUses im at_ hargs owner pos
           try unifyAt s!"`{name}` of `{key}` for `{bareName head}`" (subst at_ [] [] said) a
           catch e => throw (pos ++ e)
         | none => left := left.push (tr, subject, name, a, owner, pos)
@@ -375,6 +390,13 @@ def settleAssocs : M Unit := do
     | some first => unify first a
     | none => seen := (question, a) :: seen
   modify fun s => { s with assocUses := left ++ s.assocUses }
+
+/-- `settleAssocs` until it settles nothing more. -/
+partial def settleAssocsAll (fuel : Nat := 16) : M Unit := do
+  let before := (← get).assocUses.size
+  settleAssocs
+  let after := (← get).assocUses.size
+  if fuel > 0 && after < before then settleAssocsAll (fuel - 1)
 
 def runPending : M Unit := do
   settleAssocs

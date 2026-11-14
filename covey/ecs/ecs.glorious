@@ -280,16 +280,24 @@ pub trait AllApart {}
 impl AllApart for () {}
 impl<First, Rest> AllApart for (First, Rest) where Rest: ApartFrom<First>, Rest: AllApart {}
 
-// A function called with what was gathered for it: its arguments as pairs,
-// the last outermost. What it gives back is what the call gives.
-pub trait CallWith<Gathered, O> { fn call_with(&Self, Gathered) -> O }
-impl<P, O> CallWith<((), P), O> for fn(P) -> O { fn call_with(f, g) { (*f)(g.1) } }
-impl<P, Q, O> CallWith<(((), P), Q), O> for fn(P, Q) -> O { fn call_with(f, g) { (*f)(g.0.1, g.1) } }
-impl<P, Q, R, O> CallWith<((((), P), Q), R), O> for fn(P, Q, R) -> O {
-    fn call_with(f, g) { (*f)(g.0.0.1, g.0.1, g.1) }
+// What has been gathered, one after another, as a tuple: `(((), a), b)` is
+// `(a, b)`.
+pub trait Gathered { type Flat; fn flatten(Self) -> Flat }
+impl Gathered for () { type Flat = (); fn flatten(nothing) { () } }
+impl<G, X, F, Y> Gathered for (G, X) where G: Gathered<Flat = F>, F: Then<X, Out = Y> {
+    type Flat = Y;
+    fn flatten(g) { let (before, last) = g; then(flatten(before), last) }
 }
-impl<P, Q, R, T, O> CallWith<(((((), P), Q), R), T), O> for fn(P, Q, R, T) -> O {
-    fn call_with(f, g) { (*f)(g.0.0.0.1, g.0.0.1, g.0.1, g.1) }
+
+// A tuple with one more part at the end.
+pub trait Then<X> { type Out; fn then(Self, X) -> Out }
+impl<..T, X> Then<X> for (..T) { type Out = (..T, X); fn then(t, x) { let (..t) = t; (..t, x) } }
+
+// A function called with what was gathered for it, its arguments in order.
+// What it gives back is what the call gives.
+pub trait CallWith<G, O> { fn call_with(&Self, G) -> O }
+impl<G, ..P, O> CallWith<G, O> for fn(..P) -> O where G: Gathered<Flat = (..P)> {
+    fn call_with(f, g) { let (..p) = flatten(g); (*f)(..p) }
 }
 
 // What a list of things asked for is met with, one at a time: a column is
@@ -377,32 +385,12 @@ impl<E, S, X, Y> System<E, S> for (X, Y) where X: System<E, S>, Y: System<E, S> 
         <Y as System<E, S>>::run(&pair.1, event, world, commands)
     }
 }
-impl<E, S, P, A> System<E, S> for fn(P) -> ()
-    where P: Parameter<Asks = A>, (A, ()): Fetch<E, S, (), fn(P) -> (), ()> {
+// A function, of however many parameters, each asking for something, no
+// two for the same.
+impl<E, S, ..P, ..A, L> System<E, S> for fn(..P) -> ()
+    where ..P: Parameter<Asks = A>, (..A): Tuple<Nested = L>, L: AllApart, L: Fetch<E, S, (), fn(..P) -> (), ()> {
     fn run(f, event, world, commands) {
-        <(A, ()) as Fetch<E, S, (), fn(P) -> (), ()>>::fetch(event, world, commands, (), f);
-    }
-}
-impl<E, S, P, Q, A, B> System<E, S> for fn(P, Q) -> ()
-    where P: Parameter<Asks = A>, Q: Parameter<Asks = B>, (A, (B, ())): AllApart,
-          (A, (B, ())): Fetch<E, S, (), fn(P, Q) -> (), ()> {
-    fn run(f, event, world, commands) {
-        <(A, (B, ())) as Fetch<E, S, (), fn(P, Q) -> (), ()>>::fetch(event, world, commands, (), f);
-    }
-}
-impl<E, S, P, Q, R, A, B, C> System<E, S> for fn(P, Q, R) -> ()
-    where P: Parameter<Asks = A>, Q: Parameter<Asks = B>, R: Parameter<Asks = C>, (A, (B, (C, ()))): AllApart,
-          (A, (B, (C, ()))): Fetch<E, S, (), fn(P, Q, R) -> (), ()> {
-    fn run(f, event, world, commands) {
-        <(A, (B, (C, ()))) as Fetch<E, S, (), fn(P, Q, R) -> (), ()>>::fetch(event, world, commands, (), f);
-    }
-}
-impl<E, S, P, Q, R, T, A, B, C, D> System<E, S> for fn(P, Q, R, T) -> ()
-    where P: Parameter<Asks = A>, Q: Parameter<Asks = B>, R: Parameter<Asks = C>, T: Parameter<Asks = D>,
-          (A, (B, (C, (D, ())))): AllApart,
-          (A, (B, (C, (D, ())))): Fetch<E, S, (), fn(P, Q, R, T) -> (), ()> {
-    fn run(f, event, world, commands) {
-        <(A, (B, (C, (D, ())))) as Fetch<E, S, (), fn(P, Q, R, T) -> (), ()>>::fetch(event, world, commands, (), f);
+        <L as Fetch<E, S, (), fn(..P) -> (), ()>>::fetch(event, world, commands, (), f);
     }
 }
 
@@ -411,20 +399,10 @@ impl<E, S, P, Q, R, T, A, B, C, D> System<E, S> for fn(P, Q, R, T) -> ()
 pub trait Condition<E, S> {
     fn holds(&Self, &E, &mut World<S>, &mut Commands) -> Bool
 }
-impl<E, S, P, A> Condition<E, S> for fn(P) -> Bool
-    where P: Parameter<Asks = A>, (A, ()): Fetch<E, S, (), fn(P) -> Bool, Bool> {
+impl<E, S, ..P, ..A, L> Condition<E, S> for fn(..P) -> Bool
+    where ..P: Parameter<Asks = A>, (..A): Tuple<Nested = L>, L: AllApart, L: Fetch<E, S, (), fn(..P) -> Bool, Bool> {
     fn holds(f, event, world, commands) {
-        match(<(A, ()) as Fetch<E, S, (), fn(P) -> Bool, Bool>>::fetch(event, world, commands, (), f)) {
-            Some(answer) => answer,
-            None => false
-        }
-    }
-}
-impl<E, S, P, Q, A, B> Condition<E, S> for fn(P, Q) -> Bool
-    where P: Parameter<Asks = A>, Q: Parameter<Asks = B>, (A, (B, ())): AllApart,
-          (A, (B, ())): Fetch<E, S, (), fn(P, Q) -> Bool, Bool> {
-    fn holds(f, event, world, commands) {
-        match(<(A, (B, ())) as Fetch<E, S, (), fn(P, Q) -> Bool, Bool>>::fetch(event, world, commands, (), f)) {
+        match(<L as Fetch<E, S, (), fn(..P) -> Bool, Bool>>::fetch(event, world, commands, (), f)) {
             Some(answer) => answer,
             None => false
         }
