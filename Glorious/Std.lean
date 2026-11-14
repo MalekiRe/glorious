@@ -4014,6 +4014,220 @@ pub fn render_diagnostic(value: &Diagnostic, sources: &SourceMap, options: Rende
 }
 "#
 
+private def timeText : String := r#"// Time as amounts and moments, as the library specification has them (29.3).
+// The machine's clock is `Clock`, the host's effect: nanoseconds as numbers.
+// What is here does nothing to the machine: a test answers `Clock` itself
+// and builds moments with `Instant::at`.
+
+pub use std::host::Clock;
+use std::cmp::{Ordering};
+
+pub enum TimeError { Overflow, BeforeOrigin, DifferentClock, Unsupported }
+
+// So many seconds and, less than a second, so many nanoseconds.
+pub struct Duration { seconds: u64, nanos: u32 }
+
+fn wide(n: u64) -> u128 { to(n) }
+
+impl Duration {
+    pub fn zero() -> Self { Self { seconds: 0u64, nanos: 0u32 } }
+    // A second or more of nanoseconds is refused: it is not carried over.
+    pub fn from_parts(seconds: u64, nanos: u32) -> Result<Self, TimeError> {
+        if(nanos < 1000000000u32) { Ok(Self { seconds: seconds, nanos: nanos }) } else { Err(TimeError::Overflow) }
+    }
+    pub fn from_nanos(nanos: Int) -> Result<Self, TimeError> {
+        if(nanos < 0) { Err(TimeError::BeforeOrigin) }
+        else { Ok(Self { seconds: to(nanos / 1000000000), nanos: to(nanos % 1000000000) }) }
+    }
+    pub fn seconds(value: Self) -> u64 { value.seconds }
+    pub fn subsec_nanos(value: Self) -> u32 { value.nanos }
+    pub fn checked_add(left: Self, right: Self) -> Option<Self> {
+        let nanos = int(left.nanos) + int(right.nanos);
+        let carry = if(nanos >= 1000000000) { 1 } else { 0 };
+        let more: u128 = to(carry);
+        let seconds = wide(left.seconds) + wide(right.seconds) + more;
+        if(seconds > 18446744073709551615u128) { None }
+        else { Some(Self { seconds: to(seconds), nanos: to(nanos - carry * 1000000000) }) }
+    }
+    pub fn checked_sub(left: Self, right: Self) -> Option<Self> {
+        let borrow = if(int(left.nanos) < int(right.nanos)) { 1 } else { 0 };
+        let nanos = int(left.nanos) + borrow * 1000000000 - int(right.nanos);
+        let less: u128 = to(borrow);
+        let need = wide(right.seconds) + less;
+        if(wide(left.seconds) < need) { None }
+        else { Some(Self { seconds: to(wide(left.seconds) - need), nanos: to(nanos) }) }
+    }
+    pub fn compare(left: Self, right: Self) -> Ordering {
+        if(left.seconds < right.seconds) { Ordering::Less } else {
+            if(right.seconds < left.seconds) { Ordering::Greater } else {
+                if(left.nanos < right.nanos) { Ordering::Less } else {
+                    if(right.nanos < left.nanos) { Ordering::Greater } else { Ordering::Equal }
+                }
+            }
+        }
+    }
+}
+
+// A moment on one clock: so long after that clock began. Moments on
+// different clocks are not compared or taken from one another.
+pub struct Instant { clock: u32, since: Duration }
+
+impl Instant {
+    // For whoever answers `Clock`: the moment so long after clock `clock` began.
+    pub fn at(clock: u32, since: Duration) -> Self { Self { clock: clock, since: since } }
+    pub fn checked_add(value: Self, duration: Duration) -> Result<Self, TimeError> {
+        match(Duration::checked_add(value.since, duration)) {
+            Some(since) => Ok(Self { clock: value.clock, since: since }),
+            None => Err(TimeError::Overflow)
+        }
+    }
+    pub fn duration_since(value: Self, earlier: Self) -> Result<Duration, TimeError> {
+        if(value.clock != earlier.clock) { Err(TimeError::DifferentClock) } else {
+            match(Duration::checked_sub(value.since, earlier.since)) {
+                Some(between) => Ok(between),
+                None => Err(TimeError::BeforeOrigin)
+            }
+        }
+    }
+    pub fn compare(left: Self, right: Self) -> Result<Ordering, TimeError> {
+        if(left.clock != right.clock) { Err(TimeError::DifferentClock) }
+        else { Ok(Duration::compare(left.since, right.since)) }
+    }
+}
+
+// A moment by the calendar's clock, which can be set back: so long after
+// its origin.
+pub struct SystemTime { since: Duration }
+
+impl SystemTime {
+    pub fn from_origin(since: Duration) -> Self { Self { since: since } }
+    pub fn since_origin(value: Self) -> Duration { value.since }
+}
+
+// Now, by the machine's clock that only goes forward (clock 0) and by its
+// calendar clock.
+pub fn monotonic_now() -> Result<Instant, TimeError> / {Clock} {
+    match(Duration::from_nanos(monotonic())) { Ok(since) => Ok(Instant::at(0u32, since)), Err(e) => Err(e) }
+}
+pub fn system_now() -> Result<SystemTime, TimeError> / {Clock} {
+    match(Duration::from_nanos(now())) { Ok(since) => Ok(SystemTime::from_origin(since)), Err(e) => Err(e) }
+}
+"#
+
+private def randomText : String := r#"// Chance, as the library specification has it (29.4): bytes from the machine
+// through `Entropy`, the host's effect, and a generator that gives the same
+// numbers from the same seed.
+//
+// A source gives the bytes it was asked for as an array, or fails: there is
+// no array half filled.
+
+pub use std::host::Entropy;
+use std::host::{IoError};
+
+pub enum RandomError { Exhausted, InvalidRange, Unsupported, Host(IoError) }
+
+pub trait RandomSource {
+    type Effects: EffectRow;
+    // So many bytes, all of them, or why not.
+    fn fill(&mut Self, Int) -> Result<[u8], RandomError> / { | Self::Effects };
+}
+
+// The machine's own chance, where the program has been given `Entropy`.
+pub struct HostEntropy;
+
+impl RandomSource for HostEntropy {
+    type Effects = {Entropy};
+    fn fill(source, count) {
+        match(random_bytes(count)) { Ok(bytes) => Ok(bytes), Err(e) => Err(RandomError::Host(e)) }
+    }
+}
+
+// xoshiro256**, its four words taken from the seed's thirty-two bytes, the
+// least byte of each first. A seed of nothing but zeros stands for the
+// words 1, 2, 3, 4: the generator cannot leave a state of all zeros.
+// Not for secrets.
+pub struct SeededRng { a: u64, b: u64, c: u64, d: u64 }
+
+fn wide(n: u64) -> u128 { to(n) }
+fn times(x: u64, k: u64) -> u64 { to(wide(x) * wide(k) % 18446744073709551616u128) }
+// (A shift that would lose bits goes wrong, as other arithmetic does: the
+// bits that would be lost are taken off first.)
+fn shl_wrap(x: u64, k: Int) -> u64 { shl(bit_and(x, shr(18446744073709551615u64, k)), k) }
+fn rotl(x: u64, k: Int) -> u64 { bit_or(shl_wrap(x, k), shr(x, 64 - k)) }
+fn word(bytes: &[u8], at: Int, i: Int, sofar: u64) -> u64 {
+    if(i < 0) { sofar } else {
+        let b: u64 = match(element(bytes, at + i)) { Some(b) => to(*b), None => 0u64 };
+        word(bytes, at, i - 1, bit_or(shl(sofar, 8), b))
+    }
+}
+
+impl SeededRng {
+    // From thirty-two bytes; fewer are as if the rest were zeros.
+    pub fn from_seed(seed: [u8]) -> Self {
+        let a = word(&seed, 0, 7, 0u64);
+        let b = word(&seed, 8, 7, 0u64);
+        let c = word(&seed, 16, 7, 0u64);
+        let d = word(&seed, 24, 7, 0u64);
+        if(bit_or(bit_or(a, b), bit_or(c, d)) == 0u64) { Self { a: 1u64, b: 2u64, c: 3u64, d: 4u64 } }
+        else { Self { a: a, b: b, c: c, d: d } }
+    }
+    // Which generator this is: a release that depends on its numbers says this with its seed.
+    pub fn algorithm_version() -> u32 { 1u32 }
+    pub fn next_u64(value: &mut Self) -> u64 {
+        let out = times(rotl(times(value.b, 5u64), 7), 9u64);
+        let t = shl_wrap(value.b, 17);
+        let c = bit_xor(value.c, value.a);
+        let d = bit_xor(value.d, value.b);
+        let b = bit_xor(value.b, c);
+        let a = bit_xor(value.a, d);
+        value.a = a;
+        value.b = b;
+        value.c = bit_xor(c, t);
+        value.d = rotl(d, 45);
+        out
+    }
+}
+
+fn le_bytes(n: u64, count: Int, out: [u8]) -> [u8] {
+    if(count == 0) { out } else { le_bytes(shr(n, 8), count - 1, push(out, to(bit_and(n, 255u64)))) }
+}
+fn seeded_bytes(rng: &mut SeededRng, count: Int, out: [u8]) -> [u8] {
+    if(count <= 0) { out } else {
+        let most = if(count < 8) { count } else { 8 };
+        let next = SeededRng::next_u64(rng);
+        seeded_bytes(rng, count - most, le_bytes(next, most, out))
+    }
+}
+
+impl RandomSource for SeededRng {
+    type Effects = {};
+    fn fill(source, count) { Ok(seeded_bytes(source, count, [])) }
+}
+
+// Sixty-four bits: eight bytes of the source, the least first.
+pub fn random_u64<R: RandomSource>(source: &mut R) -> Result<u64, RandomError> / { | <R as RandomSource>::Effects } {
+    match(fill(source, 8)) {
+        Err(e) => Err(e),
+        Ok(bytes) => if(len(bytes) == 8) { Ok(word(&bytes, 0, 7, 0u64)) } else { Err(RandomError::Exhausted) }
+    }
+}
+
+// A number below `exclusive`, each as likely as any other: what falls in the
+// part of the sixty-four bits that does not divide evenly is asked for again.
+pub fn random_below<R: RandomSource>(source: &mut R, exclusive: u64) -> Result<u64, RandomError> / { | <R as RandomSource>::Effects } {
+    if(exclusive == 0u64) { Err(RandomError::InvalidRange) } else {
+        let spare: u64 = to(18446744073709551616u128 % wide(exclusive));
+        below(source, exclusive, spare)
+    }
+}
+fn below<R: RandomSource>(source: &mut R, exclusive: u64, spare: u64) -> Result<u64, RandomError> / { | <R as RandomSource>::Effects } {
+    match(random_u64(source)) {
+        Err(e) => Err(e),
+        Ok(v) => if(v < spare) { below(source, exclusive, spare) } else { Ok(v % exclusive) }
+    }
+}
+"#
+
 private def cText : String := r#"// What C has: its memory, and texts as it writes them. Everything here is
 // unsafe: an address is whatever a program says it is.
 
@@ -4483,8 +4697,8 @@ def texts : List (List String × String) :=
    (["std", "io"], "pub use std::host::{Console, IoError, print, println, eprintln, read_line};\n"),
    (["std", "fs"], "pub use std::host::{FileRead, FileWrite, IoError, read_text, write_text};\n"),
    (["std", "env"], "pub use std::host::{ProcessEnvironment, ProcessArgs};\n"),
-   (["std", "time"], "pub use std::host::Clock;\n"),
-   (["std", "random"], "pub use std::host::Entropy;\n"),
+   (["std", "time"], timeText),
+   (["std", "random"], randomText),
    (["std", "ffi"], "pub use std::c::*;\n"),
    (["core"], "pub mod option;\npub mod result;\npub mod cmp;\npub mod num;\npub mod char;\npub mod iter;\npub mod slice;\npub mod hash;\npub mod value;\n"),
    (["core", "value"], "pub use std::value::*;\n"),

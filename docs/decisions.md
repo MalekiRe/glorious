@@ -2713,6 +2713,29 @@ from being an `Id<Block>`.
 - Not built: base64; `ByteReader::read_u128_le` is, the signed widths
   other than `read_i64_le` are not in the specification.
 
+## `std::time` and `std::random` (library 29.3, 29.4)
+
+- **`Duration`** is seconds and nanoseconds under a second; a second or
+  more of nanoseconds is refused, sums and differences that do not fit are
+  `None`. **`Instant`** is a duration on a numbered clock: moments of two
+  clocks are not compared or subtracted (`DifferentClock`), and one taken
+  from an earlier one is `BeforeOrigin`. `Instant::at` makes one, for
+  whoever answers `Clock`; `monotonic_now` and `system_now` ask the host's
+  `Clock`, whose two operations give nanoseconds as numbers. The
+  specification's `Clock` with `sleep` is not here: the host has no such
+  operation yet.
+- **`SeededRng`** is xoshiro256** (version 1), its four words read from the
+  seed the least byte first, a seed of zeros standing for 1, 2, 3, 4. It
+  gives the numbers a reference written outside the language gives.
+  `random_below` asks again for what falls in the part of the range that
+  does not divide evenly, so each number is as likely as any other.
+- **`RandomSource::fill` gives the bytes as an array** or fails: there is no
+  writable slice to fill. `HostEntropy` is the machine's, through
+  `Entropy`.
+- A shift that would lose bits goes wrong, as the rest of arithmetic does:
+  the generator takes those bits off first. There are no wrapping
+  operations by name yet.
+
 ## `std::diagnostic` (library 21)
 
 `Severity`, `DiagnosticCode`, `Diagnostic` (a message with places, notes
