@@ -616,8 +616,19 @@ partial def inferCall (scope : Scope) (amb : Row) (f : Expr) (args : List Expr)
         | some none => return expected
         | some (some why) => throw why
         | none => pure ()
-      match ← fitAt scope amb "the value of a `let` with a type" none expected
-          (← inferExpr scope amb value) with
+      -- A callable written with its parameters' types: its clauses are
+      -- read knowing them, so a field read through a parameter that is a
+      -- reference is found.
+      let found ← match value, ← find expected with
+        | .closure id clauses, .fn ps _ _ _ _ =>
+          let arity := match clauses.head? with
+            | some (.mk pats _) => pats.length
+            | none => 0
+          if arity == ps.length && arity != 0 then
+            inferCallable scope (ps.map some) none none clauses "the clauses of this callable do" id
+          else inferExpr scope amb value
+        | _, _ => inferExpr scope amb value
+      match ← fitAt scope amb "the value of a `let` with a type" none expected found with
       | none => return expected
       | some e => throw e
   match f with

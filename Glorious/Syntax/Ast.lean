@@ -1127,7 +1127,9 @@ def givenAway (x : String) (rest : List Stmt) : Bool :=
 changes? It is then kept where a reference can point: as a variable is. -/
 def borrowedOnly (x : String) (after : List Stmt) : Bool :=
   let u := nameUseStmts x after
-  !x.startsWith "%" && u.shared && !u.changed && !u.fielded && !u.rebound
+  -- (A field of it may be borrowed too: it is kept where a reference can
+  -- point either way.)
+  !x.startsWith "%" && u.shared && !u.changed && !u.rebound
 
 /-- Is a name bound here one of which what follows borrows a field with `&`,
 and never changes? If what it is bound to is a value and not a reference, it
@@ -1136,18 +1138,18 @@ def fieldBorrowedOnly (x : String) (after : List Stmt) : Bool :=
   let u := nameUseStmts x after
   !x.startsWith "%" && u.fielded && !u.changed && !u.rebound
 
-/-- Is what an expression gives plainly a value, by how it is written: built
-by a constructor or a function named with its type, a tuple, or given a type
-that is not a reference's? (A call of some other function may give a
-reference: of a name bound to one, a field is borrowed through it.) -/
+/-- May what an expression gives be a value and not a reference, by how it is
+written: a tuple, what a call gives, or something given a type that is not a
+reference's? (A call can give a reference. A name bound to one and kept
+where a reference can point holds that reference, and a field is then
+borrowed through it: the checker tells the two apart by the type.) -/
 def valueLike : Expr → Bool
   | .tuple (_ :: _) => true
   | .call _ (.name none mark) [_, ty] =>
-    mark == ascribeMark && (match TypeExpr.ofExpr ty with
+    mark != ascribeMark || (match TypeExpr.ofExpr ty with
       | .ref _ _ _ => false
       | _ => true)
-  | .call _ (.name (some _) _) _ => true
-  | .call _ (.name none f) _ => (f.front.isUpper)
+  | .call _ _ _ => true
   | _ => false
 
 mutual

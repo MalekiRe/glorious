@@ -485,8 +485,11 @@ inductive Head where
   | overwrite
   | const (e : Expr)
 
-def resolveName (scope : Scope) (qual : Option String) (x : String) : M Head := do
-  if qual.isNone then
+def resolveName (scope : Scope) (asked : Option String) (x : String) : M Head := do
+  -- (`%prelude`: what `a[i]` and the like are written with. It is the
+  -- prelude's function, whatever a program has given the same name.)
+  let qual := if asked == some "%prelude" then none else asked
+  if asked.isNone then
     if let some b := scope.lookup x then return .local b
     -- A name for a constructor that was written with a type is of that
     -- type where it is used as a value; a pattern looks through it.

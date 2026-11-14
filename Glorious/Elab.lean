@@ -89,8 +89,10 @@ inductive Head where
   | overwrite
   | const (e : Expr)
 
-def resolveName (scope : Scope) (qual : Option String) (x : String) : M Head := do
-  if qual.isNone then
+def resolveName (scope : Scope) (asked : Option String) (x : String) : M Head := do
+  -- (`%prelude`: the prelude's function, whatever is named the same here.)
+  let qual := if asked == some "%prelude" then none else asked
+  if asked.isNone then
     match lookupVar scope x with
     | some (false, _, a) => return .local a
     | some (true, _, c) => return .cell c

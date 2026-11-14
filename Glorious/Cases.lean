@@ -3628,7 +3628,7 @@ def cases : List Case := [
   ⟨"struct C { n: Int, xs: [Int] }\nfn main() -> Int { match(Some(C { n: 1, xs: [4, 5] })) { Some(c) => len_at(&c.xs) + c.n, None => 0 } }",
     [], "error: 2:69: in `main`: `c` is neither a variable nor a reference, so no field of it can be borrowed here: say what it is where it is bound (`let c: Type = ..`), or bind it with `let mut`"⟩,
   ⟨"struct C { n: Int, xs: [Int] }\nfn make() -> C { C { n: 1, xs: [4, 5] } }\nfn main() -> Int { let c = make(); len_at(&c.xs) + c.n }",
-    [], "error: 3:36: in `main`: `c` is neither a variable nor a reference, so no field of it can be borrowed here: say what it is where it is bound (`let c: Type = ..`), or bind it with `let mut`"⟩,
+    [], "3"⟩,
   ⟨"struct C { n: Int }\nfn bump(r: &mut Int) -> Int { *r = *r + 1; *r }\nfn main() -> Int { let c = C { n: 1 }; bump(&mut c.n) }",
     [], "error: 3:40: in `main`: `c` is neither a variable nor a reference, so no field of it can be borrowed here: say what it is where it is bound (`let c: Type = ..`), or bind it with `let mut`"⟩,
   ⟨"struct C { n: Int, xs: [Int] }\nfn eat(c: C) -> Int { c.n }\nfn first(xs: &[Int]) -> &Int { &(*xs)[0] }\nfn main() -> Int { let c = C { n: 1, xs: [4, 5] }; let r = first(&c.xs); let n = eat(c); *r + n }",
@@ -3746,6 +3746,14 @@ def cases : List Case := [
     [], "3\n1\n2\n3\n1\n2\n7"⟩,
   ⟨"effect Positions { take_p() -> [Int], put_p([Int]) }\nfn with_positions(app: fn() -> Int / {Positions}) -> Int {\n    let mut column = [1, 2, 3];\n    handle app() { take_p(k) => k(replace(&mut column, [])), put_p(c, k) => column = c; k(()) }\n}\nfn bump() / {Positions} { let mut ps = take_p(); ps[0] = ps[0] + 10; put_p(ps) }\nfn main() -> Int { with_positions({ bump(); bump(); let ps = take_p(); let n = ps[0]; put_p(ps); n }) }",
     [], "21"⟩,
+  -- A callable written with its parameters' types reads a field through one that is a reference.
+  ⟨"struct V(Int)\nfn apply(f: for<'a> fn(&'a V) -> Int) -> Int { let x = V(4); f(&x) }\nfn main() -> Int { apply(fn(v: &V) -> Int { v.0 }) }",
+    [], "4"⟩,
+  ⟨"struct P(Int)\nstruct V(Int)\nfn apply(f: for<'a, 'b> fn(&'a mut P, &'b V)) -> Int { let mut p = P(1); let v = V(4); f(&mut p, &v); p.0 }\nfn main() -> Int { apply(fn(p: &mut P, v: &V) { p.0 = p.0 + v.0; }) }",
+    [], "5"⟩,
+  -- `a[i]` is the prelude's indexing whatever a program names `index` or `push`.
+  ⟨"fn main() -> Int { let xs = [5, 6, 7]; let index = 2; let push = 1; let ys = [xs[index], xs[push]]; ys[0] * 10 + ys[1] }",
+    [], "76"⟩,
   -- `drop` is not for a program to call.
   ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nfn main() { let mut f = File(7); drop(&mut f); 0 }",
     [], "error: 3:34: in `main`: `drop` is run when what holds a value ends; a program does not call it"⟩,

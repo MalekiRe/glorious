@@ -1,0 +1,169 @@
+// Covey: an entity component system in which the whole app is known to the
+// compiler.
+//
+// A component's storage is an effect, `Store<C>`: a system that touches
+// `Position` performs `Store<Position>`, and what a system touches is the
+// row of effects in its type, which nobody writes down. The world is one
+// `store<C>` handler for each component; a system that names a component
+// the world does not store performs an effect that nothing handles, and
+// does not compile.
+//
+// A system takes a component's table out of its store, works on it, and puts
+// it back: while it has the table nobody else does.
+
+// An entity: a place in the tables, and which of the entities that have had
+// that place this one is.
+pub struct Entity { pub index: Int, pub generation: Int }
+
+// Making and ending entities.
+pub effect Entities {
+    spawn() -> Entity
+    despawn(Entity)
+    alive(Entity) -> Bool
+}
+
+// Told to every store when an entity ends, from the innermost outward.
+pub effect Ended { ended(Entity) }
+
+// One component's values: packed, each with the entity it belongs to, and
+// for each entity's place where its value is among them.
+pub struct Table<C> { pub dense: [C], pub owners: [Entity], pub slots: [Int] }
+
+// A component's storage.
+pub effect Store<C> {
+    take() -> Table<C>
+    put(Table<C>)
+}
+
+fn empty_table<C>() -> Table<C> { Table { dense: [], owners: [], slots: [] } }
+
+// Where an entity's value is in a table, or -1.
+pub fn slot_of<C>(table: &Table<C>, entity: Entity) -> Int {
+    if(entity.index < len_at(&table.slots)) {
+        let at = table.slots[entity.index];
+        if(at >= 0) {
+            if(table.owners[at].generation == entity.generation) { at } else { 0 - 1 }
+        } else { 0 - 1 }
+    } else { 0 - 1 }
+}
+
+fn table_insert<C>(table: &mut Table<C>, entity: Entity, value: C) {
+    while({ len_at(&table.slots) <= entity.index }) { push_at(&mut table.slots, 0 - 1) };
+    let at = table.slots[entity.index];
+    if(at >= 0) {
+        table.dense[at] = value;
+        table.owners[at] = entity;
+    } else {
+        table.slots[entity.index] = len_at(&table.dense);
+        push_at(&mut table.dense, value);
+        push_at(&mut table.owners, entity);
+    }
+}
+
+// Take an entity's value out: the last value moves into its place.
+fn table_remove<C>(table: &mut Table<C>, entity: Entity) -> Option<C> {
+    let at = slot_of(&*table, entity);
+    if(at < 0) { None } else {
+        let last = len_at(&table.dense) - 1;
+        let moved = table.owners[last];
+        let _ = pop_at(&mut table.owners);
+        match(pop_at(&mut table.dense)) {
+            None => None,
+            Some(final) =>
+                table.slots[entity.index] = 0 - 1;
+                if(at == last) { Some(final) } else {
+                    table.owners[at] = moved;
+                    table.slots[moved.index] = at;
+                    Some(replace(&mut table.dense[at], final))
+                }
+        }
+    }
+}
+
+// The storage of one component, for the app inside it.
+pub fn store<C, R, e: EffectRow>(app: fn() -> R / {Store<C>, Ended | e}) -> R / {Ended | e} {
+    let mut table: Table<C> = empty_table();
+    handle app() {
+        take(k) => k(replace(&mut table, empty_table())),
+        put(given, k) => table = given; k(()),
+        ended(entity, k) => let _ = table_remove(&mut table, entity); ended(entity); k(())
+    }
+}
+
+// The entities, for the app inside it. Inside every store: an entity that
+// ends is told to each of them.
+pub fn entities<R, e: EffectRow>(app: fn() -> R / {Entities, Ended | e}) -> R / {Ended | e} {
+    let mut generations: [Int] = [];
+    let mut free: [Int] = [];
+    handle app() {
+        spawn(k) => k(match(pop_at(&mut free)) {
+            Some(index) => Entity { index: index, generation: generations[index] },
+            None => {
+                push_at(&mut generations, 0);
+                Entity { index: len_at(&generations) - 1, generation: 0 }
+            }()
+        }),
+        alive(entity, k) => k(generations[entity.index] == entity.generation),
+        despawn(entity, k) =>
+            if(generations[entity.index] == entity.generation) {
+                generations[entity.index] = entity.generation + 1;
+                push_at(&mut free, entity.index);
+                ended(entity)
+            } else { () };
+            k(())
+    }
+}
+
+// Outside every store: where word of an ended entity stops.
+pub fn world<R, e: EffectRow>(app: fn() -> R / {Ended | e}) -> R / e {
+    handle app() { ended(entity, k) => k(()) }
+}
+
+// Give an entity a component, or another value of one it has.
+pub fn insert<C>(entity: Entity, value: C) / {Store<C>} {
+    let mut table = take<C>();
+    table_insert(&mut table, entity, value);
+    put(table)
+}
+
+// Take a component away from an entity.
+pub fn remove<C>(entity: Entity) -> Option<C> / {Store<C>} {
+    let mut table = take<C>();
+    let was = table_remove(&mut table, entity);
+    put(table);
+    was
+}
+
+// How many entities have the component.
+pub fn count<C>() -> Int / {Store<C>} {
+    let table = take<C>();
+    let n = len_at(&table.dense);
+    put(table);
+    n
+}
+
+// Every entity that has an `A`, with its `A` to change.
+pub fn each<A, e: EffectRow>(f: for<'a> fn(Entity, &'a mut A) -> () / {| e}) / {Store<A> | e} {
+    let mut table = take<A>();
+    let mut i = 0;
+    while({ i < len_at(&table.dense) }) {
+        f(table.owners[i], &mut table.dense[i]);
+        i = i + 1
+    };
+    put(table)
+}
+
+// Every entity that has an `A` and a `B`: its `A` to change, its `B` to read.
+pub fn each2<A, B, e: EffectRow>(f: for<'a, 'b> fn(Entity, &'a mut A, &'b B) -> () / {| e}) / {Store<A>, Store<B> | e} {
+    let mut first = take<A>();
+    let second = take<B>();
+    let mut i = 0;
+    while({ i < len_at(&first.dense) }) {
+        let entity = first.owners[i];
+        let at = slot_of(&second, entity);
+        if(at >= 0) { f(entity, &mut first.dense[i], &second.dense[at]) } else { () };
+        i = i + 1
+    };
+    put(first);
+    put(second)
+}

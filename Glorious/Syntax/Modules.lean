@@ -1054,6 +1054,9 @@ partial def resolveExpr (ctx : Ctx) (bound : List String) : Expr → R Expr
   | .label l => pure (.label l)
   | .name qual name => do
     let (qual', name', entry) ← resolveValue ctx bound qual name
+    -- What indexing and the like are written with is the prelude's function
+    -- even where the program has a name of its own that is the same.
+    let qual' := if qual == some "%prelude" && bound.contains name' then some "%prelude" else qual'
     -- An operation, or a trait's function, named where it is not called: a
     -- callable that performs it, or calls it, with what it is given (10.8).
     if true then
@@ -1126,8 +1129,9 @@ partial def resolveExpr (ctx : Ctx) (bound : List String) : Expr → R Expr
     -- What is called is named as it is.
     let called ← match f with
       | .name q x => do
-        let (q, x, _) ← resolveValue ctx bound q x
-        pure (Expr.name q x)
+        let (q', x', _) ← resolveValue ctx bound q x
+        -- (The prelude's function, whatever is named the same here.)
+        pure (Expr.name (if q == some "%prelude" && bound.contains x' then some "%prelude" else q') x')
       | _ => resolveExpr ctx bound f
     pure (.call id called (← args.mapM (resolveExpr ctx bound)))
   | .tailCall id f args => do

@@ -2890,6 +2890,35 @@ borrow tried).
 - The fields of a value are destroyed the last declared first, and the
   elements of an array the last first. (Rust goes the other way.)
 
+## Covey
+
+- `covey/` is an entity component system written in Glorious, after
+  MalekiRe/unstable_covey, which does the same in Rust with specialization
+  and type-level lists so that the whole app is one type. Here the set of
+  types the compiler already infers and unions does that work: the effect
+  row.
+- **A component's storage is an effect**, `Store<C>`, and the world is one
+  `store<C>` handler for each component. What a system touches is its row.
+  A component the world does not store is an effect nothing handles.
+- **A system takes a table out and puts it back.** I first had a store hand
+  out `&mut Table<C>` through the resumption; a system could then ask twice
+  and hold two. Moved out and back, the table has one holder by ownership
+  alone, and an array with one holder is changed in place.
+- **A label is an operation, and a plugin a handler layer** that runs its
+  systems and performs the label again for the next layer out. The same
+  shape tells every store that an entity has ended (`ended`), which is why
+  the entities' handler is inside the stores.
+- `covey/simulation.glorious` is run with the tests.
+- What writing it found in the compiler, all fixed: a callable written with
+  its parameters' types did not know them when its body was read, so
+  `velocity.0` through a `&Velocity` parameter was refused; `xs[index]`
+  called a local named `index`; a name bound to what a call gives could not
+  have a field borrowed, nor could one that is also borrowed whole.
+- **Not there yet**: the world is assembled by hand, one `store<C>({ .. })`
+  inside another (a handler for every instance in a row is next); nothing
+  checks that two systems run side by side touch different components;
+  a query calls a callable for each entity.
+
 ## Instances of an effect, told apart by their type arguments
 
 - `effect Store<C> { take() -> [C], put([C]) }` is a family. `Store<Int>` and

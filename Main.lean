@@ -216,7 +216,7 @@ how many compile, and how many are shown to follow each set of Core's rules. -/
 def selftest (vm : Option String) : IO UInt32 := do
   let tmp : System.FilePath := (← IO.getEnv "TMPDIR").getD "/tmp"
   let stamp ← IO.monoMsNow
-  let examples ← exampleCases "examples"
+  let examples := (← exampleCases "examples") ++ (← exampleCases "covey")
   -- (The programs that take the Lean machines too long come last, and are
   -- run on the Rust VM alone.)
   let quick := (cases.map (·, [])) ++ examples
@@ -403,7 +403,7 @@ def why (path : String) : IO UInt32 := do
 /-- How many of the test programs compile, and of those how many are shown
 to follow each set of Core's rules. -/
 def survey : IO UInt32 := do
-  let examples ← exampleCases "examples"
+  let examples := (← exampleCases "examples") ++ (← exampleCases "covey")
   let all := (cases.map (·, [])) ++ examples
   let before ← IO.monoMsNow
   warm

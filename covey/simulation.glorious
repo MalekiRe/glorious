@@ -1,0 +1,73 @@
+// A small world: things that move, some of which can be hurt.
+//
+// `Update` and `Hit` are labels: an app performs them, and each plugin is a
+// layer that handles a label by running its systems and passing it on.
+// expect:
+// 3
+// 2
+// 1
+// 3
+mod ecs;
+
+use ecs::{Entity, spawn, despawn, alive, store, entities, world, insert, count, each, each2};
+
+struct Position(Int)
+struct Velocity(Int)
+struct Health(Int)
+
+effect Update { update() }
+effect Hit { hit(Int) }
+
+// Everything that moves, moves.
+fn integrate() {
+    each2(fn(entity: Entity, position: &mut Position, velocity: &Velocity) {
+        position.0 = position.0 + velocity.0;
+    })
+}
+
+// Everything that can be hurt is, and what has no health left ends.
+fn wound(amount: Int) {
+    let mut dead: [Entity] = [];
+    each(fn(entity: Entity, health: &mut Health) {
+        health.0 = health.0 - amount;
+        if(health.0 <= 0) { push_at(&mut dead, entity) } else { () }
+    });
+    let mut i = 0;
+    while({ i < len(dead) }) { despawn(dead[i]); i = i + 1 }
+}
+
+fn physics(app) {
+    handle app() { update(k) => integrate(); update(); k(()) }
+}
+
+fn combat(app) {
+    handle app() { hit(amount, k) => wound(amount); hit(amount); k(()) }
+}
+
+fn total() -> Int {
+    let mut sum = 0;
+    each(fn(entity: Entity, position: &mut Position) { sum = sum + position.0; });
+    sum
+}
+
+fn game() -> Int {
+    let a = spawn(); insert(a, Position(0)); insert(a, Velocity(1)); insert(a, Health(3));
+    let b = spawn(); insert(b, Position(10)); insert(b, Velocity(2)); insert(b, Health(1));
+    let c = spawn(); insert(c, Position(100)); insert(c, Health(2));
+    print(count<Health>());
+    update(); hit(1);
+    print(count<Health>());
+    update(); hit(1);
+    print(count<Health>());
+    update();
+    total()
+}
+
+fn main() -> Int {
+    world({ store<Position>({ store<Velocity>({ store<Health>({ entities({
+        handle physics({ combat({ game() }) }) {
+            update(k) => k(()),
+            hit(amount, k) => k(())
+        }
+    }) }) }) }) })
+}
