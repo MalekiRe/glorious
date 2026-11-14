@@ -50,7 +50,8 @@ it: with the ownership rules and the region rules if the program can be shown
 to meet them, and otherwise with those of them it can, or as a typing only.
 An error here is a defect in the compiler, not in the program. -/
 def certifyProgram (items : List Syntax.Item) (p : Core.Program)
-    (envSizes : List (Nat × Nat × Nat) := []) : Except String Typing.Cert := do
+    (envSizes : List (Nat × Nat × Nat) := []) (failed : List (Bool × Bool) := []) :
+    Except String Typing.Cert := do
   -- With the region rules, first with callables taken to bind a region
   -- where they are given a reference to a cell, and then without; and only
   -- then with references taken to be to one of several cells where they
@@ -59,9 +60,12 @@ def certifyProgram (items : List Syntax.Item) (p : Core.Program)
     match Infer.certify items p strict envSizes regions loans ranked widen with
     | .ok cert => if Typing.checkProgram cert p then some cert else none
     | .error _ => none
+  -- (`failed`: ways already seen to fail with every rule, not tried again.)
   let attempt (strict regions loans : Bool) : Option Typing.Cert :=
-    (if regions then [(true, false), (false, false), (true, true), (false, true)]
-      else [(false, false)]).findSome? fun (ranked, widen) => one strict regions loans ranked widen
+    (if regions then [(true, false), (false, false), (false, true), (true, true)]
+      else [(false, false)]).findSome? fun (ranked, widen) =>
+      if strict && regions && loans && failed.contains (ranked, widen) then none
+      else one strict regions loans ranked widen
   if let some cert := attempt true true true then return cert
   if let some cert := attempt true true false then return cert
   if let some cert := attempt true false false then return cert
@@ -427,13 +431,13 @@ def compileSource (src : String) (check : Bool := true)
       | .ok _ => pure ()
   let all := Elab.reachable roots all
   let declared := Elab.withDeclared written all
-  let plain := fun (blocks : Option Elab.Blocks) => do
+  let plain := fun (blocks : Option Elab.Blocks) (failed : List (Bool × Bool)) => do
     let out ← Elab.elabProgram all blocks
     -- What is unsafe is outside what Core's rules are about: a program that
     -- calls a foreign function or reads memory at an address has no
     -- certificate.
     let cert ← if check && !out.foreign then
-        match certifyProgram declared out.program out.envSizes with
+        match certifyProgram declared out.program out.envSizes failed with
         | .ok cert => pure (some cert)
         | .error e =>
           throw s!"the checker accepted this program, but its Core could not be shown to be well typed: {e}. This is a defect in the compiler"
@@ -478,8 +482,10 @@ def compileSource (src : String) (check : Bool := true)
         if out.lent != 0 && !out.foreign then
           if let some c := lending blocks [false, true] (fun _ => 1) then return c
           let ranked := shownAtAll blocks true
-          unless ranked == some true || shownAtAll blocks false == some true do
-            return ← plain blocks
+          let plainly := shownAtAll blocks false
+          unless ranked == some true || plainly == some true do
+            -- (Those two ways are not tried again for the plain program.)
+            return ← plain blocks [(true, false), (false, false)]
           let ways := if ranked.isSome then [false, true] else [false]
           let lending := lending blocks ways
           if out.sites ≤ 160 then
@@ -515,7 +521,7 @@ def compileSource (src : String) (check : Bool := true)
                 let sample := ((List.range 12).map fun k => (k * out.sites) / 12).eraseDups
                 let asked := sample.map fun i => Task.spawn fun _ => try_ i
                 (asked.map Task.get).all (· == 0)
-            if hopeless then return ← plain blocks
+            if hopeless then return ← plain blocks []
             let first : List (Task Nat) := (List.range out.sites).map fun i => Task.spawn fun _ =>
               if passed i then 1 else if (out.under.lookup i).isSome then 0 else try_ i
             let first := first.map Task.get
@@ -558,7 +564,7 @@ def compileSource (src : String) (check : Bool := true)
               -- (All of them at once has just failed.)
               if let some c := (add out.sites (List.replicate out.sites 0) coming none
                   (Task.spawn fun _ => none)).2 then return c
-    plain blocks
+    plain blocks []
   -- Blocks can share an environment only where a type can state it. Where one
   -- cannot, as when what a block is given may also be a function that is not a
   -- block, every block captures for itself, as it would without the sharing.
