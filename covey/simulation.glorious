@@ -12,7 +12,7 @@
 // 12
 mod ecs;
 
-use ecs::{Entity, Column, Commands, end, app, register, insert_resource, with_resource, run_if, add_systems, on, add_plugins, chain, emit, spawn, insert, spawn_with, count, fold_all, each, each2};
+use ecs::{Entity, Column, Commands, end, app, register, insert_resource, with_resource, run_if, add_systems, on, add_plugins, chain, emit, spawn, insert, spawn_with, count, fold_all, each, Query, for_each};
 
 struct Position(Int)
 struct Velocity(Int)
@@ -26,8 +26,9 @@ struct Update
 struct Hit(Int)
 
 // Everything that moves, moves.
-fn integrate(positions: &mut Column<Position>, velocities: &Column<Velocity>) {
-    each2(positions, velocities, fn(entity: Entity, position: &mut Position, velocity: &Velocity) {
+fn integrate(query: &mut Query<(&mut Position, &Velocity)>) {
+    query.for_each(fn(entity: Entity, got: (&mut Position, &Velocity)) {
+        let (position, velocity) = got;
         position.0 = position.0 + velocity.0;
     })
 }

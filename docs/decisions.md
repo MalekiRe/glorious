@@ -41,22 +41,16 @@ What the checker lacked, found on the way:
   implementation's functions; now it does, where nothing else does.
 - `()` as a pattern of a reference to `()`.
 
-Limits. Core's region rules are not shown for a program that gives a system
-with a query as a callable (as covey's `emit` does): the simulation keeps
-`each2` for that, and `query.glorious` is certified without them. The
-smallest such program: a function given as a callable for every lifetime,
-which gives a tuple of two borrows of its parameter to another callable for
-every lifetime (`for<'a> fn((&'a mut Int, &'a Int))`); given as two
-arguments, or called directly, it is shown. What goes wrong, found: the
-callback is a closure whose parameter is read part by part (`v0.[0]`), so
-where it is made its parameter is not yet known to be a tuple, nor its parts
-references; the closure is then made at a region nothing decides, and the
-certificate names a cell for it. Making the decision look into tuples, where
-closures are made and where calls are settled, did not change that: what is
-needed is the parameter's shape where the closure is made (the checker knows
-it), or the decision put off until it is known. And an
-implementation's function cannot yet write lifetimes of its own
-(`fn at<'a>(..)`): it takes its trait's, unwritten.
+Core's region rules were not shown where a system with a query was given as
+a callable: the callback of `for_each` is a closure whose parameter, a tuple
+of borrows, is read a part at a time (`v0.[0]`), so where the closure is made
+its parameter is not yet known to be a tuple of references, and certificate
+inference, which decides there whether a callable binds the region of a
+reference it is given, made it bind none and left its region to nothing.
+That decision is now put off where what the callable is given is not yet
+known, and made once it is, looking into tuples. The simulation's
+`integrate` is a query. An implementation's function cannot yet write
+lifetimes of its own (`fn at<'a>(..)`): it takes its trait's, unwritten.
 
 ## The compiler stays in Lean, and is to be fast and incremental
 

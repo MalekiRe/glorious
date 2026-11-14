@@ -255,6 +255,9 @@ structure St where
   typeLifetimes : Array (List Bool) := #[]
   /-- The group being inferred, and the signatures of its functions. -/
   curScc : Option Nat := none
+  /-- Callables made where what they are given was not yet known: whether
+  each binds the region of a reference it is given is decided once it is. -/
+  closureRanks : Array (List ITy × List ITy × Nat) := #[]
   cur : List (Nat × ISig) := []
   incls : Array Incl := #[]
   /-- Field reads whose subject was not yet known: subject, index, field. -/
@@ -1137,6 +1140,31 @@ def plainCall (c : Call) : M Unit := do
   unify c.callee (.func c.given c.result c.row (← freshCls) (← freshTy) c.acc)
   accSub c.self c.acc
 
+/-- The regions of the references in some types, through tuples, in order. -/
+partial def refRegions (ts : List ITy) : M (List Nat) := do
+  let mut out := []
+  for t in ts do
+    match ← find t with
+    | .ref ρ _ => out := out ++ [ρ]
+    | .tuple fs => out := out ++ (← refRegions fs)
+    | _ => pure ()
+  pure out
+
+/-- A callable that takes a reference, to a region nothing it captured
+mentions (directly or in a tuple), can take one to any cell: its type binds
+the region. -/
+def rankClosure (params caps : List ITy) (acc : Nat) : M Unit := do
+  if (← binderOf acc).isSome then return
+  let mut chosen : Option Nat := none
+  for ρ in ← refRegions params do
+    let root ← findRg ρ
+    if chosen.isNone && !(← isAtom root) && !(← caps.anyM (mentionsRg root)) then
+      chosen := some root
+  if let some region := chosen then
+    markRank region
+    let a ← findAcc acc
+    modify fun s => { s with accVer := s.accVer + 1, accs := s.accs.modify a fun x => { x with binder := some region } }
+
 /-- Settle a call if enough is known. A callable whose type binds a region
 is called at the region this call chooses: what it takes and gives are its
 type's with that region. A callable nothing is known of, given a reference,
@@ -1252,6 +1280,12 @@ partial def tryCall (c : Call) : M Bool := do
 /-- Enforce the inclusions and the field reads until nothing more is learnt. -/
 partial def settle : M Unit := do
   let before := (← get).gen
+  let waitingRanks := (← get).closureRanks
+  modify fun s => { s with closureRanks := #[] }
+  for (params, caps, acc) in waitingRanks do
+    if ← params.anyM fun p => do pure (match ← find p with | .var _ => true | _ => false) then
+      modify fun s => { s with closureRanks := s.closureRanks.push (params, caps, acc) }
+    else rankClosure params caps acc
   let waitingCalls := (← get).calls
   modify fun s => { s with calls := #[] }
   for c in waitingCalls do
@@ -1660,16 +1694,11 @@ partial def inferRhs (Γ : Array ITy) : Rhs → M (ITy × Option ISig)
     -- mentions, can take one to any cell: its type binds the region.
     if (← get).regions && (← get).ranked && (← get).curScc != some ((← get).scc[fn]?.getD fn) then
       if (← binderOf sig.acc).isNone then
-        let mut chosen : Option Nat := none
-        for p in sig.params do
-          if let .ref ρ _ ← find p then
-            let root ← findRg ρ
-            if chosen.isNone && !(← isAtom root) && !(← sig.caps.anyM (mentionsRg root)) then
-              chosen := some root
-        if let some region := chosen then
-          markRank region
-          let a ← findAcc sig.acc
-          modify fun s => { s with accVer := s.accVer + 1, accs := s.accs.modify a fun x => { x with binder := some region } }
+        -- (What it is given may not be known yet: a parameter read a part at
+        -- a time is a tuple only once something says so.)
+        if ← sig.params.anyM fun p => do pure (match ← find p with | .var _ => true | _ => false) then
+          modify fun s => { s with closureRanks := s.closureRanks.push (sig.params, sig.caps, sig.acc) }
+        else rankClosure sig.params sig.caps sig.acc
     let cls ← freshCls
     if (← get).strict then modify fun s => { s with onces := s.onces.push (cls, sig.caps) }
     let env ← freshTy
