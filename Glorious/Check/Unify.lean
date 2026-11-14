@@ -18,6 +18,57 @@ def bindTy (id : Nat) (t : Ty) : M Unit := do
 def bindRow (id : Nat) (r : Row) : M Unit :=
   modify fun s => { s with rows := s.rows.set! id (some r) }
 
+/-- Can two types never be the same, whatever what is still unknown in them
+turns out to be? Two instances of an effect whose arguments are apart are two
+effects (`Store<Int>`, `Store<Str>`); a function's own type parameters are
+each apart from the other and from every type that is not a parameter. -/
+partial def apart (a b : Ty) : M Bool := do
+  match ← find a, ← find b with
+  | .var _, _ => pure false
+  | _, .var _ => pure false
+  | .con n as, .con m bs =>
+    if n != m || as.length != bs.length then pure true else anyApart as bs
+  | .tuple as, .tuple bs => if as.length != bs.length then pure true else anyApart as bs
+  | .fn ps r _ _ _, .fn qs s _ _ _ =>
+    if ps.length != qs.length then pure true else anyApart (r :: ps) (s :: qs)
+  | .ref _ x _, .ref _ y _ => apart x y
+  | _, _ => pure true
+where
+  anyApart (as bs : List Ty) : M Bool := (as.zip bs).anyM fun (x, y) => apart x y
+
+/-- Are the two written the same, as far as each is known? -/
+partial def sameTy (a b : Ty) : M Bool := do
+  match ← find a, ← find b with
+  | .var i, .var j => pure (i == j)
+  | .con n as, .con m bs => if n != m || as.length != bs.length then pure false else all as bs
+  | .tuple as, .tuple bs => if as.length != bs.length then pure false else all as bs
+  | .fn ps r _ _ _, .fn qs s _ _ _ =>
+    if ps.length != qs.length then pure false else all (r :: ps) (s :: qs)
+  | .ref _ x _, .ref _ y _ => sameTy x y
+  | _, _ => pure false
+where
+  all (as bs : List Ty) : M Bool := (as.zip bs).allM fun (x, y) => sameTy x y
+
+/-- The instance of an effect among those of a row that one named here is:
+the one written the same; or, failing that, the one it could be. Where it
+could be either of two that are themselves apart, which is meant has to be
+said. None if every instance of the effect in the row is another. -/
+def findInstance (effs : List (String × List Ty)) (e : String × List Ty) :
+    M (Option (Nat × List Ty)) := do
+  let named := (effs.zipIdx.filter fun ((n, args), _) => n == e.1 && args.length == e.2.length)
+  let mut could : List (Nat × List Ty) := []
+  for ((_, args), i) in named do
+    if ← (args.zip e.2).allM fun (x, y) => sameTy x y then return some (i, args)
+    unless ← (args.zip e.2).anyM fun (x, y) => apart x y do could := could ++ [(i, args)]
+  match could with
+  | [] => pure none
+  | [one] => pure (some one)
+  | first :: rest =>
+    for (_, other) in rest do
+      if ← (first.2.zip other).anyM fun (x, y) => apart x y then
+        throw s!"which `{e.1}` is meant is not known here, and there are several: write the operation with its types, as in `operation<Type>(..)`"
+    pure (some first)
+
 mutual
 
 partial def unify (a b : Ty) : M Unit := do
@@ -57,12 +108,19 @@ partial def unifyRow (r1 r2 : Row) : M Unit := do
   let r2 ← flattenRow r2
   let e1 ← collapse r1.effs
   let e2 ← collapse r2.effs
+  -- Each effect of the one with the instance of it the other has, if any.
+  let mut taken : List Nat := []
+  let mut only1 : List (String × List Ty) := []
   for (n, args) in e1 do
-    match e2.lookup n with
-    | some args' => unifyAll args args'
-    | none => pure ()
-  let only1 := e1.filter fun e => (e2.lookup e.1).isNone
-  let only2 := e2.filter fun e => (e1.lookup e.1).isNone
+    let left := e2.zipIdx.filterMap fun (e, i) => if taken.contains i then none else some e
+    match ← findInstance left (n, args) with
+    | some (k, args') =>
+      unifyAll args args'
+      -- (`k` counts among those not yet taken.)
+      let at_ := ((List.range e2.length).filter (!taken.contains ·))[k]?.getD k
+      taken := at_ :: taken
+    | none => only1 := only1 ++ [(n, args)]
+  let only2 := e2.zipIdx.filterMap fun (e, i) => if taken.contains i then none else some e
   let unhandled := fun (e : String × List Ty) =>
     (throw s!"effect `{e.1}` is not handled here" : M Unit)
   match r1.tail, r2.tail with
@@ -88,13 +146,14 @@ partial def unifyRow (r1 r2 : Row) : M Unit := do
       bindRow i ⟨only2, some k⟩
       bindRow j ⟨only1, some k⟩
 
-/-- A row names each effect once: unify the arguments of repeated names. -/
+/-- A row names each instance of an effect once. -/
 partial def collapse (effs : List (String × List Ty)) : M (List (String × List Ty)) := do
   let mut out : List (String × List Ty) := []
   for (n, args) in effs do
-    match out.lookup n with
-    | some args' => unifyAll args args'
-    | none => out := out ++ [(n, args)]
+    let again ← out.anyM fun (m, args') =>
+      if m == n && args.length == args'.length then (args.zip args').allM fun (x, y) => sameTy x y
+      else pure false
+    unless again do out := out ++ [(n, args)]
   pure out
 
 end
@@ -120,11 +179,11 @@ calls of one function value made under different handlers.
 /-- The named effects of a callee must be permitted where it is called. -/
 def includeNamed (callee amb : Row) (what : String) : M Unit := do
   let c ← flattenRow callee
-  for (e, args) in dedupe c.effs do
+  for (e, args) in ← collapse c.effs do
     let a ← flattenRow amb
     try
-      match a.effs.lookup e with
-      | some args' => unifyAll args args'
+      match ← findInstance a.effs (e, args) with
+      | some (_, args') => unifyAll args args'
       | none => unifyRow amb ⟨[(e, args)], some (← freshRowVar)⟩
     catch err => throw s!"{what} cannot be called here: {err}"
 
@@ -195,8 +254,8 @@ partial def settleRows (bind : Option (Nat → Bool)) (final : Bool) : M Unit :=
       | [] => pure ()
       | first :: _ =>
         if ambs.all (·.tail == first.tail) && first.tail != some ρ then
-          let common := (dedupe first.effs).filter fun (n, _) =>
-            ambs.all fun a => a.effs.any (·.1 == n)
+          let common ← (← collapse first.effs).filterM fun e =>
+            ambs.allM fun a => do pure (← findInstance a.effs e).isSome
           modify fun s => { s with rows := s.rows.set! ρ (some ⟨common, first.tail⟩) }
           restore
           return ← settleRows bind final

@@ -4,6 +4,7 @@ public import Glorious.Syntax.Parser
 public import Glorious.Syntax.Resolve
 public import Glorious.Syntax.Modules
 public import Glorious.Elab
+public import Glorious.Elab.Instances
 public import Glorious.Check
 public import Glorious.Infer
 public import Glorious.Prelude
@@ -309,7 +310,9 @@ def compileSource (src : String) (check : Bool := true)
     | some b => do
       let (items, b) := Elab.untrait b all
       -- Nor a borrow of a field: each is a variable of its own by now.
-      pure (← Elab.unfield b items, some b)
+      let items ← Elab.unfield b items
+      -- Nor a family of effects: each instance used is an effect of its own.
+      pure (← Elab.instances b written items, some b)
     | none => pure (all, none)
   -- What nothing reaches is not part of the program that runs. But what the
   -- program's own functions say is looked at wherever they are: one that

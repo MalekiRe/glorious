@@ -508,7 +508,11 @@ def resolveName (scope : Scope) (qual : Option String) (x : String) : M Head := 
     if let some q := qual then
       unless q == sig.trait do throw s!"`{x}` is not a function of `{q}`"
     return .method sig
-  if let some t := s.group.lookup x then return .fn t [] true
+  if let some t := s.group.lookup x then
+    -- (`f<A>(..)` of the function being checked, or one checked with it:
+    -- its type parameters are what they are in here.)
+    modify fun st => { st with instWith := none }
+    return .fn t [] true
   if let some scheme := s.fns.lookup x then
     if s.unsafeFns.contains x && !(s.unsafeBlock || s.unsafeFns.contains s.owner) then
       throw s!"`{Syntax.lastSegment x}` is unsafe: it can be named only in `unsafe \{ .. }` or in an `unsafe fn`"

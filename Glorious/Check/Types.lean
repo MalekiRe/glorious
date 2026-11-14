@@ -91,6 +91,11 @@ structure Scheme where
   /-- Types of callables that must come back when called: they may hold no
   label to jump to. With the reason. -/
   stays : List (Ty × String) := []
+  /-- The types that say which instance of an effect each operation performed
+  or handled in the function is, and which those of the functions it calls
+  are: one after another, in the order of the function's text. A use of the
+  function has them at its own types. -/
+  sites : List Ty := []
   /-- The traits the function needs of its type parameters, in the order it is
   given the evidence: each a trait and one of `tvars`. -/
   bounds : List (String × Ty) := []
@@ -639,6 +644,18 @@ structure St where
   kimpls : List Traits.Impl := []
   /-- The bounds of the scheme last instantiated, at that use. -/
   lastBounds : List (String × Ty) := []
+  /-- The same of its `sites`. -/
+  lastSites : List Ty := []
+  /-- Where the function being checked performs or handles an operation of
+  an effect that has type parameters, or calls a function that does: the
+  function, the call's number, which of the three (`op`, `handle`, `call`),
+  the effect or the function called, and the types that say which instance. -/
+  instSites : Array (String × Nat × String × String × List Ty) := #[]
+  /-- The same once a function is done: for each, its places with where each
+  one's types are among the function's `sites`; and those types, where they
+  are known without knowing who calls the function. -/
+  siteTable : List (String × List (Nat × String × String × Nat × Nat)) := []
+  siteTypes : List (String × List (Option Syntax.TypeExpr)) := []
   /-- Bounds to meet once the types of the group being inferred are known. -/
   bounds : Array Bound := #[]
   groupUses : Array GroupUse := #[]
@@ -760,8 +777,36 @@ partial def flattenRow (r : Row) : M Row := do
       pure ⟨r.effs ++ rest.effs, rest.tail⟩
     | _ => pure r
 
+/-- Two types written the same, once what is known of them is filled in. -/
+partial def Ty.same : Ty → Ty → Bool
+  | .var i, .var j => i == j
+  | .con n as, .con m bs => n == m && as.length == bs.length && (as.zip bs).all fun (x, y) => x.same y
+  | .tuple as, .tuple bs => as.length == bs.length && (as.zip bs).all fun (x, y) => x.same y
+  | .fn ps r _ _ _, .fn qs s _ _ _ =>
+    ps.length == qs.length && r.same s && (ps.zip qs).all fun (x, y) => x.same y
+  | .ref _ x _, .ref _ y _ => x.same y
+  | _, _ => false
+
+/-- A type as it would be written, if nothing in it is unknown or a type
+parameter: the instance of an effect it names can then be an effect of its
+own. -/
+partial def Ty.written : Ty → Option Syntax.TypeExpr
+  | .var _ => none
+  | .con n args =>
+    if n.startsWith "'" then none
+    else (args.mapM Ty.written).map (Syntax.TypeExpr.name n)
+  | .tuple args => (args.mapM Ty.written).map .tuple
+  | .fn ps r _ _ _ => do pure (.fn (← ps.mapM Ty.written) (← r.written))
+  | .ref how t _ =>
+    match how with
+    | .con "&mut" [] => t.written.map (.ref true · none)
+    | _ => t.written.map (.ref false · none)
+
+/-- A row with each instance of an effect once (of types filled in). -/
 def dedupe (effs : List (String × List Ty)) : List (String × List Ty) :=
-  effs.foldl (fun acc e => if acc.any (·.1 == e.1) then acc else acc ++ [e]) []
+  effs.foldl (fun acc e =>
+    if acc.any (fun o => o.1 == e.1 && o.2.length == e.2.length && (o.2.zip e.2).all fun (x, y) => x.same y)
+    then acc else acc ++ [e]) []
 
 mutual
 
@@ -926,7 +971,8 @@ def instantiate (s : Scheme) (via : Option String := none) (fixed : List (Nat ×
       | some f => s!"{pos}`{f}` may use what it is given more than once"
       | none => why
     modify fun st => { st with dups := st.dups.push (subst tm rm cm t, why) }
-  modify fun st => { st with lastBounds := s.bounds.map fun (tr, t) => (tr, subst tm rm cm t) }
+  modify fun st => { st with lastBounds := s.bounds.map fun (tr, t) => (tr, subst tm rm cm t)
+                             lastSites := s.sites.map (subst tm rm cm) }
   for (cap, lifetimes) in s.ranked do
     let here := ((cm.lookup cap).getD cap, lifetimes.map fun (q, name) => ((cm.lookup q).getD q, name))
     modify fun st => { st with ranked := here :: st.ranked }

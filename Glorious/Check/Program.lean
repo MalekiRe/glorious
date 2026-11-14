@@ -150,7 +150,8 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
   let mut pending := (← get).bounds
   let uses := (← get).groupUses
   let cands := (← get).dropCands
-  modify fun s => { s with bounds := #[], groupUses := #[], dropCands := #[], firstSaid := none }
+  let instSites := (← get).instSites
+  modify fun s => { s with bounds := #[], groupUses := #[], dropCands := #[], firstSaid := none, instSites := #[] }
   -- A variable whose value's type has `Drop` needs the implementation, to run
   -- its function when the value is destroyed.
   -- A value that is let go is destroyed by its type's function, if its type
@@ -346,7 +347,24 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
       let root ← findCap cap
       if scheme.cvars.contains root && !ranked.any (·.1 == root) then
         ranked := (root, ← lifetimes.mapM fun (q, name) => do pure (← findCap q, name)) :: ranked
-    let scheme := { scheme with edges := edges.toList, ranked }
+    -- Which instance of an effect each operation of the function is about,
+    -- as the function's type has its type parameters.
+    let mut vector : Array Ty := #[]
+    let mut table : Array (Nat × String × String × Nat × Nat) := #[]
+    for (owner, id, kind, name, tys) in instSites do
+      if owner == d.name then
+        let mut whose : List Ty := []
+        for ty in tys do
+          let (ty, seen') ← openParams seen (← zonk ty)
+          seen := seen'
+          whose := whose ++ [ty]
+        table := table.push (id, kind, name, vector.size, whose.length)
+        vector := vector ++ whose.toArray
+    unless table.isEmpty do
+      modify fun s =>
+        { s with siteTable := (d.name, table.toList) :: s.siteTable
+                 siteTypes := (d.name, vector.toList.map Ty.written) :: s.siteTypes }
+    let scheme := { scheme with edges := edges.toList, ranked, sites := vector.toList }
     -- The type parameters as written, for a call that writes types for them.
     let written := (d.params.filter fun p => !p.startsWith "'").map fun p =>
       match seen.lookup s!"'{p}@{rigidOwner decls d}" with
@@ -1073,7 +1091,7 @@ def finish : M Elab.Blocks := do
     pure ⟨s.given.toList, links ++ s.envLinks.toList, s.coercions.toList,
       ⟨s.dictTable.toList, s.methodCalls.toList, s.fnBounds, implEs, s.dropSites.toList, destroys⟩,
       s.fieldTable.toList, s.fieldReads.toList, s.packs.toList, s.envFns, s.envWraps.toList,
-      s.derefReads.toList⟩
+      s.derefReads.toList, s.siteTable, s.siteTypes⟩
 
 /-- Check a whole program. Gives what the elaborator needs to know about its
 blocks: which take an argument they do not name, and for each that is handed a

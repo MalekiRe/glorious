@@ -2890,6 +2890,37 @@ borrow tried).
 - The fields of a value are destroyed the last declared first, and the
   elements of an array the last first. (Rust goes the other way.)
 
+## Instances of an effect, told apart by their type arguments
+
+- `effect Store<C> { take() -> [C], put([C]) }` is a family. `Store<Int>` and
+  `Store<Str>` are two effects (§10.1: an effect is its declaration and its
+  arguments), each handled by the nearest handler of exactly that one. A row
+  had one instance of a family and no more.
+- **In the checker**, two instances are the same effect if they are written
+  the same; they are two if their arguments can never be the same (`Int` and
+  `Str`, or two different type parameters of a function). One not yet known
+  is taken for the instance its context names, the nearest first (§10.3);
+  where it could be either of two that are themselves apart, the program has
+  to say: `take<Int>()`. An operation's arguments are looked at before its
+  effect is, so `put(names)` says which by what it is given.
+- **Core is unchanged.** It knows an operation by a number, so before a
+  program is elaborated each instance it uses becomes an effect of its own
+  (`take@<Int>`), and a function about an instance of its caller's choosing
+  (`fn store<C>`, `fn each_mut<C>`) is written out once for each choice. The
+  checker says, for every call, which types say which instance, in terms a
+  caller of the function fills in; the copies are found from `main`.
+  Nothing is done to a program in which no family has two instances.
+- I had this down as needing a runtime identity for instances through the
+  kernel, its proofs and the three backends. Copying needs none of it.
+- **Limits.** A trait's function is called through a value at runtime, so
+  one cannot be copied: an implementation's function may perform `Store<Int>`
+  but not `Store<C>` for a `C` of its own. A function that is copied has to
+  be called where it is named, not passed as a value. A handler handles one
+  instance of a family, the one its computation's type names; there is no
+  way yet to write which in the arm. Two functions that call each other and
+  are both copied are not supported. Generic operations (`emit<T>(T)`, with
+  the parameter on the operation and not the effect) are still refused.
+
 ## A borrow written anywhere in a statement is a scope
 
 - Core has a rule for a borrow that is a scope of its own: while it lasts,

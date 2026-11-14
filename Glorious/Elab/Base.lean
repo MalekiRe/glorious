@@ -140,6 +140,14 @@ structure Blocks where
   envWraps : List (Nat × List Nat) := []
   /-- The fields read by name of what a named reference points to. -/
   derefReads : List Nat := []
+  /-- For each function that performs or handles an operation of an effect
+  with type parameters, or calls one that does: the places, by the number of
+  the call, with which of `op`, `handle`, `call`, `ref` each is, the effect or
+  the function called, and where its types are among the function's. -/
+  sites : List (String × List (Nat × String × String × Nat × Nat)) := []
+  /-- Those types, each where it is known without knowing who calls the
+  function. -/
+  siteTypes : List (String × List (Option Syntax.TypeExpr)) := []
 
 structure Globals where
   ctors : List (String × CtorInfo) := []

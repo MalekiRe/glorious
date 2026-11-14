@@ -53,6 +53,10 @@ partial def inferExpr (scope : Scope) (amb : Row) : Expr → M Ty
         throw s!"`{x}` gives callables one environment to share, so it is called where it is named: write a block that calls it"
       if inGroup then
         modify fun s => { s with groupUses := s.groupUses.push ⟨0, x, s.owner, s.pos⟩ }
+      else
+        let sites := (← get).lastSites
+        unless sites.isEmpty do
+          modify fun s => { s with instSites := s.instSites.push (s.owner, 0, "ref", x, sites) }
       pure t
     | .method sig =>
       throw s!"`{x}` is a function of the trait `{sig.trait}`, so it is called where it is named: write a block that calls it"
@@ -638,14 +642,34 @@ partial def inferCall (scope : Scope) (amb : Row) (f : Expr) (args : List Expr)
       unless sig.must && sig.result.isSome do abandons (← get).anon s!"operation `{x}`"
       let decl := ((← get).effects.lookup sig.effect).getD ⟨[], [], []⟩
       let inst ← decl.fresh
+      -- `operation<A>(..)`: which instance of its effect, said.
+      if let some written := (← get).instWith then
+        modify fun s => { s with instWith := none }
+        let types := (inst.zip (decl.lifetimes ++ List.replicate inst.length false)).filterMap fun (t, life) =>
+          if life then none else some t
+        unless written.length == types.length do
+          throw s!"`{sig.effect}` has {types.length} type parameters, and `{x}` is written with {written.length}"
+        for (t, w) in types.zip written do
+          unify t w
       let (payload, result) := instOp sig inst
-      try unifyRow amb ⟨[(sig.effect, inst)], some (← freshRowVar)⟩
+      -- (What it is given first: that can say which instance of its effect
+      -- this is, where there are several.)
+      checkArgs scope amb s!"operation `{x}`" payload args call
+      try
+        match ← findInstance (← flattenRow amb).effs (sig.effect, inst) with
+        | some (_, args') => unifyAll inst args'
+        | none => unifyRow amb ⟨[(sig.effect, inst)], some (← freshRowVar)⟩
       catch e => throw s!"operation `{x}` cannot be performed here: {e}"
+      -- Which instance of its effect this is, for when each is made an
+      -- effect of its own.
+      let which := (inst.zip (decl.lifetimes ++ List.replicate inst.length false)).filterMap fun (t, life) =>
+        if life then none else some t
+      unless which.isEmpty do
+        modify fun s => { s with instSites := s.instSites.push (s.owner, call, "op", sig.effect, which) }
       -- What the effect's declaration asks of its parameters.
       if let some asked := (← get).typeBounds.lookup sig.effect then
         if call != 0 then
           needBounds (100000000000000000 + call) (asked.filterMap fun (tr, i) => inst[i]?.map (tr, ·))
-      checkArgs scope amb s!"operation `{x}`" payload args call
       -- The handler may run a callable it is given, there and then.
       use scope (.call s!"operation `{x}`" payload)
       match result with
@@ -783,6 +807,11 @@ partial def inferCall (scope : Scope) (amb : Row) (f : Expr) (args : List Expr)
     | .local (.poly s) => do
       applyTy scope amb s!"`{x}`" (← instantiate s (some x)) args call
     | .fn t bounds inGroup => do
+      -- The instances of effects the function called is about, at this call.
+      unless inGroup do
+        let sites := (← get).lastSites
+        unless sites.isEmpty do
+          modify fun s => { s with instSites := s.instSites.push (s.owner, call, "call", x, sites) }
       -- Callables that share an environment: the first holds it, and each
       -- other is built over what the first captured, to run in its place.
       for group in ((← get).fnGroups.lookup x).getD [] do
@@ -1385,6 +1414,14 @@ partial def inferHandle (scope : Scope) (amb : Row) (subject : Expr) (arms : Lis
       else arityError s!"an arm for the operation `{x}`" payload.length ps.length
   for (e, inst) in insts do
     let decl := (s.effects.lookup e).getD ⟨[], [], []⟩
+    let which := (inst.zip (decl.lifetimes ++ List.replicate inst.length false)).filterMap fun (t, life) =>
+      if life then none else some t
+    unless which.isEmpty do
+      -- (Told by the number of the call that is the computation handled.)
+      let subjectId := match subject with
+        | .call id _ _ => id
+        | _ => 0
+      modify fun st => { st with instSites := st.instSites.push (st.owner, subjectId, "handle", e, which) }
     unless decl.ops.all covered.contains do
       try unifyRow amb ⟨[(e, inst)], some (← freshRowVar)⟩
       catch err =>
