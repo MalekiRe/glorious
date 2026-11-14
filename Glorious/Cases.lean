@@ -847,7 +847,7 @@ def cases : List Case := [
   ⟨"trait Show { fn show(Self) -> Int }\nimpl Show for Int { }\nfn main() { 0 }",
     [], "error: `impl Show for Int` lacks the function `show`"⟩,
   ⟨"trait Show { fn show(Self) -> Int }\nimpl Show for Int { fn show(x) { Some(x) } }\nfn main() { 0 }",
-    [], "error: in `Show::show@Int`: this is not the function `Show` declares, in what it takes, gives or performs: `Result<Int, ()>` is not `Int`"⟩,
+    [], "error: 2:34: in `Show::show@Int`: the result of a clause: expected `Int`, found `Result<Int, ()>`"⟩,
   -- A trait's function performs nothing its caller would have to handle, and
   -- is called where it is named.
   ⟨"effect Ask { ask() -> Int }\ntrait Show { fn show(Self) -> Int }\nimpl Show for Int { fn show(x) { x + ask() } }\nfn main() { handle show(1) { ask(k) => k(1) } }",
@@ -1538,7 +1538,7 @@ def cases : List Case := [
   ⟨"trait Pick { fn first(&'a Self, &'b Self) -> &'a Self }\nimpl Pick for Int { fn first(x, y) { x } }\nfn main() { let mut a = 1; let mut b = 2; let r = first(&a, &b); b = 5; *r }",
     [], "1"⟩,
   ⟨"trait Pick { fn first(&'a Self, &'b Self) -> &'a Self }\nimpl Pick for Int { fn first(x, y) { y } }\nfn main() { 0 }",
-    [], "error: in `Pick::first@Int`: this is not the function `Pick` declares, in what it takes, gives or performs: lifetime `the trait's 'b` is not `the trait's 'a`: a reference that lasts for one is used where one that lasts for the other is wanted"⟩,
+    [], "error: 2:38: in `Pick::first@Int`: the result of a clause: lifetime `the trait's 'b` is not known to last as long as `the trait's 'a`: say `the trait's 'b: the trait's 'a`"⟩,
   ⟨"trait Pick { fn any(&Self, &Self) -> &Self }\nimpl Pick for Int { fn any(x, y) { y } }\nfn main() { let mut a = 1; let mut b = 2; let r = any(&a, &b); b = 5; *r }",
     [], "error: 3:64: in `main`: `b` is assigned while `r` holds a reference to it"⟩,
   -- `T: 'a`: what lasts for `'a` may hold a `T`.
@@ -4126,7 +4126,7 @@ def cases : List Case := [
   ⟨"trait Lending { type Item<'a>; fn next<'a>(&'a mut Self) -> Option<Item<'a>> }\nstruct Windows { data: [Int], at: Int }\nimpl Lending for Windows { type Item<'a> = &'a Int; fn next(w) { if(w.at < len_at(&w.data)) { w.at = w.at + 1; Some(&w.data[w.at - 1]) } else { None } } }\nfn main() -> Int { let mut w = Windows { data: [5, 6], at: 0 }; match(next(&mut w)) { Some(x) => *x, None => 0 } }",
     [], "5"⟩,
   ⟨"trait Family { type Of<T>; fn single<T>(T) -> Of<T> }\nstruct Arrays\nimpl Family for Arrays { type Of<T> = [T]; fn single(x) { Some(x) } }\nfn main() -> Int { 1 }",
-    [], "error: in `Family::single@Arrays`: this is not the function `Family` declares, in what it takes, gives or performs: `Result<T, ()>` is not `[T]`"⟩,
+    [], "error: 3:59: in `Family::single@Arrays`: the result of a clause: expected `[T]`, found `Result<T, ()>`"⟩,
   ⟨"trait Shelf { type Holding<T>; fn empty<T>() -> Holding<T>; fn put<T>(Holding<T>, T) -> Holding<T>; fn count<T>(&Holding<T>) -> Int }\nstruct Rows\nimpl Shelf for Rows { type Holding<T> = [T]; fn empty() { [] } fn put(h, x) { push(h, x) } fn count(h) { len_at(h) } }\nfn fill<S: Shelf>() -> Int { let a = <S as Shelf>::put(<S as Shelf>::put(<S as Shelf>::empty(), 1), 2); let b = <S as Shelf>::put(<S as Shelf>::empty(), \"x\"); <S as Shelf>::count(&a) * 10 + <S as Shelf>::count(&b) }\nfn main() -> Int { fill<Rows>() }",
     [], "21"⟩,
   ⟨"trait Pairs { type Both<A, B>; fn make<A, B>(A, B) -> Both<A, B> }\nstruct Tuples\nimpl Pairs for Tuples { type Both<A, B> = (A, B); fn make(a, b) { (a, b) } }\nfn main() -> Int { let p: (Int, Str) = <Tuples as Pairs>::make(4, \"s\"); p.0 }",
@@ -4141,7 +4141,7 @@ def cases : List Case := [
   ⟨"trait View { type Part<'a>; fn part<'a>(&'a Self) -> Part<'a> }\nstruct Pair(Int, Str)\nimpl View for Pair { type Part<'a> = &'a Str; fn part(p) { &(*p).1 } }\nfn main() -> Int { let p = Pair(1, \"abc\"); let s = part(&p); len(*s) }",
     [], "3"⟩,
   ⟨"trait View { type Part<'a>; fn part<'a>(&'a Self) -> Part<'a> }\nstruct Pair(Int, Str)\nimpl View for Pair { type Part<'a> = &'a Str; fn part(p) { (*p).0 } }\nfn main() -> Int { 1 }",
-    [], "error: in `View::part@Pair`: this is not the function `View` declares, in what it takes, gives or performs: `Int` is not `&Str`"⟩,
+    [], "error: 3:60: in `View::part@Pair`: the result of a clause: expected `&Str`, found `Int`"⟩,
   ⟨"trait Lend { type Item<'a>; fn next<'a>(&'a mut Self) -> Option<Item<'a>> }\nstruct Cell(Int)\nimpl Lend for Cell { type Item<'a> = &'a mut Int; fn next(c) { Some(&mut (*c).0) } }\nfn first<L: Lend>(l: &mut L) -> Int { match(next(l)) { Some(_) => 1, None => 0 } }\nfn main() -> Int { let mut c = Cell(1); first(&mut c) }",
     [], "1"⟩,
   ⟨"trait Lend { type Item<'a>; fn next<'a>(&'a mut Self) -> Option<Item<'a>> }\nstruct Cell(Int)\nimpl Lend for Cell { type Item<'a> = &'a mut Int; fn next(c) { Some(&mut (*c).0) } }\nfn leak<'b, L: Lend>(l: &'b mut L) -> Option<L::Item<'b>> { next(l) }\nfn main() -> Int { let mut c = Cell(2); match(leak(&mut c)) { Some(r) => *r = 9, None => () }; c.0 }",
@@ -4213,6 +4213,12 @@ def cases : List Case := [
   -- Two tuples joined are longer than any the program writes
   ⟨"trait Join<B> { type Out; fn join(Self, B) -> Out }\nimpl<..A, ..B> Join<(..B)> for (..A) { type Out = (..A, ..B); fn join(left, right) { let (..a) = left; let (..b) = right; (..a, ..b) } }\ntrait Count { fn count(Self) -> Int }\nimpl Count for () { fn count(t) { 0 } }\nimpl<H, ..R> Count for (H, ..R) where (..R): Count { fn count(t) { let (h, ..r) = t; 1 + count((..r)) } }\nfn main() -> Int { count(join((1, 2, 3), (4, 5, 6))) }",
     [], "6"⟩,
+  -- A trait's function hands back a borrow inside an Option: the implementation knows what it gives while its body is checked
+  ⟨"struct Col<T> { dense: [T], owners: [Int] }\nfn find<T>(c: &Col<T>, e: Int) -> Int { 0 }\ntrait Item { type Store; type Got<'a>; fn at<'a>(&'a mut Store, Int) -> Option<Got<'a>> }\nstruct W<T>(T)\nimpl<T> Item for W<T> { type Store = Col<T>; type Got<'a> = &'a mut T;\n    fn at(store, e) { let i = find(&*store, e); if(i >= 0) { Some(&mut store.dense[i]) } else { None } } }\nfn main() -> Int { let mut a = Col { dense: [1, 2], owners: [0, 1] }; match(<W<Int> as Item>::at(&mut a, 1)) { Some(x) => *x = 7, None => () }; a.dense[0] }\n",
+    [], "7"⟩,
+  -- Query items over columns, with a lifetime GAT
+  ⟨"\nstruct Col<T> { dense: [T], owners: [Int] }\n\nfn find<T>(c: &Col<T>, e: Int) -> Int {\n    let mut i = 0;\n    let mut found = 0 - 1;\n    while({ i < len_at(&c.owners) }) { if(c.owners[i] == e) { found = i } else { () }; i = i + 1 };\n    found\n}\n\ntrait Item { type Store; type Got<'a>; fn at<'a>(&'a mut Store, Int) -> Option<Got<'a>> }\nstruct W<T>(T)\nstruct R<T>(T)\nimpl<T> Item for W<T> { type Store = Col<T>; type Got<'a> = &'a mut T;\n    fn at(store, e) { let i = find(&*store, e); if(i >= 0) { Some(&mut store.dense[i]) } else { None } } }\nimpl<T> Item for R<T> { type Store = Col<T>; type Got<'a> = &'a T;\n    fn at(store, e) { let i = find(&*store, e); if(i >= 0) { Some(&store.dense[i]) } else { None } } }\n\nfn main() -> Int {\n    let mut a = Col { dense: [1, 2, 3], owners: [0, 1, 2] };\n    let mut b = Col { dense: [10, 20], owners: [0, 2] };\n    let mut total = 0;\n    let mut e = 0;\n    while({ e < 3 }) {\n        match(<W<Int> as Item>::at(&mut a, e)) {\n            Some(x) => match(<R<Int> as Item>::at(&mut b, e)) {\n                Some(y) => *x = *x + *y,\n                None => ()\n            },\n            None => ()\n        };\n        e = e + 1\n    };\n    a.dense[0] + a.dense[1] + a.dense[2]\n}\n",
+    [], "36"⟩,
   -- `drop` is not for a program to call.
   ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nfn main() { let mut f = File(7); drop(&mut f); 0 }",
     [], "error: 3:34: in `main`: `drop` is run when what holds a value ends; a program does not call it"⟩,

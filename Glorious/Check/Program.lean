@@ -1165,6 +1165,11 @@ def checkGroup (decls : List FnDecl) : M Unit := do
           | some (.fn ps _ _ _ _, _) =>
             if ps.length == annots.length then (annots.zip ps).map fun (a, p) => a <|> some p else annots
           | _ => annots
+        -- (And what it gives, as its trait says: a borrow made in its body is
+        -- known to be given back while the body is checked, not only after.)
+        let ret := ret <|> match wanted with
+          | some (.fn _ r _ _ _, _) => some r
+          | _ => none
         let t ← inferCallable [] annots ret (some d.name) d.clauses s!"the clauses of `{d.name}` do"
         if let some effects := declared then
           let (effects, rest) ← resolveRow rigid false effects
