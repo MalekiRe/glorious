@@ -112,7 +112,13 @@ partial def inferExpr (scope : Scope) (amb : Row) : Expr → M Ty
       modify fun s => { s with fieldReads := s.fieldReads.push (id, n) }
       return ← inferExpr scope amb (.proj e n)
     let subject ← inferExpr scope amb e
-    modify fun s => { s with aparts := s.aparts.push (subject, s.pos) }
+    -- (Of which name it is a part, where it is one of a name's.)
+    let whose := match e with
+      | .name none x => match scope.lookup x with
+        | some (.val _ bid) => some bid
+        | _ => none
+      | _ => none
+    modify fun s => { s with aparts := s.aparts.push (subject, s.pos, whose) }
     let unknown := match ← find subject with
       | .var _ => true
       | _ => false
@@ -153,7 +159,13 @@ partial def inferExpr (scope : Scope) (amb : Row) : Expr → M Ty
   | .proj e idx => do
     if let some field ← inferFieldOfPlace scope (.proj e idx) then return field
     let subject ← inferExpr scope amb e
-    modify fun s => { s with aparts := s.aparts.push (subject, s.pos) }
+    -- (Of which name it is a part, where it is one of a name's.)
+    let whose := match e with
+      | .name none x => match scope.lookup x with
+        | some (.val _ bid) => some bid
+        | _ => none
+      | _ => none
+    modify fun s => { s with aparts := s.aparts.push (subject, s.pos, whose) }
     match ← fieldType subject idx with
     | some t =>
       let named := match e with
@@ -1012,6 +1024,10 @@ partial def inferStmts (scope : Scope) (amb : Row) (stmts : List Stmt)
           unifyAt "`*` assigns through a reference" (.ref .uniq inner cap)
             (← inferPlace scope amb e)
           mustDrop inner "assigning through a reference lets go of what was there"
+          -- What was there is destroyed.
+          modify fun s =>
+            { s with dropCands :=
+                s.dropCands.push (⟨s.owner, s.at_.1, s.at_.2, Elab.derefSite, true⟩, inner, s.pos) }
           pure (inner, UseKind.through cap (placeName e) true)
         | _ => throw "only a mutable variable or `*reference` can be assigned"
       let whole ← match value with

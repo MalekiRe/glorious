@@ -1,6 +1,6 @@
 import Std.Data.HashSet
 import Glorious.Syntax.Ast
-import Glorious.Elab
+import Glorious.Elab.Base
 import Glorious.Traits
 
 namespace Glorious.Check
@@ -385,7 +385,7 @@ structure St where
   givenReads : Array (Ty × String) := #[]
   /-- The values a field was taken out of, leaving the rest: their types and
   where. One with `Drop` is taken apart only where it is declared. -/
-  aparts : Array (Ty × String) := #[]
+  aparts : Array (Ty × String × Option Nat) := #[]
   /-- The bounds written between them: the first lasts at least as long as
   the second. -/
   outlives : List (Nat × Nat) := []

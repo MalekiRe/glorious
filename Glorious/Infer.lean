@@ -265,7 +265,7 @@ structure St where
   /-- The regions callable types bind for whoever calls them: no cells, but
   like cells in that a function inside one that binds such a region has to
   be told which it is. -/
-  rankBinders : List Nat := []
+  rankBinders : Std.HashSet Nat := {}
   /-- Calls of such callables: what the callable gives as its type has it,
   what this call gives, the region the type binds and the one the call
   chooses. One is the other with the region changed, whichever is known first. -/
@@ -335,12 +335,19 @@ def unifyRg (a b : Nat) : M Unit := do
   if ← isAtom a then
     if ← isAtom b then
       throw "region: references to two different mutable variables are used as one"
-    modify fun s => { s with accVer := s.accVer + 1, rgs := s.rgs.set! b (some (.link a)) }
+    modify fun s => { s with accVer := s.accVer + 1, rgs := s.rgs.set! b (some (.link a))
+                             rankBinders := joined s.rankBinders b a }
   else if ← isAtom b then
-    modify fun s => { s with accVer := s.accVer + 1, rgs := s.rgs.set! a (some (.link b)) }
+    modify fun s => { s with accVer := s.accVer + 1, rgs := s.rgs.set! a (some (.link b))
+                             rankBinders := joined s.rankBinders a b }
   else
     let (lo, hi) := if a < b then (a, b) else (b, a)
-    modify fun s => { s with accVer := s.accVer + 1, rgs := s.rgs.set! hi (some (.link lo)) }
+    modify fun s => { s with accVer := s.accVer + 1, rgs := s.rgs.set! hi (some (.link lo))
+                             rankBinders := joined s.rankBinders hi lo }
+where
+  /-- The regions callables bind, once `gone` is the same region as `kept`. -/
+  joined (ranked : Std.HashSet Nat) (gone kept : Nat) : Std.HashSet Nat :=
+    if ranked.contains gone then ranked.insert kept else ranked
 
 def freshAcc : M Nat := do
   -- (in one step: the state is not held twice, so the array is not copied)
@@ -475,11 +482,14 @@ def accWrSet (a : Nat) : M (List Nat) := accSolve true a
 
 /-- A region is one a callable type binds for whoever calls it. -/
 def markRank (r : Nat) : M Unit :=
-  modify fun s => if s.rankBinders.contains r then s else { s with rankBinders := r :: s.rankBinders }
+  -- (Kept by what stands for the region: where two are made one, what
+  -- stands for both is one if either was. So asking is one look.)
+  do
+    let root ← findRg r
+    modify fun s => { s with rankBinders := s.rankBinders.insert root }
 
 def isRank (r : Nat) : M Bool := do
-  let root ← findRg r
-  (← get).rankBinders.anyM fun b => do pure ((← findRg b) == root)
+  pure ((← get).rankBinders.contains (← findRg r))
 
 /-- Every region a callable type binds, the first first. -/
 def bindersOf (a : Nat) : M (List Nat) := do

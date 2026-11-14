@@ -116,7 +116,7 @@ only the module that declares the type may do that. -/
 def checkAparts : M Unit := do
   let s ← get
   modify fun st => { st with aparts := #[] }
-  for (t, pos) in s.aparts do
+  for (t, pos, _) in s.aparts do
     if let .con n _ ← find t then
       if s.kimpls.any (fun I => I.trait == "Drop" && I.head == n) then
         if let some here := s.modules.homes.lookup s.owner then
@@ -1006,6 +1006,34 @@ def checkUses (pos : String) (outer : Scope) (binds : Scope) (body : List Stmt) 
       unless mine.isEmpty do
         modify fun st => { st with partReads := st.partReads.filter fun (owner, _, _, _, _, _) => owner != bid }
     let apart := !mine.isEmpty && !body.any (Syntax.usedWholeStmt x)
+    -- A value with a `drop` to run, of which only parts that can be used
+    -- any number of times are read: reading them takes nothing out of it.
+    -- It stays whole, and is destroyed when its block is left, as a name
+    -- that nothing uses is. (Not in its own `drop`, which is what lets go
+    -- of it.)
+    let mut kept := false
+    if apart then
+      if let (some t, .val _ bid) := (t, b) then
+        if let .con n _ ← find t then
+          if s.kimpls.any (fun I => I.trait == "Drop" && I.head == n)
+              && s.owner != Syntax.implFnName "Drop" n "drop" then
+            let mut plain := true
+            for (subject, idx, _, _) in mine do
+              match ← (try fieldType subject idx catch _ => pure none) with
+              | some ft =>
+                let ft ← zonk ft
+                modify fun st => { st with seen := [] }
+                unless (freeTys ft).isEmpty && (freeCaps ft).isEmpty && !hasParam ft
+                    && !(← tyOwnsOnce [] ft) && (← tyHasDrop [] ft).isNone do
+                  plain := false
+              | none => plain := false
+            if plain then
+              if let some (line, col) := s.bindSites.lookup bid then
+                kept := true
+                modify fun st => { st with
+                  dropCands := st.dropCands.push (⟨st.owner, line, col, x, false⟩, t, pos)
+                  aparts := st.aparts.filter fun (_, _, whose) => whose != some bid }
+    if kept then continue
     if apart then
       let (subject, firstAt) := match mine with
         | (subject, _, _, at_) :: _ => (subject, at_)

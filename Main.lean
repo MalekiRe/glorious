@@ -1,5 +1,6 @@
 import Glorious.Driver
 import Glorious.Cases
+import Glorious.Checks
 import Glorious.Bytecode.Encode
 
 /-!
@@ -30,7 +31,10 @@ import Glorious.Bytecode.Encode
   Every command that compiles a program does this check; this one only reports
   it.
 * `glorious selftest [VM]` runs the test programs on the Core machine and the
-  Lean bytecode machine, and on the Rust VM if its path is given.
+  Lean bytecode machine, and on the Rust VM if its path is given; then what
+  `Glorious/Checks.lean` asks; then says how many of the programs compile and
+  what Core shows of them. The programs are gone through side by side, on as
+  many cores as there are.
 -/
 
 open Glorious
@@ -72,10 +76,78 @@ def startLocals (c : Compiled) : List Nat :=
     | some entry => entry.sig.params.length + entry.sig.caps.length + 1
     | none => 0
 
+/-- The bytes of a compiled program's bytecode file. -/
+def bytecodeBytes (c : Compiled) : ByteArray :=
+  ⟨((Bytecode.Encode.file c.ctorNames.toList (compile c.core)
+    ++ Bytecode.Encode.list Bytecode.Encode.nat (startLocals c)).map Nat.toUInt8).toArray⟩
+
 def writeBytecode (c : Compiled) (out : System.FilePath) : IO Unit :=
-  IO.FS.writeBinFile out
-    ⟨((Bytecode.Encode.file c.ctorNames.toList (compile c.core)
-      ++ Bytecode.Encode.list Bytecode.Encode.nat (startLocals c)).map Nat.toUInt8).toArray⟩
+  IO.FS.writeBinFile out (bytecodeBytes c)
+
+/-- What the commands that go through every test program ask of one: all of
+it found by compiling the program once. -/
+structure Outcome where
+  /-- What the Lean machines give, or why the program does not compile; empty
+  where they were not asked. -/
+  lean : String := ""
+  /-- Why it does not compile. -/
+  error : Option String := none
+  /-- Its bytecode file. -/
+  bytes : Option ByteArray := none
+  /-- What the typing of its Core shows. -/
+  certified : Bool := false
+  strict : Bool := false
+  regions : Bool := false
+  loans : Bool := false
+  /-- The borrows that are scopes of their own, and those that are not. -/
+  lent : Nat := 0
+  plain : Nat := 0
+
+/-- Compile a test program, and with `run` run it on the Lean machines. -/
+def outcome (run : Bool) (c : Case) (files : List (List String × String)) : Outcome :=
+  match compileSource c.src true files with
+  | .error e => { lean := s!"error: {e}", error := some e }
+  | .ok compiled =>
+    let has := fun (f : Typing.Cert → Bool) => (compiled.cert.map f).getD false
+    { lean := if run then evalCompiled compiled c.input else ""
+      bytes := some (bytecodeBytes compiled)
+      certified := compiled.cert.isSome
+      strict := has (·.strict), regions := has (·.regions), loans := has (·.loans)
+      lent := compiled.lent, plain := compiled.plain.length }
+
+/-- What every program starts from, the prelude and the library checked,
+found before the programs are gone through side by side: each would find it
+again for itself otherwise. -/
+def warm : IO Unit := do
+  let ok := fun (t : Thunk (Except String (Nat × Check.St))) =>
+    Task.spawn fun _ => match t.get with
+      | .ok _ => true
+      | .error _ => false
+  for t in [ok checkedPrelude, ok checkedStd, ok checkedPreludeDrop, ok checkedStdDrop] do
+    let _ ← IO.wait t
+
+/-- The same thing found for each of a list, side by side: the runtime runs
+as many at a time as the machine has cores. -/
+def sideBySide {α β : Type} (xs : List α) (f : α → β) : IO (Array β) := do
+  let tasks := xs.toArray.map fun x => Task.spawn fun _ => f x
+  tasks.mapM fun t => IO.wait t
+
+/-- The same, saying how long each took, in milliseconds: for finding what
+is slow. -/
+def sideBySideTimed {α β : Type} [Inhabited β] (xs : List α) (f : α → β) : IO (Array (β × Nat)) := do
+  let tasks ← xs.toArray.mapM fun x => IO.asTask do
+    let before ← IO.monoMsNow
+    let y := f x
+    let after ← IO.monoMsNow
+    pure (y, after - before)
+  tasks.mapM fun t => do
+    match ← IO.wait t with
+    | .ok r => pure r
+    | .error _ => pure (default, 0)
+
+/-- How many programs the Rust VM is run on at a time. -/
+def vmJobs : IO Nat := do
+  pure (((← IO.getEnv "GLORIOUS_JOBS").bind String.toNat?).getD 16)
 
 /-- The expectation at the top of an example file: an optional `// input: ...`
 line, then `// expect:` followed by one comment line per line of output. -/
@@ -133,51 +205,76 @@ def exampleCases (dir : System.FilePath) :
   pure out.toList
 
 /-- Run every test program and every example on the Lean machines, and on the
-Rust VM if its path is given. -/
+Rust VM if its path is given. Each is compiled once; the programs are gone
+through side by side, and what failed is said in the order they are in. Then
+how many compile, and how many are shown to follow each set of Core's rules. -/
 def selftest (vm : Option String) : IO UInt32 := do
-  let mut failures := 0
-  let mut ran := 0
   let tmp : System.FilePath := (← IO.getEnv "TMPDIR").getD "/tmp"
-  let file := tmp / s!"glorious-selftest-{← IO.monoMsNow}.glbc"
+  let stamp ← IO.monoMsNow
   let examples ← exampleCases "examples"
-  for (c, files) in cases.map (·, []) ++ examples do
-    ran := ran + 1
-    let got := evalSource c.src c.input (files := files)
-    if got != c.expect then
-      failures := failures + 1
-      IO.eprintln s!"lean machines: expected\n{c.expect}\ngot\n{got}\nfor\n{c.src}\n"
-    if let some vm := vm then
-      match compileSource c.src true files with
-      | .error _ => pure ()
-      | .ok compiled =>
-        writeBytecode compiled file
-        let out ← IO.Process.output
-          { cmd := vm, args := #[file.toString] ++ (c.input.map toString).toArray }
-        let got := if out.exitCode == 0 then out.stdout else "went wrong\n"
-        if got != c.expect ++ "\n" then
-          failures := failures + 1
-          IO.eprintln s!"rust vm: expected\n{c.expect}\ngot\n{got}\n{out.stderr}for\n{c.src}\n"
+  let all := (cases.map (·, [])) ++ examples
+  warm
+  let found ← sideBySide all fun (c, files) => outcome true c files
   -- What is unsafe runs on the Rust VM alone, and the proved machines say so.
+  let foreign ← if vm.isSome then sideBySide foreignCases fun c => outcome false c [] else pure #[]
+  let mut failures : Array (Nat × String) := #[]
+  for ((c, _), i) in all.zipIdx do
+    let got := (found[i]?.map (·.lean)).getD ""
+    if got != c.expect then
+      failures := failures.push (2 * i, s!"lean machines: expected\n{c.expect}\ngot\n{got}\nfor\n{c.src}\n")
+  for (c, i) in foreignCases.zipIdx do
+    match foreign[i]? with
+    | some o =>
+      if let some e := o.error then
+        failures := failures.push (2 * (all.length + i), s!"foreign: {e}\nfor\n{c.src}\n")
+      else if o.certified then
+        failures := failures.push (2 * (all.length + i),
+          s!"foreign: a program that calls a foreign function has a certificate\nfor\n{c.src}\n")
+    | none => pure ()
   if let some vm := vm then
-    for c in foreignCases do
-      ran := ran + 1
-      match compileSource c.src true [] with
-      | .error e =>
-        failures := failures + 1
-        IO.eprintln s!"foreign: {e}\nfor\n{c.src}\n"
-      | .ok compiled =>
-        if compiled.cert.isSome then
-          failures := failures + 1
-          IO.eprintln s!"foreign: a program that calls a foreign function has a certificate\nfor\n{c.src}\n"
-        writeBytecode compiled file
-        let out ← IO.Process.output { cmd := vm, args := #[file.toString] }
-        if out.stdout != c.expect ++ "\n" then
-          failures := failures + 1
-          IO.eprintln s!"rust vm: expected\n{c.expect}\ngot\n{out.stdout}\n{out.stderr}for\n{c.src}\n"
-  if vm.isSome then IO.FS.removeFile file
+    -- Each program's bytecode, what it is given, what it should give, and
+    -- whether going wrong counts as `went wrong` or shows as it is.
+    let runs : Array (Nat × ByteArray × Case × Bool) :=
+      (all.zipIdx.filterMap fun ((c, _), i) =>
+        (found[i]?.bind (·.bytes)).map fun bytes => (2 * i + 1, bytes, c, true)).toArray
+      ++ (foreignCases.zipIdx.filterMap fun (c, i) =>
+        (foreign[i]?.bind (·.bytes)).map fun bytes => (2 * (all.length + i) + 1, bytes, c, false)).toArray
+    let jobs ← vmJobs
+    let workers ← (List.range jobs).mapM fun w =>
+      IO.asTask (prio := .dedicated) do
+        let file := tmp / s!"glorious-selftest-{stamp}-{w}.glbc"
+        let mut failed : Array (Nat × String) := #[]
+        for (k, (at_, bytes, c, plain)) in runs.toList.zipIdx.map (fun (r, k) => (k, r)) do
+          if k % jobs == w then
+            IO.FS.writeBinFile file bytes
+            let out ← IO.Process.output
+              { cmd := vm, args := #[file.toString] ++ (c.input.map toString).toArray }
+            let got := if plain && out.exitCode != 0 then "went wrong\n" else out.stdout
+            if got != c.expect ++ "\n" then
+              failed := failed.push (at_, s!"rust vm: expected\n{c.expect}\ngot\n{got}\n{out.stderr}for\n{c.src}\n")
+        if ← file.pathExists then IO.FS.removeFile file
+        pure failed
+    for worker in workers do
+      match ← IO.wait worker with
+      | .ok failed => failures := failures ++ failed
+      | .error e => failures := failures.push (0, s!"rust vm: {e}\n")
+  -- What else is asked of the front end: see `Glorious/Checks.lean`.
+  let held ← sideBySide Checks.all fun (_, check) => check ()
+  for ((n, _), i) in Checks.all.zipIdx do
+    unless held[i]?.getD false do
+      failures := failures.push (2 * (all.length + foreignCases.length) + n,
+        s!"check {n} of `Glorious/Checks.lean` does not hold\n")
+  for (_, said) in failures.qsort (fun a b => a.1 < b.1) do
+    IO.eprintln said
+  let ran := all.length + (if vm.isSome then foreignCases.length else 0)
   let machines := if vm.isSome then "Core, Lean bytecode and Rust VM" else "Core and Lean bytecode"
-  IO.println s!"{ran} programs ({examples.length} examples) on {machines}: {failures} failures"
-  pure (if failures == 0 then 0 else 1)
+  IO.println s!"{ran} programs ({examples.length} examples) on {machines}, and {Checks.all.length} checks: {failures.size} failures"
+  let count := fun (f : Outcome → Bool) => (found.filter f).size
+  let scopes := found.foldl (fun n o => n + o.lent) 0
+  let plain := found.foldl (fun n o => n + o.plain) 0
+  IO.println s!"{count (·.bytes.isSome)} compile; {count (·.strict)} well owned; {count (·.regions)} with regions; {count (·.loans)} with loans; {count fun o => o.strict && o.regions && o.loans} with all three"
+  IO.println s!"{scopes} borrows are scopes of their own; {plain} are not, in {count (·.plain > 0)} programs"
+  pure (if failures.isEmpty then 0 else 1)
 
 /-- Say what the typing of a program's Core shows. With `strict`, fail if some
 borrow is not covered by the proof about borrows. -/
@@ -210,15 +307,20 @@ def certify (path : String) (strict : Bool) : IO UInt32 := do
 /-- For each file: what Core shows of the program, then what it writes and
 gives, or why it does not compile. For trying programs quickly. -/
 def probe (paths : List String) : IO UInt32 := do
+  let mut read : List (String × List (List String × String)) := []
   for path in paths do
-    let src ← IO.FS.readFile path
-    let files ← moduleFiles path
+    read := read ++ [(← IO.FS.readFile path, ← moduleFiles path)]
+  -- (Each finds what it starts from as it needs it: the prelude alone is
+  -- quick to check, and a few programs do not need all four kinds.)
+  let said ← sideBySide read fun (src, files) =>
     match compileSource src true files with
-    | .error e => IO.println s!"error: {e}"
-    | .ok c =>
-      let cert := c.cert
-      let shown := s!"strict={(cert.map (·.strict)).getD false} regions={(cert.map (·.regions)).getD false} loans={(cert.map (·.loans)).getD false} scopes={c.lent} plain={c.plain.length}"
-      IO.println s!"{shown} => {evalSource src [] 200000 files}"
+    | .error e => s!"error: {e}"
+    | .ok (c : Compiled) =>
+      let has := fun (f : Typing.Cert → Bool) => (c.cert.map f).getD false
+      let shown := s!"strict={has (·.strict)} regions={has (·.regions)} loans={has (·.loans)} scopes={c.lent} plain={c.plain.length}"
+      s!"{shown} => {evalCompiled c [] 200000}"
+  for s in said do
+    IO.println s
     IO.println "--"
   pure 0
 
@@ -263,34 +365,29 @@ def why (path : String) : IO UInt32 := do
 to follow each set of Core's rules. -/
 def survey : IO UInt32 := do
   let examples ← exampleCases "examples"
-  let mut compiled := 0
-  let mut strict := 0
-  let mut regions := 0
-  let mut loans := 0
-  let mut all := 0
-  let mut scopes := 0
-  let mut plain := 0
-  let mut withPlain := 0
-  let mut weak : List String := []
-  let trace := (← IO.getEnv "GLORIOUS_TRACE").isSome
-  for (c, files) in cases.map (·, []) ++ examples do
-    if trace then
-      IO.eprintln s!"-- {c.src}"
-      (← IO.getStderr).flush
-    if let .ok out := compileSource c.src true files then
-      compiled := compiled + 1
-      let has := fun (f : Typing.Cert → Bool) => (out.cert.map f).getD false
-      if has (·.strict) then strict := strict + 1
-      if has (·.regions) then regions := regions + 1
-      if has (·.loans) then loans := loans + 1
-      if has (·.strict) && has (·.regions) && has (·.loans) then all := all + 1
-      else weak := weak ++ [s!"strict={has (·.strict)} regions={has (·.regions)} loans={has (·.loans)}: {c.src}"]
-      scopes := scopes + out.lent
-      plain := plain + out.plain.length
-      unless out.plain.isEmpty do withPlain := withPlain + 1
-  IO.println s!"{compiled} compile; {strict} well owned; {regions} with regions; {loans} with loans; {all} with all three"
-  IO.println s!"{scopes} borrows are scopes of their own; {plain} are not, in {withPlain} programs"
-  for w in weak do IO.println s!"--\n{w}"
+  let all := (cases.map (·, [])) ++ examples
+  let before ← IO.monoMsNow
+  warm
+  -- `GLORIOUS_TIMES`: the programs that take longest to compile, instead.
+  if (← IO.getEnv "GLORIOUS_TIMES").isSome then
+    let warmed ← IO.monoMsNow
+    let timed ← sideBySideTimed all fun (c, files) => (outcome false c files).bytes.isSome
+    let done ← IO.monoMsNow
+    IO.println s!"warm {warmed - before} ms; programs {done - warmed} ms; sum {timed.foldl (fun n r => n + r.2) 0} ms"
+    let slow := ((all.zip timed.toList).toArray.qsort fun a b => a.2.2 > b.2.2).toList.take 25
+    for ((c, _), (_, ms)) in slow do
+      IO.println s!"{ms} ms: {((c.src.take 110).toString.replace "\n" " ")}"
+    return 0
+  let found ← sideBySide all fun (c, files) => outcome false c files
+  let count := fun (f : Outcome → Bool) => (found.filter f).size
+  let scopes := found.foldl (fun n o => n + o.lent) 0
+  let plain := found.foldl (fun n o => n + o.plain) 0
+  IO.println s!"{count (·.bytes.isSome)} compile; {count (·.strict)} well owned; {count (·.regions)} with regions; {count (·.loans)} with loans; {count fun o => o.strict && o.regions && o.loans} with all three"
+  IO.println s!"{scopes} borrows are scopes of their own; {plain} are not, in {count (·.plain > 0)} programs"
+  for ((c, _), i) in all.zipIdx do
+    if let some o := found[i]? then
+      if o.bytes.isSome && !(o.strict && o.regions && o.loans) then
+        IO.println s!"--\nstrict={o.strict} regions={o.regions} loans={o.loans}: {c.src}"
   pure 0
 
 /-- How long each stage of compiling a program takes, in milliseconds. -/
@@ -310,6 +407,7 @@ def stages (path : String) : IO UInt32 := do
   last ← lap "resolve" last
   let .ok all := Syntax.expandAliases resolved.items | IO.println "aliases failed"; return 1
   let all := Syntax.fillDefaults all
+  let all0 := all
   IO.println s!"{all.length} filled"
   last ← lap "aliases, defaults" last
   let .ok blocks := Check.checkProgram all resolved.info | IO.println "check failed"; return 1
@@ -324,6 +422,21 @@ def stages (path : String) : IO UInt32 := do
   let .ok out := Elab.elabProgram all (some blocks) | IO.println "elab failed"; return 1
   IO.println s!"{out.program.fns.length} functions"
   last ← lap "elaborate" last
+  -- One try of the search for borrows that are scopes of their own: every
+  -- place lent, then certified as it is and with ranked callables.
+  let declared := Elab.withDeclared all0 all
+  if let .ok lentOut := Elab.elabProgram all (some blocks) (fun _ => 1) then
+    IO.println s!"{lentOut.sites} places a borrow could be a scope, {lentOut.lent} made one"
+    last ← lap "elaborate, every place lent" last
+    for ranked in [false, true] do
+      match Infer.certify declared lentOut.program true lentOut.envSizes true true ranked with
+      | .ok cert =>
+        last ← lap s!"certify lent (ranked {ranked})" last
+        IO.println s!"{Typing.checkProgram cert lentOut.program}"
+        last ← lap "check that certificate" last
+      | .error e =>
+        IO.println s!"certify lent: {(e.take 80).toString}"
+        last ← lap s!"certify lent (ranked {ranked}), refused" last
   match Infer.certify all out.program true out.envSizes true true with
   | .ok cert =>
     last ← lap "infer certificate" last
@@ -332,7 +445,25 @@ def stages (path : String) : IO UInt32 := do
   | .error e => IO.println s!"certify: {e}"
   let bytecode := compile out.program
   IO.println s!"{bytecode.fns.length} compiled"
-  _ ← lap "compile" last
+  last ← lap "compile" last
+  -- And as the other commands do it: from the library already checked,
+  -- with the search for which borrows can be scopes of their own.
+  warm
+  last ← lap "the prelude and library, checked for every kind of program" last
+  let drops := hasDrop items
+  let first := if drops then checkedStdDrop.get else checkedStd.get
+  if let .ok (count, first) := first then
+    match Check.checkAfter first (all0.drop count) resolved.info with
+    | .ok b => IO.println s!"{b.given.length} given"
+    | .error e => IO.println s!"checkAfter: {e}"
+    last ← lap "check, after the library" last
+  match compileSource src true files with
+  | .ok c =>
+    IO.println s!"{c.lent} borrows are scopes, {c.plain.length} are not"
+    last ← lap "compileSource, after that" last
+    IO.println s!"{(evalCompiled c).length} characters of result"
+    _ ← lap "both Lean machines" last
+  | .error e => IO.println s!"compileSource: {e}"
   pure 0
 
 def parseInput (args : List String) : Except String (List Int) :=
@@ -422,19 +553,20 @@ def main (args : List String) : IO UInt32 := do
     -- Every test program as files, for what runs them from outside: the
     -- bytecode where the program compiles, what it is given, what it gives.
     IO.FS.createDirAll dir
+    let all := Glorious.cases ++ Glorious.foreignCases
+    warm
+    let found ← sideBySide all fun c => outcome false c []
     let mut n := 0
     let mut built := 0
-    for c in Glorious.cases ++ Glorious.foreignCases do
+    for (c, i) in all.zipIdx do
       n := n + 1
       let stem := s!"{dir}/{n}"
       IO.FS.writeFile s!"{stem}.glorious" c.src
       IO.FS.writeFile s!"{stem}.in" (" ".intercalate (c.input.map toString))
       IO.FS.writeFile s!"{stem}.out" c.expect
-      match compileSource c.src with
-      | .ok compiled =>
-        writeBytecode compiled s!"{stem}.gbc"
+      if let some bytes := found[i]?.bind (·.bytes) then
+        IO.FS.writeBinFile s!"{stem}.gbc" bytes
         built := built + 1
-      | .error _ => pure ()
     IO.println s!"{n} programs, {built} built, in {dir}"
     pure 0
   | ["selftest"] => selftest none

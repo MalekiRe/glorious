@@ -2713,6 +2713,68 @@ from being an `Id<Block>`.
 - Not built: base64; `ByteReader::read_u128_le` is, the signed widths
   other than `read_i64_le` are not in the specification.
 
+## How long a change takes to try
+
+Trying a change took one to two minutes, and checking one before keeping it
+six to eight. What was slow, and what was done:
+
+| | before | now |
+|---|---|---|
+| every test program on the three engines (`selftest`) | 160 s | 25 s, 36 s with the quick build |
+| everything checked before a commit (`./verify.sh`) | 6 to 8 min | 55 s |
+| the compiler built again after an edit to the checker | 20 to 35 s | 8 to 19 s |
+| after an edit to the elaborator | 31 s | 9 s |
+| ten small programs tried | about 40 s | 0.1 s; a few seconds if they name the library |
+
+- **The test programs are gone through side by side**, on every core, and
+  each is compiled once: it was compiled once for the Lean machines, again
+  for the Rust VM, again for the count of what Core shows, and again for the
+  other back ends. `selftest` now says that count too. So do `survey`,
+  `cases` and `probe` go side by side.
+- **The tests the build ran are checks the executable runs**
+  (`Glorious/Checks.lean`, numbered). The build ran every test program one
+  after another before it was done, and to do that every module was also
+  compiled into a library of its own, which each module after it waited for.
+- **The checker reads `Glorious/Elab/Base.lean`**, what it shares with the
+  elaborator, and not the elaborator: a change to how a program is written
+  out no longer has the checker built again.
+- **`lake build -Kquick=1`** compiles the C that Lean writes with the cheap
+  code generator. The largest files took ten to sixteen seconds each in the
+  C compiler, nearly all of it in a few very large functions; they take
+  half that or less, and the compiler built runs at a little over half the
+  speed. The build without it is the one to use; `./verify.sh` uses the
+  quick one unless told `QUICK=0`.
+- **The search for borrows that can be scopes of their own asks side by
+  side**: each place alone, and then each round of taking them one at a
+  time. The answers are what one at a time would give.
+- **One tree.** A commit was checked in a second worktree, built again
+  there, and the first could not be built meanwhile. It is checked where it
+  is made, with nothing uncommitted.
+
+What still takes the time: the checker's own chain of modules (an edit to
+its first is nineteen seconds), the parser (eleven seconds for Lean to read
+it), checking the library once in each process (five seconds for all four
+kinds of program), and the largest examples (the calculator is eight).
+
+## Reading a part of a value with `drop`; writing over what a reference points to
+
+- `fn eat(t: T) -> Int { say(t.name); 1 }`, where `T` has `Drop`, took `t`
+  apart to read its name, in the module that declares `T`, and so `t`'s
+  `drop` never ran. Reading parts that can be copied (no reference, nothing
+  used once, nothing with a `drop`) now takes nothing out of a named value
+  that has a `drop`: it stays whole, and is destroyed when its block is left
+  as a name nothing uses is. In another module this was refused, and is now
+  allowed, since nothing is skipped. A part that cannot be copied is as
+  before: taken out only in the declaring module, which is then what lets go
+  of the rest. In the type's own `drop` the value is let go as before.
+- `h.t = new` and `*r = new` did not destroy what was there, where assigning
+  to a variable did. They now do, once the new value is made and the place
+  found.
+- `xs[0] = new` for elements with a `drop` is still refused: it is `xs =
+  index_set(xs, 0, new)`, which reads `xs`.
+- The fields of a value are destroyed the last declared first, and the
+  elements of an array the last first. (Rust goes the other way.)
+
 ## Wrong answers: a field of a variable lent for writing
 
 `let x = bump(&mut c.n); x + c.n * 100` read the old `c.n`, and so did

@@ -307,24 +307,33 @@ def compileSource (src : String) (check : Bool := true)
           if let some c := lending blocks (fun _ => 1) then return c
           if out.sites ≤ 32 then
             -- How each place fares alone, trying the narrower scope first.
-            let alone := (List.range out.sites).map fun i =>
+            -- (Each is asked apart from the others, so all are asked side
+            -- by side: the answers are what they would be one at a time.)
+            let asked : List (Task Nat) := (List.range out.sites).map fun i => Task.spawn fun _ =>
               if (lending blocks (fun j => if j == i then 1 else 0)).isSome then 1
               else if (lending blocks (fun j => if j == i then 2 else 0)).isSome then 2
               else 0
+            let alone : List Nat := asked.map Task.get
             if alone.any (· != 0) then
               if let some c := lending blocks (fun j => alone[j]?.getD 0) then return c
               -- Not all at once: take them one at a time, keeping each that
-              -- passes with those kept before it.
-              let mut kept : List Nat := List.replicate out.sites 0
-              let mut best : Option Compiled := none
-              for i in [0:out.sites] do
-                let mode := alone[i]?.getD 0
-                if mode != 0 then
-                  let next := kept.set i mode
-                  if let some c := lending blocks (fun j => next[j]?.getD 0) then
-                    kept := next
-                    best := some c
-              if let some c := best then return c
+              -- passes with those kept before it. (Every place still to
+              -- come is asked side by side with those kept so far, and the
+              -- first that passes is kept: what one at a time would find.)
+              let rec rounds (fuel from_ : Nat) (kept : List Nat) (best : Option Compiled) :
+                  Option Compiled :=
+                match fuel with
+                | 0 => best
+                | fuel + 1 =>
+                  let coming := (List.range out.sites).filter fun i =>
+                    i ≥ from_ && alone[i]?.getD 0 != 0
+                  let asked : List (Nat × List Nat × Task (Option Compiled)) := coming.map fun i =>
+                    let next := kept.set i (alone[i]?.getD 0)
+                    (i, next, Task.spawn fun _ => lending blocks (fun j => next[j]?.getD 0))
+                  match asked.find? fun (r : Nat × List Nat × Task (Option Compiled)) => (Task.get r.2.2).isSome with
+                  | some (i, next, t) => rounds fuel (i + 1) next (Task.get t)
+                  | none => best
+              if let some c := rounds out.sites 0 (List.replicate out.sites 0) none then return c
     plain blocks
   -- Blocks can share an environment only where a type can state it. Where one
   -- cannot, as when what a block is given may also be a function that is not a
@@ -429,6 +438,16 @@ def showOutcome {σ : Type} (names : Array String) : Step σ Result → String
   | .stuck => "went wrong"
   | .next _ => "out of fuel"
 
+/-- Run a compiled program on both machines with the given input: what it
+wrote followed by its value, or what went wrong; both, if they disagree. -/
+def evalCompiled (c : Compiled) (input : List Int := []) (fuel : Nat := 200000) : String :=
+  let bytecode := compile c.core
+  let onCore := showOutcome c.ctorNames
+    (Machine.exec (Core.stepIO c.core) fuel (Core.initIO c.core input))
+  let onVm := showOutcome c.ctorNames
+    (Machine.exec (Bytecode.stepIO bytecode) (fuel * 20) (Bytecode.initIO bytecode input))
+  if onCore == onVm then onVm else s!"MISMATCH: Core gives {onCore}, bytecode gives {onVm}"
+
 /--
 Compile a program and run it on both machines with the given input. The result
 is what it wrote followed by its value, or a description of what went wrong; if
@@ -438,13 +457,7 @@ def evalSource (src : String) (input : List Int := []) (fuel : Nat := 200000)
     (files : List (List String × String) := []) : String :=
   match compileSource src true files with
   | .error e => s!"error: {e}"
-  | .ok c =>
-    let bytecode := compile c.core
-    let onCore := showOutcome c.ctorNames
-      (Machine.exec (Core.stepIO c.core) fuel (Core.initIO c.core input))
-    let onVm := showOutcome c.ctorNames
-      (Machine.exec (Bytecode.stepIO bytecode) (fuel * 20) (Bytecode.initIO bytecode input))
-    if onCore == onVm then onVm else s!"MISMATCH: Core gives {onCore}, bytecode gives {onVm}"
+  | .ok c => evalCompiled c input fuel
 
 /-- Why a Core configuration has no next step, in the program's own terms. This
 is a diagnosis for the user and is not part of the semantics. -/
