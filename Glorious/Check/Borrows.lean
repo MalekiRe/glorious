@@ -551,7 +551,7 @@ def needBounds (call : Nat) (bs : List (String × Ty)) : M Unit := do
     throw "a trait is needed at a call the checker has no name for; this is a compiler defect"
   let s ← get
   let news := (bs.zip (List.range bs.length)).map fun ((tr, ty), k) =>
-    (⟨tr, ty, call, k, s.owner, s.pos⟩ : Bound)
+    (⟨tr, ty, call, k, s.owner, s.pos, []⟩ : Bound)
   set { s with bounds := s.bounds ++ news.toArray }
 
 /-- `x.i.name` as the name and the way to the field, if that is what this

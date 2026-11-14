@@ -246,6 +246,19 @@ def fillDefaults (items : List Item) : List Item :=
             (clauses.map fun c =>
               shiftClause (10000000000 * (index + 1)) (selfClause head (some (tr, (TypeExpr.tuple [self]).asExpr)) c))
         | item => item
+      -- Two implementations of a trait for one type, written with the
+      -- same arguments (`impl<T, R> Get<T> for (Column<T>, R)` and
+      -- `impl<T, H, R> Get<T> for (Column<H>, R)`): each is known by a
+      -- name of its own, the later ones numbered.
+      let same := fun (other : Item) => match other with
+        | .impl _ tr' head' _ _ methods' =>
+          tr' == tr && head' == head && (List.range methods'.length).filterMap (fun i =>
+            methods'.findSome? fun
+              | .typeAlias name _ body => if name == traitArgName i then some body.spell else none
+              | _ => none) == given
+        | _ => false
+      let before := ((items.take index).filter same).length
+      let tr := if before == 0 then tr else s!"{tr}#{before}"
       .impl ps (traitAt tr given) head args context (methods ++ missing)
     | (item, _) => item
 

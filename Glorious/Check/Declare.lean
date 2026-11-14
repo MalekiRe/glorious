@@ -402,10 +402,18 @@ def declareTraits (items : List Item) : M Unit := do
           | none => throw s!"{what}: unknown type `{head}`"
       unless args.length == arity do
         throw s!"{what}: `{head}` takes {arity} type arguments, but is given {args.length}"
-      unless args.eraseDups.length == args.length && args.all params.contains
-          && params.all args.contains do
+      -- (A type parameter that is no argument of the head is inside a type
+      -- one of them has to be, or among the trait's own.)
+      unless args.eraseDups.length == args.length && args.all params.contains do
         throw s!"{what}: the arguments of `{head}` must be the type parameters after `impl`, each once"
-      let ctx ← context.mapM fun (p, t') => do
+      -- A condition is a trait of one of the head's arguments; or, said
+      -- with the trait's own arguments or of a type parameter inside an
+      -- argument, one kept apart (`extra`, below).
+      let general := fun (k : Nat) (p : String) =>
+        !args.contains p || methods.any fun
+          | .typeAlias n _ _ => n == Syntax.ctxArgName k 0
+          | _ => false
+      let ctx ← (context.zipIdx.filter fun ((p, _), k) => !general k p).mapM fun ((p, t'), _) => do
         unless ((← get).traits.lookup t').isSome do throw s!"{what}: unknown trait `{t'}`"
         match args.idxOf? p with
         | some j => pure (t', j)
@@ -461,9 +469,22 @@ def declareTraits (items : List Item) : M Unit := do
       -- type parameters is for the type at all of them: it is the only one
       -- of the trait for the type.
       let generic := targs.any fun t => !(freeTys t).isEmpty
-      if let some other := (← get).impls.find? fun I =>
-          Syntax.traitBase I.trait == base && I.head == head && (generic || I.generic) then
-        throw s!"{what}: `{head}` has an implementation of `{base}` for every argument (`{other.trait}`), so it has no other"
+      -- The conditions kept apart, in the implementation's type parameters.
+      let mut extra : List (String × List Ty × Ty) := []
+      for ((p, t'), k) in context.zipIdx do
+        if general k p then
+          unless ((← get).traits.lookup t').isSome do throw s!"{what}: unknown trait `{t'}`"
+          let subject ← match pmap.lookup p with
+            | some t => pure t
+            | none => throw s!"{what}: `{p}` is not one of its type parameters"
+          let mut cargs : List Ty := []
+          for i in List.range ((((← get).traitShape.lookup t').map (·.1)).getD 0) do
+            match methods.findSome? fun
+                | .typeAlias n _ body => if n == Syntax.ctxArgName k i then some body else none
+                | _ => none with
+            | some body => cargs := cargs ++ [← zonk (← resolveType pmap false body)]
+            | none => throw s!"{what}: `{Syntax.lastSegment t'}` takes arguments: `{p}: {Syntax.lastSegment t'}<..>`"
+          extra := extra ++ [(t', cargs, subject)]
       let mut assocs : List (String × Ty) := []
       for a in assocNames do
         match methods.findSome? fun
@@ -502,11 +523,36 @@ def declareTraits (items : List Item) : M Unit := do
         unless fixed.isEmpty && other.fixed.isEmpty do
           throw s!"{what}: `{head}` already has an implementation of `{base}`, under this name or another of its names; a type has one"
 
+      -- Chosen by fitting types: where an implementation has a condition
+      -- kept apart, or shares its trait and type with another.
+      let shared := (← get).impls.any fun I => Syntax.traitBase I.trait == base && I.head == head
+      if !extra.isEmpty || shared then modify fun s => { s with patterned := true }
+      -- Two implementations of a trait for one type: no type is both's
+      -- (`From<Int>`, `From<Str>`), or one asks more of the type than the
+      -- other (`Wrap<Int>`, `Wrap<T>`), and is then the one for the types it
+      -- fits. Not the same twice, and not two that some type fits with
+      -- neither asking more.
+      let patternOf := fun (targs : List Ty) (fixed : List (Nat × Ty)) (params : List String)
+          (pvars : List (String × Nat)) =>
+        targs ++ (List.range arity).map fun j =>
+          match fixed.lookup j with
+          | some t => t
+          | none => (((params[j]?).bind fun p => pvars.lookup p).map Ty.var).getD (.var 0)
+      let mine := patternOf targs fixed args pvars
+      for other in (← get).impls do
+        if Syntax.traitBase other.trait == base && other.head == head && other.targs.length == targs.length then
+          let theirs := patternOf other.targs other.fixed other.params other.pvars
+          let narrower := (Ty.fitsAll (other.pvars.map (·.2)) theirs mine []).isSome
+          let wider := (Ty.fitsAll (pvars.map (·.2)) mine theirs []).isSome
+          if narrower && wider then
+            throw s!"`{Syntax.traitShown other.trait}` is implemented twice for `{head}`"
+          if !narrower && !wider && (Ty.meetAll mine theirs []).isSome then
+            throw s!"`impl {Syntax.traitShown tr} for {bareName head}`: some type fits this and another implementation of `{Syntax.traitShown other.trait}` for `{bareName head}` both, and neither asks more of it than the other: say which is for those, with an implementation for just them"
       modify fun s =>
         { s with
           impls := s.impls.push
             { trait := tr, head, params := args, context := ctx, methods,
-              dictFn := Elab.implDictName tr head, targs, assocs, pvars, fixed, equal, generic }
+              dictFn := Elab.implDictName tr head, targs, assocs, pvars, fixed, equal, generic, extra }
           kimpls := s.kimpls ++ [⟨tr, head, arity, ctx⟩] }
   -- Every type can be destroyed: by nothing at all, by its own `Drop` and
   -- then its parts', or part by part. Said as an implementation for each
@@ -535,7 +581,7 @@ def declareTraits (items : List Item) : M Unit := do
           { s with
             impls := s.impls.push
               ⟨Syntax.destroyTrait, head, (List.range arity).map (s!"T{·}"), ctx, [],
-                Elab.implDictName Syntax.destroyTrait head, [], [], [], [], [], false⟩
+                Elab.implDictName Syntax.destroyTrait head, [], [], [], [], [], false, []⟩
             kimpls := s.kimpls ++ [⟨Syntax.destroyTrait, head, arity, ctx⟩] }
   -- What `Traits.coherent` asks of the implementations.
   unless Traits.noOverlap (← get).kimpls do

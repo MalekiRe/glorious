@@ -1637,18 +1637,30 @@ private partial def parseItem : P Item := do
     match ← peek with
     | .ident "for" => advance
     | _ => failAt "expected `for`: `impl Trait for Type`, or `{`: `impl Type { fn .. }`"
-    -- `impl Trait for (A, B)`: for the tuples of so many parts.
-    let (head, args) ← if ← acceptPunct "(" then do
-        let mut names : Array String := #[]
-        repeat
-          if (← peek) == .punct ")" then break
-          names := names.push (← expectIdent)
-          if !(← acceptPunct ",") then break
-        expectPunct ")"
-        pure (s!"(tuple{names.size})", names.toList)
-      else do
-        let head ← expectPath
-        pure (head, ← parseGenerics)
+    -- What it is for: a type made with a name, or a tuple, with its
+    -- arguments. An argument that is one of the implementation's type
+    -- parameters, the first time it is written, is that parameter. Any other
+    -- is a type the argument has to be: `impl<T, R> Get<T> for (Column<T>,
+    -- R)` is for the pairs whose first part is a `Column<T>`.
+    let (head, written) ← match ← parseType with
+      | .tuple ts => pure (s!"(tuple{ts.length})", ts)
+      | .name h ts => pure (h, ts)
+      | _ => failAt "an implementation is for a type made with a name, or for a tuple"
+    let mut names : Array String := #[]
+    let mut fresh : Array String := #[]
+    for (t, j) in written.zipIdx do
+      let plain := match t with
+        | .name p [] => if params.contains p && !names.contains p then some p else none
+        | _ => none
+      match plain with
+      | some p => names := names.push p
+      | none =>
+        let name := s!"%fixed{j}"
+        names := names.push name
+        fresh := fresh.push name
+        given := given.push (.typeAlias (fixedArgName j) [] t)
+    let args := names.toList
+    let params := params ++ fresh.toList
     let mut context : Array (String × String) := #[]
     if (← peek) == .ident "where" then
       advance
@@ -1661,11 +1673,17 @@ private partial def parseItem : P Item := do
         -- implementation is that type.
         if ← isOp "<" then
           advance
+          let mut place := 0
           repeat
             if ← isOp ">" then break
-            let name ← expectIdent
-            expectPunct "="
-            given := given.push (.typeAlias (equalArgName (context.size - 1) name) [] (← parseType))
+            if (← peek 1) == .punct "=" then
+              let name ← expectIdent
+              expectPunct "="
+              given := given.push (.typeAlias (equalArgName (context.size - 1) name) [] (← parseType))
+            else
+              -- `R: Get<T>`: the trait at an argument.
+              given := given.push (.typeAlias (ctxArgName (context.size - 1) place) [] (← parseType))
+              place := place + 1
             if !(← acceptPunct ",") then break
           expectOp ">"
         if !(← acceptPunct ",") then break

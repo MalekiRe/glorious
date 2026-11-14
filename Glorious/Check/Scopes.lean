@@ -218,6 +218,17 @@ def subjectOf (trait : String) (subject : Ty) : M (Ty × List Ty) := do
   | .tuple (self :: args) => pure (self, args)
   | other => pure (other, [])
 
+/-- What an implementation's type parameters are for a type it is asked of:
+each that is an argument of its head, that argument of the type; each that
+is only inside one (`impl<T> .. for Wrap<Option<T>>`), something to be found
+by making the arguments fit. -/
+def implAt (im : ImplDecl) (hargs : List Ty) : M (List (Nat × Ty)) := do
+  let mut at_ := (im.params.zip hargs).filterMap fun (p, a) => (im.pvars.lookup p).map (·, a)
+  for (_, id) in im.pvars do
+    unless at_.any (·.1 == id) do
+      at_ := at_ ++ [(id, ← freshTy)]
+  pure at_
+
 /-- The trait at its arguments, as the one name an implementation of it has. -/
 def traitKey (trait : String) (args : List Ty) : M String := do
   pure (Syntax.traitAt trait (← args.mapM spellTy))
@@ -232,12 +243,48 @@ def implKey (trait : String) (self : Ty) (args : List Ty) : M String := do
     | .tuple parts => pure (some (s!"(tuple{parts.length})", parts))
     | _ => pure none
   if let some (h, hargs) := head then
-    if let some im := (← get).impls.toList.find? fun im =>
-        im.generic && Syntax.traitBase im.trait == trait && im.head == h then
-      let at_ := (im.params.zip hargs).filterMap fun (p, a) => (im.pvars.lookup p).map (·, a)
+    let family := (← get).impls.toList.filter fun im =>
+      Syntax.traitBase im.trait == trait && im.head == h && im.targs.length == args.length
+    -- The implementation to make the arguments fit, and its name.
+    let commit := fun (im : ImplDecl) => do
+      let at_ ← implAt im hargs
+      for (j, want) in im.fixed do
+        if let some got := hargs[j]? then
+          unifyAt s!"`{bareName trait}` for `{bareName h}`" (subst at_ [] [] want) got
       for (want, got) in (im.targs.map (subst at_ [] [])).zip args do
         unifyAt s!"`{bareName trait}` for `{bareName h}`" want got
-      return im.trait
+      pure im.trait
+    match family with
+    | [] => pure ()
+    | [im] => if im.generic then return ← commit im
+    | _ =>
+      -- Several for the one trait and type: the one whose arguments the
+      -- type's fit, and of two that do, the one that asks more of them.
+      let goal ← (args ++ hargs).mapM zonk
+      let pattern := fun (im : ImplDecl) =>
+        im.targs ++ (List.range hargs.length).map fun j =>
+          match im.fixed.lookup j with
+          | some t => t
+          | none => (((im.params[j]?).bind fun p => im.pvars.lookup p).map Ty.var).getD (.var 0)
+      let vars := fun (im : ImplDecl) => im.pvars.map (·.2)
+      let narrower := fun (a b : ImplDecl) => (Ty.fitsAll (vars b) (pattern b) (pattern a) []).isSome
+      let exact := family.filter fun im => (Ty.fitsAll (vars im) (pattern im) goal []).isSome
+      -- (Nothing may yet fit a type all of which is known.)
+      let maybe := if goal.all Ty.ground then [] else family.filter fun im =>
+        !exact.any (·.dictFn == im.dictFn) && ((pattern im).zip goal).all fun (p, g) => p.mayFit g
+      match exact.find? fun a => exact.all fun b => narrower a b with
+      | some im =>
+        -- (One that may yet fit and asks more would be the one, if it
+        -- came to fit: that is not known here.)
+        if let some other := maybe.find? fun m => !narrower im m then
+          throw s!"which implementation of `{bareName trait}` this is, is not known here: `{showTy (← zonk self)}` may turn out to be a type that another implementation of `{Syntax.traitShown other.trait}` is for. Say it of the type, `where .. : {bareName trait}`"
+        return ← commit im
+      | none =>
+        match exact, maybe with
+        | [], [im] => return ← commit im
+        | [], _ => pure ()
+        | _, _ =>
+          throw s!"two implementations of `{bareName trait}` fit `{showTy (← zonk self)}`, and neither asks more than the other"
   traitKey trait args
 
 /-- Does the type asked have an implementation of the trait for every

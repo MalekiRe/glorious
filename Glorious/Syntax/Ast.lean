@@ -321,7 +321,17 @@ def traitAt (trait : String) (args : List String) : String :=
   if args.isEmpty then trait else s!"{trait}<{", ".intercalate args}>"
 
 /-- The trait such a name is of. -/
-def traitBase (name : String) : String := (name.splitOn "<").headD name
+def traitBase (name : String) : String :=
+  -- (`Get#1<T>`: the second of two implementations of `Get` written the
+  -- same for one type; see `fillDefaults`.)
+  let whole := (name.splitOn "<").headD name
+  (whole.splitOn "#").headD whole
+
+/-- The name as it was written: without the number a second implementation
+written the same was given. -/
+def traitShown (name : String) : String :=
+  let whole := (name.splitOn "<").headD name
+  traitBase name ++ (name.drop whole.length).toString
 
 /-- The name under which an implementation keeps the `i`-th argument it gives
 its trait, among what it declares. -/
@@ -395,6 +405,10 @@ def aliasTyped : Expr → Bool
 implementations of a trait is, `where I: Iterator<Item = A>`. The name says
 which condition, by its place, and which type. -/
 def equalArgName (condition : Nat) (name : String) : String := s!"%equal:{condition}:{name}"
+
+/-- The name under which an implementation keeps an argument its condition
+gives a trait: `where R: Get<T>` keeps `T` as the first of its condition's. -/
+def ctxArgName (condition i : Nat) : String := s!"%ctx:{condition}:{i}"
 
 /-- The parts of such a name. -/
 def equalArgParts (n : String) : Option (Nat × String) :=

@@ -2926,6 +2926,34 @@ the order it is being built:
   as it is, so a function that takes `&mut Self` is written
   `(&mut q).each(..)` for now.
 
+- **An implementation's head is a type.** `impl<T> Tag for Wrap<Option<T>>`,
+  `impl<B> Tag for Pair<Int, B>`, `impl<A> Twin for (A, A)`: an argument
+  that is not one of the implementation's type parameters, the first time
+  it is written, is a type the argument has to be.
+- **Two implementations of a trait for one type**, where one asks more of
+  the type than the other: it is the one for the types it fits. The
+  specification has no specialization (§13.2); this is asked for. With it
+  `impl<A, B> Same for (A, B)` and `impl<A> Same for (A, A)` tell whether
+  two types are one, and `impl<T, R> Get<T> for (Column<T>, R)` beside
+  `impl<T, H, R> Get<T> for (Column<H>, R) where R: Get<T>` finds a column
+  by its type in a tuple of columns, each function typed on its own.
+  - Two that some type fits, with neither asking more, are refused where
+    they are declared; so is the same one twice.
+  - Where the type is not all known, or is a function's own type
+    parameter, and an implementation that asks more may yet come to fit,
+    which one it is is not decided there: the function has to be given it
+    (`where W: Kind`), and whoever calls with a known type decides. This
+    is what keeps it sound without picking by lifetimes: a choice is only
+    ever made of a type that is known.
+- **A condition of an implementation may be a trait at arguments, of any
+  of its type parameters**: `where R: Get<T>`, `where H: Same<T>`.
+- Which implementation meets a bound in a program that uses any of this is
+  found by the checker fitting types, not by `Traits.solve`, which knows an
+  implementation by its trait and the name its type is made with and is
+  proved of that. What the checker finds is not proved; it is checked with
+  the program's Core, as everything the elaborator writes is. A program
+  that uses none of it is solved as before.
+
 Still to come: a type of its own for each function
 and closure, with `Fn<(..)>` as a bound; lists of types as parameters, with
 head and rest; an implementation that is preferred over a more general one;

@@ -301,6 +301,11 @@ structure ImplDecl where
   implementation of the trait for its type, at whatever arguments the
   type's own make them. -/
   generic : Bool := false
+  /-- Its conditions that are not a trait of one of the head's arguments
+  alone: a trait at arguments, or of a type parameter inside an argument
+  (`where R: Get<T>`, `where H: Same<T>`). Each the trait, its arguments and
+  the type it is asked of, in the implementation's own type parameters. -/
+  extra : List (String × List Ty × Ty) := []
 
 /-- A trait needed of a type at a call: of the type a trait's function is used
 at, or of a type parameter of the function called. -/
@@ -311,6 +316,9 @@ structure Bound where
   slot : Nat
   owner : String
   pos : String
+  /-- The arguments the trait is asked at, once the bound is one of an
+  implementation's own name (`Get<T>` at `Int`). -/
+  args : List Ty := []
 
 /-- An array kept in pieces. Where the checker tries something it may have
 to take back, it keeps what it knew; a write to a plain array that is kept
@@ -644,6 +652,12 @@ structure St where
   kimpls : List Traits.Impl := []
   /-- The bounds of the scheme last instantiated, at that use. -/
   lastBounds : List (String × Ty) := []
+  /-- Has some implementation a condition that is more than a trait of one
+  of its head's arguments, or do two implementations of one trait for one
+  type differ only in what the arguments have to be? Then which
+  implementation meets a bound is found by fitting types, here, and not by
+  `Traits.solve`. -/
+  patterned : Bool := false
   /-- The same of its `sites`. -/
   lastSites : List Ty := []
   /-- Where the function being checked performs or handles an operation of
@@ -785,6 +799,97 @@ partial def Ty.same : Ty → Ty → Bool
   | .fn ps r _ _ _, .fn qs s _ _ _ =>
     ps.length == qs.length && r.same s && (ps.zip qs).all fun (x, y) => x.same y
   | .ref _ x _, .ref _ y _ => x.same y
+  | _, _ => false
+
+mutual
+
+/-- Does a pattern fit a type: is there something for each of the pattern's
+own variables (`vars`) to be that makes the two the same? Every other
+variable, in either, is only itself. What each variable is, is added to
+`found`. -/
+partial def Ty.fits (vars : List Nat) (pattern term : Ty) (found : List (Nat × Ty)) :
+    Option (List (Nat × Ty)) :=
+  match pattern, term with
+  | .var v, t =>
+    if vars.contains v then
+      match found.lookup v with
+      | some was => if was.same t then some found else none
+      | none => some ((v, t) :: found)
+    else match t with
+      | .var w => if v == w then some found else none
+      | _ => none
+  | .con n as, .con m bs => if n == m && as.length == bs.length then Ty.fitsAll vars as bs found else none
+  | .tuple as, .tuple bs => if as.length == bs.length then Ty.fitsAll vars as bs found else none
+  | .fn ps r _ _ _, .fn qs s _ _ _ =>
+    if ps.length == qs.length then Ty.fitsAll vars (r :: ps) (s :: qs) found else none
+  | .ref _ x _, .ref _ y _ => Ty.fits vars x y found
+  | _, _ => none
+
+partial def Ty.fitsAll (vars : List Nat) (patterns terms : List Ty) (found : List (Nat × Ty)) :
+    Option (List (Nat × Ty)) :=
+  match patterns, terms with
+  | [], [] => some found
+  | p :: ps, t :: ts => (Ty.fits vars p t found).bind (Ty.fitsAll vars ps ts)
+  | _, _ => none
+
+end
+
+mutual
+
+/-- Can two types be made the same by what their variables are? What each
+would have to be is added to `found`. (Used of two implementations' heads,
+to see whether some type could be both's.) -/
+partial def Ty.meets (a b : Ty) (found : List (Nat × Ty)) : Option (List (Nat × Ty)) :=
+  let rec walk (t : Ty) (fuel : Nat) : Ty :=
+    match fuel, t with
+    | fuel + 1, .var v => match found.lookup v with
+      | some u => walk u fuel
+      | none => t
+    | _, t => t
+  match walk a 64, walk b 64 with
+  | .var v, .var w => if v == w then some found else some ((v, .var w) :: found)
+  | .var v, t => some ((v, t) :: found)
+  | t, .var w => some ((w, t) :: found)
+  | .con n as, .con m bs => if n == m && as.length == bs.length then Ty.meetAll as bs found else none
+  | .tuple as, .tuple bs => if as.length == bs.length then Ty.meetAll as bs found else none
+  | .fn ps r _ _ _, .fn qs s _ _ _ =>
+    if ps.length == qs.length then Ty.meetAll (r :: ps) (s :: qs) found else none
+  | .ref _ x _, .ref _ y _ => Ty.meets x y found
+  | _, _ => none
+
+partial def Ty.meetAll (as bs : List Ty) (found : List (Nat × Ty)) : Option (List (Nat × Ty)) :=
+  match as, bs with
+  | [], [] => some found
+  | a :: as, b :: bs => (Ty.meets a b found).bind (Ty.meetAll as bs)
+  | _, _ => none
+
+end
+
+/-- Is everything in a type known: no variable, and no type parameter of the
+function it is in? -/
+partial def Ty.ground : Ty → Bool
+  | .var _ => false
+  | .con n args => !n.startsWith "'" && args.all Ty.ground
+  | .tuple args => args.all Ty.ground
+  | .fn ps r _ _ _ => r.ground && ps.all Ty.ground
+  | .ref _ t _ => t.ground
+
+/-- Could a pattern come to fit a type, once what is not yet known of the
+type is, and whatever a function's own type parameters in it are? Yes
+unless the two are made with different names somewhere. -/
+partial def Ty.mayFit (pattern term : Ty) : Bool :=
+  match pattern, term with
+  | .var _, _ => true
+  | _, .var _ => true
+  | .con n as, .con m bs =>
+    (m.startsWith "'" && bs.isEmpty) || (n.startsWith "'" && as.isEmpty)
+      || (n == m && as.length == bs.length && (as.zip bs).all fun (x, y) => x.mayFit y)
+  | _, .con m [] => m.startsWith "'"
+  | .con n [], _ => n.startsWith "'"
+  | .tuple as, .tuple bs => as.length == bs.length && (as.zip bs).all fun (x, y) => x.mayFit y
+  | .fn ps r _ _ _, .fn qs s _ _ _ =>
+    ps.length == qs.length && r.mayFit s && (ps.zip qs).all fun (x, y) => x.mayFit y
+  | .ref _ x _, .ref _ y _ => x.mayFit y
   | _, _ => false
 
 /-- A type as it would be written, if nothing in it is unknown or a type
