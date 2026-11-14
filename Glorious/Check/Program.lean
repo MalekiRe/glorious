@@ -147,8 +147,7 @@ partial def needsDestroying (seen : List String) (t : Ty) : M Bool := do
 trait itself, or the one chosen by fitting where there is a choice. -/
 def subKey (trait : String) (ty : Ty) (args : List Ty) : M String := do
   let head := (← find ty).head.map (·.1)
-  let several := ((← get).impls.toList.filter fun im =>
-    Syntax.traitBase im.trait == trait && some im.head == head).length > 1
+  let several := ((← implsOfBase trait).filter fun im => some im.head == head).length > 1
   if args.isEmpty && !several then pure trait else implKey trait ty args
 
 /-- The numbers under which a condition of an implementation on a type made
@@ -395,8 +394,7 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
             | .con h args => pure (some (h, args))
             | _ => pure none
           if let some (h, args) := found then
-            let mine := (← get).impls.toList.filter fun im =>
-              Syntax.traitBase im.trait == Syntax.traitBase b.trait && im.head == h
+            let mine := (← implsOfBase (Syntax.traitBase b.trait)).filter fun im => im.head == h
             if let [im] := mine then
               let at_ ← implAt im args
               for (given, want) in im.targs.zip wanted do
@@ -404,8 +402,7 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
       for b in pending do
         let (self, _) ← subjectOf b.trait b.ty
         if let .var v ← find self then
-          let mine := (← get).impls.toList.filter fun im =>
-            Syntax.traitBase im.trait == Syntax.traitBase b.trait
+          let mine ← implsOfBase (Syntax.traitBase b.trait)
           let (first, others) := mine.partition fun im => im.pvars.any (·.1 == Syntax.fallbackMark)
           if first.isEmpty then continue
           -- (The other traits asked of the same type.)
@@ -416,9 +413,10 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
               if w == v && other.trait != Syntax.destroyTrait
                   && Syntax.traitBase other.trait != Syntax.traitBase b.trait then
                 asked := Syntax.traitBase other.trait :: asked
+          let byBase := (← get).implsByBase
           let impls := (← get).impls
           let fitsAll := fun (head : String) => asked.all fun tr =>
-            impls.any fun im => Syntax.traitBase im.trait == tr && im.head == head
+            (byBase.getD tr #[]).any fun i => (impls[i]?.map (·.head)) == some head
           match (first ++ others).find? (fun im => fitsAll im.head) with
           | some im => unify self (.con im.head (← im.params.mapM fun _ => freshTy))
           | none => pure ()
@@ -436,8 +434,8 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
       if let some (h, args) := named then
         -- (Where the type has several implementations of the trait, the one
         -- chosen makes the arguments fit when it is chosen.)
-        let several := ((← get).impls.toList.filter fun im =>
-          Syntax.traitBase im.trait == Syntax.traitBase b.trait && im.head == h).length > 1
+        let several := ((← implsOfBase (Syntax.traitBase b.trait)).filter fun im =>
+          im.head == h).length > 1
         for im in (← get).impls do
           if im.trait == b.trait && im.head == h && !several then
             -- (The implementation's own type parameters are this type's
@@ -481,8 +479,8 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
     -- is chosen by fitting, arguments or none.)
     let several ← do
       let head := (← find self).head.map (·.1)
-      pure ((← get).patterned && ((← get).impls.toList.filter fun im =>
-        Syntax.traitBase im.trait == b.trait && some im.head == head).length > 1)
+      pure ((← get).patterned && ((← implsOfBase b.trait).filter fun im =>
+        some im.head == head).length > 1)
     if args.isEmpty && !several then split := split.push b
     else
       let key ← try implKey b.trait self args

@@ -57,6 +57,13 @@ to what it came to before and costs the same part of the budget; so what is
 remembered changes no answer, and running out of budget happens where it
 did. calculator 1.43 s to 1.26 s.
 
+**Implementations are found by their trait's name.** The checker kept
+them in one array and, for each condition it settled, went through every
+implementation comparing trait names (made each time from the written
+name). Programs over lists of types have many: each `impl<..T>` is twelve.
+They are now also kept by trait, as they are declared. covey 0.88 s to
+0.57 s.
+
 A group of functions whose records of what they touch were settled went
 through every record made since the group began, each by its own walk, so a
 group went again over the records of every group inferred inside it. One walk

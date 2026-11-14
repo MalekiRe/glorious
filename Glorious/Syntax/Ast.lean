@@ -376,8 +376,10 @@ def traitAt (trait : String) (args : List String) : String :=
 def traitBase (name : String) : String :=
   -- (`Get#1<T>`: the second of two implementations of `Get` written the
   -- same for one type; see `fillDefaults`.)
-  let whole := (name.splitOn "<").headD name
-  (whole.splitOn "#").headD whole
+  -- (Asked of every implementation for every bound: a name that has neither
+  -- is itself, with nothing made.)
+  if name.any fun c => c == '<' || c == '#' then (name.takeWhile fun c => c != '<' && c != '#').toString
+  else name
 
 /-- The type an implementation is for, from the name it is made with and its
 arguments: see `Ty.head` in the checker for the names. -/

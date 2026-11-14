@@ -249,8 +249,8 @@ those, and the name is that implementation's. -/
 def implKey (trait : String) (self : Ty) (args : List Ty) : M String := do
   let head := (← find self).head
   if let some (h, hargs) := head then
-    let family := (← get).impls.toList.filter fun im =>
-      Syntax.traitBase im.trait == trait && im.head == h && im.targs.length == args.length
+    let family := (← implsOfBase trait).filter fun im =>
+      im.head == h && im.targs.length == args.length
     -- The implementation to make the arguments fit, and its name.
     let commit := fun (im : ImplDecl) => do
       let at_ ← implAt im hargs
@@ -298,8 +298,7 @@ argument? Then what the arguments are need not be known to find it. -/
 def hasGenericImpl (trait : String) (self : Ty) : M Bool := do
   match ← find self with
   | .con h _ =>
-    pure ((← get).impls.toList.any fun im =>
-      im.generic && Syntax.traitBase im.trait == trait && im.head == h)
+    pure ((← implsOfBase trait).any fun im => im.generic && im.head == h)
   | _ => pure false
 
 /-- What an implementation's conditions say of types left to other traits'

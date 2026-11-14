@@ -670,6 +670,9 @@ structure St where
   traits : List (String × List String) := []
   methods : List (String × MethodSig) := []
   impls : Array ImplDecl := #[]
+  /-- The implementations of each trait, by the trait's name without its
+  arguments: their places in `impls`. -/
+  implsByBase : Std.HashMap String (Array Nat) := {}
   /-- The implementations as `Traits.solve` sees them, in the same order. -/
   kimpls : List Traits.Impl := []
   /-- The bounds of the scheme last instantiated, at that use. -/
@@ -756,6 +759,11 @@ keeps the state from before to go back to, nothing holds that state while
   match act s with
   | .ok r => .ok r
   | .error e => .error (f e)
+
+/-- The implementations of a trait, by its name without arguments. -/
+def implsOfBase (base : String) : M (List ImplDecl) := do
+  let s ← get
+  pure ((s.implsByBase.getD base #[]).toList.filterMap fun i => s.impls[i]?)
 
 instance {α : Type} : Inhabited (M α) := ⟨throw "checker: unreachable"⟩
 

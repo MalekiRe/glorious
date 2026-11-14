@@ -68,6 +68,7 @@ partial def stuckAt (p : Core.Program) (cfg : Core.Config) : Core.Config :=
 
 def usage : String :=
   "usage: glorious run FILE [INPUT...]\n       glorious check FILE [INPUT...]\n" ++
+  "       glorious watch FILE [INPUT...]   (compile and run again on every change)\n" ++
   "       glorious build FILE OUT\n       glorious certify [--strict] FILE\n" ++
   "       glorious selftest [VM]"
 
@@ -647,6 +648,43 @@ def parseInput (args : List String) : Except String (List Int) :=
     | some n => pure n
     | none => throw s!"input `{a}` is not an integer"
 
+/-- Compile the program at `path` again whenever its text or a module of it
+changes, and run it. What does not change between compiles is kept: the
+prelude and the whole library, checked once; and what the last compile found
+of where borrows can be scopes of their own. -/
+partial def watch (path : String) (input : List Int) : IO UInt32 := do
+  let file ← placesFile path
+  let mut known ← readPlaces file
+  let mut last : List String := []
+  repeat
+    let texts ← try
+        let src ← IO.FS.readFile path
+        let files ← moduleFiles path
+        pure (some (src, files))
+      catch _ => pure none
+    if let some (src, files) := texts then
+      let now := src :: files.map (·.2)
+      if now != last then
+        last := now
+        let start ← IO.monoMsNow
+        match compileSource src true files (few := false) known with
+        | .error e => IO.eprintln s!"{path}: {e}"
+        | .ok c =>
+          known := c.places
+          try
+            if let some dir := file.parent then IO.FS.createDirAll dir
+            IO.FS.writeFile file ("\n".intercalate (c.places.map fun ((owner, k), v) => s!"{k}\t{v}\t{owner}"))
+          catch _ => pure ()
+          let compiled ← IO.monoMsNow
+          IO.println s!"-- compiled in {compiled - start} ms"
+          let bytecode := compile c.core
+          match ← runStreaming c.ctorNames bytecode (Bytecode.initIO bytecode input) 0 with
+          | .halt r => IO.println (showValue c.ctorNames r.value)
+          | _ => IO.eprintln s!"the program went wrong: {explainStuck c (stuckAt c.core (Core.initIO c.core input))}"
+        (← IO.getStdout).flush
+    IO.sleep 100
+  pure 0
+
 def main (args : List String) : IO UInt32 := do
   match args with
   | ["certify", path] => certify path false
@@ -754,6 +792,12 @@ def main (args : List String) : IO UInt32 := do
     | .error e =>
       IO.eprintln s!"{path}: {e}"
       pure 1
+  | "watch" :: path :: rest =>
+    match parseInput rest with
+    | .ok input => watch path input
+    | .error e =>
+      IO.eprintln e
+      pure 64
   | command :: path :: rest =>
     let input ← match parseInput rest with
       | .ok input => pure input
