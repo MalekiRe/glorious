@@ -1,22 +1,25 @@
 // A small world: things that move and tire.
 //
 // Systems are plain functions; what each touches is its parameters. They are
-// registered under labels, and `emit` runs a label's systems in order.
+// registered under labels, and `emit` runs a label's systems in order: `Update`
+// carries nothing, `Hit` how hard. What ends an entity is a command, done once
+// the systems have run.
 // expect:
 // 3
 // 2
-// 2
-// 1012
+// 1
+// 12
 mod ecs;
 
-use ecs::{Entity, Column, app, register, add_systems, add_plugins, chain, emit, spawn, despawn, insert, count, fold_all, each, each2};
+use ecs::{Entity, Column, Commands, end, app, register, add_systems, on, add_plugins, chain, emit, spawn, insert, count, fold_all, each, each2};
 
 struct Position(Int)
 struct Velocity(Int)
 struct Health(Int)
 
 struct Update
-struct Tire
+// How much everything is hurt.
+struct Hit(Int)
 
 // Everything that moves, moves.
 fn integrate(positions: &mut Column<Position>, velocities: &Column<Velocity>) {
@@ -32,15 +35,31 @@ fn friction(velocities: &mut Column<Velocity>) {
     })
 }
 
-fn tire(healths: &mut Column<Health>) {
-    each(healths, fn(entity: Entity, health: &mut Health) {
-        health.0 = health.0 - 1;
-    })
+// Everything that can be hurt is, by what the hit says.
+fn wound(hit: &Hit, healths: &mut Column<Health>) {
+    let mut i = 0;
+    while({ i < len_at(&healths.dense) }) {
+        healths.dense[i] = Health(healths.dense[i].0 - hit.0);
+        i = i + 1
+    }
+}
+
+// And what has no health left ends.
+fn reap(healths: &Column<Health>, commands: &mut Commands) {
+    let mut i = 0;
+    while({ i < len_at(&healths.dense) }) {
+        if(healths.dense[i].0 <= 0) { commands.end(healths.owners[i]) } else { () };
+        i = i + 1
+    }
 }
 
 // A plugin: a function from an app to an app.
 fn physics(app) {
     app.add_systems(Update, (integrate, friction).chain())
+}
+
+fn combat(app) {
+    app.on<Hit>((wound, reap).chain())
 }
 
 fn main() -> Int {
@@ -49,20 +68,20 @@ fn main() -> Int {
         .register<Velocity>()
         .register<Health>()
         .add_plugins(physics)
-        .add_systems(Tire, tire);
+        .add_plugins(combat);
     let a = game.world.spawn();
     game.world.insert(a, Position(0)); game.world.insert(a, Velocity(5)); game.world.insert(a, Health(3));
     let b = game.world.spawn();
     game.world.insert(b, Position(100)); game.world.insert(b, Velocity(7)); game.world.insert(b, Health(1));
     let c = game.world.spawn();
     game.world.insert(c, Position(1000)); game.world.insert(c, Health(2));
-    print(game.world.count<Health, _>());
+    print(game.world.count<Health>());
     game.emit(Update);
-    game.emit(Tire);
-    game.world.despawn(b);
-    print(game.world.count<Health, _>());
+    game.emit(Hit(1));
+    print(game.world.count<Health>());
     game.emit(Update);
-    print(game.world.count<Position, _>());
+    game.emit(Hit(1));
+    print(game.world.count<Health>());
     game.emit(Update);
     game.world.fold_all(0, fn(sum: Int, position: &Position) -> Int { sum + position.0 })
 }

@@ -2999,6 +2999,8 @@ const generics and fixed arrays.
   puts an entry on the app's list of systems, which is a type too, and
   `emit` runs the entries under its label by `Dispatch<E, S>`, found the
   same way as `Get`.
+- **A label can carry a value**: `.on<Hit>((wound, reap).chain())`, and a
+  system under it may take `&Hit` first; `game.emit(Hit(1))` runs them.
 - **A plugin is a function from an app to an app**: `.add_plugins(physics)`.
 - **A system with two parameters of one component does not compile.** Its
   implementation asks `(A, B): Apart`, which a pair has, except `(A, A)`,
@@ -3013,8 +3015,8 @@ const generics and fixed arrays.
 - **Not there yet.**
   - One `System` implementation is written out for each number and kind
     of parameter (four so far), until a list of types can be a parameter.
-  - A system performs no effects and cannot spawn, despawn or queue
-    commands. A label carries no value to its systems.
+  - A system performs no effects. It can ask for an entity to be ended
+    (`&mut Commands`), and no more than that yet.
   - Every call of a system and of a trait's function goes through a value
     at run time: nothing is inlined, so it is the shape of the Rust and not
     yet its speed.
