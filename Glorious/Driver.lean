@@ -107,6 +107,39 @@ partial def checkUnsafeImpls (items : List Syntax.Item) : Except String Unit := 
       if !traits.contains (last tr) && said then
         throw s!"`unsafe impl {last tr} for {last head}`: `{last tr}` is not an `unsafe trait`"
 
+/-- The prelude read, once. -/
+def readPrelude : Thunk (Except String (List Syntax.Item × Syntax.Fixities)) := Thunk.mk fun _ =>
+  match Syntax.parse {} Prelude.source with
+  | .ok r => .ok r
+  | .error e => .error s!"prelude: {e}"
+
+/-- The library's texts read, once: what each says before it is parsed, the
+operators of each of its modules in a program that declares none, every
+name written in the texts, and each text parsed. A program that names the
+library reads them the same, unless it has a constructor with named fields
+whose name the library's texts write, or brings an operator into one of the
+library's modules: then they are read again for that program. -/
+structure StdRead where
+  said : List Syntax.TextSyntax
+  records : List String
+  names : Std.HashSet String
+  tables : List (List String × Syntax.Fixities)
+  parsed : Array (List Syntax.Item)
+
+def readStd : Thunk (Except String StdRead) := Thunk.mk fun _ => do
+  let (_, fix) ← readPrelude.get
+  let syn ← Std.texts.mapM fun (path, text) => Syntax.textSyntax path text
+  let records := syn.flatMap (·.records)
+  let tables ← Syntax.joinFixities fix ((← Syntax.textSyntax [] "") :: syn)
+  let mut parsed : Array (List Syntax.Item) := #[]
+  for ((path, text), k) in Std.texts.zipIdx do
+    match Syntax.parse fix text (base := 1000000 * (k + 2)) (records := records) (tables := tables)
+        (path := path) with
+    | .ok (items, _) => parsed := parsed.push items
+    | .error e => throw s!"module `{"::".intercalate path}`: {e}"
+  let names := syn.foldl (fun set s => s.names.foldl (fun set n => set.insert n) set) {}
+  pure { said := syn, records := records, names := names, tables := tables, parsed := parsed }
+
 /-- The prelude and a program as written: the first module's text, and the
 texts of the modules that are files of their own, each with its path. Where
 the program says `mod name;` the items of that module's text are put. -/
@@ -115,18 +148,40 @@ def parseProgram (src : String) (files : List (List String × String)) (check : 
   -- The library's texts are files of the program, before its own.
   -- (`#![no_std]`: without the library, whatever the text mentions.)
   let std := usesStd src files && (src.splitOn "#![no_std]").length == 1
+  let own := files
   let files := if std then Std.texts ++ files else files
-  let (prelude, fix) ← match Syntax.parse {} (if check then Prelude.source else Prelude.unchecked) with
+  let (prelude, fix) ← if check then readPrelude.get else
+    match Syntax.parse {} Prelude.unchecked with
     | .ok r => pure r
     | .error e => throw s!"prelude: {e}"
+  -- The library's texts as they were read once, where the program names it.
+  let read ← if std && check then (do pure (some (← readStd.get)) : Except String (Option StdRead))
+    else pure none
   -- Operators and the constructors with named fields are known to every
   -- text, whichever declares them.
-  let mut records : List String := []
-  for text in src :: files.map (·.2) do
-    let (_, r) ← Syntax.declaredSyntax fix text
-    records := records ++ r
+  let said ← (([], src) :: own).mapM fun (path, text) => do
+    let _ ← Syntax.declaredSyntax fix text
+    Syntax.textSyntax path text
+  let unread ← match read with
+    | some _ => pure []
+    | none => (if std then Std.texts else []).mapM fun (path, text) => do
+        let _ ← Syntax.declaredSyntax fix text
+        Syntax.textSyntax path text
+  let library := match read with
+    | some r => r.said
+    | none => unread
+  let ordered := said.take 1 ++ library ++ said.drop 1
+  let records := ordered.flatMap (·.records)
   -- An operator's fixity is its module's.
-  let tables ← Syntax.scopedFixities fix (([], src) :: files)
+  let tables ← Syntax.joinFixities fix ordered
+  -- The library as it was read once is the library as this program reads
+  -- it, if none of the program's own constructors with named fields is a
+  -- name the library writes, and its modules have the operators they had.
+  let kept : Option StdRead := read.bind fun r =>
+    let mine := said.flatMap (·.records)
+    if mine.any r.names.contains then none
+    else if r.tables.all fun (p, table) => p.isEmpty || tables.lookup p == some table then some r
+    else none
   let (items, _) ← Syntax.parse fix src (base := 1000000) (records := records) (tables := tables)
   let declares := items.any fun
     | .module "std" _ | .pub _ (.module "std" _) => true
@@ -148,11 +203,14 @@ def parseProgram (src : String) (files : List (List String × String)) (check : 
         let shown := "::".intercalate here
         match files.findIdx? (·.1 == here) with
         | some k =>
-          let text := ((files[k]?).map (·.2)).getD ""
-          let parsed ← match Syntax.parse fix text (base := 1000000 * (k + 2)) (records := records)
-              (tables := tables) (path := here) with
-            | .ok (items, _) => pure items
-            | .error e => throw s!"module `{shown}`: {e}"
+          let parsed ← match (if k < Std.texts.length then kept.bind (·.parsed[k]?) else none) with
+            | some items => pure items
+            | none =>
+              let text := ((files[k]?).map (·.2)).getD ""
+              match Syntax.parse fix text (base := 1000000 * (k + 2)) (records := records)
+                  (tables := tables) (path := here) with
+              | .ok (items, _) => pure items
+              | .error e => throw s!"module `{shown}`: {e}"
           pure (wrap (.module name (some (← fill fuel here parsed))))
         | none => throw s!"module `{shown}` has no file"
       | .module name (some body), fuel + 1 =>
@@ -166,7 +224,7 @@ def parseProgram (src : String) (files : List (List String × String)) (check : 
 knows after it. A program that declares no name the prelude has is checked
 from there, against what the prelude declares. -/
 def checkedPrelude : Thunk (Except String (Nat × Check.St)) := Thunk.mk fun _ => do
-  let (prelude, _) ← Syntax.parse {} Prelude.source
+  let (prelude, _) ← readPrelude.get
   let resolved ← Syntax.Modules.resolve prelude []
   let all := Syntax.fillDefaults (← Syntax.expandAliases resolved.items)
   pure (all.length, ← Check.checkFirst all resolved.info)
@@ -181,7 +239,7 @@ def checkedStd : Thunk (Except String (Nat × Check.St)) := Thunk.mk fun _ => do
 /-- The same two, for a program in which some type has `Drop`: checked so
 that a function is given how to destroy the types it is generic in. -/
 def checkedPreludeDrop : Thunk (Except String (Nat × Check.St)) := Thunk.mk fun _ => do
-  let (prelude, _) ← Syntax.parse {} Prelude.source
+  let (prelude, _) ← readPrelude.get
   let resolved ← Syntax.Modules.resolve prelude []
   let all := Syntax.fillDefaults (← Syntax.expandAliases resolved.items)
   pure (all.length, ← Check.checkFirst all resolved.info true)

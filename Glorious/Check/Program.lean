@@ -904,7 +904,11 @@ def checkGroup (decls : List FnDecl) : M Unit := do
     modify fun s =>
       { s with fnBodies := s.fnBodies.map fun (name, clauses) =>
           if decls.any (·.name == name) then (name, Elab.coerceFn cs name clauses)
-          else (name, clauses) }
+          else (name, clauses),
+               runFns := decls.foldl (fun m d =>
+                 match m[d.name]? with
+                 | some clauses => m.insert d.name (Elab.coerceFn cs d.name clauses)
+                 | none => m) s.runFns }
   -- A later function can still decide a requirement made here, through a
   -- declaration whose field types are inferred, so each is checked again at
   -- the end of the program.
@@ -961,7 +965,9 @@ def checkItems (items : List Item) : M Unit := do
     if builtFrom.contains name then mentions name else (mentions name ++ coercing).eraseDups
   do
     let before := (← get).impls.size
-    modify fun s => { s with fnBodies := s.fnBodies ++ decls.map fun d => (d.name, d.clauses) }
+    modify fun s =>
+      { s with fnBodies := s.fnBodies ++ (decls.map fun d => (d.name, d.clauses)),
+               runFns := decls.foldl (fun m d => m.insertIfNew d.name d.clauses) s.runFns }
     declare items
     computeVariances
     declareTraits items

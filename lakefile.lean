@@ -1,11 +1,12 @@
 import Lake
 open Lake DSL
 
-/-- `lake build -Kquick=1 glorious`: the C that Lean writes is compiled with
+/-- `lake build -R -Kquick=1 glorious`: the C that Lean writes is compiled with
 the cheap code generator, for trying a change: the largest files then take
 half the time or less, and the compiler that comes out runs at a little over
 half the speed. Frame pointers are kept, so that `perf record -g` can say
-who calls what. Without it, the build is the one to use. -/
+who calls what. Without it, the build is the one to use (`lake build -R
+glorious` after a quick one: `-R` is what has the option read again). -/
 def quickArgs : Array String :=
   if (get_config? quick).isSome then
     #["-O1", "-mllvm", "-fast-isel", "-mllvm", "-optimize-regalloc=0", "-fno-omit-frame-pointer"]

@@ -2273,27 +2273,45 @@ private partial def useLeaves (tok : Nat → Tok) (i : Nat) (before : List Strin
       ([(path, false)], if tok (i + 1) == .ident "as" then i + 3 else i + 1)
   | _ => ([], i + 1)
 
+/-- What one text of a program says that has to be known before any text is
+parsed: the operators each of its modules declares, what each brings in with
+`use`, its constructors with named fields, and every name written in it. -/
+structure TextSyntax where
+  own : List (List String × Fixities)
+  uses : List (List String × List String × Bool)
+  records : List String
+  names : List String
+
+/-- That, for the text that is the module `base`. -/
+def textSyntax (base : List String) (src : String) : Except String TextSyntax := do
+  let toks ← lex src
+  let mods := tokenModules toks
+  let tok := fun (i : Nat) => (toks[i]?.map (·.tok)).getD .eof
+  let mut own : List (List String × Fixities) := []
+  let mut uses : List (List String × List String × Bool) := []
+  for rel in ([] :: mods.toList).eraseDups do
+    own := own ++ [(base ++ rel, ← collectFixities toks {} (fun i => mods[i]? == some rel))]
+  for i in [0:toks.size] do
+    if tok i == .ident "use" then
+      let first := i == 0 || match tok (i - 1) with
+        | .punct ";" | .punct "}" | .punct "{" | .punct ")" | .ident "pub" => true
+        | _ => false
+      if first then
+        uses := uses ++ (useLeaves tok (i + 1) []).1.map fun (p, glob) => (base ++ mods[i]?.getD [], p, glob)
+  let names := toks.toList.filterMap fun t =>
+    match t.tok with
+    | .ident s => some s
+    | _ => none
+  pure { own, uses, records := collectRecords toks, names }
+
 /-- The operators of each module of a program. An operator's fixity holds in
 the module that declares it, and in one that brings in, with `use`, the
 function the operator stands for; the prelude's hold in every module. `texts`
-are the program's texts, each with the module it is. -/
-def scopedFixities (prelude : Fixities) (texts : List (List String × String)) :
+is what each of the program's texts says, in the program's order. -/
+def joinFixities (prelude : Fixities) (texts : List TextSyntax) :
     Except String (List (List String × Fixities)) := do
-  let mut own : List (List String × Fixities) := []
-  let mut uses : List (List String × List String × Bool) := []
-  for (base, src) in texts do
-    let toks ← lex src
-    let mods := tokenModules toks
-    let tok := fun (i : Nat) => (toks[i]?.map (·.tok)).getD .eof
-    for rel in ([] :: mods.toList).eraseDups do
-      own := own ++ [(base ++ rel, ← collectFixities toks {} (fun i => mods[i]? == some rel))]
-    for i in [0:toks.size] do
-      if tok i == .ident "use" then
-        let first := i == 0 || match tok (i - 1) with
-          | .punct ";" | .punct "}" | .punct "{" | .punct ")" | .ident "pub" => true
-          | _ => false
-        if first then
-          uses := uses ++ (useLeaves tok (i + 1) []).1.map fun (p, glob) => (base ++ mods[i]?.getD [], p, glob)
+  let own := texts.flatMap (·.own)
+  let uses := texts.flatMap (·.uses)
   own.mapM fun (m, mine) => do
     let mut fix := mine
     for (user, path, glob) in uses do
@@ -2327,6 +2345,11 @@ def scopedFixities (prelude : Fixities) (texts : List (List String × String)) :
                   bound := (theirs.bound.filter fun (o, pre, _) => o == op && pre) ++ fix.bound }
     pure (m, { infixes := fix.infixes ++ prelude.infixes, prefixes := fix.prefixes ++ prelude.prefixes,
                bound := fix.bound ++ prelude.bound })
+
+/-- The same from the texts themselves, each with the module it is. -/
+def scopedFixities (prelude : Fixities) (texts : List (List String × String)) :
+    Except String (List (List String × Fixities)) := do
+  joinFixities prelude (← texts.mapM fun (base, src) => textSyntax base src)
 
 /-- Parse a source text, given the fixities already in scope. Returns the items
 and the fixities including those it declares. `base` keeps the identities of

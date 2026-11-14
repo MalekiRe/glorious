@@ -489,6 +489,7 @@ structure Fixities where
   - = negate`: the operator, whether as a prefix, and the function. One
   symbol can so be one function before a value and another between two. -/
   bound : List (String × Bool × String) := []
+  deriving BEq
 
 /-- The function an operator stands for: itself, unless a declaration says. -/
 def Fixities.function (fix : Fixities) (op : String) (asPrefix : Bool) : String :=

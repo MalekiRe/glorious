@@ -352,7 +352,7 @@ partial def checkArg (scope : Scope) (amb : Row) (what : String) (p : Ty) (a : E
       | _ => false
     unless callable do
       let t ← inferExpr scope amb (.call 0 a [])
-      modify fun s => { s with packs := s.packs.push (id, [Syntax.nowMark]) }
+      modify fun s => { s with packs := s.packs.push (id, [Syntax.nowMark]), runNow := s.runNow.insert id }
       return ← fitAt scope amb what site p t
   match Elab.plainBlock a, ← find p with
   | some (id, body), .fn [input] _ _ _ _ =>

@@ -564,7 +564,8 @@ def declare (items : List Item) : M Unit := do
       let params := genericParams params
       modify fun s =>
         { s with types := (name, ⟨params.length, [name], params.map isLifetime, []⟩) :: s.types }
-    | .alias name value => modify fun s => { s with aliases := (name, value) :: s.aliases }
+    | .alias name value => modify fun s =>
+      { s with aliases := (name, value) :: s.aliases, runAliases := s.runAliases.insert name value }
     | .coerce name => modify fun s => { s with coercing := s.coercing ++ [name] }
     | .unsafeFn name => modify fun s => { s with unsafeFns := name :: s.unsafeFns }
     | .fieldNames ctor names _ =>
@@ -582,14 +583,16 @@ def declare (items : List Item) : M Unit := do
       for (c, fields) in ctors do
         let fields ← fields.mapM (resolveType pmap true)
         modify fun s =>
-          { s with ctors := (c, ⟨name, ids, fields, result, caps, kinds⟩) :: s.ctors }
+          { s with ctors := (c, ⟨name, ids, fields, result, caps, kinds⟩) :: s.ctors,
+                   runCtors := s.runCtors.insert c }
     | .struct name params fields =>
       let (pmap, ids, caps) ← freshParams params
       let kinds := (genericParams params).map isLifetime
       let fields ← fields.mapM (resolveType pmap true)
       modify fun s =>
         { s with ctors :=
-            (name, ⟨name, ids, fields, .con name (pmap.map (·.2)), caps, kinds⟩) :: s.ctors }
+            (name, ⟨name, ids, fields, .con name (pmap.map (·.2)), caps, kinds⟩) :: s.ctors,
+                 runCtors := s.runCtors.insert name }
     | .effect name params ops =>
       -- A lifetime of an effect is given where the effect is handled: what
       -- an operation gives or takes may borrow for that long.
@@ -624,7 +627,11 @@ def declare (items : List Item) : M Unit := do
               throw s!"operation `{op.name}`: a resumption is used at most once, so write `[0, 1]` or `[1, 1]`"
             pure (lower == 1)
         if must then modify fun s => { s with anyMust := true }
-        modify fun s => { s with ops := (op.name, ⟨name, ids, payload, result, must, lifetimes⟩) :: s.ops }
+        modify fun s =>
+          { s with ops := (op.name, ⟨name, ids, payload, result, must, lifetimes⟩) :: s.ops,
+                   runOps := s.runOps.insert op.name result.isSome,
+                   runExact := if must && result.isSome then s.runExact.insert op.name
+                     else s.runExact.erase op.name }
       modify fun s =>
         { s with effects := (name, ⟨ids, ops.map (·.name), lifetimes.map (·.isSome)⟩) :: s.effects }
     | .use head lower upper =>

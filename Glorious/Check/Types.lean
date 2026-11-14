@@ -1,3 +1,4 @@
+import Std.Data.HashMap
 import Std.Data.HashSet
 import Glorious.Syntax.Ast
 import Glorious.Elab.Base
@@ -518,6 +519,18 @@ structure St where
   /-- The clauses of every top-level function, for following calls when uses
   are counted. -/
   fnBodies : List (String × List Clause) := []
+  /-- What the count of uses reads of what is declared, kept as it is
+  declared and found in one look: the bodies of functions, the names of
+  constructors, the aliases, whether each operation gives something back,
+  the operations whoever handles must resume, and the blocks run where they
+  are written. Each is what its list says, the first of a name where the
+  list has two. -/
+  runFns : Std.HashMap String (List Clause) := {}
+  runCtors : Std.HashSet String := {}
+  runAliases : Std.HashMap String Expr := {}
+  runOps : Std.HashMap String Bool := {}
+  runExact : Std.HashSet String := {}
+  runNow : Std.HashSet Nat := {}
   /-- Calls whose callee has effects not yet known: the callee's row, the row
   permitted where it is called, and a description of the call. -/
   rowIncl : Array (Row × Row × String) := #[]

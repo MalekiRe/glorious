@@ -220,19 +220,19 @@ inductive AVal where
   deriving Inhabited
 
 structure ACtx where
-  fns : List (String × List Clause)
-  ctors : List String
-  aliases : List (String × Expr)
-  ops : List (String × Bool)
+  fns : Std.HashMap String (List Clause)
+  ctors : Std.HashSet String
+  aliases : Std.HashMap String Expr
+  ops : Std.HashMap String Bool
   /-- Count the fewest uses along any path instead of the most. Then a call
   that cannot be followed may also not come back, a callable that leaves the
   count may never be called, and a path that leaves ends with what it has. -/
   lower : Bool := false
   /-- Names whose calls only compute: they always come back. -/
-  quiet : List String := []
+  quiet : Std.HashSet String := {}
   /-- The operations declared `[1, 1]`: whoever handles one resumes it, so
   performing it comes back. -/
-  exact : List String := []
+  exact : Std.HashSet String := {}
   /-- Count the binding as used where it is given to something, whatever
   that then does with it: whoever takes a value has it. -/
   handed : Bool := false
@@ -245,11 +245,16 @@ structure ACtx where
   /-- Where such a value goes is accounted for by whoever lets it go. -/
   lenient : Bool := false
   /-- The blocks that are run where they are written, by their numbers. -/
-  now : List Nat := []
+  now : Std.HashSet Nat := {}
   /-- The functions being followed. One that calls itself is not followed
   again: what it is given goes where the count does not follow, which says
   of every later round what the first said. -/
   active : List String := []
+
+/-- What only computes: the machine's own operations and what builds a value. -/
+def intrinsics : Std.HashSet String :=
+  Std.HashSet.ofList (Elab.prims.map (·.1) ++ Elab.casts ++ Elab.hosts.map (·.1)
+    ++ ["cancel", "replace", "swap", "overwrite", Syntax.foreignCall, Syntax.ctorIsMark, "%shapes", "%never"])
 
 /-- Where a path that ends at a call of a `probe` is said to leave to. -/
 def probeTarget : String := "%probe"
@@ -283,7 +288,7 @@ abbrev Alts := List (AVal × Nat)
 partial def ACtx.ctorOf (ctx : ACtx) (name : String) : Option String :=
   if ctx.ctors.contains name then some name
   else
-    match (ctx.aliases.lookup name).map Syntax.aliasValue with
+    match (ctx.aliases[name]?).map Syntax.aliasValue with
     | some (.name _ y) => ctx.ctorOf y
     | _ => none
 
@@ -301,7 +306,7 @@ partial def binders (ctx : ACtx) : Pattern → List String
   | .wild => []
   | .int _ => []
   | .var x =>
-    if (ctx.ctorOf x).isSome || (ctx.aliases.lookup x).isSome then [] else [x]
+    if (ctx.ctorOf x).isSome || (ctx.aliases[x]?).isSome then [] else [x]
   | .ctor _ _ ps => ps.flatMap (binders ctx)
   | .tuple ps => ps.flatMap (binders ctx)
 
@@ -327,7 +332,7 @@ partial def fit (ctx : ACtx) : Pattern → AVal → Fit × List (String × AVal)
     match ctx.ctorOf x with
     | some c => fitData ctx c [] v
     | none =>
-      match ctx.aliases.lookup x with
+      match ctx.aliases[x]? with
       | some e =>
         match constPat e with
         | some p => fit ctx p v
@@ -527,7 +532,7 @@ partial def callValue (ctx : ACtx) (depth : Nat) (f : AVal) (args : List AVal) :
     pure [(.gone probeTarget, n), (if args.any holdsProbe then .probe else .unknown, n)]
   | .clo clauses env => applyClauses (ctx.inside env) depth clauses env args
   | .fn name =>
-    match depth, ctx.fns.lookup name with
+    match depth, ctx.fns[name]? with
     | d + 1, some clauses =>
       if ctx.active.contains name then unfollowed ctx depth args
       else applyClauses { ctx with active := name :: ctx.active } d clauses [] args
@@ -573,10 +578,10 @@ partial def runExpr (ctx : ACtx) (depth : Nat) (env : List (String × AVal)) : E
     | some v => pure [(v, 0)]
     | none =>
       if let some c := ctx.ctorOf x then pure [(.data c [], 0)]
-      else if (ctx.ops.lookup x).isSome then pure [(.unknown, 0)]
-      else if (ctx.fns.lookup x).isSome then pure [(.fn x, 0)]
+      else if (ctx.ops[x]?).isSome then pure [(.unknown, 0)]
+      else if (ctx.fns[x]?).isSome then pure [(.fn x, 0)]
       else
-        match ctx.aliases.lookup x with
+        match ctx.aliases[x]? with
         | some e => runExpr ctx depth [] e
         | none => pure [(.unknown, 0)]
   | .label _ => pure [(.unknown, 0)]
@@ -609,7 +614,7 @@ partial def runExpr (ctx : ACtx) (depth : Nat) (env : List (String × AVal)) : E
     for arm in arms do
       match arm with
       | .mk [.ctor name q ps] body =>
-        match ctx.ops.lookup name with
+        match ctx.ops[name]? with
         | some resumptive =>
           handled := name :: handled
           let params := (ps.flatMap (binders ctx)).map (·, AVal.unknown)
@@ -750,7 +755,7 @@ partial def runCallee (ctx : ACtx) (depth : Nat) (env : List (String × AVal)) (
         match goneOf vs with
         | some t => (.gone t, n)
         | none => (.data c vs, n))
-    else if x == "arr_len" && (ctx.fns.lookup x).isNone then
+    else if x == "arr_len" && (ctx.fns[x]?).isNone then
       -- Asking how long an array is only looks at it: the array is still
       -- whoever's it was.
       let found ← runList ctx depth env args
@@ -758,7 +763,7 @@ partial def runCallee (ctx : ACtx) (depth : Nat) (env : List (String × AVal)) (
         match goneOf vs with
         | some t => (.gone t, n)
         | none => (.unknown, n))
-    else if let some resumptive := ctx.ops.lookup x then
+    else if let some resumptive := ctx.ops[x]? then
       -- Performing an operation hands its payload to a handler.
       if ctx.lower then
         -- The handler need not resume: the path may end here. Unless the
@@ -773,7 +778,7 @@ partial def runCallee (ctx : ACtx) (depth : Nat) (env : List (String × AVal)) (
           for (_, k) in found do
             worst := max worst (n + k)
         pure [(.unknown, worst)]
-    else if ctx.lower && ctx.quiet.contains x && (ctx.fns.lookup x).isNone then
+    else if ctx.lower && ctx.quiet.contains x && (ctx.fns[x]?).isNone then
       handedOn fun n => [(.unknown, n)]
     else general
   | _ => general
@@ -976,13 +981,9 @@ def checkUses (pos : String) (outer : Scope) (binds : Scope) (body : List Stmt) 
     | some sig => sig.result.isSome
     | none => false
   -- What only computes: the machine's own operations and what builds a value.
-  let intrinsics := Elab.prims.map (·.1) ++ Elab.casts ++ Elab.hosts.map (·.1) ++ ["cancel", "replace", "swap", "overwrite", Syntax.foreignCall, Syntax.ctorIsMark, "%shapes", "%never"]
   let ctx : ACtx :=
-    { fns := s.fnBodies, ctors := s.ctors.map (·.1), aliases := s.aliases,
-      ops := s.ops.map fun (name, sig) => (name, sig.result.isSome), quiet := intrinsics,
-      exact := s.ops.filterMap fun (name, sig) => if sig.must && sig.result.isSome then some name else none
-      now := s.packs.toList.filterMap fun (id, names) =>
-        if names == [Syntax.nowMark] then some id else none }
+    { fns := s.runFns, ctors := s.runCtors, aliases := s.runAliases, ops := s.runOps,
+      quiet := intrinsics, exact := s.runExact, now := s.runNow }
   let names := (binds ++ outer).map (·.1)
   -- (A value clauses are given again, after one of them reached through a
   -- reference in it and was not for what it found: said as that.)
@@ -1199,14 +1200,11 @@ def runLowerChecks (fnTy : Ty) : M Unit := do
     match s.ops.lookup name with
     | some sig => sig.result.isSome
     | none => false
-  let intrinsics := Elab.prims.map (·.1) ++ Elab.casts ++ Elab.hosts.map (·.1) ++ ["cancel", "replace", "swap", "overwrite", Syntax.foreignCall, Syntax.ctorIsMark, "%shapes", "%never"]
   let ctx : ACtx :=
-    { fns := s.fnBodies, ctors := s.ctors.map (·.1), aliases := s.aliases,
-      ops := s.ops.map fun (name, sig) => (name, sig.result.isSome), quiet := intrinsics,
-      exact := s.ops.filterMap fun (name, sig) => if sig.must && sig.result.isSome then some name else none,
-      lower := true, sure := sure }
+    { fns := s.runFns, ctors := s.runCtors, aliases := s.runAliases, ops := s.runOps,
+      quiet := intrinsics, exact := s.runExact, lower := true, sure := sure }
   let quiet := fun (f : String) =>
-    (ctx.ctorOf f).isSome || (intrinsics.contains f && (ctx.fns.lookup f).isNone)
+    (ctx.ctorOf f).isSome || (intrinsics.contains f && (ctx.fns[f]?).isNone)
   let roots ← mustInfo
   -- What is found here is said first: it names the binding.
   let earlier := (← get).drops
