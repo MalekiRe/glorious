@@ -51,6 +51,16 @@ compile and write it otherwise; `GLORIOUS_FRESH` set: compiled whatever is
 kept. A program that went wrong is compiled again to say where. covey run
 again unchanged: 0.55 s to 0.016 s; calculator 1.2 s to 0.026 s.
 
+It also keeps `certificate`, the last certificate found, in a binary form of
+its own. A later compile asks the proved checker whether it fits the program
+now, for each set of rules it would look for one with, before it looks:
+where the program's Core is what it was (a change to a comment, to a
+function nothing reaches, to how something is written that comes out the
+same), no certificate is looked for. covey with a comment added: 0.57 s to
+0.35 s. A certificate that does not fit costs one run of the checker, which
+is quick. The test suite does not keep certificates: it is there to test
+inference too.
+
 ### What a compile of a file keeps for the next
 
 **Decision: `glorious run|check|build|certify FILE` keeps what its search

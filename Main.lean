@@ -221,12 +221,19 @@ def readPlaces (file : System.FilePath) : IO (List ((String × Nat) × Nat)) := 
 /-- Compile the program at `path`, with the modules it has in other files.
 What the last compile of it found for each place where a borrow can be a scope
 of its own is where this one starts; and what this one finds is kept for the
-next (`GLORIOUS_FRESH` set: not read). -/
+next, with the certificate it found: one that the proved checker accepts for
+the program now is used, and no other looked for (`GLORIOUS_FRESH` set:
+neither is read). -/
 def compileFile (path : String) : IO (Except String Compiled) := do
   let file ← placesFile path
   let known ← if (← IO.getEnv "GLORIOUS_FRESH").isSome then pure [] else readPlaces file
-  let result := compileSource (← IO.FS.readFile path) true (← moduleFiles path) (few := true) known
-  if let .ok c := result then writePlaces file c.places
+  let dir ← Target.dirOf path
+  let kept ← if (← IO.getEnv "GLORIOUS_FRESH").isSome then pure [] else
+    pure ((← Target.readCert dir).toList)
+  let result := compileSource (← IO.FS.readFile path) true (← moduleFiles path) (few := true) known kept
+  if let .ok c := result then
+    writePlaces file c.places
+    if let some cert := c.cert then Target.writeCert dir cert
   pure result
 
 /-- The program at `path` built: what the last compile kept in the build

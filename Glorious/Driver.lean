@@ -138,19 +138,31 @@ def named (e : String) : List Nat :=
   ((e.splitOn "function ").drop 1).filterMap fun after =>
     (String.ofList (after.toList.takeWhile Char.isDigit)).toNat?
 
+/-- A certificate for `p` with these rules: one of `kept` (what an earlier
+compile found) if the proved checker accepts it for `p`, and otherwise one
+found by inference. -/
+def certifyWith (kept : List Typing.Cert) (items : List Syntax.Item) (p : Core.Program)
+    (strict : Bool) (envSizes : List (Nat × Nat × Nat)) (regions loans ranked widen : Bool) :
+    Except String Typing.Cert :=
+  match kept.find? fun c =>
+      c.strict == strict && c.regions == regions && c.loans == loans && Typing.checkProgram c p with
+  | some c => .ok c
+  | none => Infer.certify items p strict envSizes regions loans ranked widen
+
 /-- Find a certificate for a program's Core and have the proved checker accept
 it: with the ownership rules and the region rules if the program can be shown
 to meet them, and otherwise with those of them it can, or as a typing only.
 An error here is a defect in the compiler, not in the program. -/
 def certifyProgram (items : List Syntax.Item) (p : Core.Program)
     (envSizes : List (Nat × Nat × Nat) := []) (failed : List (Bool × Bool) := [])
-    (first : Option Nat := none) : Except String (Typing.Cert × Option Nat) := do
+    (first : Option Nat := none) (kept : List Typing.Cert := []) :
+    Except String (Typing.Cert × Option Nat) := do
   -- With the region rules, first with callables taken to bind a region
   -- where they are given a reference to a cell, and then without; and only
   -- then with references taken to be to one of several cells where they
   -- have to be.
   let one (strict regions loans ranked widen : Bool) : Option Typing.Cert :=
-    match Infer.certify items p strict envSizes regions loans ranked widen with
+    match certifyWith kept items p strict envSizes regions loans ranked widen with
     | .ok cert => if Typing.checkProgram cert p then some cert else none
     | .error _ => none
   -- (`failed`: ways already seen to fail with every rule, not tried again.
@@ -460,7 +472,8 @@ proved Core type checker accept the result. With `check := false` both checks
 are skipped, so that programs which go wrong can still be run. -/
 def compileSourceAt (src : String) (check : Bool := true)
     (files : List (List String × String) := []) (few : Bool := false)
-    (known : List ((String × Nat) × Nat) := []) (packs : Nat := 0) : Except String Compiled := do
+    (known : List ((String × Nat) × Nat) := []) (packs : Nat := 0) (kept : List Typing.Cert := []) :
+    Except String Compiled := do
   let (prelude, items) ← parseProgram src files check few packs
   -- Every name is given its meaning: the modules become one list of items.
   let resolved ← Syntax.Modules.resolve prelude items
@@ -550,7 +563,7 @@ def compileSourceAt (src : String) (check : Bool := true)
     -- certificate.
     let first := List.lookup ("%way", 0) known
     let (cert, way) ← if check && !out.foreign then
-        match certifyProgram declared out.program out.envSizes failed first with
+        match certifyProgram declared out.program out.envSizes failed first kept with
         | .ok (cert, way) => pure (some cert, way)
         | .error e =>
           throw s!"the checker accepted this program, but its Core could not be shown to be well typed: {e}. This is a defect in the compiler"
@@ -576,7 +589,7 @@ def compileSourceAt (src : String) (check : Bool := true)
   let shownAtAll := fun (blocks : Option Elab.Blocks) (ranked : Bool) =>
     match Elab.elabProgram all blocks (fun _ => 0) with
     | .ok out =>
-      match Infer.certify declared out.program true out.envSizes true true ranked with
+      match certifyWith kept declared out.program true out.envSizes true true ranked false with
       | .ok cert => some (Typing.checkProgram cert out.program)
       | .error _ => none
     | .error _ => none
@@ -586,7 +599,7 @@ def compileSourceAt (src : String) (check : Bool := true)
       -- As it is, and then with callables taken to bind the regions of the
       -- references they are given: a function lent to by itself needs that.
       ways.findSome? fun ranked =>
-        match Infer.certify declared out.program true out.envSizes true true ranked with
+        match certifyWith kept declared out.program true out.envSizes true true ranked false with
         | .ok cert =>
           if out.lent != 0 && Typing.checkProgram cert out.program then
             some (⟨out.program, out.ctorNames.map shownName, out.fnNames, out.opNames, some cert, out.lent,
@@ -630,7 +643,7 @@ def compileSourceAt (src : String) (check : Bool := true)
             | .error _ => Sum.inr []
             | .ok o =>
               let outcomes : List (Sum Compiled (List Nat)) := ways.map fun ranked =>
-                match Infer.certify declared o.program true o.envSizes true true ranked with
+                match certifyWith kept declared o.program true o.envSizes true true ranked false with
                 | .ok cert =>
                   if o.lent != 0 && Typing.checkProgram cert o.program then
                     Sum.inl (⟨o.program, o.ctorNames.map shownName, o.fnNames, o.opNames, some cert,
@@ -808,7 +821,8 @@ parameters with no implementation, as one made by joining two, the program
 is read again with lists that long. -/
 def compileSource (src : String) (check : Bool := true)
     (files : List (List String × String) := []) (few : Bool := false)
-    (known : List ((String × Nat) × Nat) := []) : Except String Compiled := do
+    (known : List ((String × Nat) × Nat) := []) (kept : List Typing.Cert := []) :
+    Except String Compiled := do
   let packs ← (src :: files.map (·.2)).foldlM (fun m text => do
     pure (max m (Syntax.longestList (← Syntax.lex text)))) 2
   -- (An implementation over several lists, as one that joins two, is
@@ -820,7 +834,7 @@ def compileSource (src : String) (check : Bool := true)
   -- (Only a program that has such an implementation is read again.)
   let lists := lists != 0
   let rec go (fuel packs : Nat) : Except String Compiled :=
-    match compileSourceAt src check files few known packs with
+    match compileSourceAt src check files few known packs kept with
     | .error e =>
       let wanted := longestUnimplemented e
       match fuel with
