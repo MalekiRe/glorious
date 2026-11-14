@@ -3099,6 +3099,25 @@ the order it is being built:
   references), has them shown. A copy is made per implementation, not per
   type, so a function without bounds is one function for all types: Core
   does not tell types apart at run time, so nothing is lost by that.
+- **Lists of types as parameters, `..R`, in implementations.**
+  `impl<H, ..R> Size for (H, ..R) where (..R): Size { .. }` is written out,
+  before it is read, once for each length of `R` up to twelve (with two
+  lists, every pair of lengths whose sum is at most twelve; with more, six;
+  lists named after one `..` together are as long as each other). `..R`
+  stands for `R0, R1, ..` wherever it is written in brackets or in the
+  conditions after `where`: in types, patterns (`let (h, ..rest) = t`) and
+  what is built (`(x, ..rest)`, `[..show(r)]`). What follows `..` may be
+  more than a name and is then written once for each: `(..Option<R>)`,
+  `..R: Show`. A list of values is as long as the list of types its name
+  is in another case, or the first. So `join` of two tuples is one
+  implementation and no recursion, and a tuple of types can be mapped.
+  This is a rewriting of the text, not a kind of type: a function cannot
+  take a list of types (only implementations can), lengths above twelve
+  have no implementation, and a message about one of the copies names
+  `R0`, `R1`. Found on the way: in an implementation's function, a type
+  made of the function's own parameters, `(R0,)`, was taken to have the
+  trait by the one other implementation for tuples of one, and refused;
+  it is now left to what the function assumes.
 - **An associated constant at a known type is its number.** After the
   copies, a function that takes nothing and whose body is integer
   arithmetic (`int_add`, `int_sub`, `int_mul`) of numbers and of calls of

@@ -426,6 +426,11 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
             for (j, want) in im.fixed do
               if let some got := args[j]? then
                 let want ← fixedAt at_ want
+                -- (A type made of the function's own type parameters may
+                -- have the trait by what the function assumes, not by this.)
+                if Ty.hasRigid got then
+                  try unify got want catch _ => pure ()
+                else
                 try unify got want
                 catch _ =>
                   let fits ← zonk want

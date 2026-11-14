@@ -1327,4 +1327,11 @@ def generalize (t : Ty) (keep : List Ty := []) (top : Bool := true) : M Scheme :
          stays := stays.toList.filter fun (d, _) =>
            (freeTys d).any generalSet.contains || (freeCaps d).any cset.contains }
 
+/-- Does the type have one of a function's own type parameters in it? -/
+partial def Ty.hasRigid : Ty → Bool
+  | .con n args => n.startsWith "'" || args.any Ty.hasRigid
+  | .tuple args => args.any Ty.hasRigid
+  | .ref _ t _ => Ty.hasRigid t
+  | _ => false
+
 end Glorious.Check

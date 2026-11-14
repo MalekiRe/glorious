@@ -4163,6 +4163,28 @@ def cases : List Case := [
   -- A reference to one variable or another, chosen by `if`, written through.
   ⟨"fn main() -> Int { let mut a = 1; let mut b = 2; let c = 3 < 4; let r = if(c) { &mut a } else { &mut b }; *r = 7; a + b }",
     [], "9"⟩,
+  -- A list of types as a parameter, `..R`: the implementation is for tuples of every length.
+  ⟨"trait Size { const SIZE: Int; }\nimpl Size for () { const SIZE: Int = 0; }\nimpl<H, ..R> Size for (H, ..R) where (..R): Size { const SIZE: Int = 1 + <(..R) as Size>::SIZE; }\nfn main() -> Int { <(Int, Str, Int) as Size>::SIZE * 10 + <(Int,) as Size>::SIZE }",
+    [], "31"⟩,
+  ⟨"trait Total { fn total(Self) -> Int }\nimpl Total for () { fn total(t) { 0 } }\nimpl<..R> Total for (Int, ..R) where (..R): Total { fn total(t) { let (h, ..rest) = t; h + total((..rest)) } }\nfn main() -> Int { total((1, 2, 3, 4)) }",
+    [], "10"⟩,
+  ⟨"trait Shout { fn shout(Self) }\nimpl Shout for () { fn shout(t) { () } }\nimpl<H, ..R> Shout for (H, ..R) where H: Show, (..R): Shout { fn shout(t) { let (h, ..rest) = t; print(h); shout((..rest)) } }\nfn main() -> Int { shout((1, \"two\", 3)); 0 }",
+    [], "1\ntwo\n3\n0"⟩,
+  -- Two lists at once: tuples joined without recursion.
+  ⟨"trait Join<B> { type Out; fn join(Self, B) -> Out }\nimpl<..A, ..B> Join<(..B)> for (..A) { type Out = (..A, ..B); fn join(a, b) { let (..a) = a; let (..b) = b; (..a, ..b) } }\nfn main() -> Int { let t = join((1, \"x\"), (3, 4, 5)); t.0 + t.2 + t.4 }",
+    [], "9"⟩,
+  ⟨"trait Join<B> { type Out; fn join(Self, B) -> Out }\nimpl<..A, ..B> Join<(..B)> for (..A) { type Out = (..A, ..B); fn join(a, b) { let (..a) = a; let (..b) = b; (..a, ..b) } }\nfn main() -> Int { let t = join((), (7,)); let u = join((2,), ()); t.0 + u.0 }",
+    [], "9"⟩,
+  -- `..` before more than a name: each of the list in turn.
+  ⟨"trait Wrap { type Out; fn wrap(Self) -> Out }\nimpl<..R> Wrap for (..R) { type Out = (..Option<R>); fn wrap(t) { let (..r) = t; (..Some(r)) } }\nfn main() -> Int { let w = wrap((1, \"a\", 3)); match(w.2) { Some(n) => n, None => 0 } }",
+    [], "3"⟩,
+  ⟨"trait Texts { fn texts(Self) -> [Str] }\nimpl<..R> Texts for (..R) where ..R: Show { fn texts(t) { let (..r) = t; [..show(r)] } }\nfn main() -> Int { let xs = texts((1, \"b\", 3)); print(xs[1]); len(xs) }",
+    [], "b\n3"⟩,
+  ⟨"trait Asks { type Out; }\nimpl Asks for Int { type Out = Str; }\nimpl Asks for Str { type Out = Int; }\ntrait Flip { type Out; fn flip(Self) -> Int }\nimpl<..P, ..A> Flip for (..P) where ..P: Asks<Out = A> { type Out = (..A); fn flip(t) { 7 } }\nfn main() -> Int { flip((1, \"a\")) }",
+    [], "7"⟩,
+  -- What an implementation assumes of a tuple of its own parameters is not taken for another implementation.
+  ⟨"trait Total { fn total(Self) -> Int }\nimpl Total for (Int,) { fn total(t) { t.0 } }\nimpl<R0> Total for (Int, R0) where (R0,): Total { fn total(t) { let (h, r) = t; h + total((r,)) } }\nfn main() -> Int { total((1, 2)) }",
+    [], "3"⟩,
   -- `drop` is not for a program to call.
   ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nfn main() { let mut f = File(7); drop(&mut f); 0 }",
     [], "error: 3:34: in `main`: `drop` is run when what holds a value ends; a program does not call it"⟩,
