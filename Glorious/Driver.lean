@@ -52,10 +52,13 @@ An error here is a defect in the compiler, not in the program. -/
 def certifyProgram (items : List Syntax.Item) (p : Core.Program)
     (envSizes : List (Nat × Nat × Nat) := []) : Except String Typing.Cert := do
   -- With the region rules, first with callables taken to bind a region
-  -- where they are given a reference to a cell, and then without.
+  -- where they are given a reference to a cell, and then without; and only
+  -- then with references taken to be to one of several cells where they
+  -- have to be.
   let attempt (strict regions loans : Bool) : Option Typing.Cert :=
-    (if regions then [true, false] else [false]).findSome? fun ranked =>
-      match Infer.certify items p strict envSizes regions loans ranked with
+    (if regions then [(true, false), (false, false), (true, true), (false, true)]
+      else [(false, false)]).findSome? fun (ranked, widen) =>
+      match Infer.certify items p strict envSizes regions loans ranked widen with
       | .ok cert => if Typing.checkProgram cert p then some cert else none
       | .error _ => none
   if let some cert := attempt true true true then return cert

@@ -637,6 +637,30 @@ theorem closes_sound {fn : Nat} {Cs : List Ty} {θ : List Rgn} {σ : Ty} {once :
     cases h2
   · exact dupOk_all h2
 
+/-- The same for a closure made here: its captures fit the types the
+signature gives them, made with the regions `θ`. -/
+def closesFit (C : Cert) (Γ : TEnv) (fn : Nat) (captures : List Atom) (θ : List Rgn) (σ : Ty)
+    (once : Bool) (env : Option (List Ty)) : Bool :=
+  C.sigs.any fun e =>
+    e.fn == fn && θ.length == e.sig.crgns && atomsFit Γ captures (e.sig.caps.map (Ty.inst θ))
+      && σ == e.sig.ty θ once env && (once || e.sig.caps.all (dupOk C))
+      && envOk env (e.sig.caps.map (Ty.inst θ))
+
+theorem closesFit_sound {Γ : TEnv} {fn : Nat} {captures : List Atom} {θ : List Rgn} {σ : Ty}
+    {once : Bool} {env : Option (List Ty)} (h : closesFit C Γ fn captures θ σ once env = true) :
+    ∃ sig, C.ctx.fnSig fn sig ∧ θ.length = sig.crgns
+      ∧ HasAtoms Γ captures (sig.caps.map (Ty.inst θ))
+      ∧ σ = sig.ty θ once env ∧ (once = false → ∀ c, c ∈ sig.caps → C.ctx.dup c)
+      ∧ (∀ Cs', env = some Cs' → Cs' = sig.caps.map (Ty.inst θ)) := by
+  obtain ⟨e, he, hc⟩ := List.any_eq_true.mp h
+  simp only [Bool.and_eq_true, beq_iff_eq, Bool.or_eq_true] at hc
+  obtain ⟨⟨⟨⟨⟨hfn, hθ⟩, hcs⟩, hσ⟩, hdup⟩, henv⟩ := hc
+  refine ⟨e.sig, ⟨e, he, hfn, rfl⟩, hθ, atomsFit_sound hcs, hσ, fun ho => ?_, envOk_sound henv⟩
+  rcases hdup with h2 | h2
+  · rw [ho] at h2
+    cases h2
+  · exact dupOk_all h2
+
 /-- The type of an array's elements, if this is the type of arrays of some. -/
 def arrayElem : Ty → Option Ty
   | .data name [t] => if name = arrayName then some t else none
@@ -783,9 +807,9 @@ def checkRhs (C : Cert) (Γ : TEnv) (θ : List Rgn) : Rhs → Ty → Bool
     | some t => placeTy C t pl.path == some σ && dupOk C σ
     | none => false
   | .closure fn captures, σ =>
-    match σ, atomsTy Γ captures with
-    | .fn _ _ _ _ once env _, some Cs => closes C fn Cs θ σ once env
-    | _, _ => false
+    match σ with
+    | .fn _ _ _ _ once env _ => closesFit C Γ fn captures θ σ once env
+    | _ => false
   | .rebind a fn, σ =>
     match atomTy Γ a, σ with
     | some (.fn _ _ _ _ _ (some Cs) _), .fn _ _ _ _ once env _ => closes C fn Cs θ σ once env
@@ -868,11 +892,10 @@ theorem checkRhs_sound {Γ : TEnv} {θ : List Rgn} {rhs : Rhs} {σ : Ty}
   | closure fn captures =>
     simp only [checkRhs] at h
     split at h
-    · rename_i n Ps r e once env acc Cs hcs
-      obtain ⟨sig, hsig, hθ, hCs, hσ, hdup, henv⟩ := closes_sound h
+    · rename_i n Ps r e once env acc
+      obtain ⟨sig, hsig, hθ, hcaps, hσ, hdup, henv⟩ := closesFit_sound h
       rw [hσ]
-      subst hCs
-      exact .closure hsig hθ (atomsTy_sound hcs) hdup henv
+      exact .closure hsig hθ hcaps hdup henv
     · cases h
   | rebind a fn =>
     simp only [checkRhs] at h

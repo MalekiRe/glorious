@@ -4157,6 +4157,12 @@ def cases : List Case := [
     [], "error: 4:56: in `twice`: `l` is used while `a`, which borrows from it, is still in use"⟩,
   ⟨"trait Lend { type Item<'a>; fn next<'a>(&'a mut Self) -> Option<Item<'a>> }\nstruct Cell(Int)\nimpl Lend for Cell { type Item<'a> = &'a mut Int; fn next(c) { Some(&mut (*c).0) } }\nfn leak<L: Lend>(l: L) -> Option<L::Item<'static>> { let mut m = l; next(&mut m) }\nfn main() -> Int { 1 }",
     [], "error: 4:54: in `leak`: `m` could be used after its block has ended: something that uses it is the block's result"⟩,
+  -- A function of one lifetime given references to two variables: the reference it gives is to one of them, a region that is either in Core.
+  ⟨"fn longest<'a>(x: &'a Int, y: &'a Int) -> &'a Int { if(*x < *y) { y } else { x } }\nfn main() -> Int { let mut a = 1; let mut b = 2; let r = longest(&a, &b); *r }",
+    [], "2"⟩,
+  -- A reference to one variable or another, chosen by `if`, written through.
+  ⟨"fn main() -> Int { let mut a = 1; let mut b = 2; let c = 3 < 4; let r = if(c) { &mut a } else { &mut b }; *r = 7; a + b }",
+    [], "9"⟩,
   -- `drop` is not for a program to call.
   ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nfn main() { let mut f = File(7); drop(&mut f); 0 }",
     [], "error: 3:34: in `main`: `drop` is run when what holds a value ends; a program does not call it"⟩,

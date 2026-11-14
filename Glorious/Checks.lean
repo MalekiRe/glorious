@@ -184,11 +184,10 @@ def all : List (Nat × (Unit → Bool)) := [
     fn work() { tick(); tick(); 3 }
     fn main() { let mut count = 0; let r = handle work() { tick(k) => count = count + 1; k(()) };
       r + count }" == some true),
-  -- What the region rules have no type for compiles as before, without that
-  -- proof: a reference that may be to one variable or to another, and a variable
-  -- that holds something that uses the variable.
+  -- A reference that may be to one variable or to another has a region that
+  -- is either: the region rules hold.
   (54, fun _ => borrowChecked "fn main() { let mut a = 1; let mut b = 2;
-      let p = if(a < b) { &mut a } else { &mut b }; *p = 9; a + b }" == some false),
+      let p = if(a < b) { &mut a } else { &mut b }; *p = 9; a + b }" == some true),
   -- A function that passes a reference to its own variable to itself has a type
   -- that binds the region; so has a callable a function is passed and gives a
   -- reference to its own variable, or two.
@@ -213,6 +212,8 @@ def all : List (Nat × (Unit → Bool)) := [
   (61, fun _ => borrowChecked "effect Reader<'a> { ask() -> &'a Int }
     fn use_it() -> Int { *ask() + 1 }
     fn main() { let mut x = 41; handle use_it() { ask(k) => k(&x) } }" == some true),
+  -- What the region rules have no type for compiles as before, without that
+  -- proof: a variable that holds something that uses the variable.
   (62, fun _ => borrowChecked "effect Yield { yield(Int) }
     fn main() { let mut saved = None; handle (yield(1) + 1) { yield(v, k) => saved = Some(k); 0 };
       match(replace(&mut saved, None)) { Some(k) => k(41), None => 0 } }" == some false),
@@ -314,8 +315,9 @@ def all : List (Nat × (Unit → Bool)) := [
       let mut n = (n, 5);
       let r = handle work(&mut n.0) { tick(k) => print(n.1); k(()) }; r + x }" == some 1),
   -- A program that does not pass the region rules does not pass these.
-  (88, fun _ => lentBorrows "fn main() { let mut a = 1; let mut b = 2;
-      let p = if(a < b) { &mut a } else { &mut b }; *p = 9; a + b }" == none),
+  (88, fun _ => lentBorrows "effect Yield { yield(Int) }
+    fn main() { let mut saved = None; handle (yield(1) + 1) { yield(v, k) => saved = Some(k); 0 };
+      match(replace(&mut saved, None)) { Some(k) => k(41), None => 0 } }" == none),
   -- A call with one borrow among its arguments is, in Core, a call with a scope
   -- around it: nothing is made for it. A second borrow costs a callable, and so
   -- does one given a name, whose scope is some statements and not a call.

@@ -190,7 +190,7 @@ structure Scheme where
   /-- Everything the group's own typing depends on. -/
   incls : Array Incl
   places : Array (ITy × Nat × ITy)
-  coerces : Array (ITy × ITy)
+  coerces : Array (ITy × ITy × Bool)
   nevers : Array ITy
   onces : Array (ICls × List ITy)
   shows : Array (ITy × List ITy)
@@ -199,7 +199,7 @@ structure Scheme where
   /-- The part of it a user of the group can still affect, and so must meet too. -/
   exported : Array Incl
   exportedPlaces : Array (ITy × Nat × ITy)
-  exportedCoerces : Array (ITy × ITy)
+  exportedCoerces : Array (ITy × ITy × Bool)
   exportedNevers : Array ITy
   exportedOnces : Array (ICls × List ITy)
   exportedShows : Array (ITy × List ITy)
@@ -262,7 +262,7 @@ structure St where
   /-- Calls whose callee's result is not yet known: the result, and what the
   code after the call takes it to be. They are the same type unless the result
   turns out to be `never`. -/
-  coerces : Array (ITy × ITy) := #[]
+  coerces : Array (ITy × ITy × Bool) := #[]
   /-- Result types of labels: `never`, unless something needs them to be a type. -/
   nevers : Array ITy := #[]
   /-- Functions and what they captured: one that captured something that cannot
@@ -297,6 +297,12 @@ structure St where
   /-- The signatures given out so far, by function. -/
   emitted : Std.HashMap Nat (List FnSig) := {}
   entries : Array SigEntry := #[]
+  /-- Whether an operand whose type is a reference may be used as one of a
+  region of more places: one of several cells. -/
+  widen : Bool := false
+  /-- For a region standing for several places, by what stands for it: the
+  regions of the references used as it. -/
+  lows : Std.HashMap Nat (List Nat) := {}
 
 abbrev M := StateT St (Except String)
 
@@ -348,18 +354,40 @@ def unifyRg (a b : Nat) : M Unit := do
     if ← isAtom b then
       throw "region: references to two different mutable variables are used as one"
     modify fun s => { s with accVer := s.accVer + 1, rgs := s.rgs.set! b (some (.link a))
-                             rankBinders := joined s.rankBinders b a }
+                             rankBinders := joined s.rankBinders b a, lows := moved s.lows b a }
   else if ← isAtom b then
     modify fun s => { s with accVer := s.accVer + 1, rgs := s.rgs.set! a (some (.link b))
-                             rankBinders := joined s.rankBinders a b }
+                             rankBinders := joined s.rankBinders a b, lows := moved s.lows a b }
   else
     let (lo, hi) := if a < b then (a, b) else (b, a)
     modify fun s => { s with accVer := s.accVer + 1, rgs := s.rgs.set! hi (some (.link lo))
-                             rankBinders := joined s.rankBinders hi lo }
+                             rankBinders := joined s.rankBinders hi lo, lows := moved s.lows hi lo }
 where
   /-- The regions callables bind, once `gone` is the same region as `kept`. -/
   joined (ranked : Std.HashSet Nat) (gone kept : Nat) : Std.HashSet Nat :=
     if ranked.contains gone then ranked.insert kept else ranked
+  /-- What is used as `gone` is used as `kept`. -/
+  moved (lows : Std.HashMap Nat (List Nat)) (gone kept : Nat) : Std.HashMap Nat (List Nat) :=
+    match lows[gone]? with
+    | some ls => (lows.erase gone).insert kept (ls ++ (lows[kept]?.getD []))
+    | none => lows
+
+/-- The places a region stands for: itself if it is a cell's or one a callable
+type binds, or nothing is used as it; otherwise the places of what is used as
+it, a reference to one of several cells. -/
+partial def leavesOf (ρ : Nat) (seen : List Nat := []) : M (List Nat) := do
+  let r ← findRg ρ
+  if seen.contains r then return []
+  if (← isAtom r) || (← get).rankBinders.contains r then return [r]
+  match (← get).lows[r]? with
+  | some ls =>
+    let mut out : List Nat := []
+    for l in ls do
+      for x in ← leavesOf l (r :: seen) do
+        unless out.contains x do out := out ++ [x]
+    pure (if out.isEmpty then [r] else out)
+  | none => pure [r]
+
 
 def freshAcc : M Nat := do
   -- (in one step: the state is not held twice, so the array is not copied)
@@ -465,7 +493,8 @@ def accSolve (writes : Bool) (a : Nat) : M (List Nat) := do
       let mut mine := sets.getD n {}
       let before := mine.size
       for ρ in (if writes then x.wrs else x.rgns) do
-        mine := mine.insert (← findRg ρ)
+        for l in ← leavesOf ρ do
+          mine := mine.insert l
       for (b, e) in x.subs do
         let ex ← e.mapM findRg
         for r in (sets.getD (← findAcc b) {}).toList do
@@ -474,7 +503,9 @@ def accSolve (writes : Bool) (a : Nat) : M (List Nat) := do
         let chosen ← chosen.mapM fun (bound, actual) => do pure (← findRg bound, actual)
         for r in (sets.getD (← findAcc sub) {}).toList do
           match chosen.lookup r with
-          | some to => mine := mine.insert (← findRg to)
+          | some to =>
+            for l in ← leavesOf to do
+              mine := mine.insert l
           | none => mine := mine.insert r
       if mine.size != before then
         sets := sets.insert n mine
@@ -766,15 +797,31 @@ def hint (h : IHint) : M Unit := modify fun s => { s with hints := s.hints.push 
 
 /-- A call gives back an `r` and the code after it expects a `b`: the same type,
 unless the call does not return. Decided now if `r` is known. -/
-def coerce (r b : ITy) : M Unit := do
+def coerce (r b : ITy) (widen : Bool := false) : M Unit := do
   match ← find r with
   | .never => pure ()
   | .var v =>
     -- Already the same unknown: nothing is left to decide.
     if let .var w ← find b then
       if v == w then return
-    modify fun s => { s with coerces := s.coerces.push (r, b) }
+    modify fun s => { s with coerces := s.coerces.push (r, b, widen) }
+  -- (An operand used where a reference of a region of more places is
+  -- wanted: what it is used as is one of the places of that.)
+  | .ref ρ s =>
+    if widen && (← get).widen && (← get).regions then
+      let u ← freshRg
+      modify fun st => { st with lows := st.lows.insert u [ρ] }
+      unify b (.ref u s)
+    else unify r b
   | _ => unify r b
+
+/-- An operand's type as it is used where a type is wanted: a reference may be
+used as one of a region of more places. -/
+def widenTy (t : ITy) : M ITy := do
+  unless (← get).widen && (← get).regions do return t
+  let b ← freshTy
+  coerce t b (widen := true)
+  pure b
 
 def needs (sub : IRow) (under : IOps) (sup : IRow) : M Unit :=
   modify fun s => { s with incls := s.incls.push ⟨sub, under, sup⟩ }
@@ -906,7 +953,7 @@ def copyCls (sch : Scheme) (c : ICls) : M ICls := do
 
 /-- A copy of a region of a scheme: itself if it is a cell or shared with the
 rest of the program, and otherwise a new unknown. -/
-def copyRg (sch : Scheme) (ρ : Nat) : M Nat := do
+partial def copyRg (sch : Scheme) (ρ : Nat) : M Nat := do
   let r ← findRg ρ
   if (← isAtom r) || r < sch.startRg || sch.fixedRgs.contains r then pure r
   else
@@ -916,6 +963,9 @@ def copyRg (sch : Scheme) (ρ : Nat) : M Nat := do
       let r' ← freshRg
       modify fun s => { s with renRg := s.renRg.insert r r' }
       if ← isRank r then markRank r'
+      if let some ls := (← get).lows[r]? then
+        let ls' ← ls.mapM (copyRg sch)
+        modify fun s => { s with lows := s.lows.insert r' ls' }
       pure r'
 
 /-- A copy of what a callable of a scheme touches, with everything it includes. -/
@@ -1053,7 +1103,8 @@ partial def mentionsRg (region : Nat) (t : ITy) (depth : Nat := 24) : M Bool := 
   if depth == 0 then return true
   match ← find t with
   | .ref r u => do
-    if (← findRg r) == region then pure true else mentionsRg region u (depth - 1)
+    if (← findRg r) == region || (← leavesOf r).contains region then pure true
+    else mentionsRg region u (depth - 1)
   | .tuple fs => fs.anyM (mentionsRg region · (depth - 1))
   | .data _ args => args.anyM (mentionsRg region · (depth - 1))
   | .fn ps r _ _ _ env _ => do
@@ -1226,8 +1277,8 @@ partial def settle : M Unit := do
     | none => modify fun s => { s with places := s.places.push (t, i, r) }
   let pending := (← get).coerces
   modify fun s => { s with coerces := #[] }
-  for (r, b) in pending do
-    coerce r b
+  for (r, b, w) in pending do
+    coerce r b w
   let waitingOnce := (← get).onces
   modify fun s => { s with onces := #[] }
   for (c, tys) in waitingOnce do
@@ -1353,7 +1404,7 @@ partial def schemeOf (scc : Nat) : M Scheme := do
       refs := ← m.refs.mapM fun (g, s) => do pure (g, ← resolveSig s) }
   let incls ← (← get).incls.mapM resolveIncl
   let places ← (← get).places.mapM fun (t, i, r) => do pure (← resolve t, i, ← resolve r)
-  let coerces ← (← get).coerces.mapM fun (r, b) => do pure (← resolve r, ← resolve b)
+  let coerces ← (← get).coerces.mapM fun (r, b, w) => do pure (← resolve r, ← resolve b, w)
   let nevers ← (← get).nevers.mapM resolve
   let onces ← (← get).onces.mapM fun (c, tys) => do pure (← findCls c, ← tys.mapM resolve)
   let shows ← (← get).shows.mapM fun (env, caps) => do pure (← resolve env, ← caps.mapM resolve)
@@ -1398,7 +1449,7 @@ partial def schemeOf (scc : Nat) : M Scheme := do
     size := live.size
     for c in incls do
       if liveRow live c.sub then live := varsOfRow ⟨c.under, none⟩ (varsOfRow c.sup live)
-    for (r, b) in coerces do
+    for (r, b, _) in coerces do
       if liveTy live r then live := varsOf b live
     for (t, _, r) in places do
       if liveTy live t then live := varsOf r live
@@ -1434,7 +1485,7 @@ partial def schemeOf (scc : Nat) : M Scheme := do
     for (ty, _, r) in places do
       open_ ← namedAccs ty open_
       open_ ← namedAccs r open_
-    for (r, b) in coerces do
+    for (r, b, _) in coerces do
       open_ ← namedAccs r open_
       open_ ← namedAccs b open_
     for ty in nevers do
@@ -1490,7 +1541,7 @@ partial def schemeOf (scc : Nat) : M Scheme := do
       fixedAccs := shared.2, members, incls, places, coerces, nevers, onces, shows, opens, calls
       exported := incls.filter fun c => liveRow live c.sub
       exportedPlaces := places.filter fun (t, _, _) => liveTy live t
-      exportedCoerces := coerces.filter fun (r, _) => liveTy live r
+      exportedCoerces := coerces.filter fun (r, _, _) => liveTy live r
       exportedNevers := nevers.filter (liveTy live)
       exportedOnces := onces.filter fun (c, tys) => liveCls live c || tys.any live.touches
       exportedShows := shows.filter fun (env, _) => liveTy live env }
@@ -1521,8 +1572,8 @@ partial def refSig (fn : Nat) : M ISig := do
       let sig ← copySig sch m.sig
       let incls ← sch.exported.mapM (copyIncl sch)
       let places ← sch.exportedPlaces.mapM (copyPlace sch)
-      let coerces ← sch.exportedCoerces.mapM fun (r, b) => do
-        pure (← copyTy sch r, ← copyTy sch b)
+      let coerces ← sch.exportedCoerces.mapM fun (r, b, w) => do
+        pure (← copyTy sch r, ← copyTy sch b, w)
       let nevers ← sch.exportedNevers.mapM (copyTy sch)
       let onces ← sch.exportedOnces.mapM (copyOnce sch)
       let shows ← sch.exportedShows.mapM (copyShow sch)
@@ -1539,7 +1590,7 @@ partial def refSig (fn : Nat) : M ISig := do
       pure sig
 
 partial def inferRhs (Γ : Array ITy) : Rhs → M (ITy × Option ISig)
-  | .atom a => do pure (← atomTy Γ a, none)
+  | .atom a => do pure (← widenTy (← atomTy Γ a), none)
   | .prim p args => do
     -- An array is a value of the type kept for arrays, of its elements' type.
     let t ← freshTy
@@ -1578,7 +1629,7 @@ partial def inferRhs (Γ : Array ITy) : Rhs → M (ITy × Option ISig)
       pure (.data arrayName [t], none)
     else
       let (result, fields) ← instCtor tag
-      unifyList ts fields
+      unifyList (← ts.mapM widenTy) fields
       pure (result, none)
   | .place pl => do
     let mut t ← atomTy Γ (.var pl.var)
@@ -1586,7 +1637,7 @@ partial def inferRhs (Γ : Array ITy) : Rhs → M (ITy × Option ISig)
       t ← field t i
     pure (t, none)
   | .closure fn captures => do
-    let ts ← captures.mapM (atomTy Γ)
+    let ts ← captures.mapM fun a => do widenTy (← atomTy Γ a)
     let sig ← refSig fn
     unifyList ts sig.caps
     -- A callable that takes a reference, to a region nothing it captured
@@ -1656,7 +1707,7 @@ partial def inferHandler (amb : IRow) (Φ : Nat) (Γ : Array ITy) (ret : Nat)
 /-- Infer a computation that must give a `τ`, may perform what `amb` serves,
 and is part of a function that touches `self`. -/
 partial def inferTm (self : Nat) (amb : IRow) (τ : ITy) (Γ : Array ITy) : Core.Tm → M Unit
-  | .ret a => do unify (← atomTy Γ a) τ
+  | .ret a => do unify (← widenTy (← atomTy Γ a)) τ
   | .let_ rhs body => do
     let (σ, sig) ← inferRhs Γ rhs
     hint (match sig with
@@ -1747,12 +1798,13 @@ partial def inferTm (self : Nat) (amb : IRow) (τ : ITy) (Γ : Array ITy) : Core
         pure σ
       | .store, [t, v] => do
         accWr self ρ
-        unify t (.ref ρ v)
+        unify t (.ref ρ (← widenTy v))
         pure .unit
       | .swap, [t, v] => do
         accWr self ρ
-        unify t (.ref ρ v)
-        pure v
+        let held ← widenTy v
+        unify t (.ref ρ held)
+        pure held
       | .tag, t :: _ => do
         accRgn self ρ
         unify t (.ref ρ (← freshTy))
@@ -1799,7 +1851,7 @@ where
     let σ ← freshTy
     let ε' ← freshRow
     let a ← freshAcc
-    let given ← args.mapM (atomTy Γ)
+    let given ← args.mapM fun a => do widenTy (← atomTy Γ a)
     let callee ← find (← atomTy Γ f)
     if (← get).regions && (← get).ranked then
       -- Whether the callable's type binds a region may not be known yet:
@@ -1922,7 +1974,7 @@ partial def settleAll : M Unit := do
   modify fun s => { s with nevers := #[] }
   if decided then return ← settleAll
   match (← get).coerces[0]? with
-  | some (r, b) =>
+  | some (r, b, _) =>
     unify r b
     return ← settleAll
   | none => pure ()
@@ -1966,9 +2018,21 @@ number for, is a region no cell has. -/
 def zonkRg (pr : Pr) (ρ : Nat) : M Typing.Rgn := do
   unless (← get).regions do return .cell 0
   let r ← findRg ρ
-  match pr.bound.idxOf? r with
-  | some i => pure (.bound i)
-  | none => pure ((pr.vars.lookup r).getD (.cell 0))
+  let one := fun (r : Nat) =>
+    match pr.bound.idxOf? r with
+    | some i => Typing.Rgn.bound i
+    | none => (pr.vars.lookup r).getD (.cell 0)
+  if pr.bound.contains r || (pr.vars.lookup r).isSome then return one r
+  -- (One of several places: each of them, in the order of the regions that
+  -- stand for them, which a function's signature and the code using it
+  -- write alike.)
+  let mut places : List Typing.Rgn := []
+  for l in (← leavesOf r).mergeSort (· ≤ ·) do
+    let x := one l
+    unless places.contains x do places := places ++ [x]
+  match places with
+  | x :: rest => pure (rest.foldl Typing.Rgn.or x)
+  | [] => pure (one r)
 
 /-- What a callable touches, in a fixed order, so that equal sets are equal
 lists: a region no cell has, then cells from the oldest, then bound regions;
@@ -2066,10 +2130,13 @@ partial def atomsOf (t : ITy) (out : List Nat) : M (List Nat) := do
     let binders ← bindersOf acc
     pure (inner.foldl (fun o r => if binders.contains r || o.contains r then o else r :: o) out)
   | .ref ρ t => do
-    let r ← findRg ρ
     -- (a region an enclosing callable's type binds is, to what is inside it,
-    -- a region like a cell's: one it has to be told)
-    atomsOf t (if ((← isAtom r) || (← isRank r)) && !out.contains r then r :: out else out)
+    -- a region like a cell's: one it has to be told; and one of several
+    -- places is each of them)
+    let mut out := out
+    for r in ← leavesOf ρ do
+      if ((← isAtom r) || (← isRank r)) && !out.contains r then out := r :: out
+    atomsOf t out
   | .never => pure out
 
 /-- How one function writes its regions: in its signature, where a cell scope's
@@ -2178,7 +2245,7 @@ structure RgEnv where
   /-- The regions bound by the callable types being read, innermost first. -/
   bound : List Nat := []
 
-def ofRg (env : RgEnv) : Typing.Rgn → M Nat
+partial def ofRg (env : RgEnv) : Typing.Rgn → M Nat
   | .var i =>
     match env.vars[i]? with
     | some r => pure r
@@ -2194,7 +2261,13 @@ def ofRg (env : RgEnv) : Typing.Rgn → M Nat
   | .lab _ => freshRg
   | .loan _ => freshRg
   | .wr _ => freshRg
-  | .or _ _ => freshRg
+  | .or a b => do
+    -- (One of several places: a region of its own, used as each.)
+    let x ← ofRg env a
+    let y ← ofRg env b
+    let u ← freshRg
+    modify fun s => { s with lows := s.lows.insert u [x, y] }
+    pure u
 
 def ofAcc (env : RgEnv) (acc : List Typing.Rgn) : M Nat := do
   let a ← freshAcc
@@ -2292,7 +2365,7 @@ partial def instantiate (fn : Nat) (use : Use) : M Unit := do
       refs := ← m.refs.mapM fun (g, s) => do pure (g, ← copySig sch s) }
   let incls ← sch.incls.mapM (copyIncl sch)
   let places ← sch.places.mapM (copyPlace sch)
-  let coerces ← sch.coerces.mapM fun (r, b) => do pure (← copyTy sch r, ← copyTy sch b)
+  let coerces ← sch.coerces.mapM fun (r, b, w) => do pure (← copyTy sch r, ← copyTy sch b, w)
   let nevers ← sch.nevers.mapM (copyTy sch)
   let onces ← sch.onces.mapM (copyOnce sch)
   let shows ← sch.shows.mapM (copyShow sch)
@@ -2731,10 +2804,11 @@ def certifyM (items : List Item) (g : Elab.Globals) (p : Core.Program)
 without, and with the region rules or without. -/
 def certify (items : List Item) (p : Core.Program) (strict : Bool)
     (envSizes : List (Nat × Nat × Nat) := []) (regions : Bool := false) (loans : Bool := false)
-    (ranked : Bool := false) : Except String Cert := do
+    (ranked : Bool := false) (widen : Bool := false) : Except String Cert := do
   let (g, _, _) ← Elab.collect items
   let (cert, _) ← (certifyM items g p envSizes).run
-    { fns := p.fns.toArray, strict := strict, regions := regions, loans := loans, ranked := ranked }
+    { fns := p.fns.toArray, strict := strict, regions := regions, loans := loans, ranked := ranked
+      widen := widen }
   pure cert
 
 /-- Which part of a program a certificate fails on, for reporting a defect in

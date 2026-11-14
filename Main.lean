@@ -428,6 +428,56 @@ def survey : IO UInt32 := do
         IO.println s!"--\nstrict={o.strict} regions={o.regions} loans={o.loans}: {c.src}"
   pure 0
 
+/-! A Core program written out, for reading what the elaborator made. -/
+
+def showAtom : Atom → String
+  | .var i => s!"v{i}"
+  | .int n => s!"{n}"
+
+def showAtoms (as : List Atom) : String := ", ".intercalate (as.map showAtom)
+
+def showRhs : Rhs → String
+  | .atom a => showAtom a
+  | .prim _ args => s!"prim({showAtoms args})"
+  | .construct tag args => s!"#{tag}({showAtoms args})"
+  | .place pl => s!"v{pl.var}.{pl.path}"
+  | .closure fn caps => s!"fn{fn}[{showAtoms caps}]"
+  | .rebind a fn => s!"rebind({showAtom a}, fn{fn})"
+
+partial def showTm (n : Nat) : Core.Tm → String
+  | .ret a => s!"ret {showAtom a}"
+  | .let_ rhs body => s!"let v{n} = {showRhs rhs}\n" ++ showTm (n + 1) body
+  | .call f args body => s!"let v{n} = {showAtom f}({showAtoms args})\n" ++ showTm (n + 1) body
+  | .tail f args => s!"tail {showAtom f}({showAtoms args})"
+  | .handle _ _ caps thunk body =>
+    s!"let v{n} = handle {showAtom thunk} [{showAtoms caps}]\n" ++ showTm (n + 1) body
+  | .handleTail _ _ caps thunk => s!"handle {showAtom thunk} [{showAtoms caps}]"
+  | .raise op args => s!"raise op{op}({showAtoms args})"
+  | .perform op args body => s!"let v{n} = perform op{op}({showAtoms args})\n" ++ showTm (n + 1) body
+  | .label thunk body => s!"let v{n} = label {showAtom thunk}\n" ++ showTm (n + 1) body
+  | .labelTail thunk => s!"label {showAtom thunk}"
+  | .guard c thunk body => s!"let v{n} = guard {showAtom c} {showAtom thunk}\n" ++ showTm (n + 1) body
+  | .guardTail c thunk => s!"guard {showAtom c} {showAtom thunk}"
+  | .cancel k body => s!"let v{n} = cancel {showAtom k}\n" ++ showTm (n + 1) body
+  | .cell init thunk body => s!"let v{n} = cell {showAtom init} in {showAtom thunk}\n" ++ showTm (n + 1) body
+  | .cellTail init thunk => s!"cell {showAtom init} in {showAtom thunk}"
+  | .lend u r thunk pre post body =>
+    s!"let v{n} = lend{if u then " mut" else ""} {showAtom r} to {showAtom thunk}({showAtoms pre} | {showAtoms post})\n"
+      ++ showTm (n + 1) body
+  | .mem _ args body => s!"let v{n} = mem({showAtoms args})\n" ++ showTm (n + 1) body
+  | .host id args body => s!"let v{n} = host{id}({showAtoms args})\n" ++ showTm (n + 1) body
+
+def showCore (names : Array String) (p : Core.Program) : String := Id.run do
+  let mut out := ""
+  for (F, i) in p.fns.zipIdx do
+    out := out ++ s!"fn{i} {names[i]?.getD ""}:\n"
+    for c in F.clauses do
+      out := out ++ s!"  clause ({c.pats.length} patterns)\n"
+      let lines := (showTm 1000 c.body).splitOn "\n"
+      for l in lines do
+        out := out ++ s!"    {l}\n"
+  out ++ "main:\n" ++ "\n".intercalate (((showTm 0 p.main).splitOn "\n").map ("  " ++ ·))
+
 /-- How long each stage of compiling a program takes, in milliseconds. -/
 def stages (path : String) : IO UInt32 := do
   let src ← IO.FS.readFile path
@@ -460,6 +510,7 @@ def stages (path : String) : IO UInt32 := do
   let .ok out := Elab.elabProgram all (some blocks) | IO.println "elab failed"; return 1
   IO.println s!"{out.program.fns.length} functions"
   last ← lap "elaborate" last
+  if (← IO.getEnv "GLORIOUS_CORE").isSome then IO.println (showCore out.fnNames out.program)
   -- One try of the search for borrows that are scopes of their own: every
   -- place lent, then certified as it is and with ranked callables.
   let declared := Elab.withDeclared all0 all
@@ -481,6 +532,24 @@ def stages (path : String) : IO UInt32 := do
     IO.println s!"{Typing.checkProgram cert out.program}"
     last ← lap "check certificate" last
   | .error e => IO.println s!"certify: {e}"
+  -- With references taken to be to one of several cells where they have to be.
+  for ranked in [true, false] do
+    match Infer.certify all out.program true out.envSizes true false ranked true with
+    | .ok cert =>
+      let ok := Typing.checkProgram cert out.program
+      IO.println s!"certify one of several (ranked {ranked}): {ok}{if ok then "" else s!": {Infer.rejected cert out.program}"}"
+      if (← IO.getEnv "GLORIOUS_CORE").isSome && !ok then
+        for e in cert.sigs do
+          if let some F := out.program.fns[e.fn]? then
+            unless Typing.checkFn cert e F do
+              IO.println s!"  fn{e.fn}: {Infer.showSig e.sig}"
+              for hs in e.hints do
+                IO.println s!"    hints: {hs.map fun h => match h with
+                  | .ty σ => s!"ty {Infer.showCoreTy σ}"
+                  | .clo σ θ => s!"clo {Infer.showCoreTy σ} at {θ.map Infer.showRgn}"
+                  | .handler .. => "handler"
+                  | .rgns rs => s!"rgns {rs.map Infer.showRgn}"}"
+    | .error e => IO.println s!"certify one of several (ranked {ranked}): {e}"
   let bytecode := compile out.program
   IO.println s!"{bytecode.fns.length} compiled"
   last ← lap "compile" last

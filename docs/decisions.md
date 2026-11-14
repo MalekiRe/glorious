@@ -514,10 +514,21 @@ the programs it accepts.
    reference of a region of more places is expected (`Widen`, in the typing
    of an operand); the checker allows that where the type wanted is known: a
    call's arguments, a result, a constructor's fields, what is stored, and a
-   `let` of an operand. `Typing/Witness.lean` has `either`, a reference to one
-   of two cells chosen by a function with one region, accepted with the rules
-   for borrows on. Region inference does not yet produce such regions: a
-   program that needs one still gets a certificate without the region rules.
+   `let` of an operand, and a closure's captures. `Typing/Witness.lean` has
+   `either`, a reference to one of two cells chosen by a function with one
+   region, accepted with the rules for borrows on.
+
+   Region inference finds them only when it has to: if regions cannot be
+   found with every operand at its own type, it tries again with each operand
+   used where a type is wanted (an argument, a result, a field, what is
+   stored, a capture) given a region of its own that the operand's is one of
+   the places of (`Infer.widen`, `lows`); such a region is then each of the
+   places used as it, written in the order of the inference's regions, which
+   a function's signature and the code using it share, so that the checker,
+   which compares types exactly, sees the same `or` both ways. With this
+   `longest(&a, &b)` and `if(c) { &mut a } else { &mut b }` get the region
+   rules. They do not get borrows as scopes of their own: a reference that
+   one of two borrows may be does not outlive either borrow's scope.
 
    How it is set up (so that the work can be picked up from here):
 
@@ -571,7 +582,6 @@ the programs it accepts.
    written, so a program they turn away may be a good one, and it keeps
    compiling without the theorem. What they have no type for:
 
-   - a reference that may be to one variable or to another;
    - a function that passes a reference to its own variable to itself: a
      function's regions are the same throughout its recursive group;
    - a variable that holds something whose type mentions the variable's own
