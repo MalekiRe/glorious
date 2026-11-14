@@ -5,6 +5,18 @@ open, or that deliberately depart from them. Read it before changing the
 kernel. Where it disagrees with a specification in the repository root, this
 file is the current intent for this branch.
 
+## covey's borrows shown exclusive
+
+`emit` lent the app's systems and its world at once, both fields of what one
+reference points to, and Core cannot yet lend two parts of one cell apart: so
+no borrow of a covey program was shown to be the only way to what it borrows.
+The systems are now copied out of the app first (`L: Use<[0, infinity]>`:
+they are functions, which can be), and the copy and the world are each
+borrowed alone. The simulation: 37 borrows shown exclusive where there were
+none; the query and spawning examples 17 and 19. What is left is a borrow
+written as a program's last expression. A fresh compile of the simulation
+is quicker too (1.9 s to 1.2 s): every place passes at once.
+
 ## Systems that make entities
 
 **`commands.reserve()` gives a system a new entity, there once the systems

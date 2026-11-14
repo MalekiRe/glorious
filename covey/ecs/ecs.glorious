@@ -631,9 +631,12 @@ pub fn on<E, S, L, P>(app: App<S, L>, systems: P) -> App<S, (On<E, P>, L)> {
 pub fn add_plugins<X, Y>(app: X, plugin: fn(X) -> Y) -> Y { plugin(app) }
 
 // Run every system registered under what is emitted, then do what they asked.
-pub fn emit<E, S, L>(app: &mut App<S, L>, event: E) where L: Dispatch<E, S>, S: Columns {
+pub fn emit<E, S, L>(app: &mut App<S, L>, event: E) where L: Dispatch<E, S>, S: Columns, L: Use<[0, infinity]> {
     let mut commands = Commands { ended: [], next: len_at(&app.world.generations), made: 0 };
-    <L as Dispatch<E, S>>::dispatch(&app.systems, &event, &mut app.world, &mut commands);
+    // (The systems are copied out first: so they and the world are two
+    // things, each borrowed alone.)
+    let systems = app.systems;
+    <L as Dispatch<E, S>>::dispatch(&systems, &event, &mut app.world, &mut commands);
     let mut k = 0;
     while({ k < commands.made }) { push_at(&mut app.world.generations, 0); k = k + 1 };
     let mut i = 0;
