@@ -881,7 +881,9 @@ def checkGroup (decls : List FnDecl) : M Unit := do
           if isLifetime p then
             let cap ← freshCap
             rigid := rigid ++ [(p, Ty.life cap)]
-            lifetimes := (cap, p) :: lifetimes
+            -- (One an implementation's function writes is its trait's of
+            -- the same name, which the trait's declaration makes its own.)
+            if d.impl.isNone then lifetimes := (cap, p) :: lifetimes
           else rigid := rigid ++ [(p, Ty.con s!"'{p}@{rigidOwner decls d}" [])]
         -- An implementation written for another name of its type: the
         -- arguments the name fixes are those types here, not parameters.
@@ -1183,6 +1185,12 @@ def checkGroup (decls : List FnDecl) : M Unit := do
               (sig.lifetimes.lookup old).map fun l =>
                 (new, if l == "'_" then "the lifetime the trait leaves unwritten" else s!"the trait's {l}")
             modify fun s => { s with rigidCaps := s.rigidCaps ++ theirs }
+            -- (A lifetime it writes, `fn at<'a>(..)`, is the trait's of that
+            -- name.)
+            for (old, new) in cm do
+              if let some l := sig.lifetimes.lookup old then
+                if let some written := rigid.lookup l then
+                  unify written (Ty.life new)
             pure (some (want, sig.trait))
         let annots := match wanted with
           | some (.fn ps _ _ _ _, _) =>
@@ -1339,13 +1347,15 @@ def checkItems (items : List Item) : M Unit := do
     -- call them, but only through a trait, whose types are declared.
     for im in (← get).impls.toList.drop before do
       for item in im.methods do
-        if let .fn m _ annots ret clauses := item then
+        if let .fn m written annots ret clauses := item then
           if let some sig := (← get).methods.lookup m then
             -- (Its type parameters: the head's arguments, and then those
-            -- that are only inside one, or among the trait's own.)
+            -- that are only inside one, or among the trait's own; and the
+            -- lifetimes it writes of its own, `fn at<'a>(..)`.)
             let inner := (im.pvars.map (·.1)).filter (!im.params.contains ·)
+            let lifetimes := (genericParams written).filter isLifetime
             checkGroup [{ name := Syntax.implFnName im.trait im.head m,
-                          params := im.params ++ inner ++ sig.mparams.map (·.1), annots,
+                          params := im.params ++ inner ++ sig.mparams.map (·.1) ++ lifetimes, annots,
                           ret, clauses, impl := some (im, sig) }]
     for c in coercing do
       unless (((← get).fnBounds.lookup c).getD 0) == 0 do

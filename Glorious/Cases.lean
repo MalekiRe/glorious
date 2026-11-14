@@ -4228,6 +4228,9 @@ def cases : List Case := [
   -- A callable read part by part, given a tuple of borrows, binds their region once it is known to be given them
   ⟨"\nstruct Box1 { v: [Int], w: [Int] }\nfn each_v(b: &mut Box1, f: for<'a> fn((&'a mut Int, &'a Int))) { f((&mut b.v[0], &b.w[0])) }\nfn movement(b: &mut Box1) { each_v(b, fn(x: (&mut Int, &Int)) { let (p, q) = x; *p = *p + *q }) }\nfn run_with(f: for<'a> fn(&'a mut Box1)) -> Int { let mut b = Box1 { v: [1], w: [5] }; f(&mut b); b.v[0] }\nfn main() -> Int { run_with(movement) }\n",
     [], "6"⟩,
+  -- An implementation's function writes the lifetime its trait names
+  ⟨"struct Col<T> { dense: [T], owners: [Int] }\nfn find<T>(c: &Col<T>, e: Int) -> Int { 0 }\ntrait Item { type Store; type Got<'a>; fn at<'a>(&'a mut Store, Int) -> Option<Got<'a>> }\nstruct W<T>(T)\nimpl<T> Item for W<T> { type Store = Col<T>; type Got<'a> = &'a mut T;\n    fn at<'a>(store: &'a mut Col<T>, e: Int) -> Option<&'a mut T> { let i = find(&*store, e); if(i >= 0) { Some(&mut store.dense[i]) } else { None } } }\nfn main() -> Int { let mut a = Col { dense: [1, 2], owners: [0, 1] }; match(<W<Int> as Item>::at(&mut a, 1)) { Some(x) => *x = 7, None => () }; a.dense[0] }\n",
+    [], "7"⟩,
   -- `drop` is not for a program to call.
   ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nfn main() { let mut f = File(7); drop(&mut f); 0 }",
     [], "error: 3:34: in `main`: `drop` is run when what holds a value ends; a program does not call it"⟩,

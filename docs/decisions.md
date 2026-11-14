@@ -49,8 +49,9 @@ inference, which decides there whether a callable binds the region of a
 reference it is given, made it bind none and left its region to nothing.
 That decision is now put off where what the callable is given is not yet
 known, and made once it is, looking into tuples. The simulation's
-`integrate` is a query. An implementation's function cannot yet write
-lifetimes of its own (`fn at<'a>(..)`): it takes its trait's, unwritten.
+`integrate` is a query. An implementation's function may write the lifetimes
+its trait's function declares (`fn at<'a>(store: &'a mut ..) -> ..`): each is
+the trait's of that name.
 
 ## The compiler stays in Lean, and is to be fast and incremental
 
