@@ -10,6 +10,8 @@
 // systems a label runs, are found by the compiler: by implementations of
 // `Get` and `Dispatch` that fit the type.
 
+use std::tuple::{Tuple, nest};
+
 // An entity: a place in the columns, and which of the entities that have had
 // that place this one is.
 pub struct Entity { pub index: Int, pub generation: Int }
@@ -257,8 +259,9 @@ impl<E, S, A> System<E, S> for fn(&E, &mut Column<A>, &mut Commands) -> () where
     }
 }
 
-// Systems in the order written. (A tuple of systems is a system already.)
-pub fn chain<T>(systems: T) -> T { systems }
+// Systems in the order written, however many: `(a, b, c).chain()`. A tuple
+// is the pairs it is made of, and a pair of systems is a system.
+pub fn chain<T, L>(systems: T) -> L where T: Tuple<Nested = L> { nest(systems) }
 
 // The systems registered under a label.
 pub struct On<E, P> { label: fn(E) -> (), systems: P }

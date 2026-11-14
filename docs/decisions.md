@@ -2923,6 +2923,19 @@ the order it is being built:
   this is asked for, for `(a, b).chain()` and `app.add_systems(..)`. It is
   the names in scope that decide, not the value's type: a function of a
   type's own, `Vec::len`, is not found this way yet.
+- **Tuples of any length are the pairs they are made of** (`std::tuple`).
+  No parameter stands for a list of types. `Tuple` gives a tuple's nested
+  form, `(A, B, C)` as `(A, (B, (C, ())))`, and back; `Callable` gives a
+  function's parameters in that form and calls it with them. Both are
+  implemented in the library for each length up to twelve, written out by
+  the compiler's own source, so that a program writes an implementation
+  for `()` and one for a pair and has every length: `Concat` and `Count`
+  in the same module are written so, and covey's `chain` takes any number
+  of systems. What this does not reach: a function whose parameters are
+  references, taken as a list (`fn(&mut A, &B)` as `(&mut A, (&B, ()))`),
+  since the list's type would have to be for every lifetime of each; that
+  is what generic associated types are for, and covey still has one
+  implementation of `System` for each shape of parameter list.
 - **`[T; N]` and `const N: Int` are the trait machinery's.** A length is a
   type: the prelude has `Z`, `B0<N>` and `B1<N>`, a number's bits from the
   lowest, and `3` where a type is written is `B1<B1<Z>>`. What number a

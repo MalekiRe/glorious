@@ -35,6 +35,13 @@ fn friction(velocities: &mut Column<Velocity>) {
     })
 }
 
+// Nothing leaves the field.
+fn bound(positions: &mut Column<Position>) {
+    each(positions, fn(entity: Entity, position: &mut Position) {
+        if(position.0 > 1000) { position.0 = 1000 } else { () };
+    })
+}
+
 // Everything that can be hurt is, by what the hit says.
 fn wound(hit: &Hit, healths: &mut Column<Health>) {
     let mut i = 0;
@@ -55,7 +62,7 @@ fn reap(healths: &Column<Health>, commands: &mut Commands) {
 
 // A plugin: a function from an app to an app.
 fn physics(app) {
-    app.add_systems(Update, (integrate, friction).chain())
+    app.add_systems(Update, (integrate, friction, bound).chain())
 }
 
 fn combat(app) {

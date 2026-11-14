@@ -3987,6 +3987,17 @@ def cases : List Case := [
     [], "2"⟩,
   ⟨"fn main() -> Int { let m: Option<[Int; 2]> = Some([1, 2]); match(m) { Some(xs) => xs[1], None => 0 } }",
     [], "2"⟩,
+  -- `std::tuple`: a tuple of any length as the pairs it is, so that what is written for `()` and a pair is written for every length; and a function of any number of parameters by what it takes.
+  ⟨"use std::tuple::{Tuple, nest, flat};\ntrait Total { fn total(Self) -> Int }\nimpl Total for () { fn total(nothing) { 0 } }\nimpl<Rest> Total for (Int, Rest) where Rest: Total { fn total(p) { p.0 + total(p.1) } }\nfn main() -> Int { total(nest((1, 2, 3))) + total(nest((1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12))) }",
+    [], "84"⟩,
+  ⟨"use std::tuple::{apply};\nfn add(a: Int, b: Int) -> Int { a + b }\nfn neg(a: Int) -> Int { 0 - a }\nfn main() -> Int { apply(add, (3, 4)) + apply(neg, (2,)) + apply({ => 10 }, ()) }",
+    [], "15"⟩,
+  ⟨"use std::tuple::{Tuple, Concat, Count, nest, flat, concat};\nfn joined<A, B, X, Y, J, T>(a: A, b: B) -> T where A: Tuple<Nested = X>, B: Tuple<Nested = Y>, X: Concat<Y, Joined = J>, T: Tuple<Nested = J> { flat(concat(nest(a), nest(b))) }\nfn main() -> Int { let t: (Int, Str, Int, Int) = joined((1, \"two\"), (3, 4)); t.0 + t.2 + t.3 }",
+    [], "8"⟩,
+  ⟨"use std::tuple::{Tuple, Count};\nfn size<T, L>(t: &T) -> Int where T: Tuple<Nested = L>, L: Count { <L as Count>::COUNT }\nfn main() -> Int { size(&(1, \"a\", 2)) * 10 + size(&()) }",
+    [], "30"⟩,
+  ⟨"use std::tuple::{Tuple, Count, COUNT};\nfn size<T, L>(t: &T) -> Int where T: Tuple<Nested = L>, L: Count { L::COUNT }\nfn main() -> Int { size(&(1, \"a\", 2)) * 10 + size(&()) }",
+    [], "30"⟩,
   -- `drop` is not for a program to call.
   ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nfn main() { let mut f = File(7); drop(&mut f); 0 }",
     [], "error: 3:34: in `main`: `drop` is run when what holds a value ends; a program does not call it"⟩,

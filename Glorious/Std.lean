@@ -52,6 +52,7 @@ pub mod fs;
 pub mod env;
 pub mod time;
 pub mod random;
+pub mod tuple;
 pub mod ffi;
 "#
 
@@ -4657,6 +4658,83 @@ impl<K, V> HashMap<K, V> {
 }
 "#
 
+/-- `std::tuple`: tuples and functions of any length through one form. What
+is written for each length is written here, for up to twelve, so that what a
+program writes is written once. -/
+private def tupleText : String :=
+  let names := ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L"]
+  let tuple := fun (xs : List String) => match xs with
+    | [] => "()"
+    | [x] => s!"({x},)"
+    | xs => s!"({", ".intercalate xs})"
+  let nested := fun (xs : List String) => xs.foldr (fun x rest => s!"({x}, {rest})") "()"
+  let part := fun (v : String) (k : Nat) => (List.range k).foldl (fun e _ => s!"({e}.1)") v ++ ".0"
+  let one := fun (n : Nat) =>
+    let ps := names.take n
+    let generics := if ps.isEmpty then "" else s!"<{", ".intercalate ps}>"
+    let places := List.range n
+    s!"impl{generics} Tuple for {tuple ps} \{
+    type Nested = {nested ps};
+    fn nest(t) \{ {nested (places.map fun i => s!"t.{i}")} }
+    fn flat(n) \{ {tuple (places.map (part "n"))} }
+}
+impl<{", ".intercalate (ps ++ ["R"])}> Callable for fn({", ".intercalate ps}) -> R \{
+    type Args = {nested ps};
+    type Output = R;
+    fn call_with(f, args) \{ (*f)({", ".intercalate (places.map (part "args"))}) }
+}
+"
+  r#"// Tuples and functions of any length, through one form: the tuple
+// `(A, B, C)` as the pairs `(A, (B, (C, ())))`. What is written for `()` and
+// for a pair `(First, Rest)` is then written for every length:
+//
+//     trait Total { fn total(Self) -> Int }
+//     impl Total for () { fn total(nothing) { 0 } }
+//     impl<Rest> Total for (Int, Rest) where Rest: Total { fn total(p) { p.0 + total(p.1) } }
+//     total(nest((1, 2, 3)))
+//
+// Up to twelve.
+
+// A tuple, and the pairs it is.
+pub trait Tuple {
+    type Nested;
+    fn nest(Self) -> Nested
+    fn flat(Nested) -> Self
+}
+
+// A function, by what it takes, as pairs, and what it gives.
+pub trait Callable {
+    type Args;
+    type Output;
+    fn call_with(&Self, Args) -> Output
+}
+
+// A function called with a tuple of what it takes: `apply(add, (3, 4))`.
+pub fn apply<F, T, L, R>(f: F, args: T) -> R where T: Tuple<Nested = L>, F: Callable<Args = L, Output = R> {
+    call_with(&f, nest(args))
+}
+
+// Two lists of pairs as one, the second after the first.
+pub trait Concat<Other> {
+    type Joined;
+    fn concat(Self, Other) -> Joined
+}
+impl<Other> Concat<Other> for () {
+    type Joined = Other;
+    fn concat(nothing, other) { other }
+}
+impl<First, Rest, Other, J> Concat<Other> for (First, Rest) where Rest: Concat<Other, Joined = J> {
+    type Joined = (First, J);
+    fn concat(pair, other) { (pair.0, concat(pair.1, other)) }
+}
+
+// How many a list of pairs has.
+pub trait Count { const COUNT: Int; }
+impl Count for () { const COUNT: Int = 0; }
+impl<First, Rest> Count for (First, Rest) where Rest: Count { const COUNT: Int = 1 + Rest::COUNT; }
+
+"# ++ String.join ((List.range 13).map one)
+
 /-- The texts of the library, each with the module it is. -/
 def texts : List (List String × String) :=
   [(["std"], root),
@@ -4699,6 +4777,7 @@ def texts : List (List String × String) :=
    (["std", "env"], "pub use std::host::{ProcessEnvironment, ProcessArgs};\n"),
    (["std", "time"], timeText),
    (["std", "random"], randomText),
+   (["std", "tuple"], tupleText),
    (["std", "ffi"], "pub use std::c::*;\n"),
    (["core"], "pub mod option;\npub mod result;\npub mod cmp;\npub mod num;\npub mod char;\npub mod iter;\npub mod slice;\npub mod hash;\npub mod value;\n"),
    (["core", "value"], "pub use std::value::*;\n"),
