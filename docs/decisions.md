@@ -2922,10 +2922,15 @@ the order it is being built:
   explicit (decision D10: "rather than silently introduce dot methods");
   this is asked for, for `(a, b).chain()` and `app.add_systems(..)`. It is
   the names in scope that decide, not the value's type: a function of a
-  type's own, `Vec::len`, is not found this way yet, and the value is given
-  as it is, so a function that takes `&mut Self` is written
-  `(&mut q).each(..)` for now.
-
+  type's own, `Vec::len`, is not found this way yet.
+- **What a dotted call is called on is borrowed** where the function is
+  written to take a reference first: `counter.bump()` is `bump(&mut
+  counter)`, `game.world.spawn()` is `spawn(&mut game.world)`. Decided once
+  every declaration has been seen, by what is written: the function's first
+  parameter type, and whether the name is known to hold a value (a `let
+  mut`, a name bound to what is plainly a value, a parameter with a type
+  that is no reference's). A name that may already be a reference is given
+  as it is.
 - **An implementation's head is a type.** `impl<T> Tag for Wrap<Option<T>>`,
   `impl<B> Tag for Pair<Int, B>`, `impl<A> Twin for (A, A)`: an argument
   that is not one of the implementation's type parameters, the first time
@@ -3013,8 +3018,6 @@ const generics and fixed arrays.
   - Every call of a system and of a trait's function goes through a value
     at run time: nothing is inlined, so it is the shape of the Rust and not
     yet its speed.
-  - `emit(&mut game, Update)`: a dotted call does not borrow what it is
-    called on.
 
 ## Instances of an effect, told apart by their type arguments
 

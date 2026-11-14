@@ -223,6 +223,11 @@ def textEndName : String := "%end"
 it in the block may name what is unsafe. -/
 def unsafeMark : String := "%unsafe"
 
+/-- What a dotted call is called on, kept marked until every function's
+declaration has been seen: `value.f(a)` borrows `value` if `f` is written to
+take a reference first. -/
+def receiverMark : String := "%receiver"
+
 /-- A name written through another, `Owner::NAME`, and not called, kept with
 a number of its own: if it turns out to be a value a trait leaves to
 implementations, it is that trait's function called with nothing. -/

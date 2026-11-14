@@ -50,19 +50,19 @@ fn main() -> Int {
         .register<Health>()
         .add_plugins(physics)
         .add_systems(Tire, tire);
-    let a = spawn(&mut game.world);
-    insert(&mut game.world, a, Position(0)); insert(&mut game.world, a, Velocity(5)); insert(&mut game.world, a, Health(3));
-    let b = spawn(&mut game.world);
-    insert(&mut game.world, b, Position(100)); insert(&mut game.world, b, Velocity(7)); insert(&mut game.world, b, Health(1));
-    let c = spawn(&mut game.world);
-    insert(&mut game.world, c, Position(1000)); insert(&mut game.world, c, Health(2));
-    print(count<Health, _>(&mut game.world));
-    emit(&mut game, Update);
-    emit(&mut game, Tire);
-    despawn(&mut game.world, b);
-    print(count<Health, _>(&mut game.world));
-    emit(&mut game, Update);
-    print(count<Position, _>(&mut game.world));
-    emit(&mut game, Update);
-    fold_all(&mut game.world, 0, fn(sum: Int, position: &Position) -> Int { sum + position.0 })
+    let a = game.world.spawn();
+    game.world.insert(a, Position(0)); game.world.insert(a, Velocity(5)); game.world.insert(a, Health(3));
+    let b = game.world.spawn();
+    game.world.insert(b, Position(100)); game.world.insert(b, Velocity(7)); game.world.insert(b, Health(1));
+    let c = game.world.spawn();
+    game.world.insert(c, Position(1000)); game.world.insert(c, Health(2));
+    print(game.world.count<Health, _>());
+    game.emit(Update);
+    game.emit(Tire);
+    game.world.despawn(b);
+    print(game.world.count<Health, _>());
+    game.emit(Update);
+    print(game.world.count<Position, _>());
+    game.emit(Update);
+    game.world.fold_all(0, fn(sum: Int, position: &Position) -> Int { sum + position.0 })
 }

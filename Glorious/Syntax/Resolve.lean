@@ -211,11 +211,118 @@ partial def shiftStmt (k : Nat) : Stmt → Stmt
 
 end
 
+/-- The functions written to take a reference first, each with whether it is
+`&mut`: a function by its first parameter's type, a trait's function by the
+first type it lists. -/
+partial def takesReference : List Item → List (String × Bool)
+  | [] => []
+  | .pub _ item :: rest => takesReference (item :: rest)
+  | .module _ (some body) :: rest => takesReference body ++ takesReference rest
+  | .fn name _ (some (.ref uniq _ _) :: _) _ _ :: rest => (name, uniq) :: takesReference rest
+  | .trait _ methods :: rest =>
+    methods.filterMap (fun (m, ps, _) => match ps with
+      | .ref uniq _ _ :: _ => some (m, uniq)
+      | _ => none) ++ takesReference rest
+  | _ :: rest => takesReference rest
+
+mutual
+
+/-- `value.f(a)` where `f` takes a reference first and `value` is a variable,
+or a field of one: the variable is borrowed for the call. `known` are the
+names in scope that are known to hold a value and not a reference: `1` a
+mutable variable, `2` a name bound to what is plainly a value (see
+`valueLike`), or a parameter written with a type that is no reference's.
+Anything else is given as it is: a reference already, or a value `f` takes
+whole. -/
+partial def receiverExpr (taken : List (String × Bool)) (known : List (String × Nat)) : Expr → Expr
+  | .call id f args =>
+    let f := receiverExpr taken known f
+    let args := args.map (receiverExpr taken known)
+    match f, args with
+    | .name q name, .call _ (.name none mark) [receiver] :: rest =>
+      if mark == receiverMark then
+        -- The name a path of fields starts at, and the path.
+        let rec place : Expr → Option (String × List String × Nat)
+          | .name none x => if (known.lookup x).any (· != 0) then some (x, [], 0) else none
+          | .fieldOf fid e field => (place e).map fun (x, path, _) => (x, path ++ [field], fid)
+          | .proj e n => (place e).map fun (x, path, fid) => (x, path ++ [toString n], fid)
+          | _ => none
+        let given := match taken.lookup name, place receiver with
+          | some uniq, some (x, [], _) => Expr.ref uniq x
+          | some uniq, some (x, path, fid) => if fid == 0 then receiver else .refField fid uniq x path false
+          | _, _ => receiver
+        .call id (.name q name) (given :: rest)
+      else .call id f args
+    | _, _ => .call id f args
+  | .tailCall id f args => .tailCall id (receiverExpr taken known f) (args.map (receiverExpr taken known))
+  | .tuple args => .tuple (args.map (receiverExpr taken known))
+  | .proj e n => .proj (receiverExpr taken known e) n
+  | .closure id clauses => .closure id (clauses.map (receiverClause taken known []))
+  | .handle subject arms => .handle (receiverExpr taken known subject) (arms.map (receiverClause taken known []))
+  | .labelScope l body => .labelScope l (receiverStmts taken known body)
+  | .deref e => .deref (receiverExpr taken known e)
+  | .reborrow uniq e => .reborrow uniq (receiverExpr taken known e)
+  | .fieldOf id e name => .fieldOf id (receiverExpr taken known e) name
+  | e => e
+
+/-- (`values`: the parameters written with types that are no reference's.) -/
+partial def receiverClause (taken : List (String × Bool)) (known : List (String × Nat))
+    (values : List String) : Clause → Clause
+  | .mk pats body =>
+    let named := (pats.flatMap patternNames).map fun x => (x, if values.contains x then 2 else 0)
+    .mk pats (receiverStmts taken (named ++ known) body)
+
+partial def receiverStmts (taken : List (String × Bool)) (known : List (String × Nat)) :
+    List Stmt → List Stmt
+  | [] => []
+  | s :: rest =>
+    let rec here : Stmt → Stmt × List (String × Nat)
+      | .let_ pat value =>
+        let kind := match pat with
+          | .var _ => if valueLike value then 2 else 0
+          | _ => 0
+        (.let_ pat (receiverExpr taken known value), (patternNames pat).map (·, kind) ++ known)
+      | .letMut x value => (.letMut x (receiverExpr taken known value), (x, 1) :: known)
+      | .expr e => (.expr (receiverExpr taken known e), known)
+      | .defer e => (.defer (receiverExpr taken known e), known)
+      | .assign target value =>
+        (.assign (receiverExpr taken known target) (receiverExpr taken known value), known)
+      | .located line col s => let (s, known) := here s; (.located line col s, known)
+    let (s, known) := here s
+    s :: receiverStmts taken known rest
+
+end
+
+/-- Every dotted call of a program with what it is called on borrowed where
+the function takes a reference: see `receiverExpr`. A name that is then
+borrowed and was not a variable is kept where a reference can point, as one
+borrowed with `&` in the text is (`promoteItems`). -/
+partial def borrowReceivers (items : List Item) : List Item :=
+  let taken := takesReference items
+  let rec go : Item → Item
+    | .pub parent item => .pub parent (go item)
+    | .module name (some body) => .module name (some (body.map go))
+    | .fn name ps annots ret clauses =>
+      .fn name ps annots ret (clauses.map fun c =>
+        let values := match c with
+          | .mk pats _ => (pats.zip annots).filterMap fun
+            | (.var _, some (.ref _ _ _)) => none
+            | (.var x, some _) => some x
+            | _ => none
+        receiverClause taken [] values c)
+    | .impl ps tr head args context methods => .impl ps tr head args context (methods.map go)
+    | .traitInfo name supers defaults params assocs => .traitInfo name supers (defaults.map go) params assocs
+    | .alias name value => .alias name (receiverExpr taken [] value)
+    | item => item
+  promoteItems (items.map go)
+
 /-- Each implementation with the functions its trait gives a body that it
 does not write itself; and, where it gives its trait arguments, `impl
 From<Int> for u8`, as an implementation of the trait at those: `From<Int>` is
 the name of what it implements from here on. -/
 def fillDefaults (items : List Item) : List Item :=
+  -- (First, with every declaration to hand: what dotted calls borrow.)
+  let items := borrowReceivers items
   let defaults := items.filterMap fun
     | .traitInfo name _ fns _ _ => some (name, fns)
     | _ => none

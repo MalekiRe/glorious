@@ -1088,7 +1088,10 @@ partial def resolveExpr (ctx : Ctx) (bound : List String) : Expr → R Expr
       unless bound.contains name do
         if let some e := lookupIn (ctx.of name) .value name then
           if e.kind == .fn || e.kind == .method then
-            return ← resolveExpr ctx bound (.call id (.name none name) (receiver :: args))
+            -- (Marked: whether it is borrowed for the call is decided once
+            -- every function's declaration has been seen.)
+            return ← resolveExpr ctx bound
+              (.call id (.name none name) (.call 0 (.name none receiverMark) [receiver] :: args))
     if let (.name none mark, [.name (some q) name]) := (f, args) then
       if mark == pathMark then
         -- `Owner::NAME`: a trait's function of that name called with
