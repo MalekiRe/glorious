@@ -525,8 +525,8 @@ def compileSourceAt (src : String) (check : Bool := true)
   -- variable per field. The library, checked once for every program, is as
   -- it was checked.)
   let all := match first with
-    | .ok (count, _) => all.take count ++ Elab.splitFieldItems (all.drop count)
-    | .error _ => Elab.splitFieldItems all
+    | .ok (count, _) => all.take count ++ Elab.splitFieldItems all (all.drop count)
+    | .error _ => Elab.splitFieldItems all all
   -- (`kept`: what an earlier check of the same program kept, in the same
   -- process: the steps whose inputs did not change are not checked again.)
   let seed := mixHash (hash withStd) (mixHash (hash drops) (hash few))

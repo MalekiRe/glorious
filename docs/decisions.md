@@ -4221,10 +4221,12 @@ cell of its own, and the borrows are lends of different cells, which Core's
 rules show apart. In the test programs 12 more borrows are scopes of their own
 (1330; 89 are not, in 53 programs, from 99 in 59).
 
-Limits: only tuples written as a tuple where the variable is made; a struct
-variable, `let mut c = C { n: 1, m: 2 }`, is not split (its fields are found
-by name only once types are known). The library is not split: it is checked
-once for every program. What the checker says names the field's variable
+A struct variable made by its constructor, `let mut c = C { n: 1, m: 2 }`,
+is split the same way, its variables named by the fields (`c.n`), where the
+struct has no `Drop` (whose value only its own `drop` may take apart).
+
+Limits: only a variable made by writing out its tuple or its struct; the
+library is not split: it is checked once for every program. What the checker says names the field's variable
 (`x.0` is read while ..), which is what is meant.
 
 ## Other standing decisions

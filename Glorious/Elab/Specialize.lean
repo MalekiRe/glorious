@@ -467,84 +467,102 @@ def letMutItems (owner : String) (line col : Nat) (x : String) (items : List Ite
     | item => (item, false)
   (out.map (·.1), out.any (·.2))
 
-/-! ## A tuple variable whose fields are borrowed apart
+/-! ## A variable whose fields are borrowed apart
 
-`let mut x = (a, b)` whose fields are borrowed one by one (`&mut x.0`) and
-whose value is otherwise only read, written or read and written by field, is
-kept as one variable per field, `x.0` and `x.1`. Then two of its fields can be
-lent at once, each a cell of its own, which is what Core's rules for borrows
-can show (a lend of a cell takes the whole cell). Reading `x` reads every
-field; assigning it assigns each. -/
+`let mut x = (a, b)`, or `let mut c = C { n: a, m: b }` of a struct without
+`Drop`, whose fields are borrowed one by one (`&mut x.0`, `&mut c.n`) and that
+is otherwise only read, written or read and written by field, is kept as one
+variable per field (`x.0`, `c.n`). Then two of its fields can be lent at once,
+each a cell of its own, which is what Core's rules for borrows can show (a lend
+of a cell takes the whole cell). Reading the variable reads every field;
+assigning it assigns each. -/
 
-/-- The variable for field `i` of `x`. -/
-def fieldVar (x : String) (i : Nat) : String := s!"{x}.{i}"
+/-- What a variable that is split holds: its fields' names in order, and how a
+whole value is made from them and taken apart into them. -/
+structure Split where
+  fields : List String
+  make : List Expr → Expr
+  apart : List Pattern → Pattern
+
+/-- The variable for field `f` of `x`. -/
+def fieldVar (x : String) (f : String) : String := s!"{x}.{f}"
+
+/-- Which field a step names: by its name, or by its number. -/
+def Split.index (sp : Split) (s : String) : Option Nat :=
+  match sp.fields.idxOf? s with
+  | some i => some i
+  | none => s.toNat?.bind fun i => if i < sp.fields.length then some i else none
+
+def Split.var (sp : Split) (x : String) (i : Nat) : String :=
+  fieldVar x ((sp.fields[i]?).getD (toString i))
 
 mutual
 
-partial def splitExpr (x : String) (n : Nat) : Expr → Expr
-  | .proj (.name none y) i => if y == x && i < n then .name none (fieldVar x i) else .proj (.name none y) i
+partial def splitExpr (x : String) (sp : Split) : Expr → Expr
+  | .proj (.name none y) i =>
+    if y == x && i < sp.fields.length then .name none (sp.var x i) else .proj (.name none y) i
   | .fieldOf id (.name none y) s =>
-    match s.toNat? with
-    | some i => if y == x && i < n then .name none (fieldVar x i) else .fieldOf id (.name none y) s
-    | none => .fieldOf id (.name none y) s
+    match sp.index s, y == x with
+    | some i, true => .name none (sp.var x i)
+    | _, _ => .fieldOf id (.name none y) s
   | .refField id uniq y (s :: path) star =>
-    match s.toNat?, y == x && !star with
+    match sp.index s, y == x && !star with
     | some i, true =>
-      if i < n then
-        if path.isEmpty then .ref uniq (fieldVar x i) else .refField id uniq (fieldVar x i) path false
-      else .refField id uniq y (s :: path) star
+      if path.isEmpty then .ref uniq (sp.var x i) else .refField id uniq (sp.var x i) path false
     | _, _ => .refField id uniq y (s :: path) star
-  | .name none y => if y == x then .tuple ((List.range n).map fun i => .name none (fieldVar x i)) else .name none y
-  | .call i f args => .call i (splitExpr x n f) (args.map (splitExpr x n))
-  | .tailCall i f args => .tailCall i (splitExpr x n f) (args.map (splitExpr x n))
-  | .tuple args => .tuple (args.map (splitExpr x n))
-  | .proj e i => .proj (splitExpr x n e) i
-  | .closure i clauses => .closure i (clauses.map (splitClause x n))
-  | .handle subject arms => .handle (splitExpr x n subject) (arms.map (splitClause x n))
-  | .labelScope l body => .labelScope l (splitStmts x n body)
-  | .deref e => .deref (splitExpr x n e)
-  | .reborrow uniq e => .reborrow uniq (splitExpr x n e)
-  | .fieldOf i e name => .fieldOf i (splitExpr x n e) name
+  | .name none y =>
+    if y == x then sp.make ((List.range sp.fields.length).map fun i => .name none (sp.var x i))
+    else .name none y
+  | .call i f args => .call i (splitExpr x sp f) (args.map (splitExpr x sp))
+  | .tailCall i f args => .tailCall i (splitExpr x sp f) (args.map (splitExpr x sp))
+  | .tuple args => .tuple (args.map (splitExpr x sp))
+  | .proj e i => .proj (splitExpr x sp e) i
+  | .closure i clauses => .closure i (clauses.map (splitClause x sp))
+  | .handle subject arms => .handle (splitExpr x sp subject) (arms.map (splitClause x sp))
+  | .labelScope l body => .labelScope l (splitStmts x sp body)
+  | .deref e => .deref (splitExpr x sp e)
+  | .reborrow uniq e => .reborrow uniq (splitExpr x sp e)
+  | .fieldOf i e name => .fieldOf i (splitExpr x sp e) name
   | e => e
 
-partial def splitClause (x : String) (n : Nat) : Clause → Clause
-  | .mk pats body => if (pats.flatMap patVars).contains x then .mk pats body else .mk pats (splitStmts x n body)
+partial def splitClause (x : String) (sp : Split) : Clause → Clause
+  | .mk pats body => if (pats.flatMap patVars).contains x then .mk pats body else .mk pats (splitStmts x sp body)
 
 /-- The statements after `x` is made, with its fields as variables of their
 own, up to where a name `x` is made again. -/
-partial def splitStmts (x : String) (n : Nat) : List Stmt → List Stmt
+partial def splitStmts (x : String) (sp : Split) : List Stmt → List Stmt
   | [] => []
   | .located l c s :: rest =>
-    match splitStmts x n (s :: rest) with
+    match splitStmts x sp (s :: rest) with
     | first :: more => .located l c first :: more
     | [] => []
   | .let_ pat value :: rest =>
-    let value := splitExpr x n value
+    let value := splitExpr x sp value
     if (patVars pat).contains x then .let_ pat value :: rest
-    else .let_ pat value :: splitStmts x n rest
+    else .let_ pat value :: splitStmts x sp rest
   | .letMut y value :: rest =>
-    let value := splitExpr x n value
+    let value := splitExpr x sp value
     if y == x then .letMut y value :: rest
-    else .letMut y value :: splitStmts x n rest
+    else .letMut y value :: splitStmts x sp rest
   | .assign (.name none y) value :: rest =>
     if y == x then
       -- (Assigning the whole: its parts, each to its variable.)
-      let parts := (List.range n).map fun i => s!"%{fieldVar x i}"
-      .let_ (.tuple (parts.map Pattern.var)) (splitExpr x n value)
-        :: (parts.zipIdx.map fun (p, i) => Stmt.assign (.name none (fieldVar x i)) (.name none p))
-        ++ splitStmts x n rest
-    else .assign (.name none y) (splitExpr x n value) :: splitStmts x n rest
+      let parts := (List.range sp.fields.length).map fun i => s!"%{sp.var x i}"
+      .let_ (sp.apart (parts.map Pattern.var)) (splitExpr x sp value)
+        :: (parts.zipIdx.map fun (p, i) => Stmt.assign (.name none (sp.var x i)) (.name none p))
+        ++ splitStmts x sp rest
+    else .assign (.name none y) (splitExpr x sp value) :: splitStmts x sp rest
   | .assign target value :: rest =>
-    .assign (splitExpr x n target) (splitExpr x n value) :: splitStmts x n rest
-  | .expr e :: rest => .expr (splitExpr x n e) :: splitStmts x n rest
-  | .defer e :: rest => .defer (splitExpr x n e) :: splitStmts x n rest
+    .assign (splitExpr x sp target) (splitExpr x sp value) :: splitStmts x sp rest
+  | .expr e :: rest => .expr (splitExpr x sp e) :: splitStmts x sp rest
+  | .defer e :: rest => .defer (splitExpr x sp e) :: splitStmts x sp rest
 
 end
 
 /-- Does `x` have a field borrowed in these statements, before it is made again? -/
 partial def fieldBorrowed (x : String) (stmts : List Stmt) : Bool :=
   let rec inExpr : Expr → Bool
-    | .refField _ _ y (s :: _) false => y == x && s.toNat?.isSome
+    | .refField _ _ y (_ :: _) false => y == x
     | .call _ f args => inExpr f || args.any inExpr
     | .tailCall _ f args => inExpr f || args.any inExpr
     | .tuple args => args.any inExpr
@@ -567,54 +585,86 @@ partial def fieldBorrowed (x : String) (stmts : List Stmt) : Bool :=
   | .expr e :: rest => inExpr e || fieldBorrowed x rest
   | .defer e :: rest => inExpr e || fieldBorrowed x rest
 
+/-- The structs whose variables can be split: each constructor with its
+fields' names, for those without `Drop` (whose value is taken apart only by
+its own `drop`). -/
+abbrev Structs := List (String × List String)
+
+/-- How a variable made by this value would be split, if it can be. -/
+def splitOf (structs : Structs) : Expr → Option (Split × List Expr)
+  | .tuple es =>
+    if es.length ≥ 2 then
+      some (⟨(List.range es.length).map toString, .tuple, .tuple⟩, es)
+    else none
+  | .call _ (.name q s) args =>
+    match structs.lookup s with
+    | some names =>
+      if names.length ≥ 2 && names.length == args.length then
+        some (⟨names, fun vs => .call 0 (.name q s) vs, fun ps => .ctor s q ps⟩, args)
+      else none
+    | none => none
+  | _ => none
+
 mutual
 
-/-- Every tuple variable of these statements whose fields are borrowed, and
-that is used no other way than its fields and its whole value are, made one
-variable per field. -/
-partial def splitFieldVars : List Stmt → List Stmt
+/-- Every variable of these statements whose fields are borrowed, and that is
+used no other way than its fields and its whole value are, made one variable
+per field. -/
+partial def splitFieldVars (structs : Structs) : List Stmt → List Stmt
   | [] => []
-  | .located l c (.letMut x (.tuple es)) :: rest =>
-    let n := es.length
-    let split := splitStmts x n rest
-    -- (Kept as it is where it is used some other way: borrowed whole, say.)
-    if n ≥ 2 && fieldBorrowed x rest && !(fvStmts [] split).contains x then
-      (es.zipIdx.map fun (e, i) => Stmt.located l c (.letMut (fieldVar x i) (splitFieldsExpr e)))
-        ++ splitFieldVars split
-    else .located l c (.letMut x (.tuple (es.map splitFieldsExpr))) :: splitFieldVars rest
+  | .located l c (.letMut x value) :: rest =>
+    match splitOf structs value with
+    | some (sp, es) =>
+      let split := splitStmts x sp rest
+      -- (Kept as it is where it is used some other way: borrowed whole, say.)
+      if fieldBorrowed x rest && !(fvStmts [] split).contains x then
+        (es.zipIdx.map fun (e, i) => Stmt.located l c (.letMut (sp.var x i) (splitFieldsExpr structs e)))
+          ++ splitFieldVars structs split
+      else .located l c (.letMut x (splitFieldsExpr structs value)) :: splitFieldVars structs rest
+    | none => .located l c (.letMut x (splitFieldsExpr structs value)) :: splitFieldVars structs rest
   | .located l c s :: rest =>
-    match splitFieldVars [s] with
-    | [s'] => .located l c s' :: splitFieldVars rest
-    | ss => ss.map (Stmt.located l c) ++ splitFieldVars rest
-  | .let_ pat value :: rest => .let_ pat (splitFieldsExpr value) :: splitFieldVars rest
-  | .letMut x value :: rest => .letMut x (splitFieldsExpr value) :: splitFieldVars rest
+    match splitFieldVars structs [s] with
+    | [s'] => .located l c s' :: splitFieldVars structs rest
+    | ss => ss.map (Stmt.located l c) ++ splitFieldVars structs rest
+  | .let_ pat value :: rest => .let_ pat (splitFieldsExpr structs value) :: splitFieldVars structs rest
+  | .letMut x value :: rest => .letMut x (splitFieldsExpr structs value) :: splitFieldVars structs rest
   | .assign target value :: rest =>
-    .assign (splitFieldsExpr target) (splitFieldsExpr value) :: splitFieldVars rest
-  | .expr e :: rest => .expr (splitFieldsExpr e) :: splitFieldVars rest
-  | .defer e :: rest => .defer (splitFieldsExpr e) :: splitFieldVars rest
+    .assign (splitFieldsExpr structs target) (splitFieldsExpr structs value) :: splitFieldVars structs rest
+  | .expr e :: rest => .expr (splitFieldsExpr structs e) :: splitFieldVars structs rest
+  | .defer e :: rest => .defer (splitFieldsExpr structs e) :: splitFieldVars structs rest
 
-partial def splitFieldsExpr : Expr → Expr
-  | .call i f args => .call i (splitFieldsExpr f) (args.map splitFieldsExpr)
-  | .tailCall i f args => .tailCall i (splitFieldsExpr f) (args.map splitFieldsExpr)
-  | .tuple args => .tuple (args.map splitFieldsExpr)
-  | .proj e i => .proj (splitFieldsExpr e) i
+partial def splitFieldsExpr (structs : Structs) : Expr → Expr
+  | .call i f args => .call i (splitFieldsExpr structs f) (args.map (splitFieldsExpr structs))
+  | .tailCall i f args => .tailCall i (splitFieldsExpr structs f) (args.map (splitFieldsExpr structs))
+  | .tuple args => .tuple (args.map (splitFieldsExpr structs))
+  | .proj e i => .proj (splitFieldsExpr structs e) i
   | .closure i clauses => .closure i (clauses.map fun
-      | .mk pats body => .mk pats (splitFieldVars body))
-  | .handle subject arms => .handle (splitFieldsExpr subject) (arms.map fun
-      | .mk pats body => .mk pats (splitFieldVars body))
-  | .labelScope l body => .labelScope l (splitFieldVars body)
-  | .deref e => .deref (splitFieldsExpr e)
-  | .reborrow uniq e => .reborrow uniq (splitFieldsExpr e)
-  | .fieldOf i e name => .fieldOf i (splitFieldsExpr e) name
+      | .mk pats body => .mk pats (splitFieldVars structs body))
+  | .handle subject arms => .handle (splitFieldsExpr structs subject) (arms.map fun
+      | .mk pats body => .mk pats (splitFieldVars structs body))
+  | .labelScope l body => .labelScope l (splitFieldVars structs body)
+  | .deref e => .deref (splitFieldsExpr structs e)
+  | .reborrow uniq e => .reborrow uniq (splitFieldsExpr structs e)
+  | .fieldOf i e name => .fieldOf i (splitFieldsExpr structs e) name
   | e => e
 
 end
 
-/-- A program with its tuple variables whose fields are borrowed apart made one
-variable per field (`splitFieldVars`). -/
-def splitFieldItems (items : List Item) : List Item :=
+/-- A program's items with its variables whose fields are borrowed apart made
+one variable per field (`splitFieldVars`); `all` are every item of the
+program, for the structs and what has `Drop`. -/
+def splitFieldItems (all items : List Item) : List Item :=
+  let unwrap := fun (item : Item) => match item with
+    | .pub _ inner => inner
+    | other => other
+  let dropped := all.filterMap fun item => match unwrap item with
+    | .impl _ tr head _ _ _ => if tr == "Drop" then some head else none
+    | _ => none
+  let structs : Structs := all.filterMap fun item => match unwrap item with
+    | .fieldNames ctor names _ => if dropped.contains ctor then none else some (ctor, names)
+    | _ => none
   let clause := fun (c : Clause) => match c with
-    | .mk pats body => Clause.mk pats (splitFieldVars body)
+    | .mk pats body => Clause.mk pats (splitFieldVars structs body)
   items.map fun
     | .fn name ps annots ret clauses => .fn name ps annots ret (clauses.map clause)
     | .impl ps tr head args context methods => .impl ps tr head args context (methods.map fun
