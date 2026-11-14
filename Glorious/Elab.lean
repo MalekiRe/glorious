@@ -118,6 +118,22 @@ def resolveName (scope : Scope) (asked : Option String) (x : String) : M Head :=
 
 /-! ## Expressions -/
 
+/-- The borrows among the arguments of a call whose result is given a name,
+made first, each lasting while the result is used (`mode` 2), or only the
+`(mode - 3)`th of them, the others lasting as long as the call: what a
+result may keep of its arguments is in some of them only. -/
+def longBorrows (site mode : Nat) (args : List Expr) : List Stmt × List Expr :=
+  let borrowAt := (args.zip (List.range args.length)).filter fun (a, _) => (borrowOf a).isSome
+  let long := fun (i : Nat) => mode == 2 || (borrowAt.map (·.2))[mode - 3]? == some i
+  -- (The others are named too, each a scope around the statement alone.)
+  let nameOf := fun (i : Nat) => if long i then s!"%borrow{site}.{i}" else s!"%lend{site}.{i}"
+  let named := (args.zip (List.range args.length)).map fun (a, i) =>
+    match borrowOf a with
+    | some _ => (Expr.name none (nameOf i), some (i, a))
+    | none => (a, none)
+  let lets := named.filterMap fun (_, b) => b.map fun (i, a) => Stmt.let_ (.var (nameOf i)) a
+  (lets, named.map (·.1))
+
 mutual
 
 partial def elabExpr (scope : Scope) (tailPos : Bool) : Expr → M Atom
@@ -491,18 +507,18 @@ partial def elabStmts (scope : Scope) (tailPos : Bool) : List Stmt → M Atom
       let borrows := args.filter fun a => (borrowOf a).isSome
       unless borrows.isEmpty do
         modify fun s => { s with twoWays := s.sites :: s.twoWays }
-      if !borrows.isEmpty && (← read).lends (← get).sites == 2 then
-        if let .fn _ ← resolveName scope q f then
+      let mode := (← read).lends (← get).sites
+      if !borrows.isEmpty && mode ≥ 2 then
+        -- (Of a function, or of a callable the function was given.)
+        let callable ← match ← resolveName scope q f with
+          | .fn _ => pure true
+          | .local _ => pure true
+          | _ => pure false
+        if callable then
           let site := (← get).sites
-          let named := (args.zip (List.range args.length)).map fun (a, i) =>
-            match borrowOf a with
-            | some _ => (Expr.name none s!"%borrow{site}.{i}", some (i, a))
-            | none => (a, none)
-          let lets := named.filterMap fun (_, b) =>
-            b.map fun (i, a) => Stmt.let_ (.var s!"%borrow{site}.{i}") a
+          let (lets, args) := longBorrows site mode args
           modify fun s => { s with sites := s.sites + 1, siteOwners := s.siteOwners.push s.owner }
-          return ← elabStmts scope tailPos
-            (lets ++ .let_ pat (.call id (.name q f) (named.map (·.1))) :: rest)
+          return ← elabStmts scope tailPos (lets ++ .let_ pat (.call id (.name q f) args) :: rest)
     let a ← elabExpr scope false value
     let scope ← bindLet scope pat a
     elabStmts scope tailPos rest
@@ -515,18 +531,18 @@ partial def elabStmts (scope : Scope) (tailPos : Bool) : List Stmt → M Atom
       let borrows := args.filter fun a => (borrowOf a).isSome
       unless borrows.isEmpty do
         modify fun s => { s with twoWays := s.sites :: s.twoWays }
-      if !borrows.isEmpty && (← read).lends (← get).sites == 2 then
-        if let .fn _ ← resolveName scope q f then
+      let mode := (← read).lends (← get).sites
+      if !borrows.isEmpty && mode ≥ 2 then
+        -- (Of a function, or of a callable the function was given.)
+        let callable ← match ← resolveName scope q f with
+          | .fn _ => pure true
+          | .local _ => pure true
+          | _ => pure false
+        if callable then
           let site := (← get).sites
-          let named := (args.zip (List.range args.length)).map fun (a, i) =>
-            match borrowOf a with
-            | some _ => (Expr.name none s!"%borrow{site}.{i}", some (i, a))
-            | none => (a, none)
-          let lets := named.filterMap fun (_, b) =>
-            b.map fun (i, a) => Stmt.let_ (.var s!"%borrow{site}.{i}") a
+          let (lets, args) := longBorrows site mode args
           modify fun s => { s with sites := s.sites + 1, siteOwners := s.siteOwners.push s.owner }
-          return ← elabStmts scope tailPos
-            (lets ++ .letMut x (.call id (.name q f) (named.map (·.1))) :: rest)
+          return ← elabStmts scope tailPos (lets ++ .letMut x (.call id (.name q f) args) :: rest)
     let a ← elabExpr scope false value
     -- The rest of the block runs in the scope of the variable's cell, which is
     -- released however the block is left. It is given the cell as its argument.

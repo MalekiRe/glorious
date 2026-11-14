@@ -651,9 +651,9 @@ def compileSourceAt (src : String) (check : Bool := true)
             let fresh := (List.range out.sites).filter fun i => (guess[i]?.join).isNone
             let alone := (fresh.map fun i => Task.spawn fun _ =>
               if (lending blocks [false, true] (fun j => if j == i then 1 else 0)).isSome then (i, 1)
-              else if out.twoWays.contains i
-                  && (lending blocks [false, true] (fun j => if j == i then 2 else 0)).isSome then (i, 2)
-              else (i, 0)).map Task.get
+              else if !out.twoWays.contains i then (i, 0)
+              else (i, ([2, 3, 4].find? fun m =>
+                (lending blocks [false, true] (fun j => if j == i then m else 0)).isSome).getD 0)).map Task.get
             let choice := fun (j : Nat) => match guess[j]? with
               | some (some v) => v
               | _ => (List.lookup j alone).getD 0
@@ -740,10 +740,11 @@ def compileSourceAt (src : String) (check : Bool := true)
             -- by side: the answers are what they would be one at a time.)
             let try_ := fun (i : Nat) =>
               if (lending (fun j => if j == i then 1 else 0)).isSome then 1
-              -- (The second way, where the place has one.)
+              -- (The second way, where the place has one; then the third,
+              -- with one of the borrows lasting longer, the first or the
+              -- second.)
               else if !out.twoWays.contains i then 0
-              else if (lending (fun j => if j == i then 2 else 0)).isSome then 2
-              else 0
+              else ([2, 3, 4].find? fun m => (lending (fun j => if j == i then m else 0)).isSome).getD 0
             -- A call inside a statement is asked only if the statement's
             -- own place fails: where that passes, the call's borrows are
             -- the statement's.
