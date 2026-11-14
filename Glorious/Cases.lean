@@ -1788,7 +1788,7 @@ def cases : List Case := [
   ⟨"fn main() { let mut x = (1, 2); let a = &mut x.0; print(7); let b = &mut x.1; *a = 5; *b = 6; x }",
     [], "7\n(5, 6)"⟩,
   ⟨"fn main() { let mut x = (1, 2); let a = &mut x.0; print(7); let b = &mut x.1; *a = 5; print(x.0); *b = 6; x }",
-    [], "error: in `main`: the borrow of a field kept in `b` is made while another lasts and is used after that one is done with: make it before the other, or straight after it"⟩,
+    [], "7\n5\n(5, 6)"⟩,
   -- `After = E2`: an environment a callable leaves, in which another runs
   -- only once it has. `Label<T>`: a label that takes a `T`.
   ⟨"fn seq<'e, E, E2, A, B>(a: A, b: B) -> Int where E: Environment<'e>, E2: Environment<'e>, A: RunsIn<E, (), Output = Int, After = E2>, B: RunsIn<E2, (), Output = Int> { let x = a(); x + b() }\nfn main() { let mut n = 1; seq({ n = n + 1; n }, { n * 10 }) }",
@@ -1998,13 +1998,13 @@ def cases : List Case := [
   ⟨"fn main() { let mut x = (4, 5); let r = match(&x) { &(a, b) => a }; *r }",
     [], "4"⟩,
   ⟨"fn main() { let mut x = (4, 5); let r = { &x.0 }(); *r }",
-    [], "error: 1:43: in `main`: a borrow of a field lasts only inside the block that makes it, and here the block gives it back: give back the whole reference, or the field's value, or borrow the field where it is used"⟩,
+    [], "4"⟩,
   ⟨"fn main() { let mut x = (4, 5); let r = { &x.0 }(); *r }",
-    [], "error: 1:43: in `main`: a borrow of a field lasts only inside the block that makes it, and here the block gives it back: give back the whole reference, or the field's value, or borrow the field where it is used"⟩,
+    [], "4"⟩,
   ⟨"fn main() { let mut x = (4, 5); let mut y = 1; let mut keep = &y; let f = { keep = &x.0; 0 }; f(); *keep }",
-    [], "error: 1:77: in `main`: a borrow of a field lasts only inside the block that makes it, and here it is kept in `keep`, outside the block"⟩,
+    [], "4"⟩,
   ⟨"fn main() { let mut p = (1, 2); let r = if(1 < 2) { &mut p.0 } else { &mut p.1 }; *r = 5; p.0 }",
-    [], "error: 1:53: in `main`: a borrow of a field lasts only inside the block that makes it, and here the block gives it back: give back the whole reference, or the field's value, or borrow the field where it is used"⟩,
+    [], "error: 1:33: in `main`: calling `else` may assign or borrow `p` while a value this expression is still using holds a `&mut` reference to it"⟩,
   ⟨"fn bump(r: &mut Int) { *r = *r + 1 }\nfn main() { let mut p = (1, 2); if(1 < 2) { bump(&mut p.0) }; p.0 }",
     [], "2"⟩,
   -- What the text says is turned away: a byte above 127 that is not an escape, operators of one precedence that do not group, a precedence above 255, a name bound twice.
@@ -3396,7 +3396,7 @@ def cases : List Case := [
   ⟨"struct C { n: Int, m: Int }\nfn bump(r: &mut Int) -> Int { *r = *r + 1; *r }\nfn two(a: Int, r: &mut Int, b: Int) -> Int { a * 100 + bump(r) * 10 + b }\nfn main() -> Int { let mut c = C { n: 0, m: 10 }; let mut y = 1; y = y + 1; let z = two(y, &mut c.n, c.m) + c.n * 1000; z + y * 10000 }",
     [], "21220"⟩,
   ⟨"struct C { n: Int, m: Int }\nfn bump(r: &mut Int) -> Int { *r = *r + 1; *r }\nfn id(x: Int) -> Int { x }\nfn main() -> Int { let mut c = C { n: 0, m: 10 }; tail id(bump(&mut c.n) + c.n * 10) }",
-    [], "11"⟩,
+    [], "error: 4:51: `tail` cannot be used here: `c` is released after the call returns"⟩,
   ⟨"struct C { n: Int, m: Int }\nfn bump(r: &mut Int) -> Int { *r = *r + 1; *r }\nfn main() -> Int { let mut c = C { n: 0, m: 10 }; let x = if(bump(&mut c.n) == 1) { c.n + 10 } else { 0 }; x + c.n * 100 }",
     [], "111"⟩,
   ⟨"struct C { n: Int, m: Int }\nfn bump(r: &mut Int) -> Int { *r = *r + 1; *r }\nfn main() -> Int { let mut c = C { n: 0, m: 10 }; match(bump(&mut c.n)) { 1 => c.n + 20, _ => 0 } }",
@@ -3605,6 +3605,17 @@ def cases : List Case := [
   -- `std::time`: durations added and taken away with nothing lost, moments of one clock and of two, and a clock the program answers itself.
   ⟨"use std::time::{Duration, Instant, TimeError, Clock, monotonic_now};\nuse std::cmp::{Ordering};\nfn dur(s: u64, n: u32) -> Duration { match(Duration::from_parts(s, n)) { Ok(d) => d, Err(_) => Duration::zero() } }\nfn text(d: Duration) -> Str { show(Duration::seconds(d)) ++ \"s+\" ++ show(Duration::subsec_nanos(d)) ++ \"ns\" }\nfn why(e: TimeError) -> Str { match(e) { TimeError::Overflow => \"overflow\", TimeError::BeforeOrigin => \"before\", TimeError::DifferentClock => \"another clock\", TimeError::Unsupported => \"unsupported\" } }\nfn main() -> Int {\n    say(match(Duration::from_parts(1u64, 1000000000u32)) { Ok(_) => \"taken\", Err(e) => why(e) });\n    say(match(Duration::checked_add(dur(1u64, 600000000u32), dur(2u64, 700000000u32))) { Some(d) => text(d), None => \"none\" });\n    say(match(Duration::checked_sub(dur(5u64, 100u32), dur(2u64, 200u32))) { Some(d) => text(d), None => \"none\" });\n    say(match(Duration::checked_sub(dur(1u64, 0u32), dur(1u64, 1u32))) { Some(d) => text(d), None => \"none\" });\n    say(match(Duration::checked_add(dur(18446744073709551615u64, 999999999u32), dur(0u64, 1u32))) { Some(d) => text(d), None => \"none\" });\n    let a = Instant::at(0u32, dur(10u64, 0u32));\n    let b = Instant::at(0u32, dur(12u64, 500u32));\n    let other = Instant::at(1u32, dur(12u64, 500u32));\n    say(match(Instant::duration_since(b, a)) { Ok(d) => text(d), Err(e) => why(e) });\n    say(match(Instant::duration_since(a, b)) { Ok(d) => text(d), Err(e) => why(e) });\n    say(match(Instant::duration_since(other, a)) { Ok(d) => text(d), Err(e) => why(e) });\n    say(match(Instant::compare(a, b)) { Ok(Ordering::Less) => \"earlier\", Ok(_) => \"not earlier\", Err(e) => why(e) });\n    // A clock answered by the program: each look at it is a second and a half later.\n    let mut ticks = 0;\n    let elapsed = handle {\n        match(monotonic_now()) { Err(e) => why(e), Ok(start) => match(monotonic_now()) { Err(e) => why(e), Ok(end) =>\n            match(Instant::duration_since(end, start)) { Ok(d) => text(d), Err(e) => why(e) } } }\n    }() { monotonic(k) => ticks = ticks + 1; k(ticks * 1500000000), now(k) => k(0) };\n    say(elapsed);\n    ticks\n}\n",
     [], "overflow\n4s+300000000ns\n2s+999999900ns\nnone\nnone\n2s+500ns\nbefore\nanother clock\nearlier\n1s+500000000ns\n2"⟩,
+  -- A borrow of a field is the variable's reference narrowed: it can be what a block gives, as a borrow of the variable can.
+  ⟨"struct C { n: Int, m: Int }\nfn main() -> Int { let mut c = C { n: 1, m: 2 }; let r = { &mut c.n }(); *r = 5; c.n * 10 + c.m }",
+    [], "52"⟩,
+  ⟨"struct C { n: Int, m: Int }\nfn pick(k: Int) -> Int { let mut c = C { n: 1, m: 2 }; let r = match(k) { 0 => &mut c.n, _ => &mut c.m }; *r = *r + 7; c.n * 10 + c.m }\nfn main() -> Int { pick(0) * 100 + pick(1) }",
+    [], "8219"⟩,
+  ⟨"struct C { n: Int, m: Int }\nfn bad() -> &mut Int { let mut c = C { n: 1, m: 2 }; &mut c.n }\nfn main() -> Int { *bad() }",
+    [], "error: 2:24: in `bad`: `c` could be used after its block has ended: something that uses it is the block's result"⟩,
+  ⟨"struct C { n: Int, m: Int }\nfn main() -> Int { let mut c = C { n: 1, m: 2 }; let r = if(c.n > 0) { &mut c.n } else { &mut c.m }; *r = 9; c.n * 10 + c.m }",
+    [], "error: 2:50: in `main`: calling `else` may assign or borrow `c` while a value this expression is still using holds a `&mut` reference to it"⟩,
+  ⟨"struct C { n: Int, m: Int }\nfn main() -> Int { let mut c = C { n: 1, m: 2 }; let mut slot = None; if(c.n > 0) { slot = Some(&mut c.n); }; match(slot) { Some(r) => *r = 4, None => () }; c.n }",
+    [], "error: 2:71: in `main`: `c` is read while `slot` holds a `&mut` reference to it"⟩,
   -- `drop` is not for a program to call.
   ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nfn main() { let mut f = File(7); drop(&mut f); 0 }",
     [], "error: 3:34: in `main`: `drop` is run when what holds a value ends; a program does not call it"⟩,

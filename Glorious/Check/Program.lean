@@ -166,20 +166,6 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
         let id := 2000000000 + (← get).dropAsked
         modify fun s => { s with dropAsked := s.dropAsked + 1, dropSites := s.dropSites.push (site, id) }
         pending := pending.push ⟨Syntax.destroyTrait, ty, id, 0, site.owner, pos⟩
-  -- The calls that give a value holding no borrow, for the elaborator: a
-  -- field lent to one is back when the call is. A call met twice, as where
-  -- clauses are written out more than once, has to be so both times.
-  let calls := (← get).callTys
-  modify fun s => { s with callTys := #[], fieldLocal := false }
-  unless calls.isEmpty do
-    let mut plain : Std.HashSet Nat := {}
-    let mut held : Std.HashSet Nat := {}
-    for (id, t) in calls do
-      let t ← zonk t
-      if (freeCaps t).isEmpty && (freeTys t).isEmpty then plain := plain.insert id
-      else held := held.insert id
-    let kept := plain.toList.filter fun id => !held.contains id
-    modify fun s => { s with plainCalls := s.plainCalls ++ kept.toArray }
   -- What is gone through to reach each borrowed field, for the elaborator.
   let sites := (← get).fieldSites
   modify fun s => { s with fieldSites := #[] }
@@ -1087,7 +1073,7 @@ def finish : M Elab.Blocks := do
     pure ⟨s.given.toList, links ++ s.envLinks.toList, s.coercions.toList,
       ⟨s.dictTable.toList, s.methodCalls.toList, s.fnBounds, implEs, s.dropSites.toList, destroys⟩,
       s.fieldTable.toList, s.fieldReads.toList, s.packs.toList, s.envFns, s.envWraps.toList,
-      s.derefReads.toList, s.plainCalls.toList⟩
+      s.derefReads.toList⟩
 
 /-- Check a whole program. Gives what the elaborator needs to know about its
 blocks: which take an argument they do not name, and for each that is handed a

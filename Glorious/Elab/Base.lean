@@ -140,8 +140,6 @@ structure Blocks where
   envWraps : List (Nat × List Nat) := []
   /-- The fields read by name of what a named reference points to. -/
   derefReads : List Nat := []
-  /-- The calls that give a value that can hold no borrow. -/
-  plainCalls : List Nat := []
 
 structure Globals where
   ctors : List (String × CtorInfo) := []
@@ -450,17 +448,12 @@ partial def unlocated : Stmt → Stmt
   | .located _ _ s => unlocated s
   | s => s
 
-/-- The names a statement gives values that may hold what `tracked` names
-hold. What a call in `plain` gives holds no borrow, whatever it was given. -/
-def madeFrom (plain : Std.HashSet Nat) (tracked : List String) (s : Stmt) : List String :=
-  let holds := fun (value : Expr) =>
-    (match value with
-      | .call id _ _ => !plain.contains id
-      | _ => true) && (fvExpr [] value).any tracked.contains
+/-- The names a statement gives values that may hold what `tracked` names hold. -/
+def madeFrom (tracked : List String) (s : Stmt) : List String :=
   match unlocated s with
-  | .let_ pat value => if holds value then patVars pat else []
-  | .letMut y value => if holds value then [y] else []
-  | .assign (.name none y) value => if holds value then [y] else []
+  | .let_ pat value => if (fvExpr [] value).any tracked.contains then patVars pat else []
+  | .letMut y value => if (fvExpr [] value).any tracked.contains then [y] else []
+  | .assign (.name none y) value => if (fvExpr [] value).any tracked.contains then [y] else []
   | _ => []
 
 /--
@@ -470,8 +463,7 @@ mutable variable declared inside the scope ends with it, so the scope also
 takes in every statement that mentions one; and a `defer` inside it would run
 when the scope ends, so a scope that has one takes in the whole block.
 -/
-partial def scopeExtent (p : String) (rest : List Stmt) (wide : Bool)
-    (plain : Std.HashSet Nat := {}) : Nat :=
+partial def scopeExtent (p : String) (rest : List Stmt) (wide : Bool) : Nat :=
   go [p] 0
 where
   go (tracked : List String) (k : Nat) : Nat :=
@@ -485,7 +477,7 @@ where
         | .letMut y _ => some y
         | _ => none
       let made :=
-        if wide then inner.foldl (fun acc s => acc ++ madeFrom plain acc s) tracked else tracked
+        if wide then inner.foldl (fun acc s => acc ++ madeFrom acc s) tracked else tracked
       let tracked' := (made ++ muts).eraseDups
       let k' := ((List.range (rest.length + 1)).drop k).find? fun j =>
         !(fvStmts [] (rest.drop j)).any tracked'.contains

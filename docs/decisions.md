@@ -2890,30 +2890,53 @@ borrow tried).
 - The fields of a value are destroyed the last declared first, and the
   elements of an array the last first. (Rust goes the other way.)
 
-## Wrong answers: a field of a variable lent for writing
+## A borrow of a field is the variable's reference narrowed
 
-`let x = bump(&mut c.n); x + c.n * 100` read the old `c.n`, and so did
-`bump(&mut c.n) + c.n`. A field of a variable that is borrowed is taken out
-into a variable of its own for as long as the borrow may last, and put back
-after; how long that is was read off the text, as far as the last use of
-anything made from the reference, and `x`, a number, counted as made from
-it. Until then the variable still held the old field. Every engine agreed,
-since all were given the same program, and no test had read the field again
-in those places.
+`&mut c.n`, where `c` is a variable, was written out before elaboration as
+a variable of its own: the field copied in, the borrow of that, and a
+cleanup putting it back when the borrow's extent was left. How long that
+was had to be read off the text, and whatever read `c` in that time read
+the old field: `let x = bump(&mut c.n); x + c.n * 100` and `bump(&mut c.n)
++ c.n` gave wrong answers, on every engine, since all were given the same
+program. A first repair kept the copy and narrowed its extent (the checker
+said which calls give a value that can hold no borrow), sent reads and
+writes of the field to the copy, and refused what was left.
 
-- The checker now says which calls give a value that can hold no borrow (no
-  reference, callable or lifetime in its type). A field lent for writing to
-  such a call is back when the call is: the call becomes a statement of its
-  own, and the rest of the statement runs after. What such a call gives is
-  not something made from the reference.
-- While a field is out, what reads or writes that field of the variable
-  reads and writes where the field is; the whole variable read is the value
-  with the field as it is now.
-- What is left is refused, with why, rather than run wrong: the variable
-  borrowed whole, or written whole, or used in a callable, while something
-  that may hold the borrow can still be used.
-- A variable that can change, written before the borrow in the same
-  statement, is read where it was written.
+The copy is gone. The machine can narrow a reference to a part of what it
+points to (`focus`), which is how a field of what a reference points to was
+already borrowed; a field of a variable is now borrowed the same way, as
+the variable's own reference narrowed, where it is written. The field
+stays where it is, so nothing can read an old one, and none of this is
+needed any more: the extent of a field borrow, the narrowing and what the
+checker said for it, the rewriting of reads and writes, the values kept
+under names so that they were still computed first (which had the wrong
+answer described below), and four refusals:
+
+- two field borrows that overlap with neither inside the other;
+- a field borrow given back by the block that makes it, or kept in a
+  variable outside it (`let r = { &mut c.n }();`, `match(k) { 0 => &mut
+  c.n, _ => &mut c.m }`): it lasts as long as the variable, as `&mut c`
+  does;
+- the whole variable used while something that might hold the borrow can
+  still be used;
+- `a.f = v` no longer takes the field out and puts it back: it writes it.
+
+What Core shows. A borrow of a field can be a scope of its own, as a
+borrow of the variable can: the narrowed reference is what is lent. Core's
+rule is that while a cell is lent nothing else uses the cell, the whole of
+it; so a field borrow is a scope where nothing in its extent uses another
+part of the variable, and otherwise is kept exclusive by the check of the
+source alone. In the test programs 692 borrows are scopes of their own,
+where 727 were. The 727 counted borrows of the copies: what was shown of
+those said nothing of the variable the field came from, whose reads and
+writes the unproved rewriting redirected. The 692 are of the variables
+themselves.
+
+What is left for the kernel: a lend that says which part of the cell it
+lends, so that two fields of one variable can each be lent and used
+side by side with the rule still proved. `tail` directly beside a variable
+whose field is borrowed is refused, as beside any variable that is
+borrowed: it was let through by accident.
 
 `&mut a[i]` borrowed a copy of the element, so writing through it changed
 nothing. `&a[i]` and `&mut a[i]` are now references to the element where it

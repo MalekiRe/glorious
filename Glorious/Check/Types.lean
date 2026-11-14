@@ -473,10 +473,6 @@ structure St where
   /-- The types a call writes for the type parameters of the function it
   calls, `f<A, B>(..)`, until the function is found. -/
   instWith : Option (List Ty) := none
-  /-- Every borrow of a field, through a reference or of a variable: it is
-  written out as a variable of the block it is made in, so it cannot leave
-  that block. With where it is made. -/
-  blockFieldCaps : Array (Nat × String) := #[]
   /-- For each field read by name, which field it is: for the elaborator. -/
   fieldReads : Array (Nat × Nat) := #[]
   /-- Borrows of a field, to settle once the type is known: the borrow, the
@@ -489,12 +485,6 @@ structure St where
   it is given known, before it was read again without them: said if what is
   then wrong is only that those types were not known. -/
   firstSaid : Option String := none
-  /-- A field of a variable was borrowed for writing in the functions being
-  checked: from then on each call is kept with the type of what it gives. -/
-  fieldLocal : Bool := false
-  callTys : Array (Nat × Ty) := #[]
-  /-- The calls that give a value that can hold no borrow. -/
-  plainCalls : Array Nat := #[]
   /-- Every call of a callee with a type, by the call's identity, and whether
   the callee was then seen to perform nothing: its effects were a variable of
   its own that none of its parameters mention. -/
