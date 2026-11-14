@@ -301,9 +301,13 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
     let mut unmentioned : List Nat := []
     let mut seen := seen
     if d.impl.isNone then
+      -- (Not one said to be a callable or a label: that is its type, and
+      -- the parameter's name is not in the function's type for that reason.)
+      let intrinsic := d.bounds.filterMap fun b =>
+        if ["Fn", "RunsIn", "Environment", "Use", "Label"].contains b.trait then some b.subject else none
       for p in d.params do
         let key := s!"'{p}@{rigidOwner decls d}"
-        if !p.startsWith "'" && (seen.lookup key).isNone then
+        if !p.startsWith "'" && !intrinsic.contains p && (seen.lookup key).isNone then
           let fresh ← freshTy
           if let .var id := fresh then unmentioned := unmentioned ++ [id]
           seen := seen ++ [(key, fresh)]
