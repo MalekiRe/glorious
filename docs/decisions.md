@@ -13,8 +13,10 @@ no borrow of a covey program was shown to be the only way to what it borrows.
 The systems are now copied out of the app first (`L: Use<[0, infinity]>`:
 they are functions, which can be), and the copy and the world are each
 borrowed alone. The simulation: 37 borrows shown exclusive where there were
-none; the query and spawning examples 17 and 19. What is left is a borrow
-written as a program's last expression. A fresh compile of the simulation
+none; the query and spawning examples 17 and 19. The one each then said was
+not shown was: a borrow lent to a call that is also given a callable was
+still listed as not lent, since elaborating the callable moved on the place
+the list is kept by. Every borrow of the three is now shown exclusive. A fresh compile of the simulation
 is quicker too (1.9 s to 1.2 s): every place passes at once.
 
 ## Systems that make entities

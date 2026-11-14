@@ -315,12 +315,15 @@ partial def elabCall (scope : Scope) (isTail : Bool) (f : Expr) (args : List Exp
           { s with sites := s.sites + 1, siteOwners := s.siteOwners.push s.owner
                    under := (held.map fun stmt => (site, stmt) :: s.under).getD s.under }
       if !isTail && !borrows.isEmpty && (← read).lends site != 0 then atSite site do
+        -- (Where the call is: elaborating a callable among its arguments
+        -- moves on what is being elaborated.)
+        let pos := (← get).pos
         let atoms ← elabArgs scope args gives
         -- These borrows are scopes: take back what elaborating them noted.
         for a in args do
           if let some (uniq, y) := borrowOf a then
             modify fun s =>
-              { s with plain := s.plain.erase ⟨s.owner, s.pos.1, s.pos.2, y, uniq⟩ }
+              { s with plain := s.plain.erase ⟨s.owner, pos.1, pos.2, y, uniq⟩ }
         if (← get).b.done.isSome then pure (.int 0) else lendCall idx atoms borrows
       else
         let callee ← emit (.let_ (.closure idx []))
