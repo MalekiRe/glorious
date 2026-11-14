@@ -2,6 +2,7 @@ module
 
 public import Glorious.Driver
 public import Glorious.Target
+public import Std.Async.TCP
 public import Glorious.Cases
 public import Glorious.Checks
 public import Glorious.Bytecode.Encode
@@ -14,6 +15,9 @@ public import Glorious.Bytecode.Encode
 * `glorious check FILE [INPUT...]` runs it on both machines and reports whether
   they agree.
 * `glorious build FILE OUT` compiles it to a bytecode file for the Rust VM.
+* `glorious serve` compiles for the other commands, keeping what it can
+  between compiles; `run`, `certify` and `build` ask it where it runs.
+* `glorious watch FILE [INPUT...]` compiles and runs it again on every change.
 * `glorious exe FILE OUT` writes an executable of the program's own with no
   other tool: the VM with the program at its end, compiled to x86-64 when it
   starts. Needs the VM built.
@@ -251,10 +255,113 @@ def buildFile (path : String) : IO (Except String Target.Built) := do
     Target.write dir key b
     pure (.ok b)
 
+/-! ## The compile server
+
+`glorious serve` keeps one process for compiling: what any compile finds
+once and for all (the prelude checked, the library's texts read) is found
+once, and later what it keeps of each program. Where one runs, `run`,
+`certify` and `build` ask it for the program built, and run or report on
+what it gives as they would on their own; where none runs, or one of another
+compiler, they build it themselves. -/
+
+/-- Where a running server says it is: its port and the compiler it is. -/
+def serverFile : IO System.FilePath := do
+  let home := (← IO.getEnv "HOME").getD "/tmp"
+  let base := match ← IO.getEnv "XDG_CACHE_HOME" with
+    | some dir => System.FilePath.mk dir
+    | none => System.FilePath.mk home / ".cache"
+  pure (base / "glorious" / "server")
+
+/-- This compiler: its file, by size and time. -/
+def compilerIdentity : IO String := do
+  let exe ← IO.appPath
+  let info ← exe.metadata
+  pure s!"{exe} {info.byteSize} {info.modified.sec}.{info.modified.nsec}"
+
+def loopback (port : UInt16) : Std.Net.SocketAddress :=
+  .v4 ⟨Std.Net.IPv4Addr.ofParts 127 0 0 1, port⟩
+
+/-- A message: its length in eight bytes, then it. -/
+def frame (payload : ByteArray) : ByteArray := Id.run do
+  let n := payload.size
+  let mut out := ByteArray.empty
+  for k in [0:8] do
+    out := out.push ((n >>> (8 * (7 - k))) % 256).toUInt8
+  pure (out ++ payload)
+
+/-- Read one message. -/
+partial def receive (c : Std.Async.TCP.Socket.Client) : IO (Option ByteArray) := do
+  let rec fill (have_ : ByteArray) (want : Nat) : IO (Option ByteArray) := do
+    if have_.size ≥ want then return some have_
+    match ← (c.recv? 65536).block with
+    | some more => fill (have_ ++ more) want
+    | none => return none
+  let some head ← fill ByteArray.empty 8 | return none
+  let n := (List.range 8).foldl (fun acc k => acc * 256 + (head.get! k).toNat) 0
+  let some whole ← fill head (8 + n) | return none
+  pure (some (whole.extract 8 (8 + n)))
+
+def bytesOf (bs : List Nat) : ByteArray := ⟨(bs.map Nat.toUInt8).toArray⟩
+
+/-- Serve compiles until killed. -/
+partial def serve : IO UInt32 := do
+  let server ← Std.Async.TCP.Socket.Server.mk
+  server.bind (loopback 0)
+  server.listen 16
+  let port := (← server.getSockName).port
+  let file ← serverFile
+  if let some dir := file.parent then IO.FS.createDirAll dir
+  IO.FS.writeFile file s!"{port}\n{← compilerIdentity}"
+  IO.println s!"glorious: serving compiles on port {port}"
+  (← IO.getStdout).flush
+  repeat
+    let client ← server.accept.block
+    try
+      let some request ← receive client | continue
+      let reply : ByteArray ← match String.fromUTF8? request with
+        | none => pure (frame (bytesOf [1] ++ "an unreadable request".toUTF8))
+        | some path =>
+          match ← buildFile path with
+          | .ok b => pure (frame (bytesOf ([0] ++ Target.encode "" b)))
+          | .error e => pure (frame (bytesOf [1] ++ e.toUTF8))
+      (client.send reply).block
+      client.shutdown.block
+    catch e => IO.eprintln s!"glorious serve: {e}"
+  pure 0
+
+/-- The program at `path` built by the running server, if one of this
+compiler runs; none if none does or it cannot be reached. -/
+def buildByServer (path : String) : IO (Option (Except String Target.Built)) := do
+  if (← IO.getEnv "GLORIOUS_FRESH").isSome || (← IO.getEnv "GLORIOUS_TARGET").isSome then return none
+  let file ← serverFile
+  unless ← file.pathExists do return none
+  let lines := (← IO.FS.readFile file).splitOn "\n"
+  let some port := (lines.headD "").toNat? | return none
+  unless (lines.drop 1).headD "" == (← compilerIdentity) do return none
+  try
+    let client ← Std.Async.TCP.Socket.Client.mk
+    (client.connect (loopback port.toUInt16)).block
+    let whole ← IO.FS.realPath path
+    (client.send (frame whole.toString.toUTF8)).block
+    let some reply ← receive client | return none
+    let bytes := reply.toList.map (·.toNat)
+    match bytes with
+    | 0 :: rest => pure ((Target.decode "" rest).map Except.ok)
+    | 1 :: rest => pure (some (.error ((String.fromUTF8? (bytesOf rest)).getD "the server's error is unreadable")))
+    | _ => pure none
+  catch _ => pure none
+
 /-- The bytes of a built program's bytecode file. -/
 def builtBytes (b : Target.Built) : ByteArray :=
   ⟨((Bytecode.Encode.file b.ctorNames.toList b.bytecode
     ++ Bytecode.Encode.list Bytecode.Encode.nat b.startLocals).map Nat.toUInt8).toArray⟩
+
+/-- The program at `path` built: by the running server if there is one, and
+otherwise here. -/
+def buildAsked (path : String) : IO (Except String Target.Built) := do
+  match ← buildByServer path with
+  | some result => pure result
+  | none => buildFile path
 
 /-- The example programs that state what they must print. -/
 def exampleCases (dir : System.FilePath) :
@@ -377,7 +484,7 @@ def selftest (vm : Option String) : IO UInt32 := do
 /-- Say what the typing of a program's Core shows. With `strict`, fail if some
 borrow is not covered by the proof about borrows. -/
 def certify (path : String) (strict : Bool) : IO UInt32 := do
-  match ← buildFile path with
+  match ← buildAsked path with
   | .ok c =>
     let n := c.sigs
     let owned := c.strict
@@ -803,13 +910,14 @@ def main (args : List String) : IO UInt32 := do
   | ["selftest"] => selftest none
   | ["selftest", vm] => selftest (some vm)
   | ["build", path, out] =>
-    match ← buildFile path with
+    match ← buildAsked path with
     | .ok b =>
       IO.FS.writeBinFile out (builtBytes b)
       pure 0
     | .error e =>
       IO.eprintln s!"{path}: {e}"
       pure 1
+  | ["serve"] => serve
   | "watch" :: path :: rest =>
     match parseInput rest with
     | .ok input => watch path input
@@ -823,7 +931,7 @@ def main (args : List String) : IO UInt32 := do
         IO.eprintln e
         return 64
     if command == "run" then
-      let b ← match ← buildFile path with
+      let b ← match ← buildAsked path with
         | .ok b => pure b
         | .error e =>
           IO.eprintln s!"{path}: {e}"

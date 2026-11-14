@@ -61,6 +61,26 @@ same), no certificate is looked for. covey with a comment added: 0.57 s to
 is quick. The test suite does not keep certificates: it is there to test
 inference too.
 
+### The compile server
+
+**Decision: `glorious serve` keeps one process for compiling, and the commands
+ask it where it runs.** What every compile finds alike (the prelude read and
+checked, the library's texts read and checked once) is then found once, and
+what the server keeps of each program stays in memory. It listens on the
+loopback address at a port the system gives, and writes the port and which
+compiler it is to `~/.cache/glorious/server`. `run`, `certify` and `build`
+send it the program's path and get back what was built (as the build
+directory keeps it), and run or report on it as they would themselves; where
+no server runs, the file names another compiler, or it cannot be reached, they
+build the program themselves. `GLORIOUS_FRESH` or `GLORIOUS_TARGET` set: the
+server is not asked. It is started by hand: nothing starts a process that
+outlives the command. One compile at a time.
+
+Measured with covey: a comment added 0.35 s to 0.27 s; a component's value
+changed 0.34 s to 0.27 s (the kept certificate still fits: the program's types
+did not change, so no certificate was looked for, with or without a server);
+calculator after the server's first compile of it 1.2 s to 1.1 s.
+
 ### What a compile of a file keeps for the next
 
 **Decision: `glorious run|check|build|certify FILE` keeps what its search
