@@ -8,14 +8,18 @@
 // 3
 // 2
 // 1
+// 2
 // 12
 mod ecs;
 
-use ecs::{Entity, Column, Commands, end, app, register, add_systems, on, add_plugins, chain, emit, spawn, insert, count, fold_all, each, each2};
+use ecs::{Entity, Column, Commands, end, app, register, insert_resource, with_resource, add_systems, on, add_plugins, chain, emit, spawn, insert, count, fold_all, each, each2};
 
 struct Position(Int)
 struct Velocity(Int)
 struct Health(Int)
+
+// How many have ended: a resource, one for the whole world.
+struct Ended(Int)
 
 struct Update
 // How much everything is hurt.
@@ -51,11 +55,11 @@ fn wound(hit: &Hit, healths: &mut Column<Health>) {
     }
 }
 
-// And what has no health left ends.
-fn reap(healths: &Column<Health>, commands: &mut Commands) {
+// And what has no health left ends, and is counted.
+fn reap(healths: &Column<Health>, commands: &mut Commands, ended: &mut Ended) {
     let mut i = 0;
     while({ i < len_at(&healths.dense) }) {
-        if(healths.dense[i].0 <= 0) { commands.end(healths.owners[i]) } else { () };
+        if(healths.dense[i].0 <= 0) { commands.end(healths.owners[i]); ended.0 = ended.0 + 1 } else { () };
         i = i + 1
     }
 }
@@ -74,6 +78,7 @@ fn main() -> Int {
         .register<Position>()
         .register<Velocity>()
         .register<Health>()
+        .insert_resource(Ended(0))
         .add_plugins(physics)
         .add_plugins(combat);
     let a = game.world.spawn();
@@ -90,5 +95,6 @@ fn main() -> Int {
     game.emit(Hit(1));
     print(game.world.count<Health>());
     game.emit(Update);
+    match(game.world.with_resource(fn(ended: &mut Ended) -> Int { ended.0 })) { Some(n) => print(n), None => () };
     game.world.fold_all(0, fn(sum: Int, position: &Position) -> Int { sum + position.0 })
 }

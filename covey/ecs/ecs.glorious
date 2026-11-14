@@ -4,11 +4,14 @@
 //
 //     fn integrate(positions: &mut Column<Position>, velocities: &Column<Velocity>) { .. }
 //     fn wound(hit: &Hit, healths: &mut Column<Health>) { .. }
-//     fn reap(healths: &Column<Health>, commands: &mut Commands) { .. }
+//     fn reap(healths: &Column<Health>, commands: &mut Commands, ended: &mut Ended) { .. }
 //
-// and an app is built by saying what there is and what runs when:
+// A reference to a column is to a component's values; to the type a label
+// carries, to the value emitted; to `Commands`, to what is asked to be done
+// afterwards; and to any other type, to the world's one value of it, a
+// resource. An app is built by saying what there is and what runs when:
 //
-//     app().register<Position>().register<Velocity>()
+//     app().register<Position>().register<Velocity>().insert_resource(Ended(0))
 //          .add_systems(Update, (integrate, friction, bound).chain())
 //          .on<Hit>((wound, reap).chain())
 //          .add_plugins(physics)
@@ -19,12 +22,13 @@
 // compiled, by implementations that fit the types:
 //
 //   which column a parameter is          `Get`
+//   which resource                       `Holds`
 //   what each parameter asks for         `Parameter`, then `Fetch` for the list
 //   that no component is asked for twice `AllApart`
 //   which systems a label runs           `Dispatch`
 //
-// A system that asks for a component that was not registered, or for one
-// twice, or for a value its label does not carry, does not compile. When
+// A system that asks for a component that was not registered, or a
+// resource that was not inserted, or for either twice, does not compile. When
 // the program runs, each of those calls is a call of a known function.
 
 use std::tuple::{Tuple, nest};
@@ -98,22 +102,48 @@ impl<T, H, R> Get<T> for (Column<H>, R) where R: Get<T> {
     fn take(columns) { <R as Get<T>>::take(&mut columns.1) }
     fn put(columns, column) { <R as Get<T>>::put(&mut columns.1, column) }
 }
+impl<T, H, R> Get<T> for (Resource<H>, R) where R: Get<T> {
+    fn take(columns) { <R as Get<T>>::take(&mut columns.1) }
+    fn put(columns, column) { <R as Get<T>>::put(&mut columns.1, column) }
+}
 
-// What is done to every column of a world.
+// One value the whole world has, kept among its columns: a score, a clock.
+// While a system has it, it is out of its place.
+pub struct Resource<T> { value: Option<T> }
+
+// The resource of type `T` among a world's columns, found as a column is.
+pub trait Holds<T> {
+    fn lift(&mut Self) -> Option<T>
+    fn lower(&mut Self, T)
+}
+impl<T, R> Holds<T> for (Resource<T>, R) {
+    fn lift(columns) { replace(&mut columns.0.value, None) }
+    fn lower(columns, value) { columns.0.value = Some(value); }
+}
+impl<T, H, R> Holds<T> for (Resource<H>, R) where R: Holds<T> {
+    fn lift(columns) { <R as Holds<T>>::lift(&mut columns.1) }
+    fn lower(columns, value) { <R as Holds<T>>::lower(&mut columns.1, value) }
+}
+impl<T, H, R> Holds<T> for (Column<H>, R) where R: Holds<T> {
+    fn lift(columns) { <R as Holds<T>>::lift(&mut columns.1) }
+    fn lower(columns, value) { <R as Holds<T>>::lower(&mut columns.1, value) }
+}
+
+// What is done to every column of a world when an entity ends.
 pub trait Columns {
-    fn fresh() -> Self
     fn forget(&mut Self, Entity)
 }
 impl Columns for () {
-    fn fresh() { () }
     fn forget(columns, entity) { () }
 }
 impl<H, R> Columns for (Column<H>, R) where R: Columns {
-    fn fresh() { (empty_column(), <R as Columns>::fresh()) }
     fn forget(columns, entity) {
         let _ = column_remove(&mut columns.0, entity);
         <R as Columns>::forget(&mut columns.1, entity)
     }
+}
+impl<H, R> Columns for (Resource<H>, R) where R: Columns {
+    fn forget(columns, entity) { <R as Columns>::forget(&mut columns.1, entity) }
 }
 
 // The columns, and which entities there are.
@@ -169,6 +199,19 @@ pub fn fold_all<T, S, R>(world: &mut World<S>, start: R, f: for<'a> fn(R, &'a T)
     result
 }
 
+// What a function makes of a resource of the world; none while a system
+// has it.
+pub fn with_resource<T, S, X>(world: &mut World<S>, f: for<'a> fn(&'a mut T) -> X) -> Option<X> where S: Holds<T> {
+    match(<S as Holds<T>>::lift(&mut world.columns)) {
+        Some(value) =>
+            let mut value = value;
+            let made = f(&mut value);
+            <S as Holds<T>>::lower(&mut world.columns, value);
+            Some(made),
+        None => None
+    }
+}
+
 // Every entity with an `A`, its `A` to change.
 pub fn each<A>(column: &mut Column<A>, f: for<'a> fn(Entity, &'a mut A)) {
     let mut i = 0;
@@ -200,15 +243,18 @@ pub fn end(commands: &mut Commands, entity: Entity) { push_at(&mut commands.ende
 // from the parameter's type, so a system is written as any function is.
 pub struct Changed<A>(A)
 pub struct Read<A>(A)
-pub struct Emitted
 pub struct Asking
+pub struct Shared<X>(X)
+pub struct Owned<X>(X)
 pub trait Parameter { type Asks; }
 impl<A> Parameter for &mut Column<A> { type Asks = Changed<A>; }
 impl<A> Parameter for &Column<A> { type Asks = Read<A>; }
 impl Parameter for &mut Commands { type Asks = Asking; }
-// (Any other reference is to the value emitted: the narrower ones above
-// are chosen first.)
-impl<E> Parameter for &E { type Asks = Emitted; }
+// (Any other reference is to a resource, or for reading to the value
+// emitted, which is told apart where the label is known: the narrower ones
+// above are chosen first.)
+impl<X> Parameter for &mut X { type Asks = Owned<X>; }
+impl<X> Parameter for &X { type Asks = Shared<X>; }
 
 // A system takes a component once. Two of what it asks for are apart unless
 // they are one column, which is only if the component has a trait nothing
@@ -221,6 +267,9 @@ impl<A> Apart for (Changed<A>, Changed<A>) where A: ASystemTakesAComponentOnce {
 impl<A> Apart for (Changed<A>, Read<A>) where A: ASystemTakesAComponentOnce {}
 impl<A> Apart for (Read<A>, Changed<A>) where A: ASystemTakesAComponentOnce {}
 impl<A> Apart for (Read<A>, Read<A>) where A: ASystemTakesAComponentOnce {}
+impl<X> Apart for (Owned<X>, Owned<X>) where X: ASystemTakesAComponentOnce {}
+impl<X> Apart for (Owned<X>, Shared<X>) where X: ASystemTakesAComponentOnce {}
+impl<X> Apart for (Shared<X>, Owned<X>) where X: ASystemTakesAComponentOnce {}
 // One thing asked for, apart from each of a list; and a list each of whose
 // members is apart from those after it.
 pub trait ApartFrom<X> {}
@@ -268,9 +317,36 @@ impl<E, S, G, F, A, Rest> Fetch<E, S, G, F> for (Read<A>, Rest)
         <S as Get<A>>::put(&mut world.columns, a)
     }
 }
-impl<E, S, G, F, Rest> Fetch<E, S, G, F> for (Emitted, Rest) where Rest: Fetch<E, S, (G, &E), F> {
+// A shared reference to the label's type is the value emitted; to any other
+// type, a resource.
+impl<E, S, G, F, Rest> Fetch<E, S, G, F> for (Shared<E>, Rest) where Rest: Fetch<E, S, (G, &E), F> {
     fn fetch(event, world, commands, gathered, f) {
         <Rest as Fetch<E, S, (G, &E), F>>::fetch(event, world, commands, (gathered, event), f)
+    }
+}
+impl<E, S, G, F, X, Rest> Fetch<E, S, G, F> for (Shared<X>, Rest)
+    where S: Holds<X>, Rest: Fetch<E, S, (G, &X), F> {
+    fn fetch(event, world, commands, gathered, f) {
+        match(<S as Holds<X>>::lift(&mut world.columns)) {
+            Some(value) =>
+                <Rest as Fetch<E, S, (G, &X), F>>::fetch(event, world, commands, (gathered, &value), f);
+                <S as Holds<X>>::lower(&mut world.columns, value),
+            // (Not while a system has it: a system asks for one once.)
+            None => ()
+        }
+    }
+}
+impl<E, S, G, F, X, Rest> Fetch<E, S, G, F> for (Owned<X>, Rest)
+    where S: Holds<X>, Rest: Fetch<E, S, (G, &mut X), F> {
+    fn fetch(event, world, commands, gathered, f) {
+        match(<S as Holds<X>>::lift(&mut world.columns)) {
+            Some(value) =>
+                let mut value = value;
+                <Rest as Fetch<E, S, (G, &mut X), F>>::fetch(event, world, commands, (gathered, &mut value), f);
+                <S as Holds<X>>::lower(&mut world.columns, value),
+            // (Not while a system has it: a system asks for one once.)
+            None => ()
+        }
     }
 }
 // (The commands are given once: what comes after has none to give.)
@@ -356,6 +432,16 @@ pub struct App<S, L> { pub world: World<S>, systems: L }
 
 pub fn app() -> App<(), ()> {
     App { world: World { columns: (), generations: [], free: [] }, systems: () }
+}
+
+// Give the world a resource.
+pub fn insert_resource<T, S, L>(app: App<S, L>, value: T) -> App<(Resource<T>, S), L> {
+    match(app) {
+        App { world, systems } => match(world) {
+            World { columns, generations, free } =>
+                App { world: World { columns: (Resource { value: Some(value) }, columns), generations: generations, free: free }, systems: systems }
+        }
+    }
 }
 
 // Store a component.

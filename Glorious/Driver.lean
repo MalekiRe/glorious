@@ -55,12 +55,13 @@ def certifyProgram (items : List Syntax.Item) (p : Core.Program)
   -- where they are given a reference to a cell, and then without; and only
   -- then with references taken to be to one of several cells where they
   -- have to be.
+  let one (strict regions loans ranked widen : Bool) : Option Typing.Cert :=
+    match Infer.certify items p strict envSizes regions loans ranked widen with
+    | .ok cert => if Typing.checkProgram cert p then some cert else none
+    | .error _ => none
   let attempt (strict regions loans : Bool) : Option Typing.Cert :=
     (if regions then [(true, false), (false, false), (true, true), (false, true)]
-      else [(false, false)]).findSome? fun (ranked, widen) =>
-      match Infer.certify items p strict envSizes regions loans ranked widen with
-      | .ok cert => if Typing.checkProgram cert p then some cert else none
-      | .error _ => none
+      else [(false, false)]).findSome? fun (ranked, widen) => one strict regions loans ranked widen
   if let some cert := attempt true true true then return cert
   if let some cert := attempt true true false then return cert
   if let some cert := attempt true false false then return cert
