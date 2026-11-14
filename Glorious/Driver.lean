@@ -5,6 +5,7 @@ public import Glorious.Syntax.Resolve
 public import Glorious.Syntax.Modules
 public import Glorious.Elab
 public import Glorious.Elab.Instances
+public import Glorious.Elab.Specialize
 public import Glorious.Check
 public import Glorious.Infer
 public import Glorious.Prelude
@@ -263,6 +264,23 @@ partial def hasDrop : List Syntax.Item → Bool
   | .impl _ tr _ _ _ _ :: rest => (tr.splitOn "::").getLast! == "Drop" || hasDrop rest
   | _ :: rest => hasDrop rest
 
+/-- A checked program without what only the checker knows of: its traits (the
+checker said how each bound is met, and each is a value passed where it is
+needed); its borrows of fields (each the variable's reference, narrowed);
+its families of effects (each instance used an effect of its own); and, where
+an implementation given to a function is known, the function written out for
+it with its trait's functions called by name. `written` has the declarations
+with their lifetimes, `all` is without them. -/
+def lowered (b : Elab.Blocks) (written all : List Syntax.Item) :
+    Except String (List Syntax.Item × Elab.Blocks) := do
+  let (items, b) := Elab.untrait b all
+  let items ← Elab.unfield b items
+  let items ← Elab.instances b written items
+  let (items, copies) := Elab.specialize b.traits items
+  let b := { b with envFns := b.envFns ++ copies.filterMap fun (name, fn) =>
+    (b.envFns.lookup fn).map fun groups => (name, groups) }
+  pure (items, b)
+
 /-- Parse, check and elaborate a program together with the prelude, and have the
 proved Core type checker accept the result. With `check := false` both checks
 are skipped, so that programs which go wrong can still be run. -/
@@ -308,11 +326,8 @@ def compileSource (src : String) (check : Bool := true)
   -- is met, and each is now a value passed where it is needed.
   let (all, blocks) ← match blocks with
     | some b => do
-      let (items, b) := Elab.untrait b all
-      -- Nor a borrow of a field: each is a variable of its own by now.
-      let items ← Elab.unfield b items
-      -- Nor a family of effects: each instance used is an effect of its own.
-      pure (← Elab.instances b written items, some b)
+      let (items, b) ← lowered b written all
+      pure (items, some b)
     | none => pure (all, none)
   -- What nothing reaches is not part of the program that runs. But what the
   -- program's own functions say is looked at wherever they are: one that
@@ -405,24 +420,37 @@ def compileSource (src : String) (check : Bool := true)
             let alone : List Nat := second.map Task.get
             if alone.any (· != 0) then
               if let some c := lending blocks (fun j => alone[j]?.getD 0) then return c
-              -- Not all at once: take them one at a time, keeping each that
-              -- passes with those kept before it. (Every place still to
-              -- come is asked side by side with those kept so far, and the
-              -- first that passes is kept: what one at a time would find.)
-              let rec rounds (fuel from_ : Nat) (kept : List Nat) (best : Option Compiled) :
-                  Option Compiled :=
-                match fuel with
-                | 0 => best
-                | fuel + 1 =>
-                  let coming := (List.range out.sites).filter fun i =>
-                    i ≥ from_ && alone[i]?.getD 0 != 0
-                  let asked : List (Nat × List Nat × Task (Option Compiled)) := coming.map fun i =>
-                    let next := kept.set i (alone[i]?.getD 0)
-                    (i, next, Task.spawn fun _ => lending blocks (fun j => next[j]?.getD 0))
-                  match asked.find? fun (r : Nat × List Nat × Task (Option Compiled)) => (Task.get r.2.2).isSome with
-                  | some (i, next, t) => rounds fuel (i + 1) next (Task.get t)
-                  | none => best
-              if let some c := rounds out.sites 0 (List.replicate out.sites 0) none then return c
+              -- Not all at once: keep each that passes with those kept
+              -- before it. A run of them is asked whole first, and by halves
+              -- where it fails, so that the few that fail are found without
+              -- every place being asked for.
+              -- (While a run is asked, so is its first half with what is
+              -- kept: the answer wanted next if the run fails.)
+              let with_ := fun (kept : List Nat) (coming : List Nat) =>
+                coming.foldl (fun (k : List Nat) (i : Nat) => k.set i (alone[i]?.getD 0)) kept
+              let ask : List Nat → Task (Option Compiled) := fun next =>
+                Task.spawn fun _ => lending blocks (fun j => next[j]?.getD 0)
+              let rec add (fuel : Nat) (kept : List Nat) (coming : List Nat) (best : Option Compiled)
+                  (whole : Task (Option Compiled)) : List Nat × Option Compiled :=
+                match fuel, coming with
+                | 0, _ => (kept, best)
+                | _, [] => (kept, best)
+                | _, [i] =>
+                  match Task.get whole with
+                  | some c => (with_ kept [i], some c)
+                  | none => (kept, best)
+                | fuel + 1, _ =>
+                  let (a, b) := coming.splitAt (coming.length / 2)
+                  let half := ask (with_ kept a)
+                  match Task.get whole with
+                  | some c => (with_ kept coming, some c)
+                  | none =>
+                    let (kept, best) := add fuel kept a best half
+                    add fuel kept b best (ask (with_ kept b))
+              let coming := (List.range out.sites).filter fun i => alone[i]?.getD 0 != 0
+              -- (All of them at once has just failed.)
+              if let some c := (add out.sites (List.replicate out.sites 0) coming none
+                  (Task.spawn fun _ => none)).2 then return c
     plain blocks
   -- Blocks can share an environment only where a type can state it. Where one
   -- cannot, as when what a block is given may also be a function that is not a

@@ -370,8 +370,7 @@ def why (path : String) : IO UInt32 := do
   let .ok blocks := Check.checkProgram all resolved.info | IO.println "check failed"; return 1
   let written := all
   let all := Elab.eraseLifetimes all
-  let (all, blocks) := Elab.untrait blocks all
-  let .ok all := Elab.unfield blocks all | IO.println "unfield failed"; return 1
+  let .ok (all, blocks) := lowered blocks written all | IO.println "lowering failed"; return 1
   let all := Elab.reachable ("main" :: blocks.coercions.map (·.2)) all
   let declared := Elab.withDeclared written all
   -- (`GLORIOUS_LENDS=2,0,1`: how each place is tried, in place of all at once.)
@@ -452,9 +451,9 @@ def stages (path : String) : IO UInt32 := do
   let .ok blocks := Check.checkProgram all resolved.info | IO.println "check failed"; return 1
   IO.println s!"{blocks.given.length} given"
   last ← lap "check" last
+  let written := all
   let all := Elab.eraseLifetimes all
-  let (all, blocks) := Elab.untrait blocks all
-  let .ok all := Elab.unfield blocks all | IO.println "unfield failed"; return 1
+  let .ok (all, blocks) := lowered blocks written all | IO.println "lowering failed"; return 1
   let all := Elab.reachable ("main" :: blocks.coercions.map (·.2)) all
   IO.println s!"{all.length} plain"
   last ← lap "untrait, unfield, reach" last

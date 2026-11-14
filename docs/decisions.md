@@ -2923,6 +2923,19 @@ the order it is being built:
   this is asked for, for `(a, b).chain()` and `app.add_systems(..)`. It is
   the names in scope that decide, not the value's type: a function of a
   type's own, `Vec::len`, is not found this way yet.
+- **A function is written out for each implementation it is called with.**
+  Once traits are values (`untrait`), a call that gives an implementation
+  that is known calls a copy of the function made for it, in which the
+  trait's functions are called by name (`Glorious/Elab/Specialize.lean`).
+  What `main` reaches then passes no implementation about. It is done in
+  the front end and proves nothing; Core checks what comes out as before.
+  Measured on a loop calling a trait's function of a nested tuple 300 000
+  times: 0.95 s to 0.53 s on x86-64, 1.76 s to 1.31 s on the interpreter.
+  covey's example, whose regions Core could not be shown before (an
+  implementation that takes implementations whose functions take
+  references), has them shown. Not done: an associated constant is still a
+  call, of a function now known; a copy is made per implementation, not
+  per type, so a function without bounds is one function for all types.
 - **What a dotted call is called on is borrowed** where the function is
   written to take a reference first: `counter.bump()` is `bump(&mut
   counter)`, `game.world.spawn()` is `spawn(&mut game.world)`. Decided once

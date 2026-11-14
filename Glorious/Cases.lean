@@ -3872,6 +3872,16 @@ def cases : List Case := [
     [], "3"⟩,
   ⟨"struct Counter { n: Int }\nfn bump(c: &mut Counter) { c.n = c.n + 1; }\nfn main() -> Int { let c = Counter { n: 0 }; c.bump(); c.n }",
     [], "error: 3:46: in `main`: `c` is not a mutable variable, so it cannot be borrowed"⟩,
+  -- A function that asks a trait of its type parameter is written out for each implementation it is called with: the copy keeps the label its function's name is.
+  ⟨"fn find(target, a, b, c) {\n    let check = { x => if(x == target) { @find(Some(x)) } };\n    check(a); check(b); check(c);\n    None\n}\nfn main() { (find(2, 1, 2, 3), find(9, 1, 2, 3)) }",
+    [], "(Ok(2), Err(()))"⟩,
+  ⟨"trait Next { fn next(&mut Self) -> Option<Int> }\nstruct Count { n: Int }\nimpl Next for Count { fn next(c) { c.n = c.n + 1; if(c.n > 3) { None } else { Some(c.n) } } }\nfn sum<I: Next>(it: &mut I) -> Int { match(next(it)) { Some(n) => n + sum(it), None => 0 } }\nfn main() -> Int { let mut c = Count { n: 0 }; sum(&mut c) }",
+    [], "6"⟩,
+  ⟨"trait Shape { fn area(&Self) -> Int }\nstruct Sq(Int)\nstruct Rect(Int, Int)\nimpl Shape for Sq { fn area(s) { s.0 * s.0 } }\nimpl Shape for Rect { fn area(r) { r.0 * r.1 } }\nimpl<A, B> Shape for (A, B) where A: Shape, B: Shape { fn area(p) { area(&p.0) + area(&p.1) } }\nfn total<T: Shape>(shape: &T, times: Int) -> Int {\n    let mut sum = 0;\n    let mut i = 0;\n    while({ i < times }) { sum = (sum + area(shape)) % 1000003; i = i + 1 };\n    sum\n}\nfn main() -> Int { let s = ((Sq(3), Rect(2, 5)), (Sq(4), (Rect(1, 7), Sq(2)))); total(&s, 30) }\n",
+    [], "1380"⟩,
+  -- A function that calls itself with the reference it was given: the borrow it is called with is a scope.
+  ⟨"struct Count { n: Int }\nfn nxt(c: &mut Count) -> Option<Int> { c.n = c.n + 1; if(c.n > 3) { None } else { Some(c.n) } }\nfn sum2(it: &mut Count) -> Int { match(nxt(it)) { Some(n) => n + sum2(it), None => 0 } }\nfn main() -> Int { let mut c = Count { n: 0 }; sum2(&mut c) }",
+    [], "6"⟩,
   -- `drop` is not for a program to call.
   ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nfn main() { let mut f = File(7); drop(&mut f); 0 }",
     [], "error: 3:34: in `main`: `drop` is run when what holds a value ends; a program does not call it"⟩,

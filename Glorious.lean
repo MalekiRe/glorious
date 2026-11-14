@@ -36,6 +36,7 @@ public import Glorious.Syntax.Lexer
 public import Glorious.Syntax.Parser
 public import Glorious.Elab
 public import Glorious.Elab.Instances
+public import Glorious.Elab.Specialize
 public import Glorious.Prelude
 public import Glorious.Std
 public import Glorious.Driver

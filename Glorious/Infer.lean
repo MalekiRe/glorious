@@ -2155,8 +2155,17 @@ def zonkHint (pr : Pr) : IHint → M (List Hint)
   | .result r b => do
     if (← zonk pr r) == .never then pure [.ty (← zonk pr b)] else pure []
   | .rgns acc actuals => do
-    let n := (← bindersOf acc).length
-    if n == 0 then pure [] else pure [.rgns (← (actuals.take n).mapM (zonkRg pr))]
+    let binders ← bindersOf acc
+    if binders.isEmpty then pure []
+    else
+      -- A call that chose nothing for a region the callable's type binds is
+      -- one made before the type was known to bind it: a function's call of
+      -- itself, at the regions it was itself called at.
+      let chosen ← (actuals.zip binders).mapM fun (actual, binder) => do
+        let r ← findRg actual
+        if pr.bound.contains r || (pr.vars.lookup r).isSome then zonkRg pr actual
+        else zonkRg pr binder
+      pure [.rgns chosen]
 
 def zonkHints (pr : Pr) (hs : Array IHint) : M (List Hint) := do
   pure (← hs.toList.mapM (zonkHint pr)).flatten
