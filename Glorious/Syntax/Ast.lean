@@ -250,6 +250,14 @@ def arrayMark : String := "%array"
 pattern `[a, b, c]`. -/
 def arrayPatName (n : Nat) : String := s!"%array:{n}"
 
+/-- The trait of the prelude a type that stands for a whole number has: the
+number is its `VALUE`. -/
+def knownTrait : String := "%prelude::Known"
+
+/-- A type parameter of an implementation that says the implementation is
+the one a type nothing decides is taken to have: `#[fallback] impl ..`. -/
+def fallbackMark : String := "%fallback"
+
 /-- The name under which a name bound by the pattern of a `let` is known
 where it is destroyed: the place is the statement's, which a clause's own
 names are known by too when the statement is its first. -/
@@ -556,6 +564,12 @@ def Fixities.function (fix : Fixities) (op : String) (asPrefix : Bool) : String 
   match fix.bound.find? fun (o, p, _) => o == op && p == asPrefix with
   | some (_, _, f) => f
   | none => op
+
+/-- A whole number as a type, for the length of a `[T; N]`: its bits from the
+lowest, `B1<B0<B1<Z>>>` for five. Each number is one type. -/
+partial def numberType : Nat → TypeExpr
+  | 0 => .name "%prelude::Z" []
+  | n => .name (if n % 2 == 0 then "%prelude::B0" else "%prelude::B1") [numberType (n / 2)]
 
 /-- `subject: Trait<args, Name = Type>` written of a type parameter of a
 function. The compiler's own: `F: Fn<(A, B), Output = R, Effects = {E}>`, a

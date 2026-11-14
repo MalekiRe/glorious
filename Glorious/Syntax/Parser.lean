@@ -32,6 +32,12 @@ structure PCtx where
   /-- Added to the identity of each callable literal, so that the literals of
   texts parsed separately stay distinct. -/
   base : Nat
+  /-- The parameters of the function being read that are numbers, `const N:
+  Int`: such a name written as a value is the number. -/
+  consts : List String := []
+  /-- Whether the program has arrays of a length their type says, `[T; N]`:
+  `[a, b, c]` is then whichever of the two kinds is wanted of it. -/
+  fixed : Bool := false
   /-- The operators of each module of the program, where they are not the
   same in every module, and the module being read. -/
   tables : List (List String × Fixities) := []
@@ -479,6 +485,10 @@ private partial def parseType : P TypeExpr := do
       expectOp ">"
       pure (.name x args.toList)
     else pure (.name x [])
+  | .int n =>
+    -- A whole number where a type is written: the type that stands for it.
+    advance
+    pure (numberType n)
   | .punct "(" =>
     advance
     let args ← parseTypeList ")"
@@ -489,7 +499,12 @@ private partial def parseType : P TypeExpr := do
     -- `[T]`: an array of `T`.
     advance
     let element ← parseType
-    if (← peek) == .punct ";" then failAt "an array's type does not say how long it is: write `[T]`"
+    -- `[T; N]`: an array of exactly `N` of them, `N` a number or a
+    -- parameter that stands for one.
+    if ← acceptPunct ";" then
+      let length ← parseType
+      expectPunct "]"
+      return .name "%prelude::Fixed" [element, length]
     expectPunct "]"
     pure (.name "%prelude::Array" [element])
   | .op "*" =>
@@ -733,6 +748,17 @@ private partial def parseGenericsFull :
   let mut defaults : Array (Nat × List String × TypeExpr) := #[]
   repeat
     if ← isOp ">" then break
+    -- `const N: Int`: a parameter that stands for a whole number. It is a
+    -- type parameter whose type is known to stand for one.
+    if (← peek) == .ident "const" then
+      advance
+      let x ← expectIdent
+      expectPunct ":"
+      let _ ← parseType
+      out := out.push x
+      bounds := bounds.push { subject := x, trait := knownTrait }
+      if !(← acceptPunct ",") then break
+      continue
     let x ← expectIdent
     let before := out.toList
     out := out.push x
@@ -763,6 +789,9 @@ private partial def parseGenericsWith : P (List String × List Bound) := do
 
 private partial def parseGenerics : P (List String) := do
   let (params, bounds) ← parseGenericsWith
+  -- (That a `const N: Int` stands for a number is asked where its number
+  -- is: `where N: Known` on an implementation that reads it.)
+  let bounds := bounds.filter (·.trait != knownTrait)
   unless bounds.isEmpty do failAt "what is asked of a type parameter is written on a function"
   pure params
 
@@ -1218,6 +1247,13 @@ private partial def parsePostfix (noBlock : Bool) : P Expr := do
   pure e
 
 private partial def parsePrimary (noBlock : Bool) : P Expr := do
+  -- A parameter that stands for a number, written as a value: the number.
+  if let .ident x ← peek then
+    if (← read).consts.contains x && (← peek 1) != .punct "::" then
+      let id := (← read).base + (← get) + 1
+      advance
+      return .call 0 (.name none instMark)
+        [.call id (.name (some knownTrait) "VALUE") [], (TypeExpr.tuple [.name x []]).asExpr]
   match ← peek with
   | .int n =>
     let v ← plainInt false n
@@ -1234,9 +1270,15 @@ private partial def parsePrimary (noBlock : Bool) : P Expr := do
     -- they go without.)
     let base := (← read).base
     let numbered := fun (at_ offset : Nat) => if at_ < 100000 then base + at_ + offset else 0
-    let empty := numbered (← get) 600000
+    let opened ← get
+    let empty := numbered opened 600000
     advance
-    if ← acceptPunct "]" then return arrayValue [] empty
+    if ← acceptPunct "]" then
+      if (← read).fixed then
+        return .call 0 (.name none instMark)
+          [.call (numbered opened 800000) (preludeFn "array_literal") [arrayValue [] empty],
+           (TypeExpr.tuple [numberType 0]).asExpr]
+      return arrayValue [] empty
     let mut starts : Array Nat := #[numbered (← get) 700000]
     let first ← parseBinary 0 false
     if ← acceptPunct ";" then
@@ -1249,7 +1291,14 @@ private partial def parsePrimary (noBlock : Bool) : P Expr := do
       starts := starts.push (numbered (← get) 700000)
       elements := elements.push (← parseBinary 0 false)
     expectPunct "]"
-    pure (arrayValue elements.toList empty starts.toList)
+    let value := arrayValue elements.toList empty starts.toList
+    -- Where the program has arrays of a fixed length, the literal is an
+    -- array or one of exactly so many: whichever is wanted of it.
+    if (← read).fixed then
+      let id := numbered opened 800000
+      return .call 0 (.name none instMark)
+        [.call id (preludeFn "array_literal") [value], (TypeExpr.tuple [numberType elements.size]).asExpr]
+    pure value
   | .ident "tail" =>
     advance
     match ← parsePostfix noBlock with
@@ -1573,7 +1622,8 @@ private partial def parseFn : P (Item × List Bound) := do
     let ret ← if (← acceptPunct "->") || (← peek) == .op "/" then some <$> parseResult else pure none
     let (lifetimes, more) ← parseWhere
     expectPunct "{"
-    let body ← parseStmts
+    let consts := (bounds.filter (·.trait == knownTrait)).map (·.subject)
+    let body ← withReader (fun ctx => { ctx with consts := consts ++ ctx.consts }) parseStmts
     expectPunct "}"
     -- `-> !`: a function that does not come back gives whatever is wanted
     -- of it, which only a body that does not come back can.
@@ -2044,6 +2094,13 @@ private partial def parseAttributed (next : P (List Item)) : P (List Item) := do
     unless name == "no_std" || name == "no_implicit_prelude" do
       failAt s!"`#![{name}]` is not known: `#![no_std]` and `#![no_implicit_prelude]` are"
     return [.fieldNames (attrMark name) [] []]
+  -- `#[fallback] impl ..`: the implementation a type nothing decides is
+  -- taken to have, where the trait is asked of it.
+  if name == "fallback" then
+    let items ← next
+    return items.map fun
+      | .impl ps tr head args context methods => .impl (ps ++ [fallbackMark]) tr head args context methods
+      | item => item
   let known := match name, arg with
     | "non_exhaustive", "" => true
     | "repr", "C" => true
@@ -2589,12 +2646,13 @@ this text's callable literals apart from those of a text parsed before it.
 With `tables`, each module of the text has the operators the table gives it,
 and the text is the module `path`. -/
 def parse (fix : Fixities) (src : String) (base : Nat := 0) (records : List String := [])
-    (tables : List (List String × Fixities) := []) (path : List String := []) :
+    (tables : List (List String × Fixities) := []) (path : List String := [])
+    (fixed : Bool := false) :
     Except String (List Item × Fixities) := do
   let toks ← lex src
   let fix ← if tables.isEmpty then collectFixities toks fix else pure ((tables.lookup path).getD fix)
   let (items, _, local_) ← parseItems
-    { toks, fix, records := collectRecords toks ++ records, base, tables, path } 0 #[]
+    { toks, fix, records := collectRecords toks ++ records, base, tables, path, fixed } 0 #[]
   pure (promoteItems (items ++ local_.toList), fix)
 
 end Glorious.Syntax

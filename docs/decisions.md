@@ -2923,6 +2923,30 @@ the order it is being built:
   this is asked for, for `(a, b).chain()` and `app.add_systems(..)`. It is
   the names in scope that decide, not the value's type: a function of a
   type's own, `Vec::len`, is not found this way yet.
+- **`[T; N]` and `const N: Int` are the trait machinery's.** A length is a
+  type: the prelude has `Z`, `B0<N>` and `B1<N>`, a number's bits from the
+  lowest, and `3` where a type is written is `B1<B1<Z>>`. What number a
+  type stands for is its `Known::VALUE`, found through the three
+  implementations. `const N: Int` is a type parameter asked to be `Known`,
+  and `N` written as a value in the function is `N::VALUE`. `[T; N]` is the
+  prelude's `Fixed<T, N>`, an array held in a type that says its length; it
+  is the same value when the program runs. Nothing of this is in the
+  checker by name: errors show `[Int; 3]` and `3` because types are shown
+  that way.
+- **A literal is what is wanted of it, by a trait with a fallback.** In a
+  program that writes a length in brackets, `[a, b, c]` is
+  `array_literal<3>(..)`, of any type with `Literal<T, 3>`: an array, or
+  one of exactly three. `#[fallback] impl` says which implementation a
+  type that nothing decides is taken to have (an array), unless another of
+  the trait's has every other trait asked of that type. The fallback is a
+  general rule of the checker; the prelude uses it once. A program that
+  writes no length in brackets has its literals as before.
+- **Limits of fixed arrays**: `let [a, b, c] = xs` is not read for one (a
+  pattern is of an array that can grow); `[x; n]` makes an array that can
+  grow, and `fixed_repeat(x)` one of a fixed length; in an
+  implementation, `where N: Known` is written and the number is
+  `N::VALUE`; no arithmetic on lengths (`[T; N + 1]`); a length is checked
+  where types meet, and an index is still checked when the program runs.
 - **`[first, ..rest]` is written out where it is read.** A clause whose
   whole pattern is an array with `..` (or `..name`) takes any array, asks
   the prelude whether it has as many elements as the pattern names

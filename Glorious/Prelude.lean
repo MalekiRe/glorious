@@ -580,6 +580,39 @@ fn repeat_onto(x, n, out) {
 
 fn push(a, v) { arr_push(a, v) }
 
+// Whole numbers as types, for how long a `[T; N]` is: the bits from the
+// lowest, `B1<B0<B1<Z>>>` for five. What number a type stands for is its
+// `VALUE`.
+struct Z
+struct B0<N>
+struct B1<N>
+trait Known { const VALUE: Int; }
+impl Known for Z { const VALUE: Int = 0; }
+impl<N> Known for B0<N> where N: Known { const VALUE: Int = int_mul(2, N::VALUE); }
+impl<N> Known for B1<N> where N: Known { const VALUE: Int = int_add(int_mul(2, N::VALUE), 1); }
+
+// `[T; N]`: an array of exactly `N` elements.
+struct Fixed<T, N>(Array<T>)
+impl<T, N> Index for Fixed<T, N> {
+    type Elem = T;
+    fn index(a, i) { arr_get(a.0, i) }
+    fn index_set(a, i, v) { Fixed(arr_set(a.0, i, v)) }
+}
+impl<T, N> Len for Fixed<T, N> where N: Known { fn len(a) { N::VALUE } }
+// Its elements as an array that can grow.
+fn to_array<T, N>(a: Fixed<T, N>) -> Array<T> { a.0 }
+// `N` of one value.
+fn fixed_repeat<T, N>(x: T) -> Fixed<T, N> where N: Known { Fixed(array_repeat(x, N::VALUE)) }
+
+// What `[a, b, c]` is in a program that has arrays of a fixed length: an
+// array, or one of exactly three. Where nothing says which, an array.
+trait Literal<T, N> { fn of_items(Array<T>) -> Self }
+#[fallback] impl<T, N> Literal<T, N> for Array<T> { fn of_items(items) { items } }
+impl<T, N> Literal<T, N> for Fixed<T, N> { fn of_items(items) { Fixed(items) } }
+fn array_literal<N, T, A>(items: Array<T>) -> A where A: Literal<T, N> {
+    <A as Literal<T, N>>::of_items(items)
+}
+
 // What `[first, ..rest]` in a pattern is read with: whether an array has so
 // many elements, and the array without its first or its last.
 enum ArrayRest<T> { RestFits(Array<T>), RestShort(Array<T>) }

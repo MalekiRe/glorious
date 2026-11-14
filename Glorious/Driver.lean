@@ -146,6 +146,16 @@ def readStd : Thunk (Except String StdRead) := Thunk.mk fun _ => do
   let names := syn.foldl (fun set s => s.names.foldl (fun set n => set.insert n) set) {}
   pure { said := syn, records := records, names := names, tables := tables, parsed := parsed }
 
+/-- Does a text write a length in brackets, `[T; N]` or `[x; n]`: a `;`
+with only a name or a number between it and the `]`? -/
+def saysLength (text : String) : Bool :=
+  (text.splitOn ";").drop 1 |>.any fun piece =>
+    match piece.splitOn "]" with
+    | before :: _ :: _ =>
+      let word := before.trimAscii.toString
+      !word.isEmpty && word.all fun c => c.isAlphanum || c == '_'
+    | _ => false
+
 /-- The prelude and a program as written: the first module's text, and the
 texts of the modules that are files of their own, each with its path. Where
 the program says `mod name;` the items of that module's text are put. -/
@@ -188,7 +198,11 @@ def parseProgram (src : String) (files : List (List String × String)) (check : 
     if mine.any r.names.contains then none
     else if r.tables.all fun (p, table) => p.isEmpty || tables.lookup p == some table then some r
     else none
+  -- Whether the program has arrays of a length their type says: then what
+  -- `[a, b, c]` is depends on what is wanted of it.
+  let fixed := ((src :: own.map (·.2)).any saysLength)
   let (items, _) ← Syntax.parse fix src (base := 1000000) (records := records) (tables := tables)
+    (fixed := fixed)
   let declares := items.any fun
     | .module "std" _ | .pub _ (.module "std" _) => true
     | _ => false
@@ -214,7 +228,7 @@ def parseProgram (src : String) (files : List (List String × String)) (check : 
             | none =>
               let text := ((files[k]?).map (·.2)).getD ""
               match Syntax.parse fix text (base := 1000000 * (k + 2)) (records := records)
-                  (tables := tables) (path := here) with
+                  (tables := tables) (path := here) (fixed := fixed && k ≥ (if std then Std.texts.length else 0)) with
               | .ok (items, _) => pure items
               | .error e => throw s!"module `{shown}`: {e}"
           pure (wrap (.module name (some (← fill fuel here parsed))))

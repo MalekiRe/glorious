@@ -960,12 +960,26 @@ def bareName (n : String) : String :=
   let base := (n.splitOn "@").headD n
   if base.startsWith "'" then (base.drop 1).toString else base
 
+/-- The whole number a type of the prelude stands for, if it is one of those:
+`B1<B0<B1<Z>>>` is five. -/
+partial def numberOf : Ty → Option Nat
+  | .con "Z" [] => some 0
+  | .con "B0" [n] => (numberOf n).map (2 * ·)
+  | .con "B1" [n] => (numberOf n).map (2 * · + 1)
+  | _ => none
+
 mutual
 
 partial def showTy : Ty → String
   | .var _ => "_"
-  | .con n [] => if bareName n == Syntax.neverParam then "!" else bareName n
-  | .con n args => s!"{bareName n}<{", ".intercalate (args.map showTy)}>"
+  | .con n [] => if bareName n == Syntax.neverParam then "!" else if n == "Z" then "0" else bareName n
+  | .con n args =>
+    -- (A length is shown as the number, and an array with one as written.)
+    match numberOf (.con n args), n, args with
+    | some k, _, _ => toString k
+    | none, "Fixed", [element, length] => s!"[{showTy element}; {showTy length}]"
+    | none, "Array", [element] => s!"[{showTy element}]"
+    | none, _, _ => s!"{bareName n}<{", ".intercalate (args.map showTy)}>"
   | .tuple [one] => s!"({showTy one},)"
   | .tuple args => s!"({", ".intercalate (args.map showTy)})"
   | .fn ps r effs _ _ =>

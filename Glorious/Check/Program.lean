@@ -302,40 +302,91 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
   -- An implementation for another name of a type, `impl T for Option<A>`,
   -- is one for the type with some of its arguments fixed: a type it is asked
   -- of has those.
-  for b in pending do
-    let goal ← zonk b.ty
-    let fitting := (← get).patterned
-    let named := match goal with
-      | .con h args => some (h, args)
-      | .tuple parts => some (s!"(tuple{parts.length})", parts)
-      | _ => if fitting then goal.head else none
-    if let some (h, args) := named then
-      -- (Where the type has several implementations of the trait, the one
-      -- chosen makes the arguments fit when it is chosen.)
-      let several := ((← get).impls.toList.filter fun im =>
-        Syntax.traitBase im.trait == Syntax.traitBase b.trait && im.head == h).length > 1
-      for im in (← get).impls do
-        if im.trait == b.trait && im.head == h && !several then
-          -- (The implementation's own type parameters are this type's
-          -- arguments here, not what another use of it made them.)
-          let at_ ← implAt im args
-          for (j, want) in im.fixed do
-            if let some got := args[j]? then
-              let want ← fixedAt at_ want
-              try unify got want
-              catch _ =>
-                let fits ← zonk want
-                let whole := match goal with
-                  | .tuple _ => Ty.tuple (args.set j fits)
-                  | _ => .con h (args.set j fits)
-                throw (inFunction b.owner
-                  s!"{b.pos}`{b.trait}` is implemented for `{showTy whole}`, not for `{showTy goal}`")
-          -- What the implementation's conditions say of a type left to
-          -- another trait's implementations is asked of the arguments.
-          for (j, asked, name, said) in im.equal do
-            if let some subject := args[j]? then
-              let use := (asked, subject, name, subst at_ [] [] said, b.owner, b.pos)
-              modify fun s => { s with assocUses := s.assocUses.push use }
+  let mut undecided : List Nat := []
+  for round in [0, 1] do
+    -- A trait asked of a type that nothing in the group decided, even
+    -- once the implementations the others fit have said what they do,
+    -- where one of the trait's implementations is the one to fall back
+    -- on: the type is that implementation's, or another of the trait's
+    -- that has every other trait asked of the type. (`[a, b]` is an array
+    -- where nothing says it is one of exactly two.)
+    if round == 1 then
+      -- (First the arguments a decided type's one implementation gives its
+      -- trait are those asked for, which may decide another type: an array
+      -- of exactly two arrays says what the two are. As deep as written.)
+      for _ in List.range 8 do
+        for b in pending do
+          let (self, wanted) ← subjectOf b.trait b.ty
+          if wanted.isEmpty then continue
+          let found ← match ← find self with
+            | .con h args => pure (some (h, args))
+            | _ => pure none
+          if let some (h, args) := found then
+            let mine := (← get).impls.toList.filter fun im =>
+              Syntax.traitBase im.trait == Syntax.traitBase b.trait && im.head == h
+            if let [im] := mine then
+              let at_ ← implAt im args
+              for (given, want) in im.targs.zip wanted do
+                try unify want (← fixedAt at_ given) catch _ => pure ()
+      for b in pending do
+        let (self, _) ← subjectOf b.trait b.ty
+        if let .var v ← find self then
+          let mine := (← get).impls.toList.filter fun im =>
+            Syntax.traitBase im.trait == Syntax.traitBase b.trait
+          let (first, others) := mine.partition fun im => im.pvars.any (·.1 == Syntax.fallbackMark)
+          if first.isEmpty then continue
+          -- (The other traits asked of the same type.)
+          let mut asked : List String := []
+          for other in pending do
+            let (theirs, _) ← subjectOf other.trait other.ty
+            if let .var w ← find theirs then
+              if w == v && other.trait != Syntax.destroyTrait
+                  && Syntax.traitBase other.trait != Syntax.traitBase b.trait then
+                asked := Syntax.traitBase other.trait :: asked
+          let impls := (← get).impls
+          let fitsAll := fun (head : String) => asked.all fun tr =>
+            impls.any fun im => Syntax.traitBase im.trait == tr && im.head == head
+          match (first ++ others).find? (fun im => fitsAll im.head) with
+          | some im => unify self (.con im.head (← im.params.mapM fun _ => freshTy))
+          | none => pure ()
+    for (b, at_) in pending.toList.zipIdx do
+      -- (The second time, those whose type was not decided the first.)
+      if round == 1 && !undecided.contains at_ then continue
+      if round == 0 then
+        if let .var _ ← find (← subjectOf b.trait b.ty).1 then undecided := at_ :: undecided
+      let goal ← zonk b.ty
+      let fitting := (← get).patterned
+      let named := match goal with
+        | .con h args => some (h, args)
+        | .tuple parts => some (s!"(tuple{parts.length})", parts)
+        | _ => if fitting then goal.head else none
+      if let some (h, args) := named then
+        -- (Where the type has several implementations of the trait, the one
+        -- chosen makes the arguments fit when it is chosen.)
+        let several := ((← get).impls.toList.filter fun im =>
+          Syntax.traitBase im.trait == Syntax.traitBase b.trait && im.head == h).length > 1
+        for im in (← get).impls do
+          if im.trait == b.trait && im.head == h && !several then
+            -- (The implementation's own type parameters are this type's
+            -- arguments here, not what another use of it made them.)
+            let at_ ← implAt im args
+            for (j, want) in im.fixed do
+              if let some got := args[j]? then
+                let want ← fixedAt at_ want
+                try unify got want
+                catch _ =>
+                  let fits ← zonk want
+                  let whole := match goal with
+                    | .tuple _ => Ty.tuple (args.set j fits)
+                    | _ => .con h (args.set j fits)
+                  throw (inFunction b.owner
+                    s!"{b.pos}`{b.trait}` is implemented for `{showTy whole}`, not for `{showTy goal}`")
+            -- What the implementation's conditions say of a type left to
+            -- another trait's implementations is asked of the arguments.
+            for (j, asked, name, said) in im.equal do
+              if let some subject := args[j]? then
+                let use := (asked, subject, name, subst at_ [] [] said, b.owner, b.pos)
+                modify fun s => { s with assocUses := s.assocUses.push use }
   -- A trait with arguments is asked of a type together with them: from here
   -- on it is the trait at those arguments, asked of the type.
   settleAssocs
