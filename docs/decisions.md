@@ -5,6 +5,14 @@ open, or that deliberately depart from them. Read it before changing the
 kernel. Where it disagrees with a specification in the repository root, this
 file is the current intent for this branch.
 
+## The compiler stays in Lean, and is to be fast and incremental
+
+**Decision (user): there is to be no self-hosted compiler.** The compiler
+is the one written in Lean, and the work on it is to make it very fast and
+very incremental: a change to a program costs what the change touches, not
+the whole program. The specification of an incremental self-hosted
+compiler (`GSC-2-…`) is not followed on this branch.
+
 ## Resumptions are one-shot
 
 **Decision (user, with the kernel rewrite).** A resumption can be used at most

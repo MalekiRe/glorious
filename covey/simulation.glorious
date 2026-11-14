@@ -12,7 +12,7 @@
 // 12
 mod ecs;
 
-use ecs::{Entity, Column, Commands, end, app, register, insert_resource, with_resource, run_if, add_systems, on, add_plugins, chain, emit, spawn, insert, count, fold_all, each, each2};
+use ecs::{Entity, Column, Commands, end, app, register, insert_resource, with_resource, run_if, add_systems, on, add_plugins, chain, emit, spawn, insert, spawn_with, count, fold_all, each, each2};
 
 struct Position(Int)
 struct Velocity(Int)
@@ -92,12 +92,9 @@ fn main() -> Int {
         .insert_resource(Ended(0))
         .add_plugins(physics)
         .add_plugins(combat);
-    let a = game.world.spawn();
-    game.world.insert(a, Position(0)); game.world.insert(a, Velocity(5)); game.world.insert(a, Health(3));
-    let b = game.world.spawn();
-    game.world.insert(b, Position(100)); game.world.insert(b, Velocity(7)); game.world.insert(b, Health(1));
-    let c = game.world.spawn();
-    game.world.insert(c, Position(1000)); game.world.insert(c, Health(2));
+    game.world.spawn_with((Position(0), Velocity(5), Health(3)));
+    game.world.spawn_with((Position(100), Velocity(7), Health(1)));
+    game.world.spawn_with((Position(1000), Health(2)));
     print(game.world.count<Health>());
     game.emit(Update);
     game.emit(Hit(1));

@@ -26,6 +26,7 @@
 //   what each parameter asks for         `Parameter`, then `Fetch` for the list
 //   that no component is asked for twice `AllApart`
 //   which systems a label runs           `Dispatch`
+//   a tuple of components given at once  `Bundle`, for tuples of any length
 //   whether a condition holds            `Condition`, a function asking as a system does
 //
 // A system that asks for a component that was not registered, or a
@@ -177,6 +178,22 @@ pub fn insert<T, S>(world: &mut World<S>, entity: Entity, value: T) where S: Get
     let mut column = <S as Get<T>>::take(&mut world.columns);
     column_insert(&mut column, entity, value);
     <S as Get<T>>::put(&mut world.columns, column)
+}
+
+// Components given together: a tuple of them, each put in its column.
+pub trait Bundle<S> { fn put_all(Self, &mut World<S>, Entity) }
+impl<..T, S> Bundle<S> for (..T) where ..S: Get<T> {
+    fn put_all(bundle, world, entity) {
+        let (..t) = bundle;
+        let _ = (..insert(world, entity, t));
+    }
+}
+
+// A new entity with the components given.
+pub fn spawn_with<B, S>(world: &mut World<S>, bundle: B) -> Entity where B: Bundle<S> {
+    let entity = spawn(world);
+    <B as Bundle<S>>::put_all(bundle, world, entity);
+    entity
 }
 
 // How many entities have the component.
