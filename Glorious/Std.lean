@@ -4478,8 +4478,6 @@ def texts : List (List String × String) :=
    (["std", "collections"], collectionsText),
    (["std", "host"], hostText),
    (["std", "hash"], hash),
-   (["std", "fingerprint"], fingerprintText),
-   (["std", "diagnostic"], diagnosticText),
    -- The names the library specification gives its modules (1.2): the same
    -- declarations, under `core`, `alloc` and more of `std`.
    (["std", "io"], "pub use std::host::{Console, IoError, print, println, eprintln, read_line};\n"),
@@ -4498,12 +4496,17 @@ def texts : List (List String × String) :=
    (["core", "iter"], "pub use std::iterator::*;\n"),
    (["core", "slice"], "pub use std::slice::*;\n"),
    (["core", "hash"], "pub use std::hash::*;\n"),
-   (["alloc"], "pub mod vec;\npub mod string;\npub mod collections;\npub mod fmt;\npub mod boxed;\n"),
+   (["alloc"], "pub mod vec;\npub mod string;\npub mod collections;\npub mod fmt;\npub mod boxed;\npub mod fingerprint;\n"),
    (["alloc", "fmt"], "pub use std::fmt::*;\n"),
    (["alloc", "vec"], "pub use std::vec::*;\n"),
    (["alloc", "string"], "pub use std::text::*;\n"),
    (["alloc", "collections"], "pub use std::collections::*;\npub mod map;\npub mod set;\n"),
    (["alloc", "collections", "map"], "pub use std::map::*;\n"),
-   (["alloc", "collections", "set"], "pub use std::set::*;\n")]
+   (["alloc", "collections", "set"], "pub use std::set::*;\n"),
+   -- (A text added to the library goes last: the places of those before it
+   -- are in what is compiled of every program that names the library.)
+   (["std", "fingerprint"], fingerprintText),
+   (["std", "diagnostic"], diagnosticText),
+   (["alloc", "fingerprint"], "pub use std::fingerprint::*;\n")]
 
 end Glorious.Std
