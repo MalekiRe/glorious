@@ -419,6 +419,10 @@ def equalArgName (condition : Nat) (name : String) : String := s!"%equal:{condit
 gives a trait: `where R: Get<T>` keeps `T` as the first of its condition's. -/
 def ctxArgName (condition i : Nat) : String := s!"%ctx:{condition}:{i}"
 
+/-- And the type a condition is of, where that is not one of the
+implementation's type parameters: `where (A, B): Apart`. -/
+def ctxSubjectName (condition : Nat) : String := s!"%ctxOf:{condition}"
+
 /-- The parts of such a name. -/
 def equalArgParts (n : String) : Option (Nat × String) :=
   if n.startsWith "%equal:" then

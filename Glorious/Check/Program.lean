@@ -513,7 +513,11 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
           match ← keyOf t with
           | some k => pure (key, k, t)
           | none =>
-            throw (inFunction d.name s!"a condition of an implementation is of one of its type parameters: `{showTy t}` is not one")
+            -- Of a type made from them, `(A, B): Apart`: whoever uses the
+            -- implementation has to meet it. In here it is known by a
+            -- number of its own, and nothing asks for it.
+            let own ← keyOf (Ty.con s!"'%condition:{d.name}:{key}:{← spellTy t}" [])
+            pure (key, own.getD 0, t)
         pure (plain ++ apart)
       | none =>
         let inferred := leafs.toList.filter fun (_, _, k) =>

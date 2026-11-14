@@ -480,7 +480,12 @@ def declareTraits (items : List Item) : M Unit := do
           unless ((← get).traits.lookup t').isSome do throw s!"{what}: unknown trait `{t'}`"
           let subject ← match pmap.lookup p with
             | some t => pure t
-            | none => throw s!"{what}: `{p}` is not one of its type parameters"
+            | none =>
+              match methods.findSome? fun
+                  | .typeAlias n _ body => if n == Syntax.ctxSubjectName k then some body else none
+                  | _ => none with
+              | some body => zonk (← resolveType pmap false body)
+              | none => throw s!"{what}: `{p}` is not one of its type parameters"
           let mut cargs : List Ty := []
           for i in List.range ((((← get).traitShape.lookup t').map (·.1)).getD 0) do
             match methods.findSome? fun

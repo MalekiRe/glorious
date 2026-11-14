@@ -170,6 +170,14 @@ pub fn each2<A, B>(first: &mut Column<A>, second: &Column<B>, f: for<'a, 'b> fn(
     }
 }
 
+// Two different components. `(A, B)` is that unless it is `(A, A)`, which is
+// only if `A` has a trait nothing has: so a system with two parameters of
+// one component does not compile, and the message names the component.
+pub trait ASystemTakesAComponentOnce {}
+pub trait Apart {}
+impl<A, B> Apart for (A, B) {}
+impl<A> Apart for (A, A) where A: ASystemTakesAComponentOnce {}
+
 // Something that runs against a world. A function is one, by its parameters:
 // each column it asks for is taken out of the world, lent to it, and put
 // back. Two systems in a tuple run one after the other.
@@ -199,7 +207,7 @@ impl<S, A> System<S> for fn(&Column<A>) -> () where S: Get<A> {
         <S as Get<A>>::put(&mut world.columns, a)
     }
 }
-impl<S, A, B> System<S> for fn(&mut Column<A>, &Column<B>) -> () where S: Get<A>, S: Get<B> {
+impl<S, A, B> System<S> for fn(&mut Column<A>, &Column<B>) -> () where S: Get<A>, S: Get<B>, (A, B): Apart {
     fn run(f, world) {
         let mut a = <S as Get<A>>::take(&mut world.columns);
         let b = <S as Get<B>>::take(&mut world.columns);
@@ -208,7 +216,7 @@ impl<S, A, B> System<S> for fn(&mut Column<A>, &Column<B>) -> () where S: Get<A>
         <S as Get<B>>::put(&mut world.columns, b)
     }
 }
-impl<S, A, B> System<S> for fn(&mut Column<A>, &mut Column<B>) -> () where S: Get<A>, S: Get<B> {
+impl<S, A, B> System<S> for fn(&mut Column<A>, &mut Column<B>) -> () where S: Get<A>, S: Get<B>, (A, B): Apart {
     fn run(f, world) {
         let mut a = <S as Get<A>>::take(&mut world.columns);
         let mut b = <S as Get<B>>::take(&mut world.columns);

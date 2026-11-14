@@ -1672,7 +1672,15 @@ private partial def parseItem : P Item := do
     if (← peek) == .ident "where" then
       advance
       repeat
-        let p ← expectIdent
+        -- `R: Get<T>`, of a type parameter; or of a type made from them,
+        -- `(A, B): Apart`.
+        let named := match ← peek, ← peek 1 with
+          | .ident _, .punct ":" => true
+          | _, _ => false
+        let p ← if named then expectIdent else do
+          let subject ← parseType
+          given := given.push (.typeAlias (ctxSubjectName context.size) [] subject)
+          pure s!"%subject{context.size}"
         expectPunct ":"
         let asked ← expectPath
         context := context.push (p, asked)

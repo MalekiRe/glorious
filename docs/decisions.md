@@ -2995,14 +2995,17 @@ const generics and fixed arrays.
   `emit` runs the entries under its label by `Dispatch<E, S>`, found the
   same way as `Get`.
 - **A plugin is a function from an app to an app**: `.add_plugins(physics)`.
+- **A system with two parameters of one component does not compile.** Its
+  implementation asks `(A, B): Apart`, which a pair has, except `(A, A)`,
+  which has it only if `A` has a trait nothing has. The message is that
+  trait's name: "`Velocity` does not implement
+  `ASystemTakesAComponentOnce`", where the label is emitted.
 - It was first written on effects (a component's storage as an effect
   instance, a plugin as a handler layer). That version ran, and is in the
   history. It was dropped because a system that took a table twice got an
   empty one at run time where the Rust refuses to compile, a system was not
   a value that can be ordered or inspected, and a query's shape is a type.
 - **Not there yet.**
-  - Nothing refuses a system whose two parameters are the same component:
-    the second gets an empty column.
   - One `System` implementation is written out for each number and kind
     of parameter (four so far), until a list of types can be a parameter.
   - A system performs no effects and cannot spawn, despawn or queue
