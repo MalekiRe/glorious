@@ -2713,6 +2713,29 @@ from being an `Id<Block>`.
 - Not built: base64; `ByteReader::read_u128_le` is, the signed widths
   other than `read_i64_le` are not in the specification.
 
+## `std::fingerprint` (library 20)
+
+A hash of 64 bits, BLAKE3, digests and fingerprints, written in the
+language. BLAKE3 gives the reference implementation's digests for inputs
+of 0 to 5000 bytes (one byte, one block, one chunk, and each of those plus
+one, up to five chunks); the fingerprint of a stream is the reference's
+digest of the same stream built by hand.
+
+- **`Hasher` is FNV-1a**, its 64 bits kept as two halves; numbers are
+  written the least byte first. `hash64` over the `Hash` trait is not here:
+  that trait gives a number from a value and has no writer.
+- **A digest's bytes are an array**, always thirty-two: `from_bytes` gives
+  `None` for any other count, where the specification has `[u8; 32]`.
+- **`Blake3::update` keeps the pieces** and hashes them at `finish`.
+- **Programs too long for the Lean machines** are a list of their own
+  (`longCases`): compiled as any other, run on the Rust VM and the other
+  back ends. The Lean machines took twenty seconds over fifteen digests.
+- **Slow to compile.** A program that hashes once takes four seconds, two of
+  them the library; one with fifteen separate calls, each given a borrowed
+  value with no name, took twenty: Core's certificate is worked out again
+  for each place a function is used with other regions, and tried several
+  ways. The test goes over the lengths in one function.
+
 ## `Some(x)` is an `Option`
 
 `say(Some(3))` was refused: `Some` was another name for `Ok`, and nothing

@@ -106,6 +106,7 @@ structure Outcome where
   /-- The borrows that are scopes of their own, and those that are not. -/
   lent : Nat := 0
   plain : Nat := 0
+  deriving Inhabited
 
 /-- Compile a test program, and with `run` run it on the Lean machines. -/
 def outcome (run : Bool) (c : Case) (files : List (List String × String)) : Outcome :=
@@ -216,7 +217,10 @@ def selftest (vm : Option String) : IO UInt32 := do
   let tmp : System.FilePath := (← IO.getEnv "TMPDIR").getD "/tmp"
   let stamp ← IO.monoMsNow
   let examples ← exampleCases "examples"
-  let all := (cases.map (·, [])) ++ examples
+  -- (The programs that take the Lean machines too long come last, and are
+  -- run on the Rust VM alone.)
+  let quick := (cases.map (·, [])) ++ examples
+  let all := quick ++ longCases.map (·, [])
   -- `GLORIOUS_TIMES`: how long each part of this takes.
   let times := (← IO.getEnv "GLORIOUS_TIMES").isSome
   let started ← IO.monoMsNow
@@ -226,15 +230,24 @@ def selftest (vm : Option String) : IO UInt32 := do
   let asked := Checks.all.toArray.map fun (_, check) => Task.spawn fun _ => check ()
   warm
   lap "the prelude and library checked"
-  let found ← sideBySide all fun (c, files) => outcome true c files
+  let found ← if times then do
+      let timed ← sideBySideTimed all.zipIdx fun ((c, files), i) => outcome (i < quick.length) c files
+      let slow := ((all.zip timed.toList).toArray.qsort fun a b => a.2.2 > b.2.2).toList.take 8
+      for ((c, _), (_, ms)) in slow do
+        IO.eprintln s!"{ms} ms: {((c.src.take 100).toString.replace "\n" " ")}"
+      pure (timed.map (·.1))
+    else sideBySide all.zipIdx fun ((c, files), i) => outcome (i < quick.length) c files
   lap "programs compiled and run on the Lean machines"
   -- What is unsafe runs on the Rust VM alone, and the proved machines say so.
   let foreign ← if vm.isSome then sideBySide foreignCases fun c => outcome false c [] else pure #[]
   let mut failures : Array (Nat × String) := #[]
   for ((c, _), i) in all.zipIdx do
     let got := (found[i]?.map (·.lean)).getD ""
-    if got != c.expect then
-      failures := failures.push (2 * i, s!"lean machines: expected\n{c.expect}\ngot\n{got}\nfor\n{c.src}\n")
+    if i < quick.length then
+      if got != c.expect then
+        failures := failures.push (2 * i, s!"lean machines: expected\n{c.expect}\ngot\n{got}\nfor\n{c.src}\n")
+    else if let some e := found[i]?.bind (·.error) then
+      failures := failures.push (2 * i, s!"does not compile: {e}\nfor\n{c.src}\n")
   for (c, i) in foreignCases.zipIdx do
     match foreign[i]? with
     | some o =>
@@ -467,6 +480,36 @@ def stages (path : String) : IO UInt32 := do
   let bytecode := compile out.program
   IO.println s!"{bytecode.fns.length} compiled"
   last ← lap "compile" last
+  -- The search for which borrows can be scopes of their own, a step at a
+  -- time: every place at once, each place alone, those that passed alone
+  -- together.
+  if let .ok lentOut := Elab.elabProgram all (some blocks) (fun _ => 1) then
+    let try_ := fun (sites : Nat → Nat) =>
+      match Elab.elabProgram all (some blocks) sites with
+      | .ok o =>
+        [false, true].any fun ranked =>
+          match Infer.certify declared o.program true o.envSizes true true ranked with
+          | .ok cert => o.lent != 0 && Typing.checkProgram cert o.program
+          | .error _ => false
+      | .error _ => false
+    IO.println s!"every place at once: {try_ (fun _ => 1)}"
+    last ← lap "every place at once" last
+    let mut alone : Array Nat := #[]
+    for i in [0:lentOut.sites] do
+      let before ← IO.monoMsNow
+      let mode := if try_ (fun j => if j == i then 1 else 0) then 1
+        else if try_ (fun j => if j == i then 2 else 0) then 2 else 0
+      alone := alone.push mode
+      IO.println s!"  place {i} alone: {mode} ({(← IO.monoMsNow) - before} ms)"
+    last ← lap "each place alone, one after another" last
+    let asked := (List.range lentOut.sites).map fun i => Task.spawn fun _ =>
+      if try_ (fun j => if j == i then 1 else 0) then 1
+      else if try_ (fun j => if j == i then 2 else 0) then 2 else 0
+    let again ← asked.mapM fun t => IO.wait t
+    IO.println s!"side by side: the same answers: {again.toArray == alone}"
+    last ← lap "each place alone, side by side" last
+    IO.println s!"those that passed alone, together: {try_ (fun j => alone[j]?.getD 0)}"
+    last ← lap "those together" last
   -- And as the other commands do it: from the library already checked,
   -- with the search for which borrows can be scopes of their own.
   warm
@@ -574,7 +617,7 @@ def main (args : List String) : IO UInt32 := do
     -- Every test program as files, for what runs them from outside: the
     -- bytecode where the program compiles, what it is given, what it gives.
     IO.FS.createDirAll dir
-    let all := Glorious.cases ++ Glorious.foreignCases
+    let all := Glorious.cases ++ Glorious.foreignCases ++ Glorious.longCases
     warm
     let found ← sideBySide all fun c => outcome false c []
     let mut n := 0
