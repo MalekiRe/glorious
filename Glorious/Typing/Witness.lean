@@ -99,28 +99,28 @@ example : checkProgram (twiceCert true) Glorious.Witness.resumeTwice = false := 
 /-! What the checker turns away, and a use of the coverage check on a data type. -/
 
 /-- Reading a local that does not exist. -/
-example : checkProgram ⟨[], [], [], .int, [], true, true, false⟩ ⟨[], .ret (.var 0)⟩ = false := by decide
+example : checkProgram ⟨[], [], [], .int, [], true, true, false⟩ ⟨[], .ret (.var 0), []⟩ = false := by decide
 
 /-- Performing an operation nothing handles. -/
-example : checkProgram ⟨[], [], [], .int, [], true, true, false⟩ ⟨[], .raise 0 []⟩ = false := by decide
+example : checkProgram ⟨[], [], [], .int, [], true, true, false⟩ ⟨[], .raise 0 [], []⟩ = false := by decide
 
 /-- Calling something that is not callable. -/
 example : checkProgram ⟨[], [], [], .int, [.ty .int], true, true, false⟩
-    ⟨[], .let_ (.atom (.int 1)) (.tail (.var 0) [])⟩ = false := by decide
+    ⟨[], .let_ (.atom (.int 1)) (.tail (.var 0) []), []⟩ = false := by decide
 
 /-- A function with a clause for `0` only does not cover its integer parameter;
 with a second clause that binds the argument, it does. -/
 example : checkProgram
     ⟨[⟨0, ⟨[], [.int], .int, [], 0, 0, []⟩, [[]]⟩], [], [], .int,
       [.ty (.fn 0 [.int] .int [] false none [])], true, true, false⟩
-    ⟨[⟨[⟨[.int 0], .ret (.int 1)⟩]⟩], .let_ (.closure 0 []) (.tail (.var 0) [.int 5])⟩
+    ⟨[⟨[⟨[.int 0], .ret (.int 1)⟩]⟩], .let_ (.closure 0 []) (.tail (.var 0) [.int 5]), []⟩
     = false := by decide
 
 example : checkProgram
     ⟨[⟨0, ⟨[], [.int], .int, [], 0, 0, []⟩, [[], []]⟩], [], [], .int,
       [.ty (.fn 0 [.int] .int [] false none [])], true, true, false⟩
     ⟨[⟨[⟨[.int 0], .ret (.int 1)⟩, ⟨[.bind], .ret (.var 1)⟩]⟩],
-      .let_ (.closure 0 []) (.tail (.var 0) [.int 5])⟩
+      .let_ (.closure 0 []) (.tail (.var 0) [.int 5]), []⟩
     = true := by decide
 
 /-- An option of an integer: `None` is constructor 1, `Some` is constructor 2. -/
@@ -134,7 +134,7 @@ example : checkProgram
     ⟨[⟨0, ⟨[], [option], .int, [], 0, 0, []⟩, [[], []]⟩], [optionDecl], [], .int,
       [.ty option, .ty (.fn 0 [option] .int [] false none [])], true, true, false⟩
     ⟨[⟨[⟨[.ctor 1 []], .ret (.int 0)⟩, ⟨[.ctor 2 [.bind]], .ret (.var 1)⟩]⟩],
-      .let_ (.construct 2 [.int 7]) (.let_ (.closure 0 []) (.tail (.var 1) [.var 0]))⟩
+      .let_ (.construct 2 [.int 7]) (.let_ (.closure 0 []) (.tail (.var 1) [.var 0])), []⟩
     = true := by decide
 
 /-- Without the clause for `None` it does not. -/
@@ -142,7 +142,7 @@ example : checkProgram
     ⟨[⟨0, ⟨[], [option], .int, [], 0, 0, []⟩, [[]]⟩], [optionDecl], [], .int,
       [.ty option, .ty (.fn 0 [option] .int [] false none [])], true, true, false⟩
     ⟨[⟨[⟨[.ctor 2 [.bind]], .ret (.var 1)⟩]⟩],
-      .let_ (.construct 2 [.int 7]) (.let_ (.closure 0 []) (.tail (.var 1) [.var 0]))⟩
+      .let_ (.construct 2 [.int 7]) (.let_ (.closure 0 []) (.tail (.var 1) [.var 0])), []⟩
     = false := by decide
 
 /-! Two bodies over one environment. A callable that may be called once is
@@ -168,13 +168,13 @@ def bodySigs : List SigEntry :=
 def takeOver : Program :=
   ⟨bodies,
     .let_ (.closure 0 []) <| .let_ (.closure 1 [.var 0]) <| .let_ (.rebind (.var 1) 2) <|
-      .tail (.var 2) []⟩
+      .tail (.var 2) [], []⟩
 
 /-- The second body captures the callable again. -/
 def captureTwice : Program :=
   ⟨bodies,
     .let_ (.closure 0 []) <| .let_ (.closure 1 [.var 0]) <| .let_ (.closure 2 [.var 0]) <|
-      .tail (.var 2) []⟩
+      .tail (.var 2) [], []⟩
 
 def sharedCert (first : Ty) (strict : Bool) : Cert :=
   ⟨bodySigs, [], [], .int, [.ty onceFn, .ty first, .ty (shared none)], strict, true, false⟩

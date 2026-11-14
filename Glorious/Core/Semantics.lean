@@ -263,6 +263,12 @@ def step (p : Program) (s : State) : Step State Value :=
     | some (fn, captures), some c => apply p c (.guard fn captures :: s.stack) s.store
     | _, _ => .stuck
   | .cancel k body =>
+    -- A closure of a function that says how it is destroyed: what it
+    -- captured is given to that function, and the result of `cancel` is what
+    -- that gives, unit.
+    match dropOf p.drops s.env k with
+    | some (d, captures) => callFn p d [] captures (.call s.env body :: s.stack) s.store
+    | none =>
     match evalCont s.env k with
     | none => .stuck
     | some none => .next ⟨body, s.env ++ [.unit], s.stack, s.store⟩

@@ -56,6 +56,21 @@ def checkFn (C : Cert) (e : SigEntry) (F : Fn) : Bool :=
 def dataOk (C : Cert) : Bool :=
   C.datas.all fun d => !d.dup || d.ctors.all fun c => dupTys C c.2
 
+/-- The signature the function that destroys a closure of a function at `sig`
+is to have: no captures, the closure's captures as its parameters, the closure's
+regions, giving unit, performing nothing and touching nothing. -/
+def dropSig (sig : FnSig) : FnSig :=
+  { caps := [], params := sig.caps, ret := .unit, eff := [], crgns := sig.crgns, rgns := 0,
+    acc := [] }
+
+/-- Every signature of a function whose closures say how they are destroyed
+has its destructor given the signature that destroys one. -/
+def dropsOk (C : Cert) (p : Program) : Bool :=
+  C.sigs.all fun e =>
+    match p.drops.lookup e.fn with
+    | none => true
+    | some d => C.sigs.any fun e' => e'.fn == d && decide (e'.sig = dropSig e.sig)
+
 /-- Check a program against a certificate. -/
 def checkProgram (C : Cert) (p : Program) : Bool :=
   C.sigs.all (fun e =>
@@ -64,12 +79,22 @@ def checkProgram (C : Cert) (p : Program) : Bool :=
       | none => false)
     && checkTm C [] [] p.main C.mainHints C.mainTy []
     && (!C.strict || dataOk C)
+    && dropsOk C p
 
 /-- A program the checker accepts is well typed. -/
 theorem checkProgram_sound {p : Program} (h : checkProgram C p = true) : ProgramOk C.ctx p := by
   simp only [checkProgram, Bool.and_eq_true] at h
-  obtain ⟨⟨hfns, hmain⟩, _⟩ := h
-  refine ⟨C.ctx_stable, fun fn sig hsig => ?_, ⟨C.mainTy, checkTm_sound _ hmain⟩⟩
+  obtain ⟨⟨⟨hfns, hmain⟩, _⟩, hdrops⟩ := h
+  refine ⟨C.ctx_stable, fun fn sig hsig => ?_, ⟨C.mainTy, checkTm_sound _ hmain⟩,
+    fun fn d sig hl hsig => ?_⟩
+  rotate_left
+  · obtain ⟨e, he, rfl, rfl⟩ := hsig
+    have hd := List.all_eq_true.mp hdrops e he
+    rw [hl] at hd
+    obtain ⟨e', he', hd'⟩ := List.any_eq_true.mp hd
+    simp only [Bool.and_eq_true, beq_iff_eq, decide_eq_true_eq] at hd'
+    obtain ⟨hfn, hsig'⟩ := hd'
+    exact ⟨dropSig e.sig, ⟨e', he', hfn, hsig'⟩, rfl, rfl, rfl, rfl, rfl, rfl, rfl⟩
   obtain ⟨e, he, rfl, rfl⟩ := hsig
   have hfn := List.all_eq_true.mp hfns e he
   split at hfn
@@ -182,7 +207,7 @@ theorem dupSound_of_check {p : Program} (h : checkProgram C p = true) (hs : C.st
   rcases hdup with hf | hd
   · rw [hs] at hf
     cases hf
-  · exact dup_occ hs h.2 hv hd id
+  · exact dup_occ hs h.1.2 hv hd id
 
 /--
 **Type safety, checked.** If the checker accepts a program with some

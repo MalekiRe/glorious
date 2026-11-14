@@ -219,6 +219,9 @@ def step (p : Program) (s : State) : Step State Value :=
     | some (fn, captures), some c => apply p c (.guard fn captures :: s.frames) s.store
     | _, _ => .stuck
   | some (.cancel k) =>
+    match dropOf p.drops s.locals k with
+    | some (d, captures) => callFn p d [] captures (.ret s.code (s.pc + 1) s.locals :: s.frames) s.store
+    | none =>
     match evalCont s.locals k with
     | none => .stuck
     | some none => .next ⟨s.code, s.pc + 1, s.locals ++ [.unit], s.frames, s.store⟩

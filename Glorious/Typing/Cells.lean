@@ -438,6 +438,8 @@ theorem step_owns {p : Program} {s s' : State} (ho : Owns s) (h : step p s = .ne
   | cancel k body =>
     simp only [step] at h
     split at h
+    · exact apply_owns (c := .fn _ [] _) (ho'.push (fr := .call env body) (fun _ => rfl)) h
+    split at h
     · cases h
     · cases h
       exact ho'

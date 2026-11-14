@@ -68,5 +68,8 @@ structure Fn where
 structure Program where
   fns : List Fn
   main : Code
+  /-- As Core's: each function whose closures say how they are destroyed, and
+  the function that destroys what one captured. -/
+  drops : List (Nat × Nat) := []
 
 end Glorious.Bytecode

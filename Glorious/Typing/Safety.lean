@@ -1045,6 +1045,40 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
     omega
   | @cancel _ k body n σ ρ _ ε₁ _ once fenv acc hk hrow hacc hlin hbody =>
     obtain ⟨kv, hkv, hkt⟩ := atom_ok henv hk
+    -- A closure that says how it is destroyed: what it captured is given to
+    -- the function that destroys it, as a call whose result `body` binds.
+    cases hd : dropOf p.drops env k with
+    | some r =>
+      obtain ⟨d, caps⟩ := r
+      obtain ⟨fn, hkv', hl⟩ := dropOf_inv hd
+      rw [hkv] at hkv'
+      cases hkv'
+      rcases hkt.fn_inv with ⟨fn', caps', sig, θ, heq, hsig, hθ, hcaps, _, _, _, _, _⟩
+        | ⟨_, _, heq, _⟩ | ⟨_, _, heq, _⟩
+      · cases heq
+        obtain ⟨sigd, hsigd, hc0, hpar, hret, heff, hcr, hrg, hacc0⟩ := hp.drops fn d sig hl hsig
+        have hcok : CalleeOk Δ S (.fn d [] caps) Ty.unit [] [] := by
+          have e : ∀ t : Ty, Ty.open [] (Ty.inst θ t) = Ty.inst θ t := fun t => Ty.open_nil _
+          have h := CalleeOk.fn (S := S) (captures := []) (vs := caps) (rs := []) hsigd
+            (by rw [hcr]; exact hθ) (by simp [hrg]) (by simp [hc0]; exact .nil)
+            (by rw [hpar, List.map_map]; simpa [Function.comp_def, e] using hcaps)
+          rw [hret, heff, hacc0] at h
+          simpa [Ty.open_nil, Ty.unit, Ty.inst, Ty.mapR, Ty.mapRs, Ty.mapRow, Row.inst, Row.open_nil] using h
+        have h1 : step p ⟨.cancel k body, env, stack, ⟨conts, labels, cells⟩⟩
+            = apply p (.fn d [] caps) (.call env body :: stack) ⟨conts, labels, cells⟩ := by
+          simp [step, hd, apply]
+        rw [h1]
+        refine .of_apply
+          (apply_ok hp hs hcok (.call henv hbody hle hsub hst) (fun _ _ h => by simp at h)
+            (fun _ h => by simp [Rgn.flat] at h) (fun _ => by simp [Rgn.flat])) rfl
+          (fun hD id => ?_) (fun hfa => by cases hfa)
+        have h2 := moved_live hD henv hlin (live := fv (.cancel k body)) (fun i hi => hi) id
+        have h3 := occ_eval id env hkv
+        simp only [occCallee, occs, occ, occStack, occFrame] at h3 ⊢
+        omega
+      · cases heq
+      · cases heq
+    | none =>
     have hquiet : ∀ id, occState id ⟨body, env ++ [Value.unit], stack, ⟨conts, labels, cells⟩⟩
         ≤ occState id ⟨.cancel k body, env, stack, ⟨conts, labels, cells⟩⟩ := fun id => by
       have h2 := occEnv_push id env Value.unit (fv body)
@@ -1057,7 +1091,7 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
       | ⟨id, o, rfl, _, he, hcont⟩ | ⟨id, τl, rfl, _, _, _⟩
     · have h1 : step p ⟨.cancel k body, env, stack, ⟨conts, labels, cells⟩⟩
           = .next ⟨body, env ++ [Value.unit], stack, ⟨conts, labels, cells⟩⟩ := by
-        simp [step, evalCont, hkv]
+        simp [step, hd, evalCont, hkv]
       rw [h1]
       exact .next (.mk (henv.snoc .unit) hbody hle hsub hst hs) (fun _ hu => hu.mono rfl hquiet)
     · cases he
@@ -1068,7 +1102,7 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
         cases x with
         | none =>
           have h1 : step p ⟨.cancel k body, env, stack, ⟨conts, labels, cells⟩⟩ = .stuck := by
-            simp [step, evalCont, hkv, takeCont_none hget]
+            simp [step, hd, evalCont, hkv, takeCont_none hget]
           rw [h1]
           exact Fault.resumed (s := ⟨.cancel k body, env, stack, ⟨conts, labels, cells⟩⟩)
             rfl hkv hget
@@ -1077,7 +1111,7 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
               = leave p (.label labels) (.yield Value.unit)
                   (seg ++ .yield Value.unit :: .label labels :: .call env body :: stack)
                   ⟨conts.set id none, labels + 1, cells⟩ := by
-            simp [step, evalCont, hkv, takeCont_some hget]
+            simp [step, hd, evalCont, hkv, takeCont_some hget]
           rw [h1]
           obtain ⟨S', hS, hlab, hs'⟩ := (hs.take id).push_label Ty.unit
           have hbase : StackOk Δ S'
@@ -1096,7 +1130,7 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
           omega
     · have h1 : step p ⟨.cancel k body, env, stack, ⟨conts, labels, cells⟩⟩
           = .next ⟨body, env ++ [Value.unit], stack, ⟨conts, labels, cells⟩⟩ := by
-        simp [step, evalCont, hkv]
+        simp [step, hd, evalCont, hkv]
       rw [h1]
       exact .next (.mk (henv.snoc .unit) hbody hle hsub hst hs) (fun _ hu => hu.mono rfl hquiet)
   | @cell _ init thunk body n r σ ρ _ εt _ once fenv acc hform hlin hbody =>

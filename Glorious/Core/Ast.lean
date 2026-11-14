@@ -100,5 +100,9 @@ structure Fn where
 structure Program where
   fns : List Fn
   main : Tm
+  /-- The functions that say how a closure of them is destroyed: for each such
+  function, the function that destroys what a closure of it captured, given
+  the captures as its arguments. `cancel` of such a closure calls it. -/
+  drops : List (Nat × Nat) := []
 
 end Glorious.Core

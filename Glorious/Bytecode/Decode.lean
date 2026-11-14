@@ -225,8 +225,11 @@ def program (bs : Bytes) : Option Program :=
   match list fn bs with
   | some (fns, rest) =>
     match code rest with
-    | some (main, []) => some ⟨fns, main⟩
-    | _ => none
+    | some (main, rest) =>
+      match list pair rest with
+      | some (drops, []) => some ⟨fns, main, drops⟩
+      | _ => none
+    | none => none
   | none => none
 
 /-! ## Decoding inverts encoding -/
@@ -319,9 +322,10 @@ theorem fn_encode (f : Fn) (rest : Bytes) :
 /-- **The format is lossless.** Decoding an encoded program gives the program back. -/
 theorem program_encode (p : Program) : program (Encode.program p) = some p := by
   have h := list_encode (enc := fun f : Fn => Encode.code f.code) fn_encode p.fns
-    (Encode.code p.main)
-  have hmain := code_encode p.main []
-  simp only [List.append_nil] at hmain
-  simp only [program, Encode.program, h, hmain]
+    (Encode.code p.main ++ Encode.list Encode.pair p.drops)
+  have hmain := code_encode p.main (Encode.list Encode.pair p.drops)
+  have hdrops := pairs_encode p.drops []
+  simp only [List.append_nil] at hdrops
+  simp only [program, Encode.program, List.append_assoc, h, hmain, hdrops]
 
 end Glorious.Bytecode.Decode

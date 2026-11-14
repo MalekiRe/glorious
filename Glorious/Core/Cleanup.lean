@@ -597,6 +597,16 @@ theorem step_accounts {p : Program} {s s' : State} (h : step p s = .next s') :
         omega
   | cancel k body =>
     simp only [step] at h
+    cases hd : dropOf p.drops env k with
+    | some r =>
+      obtain ⟨d, captures⟩ := r
+      rw [hd] at h
+      obtain ⟨e₁, e₂⟩ := callFn_next h
+      have hk := evalCont_of_dropOf hd
+      simp only [owed, starts, installs, hk, e₁, e₂]
+      simp [guards]
+    | none =>
+    rw [hd] at h
     cases hk : evalCont env k with
     | none => rw [hk] at h; cases h
     | some o =>
@@ -760,6 +770,13 @@ theorem step_halt {p : Program} {s : State} {w : Value} (h : step p s = .halt w)
       | some c => rw [hcl, hc] at h; have := apply_halt h; simp [guards] at this
   | cancel k body =>
     simp only [step] at h
+    cases hd : dropOf p.drops env k with
+    | some r =>
+      obtain ⟨d, captures⟩ := r
+      rw [hd] at h
+      exact absurd h callFn_not_halt
+    | none =>
+    rw [hd] at h
     cases hk : evalCont env k with
     | none => rw [hk] at h; cases h
     | some o =>

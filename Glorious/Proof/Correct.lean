@@ -841,10 +841,25 @@ theorem step_sim (p : Core.Program) {s : Core.State} {t : Bytecode.State} (hm : 
   | cancel k body =>
     have hc : CodeAt code pc (Instr.cancel k :: compileTm body) := hcode
     have hi := hc.head
+    -- A closure that says how it is destroyed: both machines call its
+    -- destructor as a call.
+    cases hd : dropOf p.drops ρ k with
+    | some r =>
+      obtain ⟨d, captures⟩ := r
+      have h1 : Core.step p ⟨.cancel k body, ρ, stack, ⟨conts, labels, cells⟩⟩
+          = Core.apply p (.fn d [] captures) (.call ρ body :: stack) ⟨conts, labels, cells⟩ := by
+        simp [Core.step, hd, Core.apply]
+      have h2 : Bytecode.step (compile p) ⟨code, pc, ρ, frames, ⟨conts', labels, cells⟩⟩
+          = Bytecode.apply (compile p) (.fn d [] captures) (.ret code (pc + 1) ρ :: frames)
+              ⟨conts', labels, cells⟩ := by
+        simp [Bytecode.step, hi, compile, hd, Bytecode.apply]
+      rw [h1, h2]
+      exact apply_sim (.cons (.call hc.tail) hfr) hks
+    | none =>
     cases hk : evalCont ρ k with
     | none =>
       have h1 : Core.step p ⟨.cancel k body, ρ, stack, ⟨conts, labels, cells⟩⟩ = .stuck := by
-        simp [Core.step, hk]
+        simp [Core.step, hd, hk]
       rw [h1]
       exact .stuck
     | some o =>
@@ -852,17 +867,17 @@ theorem step_sim (p : Core.Program) {s : Core.State} {t : Bytecode.State} (hm : 
       | none =>
         have h1 : Core.step p ⟨.cancel k body, ρ, stack, ⟨conts, labels, cells⟩⟩
             = .next ⟨body, ρ ++ [Value.unit], stack, ⟨conts, labels, cells⟩⟩ := by
-          simp [Core.step, hk]
+          simp [Core.step, hd, hk]
         have h2 : Bytecode.step (compile p) ⟨code, pc, ρ, frames, ⟨conts', labels, cells⟩⟩
             = .next ⟨code, pc + 1, ρ ++ [Value.unit], frames, ⟨conts', labels, cells⟩⟩ := by
-          simp [Bytecode.step, hi, hk]
+          simp [Bytecode.step, hi, compile, hd, hk]
         rw [h1, h2]
         exact .next (RunsThrough.refl rfl) (.mk hc.tail hfr (.mk hcs))
       | some id =>
         cases ht : takeCont conts id with
         | none =>
           have h1 : Core.step p ⟨.cancel k body, ρ, stack, ⟨conts, labels, cells⟩⟩ = .stuck := by
-            simp [Core.step, hk, ht]
+            simp [Core.step, hd, hk, ht]
           rw [h1]
           exact .stuck
         | some r =>
@@ -872,12 +887,12 @@ theorem step_sim (p : Core.Program) {s : Core.State} {t : Bytecode.State} (hm : 
               = Core.leave p (.label labels) (.yield Value.unit)
                   (seg ++ .yield Value.unit :: .label labels :: .call ρ body :: stack)
                   ⟨conts₁, labels + 1, cells⟩ := by
-            simp [Core.step, hk, ht]
+            simp [Core.step, hd, hk, ht]
           have h2 : Bytecode.step (compile p) ⟨code, pc, ρ, frames, ⟨conts', labels, cells⟩⟩
               = Bytecode.leave (compile p) (.label labels) (.yield Value.unit)
                   (seg' ++ .yield Value.unit :: .label labels :: .ret code (pc + 1) ρ :: frames)
                   ⟨conts₁', labels + 1, cells⟩ := by
-            simp [Bytecode.step, hi, hk, ht']
+            simp [Bytecode.step, hi, compile, hd, hk, ht']
           rw [h1, h2]
           exact leave_sim
             (hseg.append (.cons .yield (.cons .label (.cons (.call hc.tail) hfr)))) (.mk hcs₁)

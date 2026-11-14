@@ -9,7 +9,7 @@
 //! The stack is a `Vec` with its top at the end, where the Lean definitions use
 //! a list with its top at the front.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::io::{self, BufWriter, Write};
 use std::process::ExitCode;
 use std::rc::Rc;
@@ -685,19 +685,32 @@ struct Program {
     /// Which of `codes` is the main code: the last as the file has them.
     /// Functions made when the program is loaded come after it.
     main: usize,
+    /// For each function whose closures say how they are destroyed, the
+    /// function that destroys what one captured.
+    drops: HashMap<usize, usize>,
 }
 
 fn decode(bytes: &[u8], rewrite: bool) -> Decoded<Program> {
     if bytes.len() < 5 || &bytes[..4] != b"GLBC" {
         return Err("not a Glorious bytecode file".into());
     }
-    if bytes[4] != 5 {
+    if bytes[4] != 6 {
         return Err(format!("unsupported bytecode version {}", bytes[4]));
     }
     let mut r = Reader { bytes, pos: 5 };
     let names = r.list(Reader::string)?;
     let mut codes = r.list(Reader::code)?;
     codes.push(r.code()?);
+    let mut drops = HashMap::new();
+    for _ in 0..r.nat()? {
+        let f = r.nat()? as usize;
+        let d = r.nat()? as usize;
+        if f + 1 >= codes.len() || d + 1 >= codes.len() {
+            return Err("a destructor names no function".into());
+        }
+        // As `List.lookup`: the first entry for a function is the one used.
+        drops.entry(f).or_insert(d);
+    }
     for code in &mut codes {
         mark_takes(code, None);
     }
@@ -717,7 +730,7 @@ fn decode(bytes: &[u8], rewrite: bool) -> Decoded<Program> {
         return Err("trailing bytes after the program".into());
     }
     let main = codes.len() - 1;
-    let mut program = Program { names, codes, starts, main };
+    let mut program = Program { names, codes, starts, main, drops };
     if rewrite {
         opt::optimise(&mut program);
     }
@@ -996,6 +1009,9 @@ pub struct Vm {
     stop: Option<Stop>,
     /// Lists of values no longer in use, emptied, to be used again.
     pool: Vec<Vec<Value>>,
+    /// For each function whose closures say how they are destroyed, the
+    /// function that destroys what one captured.
+    drops: Rc<HashMap<usize, usize>>,
 }
 
 impl Vm {
@@ -1450,7 +1466,16 @@ impl Vm {
             Instr::Cancel(k) => {
                 let id = match self.atom(k)? {
                     Value::Cont(id) => id,
-                    // Giving up a function or a label needs nothing done.
+                    // A closure of a function that says how it is destroyed
+                    // gives what it captured to the function that does so,
+                    // as a call whose result is the result of `cancel`.
+                    Value::Clo(c) if self.drops.contains_key(&c.func) => {
+                        let d = self.drops[&c.func];
+                        let caps = c.caps.to_vec();
+                        self.push_ret();
+                        return self.call_fn(d, &[], caps);
+                    }
+                    // Giving up any other function or a label needs nothing done.
                     Value::Clo(_) | Value::Label(_) => {
                         self.locals.push(unit());
                         self.pc += 1;
@@ -1865,6 +1890,7 @@ fn machine(program: Program, input: VecDeque<i64>) -> Vm {
         names: program.names,
         stop: None,
         pool: Vec::new(),
+        drops: Rc::new(program.drops),
     }
 }
 

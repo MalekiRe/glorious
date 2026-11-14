@@ -131,6 +131,13 @@ def takeCont {α : Type} : List (Option α) → Nat → Option (α × List (Opti
     | some (x, cs') => some (x, c :: cs')
     | none => none
 
+/-- The function that destroys what a closure captured, and the captures, if
+`a` is a closure of a function that `drops` says has one. -/
+def dropOf (drops : List (Nat × Nat)) (ρ : Env) (a : Atom) : Option (Nat × List Value) :=
+  match a.eval ρ with
+  | some (.clo fn captures) => (drops.lookup fn).map (·, captures)
+  | _ => none
+
 /-- Evaluate the operand of `cancel`, which gives up a callable without calling
 it: a resumption, by its identity, or a function or label, for which there is
 nothing to do. Anything else has no meaning. -/
@@ -140,6 +147,27 @@ def evalCont (ρ : Env) (a : Atom) : Option (Option Nat) :=
   | some (.clo _ _) => some none
   | some (.label _) => some none
   | _ => none
+
+theorem dropOf_inv {drops : List (Nat × Nat)} {ρ : Env} {a : Atom} {d : Nat} {captures : List Value}
+    (h : dropOf drops ρ a = some (d, captures)) :
+    ∃ fn, a.eval ρ = some (.clo fn captures) ∧ drops.lookup fn = some d := by
+  unfold dropOf at h
+  split at h
+  · rename_i fn caps hv
+    cases hl : drops.lookup fn with
+    | none => simp [hl] at h
+    | some d' =>
+      simp only [hl, Option.map_some, Option.some.injEq, Prod.mk.injEq] at h
+      obtain ⟨rfl, rfl⟩ := h
+      exact ⟨fn, hv, hl⟩
+  · cases h
+
+/-- A closure that `drops` says how to destroy is a function, for `cancel`. -/
+theorem evalCont_of_dropOf {drops : List (Nat × Nat)} {ρ : Env} {a : Atom} {x : Nat × List Value}
+    (h : dropOf drops ρ a = some x) : evalCont ρ a = some none := by
+  unfold dropOf at h
+  unfold evalCont
+  split at h <;> simp_all
 
 /-- The frames above and below the scope of label `id`, if that scope is on the stack. -/
 def findLabel {φ : Type} (asLabel : φ → Option Nat) (id : Nat) :

@@ -302,6 +302,13 @@ structure ProgramOk (Δ : Ctx) (p : Program) : Prop where
     ∧ ∀ S vs θ, HasVals Δ S vs ((sig.params.map (Ty.open sig.vars)).map (Ty.inst θ)) →
         selectClause F.clauses vs ≠ none
   main : ∃ τ, HasTm Δ [] [] p.main τ []
+  /-- A function whose closures say how they are destroyed: whatever signature
+  it has, the function that destroys one is entered with no captures and with
+  the closure's captures as its arguments, at the regions the closure was made
+  with, and gives unit, performing nothing and touching nothing. -/
+  drops : ∀ fn d sig, p.drops.lookup fn = some d → Δ.fnSig fn sig →
+    ∃ sigd, Δ.fnSig d sigd ∧ sigd.caps = [] ∧ sigd.params = sig.caps ∧ sigd.ret = .unit
+      ∧ sigd.eff = [] ∧ sigd.crgns = sig.crgns ∧ sigd.rgns = 0 ∧ sigd.acc = []
 
 /-- The callable a computation applies or gives up, if it does so. -/
 def calleeAtom : Tm → Option Atom
