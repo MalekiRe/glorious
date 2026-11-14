@@ -307,6 +307,38 @@ structure Bound where
   owner : String
   pos : String
 
+/-- An array kept in pieces. Where the checker tries something it may have
+to take back, it keeps what it knew; a write to a plain array that is kept
+elsewhere too copies all of it, and the checker's arrays are as long as the
+program and its library together. Here a write copies one piece, and the
+list of the pieces. -/
+structure Store (α : Type) where
+  pieces : Array (Array α) := #[]
+  size : Nat := 0
+
+namespace Store
+
+variable {α : Type}
+
+@[inline] def get? (s : Store α) (i : Nat) : Option α :=
+  if i < s.size then (s.pieces.getD (i >>> 6) #[])[i &&& 63]? else none
+
+@[inline] def getD (s : Store α) (i : Nat) (d : α) : α := (s.get? i).getD d
+
+def push (s : Store α) (x : α) : Store α :=
+  if s.size &&& 63 == 0 then
+    { pieces := s.pieces.push ((Array.mkEmpty 64).push x), size := s.size + 1 }
+  else { pieces := s.pieces.modify (s.size >>> 6) (·.push x), size := s.size + 1 }
+
+def modify (s : Store α) (i : Nat) (f : α → α) : Store α :=
+  if i < s.size then { s with pieces := s.pieces.modify (i >>> 6) (·.modify (i &&& 63) f) } else s
+
+def set! (s : Store α) (i : Nat) (x : α) : Store α := s.modify i fun _ => x
+
+def toArray (s : Store α) : Array α := s.pieces.foldl (· ++ ·) (Array.mkEmpty s.size)
+
+end Store
+
 /-- A use of a function inside the group it is inferred with: its bounds are
 not known until the group is done. `call` is zero where it is not called. -/
 structure GroupUse where
@@ -316,25 +348,25 @@ structure GroupUse where
   pos : String
 
 structure St where
-  tys : Array (Option Ty) := #[]
-  rows : Array (Option Row) := #[]
+  tys : Store (Option Ty) := {}
+  rows : Store (Option Row) := {}
   /-- Variables standing for the inferred types of declarations: never generalised. -/
   mono : List Nat := []
   monoRows : List Nat := []
   /-- Capture variables of function types written in declarations. -/
   monoCaps : List Nat := []
   /-- Capture variables, merged as function types are unified. -/
-  caps : Array (Option Nat) := #[]
+  caps : Store (Option Nat) := {}
   /-- What each capture variable is known to capture. -/
-  capEdges : Array (Nat × Captured) := #[]
+  capEdges : Store (Nat × Captured) := {}
   /-- For each capture variable that stands for itself, the places in
   `capEdges` of what it captures, whichever variable of its class the edge
   was made on: so that what one captures is found without going through
   every edge of the program. -/
-  capOut : Array (Array Nat) := #[]
+  capOut : Store (Array Nat) := {}
   /-- For each of `capEdges`, the name captured, where a callable written in
   the program captured a name. -/
-  capEdgeNames : Array (Option (String × Nat)) := #[]
+  capEdgeNames : Store (Option (String × Nat)) := {}
   brands : Nat := 0
   /-- Capture variables already visited by the search in progress. -/
   seen : List Nat := []
@@ -669,7 +701,7 @@ def freshBrand : M Nat := do
 
 /-- The representative of a capture variable. -/
 partial def findCap (c : Nat) : M Nat := do
-  match (← get).caps[c]? with
+  match (← get).caps.get? c with
   | some (some parent) => findCap parent
   | _ => pure c
 
@@ -706,13 +738,13 @@ def captures (cap : Nat) (what : Captured) (name : Option (String × Nat) := non
 class, in the order they were made. `root` stands for itself. -/
 def edgesFrom (root : Nat) : M (Array (Nat × Captured)) := do
   let s ← get
-  pure ((s.capOut.getD root #[]).filterMap fun i => s.capEdges[i]?)
+  pure ((s.capOut.getD root #[]).filterMap fun i => s.capEdges.get? i)
 
 /-- Follow a type variable to what it stands for. -/
 partial def find (t : Ty) : M Ty := do
   match t with
   | .var id =>
-    match (← get).tys[id]? with
+    match (← get).tys.get? id with
     | some (some t') => find t'
     | _ => pure t
   | _ => pure t
@@ -722,7 +754,7 @@ partial def flattenRow (r : Row) : M Row := do
   match r.tail with
   | none => pure r
   | some id =>
-    match (← get).rows[id]? with
+    match (← get).rows.get? id with
     | some (some r') => do
       let rest ← flattenRow r'
       pure ⟨r.effs ++ rest.effs, rest.tail⟩
@@ -1019,7 +1051,7 @@ def generalize (t : Ty) (keep : List Ty := []) (top : Bool := true) : M Scheme :
       for c in todo do
         let root ← findCap c
         for i in s.capOut.getD root #[] do
-          match s.capEdges[i]? with
+          match s.capEdges.get? i with
           | some (_, .ty target) =>
             -- What a block shares with the block it runs in place of, the
             -- other holds: it is no part of what this one's type says it holds.
