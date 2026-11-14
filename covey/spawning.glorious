@@ -1,0 +1,36 @@
+// Commands: a system makes new entities, there once the systems have run,
+// and gives them components through the columns it has.
+// expect:
+// 1
+// 3
+// 7
+mod ecs;
+
+use ecs::{Entity, Column, Commands, reserve, give, app, register, add_systems, emit, spawn_with, count, fold_all};
+
+struct Seed(Int)
+struct Sprout(Int)
+struct Grow
+
+// Each seed puts out a sprout as tall as the seed is old.
+fn sprout(seeds: &Column<Seed>, sprouts: &mut Column<Sprout>, commands: &mut Commands) {
+    let mut i = 0;
+    while({ i < len_at(&seeds.dense) }) {
+        let made = commands.reserve();
+        sprouts.give(made, Sprout(seeds.dense[i].0));
+        i = i + 1
+    }
+}
+
+fn main() -> Int {
+    let mut garden = app()
+        .register<Seed>()
+        .register<Sprout>()
+        .add_systems(Grow, sprout);
+    garden.world.spawn_with((Seed(3),));
+    print(garden.world.count<Seed>());
+    garden.emit(Grow);
+    garden.emit(Grow);
+    print(garden.world.count<Sprout>() + garden.world.count<Seed>());
+    garden.world.fold_all(1, fn(sum: Int, s: &Sprout) -> Int { sum + s.0 })
+}

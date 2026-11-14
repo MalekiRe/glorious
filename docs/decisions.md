@@ -5,6 +5,16 @@ open, or that deliberately depart from them. Read it before changing the
 kernel. Where it disagrees with a specification in the repository root, this
 file is the current intent for this branch.
 
+## Systems that make entities
+
+**`commands.reserve()` gives a system a new entity, there once the systems
+have run;** it gives it components through the columns it has
+(`column.give(entity, value)`). The entities a label's systems make are
+numbered after those the world had, and the world takes them when the
+systems are done, as it ends those the systems asked it to. A system has no
+hold on the world itself, so it cannot give a new entity a component of a
+column it was not given. `covey/spawning.glorious` is an example.
+
 ## Queries in covey, and what they needed of the checker
 
 **covey has `Query<(&mut Position, &Velocity)>`** as a system's parameter: the

@@ -55,6 +55,9 @@ pub fn slot_of<T>(column: &Column<T>, entity: Entity) -> Int {
     } else { 0 - 1 }
 }
 
+// An entity's value in a column, kept: a system that has the column gives it.
+pub fn give<T>(column: &mut Column<T>, entity: Entity, value: T) { column_insert(column, entity, value) }
+
 fn column_insert<T>(column: &mut Column<T>, entity: Entity, value: T) {
     while({ len_at(&column.slots) <= entity.index }) { push_at(&mut column.slots, 0 - 1) };
     let at = column.slots[entity.index];
@@ -350,9 +353,17 @@ pub fn entities<S>(world: &World<S>) -> [Entity] {
 
 // What a system asks to be done to the world once the systems have run:
 // a system has no hold on the world itself.
-pub struct Commands { ended: [Entity] }
+pub struct Commands { ended: [Entity], next: Int, made: Int }
 
 pub fn end(commands: &mut Commands, entity: Entity) { push_at(&mut commands.ended, entity) }
+
+// A new entity, there once the systems have run: give it components through
+// the columns the system has.
+pub fn reserve(commands: &mut Commands) -> Entity {
+    let entity = Entity { index: commands.next + commands.made, generation: 0 };
+    commands.made = commands.made + 1;
+    entity
+}
 
 // What a parameter of a system asks for, without the reference: a column
 // to change, a column to read, the value emitted, or the commands. Found
@@ -494,7 +505,7 @@ impl<E, S, G, F, O, Q, St, Rest> Fetch<E, S, G, F, O> for (Querying<Q, St>, Rest
 }
 impl<E, S, G, F, O, Rest> Fetch<E, S, G, F, O> for (Asking, Rest) where Rest: Fetch<E, S, (G, &mut Commands), F, O> {
     fn fetch(event, world, commands, gathered, f) {
-        let mut none = Commands { ended: [] };
+        let mut none = Commands { ended: [], next: 0, made: 0 };
         <Rest as Fetch<E, S, (G, &mut Commands), F, O>>::fetch(event, world, &mut none, (gathered, commands), f)
     }
 }
@@ -621,8 +632,10 @@ pub fn add_plugins<X, Y>(app: X, plugin: fn(X) -> Y) -> Y { plugin(app) }
 
 // Run every system registered under what is emitted, then do what they asked.
 pub fn emit<E, S, L>(app: &mut App<S, L>, event: E) where L: Dispatch<E, S>, S: Columns {
-    let mut commands = Commands { ended: [] };
+    let mut commands = Commands { ended: [], next: len_at(&app.world.generations), made: 0 };
     <L as Dispatch<E, S>>::dispatch(&app.systems, &event, &mut app.world, &mut commands);
+    let mut k = 0;
+    while({ k < commands.made }) { push_at(&mut app.world.generations, 0); k = k + 1 };
     let mut i = 0;
     while({ i < len_at(&commands.ended) }) {
         despawn(&mut app.world, commands.ended[i]);
