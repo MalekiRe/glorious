@@ -98,18 +98,22 @@ fn column_remove<T>(column: &mut Column<T>, entity: Entity) -> Option<T> {
 pub trait Get<T> {
     fn take(&mut Self) -> Column<T>
     fn put(&mut Self, Column<T>)
+    fn has(&Self, Entity) -> Bool
 }
 impl<T, R> Get<T> for (Column<T>, R) {
     fn take(columns) { replace(&mut columns.0, empty_column()) }
     fn put(columns, column) { columns.0 = column; }
+    fn has(columns, entity) { slot_of(&columns.0, entity) >= 0 }
 }
 impl<T, H, R> Get<T> for (Column<H>, R) where R: Get<T> {
     fn take(columns) { <R as Get<T>>::take(&mut columns.1) }
     fn put(columns, column) { <R as Get<T>>::put(&mut columns.1, column) }
+    fn has(columns, entity) { <R as Get<T>>::has(&columns.1, entity) }
 }
 impl<T, H, R> Get<T> for (Resource<H>, R) where R: Get<T> {
     fn take(columns) { <R as Get<T>>::take(&mut columns.1) }
     fn put(columns, column) { <R as Get<T>>::put(&mut columns.1, column) }
+    fn has(columns, entity) { <R as Get<T>>::has(&columns.1, entity) }
 }
 
 // One value the whole world has, kept among its columns: a score, a clock.
@@ -325,10 +329,25 @@ impl<H, ..R, S> Fill<S> for (H, ..R) where H: Fill<S>, (..R): Fill<S>, H: Item, 
     }
 }
 
-pub struct Query<Q, St = <Q as Item>::Store> { store: St, entities: [Entity] }
+pub struct Query<Q, Only = (), St = <Q as Item>::Store> { store: St, entities: [Entity] }
+
+// Which entities a query is of, beyond having its columns: `With<T>` those
+// that have a `T`, `Without<T>` those that do not, a tuple those all of it
+// lets through.
+pub struct With<T>(T)
+pub struct Without<T>(T)
+pub trait Only<S> { fn lets(&S, Entity) -> Bool }
+impl<S> Only<S> for () { fn lets(columns, entity) { true } }
+impl<T, S> Only<S> for With<T> where S: Get<T> { fn lets(columns, entity) { <S as Get<T>>::has(columns, entity) } }
+impl<T, S> Only<S> for Without<T> where S: Get<T> { fn lets(columns, entity) { not(<S as Get<T>>::has(columns, entity)) } }
+impl<H, ..R, S> Only<S> for (H, ..R) where H: Only<S>, (..R): Only<S> {
+    fn lets(columns, entity) {
+        if(<H as Only<S>>::lets(columns, entity)) { <(..R) as Only<S>>::lets(columns, entity) } else { false }
+    }
+}
 
 // Each entity that has every column the query asks for, with them.
-pub fn for_each<Q>(query: &mut Query<Q>, f: for<'a> fn(Entity, Q::Got<'a>)) where Q: Item {
+pub fn for_each<Q, Only>(query: &mut Query<Q, Only>, f: for<'a> fn(Entity, Q::Got<'a>)) where Q: Item {
     let mut i = 0;
     while({ i < len_at(&query.entities) }) {
         let entity = query.entities[i];
@@ -371,14 +390,14 @@ pub fn reserve(commands: &mut Commands) -> Entity {
 pub struct Changed<A>(A)
 pub struct Read<A>(A)
 pub struct Asking
-pub struct Querying<Q, St>(Q, St)
+pub struct Querying<Q, Only, St>(Q, Only, St)
 pub struct Shared<X>(X)
 pub struct Owned<X>(X)
 pub trait Parameter { type Asks; }
 impl<A> Parameter for &mut Column<A> { type Asks = Changed<A>; }
 impl<A> Parameter for &Column<A> { type Asks = Read<A>; }
 impl Parameter for &mut Commands { type Asks = Asking; }
-impl<Q, St> Parameter for &mut Query<Q, St> { type Asks = Querying<Q, St>; }
+impl<Q, Only, St> Parameter for &mut Query<Q, Only, St> { type Asks = Querying<Q, Only, St>; }
 // (Any other reference is to a resource, or for reading to the value
 // emitted, which is told apart where the label is known: the narrower ones
 // above are chosen first.)
@@ -491,13 +510,19 @@ impl<E, S, G, F, O, X, Rest> Fetch<E, S, G, F, O> for (Owned<X>, Rest)
     }
 }
 // (The commands are given once: what comes after has none to give.)
-impl<E, S, G, F, O, Q, St, Rest> Fetch<E, S, G, F, O> for (Querying<Q, St>, Rest)
-    where Q: Item<Store = St>, Q: Fill<S>, Rest: Fetch<E, S, (G, &mut Query<Q, St>), F, O> {
+impl<E, S, G, F, O, Q, N, St, Rest> Fetch<E, S, G, F, O> for (Querying<Q, N, St>, Rest)
+    where Q: Item<Store = St>, Q: Fill<S>, N: Only<S>, Rest: Fetch<E, S, (G, &mut Query<Q, N, St>), F, O> {
     fn fetch(event, world, commands, gathered, f) {
-        let found = entities(&*world);
+        let all = entities(&*world);
+        let mut found = [];
+        let mut i = 0;
+        while({ i < len_at(&all) }) {
+            if(<N as Only<S>>::lets(&world.columns, all[i])) { push_at(&mut found, all[i]) } else { () };
+            i = i + 1
+        };
         let store = <Q as Fill<S>>::fill(&mut world.columns);
         let mut query = Query { store: store, entities: found };
-        let made = <Rest as Fetch<E, S, (G, &mut Query<Q, St>), F, O>>::fetch(event, world, commands, (gathered, &mut query), f);
+        let made = <Rest as Fetch<E, S, (G, &mut Query<Q, N, St>), F, O>>::fetch(event, world, commands, (gathered, &mut query), f);
         let Query { store, entities } = query;
         <Q as Fill<S>>::unfill(&mut world.columns, store);
         made

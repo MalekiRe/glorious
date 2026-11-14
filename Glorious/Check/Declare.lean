@@ -56,12 +56,12 @@ partial def resolveType (params : List (String × Ty)) (decl : Bool) : TypeExpr 
         let traits := (← get).traitShape.filter fun (_, arity, assocs) => arity == 0 && assocs.contains name
         match traits with
         | [(tr, _, _)] =>
-          if args.isEmpty && (freeTys self).any (← get).projecting.contains then
-            return .con Syntax.projMark [self, .con tr [], .con name []]
-          let a ← freshTy
           -- (`F::Of<Int>`: asked at types, which go with the type asked.)
           let asked ← args.mapM (resolveType params decl)
           let subject := if asked.isEmpty then self else Ty.con Syntax.gatMark (self :: asked)
+          if (freeTys self).any (← get).projecting.contains then
+            return .con Syntax.projMark [subject, .con tr [], .con name []]
+          let a ← freshTy
           modify fun s => { s with assocUses := s.assocUses.push (tr, subject, name, a, s.owner, s.pos) }
           return a
         | [] => throw s!"`{x}`: no trait leaves a type `{name}` to its implementations"

@@ -1,15 +1,18 @@
 // Queries: a system asks for several columns at once, an entity at a time,
-// as `Query<(&mut Position, &Velocity)>`: each entity that has both.
+// as `Query<(&mut Position, &Velocity)>`: each entity that has both; and
+// which entities beyond that, `Query<(&Position,), Without<Velocity>>`.
 // expect:
+// 1
 // 112
 // 7
 mod ecs;
 
-use ecs::{Entity, Query, for_each, app, register, add_systems, emit, spawn_with, fold_all};
+use ecs::{Entity, Query, With, Without, for_each, app, register, add_systems, emit, spawn_with, fold_all};
 
 struct Position(Int)
 struct Velocity(Int)
 struct Tick
+struct Look
 
 fn movement(query: &mut Query<(&mut Position, &Velocity)>) {
     query.for_each(fn(entity: Entity, got: (&mut Position, &Velocity)) {
@@ -18,16 +21,23 @@ fn movement(query: &mut Query<(&mut Position, &Velocity)>) {
     })
 }
 
+// Those that stand still: a position and no velocity.
+fn still(query: &mut Query<(&Position,), Without<Velocity>>) {
+    query.for_each(fn(entity: Entity, got: (&Position,)) { print(1) })
+}
+
 fn main() -> Int {
     let mut game = app()
         .register<Position>()
         .register<Velocity>()
-        .add_systems(Tick, movement);
+        .add_systems(Tick, movement)
+        .add_systems(Look, still);
     game.world.spawn_with((Position(100), Velocity(4)));
     game.world.spawn_with((Position(7),));
     game.emit(Tick);
     game.emit(Tick);
     game.emit(Tick);
+    game.emit(Look);
     print(game.world.fold_all(0, fn(sum: Int, p: &Position) -> Int { if(p.0 > 50) { sum + p.0 } else { sum } }));
     game.world.fold_all(0, fn(sum: Int, p: &Position) -> Int { if(p.0 < 50) { sum + p.0 } else { sum } })
 }
