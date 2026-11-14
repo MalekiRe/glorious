@@ -374,8 +374,13 @@ def why (path : String) : IO UInt32 := do
   let .ok all := Elab.unfield blocks all | IO.println "unfield failed"; return 1
   let all := Elab.reachable ("main" :: blocks.coercions.map (·.2)) all
   let declared := Elab.withDeclared written all
+  -- (`GLORIOUS_LENDS=2,0,1`: how each place is tried, in place of all at once.)
+  let asked := ((← IO.getEnv "GLORIOUS_LENDS").map fun s => (s.splitOn ",").map String.toNat!)
   for lends in [1, 0] do
-    let .ok out := Elab.elabProgram all (some blocks) (fun _ => lends) | IO.println "elab failed"; return 1
+    let sites := fun (i : Nat) => match asked with
+      | some ms => if lends == 0 then 0 else ms[i]?.getD 0
+      | none => lends
+    let .ok out := Elab.elabProgram all (some blocks) sites | IO.println "elab failed"; return 1
     match Infer.certify declared out.program true out.envSizes true true true with
     | .ok cert =>
       if Typing.checkProgram cert out.program then IO.println s!"lends={lends}: accepted"

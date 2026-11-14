@@ -367,15 +367,25 @@ def compileSource (src : String) (check : Bool := true)
       if let .ok out := Elab.elabProgram all blocks (fun _ => 1) then
         if out.lent != 0 && !out.foreign then
           if let some c := lending blocks (fun _ => 1) then return c
-          if out.sites ≤ 32 then
+          if out.sites ≤ 160 then
             -- How each place fares alone, trying the narrower scope first.
             -- (Each is asked apart from the others, so all are asked side
             -- by side: the answers are what they would be one at a time.)
-            let asked : List (Task Nat) := (List.range out.sites).map fun i => Task.spawn fun _ =>
+            let try_ := fun (i : Nat) =>
               if (lending blocks (fun j => if j == i then 1 else 0)).isSome then 1
               else if (lending blocks (fun j => if j == i then 2 else 0)).isSome then 2
               else 0
-            let alone : List Nat := asked.map Task.get
+            -- A call inside a statement is asked only if the statement's
+            -- own place fails: where that passes, the call's borrows are
+            -- the statement's.
+            let first : List (Task Nat) := (List.range out.sites).map fun i => Task.spawn fun _ =>
+              if (out.under.lookup i).isSome then 0 else try_ i
+            let first := first.map Task.get
+            let second : List (Task Nat) := (List.range out.sites).map fun i => Task.spawn fun _ =>
+              match out.under.lookup i with
+              | some stmt => if first[stmt]?.getD 0 == 0 then try_ i else 0
+              | none => first[i]?.getD 0
+            let alone : List Nat := second.map Task.get
             if alone.any (· != 0) then
               if let some c := lending blocks (fun j => alone[j]?.getD 0) then return c
               -- Not all at once: take them one at a time, keeping each that

@@ -2890,6 +2890,41 @@ borrow tried).
 - The fields of a value are destroyed the last declared first, and the
   elements of an array the last first. (Rust goes the other way.)
 
+## A borrow written anywhere in a statement is a scope
+
+- Core has a rule for a borrow that is a scope of its own: while it lasts,
+  nothing else reaches what is borrowed, and that is checked by the proved
+  checker. The elaborator made a borrow such a scope in four shapes: an
+  argument of a function called by name, `let p = &x`, the arguments of a
+  call whose result is given a name, and a borrow put straight into a tuple
+  or constructor that is given a name. Anything else was the plain
+  reference, about which Core's borrow rules say nothing: `swap(&mut a,
+  &mut b)` (an intrinsic), `a[i] = v`, `x.f = v`, `f(&x)` with `f` a local
+  callable, `*pick(&a, &b)`, `match(element(&a, 1)) { .. }`.
+- Now a borrow of a variable written anywhere in a statement, outside a
+  callable written there, is made before the statement and is a scope
+  that lasts while the statement runs. Making a reference does nothing, so
+  making it earlier changes nothing else. Each statement is one more place
+  the search for a certificate tries: first with the borrows given to
+  functions left to their calls, then with those too lasting the whole
+  statement, and for a `let`, lasting while what is made of them is used.
+  Of the tests' borrows, 1044 are scopes and 117 are not; before, with ten
+  fewer tests, 731 and 409.
+- **What is assigned is computed before the place it goes**, as the
+  specification says (§5.3, "Evaluate the RHS first"). It was the other
+  way round for `*r = v` and `a[i] = v`: the index was worked out, and its
+  bounds checked, before the value. It also means the borrow by which the
+  place is reached does not last while the value is worked out, so
+  `x.1 = x.0 + 1` and `xs[0] = xs[2] + xs[1]` are scopes too.
+- The search tries each place alone when all at once fails, side by side.
+  It gave up on programs with more than 32 places, which with the standard
+  library is soon reached, and then no borrow of the program was a scope;
+  the limit is 160 now. A call inside a statement is asked only where the
+  statement's own place fails. The cost is real: a program of 88 places,
+  26 of which fail, takes 6.4 s where it took 4.2 s without the search. A
+  search that asks about one function at a time, and not the whole
+  program each time, is what would remove it.
+
 ## What a function touches is written down once
 
 - Working out a certificate copied, at each use of a function, the record of

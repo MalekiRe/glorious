@@ -255,6 +255,10 @@ structure St where
   lent : Nat := 0
   /-- How many places a borrow could be made a scope there were. -/
   sites : Nat := 0
+  /-- A place that is a call inside a statement that is a place itself, with
+  the statement's: where the statement's borrows are made scopes, the call's
+  are among them. -/
+  under : List (Nat × Nat) := []
   /-- How many of the next `let p = &x` are scopes that last while anything
   made from `p` is used, whatever `lends` says: they were written by the
   elaborator for the arguments of a call, and are not places of their own. -/
