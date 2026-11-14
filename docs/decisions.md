@@ -57,6 +57,16 @@ to what it came to before and costs the same part of the budget; so what is
 remembered changes no answer, and running out of budget happens where it
 did. calculator 1.43 s to 1.26 s.
 
+**The search for borrows starts from what fails.** Where every place at
+once cannot be shown, what failed names a function (inference says which;
+the checker, which function it turned away), and the places taken out are
+the one that function was made for, or every place of the function it is
+in. Again, until it passes; then each place taken out is tried back, side
+by side, and those that pass together. Only where nothing is named does
+the search ask each place alone, as before. The test suite: 19.6 s to
+16.2 s, and two borrows fewer are scopes of their own (1198 of 1350; the
+two searches keep different sets where not all can be kept).
+
 **Implementations are found by their trait's name.** The checker kept
 them in one array and, for each condition it settled, went through every
 implementation comparing trait names (made each time from the written

@@ -314,7 +314,7 @@ partial def elabCall (scope : Scope) (isTail : Bool) (f : Expr) (args : List Exp
         modify fun s =>
           { s with sites := s.sites + 1, siteOwners := s.siteOwners.push s.owner
                    under := (held.map fun stmt => (site, stmt) :: s.under).getD s.under }
-      if !isTail && !borrows.isEmpty && (← read).lends site != 0 then
+      if !isTail && !borrows.isEmpty && (← read).lends site != 0 then atSite site do
         let atoms ← elabArgs scope args gives
         -- These borrows are scopes: take back what elaborating them noted.
         for a in args do
@@ -472,7 +472,7 @@ partial def elabStmts (scope : Scope) (tailPos : Bool) : List Stmt → M Atom
                      twoWays := site :: s.twoWays }
           let mode := (← read).lends site
           if mode != 0 then
-            return ← elabBorrowScope scope tailPos p uniq (← lent) rest (mode == 2)
+            return ← atSite site (elabBorrowScope scope tailPos p uniq (← lent) rest (mode == 2))
     -- So can a borrow written anywhere else in what is given the name.
     if (borrowOf value).isNone then
       if let some stmts ← lendWithin scope (.let_ pat value) then
@@ -708,6 +708,20 @@ partial def lendWithin (scope : Scope) (s : Stmt) : M (Option (List Stmt)) := do
   pure (some ((first ++ found).map (fun (n, a) => Stmt.let_ (.var n) a) ++ [s']))
 
 partial def elabBorrowScope (scope : Scope) (tailPos : Bool) (p : String) (uniq : Bool)
+    (cell : Atom) (rest : List Stmt) (wide : Bool) : M Atom := do
+  -- (A borrow a statement's place named, `%lend12.0`, is of place 12.)
+  let named := if p.startsWith "%" then
+      let digits := (p.toList.dropWhile fun c => !c.isDigit).takeWhile Char.isDigit
+      if digits.isEmpty then none
+      else some ((digits.foldl (fun k c => k * 10 + (c.toNat - '0'.toNat)) 0) % 1000000)
+    else none
+  let outer := (← get).curSite
+  if let some site := named then modify fun s => { s with curSite := some site }
+  let r ← elabBorrowScopeIn scope tailPos p uniq cell rest wide
+  modify fun s => { s with curSite := outer }
+  pure r
+
+partial def elabBorrowScopeIn (scope : Scope) (tailPos : Bool) (p : String) (uniq : Bool)
     (cell : Atom) (rest : List Stmt) (wide : Bool) : M Atom := do
   let k := scopeExtent p rest wide
   let inner := rest.take k
@@ -1049,6 +1063,9 @@ structure Output where
   twoWays : List Nat := []
   /-- The function each place is in, by place. -/
   siteOwners : Array String := #[]
+  /-- For each function, the place that is a scope of its own it was made
+  for, if it was. -/
+  fnSites : Array (Option Nat) := #[]
 
 /-! ## Traits
 
@@ -1738,7 +1755,8 @@ def elabProgram (items : List Item) (blocks : Option Blocks := none)
       idx := idx + 1
   let fnNames := (fns.map fun (name, _) => s!"`{name}`").toArray
   let init : St :=
-    { fns := Array.replicate fns.length ⟨[]⟩, names := fnNames, owner := ""
+    { fns := Array.replicate fns.length ⟨[]⟩, fnSites := Array.replicate fns.length none
+      names := fnNames, owner := ""
       b := { ops := #[], depth := 0, done := none }, noTail := none }
   let (_, st) ← (action.run g).run init
   let opNames := Id.run do
@@ -1748,6 +1766,6 @@ def elabProgram (items : List Item) (blocks : Option Blocks := none)
     pure out
   pure ⟨⟨st.fns.toList, .let_ (.closure mainIdx []) (.tail (.var 0) [])⟩, names, st.names,
     opNames, st.envSizes, st.lent, st.sites, st.plain.reverse, st.foreign, st.under, st.twoWays,
-    st.siteOwners⟩
+    st.siteOwners, st.fnSites⟩
 
 end Glorious.Elab

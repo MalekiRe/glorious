@@ -277,6 +277,11 @@ structure St where
   twoWays : List Nat := []
   /-- The function each place is in, by place. -/
   siteOwners : Array String := #[]
+  /-- The place being elaborated as a scope of its own, while it is. -/
+  curSite : Option Nat := none
+  /-- For each function made, the place being elaborated as a scope of its
+  own when it was made, if one was. -/
+  fnSites : Array (Option Nat) := #[]
   /-- Where the statement being elaborated starts. -/
   pos : Nat × Nat := (0, 0)
   /-- The borrows that are not scopes of their own: each is the reference it
@@ -354,7 +359,17 @@ def useLocal (a : Atom) : M Atom := do
   | .int _ => pure a
 
 def addFn (f : Core.Fn) (name : String) : M Nat := do
-  modifyGet fun s => (s.fns.size, { s with fns := s.fns.push f, names := s.names.push name })
+  modifyGet fun s =>
+    (s.fns.size, { s with fns := s.fns.push f, names := s.names.push name, fnSites := s.fnSites.push s.curSite })
+
+/-- Elaborate as part of the place `site`, which is a scope of its own: what
+functions are made are that place's. -/
+def atSite {α : Type} (site : Nat) (act : M α) : M α := do
+  let outer := (← get).curSite
+  modify fun s => { s with curSite := some site }
+  let r ← act
+  modify fun s => { s with curSite := outer }
+  pure r
 
 def indexed (names : List String) (base : Nat) : Scope :=
   (names.zip (List.range names.length)).map fun (x, k) => (x, .var (base + k))

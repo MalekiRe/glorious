@@ -2178,10 +2178,13 @@ def numbering (s : ISig) : M Numbering := do
   pure { sig := { vars, bound := owns }, body := { vars := bodyVars ++ vars }
          crgns := atoms.length, rgns := owns.length, atoms }
 
-def zonkSig (s : ISig) : M FnSig := do
-  let nb ← numbering s
+/-- A finished signature, its regions numbered as `nb` says. -/
+def zonkSigWith (nb : Numbering) (s : ISig) : M FnSig := do
   pure ⟨← s.caps.mapM (zonk nb.sig), ← s.params.mapM (zonk nb.sig), ← zonk nb.sig s.ret,
     ← zonkRow nb.sig s.row, nb.crgns, nb.rgns, ← zonkAcc nb.sig s.acc⟩
+
+def zonkSig (s : ISig) : M FnSig := do
+  zonkSigWith (← numbering s) s
 
 /-- A use of a function: the signature it is used at, and the cells its
 numbered regions and the region it binds are at this use. -/
@@ -2197,7 +2200,7 @@ says, and the regions that use gives the function. -/
 def demand (pr : Pr) (s : ISig) : M (Use × List Typing.Rgn) := do
   let nb ← numbering s
   let owns ← bindersOf s.acc
-  pure (⟨← zonkSig s, nb.atoms, owns.head?, owns.drop 1⟩, ← nb.atoms.mapM (zonkRg pr))
+  pure (⟨← zonkSigWith nb s, nb.atoms, owns.head?, owns.drop 1⟩, ← nb.atoms.mapM (zonkRg pr))
 
 /-- The callable a cell's scope runs gives back, performs with or captured
 something whose type mentions the cell's region. A reference that outlives its
@@ -2405,12 +2408,13 @@ partial def instantiate (fn : Nat) (use : Use) : M Unit := do
   settleAll
   let mut wanted : List (Nat × Use) := []
   for m in members do
-    let ground ← zonkSig m.sig
+    let nb ← numbering m.sig
+    let ground ← zonkSigWith nb m.sig
     if m.fn == fn && ground != sig then
       throw s!"region: function {fn} cannot be used with the regions it is given: wanted {showSig sig}, found {showSig ground}"
     unless ((← get).emitted[m.fn]?.getD []).contains ground do
-      let nb ← numbering m.sig
-      let hints ← m.hints.toList.mapM (zonkHints nb.body)
+      let hints ← try m.hints.toList.mapM (zonkHints nb.body)
+        catch e => throw s!"{e} (in function {m.fn})"
       modify fun s =>
         { s with
           emitted := s.emitted.insert m.fn (ground :: s.emitted[m.fn]?.getD [])

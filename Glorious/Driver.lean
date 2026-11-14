@@ -133,6 +133,11 @@ partial def withoutUnreached (items : List Syntax.Item) : List Syntax.Item := Id
   pure <| indexed.filterMap fun (item, k) =>
     if (isLibraryFn item).isSome && !kept.contains k then none else some item
 
+/-- The functions an error of certificate inference names: `function 12`. -/
+def named (e : String) : List Nat :=
+  ((e.splitOn "function ").drop 1).filterMap fun after =>
+    (String.ofList (after.toList.takeWhile Char.isDigit)).toNat?
+
 /-- Find a certificate for a program's Core and have the proved checker accept
 it: with the ownership rules and the region rules if the program can be shown
 to meet them, and otherwise with those of them it can, or as a typing only.
@@ -616,6 +621,73 @@ def compileSourceAt (src : String) (check : Bool := true)
             -- (Those two ways are not tried again for the plain program.)
             return ← plain blocks [(true, false), (false, false)]
           let ways := if ranked.isSome then [false, true] else [false]
+          -- First, from every place at once, the places that what fails is
+          -- in are taken out, one round at a time: what fails names a
+          -- function, and the place it was made for, or every place of the
+          -- function it is. Then each place taken out is tried back.
+          let blame : List Nat → Sum Compiled (List Nat) := fun choice =>
+            match Elab.elabProgram all blocks (fun j => choice[j]?.getD 0) with
+            | .error _ => Sum.inr []
+            | .ok o =>
+              let outcomes : List (Sum Compiled (List Nat)) := ways.map fun ranked =>
+                match Infer.certify declared o.program true o.envSizes true true ranked with
+                | .ok cert =>
+                  if o.lent != 0 && Typing.checkProgram cert o.program then
+                    Sum.inl (⟨o.program, o.ctorNames.map shownName, o.fnNames, o.opNames, some cert,
+                      o.lent, o.plain, ((placeKeys o.siteOwners).toList.zip (List.range o.sites)).map
+                        fun ((k : String × Nat), (i : Nat)) => (k, choice[i]?.getD 0)⟩ : Compiled)
+                  else Sum.inr (cert.sigs.filterMap fun (e : Typing.SigEntry) =>
+                    match o.program.fns[e.fn]? with
+                    | some F => if Typing.checkFn cert e F then none else some e.fn
+                    | none => none)
+                | .error e => Sum.inr (named e)
+              match outcomes.find? Sum.isLeft with
+              | some found => found
+              | none =>
+                let fns := outcomes.flatMap fun (x : Sum Compiled (List Nat)) => match x with
+                  | .inr fs => fs
+                  | .inl _ => []
+                -- (The places a function was made for, or those of the
+                -- function it is.)
+                Sum.inr (fns.eraseDups.flatMap fun f =>
+                  match o.fnSites[f]?.join with
+                  | some site => [site]
+                  | none =>
+                    -- (A function made in another is named `.. in `f``.)
+                    let described := o.fnNames[f]?.getD ""
+                    let name := match (described.splitOn " in `").getLast? with
+                      | some last => if (described.splitOn " in `").length > 1
+                          then (last.splitOn "`").headD last else described
+                      | none => described
+                    (List.range o.sites).filter fun j => o.siteOwners[j]? == some name)
+          let rec narrow (fuel : Nat) (choice : List Nat) : Option (Compiled × List Nat) :=
+            match fuel with
+            | 0 => none
+            | fuel + 1 =>
+              match blame choice with
+              | .inl c => some (c, choice)
+              | .inr sites =>
+                let next := (List.range choice.length).map fun j =>
+                  if sites.contains j then 0 else choice[j]?.getD 0
+                if next == choice then none else narrow fuel next
+          if let some (c, choice) := narrow 24 (List.replicate out.sites 1) then
+            let rec back (best : Compiled) (choice : List Nat) : List Nat → Compiled
+              | [] => best
+              | j :: rest =>
+                let tried := choice.set j 1
+                match blame tried with
+                | .inl c => back c tried rest
+                | .inr _ => back best choice rest
+            -- (Each taken out is tried back alone, side by side; those that
+            -- pass, together; and if that fails, one at a time.)
+            let out_ := (List.range choice.length).filter fun j => choice[j]?.getD 0 == 0
+            let alone : List (Nat × Bool) :=
+              (out_.map fun j => Task.spawn fun _ => (j, (blame (choice.set j 1)).isLeft)).map Task.get
+            let passing := alone.filterMap fun (p : Nat × Bool) => if p.2 then some p.1 else none
+            if passing.isEmpty then return c
+            let together := passing.foldl (fun (ch : List Nat) j => ch.set j 1) choice
+            if let .inl c := blame together then return c
+            return back c choice passing
           let lending := lending blocks ways
           if out.sites ≤ 160 then
             -- How each place fares alone, trying the narrower scope first.
