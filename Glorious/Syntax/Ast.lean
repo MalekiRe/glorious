@@ -269,6 +269,15 @@ def tupleRestOf (name : String) : Option Nat :=
 pattern stands for: the program is then read again with them written `_`. -/
 def tupleRestFound (id count : Nat) : String := s!"%tuplerest:{id}:{count}%"
 
+/-- The type under which a type left to implementations is asked at types,
+`F::Of<Int>`: the type it is asked of, and then those. -/
+def gatMark : String := "%gat"
+
+/-- How a trait's function says it has type parameters of its own, `fn
+single<T>(T) -> Of<T>`: what it gives is written under this mark, with the
+parameters after it. -/
+def methodGenericsMark : String := "%generic"
+
 /-- The name under which a name bound by the pattern of a `let` is known
 where it is destroyed: the place is the statement's, which a clause's own
 names are known by too when the statement is its first. -/
@@ -575,6 +584,21 @@ def Fixities.function (fix : Fixities) (op : String) (asPrefix : Bool) : String 
   match fix.bound.find? fun (o, p, _) => o == op && p == asPrefix with
   | some (_, _, f) => f
   | none => op
+
+/-- What a trait's function gives, and the type parameters of its own. -/
+def methodGenerics (ret : Option TypeExpr) : Option TypeExpr × List String :=
+  match ret with
+  | some (.name mark (inner :: generics)) =>
+    if mark == "%generic" then
+      (some inner, generics.filterMap fun
+        | .name g [] => some g
+        | _ => none)
+    else (ret, [])
+  | _ => (ret, [])
+
+def withMethodGenerics (ret : Option TypeExpr) (generics : List String) : Option TypeExpr :=
+  if generics.isEmpty then ret
+  else some (.name "%generic" ((ret.getD (.tuple [])) :: generics.map fun g => .name g []))
 
 /-- A whole number as a type, for the length of a `[T; N]`: its bits from the
 lowest, `B1<B0<B1<Z>>>` for five. Each number is one type. -/

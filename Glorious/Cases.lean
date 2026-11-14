@@ -4015,7 +4015,7 @@ def cases : List Case := [
     [], "1"⟩,
   -- `type Of<T>;` in a trait is not read: the message says what to write.
   ⟨"trait Family { type Of<T>; fn single<T>(T) -> Of<T> }\nstruct Arrays\nstruct Options\nimpl Family for Arrays { type Of<T> = [T]; fn single(x) { [x] } }\nimpl Family for Options { type Of<T> = Option<T>; fn single(x) { Some(x) } }\nfn main() -> Int { let a: [Int] = <Arrays as Family>::single(3); let o: Option<Int> = <Options as Family>::single(4); len(a) + match(o) { Some(n) => n, None => 0 } }",
-    [], "error: 1:23: a type a trait leaves to its implementations takes no parameters: give the trait the parameter, `trait Family<T> { type Of; }`, and ask for it at each, `F: Family<Int, Of = A>`, found `<`"⟩,
+    [], "5"⟩,
   -- `let [a, b, c] = xs` takes an array of exactly three apart.
   ⟨"fn main() -> Int { let xs: [Int; 3] = [1, 2, 3]; let [a, b, c] = xs; a * 100 + b * 10 + c }",
     [], "123"⟩,
@@ -4115,6 +4115,24 @@ def cases : List Case := [
     [], "3"⟩,
   ⟨"struct Counter { n: Int }\nimpl Counter { fn bump(c: Counter) -> Counter { Counter { n: c.n + 1 } } fn total(c: Counter) -> Int { c.n } }\nfn main() -> Int { Counter { n: 0 }.bump().bump().total() }",
     [], "2"⟩,
+  -- A trait's function with type parameters of its own, `fn twice<T>(Self, T)`.
+  ⟨"trait Pairing { fn twice<T>(Self, T) -> (T, T) }\nimpl Pairing for Int { fn twice(n, x) { (x, x) } }\nfn main() -> Int { let p = twice(1, \"a\"); let q = twice(2, 5); q.0 + q.1 + len(p.0) }",
+    [], "11"⟩,
+  -- A type a trait leaves to its implementations that takes types, `type Of<T>;`: an implementation says what it is at each, `type Of<T> = [T];`, and it is asked as `Of<T>` in the trait's functions and `F::Of<Int>` elsewhere.
+  ⟨"trait Family { type Of<T>; fn single<T>(T) -> Of<T> }\nstruct Arrays\nstruct Options\nimpl Family for Arrays { type Of<T> = [T]; fn single(x) { [x] } }\nimpl Family for Options { type Of<T> = Option<T>; fn single(x) { Some(x) } }\nfn both<F: Family>() -> (F::Of<Int>, F::Of<Str>) { (<F as Family>::single(1), <F as Family>::single(\"a\")) }\nfn main() -> Int { let p = both<Arrays>(); let q = both<Options>(); len(p.0) + len(p.1) + match(q.0) { Some(n) => n, None => 0 } }",
+    [], "3"⟩,
+  ⟨"trait Functor { type Of<T>; fn map<A, B>(Of<A>, fn(A) -> B) -> Of<B> }\nstruct Opt\nimpl Functor for Opt { type Of<T> = Option<T>; fn map(o, f) { match(o) { Some(x) => Some(f(x)), None => None } } }\nfn main() -> Int { match(<Opt as Functor>::map(Some(3), { n => n + 1 })) { Some(n) => n, None => 0 } }",
+    [], "4"⟩,
+  ⟨"trait Lending { type Item<'a>; fn next<'a>(&'a mut Self) -> Option<Item<'a>> }\nstruct Windows { data: [Int], at: Int }\nimpl Lending for Windows { type Item<'a> = &'a Int; fn next(w) { if(w.at < len_at(&w.data)) { w.at = w.at + 1; Some(&w.data[w.at - 1]) } else { None } } }\nfn main() -> Int { let mut w = Windows { data: [5, 6], at: 0 }; match(next(&mut w)) { Some(x) => *x, None => 0 } }",
+    [], "error: 1:30: a type a trait leaves to its implementations can take types, `type Of<T>;`, but not yet a lifetime, found `;`"⟩,
+  ⟨"trait Family { type Of<T>; fn single<T>(T) -> Of<T> }\nstruct Arrays\nimpl Family for Arrays { type Of<T> = [T]; fn single(x) { Some(x) } }\nfn main() -> Int { 1 }",
+    [], "error: in `Family::single@Arrays`: this is not the function `Family` declares, in what it takes, gives or performs: `Result<T, ()>` is not `[T]`"⟩,
+  ⟨"trait Shelf { type Holding<T>; fn empty<T>() -> Holding<T>; fn put<T>(Holding<T>, T) -> Holding<T>; fn count<T>(&Holding<T>) -> Int }\nstruct Rows\nimpl Shelf for Rows { type Holding<T> = [T]; fn empty() { [] } fn put(h, x) { push(h, x) } fn count(h) { len_at(h) } }\nfn fill<S: Shelf>() -> Int { let a = <S as Shelf>::put(<S as Shelf>::put(<S as Shelf>::empty(), 1), 2); let b = <S as Shelf>::put(<S as Shelf>::empty(), \"x\"); <S as Shelf>::count(&a) * 10 + <S as Shelf>::count(&b) }\nfn main() -> Int { fill<Rows>() }",
+    [], "21"⟩,
+  ⟨"trait Pairs { type Both<A, B>; fn make<A, B>(A, B) -> Both<A, B> }\nstruct Tuples\nimpl Pairs for Tuples { type Both<A, B> = (A, B); fn make(a, b) { (a, b) } }\nfn main() -> Int { let p: (Int, Str) = <Tuples as Pairs>::make(4, \"s\"); p.0 }",
+    [], "4"⟩,
+  ⟨"struct Loud(Int)\nimpl Drop for Loud { fn drop(l) { print(l.0) } }\ntrait Family { type Of<T>; fn single<T>(T) -> Of<T> }\nstruct Options\nimpl Family for Options { type Of<T> = Option<T>; fn single(x) { Some(x) } }\nfn main() -> Int { let o = <Options as Family>::single(Loud(7)); 1 }",
+    [], "7\n1"⟩,
   -- `drop` is not for a program to call.
   ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nfn main() { let mut f = File(7); drop(&mut f); 0 }",
     [], "error: 3:34: in `main`: `drop` is run when what holds a value ends; a program does not call it"⟩,

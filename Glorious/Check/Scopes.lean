@@ -306,6 +306,10 @@ def hasGenericImpl (trait : String) (self : Ty) : M Bool := do
 implementation is known: `Elem` of `Index` for an array of `Int`. Nothing
 where the type is not known enough to say which implementation is its. -/
 def assocAt (tr : String) (subject : Ty) (name : String) : M (Option Ty) := do
+  -- (Asked at types, `F::Of<Int>`: those go with the type asked.)
+  let (subject, asked) ← match ← find subject with
+    | .con mark (inner :: asked) => pure (if mark == Syntax.gatMark then (inner, asked) else (subject, []))
+    | _ => pure (subject, [])
   let (self, args) ← subjectOf tr subject
   let known ← match ← find self with
     | .con n hargs => pure (if n.startsWith "'" then none else some (n, hargs))
@@ -319,7 +323,8 @@ def assocAt (tr : String) (subject : Ty) (name : String) : M (Option Ty) := do
   for (j, want) in im.fixed do
     if let some got := hargs[j]? then
       try unify got (← fixedAt at_ want) catch _ => return none
-  pure (some (subst at_ [] [] said))
+  let taken := ((im.gatParams.lookup name).getD []).zip asked
+  pure (some (subst (at_ ++ taken) [] [] said))
 
 /-- Settle what can be settled of the types traits leave to implementations:
 where the type asked of is known, the answer is what its implementation says;
@@ -329,6 +334,16 @@ def settleAssocs : M Unit := do
   modify fun s => { s with assocUses := #[] }
   let mut left : Array (String × Ty × String × Ty × String × String) := #[]
   for (tr, subject, name, a, owner, pos) in uses do
+    -- (Asked at types, `F::Of<Int>`: found as any other is, once the type
+    -- asked is known.)
+    if let .con mark (_ :: _) ← find subject then
+      if mark == Syntax.gatMark then
+        match ← assocAt tr subject name with
+        | some found =>
+          try unifyAt s!"`{name}` of `{Syntax.lastSegment tr}`" found a
+          catch e => throw (pos ++ e)
+        | none => left := left.push (tr, subject, name, a, owner, pos)
+        continue
     let (self, args) ← subjectOf tr subject
     let known ← match ← find self with
       | .con n hargs => pure (if n.startsWith "'" then none else some (n, hargs))

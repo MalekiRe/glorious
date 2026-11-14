@@ -924,8 +924,19 @@ partial def inferCall (scope : Scope) (amb : Row) (f : Expr) (args : List Expr)
           rm := (k, k') :: rm
           found := found ++ [.fn [] .unit [] (some k') (← freshCap)]
         | none => found := found ++ [← freshTy]
-      let tm := (sig.self, self) :: sig.tparams.zip targs ++ (sig.assocs.map (·.2)).zip found
+      -- (Its own type parameters anew, and an answer for each place its
+      -- types ask a type the trait leaves at types.)
+      let mut anew : List (Nat × Ty) := []
+      for (_, id) in sig.mparams do
+        anew := anew ++ [(id, ← freshTy)]
+      for (_, _, id) in sig.gats do
+        anew := anew ++ [(id, ← freshTy)]
+      let tm := (sig.self, self) :: sig.tparams.zip targs ++ (sig.assocs.map (·.2)).zip found ++ anew
       let subject := if targs.isEmpty then self else Ty.tuple (self :: targs)
+      for (name, asked, id) in sig.gats do
+        let use := (sig.trait, Ty.con Syntax.gatMark (self :: asked.map (subst tm [] [])), name,
+          subst tm [] [] (.var id), (← get).owner, (← get).pos)
+        modify fun s => { s with assocUses := s.assocUses.push use }
       for ((name, _), a) in sig.assocs.zip found do
         modify fun s =>
           { s with assocUses := s.assocUses.push (sig.trait, subject, name, a, s.owner, s.pos) }

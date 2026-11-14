@@ -276,6 +276,13 @@ structure MethodSig where
   row is also among `assocs`, as the type of a callable that takes nothing,
   gives nothing and performs the row. -/
   rowAssocs : List (String × Nat) := []
+  /-- The type parameters of its own, `fn single<T>(..)`: each by name, as
+  the variable that stands for it. A use has each anew. -/
+  mparams : List (String × Nat) := []
+  /-- Where its types ask a type the trait leaves to implementations at
+  types, `Of<T>`: the name, what it is asked at, and the variable that
+  stands for the answer there. -/
+  gats : List (String × List Ty × Nat) := []
 
 structure ImplDecl where
   trait : String
@@ -309,6 +316,9 @@ structure ImplDecl where
   (`where R: Get<T>`, `where H: Same<T>`). Each the trait, its arguments and
   the type it is asked of, in the implementation's own type parameters. -/
   extra : List (String × List Ty × Ty) := []
+  /-- For a type it says that takes types, `type Of<T> = [T];`: the
+  variables that stand in `assocs` for what it takes. -/
+  gatParams : List (String × List Nat) := []
 
 /-- A trait needed of a type at a call: of the type a trait's function is used
 at, or of a type parameter of the function called. -/
@@ -708,6 +718,10 @@ structure St where
   lateKeeps : Array (Elab.DropSite × Ty × List (Ty × Nat) × String) := #[]
   /-- Types that have to have nothing to destroy, and what to say if one has. -/
   quiets : Array (Ty × String) := #[]
+  /-- While a trait's functions are read: the types it leaves to
+  implementations, and where one is asked at types, as `MethodSig.gats`. -/
+  gatScope : List String := []
+  gatOccs : Array (String × List Ty × Nat) := #[]
   /-- A program in which some type has `Drop`: values are destroyed where
   they are let go, each type by its own function, and a function is given
   how to destroy the types it is generic in. Without `Drop` anywhere there

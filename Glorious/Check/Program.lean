@@ -1096,6 +1096,14 @@ def checkGroup (decls : List FnDecl) : M Unit := do
           let tm := (sig.self, self) :: sig.tparams.zip (im.targs.map (subst own [] []))
             ++ sig.assocs.filterMap fun (a, id) =>
               (im.assocs.lookup a).map fun t => (id, subst own [] [] t)
+          -- Its own type parameters are the function's, each itself here;
+          -- and where its types ask a type the trait leaves at types, that
+          -- is what the implementation says at them.
+          let tm := tm ++ sig.mparams.filterMap fun (g, id) => (rigid.lookup g).map fun t => (id, t)
+          let tm := tm ++ sig.gats.filterMap fun (a, asked, id) =>
+            (im.assocs.lookup a).map fun said =>
+              let taken := ((im.gatParams.lookup a).getD []).zip (asked.map (subst tm [] []))
+              (id, subst (own ++ taken) [] [] said)
           -- The trait's lifetimes are each itself here, as a function's own
           -- are: what the trait says is borrowed from one thing may not be
           -- borrowed from another.
@@ -1278,7 +1286,8 @@ def checkItems (items : List Item) : M Unit := do
             -- (Its type parameters: the head's arguments, and then those
             -- that are only inside one, or among the trait's own.)
             let inner := (im.pvars.map (·.1)).filter (!im.params.contains ·)
-            checkGroup [{ name := Syntax.implFnName im.trait im.head m, params := im.params ++ inner, annots,
+            checkGroup [{ name := Syntax.implFnName im.trait im.head m,
+                          params := im.params ++ inner ++ sig.mparams.map (·.1), annots,
                           ret, clauses, impl := some (im, sig) }]
     for c in coercing do
       unless (((← get).fnBounds.lookup c).getD 0) == 0 do

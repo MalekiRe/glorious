@@ -1326,8 +1326,11 @@ partial def resolveItem (ctx : Ctx) : Item → R (List Item)
       | some names => names
       | none => []
     let methods ← methods.mapM fun (m, ps, r) => do
-      pure (ownName ctx .value m, ← ps.mapM (resolveType ctx ("Self" :: extra)),
-        ← r.mapM (resolveType ctx ("Self" :: extra)))
+      -- (With the type parameters of its own, if it has some.)
+      let (r, own) := methodGenerics r
+      let known := "Self" :: extra ++ own
+      pure (ownName ctx .value m, ← ps.mapM (resolveType ctx known),
+        withMethodGenerics (← r.mapM (resolveType ctx known)) own)
     pure [.trait (ownName ctx .trait name) methods]
   | .traitInfo name supers defaults params assocs => do
     let supers ← supers.mapM fun s => (·.1) <$> resolveNamed ctx .trait [] s

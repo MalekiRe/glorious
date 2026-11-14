@@ -2932,18 +2932,26 @@ the order it is being built:
   of the library's collections used side by side; choosing by the value's
   type would mean reading the program again for each call, as the `..` of
   a tuple pattern does.
-- **Generic associated types are not built; what they are for is partly
-  reachable.** A family of types, one for each type asked (`type Of<T>`),
-  is a trait that takes the parameter and leaves a type:
-  `trait Family<T> { type Of; }`, `impl<T> Family<T> for Arrays { type Of =
-  [T]; }`, asked as `F: Family<Int, Of = A>, F: Family<Str, Of = B>`. Two
-  things were wrong for that and are fixed: an equality bound was of the
-  trait whatever its arguments, so `A` and `B` were made one; and two
-  bounds of one trait on one parameter had the arguments of the first.
-  `type Of<T>;` is refused with what to write. Not reachable: a type left
-  to implementations that is for every lifetime (`type Item<'a>`, an
-  iterator that lends), and a trait's function with type parameters of its
-  own.
+- **Generic associated types, over types.** `type Of<T>;` in a trait is a
+  type for each type it is asked at; an implementation says `type Of<T> =
+  [T];`. It is asked as `Of<T>` in the trait's own functions and as
+  `F::Of<Int>` in a function's type. Each place it is written has an answer
+  of its own, found where the implementation is known, as a plain
+  associated type's is. With it, a trait's function may have type
+  parameters of its own, `fn map<A, B>(Of<A>, fn(A) -> B) -> Of<B>`: a use
+  has them anew, and in an implementation they are the function's. Not
+  built: a lifetime as what it takes (`type Item<'a>`, an iterator that
+  lends), which is refused where it is written; saying what one is in a
+  bound (`F: Family<Of<Int> = A>`); type arguments written at a call for a
+  trait function's own parameters; and a trait with parameters of its own
+  that also leaves such a type. A function generic in `F` that calls
+  `single` at two types has been run only where `F` was known and the
+  function written out for it.
+- **A family of types by a trait's parameter** also works: `trait
+  Family<T> { type Of; }`, asked as `F: Family<Int, Of = A>, F:
+  Family<Str, Of = B>`. Two things were wrong for that and are fixed: an
+  equality bound was of the trait whatever its arguments, and two bounds of
+  one trait on one parameter had the arguments of the first.
 - **covey: a function of any parameters is a system, by one
   implementation for each number of them.** `Parameter` gives, for a
   parameter's type, what it asks for without the reference (`Changed<A>`,

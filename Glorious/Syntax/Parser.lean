@@ -1886,6 +1886,8 @@ private partial def parseItem : P Item := do
         -- `type Item = Int;`: a type the trait leaves to the implementation.
         advance
         let name ← expectIdent
+        -- `type Of<T> = [T];`: what it is at each type it is asked at.
+        let takes ← parseGenerics
         expectPunct "="
         -- `type Effects = {Log};`: a row, kept as the type of a callable
         -- that takes nothing, gives nothing and performs it.
@@ -1893,7 +1895,7 @@ private partial def parseItem : P Item := do
             pure (TypeExpr.fn [] (.performs (.tuple []) (← parseRow)))
           else parseType
         let _ ← acceptPunct ";"
-        methods := methods.push (.typeAlias name [] body)
+        methods := methods.push (.typeAlias name takes body)
       | .ident "const" =>
         -- `const NAME: Type = value;`: the trait's function of that name,
         -- which takes nothing and gives the value.
@@ -2026,6 +2028,11 @@ private partial def parseTrait : P (List Item) := do
     if (← peek) == .ident "type" then
       advance
       assocs := assocs.push (← expectIdent)
+      -- `type Of<T>;`: a type for each type it is asked at. How many it
+      -- takes is seen where an implementation says what it is.
+      let asked ← parseGenerics
+      if asked.any (·.startsWith "'") then
+        failAt "a type a trait leaves to its implementations can take types, `type Of<T>;`, but not yet a lifetime"
       -- `type Effects: EffectRow;`: what is said of it is read and not kept;
       -- a row is known by where the trait's functions use it.
       if ← acceptPunct ":" then
@@ -2048,16 +2055,14 @@ private partial def parseTrait : P (List Item) := do
       continue
     match ← peek with
     | .ident "fn" => advance
-    | .op "<" =>
-      -- `type Of<T>;`: a type left to implementations that takes a
-      -- parameter. Not read; the trait's own parameter says the same.
-      failAt "a type a trait leaves to its implementations takes no parameters: give the trait the parameter, `trait Family<T> { type Of; }`, and ask for it at each, `F: Family<Int, Of = A>`"
     | _ => failAt "expected `fn`: a trait lists the functions a type must have"
     let m ← match ← peek with
       | .op s => do
         advance
         pure s
       | _ => expectIdent
+    -- `fn single<T>(..)`: type parameters of the function's own.
+    let own ← parseGenerics
     expectPunct "("
     let mut types : Array TypeExpr := #[]
     let mut names : Array (Option String) := #[]
@@ -2074,7 +2079,7 @@ private partial def parseTrait : P (List Item) := do
     expectPunct ")"
     -- `-> R`, `-> R / {E}`, or `/ {E}` alone for a function that gives `()`.
     let ret ← if (← acceptPunct "->") || (← peek) == .op "/" then some <$> parseResult else pure none
-    methods := methods.push (m, types.toList, ret)
+    methods := methods.push (m, types.toList, withMethodGenerics ret (genericParams own))
     if (← peek) == .punct "{" then
       -- A body: what an implementation gets if it does not write its own.
       let pats ← names.toList.mapM fun

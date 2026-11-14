@@ -46,15 +46,28 @@ partial def resolveType (params : List (String × Ty)) (decl : Bool) : TypeExpr 
         -- leaves open: the one every use of the trait gives its own answer
         -- for, not one answer shared by them all.
         if p == "Self" then
+          if !args.isEmpty && (← get).gatScope.contains name then
+            return ← resolveType params decl (.name name args)
           if let some own := params.lookup name then return own
         let traits := (← get).traitShape.filter fun (_, arity, assocs) => arity == 0 && assocs.contains name
         match traits with
         | [(tr, _, _)] =>
           let a ← freshTy
-          modify fun s => { s with assocUses := s.assocUses.push (tr, self, name, a, s.owner, s.pos) }
+          -- (`F::Of<Int>`: asked at types, which go with the type asked.)
+          let asked ← args.mapM (resolveType params decl)
+          let subject := if asked.isEmpty then self else Ty.con Syntax.gatMark (self :: asked)
+          modify fun s => { s with assocUses := s.assocUses.push (tr, subject, name, a, s.owner, s.pos) }
           return a
         | [] => throw s!"`{x}`: no trait leaves a type `{name}` to its implementations"
         | _ => throw s!"`{x}`: more than one trait leaves a type `{name}` to its implementations"
+    -- `Of<T>` in a trait's own functions: the type the trait leaves to an
+    -- implementation, at these types. Each place it is written has its own
+    -- answer, found where the implementation is known.
+    if !args.isEmpty && (← get).gatScope.contains x then
+      let asked ← args.mapM (resolveType params decl)
+      if let .var id ← freshTy then
+        modify fun s => { s with gatOccs := s.gatOccs.push (x, asked, id) }
+        return .var id
     match params.lookup x with
     | some t =>
       if args.isEmpty then pure t else throw s!"type parameter `{x}` takes no arguments"
@@ -297,7 +310,7 @@ def declareTraits (items : List Item) : M Unit := do
     modify fun s =>
       { s with
         traits := ("Drop", ["drop"]) :: s.traits
-        methods := ("drop", ⟨"Drop", 0, dropSelf, [.ref .uniq (.var dropSelf) dropCap], .unit, [], [], [], ⟨[], none⟩, []⟩)
+        methods := ("drop", ⟨"Drop", 0, dropSelf, [.ref .uniq (.var dropSelf) dropCap], .unit, [], [], [], ⟨[], none⟩, [], [], []⟩)
           :: s.methods }
   for item in items do
     if let .trait name methods := item then
@@ -326,7 +339,7 @@ def declareTraits (items : List Item) : M Unit := do
       -- it leaves to an implementation: held as the type of a callable that
       -- takes nothing, gives nothing and performs that row.
       let asRows := methods.flatMap fun (_, _, ret) =>
-        match ret with
+        match (Syntax.methodGenerics ret).1 with
         | some (.performs _ effects) => effects.filterMap fun
           | (mark, [.name e []]) =>
             match e.splitOn "::" with
@@ -346,13 +359,20 @@ def declareTraits (items : List Item) : M Unit := do
       modify fun s => { s with traitShape := (name, tparams.length, assocNames) :: s.traitShape }
       let mut index := 0
       for (m, params, ret) in methods do
+        -- (The type parameters of its own: a variable each.)
+        let (ret, ownNames) := Syntax.methodGenerics ret
+        let mut mparams : List (String × Nat) := []
+        for g in ownNames do
+          if let .var id ← freshTy then mparams := mparams ++ [(g, id)]
+        modify fun s => { s with gatScope := assocNames, gatOccs := #[] }
         if ((← get).methods.lookup m).isSome then
           throw s!"`{m}` is declared twice as a function of a trait"
         -- A trait's function has no body its lifetimes could be found from,
         -- so the unwritten ones are one: what it gives may borrow whatever
         -- anything it takes borrows. A lifetime written with a name is its own.
         let named := (params ++ ret.toList).flatMap lifetimesOf
-        let mut scope : List (String × Ty) := ("Self", .var self) :: extra
+        let mut scope : List (String × Ty) :=
+          ("Self", .var self) :: extra ++ mparams.map fun (g, id) => (g, Ty.var id)
         for l in named.eraseDups do
           scope := scope ++ [(l, Ty.life (← freshCap))]
         let one ← freshCap
@@ -374,8 +394,10 @@ def declareTraits (items : List Item) : M Unit := do
         let written := scope.filterMap fun
           | (l, .ref _ _ cap) => some (cap, l)
           | _ => none
+        let gats := (← get).gatOccs.toList
+        modify fun s => { s with gatScope := [], gatOccs := #[] }
         let sig : MethodSig :=
-          ⟨name, index, self, ps, r, (one, "'_") :: written, tparams, assocVars, row, rowVars⟩
+          ⟨name, index, self, ps, r, (one, "'_") :: written, tparams, assocVars, row, rowVars, mparams, gats⟩
         modify fun s => { s with methods := (m, sig) :: s.methods }
         index := index + 1
       modify fun s => { s with traits := (name, methods.map (·.1)) :: s.traits }
@@ -495,11 +517,21 @@ def declareTraits (items : List Item) : M Unit := do
             | none => throw s!"{what}: `{Syntax.lastSegment t'}` takes arguments: `{p}: {Syntax.lastSegment t'}<..>`"
           extra := extra ++ [(t', cargs, subject)]
       let mut assocs : List (String × Ty) := []
+      let mut gatParams : List (String × List Nat) := []
       for a in assocNames do
         match methods.findSome? fun
-            | .typeAlias n _ body => if n == a then some body else none
+            | .typeAlias n takes body => if n == a then some (takes, body) else none
             | _ => none with
-        | some body => assocs := assocs ++ [(a, ← resolveType pmap false body)]
+        | some (takes, body) =>
+          -- (`type Of<T> = [T];`: what it takes, a variable each.)
+          let mut own : List (String × Ty) := []
+          let mut ids : List Nat := []
+          for p in takes do
+            if let .var id ← freshTy then
+              own := own ++ [(p, .var id)]
+              ids := ids ++ [id]
+          unless ids.isEmpty do gatParams := gatParams ++ [(a, ids)]
+          assocs := assocs ++ [(a, ← resolveType (own ++ pmap) false body)]
         | none => throw s!"{what} does not say what `{a}` is: write `type {a} = ..;`"
       for m in methods do
         if let .typeAlias n _ _ := m then
@@ -562,7 +594,8 @@ def declareTraits (items : List Item) : M Unit := do
         { s with
           impls := s.impls.push
             { trait := tr, head, params := args, context := ctx, methods,
-              dictFn := Elab.implDictName tr head, targs, assocs, pvars, fixed, equal, generic, extra }
+              dictFn := Elab.implDictName tr head, targs, assocs, pvars, fixed, equal, generic, extra,
+              gatParams }
           kimpls := s.kimpls ++ [⟨tr, head, arity, ctx⟩] }
   -- Every type can be destroyed: by nothing at all, by its own `Drop` and
   -- then its parts', or part by part. Said as an implementation for each
@@ -591,7 +624,7 @@ def declareTraits (items : List Item) : M Unit := do
           { s with
             impls := s.impls.push
               ⟨Syntax.destroyTrait, head, (List.range arity).map (s!"T{·}"), ctx, [],
-                Elab.implDictName Syntax.destroyTrait head, [], [], [], [], [], false, []⟩
+                Elab.implDictName Syntax.destroyTrait head, [], [], [], [], [], false, [], []⟩
             kimpls := s.kimpls ++ [⟨Syntax.destroyTrait, head, arity, ctx⟩] }
   -- What `Traits.coherent` asks of the implementations.
   unless Traits.noOverlap (← get).kimpls do
