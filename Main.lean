@@ -675,12 +675,9 @@ def parseInput (args : List String) : Except String (List Int) :=
     | none => throw s!"input `{a}` is not an integer"
 
 /-- Compile the program at `path` again whenever its text or a module of it
-changes, and run it. What does not change between compiles is kept: the
-prelude, checked once, and what the last compile found of where borrows can
-be scopes of their own. -/
+changes, and run it, each compile as `compileFile` makes one: from what the
+build directory keeps. -/
 partial def watch (path : String) (input : List Int) : IO UInt32 := do
-  let file ← placesFile path
-  let mut known ← readPlaces file
   let mut last : List String := []
   repeat
     let texts ← try
@@ -693,11 +690,9 @@ partial def watch (path : String) (input : List Int) : IO UInt32 := do
       if now != last then
         last := now
         let start ← IO.monoMsNow
-        match compileSource src true files (few := true) known with
+        match ← compileFile path with
         | .error e => IO.eprintln s!"{path}: {e}"
         | .ok c =>
-          known := c.places
-          writePlaces file c.places
           let compiled ← IO.monoMsNow
           IO.println s!"-- compiled in {compiled - start} ms"
           let bytecode := compile c.core
