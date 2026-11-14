@@ -1,6 +1,7 @@
 module
 
 public import Glorious.Driver
+public import Glorious.Target
 public import Glorious.Cases
 public import Glorious.Checks
 public import Glorious.Bytecode.Encode
@@ -195,14 +196,16 @@ partial def moduleFiles (path : System.FilePath) : IO (List (List String × Stri
   load [] (← IO.FS.readFile path)
 
 /-- Where what the last compile of the program at `path` found for each place
-is kept: in the user's cache, under a name made from the path. -/
+is kept: in its build directory. -/
 def placesFile (path : String) : IO System.FilePath := do
-  let whole ← IO.FS.realPath path
-  let home := (← IO.getEnv "HOME").getD "/tmp"
-  let base := match ← IO.getEnv "XDG_CACHE_HOME" with
-    | some dir => System.FilePath.mk dir
-    | none => System.FilePath.mk home / ".cache"
-  pure (base / "glorious" / "places" / s!"{(hash whole.toString).toNat}")
+  pure ((← Target.dirOf path) / "places")
+
+/-- Keep what a compile found for each place. -/
+def writePlaces (file : System.FilePath) (places : List ((String × Nat) × Nat)) : IO Unit := do
+  try
+    if let some dir := file.parent then IO.FS.createDirAll dir
+    IO.FS.writeFile file ("\n".intercalate (places.map fun ((owner, k), v) => s!"{k}\t{v}\t{owner}"))
+  catch _ => pure ()
 
 /-- What the last compile found for each place: a line for each, its number in
 its function, how it was elaborated and the function's name. -/
@@ -223,12 +226,28 @@ def compileFile (path : String) : IO (Except String Compiled) := do
   let file ← placesFile path
   let known ← if (← IO.getEnv "GLORIOUS_FRESH").isSome then pure [] else readPlaces file
   let result := compileSource (← IO.FS.readFile path) true (← moduleFiles path) (few := true) known
-  if let .ok c := result then
-    try
-      if let some dir := file.parent then IO.FS.createDirAll dir
-      IO.FS.writeFile file ("\n".intercalate (c.places.map fun ((owner, k), v) => s!"{k}\t{v}\t{owner}"))
-    catch _ => pure ()
+  if let .ok c := result then writePlaces file c.places
   pure result
+
+/-- The program at `path` built: what the last compile kept in the build
+directory, if it was made from the same texts by the same compiler, and
+otherwise compiled and kept (`GLORIOUS_FRESH` set: compiled whatever is kept). -/
+def buildFile (path : String) : IO (Except String Target.Built) := do
+  let dir ← Target.dirOf path
+  let key ← Target.keyOf (← IO.FS.readFile path) (← moduleFiles path)
+  if (← IO.getEnv "GLORIOUS_FRESH").isNone then
+    if let some b ← Target.read dir key then return .ok b
+  match ← compileFile path with
+  | .error e => pure (.error e)
+  | .ok c =>
+    let b := Target.Built.of c (startLocals c)
+    Target.write dir key b
+    pure (.ok b)
+
+/-- The bytes of a built program's bytecode file. -/
+def builtBytes (b : Target.Built) : ByteArray :=
+  ⟨((Bytecode.Encode.file b.ctorNames.toList b.bytecode
+    ++ Bytecode.Encode.list Bytecode.Encode.nat b.startLocals).map Nat.toUInt8).toArray⟩
 
 /-- The example programs that state what they must print. -/
 def exampleCases (dir : System.FilePath) :
@@ -351,23 +370,23 @@ def selftest (vm : Option String) : IO UInt32 := do
 /-- Say what the typing of a program's Core shows. With `strict`, fail if some
 borrow is not covered by the proof about borrows. -/
 def certify (path : String) (strict : Bool) : IO UInt32 := do
-  match ← compileFile path with
+  match ← buildFile path with
   | .ok c =>
-    let n := (c.cert.map (·.sigs.length)).getD 0
-    let owned := (c.cert.map (·.strict)).getD false
-    let regions := (c.cert.map (·.regions)).getD false
+    let n := c.sigs
+    let owned := c.strict
+    let regions := c.regions
     let how := if owned then "well typed and well owned" else "well typed, not shown well owned,"
     let borrows :=
       if regions then "its mutable variables and labels shown never to be used after their blocks end"
       else "its mutable variables and labels not shown to stay within their blocks"
-    let loans := (c.cert.map (·.loans)).getD false
+    let loans := c.loans
     let lent :=
       if !loans then "the rules for borrows not shown to hold"
       else if c.lent == 0 then "no borrow made a scope of its own"
       else s!"{c.lent} borrows shown to be the only way to what they borrow while they last"
     IO.println s!"{path}: {how} in Core, {borrows}, {lent}, with {n} function signatures"
     for b in c.plain do
-      IO.println s!"{path}:{b.show} is not shown exclusive in Core"
+      IO.println s!"{path}:{b} is not shown exclusive in Core"
     if strict && !c.plain.isEmpty then
       IO.eprintln s!"{path}: {c.plain.length} borrows are kept exclusive only by the check of the source text"
       pure 1
@@ -671,10 +690,7 @@ partial def watch (path : String) (input : List Int) : IO UInt32 := do
         | .error e => IO.eprintln s!"{path}: {e}"
         | .ok c =>
           known := c.places
-          try
-            if let some dir := file.parent then IO.FS.createDirAll dir
-            IO.FS.writeFile file ("\n".intercalate (c.places.map fun ((owner, k), v) => s!"{k}\t{v}\t{owner}"))
-          catch _ => pure ()
+          writePlaces file c.places
           let compiled ← IO.monoMsNow
           IO.println s!"-- compiled in {compiled - start} ms"
           let bytecode := compile c.core
@@ -785,9 +801,9 @@ def main (args : List String) : IO UInt32 := do
   | ["selftest"] => selftest none
   | ["selftest", vm] => selftest (some vm)
   | ["build", path, out] =>
-    match ← compileFile path with
-    | .ok c =>
-      writeBytecode c out
+    match ← buildFile path with
+    | .ok b =>
+      IO.FS.writeBinFile out (builtBytes b)
       pure 0
     | .error e =>
       IO.eprintln s!"{path}: {e}"
@@ -804,22 +820,31 @@ def main (args : List String) : IO UInt32 := do
       | .error e =>
         IO.eprintln e
         return 64
+    if command == "run" then
+      let b ← match ← buildFile path with
+        | .ok b => pure b
+        | .error e =>
+          IO.eprintln s!"{path}: {e}"
+          return 1
+      match ← runStreaming b.ctorNames b.bytecode (Bytecode.initIO b.bytecode input) 0 with
+      | .halt r =>
+        IO.println (showValue b.ctorNames r.value)
+        return 0
+      | _ =>
+        -- The bytecode went wrong, so the Core program does too: find where
+        -- and say why (the Core program made again, where it was kept).
+        match ← compileFile path with
+        | .ok c =>
+          IO.eprintln s!"the program went wrong: {explainStuck c (stuckAt c.core (Core.initIO c.core input))}"
+        | .error e => IO.eprintln s!"the program went wrong; compiled again: {e}"
+        return 2
     let c ← match ← compileFile path with
       | .ok c => pure c
       | .error e =>
         IO.eprintln s!"{path}: {e}"
         return 1
     let bytecode := compile c.core
-    if command == "run" then
-      match ← runStreaming c.ctorNames bytecode (Bytecode.initIO bytecode input) 0 with
-      | .halt r =>
-        IO.println (showValue c.ctorNames r.value)
-        pure 0
-      | _ =>
-        -- The bytecode went wrong, so the Core program does too: find where and say why.
-        IO.eprintln s!"the program went wrong: {explainStuck c (stuckAt c.core (Core.initIO c.core input))}"
-        pure 2
-    else if command == "check" then
+    if command == "check" then
       let (onCore, coreSteps) := runToEnd (Core.stepIO c.core) (Core.initIO c.core input)
       let (onVm, vmSteps) := runToEnd (Bytecode.stepIO bytecode) (Bytecode.initIO bytecode input)
       let a := showOutcome c.ctorNames onCore

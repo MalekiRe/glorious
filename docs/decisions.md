@@ -13,6 +13,44 @@ very incremental: a change to a program costs what the change touches, not
 the whole program. The specification of an incremental self-hosted
 compiler (`GSC-2-…`) is not followed on this branch.
 
+### The build directory, and the plan towards an incremental compiler
+
+**Decision (user): restructure the compiler towards one that is incremental,
+with a build directory.** The plan, in steps each shipped on its own with the
+test suite passing:
+
+1. A build directory per program, and what a compile makes kept in it (done:
+   below).
+2. The checker's state split into what is declared (built once from the
+   items), what one group of functions needs while it is checked, and what
+   a group's check gives, so that a group is a function of what it is given.
+3. Uses counted from what a function's summary says of its parameters, not by
+   following its body.
+4. The checker hands the elaborator each body with its types and meanings on
+   it, in place of facts keyed by expression numbers; names are resolved
+   once.
+5. Core functions known by name, not position, until they are linked; the
+   certificate found a group at a time, each group's kept; whether a borrow is
+   a scope of its own decided by inference, not by trying.
+6. Each of those kept in the build directory by what it was made from, so
+   that a change to a function's body redoes that function and, where what
+   it shows others has not changed, nothing else.
+
+What is proved stays as it is: every program is certified whole, and the
+proved checker checks the whole certificate.
+
+**The build directory** is `GLORIOUS_TARGET` if set, and otherwise one in the
+user's cache (`$XDG_CACHE_HOME/glorious/build/`, or `~/.cache`), named from
+the program's path: a program's own folder holds only what was written in it.
+It keeps `program`, what the last compile made as the commands use it (the
+bytecode, the constructor names, what Core's typing showed, the borrows that
+are not scopes of their own, and how each place was made), under the key it
+was made from: the compiler's file by size and time, and every text of the
+program. `run`, `certify` and `build` read it where the key is the same, and
+compile and write it otherwise; `GLORIOUS_FRESH` set: compiled whatever is
+kept. A program that went wrong is compiled again to say where. covey run
+again unchanged: 0.55 s to 0.016 s; calculator 1.2 s to 0.026 s.
+
 ### What a compile of a file keeps for the next
 
 **Decision: `glorious run|check|build|certify FILE` keeps what its search
@@ -20,8 +58,8 @@ found, and the next compile of the same file starts from it.** Where a
 borrow can be a scope of its own, which can be is found by asking, for each
 place, whether the program can then be shown to follow Core's rules: one
 certificate found for each, side by side. That search is most of a compile.
-What it found is written to the user's cache
-(`$XDG_CACHE_HOME/glorious/places/`, or `~/.cache`), a line for each place:
+What it found is written to the program's build directory (below), a
+line for each place:
 the function it is in, how many places of that function come before it, and
 how it was made. With it, which of Core's sets of rules and which way of
 finding a certificate passed. The next compile asks that all at once, with a
