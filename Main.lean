@@ -109,8 +109,9 @@ structure Outcome where
   deriving Inhabited
 
 /-- Compile a test program, and with `run` run it on the Lean machines. -/
-def outcome (run : Bool) (c : Case) (files : List (List String × String)) : Outcome :=
-  match compileSource c.src true files with
+def outcome (run : Bool) (c : Case) (files : List (List String × String)) (few : Bool := false) :
+    Outcome :=
+  match compileSource c.src true files few with
   | .error e => { lean := s!"error: {e}", error := some e }
   | .ok compiled =>
     let has := fun (f : Typing.Cert → Bool) => (compiled.cert.map f).getD false
@@ -192,9 +193,41 @@ partial def moduleFiles (path : System.FilePath) : IO (List (List String × Stri
     pure out
   load [] (← IO.FS.readFile path)
 
-/-- Compile the program at `path`, with the modules it has in other files. -/
+/-- Where what the last compile of the program at `path` found for each place
+is kept: in the user's cache, under a name made from the path. -/
+def placesFile (path : String) : IO System.FilePath := do
+  let whole ← IO.FS.realPath path
+  let home := (← IO.getEnv "HOME").getD "/tmp"
+  let base := match ← IO.getEnv "XDG_CACHE_HOME" with
+    | some dir => System.FilePath.mk dir
+    | none => System.FilePath.mk home / ".cache"
+  pure (base / "glorious" / "places" / s!"{(hash whole.toString).toNat}")
+
+/-- What the last compile found for each place: a line for each, its number in
+its function, how it was elaborated and the function's name. -/
+def readPlaces (file : System.FilePath) : IO (List ((String × Nat) × Nat)) := do
+  unless ← file.pathExists do return []
+  let lines := (← IO.FS.readFile file).splitOn "\n"
+  pure <| lines.filterMap fun line =>
+    match line.splitOn "\t" with
+    | k :: v :: rest => do
+      pure ((("\t".intercalate rest), ← k.toNat?), ← v.toNat?)
+    | _ => none
+
+/-- Compile the program at `path`, with the modules it has in other files.
+What the last compile of it found for each place where a borrow can be a scope
+of its own is where this one starts; and what this one finds is kept for the
+next (`GLORIOUS_FRESH` set: not read). -/
 def compileFile (path : String) : IO (Except String Compiled) := do
-  pure (compileSource (← IO.FS.readFile path) true (← moduleFiles path) (few := true))
+  let file ← placesFile path
+  let known ← if (← IO.getEnv "GLORIOUS_FRESH").isSome then pure [] else readPlaces file
+  let result := compileSource (← IO.FS.readFile path) true (← moduleFiles path) (few := true) known
+  if let .ok c := result then
+    try
+      if let some dir := file.parent then IO.FS.createDirAll dir
+      IO.FS.writeFile file ("\n".intercalate (c.places.map fun ((owner, k), v) => s!"{k}\t{v}\t{owner}"))
+    catch _ => pure ()
+  pure result
 
 /-- The example programs that state what they must print. -/
 def exampleCases (dir : System.FilePath) :
@@ -231,12 +264,16 @@ def selftest (vm : Option String) : IO UInt32 := do
   warm
   lap "the prelude and library checked"
   let found ← if times then do
-      let timed ← sideBySideTimed all.zipIdx fun ((c, files), i) => outcome (i < quick.length) c files
+      let timed ← sideBySideTimed all.zipIdx fun ((c, files), i) =>
+        -- (An example is compiled as the command compiles a file.)
+        outcome (i < quick.length) c files (cases.length ≤ i && i < quick.length)
       let slow := ((all.zip timed.toList).toArray.qsort fun a b => a.2.2 > b.2.2).toList.take 8
       for ((c, _), (_, ms)) in slow do
         IO.eprintln s!"{ms} ms: {((c.src.take 100).toString.replace "\n" " ")}"
       pure (timed.map (·.1))
-    else sideBySide all.zipIdx fun ((c, files), i) => outcome (i < quick.length) c files
+    else sideBySide all.zipIdx fun ((c, files), i) =>
+        -- (An example is compiled as the command compiles a file.)
+        outcome (i < quick.length) c files (cases.length ≤ i && i < quick.length)
   lap "programs compiled and run on the Lean machines"
   -- What is unsafe runs on the Rust VM alone, and the proved machines say so.
   let foreign ← if vm.isSome then sideBySide foreignCases fun c => outcome false c [] else pure #[]

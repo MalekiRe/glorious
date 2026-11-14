@@ -1509,26 +1509,42 @@ partial def schemeOf (scc : Nat) : M Scheme := do
     modify fun s => { s with kept := open_.fold (fun k a => k.insert a) s.kept }
     let kept := (← get).kept
     let last := (← get).accs.size
-    let mut settled : Array (Nat × List Nat × List Nat) := #[]
+    -- A record is settled if nothing it reaches is open: older than the
+    -- group, shared, or kept. Every record reachable from the group's is
+    -- visited once, and openness goes back along the edges from the open
+    -- ones. (Done for each record apart, as it was, a group went again over
+    -- the records of every group inferred inside it.)
+    let mut roots : Array Nat := #[]
     for a in [startAcc:last] do
-      if (← findAcc a) == a && !(← accNode a).final then
-        let mut reach : Array Nat := #[a]
-        let mut seen : Std.HashSet Nat := ({} : Std.HashSet Nat).insert a
-        let mut closed := true
-        let mut at_ := 0
-        while closed && at_ < reach.size do
-          let n := reach[at_]!
-          at_ := at_ + 1
-          let x ← accNode n
-          unless x.final do
-            if n < startAcc || shared.2.contains n || kept.contains n then closed := false
-            else
-              for next in x.subs.map (·.1) ++ x.insts.map (·.1) do
-                let m ← findAcc next
-                unless seen.contains m do
-                  seen := seen.insert m
-                  reach := reach.push m
-        if closed then settled := settled.push (a, ← accSet a, ← accWrSet a)
+      if (← findAcc a) == a && !(← accNode a).final then roots := roots.push a
+    let mut seen : Std.HashSet Nat := roots.foldl (fun s a => s.insert a) {}
+    let mut stack := roots
+    let mut preds : Std.HashMap Nat (List Nat) := {}
+    let mut opened : Array Nat := #[]
+    while !stack.isEmpty do
+      let n := stack.back!
+      stack := stack.pop
+      let x ← accNode n
+      unless x.final do
+        if n < startAcc || shared.2.contains n || kept.contains n then opened := opened.push n
+        else
+          for next in x.subs.map (·.1) ++ x.insts.map (·.1) do
+            let m ← findAcc next
+            preds := preds.insert m (n :: preds.getD m [])
+            unless seen.contains m do
+              seen := seen.insert m
+              stack := stack.push m
+    let mut isOpen : Std.HashSet Nat := opened.foldl (fun s a => s.insert a) {}
+    while !opened.isEmpty do
+      let n := opened.back!
+      opened := opened.pop
+      for p in preds.getD n [] do
+        unless isOpen.contains p do
+          isOpen := isOpen.insert p
+          opened := opened.push p
+    let mut settled : Array (Nat × List Nat × List Nat) := #[]
+    for a in roots do
+      unless isOpen.contains a do settled := settled.push (a, ← accSet a, ← accWrSet a)
     unless settled.isEmpty do
       modify fun s =>
         { s with

@@ -44,14 +44,102 @@ structure Compiled where
   /-- The borrows that are not: each is, in `core`, the reference it borrows,
   and only the check of the source text keeps it exclusive. -/
   plain : List Elab.Borrow := []
+  /-- How each place of `core` was elaborated (0 for a borrow that is the
+  reference it borrows, and 1 or 2 for a scope of its own), by the function it
+  is in and how many places of that function come before it: what a later
+  compile of a changed program can start from. -/
+  places : List ((String × Nat) × Nat) := []
+
+/-- Each place by the function it is in and how many places of that function
+come before it: what stays the same of a place when other functions change. -/
+def placeKeys (owners : Array String) : Array (String × Nat) := Id.run do
+  let mut count : Std.HashMap String Nat := {}
+  let mut out := #[]
+  for o in owners do
+    let k := count.getD o 0
+    out := out.push (o, k)
+    count := count.insert o (k + 1)
+  pure out
+
+mutual
+/-- Every name an expression writes, bound or not, and every field or function
+named after a dot: more than it can mean, never less. -/
+partial def namesInExpr (acc : List String) : Syntax.Expr → List String
+  | .name _ n => n :: acc
+  | .call _ f args => args.foldl namesInExpr (namesInExpr acc f)
+  | .tailCall _ f args => args.foldl namesInExpr (namesInExpr acc f)
+  | .tuple args => args.foldl namesInExpr acc
+  | .proj e _ => namesInExpr acc e
+  | .closure _ clauses => clauses.foldl namesInClause acc
+  | .handle subject arms => arms.foldl namesInClause (namesInExpr acc subject)
+  | .labelScope _ body => body.foldl namesInStmt acc
+  | .ref _ n => n :: acc
+  | .deref e => namesInExpr acc e
+  | .reborrow _ e => namesInExpr acc e
+  | .refField _ _ n path _ => n :: path ++ acc
+  | .fieldOf _ e n => namesInExpr (n :: acc) e
+  | .int _ => acc
+  | .label _ => acc
+
+partial def namesInStmt (acc : List String) : Syntax.Stmt → List String
+  | .let_ _ value => namesInExpr acc value
+  | .expr e => namesInExpr acc e
+  | .defer e => namesInExpr acc e
+  | .letMut _ value => namesInExpr acc value
+  | .assign target value => namesInExpr (namesInExpr acc target) value
+  | .located _ _ s => namesInStmt acc s
+
+partial def namesInClause (acc : List String) : Syntax.Clause → List String
+  | .mk _ body => body.foldl namesInStmt acc
+end
+
+/-- The names written in an item that is not one of the library's functions. -/
+partial def namesInItem (acc : List String) : Syntax.Item → List String
+  | .fn _ _ _ _ clauses => clauses.foldl namesInClause acc
+  | .impl _ _ _ _ _ methods => methods.foldl namesInItem acc
+  | .traitInfo _ _ defaults _ _ => defaults.foldl namesInItem acc
+  | .alias _ value => namesInExpr acc value
+  | .coerce name => name :: acc
+  | .pub _ item => namesInItem acc item
+  | .module _ (some body) => body.foldl namesInItem acc
+  | _ => acc
+
+/-- The library's modules read for one program, without the functions none of
+the program's text can reach: each is kept if its name, without its module, is
+written in what is kept. (They are known to be well typed: the library is
+checked whole by the tests. A function its text names but nothing calls is
+kept, and so checked, as it was.) -/
+partial def withoutUnreached (items : List Syntax.Item) : List Syntax.Item := Id.run do
+  let library := fun (name : String) =>
+    name.startsWith "std::" || name.startsWith "core::" || name.startsWith "alloc::"
+  let isLibraryFn : Syntax.Item → Option String
+    | .fn name _ _ _ _ => if library name then some (Syntax.lastSegment name) else none
+    | _ => none
+  let mut wanted : Std.HashSet String := {}
+  for item in items do
+    if (isLibraryFn item).isNone then
+      for n in namesInItem [] item do wanted := wanted.insert (Syntax.lastSegment n)
+  let mut kept : Std.HashSet Nat := {}
+  let mut changed := true
+  let indexed := items.zipIdx
+  while changed do
+    changed := false
+    for (item, k) in indexed do
+      if let some short := isLibraryFn item then
+        if !kept.contains k && wanted.contains short then
+          kept := kept.insert k
+          changed := true
+          for n in namesInItem [] item do wanted := wanted.insert (Syntax.lastSegment n)
+  pure <| indexed.filterMap fun (item, k) =>
+    if (isLibraryFn item).isSome && !kept.contains k then none else some item
 
 /-- Find a certificate for a program's Core and have the proved checker accept
 it: with the ownership rules and the region rules if the program can be shown
 to meet them, and otherwise with those of them it can, or as a typing only.
 An error here is a defect in the compiler, not in the program. -/
 def certifyProgram (items : List Syntax.Item) (p : Core.Program)
-    (envSizes : List (Nat × Nat × Nat) := []) (failed : List (Bool × Bool) := []) :
-    Except String Typing.Cert := do
+    (envSizes : List (Nat × Nat × Nat) := []) (failed : List (Bool × Bool) := [])
+    (first : Option Nat := none) : Except String (Typing.Cert × Option Nat) := do
   -- With the region rules, first with callables taken to bind a region
   -- where they are given a reference to a cell, and then without; and only
   -- then with references taken to be to one of several cells where they
@@ -60,21 +148,28 @@ def certifyProgram (items : List Syntax.Item) (p : Core.Program)
     match Infer.certify items p strict envSizes regions loans ranked widen with
     | .ok cert => if Typing.checkProgram cert p then some cert else none
     | .error _ => none
-  -- (`failed`: ways already seen to fail with every rule, not tried again.)
-  let attempt (strict regions loans : Bool) : Option Typing.Cert :=
-    (if regions then [(true, false), (false, false), (false, true), (true, true)]
-      else [(false, false)]).findSome? fun (ranked, widen) =>
+  -- (`failed`: ways already seen to fail with every rule, not tried again.
+  -- `first`: the one of these attempts that passed last time, tried first.)
+  let ways := [(true, false), (false, false), (false, true), (true, true)]
+  let rules := [(true, true, true), (true, true, false), (true, false, false), (false, true, true),
+    (false, true, false)]
+  let attempts := rules.flatMap fun (strict, regions, loans) =>
+    (if regions then ways else [(false, false)]).map fun (ranked, widen) =>
+      (strict, regions, loans, ranked, widen)
+  let try_ := fun (k : Nat) => match attempts[k]? with
+    | some (strict, regions, loans, ranked, widen) =>
       if strict && regions && loans && failed.contains (ranked, widen) then none
       else one strict regions loans ranked widen
-  if let some cert := attempt true true true then return cert
-  if let some cert := attempt true true false then return cert
-  if let some cert := attempt true false false then return cert
-  if let some cert := attempt false true true then return cert
-  if let some cert := attempt false true false then return cert
+    | none => none
+  if let some k := first then
+    if let some cert := try_ k then return (cert, some k)
+  if let some found := (List.range attempts.length).findSome? fun k =>
+      if first == some k then none else (try_ k).map fun cert => (cert, some k) then
+    return found
   let cert ← match Infer.certify items p false envSizes with
     | .ok cert => pure cert
     | .error e => throw s!"no certificate was found: {e}"
-  if Typing.checkProgram cert p then pure cert
+  if Typing.checkProgram cert p then pure (cert, none)
   else throw s!"the certificate was rejected: {Infer.rejected cert p}"
 
 /-- Does a program have the standard library: does it name `std`, and have no
@@ -353,7 +448,8 @@ def lowered (b : Elab.Blocks) (written all : List Syntax.Item) :
 proved Core type checker accept the result. With `check := false` both checks
 are skipped, so that programs which go wrong can still be run. -/
 def compileSource (src : String) (check : Bool := true)
-    (files : List (List String × String) := []) (few : Bool := false) : Except String Compiled := do
+    (files : List (List String × String) := []) (few : Bool := false)
+    (known : List ((String × Nat) × Nat) := []) : Except String Compiled := do
   let (prelude, items) ← parseProgram src files check few
   -- Every name is given its meaning: the modules become one list of items.
   let resolved ← Syntax.Modules.resolve prelude items
@@ -382,6 +478,11 @@ def compileSource (src : String) (check : Bool := true)
     | true, true => checkedStdDrop.get
     | false, false => checkedPrelude.get
     | false, true => checkedPreludeDrop.get
+  -- (The library's modules read for this program alone: without what it
+  -- cannot reach.)
+  let all := match first with
+    | .ok (count, _) => if few && check then all.take count ++ withoutUnreached (all.drop count) else all
+    | .error _ => all
   let checkOnce := fun (all : List Syntax.Item) =>
     match check && !resolved.info.shadowed, first with
     | true, .ok (count, first) => Check.checkAfter first (all.drop count) resolved.info
@@ -436,13 +537,19 @@ def compileSource (src : String) (check : Bool := true)
     -- What is unsafe is outside what Core's rules are about: a program that
     -- calls a foreign function or reads memory at an address has no
     -- certificate.
-    let cert ← if check && !out.foreign then
-        match certifyProgram declared out.program out.envSizes failed with
-        | .ok cert => pure (some cert)
+    let first := List.lookup ("%way", 0) known
+    let (cert, way) ← if check && !out.foreign then
+        match certifyProgram declared out.program out.envSizes failed first with
+        | .ok (cert, way) => pure (some cert, way)
         | .error e =>
           throw s!"the checker accepted this program, but its Core could not be shown to be well typed: {e}. This is a defect in the compiler"
-      else pure none
-    pure (⟨out.program, out.ctorNames.map shownName, out.fnNames, out.opNames, cert, 0, out.plain⟩ : Compiled)
+      else pure (none, none)
+    -- (And the way that passed, under a name no function has.)
+    let way := match way with
+      | some k => [(("%way", 0), k)]
+      | none => []
+    pure (⟨out.program, out.ctorNames.map shownName, out.fnNames, out.opNames, cert, 0, out.plain,
+      way ++ (placeKeys out.siteOwners).toList.map fun k => (k, 0)⟩ : Compiled)
   -- A borrow given a name, or written as an argument of a call of a function,
   -- is a scope of its own in Core if the program can then be shown to follow
   -- every rule. Where it cannot, the borrow is the reference it borrows, as in
@@ -472,7 +579,8 @@ def compileSource (src : String) (check : Bool := true)
         | .ok cert =>
           if out.lent != 0 && Typing.checkProgram cert out.program then
             some (⟨out.program, out.ctorNames.map shownName, out.fnNames, out.opNames, some cert, out.lent,
-              out.plain⟩ : Compiled)
+              out.plain, ((placeKeys out.siteOwners).toList.zip (List.range out.sites)).map
+                fun (k, i) => (k, sites i)⟩ : Compiled)
           else none
         | .error _ => none
     | .error _ => none
@@ -480,6 +588,21 @@ def compileSource (src : String) (check : Bool := true)
     if check then
       if let .ok out := Elab.elabProgram all blocks (fun _ => 1) then
         if out.lent != 0 && !out.foreign then
+          -- What an earlier compile found for each place is asked first, all
+          -- at once; a place it did not see is asked alone first.
+          unless known.isEmpty do
+            let guess := (placeKeys out.siteOwners).toList.map fun k => List.lookup k known
+            let fresh := (List.range out.sites).filter fun i => (guess[i]?.join).isNone
+            let alone := (fresh.map fun i => Task.spawn fun _ =>
+              if (lending blocks [false, true] (fun j => if j == i then 1 else 0)).isSome then (i, 1)
+              else if out.twoWays.contains i
+                  && (lending blocks [false, true] (fun j => if j == i then 2 else 0)).isSome then (i, 2)
+              else (i, 0)).map Task.get
+            let choice := fun (j : Nat) => match guess[j]? with
+              | some (some v) => v
+              | _ => (List.lookup j alone).getD 0
+            if (List.range out.sites).all (choice · == 0) then return ← plain blocks []
+            if let some c := lending blocks [false, true] choice then return c
           if let some c := lending blocks [false, true] (fun _ => 1) then return c
           let ranked := shownAtAll blocks true
           let plainly := shownAtAll blocks false

@@ -275,6 +275,8 @@ structure St where
   lasting longer: the others are a call's, and a call's lasts as long as
   the call. -/
   twoWays : List Nat := []
+  /-- The function each place is in, by place. -/
+  siteOwners : Array String := #[]
   /-- Where the statement being elaborated starts. -/
   pos : Nat × Nat := (0, 0)
   /-- The borrows that are not scopes of their own: each is the reference it

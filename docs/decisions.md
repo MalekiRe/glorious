@@ -13,6 +13,47 @@ very incremental: a change to a program costs what the change touches, not
 the whole program. The specification of an incremental self-hosted
 compiler (`GSC-2-…`) is not followed on this branch.
 
+### What a compile of a file keeps for the next
+
+**Decision: `glorious run|check|build|certify FILE` keeps what its search
+found, and the next compile of the same file starts from it.** Where a
+borrow can be a scope of its own, which can be is found by asking, for each
+place, whether the program can then be shown to follow Core's rules: one
+certificate found for each, side by side. That search is most of a compile.
+What it found is written to the user's cache
+(`$XDG_CACHE_HOME/glorious/places/`, or `~/.cache`), a line for each place:
+the function it is in, how many places of that function come before it, and
+how it was made. With it, which of Core's sets of rules and which way of
+finding a certificate passed. The next compile asks that all at once, with a
+place not seen before asked alone first; a certificate found then is checked
+as any is, so what is kept can be out of date or wrong and cost only the
+search it was to save. `GLORIOUS_FRESH` set: not read.
+
+Measured (wall clock, one machine, the same file compiled again):
+
+| file | before | kept |
+|---|---|---|
+| `examples/calculator.glorious` | 3.30 s | 1.43 s |
+| `examples/json.glorious` | 0.82 s | 0.39 s |
+| `covey/simulation.glorious` | 2.24 s | 0.90 s |
+| `examples/orders.glorious` | 1.36 s | 1.17 s |
+
+(`kept` also has the library pruned, below.)
+
+**And the library's modules read for one file are checked without the
+functions it cannot reach.** A function of `std` is kept if its name,
+without its module, is written in the program or in what is kept of the
+library, until nothing more is; implementations, traits and types are all
+kept. More is kept than is called (any function of that name in any module),
+never less. The library is checked whole by the tests, which is why what a
+program does not reach need not be checked again with it. A program naming
+four of the library's modules and nothing else: 0.70 s, now 0.40 s.
+
+A group of functions whose records of what they touch were settled went
+through every record made since the group began, each by its own walk, so a
+group went again over the records of every group inferred inside it. One walk
+over them now, and openness carried back along the edges.
+
 ## Resumptions are one-shot
 
 **Decision (user, with the kernel rewrite).** A resumption can be used at most

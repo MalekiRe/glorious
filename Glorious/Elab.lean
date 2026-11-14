@@ -312,7 +312,7 @@ partial def elabCall (scope : Scope) (isTail : Bool) (f : Expr) (args : List Exp
       let site := (← get).sites
       if !isTail && (!borrows.isEmpty || held.isSome) then
         modify fun s =>
-          { s with sites := s.sites + 1
+          { s with sites := s.sites + 1, siteOwners := s.siteOwners.push s.owner
                    under := (held.map fun stmt => (site, stmt) :: s.under).getD s.under }
       if !isTail && !borrows.isEmpty && (← read).lends site != 0 then
         let atoms ← elabArgs scope args gives
@@ -467,7 +467,9 @@ partial def elabStmts (scope : Scope) (tailPos : Bool) : List Stmt → M Atom
           if madeBorrow p then
             return ← elabBorrowScope scope tailPos p uniq (← lent) rest (p.startsWith "%borrow")
           let site := (← get).sites
-          modify fun s => { s with sites := s.sites + 1, twoWays := site :: s.twoWays }
+          modify fun s =>
+            { s with sites := s.sites + 1, siteOwners := s.siteOwners.push s.owner
+                     twoWays := site :: s.twoWays }
           let mode := (← read).lends site
           if mode != 0 then
             return ← elabBorrowScope scope tailPos p uniq (← lent) rest (mode == 2)
@@ -490,7 +492,7 @@ partial def elabStmts (scope : Scope) (tailPos : Bool) : List Stmt → M Atom
             | none => (a, none)
           let lets := named.filterMap fun (_, b) =>
             b.map fun (i, a) => Stmt.let_ (.var s!"%borrow{site}.{i}") a
-          modify fun s => { s with sites := s.sites + 1 }
+          modify fun s => { s with sites := s.sites + 1, siteOwners := s.siteOwners.push s.owner }
           return ← elabStmts scope tailPos
             (lets ++ .let_ pat (.call id (.name q f) (named.map (·.1))) :: rest)
     let a ← elabExpr scope false value
@@ -678,7 +680,9 @@ partial def lendWithin (scope : Scope) (s : Stmt) : M (Option (List Stmt)) := do
     | other => pure (other, []) : M (Stmt × List (String × Expr)))
   -- (Whether this is a place at all does not depend on how it is tried.)
   if (← named false true).2.isEmpty then return none
-  modify fun st => { st with sites := st.sites + 1, twoWays := site :: st.twoWays }
+  modify fun st =>
+    { st with sites := st.sites + 1, siteOwners := st.siteOwners.push st.owner
+              twoWays := site :: st.twoWays }
   if mode == 0 then return none
   let (s', found) ← named (mode == 2) (mode == 2)
   if found.isEmpty then return none
@@ -1043,6 +1047,8 @@ structure Output where
   under : List (Nat × Nat) := []
   /-- The places that can be tried two ways. -/
   twoWays : List Nat := []
+  /-- The function each place is in, by place. -/
+  siteOwners : Array String := #[]
 
 /-! ## Traits
 
@@ -1741,6 +1747,7 @@ def elabProgram (items : List Item) (blocks : Option Blocks := none)
       out := out.set! info.id name
     pure out
   pure ⟨⟨st.fns.toList, .let_ (.closure mainIdx []) (.tail (.var 0) [])⟩, names, st.names,
-    opNames, st.envSizes, st.lent, st.sites, st.plain.reverse, st.foreign, st.under, st.twoWays⟩
+    opNames, st.envSizes, st.lent, st.sites, st.plain.reverse, st.foreign, st.under, st.twoWays,
+    st.siteOwners⟩
 
 end Glorious.Elab
