@@ -2916,7 +2916,17 @@ the order it is being built:
   trait's function at a known type is a direct call.
 - `Self::f(..)` in a trait's own body is the implementation's `f`.
 
-Still to come: `x.f(a)` for `f(x, a)`; a type of its own for each function
+- **`value.f(a)` is `f(value, a)`**, where `f` is a function or a trait's
+  function that can be named where the call is written; otherwise `f` is a
+  field holding a callable, as before. The specification kept calls
+  explicit (decision D10: "rather than silently introduce dot methods");
+  this is asked for, for `(a, b).chain()` and `app.add_systems(..)`. It is
+  the names in scope that decide, not the value's type: a function of a
+  type's own, `Vec::len`, is not found this way yet, and the value is given
+  as it is, so a function that takes `&mut Self` is written
+  `(&mut q).each(..)` for now.
+
+Still to come: a type of its own for each function
 and closure, with `Fn<(..)>` as a bound; lists of types as parameters, with
 head and rest; an implementation that is preferred over a more general one;
 a copy of a function for each type it is used at; generic associated types,

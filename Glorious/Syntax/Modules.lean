@@ -1081,6 +1081,14 @@ partial def resolveExpr (ctx : Ctx) (bound : List String) : Expr → R Expr
               [.expr (.call (7000000000000 + made) (.name qual' name') (params.map (Expr.name none)))]]
     pure (.name qual' name')
   | .call id f args => do
+    -- `value.f(a)`: `f(value, a)`, where `f` is a function or a trait's
+    -- function that can be named here. (Where it is neither, `f` is a field
+    -- that holds a callable, as it was.)
+    if let .fieldOf _ receiver name := f then
+      unless bound.contains name do
+        if let some e := lookupIn (ctx.of name) .value name then
+          if e.kind == .fn || e.kind == .method then
+            return ← resolveExpr ctx bound (.call id (.name none name) (receiver :: args))
     if let (.name none mark, [.name (some q) name]) := (f, args) then
       if mark == pathMark then
         -- `Owner::NAME`: a trait's function of that name called with
