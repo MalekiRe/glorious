@@ -485,6 +485,10 @@ structure St where
   /-- For each, what is gone through to reach the field: at each step the
   constructor, or none for a tuple, and how many fields it has. -/
   fieldTable : Array (Nat × Bool × List Nat × List (Option String × Nat)) := #[]
+  /-- What went wrong when a callable was first read, with the types of what
+  it is given known, before it was read again without them: said if what is
+  then wrong is only that those types were not known. -/
+  firstSaid : Option String := none
   /-- A field of a variable was borrowed for writing in the functions being
   checked: from then on each call is kept with the type of what it gives. -/
   fieldLocal : Bool := false

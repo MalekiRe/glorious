@@ -2713,6 +2713,31 @@ from being an `Id<Block>`.
 - Not built: base64; `ByteReader::read_u128_le` is, the signed widths
   other than `read_i64_le` are not in the specification.
 
+## `std::diagnostic` (library 21)
+
+`Severity`, `DiagnosticCode`, `Diagnostic` (a message with places, notes
+and what would help), `DiagnosticBag` and `render_diagnostic`.
+
+- **What is written**: `error[17]: message`, then each place as `  -->
+  name:line:column: label` (`:::` for a secondary one), then `  note: ..`
+  and `  help: ..`. A place in no text the map has, or not in it, is
+  `<unknown>`. More notes than are allowed are counted, `(2 more)`. Longer
+  than is allowed, the whole is refused: nothing is cut short.
+- **A full bag gives the diagnostic back.** `into_vec` gives them by the
+  text their first primary place is in, then how far in, then errors before
+  warnings before notes, then by code; ones this does not tell apart stay
+  in the order they were pushed.
+- Texts are `Str` and `into_vec` gives an array, as elsewhere in this
+  library. `SourceId::to_u32` is added to `std::source` for the ordering.
+
+Writing it showed a message that named the wrong thing. A callable given a
+reference is read first with the types of what it is given known; if that
+fails it is read again without them, and what then went wrong (`&L has no
+field primary`, of a field that is there) was said instead of what had
+(a field of another module's type that is not `pub`). What went wrong
+first is now what is said, and a field read through a reference whose type
+is not known where it is read says that.
+
 ## `std::fingerprint` (library 20)
 
 A hash of 64 bits, BLAKE3, digests and fingerprints, written in the

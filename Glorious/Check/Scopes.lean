@@ -146,6 +146,14 @@ partial def runProjections (final : Bool) : M Unit := do
     let unknown := match ← find subject with
       | .var _ => true
       | _ => false
+    -- (A reference, known only now: what is read through one is settled
+    -- where it is read, with the reference's type known there. If the
+    -- callable was first read with it known and something else was wrong,
+    -- that is what is wrong.)
+    if let .ref _ _ _ ← find subject then
+      match (← get).firstSaid with
+      | some said => throw said
+      | none => throw s!"{pos}the field `{name}` is read through a reference, and where it is read the type of what it is read from is not known: say what that is"
     let found ← if unknown then pure none else
       match ← (try fieldIndex subject name catch e => throw (pos ++ e)) with
       | some idx => do

@@ -46,6 +46,7 @@ pub mod collections;
 pub mod host;
 pub mod hash;
 pub mod fingerprint;
+pub mod diagnostic;
 pub mod io;
 pub mod fs;
 pub mod env;
@@ -3139,6 +3140,11 @@ use std::value::{Rejected};
 use std::text::{utf8, from_utf8};
 
 pub struct SourceId(u32);
+
+impl SourceId {
+    // Which text of its map it is, counted from nothing.
+    pub fn to_u32(value: Self) -> u32 { value.0 }
+}
 // A stretch of a text: from one place up to, not including, another.
 pub struct SourceSpan { pub source: SourceId, pub start: Int, pub end: Int }
 pub struct SourceLocation { pub source: SourceId, pub line: Int, pub column_bytes: Int }
@@ -3849,6 +3855,165 @@ impl FingerprintWriter {
 }
 "#
 
+private def diagnosticText : String := r#"// What a compiler has to say about a program, kept as what it is (how bad,
+// which code, where, with what beside it) and written out at the end, as the
+// library specification has it (21).
+//
+// Texts are `Str` and what a bag gives back is an array, as elsewhere here.
+
+use std::source::{SourceMap, SourceSpan, SourceId};
+use std::fmt::{FormatError};
+use std::text::{utf8};
+
+pub enum Severity { Note, Warning, Error }
+
+pub struct DiagnosticCode(u32)
+
+impl DiagnosticCode {
+    pub fn from_u32(value: u32) -> Self { DiagnosticCode(value) }
+    pub fn to_u32(value: Self) -> u32 { value.0 }
+}
+
+// A place something is said of: the first is what the diagnostic is about.
+struct Label { span: SourceSpan, text: Str, primary: Bool }
+
+pub struct Diagnostic { severity: Severity, code: DiagnosticCode, message: Str, labels: [Label], notes: [Str], helps: [Str] }
+
+impl Diagnostic {
+    pub fn new(severity: Severity, code: DiagnosticCode, message: Str) -> Self {
+        Self { severity: severity, code: code, message: message, labels: [], notes: [], helps: [] }
+    }
+    pub fn primary(value: &mut Self, span: SourceSpan, label: Str) {
+        value.labels = push(replace(&mut value.labels, []), Label { span: span, text: label, primary: true });
+    }
+    pub fn secondary(value: &mut Self, span: SourceSpan, label: Str) {
+        value.labels = push(replace(&mut value.labels, []), Label { span: span, text: label, primary: false });
+    }
+    pub fn note(value: &mut Self, text: Str) { value.notes = push(replace(&mut value.notes, []), text); }
+    pub fn help(value: &mut Self, text: Str) { value.helps = push(replace(&mut value.helps, []), text); }
+    pub fn is_error(value: &Self) -> Bool { rank(&value.severity) == 0 }
+    pub fn code(value: &Self) -> u32 { value.code.0 }
+    pub fn message(value: &Self) -> Str { value.message }
+}
+
+// Errors first.
+fn rank(s: &Severity) -> Int { match(s) { &Severity::Error => 0, &Severity::Warning => 1, &Severity::Note => 2 } }
+fn word(s: &Severity) -> Str { match(s) { &Severity::Error => "error", &Severity::Warning => "warning", &Severity::Note => "note" } }
+
+// Where a diagnostic is put among others: by the text its first primary
+// place is in, then how far in, then how bad, then its code. One with no
+// place comes after those that have one.
+fn first_place(labels: &[Label], i: Int) -> (Int, Int) {
+    match(element(labels, i)) {
+        None => (4294967296, 0),
+        Some(label) => if(label.primary) { (int(SourceId::to_u32(label.span.source)), label.span.start) } else { first_place(labels, i + 1) }
+    }
+}
+fn comes_before(a: &Diagnostic, b: &Diagnostic) -> Bool {
+    let pa = first_place(&a.labels, 0);
+    let pb = first_place(&b.labels, 0);
+    if(pa.0 != pb.0) { pa.0 < pb.0 } else {
+        if(pa.1 != pb.1) { pa.1 < pb.1 } else {
+            if(rank(&a.severity) != rank(&b.severity)) { rank(&a.severity) < rank(&b.severity) } else { int(a.code.0) < int(b.code.0) }
+        }
+    }
+}
+
+// Diagnostics up to a limit: one more is given back, not lost.
+pub struct DiagnosticBag { items: [Diagnostic], limit: Int, errors: Int }
+
+impl DiagnosticBag {
+    pub fn new(limit: Int) -> Self { Self { items: [], limit: limit, errors: 0 } }
+    pub fn push(value: &mut Self, diagnostic: Diagnostic) -> Result<(), Diagnostic> {
+        if(len_at(&value.items) >= value.limit) { Err(diagnostic) } else {
+            value.errors = value.errors + (if(Diagnostic::is_error(&diagnostic)) { 1 } else { 0 });
+            push_at(&mut value.items, diagnostic);
+            Ok(())
+        }
+    }
+    pub fn len(value: &Self) -> Int { len_at(&value.items) }
+    pub fn has_errors(value: &Self) -> Bool { value.errors > 0 }
+    // Every diagnostic, in the order above; those the order does not tell
+    // apart stay as they were pushed.
+    pub fn into_vec(value: Self) -> [Diagnostic] {
+        match(value) { DiagnosticBag { items, limit, errors } => in_order(items, []) }
+    }
+}
+
+// Each put where it belongs among those already placed.
+fn in_order(left: [Diagnostic], placed: [Diagnostic]) -> [Diagnostic] {
+    match(pop_first(left)) {
+        None => placed,
+        Some((next, rest)) => in_order(rest, placed_with(placed, next))
+    }
+}
+fn pop_first(items: [Diagnostic]) -> Option<(Diagnostic, [Diagnostic])> {
+    let mut items = items;
+    match(pop_at(&mut items)) {
+        None => None,
+        Some(last) =>
+            // The last taken off, and what is left turned so that the first is next.
+            match(pop_first(items)) {
+                None => Some((last, [])),
+                Some((first, rest)) => Some((first, push(rest, last)))
+            }
+    }
+}
+fn placed_with(placed: [Diagnostic], next: Diagnostic) -> [Diagnostic] {
+    let mut placed = placed;
+    match(pop_at(&mut placed)) {
+        None => [next],
+        Some(last) =>
+            if(comes_before(&next, &last)) { push(placed_with(placed, next), last) }
+            else { push(push(placed, last), next) }
+    }
+}
+
+pub struct RenderOptions { pub maximum_notes: Int, pub maximum_bytes: Int }
+
+// A place as `name:line:column`, both counted from one; a place that is in
+// no text the map has, or not in it, is `<unknown>`.
+fn place_text(span: &SourceSpan, sources: &SourceMap) -> Str {
+    match(SourceMap::name(sources, span.source)) {
+        None => "<unknown>",
+        Some(name) => match(SourceMap::locate(sources, span.source, span.start)) {
+            Err(_) => "<unknown>",
+            Ok(at) => name ++ ":" ++ show(at.line + 1) ++ ":" ++ show(at.column_bytes + 1)
+        }
+    }
+}
+
+fn labels_text(labels: &[Label], sources: &SourceMap, i: Int, out: Str) -> Str {
+    match(element(labels, i)) {
+        None => out,
+        Some(label) =>
+            let arrow = if(label.primary) { "  --> " } else { "  ::: " };
+            let said = if(label.text == "") { "" } else { ": " ++ label.text };
+            labels_text(labels, sources, i + 1, out ++ arrow ++ place_text(&label.span, sources) ++ said ++ "\n")
+    }
+}
+
+fn lines_text(kind: Str, lines: &[Str], i: Int, most: Int, out: Str) -> Str {
+    match(element(lines, i)) {
+        None => out,
+        Some(text) =>
+            if(i >= most) { out ++ "  (" ++ show(len_at(lines) - most) ++ " more)\n" }
+            else { lines_text(kind, lines, i + 1, most, out ++ "  " ++ kind ++ ": " ++ *text ++ "\n") }
+    }
+}
+
+// The diagnostic as text: its severity, code and message, each place, then
+// its notes (as many as are allowed, and how many more there are) and what
+// would help. Longer than is allowed, it is refused, not cut short.
+pub fn render_diagnostic(value: &Diagnostic, sources: &SourceMap, options: RenderOptions) -> Result<Str, FormatError> {
+    let head = word(&value.severity) ++ "[" ++ show(value.code.0) ++ "]: " ++ value.message ++ "\n";
+    let places = labels_text(&value.labels, sources, 0, head);
+    let noted = lines_text("note", &value.notes, 0, options.maximum_notes, places);
+    let all = lines_text("help", &value.helps, 0, len_at(&value.helps), noted);
+    if(len(utf8(all)) > options.maximum_bytes) { Err(FormatError::OutputLimit) } else { Ok(all) }
+}
+"#
+
 private def cText : String := r#"// What C has: its memory, and texts as it writes them. Everything here is
 // unsafe: an address is whatever a program says it is.
 
@@ -4314,6 +4479,7 @@ def texts : List (List String × String) :=
    (["std", "host"], hostText),
    (["std", "hash"], hash),
    (["std", "fingerprint"], fingerprintText),
+   (["std", "diagnostic"], diagnosticText),
    -- The names the library specification gives its modules (1.2): the same
    -- declarations, under `core`, `alloc` and more of `std`.
    (["std", "io"], "pub use std::host::{Console, IoError, print, println, eprintln, read_line};\n"),

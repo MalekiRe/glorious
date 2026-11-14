@@ -453,10 +453,24 @@ partial def checkArg (scope : Scope) (amb : Row) (what : String) (p : Ty) (a : E
             let t ← inferCallable scope wider none none clauses "the clauses of this callable do" id
             if let .fn _ _ _ _ cap := t then
               modify fun s => { s with blockCaps := s.blockCaps.push (id, cap) }
-            pure ((← fitAt scope amb what site p t).isNone)
-          catch _ => pure false
-        if tried then return none
-        set saved
+            pure (if (← fitAt scope amb what site p t).isNone then none else some "")
+          catch e => pure (some e)
+        match tried with
+        | none => return none
+        | some said =>
+          set saved
+          -- What went wrong with the types known is what is said if the
+          -- callable is wrong without them too: it was read knowing more.
+          unless said.isEmpty do
+            modify fun s => { s with firstSaid := s.firstSaid <|> some said }
+            try
+              if arity == ps.length && annots.any (·.isSome) then
+                let t ← inferCallable scope annots none none clauses "the clauses of this callable do" id
+                if let .fn _ _ _ _ cap := t then
+                  modify fun s => { s with blockCaps := s.blockCaps.push (id, cap) }
+                return ← fitAt scope amb what site p t
+              return ← fitAt scope amb what site p (← inferExpr scope amb a)
+            catch _ => throw said
       if arity == ps.length && annots.any (·.isSome) then
         let t ← inferCallable scope annots none none clauses "the clauses of this callable do" id
         if let .fn _ _ _ _ cap := t then
