@@ -517,15 +517,16 @@ def stages (path : String) : IO UInt32 := do
   if let .ok lentOut := Elab.elabProgram all (some blocks) (fun _ => 1) then
     IO.println s!"{lentOut.sites} places a borrow could be a scope, {lentOut.lent} made one"
     last ← lap "elaborate, every place lent" last
-    for ranked in [false, true] do
-      match Infer.certify declared lentOut.program true lentOut.envSizes true true ranked with
+    for (ranked, widen) in [(false, false), (true, false), (false, true), (true, true)] do
+      match Infer.certify declared lentOut.program true lentOut.envSizes true true ranked widen with
       | .ok cert =>
-        last ← lap s!"certify lent (ranked {ranked})" last
-        IO.println s!"{Typing.checkProgram cert lentOut.program}"
+        last ← lap s!"certify lent (ranked {ranked}, widen {widen})" last
+        let ok := Typing.checkProgram cert lentOut.program
+        IO.println s!"{ok}{if ok then "" else s!": {Infer.rejected cert lentOut.program}"}"
         last ← lap "check that certificate" last
       | .error e =>
-        IO.println s!"certify lent: {(e.take 80).toString}"
-        last ← lap s!"certify lent (ranked {ranked}), refused" last
+        IO.println s!"certify lent: {(e.take 300).toString}"
+        last ← lap s!"certify lent (ranked {ranked}, widen {widen}), refused" last
   match Infer.certify all out.program true out.envSizes true true with
   | .ok cert =>
     last ← lap "infer certificate" last

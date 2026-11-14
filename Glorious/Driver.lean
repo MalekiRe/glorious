@@ -446,10 +446,16 @@ def compileSource (src : String) (check : Bool := true)
   -- regions of the references they are given, before any borrow is a scope:
   -- where it cannot, no borrow made a scope will change that, and that way
   -- is not tried for each.)
-  let rankedAtAll := fun (blocks : Option Elab.Blocks) =>
+  -- (Where it cannot be shown at all, or only with references taken to be to
+  -- one of several cells, which a borrow's scope cannot give out, no place
+  -- is tried alone.)
+  let shownAtAll := fun (blocks : Option Elab.Blocks) (ranked : Bool) =>
     match Elab.elabProgram all blocks (fun _ => 0) with
-    | .ok out => (Infer.certify declared out.program true out.envSizes true true true).toOption.isSome
-    | .error _ => false
+    | .ok out =>
+      match Infer.certify declared out.program true out.envSizes true true ranked with
+      | .ok cert => some (Typing.checkProgram cert out.program)
+      | .error _ => none
+    | .error _ => none
   let lending := fun (blocks : Option Elab.Blocks) (ways : List Bool) (sites : Nat → Nat) =>
     match Elab.elabProgram all blocks sites with
     | .ok out =>
@@ -469,7 +475,10 @@ def compileSource (src : String) (check : Bool := true)
       if let .ok out := Elab.elabProgram all blocks (fun _ => 1) then
         if out.lent != 0 && !out.foreign then
           if let some c := lending blocks [false, true] (fun _ => 1) then return c
-          let ways := if rankedAtAll blocks then [false, true] else [false]
+          let ranked := shownAtAll blocks true
+          unless ranked == some true || shownAtAll blocks false == some true do
+            return ← plain blocks
+          let ways := if ranked.isSome then [false, true] else [false]
           let lending := lending blocks ways
           if out.sites ≤ 160 then
             -- How each place fares alone, trying the narrower scope first.
