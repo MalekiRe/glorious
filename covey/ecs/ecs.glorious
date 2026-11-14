@@ -1,169 +1,276 @@
-// Covey: an entity component system in which the whole app is known to the
-// compiler.
+// Covey: an entity component system in which the whole app is one type.
 //
-// A component's storage is an effect, `Store<C>`: a system that touches
-// `Position` performs `Store<Position>`, and what a system touches is the
-// row of effects in its type, which nobody writes down. The world is one
-// `store<C>` handler for each component; a system that names a component
-// the world does not store performs an effect that nothing handles, and
-// does not compile.
+// A system is a plain function, and its parameters say what it touches:
 //
-// A system takes a component's table out of its store, works on it, and puts
-// it back: while it has the table nobody else does.
+//     fn integrate(positions: &mut Column<Position>, velocities: &Column<Velocity>) { .. }
+//
+// The world's storage is a tuple of columns, one inside the next, and an
+// app is that world with a list of the systems registered under each label.
+// Both are types, so which column a system's parameter is, and which
+// systems a label runs, are found by the compiler: by implementations of
+// `Get` and `Dispatch` that fit the type.
 
-// An entity: a place in the tables, and which of the entities that have had
+// An entity: a place in the columns, and which of the entities that have had
 // that place this one is.
 pub struct Entity { pub index: Int, pub generation: Int }
 
-// Making and ending entities.
-pub effect Entities {
-    spawn() -> Entity
-    despawn(Entity)
-    alive(Entity) -> Bool
-}
-
-// Told to every store when an entity ends, from the innermost outward.
-pub effect Ended { ended(Entity) }
-
 // One component's values: packed, each with the entity it belongs to, and
 // for each entity's place where its value is among them.
-pub struct Table<C> { pub dense: [C], pub owners: [Entity], pub slots: [Int] }
+pub struct Column<T> { pub dense: [T], pub owners: [Entity], pub slots: [Int] }
 
-// A component's storage.
-pub effect Store<C> {
-    take() -> Table<C>
-    put(Table<C>)
-}
+pub fn empty_column<T>() -> Column<T> { Column { dense: [], owners: [], slots: [] } }
 
-fn empty_table<C>() -> Table<C> { Table { dense: [], owners: [], slots: [] } }
-
-// Where an entity's value is in a table, or -1.
-pub fn slot_of<C>(table: &Table<C>, entity: Entity) -> Int {
-    if(entity.index < len_at(&table.slots)) {
-        let at = table.slots[entity.index];
+// Where an entity's value is in a column, or -1.
+pub fn slot_of<T>(column: &Column<T>, entity: Entity) -> Int {
+    if(entity.index < len_at(&column.slots)) {
+        let at = column.slots[entity.index];
         if(at >= 0) {
-            if(table.owners[at].generation == entity.generation) { at } else { 0 - 1 }
+            if(column.owners[at].generation == entity.generation) { at } else { 0 - 1 }
         } else { 0 - 1 }
     } else { 0 - 1 }
 }
 
-fn table_insert<C>(table: &mut Table<C>, entity: Entity, value: C) {
-    while({ len_at(&table.slots) <= entity.index }) { push_at(&mut table.slots, 0 - 1) };
-    let at = table.slots[entity.index];
+fn column_insert<T>(column: &mut Column<T>, entity: Entity, value: T) {
+    while({ len_at(&column.slots) <= entity.index }) { push_at(&mut column.slots, 0 - 1) };
+    let at = column.slots[entity.index];
     if(at >= 0) {
-        table.dense[at] = value;
-        table.owners[at] = entity;
+        column.dense[at] = value;
+        column.owners[at] = entity;
     } else {
-        table.slots[entity.index] = len_at(&table.dense);
-        push_at(&mut table.dense, value);
-        push_at(&mut table.owners, entity);
+        column.slots[entity.index] = len_at(&column.dense);
+        push_at(&mut column.dense, value);
+        push_at(&mut column.owners, entity);
     }
 }
 
 // Take an entity's value out: the last value moves into its place.
-fn table_remove<C>(table: &mut Table<C>, entity: Entity) -> Option<C> {
-    let at = slot_of(&*table, entity);
+fn column_remove<T>(column: &mut Column<T>, entity: Entity) -> Option<T> {
+    let at = slot_of(&*column, entity);
     if(at < 0) { None } else {
-        let last = len_at(&table.dense) - 1;
-        let moved = table.owners[last];
-        let _ = pop_at(&mut table.owners);
-        match(pop_at(&mut table.dense)) {
+        let last = len_at(&column.dense) - 1;
+        let moved = column.owners[last];
+        let _ = pop_at(&mut column.owners);
+        match(pop_at(&mut column.dense)) {
             None => None,
             Some(final) =>
-                table.slots[entity.index] = 0 - 1;
+                column.slots[entity.index] = 0 - 1;
                 if(at == last) { Some(final) } else {
-                    table.owners[at] = moved;
-                    table.slots[moved.index] = at;
-                    Some(replace(&mut table.dense[at], final))
+                    column.owners[at] = moved;
+                    column.slots[moved.index] = at;
+                    Some(replace(&mut column.dense[at], final))
                 }
         }
     }
 }
 
-// The storage of one component, for the app inside it.
-pub fn store<C, R, e: EffectRow>(app: fn() -> R / {Store<C>, Ended | e}) -> R / {Ended | e} {
-    let mut table: Table<C> = empty_table();
-    handle app() {
-        take(k) => k(replace(&mut table, empty_table())),
-        put(given, k) => table = given; k(()),
-        ended(entity, k) => let _ = table_remove(&mut table, entity); ended(entity); k(())
+// The column of `T` among a world's columns. Of the two implementations the
+// first is for a tuple whose first column is `T`'s; the second looks further.
+// A world that has no column of `T` has no implementation: a system that
+// asks for one does not compile.
+pub trait Get<T> {
+    fn take(&mut Self) -> Column<T>
+    fn put(&mut Self, Column<T>)
+}
+impl<T, R> Get<T> for (Column<T>, R) {
+    fn take(columns) { replace(&mut columns.0, empty_column()) }
+    fn put(columns, column) { columns.0 = column; }
+}
+impl<T, H, R> Get<T> for (Column<H>, R) where R: Get<T> {
+    fn take(columns) { <R as Get<T>>::take(&mut columns.1) }
+    fn put(columns, column) { <R as Get<T>>::put(&mut columns.1, column) }
+}
+
+// What is done to every column of a world.
+pub trait Columns {
+    fn fresh() -> Self
+    fn forget(&mut Self, Entity)
+}
+impl Columns for () {
+    fn fresh() { () }
+    fn forget(columns, entity) { () }
+}
+impl<H, R> Columns for (Column<H>, R) where R: Columns {
+    fn fresh() { (empty_column(), <R as Columns>::fresh()) }
+    fn forget(columns, entity) {
+        let _ = column_remove(&mut columns.0, entity);
+        <R as Columns>::forget(&mut columns.1, entity)
     }
 }
 
-// The entities, for the app inside it. Inside every store: an entity that
-// ends is told to each of them.
-pub fn entities<R, e: EffectRow>(app: fn() -> R / {Entities, Ended | e}) -> R / {Ended | e} {
-    let mut generations: [Int] = [];
-    let mut free: [Int] = [];
-    handle app() {
-        spawn(k) => k(match(pop_at(&mut free)) {
-            Some(index) => Entity { index: index, generation: generations[index] },
-            None => {
-                push_at(&mut generations, 0);
-                Entity { index: len_at(&generations) - 1, generation: 0 }
-            }()
-        }),
-        alive(entity, k) => k(generations[entity.index] == entity.generation),
-        despawn(entity, k) =>
-            if(generations[entity.index] == entity.generation) {
-                generations[entity.index] = entity.generation + 1;
-                push_at(&mut free, entity.index);
-                ended(entity)
-            } else { () };
-            k(())
+// The columns, and which entities there are.
+pub struct World<S> { pub columns: S, generations: [Int], free: [Int] }
+
+pub fn spawn<S>(world: &mut World<S>) -> Entity {
+    match(pop_at(&mut world.free)) {
+        Some(index) => Entity { index: index, generation: world.generations[index] },
+        None =>
+            push_at(&mut world.generations, 0);
+            Entity { index: len_at(&world.generations) - 1, generation: 0 }
     }
 }
 
-// Outside every store: where word of an ended entity stops.
-pub fn world<R, e: EffectRow>(app: fn() -> R / {Ended | e}) -> R / e {
-    handle app() { ended(entity, k) => k(()) }
+pub fn alive<S>(world: &World<S>, entity: Entity) -> Bool {
+    world.generations[entity.index] == entity.generation
+}
+
+// End an entity: every column forgets it.
+pub fn despawn<S>(world: &mut World<S>, entity: Entity) where S: Columns {
+    if(world.generations[entity.index] == entity.generation) {
+        world.generations[entity.index] = entity.generation + 1;
+        push_at(&mut world.free, entity.index);
+        <S as Columns>::forget(&mut world.columns, entity)
+    } else { () }
 }
 
 // Give an entity a component, or another value of one it has.
-pub fn insert<C>(entity: Entity, value: C) / {Store<C>} {
-    let mut table = take<C>();
-    table_insert(&mut table, entity, value);
-    put(table)
-}
-
-// Take a component away from an entity.
-pub fn remove<C>(entity: Entity) -> Option<C> / {Store<C>} {
-    let mut table = take<C>();
-    let was = table_remove(&mut table, entity);
-    put(table);
-    was
+pub fn insert<T, S>(world: &mut World<S>, entity: Entity, value: T) where S: Get<T> {
+    let mut column = <S as Get<T>>::take(&mut world.columns);
+    column_insert(&mut column, entity, value);
+    <S as Get<T>>::put(&mut world.columns, column)
 }
 
 // How many entities have the component.
-pub fn count<C>() -> Int / {Store<C>} {
-    let table = take<C>();
-    let n = len_at(&table.dense);
-    put(table);
+pub fn count<T, S>(world: &mut World<S>) -> Int where S: Get<T> {
+    let column = <S as Get<T>>::take(&mut world.columns);
+    let n = len_at(&column.dense);
+    <S as Get<T>>::put(&mut world.columns, column);
     n
 }
 
-// Every entity that has an `A`, with its `A` to change.
-pub fn each<A, e: EffectRow>(f: for<'a> fn(Entity, &'a mut A) -> () / {| e}) / {Store<A> | e} {
-    let mut table = take<A>();
+// Every value of a component, folded into one.
+pub fn fold_all<T, S, R>(world: &mut World<S>, start: R, f: for<'a> fn(R, &'a T) -> R) -> R where S: Get<T> {
+    let column = <S as Get<T>>::take(&mut world.columns);
+    let mut result = start;
     let mut i = 0;
-    while({ i < len_at(&table.dense) }) {
-        f(table.owners[i], &mut table.dense[i]);
+    while({ i < len_at(&column.dense) }) {
+        result = f(result, &column.dense[i]);
         i = i + 1
     };
-    put(table)
+    <S as Get<T>>::put(&mut world.columns, column);
+    result
 }
 
-// Every entity that has an `A` and a `B`: its `A` to change, its `B` to read.
-pub fn each2<A, B, e: EffectRow>(f: for<'a, 'b> fn(Entity, &'a mut A, &'b B) -> () / {| e}) / {Store<A>, Store<B> | e} {
-    let mut first = take<A>();
-    let second = take<B>();
+// Every entity with an `A`, its `A` to change.
+pub fn each<A>(column: &mut Column<A>, f: for<'a> fn(Entity, &'a mut A)) {
+    let mut i = 0;
+    while({ i < len_at(&column.dense) }) {
+        f(column.owners[i], &mut column.dense[i]);
+        i = i + 1
+    }
+}
+
+// Every entity with an `A` and a `B`: its `A` to change, its `B` to read.
+pub fn each2<A, B>(first: &mut Column<A>, second: &Column<B>, f: for<'a, 'b> fn(Entity, &'a mut A, &'b B)) {
     let mut i = 0;
     while({ i < len_at(&first.dense) }) {
         let entity = first.owners[i];
-        let at = slot_of(&second, entity);
+        let at = slot_of(second, entity);
         if(at >= 0) { f(entity, &mut first.dense[i], &second.dense[at]) } else { () };
         i = i + 1
-    };
-    put(first);
-    put(second)
+    }
+}
+
+// Something that runs against a world. A function is one, by its parameters:
+// each column it asks for is taken out of the world, lent to it, and put
+// back. Two systems in a tuple run one after the other.
+pub trait System<S> {
+    fn run(&Self, &mut World<S>)
+}
+impl<S> System<S> for () {
+    fn run(nothing, world) { () }
+}
+impl<S, X, Y> System<S> for (X, Y) where X: System<S>, Y: System<S> {
+    fn run(pair, world) {
+        <X as System<S>>::run(&pair.0, world);
+        <Y as System<S>>::run(&pair.1, world)
+    }
+}
+impl<S, A> System<S> for fn(&mut Column<A>) -> () where S: Get<A> {
+    fn run(f, world) {
+        let mut a = <S as Get<A>>::take(&mut world.columns);
+        (*f)(&mut a);
+        <S as Get<A>>::put(&mut world.columns, a)
+    }
+}
+impl<S, A> System<S> for fn(&Column<A>) -> () where S: Get<A> {
+    fn run(f, world) {
+        let a = <S as Get<A>>::take(&mut world.columns);
+        (*f)(&a);
+        <S as Get<A>>::put(&mut world.columns, a)
+    }
+}
+impl<S, A, B> System<S> for fn(&mut Column<A>, &Column<B>) -> () where S: Get<A>, S: Get<B> {
+    fn run(f, world) {
+        let mut a = <S as Get<A>>::take(&mut world.columns);
+        let b = <S as Get<B>>::take(&mut world.columns);
+        (*f)(&mut a, &b);
+        <S as Get<A>>::put(&mut world.columns, a);
+        <S as Get<B>>::put(&mut world.columns, b)
+    }
+}
+impl<S, A, B> System<S> for fn(&mut Column<A>, &mut Column<B>) -> () where S: Get<A>, S: Get<B> {
+    fn run(f, world) {
+        let mut a = <S as Get<A>>::take(&mut world.columns);
+        let mut b = <S as Get<B>>::take(&mut world.columns);
+        (*f)(&mut a, &mut b);
+        <S as Get<A>>::put(&mut world.columns, a);
+        <S as Get<B>>::put(&mut world.columns, b)
+    }
+}
+
+// Systems in the order written. (A tuple of systems is a system already.)
+pub fn chain<T>(systems: T) -> T { systems }
+
+// The systems registered under a label.
+pub struct On<E, P> { label: E, systems: P }
+
+// Run what is registered under `E`, in the order it was registered. Of the
+// two implementations for a list the first is for one whose first entry is
+// under `E`; the second passes over an entry under another label.
+pub trait Dispatch<E, S> {
+    fn dispatch(&Self, &mut World<S>)
+}
+impl<E, S> Dispatch<E, S> for () {
+    fn dispatch(nothing, world) { () }
+}
+impl<E, P, T, S> Dispatch<E, S> for (On<E, P>, T) where P: System<S>, T: Dispatch<E, S> {
+    fn dispatch(list, world) {
+        <T as Dispatch<E, S>>::dispatch(&list.1, world);
+        <P as System<S>>::run(&list.0.systems, world)
+    }
+}
+impl<E, F, P, T, S> Dispatch<E, S> for (On<F, P>, T) where T: Dispatch<E, S> {
+    fn dispatch(list, world) { <T as Dispatch<E, S>>::dispatch(&list.1, world) }
+}
+
+// A world of columns `S` and the registered systems `L`.
+pub struct App<S, L> { pub world: World<S>, systems: L }
+
+pub fn app() -> App<(), ()> {
+    App { world: World { columns: (), generations: [], free: [] }, systems: () }
+}
+
+// Store a component.
+pub fn register<T, S, L>(app: App<S, L>) -> App<(Column<T>, S), L> {
+    match(app) {
+        App { world, systems } => match(world) {
+            World { columns, generations, free } =>
+                App { world: World { columns: (empty_column(), columns), generations: generations, free: free }, systems: systems }
+        }
+    }
+}
+
+// Register systems under a label.
+pub fn add_systems<S, L, E, P>(app: App<S, L>, label: E, systems: P) -> App<S, (On<E, P>, L)> {
+    match(app) {
+        App { world, systems: before } => App { world: world, systems: (On { label: label, systems: systems }, before) }
+    }
+}
+
+// A plugin is a function from an app to an app.
+pub fn add_plugins<X, Y>(app: X, plugin: fn(X) -> Y) -> Y { plugin(app) }
+
+// Run every system registered under the label.
+pub fn emit<E, S, L>(app: &mut App<S, L>, label: E) where L: Dispatch<E, S> {
+    <L as Dispatch<E, S>>::dispatch(&app.systems, &mut app.world)
 }

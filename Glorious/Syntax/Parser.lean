@@ -1024,8 +1024,10 @@ private partial def parsePostfix (noBlock : Bool) : P Expr := do
       -- `f<A, B>(args)`: types written for the function's type parameters.
       -- It is that, and not a comparison, if what follows reads as types
       -- closed by `>` with `(` straight after.
+      -- (`value.f<A>(args)` too.)
       let isName := match e with
         | .name _ _ => true
+        | .fieldOf _ _ _ => true
         | _ => false
       if !isName then break
       let saved ← get

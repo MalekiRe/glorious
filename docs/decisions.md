@@ -2976,31 +2976,42 @@ const generics and fixed arrays.
 ## Covey
 
 - `covey/` is an entity component system written in Glorious, after
-  MalekiRe/unstable_covey, which does the same in Rust with specialization
-  and type-level lists so that the whole app is one type. Here the set of
-  types the compiler already infers and unions does that work: the effect
-  row.
-- **A component's storage is an effect**, `Store<C>`, and the world is one
-  `store<C>` handler for each component. What a system touches is its row.
-  A component the world does not store is an effect nothing handles.
-- **A system takes a table out and puts it back.** I first had a store hand
-  out `&mut Table<C>` through the resumption; a system could then ask twice
-  and hold two. Moved out and back, the table has one holder by ownership
-  alone, and an array with one holder is changed in place.
-- **A label is an operation, and a plugin a handler layer** that runs its
-  systems and performs the label again for the next layer out. The same
-  shape tells every store that an entity has ended (`ended`), which is why
-  the entities' handler is inside the stores.
-- `covey/simulation.glorious` is run with the tests.
-- What writing it found in the compiler, all fixed: a callable written with
-  its parameters' types did not know them when its body was read, so
-  `velocity.0` through a `&Velocity` parameter was refused; `xs[index]`
-  called a local named `index`; a name bound to what a call gives could not
-  have a field borrowed, nor could one that is also borrowed whole.
-- **Not there yet**: the world is assembled by hand, one `store<C>({ .. })`
-  inside another (a handler for every instance in a row is next); nothing
-  checks that two systems run side by side touch different components;
-  a query calls a callable for each entity.
+  MalekiRe/unstable_covey: the whole app is one type, and the compiler
+  works out from it which column a system touches and which systems a label
+  runs. `covey/simulation.glorious` is run with the tests.
+- **A system is a plain function, and its parameters say what it touches**:
+  `fn integrate(positions: &mut Column<Position>, velocities:
+  &Column<Velocity>)`. `System<S>` is implemented for functions by their
+  parameters; each column is taken out of the world, lent to the function,
+  and put back.
+- **The world's storage is a tuple of columns**, `(Column<Position>,
+  (Column<Velocity>, ()))`, grown by `.register<T>()`. `Get<T>` finds a
+  column in it by its type: two implementations for a pair, the one whose
+  first column is `T`'s being the narrower. A world without a column of
+  `T` has no implementation, so a system that asks for one does not
+  compile.
+- **Labels are types**; `.add_systems(Update, (integrate, friction).chain())`
+  puts an entry on the app's list of systems, which is a type too, and
+  `emit` runs the entries under its label by `Dispatch<E, S>`, found the
+  same way as `Get`.
+- **A plugin is a function from an app to an app**: `.add_plugins(physics)`.
+- It was first written on effects (a component's storage as an effect
+  instance, a plugin as a handler layer). That version ran, and is in the
+  history. It was dropped because a system that took a table twice got an
+  empty one at run time where the Rust refuses to compile, a system was not
+  a value that can be ordered or inspected, and a query's shape is a type.
+- **Not there yet.**
+  - Nothing refuses a system whose two parameters are the same component:
+    the second gets an empty column.
+  - One `System` implementation is written out for each number and kind
+    of parameter (four so far), until a list of types can be a parameter.
+  - A system performs no effects and cannot spawn, despawn or queue
+    commands. A label carries no value to its systems.
+  - Every call of a system and of a trait's function goes through a value
+    at run time: nothing is inlined, so it is the shape of the Rust and not
+    yet its speed.
+  - `emit(&mut game, Update)`: a dotted call does not borrow what it is
+    called on.
 
 ## Instances of an effect, told apart by their type arguments
 
