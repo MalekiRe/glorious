@@ -3008,7 +3008,14 @@ the order it is being built:
   checker refuses that where it does not cover every case. Limits: only a
   clause's whole pattern (not inside `Some(..)`, not a function's
   parameter, not `let`); taking the first element off copies the others
-  (`sum` over `[x, ..rest]` is quadratic); a tuple has no `..` yet.
+  (`sum` over `[x, ..rest]` is quadratic).
+- **`..` in a tuple pattern is found by reading the program again.** How
+  many parts `(first, ..)` leaves out is known only from the tuple's type.
+  Where the checker meets such a pattern and knows the type, it says how
+  many, and the program is read again with that many `_` written; where it
+  does not know the type, it asks for it. Each pattern costs a reading of
+  the program up to it. The tools that show a program's stages (`why`,
+  `stages`) do not do this.
 - **Destructors, swept.** Every way of binding two values with a `drop`
   (a name, a tuple, a struct or array pattern, in `let`, a clause, a
   callable's parameters) was run against every way of using one (not at

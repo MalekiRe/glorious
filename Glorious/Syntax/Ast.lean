@@ -258,6 +258,17 @@ def knownTrait : String := "%prelude::Known"
 the one a type nothing decides is taken to have: `#[fallback] impl ..`. -/
 def fallbackMark : String := "%fallback"
 
+/-- The name `..` has in a tuple pattern until how many parts it stands for
+is known: with the identity of the pattern's `(`. -/
+def tupleRestName (id : Nat) : String := s!"%tuplerest:{id}"
+
+def tupleRestOf (name : String) : Option Nat :=
+  if name.startsWith "%tuplerest:" then (name.drop 11).toString.toNat? else none
+
+/-- What the checker says when it finds how many parts the `..` of a tuple
+pattern stands for: the program is then read again with them written `_`. -/
+def tupleRestFound (id count : Nat) : String := s!"%tuplerest:{id}:{count}%"
+
 /-- The name under which a name bound by the pattern of a `let` is known
 where it is destroyed: the place is the statement's, which a clause's own
 names are known by too when the statement is its first. -/

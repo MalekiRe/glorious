@@ -202,4 +202,65 @@ partial def specialize (tr : TraitInfo) (items : List Item) (fuel : Nat := 50000
   | some (made, copies) => (roots ++ made.toList, copies.map fun (name, fn, _, _) => (name, fn))
   | none => (items, [])
 
+/-! ## `..` in a tuple pattern
+
+How many parts the `..` of `(first, ..)` stands for is known once the
+tuple's type is. The checker says so, and the program is then read with that
+many `_` written in its place. -/
+
+mutual
+
+partial def restPat (id count : Nat) : Pattern → Pattern
+  | .tuple ps => .tuple (ps.flatMap fun
+      | .var x => if Syntax.tupleRestOf x == some id then List.replicate count Pattern.wild else [.var x]
+      | p => [restPat id count p])
+  | .ctor c q ps => .ctor c q (ps.map (restPat id count))
+  | p => p
+
+partial def restExprIn (id count : Nat) : Expr → Expr
+  | .call i f args => .call i (restExprIn id count f) (args.map (restExprIn id count))
+  | .tailCall i f args => .tailCall i (restExprIn id count f) (args.map (restExprIn id count))
+  | .tuple args => .tuple (args.map (restExprIn id count))
+  | .proj e n => .proj (restExprIn id count e) n
+  | .closure i clauses => .closure i (clauses.map (restClause id count))
+  | .handle subject arms => .handle (restExprIn id count subject) (arms.map (restClause id count))
+  | .labelScope l body => .labelScope l (body.map (restStmt id count))
+  | .deref e => .deref (restExprIn id count e)
+  | .reborrow uniq e => .reborrow uniq (restExprIn id count e)
+  | .fieldOf i e name => .fieldOf i (restExprIn id count e) name
+  | e => e
+
+partial def restClause (id count : Nat) : Clause → Clause
+  | .mk pats body => .mk (pats.map (restPat id count)) (body.map (restStmt id count))
+
+partial def restStmt (id count : Nat) : Stmt → Stmt
+  | .let_ pat value => .let_ (restPat id count pat) (restExprIn id count value)
+  | .expr e => .expr (restExprIn id count e)
+  | .defer e => .defer (restExprIn id count e)
+  | .letMut x value => .letMut x (restExprIn id count value)
+  | .assign target value => .assign (restExprIn id count target) (restExprIn id count value)
+  | .located line col s => .located line col (restStmt id count s)
+
+end
+
+/-- A program with the `..` of one tuple pattern written as so many `_`. -/
+partial def restItems (id count : Nat) (items : List Item) : List Item :=
+  items.map fun
+    | .fn name ps annots ret clauses => .fn name ps annots ret (clauses.map (restClause id count))
+    | .impl ps tr head args context methods => .impl ps tr head args context (restItems id count methods)
+    | .traitInfo n supers defaults params assocs => .traitInfo n supers (restItems id count defaults) params assocs
+    | .module name (some body) => .module name (some (restItems id count body))
+    | .pub parent item => .pub parent ((restItems id count [item]).headD item)
+    | item => item
+
+/-- What the checker said of a tuple pattern's `..`, if that is what it said:
+which pattern, and how many parts. -/
+def restFound (said : String) : Option (Nat × Nat) :=
+  match said.splitOn "%tuplerest:" with
+  | _ :: after :: _ =>
+    match ((after.splitOn "%").headD "").splitOn ":" with
+    | [id, count] => id.toNat?.bind fun id => count.toNat?.map fun count => (id, count)
+    | _ => none
+  | _ => none
+
 end Glorious.Elab

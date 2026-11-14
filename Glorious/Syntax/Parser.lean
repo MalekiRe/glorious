@@ -1004,14 +1004,21 @@ private partial def parsePattern : P Pattern := do
     if uniq then advance
     pure (.ctor (byRefMark uniq) none [← parsePattern])
   | .punct "(" =>
+    let opened := (← read).base + (← get)
     advance
     let args ← parsePatternList
     -- How many parts a tuple has is not written anywhere a pattern could
     -- read it: `..` is for a constructor's fields.
-    if args.any (fun p => match p with
-        | .var r => r == restMark
-        | _ => false) then
-      failAt "`..` stands for the rest of a constructor's fields; of a tuple each part is written, `_` for one that is not wanted"
+    -- `(first, ..)`: the parts not written, however many the tuple has.
+    -- How many is the checker's to find; until then `..` has a name.
+    let rests := args.filter fun p => match p with
+      | .var r => r == restMark
+      | _ => false
+    if rests.length > 1 then failAt "a tuple pattern has one `..`"
+    if rests.length == 1 then
+      return .tuple (args.map fun p => match p with
+        | .var r => if r == restMark then .var (tupleRestName opened) else .var r
+        | p => p)
     match args with
     | [p] => if ← closedAfterComma then pure (.tuple [p]) else pure p
     | _ => pure (.tuple args)

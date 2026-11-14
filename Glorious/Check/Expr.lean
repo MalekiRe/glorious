@@ -1203,6 +1203,18 @@ partial def inferPat (p : Pattern) (t : Ty) : M Scope := do
       unifyAt "an integer pattern" .int t
       pure []
   | .tuple ps => do
+    -- `(first, ..)`: how many parts `..` stands for is what the tuple has
+    -- beyond those written. Said to whoever is reading the program, which
+    -- is then read with them written.
+    if let some id := ps.findSome? fun
+        | .var x => Syntax.tupleRestOf x
+        | _ => none then
+      match ← find t with
+      | .tuple parts =>
+        if parts.length + 1 < ps.length then
+          throw s!"a tuple pattern with {ps.length - 1} parts and `..`, of a tuple of {parts.length}"
+        throw (Syntax.tupleRestFound id (parts.length + 1 - ps.length))
+      | _ => throw "`..` in a tuple pattern stands for the parts not written, and how many the tuple has is not known here: say its type"
     let ts ← ps.mapM fun _ => freshTy
     unifyAt "a tuple pattern" (.tuple ts) t
     inferPats ps ts

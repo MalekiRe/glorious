@@ -373,9 +373,21 @@ def compileSource (src : String) (check : Bool := true)
     | true, true => checkedStdDrop.get
     | false, false => checkedPrelude.get
     | false, true => checkedPreludeDrop.get
-  let checked := match check && !resolved.info.shadowed, first with
+  let checkOnce := fun (all : List Syntax.Item) =>
+    match check && !resolved.info.shadowed, first with
     | true, .ok (count, first) => Check.checkAfter first (all.drop count) resolved.info
     | _, _ => Check.checkProgram all resolved.info drops
+  -- (`..` in a tuple pattern: the checker says how many parts it stands
+  -- for, and the program is read again with them written.)
+  let rec checkWith (fuel : Nat) (all : List Syntax.Item) :
+      List Syntax.Item × Except String Elab.Blocks :=
+    match checkOnce all with
+    | .ok blocks => (all, .ok blocks)
+    | .error e =>
+      match fuel, Elab.restFound e with
+      | fuel + 1, some (id, count) => checkWith fuel (Elab.restItems id count all)
+      | _, _ => (all, .error e)
+  let (all, checked) := checkWith 64 all
   let blocks ← match checked with
     | .ok blocks => pure (some blocks)
     | .error e => if check then throw e else pure none
