@@ -501,12 +501,23 @@ the programs it accepts.
    checker `checked_borrow_safety`, `checked_scoped_safety` and their compiled
    forms.
 
-   What this is not. A region is one cell: there is no outlives relation, no
-   region that stands for several cells, and so no reference that may point to
-   one cell or another (a reference stored in a data structure with others of
-   different cells cannot be typed with regions). Holding a dangling reference
-   is allowed; using it is what is ruled out. References are still freely
-   copied: nothing here says a writer is alone (stage 5).
+   What this is not. There is no outlives relation. Holding a dangling
+   reference is allowed; using it is what is ruled out. References are still
+   freely copied: nothing here says a writer is alone (stage 5).
+
+   **A region may be one of several places** (`Rgn.or`): a reference of
+   region `or a b` points into `a` or into `b`, and touching it needs both.
+   Everything that grants or asks for regions does so place by place
+   (`Rgn.parts`, `Rgn.flat`, `Grants`, `Sub`): a borrow takes away every
+   place of what was lent, and "the regions a callable touches are different"
+   is said of their places. A value of a reference type may be used where a
+   reference of a region of more places is expected (`Widen`, in the typing
+   of an operand); the checker allows that where the type wanted is known: a
+   call's arguments, a result, a constructor's fields, what is stored, and a
+   `let` of an operand. `Typing/Witness.lean` has `either`, a reference to one
+   of two cells chosen by a function with one region, accepted with the rules
+   for borrows on. Region inference does not yet produce such regions: a
+   program that needs one still gets a certificate without the region rules.
 
    How it is set up (so that the work can be picked up from here):
 

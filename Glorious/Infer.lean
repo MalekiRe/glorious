@@ -2194,6 +2194,7 @@ def ofRg (env : RgEnv) : Typing.Rgn → M Nat
   | .lab _ => freshRg
   | .loan _ => freshRg
   | .wr _ => freshRg
+  | .or _ _ => freshRg
 
 def ofAcc (env : RgEnv) (acc : List Typing.Rgn) : M Nat := do
   let a ← freshAcc
@@ -2249,6 +2250,7 @@ partial def showRgn : Typing.Rgn → String
   | .lab id => s!"lab{id}"
   | .loan b => s!"loan{b}"
   | .wr r => s!"wr({showRgn r})"
+  | .or a b => s!"({showRgn a}|{showRgn b})"
 
 partial def showCoreTy : Typing.Ty → String
   | .int => "int"

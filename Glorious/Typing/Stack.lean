@@ -365,19 +365,21 @@ theorem StackOk.guard_inv {S : StoreTy} {st : List Frame} {τ : Ty} {ε : Row} {
 /-- A stack grants only regions of things the store typing knows: so a new
 cell, label or borrow is none of them. -/
 theorem StackOk.known {S : StoreTy} {st : List Frame} {τ : Ty} {ε : Row} {ϕ : List Rgn}
-    (h : StackOk Δ S st τ ε ϕ) : ∀ x, x ∈ ϕ → Known S x := by
+    (h : StackOk Δ S st τ ε ϕ) : ∀ x, x ∈ Rgn.flat ϕ → Known S x := by
   induction h with
   | nil => intro x hx; cases hx
   | call _ _ _ _ _ ih => exact ih
   | handler _ _ _ hΦ _ ih => exact fun x hx => ih x (hΦ x hx)
   | label hl _ ih =>
     intro x hx
+    rw [Rgn.flat_cons_atom rfl] at hx
     rcases List.mem_cons.mp hx with rfl | hx
     · exact ⟨_, hl⟩
     · exact ih x hx
   | guard _ _ _ ih => exact ih
   | cell hc _ ih =>
     intro x hx
+    rw [Rgn.flat_cons_atom rfl, Rgn.flat_cons_atom rfl] at hx
     rcases List.mem_cons.mp hx with rfl | hx
     · exact ⟨_, hc⟩
     · rcases List.mem_cons.mp hx with rfl | hx
@@ -385,6 +387,7 @@ theorem StackOk.known {S : StoreTy} {st : List Frame} {τ : Ty} {ε : Row} {ϕ :
       · exact ih x hx
   | @lend uniq a b st τ ε ϕ ρ hl _ _ _ _ _ ih =>
     intro x hx
+    rw [flat_lent] at hx
     rcases List.mem_cons.mp hx with rfl | hx
     · exact ⟨_, hl⟩
     · rcases List.mem_append.mp hx with hx | hx
@@ -656,7 +659,7 @@ the store. -/
 theorem apply_ok {p : Program} {S : StoreTy} {store : Store Frame} {st : List Frame}
     {c : Callee} {σ : Ty} {ε' ε : Row} {ϕ' ϕ : List Rgn} (hp : ProgramOk Δ p)
     (hs : StoreOk Δ S store) (hc : CalleeOk Δ S c σ ε' ϕ') (hst : StackOk Δ S st σ ε ϕ)
-    (hle : Row.le ε' ε) (hsub : Sub ϕ' ϕ) (hnd : Δ.loans → ϕ'.Nodup) :
+    (hle : Row.le ε' ε) (hsub : Sub ϕ' ϕ) (hnd : Δ.loans → (Rgn.flat ϕ').Nodup) :
     ((∀ k v, c ≠ .cont k v)
         ∧ Safe Δ S (fun id => occCallee id c + occStack id st) store (apply p c st store))
       ∨ (∃ k v seg, c = .cont k v ∧ store.conts[k]? = some (some seg)

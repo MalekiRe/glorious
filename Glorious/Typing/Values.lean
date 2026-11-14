@@ -203,9 +203,9 @@ theorem HasVal.unit {S : StoreTy} : HasVal Δ S Value.unit Ty.unit :=
 theorem HasAtom.snoc {Γ : TEnv} {a : Atom} {τ : Ty} (σ : Ty) (h : HasAtom Γ a τ) :
     HasAtom (Γ ++ [σ]) a τ := by
   cases h with
-  | var h =>
+  | var h hw =>
     obtain ⟨hlt, _⟩ := List.getElem?_eq_some_iff.mp h
-    exact .var (by rw [List.getElem?_append_left hlt]; exact h)
+    exact .var (by rw [List.getElem?_append_left hlt]; exact h) hw
   | int => exact .int
 
 theorem HasAtoms.snoc {Γ : TEnv} (σ : Ty) : ∀ {as : List Atom} {τs : List Ty},
@@ -230,13 +230,22 @@ theorem eval_snoc {env : Env} {a : Atom} {v : Value} (x : Value) (h : a.eval env
     exact h'
   | int n => exact h
 
+/-- A value is one of any type its type widens to. -/
+theorem HasVal.widen {S : StoreTy} {v : Value} {τ τ' : Ty} (h : HasVal Δ S v τ)
+    (hw : Widen τ τ') : HasVal Δ S v τ' := by
+  cases hw with
+  | refl => exact h
+  | ref hp =>
+    obtain ⟨a, b, path, τ₀, rfl, hc, hpo, hon, htag⟩ := h.ref_inv
+    exact .ref hc hpo (fun hR => (hon hR).widen hp) (fun hR hL => (htag hR hL).widen hp)
+
 theorem atom_ok {S : StoreTy} {env : Env} {Γ : TEnv} {a : Atom} {τ : Ty}
     (henv : HasVals Δ S env Γ) (h : HasAtom Γ a τ) :
     ∃ v, a.eval env = some v ∧ HasVal Δ S v τ := by
   cases h with
-  | var hi =>
+  | var hi hw =>
     obtain ⟨v, hv, ht⟩ := henv.get hi
-    exact ⟨v, by simp [Atom.eval, hv], ht⟩
+    exact ⟨v, by simp [Atom.eval, hv], ht.widen hw⟩
   | int => exact ⟨_, rfl, .int⟩
 
 theorem atoms_ok {S : StoreTy} {env : Env} {Γ : TEnv} (henv : HasVals Δ S env Γ)
@@ -784,7 +793,7 @@ theorem callFn_safe {p : Program} {S : StoreTy} {fn : Nat} {sig : FnSig} {θ rs 
     (hv : HasVals Δ S vs ((sig.params.map (Ty.inst θ)).map (Ty.open rs)))
     (hle : Row.le ((sig.eff.inst θ).open rs) ε)
     (hacc : Sub ((sig.acc.map (Rgn.inst θ)).map (Rgn.openAt 0 rs)) ϕ)
-    (hnd : Δ.loans → ((sig.acc.map (Rgn.inst θ)).map (Rgn.openAt 0 rs)).Nodup)
+    (hnd : Δ.loans → (Rgn.flat ((sig.acc.map (Rgn.inst θ)).map (Rgn.openAt 0 rs))).Nodup)
     (hst : StackOk Δ S st ((sig.ret.inst θ).open rs) ε ϕ) (hs : StoreOk Δ S store) :
     Safe Δ S (fun id => occs id vs + occs id captures + occStack id st) store
       (callFn p fn captures vs st store) := by

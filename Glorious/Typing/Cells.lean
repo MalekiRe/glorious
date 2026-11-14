@@ -537,30 +537,55 @@ theorem ownStack_cons_pos {a : Nat} {st : List Frame} (fr : Frame) (h : 0 < ownS
 /-- What the scope of a borrow grants. -/
 theorem mem_lent {uniq : Bool} {ρ : Rgn} {b : Nat} {ϕ : List Rgn} {x : Rgn} :
     x ∈ lent uniq ρ b ϕ ↔ x = .loan b ∨ (uniq = true ∧ x = .wr (.loan b))
-      ∨ (x ∈ ϕ ∧ x ≠ .wr ρ ∧ (uniq = true → x ≠ ρ) ∧ x ≠ .loan b ∧ x ≠ .wr (.loan b)) := by
+      ∨ (x ∈ Rgn.flat ϕ ∧ x ∉ (Rgn.wr ρ).parts ∧ (uniq = true → x ∉ ρ.parts) ∧ x ≠ .loan b
+        ∧ x ≠ .wr (.loan b)) := by
   cases uniq <;> simp [lent, and_assoc]
+
+/-- A cell is of a region through one of the region's places. -/
+theorem OnCell.part {S : StoreTy} {r : Rgn} {a : Nat} (h : OnCell S r a) :
+    ∃ y, y ∈ r.parts ∧ OnCell S y a := by
+  obtain ⟨y, hy, hc⟩ := h
+  exact ⟨y, hy, y, Rgn.self_mem_parts (Rgn.mem_parts_atom hy), hc⟩
+
+theorem OnCell.not_lab {S : StoreTy} {id a : Nat} : ¬ OnCell S (.lab id) a := by
+  rintro ⟨y, hy, hc⟩
+  simp only [Rgn.parts, List.mem_singleton] at hy
+  subst hy
+  rcases hc with hc | ⟨_, hc, _⟩ <;> cases hc
+
+theorem OnCell.not_wr {S : StoreTy} {r : Rgn} {a : Nat} : ¬ OnCell S (.wr r) a := by
+  rintro ⟨y, hy, hc⟩
+  simp only [Rgn.parts, List.mem_map] at hy
+  obtain ⟨z, _, rfl⟩ := hy
+  rcases hc with hc | ⟨_, hc, _⟩ <;> cases hc
 
 theorem OnCell.loan_eq {S : StoreTy} {a a' b : Nat} (h : OnCell S (.loan b) a)
     (hl : S.loans b = some a') : a = a' := by
-  rcases h with h | ⟨b', h, hl'⟩
+  obtain ⟨y, hy, hc⟩ := h
+  simp only [Rgn.parts, List.mem_singleton] at hy
+  subst hy
+  rcases hc with h | ⟨b', h, hl'⟩
   · cases h
   · cases h
     rw [hl] at hl'
     exact (Option.some.inj hl').symm
 
 theorem OnCell.cell_eq {S : StoreTy} {a a' : Nat} (h : OnCell S (.cell a') a) : a = a' := by
-  rcases h with h | ⟨b', h, _⟩
+  obtain ⟨y, hy, hc⟩ := h
+  simp only [Rgn.parts, List.mem_singleton] at hy
+  subst hy
+  rcases hc with h | ⟨b', h, _⟩
   · cases h
     rfl
   · cases h
 
-/-- A region a typed stack grants, to read or to write, that is of a cell has
+/-- A place a typed stack grants, to read or to write, that is of a cell has
 that cell's scope on the stack: the cell's own region is granted by the scope,
 and a borrow's by the scope of the borrow, which was made where the region
 borrowed from was granted. -/
 theorem StackOk.onCell {S : StoreTy} {st : List Frame} {τ : Ty} {ε : Row} {ϕ : List Rgn}
     (hR : Δ.regions) (h : StackOk Δ S st τ ε ϕ) :
-    ∀ x a, (x ∈ ϕ ∨ .wr x ∈ ϕ) → OnCell S x a → 0 < ownStack a st := by
+    ∀ x a, (x ∈ Rgn.flat ϕ ∨ .wr x ∈ Rgn.flat ϕ) → OnCell S x a → 0 < ownStack a st := by
   induction h with
   | nil => intro x a hx; rcases hx with hx | hx <;> cases hx
   | call _ _ _ _ _ ih => exact fun x a hx hc => ownStack_cons_pos _ (ih x a hx hc)
@@ -568,9 +593,10 @@ theorem StackOk.onCell {S : StoreTy} {st : List Frame} {τ : Ty} {ε : Row} {ϕ 
     exact fun x a hx hc => ownStack_cons_pos _ (ih x a (hx.imp (hsub _) (hsub _)) hc)
   | @label id st τ ε ϕ _ _ ih =>
     intro x a hx hc
+    rw [Rgn.flat_cons_atom rfl] at hx
     rcases hx with hx | hx
     · rcases List.mem_cons.mp hx with rfl | hx
-      · rcases hc with hc | ⟨_, hc, _⟩ <;> cases hc
+      · exact absurd hc OnCell.not_lab
       · exact ownStack_cons_pos _ (ih x a (.inl hx) hc)
     · rcases List.mem_cons.mp hx with hx | hx
       · cases hx
@@ -583,11 +609,12 @@ theorem StackOk.onCell {S : StoreTy} {st : List Frame} {τ : Ty} {ε : Row} {ϕ 
       cases hc.cell_eq
       simp only [ownStack, ownFrame, ↓reduceIte]
       omega
+    rw [Rgn.flat_cons_atom rfl, Rgn.flat_cons_atom rfl] at hx
     rcases hx with hx | hx
     · rcases List.mem_cons.mp hx with rfl | hx
       · exact hself rfl
       · rcases List.mem_cons.mp hx with rfl | hx
-        · rcases hc with hc | ⟨_, hc, _⟩ <;> cases hc
+        · exact absurd hc OnCell.not_wr
         · exact ownStack_cons_pos _ (ih x a (.inl hx) hc)
     · rcases List.mem_cons.mp hx with hx | hx
       · cases hx
@@ -599,11 +626,13 @@ theorem StackOk.onCell {S : StoreTy} {st : List Frame} {τ : Ty} {ε : Row} {ϕ 
     have hself : x = .loan b → 0 < ownStack a (.lend uniq a' b :: st) := by
       rintro rfl
       cases hc.loan_eq hl
-      exact ownStack_cons_pos _ (ih ρ a' (.inl hρ) hon)
+      obtain ⟨y, hy, hyc⟩ := hon.part
+      exact ownStack_cons_pos _ (ih y a' (.inl (hρ y hy)) hyc)
+    rw [flat_lent] at hx
     rcases hx with hx | hx
     · rcases mem_lent.mp hx with rfl | ⟨_, rfl⟩ | ⟨hx, _⟩
       · exact hself rfl
-      · rcases hc with hc | ⟨_, hc, _⟩ <;> cases hc
+      · exact absurd hc OnCell.not_wr
       · exact ownStack_cons_pos _ (ih x a (.inl hx) hc)
     · rcases mem_lent.mp hx with hx | ⟨_, hx⟩ | ⟨hx, _⟩
       · cases hx
@@ -615,12 +644,14 @@ theorem StackOk.onCell {S : StoreTy} {st : List Frame} {τ : Ty} {ε : Row} {ϕ 
       rintro rfl
       cases hc.loan_eq hl
       obtain ⟨ρ, hon', hρ⟩ := hon hR
-      exact ownStack_cons_pos _ (ih ρ a' (.inl hρ) hon')
+      obtain ⟨y, hy, hyc⟩ := hon'.part
+      exact ownStack_cons_pos _ (ih y a' (.inl (hρ y hy)) hyc)
+    rw [Rgn.flat_cons_atom rfl, Rgn.flat_cons_atom rfl] at hx
     rcases hx with hx | hx
     · rcases List.mem_cons.mp hx with rfl | hx
       · exact hself rfl
       · rcases List.mem_cons.mp hx with rfl | hx
-        · rcases hc with hc | ⟨_, hc, _⟩ <;> cases hc
+        · exact absurd hc OnCell.not_wr
         · exact ownStack_cons_pos _ (ih x a (.inl hx) hc)
     · rcases List.mem_cons.mp hx with hx | hx
       · cases hx
@@ -633,13 +664,14 @@ theorem StackOk.onCell {S : StoreTy} {st : List Frame} {τ : Ty} {ε : Row} {ϕ 
 
 /-- A label's region is granted only by a stack its scope is on. -/
 theorem StackOk.labelled {S : StoreTy} {st : List Frame} {τ : Ty} {ε : Row} {ϕ : List Rgn}
-    (h : StackOk Δ S st τ ε ϕ) : ∀ id, .lab id ∈ ϕ → Frame.label id ∈ st := by
+    (h : StackOk Δ S st τ ε ϕ) : ∀ id, .lab id ∈ Rgn.flat ϕ → Frame.label id ∈ st := by
   induction h with
   | nil => intro id hr; cases hr
   | call _ _ _ _ _ ih => exact fun id hr => List.mem_cons_of_mem _ (ih id hr)
   | handler _ _ _ hsub _ ih => exact fun id hr => List.mem_cons_of_mem _ (ih id (hsub _ hr))
   | label _ _ ih =>
     intro id hr
+    rw [Rgn.flat_cons_atom rfl] at hr
     rcases List.mem_cons.mp hr with h | hr
     · cases h
       exact List.mem_cons_self ..
@@ -647,6 +679,7 @@ theorem StackOk.labelled {S : StoreTy} {st : List Frame} {τ : Ty} {ε : Row} {�
   | guard _ _ _ ih => exact fun id hr => List.mem_cons_of_mem _ (ih id hr)
   | cell _ _ ih =>
     intro id hr
+    rw [Rgn.flat_cons_atom rfl, Rgn.flat_cons_atom rfl] at hr
     rcases List.mem_cons.mp hr with h | hr
     · cases h
     · rcases List.mem_cons.mp hr with h | hr
@@ -654,12 +687,14 @@ theorem StackOk.labelled {S : StoreTy} {st : List Frame} {τ : Ty} {ε : Row} {�
       · exact List.mem_cons_of_mem _ (ih id hr)
   | lend _ _ _ _ _ _ ih =>
     intro id hr
+    rw [flat_lent] at hr
     rcases mem_lent.mp hr with h | ⟨_, h⟩ | ⟨hr, _⟩
     · cases h
     · cases h
     · exact List.mem_cons_of_mem _ (ih id hr)
   | lendLoose _ _ _ _ ih =>
     intro id hr
+    rw [Rgn.flat_cons_atom rfl, Rgn.flat_cons_atom rfl] at hr
     rcases List.mem_cons.mp hr with h | hr
     · cases h
     · rcases List.mem_cons.mp hr with h | hr
@@ -683,7 +718,7 @@ theorem TypedAt.not_freed {S : StoreTy} {s : State} (hR : Δ.regions) (ht : Type
   obtain @⟨tm, env, stack, store, Γ, τ, ε, ε', ϕ, ϕ', henv, hty, hle, hsub, hst, hs⟩ := ht
   simp only at htm hev hnone
   subst htm
-  have key : ∀ {x : Atom} {r : Rgn} {σ : Ty}, HasAtom Γ x (.ref r σ) → r ∈ ϕ →
+  have key : ∀ {x : Atom} {r : Rgn} {σ : Ty}, HasAtom Γ x (.ref r σ) → Grants ϕ r →
       ∀ {w : Value}, x.eval env = some w → w = .ref a tag pth → False := by
     intro x r σ hx hr w hw hwa
     obtain ⟨v, hv, hvt⟩ := atom_ok henv hx
@@ -692,7 +727,8 @@ theorem TypedAt.not_freed {S : StoreTy} {s : State} (hR : Δ.regions) (ht : Type
     subst hwa
     obtain ⟨b, _, _, _, hb, _, _, hreg, _⟩ := hvt.ref_inv
     cases hb
-    have hpos := hst.onCell hR r a (.inl (hsub _ hr)) (hreg hR)
+    obtain ⟨y, hy, hyc⟩ := (hreg hR).part
+    have hpos := hst.onCell hR y a (.inl (hsub _ (hr y hy))) hyc
     obtain ⟨u, hu⟩ := ((ho a).2 (by
       show 0 < ownStack a stack + osum (ownStack a) store.conts
       omega))
@@ -806,7 +842,7 @@ theorem TypedAt.not_dead {S : StoreTy} {s : State} (hR : Δ.regions) (ht : Typed
     · cases h
       exact ⟨hn, hreg hR⟩
   -- A granted label has its scope on the stack.
-  have found : .lab id ∈ ϕ → False := by
+  have found : .lab id ∈ Rgn.flat ϕ → False := by
     intro hin
     exact findLabel_mem (hst.labelled _ (hsub _ hin)) hnone
   have opened : ∀ {n : Nat} {rs : List Rgn} {acc : List Rgn}, n = 0 → rs.length = n →
@@ -815,7 +851,8 @@ theorem TypedAt.not_dead {S : StoreTy} {s : State} (hR : Δ.regions) (ht : Typed
     subst hn
     have hnil : rs = [] := List.eq_nil_of_length_eq_zero hrs
     subst hnil
-    exact found (hacc _ (List.mem_map.mpr ⟨_, hin, Rgn.openAt_nil 0 _⟩))
+    exact found (hacc _ (Rgn.mem_flat.mpr
+      ⟨_, List.mem_map.mpr ⟨_, hin, Rgn.openAt_nil 0 _⟩, List.mem_singleton_self _⟩))
   have scoped' : ∀ {n : Nat} {acc : List Rgn}, n = 0 → (Δ.regions → n = 1 ∧ True) → False := by
     intro n acc hn hreg
     have := (hreg hR).1
@@ -869,7 +906,7 @@ theorem TypedAt.not_dead {S : StoreTy} {s : State} (hR : Δ.regions) (ht : Typed
   | guardTail _ _ => cases hcallee
   | cancel hk _ hacc _ _ =>
     cases hcallee
-    exact found (hacc _ (isLabel rfl hk).2)
+    exact found (hacc _ (Rgn.mem_flat.mpr ⟨_, (isLabel rfl hk).2, List.mem_singleton_self _⟩))
   | cell hform _ _ =>
     have hthunk := hform.thunk
     have hreg := hform.region
@@ -887,7 +924,7 @@ theorem TypedAt.not_dead {S : StoreTy} {s : State} (hR : Δ.regions) (ht : Typed
     obtain ⟨h0, hin⟩ := isLabel rfl hthunk
     rcases hacc _ hin with ⟨h1, _⟩ | ⟨_, hmem, _⟩
     · omega
-    · exact found hmem
+    · exact found (hmem _ (List.mem_singleton_self _))
   | load _ _ _ _ => cases hcallee
   | tag _ _ _ _ => cases hcallee
   | focus _ _ _ _ => cases hcallee

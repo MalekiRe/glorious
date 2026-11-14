@@ -36,6 +36,9 @@ inductive Rgn where
   /-- Not a place but a permission: to write what `r` is. Being allowed to
   touch `r` is being allowed to read it. -/
   | wr (r : Rgn)
+  /-- One place or another: a reference of this region points into one of
+  them, and touching it needs both. -/
+  | or (a b : Rgn)
   deriving DecidableEq
 
 inductive Ty where
@@ -75,7 +78,7 @@ def Row.le (a b : Row) : Prop :=
 
 namespace Rgn
 
-/-- Is this region not one bound by a callable type? -/
+/-- Is no part of this region one bound by a callable type? -/
 def free : Rgn → Bool
   | .bound _ => false
   | .var _ => true
@@ -83,19 +86,27 @@ def free : Rgn → Bool
   | .lab _ => true
   | .loan _ => true
   | .wr r => r.free
+  | .or a b => a.free && b.free
+
+/-- Is this region a place, or one of several places: nothing bound by a
+callable type and no permission? -/
+def place : Rgn → Bool
+  | .bound _ => false
+  | .wr _ => false
+  | .or a b => a.place && b.place
+  | _ => true
 
 /-- A region to put in place of another: never one that would be bound where
 it lands, and a place, not a permission. -/
 def clean : Option Rgn → Rgn
-  | some (.bound _) => .cell 0
-  | some (.wr _) => .cell 0
-  | some r => r
+  | some r => if r.place then r else .cell 0
   | none => .cell 0
 
 /-- Put regions in place of a function's region variables. -/
 def inst (θ : List Rgn) : Rgn → Rgn
   | .var i => clean θ[i]?
   | .wr r => .wr (inst θ r)
+  | .or a b => .or (inst θ a) (inst θ b)
   | r => r
 
 /-- Put regions in place of those bound by the outermost callable type, seen
@@ -108,17 +119,36 @@ def openAt (d : Nat) (rs : List Rgn) : Rgn → Rgn
       | some r => clean (some r)
       | none => .bound (j - rs.length)
   | .wr r => .wr (openAt d rs r)
+  | .or a b => .or (openAt d rs a) (openAt d rs b)
   | r => r
 
-theorem clean_free (o : Option Rgn) : (clean o).free = true := by
-  cases o with
-  | none => rfl
-  | some r => cases r <;> rfl
+theorem place_free {r : Rgn} (h : r.place = true) : r.free = true := by
+  induction r with
+  | var i => rfl
+  | bound k => cases h
+  | cell a => rfl
+  | lab id => rfl
+  | loan b => rfl
+  | wr r _ => cases h
+  | or a b iha ihb =>
+    simp only [place, Bool.and_eq_true] at h
+    simp [free, iha h.1, ihb h.2]
 
-theorem clean_clean (o : Option Rgn) : clean (some (clean o)) = clean o := by
+theorem clean_place (o : Option Rgn) : (clean o).place = true := by
   cases o with
   | none => rfl
-  | some r => cases r <;> rfl
+  | some r =>
+    by_cases h : r.place = true
+    · simp [clean, h]
+    · simp [clean, h, place]
+
+theorem clean_free (o : Option Rgn) : (clean o).free = true := place_free (clean_place o)
+
+theorem clean_of_place {r : Rgn} (h : r.place = true) : clean (some r) = r := by
+  simp [clean, h]
+
+theorem clean_clean (o : Option Rgn) : clean (some (clean o)) = clean o :=
+  clean_of_place (clean_place o)
 
 theorem inst_free (θ : List Rgn) (r : Rgn) : (r.inst θ).free = r.free := by
   induction r with
@@ -128,6 +158,27 @@ theorem inst_free (θ : List Rgn) (r : Rgn) : (r.inst θ).free = r.free := by
   | lab id => rfl
   | loan b => rfl
   | wr r ih => exact ih
+  | or a b iha ihb => simp [inst, free, iha, ihb]
+
+theorem inst_place (θ : List Rgn) (r : Rgn) : (r.inst θ).place = r.place := by
+  induction r with
+  | var i => exact clean_place _
+  | bound k => rfl
+  | cell a => rfl
+  | lab id => rfl
+  | loan b => rfl
+  | wr r _ => rfl
+  | or a b iha ihb => simp [inst, place, iha, ihb]
+
+theorem inst_clean (θ : List Rgn) (o : Option Rgn) : (clean o).inst θ = clean (o.map (inst θ)) := by
+  cases o with
+  | none => rfl
+  | some r =>
+    by_cases h : r.place = true
+    · have h' : (r.inst θ).place = true := by rw [inst_place]; exact h
+      simp [clean, h, h']
+    · have h' : ¬ (r.inst θ).place = true := by rw [inst_place]; exact h
+      simp [clean, h, h', inst]
 
 /-- Opening leaves a region that is not bound alone. -/
 theorem openAt_free {r : Rgn} (h : r.free = true) (d : Nat) (rs : List Rgn) :
@@ -139,6 +190,9 @@ theorem openAt_free {r : Rgn} (h : r.free = true) (d : Nat) (rs : List Rgn) :
   | lab id => rfl
   | loan b => rfl
   | wr r ih => exact congrArg Rgn.wr (ih h)
+  | or a b iha ihb =>
+    simp only [free, Bool.and_eq_true] at h
+    simp [openAt, iha h.1, ihb h.2]
 
 /-- Instantiating twice is instantiating once, by the regions instantiated. -/
 theorem inst_inst (θ η : List Rgn) (r : Rgn) :
@@ -146,22 +200,13 @@ theorem inst_inst (θ η : List Rgn) (r : Rgn) :
   induction r with
   | var i =>
     show (clean θ[i]?).inst η = clean ((θ.map (inst η))[i]?)
-    rw [List.getElem?_map]
-    cases h : θ[i]? with
-    | none => rfl
-    | some x =>
-      cases x with
-      | var j => exact (clean_clean _).symm
-      | bound k => rfl
-      | cell a => rfl
-      | lab id => rfl
-      | loan b => rfl
-      | wr y => rfl
+    rw [List.getElem?_map, inst_clean]
   | bound k => rfl
   | cell a => rfl
   | lab id => rfl
   | loan b => rfl
   | wr r ih => exact congrArg Rgn.wr ih
+  | or a b iha ihb => simp [inst, iha, ihb]
 
 /-- Opening and then instantiating is instantiating and then opening. -/
 theorem openAt_inst (d : Nat) (rs η : List Rgn) (r : Rgn) :
@@ -179,18 +224,13 @@ theorem openAt_inst (d : Nat) (rs η : List Rgn) (r : Rgn) :
         have hr : (Rgn.bound j).openAt d (rs.map (inst η)) = clean (some (x.inst η)) := by
           simp [openAt, hj, hm]
         show ((Rgn.bound j).openAt d rs).inst η = (Rgn.bound j).openAt d (rs.map (inst η))
-        rw [hl, hr]
-        cases x with
-        | var i => exact (clean_clean _).symm
-        | bound k => rfl
-        | cell a => rfl
-        | lab id => rfl
-        | loan b => rfl
-        | wr y => rfl
+        rw [hl, hr, inst_clean]
+        rfl
   | cell a => rfl
   | lab id => rfl
   | loan b => rfl
   | wr r ih => exact congrArg Rgn.wr ih
+  | or a b iha ihb => simp [openAt, inst, iha, ihb]
 
 /-- Opening with no regions changes nothing. -/
 theorem openAt_nil (d : Nat) (r : Rgn) : r.openAt d [] = r := by
@@ -202,6 +242,7 @@ theorem openAt_nil (d : Nat) (r : Rgn) : r.openAt d [] = r := by
   | lab id => rfl
   | loan b => rfl
   | wr r ih => exact congrArg Rgn.wr ih
+  | or a b iha ihb => simp [openAt, iha, ihb]
 
 /-- The variables a function's call regions are opened to in its body: those
 after its `c` capture regions. -/
@@ -217,6 +258,7 @@ def within (c : Nat) : Rgn → Bool
   | .lab _ => true
   | .loan _ => true
   | .wr r => within c r
+  | .or a b => within c a && within c b
 
 /-- A function's body is typed with its call regions as variables. Entered
 with capture regions `θ` and call regions `rs`, a region of its signature means
@@ -239,7 +281,7 @@ theorem open_callVars_inst (d : Nat) (θ rs : List Rgn) (r : Rgn) (hr : r.within
           simp
         have hl : (Rgn.bound j).openAt d (callVars θ.length rs.length)
             = .var (θ.length + (j - d)) := by
-          simp [openAt, hj, h1, clean]
+          simp [openAt, hj, h1, clean, place]
         have hx : rs[j - d]? = some rs[j - d] := by simp [hlt]
         have hr' : (Rgn.bound j).openAt d rs = clean (some rs[j - d]) := by
           simp [openAt, hj, hx]
@@ -259,41 +301,166 @@ theorem open_callVars_inst (d : Nat) (θ rs : List Rgn) (r : Rgn) (hr : r.within
   | lab id => rfl
   | loan b => rfl
   | wr r ih => exact congrArg Rgn.wr (ih hr)
-
-/-- A region that is bound is left as it is. -/
-theorem inst_bound {r : Rgn} (h : r.free = false) (θ : List Rgn) : r.inst θ = r := by
-  induction r with
-  | var i => cases h
-  | bound k => rfl
-  | cell a => cases h
-  | lab id => cases h
-  | loan b => cases h
-  | wr r ih => exact congrArg Rgn.wr (ih h)
+  | or a b iha ihb =>
+    simp only [within, Bool.and_eq_true] at hr
+    simp [openAt, inst, iha hr.1, ihb hr.2]
 
 /-- No part of the region is bound more than `d` callable types out. -/
 def lcAt (d : Nat) : Rgn → Bool
   | .bound j => decide (j < d)
   | .wr r => lcAt d r
+  | .or a b => lcAt d a && lcAt d b
   | _ => true
+
+theorem place_lcAt {r : Rgn} (h : r.place = true) (d : Nat) : r.lcAt d = true := by
+  induction r with
+  | bound k => cases h
+  | wr r _ => cases h
+  | or a b iha ihb =>
+    simp only [place, Bool.and_eq_true] at h
+    simp [lcAt, iha h.1, ihb h.2]
+  | _ => rfl
 
 theorem lcAt_inst {d : Nat} {r : Rgn} (h : r.lcAt d = true) (θ : List Rgn) :
     (r.inst θ).lcAt d = true := by
   induction r with
-  | var i =>
-    have := clean_free θ[i]?
-    show (clean θ[i]?).lcAt d = true
-    cases hc : clean θ[i]? with
-    | bound k => rw [hc] at this; cases this
-    | wr y =>
-      cases hθ : θ[i]? with
-      | none => rw [hθ] at hc; cases hc
-      | some x => rw [hθ] at hc; cases x <;> cases hc
-    | _ => rfl
+  | var i => exact place_lcAt (clean_place _) d
   | bound k => exact h
   | cell a => rfl
   | lab id => rfl
   | loan b => rfl
   | wr r ih => exact ih h
+  | or a b iha ihb =>
+    simp only [lcAt, Bool.and_eq_true] at h
+    simp [inst, lcAt, iha h.1, ihb h.2]
+
+/-- Does the region have no part that is a region variable? -/
+def novar : Rgn → Bool
+  | .var _ => false
+  | .wr r => novar r
+  | .or a b => novar a && novar b
+  | _ => true
+
+/-- A region with no variable in it is left as it is. -/
+theorem inst_novar {r : Rgn} (h : r.novar = true) (θ : List Rgn) : r.inst θ = r := by
+  induction r with
+  | var i => cases h
+  | wr r ih => exact congrArg Rgn.wr (ih h)
+  | or a b iha ihb =>
+    simp only [novar, Bool.and_eq_true] at h
+    simp [inst, iha h.1, ihb h.2]
+  | _ => rfl
+
+/-- The places and permissions a region is made of: a region that is one of
+several places is each of them. -/
+def parts : Rgn → List Rgn
+  | .wr r => (parts r).map .wr
+  | .or a b => parts a ++ parts b
+  | r => [r]
+
+/-- A region that is not several places: a place, or leave to write one. -/
+def atom : Rgn → Bool
+  | .or _ _ => false
+  | .wr r => r.atom
+  | _ => true
+
+theorem atom_parts {r : Rgn} (h : r.atom = true) : r.parts = [r] := by
+  induction r with
+  | or a b _ _ => cases h
+  | wr r ih => simp [parts, ih h]
+  | _ => rfl
+
+theorem mem_parts_atom {r x : Rgn} (h : x ∈ r.parts) : x.atom = true := by
+  induction r generalizing x with
+  | or a b iha ihb =>
+    simp only [parts, List.mem_append] at h
+    rcases h with h | h
+    · exact iha h
+    · exact ihb h
+  | wr r ih =>
+    simp only [parts, List.mem_map] at h
+    obtain ⟨y, hy, rfl⟩ := h
+    have := ih (x := y) hy
+    simpa [atom] using this
+  | _ =>
+    simp only [parts, List.mem_singleton] at h
+    subst h
+    rfl
+
+/-- A part of a region is its own only part. -/
+theorem parts_of_mem {r x : Rgn} (h : x ∈ r.parts) : x.parts = [x] := atom_parts (mem_parts_atom h)
+
+theorem self_mem_parts {x : Rgn} (h : x.atom = true) : x ∈ x.parts := by
+  rw [atom_parts h]
+  exact List.mem_singleton_self x
+
+theorem parts_ne_nil (r : Rgn) : r.parts ≠ [] := by
+  induction r with
+  | or a b iha _ => simp [parts, iha]
+  | wr r ih => simp [parts, ih]
+  | _ => simp [parts]
+
+theorem parts_inst (θ : List Rgn) (r : Rgn) :
+    (r.inst θ).parts = r.parts.flatMap fun x => (x.inst θ).parts := by
+  induction r with
+  | or a b iha ihb => simp [inst, parts, iha, ihb, List.flatMap_append]
+  | wr r ih => simp [inst, parts, ih, List.flatMap_map, List.map_flatMap]
+  | _ => simp [parts]
+
+theorem parts_openAt (d : Nat) (rs : List Rgn) (r : Rgn) :
+    (r.openAt d rs).parts = r.parts.flatMap fun x => (x.openAt d rs).parts := by
+  induction r with
+  | or a b iha ihb => simp [openAt, parts, iha, ihb, List.flatMap_append]
+  | wr r ih => simp [openAt, parts, ih, List.flatMap_map, List.map_flatMap]
+  | _ => simp [parts]
+
+theorem free_of_mem_parts {r x : Rgn} (hx : x ∈ r.parts) (hf : r.free = true) : x.free = true := by
+  induction r generalizing x with
+  | or a b iha ihb =>
+    simp only [free, Bool.and_eq_true] at hf
+    simp only [parts, List.mem_append] at hx
+    rcases hx with hx | hx
+    · exact iha hx hf.1
+    · exact ihb hx hf.2
+  | wr r ih =>
+    simp only [parts, List.mem_map] at hx
+    obtain ⟨y, hy, rfl⟩ := hx
+    have := ih (x := y) hy hf
+    simpa [free] using this
+  | _ =>
+    simp only [parts, List.mem_singleton] at hx
+    subst hx
+    exact hf
+
+/-- A part bound by a callable type is left as it is. -/
+theorem inst_atom_bound {x : Rgn} (ha : x.atom = true) (hf : x.free = false) (θ : List Rgn) :
+    x.inst θ = x := by
+  induction x with
+  | var i => cases hf
+  | wr r ih => exact congrArg Rgn.wr (ih ha hf)
+  | or a b _ _ => cases ha
+  | _ => rfl
+
+/-- A place has no part that is leave to write. -/
+theorem place_parts {r x : Rgn} (h : r.place = true) (hx : x ∈ r.parts) : ∀ y, x ≠ .wr y := by
+  induction r generalizing x with
+  | or a b iha ihb =>
+    simp only [place, Bool.and_eq_true] at h
+    simp only [parts, List.mem_append] at hx
+    rcases hx with hx | hx
+    · exact iha h.1 hx
+    · exact ihb h.2 hx
+  | wr r _ => cases h
+  | bound k => cases h
+  | _ =>
+    simp only [parts, List.mem_singleton] at hx
+    subst hx
+    intro y hy
+    cases hy
+
+/-- What a variable is instantiated to has no part that is leave to write. -/
+theorem inst_var_parts {θ : List Rgn} {i : Nat} {x : Rgn} (hx : x ∈ ((Rgn.var i).inst θ).parts) :
+    ∀ y, x ≠ .wr y := place_parts (clean_place _) hx
 
 end Rgn
 
@@ -727,6 +894,9 @@ theorem Rgn.openAt_lc {d : Nat} {r : Rgn} (rs : List Rgn) (h : r.lcAt d = true) 
   | lab id => rfl
   | loan b => rfl
   | wr r ih => exact congrArg Rgn.wr (ih h)
+  | or a b iha ihb =>
+    simp only [Rgn.lcAt, Bool.and_eq_true] at h
+    simp [Rgn.openAt, iha h.1, ihb h.2]
 
 /-- Opening a type none of whose regions is bound outside it changes nothing. -/
 theorem Ty.open_lc {t : Ty} (h : t.lc = true) (rs : List Rgn) : t.open rs = t := by
@@ -764,6 +934,9 @@ theorem Rgn.inst_append {θ : List Rgn} {r : Rgn} (h : r.within θ.length = true
   | lab id => rfl
   | loan b => rfl
   | wr r ih => exact congrArg Rgn.wr (ih h)
+  | or a b iha ihb =>
+    simp only [Rgn.within, Bool.and_eq_true] at h
+    simp [Rgn.inst, iha h.1, ihb h.2]
 
 theorem Ty.inst_append {θ : List Rgn} {t : Ty} (h : t.within θ.length = true) (rs : List Rgn) :
     t.inst (θ ++ rs) = t.inst θ :=
@@ -801,20 +974,29 @@ def Rgn.shape : Rgn → Rgn
   | .cell _ => .cell 0
   | .lab _ => .cell 0
   | .loan _ => .cell 0
+  | .or a b => if a.free && b.free then .cell 0 else .or a.shape b.shape
 
 def Rgn.isWr : Rgn → Bool
   | .wr _ => true
   | _ => false
 
-theorem Rgn.clean_shape (o : Option Rgn) : (Rgn.clean o).shape = .cell 0 := by
-  cases o with
-  | none => rfl
-  | some r => cases r <;> rfl
+theorem Rgn.place_shape {r : Rgn} (h : r.place = true) : r.shape = .cell 0 := by
+  cases r with
+  | bound k => cases h
+  | wr r => cases h
+  | or a b =>
+    simp only [Rgn.place, Bool.and_eq_true] at h
+    simp [Rgn.shape, Rgn.place_free h.1, Rgn.place_free h.2]
+  | _ => rfl
+
+theorem Rgn.clean_shape (o : Option Rgn) : (Rgn.clean o).shape = .cell 0 :=
+  Rgn.place_shape (Rgn.clean_place o)
 
 theorem Rgn.clean_isWr (o : Option Rgn) : (Rgn.clean o).isWr = false := by
-  cases o with
-  | none => rfl
-  | some r => cases r <;> rfl
+  have h := Rgn.clean_place o
+  cases hc : Rgn.clean o with
+  | wr r => rw [hc] at h; cases h
+  | _ => rfl
 
 theorem Rgn.shape_inst (θ : List Rgn) (r : Rgn) : (r.inst θ).shape = r.shape := by
   induction r with
@@ -824,6 +1006,8 @@ theorem Rgn.shape_inst (θ : List Rgn) (r : Rgn) : (r.inst θ).shape = r.shape :
   | lab id => rfl
   | loan b => rfl
   | wr r ih => exact congrArg Rgn.wr ih
+  | or a b iha ihb =>
+    simp only [Rgn.inst, Rgn.shape, Rgn.inst_free, iha, ihb]
 
 theorem Rgn.isWr_inst (θ : List Rgn) (r : Rgn) : (r.inst θ).isWr = r.isWr := by
   cases r with

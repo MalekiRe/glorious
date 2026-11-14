@@ -65,14 +65,18 @@ def FnSig.ty (sig : FnSig) (θ : List Rgn) (once : Bool) (env : Option (List Ty)
   .fn sig.rgns (sig.params.map (Ty.inst θ)) (sig.ret.inst θ) (sig.eff.inst θ) once env
     (sig.acc.map (Rgn.inst θ))
 
-/-- Whoever may write a region may read it. -/
+/-- The places and permissions a list of regions is made of. -/
+def Rgn.flat (l : List Rgn) : List Rgn := l.flatMap Rgn.parts
+
+/-- Whoever may write a place may read it. -/
 def closed (l : List Rgn) : Bool :=
-  l.all fun x =>
+  (Rgn.flat l).all fun x =>
     match x with
-    | .wr r => l.contains r
+    | .wr r => (Rgn.flat l).contains r
     | _ => true
 
-theorem closed_mem {l : List Rgn} (h : closed l = true) {r : Rgn} (hr : .wr r ∈ l) : r ∈ l := by
+theorem closed_mem {l : List Rgn} (h : closed l = true) {r : Rgn} (hr : .wr r ∈ Rgn.flat l) :
+    r ∈ Rgn.flat l := by
   have := List.all_eq_true.mp h _ hr
   simpa using this
 
@@ -132,8 +136,11 @@ theorem CtorOf.unique {Δ : Ctx} {tag : Nat} {T : Ty} {Fs Fs' : List Ty}
       rw [hF] at hF'
       exact Option.some.inj hF'
 
-/-- Every region of `a` is one of `b`. -/
-def Sub (a b : List Rgn) : Prop := ∀ r, r ∈ a → r ∈ b
+/-- What `ϕ` grants covers the region: each place or permission it is made of. -/
+def Grants (ϕ : List Rgn) (r : Rgn) : Prop := ∀ x, x ∈ r.parts → x ∈ Rgn.flat ϕ
+
+/-- Every place and permission of `a` is one of `b`. -/
+def Sub (a b : List Rgn) : Prop := ∀ r, r ∈ Rgn.flat a → r ∈ Rgn.flat b
 
 /-- Two lists related item by item. -/
 inductive All₂ {α β : Type} (R : α → β → Prop) : List α → List β → Prop where
@@ -144,8 +151,15 @@ inductive All₂ {α β : Type} (R : α → β → Prop) : List α → List β �
 /-- The types of the locals of an activation, oldest first. -/
 abbrev TEnv := List Ty
 
+/-- A value of the first type is one of the second: the same type, or a
+reference taken to be of a region of more places, any of which it may point
+into. -/
+inductive Widen : Ty → Ty → Prop where
+  | refl {τ : Ty} : Widen τ τ
+  | ref {ρ ρ' : Rgn} {σ : Ty} : (∀ x, x ∈ ρ.parts → x ∈ ρ'.parts) → Widen (.ref ρ σ) (.ref ρ' σ)
+
 inductive HasAtom (Γ : TEnv) : Atom → Ty → Prop where
-  | var {i : Nat} {τ : Ty} : Γ[i]? = some τ → HasAtom Γ (.var i) τ
+  | var {i : Nat} {τ τ' : Ty} : Γ[i]? = some τ → Widen τ τ' → HasAtom Γ (.var i) τ'
   | int {n : Int} : HasAtom Γ (.int n) .int
 
 abbrev HasAtoms (Γ : TEnv) : List Atom → List Ty → Prop := All₂ (HasAtom Γ)
@@ -344,7 +358,7 @@ def Enters (Δ : Ctx) (fn : Nat) (Cs Ps : List Ty) (ρ : Ty) (ε : Row) (Φ : Li
   ∃ sig θ, Δ.fnSig fn sig ∧ θ.length = sig.crgns ∧ sig.rgns = 0
     ∧ Cs = sig.caps.map (Ty.inst θ) ∧ Ps = sig.params.map (Ty.inst θ) ∧ ρ = sig.ret.inst θ
     ∧ Row.le (sig.eff.inst θ) ε ∧ Sub (sig.acc.map (Rgn.inst θ)) Φ
-    ∧ (Δ.loans → (sig.acc.map (Rgn.inst θ)).Nodup)
+    ∧ (Δ.loans → (Rgn.flat (sig.acc.map (Rgn.inst θ))).Nodup)
 
 /-- The functions serving a handler's operations, against the type each
 operation is declared to have. A resumptive operation's function also receives
@@ -391,7 +405,7 @@ structure CallOk (Δ : Ctx) (ϕ : List Rgn) (Γ : TEnv) (f : Atom) (args : List 
   /-- Regions: the code may touch what the callable does. -/
   touches : Sub (acc.map (Rgn.openAt 0 rs)) ϕ
   /-- Borrows: the regions the callable touches are different regions here. -/
-  apart : Δ.loans → (acc.map (Rgn.openAt 0 rs)).Nodup
+  apart : Δ.loans → (Rgn.flat (acc.map (Rgn.openAt 0 rs))).Nodup
 
 /-- The handled computation and the handler's functions touch within `Φ`,
 which the code installing the handler may touch. -/
@@ -406,7 +420,7 @@ structure InstallOk (Δ : Ctx) (ϕ : List Rgn) (Γ : TEnv) (ret : Nat) (ops : Li
   touches : Sub acc Φ
   within : Sub Φ ϕ
   /-- Borrows. -/
-  apart : Δ.loans → acc.Nodup
+  apart : Δ.loans → (Rgn.flat acc).Nodup
 
 /-- A label lives for the scope it is made for. The callable run in that
 scope is given the label. Under the region rules the callable is polymorphic
@@ -422,9 +436,9 @@ structure LabelOk (Δ : Ctx) (ϕ : List Rgn) (Γ : TEnv) (thunk : Atom) (n : Nat
   arity : n = 0 ∨ n = 1
   /-- Regions. -/
   region : Δ.regions → n = 1 ∧ .bound 0 ∈ accl
-  touches : ∀ x, x ∈ acc → (n = 1 ∧ x = .bound 0) ∨ (x.free = true ∧ x ∈ ϕ)
+  touches : ∀ x, x ∈ acc → (n = 1 ∧ x = .bound 0) ∨ (x.free = true ∧ Grants ϕ x)
   /-- Borrows. -/
-  apart : Δ.loans → acc.Nodup
+  apart : Δ.loans → (Rgn.flat acc).Nodup
   row : Row.le εt ε
 
 /-- A cleanup performs no operations. -/
@@ -438,7 +452,7 @@ structure GuardOk (Δ : Ctx) (ϕ : List Rgn) (Γ : TEnv) (cleanup thunk : Atom) 
   cleanupTouches : Sub accc ϕ
   touches : Sub acc ϕ
   /-- Borrows. -/
-  apart : Δ.loans → accc.Nodup ∧ acc.Nodup
+  apart : Δ.loans → (Rgn.flat accc).Nodup ∧ (Rgn.flat acc).Nodup
 
 /-- A cell lives for the scope it is made for. The callable run in that scope
 is given a reference to the cell, which holds `init` to begin with. Under the
@@ -457,9 +471,9 @@ structure CellOk (Δ : Ctx) (ϕ : List Rgn) (Γ : TEnv) (init thunk : Atom) (n :
   /-- Regions. -/
   region : Δ.regions → n = 1 ∧ r = .bound 0
   touches : ∀ x, x ∈ acc →
-    (n = 1 ∧ (x = .bound 0 ∨ x = .wr (.bound 0))) ∨ (x.free = true ∧ x ∈ ϕ)
+    (n = 1 ∧ (x = .bound 0 ∨ x = .wr (.bound 0))) ∨ (x.free = true ∧ Grants ϕ x)
   /-- Borrows. -/
-  apart : Δ.loans → acc.Nodup
+  apart : Δ.loans → (Rgn.flat acc).Nodup
   row : Row.le εt ε
 
 /-- Lending a reference calls a callable with a reference to the same cell,
@@ -483,11 +497,13 @@ structure LendOk (Δ : Ctx) (ϕ : List Rgn) (Γ : TEnv) (uniq : Bool) (r thunk :
   lcRow : εt.lc = true
   arity : (n = 0 ∧ κ = ρ) ∨ (n = 1 ∧ κ = .bound 0)
   /-- Regions. -/
-  region : Δ.regions → ρ ∈ ϕ
+  region : Δ.regions → Grants ϕ ρ
   /-- Borrows. -/
-  loan : Δ.loans → n = 1 ∧ ρ ∈ ϕ ∧ (uniq = true → .wr ρ ∈ ϕ) ∧ acc.Nodup ∧ εt = []
+  loan : Δ.loans → n = 1 ∧ Grants ϕ ρ ∧ (uniq = true → Grants ϕ (.wr ρ)) ∧ (Rgn.flat acc).Nodup
+    ∧ εt = []
   touches : ∀ x, x ∈ acc → (n = 1 ∧ (x = .bound 0 ∨ (uniq = true ∧ x = .wr (.bound 0))))
-    ∨ (x.free = true ∧ x ∈ ϕ ∧ (Δ.loans → x ≠ .wr ρ ∧ (uniq = true → x ≠ ρ)))
+    ∨ (x.free = true ∧ Grants ϕ x ∧ (Δ.loans → ∀ y, y ∈ x.parts →
+      y ∉ (Rgn.wr ρ).parts ∧ (uniq = true → y ∉ ρ.parts)))
   row : Row.le εt ε
 
 /-- Writing a cell. Under the region rules it needs the cell's region; under
@@ -496,9 +512,9 @@ structure WriteOk (Δ : Ctx) (ϕ : List Rgn) (Γ : TEnv) (a b : Atom) (r : Rgn) 
     Prop where
   ref : HasAtom Γ a (.ref r σ)
   /-- Regions. -/
-  region : Δ.regions → r ∈ ϕ
+  region : Δ.regions → Grants ϕ r
   /-- Borrows. -/
-  write : Δ.loans → .wr r ∈ ϕ
+  write : Δ.loans → Grants ϕ (.wr r)
   value : HasAtom Γ b σ
 
 /-- A computation in an activation whose locals have types `Γ`: it gives the
@@ -600,7 +616,7 @@ inductive HasTm (Δ : Ctx) (ϕ : List Rgn) : TEnv → Tm → Ty → Row → Prop
   that is not is taken out with `swap`. Under the region rules, reading a cell
   needs its region. -/
   | load {Γ : TEnv} {a : Atom} {body : Tm} {r : Rgn} {σ τ : Ty} {ε : Row} :
-      HasAtom Γ a (.ref r σ) → (Δ.regions → r ∈ ϕ) → Δ.dup σ →
+      HasAtom Γ a (.ref r σ) → (Δ.regions → Grants ϕ r) → Δ.dup σ →
       HasTm Δ ϕ (Γ ++ [σ]) body τ ε → HasTm Δ ϕ Γ (.mem .load [a] body) τ ε
   | store {Γ : TEnv} {a b : Atom} {body : Tm} {r : Rgn} {σ τ : Ty} {ε : Row} :
       WriteOk Δ ϕ Γ a b r σ → Linear Δ Γ (atomVars [b]) (fv body) →
@@ -613,13 +629,13 @@ inductive HasTm (Δ : Ctx) (ϕ : List Rgn) : TEnv → Tm → Ty → Row → Prop
   needs the cell's region, as reading does. -/
   | tag {Γ : TEnv} {a : Atom} {path : List Atom} {body : Tm} {r : Rgn} {σ τ : Ty} {ε : Row}
       {Ps : List Ty} :
-      HasAtom Γ a (.ref r σ) → (Δ.regions → r ∈ ϕ) → HasAtoms Γ path Ps →
+      HasAtom Γ a (.ref r σ) → (Δ.regions → Grants ϕ r) → HasAtoms Γ path Ps →
       HasTm Δ ϕ (Γ ++ [.int]) body τ ε → HasTm Δ ϕ Γ (.mem .tag (a :: path) body) τ ε
   /-- A reference to a field of what a reference points to, of the same region.
   Nothing is read, but under the region rules it needs the cell's region, as
   reading does. -/
   | focus {Γ : TEnv} {a : Atom} {i : Nat} {body : Tm} {r : Rgn} {σ σ' τ : Ty} {ε : Row} :
-      HasAtom Γ a (.ref r σ) → (Δ.regions → r ∈ ϕ) → PartOk Δ σ [⟨none, i⟩] σ' →
+      HasAtom Γ a (.ref r σ) → (Δ.regions → Grants ϕ r) → PartOk Δ σ [⟨none, i⟩] σ' →
       HasTm Δ ϕ (Γ ++ [.ref r σ']) body τ ε →
       HasTm Δ ϕ Γ (.mem .focus [a, .int i] body) τ ε
   /-- The same to a field of one of a type's several constructors. The
@@ -627,14 +643,14 @@ inductive HasTm (Δ : Ctx) (ϕ : List Rgn) : TEnv → Tm → Ty → Row → Prop
   whether it is, is found when the reference is used. -/
   | focusIn {Γ : TEnv} {a : Atom} {i tag : Nat} {body : Tm} {r : Rgn} {σ σ' τ : Ty} {ε : Row}
       {Fs : List Ty} :
-      HasAtom Γ a (.ref r σ) → (Δ.regions → r ∈ ϕ) → CtorOf Δ tag σ Fs → Fs[i]? = some σ' →
+      HasAtom Γ a (.ref r σ) → (Δ.regions → Grants ϕ r) → CtorOf Δ tag σ Fs → Fs[i]? = some σ' →
       HasTm Δ ϕ (Γ ++ [.ref r σ']) body τ ε →
       HasTm Δ ϕ Γ (.mem .focus [a, .int i, .int tag] body) τ ε
   /-- The same to a place found when the program runs, of a value every field
   of which has one type: an array. Whether the place is there is found when
   the reference is used. -/
   | focusAt {Γ : TEnv} {a ix : Atom} {body : Tm} {r : Rgn} {σ σ' τ : Ty} {ε : Row} :
-      HasAtom Γ a (.ref r σ) → HasAtom Γ ix .int → (Δ.regions → r ∈ ϕ) → Uniform Δ σ σ' →
+      HasAtom Γ a (.ref r σ) → HasAtom Γ ix .int → (Δ.regions → Grants ϕ r) → Uniform Δ σ σ' →
       HasTm Δ ϕ (Γ ++ [.ref r σ']) body τ ε →
       HasTm Δ ϕ Γ (.mem .focus [a, ix] body) τ ε
   | write {Γ : TEnv} {a : Atom} {body : Tm} {σ τ : Ty} {ε : Row} :

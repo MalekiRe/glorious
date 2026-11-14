@@ -46,39 +46,77 @@ structure StoreTy.Le (S S' : StoreTy) : Prop where
   cells : ∀ id x, S.cells id = some x → S'.cells id = some x
   loans : ∀ id x, S.loans id = some x → S'.loans id = some x
 
-/-- The region is of the cell at `a`: the cell's own, or that of a borrow of it. -/
+/-- A place of the region is of the cell at `a`: the cell's own, or that of a
+borrow of it. -/
 def OnCell (S : StoreTy) (r : Rgn) (a : Nat) : Prop :=
-  r = .cell a ∨ ∃ b, r = .loan b ∧ S.loans b = some a
+  ∃ x, x ∈ r.parts ∧ (x = .cell a ∨ ∃ b, x = .loan b ∧ S.loans b = some a)
 
-/-- The reference to the cell at `a` that is borrow `b` is of the region `r`:
-the cell's own reference is of the cell's region, and a borrow's of the borrow's. -/
+/-- The reference to the cell at `a` that is borrow `b` is of a place of the
+region `r`: the cell's own reference is of the cell's region, and a borrow's
+of the borrow's. -/
 def Tagged (S : StoreTy) (r : Rgn) (a b : Nat) : Prop :=
-  (r = .cell a ∧ b = 0) ∨ (r = .loan b ∧ S.loans b = some a)
+  ∃ x, x ∈ r.parts ∧ ((x = .cell a ∧ b = 0) ∨ (x = .loan b ∧ S.loans b = some a))
 
 theorem Tagged.onCell {S : StoreTy} {r : Rgn} {a b : Nat} (h : Tagged S r a b) : OnCell S r a := by
-  rcases h with ⟨h, _⟩ | ⟨h, hl⟩
-  · exact .inl h
-  · exact .inr ⟨b, h, hl⟩
+  obtain ⟨x, hx, ⟨h, _⟩ | ⟨h, hl⟩⟩ := h
+  · exact ⟨x, hx, .inl h⟩
+  · exact ⟨x, hx, .inr ⟨b, h, hl⟩⟩
 
 theorem OnCell.mono {S S' : StoreTy} (hle : S.Le S') {r : Rgn} {a : Nat} (h : OnCell S r a) :
     OnCell S' r a := by
-  rcases h with h | ⟨b, h, hl⟩
-  · exact .inl h
-  · exact .inr ⟨b, h, hle.loans _ _ hl⟩
+  obtain ⟨x, hx, h | ⟨b, h, hl⟩⟩ := h
+  · exact ⟨x, hx, .inl h⟩
+  · exact ⟨x, hx, .inr ⟨b, h, hle.loans _ _ hl⟩⟩
 
 theorem Tagged.mono {S S' : StoreTy} (hle : S.Le S') {r : Rgn} {a b : Nat} (h : Tagged S r a b) :
     Tagged S' r a b := by
-  rcases h with h | ⟨h, hl⟩
-  · exact .inl h
-  · exact .inr ⟨h, hle.loans _ _ hl⟩
+  obtain ⟨x, hx, h | ⟨h, hl⟩⟩ := h
+  · exact ⟨x, hx, .inl h⟩
+  · exact ⟨x, hx, .inr ⟨h, hle.loans _ _ hl⟩⟩
+
+theorem OnCell.cell {S : StoreTy} {a : Nat} : OnCell S (.cell a) a :=
+  ⟨.cell a, List.mem_singleton_self _, .inl rfl⟩
+
+theorem OnCell.loan {S : StoreTy} {a b : Nat} (hl : S.loans b = some a) : OnCell S (.loan b) a :=
+  ⟨.loan b, List.mem_singleton_self _, .inr ⟨b, rfl, hl⟩⟩
+
+theorem Tagged.cell {S : StoreTy} {a : Nat} : Tagged S (.cell a) a 0 :=
+  ⟨.cell a, List.mem_singleton_self _, .inl ⟨rfl, rfl⟩⟩
+
+theorem Tagged.loan {S : StoreTy} {a b : Nat} (hl : S.loans b = some a) : Tagged S (.loan b) a b :=
+  ⟨.loan b, List.mem_singleton_self _, .inr ⟨rfl, hl⟩⟩
+
+/-- A region of more places is of whatever cell the first is. -/
+theorem OnCell.widen {S : StoreTy} {r r' : Rgn} {a : Nat} (h : OnCell S r a)
+    (hp : ∀ x, x ∈ r.parts → x ∈ r'.parts) : OnCell S r' a := by
+  obtain ⟨x, hx, h⟩ := h
+  exact ⟨x, hp x hx, h⟩
+
+theorem Tagged.widen {S : StoreTy} {r r' : Rgn} {a b : Nat} (h : Tagged S r a b)
+    (hp : ∀ x, x ∈ r.parts → x ∈ r'.parts) : Tagged S r' a b := by
+  obtain ⟨x, hx, h⟩ := h
+  exact ⟨x, hp x hx, h⟩
 
 /-- What the code above a borrow's scope may touch: the borrow, to write too if
 it is one for writing, and whatever the code below may, except that it may not
-write what was lent, nor read it if it was lent for writing. -/
+write a place of what was lent, nor read one if it was lent for writing. -/
 def lent (uniq : Bool) (ρ : Rgn) (b : Nat) (ϕ : List Rgn) : List Rgn :=
   .loan b :: ((if uniq then [.wr (.loan b)] else [])
-    ++ ϕ.filter fun x =>
-      x != .wr ρ && (!uniq || x != ρ) && x != .loan b && x != .wr (.loan b))
+    ++ (Rgn.flat ϕ).filter fun x =>
+      !((Rgn.wr ρ).parts.contains x) && (!uniq || !(ρ.parts.contains x)) && x != .loan b
+        && x != .wr (.loan b))
+
+/-- What a borrow's scope grants is made of places and permissions alone. -/
+theorem flat_lent (uniq : Bool) (ρ : Rgn) (b : Nat) (ϕ : List Rgn) :
+    Rgn.flat (lent uniq ρ b ϕ) = lent uniq ρ b ϕ := by
+  refine Rgn.flat_of_atoms fun x hx => ?_
+  simp only [lent, List.mem_cons, List.mem_append] at hx
+  rcases hx with rfl | hx | hx
+  · rfl
+  · cases uniq <;> simp at hx
+    subst hx
+    rfl
+  · exact Rgn.atom_of_mem_flat (List.mem_filter.mp hx).1
 
 /-- The region is of something the store typing knows. -/
 def Known (S : StoreTy) : Rgn → Prop
@@ -86,6 +124,7 @@ def Known (S : StoreTy) : Rgn → Prop
   | .lab id => ∃ τ, S.labels id = some τ
   | .loan b => ∃ a, S.loans b = some a
   | .wr r => Known S r
+  | .or a b => Known S a ∧ Known S b
   | .var _ => False
   | .bound _ => False
 
@@ -97,6 +136,7 @@ theorem Known.mono {S S' : StoreTy} (hle : S.Le S') {r : Rgn} (h : Known S r) : 
   | lab id => exact h.imp fun τ h => hle.labels _ _ h
   | loan b => exact h.imp fun a h => hle.loans _ _ h
   | wr r ih => exact ih h
+  | or a b iha ihb => exact ⟨iha h.1, ihb h.2⟩
 
 mutual
 
@@ -195,11 +235,11 @@ inductive StackOk (Δ : Ctx) (S : StoreTy) : List Frame → Ty → Row → List 
   nothing, so it is never among the frames a resumption captures. -/
   | lend {uniq : Bool} {a b : Nat} {st : List Frame} {τ : Ty} {ε : Row} {ϕ : List Rgn}
       {ρ : Rgn} :
-      S.loans b = some a → 0 < b → OnCell S ρ a → ρ ∈ ϕ → (uniq = true → .wr ρ ∈ ϕ) →
+      S.loans b = some a → 0 < b → OnCell S ρ a → Grants ϕ ρ → (uniq = true → Grants ϕ (.wr ρ)) →
       StackOk Δ S st τ ε ϕ → StackOk Δ S (.lend uniq a b :: st) τ [] (lent uniq ρ b ϕ)
   /-- Without the rules for borrows it takes nothing away. -/
   | lendLoose {uniq : Bool} {a b : Nat} {st : List Frame} {τ : Ty} {ε : Row} {ϕ : List Rgn} :
-      ¬ (Δ.regions ∧ Δ.loans) → S.loans b = some a → (Δ.regions → ∃ ρ, OnCell S ρ a ∧ ρ ∈ ϕ) →
+      ¬ (Δ.regions ∧ Δ.loans) → S.loans b = some a → (Δ.regions → ∃ ρ, OnCell S ρ a ∧ Grants ϕ ρ) →
       StackOk Δ S st τ ε ϕ →
       StackOk Δ S (.lend uniq a b :: st) τ ε (.loan b :: .wr (.loan b) :: ϕ)
   /-- A pending result takes anything, since it discards it. -/

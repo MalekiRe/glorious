@@ -277,6 +277,59 @@ theorem readers_borrows (input : List Int) {c : Config}
     (h : Machine.Reaches (stepIO readers) (initIO readers input) c) : ¬ Freed c.state :=
   checked_borrow_safety readers_checked rfl input h
 
+/-- A function given two references at one region, giving the first back. -/
+def pickTy : Ty :=
+  .fn 1 [.ref (.bound 0) .int, .ref (.bound 0) .int] (.ref (.bound 0) .int) [] false none []
+
+/--
+A reference to one of two cells: `pick` takes two references of one region and
+gives one back, and is called with a reference to each of two cells, at the
+region that is either of them. What it gives is read while both scopes last.
+```
+pick(x, y)          = x
+inner[pick, pa](pb) = let r = pick(pa, pb) in *r
+outer[pick](pa)     = cell 2 in inner[pick, pa]
+main                = cell 1 in outer[pick]
+```
+-/
+def either : Program where
+  fns := [
+    ⟨[ ⟨[.wild, .wild], .ret (.var 0)⟩ ]⟩,
+    ⟨[ ⟨[.wild], .call (.var 1) [.var 2, .var 0] <| .mem .load [.var 3] <| .ret (.var 4)⟩ ]⟩,
+    ⟨[ ⟨[.wild], .let_ (.closure 1 [.var 1, .var 0]) <| .cellTail (.int 2) (.var 2)⟩ ]⟩ ]
+  main := .let_ (.closure 0 []) <| .let_ (.closure 2 [.var 0]) <| .cellTail (.int 1) (.var 1)
+
+/-- `inner`, made with the first cell's region. -/
+def innerTy : Ty := .fn 1 [.ref (.bound 0) .int] .int [] false none [.var 0, .bound 0]
+
+/-- The region `pick` is called at in `inner`: `rs`. -/
+def eitherCert (rs : List Rgn) (loans : Bool) : Cert where
+  sigs := [
+    ⟨0, ⟨[], [.ref (.bound 0) .int, .ref (.bound 0) .int], .ref (.bound 0) .int, [], 0, 1, []⟩,
+      [[]]⟩,
+    ⟨1, ⟨[pickTy, .ref (.var 0) .int], [.ref (.bound 0) .int], .int, [], 1, 1,
+      [.var 0, .bound 0]⟩, [[.rgns rs]]⟩,
+    ⟨2, ⟨[pickTy], [.ref (.bound 0) .int], .int, [], 0, 1, [.bound 0]⟩,
+      [[.clo innerTy [.var 0]]]⟩]
+  datas := []
+  ops := []
+  mainTy := .int
+  mainHints := [.ty pickTy, .ty (scopeFn .int [.bound 0])]
+  strict := true
+  regions := true
+  loans := loans
+
+theorem either_checked : checkProgram (eitherCert [.or (.var 0) (.var 1)] true) either = true := by
+  decide
+
+/-- So `either` never reads or writes a released cell, nor uses a reference behind a borrow's back. -/
+theorem either_borrows (input : List Int) {c : Config}
+    (h : Machine.Reaches (stepIO either) (initIO either input) c) : ¬ Freed c.state :=
+  checked_borrow_safety either_checked rfl input h
+
+/-- At the first cell's region alone, the reference to the second does not fit. -/
+example : checkProgram (eitherCert [.var 0] false) either = false := by decide
+
 /--
 The reference leaves the scope, and is read after the cell is released.
 ```

@@ -74,14 +74,14 @@ def Suspended (s : State) : Prop :=
   ∃ (k : Nat) (seg : List Frame) (uniq : Bool) (a b : Nat),
     s.store.conts[k]? = some (some seg) ∧ Frame.lend uniq a b ∈ seg
 
-/-- What a typed stack's grants say of borrows. A region that may be written
-is the only granted region of its cell. A granted region's reference may be
-used to read, and to write if writing the region was granted. And the own
-reference of a cell with no scope on the stack is excluded by nothing. -/
+/-- What a typed stack's grants say of borrows. A place that may be written
+is the only granted place of its cell. A granted place's reference may be used
+to read, and to write if writing the place was granted. And the own reference
+of a cell with no scope on the stack is excluded by nothing. -/
 def Excl (S : StoreTy) (st : List Frame) (ϕ : List Rgn) : Prop :=
-  (∀ ρ r a, .wr ρ ∈ ϕ → OnCell S ρ a → r ∈ ϕ → OnCell S r a → r = ρ)
-    ∧ (∀ r a b, r ∈ ϕ → Tagged S r a b → allowed a b false st = true)
-    ∧ (∀ r a b, .wr r ∈ ϕ → Tagged S r a b → allowed a b true st = true)
+  (∀ ρ r a, .wr ρ ∈ Rgn.flat ϕ → OnCell S ρ a → r ∈ Rgn.flat ϕ → OnCell S r a → r = ρ)
+    ∧ (∀ r a b, r ∈ Rgn.flat ϕ → Tagged S r a b → allowed a b false st = true)
+    ∧ (∀ r a b, .wr r ∈ Rgn.flat ϕ → Tagged S r a b → allowed a b true st = true)
     ∧ (∀ a w, ownStack a st = 0 → allowed a 0 w st = true)
 
 theorem Excl.sub {S : StoreTy} {st : List Frame} {ϕ Φ : List Rgn} (h : Excl S st ϕ)
@@ -102,21 +102,53 @@ theorem Excl.skip {S : StoreTy} {st : List Frame} {ϕ : List Rgn} (h : Excl S st
       simp only [ownStack, hof] at h0
       omega⟩
 
-/-- Nor does granting a region that is of no cell. -/
+/-- Nor does granting a place that is of no cell. -/
 theorem Excl.inert {S : StoreTy} {st : List Frame} {ϕ : List Rgn} (h : Excl S st ϕ) {x : Rgn}
-    (hx : ∀ a, ¬ OnCell S x a) (hw : ∀ y, x ≠ .wr y) : Excl S st (x :: ϕ) := by
+    (hxa : x.atom = true) (hx : ∀ a, ¬ OnCell S x a) (hw : ∀ y, x ≠ .wr y) :
+    Excl S st (x :: ϕ) := by
   refine ⟨fun ρ r a hwρ hρ hr hra => ?_, fun r a b hr ht => ?_, fun r a b hwr ht => ?_, h.2.2.2⟩
-  · rcases List.mem_cons.mp hwρ with he | hwρ
+  · rw [Rgn.flat_cons_atom hxa] at hwρ hr
+    rcases List.mem_cons.mp hwρ with he | hwρ
     · exact absurd he.symm (hw ρ)
     · rcases List.mem_cons.mp hr with rfl | hr
       · exact absurd hra (hx a)
       · exact h.1 ρ r a hwρ hρ hr hra
-  · rcases List.mem_cons.mp hr with rfl | hr
+  · rw [Rgn.flat_cons_atom hxa] at hr
+    rcases List.mem_cons.mp hr with rfl | hr
     · exact absurd ht.onCell (hx a)
     · exact h.2.1 r a b hr ht
-  · rcases List.mem_cons.mp hwr with he | hwr
+  · rw [Rgn.flat_cons_atom hxa] at hwr
+    rcases List.mem_cons.mp hwr with he | hwr
     · exact absurd he.symm (hw r)
     · exact h.2.2.1 r a b hwr ht
+
+theorem Tagged.part {S : StoreTy} {r : Rgn} {a b : Nat} (h : Tagged S r a b) :
+    ∃ y, y ∈ r.parts ∧ Tagged S y a b := by
+  obtain ⟨y, hy, ht⟩ := h
+  exact ⟨y, hy, y, Rgn.self_mem_parts (Rgn.mem_parts_atom hy), ht⟩
+
+theorem Tagged.cell_inv {S : StoreTy} {c a b : Nat} (h : Tagged S (.cell c) a b) :
+    c = a ∧ b = 0 := by
+  obtain ⟨y, hy, ht⟩ := h
+  simp only [Rgn.parts, List.mem_singleton] at hy
+  subst hy
+  rcases ht with ⟨he, hb⟩ | ⟨he, _⟩
+  · cases he
+    exact ⟨rfl, hb⟩
+  · cases he
+
+theorem Tagged.loan_inv {S : StoreTy} {b' a b : Nat} (h : Tagged S (.loan b') a b) :
+    b' = b ∧ S.loans b = some a := by
+  obtain ⟨y, hy, ht⟩ := h
+  simp only [Rgn.parts, List.mem_singleton] at hy
+  subst hy
+  rcases ht with ⟨he, _⟩ | ⟨he, hl⟩
+  · cases he
+  · cases he
+    exact ⟨rfl, hl⟩
+
+theorem Tagged.not_wr {S : StoreTy} {r : Rgn} {a b : Nat} : ¬ Tagged S (.wr r) a b :=
+  fun h => OnCell.not_wr h.onCell
 
 /-- **What a typed stack grants excludes what was lent.** -/
 theorem StackOk.exclusive {S : StoreTy} {st : List Frame} {τ : Ty} {ε : Row} {ϕ : List Rgn}
@@ -137,9 +169,9 @@ theorem StackOk.exclusive {S : StoreTy} {st : List Frame} {τ : Ty} {ε : Row} {
       (fun _ _ _ => rfl) (fun _ => rfl)
   | label _ _ ih =>
     intro hown
-    refine ((ih fun a => Nat.le_trans (Nat.le_add_left _ _) (hown a)).skip _
-      (fun _ _ _ => rfl) (fun _ => rfl)).inert (fun a hc => ?_) (fun y h => by cases h)
-    rcases hc with hc | ⟨_, hc, _⟩ <;> cases hc
+    exact ((ih fun a => Nat.le_trans (Nat.le_add_left _ _) (hown a)).skip _
+      (fun _ _ _ => rfl) (fun _ => rfl)).inert rfl (fun _ hc => OnCell.not_lab hc)
+      (fun y h => by cases h)
   | guard _ _ _ ih =>
     intro hown
     exact (ih fun a => Nat.le_trans (Nat.le_add_left _ _) (hown a)).skip _
@@ -152,13 +184,16 @@ theorem StackOk.exclusive {S : StoreTy} {st : List Frame} {τ : Ty} {ε : Row} {
       simp only [ownStack, ownFrame, ↓reduceIte] at this
       omega
     -- Nothing granted below the scope is of its cell.
-    have hN : ∀ x, (x ∈ ϕ ∨ .wr x ∈ ϕ) → ¬ OnCell S x c := fun x hx hc => by
+    have hN : ∀ x, (x ∈ Rgn.flat ϕ ∨ .wr x ∈ Rgn.flat ϕ) → ¬ OnCell S x c := fun x hx hc => by
       have := hst.onCell hR x c hx hc
       omega
     have hskip : ∀ a b w, allowed a b w (.cell c :: st) = allowed a b w st := fun _ _ _ => rfl
+    have hfl : Rgn.flat (.cell c :: .wr (.cell c) :: ϕ) = .cell c :: .wr (.cell c) :: Rgn.flat ϕ := by
+      rw [Rgn.flat_cons_atom rfl, Rgn.flat_cons_atom rfl]
     refine ⟨fun ρ r a hw hρ hr hra => ?_, fun r a b hr ht => ?_, fun r a b hw ht => ?_,
       fun a w hz => ?_⟩
-    · rcases List.mem_cons.mp hw with he | hw
+    · rw [hfl] at hw hr
+      rcases List.mem_cons.mp hw with he | hw
       · cases he
       · rcases List.mem_cons.mp hw with he | hw
         · cases he
@@ -166,32 +201,30 @@ theorem StackOk.exclusive {S : StoreTy} {st : List Frame} {τ : Ty} {ε : Row} {
           rcases List.mem_cons.mp hr with rfl | hr
           · rfl
           · rcases List.mem_cons.mp hr with rfl | hr
-            · rcases hra with hc | ⟨_, hc, _⟩ <;> cases hc
+            · exact absurd hra OnCell.not_wr
             · exact absurd hra (hN r (.inl hr))
         · rcases List.mem_cons.mp hr with rfl | hr
           · cases hra.cell_eq
             exact absurd hρ (hN ρ (.inr hw))
           · rcases List.mem_cons.mp hr with rfl | hr
-            · rcases hra with hc | ⟨_, hc, _⟩ <;> cases hc
+            · exact absurd hra OnCell.not_wr
             · exact E.1 ρ r a hw hρ hr hra
     · rw [hskip]
+      rw [hfl] at hr
       rcases List.mem_cons.mp hr with rfl | hr
-      · rcases ht with ⟨he, rfl⟩ | ⟨he, _⟩
-        · cases he
-          exact E.2.2.2 c false h0
-        · cases he
+      · obtain ⟨rfl, rfl⟩ := ht.cell_inv
+        exact E.2.2.2 _ false h0
       · rcases List.mem_cons.mp hr with rfl | hr
-        · rcases ht with ⟨he, _⟩ | ⟨he, _⟩ <;> cases he
+        · exact absurd ht Tagged.not_wr
         · exact E.2.1 r a b hr ht
     · rw [hskip]
+      rw [hfl] at hw
       rcases List.mem_cons.mp hw with he | hw
       · cases he
       · rcases List.mem_cons.mp hw with he | hw
         · cases he
-          rcases ht with ⟨he, rfl⟩ | ⟨he, _⟩
-          · cases he
-            exact E.2.2.2 c true h0
-          · cases he
+          obtain ⟨rfl, rfl⟩ := ht.cell_inv
+          exact E.2.2.2 _ true h0
         · exact E.2.2.1 r a b hw ht
     · rw [hskip]
       refine E.2.2.2 a w ?_
@@ -200,60 +233,78 @@ theorem StackOk.exclusive {S : StoreTy} {st : List Frame} {τ : Ty} {ε : Row} {
   | @lend u c b' st τ ε ϕ ρ hl hb hon hρ hw hst ih =>
     intro hown
     have E := ih fun a => Nat.le_trans (Nat.le_add_left _ _) (hown a)
+    -- The place of what was lent that is of the cell.
+    obtain ⟨ρ₀, hρ₀, hon₀⟩ := hon.part
+    have hρ₀ϕ : ρ₀ ∈ Rgn.flat ϕ := hρ ρ₀ hρ₀
+    have hwρ₀ : u = true → .wr ρ₀ ∈ Rgn.flat ϕ := fun hu =>
+      hw hu (.wr ρ₀) (List.mem_map.mpr ⟨ρ₀, hρ₀, rfl⟩)
+    have hwmem : .wr ρ₀ ∈ (Rgn.wr ρ).parts := List.mem_map.mpr ⟨ρ₀, hρ₀, rfl⟩
     refine ⟨fun ρ₁ r a hw₁ hρ₁ hr hra => ?_, fun r a b hr ht => ?_, fun r a b hwr ht => ?_,
       fun a w hz => ?_⟩
-    · rcases mem_lent.mp hw₁ with he | ⟨hu, he⟩ | ⟨hw₁, hne, _⟩
+    · rw [flat_lent] at hw₁ hr
+      rcases mem_lent.mp hw₁ with he | ⟨hu, he⟩ | ⟨hw₁, hne, _⟩
       · cases he
       · cases he
         cases hρ₁.loan_eq hl
         rcases mem_lent.mp hr with rfl | ⟨_, rfl⟩ | ⟨hr, _, hne', _⟩
         · rfl
-        · rcases hra with hc | ⟨_, hc, _⟩ <;> cases hc
-        · exact absurd (E.1 ρ r c (hw hu) hon hr hra) (hne' hu)
+        · exact absurd hra OnCell.not_wr
+        · have := E.1 ρ₀ r c (hwρ₀ hu) hon₀ hr hra
+          subst this
+          exact absurd hρ₀ (hne' hu)
       · rcases mem_lent.mp hr with rfl | ⟨_, rfl⟩ | ⟨hr, _⟩
         · cases hra.loan_eq hl
-          have := E.1 ρ₁ ρ c hw₁ hρ₁ hρ hon
-          exact absurd (congrArg Rgn.wr this.symm) hne
-        · rcases hra with hc | ⟨_, hc, _⟩ <;> cases hc
+          have := E.1 ρ₁ ρ₀ c hw₁ hρ₁ hρ₀ϕ hon₀
+          subst this
+          exact absurd hwmem hne
+        · exact absurd hra OnCell.not_wr
         · exact E.1 ρ₁ r a hw₁ hρ₁ hr hra
-    · rcases mem_lent.mp hr with rfl | ⟨_, rfl⟩ | ⟨hrϕ, _, hne, hnl, _⟩
-      · rcases ht with ⟨he, _⟩ | ⟨he, hl'⟩
-        · cases he
-        · cases he
-          rw [hl] at hl'
-          cases hl'
-          simp [allowed]
-      · rcases ht with ⟨he, _⟩ | ⟨he, _⟩ <;> cases he
+    · rw [flat_lent] at hr
+      rcases mem_lent.mp hr with rfl | ⟨_, rfl⟩ | ⟨hrϕ, _, hne, hnl, _⟩
+      · obtain ⟨rfl, hl'⟩ := ht.loan_inv
+        rw [hl] at hl'
+        cases hl'
+        simp [allowed]
+      · exact absurd ht Tagged.not_wr
       · by_cases hca : c = a
         · subst hca
           have hbb : b' ≠ b := by
             rintro rfl
-            rcases ht with ⟨_, h0⟩ | ⟨he, _⟩
+            obtain ⟨y, hy, hyt⟩ := ht
+            have hyr : y = r := by
+              have := Rgn.atom_parts (Rgn.atom_of_mem_flat hrϕ)
+              rw [this] at hy
+              exact List.mem_singleton.mp hy
+            subst hyr
+            rcases hyt with ⟨_, h0⟩ | ⟨he, _⟩
             · omega
             · exact hnl he
           have hu : u = false := by
             cases u with
             | false => rfl
-            | true => exact absurd (E.1 ρ r c (hw rfl) hon hrϕ ht.onCell) (hne rfl)
+            | true =>
+              have := E.1 ρ₀ r c (hwρ₀ rfl) hon₀ hrϕ ht.onCell
+              subst this
+              exact absurd hρ₀ (hne rfl)
           simp [allowed, hbb, hu, E.2.1 r c b hrϕ ht]
         · simp [allowed, hca, E.2.1 r a b hrϕ ht]
-    · rcases mem_lent.mp hwr with he | ⟨hu, he⟩ | ⟨hwr, hne, _⟩
+    · rw [flat_lent] at hwr
+      rcases mem_lent.mp hwr with he | ⟨hu, he⟩ | ⟨hwr, hne, _⟩
       · cases he
       · cases he
-        rcases ht with ⟨he, _⟩ | ⟨he, hl'⟩
-        · cases he
-        · cases he
-          rw [hl] at hl'
-          cases hl'
-          simp [allowed, hu]
+        obtain ⟨rfl, hl'⟩ := ht.loan_inv
+        rw [hl] at hl'
+        cases hl'
+        simp [allowed, hu]
       · by_cases hca : c = a
         · subst hca
-          have := E.1 r ρ c hwr ht.onCell hρ hon
-          exact absurd (congrArg Rgn.wr this.symm) hne
+          have := E.1 r ρ₀ c hwr ht.onCell hρ₀ϕ hon₀
+          subst this
+          exact absurd hwmem hne
         · simp [allowed, hca, E.2.2.1 r a b hwr ht]
     · by_cases hca : c = a
       · subst hca
-        have := hst.onCell hR ρ c (.inl hρ) hon
+        have := hst.onCell hR ρ₀ c (.inl hρ₀ϕ) hon₀
         simp only [ownStack, ownFrame] at hz
         omega
       · simp only [allowed, hca, ↓reduceIte]
@@ -291,6 +342,16 @@ theorem TypedAt.not_aliased {S : StoreTy} {s : State} (hR : Δ.regions) (hL : Δ
     obtain ⟨a', b', _, _, he, _, _, _, htag⟩ := hvt.ref_inv
     cases he
     exact htag hR hL
+  -- Through the place of the region the reference is of.
+  have rd : ∀ {r : Rgn} {a b : Nat}, Grants ϕ r → Tagged S r a b → allowed a b false stack = true := by
+    intro r a b hg ht
+    obtain ⟨y, hy, hyt⟩ := ht.part
+    exact hread y a b (hsub _ (hg y hy)) hyt
+  have wrt : ∀ {r : Rgn} {a b : Nat}, Grants ϕ (.wr r) → Tagged S r a b →
+      allowed a b true stack = true := by
+    intro r a b hg ht
+    obtain ⟨y, hy, hyt⟩ := ht.part
+    exact hwrite y a b (hsub _ (hg (.wr y) (List.mem_map.mpr ⟨y, hy, rfl⟩))) hyt
   rintro (⟨op, args, body, a, b, pth, vs, htm, hev, hno⟩
     | ⟨uniq, r, thunk, pre, post, body, a, b, pth, htm, hev, hno⟩)
   · simp only at htm hev hno
@@ -302,7 +363,7 @@ theorem TypedAt.not_aliased {S : StoreTy} {s : State} (hR : Δ.regions) (hL : Δ
       | some w =>
         simp [evalAtoms, hx] at hev
         rw [hev.1] at hx
-        have := hread r a b (hsub _ (hr hR)) (key ha hx)
+        have := rd (hr hR) (key ha hx)
         simp [writes, this] at hno
     | @tag _ x path _ r σ _ _ _ ha hr _ _ =>
       cases hx : Atom.eval env x with
@@ -313,7 +374,7 @@ theorem TypedAt.not_aliased {S : StoreTy} {s : State} (hR : Δ.regions) (hL : Δ
         | some ws =>
           simp [evalAtoms, hx, hp] at hev
           rw [hev.1] at hx
-          have := hread r a b (hsub _ (hr hR)) (key ha hx)
+          have := rd (hr hR) (key ha hx)
           simp [writes, this] at hno
     | @focus _ x i _ r σ _ _ _ ha hr _ _ =>
       cases hx : Atom.eval env x with
@@ -322,7 +383,7 @@ theorem TypedAt.not_aliased {S : StoreTy} {s : State} (hR : Δ.regions) (hL : Δ
         have hi : (Atom.int (i : Int)).eval env = some (.int i) := rfl
         simp [evalAtoms, hx, hi] at hev
         rw [hev.1] at hx
-        have := hread r a b (hsub _ (hr hR)) (key ha hx)
+        have := rd (hr hR) (key ha hx)
         simp [writes, this] at hno
     | @focusIn _ x i built _ r σ _ _ _ _ ha hr _ _ _ =>
       cases hx : Atom.eval env x with
@@ -332,7 +393,7 @@ theorem TypedAt.not_aliased {S : StoreTy} {s : State} (hR : Δ.regions) (hL : Δ
         have hb : (Atom.int (built : Int)).eval env = some (.int built) := rfl
         simp [evalAtoms, hx, hi, hb] at hev
         rw [hev.1] at hx
-        have := hread r a b (hsub _ (hr hR)) (key ha hx)
+        have := rd (hr hR) (key ha hx)
         simp [writes, this] at hno
     | @focusAt _ x ix _ r σ _ _ _ ha _ hr _ _ =>
       cases hx : Atom.eval env x with
@@ -343,7 +404,7 @@ theorem TypedAt.not_aliased {S : StoreTy} {s : State} (hR : Δ.regions) (hL : Δ
         | some w' =>
           simp [evalAtoms, hx, hi] at hev
           rw [hev.1] at hx
-          have := hread r a b (hsub _ (hr hR)) (key ha hx)
+          have := rd (hr hR) (key ha hx)
           simp [writes, this] at hno
     | @store _ x y _ r σ _ _ hform _ _ =>
       have ha := hform.ref
@@ -356,7 +417,7 @@ theorem TypedAt.not_aliased {S : StoreTy} {s : State} (hR : Δ.regions) (hL : Δ
         | some w' =>
           simp [evalAtoms, hx, hy] at hev
           rw [hev.1] at hx
-          have := hwrite r a b (hsub _ (hw hL)) (key ha hx)
+          have := wrt (hw hL) (key ha hx)
           simp [writes, this] at hno
     | @swap _ x y _ r σ _ _ hform _ _ =>
       have ha := hform.ref
@@ -369,7 +430,7 @@ theorem TypedAt.not_aliased {S : StoreTy} {s : State} (hR : Δ.regions) (hL : Δ
         | some w' =>
           simp [evalAtoms, hx, hy] at hev
           rw [hev.1] at hx
-          have := hwrite r a b (hsub _ (hw hL)) (key ha hx)
+          have := wrt (hw hL) (key ha hx)
           simp [writes, this] at hno
   · simp only at htm hev hno
     subst htm
@@ -381,10 +442,10 @@ theorem TypedAt.not_aliased {S : StoreTy} {s : State} (hR : Δ.regions) (hL : Δ
       have htag := key hr hev
       cases uniq with
       | false =>
-        have := hread _ a b (hsub _ (hreg hR)) htag
+        have := rd (hreg hR) htag
         simp [this] at hno
       | true =>
-        have := hwrite _ a b (hsub _ ((hloan hL).2.2.1 rfl)) htag
+        have := wrt ((hloan hL).2.2.1 rfl) htag
         simp [this] at hno
 
 /-- Under the same rules no resumption of a typed state captured the scope of a

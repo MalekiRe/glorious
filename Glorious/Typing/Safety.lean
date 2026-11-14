@@ -122,7 +122,7 @@ theorem evalScope_ok {S : StoreTy} {env : Env} {Γ : TEnv} {thunk : Atom} {l : V
 /-- A callable that takes no arguments and binds no regions is a function. -/
 theorem evalThunk_ok {S : StoreTy} {env : Env} {Γ : TEnv} {f : Atom} {σ : Ty} {ε : Row}
     {once : Bool} {fenv : Option (List Ty)} {acc : List Rgn} (henv : HasVals Δ S env Γ)
-    (hf : HasAtom Γ f (.fn 0 [] σ ε once fenv acc)) (hnd : Δ.loans → acc.Nodup) :
+    (hf : HasAtom Γ f (.fn 0 [] σ ε once fenv acc)) (hnd : Δ.loans → (Rgn.flat acc).Nodup) :
     ∃ fn caps Cs, evalCall env f [] = some (.fn fn caps []) ∧ f.eval env = some (.clo fn caps)
       ∧ Enters Δ fn Cs [] σ ε acc ∧ HasVals Δ S caps Cs := by
   obtain ⟨fv, hfv, hft⟩ := atom_ok henv hf
@@ -475,7 +475,8 @@ theorem mem_skip {a b c : List Nat} {i : Nat} (h : i ∈ a ++ c) : i ∈ a ++ (b
 
 /-- A stack grants nothing of what the store typing does not know. -/
 theorem StackOk.fresh {S : StoreTy} {st : List Frame} {τ : Ty} {ε : Row} {ϕ : List Rgn}
-    (h : StackOk Δ S st τ ε ϕ) {r : Rgn} (hr : ¬ Known S r) : r ∉ ϕ ∧ .wr r ∉ ϕ :=
+    (h : StackOk Δ S st τ ε ϕ) {r : Rgn} (hr : ¬ Known S r) :
+    r ∉ Rgn.flat ϕ ∧ .wr r ∉ Rgn.flat ϕ :=
   ⟨fun hx => hr (h.known _ hx), fun hx => hr (h.known (.wr r) hx)⟩
 
 theorem nodup_map {α β : Type} {f : α → β} : ∀ {l : List α},
@@ -491,30 +492,59 @@ theorem nodup_map {α β : Type} {f : α → β} : ∀ {l : List α},
     exact ha hb
 
 /-- Putting a scope's own region for the one its callable binds keeps the
-regions the callable touches apart, the scope's own being new. -/
+places the callable touches apart, the scope's own being new. -/
 theorem open_scope_nodup {acc ϕ : List Rgn} {r : Rgn}
-    (hb : (Rgn.bound 0).openAt 0 [r] = r) (hne : r ≠ .wr r)
-    (hacc : ∀ x, x ∈ acc → x = .bound 0 ∨ x = .wr (.bound 0) ∨ (x.free = true ∧ x ∈ ϕ))
-    (hr : r ∉ ϕ ∧ .wr r ∉ ϕ) (hnd : acc.Nodup) : (acc.map (Rgn.openAt 0 [r])).Nodup := by
+    (hb : (Rgn.bound 0).openAt 0 [r] = r) (hpr : r.parts = [r]) (hne : r ≠ .wr r)
+    (hacc : ∀ x, x ∈ acc → x = .bound 0 ∨ x = .wr (.bound 0) ∨ (x.free = true ∧ Grants ϕ x))
+    (hr : r ∉ Rgn.flat ϕ ∧ .wr r ∉ Rgn.flat ϕ) (hnd : (Rgn.flat acc).Nodup) :
+    (Rgn.flat (acc.map (Rgn.openAt 0 [r]))).Nodup := by
   have hwb : (Rgn.wr (.bound 0)).openAt 0 [r] = .wr r := congrArg Rgn.wr hb
-  refine nodup_map (fun x y hx hy he => ?_) hnd
-  rcases hacc x hx with hx0 | hx0 | ⟨hfx, hxϕ⟩ <;> rcases hacc y hy with hy0 | hy0 | ⟨hfy, hyϕ⟩
-  · rw [hx0, hy0]
-  · rw [hx0, hy0, hb, hwb] at he
-    exact absurd he hne
-  · rw [hx0, hb, Rgn.openAt_free hfy] at he
-    exact absurd (by rw [he]; exact hyϕ) hr.1
-  · rw [hx0, hy0, hb, hwb] at he
-    exact absurd he.symm hne
-  · rw [hx0, hy0]
-  · rw [hx0, hwb, Rgn.openAt_free hfy] at he
-    exact absurd (by rw [he]; exact hyϕ) hr.2
-  · rw [hy0, hb, Rgn.openAt_free hfx] at he
-    exact absurd (by rw [← he]; exact hxϕ) hr.1
-  · rw [hy0, hwb, Rgn.openAt_free hfx] at he
-    exact absurd (by rw [← he]; exact hxϕ) hr.2
-  · rw [Rgn.openAt_free hfx, Rgn.openAt_free hfy] at he
-    exact he
+  have hcls : ∀ y, y ∈ Rgn.flat acc →
+      (y = .bound 0 ∨ y = .wr (.bound 0)) ∨ (y.free = true ∧ y ∈ Rgn.flat ϕ) := by
+    intro y hy
+    obtain ⟨x, hx, hyx⟩ := Rgn.mem_flat.mp hy
+    rcases hacc x hx with rfl | rfl | ⟨hf, hg⟩
+    · exact .inl (.inl (by simpa [Rgn.parts] using hyx))
+    · exact .inl (.inr (by simpa [Rgn.parts] using hyx))
+    · exact .inr ⟨Rgn.free_of_mem_parts hyx hf, hg y hyx⟩
+  have himg : ∀ y, y ∈ Rgn.flat acc → (y.openAt 0 [r]).parts = [y.openAt 0 [r]] := by
+    intro y hy
+    rcases hcls y hy with (rfl | rfl) | ⟨hf, hm⟩
+    · rw [hb, hpr]
+    · rw [hwb]
+      simp [Rgn.parts, hpr]
+    · rw [Rgn.openAt_free hf]
+      exact Rgn.atom_parts (Rgn.atom_of_mem_flat hm)
+  rw [Rgn.flat_map_openAt]
+  refine nodup_flatMap_of hnd (fun y hy => by rw [himg y hy]; simp)
+    (fun x y hx hy z hzx hzy => ?_)
+  rw [himg x hx, List.mem_singleton] at hzx
+  rw [himg y hy, List.mem_singleton] at hzy
+  have he : x.openAt 0 [r] = y.openAt 0 [r] := hzx.symm.trans hzy
+  rcases hcls x hx with (hx0 | hx0) | ⟨hfx, hxϕ⟩
+  · rcases hcls y hy with (hy0 | hy0) | ⟨hfy, hyϕ⟩
+    · rw [hx0, hy0]
+    · rw [hx0, hy0, hb, hwb] at he
+      exact absurd he hne
+    · rw [hx0, hb, Rgn.openAt_free hfy] at he
+      exact absurd (he ▸ hyϕ) hr.1
+  · rcases hcls y hy with (hy0 | hy0) | ⟨hfy, hyϕ⟩
+    · rw [hx0, hy0, hb, hwb] at he
+      exact absurd he.symm hne
+    · rw [hx0, hy0]
+    · rw [hx0, hwb, Rgn.openAt_free hfy] at he
+      exact absurd (he ▸ hyϕ) hr.2
+  · rcases hcls y hy with (hy0 | hy0) | ⟨hfy, hyϕ⟩
+    · rw [hy0, hb, Rgn.openAt_free hfx] at he
+      exact absurd (he.symm ▸ hxϕ) hr.1
+    · rw [hy0, hwb, Rgn.openAt_free hfx] at he
+      exact absurd (he.symm ▸ hxϕ) hr.2
+    · rw [Rgn.openAt_free hfx, Rgn.openAt_free hfy] at he
+      exact he
+
+/-- Granted below a scope's frame is granted above it. -/
+theorem Sub.cons2 (x y : Rgn) (ϕ : List Rgn) : Sub ϕ (x :: y :: ϕ) :=
+  Sub.of_mem fun _ h => List.mem_cons_of_mem _ (List.mem_cons_of_mem _ h)
 
 /-- What the callable a cell's scope runs is given, and what running it needs:
 a reference to the cell at the type the callable takes, and no region but the
@@ -524,76 +554,78 @@ theorem cell_enter {S : StoreTy} {a n : Nat} {r : Rgn} {σ ρ : Ty} {εt : Row}
     (hε : εt.lc = true) (hn : n = 0 ∨ (n = 1 ∧ r = .bound 0))
     (hreg : Δ.regions → n = 1 ∧ r = .bound 0)
     (hacc : ∀ x, x ∈ acc → (n = 1 ∧ (x = .bound 0 ∨ x = .wr (.bound 0)))
-      ∨ (x.free = true ∧ x ∈ ϕ)) (hsub : Sub ϕ ϕ') (hnd : Δ.loans → acc.Nodup)
-    (hfr : .cell a ∉ ϕ' ∧ .wr (.cell a) ∉ ϕ') :
+      ∨ (x.free = true ∧ Grants ϕ x)) (hsub : Sub ϕ ϕ') (hnd : Δ.loans → (Rgn.flat acc).Nodup)
+    (hfr : .cell a ∉ Rgn.flat ϕ' ∧ .wr (.cell a) ∉ Rgn.flat ϕ') :
     ∃ rs, rs.length = n ∧ HasVal Δ S (.ref a 0 []) ((Ty.ref r σ).open rs) ∧ ρ.open rs = ρ
       ∧ εt.open rs = εt ∧ Sub (acc.map (Rgn.openAt 0 rs)) (.cell a :: .wr (.cell a) :: ϕ')
-      ∧ (Δ.loans → (acc.map (Rgn.openAt 0 rs)).Nodup) := by
+      ∧ (Δ.loans → (Rgn.flat (acc.map (Rgn.openAt 0 rs))).Nodup) := by
   rcases hn with rfl | ⟨rfl, rfl⟩
   · refine ⟨[], rfl, ?_, Ty.open_nil _, Row.open_nil _, ?_, ?_⟩
     · rw [Ty.open_nil]
       exact .ref hcell .here (fun hR => absurd (hreg hR).1 (by simp))
         (fun hR _ => absurd (hreg hR).1 (by simp))
     · rw [acc_open_nil]
-      intro x hx
+      refine Sub.of_grants fun x hx => ?_
       rcases hacc x hx with ⟨h, _⟩ | ⟨_, h⟩
       · cases h
-      · exact List.mem_cons_of_mem _ (List.mem_cons_of_mem _ (hsub x h))
+      · exact (h.sub hsub).sub (Sub.cons2 _ _ _)
     · rw [acc_open_nil]
       exact hnd
   · refine ⟨[.cell a], rfl, ?_, Ty.open_lc hρ _, Row.open_lc hε _, ?_, ?_⟩
     · rw [Ty.open_ref, Ty.open_lc hσ]
-      exact .ref hcell .here (fun _ => .inl rfl) (fun _ _ => .inl ⟨rfl, rfl⟩)
-    · intro x hx
+      exact .ref hcell .here (fun _ => OnCell.cell) (fun _ _ => Tagged.cell)
+    · refine Sub.of_grants fun x hx => ?_
       obtain ⟨x₀, hx₀, rfl⟩ := List.mem_map.mp hx
       rcases hacc x₀ hx₀ with ⟨_, rfl | rfl⟩ | ⟨hfree, h⟩
-      · exact List.mem_cons_self ..
-      · exact List.mem_cons_of_mem _ (List.mem_cons_self ..)
+      · exact Grants.of_mem (List.mem_cons_self ..)
+      · exact Grants.of_mem (List.mem_cons_of_mem _ (List.mem_cons_self ..))
       · rw [Rgn.openAt_free hfree]
-        exact List.mem_cons_of_mem _ (List.mem_cons_of_mem _ (hsub x₀ h))
+        exact (h.sub hsub).sub (Sub.cons2 _ _ _)
     · intro hL
-      refine open_scope_nodup (ϕ := ϕ') rfl (fun h => by cases h) (fun x hx => ?_) hfr (hnd hL)
+      refine open_scope_nodup (ϕ := ϕ') rfl rfl (fun h => by cases h) (fun x hx => ?_) hfr (hnd hL)
       rcases hacc x hx with ⟨_, h | h⟩ | ⟨hfree, h⟩
       · exact .inl h
       · exact .inr (.inl h)
-      · exact .inr (.inr ⟨hfree, hsub x h⟩)
+      · exact .inr (.inr ⟨hfree, h.sub hsub⟩)
 
 /-- The same for the callable a label's scope runs: it is given the label, and
 needs no region but the scope's and those the code making the scope may touch. -/
 theorem label_enter {S : StoreTy} {id n : Nat} {σ ρ : Ty} {εl εt : Row} {once' : Bool}
     {accl acc ϕ ϕ' : List Rgn} (hlab : S.labels id = some σ) (hσ : σ.lc = true)
     (hε : εt.lc = true) (hn : n = 0 ∨ n = 1) (hreg : Δ.regions → n = 1 ∧ .bound 0 ∈ accl)
-    (hacc : ∀ x, x ∈ acc → (n = 1 ∧ x = .bound 0) ∨ (x.free = true ∧ x ∈ ϕ)) (hsub : Sub ϕ ϕ')
-    (hnd : Δ.loans → acc.Nodup) (hfr : .lab id ∉ ϕ' ∧ .wr (.lab id) ∉ ϕ') :
+    (hacc : ∀ x, x ∈ acc → (n = 1 ∧ x = .bound 0) ∨ (x.free = true ∧ Grants ϕ x))
+    (hsub : Sub ϕ ϕ') (hnd : Δ.loans → (Rgn.flat acc).Nodup)
+    (hfr : .lab id ∉ Rgn.flat ϕ' ∧ .wr (.lab id) ∉ Rgn.flat ϕ') :
     ∃ rs, rs.length = n ∧ HasVal Δ S (.label id) ((Ty.fn 0 [σ] ρ εl once' none accl).open rs)
       ∧ σ.open rs = σ ∧ εt.open rs = εt ∧ Sub (acc.map (Rgn.openAt 0 rs)) (.lab id :: ϕ')
-      ∧ (Δ.loans → (acc.map (Rgn.openAt 0 rs)).Nodup) := by
+      ∧ (Δ.loans → (Rgn.flat (acc.map (Rgn.openAt 0 rs))).Nodup) := by
+  have hsub1 : Sub ϕ' (.lab id :: ϕ') := Sub.of_mem fun _ h => List.mem_cons_of_mem _ h
   rcases hn with rfl | rfl
   · refine ⟨[], rfl, ?_, Ty.open_nil _, Row.open_nil _, ?_, ?_⟩
     · rw [Ty.open_nil]
       exact .label hlab (fun hR => absurd (hreg hR).1 (by simp))
     · rw [acc_open_nil]
-      intro x hx
+      refine Sub.of_grants fun x hx => ?_
       rcases hacc x hx with ⟨h, _⟩ | ⟨_, h⟩
       · cases h
-      · exact List.mem_cons_of_mem _ (hsub x h)
+      · exact (h.sub hsub).sub hsub1
     · rw [acc_open_nil]
       exact hnd
   · refine ⟨[.lab id], rfl, ?_, Ty.open_lc hσ _, Row.open_lc hε _, ?_, ?_⟩
     · rw [Ty.open_fn0]
       simp only [List.map_cons, List.map_nil, Ty.open_lc hσ]
       exact .label hlab (fun hR => List.mem_map.mpr ⟨.bound 0, (hreg hR).2, rfl⟩)
-    · intro x hx
+    · refine Sub.of_grants fun x hx => ?_
       obtain ⟨x₀, hx₀, rfl⟩ := List.mem_map.mp hx
       rcases hacc x₀ hx₀ with ⟨_, rfl⟩ | ⟨hfree, h⟩
-      · exact List.mem_cons_self ..
+      · exact Grants.of_mem (List.mem_cons_self ..)
       · rw [Rgn.openAt_free hfree]
-        exact List.mem_cons_of_mem _ (hsub x₀ h)
+        exact (h.sub hsub).sub hsub1
     · intro hL
-      refine open_scope_nodup (ϕ := ϕ') rfl (fun h => by cases h) (fun x hx => ?_) hfr (hnd hL)
+      refine open_scope_nodup (ϕ := ϕ') rfl rfl (fun h => by cases h) (fun x hx => ?_) hfr (hnd hL)
       rcases hacc x hx with ⟨_, h⟩ | ⟨hfree, h⟩
       · exact .inl h
-      · exact .inr (.inr ⟨hfree, hsub x h⟩)
+      · exact .inr (.inr ⟨hfree, h.sub hsub⟩)
 
 /-- The same for the callable a borrow's scope runs: it is given the borrow.
 Under the rules for borrows it may not touch what was lent, and the stack it
@@ -603,24 +635,26 @@ theorem lend_enter {S : StoreTy} {uniq : Bool} {a b n : Nat} {ρ κ : Rgn} {σ �
     (hcell : S.cells a = some σ₀) (hp : PartOk Δ σ₀ path σ)
     (hl : S.loans b = some a) (hb : 0 < b) (hon : Δ.regions → OnCell S ρ a)
     (hσ : σ.lc = true) (hρt : ρt.lc = true) (hε : εt.lc = true)
-    (hn : (n = 0 ∧ κ = ρ) ∨ (n = 1 ∧ κ = .bound 0)) (hreg : Δ.regions → ρ ∈ ϕ)
+    (hn : (n = 0 ∧ κ = ρ) ∨ (n = 1 ∧ κ = .bound 0)) (hreg : Δ.regions → Grants ϕ ρ)
     (hacc : ∀ x, x ∈ acc → (n = 1 ∧ (x = .bound 0 ∨ (uniq = true ∧ x = .wr (.bound 0))))
-      ∨ (x.free = true ∧ x ∈ ϕ ∧ (Δ.loans → x ≠ .wr ρ ∧ (uniq = true → x ≠ ρ))))
-    (hloan : Δ.loans → n = 1 ∧ ρ ∈ ϕ ∧ (uniq = true → .wr ρ ∈ ϕ) ∧ acc.Nodup ∧ εt = [])
-    (hsub : Sub ϕ ϕ') (hfr : .loan b ∉ ϕ' ∧ .wr (.loan b) ∉ ϕ') (hrow : Row.le εt ε')
-    (hst : StackOk Δ S st ρt ε' ϕ') :
+      ∨ (x.free = true ∧ Grants ϕ x ∧ (Δ.loans → ∀ y, y ∈ x.parts →
+        y ∉ (Rgn.wr ρ).parts ∧ (uniq = true → y ∉ ρ.parts))))
+    (hloan : Δ.loans → n = 1 ∧ Grants ϕ ρ ∧ (uniq = true → Grants ϕ (.wr ρ))
+      ∧ (Rgn.flat acc).Nodup ∧ εt = [])
+    (hsub : Sub ϕ ϕ') (hfr : .loan b ∉ Rgn.flat ϕ' ∧ .wr (.loan b) ∉ Rgn.flat ϕ')
+    (hrow : Row.le εt ε') (hst : StackOk Δ S st ρt ε' ϕ') :
     ∃ rs G ε'', rs.length = n ∧ HasVal Δ S (.ref a b path) ((Ty.ref κ σ).open rs) ∧ ρt.open rs = ρt
       ∧ εt.open rs = εt ∧ Sub (acc.map (Rgn.openAt 0 rs)) G
-      ∧ (Δ.loans → (acc.map (Rgn.openAt 0 rs)).Nodup) ∧ Row.le εt ε''
+      ∧ (Δ.loans → (Rgn.flat (acc.map (Rgn.openAt 0 rs))).Nodup) ∧ Row.le εt ε''
       ∧ StackOk Δ S (.lend uniq a b :: st) ρt ε'' G := by
-  have hnd1 : n = 1 → Δ.loans → (acc.map (Rgn.openAt 0 [.loan b])).Nodup := by
+  have hnd1 : n = 1 → Δ.loans → (Rgn.flat (acc.map (Rgn.openAt 0 [.loan b]))).Nodup := by
     intro h1 hL
-    refine open_scope_nodup (ϕ := ϕ') rfl (fun h => by cases h) (fun x hx => ?_) hfr
+    refine open_scope_nodup (ϕ := ϕ') rfl rfl (fun h => by cases h) (fun x hx => ?_) hfr
       (hloan hL).2.2.2.1
     rcases hacc x hx with ⟨_, h | ⟨_, h⟩⟩ | ⟨hfree, h, _⟩
     · exact .inl h
     · exact .inr (.inl h)
-    · exact .inr (.inr ⟨hfree, hsub x h⟩)
+    · exact .inr (.inr ⟨hfree, h.sub hsub⟩)
   by_cases hB : Δ.regions ∧ Δ.loans
   · obtain ⟨h1, hρϕ, hw, _, hquiet⟩ := hloan hB.2
     subst h1
@@ -631,49 +665,51 @@ theorem lend_enter {S : StoreTy} {uniq : Bool} {a b n : Nat} {ρ κ : Rgn} {σ �
     subst hκ
     refine ⟨[.loan b], lent uniq ρ b ϕ', [], rfl, ?_, Ty.open_lc hρt _, Row.open_lc hε _, ?_,
       hnd1 rfl, by rw [hquiet]; exact Row.le_refl _,
-      .lend hl hb (hon hB.1) (hsub _ hρϕ) (fun hu => hsub _ (hw hu)) hst⟩
+      .lend hl hb (hon hB.1) (hρϕ.sub hsub) (fun hu => (hw hu).sub hsub) hst⟩
     · rw [Ty.open_ref, Ty.open_lc hσ]
-      exact .ref hcell hp (fun _ => .inr ⟨b, rfl, hl⟩) (fun _ _ => .inr ⟨rfl, hl⟩)
-    · intro x hx
+      exact .ref hcell hp (fun _ => OnCell.loan hl) (fun _ _ => Tagged.loan hl)
+    · refine Sub.of_grants fun x hx => ?_
       obtain ⟨x₀, hx₀, rfl⟩ := List.mem_map.mp hx
       rcases hacc x₀ hx₀ with ⟨_, rfl | ⟨hu, rfl⟩⟩ | ⟨hfree, hmem, hne⟩
-      · exact List.mem_cons_self ..
+      · exact Grants.of_mem (List.mem_cons_self ..)
       · subst hu
-        exact List.mem_cons_of_mem _ (List.mem_append_left _ (List.mem_cons_self ..))
+        exact Grants.of_mem (List.mem_cons_of_mem _ (List.mem_append_left _ (List.mem_cons_self ..)))
       · rw [Rgn.openAt_free hfree]
+        intro y hy
+        rw [flat_lent]
         refine List.mem_cons_of_mem _ (List.mem_append_right _
-          (List.mem_filter.mpr ⟨hsub _ hmem, ?_⟩))
-        have h1 := (hne hB.2).1
-        have h2 := (hne hB.2).2
-        have h3 : x₀ ≠ .loan b := fun h => hfr.1 (h ▸ hsub _ hmem)
-        have h4 : x₀ ≠ .wr (.loan b) := fun h => hfr.2 (h ▸ hsub _ hmem)
+          (List.mem_filter.mpr ⟨hsub _ (hmem y hy), ?_⟩))
+        have h1 := ((hne hB.2) y hy).1
+        have h2 := ((hne hB.2) y hy).2
+        have h3 : y ≠ .loan b := fun h => hfr.1 (h ▸ hsub _ (hmem y hy))
+        have h4 : y ≠ .wr (.loan b) := fun h => hfr.2 (h ▸ hsub _ (hmem y hy))
         cases uniq with
         | false => simp [h1, h3, h4]
         | true => simp [h1, h3, h4, h2 rfl]
   · have hstk : StackOk Δ S (.lend uniq a b :: st) ρt ε' (.loan b :: .wr (.loan b) :: ϕ') :=
-      .lendLoose hB hl (fun hR => ⟨ρ, hon hR, hsub _ (hreg hR)⟩) hst
+      .lendLoose hB hl (fun hR => ⟨ρ, hon hR, (hreg hR).sub hsub⟩) hst
     rcases hn with ⟨rfl, rfl⟩ | ⟨rfl, rfl⟩
     · refine ⟨[], _, ε', rfl, ?_, Ty.open_nil _, Row.open_nil _, ?_, ?_, hrow, hstk⟩
       · rw [Ty.open_nil]
         exact .ref hcell hp hon (fun hR hL => absurd ⟨hR, hL⟩ hB)
       · rw [acc_open_nil]
-        intro x hx
+        refine Sub.of_grants fun x hx => ?_
         rcases hacc x hx with ⟨h, _⟩ | ⟨_, h, _⟩
         · cases h
-        · exact List.mem_cons_of_mem _ (List.mem_cons_of_mem _ (hsub x h))
+        · exact (h.sub hsub).sub (Sub.cons2 _ _ _)
       · intro hL
         exact absurd (hloan hL).1 (by simp)
     · refine ⟨[.loan b], _, ε', rfl, ?_, Ty.open_lc hρt _, Row.open_lc hε _, ?_, hnd1 rfl, hrow,
         hstk⟩
       · rw [Ty.open_ref, Ty.open_lc hσ]
-        exact .ref hcell hp (fun _ => .inr ⟨b, rfl, hl⟩) (fun hR hL => absurd ⟨hR, hL⟩ hB)
-      · intro x hx
+        exact .ref hcell hp (fun _ => OnCell.loan hl) (fun hR hL => absurd ⟨hR, hL⟩ hB)
+      · refine Sub.of_grants fun x hx => ?_
         obtain ⟨x₀, hx₀, rfl⟩ := List.mem_map.mp hx
         rcases hacc x₀ hx₀ with ⟨_, rfl | ⟨_, rfl⟩⟩ | ⟨hfree, hmem, _⟩
-        · exact List.mem_cons_self ..
-        · exact List.mem_cons_of_mem _ (List.mem_cons_self ..)
+        · exact Grants.of_mem (List.mem_cons_self ..)
+        · exact Grants.of_mem (List.mem_cons_of_mem _ (List.mem_cons_self ..))
         · rw [Rgn.openAt_free hfree]
-          exact List.mem_cons_of_mem _ (List.mem_cons_of_mem _ (hsub _ hmem))
+          exact (hmem.sub hsub).sub (Sub.cons2 _ _ _)
 
 /-- A well-typed state that is not at a host operation steps to a well-typed
 state, halts, or is a fault. -/
@@ -1158,7 +1194,7 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
         ((Pre ++ .ref κ σ :: Post).map (Ty.open rs)) := by
       rw [List.map_append, List.map_cons, hpre, hpost]
       exact (hform.before.snoc _).append
-        (.cons (.var (by rw [henv.length_eq]; simp)) (hform.after.snoc _))
+        (.cons (.var (by rw [henv.length_eq]; simp) .refl) (hform.after.snoc _))
     obtain ⟨c, hc, hcok, hck, hcl, hocc⟩ :=
       evalCall_ok (S := S') ((henv.mono hS).snoc hl') (hthunk.snoc _) hrs hargs
     rw [hρo, hεo] at hcok
