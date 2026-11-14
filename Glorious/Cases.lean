@@ -2931,6 +2931,10 @@ def cases : List Case := [
   ⟨"struct Noisy(Int);\nimpl Drop for Noisy { fn drop(n) { say(n.0) } }\nfn eat(n: Noisy) -> Int { 5 }\neffect E { e() -> Int }\nfn work() -> Int { let n = Noisy(7); let f = { e() + eat(n) }; cancel(f); 1 }\nfn main() -> Int { handle work() { e(k) => k(2) } }",
     [], "7\n1"⟩,
   -- A value with `Drop` that a path does not use is kept in a variable, which destroys it where it was not used.
+  ⟨"struct Noisy(Int);\nimpl Drop for Noisy { fn drop(n) { say(n.0) } }\nfn eat(n: Noisy) -> Int { 5 }\nfn f(n: Noisy, c: Bool) -> Int { if(c) { eat(n) } else { 7 } }\nfn main() -> Int { say(f(Noisy(1), true)); f(Noisy(2), false) }",
+    [], "1\n5\n2\n7"⟩,
+  ⟨"struct Noisy(Int);\nimpl Drop for Noisy { fn drop(n) { say(n.0) } }\nfn eat(n: Noisy) -> Int { 5 }\nfn main() -> Int { let (a, k) = (Noisy(3), 4); if(k > 9) { eat(a) } else { k } }",
+    [], "3\n4"⟩,
   ⟨"struct Noisy(Int);\nimpl Drop for Noisy { fn drop(n) { say(n.0) } }\nfn eat(n: Noisy) -> Int { 5 }\nfn main() -> Int { let n = Noisy(1); if(2 < 1) { eat(n) } else { 7 } }",
     [], "1\n7"⟩,
   ⟨"struct Noisy(Int);\nimpl Drop for Noisy { fn drop(n) { say(n.0) } }\nfn eat(n: Noisy) -> Int { 5 }\nuse core::value::{discard};\nfn main() -> Int { let n = Noisy(1); if(2 < 1) { eat(n) } else { discard(n); 7 } }",

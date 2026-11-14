@@ -396,19 +396,43 @@ partial def letMutExpr (line col : Nat) (x : String) : Expr → Expr
   | .proj e n => .proj (letMutExpr line col x e) n
   | .closure i clauses => .closure i (clauses.map (letMutClause line col x))
   | .handle subject arms => .handle (letMutExpr line col x subject) (arms.map (letMutClause line col x))
-  | .labelScope l body => .labelScope l (body.map (letMutStmt line col x))
+  | .labelScope l body => .labelScope l (letMutStmts line col x body)
   | .deref e => .deref (letMutExpr line col x e)
   | .reborrow uniq e => .reborrow uniq (letMutExpr line col x e)
   | .fieldOf i e name => .fieldOf i (letMutExpr line col x e) name
   | e => e
 
+/-- A clause; at place `0:0`, one that takes `x` as a parameter (or a name
+its patterns bind) starts by keeping it in a variable, written at the place
+of its first statement. -/
 partial def letMutClause (line col : Nat) (x : String) : Clause → Clause
-  | .mk pats body => .mk pats (body.map (letMutStmt line col x))
+  | .mk pats body =>
+    let body := letMutStmts line col x body
+    if line == 0 && col == 0 && (pats.flatMap patVars).contains x then
+      match body with
+      | .located l c s :: rest => .mk pats (.located l c (.letMut x (.name none x)) :: .located l c s :: rest)
+      | _ => .mk pats body
+    else .mk pats body
+
+partial def letMutStmts (line col : Nat) (x : String) : List Stmt → List Stmt
+  | [] => []
+  | .located l c (.let_ pat value) :: rest =>
+    let value := letMutExpr line col x value
+    let rest := letMutStmts line col x rest
+    if l == line && c == col then
+      match pat with
+      | .var y =>
+        if y == x then .located l c (.letMut y value) :: rest
+        else .located l c (.let_ pat value) :: rest
+      | _ =>
+        -- (A name a pattern binds: kept in a variable straight after.)
+        if (patVars pat).contains x then
+          .located l c (.let_ pat value) :: .located l c (.letMut x (.name none x)) :: rest
+        else .located l c (.let_ pat value) :: rest
+    else .located l c (.let_ pat value) :: rest
+  | s :: rest => letMutStmt line col x s :: letMutStmts line col x rest
 
 partial def letMutStmt (line col : Nat) (x : String) : Stmt → Stmt
-  | .located l c (.let_ (.var y) value) =>
-    if l == line && c == col && y == x then .located l c (.letMut y (letMutExpr line col x value))
-    else .located l c (.let_ (.var y) (letMutExpr line col x value))
   | .let_ pat value => .let_ pat (letMutExpr line col x value)
   | .expr e => .expr (letMutExpr line col x e)
   | .defer e => .defer (letMutExpr line col x e)

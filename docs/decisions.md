@@ -4201,8 +4201,8 @@ the function, the place of the `let` and the name; the driver rewrites that one
 `let x = e` as `let mut x = e` and checks the program again (within the same
 bound as the re-reading for `..` in a pattern). If the program is still refused,
 what is said is the first refusal, not what the rewritten program got wrong.
-A parameter, or a name bound by a pattern, is not rewritten: those are still
-refused. A field taken out of such a value on one path is refused, as it is of a
+A parameter is kept in a variable at the start of its clause (`let mut n = n`),
+and a name a pattern binds straight after the pattern's `let`. A field taken out of such a value on one path is refused, as it is of a
 `let mut` (`replace` takes it out).
 
 ## Other standing decisions
