@@ -323,8 +323,7 @@ def assocAt (tr : String) (subject : Ty) (name : String) : M (Option Ty) := do
   for (j, want) in im.fixed do
     if let some got := hargs[j]? then
       try unify got (← fixedAt at_ want) catch _ => return none
-  let taken := ((im.gatParams.lookup name).getD []).zip asked
-  pure (some (subst (at_ ++ taken) [] [] said))
+  pure (some (gatAt at_ ((im.gatParams.lookup name).getD []) asked said))
 
 /-- Settle what can be settled of the types traits leave to implementations:
 where the type asked of is known, the answer is what its implementation says;
@@ -433,7 +432,14 @@ partial def capHolds (brand : Nat) (cap : Nat) : M Bool := do
 /-- Does the type mention a callable that holds the brand? -/
 partial def tyHolds (brand : Nat) (t : Ty) : M Bool := do
   match ← find t with
-  | .var _ => pure false
+  | .var v =>
+    -- (A type a trait leaves at a lifetime, not known here: it may hold
+    -- what that lifetime holds.)
+    for (w, lives) in (← get).gatHolds do
+      if let .var r' ← find (.var w) then
+        if r' == v then
+          if ← lives.anyM (capHolds brand ·) then return true
+    pure false
   | .con _ args => args.anyM (tyHolds brand)
   | .tuple args => args.anyM (tyHolds brand)
   | .fn ps r effs tail cap => do
@@ -454,6 +460,7 @@ def checkEscape (brand : Nat) (what : String) (roots : List (String × Ty)) (amb
     M Unit := do
   runProjections false
   settleRows none false
+  settleAssocs
   let holds := fun (t : Ty) => do
     modify fun s => { s with seen := [] }
     tyHolds brand t

@@ -362,7 +362,8 @@ def declareTraits (items : List Item) : M Unit := do
         -- (The type parameters of its own: a variable each.)
         let (ret, ownNames) := Syntax.methodGenerics ret
         let mut mparams : List (String × Nat) := []
-        for g in ownNames do
+        -- (A lifetime among them is one of its lifetimes, as any written.)
+        for g in ownNames.filter (!·.startsWith "'") do
           if let .var id ← freshTy then mparams := mparams ++ [(g, id)]
         modify fun s => { s with gatScope := assocNames, gatOccs := #[] }
         if ((← get).methods.lookup m).isSome then
@@ -517,7 +518,7 @@ def declareTraits (items : List Item) : M Unit := do
             | none => throw s!"{what}: `{Syntax.lastSegment t'}` takes arguments: `{p}: {Syntax.lastSegment t'}<..>`"
           extra := extra ++ [(t', cargs, subject)]
       let mut assocs : List (String × Ty) := []
-      let mut gatParams : List (String × List Nat) := []
+      let mut gatParams : List (String × List (Bool × Nat)) := []
       for a in assocNames do
         match methods.findSome? fun
             | .typeAlias n takes body => if n == a then some (takes, body) else none
@@ -525,11 +526,15 @@ def declareTraits (items : List Item) : M Unit := do
         | some (takes, body) =>
           -- (`type Of<T> = [T];`: what it takes, a variable each.)
           let mut own : List (String × Ty) := []
-          let mut ids : List Nat := []
+          let mut ids : List (Bool × Nat) := []
           for p in takes do
-            if let .var id ← freshTy then
+            if p.startsWith "'" then
+              let cap ← freshCap
+              own := own ++ [(p, Ty.life cap)]
+              ids := ids ++ [(true, cap)]
+            else if let .var id ← freshTy then
               own := own ++ [(p, .var id)]
-              ids := ids ++ [id]
+              ids := ids ++ [(false, id)]
           unless ids.isEmpty do gatParams := gatParams ++ [(a, ids)]
           assocs := assocs ++ [(a, ← resolveType (own ++ pmap) false body)]
         | none => throw s!"{what} does not say what `{a}` is: write `type {a} = ..;`"

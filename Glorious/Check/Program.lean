@@ -1102,8 +1102,7 @@ def checkGroup (decls : List FnDecl) : M Unit := do
           let tm := tm ++ sig.mparams.filterMap fun (g, id) => (rigid.lookup g).map fun t => (id, t)
           let tm := tm ++ sig.gats.filterMap fun (a, asked, id) =>
             (im.assocs.lookup a).map fun said =>
-              let taken := ((im.gatParams.lookup a).getD []).zip (asked.map (subst tm [] []))
-              (id, subst (own ++ taken) [] [] said)
+              (id, gatAt own ((im.gatParams.lookup a).getD []) (asked.map (subst tm [] [])) said)
           -- The trait's lifetimes are each itself here, as a function's own
           -- are: what the trait says is borrowed from one thing may not be
           -- borrowed from another.

@@ -2939,9 +2939,13 @@ the order it is being built:
   of its own, found where the implementation is known, as a plain
   associated type's is. With it, a trait's function may have type
   parameters of its own, `fn map<A, B>(Of<A>, fn(A) -> B) -> Of<B>`: a use
-  has them anew, and in an implementation they are the function's. Not
-  built: a lifetime as what it takes (`type Item<'a>`, an iterator that
-  lends), which is refused where it is written; saying what one is in a
+  has them anew, and in an implementation they are the function's. It may
+  take a lifetime, `type Item<'a>; fn next<'a>(&'a mut Self) ->
+  Option<Item<'a>>`, an iterator that lends: the lifetime asked is the one of
+  that use, so what `next` gave keeps its borrow. Where the answer is not
+  known (`L::Item<'a>` with `L` a type parameter), it is taken to hold
+  whatever the lifetime borrows, both for a borrow still in use and for one
+  that would outlive its variable. Not built: saying what one is in a
   bound (`F: Family<Of<Int> = A>`); type arguments written at a call for a
   trait function's own parameters; and a trait with parameters of its own
   that also leaves such a type. A function generic in `F` that calls

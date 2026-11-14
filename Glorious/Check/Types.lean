@@ -316,9 +316,10 @@ structure ImplDecl where
   (`where R: Get<T>`, `where H: Same<T>`). Each the trait, its arguments and
   the type it is asked of, in the implementation's own type parameters. -/
   extra : List (String × List Ty × Ty) := []
-  /-- For a type it says that takes types, `type Of<T> = [T];`: the
-  variables that stand in `assocs` for what it takes. -/
-  gatParams : List (String × List Nat) := []
+  /-- For a type it says that takes types, `type Of<T> = [T];`: what stands
+  in `assocs` for what it takes, each a variable, or for a lifetime
+  (`type Item<'a> = &'a T;`, marked `true`) a capture variable. -/
+  gatParams : List (String × List (Bool × Nat)) := []
 
 /-- A trait needed of a type at a call: of the type a trait's function is used
 at, or of a type parameter of the function called. -/
@@ -722,6 +723,10 @@ structure St where
   implementations, and where one is asked at types, as `MethodSig.gats`. -/
   gatScope : List String := []
   gatOccs : Array (String × List Ty × Nat) := #[]
+  /-- A type a trait leaves at a lifetime, not yet known (`L::Item<'a>` where
+  `L` is a type parameter): by its variable, the lifetimes it was asked at.
+  It may hold whatever they borrow. -/
+  gatHolds : Array (Nat × List Nat) := #[]
   /-- A program in which some type has `Drop`: values are destroyed where
   they are let go, each type by its own function, and a function is given
   how to destroy the types it is generic in. Without `Drop` anywhere there
@@ -1083,6 +1088,18 @@ lifetime for each lifetime. -/
 def EffectDecl.fresh (d : EffectDecl) : M (List Ty) := do
   (d.tvars.zip (d.lifetimes ++ d.tvars.map fun _ => false)).mapM fun (_, life) => do
     if life then pure (Ty.life (← freshCap)) else freshTy
+
+/-- What a type a trait leaves at types is, `said` with what it takes,
+`takes`, as `asked`: types for its type parameters, and for a lifetime the
+lifetime asked. `own` is the implementation's own type parameters. -/
+def gatAt (own : List (Nat × Ty)) (takes : List (Bool × Nat)) (asked : List Ty) (said : Ty) : Ty :=
+  let pairs := takes.zip asked
+  let tm := pairs.filterMap fun ((life, id), t) => if life then none else some (id, t)
+  let cm := pairs.filterMap fun ((life, id), t) =>
+    match life, t with
+    | true, .ref _ _ c => some (id, c)
+    | _, _ => none
+  subst (own ++ tm) [] cm said
 
 /-- A type with every capture variable replaced by a new one. -/
 def freshenCaps (t : Ty) : M Ty := do

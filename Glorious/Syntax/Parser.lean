@@ -2030,9 +2030,7 @@ private partial def parseTrait : P (List Item) := do
       assocs := assocs.push (← expectIdent)
       -- `type Of<T>;`: a type for each type it is asked at. How many it
       -- takes is seen where an implementation says what it is.
-      let asked ← parseGenerics
-      if asked.any (·.startsWith "'") then
-        failAt "a type a trait leaves to its implementations can take types, `type Of<T>;`, but not yet a lifetime"
+      let _ ← parseGenerics
       -- `type Effects: EffectRow;`: what is said of it is read and not kept;
       -- a row is known by where the trait's functions use it.
       if ← acceptPunct ":" then

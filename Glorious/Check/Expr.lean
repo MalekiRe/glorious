@@ -933,18 +933,31 @@ partial def inferCall (scope : Scope) (amb : Row) (f : Expr) (args : List Expr)
         anew := anew ++ [(id, ← freshTy)]
       let tm := (sig.self, self) :: sig.tparams.zip targs ++ (sig.assocs.map (·.2)).zip found ++ anew
       let subject := if targs.isEmpty then self else Ty.tuple (self :: targs)
-      for (name, asked, id) in sig.gats do
-        let use := (sig.trait, Ty.con Syntax.gatMark (self :: asked.map (subst tm [] [])), name,
-          subst tm [] [] (.var id), (← get).owner, (← get).pos)
-        modify fun s => { s with assocUses := s.assocUses.push use }
       for ((name, _), a) in sig.assocs.zip found do
         modify fun s =>
           { s with assocUses := s.assocUses.push (sig.trait, subject, name, a, s.owner, s.pos) }
       let row : Row :=
         ⟨sig.row.effs.map fun (e, args) => (e, args.map (subst tm rm [])),
           sig.row.tail.map fun k => (rm.lookup k).getD k⟩
-      let callee ← freshenCaps
-        (.func (sig.params.map (subst tm rm [])) (subst tm rm [] sig.ret) row (← freshCap))
+      -- (Where a type left at types is asked at a lifetime, that lifetime
+      -- is the one of this use: the function's lifetimes and those asked
+      -- are made new together.)
+      let asking := sig.gats.map fun (_, asked, _) => Ty.tuple (asked.map (subst tm [] []))
+      let both ← freshenCaps (.tuple
+        (.func (sig.params.map (subst tm rm [])) (subst tm rm [] sig.ret) row (← freshCap) :: asking))
+      let (callee, asking) := match both with
+        | .tuple (c :: rest) => (c, rest)
+        | other => (other, asking)
+      for ((name, _, id), asked) in sig.gats.zip asking do
+        let asked := match asked with
+          | .tuple ts => ts
+          | t => [t]
+        let answer := subst tm [] [] (.var id)
+        let use := (sig.trait, Ty.con Syntax.gatMark (self :: asked), name, answer, (← get).owner, (← get).pos)
+        modify fun s => { s with assocUses := s.assocUses.push use }
+        let lives := asked.filterMap fun | .ref (.con "'" []) _ c => some c | _ => none
+        if let .var v := answer then
+          unless lives.isEmpty do modify fun s => { s with gatHolds := s.gatHolds.push (v, lives) }
       let r ← applyTy scope amb s!"`{x}`" callee args call
       needBounds call [(sig.trait, subject)]
       modify fun s => { s with methodCalls := s.methodCalls.push (call, sig.index) }

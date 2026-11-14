@@ -126,7 +126,14 @@ back is not what it holds: only what it captured is. -/
 partial def tyHoldsLoan (loan : Nat) (t : Ty) (suspended : Bool := false)
     (plain : Bool := false) : M Bool := do
   match ← find t with
-  | .var _ => pure false
+  | .var v =>
+    -- (A type a trait leaves at a lifetime, not known here: it may hold
+    -- what that lifetime borrows.)
+    for (w, lives) in (← get).gatHolds do
+      if let .var r' ← find (.var w) then
+        if r' == v then
+          if ← lives.anyM (capHoldsLoan loan · suspended plain) then return true
+    pure false
   | .con _ args => args.anyM (tyHoldsLoan loan · suspended plain)
   | .tuple args => args.anyM (tyHoldsLoan loan · suspended plain)
   | .fn _ _ _ _ cap => capHoldsLoan loan cap suspended plain
@@ -954,7 +961,14 @@ def openRanked (t : Ty) (rigid : Bool := false) : M (Ty × List Nat) := do
 /-- The capture variables reachable from a type through what they hold. -/
 def capsReached (t : Ty) : M (List Nat) := do
   let mut reach : List Nat := []
-  for c in freeCaps (← zonk t) do
+  let t ← zonk t
+  -- (A type a trait leaves at a lifetime, not known here, reaches it.)
+  let mut asked : List Nat := []
+  for v in freeTys t do
+    for (w, lives) in (← get).gatHolds do
+      if let .var r' ← find (.var w) then
+        if r' == v then asked := asked ++ lives
+  for c in freeCaps t ++ asked do
     let root ← findCap c
     unless reach.contains root do reach := root :: reach
   let mut todo := reach
