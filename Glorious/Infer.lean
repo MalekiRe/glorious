@@ -61,6 +61,10 @@ structure IAcc where
   touches, and for each region its type binds the region chosen. What it
   touches of the first is touched of the second. -/
   insts : List (Nat × List (Nat × Nat)) := []
+  /-- Nothing will be added to it: it is of a group of functions whose types
+  are settled, and what it includes has been worked out and written here in
+  its own `rgns` and `wrs`. A copy of it copies those and nothing further. -/
+  final : Bool := false
   deriving Inhabited
 
 /-- A type while it is being inferred. -/
@@ -209,6 +213,10 @@ structure St where
   worked out when `accVer` was `accMemoAt`. -/
   accMemo : Std.HashMap (Nat × Bool) (List Nat) := {}
   accMemoAt : Nat := 0
+  /-- The records of what callables touch that settled groups' own types and
+  unsettled questions name: each use of such a group copies them and adds to
+  the copy, so what they include is never written into them. -/
+  kept : Std.HashSet Nat := {}
   /-- For each function, an identity shared by the functions it is mutually recursive with. -/
   scc : Array Nat := #[]
   /-- How many values each function captures. -/
@@ -1234,6 +1242,31 @@ partial def settle : M Unit := do
     | _ => pure ()
   if (← get).gen != before then settle
 
+/-- The callables' records of what they touch that a type names: those of the
+callable types in it. (Not what those include in turn.) -/
+partial def namedAccs (t : ITy) (out : Std.HashSet Nat) : M (Std.HashSet Nat) := do
+  match ← find t with
+  | .var _ => pure out
+  | .param _ => pure out
+  | .int => pure out
+  | .tuple fs => fs.foldlM (fun o f => namedAccs f o) out
+  | .data _ args => args.foldlM (fun o f => namedAccs f o) out
+  | .fn ps r ops tail _ env a => do
+    let mut out ← ps.foldlM (fun o f => namedAccs f o) out
+    out ← namedAccs r out
+    out ← namedAccs env out
+    let row ← flattenRow ⟨ops, tail⟩
+    for (_, targs) in row.ops do
+      out ← targs.foldlM (fun o f => namedAccs f o) out
+    pure (out.insert (← findAcc a))
+  | .ref _ t => namedAccs t out
+  | .never => pure out
+
+/-- Those a row's operations name. -/
+def namedAccsRow (r : IRow) (out : Std.HashSet Nat) : M (Std.HashSet Nat) := do
+  let row ← flattenRow r
+  row.ops.foldlM (fun o (_, targs) => targs.foldlM (fun o f => namedAccs f o) o) out
+
 /-- The regions a type mentions and what its callables touch, with whatever
 those include: gathered for the types the whole program shares. -/
 partial def sharedRegions (t : ITy) (acc : Std.HashSet Nat × Std.HashSet Nat) :
@@ -1377,6 +1410,80 @@ partial def schemeOf (scc : Nat) : M Scheme := do
     for (template, opened, _) in opens do
       if liveTy live template then live := varsOf opened live
       if liveTy live opened then live := varsOf template live
+  -- What a callable of the group touches is worked out once and written
+  -- into its own record, in place of what it includes and calls, where
+  -- nothing can be added to that any more. A use of the group then copies
+  -- the record, and not, as it did, everything the function calls, and what
+  -- those call, each time: the copies grew with every level of calls.
+  --
+  -- Something can still be added to a record that a type names which the
+  -- group's users or its unsettled questions can reach: a parameter that is
+  -- a callable touches what the one given for it does, which a use decides.
+  -- So a record is settled only if it is not such a one and includes none.
+  if (← get).regions then
+    let mut open_ : Std.HashSet Nat := {}
+    for m in members do
+      for ty in m.sig.caps ++ m.sig.params ++ [m.sig.ret] do
+        open_ ← namedAccs ty open_
+      open_ ← namedAccsRow m.sig.row open_
+      open_ := open_.insert (← findAcc m.sig.acc)
+    for c in incls do
+      open_ ← namedAccsRow c.sub open_
+      open_ ← namedAccsRow ⟨c.under, none⟩ open_
+      open_ ← namedAccsRow c.sup open_
+    for (ty, _, r) in places do
+      open_ ← namedAccs ty open_
+      open_ ← namedAccs r open_
+    for (r, b) in coerces do
+      open_ ← namedAccs r open_
+      open_ ← namedAccs b open_
+    for ty in nevers do
+      open_ ← namedAccs ty open_
+    for (_, tys) in onces do
+      for ty in tys do
+        open_ ← namedAccs ty open_
+    for (env, caps) in shows do
+      for ty in env :: caps do
+        open_ ← namedAccs ty open_
+    for (template, opened, _) in opens do
+      open_ ← namedAccs template open_
+      open_ ← namedAccs opened open_
+    for c in calls do
+      for ty in c.callee :: c.result :: c.given do
+        open_ ← namedAccs ty open_
+      open_ ← namedAccsRow c.row open_
+      open_ := (open_.insert (← findAcc c.acc)).insert (← findAcc c.self)
+    -- (And the same of the groups settled while this one was inferred,
+    -- whose records are among this one's.)
+    modify fun s => { s with kept := open_.fold (fun k a => k.insert a) s.kept }
+    let kept := (← get).kept
+    let last := (← get).accs.size
+    let mut settled : Array (Nat × List Nat × List Nat) := #[]
+    for a in [startAcc:last] do
+      if (← findAcc a) == a && !(← accNode a).final then
+        let mut reach : Array Nat := #[a]
+        let mut seen : Std.HashSet Nat := ({} : Std.HashSet Nat).insert a
+        let mut closed := true
+        let mut at_ := 0
+        while closed && at_ < reach.size do
+          let n := reach[at_]!
+          at_ := at_ + 1
+          let x ← accNode n
+          unless x.final do
+            if n < startAcc || shared.2.contains n || kept.contains n then closed := false
+            else
+              for next in x.subs.map (·.1) ++ x.insts.map (·.1) do
+                let m ← findAcc next
+                unless seen.contains m do
+                  seen := seen.insert m
+                  reach := reach.push m
+        if closed then settled := settled.push (a, ← accSet a, ← accWrSet a)
+    unless settled.isEmpty do
+      modify fun s =>
+        { s with
+          accVer := s.accVer + 1
+          accs := settled.foldl (fun accs (a, rs, ws) =>
+            accs.modify a fun x => { x with rgns := rs, wrs := ws, subs := [], insts := [], final := true }) s.accs }
   let sch : Scheme :=
     { startTy, startRow, startCls, startRg, startAcc, fixedTys := fixed.tys
       fixedRows := fixed.rows, fixedClss := fixed.clss, fixedRgs := shared.1

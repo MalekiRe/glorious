@@ -2890,6 +2890,20 @@ borrow tried).
 - The fields of a value are destroyed the last declared first, and the
   elements of an array the last first. (Rust goes the other way.)
 
+## What a function touches is written down once
+
+- Working out a certificate copied, at each use of a function, the record of
+  what the function touches together with the records of everything it
+  calls, and of what those call: the copies multiplied with each level of
+  calls. A program that called a hash of five levels fifteen times made 2.7
+  million records and took 22 s to compile. When a group of functions has
+  its types, each record that nothing can still be added to is now worked
+  out and written flat, so a use copies that alone; the same program makes
+  42 thousand and takes 7.8 s. A record a parameter's type names, or one
+  that includes such a record, is left as it was: what a callable parameter
+  touches is decided by each use. Every program of the tests gets the same
+  certificate as before (compared one by one, 1533 programs).
+
 ## A field of a value borrowed; a parameter that is only borrowed
 
 - `let c = C { .. }; len_at(&c.xs)` and `fn f(c: C) { len_at(&c.xs) }` said
