@@ -302,6 +302,12 @@ def captureSite (x : String) : String := s!"%capture:{x}"
 def captureSiteOf (name : String) : Option String :=
   if name.startsWith "%capture:" then some (name.drop 9).toString else none
 
+/-- What the checker says of a `let x` at a place in a function whose value is
+used on one path and not on another: the program is read again with that
+`let` written `let mut` (`Elab.letMutFound`). -/
+def letMutMark (owner : String) (line col : Nat) (x : String) : String :=
+  s!"%letmut:{line}:{col}:{x}:{owner}%"
+
 /-- A callable with what destroys it if it is let go: `%destroyed(callable,
 { .. })`, where the block destroys what the callable captured, by its names. -/
 def destroyedMark : String := "%destroyed"

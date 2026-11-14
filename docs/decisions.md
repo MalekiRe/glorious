@@ -4188,6 +4188,23 @@ given up, which destroys what it captured.
   callable in a field of a value is not given up when the value is destroyed
   unless the field's type is known to need it.
 
+## A value used on one path only is kept in a variable
+
+The specification allows a value to be moved on one path and not on another
+(path-sensitive initialization). A `let mut` variable already did this: a flag
+set where its value is given away, and its cleanup destroying the value where
+it was not. A plain `let` whose value has a `drop` to run and is used on some
+paths only was refused with the advice to write `let mut`.
+
+Now the compiler takes that advice itself. The refusal carries a marker naming
+the function, the place of the `let` and the name; the driver rewrites that one
+`let x = e` as `let mut x = e` and checks the program again (within the same
+bound as the re-reading for `..` in a pattern). If the program is still refused,
+what is said is the first refusal, not what the rewritten program got wrong.
+A parameter, or a name bound by a pattern, is not rewritten: those are still
+refused. A field taken out of such a value on one path is refused, as it is of a
+`let mut` (`replace` takes it out).
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by

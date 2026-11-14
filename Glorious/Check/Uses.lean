@@ -1345,7 +1345,15 @@ def runLowerChecks (fnTy : Ty) : M Unit := do
           if (pathUses { ctx with handed := true, capturesOwned := true } names x body) == some 0 then
             if heldDrop then
               throw s!"{pos}`{x}` is used on one path and not on another, and it holds a `{name}`, which has a `drop` to run: where it is not used nothing would run it. Use it on every path, or give it up there with `cancel({x})`, which destroys what it holds"
-            throw s!"{pos}`{x}` is used on one path and not on another, and a `{name}` has a `drop` to run: where it is not used nothing would run it. Use it on every path, let it go there with a function that takes it, or keep it in a variable (`let mut {x}`), which is destroyed where it was not used"
+            -- (Said with which `let` it is: the program is read again with
+            -- the value kept in a variable, which destroys it where no path
+            -- used it.)
+            let place := ((pos.splitOn ":").take 2).filterMap String.toNat?
+            let owner := (← get).owner
+            let mark := match place with
+              | [line, col] => Syntax.letMutMark owner line col x
+              | _ => ""
+            throw s!"{pos}`{x}` is used on one path and not on another, and a `{name}` has a `drop` to run: where it is not used nothing would run it. Use it on every path, let it go there with a function that takes it, or keep it in a variable (`let mut {x}`), which is destroyed where it was not used{mark}"
       continue
     let mut unused := false
     if usesStmts resumptive x body == 0 then unused := true

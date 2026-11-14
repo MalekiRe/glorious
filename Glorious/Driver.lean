@@ -520,15 +520,23 @@ def compileSourceAt (src : String) (check : Bool := true)
     | _, _ => (Check.checkProgram all resolved.info drops).map (·, [])
   -- (`..` in a tuple pattern: the checker says how many parts it stands
   -- for, and the program is read again with them written.)
-  let rec checkWith (fuel : Nat) (all : List Syntax.Item) :
+  -- (A value used on one path and not on another, bound by `let`: kept in a
+  -- variable, as `let mut` keeps it, and the program read again. If that is
+  -- refused, what is said is why the value could not be left unused.)
+  let rec checkWith (fuel : Nat) (all : List Syntax.Item) (first : Option String) :
       List Syntax.Item × Except String (Elab.Blocks × Check.Kept) :=
     match checkOnce all with
     | .ok blocks => (all, .ok blocks)
     | .error e =>
-      match fuel, Elab.restFound e with
-      | fuel + 1, some (id, count) => checkWith fuel (Elab.restItems id count all)
-      | _, _ => (all, .error e)
-  let (all, checked) := checkWith 64 all
+      let said := Elab.withoutLetMut ((first.filter fun _ => (Elab.letMutFound e).isNone).getD e)
+      match fuel, Elab.restFound e, Elab.letMutFound e with
+      | fuel + 1, some (id, count), _ => checkWith fuel (Elab.restItems id count all) first
+      | fuel + 1, none, some (owner, line, col, x) =>
+        match Elab.letMutItems owner line col x all with
+        | (all, true) => checkWith fuel all (some (first.getD e))
+        | _ => (all, .error said)
+      | _, _, _ => (all, .error said)
+  let (all, checked) := checkWith 64 all none
   let (blocks, checkMade) ← match checked with
     | .ok (blocks, made) => pure (some blocks, made)
     | .error e => if check then throw e else pure (none, [])

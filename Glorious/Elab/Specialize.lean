@@ -363,4 +363,84 @@ def restFound (said : String) : Option (Nat × Nat) :=
     | _ => none
   | _ => none
 
+/-! ## A value used on one path and not on another
+
+A value with a `drop` to run that one path uses and another does not is kept
+in a variable, as `let mut` keeps it: where it was not used, the variable
+destroys it. The checker says which `let`, and the program is read again with
+that `let` written as `let mut`. -/
+
+/-- The `let` the checker asks to keep its value in a variable, if it does:
+the function, its place and the name. -/
+def letMutFound (said : String) : Option (String × Nat × Nat × String) :=
+  match said.splitOn "%letmut:" with
+  | _ :: after :: _ =>
+    match ((after.splitOn "%").headD "").splitOn ":" with
+    | line :: col :: x :: owner =>
+      line.toNat?.bind fun line => col.toNat?.map fun col => (":".intercalate owner, line, col, x)
+    | _ => none
+  | _ => none
+
+/-- What the checker says, without the marker. -/
+def withoutLetMut (said : String) : String :=
+  match said.splitOn "%letmut:" with
+  | before :: after :: _ => before ++ (((after.splitOn "%").drop 1).foldl (· ++ ·) "")
+  | _ => said
+
+mutual
+
+partial def letMutExpr (line col : Nat) (x : String) : Expr → Expr
+  | .call i f args => .call i (letMutExpr line col x f) (args.map (letMutExpr line col x))
+  | .tailCall i f args => .tailCall i (letMutExpr line col x f) (args.map (letMutExpr line col x))
+  | .tuple args => .tuple (args.map (letMutExpr line col x))
+  | .proj e n => .proj (letMutExpr line col x e) n
+  | .closure i clauses => .closure i (clauses.map (letMutClause line col x))
+  | .handle subject arms => .handle (letMutExpr line col x subject) (arms.map (letMutClause line col x))
+  | .labelScope l body => .labelScope l (body.map (letMutStmt line col x))
+  | .deref e => .deref (letMutExpr line col x e)
+  | .reborrow uniq e => .reborrow uniq (letMutExpr line col x e)
+  | .fieldOf i e name => .fieldOf i (letMutExpr line col x e) name
+  | e => e
+
+partial def letMutClause (line col : Nat) (x : String) : Clause → Clause
+  | .mk pats body => .mk pats (body.map (letMutStmt line col x))
+
+partial def letMutStmt (line col : Nat) (x : String) : Stmt → Stmt
+  | .located l c (.let_ (.var y) value) =>
+    if l == line && c == col && y == x then .located l c (.letMut y (letMutExpr line col x value))
+    else .located l c (.let_ (.var y) (letMutExpr line col x value))
+  | .let_ pat value => .let_ pat (letMutExpr line col x value)
+  | .expr e => .expr (letMutExpr line col x e)
+  | .defer e => .defer (letMutExpr line col x e)
+  | .letMut y value => .letMut y (letMutExpr line col x value)
+  | .assign target value => .assign (letMutExpr line col x target) (letMutExpr line col x value)
+  | .located l c s => .located l c (letMutStmt line col x s)
+
+end
+
+/-- A program with one function's `let x` at a place written `let mut x`, and
+whether there was such a `let`. -/
+def letMutItems (owner : String) (line col : Nat) (x : String) (items : List Item) :
+    List Item × Bool :=
+  let fn := fun (clauses : List Clause) =>
+    let after := clauses.map (letMutClause line col x)
+    (after, hash after != hash clauses)
+  let out : List (Item × Bool) := items.map fun
+    | .fn name ps annots ret clauses =>
+      if name == owner then
+        let (after, changed) := fn clauses
+        (Item.fn name ps annots ret after, changed)
+      else (Item.fn name ps annots ret clauses, false)
+    | .impl ps tr head args context methods =>
+      let methods : List (Item × Bool) := methods.map fun
+        | .fn m mps annots ret clauses =>
+          if implFnName tr head m == owner then
+            let (after, changed) := fn clauses
+            (Item.fn m mps annots ret after, changed)
+          else (Item.fn m mps annots ret clauses, false)
+        | item => (item, false)
+      (.impl ps tr head args context (methods.map (·.1)), methods.any (·.2))
+    | item => (item, false)
+  (out.map (·.1), out.any (·.2))
+
 end Glorious.Elab
