@@ -728,11 +728,31 @@ def declare (items : List Item) : M Unit := do
           lifetimes := lifetimes ++ [some cap]
         | _ => pure ()
       for op in ops do
-        let payload ← op.payload.mapM (resolveType pmap true)
+        -- (Its own lifetimes, and those it does not write: not the
+        -- declaration's, but each use's.)
+        let before := (← get).monoCaps
+        let mut own : List (String × Ty) := []
+        for l in op.lifetimes do
+          own := own ++ [(l, Ty.life (← freshCap))]
+        let opMap := own ++ pmap
+        let payload ← op.payload.mapM (resolveType opMap true)
         let result ← if op.terminal then pure none
           else match op.result with
-            | some t => some <$> resolveType pmap true t
-            | none => some <$> resolveType pmap true .hole
+            | some t => some <$> resolveType opMap true t
+            | none => some <$> resolveType opMap true .hole
+        -- (Of references only: a callable it is given or gives is held to
+        -- what the declaration says, as before.)
+        let rec refCaps : Ty → List Nat
+          | .ref _ t c => c :: refCaps t
+          | .con _ args => args.flatMap refCaps
+          | .tuple args => args.flatMap refCaps
+          | _ => []
+        let atRefs := (payload ++ result.toList).flatMap refCaps
+        let made := (← get).monoCaps.filter fun c => !before.contains c && atRefs.contains c
+        modify fun s => { s with monoCaps := s.monoCaps.filter (!made.contains ·) }
+        let caps := made ++ own.filterMap fun (_, t) => match t with
+          | .ref _ _ c => some c
+          | _ => none
         -- A resumption is resumed at most once, so the most uses is one; the
         -- fewest says whether it may simply be let go.
         let must ← match op.quantity with
@@ -745,7 +765,7 @@ def declare (items : List Item) : M Unit := do
             pure (lower == 1)
         if must then modify fun s => { s with anyMust := true }
         modify fun s =>
-          { s with ops := (op.name, ⟨name, ids, payload, result, must, lifetimes⟩) :: s.ops,
+          { s with ops := (op.name, ⟨name, ids, payload, result, must, lifetimes, caps⟩) :: s.ops,
                    runOps := s.runOps.insert op.name result.isSome,
                    runExact := if must && result.isSome then s.runExact.insert op.name
                      else s.runExact.erase op.name }
@@ -807,10 +827,11 @@ def instCtor (sig : CtorSig) : M (List Ty × Ty) := do
   pure (sig.fields.map (subst tm [] cm), subst tm [] cm sig.result)
 
 /-- An operation's payload and result types at the given effect arguments. -/
-def instOp (sig : OpSig) (inst : List Ty) : List Ty × Option Ty :=
+def instOp (sig : OpSig) (inst : List Ty) (own : List (Nat × Nat) := []) : List Ty × Option Ty :=
   let tm := sig.tvars.zip inst
-  -- A lifetime of the effect is the one it is given.
-  let cm := (sig.lifetimes.zip inst).filterMap fun
+  -- A lifetime of the effect is the one it is given; one of the operation's
+  -- own is this use's (`own`).
+  let cm := own ++ (sig.lifetimes.zip inst).filterMap fun
     | (some cap, .ref _ _ given) => some (cap, given)
     | _ => none
   (sig.payload.map (subst tm [] cm), sig.result.map (subst tm [] cm))

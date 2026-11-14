@@ -691,7 +691,8 @@ partial def inferCall (scope : Scope) (amb : Row) (f : Expr) (args : List Expr)
           throw s!"`{sig.effect}` has {types.length} type parameters, and `{x}` is written with {written.length}"
         for (t, w) in types.zip written do
           unify t w
-      let (payload, result) := instOp sig inst
+      let own ← sig.caps.mapM fun c => do pure (c, ← freshCap)
+      let (payload, result) := instOp sig inst own
       -- (What it is given first: that can say which instance of its effect
       -- this is, where there are several.)
       checkArgs scope amb s!"operation `{x}`" payload args call
@@ -1489,7 +1490,20 @@ partial def inferHandle (scope : Scope) (amb : Row) (subject : Expr) (arms : Lis
   let mut covered : List String := []
   for (x, sig, ps, body) in opArms do
     let inst := (insts.lookup sig.effect).getD []
-    let (payload, opResult) := instOp sig inst
+    -- (What the payload borrows from the performer is borrowed from it for
+    -- as long as the arm runs: as from a variable of the arm's own.)
+    let own ← sig.caps.mapM fun c => do pure (c, ← freshCap)
+    let lent ← freshBrand
+    for (_, c) in own do
+      captures c (.brand lent)
+    let (payload, opResult) := instOp sig inst own
+    let borrowed := !own.isEmpty && (← payload.anyM fun p => do
+      pure (own.any fun (_, c) => (freeCaps p).contains c))
+    if borrowed then
+      if opResult.isNone then
+        throw s!"the operation `{x}` does not return, so its performer is gone before an arm runs: what it is given cannot borrow"
+      unless ps.length == payload.length do
+        throw s!"the arm for `{x}` is given what borrows from its performer, which is gone once it is resumed: write the arm without the resumption, `{x}(..) => value`, which resumes with the value when the arm is done"
     match opResult with
     | none =>
       unless ps.length == payload.length do
@@ -1531,6 +1545,8 @@ partial def inferHandle (scope : Scope) (amb : Row) (subject : Expr) (arms : Lis
         unifyAt s!"the value the arm for `{x}` resumes with" o
           (← withLater ["%resumed"] (inferStmts (binds ++ resumption :: scope) amb body))
         checkUses here scope binds body
+        if borrowed then
+          checkEscape lent s!"what the operation `{x}` was given borrows from its performer and could be used after the arm" (scopeRoots scope) amb
         if ← ps.allM irrefutable then covered := x :: covered
       else arityError s!"an arm for the operation `{x}`" payload.length ps.length
   for (e, inst) in insts do

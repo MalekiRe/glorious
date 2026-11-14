@@ -1677,9 +1677,17 @@ private partial def parseItem : P Item := do
       let quantity ← if (← peek) == .punct "[" then some <$> parseQuantity else pure none
       let op ← expectIdent
       -- (The machine's types give an operation one type wherever an effect
-      -- is handled, so it has no type parameters apart from the effect's.)
+      -- is handled, so it has no type parameters apart from the effect's;
+      -- lifetimes it may have, each performance its own.)
+      let mut own : List String := []
       if ← isOp "<" then
-        failAt s!"the operation `{op}` cannot have type parameters of its own: an operation has one type wherever its effect is handled. Give the effect the parameter, `effect {name}<T> \{ {op}(..) }`"
+        let lifetimeFirst := match ← peek 1 with
+          | .ident l => l.startsWith "'"
+          | _ => false
+        let names ← if lifetimeFirst then parseGenerics else pure ["T"]
+        unless names.all (·.startsWith "'") do
+          failAt s!"the operation `{op}` cannot have type parameters of its own: an operation has one type wherever its effect is handled. Give the effect the parameter, `effect {name}<T> \{ {op}(..) }`"
+        own := names
       expectPunct "("
       let payload ← parseTypeList ")"
       let mut terminal := false
@@ -1690,7 +1698,7 @@ private partial def parseItem : P Item := do
           terminal := true
         else
           result := some (← parseType)
-      ops := ops.push ⟨op, payload, result, terminal, quantity⟩
+      ops := ops.push ⟨op, payload, result, terminal, quantity, own⟩
       -- An operation ends with `,` or `;`, or with nothing at all.
       if !(← acceptPunct ",") then
         let _ ← acceptPunct ";"

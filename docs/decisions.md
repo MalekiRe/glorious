@@ -3270,6 +3270,31 @@ const generics and fixed arrays.
   are both copied are not supported. Generic operations (`emit<T>(T)`, with
   the parameter on the operation and not the effect) are still refused.
 
+## An operation's own lifetimes
+
+- `effect Files { read<'a>(Path<'a>) -> Bytes }`, as the standard library's
+  specification writes them: an operation may have lifetimes of its own,
+  and a reference in what it takes or gives without a written lifetime has
+  one of its own too. Each performance has its own, so what an operation
+  is given may borrow from the performer's variables, and what it gives
+  back may borrow from what it was given (`pick<'a>(&'a Int, &'a Int) ->
+  &'a Int`).
+- In an arm such a payload is borrowed for as long as the arm runs: it
+  may not be kept anywhere that outlasts the arm ("could be used after the
+  arm"). The arm has to be one without the resumption (`read(p) =>
+  value`, which resumes with the value once it is done), as the
+  performer's variables are gone once it is resumed and comes back; and
+  an operation that never returns cannot be given what borrows. A
+  callable it is given or gives is held to what the declaration says, as
+  before.
+- So `effect Reader { ask() -> &Int }`, the handler lending its own
+  variable, now compiles: two tests that said it was refused say what it
+  gives. Type parameters of an operation's own are still refused: an
+  operation has one type wherever its effect is handled.
+- Core's certificate has no type for an operation of a region of each
+  performance; a program with one is certified without the region rules,
+  as other programs whose regions cannot be found are.
+
 ## A borrow written anywhere in a statement is a scope
 
 - Core has a rule for a borrow that is a scope of its own: while it lasts,

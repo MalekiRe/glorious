@@ -178,6 +178,9 @@ structure OpSig where
   /-- For each parameter of the effect, in order: the capture variable it is
   in the types above if it is a lifetime, none if it is a type. -/
   lifetimes : List (Option Nat) := []
+  /-- The lifetimes of its own, written or not (`read<'a>(&'a Path)`,
+  `size(&Int)`): each performance and each arm has its own. -/
+  caps : List Nat := []
 
 /-- An effect: a variable for each of its parameters, a lifetime's standing
 for nothing, and which of them are lifetimes. -/

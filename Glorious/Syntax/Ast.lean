@@ -562,6 +562,9 @@ structure OpDecl where
   /-- How often its resumption is to be used, where written before the name:
   the fewest times and the most, none for no limit. -/
   quantity : Option (Nat × Option Nat) := none
+  /-- Lifetimes of its own, `read<'a>(Path<'a>)`: each performance has its
+  own. -/
+  lifetimes : List String := []
 
 inductive Assoc where
   | left
