@@ -282,13 +282,33 @@ def ACtx.fold (ctx : ACtx) : List Nat → Nat
   | [] => 0
   | n :: ns => if ctx.lower then ns.foldl min n else ns.foldl max n
 
-/-- A budget of steps; running out abandons the count. -/
-abbrev A := StateT Nat Option
+/-- A budget of steps, running out of which abandons the count; and what calls of functions it already
+followed gave: by the call, what came of it and what it cost. -/
+structure AState where
+  fuel : Nat
+  memo : Std.HashMap String (List (AVal × Nat) × Nat) := {}
 
+abbrev A := StateT AState Option
+
+/-- Spend one step of the budget. -/
 def tick : A Unit := do
-  match ← get with
+  let s ← get
+  match s.fuel with
   | 0 => failure
-  | n + 1 => set n
+  | n + 1 => set { s with fuel := n }
+
+/-- A value written out, where it holds no callable: a call given the same
+such values, in the same context, comes to the same. -/
+partial def AVal.key? : AVal → Option String
+  | .unknown => some "u"
+  | .tracked => some "t"
+  | .probe => some "p"
+  | .fn n => some s!"f{n.length}:{n}"
+  | .gone t => some s!"g{t.length}:{t}"
+  | .data tag args => do
+    let ks ← args.mapM AVal.key?
+    pure s!"d{tag.length}:{tag}({args.length}:{String.join ks})"
+  | .clo _ _ => none
 
 /-- The outcomes of a computation: its value and the uses so far, per path. -/
 abbrev Alts := List (AVal × Nat)
@@ -543,7 +563,25 @@ partial def callValue (ctx : ACtx) (depth : Nat) (f : AVal) (args : List AVal) :
     match depth, ctx.fns[name]? with
     | d + 1, some clauses =>
       if ctx.active.contains name then unfollowed ctx depth args
-      else applyClauses { ctx with active := name :: ctx.active } d clauses [] args
+      else
+        let follow := applyClauses { ctx with active := name :: ctx.active } d clauses [] args
+        -- (A call followed before, with the same values and in the same
+        -- context, comes to what it came to then, and costs what it cost.)
+        match args.mapM AVal.key? with
+        | none => follow
+        | some ks =>
+          let key := s!"{name}|{d}|{ctx.lower}{ctx.handed}{ctx.probing}{ctx.lenient}|{ctx.active}|{ks}"
+          match (← get).memo[key]? with
+          | some (alts, cost) =>
+            let s ← get
+            if s.fuel < cost then failure
+            set { s with fuel := s.fuel - cost }
+            pure alts
+          | none =>
+            let before := (← get).fuel
+            let alts ← follow
+            modify fun s => { s with memo := s.memo.insert key (alts, before - s.fuel) }
+            pure alts
     | _, _ => unfollowed ctx depth args
   | _ => unfollowed ctx depth args
 
@@ -878,7 +916,7 @@ def pathUses (ctx : ACtx) (outer : List String) (x : String) (body : List Stmt)
       -- What the body yields leaves the region being counted.
       ns := (n + (← escapes ctx 8 v)) :: ns
     pure (ctx.fold ns)
-  (count.run 20000).map (·.1)
+  (count.run { fuel := 20000 }).map (·.1)
 
 /-- The most uses of `x` on any path through `body` up to a call of one of the
 `probes`, if the count finishes: none if no use comes before such a call. A
@@ -897,7 +935,7 @@ def usesBeforeProbe (ctx : ACtx) (outer : List String) (x : String) (body : List
         if holdsProbe v then
           worst := max worst (n + (← escapes { ctx with lenient := true } 8 v))
     pure worst
-  (count.run 20000).map (·.1)
+  (count.run { fuel := 20000 }).map (·.1)
 
 /-- Does evaluating this run nothing at all? `quiet` names what only builds a
 value. -/

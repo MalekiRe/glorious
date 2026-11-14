@@ -749,6 +749,14 @@ structure St where
 
 abbrev M := StateT St (Except String)
 
+/-- Run `act`, and change an error it ends in with `f`. Unlike `try`, which
+keeps the state from before to go back to, nothing holds that state while
+`act` runs: so what `act` changes is changed in place, and not copied. -/
+@[inline] def onError {α : Type} (act : M α) (f : String → String) : M α := fun s =>
+  match act s with
+  | .ok r => .ok r
+  | .error e => .error (f e)
+
 instance {α : Type} : Inhabited (M α) := ⟨throw "checker: unreachable"⟩
 
 def freshTy : M Ty := do

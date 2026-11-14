@@ -49,6 +49,14 @@ never less. The library is checked whole by the tests, which is why what a
 program does not reach need not be checked again with it. A program naming
 four of the library's modules and nothing else: 0.70 s, now 0.40 s.
 
+**The count of a value's uses remembers the calls it followed.** It follows
+a call into the function called, as many times as the call is reached, on
+every path. A call of a function given the same values (none of them a
+callable, whose body would have to be compared) in the same context comes
+to what it came to before and costs the same part of the budget; so what is
+remembered changes no answer, and running out of budget happens where it
+did. calculator 1.43 s to 1.26 s.
+
 A group of functions whose records of what they touch were settled went
 through every record made since the group began, each by its own walk, so a
 group went again over the records of every group inferred inside it. One walk
