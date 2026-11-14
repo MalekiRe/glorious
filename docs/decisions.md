@@ -33,7 +33,15 @@ What the checker lacked, found on the way:
 
 Limits. Core's region rules are not shown for a program that gives a system
 with a query as a callable (as covey's `emit` does): the simulation keeps
-`each2` for that, and `query.glorious` is certified without them.
+`each2` for that, and `query.glorious` is certified without them. The
+smallest such program: a function given as a callable for every lifetime,
+which gives a tuple of two borrows of its parameter to another callable for
+every lifetime (`for<'a> fn((&'a mut Int, &'a Int))`); given as two
+arguments, or called directly, it is shown. Certificate inference takes a
+callable to bind the region of a reference it is given, and not of one in a
+tuple it is given; making it look into tuples was not enough. And an
+implementation's function cannot yet write lifetimes of its own
+(`fn at<'a>(..)`): it takes its trait's, unwritten.
 
 ## The compiler stays in Lean, and is to be fast and incremental
 
