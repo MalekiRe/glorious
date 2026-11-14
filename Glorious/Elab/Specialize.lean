@@ -467,4 +467,159 @@ def letMutItems (owner : String) (line col : Nat) (x : String) (items : List Ite
     | item => (item, false)
   (out.map (·.1), out.any (·.2))
 
+/-! ## A tuple variable whose fields are borrowed apart
+
+`let mut x = (a, b)` whose fields are borrowed one by one (`&mut x.0`) and
+whose value is otherwise only read, written or read and written by field, is
+kept as one variable per field, `x.0` and `x.1`. Then two of its fields can be
+lent at once, each a cell of its own, which is what Core's rules for borrows
+can show (a lend of a cell takes the whole cell). Reading `x` reads every
+field; assigning it assigns each. -/
+
+/-- The variable for field `i` of `x`. -/
+def fieldVar (x : String) (i : Nat) : String := s!"{x}.{i}"
+
+mutual
+
+partial def splitExpr (x : String) (n : Nat) : Expr → Expr
+  | .proj (.name none y) i => if y == x && i < n then .name none (fieldVar x i) else .proj (.name none y) i
+  | .fieldOf id (.name none y) s =>
+    match s.toNat? with
+    | some i => if y == x && i < n then .name none (fieldVar x i) else .fieldOf id (.name none y) s
+    | none => .fieldOf id (.name none y) s
+  | .refField id uniq y (s :: path) star =>
+    match s.toNat?, y == x && !star with
+    | some i, true =>
+      if i < n then
+        if path.isEmpty then .ref uniq (fieldVar x i) else .refField id uniq (fieldVar x i) path false
+      else .refField id uniq y (s :: path) star
+    | _, _ => .refField id uniq y (s :: path) star
+  | .name none y => if y == x then .tuple ((List.range n).map fun i => .name none (fieldVar x i)) else .name none y
+  | .call i f args => .call i (splitExpr x n f) (args.map (splitExpr x n))
+  | .tailCall i f args => .tailCall i (splitExpr x n f) (args.map (splitExpr x n))
+  | .tuple args => .tuple (args.map (splitExpr x n))
+  | .proj e i => .proj (splitExpr x n e) i
+  | .closure i clauses => .closure i (clauses.map (splitClause x n))
+  | .handle subject arms => .handle (splitExpr x n subject) (arms.map (splitClause x n))
+  | .labelScope l body => .labelScope l (splitStmts x n body)
+  | .deref e => .deref (splitExpr x n e)
+  | .reborrow uniq e => .reborrow uniq (splitExpr x n e)
+  | .fieldOf i e name => .fieldOf i (splitExpr x n e) name
+  | e => e
+
+partial def splitClause (x : String) (n : Nat) : Clause → Clause
+  | .mk pats body => if (pats.flatMap patVars).contains x then .mk pats body else .mk pats (splitStmts x n body)
+
+/-- The statements after `x` is made, with its fields as variables of their
+own, up to where a name `x` is made again. -/
+partial def splitStmts (x : String) (n : Nat) : List Stmt → List Stmt
+  | [] => []
+  | .located l c s :: rest =>
+    match splitStmts x n (s :: rest) with
+    | first :: more => .located l c first :: more
+    | [] => []
+  | .let_ pat value :: rest =>
+    let value := splitExpr x n value
+    if (patVars pat).contains x then .let_ pat value :: rest
+    else .let_ pat value :: splitStmts x n rest
+  | .letMut y value :: rest =>
+    let value := splitExpr x n value
+    if y == x then .letMut y value :: rest
+    else .letMut y value :: splitStmts x n rest
+  | .assign (.name none y) value :: rest =>
+    if y == x then
+      -- (Assigning the whole: its parts, each to its variable.)
+      let parts := (List.range n).map fun i => s!"%{fieldVar x i}"
+      .let_ (.tuple (parts.map Pattern.var)) (splitExpr x n value)
+        :: (parts.zipIdx.map fun (p, i) => Stmt.assign (.name none (fieldVar x i)) (.name none p))
+        ++ splitStmts x n rest
+    else .assign (.name none y) (splitExpr x n value) :: splitStmts x n rest
+  | .assign target value :: rest =>
+    .assign (splitExpr x n target) (splitExpr x n value) :: splitStmts x n rest
+  | .expr e :: rest => .expr (splitExpr x n e) :: splitStmts x n rest
+  | .defer e :: rest => .defer (splitExpr x n e) :: splitStmts x n rest
+
+end
+
+/-- Does `x` have a field borrowed in these statements, before it is made again? -/
+partial def fieldBorrowed (x : String) (stmts : List Stmt) : Bool :=
+  let rec inExpr : Expr → Bool
+    | .refField _ _ y (s :: _) false => y == x && s.toNat?.isSome
+    | .call _ f args => inExpr f || args.any inExpr
+    | .tailCall _ f args => inExpr f || args.any inExpr
+    | .tuple args => args.any inExpr
+    | .proj e _ => inExpr e
+    | .closure _ clauses => clauses.any fun
+      | .mk pats body => !(pats.flatMap patVars).contains x && fieldBorrowed x body
+    | .handle subject arms => inExpr subject || arms.any fun
+      | .mk pats body => !(pats.flatMap patVars).contains x && fieldBorrowed x body
+    | .labelScope _ body => fieldBorrowed x body
+    | .deref e => inExpr e
+    | .reborrow _ e => inExpr e
+    | .fieldOf _ e _ => inExpr e
+    | _ => false
+  match stmts with
+  | [] => false
+  | .located _ _ s :: rest => fieldBorrowed x (s :: rest)
+  | .let_ pat value :: rest => inExpr value || (!(patVars pat).contains x && fieldBorrowed x rest)
+  | .letMut y value :: rest => inExpr value || (y != x && fieldBorrowed x rest)
+  | .assign target value :: rest => inExpr target || inExpr value || fieldBorrowed x rest
+  | .expr e :: rest => inExpr e || fieldBorrowed x rest
+  | .defer e :: rest => inExpr e || fieldBorrowed x rest
+
+mutual
+
+/-- Every tuple variable of these statements whose fields are borrowed, and
+that is used no other way than its fields and its whole value are, made one
+variable per field. -/
+partial def splitFieldVars : List Stmt → List Stmt
+  | [] => []
+  | .located l c (.letMut x (.tuple es)) :: rest =>
+    let n := es.length
+    let split := splitStmts x n rest
+    -- (Kept as it is where it is used some other way: borrowed whole, say.)
+    if n ≥ 2 && fieldBorrowed x rest && !(fvStmts [] split).contains x then
+      (es.zipIdx.map fun (e, i) => Stmt.located l c (.letMut (fieldVar x i) (splitFieldsExpr e)))
+        ++ splitFieldVars split
+    else .located l c (.letMut x (.tuple (es.map splitFieldsExpr))) :: splitFieldVars rest
+  | .located l c s :: rest =>
+    match splitFieldVars [s] with
+    | [s'] => .located l c s' :: splitFieldVars rest
+    | ss => ss.map (Stmt.located l c) ++ splitFieldVars rest
+  | .let_ pat value :: rest => .let_ pat (splitFieldsExpr value) :: splitFieldVars rest
+  | .letMut x value :: rest => .letMut x (splitFieldsExpr value) :: splitFieldVars rest
+  | .assign target value :: rest =>
+    .assign (splitFieldsExpr target) (splitFieldsExpr value) :: splitFieldVars rest
+  | .expr e :: rest => .expr (splitFieldsExpr e) :: splitFieldVars rest
+  | .defer e :: rest => .defer (splitFieldsExpr e) :: splitFieldVars rest
+
+partial def splitFieldsExpr : Expr → Expr
+  | .call i f args => .call i (splitFieldsExpr f) (args.map splitFieldsExpr)
+  | .tailCall i f args => .tailCall i (splitFieldsExpr f) (args.map splitFieldsExpr)
+  | .tuple args => .tuple (args.map splitFieldsExpr)
+  | .proj e i => .proj (splitFieldsExpr e) i
+  | .closure i clauses => .closure i (clauses.map fun
+      | .mk pats body => .mk pats (splitFieldVars body))
+  | .handle subject arms => .handle (splitFieldsExpr subject) (arms.map fun
+      | .mk pats body => .mk pats (splitFieldVars body))
+  | .labelScope l body => .labelScope l (splitFieldVars body)
+  | .deref e => .deref (splitFieldsExpr e)
+  | .reborrow uniq e => .reborrow uniq (splitFieldsExpr e)
+  | .fieldOf i e name => .fieldOf i (splitFieldsExpr e) name
+  | e => e
+
+end
+
+/-- A program with its tuple variables whose fields are borrowed apart made one
+variable per field (`splitFieldVars`). -/
+def splitFieldItems (items : List Item) : List Item :=
+  let clause := fun (c : Clause) => match c with
+    | .mk pats body => Clause.mk pats (splitFieldVars body)
+  items.map fun
+    | .fn name ps annots ret clauses => .fn name ps annots ret (clauses.map clause)
+    | .impl ps tr head args context methods => .impl ps tr head args context (methods.map fun
+        | .fn m mps annots ret clauses => .fn m mps annots ret (clauses.map clause)
+        | item => item)
+    | item => item
+
 end Glorious.Elab

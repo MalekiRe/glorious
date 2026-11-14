@@ -4205,6 +4205,28 @@ A parameter is kept in a variable at the start of its clause (`let mut n = n`),
 and a name a pattern binds straight after the pattern's `let`. A field taken out of such a value on one path is refused, as it is of a
 `let mut` (`replace` takes it out).
 
+## A tuple variable whose fields are borrowed apart is a variable per field
+
+Core lends a whole cell, so two fields of one variable lent at once
+(`swap(&mut x.0, &mut x.1)`, a handler reading `x.1` while `x.0` is lent) were
+kept apart only by the unproved check of the source. Rather than give Core
+lends of parts of a cell (a region per field, `allowed` and the grants told
+apart by path; the proofs of borrows all touched), the program's own
+`let mut x = (a, b, ..)` whose fields are borrowed is now, before checking,
+one variable per field: `x.0`, `x.1`, .. (`Elab.splitFieldVars`). `x.i` is the
+variable, `&mut x.i.rest` borrows it, reading `x` reads every field into a
+tuple, and assigning `x` takes the value apart and assigns each. A variable
+used any other way (borrowed whole, say) is left as it is. So each field is a
+cell of its own, and the borrows are lends of different cells, which Core's
+rules show apart. In the test programs 12 more borrows are scopes of their own
+(1330; 89 are not, in 53 programs, from 99 in 59).
+
+Limits: only tuples written as a tuple where the variable is made; a struct
+variable, `let mut c = C { n: 1, m: 2 }`, is not split (its fields are found
+by name only once types are known). The library is not split: it is checked
+once for every program. What the checker says names the field's variable
+(`x.0` is read while ..), which is what is meant.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by

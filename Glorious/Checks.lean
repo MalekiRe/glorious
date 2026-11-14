@@ -279,11 +279,12 @@ def all : List (Nat × (Unit → Bool)) := [
   (80, fun _ => lentBorrows "effect Tick { tick() }
     fn work(p) { tick(); *p = *p + 1; tick(); *p }
     fn main() { let mut n = 0; handle work(&mut n) { tick(k) => k(()) } }" == some 1),
-  -- A handler that itself reaches the variable leaves the borrow no scope:
-  -- here another part of it, which Core's rule does not tell from the whole.
+  -- A handler that itself reaches another part of the variable: the variable
+  -- is one per field, since its fields are borrowed apart, and the borrow of
+  -- one is a scope that the other's use does not touch.
   (93, fun _ => lentBorrows "effect Tick { tick() }
     fn work(p) { tick(); *p = *p + 1; tick(); *p }
-    fn main() { let mut n = (0, 5); handle work(&mut n.0) { tick(k) => print(n.1); k(()) } }" == some 0),
+    fn main() { let mut n = (0, 5); handle work(&mut n.0) { tick(k) => print(n.1); k(()) } }" == some 1),
   -- A callable made before the call can be given the borrow: its type binds
   -- the region of the reference it takes.
   (81, fun _ => lentBorrows "fn apply(f, p) { f(p) }
@@ -313,7 +314,7 @@ def all : List (Nat × (Unit → Bool)) := [
     fn work(p) { tick(); *p = *p + 1; tick(); *p }
     fn main() { let mut x = 1; let mut n = 0; incr(&mut x);
       let mut n = (n, 5);
-      let r = handle work(&mut n.0) { tick(k) => print(n.1); k(()) }; r + x }" == some 1),
+      let r = handle work(&mut n.0) { tick(k) => print(n.1); k(()) }; r + x }" == some 2),
   -- A program that does not pass the region rules does not pass these.
   (88, fun _ => lentBorrows "effect Yield { yield(Int) }
     fn main() { let mut saved = None; handle (yield(1) + 1) { yield(v, k) => saved = Some(k); 0 };
