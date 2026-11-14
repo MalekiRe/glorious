@@ -236,10 +236,15 @@ def fillDefaults (items : List Item) : List Item :=
       -- implementation writes itself without saying them.
       -- Each implementation has its own copy: the calls in it are met by
       -- this implementation's types, and are known by their identities.
+      -- (`Self::f(..)` in it is this implementation's `f`, as it is in a
+      -- function the implementation writes.)
+      let self := if head.startsWith "(tuple" then TypeExpr.tuple (args.map (TypeExpr.name · []))
+        else TypeExpr.name head (args.map (TypeExpr.name · []))
       let missing := missing.map fun
         | .fn m fps annots _ clauses =>
           Item.fn m fps (annots.map fun _ => none) none
-            (clauses.map (shiftClause (10000000000 * (index + 1))))
+            (clauses.map fun c =>
+              shiftClause (10000000000 * (index + 1)) (selfClause head (some (tr, (TypeExpr.tuple [self]).asExpr)) c))
         | item => item
       .impl ps (traitAt tr given) head args context (methods ++ missing)
     | (item, _) => item

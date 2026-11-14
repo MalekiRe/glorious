@@ -1162,13 +1162,20 @@ private partial def parsePrimary (noBlock : Bool) : P Expr := do
       | _ => failAt "expected a trait: `<Type as Trait>::function(..)`"
     if ← isOp ">" then advance else failAt "expected `>`"
     expectPunct "::"
+    -- (The name's own place numbers the call where nothing is written
+    -- after it: the next token's number is its own to use.)
+    let nameAt := (← read).base + (← get) + 1
     let name ← expectIdent
-    unless (← peek) == .punct "(" do failAt "expected `(`: a trait's function written this way is called"
-    let id := (← read).base + (← get) + 1
-    advance
-    let mut args ← parseArgs
-    while !noBlock && (← peek) == .punct "{" do
-      args := args ++ [← parseBraces]
+    -- `<Type as Trait>::NAME`: a value the trait leaves to implementations,
+    -- which is its function of that name called with nothing.
+    let mut args : List Expr := []
+    let mut id := nameAt
+    if (← peek) == .punct "(" then
+      id := (← read).base + (← get) + 1
+      advance
+      args ← parseArgs
+      while !noBlock && (← peek) == .punct "{" do
+        args := args ++ [← parseBraces]
     pure (.call 0 (.name none instMark)
       [.call id (.name (some trait) name) args, (TypeExpr.tuple (self :: targs)).asExpr])
   | .ident "move" =>
@@ -1245,6 +1252,11 @@ private partial def parsePrimary (noBlock : Bool) : P Expr := do
       return .call call (.closure id [.mk [] (.expr (.name none unsafeMark) :: body)]) []
     advance
     let (qual, name) := splitPath (← parsePathRest x)
+    -- `Type::NAME`, in capitals and not called: perhaps a value a trait
+    -- leaves to implementations. What it is, is found with the names.
+    let capitals := name.any Char.isUpper && name.all fun c => c.isUpper || c.isDigit || c == '_'
+    if qual.isSome && capitals && (← peek) != .punct "(" && (← peek) != .punct "{" then
+      return .call ((← read).base + (← get)) (.name none pathMark) [.name qual name]
     pure (.name qual name)
   | .punct "@" =>
     advance
@@ -1678,6 +1690,17 @@ private partial def parseItem : P Item := do
           else parseType
         let _ ← acceptPunct ";"
         methods := methods.push (.typeAlias name [] body)
+      | .ident "const" =>
+        -- `const NAME: Type = value;`: the trait's function of that name,
+        -- which takes nothing and gives the value.
+        advance
+        let name ← expectIdent
+        expectPunct ":"
+        let ty ← parseType
+        expectPunct "="
+        let value ← parseBinary 0 false
+        let _ ← acceptPunct ";"
+        methods := methods.push (.fn name [] [] (some ty) [.mk [] [.expr value]])
       | _ => failAt "expected `fn`: an implementation gives the trait's functions"
     expectPunct "}"
     -- `Self` is the type the implementation is for.
@@ -1804,6 +1827,20 @@ private partial def parseTrait : P (List Item) := do
       -- a row is known by where the trait's functions use it.
       if ← acceptPunct ":" then
         let _ ← expectPath
+      let _ ← acceptPunct ";"
+      continue
+    if (← peek) == .ident "const" then
+      -- `const NAME: Type;`: a value each implementation says. It is a
+      -- function of the trait that takes nothing, and naming it calls it.
+      advance
+      let c ← expectIdent
+      expectPunct ":"
+      let ty ← parseType
+      methods := methods.push (c, [], some ty)
+      if ← acceptPunct "=" then
+        -- What an implementation has if it does not say.
+        let value ← parseBinary 0 false
+        defaults := defaults.push (.fn c [] [] none [.mk [] [.expr value]])
       let _ ← acceptPunct ";"
       continue
     match ← peek with

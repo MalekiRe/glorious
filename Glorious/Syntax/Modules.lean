@@ -1081,6 +1081,20 @@ partial def resolveExpr (ctx : Ctx) (bound : List String) : Expr → R Expr
               [.expr (.call (7000000000000 + made) (.name qual' name') (params.map (Expr.name none)))]]
     pure (.name qual' name')
   | .call id f args => do
+    if let (.name none mark, [.name (some q) name]) := (f, args) then
+      if mark == pathMark then
+        -- `Owner::NAME`: a trait's function of that name called with
+        -- nothing, at the type `Owner`, if that is what `NAME` is here;
+        -- or else whatever `Owner::NAME` names.
+        let (_, _, entry) ← resolveValue ctx bound (some q) name
+        let method := (lookupIn (ctx.of name) .value name).any (·.kind == .method)
+        if method && (entry.isNone || entry.any (·.kind == .method)) then
+          -- (`Self::NAME` is `Self::NAME()`, which an implementation's
+          -- functions and a trait's own bodies already know.)
+          if q == "Self" then return ← resolveExpr ctx bound (.call id (.name (some q) name) [])
+          return ← resolveExpr ctx bound (.call 0 (.name none instMark)
+            [.call id (.name none name) [], (TypeExpr.tuple [.name q []]).asExpr])
+        return ← resolveExpr ctx bound (.name (some q) name)
     match f, args with
     | .name none mark, [value, ty] =>
       if mark == ascribeMark || mark == instMark then

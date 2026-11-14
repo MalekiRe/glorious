@@ -223,6 +223,11 @@ def textEndName : String := "%end"
 it in the block may name what is unsafe. -/
 def unsafeMark : String := "%unsafe"
 
+/-- A name written through another, `Owner::NAME`, and not called, kept with
+a number of its own: if it turns out to be a value a trait leaves to
+implementations, it is that trait's function called with nothing. -/
+def pathMark : String := "%path"
+
 /-- Whether what a reference points to was built by a constructor, at a path
 of field numbers: `%ctor_is(r, 0, 1, Some)`. The compiler writes this where a
 pattern binds by reference; it reads nothing out of the cell. -/

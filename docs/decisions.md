@@ -2890,6 +2890,38 @@ borrow tried).
 - The fields of a value are destroyed the last declared first, and the
   elements of an array the last first. (Rust goes the other way.)
 
+## Computing with traits
+
+Covey is to be written the way MalekiRe/unstable_covey is, with systems as
+plain functions whose parameter types say what they touch, and what the
+Rust does with specialization, type-level lists and const evaluation done
+by the trait machinery here. (The effects version in `covey/` stays as a
+prototype until the trait one replaces it: on effects a system that takes a
+table twice gets an empty one at run time, where the Rust refuses to
+compile; a system is not a value that can be ordered or inspected; and a
+query's shape is a type, which is a trait's business.) What that needs, in
+the order it is being built:
+
+- **A type parameter that is only asked questions.** `fn weight<A:
+  Access>() -> Int` dropped what was written of `A`, because `A` is in
+  neither a parameter's type nor the result's. It is a parameter of the
+  function now; a call says it, `weight<Write>()`.
+- **A value a trait leaves to implementations**, `const WRITES: Bool;`. It
+  is a function of the trait that takes nothing, so everything that works
+  for a trait's functions works for it: a default, `where` bounds, an
+  implementation for a pair in terms of its parts (which is a fold over a
+  tuple of types). Named without being called it is called:
+  `<A as Access>::WRITES`, and `A::WRITES` where the name is in capitals.
+  Evaluated when the program runs, for now: it becomes a literal once a
+  trait's function at a known type is a direct call.
+- `Self::f(..)` in a trait's own body is the implementation's `f`.
+
+Still to come: `x.f(a)` for `f(x, a)`; a type of its own for each function
+and closure, with `Fn<(..)>` as a bound; lists of types as parameters, with
+head and rest; an implementation that is preferred over a more general one;
+a copy of a function for each type it is used at; generic associated types,
+const generics and fixed arrays.
+
 ## Covey
 
 - `covey/` is an entity component system written in Glorious, after
