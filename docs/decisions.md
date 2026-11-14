@@ -101,6 +101,11 @@ test suite passing:
 What is proved stays as it is: every program is certified whole, and the
 proved checker checks the whole certificate.
 
+Tried for step 3 and not kept: what the count of uses found of the calls it
+followed, kept for every count made in the same context (one check of a
+function's uses), not only within one count. The test suite took the same
+time with it (16.4 s, 190 s of processor time), so the memo stays per count.
+
 **The build directory** is `GLORIOUS_TARGET` if set, and otherwise one in the
 user's cache (`$XDG_CACHE_HOME/glorious/build/`, or `~/.cache`), named from
 the program's path: a program's own folder holds only what was written in it.
