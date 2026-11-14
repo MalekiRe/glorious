@@ -2923,6 +2923,18 @@ the order it is being built:
   this is asked for, for `(a, b).chain()` and `app.add_systems(..)`. It is
   the names in scope that decide, not the value's type: a function of a
   type's own, `Vec::len`, is not found this way yet.
+- **Generic associated types are not built; what they are for is partly
+  reachable.** A family of types, one for each type asked (`type Of<T>`),
+  is a trait that takes the parameter and leaves a type:
+  `trait Family<T> { type Of; }`, `impl<T> Family<T> for Arrays { type Of =
+  [T]; }`, asked as `F: Family<Int, Of = A>, F: Family<Str, Of = B>`. Two
+  things were wrong for that and are fixed: an equality bound was of the
+  trait whatever its arguments, so `A` and `B` were made one; and two
+  bounds of one trait on one parameter had the arguments of the first.
+  `type Of<T>;` is refused with what to write. Not reachable: a type left
+  to implementations that is for every lifetime (`type Item<'a>`, an
+  iterator that lends), and a trait's function with type parameters of its
+  own.
 - **covey: a function of any parameters is a system, by one
   implementation for each number of them.** `Parameter` gives, for a
   parameter's type, what it asks for without the reference (`Changed<A>`,

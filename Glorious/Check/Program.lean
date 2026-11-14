@@ -620,13 +620,17 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
         if ordinary.isEmpty then pure inferred
         else
           let mut written : List (String × Nat × Ty) := []
-          for b in ordinary do
+          for (b, at_) in ordinary.zipIdx do
             let t := Ty.con s!"'{b.subject}@{rigidOwner decls d}" []
             if (seen.lookup s!"'{b.subject}@{rigidOwner decls d}").isSome then
               let k := (← keyOf t).getD 0
-              -- The trait at the arguments written, if it takes some.
-              let args := ((← get).writtenArgs.findSome? fun (f, subject, tr, args) =>
-                if f == d.name && subject == b.subject && tr == b.trait then some args else none).getD []
+              -- The trait at the arguments written, if it takes some: this
+              -- bound's, where the trait is asked of the type more than
+              -- once (`F: Family<Int>, F: Family<Str>`).
+              let nth := ((ordinary.take at_).filter fun o => o.subject == b.subject && o.trait == b.trait).length
+              let theirs := (← get).writtenArgs.filterMap fun (f, subject, tr, args) =>
+                if f == d.name && subject == b.subject && tr == b.trait then some args else none
+              let args := (theirs[nth]?).getD (theirs.headD [])
               let key ← traitKey b.trait args
               unless args.isEmpty || keyed.any (·.1 == key) do keyed := (key, b.trait, args) :: keyed
               for tr in key :: (← supersAll b.trait) do
@@ -1008,7 +1012,11 @@ def checkGroup (decls : List FnDecl) : M Unit := do
               unless assocs.contains name do
                 throw s!"`{b.subject}: {Syntax.lastSegment b.trait}<{name} = ..>`: `{Syntax.lastSegment b.trait}` leaves no type `{name}` to its implementations"
               let a ← resolveType rigid false said
-              modify fun s => { s with assocUses := s.assocUses.push (b.trait, self, name, a, d.name, "") }
+              -- (Of the trait at the arguments written: `F: Family<Int, Of
+              -- = A>` and `F: Family<Str, Of = B>` are two questions.)
+              let targs ← b.args.mapM (resolveType rigid false)
+              let subject := if targs.isEmpty then self else Ty.tuple (self :: targs)
+              modify fun s => { s with assocUses := s.assocUses.push (b.trait, subject, name, a, d.name, "") }
             | _, _ => throw s!"`{b.subject}: {Syntax.lastSegment b.trait}<{name} = ..>`: `{b.subject}` is not a type parameter of `{d.name}`, or `{Syntax.lastSegment b.trait}` is not a trait"
       let rankedBefore := (← get).ranked.length
       let annots ← d.annots.mapM fun

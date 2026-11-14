@@ -2029,6 +2029,10 @@ private partial def parseTrait : P (List Item) := do
       continue
     match ← peek with
     | .ident "fn" => advance
+    | .op "<" =>
+      -- `type Of<T>;`: a type left to implementations that takes a
+      -- parameter. Not read; the trait's own parameter says the same.
+      failAt "a type a trait leaves to its implementations takes no parameters: give the trait the parameter, `trait Family<T> { type Of; }`, and ask for it at each, `F: Family<Int, Of = A>`"
     | _ => failAt "expected `fn`: a trait lists the functions a type must have"
     let m ← match ← peek with
       | .op s => do
