@@ -12,7 +12,7 @@
 // 12
 mod ecs;
 
-use ecs::{Entity, Column, Commands, end, app, register, insert_resource, with_resource, add_systems, on, add_plugins, chain, emit, spawn, insert, count, fold_all, each, each2};
+use ecs::{Entity, Column, Commands, end, app, register, insert_resource, with_resource, run_if, add_systems, on, add_plugins, chain, emit, spawn, insert, count, fold_all, each, each2};
 
 struct Position(Int)
 struct Velocity(Int)
@@ -37,6 +37,17 @@ fn friction(velocities: &mut Column<Velocity>) {
     each(velocities, fn(entity: Entity, velocity: &mut Velocity) {
         velocity.0 = velocity.0 - 1;
     })
+}
+
+// Whether anything still moves.
+fn moving(velocities: &Column<Velocity>) -> Bool {
+    let mut i = 0;
+    let mut any = false;
+    while({ i < len_at(&velocities.dense) }) {
+        if(velocities.dense[i].0 > 0) { any = true } else { () };
+        i = i + 1
+    };
+    any
 }
 
 // Nothing leaves the field.
@@ -66,7 +77,7 @@ fn reap(healths: &Column<Health>, commands: &mut Commands, ended: &mut Ended) {
 
 // A plugin: a function from an app to an app.
 fn physics(app) {
-    app.add_systems(Update, (integrate, friction, bound).chain())
+    app.add_systems(Update, (integrate, friction.run_if(moving), bound).chain())
 }
 
 fn combat(app) {
