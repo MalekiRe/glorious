@@ -141,6 +141,17 @@ def named (e : String) : List Nat :=
   ((e.splitOn "function ").drop 1).filterMap fun after =>
     (String.ofList (after.toList.takeWhile Char.isDigit)).toNat?
 
+/-- What certificate inference or the checker of certificates said, with each
+function it names (`function 12`) followed by what that function is. -/
+def withFnNames (names : Array String) (e : String) : String :=
+  match e.splitOn "function " with
+  | [] => e
+  | first :: rest => first ++ String.join (rest.map fun after =>
+      let digits := (after.takeWhile Char.isDigit).toString
+      match digits.toNat? with
+      | some n => s!"function {digits} ({(names[n]?).getD "?"})" ++ (after.drop digits.length).toString
+      | none => "function " ++ after)
+
 /-- A certificate for `p` with these rules: one of `kept` (what an earlier
 compile found) if the proved checker accepts it for `p`, and otherwise one
 found by inference. -/
@@ -581,7 +592,7 @@ def compileSourceAt (src : String) (check : Bool := true)
         match certifyProgram declared out.program out.envSizes failed first kept with
         | .ok (cert, way) => pure (some cert, way)
         | .error e =>
-          throw s!"the checker accepted this program, but its Core could not be shown to be well typed: {e}. This is a defect in the compiler"
+          throw s!"the checker accepted this program, but its Core could not be shown to be well typed: {withFnNames out.fnNames e}. This is a defect in the compiler"
       else pure (none, none)
     -- (And the way that passed, under a name no function has.)
     let way := match way with

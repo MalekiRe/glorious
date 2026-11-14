@@ -663,7 +663,7 @@ partial def runExpr (ctx : ACtx) (depth : Nat) (env : List (String × AVal)) : E
       -- Counting where a value is handed on: a callable that captures it
       -- and is kept in a variable has it, and destroys it if it is let go
       -- without being called. (The variable is then counted as any value.)
-      let captured := if ctx.handed && ctx.owning && ctx.capturesOwned then
+      let captured := if ctx.owning && ctx.capturesOwned then
           let free := clauses.flatMap (Elab.fvClause [])
           env.filter fun (y, v) => free.contains y && isTracked v
         else []
@@ -1341,10 +1341,16 @@ def runLowerChecks (fnTy : Ty) : M Unit := do
       if let some name ← tyHasDrop [] t then
         -- (A variable that gives its value away asks, when its block ends,
         -- whether it did: it may on some paths and not on others.)
-        unless s.flagged.contains pos || usesStmts resumptive x body == 0 || usedFirst quiet x body do
-          if (pathUses { ctx with handed := true, capturesOwned := true } names x body) == some 0 then
+        unless s.flagged.contains pos || usesStmts resumptive x body == 0
+            || (!heldDrop && usedFirst quiet x body) do
+          -- (A callable is counted as what has to be used is: handed to a
+          -- function, it is used only if that function uses it, since one
+          -- that lets it go does not destroy it.)
+          let count := if heldDrop then pathUses { ctx with capturesOwned := true } names x body
+            else pathUses { ctx with handed := true, capturesOwned := true } names x body
+          if count == some 0 then
             if heldDrop then
-              throw s!"{pos}`{x}` is used on one path and not on another, and it holds a `{name}`, which has a `drop` to run: where it is not used nothing would run it. Use it on every path, or give it up there with `cancel({x})`, which destroys what it holds"
+              throw s!"{pos}`{x}` holds a `{name}`, which has a `drop` to run, and is not used on every path (a function it is given uses it only if it calls it or hands it on): where it is not used nothing would run the `drop`. Use it on every path, or give it up there with `cancel({x})`, which destroys what it holds"
             -- (Said with which `let` it is: the program is read again with
             -- the value kept in a variable, which destroys it where no path
             -- used it.)

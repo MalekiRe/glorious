@@ -279,6 +279,9 @@ structure St where
   /-- How many arguments the callable a function captured at a place takes,
   where that is known (`captureArities`). -/
   capArities : Std.HashMap (Nat × Nat) Nat := {}
+  /-- The functions that are a handler's arms: what they give up without its
+  type known is their resumption. -/
+  armFns : Std.HashSet Nat := {}
   /-- Functions and what they captured: one that captured something that cannot
   be duplicated can be called only once. -/
   onces : Array (ICls × List ITy) := #[]
@@ -1454,7 +1457,8 @@ partial def schemeOf (scc : Nat) : M Scheme := do
       unless c.pats.length == sig.params.length do
         throw s!"the clauses of function {f} take different numbers of arguments"
       let binds ← inferPats c.pats sig.params
-      inferTm sig.acc sig.row sig.ret (sig.params ++ sig.caps ++ binds).toArray c.body
+      try inferTm sig.acc sig.row sig.ret (sig.params ++ sig.caps ++ binds).toArray c.body
+      catch e => throw (if (e.splitOn "(in function ").length > 1 then e else s!"{e} (in function {f})")
       hints := hints.push (← get).hints
     raw := raw ++ [⟨f, sig, hints, (← get).refs⟩]
   -- A callable given up, now that more is known of its type: one whose type
@@ -1462,6 +1466,7 @@ partial def schemeOf (scc : Nat) : M Scheme := do
   -- by a function that destroys callables of every type, or where it is
   -- something the function captured, whose type its maker knows.
   let anyCallable := (← get).anyCallable
+  let armFns := (← get).armFns
   let general := cur.any fun (f, _) => anyCallable.contains f
   let mut captured : List (Nat × Option Nat) := []
   let arities := (← get).capArities
@@ -1476,7 +1481,9 @@ partial def schemeOf (scc : Nat) : M Scheme := do
       -- of whatever type its maker gives.)
       | some (some n) => givenUp (.var v) amb self n
       | some none => pure ()
-      | none => unless general do givenUp (.var v) amb self
+      -- (Else a resumption's, of one argument, in a handler's arm; anywhere
+      -- else, what a use gives.)
+      | none => if !general && cur.any (fun (f, _) => armFns.contains f) then givenUp (.var v) amb self
     | kt => givenUp kt amb self
   modify fun s => { s with cancels := #[] }
   settle
@@ -2824,6 +2831,21 @@ partial def dupFlags (datas : List DataInst) : List DataInst :=
 
 /-! ## The certificate -/
 
+/-- The functions that are the arms of some handler of the program. -/
+def armsOf (p : Core.Program) : Std.HashSet Nat := Id.run do
+  let rec visit (acc : Std.HashSet Nat) : Core.Tm → Std.HashSet Nat
+    | .handle _ ops _ _ body => visit (ops.foldl (fun a o => a.insert o.2) acc) body
+    | .handleTail _ ops _ _ => ops.foldl (fun a o => a.insert o.2) acc
+    | .let_ _ body | .call _ _ body | .perform _ _ body | .label _ body | .cell _ _ body
+    | .lend _ _ _ _ _ body | .guard _ _ body | .cancel _ body | .mem _ _ body | .host _ _ body =>
+      visit acc body
+    | _ => acc
+  let mut acc : Std.HashSet Nat := {}
+  for F in p.fns do
+    for c in F.clauses do
+      acc := visit acc c.body
+  visit acc p.main
+
 /-- What is known of a local, for how many arguments a callable it holds
 takes: nothing, that number, or that it is what a function captured there. -/
 inductive Slot where
@@ -2930,6 +2952,7 @@ def certifyM (items : List Item) (g : Elab.Globals) (p : Core.Program)
       anyCallable :=
         (g.fns.lookup (implFnName Syntax.destroyTrait Syntax.callableHead Syntax.destroyFn)).toList
           ++ p.drops.map (·.2)
+      armFns := armsOf p
       capArities := captureArities p
         (envSizes.foldl (fun acc (fn, n, _) => acc.setIfInBounds fn n) (captureCounts p))
       scc := sccs s.fns
