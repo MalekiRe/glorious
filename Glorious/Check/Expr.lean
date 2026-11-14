@@ -943,7 +943,18 @@ partial def inferCall (scope : Scope) (amb : Row) (f : Expr) (args : List Expr)
   | .label l => do
     applyTy scope amb s!"the label `@{l}`" (← inferExpr scope amb f) args call
   | _ => do
-    applyTy scope amb "this callee" (← inferExpr scope amb f) args call
+    -- (`value.name(..)` where `name` is no field: if types have a function of
+    -- their own of that name, that is what was meant, and which one could
+    -- not be told by the name alone.)
+    let callee ← try inferExpr scope amb f catch e =>
+      match f with
+      | .fieldOf _ _ name =>
+        let theirs := (← get).fns.filter fun (fn, _) => fn.endsWith s!"::{name}"
+        if (e.splitOn "has no field").length > 1 && theirs.length > 1 then
+          throw s!"{e}. More than one type has a function `{name}` of its own ({", ".intercalate (theirs.map fun (fn, _) => s!"`{bareName fn}`")}): say which, `Type::{name}(value, ..)`"
+        else throw e
+      | _ => throw e
+    applyTy scope amb "this callee" callee args call
 
 /-- The type of a block: that of its last expression, or unit. -/
 partial def inferStmts (scope : Scope) (amb : Row) (stmts : List Stmt)

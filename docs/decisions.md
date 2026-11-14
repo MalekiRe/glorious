@@ -2921,8 +2921,17 @@ the order it is being built:
   field holding a callable, as before. The specification kept calls
   explicit (decision D10: "rather than silently introduce dot methods");
   this is asked for, for `(a, b).chain()` and `app.add_systems(..)`. It is
-  the names in scope that decide, not the value's type: a function of a
-  type's own, `Vec::len`, is not found this way yet.
+  the names in scope that decide, not the value's type.
+- **`value.name(..)` finds a type's own function by its name alone**:
+  `counter.bump()` is `Counter::bump(&mut counter)` where one type that
+  can be named there has a function `bump` of its own and no declared type
+  has a field `bump` (which could hold a callable). The value's type is not
+  known where names are given their meaning, so where two types have the
+  function it is not chosen, and the message says to write
+  `Type::name(value, ..)`. That leaves out the common names (`len`, `get`)
+  of the library's collections used side by side; choosing by the value's
+  type would mean reading the program again for each call, as the `..` of
+  a tuple pattern does.
 - **Generic associated types are not built; what they are for is partly
   reachable.** A family of types, one for each type asked (`type Of<T>`),
   is a trait that takes the parameter and leaves a type:

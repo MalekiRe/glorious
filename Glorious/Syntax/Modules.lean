@@ -1092,6 +1092,32 @@ partial def resolveExpr (ctx : Ctx) (bound : List String) : Expr → R Expr
             -- every function's declaration has been seen.)
             return ← resolveExpr ctx bound
               (.call id (.name none name) (.call 0 (.name none receiverMark) [receiver] :: args))
+        -- A function of a type's own, `impl Type { fn name .. }`: found by
+        -- its name alone, where one type that can be named here has it and
+        -- no declared type has a field of that name (which may then hold a
+        -- callable). The value's type is not known where names are given
+        -- their meaning.
+        let fieldNamed := (← get).units.any fun u => u.items.any fun item =>
+          match (match item with
+            | .pub _ inner => inner
+            | other => other) with
+          | .fieldNames _ names _ => names.contains name
+          | _ => false
+        unless fieldNamed do
+          let found := (← get).units.flatMap fun u => u.own.filter fun b =>
+            match b.name.splitOn "::" with
+            | [ty, fn] =>
+              fn == name && b.entry.kind.space == .value
+                && (u.path == ctx.here || visible b.shown u.path ctx.here)
+                && (ctx.of ty).any fun named => named.name == ty && named.entry.kind == .type
+                  && named.entry.home == u.path
+            | _ => false
+          if let [b] := found then
+            noteUse ctx.here b.entry
+            let receiver ← resolveExpr ctx bound receiver
+            let args ← args.mapM (resolveExpr ctx bound)
+            return .call id (.name none b.entry.global)
+              (.call 0 (.name none receiverMark) [receiver] :: args)
     if let (.name none mark, [.name (some q) name]) := (f, args) then
       if mark == pathMark then
         -- `Owner::NAME`: a trait's function of that name called with
