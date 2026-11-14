@@ -3754,6 +3754,13 @@ def cases : List Case := [
   -- `a[i]` is the prelude's indexing whatever a program names `index` or `push`.
   ⟨"fn main() -> Int { let xs = [5, 6, 7]; let index = 2; let push = 1; let ys = [xs[index], xs[push]]; ys[0] * 10 + ys[1] }",
     [], "76"⟩,
+  -- A type parameter that the function's type does not mention is still one of its parameters: a call says it, and what is written of it holds.
+  ⟨"trait Access { fn writes() -> Bool }\nstruct Read\nstruct Write\nimpl Access for Read { fn writes() { false } }\nimpl Access for Write { fn writes() { true } }\nfn both<A: Access, B: Access>() -> Bool { if(<A as Access>::writes()) { true } else { <B as Access>::writes() } }\nfn main() -> Bool { both<Read, Write>() }",
+    [], "Ok(())"⟩,
+  ⟨"trait Access { fn writes() -> Bool }\nstruct Read\nimpl Access for Read { fn writes() { false } }\nfn one<A: Access>() -> Bool { <A as Access>::writes() }\nfn main() -> Bool { one() }",
+    [], "error: 5:21: in `main`: `Access` is needed of a type that nothing here decides"⟩,
+  ⟨"trait Access { fn weight() -> Int }\nstruct Read\nstruct Write\nimpl Access for Read { fn weight() { 1 } }\nimpl Access for Write { fn weight() { 10 } }\nfn one<A: Access>() -> Int { <A as Access>::weight() }\nfn two<A: Access, B: Access>() -> Int { one<A>() + one<B>() * 2 }\nfn main() -> Int { two<Read, Write>() + two<Write, Read>() }",
+    [], "33"⟩,
   -- `drop` is not for a program to call.
   ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nfn main() { let mut f = File(7); drop(&mut f); 0 }",
     [], "error: 3:34: in `main`: `drop` is run when what holds a value ends; a program does not call it"⟩,

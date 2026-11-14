@@ -295,11 +295,22 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
   for d in decls do
     let t0 ← zonk ((defs.lookup d.name).getD .unit)
     let (t1, seen) ← openParams [] t0
+    -- A type parameter the function's type does not mention is one of its
+    -- parameters all the same: a call says it (`f<Read>()`), and what is
+    -- written of it holds (`A: Access`).
+    let mut unmentioned : List Nat := []
+    let mut seen := seen
+    if d.impl.isNone then
+      for p in d.params do
+        let key := s!"'{p}@{rigidOwner decls d}"
+        if !p.startsWith "'" && (seen.lookup key).isNone then
+          let fresh ← freshTy
+          if let .var id := fresh then unmentioned := unmentioned ++ [id]
+          seen := seen ++ [(key, fresh)]
     -- What the body needs of a type parameter it wrote, to be let go or to
     -- be used more than once, it needs of the type the parameter is at each
     -- use: said of the parameter as the function's type has it.
     let before ← get
-    let mut seen := seen
     let mut opened : Array (Array (Ty × String)) := #[]
     for needs in [before.dups, before.drops, before.stays] do
       let mut out : Array (Ty × String) := #[]
@@ -364,7 +375,8 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
       modify fun s =>
         { s with siteTable := (d.name, table.toList) :: s.siteTable
                  siteTypes := (d.name, vector.toList.map Ty.written) :: s.siteTypes }
-    let scheme := { scheme with edges := edges.toList, ranked, sites := vector.toList }
+    let scheme := { scheme with edges := edges.toList, ranked, sites := vector.toList
+                                tvars := scheme.tvars ++ unmentioned }
     -- The type parameters as written, for a call that writes types for them.
     let written := (d.params.filter fun p => !p.startsWith "'").map fun p =>
       match seen.lookup s!"'{p}@{rigidOwner decls d}" with
