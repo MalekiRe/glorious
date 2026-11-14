@@ -213,8 +213,17 @@ def selftest (vm : Option String) : IO UInt32 := do
   let stamp ← IO.monoMsNow
   let examples ← exampleCases "examples"
   let all := (cases.map (·, [])) ++ examples
+  -- `GLORIOUS_TIMES`: how long each part of this takes.
+  let times := (← IO.getEnv "GLORIOUS_TIMES").isSome
+  let started ← IO.monoMsNow
+  let lap := fun (what : String) => do
+    if times then IO.eprintln s!"{what}: at {(← IO.monoMsNow) - started} ms"
+  -- The checks are started with the programs, and looked at after them.
+  let asked := Checks.all.toArray.map fun (_, check) => Task.spawn fun _ => check ()
   warm
+  lap "the prelude and library checked"
   let found ← sideBySide all fun (c, files) => outcome true c files
+  lap "programs compiled and run on the Lean machines"
   -- What is unsafe runs on the Rust VM alone, and the proved machines say so.
   let foreign ← if vm.isSome then sideBySide foreignCases fun c => outcome false c [] else pure #[]
   let mut failures : Array (Nat × String) := #[]
@@ -239,27 +248,35 @@ def selftest (vm : Option String) : IO UInt32 := do
         (found[i]?.bind (·.bytes)).map fun bytes => (2 * i + 1, bytes, c, true)).toArray
       ++ (foreignCases.zipIdx.filterMap fun (c, i) =>
         (foreign[i]?.bind (·.bytes)).map fun bytes => (2 * (all.length + i) + 1, bytes, c, false)).toArray
+    -- All are started by one process that holds little: one started from
+    -- here for each program waits for this one's memory to be copied, a
+    -- hundredth of a second each time and one at a time.
     let jobs ← vmJobs
-    let workers ← (List.range jobs).mapM fun w =>
-      IO.asTask (prio := .dedicated) do
-        let file := tmp / s!"glorious-selftest-{stamp}-{w}.glbc"
-        let mut failed : Array (Nat × String) := #[]
-        for (k, (at_, bytes, c, plain)) in runs.toList.zipIdx.map (fun (r, k) => (k, r)) do
-          if k % jobs == w then
-            IO.FS.writeBinFile file bytes
-            let out ← IO.Process.output
-              { cmd := vm, args := #[file.toString] ++ (c.input.map toString).toArray }
-            let got := if plain && out.exitCode != 0 then "went wrong\n" else out.stdout
-            if got != c.expect ++ "\n" then
-              failed := failed.push (at_, s!"rust vm: expected\n{c.expect}\ngot\n{got}\n{out.stderr}for\n{c.src}\n")
-        if ← file.pathExists then IO.FS.removeFile file
-        pure failed
-    for worker in workers do
-      match ← IO.wait worker with
-      | .ok failed => failures := failures ++ failed
-      | .error e => failures := failures.push (0, s!"rust vm: {e}\n")
+    let dir := tmp / s!"glorious-selftest-{stamp}"
+    IO.FS.createDirAll dir
+    let vmPath ← IO.FS.realPath vm
+    for ((_, bytes, c, _), k) in runs.toList.zipIdx do
+      IO.FS.writeBinFile (dir / s!"{k}.gbc") bytes
+      let given := " ".intercalate (c.input.map toString)
+      IO.FS.writeFile (dir / s!"{k}.sh")
+        s!"\"$VM\" {k}.gbc {given} > {k}.out 2> {k}.err\necho $? > {k}.rc\n"
+    let ran ← IO.Process.output
+      { cmd := "sh", env := #[("VM", some vmPath.toString)]
+        args := #["-c", s!"cd '{dir}' && ls | grep '[.]sh$' | xargs -P {jobs} -n 1 sh"] }
+    if ran.exitCode != 0 then
+      failures := failures.push (0, s!"rust vm: the programs could not be run: {ran.stderr}\n")
+    for ((at_, _, c, plain), k) in runs.toList.zipIdx do
+      let out ← IO.FS.readFile (dir / s!"{k}.out")
+      let code := (← IO.FS.readFile (dir / s!"{k}.rc")).trimAscii.toString
+      let got := if plain && code != "0" then "went wrong\n" else out
+      if got != c.expect ++ "\n" then
+        let err ← IO.FS.readFile (dir / s!"{k}.err")
+        failures := failures.push (at_, s!"rust vm: expected\n{c.expect}\ngot\n{got}\n{err}for\n{c.src}\n")
+    IO.FS.removeDirAll dir
+  lap "programs run on the Rust VM"
   -- What else is asked of the front end: see `Glorious/Checks.lean`.
-  let held ← sideBySide Checks.all fun (_, check) => check ()
+  let held ← asked.mapM fun t => IO.wait t
+  lap "checks"
   for ((n, _), i) in Checks.all.zipIdx do
     unless held[i]?.getD false do
       failures := failures.push (2 * (all.length + foreignCases.length) + n,

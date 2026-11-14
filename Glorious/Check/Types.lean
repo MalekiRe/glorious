@@ -510,7 +510,7 @@ structure St where
   abandoned : Array (Nat × Ty × String) := #[]
   /-- The calls that certainly come back if they end at all: the callee
   performs nothing and can jump to no label. -/
-  sure : List Nat := []
+  sure : Std.HashSet Nat := {}
   /-- Bindings whose use on every path is still to be looked at, once the
   types of the function they are in are known: where, the name, its type, the
   other names in scope, and the code the name is in scope of. -/

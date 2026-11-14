@@ -1,3 +1,4 @@
+import Std.Data.HashMap
 import Glorious.Syntax.Ast
 
 /-!
@@ -326,7 +327,7 @@ partial def enter (viewer target : List String) : R Unit := do
 
 /-- The module a path names, if its first name is a module: `crate`, `self`
 and `super`, a module that can be written here, or one of the first module's. -/
-partial def moduleAt (viewer : List String) (scope : List Bound) (segs : List String) :
+partial def moduleAt (viewer : List String) (named : String → List Bound) (segs : List String) :
     R (Option (List String)) := do
   let some head := segs.head? | return none
   let start ← match head with
@@ -334,8 +335,8 @@ partial def moduleAt (viewer : List String) (scope : List Bound) (segs : List St
     | "%prelude" => pure (some preludePath)
     -- The prelude by name, where the program has no module of that name.
     | "prelude" =>
-      if (← unitOf ["prelude"]).isSome || (lookupIn scope .module "prelude").isSome then
-        match lookupIn scope .module head with
+      if (← unitOf ["prelude"]).isSome || (lookupIn (named "prelude") .module "prelude").isSome then
+        match lookupIn (named head) .module head with
         | some e => pure (some e.home)
         | none =>
           enter viewer [head]
@@ -347,7 +348,7 @@ partial def moduleAt (viewer : List String) (scope : List Bound) (segs : List St
       if viewer.isEmpty then throw "`super`: the first module is written in no other"
       pure (some viewer.dropLast)
     | _ =>
-      match lookupIn scope .module head with
+      match lookupIn (named head) .module head with
       | some e => pure (some e.home)
       | none =>
         if (← unitOf [head]).isSome then
@@ -362,7 +363,7 @@ partial def moduleAt (viewer : List String) (scope : List Bound) (segs : List St
       cur := cur ++ [seg]
     else
       -- A module another module names again with `pub use`.
-      let bounds ← if cur == viewer then pure scope else scopeOf cur
+      let bounds ← if cur == viewer then pure (named seg) else scopeOf cur
       match bounds.find? fun b =>
           b.name == seg && b.entry.kind == .module && b.rank ≤ 1 && visible b.shown cur viewer with
       | some b => cur := b.entry.home
@@ -384,7 +385,7 @@ partial def imported (p : List String) (scope : List Bound) (path : List String)
     R (List Bound) := do
   let written := "::".intercalate path
   if glob then
-    let some q ← moduleAt p scope path | throw s!"`use {written}::*`: there is no module `{written}`"
+    let some q ← moduleAt p (fun _ => scope) path | throw s!"`use {written}::*`: there is no module `{written}`"
     if q == p then throw s!"`use {written}::*`: a module does not use itself"
     noteEdge p q
     let bounds ← scopeOf q
@@ -392,7 +393,7 @@ partial def imported (p : List String) (scope : List Bound) (path : List String)
     for b in seen do noteUse p b.entry
     return seen
   -- The whole path may be a module.
-  let asModule ← moduleAt p scope path
+  let asModule ← moduleAt p (fun _ => scope) path
   let name := path.getLast!
   let before := path.dropLast
   let mut found : List Bound := []
@@ -401,7 +402,7 @@ partial def imported (p : List String) (scope : List Bound) (path : List String)
       noteEdge p m
       found := [⟨name, ⟨m, "", .pub, .module⟩, .priv, 0⟩]
   if !before.isEmpty then
-    if let some q ← moduleAt p scope before then
+    if let some q ← moduleAt p (fun _ => scope) before then
       if q == p then throw s!"`use {written}`: a module does not use itself"
       noteEdge p q
       let seen ← exported p q name
@@ -410,7 +411,7 @@ partial def imported (p : List String) (scope : List Bound) (path : List String)
   -- `use a::Effect::operation`: one operation of an effect.
   if found.isEmpty && !before.isEmpty then
     let effect := before.getLast!
-    let home ← if before.length == 1 then pure (some p) else moduleAt p scope before.dropLast
+    let home ← if before.length == 1 then pure (some p) else moduleAt p (fun _ => scope) before.dropLast
     if let some q := home then
       let named ← if q == p then pure (scope.filter fun b => b.name == effect && b.rank ≤ 1)
         else exported p q effect
@@ -422,7 +423,7 @@ partial def imported (p : List String) (scope : List Bound) (path : List String)
         | none => throw s!"`use {written}`: the effect `{effect}` has no operation `{name}`"
   if found.isEmpty then
     if before.isEmpty then throw s!"`use {written}`: there is no module `{written}`"
-    match ← moduleAt p scope before with
+    match ← moduleAt p (fun _ => scope) before with
     | some q => throw s!"`use {written}`: {showPath q} has no `{name}`"
     | none => throw s!"`use {written}`: there is no module `{"::".intercalate before}`"
   pure found
@@ -435,6 +436,16 @@ structure Ctx where
   scope : List Bound
   /-- The type parameters of the function being read. -/
   generics : List String := []
+  /-- What is in `scope` by name, each name's in the order they are there:
+  a name is looked for among its own. -/
+  named : Std.HashMap String (List Bound) := {}
+
+/-- What a module can write under a name. -/
+def Ctx.of (ctx : Ctx) (name : String) : List Bound := ctx.named.getD name []
+
+/-- What is in a scope, by name. -/
+def byName (scope : List Bound) : Std.HashMap String (List Bound) :=
+  scope.foldr (fun b m => m.insert b.name (b :: m.getD b.name [])) {}
 
 /-- A constructor some of whose fields are private cannot be built or taken
 apart outside its module. -/
@@ -454,9 +465,9 @@ def resolveValue (ctx : Ctx) (bound : List String) (qual : Option String) (name 
   match qual with
   | none =>
     if bound.contains name then return (none, name, none)
-    if let some (a, b) := clash ctx.scope .value name then
+    if let some (a, b) := clash (ctx.of name) .value name then
       throw s!"`{name}` is two things here, `{a.global}` and `{b.global}`: say which with its module"
-    match lookupIn ctx.scope .value name with
+    match lookupIn (ctx.of name) .value name with
     | some e =>
       noteUse ctx.here e
       checkSealed ctx name e
@@ -477,10 +488,10 @@ def resolveValue (ctx : Ctx) (bound : List String) (qual : Option String) (name 
       pure (none, name, none)
   | some q =>
     let segs := q.splitOn "::"
-    if let some m ← moduleAt ctx.here ctx.scope segs then
+    if let some m ← moduleAt ctx.here ctx.of segs then
       noteEdge ctx.here m
       let found ← if m == ctx.here then
-          pure (ctx.scope.filter fun b => b.name == name && b.rank == 0)
+          pure ((ctx.of name).filter fun b => b.name == name && b.rank == 0)
         else exported ctx.here m name
       match found.find? fun b => b.entry.kind.space == .value with
       | some b =>
@@ -492,14 +503,14 @@ def resolveValue (ctx : Ctx) (bound : List String) (qual : Option String) (name 
     let last := segs.getLast!
     let before := segs.dropLast
     let owner ← if before.isEmpty then
-        pure ((ctx.scope.filter fun b => b.name == last &&
+        pure (((ctx.of last).filter fun b => b.name == last &&
           (b.entry.kind == .type || b.entry.kind == .effect || b.entry.kind == .trait)).head?.map (·.entry))
       else
-        match ← moduleAt ctx.here ctx.scope before with
+        match ← moduleAt ctx.here ctx.of before with
         | some m =>
           noteEdge ctx.here m
           let found ← if m == ctx.here then
-              pure (ctx.scope.filter fun b => b.name == last && b.rank == 0)
+              pure ((ctx.of last).filter fun b => b.name == last && b.rank == 0)
             else exported ctx.here m last
           match found.find? fun b =>
               b.entry.kind == .type || b.entry.kind == .effect || b.entry.kind == .trait with
@@ -534,9 +545,9 @@ def resolveNamed (ctx : Ctx) (space : Space) (generics : List String) (written :
   let segs := written.splitOn "::"
   if segs.length == 1 then
     if generics.contains written then return (written, none)
-    if let some (a, b) := clash ctx.scope space written then
+    if let some (a, b) := clash (ctx.of written) space written then
       throw s!"`{written}` is two things here, `{a.global}` and `{b.global}`: say which with its module"
-    match lookupIn ctx.scope space written with
+    match lookupIn (ctx.of written) space written with
     | some e =>
       noteUse ctx.here e
       pure (e.global, some e)
@@ -553,11 +564,11 @@ def resolveNamed (ctx : Ctx) (space : Space) (generics : List String) (written :
     -- implementation. The checker finds which.
     if let [p] := before then
       if generics.contains p then return (written, none)
-    let some m ← moduleAt ctx.here ctx.scope before
+    let some m ← moduleAt ctx.here ctx.of before
       | throw s!"`{written}`: there is no module `{"::".intercalate before}`"
     noteEdge ctx.here m
     let found ← if m == ctx.here then
-        pure (ctx.scope.filter fun b => b.name == last && b.rank == 0)
+        pure ((ctx.of last).filter fun b => b.name == last && b.rank == 0)
       else exported ctx.here m last
     match found.find? fun b => b.entry.kind.space == space with
     | some b =>
@@ -671,7 +682,7 @@ partial def shapeOf (ctx : Ctx) (way : List String) : Pattern → R (Pattern × 
   | .int n => pure (.int n, [])
   | .var x => do
     -- A constructor or a constant is a test; a new name names this part.
-    match lookupIn ctx.scope .value x with
+    match lookupIn (ctx.of x) .value x with
     | some e => if e.kind == .ctor || e.kind == .const then pure (.var x, []) else pure (.wild, [(x, way)])
     | none => pure (.wild, [(x, way)])
   | .tuple args => do
@@ -728,7 +739,7 @@ partial def shapeTests (ctx : Ctx) (path : List Nat) :
   | .wild => pure (some [])
   | .int _ => pure none
   | .var x => do
-    match lookupIn ctx.scope .value x with
+    match lookupIn (ctx.of x) .value x with
     | some e => pure (if e.kind == .ctor then some [(path, .name none x)] else none)
     | none => pure (some [])
   | .tuple args => do
@@ -948,7 +959,7 @@ def byReference (ctx : Ctx) (clauses : List Clause) : R (List Clause) := do
           match p with
           | .wild => tests := tests.push .wild
           | .var x =>
-            match lookupIn ctx.scope .value x with
+            match lookupIn (ctx.of x) .value x with
             | some _ => throw "where one clause binds a parameter by reference, `&mut Pattern`, every clause does, or takes the reference whole"
             | none =>
               tests := tests.push .wild
@@ -993,7 +1004,7 @@ partial def resolvePattern (ctx : Ctx) : Pattern → R (Pattern × List String)
   | .int n => pure (.int n, [])
   | .var x => do
     -- A constructor or a constant, if the name is one; else a new name.
-    match lookupIn ctx.scope .value x with
+    match lookupIn (ctx.of x) .value x with
     | some e =>
       if e.kind == .ctor || e.kind == .const then
         noteUse ctx.here e
@@ -1401,7 +1412,8 @@ def resolve (prelude root : List Item) : Except String Resolved := do
   let run : R (List Item × List (String × List String)) := do
     let mut out : Array Item := #[]
     for u in units do
-      let ctx : Ctx := ⟨u.path, ← scopeOf u.path, []⟩
+      let scope ← scopeOf u.path
+      let ctx : Ctx := { here := u.path, scope := scope, named := byName scope }
       for item in u.items do
         out := out ++ (← resolveItem ctx item).toArray
       -- The prelude's type of arrays, by the name it has in this program.

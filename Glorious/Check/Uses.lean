@@ -237,7 +237,7 @@ structure ACtx where
   that then does with it: whoever takes a value has it. -/
   handed : Bool := false
   /-- Calls, by identity, whose types say they come back. -/
-  sure : List Nat := []
+  sure : Std.HashSet Nat := {}
   /-- The count is of what comes before a call of a `probe`: a path ends at
   such a call, with the name below for where it left to, and a value one may
   be in cannot go where the count does not follow. -/
@@ -1191,7 +1191,7 @@ def runLowerChecks (fnTy : Ty) : M Unit := do
         for c in freeCaps callee do
           if given.contains (← findCap c) then theirs := true
         if theirs then conditional := (id, callee) :: conditional
-        else sure := id :: sure
+        else sure := sure.insert id
   modify fun st => { st with sure := sure }
   for (id, t, why) in s.abandoned do
     unless sure.contains id do
@@ -1253,7 +1253,7 @@ def runLowerChecks (fnTy : Ty) : M Unit := do
       -- Used on every path if the callables the function was given come
       -- back: then that is asked of whoever gives them.
       if unused && !conditional.isEmpty then
-        unless counted { ctx with sure := conditional.map (·.1) ++ sure } do
+        unless counted { ctx with sure := conditional.foldl (fun set c => set.insert c.1) sure } do
           unused := false
           relied := true
     if unused then
