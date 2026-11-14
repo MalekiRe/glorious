@@ -228,13 +228,14 @@ of its own is where this one starts; and what this one finds is kept for the
 next, with the certificate it found: one that the proved checker accepts for
 the program now is used, and no other looked for (`GLORIOUS_FRESH` set:
 neither is read). -/
-def compileFile (path : String) : IO (Except String Compiled) := do
+def compileFile (path : String) (checkKept : Check.Kept := []) : IO (Except String Compiled) := do
   let file ← placesFile path
   let known ← if (← IO.getEnv "GLORIOUS_FRESH").isSome then pure [] else readPlaces file
   let dir ← Target.dirOf path
   let kept ← if (← IO.getEnv "GLORIOUS_FRESH").isSome then pure [] else
     pure ((← Target.readCert dir).toList)
   let result := compileSource (← IO.FS.readFile path) true (← moduleFiles path) (few := true) known kept
+    checkKept
   if let .ok c := result then
     writePlaces file c.places
     if let some cert := c.cert then Target.writeCert dir cert
@@ -243,14 +244,20 @@ def compileFile (path : String) : IO (Except String Compiled) := do
 /-- The program at `path` built: what the last compile kept in the build
 directory, if it was made from the same texts by the same compiler, and
 otherwise compiled and kept (`GLORIOUS_FRESH` set: compiled whatever is kept). -/
-def buildFile (path : String) : IO (Except String Target.Built) := do
+def buildFile (path : String) (checkKept : Option (IO.Ref (List (String × Check.Kept))) := none) :
+    IO (Except String Target.Built) := do
   let dir ← Target.dirOf path
   let key ← Target.keyOf (← IO.FS.readFile path) (← moduleFiles path)
   if (← IO.getEnv "GLORIOUS_FRESH").isNone then
     if let some b ← Target.read dir key then return .ok b
-  match ← compileFile path with
+  let kept ← match checkKept with
+    | some ref => pure (((← ref.get).lookup path).getD [])
+    | none => pure []
+  match ← compileFile path kept with
   | .error e => pure (.error e)
   | .ok c =>
+    if let some ref := checkKept then
+      ref.modify fun ks => (path, c.checkKept) :: ks.filter (·.1 != path)
     let b := Target.Built.of c (startLocals c)
     Target.write dir key b
     pure (.ok b)
@@ -314,6 +321,8 @@ partial def serve : IO UInt32 := do
   IO.FS.writeFile file s!"{port}\n{← compilerIdentity}"
   IO.println s!"glorious: serving compiles on port {port}"
   (← IO.getStdout).flush
+  -- (What the checker kept of each program, for its next compile.)
+  let kept ← IO.mkRef ([] : List (String × Check.Kept))
   repeat
     let client ← server.accept.block
     try
@@ -321,7 +330,7 @@ partial def serve : IO UInt32 := do
       let reply : ByteArray ← match String.fromUTF8? request with
         | none => pure (frame (bytesOf [1] ++ "an unreadable request".toUTF8))
         | some path =>
-          match ← buildFile path with
+          match ← buildFile path (some kept) with
           | .ok b => pure (frame (bytesOf ([0] ++ Target.encode "" b)))
           | .error e => pure (frame (bytesOf [1] ++ e.toUTF8))
       (client.send reply).block
@@ -786,6 +795,7 @@ changes, and run it, each compile as `compileFile` makes one: from what the
 build directory keeps. -/
 partial def watch (path : String) (input : List Int) : IO UInt32 := do
   let mut last : List String := []
+  let mut kept : Check.Kept := []
   repeat
     let texts ← try
         let src ← IO.FS.readFile path
@@ -797,9 +807,10 @@ partial def watch (path : String) (input : List Int) : IO UInt32 := do
       if now != last then
         last := now
         let start ← IO.monoMsNow
-        match ← compileFile path with
+        match ← compileFile path kept with
         | .error e => IO.eprintln s!"{path}: {e}"
         | .ok c =>
+          kept := c.checkKept
           let compiled ← IO.monoMsNow
           IO.println s!"-- compiled in {compiled - start} ms"
           let bytecode := compile c.core

@@ -1290,9 +1290,31 @@ def checkGroup (decls : List FnDecl) : M Unit := do
              lateDrops := s.lateDrops ++ lateDrops, stays := #[],
              lateStays := s.lateStays ++ lateStays }
 
-/-- Check some items against what is already known: their declarations, and
-then their functions, each group once those it calls are done. -/
-def checkItems (items : List Item) : M Unit := do
+/-- What one check keeps for the next of a program that changed a little: the
+checker's state after the declarations and after each group of functions,
+each under a key of everything it was made from, in order. -/
+abbrev Kept := List (UInt64 × St)
+
+/-- An item as its declarations have it: its functions without their bodies. -/
+partial def withoutBodies : Item → Item
+  | .fn name params annots ret _ => .fn name params annots ret []
+  | .impl params tr head args ctx methods => .impl params tr head args ctx (methods.map withoutBodies)
+  | .pub parent item => .pub parent (withoutBodies item)
+  | other => other
+
+/-- A group of functions, as what its check is made from. -/
+def groupKey (key : UInt64) (group : List FnDecl) : UInt64 :=
+  group.foldl (fun h d => mixHash h (hash (d.name, d.params, d.annots, d.ret, d.clauses, d.bounds))) key
+
+/-- Check items. With `kept` from an earlier check of a program that began
+alike (`seed`: what was checked before them), the state after each step whose
+key is among them is taken from there instead of checked again: the
+declarations' key is of every item without the bodies of its functions, each
+group's is of the key before it and the group's functions whole. A step
+depends on no more than that: a group follows calls only into groups before
+it. What the functions of later groups are is put back as this program has
+them. Gives what this check kept. -/
+def checkItems (items : List Item) (seed : UInt64 := 0) (kept : Kept := []) : M Kept := do
   let written := items.filterMap fun
     | .bounds fn bounds => some (fn, bounds)
     | _ => none
@@ -1334,15 +1356,36 @@ def checkItems (items : List Item) : M Unit := do
     if builtFrom.contains name then mentions name else (mentions name ++ coercing).eraseDups
   do
     let before := (← get).impls.size
+    let mut made : Kept := []
+    let mut key := mixHash seed (hash (items.map withoutBodies))
+    match kept.lookup key with
+    | some st => set st
+    | none =>
+      declare items
+      computeVariances
+      declareTraits items
+      checkUseDecls
+    made := (key, ← get) :: made
     modify fun s =>
       { s with fnBodies := s.fnBodies ++ (decls.map fun d => (d.name, d.clauses)),
                runFns := decls.foldl (fun m d => m.insertIfNew d.name d.clauses) s.runFns }
-    declare items
-    computeVariances
-    declareTraits items
-    checkUseDecls
-    for comp in components names deps do
-      checkGroup (comp.filterMap fun n => decls.find? (·.name == n))
+    -- (A state kept from before has the bodies that program's later
+    -- functions had: this one's are put in their place.)
+    let restore := fun (st : St) (later : List FnDecl) => (do
+      set st
+      modify fun s =>
+        { s with fnBodies := s.fnBodies.map fun (name, clauses) =>
+                   match later.find? (·.name == name) with
+                   | some d => (name, d.clauses)
+                   | none => (name, clauses),
+                 runFns := later.foldl (fun m d => m.insert d.name d.clauses) s.runFns } : M Unit)
+    let groups := (components names deps).map fun comp => comp.filterMap fun n => decls.find? (·.name == n)
+    for (group, k) in groups.zipIdx do
+      key := groupKey key group
+      match kept.lookup key with
+      | some st => restore st ((groups.drop (k + 1)).flatten)
+      | none => checkGroup group
+      made := (key, ← get) :: made
     -- The functions implementations give, each on its own: any function may
     -- call them, but only through a trait, whose types are declared.
     for im in (← get).impls.toList.drop before do
@@ -1354,9 +1397,14 @@ def checkItems (items : List Item) : M Unit := do
             -- lifetimes it writes of its own, `fn at<'a>(..)`.)
             let inner := (im.pvars.map (·.1)).filter (!im.params.contains ·)
             let lifetimes := (genericParams written).filter isLifetime
-            checkGroup [{ name := Syntax.implFnName im.trait im.head m,
-                          params := im.params ++ inner ++ sig.mparams.map (·.1) ++ lifetimes, annots,
-                          ret, clauses, impl := some (im, sig) }]
+            let d : FnDecl := { name := Syntax.implFnName im.trait im.head m,
+                                params := im.params ++ inner ++ sig.mparams.map (·.1) ++ lifetimes, annots,
+                                ret, clauses, impl := some (im, sig) }
+            key := groupKey key [d]
+            match kept.lookup key with
+            | some st => restore st []
+            | none => checkGroup [d]
+            made := (key, ← get) :: made
     for c in coercing do
       unless (((← get).fnBounds.lookup c).getD 0) == 0 do
         throw s!"`coerce {c}`: a coercion cannot need a trait of a type it is used at"
@@ -1364,6 +1412,7 @@ def checkItems (items : List Item) : M Unit := do
     checkDrops (← get).lateDrops
     checkStays (← get).lateStays
     modify fun s => { s with lateDups := #[], lateDrops := #[], lateStays := #[] }
+    pure made
 
 /-- The declared types a type is made of. -/
 partial def namedIn : Ty → List String
@@ -1468,7 +1517,7 @@ def checkProgram (items : List Item) (modules : Syntax.ModuleInfo := {}) (drops 
     Except String Elab.Blocks := do
   let action : M Elab.Blocks := do
     modify fun s => { s with modules }
-    checkItems items
+    let _ ← checkItems items
     finish
   let (blocks, _) ← action.run { dropMode := drops }
   pure blocks
@@ -1479,7 +1528,7 @@ def checkFirst (items : List Item) (modules : Syntax.ModuleInfo := {}) (drops : 
     Except String St := do
   let action : M Unit := do
     modify fun s => { s with modules }
-    checkItems items
+    let _ ← checkItems items
   let (_, st) ← action.run { dropMode := drops }
   pure st
 
@@ -1488,9 +1537,20 @@ def checkAfter (first : St) (items : List Item) (modules : Syntax.ModuleInfo := 
     Except String Elab.Blocks := do
   let action : M Elab.Blocks := do
     modify fun s => { s with modules }
-    checkItems items
+    let _ ← checkItems items
     finish
   let (blocks, _) ← action.run first
   pure blocks
+
+/-- The same, taking what an earlier check of a program that began alike kept
+(`seed`: what the first items were), and giving what this one keeps. -/
+def checkAfterKept (first : St) (items : List Item) (modules : Syntax.ModuleInfo) (seed : UInt64)
+    (kept : Kept) : Except String (Elab.Blocks × Kept) := do
+  let action : M (Elab.Blocks × Kept) := do
+    modify fun s => { s with modules }
+    let made ← checkItems items (mixHash seed (hash modules)) kept
+    pure (← finish, made)
+  let (r, _) ← action.run first
+  pure r
 
 end Glorious.Check

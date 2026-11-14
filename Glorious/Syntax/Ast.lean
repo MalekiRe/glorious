@@ -23,7 +23,7 @@ inductive Pattern where
   | int (n : Int)
   | ctor (name : String) (qual : Option String) (args : List Pattern)
   | tuple (args : List Pattern)
-  deriving Inhabited
+  deriving Inhabited, Hashable
 
 mutual
 
@@ -84,6 +84,8 @@ inductive Clause where
   | mk (pats : List Pattern) (body : List Stmt)
 
 end
+
+deriving instance Hashable for Expr, Stmt, Clause
 
 instance : Inhabited Expr := ⟨.int 0⟩
 
@@ -214,6 +216,7 @@ structure ModuleInfo where
   /-- For each module, the coercions that apply in it: those it declares, and
   those of functions it brings in with `use`. -/
   coercions : List (String × List String) := []
+  deriving Hashable
 
 /-- How the constructors of a text are named where values are shown: no
 program can write these names. -/
@@ -346,7 +349,7 @@ inductive TypeExpr where
   | never
   /-- `_`: to be inferred. -/
   | hole
-  deriving Inhabited
+  deriving Inhabited, Hashable
 
 /-- A type with `Self` written out as the type an implementation is for. -/
 partial def TypeExpr.withSelf (self : TypeExpr) : TypeExpr → TypeExpr
@@ -690,6 +693,8 @@ inductive Item where
   another module, to be written here without their path. `use a::{b, c}` is one
   of these for each. -/
   | import (path : List String) (rename : Option String) (glob : Bool)
+
+deriving instance Hashable for OpDecl, Bound, Item
 
 /-- Every name a pattern could bind. -/
 partial def patternNames : Pattern → List String

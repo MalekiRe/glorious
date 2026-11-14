@@ -49,6 +49,9 @@ structure Compiled where
   is in and how many places of that function come before it: what a later
   compile of a changed program can start from. -/
   places : List ((String × Nat) × Nat) := []
+  /-- What the checker kept, for a later compile of the program in the same
+  process (`Check.Kept`). -/
+  checkKept : Check.Kept := []
 
 /-- Each place by the function it is in and how many places of that function
 come before it: what stays the same of a place when other functions change. -/
@@ -472,8 +475,8 @@ proved Core type checker accept the result. With `check := false` both checks
 are skipped, so that programs which go wrong can still be run. -/
 def compileSourceAt (src : String) (check : Bool := true)
     (files : List (List String × String) := []) (few : Bool := false)
-    (known : List ((String × Nat) × Nat) := []) (packs : Nat := 0) (kept : List Typing.Cert := []) :
-    Except String Compiled := do
+    (known : List ((String × Nat) × Nat) := []) (packs : Nat := 0) (kept : List Typing.Cert := [])
+    (checkKept : Check.Kept := []) : Except String Compiled := do
   let (prelude, items) ← parseProgram src files check few packs
   -- Every name is given its meaning: the modules become one list of items.
   let resolved ← Syntax.Modules.resolve prelude items
@@ -507,14 +510,18 @@ def compileSourceAt (src : String) (check : Bool := true)
   let all := match first with
     | .ok (count, _) => if few && check then all.take count ++ withoutUnreached (all.drop count) else all
     | .error _ => all
+  -- (`kept`: what an earlier check of the same program kept, in the same
+  -- process: the steps whose inputs did not change are not checked again.)
+  let seed := mixHash (hash withStd) (mixHash (hash drops) (hash few))
   let checkOnce := fun (all : List Syntax.Item) =>
     match check && !resolved.info.shadowed, first with
-    | true, .ok (count, first) => Check.checkAfter first (all.drop count) resolved.info
-    | _, _ => Check.checkProgram all resolved.info drops
+    | true, .ok (count, first) =>
+      Check.checkAfterKept first (all.drop count) resolved.info (mixHash seed (hash count)) checkKept
+    | _, _ => (Check.checkProgram all resolved.info drops).map (·, [])
   -- (`..` in a tuple pattern: the checker says how many parts it stands
   -- for, and the program is read again with them written.)
   let rec checkWith (fuel : Nat) (all : List Syntax.Item) :
-      List Syntax.Item × Except String Elab.Blocks :=
+      List Syntax.Item × Except String (Elab.Blocks × Check.Kept) :=
     match checkOnce all with
     | .ok blocks => (all, .ok blocks)
     | .error e =>
@@ -522,9 +529,9 @@ def compileSourceAt (src : String) (check : Bool := true)
       | fuel + 1, some (id, count) => checkWith fuel (Elab.restItems id count all)
       | _, _ => (all, .error e)
   let (all, checked) := checkWith 64 all
-  let blocks ← match checked with
-    | .ok blocks => pure (some blocks)
-    | .error e => if check then throw e else pure none
+  let (blocks, checkMade) ← match checked with
+    | .ok (blocks, made) => pure (some blocks, made)
+    | .error e => if check then throw e else pure (none, [])
   -- Lifetimes were the checker's to read; and, of what is declared, the
   -- certificate's.
   let written := all
@@ -573,7 +580,7 @@ def compileSourceAt (src : String) (check : Bool := true)
       | some k => [(("%way", 0), k)]
       | none => []
     pure (⟨out.program, out.ctorNames.map shownName, out.fnNames, out.opNames, cert, 0, out.plain,
-      way ++ (placeKeys out.siteOwners).toList.map fun k => (k, 0)⟩ : Compiled)
+      way ++ (placeKeys out.siteOwners).toList.map fun k => (k, 0), checkMade⟩ : Compiled)
   -- A borrow given a name, or written as an argument of a call of a function,
   -- is a scope of its own in Core if the program can then be shown to follow
   -- every rule. Where it cannot, the borrow is the reference it borrows, as in
@@ -604,7 +611,7 @@ def compileSourceAt (src : String) (check : Bool := true)
           if out.lent != 0 && Typing.checkProgram cert out.program then
             some (⟨out.program, out.ctorNames.map shownName, out.fnNames, out.opNames, some cert, out.lent,
               out.plain, ((placeKeys out.siteOwners).toList.zip (List.range out.sites)).map
-                fun (k, i) => (k, sites i)⟩ : Compiled)
+                fun (k, i) => (k, sites i), checkMade⟩ : Compiled)
           else none
         | .error _ => none
     | .error _ => none
@@ -648,7 +655,7 @@ def compileSourceAt (src : String) (check : Bool := true)
                   if o.lent != 0 && Typing.checkProgram cert o.program then
                     Sum.inl (⟨o.program, o.ctorNames.map shownName, o.fnNames, o.opNames, some cert,
                       o.lent, o.plain, ((placeKeys o.siteOwners).toList.zip (List.range o.sites)).map
-                        fun ((k : String × Nat), (i : Nat)) => (k, choice[i]?.getD 0)⟩ : Compiled)
+                        fun ((k : String × Nat), (i : Nat)) => (k, choice[i]?.getD 0), checkMade⟩ : Compiled)
                   else Sum.inr (cert.sigs.filterMap fun (e : Typing.SigEntry) =>
                     match o.program.fns[e.fn]? with
                     | some F => if Typing.checkFn cert e F then none else some e.fn
@@ -821,8 +828,8 @@ parameters with no implementation, as one made by joining two, the program
 is read again with lists that long. -/
 def compileSource (src : String) (check : Bool := true)
     (files : List (List String × String) := []) (few : Bool := false)
-    (known : List ((String × Nat) × Nat) := []) (kept : List Typing.Cert := []) :
-    Except String Compiled := do
+    (known : List ((String × Nat) × Nat) := []) (kept : List Typing.Cert := [])
+    (checkKept : Check.Kept := []) : Except String Compiled := do
   let packs ← (src :: files.map (·.2)).foldlM (fun m text => do
     pure (max m (Syntax.longestList (← Syntax.lex text)))) 2
   -- (An implementation over several lists, as one that joins two, is
@@ -834,7 +841,7 @@ def compileSource (src : String) (check : Bool := true)
   -- (Only a program that has such an implementation is read again.)
   let lists := lists != 0
   let rec go (fuel packs : Nat) : Except String Compiled :=
-    match compileSourceAt src check files few known packs kept with
+    match compileSourceAt src check files few known packs kept checkKept with
     | .error e =>
       let wanted := longestUnimplemented e
       match fuel with

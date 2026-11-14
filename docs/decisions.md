@@ -101,6 +101,30 @@ test suite passing:
 What is proved stays as it is: every program is certified whole, and the
 proved checker checks the whole certificate.
 
+**Step 2, as built: the checker keeps its state after each step, and a
+compile in the same process takes it where nothing the step was made from
+changed.** The checker goes through a program in steps: its declarations,
+then each group of functions that call each other, callees first, then each
+function an implementation gives. Each step's state is kept under a key of
+everything it was made from, in order: the declarations' of every item with
+its functions' bodies left out, each group's of the key before it and the
+group's functions whole. A compile that finds its key among those the last
+one kept takes that state and does not check the step again; the functions
+of later groups are then put back as this program has them, since the state
+kept had the earlier program's. That is exact as long as a step looks only
+at what its key covers: a group follows calls only into groups before it,
+and checks nothing of a later one. Checked: compiling each example and
+covey's three programs again from what the first compile kept gives the same
+bytecode, and so does compiling each with a number changed in one of two
+places at random (26 programs; one edit made a program the checker refuses,
+and both compiles refused it alike).
+
+The server and the watch mode keep what was kept, a program at a time; a
+single compile has nothing kept. In watch mode, covey: a comment added 290 ms
+to 200 ms; a system's body changed 440 ms to 390 ms. The state was not split
+into the three parts the plan named: the steps' keys are what make it exact,
+not the state's shape.
+
 Tried for step 3 and not kept: what the count of uses found of the calls it
 followed, kept for every count made in the same context (one check of a
 function's uses), not only within one count. The test suite took the same
