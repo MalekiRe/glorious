@@ -465,7 +465,7 @@ partial def elabStmts (scope : Scope) (tailPos : Bool) : List Stmt → M Atom
           if madeBorrow p then
             return ← elabBorrowScope scope tailPos p uniq (← lent) rest (p.startsWith "%borrow")
           let site := (← get).sites
-          modify fun s => { s with sites := s.sites + 1 }
+          modify fun s => { s with sites := s.sites + 1, twoWays := site :: s.twoWays }
           let mode := (← read).lends site
           if mode != 0 then
             return ← elabBorrowScope scope tailPos p uniq (← lent) rest (mode == 2)
@@ -477,6 +477,8 @@ partial def elabStmts (scope : Scope) (tailPos : Bool) : List Stmt → M Atom
     -- lasting while the result is used: each is named first.
     if let .call id (.name q f) args := value then
       let borrows := args.filter fun a => (borrowOf a).isSome
+      unless borrows.isEmpty do
+        modify fun s => { s with twoWays := s.sites :: s.twoWays }
       if !borrows.isEmpty && (← read).lends (← get).sites == 2 then
         if let .fn _ ← resolveName scope q f then
           let site := (← get).sites
@@ -674,7 +676,7 @@ partial def lendWithin (scope : Scope) (s : Stmt) : M (Option (List Stmt)) := do
     | other => pure (other, []) : M (Stmt × List (String × Expr)))
   -- (Whether this is a place at all does not depend on how it is tried.)
   if (← named false true).2.isEmpty then return none
-  modify fun st => { st with sites := st.sites + 1 }
+  modify fun st => { st with sites := st.sites + 1, twoWays := site :: st.twoWays }
   if mode == 0 then return none
   let (s', found) ← named (mode == 2) (mode == 2)
   if found.isEmpty then return none
@@ -1037,6 +1039,8 @@ structure Output where
   /-- Places that are calls inside statements that are places themselves,
   each with its statement's. -/
   under : List (Nat × Nat) := []
+  /-- The places that can be tried two ways. -/
+  twoWays : List Nat := []
 
 /-! ## Traits
 
@@ -1720,6 +1724,6 @@ def elabProgram (items : List Item) (blocks : Option Blocks := none)
       out := out.set! info.id name
     pure out
   pure ⟨⟨st.fns.toList, .let_ (.closure mainIdx []) (.tail (.var 0) [])⟩, names, st.names,
-    opNames, st.envSizes, st.lent, st.sites, st.plain.reverse, st.foreign, st.under⟩
+    opNames, st.envSizes, st.lent, st.sites, st.plain.reverse, st.foreign, st.under, st.twoWays⟩
 
 end Glorious.Elab

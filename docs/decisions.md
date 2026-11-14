@@ -2934,11 +2934,15 @@ borrow tried).
 - The search tries each place alone when all at once fails, side by side.
   It gave up on programs with more than 32 places, which with the standard
   library is soon reached, and then no borrow of the program was a scope;
-  the limit is 160 now. A call inside a statement is asked only where the
-  statement's own place fails. The cost is real: a program of 88 places,
-  26 of which fail, takes 6.4 s where it took 4.2 s without the search. A
-  search that asks about one function at a time, and not the whole
-  program each time, is what would remove it.
+  the limit is 160 now. Three things keep the cost down: a call inside a
+  statement is asked only where the statement's own place fails; the second
+  way is tried only where a place has one; and where there are more than
+  16 places they are first asked a run of them at a time, since few fail
+  and a run that passes whole needs none of its places asked alone. A
+  program of 88 places takes 6.0 s and 21 s of processor time; asked one
+  place at a time it took 10.1 s and 126 s. Each try still certifies the
+  whole program again: a search that asks about one function at a time is
+  what would remove the rest.
 
 ## What a function touches is written down once
 

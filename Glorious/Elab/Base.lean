@@ -259,6 +259,10 @@ structure St where
   the statement's: where the statement's borrows are made scopes, the call's
   are among them. -/
   under : List (Nat × Nat) := []
+  /-- The places that can be tried two ways, the second with the borrow
+  lasting longer: the others are a call's, and a call's lasts as long as
+  the call. -/
+  twoWays : List Nat := []
   /-- Where the statement being elaborated starts. -/
   pos : Nat × Nat := (0, 0)
   /-- The borrows that are not scopes of their own: each is the reference it

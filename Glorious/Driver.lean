@@ -373,16 +373,30 @@ def compileSource (src : String) (check : Bool := true)
             -- by side: the answers are what they would be one at a time.)
             let try_ := fun (i : Nat) =>
               if (lending blocks (fun j => if j == i then 1 else 0)).isSome then 1
+              -- (The second way, where the place has one.)
+              else if !out.twoWays.contains i then 0
               else if (lending blocks (fun j => if j == i then 2 else 0)).isSome then 2
               else 0
             -- A call inside a statement is asked only if the statement's
             -- own place fails: where that passes, the call's borrows are
             -- the statement's.
+            -- Where there are many places, they are first asked a run of
+            -- them at a time: few fail, and a run that passes whole needs
+            -- no place of it asked alone. (Places are numbered in the order
+            -- they are written, so a run is mostly one function's.)
+            let size := if out.sites ≤ 16 then 1 else (out.sites + 7) / 8
+            let whole : List (Task Bool) :=
+              if size == 1 then []
+              else (List.range ((out.sites + size - 1) / size)).map fun g => Task.spawn fun _ =>
+                (lending blocks (fun j => if j / size == g then 1 else 0)).isSome
+            let whole := whole.map Task.get
+            let passed := fun (i : Nat) => size != 1 && whole[i / size]?.getD false
             let first : List (Task Nat) := (List.range out.sites).map fun i => Task.spawn fun _ =>
-              if (out.under.lookup i).isSome then 0 else try_ i
+              if passed i then 1 else if (out.under.lookup i).isSome then 0 else try_ i
             let first := first.map Task.get
             let second : List (Task Nat) := (List.range out.sites).map fun i => Task.spawn fun _ =>
-              match out.under.lookup i with
+              if passed i then 1
+              else match out.under.lookup i with
               | some stmt => if first[stmt]?.getD 0 == 0 then try_ i else 0
               | none => first[i]?.getD 0
             let alone : List Nat := second.map Task.get

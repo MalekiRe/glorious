@@ -993,27 +993,30 @@ def generalize (t : Ty) (keep : List Ty := []) (top : Bool := true) : M Scheme :
   let t ← if top then (·.1) <$> openParams [] (← zonk t) else pure t
   let t ← zonk t
   let s ← get
-  let mut fixedTys : List Nat := []
-  let mut fixedRows : List Nat := []
-  let mut fixedCaps : List Nat := []
+  -- (Sets, and nothing appended to a list: what declarations fix is as much
+  -- as the program and its library declare, and this runs for every
+  -- function and every callable written in one.)
+  let mut fixedTys : Std.HashSet Nat := {}
+  let mut fixedRows : Std.HashSet Nat := {}
+  let mut fixedCaps : Std.HashSet Nat := {}
   for id in s.monoCaps do
-    fixedCaps := (← findCap id) :: fixedCaps
+    fixedCaps := fixedCaps.insert (← findCap id)
   -- A local callable is used at one type where a trait is needed of it: the
   -- evidence is found for the function it is written in, once.
   let bounded := if top then [] else s.bounds.toList.map (·.ty)
   for m in keep ++ bounded ++ s.mono.map Ty.var do
     let m ← zonk m
-    fixedTys := fixedTys ++ freeTys m
-    fixedRows := fixedRows ++ freeRows m
-    fixedCaps := fixedCaps ++ freeCaps m
+    fixedTys := (freeTys m).foldl (·.insert ·) fixedTys
+    fixedRows := (freeRows m).foldl (·.insert ·) fixedRows
+    fixedCaps := (freeCaps m).foldl (·.insert ·) fixedCaps
   for id in s.monoRows do
     let r ← zonkRow ⟨[], some id⟩
-    fixedRows := fixedRows ++ r.tail.toList
+    fixedRows := r.tail.toList.foldl (·.insert ·) fixedRows
     for (_, args) in r.effs do
       for a in args do
-        fixedTys := fixedTys ++ freeTys a
-        fixedRows := fixedRows ++ freeRows a
-        fixedCaps := fixedCaps ++ freeCaps a
+        fixedTys := (freeTys a).foldl (·.insert ·) fixedTys
+        fixedRows := (freeRows a).foldl (·.insert ·) fixedRows
+        fixedCaps := (freeCaps a).foldl (·.insert ·) fixedCaps
   -- What must be free to use more than once is part of the function's
   -- contract, so the capture variables it mentions are generalised too.
   let mut dups : Array (Ty × String) := #[]
@@ -1038,9 +1041,13 @@ def generalize (t : Ty) (keep : List Ty := []) (top : Bool := true) : M Scheme :
   -- function would ask it again, with a copy of all it mentions, and so
   -- would every use of whatever used it.
   let general := (freeTys t).eraseDups.filter (!fixedTys.contains ·)
+  let generalSet : Std.HashSet Nat := general.foldl (·.insert ·) {}
   let needs := (dups.toList ++ drops.toList ++ stays.toList).map (·.1)
   let mut pending := needs.map fun d => (freeTys d, freeCaps d)
+  -- (`reach` in the order found, and the same as a set to ask of: what a
+  -- type holds can be a great deal, and each was looked for in a list.)
   let mut reach : List Nat := (freeCaps t).eraseDups
+  let mut reached : Std.HashSet Nat := reach.foldl (·.insert ·) {}
   let mut todo := reach
   let mut found : Array (Nat × Nat × Captured) := #[]
   let mut more := true
@@ -1048,6 +1055,7 @@ def generalize (t : Ty) (keep : List Ty := []) (top : Bool := true) : M Scheme :
     more := false
     while !todo.isEmpty do
       let mut next : List Nat := []
+      let mut nextSet : Std.HashSet Nat := {}
       for c in todo do
         let root ← findCap c
         for i in s.capOut.getD root #[] do
@@ -1059,34 +1067,41 @@ def generalize (t : Ty) (keep : List Ty := []) (top : Bool := true) : M Scheme :
             let target ← zonk target
             found := found.push (i, root, .ty target)
             for c in freeCaps target do
-              unless reach.contains c || next.contains c do next := c :: next
+              unless reached.contains c || nextSet.contains c do
+                next := c :: next
+                nextSet := nextSet.insert c
           | some (_, what) => found := found.push (i, root, what)
           | none => pure ()
       reach := reach ++ next
+      reached := next.foldl (·.insert ·) reached
       todo := next
     -- The needs that are about what has been reached so far.
     let mut rest : List (List Nat × List Nat) := []
+    let mut todoSet : Std.HashSet Nat := {}
     for (tys, caps) in pending do
-      if tys.any general.contains || caps.any reach.contains then
+      if tys.any generalSet.contains || caps.any reached.contains then
         for c in caps do
-          unless reach.contains c || todo.contains c do
+          unless reached.contains c || todoSet.contains c do
             todo := c :: todo
+            todoSet := todoSet.insert c
         more := true
       else rest := (tys, caps) :: rest
     pending := rest
     reach := reach ++ todo
+    reached := todo.foldl (·.insert ·) reached
   -- (In the order the edges were made.)
   let all := (found.qsort fun a b => a.1 < b.1).map fun (_, root, what) => (root, what)
   let cvars := reach.filter (!fixedCaps.contains ·)
-  let tvars := (freeTys t).eraseDups.filter (!fixedTys.contains ·)
+  let cset : Std.HashSet Nat := cvars.foldl (·.insert ·) {}
+  let tvars := general
   let mine := dups.toList.filter fun (d, _) =>
-    (freeTys d).any tvars.contains || (freeCaps d).any cvars.contains
+    (freeTys d).any generalSet.contains || (freeCaps d).any cset.contains
   let unused := drops.toList.filter fun (d, _) =>
-    (freeTys d).any tvars.contains || (freeCaps d).any cvars.contains
+    (freeTys d).any generalSet.contains || (freeCaps d).any cset.contains
   pure { tvars, rvars := (freeRows t).eraseDups.filter (!fixedRows.contains ·), cvars,
-         edges := all.toList.filter (cvars.contains ·.1), dups := mine, ty := t,
+         edges := all.toList.filter (cset.contains ·.1), dups := mine, ty := t,
          drops := unused,
          stays := stays.toList.filter fun (d, _) =>
-           (freeTys d).any tvars.contains || (freeCaps d).any cvars.contains }
+           (freeTys d).any generalSet.contains || (freeCaps d).any cset.contains }
 
 end Glorious.Check
