@@ -1048,7 +1048,8 @@ def checkUses (pos : String) (outer : Scope) (binds : Scope) (body : List Stmt) 
               if let some (line, col) := s.bindSites.lookup bid then
                 kept := true
                 modify fun st => { st with
-                  dropCands := st.dropCands.push (⟨st.owner, line, col, x, false⟩, t, pos)
+                  dropCands := st.dropCands.push
+                    (⟨st.owner, line, col, (if st.letBinds.contains bid then Syntax.letSite x else x), false⟩, t, pos)
                   aparts := st.aparts.filter fun (_, _, whose) => whose != some bid }
     if kept then continue
     if apart then

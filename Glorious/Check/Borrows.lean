@@ -895,6 +895,16 @@ def checkLifetimes : M Unit := do
         unless ← outlasts b a do
           throw s!"what lasts for `{x}` is made to depend on what lasts for `{y}`: say `{y}: {x}` if `{y}` lasts at least as long"
 
+/-- Refuse the read of a field of a value that is in no variable, where the
+value's own type has a `drop` to run: nothing would run it. (In the type's
+own `drop` the value is being let go, and its fields are what is left.) -/
+def ownDropRead (subject : Ty) : M Unit := do
+  if let .con n _ ← find subject then
+    let s ← get
+    if s.dropMode && s.kimpls.any (fun I => I.trait == "Drop" && I.head == n)
+        && s.owner != Syntax.implFnName "Drop" n "drop" then
+      throw s!"{s.pos}a field is read of a `{bareName n}` that is in no variable, and a `{bareName n}` has a `drop` to run, which nothing then would: give the value a name first, `let value = ..; value.field`"
+
 /-- A whole number written without a type, where a value of type `t` is
 wanted: if `t` is known to be a type of whole numbers, the number is of that
 type, and this is whether it fits. None if `t` is not such a type: then the

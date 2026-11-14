@@ -698,6 +698,8 @@ structure St where
   wildCount : Nat := 0
   /-- Whether the pattern being read is a `let`'s. -/
   wildLet : Bool := false
+  /-- The names bound by the pattern of a `let`, by their bindings. -/
+  letBinds : List Nat := []
   /-- A program in which some type has `Drop`: values are destroyed where
   they are let go, each type by its own function, and a function is given
   how to destroy the types it is generic in. Without `Drop` anywhere there

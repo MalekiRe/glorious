@@ -1535,7 +1535,19 @@ private partial def parseStmts : P (List Stmt) := do
           let t' ← peek
           if t' == .punct "}" || t' == .punct "," then
             out := out.push (.expr (.tuple []))
-        | _ => out := out ++ (← settle (.let_ pat value)).toArray
+        | _ =>
+          -- `let [a, b, c] = xs`, where the program has arrays of a fixed
+          -- length: `xs` is one of exactly three, taken apart as a tuple.
+          let here ← get
+          let ctx ← read
+          let id := if here < 100000 then ctx.base + here + 900000 else 0
+          let (pat, value) := match pat, ctx.fixed with
+            | .ctor name none args, true =>
+              if (arrayPatLen name).isSome then
+                (Pattern.tuple args, Expr.call id (preludeFn "elements") [value])
+              else (pat, value)
+            | _, _ => (pat, value)
+          out := out ++ (← settle (.let_ pat value)).toArray
     else if t == .ident "defer" then
       advance
       let e ← parseBinary 0 false

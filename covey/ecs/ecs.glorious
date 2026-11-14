@@ -3,12 +3,29 @@
 // A system is a plain function, and its parameters say what it touches:
 //
 //     fn integrate(positions: &mut Column<Position>, velocities: &Column<Velocity>) { .. }
+//     fn wound(hit: &Hit, healths: &mut Column<Health>) { .. }
+//     fn reap(healths: &Column<Health>, commands: &mut Commands) { .. }
+//
+// and an app is built by saying what there is and what runs when:
+//
+//     app().register<Position>().register<Velocity>()
+//          .add_systems(Update, (integrate, friction, bound).chain())
+//          .on<Hit>((wound, reap).chain())
+//          .add_plugins(physics)
 //
 // The world's storage is a tuple of columns, one inside the next, and an
 // app is that world with a list of the systems registered under each label.
-// Both are types, so which column a system's parameter is, and which
-// systems a label runs, are found by the compiler: by implementations of
-// `Get` and `Dispatch` that fit the type.
+// Both are types, so everything about a system is found when the program is
+// compiled, by implementations that fit the types:
+//
+//   which column a parameter is          `Get`
+//   what each parameter asks for         `Parameter`, then `Fetch` for the list
+//   that no component is asked for twice `AllApart`
+//   which systems a label runs           `Dispatch`
+//
+// A system that asks for a component that was not registered, or for one
+// twice, or for a value its label does not carry, does not compile. When
+// the program runs, each of those calls is a call of a known function.
 
 use std::tuple::{Tuple, nest};
 

@@ -159,6 +159,9 @@ partial def inferExpr (scope : Scope) (amb : Row) : Expr → M Ty
       | some (bid, x) =>
         modify fun s => { s with partReads := s.partReads.push (bid, x, subject, idx, name, s.pos) }
       | none =>
+        -- A value that is in no variable and has a `drop` of its own to
+        -- run: taking a field of it would let it go without that.
+        ownDropRead subject
         match ← otherFields subject idx with
         | some rest =>
           for r in rest do
@@ -193,6 +196,9 @@ partial def inferExpr (scope : Scope) (amb : Row) : Expr → M Ty
       | some (bid, x) =>
         modify fun s => { s with partReads := s.partReads.push (bid, x, subject, idx, toString idx, s.pos) }
       | none =>
+        -- A value that is in no variable and has a `drop` of its own to
+        -- run: taking a field of it would let it go without that.
+        ownDropRead subject
         match ← otherFields subject idx with
         | some rest =>
           for r in rest do
@@ -1008,6 +1014,10 @@ partial def inferStmts (scope : Scope) (amb : Row) (stmts : List Stmt)
           || ((← get).aliases.lookup x).isSome do
         modify fun s =>
           { s with dropCands := s.dropCands.push (⟨s.owner, at_.1, at_.2, x, false⟩, t, pos) }
+    -- (A type left to an implementation is found now where it can be: what
+    -- the pattern takes, and what is read of it after, is then of a type
+    -- that is known, and what has a `drop` to run is seen to have one.)
+    settleAssocs
     let binds ← match pat with
       | .var _ => inferPat pat t
       | _ => do
@@ -1018,7 +1028,8 @@ partial def inferStmts (scope : Scope) (amb : Row) (stmts : List Stmt)
         modify fun s => { s with wildAt := none, wildLet := false }
         let mentioned := Elab.fvStmts [] rest
         for (x, b) in binds do
-          if let .val tx _ := b then
+          if let .val tx bid := b then
+            modify fun s => { s with bindSites := (bid, at_.1, at_.2) :: s.bindSites, letBinds := bid :: s.letBinds }
             unless mentioned.contains x || x.startsWith "%" do
               let site : Elab.DropSite := ⟨(← get).owner, at_.1, at_.2, Syntax.letSite x, false⟩
               modify fun s => { s with dropCands := s.dropCands.push (site, tx, pos) }

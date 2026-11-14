@@ -902,7 +902,37 @@ impl Show for f32 {
 "# ++ String.join ((Syntax.scalars.filterMap fun (t, width) => width.map fun w =>
     if w == -128 then unsigned128 else wholeNumber t w))
 
-def source : String := core ++ operators ++ scalars ++ world
+/-- A `[T; N]` as a tuple of its elements, for each length up to eight: what
+`let [a, b, c] = xs` takes `xs` apart with. Written out for each length,
+since a length is a type and a tuple of so many is another. -/
+private def fixedElements : String :=
+  let number := fun (n : Nat) =>
+    let rec bits (fuel k : Nat) : String :=
+      match fuel, k with
+      | _, 0 => "Z"
+      | 0, _ => "Z"
+      | fuel + 1, k => (if k % 2 == 0 then "B0<" else "B1<") ++ bits fuel (k / 2) ++ ">"
+    bits 64 n
+  let one := fun (n : Nat) =>
+    let places := List.range n
+    let tuple := fun (xs : List String) => match xs with
+      | [] => "()"
+      | [x] => s!"({x},)"
+      | xs => s!"({", ".intercalate xs})"
+    -- (The last element comes off first.)
+    let pops := places.reverse.map fun i =>
+      s!"let (r{i}, x{i}) = arr_pop({if i + 1 == n then "a.0" else s!"r{i + 1}"}, 0); "
+    s!"impl<T> Elements for Fixed<T, {number n}> \{
+    type Each = {tuple (places.map fun _ => "T")};
+    fn elements(a) \{ {String.join pops}{tuple (places.map fun i => s!"x{i}")} }
+}
+"
+  "
+// A `[T; N]` as a tuple of its elements: `let [a, b, c] = xs`.
+trait Elements { type Each; fn elements(Self) -> Each }
+" ++ String.join ((List.range 9).map one)
+
+def source : String := core ++ operators ++ scalars ++ world ++ fixedElements
 
 /-- The prelude of a program run without the checker. -/
 def unchecked : String := core ++ intOperators ++ world

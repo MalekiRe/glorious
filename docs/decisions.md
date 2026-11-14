@@ -2989,8 +2989,10 @@ the order it is being built:
   the trait's has every other trait asked of that type. The fallback is a
   general rule of the checker; the prelude uses it once. A program that
   writes no length in brackets has its literals as before.
-- **Limits of fixed arrays**: `let [a, b, c] = xs` is not read for one (a
-  pattern is of an array that can grow); `[x; n]` makes an array that can
+- **`let [a, b, c] = xs` takes a fixed array apart** as a tuple of its
+  elements: `elements(xs)`, by an implementation the prelude has for each
+  length up to eight.
+- **Limits of fixed arrays**: `[x; n]` makes an array that can
   grow, and `fixed_repeat(x)` one of a fixed length; in an
   implementation, `where N: Known` is written and the number is
   `N::VALUE`; no arithmetic on lengths (`[T; N + 1]`); a length is checked
@@ -3007,6 +3009,14 @@ the order it is being built:
   clause's whole pattern (not inside `Some(..)`, not a function's
   parameter, not `let`); taking the first element off copies the others
   (`sum` over `[x, ..rest]` is quadratic); a tuple has no `..` yet.
+- **Two more skipped destructors.** A name bound by the pattern of a `let`
+  of which only fields were read, `let (a, b) = pair(); a.0`, was never
+  destroyed (as a clause's name is, it now is when the block ends, and what
+  is left of one a field was moved out of). And a field read of a value in
+  no variable whose own type has a `drop`, `make().0` or `pair.0.0`, let
+  the value go without running it: that is refused, with what to write.
+  Before the pattern of a `let` is read, a type left to an implementation
+  is found where it can be, so that what has a `drop` is seen to have one.
 - **A destructor was skipped, the fourth time**: what the pattern of a `let`
   took under a name nothing used, or under `_` (`let (a, b) = pair();`),
   was not destroyed. It is now, as a clause's is. And `x;` and `let _ = x`

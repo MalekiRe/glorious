@@ -1317,7 +1317,7 @@ private partial def untraitStmts (tr : TraitInfo) (owner : String) (pos : Nat ×
       let site := fun (x : String) => (⟨owner, pos.1, pos.2, Syntax.letSite x, false⟩ : DropSite)
       let (pats, _) := nameWilds (fun k => (dropHook tr (site (letWildName pos.1 pos.2 k))).isSome) [pat] 0
       let pat := letWilds pos ((pats.head?).getD pat)
-      let hooks := (patVars pat).filterMap fun x => dropHook tr (site x)
+      let hooks := (patVars pat).flatMap fun x => (dropHook tr (site x)).toList ++ partHooks tr owner pos x
       .let_ pat value :: hooks.map (if tailsStmts rest then Stmt.expr else Stmt.defer) ++ rest
   | .assign target value :: rest =>
     let value := untraitExpr tr owner value
