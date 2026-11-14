@@ -2903,9 +2903,9 @@ def cases : List Case := [
   -- A `defer` block that takes out what a variable holds is the cleanup the variable needs.
   ⟨"struct Ticket(Int);\nimpl Use<[1, 1]> for Ticket {}\nfn redeem(t: Ticket) -> Int { match(t) { Ticket(n) => n } }\nfn main() -> Int { let mut held = Some(Ticket(3)); defer { match(replace(&mut held, None)) { Some(t) => redeem(t), None => 0 }; } match(replace(&mut held, None)) { Some(t) => redeem(t), None => 0 } }",
     [], "3"⟩,
-  -- A callable that takes hold of a value with `Drop` has to be called: nothing destroys what a callable holds.
+  -- A callable that takes hold of a value with `Drop` and is let go uncalled destroys it.
   ⟨"struct Noisy(Int);\nimpl Drop for Noisy { fn drop(n) { say(n.0) } }\nfn eat(n: Noisy) -> Int { 5 }\nfn main() -> Int { let n = Noisy(1); let f = { eat(n) }; 0 }",
-    [], "error: 4:20: in `main`: `n` is used on one path and not on another, and a `Noisy` has a `drop` to run: where it is not used nothing would run it. Use it on every path, let it go there with a function that takes it, or keep it in a variable (`let mut n`), which is destroyed where it was not used"⟩,
+    [], "1\n0"⟩,
   ⟨"struct Noisy(Int);\nimpl Drop for Noisy { fn drop(n) { say(n.0) } }\nfn eat(n: Noisy) -> Int { 5 }\nfn main() -> Int { let n = Noisy(1); let f = { eat(n) }; f() }",
     [], "1\n5"⟩,
   ⟨"struct Noisy(Int);\nimpl Drop for Noisy { fn drop(n) { say(n.0) } }\nfn eat(n: Noisy) -> Int { 5 }\nfn run(f: fn() -> Int) -> Int { f() }\nfn main() -> Int { let n = Noisy(1); run({ eat(n) }) }",
@@ -2915,7 +2915,21 @@ def cases : List Case := [
   ⟨"struct Noisy(Int);\nimpl Drop for Noisy { fn drop(n) { say(n.0) } }\nfn eat(n: Noisy) -> Int { 5 }\nfn later(n: Noisy) -> fn() -> Int { { eat(n) } }\nfn main() -> Int { let f = later(Noisy(1)); f() }",
     [], "1\n5"⟩,
   ⟨"struct Noisy(Int);\nimpl Drop for Noisy { fn drop(n) { say(n.0) } }\nfn eat(n: Noisy) -> Int { 5 }\nfn later(n: Noisy) -> fn() -> Int { { eat(n) } }\nfn main() -> Int { let f = later(Noisy(1)); 0 }",
-    [], "error: 5:20: in `main`: `f` is not used on every path, but a callable that holds a `Noisy`, whose `drop` would then not run, has to be used"⟩,
+    [], "1\n0"⟩,
+  -- A callable kept by another is destroyed with it; one called on a path is given up on the others with `cancel`.
+  ⟨"struct Noisy(Int);\nimpl Drop for Noisy { fn drop(n) { say(n.0) } }\nfn eat(n: Noisy) -> Int { 5 }\nfn main() -> Int { let n = Noisy(2); let inner = { eat(n) }; let outer = { inner() + 1 }; 0 }",
+    [], "2\n0"⟩,
+  ⟨"struct Noisy(Int);\nimpl Drop for Noisy { fn drop(n) { say(n.0) } }\nfn eat(n: Noisy) -> Int { 5 }\nfn pick(c: Bool) -> Int { let n = Noisy(8); let f = { eat(n) }; if(c) { f() } else { 0 } }\nfn main() -> Int { say(pick(true)); pick(false) }",
+    [], "error: 4:45: in `pick`: `f` is used on one path and not on another, and it holds a `Noisy`, which has a `drop` to run: where it is not used nothing would run it. Use it on every path, or give it up there with `cancel(f)`, which destroys what it holds"⟩,
+  ⟨"struct Noisy(Int);\nimpl Drop for Noisy { fn drop(n) { say(n.0) } }\nfn eat(n: Noisy) -> Int { 5 }\nfn pick(c: Bool) -> Int { let n = Noisy(8); let f = { eat(n) }; if(c) { f() } else { cancel(f); 0 } }\nfn main() -> Int { say(pick(true)); pick(false) }",
+    [], "8\n5\n8\n0"⟩,
+  ⟨"struct Noisy(Int);\nimpl Drop for Noisy { fn drop(n) { say(n.0) } }\nfn take(n: Noisy, k: Int) -> Int { k }\nfn main() -> Int { let a = Noisy(1); let b = Noisy(2); let f = fn(k: Int) { take(a, k) + take(b, k) }; 9 }",
+    [], "1\n2\n9"⟩,
+  -- One that performs operations is given up where they could be: not in the cleanup that ends its block.
+  ⟨"struct Noisy(Int);\nimpl Drop for Noisy { fn drop(n) { say(n.0) } }\nfn eat(n: Noisy) -> Int { 5 }\neffect E { e() -> Int }\nfn work() -> Int { let n = Noisy(7); let f = { e() + eat(n) }; 1 }\nfn main() -> Int { handle work() { e(k) => k(2) } }",
+    [], "error: 5:38: in `work`: `f` is let go here holding something with a `drop` to run, which giving it up would run; but it performs operations, and it can be given up only where they could be performed, which is not where it is let go. Call it, or give it up first with `cancel(f)`"⟩,
+  ⟨"struct Noisy(Int);\nimpl Drop for Noisy { fn drop(n) { say(n.0) } }\nfn eat(n: Noisy) -> Int { 5 }\neffect E { e() -> Int }\nfn work() -> Int { let n = Noisy(7); let f = { e() + eat(n) }; cancel(f); 1 }\nfn main() -> Int { handle work() { e(k) => k(2) } }",
+    [], "7\n1"⟩,
   -- A value with `Drop` is used on every path or on none: where a path does not use it, nothing would run its `drop`.
   ⟨"struct Noisy(Int);\nimpl Drop for Noisy { fn drop(n) { say(n.0) } }\nfn eat(n: Noisy) -> Int { 5 }\nfn main() -> Int { let n = Noisy(1); if(2 < 1) { eat(n) } else { 7 } }",
     [], "error: 4:20: in `main`: `n` is used on one path and not on another, and a `Noisy` has a `drop` to run: where it is not used nothing would run it. Use it on every path, let it go there with a function that takes it, or keep it in a variable (`let mut n`), which is destroyed where it was not used"⟩,

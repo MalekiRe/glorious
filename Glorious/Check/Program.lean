@@ -136,6 +136,14 @@ holds nothing more than was seen on the way. -/
 partial def needsDestroying (seen : List String) (t : Ty) : M Bool := do
   match ← find t with
   | .tuple args => args.anyM (needsDestroying seen)
+  | .fn .. =>
+    -- A callable that holds something with a `drop` to run: giving it up
+    -- runs them.
+    let before := (← get).seen
+    modify fun s => { s with seen := [] }
+    let held ← tyHasDrop [] t
+    modify fun s => { s with seen := before }
+    pure held.isSome
   | .con name args =>
     if (← get).kimpls.any fun I => I.trait == "Drop" && I.head == name then return true
     let key ← spellTy (.con name args)
@@ -315,6 +323,18 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
       -- generic in is not destroyed.)
       let ty ← zonk ty
       if (← get).coercing.contains site.owner && !(← needsDestroying [] ty) then continue
+      -- (What a callable captures is destroyed by it only where its type is
+      -- known to need that: a function is not asked how to destroy what
+      -- its callables capture of a type it is generic in.)
+      if (Syntax.captureSiteOf site.name).isSome then
+        unless (freeTys ty).isEmpty && !hasParam ty && (← needsDestroying [] ty) do continue
+      -- A callable is destroyed by giving it up, which is done where nothing
+      -- may be performed (a cleanup, or what destroys another callable); and
+      -- giving one up is allowed only where what it performs could be.
+      if let .fn _ _ effs _ _ ← find ty then
+        if !effs.isEmpty && (← needsDestroying [] ty) then
+          let name := (Syntax.captureSiteOf site.name).getD ((Syntax.letSiteOf site.name).getD site.name)
+          throw (inFunction site.owner s!"{pos}`{name}` is let go here holding something with a `drop` to run, which giving it up would run; but it performs operations, and it can be given up only where they could be performed, which is not where it is let go. Call it, or give it up first with `cancel({name})`")
       if (← needsDestroying [] ty) || !(freeTys ty).isEmpty || hasParam ty then
         let id := 2000000000 + (← get).dropAsked
         modify fun s => { s with dropAsked := s.dropAsked + 1, dropSites := s.dropSites.push (site, id) }
@@ -1464,7 +1484,8 @@ def finish : M Elab.Blocks := do
     let mut unlinked : Array (Ty × String) := #[]
     for (id, owner, input, why) in s.assumedLinks do
       unless links.contains (id, owner) do unlinked := unlinked.push (input, why)
-    checkDrops unlinked
+    -- (What such a block lets go of, nothing destroys.)
+    checkDrops unlinked (callables := true)
     let implEs := s.impls.toList.map fun im =>
       let names := (s.traits.lookup (Syntax.traitBase im.trait)).getD []
       (⟨im.dictFn, im.context.length + im.extra.length, names.map fun m =>

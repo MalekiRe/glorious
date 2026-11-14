@@ -591,9 +591,9 @@ inductive HasTm (Δ : Ctx) (ϕ : List Rgn) : TEnv → Tm → Ty → Row → Prop
       HasTm Δ ϕ Γ (.guardTail cleanup thunk) τ ε
   /-- Giving up a callable may run the cleanups of what it captured, among
   whatever that could still perform and touch. -/
-  | cancel {Γ : TEnv} {k : Atom} {body : Tm} {n : Nat} {σ ρ τ : Ty} {ε' ε : Row} {once : Bool}
-      {env : Option (List Ty)} {acc : List Rgn} :
-      HasAtom Γ k (.fn n [σ] ρ ε' once env acc) → Row.le ε' ε → Sub acc ϕ →
+  | cancel {Γ : TEnv} {k : Atom} {body : Tm} {n : Nat} {Ps : List Ty} {ρ τ : Ty} {ε' ε : Row}
+      {once : Bool} {env : Option (List Ty)} {acc : List Rgn} :
+      HasAtom Γ k (.fn n Ps ρ ε' once env acc) → Row.le ε' ε → Sub acc ϕ →
       Linear Δ Γ (atomVars [k]) (fv body) →
       HasTm Δ ϕ (Γ ++ [.unit]) body τ ε → HasTm Δ ϕ Γ (.cancel k body) τ ε
   | cell {Γ : TEnv} {init thunk : Atom} {body : Tm} {n : Nat} {r : Rgn} {σ ρ τ : Ty}

@@ -294,6 +294,21 @@ def letSite (x : String) : String := s!"%let:{x}"
 def letSiteOf (name : String) : Option String :=
   if name.startsWith "%let:" then some (name.drop 5).toString else none
 
+/-- Where a callable written at a statement captures `x`: the site under which
+the checker says how what `x` holds is destroyed if the callable is let go
+without being called. -/
+def captureSite (x : String) : String := s!"%capture:{x}"
+
+def captureSiteOf (name : String) : Option String :=
+  if name.startsWith "%capture:" then some (name.drop 9).toString else none
+
+/-- A callable with what destroys it if it is let go: `%destroyed(callable,
+{ .. })`, where the block destroys what the callable captured, by its names. -/
+def destroyedMark : String := "%destroyed"
+
+/-- The head under which callables are destroyed: by giving them up. -/
+def callableHead : String := "(callable)"
+
 /-- The name an array pattern with a rest has until its clause is written
 out: how many patterns come before the rest, and the identity of its `[`. -/
 def restPatName (before id line col : Nat) : String := s!"%rest:{before}:{id}:{line}:{col}"

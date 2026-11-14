@@ -42,11 +42,11 @@ def mustInfo : M MustInfo := do
 callable has to be called if it holds something that has to be used, or
 something with a `drop` to run: nothing destroys what a callable holds, so
 one that is let go without being called would take the value with it. -/
-partial def tyMustUse (info : MustInfo) (visiting : List String) (t : Ty) :
-    M (Option String) := do
+partial def tyMustUse (info : MustInfo) (visiting : List String) (t : Ty)
+    (callables : Bool := false) : M (Option String) := do
   match ← find t with
   | .var _ => pure none
-  | .tuple args => args.findSomeM? (tyMustUse info visiting)
+  | .tuple args => args.findSomeM? (tyMustUse info visiting · callables)
   | .fn _ _ _ _ cap => do
     let root ← findCap cap
     -- What it captures, by place among the program's captures.
@@ -65,24 +65,27 @@ partial def tyMustUse (info : MustInfo) (visiting : List String) (t : Ty) :
     for (i, what) in mine do
       if let .ty held := what then
         unless s.sharedEdges.contains i || s.givenEdges.contains i do
-          if let some what ← tyMustUse info visiting held then
+          if let some what ← tyMustUse info visiting held callables then
             return some s!"a callable that holds {what}"
-          if let some name ← tyHasDrop [] held then
-            return some s!"a callable that holds a `{name}`, whose `drop` would then not run,"
+          -- (A callable let go is given up, which destroys what it holds;
+          -- `callables` asks of one that is let go where nothing does.)
+          if callables then
+            if let some name ← tyHasDrop [] held then
+              return some s!"a callable that holds a `{name}`, whose `drop` would then not run,"
     -- The value of a variable that gives it away: the variable's cleanup
     -- runs its `drop` where the callable did not use it, so only what has
     -- to be used makes the callable one that has to be called.
     for (i, what) in mine do
       if let .ty held := what then
         if s.givenEdges.contains i && !s.sharedEdges.contains i then
-          if let some what ← tyMustUse info visiting held then
+          if let some what ← tyMustUse info visiting held callables then
             return some s!"a callable that holds {what}"
     return none
   | .ref _ _ _ => pure none
   | .con name args => do
     if let some (must, _) := (← get).useDecls.lookup name then
       if must then return some s!"a `{bareName name}`"
-    if let some w ← args.findSomeM? (tyMustUse info visiting) then return some w
+    if let some w ← args.findSomeM? (tyMustUse info visiting · callables) then return some w
     if visiting.contains name then return none
     match (← get).types.lookup name with
     | none => pure none
@@ -92,7 +95,7 @@ partial def tyMustUse (info : MustInfo) (visiting : List String) (t : Ty) :
         | none => pure none
         | some sig =>
           (sig.fieldsAt args).findSomeM?
-            (tyMustUse info (name :: visiting))
+            (tyMustUse info (name :: visiting) · callables)
 
 /-- Does a type mention a type parameter the function being checked wrote?
 What such a type is, is known only where the function is used. -/
@@ -128,12 +131,12 @@ def checkAparts : M Unit := do
           unless here == home do
             throw s!"{pos}`{Syntax.lastSegment n}` has `Drop`, so only the module that declares it can take a field out of one: what `drop` does would not be done. Borrow the field, or ask the module for it"
 
-def checkDrops (drops : Array (Ty × String)) : M Unit := do
+def checkDrops (drops : Array (Ty × String)) (callables : Bool := false) : M Unit := do
   if drops.isEmpty then return
   let info ← mustInfo
   for (t, why) in drops do
     modify fun s => { s with seen := [] }
-    if let some what ← tyMustUse info [] t then
+    if let some what ← tyMustUse info [] t callables then
       throw s!"{why}, but {what} has to be used"
 
 def addUses (a b : Nat) : Nat := min 2 (a + b)
@@ -248,6 +251,12 @@ structure ACtx where
   probing : Bool := false
   /-- Where such a value goes is accounted for by whoever lets it go. -/
   lenient : Bool := false
+  /-- The callable being evaluated is kept in a variable: what it captures
+  is its own. -/
+  owning : Bool := false
+  /-- What is counted is a value a callable takes when it captures it (not a
+  variable's, which the callable only reaches). -/
+  capturesOwned : Bool := false
   /-- The blocks that are run where they are written, by their numbers. -/
   now : Std.HashSet Nat := {}
   /-- The functions being followed. One that calls itself is not followed
@@ -650,7 +659,18 @@ partial def runExpr (ctx : ACtx) (depth : Nat) (env : List (String × AVal)) : E
   | .tailCall id f args => runCall ctx depth env f args id
   | .closure id clauses =>
     if id != 0 && ctx.now.contains id then applyClauses ctx depth clauses env []
-    else pure [(.clo clauses ((activeMark, .data activeMark (ctx.active.map AVal.fn)) :: env), 0)]
+    else
+      -- Counting where a value is handed on: a callable that captures it
+      -- and is kept in a variable has it, and destroys it if it is let go
+      -- without being called. (The variable is then counted as any value.)
+      let captured := if ctx.handed && ctx.owning && ctx.capturesOwned then
+          let free := clauses.flatMap (Elab.fvClause [])
+          env.filter fun (y, v) => free.contains y && isTracked v
+        else []
+      let env := if captured.isEmpty then env
+        else env.map fun (y, v) => if captured.any (·.1 == y) then (y, AVal.unknown) else (y, v)
+      pure [(.clo clauses ((activeMark, .data activeMark (ctx.active.map AVal.fn)) :: env),
+        if captured.isEmpty then 0 else 1)]
   | .handle subject arms => do
     let subject ← runExpr ctx depth env subject
     let mut completions : List Clause := []
@@ -848,7 +868,11 @@ partial def runStmts (ctx : ACtx) (depth : Nat) (env : List (String × AVal)) :
       pure ((alts.map fun (v, n) => (v, n + first + letGo)) ++ left)
   | .let_ pat value :: rest => do
     let mut out : Alts := []
-    let found ← runExpr ctx depth env value
+    let owning := match pat, value with
+      | .var _, .closure _ _ => true
+      | .var _, .call _ (.name none m) [.closure _ _, _] => m == Syntax.ascribeMark
+      | _, _ => false
+    let found ← runExpr { ctx with owning := owning } depth env value
     for (v, n) in found do
       if isGone v then out := (v, n) :: out
       else
@@ -1299,16 +1323,28 @@ def runLowerChecks (fnTy : Ty) : M Unit := do
     -- Only a type that has to be used, or one not yet known, needs the count.
     let free := !(freeTys t).isEmpty || !(freeCaps t).isEmpty || hasParam t
     modify fun st => { st with seen := [] }
-    unless free || (← tyMustUse roots [] t).isSome do
+    -- (A callable kept by `let` is general in what it captures, but what it
+    -- holds is known: it has a `drop` to run if what it holds does.)
+    let heldDrop ← match ← find t with
+      | .fn .. => do
+        modify fun st => { st with seen := [] }
+        let held ← tyHasDrop [] t
+        modify fun st => { st with seen := [] }
+        pure held.isSome
+      | _ => pure false
+    unless (free && !heldDrop) || (← tyMustUse roots [] t).isSome do
       -- A value with a `drop` to run that is used on one path and not on
       -- another: where it is not, nothing would run its `drop`, since the
       -- paths are callables and it is theirs. (One no path uses stays in
       -- its variable, and is destroyed there.)
+      modify fun st => { st with seen := [] }
       if let some name ← tyHasDrop [] t then
         -- (A variable that gives its value away asks, when its block ends,
         -- whether it did: it may on some paths and not on others.)
         unless s.flagged.contains pos || usesStmts resumptive x body == 0 || usedFirst quiet x body do
-          if (pathUses { ctx with handed := true } names x body) == some 0 then
+          if (pathUses { ctx with handed := true, capturesOwned := true } names x body) == some 0 then
+            if heldDrop then
+              throw s!"{pos}`{x}` is used on one path and not on another, and it holds a `{name}`, which has a `drop` to run: where it is not used nothing would run it. Use it on every path, or give it up there with `cancel({x})`, which destroys what it holds"
             throw s!"{pos}`{x}` is used on one path and not on another, and a `{name}` has a `drop` to run: where it is not used nothing would run it. Use it on every path, let it go there with a function that takes it, or keep it in a variable (`let mut {x}`), which is destroyed where it was not used"
       continue
     let mut unused := false

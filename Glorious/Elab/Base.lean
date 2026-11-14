@@ -84,6 +84,11 @@ structure DropSite where
   assign : Bool
   deriving BEq
 
+/-- The site under which the checker says how what `x` holds is destroyed when
+the callable written as `written` (its hash), which captured it, is let go. -/
+def captureDropSite (owner : String) (written : UInt64) (x : String) : DropSite :=
+  ⟨owner, written.toNat, 0, Syntax.captureSite x, false⟩
+
 /-- The identity given to the calls of `Drop`'s function that the compiler
 writes, so that the borrow each passes is not taken for one the program wrote. -/
 def dropCallId : Nat := 4000000000
@@ -290,6 +295,9 @@ structure St where
   /-- Does the program call a foreign function, or read or write memory at an
   address? -/
   foreign : Bool := false
+  /-- Each function whose closures say how they are destroyed, with the
+  function that destroys what one captured. -/
+  drops : List (Nat × Nat) := []
 
 abbrev M := ReaderT Globals (StateT St (Except String))
 

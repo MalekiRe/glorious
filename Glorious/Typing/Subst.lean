@@ -842,7 +842,7 @@ theorem HasTm.inst (hΔ : Δ.Stable) (θ : List Rgn) {ϕ : List Rgn}
       (hlin.inst hΔ θ)
   | cancel hk hrow hacc hlin _ ih =>
     have hk' := hk.inst θ
-    simp only [Ty.inst_fn, List.map_cons, List.map_nil] at hk'
+    simp only [Ty.inst_fn] at hk'
     rw [snoc_inst] at ih
     have hu : Ty.unit.inst θ = Ty.unit := by simp [Ty.unit, Ty.inst_tuple]
     rw [hu] at ih

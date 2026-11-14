@@ -798,9 +798,24 @@ partial def inferCall (scope : Scope) (amb : Row) (f : Expr) (args : List Expr)
         checkArgs scope amb s!"`{x}`" [] args call
         pure (.tuple [.int, .int])
     | .cancel => do
-      -- Giving up a callable: a resumption, or anything else applied to one value.
+      -- Giving up a callable: a resumption, or any other callable, which
+      -- destroys what it holds. (Of one argument unless it is a name whose
+      -- type says otherwise.)
       let row ← freshRow
-      let given := Ty.func [← freshTy] (← freshTy) row (← freshCap)
+      let known ← match args with
+        | [.name none y] =>
+          match scope.lookup y with
+          | some (.val t _) => pure (some t)
+          | some (.poly p) => pure (some p.ty)
+          | _ => pure none
+        | _ => pure none
+      let arity ← match known with
+        | some t => do
+          match ← find t with
+          | .fn ps .. => pure ps.length
+          | _ => pure 1
+        | none => pure 1
+      let given := Ty.func (← (List.range arity).mapM fun _ => freshTy) (← freshTy) row (← freshCap)
       checkArgs scope amb "`cancel`" [given] args call
       -- A resumption of an operation declared `[1, 1]` is resumed: giving
       -- it up is letting it go.
@@ -1031,11 +1046,17 @@ partial def inferStmts (scope : Scope) (amb : Row) (stmts : List Stmt)
       { s with dropCands := s.dropCands.push (⟨s.owner, s.at_.1, s.at_.2, Elab.stmtValue, false⟩, t, s.pos) }
     inferStmts scope amb rest want
   | .let_ (.var x) (.closure id clauses) :: rest => do
+    let (at_, pos) := ((← get).at_, (← get).pos)
     let t ← withLater (Elab.fvStmts [x] rest) (inferExpr scope amb (.closure id clauses))
     if (← resolveCtor x none).isSome || ((← get).aliases.lookup x).isSome then
       let binds ← inferPat (.var x) t
       inferStmts (binds ++ scope) amb rest want
     else
+      -- A callable nothing then uses is let go when the block ends: if it
+      -- holds something to destroy, it is given up there.
+      unless (Elab.fvStmts [] rest).contains x do
+        modify fun s =>
+          { s with dropCands := s.dropCands.push (⟨s.owner, at_.1, at_.2, x, false⟩, t, pos) }
       -- A callable bound by `let` is a value, so it can be used at several types.
       -- Everything its surroundings already depend on stays fixed.
       let s ← get
@@ -1363,6 +1384,19 @@ partial def inferCallable (scope : Scope) (annots : List (Option Ty)) (ret : Opt
     (fun x => clauses.any fun c =>
       let u := Syntax.nameUseClause x c
       u.valued || u.valuedInside)
+  -- A value it captures is the callable's: if the callable is let go without
+  -- being called, it destroys the value. The elaborator asks how, by the
+  -- callable as written and the name.
+  let written := hash (Expr.closure id clauses)
+  for x in (clauses.flatMap (Elab.fvClause [])).eraseDups do
+    let held := match scope.lookup x with
+      | some (.val tx _) => some tx
+      -- (A callable kept by `let`: the value is the one callable.)
+      | some (.poly p) => some p.ty
+      | _ => none
+    if let some tx := held then
+      let site := Elab.captureDropSite (← get).owner written x
+      modify fun s => { s with dropCands := s.dropCands.push (site, tx, s.pos) }
   let loansBefore := (← get).loans.size
   -- What `unsafe { .. }` allows is allowed where it is written, not in a
   -- callable written inside it, which runs later.

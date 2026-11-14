@@ -268,6 +268,17 @@ structure St where
   coerces : Array (ITy × ITy × Bool) := #[]
   /-- Result types of labels: `never`, unless something needs them to be a type. -/
   nevers : Array ITy := #[]
+  /-- Callables given up whose type was not yet known: the type, and the
+  effects and regions where they were given up. Settled once the function's
+  body is read. -/
+  cancels : Array (ITy × IRow × Nat) := #[]
+  /-- The functions that give up a callable of whatever type they are given:
+  how callables are destroyed, and what destroys the captures of a closure.
+  What a use gives them is checked of each use. -/
+  anyCallable : List Nat := []
+  /-- How many arguments the callable a function captured at a place takes,
+  where that is known (`captureArities`). -/
+  capArities : Std.HashMap (Nat × Nat) Nat := {}
   /-- Functions and what they captured: one that captured something that cannot
   be duplicated can be called only once. -/
   onces : Array (ICls × List ITy) := #[]
@@ -1391,6 +1402,23 @@ where
       acc ← touched sub acc
     pure acc
 
+
+/-- A callable of type `kt` given up where the effects `amb` may be performed
+and the regions `self` touched: whatever it takes, a call of it could do what
+it says. -/
+def givenUp (kt : ITy) (amb : IRow) (self : Nat) (known : Option Nat := none) : M Unit := do
+  let ε' ← freshRow
+  let a ← freshAcc
+  -- A resumption or label takes one argument; a closure, any number.
+  let arity := match kt, known with
+    | .fn ps .., _ => ps.length
+    | _, some n => n
+    | _, none => 1
+  let ps ← (List.range arity).mapM fun _ => freshTy
+  unify kt (.func ps (← freshTy) ε' (← freshCls) (← freshTy) a)
+  needs ε' [] amb
+  accSub self a
+
 mutual
 
 /-- The general type of the group of `fn`, inferring the group if this is its first use. -/
@@ -1429,6 +1457,28 @@ partial def schemeOf (scc : Nat) : M Scheme := do
       inferTm sig.acc sig.row sig.ret (sig.params ++ sig.caps ++ binds).toArray c.body
       hints := hints.push (← get).hints
     raw := raw ++ [⟨f, sig, hints, (← get).refs⟩]
+  -- A callable given up, now that more is known of its type: one whose type
+  -- is still not known is taken to be a resumption's, of one argument, but
+  -- by a function that destroys callables of every type, or where it is
+  -- something the function captured, whose type its maker knows.
+  let anyCallable := (← get).anyCallable
+  let general := cur.any fun (f, _) => anyCallable.contains f
+  let mut captured : List (Nat × Option Nat) := []
+  let arities := (← get).capArities
+  for (f, sig) in cur do
+    for (c, j) in sig.caps.zipIdx do
+      if let .var v ← find c then captured := (v, arities[(f, j)]?) :: captured
+  for (kt, amb, self) in (← get).cancels do
+    match ← find kt with
+    | .var v =>
+      match captured.lookup v with
+      -- (Captured: of as many arguments as every closure made says, else
+      -- of whatever type its maker gives.)
+      | some (some n) => givenUp (.var v) amb self n
+      | some none => pure ()
+      | none => unless general do givenUp (.var v) amb self
+    | kt => givenUp kt amb self
+  modify fun s => { s with cancels := #[] }
   settle
   -- Write out what was learnt, and separate what is general from what is shared.
   let members ← raw.mapM fun m => do
@@ -1810,11 +1860,11 @@ partial def inferTm (self : Nat) (amb : IRow) (τ : ITy) (Γ : Array ITy) : Core
     let σ ← guarded Γ amb cleanup thunk
     unify σ τ
   | .cancel k body => do
-    let ε' ← freshRow
-    let a ← freshAcc
-    unify (← atomTy Γ k) (.func [← freshTy] (← freshTy) ε' (← freshCls) (← freshTy) a)
-    needs ε' [] amb
-    accSub self a
+    -- (One whose type is not known yet is settled when the body is read.)
+    let kt ← atomTy Γ k
+    match ← find kt with
+    | .var _ => modify fun s => { s with cancels := s.cancels.push (kt, amb, self) }
+    | kt => givenUp kt amb self
     inferTm self amb τ (Γ.push .unit) body
   | .cell init thunk body => do
     let ρ ← freshTy
@@ -2774,6 +2824,72 @@ partial def dupFlags (datas : List DataInst) : List DataInst :=
 
 /-! ## The certificate -/
 
+/-- What is known of a local, for how many arguments a callable it holds
+takes: nothing, that number, or that it is what a function captured there. -/
+inductive Slot where
+  | none
+  | arity (n : Nat)
+  | cap (fn j : Nat)
+
+def patBinds : Core.Pat → Nat
+  | .bind => 1
+  | .ctor _ ps => ps.attach.foldl (fun n ⟨q, _⟩ => n + patBinds q) 0
+  | _ => 0
+
+/-- For each function and place among its captures, how many arguments the
+callable it captured there takes, where every closure made of it says the
+same: what is given up without its type known in the function's own body
+is then known to be such a callable. -/
+partial def captureArities (p : Core.Program) (ncaps : Array Nat) : Std.HashMap (Nat × Nat) Nat :=
+  Id.run do
+  let arityOf := fun (g : Nat) =>
+    match p.fns[g]? with
+    | some ⟨c :: _⟩ => Slot.arity c.pats.length
+    | _ => Slot.none
+  let rec visit (env : Array Slot) (acc : Array ((Nat × Nat) × Slot)) : Core.Tm → Array ((Nat × Nat) × Slot)
+    | .let_ rhs body =>
+      match rhs with
+      | .closure g caps => visit (env.push (arityOf g)) (record env acc g caps) body
+      | .rebind _ g => visit (env.push (arityOf g)) acc body
+      | .atom (.var i) => visit (env.push (env[i]?.getD .none)) acc body
+      | _ => visit (env.push .none) acc body
+    | .handle ret ops caps _ body =>
+      visit (env.push .none) ((ret :: ops.map (·.2)).foldl (fun a g => record env a g caps) acc) body
+    | .handleTail ret ops caps _ => (ret :: ops.map (·.2)).foldl (fun a g => record env a g caps) acc
+    | .call _ _ body | .perform _ _ body | .label _ body | .cell _ _ body
+    | .lend _ _ _ _ _ body | .guard _ _ body | .cancel _ body | .mem _ _ body | .host _ _ body =>
+      visit (env.push .none) acc body
+    | _ => acc
+  let mut found : Array ((Nat × Nat) × Slot) := #[]
+  for (F, f) in p.fns.zipIdx do
+    for c in F.clauses do
+      let env := (Array.replicate c.pats.length Slot.none)
+        ++ ((List.range (ncaps[f]?.getD 0)).map fun j => Slot.cap f j).toArray
+        ++ Array.replicate (c.pats.foldl (fun n q => n + patBinds q) 0) Slot.none
+      found := visit env found c.body
+  -- (Where captures are captured again, what the first says.)
+  let mut known : Std.HashMap (Nat × Nat) Nat := {}
+  let mut bad : Std.HashSet (Nat × Nat) := {}
+  for _ in [0:8] do
+    for (key, s) in found do
+      let n := match s with
+        | .arity n => some n
+        | .cap f j => known[(f, j)]?
+        | .none => none
+      match n, known[key]? with
+      | some n, none => if !bad.contains key then known := known.insert key n
+      | some n, some m => if n != m then bad := bad.insert key
+      | none, _ => pure ()
+  for (key, s) in found do
+    if let .none := s then bad := bad.insert key
+  pure (bad.fold (fun k b => k.erase b) known)
+where
+  record (env : Array Slot) (acc : Array ((Nat × Nat) × Slot)) (g : Nat) (caps : List Atom) :=
+    caps.zipIdx.foldl (fun acc (a, j) =>
+      match a with
+      | .var i => acc.push ((g, j), env[i]?.getD .none)
+      | _ => acc) acc
+
 /-- How many values each function captures, read off the places that build it. -/
 def captureCounts (p : Core.Program) : Array Nat := Id.run do
   let mut out := Array.replicate p.fns.length 0
@@ -2811,6 +2927,11 @@ def certifyM (items : List Item) (g : Elab.Globals) (p : Core.Program)
   declare items g
   modify fun s =>
     { s with
+      anyCallable :=
+        (g.fns.lookup (implFnName Syntax.destroyTrait Syntax.callableHead Syntax.destroyFn)).toList
+          ++ p.drops.map (·.2)
+      capArities := captureArities p
+        (envSizes.foldl (fun acc (fn, n, _) => acc.setIfInBounds fn n) (captureCounts p))
       scc := sccs s.fns
       ncaps := envSizes.foldl (fun acc (fn, n, _) => acc.setIfInBounds fn n) (captureCounts p)
       givenUp := envSizes.map fun (fn, _, arity) => (fn, arity)
@@ -2835,6 +2956,31 @@ def certifyM (items : List Item) (g : Elab.Globals) (p : Core.Program)
     { s with incls := #[], places := #[], coerces := #[], nevers := #[], onces := #[], shows := #[] }
   for (g, gs) in wanted do
     instantiate g gs
+  -- A function whose closures say how they are destroyed: the function that
+  -- destroys one, at each of its signatures (`Typing.dropSig`). It is
+  -- inferred at the regions the captures mention, and then said at all the
+  -- closure's: those it does not mention it has no use for.
+  let mut done : List (Nat × FnSig) := []
+  let mut again := true
+  while again do
+    again := false
+    for e in (← get).entries.toList do
+      if let some d := p.drops.lookup e.fn then
+        unless done.contains (e.fn, e.sig) do
+          done := (e.fn, e.sig) :: done
+          again := true
+          let full := Typing.dropSig e.sig
+          let k := ((List.range (e.sig.crgns + 1)).find? fun c => e.sig.caps.all (Ty.within c)).getD
+            e.sig.crgns
+          let want := { full with crgns := k }
+          instantiate d ⟨want, [], none, []⟩
+          let s ← get
+          unless (s.emitted[d]?.getD []).contains full do
+            if let some e' := s.entries.find? (fun x => x.fn == d && x.sig == want) then
+              modify fun s =>
+                { s with
+                  emitted := s.emitted.insert d (full :: s.emitted[d]?.getD [])
+                  entries := s.entries.push ⟨d, full, e'.hints⟩ }
   let entries := (← get).entries.toList
   let types : List Ty :=
     mainTy :: mainHints.flatMap hintTypes

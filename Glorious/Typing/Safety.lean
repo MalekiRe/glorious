@@ -1095,7 +1095,7 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
       rw [h1]
       exact .next (.mk (henv.snoc .unit) hbody hle hsub hst hs) (fun _ hu => hu.mono rfl hquiet)
     · cases he
-      obtain ⟨hlt, hseg⟩ := hs.conts id σ ρ ε₁ acc hcont
+      obtain ⟨hlt, hseg⟩ := hs.conts id o ρ ε₁ acc hcont
       cases hget : conts[id]? with
       | none => exact absurd hlt (by simpa using List.getElem?_eq_none_iff.mp hget)
       | some x =>

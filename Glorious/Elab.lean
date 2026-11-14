@@ -163,6 +163,9 @@ partial def elabExpr (scope : Scope) (tailPos : Bool) : Expr → M Atom
         return ← elabExpr scope tailPos value
     if let (.name none mark, [value]) := (f, args) then
       if mark == Syntax.moveMark then return ← elabExpr scope tailPos value
+    -- A callable with what destroys what it captured if it is let go.
+    if let (.name none mark, [.closure id clauses, .closure _ [.mk [] destroy]]) := (f, args) then
+      if mark == Syntax.destroyedMark then return ← elabClosure scope clauses id destroy
     let before := (← get).plain.length
     let r ← elabCall scope false f args
     -- The borrow a destruction passes is the compiler's, not the program's.
@@ -846,7 +849,8 @@ partial def mkClause (captures : List String) (pats : List Pattern) (body : Scop
   pure ⟨corePats.toList, tm⟩
 
 /-- A callable literal: a new closed function and a closure over its captures. -/
-partial def elabClosure (scope : Scope) (clauses : List Clause) (id : Nat := 0) : M Atom := do
+partial def elabClosure (scope : Scope) (clauses : List Clause) (id : Nat := 0)
+    (destroy : List Stmt := []) : M Atom := do
   let arities := clauses.map fun
     | .mk pats _ => pats.length
   match arities with
@@ -854,10 +858,18 @@ partial def elabClosure (scope : Scope) (clauses : List Clause) (id : Nat := 0) 
   | n :: rest =>
     unless rest.all (· == n) do
       throw "the clauses of a callable take different numbers of arguments"
-  let captures := captureNames scope (clauses.flatMap (fvClause []))
+  -- (What destroys the captures may need what the function was given to
+  -- know how: the callable captures that too.)
+  let captures := captureNames scope (clauses.flatMap (fvClause []) ++ fvStmts [] destroy)
   let coreClauses ← clauses.mapM fun
     | .mk pats body => mkClause captures pats (fun sc => elabStmts sc true body)
   let idx ← addFn ⟨coreClauses⟩ s!"a callable in `{(← get).owner}`"
+  -- The function that destroys a closure of it: given what the closure
+  -- captured, in order, as its arguments.
+  unless destroy.isEmpty do
+    let clause ← mkClause [] (captures.map Pattern.var) fun sc => elabStmts sc true destroy
+    let d ← addFn ⟨[clause]⟩ s!"what destroys a callable in `{(← get).owner}`"
+    modify fun s => { s with drops := (idx, d) :: s.drops }
   unless id == 0 do
     let origins := (← get).b.origins
     let layout := captures.filterMap fun x => (scope.lookup x).map fun a =>
@@ -1129,7 +1141,11 @@ type's function by name where the type is known, and else the function the
 enclosing one was given. -/
 private def destroyCall (tr : TraitInfo) (d : DictE) (value : Expr) : Expr :=
   match staticMethod tr d 0 with
-  | some (fn, subs) => .call dropCallId (.name none fn) (subs.map dictExpr ++ [value])
+  | some (fn, subs) =>
+    -- (A callable is given up where it is.)
+    if fn == Syntax.implFnName Syntax.destroyTrait Syntax.callableHead Syntax.destroyFn then
+      .call 0 (.name none "cancel") [value]
+    else .call dropCallId (.name none fn) (subs.map dictExpr ++ [value])
   | none => .call dropCallId (.proj (dictExpr d) 0) [value]
 
 /-- The call that destroys what `x` holds, if this is a place where that
@@ -1138,10 +1154,12 @@ private def dropHook (tr : TraitInfo) (site : DropSite) : Option Expr :=
   match (tr.drops.lookup site).bind fun id => tr.dicts.lookup id with
   | some [d] =>
     -- (A part of a name's value that nothing reads: that part.)
-    some (destroyCall tr d (match Syntax.partOf site.name, Syntax.letSiteOf site.name with
-      | some (x, i), _ => .proj (.name none x) i
-      | none, some x => .name none x
-      | none, none => .name none site.name))
+    some (destroyCall tr d (match Syntax.partOf site.name, Syntax.letSiteOf site.name,
+        Syntax.captureSiteOf site.name with
+      | some (x, i), _, _ => .proj (.name none x) i
+      | none, some x, _ => .name none x
+      | none, none, some x => .name none x
+      | none, none, none => .name none site.name))
   | _ => none
 
 /-- The cleanups of the parts of a name's value that are never read, where
@@ -1195,6 +1213,11 @@ def destroyers (tr : TraitInfo) : List Item :=
         (calls ++ [.expr unit])
     -- A type with nothing inside it to look at: nothing to do.
     let clauses := if clauses.isEmpty then [Clause.mk (given ++ [.wild]) [.expr unit]] else clauses
+    -- A callable is destroyed by giving it up: a closure of a function that
+    -- says how it is destroyed then destroys what it captured.
+    let clauses := if D.head == Syntax.callableHead then
+        [Clause.mk (given ++ [.var "%value"]) [.expr (.call 0 (name "cancel") [name "%value"])]]
+      else clauses
     let inner := D.ctors.any fun (_, parts) => parts.any (·.isSome)
     match D.hook with
     | some d =>
@@ -1250,7 +1273,15 @@ private partial def untraitExpr (tr : TraitInfo) (owner : String) : Expr → Exp
   | .tailCall id f args => untraitCall tr owner id f args true
   | .tuple args => .tuple (args.map (untraitExpr tr owner))
   | .proj e idx => .proj (untraitExpr tr owner e) idx
-  | .closure id clauses => .closure id (clauses.map (untraitClause tr owner))
+  | .closure id clauses =>
+    -- What the callable captures is destroyed if it is let go uncalled.
+    let written := hash (Expr.closure id clauses)
+    let hooks := (clauses.flatMap (fvClause [])).eraseDups.filterMap fun x =>
+      dropHook tr (captureDropSite owner written x)
+    let c := Expr.closure id (clauses.map (untraitClause tr owner))
+    if hooks.isEmpty then c
+    else .call 0 (.name none Syntax.destroyedMark)
+      [c, .closure 0 [.mk [] (hooks.map Stmt.expr ++ [.expr (.tuple [])])]]
   | .handle subject arms =>
     .handle (untraitExpr tr owner subject) (arms.map (untraitClause tr owner))
   | .labelScope l body => .labelScope l (untraitStmts tr owner (0, 0) body)
@@ -1767,7 +1798,7 @@ def elabProgram (items : List Item) (blocks : Option Blocks := none)
     for (name, info) in g.ops do
       out := out.set! info.id name
     pure out
-  pure ⟨⟨st.fns.toList, .let_ (.closure mainIdx []) (.tail (.var 0) []), []⟩, names, st.names,
+  pure ⟨⟨st.fns.toList, .let_ (.closure mainIdx []) (.tail (.var 0) []), st.drops.reverse⟩, names, st.names,
     opNames, st.envSizes, st.lent, st.sites, st.plain.reverse, st.foreign, st.under, st.twoWays,
     st.siteOwners, st.fnSites⟩
 

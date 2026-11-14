@@ -4144,6 +4144,50 @@ files and children, paths, clocks by domain), S91, S92, S94, S95 (futures,
   `Default` and `take` (3). `Default` is given for `Int`, `Str` and
   `Option<A>`, which covers `Bool`.
 
+## Callables say how they are destroyed
+
+A callable that captured a value with a `drop` to run used to be refused unless
+it was certainly called, since nothing destroyed what a callable held. Now a
+closure may say how it is destroyed, and one let go without being called is
+given up, which destroys what it captured.
+
+- **Core.** `Program.drops` names, for some functions, the function that
+  destroys a closure of it: `cancel` of such a closure calls it with the
+  captures as arguments. Any other closure is still given up with nothing done.
+  The bytecode machine and the Rust VM do the same (format version 6). The
+  cancel rule now takes a callable of any arity. Proved: the bytecode
+  simulation, the cleanup account, type safety and cell ownership.
+  `ProgramOk.drops` asks that a destructor has `dropSig` of every signature of
+  its function: no captures, the captures as parameters, the closure's regions,
+  unit, nothing performed and no region touched. The proved checker checks it.
+- **Front end.** The checker asks how each value a callable captures is
+  destroyed, keyed by the callable as written (its hash) and the name, since a
+  statement's position is not restored after a nested block. `untrait` wraps such
+  a callable as `%destroyed(callable, { destroy each capture })`. The elaborator
+  makes the destructor from that block, with the closure's captures as its
+  parameters, and records the pair in `drops`. Callables are destroyed (the
+  `(callable)` destroyer) by `cancel`, written in place where the type is known.
+- **Inference.** A destructor gets an entry at `dropSig` of each of its
+  closure's entries: inferred at the regions the captures mention, then given
+  all the closure's. A `cancel` of a callable whose type is not yet known is
+  settled when the function's body has been read. Still unknown, it is a
+  resumption's (one argument), except in the generic destroyer, in destructors,
+  or where it is a capture: then the arity is the one every closure made of the
+  function gives there (`captureArities`), or it is left to each use.
+- **Ownership.** A callable kept by `let` that captures a value has it: the
+  count of paths that use the value treats the capture as a use, and the
+  callable is then counted as any value is (used on every path, or given up
+  with `cancel`). Callables passed straight to a function are not changed:
+  that function might let one go without destroying it, so a value one
+  captures is still counted on the paths that call it.
+- **Limits.** A cleanup and a destructor perform nothing, and giving up a
+  callable requires that what it performs could be performed. A callable that
+  performs operations is therefore refused where it would be let go at the end
+  of its block; `cancel` before then works. A value of a type the function is
+  generic in that a callable captures is not destroyed by the callable. A
+  callable in a field of a value is not given up when the value is destroyed
+  unless the field's type is known to need it.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by
