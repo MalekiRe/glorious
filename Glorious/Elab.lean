@@ -445,6 +445,8 @@ partial def elabStmts (scope : Scope) (tailPos : Bool) : List Stmt → M Atom
   -- Where `unsafe { .. }` begins: nothing to do.
   | [.expr (.name none "%unsafe")] => emit (.let_ (.construct 0 []))
   | .expr (.name none "%unsafe") :: rest => elabStmts scope tailPos rest
+  | [.expr (.name none "%observed")] => emit (.let_ (.construct 0 []))
+  | .expr (.name none "%observed") :: rest => elabStmts scope tailPos rest
   | [.expr e] => do
     -- A borrow written in a statement can be a scope that lasts while the
     -- statement runs.
@@ -1331,7 +1333,7 @@ private partial def untraitClause (tr : TraitInfo) (owner : String) : Clause →
     -- is given a name for it. Where the clause hands its place on with
     -- `tail`, nothing can be done after: what it does not use is destroyed
     -- before it starts, which is the cleanup a `tail` call has before it.
-    let first := firstPlace body
+    let first := clausePlace body
     let (pats, _) := nameWilds (fun k => (dropHook tr ⟨owner, first.1, first.2, wildName k, false⟩).isSome) pats 0
     let early := tailsStmts body
     -- (A name the clause straight away makes a variable of the same name,

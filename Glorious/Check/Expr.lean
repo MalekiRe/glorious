@@ -1023,6 +1023,7 @@ partial def inferStmts (scope : Scope) (amb : Row) (stmts : List Stmt)
         throw (positioned line col s!"`{x}` is used after `move {x}` handed it on")
     try inferStmts scope amb (s :: rest) want
     catch e => throw (positioned line col e)
+  | .expr (.name none "%observed") :: rest => inferStmts scope amb rest want
   | .expr (.name none "%unsafe") :: rest => do
     -- What follows in this block may name what is unsafe.
     let before := (← get).unsafeBlock
@@ -1326,15 +1327,20 @@ given under a name and does not mention is the name's, and what a `_` takes is
 let go: if either is one to destroy, that happens when the clause is done. The
 place it is known by is the clause's first statement. -/
 partial def clauseGiven (body : List Stmt) (patterns : M Scope) : M Scope := do
-  let first := Elab.firstPlace body
-  modify fun s => { s with wildAt := some first, wildCount := 0 }
+  let first := Elab.clausePlace body
+  -- (A clause that looks at a copy of what a reference points to owns none
+  -- of it: nothing its patterns take is destroyed.)
+  let observed := match body.head?.map Elab.unlocated with
+    | some (.expr (.name none mark)) => mark == Syntax.observedMark
+    | _ => false
+  modify fun s => { s with wildAt := if observed then none else some first, wildCount := 0 }
   let binds ← patterns
   modify fun s => { s with wildAt := none }
   let mentioned := Elab.fvStmts [] body
   for (x, b) in binds do
     if let .val t bid := b then
       modify fun s => { s with bindSites := (bid, first.1, first.2) :: s.bindSites }
-      unless mentioned.contains x || x.startsWith "%" do
+      unless mentioned.contains x || x.startsWith "%" || observed do
         modify fun s =>
           { s with dropCands := s.dropCands.push (⟨s.owner, first.1, first.2, x, false⟩, t, s.pos) }
   pure binds

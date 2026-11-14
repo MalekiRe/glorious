@@ -2930,6 +2930,9 @@ def cases : List Case := [
     [], "error: 5:38: in `work`: `f` is let go here holding something with a `drop` to run, which giving it up would run; but it performs operations, and it can be given up only where they could be performed, which is not where it is let go. Call it, or give it up first with `cancel(f)`"⟩,
   ⟨"struct Noisy(Int);\nimpl Drop for Noisy { fn drop(n) { say(n.0) } }\nfn eat(n: Noisy) -> Int { 5 }\neffect E { e() -> Int }\nfn work() -> Int { let n = Noisy(7); let f = { e() + eat(n) }; cancel(f); 1 }\nfn main() -> Int { handle work() { e(k) => k(2) } }",
     [], "7\n1"⟩,
+  -- A clause that binds by reference and is chosen by looking at a copy of what the reference points to destroys nothing of the copy.
+  ⟨"struct File(Int)\nimpl Drop for File { fn drop(f) { say(f.0) } }\nfn main() -> Int { let mut x = Some(File(4)); let k = match(&x) { &Some(f) => f.0, &None => 0 }; k }",
+    [], "4\n4"⟩,
   -- A value with `Drop` that a path does not use is kept in a variable, which destroys it where it was not used.
   ⟨"struct Noisy(Int);\nimpl Drop for Noisy { fn drop(n) { say(n.0) } }\nfn eat(n: Noisy) -> Int { 5 }\nfn f(n: Noisy, c: Bool) -> Int { if(c) { eat(n) } else { 7 } }\nfn main() -> Int { say(f(Noisy(1), true)); f(Noisy(2), false) }",
     [], "1\n5\n2\n7"⟩,

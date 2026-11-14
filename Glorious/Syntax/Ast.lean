@@ -226,6 +226,11 @@ def textEndName : String := "%end"
 it in the block may name what is unsafe. -/
 def unsafeMark : String := "%unsafe"
 
+/-- The first statement of a clause that only looks at a copy of what a
+reference points to, to choose itself (`byReference`): what its patterns take
+is not the clause's, and nothing of it is destroyed. -/
+def observedMark : String := "%observed"
+
 /-- What a dotted call is called on, kept marked until every function's
 declaration has been seen: `value.f(a)` borrows `value` if `f` is written to
 take a reference first. -/

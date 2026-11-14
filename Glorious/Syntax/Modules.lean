@@ -971,7 +971,10 @@ def byReference (ctx : Ctx) (clauses : List Clause) : R (List Clause) := do
           | _ =>
             throw "where one clause binds a parameter by reference, `&mut Pattern`, every clause does, or takes the reference whole"
       else tests := tests.push p
-    inner := inner.push (.mk tests.toList (binds.toList ++ body))
+    -- (Chosen by looking at a copy of what is pointed to: the copy is not
+    -- the clause's, and what its patterns let go is not destroyed.)
+    let observed := if byTest then [] else [Stmt.expr (.name none observedMark)]
+    inner := inner.push (.mk tests.toList (observed ++ binds.toList ++ body))
   -- Asked of the cells, the clauses' tests are of numbers, which say nothing
   -- of whether every case is covered: the patterns as written say that, to
   -- the checker; and a last clause, never reached, stands for the rest.

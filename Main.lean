@@ -222,6 +222,57 @@ def readPlaces (file : System.FilePath) : IO (List ((String × Nat) × Nat)) := 
       pure ((("\t".intercalate rest), ← k.toNat?), ← v.toNat?)
     | _ => none
 
+def showAtom : Atom → String
+  | .var i => s!"v{i}"
+  | .int n => s!"{n}"
+
+def showAtoms (as : List Atom) : String := ", ".intercalate (as.map showAtom)
+
+def showRhs : Rhs → String
+  | .atom a => showAtom a
+  | .prim _ args => s!"prim({showAtoms args})"
+  | .construct tag args => s!"#{tag}({showAtoms args})"
+  | .place pl => s!"v{pl.var}.{pl.path}"
+  | .closure fn caps => s!"fn{fn}[{showAtoms caps}]"
+  | .rebind a fn => s!"rebind({showAtom a}, fn{fn})"
+
+partial def showTm (n : Nat) : Core.Tm → String
+  | .ret a => s!"ret {showAtom a}"
+  | .let_ rhs body => s!"let v{n} = {showRhs rhs}\n" ++ showTm (n + 1) body
+  | .call f args body => s!"let v{n} = {showAtom f}({showAtoms args})\n" ++ showTm (n + 1) body
+  | .tail f args => s!"tail {showAtom f}({showAtoms args})"
+  | .handle _ _ caps thunk body =>
+    s!"let v{n} = handle {showAtom thunk} [{showAtoms caps}]\n" ++ showTm (n + 1) body
+  | .handleTail _ _ caps thunk => s!"handle {showAtom thunk} [{showAtoms caps}]"
+  | .raise op args => s!"raise op{op}({showAtoms args})"
+  | .perform op args body => s!"let v{n} = perform op{op}({showAtoms args})\n" ++ showTm (n + 1) body
+  | .label thunk body => s!"let v{n} = label {showAtom thunk}\n" ++ showTm (n + 1) body
+  | .labelTail thunk => s!"label {showAtom thunk}"
+  | .guard c thunk body => s!"let v{n} = guard {showAtom c} {showAtom thunk}\n" ++ showTm (n + 1) body
+  | .guardTail c thunk => s!"guard {showAtom c} {showAtom thunk}"
+  | .cancel k body => s!"let v{n} = cancel {showAtom k}\n" ++ showTm (n + 1) body
+  | .cell init thunk body => s!"let v{n} = cell {showAtom init} in {showAtom thunk}\n" ++ showTm (n + 1) body
+  | .cellTail init thunk => s!"cell {showAtom init} in {showAtom thunk}"
+  | .lend u r thunk pre post body =>
+    s!"let v{n} = lend{if u then " mut" else ""} {showAtom r} to {showAtom thunk}({showAtoms pre} | {showAtoms post})\n"
+      ++ showTm (n + 1) body
+  | .mem _ args body => s!"let v{n} = mem({showAtoms args})\n" ++ showTm (n + 1) body
+  | .host id args body => s!"let v{n} = host{id}({showAtoms args})\n" ++ showTm (n + 1) body
+
+
+def showCore (names : Array String) (p : Core.Program) : String := Id.run do
+  let mut out := ""
+  for (F, i) in p.fns.zipIdx do
+    out := out ++ s!"fn{i} {names[i]?.getD ""}:\n"
+    for c in F.clauses do
+      out := out ++ s!"  clause ({c.pats.length} patterns)\n"
+      let lines := (showTm 1000 c.body).splitOn "\n"
+      for l in lines do
+        out := out ++ s!"    {l}\n"
+  out ++ "main:\n" ++ "\n".intercalate (((showTm 0 p.main).splitOn "\n").map ("  " ++ ·))
+
+
+
 /-- Compile the program at `path`, with the modules it has in other files.
 What the last compile of it found for each place where a borrow can be a scope
 of its own is where this one starts; and what this one finds is kept for the
@@ -239,6 +290,10 @@ def compileFile (path : String) (checkKept : Check.Kept := []) : IO (Except Stri
   if let .ok c := result then
     writePlaces file c.places
     if let some cert := c.cert then Target.writeCert dir cert
+    -- (`GLORIOUS_CORE`: the Core that was compiled, with what destroys what.)
+    if (← IO.getEnv "GLORIOUS_CORE").isSome then
+      IO.eprintln (showCore c.fnNames c.core)
+      IO.eprintln s!"drops: {c.core.drops}"
   pure result
 
 /-- The program at `path` built: what the last compile kept in the build
@@ -568,55 +623,6 @@ def survey : IO UInt32 := do
   pure 0
 
 /-! A Core program written out, for reading what the elaborator made. -/
-
-def showAtom : Atom → String
-  | .var i => s!"v{i}"
-  | .int n => s!"{n}"
-
-def showAtoms (as : List Atom) : String := ", ".intercalate (as.map showAtom)
-
-def showRhs : Rhs → String
-  | .atom a => showAtom a
-  | .prim _ args => s!"prim({showAtoms args})"
-  | .construct tag args => s!"#{tag}({showAtoms args})"
-  | .place pl => s!"v{pl.var}.{pl.path}"
-  | .closure fn caps => s!"fn{fn}[{showAtoms caps}]"
-  | .rebind a fn => s!"rebind({showAtom a}, fn{fn})"
-
-partial def showTm (n : Nat) : Core.Tm → String
-  | .ret a => s!"ret {showAtom a}"
-  | .let_ rhs body => s!"let v{n} = {showRhs rhs}\n" ++ showTm (n + 1) body
-  | .call f args body => s!"let v{n} = {showAtom f}({showAtoms args})\n" ++ showTm (n + 1) body
-  | .tail f args => s!"tail {showAtom f}({showAtoms args})"
-  | .handle _ _ caps thunk body =>
-    s!"let v{n} = handle {showAtom thunk} [{showAtoms caps}]\n" ++ showTm (n + 1) body
-  | .handleTail _ _ caps thunk => s!"handle {showAtom thunk} [{showAtoms caps}]"
-  | .raise op args => s!"raise op{op}({showAtoms args})"
-  | .perform op args body => s!"let v{n} = perform op{op}({showAtoms args})\n" ++ showTm (n + 1) body
-  | .label thunk body => s!"let v{n} = label {showAtom thunk}\n" ++ showTm (n + 1) body
-  | .labelTail thunk => s!"label {showAtom thunk}"
-  | .guard c thunk body => s!"let v{n} = guard {showAtom c} {showAtom thunk}\n" ++ showTm (n + 1) body
-  | .guardTail c thunk => s!"guard {showAtom c} {showAtom thunk}"
-  | .cancel k body => s!"let v{n} = cancel {showAtom k}\n" ++ showTm (n + 1) body
-  | .cell init thunk body => s!"let v{n} = cell {showAtom init} in {showAtom thunk}\n" ++ showTm (n + 1) body
-  | .cellTail init thunk => s!"cell {showAtom init} in {showAtom thunk}"
-  | .lend u r thunk pre post body =>
-    s!"let v{n} = lend{if u then " mut" else ""} {showAtom r} to {showAtom thunk}({showAtoms pre} | {showAtoms post})\n"
-      ++ showTm (n + 1) body
-  | .mem _ args body => s!"let v{n} = mem({showAtoms args})\n" ++ showTm (n + 1) body
-  | .host id args body => s!"let v{n} = host{id}({showAtoms args})\n" ++ showTm (n + 1) body
-
-def showCore (names : Array String) (p : Core.Program) : String := Id.run do
-  let mut out := ""
-  for (F, i) in p.fns.zipIdx do
-    out := out ++ s!"fn{i} {names[i]?.getD ""}:\n"
-    for c in F.clauses do
-      out := out ++ s!"  clause ({c.pats.length} patterns)\n"
-      let lines := (showTm 1000 c.body).splitOn "\n"
-      for l in lines do
-        out := out ++ s!"    {l}\n"
-  out ++ "main:\n" ++ "\n".intercalate (((showTm 0 p.main).splitOn "\n").map ("  " ++ ·))
-
 
 /-- Why a program's Core is not shown to follow every rule: what stops the
 certificate with all of them asked for. -/

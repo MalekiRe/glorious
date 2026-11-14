@@ -483,6 +483,14 @@ def firstPlace : List Stmt → Nat × Nat
   | .located line col _ :: _ => (line, col)
   | _ => (0, 0)
 
+/-- The place a clause's names and `_` are known by, for what destroys them:
+its first statement's, or, where that has none, the clause's body as written
+(its hash), so that two such clauses of one function are not taken for one. -/
+def clausePlace (body : List Stmt) : Nat × Nat :=
+  match firstPlace body with
+  | (0, 0) => ((hash body).toNat, 0)
+  | place => place
+
 /-! ## How long a borrow lasts -/
 
 partial def unlocated : Stmt → Stmt
