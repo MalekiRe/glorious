@@ -1132,11 +1132,14 @@ partial def resolveExpr (ctx : Ctx) (bound : List String) : Expr → R Expr
         -- no declared type has a field of that name (which may then hold a
         -- callable). The value's type is not known where names are given
         -- their meaning.
+        -- (A field of the name that can be read here: one that is `pub`, or
+        -- of a type of this module.)
         let fieldNamed := (← get).units.any fun u => u.items.any fun item =>
           match (match item with
             | .pub _ inner => inner
             | other => other) with
-          | .fieldNames _ names _ => names.contains name
+          | .fieldNames _ names pubs =>
+            (names.zip pubs).any fun (n, p) => n == name && (p || u.path == ctx.here)
           | _ => false
         unless fieldNamed do
           let found ← own true

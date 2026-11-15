@@ -3585,6 +3585,10 @@ def cases : List Case := [
   -- `where I::Item: Ord`.
   ⟨"use std::iterator::{Iterator, range, next};\nfn biggest<I: Iterator>(it: &mut I) -> Option<I::Item> where I::Item: Ord { match(next(it)) { Some(x) => Some(go(it, x)), None => None } }\nfn go<I: Iterator>(it: &mut I, best: I::Item) -> I::Item where I::Item: Ord { match(next(it)) { Some(x) => if(best < x) { go(it, x) } else { go(it, best) }, None => best } }\nfn main() -> Int { let mut r = range(2, 7); match(biggest(&mut r)) { Some(n) => n, None => 0 } }",
     [], "6"⟩,
+  -- A private field of a library type named `first` does not keep
+  -- `v.first()` from being `Vec::first`.
+  ⟨"use std::vec::{Vec};\nfn main() -> Int { let mut v = Vec::new(); v.push(4); v.push(5); match(v.first()) { Some(x) => *x, None => 0 } + match(v.last()) { Some(x) => *x, None => 0 } }",
+    [], "9"⟩,
   -- (An element of what a reference is to is borrowed through it.)
   ⟨"fn first(r: &[Int]) -> Int { let e = &r[0]; *e }\nfn main() -> Int { first(&[7, 8]) }",
     [], "7"⟩,
