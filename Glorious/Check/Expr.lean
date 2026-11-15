@@ -1196,6 +1196,16 @@ partial def inferStmts (scope : Scope) (amb : Row) (stmts : List Stmt)
       | some none => return expected
       | some (some why) => throw (resultMark ++ s!"the result of a clause: {why}")
       | none => pure ()
+    -- (`if(c) { a }` without `else` gives a `Result`: where a value is
+    -- wanted, `else` is what is missing.)
+    if let (.call _ (.name _ "if") _, some (expected, _)) := (e, want) then
+      match ← find expected with
+      | .con n _ =>
+        unless Syntax.lastSegment n == "Result" do
+          let t ← inferExpr scope amb e
+          try return ← finish t true
+          catch err => throw (err ++ ". `if(c) { a }` without `else` gives `Ok(a)` or `Err(..)`: write `else { b }` for the value where the condition fails")
+      | _ => pure ()
     -- (A block a clause ends with is a callable, `{ .. }` as anywhere: one
     -- wanted to be run there is written without its braces.)
     if let (some _, some (expected, _)) := (Elab.plainBlock e, want) then
@@ -1360,7 +1370,7 @@ partial def inferStmts (scope : Scope) (amb : Row) (stmts : List Stmt)
                   s.dropCands.push (⟨s.owner, s.at_.1, s.at_.2, x, true⟩, t, s.pos) }
             mustDrop t s!"assigning to `{x}` lets go of what it holds (`replace` takes it out instead)"
             pure (t, UseKind.var brand x .write)
-          | some _ => throw s!"`{x}` is not a mutable variable"
+          | some _ => throw s!"`{x}` is not a mutable variable: write `let mut {x}` where it is bound to change it"
           | none => throw s!"unknown name `{x}`"
         | .deref e => do
           let inner ← freshTy

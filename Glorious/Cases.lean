@@ -345,7 +345,7 @@ def cases : List Case := [
   ⟨"fn main() { let mut x = 1; let x = x + 10; x }",
     [], "11"⟩,
   ⟨"fn main() { let x = 1; x = 2; x }",
-    [], "error: 1:24: in `main`: `x` is not a mutable variable"⟩,
+    [], "error: 1:24: in `main`: `x` is not a mutable variable: write `let mut x` where it is bound to change it"⟩,
   ⟨"fn main() { let x = 1; &mut x }",
     [], "error: 1:24: in `main`: `x` is not a mutable variable, so it cannot be borrowed"⟩,
 
@@ -374,7 +374,7 @@ def cases : List Case := [
   ⟨"fn main() { (1, 2).5 }",
     [], "error: 1:13: in `main`: a tuple of 2 values has no field 5"⟩,
   ⟨"fn main() { match(Some(1)) { None => 0 } }",
-    [], "error: 1:13: in `main`: the clauses of this callable do not cover every case"⟩,
+    [], "error: 1:13: in `main`: the clauses of this callable do not cover every case: not `Some(_)`"⟩,
   ⟨"fn f { 0 => 1 }  fn main() { f(5) }",
     [], "error: in `f`: the clauses of `f` do not cover every case"⟩,
   ⟨"fn main() { let (a, b) = (1, 2, 3); a }",
@@ -457,9 +457,9 @@ def cases : List Case := [
   ⟨"fn both { (Ok(_), Ok(_)) => 1, (Err(_), _) => 2, (_, Err(_)) => 3 }\n  fn main() { both((true, false)) }",
     [], "3"⟩,
   ⟨"fn both { (Ok(_), Ok(_)) => 1, (Err(_), Err(_)) => 2 }\n  fn main() { both((true, false)) }",
-    [], "error: in `both`: the clauses of `both` do not cover every case"⟩,
+    [], "error: in `both`: the clauses of `both` do not cover every case: not `(Ok(_), Err(_))`"⟩,
   ⟨"fn main() { let Some(x) = Some(1); x }",
-    [], "error: 1:13: in `main`: the pattern of this `let` does not cover every case"⟩,
+    [], "error: 1:13: in `main`: the pattern of this `let` does not cover every case: not `None`"⟩,
   ⟨"struct Pair<A, B>(first: A, second: B)\n  fn swap(p) { let Pair(a, b) = p; Pair(b, a) }\n  fn main() { swap(Pair(1, (2, 3))) }",
     [], "Pair((2, 3), 1)"⟩,
 
@@ -1933,7 +1933,7 @@ def cases : List Case := [
   ⟨"enum Tree { Leaf(Int), Node((Tree, Tree)) }\nfn bump(t: &mut Tree) { match(t) { &mut Leaf(n) => *n = *n + 1, &mut Node((Leaf(a), _)) => *a = *a + 10, _ => () } }\nfn main() { let mut x = Node((Leaf(1), Leaf(2))); bump(&mut x); let mut y = Leaf(5); bump(&mut y); (x, y) }",
     [], "(Node((Leaf(11), Leaf(2))), Leaf(6))"⟩,
   ⟨"enum Shape { Circle(Int), Rect(Int, Int), Dot }\nfn f(s: &Shape) -> Int { match(s) { &Circle(r) => *r, &Rect(w, _) => *w } }\nfn main() { 0 }",
-    [], "error: 2:26: in `f`: the clauses of this callable do not cover every case"⟩,
+    [], "error: 2:26: in `f`: the clauses of this callable do not cover every case: not `Dot`"⟩,
   ⟨"struct File(Int)\nimpl Use<[0, 1]> for File {}\nenum Slot { Empty, Full(File, Int) }\nfn id_of(s: &Slot) -> Int { match(s) { &Full(f, _) => (*f).0, &Empty => 0 } }\nfn main() { let mut a = Full(File(3), 1); id_of(&a) + id_of(&a) }",
     [], "6"⟩,
   ⟨"enum E { A(Int), B(Int) }\nfn f(e: &E, n: Int) -> Int { match((n, 0)) { (0, _) => 0, _ => match(e) { &A(x) => *x, &B(y) => *y + 100 } } }\nfn main() { let mut e = B(2); f(&e, 0) + f(&e, 1) }",
@@ -2695,7 +2695,7 @@ def cases : List Case := [
     [], "error: function `f` is declared twice"⟩,
   -- Conformance L03c: rebind ref.
   ⟨"fn main() -> Int { let mut a = 1; let mut b = 2; let r = &mut a; r = &mut b; a }",
-    [], "error: 1:66: in `main`: `r` is not a mutable variable"⟩,
+    [], "error: 1:66: in `main`: `r` is not a mutable variable: write `let mut r` where it is bound to change it"⟩,
   -- Conformance L04b: not tuple.
   ⟨"fn f(p: (Int,)) -> Int { p.0 }\nfn main() -> Int { f(7) }",
     [], "error: 2:20: in `main`: argument 1 of `f`: expected `(Int,)`, found `Int`"⟩,
@@ -3396,9 +3396,9 @@ def cases : List Case := [
   ⟨"enum E { A(Int), B(Int) }\nfn total(xs: [&E], i: Int) -> Int { if(i >= len(xs)) { 0 } else { match(xs[i]) { &A(x) => *x, &B(y) => *y * 100 } + total(xs, i + 1) } }\nfn main() -> Int { let a = A(3); let b = B(4); total([&a, &b, &a], 0) }",
     [], "406"⟩,
   ⟨"enum Shape { Circle(Int), Square(Int) }\nfn area(s: Option<&Shape>) -> Int { match(s) { Some(&Circle(r)) => *r, None => 0 } }\nfn main() -> Int { 0 }",
-    [], "error: 2:37: in `area`: the clauses of this callable do not cover every case"⟩,
+    [], "error: 2:37: in `area`: the clauses of this callable do not cover every case: not `Some(Square(_))`"⟩,
   ⟨"enum E { A(Int), B(Int) }\nfn both(p: (&E, &E)) -> Int { match(p) { (&A(x), &A(y)) => *x + *y, (&B(x), _) => *x * 10 } }\nfn main() -> Int { 0 }",
-    [], "error: 2:31: in `both`: the clauses of this callable do not cover every case"⟩,
+    [], "error: 2:31: in `both`: the clauses of this callable do not cover every case: not `(A(_), B(_))`"⟩,
   ⟨"struct Ticket(Int);\nimpl Use<[1, 1]> for Ticket {}\nfn redeem(t: Ticket) -> Int { match(t) { Ticket(n) => n } }\nenum E { A(Int), B(Int) }\nfn f(p: (Ticket, &E)) -> Int { match(p) { (t, &A(x)) => redeem(t) + *x, (t, _) => redeem(t) } }\nfn main() -> Int { let e = A(4); f((Ticket(1), &e)) }",
     [], "error: 5:32: in `f`: a clause reaches through a reference inside the value, and where it is not for what it finds the clauses after it are given the value again, but a `Ticket` can be used only once"⟩,
   -- What is computed before a borrow of a field, in a call inside a call inside a call: each kept under a name of its own.
@@ -3545,6 +3545,12 @@ def cases : List Case := [
   -- value of it.
   ⟨"use std::hash::{HashMap};\nuse std::text::{words};\nfn main() -> Int {\n    let mut counts = HashMap::new();\n    let ws = words(\"a b a c b a\");\n    let mut i = 0;\n    while({ i < len(ws) }) { let n = counts.entry(ws[i]).or_insert(0); *n = *n + 1; i = i + 1 };\n    match(counts.get(&\"a\")) { Some(n) => say(*n), None => () };\n    counts.len()\n}\n",
     [], "3\n3"⟩,
+  -- What the refusals say of clauses that do not cover every case, and of
+  -- an `if` without `else` where a value is wanted.
+  ⟨"enum C { A, B, D }\nfn f(c: C) -> Int { match(c) { A => 1, B => 2 } }\nfn main() -> Int { f(A) }",
+    [], "error: 2:21: in `f`: the clauses of this callable do not cover every case: not `D`"⟩,
+  ⟨"fn f(c: Bool) -> Int { if(c) { 1 } }\nfn main() -> Int { f(true) }",
+    [], "error: 1:24: in `f`: the result of a clause: expected `Int`, found `Result<Int, fn(()) -> Int>`. `if(c) { a }` without `else` gives `Ok(a)` or `Err(..)`: write `else { b }` for the value where the condition fails"⟩,
   -- (An element of what a reference is to is borrowed through it.)
   ⟨"fn first(r: &[Int]) -> Int { let e = &r[0]; *e }\nfn main() -> Int { first(&[7, 8]) }",
     [], "7"⟩,
