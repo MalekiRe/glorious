@@ -4616,6 +4616,16 @@ before. The kept build records whether it was searched (format version 2),
 and `certify` compiles again where it was not; a compile that did not search
 keeps neither its places nor its certificate for later ones.
 
+## `impl Trait` in a function's parameters and result
+
+`fn f(x: impl Show)` is `fn f<Impl0: Show>(x: Impl0)`: a type parameter of
+its own per such parameter. `fn g() -> impl Show` is a result found from the
+body, as an unwritten one is: callers see the type itself, which is more
+than Rust shows them, and the trait is not checked of it (what calls it
+needs of the type is checked where it is used). Elsewhere `impl Trait` is
+refused. `impl<T: Show> ..` asks of its parameters what `where T: Show`
+does, for implementations of traits and of a type's own functions.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by
