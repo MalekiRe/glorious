@@ -1155,7 +1155,12 @@ private partial def parseUnary (noBlock : Bool) : P Expr := do
           -- `&x`, `&x.0.1`, `&(*p).0`, or `&f().0` through what an
           -- expression gives.
           match ← parsePostfix true with
-          | .name none x => pure (.ref uniq x)
+          -- (A name written with a capital is a constructor or a constant, a
+          -- value and no variable: it is borrowed as any value is, below.)
+          | .name none x =>
+            if (x.front.isUpper) then
+              pure (.call id (.name none (if uniq then borrowMutMark else borrowMark)) [.name none x])
+            else pure (.ref uniq x)
           | e =>
             if let some at_ := elementBorrow uniq e then return at_
             match fieldRoot e with

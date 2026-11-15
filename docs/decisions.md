@@ -4412,9 +4412,24 @@ reference to a reference (`&&'a mut T` gives the lifetime and `mut` to the
 inner one). A prefix fixity a program declares for such a symbol still wins.
 
 Matching a reference with patterns of a value (`match(s) { Dot => .. }` for
-`s: &Shape`) is still refused: Rust's binding modes, which would make that
-bind references, are not built. The refusal now says that the patterns are
-written `&Pattern` and bind references.
+`s: &Shape`) was refused; see the next section.
+
+## Matching a reference with patterns of a value
+
+`match(s) { Dot => 0, Line(n) => *n }` for `s: &Shape` now looks at what `s`
+points to and binds `n: &Int`, as Rust's binding modes have it (and
+`&mut Shape` binds `&mut` references). Where a callable's clauses are checked
+against a first parameter that is a reference, and some of their first
+patterns are of a value (a constructor, a tuple, a constructor without fields
+written as a name), the checker says which (`Syntax.refPatsMark`), and the
+program is read again with those patterns written `&Pattern`
+(`Elab.refPatsItems`, in `compileSourceAt`), which the language had: so the
+rest is as if they were written so. A name pattern is left as it is, binding
+the reference. The second reading costs only programs that need it.
+
+`&Dot`, a constructor without fields borrowed, was taken for a variable and
+refused as an unknown name; a name written with a capital is now borrowed as
+a value is.
 
 ## Other standing decisions
 

@@ -363,6 +363,74 @@ def restFound (said : String) : Option (Nat × Nat) :=
     | _ => none
   | _ => none
 
+/-! ## Patterns of a value matched against a reference
+
+`match(s) { Dot => 0, Line(n) => *n }` for `s: &Shape`: the checker says which
+callable's clauses, and the program is read again with their first patterns
+written `&Dot`, `&Line(n)`, so that they look at what the reference points to
+and bind references, as Rust's binding modes have it. -/
+
+mutual
+
+partial def refPatsExpr (id : Nat) (uniq : Bool) (which : List Nat) : Expr → Expr
+  | .call i f args => .call i (refPatsExpr id uniq which f) (args.map (refPatsExpr id uniq which))
+  | .tailCall i f args => .tailCall i (refPatsExpr id uniq which f) (args.map (refPatsExpr id uniq which))
+  | .tuple args => .tuple (args.map (refPatsExpr id uniq which))
+  | .proj e n => .proj (refPatsExpr id uniq which e) n
+  | .closure i clauses =>
+    let clauses := clauses.map (refPatsClause id uniq which)
+    if i != id then .closure i clauses else
+    .closure i (clauses.zipIdx.map fun
+      | (.mk (p :: ps) body, k) =>
+        if which.contains k then .mk (.ctor (Syntax.byRefMark uniq) none [p] :: ps) body
+        else .mk (p :: ps) body
+      | (c, _) => c)
+  | .handle subject arms => .handle (refPatsExpr id uniq which subject) (arms.map (refPatsClause id uniq which))
+  | .labelScope l body => .labelScope l (body.map (refPatsStmt id uniq which))
+  | .deref e => .deref (refPatsExpr id uniq which e)
+  | .reborrow u e => .reborrow u (refPatsExpr id uniq which e)
+  | .fieldOf i e name => .fieldOf i (refPatsExpr id uniq which e) name
+  | e => e
+
+partial def refPatsClause (id : Nat) (uniq : Bool) (which : List Nat) : Clause → Clause
+  | .mk pats body => .mk pats (body.map (refPatsStmt id uniq which))
+
+partial def refPatsStmt (id : Nat) (uniq : Bool) (which : List Nat) : Stmt → Stmt
+  | .let_ pat value => .let_ pat (refPatsExpr id uniq which value)
+  | .expr e => .expr (refPatsExpr id uniq which e)
+  | .defer e => .defer (refPatsExpr id uniq which e)
+  | .letMut x value => .letMut x (refPatsExpr id uniq which value)
+  | .assign target value => .assign (refPatsExpr id uniq which target) (refPatsExpr id uniq which value)
+  | .located line col s => .located line col (refPatsStmt id uniq which s)
+
+end
+
+/-- A program with the first patterns of one callable's clauses written
+`&Pattern`. -/
+partial def refPatsItems (id : Nat) (uniq : Bool) (which : List Nat) (items : List Item) : List Item :=
+  items.map fun
+    | .fn name ps annots ret clauses => .fn name ps annots ret (clauses.map (refPatsClause id uniq which))
+    | .impl ps tr head args context methods => .impl ps tr head args context (refPatsItems id uniq which methods)
+    | .traitInfo n supers defaults params assocs => .traitInfo n supers (refPatsItems id uniq which defaults) params assocs
+    | .module name (some body) => .module name (some (refPatsItems id uniq which body))
+    | .pub parent item => .pub parent ((refPatsItems id uniq which [item]).headD item)
+    | item => item
+
+/-- What the checker said of such clauses, if that is what it said. -/
+def refPatsFound (said : String) : Option (Nat × Bool × List Nat) :=
+  match said.splitOn "%refpats:" with
+  | _ :: after :: _ =>
+    match ((after.splitOn "%").headD "").splitOn ":" with
+    | [id, u, ks] => id.toNat?.map fun id => (id, u == "1", (ks.splitOn ",").filterMap String.toNat?)
+    | _ => none
+  | _ => none
+
+/-- What the checker says, without that mark. -/
+def withoutRefPats (said : String) : String :=
+  match said.splitOn "%refpats:" with
+  | before :: after :: _ => before ++ "%".intercalate ((after.splitOn "%").drop 1)
+  | _ => said
+
 /-! ## A value used on one path and not on another
 
 A value with a `drop` to run that one path uses and another does not is kept

@@ -3476,9 +3476,14 @@ def cases : List Case := [
   -- `**r` and `&**r`, which the lexer reads as one symbol each.
   ⟨"fn get(r: &&Int) -> Int { **r }\nfn again<'a>(r: &&'a Int) -> &'a Int { &**r }\nfn main() -> Int { let x = 5; let r = &x; get(&r) + *again(&r) }",
     [], "10"⟩,
-  -- Matching a reference with patterns of a value: the refusal says how.
+  -- Matching a reference with patterns of a value: they look at what it
+  -- points to and bind references, as Rust's binding modes have them.
+  ⟨"enum Shape { Dot, Line(Int), Box(Int, Int) }\nfn size(s: &Shape) -> Int { match(s) { Dot => 0, Line(n) => *n, Box(w, h) => *w * *h } }\nfn bump(s: &mut Shape) { match(s) { Line(n) => *n = *n + 1, _ => () } }\nfn main() -> Int { let mut l = Line(3); bump(&mut l); size(&Dot) + size(&l) + size(&Box(2, 5)) }",
+    [], "14"⟩,
+  ⟨"fn first(p: &(Int, Int)) -> Int { match(p) { (a, b) => *a * 10 + *b } }\nfn main() -> Int { first(&(4, 2)) }",
+    [], "42"⟩,
   ⟨"enum Shape { Dot, Line(Int) }\nfn size(s: &Shape) -> Int { match(s) { Dot => 0, Line(n) => n } }\nfn main() -> Int { size(&Line(3)) }",
-    [], "error: 2:29: in `size`: argument 2 of `match`: expected `fn(&Shape) -> _`, found `fn(Shape) -> Int`. What is matched is a reference: a pattern of what it points to is written `&Pattern`, and binds references (`&Some(x) => *x`)"⟩,
+    [], "error: 2:61: in `size`: the result of a clause: expected `Int`, found `&Int`"⟩,
   -- (An element of what a reference is to is borrowed through it.)
   ⟨"fn first(r: &[Int]) -> Int { let e = &r[0]; *e }\nfn main() -> Int { first(&[7, 8]) }",
     [], "7"⟩,

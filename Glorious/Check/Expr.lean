@@ -531,6 +531,27 @@ partial def checkArgsIn (scope : Scope) (amb : Row) (what : String) (params : Li
     match params[i]?, args[i]? with
     | some p, some a =>
       let site := if call == 0 then none else some (Elab.Site.arg call i)
+      -- Clauses that match what a reference points to with patterns of a
+      -- value: the program is read again with those patterns written
+      -- `&Pattern`, binding references, as Rust's binding modes have them.
+      if let .closure id clauses := a then
+        -- (Which clauses' first patterns are of a value: a constructor, a
+        -- tuple, a constructor without fields written as a name.)
+        let mut valuePats : List Nat := []
+        for (c, k) in clauses.zipIdx do
+          match c with
+          | .mk (.ctor n _ _ :: _) _ => if !n.startsWith "%" then valuePats := valuePats ++ [k]
+          | .mk (.tuple _ :: _) _ => valuePats := valuePats ++ [k]
+          | .mk (.var x :: _) _ => if (← resolveCtor x none).isSome then valuePats := valuePats ++ [k]
+          | _ => pure ()
+        if !valuePats.isEmpty then
+          if let .fn (first :: _) _ _ _ _ ← find p then
+            if let .ref how _ _ ← find first then
+              let uniq := match ← find how with
+                | .con "&mut" [] => true
+                | _ => false
+              let shown := if uniq then "&mut " else "&"
+              throw (Syntax.refPatsMark id uniq valuePats ++ s!"argument {i + 1} of {what}: what is matched is a reference: a pattern of what it points to is written `{shown}Pattern`, and binds references (`{shown}Some(x) => *x`)")
       if let some e ← checkArg scope amb s!"argument {i + 1} of {what}" p a site then
         -- (Clauses one of which ends with a braced block, which is a callable
         -- there: likely meant to be run.)
@@ -542,19 +563,6 @@ partial def checkArgsIn (scope : Scope) (amb : Row) (what : String) (params : Li
           | _ => false
         if blocky && (e.splitOn "fn() ->").length > 1 then
           return some (i, e ++ ". A block `{ .. }` a clause ends with is a callable; to run its statements there, write them without the braces: `pattern => a; b`")
-        -- (Clauses whose patterns are of a value, given a reference to one.)
-        let valuePats := match a with
-          | .closure _ clauses => clauses.any fun
-            | .mk (.ctor n _ _ :: _) _ => !n.startsWith "%"
-            | _ => false
-          | _ => false
-        if let (true, .fn ps _ _ _ _) := (valuePats && (e.splitOn "expected `fn(&").length > 1, ← find p) then
-          if let some first := ps.head? then
-            if let .ref how _ _ ← find first then
-              let shown := match ← find how with
-                | .con "&mut" [] => "&mut "
-                | _ => "&"
-              return some (i, e ++ s!". What is matched is a reference: a pattern of what it points to is written `{shown}Pattern`, and binds references (`{shown}Some(x) => *x`)")
         return some (i, e)
       pushTemp p
       pushAnon a p

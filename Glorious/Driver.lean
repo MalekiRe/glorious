@@ -484,11 +484,14 @@ def lowered (b : Elab.Blocks) (written all : List Syntax.Item) :
 /-- Parse, check and elaborate a program together with the prelude, and have the
 proved Core type checker accept the result. With `check := false` both checks
 are skipped, so that programs which go wrong can still be run. -/
-def compileSourceAt (src : String) (check : Bool := true)
+partial def compileSourceAt (src : String) (check : Bool := true)
     (files : List (List String × String) := []) (few : Bool := false)
     (known : List ((String × Nat) × Nat) := []) (packs : Nat := 0) (kept : List Typing.Cert := [])
-    (checkKept : Check.Kept := []) : Except String Compiled := do
+    (checkKept : Check.Kept := []) (refPats : List (Nat × Bool × List Nat) := []) : Except String Compiled := do
   let (prelude, items) ← parseProgram src files check few packs
+  -- (Clauses the checker found matching a reference with patterns of a
+  -- value: read with those patterns written `&Pattern`.)
+  let items := refPats.foldl (fun items (id, uniq, which) => Elab.refPatsItems id uniq which items) items
   -- Every name is given its meaning: the modules become one list of items.
   let resolved ← Syntax.Modules.resolve prelude items
   -- How a constructor is named where a value is shown: without its module,
@@ -558,7 +561,15 @@ def compileSourceAt (src : String) (check : Bool := true)
   let (all, checked) := checkWith 64 all none
   let (blocks, checkMade) ← match checked with
     | .ok (blocks, made) => pure (some blocks, made)
-    | .error e => if check then throw e else pure (none, [])
+    | .error e =>
+      match Elab.refPatsFound e with
+      | some found =>
+        if check && refPats.length < 32 && !refPats.contains found then
+          match compileSourceAt src check files few known packs kept checkKept (refPats ++ [found]) with
+          | .ok c => return c
+          | .error e' => throw (if (Elab.refPatsFound e').isSome then Elab.withoutRefPats e' else e')
+        else if check then throw (Elab.withoutRefPats e) else pure (none, [])
+      | none => if check then throw e else pure (none, [])
   -- Lifetimes were the checker's to read; and, of what is declared, the
   -- certificate's.
   let written := all

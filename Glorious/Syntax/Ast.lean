@@ -313,6 +313,12 @@ used on one path and not on another: the program is read again with that
 def letMutMark (owner : String) (line col : Nat) (x : String) : String :=
   s!"%letmut:{line}:{col}:{x}:{owner}%"
 
+/-- What the checker throws where the clauses of a callable match what its
+first argument points to with patterns of a value (`Dot => ..` for a
+`&Shape`): the program is read again with those patterns written `&Dot`. -/
+def refPatsMark (id : Nat) (uniq : Bool) (clauses : List Nat) : String :=
+  s!"%refpats:{id}:{if uniq then 1 else 0}:{",".intercalate (clauses.map toString)}%"
+
 /-- A callable with what destroys it if it is let go: `%destroyed(callable,
 { .. })`, where the block destroys what the callable captured, by its names. -/
 def destroyedMark : String := "%destroyed"
