@@ -4689,6 +4689,17 @@ as named where it is written, so a program's own `if` or `and` is the one
 used. These read text that was refused before; the spec's forms are
 unchanged.
 
+## Rust's operator traits
+
+`impl Add for V { type Output = V; fn add(self, o: V) -> V }` (and `Sub`,
+`Mul`, `Div`, `Rem`, `Neg`; `PartialEq`'s `eq`/`ne`, `PartialOrd`'s `lt`,
+`gt`, `le`, `ge`) implements the prelude's trait of the operator: the
+function is named as the operator, `type Output` is dropped (the prelude's
+operators give `Self`), and parameters written as references take the
+values, which is the same for values that are copied. `PartialEq` and
+`PartialOrd` are `Eq` and `Ord`. `use std::ops::Add` and `use
+std::cmp::PartialEq` bring in nothing more than the prelude has.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by

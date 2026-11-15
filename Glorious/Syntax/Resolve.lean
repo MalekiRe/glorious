@@ -251,6 +251,11 @@ partial def receiverExpr (taken : List (String Ã— Bool)) (known : List (String Ã
               -- given a name first, and borrowed.)
               match receiver with
               | .call .. => .call id (.name none (if uniq then borrowMutMark else borrowMark)) [receiver]
+              -- (A constructor without fields or a constant, `D.greet()`.)
+              | .name none x =>
+                if (lastSegment x).front.isUpper then
+                  .call id (.name none (if uniq then borrowMutMark else borrowMark)) [receiver]
+                else receiver
               | _ => receiver
           | _, _, _ => receiver
         .call id (.name q name) (given :: rest)

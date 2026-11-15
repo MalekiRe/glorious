@@ -2081,6 +2081,17 @@ private partial def parseItem : P Item := do
       expectPunct "}"
       return .fieldNames (attrMark "negative_impl") [tr, head] []
     let tr ← expectPath
+    -- (Rust's `PartialEq` and `PartialOrd`: the prelude's `Eq` and `Ord`.)
+    let tr := match tr with
+      | "PartialEq" | "std::cmp::PartialEq" => "Eq"
+      | "PartialOrd" | "std::cmp::PartialOrd" => "Ord"
+      | "std::ops::Add" => "Add"
+      | "std::ops::Sub" => "Sub"
+      | "std::ops::Mul" => "Mul"
+      | "std::ops::Div" => "Div"
+      | "std::ops::Rem" => "Rem"
+      | "std::ops::Neg" => "Neg"
+      | other => other
     -- `impl From<Int> for u8`: the trait's own arguments, kept among what
     -- the implementation declares.
     let mut given : Array Item := #[]
@@ -2226,14 +2237,47 @@ private partial def parseItem : P Item := do
         if !(← acceptPunct ",") then break
     expectPunct "{"
     let mut methods : Array Item := given
+    -- (Rust's operator traits: their functions by Rust's names, `fn add`,
+    -- `fn eq(&self, other: &Self)`, are the prelude's operators, taking
+    -- the values; `type Output` is what the operator gives, `Self`.)
+    let rustOps : List (String × String) := match lastSegment tr with
+      | "Add" => [("add", "+")]
+      | "Sub" => [("sub", "-")]
+      | "Mul" => [("mul", "*")]
+      | "Div" => [("div", "/")]
+      | "Rem" => [("rem", "%")]
+      | "Neg" => [("neg", "negate")]
+      | "Eq" => [("eq", "=="), ("ne", "!=")]
+      | "Ord" => [("lt", "<"), ("gt", ">"), ("le", "<="), ("ge", ">=")]
+      | _ => []
     repeat
       if (← peek) == .punct "}" then break
       match ← peek with
       | .ident "fn" =>
-        methods := methods.push (← withReader (fun c =>
+        let item ← withReader (fun c =>
           if c.records.contains head then { c with records := "Self" :: c.records } else c)
-          parseItem)
+          parseItem
+        let item := match item with
+          | .fn name ps annots ret clauses =>
+            match rustOps.lookup name with
+            | some op =>
+              let plain := annots.map (·.map fun
+                | .ref _ inner _ => inner
+                | other => other)
+              -- (What a body of `&self` reads through a reference it now
+              -- reads of the value: the same, for a value that is copied.)
+              Item.fn op ps plain ret clauses
+            | none => item
+          | other => other
+        methods := methods.push item
       | .ident "type" =>
+        if !rustOps.isEmpty && (← peek 1) == .ident "Output" then
+          -- (`type Output = Self;`: what the prelude's operator gives.)
+          advance; advance
+          expectPunct "="
+          let _ ← parseType
+          let _ ← acceptPunct ";"
+          continue
         -- `type Item = Int;`: a type the trait leaves to the implementation.
         advance
         let name ← expectIdent

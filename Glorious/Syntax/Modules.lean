@@ -286,6 +286,11 @@ partial def unforce : Pattern → Pattern
   | .tuple args => .tuple (args.map unforce)
   | p => p
 
+/-- Traits Rust keeps in `std::ops` and `std::cmp` that the prelude has
+everywhere: a `use` of one there brings in nothing more. -/
+def rustPreludeTraits : List String :=
+  ["Add", "Sub", "Mul", "Div", "Rem", "Neg", "PartialEq", "Eq", "PartialOrd", "Ord"]
+
 mutual
 
 /-- Everything a module can write: what it declares, the modules written in
@@ -429,6 +434,11 @@ partial def imported (p : List String) (scope : List Bound) (path : List String)
         | none => throw s!"`use {written}`: the effect `{effect}` has no operation `{name}`"
   if found.isEmpty then
     if before.isEmpty then throw s!"`use {written}`: there is no module `{written}`"
+    -- (`use std::ops::Add`, `use std::cmp::PartialEq`: Rust's homes of what
+    -- the prelude has everywhere already.)
+    if (before == ["std", "ops"] || before == ["core", "ops"] || before == ["std", "cmp"] || before == ["core", "cmp"])
+        && rustPreludeTraits.contains name then
+      return []
     match ← moduleAt p (fun _ => scope) before with
     | some q => throw s!"`use {written}`: {showPath q} has no `{name}`"
     | none => throw s!"`use {written}`: there is no module `{"::".intercalate before}`"

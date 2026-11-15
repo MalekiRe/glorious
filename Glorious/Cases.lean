@@ -3732,6 +3732,15 @@ def cases : List Case := [
     [], "8"⟩,
   ⟨"fn main() -> Int { std::iterator::range(0, 10).filter({ x => *x % 2 == 0 }).count() }",
     [], "5"⟩,
+  -- Rust's operator traits by their names; `D.greet()` of a constant.
+  ⟨"use std::ops::Add;\nstruct V(Int, Int)\nimpl Add for V { type Output = V; fn add(self, o: V) -> V { V(self.0 + o.0, self.1 + o.1) } }\nfn main() -> Int { let c = V(1, 2) + V(3, 4); c.0 * 10 + c.1 }",
+    [], "46"⟩,
+  ⟨"struct P { x: Int }\nimpl PartialEq for P { fn eq(&self, o: &P) -> Bool { self.x == o.x } }\nfn main() -> Int { let a = P { x: 1 }; let b = P { x: 1 }; if a == b { 1 } else { 0 } }",
+    [], "1"⟩,
+  ⟨"trait Greet { fn name(&self) -> Str; fn greet(&self) -> Str { \"hi \" ++ self.name() } }\nstruct D;\nimpl Greet for D { fn name(&self) -> Str { \"d\" } }\nfn main() -> Int { say(D.greet()); 0 }",
+    [], "hi d\n0"⟩,
+  ⟨"use std::ops::Neg;\nstruct V(Int)\nimpl Neg for V { type Output = V; fn neg(self) -> V { V(0 - self.0) } }\nfn main() -> Int { let v = -V(3); v.0 }",
+    [], "-3"⟩,
   -- (An element of what a reference is to is borrowed through it.)
   ⟨"fn first(r: &[Int]) -> Int { let e = &r[0]; *e }\nfn main() -> Int { first(&[7, 8]) }",
     [], "7"⟩,
