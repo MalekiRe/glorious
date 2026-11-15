@@ -608,6 +608,16 @@ partial def receiverKinds (f g : String) : M (Option Nat × Option Nat) := do
   set saved
   pure (a, b)
 
+/-- `x.f.g` where `x` is a mutable variable that holds no reference: the
+name, the path of fields, and the identity of the last read. -/
+partial def cellField (scope : Scope) : Expr → Option (String × List String × Nat)
+  | .fieldOf fid (.name none x) field =>
+    match scope.lookup x with
+    | some (.cell _ _) => some (x, [field], fid)
+    | _ => none
+  | .fieldOf fid e field => (cellField scope e).map fun (x, path, _) => (x, path ++ [field], fid)
+  | _ => none
+
 /-- `x.f.g` where `x` holds a reference: the name, the path of fields, and the
 identity of the last read. -/
 partial def fieldThroughRef (scope : Scope) : Expr → M (Option (String × List String × Nat))
@@ -968,6 +978,28 @@ partial def inferCall (scope : Scope) (amb : Row) (f : Expr) (args : List Expr)
                     return ← inferCall scope amb (.name none alt) args call
                   modify fun s => { s with dotChosen := (call, alt, k) :: s.dotChosen }
                   return ← inferCall scope amb (.name none alt) (.ref (k == 2) v :: args.drop 1) call
+            if let (some 0, some k) := (mine, theirs) then
+              if k != 0 then
+                -- (What is a reference already, a name that holds one or a
+                -- call that gives one, is given as it is.)
+                let saved ← get
+                let given ← try some <$> inferExpr scope amb a catch _ => pure none
+                let isRef ← match given with
+                  | some t => do pure (match ← find t with | .ref .. => true | _ => false)
+                  | none => pure false
+                set saved
+                if isRef then
+                  modify fun s => { s with dotChosen := (call, alt, 0) :: s.dotChosen }
+                  return ← inferCall scope amb (.name none alt) args call
+                -- (A field of what a name points to, or of a mutable
+                -- variable: borrowed where it is.)
+                let borrowed ← match ← fieldThroughRef scope a with
+                  | some (x, path, fid) => pure (some (Expr.refField fid (k == 2) x path true))
+                  | none => pure ((cellField scope a).map fun (x, path, fid) => Expr.refField fid (k == 2) x path false)
+                if let some b := borrowed then
+                  modify fun s => { s with dotChosen := (call, alt, 0) :: s.dotChosen,
+                                           argsChosen := ((call, 0), b) :: s.argsChosen }
+                  return ← inferCall scope amb (.name none alt) (b :: args.drop 1) call
   -- `T::f(..)` of a type parameter `T` and a trait's function `f`: as
   -- `<T as Trait>::f(..)` is.
   if let .name (some q) x := f then
