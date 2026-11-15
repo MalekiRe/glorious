@@ -3645,6 +3645,9 @@ def cases : List Case := [
     [], "Err(odd!)\ntrue\n4"⟩,
   ⟨"fn main() -> Int { let a = Some(3); say(a.filter({ x => *x > 5 })); say(a.filter({ x => *x > 1 })); 0 }",
     [], "Err(())\nOk(3)\n0"⟩,
+  -- A text's functions called on a value, brought in without a `use`.
+  ⟨"fn main() -> Int { let s = \"  Hello \"; say(s.trim().to_upper()); say(\"42\".parse_int().unwrap_or(0) + 1); say(\"abc\".starts_with(\"ab\")); len(\"a b c\".words()) }",
+    [], "HELLO\n43\ntrue\n3"⟩,
   -- (An element of what a reference is to is borrowed through it.)
   ⟨"fn first(r: &[Int]) -> Int { let e = &r[0]; *e }\nfn main() -> Int { first(&[7, 8]) }",
     [], "7"⟩,

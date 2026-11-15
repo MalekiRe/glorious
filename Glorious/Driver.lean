@@ -212,6 +212,12 @@ def stdPreludeNames : List (String × String) :=
    ("Fail", "value"), ("fail", "value"), ("Report", "value"), ("report", "value"),
    ("catch_fail", "value")]
 
+/-- The functions of `std::text` brought in where a program calls one on a
+value, `s.trim()`: none has a name a type's own function commonly has. -/
+def textDotNames : List String :=
+  ["to_upper", "to_lower", "trim", "trim_start", "starts_with", "ends_with", "parse_int",
+   "char_at", "pad_start", "pad_end", "lines", "words", "repeat", "utf8"]
+
 /-- The names of the default prelude a program's text uses and does not
 declare or bring in itself: `use` lines for them, written after the text (so
 that no position in it moves). Where the text names no library, none. -/
@@ -253,7 +259,12 @@ def stdPreludeUses (src : String) : String := Id.run do
     declares name || brought name || ownOp name
       || (opOf.lookup name).any (fun e => declares e || brought e)
       || (opOf.find? (·.2 == name)).any (fun (op, _) => ownOp op)
+  -- (A text's functions where they are called on a value, `s.to_upper()`:
+  -- the dot call finds the one in scope.)
+  let dotted := fun (name : String) => (src.splitOn ("." ++ name ++ "(")).length > 1
+  let textDots := textDotNames.filter fun name => dotted name && !blocked name
   let wanted := stdPreludeNames.filter fun (name, _) => mentions name && !blocked name
+  let wanted := wanted ++ (textDots.filter (fun n => !wanted.any (·.1 == n))).map (·, "text")
   if wanted.isEmpty then return ""
   let mods := wanted.map (·.2) |>.eraseDups
   let lines := mods.map fun m =>
