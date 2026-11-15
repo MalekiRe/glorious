@@ -157,6 +157,10 @@ structure Blocks where
   /-- Those types, each where it is known without knowing who calls the
   function. -/
   siteTypes : List (String × List (Option Syntax.TypeExpr)) := []
+  /-- Dot calls the checker found are of a type's own function, chosen by
+  the value's type: the call, the function, and how the receiver, a
+  variable, is now given (`0` as it was, `1` borrowed, `2` borrowed `&mut`). -/
+  dotChosen : List (Nat × String × Nat) := []
 
 structure Globals where
   ctors : List (String × CtorInfo) := []

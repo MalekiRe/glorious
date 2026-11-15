@@ -4695,6 +4695,22 @@ impl<K, V> HashMap<K, V> {
         value.0 = empty_buckets(8, []);
         value.1 = 0
     }
+    // The place of a key: what it stands for, or where it would.
+    pub fn entry<'a>(value: &'a mut Self, key: K) -> Entry<'a, K, V> where K: Eq, K: Hash {
+        if(HashMap::contains_key(&*value, &key)) {
+            match(HashMap::get_mut(value, &key)) { Some(v) => Occupied(v), None => unreachable("a key that is there") }
+        } else { Vacant(value, key) }
+    }
+    // A key known not to be there, standing for the item from now on: where
+    // the item now is.
+    fn insert_new<'a>(value: &'a mut Self, key: K, item: V) -> &'a mut V where K: Hash {
+        if(value.1 + 1 > len_at(&value.0)) { HashMap::regrow(value) } else { () };
+        let at = int_rem(hash(key), len_at(&value.0));
+        push_at(&mut value.0[at], (key, item));
+        value.1 = value.1 + 1;
+        let last = len_at(&value.0[at]) - 1;
+        &mut value.0[at][last].1
+    }
     // Its keys and what they stand for, in no order one can rely on.
     pub fn into_entries(value: Self) -> [(K, V)] {
         match(value) { HashMap(buckets, _) => flat_onto(buckets, []) }
@@ -4717,6 +4733,22 @@ impl<K, V> HashMap<K, V> {
             }
         });
         value.0 = buckets
+    }
+}
+
+// What a key stands for, or the map it would be put in.
+pub enum Entry<'a, K, V> { Occupied(&'a mut V), Vacant(&'a mut HashMap<K, V>, K) }
+
+impl<'a, K, V> Entry<'a, K, V> {
+    // What it stands for; or, if nothing, the item, put there.
+    pub fn or_insert(e: Self, item: V) -> &'a mut V where K: Hash {
+        match(e) { Occupied(v) => v, Vacant(m, k) => HashMap::insert_new(m, k, item) }
+    }
+    pub fn or_insert_with(e: Self, make: fn() -> V) -> &'a mut V where K: Hash {
+        match(e) { Occupied(v) => v, Vacant(m, k) => HashMap::insert_new(m, k, make()) }
+    }
+    pub fn or_insert_default(e: Self) -> &'a mut V where K: Hash, V: std::value::Default {
+        match(e) { Occupied(v) => v, Vacant(m, k) => HashMap::insert_new(m, k, std::value::default()) }
     }
 }
 

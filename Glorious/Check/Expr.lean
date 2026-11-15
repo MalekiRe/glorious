@@ -553,6 +553,39 @@ partial def dotAltFor (scope : Scope) (amb : Row) (call : Nat) (a : Expr) : M (O
       | none => pure none
     | none => pure none
 
+/-- How two functions take their first argument: `0` whole, `1` by a shared
+reference, `2` by a `&mut` one (none where it is no function known so). -/
+partial def receiverKinds (f g : String) : M (Option Nat × Option Nat) := do
+  let first := fun (name : String) => (do
+    match (← get).fns.lookup name with
+    | none =>
+      -- (A trait's function: as its first parameter is written.)
+      match (← get).methods.lookup name with
+      | some sig =>
+        match sig.params.head? with
+        | some (.ref how _ _) =>
+          match how with
+          | .con "&mut" [] => pure (some 2)
+          | _ => pure (some 1)
+        | some _ => pure (some 0)
+        | none => pure none
+      | none => pure none
+    | some scheme =>
+      match ← instantiate scheme with
+      | .fn (p :: _) _ _ _ _ =>
+        match ← find p with
+        | .ref how _ _ =>
+          match ← find how with
+          | .con "&mut" [] => pure (some 2)
+          | _ => pure (some 1)
+        | _ => pure (some 0)
+      | _ => pure none : M (Option Nat))
+  let saved ← get
+  let a ← first f
+  let b ← first g
+  set saved
+  pure (a, b)
+
 /-- Check arguments in the given order. Gives the first that does not fit. -/
 partial def checkArgsIn (scope : Scope) (amb : Row) (what : String) (params : List Ty)
     (args : List Expr) (call : Nat) (order : List Nat) : M (Option (Nat × String)) := do
@@ -583,9 +616,11 @@ partial def checkArgsIn (scope : Scope) (amb : Row) (what : String) (params : Li
               throw (Syntax.refPatsMark id uniq valuePats ++ s!"argument {i + 1} of {what}: what is matched is a reference: a pattern of what it points to is written `{shown}Pattern`, and binds references (`{shown}Some(x) => *x`)")
       -- (A dot call whose receiver is of a type with a function of its own of
       -- the name: that one, if the function in scope does not fit.)
-      let ownAlt ← if i != 0 then pure none else dotAltFor scope amb call a
       if let some e ← checkArg scope amb s!"argument {i + 1} of {what}" p a site then
-        if let some alt := ownAlt then throw (Syntax.dotOwnMark call alt ++ e)
+        -- (Asked only once the function in scope does not fit: the program
+        -- is read again, so what this finds on the way is not kept.)
+        if i == 0 then
+          if let some alt ← dotAltFor scope amb call a then throw (Syntax.dotOwnMark call alt ++ e)
         -- (Clauses one of which ends with a braced block, which is a callable
         -- there: likely meant to be run.)
         let blocky := match a with
@@ -745,6 +780,26 @@ partial def inferCall (scope : Scope) (amb : Row) (f : Expr) (args : List Expr)
       match ← fitAt scope amb "the value of a `let` with a type" none expected found with
       | none => return expected
       | some e => throw e
+  -- A dot call the resolver could not tell: the function of the value's
+  -- type, where it takes its first argument as the one written does (so
+  -- that the receiver is borrowed as it should be); the program is read
+  -- again only where it does not.
+  if let .name none x := f then
+    if let some alts := (← get).modules.dotAlts.lookup call then
+      if let some a := args.head? then
+        if let some alt ← dotAltFor scope amb call a then
+          if alt != x && alts.contains alt then
+            let (mine, theirs) ← receiverKinds x alt
+            if mine.isSome && mine == theirs then
+              modify fun s => { s with dotChosen := (call, alt, 0) :: s.dotChosen }
+              return ← inferCall scope amb (.name none alt) args call
+            -- (The one in scope takes the value whole, the type's own a
+            -- reference: a mutable variable is borrowed for it.)
+            if let (some 0, some k, .name none v) := (mine, theirs, a) then
+              if k != 0 then
+                if let some (.cell _ _) := scope.lookup v then
+                  modify fun s => { s with dotChosen := (call, alt, k) :: s.dotChosen }
+                  return ← inferCall scope amb (.name none alt) (.ref (k == 2) v :: args.drop 1) call
   -- `T::f(..)` of a type parameter `T` and a trait's function `f`: as
   -- `<T as Trait>::f(..)` is.
   if let .name (some q) x := f then

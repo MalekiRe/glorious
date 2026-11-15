@@ -4549,14 +4549,32 @@ as values, so they are copied (numbers, texts); what a key stands for is
 never copied, so it may have a `drop` (a replaced or removed value is given
 back; the rest are destroyed with the map). Lookups look at each pair where
 it is (`&(k, _)` patterns), not through `a[i].0`, which copies the element.
-The entry API and iterators over references are not built. The three cases
-that used the old names use these.
+`entry(k)` gives `Occupied(&mut V)` or `Vacant(map, key)` (not the
+specification's entry structs), with `or_insert`, `or_insert_with` and
+`or_insert_default`. Iterators over references are not built. The three
+cases that used the old names use these.
 
 A dot call whose name is a function of several types' own (`a.size()` with
 `A::size` and `B::size`) was refused as ambiguous; the resolver now takes the
 first and tells the checker of the rest, which chooses by the value's type as
 for a function in scope that does not fit (the case that expected the
 refusal now gives what both calls give).
+
+## A dot call's own function chosen without reading the program again
+
+A dot call whose function in scope did not fit was read again from the text
+with the type's own function, each such call once: a program with a dozen
+map calls took a fresh compile for several of them. Now the checker, where
+the resolver noted alternatives, finds the receiver's type first and checks
+the call as of the type's own function where it takes its first argument as
+the one in scope does (`receiverKinds`, of functions and of trait
+functions), or where the one in scope takes it whole, the own one by
+reference, and the receiver is a mutable variable, which is then borrowed.
+What it chose (`Blocks.dotChosen`) is written into the program for what
+follows (`Elab.chosenItems`). Other cases are read again as before. A
+function of a type that cannot be named where it is called (`Entry`, given
+by `HashMap::entry`) is found through the value too, where nothing in scope
+has the name.
 
 ## Other standing decisions
 

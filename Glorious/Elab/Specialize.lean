@@ -482,6 +482,51 @@ partial def dotOwnItems (call : Nat) (fn : String) (items : List Item) : List It
     | .pub parent item => .pub parent ((dotOwnItems call fn [item]).headD item)
     | item => item
 
+/-- A program with the functions of dot calls the checker chose by the
+value's type (`Blocks.dotChosen`) written in. -/
+partial def chosenExpr (picks : List (Nat × String × Nat)) : Expr → Expr
+  | .call i f args =>
+    let args := args.map (chosenExpr picks)
+    match f, picks.lookup i with
+    | .name _ _, some (fn, how) =>
+      let args := match how, args with
+        | 0, _ => args
+        | k, .name none v :: rest => .ref (k == 2) v :: rest
+        | _, _ => args
+      .call i (.name none fn) args
+    | f, _ => .call i (chosenExpr picks f) args
+  | .tailCall i f args => .tailCall i (chosenExpr picks f) (args.map (chosenExpr picks))
+  | .tuple args => .tuple (args.map (chosenExpr picks))
+  | .proj e n => .proj (chosenExpr picks e) n
+  | .closure i clauses => .closure i (clauses.map fun
+    | .mk pats body => .mk pats (body.map (chosenStmt picks)))
+  | .handle subject arms => .handle (chosenExpr picks subject) (arms.map fun
+    | .mk pats body => .mk pats (body.map (chosenStmt picks)))
+  | .labelScope l body => .labelScope l (body.map (chosenStmt picks))
+  | .deref e => .deref (chosenExpr picks e)
+  | .reborrow u e => .reborrow u (chosenExpr picks e)
+  | .fieldOf i e name => .fieldOf i (chosenExpr picks e) name
+  | e => e
+where
+  chosenStmt (picks : List (Nat × String × Nat)) : Stmt → Stmt
+    | .let_ pat value => .let_ pat (chosenExpr picks value)
+    | .expr e => .expr (chosenExpr picks e)
+    | .defer e => .defer (chosenExpr picks e)
+    | .letMut x value => .letMut x (chosenExpr picks value)
+    | .assign target value => .assign (chosenExpr picks target) (chosenExpr picks value)
+    | .located line col s => .located line col (chosenStmt picks s)
+
+partial def chosenItems (picks : List (Nat × String × Nat)) (items : List Item) : List Item :=
+  if picks.isEmpty then items else
+  items.map fun
+    | .fn name ps annots ret clauses => .fn name ps annots ret (clauses.map fun
+      | .mk pats body => .mk pats (body.map (chosenExpr.chosenStmt picks)))
+    | .impl ps tr head args context methods => .impl ps tr head args context (chosenItems picks methods)
+    | .traitInfo n supers defaults params assocs => .traitInfo n supers (chosenItems picks defaults) params assocs
+    | .module name (some body) => .module name (some (chosenItems picks body))
+    | .pub parent item => .pub parent ((chosenItems picks [item]).headD item)
+    | item => item
+
 def dotOwnFound (said : String) : Option (Nat × String) :=
   match said.splitOn "%dotown:" with
   | _ :: after :: _ =>

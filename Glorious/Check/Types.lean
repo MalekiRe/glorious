@@ -470,6 +470,8 @@ structure St where
   /-- The type parameters of the function being checked, each as what it
   stands for while it is. -/
   rigidParams : List (String × Ty) := []
+  /-- Dot calls of a type's own function chosen by the value's type. -/
+  dotChosen : List (Nat × String × Nat) := []
   /-- For each trait, how many type parameters it has and the names of the
   types it leaves to implementations. -/
   traitShape : List (String × Nat × List String) := []

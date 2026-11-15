@@ -3540,6 +3540,11 @@ def cases : List Case := [
   -- stands for may have a `drop`, and what `insert` replaces is given back.
   ⟨"use std::hash::{HashMap};\nstruct H(Int)\nimpl Drop for H { fn drop(h) { say(h.0) } }\nfn main() -> Int {\n    let mut m = HashMap::new();\n    let mut i = 0;\n    while({ i < 20 }) { m.insert(i, i * i); i = i + 1 };\n    say(m.len());\n    match(m.get(&7)) { Some(v) => say(*v), None => say(0 - 1) };\n    match(m.get_mut(&3)) { Some(v) => *v = 100, None => () };\n    say(m.insert(3, 5));\n    say(m.remove(&4));\n    say(m.contains_key(&4));\n    let mut words = HashMap::new();\n    words.insert(\"a\", 1);\n    match(words.get_mut(&\"a\")) { Some(n) => *n = *n + 1, None => () };\n    match(words.get(&\"a\")) { Some(n) => say(*n), None => () };\n    let mut hs = HashMap::new();\n    hs.insert(1, H(10));\n    match(hs.insert(1, H(11))) { Some(old) => say(100 + old.0), None => () };\n    say(m.len());\n    0\n}\n",
     [], "20\n49\nOk(100)\nOk(16)\nErr(())\n2\n110\n10\n19\n11\n0"⟩,
+  -- `entry(k).or_insert(v)`: what the key stands for, put there if it is
+  -- not; a function of a type that cannot be named here, called through a
+  -- value of it.
+  ⟨"use std::hash::{HashMap};\nuse std::text::{words};\nfn main() -> Int {\n    let mut counts = HashMap::new();\n    let ws = words(\"a b a c b a\");\n    let mut i = 0;\n    while({ i < len(ws) }) { let n = counts.entry(ws[i]).or_insert(0); *n = *n + 1; i = i + 1 };\n    match(counts.get(&\"a\")) { Some(n) => say(*n), None => () };\n    counts.len()\n}\n",
+    [], "3\n3"⟩,
   -- (An element of what a reference is to is borrowed through it.)
   ⟨"fn first(r: &[Int]) -> Int { let e = &r[0]; *e }\nfn main() -> Int { first(&[7, 8]) }",
     [], "7"⟩,

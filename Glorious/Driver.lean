@@ -621,6 +621,11 @@ partial def compileSourceAt (src : String) (check : Bool := true)
         | _ => (all, .error said)
       | _, _, _ => (all, .error said)
   let (all, checked) := checkWith 64 all none
+  -- (Dot calls the checker chose a type's own function for, by the value's
+  -- type: written so for what follows.)
+  let all := match checked with
+    | .ok (blocks, _) => Elab.chosenItems blocks.dotChosen all
+    | .error _ => all
   let (blocks, checkMade) ← match checked with
     | .ok (blocks, made) => pure (some blocks, made)
     | .error e =>

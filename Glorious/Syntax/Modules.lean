@@ -1097,19 +1097,22 @@ partial def resolveExpr (ctx : Ctx) (bound : List String) : Expr → R Expr
         return .call id (.name none (name.drop 5).toString)
           (.call 0 (.name none receiverMark) [receiver] :: args)
       -- Types' own functions of the name, that can be named here.
-      let own := fun (_ : Unit) => (do
+      -- (`anywhere`: also of a type that cannot be named here, a value of
+      -- which is had, and its functions called through the value.)
+      let own := fun (anywhere : Bool) => (do
         pure ((← get).units.flatMap fun u => u.own.filter fun b =>
           match b.name.splitOn "::" with
           | [ty, fn] =>
             fn == name && b.entry.kind.space == .value
               && (u.path == ctx.here || visible b.shown u.path ctx.here)
-              && (ctx.of ty).any fun named => named.name == ty && named.entry.kind == .type
-                && named.entry.home == u.path
+              && (if anywhere then u.own.any fun named => named.name == ty && named.entry.kind == .type
+                else (ctx.of ty).any fun named => named.name == ty && named.entry.kind == .type
+                  && named.entry.home == u.path)
           | _ => false) : R (List Bound))
       unless bound.contains name do
         if let some e := lookupIn (ctx.of name) .value name then
           if e.kind == .fn || e.kind == .method then
-            let alts := (← own ()).map (·.entry.global)
+            let alts := (← own false).map (·.entry.global)
             unless alts.isEmpty || id == 0 do
               modify fun s => { s with dotAlts := (id, alts) :: s.dotAlts }
             -- (Marked: whether it is borrowed for the call is decided once
@@ -1128,7 +1131,7 @@ partial def resolveExpr (ctx : Ctx) (bound : List String) : Expr → R Expr
           | .fieldNames _ names _ => names.contains name
           | _ => false
         unless fieldNamed do
-          let found ← own ()
+          let found ← own true
           -- (Of several types: the first, and the checker told of the rest,
           -- which it chooses from by the value's type where the first does
           -- not fit.)
