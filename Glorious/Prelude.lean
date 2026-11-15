@@ -843,6 +843,27 @@ fn some_or_leave<T, R, L>(value: Result<T, ()>, target: L, fallback) -> T where 
 // cleanup run (the library specification's §6.1).
 fn abort<T>(message: Str) -> T { host_write(message); arr_get(arr_new(), 0) }
 fn unreachable<T>(message: Str) -> T { abort(message) }
+// What an `Option` or a `Result` has, asked of it as a value's own: `o.map(f)`.
+// (An `Option<T>` is a `Result<T, ()>`, so each is both's.)
+impl<T, E> Result<T, E> {
+    fn is_some(&self) -> Bool { match(self) { &Ok(_) => true, &Err(_) => false } }
+    fn is_none(&self) -> Bool { match(self) { &Ok(_) => false, &Err(_) => true } }
+    fn is_ok(&self) -> Bool { match(self) { &Ok(_) => true, &Err(_) => false } }
+    fn is_err(&self) -> Bool { match(self) { &Ok(_) => false, &Err(_) => true } }
+    fn unwrap(self) -> T { match(self) { Ok(x) => x, Err(_) => abort("unwrap of nothing") } }
+    fn expect(self, message: Str) -> T { match(self) { Ok(x) => x, Err(_) => abort(message) } }
+    fn unwrap_or(self, other: T) -> T { match(self) { Ok(x) => x, Err(_) => other } }
+    fn unwrap_or_else(self, other) -> T { match(self) { Ok(x) => x, Err(e) => other(e) } }
+    fn map(self, f) { match(self) { Ok(x) => Ok(f(x)), Err(e) => Err(e) } }
+    fn map_err(self, f) { match(self) { Ok(x) => Ok(x), Err(e) => Err(f(e)) } }
+    fn and_then(self, f) { match(self) { Ok(x) => f(x), Err(e) => Err(e) } }
+    fn or_else(self, f) { match(self) { Ok(x) => Ok(x), Err(e) => f(e) } }
+    fn ok_or<D>(self, error: D) -> Result<T, D> { match(self) { Ok(x) => Ok(x), Err(_) => Err(error) } }
+    fn ok(self) -> Option<T> { match(self) { Ok(x) => Some(x), Err(_) => None } }
+    fn filter(self, keep: for<'a> fn(&'a T) -> Bool) -> Result<T, ()> {
+        match(self) { Ok(x) => if(keep(&x)) { Ok(x) } else { Err(()) }, Err(_) => Err(()) }
+    }
+}
 fn assert(condition: Result<(), ()>) { match(condition) { Ok(_) => (), Err(_) => abort("assertion failed") } }
 fn assert_message(condition: Result<(), ()>, message: Str) { match(condition) { Ok(_) => (), Err(_) => abort(message) } }
 fn assert_eq<T>(left: &T, right: &T) where T: Eq, T: Show {

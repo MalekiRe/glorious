@@ -3635,6 +3635,16 @@ def cases : List Case := [
     [], "5"⟩,
   ⟨"fn f(o: &Option<Int>) -> Int { match(o) { Some(x) => 1, None => 0 } }\nfn main() -> Int { f(&Some(4)) }",
     [], "1"⟩,
+  -- An `Option`'s and a `Result`'s functions as their own: `a.map(f)`;
+  -- `half(4).is_ok()` borrows the value made where it is called on.
+  ⟨"fn main() -> Int { let a = Some(3); let b = a.map({ x => x + 1 }).unwrap_or(0); let c: Option<Int> = None; b + c.unwrap_or(10) }",
+    [], "14"⟩,
+  ⟨"fn main() -> Int { let a = Some(3); say(a.is_some()); say(a.map({ x => x * 2 })); let n: Option<Int> = None; say(n.is_none()); say(a.and_then({ x => if(x > 2) { Some(x) } else { None } })); say(n.ok_or(\"none\")); a.unwrap() + a.expect(\"there\") }",
+    [], "true\nOk(6)\ntrue\nOk(3)\nErr(none)\n6"⟩,
+  ⟨"fn half(x: Int) -> Result<Int, Str> { if(x % 2 == 0) { Ok(x / 2) } else { Err(\"odd\") } }\nfn main() -> Int { say(half(3).map_err({ e => e ++ \"!\" })); say(half(4).is_ok()); half(8).unwrap_or(0) }",
+    [], "Err(odd!)\ntrue\n4"⟩,
+  ⟨"fn main() -> Int { let a = Some(3); say(a.filter({ x => *x > 5 })); say(a.filter({ x => *x > 1 })); 0 }",
+    [], "Err(())\nOk(3)\n0"⟩,
   -- (An element of what a reference is to is borrowed through it.)
   ⟨"fn first(r: &[Int]) -> Int { let e = &r[0]; *e }\nfn main() -> Int { first(&[7, 8]) }",
     [], "7"⟩,

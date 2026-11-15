@@ -273,7 +273,15 @@ partial def receiverExpr (taken : List (String × Bool)) (known : List (String �
           | some uniq, some (x, [], _), _ => Expr.ref uniq x
           | some uniq, some (x, path, fid), _ => if fid == 0 then receiver else .refField fid uniq x path false
           | some uniq, none, some (x, path, fid) => .refField fid uniq x path true
-          | some uniq, none, none => (element uniq 8 receiver).getD receiver
+          | some uniq, none, none =>
+            match element uniq 8 receiver with
+            | some e => e
+            | none =>
+              -- (A value made where it is called on, `half(4).is_ok()`:
+              -- given a name first, and borrowed.)
+              match receiver with
+              | .call .. => .call id (.name none (if uniq then borrowMutMark else borrowMark)) [receiver]
+              | _ => receiver
           | _, _, _ => receiver
         .call id (.name q name) (given :: rest)
       else .call id f args
@@ -346,7 +354,7 @@ partial def borrowReceivers (items : List Item) : List Item :=
           | .mk pats _ => (pats.zip annots).filterMap fun
             | (Pattern.var x, some (TypeExpr.ref _ _ _)) => some x
             | _ => none
-        receiverClause taken (refs.map (·, 3)) values c)
+        nameBorrowsClause (receiverClause taken (refs.map (·, 3)) values c))
     | .impl ps tr head args context methods => .impl ps tr head args context (methods.map go)
     | .traitInfo name supers defaults params assocs => .traitInfo name supers (defaults.map go) params assocs
     | .alias name value => .alias name (receiverExpr taken [] value)
