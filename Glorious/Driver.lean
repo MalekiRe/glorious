@@ -210,13 +210,13 @@ def stdPreludeNames : List (String × String) :=
    ("Left", "value"), ("Right", "value"), ("Rejected", "value"), ("Ordering", "cmp"),
    ("Less", "cmp"), ("Equal", "cmp"), ("Greater", "cmp"), ("Range", "iterator"),
    ("Fail", "value"), ("fail", "value"), ("Report", "value"), ("report", "value"),
-   ("catch_fail", "value"), ("Vec", "vec")]
+   ("catch_fail", "value"), ("Vec", "vec"), ("String", "text")]
 
 /-- The functions of `std::text` brought in where a program calls one on a
 value, `s.trim()`: none has a name a type's own function commonly has. -/
 def textDotNames : List String :=
   ["to_upper", "to_lower", "trim", "trim_start", "starts_with", "ends_with", "parse_int",
-   "char_at", "pad_start", "pad_end", "lines", "words", "repeat", "utf8"]
+   "char_at", "pad_start", "pad_end", "lines", "words", "repeat", "utf8", "split", "contains"]
 
 /-- The functions of `std::iterator` brought in where a program calls one on
 a value, `v.iter().map(f).sum()`, as Rust's prelude has `Iterator`'s. -/

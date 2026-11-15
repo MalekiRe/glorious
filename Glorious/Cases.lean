@@ -3750,6 +3750,13 @@ def cases : List Case := [
     [], "10"⟩,
   ⟨"fn main() -> Int { let mut n = 0; for c in \"abc\".chars() { n += 1 }; n }",
     [], "3"⟩,
+  -- `String` without a `use`; `split` and `contains` called on texts.
+  ⟨"fn main() -> Int { let mut s = String::new(); s.push_str(\"ab\"); s.push('c'); say(s.as_str()); s.len() }",
+    [], "abc\n3"⟩,
+  ⟨"fn main() -> Int { let parts = \"a,b,c\".split(','); len(parts) }",
+    [], "3"⟩,
+  ⟨"fn main() -> Int { let v = Vec::from_array([1, 2]); let a = if v.contains(&2) { 1 } else { 0 }; let b = if \"hello\".contains(\"ell\") { 10 } else { 0 }; a + b }",
+    [], "11"⟩,
   -- (An element of what a reference is to is borrowed through it.)
   ⟨"fn first(r: &[Int]) -> Int { let e = &r[0]; *e }\nfn main() -> Int { first(&[7, 8]) }",
     [], "7"⟩,

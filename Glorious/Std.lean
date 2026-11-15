@@ -792,7 +792,10 @@ impl String {
         let bytes = &mut value.bytes;
         *bytes = [];
     }
+    // The text as a value of its own, as Rust names it.
+    pub fn as_str(value: &Self) -> Str { String::to_str(value) }
 }
+impl Show for String { fn show(s) { String::to_str(&s) } }
 "#
 
 private def mapText : String := r#"// A map from keys to values, the keys kept in order: a tree that stays
