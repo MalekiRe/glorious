@@ -4676,6 +4676,19 @@ the checker chooses it (`Blocks.derefArgs`) and `*r` is written in after the
 check. Only a name: an expression of reference type is not looked at, which
 keeps the choice from inferring an argument twice.
 
+## Rust's control forms
+
+`if c { .. }`, `while c { .. }` and `match x { .. }` written without
+parentheses are `if(c) { .. }`, `while({ c }) { .. }` and `match(x) { .. }`:
+what is tested is read up to the block (no record literal unbracketed there,
+as in Rust). `a else if c { .. }` gives `else` a callable that runs the
+`if`. `a && b` and `a || b` are `a and { b }` and `a or { b }`; prefix `!c`
+is `not c`. `x += e` (and `-=`, `*=`, `/=`, `%=`) as a statement is
+`x = x + e`, the target read again for the value. Each calls the functions
+as named where it is written, so a program's own `if` or `and` is the one
+used. These read text that was refused before; the spec's forms are
+unchanged.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by

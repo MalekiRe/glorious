@@ -1404,4 +1404,35 @@ partial def promoteItems (items : List Item) : List Item :=
     | .impl ps tr head args context methods => .impl ps tr head args context (promoteItems methods)
     | item => item
 
+mutual
+
+/-- An expression with every identity in it moved on by `k`: a copy of a
+function is then told apart from the function and from every other copy. -/
+partial def shiftExpr (k : Nat) : Expr → Expr
+  | .call id g args => .call (id + k) (shiftExpr k g) (args.map (shiftExpr k))
+  | .tailCall id g args => .tailCall (id + k) (shiftExpr k g) (args.map (shiftExpr k))
+  | .tuple args => .tuple (args.map (shiftExpr k))
+  | .proj e i => .proj (shiftExpr k e) i
+  | .fieldOf id e name => .fieldOf (id + k) (shiftExpr k e) name
+  | .refField id uniq name path star => .refField (id + k) uniq name path star
+  | .deref e => .deref (shiftExpr k e)
+  | .reborrow u e => .reborrow u (shiftExpr k e)
+  | .closure id clauses => .closure (id + k) (clauses.map (shiftClause k))
+  | .handle subject arms => .handle (shiftExpr k subject) (arms.map (shiftClause k))
+  | .labelScope l body => .labelScope l (body.map (shiftStmt k))
+  | e => e
+
+partial def shiftClause (k : Nat) : Clause → Clause
+  | .mk pats body => .mk pats (body.map (shiftStmt k))
+
+partial def shiftStmt (k : Nat) : Stmt → Stmt
+  | .let_ pat value => .let_ pat (shiftExpr k value)
+  | .letMut x value => .letMut x (shiftExpr k value)
+  | .expr e => .expr (shiftExpr k e)
+  | .defer e => .defer (shiftExpr k e)
+  | .assign target value => .assign (shiftExpr k target) (shiftExpr k value)
+  | .located line col s => .located line col (shiftStmt k s)
+
+end
+
 end Glorious.Syntax

@@ -1112,14 +1112,30 @@ private partial def parseBinary (minPrec : Nat) (noBlock : Bool)
       let next := match assoc with
         | .right => prec
         | _ => prec + 1
+      -- (`else if c { .. }`: what `else` is given is a callable, which runs
+      -- the `if`.)
+      let elseIf := name == "else" && (← peek) == .ident "if"
       let rhs ← parseBinary next noBlock (some (prec, assoc))
+      let rhs := if elseIf then Expr.closure (id + 300000) [.mk [] [.expr rhs]] else rhs
       let (qual, f) := splitPath (((← read).fix.function name false).splitOn "::")
       lhs := .call id (.name qual f) [lhs, rhs]
     | none =>
       match t with
+      -- `a && b`, `a || b`: `a and { b }`, `a or { b }`, as Rust has them.
+      | .op "&&" | .op "||" =>
+        let word := if t == .op "&&" then "and" else "or"
+        match ← infixOf (.ident word) with
+        | some (_, prec, _) =>
+          if prec < minPrec then break
+          let id := (← read).base + (← get) + 1
+          advance
+          let rhs ← parseBinary (prec + 1) noBlock (some (prec, .left))
+          let (qual, f) := splitPath (((← read).fix.function word false).splitOn "::")
+          lhs := .call id (.name qual f) [lhs, .closure (id + 300000) [.mk [] [.expr rhs]]]
+        | none => failAt s!"operator `{if word == "and" then "&&" else "||"}` is `{word}` here, which has no infix fixity in this module"
       | .op s =>
-        if s.length == 2 && s.endsWith "=" && ["+=", "-=", "*=", "/=", "%="].contains s then
-          failAt s!"`x {s} e` is not an assignment here: write `x = x {(s.take 1).toString} e`"
+        -- (`x += e`: a statement's, read where statements are.)
+        if ["+=", "-=", "*=", "/=", "%="].contains s then break
         failAt s!"operator `{s}` has no infix fixity in this module (a fixity is its module's: `use` the function the operator stands for)"
       | .ident "is" =>
         -- `subject is Pattern`, which binds as a comparison does.
@@ -1162,6 +1178,14 @@ private partial def parseUnary (noBlock : Bool) : P Expr := do
       let (qual, f) := splitPath ((fix.function s true).splitOn "::")
       pure (.call id (.name qual f) [operand])
     | none =>
+      -- (`!c`: `not c`, as Rust has it.)
+      if t == .op "!" then
+        if let some prec := fix.prefixes.lookup "not" then
+          let id := (← read).base + (← get) + 1
+          advance
+          let operand ← parseBinary prec noBlock
+          let (qual, f) := splitPath ((fix.function "not" true).splitOn "::")
+          return .call id (.name qual f) [operand]
       if t == .op "-" then failAt "operator `-` has no prefix fixity"
       else if t == .op "&" then
         advance
@@ -1351,6 +1375,25 @@ private partial def parsePrimary (noBlock : Bool) : P Expr := do
         | _ => parseBinary 0 false
       -- (`return` as it is named here, as `return(e, @f)` would call.)
       return .call id (.name none "return") [value, .label l]
+  -- `if c { .. }`, `while c { .. }`, `match x { .. }`: what is tested
+  -- written without parentheses, read up to the block, as Rust has them:
+  -- `if(c) { .. }`, `while({ c }) { .. }`, `match(x) { .. }`.
+  if let .ident w ← peek then
+    if (w == "if" || w == "while" || w == "match") && (← peek 1) != .punct "(" then
+      let next ← peek 1
+      let starts := match next with
+        | .ident "let" => false
+        | .ident _ | .int _ | .str _ | .char _ => true
+        | .op "!" | .op "-" | .op "*" | .op "&" => true
+        | _ => false
+      if starts then
+        let id := (← read).base + (← get)
+        advance
+        let tested ← parseBinary 0 true
+        if (← peek) != .punct "{" then failAt s!"expected `\{` after what `{w}` is given"
+        let block ← parseBraces
+        let tested := if w == "while" then Expr.closure (id + 300000) [.mk [] [.expr tested]] else tested
+        return .call id (.name none w) [tested, block]
   -- `break` and `continue` alone, where a statement ends: performed, with
   -- `()` and with nothing (`break(())`, `continue()`), as named here.
   if let .ident w ← peek then
@@ -1683,16 +1726,10 @@ private partial def parseStmts : P (List Stmt) := do
         else set saved
       | none => set saved
     match t, ← peek 1 with
-    | .ident "match", next =>
-      if operand next then
-        failAt "`match` is given what it matches in parentheses: `match(x) { pattern => .. }`"
     | .ident "if", .ident "let" =>
       failAt "`if let` is not read: match what is tested, `match(a) { Some(x) => .., _ => .. }`"
     | .ident "while", .ident "let" =>
       failAt "`while let` is not read: go through an iterator with `for x in it { .. }`, or loop with `while({ condition }, { body })`"
-    | .ident "if", next =>
-      if operand next then
-        failAt "`if` is given its condition in parentheses: `if(c) { .. } else { .. }`"
     | _, _ => pure ()
     let here ← peekTok
     let mark := fun (s : Stmt) => Stmt.located here.line here.col s
@@ -1759,9 +1796,21 @@ private partial def parseStmts : P (List Stmt) := do
       out := out ++ (← settle (.defer e)).toArray
     else
       let e ← parseBinary 0 false
-      if ← acceptPunct "=" then
+      -- `x += e`: `x = x + e`, and so on.
+      let compound := match ← peek with
+        | .op s => if ["+=", "-=", "*=", "/=", "%="].contains s then some (s.take 1).toString else none
+        | _ => none
+      if compound.isSome then advance
+      if compound.isSome || (← acceptPunct "=") then
         let id := (← read).base + (← get) + 1
         let value ← parseBinary 0 false
+        let fix := (← read).fix
+        let value := match compound with
+          | some op =>
+            let (qual, f) := splitPath ((fix.function op false).splitOn "::")
+            -- (What is read is told apart from where it is written.)
+            Expr.call (id + 300000) (.name qual f) [shiftExpr 350000 e, value]
+          | none => value
         -- `x.0 = v` and `(*p).0 = v` assign through a borrow of the field.
         -- `a[i] = v` makes `a` the array with `v` at that place: `a =
         -- index_set(a, i, v)`, and so on outwards for `a[i][j] = v`.
