@@ -196,6 +196,9 @@ structure Scheme where
   shows : Array (ITy × List ITy)
   opens : Array (ITy × ITy × List (Nat × Nat)) := #[]
   calls : Array Call := #[]
+  /-- Callables given up whose types the group does not fix (a parameter of
+  any callable type): what giving one up touches is known at each use. -/
+  givenUpOpen : Array (ITy × IRow × Nat) := #[]
   /-- The part of it a user of the group can still affect, and so must meet too. -/
   exported : Array Incl
   exportedPlaces : Array (ITy × Nat × ITy)
@@ -271,7 +274,9 @@ structure St where
   /-- Callables given up whose type was not yet known: the type, and the
   effects and regions where they were given up. Settled once the function's
   body is read. -/
-  cancels : Array (ITy × IRow × Nat) := #[]
+  cancels : Array (ITy × IRow × Nat × Bool) := #[]
+  /-- Of those, the ones whose types the group being inferred left open. -/
+  pending : Array (ITy × IRow × Nat) := #[]
   /-- The functions that give up a callable of whatever type they are given:
   how callables are destroyed, and what destroys the captures of a closure.
   What a use gives them is checked of each use. -/
@@ -1406,6 +1411,15 @@ where
     pure acc
 
 
+/-- A callable type that binds no region of its own. (Giving up one that
+does touches nothing of those: they are chosen at a call. What else it
+touches is not told apart here, so one given up where its type is fixed by a
+use is left to the destroyer's own typing.) -/
+def bindsNone (kt : ITy) : M Bool := do
+  match kt with
+  | .fn _ _ _ _ _ _ acc => pure (← bindersOf acc).isEmpty
+  | _ => pure true
+
 /-- A callable of type `kt` given up where the effects `amb` may be performed
 and the regions `self` touched: whatever it takes, a call of it could do what
 it says. -/
@@ -1446,7 +1460,7 @@ partial def schemeOf (scc : Nat) : M Scheme := do
   modify fun s =>
     { s with
       curScc := some scc, cur := cur, incls := #[], places := #[], coerces := #[], nevers := #[]
-      onces := #[], shows := #[], opens := #[], calls := #[] }
+      onces := #[], shows := #[], opens := #[], calls := #[], cancels := #[], pending := #[] }
   let mut raw : List Member := []
   for (f, sig) in cur do
     let F := (outer.fns[f]?).getD ⟨[]⟩
@@ -1473,18 +1487,22 @@ partial def schemeOf (scc : Nat) : M Scheme := do
   for (f, sig) in cur do
     for (c, j) in sig.caps.zipIdx do
       if let .var v ← find c then captured := (v, arities[(f, j)]?) :: captured
-  for (kt, amb, self) in (← get).cancels do
+  for (kt, amb, self, inherited) in (← get).cancels do
     match ← find kt with
     | .var v =>
+      let leave := modify fun s => { s with pending := s.pending.push (kt, amb, self) }
+      if inherited then leave else
       match captured.lookup v with
       -- (Captured: of as many arguments as every closure made says, else
       -- of whatever type its maker gives.)
       | some (some n) => givenUp (.var v) amb self n
       | some none => pure ()
       -- (Else a resumption's, of one argument, in a handler's arm; anywhere
-      -- else, what a use gives.)
-      | none => if !general && cur.any (fun (f, _) => armFns.contains f) then givenUp (.var v) amb self
-    | kt => givenUp kt amb self
+      -- else, what each use gives: the group's users find it.)
+      | none =>
+        if !general && cur.any (fun (f, _) => armFns.contains f) then givenUp (.var v) amb self
+        else leave
+    | kt => if !inherited || (← bindsNone kt) then givenUp kt amb self
   modify fun s => { s with cancels := #[] }
   settle
   -- Write out what was learnt, and separate what is general from what is shared.
@@ -1595,6 +1613,9 @@ partial def schemeOf (scc : Nat) : M Scheme := do
         open_ ← namedAccs ty open_
       open_ ← namedAccsRow c.row open_
       open_ := (open_.insert (← findAcc c.acc)).insert (← findAcc c.self)
+    for (kt, _, self) in (← get).pending do
+      open_ ← namedAccs kt open_
+      open_ := open_.insert (← findAcc self)
     -- (And the same of the groups settled while this one was inferred,
     -- whose records are among this one's.)
     modify fun s => { s with kept := open_.fold (fun k a => k.insert a) s.kept }
@@ -1646,6 +1667,7 @@ partial def schemeOf (scc : Nat) : M Scheme := do
     { startTy, startRow, startCls, startRg, startAcc, fixedTys := fixed.tys
       fixedRows := fixed.rows, fixedClss := fixed.clss, fixedRgs := shared.1
       fixedAccs := shared.2, members, incls, places, coerces, nevers, onces, shows, opens, calls
+      givenUpOpen := (← get).pending
       exported := incls.filter fun c => liveRow live c.sub
       exportedPlaces := places.filter fun (t, _, _) => liveTy live t
       exportedCoerces := coerces.filter fun (r, _, _) => liveTy live r
@@ -1657,7 +1679,8 @@ partial def schemeOf (scc : Nat) : M Scheme := do
       schemes := s.schemes.insert scc sch
       curScc := outer.curScc, cur := outer.cur, incls := outer.incls, places := outer.places
       coerces := outer.coerces, nevers := outer.nevers, onces := outer.onces, shows := outer.shows
-      opens := outer.opens, calls := outer.calls, hints := outer.hints, refs := outer.refs }
+      opens := outer.opens, calls := outer.calls, hints := outer.hints, refs := outer.refs
+      cancels := outer.cancels, pending := outer.pending }
   pure sch
 
 /-- The signature to use for a reference to `fn`: the group's own inside its
@@ -1688,7 +1711,10 @@ partial def refSig (fn : Nat) : M ISig := do
         pure (← copyTy sch template, ← copyTy sch opened, ← chosen.mapM fun (bound, actual) => do
           pure (← copyRg sch bound, ← copyRg sch actual))
       let calls ← sch.calls.mapM (copyCall sch)
-      modify fun s => { s with opens := s.opens ++ opens, calls := s.calls ++ calls }
+      let open_ ← sch.givenUpOpen.mapM fun (kt, amb, self) => do
+        pure (← copyTy sch kt, ← copyRow sch amb, ← copyAcc sch self, true)
+      modify fun s => { s with opens := s.opens ++ opens, calls := s.calls ++ calls
+                               cancels := s.cancels ++ open_ }
       modify fun s =>
         { s with
           incls := s.incls ++ incls, places := s.places ++ places
@@ -1870,7 +1896,7 @@ partial def inferTm (self : Nat) (amb : IRow) (τ : ITy) (Γ : Array ITy) : Core
     -- (One whose type is not known yet is settled when the body is read.)
     let kt ← atomTy Γ k
     match ← find kt with
-    | .var _ => modify fun s => { s with cancels := s.cancels.push (kt, amb, self) }
+    | .var _ => modify fun s => { s with cancels := s.cancels.push (kt, amb, self, false) }
     | kt => givenUp kt amb self
     inferTm self amb τ (Γ.push .unit) body
   | .cell init thunk body => do
@@ -2482,6 +2508,8 @@ partial def instantiate (fn : Nat) (use : Use) : M Unit := do
     { s with
       incls := incls, places := places, coerces := coerces, nevers := nevers, onces := onces
       shows := shows, opens := opens, calls := calls }
+  let givenUpOpen ← sch.givenUpOpen.mapM fun (kt, amb, self) => do
+    pure (← copyTy sch kt, ← copyRow sch amb, ← copyAcc sch self)
   match members.find? (·.fn == fn) with
   | none => throw s!"certificate: function {fn} is missing from its group"
   | some m =>
@@ -2491,6 +2519,11 @@ partial def instantiate (fn : Nat) (use : Use) : M Unit := do
     unify m.sig.ret want.ret
     unifyRow m.sig.row want.row
     unifyAcc m.sig.acc want.acc
+  -- (A callable given up whose type the use fixes touches what it does.)
+  for (kt, amb, self) in givenUpOpen do
+    match ← find kt with
+    | .var _ => pure ()
+    | kt => if ← bindsNone kt then givenUp kt amb self
   settleAll
   let mut wanted : List (Nat × Use) := []
   for m in members do
@@ -2996,7 +3029,9 @@ def certifyM (items : List Item) (g : Elab.Globals) (p : Core.Program)
           let k := ((List.range (e.sig.crgns + 1)).find? fun c => e.sig.caps.all (Ty.within c)).getD
             e.sig.crgns
           let want := { full with crgns := k }
-          instantiate d ⟨want, [], none, []⟩
+          -- (Its regions are the closure's, fixed when it was made: one each.)
+          let atoms ← (List.range k).mapM fun _ => freshAtom
+          instantiate d ⟨want, atoms, none, []⟩
           let s ← get
           unless (s.emitted[d]?.getD []).contains full do
             if let some e' := s.entries.find? (fun x => x.fn == d && x.sig == want) then

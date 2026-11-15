@@ -4350,13 +4350,23 @@ call of the closure touches of the regions it was made with, none chosen at
 a call. `cancel` asks in turn that what its callable's type touches has no
 repeats where loans are checked, as a call does, and `Safety` grants the
 destructor's call from `cancel`'s `SubFree` (`Rgn.flat_map_filter_sublist`,
-`InjOn.nodup_free`, `Rgn.freeOf_of_free`). No test program's certificate
-changed with it: the two that need it (`examples/tasks.glorious`, a closure
-holding such a resumption handed to `fn(c: fn() -> Int)`) fail the region
-rules earlier, where a closure kept in a data type's field or a declared
-callable parameter is given a type that touches nothing, and its regions fall
-back to `cell0`. A data type with regions of its own, or callable parameters
-generic in what they touch, would be needed for that.
+`InjOn.nodup_free`, `Rgn.freeOf_of_free`).
+
+Inference had to follow. A destructor was instantiated at the closure's
+signature with no regions given for those fixed when the closure was made, so
+each was a fresh one, not one of the signature's (`freshAtom` now, one each).
+And a function that gives up a callable whose type it does not fix
+(`fn drop_it(c: fn() -> Int) { cancel(c); .. }`, the destroyer of any
+callable) touched nothing of it: the type was still unknown when the group was
+settled. Such a cancel is now kept with the group's scheme (`givenUpOpen`),
+its records left open, and taken on by each user (`refSig`) and each
+instantiation, where the type is known; except where that type binds regions
+of its own, whose touches are not told apart from the rest here. Check 94: a
+closure holding a resumption whose cleanup writes a variable, given up by
+`drop_it`, is shown to keep the region rules. `examples/tasks.glorious` is
+still not: a closure kept in a data type's field is given a type that touches
+nothing, and its regions fall back to `cell0`; a data type with regions of its
+own would be needed.
 
 ## Other standing decisions
 

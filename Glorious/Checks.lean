@@ -331,7 +331,15 @@ def all : List (Nat × (Unit → Bool)) := [
   (91, fun _ => borrowFns "fn main() { let mut x = 1; let p = &mut x; *p = 2; x }" == some 1),
   -- Putting a new value in a variable and taking the old one is not a borrow.
   (92, fun _ => unprovedBorrows "fn main() { let mut x = 1; let old = replace(&mut x, 5); (old, x) }"
-    == some [])
+    == some []),
+  -- A closure holding a resumption whose cleanup writes a variable, given up
+  -- by a function that takes any callable: its destructor, and the function,
+  -- touch the variable, and the region rules hold.
+  (94, fun _ => borrowChecked "effect Ask { ask() -> Int }
+    fn drop_it(c: fn() -> Int) -> Int { cancel(c); 7 }
+    fn main() -> Int { let mut n = 0;
+      let got = handle { defer say(9); let a = ask(); n = n + a; a }() { ask(k) => drop_it({ k(1) }) };
+      got + n }" == some true)
 ]
 
 end Glorious.Checks
