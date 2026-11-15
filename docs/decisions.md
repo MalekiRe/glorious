@@ -4227,7 +4227,16 @@ is split the same way, its variables named by the fields (`c.n`), where the
 struct has no `Drop` (whose value only its own `drop` may take apart).
 
 Limits: only a variable made by writing out its tuple or its struct; the
-library is not split: it is checked once for every program. What the checker says names the field's variable
+library is not split: it is checked once for every program.
+
+(Found while testing what is destroyed: one field taken of a value that is in
+no variable, `f(x).0`, lets the other fields go. Where their types are known
+and one has a `drop`, that is refused; in a function generic in their types it
+is not seen, and nothing destroys them. `Vec::truncate` did this, and now
+takes the pair apart with a pattern, whose `_` destroys. The general case is
+not built: the elaborator would have to destroy the other fields there, which
+asks the function for how to destroy its type parameter where it may not be
+asked anything yet.) What the checker says names the field's variable
 (`x.0` is read while ..), which is what is meant.
 
 ## A resumption let go is given up
