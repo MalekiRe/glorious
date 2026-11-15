@@ -424,6 +424,8 @@ mutual
 
 private partial def parseType : P TypeExpr := do
   match ← peek with
+  | .ident "impl" =>
+    failAt "`impl Trait` is not a type: give the function a type parameter with the trait, `fn f<T: Trait>(x: T)`"
   | .op "!" =>
     advance
     pure .never
@@ -1081,7 +1083,10 @@ private partial def parseBinary (minPrec : Nat) (noBlock : Bool)
       lhs := .call id (.name qual f) [lhs, rhs]
     | none =>
       match t with
-      | .op s => failAt s!"operator `{s}` has no infix fixity in this module (a fixity is its module's: `use` the function the operator stands for)"
+      | .op s =>
+        if s.length == 2 && s.endsWith "=" && ["+=", "-=", "*=", "/=", "%="].contains s then
+          failAt s!"`x {s} e` is not an assignment here: write `x = x {(s.take 1).toString} e`"
+        failAt s!"operator `{s}` has no infix fixity in this module (a fixity is its module's: `use` the function the operator stands for)"
       | .ident "is" =>
         -- `subject is Pattern`, which binds as a comparison does.
         if 4 < minPrec then break
@@ -1504,6 +1509,26 @@ private partial def parseStmts : P (List Stmt) := do
         | _ => pure ()
         continue
       | _, _ => pure ()
+    -- (What is written as in other languages, where it is not this one's.)
+    -- (Only where what follows the word could not follow a name.)
+    let operand := fun (tok : Tok) => match tok with
+      | .ident _ => true
+      | .int _ => true
+      | _ => false
+    match t, ← peek 1 with
+    | .ident "return", next =>
+      if operand next then
+        failAt "`return` is the library's function of a value and the function's label, `return(value, @f)`; or the value is written last, without `;`"
+    | .ident "for", .ident _ =>
+      if (← peek 2) == .ident "in" then
+        failAt "there is no `for .. in` loop: go through an iterator with `for_each(&mut it, { (x) => .. })`, or loop with `while({ condition }, { body })`"
+    | .ident "match", next =>
+      if operand next then
+        failAt "`match` is given what it matches in parentheses: `match(x) { pattern => .. }`"
+    | .ident "if", next =>
+      if operand next then
+        failAt "`if` is given its condition in parentheses: `if(c) { .. } else { .. }`"
+    | _, _ => pure ()
     let here ← peekTok
     let mark := fun (s : Stmt) => Stmt.located here.line here.col s
     -- A borrow of a field of what an expression points to: the reference is

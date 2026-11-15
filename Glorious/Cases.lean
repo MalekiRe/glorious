@@ -3357,6 +3357,11 @@ def cases : List Case := [
   -- An operation's type can be what a trait leaves to an implementation of the effect's type parameter, asked at each use.
   ⟨"trait Source { type Out; fn get(&Self) -> Self::Out; }\nstruct Seven\nimpl Source for Seven { type Out = Int; fn get(s) { 7 } }\nstruct Hi\nimpl Source for Hi { type Out = Str; fn get(s) { \"hi\" } }\neffect Fetch<S: Source> { fetch(S) -> S::Out }\nfn main() -> Int { let a = handle fetch(Seven) + 1 { fetch(s, k) => k(get(&s)) }; let b = handle length(fetch(Hi)) { fetch(s, k) => k(get(&s)) }; a * 10 + b }",
     [], "82"⟩,
+  -- What other languages write is answered with how it is written here.
+  ⟨"fn main() -> Int { return 5 }", [], "error: 1:20: `return` is the library's function of a value and the function's label, `return(value, @f)`; or the value is written last, without `;`, found `return`"⟩,
+  ⟨"fn main() -> Int { let mut x = 1; x += 2; x }", [], "error: 1:37: `x += e` is not an assignment here: write `x = x + e`, found `+=`"⟩,
+  ⟨"fn main() -> Int { let x = Some(1); match x { Some(v) => v, None => 0 } }", [], "error: 1:37: `match` is given what it matches in parentheses: `match(x) { pattern => .. }`, found `match`"⟩,
+  ⟨"fn f(x: impl Show) -> Int { 0 }\nfn main() -> Int { f(1) }", [], "error: 1:9: `impl Trait` is not a type: give the function a type parameter with the trait, `fn f<T: Trait>(x: T)`, found `impl`"⟩,
   ⟨"use std::future::{Future, FutureStep, Await, await, poll, ready, block_on};\n\n// Done after so many polls.\nstruct Countdown { left: Int, value: Int }\nimpl Future for Countdown {\n    type Output = Int;\n    fn poll(c) { if(c.left <= 0) { FutureStep::Ready(c.value) } else { say(c.left); FutureStep::Pending(Countdown { left: c.left - 1, value: c.value }) } }\n}\nfn main() -> Int {\n    let a = block_on({ await(Countdown { left: 2, value: 40 }) + await(Countdown { left: 1, value: 2 }) });\n    let b = block_on({ length(await(ready(\"done\"))) });\n    a * 10 + b\n}\n",
     [], "2\n1\n1\n424"⟩,
   -- Base64, with padding as the options say (library 23).
