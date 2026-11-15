@@ -818,7 +818,11 @@ private partial def parseWhere : P (List String × List Bound) := do
   let mut out : Array String := #[]
   let mut bounds : Array Bound := #[]
   repeat
-    let x ← expectIdent
+    let mut x ← expectIdent
+    -- (`I::Item: Ord`: of what a trait of `I` leaves to its implementation.)
+    if (← peek) == .punct "::" then
+      advance
+      x := x ++ "::" ++ (← expectIdent)
     expectPunct ":"
     if x.startsWith "'" then
       let y ← expectIdent
@@ -1763,6 +1767,28 @@ private partial def parseFn : P (Item × List Bound) := do
         else some <$> parseResult
       else if (← peek) == .op "/" then some <$> parseResult else pure none
     let (lifetimes, more) ← parseWhere
+    -- `where I::Item: Ord`: a type parameter for `I::Item`, which `I`'s one
+    -- written trait is asked to leave (`I: Iterator<Item = ItemOfI>`).
+    let mut more := more
+    let projected := more.filter fun b => (b.subject.splitOn "::").length == 2
+    for b in projected do
+      if let [p, name] := b.subject.splitOn "::" then
+        let fresh := s!"{name}Of{p}"
+        let theirs := (bounds ++ more).filter (·.subject == p)
+        match theirs with
+        | [own] =>
+          unless params.contains fresh do params := params ++ [fresh]
+          bounds := bounds.map fun c =>
+            if c.subject == p && c.trait == own.trait && !c.assoc.any (·.1 == name) then
+              { c with assoc := c.assoc ++ [(name, .name fresh [])] } else c
+          more := more.map fun c =>
+            if c.subject == p && c.trait == own.trait && !c.assoc.any (·.1 == name) then
+              { c with assoc := c.assoc ++ [(name, .name fresh [])] } else c
+        | _ => failAt s!"`{b.subject}`: `{p}` is asked one trait, which leaves `{name}`, to say this of"
+    more := more.map fun c =>
+      match c.subject.splitOn "::" with
+      | [p, name] => { c with subject := s!"{name}Of{p}" }
+      | _ => c
     expectPunct "{"
     let consts := (bounds.filter (·.trait == knownTrait)).map (·.subject)
     let body ← withReader (fun ctx => { ctx with consts := consts ++ ctx.consts }) parseStmts

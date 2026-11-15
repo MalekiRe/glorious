@@ -3582,6 +3582,9 @@ def cases : List Case := [
     [], "10"⟩,
   ⟨"use std::iterator::{Iterator, range, sum, product, any, all, position, last, min, max};\nfn main() -> Int { let mut a = range(1, 5); say(sum(&mut a)); let mut b = range(1, 5); say(product(&mut b)); let mut c = range(0, 10); say(any(&mut c, { x => x > 8 })); let mut d = range(0, 10); say(all(&mut d, { x => x < 5 })); let mut e = range(3, 9); say(position(&mut e, { x => x == 6 })); let mut f = range(3, 9); say(last(&mut f)); let mut g = range(3, 9); say(min(&mut g)); let mut h = range(3, 9); say(max(&mut h)); 0 }",
     [], "10\n24\ntrue\nfalse\nOk(3)\nOk(8)\nOk(3)\nOk(8)\n0"⟩,
+  -- `where I::Item: Ord`.
+  ⟨"use std::iterator::{Iterator, range, next};\nfn biggest<I: Iterator>(it: &mut I) -> Option<I::Item> where I::Item: Ord { match(next(it)) { Some(x) => Some(go(it, x)), None => None } }\nfn go<I: Iterator>(it: &mut I, best: I::Item) -> I::Item where I::Item: Ord { match(next(it)) { Some(x) => if(best < x) { go(it, x) } else { go(it, best) }, None => best } }\nfn main() -> Int { let mut r = range(2, 7); match(biggest(&mut r)) { Some(n) => n, None => 0 } }",
+    [], "6"⟩,
   -- (An element of what a reference is to is borrowed through it.)
   ⟨"fn first(r: &[Int]) -> Int { let e = &r[0]; *e }\nfn main() -> Int { first(&[7, 8]) }",
     [], "7"⟩,

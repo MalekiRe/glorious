@@ -4635,6 +4635,13 @@ specification writes receivers out (`value: &Self`), which stays. `self` is
 an ordinary name in the body. A `|x| body` callable is refused with how a
 callable is written.
 
+## `where I::Item: Ord`
+
+A function's `where` may ask a trait of what a trait of a type parameter
+leaves to its implementation: `I::Item: Ord` is read as a type parameter of
+its own, `ItemOfI: Ord`, with `I: Iterator<Item = ItemOfI>`. Only where `I`
+is asked exactly one trait, which is then taken to be the one leaving `Item`.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by
