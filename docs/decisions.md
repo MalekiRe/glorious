@@ -4522,6 +4522,20 @@ said instead), and only the `drop` function itself, and the copy a clause
 that binds by reference is chosen by (`*%given..`, of `byReference`, which
 nothing destroys), read such a value through a reference. Two cases.
 
+## Smaller additions of the same days
+
+- `Vec::sort` (by `<`, stable) and `Vec::sort_by(v, { (a, b) => .. })`, in
+  place, by the library's merge sort of arrays.
+- `T::f(..)` for a type parameter `T` and a trait's function `f`, checked as
+  `<T as Trait>::f(..)` is (the trait is the one that has `f`).
+- A name bound to a whole number or a capitalized name (a constructor without
+  fields, a constant) is a value for a dot call's receiver, which is then
+  borrowed if the function takes a reference first.
+- A dot call that is read again with a type's own function costs a fresh
+  compile of the program each time (about 75 ms for a small one): the
+  receiver is borrowed as the resolver decides, before checking, so the
+  reading starts over from the text. Two such calls in one program cost two.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by
