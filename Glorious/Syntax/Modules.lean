@@ -445,6 +445,8 @@ structure Ctx where
   /-- What is in `scope` by name, each name's in the order they are there:
   a name is looked for among its own. -/
   named : Std.HashMap String (List Bound) := {}
+  /-- The constructors written with their type, `Type::Name`, by `Name`. -/
+  ctorsByLast : Std.HashMap String (List Bound) := {}
 
 /-- What a module can write under a name. -/
 def Ctx.of (ctx : Ctx) (name : String) : List Bound := ctx.named.getD name []
@@ -452,6 +454,13 @@ def Ctx.of (ctx : Ctx) (name : String) : List Bound := ctx.named.getD name []
 /-- What is in a scope, by name. -/
 def byName (scope : List Bound) : Std.HashMap String (List Bound) :=
   scope.foldr (fun b m => m.insert b.name (b :: m.getD b.name [])) {}
+
+/-- The constructors of a scope written with their type, by their own name. -/
+def ctorsByLastName (scope : List Bound) : Std.HashMap String (List Bound) :=
+  scope.foldr (fun b m =>
+    match b.name.splitOn "::" with
+    | [_, last] => if b.entry.kind == .ctor then m.insert last (b :: m.getD last []) else m
+    | _ => m) {}
 
 /-- A constructor some of whose fields are private cannot be built or taken
 apart outside its module. -/
@@ -481,8 +490,7 @@ def resolveValue (ctx : Ctx) (bound : List String) (qual : Option String) (name 
     | none =>
       -- A constructor that shares its name with another of its module is
       -- written with its type.
-      let shared := ctx.scope.filter fun b =>
-        b.entry.kind == .ctor && (b.name.splitOn "::").length == 2 && (b.name.splitOn "::").getLast? == some name
+      let shared := ctx.ctorsByLast.getD name []
       unless shared.isEmpty do
         let ways := " or ".intercalate (shared.map fun b => s!"`{b.name}`")
         throw s!"`{name}` is a constructor of more than one type here: write {ways}"
@@ -1500,7 +1508,7 @@ def resolve (prelude root : List Item) : Except String Resolved := do
     let mut out : Array Item := #[]
     for u in units do
       let scope ← scopeOf u.path
-      let ctx : Ctx := { here := u.path, scope := scope, named := byName scope }
+      let ctx : Ctx := { here := u.path, scope := scope, named := byName scope, ctorsByLast := ctorsByLastName scope }
       for item in u.items do
         out := out ++ (← resolveItem ctx item).toArray
       -- The prelude's type of arrays, by the name it has in this program.
