@@ -4087,9 +4087,10 @@ of a callable that performs only such operations.
   pattern, left in a variable, kept by a callable that may not run, or held
   while something runs that may not come back. That is the unproved
   checker's rule, as before; Core is told nothing of it.
-- A resumption that is let go somewhere other than its arm is still simply
-  forgotten, without its cleanups running: callables do not yet say how
-  they are destroyed.
+- A resumption that is let go somewhere other than its arm is given up there
+  (see "Callables say how they are destroyed"), so its cleanups run, in a
+  program that has a `drop` or a `defer` to run; in any other there is
+  nothing for them to do.
 
 ## The library specification's required cases
 
@@ -4228,6 +4229,24 @@ struct has no `Drop` (whose value only its own `drop` may take apart).
 Limits: only a variable made by writing out its tuple or its struct; the
 library is not split: it is checked once for every program. What the checker says names the field's variable
 (`x.0` is read while ..), which is what is meant.
+
+## A resumption let go is given up
+
+A resumption that is let go other than by its arm (kept in a variable that is
+then let go, handed to a function that ignores it, left in a value that is
+destroyed) was forgotten: the cleanups and `drop`s of the computation it
+suspended never ran. A callable type that holds a resumption now needs
+destroying as one that holds a value with a `drop` does, and is destroyed the
+same way, by `cancel`. The destroying machinery is written for a program that
+has a `Drop` or, now, a `defer`; in any other, giving up a resumption has
+nothing to run.
+
+An arm that does not use its resumption still gives it up as it starts, before
+its body: the checker leaves out of what the arm's end destroys a resumption
+the arm does not name or names `_`, and the elaborator does not count what it
+wrote to destroy one as a use. Giving one up where nothing may be performed (a
+cleanup) needs what it performs to be nothing, as for any callable; where it
+performs something, it is refused, with `cancel` before as the way out.
 
 ## Other standing decisions
 

@@ -507,7 +507,9 @@ def compileSourceAt (src : String) (check : Bool := true)
   let all := Syntax.fillDefaults all
   -- What the checker learnt about blocks that share an environment. A program
   -- it rejects is elaborated without that.
-  let drops := hasDrop items
+  -- (Or that has a cleanup, which a resumption given up runs: what destroys
+  -- a resumption that is let go is then written.)
+  let drops := hasDrop items || (src.splitOn "defer").length > 1
   -- (The library read for this program alone is checked with it.)
   let withStd := usesStd src files && (src.splitOn "#![no_std]").length == 1
     && !(few && (neededStd (src :: files.map (·.2))).isSome)

@@ -308,7 +308,7 @@ def cases : List Case := [
   fn work() { defer print(1); ask(); print(99); 0 }
   fn keep(k) { 7 }
   fn main() { handle work() { ask(k) => keep(k) } }",
-    [], "7"⟩,
+    [], "1\n7"⟩,
   ⟨"effect Ask { ask() }
   fn work() { defer print(1); ask() }
   fn main() { handle work() { ask(k) => cancel(k); k(1) } }",
@@ -2929,9 +2929,14 @@ def cases : List Case := [
     [], "error: 5:35: in `main`: `f` holds a `N`, which has a `drop` to run, and is not used on every path (a function it is given uses it only if it calls it or hands it on): where it is not used nothing would run the `drop`. Use it on every path, or give it up there with `cancel(f)`, which destroys what it holds"⟩,
   ⟨"struct N(Int)\nimpl Drop for N { fn drop(n) { say(n.0) } }\nfn eat(n: N) -> Int { 0 }\nfn main() -> Int { let a = N(42); let t = ({ eat(a) }, 5); t.1 }",
     [], "42\n5"⟩,
+  -- A resumption let go is given up too: the cleanups of the computation it suspended run.
+  ⟨"struct N(Int)\nimpl Drop for N { fn drop(n) { say(n.0) } }\nfn peek(n: &N) -> Int { n.0 }\neffect E { e() -> Int }\nfn work() -> Int { let n = N(70); e() + peek(&n) }\nfn main() -> Int { handle work() { e(k) => let saved = k; 5 } }",
+    [], "70\n5"⟩,
+  ⟨"effect E { e() -> Int }\nfn work() -> Int { defer say(99); e() }\nfn main() -> Int { let mut held = None; let r = handle work() { e(k) => held = Some(k); 3 }; held = None; r }",
+    [], "99\n3"⟩,
   -- One that performs operations is given up where they could be: not in the cleanup that ends its block.
   ⟨"struct Noisy(Int);\nimpl Drop for Noisy { fn drop(n) { say(n.0) } }\nfn eat(n: Noisy) -> Int { 5 }\neffect E { e() -> Int }\nfn work() -> Int { let n = Noisy(7); let f = { e() + eat(n) }; 1 }\nfn main() -> Int { handle work() { e(k) => k(2) } }",
-    [], "error: 5:38: in `work`: `f` is let go here holding something with a `drop` to run, which giving it up would run; but it performs operations, and it can be given up only where they could be performed, which is not where it is let go. Call it, or give it up first with `cancel(f)`"⟩,
+    [], "error: 5:38: in `work`: `f` is let go here, and giving it up destroys what it holds (a `drop` runs, or the cleanups of the computation it suspended); but it performs operations, and it can be given up only where they could be performed, which is not where it is let go. Call it, or give it up before with `cancel(f)`"⟩,
   ⟨"struct Noisy(Int);\nimpl Drop for Noisy { fn drop(n) { say(n.0) } }\nfn eat(n: Noisy) -> Int { 5 }\neffect E { e() -> Int }\nfn work() -> Int { let n = Noisy(7); let f = { e() + eat(n) }; cancel(f); 1 }\nfn main() -> Int { handle work() { e(k) => k(2) } }",
     [], "7\n1"⟩,
   -- A clause that binds by reference and is chosen by looking at a copy of what the reference points to destroys nothing of the copy.

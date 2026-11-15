@@ -136,9 +136,15 @@ holds nothing more than was seen on the way. -/
 partial def needsDestroying (seen : List String) (t : Ty) : M Bool := do
   match ← find t with
   | .tuple args => args.anyM (needsDestroying seen)
-  | .fn .. =>
+  | .fn _ _ _ _ cap =>
     -- A callable that holds something with a `drop` to run: giving it up
-    -- runs them.
+    -- runs them. And a resumption: giving it up runs the cleanups of the
+    -- computation it suspended.
+    let root ← findCap cap
+    if (← edgesFrom root).any (fun (_, what) => match what with
+        | .once => true
+        | .must => true
+        | _ => false) then return true
     let before := (← get).seen
     modify fun s => { s with seen := [] }
     let held ← tyHasDrop [] t
@@ -334,7 +340,7 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
       if let .fn _ _ effs _ _ ← find ty then
         if !effs.isEmpty && (← needsDestroying [] ty) then
           let name := (Syntax.captureSiteOf site.name).getD ((Syntax.letSiteOf site.name).getD site.name)
-          throw (inFunction site.owner s!"{pos}`{name}` is let go here holding something with a `drop` to run, which giving it up would run; but it performs operations, and it can be given up only where they could be performed, which is not where it is let go. Call it, or give it up first with `cancel({name})`")
+          throw (inFunction site.owner s!"{pos}`{name}` is let go here, and giving it up destroys what it holds (a `drop` runs, or the cleanups of the computation it suspended); but it performs operations, and it can be given up only where they could be performed, which is not where it is let go. Call it, or give it up before with `cancel({name})`")
       if (← needsDestroying [] ty) || !(freeTys ty).isEmpty || hasParam ty then
         let id := 2000000000 + (← get).dropAsked
         modify fun s => { s with dropAsked := s.dropAsked + 1, dropSites := s.dropSites.push (site, id) }

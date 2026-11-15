@@ -1326,7 +1326,8 @@ partial def inferPat (p : Pattern) (t : Ty) : M Scope := do
 given under a name and does not mention is the name's, and what a `_` takes is
 let go: if either is one to destroy, that happens when the clause is done. The
 place it is known by is the clause's first statement. -/
-partial def clauseGiven (body : List Stmt) (patterns : M Scope) : M Scope := do
+partial def clauseGiven (body : List Stmt) (patterns : M Scope) (spared : List String := []) :
+    M Scope := do
   let first := Elab.clausePlace body
   -- (A clause that looks at a copy of what a reference points to owns none
   -- of it: nothing its patterns take is destroyed.)
@@ -1340,7 +1341,7 @@ partial def clauseGiven (body : List Stmt) (patterns : M Scope) : M Scope := do
   for (x, b) in binds do
     if let .val t bid := b then
       modify fun s => { s with bindSites := (bid, first.1, first.2) :: s.bindSites }
-      unless mentioned.contains x || x.startsWith "%" || observed do
+      unless mentioned.contains x || x.startsWith "%" || observed || spared.contains x do
         modify fun s =>
           { s with dropCands := s.dropCands.push (⟨s.owner, first.1, first.2, x, false⟩, t, s.pos) }
   pure binds
@@ -1569,7 +1570,20 @@ partial def inferHandle (scope : Scope) (amb : Row) (subject : Expr) (arms : Lis
           captures held (.inner id)
         captureAll scope held (Elab.fvExpr [] (.handle subject arms)) fun x =>
           assignsExpr x (.handle subject arms)
-        let binds ← clauseGiven body (inferPats ps (payload ++ [.func [o] result amb held]))
+        -- (A resumption the arm does not use is given up as the arm starts,
+        -- by the elaborator: nothing destroys it when the arm is done.)
+        let resumptionTy := Ty.func [o] result amb held
+        -- (`_` for it too: its pattern is read with no place for what it
+        -- lets go.)
+        let patterns : M Scope := do
+          let before ← inferPats ps.dropLast payload
+          modify fun s => { s with wildAt := none }
+          match ps.getLast? with
+          | some last => pure ((← inferPat last resumptionTy) ++ before)
+          | none => pure before
+        let binds ← clauseGiven body patterns (match ps.getLast? with
+          | some (.var k) => [k]
+          | _ => [])
         let here := (← get).pos
         unifyAt s!"the result of the arm for `{x}`" result
           (← inferStmts (binds ++ scope) amb body)

@@ -1049,10 +1049,18 @@ partial def elabHandle (scope : Scope) (tailPos : Bool) (subject : Expr) (arms :
           -- An arm that does not use its resumption gives it up first: the
           -- computation it suspended is left as an exit would leave it, and
           -- its cleanups run. Otherwise it would simply be forgotten.
-          let unused := match ps.getLast? with
-            | some .wild => true
-            | some (.var k) => !(fvStmts [] body).contains k
+          -- (What destroys it where the arm is done, written by the
+          -- elaborator, is not a use: giving it up first does that.)
+          let hookOf := fun (k : String) (s : Stmt) => match unlocated s with
+            | .defer (.call id _ args) => id == dropCallId && args.any (fun a => fvExpr [] a == [k])
+            | .expr (.call id _ args) => id == dropCallId && args.any (fun a => fvExpr [] a == [k])
             | _ => false
+          let (unused, body) := match ps.getLast? with
+            | some .wild => (true, body)
+            | some (.var k) =>
+              let real := body.filter (!hookOf k ·)
+              if (fvStmts [] real).contains k then (false, body) else (true, real)
+            | _ => (false, body)
           if unused then
             mkClause captures ps (fun sc => do
               let _ ← emit (.cancel (.var n))
@@ -1180,7 +1188,7 @@ private def destroyCall (tr : TraitInfo) (d : DictE) (value : Expr) : Expr :=
   | some (fn, subs) =>
     -- (A callable is given up where it is.)
     if fn == Syntax.implFnName Syntax.destroyTrait Syntax.callableHead Syntax.destroyFn then
-      .call 0 (.name none "cancel") [value]
+      .call dropCallId (.name none "cancel") [value]
     else .call dropCallId (.name none fn) (subs.map dictExpr ++ [value])
   | none => .call dropCallId (.proj (dictExpr d) 0) [value]
 

@@ -86,9 +86,11 @@ def all : List (Nat × (Unit → Bool)) := [
     fn main() { handle work() { ask(k) => k(()) } }" == some (1, 1, 0)),
   (26, fun _ => cleanups "effect Ask { ask() }  fn work() { defer print(1); ask(); 0 }
     fn main() { handle work() { ask(k) => 7 } }" == some (1, 1, 0)),
+  -- (A resumption a function lets go is given up there, by a cleanup of the
+  -- function's own: its two cleanups start, and that one.)
   (27, fun _ => cleanups "effect Ask { ask() }  fn work() { defer print(1); defer print(2); ask(); 0 }
     fn forget(k) { 7 }
-    fn main() { handle work() { ask(k) => forget(k) } }" == some (2, 0, 2)),
+    fn main() { handle work() { ask(k) => forget(k) } }" == some (3, 3, 0)),
   (28, fun _ => cleanups "effect Fail { fail() -> ! }  fn work() { defer print(1); fail(); 0 }
     fn main() { handle work() { fail() => 7 } }" == some (1, 1, 0)),
   -- Without the checker, a callable that outlives its variable finds the cell gone.
