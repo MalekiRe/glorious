@@ -1304,6 +1304,14 @@ def fieldBorrowedOnly (x : String) (after : List Stmt) : Bool :=
   let u := nameUseStmts x after
   !x.startsWith "%" && u.fielded && !u.changed && !u.rebound
 
+/-- The label `@f` a function is also known by: the last part of its name,
+`f` of `m::f` or `T::f`, and of a function written in a block, `f%12`. -/
+def labelShort (name : String) : String :=
+  let s := lastSegment name
+  match s.splitOn "%" with
+  | p :: _ :: _ => if p.isEmpty then s else p
+  | _ => s
+
 /-- May what an expression gives be a value and not a reference, by how it is
 written: a tuple, what a call gives, or something given a type that is not a
 reference's? (A call can give a reference. A name bound to one and kept

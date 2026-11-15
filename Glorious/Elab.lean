@@ -1771,7 +1771,7 @@ scope, so applying the label returns from the function. -/
 private def withSelfLabel (name : String) : Clause → Clause
   | .mk pats body =>
     let free := fvStmts (pats.flatMap patVars) body
-    let short := Syntax.lastSegment name
+    let short := Syntax.labelShort name
     if free.contains (labelName name) then
       .mk pats [.expr (.labelScope name body)]
     -- (`@f` of `m::f` or `T::f`.)

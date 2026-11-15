@@ -4642,6 +4642,17 @@ leaves to its implementation: `I::Item: Ord` is read as a type parameter of
 its own, `ItemOfI: Ord`, with `I: Iterator<Item = ItemOfI>`. Only where `I`
 is asked exactly one trait, which is then taken to be the one leaving `Item`.
 
+## `return e` and `e?`
+
+Inside a function, `return e` is `return(e, @f)` and `e?` is `try(e, @f)`,
+with `f` the function it is written in (`return` alone gives `()`). In a
+callable written inside the function they still leave the function, as
+`@f` does: they are not the callable's own return. `?` is postfix only
+where what follows could not start an infix `?`'s right operand (`;`, `)`,
+`,`, `}`, `.`, an operator, the end). A function written in a block is
+`@g` as well as by its full name. Outside a function `return e` is refused
+as before.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by

@@ -42,6 +42,9 @@ structure PCtx where
   same in every module, and the module being read. -/
   tables : List (List String × Fixities) := []
   path : List String := []
+  /-- The label of the function whose body is being read: what `return e`
+  and `e?` leave. -/
+  fnLabel : Option String := none
 
 /-- What the parser does: given what it reads from, where it is, and the
 functions written inside blocks so far (on their way to the module the block
@@ -1214,6 +1217,22 @@ private partial def parsePostfix (noBlock : Bool) : P Expr := do
   let mut e ← parsePrimary noBlock
   repeat
     match ← peek with
+    | .op "?" =>
+      -- `e?` in a function: `try(e, @f)`, the value of an `Ok`, or the
+      -- function gives back the `Err`. (Where what follows could not start
+      -- what an infix `?` is given.)
+      let after ← peek 1
+      let ends := match after with
+        | .punct p => p != "(" && p != "[" && p != "{" && p != "@"
+        | .op _ => true
+        | .eof => true
+        | _ => false
+      match ends, (← read).fnLabel with
+      | true, some l =>
+        let id := (← read).base + (← get)
+        advance
+        e := .call id (preludeFn "try") [e, .label l]
+      | _, _ => break
     | .op "<" =>
       -- `f<A, B>(args)`: types written for the function's type parameters.
       -- It is that, and not a comparison, if what follows reads as types
@@ -1310,6 +1329,15 @@ private partial def parsePostfix (noBlock : Bool) : P Expr := do
   pure e
 
 private partial def parsePrimary (noBlock : Bool) : P Expr := do
+  -- `return e` (`return` alone: `()`) in a function: `return(e, @f)`.
+  if (← peek) == .ident "return" && (← peek 1) != .punct "(" then
+    if let some l := (← read).fnLabel then
+      let id := (← read).base + (← get)
+      advance
+      let value ← match ← peek with
+        | .punct ";" | .punct "}" | .punct "," | .punct ")" => pure (Expr.tuple [])
+        | _ => parseBinary 0 false
+      return .call id (preludeFn "return") [value, .label l]
   -- A parameter that stands for a number, written as a value: the number.
   if let .ident x ← peek then
     if (← read).consts.contains x && (← peek 1) != .punct "::" then
@@ -1572,7 +1600,7 @@ private partial def parseStmts : P (List Stmt) := do
       | _ => false
     match t, ← peek 1 with
     | .ident "return", next =>
-      if operand next then
+      if operand next && (← read).fnLabel.isNone then
         failAt "`return` is the library's function of a value and the function's label, `return(value, @f)`; or the value is written last, without `;`"
     | .ident "for", .ident _ =>
       if (← peek 2) == .ident "in" then
@@ -1791,7 +1819,7 @@ private partial def parseFn : P (Item × List Bound) := do
       | _ => c
     expectPunct "{"
     let consts := (bounds.filter (·.trait == knownTrait)).map (·.subject)
-    let body ← withReader (fun ctx => { ctx with consts := consts ++ ctx.consts }) parseStmts
+    let body ← withReader (fun ctx => { ctx with consts := consts ++ ctx.consts, fnLabel := some name }) parseStmts
     expectPunct "}"
     -- `-> !`: a function that does not come back gives whatever is wanted
     -- of it, which only a body that does not come back can.

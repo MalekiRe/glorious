@@ -3365,7 +3365,7 @@ def cases : List Case := [
   ⟨"trait Source { type Out; fn get(&Self) -> Self::Out; }\nstruct Seven\nimpl Source for Seven { type Out = Int; fn get(s) { 7 } }\nstruct Hi\nimpl Source for Hi { type Out = Str; fn get(s) { \"hi\" } }\neffect Fetch<S: Source> { fetch(S) -> S::Out }\nfn main() -> Int { let a = handle fetch(Seven) + 1 { fetch(s, k) => k(get(&s)) }; let b = handle length(fetch(Hi)) { fetch(s, k) => k(get(&s)) }; a * 10 + b }",
     [], "82"⟩,
   -- What other languages write is answered with how it is written here.
-  ⟨"fn main() -> Int { return 5 }", [], "error: 1:20: `return` is the library's function of a value and the function's label, `return(value, @f)`; or the value is written last, without `;`, found `return`"⟩,
+  ⟨"fn main() -> Int { return 5 }", [], "5"⟩,
   ⟨"fn main() -> Int { let mut x = 1; x += 2; x }", [], "error: 1:37: `x += e` is not an assignment here: write `x = x + e`, found `+=`"⟩,
   ⟨"fn main() -> Int { let x = Some(1); match x { Some(v) => v, None => 0 } }", [], "error: 1:37: `match` is given what it matches in parentheses: `match(x) { pattern => .. }`, found `match`"⟩,
   ⟨"fn f(x: impl Show) -> Str { show(x) ++ \"!\" }\nfn g() -> impl Show { 1 }\nfn main() -> Int { say(f(g())); 0 }",
@@ -3593,6 +3593,19 @@ def cases : List Case := [
   -- element is borrowed where it is.
   ⟨"use std::vec::{Vec};\nuse std::text::{join};\n\nstruct Student { name: Str, scores: Vec<Int> }\n\nimpl Student {\n    fn new(name: Str) -> Self { Student { name, scores: Vec::new() } }\n    fn add(&mut self, s: Int) { self.scores.push(s) }\n    fn average(&self) -> Int {\n        if(self.scores.is_empty()) { 0 } else {\n            let mut total = 0;\n            let mut i = 0;\n            while({ i < self.scores.len() }) { total = total + self.scores[i]; i = i + 1 };\n            total / self.scores.len()\n        }\n    }\n    fn grade(&self) -> Str {\n        let a = self.average();\n        if(a >= 90) { \"A\" } else { if(a >= 80) { \"B\" } else { if(a >= 70) { \"C\" } else { \"F\" } } }\n    }\n}\n\nstruct Class { students: Vec<Student> }\n\nimpl Class {\n    fn top(&self) -> Option<Str> {\n        let mut best = 0 - 1;\n        let mut who = None;\n        let mut i = 0;\n        while({ i < self.students.len() }) {\n            let a = self.students[i].average();\n            if(a > best) { best = a; who = Some(self.students[i].name) } else { () };\n            i = i + 1\n        };\n        who\n    }\n}\n\nfn main() -> Int {\n    let mut ann = Student::new(\"ann\");\n    ann.add(95); ann.add(88);\n    let mut bob = Student::new(\"bob\");\n    bob.add(72); bob.add(65);\n    let mut class = Class { students: Vec::new() };\n    class.students.push(ann);\n    class.students.push(bob);\n    let mut lines = Vec::new();\n    let mut i = 0;\n    while({ i < class.students.len() }) {\n        let s = &class.students[i];\n        lines.push(s.name ++ \": \" ++ show(s.average()) ++ \" \" ++ s.grade());\n        i = i + 1\n    };\n    say(join(Vec::into_array(lines), \"; \"));\n    match(class.top()) { Some(n) => say(n), None => () };\n    class.students.len()\n}\n",
     [], "ann: 91 A; bob: 68 F\nann\n2"⟩,
+  -- `return e` and `e?` in a function: `return(e, @f)` and `try(e, @f)`.
+  ⟨"fn f(x: Int) { if(x > 2) { return; }; say(x) }\nfn main() -> Int { f(1); f(5); 0 }",
+    [], "1\n0"⟩,
+  ⟨"fn main() -> Int { fn g(x: Int) -> Int { if(x > 0) { return x * 10 }; 0 }; g(3) }",
+    [], "30"⟩,
+  ⟨"struct P { x: Int }\nimpl P { fn get(&self) -> Int { if(self.x > 5) { return 5 }; self.x } }\nfn main() -> Int { let p = P { x: 9 }; p.get() }",
+    [], "5"⟩,
+  ⟨"fn first_even(v: [Int]) -> Option<Int> { let x = find_even(v)?; Some(x * 100) }\nfn find_even(v: [Int]) -> Option<Int> { if(len(v) > 0) { Some(v[0]) } else { None } }\nfn main() -> Int { match(first_even([4])) { Some(n) => n, None => 0 } }",
+    [], "400"⟩,
+  ⟨"fn sum_ok(v: [Result<Int, Str>]) -> Result<Int, Str> { let mut t = 0; let mut i = 0; while({ i < len(v) }) { t = t + v[i]?; i = i + 1 }; Ok(t) }\nfn main() -> Int { say(sum_ok([Ok(1), Ok(3)])); match(sum_ok([Ok(1), Err(\"xy\"), Ok(3)])) { Ok(n) => n, Err(e) => 100 + len(e) } }",
+    [], "Ok(4)\n102"⟩,
+  ⟨"fn half(x: Int) -> Result<Int, Str> { if(x % 2 == 0) { Ok(x / 2) } else { Err(\"odd\") } }\nfn f() -> Result<Int, Str> { Ok(half(half(12)?)? + 1) }\nfn main() -> Int { match(f()) { Ok(n) => n, Err(_) => 0 } }",
+    [], "4"⟩,
   -- (An element of what a reference is to is borrowed through it.)
   ⟨"fn first(r: &[Int]) -> Int { let e = &r[0]; *e }\nfn main() -> Int { first(&[7, 8]) }",
     [], "7"⟩,

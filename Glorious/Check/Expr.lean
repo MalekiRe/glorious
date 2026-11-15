@@ -1595,7 +1595,7 @@ partial def inferCallable (scope : Scope) (annots : List (Option Ty)) (ret : Opt
   -- `m::f` or `T::f`.)
   let scope := match self with
     | some name =>
-      let short := Syntax.lastSegment name
+      let short := Syntax.labelShort name
       let scope := ("@" ++ name, Binding.label result brand) :: scope
       if short != name then ("@" ++ short, Binding.label result brand) :: scope else scope
     | none => scope
