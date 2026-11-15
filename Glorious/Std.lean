@@ -468,6 +468,18 @@ impl<T> Vec<T> {
         let all = turned(replace(items, []), []);
         unsafe { restore_at(items, all) };
     }
+    // In order, by `<`, equal ones as they were to each other; or in the
+    // order `before` gives.
+    pub fn sort(value: &mut Self) where T: Ord {
+        let items = &mut value.items;
+        let all = sort(replace(items, []));
+        unsafe { restore_at(items, all) };
+    }
+    pub fn sort_by(value: &mut Self, before: fn(T, T) -> Bool) {
+        let items = &mut value.items;
+        let all = sort_by(replace(items, []), before);
+        unsafe { restore_at(items, all) };
+    }
     // Only so many kept: the rest are let go.
     pub fn truncate(value: &mut Self, length: Int) {
         let items = &mut value.items;

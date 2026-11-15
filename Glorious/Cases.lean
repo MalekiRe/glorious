@@ -3517,6 +3517,8 @@ def cases : List Case := [
     [], "(Ok(()), Err(already done), Err(no such task))\n4\n2"⟩,
   ⟨"mod m {\n  pub fn f(n: Int) -> Int { if(n > 0) { return(1, @f) } else { () }; 0 }\n}\nfn main() -> Int { m::f(3) }",
     [], "1"⟩,
+  ⟨"use std::vec::{Vec};\nfn main() -> Int { let mut v = Vec::new(); v.push(3); v.push(1); v.push(2); v.sort(); let a = v[0] * 100 + v[1] * 10 + v[2]; v.sort_by({ (a, b) => a > b }); a * 1000 + v[0] * 100 + v[1] * 10 + v[2] }",
+    [], "123321"⟩,
   -- (An element of what a reference is to is borrowed through it.)
   ⟨"fn first(r: &[Int]) -> Int { let e = &r[0]; *e }\nfn main() -> Int { first(&[7, 8]) }",
     [], "7"⟩,
