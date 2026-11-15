@@ -1351,6 +1351,16 @@ private partial def parsePrimary (noBlock : Bool) : P Expr := do
         | _ => parseBinary 0 false
       -- (`return` as it is named here, as `return(e, @f)` would call.)
       return .call id (.name none "return") [value, .label l]
+  -- `break` and `continue` alone, where a statement ends: performed, with
+  -- `()` and with nothing (`break(())`, `continue()`), as named here.
+  if let .ident w ← peek then
+    if w == "break" || w == "continue" then
+      match ← peek 1 with
+      | .punct ";" | .punct "}" | .punct "," | .punct ")" =>
+        let id := (← read).base + (← get)
+        advance
+        return .call id (.name none w) (if w == "break" then [.tuple []] else [])
+      | _ => pure ()
   -- A parameter that stands for a number, written as a value: the number.
   if let .ident x ← peek then
     if (← read).consts.contains x && (← peek 1) != .punct "::" then
@@ -1623,8 +1633,10 @@ private partial def parseStmts : P (List Stmt) := do
       if operand next && (← read).fnLabel.isNone then
         failAt "`return` is the library's function of a value and the function's label, `return(value, @f)`; or the value is written last, without `;`"
     | _, _ => pure ()
-    -- `for pattern in iterator { body }`: `std::iterator::for_each` of the
-    -- iterator, kept in a variable of its own, and a callable of the body.
+    -- `for pattern in iterator { body }`: the iterator, kept in a variable
+    -- of its own, gone through with `loop`, so that `break` and `continue`
+    -- in the body are the loop's: `loop { match(next(&mut it)) { Some(pattern)
+    -- => body, None => break(()) } }`.
     if t == .ident "for" then
       let saved ← get
       advance
@@ -1632,15 +1644,21 @@ private partial def parseStmts : P (List Stmt) := do
       match pat? with
       | some pat =>
         if (← peek) == .ident "in" then
+          let inAt ← get
           advance
-          let id := (← read).base + saved
-          let it := s!"for%{id}"
+          let base := (← read).base
+          -- (Identities of the calls made here: each of a token of the loop,
+          -- moved clear of every token's.)
+          let made := fun (at_ offset : Nat) => if at_ < 100000 then base + at_ + offset else 0
+          let it := s!"for%{base + saved}"
           -- (`for x in &v`: what `v.iter()` gives.)
           let source ← if (← isOp "&") && (← peek 1) != .ident "mut" then do
+              let ampAt ← get
               advance
               let inner ← parseBinary 0 true
-              pure (Expr.call (id + 3) (.fieldOf (id + 4) inner "iter") [])
+              pure (Expr.call (made ampAt 300000) (.fieldOf (made ampAt 400000) inner "iter") [])
             else parseBinary 0 true
+          let openAt ← get
           expectPunct "{"
           let body ← parseStmts
           expectPunct "}"
@@ -1648,9 +1666,14 @@ private partial def parseStmts : P (List Stmt) := do
           let mark := fun (s : Stmt) => match here with
             | some tok => Stmt.located tok.line tok.col s
             | none => s
+          let step := Expr.call (made inAt 400000) (.name (some "std::iterator") "next") [.ref true it]
+          let arms := Expr.closure (made openAt 300000)
+            [.mk [.ctor "Some" none [pat]] body,
+             .mk [.var "None"] [.expr (.call (made openAt 400000) (.name none "break") [.tuple []])]]
+          let each := Expr.closure (made saved 400000)
+            [.mk [] [.expr (.call (made inAt 300000) (.name none "match") [step, arms])]]
           out := out.push (mark (.letMut it source))
-          out := out.push (mark (.expr (.call (id + 1) (.name (some "std::iterator") "for_each")
-            [.ref true it, .closure (id + 2) [.mk [pat] body]])))
+          out := out.push (mark (.expr (.call (made saved 300000) (.name none "loop") [each])))
           let _ ← acceptPunct ";"
           let t' ← peek
           if t' == .punct "}" || t' == .punct "," || t' == .eof then

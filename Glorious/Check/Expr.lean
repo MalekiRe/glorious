@@ -484,7 +484,7 @@ partial def checkArg (scope : Scope) (amb : Row) (what : String) (p : Ty) (a : E
         | none => 0
       -- (What a type leaves to a trait's implementation, the `&'a T` a
       -- `SliceIter` gives, found first where it can be.)
-      if ← ps.anyM (fun q => do pure (match ← find q with | .var _ => true | _ => false)) then
+      if ← ps.anyM (fun q => do pure !(freeTys (← zonk q)).isEmpty) then
         settleAssocsAll
       let mut annots : List (Option Ty) := []
       -- A parameter known to be of a declared type is said too, so that

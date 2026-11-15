@@ -3677,6 +3677,17 @@ def cases : List Case := [
   -- `Vec` is the default prelude's (the spec's allocation profile).
   ⟨"fn main() -> Int { let mut v = Vec::new(); v.push(3); v.push(4); let mut t = 0; for x in &v { t = t + *x }; t }",
     [], "7"⟩,
+  -- `break` and `continue` alone; in a `for` loop too.
+  ⟨"fn main() -> Int { let mut i = 0; loop { i = i + 1; if(i > 3) { break } else { () } }; i }",
+    [], "4"⟩,
+  ⟨"fn main() -> Int { let mut i = 0; let mut t = 0; while({ i < 5 }) { i = i + 1; if(i == 2) { continue } else { () }; t = t + i }; t }",
+    [], "13"⟩,
+  ⟨"fn main() -> Int { let mut i = 0; loop { i = i + 1; if(i > 3) { break } }; i }",
+    [], "4"⟩,
+  ⟨"fn main() -> Int { let mut t = 0; for x in std::iterator::range(0, 100) { if(x > 4) { break }; t = t + x }; t }",
+    [], "10"⟩,
+  ⟨"fn main() -> Int { let mut t = 0; for x in std::iterator::range(0, 6) { if(x % 2 == 0) { continue }; t = t + x }; t }",
+    [], "9"⟩,
   -- (An element of what a reference is to is borrowed through it.)
   ⟨"fn first(r: &[Int]) -> Int { let e = &r[0]; *e }\nfn main() -> Int { first(&[7, 8]) }",
     [], "7"⟩,

@@ -4655,11 +4655,13 @@ as before.
 
 ## `for pattern in iterator { body }`
 
-A `for` loop is `std::iterator::for_each` of the iterator, kept in a
-variable of its own, given a callable of the body with the pattern as its
-one clause's. `for x in &v` goes through what `v.iter()` gives. The body is
-a callable as a `while` body is: it assigns the function's variables, and
-`return` in it leaves the function. There is no `break` or `continue`.
+A `for` loop is `loop { match(next(&mut it)) { Some(pattern) => body,
+None => break(()) } }` with the iterator kept in a variable of its own, so
+that `break` and `continue` in the body are the loop's. `for x in &v` goes
+through what `v.iter()` gives. The body is a callable as a `while` body is:
+it assigns the function's variables, and `return` in it leaves the
+function. `break` and `continue` written alone where a statement ends are
+`break(())` and `continue()` of the names in scope.
 A callable's parameter whose type is a reference to a type with named
 fields is now said to the clauses when they are read, as one of a declared
 type already was, after what traits leave to implementations is settled.
