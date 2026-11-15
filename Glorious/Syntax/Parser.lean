@@ -493,6 +493,10 @@ private partial def parseType : P TypeExpr := do
       | _ => pure none
     let uniq := (← peek) == .ident "mut"
     if uniq then advance
+    -- (Rust's `&str`, `&'static str`: a text, which is a value here.)
+    if !uniq && (← peek) == .ident "str" && (← peek 1) != .punct "::" then
+      advance
+      return .name "Str" []
     pure (.ref uniq (← parseType) life)
   | .op "&&" =>
     -- `&&T` (and `&&'a mut T`), which the lexer reads as one symbol.

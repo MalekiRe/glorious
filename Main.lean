@@ -999,7 +999,9 @@ def main (args : List String) : IO UInt32 := do
           return 1
       match ← runStreaming b.ctorNames b.bytecode (Bytecode.initIO b.bytecode input) 0 with
       | .halt r =>
-        IO.println (showValue b.ctorNames r.value)
+        -- (A `main` that gives nothing, `fn main() { .. }`, shows nothing.)
+        let shown := showValue b.ctorNames r.value
+        unless shown == "()" do IO.println shown
         return 0
       | _ =>
         -- The bytecode went wrong, so the Core program does too: find where

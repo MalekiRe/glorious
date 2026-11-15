@@ -3836,6 +3836,10 @@ def cases : List Case := [
     [], "H S\n0"⟩,
   ⟨"use std::fmt::{self, Display, Formatter};\nstruct M(Vec<Int>);\nimpl Display for M {\n    fn fmt(&self, f: &mut Formatter) -> fmt::Result {\n        write!(f, \"[\")?;\n        for (i, x) in self.0.iter().enumerate() {\n            if i > 0 { write!(f, \", \")?; }\n            write!(f, \"{}\", x)?;\n        }\n        write!(f, \"]\")\n    }\n}\nfn main() -> Int { println!(\"{}\", M(vec![1, 2, 3])); 0 }",
     [], "[1, 2, 3]\n0"⟩,
+  -- The Rust book's rectangles (chapter 5), unchanged: `bool`, `u32`,
+  -- `#[derive(Debug)]`, `{:?}`, `&&`, `Self { .. }`.
+  ⟨"#[derive(Debug)]\nstruct Rectangle {\n    width: u32,\n    height: u32,\n}\n\nimpl Rectangle {\n    fn area(&self) -> u32 {\n        self.width * self.height\n    }\n\n    fn can_hold(&self, other: &Rectangle) -> bool {\n        self.width > other.width && self.height > other.height\n    }\n\n    fn square(size: u32) -> Self {\n        Self {\n            width: size,\n            height: size,\n        }\n    }\n}\n\nfn main() {\n    let rect1 = Rectangle {\n        width: 30,\n        height: 50,\n    };\n    let rect2 = Rectangle {\n        width: 10,\n        height: 40,\n    };\n    let rect3 = Rectangle {\n        width: 60,\n        height: 45,\n    };\n\n    println!(\"rect1 is {:?}\", rect1);\n    println!(\"The area of the rectangle is {} square pixels.\", rect1.area());\n    println!(\"Can rect1 hold rect2? {}\", rect1.can_hold(&rect2));\n    println!(\"Can rect1 hold rect3? {}\", rect1.can_hold(&rect3));\n    let sq = Rectangle::square(3);\n    println!(\"{}\", sq.area());\n}\n",
+    [], "rect1 is Rectangle { width: 30, height: 50 }\nThe area of the rectangle is 1500 square pixels.\nCan rect1 hold rect2? true\nCan rect1 hold rect3? false\n9\n()"⟩,
   -- (An element of what a reference is to is borrowed through it.)
   ⟨"fn first(r: &[Int]) -> Int { let e = &r[0]; *e }\nfn main() -> Int { first(&[7, 8]) }",
     [], "7"⟩,
