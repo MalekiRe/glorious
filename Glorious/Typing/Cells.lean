@@ -906,7 +906,7 @@ theorem TypedAt.not_dead {S : StoreTy} {s : State} (hR : Δ.regions) (ht : Typed
     exact scoped' (acc := []) (isLabel rfl hthunk).1 (fun h => ⟨(hreg h).1, trivial⟩)
   | guard _ _ _ => cases hcallee
   | guardTail _ _ => cases hcallee
-  | cancel hk _ hacc _ _ =>
+  | cancel hk _ hacc _ _ _ =>
     cases hcallee
     exact found (hacc _ (Rgn.mem_flat.mpr ⟨_, (isLabel rfl hk).2, List.mem_singleton_self _⟩) rfl)
   | cell hform _ _ =>

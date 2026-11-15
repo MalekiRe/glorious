@@ -359,6 +359,14 @@ def freeOf (n : Nat) : Rgn → Bool
   | .or a b => freeOf n a && freeOf n b
   | _ => true
 
+theorem freeOf_of_free {n : Nat} : ∀ {r : Rgn}, r.free = true → r.freeOf n = true
+  | .bound _, h => by cases h
+  | .wr r, h => freeOf_of_free (r := r) h
+  | .or a b, h => by
+    simp only [free, Bool.and_eq_true] at h
+    simp [freeOf, freeOf_of_free h.1, freeOf_of_free h.2]
+  | .var _, _ | .cell _, _ | .lab _, _ | .loan _, _ => rfl
+
 theorem freeOf_zero : ∀ r : Rgn, r.freeOf 0 = true
   | .bound _ => by simp [freeOf]
   | .wr r => freeOf_zero r

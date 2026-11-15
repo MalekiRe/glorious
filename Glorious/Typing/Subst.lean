@@ -100,6 +100,17 @@ theorem SubFree.inst {n : Nat} {a b : List Rgn} (h : SubFree n a b) (θ : List R
   exact Rgn.mem_flat_inst.mpr
     ⟨y, h y hy (Rgn.freeOf_of_mem_parts_inst (Rgn.atom_of_mem_flat hy) hxy hfx), hxy⟩
 
+/-- What some of a list become is among what all of it become. -/
+theorem Rgn.flat_map_filter_sublist (p : Rgn → Bool) (f : Rgn → Rgn) : ∀ l : List Rgn,
+    (Rgn.flat ((l.filter p).map f)).Sublist (Rgn.flat (l.map f))
+  | [] => by simp [Rgn.flat]
+  | r :: l => by
+    by_cases h : p r = true
+    · rw [List.filter_cons_of_pos h, List.map_cons, List.map_cons, Rgn.flat_cons, Rgn.flat_cons]
+      exact (Rgn.flat_map_filter_sublist p f l).append_left _
+    · rw [List.filter_cons_of_neg h, List.map_cons, Rgn.flat_cons]
+      exact (Rgn.flat_map_filter_sublist p f l).trans (List.sublist_append_right _ _)
+
 theorem Sub.of_mem {a b : List Rgn} (h : ∀ r, r ∈ a → r ∈ b) : Sub a b := by
   intro x hx
   obtain ⟨r, hr, hx⟩ := Rgn.mem_flat.mp hx
@@ -270,6 +281,27 @@ theorem InjOn.nodup_scope {ϕ θ : List Rgn} (h : InjOn ϕ θ) {l : List Rgn}
         rw [hfy] at this
         cases this
     · exact h.2 x y hmx hmy z hzx hzy
+
+/-- The same of what a callable type binding `n` regions touches, of which
+what is none of its own is among `ϕ`'s. -/
+theorem InjOn.nodup_free {ϕ θ : List Rgn} {n : Nat} (h : InjOn ϕ θ) {l : List Rgn}
+    (hsub : SubFree n l ϕ) (hnd : (Rgn.flat l).Nodup) : (Rgn.flat (l.map (Rgn.inst θ))).Nodup := by
+  have e : Rgn.flat (l.map (Rgn.inst θ)) = Rgn.flat ((Rgn.flat l).map (Rgn.inst θ)) := by
+    rw [Rgn.flat_map_inst, Rgn.flat_map_inst, Rgn.flat_flat]
+  rw [e]
+  refine h.nodup_scope (fun x hx => ?_) (by rw [Rgn.flat_flat]; exact hnd)
+  have hp := Rgn.atom_parts (Rgn.atom_of_mem_flat hx)
+  cases hf : x.freeOf n
+  · refine .inl (fun y hy => ?_)
+    rw [hp, List.mem_singleton] at hy
+    subst hy
+    cases hfr : y.free
+    · rfl
+    · rw [Rgn.freeOf_of_free hfr] at hf; cases hf
+  · refine .inr (fun y hy => ?_)
+    rw [hp, List.mem_singleton] at hy
+    subst hy
+    exact hsub y hx hf
 
 /-- A part of what a part becomes that is leave to write comes from leave to
 write. -/
@@ -864,13 +896,14 @@ theorem HasTm.inst (hΔ : Δ.Stable) (θ : List Rgn) {ϕ : List Rgn}
     exact .guardTail ⟨hc', ht', (Row.le_inst hrow θ), (haccc.inst θ), (hacc.inst θ),
       (fun hL => ⟨(hinj hL).1.nodup haccc (hnd hL).1, (hinj hL).1.nodup hacc (hnd hL).2⟩)⟩
       (hlin.inst hΔ θ)
-  | cancel hk hrow hacc hlin _ ih =>
+  | cancel hk hrow hacc hnd hlin _ ih =>
     have hk' := hk.inst θ
     simp only [Ty.inst_fn] at hk'
     rw [snoc_inst] at ih
     have hu : Ty.unit.inst θ = Ty.unit := by simp [Ty.unit, Ty.inst_tuple]
     rw [hu] at ih
-    exact .cancel hk' (Row.le_inst hrow θ) (SubFree.inst hacc θ) (hlin.inst hΔ θ) ih
+    exact .cancel hk' (Row.le_inst hrow θ) (SubFree.inst hacc θ)
+      (fun hL => (hinj hL).1.nodup_free hacc (hnd hL)) (hlin.inst hΔ θ) ih
   | @cell Γ init thunk body n r σ ρ τ εt ε once env acc hform hlin _ ih =>
     have hinit := hform.init
     have hthunk := hform.thunk

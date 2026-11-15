@@ -305,10 +305,11 @@ structure ProgramOk (Δ : Ctx) (p : Program) : Prop where
   /-- A function whose closures say how they are destroyed: whatever signature
   it has, the function that destroys one is entered with no captures and with
   the closure's captures as its arguments, at the regions the closure was made
-  with, and gives unit, performing nothing and touching nothing. -/
+  with, and gives unit, performing nothing and touching what a call of the
+  closure touches of the regions it was made with. -/
   drops : ∀ fn d sig, p.drops.lookup fn = some d → Δ.fnSig fn sig →
     ∃ sigd, Δ.fnSig d sigd ∧ sigd.caps = [] ∧ sigd.params = sig.caps ∧ sigd.ret = .unit
-      ∧ sigd.eff = [] ∧ sigd.crgns = sig.crgns ∧ sigd.rgns = 0 ∧ sigd.acc = []
+      ∧ sigd.eff = [] ∧ sigd.crgns = sig.crgns ∧ sigd.rgns = 0 ∧ sigd.acc = sig.acc.filter Rgn.free
 
 /-- The callable a computation applies or gives up, if it does so. -/
 def calleeAtom : Tm → Option Atom

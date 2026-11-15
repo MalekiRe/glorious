@@ -61,7 +61,7 @@ is to have: no captures, the closure's captures as its parameters, the closure's
 regions, giving unit, performing nothing and touching nothing. -/
 def dropSig (sig : FnSig) : FnSig :=
   { caps := [], params := sig.caps, ret := .unit, eff := [], crgns := sig.crgns, rgns := 0,
-    acc := [] }
+    acc := sig.acc.filter Rgn.free }
 
 /-- Every signature of a function whose closures say how they are destroyed
 has its destructor given the signature that destroys one. -/

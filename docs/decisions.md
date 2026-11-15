@@ -4339,6 +4339,25 @@ cleanups run, needs (`Safety`); a closure's destructor touches nothing
 (`dropSig`). Proofs updated: `SubFree.inst`, `Rgn.freeOf_of_mem_parts_inst`,
 `subFreeB_sound`.
 
+## A destructor may touch what its closure's calls touch
+
+A closure's destructor gives up what the closure captured; giving up a
+resumption runs its cleanups, which touch what the resumption touches. The
+destructor was required to touch nothing (`acc = []`), so a closure holding a
+resumption that touches a variable could not be destroyed under the region
+rules. `ProgramOk.drops` now asks `sigd.acc = sig.acc.filter Rgn.free`: what a
+call of the closure touches of the regions it was made with, none chosen at
+a call. `cancel` asks in turn that what its callable's type touches has no
+repeats where loans are checked, as a call does, and `Safety` grants the
+destructor's call from `cancel`'s `SubFree` (`Rgn.flat_map_filter_sublist`,
+`InjOn.nodup_free`, `Rgn.freeOf_of_free`). No test program's certificate
+changed with it: the two that need it (`examples/tasks.glorious`, a closure
+holding such a resumption handed to `fn(c: fn() -> Int)`) fail the region
+rules earlier, where a closure kept in a data type's field or a declared
+callable parameter is given a type that touches nothing, and its regions fall
+back to `cell0`. A data type with regions of its own, or callable parameters
+generic in what they touch, would be needed for that.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by

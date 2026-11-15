@@ -1201,7 +1201,7 @@ def checkTm (C : Cert) (ϕ : List Rgn) : TEnv → Tm → List Hint → Ty → Ro
   | Γ, .cancel k body, hs, τ, ε =>
     match atomTy Γ k with
     | some (.fn n _ _ ε' _ _ acc) =>
-      rowLe ε' ε && subFreeB n acc ϕ && linearB C Γ (atomVars [k]) (fv body)
+      rowLe ε' ε && subFreeB n acc ϕ && nodupOk C acc && linearB C Γ (atomVars [k]) (fv body)
         && checkTm C ϕ (Γ ++ [.unit]) body hs τ ε
     | _ => false
   | Γ, .cell init thunk body, hs, τ, ε =>
@@ -1426,8 +1426,8 @@ theorem checkTm_sound {ϕ : List Rgn} : ∀ (tm : Tm) {Γ : TEnv} {hs : List Hin
     split at h
     · rename_i n Ps ρ ε' once env acc hk
       simp only [Bool.and_eq_true] at h
-      exact .cancel (atomTy_sound hk) (rowLe_sound h.1.1.1) (subFreeB_sound h.1.1.2)
-        (linearB_sound h.1.2) (ih h.2)
+      exact .cancel (atomTy_sound hk) (rowLe_sound h.1.1.1.1) (subFreeB_sound h.1.1.1.2)
+        (nodupOk_sound h.1.1.2) (linearB_sound h.1.2) (ih h.2)
     · simp at h
   | cell init thunk body ih =>
     intro Γ hs τ ε h

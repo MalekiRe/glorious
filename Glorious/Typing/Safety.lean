@@ -1043,7 +1043,7 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
     simp only [occs, occ] at h3
     simp only [occStack, occFrame, occs]
     omega
-  | @cancel _ k body n σ ρ _ ε₁ _ once fenv acc hk hrow hacc hlin hbody =>
+  | @cancel _ k body n σ ρ _ ε₁ _ once fenv acc hk hrow hacc hndc hlin hbody =>
     obtain ⟨kv, hkv, hkt⟩ := atom_ok henv hk
     -- A closure that says how it is destroyed: what it captured is given to
     -- the function that destroys it, as a call whose result `body` binds.
@@ -1053,16 +1053,40 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
       obtain ⟨fn, hkv', hl⟩ := dropOf_inv hd
       rw [hkv] at hkv'
       cases hkv'
-      rcases hkt.fn_inv with ⟨fn', caps', sig, θ, heq, hsig, hθ, hcaps, _, _, _, _, _⟩
+      rcases hkt.fn_inv with ⟨fn', caps', sig, θ, heq, hsig, hθ, hcaps, _, _, _, _, hacceq⟩
         | ⟨_, _, heq, _⟩ | ⟨_, _, heq, _⟩
       · cases heq
         obtain ⟨sigd, hsigd, hc0, hpar, hret, heff, hcr, hrg, hacc0⟩ := hp.drops fn d sig hl hsig
-        have hcok : CalleeOk Δ S (.fn d [] caps) Ty.unit [] [] := by
+        -- What the destructor touches: what a call of the closure does, of
+        -- the regions it was made with, none chosen at a call.
+        have hfa : (sigd.acc.map (Rgn.inst θ)).map (Rgn.openAt 0 [])
+            = (sig.acc.filter Rgn.free).map (Rgn.inst θ) := by
+          rw [hacc0, List.map_map]
+          apply List.map_congr_left
+          intro r hr
+          exact Rgn.openAt_free (by rw [Rgn.inst_free]; exact (List.mem_filter.mp hr).2) 0 []
+        have hsubd : Sub ((sig.acc.filter Rgn.free).map (Rgn.inst θ)) ϕ := by
+          intro x hx
+          obtain ⟨y, hy, hxy⟩ := Rgn.mem_flat_inst.mp hx
+          obtain ⟨r, hr, hyr⟩ := Rgn.mem_flat.mp hy
+          have hrf := List.mem_filter.mp hr
+          have hyf : y.free = true := Rgn.free_of_mem_parts hyr hrf.2
+          have hxf : x.free = true := Rgn.free_of_mem_parts hxy (by rw [Rgn.inst_free]; exact hyf)
+          refine hacc x ?_ (Rgn.freeOf_of_free hxf)
+          rw [hacceq]
+          exact Rgn.mem_flat_inst.mpr ⟨y, Rgn.mem_flat.mpr ⟨r, hrf.1, hyr⟩, hxy⟩
+        have hndd : Δ.loans → (Rgn.flat ((sig.acc.filter Rgn.free).map (Rgn.inst θ))).Nodup :=
+          fun hL => by
+            have h := hndc hL
+            rw [hacceq] at h
+            exact (Rgn.flat_map_filter_sublist _ _ _).nodup h
+        have hcok : CalleeOk Δ S (.fn d [] caps) Ty.unit []
+            ((sig.acc.filter Rgn.free).map (Rgn.inst θ)) := by
           have e : ∀ t : Ty, Ty.open [] (Ty.inst θ t) = Ty.inst θ t := fun t => Ty.open_nil _
           have h := CalleeOk.fn (S := S) (captures := []) (vs := caps) (rs := []) hsigd
             (by rw [hcr]; exact hθ) (by simp [hrg]) (by simp [hc0]; exact .nil)
             (by rw [hpar, List.map_map]; simpa [Function.comp_def, e] using hcaps)
-          rw [hret, heff, hacc0] at h
+          rw [hret, heff, hfa] at h
           simpa [Ty.open_nil, Ty.unit, Ty.inst, Ty.mapR, Ty.mapRs, Ty.mapRow, Row.inst, Row.open_nil] using h
         have h1 : step p ⟨.cancel k body, env, stack, ⟨conts, labels, cells⟩⟩
             = apply p (.fn d [] caps) (.call env body :: stack) ⟨conts, labels, cells⟩ := by
@@ -1070,7 +1094,7 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
         rw [h1]
         refine .of_apply
           (apply_ok hp hs hcok (.call henv hbody hle hsub hst) (fun _ _ h => by simp at h)
-            (fun _ h => by simp [Rgn.flat] at h) (fun _ => by simp [Rgn.flat])) rfl
+            (Sub.trans hsubd hsub) hndd) rfl
           (fun hD id => ?_) (fun hfa => by cases hfa)
         have h2 := moved_live hD henv hlin (live := fv (.cancel k body)) (fun i hi => hi) id
         have h3 := occ_eval id env hkv

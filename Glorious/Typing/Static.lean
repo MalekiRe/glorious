@@ -600,6 +600,7 @@ inductive HasTm (Δ : Ctx) (ϕ : List Rgn) : TEnv → Tm → Ty → Row → Prop
   | cancel {Γ : TEnv} {k : Atom} {body : Tm} {n : Nat} {Ps : List Ty} {ρ τ : Ty} {ε' ε : Row}
       {once : Bool} {env : Option (List Ty)} {acc : List Rgn} :
       HasAtom Γ k (.fn n Ps ρ ε' once env acc) → Row.le ε' ε → SubFree n acc ϕ →
+      (Δ.loans → (Rgn.flat acc).Nodup) →
       Linear Δ Γ (atomVars [k]) (fv body) →
       HasTm Δ ϕ (Γ ++ [.unit]) body τ ε → HasTm Δ ϕ Γ (.cancel k body) τ ε
   | cell {Γ : TEnv} {init thunk : Atom} {body : Tm} {n : Nat} {r : Rgn} {σ ρ τ : Ty}
