@@ -3773,6 +3773,17 @@ def cases : List Case := [
   -- `use`, gone through with `zip`, `skip`, `map`, `filter`, `sum`, `take`.
   ⟨"struct Counter { n: Int }\n\nimpl Iterator for Counter {\n    type Item = Int;\n    fn next(&mut self) -> Option<Int> {\n        if self.n < 5 {\n            self.n += 1;\n            Some(self.n)\n        } else {\n            None\n        }\n    }\n}\n\nstruct Fib { a: Int, b: Int }\n\nimpl Iterator for Fib {\n    type Item = Int;\n    fn next(&mut self) -> Option<Int> {\n        let r = self.a;\n        self.a = self.b;\n        self.b = r + self.b;\n        Some(r)\n    }\n}\n\nfn main() -> Int {\n    let c = Counter { n: 0 };\n    let total: Int = c.zip(Counter { n: 0 }.skip(1)).map({ (a, b) => a * b }).filter({ x => *x % 3 == 0 }).sum();\n    say(total);\n    let mut f = Fib { a: 0, b: 1 };\n    let firsts: Vec<Int> = Vec::from_array(f.take(10).collect());\n    for x in &firsts { say(x) }\n    let mut evens = 0;\n    for x in (Fib { a: 0, b: 1 }).take(20) { if x % 2 == 0 { evens += 1 } }\n    evens\n}\n",
     [], "18\n0\n1\n1\n2\n3\n5\n8\n13\n21\n34\n7"⟩,
+  -- `Fn(A) -> R` bounds (`FnMut` too); `mut x` parameters.
+  ⟨"fn make_adder(n: Int) -> impl Fn(Int) -> Int { { x => x + n } }\nfn main() -> Int { let f = make_adder(3); f(4) }",
+    [], "7"⟩,
+  ⟨"fn apply<F: Fn(Int) -> Int>(f: F, x: Int) -> Int { f(x) }\nfn main() -> Int { apply({ x => x * 2 }, 5) }",
+    [], "10"⟩,
+  ⟨"fn apply(f: impl Fn(Int) -> Int, x: Int) -> Int { f(x) }\nfn main() -> Int { apply({ x => x * 2 }, 5) }",
+    [], "10"⟩,
+  ⟨"fn twice<F: FnMut()>(mut f: F) { f(); f() }\nfn main() -> Int { let mut n = 0; twice({ n += 1 }); n }",
+    [], "2"⟩,
+  ⟨"fn count_down(mut n: Int) -> Int { let mut steps = 0; while n > 0 { n -= 1; steps += 1 }; steps }\nfn main() -> Int { count_down(4) }",
+    [], "4"⟩,
   -- (An element of what a reference is to is borrowed through it.)
   ⟨"fn first(r: &[Int]) -> Int { let e = &r[0]; *e }\nfn main() -> Int { first(&[7, 8]) }",
     [], "7"⟩,

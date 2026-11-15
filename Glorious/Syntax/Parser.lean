@@ -705,6 +705,8 @@ private partial def parseBoundsOf (subject : String) : P (List Bound) := do
   let mut out : Array Bound := #[]
   repeat
     let mut tr ← expectPath
+    -- (Rust's `FnMut` and `FnOnce`: what `Fn` asks, here.)
+    if (tr == "FnMut" || tr == "FnOnce") && (← peek) == .punct "(" then tr := "Fn"
     -- `for<'a>` before a callable: it is asked for at every such lifetime.
     let mut ranked : Array String := #[]
     if tr == "for" && (← isOp "<") then
@@ -718,7 +720,18 @@ private partial def parseBoundsOf (subject : String) : P (List Bound) := do
       expectOp ">"
       tr ← expectPath
       unless tr == "Fn" || tr == "RunsIn" do failAt "`for<..>` is written before `Fn` or `RunsIn`"
-    if tr == "Fn" then
+    -- `Fn(A, B) -> R`, as Rust writes it: `Fn<(A, B), Output = R>`.
+    if tr == "Fn" && (← peek) == .punct "(" then
+      advance
+      let mut pack : Array TypeExpr := #[]
+      repeat
+        if (← peek) == .punct ")" then break
+        pack := pack.push (← parseType)
+        if !(← acceptPunct ",") then break
+      expectPunct ")"
+      let output ← if ← acceptPunct "->" then parseType else pure (TypeExpr.tuple [])
+      out := out.push { subject, trait := tr, args := pack.toList, assoc := [("Output", output)], ranked := ranked.toList }
+    else if tr == "Fn" then
       if !(← isOp "<") then failAt "expected `<`: `Fn<(A, B), Output = R>`"
       advance
       let pack ← parsePack
@@ -1922,6 +1935,7 @@ private partial def parseFn : P (Item × List Bound) := do
     let mut annots : Array (Option TypeExpr) := #[]
     let mut params := params
     let mut bounds := bounds
+    let mut mutParams : Array String := #[]
     repeat
       if (← peek) == .punct ")" then break
       -- `self`, `&self`, `&mut self` (Rust's receivers): `self: Self`,
@@ -1942,6 +1956,11 @@ private partial def parseFn : P (Item × List Bound) := do
         annots := annots.push (some ty)
         if !(← acceptPunct ",") then break
         continue
+      -- (`mut x: T`: a parameter the body changes, a variable of its own.)
+      if (← peek) == .ident "mut" then
+        if let .ident x ← peek 1 then
+          advance
+          mutParams := mutParams.push x
       pats := pats.push (← parsePattern)
       if ← acceptPunct ":" then
         -- `x: impl Trait`: a type parameter of its own with the trait.
@@ -1995,6 +2014,7 @@ private partial def parseFn : P (Item × List Bound) := do
     expectPunct "{"
     let consts := (bounds.filter (·.trait == knownTrait)).map (·.subject)
     let body ← withReader (fun ctx => { ctx with consts := consts ++ ctx.consts, fnLabel := some name }) parseStmts
+    let body := mutParams.toList.map (fun x => Stmt.letMut x (.name none x)) ++ body
     expectPunct "}"
     -- `-> !`: a function that does not come back gives whatever is wanted
     -- of it, which only a body that does not come back can.
