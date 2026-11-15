@@ -596,6 +596,11 @@ partial def checkArgsIn (scope : Scope) (amb : Row) (what : String) (params : Li
           | _ => false
         if blocky && (e.splitOn "fn() ->").length > 1 then
           return some (i, e ++ ". A block `{ .. }` a clause ends with is a callable; to run its statements there, write them without the braces: `pattern => a; b`")
+        -- (`a ++ if(c) { x } else { y }` is `(a ++ if(c) { x }) else { y }`:
+        -- `else` binds loosest of all.)
+        if let .call _ (.name _ "if") _ := a then
+          if (e.splitOn "found `Result<").length > 1 then
+            return some (i, e ++ ". `else` binds more loosely than any other operator: `a ++ if(c) { x } else { y }` is `(a ++ if(c) { x }) else { y }`; write the conditional in parentheses")
         return some (i, e)
       pushTemp p
       pushAnon a p

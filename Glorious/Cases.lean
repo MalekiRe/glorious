@@ -3533,6 +3533,9 @@ def cases : List Case := [
   -- a field type to infer.
   ⟨"effect A { boom(Str) -> Never }\nfn main() -> Int { handle { boom(\"x\"); 1 }() { boom(m, k) => 0 } }",
     [], "error: unknown type `Never`: what does not return is written `!`"⟩,
+  -- `else` binds loosest of all: the refusal says so.
+  ⟨"fn main() -> Int { let s = \"a\" ++ if(1 < 2) { \"b\" } else { \"c\" }; len(s) }",
+    [], "error: 1:20: in `main`: argument 2 of `++`: expected `Str`, found `Result<Str, fn(()) -> Str>`. `else` binds more loosely than any other operator: `a ++ if(c) { x } else { y }` is `(a ++ if(c) { x }) else { y }`; write the conditional in parentheses"⟩,
   -- (An element of what a reference is to is borrowed through it.)
   ⟨"fn first(r: &[Int]) -> Int { let e = &r[0]; *e }\nfn main() -> Int { first(&[7, 8]) }",
     [], "7"⟩,
