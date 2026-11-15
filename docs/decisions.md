@@ -1773,9 +1773,11 @@ type's head, and its two theorems stand unchanged.
 - `to(x)` takes a whole number of one type to another, if it fits (`Whole`).
   `From<T>` is in the prelude with no implementations of its own.
 
-Limits. A function of a trait cannot have type parameters of its own: its
-evidence is one value, and Core has no value that is a function at every
-type. A trait's lifetime, `trait Borrowed<'a>`, is a name its functions' types
+Limits. (A function of a trait could not have type parameters of its own at
+first: its evidence is one value, and Core has no value that is a function at
+every type. It can now, where the implementation is known at the call, which
+is called by name; `fn apply_to<B>(s: &Self, f: fn(Int) -> B) -> B` is used
+at two types in one program.) A trait's lifetime, `trait Borrowed<'a>`, is a name its functions' types
 may use, and each function is still taken alone. A trait a trait needs is
 written without arguments. `T::Item` is of a trait without parameters, and a
 trait cannot be written of it (`T::Item: Show`); what is needed of it is
