@@ -425,7 +425,7 @@ mutual
 private partial def parseType : P TypeExpr := do
   match ← peek with
   | .ident "impl" =>
-    failAt "`impl Trait` is a parameter's type, standing for a type parameter of its own with the trait; a result's is not built: write the type"
+    failAt "`impl Trait` is the type of a function's parameter or result"
   | .op "!" =>
     advance
     pure .never
@@ -1729,7 +1729,19 @@ private partial def parseFn : P (Item × List Bound) := do
       if !(← acceptPunct ",") then break
     expectPunct ")"
     -- `-> R`, `-> R / {E}`, or `/ {E}` alone for a function that gives `()`.
-    let ret ← if (← acceptPunct "->") || (← peek) == .op "/" then some <$> parseResult else pure none
+    -- (`-> impl Trait`: the type the body gives, found from the body;
+    -- callers see it, which is more than Rust shows them.)
+    let ret ← if ← acceptPunct "->" then
+        if (← peek) == .ident "impl" then
+          advance
+          let _ ← parseBoundsOf "%result"
+          if (← peek) == .op "/" then
+            match ← parseResult with
+            | .performs _ effects => pure (some (TypeExpr.performs .hole effects))
+            | _ => pure (some TypeExpr.hole)
+          else pure (some TypeExpr.hole)
+        else some <$> parseResult
+      else if (← peek) == .op "/" then some <$> parseResult else pure none
     let (lifetimes, more) ← parseWhere
     expectPunct "{"
     let consts := (bounds.filter (·.trait == knownTrait)).map (·.subject)
