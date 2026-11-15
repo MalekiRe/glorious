@@ -480,6 +480,110 @@ impl<T> Vec<T> {
         let all = sort_by(replace(items, []), before);
         unsafe { restore_at(items, all) };
     }
+    // How many it holds room for without growing: as many as it holds, here.
+    pub fn capacity(value: &Self) -> Int { len_at(&value.items) }
+    pub fn reserve(value: &mut Self, additional: Int) { () }
+    pub fn shrink_to_fit(value: &mut Self) { () }
+    // The element at a place, which must be there.
+    pub fn index<'a>(value: &'a Self, index: Int) -> &'a T { element_at(&value.items, index) }
+    pub fn index_mut<'a>(value: &'a mut Self, index: Int) -> &'a mut T { place_at(index, &mut value.items) }
+    pub fn first_mut<'a>(value: &'a mut Self) -> Option<&'a mut T> { element_mut(&mut value.items, 0) }
+    pub fn last_mut<'a>(value: &'a mut Self) -> Option<&'a mut T> {
+        let n = len_at(&value.items);
+        element_mut(&mut value.items, n - 1)
+    }
+    // The element at a place, the last put in its place.
+    pub fn swap_remove(value: &mut Self, index: Int) -> Option<T> {
+        let n = len_at(&value.items);
+        if(index < 0 or { index >= n }) { None } else {
+            match(pop_at(&mut value.items)) {
+                Some(last) => if(index == n - 1) { Some(last) } else { Some(replace(&mut value.items[index], last)) },
+                None => None
+            }
+        }
+    }
+    // What is at a place, with another put there; or the other given back.
+    pub fn replace(value: &mut Self, index: Int, item: T) -> Result<T, T> {
+        if(index < 0 or { index >= len_at(&value.items) }) { Err(item) } else { Ok(replace(&mut value.items[index], item)) }
+    }
+    // The elements at two places changed over.
+    pub fn swap(value: &mut Self, left: Int, right: Int) -> Result<(), ()> {
+        let n = len_at(&value.items);
+        if(left < 0 or { right < 0 } or { left >= n } or { right >= n }) { Err(()) } else {
+            if(left != right) {
+                let first = Vec::remove(value, left);
+                let a = match(first) { Some(x) => x, None => unreachable("a place that is there") };
+                let at = if(right > left) { right - 1 } else { right };
+                let b = Vec::replace(value, at, a);
+                match(b) {
+                    Ok(y) => match(Vec::insert(value, left, y)) { Ok(_) => (), Err(z) => std::value::discard(z) },
+                    Err(z) => std::value::discard(z)
+                }
+            } else { () };
+            Ok(())
+        }
+    }
+    // The elements turned: the first `count` taken from the front to the back.
+    pub fn rotate_left(value: &mut Self, count: Int) -> Result<(), ()> {
+        let n = len_at(&value.items);
+        if(count < 0 or { count > n }) { Err(()) } else {
+            let rest = Vec::split_off_at(value, count);
+            let front = replace(&mut value.items, []);
+            value.items = rest;
+            Vec::append(value, Vec { items: front });
+            Ok(())
+        }
+    }
+    pub fn rotate_right(value: &mut Self, count: Int) -> Result<(), ()> {
+        let n = len_at(&value.items);
+        if(count < 0 or { count > n }) { Err(()) } else { Vec::rotate_left(value, n - count) }
+    }
+    // The elements from a place on, taken off into a new one.
+    pub fn split_off(value: &mut Self, index: Int) -> Result<Self, ()> {
+        if(index < 0 or { index > len_at(&value.items) }) { Err(()) } else { Ok(Vec { items: Vec::split_off_at(value, index) }) }
+    }
+    fn split_off_at(value: &mut Self, index: Int) -> [T] {
+        let items = &mut value.items;
+        let n = len_at(&*items);
+        let (kept, off) = taken_off(replace(items, []), n - index, []);
+        *items = kept;
+        turned(off, [])
+    }
+    // So many elements: those after the length let go, or copies of the
+    // fill put on.
+    pub fn resize(value: &mut Self, length: Int, fill: T) {
+        let n = len_at(&value.items);
+        if(length < n) { Vec::truncate(value, length) }
+        else { let mut i = n; while({ i < length }) { push_at(&mut value.items, fill); i = i + 1 } }
+    }
+    // Those for which the test holds, kept in order; the rest let go.
+    pub fn retain(value: &mut Self, keep: for<'a> fn(&'a T) -> Bool) {
+        let mut all = turned(replace(&mut value.items, []), []);
+        let mut kept = [];
+        loop({
+            match(pop_at(&mut all)) {
+                Some(x) => if(keep(&x)) { push_at(&mut kept, x) } else { std::value::discard(x) },
+                None => break(())
+            }
+        });
+        value.items = kept
+    }
+    pub fn into_iter(value: Self) -> std::iterator::IntoIter<T> { std::iterator::into_iter(Vec::into_array(value)) }
+    pub fn finish_empty(value: Self) -> Result<(), Self> {
+        if(len_at(&value.items) == 0) { match(value) { Vec { items } => std::value::discard(items) }; Ok(()) } else { Err(value) }
+    }
+    // Is a value equal to one of the elements?
+    pub fn contains(value: &Self, item: &T) -> Bool where T: Eq {
+        let mut i = 0;
+        let n = len_at(&value.items);
+        let mut found = false;
+        while({ i < n and { not found } }) { if(value.items[i] == *item) { found = true } else { () }; i = i + 1 };
+        found
+    }
+    pub fn extend(value: &mut Self, more: [T]) {
+        let mut rest = turned(more, []);
+        loop({ match(pop_at(&mut rest)) { Some(x) => push_at(&mut value.items, x), None => break(()) } })
+    }
     // Only so many kept: the rest are let go.
     pub fn truncate(value: &mut Self, length: Int) {
         let items = &mut value.items;

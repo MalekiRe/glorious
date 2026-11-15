@@ -3551,6 +3551,9 @@ def cases : List Case := [
     [], "error: 2:21: in `f`: the clauses of this callable do not cover every case: not `D`"⟩,
   ⟨"fn f(c: Bool) -> Int { if(c) { 1 } }\nfn main() -> Int { f(true) }",
     [], "error: 1:24: in `f`: the result of a clause: expected `Int`, found `Result<Int, fn(()) -> Int>`. `if(c) { a }` without `else` gives `Ok(a)` or `Err(..)`: write `else { b }` for the value where the condition fails"⟩,
+  -- More of the specification's `Vec` functions.
+  ⟨"use std::vec::{Vec};\nuse std::iterator::{Iterator, fold};\nfn main() -> Int {\n    let mut v = Vec::new();\n    v.extend([5, 1, 4, 2, 3]);\n    say(v.contains(&4));\n    say(v.swap_remove(1));\n    say(Vec::into_array(v.clone()));\n    v.retain({ x => *x > 2 });\n    say(Vec::into_array(v.clone()));\n    let _ = v.rotate_left(1);\n    say(Vec::into_array(v.clone()));\n    let _ = v.swap(0, 2);\n    say(Vec::into_array(v.clone()));\n    v.resize(5, 0);\n    say(Vec::into_array(v.clone()));\n    match(v.split_off(3)) { Ok(back) => say(Vec::into_array(back)), Err(_) => () };\n    say(v.replace(0, 9));\n    *v.index_mut(1) = 7;\n    let mut it = v.into_iter();\n    fold(&mut it, 0, { (a, x) => a * 10 + x })\n}\n",
+    [], "Ok(())\nOk(1)\n[5, 3, 4, 2]\n[5, 3, 4]\n[3, 4, 5]\n[5, 4, 3]\n[5, 4, 3, 0, 0]\n[0, 0]\nOk(5)\n973"⟩,
   -- (An element of what a reference is to is borrowed through it.)
   ⟨"fn first(r: &[Int]) -> Int { let e = &r[0]; *e }\nfn main() -> Int { first(&[7, 8]) }",
     [], "7"⟩,

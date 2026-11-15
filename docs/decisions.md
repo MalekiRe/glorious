@@ -4576,6 +4576,19 @@ function of a type that cannot be named where it is called (`Entry`, given
 by `HashMap::entry`) is found through the value too, where nothing in scope
 has the name.
 
+## More of `Vec`
+
+`capacity`, `reserve` and `shrink_to_fit` (a `Vec` holds room for what it
+holds, so the last two do nothing), `index`, `index_mut`, `first_mut`,
+`last_mut`, `swap_remove`, `replace`, `swap`, `rotate_left`, `rotate_right`,
+`split_off`, `resize`, `retain` (with `for<'a> fn(&'a T) -> Bool`),
+`into_iter`, `finish_empty`, and, not in the specification, `contains` and
+`extend` of an array. Places are `Int` and bounds errors are `()` (the
+library has no `BoundsError`); `insert` keeps giving back the item where the
+place is not there. Not built: the `try_` forms, slices (`as_mut_slice`,
+`extend_from_slice`), `drain`, `iter_mut`, `partition`, `extract_if`,
+`resize_with`.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by
