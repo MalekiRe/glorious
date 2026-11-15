@@ -749,6 +749,21 @@ private partial def parseBoundsOf (subject : String) : P (List Bound) := do
   let mut out : Array Bound := #[]
   repeat
     let mut tr ← expectPath
+    -- (Rust's names of the prelude's traits: `PartialOrd` is `Ord`,
+    -- `PartialEq` is `Eq`, `Display` and `Debug` are `Show`.)
+    let generic := (← peek) == .op "<"
+    -- (Not in the library, whose `Display` is its own.)
+    let library := ["std", "core", "alloc"].contains ((← read).path.headD "")
+    -- (Rust's `PartialOrd` and `PartialEq` compare through references,
+    -- which here copies: what is asked them is asked `Copy` too.)
+    if !library && ["PartialOrd", "std::cmp::PartialOrd", "PartialEq", "std::cmp::PartialEq"].contains tr then
+      out := out.push { subject, trait := "Use", quantity := some (0, none) }
+    tr := match tr with
+      | "PartialOrd" | "std::cmp::PartialOrd" => "Ord"
+      | "PartialEq" | "std::cmp::PartialEq" => "Eq"
+      | "Display" | "Debug" | "fmt::Display" | "fmt::Debug" | "std::fmt::Display" | "std::fmt::Debug" =>
+        if generic || library then tr else "Show"
+      | other => other
     -- (Rust's `FnMut` and `FnOnce`: what `Fn` asks, here.)
     if (tr == "FnMut" || tr == "FnOnce") && (← peek) == .punct "(" then tr := "Fn"
     -- `for<'a>` before a callable: it is asked for at every such lifetime.
@@ -1936,7 +1951,7 @@ private partial def parseStmts : P (List Stmt) := do
           -- (With the library's function that gives an array's elements away,
           -- named so that it is there to be chosen.)
           let source := Expr.call (made (saved + 1) 300000) (.name none forSourceMark)
-            [source, .name (some "std::iterator") "into_iter"]
+            [source, .name (some "std::iterator") "into_iter", .name (some "std::slice") "iter_of"]
           out := out.push (mark (.letMut it source))
           out := out.push (mark (.expr (.call (made saved 300000) (.name none "loop") [each])))
           let _ ← acceptPunct ";"

@@ -119,6 +119,9 @@ partial def withoutUnreached (items : List Syntax.Item) : List Syntax.Item := Id
     | .fn name _ _ _ _ => if library name then some (Syntax.lastSegment name) else none
     | _ => none
   let mut wanted : Std.HashSet String := {}
+  -- (What the checker may choose to give where none is written: a `Vec`'s
+  -- array, borrowed, where a reference to an array is wanted.)
+  wanted := wanted.insert "as_array" |>.insert "as_array_mut"
   for item in items do
     if (isLibraryFn item).isNone then
       for n in namesInItem [] item do wanted := wanted.insert (Syntax.lastSegment n)
@@ -250,6 +253,9 @@ def stdPreludeUses (src : String) : String := Id.run do
   let plainStd := (src.splitOn "#![no_std]").length == 1 && (src.splitOn "mod std").length == 1
   let loopNote := if (loops || ranges) && (src.splitOn "std::iterator").length == 1 && plainStd
     then "\n// std::iterator\n" else ""
+  -- (A `for` loop may go through a reference to an array, `std::slice`'s.)
+  let loopNote := if loops && (src.splitOn "std::slice").length == 1 && plainStd
+    then loopNote ++ "// std::slice\n" else loopNote
   -- (`vec![..]` is `std::vec::Vec::from_array(..)`.)
   let loopNote := if (src.splitOn "vec![").length > 1 && (src.splitOn "std::vec").length == 1 && plainStd
     then loopNote ++ "\n// std::vec\n" else loopNote

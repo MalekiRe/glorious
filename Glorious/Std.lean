@@ -416,6 +416,9 @@ impl<T> Vec<T> {
     pub fn into_array(value: Self) -> [T] { match(value) { Vec { items } => items } }
     pub fn len(value: &Self) -> Int { len_at(&value.items) }
     pub fn is_empty(value: &Self) -> Bool { len_at(&value.items) == 0 }
+    // The array it holds, borrowed: what `&v` is where `&[T]` is wanted.
+    pub fn as_array<'a>(value: &'a Self) -> &'a [T] { &value.items }
+    pub fn as_array_mut<'a>(value: &'a mut Self) -> &'a mut [T] { &mut value.items }
     pub fn get<'a>(value: &'a Self, index: Int) -> Option<&'a T> { element(&value.items, index) }
     pub fn get_mut<'a>(value: &'a mut Self, index: Int) -> Option<&'a mut T> {
         element_mut(&mut value.items, index)
@@ -1779,6 +1782,10 @@ impl<'a, T> Slice<'a, T> {
 
 // The elements of a slice by reference, first to last.
 pub struct SliceIter<'a, T> { items: &'a [T], at: Int, end: Int }
+
+// The elements of an array by reference, first to last: what a `for` loop
+// through a reference to an array goes through.
+pub fn iter_of<'a, T>(items: &'a [T]) -> SliceIter<'a, T> { SliceIter { items: items, at: 0, end: len_at(items) } }
 
 impl<'a, T> Iterator for SliceIter<'a, T> {
     type Item = &'a T;

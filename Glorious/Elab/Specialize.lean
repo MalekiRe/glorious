@@ -535,7 +535,7 @@ partial def argsChosenExpr (picks : List ((Nat × Nat) × Expr)) : Expr → Expr
   | .call i f args =>
     match f, args with
     -- (What a `for` loop goes through: as the checker chose.)
-    | .name none mark, [a, _] =>
+    | .name none mark, [a, _, _] =>
       if mark == Syntax.forSourceMark then
         let a := argsChosenExpr picks a
         match picks.lookup (i, 0) with

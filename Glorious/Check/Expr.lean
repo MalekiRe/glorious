@@ -699,6 +699,33 @@ partial def checkArgsIn (scope : Scope) (amb : Row) (what : String) (params : Li
       -- (A field of what a name holding a reference points to, given where a
       -- reference is wanted, `a.items.len()` with `a: &Account`: the field
       -- is borrowed through it, as `&a.items`.)
+      -- (A reference to a `Vec` where one to an array is wanted, `&v` for
+      -- `&[T]`: the array it holds, borrowed, as Rust's `&Vec<T>` is a
+      -- `&[T]` there.)
+      let a ← if call == 0 then pure a else do
+        match ← find p with
+        | .ref how (.con "Array" _) _ => do
+          let saved ← get
+          let given ← try some <$> inferExpr scope amb a catch _ => pure none
+          let head ← match given with
+            | some t => do
+              match ← find t with
+              | .ref _ inner _ => do pure (match ← find inner with | .con n _ => some n | _ => none)
+              | _ => pure none
+            | none => pure none
+          set saved
+          match head with
+          | some n =>
+            let uniq ← match ← find how with
+              | .con "&mut" [] => pure true
+              | _ => pure false
+            let g := s!"{n}::{if uniq then "as_array_mut" else "as_array"}"
+            if Syntax.lastSegment n == "Vec" && ((← get).fns.lookup g).isSome then
+              modify fun s => { s with argsChosen := ((call, i), .call 0 (.name none Syntax.wrapMark) [.name none g]) :: s.argsChosen }
+              pure (Expr.call (call + 700000 + i) (.name none g) [a])
+            else pure a
+          | none => pure a
+        | _ => pure a
       -- (A value made where a dot call is made on it, named and borrowed for
       -- the call (`Resolve.receiverExpr`), that is a reference already: the
       -- reference is given.)
@@ -890,7 +917,7 @@ partial def inferCall (scope : Scope) (amb : Row) (f : Expr) (args : List Expr)
         return ← inferCall scope amb f (.call (call + 700000) g [subject] :: args.drop 1) call
   -- What a `for` loop goes through: an array's elements and a `Vec`'s, given
   -- away (`into_iter`), or what is written, an iterator.
-  if let (.name none mark, [source, arrays]) := (f, args) then
+  if let (.name none mark, [source, arrays, borrowedArrays]) := (f, args) then
     if mark == Syntax.forSourceMark then
       let saved ← get
       let t ← inferExpr scope amb source
@@ -907,9 +934,11 @@ partial def inferCall (scope : Scope) (amb : Row) (f : Expr) (args : List Expr)
       let borrowed := refHead.map (· ++ "::iter") |>.filter (fns.lookup · |>.isSome)
       -- (The function it is given to, if any: what the elaborator writes
       -- around what is written, as it then is.)
-      let through : Option Expr := match borrowed with
-        | some f => some (.name none f)
-        | none => match head, own with
+      let through : Option Expr := match borrowed, refHead with
+        | some f, _ => some (.name none f)
+        -- (A reference to an array: its elements borrowed.)
+        | none, some "Array" => some borrowedArrays
+        | none, _ => match head, own with
           | some "Array", _ => some arrays
           | _, some f => if (fns.lookup f).isSome then some (.name none f) else none
           | _, none => none
@@ -941,24 +970,44 @@ partial def inferCall (scope : Scope) (amb : Row) (f : Expr) (args : List Expr)
               if let .var _ ← find inner then settleAssocsAll
               -- (A number or a character; or, to what shows a value or joins
               -- texts, any value that may be used more than once, a `Str`.)
+              -- (Any value that may be used more than once: a number, a
+              -- text, a type parameter asked `Copy`, as `PartialOrd` is.)
               let copied ← match ← find inner with
                 | .con n [] =>
                   if n == "Int" || Syntax.isScalar n then pure true
-                  else if Syntax.derefShows.contains op then do
+                  else do
                     let z ← zonk inner
                     pure ((freeTys z).isEmpty && !(← tyOwnsOnce [] z))
-                  else pure false
-                | .con _ (_ :: _) | .tuple _ =>
-                  if Syntax.derefShows.contains op then do
-                    let z ← zonk inner
-                    pure ((freeTys z).isEmpty && !(← tyOwnsOnce [] z))
-                  else pure false
+                | .con _ (_ :: _) | .tuple _ => do
+                  let z ← zonk inner
+                  pure ((freeTys z).isEmpty && !(← tyOwnsOnce [] z))
                 | _ => pure false
               if copied then
                 modify fun s => { s with argsChosen := ((call, i), .deref a) :: s.argsChosen }
                 a' := .deref a
                 changed := true
         given := given.push a'
+      -- (What shows a value given a call that gives a reference, `p.x()`:
+      -- what it points to, copied, where that may be used more than once.)
+      if !changed && Syntax.derefShows.contains op then
+        for (a, i) in args.zipIdx do
+          if let .call .. := a then
+            let saved ← get
+            let found ← try some <$> inferExpr scope amb a catch _ => pure none
+            let copies ← match found with
+              | some t => do
+                match ← find t with
+                | .ref _ inner _ => do
+                  let z ← zonk inner
+                  pure ((freeTys z).isEmpty && !(← tyOwnsOnce [] z))
+                | _ => pure false
+              | none => pure false
+            set saved
+            if copies then
+              let g := Expr.name none "copied_of"
+              modify fun s => { s with argsChosen := ((call, i), .call 0 (.name none Syntax.wrapMark) [g]) :: s.argsChosen }
+              given := given.set! i (.call (call + 700000 + i) g [a])
+              changed := true
       if changed then return ← inferCall scope amb f given.toList call
   -- `let x: Type = value`: the value is made that type.
   if let (.name none mark, [operand]) := (f, args) then
@@ -1427,6 +1476,28 @@ partial def inferCall (scope : Scope) (amb : Row) (f : Expr) (args : List Expr)
           throw s!"{e}. More than one type has a function `{name}` of its own ({", ".intercalate (theirs.map fun (fn, _) => s!"`{bareName fn}`")}): say which, `Type::{name}(value, ..)`"
         else throw e
       | _ => throw e
+    -- (A field that holds no callable, `p.x()` where `x` is a field and the
+    -- type's own function: the function, the program read again so.)
+    if let .fieldOf _ recv name := f then
+      if call != 0 then
+        match ← find callee with
+        | .fn .. | .var _ => pure ()
+        | _ =>
+          let saved ← get
+          let found ← try some <$> inferExpr scope amb recv catch _ => pure none
+          let rec headOf (fuel : Nat) (t : Ty) : M (Option String) := do
+            match fuel, ← find t with
+            | fuel + 1, .ref _ inner _ => headOf fuel inner
+            | _, .con n _ => pure (some n)
+            | _, _ => pure none
+          let h ← match found with
+            | some ty => headOf 8 ty
+            | none => pure none
+          set saved
+          if let some h := h then
+            let own := s!"{h}::{name}"
+            if ((← get).fns.lookup own).isSome then
+              throw (Syntax.dotOwnMark call own ++ s!"the field `{name}` is no callable")
     applyTy scope amb "this callee" callee args call
 
 /-- The type of a block: that of its last expression, or unit. -/

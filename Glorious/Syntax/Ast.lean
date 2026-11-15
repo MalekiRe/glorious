@@ -1350,6 +1350,41 @@ def valueLike : Expr → Bool
 
 mutual
 
+/-- `&list[i]` of a parameter `list` written with a reference's type: the
+element through `list`, as `element_at(list, i)`. -/
+partial def throughParamsExpr (refs : List String) : Expr → Expr
+  | .call id f args =>
+    let args := args.map (throughParamsExpr refs)
+    let args := match f, args with
+      | .name _ "element_at", [.ref false x, i] => if refs.contains x then [Expr.name none x, i] else args
+      | .name _ "place_at", [i, .ref true x] => if refs.contains x then [i, Expr.name none x] else args
+      | _, _ => args
+    .call id (throughParamsExpr refs f) args
+  | .tailCall id f args => .tailCall id (throughParamsExpr refs f) (args.map (throughParamsExpr refs))
+  | .tuple args => .tuple (args.map (throughParamsExpr refs))
+  | .proj e i => .proj (throughParamsExpr refs e) i
+  | .closure id clauses => .closure id (clauses.map fun
+    | .mk pats body => .mk pats (body.map (throughParamsStmt refs)))
+  | .handle subject arms => .handle (throughParamsExpr refs subject) (arms.map fun
+    | .mk pats body => .mk pats (body.map (throughParamsStmt refs)))
+  | .labelScope l body => .labelScope l (body.map (throughParamsStmt refs))
+  | .deref e => .deref (throughParamsExpr refs e)
+  | .reborrow u e => .reborrow u (throughParamsExpr refs e)
+  | .fieldOf id e name => .fieldOf id (throughParamsExpr refs e) name
+  | e => e
+
+partial def throughParamsStmt (refs : List String) : Stmt → Stmt
+  | .let_ pat value => .let_ pat (throughParamsExpr refs value)
+  | .letMut x value => .letMut x (throughParamsExpr refs value)
+  | .expr e => .expr (throughParamsExpr refs e)
+  | .defer e => .defer (throughParamsExpr refs e)
+  | .assign target value => .assign (throughParamsExpr refs target) (throughParamsExpr refs value)
+  | .located line col s => .located line col (throughParamsStmt refs s)
+
+end
+
+mutual
+
 /-- A value that is given a name and then borrowed with `&` has to be
 somewhere a reference can point. Where the name is never changed, borrowed
 for writing or bound again, the binding is made a variable's, which is such a
@@ -1431,6 +1466,14 @@ partial def promoteItems (items : List Item) : List Item :=
             | (.var _, some (.ref _ _ _)) => none
             | (.var x, some _) => some x
             | _ => none
+        -- (One written with a reference's type, `list: &[T]`: `&list[0]` is
+        -- the element through that reference, not through one to it.)
+        let refs := match c with
+          | .mk pats _ => (pats.zip annots).filterMap fun
+            | (.var x, some (.ref _ _ _)) => some x
+            | _ => none
+        let c := if refs.isEmpty then c else match c with
+          | .mk pats body => .mk pats (body.map (throughParamsStmt refs))
         promoteClause values (nameBorrowsClause c))
     | .pub parent item => .pub parent ((promoteItems [item]).headD item)
     | .module name (some inner) => .module name (some (promoteItems inner))
