@@ -1672,6 +1672,63 @@ pub fn nth<I: Iterator>(it: &mut I, n: Int) -> Option<I::Item> {
         None => None
     }
 }
+
+// The whole numbers left, added up, and multiplied.
+pub fn sum<I: Iterator<Item = Int>>(it: &mut I) -> Int { fold(it, 0, { (a, x) => a + x }) }
+pub fn product<I: Iterator<Item = Int>>(it: &mut I) -> Int { fold(it, 1, { (a, x) => a * x }) }
+
+// Whether some value left passes a test, and whether every one does: each
+// stops at the first that settles it.
+pub fn any<I: Iterator>(it: &mut I, test: fn(I::Item) -> Bool) -> Bool {
+    match(next(it)) {
+        Some(x) => if(test(x)) { true } else { tail any(it, test) },
+        None => false
+    }
+}
+pub fn all<I: Iterator>(it: &mut I, test: fn(I::Item) -> Bool) -> Bool {
+    match(next(it)) {
+        Some(x) => if(test(x)) { tail all(it, test) } else { false },
+        None => true
+    }
+}
+
+// Where the first value left that passes a test is, counting from here.
+pub fn position<I: Iterator>(it: &mut I, test: fn(I::Item) -> Bool) -> Option<Int> { position_from(it, test, 0) }
+fn position_from<I: Iterator>(it: &mut I, test: fn(I::Item) -> Bool, at: Int) -> Option<Int> {
+    match(next(it)) {
+        Some(x) => if(test(x)) { Some(at) } else { tail position_from(it, test, at + 1) },
+        None => None
+    }
+}
+
+// The last value left.
+pub fn last<I: Iterator>(it: &mut I) -> Option<I::Item> { last_after(it, None) }
+fn last_after<I: Iterator>(it: &mut I, seen: Option<I::Item>) -> Option<I::Item> {
+    match(next(it)) {
+        Some(x) => tail last_after(it, Some(x)),
+        None => seen
+    }
+}
+
+// The least and the greatest value left, by `<`.
+pub fn min<T: Ord, I: Iterator<Item = T>>(it: &mut I) -> Option<T> {
+    match(next(it)) { Some(x) => Some(least_after(it, x)), None => None }
+}
+fn least_after<T: Ord, I: Iterator<Item = T>>(it: &mut I, best: T) -> T {
+    match(next(it)) {
+        Some(x) => if(x < best) { tail least_after(it, x) } else { tail least_after(it, best) },
+        None => best
+    }
+}
+pub fn max<T: Ord, I: Iterator<Item = T>>(it: &mut I) -> Option<T> {
+    match(next(it)) { Some(x) => Some(greatest_after(it, x)), None => None }
+}
+fn greatest_after<T: Ord, I: Iterator<Item = T>>(it: &mut I, best: T) -> T {
+    match(next(it)) {
+        Some(x) => if(best < x) { tail greatest_after(it, x) } else { tail greatest_after(it, best) },
+        None => best
+    }
+}
 "#
 
 private def sliceText : String := r#"// A stretch of an array, borrowed: the array is not copied, and an element is

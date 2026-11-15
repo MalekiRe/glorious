@@ -3580,6 +3580,8 @@ def cases : List Case := [
   -- field shorthand, an iterator over a `Vec` mapped and folded.
   ⟨"use std::vec::{Vec};\nuse std::iterator::{Iterator, map, fold};\n\nstruct Point { x: Int, y: Int }\n\nimpl Point {\n    pub fn new(x: Int, y: Int) -> Self { Point { x, y } }\n    pub fn manhattan(&self) -> Int { self.x.abs() + self.y.abs() }\n}\n\nfn main() -> Int {\n    let mut pts = Vec::new();\n    pts.push(Point::new(1, 2));\n    pts.push(Point::new(0 - 3, 4));\n    let mut it = pts.iter().map({ p => p.manhattan() });\n    fold(&mut it, 0, { (a, b) => a + b })\n}\n",
     [], "10"⟩,
+  ⟨"use std::iterator::{Iterator, range, sum, product, any, all, position, last, min, max};\nfn main() -> Int { let mut a = range(1, 5); say(sum(&mut a)); let mut b = range(1, 5); say(product(&mut b)); let mut c = range(0, 10); say(any(&mut c, { x => x > 8 })); let mut d = range(0, 10); say(all(&mut d, { x => x < 5 })); let mut e = range(3, 9); say(position(&mut e, { x => x == 6 })); let mut f = range(3, 9); say(last(&mut f)); let mut g = range(3, 9); say(min(&mut g)); let mut h = range(3, 9); say(max(&mut h)); 0 }",
+    [], "10\n24\ntrue\nfalse\nOk(3)\nOk(8)\nOk(3)\nOk(8)\n0"⟩,
   -- (An element of what a reference is to is borrowed through it.)
   ⟨"fn first(r: &[Int]) -> Int { let e = &r[0]; *e }\nfn main() -> Int { first(&[7, 8]) }",
     [], "7"⟩,
