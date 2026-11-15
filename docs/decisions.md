@@ -4536,6 +4536,28 @@ nothing destroys), read such a value through a reference. Two cases.
   receiver is borrowed as the resolver decides, before checking, so the
   reading starts over from the text. Two such calls in one program cost two.
 
+## `HashMap` changed in place, as the specification has it
+
+`std::hash::HashMap` had, besides its functions that give a new map, an
+in-place set of its own naming (`set`, `unset`, `get_ref`, `has`, `count`,
+`get_mut` by key value) that copied what keys stood for. It now has the
+specification's (17) instead: `HashMap::new`, `len`, `is_empty`,
+`contains_key(&k)`, `get(&k) -> Option<&V>`, `get_mut(&k)`,
+`insert(k, v) -> Option<V>` (what the key stood for before), `remove(&k) ->
+Option<V>`, `clear`, `keys` and `into_entries`. Keys are hashed and compared
+as values, so they are copied (numbers, texts); what a key stands for is
+never copied, so it may have a `drop` (a replaced or removed value is given
+back; the rest are destroyed with the map). Lookups look at each pair where
+it is (`&(k, _)` patterns), not through `a[i].0`, which copies the element.
+The entry API and iterators over references are not built. The three cases
+that used the old names use these.
+
+A dot call whose name is a function of several types' own (`a.size()` with
+`A::size` and `B::size`) was refused as ambiguous; the resolver now takes the
+first and tells the checker of the rest, which chooses by the value's type as
+for a function in scope that does not fit (the case that expected the
+refusal now gives what both calls give).
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by

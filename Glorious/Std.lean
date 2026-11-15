@@ -4631,6 +4631,134 @@ pub fn remove(m, key) {
     }
 }
 
+// The same map changed where it is, in the shape the library specification
+// gives it (17): a key is hashed and compared as a value, so it is one that
+// is copied (a number, a text); what a key stands for may be anything.
+impl<K, V> HashMap<K, V> {
+    pub fn new() -> Self { HashMap(empty_buckets(8, []), 0) }
+    pub fn len(value: &Self) -> Int { value.1 }
+    pub fn is_empty(value: &Self) -> Bool { value.1 == 0 }
+    pub fn contains_key(value: &Self, key: &K) -> Bool where K: Eq, K: Hash {
+        match(HashMap::get(value, key)) { Some(_) => true, None => false }
+    }
+    pub fn get<'a>(value: &'a Self, key: &K) -> Option<&'a V> where K: Eq, K: Hash {
+        let at = int_rem(hash(*key), len_at(&value.0));
+        match(slot_in(&value.0[at], *key, 0)) {
+            Some(i) => Some(&value.0[at][i].1),
+            None => None
+        }
+    }
+    pub fn get_mut<'a>(value: &'a mut Self, key: &K) -> Option<&'a mut V> where K: Eq, K: Hash {
+        let at = int_rem(hash(*key), len_at(&value.0));
+        match(slot_in(&value.0[at], *key, 0)) {
+            Some(i) => Some(&mut value.0[at][i].1),
+            None => None
+        }
+    }
+    // What the key stood for before, if anything.
+    pub fn insert(value: &mut Self, key: K, item: V) -> Option<V> where K: Eq, K: Hash {
+        let at = int_rem(hash(key), len_at(&value.0));
+        match(slot_in(&value.0[at], key, 0)) {
+            Some(i) => Some(replace(&mut value.0[at][i].1, item)),
+            None =>
+                push_at(&mut value.0[at], (key, item));
+                value.1 = value.1 + 1;
+                if(value.1 > len_at(&value.0)) { HashMap::regrow(value) } else { () };
+                None
+        }
+    }
+    pub fn remove(value: &mut Self, key: &K) -> Option<V> where K: Eq, K: Hash {
+        let at = int_rem(hash(*key), len_at(&value.0));
+        match(slot_in(&value.0[at], *key, 0)) {
+            Some(i) =>
+                // (The last of the bucket takes its place.)
+                // (The bucket is made again without it.)
+                let mut bucket = replace(&mut value.0[at], []);
+                let mut kept = [];
+                let mut found = None;
+                let mut n = len_at(&bucket);
+                loop({
+                    match(pop_at(&mut bucket)) {
+                        Some((k, v)) =>
+                            n = n - 1;
+                            if(n == i) { found = Some(v) } else { push_at(&mut kept, (k, v)) },
+                        None => break(())
+                    }
+                });
+                value.0[at] = kept;
+                value.1 = value.1 - 1;
+                found,
+            None => None
+        }
+    }
+    pub fn clear(value: &mut Self) {
+        value.0 = empty_buckets(8, []);
+        value.1 = 0
+    }
+    // Its keys and what they stand for, in no order one can rely on.
+    pub fn into_entries(value: Self) -> [(K, V)] {
+        match(value) { HashMap(buckets, _) => flat_onto(buckets, []) }
+    }
+    pub fn keys(value: &Self) -> [K] where K: Eq {
+        keys_onto(&value.0, 0, 0, [])
+    }
+    // With twice the buckets: each key moved to where it now falls.
+    fn regrow(value: &mut Self) where K: Hash {
+        let size = len_at(&value.0) * 2;
+        let old = replace(&mut value.0, []);
+        let mut all = flat_onto(old, []);
+        let mut buckets = empty_buckets(size, []);
+        loop({
+            match(pop_at(&mut all)) {
+                Some((k, v)) =>
+                    let at = int_rem(hash(k), size);
+                    push_at(&mut buckets[at], (k, v)),
+                None => break(())
+            }
+        });
+        value.0 = buckets
+    }
+}
+
+// So many empty buckets: each made anew, as a bucket may come to hold what
+// is not copied.
+fn empty_buckets<K, V>(n: Int, out: [[(K, V)]]) -> [[(K, V)]] {
+    if(n <= 0) { out } else { tail empty_buckets(n - 1, push(out, [])) }
+}
+
+// Where a key is in a bucket. (Each pair is looked at where it is: what
+// the key stands for may be no value that is copied.)
+fn slot_in<K: Eq, V>(bucket: &[(K, V)], key: K, i: Int) -> Option<Int> {
+    match(element(bucket, i)) {
+        Some(p) => match(p) { &(k, _) => if(*k == key) { Some(i) } else { slot_in(bucket, key, i + 1) } },
+        None => None
+    }
+}
+// The pairs of every bucket, one array.
+fn flat_onto<K, V>(buckets: [[(K, V)]], out: [(K, V)]) -> [(K, V)] {
+    let mut buckets = buckets;
+    let mut out = out;
+    loop({
+        match(pop_at(&mut buckets)) {
+            Some(bucket) =>
+                let mut bucket = bucket;
+                loop({ match(pop_at(&mut bucket)) { Some(pair) => push_at(&mut out, pair), None => break(()) } }),
+            None => break(())
+        }
+    });
+    out
+}
+fn keys_onto<K: Eq, V>(buckets: &[[(K, V)]], b: Int, i: Int, out: [K]) -> [K] {
+    match(element(buckets, b)) {
+        Some(bucket) =>
+            match(element(bucket, i)) {
+                Some(p) => match(p) { &(k, _) => keys_onto(buckets, b, i + 1, push(out, *k)) },
+                None => keys_onto(buckets, b + 1, 0, out)
+            },
+        None => out
+    }
+}
+
 // `f(f(init, k0, v0), k1, v1)` and so on, in no order one can rely on.
 pub fn fold_map(m, init, f) {
     match(m) {
@@ -4644,60 +4772,6 @@ pub fn values(m) { fold_map(m, [], fn(out, k, v) { push(out, v) }) }
 pub fn entries(m) { fold_map(m, [], fn(out, k, v) { push(out, (k, v)) }) }
 pub fn from(pairs) { fold(pairs, new(), fn(m, pair) { match(pair) { (k, v) => insert(m, k, v) } }) }
 
-// The same map changed where it is and looked into by reference, in the
-// shape the library specification gives its maps (17).
-fn slot_of<'a, K, V>(bucket: &'a [(K, V)], key: K, i: Int) -> Option<&'a V> where K: Eq {
-    match(element(bucket, i)) {
-        Some(pair) => if(pair.0 == key) { Some(&pair.1) } else { tail slot_of(bucket, key, i + 1) },
-        None => None
-    }
-}
-
-// Where in a bucket a key is, or a place that is not there.
-fn place_of<K, V>(bucket: &[(K, V)], key: K, i: Int) -> Int where K: Eq {
-    match(element(bucket, i)) {
-        Some(pair) => if(pair.0 == key) { i } else { tail place_of(bucket, key, i + 1) },
-        None => 0 - 1
-    }
-}
-
-impl<K, V> HashMap<K, V> {
-    // How many keys.
-    pub fn count(value: &Self) -> Int { value.1 }
-    // What a key stands for, where it is.
-    pub fn get_ref<'a>(value: &'a Self, key: K) -> Option<&'a V> where K: Hash, K: Eq {
-        let buckets = &value.0;
-        match(element(buckets, int_rem(hash(key), len_at(buckets)))) {
-            Some(bucket) => slot_of(bucket, key, 0),
-            None => None
-        }
-    }
-    pub fn has(value: &Self, key: K) -> Bool where K: Hash, K: Eq {
-        match(HashMap::get_ref(value, key)) { Some(_) => true, None => false }
-    }
-    // What a key stands for, to change where it is.
-    pub fn get_mut<'a>(value: &'a mut Self, key: K) -> Option<&'a mut V> where K: Hash, K: Eq {
-        let buckets = &mut value.0;
-        let n = len_at(&*buckets);
-        match(element_mut(buckets, int_rem(hash(key), n))) {
-            Some(bucket) =>
-                let i = place_of(&*bucket, key, 0);
-                match(element_mut(bucket, i)) {
-                    Some(pair) => Some(&mut pair.1),
-                    None => None
-                },
-            None => None
-        }
-    }
-    // The key standing for the item from now on.
-    pub fn set(value: &mut Self, key: K, item: V) where K: Hash, K: Eq {
-        *value = insert(replace(value, new()), key, item);
-    }
-    // The key standing for nothing from now on.
-    pub fn unset(value: &mut Self, key: K) where K: Hash, K: Eq {
-        *value = remove(replace(value, new()), key);
-    }
-}
 "#
 
 /-- `std::tuple`: tuples and functions of any length through one form. What

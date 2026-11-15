@@ -2579,8 +2579,8 @@ def cases : List Case := [
   ⟨"trait Mark { fn mark(Self) -> Int; }\nstruct A(Int)\nimpl !Mark for A {}\nfn main() -> Int { mark(A(1)) }",
     [], "error: 4:20: in `main`: `A` does not implement `Mark`"⟩,
   -- A hash map changed where it is, and what a key stands for looked at where it is.
-  ⟨"use std::hash::{HashMap, new, get};\nfn main() {\n    let mut m = new();\n    HashMap::set(&mut m, \"one\", 1); HashMap::set(&mut m, \"two\", 2); HashMap::set(&mut m, \"three\", 3);\n    say(HashMap::count(&m));\n    say(match(HashMap::get_ref(&m, \"two\")) { Some(r) => *r, None => 0 });\n    say(HashMap::has(&m, \"four\"));\n    HashMap::unset(&mut m, \"one\");\n    HashMap::set(&mut m, \"two\", 22);\n    say(HashMap::count(&m));\n    say(match(HashMap::get_ref(&m, \"two\")) { Some(r) => *r, None => 0 });\n    say(get(m, \"one\"));\n    0 }",
-    [], "3\n2\nErr(())\n2\n22\nErr(())\n0"⟩,
+  ⟨"use std::hash::{HashMap, new, get};\nfn main() {\n    let mut m = new();\n    m.insert(\"one\", 1); m.insert(\"two\", 2); m.insert(\"three\", 3);\n    say(m.len());\n    say(match(m.get(&\"two\")) { Some(r) => *r, None => 0 });\n    say(m.contains_key(&\"four\"));\n    let _ = m.remove(&\"one\");\n    say(m.insert(\"two\", 22));\n    say(m.len());\n    say(match(m.get(&\"two\")) { Some(r) => *r, None => 0 });\n    say(get(m, \"one\"));\n    0 }",
+    [], "3\n2\nErr(())\nOk(2)\n2\n22\nErr(())\n0"⟩,
   -- A value bound with `let`, or given as an argument, can be borrowed with `&`: it is kept where a reference can point.
   ⟨"struct P { x: Int, y: Int }\nfn sum(p: &P) -> Int { p.x + p.y }\nfn main() -> Int { let p = P { x: 3, y: 4 }; sum(&p) + sum(&p) }",
     [], "14"⟩,
@@ -2651,7 +2651,7 @@ def cases : List Case := [
     [], "Ok(8)\nErr(())\n8"⟩,
   ⟨"use core::result::{as_mut};\nfn main() {\n    let mut r: Result<Int, Str> = Err(\"no\");\n    match(as_mut(&mut r)) { Ok(n) => *n = 1;, Err(e) => *e = \"changed\"; };\n    r }",
     [], "Err(\"changed\")"⟩,
-  ⟨"use std::hash::{HashMap, new};\nfn main() -> Int {\n    let mut m = new();\n    HashMap::set(&mut m, \"a\", 1);\n    HashMap::set(&mut m, \"b\", 2);\n    match(HashMap::get_mut(&mut m, \"b\")) { Some(v) => *v = *v + 40;, None => () };\n    let missing = match(HashMap::get_mut(&mut m, \"zz\")) { Some(_) => 1, None => 0 };\n    match(HashMap::get_ref(&m, \"b\")) { Some(v) => *v + missing, None => 0 - 1 } }",
+  ⟨"use std::hash::{HashMap, new};\nfn main() -> Int {\n    let mut m = new();\n    m.insert(\"a\", 1);\n    m.insert(\"b\", 2);\n    match(HashMap::get_mut(&mut m, &\"b\")) { Some(v) => *v = *v + 40;, None => () };\n    let missing = match(HashMap::get_mut(&mut m, &\"zz\")) { Some(_) => 1, None => 0 };\n    match(HashMap::get(&m, &\"b\")) { Some(v) => *v + missing, None => 0 - 1 } }",
     [], "42"⟩,
   ⟨"use alloc::collections::map::{Map, new, insert};\nfn main() -> Int {\n    let mut m = insert(insert(insert(new(), 5, 50), 2, 20), 9, 90);\n    match(Map::get_mut(&mut m, 9)) { Some(v) => *v = *v + 1;, None => () };\n    let a = match(Map::get_ref(&m, 9)) { Some(v) => *v, None => 0 };\n    let b = match(Map::get_ref(&m, 7)) { Some(v) => *v, None => 0 - 1 };\n    a * 10 + b }",
     [], "909"⟩,
@@ -2826,7 +2826,7 @@ def cases : List Case := [
   ⟨"fn main() { let z = 0.0; let n = z / z; say(n < 1.0); say(n > 1.0); say(n == n); say(0.0 == 0.0 - 0.0); 0 }",
     [], "Err(())\nErr(())\nErr(())\nOk(())\n0"⟩,
   -- Library conformance S33: float no ord hash.
-  ⟨"use std::hash::{HashMap, new};\nfn main() -> Int { let mut m = new(); HashMap::set(&mut m, 1.5, 1); 0 }",
+  ⟨"use std::hash::{HashMap, new};\nfn main() -> Int { let mut m = new(); HashMap::insert(&mut m, 1.5, 1); 0 }",
     [], "error: 2:39: in `main`: `f64` does not implement `std::hash::Hash`"⟩,
   -- Library conformance S36: utf8 bad.
   ⟨"use alloc::string::{String};\nfn main() { let bad: [u8] = [u8(255), u8(65)]; match(String::from_utf8(bad)) { Ok(_) => 0, Err(bytes) => len(bytes) } }",
@@ -3536,6 +3536,10 @@ def cases : List Case := [
   -- `else` binds loosest of all: the refusal says so.
   ⟨"fn main() -> Int { let s = \"a\" ++ if(1 < 2) { \"b\" } else { \"c\" }; len(s) }",
     [], "error: 1:20: in `main`: argument 2 of `++`: expected `Str`, found `Result<Str, fn(()) -> Str>`. `else` binds more loosely than any other operator: `a ++ if(c) { x } else { y }` is `(a ++ if(c) { x }) else { y }`; write the conditional in parentheses"⟩,
+  -- The map changed where it is, as the specification has it: what a key
+  -- stands for may have a `drop`, and what `insert` replaces is given back.
+  ⟨"use std::hash::{HashMap};\nstruct H(Int)\nimpl Drop for H { fn drop(h) { say(h.0) } }\nfn main() -> Int {\n    let mut m = HashMap::new();\n    let mut i = 0;\n    while({ i < 20 }) { m.insert(i, i * i); i = i + 1 };\n    say(m.len());\n    match(m.get(&7)) { Some(v) => say(*v), None => say(0 - 1) };\n    match(m.get_mut(&3)) { Some(v) => *v = 100, None => () };\n    say(m.insert(3, 5));\n    say(m.remove(&4));\n    say(m.contains_key(&4));\n    let mut words = HashMap::new();\n    words.insert(\"a\", 1);\n    match(words.get_mut(&\"a\")) { Some(n) => *n = *n + 1, None => () };\n    match(words.get(&\"a\")) { Some(n) => say(*n), None => () };\n    let mut hs = HashMap::new();\n    hs.insert(1, H(10));\n    match(hs.insert(1, H(11))) { Some(old) => say(100 + old.0), None => () };\n    say(m.len());\n    0\n}\n",
+    [], "20\n49\nOk(100)\nOk(16)\nErr(())\n2\n110\n10\n19\n11\n0"⟩,
   -- (An element of what a reference is to is borrowed through it.)
   ⟨"fn first(r: &[Int]) -> Int { let e = &r[0]; *e }\nfn main() -> Int { first(&[7, 8]) }",
     [], "7"⟩,
@@ -4232,8 +4236,8 @@ def cases : List Case := [
     [], "7"⟩,
   ⟨"struct Button { press: fn(Int) -> Int }\nstruct Other { n: Int }\nimpl Other { fn press(o: &Other, k: Int) -> Int { o.n + k } }\nfn main() -> Int { let b = Button { press: { n => n + 1 } }; b.press(4) }",
     [], "5"⟩,
-  ⟨"struct A { n: Int }\nstruct B { n: Int }\nimpl A { fn size(a: &A) -> Int { a.n } }\nimpl B { fn size(b: &B) -> Int { b.n * 2 } }\nfn main() -> Int { let a = A { n: 3 }; a.size() }",
-    [], "error: 5:40: in `main`: `A` has no field `size`. More than one type has a function `size` of its own (`B::size`, `A::size`): say which, `Type::size(value, ..)`"⟩,
+  ⟨"struct A { n: Int }\nstruct B { n: Int }\nimpl A { fn size(a: &A) -> Int { a.n } }\nimpl B { fn size(b: &B) -> Int { b.n * 2 } }\nfn main() -> Int { let a = A { n: 3 }; let b = B { n: 5 }; a.size() * 100 + b.size() }",
+    [], "310"⟩,
   ⟨"use std::collections::{VecDeque};\nfn main() -> Int { let mut q = VecDeque::new(); q.push_back(3); q.push_back(4); match(q.pop_front()) { Some(x) => x, None => 0 } }",
     [], "3"⟩,
   ⟨"struct Counter { n: Int }\nimpl Counter { fn bump(c: Counter) -> Counter { Counter { n: c.n + 1 } } fn total(c: Counter) -> Int { c.n } }\nfn main() -> Int { Counter { n: 0 }.bump().bump().total() }",

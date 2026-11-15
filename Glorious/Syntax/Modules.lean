@@ -1129,7 +1129,12 @@ partial def resolveExpr (ctx : Ctx) (bound : List String) : Expr → R Expr
           | _ => false
         unless fieldNamed do
           let found ← own ()
-          if let [b] := found then
+          -- (Of several types: the first, and the checker told of the rest,
+          -- which it chooses from by the value's type where the first does
+          -- not fit.)
+          if found.length > 1 && id != 0 then
+            modify fun s => { s with dotAlts := (id, found.map (·.entry.global)) :: s.dotAlts }
+          if let b :: _ := found then
             noteUse ctx.here b.entry
             let receiver ← resolveExpr ctx bound receiver
             let args ← args.mapM (resolveExpr ctx bound)
