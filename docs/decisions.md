@@ -4742,6 +4742,17 @@ nothing: a type whose fields may be used more than once already may be.
 Each type parameter is asked the trait. Any other trait is refused. The
 text is read with identities far from every other text's.
 
+## Rust's common macros
+
+There are no macros; `println!`, `print!`, `eprintln!`, `format!`,
+`panic!`, `assert!`, `assert_eq!`, `assert_ne!` and `vec!` are read as the
+calls they stand for. A format text's `{}`, `{0}` and `{name}` (anything
+after `:` is read and not used) are each `show` of the argument, joined
+with `++`; `{{` and `}}` are braces. `println!`/`print!` are `say` (so
+`print!` ends its line too), `panic!` is `abort`, `assert!` is `assert` or
+`assert_message`, `assert_eq!(a, b)` is `assert_eq(&a, &b)`, and
+`vec![..]` is `std::vec::Vec::from_array([..])`, which brings in `Vec`.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by

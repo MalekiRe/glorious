@@ -247,9 +247,12 @@ def stdPreludeUses (src : String) : String := Id.run do
       let rightOk := next.any fun c => c.isAlphanum || c == '(' || c == '=' || c == '_' || c == '-'
       if leftOk && rightOk then found := true
     pure found
-  let loopNote := if (loops || ranges) && (src.splitOn "std::iterator").length == 1
-      && (src.splitOn "#![no_std]").length == 1 && (src.splitOn "mod std").length == 1
+  let plainStd := (src.splitOn "#![no_std]").length == 1 && (src.splitOn "mod std").length == 1
+  let loopNote := if (loops || ranges) && (src.splitOn "std::iterator").length == 1 && plainStd
     then "\n// std::iterator\n" else ""
+  -- (`vec![..]` is `std::vec::Vec::from_array(..)`.)
+  let loopNote := if (src.splitOn "vec![").length > 1 && (src.splitOn "std::vec").length == 1 && plainStd
+    then loopNote ++ "\n// std::vec\n" else loopNote
   -- (Nor where the text brings in whole modules, whose names could be any.)
   if (src.splitOn "#![no_std]").length > 1 || (src.splitOn "#![no_implicit_prelude]").length > 1
       || (src.splitOn "mod std").length > 1 || (src.splitOn "::*").length > 1 then
@@ -299,7 +302,8 @@ def stdPreludeUses (src : String) : String := Id.run do
   let textDots := textDotNames.filter fun name => dotted name && !blocked name
   let iterDots := iteratorDotNames.filter fun name => dotted name && !blocked name
   let charDots := charDotNames.filter fun name => dotted name && !blocked name
-  let wanted := stdPreludeNames.filter fun (name, _) => mentions name && !blocked name
+  let wanted := stdPreludeNames.filter fun (name, _) =>
+    (mentions name || (name == "Vec" && (src.splitOn "vec![").length > 1)) && !blocked name
   let wanted := wanted ++ (textDots.filter (fun n => !wanted.any (·.1 == n))).map (·, "text")
   let wanted := wanted ++ (iterDots.filter (fun n => !wanted.any (·.1 == n))).map (·, "iterator")
   let wanted := wanted ++ (charDots.filter (fun n => !wanted.any (·.1 == n))).map (·, "char")

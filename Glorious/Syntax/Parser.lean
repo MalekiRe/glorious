@@ -236,6 +236,35 @@ private def scalarLiteral (neg : Bool) : P (Option Expr) := do
     pure (some (arrayValue (codes.map fun (c : Nat) => scalarValue "u8_of" (c : Int))))
   | _ => pure none
 
+
+/-- The pieces of a format text, `"{} is {name:?}"`: the texts between, and
+for each `{..}` what it shows, the next argument (`none`), one by place
+(`some (.inr n)`) or a name (`some (.inl x)`). What follows `:` is read and
+not used. `{{` and `}}` are braces. -/
+private def formatPieces (text : List Char) : Except String (List (Sum String (Option (Sum String Nat)))) := do
+  let mut out : Array (Sum String (Option (Sum String Nat))) := #[]
+  let mut lit : List Char := []
+  let mut rest := text
+  while !rest.isEmpty do
+    match rest with
+    | '{' :: '{' :: more => lit := lit ++ ['{']; rest := more
+    | '}' :: '}' :: more => lit := lit ++ ['}']; rest := more
+    | '{' :: more =>
+      let inside := more.takeWhile (· != '}')
+      if inside.length == more.length then throw "a `{` of a format text is not closed"
+      rest := more.drop (inside.length + 1)
+      unless lit.isEmpty do out := out.push (.inl (String.ofList lit))
+      lit := []
+      let what := String.ofList (inside.takeWhile (· != ':'))
+      out := out.push (.inr (if what.isEmpty then none
+        else match what.toNat? with
+          | some n => some (.inr n)
+          | none => some (.inl what)))
+    | c :: more => lit := lit ++ [c]; rest := more
+    | [] => rest := []
+  unless lit.isEmpty do out := out.push (.inl (String.ofList lit))
+  pure out.toList
+
 /-- A literal as a pattern: the value it is, to be compared with. -/
 private partial def literalPattern : Expr → Option Pattern
   | .int n => some (.int n)
@@ -1415,6 +1444,83 @@ private partial def parsePrimary (noBlock : Bool) : P Expr := do
         | _ => parseBinary 0 false
       -- (`return` as it is named here, as `return(e, @f)` would call.)
       return .call id (.name none "return") [value, .label l]
+  -- Rust's macros most programs use: `println!`, `print!`, `format!`,
+  -- `panic!`, `assert!`, `assert_eq!`, `vec!`. A format text shows each
+  -- `{}` with `show`, joined with `++`.
+  if let .ident m ← peek then
+    if (← peek 1) == .op "!" && ((← peek 2) == .punct "(" || (← peek 2) == .punct "[") then
+      if ["println", "print", "eprintln", "eprint", "format", "panic", "assert", "assert_eq", "assert_ne", "vec"].contains m then
+        let id := (← read).base + (← get) + 1
+        advance; advance
+        let closing := if (← peek) == .punct "[" then "]" else ")"
+        advance
+        let fix := (← read).fix
+        let (jq, jf) := splitPath ((fix.function "++" false).splitOn "::")
+        let join := fun (a b : Expr) (k : Nat) => Expr.call (id + 300000 + k) (.name jq jf) [a, b]
+        -- (The text a format makes of its arguments.)
+        let formatted : P Expr := do
+          let codes ← match ← peek with
+            | .str codes => do advance; pure codes
+            | _ => failAt s!"`{m}!` is given a format text first: `{m}!(\"\{}\", x)`"
+          let mut args : Array Expr := #[]
+          while ← acceptPunct "," do
+            if (← peek) == .punct ")" then break
+            args := args.push (← parseBinary 0 false)
+          let pieces ← match formatPieces (codes.map Char.ofNat) with
+            | .ok p => pure p
+            | .error e => failAt e
+          let mut next := 0
+          let mut parts : Array Expr := #[]
+          for p in pieces do
+            match p with
+            | .inl s => parts := parts.push (textValue (s.toList.map Char.toNat))
+            | .inr what =>
+              let arg ← match what with
+                | none => do
+                  let a := args[next]?
+                  next := next + 1
+                  match a with
+                  | some a => pure a
+                  | none => failAt s!"`{m}!`: more `\{}` than arguments"
+                | some (.inr n) => match args[n]? with
+                  | some a => pure a
+                  | none => failAt s!"`{m}!`: no argument {n}"
+                | some (.inl x) => pure (Expr.name none x)
+              parts := parts.push (.call (id + 400000 + parts.size) (.name none "show") [arg])
+          match parts.toList with
+          | [] => pure (textValue [])
+          | first :: rest => pure (rest.zipIdx.foldl (fun acc (e, k) => join acc e k) first)
+        let made ← match m with
+          | "println" | "eprintln" | "print" | "eprint" =>
+            if (← peek) == .punct ")" then pure (.call id (.name none "say") [textValue []])
+            else do pure (.call id (.name none "say") [← formatted])
+          | "format" => formatted
+          | "panic" =>
+            if (← peek) == .punct ")" then pure (.call id (.name none "abort") [textValue ("explicit panic".toList.map Char.toNat)])
+            else do pure (.call id (.name none "abort") [← formatted])
+          | "assert" =>
+            let cond ← parseBinary 0 false
+            if ← acceptPunct "," then do
+              pure (.call id (.name none "assert_message") [cond, ← formatted])
+            else pure (.call id (.name none "assert") [cond])
+          | "assert_eq" | "assert_ne" =>
+            let a ← parseBinary 0 false
+            expectPunct ","
+            let b ← parseBinary 0 false
+            let _ ← acceptPunct ","
+            let borrowed := fun (e : Expr) (k : Nat) => Expr.call (id + 500000 + k) (.name none borrowMark) [e]
+            pure (.call id (.name none m) [borrowed a 0, borrowed b 1])
+          | _ =>
+            -- `vec![a, b]`, `vec![x; n]`: a `Vec` of the array.
+            let items ← if closing == "]" then do
+                let saved ← get
+                -- (Read as the array literal it is, from its `[`.)
+                set (saved - 1)
+                parsePrimary noBlock
+              else failAt "`vec!` is written with brackets: `vec![a, b]`"
+            pure (.call id (.name (some "std::vec::Vec") "from_array") [items])
+        if m != "vec" then expectPunct closing
+        return made
   -- `if c { .. }`, `while c { .. }`, `match x { .. }`: what is tested
   -- written without parentheses, read up to the block, as Rust has them:
   -- `if(c) { .. }`, `while({ c }) { .. }`, `match(x) { .. }`.

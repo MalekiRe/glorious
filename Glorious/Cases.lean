@@ -3819,6 +3819,16 @@ def cases : List Case := [
     [], "W { v: 3 }\n0"⟩,
   ⟨"#[derive(Clone)]\nstruct Employee { name: Str, dept: Str, salary: Int, age: Int }\n\nfn by_dept(staff: &Vec<Employee>, dept: Str) -> Vec<Employee> {\n    let mut out = Vec::new();\n    for e in staff {\n        if e.dept == dept { out.push(e.clone()) }\n    }\n    out\n}\n\nfn average(xs: &Vec<Employee>) -> Int {\n    if xs.is_empty() { return 0 }\n    let total: Int = xs.iter().map(|e| e.salary).sum();\n    total / xs.len()\n}\n\nfn oldest(xs: &Vec<Employee>) -> Option<Str> {\n    let mut best: Option<&Employee> = None;\n    for e in xs {\n        best = match best {\n            None => Some(e),\n            Some(b) => if e.age > b.age { Some(e) } else { Some(b) },\n        };\n    }\n    best.map(|e| e.name)\n}\n\nfn main() -> Int {\n    let mut staff = Vec::new();\n    staff.push(Employee { name: \"ann\", dept: \"eng\", salary: 120, age: 41 });\n    staff.push(Employee { name: \"bob\", dept: \"eng\", salary: 100, age: 29 });\n    staff.push(Employee { name: \"cyd\", dept: \"ops\", salary: 80, age: 55 });\n    staff.push(Employee { name: \"dee\", dept: \"eng\", salary: 110, age: 35 });\n    let eng = by_dept(&staff, \"eng\");\n    say(\"eng: \" ++ eng.len().to_string() ++ \", avg \" ++ average(&eng).to_string());\n    say(\"oldest: \" ++ oldest(&staff).unwrap_or(\"nobody\"));\n    staff.sort_by(|a, b| a.salary < b.salary);\n    for e in &staff { say(e.name ++ \" \" ++ e.salary.to_string()) }\n    staff.retain(|e| e.age < 50);\n    staff.len()\n}\n",
     [], "eng: 3, avg 110\noldest: cyd\ncyd 80\nbob 100\ndee 110\nann 120\n3"⟩,
+  -- `println!`, `format!`, `vec!`, `assert!`, `assert_eq!`; the first Rust
+  -- program tried, unchanged.
+  ⟨"fn main() -> Int { let x = 3; let name = \"ann\"; println!(\"{} is {} years\", name, x); println!(\"{name}: {x:?} {{ok}}\"); let s = format!(\"<{}>\", x + 1); println!(\"{}\", s); 0 }",
+    [], "ann is 3 years\nann: 3 {ok}\n<4>\n0"⟩,
+  ⟨"fn main() -> Int { let v = vec![1, 2, 3]; let w = vec![0; 4]; v.len() * 10 + w.len() }",
+    [], "34"⟩,
+  ⟨"fn main() -> Int { assert!(1 < 2); assert_eq!(2 + 2, 4); assert!(true, \"never {}\", 1); 7 }",
+    [], "7"⟩,
+  ⟨"use std::vec::{Vec};\nuse std::hash::{HashMap};\n\n#[derive(Debug)]\nstruct Point { x: Int, y: Int }\n\nimpl Point {\n    pub fn new(x: Int, y: Int) -> Self { Point { x, y } }\n    pub fn manhattan(&self) -> Int { self.x.abs() + self.y.abs() }\n}\n\nfn main() -> Int {\n    let pts = vec![Point::new(1, 2), Point::new(-3, 4)];\n    let total: Int = pts.iter().map(|p| p.manhattan()).sum();\n    total\n}\n",
+    [], "10"⟩,
   -- (An element of what a reference is to is borrowed through it.)
   ⟨"fn first(r: &[Int]) -> Int { let e = &r[0]; *e }\nfn main() -> Int { first(&[7, 8]) }",
     [], "7"⟩,
