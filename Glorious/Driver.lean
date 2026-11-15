@@ -121,7 +121,7 @@ partial def withoutUnreached (items : List Syntax.Item) : List Syntax.Item := Id
   let mut wanted : Std.HashSet String := {}
   -- (What the checker may choose to give where none is written: a `Vec`'s
   -- array, borrowed, where a reference to an array is wanted.)
-  wanted := wanted.insert "as_array" |>.insert "as_array_mut"
+  wanted := wanted.insert "as_array" |>.insert "as_array_mut" |>.insert "from_array"
   for item in items do
     if (isLibraryFn item).isNone then
       for n in namesInItem [] item do wanted := wanted.insert (Syntax.lastSegment n)
@@ -219,7 +219,8 @@ def stdPreludeNames : List (String × String) :=
 value, `s.trim()`: none has a name a type's own function commonly has. -/
 def textDotNames : List String :=
   ["to_upper", "to_lower", "trim", "trim_start", "starts_with", "ends_with", "parse_int",
-   "char_at", "pad_start", "pad_end", "lines", "words", "repeat", "utf8", "split", "contains"]
+   "char_at", "pad_start", "pad_end", "lines", "words", "repeat", "utf8", "split", "contains",
+   "split_whitespace"]
 
 /-- The functions of `std::char` brought in where a program calls one on a
 value, `c.is_digit()`. -/

@@ -634,6 +634,15 @@ partial def receiverKinds (f g : String) : M (Option Nat × Option Nat) := do
   set saved
   pure (a, b)
 
+/-- Where an array is given and a `Vec` wanted: the function that makes the
+`Vec` of it, if the program has it. -/
+partial def vecOfArray (expected found : Ty) : M (Option String) := do
+  match ← find expected, ← find found with
+  | .con n _, .con "Array" _ =>
+    let g := n ++ "::from_array"
+    if Syntax.lastSegment n == "Vec" && ((← get).fns.lookup g).isSome then pure (some g) else pure none
+  | _, _ => pure none
+
 /-- `x.f.g` where `x` is a mutable variable that holds no reference: the
 name, the path of fields, and the identity of the last read. -/
 partial def cellField (scope : Scope) : Expr → Option (String × List String × Nat)
@@ -1048,6 +1057,7 @@ partial def inferCall (scope : Scope) (amb : Row) (f : Expr) (args : List Expr)
       -- A callable written with its parameters' types: its clauses are
       -- read knowing them, so a field read through a parameter that is a
       -- reference is found.
+      let beforeFound ← get
       let found ← match value, ← find expected with
         | .closure id clauses, .fn ps _ _ _ _ =>
           let arity := match clauses.head? with
@@ -1057,6 +1067,21 @@ partial def inferCall (scope : Scope) (amb : Row) (f : Expr) (args : List Expr)
             inferCallable scope (ps.map some) none none clauses "the clauses of this callable do" id
           else inferExpr scope amb value
         | _, _ => inferExpr scope amb value
+      -- (An array where a `Vec` is wanted, `let v: Vec<Int> = it.collect()`:
+      -- the `Vec` of it, `Vec::from_array`, chosen and written in.)
+      if call != 0 then
+        if let some g ← vecOfArray expected found then
+          let saved ← get
+          set beforeFound
+          let wrapped ← try (do
+              let made ← inferExpr scope amb (.call (call + 700000) (.name none g) [value])
+              some <$> fitAt scope amb "the value of a `let` with a type" none expected made)
+            catch _ => pure none
+          match wrapped with
+          | some none =>
+            modify fun s => { s with argsChosen := ((call, 0), .call 0 (.name none Syntax.wrapMark) [.name none g]) :: s.argsChosen }
+            return expected
+          | _ => set saved
       match ← fitAt scope amb "the value of a `let` with a type" none expected found with
       | none => return expected
       | some e => throw e

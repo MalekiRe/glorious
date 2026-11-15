@@ -674,6 +674,8 @@ fn split_onto(text: Str, at: char, part: Str, out: [Str]) -> [Str] {
     }
 }
 pub fn lines(text: Str) -> [Str] { split(text, '\n') }
+// (Rust's name of `words`.)
+pub fn split_whitespace(text: Str) -> [Str] { words(text) }
 
 // The words of a text: what is between its spaces.
 pub fn words(text: Str) -> [Str] { vec::filter(split(map(text, { c => if(std::char::is_space(c)) { ' ' } else { c } }), ' '), { w => not is_empty(w) }) }
@@ -1331,6 +1333,8 @@ private def collectionsText : String := r#"// Queues and heaps: collections chan
 // reference, in the shape the library specification gives them (16).
 
 use std::vec::{swap};
+// (Where Rust keeps its maps and sets.)
+pub use std::hash::{HashMap, HashSet};
 
 // A queue with two ends. What is at the front is kept turned round, so that
 // both ends are the ends of an array: putting and taking at either end takes

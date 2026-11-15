@@ -3847,6 +3847,11 @@ def cases : List Case := [
     [], "The largest number is 100\nThe largest char is y\np.x = 5\ndistance = 5.0\n()"⟩,
   ⟨"fn first<T: Copy>(list: &[T]) -> T { list[0] }\nfn main() -> Int { let v = vec![5, 6]; first(&v) }",
     [], "5"⟩,
+  -- `let v: Vec<T> = it.collect()`; the Rust book's word count (chapter 8).
+  ⟨"fn main() -> Int { let v1 = vec![1, 2, 3]; let v2: Vec<Int> = v1.iter().map(|x| x + 1).collect(); println!(\"{}\", v2.len()); v2[2] }",
+    [], "3\n4"⟩,
+  ⟨"use std::collections::HashMap;\n\nfn main() {\n    let text = \"hello world wonderful world\";\n\n    let mut map = HashMap::new();\n\n    for word in text.split_whitespace() {\n        let count = map.entry(word).or_insert(0);\n        *count += 1;\n    }\n\n    println!(\"{}\", map.get(&\"world\").unwrap());\n    println!(\"{}\", map.len());\n}",
+    [], "2\n3\n()"⟩,
   -- (An element of what a reference is to is borrowed through it.)
   ⟨"fn first(r: &[Int]) -> Int { let e = &r[0]; *e }\nfn main() -> Int { first(&[7, 8]) }",
     [], "7"⟩,

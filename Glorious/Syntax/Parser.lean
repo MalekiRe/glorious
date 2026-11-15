@@ -1972,6 +1972,9 @@ private partial def parseStmts : P (List Stmt) := do
       | some (lets, s) => pure (lets.map mark ++ [mark s])
       | none => throw s!"{here.line}:{here.col}: a field is borrowed of what an expression points to, after something else in the statement is computed: give the reference a `let` of its own first" : P (List Stmt))
     if t == .ident "let" then
+      -- (What a `let`'s written type is checked by is known by its `let`, so
+      -- that what is given may be made that type, `[T]` a `Vec<T>`.)
+      let typedAt := (← read).base + (← get) + 400000
       advance
       if (← peek) == .ident "mut" then
         advance
@@ -1980,7 +1983,7 @@ private partial def parseStmts : P (List Stmt) := do
         expectPunct "="
         let value ← parseBinary 0 false
         let value := match typed with
-          | some ty => Expr.call 0 (.name none ascribeMark) [value, ty.asExpr]
+          | some ty => Expr.call typedAt (.name none ascribeMark) [value, ty.asExpr]
           | none => value
         expectPunct ";"
         out := out ++ (← settle (.letMut name value)).toArray
@@ -1991,7 +1994,7 @@ private partial def parseStmts : P (List Stmt) := do
         expectPunct "="
         let value ← parseBinary 0 false
         let value := match typed with
-          | some ty => Expr.call 0 (.name none ascribeMark) [value, ty.asExpr]
+          | some ty => Expr.call typedAt (.name none ascribeMark) [value, ty.asExpr]
           | none => value
         expectPunct ";"
         match pat with
