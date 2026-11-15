@@ -429,6 +429,10 @@ private partial def parseType : P TypeExpr := do
   match ← peek with
   | .ident "impl" =>
     failAt "`impl Trait` is the type of a function's parameter or result"
+  | .ident "dyn" =>
+    if let .ident _ ← peek 1 then
+      failAt "`dyn Trait` is not read: values of several types are an `enum` of them, or the callables that do what is wanted of each"
+    pure (.name (← expectPath) [])
   | .op "!" =>
     advance
     pure .never

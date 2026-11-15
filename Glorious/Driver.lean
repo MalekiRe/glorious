@@ -210,7 +210,7 @@ def stdPreludeNames : List (String × String) :=
    ("Left", "value"), ("Right", "value"), ("Rejected", "value"), ("Ordering", "cmp"),
    ("Less", "cmp"), ("Equal", "cmp"), ("Greater", "cmp"), ("Range", "iterator"),
    ("Fail", "value"), ("fail", "value"), ("Report", "value"), ("report", "value"),
-   ("catch_fail", "value")]
+   ("catch_fail", "value"), ("Vec", "vec")]
 
 /-- The functions of `std::text` brought in where a program calls one on a
 value, `s.trim()`: none has a name a type's own function commonly has. -/
