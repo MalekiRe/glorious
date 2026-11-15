@@ -542,6 +542,15 @@ def declareTraits (items : List Item) : M Unit := do
             | some body => cargs := cargs ++ [← zonk (← resolveType pmap false body)]
             | none => throw s!"{what}: `{Syntax.lastSegment t'}` takes arguments: `{p}: {Syntax.lastSegment t'}<..>`"
           extra := extra ++ [(t', cargs, subject)]
+      -- A type parameter inside one of the head's arguments (`H` of
+      -- `(Column<H>, R)`): its functions may let go of a value of it too, so
+      -- it is given how that is destroyed, as a head's argument is.
+      if (← get).dropMode then
+        let said := context.filterMap fun (p, t') => if t' == Syntax.destroyTrait then some p else none
+        for p in genericParams params do
+          if !args.contains p && !p.startsWith "'" && !said.contains p then
+            if let some subject := pmap.lookup p then
+              extra := extra ++ [(Syntax.destroyTrait, [], subject)]
       let mut assocs : List (String × Ty) := []
       let mut gatParams : List (String × List (Bool × Nat)) := []
       for a in assocNames do

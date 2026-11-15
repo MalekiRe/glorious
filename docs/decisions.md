@@ -4287,6 +4287,17 @@ Where several traits leave an `Out` (the library's `Future` and others leave
 `Output`), the one written of the parameter, `effect Await<F: Future>`, is
 the one asked; `<F as Future>::Output` says it too.
 
+## An implementation is given how to destroy its nested type parameters
+
+`impl<H, R> Columns for (Column<H>, R)` was given how each argument of its
+head is destroyed (`Column<H>`, `R`), but not `H`, which is inside one: a value
+of `H` its functions let go (covey's `despawn`, which removes an entity's
+component from each column) found no way to destroy it, and was let go with
+nothing run. Where values are destroyed, such an implementation now asks how
+each of its type parameters that is no argument of its head is destroyed, as a
+condition of its own (`extra`), answered where it is used: every type has
+that answer.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by

@@ -1,0 +1,25 @@
+// Components that hold something to close: a component with a `drop` is
+// destroyed when its entity ends, and the rest when the world does.
+// expect:
+// 7
+// 1
+// 8
+// 0
+mod ecs;
+
+use ecs::{Entity, app, register, spawn_with, despawn, count};
+
+// A handle to something outside, closed when it is destroyed.
+struct Handle(Int)
+impl Drop for Handle { fn drop(h) { say(h.0) } }
+
+struct Position(Int)
+
+fn main() -> Int {
+    let mut game = app().register<Handle>().register<Position>();
+    let a = game.world.spawn_with((Handle(7), Position(1)));
+    let b = game.world.spawn_with((Handle(8), Position(2)));
+    game.world.despawn(a);
+    say(game.world.count<Handle>());
+    0
+}
