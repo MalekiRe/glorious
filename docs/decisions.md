@@ -4323,6 +4323,22 @@ value is destroyed. A missing implementation says now what needed it:
 `` `()` does not implement `Get<Health>`, which `Get` of `(Column<Position>,
 ())` needs ``.
 
+## Giving up a callable needs only what it touches outside its own regions
+
+`cancel k` was typed only where the function doing it may touch every region
+`k`'s type says a call touches. A callable that takes references,
+`fn(&mut Column<Life>, &mut Commands)`, binds the regions of those, and its
+type says a call touches them: regions chosen at each call, which no function
+may be granted. So the function that destroys any callable (`%destroy` at
+`(callable)`) failed the region rules whenever it was used at such a type, and
+the program with it (covey with a component with a `drop` and a system).
+The rule (`HasTm.cancel`) now asks `SubFree n acc ϕ`: what a call touches that
+is none of the type's own `n` regions. A resumption and a label bind none, so
+for them it is `Sub` as before, which is what giving up a resumption, whose
+cleanups run, needs (`Safety`); a closure's destructor touches nothing
+(`dropSig`). Proofs updated: `SubFree.inst`, `Rgn.freeOf_of_mem_parts_inst`,
+`subFreeB_sound`.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by

@@ -142,6 +142,12 @@ def Grants (ϕ : List Rgn) (r : Rgn) : Prop := ∀ x, x ∈ r.parts → x ∈ Rg
 /-- Every place and permission of `a` is one of `b`. -/
 def Sub (a b : List Rgn) : Prop := ∀ r, r ∈ Rgn.flat a → r ∈ Rgn.flat b
 
+/-- `Sub`, of what a callable type binding `n` regions touches, leaving out
+what is of its own regions: those are chosen at each call, and name nothing
+where it is not called. -/
+def SubFree (n : Nat) (a b : List Rgn) : Prop :=
+  ∀ r, r ∈ Rgn.flat a → r.freeOf n = true → r ∈ Rgn.flat b
+
 /-- Two lists related item by item. -/
 inductive All₂ {α β : Type} (R : α → β → Prop) : List α → List β → Prop where
   | nil : All₂ R [] []
@@ -593,7 +599,7 @@ inductive HasTm (Δ : Ctx) (ϕ : List Rgn) : TEnv → Tm → Ty → Row → Prop
   whatever that could still perform and touch. -/
   | cancel {Γ : TEnv} {k : Atom} {body : Tm} {n : Nat} {Ps : List Ty} {ρ τ : Ty} {ε' ε : Row}
       {once : Bool} {env : Option (List Ty)} {acc : List Rgn} :
-      HasAtom Γ k (.fn n Ps ρ ε' once env acc) → Row.le ε' ε → Sub acc ϕ →
+      HasAtom Γ k (.fn n Ps ρ ε' once env acc) → Row.le ε' ε → SubFree n acc ϕ →
       Linear Δ Γ (atomVars [k]) (fv body) →
       HasTm Δ ϕ (Γ ++ [.unit]) body τ ε → HasTm Δ ϕ Γ (.cancel k body) τ ε
   | cell {Γ : TEnv} {init thunk : Atom} {body : Tm} {n : Nat} {r : Rgn} {σ ρ τ : Ty}

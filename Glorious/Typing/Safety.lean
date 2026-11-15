@@ -1088,7 +1088,7 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
       simp only [occState]
       omega
     rcases hkt.fn_inv with ⟨fn, caps, sig, θ, rfl, _, _, _, _, _, _, _, _⟩
-      | ⟨id, o, rfl, _, he, hcont⟩ | ⟨id, τl, rfl, _, _, _⟩
+      | ⟨id, o, rfl, hn0, he, hcont⟩ | ⟨id, τl, rfl, _, _, _⟩
     · have h1 : step p ⟨.cancel k body, env, stack, ⟨conts, labels, cells⟩⟩
           = .next ⟨body, env ++ [Value.unit], stack, ⟨conts, labels, cells⟩⟩ := by
         simp [step, hd, evalCont, hkv]
@@ -1119,7 +1119,7 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
               (.lab labels :: ϕ') :=
             .yield .unit (.label hlab (.call (henv.mono hS) hbody hle hsub (hst.mono hS)))
           obtain ⟨ε'', ϕ'', hst'⟩ := hseg seg hget S' hS _ ε' _ hbase (Row.le_trans hrow hle)
-            (fun x hx => List.mem_cons_of_mem _ (hsub x (hacc x hx)))
+            (fun x hx => List.mem_cons_of_mem _ (hsub x (hacc x hx (by rw [hn0]; exact Rgn.freeOf_zero x))))
           refine .of_safe_take (leave_safe hp hs' hst' (.label hlab .unit)
             ⟨.label labels, by simp, by simp [Frame.isTarget]⟩) rfl hget (fun hD id' => ?_)
           have h2 := moved_live hD henv hlin (live := fv (.cancel k body)) (fun i hi => hi) id'

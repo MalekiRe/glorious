@@ -908,7 +908,7 @@ theorem TypedAt.not_dead {S : StoreTy} {s : State} (hR : Δ.regions) (ht : Typed
   | guardTail _ _ => cases hcallee
   | cancel hk _ hacc _ _ =>
     cases hcallee
-    exact found (hacc _ (Rgn.mem_flat.mpr ⟨_, (isLabel rfl hk).2, List.mem_singleton_self _⟩))
+    exact found (hacc _ (Rgn.mem_flat.mpr ⟨_, (isLabel rfl hk).2, List.mem_singleton_self _⟩) rfl)
   | cell hform _ _ =>
     have hthunk := hform.thunk
     have hreg := hform.region

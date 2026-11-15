@@ -76,6 +76,30 @@ theorem Sub.inst {a b : List Rgn} (h : Sub a b) (θ : List Rgn) :
   obtain ⟨y, hy, hxy⟩ := Rgn.mem_flat_inst.mp hx
   exact Rgn.mem_flat_inst.mpr ⟨y, h y hy, hxy⟩
 
+/-- A place or permission of an instance of a region that is none of a
+callable type's own regions comes of one that is none of them. -/
+theorem Rgn.freeOf_of_mem_parts_inst {θ : List Rgn} {n : Nat} :
+    ∀ {y x : Rgn}, y.atom = true → x ∈ (y.inst θ).parts → x.freeOf n = true → y.freeOf n = true
+  | .bound _, x, _, hx, hf => by
+    simp only [Rgn.inst, Rgn.parts, List.mem_singleton] at hx
+    subst hx; exact hf
+  | .wr y, x, hy, hx, hf => by
+    simp only [Rgn.inst, Rgn.parts, List.mem_map] at hx
+    obtain ⟨z, hz, rfl⟩ := hx
+    exact Rgn.freeOf_of_mem_parts_inst (y := y) hy hz hf
+  | .or _ _, _, hy, _, _ => by cases hy
+  | .var _, _, _, _, _ => rfl
+  | .cell _, _, _, _, _ => rfl
+  | .lab _, _, _, _, _ => rfl
+  | .loan _, _, _, _, _ => rfl
+
+theorem SubFree.inst {n : Nat} {a b : List Rgn} (h : SubFree n a b) (θ : List Rgn) :
+    SubFree n (a.map (Rgn.inst θ)) (b.map (Rgn.inst θ)) := by
+  intro x hx hfx
+  obtain ⟨y, hy, hxy⟩ := Rgn.mem_flat_inst.mp hx
+  exact Rgn.mem_flat_inst.mpr
+    ⟨y, h y hy (Rgn.freeOf_of_mem_parts_inst (Rgn.atom_of_mem_flat hy) hxy hfx), hxy⟩
+
 theorem Sub.of_mem {a b : List Rgn} (h : ∀ r, r ∈ a → r ∈ b) : Sub a b := by
   intro x hx
   obtain ⟨r, hr, hx⟩ := Rgn.mem_flat.mp hx
@@ -846,7 +870,7 @@ theorem HasTm.inst (hΔ : Δ.Stable) (θ : List Rgn) {ϕ : List Rgn}
     rw [snoc_inst] at ih
     have hu : Ty.unit.inst θ = Ty.unit := by simp [Ty.unit, Ty.inst_tuple]
     rw [hu] at ih
-    exact .cancel hk' (Row.le_inst hrow θ) (hacc.inst θ) (hlin.inst hΔ θ) ih
+    exact .cancel hk' (Row.le_inst hrow θ) (SubFree.inst hacc θ) (hlin.inst hΔ θ) ih
   | @cell Γ init thunk body n r σ ρ τ εt ε once env acc hform hlin _ ih =>
     have hinit := hform.init
     have hthunk := hform.thunk

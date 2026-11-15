@@ -540,6 +540,15 @@ theorem subB_sound {a b : List Rgn} (h : subB a b = true) : Sub a b := by
   intro r hr
   simpa using List.all_eq_true.mp h r hr
 
+def subFreeB (n : Nat) (a b : List Rgn) : Bool :=
+  (Rgn.flat a).all fun r => !r.freeOf n || (Rgn.flat b).contains r
+
+theorem subFreeB_sound {n : Nat} {a b : List Rgn} (h : subFreeB n a b = true) : SubFree n a b := by
+  intro r hr hf
+  have := List.all_eq_true.mp h r hr
+  simp only [hf, Bool.not_true, Bool.false_or, List.contains_iff_mem] at this
+  exact this
+
 /-- May the region of a reference be read or written through? -/
 def regionOk (C : Cert) (ϕ : List Rgn) (r : Rgn) : Bool := !C.regions || grantsB ϕ r
 
@@ -1191,8 +1200,8 @@ def checkTm (C : Cert) (ϕ : List Rgn) : TEnv → Tm → List Hint → Ty → Ro
     | _, _ => false
   | Γ, .cancel k body, hs, τ, ε =>
     match atomTy Γ k with
-    | some (.fn _ _ _ ε' _ _ acc) =>
-      rowLe ε' ε && subB acc ϕ && linearB C Γ (atomVars [k]) (fv body)
+    | some (.fn n _ _ ε' _ _ acc) =>
+      rowLe ε' ε && subFreeB n acc ϕ && linearB C Γ (atomVars [k]) (fv body)
         && checkTm C ϕ (Γ ++ [.unit]) body hs τ ε
     | _ => false
   | Γ, .cell init thunk body, hs, τ, ε =>
@@ -1417,7 +1426,7 @@ theorem checkTm_sound {ϕ : List Rgn} : ∀ (tm : Tm) {Γ : TEnv} {hs : List Hin
     split at h
     · rename_i n Ps ρ ε' once env acc hk
       simp only [Bool.and_eq_true] at h
-      exact .cancel (atomTy_sound hk) (rowLe_sound h.1.1.1) (subB_sound h.1.1.2)
+      exact .cancel (atomTy_sound hk) (rowLe_sound h.1.1.1) (subFreeB_sound h.1.1.2)
         (linearB_sound h.1.2) (ih h.2)
     · simp at h
   | cell init thunk body ih =>

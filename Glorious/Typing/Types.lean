@@ -351,6 +351,20 @@ theorem inst_novar {r : Rgn} (h : r.novar = true) (θ : List Rgn) : r.inst θ = 
     simp [inst, iha h.1, ihb h.2]
   | _ => rfl
 
+/-- Is the region none of the `n` regions a callable type binds, seen from
+inside it? -/
+def freeOf (n : Nat) : Rgn → Bool
+  | .bound k => n ≤ k
+  | .wr r => freeOf n r
+  | .or a b => freeOf n a && freeOf n b
+  | _ => true
+
+theorem freeOf_zero : ∀ r : Rgn, r.freeOf 0 = true
+  | .bound _ => by simp [freeOf]
+  | .wr r => freeOf_zero r
+  | .or a b => by simp [freeOf, freeOf_zero a, freeOf_zero b]
+  | .var _ | .cell _ | .lab _ | .loan _ => rfl
+
 /-- The places and permissions a region is made of: a region that is one of
 several places is each of them. -/
 def parts : Rgn → List Rgn
