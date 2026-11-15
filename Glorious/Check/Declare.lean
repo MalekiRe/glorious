@@ -54,6 +54,11 @@ partial def resolveType (params : List (String × Ty)) (decl : Bool) : TypeExpr 
             return ← resolveType params decl (.name name args)
           if let some own := params.lookup name then return own
         let traits := (← get).traitShape.filter fun (_, arity, assocs) => arity == 0 && assocs.contains name
+        -- (Several: the one written of the parameter, if one is.)
+        let written := (← get).paramTraits.filterMap fun (q, tr) => if q == p then some tr else none
+        let traits := if traits.length > 1 && !written.isEmpty then
+            traits.filter fun (tr, _, _) => written.any fun w => w == tr || Syntax.lastSegment tr == Syntax.lastSegment w
+          else traits
         match traits with
         | [(tr, _, _)] =>
           -- (`F::Of<Int>`: asked at types, which go with the type asked.)
@@ -774,13 +779,20 @@ def declare (items : List Item) : M Unit := do
         -- (`S::Out` of a type parameter of the effect: kept as written, and
         -- answered at each use, at the type the use gives.)
         let projecting := (← get).projecting
-        modify fun s => { s with projecting := ids }
+        let written := items.findSome? fun
+          | .bounds n bs => if n == name then some bs else none
+          | .module _ (some inner) => inner.findSome? fun
+            | .bounds n bs => if n == name then some bs else none
+            | _ => none
+          | _ => none
+        modify fun s => { s with projecting := ids
+                                 paramTraits := ((written.getD []).map fun b => (b.subject, b.trait)) }
         let payload ← op.payload.mapM (resolveType opMap true)
         let result ← if op.terminal then pure none
           else match op.result with
             | some t => some <$> resolveType opMap true t
             | none => some <$> resolveType opMap true .hole
-        modify fun s => { s with projecting := projecting }
+        modify fun s => { s with projecting := projecting, paramTraits := [] }
         -- (Of references only: a callable it is given or gives is held to
         -- what the declaration says, as before.)
         let rec refCaps : Ty → List Nat

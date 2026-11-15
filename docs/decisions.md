@@ -4280,9 +4280,9 @@ answer; it is now kept as written (`projMark`, as an implementation's own
 projections are) and asked at each use, of the type that use gives
 (`unproject` where an operation is performed or handled).
 
-`S::Out` needs one trait to leave `Out`; where several do (the library's
-`Future` and others leave `Output`), the trait is written:
-`<F as Future>::Output`.
+Where several traits leave an `Out` (the library's `Future` and others leave
+`Output`), the one written of the parameter, `effect Await<F: Future>`, is
+the one asked; `<F as Future>::Output` says it too.
 
 ## Other standing decisions
 

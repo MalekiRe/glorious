@@ -3529,7 +3529,7 @@ pub trait Future {
 // Waiting for a future's result. Whoever asks is always answered, with what
 // the future made: a handler drives the future, or hands it on, and resumes
 // once.
-pub effect Await<F: Future> { [1, 1] await(F) -> <F as Future>::Output }
+pub effect Await<F: Future> { [1, 1] await(F) -> F::Output }
 
 // A future that is done already.
 pub struct Ready<T> { value: T }

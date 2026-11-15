@@ -741,6 +741,10 @@ structure St where
   is asked again with the program rewritten (a value of a type parameter kept
   in a variable) is asked only of these. -/
   ownItems : Bool := false
+  /-- While an effect's operations are read: the traits written of each of its
+  type parameters, by which `S::Out` is told apart where several traits leave
+  an `Out`. -/
+  paramTraits : List (String × String) := []
   gatOccs : Array (String × List Ty × Nat) := #[]
   /-- A type a trait leaves at a lifetime, not yet known (`L::Item<'a>` where
   `L` is a type parameter): by its variable, the lifetimes it was asked at.
