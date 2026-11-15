@@ -119,7 +119,10 @@ partial def resolveType (params : List (String × Ty)) (decl : Bool) : TypeExpr 
                 else s!"type `{x}` takes a type where a lifetime is written")
           pure (.con x (← args.mapM (resolveType params decl)))
         | none =>
-          if decl && args.isEmpty then inferredTy
+          -- (A name written with a capital is a type's, not a field's: one
+          -- that is not known is a mistake, not a type to infer.)
+          if decl && args.isEmpty && !(Syntax.lastSegment x).front.isUpper then inferredTy
+          else if x == "Never" then throw s!"unknown type `Never`: what does not return is written `!`"
           else throw s!"unknown type `{x}`"
   | .tuple args => do
     pure (.tuple (← args.mapM (resolveType params decl)))

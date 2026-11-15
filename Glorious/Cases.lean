@@ -3529,6 +3529,10 @@ def cases : List Case := [
     [], "error: 3:42: in `main`: `a[i]` copies the element (take it out with `pop` or `remove`, or borrow it, `&a[i]`), but a `H` has a `drop`, which would then run once for each"⟩,
   ⟨"struct H(Int)\nimpl Drop for H { fn drop(h) { say(h.0) } }\nfn main() -> Int { let h = H(1); let r = &h; let y = *r; 0 }",
     [], "error: 3:46: in `main`: reading through a reference copies the value (`replace` takes it out instead), but a `H` has a `drop`, which would then run once for each"⟩,
+  -- A capitalized name that is no type, in a declaration, is a mistake, not
+  -- a field type to infer.
+  ⟨"effect A { boom(Str) -> Never }\nfn main() -> Int { handle { boom(\"x\"); 1 }() { boom(m, k) => 0 } }",
+    [], "error: unknown type `Never`: what does not return is written `!`"⟩,
   -- (An element of what a reference is to is borrowed through it.)
   ⟨"fn first(r: &[Int]) -> Int { let e = &r[0]; *e }\nfn main() -> Int { first(&[7, 8]) }",
     [], "7"⟩,
