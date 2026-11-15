@@ -112,6 +112,9 @@ structure Outcome where
   /-- The borrows that are scopes of their own, and those that are not. -/
   lent : Nat := 0
   plain : Nat := 0
+  /-- Run on the Core machine: the cleanups installed, those started, and those
+  left in resumptions never taken (`Core.cleanup_accounting`). -/
+  cleanups : Option (Nat × Nat × Nat) := none
   deriving Inhabited
 
 /-- Compile a test program, and with `run` run it on the Lean machines. -/
@@ -125,7 +128,8 @@ def outcome (run : Bool) (c : Case) (files : List (List String × String)) (few 
       bytes := some (bytecodeBytes compiled)
       certified := compiled.cert.isSome
       strict := has (·.strict), regions := has (·.regions), loans := has (·.loans)
-      lent := compiled.lent, plain := compiled.plain.length }
+      lent := compiled.lent, plain := compiled.plain.length
+      cleanups := if run then cleanupsOf compiled.core c.input else none }
 
 /-- What every program starts from, the prelude and the library checked,
 found before the programs are gone through side by side: each would find it
@@ -543,6 +547,13 @@ def selftest (vm : Option String) : IO UInt32 := do
   let plain := found.foldl (fun n o => n + o.plain) 0
   IO.println s!"{count (·.bytes.isSome)} compile; {count (·.strict)} well owned; {count (·.regions)} with regions; {count (·.loans)} with loans; {count fun o => o.strict && o.regions && o.loans} with all three"
   IO.println s!"{scopes} borrows are scopes of their own; {plain} are not, in {count (·.plain > 0)} programs"
+  let installs := count fun o => match o.cleanups with
+    | some (n, _, _) => decide (n > 0)
+    | none => false
+  let lost := count fun o => match o.cleanups with
+    | some (_, _, h) => decide (h > 0)
+    | none => false
+  IO.println s!"{installs} programs install cleanups on the Core machine; {lost} leave one in a resumption never taken"
   pure (if failures.isEmpty then 0 else 1)
 
 /-- Say what the typing of a program's Core shows. With `strict`, fail if some
@@ -851,6 +862,14 @@ def main (args : List String) : IO UInt32 := do
   | ["stages", path] => stages path
   | ["survey"] => survey
   | ["why", path] => why path
+  -- (How many cleanups the Core machine installed, started, and left in a
+  -- resumption never taken, running the program: `Core.cleanup_accounting`.)
+  | ["cleanups", path] => do
+    match cleanups (← IO.FS.readFile path) with
+    | some (installed, started, held) =>
+      IO.println s!"{installed} installed, {started} started, {held} left in resumptions never taken"
+      pure 0
+    | none => IO.println "does not compile, or does not finish"; pure 1
   | ["sigs", path] =>
     match ← compileFile path with
     | .ok c =>

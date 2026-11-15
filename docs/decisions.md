@@ -4298,6 +4298,17 @@ each of its type parameters that is no argument of its head is destroyed, as a
 condition of its own (`extra`), answered where it is used: every type has
 that answer.
 
+## Cleanups left undone are counted in every test program
+
+`Core.cleanup_accounting` says that when a program finishes, the cleanups it
+installed are those it started and those left in resumptions never taken.
+What is not proved is that the last are none. The test programs now say it of
+themselves: each that runs on the Core machine is run again counting
+(`Driver.cleanupsOf`, `glorious cleanups FILE`), and the test summary says how
+many install cleanups and how many leave one in a resumption never taken.
+With resumptions let go now given up (see "A resumption let go is given
+up"), 203 install cleanups and none leaves one. This is measured, not proved.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by
