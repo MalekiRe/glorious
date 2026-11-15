@@ -425,7 +425,7 @@ mutual
 private partial def parseType : P TypeExpr := do
   match ← peek with
   | .ident "impl" =>
-    failAt "`impl Trait` is not a type: give the function a type parameter with the trait, `fn f<T: Trait>(x: T)`"
+    failAt "`impl Trait` is a parameter's type, standing for a type parameter of its own with the trait; a result's is not built: write the type"
   | .op "!" =>
     advance
     pure .never
@@ -1711,10 +1711,21 @@ private partial def parseFn : P (Item × List Bound) := do
   if ← acceptPunct "(" then
     let mut pats : Array Pattern := #[]
     let mut annots : Array (Option TypeExpr) := #[]
+    let mut params := params
+    let mut bounds := bounds
     repeat
       if (← peek) == .punct ")" then break
       pats := pats.push (← parsePattern)
-      annots := annots.push (← if ← acceptPunct ":" then some <$> parseType else pure none)
+      if ← acceptPunct ":" then
+        -- `x: impl Trait`: a type parameter of its own with the trait.
+        if (← peek) == .ident "impl" then
+          advance
+          let p := s!"Impl{params.length}"
+          params := params ++ [p]
+          bounds := bounds ++ (← parseBoundsOf p)
+          annots := annots.push (some (.name p []))
+        else annots := annots.push (some (← parseType))
+      else annots := annots.push none
       if !(← acceptPunct ",") then break
     expectPunct ")"
     -- `-> R`, `-> R / {E}`, or `/ {E}` alone for a function that gives `()`.
@@ -1726,12 +1737,12 @@ private partial def parseFn : P (Item × List Bound) := do
     expectPunct "}"
     -- `-> !`: a function that does not come back gives whatever is wanted
     -- of it, which only a body that does not come back can.
-    let (params, ret) := match ret with
+    let (allParams, ret) := match ret with
       | some .never => (params ++ [neverParam], some (TypeExpr.name neverParam []))
       | some (.performs .never effects) =>
         (params ++ [neverParam], some (TypeExpr.performs (.name neverParam []) effects))
       | other => (params, other)
-    pure (.fn name (params ++ lifetimes) annots.toList ret [.mk pats.toList body], bounds ++ more)
+    pure (.fn name (allParams ++ lifetimes) annots.toList ret [.mk pats.toList body], bounds ++ more)
   else
     expectPunct "{"
     let clauses ← parseClauses

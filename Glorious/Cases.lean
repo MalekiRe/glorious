@@ -3368,7 +3368,10 @@ def cases : List Case := [
   ⟨"fn main() -> Int { return 5 }", [], "error: 1:20: `return` is the library's function of a value and the function's label, `return(value, @f)`; or the value is written last, without `;`, found `return`"⟩,
   ⟨"fn main() -> Int { let mut x = 1; x += 2; x }", [], "error: 1:37: `x += e` is not an assignment here: write `x = x + e`, found `+=`"⟩,
   ⟨"fn main() -> Int { let x = Some(1); match x { Some(v) => v, None => 0 } }", [], "error: 1:37: `match` is given what it matches in parentheses: `match(x) { pattern => .. }`, found `match`"⟩,
-  ⟨"fn f(x: impl Show) -> Int { 0 }\nfn main() -> Int { f(1) }", [], "error: 1:9: `impl Trait` is not a type: give the function a type parameter with the trait, `fn f<T: Trait>(x: T)`, found `impl`"⟩,
+  ⟨"fn f(x: impl Show) -> Str { show(x) ++ \"!\" }\nfn g() -> impl Show { 1 }\nfn main() -> Int { say(f(1)); 0 }",
+    [], "error: 2:11: `impl Trait` is a parameter's type, standing for a type parameter of its own with the trait; a result's is not built: write the type, found `impl`"⟩,
+  ⟨"fn f(x: impl Show) -> Str { show(x) ++ \"!\" }\nfn main() -> Int { say(f(1)); say(f(\"a\")); 0 }",
+    [], "1!\na!\n0"⟩,
   -- What `Vec::truncate` takes off is destroyed.
   ⟨"struct N(Int)\nimpl Drop for N { fn drop(n) { say(n.0) } }\nuse std::vec::{Vec};\nfn main() -> Int { let mut v = Vec::new(); Vec::push(&mut v, N(102)); Vec::push(&mut v, N(103)); Vec::truncate(&mut v, 1); say(Vec::len(&v)); 0 }",
     [], "103\n1\n102\n0"⟩,
