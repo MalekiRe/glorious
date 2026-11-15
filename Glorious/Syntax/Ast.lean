@@ -1311,6 +1311,10 @@ where a reference can point holds that reference, and a field is then
 borrowed through it: the checker tells the two apart by the type.) -/
 def valueLike : Expr → Bool
   | .tuple (_ :: _) => true
+  -- (A whole number, or a name written with a capital: a constructor without
+  -- fields or a constant.)
+  | .int _ => true
+  | .name _ x => (lastSegment x).front.isUpper
   | .call _ (.name none mark) [_, ty] =>
     mark != ascribeMark || (match TypeExpr.ofExpr ty with
       | .ref _ _ _ => false

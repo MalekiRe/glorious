@@ -3490,6 +3490,10 @@ def cases : List Case := [
     [], "24"⟩,
   ⟨"struct P(Int)\nimpl P { fn get(p: &P) -> Int { p.0 } }\nfn main() -> Int { let p = P(4); p.get() }",
     [], "4"⟩,
+  -- A name bound to a constructor without fields is a value: a dot call of a
+  -- function that takes a reference first borrows it.
+  ⟨"enum Op { Add, Mul }\nimpl Op { fn apply(o: &Op, a: Int, b: Int) -> Int { match(o) { Add => a + b, Mul => a * b } } }\nfn main() -> Int { let o = Mul; let n = 5; o.apply(6, 7) + n }",
+    [], "47"⟩,
   -- (An element of what a reference is to is borrowed through it.)
   ⟨"fn first(r: &[Int]) -> Int { let e = &r[0]; *e }\nfn main() -> Int { first(&[7, 8]) }",
     [], "7"⟩,
