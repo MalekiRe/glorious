@@ -797,7 +797,11 @@ partial def inferCall (scope : Scope) (amb : Row) (f : Expr) (args : List Expr)
             -- reference: a mutable variable is borrowed for it.)
             if let (some 0, some k, .name none v) := (mine, theirs, a) then
               if k != 0 then
-                if let some (.cell _ _) := scope.lookup v then
+                if let some (.cell held _) := scope.lookup v then
+                  -- (One that holds a reference already is given as it is.)
+                  if let .ref .. ← find held then
+                    modify fun s => { s with dotChosen := (call, alt, 0) :: s.dotChosen }
+                    return ← inferCall scope amb (.name none alt) args call
                   modify fun s => { s with dotChosen := (call, alt, k) :: s.dotChosen }
                   return ← inferCall scope amb (.name none alt) (.ref (k == 2) v :: args.drop 1) call
   -- `T::f(..)` of a type parameter `T` and a trait's function `f`: as

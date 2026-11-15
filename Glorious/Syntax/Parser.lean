@@ -1414,6 +1414,8 @@ private partial def parsePrimary (noBlock : Bool) : P Expr := do
   | .ident "handle" =>
     advance
     let subject ← parseBinary 0 true
+    unless (← peek) == .punct "{" do
+      failAt "`handle` is a word of the language, `handle computation { arms }`: nothing else can be named `handle`"
     expectPunct "{"
     let arms ← parseClauses
     expectPunct "}"
