@@ -633,7 +633,12 @@ def why (path : String) : IO UInt32 := do
   let .ok resolved := Syntax.Modules.resolve prelude items | IO.println "resolve failed"; return 1
   let .ok all := Syntax.expandAliases resolved.items | IO.println "aliases failed"; return 1
   let all := Syntax.fillDefaults all
-  let .ok blocks := Check.checkProgram all resolved.info | IO.println "check failed"; return 1
+  -- (With what destroys values written, where the program has something to
+  -- destroy, as a compile has it.)
+  let drops := hasDrop items || (src.splitOn "defer").length > 1
+  let blocks ← match Check.checkProgram all resolved.info drops with
+    | .ok blocks => pure blocks
+    | .error e => IO.println s!"check failed: {e}"; return 1
   let written := all
   let all := Elab.eraseLifetimes all
   let .ok (all, blocks) := lowered blocks written all | IO.println "lowering failed"; return 1
@@ -690,7 +695,12 @@ def stages (path : String) : IO UInt32 := do
   let all0 := all
   IO.println s!"{all.length} filled"
   last ← lap "aliases, defaults" last
-  let .ok blocks := Check.checkProgram all resolved.info | IO.println "check failed"; return 1
+  -- (With what destroys values written, where the program has something to
+  -- destroy, as a compile has it.)
+  let drops := hasDrop items || (src.splitOn "defer").length > 1
+  let blocks ← match Check.checkProgram all resolved.info drops with
+    | .ok blocks => pure blocks
+    | .error e => IO.println s!"check failed: {e}"; return 1
   IO.println s!"{blocks.given.length} given"
   last ← lap "check" last
   let written := all
