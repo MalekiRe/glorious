@@ -253,10 +253,27 @@ partial def receiverExpr (taken : List (String × Bool)) (known : List (String �
             if known.lookup x == some 3 then some (x, [field], fid) else none
           | .fieldOf fid e field => (throughRef e).map fun (x, path, _) => (x, path ++ [field], fid)
           | _ => none
+        -- (`v[i].f()` where `f` takes a reference: the element, borrowed
+        -- where it is.)
+        let rec element (uniq : Bool) (fuel : Nat) : Expr → Option Expr
+          | .call cid (.name _ "index") [a, i] =>
+            let base := match fuel, place a, throughRef a with
+              | _, some (x, [], _), _ => some (Expr.ref uniq x)
+              | _, some (x, path, fid), _ => if fid == 0 then none else some (.refField fid uniq x path false)
+              | _, none, some (x, path, fid) => some (.refField fid uniq x path true)
+              | fuel + 1, none, none =>
+                match a with
+                | .name none x => if known.lookup x == some 3 then some (.name none x) else none
+                | _ => element uniq fuel a
+              | 0, _, _ => none
+            base.map fun b =>
+              if uniq then .call cid (.name none "place_at") [i, b] else .call cid (.name none "element_at") [b, i]
+          | _ => none
         let given := match taken.lookup name, place receiver, throughRef receiver with
           | some uniq, some (x, [], _), _ => Expr.ref uniq x
           | some uniq, some (x, path, fid), _ => if fid == 0 then receiver else .refField fid uniq x path false
           | some uniq, none, some (x, path, fid) => .refField fid uniq x path true
+          | some uniq, none, none => (element uniq 8 receiver).getD receiver
           | _, _, _ => receiver
         .call id (.name q name) (given :: rest)
       else .call id f args
@@ -286,8 +303,14 @@ partial def receiverStmts (taken : List (String × Bool)) (known : List (String 
   | s :: rest =>
     let rec here : Stmt → Stmt × List (String × Nat)
       | .let_ pat value =>
+        -- (`let s = &v[i]`: an element borrowed, a reference.)
+        let elementRef := match value with
+          | .call _ (.name _ f) _ => f == "element_at" || f == "place_at"
+          | .ref _ _ => true
+          | .refField .. => true
+          | _ => false
         let kind := match pat with
-          | .var _ => if valueLike value then 2 else 0
+          | .var _ => if elementRef then 3 else if valueLike value then 2 else 0
           | _ => 0
         (.let_ pat (receiverExpr taken known value), (patternNames pat).map (·, kind) ++ known)
       | .letMut x value => (.letMut x (receiverExpr taken known value), (x, 1) :: known)
