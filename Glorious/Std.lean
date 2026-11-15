@@ -1861,6 +1861,16 @@ pub fn format<T: Display>(value: &T) -> String {
     match(out) { Formatter { text, depth, width, fresh } => text }
 }
 
+// What Rust's `write!(f, ..)` is: the text written, and nothing wrong.
+pub fn write_fmt(out: &mut Formatter, text: Str) -> Result<(), FormatError> {
+    Formatter::write_str(out, text);
+    Ok(())
+}
+// The text a formatter was given.
+pub fn text_of(out: Formatter) -> Str {
+    match(out) { Formatter { text, depth, width, fresh } => String::to_str(&text) }
+}
+
 impl Display for Int { fn fmt(n, out) { Formatter::write_str(out, show(*n)) } }
 impl Display for Str { fn fmt(text, out) { Formatter::write_str(out, *text) } }
 impl Display for char { fn fmt(c, out) { Formatter::write_char(out, *c) } }

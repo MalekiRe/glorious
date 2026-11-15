@@ -3829,6 +3829,13 @@ def cases : List Case := [
     [], "7"⟩,
   ⟨"use std::vec::{Vec};\nuse std::hash::{HashMap};\n\n#[derive(Debug)]\nstruct Point { x: Int, y: Int }\n\nimpl Point {\n    pub fn new(x: Int, y: Int) -> Self { Point { x, y } }\n    pub fn manhattan(&self) -> Int { self.x.abs() + self.y.abs() }\n}\n\nfn main() -> Int {\n    let pts = vec![Point::new(1, 2), Point::new(-3, 4)];\n    let total: Int = pts.iter().map(|p| p.manhattan()).sum();\n    total\n}\n",
     [], "10"⟩,
+  -- Rust's `impl fmt::Display` (and `Debug`) with `write!`: how the type is shown.
+  ⟨"use std::fmt;\nstruct P { x: Int, y: Int }\nimpl fmt::Display for P {\n    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {\n        write!(f, \"({}, {})\", self.x, self.y)\n    }\n}\nfn main() -> Int { let p = P { x: 1, y: 2 }; println!(\"p = {}\", p); let s = p.to_string(); s.len() }",
+    [], "p = (1, 2)\n6"⟩,
+  ⟨"use std::fmt;\n#[derive(Debug, Clone)]\nenum Suit { Hearts, Spades }\nimpl fmt::Display for Suit {\n    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {\n        let s = match self { Hearts => \"H\", Spades => \"S\" };\n        write!(f, \"{}\", s)\n    }\n}\nfn main() -> Int { println!(\"{} {}\", Hearts, Spades); 0 }",
+    [], "H S\n0"⟩,
+  ⟨"use std::fmt::{self, Display, Formatter};\nstruct M(Vec<Int>);\nimpl Display for M {\n    fn fmt(&self, f: &mut Formatter) -> fmt::Result {\n        write!(f, \"[\")?;\n        for (i, x) in self.0.iter().enumerate() {\n            if i > 0 { write!(f, \", \")?; }\n            write!(f, \"{}\", x)?;\n        }\n        write!(f, \"]\")\n    }\n}\nfn main() -> Int { println!(\"{}\", M(vec![1, 2, 3])); 0 }",
+    [], "[1, 2, 3]\n0"⟩,
   -- (An element of what a reference is to is borrowed through it.)
   ⟨"fn first(r: &[Int]) -> Int { let e = &r[0]; *e }\nfn main() -> Int { first(&[7, 8]) }",
     [], "7"⟩,

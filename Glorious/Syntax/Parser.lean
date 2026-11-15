@@ -537,6 +537,11 @@ private partial def parseType : P TypeExpr := do
       let mut args : Array TypeExpr := #[]
       repeat
         if ← isOp ">" then break
+        -- (`'_`: a lifetime left to be found, which is to say not written.)
+        if (← peek) == .ident "'_" then
+          advance
+          if !(← acceptPunct ",") then break
+          continue
         args := args.push (← parseType)
         if !(← acceptPunct ",") then break
       expectOp ">"
@@ -1449,7 +1454,8 @@ private partial def parsePrimary (noBlock : Bool) : P Expr := do
   -- `{}` with `show`, joined with `++`.
   if let .ident m ← peek then
     if (← peek 1) == .op "!" && ((← peek 2) == .punct "(" || (← peek 2) == .punct "[") then
-      if ["println", "print", "eprintln", "eprint", "format", "panic", "assert", "assert_eq", "assert_ne", "vec"].contains m then
+      if ["println", "print", "eprintln", "eprint", "format", "panic", "assert", "assert_eq", "assert_ne", "vec",
+          "write", "writeln"].contains m then
         let id := (← read).base + (← get) + 1
         advance; advance
         let closing := if (← peek) == .punct "[" then "]" else ")"
@@ -1491,6 +1497,13 @@ private partial def parsePrimary (noBlock : Bool) : P Expr := do
           | [] => pure (textValue [])
           | first :: rest => pure (rest.zipIdx.foldl (fun acc (e, k) => join acc e k) first)
         let made ← match m with
+          | "write" | "writeln" =>
+            -- `write!(f, ..)`: `std::fmt::write_fmt(f, text)`.
+            let out ← parseBinary 0 false
+            expectPunct ","
+            let text ← formatted
+            let text := if m == "writeln" then join text (textValue ['\n'.toNat]) 99 else text
+            pure (.call id (.name (some "std::fmt") "write_fmt") [out, text])
           | "println" | "eprintln" | "print" | "eprint" =>
             if (← peek) == .punct ")" then pure (.call id (.name none "say") [textValue []])
             else do pure (.call id (.name none "say") [← formatted])
@@ -2501,6 +2514,21 @@ private partial def parseItem : P Item := do
     expectPunct "}"
     -- `Self` is the type the implementation is for.
     let self := selfTypeOf head (args.map (TypeExpr.name · []))
+    -- (Rust's `impl fmt::Display for T { fn fmt(&self, f: &mut Formatter)
+    -- -> fmt::Result }`: the function is the type's own, `T::fmt`, its
+    -- result found from its body; what the type is shown as, `Show`, is
+    -- written out once the text is read (`deriveItems`).)
+    let rustFmt := (lastSegment tr == "Display" || lastSegment tr == "Debug") && methods.any fun
+      | .fn "fmt" _ _ (some (.name r _)) _ => lastSegment r == "Result"
+      | _ => false
+    if rustFmt then
+      let own := s!"{head}::{if lastSegment tr == "Display" then "fmt" else "fmt_debug"}"
+      let fns := methods.toList.filterMap fun
+        | .fn "fmt" ps annots _ clauses =>
+          some (Item.fn own ps (annots.map (·.map (TypeExpr.withSelf self))) none (clauses.map (selfClause head none)))
+        | _ => none
+      let shown := Item.fieldNames (attrMark "rustfmt") (head :: own :: lastSegment tr :: params) []
+      return .module inherentMark (some (fns ++ [shown]))
     let written := methods.toList.map fun
       | .fn name ps annots ret clauses =>
         Item.fn name ps (annots.map (·.map (TypeExpr.withSelf self))) (ret.map (TypeExpr.withSelf self))
@@ -3645,8 +3673,24 @@ partial def deriveItems (readText : String → Except String (List Item)) (items
     | .pub _ i => i
     | i => i
   let mut more : List Item := []
+  -- (A type shown by a Rust `Display`, or failing that a Rust `Debug`.)
+  let rustShown := plain.filterMap fun
+    | .fieldNames mark (ty :: own :: kind :: params) _ =>
+      if mark == attrMark "rustfmt" then some (ty, own, kind, params) else none
+    | _ => none
+  let shownBy := fun (ty : String) =>
+    match rustShown.find? (fun (t, _, k, _) => t == ty && k == "Display") with
+    | some s => some s
+    | none => rustShown.find? (fun (t, _, _, _) => t == ty)
+  for (ty, own, kind, params) in rustShown do
+    if shownBy ty == some (ty, own, kind, params) then
+      let params := params.filter (!·.startsWith "'")
+      let args := if params.isEmpty then "" else "<" ++ ", ".intercalate params ++ ">"
+      more := more ++ (← readText s!"impl{args} Show for {ty}{args} \{ fn show(v) \{ let mut f = std::fmt::Formatter::new(); let _ = {own}(&v, &mut f); std::fmt::text_of(f) } }\n")
   for item in plain do
     if let .fieldNames mark (ty :: traits) _ := item then
+      -- (A Rust `Display` or `Debug` of its own is how it is shown.)
+      let traits := if (shownBy ty).isSome then traits.filter (· != "Debug") else traits
       if mark == attrMark "derive" then
         let fieldsOf := fun (c : String) => plain.findSome? fun
           | .fieldNames owner names _ => if owner == c && !names.isEmpty then some names else none

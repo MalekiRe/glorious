@@ -4753,6 +4753,18 @@ with `++`; `{{` and `}}` are braces. `println!`/`print!` are `say` (so
 `assert_message`, `assert_eq!(a, b)` is `assert_eq(&a, &b)`, and
 `vec![..]` is `std::vec::Vec::from_array([..])`, which brings in `Vec`.
 
+## Rust's `Display`
+
+`impl fmt::Display for T { fn fmt(&self, f: &mut fmt::Formatter) ->
+fmt::Result { .. } }` (told from the library's own `Display`, whose `fmt`
+gives nothing, by its `Result`) makes `fmt` the type's own function, `T::fmt`,
+its result found from its body, and writes out `impl Show for T` that runs
+it on a `std::fmt::Formatter` and gives the text. A Rust `Debug` does the
+same where there is no `Display`; either keeps `#[derive(Debug)]` from
+writing a `Show` of its own. `write!(f, ..)` and `writeln!` are
+`std::fmt::write_fmt(f, text)`, which gives `Ok(())`. `'_` among a type's
+arguments is left out.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by
