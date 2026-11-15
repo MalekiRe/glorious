@@ -2607,6 +2607,26 @@ private partial def parseAttributed (next : P (List Item)) : P (List Item) := do
   expectPunct "["
   let name ← expectIdent
   let mut arg : String := ""
+  -- `#[derive(Clone, PartialEq)]`: implementations written out for the
+  -- type that follows (`deriveItems`, once the whole text is read).
+  if name == "derive" then
+    let mut traits : Array String := #[]
+    expectPunct "("
+    repeat
+      if (← peek) == .punct ")" then break
+      traits := traits.push (lastSegment (← expectPath))
+      if !(← acceptPunct ",") then break
+    expectPunct ")"
+    expectPunct "]"
+    let items ← next
+    let subject := items.findSome? fun item =>
+      match (match item with | .pub _ i => i | i => i) with
+      | .enum n _ _ => some n
+      | .struct n _ _ => some n
+      | _ => none
+    match subject with
+    | some n => return items ++ [.fieldNames (attrMark "derive") (n :: traits.toList) []]
+    | none => failAt "`#[derive(..)]` is written before a `struct` or an `enum`"
   if ← acceptPunct "(" then
     arg ← expectIdent
     expectPunct ")"
@@ -3434,6 +3454,110 @@ where
       i := i + 1
     return out
 
+
+/-- The text of what `#[derive(..)]` asks for a type: an implementation of each
+trait, written out field by field. The constructors are each a name, the
+field names if it was declared with them, and how many fields it has. -/
+def deriveText (ty : String) (params : List String) (ctors : List (String × Option (List String) × Nat))
+    (traits : List String) : Except String String := do
+  let params := params.filter (!·.startsWith "'")
+  let args := if params.isEmpty then "" else "<" ++ ", ".intercalate params ++ ">"
+  let gen := fun (tr : String) =>
+    if params.isEmpty then "" else "<" ++ ", ".intercalate (params.map (· ++ ": " ++ tr)) ++ ">"
+  -- The pattern of a constructor with its fields named `x0, x1, ..` (or
+  -- with another letter), and the value made of expressions of them.
+  let pat := fun (c : String × Option (List String) × Nat) (v : String) =>
+    let (name, names, n) := c
+    let vars := (List.range n).map (s!"{v}{·}")
+    match names with
+    | some ns => if ns.isEmpty then name else
+      name ++ " { " ++ ", ".intercalate ((ns.zip vars).map fun ((f, x) : String × String) => s!"{f}: {x}") ++ " }"
+    | none => if n == 0 then name else name ++ "(" ++ ", ".intercalate vars ++ ")"
+  let build := fun (c : String × Option (List String) × Nat) (parts : List String) =>
+    let (name, names, n) := c
+    match names with
+    | some ns => if ns.isEmpty then name else
+      name ++ " { " ++ ", ".intercalate ((ns.zip parts).map fun ((f, x) : String × String) => s!"{f}: {x}") ++ " }"
+    | none => if n == 0 then name else name ++ "(" ++ ", ".intercalate parts ++ ")"
+  let vars := fun (n : Nat) (v : String) => (List.range n).map (s!"{v}{·}")
+  let mut out := ""
+  for tr in traits do
+    match tr with
+    | "Copy" => pure ()
+    | "Clone" =>
+      let arms := ctors.map fun c => s!"&{pat c "x"} => {build c ((vars c.2.2 "x").map (s!"clone({·})"))}"
+      out := out ++ s!"impl{gen "Clone"} Clone for {ty}{args} \{ fn clone(v: &Self) -> Self \{ match(v) \{ {", ".intercalate arms} } } }\n"
+    | "PartialEq" | "Eq" =>
+      if !(out.splitOn " Eq for ").length.ble 1 then pure () else
+      let same := fun (n : Nat) =>
+        let tests := (List.range n).map fun i => s!"x{i} == y{i}"
+        match tests.reverse with
+        | [] => "true"
+        | last :: rest => rest.foldl (fun acc t => s!"{t} and \{ {acc} }") last
+      let arms := ctors.map fun c => s!"({pat c "x"}, {pat c "y"}) => {same c.2.2}"
+      let arms := if ctors.length > 1 then arms ++ ["_ => false"] else arms
+      out := out ++ s!"impl{gen "Eq"} Eq for {ty}{args} \{ fn ==(a, b) \{ match((a, b)) \{ {", ".intercalate arms} } } }\n"
+    | "Debug" =>
+      let shown := fun (c : String × Option (List String) × Nat) =>
+        let (name, names, n) := c
+        let xs := vars n "x"
+        match names with
+        | some ns => if ns.isEmpty then s!"\"{name}\"" else
+          s!"\"{name} \{ " ++ " ++ \", ".intercalate ((ns.zip xs).map fun ((f, x) : String × String) => s!"{f}: \" ++ show({x})") ++ " ++ \" }\""
+        | none => if n == 0 then s!"\"{name}\"" else
+          s!"\"{name}(\" ++ " ++ " ++ \", \" ++ ".intercalate (xs.map (s!"show({·})")) ++ " ++ \")\""
+      let arms := ctors.map fun c => s!"{pat c "x"} => {shown c}"
+      out := out ++ s!"impl{gen "Show"} Show for {ty}{args} \{ fn show(v) \{ match(v) \{ {", ".intercalate arms} } } }\n"
+    | "Hash" =>
+      let arms := ctors.zipIdx.map fun (c, i) =>
+        let h := (vars c.2.2 "x").foldl (fun acc x => s!"({acc}) * 31 + std::hash::hash({x})") (toString (i + 7))
+        s!"{pat c "x"} => {h}"
+      out := out ++ s!"impl{gen "std::hash::Hash"} std::hash::Hash for {ty}{args} \{ fn hash(v) \{ match(v) \{ {", ".intercalate arms} } } }\n"
+    | "PartialOrd" | "Ord" =>
+      if !(out.splitOn " Ord for ").length.ble 1 then pure () else
+      match ctors with
+      | [c] =>
+        let n := c.2.2
+        let lt := match (List.range n).reverse with
+          | [] => "false"
+          | last :: rest => rest.foldl (fun acc i => s!"x{i} < y{i} or \{ x{i} == y{i} and \{ {acc} } }") s!"x{last} < y{last}"
+        out := out ++ s!"impl{gen "Ord"} Ord for {ty}{args} \{ fn <(a, b) \{ match((a, b)) \{ ({pat c "x"}, {pat c "y"}) => {lt} } } }\n"
+      | _ =>
+        unless ctors.all (·.2.2 == 0) do
+          throw s!"`#[derive({tr})]` of `{ty}`: only of a struct, or of an enum whose constructors have no fields"
+        let rank := fun (v : String) =>
+          s!"match({v}) \{ " ++ ", ".intercalate (ctors.zipIdx.map fun (c, i) => s!"{c.1} => {i}") ++ " }"
+        out := out ++ s!"impl Ord for {ty} \{ fn <(a, b) \{ {rank "a"} < {rank "b"} } }\n"
+    | other => throw s!"`#[derive({other})]`: only `Clone`, `Copy`, `Debug`, `PartialEq`, `Eq`, `Hash`, `PartialOrd` and `Ord` are written out"
+  pure out
+
+/-- A text's items with what each `#[derive(..)]` asks written out beside
+its type, in the same module. -/
+partial def deriveItems (readText : String → Except String (List Item)) (items : List Item) :
+    Except String (List Item) := do
+  let plain := items.map fun
+    | .pub _ i => i
+    | i => i
+  let mut more : List Item := []
+  for item in plain do
+    if let .fieldNames mark (ty :: traits) _ := item then
+      if mark == attrMark "derive" then
+        let fieldsOf := fun (c : String) => plain.findSome? fun
+          | .fieldNames owner names _ => if owner == c && !names.isEmpty then some names else none
+          | _ => none
+        let decl := plain.findSome? fun
+          | .struct n params fields => if n == ty then some (params, [(n, fieldsOf n, fields.length)]) else none
+          | .enum n params ctors => if n == ty then some (params, ctors.map fun (c, ts) => (c, fieldsOf c, ts.length)) else none
+          | _ => none
+        match decl with
+        | some (params, ctors) => more := more ++ (← readText (← deriveText ty params ctors traits))
+        | none => throw s!"`#[derive(..)]` of `{ty}`: no such type here"
+  let items ← items.mapM fun
+    | .module name (some body) => do pure (.module name (some (← deriveItems readText body)))
+    | .pub p (.module name (some body)) => do pure (.pub p (.module name (some (← deriveItems readText body))))
+    | i => pure i
+  pure (items ++ more)
+
 /-- Parse a source text, given the fixities already in scope. Returns the items
 and the fixities including those it declares. `base` keeps the identities of
 this text's callable literals apart from those of a text parsed before it.
@@ -3450,8 +3574,14 @@ def parse (fix : Fixities) (src : String) (base : Nat := 0) (records : List Stri
     | none => lex src
   let toks := expandPacks toks (if packs == 0 then max 2 (longestList toks) else packs)
   let fix ← if tables.isEmpty then collectFixities toks fix else pure ((tables.lookup path).getD fix)
-  let (items, _, local_) ← parseItems
-    { toks, fix, records := collectRecords toks ++ records, base, tables, path, fixed } 0 #[]
+  let ctx : PCtx := { toks, fix, records := collectRecords toks ++ records, base, tables, path, fixed }
+  let (items, _, local_) ← parseItems ctx 0 #[]
+  -- (What `#[derive(..)]` asks, read as text of this module's.)
+  let readText := fun (text : String) => do
+    let derived ← lex text
+    let (more, _, made) ← parseItems { ctx with toks := derived, base := base + 9000000000000 } 0 #[]
+    pure (more ++ made.toList)
+  let items ← deriveItems readText items
   pure (promoteItems (items ++ local_.toList), fix)
 
 end Glorious.Syntax

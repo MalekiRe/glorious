@@ -4729,6 +4729,19 @@ references. `*n` of a name that holds such a value, not a reference, is the
 value (the checker records it, `Blocks.derefValues`, and the elaborator
 leaves out the `*`). A `T` that may not be copied is still refused there.
 
+## `#[derive(..)]`
+
+The specification has no derive framework; Rust programs lean on a few, so
+`#[derive(..)]` writes out, as text read in the type's module, an
+implementation of `Clone` (each field cloned), `PartialEq`/`Eq` (`==` field
+by field, constructors compared), `Debug` (as `Show`: `P { x: 1 }`,
+`Rect(2, 3)`), `Hash` (`std::hash::Hash`, fields mixed with the
+constructor's place), `PartialOrd`/`Ord` (a struct's fields in order; an
+enum whose constructors have no fields by their order). `Copy` writes
+nothing: a type whose fields may be used more than once already may be.
+Each type parameter is asked the trait. Any other trait is refused. The
+text is read with identities far from every other text's.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by
