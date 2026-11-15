@@ -545,7 +545,7 @@ partial def compileSourceAt (src : String) (check : Bool := true)
     (files : List (List String × String) := []) (few : Bool := false)
     (known : List ((String × Nat) × Nat) := []) (packs : Nat := 0) (kept : List Typing.Cert := [])
     (checkKept : Check.Kept := []) (refPats : List (Nat × Bool × List Nat) := [])
-    (dotPicks : List (Nat × String) := []) : Except String Compiled := do
+    (dotPicks : List (Nat × String) := []) (search : Bool := true) : Except String Compiled := do
   -- (What the default prelude has from the library, where the text uses it.)
   let src := if refPats.isEmpty && dotPicks.isEmpty then src ++ stdPreludeUses src else src
   let (prelude, items) ← parseProgram src files check few packs
@@ -633,13 +633,13 @@ partial def compileSourceAt (src : String) (check : Bool := true)
       match Elab.refPatsFound e, Elab.dotOwnFound e with
       | some found, _ =>
         if check && refPats.length < 32 && !refPats.contains found then
-          match compileSourceAt src check files few known packs kept checkKept (refPats ++ [found]) dotPicks with
+          match compileSourceAt src check files few known packs kept checkKept (refPats ++ [found]) dotPicks search with
           | .ok c => return c
           | .error e' => throw (clean e')
         else if check then throw (clean e) else pure (none, [])
       | none, some found =>
         if check && dotPicks.length < 32 && !dotPicks.contains found then
-          match compileSourceAt src check files few known packs kept checkKept refPats (dotPicks ++ [found]) with
+          match compileSourceAt src check files few known packs kept checkKept refPats (dotPicks ++ [found]) search with
           | .ok c => return c
           | .error e' => throw (clean e')
         else if check then throw (clean e) else pure (none, [])
@@ -733,6 +733,15 @@ partial def compileSourceAt (src : String) (check : Bool := true)
         if out.lent != 0 && !out.foreign then
           -- What an earlier compile found for each place is asked first, all
           -- at once; a place it did not see is asked alone first.
+          -- (Not looked for one by one: what an earlier compile found, all
+          -- at once, and else every place a scope of its own, and else none.)
+          unless search do
+            let guess := (placeKeys out.siteOwners).toList.map fun k => List.lookup k known
+            let choice := fun (j : Nat) => match guess[j]? with
+              | some (some v) => v
+              | _ => 1
+            if let some c := lending blocks [false, true] choice then return c
+            return ← plain blocks []
           unless known.isEmpty do
             let guess := (placeKeys out.siteOwners).toList.map fun k => List.lookup k known
             let fresh := (List.range out.sites).filter fun i => (guess[i]?.join).isNone
@@ -942,7 +951,7 @@ is read again with lists that long. -/
 def compileSource (src : String) (check : Bool := true)
     (files : List (List String × String) := []) (few : Bool := false)
     (known : List ((String × Nat) × Nat) := []) (kept : List Typing.Cert := [])
-    (checkKept : Check.Kept := []) : Except String Compiled := do
+    (checkKept : Check.Kept := []) (search : Bool := true) : Except String Compiled := do
   let packs ← (src :: files.map (·.2)).foldlM (fun m text => do
     pure (max m (Syntax.longestList (← Syntax.lex text)))) 2
   -- (An implementation over several lists, as one that joins two, is
@@ -954,7 +963,7 @@ def compileSource (src : String) (check : Bool := true)
   -- (Only a program that has such an implementation is read again.)
   let lists := lists != 0
   let rec go (fuel packs : Nat) : Except String Compiled :=
-    match compileSourceAt src check files few known packs kept checkKept with
+    match compileSourceAt src check files few known packs kept checkKept (search := search) with
     | .error e =>
       let wanted := longestUnimplemented e
       match fuel with

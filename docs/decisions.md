@@ -4601,6 +4601,21 @@ implementation is preferred (specialization, which the checker had). An
 two is meant is not known either, and the program says so. The expected
 output of 35 test programs changed accordingly (only those lines).
 
+## Running does not look for each borrow's scope
+
+Most of a fresh compile of a mid-sized program went to looking, place by
+place, for which borrows can be scopes of their own in Core: each try
+elaborates and certifies the whole program again (`wc3` 2.08 s of which
+0.53 s without it, `bank` 1.93/0.74, a map program 5.62/0.75, `calculator`
+3.36/1.67, quick build). What it finds changes only the certificate, which
+`run` does not use. Now `run`, `check`, `watch`, `build`, `native` and `exe`
+compile without that search (`compileSource ... (search := false)`): what an
+earlier compile found is asked all at once, else every place a scope of its
+own, else none. `certify`, `sigs`, the server and the test suite search as
+before. The kept build records whether it was searched (format version 2),
+and `certify` compiles again where it was not; a compile that did not search
+keeps neither its places nor its certificate for later ones.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by

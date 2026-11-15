@@ -47,14 +47,17 @@ structure Built where
   plain : List String
   /-- How each place was made, for a later compile (`Compiled.places`). -/
   places : List ((String × Nat) × Nat)
+  /-- Whether the places where a borrow can be a scope of its own were looked
+  for one by one (`certify` asks for it; `run` does not need it). -/
+  searched : Bool := true
 
 /-- What a compile keeps of a program it compiled. -/
-def Built.of (c : Compiled) (startLocals : List Nat) : Built :=
+def Built.of (c : Compiled) (startLocals : List Nat) (searched : Bool := true) : Built :=
   let has := fun (f : Typing.Cert → Bool) => (c.cert.map f).getD false
   { bytecode := compile c.core, ctorNames := c.ctorNames, startLocals
     sigs := (c.cert.map (·.sigs.length)).getD 0, certified := c.cert.isSome
     strict := has (·.strict), regions := has (·.regions), loans := has (·.loans)
-    lent := c.lent, plain := c.plain.map (·.show), places := c.places }
+    lent := c.lent, plain := c.plain.map (·.show), places := c.places, searched }
 
 /-! ## Writing and reading -/
 
@@ -84,7 +87,7 @@ def place (bs : Bytes) : Option (((String × Nat) × Nat) × Bytes) := do
 end Dec
 
 /-- The magic `GLBO` and the format's version. -/
-def magic : Bytes := [0x47, 0x4C, 0x42, 0x4F, 1]
+def magic : Bytes := [0x47, 0x4C, 0x42, 0x4F, 2]
 
 /-- A built program as bytes, after the key it was made from. -/
 def encode (key : String) (b : Built) : Bytes :=
@@ -94,7 +97,7 @@ def encode (key : String) (b : Built) : Bytes :=
     ++ Bytecode.Encode.nat b.sigs ++ Enc.bool b.certified ++ Enc.bool b.strict
     ++ Enc.bool b.regions ++ Enc.bool b.loans ++ Bytecode.Encode.nat b.lent
     ++ Bytecode.Encode.list Bytecode.Encode.string b.plain
-    ++ Bytecode.Encode.list Enc.place b.places
+    ++ Bytecode.Encode.list Enc.place b.places ++ Enc.bool b.searched
     ++ Bytecode.Encode.program b.bytecode
 
 /-- A built program from bytes, if they are one and were made from `key`. -/
@@ -113,9 +116,10 @@ def decode (key : String) (bs : Bytes) : Option Built := do
   let (lent, bs) ← Bytecode.Decode.nat bs
   let (plain, bs) ← Bytecode.Decode.list Dec.string bs
   let (places, bs) ← Bytecode.Decode.list Dec.place bs
+  let (searched, bs) ← Dec.bool bs
   let bytecode ← Bytecode.Decode.program bs
   pure { bytecode, ctorNames := ctorNames.toArray, startLocals, sigs, certified, strict, regions
-         loans, lent, plain, places }
+         loans, lent, plain, places, searched }
 
 /-! ## A certificate
 

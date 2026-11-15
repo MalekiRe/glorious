@@ -283,17 +283,21 @@ of its own is where this one starts; and what this one finds is kept for the
 next, with the certificate it found: one that the proved checker accepts for
 the program now is used, and no other looked for (`GLORIOUS_FRESH` set:
 neither is read). -/
-def compileFile (path : String) (checkKept : Check.Kept := []) : IO (Except String Compiled) := do
+def compileFile (path : String) (checkKept : Check.Kept := []) (search : Bool := true) :
+    IO (Except String Compiled) := do
   let file ← placesFile path
   let known ← if (← IO.getEnv "GLORIOUS_FRESH").isSome then pure [] else readPlaces file
   let dir ← Target.dirOf path
   let kept ← if (← IO.getEnv "GLORIOUS_FRESH").isSome then pure [] else
     pure ((← Target.readCert dir).toList)
   let result := compileSource (← IO.FS.readFile path) true (← moduleFiles path) (few := true) known kept
-    checkKept
+    checkKept search
   if let .ok c := result then
-    writePlaces file c.places
-    if let some cert := c.cert then Target.writeCert dir cert
+    -- (What a compile that did not look for each place found is not kept
+    -- for one that does.)
+    if search then
+      writePlaces file c.places
+      if let some cert := c.cert then Target.writeCert dir cert
     -- (`GLORIOUS_CORE`: the Core that was compiled, with what destroys what.)
     if (← IO.getEnv "GLORIOUS_CORE").isSome then
       IO.eprintln (showCore c.fnNames c.core)
@@ -303,21 +307,24 @@ def compileFile (path : String) (checkKept : Check.Kept := []) : IO (Except Stri
 /-- The program at `path` built: what the last compile kept in the build
 directory, if it was made from the same texts by the same compiler, and
 otherwise compiled and kept (`GLORIOUS_FRESH` set: compiled whatever is kept). -/
-def buildFile (path : String) (checkKept : Option (IO.Ref (List (String × Check.Kept))) := none) :
-    IO (Except String Target.Built) := do
+def buildFile (path : String) (checkKept : Option (IO.Ref (List (String × Check.Kept))) := none)
+    (search : Bool := true) : IO (Except String Target.Built) := do
   let dir ← Target.dirOf path
   let key ← Target.keyOf (← IO.FS.readFile path) (← moduleFiles path)
   if (← IO.getEnv "GLORIOUS_FRESH").isNone then
-    if let some b ← Target.read dir key then return .ok b
+    if let some b ← Target.read dir key then
+      -- (One built without looking for each place serves what does not
+      -- ask for that.)
+      if b.searched || !search then return .ok b
   let kept ← match checkKept with
     | some ref => pure (((← ref.get).lookup path).getD [])
     | none => pure []
-  match ← compileFile path kept with
+  match ← compileFile path kept search with
   | .error e => pure (.error e)
   | .ok c =>
     if let some ref := checkKept then
       ref.modify fun ks => (path, c.checkKept) :: ks.filter (·.1 != path)
-    let b := Target.Built.of c (startLocals c)
+    let b := Target.Built.of c (startLocals c) search
     Target.write dir key b
     pure (.ok b)
 
@@ -426,10 +433,10 @@ def builtBytes (b : Target.Built) : ByteArray :=
 
 /-- The program at `path` built: by the running server if there is one, and
 otherwise here. -/
-def buildAsked (path : String) : IO (Except String Target.Built) := do
+def buildAsked (path : String) (search : Bool := true) : IO (Except String Target.Built) := do
   match ← buildByServer path with
   | some result => pure result
-  | none => buildFile path
+  | none => buildFile path (search := search)
 
 /-- The example programs that state what they must print. -/
 def exampleCases (dir : System.FilePath) :
@@ -840,7 +847,7 @@ partial def watch (path : String) (input : List Int) : IO UInt32 := do
       if now != last then
         last := now
         let start ← IO.monoMsNow
-        match ← compileFile path kept with
+        match ← compileFile path kept (search := false) with
         | .error e => IO.eprintln s!"{path}: {e}"
         | .ok c =>
           kept := c.checkKept
@@ -889,7 +896,7 @@ def main (args : List String) : IO UInt32 := do
     -- A program of its own: the bytecode, a body for every function made by
     -- LLVM, and the runtime, linked. The VM and its library are looked for
     -- in `GLORIOUS_VM_DIR`, or where the repository builds them.
-    match ← compileFile path with
+    match ← compileFile path (search := false) with
     | .ok c => do
       let dir ← match ← IO.getEnv "GLORIOUS_VM_DIR" with
         | some d => pure (System.FilePath.mk d)
@@ -919,7 +926,7 @@ def main (args : List String) : IO UInt32 := do
   | ["exe", path, out] =>
     -- An executable of the program's own with no other tool: the VM with
     -- the program at its end, compiled to machine code when it starts.
-    match ← compileFile path with
+    match ← compileFile path (search := false) with
     | .ok c => do
       let dir ← match ← IO.getEnv "GLORIOUS_VM_DIR" with
         | some d => pure (System.FilePath.mk d)
@@ -962,7 +969,7 @@ def main (args : List String) : IO UInt32 := do
   | ["selftest"] => selftest none
   | ["selftest", vm] => selftest (some vm)
   | ["build", path, out] =>
-    match ← buildAsked path with
+    match ← buildAsked path (search := false) with
     | .ok b =>
       IO.FS.writeBinFile out (builtBytes b)
       pure 0
@@ -983,7 +990,9 @@ def main (args : List String) : IO UInt32 := do
         IO.eprintln e
         return 64
     if command == "run" then
-      let b ← match ← buildAsked path with
+      -- (Running needs the program, not how much of it is shown: the places
+      -- where a borrow can be a scope of its own are not looked for.)
+      let b ← match ← buildAsked path (search := false) with
         | .ok b => pure b
         | .error e =>
           IO.eprintln s!"{path}: {e}"
@@ -1000,7 +1009,7 @@ def main (args : List String) : IO UInt32 := do
           IO.eprintln s!"the program went wrong: {explainStuck c (stuckAt c.core (Core.initIO c.core input))}"
         | .error e => IO.eprintln s!"the program went wrong; compiled again: {e}"
         return 2
-    let c ← match ← compileFile path with
+    let c ← match ← compileFile path (search := false) with
       | .ok c => pure c
       | .error e =>
         IO.eprintln s!"{path}: {e}"
