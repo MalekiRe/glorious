@@ -941,15 +941,18 @@ trait Real {
     fn ceil(Self) -> Self
     fn trunc(Self) -> Self
     fn round(Self) -> Self
-    fn abs(Self) -> Self
 }
+// How far from zero, as a value of the same type.
+trait Abs { fn abs(Self) -> Self }
+impl Abs for Int { fn abs(n) { match(int_lt(n, 0)) { 0 => n, _ => int_sub(0, n) } } }
+impl Abs for f64 { fn abs(x) { f64_of(int_and(f64_bits(x), 9223372036854775807)) } }
+impl Abs for f32 { fn abs(x) { narrow(abs(widen(x))) } }
 impl Real for f64 {
     fn sqrt(x) { f64_of(f64_sqrt(f64_bits(x), 0)) }
     fn floor(x) { f64_of(f64_round(f64_bits(x), 0)) }
     fn ceil(x) { f64_of(f64_round(f64_bits(x), 1)) }
     fn trunc(x) { f64_of(f64_round(f64_bits(x), 2)) }
     fn round(x) { f64_of(f64_round(f64_bits(x), 3)) }
-    fn abs(x) { f64_of(int_and(f64_bits(x), 9223372036854775807)) }
 }
 fn f64(n: Int) -> f64 { f64_of(f64_of_int(n, 0)) }
 
@@ -979,7 +982,6 @@ impl Real for f32 {
     fn ceil(x) { narrow(ceil(widen(x))) }
     fn trunc(x) { narrow(trunc(widen(x))) }
     fn round(x) { narrow(round(widen(x))) }
-    fn abs(x) { narrow(abs(widen(x))) }
 }
 fn f32(n: Int) -> f32 { narrow(f64(n)) }
 

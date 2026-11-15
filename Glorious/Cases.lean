@@ -3574,6 +3574,8 @@ def cases : List Case := [
     [], "62"⟩,
   ⟨"fn main() -> Int { let f = |x| x + 1; f(2) }",
     [], "error: 1:28: a callable is written `{ x => body }`, or `fn(x) { body }`; `|x| body` is not read, found `|`"⟩,
+  ⟨"fn main() -> Int { let x = 0.0 - 2.5; say(x.abs()); let n = 0 - 4; n.abs() }",
+    [], "2.5\n4"⟩,
   -- (An element of what a reference is to is borrowed through it.)
   ⟨"fn first(r: &[Int]) -> Int { let e = &r[0]; *e }\nfn main() -> Int { first(&[7, 8]) }",
     [], "7"⟩,
