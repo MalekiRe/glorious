@@ -734,13 +734,14 @@ partial def compileSourceAt (src : String) (check : Bool := true)
           -- What an earlier compile found for each place is asked first, all
           -- at once; a place it did not see is asked alone first.
           -- (Not looked for one by one: what an earlier compile found, all
-          -- at once, and else every place a scope of its own, and else none.)
+          -- at once, and else none.)
           unless search do
-            let guess := (placeKeys out.siteOwners).toList.map fun k => List.lookup k known
-            let choice := fun (j : Nat) => match guess[j]? with
-              | some (some v) => v
-              | _ => 1
-            if let some c := lending blocks [false, true] choice then return c
+            unless known.isEmpty do
+              let guess := (placeKeys out.siteOwners).toList.map fun k => List.lookup k known
+              let choice := fun (j : Nat) => match guess[j]? with
+                | some (some v) => v
+                | _ => 0
+              if let some c := lending blocks [false, true] choice then return c
             return ← plain blocks []
           unless known.isEmpty do
             let guess := (placeKeys out.siteOwners).toList.map fun k => List.lookup k known

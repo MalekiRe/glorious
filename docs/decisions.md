@@ -4610,8 +4610,8 @@ elaborates and certifies the whole program again (`wc3` 2.08 s of which
 3.36/1.67, quick build). What it finds changes only the certificate, which
 `run` does not use. Now `run`, `check`, `watch`, `build`, `native` and `exe`
 compile without that search (`compileSource ... (search := false)`): what an
-earlier compile found is asked all at once, else every place a scope of its
-own, else none. `certify`, `sigs`, the server and the test suite search as
+earlier compile found is asked all at once, and else no borrow is a scope of
+its own (one certificate, of the plain program). `certify`, `sigs`, the server and the test suite search as
 before. The kept build records whether it was searched (format version 2),
 and `certify` compiles again where it was not; a compile that did not search
 keeps neither its places nor its certificate for later ones.
