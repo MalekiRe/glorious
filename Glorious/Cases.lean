@@ -3568,6 +3568,12 @@ def cases : List Case := [
   -- What an implementation asks of its parameters, written in them.
   ⟨"trait Both { fn both(x: &Self) -> Str; }\nstruct P<A, B>(A, B)\nimpl<A: Show, B: Show> Both for P<A, B> { fn both(p) { show(p.0) ++ show(p.1) } }\nstruct W<T>(T)\nimpl<T: Show> W<T> { fn describe(w: &W<T>) -> Str { \"W:\" ++ show(w.0) } }\nfn main() -> Int { say(both(&P(1, \"x\"))); let w = W(5); say(w.describe()); 0 }",
     [], "1x\nW:5\n0"⟩,
+  -- Rust's receivers, `self`, `&self`, `&mut self`, in a type's own
+  -- functions and a trait's.
+  ⟨"struct P { x: Int }\nimpl P { fn get(&self) -> Int { self.x } fn bump(&mut self) { self.x = self.x + 1 } fn into(self) -> Int { self.x * 10 } }\ntrait Area { fn area(&self) -> Int; fn double(&self) -> Int { self.area() * 2 } }\nstruct Sq(Int)\nimpl Area for Sq { fn area(&self) -> Int { self.0 * self.0 } }\nfn main() -> Int { let mut p = P { x: 3 }; p.bump(); let a = p.get(); let s = Sq(3); a + p.into() + s.double() }",
+    [], "62"⟩,
+  ⟨"fn main() -> Int { let f = |x| x + 1; f(2) }",
+    [], "error: 1:28: a callable is written `{ x => body }`, or `fn(x) { body }`; `|x| body` is not read, found `|`"⟩,
   -- (An element of what a reference is to is borrowed through it.)
   ⟨"fn first(r: &[Int]) -> Int { let e = &r[0]; *e }\nfn main() -> Int { first(&[7, 8]) }",
     [], "7"⟩,

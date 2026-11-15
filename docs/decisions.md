@@ -4626,6 +4626,15 @@ needs of the type is checked where it is used). Elsewhere `impl Trait` is
 refused. `impl<T: Show> ..` asks of its parameters what `where T: Show`
 does, for implementations of traits and of a type's own functions.
 
+## Rust's receivers
+
+`fn get(&self)`, `fn bump(&mut self)` and `fn into(self)`, in a type's own
+functions and in a trait's (declared or with a default body), are read as a
+first parameter named `self` of type `&Self`, `&mut Self` or `Self`. The
+specification writes receivers out (`value: &Self`), which stays. `self` is
+an ordinary name in the body. A `|x| body` callable is refused with how a
+callable is written.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by

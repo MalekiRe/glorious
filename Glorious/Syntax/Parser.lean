@@ -1496,6 +1496,8 @@ private partial def parsePrimary (noBlock : Bool) : P Expr := do
     | [e] => if ← closedAfterComma then pure (.tuple [e]) else pure e
     | _ => pure (.tuple args)
   | .punct "{" => parseBraces
+  | .op "|" => failAt "a callable is written `{ x => body }`, or `fn(x) { body }`; `|x| body` is not read"
+  | .op "||" => failAt "a callable is written `{ => body }`, or `fn() { body }`; `|| body` is not read"
   | _ => failAt "expected an expression"
 
 /-- A callable literal in braces. -/
@@ -1715,6 +1717,24 @@ private partial def parseFn : P (Item × List Bound) := do
     let mut bounds := bounds
     repeat
       if (← peek) == .punct ")" then break
+      -- `self`, `&self`, `&mut self` (Rust's receivers): `self: Self`,
+      -- `self: &Self`, `self: &mut Self`.
+      let receiver : Option TypeExpr ← match ← peek, ← peek 1, ← peek 2 with
+        | .ident "self", t1, _ =>
+          if pats.isEmpty && t1 != .punct ":" then do advance; pure (some (TypeExpr.name "Self" []))
+          else pure none
+        | .op "&", .ident "self", t2 =>
+          if pats.isEmpty && t2 != .punct ":" then do advance; advance; pure (some (TypeExpr.ref false (.name "Self" []) none))
+          else pure none
+        | .op "&", .ident "mut", .ident "self" =>
+          if pats.isEmpty then do advance; advance; advance; pure (some (TypeExpr.ref true (.name "Self" []) none))
+          else pure none
+        | _, _, _ => pure none
+      if let some ty := receiver then
+        pats := pats.push (.var "self")
+        annots := annots.push (some ty)
+        if !(← acceptPunct ",") then break
+        continue
       pats := pats.push (← parsePattern)
       if ← acceptPunct ":" then
         -- `x: impl Trait`: a type parameter of its own with the trait.
@@ -2189,6 +2209,23 @@ private partial def parseTrait : P (List Item) := do
     let mut names : Array (Option String) := #[]
     repeat
       if (← peek) == .punct ")" then break
+      -- (`self`, `&self`, `&mut self`: a receiver named `self`.)
+      let receiver : Option TypeExpr ← match ← peek, ← peek 1, ← peek 2 with
+        | .ident "self", t1, _ =>
+          if types.isEmpty && t1 != .punct ":" then do advance; pure (some (TypeExpr.name "Self" []))
+          else pure none
+        | .op "&", .ident "self", _ =>
+          if types.isEmpty then do advance; advance; pure (some (TypeExpr.ref false (.name "Self" []) none))
+          else pure none
+        | .op "&", .ident "mut", .ident "self" =>
+          if types.isEmpty then do advance; advance; advance; pure (some (TypeExpr.ref true (.name "Self" []) none))
+          else pure none
+        | _, _, _ => pure none
+      if let some ty := receiver then
+        names := names.push (some "self")
+        types := types.push ty
+        if !(← acceptPunct ",") then break
+        continue
       match ← peek, ← peek 1 with
       | .ident x, .punct ":" =>
         advance
