@@ -158,6 +158,11 @@ def fieldMark (field : String) : String := s!"%field:{field}"
 def fieldOfMark (name : String) : Option String :=
   if name.startsWith "%field:" then some (name.drop 7).toString else none
 
+/-- The operators that, given a name holding a reference to a number or a
+character, are given what it points to (`Check.inferCall`). -/
+def derefOperators : List String :=
+  ["+", "-", "*", "/", "%", "<", ">", "<=", ">=", "==", "!=", "negate"]
+
 /-- The scalar types beside `Int`. A value of each is held as an integer: an
 integer type's own value, the code of a character, the bits of a floating
 point number. With an integer type is the width `int_fit` is asked whether a

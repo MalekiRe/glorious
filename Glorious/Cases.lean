@@ -3621,6 +3621,20 @@ def cases : List Case := [
     [], "9"⟩,
   ⟨"use std::vec::{Vec};\nstruct C { xs: Vec<Int> }\nimpl C { fn total(&self) -> Int { let mut t = 0; for x in &self.xs { t = t + *x }; t } }\nfn main() -> Int { let mut c = C { xs: Vec::new() }; c.xs.push(5); c.xs.push(6); c.total() }",
     [], "11"⟩,
+  -- An operator given a name holding a reference to a number copies what
+  -- it points to; `None` matched through a reference.
+  ⟨"enum Shape { Circle(Int), Rect(Int, Int) }\nimpl Shape { fn area(&self) -> Int { match(self) { Circle(r) => 3 * r * r, Rect(w, h) => w * h } } }\nfn main() -> Int { let s = Rect(2, 3); let c = Circle(1); s.area() + c.area() }",
+    [], "9"⟩,
+  ⟨"fn big(v: &Int) -> Bool { v > 3 }\nfn main() -> Int { let a = 5; say(big(&a)); let r = &a; if(r == 5) { 1 } else { 0 } }",
+    [], "true\n1"⟩,
+  ⟨"enum S { C(f64) }\nfn area(s: &S) -> f64 { match(s) { C(r) => r * r * 3.0 } }\nfn main() -> Int { say(area(&C(2.0))); 0 }",
+    [], "12.0\n0"⟩,
+  ⟨"fn f(x: &Int) -> Int { -x }\nfn main() -> Int { let a = 3; f(&a) }",
+    [], "-3"⟩,
+  ⟨"fn f(o: &Option<Int>) -> Int { match(o) { Some(x) => *x + 1, None => 0 } }\nfn main() -> Int { f(&Some(4)) }",
+    [], "5"⟩,
+  ⟨"fn f(o: &Option<Int>) -> Int { match(o) { Some(x) => 1, None => 0 } }\nfn main() -> Int { f(&Some(4)) }",
+    [], "1"⟩,
   -- (An element of what a reference is to is borrowed through it.)
   ⟨"fn first(r: &[Int]) -> Int { let e = &r[0]; *e }\nfn main() -> Int { first(&[7, 8]) }",
     [], "7"⟩,

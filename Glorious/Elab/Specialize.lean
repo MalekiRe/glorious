@@ -482,6 +482,47 @@ partial def dotOwnItems (call : Nat) (fn : String) (items : List Item) : List It
     | .pub parent item => .pub parent ((dotOwnItems call fn [item]).headD item)
     | item => item
 
+/-- A program with `*x` written for the `x` the checker found given to an
+operator as a reference to a number (`Blocks.derefArgs`). -/
+partial def derefArgsExpr (picks : List (Nat × Nat)) : Expr → Expr
+  | .call i f args =>
+    let args := (args.map (derefArgsExpr picks)).zipIdx.map fun (a, k) =>
+      if picks.contains (i, k) then (match a with
+        | .deref _ => a
+        | a => .deref a) else a
+    .call i (derefArgsExpr picks f) args
+  | .tailCall i f args => .tailCall i (derefArgsExpr picks f) (args.map (derefArgsExpr picks))
+  | .tuple args => .tuple (args.map (derefArgsExpr picks))
+  | .proj e n => .proj (derefArgsExpr picks e) n
+  | .closure i clauses => .closure i (clauses.map fun
+    | .mk pats body => .mk pats (body.map (derefArgsStmt picks)))
+  | .handle subject arms => .handle (derefArgsExpr picks subject) (arms.map fun
+    | .mk pats body => .mk pats (body.map (derefArgsStmt picks)))
+  | .labelScope l body => .labelScope l (body.map (derefArgsStmt picks))
+  | .deref e => .deref (derefArgsExpr picks e)
+  | .reborrow u e => .reborrow u (derefArgsExpr picks e)
+  | .fieldOf i e name => .fieldOf i (derefArgsExpr picks e) name
+  | e => e
+where
+  derefArgsStmt (picks : List (Nat × Nat)) : Stmt → Stmt
+    | .let_ pat value => .let_ pat (derefArgsExpr picks value)
+    | .expr e => .expr (derefArgsExpr picks e)
+    | .defer e => .defer (derefArgsExpr picks e)
+    | .letMut x value => .letMut x (derefArgsExpr picks value)
+    | .assign target value => .assign (derefArgsExpr picks target) (derefArgsExpr picks value)
+    | .located line col s => .located line col (derefArgsStmt picks s)
+
+partial def derefArgsItems (picks : List (Nat × Nat)) (items : List Item) : List Item :=
+  if picks.isEmpty then items else
+  items.map fun
+    | .fn name ps annots ret clauses => .fn name ps annots ret (clauses.map fun
+      | .mk pats body => .mk pats (body.map (derefArgsExpr.derefArgsStmt picks)))
+    | .impl ps tr head args context methods => .impl ps tr head args context (derefArgsItems picks methods)
+    | .traitInfo n supers defaults params assocs => .traitInfo n supers (derefArgsItems picks defaults) params assocs
+    | .module name (some body) => .module name (some (derefArgsItems picks body))
+    | .pub parent item => .pub parent ((derefArgsItems picks [item]).headD item)
+    | item => item
+
 /-- A program with the functions of dot calls the checker chose by the
 value's type (`Blocks.dotChosen`) written in. -/
 partial def chosenExpr (picks : List (Nat × String × Nat)) : Expr → Expr

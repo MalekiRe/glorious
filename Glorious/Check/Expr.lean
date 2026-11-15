@@ -620,7 +620,10 @@ partial def checkArgsIn (scope : Scope) (amb : Row) (what : String) (params : Li
           match c with
           | .mk (.ctor n _ _ :: _) _ => if !n.startsWith "%" then valuePats := valuePats ++ [k]
           | .mk (.tuple _ :: _) _ => valuePats := valuePats ++ [k]
-          | .mk (.var x :: _) _ => if (← resolveCtor x none).isSome then valuePats := valuePats ++ [k]
+          -- (Or a constant that is a constructor's other name, `None`.)
+          | .mk (.var x :: _) _ =>
+            if (← resolveCtor x none).isSome || (Syntax.lastSegment x).front.isUpper then
+              valuePats := valuePats ++ [k]
           | _ => pure ()
         if !valuePats.isEmpty then
           if let .fn (first :: _) _ _ _ _ ← find p then
@@ -745,6 +748,30 @@ partial def applyTy (scope : Scope) (amb : Row) (what : String) (callee : Ty) (a
 
 partial def inferCall (scope : Scope) (amb : Row) (f : Expr) (args : List Expr)
     (call : Nat := 0) : M Ty := do
+  -- An operator given a name that holds a reference to a number or a
+  -- character, as a pattern binding by reference gives one (`Circle(r) =>
+  -- 3 * r * r`): what it points to, copied (`*r`), as Rust's operators on
+  -- references to numbers have it.
+  if let .name _ op := f then
+    if call != 0 && Syntax.derefOperators.contains op then
+      let mut changed := false
+      let mut given : Array Expr := #[]
+      for (a, i) in args.zipIdx do
+        let mut a' := a
+        if let .name none x := a then
+          let held := match scope.lookup x with
+            | some (.val t _) => some t
+            | some (.cell t _) => some t
+            | _ => none
+          if let some t := held then
+            if let .ref _ inner _ ← find t then
+              if let .con n [] ← find inner then
+                if n == "Int" || Syntax.isScalar n then
+                  modify fun s => { s with derefArgs := (call, i) :: s.derefArgs }
+                  a' := .deref a
+                  changed := true
+        given := given.push a'
+      if changed then return ← inferCall scope amb f given.toList call
   -- `let x: Type = value`: the value is made that type.
   if let (.name none mark, [operand]) := (f, args) then
     if mark == Syntax.moveMark then

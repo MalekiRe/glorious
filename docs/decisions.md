@@ -4664,6 +4664,16 @@ A callable's parameter whose type is a reference to a type with named
 fields is now said to the clauses when they are read, as one of a declared
 type already was, after what traits leave to implementations is settled.
 
+## Operators given references to numbers
+
+An operator (`+ - * / % < > <= >= == !=`, prefix `-`) given a name that
+holds a reference to a number or a character is given what it points to,
+copied: `Circle(r) => 3 * r * r` where the match binds `r` by reference.
+Rust has this through implementations of its operators for references; here
+the checker chooses it (`Blocks.derefArgs`) and `*r` is written in after the
+check. Only a name: an expression of reference type is not looked at, which
+keeps the choice from inferring an argument twice.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by
