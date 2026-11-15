@@ -1203,15 +1203,22 @@ partial def resolveExpr (ctx : Ctx) (bound : List String) : Expr → R Expr
             | some field => pure (some (field, ← resolveExpr ctx bound v))
             | none => pure none
           | _ => pure none
-        let _ ← match orderFields name names (gave.map fun (f, _) => (f, ())) none with
+        -- (`..base`: what is not written is read from it, after what is.)
+        let base := gave.lookup "%rest"
+        let gave := gave.filter (·.1 != "%rest")
+        let _ ← match orderFields name names (gave.map fun (f, _) => (f, ())) (base.map fun _ => ()) with
           | .ok r => pure r
           | .error e => throw e
         if gave.map (·.1) == names then
           return .call id (.name qual' name') (gave.map (·.2))
         let temps := gave.map fun (field, _) => s!"%{field}"
-        return .call id (.closure 0 [.mk (temps.map Pattern.var)
-          [.expr (.call (id + 1) (.name qual' name') (names.map fun field => .name none s!"%{field}"))]])
-          (gave.map (·.2))
+        let mut parts : List Expr := []
+        for field in names do
+          if gave.any (·.1 == field) then parts := parts ++ [.name none s!"%{field}"]
+          else parts := parts ++ [.fieldOf (← freshId) (.name none "%base") field]
+        let pats := temps.map Pattern.var ++ (if base.isSome then [Pattern.var "%base"] else [])
+        return .call id (.closure 0 [.mk pats [.expr (.call (id + 1) (.name qual' name') parts)]])
+          (gave.map (·.2) ++ base.toList)
     | _, _ => pure ()
     -- What is called is named as it is.
     let called ← match f with

@@ -3661,6 +3661,15 @@ def cases : List Case := [
     [], "error: 1:35: a pattern has no ranges: test in the clause, `x => if(x <= 9) { .. } else { .. }`, found `.`"⟩,
   ⟨"fn main() -> Int { let s = 42.to_string(); len(s) }",
     [], "2"⟩,
+  -- `P { x: 5, ..base }`: the fields not written are the base's.
+  ⟨"struct P { x: Int, y: Int }\nfn main() -> Int { let a = P { x: 1, y: 2 }; let b = P { x: 5, ..a }; b.x + b.y }",
+    [], "7"⟩,
+  ⟨"struct P { name: Str, n: Int, k: Int }\nfn main() -> Int { let a = P { name: \"a\", n: 1, k: 2 }; let b = P { n: 7, ..a }; say(b.name); b.n + b.k }",
+    [], "a\n9"⟩,
+  ⟨"struct P { x: Int, y: Int }\nfn base() -> P { P { x: 1, y: 2 } }\nfn main() -> Int { let b = P { y: 9, ..base() }; b.x * 100 + b.y }",
+    [], "109"⟩,
+  ⟨"use std::vec::{Vec};\nstruct S { v: Vec<Int>, n: Int }\nfn main() -> Int { let mut a = S { v: Vec::new(), n: 1 }; a.v.push(5); let b = S { n: 2, ..a }; let c = S { v: Vec::new(), ..b }; c.n + c.v.len() }",
+    [], "2"⟩,
   -- (An element of what a reference is to is borrowed through it.)
   ⟨"fn first(r: &[Int]) -> Int { let e = &r[0]; *e }\nfn main() -> Int { first(&[7, 8]) }",
     [], "7"⟩,

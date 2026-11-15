@@ -1289,6 +1289,12 @@ private partial def parsePostfix (noBlock : Bool) : P Expr := do
         let mut given : Array Expr := #[.name none recordMark]
         repeat
           if (← peek) == .punct "}" then break
+          -- `..base`: the fields not written are `base`'s.
+          if (← peek) == .punct "." && (← peek 1) == .punct "." then
+            advance
+            advance
+            given := given.push (.call 0 (.name none (fieldMark "%rest")) [← parseBinary 0 false])
+            break
           let field ← expectIdent
           let value ← if ← acceptPunct ":" then parseBinary 0 false else pure (.name none field)
           given := given.push (.call 0 (.name none (fieldMark field)) [value])
