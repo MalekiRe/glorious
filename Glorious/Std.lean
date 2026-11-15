@@ -407,6 +407,7 @@ impl<T> Indexed for Vec<T> {
     fn size_at(v) { len_at(&v.items) }
 }
 impl<T> IndexedMut for Vec<T> { fn place_at(i, v) { place_at(i, &mut v.items) } }
+impl<T> Clone for Vec<T> where T: Clone { fn clone(v) { Vec { items: clone(&v.items) } } }
 
 impl<T> Vec<T> {
     pub fn new() -> Self { Self { items: [] } }

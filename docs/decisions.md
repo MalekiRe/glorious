@@ -4480,6 +4480,16 @@ Compiling a program afresh, prelude included, takes 16 ms more for `hello`
 (0.133 s against 0.117 s, quick build); a program whose compiled form is kept
 is as fast as it was.
 
+## `Clone`
+
+The specification's `trait Clone { fn clone(value: &Self) -> Self; }` is in
+the prelude, with implementations for `Int`, `Str`, `char`, `()` (the copy),
+pairs and triples, `Result` (so `Option` and `Bool`) and arrays (each part's
+clone), and `Vec` in the library. There is no derive: a program's own type
+says its own. The specification's other fundamental traits stay as this
+prelude has them (`Eq` with `==` of values, `Show`), not `PartialEq` with
+`eq` of references or `Display`/`Debug` with a `Formatter`.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by

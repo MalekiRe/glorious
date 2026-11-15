@@ -796,6 +796,26 @@ impl<T> Show for Array<T> where T: Show {
 // Write a value as text.
 fn say(value) { host_write(show(value)) }
 
+// A value owned anew, from one read through a reference (the library
+// specification's §3.1): of what is copied as it is read, the copy; of a
+// tuple, a `Result` or an array, each part's.
+trait Clone { fn clone(value: &Self) -> Self }
+impl Clone for Int { fn clone(v) { *v } }
+impl Clone for Str { fn clone(v) { *v } }
+impl Clone for char { fn clone(v) { *v } }
+impl Clone for () { fn clone(v) { () } }
+impl<A, B> Clone for (A, B) where A: Clone, B: Clone { fn clone(p) { (clone(&p.0), clone(&p.1)) } }
+impl<A, B, C> Clone for (A, B, C) where A: Clone, B: Clone, C: Clone {
+    fn clone(p) { (clone(&p.0), clone(&p.1), clone(&p.2)) }
+}
+impl<T, E> Clone for Result<T, E> where T: Clone, E: Clone {
+    fn clone(r) { match(r) { &Ok(v) => Ok(clone(v)), &Err(e) => Err(clone(e)) } }
+}
+impl<T> Clone for Array<T> where T: Clone { fn clone(a) { clone_onto(a, 0, arr_new()) } }
+fn clone_onto<T: Clone>(a: &Array<T>, i: Int, out: Array<T>) -> Array<T> {
+    if(i < arr_len_at(a)) { tail clone_onto(a, i + 1, arr_push(out, clone(arr_at(a, i)))) } else { out }
+}
+
 // Of a result: what `Ok` holds, or else leaving for the label with the error
 // (`try(r, @f)` in a function that gives a `Result`); the same with the
 // error made another first; leaving with an error unless a condition holds;

@@ -3507,6 +3507,10 @@ def cases : List Case := [
   -- `Fail`, `Report` and `catch_fail`, brought in from the library by need.
   ⟨"fn f(n: Int) -> Int / { Fail<Str> } { if(n < 0) { fail(\"negative\") } else { n * 2 } }\nfn work() -> Int / { Report<Int> } { report(1); report(2); 5 }\nfn main() -> Int { let mut seen = 0; let r = handle work() { report(d, k) => seen = seen + d; k(()) }; match(catch_fail({ f(0 - 1) })) { Ok(n) => n, Err(e) => say(e); 0 - 1 } + match(catch_fail({ f(4) })) { Ok(n) => n, Err(_) => 0 } + r * 10 + seen }",
     [], "negative\n60"⟩,
+  -- `Clone`: of what is copied, the copy; of tuples, results, arrays and
+  -- `Vec`, each part's; a program's own types say theirs.
+  ⟨"use std::vec::{Vec};\nstruct P { x: Int }\nimpl Clone for P { fn clone(p) { P { x: p.x + 1 } } }\nfn main() -> Int { let a = [1, 2, 3]; let b = clone(&a); let p = P { x: 3 }; let q = p.clone(); let mut v = Vec::new(); v.push(1); let w = v.clone(); v.push(2); len(b) + q.x * 10 + v.len() * 100 + w.len() * 1000 + match(clone(&Some(5))) { Some(n) => n, None => 0 } }",
+    [], "1248"⟩,
   -- (An element of what a reference is to is borrowed through it.)
   ⟨"fn first(r: &[Int]) -> Int { let e = &r[0]; *e }\nfn main() -> Int { first(&[7, 8]) }",
     [], "7"⟩,
