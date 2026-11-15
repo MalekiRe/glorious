@@ -218,6 +218,12 @@ def textDotNames : List String :=
   ["to_upper", "to_lower", "trim", "trim_start", "starts_with", "ends_with", "parse_int",
    "char_at", "pad_start", "pad_end", "lines", "words", "repeat", "utf8"]
 
+/-- The functions of `std::iterator` brought in where a program calls one on
+a value, `v.iter().map(f).sum()`, as Rust's prelude has `Iterator`'s. -/
+def iteratorDotNames : List String :=
+  ["next", "fold", "for_each", "count", "collect", "map", "filter", "take", "skip",
+   "enumerate", "zip", "chain", "find_map", "nth", "sum", "product", "any", "all", "position"]
+
 /-- The names of the default prelude a program's text uses and does not
 declare or bring in itself: `use` lines for them, written after the text (so
 that no position in it moves). Where the text names no library, none. -/
@@ -246,8 +252,14 @@ def stdPreludeUses (src : String) : String := Id.run do
   let declares := fun (name : String) =>
     ["fn ", "enum ", "struct ", "type ", "trait ", "effect ", "const ", "let "].any fun k =>
       (src.splitOn (k ++ name)).length > 1
+  -- (What the text's `use`s name, `use m::{a, b};` too.)
+  let uses := (src.splitOn "use ").drop 1 |>.map fun after => (after.splitOn ";").headD ""
+  let inUse := fun (name : String) => uses.any fun u =>
+    let parts := u.splitOn name
+    (parts.zip (parts.drop 1)).any fun (before, after) =>
+      (before.toList.getLast?.all fun c => !isWord c) && (after.toList.head?.all fun c => !isWord c)
   let brought := fun (name : String) =>
-    (src.splitOn ("::" ++ name)).length > 1
+    (src.splitOn ("::" ++ name)).length > 1 || inUse name
   -- (An operation goes with its effect: where the text declares the effect,
   -- or an operation of the name in an effect of its own, neither is.)
   let opOf : List (String × String) := [("fail", "Fail"), ("report", "Report")]
@@ -263,8 +275,10 @@ def stdPreludeUses (src : String) : String := Id.run do
   -- the dot call finds the one in scope.)
   let dotted := fun (name : String) => (src.splitOn ("." ++ name ++ "(")).length > 1
   let textDots := textDotNames.filter fun name => dotted name && !blocked name
+  let iterDots := iteratorDotNames.filter fun name => dotted name && !blocked name
   let wanted := stdPreludeNames.filter fun (name, _) => mentions name && !blocked name
   let wanted := wanted ++ (textDots.filter (fun n => !wanted.any (·.1 == n))).map (·, "text")
+  let wanted := wanted ++ (iterDots.filter (fun n => !wanted.any (·.1 == n))).map (·, "iterator")
   if wanted.isEmpty then return ""
   let mods := wanted.map (·.2) |>.eraseDups
   let lines := mods.map fun m =>

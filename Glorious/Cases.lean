@@ -3725,6 +3725,13 @@ def cases : List Case := [
     [], "x!\n0"⟩,
   ⟨"fn g(o: Option<&(Int, Str)>) -> Str { match(o) { Some(p) => match(p) { (n, w) => *w }, None => \"\" } }\nfn main() -> Int { let t = (1, \"x\"); say(g(Some(&t))); 0 }",
     [], "x\n0"⟩,
+  -- Iterator functions called on a value, brought in without a `use`.
+  ⟨"fn main() -> Int { let mut v = Vec::new(); v.push(1); v.push(2); v.push(3); let s: Int = v.iter().map({ x => *x * 10 }).sum(); let mut it = v.iter(); it.next(); say(it.count()); s }",
+    [], "2\n60"⟩,
+  ⟨"fn main() -> Int { let mut v = Vec::new(); v.push(4); let a = Some(3).map({ x => x + 1 }).unwrap_or(0); let n: Int = v.iter().map({ x => *x }).sum(); a + n }",
+    [], "8"⟩,
+  ⟨"fn main() -> Int { std::iterator::range(0, 10).filter({ x => *x % 2 == 0 }).count() }",
+    [], "5"⟩,
   -- (An element of what a reference is to is borrowed through it.)
   ⟨"fn first(r: &[Int]) -> Int { let e = &r[0]; *e }\nfn main() -> Int { first(&[7, 8]) }",
     [], "7"⟩,
