@@ -3523,6 +3523,12 @@ def cases : List Case := [
   -- `<T as Trait>::f()` is.
   ⟨"trait Named { fn name() -> Str; fn size(s: &Self) -> Int; }\nstruct A\nstruct B(Int)\nimpl Named for A { fn name() { \"a\" } fn size(s) { 1 } }\nimpl Named for B { fn name() { \"b\" } fn size(s) { s.0 } }\nfn get<T: Named>(x: &T) -> Str { say(T::size(x)); T::name() }\nfn main() -> Int { say(get(&A)); say(get(&B(7))); 0 }",
     [], "1\na\n7\nb\n0"⟩,
+  -- A value with a `drop` is not copied: not out of an array by `a[i]`, nor
+  -- through a reference in the module that declares its type.
+  ⟨"struct H(Int)\nimpl Drop for H { fn drop(h) { say(h.0) } }\nfn main() -> Int { let a = [H(1), H(2)]; let x = a[0]; 0 }",
+    [], "error: 3:42: in `main`: `a[i]` copies the element (take it out with `pop` or `remove`, or borrow it, `&a[i]`), but a `H` has a `drop`, which would then run once for each"⟩,
+  ⟨"struct H(Int)\nimpl Drop for H { fn drop(h) { say(h.0) } }\nfn main() -> Int { let h = H(1); let r = &h; let y = *r; 0 }",
+    [], "error: 3:46: in `main`: reading through a reference copies the value (`replace` takes it out instead), but a `H` has a `drop`, which would then run once for each"⟩,
   -- (An element of what a reference is to is borrowed through it.)
   ⟨"fn first(r: &[Int]) -> Int { let e = &r[0]; *e }\nfn main() -> Int { first(&[7, 8]) }",
     [], "7"⟩,

@@ -336,7 +336,14 @@ partial def inferExpr (scope : Scope) (amb : Row) : Expr → M Ty
     let cap ← freshCap
     unifyAt "`*` reads through a reference" (.ref (← freshTy) inner cap) t
     use scope (.through cap (placeName e) false)
-    mustDup inner "reading through a reference copies the value (`replace` takes it out instead)"
+    -- (What a clause that binds by reference is chosen by, `*%given..`, is
+    -- a copy only for that: nothing of it is destroyed.)
+    let choosing := match e with
+      | .name none x => x.startsWith "%given"
+      | _ => false
+    if choosing then
+      mustDup inner "reading through a reference copies the value to choose a clause"
+    else mustDup inner "reading through a reference copies the value (`replace` takes it out instead)"
     pure inner
 
 /-- A field of what a mutable variable holds, or of what a reference points
@@ -1064,6 +1071,10 @@ partial def inferCall (scope : Scope) (amb : Row) (f : Expr) (args : List Expr)
       let r ← applyTy scope amb s!"`{x}`" callee args call
       needBounds call [(sig.trait, subject)]
       modify fun s => { s with methodCalls := s.methodCalls.push (call, sig.index) }
+      -- (`a[i]` copies the element out: one that cannot be copied is taken
+      -- out with `pop` or `remove`, or borrowed.)
+      if x == "index" && Syntax.lastSegment sig.trait == "Index" then
+        mustDup r "`a[i]` copies the element (take it out with `pop` or `remove`, or borrow it, `&a[i]`)"
       pure r
     | .const e => do
       applyTy scope amb s!"`{x}`" (← inferExpr [] amb e) args call

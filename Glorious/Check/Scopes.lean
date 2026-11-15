@@ -667,16 +667,17 @@ def checkDups (dups : Array (Ty × String)) : M Unit := do
       if let some name ← onceBy [] t then
         throw s!"{why}, but a `{name}` can be used only once"
       -- A value with a `drop` to run is not copied: each copy would run it.
-      -- (The module that declares the type may read one through a reference,
-      -- as it may take one apart: its `drop` does, to see what to do.)
+      -- (Its `drop` may read one through a reference, as it takes one apart,
+      -- to see what to do; nothing else may.)
       modify fun s => { s with seen := [] }
       if let some name ← tyHasDrop [] t then
         let s ← get
         let through := (why.splitOn "reading through a reference").length > 1
         let home := s.kimpls.any fun I =>
           I.trait == "Drop" && bareName I.head == name
-            && s.modules.homes.lookup s.owner == some ("::".intercalate ((I.head.splitOn "::").dropLast))
-        if through && home then continue
+            && (s.owner.splitOn "@").head? == some "Drop::drop"
+        let observed := (why.splitOn "to choose a clause").length > 1
+        if through && (home || observed) then continue
         throw s!"{why}, but a `{name}` has a `drop`, which would then run once for each"
       throw s!"{why}, but a value that holds a resumption can be used only once"
 

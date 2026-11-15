@@ -4510,6 +4510,18 @@ early returns, written as a Rust programmer would, needed:
 The program is a case; it is shown well owned with regions and loans, with 6
 borrows that are not scopes of their own.
 
+## A value with a `drop` is not copied out of an array or through a reference
+
+Two ways to copy a value whose type has a `drop` were open, and each copy's
+`drop` ran: `let x = a[i]` (of an array, a `Vec` through `Index`), which
+also let the rest of the array go without destroying it; and `*r` in the
+module that declares the type, which was allowed so that the type's `drop`
+could read what it is given. Now `Index::index`'s result must be one that is
+copied (`a[i]` of a `drop` type is refused, with `pop`, `remove` and `&a[i]`
+said instead), and only the `drop` function itself, and the copy a clause
+that binds by reference is chosen by (`*%given..`, of `byReference`, which
+nothing destroys), read such a value through a reference. Two cases.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by
