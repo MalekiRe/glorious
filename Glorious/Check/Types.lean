@@ -737,6 +737,10 @@ structure St where
   that names another trait's type of one of its parameters is kept as written
   (`Syntax.projMark`). -/
   projecting : List Nat := []
+  /-- The items being checked are the program's own, after the library's: what
+  is asked again with the program rewritten (a value of a type parameter kept
+  in a variable) is asked only of these. -/
+  ownItems : Bool := false
   gatOccs : Array (String × List Ty × Nat) := #[]
   /-- A type a trait leaves at a lifetime, not yet known (`L::Item<'a>` where
   `L` is a type parameter): by its variable, the lifetimes it was asked at.

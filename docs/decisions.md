@@ -4203,7 +4203,16 @@ the function, the place of the `let` and the name; the driver rewrites that one
 bound as the re-reading for `..` in a pattern). If the program is still refused,
 what is said is the first refusal, not what the rewritten program got wrong.
 A parameter is kept in a variable at the start of its clause (`let mut n = n`),
-and a name a pattern binds straight after the pattern's `let`. A field taken out of such a value on one path is refused, as it is of a
+and a name a pattern binds straight after the pattern's `let`.
+
+So is a value of a type the function is generic in (not a reference or a
+callable), used on one path and not on another, in the program's own
+functions: `fn choose<T>(c, a: T, b: T) -> T { if(c) { a } else { b } }`
+destroyed the one not chosen only where `T` was known to have a `drop`, that
+is never. Kept in a variable, it is destroyed where it was not used, by how
+`T` is destroyed, which the function is then given. The library's generic
+functions are not rewritten so; they are written to use what they are given
+on every path. A field taken out of such a value on one path is refused, as it is of a
 `let mut` (`replace` takes it out).
 
 ## A tuple variable whose fields are borrowed apart is a variable per field

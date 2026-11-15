@@ -2943,6 +2943,8 @@ def cases : List Case := [
   ⟨"struct File(Int)\nimpl Drop for File { fn drop(f) { say(f.0) } }\nfn main() -> Int { let mut x = Some(File(4)); let k = match(&x) { &Some(f) => f.0, &None => 0 }; k }",
     [], "4\n4"⟩,
   -- A value with `Drop` that a path does not use is kept in a variable, which destroys it where it was not used.
+  ⟨"struct N(Int)\nimpl Drop for N { fn drop(n) { say(n.0) } }\nfn choose<T>(c: Bool, a: T, b: T) -> T { if(c) { a } else { b } }\nfn main() -> Int { let x = choose(true, N(124), N(125)); 0 }",
+    [], "125\n124\n0"⟩,
   ⟨"struct Noisy(Int);\nimpl Drop for Noisy { fn drop(n) { say(n.0) } }\nfn eat(n: Noisy) -> Int { 5 }\nfn f(n: Noisy, c: Bool) -> Int { if(c) { eat(n) } else { 7 } }\nfn main() -> Int { say(f(Noisy(1), true)); f(Noisy(2), false) }",
     [], "1\n5\n2\n7"⟩,
   ⟨"struct Noisy(Int);\nimpl Drop for Noisy { fn drop(n) { say(n.0) } }\nfn eat(n: Noisy) -> Int { 5 }\nfn main() -> Int { let (a, k) = (Noisy(3), 4); if(k > 9) { eat(a) } else { k } }",

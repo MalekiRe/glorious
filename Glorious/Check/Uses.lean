@@ -1332,6 +1332,26 @@ def runLowerChecks (fnTy : Ty) : M Unit := do
         modify fun st => { st with seen := [] }
         pure held.isSome
       | _ => pure false
+    -- A value of a type the function is generic in, which may have a `drop`
+    -- to run, used on one path and not on another: kept in a variable too,
+    -- which destroys it where it was not used. (Of the program's own
+    -- functions: the library is checked once for every program.)
+    -- (Not a reference or a callable, which have nothing to destroy of
+    -- their own; nor the library's, checked for every program alike.)
+    let ownValue ← match ← find t with
+      | .ref .. => pure false
+      | .fn .. => pure false
+      | _ => pure true
+    let library := ["std::", "core::", "alloc::"].any (s.owner.startsWith ·)
+    if free && !heldDrop && hasParam t && ownValue && s.ownItems && !library
+        && (← tyMustUse roots [] t).isNone then
+      unless s.flagged.contains pos || usesStmts resumptive x body == 0 || usedFirst quiet x body do
+        if (pathUses { ctx with handed := true, capturesOwned := true } names x body) == some 0 then
+          let place := ((pos.splitOn ":").take 2).filterMap String.toNat?
+          let mark := match place with
+            | [line, col] => Syntax.letMutMark s.owner line col x
+            | _ => Syntax.letMutMark s.owner 0 0 x
+          throw s!"{pos}`{x}` is used on one path and not on another, and its type may have a `drop` to run: where it is not used nothing would run it. Use it on every path, let it go there with a function that takes it, or keep it in a variable (`let mut {x}`), which is destroyed where it was not used{mark}"
     unless (free && !heldDrop) || (← tyMustUse roots [] t).isSome do
       -- A value with a `drop` to run that is used on one path and not on
       -- another: where it is not, nothing would run its `drop`, since the

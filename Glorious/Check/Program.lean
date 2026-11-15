@@ -1563,7 +1563,7 @@ def checkFirst (items : List Item) (modules : Syntax.ModuleInfo := {}) (drops : 
 def checkAfter (first : St) (items : List Item) (modules : Syntax.ModuleInfo := {}) :
     Except String Elab.Blocks := do
   let action : M Elab.Blocks := do
-    modify fun s => { s with modules }
+    modify fun s => { s with modules, ownItems := true }
     let _ ← checkItems items
     finish
   let (blocks, _) ← action.run first
@@ -1574,7 +1574,7 @@ def checkAfter (first : St) (items : List Item) (modules : Syntax.ModuleInfo := 
 def checkAfterKept (first : St) (items : List Item) (modules : Syntax.ModuleInfo) (seed : UInt64)
     (kept : Kept) : Except String (Elab.Blocks × Kept) := do
   let action : M (Elab.Blocks × Kept) := do
-    modify fun s => { s with modules }
+    modify fun s => { s with modules, ownItems := true }
     let made ← checkItems items (mixHash seed (hash modules)) kept
     pure (← finish, made)
   let (r, _) ← action.run first
