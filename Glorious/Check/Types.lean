@@ -472,9 +472,10 @@ structure St where
   rigidParams : List (String × Ty) := []
   /-- Dot calls of a type's own function chosen by the value's type. -/
   dotChosen : List (Nat × String × Nat) := []
-  /-- The arguments of operator calls given what the name written points
-  to, `*x` (call, argument). -/
-  derefArgs : List (Nat × Nat) := []
+  /-- Arguments the checker chose to give as other than written, by the call
+  and the argument's place: `*x` to an operator, a field borrowed through a
+  reference for a function that takes one. -/
+  argsChosen : List ((Nat × Nat) × Expr) := []
   /-- For each trait, how many type parameters it has and the names of the
   types it leaves to implementations. -/
   traitShape : List (String × Nat × List String) := []

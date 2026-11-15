@@ -161,8 +161,8 @@ structure Blocks where
   the value's type: the call, the function, and how the receiver, a
   variable, is now given (`0` as it was, `1` borrowed, `2` borrowed `&mut`). -/
   dotChosen : List (Nat × String × Nat) := []
-  /-- Arguments of operator calls given `*x` for the `x` written. -/
-  derefArgs : List (Nat × Nat) := []
+  /-- Arguments given as other than written (`Check.argsChosen`). -/
+  argsChosen : List ((Nat × Nat) × Expr) := []
 
 structure Globals where
   ctors : List (String × CtorInfo) := []

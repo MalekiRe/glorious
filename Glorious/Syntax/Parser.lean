@@ -1843,7 +1843,14 @@ private partial def parseStmts : P (List Stmt) := do
           let t' ← peek
           if t' == .punct "}" || t' == .punct "," then
             out := out.push (.expr (.tuple []))
-        else break
+        else
+          -- (A statement that ends with a block, `if c { .. }`, needs no `;`
+          -- before the next, as in Rust; its value is let go.)
+          let pos ← get
+          let endsBlock := pos > 0 && ((← read).toks[pos - 1]?.map (·.tok)) == some (.punct "}")
+          let t' ← peek
+          if endsBlock && t' != .punct "}" && t' != .punct "," && t' != .eof then continue
+          break
   -- The functions written in this block are named, in it and in each
   -- other, by the names they have as functions of the module.
   if local_.isEmpty then return out.toList

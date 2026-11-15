@@ -482,45 +482,43 @@ partial def dotOwnItems (call : Nat) (fn : String) (items : List Item) : List It
     | .pub parent item => .pub parent ((dotOwnItems call fn [item]).headD item)
     | item => item
 
-/-- A program with `*x` written for the `x` the checker found given to an
-operator as a reference to a number (`Blocks.derefArgs`). -/
-partial def derefArgsExpr (picks : List (Nat × Nat)) : Expr → Expr
+/-- A program with the arguments the checker chose to give as other than
+written (`Blocks.argsChosen`) written in. -/
+partial def argsChosenExpr (picks : List ((Nat × Nat) × Expr)) : Expr → Expr
   | .call i f args =>
-    let args := (args.map (derefArgsExpr picks)).zipIdx.map fun (a, k) =>
-      if picks.contains (i, k) then (match a with
-        | .deref _ => a
-        | a => .deref a) else a
-    .call i (derefArgsExpr picks f) args
-  | .tailCall i f args => .tailCall i (derefArgsExpr picks f) (args.map (derefArgsExpr picks))
-  | .tuple args => .tuple (args.map (derefArgsExpr picks))
-  | .proj e n => .proj (derefArgsExpr picks e) n
+    let args := (args.map (argsChosenExpr picks)).zipIdx.map fun (a, k) =>
+      (picks.lookup (i, k)).getD a
+    .call i (argsChosenExpr picks f) args
+  | .tailCall i f args => .tailCall i (argsChosenExpr picks f) (args.map (argsChosenExpr picks))
+  | .tuple args => .tuple (args.map (argsChosenExpr picks))
+  | .proj e n => .proj (argsChosenExpr picks e) n
   | .closure i clauses => .closure i (clauses.map fun
-    | .mk pats body => .mk pats (body.map (derefArgsStmt picks)))
-  | .handle subject arms => .handle (derefArgsExpr picks subject) (arms.map fun
-    | .mk pats body => .mk pats (body.map (derefArgsStmt picks)))
-  | .labelScope l body => .labelScope l (body.map (derefArgsStmt picks))
-  | .deref e => .deref (derefArgsExpr picks e)
-  | .reborrow u e => .reborrow u (derefArgsExpr picks e)
-  | .fieldOf i e name => .fieldOf i (derefArgsExpr picks e) name
+    | .mk pats body => .mk pats (body.map (argsChosenStmt picks)))
+  | .handle subject arms => .handle (argsChosenExpr picks subject) (arms.map fun
+    | .mk pats body => .mk pats (body.map (argsChosenStmt picks)))
+  | .labelScope l body => .labelScope l (body.map (argsChosenStmt picks))
+  | .deref e => .deref (argsChosenExpr picks e)
+  | .reborrow u e => .reborrow u (argsChosenExpr picks e)
+  | .fieldOf i e name => .fieldOf i (argsChosenExpr picks e) name
   | e => e
 where
-  derefArgsStmt (picks : List (Nat × Nat)) : Stmt → Stmt
-    | .let_ pat value => .let_ pat (derefArgsExpr picks value)
-    | .expr e => .expr (derefArgsExpr picks e)
-    | .defer e => .defer (derefArgsExpr picks e)
-    | .letMut x value => .letMut x (derefArgsExpr picks value)
-    | .assign target value => .assign (derefArgsExpr picks target) (derefArgsExpr picks value)
-    | .located line col s => .located line col (derefArgsStmt picks s)
+  argsChosenStmt (picks : List ((Nat × Nat) × Expr)) : Stmt → Stmt
+    | .let_ pat value => .let_ pat (argsChosenExpr picks value)
+    | .expr e => .expr (argsChosenExpr picks e)
+    | .defer e => .defer (argsChosenExpr picks e)
+    | .letMut x value => .letMut x (argsChosenExpr picks value)
+    | .assign target value => .assign (argsChosenExpr picks target) (argsChosenExpr picks value)
+    | .located line col s => .located line col (argsChosenStmt picks s)
 
-partial def derefArgsItems (picks : List (Nat × Nat)) (items : List Item) : List Item :=
+partial def argsChosenItems (picks : List ((Nat × Nat) × Expr)) (items : List Item) : List Item :=
   if picks.isEmpty then items else
   items.map fun
     | .fn name ps annots ret clauses => .fn name ps annots ret (clauses.map fun
-      | .mk pats body => .mk pats (body.map (derefArgsExpr.derefArgsStmt picks)))
-    | .impl ps tr head args context methods => .impl ps tr head args context (derefArgsItems picks methods)
-    | .traitInfo n supers defaults params assocs => .traitInfo n supers (derefArgsItems picks defaults) params assocs
-    | .module name (some body) => .module name (some (derefArgsItems picks body))
-    | .pub parent item => .pub parent ((derefArgsItems picks [item]).headD item)
+      | .mk pats body => .mk pats (body.map (argsChosenExpr.argsChosenStmt picks)))
+    | .impl ps tr head args context methods => .impl ps tr head args context (argsChosenItems picks methods)
+    | .traitInfo n supers defaults params assocs => .traitInfo n supers (argsChosenItems picks defaults) params assocs
+    | .module name (some body) => .module name (some (argsChosenItems picks body))
+    | .pub parent item => .pub parent ((argsChosenItems picks [item]).headD item)
     | item => item
 
 /-- A program with the functions of dot calls the checker chose by the

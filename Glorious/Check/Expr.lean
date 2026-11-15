@@ -602,6 +602,23 @@ partial def receiverKinds (f g : String) : M (Option Nat × Option Nat) := do
   set saved
   pure (a, b)
 
+/-- `x.f.g` where `x` holds a reference: the name, the path of fields, and the
+identity of the last read. -/
+partial def fieldThroughRef (scope : Scope) : Expr → M (Option (String × List String × Nat))
+  | .fieldOf fid (.name none x) field => do
+    let held := match scope.lookup x with
+      | some (.val t _) => some t
+      | some (.cell t _) => some t
+      | _ => none
+    match held with
+    | some t => do pure (match ← find t with
+      | .ref .. => some (x, [field], fid)
+      | _ => none)
+    | none => pure none
+  | .fieldOf fid e field => do
+    pure ((← fieldThroughRef scope e).map fun (x, path, _) => (x, path ++ [field], fid))
+  | _ => pure none
+
 /-- Check arguments in the given order. Gives the first that does not fit. -/
 partial def checkArgsIn (scope : Scope) (amb : Row) (what : String) (params : List Ty)
     (args : List Expr) (call : Nat) (order : List Nat) : M (Option (Nat × String)) := do
@@ -633,6 +650,28 @@ partial def checkArgsIn (scope : Scope) (amb : Row) (what : String) (params : Li
                 | _ => false
               let shown := if uniq then "&mut " else "&"
               throw (Syntax.refPatsMark id uniq valuePats ++ s!"argument {i + 1} of {what}: what is matched is a reference: a pattern of what it points to is written `{shown}Pattern`, and binds references (`{shown}Some(x) => *x`)")
+      -- (A field of what a name holding a reference points to, given where a
+      -- reference is wanted, `a.items.len()` with `a: &Account`: the field
+      -- is borrowed through it, as `&a.items`.)
+      let a ← if i == 0 && call != 0 then do
+          match ← fieldThroughRef scope a, ← find p with
+          | some (x, path, fid), .ref how _ _ =>
+            let saved ← get
+            let given ← try some <$> inferExpr scope amb a catch _ => pure none
+            set saved
+            let plain ← match given with
+              | some t => do pure (match ← find t with | .ref .. => false | _ => true)
+              | none => pure false
+            if plain then
+              let uniq := match ← find how with
+                | .con "&mut" [] => true
+                | _ => false
+              let borrowed := Expr.refField fid uniq x path true
+              modify fun s => { s with argsChosen := ((call, i), borrowed) :: s.argsChosen }
+              pure borrowed
+            else pure a
+          | _, _ => pure a
+        else pure a
       -- (A dot call whose receiver is of a type with a function of its own of
       -- the name: that one, if the function in scope does not fit.)
       if let some e ← checkArg scope amb s!"argument {i + 1} of {what}" p a site then
@@ -767,7 +806,7 @@ partial def inferCall (scope : Scope) (amb : Row) (f : Expr) (args : List Expr)
             if let .ref _ inner _ ← find t then
               if let .con n [] ← find inner then
                 if n == "Int" || Syntax.isScalar n then
-                  modify fun s => { s with derefArgs := (call, i) :: s.derefArgs }
+                  modify fun s => { s with argsChosen := ((call, i), .deref a) :: s.argsChosen }
                   a' := .deref a
                   changed := true
         given := given.push a'

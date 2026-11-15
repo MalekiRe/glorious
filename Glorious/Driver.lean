@@ -650,7 +650,7 @@ partial def compileSourceAt (src : String) (check : Bool := true)
   -- (Dot calls the checker chose a type's own function for, by the value's
   -- type: written so for what follows.)
   let all := match checked with
-    | .ok (blocks, _) => Elab.derefArgsItems blocks.derefArgs (Elab.chosenItems blocks.dotChosen all)
+    | .ok (blocks, _) => Elab.argsChosenItems blocks.argsChosen (Elab.chosenItems blocks.dotChosen all)
     | .error _ => all
   let (blocks, checkMade) ← match checked with
     | .ok (blocks, made) => pure (some blocks, made)
