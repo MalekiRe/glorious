@@ -2934,6 +2934,11 @@ def cases : List Case := [
     [], "70\n5"⟩,
   ⟨"effect E { e() -> Int }\nfn work() -> Int { defer say(99); e() }\nfn main() -> Int { let mut held = None; let r = handle work() { e(k) => held = Some(k); 3 }; held = None; r }",
     [], "99\n3"⟩,
+  -- In a function generic in what a callable holds, the callable destroys it too.
+  ⟨"struct N(Int)\nimpl Drop for N { fn drop(n) { say(n.0) } }\nfn hold<T>(x: T) -> Int { let f = { let _ = x; 1 }; 0 }\nfn main() -> Int { hold(N(92)) }",
+    [], "92\n0"⟩,
+  ⟨"struct N(Int)\nimpl Drop for N { fn drop(n) { say(n.0) } }\nfn hold<T>(x: T, c: Bool) -> Int { let f = { let _ = x; 1 }; if(c) { f() } else { cancel(f); 0 } }\nfn main() -> Int { say(hold(N(93), true)); hold(N(94), false) }",
+    [], "93\n1\n94\n0"⟩,
   -- One that performs operations is given up where they could be: not in the cleanup that ends its block.
   ⟨"struct Noisy(Int);\nimpl Drop for Noisy { fn drop(n) { say(n.0) } }\nfn eat(n: Noisy) -> Int { 5 }\neffect E { e() -> Int }\nfn work() -> Int { let n = Noisy(7); let f = { e() + eat(n) }; 1 }\nfn main() -> Int { handle work() { e(k) => k(2) } }",
     [], "error: 5:38: in `work`: `f` is let go here, and giving it up destroys what it holds (a `drop` runs, or the cleanups of the computation it suspended); but it performs operations, and it can be given up only where they could be performed, which is not where it is let go. Call it, or give it up before with `cancel(f)`"⟩,

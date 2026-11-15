@@ -1326,11 +1326,26 @@ def runLowerChecks (fnTy : Ty) : M Unit := do
     -- (A callable kept by `let` is general in what it captures, but what it
     -- holds is known: it has a `drop` to run if what it holds does.)
     let heldDrop ← match ← find t with
-      | .fn .. => do
+      | .fn _ _ _ _ cap => do
         modify fun st => { st with seen := [] }
         let held ← tyHasDrop [] t
         modify fun st => { st with seen := [] }
-        pure held.isSome
+        -- (Or, in the program's own function, a value of a type it is
+        -- generic in, which may have one.)
+        let generic ← if s.ownItems && !libraryOwner s.owner then do
+            let root ← findCap cap
+            (← edgesFrom root).anyM fun (_, what) => do
+              match what with
+              | .ty heldTy =>
+                if hasParam heldTy then
+                  match ← find heldTy with
+                  | .ref .. => pure false
+                  | .fn .. => pure false
+                  | _ => pure true
+                else pure false
+              | _ => pure false
+          else pure false
+        pure (held.isSome || generic)
       | _ => pure false
     -- A value of a type the function is generic in, which may have a `drop`
     -- to run, used on one path and not on another: kept in a variable too,
@@ -1342,7 +1357,7 @@ def runLowerChecks (fnTy : Ty) : M Unit := do
       | .ref .. => pure false
       | .fn .. => pure false
       | _ => pure true
-    let library := ["std::", "core::", "alloc::"].any (s.owner.startsWith ·)
+    let library := libraryOwner s.owner
     if free && !heldDrop && hasParam t && ownValue && s.ownItems && !library
         && (← tyMustUse roots [] t).isNone then
       unless s.flagged.contains pos || usesStmts resumptive x body == 0 || usedFirst quiet x body do
@@ -1358,7 +1373,11 @@ def runLowerChecks (fnTy : Ty) : M Unit := do
       -- paths are callables and it is theirs. (One no path uses stays in
       -- its variable, and is destroyed there.)
       modify fun st => { st with seen := [] }
-      if let some name ← tyHasDrop [] t then
+      -- (A callable that holds a value of a type the function is generic in
+      -- is asked the same, of that value.)
+      let named ← tyHasDrop [] t
+      let named := if named.isNone && heldDrop then some "%generic" else named
+      if let some name := named then
         -- (A variable that gives its value away asks, when its block ends,
         -- whether it did: it may on some paths and not on others.)
         unless s.flagged.contains pos || usesStmts resumptive x body == 0
@@ -1369,6 +1388,8 @@ def runLowerChecks (fnTy : Ty) : M Unit := do
           let count := if heldDrop then pathUses { ctx with capturesOwned := true } names x body
             else pathUses { ctx with handed := true, capturesOwned := true } names x body
           if count == some 0 then
+            if heldDrop && name == "%generic" then
+              throw s!"{pos}`{x}` holds a value of a type the function is generic in, which may have a `drop` to run, and is not used on every path (a function it is given uses it only if it calls it or hands it on): where it is not used nothing would run the `drop`. Use it on every path, or give it up there with `cancel({x})`, which destroys what it holds"
             if heldDrop then
               throw s!"{pos}`{x}` holds a `{name}`, which has a `drop` to run, and is not used on every path (a function it is given uses it only if it calls it or hands it on): where it is not used nothing would run the `drop`. Use it on every path, or give it up there with `cancel({x})`, which destroys what it holds"
             -- (Said with which `let` it is: the program is read again with

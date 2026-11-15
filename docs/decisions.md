@@ -4185,8 +4185,10 @@ given up, which destroys what it captured.
   callable requires that what it performs could be performed. A callable that
   performs operations is therefore refused where it would be let go at the end
   of its block; `cancel` before then works. A value of a type the function is
-  generic in that a callable captures is not destroyed by the callable. A
-  callable in a field of a value is not given up when the value is destroyed
+  generic in that a callable captures is destroyed by the callable in the
+  program's own functions (the function is given how, and the callable
+  captures that; one used on some paths only is refused, with `cancel` as the
+  way out); in the library's, it is not. A callable in a field of a value is not given up when the value is destroyed
   unless the field's type is known to need it.
 
 ## A value used on one path only is kept in a variable

@@ -834,6 +834,10 @@ def edgesFrom (root : Nat) : M (Array (Nat × Captured)) := do
   let s ← get
   pure ((s.capOut.getD root #[]).filterMap fun i => s.capEdges.get? i)
 
+/-- A function of the library, which is checked once for every program. -/
+def libraryOwner (owner : String) : Bool :=
+  ["std::", "core::", "alloc::"].any (owner.startsWith ·)
+
 /-- Follow a type variable to what it stands for. -/
 partial def find (t : Ty) : M Ty := do
   match t with

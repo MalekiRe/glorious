@@ -145,6 +145,17 @@ partial def needsDestroying (seen : List String) (t : Ty) : M Bool := do
         | .once => true
         | .must => true
         | _ => false) then return true
+    -- (And in the program's own functions, one that holds a value of a type
+    -- the function is generic in, which may have one: as what it holds is
+    -- destroyed, `heldGeneric`.)
+    if (← get).ownItems && !libraryOwner (← get).owner then
+      for (_, what) in ← edgesFrom root do
+        if let .ty held := what then
+          if hasParam held then
+            match ← find held with
+            | .ref .. => pure ()
+            | .fn .. => pure ()
+            | _ => return true
     let before := (← get).seen
     modify fun s => { s with seen := [] }
     let held ← tyHasDrop [] t
@@ -333,7 +344,15 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
       -- known to need that: a function is not asked how to destroy what
       -- its callables capture of a type it is generic in.)
       if (Syntax.captureSiteOf site.name).isSome then
-        unless (freeTys ty).isEmpty && !hasParam ty && (← needsDestroying [] ty) do continue
+        -- (Or of a type the program's own function is generic in, not a
+        -- reference or a callable: the function is then given how to
+        -- destroy it, and the callable captures that.)
+        let generic := (← get).ownItems && hasParam ty && !libraryOwner site.owner
+          && (match ← find ty with
+            | .ref .. => false
+            | .fn .. => false
+            | _ => true)
+        unless generic || ((freeTys ty).isEmpty && !hasParam ty && (← needsDestroying [] ty)) do continue
       -- A callable is destroyed by giving it up, which is done where nothing
       -- may be performed (a cleanup, or what destroys another callable); and
       -- giving one up is allowed only where what it performs could be.
