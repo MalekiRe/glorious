@@ -532,6 +532,11 @@ impl<T, E> Show for Result<T, E> where T: Show, E: Show {
         }
     }
 }
+// Truth, `Result<(), ()>`, as `true` and `false` (preferred, as the more
+// particular implementation, over the one of every `Result`).
+impl Show for Result<(), ()> {
+    fn show(b) { match(b) { Ok(_) => "true", Err(_) => "false" } }
+}
 
 // An array: its elements, one after another. The machines build its values
 // and read a place of one in a step; the constructor written here builds

@@ -4589,6 +4589,18 @@ place is not there. Not built: the `try_` forms, slices (`as_mut_slice`,
 `extend_from_slice`), `drain`, `iter_mut`, `partition`, `extract_if`,
 `resize_with`.
 
+## Truths are shown as `true` and `false`
+
+`say(1 < 2)` wrote `Ok(())`: `Bool` is `Result<(), ()>`, and `Show` had one
+implementation for every `Result`. The specification shows `Bool` as
+`true`/`false` and other results with `Ok`/`Err`. The prelude now has `impl
+Show for Result<(), ()>` besides the general one, and the more particular
+implementation is preferred (specialization, which the checker had). An
+`Option<()>` is a `Bool`, and is shown so; `Option<Int>`'s `None` is still
+`Err(())`. Where the error type of an `Ok(())` is not known, which of the
+two is meant is not known either, and the program says so. The expected
+output of 35 test programs changed accordingly (only those lines).
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by
