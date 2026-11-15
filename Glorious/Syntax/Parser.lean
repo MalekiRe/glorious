@@ -452,6 +452,19 @@ private partial def parseType : P TypeExpr := do
     let uniq := (← peek) == .ident "mut"
     if uniq then advance
     pure (.ref uniq (← parseType) life)
+  | .op "&&" =>
+    -- `&&T` (and `&&'a mut T`), which the lexer reads as one symbol.
+    advance
+    let life ← match ← peek with
+      | .ident x =>
+        if x.startsWith "'" then
+          advance
+          pure (some x)
+        else pure none
+      | _ => pure none
+    let uniq := (← peek) == .ident "mut"
+    if uniq then advance
+    pure (.ref false (.ref uniq (← parseType) life) none)
   | .ident "_" =>
     advance
     pure .hole
@@ -531,6 +544,7 @@ private partial def parseResult : P TypeExpr := do
     | .punct "[" => true
     | .op "!" => true
     | .op "&" => true
+    | .op "&&" => true
     | .op "*" => true
     | _ => false
   let ret ← if startsType then parseType else pure (.tuple [])
@@ -1156,7 +1170,20 @@ private partial def parseUnary (noBlock : Bool) : P Expr := do
       else if t == .op "*" then
         advance
         pure (.deref (← parseUnary noBlock))
-      else parsePostfix noBlock
+      else
+        -- `&**e` and `**e`, which the lexer reads as one symbol each: a
+        -- borrow through, or a reading through, as many references.
+        match t with
+        | .op s =>
+          let stars := (s.dropWhile (· == '&')).toString
+          let amps := s.length - stars.length
+          if amps ≤ 1 && stars.length ≥ 2 && stars.all (· == '*') then
+            advance
+            let inner ← parseUnary noBlock
+            let derefs := (List.range (stars.length - amps)).foldl (fun e _ => Expr.deref e) inner
+            pure (if amps == 1 then .reborrow false derefs else derefs)
+          else parsePostfix noBlock
+        | _ => parsePostfix noBlock
   | none => parsePostfix noBlock
 
 private partial def parsePostfix (noBlock : Bool) : P Expr := do

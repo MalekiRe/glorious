@@ -3473,6 +3473,12 @@ def cases : List Case := [
     [], "error: 1:20: in `main`: argument 2 of `match`: expected `fn(Result<Int, ()>) -> _`, found `fn(Result<fn() -> Int, ()>) -> fn() -> Int`. A block `{ .. }` a clause ends with is a callable; to run its statements there, write them without the braces: `pattern => a; b`"⟩,
   ⟨"fn size(x: Option<Int>) -> Int { match(x) { Some(n) => n + 1, None => { say(1); 0 } } }\nfn main() -> Int { size(None) }",
     [], "error: 1:71: in `size`: the result of a clause: expected `Int`, found `fn() -> Int`. A block `{ .. }` a clause ends with is a callable; to run its statements there, write them without the braces: `pattern => a; b`"⟩,
+  -- `**r` and `&**r`, which the lexer reads as one symbol each.
+  ⟨"fn get(r: &&Int) -> Int { **r }\nfn again<'a>(r: &&'a Int) -> &'a Int { &**r }\nfn main() -> Int { let x = 5; let r = &x; get(&r) + *again(&r) }",
+    [], "10"⟩,
+  -- Matching a reference with patterns of a value: the refusal says how.
+  ⟨"enum Shape { Dot, Line(Int) }\nfn size(s: &Shape) -> Int { match(s) { Dot => 0, Line(n) => n } }\nfn main() -> Int { size(&Line(3)) }",
+    [], "error: 2:29: in `size`: argument 2 of `match`: expected `fn(&Shape) -> _`, found `fn(Shape) -> Int`. What is matched is a reference: a pattern of what it points to is written `&Pattern`, and binds references (`&Some(x) => *x`)"⟩,
   -- (An element of what a reference is to is borrowed through it.)
   ⟨"fn first(r: &[Int]) -> Int { let e = &r[0]; *e }\nfn main() -> Int { first(&[7, 8]) }",
     [], "7"⟩,

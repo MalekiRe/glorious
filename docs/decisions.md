@@ -4402,6 +4402,20 @@ clause's result is neither. Written by habit from Rust, it was refused with
 refusals now add that such a block is a callable and that its statements are
 written without the braces to be run there. The rule itself is unchanged.
 
+## `**r`, `&**r`, `&&T`, and matching a reference
+
+The lexer reads a run of operator characters as one symbol, so `**r`, `&**r`
+and `&&T` were refused as unknown symbols. In an expression's prefix place,
+a symbol of one `&` or none followed by `*`s is now read as that many
+dereferences, borrowed through if it starts with `&`; in a type, `&&` is a
+reference to a reference (`&&'a mut T` gives the lifetime and `mut` to the
+inner one). A prefix fixity a program declares for such a symbol still wins.
+
+Matching a reference with patterns of a value (`match(s) { Dot => .. }` for
+`s: &Shape`) is still refused: Rust's binding modes, which would make that
+bind references, are not built. The refusal now says that the patterns are
+written `&Pattern` and bind references.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by

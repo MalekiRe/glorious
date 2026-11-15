@@ -542,6 +542,19 @@ partial def checkArgsIn (scope : Scope) (amb : Row) (what : String) (params : Li
           | _ => false
         if blocky && (e.splitOn "fn() ->").length > 1 then
           return some (i, e ++ ". A block `{ .. }` a clause ends with is a callable; to run its statements there, write them without the braces: `pattern => a; b`")
+        -- (Clauses whose patterns are of a value, given a reference to one.)
+        let valuePats := match a with
+          | .closure _ clauses => clauses.any fun
+            | .mk (.ctor n _ _ :: _) _ => !n.startsWith "%"
+            | _ => false
+          | _ => false
+        if let (true, .fn ps _ _ _ _) := (valuePats && (e.splitOn "expected `fn(&").length > 1, ← find p) then
+          if let some first := ps.head? then
+            if let .ref how _ _ ← find first then
+              let shown := match ← find how with
+                | .con "&mut" [] => "&mut "
+                | _ => "&"
+              return some (i, e ++ s!". What is matched is a reference: a pattern of what it points to is written `{shown}Pattern`, and binds references (`{shown}Some(x) => *x`)")
         return some (i, e)
       pushTemp p
       pushAnon a p
