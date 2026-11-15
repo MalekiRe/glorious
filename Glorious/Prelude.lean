@@ -843,6 +843,8 @@ fn some_or_leave<T, R, L>(value: Result<T, ()>, target: L, fallback) -> T where 
 // cleanup run (the library specification's §6.1).
 fn abort<T>(message: Str) -> T { host_write(message); arr_get(arr_new(), 0) }
 fn unreachable<T>(message: Str) -> T { abort(message) }
+// What a value is shown as, `x.to_string()`.
+fn to_string<T: Show>(value: T) -> Str { show(value) }
 // What an `Option` or a `Result` has, asked of it as a value's own: `o.map(f)`.
 // (An `Option<T>` is a `Result<T, ()>`, so each is both's.)
 impl<T, E> Result<T, E> {

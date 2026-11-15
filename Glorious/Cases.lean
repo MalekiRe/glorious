@@ -3648,6 +3648,19 @@ def cases : List Case := [
   -- A text's functions called on a value, brought in without a `use`.
   ⟨"fn main() -> Int { let s = \"  Hello \"; say(s.trim().to_upper()); say(\"42\".parse_int().unwrap_or(0) + 1); say(\"abc\".starts_with(\"ab\")); len(\"a b c\".words()) }",
     [], "HELLO\n43\ntrue\n3"⟩,
+  -- Rust's forms version 1 does not have, each saying what to write.
+  ⟨"fn main() -> Int { let a = Some(3); if let Some(x) = a { x } else { 0 } }",
+    [], "error: 1:37: `if let` is not read: match what is tested, `match(a) { Some(x) => .., _ => .. }`, found `if`"⟩,
+  ⟨"fn f(x: Int) -> Int { match(x) { n if n > 5 => 1, _ => 0 } }\nfn main() -> Int { f(7) }",
+    [], "error: 1:36: a pattern has no guard: test in the clause, `x => if(c) { .. } else { .. }`, or match again, found `if`"⟩,
+  ⟨"fn main() -> Int { let a: u8 = 200; let b = a as Int; b + 1 }",
+    [], "error: 1:47: `as` is not read: `int(x)` is an `Int` of a number or a character, `f64(n)` an `f64` of an `Int`, and `T::from(x)` what `From` gives, found `as`"⟩,
+  ⟨"fn f(x: Int) -> Int { match(x) { 1 | 2 => 10, _ => 0 } }\nfn main() -> Int { f(2) }",
+    [], "error: 1:36: a pattern has no alternatives: write a clause for each, or `_ =>` for the rest, found `|`"⟩,
+  ⟨"fn f(x: Int) -> Int { match(x) { 0..=9 => 1, _ => 0 } }\nfn main() -> Int { f(5) }",
+    [], "error: 1:35: a pattern has no ranges: test in the clause, `x => if(x <= 9) { .. } else { .. }`, found `.`"⟩,
+  ⟨"fn main() -> Int { let s = 42.to_string(); len(s) }",
+    [], "2"⟩,
   -- (An element of what a reference is to is borrowed through it.)
   ⟨"fn first(r: &[Int]) -> Int { let e = &r[0]; *e }\nfn main() -> Int { first(&[7, 8]) }",
     [], "7"⟩,

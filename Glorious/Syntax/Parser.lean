@@ -1217,6 +1217,8 @@ private partial def parsePostfix (noBlock : Bool) : P Expr := do
   let mut e ← parsePrimary noBlock
   repeat
     match ← peek with
+    | .ident "as" =>
+      failAt "`as` is not read: `int(x)` is an `Int` of a number or a character, `f64(n)` an `f64` of an `Int`, and `T::from(x)` what `From` gives"
     | .op "?" =>
       -- `e?` in a function: `try(e, @f)`, the value of an `Ok`, or the
       -- function gives back the `Err`. (Where what follows could not start
@@ -1231,7 +1233,7 @@ private partial def parsePostfix (noBlock : Bool) : P Expr := do
       | true, some l =>
         let id := (← read).base + (← get)
         advance
-        e := .call id (preludeFn "try") [e, .label l]
+        e := .call id (.name none "try") [e, .label l]
       | _, _ => break
     | .op "<" =>
       -- `f<A, B>(args)`: types written for the function's type parameters.
@@ -1337,7 +1339,8 @@ private partial def parsePrimary (noBlock : Bool) : P Expr := do
       let value ← match ← peek with
         | .punct ";" | .punct "}" | .punct "," | .punct ")" => pure (Expr.tuple [])
         | _ => parseBinary 0 false
-      return .call id (preludeFn "return") [value, .label l]
+      -- (`return` as it is named here, as `return(e, @f)` would call.)
+      return .call id (.name none "return") [value, .label l]
   -- A parameter that stands for a number, written as a value: the number.
   if let .ident x ← peek then
     if (← read).consts.contains x && (← peek 1) != .punct "::" then
@@ -1562,6 +1565,13 @@ private partial def parseClause : P Clause := do
     if (← peek) == .punct "=>" then pure []
     else do
       pure [← parsePattern]
+  -- (Rust's, which version 1 does not have.)
+  if (← peek) == .ident "if" then
+    failAt "a pattern has no guard: test in the clause, `x => if(c) { .. } else { .. }`, or match again"
+  if ← isOp "|" then
+    failAt "a pattern has no alternatives: write a clause for each, or `_ =>` for the rest"
+  if (← peek) == .punct ".." || (← peek) == .punct "." || (← isOp "..=") || (← isOp "..") then
+    failAt "a pattern has no ranges: test in the clause, `x => if(x <= 9) { .. } else { .. }`"
   expectPunct "=>"
   let body ← parseStmts
   pure (.mk pats body)
@@ -1643,6 +1653,10 @@ private partial def parseStmts : P (List Stmt) := do
     | .ident "match", next =>
       if operand next then
         failAt "`match` is given what it matches in parentheses: `match(x) { pattern => .. }`"
+    | .ident "if", .ident "let" =>
+      failAt "`if let` is not read: match what is tested, `match(a) { Some(x) => .., _ => .. }`"
+    | .ident "while", .ident "let" =>
+      failAt "`while let` is not read: go through an iterator with `for x in it { .. }`, or loop with `while({ condition }, { body })`"
     | .ident "if", next =>
       if operand next then
         failAt "`if` is given its condition in parentheses: `if(c) { .. } else { .. }`"
