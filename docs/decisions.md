@@ -1775,9 +1775,10 @@ type's head, and its two theorems stand unchanged.
 
 Limits. (A function of a trait could not have type parameters of its own at
 first: its evidence is one value, and Core has no value that is a function at
-every type. It can now, where the implementation is known at the call, which
-is called by name; `fn apply_to<B>(s: &Self, f: fn(Int) -> B) -> B` is used
-at two types in one program.) A trait's lifetime, `trait Borrowed<'a>`, is a name its functions' types
+every type. It can now: a function is copied for each type it is used at, so
+the implementation is known at each call, also through a bound; `fn
+apply_to<B>(s: &Self, f: fn(Int) -> B) -> B` is used at two types in one
+function generic in `M: Mapper`.) A trait's lifetime, `trait Borrowed<'a>`, is a name its functions' types
 may use, and each function is still taken alone. A trait a trait needs is
 written without arguments. `T::Item` is of a trait without parameters, and a
 trait cannot be written of it (`T::Item: Show`); what is needed of it is
