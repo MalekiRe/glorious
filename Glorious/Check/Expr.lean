@@ -733,6 +733,16 @@ partial def inferCall (scope : Scope) (amb : Row) (f : Expr) (args : List Expr)
       match ← fitAt scope amb "the value of a `let` with a type" none expected found with
       | none => return expected
       | some e => throw e
+  -- `T::f(..)` of a type parameter `T` and a trait's function `f`: as
+  -- `<T as Trait>::f(..)` is.
+  if let .name (some q) x := f then
+    if let some self := (← get).rigidParams.lookup q then
+      if let some sig := (← get).methods.lookup x then
+        if (← get).instWith.isNone then
+          modify fun s => { s with instWith := some [self] }
+          let t ← inferCall scope amb (.name (some sig.trait) x) args call
+          if (← get).instWith.isSome then modify fun s => { s with instWith := none }
+          return t
   match f with
   | .name q x =>
     match ← resolveName scope q x with

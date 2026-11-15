@@ -3519,6 +3519,10 @@ def cases : List Case := [
     [], "1"⟩,
   ⟨"use std::vec::{Vec};\nfn main() -> Int { let mut v = Vec::new(); v.push(3); v.push(1); v.push(2); v.sort(); let a = v[0] * 100 + v[1] * 10 + v[2]; v.sort_by({ (a, b) => a > b }); a * 1000 + v[0] * 100 + v[1] * 10 + v[2] }",
     [], "123321"⟩,
+  -- `T::f()` of a type parameter: the trait's function at `T`, as
+  -- `<T as Trait>::f()` is.
+  ⟨"trait Named { fn name() -> Str; fn size(s: &Self) -> Int; }\nstruct A\nstruct B(Int)\nimpl Named for A { fn name() { \"a\" } fn size(s) { 1 } }\nimpl Named for B { fn name() { \"b\" } fn size(s) { s.0 } }\nfn get<T: Named>(x: &T) -> Str { say(T::size(x)); T::name() }\nfn main() -> Int { say(get(&A)); say(get(&B(7))); 0 }",
+    [], "1\na\n7\nb\n0"⟩,
   -- (An element of what a reference is to is borrowed through it.)
   ⟨"fn first(r: &[Int]) -> Int { let e = &r[0]; *e }\nfn main() -> Int { first(&[7, 8]) }",
     [], "7"⟩,
