@@ -299,6 +299,16 @@ partial def inferExpr (scope : Scope) (amb : Row) : Expr → M Ty
       captures cap (.brand brand)
       captures cap (.loan (← freshLoan (some brand) uniq none))
       pure (.ref (if uniq then .uniq else .shared) t cap)
+    -- (A name that holds a `&mut` reference is borrowed through: `a[i] = v`
+    -- of an `a: &mut [T]` writes what `a` is to, as `(*a)[i] = v` does.)
+    | some (.val t _) => do
+      match ← find t with
+      | Ty.ref how _ _ =>
+        if uniq then
+          if let .con "&mut" [] ← find how then
+            return ← inferExpr scope amb (.reborrow true (.name none x))
+        throw s!"`{x}` is not a mutable variable, so it cannot be borrowed"
+      | _ => throw s!"`{x}` is not a mutable variable, so it cannot be borrowed"
     | some _ => throw s!"`{x}` is not a mutable variable, so it cannot be borrowed"
     | none => throw s!"unknown name `{x}`"
   | .reborrow uniq e => do

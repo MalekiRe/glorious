@@ -206,7 +206,11 @@ partial def elabExpr (scope : Scope) (tailPos : Bool) : Expr → M Atom
     | some (true, _, c) => do
       modify fun s => { s with plain := ⟨s.owner, s.pos.1, s.pos.2, x, uniq⟩ :: s.plain }
       pure c
-    | some (false, _, _) => throw s!"`{x}` is not a mutable variable, so it cannot be borrowed"
+    -- (One the checker let through holds a `&mut` reference: borrowed
+    -- through, it is that reference.)
+    | some (false, _, _) =>
+      if uniq then elabExpr scope false (.name none x)
+      else throw s!"`{x}` is not a mutable variable, so it cannot be borrowed"
     | none => throw s!"unknown name `{x}`"
   -- A reference borrowed from a reference is, to the machine, that reference.
   | .reborrow _ e => elabExpr scope false e

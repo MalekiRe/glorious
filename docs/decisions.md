@@ -4368,6 +4368,31 @@ still not: a closure kept in a data type's field is given a type that touches
 nothing, and its regions fall back to `cell0`; a data type with regions of its
 own would be needed.
 
+## Indexing through references, and a `Vec`
+
+`a[i]` was of arrays held in variables (and fields through references): a
+function given `a: &mut [T]` could not write `a[i] = v`, read `a[i]`, or
+write `a[i].f = v` (`(*a)[i]` it could), and a `Vec` could not be indexed at
+all. Now:
+
+- `&a[i]` and `a[i] = v` borrow the element with `element_at` and
+  `place_at`, which are the functions of two prelude traits, `Indexed` and
+  `IndexedMut: Indexed` (with `size_at`), implemented for arrays, `[T; N]`,
+  `Vec`, and `&A` / `&mut A` of any of them, through the reference. (As a
+  generic function over the trait, `place_at` lost covey's `spawning` its
+  region certificate: the call went through the trait's evidence. As the
+  trait's own function it is chosen by the type, as `index` is.)
+- `a[i]` reads by `Index`, now also of `Vec` and of `&A` / `&mut A` for any
+  `A: Indexed`; `len` of `&A` / `&mut A` likewise.
+- `a[i].f = v` writes the field through a borrow of the element.
+- `&mut a`, where `a` is no mutable variable but holds a `&mut` reference, is
+  a reborrow of what it is to (`&mut *a`), as the element borrow of `a[i] = v`
+  needs; Rust refuses it.
+
+Dot calls stay as they were: `v.push(x)` is the prelude's `push` of arrays,
+and `Vec::push(&mut v, x)` is how a `Vec` grows (the specification makes it
+the canonical call and leaves method sugar out).
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by

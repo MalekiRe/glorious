@@ -665,8 +665,58 @@ fn element<T>(a: &Array<T>, i: Int) -> Option<&T> {
 
 // `&a[i]` and `&mut a[i]`: the element where it is. A place that is not
 // there has no meaning: the program stops, as it does for `a[i]`.
-fn element_at<T>(a: &Array<T>, i: Int) -> &T { arr_at(a, i) }
-fn place_at<T>(i: Int, a: &mut Array<T>) -> &mut T { arr_at(a, i) }
+// What holds elements in order: one borrowed in place, to read or to write
+// through. `&a[i]` and `a[i] = v` are of these.
+trait Indexed {
+    type Element;
+    fn element_at(&Self, Int) -> &Element
+    fn size_at(&Self) -> Int
+}
+trait IndexedMut: Indexed {
+    fn place_at(Int, &mut Self) -> &mut Self::Element
+}
+impl<T> Indexed for Array<T> {
+    type Element = T;
+    fn element_at(a, i) { arr_at(a, i) }
+    fn size_at(a) { arr_len_at(a) }
+}
+impl<T> IndexedMut for Array<T> { fn place_at(i, a) { arr_at(a, i) } }
+impl<T, N> Indexed for Fixed<T, N> {
+    type Element = T;
+    fn element_at(a, i) { arr_at(&a.0, i) }
+    fn size_at(a) { arr_len_at(&a.0) }
+}
+impl<T, N> IndexedMut for Fixed<T, N> { fn place_at(i, a) { arr_at(&mut a.0, i) } }
+// A reference to one is one: `a[i]` of an `a: &mut [T]` is of what it is to.
+impl<'a, A> Indexed for &'a A where A: Indexed {
+    type Element = A::Element;
+    fn element_at(r, i) { element_at(*r, i) }
+    fn size_at(r) { size_at(*r) }
+}
+impl<'a, A> Indexed for &'a mut A where A: Indexed {
+    type Element = A::Element;
+    fn element_at(r, i) { element_at(&*(*r), i) }
+    fn size_at(r) { size_at(&*(*r)) }
+}
+impl<'a, A> IndexedMut for &'a mut A where A: IndexedMut {
+    fn place_at(i, r) { place_at(i, &mut *(*r)) }
+}
+// How many a reference's elements are, as `len` of what it is to.
+impl<'a, A> Len for &'a A where A: Indexed { fn len(r) { size_at(r) } }
+impl<'a, A> Len for &'a mut A where A: Indexed { fn len(r) { size_at(&*r) } }
+
+// `a[i]` of a reference to an array: the element, read through it. (`a[i] =
+// v` writes through it where it is, as of a variable's array.)
+impl<'a, A> Index for &'a A where A: Indexed {
+    type Elem = A::Element;
+    fn index(r, i) { *element_at(r, i) }
+    fn index_set(r, i, v) { r }
+}
+impl<'a, A> Index for &'a mut A where A: Indexed {
+    type Elem = A::Element;
+    fn index(r, i) { *element_at(&*r, i) }
+    fn index_set(r, i, v) { r }
+}
 
 // The same to write through.
 fn element_mut<T>(a: &mut Array<T>, i: Int) -> Option<&mut T> {

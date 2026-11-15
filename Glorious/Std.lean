@@ -394,6 +394,20 @@ fn put_back<T>(a: [T], off: [T]) -> [T] {
     }
 }
 
+// `v[i]`, and `v[i] = x`, as of the array it holds: a place that is not
+// there stops the program.
+impl<T> Index for Vec<T> {
+    type Elem = T;
+    fn index(v, i) { arr_get(v.items, i) }
+    fn index_set(v, i, x) { Vec { items: arr_set(v.items, i, x) } }
+}
+impl<T> Indexed for Vec<T> {
+    type Element = T;
+    fn element_at(v, i) { element_at(&v.items, i) }
+    fn size_at(v) { len_at(&v.items) }
+}
+impl<T> IndexedMut for Vec<T> { fn place_at(i, v) { place_at(i, &mut v.items) } }
+
 impl<T> Vec<T> {
     pub fn new() -> Self { Self { items: [] } }
     pub fn with_capacity(capacity: Int) -> Self { Self { items: [] } }

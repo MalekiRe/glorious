@@ -1611,7 +1611,13 @@ private partial def parseStmts : P (List Stmt) := do
         let (e, value) := match elementBorrow true e with
           | some place => (Expr.deref place, value)
           | none => lower 16 e value
+        -- (A field of an array's element, `a[i].f = v`, is written through
+        -- a borrow of the element.)
         let target := match fieldRoot e with
+          | some (.through b, path) =>
+            match elementBorrow true b with
+            | some r => Expr.deref (fieldBorrow id true (.through r) path)
+            | none => Expr.deref (fieldBorrow id true (.through b) path)
           | some (root, path) => Expr.deref (fieldBorrow id true root path)
           | none => e
         out := out ++ (← settle (.assign target value)).toArray
