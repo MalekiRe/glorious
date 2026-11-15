@@ -3468,6 +3468,11 @@ def cases : List Case := [
     [], "442"⟩,
   ⟨"fn main() -> Int { let mut xs = [1, 2, 3]; swap(&mut xs[0], &mut xs[2]); xs[0] * 100 + xs[1] * 10 + xs[2] }",
     [], "error: 1:44: in `main`: `xs` is borrowed with `&mut` while a value this expression is still using holds a `&mut` reference to it"⟩,
+  -- A braced block a clause ends with is a callable; the refusal says so.
+  ⟨"fn main() -> Int { match(Some(2)) { Some(n) => n, None => { say(1); 0 } } }",
+    [], "error: 1:20: in `main`: argument 2 of `match`: expected `fn(Result<Int, ()>) -> _`, found `fn(Result<fn() -> Int, ()>) -> fn() -> Int`. A block `{ .. }` a clause ends with is a callable; to run its statements there, write them without the braces: `pattern => a; b`"⟩,
+  ⟨"fn size(x: Option<Int>) -> Int { match(x) { Some(n) => n + 1, None => { say(1); 0 } } }\nfn main() -> Int { size(None) }",
+    [], "error: 1:71: in `size`: the result of a clause: expected `Int`, found `fn() -> Int`. A block `{ .. }` a clause ends with is a callable; to run its statements there, write them without the braces: `pattern => a; b`"⟩,
   -- (An element of what a reference is to is borrowed through it.)
   ⟨"fn first(r: &[Int]) -> Int { let e = &r[0]; *e }\nfn main() -> Int { first(&[7, 8]) }",
     [], "7"⟩,

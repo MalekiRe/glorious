@@ -4393,6 +4393,15 @@ Dot calls stay as they were: `v.push(x)` is the prelude's `push` of arrays,
 and `Vec::push(&mut v, x)` is how a `Vec` grows (the specification makes it
 the canonical call and leaves method sugar out).
 
+## A braced block a clause ends with: the refusal says what it is
+
+`Err(e) => { say(e); 0 - 1 }` is a clause whose result is a callable: braces
+make one wherever a block is not a call's argument or an operand (5.4), and a
+clause's result is neither. Written by habit from Rust, it was refused with
+`expected Int, found fn() -> Int`, or a mismatch of the whole `match`. Both
+refusals now add that such a block is a callable and that its statements are
+written without the braces to be run there. The rule itself is unchanged.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by

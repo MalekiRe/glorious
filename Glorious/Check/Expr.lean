@@ -532,6 +532,16 @@ partial def checkArgsIn (scope : Scope) (amb : Row) (what : String) (params : Li
     | some p, some a =>
       let site := if call == 0 then none else some (Elab.Site.arg call i)
       if let some e ← checkArg scope amb s!"argument {i + 1} of {what}" p a site then
+        -- (Clauses one of which ends with a braced block, which is a callable
+        -- there: likely meant to be run.)
+        let blocky := match a with
+          | .closure _ clauses => clauses.any fun
+            | .mk _ body => match body.getLast? with
+              | some (.expr e) | some (.located _ _ (.expr e)) => (Elab.plainBlock e).isSome
+              | _ => false
+          | _ => false
+        if blocky && (e.splitOn "fn() ->").length > 1 then
+          return some (i, e ++ ". A block `{ .. }` a clause ends with is a callable; to run its statements there, write them without the braces: `pattern => a; b`")
         return some (i, e)
       pushTemp p
       pushAnon a p
@@ -1052,6 +1062,15 @@ partial def inferStmts (scope : Scope) (amb : Row) (stmts : List Stmt)
       | some none => return expected
       | some (some why) => throw (resultMark ++ s!"the result of a clause: {why}")
       | none => pure ()
+    -- (A block a clause ends with is a callable, `{ .. }` as anywhere: one
+    -- wanted to be run there is written without its braces.)
+    if let (some _, some (expected, _)) := (Elab.plainBlock e, want) then
+      match ← find expected with
+      | .fn _ _ _ _ _ | .var _ => pure ()
+      | _ =>
+        let t ← inferExpr scope amb e
+        try return ← finish t true
+        catch err => throw (err ++ ". A block `{ .. }` a clause ends with is a callable; to run its statements there, write them without the braces: `pattern => a; b`")
     finish (← inferExpr scope amb e) true
   | .expr e :: rest => do
     let t ← withLater (Elab.fvStmts [] rest) (inferExpr scope amb e)
