@@ -3504,6 +3504,9 @@ def cases : List Case := [
   -- brought in where a program uses them and does not declare them.
   ⟨"fn f(e: Either<Int, Int>) -> Int { match(e) { Left(a) => a, Right(b) => b * 2 } }\nfn main() -> Int { let r = Range { start: 2, end: 5 }; f(Left(3)) + f(Right(4)) + identity(r.end - r.start) }",
     [], "14"⟩,
+  -- `Fail`, `Report` and `catch_fail`, brought in from the library by need.
+  ⟨"fn f(n: Int) -> Int / { Fail<Str> } { if(n < 0) { fail(\"negative\") } else { n * 2 } }\nfn work() -> Int / { Report<Int> } { report(1); report(2); 5 }\nfn main() -> Int { let mut seen = 0; let r = handle work() { report(d, k) => seen = seen + d; k(()) }; match(catch_fail({ f(0 - 1) })) { Ok(n) => n, Err(e) => say(e); 0 - 1 } + match(catch_fail({ f(4) })) { Ok(n) => n, Err(_) => 0 } + r * 10 + seen }",
+    [], "negative\n60"⟩,
   -- (An element of what a reference is to is borrowed through it.)
   ⟨"fn first(r: &[Int]) -> Int { let e = &r[0]; *e }\nfn main() -> Int { first(&[7, 8]) }",
     [], "7"⟩,

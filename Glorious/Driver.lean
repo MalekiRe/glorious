@@ -208,7 +208,9 @@ library (§3): each name, with its module. -/
 def stdPreludeNames : List (String × String) :=
   [("identity", "value"), ("discard", "value"), ("Either", "value"),
    ("Left", "value"), ("Right", "value"), ("Rejected", "value"), ("Ordering", "cmp"),
-   ("Less", "cmp"), ("Equal", "cmp"), ("Greater", "cmp"), ("Range", "iterator")]
+   ("Less", "cmp"), ("Equal", "cmp"), ("Greater", "cmp"), ("Range", "iterator"),
+   ("Fail", "value"), ("fail", "value"), ("Report", "value"), ("report", "value"),
+   ("catch_fail", "value")]
 
 /-- The names of the default prelude a program's text uses and does not
 declare or bring in itself: `use` lines for them, written after the text (so
@@ -240,7 +242,18 @@ def stdPreludeUses (src : String) : String := Id.run do
       (src.splitOn (k ++ name)).length > 1
   let brought := fun (name : String) =>
     (src.splitOn ("::" ++ name)).length > 1
-  let wanted := stdPreludeNames.filter fun (name, _) => mentions name && !declares name && !brought name
+  -- (An operation goes with its effect: where the text declares the effect,
+  -- or an operation of the name in an effect of its own, neither is.)
+  let opOf : List (String × String) := [("fail", "Fail"), ("report", "Report")]
+  let ownOp := fun (name : String) =>
+    (src.splitOn "effect ").drop 1 |>.any fun after =>
+      let body := ((after.splitOn "}").headD "")
+      (body.splitOn (name ++ "(")).length > 1
+  let blocked := fun (name : String) =>
+    declares name || brought name || ownOp name
+      || (opOf.lookup name).any (fun e => declares e || brought e)
+      || (opOf.find? (·.2 == name)).any (fun (op, _) => ownOp op)
+  let wanted := stdPreludeNames.filter fun (name, _) => mentions name && !blocked name
   if wanted.isEmpty then return ""
   let mods := wanted.map (·.2) |>.eraseDups
   let lines := mods.map fun m =>

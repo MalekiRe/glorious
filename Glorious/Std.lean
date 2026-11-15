@@ -1982,6 +1982,18 @@ impl<A> Default for Option<A> { fn default() { None } }
 
 // What a reference points to, taken; the type's start is left in its place.
 pub fn take<T: Default>(target: &mut T) -> T { replace(target, default()) }
+
+// A step that cannot go on, with why; and one that says something and goes
+// on (the library specification's §6.1). `catch_fail` runs a body and gives
+// `Ok` of what it gives, or `Err` of what it failed with.
+pub effect Fail<E> { fail(E) -> ! }
+pub effect Report<D> { report(D) }
+pub fn catch_fail(body) {
+    handle body() {
+        r => Ok(r),
+        fail(e) => Err(e)
+    }
+}
 "#
 
 private def errorText : String := r#"// Failures several modules share, as the library specification lists them

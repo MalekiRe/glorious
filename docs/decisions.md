@@ -4457,7 +4457,10 @@ with `Err`), `try_map_error`, `ensure(condition, @f, { error })`,
 run), `assert`, `assert_message`, `assert_eq` and `assert_ne` (of `Eq` and
 `Show`; the values are read through the references, so copied). They are in
 the part of the prelude that programs compiled without checking do not read.
-`Fail`/`Report`/`catch_fail` and `loop_at` are not built.
+`Fail<E>` (`fail(E) -> !`), `Report<D>` (`report(D)`) and `catch_fail(body)`
+are in `std::value`, brought in by need as below (not where the text
+declares the effect, or an operation of the name in an effect of its own).
+`loop_at` is not built.
 
 The specification's default prelude also has `identity`, `discard`, `Either`
 (`Left`, `Right`), `Rejected`, `Ordering` (`Less`, `Equal`, `Greater`) and
