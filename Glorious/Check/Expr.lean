@@ -1193,8 +1193,26 @@ partial def inferCall (scope : Scope) (amb : Row) (f : Expr) (args : List Expr)
     -- not be told by the name alone.)
     let callee ← try inferExpr scope amb f catch e =>
       match f with
-      | .fieldOf _ _ name =>
+      | .fieldOf _ recv name =>
         let theirs := (← get).fns.filter fun (fn, _) => fn.endsWith s!"::{name}"
+        -- (Taken for a field because some type has a field of the name: the
+        -- function of the value's type's own, if it has one; read again.)
+        if call != 0 && (e.splitOn "has no field").length > 1 then
+          let saved ← get
+          let found ← try some <$> inferExpr scope amb recv catch _ => pure none
+          let head ← match found with
+            | some ty => do
+              let rec go (fuel : Nat) (t : Ty) : M (Option String) := do
+                match fuel, ← find t with
+                | fuel + 1, .ref _ inner _ => go fuel inner
+                | _, .con n _ => pure (some n)
+                | _, _ => pure none
+              go 8 ty
+            | none => pure none
+          set saved
+          if let some h := head then
+            let own := s!"{h}::{name}"
+            if ((← get).fns.lookup own).isSome then throw (Syntax.dotOwnMark call own ++ e)
         if (e.splitOn "has no field").length > 1 && theirs.length > 1 then
           throw s!"{e}. More than one type has a function `{name}` of its own ({", ".intercalate (theirs.map fun (fn, _) => s!"`{bareName fn}`")}): say which, `Type::{name}(value, ..)`"
         else throw e
