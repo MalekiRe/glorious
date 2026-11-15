@@ -927,7 +927,7 @@ private def restClauses (clauses : List Clause) : List Clause :=
 
 mutual
 
-private partial def parsePattern : P Pattern := do
+private partial def parsePatternRest : P Pattern := do
   match ← peek with
   | .ident "_" =>
     advance
@@ -1041,6 +1041,15 @@ private partial def parsePattern : P Pattern := do
   | _ => failAt "expected a pattern"
 
 /-- Patterns separated by commas up to and including the closing `)`. -/
+private partial def parsePattern : P Pattern := do
+  match ← peek with
+  -- (A word of the language bound as a name could not be written after.)
+  | .ident w =>
+    if ["tail", "handle", "move", "fn"].contains w then
+      failAt s!"`{w}` is a word of the language: what is bound here is named otherwise"
+    parsePatternRest
+  | _ => parsePatternRest
+
 private partial def parsePatternList : P (List Pattern) := do
   let mut out : Array Pattern := #[]
   repeat

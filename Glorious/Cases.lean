@@ -3558,6 +3558,8 @@ def cases : List Case := [
   -- reference: `hs.len()` is the `Vec`'s own, given the reference as it is.
   ⟨"use std::vec::{Vec};\n\neffect Emit { emit(Str) }\n\nstruct Listener { name: Str, threshold: Int }\n\ntrait Handler {\n    fn on_value(h: &Self, value: Int) -> Bool / { Emit };\n}\n\nimpl Handler for Listener {\n    fn on_value(l, value) {\n        if(value >= l.threshold) { emit(l.name ++ \" saw \" ++ show(value)); true } else { false }\n    }\n}\n\nfn dispatch<H: Handler>(hs: &Vec<H>, value: Int) -> Int / { Emit } {\n    let mut n = 0;\n    let mut i = 0;\n    while({ i < hs.len() }) {\n        if(on_value(&hs[i], value)) { n = n + 1 } else { () };\n        i = i + 1\n    };\n    n\n}\n\nfn main() -> Int {\n    let mut hs = Vec::new();\n    hs.push(Listener { name: \"low\", threshold: 1 });\n    hs.push(Listener { name: \"high\", threshold: 10 });\n    let mut log = Vec::new();\n    let total = handle {\n        dispatch(&hs, 5) + dispatch(&hs, 15)\n    }() {\n        emit(m, k) => log.push(m); k(())\n    };\n    let mut i = 0;\n    while({ i < log.len() }) { say(log[i]); i = i + 1 };\n    total\n}\n",
     [], "low saw 5\nlow saw 15\nhigh saw 15\n3"⟩,
+  ⟨"fn f(o: Option<Int>) -> Int { match(o) { Some(tail) => tail, None => 0 } }\nfn main() -> Int { f(Some(1)) }",
+    [], "error: 1:47: `tail` is a word of the language: what is bound here is named otherwise, found `tail`"⟩,
   -- (An element of what a reference is to is borrowed through it.)
   ⟨"fn first(r: &[Int]) -> Int { let e = &r[0]; *e }\nfn main() -> Int { first(&[7, 8]) }",
     [], "7"⟩,
