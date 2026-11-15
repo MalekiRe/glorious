@@ -3852,6 +3852,11 @@ def cases : List Case := [
     [], "3\n4"⟩,
   ⟨"use std::collections::HashMap;\n\nfn main() {\n    let text = \"hello world wonderful world\";\n\n    let mut map = HashMap::new();\n\n    for word in text.split_whitespace() {\n        let count = map.entry(word).or_insert(0);\n        *count += 1;\n    }\n\n    println!(\"{}\", map.get(&\"world\").unwrap());\n    println!(\"{}\", map.len());\n}",
     [], "2\n3\n()"⟩,
+  -- A whole number a clause of a match ends with is of the result wanted, `u8`.
+  ⟨"fn f(c: Int) -> u8 { match c { 1 => 5, _ => 10 } }\nfn main() -> Int { int(f(1)) }",
+    [], "5"⟩,
+  ⟨"fn f(c: Int) -> u8 { match c { 1 => { say(1); 5 } _ => 10 } }\nfn main() -> Int { int(f(1)) }",
+    [], "1\n5"⟩,
   -- (An element of what a reference is to is borrowed through it.)
   ⟨"fn first(r: &[Int]) -> Int { let e = &r[0]; *e }\nfn main() -> Int { first(&[7, 8]) }",
     [], "7"⟩,

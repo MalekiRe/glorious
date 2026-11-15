@@ -501,6 +501,14 @@ partial def checkArg (scope : Scope) (amb : Row) (what : String) (p : Ty) (a : E
       let everyLifetime ← match ← find p with
         | .fn _ _ _ _ cap => rankedOf cap
         | _ => pure []
+      -- (What the callable is to give, where that is known: a whole number
+      -- a clause ends with is then of it, `u8`.)
+      let knownRet ← match ← find p with
+        | .fn _ r _ _ _ => do
+          match ← find r with
+          | .con n [] => pure (if n == "Int" || Syntax.isScalar n then some r else none)
+          | _ => pure none
+        | _ => pure none
       let mut annots : List (Option Ty) := []
       -- A parameter known to be of a declared type is said too, so that
       -- what the clauses do with it, a field read by name, is looked at
@@ -546,7 +554,7 @@ partial def checkArg (scope : Scope) (amb : Row) (what : String) (p : Ty) (a : E
       if arity == ps.length && widened then
         let saved ← get
         let tried ← try
-            let t ← inferCallable scope wider none none clauses "the clauses of this callable do" id
+            let t ← inferCallable scope wider knownRet none clauses "the clauses of this callable do" id
             if let .fn _ _ _ _ cap := t then
               modify fun s => { s with blockCaps := s.blockCaps.push (id, cap) }
             pure (if (← fitAt scope amb what site p t).isNone then none else some "")
@@ -564,14 +572,14 @@ partial def checkArg (scope : Scope) (amb : Row) (what : String) (p : Ty) (a : E
             modify fun s => { s with firstSaid := s.firstSaid <|> some said }
             try
               if arity == ps.length && annots.any (·.isSome) then
-                let t ← inferCallable scope annots none none clauses "the clauses of this callable do" id
+                let t ← inferCallable scope annots knownRet none clauses "the clauses of this callable do" id
                 if let .fn _ _ _ _ cap := t then
                   modify fun s => { s with blockCaps := s.blockCaps.push (id, cap) }
                 return ← fitAt scope amb what site p t
               return ← fitAt scope amb what site p (← inferExpr scope amb a)
             catch _ => throw said
       if arity == ps.length && annots.any (·.isSome) then
-        let t ← inferCallable scope annots none none clauses "the clauses of this callable do" id
+        let t ← inferCallable scope annots knownRet none clauses "the clauses of this callable do" id
         if let .fn _ _ _ _ cap := t then
           modify fun s => { s with blockCaps := s.blockCaps.push (id, cap) }
         return ← fitAt scope amb what site p t
@@ -865,6 +873,15 @@ partial def applyTy (scope : Scope) (amb : Row) (what : String) (callee : Ty) (a
   let (callee, _) ← openRanked callee
   match ← find callee with
   | .fn ps r effs tail _ => do
+    -- (What the call's result is wanted to be, where a body ends with it and
+    -- the result is open: known before the arguments are read, so that a
+    -- whole number a clause given ends with is of it.)
+    if let some (c, w) := (← get).wantResult then
+      if c == call && call != 0 then
+        modify fun s => { s with wantResult := none }
+        if let .var _ ← find r then
+          let saved ← get
+          try unify r w catch _ => set saved
     checkArgs scope amb what ps args call
     if call != 0 && (← get).anyMust then
       let row ← flattenRow ⟨effs, tail⟩
@@ -1561,6 +1578,12 @@ partial def inferStmts (scope : Scope) (amb : Row) (stmts : List Stmt)
     modify fun s => { s with unsafeBlock := before }
     pure t
   | [.expr e] => do
+    -- (A call a body ends with whose result is wanted to be a whole number
+    -- of a type: said to the call, `match x { .. => 5 }` of a `u8`.)
+    if let (.call id _ _, some (expected, _)) := (e, want) then
+      if let .con n [] ← find expected then
+        if Syntax.isScalar n then
+          modify fun s => { s with wantResult := some (id, expected) }
     -- A whole number a body ends with is of the type wanted of the body.
     if let (.int n, some (expected, _)) := (e, want) then
       match ← literalAt expected n with
