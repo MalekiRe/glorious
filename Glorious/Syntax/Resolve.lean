@@ -243,14 +243,21 @@ partial def receiverExpr (taken : List (String × Bool)) (known : List (String �
       if mark == receiverMark then
         -- The name a path of fields starts at, and the path.
         let rec place : Expr → Option (String × List String × Nat)
-          | .name none x => if (known.lookup x).any (· != 0) then some (x, [], 0) else none
+          | .name none x => if (known.lookup x).any (fun k => k != 0 && k != 3) then some (x, [], 0) else none
           | .fieldOf fid e field => (place e).map fun (x, path, _) => (x, path ++ [field], fid)
           | .proj e n => (place e).map fun (x, path, fid) => (x, path ++ [toString n], fid)
           | _ => none
-        let given := match taken.lookup name, place receiver with
-          | some uniq, some (x, [], _) => Expr.ref uniq x
-          | some uniq, some (x, path, fid) => if fid == 0 then receiver else .refField fid uniq x path false
-          | _, _ => receiver
+        -- (A field of what a `&mut` parameter points to, `p.items`.)
+        let rec throughRef : Expr → Option (String × List String × Nat)
+          | .fieldOf fid (.name none x) field =>
+            if known.lookup x == some 3 then some (x, [field], fid) else none
+          | .fieldOf fid e field => (throughRef e).map fun (x, path, _) => (x, path ++ [field], fid)
+          | _ => none
+        let given := match taken.lookup name, place receiver, throughRef receiver with
+          | some uniq, some (x, [], _), _ => Expr.ref uniq x
+          | some uniq, some (x, path, fid), _ => if fid == 0 then receiver else .refField fid uniq x path false
+          | some uniq, none, some (x, path, fid) => .refField fid uniq x path true
+          | _, _, _ => receiver
         .call id (.name q name) (given :: rest)
       else .call id f args
     | _, _ => .call id f args
@@ -269,7 +276,8 @@ partial def receiverExpr (taken : List (String × Bool)) (known : List (String �
 partial def receiverClause (taken : List (String × Bool)) (known : List (String × Nat))
     (values : List String) : Clause → Clause
   | .mk pats body =>
-    let named := (pats.flatMap patternNames).map fun x => (x, if values.contains x then 2 else 0)
+    let named := (pats.flatMap patternNames).map fun x =>
+      (x, if values.contains x then 2 else if known.lookup x == some 3 then 3 else 0)
     .mk pats (receiverStmts taken (named ++ known) body)
 
 partial def receiverStmts (taken : List (String × Bool)) (known : List (String × Nat)) :
@@ -309,7 +317,13 @@ partial def borrowReceivers (items : List Item) : List Item :=
             | (.var _, some (.ref _ _ _)) => none
             | (.var x, some _) => some x
             | _ => none
-        receiverClause taken [] values c)
+        -- (Those written with a reference's type: a field of what one points
+        -- to is borrowed through it.)
+        let refs : List String := match c with
+          | .mk pats _ => (pats.zip annots).filterMap fun
+            | (Pattern.var x, some (TypeExpr.ref _ _ _)) => some x
+            | _ => none
+        receiverClause taken (refs.map (·, 3)) values c)
     | .impl ps tr head args context methods => .impl ps tr head args context (methods.map go)
     | .traitInfo name supers defaults params assocs => .traitInfo name supers (defaults.map go) params assocs
     | .alias name value => .alias name (receiverExpr taken [] value)

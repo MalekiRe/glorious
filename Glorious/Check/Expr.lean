@@ -1496,8 +1496,13 @@ partial def inferCallable (scope : Scope) (annots : List (Option Ty)) (ret : Opt
   let unsafeBefore := (← get).unsafeBlock
   modify fun s => { s with unsafeBlock := false }
   let brand ← freshBrand
+  -- (Written `@f` also for a function of a module or a type's own,
+  -- `m::f` or `T::f`.)
   let scope := match self with
-    | some name => ("@" ++ name, Binding.label result brand) :: scope
+    | some name =>
+      let short := Syntax.lastSegment name
+      let scope := ("@" ++ name, Binding.label result brand) :: scope
+      if short != name then ("@" ++ short, Binding.label result brand) :: scope else scope
     | none => scope
   -- Where the result of clause `j` can be converted, if this callable is one
   -- the elaborator can be told about.

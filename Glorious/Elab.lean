@@ -1770,8 +1770,13 @@ def collect (items : List Item) :
 scope, so applying the label returns from the function. -/
 private def withSelfLabel (name : String) : Clause → Clause
   | .mk pats body =>
-    if (fvStmts (pats.flatMap patVars) body).contains (labelName name) then
+    let free := fvStmts (pats.flatMap patVars) body
+    let short := Syntax.lastSegment name
+    if free.contains (labelName name) then
       .mk pats [.expr (.labelScope name body)]
+    -- (`@f` of `m::f` or `T::f`.)
+    else if short != name && free.contains (labelName short) then
+      .mk pats [.expr (.labelScope short body)]
     else .mk pats body
 
 /-- The program without the functions nothing reaches from `main` or from a

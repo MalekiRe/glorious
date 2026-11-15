@@ -1164,6 +1164,12 @@ private partial def parseUnary (noBlock : Bool) : P Expr := do
           | e =>
             if let some at_ := elementBorrow uniq e then return at_
             match fieldRoot e with
+            -- (A field of an array's element, `&a[i].f`: through a borrow of
+            -- the element.)
+            | some (.through b, path) =>
+              match elementBorrow uniq b with
+              | some r => pure (fieldBorrow id uniq (.through r) path)
+              | none => pure (fieldBorrow id uniq (.through b) path)
             | some (root, path) => pure (fieldBorrow id uniq root path)
             -- A value with no name: it is given one where the statement
             -- starts, and that is borrowed.

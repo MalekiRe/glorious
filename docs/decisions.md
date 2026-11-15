@@ -4490,6 +4490,26 @@ says its own. The specification's other fundamental traits stay as this
 prelude has them (`Eq` with `==` of values, `Show`), not `PartialEq` with
 `eq` of references or `Display`/`Debug` with a `Formatter`.
 
+## A task board, and what it took
+
+A program of a type with its own functions (`impl Board { fn add(b: &mut
+Board, ..) }`), a `Vec` of records in a field, an effect for logging, and
+early returns, written as a Rust programmer would, needed:
+
+- `b.tasks.push(t)` where `b` is a parameter written with a reference's type:
+  the field of what `b` points to is borrowed for the call (`&mut (*b).tasks`)
+  where the function takes a reference first. Before, only fields of
+  variables and of names known to hold values were.
+- `return(Err(..), @finish)` in `Board::finish`, and `@f` in a module's
+  `m::f`: a function's label answers to its name as written as well as its
+  full one (the checker binds both; the elaborator opens the scope under the
+  one the body uses).
+- `&b.tasks[i].status`: a field of an array's element, borrowed through a
+  borrow of the element (as `a[i].f = v` writes through one).
+
+The program is a case; it is shown well owned with regions and loans, with 6
+borrows that are not scopes of their own.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by
