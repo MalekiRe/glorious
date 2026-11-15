@@ -1124,6 +1124,20 @@ private partial def parseBinary (minPrec : Nat) (noBlock : Bool)
       lhs := .call id (.name qual f) [lhs, rhs]
     | none =>
       match t with
+      -- `a..b`, `a..=b`: the whole numbers from `a` up to `b`, without it and
+      -- with it (`std::iterator::range`), looser than any operator.
+      | .punct "." =>
+        if minPrec > 0 || (← peek 1) != .punct "." then break
+        let id := (← read).base + (← get) + 1
+        advance; advance
+        let inclusive ← acceptPunct "="
+        let upper ← parseBinary 1 noBlock
+        let fix := (← read).fix
+        let upper := if inclusive then
+            let (qual, f) := splitPath ((fix.function "+" false).splitOn "::")
+            Expr.call (id + 300000) (.name qual f) [upper, .int 1]
+          else upper
+        lhs := .call id (.name (some "std::iterator") "range") [lhs, upper]
       -- `a && b`, `a || b`: `a and { b }`, `a or { b }`, as Rust has them.
       | .op "&&" | .op "||" =>
         let word := if t == .op "&&" then "and" else "or"
@@ -1363,6 +1377,8 @@ private partial def parsePostfix (noBlock : Bool) : P Expr := do
         advance
         advance
         e := .fieldOf id e field
+      -- (`a..b`: a range, read where operators are.)
+      | .punct "." => break
       | _ => failAt "expected a field after `.`"
     | _ => break
   pure e

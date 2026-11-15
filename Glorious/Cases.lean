@@ -3741,6 +3741,15 @@ def cases : List Case := [
     [], "hi d\n0"⟩,
   ⟨"use std::ops::Neg;\nstruct V(Int)\nimpl Neg for V { type Output = V; fn neg(self) -> V { V(0 - self.0) } }\nfn main() -> Int { let v = -V(3); v.0 }",
     [], "-3"⟩,
+  -- Ranges `a..b`, `a..=b`; loops in a program that names no library.
+  ⟨"fn main() -> Int { let v = Vec::from_array([1, 2, 3]); let mut t = 0; for i in 0..v.len() { t += v[i] }; t }",
+    [], "6"⟩,
+  ⟨"fn main() -> Int { let mut t = 0; for i in 0..4 { t += i }; t }",
+    [], "6"⟩,
+  ⟨"fn main() -> Int { let mut t = 0; for i in 1..=4 { t += i }; t }",
+    [], "10"⟩,
+  ⟨"fn main() -> Int { let mut n = 0; for c in \"abc\".chars() { n += 1 }; n }",
+    [], "3"⟩,
   -- (An element of what a reference is to is borrowed through it.)
   ⟨"fn first(r: &[Int]) -> Int { let e = &r[0]; *e }\nfn main() -> Int { first(&[7, 8]) }",
     [], "7"⟩,

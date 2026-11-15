@@ -228,10 +228,27 @@ def iteratorDotNames : List String :=
 declare or bring in itself: `use` lines for them, written after the text (so
 that no position in it moves). Where the text names no library, none. -/
 def stdPreludeUses (src : String) : String := Id.run do
+  -- (A `for` loop and a range `a..b` are read as calls of `std::iterator`'s
+  -- functions by their full names: the module is named for the loader.)
+  let loops := (src.splitOn "for ").length > 1 && (src.splitOn " in ").length > 1
+  -- (`a..b` with something on either side: not a pattern's `..`.)
+  let ranges := Id.run do
+    let parts := src.splitOn ".."
+    let mut found := false
+    for (before, after) in parts.zip (parts.drop 1) do
+      let prev := before.toList.getLast?
+      let next := after.toList.head?
+      let leftOk := prev.any fun c => c.isAlphanum || c == ')' || c == ']' || c == '_'
+      let rightOk := next.any fun c => c.isAlphanum || c == '(' || c == '=' || c == '_' || c == '-'
+      if leftOk && rightOk then found := true
+    pure found
+  let loopNote := if (loops || ranges) && (src.splitOn "std::iterator").length == 1
+      && (src.splitOn "#![no_std]").length == 1 && (src.splitOn "mod std").length == 1
+    then "\n// std::iterator\n" else ""
   -- (Nor where the text brings in whole modules, whose names could be any.)
   if (src.splitOn "#![no_std]").length > 1 || (src.splitOn "#![no_implicit_prelude]").length > 1
       || (src.splitOn "mod std").length > 1 || (src.splitOn "::*").length > 1 then
-    return ""
+    return loopNote
   let isWord := fun (c : Char) => c.isAlphanum || c == '_'
   -- (Written as a name of its own: not after `::`, `.` or another letter,
   -- nor before one.)
@@ -279,11 +296,12 @@ def stdPreludeUses (src : String) : String := Id.run do
   let wanted := stdPreludeNames.filter fun (name, _) => mentions name && !blocked name
   let wanted := wanted ++ (textDots.filter (fun n => !wanted.any (·.1 == n))).map (·, "text")
   let wanted := wanted ++ (iterDots.filter (fun n => !wanted.any (·.1 == n))).map (·, "iterator")
-  if wanted.isEmpty then return ""
+  let note := if wanted.any (·.2 == "iterator") then "" else loopNote
+  if wanted.isEmpty then return note
   let mods := wanted.map (·.2) |>.eraseDups
   let lines := mods.map fun m =>
     s!"use std::{m}::\{{", ".intercalate ((wanted.filter (·.2 == m)).map (·.1))}};"
-  return "\n" ++ "\n".intercalate lines ++ "\n"
+  return "\n" ++ "\n".intercalate lines ++ "\n" ++ note
 
 /-- Does a program have the standard library: does it name `std`, and have no
 module `std` of its own? -/
