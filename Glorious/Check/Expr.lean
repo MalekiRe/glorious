@@ -486,6 +486,9 @@ partial def checkArg (scope : Scope) (amb : Row) (what : String) (p : Ty) (a : E
       -- `SliceIter` gives, found first where it can be.)
       if ← ps.anyM (fun q => do pure !(freeTys (← zonk q)).isEmpty) then
         settleAssocsAll
+      let everyLifetime ← match ← find p with
+        | .fn _ _ _ _ cap => rankedOf cap
+        | _ => pure []
       let mut annots : List (Option Ty) := []
       -- A parameter known to be of a declared type is said too, so that
       -- what the clauses do with it, a field read by name, is looked at
@@ -501,9 +504,20 @@ partial def checkArg (scope : Scope) (amb : Row) (what : String) (p : Ty) (a : E
           | .tuple (_ :: _) => pure true
           -- (A reference to a type with named fields: what they are is
           -- known where the clauses read them through it.)
+          -- (And a reference to a number, `&Int`, an iterator's item, where
+          -- the callable wanted is not one for every lifetime.)
           | .ref _ inner _ => do
             match ← find inner with
             | .tuple (_ :: _) => pure true
+            | .con name [] =>
+              if name == "Int" || Syntax.isScalar name then pure everyLifetime.isEmpty
+              else
+                let st ← get
+                pure (match st.types.lookup name with
+                  | some decl => match decl.ctors with
+                    | [c] => (st.fieldNames.lookup c).isSome
+                    | _ => false
+                  | none => false)
             | .con name _ =>
               let st ← get
               pure (match st.types.lookup name with
@@ -879,8 +893,10 @@ partial def inferCall (scope : Scope) (amb : Row) (f : Expr) (args : List Expr)
             | some (.cell t _) => some t
             | _ => none
           if let some t := held then
+            -- (What a trait leaves to an implementation, found first: an
+            -- iterator's items, `&'a T`.)
+            if let .var _ ← find t then settleAssocsAll
             if let .ref _ inner _ ← find t then
-              -- (What a trait leaves to an implementation, found first.)
               if let .var _ ← find inner then settleAssocsAll
               -- (A number or a character; or, to what shows a value or joins
               -- texts, any value that may be used more than once, a `Str`.)

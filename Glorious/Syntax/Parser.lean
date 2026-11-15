@@ -1531,6 +1531,9 @@ private partial def parsePrimary (noBlock : Bool) : P Expr := do
       [.call id (.name (some trait) name) args, (TypeExpr.tuple (self :: targs)).asExpr])
   | .ident "move" =>
     advance
+    -- (`move |x| body`: Rust's callable that holds what it names, as every
+    -- callable here does.)
+    if (← peek) == .op "|" || (← peek) == .op "||" then return ← parsePrimary noBlock
     -- `move (a, b) { body }`: the block, holding the values `a` and `b`
     -- have where it is written. It is a callable given them at once.
     if (← peek) == .punct "(" then
@@ -1635,8 +1638,29 @@ private partial def parsePrimary (noBlock : Bool) : P Expr := do
     | [e] => if ← closedAfterComma then pure (.tuple [e]) else pure e
     | _ => pure (.tuple args)
   | .punct "{" => parseBraces
-  | .op "|" => failAt "a callable is written `{ x => body }`, or `fn(x) { body }`; `|x| body` is not read"
-  | .op "||" => failAt "a callable is written `{ => body }`, or `fn() { body }`; `|| body` is not read"
+  -- `|x| body`, `|a, b| body`, `|| body`: Rust's callables, `{ x => body }`,
+  -- `fn(a, b) { body }`, `{ => body }`. (A pattern's written type is read
+  -- and left to be found.)
+  | .op "|" | .op "||" =>
+    let id := (← read).base + (← get)
+    let none_ := (← peek) == .op "||"
+    advance
+    let mut pats : Array Pattern := #[]
+    if !none_ then
+      repeat
+        if ← isOp "|" then break
+        pats := pats.push (← parsePattern)
+        if ← acceptPunct ":" then let _ ← parseType
+        if !(← acceptPunct ",") then break
+      expectOp "|"
+    let _ ← if ← acceptPunct "->" then some <$> parseType else pure none
+    let body ← if (← peek) == .punct "{" then do
+        advance
+        let stmts ← parseStmts
+        expectPunct "}"
+        pure stmts
+      else pure [Stmt.expr (← parseBinary 0 noBlock)]
+    pure (.closure id [.mk pats.toList body])
   | _ => failAt "expected an expression"
 
 /-- A callable literal in braces. -/

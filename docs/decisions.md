@@ -4707,6 +4707,14 @@ and `while({ e is P }) { .. }`: the language's `is`, whose names the block
 has. Names an `is` binds that the block borrows are kept where a reference
 can point, as a clause's are. `let else` stays unread.
 
+## Rust's callables
+
+`|x| body`, `|a, b| body`, `|| body` and `move |x| body` are `{ x => body }`,
+`fn(a, b) { body }` and `{ => body }`: a written parameter type or result
+type is read and left to be found; a braced body is the statements. Every
+callable here holds what it names, so `move` adds nothing. `||` after an
+operand is still `or`.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by
