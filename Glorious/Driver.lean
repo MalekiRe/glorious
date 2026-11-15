@@ -385,6 +385,20 @@ def neededStd (texts : List String) : Option (List (List String × String)) :=
       some (usedRoots.map (fun r => ([r], rootOf r))
         ++ Std.texts.filter fun (path, _) => needed.contains path)
 
+/-- The library's texts, each lexed once in a process, where it is first
+read: a compile reads a module's tokens three times (for its fixities, its
+syntax and its items). -/
+def stdLexed : List (List String × Thunk (Except String (Array Syntax.Token))) :=
+  Std.texts.map fun (path, text) => (path, Thunk.mk fun _ => Syntax.lex text)
+
+/-- A library module's tokens, if this is its text as the library has it (a
+compile that reads only some modules reads a root that names only those). -/
+def stdTokens (path : List String) (text : String) : Option (Array Syntax.Token) :=
+  if (Std.texts.lookup path) != some text then none else
+  (stdLexed.lookup path).bind fun th => match th.get with
+    | .ok toks => some toks
+    | .error _ => none
+
 /-- The prelude and a program as written: the first module's text, and the
 texts of the modules that are files of their own, each with its path. Where
 the program says `mod name;` the items of that module's text are put. -/
@@ -422,8 +436,9 @@ def parseProgram (src : String) (files : List (List String × String)) (check : 
   let unread ← match read with
     | some _ => pure []
     | none => (if std then library else []).mapM fun (path, text) => do
-        let _ ← Syntax.declaredSyntax fix text
-        Syntax.textSyntax path text
+        let lexed := stdTokens path text
+        let _ ← Syntax.declaredSyntax fix text lexed
+        Syntax.textSyntax path text lexed
   let librarySaid := match read with
     | some r => r.said
     | none => unread
@@ -470,7 +485,7 @@ def parseProgram (src : String) (files : List (List String × String)) (check : 
               let text := ((files[k]?).map (·.2)).getD ""
               match Syntax.parse fix text (base := 1000000 * (k + 2)) (records := records)
                   (tables := tables) (path := here) (fixed := fixed && k ≥ (if std then library.length else 0))
-                  (packs := packs) with
+                  (packs := packs) (lexed := if k < library.length then stdTokens here text else none) with
               | .ok (items, _) => pure items
               | .error e => throw s!"module `{shown}`: {e}"
           pure (wrap (.module name (some (← fill fuel here parsed))))

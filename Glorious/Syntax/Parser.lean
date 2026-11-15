@@ -2604,8 +2604,11 @@ private def collectFixities (toks : Array Token) (fix : Fixities)
 /-- What a text declares that has to be known before any text of the program
 is parsed: its operators, added to `fix`, and its constructors with named
 fields. -/
-def declaredSyntax (fix : Fixities) (src : String) : Except String (Fixities × List String) := do
-  let toks ← lex src
+def declaredSyntax (fix : Fixities) (src : String) (lexed : Option (Array Token) := none) :
+    Except String (Fixities × List String) := do
+  let toks ← match lexed with
+    | some toks => pure toks
+    | none => lex src
   pure (← collectFixities toks fix, collectRecords toks)
 
 /-- The modules a text says are files of their own, `mod name;`: each as its
@@ -2686,8 +2689,11 @@ structure TextSyntax where
   names : List String
 
 /-- That, for the text that is the module `base`. -/
-def textSyntax (base : List String) (src : String) : Except String TextSyntax := do
-  let toks ← lex src
+def textSyntax (base : List String) (src : String) (lexed : Option (Array Token) := none) :
+    Except String TextSyntax := do
+  let toks ← match lexed with
+    | some toks => pure toks
+    | none => lex src
   let mods := tokenModules toks
   let tok := fun (i : Nat) => (toks[i]?.map (·.tok)).getD .eof
   let mut own : List (List String × Fixities) := []
@@ -3022,11 +3028,13 @@ With `tables`, each module of the text has the operators the table gives it,
 and the text is the module `path`. -/
 def parse (fix : Fixities) (src : String) (base : Nat := 0) (records : List String := [])
     (tables : List (List String × Fixities) := []) (path : List String := [])
-    (fixed : Bool := false) (packs : Nat := 0) :
+    (fixed : Bool := false) (packs : Nat := 0) (lexed : Option (Array Token) := none) :
     Except String (List Item × Fixities) := do
   -- (`packs`: how long lists of types are written out to; by default, as
   -- long as the longest list this text writes.)
-  let toks ← lex src
+  let toks ← match lexed with
+    | some toks => pure toks
+    | none => lex src
   let toks := expandPacks toks (if packs == 0 then max 2 (longestList toks) else packs)
   let fix ← if tables.isEmpty then collectFixities toks fix else pure ((tables.lookup path).getD fix)
   let (items, _, local_) ← parseItems
