@@ -1507,6 +1507,9 @@ def finish : M Elab.Blocks := do
       if let some scheme := (← get).fns.lookup f then
         let t ← zonk (← instantiate scheme)
         for n in namedIn t do
+          -- (A type's own function is named through the type: where the
+          -- type cannot be written, neither can the function, `pub` or not.)
+          if f.startsWith (n ++ "::") then continue
           if let some home := info.privTypes.lookup n then
             if info.homes.lookup f == some home then
               throw s!"`{Syntax.lastSegment f}` is `pub`, but its type, `{showTy t}`, has `{Syntax.lastSegment n}` in it, which is private to its module: one who calls `{Syntax.lastSegment f}` could not write that type (`pub struct` with fields that are not `pub` keeps what is inside private)"

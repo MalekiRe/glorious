@@ -3576,6 +3576,10 @@ def cases : List Case := [
     [], "error: 1:28: a callable is written `{ x => body }`, or `fn(x) { body }`; `|x| body` is not read, found `|`"⟩,
   ⟨"fn main() -> Int { let x = 0.0 - 2.5; say(x.abs()); let n = 0 - 4; n.abs() }",
     [], "2.5\n4"⟩,
+  -- A private type's own `pub` functions may mention it; Rust's receivers,
+  -- field shorthand, an iterator over a `Vec` mapped and folded.
+  ⟨"use std::vec::{Vec};\nuse std::iterator::{Iterator, map, fold};\n\nstruct Point { x: Int, y: Int }\n\nimpl Point {\n    pub fn new(x: Int, y: Int) -> Self { Point { x, y } }\n    pub fn manhattan(&self) -> Int { self.x.abs() + self.y.abs() }\n}\n\nfn main() -> Int {\n    let mut pts = Vec::new();\n    pts.push(Point::new(1, 2));\n    pts.push(Point::new(0 - 3, 4));\n    let mut it = pts.iter().map({ p => p.manhattan() });\n    fold(&mut it, 0, { (a, b) => a + b })\n}\n",
+    [], "10"⟩,
   -- (An element of what a reference is to is borrowed through it.)
   ⟨"fn first(r: &[Int]) -> Int { let e = &r[0]; *e }\nfn main() -> Int { first(&[7, 8]) }",
     [], "7"⟩,
