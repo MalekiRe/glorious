@@ -302,6 +302,20 @@ partial def leavesFitting (pos key : String) (t : Ty) (args : List Ty) (owner : 
     out := out ++ (← leavesFitting pos (← subKey tr subject cargs) subject cargs owner (this :: via))
   pure out
 
+/-- A dot call of a trait's function, of a value whose type does not
+implement the trait but has a function of the name of its own: that one,
+and the program read again (`Syntax.dotOwnMark`). -/
+def dotOwnInstead (call : Nat) (ty : Ty) (said : String) : M Unit := do
+  if let some alts := (← get).modules.dotAlts.lookup call then
+    let rec head (fuel : Nat) (t : Ty) : M (Option String) := do
+      match fuel, ← find t with
+      | fuel + 1, .ref _ inner _ => head fuel inner
+      | _, .con n _ => pure (some n)
+      | _, _ => pure none
+    if let some h ← head 8 ty then
+      if let some alt := alts.find? (·.startsWith (h ++ "::")) then
+        throw (Syntax.dotOwnMark call alt ++ said)
+
 /-- Meet the bounds of the group just inferred, and give each of its functions
 its type. A bound on a type the function is generic in becomes something the
 function is given; every other is met by `Traits.solve`. -/
@@ -560,7 +574,9 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
     -- (How to destroy a type that nothing decides is not asked for.)
     let ls ← try (if (← get).patterned && b.trait != Syntax.destroyTrait then leavesFitting b.pos b.trait b.ty b.args b.owner
         else leaves b.pos b.trait b.ty) catch e =>
-      if b.trait == Syntax.destroyTrait then pure [] else throw (inFunction b.owner e)
+      if b.trait == Syntax.destroyTrait then pure [] else do
+        dotOwnInstead b.call b.ty e
+        throw (inFunction b.owner e)
     for l in ls do
       unless leafs.any (fun x => x.1 == l.1 && x.2.1 == l.2.1) do leafs := leafs.push l
   -- What a type parameter's trait says it performs stays a row of its own:
@@ -830,6 +846,10 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
     | some d => table := record table b.call (toDictE impls d)
     | none =>
       if b.trait == Syntax.destroyTrait then continue
+      -- (A dot call of a trait's function, of a value whose type does not
+      -- implement the trait but has a function of the name of its own: that
+      -- one, and the program read again.)
+      dotOwnInstead b.call b.ty s!"{b.pos}`{b.trait}` is not implemented"
       for (tr, k, t) in ← leaves b.pos b.trait b.ty do
         unless givens.contains (tr, k) do
           match t with

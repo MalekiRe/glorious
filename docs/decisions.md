@@ -4431,6 +4431,23 @@ the reference. The second reading costs only programs that need it.
 refused as an unknown name; a name written with a capital is now borrowed as
 a value is.
 
+## A dot call of a type's own function, where the one in scope does not fit
+
+`v.push(3)` for a `Vec` called the prelude's `push` of arrays: a dot call
+`value.f(a)` was `f(value, a)` with whatever `f` is in scope, and a type's
+own `T::f` only where no `f` is. (The specification has no dot calls; the
+canonical spelling is `Vec::push(&mut v, 3)`, which stays.) The resolver,
+which does not know types, now notes such calls with the types' own
+functions of the name that it can see (`ModuleInfo.dotAlts`). Where the
+checker finds the value's type has one of them and the function in scope does
+not fit (its first parameter, its number of arguments, or the trait it is of
+is not implemented for the type), it says so (`Syntax.dotOwnMark`) and the
+program is read again with that call of the type's own function
+(`Elab.dotOwnItems`, `%own:` in the resolver), whose receiver is then
+borrowed as its first parameter says. Nothing changes where the function in
+scope fits. `v.push(3); v.len()` and `p.get()` of `impl P { fn get(p: &P) }`
+work; compile times of the examples are as they were.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by

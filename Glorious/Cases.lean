@@ -3484,6 +3484,12 @@ def cases : List Case := [
     [], "42"⟩,
   ⟨"enum Shape { Dot, Line(Int) }\nfn size(s: &Shape) -> Int { match(s) { Dot => 0, Line(n) => n } }\nfn main() -> Int { size(&Line(3)) }",
     [], "error: 2:61: in `size`: the result of a clause: expected `Int`, found `&Int`"⟩,
+  -- A dot call whose function in scope does not fit the value, of a type
+  -- with a function of that name of its own: that one.
+  ⟨"use std::vec::{Vec};\nfn main() -> Int { let mut v = Vec::new(); v.push(3); v.push(4); v.len() * 10 + v[1] }",
+    [], "24"⟩,
+  ⟨"struct P(Int)\nimpl P { fn get(p: &P) -> Int { p.0 } }\nfn main() -> Int { let p = P(4); p.get() }",
+    [], "4"⟩,
   -- (An element of what a reference is to is borrowed through it.)
   ⟨"fn first(r: &[Int]) -> Int { let e = &r[0]; *e }\nfn main() -> Int { first(&[7, 8]) }",
     [], "7"⟩,

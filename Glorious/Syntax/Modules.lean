@@ -140,6 +140,8 @@ structure St where
   bare : Bool := false
   /-- How many names this pass has made up. -/
   fresh : Nat := 0
+  /-- Dot calls with a function in scope and types' own of the same name. -/
+  dotAlts : List (Nat × List String) := []
 
 abbrev R := StateT St (Except String)
 
@@ -1088,9 +1090,28 @@ partial def resolveExpr (ctx : Ctx) (bound : List String) : Expr → R Expr
     -- function that can be named here. (Where it is neither, `f` is a field
     -- that holds a callable, as it was.)
     if let .fieldOf _ receiver name := f then
+      -- (One the checker chose a type's own function for: that one.)
+      if name.startsWith "%own:" then
+        let receiver ← resolveExpr ctx bound receiver
+        let args ← args.mapM (resolveExpr ctx bound)
+        return .call id (.name none (name.drop 5).toString)
+          (.call 0 (.name none receiverMark) [receiver] :: args)
+      -- Types' own functions of the name, that can be named here.
+      let own := fun (_ : Unit) => (do
+        pure ((← get).units.flatMap fun u => u.own.filter fun b =>
+          match b.name.splitOn "::" with
+          | [ty, fn] =>
+            fn == name && b.entry.kind.space == .value
+              && (u.path == ctx.here || visible b.shown u.path ctx.here)
+              && (ctx.of ty).any fun named => named.name == ty && named.entry.kind == .type
+                && named.entry.home == u.path
+          | _ => false) : R (List Bound))
       unless bound.contains name do
         if let some e := lookupIn (ctx.of name) .value name then
           if e.kind == .fn || e.kind == .method then
+            let alts := (← own ()).map (·.entry.global)
+            unless alts.isEmpty || id == 0 do
+              modify fun s => { s with dotAlts := (id, alts) :: s.dotAlts }
             -- (Marked: whether it is borrowed for the call is decided once
             -- every function's declaration has been seen.)
             return ← resolveExpr ctx bound
@@ -1107,14 +1128,7 @@ partial def resolveExpr (ctx : Ctx) (bound : List String) : Expr → R Expr
           | .fieldNames _ names _ => names.contains name
           | _ => false
         unless fieldNamed do
-          let found := (← get).units.flatMap fun u => u.own.filter fun b =>
-            match b.name.splitOn "::" with
-            | [ty, fn] =>
-              fn == name && b.entry.kind.space == .value
-                && (u.path == ctx.here || visible b.shown u.path ctx.here)
-                && (ctx.of ty).any fun named => named.name == ty && named.entry.kind == .type
-                  && named.entry.home == u.path
-            | _ => false
+          let found ← own ()
           if let [b] := found then
             noteUse ctx.here b.entry
             let receiver ← resolveExpr ctx bound receiver
@@ -1527,6 +1541,7 @@ def resolve (prelude root : List Item) : Except String Resolved := do
     if b.entry.kind == .fn && !(b.entry.vis matches .priv) then some b.entry.global else none
   let privTypes := mine.flatMap fun u => u.own.filterMap fun b =>
     if b.entry.kind == .type && (b.entry.vis matches .priv) then some (b.entry.global, key u.path) else none
-  pure ⟨items, ⟨st.homes, fieldVis, text, preludeNames.any taken.contains, pubFns, privTypes, coercions⟩⟩
+  pure ⟨items, ⟨st.homes, fieldVis, text, preludeNames.any taken.contains, pubFns, privTypes, coercions,
+    st.dotAlts⟩⟩
 
 end Glorious.Syntax.Modules

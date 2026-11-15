@@ -487,11 +487,14 @@ are skipped, so that programs which go wrong can still be run. -/
 partial def compileSourceAt (src : String) (check : Bool := true)
     (files : List (List String × String) := []) (few : Bool := false)
     (known : List ((String × Nat) × Nat) := []) (packs : Nat := 0) (kept : List Typing.Cert := [])
-    (checkKept : Check.Kept := []) (refPats : List (Nat × Bool × List Nat) := []) : Except String Compiled := do
+    (checkKept : Check.Kept := []) (refPats : List (Nat × Bool × List Nat) := [])
+    (dotPicks : List (Nat × String) := []) : Except String Compiled := do
   let (prelude, items) ← parseProgram src files check few packs
   -- (Clauses the checker found matching a reference with patterns of a
   -- value: read with those patterns written `&Pattern`.)
   let items := refPats.foldl (fun items (id, uniq, which) => Elab.refPatsItems id uniq which items) items
+  -- (Dot calls the checker found are of a type's own function.)
+  let items := dotPicks.foldl (fun items (call, fn) => Elab.dotOwnItems call fn items) items
   -- Every name is given its meaning: the modules become one list of items.
   let resolved ← Syntax.Modules.resolve prelude items
   -- How a constructor is named where a value is shown: without its module,
@@ -562,14 +565,21 @@ partial def compileSourceAt (src : String) (check : Bool := true)
   let (blocks, checkMade) ← match checked with
     | .ok (blocks, made) => pure (some blocks, made)
     | .error e =>
-      match Elab.refPatsFound e with
-      | some found =>
+      let clean := fun (e : String) => Elab.withoutDotOwn (Elab.withoutRefPats e)
+      match Elab.refPatsFound e, Elab.dotOwnFound e with
+      | some found, _ =>
         if check && refPats.length < 32 && !refPats.contains found then
-          match compileSourceAt src check files few known packs kept checkKept (refPats ++ [found]) with
+          match compileSourceAt src check files few known packs kept checkKept (refPats ++ [found]) dotPicks with
           | .ok c => return c
-          | .error e' => throw (if (Elab.refPatsFound e').isSome then Elab.withoutRefPats e' else e')
-        else if check then throw (Elab.withoutRefPats e) else pure (none, [])
-      | none => if check then throw e else pure (none, [])
+          | .error e' => throw (clean e')
+        else if check then throw (clean e) else pure (none, [])
+      | none, some found =>
+        if check && dotPicks.length < 32 && !dotPicks.contains found then
+          match compileSourceAt src check files few known packs kept checkKept refPats (dotPicks ++ [found]) with
+          | .ok c => return c
+          | .error e' => throw (clean e')
+        else if check then throw (clean e) else pure (none, [])
+      | none, none => if check then throw e else pure (none, [])
   -- Lifetimes were the checker's to read; and, of what is declared, the
   -- certificate's.
   let written := all

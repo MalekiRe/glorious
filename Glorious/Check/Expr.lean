@@ -524,6 +524,28 @@ partial def checkArg (scope : Scope) (amb : Row) (what : String) (p : Ty) (a : E
         return ← fitAt scope amb what site p t
     fitAt scope amb what site p (← inferExpr scope amb a)
 
+/-- A dot call's own function of the receiver's type, if the resolver found
+one of the name (`ModuleInfo.dotAlts`): the receiver's type is found on a
+copy of what is known. -/
+partial def dotAltFor (scope : Scope) (amb : Row) (call : Nat) (a : Expr) : M (Option String) := do
+  match (← get).modules.dotAlts.lookup call with
+  | none => pure none
+  | some alts =>
+    let saved ← get
+    let found ← try some <$> inferExpr scope amb a catch _ => pure none
+    set saved
+    let rec head (fuel : Nat) (t : Ty) : M (Option String) := do
+      match fuel, ← find t with
+      | fuel + 1, .ref _ inner _ => head fuel inner
+      | _, .con n _ => pure (some n)
+      | _, _ => pure none
+    match found with
+    | some ty =>
+      match ← head 8 ty with
+      | some h => pure (alts.find? (·.startsWith (h ++ "::")))
+      | none => pure none
+    | none => pure none
+
 /-- Check arguments in the given order. Gives the first that does not fit. -/
 partial def checkArgsIn (scope : Scope) (amb : Row) (what : String) (params : List Ty)
     (args : List Expr) (call : Nat) (order : List Nat) : M (Option (Nat × String)) := do
@@ -552,7 +574,11 @@ partial def checkArgsIn (scope : Scope) (amb : Row) (what : String) (params : Li
                 | _ => false
               let shown := if uniq then "&mut " else "&"
               throw (Syntax.refPatsMark id uniq valuePats ++ s!"argument {i + 1} of {what}: what is matched is a reference: a pattern of what it points to is written `{shown}Pattern`, and binds references (`{shown}Some(x) => *x`)")
+      -- (A dot call whose receiver is of a type with a function of its own of
+      -- the name: that one, if the function in scope does not fit.)
+      let ownAlt ← if i != 0 then pure none else dotAltFor scope amb call a
       if let some e ← checkArg scope amb s!"argument {i + 1} of {what}" p a site then
+        if let some alt := ownAlt then throw (Syntax.dotOwnMark call alt ++ e)
         -- (Clauses one of which ends with a braced block, which is a callable
         -- there: likely meant to be run.)
         let blocky := match a with
@@ -576,7 +602,13 @@ needs is then known when the others are looked at, and one of them may be what
 has to be converted. -/
 partial def checkArgs (scope : Scope) (amb : Row) (what : String) (params : List Ty)
     (args : List Expr) (call : Nat := 0) : M Unit := do
-  unless params.length == args.length do arityError what params.length args.length
+  unless params.length == args.length do
+    -- (A dot call of a function in scope that takes another number of
+    -- arguments, of a value whose type has one of the name of its own.)
+    if let some a := args.head? then
+      if let some alt ← dotAltFor scope amb call a then
+        throw (Syntax.dotOwnMark call alt ++ s!"{what} takes {params.length} arguments")
+    arityError what params.length args.length
   -- Whole numbers written without a type are looked at last: by then what
   -- is wanted of them may be known from the other arguments.
   let written := fun (i : Nat) => match args[i]? with

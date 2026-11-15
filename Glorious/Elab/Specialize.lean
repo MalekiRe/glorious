@@ -431,6 +431,70 @@ def withoutRefPats (said : String) : String :=
   | before :: after :: _ => before ++ "%".intercalate ((after.splitOn "%").drop 1)
   | _ => said
 
+/-! ## A dot call of a type's own function
+
+`v.push(x)` where `push` is a function in scope that does not fit `v`, and
+`v`'s type has a `push` of its own: the checker says so, and the program is
+read again with the call written as one of that function
+(`.fieldOf _ v "%own:std::vec::Vec::push"`, which the resolver reads). -/
+
+mutual
+
+partial def dotOwnExpr (call : Nat) (fn : String) : Expr → Expr
+  | .call i f args =>
+    let args := args.map (dotOwnExpr call fn)
+    match f with
+    | .fieldOf fi recv name =>
+      let recv := dotOwnExpr call fn recv
+      if i == call then .call i (.fieldOf fi recv ("%own:" ++ fn)) args
+      else .call i (.fieldOf fi recv name) args
+    | f => .call i (dotOwnExpr call fn f) args
+  | .tailCall i f args => .tailCall i (dotOwnExpr call fn f) (args.map (dotOwnExpr call fn))
+  | .tuple args => .tuple (args.map (dotOwnExpr call fn))
+  | .proj e n => .proj (dotOwnExpr call fn e) n
+  | .closure i clauses => .closure i (clauses.map (dotOwnClause call fn))
+  | .handle subject arms => .handle (dotOwnExpr call fn subject) (arms.map (dotOwnClause call fn))
+  | .labelScope l body => .labelScope l (body.map (dotOwnStmt call fn))
+  | .deref e => .deref (dotOwnExpr call fn e)
+  | .reborrow u e => .reborrow u (dotOwnExpr call fn e)
+  | .fieldOf i e name => .fieldOf i (dotOwnExpr call fn e) name
+  | e => e
+
+partial def dotOwnClause (call : Nat) (fn : String) : Clause → Clause
+  | .mk pats body => .mk pats (body.map (dotOwnStmt call fn))
+
+partial def dotOwnStmt (call : Nat) (fn : String) : Stmt → Stmt
+  | .let_ pat value => .let_ pat (dotOwnExpr call fn value)
+  | .expr e => .expr (dotOwnExpr call fn e)
+  | .defer e => .defer (dotOwnExpr call fn e)
+  | .letMut x value => .letMut x (dotOwnExpr call fn value)
+  | .assign target value => .assign (dotOwnExpr call fn target) (dotOwnExpr call fn value)
+  | .located line col s => .located line col (dotOwnStmt call fn s)
+
+end
+
+partial def dotOwnItems (call : Nat) (fn : String) (items : List Item) : List Item :=
+  items.map fun
+    | .fn name ps annots ret clauses => .fn name ps annots ret (clauses.map (dotOwnClause call fn))
+    | .impl ps tr head args context methods => .impl ps tr head args context (dotOwnItems call fn methods)
+    | .traitInfo n supers defaults params assocs => .traitInfo n supers (dotOwnItems call fn defaults) params assocs
+    | .module name (some body) => .module name (some (dotOwnItems call fn body))
+    | .pub parent item => .pub parent ((dotOwnItems call fn [item]).headD item)
+    | item => item
+
+def dotOwnFound (said : String) : Option (Nat × String) :=
+  match said.splitOn "%dotown:" with
+  | _ :: after :: _ =>
+    match ((after.splitOn "%").headD "").splitOn ":" with
+    | call :: fn => call.toNat?.map fun c => (c, ":".intercalate fn)
+    | _ => none
+  | _ => none
+
+def withoutDotOwn (said : String) : String :=
+  match said.splitOn "%dotown:" with
+  | before :: after :: _ => before ++ "%".intercalate ((after.splitOn "%").drop 1)
+  | _ => said
+
 /-! ## A value used on one path and not on another
 
 A value with a `drop` to run that one path uses and another does not is kept

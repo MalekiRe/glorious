@@ -216,7 +216,17 @@ structure ModuleInfo where
   /-- For each module, the coercions that apply in it: those it declares, and
   those of functions it brings in with `use`. -/
   coercions : List (String × List String) := []
+  /-- `value.f(a)` where `f` is a function in scope and also the function of
+  some type's own: the call and those, by their names in the whole program.
+  The checker chooses the type's own where the value is of that type and the
+  function in scope does not fit it. -/
+  dotAlts : List (Nat × List String) := []
   deriving Hashable
+
+/-- What the checker throws where a dot call is of a type's own function
+rather than the one in scope: the call and that function. The program is
+read again with it. -/
+def dotOwnMark (call : Nat) (fn : String) : String := s!"%dotown:{call}:{fn}%"
 
 /-- How the constructors of a text are named where values are shown: no
 program can write these names. -/
