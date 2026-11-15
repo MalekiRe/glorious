@@ -1340,12 +1340,13 @@ pub trait Iterator {
     fn next(&mut Self) -> Option<Self::Item>;
 }
 
-// The whole numbers from one up to, not including, another.
-pub struct Range { at: Int, end: Int }
-pub fn range(from: Int, to: Int) -> Range { Range { at: from, end: to } }
-impl Iterator for Range {
+// From one value up to, not including, another (the library
+// specification's §3); of whole numbers, what is iterated.
+pub struct Range<T> { pub start: T, pub end: T }
+pub fn range(from: Int, to: Int) -> Range<Int> { Range { start: from, end: to } }
+impl Iterator for Range<Int> {
     type Item = Int;
-    fn next(r) { if(r.at < r.end) { let v = r.at; r.at = v + 1; Some(v) } else { None } }
+    fn next(r) { if(r.start < r.end) { let v = r.start; r.start = v + 1; Some(v) } else { None } }
 }
 
 fn turned<T>(from: [T], onto: [T]) -> [T] {

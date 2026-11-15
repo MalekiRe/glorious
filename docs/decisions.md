@@ -4448,6 +4448,35 @@ borrowed as its first parameter says. Nothing changes where the function in
 scope fits. `v.push(3); v.len()` and `p.get()` of `impl P { fn get(p: &P) }`
 work; compile times of the examples are as they were.
 
+## The specification's §6 functions, and its default prelude's library names
+
+The prelude now has `try(r, @f)` (what `Ok` holds, or leaving for the label
+with `Err`), `try_map_error`, `ensure(condition, @f, { error })`,
+`some_or_leave(option, @f, { fallback })`, `abort` and `unreachable`
+(the message written, then the program stops, going wrong, with no cleanup
+run), `assert`, `assert_message`, `assert_eq` and `assert_ne` (of `Eq` and
+`Show`; the values are read through the references, so copied). They are in
+the part of the prelude that programs compiled without checking do not read.
+`Fail`/`Report`/`catch_fail` and `loop_at` are not built.
+
+The specification's default prelude also has `identity`, `discard`, `Either`
+(`Left`, `Right`), `Rejected`, `Ordering` (`Less`, `Equal`, `Greater`) and
+`Range`, which this library keeps in `std::value`, `std::cmp` and
+`std::iterator`. A program that names one of them as a word of its own, does
+not declare it and does not bring it in by a path, has a `use` of it written
+after its text (`Driver.stdPreludeUses`; no position in the text moves), and
+the library is then read. Not where the text brings in a whole module (`::*`)
+or has no library. `take` is left out: the library has five. `Range` is now
+the specification's `Range<T> { pub start: T, pub end: T }`; the iterator of
+whole numbers is `Range<Int>`.
+
+A program that goes wrong reading past an array's end is said to ask a place
+of an array of so many, not to apply an arithmetic intrinsic.
+
+Compiling a program afresh, prelude included, takes 16 ms more for `hello`
+(0.133 s against 0.117 s, quick build); a program whose compiled form is kept
+is as fast as it was.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by

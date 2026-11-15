@@ -203,6 +203,50 @@ def certifyProgram (items : List Syntax.Item) (p : Core.Program)
   if Typing.checkProgram cert p then pure (cert, none)
   else throw s!"the certificate was rejected: {Infer.rejected cert p}"
 
+/-- What the specification's default prelude has that this one keeps in the
+library (§3): each name, with its module. -/
+def stdPreludeNames : List (String × String) :=
+  [("identity", "value"), ("discard", "value"), ("Either", "value"),
+   ("Left", "value"), ("Right", "value"), ("Rejected", "value"), ("Ordering", "cmp"),
+   ("Less", "cmp"), ("Equal", "cmp"), ("Greater", "cmp"), ("Range", "iterator")]
+
+/-- The names of the default prelude a program's text uses and does not
+declare or bring in itself: `use` lines for them, written after the text (so
+that no position in it moves). Where the text names no library, none. -/
+def stdPreludeUses (src : String) : String := Id.run do
+  -- (Nor where the text brings in whole modules, whose names could be any.)
+  if (src.splitOn "#![no_std]").length > 1 || (src.splitOn "#![no_implicit_prelude]").length > 1
+      || (src.splitOn "mod std").length > 1 || (src.splitOn "::*").length > 1 then
+    return ""
+  let isWord := fun (c : Char) => c.isAlphanum || c == '_'
+  -- (Written as a name of its own: not after `::`, `.` or another letter,
+  -- nor before one.)
+  let mentions := fun (name : String) => Id.run do
+    let parts := src.splitOn name
+    let mut found := false
+    for (before, after) in parts.zip (parts.drop 1) do
+      let prev := before.toList.getLast?
+      let next := after.toList.head?
+      let okBefore := match prev with
+        | some c => !isWord c && c != '.' && c != ':'
+        | none => true
+      let okAfter := match next with
+        | some c => !isWord c
+        | none => true
+      if okBefore && okAfter then found := true
+    pure found
+  let declares := fun (name : String) =>
+    ["fn ", "enum ", "struct ", "type ", "trait ", "effect ", "const ", "let "].any fun k =>
+      (src.splitOn (k ++ name)).length > 1
+  let brought := fun (name : String) =>
+    (src.splitOn ("::" ++ name)).length > 1
+  let wanted := stdPreludeNames.filter fun (name, _) => mentions name && !declares name && !brought name
+  if wanted.isEmpty then return ""
+  let mods := wanted.map (·.2) |>.eraseDups
+  let lines := mods.map fun m =>
+    s!"use std::{m}::\{{", ".intercalate ((wanted.filter (·.2 == m)).map (·.1))}};"
+  return "\n" ++ "\n".intercalate lines ++ "\n"
+
 /-- Does a program have the standard library: does it name `std`, and have no
 module `std` of its own? -/
 def usesStd (src : String) (files : List (List String × String)) : Bool :=
@@ -489,6 +533,8 @@ partial def compileSourceAt (src : String) (check : Bool := true)
     (known : List ((String × Nat) × Nat) := []) (packs : Nat := 0) (kept : List Typing.Cert := [])
     (checkKept : Check.Kept := []) (refPats : List (Nat × Bool × List Nat) := [])
     (dotPicks : List (Nat × String) := []) : Except String Compiled := do
+  -- (What the default prelude has from the library, where the text uses it.)
+  let src := if refPats.isEmpty && dotPicks.isEmpty then src ++ stdPreludeUses src else src
   let (prelude, items) ← parseProgram src files check few packs
   -- (Clauses the checker found matching a reference with patterns of a
   -- value: read with those patterns written `&Pattern`.)
@@ -1072,7 +1118,11 @@ def explainStuck (c : Compiled) (cfg : Core.Config) : String :=
           else if code == 39 then
             s!"place `{first}` is asked of something that has {second}"
           else s!"an operation on ({shown vs}) has no result: it would not fit, or there is none"
-        else s!"an arithmetic intrinsic is applied to ({shown vs})"
+        else match vs with
+          | [.data tag fields, .int i] =>
+            if arrayBase ≤ tag then s!"place `{i}` is asked of an array of {fields.length}"
+            else s!"an arithmetic intrinsic is applied to ({shown vs})"
+          | _ => s!"an arithmetic intrinsic is applied to ({shown vs})"
       | none => unbound
     | .place pl =>
       match s.env[pl.var]? with

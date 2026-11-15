@@ -3494,6 +3494,16 @@ def cases : List Case := [
   -- function that takes a reference first borrows it.
   ⟨"enum Op { Add, Mul }\nimpl Op { fn apply(o: &Op, a: Int, b: Int) -> Int { match(o) { Add => a + b, Mul => a * b } } }\nfn main() -> Int { let o = Mul; let n = 5; o.apply(6, 7) + n }",
     [], "47"⟩,
+  -- The specification's §6: leaving for a label with a result's error, or
+  -- unless a condition holds, or with a fallback; stopping with a message.
+  ⟨"fn g(n: Int) -> Result<Int, Int> { if(n > 0) { Ok(n) } else { Err(n) } }\nfn f(n: Int) -> Result<Int, Int> { let x = try(g(n), @f); Ok(x + 1) }\nfn h(n: Int) -> Result<Int, Str> { ensure(n > 0, @h, { \"not positive\" }); Ok(n * 2) }\nfn k(o: Option<Int>) -> Int { let x = some_or_leave(o, @k, { 0 - 1 }); x * 2 }\nfn main() -> Int { assert_eq(&f(4), &Ok(5)); assert(k(None) == 0 - 1); match(h(0)) { Ok(_) => 0, Err(e) => say(e); 1 } + match(f(0 - 2)) { Ok(n) => n, Err(e) => e * 10 } + k(Some(4)) }",
+    [], "not positive\n-11"⟩,
+  ⟨"fn main() -> Int { assert_message(2 < 1, \"two is not less\"); 5 }",
+    [], "went wrong"⟩,
+  -- The default prelude's names that this one keeps in the library are
+  -- brought in where a program uses them and does not declare them.
+  ⟨"fn f(e: Either<Int, Int>) -> Int { match(e) { Left(a) => a, Right(b) => b * 2 } }\nfn main() -> Int { let r = Range { start: 2, end: 5 }; f(Left(3)) + f(Right(4)) + identity(r.end - r.start) }",
+    [], "14"⟩,
   -- (An element of what a reference is to is borrowed through it.)
   ⟨"fn first(r: &[Int]) -> Int { let e = &r[0]; *e }\nfn main() -> Int { first(&[7, 8]) }",
     [], "7"⟩,

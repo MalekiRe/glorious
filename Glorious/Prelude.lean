@@ -796,6 +796,38 @@ impl<T> Show for Array<T> where T: Show {
 // Write a value as text.
 fn say(value) { host_write(show(value)) }
 
+// Of a result: what `Ok` holds, or else leaving for the label with the error
+// (`try(r, @f)` in a function that gives a `Result`); the same with the
+// error made another first; leaving with an error unless a condition holds;
+// and of an option, what `Some` holds or else leaving with what a fallback
+// gives. (The library specification's §6. There is no `?`.)
+fn try<T, E, R, L>(value: Result<T, E>, target: L) -> T where L: Label<Result<R, E>> {
+    match(value) { Ok(v) => v, Err(e) => target(Err(e)) }
+}
+fn try_map_error<T, E, D, R, L>(value: Result<T, E>, target: L, map_error) -> T where L: Label<Result<R, D>> {
+    match(value) { Ok(v) => v, Err(e) => target(Err(map_error(e))) }
+}
+fn ensure<R, E, L>(condition: Result<(), ()>, target: L, make_error) where L: Label<Result<R, E>> {
+    match(condition) { Ok(_) => (), Err(_) => target(Err(make_error())) }
+}
+fn some_or_leave<T, R, L>(value: Result<T, ()>, target: L, fallback) -> T where L: Label<R> {
+    match(value) { Ok(v) => v, Err(_) => target(fallback()) }
+}
+
+// Stopping: what is said is written, and the program stops there, with no
+// cleanup run (the library specification's §6.1).
+fn abort<T>(message: Str) -> T { host_write(message); arr_get(arr_new(), 0) }
+fn unreachable<T>(message: Str) -> T { abort(message) }
+fn assert(condition: Result<(), ()>) { match(condition) { Ok(_) => (), Err(_) => abort("assertion failed") } }
+fn assert_message(condition: Result<(), ()>, message: Str) { match(condition) { Ok(_) => (), Err(_) => abort(message) } }
+fn assert_eq<T>(left: &T, right: &T) where T: Eq, T: Show {
+    match(*left == *right) { Ok(_) => (), Err(_) => abort(show(*left) ++ " is not " ++ show(*right)) }
+}
+fn assert_ne<T>(left: &T, right: &T) where T: Eq, T: Show {
+    match(*left == *right) { Ok(_) => abort(show(*left) ++ " is what it should not be"), Err(_) => () }
+}
+
+
 // Values made of values that can be compared can be compared.
 impl Eq for () { fn ==(a, b) { true } }
 impl<A, B> Eq for (A, B) where A: Eq, B: Eq {
