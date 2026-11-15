@@ -545,10 +545,12 @@ def declareTraits (items : List Item) : M Unit := do
       -- A type parameter inside one of the head's arguments (`H` of
       -- `(Column<H>, R)`): its functions may let go of a value of it too, so
       -- it is given how that is destroyed, as a head's argument is.
-      if (← get).dropMode then
+      -- (Not of a callable's parameters and result: a callable holds no
+      -- value of those to destroy. Nor of a list of types.)
+      if (← get).dropMode && !head.startsWith "(fn" then
         let said := context.filterMap fun (p, t') => if t' == Syntax.destroyTrait then some p else none
         for p in genericParams params do
-          if !args.contains p && !p.startsWith "'" && !said.contains p then
+          if !args.contains p && !p.startsWith "'" && !p.startsWith ".." && !said.contains p then
             if let some subject := pmap.lookup p then
               extra := extra ++ [(Syntax.destroyTrait, [], subject)]
       let mut assocs : List (String × Ty) := []

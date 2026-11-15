@@ -4309,6 +4309,20 @@ many install cleanups and how many leave one in a resumption never taken.
 With resumptions let go now given up (see "A resumption let go is given
 up"), 203 install cleanups and none leaves one. This is measured, not proved.
 
+## How a value is destroyed is not a condition left to explain
+
+A system registered under a label is kept in an `On<Tick, fn(..)>`, and
+`Dispatch` of the systems, a tuple, has a condition in a program with a
+`drop`: how each is destroyed. That is found by the type's shape alone, and
+was; but where the implementation was chosen by fitting, what a call needs
+was gone through by `leavesFitting`, which looked for an implementation of
+`%Destroy` for a function's type as for any trait, found none, and refused the
+program (covey with a component with a `drop` and a system). It now asks
+`solveFitting` first, as `leaves` does in effect, and nothing is left of how a
+value is destroyed. A missing implementation says now what needed it:
+`` `()` does not implement `Get<Health>`, which `Get` of `(Column<Position>,
+())` needs ``.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by

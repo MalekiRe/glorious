@@ -1,25 +1,44 @@
 // Components that hold something to close: a component with a `drop` is
-// destroyed when its entity ends, and the rest when the world does.
+// destroyed when its entity ends, by hand or by a system's command, and what
+// is left when the world is.
 // expect:
 // 7
-// 1
+// 2
 // 8
-// 0
+// 1
+// 9
+// 3
 mod ecs;
 
-use ecs::{Entity, app, register, spawn_with, despawn, count};
+use ecs::{Entity, Column, Commands, end, app, register, add_systems, emit, spawn_with, despawn, count};
 
 // A handle to something outside, closed when it is destroyed.
 struct Handle(Int)
 impl Drop for Handle { fn drop(h) { say(h.0) } }
 
-struct Position(Int)
+// How many ticks an entity has left.
+struct Life(Int)
+
+struct Tick
+
+// Every tick, each entity has one less; one with none left ends.
+fn age(lives: &mut Column<Life>, commands: &mut Commands) {
+    let mut i = 0;
+    while({ i < len_at(&lives.dense) }) {
+        lives.dense[i] = Life(lives.dense[i].0 - 1);
+        if(lives.dense[i].0 <= 0) { commands.end(lives.owners[i]) } else { () };
+        i = i + 1
+    }
+}
 
 fn main() -> Int {
-    let mut game = app().register<Handle>().register<Position>();
-    let a = game.world.spawn_with((Handle(7), Position(1)));
-    let b = game.world.spawn_with((Handle(8), Position(2)));
+    let mut game = app().register<Handle>().register<Life>().add_systems(Tick, age);
+    let a = game.world.spawn_with((Handle(7), Life(5)));
+    game.world.spawn_with((Handle(8), Life(1)));
+    game.world.spawn_with((Handle(9), Life(5)));
     game.world.despawn(a);
     say(game.world.count<Handle>());
-    0
+    game.emit(Tick);
+    say(game.world.count<Handle>());
+    3
 }

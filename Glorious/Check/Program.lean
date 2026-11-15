@@ -248,15 +248,23 @@ partial def solveFitting (givens : Traits.Givens) (fuel : Nat) (key : String) (t
   pure (some (.impl i subs))
 
 /-- `leaves`, where implementations are chosen by fitting types. -/
-partial def leavesFitting (pos key : String) (t : Ty) (args : List Ty) (owner : String := "") :
-    M (List (String × Nat × Ty)) := do
+partial def leavesFitting (pos key : String) (t : Ty) (args : List Ty) (owner : String := "")
+    (via : List String := []) : M (List (String × Nat × Ty)) := do
   let t ← find t
+  -- (How a value is destroyed is found by the type's shape alone, as
+  -- `solveFitting` finds it: no condition is left of what it finds.)
+  if key == Syntax.destroyTrait then
+    if (← solveFitting [] 1 key t []).isSome then return []
   if let some k ← keyOf t then return [(key, k, t)]
   -- (What the function is given of a type made from its type parameters.)
   let said := s!"'%condition:{owner}:{key}:{← spellTy (← zonk t)}"
   if let some i := (← get).rigidKeys.toList.idxOf? said then return [(key, 2 * i + 1, t)]
+  -- (What it was asked for, where it is a condition of another.)
+  let because := match via with
+    | [] => ""
+    | ws => s!", which {", which ".intercalate (ws.map (· ++ " needs"))}"
   let missing : M (List (String × Nat × Ty)) := do
-    throw s!"{pos}`{showTy (← zonk t)}` does not implement `{Syntax.traitShown key}`"
+    throw s!"{pos}`{showTy (← zonk t)}` does not implement `{Syntax.traitShown key}`{because}"
   if let .fn _ _ effs tail _ := t then
     try unifyRow ⟨effs, tail⟩ ⟨[], none⟩
     catch _ => throw s!"{pos}`{showTy (← zonk t)}` performs effects, and `{Syntax.traitShown key}` is implemented for functions that perform none"
@@ -283,13 +291,15 @@ partial def leavesFitting (pos key : String) (t : Ty) (args : List Ty) (owner : 
   -- (What those decide, before the conditions on what they decide.)
   unless im.equal.isEmpty && im.extraEqual.isEmpty do settleAssocsAll
   let mut out : List (String × Nat × Ty) := []
+  let shown := Syntax.traitShown key
+  let this := s!"`{(shown.takeWhile (· != '<')).toString}` of `{showTy (← zonk t)}`"
   for (tr, j) in im.context do
     let arg := hargs[j]?.getD .unit
-    out := out ++ (← leavesFitting pos (← subKey tr arg []) arg [] owner)
+    out := out ++ (← leavesFitting pos (← subKey tr arg []) arg [] owner (this :: via))
   for (tr, cargs, subject) in im.extra do
     let subject := subst at_ [] [] subject
     let cargs := cargs.map (subst at_ [] [])
-    out := out ++ (← leavesFitting pos (← subKey tr subject cargs) subject cargs owner)
+    out := out ++ (← leavesFitting pos (← subKey tr subject cargs) subject cargs owner (this :: via))
   pure out
 
 /-- Meet the bounds of the group just inferred, and give each of its functions

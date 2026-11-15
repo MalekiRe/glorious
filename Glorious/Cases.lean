@@ -835,7 +835,7 @@ def cases : List Case := [
   ⟨"enum Maybe<T> { Nothing, Just(T) }\ntrait Show { fn show(Self) -> Int }\nimpl Show for Int { fn show(x) { x } }\nfn main() { show(Just(1)) }",
     [], "error: 4:13: in `main`: `Maybe<Int>` does not implement `Show`"⟩,
   ⟨"enum Maybe<T> { Nothing, Just(T) }\ntrait Show { fn show(Self) -> Int }\nimpl Show for Int { fn show(x) { x } }\nimpl<T> Show for Maybe<T> where T: Show { fn show(o) { match(o) { Just(v) => show(v) + 100, Nothing => 0 } } }\nfn main() { show(Just(Just({ 1 }))) }",
-    [], "error: 5:13: in `main`: `fn() -> Int` does not implement `Show`"⟩,
+    [], "error: 5:13: in `main`: `fn() -> Int` does not implement `Show`, which `Show` of `Maybe<fn() -> Int>` needs, which `Show` of `Maybe<Maybe<fn() -> Int>>` needs"⟩,
   ⟨"enum Maybe<T> { Nothing, Just(T) }\ntrait Show { fn show(Self) -> Int }\nimpl Show for Int { fn show(x) { x } }\nimpl<T> Show for Maybe<T> { fn show(o) { match(o) { Just(v) => show(v), Nothing => 0 } } }\nfn main() { 0 }",
     [], "error: 4:64: in `Show::show@Maybe`: `T` is not known to implement `Show`: add `where T: Show` to the implementation"⟩,
   -- No two implementations are for the same trait and type: which one a use
@@ -1681,7 +1681,7 @@ def cases : List Case := [
   ⟨"fn pair() -> Result<Int, Str> { Ok(3) }\nfn main() { say((1, 2.5)); say(((), 'x', \"s\")); say(pair()); say(1 < 2); say(()); 0 }",
     [], "(1, 2.5)\n((), x, s)\nOk(3)\nOk(())\n()\n0"⟩,
   ⟨"struct P(Int)\nfn main() { say((1, P(2))); 0 }",
-    [], "error: 2:13: in `main`: `P` does not implement `Show`"⟩,
+    [], "error: 2:13: in `main`: `P` does not implement `Show`, which `Show` of `(Int, P)` needs"⟩,
   -- A trait can give a function a body, and can need another trait; what is
   -- written of a type parameter is then all it has.
   ⟨"trait Shape { fn area(Self) -> Int  fn double(s: Self) -> Int { area(s) * 2 } }\nstruct Sq(Int)\nstruct Circle(Int)\nimpl Shape for Sq { fn area(Sq(n)) { n * n } }\nimpl Shape for Circle { fn area(Circle(r)) { 3 * r * r }  fn double(c) { 0 } }\nfn main() { double(Sq(3)) + double(Circle(1)) + area(Circle(1)) }",
@@ -3872,7 +3872,7 @@ def cases : List Case := [
   ⟨"struct Column<T> { items: [T] }\ntrait Get<T> { fn column(&Self) -> &Column<T>; fn column_mut(&mut Self) -> &mut Column<T> }\nimpl<T, R> Get<T> for (Column<T>, R) { fn column(w) { &w.0 } fn column_mut(w) { &mut w.0 } }\nimpl<T, H, R> Get<T> for (Column<H>, R) where R: Get<T> { fn column(w) { <R as Get<T>>::column(&w.1) } fn column_mut(w) { <R as Get<T>>::column_mut(&mut w.1) } }\nstruct Position(Int)\nstruct Velocity(Int)\nfn count<T, W>(world: &W) -> Int where W: Get<T> { let c = <W as Get<T>>::column(world); len_at(&c.items) }\nfn main() -> Int {\n    let world = (Column { items: [Position(1), Position(2)] }, (Column { items: [Velocity(10)] }, ()));\n    count<Position, (Column<Position>, (Column<Velocity>, ()))>(&world) * 10 + count<Velocity, (Column<Position>, (Column<Velocity>, ()))>(&world)\n}",
     [], "21"⟩,
   ⟨"struct Column<T> { items: [T] }\ntrait Get<T> { fn column(&Self) -> &Column<T>; fn column_mut(&mut Self) -> &mut Column<T> }\nimpl<T, R> Get<T> for (Column<T>, R) { fn column(w) { &w.0 } fn column_mut(w) { &mut w.0 } }\nimpl<T, H, R> Get<T> for (Column<H>, R) where R: Get<T> { fn column(w) { <R as Get<T>>::column(&w.1) } fn column_mut(w) { <R as Get<T>>::column_mut(&mut w.1) } }\nstruct Position(Int)\nstruct Velocity(Int)\nstruct Health(Int)\nfn main() -> Int {\n    let world = (Column { items: [Position(1)] }, ());\n    let c = <(Column<Position>, ()) as Get<Health>>::column(&world);\n    len_at(&c.items)\n}",
-    [], "error: 10:5: in `main`: `()` does not implement `Get<Health>`"⟩,
+    [], "error: 10:5: in `main`: `()` does not implement `Get<Health>`, which `Get` of `(Column<Position>, ())` needs"⟩,
   ⟨"trait Count { fn count(Self) -> Int; }\nimpl<A> Count for Option<A> { fn count(o) { 1 } }\nimpl<A, E> Count for Result<A, E> { fn count(o) { 2 } }\nfn bad() -> Result<Int, Str> { Err(\"x\") }\nfn main() -> Int { count(Some(1)) * 10 + count(bad()) }",
     [], "12"⟩,
   ⟨"trait Show2 { fn show2(Self) -> Int }\nimpl Show2 for Int { fn show2(x) { x } }\nimpl Show2 for Int { fn show2(x) { x + 1 } }\nfn main() -> Int { show2(1) }",
@@ -3902,7 +3902,7 @@ def cases : List Case := [
   ⟨"trait Never {}\ntrait Apart {}\nimpl<A, B> Apart for (A, B) {}\nimpl<A> Apart for (A, A) where A: Never {}\ntrait Pairing { fn weight(Self) -> Int }\nstruct Two<A, B>(A, B)\nimpl<A, B> Pairing for Two<A, B> where (A, B): Apart { fn weight(t) { 1 } }\nfn main() -> Int { weight(Two(1, \"a\")) }",
     [], "1"⟩,
   ⟨"trait Never {}\ntrait Apart {}\nimpl<A, B> Apart for (A, B) {}\nimpl<A> Apart for (A, A) where A: Never {}\ntrait Pairing { fn weight(Self) -> Int }\nstruct Two<A, B>(A, B)\nimpl<A, B> Pairing for Two<A, B> where (A, B): Apart { fn weight(t) { 1 } }\nfn main() -> Int { weight(Two(1, 2)) }",
-    [], "error: 8:20: in `main`: `Int` does not implement `Never`"⟩,
+    [], "error: 8:20: in `main`: `Int` does not implement `Never`, which `Apart` of `(Int, Int)` needs, which `Pairing` of `Two<Int, Int>` needs"⟩,
   ⟨"struct Bag<T> { items: [T] }\nfn empty<T>(seed: Int) -> Bag<T> { Bag { items: [] } }\nfn widen<T, U>(bag: Bag<T>) -> Int { len(bag.items) }\nfn main() -> Int { let b: Bag<Int> = empty(0); b.widen<Int, Str>() + 3 }",
     [], "3"⟩,
   -- A dotted call borrows what it is called on where the function takes a reference first: a variable, or a field of one; a name that is already a reference is given as it is.
