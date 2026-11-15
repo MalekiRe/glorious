@@ -693,6 +693,10 @@ partial def inferCall (scope : Scope) (amb : Row) (f : Expr) (args : List Expr)
           unify t w
       let own ← sig.caps.mapM fun c => do pure (c, ← freshCap)
       let (payload, result) := instOp sig inst own
+      -- (What a type parameter of the effect leaves to an implementation,
+      -- `S::Out`: asked now, of the type this use gives.)
+      let payload ← payload.mapM unproject
+      let result ← result.mapM unproject
       -- (What it is given first: that can say which instance of its effect
       -- this is, where there are several.)
       checkArgs scope amb s!"operation `{x}`" payload args call
@@ -1543,6 +1547,8 @@ partial def inferHandle (scope : Scope) (amb : Row) (subject : Expr) (arms : Lis
     for (_, c) in own do
       captures c (.brand lent)
     let (payload, opResult) := instOp sig inst own
+    let payload ← payload.mapM unproject
+    let opResult ← opResult.mapM unproject
     let borrowed := !own.isEmpty && (← payload.anyM fun p => do
       pure (own.any fun (_, c) => (freeCaps p).contains c))
     if borrowed then

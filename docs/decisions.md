@@ -3771,10 +3771,10 @@ it finding which of its borrows can be scopes of their own.
   `pop`. There is one path type, not `Path<'a>` and `PathBuf`, and no
   `OsString`: a text here is not a view of bytes, and every text is valid.
 - **`std::future`** (30.3) has `Future`, `FutureStep`, `Await`, `ready`,
-  `drive` and `block_on`. `Await<F, T>` says the result type beside the
-  future's, where the specification has `Await<F> where F: Future` giving
-  `F::Output`: an effect's operation cannot yet name a type a trait leaves
-  to an implementation. `poll` takes the future alone: there is no
+  `drive` and `block_on`. `Await<F: Future>` gives `<F as Future>::Output`,
+  as the specification has it: an effect's operation can name a type a trait
+  leaves to an implementation of one of the effect's type parameters (see
+  "An effect's operation can name what a trait leaves"). `poll` takes the future alone: there is no
   `PollContext` or wake key, since nothing here wakes anything.
 - **`BufferWriter` and `BufferReader`** are in `std::stream` (28.2), each
   with its inner stream's effects. `new` cannot fail and gives the buffer
@@ -4247,6 +4247,22 @@ the arm does not name or names `_`, and the elaborator does not count what it
 wrote to destroy one as a use. Giving one up where nothing may be performed (a
 cleanup) needs what it performs to be nothing, as for any callable; where it
 performs something, it is refused, with `cancel` before as the way out.
+
+## An effect's operation can name what a trait leaves
+
+`effect Fetch<S: Source> { fetch(S) -> S::Out }`: what an operation gives or
+takes may be a type a trait leaves to an implementation of the effect's type
+parameter. Two things were missing. The traits were declared after the
+effects, so `S::Out` found no trait leaving `Out`; the shapes of traits (their
+arity and what they leave) are now known before anything else is declared.
+And the type was asked once, at the declaration, so every use shared one
+answer; it is now kept as written (`projMark`, as an implementation's own
+projections are) and asked at each use, of the type that use gives
+(`unproject` where an operation is performed or handled).
+
+`S::Out` needs one trait to leave `Out`; where several do (the library's
+`Future` and others leave `Output`), the trait is written:
+`<F as Future>::Output`.
 
 ## Other standing decisions
 

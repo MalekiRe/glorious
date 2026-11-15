@@ -372,7 +372,8 @@ def declareTraits (items : List Item) : M Unit := do
             rowVars := rowVars ++ [(a, k)]
           else extra := extra ++ [(a, .var id)]
           assocVars := assocVars ++ [(a, id)]
-      modify fun s => { s with traitShape := (name, tparams.length, assocNames) :: s.traitShape }
+      let shapes := (← get).traitShape.filter (·.1 != name)
+      modify fun s => { s with traitShape := (name, tparams.length, assocNames) :: shapes }
       let mut index := 0
       for (m, params, ret) in methods do
         -- (The type parameters of its own: a variable each.)
@@ -695,6 +696,13 @@ def declareTraits (items : List Item) : M Unit := do
         throw s!"`impl {I.trait} for {bareName I.head}`: a type that has `{I.trait}` has `{s}`, and there is no `impl {s} for {bareName I.head}`"
 
 def declare (items : List Item) : M Unit := do
+  -- What each trait leaves to its implementations, first: an effect's
+  -- operation may name it of the effect's type parameters (`S::Out`).
+  for item in items do
+    if let .traitInfo n _ _ params assocs := item then
+      unless (← get).traitShape.any (·.1 == n) do
+        let params := (genericParams params).filter (!isLifetime ·)
+        modify fun s => { s with traitShape := (n, params.length, assocs) :: s.traitShape }
   -- Names first, so that declarations may refer to each other.
   for item in items do
     match item with
@@ -763,11 +771,16 @@ def declare (items : List Item) : M Unit := do
         for l in op.lifetimes do
           own := own ++ [(l, Ty.life (← freshCap))]
         let opMap := own ++ pmap
+        -- (`S::Out` of a type parameter of the effect: kept as written, and
+        -- answered at each use, at the type the use gives.)
+        let projecting := (← get).projecting
+        modify fun s => { s with projecting := ids }
         let payload ← op.payload.mapM (resolveType opMap true)
         let result ← if op.terminal then pure none
           else match op.result with
             | some t => some <$> resolveType opMap true t
             | none => some <$> resolveType opMap true .hole
+        modify fun s => { s with projecting := projecting }
         -- (Of references only: a callable it is given or gives is held to
         -- what the declaration says, as before.)
         let rec refCaps : Ty → List Nat

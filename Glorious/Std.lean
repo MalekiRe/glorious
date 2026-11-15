@@ -3527,7 +3527,7 @@ pub trait Future {
 // Waiting for a future's result. Whoever asks is always answered, with what
 // the future made: a handler drives the future, or hands it on, and resumes
 // once.
-pub effect Await<F, T> { [1, 1] await(F) -> T }
+pub effect Await<F: Future> { [1, 1] await(F) -> <F as Future>::Output }
 
 // A future that is done already.
 pub struct Ready<T> { value: T }
@@ -3544,7 +3544,7 @@ pub fn drive<T, F: Future<Output = T>>(future: F) -> T {
 
 // The simplest provider: a future awaited is driven to its end where it is
 // awaited.
-pub fn block_on<T, F: Future<Output = T>, R>(body: fn() -> R / {Await<F, T>}) -> R {
+pub fn block_on<F: Future, R>(body: fn() -> R / {Await<F>}) -> R {
     handle body() { await(future, k) => k(drive(future)) }
 }
 "#
