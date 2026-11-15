@@ -559,19 +559,21 @@ partial def dotAltFor (scope : Scope) (amb : Row) (call : Nat) (a : Expr) : M (O
   | none => pure none
   | some alts =>
     let saved ← get
-    let found ← try some <$> inferExpr scope amb a catch _ => pure none
-    set saved
+    -- (What the receiver itself is found to need read again, a dot call in
+    -- it of a type's own function, is passed on first.)
+    let found ← try some <$> inferExpr scope amb a catch e =>
+      if (e.splitOn "%dotown:").length > 1 || (e.splitOn "%refpats:").length > 1 then throw e else pure none
     let rec head (fuel : Nat) (t : Ty) : M (Option String) := do
       match fuel, ← find t with
       | fuel + 1, .ref _ inner _ => head fuel inner
       | _, .con n _ => pure (some n)
       | _, _ => pure none
-    match found with
-    | some ty =>
-      match ← head 8 ty with
-      | some h => pure (alts.find? (·.startsWith (h ++ "::")))
+    -- (Its head read before what was found on the way is let go.)
+    let h ← match found with
+      | some ty => head 8 ty
       | none => pure none
-    | none => pure none
+    set saved
+    pure (h.bind fun h => alts.find? (·.startsWith (h ++ "::")))
 
 /-- How two functions take their first argument: `0` whole, `1` by a shared
 reference, `2` by a `&mut` one (none where it is no function known so). -/
@@ -661,6 +663,26 @@ partial def checkArgsIn (scope : Scope) (amb : Row) (what : String) (params : Li
       -- (A field of what a name holding a reference points to, given where a
       -- reference is wanted, `a.items.len()` with `a: &Account`: the field
       -- is borrowed through it, as `&a.items`.)
+      -- (A value made where a dot call is made on it, named and borrowed for
+      -- the call (`Resolve.receiverExpr`), that is a reference already: the
+      -- reference is given.)
+      let a ← match a with
+        | .ref _ x =>
+          if i == 0 && call != 0 && x == s!"borrowed%{call}" then do
+            let held := match scope.lookup x with
+              | some (.val t _) => some t
+              | some (.cell t _) => some t
+              | _ => none
+            match held with
+            | some t => do
+              match ← find t with
+              | .ref .. =>
+                modify fun s => { s with argsChosen := ((call, i), .name none x) :: s.argsChosen }
+                pure (Expr.name none x)
+              | _ => pure a
+            | none => pure a
+          else pure a
+        | _ => pure a
       let a ← if i == 0 && call != 0 then do
           match ← fieldThroughRef scope a, ← find p with
           | some (x, path, fid), .ref how _ _ =>
@@ -682,11 +704,17 @@ partial def checkArgsIn (scope : Scope) (amb : Row) (what : String) (params : Li
         else pure a
       -- (A dot call whose receiver is of a type with a function of its own of
       -- the name: that one, if the function in scope does not fit.)
+      let before ← get
       if let some e ← checkArg scope amb s!"argument {i + 1} of {what}" p a site then
         -- (Asked only once the function in scope does not fit: the program
-        -- is read again, so what this finds on the way is not kept.)
+        -- is read again, so what this finds on the way is not kept. The
+        -- receiver's type is found as it was before it was made to fit.)
         if i == 0 then
-          if let some alt ← dotAltFor scope amb call a then throw (Syntax.dotOwnMark call alt ++ e)
+          let failed ← get
+          set before
+          let alt ← dotAltFor scope amb call a
+          set failed
+          if let some alt := alt then throw (Syntax.dotOwnMark call alt ++ e)
         -- (Clauses one of which ends with a braced block, which is a callable
         -- there: likely meant to be run.)
         let blocky := match a with

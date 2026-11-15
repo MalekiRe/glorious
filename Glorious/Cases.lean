@@ -3650,7 +3650,7 @@ def cases : List Case := [
     [], "HELLO\n43\ntrue\n3"⟩,
   -- Rust's forms version 1 does not have, each saying what to write.
   ⟨"fn main() -> Int { let a = Some(3); if let Some(x) = a { x } else { 0 } }",
-    [], "error: 1:37: `if let` is not read: match what is tested, `match(a) { Some(x) => .., _ => .. }`, found `if`"⟩,
+    [], "3"⟩,
   ⟨"fn f(x: Int) -> Int { match(x) { n if n > 5 => 1, _ => 0 } }\nfn main() -> Int { f(7) }",
     [], "error: 1:36: a pattern has no guard: test in the clause, `x => if(c) { .. } else { .. }`, or match again, found `if`"⟩,
   ⟨"fn main() -> Int { let a: u8 = 200; let b = a as Int; b + 1 }",
@@ -3757,6 +3757,18 @@ def cases : List Case := [
     [], "3"⟩,
   ⟨"fn main() -> Int { let v = Vec::from_array([1, 2]); let a = if v.contains(&2) { 1 } else { 0 }; let b = if \"hello\".contains(\"ell\") { 10 } else { 0 }; a + b }",
     [], "11"⟩,
+  -- A graph searched breadth first: `HashSet`, `VecDeque`, `while let`,
+  -- `if let`, `entry(..).or_insert_with(Vec::new).push(..)`.
+  ⟨"use std::hash::{HashMap, HashSet};\nuse std::collections::{VecDeque};\n\nstruct Graph { edges: HashMap<Int, Vec<Int>> }\n\nimpl Graph {\n    fn new() -> Self { Graph { edges: HashMap::new() } }\n    fn add_edge(&mut self, a: Int, b: Int) {\n        self.edges.entry(a).or_insert_with(Vec::new).push(b);\n        self.edges.entry(b).or_insert_with(Vec::new).push(a);\n    }\n    fn bfs(&self, start: Int) -> Vec<Int> {\n        let mut seen = HashSet::new();\n        let mut order = Vec::new();\n        let mut queue = VecDeque::new();\n        queue.push_back(start);\n        seen.insert(start);\n        while let Some(n) = queue.pop_front() {\n            order.push(n);\n            if let Some(next) = self.edges.get(&n) {\n                for m in next {\n                    if !seen.contains(m) { seen.insert(*m); queue.push_back(*m); }\n                }\n            }\n        }\n        order\n    }\n}\n\nfn main() -> Int {\n    let mut g = Graph::new();\n    g.add_edge(1, 2); g.add_edge(1, 3); g.add_edge(2, 4); g.add_edge(3, 4); g.add_edge(4, 5);\n    let order = g.bfs(1);\n    for n in &order { say(n) }\n    order.len()\n}\n",
+    [], "1\n2\n3\n4\n5\n5"⟩,
+  ⟨"fn id<T>(x: T) -> T { x }\nfn main() -> Int { let mut a = Vec::new(); id(&mut a).push(2); a.len() }",
+    [], "1"⟩,
+  ⟨"use std::hash::{HashMap};\nfn main() -> Int { let mut m: HashMap<Int, Vec<Int>> = HashMap::new(); m.insert(1, Vec::new()); m.get_mut(&1).unwrap().push(2); m.get(&1).unwrap().len() }",
+    [], "1"⟩,
+  ⟨"fn f(x: &Int) -> Int { *x }\nfn main() -> Int { if Some(3) is Some(n) { f(&n) } else { 0 } }",
+    [], "3"⟩,
+  ⟨"use std::vec::{Vec};\nfn main() -> Int { let mut v = Vec::new(); v.push(1); v.push(2); let mut t = 0; while let Some(x) = v.pop() { t = t + x }; t }",
+    [], "3"⟩,
   -- (An element of what a reference is to is borrowed through it.)
   ⟨"fn first(r: &[Int]) -> Int { let e = &r[0]; *e }\nfn main() -> Int { first(&[7, 8]) }",
     [], "7"⟩,

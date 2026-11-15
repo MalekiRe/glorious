@@ -181,6 +181,24 @@ partial def expandAliases (items : List Item) : Except String (List Item) := do
   rest.mapM item
 
 
+/-- How `givesReference`'s functions are kept among `takesReference`'s. -/
+def givesKey (name : String) : String := "%gives:" ++ name
+
+/-- The functions written to give a reference: a dot call on what one gives
+is given it as it is, not borrowed again. -/
+partial def givesReference : List Item → List String
+  | [] => []
+  | .pub _ item :: rest => givesReference (item :: rest)
+  | .module _ (some body) :: rest => givesReference body ++ givesReference rest
+  | .fn name _ _ (some r) _ :: rest =>
+    let gives := match r with
+      | .ref .. => true
+      | .performs (.ref ..) _ => true
+      | _ => false
+    if gives then name :: givesReference rest else givesReference rest
+  | .impl _ _ _ _ _ methods :: rest => givesReference methods ++ givesReference rest
+  | _ :: rest => givesReference rest
+
 /-- The functions written to take a reference first, each with whether it is
 `&mut`: a function by its first parameter's type, a trait's function by the
 first type it lists. -/
@@ -250,6 +268,10 @@ partial def receiverExpr (taken : List (String × Bool)) (known : List (String �
               -- (A value made where it is called on, `half(4).is_ok()`:
               -- given a name first, and borrowed.)
               match receiver with
+              -- (Not what a function written to give a reference gives.)
+              | .call _ (.name _ g) _ =>
+                if (taken.lookup (givesKey g)).isSome then receiver
+                else .call id (.name none (if uniq then borrowMutMark else borrowMark)) [receiver]
               | .call .. => .call id (.name none (if uniq then borrowMutMark else borrowMark)) [receiver]
               -- (A constructor without fields or a constant, `D.greet()`.)
               | .name none x =>
@@ -312,7 +334,7 @@ the function takes a reference: see `receiverExpr`. A name that is then
 borrowed and was not a variable is kept where a reference can point, as one
 borrowed with `&` in the text is (`promoteItems`). -/
 partial def borrowReceivers (items : List Item) : List Item :=
-  let taken := takesReference items
+  let taken := takesReference items ++ (givesReference items).map (givesKey ·, false)
   let rec go : Item → Item
     | .pub parent item => .pub parent (go item)
     | .module name (some body) => .module name (some (body.map go))

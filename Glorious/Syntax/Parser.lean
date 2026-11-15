@@ -1401,14 +1401,23 @@ private partial def parsePrimary (noBlock : Bool) : P Expr := do
     if (w == "if" || w == "while" || w == "match") && (← peek 1) != .punct "(" then
       let next ← peek 1
       let starts := match next with
-        | .ident "let" => false
+        | .ident "let" => w != "match"
         | .ident _ | .int _ | .str _ | .char _ => true
         | .op "!" | .op "-" | .op "*" | .op "&" => true
         | _ => false
       if starts then
         let id := (← read).base + (← get)
         advance
-        let tested ← parseBinary 0 true
+        -- (`if let P = e`, `while let P = e`: `e is P`, whose names the block
+        -- then has.)
+        let tested ← if (← peek) == .ident "let" then do
+            advance
+            let pat ← parsePattern
+            expectPunct "="
+            let isAt := (← read).base + (← get)
+            let subject ← parseBinary 5 true
+            pure (Expr.call isAt (.name none isMark) [subject, .closure 0 [.mk [pat] []]])
+          else parseBinary 0 true
         if (← peek) != .punct "{" then failAt s!"expected `\{` after what `{w}` is given"
         let block ← parseBraces
         let tested := if w == "while" then Expr.closure (id + 300000) [.mk [] [.expr tested]] else tested
@@ -1758,10 +1767,6 @@ private partial def parseStmts : P (List Stmt) := do
         else set saved
       | none => set saved
     match t, ← peek 1 with
-    | .ident "if", .ident "let" =>
-      failAt "`if let` is not read: match what is tested, `match(a) { Some(x) => .., _ => .. }`"
-    | .ident "while", .ident "let" =>
-      failAt "`while let` is not read: go through an iterator with `for x in it { .. }`, or loop with `while({ condition }, { body })`"
     | _, _ => pure ()
     let here ← peekTok
     let mark := fun (s : Stmt) => Stmt.located here.line here.col s

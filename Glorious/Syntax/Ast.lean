@@ -1351,7 +1351,27 @@ somewhere a reference can point. Where the name is never changed, borrowed
 for writing or bound again, the binding is made a variable's, which is such a
 place; the checker still sees no assignment to it, since there is none. -/
 partial def promoteExpr : Expr → Expr
-  | .call id f args => .call id (promoteExpr f) (args.map promoteExpr)
+  | .call id f args =>
+    -- (`if(e is Some(n)) { .. &n .. }`: the names an `is` among the
+    -- arguments binds are the blocks' after it, and are kept where a
+    -- reference can point as a clause's are.)
+    let isNames := fun (e : Expr) => match e with
+      | .call _ (.name none m) [_, .closure _ [.mk [pat] []]] =>
+        if m == isMark then patternNames pat else []
+      | .closure _ [.mk [] [.expr (.call _ (.name none m) [_, .closure _ [.mk [pat] []]])]] =>
+        if m == isMark then patternNames pat else []
+      | _ => []
+    let named := args.flatMap isNames
+    let args := args.map promoteExpr
+    let args := if named.isEmpty then args else args.map fun
+      | .closure cid [.mk [] body] =>
+        let held := named.eraseDups.filter (borrowedOnly · body)
+        let placed := fun (s : Stmt) => match body with
+          | .located line col _ :: _ => Stmt.located line col s
+          | _ => s
+        .closure cid [.mk [] (held.map (fun x => placed (.letMut x (.name none x))) ++ body)]
+      | a => a
+    .call id (promoteExpr f) args
   | .tailCall id f args => .tailCall id (promoteExpr f) (args.map promoteExpr)
   | .tuple args => .tuple (args.map promoteExpr)
   | .proj e i => .proj (promoteExpr e) i

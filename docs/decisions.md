@@ -4700,6 +4700,13 @@ values, which is the same for values that are copied. `PartialEq` and
 `PartialOrd` are `Eq` and `Ord`. `use std::ops::Add` and `use
 std::cmp::PartialEq` bring in nothing more than the prelude has.
 
+## `if let` and `while let`
+
+`if let P = e { .. }` and `while let P = e { .. }` are `if e is P { .. }`
+and `while({ e is P }) { .. }`: the language's `is`, whose names the block
+has. Names an `is` binds that the block borrows are kept where a reference
+can point, as a clause's are. `let else` stays unread.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by

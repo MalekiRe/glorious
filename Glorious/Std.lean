@@ -4956,6 +4956,30 @@ fn keys_onto<K: Eq, V>(buckets: &[[(K, V)]], b: Int, i: Int, out: [K]) -> [K] {
 }
 
 // `f(f(init, k0, v0), k1, v1)` and so on, in no order one can rely on.
+// A set of values: a map from each to nothing.
+pub struct HashSet<T>(HashMap<T, ()>)
+
+impl<T> HashSet<T> {
+    pub fn new() -> Self { HashSet(HashMap::new()) }
+    pub fn len(value: &Self) -> Int { HashMap::len(&value.0) }
+    pub fn is_empty(value: &Self) -> Bool { HashMap::len(&value.0) == 0 }
+    pub fn contains(value: &Self, item: &T) -> Bool where T: Eq, T: Hash {
+        HashMap::contains_key(&value.0, item)
+    }
+    // Whether it was not there before.
+    pub fn insert(value: &mut Self, item: T) -> Bool where T: Eq, T: Hash {
+        match(HashMap::insert(&mut value.0, item, ())) { Some(_) => false, None => true }
+    }
+    // Whether it was there.
+    pub fn remove(value: &mut Self, item: &T) -> Bool where T: Eq, T: Hash {
+        match(HashMap::remove(&mut value.0, item)) { Some(_) => true, None => false }
+    }
+    pub fn clear(value: &mut Self) { HashMap::clear(&mut value.0) }
+    pub fn into_vec(value: Self) -> [T] {
+        match(value) { HashSet(m) => fold(HashMap::into_entries(m), [], fn(out, pair) { match(pair) { (k, _) => push(out, k) } }) }
+    }
+}
+
 pub fn fold_map(m, init, f) {
     match(m) {
         HashMap(buckets, _) => fold(buckets, init, fn(acc, bucket) {
