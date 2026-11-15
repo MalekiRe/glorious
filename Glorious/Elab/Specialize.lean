@@ -486,9 +486,16 @@ partial def dotOwnItems (call : Nat) (fn : String) (items : List Item) : List It
 written (`Blocks.argsChosen`) written in. -/
 partial def argsChosenExpr (picks : List ((Nat × Nat) × Expr)) : Expr → Expr
   | .call i f args =>
-    let args := (args.map (argsChosenExpr picks)).zipIdx.map fun (a, k) =>
-      (picks.lookup (i, k)).getD a
-    .call i (argsChosenExpr picks f) args
+    match f, args with
+    -- (What a `for` loop goes through: as the checker chose.)
+    | .name none mark, [a, _] =>
+      if mark == Syntax.forSourceMark then
+        let a := argsChosenExpr picks a
+        match picks.lookup (i, 0) with
+        | some g => .call (i + 600000) g [a]
+        | none => a
+      else chosenArgs i f args
+    | _, _ => chosenArgs i f args
   | .tailCall i f args => .tailCall i (argsChosenExpr picks f) (args.map (argsChosenExpr picks))
   | .tuple args => .tuple (args.map (argsChosenExpr picks))
   | .proj e n => .proj (argsChosenExpr picks e) n
@@ -502,6 +509,10 @@ partial def argsChosenExpr (picks : List ((Nat × Nat) × Expr)) : Expr → Expr
   | .fieldOf i e name => .fieldOf i (argsChosenExpr picks e) name
   | e => e
 where
+  chosenArgs (i : Nat) (f : Expr) (args : List Expr) : Expr :=
+    let args := (args.map (argsChosenExpr picks)).zipIdx.map fun (a, k) =>
+      (picks.lookup (i, k)).getD a
+    .call i (argsChosenExpr picks f) args
   argsChosenStmt (picks : List ((Nat × Nat) × Expr)) : Stmt → Stmt
     | .let_ pat value => .let_ pat (argsChosenExpr picks value)
     | .expr e => .expr (argsChosenExpr picks e)
@@ -511,7 +522,6 @@ where
     | .located line col s => .located line col (argsChosenStmt picks s)
 
 partial def argsChosenItems (picks : List ((Nat × Nat) × Expr)) (items : List Item) : List Item :=
-  if picks.isEmpty then items else
   items.map fun
     | .fn name ps annots ret clauses => .fn name ps annots ret (clauses.map fun
       | .mk pats body => .mk pats (body.map (argsChosenExpr.argsChosenStmt picks)))

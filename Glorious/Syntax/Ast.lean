@@ -163,6 +163,10 @@ character, are given what it points to (`Check.inferCall`). -/
 def derefOperators : List String :=
   ["+", "-", "*", "/", "%", "<", ">", "<=", ">=", "==", "!=", "negate"]
 
+/-- The functions that show a value or join texts, given a name holding a
+reference to a value that may be used more than once: given the value. -/
+def derefShows : List String := ["++", "say", "show", "to_string"]
+
 /-- The scalar types beside `Int`. A value of each is held as an integer: an
 integer type's own value, the code of a character, the bits of a floating
 point number. With an integer type is the width `int_fit` is asked whether a
@@ -839,6 +843,11 @@ partial def selfStmt (self : String) (trait : Option (String Ã— Expr)) : Stmt â†
 
 end
 
+
+/-- What a `for` loop goes through, as written: the checker chooses what it
+is gone through as (`Check.inferCall`), an array's or a `Vec`'s elements
+given away, or the iterator itself. -/
+def forSourceMark : String := "%forsource"
 
 /-- `&value` and `&mut value` where the value has no name. -/
 def borrowMark : String := "%borrow"

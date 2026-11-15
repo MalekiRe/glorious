@@ -503,6 +503,7 @@ partial def checkArg (scope : Scope) (amb : Row) (what : String) (p : Ty) (a : E
           -- known where the clauses read them through it.)
           | .ref _ inner _ => do
             match ← find inner with
+            | .tuple (_ :: _) => pure true
             | .con name _ =>
               let st ← get
               pure (match st.types.lookup name with
@@ -527,6 +528,9 @@ partial def checkArg (scope : Scope) (amb : Row) (what : String) (p : Ty) (a : E
         match tried with
         | none => return none
         | some said =>
+          -- (Found that a match is of a reference, or a dot call of a type's
+          -- own function, knowing the types: the program is read again so.)
+          if (said.splitOn "%refpats:").length > 1 || (said.splitOn "%dotown:").length > 1 then throw said
           set saved
           -- What went wrong with the types known is what is said if the
           -- callable is wrong without them too: it was read knowing more.
@@ -643,6 +647,10 @@ partial def checkArgsIn (scope : Scope) (amb : Row) (what : String) (params : Li
               valuePats := valuePats ++ [k]
           | _ => pure ()
         if !valuePats.isEmpty then
+          -- (What a trait leaves to an implementation, the `&'a T` a
+          -- `SliceIter` gives, found first.)
+          if let .fn (first :: _) _ _ _ _ ← find p then
+            if let .var _ ← find first then settleAssocsAll
           if let .fn (first :: _) _ _ _ _ ← find p then
             if let .ref how _ _ ← find first then
               let uniq := match ← find how with
@@ -787,12 +795,42 @@ partial def applyTy (scope : Scope) (amb : Row) (what : String) (callee : Ty) (a
 
 partial def inferCall (scope : Scope) (amb : Row) (f : Expr) (args : List Expr)
     (call : Nat := 0) : M Ty := do
+  -- What a `for` loop goes through: an array's elements and a `Vec`'s, given
+  -- away (`into_iter`), or what is written, an iterator.
+  if let (.name none mark, [source, arrays]) := (f, args) then
+    if mark == Syntax.forSourceMark then
+      let saved ← get
+      let t ← inferExpr scope amb source
+      let head ← match ← find t with
+        | .con n _ => pure (some n)
+        | _ => pure none
+      -- (A reference to a `Vec`: its elements, borrowed, `v.iter()`.)
+      let refHead ← match ← find t with
+        | .ref _ inner _ => do pure (match ← find inner with | .con n _ => some n | _ => none)
+        | _ => pure none
+      set saved
+      let own := head.map (· ++ "::into_iter")
+      let fns := (← get).fns
+      let borrowed := refHead.map (· ++ "::iter") |>.filter (fns.lookup · |>.isSome)
+      -- (The function it is given to, if any: what the elaborator writes
+      -- around what is written, as it then is.)
+      let through : Option Expr := match borrowed with
+        | some f => some (.name none f)
+        | none => match head, own with
+          | some "Array", _ => some arrays
+          | _, some f => if (fns.lookup f).isSome then some (.name none f) else none
+          | _, none => none
+      match through with
+      | some g =>
+        modify fun s => { s with argsChosen := ((call, 0), g) :: s.argsChosen }
+        return ← inferExpr scope amb (.call (call + 600000) g [source])
+      | none => return ← inferExpr scope amb source
   -- An operator given a name that holds a reference to a number or a
   -- character, as a pattern binding by reference gives one (`Circle(r) =>
   -- 3 * r * r`): what it points to, copied (`*r`), as Rust's operators on
   -- references to numbers have it.
   if let .name _ op := f then
-    if call != 0 && Syntax.derefOperators.contains op then
+    if call != 0 && (Syntax.derefOperators.contains op || Syntax.derefShows.contains op) then
       let mut changed := false
       let mut given : Array Expr := #[]
       for (a, i) in args.zipIdx do
@@ -804,11 +842,27 @@ partial def inferCall (scope : Scope) (amb : Row) (f : Expr) (args : List Expr)
             | _ => none
           if let some t := held then
             if let .ref _ inner _ ← find t then
-              if let .con n [] ← find inner then
-                if n == "Int" || Syntax.isScalar n then
-                  modify fun s => { s with argsChosen := ((call, i), .deref a) :: s.argsChosen }
-                  a' := .deref a
-                  changed := true
+              -- (What a trait leaves to an implementation, found first.)
+              if let .var _ ← find inner then settleAssocsAll
+              -- (A number or a character; or, to what shows a value or joins
+              -- texts, any value that may be used more than once, a `Str`.)
+              let copied ← match ← find inner with
+                | .con n [] =>
+                  if n == "Int" || Syntax.isScalar n then pure true
+                  else if Syntax.derefShows.contains op then do
+                    let z ← zonk inner
+                    pure ((freeTys z).isEmpty && !(← tyOwnsOnce [] z))
+                  else pure false
+                | .con _ (_ :: _) | .tuple _ =>
+                  if Syntax.derefShows.contains op then do
+                    let z ← zonk inner
+                    pure ((freeTys z).isEmpty && !(← tyOwnsOnce [] z))
+                  else pure false
+                | _ => pure false
+              if copied then
+                modify fun s => { s with argsChosen := ((call, i), .deref a) :: s.argsChosen }
+                a' := .deref a
+                changed := true
         given := given.push a'
       if changed then return ← inferCall scope amb f given.toList call
   -- `let x: Type = value`: the value is made that type.

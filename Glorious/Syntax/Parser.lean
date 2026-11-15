@@ -730,6 +730,9 @@ private partial def parseBoundsOf (subject : String) : P (List Bound) := do
       expectPunct ","
       let pack ← parsePack
       out := out.push { subject, trait := tr, args := access :: pack, assoc := ← parseAssoc, ranked := ranked.toList }
+    -- (`Copy`, as Rust names it: what may be used any number of times.)
+    else if tr == "Copy" && !(← isOp "<") then
+      out := out.push { subject, trait := "Use", quantity := some (0, none) }
     else if tr == "Use" then
       if !(← isOp "<") then failAt "expected `<`: `Use<[1, 1]>`"
       advance
@@ -1710,11 +1713,24 @@ private partial def parseStmts : P (List Stmt) := do
             | some tok => Stmt.located tok.line tok.col s
             | none => s
           let step := Expr.call (made inAt 400000) (.name (some "std::iterator") "next") [.ref true it]
+          -- (A pattern of more than a name is matched on its own, so that what
+          -- it is matched with may be a reference: `for (n, w) in &pairs`
+          -- binds references, as a `match` of one does.)
+          let (taken, body) := match pat with
+            | .var _ | .wild => (pat, body)
+            | _ =>
+              let item := s!"for%item{base + saved}"
+              (Pattern.var item, [Stmt.expr (.call (made (saved + 1) 400000) (.name none "match")
+                [.name none item, .closure (made (saved + 1) 500000) [.mk [pat] body]])])
           let arms := Expr.closure (made openAt 300000)
-            [.mk [.ctor "Some" none [pat]] body,
+            [.mk [.ctor "Some" none [taken]] body,
              .mk [.var "None"] [.expr (.call (made openAt 400000) (.name none "break") [.tuple []])]]
           let each := Expr.closure (made saved 400000)
             [.mk [] [.expr (.call (made inAt 300000) (.name none "match") [step, arms])]]
+          -- (With the library's function that gives an array's elements away,
+          -- named so that it is there to be chosen.)
+          let source := Expr.call (made (saved + 1) 300000) (.name none forSourceMark)
+            [source, .name (some "std::iterator") "into_iter"]
           out := out.push (mark (.letMut it source))
           out := out.push (mark (.expr (.call (made saved 300000) (.name none "loop") [each])))
           let _ ← acceptPunct ";"
