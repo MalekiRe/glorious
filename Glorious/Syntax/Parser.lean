@@ -1602,9 +1602,44 @@ private partial def parseStmts : P (List Stmt) := do
     | .ident "return", next =>
       if operand next && (← read).fnLabel.isNone then
         failAt "`return` is the library's function of a value and the function's label, `return(value, @f)`; or the value is written last, without `;`"
-    | .ident "for", .ident _ =>
-      if (← peek 2) == .ident "in" then
-        failAt "there is no `for .. in` loop: go through an iterator with `for_each(&mut it, { (x) => .. })`, or loop with `while({ condition }, { body })`"
+    | _, _ => pure ()
+    -- `for pattern in iterator { body }`: `std::iterator::for_each` of the
+    -- iterator, kept in a variable of its own, and a callable of the body.
+    if t == .ident "for" then
+      let saved ← get
+      advance
+      let pat? ← try (some <$> parsePattern) catch _ => pure none
+      match pat? with
+      | some pat =>
+        if (← peek) == .ident "in" then
+          advance
+          let id := (← read).base + saved
+          let it := s!"for%{id}"
+          -- (`for x in &v`: what `v.iter()` gives.)
+          let source ← if (← isOp "&") && (← peek 1) != .ident "mut" then do
+              advance
+              let inner ← parseBinary 0 true
+              pure (Expr.call (id + 3) (.fieldOf (id + 4) inner "iter") [])
+            else parseBinary 0 true
+          expectPunct "{"
+          let body ← parseStmts
+          expectPunct "}"
+          let here := (← read).toks[saved]?
+          let mark := fun (s : Stmt) => match here with
+            | some tok => Stmt.located tok.line tok.col s
+            | none => s
+          out := out.push (mark (.letMut it source))
+          out := out.push (mark (.expr (.call (id + 1) (.name (some "std::iterator") "for_each")
+            [.ref true it, .closure (id + 2) [.mk [pat] body]])))
+          let _ ← acceptPunct ";"
+          let t' ← peek
+          if t' == .punct "}" || t' == .punct "," || t' == .eof then
+            out := out.push (.expr (.tuple []))
+            break
+          continue
+        else set saved
+      | none => set saved
+    match t, ← peek 1 with
     | .ident "match", next =>
       if operand next then
         failAt "`match` is given what it matches in parentheses: `match(x) { pattern => .. }`"

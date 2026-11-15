@@ -482,6 +482,10 @@ partial def checkArg (scope : Scope) (amb : Row) (what : String) (p : Ty) (a : E
       let arity := match clauses.head? with
         | some (.mk pats _) => pats.length
         | none => 0
+      -- (What a type leaves to a trait's implementation, the `&'a T` a
+      -- `SliceIter` gives, found first where it can be.)
+      if ← ps.anyM (fun q => do pure (match ← find q with | .var _ => true | _ => false)) then
+        settleAssocsAll
       let mut annots : List (Option Ty) := []
       -- A parameter known to be of a declared type is said too, so that
       -- what the clauses do with it, a field read by name, is looked at
@@ -492,10 +496,22 @@ partial def checkArg (scope : Scope) (amb : Row) (what : String) (p : Ty) (a : E
       for q in ps do
         -- (A tuple too: what its parts are is then known where the clauses
         -- read them.)
-        let declared := match ← find q with
-          | .con _ _ => true
-          | .tuple (_ :: _) => true
-          | _ => false
+        let declared ← match ← find q with
+          | .con _ _ => pure true
+          | .tuple (_ :: _) => pure true
+          -- (A reference to a type with named fields: what they are is
+          -- known where the clauses read them through it.)
+          | .ref _ inner _ => do
+            match ← find inner with
+            | .con name _ =>
+              let st ← get
+              pure (match st.types.lookup name with
+                | some decl => match decl.ctors with
+                  | [c] => (st.fieldNames.lookup c).isSome
+                  | _ => false
+                | none => false)
+            | _ => pure false
+          | _ => pure false
         let whole := (← literalAt q 0).isSome
         annots := annots ++ [if whole then some q else none]
         wider := wider ++ [if declared || whole then some q else none]
