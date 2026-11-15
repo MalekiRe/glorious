@@ -1813,7 +1813,9 @@ private partial def parseItem : P Item := do
     pure (.alias name (Expr.call 0 (.name none ascribeMark) [value, ty.asExpr]))
   | .ident "impl" =>
     advance
-    let params ← parseGenerics
+    -- (`impl<T: Show> ..`: what is asked of a parameter, as `where T: Show`.)
+    let (params, early) ← if ← isOp "<" then parseGenericsWith else pure ([], [])
+    let early := early.filter (·.trait != knownTrait)
     -- `impl !Trait for Type {}`: the type does not have the trait, and no
     -- implementation may say it does.
     if ← isOp "!" then
@@ -1871,6 +1873,7 @@ private partial def parseItem : P Item := do
     -- called.
     -- (`impl<T> Type<T> where T: Hash { .. }`: asked of each of its functions.)
     let (_, shared) ← if (← peek) == .ident "where" then parseWhere else pure ([], [])
+    let shared := early ++ shared
     if (← peek) == .punct "{" then
       advance
       let self := TypeExpr.name tr selfArgs.toList
@@ -1928,6 +1931,15 @@ private partial def parseItem : P Item := do
     let args := names.toList
     let params := params ++ fresh.toList
     let mut context : Array (String × String) := #[]
+    -- (What `impl<T: Show>` asked of its parameters, as `where` asks it.)
+    for b in early do
+      if b.quantity.isSome || !b.ranked.isEmpty then
+        failAt "what is asked of a parameter of an implementation is written after `where`"
+      context := context.push (b.subject, b.trait)
+      for (a, place) in b.args.zipIdx do
+        given := given.push (.typeAlias (ctxArgName (context.size - 1) place) [] a)
+      for (name, ty) in b.assoc do
+        given := given.push (.typeAlias (equalArgName (context.size - 1) name) [] ty)
     if (← peek) == .ident "where" then
       advance
       repeat

@@ -3560,6 +3560,9 @@ def cases : List Case := [
     [], "low saw 5\nlow saw 15\nhigh saw 15\n3"⟩,
   ⟨"fn f(o: Option<Int>) -> Int { match(o) { Some(tail) => tail, None => 0 } }\nfn main() -> Int { f(Some(1)) }",
     [], "error: 1:47: `tail` is a word of the language: what is bound here is named otherwise, found `tail`"⟩,
+  -- What an implementation asks of its parameters, written in them.
+  ⟨"trait Both { fn both(x: &Self) -> Str; }\nstruct P<A, B>(A, B)\nimpl<A: Show, B: Show> Both for P<A, B> { fn both(p) { show(p.0) ++ show(p.1) } }\nstruct W<T>(T)\nimpl<T: Show> W<T> { fn describe(w: &W<T>) -> Str { \"W:\" ++ show(w.0) } }\nfn main() -> Int { say(both(&P(1, \"x\"))); let w = W(5); say(w.describe()); 0 }",
+    [], "1x\nW:5\n0"⟩,
   -- (An element of what a reference is to is borrowed through it.)
   ⟨"fn first(r: &[Int]) -> Int { let e = &r[0]; *e }\nfn main() -> Int { first(&[7, 8]) }",
     [], "7"⟩,
