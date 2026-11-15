@@ -457,7 +457,9 @@ impl<T> Vec<T> {
     pub fn truncate(value: &mut Self, length: Int) {
         let items = &mut value.items;
         let n = len_at(&*items);
-        *items = taken_off(replace(items, []), n - length, []).0;
+        // (What is taken off is destroyed: a pattern's `_` does that.)
+        let (kept, _) = taken_off(replace(items, []), n - length, []);
+        *items = kept;
     }
     pub fn clear(value: &mut Self) {
         let items = &mut value.items;

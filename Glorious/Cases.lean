@@ -3362,6 +3362,9 @@ def cases : List Case := [
   ⟨"fn main() -> Int { let mut x = 1; x += 2; x }", [], "error: 1:37: `x += e` is not an assignment here: write `x = x + e`, found `+=`"⟩,
   ⟨"fn main() -> Int { let x = Some(1); match x { Some(v) => v, None => 0 } }", [], "error: 1:37: `match` is given what it matches in parentheses: `match(x) { pattern => .. }`, found `match`"⟩,
   ⟨"fn f(x: impl Show) -> Int { 0 }\nfn main() -> Int { f(1) }", [], "error: 1:9: `impl Trait` is not a type: give the function a type parameter with the trait, `fn f<T: Trait>(x: T)`, found `impl`"⟩,
+  -- What `Vec::truncate` takes off is destroyed.
+  ⟨"struct N(Int)\nimpl Drop for N { fn drop(n) { say(n.0) } }\nuse std::vec::{Vec};\nfn main() -> Int { let mut v = Vec::new(); Vec::push(&mut v, N(102)); Vec::push(&mut v, N(103)); Vec::truncate(&mut v, 1); say(Vec::len(&v)); 0 }",
+    [], "103\n1\n102\n0"⟩,
   ⟨"use std::future::{Future, FutureStep, Await, await, poll, ready, block_on};\n\n// Done after so many polls.\nstruct Countdown { left: Int, value: Int }\nimpl Future for Countdown {\n    type Output = Int;\n    fn poll(c) { if(c.left <= 0) { FutureStep::Ready(c.value) } else { say(c.left); FutureStep::Pending(Countdown { left: c.left - 1, value: c.value }) } }\n}\nfn main() -> Int {\n    let a = block_on({ await(Countdown { left: 2, value: 40 }) + await(Countdown { left: 1, value: 2 }) });\n    let b = block_on({ length(await(ready(\"done\"))) });\n    a * 10 + b\n}\n",
     [], "2\n1\n1\n424"⟩,
   -- Base64, with padding as the options say (library 23).
