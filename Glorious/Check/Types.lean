@@ -476,6 +476,9 @@ structure St where
   and the argument's place: `*x` to an operator, a field borrowed through a
   reference for a function that takes one. -/
   argsChosen : List ((Nat × Nat) × Expr) := []
+  /-- `*x` written of a name that holds a value, not a reference: the
+  function, the statement's place, and the name (`*x` is then `x`). -/
+  derefValues : List (String × String × String) := []
   /-- For each trait, how many type parameters it has and the names of the
   types it leaves to implementations. -/
   traitShape : List (String × Nat × List String) := []

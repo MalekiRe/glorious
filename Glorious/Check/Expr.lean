@@ -332,6 +332,18 @@ partial def inferExpr (scope : Scope) (amb : Row) : Expr → M Ty
       pure (.ref .shared inner cap')
   | .deref e => do
     let t ← inferPlace scope amb e
+    -- (`*n` of a name that holds a value that may be used more than once,
+    -- not a reference, as one bound by a match of what an `Option<&T>`
+    -- points to, copied: the value; the elaborator leaves out the `*`.)
+    if let .name none x := e then
+      let plain ← match ← find t with
+        | .con _ _ | .tuple _ => do
+          let z ← zonk t
+          pure ((freeTys z).isEmpty && !(← tyOwnsOnce [] z))
+        | _ => pure false
+      if plain then
+        modify fun s => { s with derefValues := (s.owner, s.pos, x) :: s.derefValues }
+        return t
     let inner ← freshTy
     let cap ← freshCap
     unifyAt "`*` reads through a reference" (.ref (← freshTy) inner cap) t
@@ -847,6 +859,35 @@ partial def applyTy (scope : Scope) (amb : Row) (what : String) (callee : Ty) (a
 
 partial def inferCall (scope : Scope) (amb : Row) (f : Expr) (args : List Expr)
     (call : Nat := 0) : M Ty := do
+  -- A match of an `Option<&T>` whose clauses look inside the `T` with
+  -- patterns of a value, `Some(Num(n))`: of what it points to, copied, where
+  -- a `T` may be used more than once (Rust's match through a reference).
+  if let (.name none "match", [subject, .closure _ clauses]) := (f, args) then
+    let inside := clauses.any fun
+      | .mk (.ctor _ _ [.ctor n _ _] :: _) _ => !n.startsWith "%"
+      | .mk (.ctor _ _ [.tuple _] :: _) _ => true
+      -- (A constructor without fields, `Some(RParen)`.)
+      | .mk (.ctor _ _ [.var x] :: _) _ => (Syntax.lastSegment x).front.isUpper
+      | _ => false
+    if call != 0 && inside then
+      let saved ← get
+      let found ← try some <$> inferExpr scope amb subject catch _ => pure none
+      let copies ← match found with
+        | some t => do
+          match ← find t with
+          | .con "Result" [r, _] => do
+            match ← find r with
+            | .ref _ inner _ =>
+              let z ← zonk inner
+              pure ((freeTys z).isEmpty && !(← tyOwnsOnce [] z))
+            | _ => pure false
+          | _ => pure false
+        | none => pure false
+      set saved
+      if copies then
+        let g := Expr.name none "copied_ref"
+        modify fun s => { s with argsChosen := ((call, 0), .call 0 (.name none Syntax.wrapMark) [g]) :: s.argsChosen }
+        return ← inferCall scope amb f (.call (call + 700000) g [subject] :: args.drop 1) call
   -- What a `for` loop goes through: an array's elements and a `Vec`'s, given
   -- away (`into_iter`), or what is written, an iterator.
   if let (.name none mark, [source, arrays]) := (f, args) then

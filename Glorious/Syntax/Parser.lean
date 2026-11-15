@@ -392,6 +392,12 @@ private def hoistStmt (s : Stmt) : Option (List Stmt × Stmt) :=
   | .defer e => if hasThrough e then none else some ([], .defer e)
   | s => some ([], s)
 
+/-- A clause's body that is one braced block: the block's statements. -/
+private def runBlock : List Stmt → List Stmt
+  | [.expr (.closure _ [.mk [] stmts])] => stmts
+  | [.located _ _ (.expr (.closure _ [.mk [] stmts]))] => stmts
+  | body => body
+
 /-- Does the block starting at token `i` have clauses (`... => ...`) rather than statements? -/
 private partial def scanClauseForm (toks : Array Token) (i depth : Nat) : Bool :=
   match toks[i]? with
@@ -1400,7 +1406,9 @@ private partial def parsePrimary (noBlock : Bool) : P Expr := do
   -- `return e` (`return` alone: `()`) in a function: `return(e, @f)`.
   if (← peek) == .ident "return" && (← peek 1) != .punct "(" then
     if let some l := (← read).fnLabel then
-      let id := (← read).base + (← get)
+      -- (Each call is known by the token after the one that makes it: a
+      -- block's callable is known by its first token.)
+      let id := (← read).base + (← get) + 1
       advance
       let value ← match ← peek with
         | .punct ";" | .punct "}" | .punct "," | .punct ")" => pure (Expr.tuple [])
@@ -1419,7 +1427,7 @@ private partial def parsePrimary (noBlock : Bool) : P Expr := do
         | .op "!" | .op "-" | .op "*" | .op "&" => true
         | _ => false
       if starts then
-        let id := (← read).base + (← get)
+        let id := (← read).base + (← get) + 1
         advance
         -- (`if let P = e`, `while let P = e`: `e is P`, whose names the block
         -- then has.)
@@ -1434,6 +1442,12 @@ private partial def parsePrimary (noBlock : Bool) : P Expr := do
         if (← peek) != .punct "{" then failAt s!"expected `\{` after what `{w}` is given"
         let block ← parseBraces
         let tested := if w == "while" then Expr.closure (id + 300000) [.mk [] [.expr tested]] else tested
+        -- (In a match written as Rust writes it, a clause's braced body is
+        -- run, as Rust's is: its statements are the clause's.)
+        let block := if w != "match" then block else match block with
+          | .closure cid clauses => .closure cid (clauses.map fun
+            | .mk pats body => .mk pats (runBlock body))
+          | other => other
         return .call id (.name none w) [tested, block]
   -- `break` and `continue` alone, where a statement ends: performed, with
   -- `()` and with nothing (`break(())`, `continue()`), as named here.
@@ -1441,7 +1455,7 @@ private partial def parsePrimary (noBlock : Bool) : P Expr := do
     if w == "break" || w == "continue" then
       match ← peek 1 with
       | .punct ";" | .punct "}" | .punct "," | .punct ")" =>
-        let id := (← read).base + (← get)
+        let id := (← read).base + (← get) + 1
         advance
         return .call id (.name none w) (if w == "break" then [.tuple []] else [])
       | _ => pure ()
@@ -1642,7 +1656,8 @@ private partial def parsePrimary (noBlock : Bool) : P Expr := do
   -- `fn(a, b) { body }`, `{ => body }`. (A pattern's written type is read
   -- and left to be found.)
   | .op "|" | .op "||" =>
-    let id := (← read).base + (← get)
+    -- (Known apart from a block it begins.)
+    let id := (← read).base + (← get) + 1
     let none_ := (← peek) == .op "||"
     advance
     let mut pats : Array Pattern := #[]
@@ -1683,7 +1698,13 @@ private partial def parseClauses : P (List Clause) := do
   repeat
     if (← peek) == .punct "}" then break
     out := out.push (← parseClause)
-    if !(← acceptPunct ",") then break
+    if !(← acceptPunct ",") then
+      -- (A clause whose body ends with a block needs no comma before the
+      -- next, as in Rust.)
+      let pos ← get
+      let endsBlock := pos > 0 && ((← read).toks[pos - 1]?.map (·.tok)) == some (.punct "}")
+      if endsBlock && (← peek) != .punct "}" then continue
+      break
   pure (restClauses out.toList)
 
 /-- One clause: a single pattern for the argument, or none for a callable taking
@@ -1923,7 +1944,10 @@ private partial def parseStmts : P (List Stmt) := do
           let pos ← get
           let endsBlock := pos > 0 && ((← read).toks[pos - 1]?.map (·.tok)) == some (.punct "}")
           let t' ← peek
-          if endsBlock && t' != .punct "}" && t' != .punct "," && t' != .eof then continue
+          -- (Not where what follows is the next clause of a match, `pattern
+          -- => ..`, written after a braced body without a comma.)
+          let nextClause := scanClauseForm (← read).toks pos 0
+          if endsBlock && t' != .punct "}" && t' != .punct "," && t' != .eof && !nextClause then continue
           break
   -- The functions written in this block are named, in it and in each
   -- other, by the names they have as functions of the module.

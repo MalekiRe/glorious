@@ -218,6 +218,11 @@ def textDotNames : List String :=
   ["to_upper", "to_lower", "trim", "trim_start", "starts_with", "ends_with", "parse_int",
    "char_at", "pad_start", "pad_end", "lines", "words", "repeat", "utf8", "split", "contains"]
 
+/-- The functions of `std::char` brought in where a program calls one on a
+value, `c.is_digit()`. -/
+def charDotNames : List String :=
+  ["is_digit", "is_lower", "is_upper", "is_alpha", "is_alphanumeric", "is_space", "digit", "of_digit"]
+
 /-- The functions of `std::iterator` brought in where a program calls one on
 a value, `v.iter().map(f).sum()`, as Rust's prelude has `Iterator`'s. -/
 def iteratorDotNames : List String :=
@@ -293,9 +298,11 @@ def stdPreludeUses (src : String) : String := Id.run do
   let dotted := fun (name : String) => (src.splitOn ("." ++ name ++ "(")).length > 1
   let textDots := textDotNames.filter fun name => dotted name && !blocked name
   let iterDots := iteratorDotNames.filter fun name => dotted name && !blocked name
+  let charDots := charDotNames.filter fun name => dotted name && !blocked name
   let wanted := stdPreludeNames.filter fun (name, _) => mentions name && !blocked name
   let wanted := wanted ++ (textDots.filter (fun n => !wanted.any (·.1 == n))).map (·, "text")
   let wanted := wanted ++ (iterDots.filter (fun n => !wanted.any (·.1 == n))).map (·, "iterator")
+  let wanted := wanted ++ (charDots.filter (fun n => !wanted.any (·.1 == n))).map (·, "char")
   let note := if wanted.any (·.2 == "iterator") then "" else loopNote
   if wanted.isEmpty then return note
   let mods := wanted.map (·.2) |>.eraseDups
@@ -682,7 +689,8 @@ partial def compileSourceAt (src : String) (check : Bool := true)
   -- (Dot calls the checker chose a type's own function for, by the value's
   -- type: written so for what follows.)
   let all := match checked with
-    | .ok (blocks, _) => Elab.argsChosenItems blocks.argsChosen (Elab.chosenItems blocks.dotChosen all)
+    | .ok (blocks, _) => Elab.derefValuesItems blocks.derefValues
+        (Elab.argsChosenItems blocks.argsChosen (Elab.chosenItems blocks.dotChosen all))
     | .error _ => all
   let (blocks, checkMade) ← match checked with
     | .ok (blocks, made) => pure (some blocks, made)

@@ -4715,6 +4715,20 @@ type is read and left to be found; a braced body is the statements. Every
 callable here holds what it names, so `move` adds nothing. `||` after an
 operand is still `or`.
 
+## Rust's match arms, and matching inside an `Option<&T>`
+
+In a match written as Rust writes it (`match x { .. }`, no parentheses), a
+clause whose body is one braced block runs the block's statements, as in
+Rust; in `match(x) { .. }` such a body stays a callable, as the
+specification has it. A clause whose body ends with a block needs no comma
+before the next. A match of an `Option<&T>` (any `Result<&T, E>`) whose
+clauses look inside the `T` with patterns of a value, `Some(Num(n))`, is of
+what the reference points to, copied, where a `T` may be used more than
+once (`copied_ref`, chosen by the checker): the names bind values, not
+references. `*n` of a name that holds such a value, not a reference, is the
+value (the checker records it, `Blocks.derefValues`, and the elaborator
+leaves out the `*`). A `T` that may not be copied is still refused there.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by

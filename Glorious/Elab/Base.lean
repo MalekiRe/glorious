@@ -163,6 +163,8 @@ structure Blocks where
   dotChosen : List (Nat × String × Nat) := []
   /-- Arguments given as other than written (`Check.argsChosen`). -/
   argsChosen : List ((Nat × Nat) × Expr) := []
+  /-- `*x` of a value that is `x` (`Check.derefValues`). -/
+  derefValues : List (String × String × String) := []
 
 structure Globals where
   ctors : List (String × CtorInfo) := []

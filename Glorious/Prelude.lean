@@ -843,6 +843,9 @@ fn some_or_leave<T, R, L>(value: Result<T, ()>, target: L, fallback) -> T where 
 // cleanup run (the library specification's §6.1).
 fn abort<T>(message: Str) -> T { host_write(message); arr_get(arr_new(), 0) }
 fn unreachable<T>(message: Str) -> T { abort(message) }
+// What an `Option<&T>` points to, copied: what a match of a reference's
+// insides with patterns of a value is given (`Check.inferCall`).
+fn copied_ref<T: Copy, E>(r: Result<&T, E>) -> Result<T, E> { match(r) { Ok(x) => Ok(*x), Err(e) => Err(e) } }
 // What a value is shown as, `x.to_string()`.
 fn to_string<T: Show>(value: T) -> Str { show(value) }
 // What an `Option` or a `Result` has, asked of it as a value's own: `o.map(f)`.

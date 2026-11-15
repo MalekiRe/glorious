@@ -849,6 +849,10 @@ is gone through as (`Check.inferCall`), an array's or a `Vec`'s elements
 given away, or the iterator itself. -/
 def forSourceMark : String := "%forsource"
 
+/-- An argument the checker chose to give to a function instead of as it is:
+`%wrap(g)` among `Check.argsChosen`, the elaborator writes `g(argument)`. -/
+def wrapMark : String := "%wrap"
+
 /-- `&value` and `&mut value` where the value has no name. -/
 def borrowMark : String := "%borrow"
 def borrowMutMark : String := "%borrow_mut"
