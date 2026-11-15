@@ -3769,6 +3769,10 @@ def cases : List Case := [
     [], "3"⟩,
   ⟨"use std::vec::{Vec};\nfn main() -> Int { let mut v = Vec::new(); v.push(1); v.push(2); let mut t = 0; while let Some(x) = v.pop() { t = t + x }; t }",
     [], "3"⟩,
+  -- A program's own iterators, `impl Iterator for Counter`, without a
+  -- `use`, gone through with `zip`, `skip`, `map`, `filter`, `sum`, `take`.
+  ⟨"struct Counter { n: Int }\n\nimpl Iterator for Counter {\n    type Item = Int;\n    fn next(&mut self) -> Option<Int> {\n        if self.n < 5 {\n            self.n += 1;\n            Some(self.n)\n        } else {\n            None\n        }\n    }\n}\n\nstruct Fib { a: Int, b: Int }\n\nimpl Iterator for Fib {\n    type Item = Int;\n    fn next(&mut self) -> Option<Int> {\n        let r = self.a;\n        self.a = self.b;\n        self.b = r + self.b;\n        Some(r)\n    }\n}\n\nfn main() -> Int {\n    let c = Counter { n: 0 };\n    let total: Int = c.zip(Counter { n: 0 }.skip(1)).map({ (a, b) => a * b }).filter({ x => *x % 3 == 0 }).sum();\n    say(total);\n    let mut f = Fib { a: 0, b: 1 };\n    let firsts: Vec<Int> = Vec::from_array(f.take(10).collect());\n    for x in &firsts { say(x) }\n    let mut evens = 0;\n    for x in (Fib { a: 0, b: 1 }).take(20) { if x % 2 == 0 { evens += 1 } }\n    evens\n}\n",
+    [], "18\n0\n1\n1\n2\n3\n5\n8\n13\n21\n34\n7"⟩,
   -- (An element of what a reference is to is borrowed through it.)
   ⟨"fn first(r: &[Int]) -> Int { let e = &r[0]; *e }\nfn main() -> Int { first(&[7, 8]) }",
     [], "7"⟩,
