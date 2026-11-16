@@ -119,9 +119,6 @@ partial def withoutUnreached (items : List Syntax.Item) : List Syntax.Item := Id
     | .fn name _ _ _ _ => if library name then some (Syntax.lastSegment name) else none
     | _ => none
   let mut wanted : Std.HashSet String := {}
-  -- (What the checker may choose to give where none is written: a `Vec`'s
-  -- array, borrowed, where a reference to an array is wanted.)
-  wanted := wanted.insert "as_array" |>.insert "as_array_mut" |>.insert "from_array"
   for item in items do
     if (isLibraryFn item).isNone then
       for n in namesInItem [] item do wanted := wanted.insert (Syntax.lastSegment n)
@@ -215,55 +212,14 @@ def stdPreludeNames : List (String × String) :=
    ("Fail", "value"), ("fail", "value"), ("Report", "value"), ("report", "value"),
    ("catch_fail", "value"), ("Vec", "vec"), ("String", "text"), ("Iterator", "iterator")]
 
-/-- The functions of `std::text` brought in where a program calls one on a
-value, `s.trim()`: none has a name a type's own function commonly has. -/
-def textDotNames : List String :=
-  ["to_upper", "to_lower", "trim", "trim_start", "starts_with", "ends_with", "parse_int",
-   "char_at", "pad_start", "pad_end", "lines", "words", "repeat", "utf8", "split", "contains",
-   "split_whitespace"]
-
-/-- The functions of `std::char` brought in where a program calls one on a
-value, `c.is_digit()`. -/
-def charDotNames : List String :=
-  ["is_digit", "is_lower", "is_upper", "is_alpha", "is_alphanumeric", "is_space", "digit", "of_digit"]
-
-/-- The functions of `std::iterator` brought in where a program calls one on
-a value, `v.iter().map(f).sum()`, as Rust's prelude has `Iterator`'s. -/
-def iteratorDotNames : List String :=
-  ["next", "fold", "for_each", "count", "collect", "map", "filter", "take", "skip",
-   "enumerate", "zip", "chain", "find_map", "nth", "sum", "product", "any", "all", "position"]
-
 /-- The names of the default prelude a program's text uses and does not
 declare or bring in itself: `use` lines for them, written after the text (so
 that no position in it moves). Where the text names no library, none. -/
 def stdPreludeUses (src : String) : String := Id.run do
-  -- (A `for` loop and a range `a..b` are read as calls of `std::iterator`'s
-  -- functions by their full names: the module is named for the loader.)
-  let loops := (src.splitOn "for ").length > 1 && (src.splitOn " in ").length > 1
-  -- (`a..b` with something on either side: not a pattern's `..`.)
-  let ranges := Id.run do
-    let parts := src.splitOn ".."
-    let mut found := false
-    for (before, after) in parts.zip (parts.drop 1) do
-      let prev := before.toList.getLast?
-      let next := after.toList.head?
-      let leftOk := prev.any fun c => c.isAlphanum || c == ')' || c == ']' || c == '_'
-      let rightOk := next.any fun c => c.isAlphanum || c == '(' || c == '=' || c == '_' || c == '-'
-      if leftOk && rightOk then found := true
-    pure found
-  let plainStd := (src.splitOn "#![no_std]").length == 1 && (src.splitOn "mod std").length == 1
-  let loopNote := if (loops || ranges) && (src.splitOn "std::iterator").length == 1 && plainStd
-    then "\n// std::iterator\n" else ""
-  -- (A `for` loop may go through a reference to an array, `std::slice`'s.)
-  let loopNote := if loops && (src.splitOn "std::slice").length == 1 && plainStd
-    then loopNote ++ "// std::slice\n" else loopNote
-  -- (`vec![..]` is `std::vec::Vec::from_array(..)`.)
-  let loopNote := if (src.splitOn "vec![").length > 1 && (src.splitOn "std::vec").length == 1 && plainStd
-    then loopNote ++ "\n// std::vec\n" else loopNote
   -- (Nor where the text brings in whole modules, whose names could be any.)
   if (src.splitOn "#![no_std]").length > 1 || (src.splitOn "#![no_implicit_prelude]").length > 1
       || (src.splitOn "mod std").length > 1 || (src.splitOn "::*").length > 1 then
-    return loopNote
+    return ""
   let isWord := fun (c : Char) => c.isAlphanum || c == '_'
   -- (Written as a name of its own: not after `::`, `.` or another letter,
   -- nor before one.)
@@ -303,23 +259,12 @@ def stdPreludeUses (src : String) : String := Id.run do
     declares name || brought name || ownOp name
       || (opOf.lookup name).any (fun e => declares e || brought e)
       || (opOf.find? (·.2 == name)).any (fun (op, _) => ownOp op)
-  -- (A text's functions where they are called on a value, `s.to_upper()`:
-  -- the dot call finds the one in scope.)
-  let dotted := fun (name : String) => (src.splitOn ("." ++ name ++ "(")).length > 1
-  let textDots := textDotNames.filter fun name => dotted name && !blocked name
-  let iterDots := iteratorDotNames.filter fun name => dotted name && !blocked name
-  let charDots := charDotNames.filter fun name => dotted name && !blocked name
-  let wanted := stdPreludeNames.filter fun (name, _) =>
-    (mentions name || (name == "Vec" && (src.splitOn "vec![").length > 1)) && !blocked name
-  let wanted := wanted ++ (textDots.filter (fun n => !wanted.any (·.1 == n))).map (·, "text")
-  let wanted := wanted ++ (iterDots.filter (fun n => !wanted.any (·.1 == n))).map (·, "iterator")
-  let wanted := wanted ++ (charDots.filter (fun n => !wanted.any (·.1 == n))).map (·, "char")
-  let note := if wanted.any (·.2 == "iterator") then "" else loopNote
-  if wanted.isEmpty then return note
+  let wanted := stdPreludeNames.filter fun (name, _) => mentions name && !blocked name
+  if wanted.isEmpty then return ""
   let mods := wanted.map (·.2) |>.eraseDups
   let lines := mods.map fun m =>
     s!"use std::{m}::\{{", ".intercalate ((wanted.filter (·.2 == m)).map (·.1))}};"
-  return "\n" ++ "\n".intercalate lines ++ "\n" ++ note
+  return "\n" ++ "\n".intercalate lines ++ "\n"
 
 /-- Does a program have the standard library: does it name `std`, and have no
 module `std` of its own? -/
@@ -700,8 +645,7 @@ partial def compileSourceAt (src : String) (check : Bool := true)
   -- (Dot calls the checker chose a type's own function for, by the value's
   -- type: written so for what follows.)
   let all := match checked with
-    | .ok (blocks, _) => Elab.derefValuesItems blocks.derefValues
-        (Elab.argsChosenItems blocks.argsChosen (Elab.chosenItems blocks.dotChosen all))
+    | .ok (blocks, _) => Elab.argsChosenItems blocks.argsChosen (Elab.chosenItems blocks.dotChosen all)
     | .error _ => all
   let (blocks, checkMade) ← match checked with
     | .ok (blocks, made) => pure (some blocks, made)

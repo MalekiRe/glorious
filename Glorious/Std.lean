@@ -416,9 +416,6 @@ impl<T> Vec<T> {
     pub fn into_array(value: Self) -> [T] { match(value) { Vec { items } => items } }
     pub fn len(value: &Self) -> Int { len_at(&value.items) }
     pub fn is_empty(value: &Self) -> Bool { len_at(&value.items) == 0 }
-    // The array it holds, borrowed: what `&v` is where `&[T]` is wanted.
-    pub fn as_array<'a>(value: &'a Self) -> &'a [T] { &value.items }
-    pub fn as_array_mut<'a>(value: &'a mut Self) -> &'a mut [T] { &mut value.items }
     pub fn get<'a>(value: &'a Self, index: Int) -> Option<&'a T> { element(&value.items, index) }
     pub fn get_mut<'a>(value: &'a mut Self, index: Int) -> Option<&'a mut T> {
         element_mut(&mut value.items, index)
@@ -674,8 +671,6 @@ fn split_onto(text: Str, at: char, part: Str, out: [Str]) -> [Str] {
     }
 }
 pub fn lines(text: Str) -> [Str] { split(text, '\n') }
-// (Rust's name of `words`.)
-pub fn split_whitespace(text: Str) -> [Str] { words(text) }
 
 // The words of a text: what is between its spaces.
 pub fn words(text: Str) -> [Str] { vec::filter(split(map(text, { c => if(std::char::is_space(c)) { ' ' } else { c } }), ' '), { w => not is_empty(w) }) }
@@ -1787,9 +1782,6 @@ impl<'a, T> Slice<'a, T> {
 // The elements of a slice by reference, first to last.
 pub struct SliceIter<'a, T> { items: &'a [T], at: Int, end: Int }
 
-// The elements of an array by reference, first to last: what a `for` loop
-// through a reference to an array goes through.
-pub fn iter_of<'a, T>(items: &'a [T]) -> SliceIter<'a, T> { SliceIter { items: items, at: 0, end: len_at(items) } }
 
 impl<'a, T> Iterator for SliceIter<'a, T> {
     type Item = &'a T;
@@ -1872,15 +1864,6 @@ pub fn format<T: Display>(value: &T) -> String {
     match(out) { Formatter { text, depth, width, fresh } => text }
 }
 
-// What Rust's `write!(f, ..)` is: the text written, and nothing wrong.
-pub fn write_fmt(out: &mut Formatter, text: Str) -> Result<(), FormatError> {
-    Formatter::write_str(out, text);
-    Ok(())
-}
-// The text a formatter was given.
-pub fn text_of(out: Formatter) -> Str {
-    match(out) { Formatter { text, depth, width, fresh } => String::to_str(&text) }
-}
 
 impl Display for Int { fn fmt(n, out) { Formatter::write_str(out, show(*n)) } }
 impl Display for Str { fn fmt(text, out) { Formatter::write_str(out, *text) } }

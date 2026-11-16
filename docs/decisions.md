@@ -4616,24 +4616,30 @@ before. The kept build records whether it was searched (format version 2),
 and `certify` compiles again where it was not; a compile that did not search
 keeps neither its places nor its certificate for later ones.
 
-## `impl Trait` in a function's parameters and result
+## `impl Trait` in a function's parameters
 
 `fn f(x: impl Show)` is `fn f<Impl0: Show>(x: Impl0)`: a type parameter of
-its own per such parameter. `fn g() -> impl Show` is a result found from the
-body, as an unwritten one is: callers see the type itself, which is more
-than Rust shows them, and the trait is not checked of it (what calls it
-needs of the type is checked where it is used). Elsewhere `impl Trait` is
-refused. `impl<T: Show> ..` asks of its parameters what `where T: Show`
-does, for implementations of traits and of a type's own functions.
+its own per such parameter, a trait feature. Elsewhere, a result's
+included, `impl Trait` is refused. `impl<T: Show> ..` asks of its
+parameters what `where T: Show` does, for implementations of traits and of
+a type's own functions.
 
-## Rust's receivers
+## No syntax for library names, no Rust surface forms
 
-`fn get(&self)`, `fn bump(&mut self)` and `fn into(self)`, in a type's own
-functions and in a trait's (declared or with a default body), are read as a
-first parameter named `self` of type `&Self`, `&mut Self` or `Self`. The
-specification writes receivers out (`value: &Self`), which stays. `self` is
-an ordinary name in the body. A `|x| body` callable is refused with how a
-callable is written.
+The specification makes `if`, `match`, `loop`, `break`, `return`, `and`,
+`or`, `not` and `for` ordinary library names that the compiler never reads
+specially (1.1, 3.1, 8.4, 19); it has no `else if` rule (5.4), no `return`
+keyword (5.5), no format macros (3.3), no macros or derive (20; library
+1.4 and 2.2), and no conversion of an expression into a callable or of an
+owner into a borrow because of an expected type (1.3, 5.3). Rust's forms
+for these (`for x in it`, `if c {}`, `match x {}`, `else if`, `&&`, `||`,
+`!`, `+=`, `return e`, `e?`, bare `break`, `|x|` callables, `if let`,
+`a..b`, `P { ..base }`, `&self` receivers, `mut x` parameters,
+`Fn(A) -> R`, `#[derive]`, `println!` and the like, Rust's trait names) are
+refused, the common ones saying what is written instead. Dot calls stay:
+they are the accepted extension, and their receiver adjustments (an
+element, a field or a value made where it is called on, borrowed) apply
+only to the receiver of a dot call.
 
 ## `where I::Item: Ord`
 
@@ -4641,129 +4647,6 @@ A function's `where` may ask a trait of what a trait of a type parameter
 leaves to its implementation: `I::Item: Ord` is read as a type parameter of
 its own, `ItemOfI: Ord`, with `I: Iterator<Item = ItemOfI>`. Only where `I`
 is asked exactly one trait, which is then taken to be the one leaving `Item`.
-
-## `return e` and `e?`
-
-Inside a function, `return e` is `return(e, @f)` and `e?` is `try(e, @f)`,
-with `f` the function it is written in (`return` alone gives `()`). In a
-callable written inside the function they still leave the function, as
-`@f` does: they are not the callable's own return. `?` is postfix only
-where what follows could not start an infix `?`'s right operand (`;`, `)`,
-`,`, `}`, `.`, an operator, the end). A function written in a block is
-`@g` as well as by its full name. Outside a function `return e` is refused
-as before.
-
-## `for pattern in iterator { body }`
-
-A `for` loop is `loop { match(next(&mut it)) { Some(pattern) => body,
-None => break(()) } }` with the iterator kept in a variable of its own, so
-that `break` and `continue` in the body are the loop's. `for x in &v` goes
-through what `v.iter()` gives. The body is a callable as a `while` body is:
-it assigns the function's variables, and `return` in it leaves the
-function. `break` and `continue` written alone where a statement ends are
-`break(())` and `continue()` of the names in scope.
-A callable's parameter whose type is a reference to a type with named
-fields is now said to the clauses when they are read, as one of a declared
-type already was, after what traits leave to implementations is settled.
-
-## Operators given references to numbers
-
-An operator (`+ - * / % < > <= >= == !=`, prefix `-`) given a name that
-holds a reference to a number or a character is given what it points to,
-copied: `Circle(r) => 3 * r * r` where the match binds `r` by reference.
-Rust has this through implementations of its operators for references; here
-the checker chooses it (`Blocks.derefArgs`) and `*r` is written in after the
-check. Only a name: an expression of reference type is not looked at, which
-keeps the choice from inferring an argument twice.
-
-## Rust's control forms
-
-`if c { .. }`, `while c { .. }` and `match x { .. }` written without
-parentheses are `if(c) { .. }`, `while({ c }) { .. }` and `match(x) { .. }`:
-what is tested is read up to the block (no record literal unbracketed there,
-as in Rust). `a else if c { .. }` gives `else` a callable that runs the
-`if`. `a && b` and `a || b` are `a and { b }` and `a or { b }`; prefix `!c`
-is `not c`. `x += e` (and `-=`, `*=`, `/=`, `%=`) as a statement is
-`x = x + e`, the target read again for the value. Each calls the functions
-as named where it is written, so a program's own `if` or `and` is the one
-used. These read text that was refused before; the spec's forms are
-unchanged.
-
-## Rust's operator traits
-
-`impl Add for V { type Output = V; fn add(self, o: V) -> V }` (and `Sub`,
-`Mul`, `Div`, `Rem`, `Neg`; `PartialEq`'s `eq`/`ne`, `PartialOrd`'s `lt`,
-`gt`, `le`, `ge`) implements the prelude's trait of the operator: the
-function is named as the operator, `type Output` is dropped (the prelude's
-operators give `Self`), and parameters written as references take the
-values, which is the same for values that are copied. `PartialEq` and
-`PartialOrd` are `Eq` and `Ord`. `use std::ops::Add` and `use
-std::cmp::PartialEq` bring in nothing more than the prelude has.
-
-## `if let` and `while let`
-
-`if let P = e { .. }` and `while let P = e { .. }` are `if e is P { .. }`
-and `while({ e is P }) { .. }`: the language's `is`, whose names the block
-has. Names an `is` binds that the block borrows are kept where a reference
-can point, as a clause's are. `let else` stays unread.
-
-## Rust's callables
-
-`|x| body`, `|a, b| body`, `|| body` and `move |x| body` are `{ x => body }`,
-`fn(a, b) { body }` and `{ => body }`: a written parameter type or result
-type is read and left to be found; a braced body is the statements. Every
-callable here holds what it names, so `move` adds nothing. `||` after an
-operand is still `or`.
-
-## Rust's match arms, and matching inside an `Option<&T>`
-
-In a match written as Rust writes it (`match x { .. }`, no parentheses), a
-clause whose body is one braced block runs the block's statements, as in
-Rust; in `match(x) { .. }` such a body stays a callable, as the
-specification has it. A clause whose body ends with a block needs no comma
-before the next. A match of an `Option<&T>` (any `Result<&T, E>`) whose
-clauses look inside the `T` with patterns of a value, `Some(Num(n))`, is of
-what the reference points to, copied, where a `T` may be used more than
-once (`copied_ref`, chosen by the checker): the names bind values, not
-references. `*n` of a name that holds such a value, not a reference, is the
-value (the checker records it, `Blocks.derefValues`, and the elaborator
-leaves out the `*`). A `T` that may not be copied is still refused there.
-
-## `#[derive(..)]`
-
-The specification has no derive framework; Rust programs lean on a few, so
-`#[derive(..)]` writes out, as text read in the type's module, an
-implementation of `Clone` (each field cloned), `PartialEq`/`Eq` (`==` field
-by field, constructors compared), `Debug` (as `Show`: `P { x: 1 }`,
-`Rect(2, 3)`), `Hash` (`std::hash::Hash`, fields mixed with the
-constructor's place), `PartialOrd`/`Ord` (a struct's fields in order; an
-enum whose constructors have no fields by their order). `Copy` writes
-nothing: a type whose fields may be used more than once already may be.
-Each type parameter is asked the trait. Any other trait is refused. The
-text is read with identities far from every other text's.
-
-## Rust's common macros
-
-There are no macros; `println!`, `print!`, `eprintln!`, `format!`,
-`panic!`, `assert!`, `assert_eq!`, `assert_ne!` and `vec!` are read as the
-calls they stand for. A format text's `{}`, `{0}` and `{name}` (anything
-after `:` is read and not used) are each `show` of the argument, joined
-with `++`; `{{` and `}}` are braces. `println!`/`print!` are `say` (so
-`print!` ends its line too), `panic!` is `abort`, `assert!` is `assert` or
-`assert_message`, `assert_eq!(a, b)` is `assert_eq(&a, &b)`, and
-`vec![..]` is `std::vec::Vec::from_array([..])`, which brings in `Vec`.
-
-## Rust's `Display`
-
-`impl fmt::Display for T { fn fmt(&self, f: &mut fmt::Formatter) ->
-fmt::Result { .. } }` (told from the library's own `Display`, whose `fmt`
-gives nothing, by its `Result`) makes `fmt` the type's own function, `T::fmt`,
-its result found from its body, and writes out `impl Show for T` that runs
-it on a `std::fmt::Formatter` and gives the text. A Rust `Debug` does the
-same where there is no `Display`; either keeps `#[derive(Debug)]` from
-writing a `Show` of its own. `write!(f, ..)` and `writeln!` are
-`std::fmt::write_fmt(f, text)`, which gives `Ok(())`. `'_` among a type's
-arguments is left out.
 
 ## Other standing decisions
 

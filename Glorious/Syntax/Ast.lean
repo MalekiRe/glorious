@@ -158,15 +158,6 @@ def fieldMark (field : String) : String := s!"%field:{field}"
 def fieldOfMark (name : String) : Option String :=
   if name.startsWith "%field:" then some (name.drop 7).toString else none
 
-/-- The operators that, given a name holding a reference to a number or a
-character, are given what it points to (`Check.inferCall`). -/
-def derefOperators : List String :=
-  ["+", "-", "*", "/", "%", "<", ">", "<=", ">=", "==", "!=", "negate"]
-
-/-- The functions that show a value or join texts, given a name holding a
-reference to a value that may be used more than once: given the value. -/
-def derefShows : List String := ["++", "say", "show", "to_string"]
-
 /-- The scalar types beside `Int`. A value of each is held as an integer: an
 integer type's own value, the code of a character, the bits of a floating
 point number. With an integer type is the width `int_fit` is asked whether a
@@ -843,15 +834,6 @@ partial def selfStmt (self : String) (trait : Option (String Ã— Expr)) : Stmt â†
 
 end
 
-
-/-- What a `for` loop goes through, as written: the checker chooses what it
-is gone through as (`Check.inferCall`), an array's or a `Vec`'s elements
-given away, or the iterator itself. -/
-def forSourceMark : String := "%forsource"
-
-/-- An argument the checker chose to give to a function instead of as it is:
-`%wrap(g)` among `Check.argsChosen`, the elaborator writes `g(argument)`. -/
-def wrapMark : String := "%wrap"
 
 /-- `&value` and `&mut value` where the value has no name. -/
 def borrowMark : String := "%borrow"

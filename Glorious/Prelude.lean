@@ -24,9 +24,6 @@ enum Result<T, E> { Ok(T), Err(E) }
 // Truth is success. `Option<T>` is `Result<T, ()>` and `Bool` is `Option<()>`.
 type Option<T> = Result<T, ()>;
 type Bool = Result<(), ()>;
-// (Rust's names of them.)
-type bool = Result<(), ()>;
-type str = Str;
 let Some: fn(_) -> Result<_, ()> = Ok;
 let None = Err(());
 let true: Result<(), ()> = Ok(());
@@ -846,33 +843,25 @@ fn some_or_leave<T, R, L>(value: Result<T, ()>, target: L, fallback) -> T where 
 // cleanup run (the library specification's §6.1).
 fn abort<T>(message: Str) -> T { host_write(message); arr_get(arr_new(), 0) }
 fn unreachable<T>(message: Str) -> T { abort(message) }
-// What an `Option<&T>` points to, copied: what a match of a reference's
-// insides with patterns of a value is given (`Check.inferCall`).
-fn copied_ref<T: Copy, E>(r: Result<&T, E>) -> Result<T, E> { match(r) { Ok(x) => Ok(*x), Err(e) => Err(e) } }
-// What a reference points to, copied: what is shown of a reference
-// (`Check.inferCall`).
-fn copied_of<T: Copy>(r: &T) -> T { *r }
-// What a value is shown as, `x.to_string()`.
-fn to_string<T: Show>(value: T) -> Str { show(value) }
 // What an `Option` or a `Result` has, asked of it as a value's own: `o.map(f)`.
 // (An `Option<T>` is a `Result<T, ()>`, so each is both's.)
 impl<T, E> Result<T, E> {
-    fn is_some(&self) -> Bool { match(self) { &Ok(_) => true, &Err(_) => false } }
-    fn is_none(&self) -> Bool { match(self) { &Ok(_) => false, &Err(_) => true } }
-    fn is_ok(&self) -> Bool { match(self) { &Ok(_) => true, &Err(_) => false } }
-    fn is_err(&self) -> Bool { match(self) { &Ok(_) => false, &Err(_) => true } }
-    fn unwrap(self) -> T { match(self) { Ok(x) => x, Err(_) => abort("unwrap of nothing") } }
-    fn expect(self, message: Str) -> T { match(self) { Ok(x) => x, Err(_) => abort(message) } }
-    fn unwrap_or(self, other: T) -> T { match(self) { Ok(x) => x, Err(_) => other } }
-    fn unwrap_or_else(self, other) -> T { match(self) { Ok(x) => x, Err(e) => other(e) } }
-    fn map(self, f) { match(self) { Ok(x) => Ok(f(x)), Err(e) => Err(e) } }
-    fn map_err(self, f) { match(self) { Ok(x) => Ok(x), Err(e) => Err(f(e)) } }
-    fn and_then(self, f) { match(self) { Ok(x) => f(x), Err(e) => Err(e) } }
-    fn or_else(self, f) { match(self) { Ok(x) => Ok(x), Err(e) => f(e) } }
-    fn ok_or<D>(self, error: D) -> Result<T, D> { match(self) { Ok(x) => Ok(x), Err(_) => Err(error) } }
-    fn ok(self) -> Option<T> { match(self) { Ok(x) => Some(x), Err(_) => None } }
-    fn filter(self, keep: for<'a> fn(&'a T) -> Bool) -> Result<T, ()> {
-        match(self) { Ok(x) => if(keep(&x)) { Ok(x) } else { Err(()) }, Err(_) => Err(()) }
+    fn is_some(value: &Self) -> Bool { match(value) { &Ok(_) => true, &Err(_) => false } }
+    fn is_none(value: &Self) -> Bool { match(value) { &Ok(_) => false, &Err(_) => true } }
+    fn is_ok(value: &Self) -> Bool { match(value) { &Ok(_) => true, &Err(_) => false } }
+    fn is_err(value: &Self) -> Bool { match(value) { &Ok(_) => false, &Err(_) => true } }
+    fn unwrap(value: Self) -> T { match(value) { Ok(x) => x, Err(_) => abort("unwrap of nothing") } }
+    fn expect(value: Self, message: Str) -> T { match(value) { Ok(x) => x, Err(_) => abort(message) } }
+    fn unwrap_or(value: Self, other: T) -> T { match(value) { Ok(x) => x, Err(_) => other } }
+    fn unwrap_or_else(value: Self, other) -> T { match(value) { Ok(x) => x, Err(e) => other(e) } }
+    fn map(value: Self, f) { match(value) { Ok(x) => Ok(f(x)), Err(e) => Err(e) } }
+    fn map_err(value: Self, f) { match(value) { Ok(x) => Ok(x), Err(e) => Err(f(e)) } }
+    fn and_then(value: Self, f) { match(value) { Ok(x) => f(x), Err(e) => Err(e) } }
+    fn or_else(value: Self, f) { match(value) { Ok(x) => Ok(x), Err(e) => f(e) } }
+    fn ok_or<D>(value: Self, error: D) -> Result<T, D> { match(value) { Ok(x) => Ok(x), Err(_) => Err(error) } }
+    fn ok(value: Self) -> Option<T> { match(value) { Ok(x) => Some(x), Err(_) => None } }
+    fn filter(value: Self, keep: for<'a> fn(&'a T) -> Bool) -> Result<T, ()> {
+        match(value) { Ok(x) => if(keep(&x)) { Ok(x) } else { Err(()) }, Err(_) => Err(()) }
     }
 }
 fn assert(condition: Result<(), ()>) { match(condition) { Ok(_) => (), Err(_) => abort("assertion failed") } }

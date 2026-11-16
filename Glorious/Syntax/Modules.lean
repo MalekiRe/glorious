@@ -286,11 +286,6 @@ partial def unforce : Pattern → Pattern
   | .tuple args => .tuple (args.map unforce)
   | p => p
 
-/-- Traits Rust keeps in `std::ops` and `std::cmp` that the prelude has
-everywhere: a `use` of one there brings in nothing more. -/
-def rustPreludeTraits : List String :=
-  ["Add", "Sub", "Mul", "Div", "Rem", "Neg", "PartialEq", "Eq", "PartialOrd", "Ord"]
-
 mutual
 
 /-- Everything a module can write: what it declares, the modules written in
@@ -434,11 +429,6 @@ partial def imported (p : List String) (scope : List Bound) (path : List String)
         | none => throw s!"`use {written}`: the effect `{effect}` has no operation `{name}`"
   if found.isEmpty then
     if before.isEmpty then throw s!"`use {written}`: there is no module `{written}`"
-    -- (`use std::ops::Add`, `use std::cmp::PartialEq`: Rust's homes of what
-    -- the prelude has everywhere already.)
-    if (before == ["std", "ops"] || before == ["core", "ops"] || before == ["std", "cmp"] || before == ["core", "cmp"])
-        && rustPreludeTraits.contains name then
-      return []
     match ← moduleAt p (fun _ => scope) before with
     | some q => throw s!"`use {written}`: {showPath q} has no `{name}`"
     | none => throw s!"`use {written}`: there is no module `{"::".intercalate before}`"
@@ -1213,22 +1203,15 @@ partial def resolveExpr (ctx : Ctx) (bound : List String) : Expr → R Expr
             | some field => pure (some (field, ← resolveExpr ctx bound v))
             | none => pure none
           | _ => pure none
-        -- (`..base`: what is not written is read from it, after what is.)
-        let base := gave.lookup "%rest"
-        let gave := gave.filter (·.1 != "%rest")
-        let _ ← match orderFields name names (gave.map fun (f, _) => (f, ())) (base.map fun _ => ()) with
+        let _ ← match orderFields name names (gave.map fun (f, _) => (f, ())) none with
           | .ok r => pure r
           | .error e => throw e
         if gave.map (·.1) == names then
           return .call id (.name qual' name') (gave.map (·.2))
         let temps := gave.map fun (field, _) => s!"%{field}"
-        let mut parts : List Expr := []
-        for field in names do
-          if gave.any (·.1 == field) then parts := parts ++ [.name none s!"%{field}"]
-          else parts := parts ++ [.fieldOf (← freshId) (.name none "%base") field]
-        let pats := temps.map Pattern.var ++ (if base.isSome then [Pattern.var "%base"] else [])
-        return .call id (.closure 0 [.mk pats [.expr (.call (id + 1) (.name qual' name') parts)]])
-          (gave.map (·.2) ++ base.toList)
+        return .call id (.closure 0 [.mk (temps.map Pattern.var)
+          [.expr (.call (id + 1) (.name qual' name') (names.map fun field => .name none s!"%{field}"))]])
+          (gave.map (·.2))
     | _, _ => pure ()
     -- What is called is named as it is.
     let called ← match f with

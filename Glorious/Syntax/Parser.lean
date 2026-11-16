@@ -42,9 +42,6 @@ structure PCtx where
   same in every module, and the module being read. -/
   tables : List (List String × Fixities) := []
   path : List String := []
-  /-- The label of the function whose body is being read: what `return e`
-  and `e?` leave. -/
-  fnLabel : Option String := none
 
 /-- What the parser does: given what it reads from, where it is, and the
 functions written inside blocks so far (on their way to the module the block
@@ -236,35 +233,6 @@ private def scalarLiteral (neg : Bool) : P (Option Expr) := do
     pure (some (arrayValue (codes.map fun (c : Nat) => scalarValue "u8_of" (c : Int))))
   | _ => pure none
 
-
-/-- The pieces of a format text, `"{} is {name:?}"`: the texts between, and
-for each `{..}` what it shows, the next argument (`none`), one by place
-(`some (.inr n)`) or a name (`some (.inl x)`). What follows `:` is read and
-not used. `{{` and `}}` are braces. -/
-private def formatPieces (text : List Char) : Except String (List (Sum String (Option (Sum String Nat)))) := do
-  let mut out : Array (Sum String (Option (Sum String Nat))) := #[]
-  let mut lit : List Char := []
-  let mut rest := text
-  while !rest.isEmpty do
-    match rest with
-    | '{' :: '{' :: more => lit := lit ++ ['{']; rest := more
-    | '}' :: '}' :: more => lit := lit ++ ['}']; rest := more
-    | '{' :: more =>
-      let inside := more.takeWhile (· != '}')
-      if inside.length == more.length then throw "a `{` of a format text is not closed"
-      rest := more.drop (inside.length + 1)
-      unless lit.isEmpty do out := out.push (.inl (String.ofList lit))
-      lit := []
-      let what := String.ofList (inside.takeWhile (· != ':'))
-      out := out.push (.inr (if what.isEmpty then none
-        else match what.toNat? with
-          | some n => some (.inr n)
-          | none => some (.inl what)))
-    | c :: more => lit := lit ++ [c]; rest := more
-    | [] => rest := []
-  unless lit.isEmpty do out := out.push (.inl (String.ofList lit))
-  pure out.toList
-
 /-- A literal as a pattern: the value it is, to be compared with. -/
 private partial def literalPattern : Expr → Option Pattern
   | .int n => some (.int n)
@@ -421,12 +389,6 @@ private def hoistStmt (s : Stmt) : Option (List Stmt × Stmt) :=
   | .defer e => if hasThrough e then none else some ([], .defer e)
   | s => some ([], s)
 
-/-- A clause's body that is one braced block: the block's statements. -/
-private def runBlock : List Stmt → List Stmt
-  | [.expr (.closure _ [.mk [] stmts])] => stmts
-  | [.located _ _ (.expr (.closure _ [.mk [] stmts]))] => stmts
-  | body => body
-
 /-- Does the block starting at token `i` have clauses (`... => ...`) rather than statements? -/
 private partial def scanClauseForm (toks : Array Token) (i depth : Nat) : Bool :=
   match toks[i]? with
@@ -463,7 +425,7 @@ mutual
 private partial def parseType : P TypeExpr := do
   match ← peek with
   | .ident "impl" =>
-    failAt "`impl Trait` is the type of a function's parameter or result"
+    failAt "`impl Trait` is a parameter's type, standing for a type parameter of its own with the trait; a result's is not built: write the type"
   | .ident "dyn" =>
     if let .ident _ ← peek 1 then
       failAt "`dyn Trait` is not read: values of several types are an `enum` of them, or the callables that do what is wanted of each"
@@ -493,10 +455,6 @@ private partial def parseType : P TypeExpr := do
       | _ => pure none
     let uniq := (← peek) == .ident "mut"
     if uniq then advance
-    -- (Rust's `&str`, `&'static str`: a text, which is a value here.)
-    if !uniq && (← peek) == .ident "str" && (← peek 1) != .punct "::" then
-      advance
-      return .name "Str" []
     pure (.ref uniq (← parseType) life)
   | .op "&&" =>
     -- `&&T` (and `&&'a mut T`), which the lexer reads as one symbol.
@@ -749,23 +707,6 @@ private partial def parseBoundsOf (subject : String) : P (List Bound) := do
   let mut out : Array Bound := #[]
   repeat
     let mut tr ← expectPath
-    -- (Rust's names of the prelude's traits: `PartialOrd` is `Ord`,
-    -- `PartialEq` is `Eq`, `Display` and `Debug` are `Show`.)
-    let generic := (← peek) == .op "<"
-    -- (Not in the library, whose `Display` is its own.)
-    let library := ["std", "core", "alloc"].contains ((← read).path.headD "")
-    -- (Rust's `PartialOrd` and `PartialEq` compare through references,
-    -- which here copies: what is asked them is asked `Copy` too.)
-    if !library && ["PartialOrd", "std::cmp::PartialOrd", "PartialEq", "std::cmp::PartialEq"].contains tr then
-      out := out.push { subject, trait := "Use", quantity := some (0, none) }
-    tr := match tr with
-      | "PartialOrd" | "std::cmp::PartialOrd" => "Ord"
-      | "PartialEq" | "std::cmp::PartialEq" => "Eq"
-      | "Display" | "Debug" | "fmt::Display" | "fmt::Debug" | "std::fmt::Display" | "std::fmt::Debug" =>
-        if generic || library then tr else "Show"
-      | other => other
-    -- (Rust's `FnMut` and `FnOnce`: what `Fn` asks, here.)
-    if (tr == "FnMut" || tr == "FnOnce") && (← peek) == .punct "(" then tr := "Fn"
     -- `for<'a>` before a callable: it is asked for at every such lifetime.
     let mut ranked : Array String := #[]
     if tr == "for" && (← isOp "<") then
@@ -779,18 +720,7 @@ private partial def parseBoundsOf (subject : String) : P (List Bound) := do
       expectOp ">"
       tr ← expectPath
       unless tr == "Fn" || tr == "RunsIn" do failAt "`for<..>` is written before `Fn` or `RunsIn`"
-    -- `Fn(A, B) -> R`, as Rust writes it: `Fn<(A, B), Output = R>`.
-    if tr == "Fn" && (← peek) == .punct "(" then
-      advance
-      let mut pack : Array TypeExpr := #[]
-      repeat
-        if (← peek) == .punct ")" then break
-        pack := pack.push (← parseType)
-        if !(← acceptPunct ",") then break
-      expectPunct ")"
-      let output ← if ← acceptPunct "->" then parseType else pure (TypeExpr.tuple [])
-      out := out.push { subject, trait := tr, args := pack.toList, assoc := [("Output", output)], ranked := ranked.toList }
-    else if tr == "Fn" then
+    if tr == "Fn" then
       if !(← isOp "<") then failAt "expected `<`: `Fn<(A, B), Output = R>`"
       advance
       let pack ← parsePack
@@ -802,9 +732,6 @@ private partial def parseBoundsOf (subject : String) : P (List Bound) := do
       expectPunct ","
       let pack ← parsePack
       out := out.push { subject, trait := tr, args := access :: pack, assoc := ← parseAssoc, ranked := ranked.toList }
-    -- (`Copy`, as Rust names it: what may be used any number of times.)
-    else if tr == "Copy" && !(← isOp "<") then
-      out := out.push { subject, trait := "Use", quantity := some (0, none) }
     else if tr == "Use" then
       if !(← isOp "<") then failAt "expected `<`: `Use<[1, 1]>`"
       advance
@@ -1187,44 +1114,14 @@ private partial def parseBinary (minPrec : Nat) (noBlock : Bool)
       let next := match assoc with
         | .right => prec
         | _ => prec + 1
-      -- (`else if c { .. }`: what `else` is given is a callable, which runs
-      -- the `if`.)
-      let elseIf := name == "else" && (← peek) == .ident "if"
       let rhs ← parseBinary next noBlock (some (prec, assoc))
-      let rhs := if elseIf then Expr.closure (id + 300000) [.mk [] [.expr rhs]] else rhs
       let (qual, f) := splitPath (((← read).fix.function name false).splitOn "::")
       lhs := .call id (.name qual f) [lhs, rhs]
     | none =>
       match t with
-      -- `a..b`, `a..=b`: the whole numbers from `a` up to `b`, without it and
-      -- with it (`std::iterator::range`), looser than any operator.
-      | .punct "." =>
-        if minPrec > 0 || (← peek 1) != .punct "." then break
-        let id := (← read).base + (← get) + 1
-        advance; advance
-        let inclusive ← acceptPunct "="
-        let upper ← parseBinary 1 noBlock
-        let fix := (← read).fix
-        let upper := if inclusive then
-            let (qual, f) := splitPath ((fix.function "+" false).splitOn "::")
-            Expr.call (id + 300000) (.name qual f) [upper, .int 1]
-          else upper
-        lhs := .call id (.name (some "std::iterator") "range") [lhs, upper]
-      -- `a && b`, `a || b`: `a and { b }`, `a or { b }`, as Rust has them.
-      | .op "&&" | .op "||" =>
-        let word := if t == .op "&&" then "and" else "or"
-        match ← infixOf (.ident word) with
-        | some (_, prec, _) =>
-          if prec < minPrec then break
-          let id := (← read).base + (← get) + 1
-          advance
-          let rhs ← parseBinary (prec + 1) noBlock (some (prec, .left))
-          let (qual, f) := splitPath (((← read).fix.function word false).splitOn "::")
-          lhs := .call id (.name qual f) [lhs, .closure (id + 300000) [.mk [] [.expr rhs]]]
-        | none => failAt s!"operator `{if word == "and" then "&&" else "||"}` is `{word}` here, which has no infix fixity in this module"
       | .op s =>
-        -- (`x += e`: a statement's, read where statements are.)
-        if ["+=", "-=", "*=", "/=", "%="].contains s then break
+        if s.length == 2 && s.endsWith "=" && ["+=", "-=", "*=", "/=", "%="].contains s then
+          failAt s!"`x {s} e` is not an assignment here: write `x = x {(s.take 1).toString} e`"
         failAt s!"operator `{s}` has no infix fixity in this module (a fixity is its module's: `use` the function the operator stands for)"
       | .ident "is" =>
         -- `subject is Pattern`, which binds as a comparison does.
@@ -1267,14 +1164,6 @@ private partial def parseUnary (noBlock : Bool) : P Expr := do
       let (qual, f) := splitPath ((fix.function s true).splitOn "::")
       pure (.call id (.name qual f) [operand])
     | none =>
-      -- (`!c`: `not c`, as Rust has it.)
-      if t == .op "!" then
-        if let some prec := fix.prefixes.lookup "not" then
-          let id := (← read).base + (← get) + 1
-          advance
-          let operand ← parseBinary prec noBlock
-          let (qual, f) := splitPath ((fix.function "not" true).splitOn "::")
-          return .call id (.name qual f) [operand]
       if t == .op "-" then failAt "operator `-` has no prefix fixity"
       else if t == .op "&" then
         advance
@@ -1336,22 +1225,6 @@ private partial def parsePostfix (noBlock : Bool) : P Expr := do
     match ← peek with
     | .ident "as" =>
       failAt "`as` is not read: `int(x)` is an `Int` of a number or a character, `f64(n)` an `f64` of an `Int`, and `T::from(x)` what `From` gives"
-    | .op "?" =>
-      -- `e?` in a function: `try(e, @f)`, the value of an `Ok`, or the
-      -- function gives back the `Err`. (Where what follows could not start
-      -- what an infix `?` is given.)
-      let after ← peek 1
-      let ends := match after with
-        | .punct p => p != "(" && p != "[" && p != "{" && p != "@"
-        | .op _ => true
-        | .eof => true
-        | _ => false
-      match ends, (← read).fnLabel with
-      | true, some l =>
-        let id := (← read).base + (← get)
-        advance
-        e := .call id (.name none "try") [e, .label l]
-      | _, _ => break
     | .op "<" =>
       -- `f<A, B>(args)`: types written for the function's type parameters.
       -- It is that, and not a comparison, if what follows reads as types
@@ -1406,12 +1279,6 @@ private partial def parsePostfix (noBlock : Bool) : P Expr := do
         let mut given : Array Expr := #[.name none recordMark]
         repeat
           if (← peek) == .punct "}" then break
-          -- `..base`: the fields not written are `base`'s.
-          if (← peek) == .punct "." && (← peek 1) == .punct "." then
-            advance
-            advance
-            given := given.push (.call 0 (.name none (fieldMark "%rest")) [← parseBinary 0 false])
-            break
           let field ← expectIdent
           let value ← if ← acceptPunct ":" then parseBinary 0 false else pure (.name none field)
           given := given.push (.call 0 (.name none (fieldMark field)) [value])
@@ -1449,154 +1316,15 @@ private partial def parsePostfix (noBlock : Bool) : P Expr := do
         advance
         advance
         e := .fieldOf id e field
-      -- (`a..b`: a range, read where operators are.)
-      | .punct "." => break
       | _ => failAt "expected a field after `.`"
     | _ => break
   pure e
 
 private partial def parsePrimary (noBlock : Bool) : P Expr := do
-  -- `return e` (`return` alone: `()`) in a function: `return(e, @f)`.
-  if (← peek) == .ident "return" && (← peek 1) != .punct "(" then
-    if let some l := (← read).fnLabel then
-      -- (Each call is known by the token after the one that makes it: a
-      -- block's callable is known by its first token.)
-      let id := (← read).base + (← get) + 1
-      advance
-      let value ← match ← peek with
-        | .punct ";" | .punct "}" | .punct "," | .punct ")" => pure (Expr.tuple [])
-        | _ => parseBinary 0 false
-      -- (`return` as it is named here, as `return(e, @f)` would call.)
-      return .call id (.name none "return") [value, .label l]
-  -- Rust's macros most programs use: `println!`, `print!`, `format!`,
-  -- `panic!`, `assert!`, `assert_eq!`, `vec!`. A format text shows each
-  -- `{}` with `show`, joined with `++`.
+  -- (`println!(..)`: a Rust macro; there are none.)
   if let .ident m ← peek then
     if (← peek 1) == .op "!" && ((← peek 2) == .punct "(" || (← peek 2) == .punct "[") then
-      if ["println", "print", "eprintln", "eprint", "format", "panic", "assert", "assert_eq", "assert_ne", "vec",
-          "write", "writeln"].contains m then
-        let id := (← read).base + (← get) + 1
-        advance; advance
-        let closing := if (← peek) == .punct "[" then "]" else ")"
-        advance
-        let fix := (← read).fix
-        let (jq, jf) := splitPath ((fix.function "++" false).splitOn "::")
-        let join := fun (a b : Expr) (k : Nat) => Expr.call (id + 300000 + k) (.name jq jf) [a, b]
-        -- (The text a format makes of its arguments.)
-        let formatted : P Expr := do
-          let codes ← match ← peek with
-            | .str codes => do advance; pure codes
-            | _ => failAt s!"`{m}!` is given a format text first: `{m}!(\"\{}\", x)`"
-          let mut args : Array Expr := #[]
-          while ← acceptPunct "," do
-            if (← peek) == .punct ")" then break
-            args := args.push (← parseBinary 0 false)
-          let pieces ← match formatPieces (codes.map Char.ofNat) with
-            | .ok p => pure p
-            | .error e => failAt e
-          let mut next := 0
-          let mut parts : Array Expr := #[]
-          for p in pieces do
-            match p with
-            | .inl s => parts := parts.push (textValue (s.toList.map Char.toNat))
-            | .inr what =>
-              let arg ← match what with
-                | none => do
-                  let a := args[next]?
-                  next := next + 1
-                  match a with
-                  | some a => pure a
-                  | none => failAt s!"`{m}!`: more `\{}` than arguments"
-                | some (.inr n) => match args[n]? with
-                  | some a => pure a
-                  | none => failAt s!"`{m}!`: no argument {n}"
-                | some (.inl x) => pure (Expr.name none x)
-              parts := parts.push (.call (id + 400000 + parts.size) (.name none "show") [arg])
-          match parts.toList with
-          | [] => pure (textValue [])
-          | first :: rest => pure (rest.zipIdx.foldl (fun acc (e, k) => join acc e k) first)
-        let made ← match m with
-          | "write" | "writeln" =>
-            -- `write!(f, ..)`: `std::fmt::write_fmt(f, text)`.
-            let out ← parseBinary 0 false
-            expectPunct ","
-            let text ← formatted
-            let text := if m == "writeln" then join text (textValue ['\n'.toNat]) 99 else text
-            pure (.call id (.name (some "std::fmt") "write_fmt") [out, text])
-          | "println" | "eprintln" | "print" | "eprint" =>
-            if (← peek) == .punct ")" then pure (.call id (.name none "say") [textValue []])
-            else do pure (.call id (.name none "say") [← formatted])
-          | "format" => formatted
-          | "panic" =>
-            if (← peek) == .punct ")" then pure (.call id (.name none "abort") [textValue ("explicit panic".toList.map Char.toNat)])
-            else do pure (.call id (.name none "abort") [← formatted])
-          | "assert" =>
-            let cond ← parseBinary 0 false
-            if ← acceptPunct "," then do
-              pure (.call id (.name none "assert_message") [cond, ← formatted])
-            else pure (.call id (.name none "assert") [cond])
-          | "assert_eq" | "assert_ne" =>
-            let a ← parseBinary 0 false
-            expectPunct ","
-            let b ← parseBinary 0 false
-            let _ ← acceptPunct ","
-            let borrowed := fun (e : Expr) (k : Nat) => Expr.call (id + 500000 + k) (.name none borrowMark) [e]
-            pure (.call id (.name none m) [borrowed a 0, borrowed b 1])
-          | _ =>
-            -- `vec![a, b]`, `vec![x; n]`: a `Vec` of the array.
-            let items ← if closing == "]" then do
-                let saved ← get
-                -- (Read as the array literal it is, from its `[`.)
-                set (saved - 1)
-                parsePrimary noBlock
-              else failAt "`vec!` is written with brackets: `vec![a, b]`"
-            pure (.call id (.name (some "std::vec::Vec") "from_array") [items])
-        if m != "vec" then expectPunct closing
-        return made
-  -- `if c { .. }`, `while c { .. }`, `match x { .. }`: what is tested
-  -- written without parentheses, read up to the block, as Rust has them:
-  -- `if(c) { .. }`, `while({ c }) { .. }`, `match(x) { .. }`.
-  if let .ident w ← peek then
-    if (w == "if" || w == "while" || w == "match") && (← peek 1) != .punct "(" then
-      let next ← peek 1
-      let starts := match next with
-        | .ident "let" => w != "match"
-        | .ident _ | .int _ | .str _ | .char _ => true
-        | .op "!" | .op "-" | .op "*" | .op "&" => true
-        | _ => false
-      if starts then
-        let id := (← read).base + (← get) + 1
-        advance
-        -- (`if let P = e`, `while let P = e`: `e is P`, whose names the block
-        -- then has.)
-        let tested ← if (← peek) == .ident "let" then do
-            advance
-            let pat ← parsePattern
-            expectPunct "="
-            let isAt := (← read).base + (← get)
-            let subject ← parseBinary 5 true
-            pure (Expr.call isAt (.name none isMark) [subject, .closure 0 [.mk [pat] []]])
-          else parseBinary 0 true
-        if (← peek) != .punct "{" then failAt s!"expected `\{` after what `{w}` is given"
-        let block ← parseBraces
-        let tested := if w == "while" then Expr.closure (id + 300000) [.mk [] [.expr tested]] else tested
-        -- (In a match written as Rust writes it, a clause's braced body is
-        -- run, as Rust's is: its statements are the clause's.)
-        let block := if w != "match" then block else match block with
-          | .closure cid clauses => .closure cid (clauses.map fun
-            | .mk pats body => .mk pats (runBlock body))
-          | other => other
-        return .call id (.name none w) [tested, block]
-  -- `break` and `continue` alone, where a statement ends: performed, with
-  -- `()` and with nothing (`break(())`, `continue()`), as named here.
-  if let .ident w ← peek then
-    if w == "break" || w == "continue" then
-      match ← peek 1 with
-      | .punct ";" | .punct "}" | .punct "," | .punct ")" =>
-        let id := (← read).base + (← get) + 1
-        advance
-        return .call id (.name none w) (if w == "break" then [.tuple []] else [])
-      | _ => pure ()
+      failAt s!"`{m}!` is not read: there are no macros; call a function, `say(value)`, `assert(condition)`, `abort(message)`"
   -- A parameter that stands for a number, written as a value: the number.
   if let .ident x ← peek then
     if (← read).consts.contains x && (← peek 1) != .punct "::" then
@@ -1683,9 +1411,6 @@ private partial def parsePrimary (noBlock : Bool) : P Expr := do
       [.call id (.name (some trait) name) args, (TypeExpr.tuple (self :: targs)).asExpr])
   | .ident "move" =>
     advance
-    -- (`move |x| body`: Rust's callable that holds what it names, as every
-    -- callable here does.)
-    if (← peek) == .op "|" || (← peek) == .op "||" then return ← parsePrimary noBlock
     -- `move (a, b) { body }`: the block, holding the values `a` and `b`
     -- have where it is written. It is a callable given them at once.
     if (← peek) == .punct "(" then
@@ -1790,30 +1515,8 @@ private partial def parsePrimary (noBlock : Bool) : P Expr := do
     | [e] => if ← closedAfterComma then pure (.tuple [e]) else pure e
     | _ => pure (.tuple args)
   | .punct "{" => parseBraces
-  -- `|x| body`, `|a, b| body`, `|| body`: Rust's callables, `{ x => body }`,
-  -- `fn(a, b) { body }`, `{ => body }`. (A pattern's written type is read
-  -- and left to be found.)
-  | .op "|" | .op "||" =>
-    -- (Known apart from a block it begins.)
-    let id := (← read).base + (← get) + 1
-    let none_ := (← peek) == .op "||"
-    advance
-    let mut pats : Array Pattern := #[]
-    if !none_ then
-      repeat
-        if ← isOp "|" then break
-        pats := pats.push (← parsePattern)
-        if ← acceptPunct ":" then let _ ← parseType
-        if !(← acceptPunct ",") then break
-      expectOp "|"
-    let _ ← if ← acceptPunct "->" then some <$> parseType else pure none
-    let body ← if (← peek) == .punct "{" then do
-        advance
-        let stmts ← parseStmts
-        expectPunct "}"
-        pure stmts
-      else pure [Stmt.expr (← parseBinary 0 noBlock)]
-    pure (.closure id [.mk pats.toList body])
+  | .op "|" => failAt "a callable is written `{ x => body }`, or `fn(x) { body }`; `|x| body` is not read"
+  | .op "||" => failAt "a callable is written `{ => body }`, or `fn() { body }`; `|| body` is not read"
   | _ => failAt "expected an expression"
 
 /-- A callable literal in braces. -/
@@ -1836,13 +1539,7 @@ private partial def parseClauses : P (List Clause) := do
   repeat
     if (← peek) == .punct "}" then break
     out := out.push (← parseClause)
-    if !(← acceptPunct ",") then
-      -- (A clause whose body ends with a block needs no comma before the
-      -- next, as in Rust.)
-      let pos ← get
-      let endsBlock := pos > 0 && ((← read).toks[pos - 1]?.map (·.tok)) == some (.punct "}")
-      if endsBlock && (← peek) != .punct "}" then continue
-      break
+    if !(← acceptPunct ",") then break
   pure (restClauses out.toList)
 
 /-- One clause: a single pattern for the argument, or none for a callable taking
@@ -1897,72 +1594,21 @@ private partial def parseStmts : P (List Stmt) := do
       | _ => false
     match t, ← peek 1 with
     | .ident "return", next =>
-      if operand next && (← read).fnLabel.isNone then
+      if operand next then
         failAt "`return` is the library's function of a value and the function's label, `return(value, @f)`; or the value is written last, without `;`"
-    | _, _ => pure ()
-    -- `for pattern in iterator { body }`: the iterator, kept in a variable
-    -- of its own, gone through with `loop`, so that `break` and `continue`
-    -- in the body are the loop's: `loop { match(next(&mut it)) { Some(pattern)
-    -- => body, None => break(()) } }`.
-    if t == .ident "for" then
-      let saved ← get
-      advance
-      let pat? ← try (some <$> parsePattern) catch _ => pure none
-      match pat? with
-      | some pat =>
-        if (← peek) == .ident "in" then
-          let inAt ← get
-          advance
-          let base := (← read).base
-          -- (Identities of the calls made here: each of a token of the loop,
-          -- moved clear of every token's.)
-          let made := fun (at_ offset : Nat) => if at_ < 100000 then base + at_ + offset else 0
-          let it := s!"for%{base + saved}"
-          -- (`for x in &v`: what `v.iter()` gives.)
-          let source ← if (← isOp "&") && (← peek 1) != .ident "mut" then do
-              let ampAt ← get
-              advance
-              let inner ← parseBinary 0 true
-              pure (Expr.call (made ampAt 300000) (.fieldOf (made ampAt 400000) inner "iter") [])
-            else parseBinary 0 true
-          let openAt ← get
-          expectPunct "{"
-          let body ← parseStmts
-          expectPunct "}"
-          let here := (← read).toks[saved]?
-          let mark := fun (s : Stmt) => match here with
-            | some tok => Stmt.located tok.line tok.col s
-            | none => s
-          let step := Expr.call (made inAt 400000) (.name (some "std::iterator") "next") [.ref true it]
-          -- (A pattern of more than a name is matched on its own, so that what
-          -- it is matched with may be a reference: `for (n, w) in &pairs`
-          -- binds references, as a `match` of one does.)
-          let (taken, body) := match pat with
-            | .var _ | .wild => (pat, body)
-            | _ =>
-              let item := s!"for%item{base + saved}"
-              (Pattern.var item, [Stmt.expr (.call (made (saved + 1) 400000) (.name none "match")
-                [.name none item, .closure (made (saved + 1) 500000) [.mk [pat] body]])])
-          let arms := Expr.closure (made openAt 300000)
-            [.mk [.ctor "Some" none [taken]] body,
-             .mk [.var "None"] [.expr (.call (made openAt 400000) (.name none "break") [.tuple []])]]
-          let each := Expr.closure (made saved 400000)
-            [.mk [] [.expr (.call (made inAt 300000) (.name none "match") [step, arms])]]
-          -- (With the library's function that gives an array's elements away,
-          -- named so that it is there to be chosen.)
-          let source := Expr.call (made (saved + 1) 300000) (.name none forSourceMark)
-            [source, .name (some "std::iterator") "into_iter", .name (some "std::slice") "iter_of"]
-          out := out.push (mark (.letMut it source))
-          out := out.push (mark (.expr (.call (made saved 300000) (.name none "loop") [each])))
-          let _ ← acceptPunct ";"
-          let t' ← peek
-          if t' == .punct "}" || t' == .punct "," || t' == .eof then
-            out := out.push (.expr (.tuple []))
-            break
-          continue
-        else set saved
-      | none => set saved
-    match t, ← peek 1 with
+    | .ident "for", .ident _ =>
+      if (← peek 2) == .ident "in" then
+        failAt "there is no `for .. in` loop: go through an iterator with `for_each(&mut it, { (x) => .. })`, or loop with `while({ condition }, { body })`"
+    | .ident "match", next =>
+      if operand next then
+        failAt "`match` is given what it matches in parentheses: `match(x) { pattern => .. }`"
+    | .ident "if", .ident "let" =>
+      failAt "`if let` is not read: test with `is`, `if(a is Some(x)) { .. } else { .. }`"
+    | .ident "while", .ident "let" =>
+      failAt "`while let` is not read: test with `is`, `while({ a is Some(x) }) { .. }`"
+    | .ident "if", next =>
+      if operand next then
+        failAt "`if` is given its condition in parentheses: `if(c) { .. } else { .. }`"
     | _, _ => pure ()
     let here ← peekTok
     let mark := fun (s : Stmt) => Stmt.located here.line here.col s
@@ -1972,9 +1618,6 @@ private partial def parseStmts : P (List Stmt) := do
       | some (lets, s) => pure (lets.map mark ++ [mark s])
       | none => throw s!"{here.line}:{here.col}: a field is borrowed of what an expression points to, after something else in the statement is computed: give the reference a `let` of its own first" : P (List Stmt))
     if t == .ident "let" then
-      -- (What a `let`'s written type is checked by is known by its `let`, so
-      -- that what is given may be made that type, `[T]` a `Vec<T>`.)
-      let typedAt := (← read).base + (← get) + 400000
       advance
       if (← peek) == .ident "mut" then
         advance
@@ -1983,7 +1626,7 @@ private partial def parseStmts : P (List Stmt) := do
         expectPunct "="
         let value ← parseBinary 0 false
         let value := match typed with
-          | some ty => Expr.call typedAt (.name none ascribeMark) [value, ty.asExpr]
+          | some ty => Expr.call 0 (.name none ascribeMark) [value, ty.asExpr]
           | none => value
         expectPunct ";"
         out := out ++ (← settle (.letMut name value)).toArray
@@ -1994,7 +1637,7 @@ private partial def parseStmts : P (List Stmt) := do
         expectPunct "="
         let value ← parseBinary 0 false
         let value := match typed with
-          | some ty => Expr.call typedAt (.name none ascribeMark) [value, ty.asExpr]
+          | some ty => Expr.call 0 (.name none ascribeMark) [value, ty.asExpr]
           | none => value
         expectPunct ";"
         match pat with
@@ -2032,21 +1675,9 @@ private partial def parseStmts : P (List Stmt) := do
       out := out ++ (← settle (.defer e)).toArray
     else
       let e ← parseBinary 0 false
-      -- `x += e`: `x = x + e`, and so on.
-      let compound := match ← peek with
-        | .op s => if ["+=", "-=", "*=", "/=", "%="].contains s then some (s.take 1).toString else none
-        | _ => none
-      if compound.isSome then advance
-      if compound.isSome || (← acceptPunct "=") then
+      if ← acceptPunct "=" then
         let id := (← read).base + (← get) + 1
         let value ← parseBinary 0 false
-        let fix := (← read).fix
-        let value := match compound with
-          | some op =>
-            let (qual, f) := splitPath ((fix.function op false).splitOn "::")
-            -- (What is read is told apart from where it is written.)
-            Expr.call (id + 300000) (.name qual f) [shiftExpr 350000 e, value]
-          | none => value
         -- `x.0 = v` and `(*p).0 = v` assign through a borrow of the field.
         -- `a[i] = v` makes `a` the array with `v` at that place: `a =
         -- index_set(a, i, v)`, and so on outwards for `a[i][j] = v`.
@@ -2079,17 +1710,7 @@ private partial def parseStmts : P (List Stmt) := do
           let t' ← peek
           if t' == .punct "}" || t' == .punct "," then
             out := out.push (.expr (.tuple []))
-        else
-          -- (A statement that ends with a block, `if c { .. }`, needs no `;`
-          -- before the next, as in Rust; its value is let go.)
-          let pos ← get
-          let endsBlock := pos > 0 && ((← read).toks[pos - 1]?.map (·.tok)) == some (.punct "}")
-          let t' ← peek
-          -- (Not where what follows is the next clause of a match, `pattern
-          -- => ..`, written after a braced body without a comma.)
-          let nextClause := scanClauseForm (← read).toks pos 0
-          if endsBlock && t' != .punct "}" && t' != .punct "," && t' != .eof && !nextClause then continue
-          break
+        else break
   -- The functions written in this block are named, in it and in each
   -- other, by the names they have as functions of the module.
   if local_.isEmpty then return out.toList
@@ -2124,32 +1745,8 @@ private partial def parseFn : P (Item × List Bound) := do
     let mut annots : Array (Option TypeExpr) := #[]
     let mut params := params
     let mut bounds := bounds
-    let mut mutParams : Array String := #[]
     repeat
       if (← peek) == .punct ")" then break
-      -- `self`, `&self`, `&mut self` (Rust's receivers): `self: Self`,
-      -- `self: &Self`, `self: &mut Self`.
-      let receiver : Option TypeExpr ← match ← peek, ← peek 1, ← peek 2 with
-        | .ident "self", t1, _ =>
-          if pats.isEmpty && t1 != .punct ":" then do advance; pure (some (TypeExpr.name "Self" []))
-          else pure none
-        | .op "&", .ident "self", t2 =>
-          if pats.isEmpty && t2 != .punct ":" then do advance; advance; pure (some (TypeExpr.ref false (.name "Self" []) none))
-          else pure none
-        | .op "&", .ident "mut", .ident "self" =>
-          if pats.isEmpty then do advance; advance; advance; pure (some (TypeExpr.ref true (.name "Self" []) none))
-          else pure none
-        | _, _, _ => pure none
-      if let some ty := receiver then
-        pats := pats.push (.var "self")
-        annots := annots.push (some ty)
-        if !(← acceptPunct ",") then break
-        continue
-      -- (`mut x: T`: a parameter the body changes, a variable of its own.)
-      if (← peek) == .ident "mut" then
-        if let .ident x ← peek 1 then
-          advance
-          mutParams := mutParams.push x
       pats := pats.push (← parsePattern)
       if ← acceptPunct ":" then
         -- `x: impl Trait`: a type parameter of its own with the trait.
@@ -2164,19 +1761,7 @@ private partial def parseFn : P (Item × List Bound) := do
       if !(← acceptPunct ",") then break
     expectPunct ")"
     -- `-> R`, `-> R / {E}`, or `/ {E}` alone for a function that gives `()`.
-    -- (`-> impl Trait`: the type the body gives, found from the body;
-    -- callers see it, which is more than Rust shows them.)
-    let ret ← if ← acceptPunct "->" then
-        if (← peek) == .ident "impl" then
-          advance
-          let _ ← parseBoundsOf "%result"
-          if (← peek) == .op "/" then
-            match ← parseResult with
-            | .performs _ effects => pure (some (TypeExpr.performs .hole effects))
-            | _ => pure (some TypeExpr.hole)
-          else pure (some TypeExpr.hole)
-        else some <$> parseResult
-      else if (← peek) == .op "/" then some <$> parseResult else pure none
+    let ret ← if (← acceptPunct "->") || (← peek) == .op "/" then some <$> parseResult else pure none
     let (lifetimes, more) ← parseWhere
     -- `where I::Item: Ord`: a type parameter for `I::Item`, which `I`'s one
     -- written trait is asked to leave (`I: Iterator<Item = ItemOfI>`).
@@ -2202,8 +1787,7 @@ private partial def parseFn : P (Item × List Bound) := do
       | _ => c
     expectPunct "{"
     let consts := (bounds.filter (·.trait == knownTrait)).map (·.subject)
-    let body ← withReader (fun ctx => { ctx with consts := consts ++ ctx.consts, fnLabel := some name }) parseStmts
-    let body := mutParams.toList.map (fun x => Stmt.letMut x (.name none x)) ++ body
+    let body ← withReader (fun ctx => { ctx with consts := consts ++ ctx.consts }) parseStmts
     expectPunct "}"
     -- `-> !`: a function that does not come back gives whatever is wanted
     -- of it, which only a body that does not come back can.
@@ -2311,17 +1895,6 @@ private partial def parseItem : P Item := do
       expectPunct "}"
       return .fieldNames (attrMark "negative_impl") [tr, head] []
     let tr ← expectPath
-    -- (Rust's `PartialEq` and `PartialOrd`: the prelude's `Eq` and `Ord`.)
-    let tr := match tr with
-      | "PartialEq" | "std::cmp::PartialEq" => "Eq"
-      | "PartialOrd" | "std::cmp::PartialOrd" => "Ord"
-      | "std::ops::Add" => "Add"
-      | "std::ops::Sub" => "Sub"
-      | "std::ops::Mul" => "Mul"
-      | "std::ops::Div" => "Div"
-      | "std::ops::Rem" => "Rem"
-      | "std::ops::Neg" => "Neg"
-      | other => other
     -- `impl From<Int> for u8`: the trait's own arguments, kept among what
     -- the implementation declares.
     let mut given : Array Item := #[]
@@ -2467,47 +2040,14 @@ private partial def parseItem : P Item := do
         if !(← acceptPunct ",") then break
     expectPunct "{"
     let mut methods : Array Item := given
-    -- (Rust's operator traits: their functions by Rust's names, `fn add`,
-    -- `fn eq(&self, other: &Self)`, are the prelude's operators, taking
-    -- the values; `type Output` is what the operator gives, `Self`.)
-    let rustOps : List (String × String) := match lastSegment tr with
-      | "Add" => [("add", "+")]
-      | "Sub" => [("sub", "-")]
-      | "Mul" => [("mul", "*")]
-      | "Div" => [("div", "/")]
-      | "Rem" => [("rem", "%")]
-      | "Neg" => [("neg", "negate")]
-      | "Eq" => [("eq", "=="), ("ne", "!=")]
-      | "Ord" => [("lt", "<"), ("gt", ">"), ("le", "<="), ("ge", ">=")]
-      | _ => []
     repeat
       if (← peek) == .punct "}" then break
       match ← peek with
       | .ident "fn" =>
-        let item ← withReader (fun c =>
+        methods := methods.push (← withReader (fun c =>
           if c.records.contains head then { c with records := "Self" :: c.records } else c)
-          parseItem
-        let item := match item with
-          | .fn name ps annots ret clauses =>
-            match rustOps.lookup name with
-            | some op =>
-              let plain := annots.map (·.map fun
-                | .ref _ inner _ => inner
-                | other => other)
-              -- (What a body of `&self` reads through a reference it now
-              -- reads of the value: the same, for a value that is copied.)
-              Item.fn op ps plain ret clauses
-            | none => item
-          | other => other
-        methods := methods.push item
+          parseItem)
       | .ident "type" =>
-        if !rustOps.isEmpty && (← peek 1) == .ident "Output" then
-          -- (`type Output = Self;`: what the prelude's operator gives.)
-          advance; advance
-          expectPunct "="
-          let _ ← parseType
-          let _ ← acceptPunct ";"
-          continue
         -- `type Item = Int;`: a type the trait leaves to the implementation.
         advance
         let name ← expectIdent
@@ -2536,21 +2076,6 @@ private partial def parseItem : P Item := do
     expectPunct "}"
     -- `Self` is the type the implementation is for.
     let self := selfTypeOf head (args.map (TypeExpr.name · []))
-    -- (Rust's `impl fmt::Display for T { fn fmt(&self, f: &mut Formatter)
-    -- -> fmt::Result }`: the function is the type's own, `T::fmt`, its
-    -- result found from its body; what the type is shown as, `Show`, is
-    -- written out once the text is read (`deriveItems`).)
-    let rustFmt := (lastSegment tr == "Display" || lastSegment tr == "Debug") && methods.any fun
-      | .fn "fmt" _ _ (some (.name r _)) _ => lastSegment r == "Result"
-      | _ => false
-    if rustFmt then
-      let own := s!"{head}::{if lastSegment tr == "Display" then "fmt" else "fmt_debug"}"
-      let fns := methods.toList.filterMap fun
-        | .fn "fmt" ps annots _ clauses =>
-          some (Item.fn own ps (annots.map (·.map (TypeExpr.withSelf self))) none (clauses.map (selfClause head none)))
-        | _ => none
-      let shown := Item.fieldNames (attrMark "rustfmt") (head :: own :: lastSegment tr :: params) []
-      return .module inherentMark (some (fns ++ [shown]))
     let written := methods.toList.map fun
       | .fn name ps annots ret clauses =>
         Item.fn name ps (annots.map (·.map (TypeExpr.withSelf self))) (ret.map (TypeExpr.withSelf self))
@@ -2706,23 +2231,6 @@ private partial def parseTrait : P (List Item) := do
     let mut names : Array (Option String) := #[]
     repeat
       if (← peek) == .punct ")" then break
-      -- (`self`, `&self`, `&mut self`: a receiver named `self`.)
-      let receiver : Option TypeExpr ← match ← peek, ← peek 1, ← peek 2 with
-        | .ident "self", t1, _ =>
-          if types.isEmpty && t1 != .punct ":" then do advance; pure (some (TypeExpr.name "Self" []))
-          else pure none
-        | .op "&", .ident "self", _ =>
-          if types.isEmpty then do advance; advance; pure (some (TypeExpr.ref false (.name "Self" []) none))
-          else pure none
-        | .op "&", .ident "mut", .ident "self" =>
-          if types.isEmpty then do advance; advance; advance; pure (some (TypeExpr.ref true (.name "Self" []) none))
-          else pure none
-        | _, _, _ => pure none
-      if let some ty := receiver then
-        names := names.push (some "self")
-        types := types.push ty
-        if !(← acceptPunct ",") then break
-        continue
       match ← peek, ← peek 1 with
       | .ident x, .punct ":" =>
         advance
@@ -2763,28 +2271,11 @@ private partial def parseAttributed (next : P (List Item)) : P (List Item) := do
   expectPunct "["
   let name ← expectIdent
   let mut arg : String := ""
-  -- `#[derive(Clone, PartialEq)]`: implementations written out for the
-  -- type that follows (`deriveItems`, once the whole text is read).
-  if name == "derive" then
-    let mut traits : Array String := #[]
-    expectPunct "("
-    repeat
-      if (← peek) == .punct ")" then break
-      traits := traits.push (lastSegment (← expectPath))
-      if !(← acceptPunct ",") then break
-    expectPunct ")"
-    expectPunct "]"
-    let items ← next
-    let subject := items.findSome? fun item =>
-      match (match item with | .pub _ i => i | i => i) with
-      | .enum n _ _ => some n
-      | .struct n _ _ => some n
-      | _ => none
-    match subject with
-    | some n => return items ++ [.fieldNames (attrMark "derive") (n :: traits.toList) []]
-    | none => failAt "`#[derive(..)]` is written before a `struct` or an `enum`"
   if ← acceptPunct "(" then
     arg ← expectIdent
+    -- (`#[derive(Clone, Debug)]`: refused below, by its name.)
+    while ← acceptPunct "," do
+      let _ ← expectIdent
     expectPunct ")"
   else if ← acceptPunct "=" then
     match ← peek with
@@ -3610,126 +3101,6 @@ where
       i := i + 1
     return out
 
-
-/-- The text of what `#[derive(..)]` asks for a type: an implementation of each
-trait, written out field by field. The constructors are each a name, the
-field names if it was declared with them, and how many fields it has. -/
-def deriveText (ty : String) (params : List String) (ctors : List (String × Option (List String) × Nat))
-    (traits : List String) : Except String String := do
-  let params := params.filter (!·.startsWith "'")
-  let args := if params.isEmpty then "" else "<" ++ ", ".intercalate params ++ ">"
-  let gen := fun (tr : String) =>
-    if params.isEmpty then "" else "<" ++ ", ".intercalate (params.map (· ++ ": " ++ tr)) ++ ">"
-  -- The pattern of a constructor with its fields named `x0, x1, ..` (or
-  -- with another letter), and the value made of expressions of them.
-  let pat := fun (c : String × Option (List String) × Nat) (v : String) =>
-    let (name, names, n) := c
-    let vars := (List.range n).map (s!"{v}{·}")
-    match names with
-    | some ns => if ns.isEmpty then name else
-      name ++ " { " ++ ", ".intercalate ((ns.zip vars).map fun ((f, x) : String × String) => s!"{f}: {x}") ++ " }"
-    | none => if n == 0 then name else name ++ "(" ++ ", ".intercalate vars ++ ")"
-  let build := fun (c : String × Option (List String) × Nat) (parts : List String) =>
-    let (name, names, n) := c
-    match names with
-    | some ns => if ns.isEmpty then name else
-      name ++ " { " ++ ", ".intercalate ((ns.zip parts).map fun ((f, x) : String × String) => s!"{f}: {x}") ++ " }"
-    | none => if n == 0 then name else name ++ "(" ++ ", ".intercalate parts ++ ")"
-  let vars := fun (n : Nat) (v : String) => (List.range n).map (s!"{v}{·}")
-  let mut out := ""
-  for tr in traits do
-    match tr with
-    | "Copy" => pure ()
-    | "Clone" =>
-      let arms := ctors.map fun c => s!"&{pat c "x"} => {build c ((vars c.2.2 "x").map (s!"clone({·})"))}"
-      out := out ++ s!"impl{gen "Clone"} Clone for {ty}{args} \{ fn clone(v: &Self) -> Self \{ match(v) \{ {", ".intercalate arms} } } }\n"
-    | "PartialEq" | "Eq" =>
-      if !(out.splitOn " Eq for ").length.ble 1 then pure () else
-      let same := fun (n : Nat) =>
-        let tests := (List.range n).map fun i => s!"x{i} == y{i}"
-        match tests.reverse with
-        | [] => "true"
-        | last :: rest => rest.foldl (fun acc t => s!"{t} and \{ {acc} }") last
-      let arms := ctors.map fun c => s!"({pat c "x"}, {pat c "y"}) => {same c.2.2}"
-      let arms := if ctors.length > 1 then arms ++ ["_ => false"] else arms
-      out := out ++ s!"impl{gen "Eq"} Eq for {ty}{args} \{ fn ==(a, b) \{ match((a, b)) \{ {", ".intercalate arms} } } }\n"
-    | "Debug" =>
-      let shown := fun (c : String × Option (List String) × Nat) =>
-        let (name, names, n) := c
-        let xs := vars n "x"
-        match names with
-        | some ns => if ns.isEmpty then s!"\"{name}\"" else
-          s!"\"{name} \{ " ++ " ++ \", ".intercalate ((ns.zip xs).map fun ((f, x) : String × String) => s!"{f}: \" ++ show({x})") ++ " ++ \" }\""
-        | none => if n == 0 then s!"\"{name}\"" else
-          s!"\"{name}(\" ++ " ++ " ++ \", \" ++ ".intercalate (xs.map (s!"show({·})")) ++ " ++ \")\""
-      let arms := ctors.map fun c => s!"{pat c "x"} => {shown c}"
-      out := out ++ s!"impl{gen "Show"} Show for {ty}{args} \{ fn show(v) \{ match(v) \{ {", ".intercalate arms} } } }\n"
-    | "Hash" =>
-      let arms := ctors.zipIdx.map fun (c, i) =>
-        let h := (vars c.2.2 "x").foldl (fun acc x => s!"({acc}) * 31 + std::hash::hash({x})") (toString (i + 7))
-        s!"{pat c "x"} => {h}"
-      out := out ++ s!"impl{gen "std::hash::Hash"} std::hash::Hash for {ty}{args} \{ fn hash(v) \{ match(v) \{ {", ".intercalate arms} } } }\n"
-    | "PartialOrd" | "Ord" =>
-      if !(out.splitOn " Ord for ").length.ble 1 then pure () else
-      match ctors with
-      | [c] =>
-        let n := c.2.2
-        let lt := match (List.range n).reverse with
-          | [] => "false"
-          | last :: rest => rest.foldl (fun acc i => s!"x{i} < y{i} or \{ x{i} == y{i} and \{ {acc} } }") s!"x{last} < y{last}"
-        out := out ++ s!"impl{gen "Ord"} Ord for {ty}{args} \{ fn <(a, b) \{ match((a, b)) \{ ({pat c "x"}, {pat c "y"}) => {lt} } } }\n"
-      | _ =>
-        unless ctors.all (·.2.2 == 0) do
-          throw s!"`#[derive({tr})]` of `{ty}`: only of a struct, or of an enum whose constructors have no fields"
-        let rank := fun (v : String) =>
-          s!"match({v}) \{ " ++ ", ".intercalate (ctors.zipIdx.map fun (c, i) => s!"{c.1} => {i}") ++ " }"
-        out := out ++ s!"impl Ord for {ty} \{ fn <(a, b) \{ {rank "a"} < {rank "b"} } }\n"
-    | other => throw s!"`#[derive({other})]`: only `Clone`, `Copy`, `Debug`, `PartialEq`, `Eq`, `Hash`, `PartialOrd` and `Ord` are written out"
-  pure out
-
-/-- A text's items with what each `#[derive(..)]` asks written out beside
-its type, in the same module. -/
-partial def deriveItems (readText : String → Except String (List Item)) (items : List Item) :
-    Except String (List Item) := do
-  let plain := items.map fun
-    | .pub _ i => i
-    | i => i
-  let mut more : List Item := []
-  -- (A type shown by a Rust `Display`, or failing that a Rust `Debug`.)
-  let rustShown := plain.filterMap fun
-    | .fieldNames mark (ty :: own :: kind :: params) _ =>
-      if mark == attrMark "rustfmt" then some (ty, own, kind, params) else none
-    | _ => none
-  let shownBy := fun (ty : String) =>
-    match rustShown.find? (fun (t, _, k, _) => t == ty && k == "Display") with
-    | some s => some s
-    | none => rustShown.find? (fun (t, _, _, _) => t == ty)
-  for (ty, own, kind, params) in rustShown do
-    if shownBy ty == some (ty, own, kind, params) then
-      let params := params.filter (!·.startsWith "'")
-      let args := if params.isEmpty then "" else "<" ++ ", ".intercalate params ++ ">"
-      more := more ++ (← readText s!"impl{args} Show for {ty}{args} \{ fn show(v) \{ let mut f = std::fmt::Formatter::new(); let _ = {own}(&v, &mut f); std::fmt::text_of(f) } }\n")
-  for item in plain do
-    if let .fieldNames mark (ty :: traits) _ := item then
-      -- (A Rust `Display` or `Debug` of its own is how it is shown.)
-      let traits := if (shownBy ty).isSome then traits.filter (· != "Debug") else traits
-      if mark == attrMark "derive" then
-        let fieldsOf := fun (c : String) => plain.findSome? fun
-          | .fieldNames owner names _ => if owner == c && !names.isEmpty then some names else none
-          | _ => none
-        let decl := plain.findSome? fun
-          | .struct n params fields => if n == ty then some (params, [(n, fieldsOf n, fields.length)]) else none
-          | .enum n params ctors => if n == ty then some (params, ctors.map fun (c, ts) => (c, fieldsOf c, ts.length)) else none
-          | _ => none
-        match decl with
-        | some (params, ctors) => more := more ++ (← readText (← deriveText ty params ctors traits))
-        | none => throw s!"`#[derive(..)]` of `{ty}`: no such type here"
-  let items ← items.mapM fun
-    | .module name (some body) => do pure (.module name (some (← deriveItems readText body)))
-    | .pub p (.module name (some body)) => do pure (.pub p (.module name (some (← deriveItems readText body))))
-    | i => pure i
-  pure (items ++ more)
-
 /-- Parse a source text, given the fixities already in scope. Returns the items
 and the fixities including those it declares. `base` keeps the identities of
 this text's callable literals apart from those of a text parsed before it.
@@ -3746,14 +3117,8 @@ def parse (fix : Fixities) (src : String) (base : Nat := 0) (records : List Stri
     | none => lex src
   let toks := expandPacks toks (if packs == 0 then max 2 (longestList toks) else packs)
   let fix ← if tables.isEmpty then collectFixities toks fix else pure ((tables.lookup path).getD fix)
-  let ctx : PCtx := { toks, fix, records := collectRecords toks ++ records, base, tables, path, fixed }
-  let (items, _, local_) ← parseItems ctx 0 #[]
-  -- (What `#[derive(..)]` asks, read as text of this module's.)
-  let readText := fun (text : String) => do
-    let derived ← lex text
-    let (more, _, made) ← parseItems { ctx with toks := derived, base := base + 9000000000000 } 0 #[]
-    pure (more ++ made.toList)
-  let items ← deriveItems readText items
+  let (items, _, local_) ← parseItems
+    { toks, fix, records := collectRecords toks ++ records, base, tables, path, fixed } 0 #[]
   pure (promoteItems (items ++ local_.toList), fix)
 
 end Glorious.Syntax

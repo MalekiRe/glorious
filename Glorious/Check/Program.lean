@@ -1586,7 +1586,7 @@ def finish : M Elab.Blocks := do
     pure ⟨s.given.toList, links ++ s.envLinks.toList, s.coercions.toList,
       ⟨s.dictTable.toList, s.methodCalls.toList, s.fnBounds, implEs, s.dropSites.toList, destroys⟩,
       s.fieldTable.toList, s.fieldReads.toList, s.packs.toList, s.envFns, s.envWraps.toList,
-      s.derefReads.toList, s.siteTable, s.siteTypes, s.dotChosen, s.argsChosen, s.derefValues⟩
+      s.derefReads.toList, s.siteTable, s.siteTypes, s.dotChosen, s.argsChosen⟩
 
 /-- Check a whole program. Gives what the elaborator needs to know about its
 blocks: which take an argument they do not name, and for each that is handed a

@@ -482,67 +482,13 @@ partial def dotOwnItems (call : Nat) (fn : String) (items : List Item) : List It
     | .pub parent item => .pub parent ((dotOwnItems call fn [item]).headD item)
     | item => item
 
-/-- A function with `x` written for `*x` where the checker found `x` holds a
-value (`Blocks.derefValues`): by the statement's place and the name. -/
-partial def derefValuesExpr (all here : List (String × String)) : Expr → Expr
-  | .deref (.name none x) => if here.any (·.2 == x) then .name none x else .deref (.name none x)
-  | .call i f args => .call i (derefValuesExpr all here f) (args.map (derefValuesExpr all here))
-  | .tailCall i f args => .tailCall i (derefValuesExpr all here f) (args.map (derefValuesExpr all here))
-  | .tuple args => .tuple (args.map (derefValuesExpr all here))
-  | .proj e n => .proj (derefValuesExpr all here e) n
-  | .closure i clauses => .closure i (clauses.map fun
-    | .mk pats body => .mk pats (derefValuesStmts all here body))
-  | .handle subject arms => .handle (derefValuesExpr all here subject) (arms.map fun
-    | .mk pats body => .mk pats (derefValuesStmts all here body))
-  | .labelScope l body => .labelScope l (derefValuesStmts all here body)
-  | .deref e => .deref (derefValuesExpr all here e)
-  | .reborrow u e => .reborrow u (derefValuesExpr all here e)
-  | .fieldOf i e name => .fieldOf i (derefValuesExpr all here e) name
-  | e => e
-where
-  /-- (`all`: the places and names of the function; `here`, those of the
-  statement being gone through; a statement with a place of its own has
-  those of its place.) -/
-  derefValuesStmts (all here : List (String × String)) : List Stmt → List Stmt
-    | [] => []
-    | s :: rest =>
-      let rec one (here : List (String × String)) : Stmt → Stmt
-        | .located line col s => .located line col (one (all.filter (·.1 == s!"{line}:{col}: ")) s)
-        | .let_ pat value => .let_ pat (derefValuesExpr all here value)
-        | .expr e => .expr (derefValuesExpr all here e)
-        | .defer e => .defer (derefValuesExpr all here e)
-        | .letMut x value => .letMut x (derefValuesExpr all here value)
-        | .assign target value => .assign (derefValuesExpr all here target) (derefValuesExpr all here value)
-      one here s :: derefValuesStmts all here rest
-
-partial def derefValuesItems (picks : List (String × String × String)) (items : List Item) : List Item :=
-  if picks.isEmpty then items else
-  items.map fun
-    | .fn name ps annots ret clauses =>
-      let mine := (picks.filter (·.1 == name)).map (·.2)
-      if mine.isEmpty then .fn name ps annots ret clauses
-      else .fn name ps annots ret (clauses.map fun
-        | .mk pats body => .mk pats (derefValuesExpr.derefValuesStmts mine [] body))
-    | .impl ps tr head args context methods => .impl ps tr head args context (derefValuesItems picks methods)
-    | .traitInfo n supers defaults params assocs => .traitInfo n supers (derefValuesItems picks defaults) params assocs
-    | .module name (some body) => .module name (some (derefValuesItems picks body))
-    | .pub parent item => .pub parent ((derefValuesItems picks [item]).headD item)
-    | item => item
-
 /-- A program with the arguments the checker chose to give as other than
 written (`Blocks.argsChosen`) written in. -/
 partial def argsChosenExpr (picks : List ((Nat × Nat) × Expr)) : Expr → Expr
   | .call i f args =>
-    match f, args with
-    -- (What a `for` loop goes through: as the checker chose.)
-    | .name none mark, [a, _, _] =>
-      if mark == Syntax.forSourceMark then
-        let a := argsChosenExpr picks a
-        match picks.lookup (i, 0) with
-        | some g => .call (i + 600000) g [a]
-        | none => a
-      else chosenArgs i f args
-    | _, _ => chosenArgs i f args
+    let args := (args.map (argsChosenExpr picks)).zipIdx.map fun (a, k) =>
+      (picks.lookup (i, k)).getD a
+    .call i (argsChosenExpr picks f) args
   | .tailCall i f args => .tailCall i (argsChosenExpr picks f) (args.map (argsChosenExpr picks))
   | .tuple args => .tuple (args.map (argsChosenExpr picks))
   | .proj e n => .proj (argsChosenExpr picks e) n
@@ -556,14 +502,6 @@ partial def argsChosenExpr (picks : List ((Nat × Nat) × Expr)) : Expr → Expr
   | .fieldOf i e name => .fieldOf i (argsChosenExpr picks e) name
   | e => e
 where
-  chosenArgs (i : Nat) (f : Expr) (args : List Expr) : Expr :=
-    let args := (args.map (argsChosenExpr picks)).zipIdx.map fun (a, k) =>
-      match picks.lookup (i, k) with
-      | some (.call _ (.name none m) [g]) =>
-        if m == Syntax.wrapMark then .call (i + 700000 + k) g [a] else (picks.lookup (i, k)).getD a
-      | some e => e
-      | none => a
-    .call i (argsChosenExpr picks f) args
   argsChosenStmt (picks : List ((Nat × Nat) × Expr)) : Stmt → Stmt
     | .let_ pat value => .let_ pat (argsChosenExpr picks value)
     | .expr e => .expr (argsChosenExpr picks e)
@@ -573,6 +511,7 @@ where
     | .located line col s => .located line col (argsChosenStmt picks s)
 
 partial def argsChosenItems (picks : List ((Nat × Nat) × Expr)) (items : List Item) : List Item :=
+  if picks.isEmpty then items else
   items.map fun
     | .fn name ps annots ret clauses => .fn name ps annots ret (clauses.map fun
       | .mk pats body => .mk pats (body.map (argsChosenExpr.argsChosenStmt picks)))
