@@ -4946,56 +4946,27 @@ recompile of the simulation: about 0.37 s):
   the lexer work. For us they are about 9% of an edit recompile, so the
   repeated work (each text lexed about four times) comes first.
 
-## Notes: what makes Jai's compiler fast, and what applies here
+## Start-up: 22 of 26 ms is Lean setting itself up (parked)
 
-Sources:
-- The Way to Jai, ch. 4: https://github.com/Ivo-Balbaert/The_Way_to_Jai/blob/main/book/04A_More_info_about_the_compiler.md
-- An independent Jai compiler's measured compile-speed notes (jacket):
-  https://github.com/matteopolak/jacket/blob/main/docs/compiler/compile-speed.md
+A `glorious` process takes 26 ms before `main` does anything (optimized
+build). Nearly all of it is `lean_initialize`: the C that Lean writes calls
+it, in place of initializing only the runtime, whenever any module imported is
+`Lean`'s. Our only such import is `Lean.CompactedRegion` (the kept states'
+file format). That sets up all of Lean, its parser tables included
+(`Lean.Parser.addBuiltinParser` in the profile).
 
-What they report:
-- Front end for ~10k lines: about 0.025–0.08 s. Typical debug builds up to
-  250k lines under 1 s. Link is often the largest part (0.25–0.33 s of 0.32–0.43 s).
-- No processing in source order: declarations are worked on as jobs, which
-  wait on what they need (no forward declarations) and run on a job
-  system across threads.
-- One internal bytecode, then either a naive x64 backend written for speed
-  (no optimization) or LLVM for release.
-- A hand-written recursive-descent parser.
-- jacket, measured:
-  - lexing and parsing on worker threads ahead of semantic analysis;
-  - one interner that hashes a spelling once;
-  - 40-byte tokens;
-  - word compares for punctuation;
-  - code that only compile-time execution runs is not lowered;
-  - failure paths compiled without optimization;
-  - codegen split into units per core;
-  - memory leaked at exit (no teardown);
-  - mimalloc (about 8% overall).
-  Rejected after measuring: a bump arena (+2–3%) and early import discovery.
+Declaring the two entry points (`lean_compacted_region_save`/`_read`) in
+`Store.lean` without the import brought start-up to 4 ms, but the save then
+crashed: it needs what `lean_initialize` sets up. A compile then kept
+nothing, and each was as slow as a first build. Reverted.
 
-What carries over to Glorious, by what it costs us now (an edit
-recompile of the simulation: about 0.37 s):
-- Our time is in checking and certificate inference, which Jai does not
-  have: those are where the job idea applies. Groups of functions (and
-  modules) as jobs that wait on their callees' schemes, run on `Task`s.
-  It needs per-group state that does not thread one checker state; see
-  "The library's modules, checked once" for what that takes.
-- Already done:
-  - our own naive x86 backend with no external linker (`glorious exe`);
-  - wild where we do link;
-  - only what `main` reaches is elaborated into Core;
-  - kept work keyed by content.
-- Cheap and worth doing:
-  - per-phase timings (`--timings`), as Jai and jacket print;
-  - leave the process without freeing what the compile built (Lean's
-    `lean_dec_ref`/`mi_free` were about 6–7% of profiles);
-  - lex each text once and keep the parsed library;
-  - lex and parse modules on `Task`s.
-- Parser micro-tuning (interning, token size): jacket found lexing and
-  parsing a quarter of a check of 600k generated lines and got 9% from
-  the lexer work. For us they are about 9% of an edit recompile, so the
-  repeated work (each text lexed about four times) comes first.
+Ways left:
+- Our own format for kept states, which is a large serializer.
+- Calling the full initializer only before the first save or load, which
+  needs a C shim and running Lean's initializers after start, which they
+  may refuse.
+
+Parked: 22 ms is about 8% of an edit recompile of the simulation (0.27 s).
 
 ## Other standing decisions
 
