@@ -1,0 +1,110 @@
+// Upstream's tests/bundles.rs, of a world whose columns are said: bundles in
+// either order, inserted and removed whole, giving back what was had; a
+// batch spawned at once; and the placeholder entity, which no world has.
+// expect:
+// 11
+// 12
+// 22
+// 33
+// 66
+// 67
+// 11 12
+// 44 45
+// 55 56
+// 1
+// 1
+// 1
+// 77
+// 78
+// 79
+// 80
+// --
+// --
+// 1 20 21
+// 2 22
+// 10
+// 14 16
+// 18 19
+// 3
+// 0
+// 0
+// 1
+mod ecs;
+
+use ecs::{World, Entity, Column, Query};
+
+type Schema = (Column<u32>, (Column<i16>, (Column<u8>, (Column<u64>, ()))));
+
+fn say_u32(o: Option<&u32>) { match(o) { Some(x) => say(*x), None => say(-1) } }
+fn say_i16(o: Option<&i16>) { match(o) { Some(x) => say(*x), None => say(-1) } }
+fn flag(b: Bool) { if(b) { say(1) } else { say(0) } }
+
+// `undeclared_bundles_are_world_local_and_survive_empty_tables_and_moves`
+fn orders() {
+    let mut first = World::new<Schema>();
+    let mut second = World::new<Schema>();
+    let first_single = first.spawn_bundle((11u32,));
+    let second_single = second.spawn_bundle((22i16,));
+    let second_number = second.spawn_bundle((33u32,));
+    let _ = first.insert(first_single, 12i16);
+    let pair = first.spawn_bundle((44u32, 45i16));
+    let reversed = first.spawn_bundle((56i16, 55u32));
+    let second_pair = second.spawn_bundle((66u32, 67i16));
+    say_u32(first.get<u32>(first_single));
+    say_i16(first.get<i16>(first_single));
+    say_i16(second.get<i16>(second_single));
+    say_u32(second.get<u32>(second_number));
+    say_u32(second.get<u32>(second_pair));
+    say_i16(second.get<i16>(second_pair));
+    first.query<(&u32, &i16)>(fn(query: &mut Query<(&u32, &i16)>) {
+        query.for_each(fn(got: (&u32, &i16)) { let (a, b) = got; say(show(*a) ++ " " ++ show(*b)) })
+    });
+    flag(first.despawn(pair));
+    flag(first.despawn(first_single));
+    flag(first.despawn(reversed));
+    let mut moved = first;
+    let revived = moved.spawn_batch([(78i16, 77u32), (80i16, 79u32)]);
+    say_u32(moved.get<u32>(revived[0]));
+    say_i16(moved.get<i16>(revived[0]));
+    say_u32(moved.get<u32>(revived[1]));
+    say_i16(moved.get<i16>(revived[1]))
+}
+
+fn opt<T>(o: Option<T>) -> Str where T: Show { match(o) { Some(x) => show(x), None => "-" } }
+
+// Some of `many_bundle_transitions_stay_exact_while_the_cache_grows`, one round.
+fn transitions() {
+    let mut world = World::new<Schema>();
+    let a = world.spawn_bundle((1u32, 1i16));
+    let d = world.spawn_bundle((4i16, 5u8));
+    let g = world.spawn_bundle((2u32, 10i16, 11u8));
+    let i = world.spawn_bundle((14i16, 15u8, 16u64));
+    let j = world.spawn_bundle((3u32, 17i16, 18u8, 19u64));
+    match(world.insert_bundle(a, (20u8, 21u64))) { Some(had) => let (x, y) = had; say(opt(x) ++ opt(y)), None => () };
+    match(world.insert_bundle(d, (2u32, 22u64))) { Some(had) => let (x, y) = had; say(opt(x) ++ opt(y)), None => () };
+    match(world.get<u8>(a)) { Some(x) => say(show(1) ++ " " ++ show(*x) ++ " " ++ opt(match(world.get<u64>(a)) { Some(y) => Some(*y), None => None })), None => () };
+    match(world.get<u32>(d)) { Some(x) => say(show(*x) ++ " " ++ opt(match(world.get<u64>(d)) { Some(y) => Some(*y), None => None })), None => () };
+    let (_, ten) = world.remove_bundle<(u32, i16)>(g);
+    say(opt(ten));
+    let (fourteen, sixteen) = world.remove_bundle<(i16, u64)>(i);
+    say(opt(fourteen) ++ " " ++ opt(sixteen));
+    let (eighteen, nineteen) = world.remove_bundle<(u8, u64)>(j);
+    say(opt(eighteen) ++ " " ++ opt(nineteen));
+    say(world.query<&u32>(fn(query: &mut Query<&u32>) -> Int { query.count() }))
+}
+
+// `the_placeholder_entity_is_in_no_world`
+struct Hp(Int)
+fn placeholder() -> Int {
+    let mut world = World::new<(Column<Hp>, ())>();
+    let real = world.spawn_bundle((Hp(1),));
+    flag(world.contains(Entity::PLACEHOLDER));
+    flag(world.despawn(Entity::PLACEHOLDER));
+    if(world.contains(real)) { 1 } else { 0 }
+}
+
+fn main() -> Int {
+    orders();
+    transitions();
+    placeholder()
+}

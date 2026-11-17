@@ -36,10 +36,15 @@
 use std::tuple::{Tuple, nest};
 use core::option::{as_ref, as_mut, is_none, is_some};
 use core::value::{Default, default};
+use core::iter::{into_iter, next};
 
 // An entity: a place in the columns, and which of the entities that have had
 // that place this one is.
 pub struct Entity { pub index: Int, pub generation: Int }
+impl Entity {
+    // An entity no world has, to start with where one is needed.
+    pub const PLACEHOLDER: Entity = Entity { index: -1, generation: -1 };
+}
 
 // One component's values: packed, each with the entity it belongs to, and
 // for each entity's place where its value is among them.
@@ -49,12 +54,14 @@ pub fn empty_column<T>() -> Column<T> { Column { dense: [], owners: [], slots: [
 
 // Where an entity's value is in a column, or -1.
 pub fn slot_of<T>(column: &Column<T>, entity: Entity) -> Int {
-    if(entity.index < len_at(&column.slots)) {
-        let at = column.slots[entity.index];
-        if(at >= 0) {
-            if(column.owners[at].generation == entity.generation) { at } else { 0 - 1 }
+    if(entity.index < 0) { 0 - 1 } else {
+        if(entity.index < len_at(&column.slots)) {
+            let at = column.slots[entity.index];
+            if(at >= 0) {
+                if(column.owners[at].generation == entity.generation) { at } else { 0 - 1 }
+            } else { 0 - 1 }
         } else { 0 - 1 }
-    } else { 0 - 1 }
+    }
 }
 
 // An entity's value in a column, kept: a system that has the column gives it.
@@ -156,18 +163,22 @@ fn lower<T, S>(columns: &mut S, value: T) where S: Holds<T> { *<S as Holds<T>>::
 // What is done to every column of a world when an entity ends.
 pub trait Columns {
     fn forget(&mut Self, Entity)
+    fn empty() -> Self
 }
 impl Columns for () {
     fn forget(columns, entity) { () }
+    fn empty() { () }
 }
 impl<H, R> Columns for (Column<H>, R) where R: Columns {
     fn forget(columns, entity) {
         let _ = column_remove(&mut columns.0, entity);
         <R as Columns>::forget(&mut columns.1, entity)
     }
+    fn empty() { (empty_column(), <R as Columns>::empty()) }
 }
 impl<H, R> Columns for (Resource<H>, R) where R: Columns {
     fn forget(columns, entity) { <R as Columns>::forget(&mut columns.1, entity) }
+    fn empty() { (Resource { value: None }, <R as Columns>::empty()) }
 }
 
 // The columns, and which entities there are.
@@ -183,12 +194,14 @@ pub fn spawn<S>(world: &mut World<S>) -> Entity {
 }
 
 pub fn alive<S>(world: &World<S>, entity: Entity) -> Bool {
-    world.generations[entity.index] == entity.generation
+    if(entity.index < 0) { false } else {
+        if(entity.index < len_at(&world.generations)) { world.generations[entity.index] == entity.generation } else { false }
+    }
 }
 
 // End an entity: every column forgets it.
 pub fn despawn<S>(world: &mut World<S>, entity: Entity) where S: Columns {
-    if(world.generations[entity.index] == entity.generation) {
+    if(alive(&*world, entity)) {
         world.generations[entity.index] = entity.generation + 1;
         push_at(&mut world.free, entity.index);
         <S as Columns>::forget(&mut world.columns, entity)
@@ -204,19 +217,31 @@ pub fn remove<T, S>(world: &mut World<S>, entity: Entity) -> Option<T> where S: 
 }
 
 // Give an entity a component, or another value of one it has.
-pub fn insert<T, S>(world: &mut World<S>, entity: Entity, value: T) where S: Get<T> {
+pub fn insert<T, S>(world: &mut World<S>, entity: Entity, value: T) -> Option<T> where S: Get<T> {
     let mut column = <S as Get<T>>::take(&mut world.columns);
+    let had = column_remove(&mut column, entity);
     column_insert(&mut column, entity, value);
-    <S as Get<T>>::put(&mut world.columns, column)
+    <S as Get<T>>::put(&mut world.columns, column);
+    had
 }
 
 // Components given together: a tuple of them, each put in its column.
-pub trait Bundle<S> { fn put_all(Self, &mut World<S>, Entity) }
+// Components given together. Put on an entity, what it had of them comes
+// back; taken from one, what it had of them.
+// (What was had is said by a trait of its own: a type a trait with
+// arguments leaves to its implementations cannot be named yet.)
+pub trait Components { type Had; }
+impl<..T> Components for (..T) { type Had = (..Option<T>); }
+pub trait Bundle<S>: Components {
+    fn put_all(Self, &mut World<S>, Entity) -> Self::Had
+    fn take_all(&mut World<S>, Entity) -> Self::Had
+}
 impl<..T, S> Bundle<S> for (..T) where ..S: Get<T> {
     fn put_all(bundle, world, entity) {
         let (..t) = bundle;
-        let _ = (..insert(world, entity, t));
+        (..insert(world, entity, t))
     }
+    fn take_all(world, entity) { (..remove<T, S>(world, entity)) }
 }
 
 // A new entity with the components given.
@@ -238,10 +263,35 @@ impl<S> World<S> {
     // A new entity with the components given.
     pub fn spawn_bundle<B>(world: &mut Self, bundle: B) -> Entity where B: Bundle<S> { spawn_with(world, bundle) }
 
-    // Give an entity components, or other values of ones it has.
-    pub fn insert<B>(world: &mut Self, entity: Entity, bundle: B) where B: Bundle<S> {
-        if(alive(&*world, entity)) { <B as Bundle<S>>::put_all(bundle, world, entity) } else { () }
+    // An empty world of the columns `S`.
+    pub fn new() -> World<S> where S: Columns { World { columns: <S as Columns>::empty(), generations: [], free: [] } }
+
+    // Give an entity a component, or another value of one it has: the one
+    // it had, if it had one.
+    pub fn insert<T>(world: &mut Self, entity: Entity, value: T) -> Option<T> where S: Get<T> {
+        if(alive(&*world, entity)) { insert(world, entity, value) } else { None }
     }
+
+    // Give an entity components; what it had of them.
+    pub fn insert_bundle<B>(world: &mut Self, entity: Entity, bundle: B) -> Option<B::Had> where B: Bundle<S> {
+        if(alive(&*world, entity)) { Some(<B as Bundle<S>>::put_all(bundle, world, entity)) } else { None }
+    }
+
+    // Take components from an entity; what it had of them.
+    pub fn remove_bundle<B>(world: &mut Self, entity: Entity) -> B::Had where B: Bundle<S> {
+        <B as Bundle<S>>::take_all(world, entity)
+    }
+
+    // New entities, one for each bundle, in order.
+    pub fn spawn_batch<B>(world: &mut Self, bundles: [B]) -> [Entity] where B: Bundle<S> {
+        let mut made = [];
+        let mut rest = into_iter(bundles);
+        while({ match(next(&mut rest)) { Some(b) => push_at(&mut made, spawn_with(world, b)); true, None => false } }) { () };
+        made
+    }
+
+    // Whether the entity is there.
+    pub fn contains(world: &Self, entity: Entity) -> Bool { alive(world, entity) }
 
     // Take a component from an entity.
     pub fn remove<T>(world: &mut Self, entity: Entity) -> Option<T> where S: Get<T> { remove<T, S>(world, entity) }
@@ -538,14 +588,14 @@ impl<S> Commands<S> {
     // A new entity with the components given, there once the systems have run.
     pub fn spawn<B>(commands: &mut Self, bundle: B) -> Entity where B: Bundle<S> {
         let entity = reserve(commands);
-        push_at(&mut commands.queue, fn(world: &mut World<S>) { <B as Bundle<S>>::put_all(bundle, world, entity) });
+        push_at(&mut commands.queue, fn(world: &mut World<S>) { let _ = <B as Bundle<S>>::put_all(bundle, world, entity); });
         entity
     }
 
     // Give an entity components, or other values of ones it has.
     pub fn insert<B>(commands: &mut Self, entity: Entity, bundle: B) where B: Bundle<S> {
         push_at(&mut commands.queue, fn(world: &mut World<S>) {
-            if(alive(&*world, entity)) { <B as Bundle<S>>::put_all(bundle, world, entity) } else { () }
+            if(alive(&*world, entity)) { let _ = <B as Bundle<S>>::put_all(bundle, world, entity); } else { () }
         })
     }
 

@@ -1925,7 +1925,22 @@ private partial def parseItem : P Item := do
       repeat
         if (← peek) == .punct "}" then break
         let vis ← acceptPub
-        if (← peek) != .ident "fn" then failAt "expected `fn`: an implementation gives functions"
+        -- `const NAME: Type = value;`: a value of the type's own, named
+        -- `Type::NAME`.
+        if (← peek) == .ident "const" then
+          advance
+          let name ← expectIdent
+          expectPunct ":"
+          let ty := TypeExpr.withSelf self (← parseType)
+          expectPunct "="
+          let value ← parseBinary 0 false
+          expectPunct ";"
+          let c := Item.alias s!"{tr}::{name}" (Expr.call 0 (.name none ascribeMark) [value, ty.asExpr])
+          items := items.push (match vis with
+            | some parent => .pub parent c
+            | none => c)
+          continue
+        if (← peek) != .ident "fn" then failAt "expected `fn` or `const`: an implementation gives functions and values"
         let (item, bounds) ← withReader (fun c =>
           if c.records.contains tr then { c with records := "Self" :: c.records } else c) parseFn
         match item with

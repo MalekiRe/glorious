@@ -66,8 +66,8 @@ fn main() -> Int {
     say(shield_of(&app, stunned));
     let _ = app.world.remove<Stunned>(stunned);
     let _ = app.world.remove<Shield>(shielded);
-    app.world.insert(bare, (Tag,));
-    app.world.insert(stunned, (Tag,));
+    let _ = app.world.insert(bare, Tag);
+    let _ = app.world.insert(stunned, Tag);
     // Two tagged: `lone` is not run, and the shield charges once more.
     app.emit(&Update);
     say(shield_of(&app, stunned) - 3);

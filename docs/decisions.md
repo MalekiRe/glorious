@@ -5165,6 +5165,15 @@ Covey is the toolbox for finding what the language lacks. Rewriting it after
   function of the name in scope (`app.world.get<Shield>(e)` with `World` not
   imported, and the library's `get`), did not count the type's function among
   the alternatives. It now does. Fixed.
+- **`<<` opening a list whose first argument is a qualified path**
+  (`Option<<B as Bundle<S>>::Had>`) was one operator. A run of `<` is now
+  each its own, as a run of `>` was; the language has no `<<`. Fixed.
+- **A constant of a type's own**, `impl Entity { pub const PLACEHOLDER:
+  Entity = .. }`, could not be written. It is a value named `Entity::PLACEHOLDER`.
+  Fixed.
+- **A type a trait with arguments leaves to its implementations** cannot be
+  named: `B::Had` of `B: Bundle<S>`, or `<B as Bundle<S>>::Had`. Open: covey
+  says it with a trait of its own without arguments (`Components`).
 
 ## Other standing decisions
 

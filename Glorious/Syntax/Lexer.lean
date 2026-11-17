@@ -233,9 +233,11 @@ private partial def lexLoop (cs : Array Char) (i line col : Nat) (acc : Array To
     else if isOpChar c then
       let j := spanWhile cs isOpChar i
       let s := slice cs i j
-      -- `>>` closes two type argument lists; it is never one operator.
-      if j > i + 1 && (cs.extract i j).all (· == '>') then
-        lexLoop cs (i + 1) line (col + 1) (acc.push ⟨.op ">", line, col⟩)
+      -- `>>` closes two type argument lists, `<<` opens a list whose first
+      -- argument is a qualified path (`Option<<T as Tr>::Out>`); neither is
+      -- one operator.
+      if j > i + 1 && ((cs.extract i j).all (· == '>') || (cs.extract i j).all (· == '<')) then
+        lexLoop cs (i + 1) line (col + 1) (acc.push ⟨.op (String.singleton c), line, col⟩)
       -- `<&` opens a type argument list with a reference in it.
       else if j > i + 1 && c == '<' && cs[i + 1]? == some '&' then
         lexLoop cs (i + 1) line (col + 1) (acc.push ⟨.op "<", line, col⟩)
