@@ -75,7 +75,16 @@ partial def inferExpr (scope : Scope) (amb : Row) : Expr → M Ty
     | .local (.poly s) => instantiate s (some x)
     | .fn t bounds inGroup => do
       unless bounds.isEmpty do
-        throw s!"`{x}` needs a trait of a type it is used at, so it is called where it is named: write a block that calls it"
+        -- (Read again with the naming a block that calls it, whose type the
+        -- use decides, and so what the function needs.)
+        let arity := match ← find t with
+          | .fn ps _ _ _ _ => some ps.length
+          | _ => none
+        let owner := (← get).owner
+        let again := match arity with
+          | some n => if inGroup then "" else Syntax.etaMark owner x n
+          | none => ""
+        throw s!"{again}`{x}` needs a trait of a type it is used at, so it is called where it is named: write a block that calls it"
       if ((← get).fnGroups.lookup x).isSome then
         throw s!"`{x}` gives callables one environment to share, so it is called where it is named: write a block that calls it"
       if inGroup then

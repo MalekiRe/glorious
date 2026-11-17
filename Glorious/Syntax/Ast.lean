@@ -324,6 +324,12 @@ def captureSite (x : String) : String := s!"%capture:{x}"
 def captureSiteOf (name : String) : Option String :=
   if name.startsWith "%capture:" then some (name.drop 9).toString else none
 
+/-- What the checker throws where a function that needs a trait of a type it
+is used at is named as a value, not called: the program is read again with
+each such naming in `owner` a block that calls it, of `arity` parameters. -/
+def etaMark (owner : String) (x : String) (arity : Nat) : String :=
+  s!"%eta:{arity}:{x}:{owner}%"
+
 /-- What the checker says of a `let x` at a place in a function whose value is
 used on one path and not on another: the program is read again with that
 `let` written `let mut` (`Elab.letMutFound`). -/

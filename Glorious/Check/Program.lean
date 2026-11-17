@@ -823,7 +823,18 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
     match table.lookup call with
     | some ds => (call, ds ++ [d]) :: table.filter (·.1 != call)
     | none => (call, [d]) :: table
-  for b in pending do
+  -- (A bound of a type not all decided waits for the others: meeting them
+  -- may decide it. In the last round, what is left is refused.)
+  let mut waiting := pending.toList
+  let mut round := 0
+  while !waiting.isEmpty do
+   round := round + 1
+   let last := round > 3
+   -- (What the bounds met so far said a type left to an implementation is.)
+   if round > 1 then settleAssocsAll
+   let now := waiting
+   waiting := []
+   for b in now do
     let givens := (givensOf.lookup b.owner).getD []
     -- What `Traits.coherent` asks of the assumptions.
     unless Traits.distinct givens do
@@ -854,6 +865,9 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
     | some d => table := record table b.call (toDictE impls d)
     | none =>
       if b.trait == Syntax.destroyTrait then continue
+      if !last && !(← zonk b.ty).ground then
+        waiting := waiting ++ [b]
+        continue
       -- (A dot call of a trait's function, of a value whose type does not
       -- implement the trait but has a function of the name of its own: that
       -- one, and the program read again.)

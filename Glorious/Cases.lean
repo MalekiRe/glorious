@@ -3689,6 +3689,12 @@ def cases : List Case := [
   -- Modules that do not use each other are checked side by side and put together.
   ⟨"mod shapes {\n  pub trait Area { fn area(&Self) -> Int }\n  pub struct Sq { pub s: Int }\n  impl Area for Sq { fn area(q) { q.s * q.s } }\n  pub fn total<T: Area>(xs: &[T]) -> Int { let mut n = 0; let mut i = 0; while({ i < len_at(xs) }) { n = n + area(&xs[i]); i = i + 1 }; n }\n}\nmod names {\n  pub trait Size { fn size(&Self) -> Int }\n  pub struct Word { pub n: Int }\n  impl Size for Word { fn size(w) { w.n } }\n  impl Size for Int { fn size(x) { *x + 100 } }\n  pub fn sizes<T: Size>(a: &T, b: &T) -> Int { size(a) + size(b) }\n}\nuse shapes::{Sq, total};\nuse names::{Word, sizes};\nfn main() -> Int { total(&[Sq { s: 2 }, Sq { s: 3 }]) + sizes(&Word { n: 4 }, &Word { n: 5 }) + sizes(&1, &2) }",
     [], "225"⟩,
+  -- A function that needs a trait of a type it is used at, named as a value: a block that calls it.
+  ⟨"trait Num { fn num(&Self) -> Int }\nimpl Num for Int { fn num(x) { *x } }\nfn twice<T: Num>(x: T) -> Int { num(&x) * 2 }\nfn apply(f: fn(Int) -> Int, x: Int) -> Int { f(x) }\nfn main() -> Int { apply(twice, 21) }",
+    [], "42"⟩,
+  -- (Which implementation fits a type not all known: each of its variables one type throughout.)
+  ⟨"struct On<E, P>(E, P)\nstruct Up\nstruct Hit\ntrait Run<E> { fn run(&Self) -> Int }\nimpl<E> Run<E> for () { fn run(x) { 0 } }\nimpl<E, P, T> Run<E> for (On<E, P>, T) where T: Run<E> { fn run(l) { 1 + <T as Run<E>>::run(&l.1) } }\nimpl<E, F, P, T> Run<E> for (On<F, P>, T) where T: Run<E> { fn run(l) { 10 + <T as Run<E>>::run(&l.1) } }\nfn up<L: Run<Up>>(l: &L) -> Int { <L as Run<Up>>::run(l) }\nfn main() -> Int { let l = (On(Hit, []), (On(Up, 3), ())); up(&l) }",
+    [], "11"⟩,
   -- (An element of what a reference is to is borrowed through it.)
   ⟨"fn first(r: &[Int]) -> Int { let e = &r[0]; *e }\nfn main() -> Int { first(&[7, 8]) }",
     [], "7"⟩,

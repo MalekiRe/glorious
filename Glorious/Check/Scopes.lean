@@ -333,8 +333,14 @@ def implKey (trait : String) (self : Ty) (args : List Ty) : M String := do
       let narrower := fun (a b : ImplDecl) => (Ty.fitsAll (vars b) (pattern b) (pattern a) []).isSome
       let exact := family.filter fun im => (Ty.fitsAll (vars im) (pattern im) goal []).isSome
       -- (Nothing may yet fit a type all of which is known.)
+      -- (One whose variables could be made what the goal needs, the same
+      -- everywhere each is written: a type parameter of the function the
+      -- goal is in may be anything.)
+      let rigids := (goal.flatMap Ty.rigidNames).eraseDups
+      let open_ := goal.map (Ty.openRigids (rigids.zipIdx.map fun (n, k) => (n, Ty.var (1000000000000 + k))))
       let maybe := if goal.all Ty.ground then [] else family.filter fun im =>
-        !exact.any (·.dictFn == im.dictFn) && ((pattern im).zip goal).all fun (p, g) => p.mayFit g
+        !exact.any (·.dictFn == im.dictFn) && ((pattern im).zip goal).all (fun (p, g) => p.mayFit g)
+          && (Ty.meetAll (pattern im) open_ []).isSome
       match exact.find? fun a => exact.all fun b => narrower a b with
       | some im =>
         -- (One that may yet fit and asks more would be the one, if it

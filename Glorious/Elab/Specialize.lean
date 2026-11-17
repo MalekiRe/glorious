@@ -683,6 +683,85 @@ def letMutItems (owner : String) (line col : Nat) (x : String) (items : List Ite
     | item => (item, false)
   (out.map (·.1), out.any (·.2))
 
+/-- What `etaMark` said: the function it is in, the function named, and how
+many parameters. -/
+def etaFound (said : String) : Option (String × String × Nat) :=
+  match said.splitOn "%eta:" with
+  | _ :: after :: _ =>
+    match ((after.splitOn "%").headD "").splitOn ":" with
+    | arity :: x :: owner => arity.toNat?.map fun n => (":".intercalate owner, x, n)
+    | _ => none
+  | _ => none
+
+/-- What the checker says, without the marker. -/
+def withoutEta (said : String) : String :=
+  match said.splitOn "%eta:" with
+  | before :: after :: _ => before ++ (((after.splitOn "%").drop 1).foldl (· ++ ·) "")
+  | _ => said
+
+mutual
+
+/-- An expression with each naming of `x` that is not a call of it a block
+that calls it: `{ (a, b) => x(a, b) }`. -/
+partial def etaExpr (x : String) (arity : Nat) (base : Nat) : Expr → Expr
+  | .name q y =>
+    if y == x then
+      let ps := (List.range arity).map fun i => s!"%eta{i}"
+      .closure base [.mk (ps.map Pattern.var) [.expr (.call (base + 1) (.name q y) (ps.map (Expr.name none ·)))]]
+    else .name q y
+  | .call i (.name q y) args => .call i (.name q y) (args.map (etaExpr x arity (base + 2 * (i % 1000000))))
+  | .call i f args => .call i (etaExpr x arity base f) (args.map (etaExpr x arity (base + 2 * (i % 1000000))))
+  | .tailCall i f args => .tailCall i (match f with
+      | .name q y => .name q y
+      | f => etaExpr x arity base f) (args.map (etaExpr x arity (base + 2 * (i % 1000000))))
+  | .tuple args => .tuple (args.zipIdx.map fun (e, k) => etaExpr x arity (base + 2 * k + 1000000000) e)
+  | .proj e n => .proj (etaExpr x arity base e) n
+  | .closure i clauses => .closure i (clauses.map (etaClause x arity base))
+  | .handle subject arms => .handle (etaExpr x arity base subject) (arms.map (etaClause x arity base))
+  | .labelScope l body => .labelScope l (body.map (etaStmt x arity base))
+  | .deref e => .deref (etaExpr x arity base e)
+  | .reborrow uniq e => .reborrow uniq (etaExpr x arity base e)
+  | .fieldOf i e name => .fieldOf i (etaExpr x arity base e) name
+  | e => e
+
+partial def etaClause (x : String) (arity : Nat) (base : Nat) : Clause → Clause
+  | .mk pats body => .mk pats (body.map (etaStmt x arity base))
+
+partial def etaStmt (x : String) (arity : Nat) (base : Nat) : Stmt → Stmt
+  | .let_ pat value => .let_ pat (etaExpr x arity base value)
+  | .expr e => .expr (etaExpr x arity base e)
+  | .defer e => .defer (etaExpr x arity base e)
+  | .letMut y value => .letMut y (etaExpr x arity base value)
+  | .assign target value => .assign (etaExpr x arity base target) (etaExpr x arity base value)
+  | .located l c s => .located l c (etaStmt x arity (base + 4000000 * l + 2000 * c) s)
+
+end
+
+/-- A program with each naming of `x` in `owner` that is not a call of it a
+block that calls it, and whether there was such a naming. -/
+def etaItems (owner x : String) (arity : Nat) (items : List Item) : List Item × Bool :=
+  let base := 700000000000000 + 10000000000000 * (hash owner % 16).toNat
+  let fn := fun (clauses : List Clause) =>
+    let after := clauses.map (etaClause x arity base)
+    (after, hash after != hash clauses)
+  let out : List (Item × Bool) := items.map fun
+    | .fn name ps annots ret clauses =>
+      if name == owner then
+        let (after, changed) := fn clauses
+        (Item.fn name ps annots ret after, changed)
+      else (Item.fn name ps annots ret clauses, false)
+    | .impl ps tr head args context methods =>
+      let methods : List (Item × Bool) := methods.map fun
+        | .fn m mps annots ret clauses =>
+          if implFnName tr head m == owner then
+            let (after, changed) := fn clauses
+            (Item.fn m mps annots ret after, changed)
+          else (Item.fn m mps annots ret clauses, false)
+        | item => (item, false)
+      (.impl ps tr head args context (methods.map (·.1)), methods.any (·.2))
+    | item => (item, false)
+  (out.map (·.1), out.any (·.2))
+
 /-! ## A variable whose fields are borrowed apart
 
 `let mut x = (a, b)`, or `let mut c = C { n: a, m: b }` of a struct without

@@ -5051,6 +5051,78 @@ Stages timed:
 
 Unset, a stage is only its computation.
 
+## Covey toward MalekiRe/unstable_covey: what it has, and the order
+
+The upstream is the `static-ecs` crate (about 12,000 lines of library; 19,000
+with devtools), beside a window system, a UI, and demos. Covey is 672 lines.
+To be one to one with `static-ecs`, in this order (each a step that compiles
+and runs, with the upstream's tests for it ported as covey programs):
+
+1. **The core API as upstream names it.**
+   - `App::new().add_systems(label, systems).build()` and `app.emit(&label)`.
+   - Labels with an input (`Schedule` with `In`).
+   - `world.spawn_bundle`, `get`, `get_mut`, `insert`, `remove`,
+     `despawn`, `query`.
+   - **`Commands` deferred, applied when the emit finishes**: spawn, insert,
+     remove, despawn and queue, as closures over the world.
+   - `Res`/`ResMut`, `Local`.
+   - `Query<D, F>` items `&T`, `&mut T`, `Entity`, `Option<D>`, `Has<T>`, with
+     `iter_mut`, `for_each` and `get`; `Single`.
+2. **The world inferred from the systems**: `build` gives a world storing
+   exactly what the systems mention, and `register` for the rest. Then tables
+   (archetypes) and `Sparse` storage, and change detection: `Mut<T>`, `Added`,
+   `Changed`.
+3. **Component behavior and lifecycle**:
+   - `Requires`, `OneOf`, `Immutable`;
+   - hooks `OnAdd`/`OnInsert`/`OnReplace`/`OnRemove` as labels;
+   - `Disabled`/`Disabling`/`MayHave`;
+   - states: `OnEnter`/`OnExit`/`OnTransition` and `in_state`.
+4. **Plugins as types**, with their components named.
+5. **Relations**: `OneToOne`/`OneToMany`/`ManyToMany`, `To`/`From` joins,
+   `cascade`, and relation hooks.
+6. **Composing systems**:
+   - `chain`, `run_if`, `parallel`;
+   - dependency graphs (`ready`, `node`, `after`) checked when compiled;
+   - the executor. The VM runs one thread, so `parallel` is checked for
+     disjoint access and run in order until it has workers.
+7. **Async tasks and bridges, and behaviors**: on effect handlers, which is
+   where Glorious differs most.
+
+Out of scope unless asked: devtools and the MCP server, remote bridges (they
+need sockets), and the window and UI crates.
+
+## Holes covey found, and what was done
+
+Covey is the toolbox for finding what the language lacks. Rewriting it after
+`unstable_covey` found these:
+
+- **A function that needs a trait of a type it is used at could not be a
+  value.** "`age` needs a trait of a type it is used at, so it is called where
+  it is named: write a block that calls it." The checker now throws a mark
+  (`Syntax.etaMark`) instead. The program is read again with each naming of
+  the function in that function, other than a call of it, written as a block
+  that calls it with as many parameters (`Elab.etaItems`). Rust's generic
+  functions as values are the same. Fixed.
+- **Which implementation fits a type not all known** was decided position by
+  position (`mayFit`), so `(On<E, P>, T)` was thought to perhaps fit
+  `(On<Hit, ..>, ..)` asked at `E = Update`. That made the dispatch on a
+  label ambiguous whenever a system's type had an unknown in it. Now an
+  implementation may fit only if its variables can each be one type
+  throughout (`Ty.meetAll`, the function's own type parameters left open).
+  Fixed.
+- **A bound of a type not yet decided** was refused where met, though meeting
+  the group's other bounds could decide it. Bounds now go in rounds:
+  - one of an undecided type waits;
+  - what the others said of associated types is settled between rounds;
+  - the fourth round refuses what is left.
+
+  This is not enough for covey's `Commands<_>`. The world's type reaches a
+  system's `Commands<S>` only through the associated types `Gathered::Flat`
+  and `Then::Out` of `CallWith`. Those are found, but the variable in the
+  system's type is not decided by them. Open; covey is being rewritten so
+  that a system's arguments are gathered flat (`(..G, X)`), which the
+  implementations' own arguments decide.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by

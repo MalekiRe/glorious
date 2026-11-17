@@ -1027,6 +1027,23 @@ partial def Ty.ground : Ty → Bool
   | .fn ps r _ _ _ => r.ground && ps.all Ty.ground
   | .ref _ t _ => t.ground
 
+/-- The type parameters of a function a type mentions, by name. -/
+partial def Ty.rigidNames : Ty → List String
+  | .con n [] => if n.startsWith "'" then [n] else []
+  | .con _ args | .tuple args => args.flatMap Ty.rigidNames
+  | .fn ps r _ _ _ => (r :: ps).flatMap Ty.rigidNames
+  | .ref h x _ => h.rigidNames ++ x.rigidNames
+  | .var _ => []
+
+/-- A type with each of those that `named` says a variable in its place. -/
+partial def Ty.openRigids (named : List (String × Ty)) : Ty → Ty
+  | .con n [] => (named.lookup n).getD (.con n [])
+  | .con n args => .con n (args.map (Ty.openRigids named))
+  | .tuple args => .tuple (args.map (Ty.openRigids named))
+  | .fn ps r effs tail cap => .fn (ps.map (Ty.openRigids named)) (r.openRigids named) effs tail cap
+  | .ref h x cap => .ref (h.openRigids named) (x.openRigids named) cap
+  | .var v => .var v
+
 /-- Could a pattern come to fit a type, once what is not yet known of the
 type is, and whatever a function's own type parameters in it are? Yes
 unless the two are made with different names somewhere. -/

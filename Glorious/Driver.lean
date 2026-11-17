@@ -794,13 +794,20 @@ partial def compileSourceAt (src : String) (check : Bool := true)
     | .ok blocks => (all, .ok blocks)
     | .error e =>
       let said := Elab.withoutLetMut ((first.filter fun _ => (Elab.letMutFound e).isNone).getD e)
-      match fuel, Elab.restFound e, Elab.letMutFound e with
-      | fuel + 1, some (id, count), _ => checkWith fuel (Elab.restItems id count all) first
-      | fuel + 1, none, some (owner, line, col, x) =>
-        match Elab.letMutItems owner line col x all with
-        | (all, true) => checkWith fuel all (some (first.getD e))
-        | _ => (all, .error said)
-      | _, _, _ => (all, .error said)
+      match fuel with
+      | 0 => (all, .error (Elab.withoutEta said))
+      | fuel + 1 =>
+        match Elab.etaFound e, Elab.restFound e, Elab.letMutFound e with
+        | some (owner, x, arity), _, _ =>
+          match Elab.etaItems owner x arity all with
+          | (all, true) => checkWith fuel all first
+          | _ => (all, .error (Elab.withoutEta said))
+        | none, some (id, count), _ => checkWith fuel (Elab.restItems id count all) first
+        | none, none, some (owner, line, col, x) =>
+          match Elab.letMutItems owner line col x all with
+          | (all, true) => checkWith fuel all (some (first.getD e))
+          | _ => (all, .error said)
+        | none, none, none => (all, .error (Elab.withoutEta said))
   let (all, checked) := Trace.timed "check" fun _ => checkWith 64 all none
   -- (Dot calls the checker chose a type's own function for, by the value's
   -- type: written so for what follows.)
