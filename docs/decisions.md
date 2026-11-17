@@ -4860,6 +4860,40 @@ program's library modules kept): calculator 1.22 → 1.02 s, orders 1.01 →
 0.89 s; simulation 0.90 → 0.89 s and json 0.46 → 0.47 s (their library
 modules are small). The file is 1.3 MB after four programs.
 
+## Certificate inference keeps groups' schemes
+
+A group's scheme (`Infer.schemeOf`) is now kept by the group's key
+alongside the instantiations, in the build directory's `infer`. It is kept
+only where inferring it changed none of the declarations' variables and
+decided none of the closures other groups left waiting. Freezing renumbers
+the scheme's own variables from `frozenBase` and keeps the declarations' as
+they are. With them go the records of what its callables touch, which of
+its regions are cells or bound by callables, what its regions stand for, the
+records others may add to, and the closures it leaves waiting itself. A
+scheme naming any other variable is not kept. A later compile that meets
+the key thaws it (fresh variables for its own) and infers nothing, not even
+the groups the scheme was inferred from. The proved checker checks the
+result as before, and a certificate it turns away is looked for afresh.
+
+On the first build of the simulation, 98 groups could be kept and 179 not,
+because they left closures waiting. Keeping what a group leaves waiting
+made the rest keepable.
+
+One traversal (`Ren`: what to do with each kind of variable) now renames
+schemes for copies at uses (`copyRen`), for freezing and for thawing.
+Before, the copy functions were written out one per kind of term. The two
+certify entry points are one (`certifyKept`; `certify` takes the
+certificate from it), and the driver's three certificate helpers are one
+(`certifyWith`), which says whether the checker accepted, so nothing is
+checked twice.
+
+Measured (quick build, median of 3; edit of `main`, kept instantiations
+only → with kept schemes): simulation 0.55 → 0.37 s, orders 0.65 → 0.39 s,
+calculator 0.50 → 0.40 s, query 0.54 → 0.32 s, despawn 0.42 → 0.30 s, json
+0.43 → 0.28 s, shapes 0.15 → 0.15 s. Fresh builds pay for freezing (4% of
+the simulation's) and a larger file: simulation 0.90 → 1.01 s, calculator
+1.02 → 1.07 s, json 0.47 → 0.51 s.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by

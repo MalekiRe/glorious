@@ -34,14 +34,14 @@ open Glorious.Typing (Ty FnSig Hint Cert SigEntry DataInst OpInst)
 inductive ICls where
   | var (id : Nat)
   | lit (once : Bool)
-  deriving Inhabited
+  deriving Inhabited, BEq
 
 /-- A region while it is being inferred: the same as another, or the cell of one
 scope. A region nothing is known about has neither. -/
 inductive IRg where
   | link (id : Nat)
   | atom
-  deriving Inhabited
+  deriving Inhabited, BEq
 
 /-- What a callable may touch, while that is being inferred: some regions, and
 whatever some other callables may touch. -/
@@ -65,7 +65,7 @@ structure IAcc where
   are settled, and what it includes has been worked out and written here in
   its own `rgns` and `wrs`. A copy of it copies those and nothing further. -/
   final : Bool := false
-  deriving Inhabited
+  deriving Inhabited, BEq
 
 /-- A type while it is being inferred. -/
 inductive ITy where
@@ -85,14 +85,14 @@ inductive ITy where
   | ref (ρ : Nat) (t : ITy)
   /-- The result of a call that does not return. -/
   | never
-  deriving Inhabited
+  deriving Inhabited, BEq
 
 abbrev IOps := List (Nat × List ITy)
 
 structure IRow where
   ops : IOps
   tail : Option Nat
-  deriving Inhabited
+  deriving Inhabited, BEq
 
 def ITy.unit : ITy := .tuple []
 
@@ -219,8 +219,39 @@ structure Remembered where
   entries : List (UInt64 × FnSig × List (List Hint))
   wanted : List (UInt64 × FnSig × List Nat × Option Nat × List Nat)
 
-/-- Instantiations kept, by the key of the function and the signature. -/
-abbrev Memo := Std.HashMap UInt64 (List (FnSig × Remembered))
+/-- A group's scheme, kept for a later compile: its own variables numbered
+from `frozenBase`, those of the declarations as they are; how many of each it
+has; which of its regions are cells, and which callables bind; what is known
+of its records of what callables touch and of what regions stand for; and the
+records the program's other groups may still add to. -/
+structure Frozen where
+  scheme : Scheme
+  counts : Nat × Nat × Nat × Nat × Nat
+  atoms : List Nat
+  ranks : List Nat
+  nodes : List (Nat × IAcc)
+  lows : List (Nat × List Nat)
+  kept : List Nat
+  /-- The callables of the group whose regions are decided once what they
+  are given is known. -/
+  waiting : List (List ITy × List ITy × Nat) := []
+
+/-- What certificate inference keeps between compiles: instantiations, by
+the key of the function and the signature, and groups' schemes, by key. -/
+structure Memo where
+  inst : Std.HashMap UInt64 (List (FnSig × Remembered)) := {}
+  schemes : Std.HashMap UInt64 Frozen := {}
+
+def Memo.isEmpty (m : Memo) : Bool := m.inst.isEmpty && m.schemes.isEmpty
+
+instance : Nonempty Memo := ⟨{}⟩
+
+/-- What a compile made of that. -/
+structure Made where
+  inst : Array (UInt64 × FnSig × Remembered) := #[]
+  schemes : Array (UInt64 × Frozen) := #[]
+
+def Made.isEmpty (m : Made) : Bool := m.inst.isEmpty && m.schemes.isEmpty
 
 structure St where
   fns : Array Core.Fn
@@ -344,10 +375,14 @@ structure St where
   keys : Array UInt64 := #[]
   byKey : Std.HashMap UInt64 Nat := {}
   /-- What an earlier compile kept, and what this one made. -/
-  memo : Memo := {}
+  memo : Std.HashMap UInt64 (List (FnSig × Remembered)) := {}
   made : Array (UInt64 × FnSig × Remembered) := #[]
   /-- Whether what this compile infers is to be kept. -/
   remember : Bool := false
+  /-- Groups' schemes an earlier compile kept, by key, and those this one
+  made that can be kept. -/
+  frozen : Std.HashMap UInt64 Frozen := {}
+  frozenMade : Array (UInt64 × Frozen) := #[]
 
 abbrev M := StateT St (Except String)
 
@@ -981,20 +1016,102 @@ def Vars.touches (live : Vars) (t : ITy) : Bool :=
   v.tys.toList.any live.tys.contains || v.rows.toList.any live.rows.contains
     || v.clss.toList.any live.clss.contains
 
-def copyCls (sch : Scheme) (c : ICls) : M ICls := do
-  match c with
-  | .lit _ => pure c
-  | .var id =>
-    if id < sch.startCls || sch.fixedClss.contains id then pure c
-    else
-      match (← get).renCls[id]? with
-      | some id' => pure (.var id')
-      | none =>
-        match ← freshCls with
-        | .var id' =>
-          modify fun s => { s with renCls := s.renCls.insert id id' }
-          pure (.var id')
-        | c' => pure c'
+/-! ## Renaming the variables of a scheme -/
+
+/-- What to do with each kind of variable a scheme names. -/
+structure Ren (m : Type → Type) where
+  ty : Nat → m Nat
+  row : Nat → m Nat
+  cls : Nat → m Nat
+  rg : Nat → m Nat
+  acc : Nat → m Nat
+
+section Ren
+variable {m : Type → Type} [Monad m] (f : Ren m)
+
+def renCls : ICls → m ICls
+  | .var id => do pure (.var (← f.cls id))
+  | c => pure c
+
+mutual
+partial def renTy : ITy → m ITy
+  | .var id => do pure (.var (← f.ty id))
+  | .tuple fs => do pure (.tuple (← fs.mapM renTy))
+  | .data n args => do pure (.data n (← args.mapM renTy))
+  | .fn ps r ops tail cls env acc => do
+    pure (.fn (← ps.mapM renTy) (← renTy r) (← renOps ops) (← tail.mapM f.row) (← renCls f cls)
+      (← renTy env) (← f.acc acc))
+  | .ref ρ t => do pure (.ref (← f.rg ρ) (← renTy t))
+  | t => pure t
+partial def renOps (ops : IOps) : m IOps :=
+  ops.mapM fun (op, targs) => do pure (op, ← targs.mapM renTy)
+end
+
+def renRow (r : IRow) : m IRow := do pure ⟨← renOps f r.ops, ← r.tail.mapM f.row⟩
+
+def renSig (s : ISig) : m ISig := do
+  pure ⟨← s.caps.mapM (renTy f), ← s.params.mapM (renTy f), ← renTy f s.ret, ← renRow f s.row, ← f.acc s.acc⟩
+
+def renHint : IHint → m IHint
+  | .ty t => do pure (.ty (← renTy f t))
+  | .clo t sig => do pure (.clo (← renTy f t) (← renSig f sig))
+  | .handler ρ H Φ sigs => do pure (.handler (← renTy f ρ) (← renOps f H) (← f.acc Φ) (← sigs.mapM (renSig f)))
+  | .result r b => do pure (.result (← renTy f r) (← renTy f b))
+  | .rgns acc actuals => do pure (.rgns (← f.acc acc) (← actuals.mapM f.rg))
+
+def renIncl (c : Incl) : m Incl := do pure ⟨← renRow f c.sub, ← renOps f c.under, ← renRow f c.sup⟩
+
+def renPlace (p : ITy × Nat × ITy) : m (ITy × Nat × ITy) := do pure (← renTy f p.1, p.2.1, ← renTy f p.2.2)
+
+def renCoerce (p : ITy × ITy × Bool) : m (ITy × ITy × Bool) := do pure (← renTy f p.1, ← renTy f p.2.1, p.2.2)
+
+def renOnce (o : ICls × List ITy) : m (ICls × List ITy) := do pure (← renCls f o.1, ← o.2.mapM (renTy f))
+
+def renShow (o : ITy × List ITy) : m (ITy × List ITy) := do pure (← renTy f o.1, ← o.2.mapM (renTy f))
+
+def renCall (c : Call) : m Call := do
+  pure ⟨← renTy f c.callee, ← c.given.mapM (renTy f), ← renTy f c.result, ← renRow f c.row,
+    ← f.acc c.acc, ← c.actuals.mapM f.rg, ← f.acc c.self⟩
+
+def renNode (x : IAcc) : m IAcc := do
+  pure { x with
+    link := none
+    rgns := ← x.rgns.mapM f.rg, wrs := ← x.wrs.mapM f.rg
+    subs := ← x.subs.mapM fun (b, e) => do pure (← f.acc b, ← e.mapM f.rg)
+    binder := ← x.binder.mapM f.rg, more := ← x.more.mapM f.rg
+    insts := ← x.insts.mapM fun (sub, chosen) => do
+      pure (← f.acc sub, ← chosen.mapM fun (a, b) => do pure (← f.rg a, ← f.rg b)) }
+
+/-- A scheme with its variables renamed (and its own variables from `start`). -/
+def renScheme (sch : Scheme) (start : Nat × Nat × Nat × Nat × Nat) : m Scheme := do
+  let set := fun (g : Nat → m Nat) (xs : Std.HashSet Nat) => do
+    pure ((← xs.toList.mapM g).foldl (fun s x => s.insert x) ({} : Std.HashSet Nat))
+  pure { sch with
+    startTy := start.1, startRow := start.2.1, startCls := start.2.2.1, startRg := start.2.2.2.1
+    startAcc := start.2.2.2.2
+    fixedTys := ← set f.ty sch.fixedTys, fixedRows := ← set f.row sch.fixedRows
+    fixedClss := ← set f.cls sch.fixedClss, fixedRgs := ← set f.rg sch.fixedRgs
+    fixedAccs := ← set f.acc sch.fixedAccs
+    members := ← sch.members.mapM fun mb => do
+      pure { mb with
+        sig := ← renSig f mb.sig
+        hints := ← mb.hints.mapM fun hs => hs.mapM (renHint f)
+        refs := ← mb.refs.mapM fun (g, s) => do pure (g, ← renSig f s) }
+    incls := ← sch.incls.mapM (renIncl f), places := ← sch.places.mapM (renPlace f)
+    coerces := ← sch.coerces.mapM (renCoerce f), nevers := ← sch.nevers.mapM (renTy f)
+    onces := ← sch.onces.mapM (renOnce f), shows := ← sch.shows.mapM (renShow f)
+    opens := ← sch.opens.mapM fun (a, b, ch) => do
+      pure (← renTy f a, ← renTy f b, ← ch.mapM fun (x, y) => do pure (← f.rg x, ← f.rg y))
+    calls := ← sch.calls.mapM (renCall f)
+    givenUpOpen := ← sch.givenUpOpen.mapM fun (t, r, a) => do pure (← renTy f t, ← renRow f r, ← f.acc a)
+    exported := ← sch.exported.mapM (renIncl f)
+    exportedPlaces := ← sch.exportedPlaces.mapM (renPlace f)
+    exportedCoerces := ← sch.exportedCoerces.mapM (renCoerce f)
+    exportedNevers := ← sch.exportedNevers.mapM (renTy f)
+    exportedOnces := ← sch.exportedOnces.mapM (renOnce f)
+    exportedShows := ← sch.exportedShows.mapM (renShow f) }
+
+end Ren
 
 /-- A copy of a region of a scheme: itself if it is a cell or shared with the
 rest of the program, and otherwise a new unknown. -/
@@ -1040,83 +1157,156 @@ partial def copyAcc (sch : Scheme) (a : Nat) : M Nat := do
       modify fun s => { s with accVer := s.accVer + 1, accs := s.accs.set! a' { rgns, wrs, subs, binder, more, insts } }
       pure a'
 
-mutual
+/-- A copy of a variable of a scheme: itself if it is older than the
+scheme or shared with the rest of the program, and otherwise a new one, the
+same for each time it is met in one copy. -/
+def copyVar (start : Nat) (fixed : Std.HashSet Nat) (renamed : St → Std.HashMap Nat Nat)
+    (record : St → Nat → Nat → St) (fresh : M Nat) (id : Nat) : M Nat := do
+  if id < start || fixed.contains id then return id
+  match (renamed (← get))[id]? with
+  | some id' => pure id'
+  | none =>
+    let id' ← fresh
+    modify fun s => record s id id'
+    pure id'
 
-/-- A copy of a scheme's type with its general variables renamed. -/
-partial def copyTy (sch : Scheme) (t : ITy) : M ITy := do
-  match t with
-  | .var id =>
-    if id < sch.startTy || sch.fixedTys.contains id then pure t
-    else
-      match (← get).renTy[id]? with
-      | some id' => pure (.var id')
-      | none =>
-        match ← freshTy with
-        | .var id' =>
-          modify fun s => { s with renTy := s.renTy.insert id id' }
-          pure (.var id')
-        | t' => pure t'
-  | .param i => pure (.param i)
-  | .int => pure .int
-  | .tuple fs => do pure (.tuple (← fs.mapM (copyTy sch)))
-  | .data n args => do pure (.data n (← args.mapM (copyTy sch)))
-  | .fn ps r ops tail cls env acc => do
-    let row ← copyRow sch ⟨ops, tail⟩
-    pure (.fn (← ps.mapM (copyTy sch)) (← copyTy sch r) row.ops row.tail (← copyCls sch cls)
-      (← copyTy sch env) (← copyAcc sch acc))
-  | .ref ρ t => do pure (.ref (← copyRg sch ρ) (← copyTy sch t))
-  | .never => pure .never
-
-partial def copyRow (sch : Scheme) (r : IRow) : M IRow := do
-  let ops ← r.ops.mapM fun (op, targs) => do pure (op, ← targs.mapM (copyTy sch))
-  match r.tail with
-  | none => pure ⟨ops, none⟩
-  | some v =>
-    if v < sch.startRow || sch.fixedRows.contains v then pure ⟨ops, some v⟩
-    else
-      match (← get).renRow[v]? with
-      | some v' => pure ⟨ops, some v'⟩
-      | none =>
-        let fresh ← freshRow
-        match fresh.tail with
-        | some v' =>
-          modify fun s => { s with renRow := s.renRow.insert v v' }
-          pure ⟨ops, some v'⟩
-        | none => pure ⟨ops, none⟩
-
-end
-
-def copySig (sch : Scheme) (s : ISig) : M ISig := do
-  pure ⟨← s.caps.mapM (copyTy sch), ← s.params.mapM (copyTy sch), ← copyTy sch s.ret,
-    ← copyRow sch s.row, ← copyAcc sch s.acc⟩
-
-def copyIncl (sch : Scheme) (c : Incl) : M Incl := do
-  pure ⟨← copyRow sch c.sub, (← copyRow sch ⟨c.under, none⟩).ops, ← copyRow sch c.sup⟩
-
-def copyPlace (sch : Scheme) (p : ITy × Nat × ITy) : M (ITy × Nat × ITy) := do
-  pure (← copyTy sch p.1, p.2.1, ← copyTy sch p.2.2)
-
-def copyHint (sch : Scheme) : IHint → M IHint
-  | .ty t => do pure (.ty (← copyTy sch t))
-  | .clo t sig => do pure (.clo (← copyTy sch t) (← copySig sch sig))
-  | .handler ρ H Φ sigs => do
-    pure (.handler (← copyTy sch ρ) (← copyRow sch ⟨H, none⟩).ops (← copyAcc sch Φ)
-      (← sigs.mapM (copySig sch)))
-  | .result r b => do pure (.result (← copyTy sch r) (← copyTy sch b))
-  | .rgns acc actuals => do pure (.rgns (← copyAcc sch acc) (← actuals.mapM (copyRg sch)))
-
-def copyCall (sch : Scheme) (c : Call) : M Call := do
-  pure ⟨← copyTy sch c.callee, ← c.given.mapM (copyTy sch), ← copyTy sch c.result,
-    ← copyRow sch c.row, ← copyAcc sch c.acc, ← c.actuals.mapM (copyRg sch), ← copyAcc sch c.self⟩
+/-- How a scheme is copied for a use of it: its general variables renamed. -/
+def copyRen (sch : Scheme) : Ren M :=
+  { ty := copyVar sch.startTy sch.fixedTys (·.renTy) (fun s a b => { s with renTy := s.renTy.insert a b })
+      (do match ← freshTy with | .var v => pure v | _ => pure 0)
+    row := copyVar sch.startRow sch.fixedRows (·.renRow) (fun s a b => { s with renRow := s.renRow.insert a b })
+      (do pure ((← freshRow).tail.getD 0))
+    cls := copyVar sch.startCls sch.fixedClss (·.renCls) (fun s a b => { s with renCls := s.renCls.insert a b })
+      (do match ← freshCls with | .var v => pure v | _ => pure 0)
+    rg := copyRg sch
+    acc := copyAcc sch }
 
 def startCopy : M Unit :=
   modify fun s => { s with renTy := {}, renRow := {}, renCls := {}, renRg := {}, renAcc := {} }
 
-def copyOnce (sch : Scheme) (o : ICls × List ITy) : M (ICls × List ITy) := do
-  pure (← copyCls sch o.1, ← o.2.mapM (copyTy sch))
 
-def copyShow (sch : Scheme) (o : ITy × List ITy) : M (ITy × List ITy) := do
-  pure (← copyTy sch o.1, ← o.2.mapM (copyTy sch))
+
+/-- Do two arrays agree on their first `n` places? -/
+def samePrefix {α : Type} [BEq α] (a b : Array α) (n : Nat) : Bool :=
+  (List.range n).all fun i => a[i]? == b[i]?
+
+/-- Where the variables of a scheme kept between compiles are numbered from:
+far above any a compile makes. -/
+def frozenBase : Nat := 1 <<< 40
+
+/-- What freezing has numbered so far, by kind. -/
+structure FreezeSt where
+  ty : Std.HashMap Nat Nat := {}
+  row : Std.HashMap Nat Nat := {}
+  cls : Std.HashMap Nat Nat := {}
+  rg : Std.HashMap Nat Nat := {}
+  acc : Std.HashMap Nat Nat := {}
+  nodes : Array (Nat × IAcc) := #[]
+  /-- A variable neither the group's own nor the declarations' was named. -/
+  foreign : Bool := false
+
+/-- The number a variable of a scheme has as kept: as it is if it is one
+of the declarations', and otherwise from `frozenBase` in the order met. One
+that is older than the group and not the declarations' is foreign. -/
+def freezeId (globals start id : Nat) (get : FreezeSt → Std.HashMap Nat Nat)
+    (put : FreezeSt → Std.HashMap Nat Nat → FreezeSt) : StateT FreezeSt M Nat := do
+  if id < globals then return id
+  if id < start then
+    modify fun z => { z with foreign := true }
+    return id
+  let z ← StateT.get
+  match (get z)[id]? with
+  | some k => pure k
+  | none =>
+    let k := frozenBase + (get z).size
+    StateT.set (put z ((get z).insert id k))
+    pure k
+
+def freezeRg (sch : Scheme) (id : Nat) : StateT FreezeSt M Nat := do
+  let r ← findRg id
+  -- (No region is the declarations': one is the group's or foreign.)
+  freezeId 0 sch.startRg r (·.rg) fun z m => { z with rg := m }
+
+/-- A record of what a callable touches, as kept, with what it reaches. -/
+partial def freezeAcc (sch : Scheme) (id : Nat) : StateT FreezeSt M Nat := do
+  let a ← findAcc id
+  if a < (← getThe St).globalAccs then return a
+  if a < sch.startAcc then
+    modify fun z => { z with foreign := true }
+    return a
+  if let some k := (← StateT.get).acc[a]? then return k
+  let k := frozenBase + (← StateT.get).acc.size
+  modify fun z => { z with acc := z.acc.insert a k }
+  let x ← accNode a
+  let node : IAcc := { x with
+    link := none
+    rgns := ← x.rgns.mapM (freezeRg sch), wrs := ← x.wrs.mapM (freezeRg sch)
+    subs := ← x.subs.mapM fun (b, e) => do pure (← freezeAcc sch b, ← e.mapM (freezeRg sch))
+    binder := ← x.binder.mapM (freezeRg sch), more := ← x.more.mapM (freezeRg sch)
+    insts := ← x.insts.mapM fun (sub, chosen) => do
+      pure (← freezeAcc sch sub, ← chosen.mapM fun (p, q) => do pure (← freezeRg sch p, ← freezeRg sch q)) }
+  modify fun z => { z with nodes := z.nodes.push (k, node) }
+  pure k
+
+/-- A group's scheme as kept for a later compile, if it names no variable
+but its own and the declarations'. -/
+def freeze (sch : Scheme) (waiting : List (List ITy × List ITy × Nat)) : M (Option Frozen) := do
+  let s0 ← get
+  let ren : Ren (StateT FreezeSt M) :=
+    { ty := fun id => freezeId s0.globalTys sch.startTy id (·.ty) fun z m => { z with ty := m }
+      row := fun id => freezeId s0.globalRows sch.startRow id (·.row) fun z m => { z with row := m }
+      cls := fun id => freezeId s0.globalClss sch.startCls id (·.cls) fun z m => { z with cls := m }
+      rg := freezeRg sch
+      acc := freezeAcc sch }
+  let ((frozen, waiting), z) ← (do
+      let sch ← renScheme ren sch (frozenBase, frozenBase, frozenBase, frozenBase, frozenBase)
+      let waiting ← waiting.mapM fun ((ps, cs, a) : List ITy × List ITy × Nat) => do
+        pure (← ps.mapM (renTy ren), ← cs.mapM (renTy ren), ← ren.acc a)
+      pure (sch, waiting)).run {}
+  if z.foreign then return none
+  let s ← get
+  let mut atoms : List Nat := []
+  let mut ranks : List Nat := []
+  let mut lows : List (Nat × List Nat) := []
+  for (r, k) in z.rg.toList do
+    if ← isAtom r then atoms := k :: atoms
+    if s.rankBinders.contains r then ranks := k :: ranks
+    if let some ls := s.lows[r]? then
+      let ls' ← ls.mapM fun l => do
+        let l ← findRg l
+        pure ((z.rg[l]?).getD l)
+      lows := (k, ls') :: lows
+  let kept := z.acc.toList.filterMap fun (a, k) => if s.kept.contains a then some k else none
+  pure (some ⟨frozen, (z.ty.size, z.row.size, z.cls.size, z.rg.size, z.acc.size), atoms, ranks,
+    z.nodes.toList, lows, kept, waiting⟩)
+
+/-- A kept scheme taken into this compile: each of its own variables a new one. -/
+def thaw (fz : Frozen) : M Scheme := do
+  let s ← get
+  let start := (s.tys.size, s.rows.size, s.clss.size, s.rgs.size, s.accs.size)
+  let (nTy, nRow, nCls, nRg, nAcc) := fz.counts
+  for _ in [0:nTy] do discard freshTy
+  for _ in [0:nRow] do discard freshRow
+  for _ in [0:nCls] do discard freshCls
+  for k in [0:nRg] do
+    if fz.atoms.contains (frozenBase + k) then discard freshAtom else discard freshRg
+  for _ in [0:nAcc] do discard freshAcc
+  let shift := fun (base : Nat) (id : Nat) => if id ≥ frozenBase then base + (id - frozenBase) else id
+  let ren : Ren Id :=
+    { ty := shift start.1, row := shift start.2.1, cls := shift start.2.2.1
+      rg := shift start.2.2.2.1, acc := shift start.2.2.2.2 }
+  for (k, node) in fz.nodes do
+    let node := Id.run (renNode ren node)
+    modify fun s => { s with accVer := s.accVer + 1, accs := s.accs.set! (ren.acc k) node }
+  for k in fz.ranks do markRank (ren.rg k)
+  for (k, ls) in fz.lows do
+    modify fun s => { s with lows := s.lows.insert (ren.rg k) (ls.map ren.rg) }
+  modify fun s =>
+    { s with
+      kept := fz.kept.foldl (fun kp a => kp.insert (ren.acc a)) s.kept
+      closureRanks := fz.waiting.foldl (fun w (ps, cs, a) =>
+        w.push (ps.map fun t => Id.run (renTy ren t), cs.map fun t => Id.run (renTy ren t), ren.acc a)) s.closureRanks }
+  pure (Id.run (renScheme ren fz.scheme start))
 
 /-- Is this type known to hold something that cannot be duplicated? -/
 partial def nonDup (seen : List Nat) (t : ITy) : M Bool := do
@@ -1464,6 +1654,14 @@ mutual
 /-- The general type of the group of `fn`, inferring the group if this is its first use. -/
 partial def schemeOf (scc : Nat) : M Scheme := do
   if let some sch := (← get).schemes[scc]? then return sch
+  -- (Kept from an earlier compile, where the group and all it reaches are
+  -- the same: taken with new variables, and not inferred.)
+  let key := ((← get).keys[scc]?).getD 0
+  if key != 0 then
+    if let some fz := (← get).frozen.get? key then
+      let sch ← thaw fz
+      modify fun s => { s with schemes := s.schemes.insert scc sch, frozenMade := s.frozenMade.push (key, fz) }
+      return sch
   let outer ← get
   let startTy := outer.tys.size
   let startRow := outer.rows.size
@@ -1704,6 +1902,17 @@ partial def schemeOf (scc : Nat) : M Scheme := do
       coerces := outer.coerces, nevers := outer.nevers, onces := outer.onces, shows := outer.shows
       opens := outer.opens, calls := outer.calls, hints := outer.hints, refs := outer.refs
       cancels := outer.cancels, pending := outer.pending }
+  -- (Kept for a later compile where inferring it changed nothing of the
+  -- declarations' and decided nothing left waiting by others: then the
+  -- scheme, and what of its own it leaves waiting, is all it made.)
+  let now ← get
+  let waiting := outer.closureRanks.size
+  if now.remember && key != 0
+      && samePrefix now.tys outer.tys now.globalTys && samePrefix now.rows outer.rows now.globalRows
+      && samePrefix now.clss outer.clss now.globalClss && samePrefix now.accs outer.accs now.globalAccs
+      && samePrefix now.closureRanks outer.closureRanks waiting then
+    if let some fz ← freeze sch (now.closureRanks.extract waiting now.closureRanks.size).toList then
+      modify fun s => { s with frozenMade := s.frozenMade.push (key, fz) }
   pure sch
 
 /-- The signature to use for a reference to `fn`: the group's own inside its
@@ -1722,20 +1931,20 @@ partial def refSig (fn : Nat) : M ISig := do
     | none => throw s!"certificate: function {fn} is missing from its group"
     | some m =>
       startCopy
-      let sig ← copySig sch m.sig
-      let incls ← sch.exported.mapM (copyIncl sch)
-      let places ← sch.exportedPlaces.mapM (copyPlace sch)
+      let sig ← renSig (copyRen sch) m.sig
+      let incls ← sch.exported.mapM (renIncl (copyRen sch))
+      let places ← sch.exportedPlaces.mapM (renPlace (copyRen sch))
       let coerces ← sch.exportedCoerces.mapM fun (r, b, w) => do
-        pure (← copyTy sch r, ← copyTy sch b, w)
-      let nevers ← sch.exportedNevers.mapM (copyTy sch)
-      let onces ← sch.exportedOnces.mapM (copyOnce sch)
-      let shows ← sch.exportedShows.mapM (copyShow sch)
+        pure (← renTy (copyRen sch) r, ← renTy (copyRen sch) b, w)
+      let nevers ← sch.exportedNevers.mapM (renTy (copyRen sch))
+      let onces ← sch.exportedOnces.mapM (renOnce (copyRen sch))
+      let shows ← sch.exportedShows.mapM (renShow (copyRen sch))
       let opens ← sch.opens.mapM fun (template, opened, chosen) => do
-        pure (← copyTy sch template, ← copyTy sch opened, ← chosen.mapM fun (bound, actual) => do
+        pure (← renTy (copyRen sch) template, ← renTy (copyRen sch) opened, ← chosen.mapM fun (bound, actual) => do
           pure (← copyRg sch bound, ← copyRg sch actual))
-      let calls ← sch.calls.mapM (copyCall sch)
+      let calls ← sch.calls.mapM (renCall (copyRen sch))
       let open_ ← sch.givenUpOpen.mapM fun (kt, amb, self) => do
-        pure (← copyTy sch kt, ← copyRow sch amb, ← copyAcc sch self, true)
+        pure (← renTy (copyRen sch) kt, ← renRow (copyRen sch) amb, ← copyAcc sch self, true)
       modify fun s => { s with opens := s.opens ++ opens, calls := s.calls ++ calls
                                cancels := s.cancels ++ open_ }
       modify fun s =>
@@ -2538,25 +2747,25 @@ partial def instantiate (fn : Nat) (use : Use) : M Unit := do
   startCopy
   let members ← sch.members.mapM fun m => do
     pure { m with
-      sig := ← copySig sch m.sig
-      hints := ← m.hints.mapM fun hs => hs.mapM (copyHint sch)
-      refs := ← m.refs.mapM fun (g, s) => do pure (g, ← copySig sch s) }
-  let incls ← sch.incls.mapM (copyIncl sch)
-  let places ← sch.places.mapM (copyPlace sch)
-  let coerces ← sch.coerces.mapM fun (r, b, w) => do pure (← copyTy sch r, ← copyTy sch b, w)
-  let nevers ← sch.nevers.mapM (copyTy sch)
-  let onces ← sch.onces.mapM (copyOnce sch)
-  let shows ← sch.shows.mapM (copyShow sch)
+      sig := ← renSig (copyRen sch) m.sig
+      hints := ← m.hints.mapM fun hs => hs.mapM (renHint (copyRen sch))
+      refs := ← m.refs.mapM fun (g, s) => do pure (g, ← renSig (copyRen sch) s) }
+  let incls ← sch.incls.mapM (renIncl (copyRen sch))
+  let places ← sch.places.mapM (renPlace (copyRen sch))
+  let coerces ← sch.coerces.mapM fun (r, b, w) => do pure (← renTy (copyRen sch) r, ← renTy (copyRen sch) b, w)
+  let nevers ← sch.nevers.mapM (renTy (copyRen sch))
+  let onces ← sch.onces.mapM (renOnce (copyRen sch))
+  let shows ← sch.shows.mapM (renShow (copyRen sch))
   let opens ← sch.opens.mapM fun (template, opened, chosen) => do
-    pure (← copyTy sch template, ← copyTy sch opened, ← chosen.mapM fun (bound, actual) => do
+    pure (← renTy (copyRen sch) template, ← renTy (copyRen sch) opened, ← chosen.mapM fun (bound, actual) => do
       pure (← copyRg sch bound, ← copyRg sch actual))
-  let calls ← sch.calls.mapM (copyCall sch)
+  let calls ← sch.calls.mapM (renCall (copyRen sch))
   modify fun s =>
     { s with
       incls := incls, places := places, coerces := coerces, nevers := nevers, onces := onces
       shows := shows, opens := opens, calls := calls }
   let givenUpOpen ← sch.givenUpOpen.mapM fun (kt, amb, self) => do
-    pure (← copyTy sch kt, ← copyRow sch amb, ← copyAcc sch self)
+    pure (← renTy (copyRen sch) kt, ← renRow (copyRen sch) amb, ← copyAcc sch self)
   match members.find? (·.fn == fn) with
   | none => throw s!"certificate: function {fn} is missing from its group"
   | some m =>
@@ -3091,7 +3300,7 @@ def certifyM (items : List Item) (g : Elab.Globals) (p : Core.Program)
       | .pub _ (.fn ..) => false
       | _ => true),
     envSizes, st.strict, st.regions, st.loans, st.ranked, st.widen, p.drops)
-  let keys := if st.memo.isEmpty && !st.remember then #[] else fnKeys st.fns st.scc extra globals
+  let keys := if st.memo.isEmpty && st.frozen.isEmpty && !st.remember then #[] else fnKeys st.fns st.scc extra globals
   modify fun s =>
     { s with keys, byKey := (keys.zipIdx.foldl (fun (m : Std.HashMap UInt64 Nat) (k, f) => m.insert k f) {}) }
   let τ ← freshTy
@@ -3155,32 +3364,30 @@ def certifyM (items : List Item) (g : Elab.Globals) (p : Core.Program)
     (← get).regions && (← get).loans⟩
 
 /-- Find a certificate for an elaborated program, with the ownership rules or
-without, and with the region rules or without. -/
-def certify (items : List Item) (p : Core.Program) (strict : Bool)
-    (envSizes : List (Nat × Nat × Nat) := []) (regions : Bool := false) (loans : Bool := false)
-    (ranked : Bool := false) (widen : Bool := false) : Except String Cert := do
-  let (g, _, _) ← Elab.collect items
-  let (cert, _) ← (certifyM items g p envSizes).run
-    { fns := p.fns.toArray, strict := strict, regions := regions, loans := loans, ranked := ranked
-      widen := widen }
-  pure cert
-
-/-- The same, taking what an earlier compile kept of its instantiations
-(`memo`), and giving what this one made, to be kept for the next. -/
+without, and with the region rules or without; taking what an earlier compile
+kept of its inference (`memo`) and, if `remember`, giving what this one made,
+to be kept for the next. -/
 def certifyKept (items : List Item) (p : Core.Program) (strict : Bool)
-    (envSizes : List (Nat × Nat × Nat)) (regions loans ranked widen : Bool) (memo : Memo) :
-    Except String (Cert × Array (UInt64 × FnSig × Remembered)) := do
+    (envSizes : List (Nat × Nat × Nat) := []) (regions loans ranked widen : Bool := false)
+    (memo : Memo := {}) (remember : Bool := true) : Except String (Cert × Made) := do
   let (g, _, _) ← Elab.collect items
   let (cert, st) ← (certifyM items g p envSizes).run
-    { fns := p.fns.toArray, strict := strict, regions := regions, loans := loans, ranked := ranked
-      widen := widen, memo := memo, remember := true }
-  pure (cert, st.made)
+    { fns := p.fns.toArray, strict, regions, loans, ranked, widen, memo := memo.inst
+      frozen := memo.schemes, remember }
+  pure (cert, ⟨st.made, st.frozenMade⟩)
+
+/-- The certificate alone, with nothing kept. -/
+def certify (items : List Item) (p : Core.Program) (strict : Bool)
+    (envSizes : List (Nat × Nat × Nat) := []) (regions loans ranked widen : Bool := false) :
+    Except String Cert :=
+  (·.1) <$> certifyKept items p strict envSizes regions loans ranked widen (remember := false)
 
 /-- What was made, as kept for the next compile. -/
-def toMemo (made : Array (UInt64 × FnSig × Remembered)) : Memo :=
-  made.foldl (fun m (k, sig, r) =>
-    let old := m.getD k []
-    if old.any (·.1 == sig) then m else m.insert k ((sig, r) :: old)) {}
+def toMemo (made : Made) : Memo :=
+  { inst := made.inst.foldl (fun m (k, sig, r) =>
+      let old := m.getD k []
+      if old.any (·.1 == sig) then m else m.insert k ((sig, r) :: old)) {}
+    schemes := made.schemes.foldl (fun m (k, fz) => m.insert k fz) {} }
 
 /-- Which part of a program a certificate fails on, for reporting a defect in
 this pass or in the elaborator. -/
