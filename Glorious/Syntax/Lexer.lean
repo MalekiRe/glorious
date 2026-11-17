@@ -239,6 +239,10 @@ private partial def lexLoop (cs : Array Char) (i line col : Nat) (acc : Array To
       -- `<&` opens a type argument list with a reference in it.
       else if j > i + 1 && c == '<' && cs[i + 1]? == some '&' then
         lexLoop cs (i + 1) line (col + 1) (acc.push ⟨.op "<", line, col⟩)
+      -- `*<T as Tr>::f(..)`, `&<..>`, `!<..>`, `-<..>`: a prefix operator
+      -- on a qualified path.
+      else if j > i + 1 && "*&!-".toList.contains c && cs[i + 1]? == some '<' then
+        lexLoop cs (i + 1) line (col + 1) (acc.push ⟨.op (String.singleton c), line, col⟩)
       else
         let tok := if ["=", "=>", "->"].contains s then Tok.punct s else Tok.op s
         lexLoop cs j line (col + (j - i)) (acc.push ⟨tok, line, col⟩)

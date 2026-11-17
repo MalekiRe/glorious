@@ -12,7 +12,7 @@
 // 12
 mod ecs;
 
-use ecs::{App, Entity, Column, Commands, end, with_resource, run_if, chain, spawn, fold_all, each, Query, for_each};
+use ecs::{App, Entity, Column, Commands, end, run_if, chain, spawn, fold_all, each, Query, for_each};
 
 struct Position(Int)
 struct Velocity(Int)
@@ -104,7 +104,7 @@ fn main() -> Int {
     game.emit(&Hit(1));
     print(game.world.count<Health>());
     game.emit(&Update);
-    match(game.world.with_resource(fn(ended: &mut Ended) -> Int { ended.0 })) { Some(n) => print(n), None => () };
+    match(game.world.resource<Ended>()) { Some(ended) => print(ended.0), None => () };
     game.world.fold_all(0, fn(sum: Int, position: &Position) -> Int { sum + position.0 })
 }
 

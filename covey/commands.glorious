@@ -56,6 +56,8 @@ fn main() -> Int {
     print(parent_value);
     app.emit(&Update);
     // What `look` saw at each emit: nothing the first time, both the second.
-    match(app.world.with_resource(fn(seen: &mut Seen) -> Int { seen.0[0] })) { Some(n) => print(n), None => () };
-    match(app.world.with_resource(fn(seen: &mut Seen) -> Int { seen.0[1] })) { Some(n) => n, None => 99 }
+    match(app.world.resource<Seen>()) {
+        Some(seen) => print(seen.0[0]); seen.0[1],
+        None => 99
+    }
 }

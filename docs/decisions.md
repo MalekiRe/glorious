@@ -5142,6 +5142,16 @@ Covey is the toolbox for finding what the language lacks. Rewriting it after
 - **A bound a function's needs come down to, at arguments** (`S: Get<Value>`
   from `(Value,): Bundle<S>`), went into its type by name alone, and its
   arguments were lost where it was used. It is now said with them. Fixed.
+- **A prefix operator before a qualified path**, `*<S as Holds<T>>::slot_mut(c)
+  = v`, was read as one operator `*<`. A run of `*`, `&`, `!` or `-` then `<`
+  is now two. Fixed.
+- **An alias with a lifetime**, `type Res<'a, T> = &'a T`, had to be given
+  the lifetime. Written without it, `Res<Score>`, the lifetime is left out as
+  in a written `&Score`. Fixed.
+- **A dot call whose receiver the first function of the name borrows as it
+  cannot be** (`app.insert_resource(..)` read as `World::insert_resource`,
+  `&mut app` of an `app` that is not mutable) failed instead of trying the
+  receiver's type's own function. It now tries it. Fixed.
 
 ## Other standing decisions
 

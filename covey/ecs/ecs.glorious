@@ -34,6 +34,8 @@
 // the program runs, each of those calls is a call of a known function.
 
 use std::tuple::{Tuple, nest};
+use core::option::{as_ref, as_mut, is_none};
+use core::value::{Default, default};
 
 // An entity: a place in the columns, and which of the entities that have had
 // that place this one is.
@@ -124,23 +126,32 @@ impl<T, H, R> Get<T> for (Resource<H>, R) where R: Get<T> {
 // While a system has it, it is out of its place.
 pub struct Resource<T> { value: Option<T> }
 
+// What a system names a resource by: `score: Res<Score>`, `speed: ResMut<Speed>`.
+// A system that takes one runs only while the world has it; one that takes
+// `Option<Res<T>>` runs either way.
+pub type Res<'a, T> = &'a T;
+pub type ResMut<'a, T> = &'a mut T;
+
 // The resource of type `T` among a world's columns, found as a column is.
 pub trait Holds<T> {
-    fn lift(&mut Self) -> Option<T>
-    fn lower(&mut Self, T)
+    fn slot(&Self) -> &Option<T>
+    fn slot_mut(&mut Self) -> &mut Option<T>
 }
 impl<T, R> Holds<T> for (Resource<T>, R) {
-    fn lift(columns) { replace(&mut columns.0.value, None) }
-    fn lower(columns, value) { columns.0.value = Some(value); }
+    fn slot(columns) { &columns.0.value }
+    fn slot_mut(columns) { &mut columns.0.value }
 }
 impl<T, H, R> Holds<T> for (Resource<H>, R) where R: Holds<T> {
-    fn lift(columns) { <R as Holds<T>>::lift(&mut columns.1) }
-    fn lower(columns, value) { <R as Holds<T>>::lower(&mut columns.1, value) }
+    fn slot(columns) { <R as Holds<T>>::slot(&columns.1) }
+    fn slot_mut(columns) { <R as Holds<T>>::slot_mut(&mut columns.1) }
 }
 impl<T, H, R> Holds<T> for (Column<H>, R) where R: Holds<T> {
-    fn lift(columns) { <R as Holds<T>>::lift(&mut columns.1) }
-    fn lower(columns, value) { <R as Holds<T>>::lower(&mut columns.1, value) }
+    fn slot(columns) { <R as Holds<T>>::slot(&columns.1) }
+    fn slot_mut(columns) { <R as Holds<T>>::slot_mut(&mut columns.1) }
 }
+// The resource taken out of its place, and put back.
+fn lift<T, S>(columns: &mut S) -> Option<T> where S: Holds<T> { replace(<S as Holds<T>>::slot_mut(columns), None) }
+fn lower<T, S>(columns: &mut S, value: T) where S: Holds<T> { *<S as Holds<T>>::slot_mut(columns) = Some(value); }
 
 // What is done to every column of a world when an entity ends.
 pub trait Columns {
@@ -255,9 +266,24 @@ impl<S> World<S> {
     // Every entity there is.
     pub fn entities(world: &Self) -> [Entity] { entities(world) }
 
-    // A resource, lent to `f`, if the world has it.
-    pub fn with_resource<T, X>(world: &mut Self, f: for<'a> fn(&'a mut T) -> X) -> Option<X> where S: Holds<T> {
-        with_resource(world, f)
+    // The resource, if the world has it (none while a system has it).
+    pub fn resource<T>(world: &Self) -> Option<&T> where S: Holds<T> { as_ref(<S as Holds<T>>::slot(&world.columns)) }
+    pub fn resource_mut<T>(world: &mut Self) -> Option<&mut T> where S: Holds<T> {
+        as_mut(<S as Holds<T>>::slot_mut(&mut world.columns))
+    }
+
+    // Give the world the resource; the one it had, if it had one.
+    pub fn insert_resource<T>(world: &mut Self, value: T) -> Option<T> where S: Holds<T> {
+        replace(<S as Holds<T>>::slot_mut(&mut world.columns), Some(value))
+    }
+    pub fn remove_resource<T>(world: &mut Self) -> Option<T> where S: Holds<T> {
+        replace(<S as Holds<T>>::slot_mut(&mut world.columns), None)
+    }
+
+    // The resource at its type's start, if the world does not have one.
+    pub fn init_resource<T: Default>(world: &mut Self) where S: Holds<T> {
+        let slot = <S as Holds<T>>::slot_mut(&mut world.columns);
+        if(is_none(as_ref(&*slot))) { *slot = Some(default()) } else { () }
     }
 }
 
@@ -272,19 +298,6 @@ pub fn fold_all<T, S, R>(world: &mut World<S>, start: R, f: for<'a> fn(R, &'a T)
     };
     <S as Get<T>>::put(&mut world.columns, column);
     result
-}
-
-// What a function makes of a resource of the world; none while a system
-// has it.
-pub fn with_resource<T, S, X>(world: &mut World<S>, f: for<'a> fn(&'a mut T) -> X) -> Option<X> where S: Holds<T> {
-    match(<S as Holds<T>>::lift(&mut world.columns)) {
-        Some(value) =>
-            let mut value = value;
-            let made = f(&mut value);
-            <S as Holds<T>>::lower(&mut world.columns, value);
-            Some(made),
-        None => None
-    }
 }
 
 // Every entity with an `A`, its `A` to change.
@@ -449,6 +462,12 @@ impl<S> Commands<S> {
     }
 
     // End an entity.
+    pub fn insert_resource<T>(commands: &mut Self, value: T) where S: Holds<T> {
+        push_at(&mut commands.queue, fn(world: &mut World<S>) { let _ = world.insert_resource(value); })
+    }
+    pub fn remove_resource<T>(commands: &mut Self) where S: Holds<T> {
+        push_at(&mut commands.queue, fn(world: &mut World<S>) { let _ = world.remove_resource<T>(); })
+    }
     pub fn despawn(commands: &mut Self, entity: Entity) where S: Columns {
         push_at(&mut commands.queue, fn(world: &mut World<S>) { despawn(world, entity) })
     }
@@ -486,6 +505,8 @@ pub struct Asking
 pub struct Querying<Q, Only, St>(Q, Only, St)
 pub struct Shared<X>(X)
 pub struct Owned<X>(X)
+pub struct Maybe<X>(X)
+pub struct MaybeOwned<X>(X)
 pub trait Parameter { type Asks; }
 impl<A> Parameter for &mut Column<A> { type Asks = Changed<A>; }
 impl<A> Parameter for &Column<A> { type Asks = Read<A>; }
@@ -496,6 +517,8 @@ impl<Q, Only, St> Parameter for &mut Query<Q, Only, St> { type Asks = Querying<Q
 // above are chosen first.)
 impl<X> Parameter for &mut X { type Asks = Owned<X>; }
 impl<X> Parameter for &X { type Asks = Shared<X>; }
+impl<X> Parameter for Option<&mut X> { type Asks = MaybeOwned<X>; }
+impl<X> Parameter for Option<&X> { type Asks = Maybe<X>; }
 
 // A system takes a component once. Two of what it asks for are apart unless
 // they are one column, which is only if the component has a trait nothing
@@ -571,10 +594,10 @@ impl<E, S, ..G, F, O, X, Rest> Fetch<E, S, (..G), F, O> for (Shared<X>, Rest)
     where S: Holds<X>, Rest: Fetch<E, S, (..G, &X), F, O> {
     fn fetch(event, world, commands, gathered, f) {
         let (..g) = gathered;
-        match(<S as Holds<X>>::lift(&mut world.columns)) {
+        match(lift<X, S>(&mut world.columns)) {
             Some(value) =>
                 let made = <Rest as Fetch<E, S, (..G, &X), F, O>>::fetch(event, world, commands, (..g, &value), f);
-                <S as Holds<X>>::lower(&mut world.columns, value);
+                lower<X, S>(&mut world.columns, value);
                 made,
             None => None
         }
@@ -584,13 +607,40 @@ impl<E, S, ..G, F, O, X, Rest> Fetch<E, S, (..G), F, O> for (Owned<X>, Rest)
     where S: Holds<X>, Rest: Fetch<E, S, (..G, &mut X), F, O> {
     fn fetch(event, world, commands, gathered, f) {
         let (..g) = gathered;
-        match(<S as Holds<X>>::lift(&mut world.columns)) {
+        match(lift<X, S>(&mut world.columns)) {
             Some(value) =>
                 let mut value = value;
                 let made = <Rest as Fetch<E, S, (..G, &mut X), F, O>>::fetch(event, world, commands, (..g, &mut value), f);
-                <S as Holds<X>>::lower(&mut world.columns, value);
+                lower<X, S>(&mut world.columns, value);
                 made,
             None => None
+        }
+    }
+}
+impl<E, S, ..G, F, O, X, Rest> Fetch<E, S, (..G), F, O> for (Maybe<X>, Rest)
+    where S: Holds<X>, Rest: Fetch<E, S, (..G, Option<&X>), F, O> {
+    fn fetch(event, world, commands, gathered, f) {
+        let (..g) = gathered;
+        match(lift<X, S>(&mut world.columns)) {
+            Some(value) =>
+                let made = <Rest as Fetch<E, S, (..G, Option<&X>), F, O>>::fetch(event, world, commands, (..g, Some(&value)), f);
+                lower<X, S>(&mut world.columns, value);
+                made,
+            None => <Rest as Fetch<E, S, (..G, Option<&X>), F, O>>::fetch(event, world, commands, (..g, None), f)
+        }
+    }
+}
+impl<E, S, ..G, F, O, X, Rest> Fetch<E, S, (..G), F, O> for (MaybeOwned<X>, Rest)
+    where S: Holds<X>, Rest: Fetch<E, S, (..G, Option<&mut X>), F, O> {
+    fn fetch(event, world, commands, gathered, f) {
+        let (..g) = gathered;
+        match(lift<X, S>(&mut world.columns)) {
+            Some(value) =>
+                let mut value = value;
+                let made = <Rest as Fetch<E, S, (..G, Option<&mut X>), F, O>>::fetch(event, world, commands, (..g, Some(&mut value)), f);
+                lower<X, S>(&mut world.columns, value);
+                made,
+            None => <Rest as Fetch<E, S, (..G, Option<&mut X>), F, O>>::fetch(event, world, commands, (..g, None), f)
         }
     }
 }
@@ -712,6 +762,17 @@ impl<S, L> App<S, L> {
         let App { world, systems } = app;
         let World { columns, generations, free } = world;
         App { world: World { columns: (Resource { value: Some(value) }, columns), generations: generations, free: free }, systems: systems }
+    }
+
+    // The resource at its type's start.
+    pub fn init_resource<T: Default>(app: Self) -> App<(Resource<T>, S), L> { app.insert_resource(default<T>()) }
+
+    // A place for a resource the world does not have yet. (Upstream finds
+    // it from the systems that ask for it.)
+    pub fn register_resource<T>(app: Self) -> App<(Resource<T>, S), L> {
+        let App { world, systems } = app;
+        let World { columns, generations, free } = world;
+        App { world: World { columns: (Resource { value: None }, columns), generations: generations, free: free }, systems: systems }
     }
 
     // Store a component.

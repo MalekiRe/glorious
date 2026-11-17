@@ -541,6 +541,10 @@ partial def dotAltFor (scope : Scope) (amb : Row) (call : Nat) (a : Expr) : M (O
     let saved ← get
     -- (What the receiver itself is found to need read again, a dot call in
     -- it of a type's own function, is passed on first.)
+    -- (Its type as it is, not as borrowed for the function in scope.)
+    let a := match a with
+      | .ref _ x => Expr.name none x
+      | a => a
     let found ← try some <$> inferExpr scope amb a catch e =>
       if (e.splitOn "%dotown:").length > 1 || (e.splitOn "%refpats:").length > 1 then throw e else pure none
     let rec head (fuel : Nat) (t : Ty) : M (Option String) := do
@@ -669,7 +673,21 @@ partial def checkArgsIn (scope : Scope) (amb : Row) (what : String) (params : Li
       -- (A dot call whose receiver is of a type with a function of its own of
       -- the name: that one, if the function in scope does not fit.)
       let before ← get
-      if let some e ← checkArg scope amb s!"argument {i + 1} of {what}" p a site then
+      -- (A receiver the function in scope borrows in a way it cannot be,
+      -- `&mut app` of an `app` that is not mutable, where its type has a
+      -- function of its own of the name that takes it otherwise: that one.)
+      let checked ← if i == 0 && call != 0 then
+          try checkArg scope amb s!"argument {i + 1} of {what}" p a site catch ex => do
+            if (ex.splitOn "%dotown:").length > 1 || (ex.splitOn "%refpats:").length > 1 then throw ex
+            let failed ← get
+            set before
+            let alt ← dotAltFor scope amb call a
+            set failed
+            match alt with
+            | some alt => if (what.splitOn s!"`{alt}`").length > 1 then throw ex else throw (Syntax.dotOwnMark call alt ++ ex)
+            | none => throw ex
+        else checkArg scope amb s!"argument {i + 1} of {what}" p a site
+      if let some e := checked then
         -- (Asked only once the function in scope does not fit: the program
         -- is read again, so what this finds on the way is not kept. The
         -- receiver's type is found as it was before it was made to fit.)

@@ -1,0 +1,113 @@
+// Upstream's tests/resources.rs: a world's resources put in, replaced, read,
+// changed and taken out; systems that need one that is missing are not run,
+// and ones that take `Option<Res<T>>` are; commands put resources in and take
+// them out once the systems have run.
+// expect:
+// -1
+// -1
+// -1
+// 1
+// 3
+// 3
+// 3
+// 0
+// 0
+// 100
+// 0
+// 102
+// 2
+// 5
+// 1
+// 2
+// -1
+// 2
+mod ecs;
+
+use ecs::{App, Commands, Res, ResMut, chain};
+use core::value::{Default};
+
+struct Update
+struct Score(Int)
+struct Speed(Int)
+struct Tally { ran: Int, saw: Int }
+
+impl Default for Score { fn default() { Score(0) } }
+impl Default for Tally { fn default() { Tally { ran: 0, saw: 0 } } }
+
+fn shown(score: Option<&Score>) -> Int { match(score) { Some(s) => s.0, None => -1 } }
+fn had(score: Option<Score>) -> Int { match(score) { Some(s) => s.0, None => -1 } }
+
+// `world_resources_insert_replace_read_write_and_remove`
+fn by_hand() {
+    let mut world = App::new().register_resource<Score>().build().world;
+    say(shown(world.resource<Score>()));
+    say(had(world.remove_resource<Score>()));
+    say(had(world.insert_resource(Score(1))));
+    say(had(world.insert_resource(Score(2))));
+    match(world.resource_mut<Score>()) { Some(s) => s.0 = s.0 + 1;, None => () };
+    say(shown(world.resource<Score>()));
+    world.init_resource<Score>();
+    say(shown(world.resource<Score>()));
+    say(had(world.remove_resource<Score>()));
+    world.init_resource<Score>();
+    say(shown(world.resource<Score>()))
+}
+
+// `missing_resources_skip_systems_and_options_run_regardless`
+fn needs(score: Res<Score>, speed: ResMut<Speed>, tally: ResMut<Tally>) {
+    tally.ran = tally.ran + 1;
+    speed.0 = speed.0 + score.0
+}
+fn either(score: Option<Res<Score>>, tally: ResMut<Tally>) {
+    tally.saw = tally.saw + match(score) { Some(s) => s.0, None => 100 }
+}
+fn tally_of<S, L>(app: &App<S, L>) {
+    match(app.world.resource<Tally>()) { Some(t) => say(t.ran); say(t.saw), None => () }
+}
+fn skipping() {
+    let mut app = App::new()
+        .register_resource<Score>()
+        .register_resource<Speed>()
+        .init_resource<Tally>()
+        .add_systems(Update, (needs, either).chain())
+        .build();
+    app.emit(&Update);
+    tally_of(&app);
+    let _ = app.world.insert_resource(Score(2));
+    app.emit(&Update);
+    tally_of(&app);
+    let _ = app.world.insert_resource(Speed(1));
+    app.emit(&Update);
+    app.emit(&Update);
+    match(app.world.resource<Tally>()) { Some(t) => say(t.ran), None => () };
+    match(app.world.resource<Speed>()) { Some(s) => say(s.0), None => () }
+}
+
+// `commands_insert_and_remove_resources_when_applied`
+fn toggle<S>(commands: &mut Commands<S>, score: Option<Res<Score>>, speed: Option<Res<Speed>>) {
+    match((score, speed)) {
+        (None, _) => commands.insert_resource(Score(1)),
+        (Some(_), None) => commands.insert_resource(Speed(2)),
+        (Some(_), Some(_)) => commands.remove_resource<Score>()
+    }
+}
+fn commanded() -> Int {
+    let mut app = App::new()
+        .register_resource<Score>()
+        .register_resource<Speed>()
+        .add_systems(Update, toggle)
+        .build();
+    app.emit(&Update);
+    say(shown(app.world.resource<Score>()));
+    app.emit(&Update);
+    match(app.world.resource<Speed>()) { Some(s) => say(s.0), None => () };
+    app.emit(&Update);
+    say(shown(app.world.resource<Score>()));
+    match(app.world.resource<Speed>()) { Some(s) => s.0, None => -1 }
+}
+
+fn main() -> Int {
+    by_hand();
+    skipping();
+    commanded()
+}

@@ -14,6 +14,15 @@ public section
 
 namespace Glorious.Syntax
 
+/-- The type with these lifetimes left out of its references. -/
+partial def elideLifetimes (lifes : List String) : TypeExpr → TypeExpr
+  | .ref uniq t life => .ref uniq (elideLifetimes lifes t) (if life.any lifes.contains then none else life)
+  | .name x args => .name x (args.map (elideLifetimes lifes))
+  | .tuple args => .tuple (args.map (elideLifetimes lifes))
+  | .fn ps r => .fn (ps.map (elideLifetimes lifes)) (elideLifetimes lifes r)
+  | .performs r effects => .performs (elideLifetimes lifes r) (effects.map fun (e, args) => (e, args.map (elideLifetimes lifes)))
+  | t => t
+
 /-- A type with every alias in it written out. `seen` are the aliases being
 written out already: one that stands for itself has no meaning. -/
 partial def expandTypeExpr (aliases : List (String × List String × TypeExpr))
@@ -33,6 +42,11 @@ partial def expandTypeExpr (aliases : List (String × List String × TypeExpr))
     | some (params, body) =>
       if seen.contains x then throw s!"type alias `{x}` stands for itself"
       let params := genericParams params
+      -- (Its lifetimes not written, `Res<T>` of `type Res<'a, T> = &'a T`:
+      -- each is left out where the alias is used, as in a written `&T`.)
+      let lifes := params.filter (·.startsWith "'")
+      let (params, body) := if !lifes.isEmpty && args.length + lifes.length == params.length
+        then (params.filter (!·.startsWith "'"), elideLifetimes lifes body) else (params, body)
       unless params.length == args.length do
         throw s!"type alias `{x}` takes {params.length} arguments, but is given {args.length}"
       expandTypeExpr aliases (x :: seen) (substTypeExpr (params.zip args) body)
