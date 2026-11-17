@@ -380,6 +380,10 @@ def expandBlankets (items : List Item) : List Item := Id.run do
     | .impl _ tr head _ _ ms => some (traitBase tr, head, givenArgs ms)
     | _ => none
   let mut known : List (String × String × List String) := rest.filterMap implOf
+  -- (Those another implementation for every type gave, by which: two of
+  -- them for one trait both written out for a type are two implementations
+  -- of it for that type, which the checker refuses.)
+  let mut byBlanket : List (Nat × String × String × List String) := []
   -- (`impl !Print for Secret {}`: not written out for that type.)
   let last := fun (s : String) => (s.splitOn "::").getLast!
   let denied := rest.filterMap fun
@@ -394,7 +398,7 @@ def expandBlankets (items : List Item) : List Item := Id.run do
   -- (A copy may give what another asks: as many rounds as there are.)
   for _ in List.range (blankets.length + 1) do
     let mut more := false
-    for (ps, tr, t, ctx, ms) in blankets do
+    for ((ps, tr, t, ctx, ms), b) in blankets.zipIdx do
       let asked := ctx.filterMap fun (p, c) => if p == t then some (traitBase c) else none
       for (h, hps) in heads do
         let fresh := hps.zipIdx.map fun (p, j) => if p.startsWith "'" then s!"'%b{j}" else s!"%b{j}"
@@ -402,7 +406,9 @@ def expandBlankets (items : List Item) : List Item := Id.run do
         let mine := givenArgs (ms.map fun
           | .typeAlias n takes body => .typeAlias n takes (substTypeExpr [(t, self)] body)
           | item => item)
-        if known.any (fun (tr', h', a) => tr' == traitBase tr && h' == h && a == mine) then continue
+        if byBlanket.any (fun (b', tr', h', a) => b' == b && tr' == traitBase tr && h' == h && a == mine) then continue
+        let mineToo := byBlanket.any fun (b', tr', h', a) => b' != b && tr' == traitBase tr && h' == h && a == mine
+        if !mineToo && known.any (fun (tr', h', a) => tr' == traitBase tr && h' == h && a == mine) then continue
         if denied.contains (last (traitBase tr), last h) then continue
         unless asked.all (fun c => known.any fun (c', h', _) => c' == c && h' == h) do continue
         let ctx' := ctx.zipIdx.map fun ((p, c), k) => if p == t then (s!"%subject{k}", c) else (p, c)
@@ -419,6 +425,7 @@ def expandBlankets (items : List Item) : List Item := Id.run do
         out := out.push (.impl (fresh ++ ps.filter (· != t)) tr h fresh ctx'
           (ms' ++ subjects ++ [.typeAlias (blanketName t) [] self]))
         known := known ++ [(traitBase tr, h, mine)]
+        byBlanket := byBlanket ++ [(b, traitBase tr, h, mine)]
         more := true
     unless more do break
   pure (rest ++ out.toList)

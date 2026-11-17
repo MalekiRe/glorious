@@ -4815,8 +4815,9 @@ type that has a narrower one.
 Limits:
 - A blanket implementation in the prelude or library is not written out for
   a program's own types. There is none.
-- Two blanket implementations of one trait at the same arguments are not
-  reported; the first written wins.
+- Two blanket implementations of one trait at the same arguments that are
+  both written out for a type are two implementations of it for that type,
+  which the checker refuses (`Show` is implemented twice for `Int`).
 - The copies come after everything else, in the last unit.
 
 ## Certificate attempts after the first run in parallel

@@ -3684,6 +3684,8 @@ def cases : List Case := [
     [], "4"⟩,
   ⟨"trait Into2<U> { fn into2(Self) -> U }\nimpl<T> Into2<T> for T { fn into2(x) { x } }\nimpl Into2<Int> for u8 { fn into2(x) { int(x) } }\nfn main() -> Int { into2(5) + into2(u8(3)) }",
     [], "8"⟩,
+  ⟨"trait Show { fn show(&Self) -> Int }\ntrait A { fn a(&Self) -> Int }\ntrait B { fn b(&Self) -> Int }\nimpl A for Int { fn a(x) { 1 } }\nimpl B for Int { fn b(x) { 2 } }\nimpl<T: A> Show for T { fn show(x) { a(x) } }\nimpl<T: B> Show for T { fn show(x) { b(x) } }\nfn main() -> Int { show(&1) }",
+    [], "error: `Show` is implemented twice for `Int`"⟩,
   -- (An element of what a reference is to is borrowed through it.)
   ⟨"fn first(r: &[Int]) -> Int { let e = &r[0]; *e }\nfn main() -> Int { first(&[7, 8]) }",
     [], "7"⟩,
