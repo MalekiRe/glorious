@@ -266,6 +266,20 @@ impl<S> World<S> {
     // Every entity there is.
     pub fn entities(world: &Self) -> [Entity] { entities(world) }
 
+    // A query of the world, lent to `f`: `world.query<(Entity, &Score)>(..)`.
+    // (Upstream gives it back to be used after; here its columns are out of
+    // the world while `f` has it.)
+    pub fn query<Q, X>(world: &mut Self, f: for<'a> fn(&'a mut Query<Q>) -> X) -> X where Q: Fill<S> {
+        world.query_filtered<Q, (), X>(f)
+    }
+    pub fn query_filtered<Q, N, X>(world: &mut Self, f: for<'a> fn(&'a mut Query<Q, N>) -> X) -> X where Q: Fill<S>, N: Only<S> {
+        let mut query = query_of<Q, N, S>(world);
+        let made = f(&mut query);
+        let Query { store, entities: _ } = query;
+        <Q as Fill<S>>::unfill(&mut world.columns, store);
+        made
+    }
+
     // The resource, if the world has it (none while a system has it).
     pub fn resource<T>(world: &Self) -> Option<&T> where S: Holds<T> { as_ref(<S as Holds<T>>::slot(&world.columns)) }
     pub fn resource_mut<T>(world: &mut Self) -> Option<&mut T> where S: Holds<T> {

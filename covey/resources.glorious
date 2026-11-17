@@ -1,7 +1,8 @@
 // Upstream's tests/resources.rs: a world's resources put in, replaced, read,
 // changed and taken out; systems that need one that is missing are not run,
 // and ones that take `Option<Res<T>>` are; commands put resources in and take
-// them out once the systems have run.
+// them out once the systems have run; a query of the world does not see a
+// resource of a component's type.
 // expect:
 // -1
 // -1
@@ -11,6 +12,10 @@
 // 3
 // 3
 // 0
+// 0
+// 2
+// 1
+// 1
 // 0
 // 100
 // 0
@@ -23,7 +28,7 @@
 // 2
 mod ecs;
 
-use ecs::{App, Commands, Res, ResMut, chain};
+use ecs::{App, Entity, Query, Commands, Res, ResMut, chain};
 use core::value::{Default};
 
 struct Update
@@ -50,6 +55,18 @@ fn by_hand() {
     say(shown(world.resource<Score>()));
     say(had(world.remove_resource<Score>()));
     world.init_resource<Score>();
+    say(shown(world.resource<Score>()))
+}
+
+// `queries_never_see_resources_even_with_identical_components`
+fn unseen() {
+    let mut world = App::new().register<Score>().register_resource<Score>().build().world;
+    let _ = world.insert_resource(Score(1));
+    let entity = world.spawn_bundle((Score(2),));
+    world.query<(Entity, &Score)>(fn(query: &mut Query<(Entity, &Score)>) {
+        query.for_each(fn(got: (Entity, &Score)) { let (e, s) = got; say(e.index); say(s.0) })
+    });
+    say(world.query<Entity>(fn(query: &mut Query<Entity>) -> Int { query.count() }));
     say(shown(world.resource<Score>()))
 }
 
@@ -108,6 +125,7 @@ fn commanded() -> Int {
 
 fn main() -> Int {
     by_hand();
+    unseen();
     skipping();
     commanded()
 }
