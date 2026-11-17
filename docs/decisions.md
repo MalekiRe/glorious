@@ -4836,6 +4836,30 @@ Measured (fresh build, quick build, median of 3, before → after): despawn
 1.35 → 0.76 s; json 0.44 → 0.48 s (two attempts: the second waits while
 the others use the machine); simulation 0.90 → 0.90 s (one attempt).
 
+## The library's modules, checked once for every program
+
+What the checker keeps of each unit is keyed by the unit and every unit
+before it. The library's modules come first, so their states depend only on
+the library and the seed (whether the library and `Drop` are in), and not on
+the program. The states of the leading `std` units
+(`Check.checkUnitsKept (library := n)`) are now also kept in the user's
+cache (`~/.cache/glorious/library/units`, newest first, at most 32), and
+every compile adds them to what its own build directory kept. A program's
+first build then takes the library modules another program checked.
+
+This is separate compilation where it pays off now. Checking the program's
+own modules side by side would mean merging checker states that grew from
+one start: every id counter given a range of its own, the chunked id stores
+made sparse, and a merge rule for each of about 150 fields. The programs
+here have chains of modules (covey: prelude → `std::tuple` → `ecs` → main),
+so there is nothing to check side by side yet. That is left for when there
+is.
+
+Measured (fresh build directory, quick build; first ever → with another
+program's library modules kept): calculator 1.22 → 1.02 s, orders 1.01 →
+0.89 s; simulation 0.90 → 0.89 s and json 0.46 → 0.47 s (their library
+modules are small). The file is 1.3 MB after four programs.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by

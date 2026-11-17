@@ -303,12 +303,16 @@ def compileFile (path : String) (checkKept : Check.Kept := []) (search : Bool :=
   -- after each step, which a step made from the same is taken from.)
   let checkKept ← if !checkKept.isEmpty || (← IO.getEnv "GLORIOUS_FRESH").isSome then pure checkKept
     else pure ((← Store.load (α := Check.Kept) (dir / "checked") "checked").getD [])
+  -- (And what any program kept of the library's modules, checked first.)
+  let library ← Target.libraryDir
+  let libraryKept ← if (← IO.getEnv "GLORIOUS_FRESH").isSome then pure []
+    else pure ((← Store.load (α := Check.Kept) (library / "units") "units").getD [])
+  let checkKept := checkKept ++ libraryKept
   -- (What certificate inference made the last time, by function and signature.)
   let memo ← if (← IO.getEnv "GLORIOUS_FRESH").isSome then pure {}
     else pure ((← Store.load (α := Infer.Memo) (dir / "infer") "infer").getD {})
   -- (The prelude and library as checked, by an earlier process of this
   -- compiler, for any program.)
-  let library ← Target.libraryDir
   let firsts ← if (← IO.getEnv "GLORIOUS_FRESH").isSome then pure [] else
     [(true, false), (true, true), (false, false), (false, true)].filterMapM fun (std, drop) => do
       pure (((← Store.load (α := List (Nat × Check.St)) (library / s!"first-{std}-{drop}") "first").bind
@@ -325,6 +329,12 @@ def compileFile (path : String) (checkKept : Check.Kept := []) (search : Bool :=
     unless c.inferMade.isEmpty do Store.save (dir / "infer") "infer" (Infer.toMemo c.inferMade)
     if let some ((std, drop), first) := c.firstMade then
       Store.save (library / s!"first-{std}-{drop}") "first" [first]
+    -- (The library's modules as this compile checked them, with those kept
+    -- before, newest first and no more than 32.)
+    let newKeys := c.libraryKept.map (·.1)
+    unless c.libraryKept.isEmpty || newKeys.all (fun k => libraryKept.any (·.1 == k)) do
+      Store.save (library / "units") "units"
+        ((c.libraryKept ++ libraryKept.filter fun (k, _) => !newKeys.contains k).take 32)
     if let some k := List.lookup ("%way", 0) c.places then Store.save (dir / "way") "way" k
     -- (`GLORIOUS_CORE`: the Core that was compiled, with what destroys what.)
     if (← IO.getEnv "GLORIOUS_CORE").isSome then

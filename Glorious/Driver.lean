@@ -57,6 +57,9 @@ structure Compiled where
   /-- The prelude (and library) as checked, where this compile checked it:
   for a later process, by whether the library is in and whether `Drop` is. -/
   firstMade : Option ((Bool × Bool) × (Nat × Check.St)) := none
+  /-- What the checker kept of the library's modules, for any program that
+  begins with them. -/
+  libraryKept : Check.Kept := []
 
 /-- Each place by the function it is in and how many places of that function
 come before it: what stays the same of a place when other functions change. -/
@@ -774,6 +777,8 @@ partial def compileSourceAt (src : String) (check : Bool := true)
     | .ok (count, _) => (unitsOf (all.drop count) resolved.info.unitUses).2
     | .error _ => []
   let units := unitList.map (fun (u : String × List Syntax.Item) => u.2)
+  -- (The library's modules among them, which come first.)
+  let library := (unitList.takeWhile fun (k, _) => k == "std" || k.startsWith "std::").length
   let infoKeys := unitList.zipIdx.map fun ((k, is), i) =>
     unitInfoKey resolved.info ((unitList.take i).map (·.1)) k is
   -- (And what the prelude and library checked first count, without marks.)
@@ -790,19 +795,20 @@ partial def compileSourceAt (src : String) (check : Bool := true)
     match check, resolved.info.shadowed, first with
     | true, false, .ok (count, first) =>
       Check.checkUnitsKept first (cut (all.drop count)) resolved.info (mixHash seed (hash count)) checkKept
+        (library := if (units.map List.length).sum == (all.drop count).length then library else 0)
     -- (A program that declares a name the prelude has: the prelude checked
     -- with it, as the first unit, and nothing taken as the program's own.)
     | true, true, .ok (count, _) =>
       Check.checkUnitsKept { dropMode := drops } ((all.take count, hash resolved.info.text) :: cut (all.drop count))
         resolved.info (mixHash seed 77) checkKept (own := false)
-    | _, _, _ => (Check.checkProgram all resolved.info drops).map (·, [])
+    | _, _, _ => (Check.checkProgram all resolved.info drops).map (·, [], [])
   -- (`..` in a tuple pattern: the checker says how many parts it stands
   -- for, and the program is read again with them written.)
   -- (A value used on one path and not on another, bound by `let`: kept in a
   -- variable, as `let mut` keeps it, and the program read again. If that is
   -- refused, what is said is why the value could not be left unused.)
   let rec checkWith (fuel : Nat) (all : List Syntax.Item) (first : Option String) :
-      List Syntax.Item × Except String (Elab.Blocks × Check.Kept) :=
+      List Syntax.Item × Except String (Elab.Blocks × Check.Kept × Check.Kept) :=
     match checkOnce all with
     | .ok blocks => (all, .ok blocks)
     | .error e =>
@@ -820,8 +826,8 @@ partial def compileSourceAt (src : String) (check : Bool := true)
   let all := match checked with
     | .ok (blocks, _) => Elab.argsChosenItems blocks.argsChosen (Elab.chosenItems blocks.dotChosen all)
     | .error _ => all
-  let (blocks, checkMade) ← match checked with
-    | .ok (blocks, made) => pure (some blocks, made)
+  let (blocks, checkMade, libraryMade) ← match checked with
+    | .ok (blocks, made, shared) => pure (some blocks, made, shared)
     | .error e =>
       let clean := fun (e : String) => Elab.withoutDotOwn (Elab.withoutRefPats e)
       match Elab.refPatsFound e, Elab.dotOwnFound e with
@@ -830,14 +836,14 @@ partial def compileSourceAt (src : String) (check : Bool := true)
           match compileSourceAt src check files few known packs kept checkKept (refPats ++ [found]) dotPicks search memo firsts with
           | .ok c => return c
           | .error e' => throw (clean e')
-        else if check then throw (clean e) else pure (none, [])
+        else if check then throw (clean e) else pure (none, [], [])
       | none, some found =>
         if check && dotPicks.length < 32 && !dotPicks.contains found then
           match compileSourceAt src check files few known packs kept checkKept refPats (dotPicks ++ [found]) search memo firsts with
           | .ok c => return c
           | .error e' => throw (clean e')
-        else if check then throw (clean e) else pure (none, [])
-      | none, none => if check then throw e else pure (none, [])
+        else if check then throw (clean e) else pure (none, [], [])
+      | none, none => if check then throw e else pure (none, [], [])
   -- Lifetimes were the checker's to read; and, of what is declared, the
   -- certificate's.
   let written := all
@@ -886,7 +892,7 @@ partial def compileSourceAt (src : String) (check : Bool := true)
       | some k => [(("%way", 0), k)]
       | none => []
     pure (⟨out.program, out.ctorNames.map shownName, out.fnNames, out.opNames, cert, 0, out.plain,
-      way ++ (placeKeys out.siteOwners).toList.map (fun k => (k, 0)), checkMade, made, firstMade⟩ : Compiled)
+      way ++ (placeKeys out.siteOwners).toList.map (fun k => (k, 0)), checkMade, made, firstMade, libraryMade⟩ : Compiled)
   -- A borrow given a name, or written as an argument of a call of a function,
   -- is a scope of its own in Core if the program can then be shown to follow
   -- every rule. Where it cannot, the borrow is the reference it borrows, as in
@@ -917,7 +923,7 @@ partial def compileSourceAt (src : String) (check : Bool := true)
           if out.lent != 0 && Typing.checkProgram cert out.program then
             some (⟨out.program, out.ctorNames.map shownName, out.fnNames, out.opNames, some cert, out.lent,
               out.plain, ((placeKeys out.siteOwners).toList.zip (List.range out.sites)).map
-                (fun (k, i) => (k, sites i)), checkMade, made, firstMade⟩ : Compiled)
+                (fun (k, i) => (k, sites i)), checkMade, made, firstMade, libraryMade⟩ : Compiled)
           else none
         | .error _ => none
     | .error _ => none
@@ -973,7 +979,7 @@ partial def compileSourceAt (src : String) (check : Bool := true)
                   if o.lent != 0 && Typing.checkProgram cert o.program then
                     Sum.inl (⟨o.program, o.ctorNames.map shownName, o.fnNames, o.opNames, some cert,
                       o.lent, o.plain, ((placeKeys o.siteOwners).toList.zip (List.range o.sites)).map
-                        (fun ((k : String × Nat), (i : Nat)) => (k, choice[i]?.getD 0)), checkMade, made, firstMade⟩ : Compiled)
+                        (fun ((k : String × Nat), (i : Nat)) => (k, choice[i]?.getD 0)), checkMade, made, firstMade, libraryMade⟩ : Compiled)
                   else Sum.inr (cert.sigs.filterMap fun (e : Typing.SigEntry) =>
                     match o.program.fns[e.fn]? with
                     | some F => if Typing.checkFn cert e F then none else some e.fn
