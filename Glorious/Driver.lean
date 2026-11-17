@@ -611,17 +611,17 @@ def withoutUnitMarks (items : List Syntax.Item) : List Syntax.Item :=
     | .fieldNames m [_] [] => m != Syntax.unitMark
     | _ => true
 
-/-- The prelude checked, once: how many items it is, and what the checker
-knows after it. A program that declares no name the prelude has is checked
-from there, against what the prelude declares. -/
-def checkedPrelude : Thunk (Except String (Nat × Check.St)) := Thunk.mk fun _ => do
-  let (prelude, _) ← readPrelude.get
-  let resolved ← Syntax.Modules.resolve prelude []
-  let all := withoutUnitMarks (Syntax.fillDefaults (← Syntax.expandAliases resolved.items))
-  pure (all.length, ← Check.checkFirst all resolved.info)
-
-/-- The prelude and the standard library checked, once. -/
-def checkedStd : Thunk (Except String (Nat × Check.St)) := Thunk.mk fun _ => do
+/-- The prelude, with the standard library if `std`, checked: how many items
+it is, and what the checker knows after it. A program that declares no name
+the prelude has is checked from there, against what the prelude declares.
+`drop`: for a program in which some type has `Drop`, checked so that a
+function is given how to destroy the types it is generic in. -/
+def checkFirstPart (std drop : Bool) : Except String (Nat × Check.St) := do
+  if !std then
+    let (prelude, _) ← readPrelude.get
+    let resolved ← Syntax.Modules.resolve prelude []
+    let all := withoutUnitMarks (Syntax.fillDefaults (← Syntax.expandAliases resolved.items))
+    return (all.length, ← Check.checkFirst all resolved.info drop)
   let (prelude, items) ← parseProgram "// std" []
   let resolved ← Syntax.Modules.resolve prelude items
   -- (Its modules in the order a program has them, marks and all, so that
@@ -633,29 +633,13 @@ def checkedStd : Thunk (Except String (Nat × Check.St)) := Thunk.mk fun _ => do
   let all := match all.getLast? with
     | some (.fieldNames m [""] []) => if m == Syntax.unitMark then all.dropLast else all
     | _ => all
-  pure (all.length, ← Check.checkFirst (withoutUnitMarks all) resolved.info)
+  pure (all.length, ← Check.checkFirst (withoutUnitMarks all) resolved.info drop)
 
-/-- The same two, for a program in which some type has `Drop`: checked so
-that a function is given how to destroy the types it is generic in. -/
-def checkedPreludeDrop : Thunk (Except String (Nat × Check.St)) := Thunk.mk fun _ => do
-  let (prelude, _) ← readPrelude.get
-  let resolved ← Syntax.Modules.resolve prelude []
-  let all := withoutUnitMarks (Syntax.fillDefaults (← Syntax.expandAliases resolved.items))
-  pure (all.length, ← Check.checkFirst all resolved.info true)
-
-def checkedStdDrop : Thunk (Except String (Nat × Check.St)) := Thunk.mk fun _ => do
-  let (prelude, items) ← parseProgram "// std" []
-  let resolved ← Syntax.Modules.resolve prelude items
-  -- (Its modules in the order a program has them, marks and all, so that
-  -- what a program has first is these, item for item.)
-  let (first, units) := unitsOf resolved.items resolved.info.unitUses
-  let items := first ++ units.flatMap (fun (k, is) => Syntax.Item.fieldNames Syntax.unitMark [k] [] :: is)
-  let all := Syntax.fillDefaults (← Syntax.expandAliases items)
-  -- (Without the first module's mark, at the end: it has nothing.)
-  let all := match all.getLast? with
-    | some (.fieldNames m [""] []) => if m == Syntax.unitMark then all.dropLast else all
-    | _ => all
-  pure (all.length, ← Check.checkFirst (withoutUnitMarks all) resolved.info true)
+/-- Each of those, checked once in a process. -/
+def checkedPrelude : Thunk (Except String (Nat × Check.St)) := Thunk.mk fun _ => checkFirstPart false false
+def checkedStd : Thunk (Except String (Nat × Check.St)) := Thunk.mk fun _ => checkFirstPart true false
+def checkedPreludeDrop : Thunk (Except String (Nat × Check.St)) := Thunk.mk fun _ => checkFirstPart false true
+def checkedStdDrop : Thunk (Except String (Nat × Check.St)) := Thunk.mk fun _ => checkFirstPart true true
 
 /-- Does some type of a program have `Drop`? -/
 partial def hasDrop : List Syntax.Item → Bool

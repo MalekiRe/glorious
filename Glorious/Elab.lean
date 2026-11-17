@@ -134,6 +134,25 @@ def longBorrows (site mode : Nat) (args : List Expr) : List Stmt × List Expr :=
   let lets := named.filterMap fun (_, b) => b.map fun (i, a) => Stmt.let_ (.var (nameOf i)) a
   (lets, named.map (·.1))
 
+/-- A call whose result is kept, by `make`, with borrows given to it that last
+while the result is used: the statements with each borrow named first, where
+`lends` says they are for this place, and only of a function or a callable
+the function was given. -/
+def namedBorrows (scope : Scope) (value : Expr) (make : Expr → Stmt) : M (Option (List Stmt)) := do
+  let .call id (.name q f) args := value | return none
+  let borrows := args.filter fun a => (borrowOf a).isSome
+  unless borrows.isEmpty do
+    modify fun s => { s with twoWays := s.sites :: s.twoWays }
+  let mode := (← read).lends (← get).sites
+  if borrows.isEmpty || mode < 2 then return none
+  match ← resolveName scope q f with
+  | .fn _ | .local _ =>
+    let site := (← get).sites
+    let (lets, args) := longBorrows site mode args
+    modify fun s => { s with sites := s.sites + 1, siteOwners := s.siteOwners.push s.owner }
+    pure (some (lets ++ [make (.call id (.name q f) args)]))
+  | _ => pure none
+
 mutual
 
 partial def elabExpr (scope : Scope) (tailPos : Bool) : Expr → M Atom
@@ -507,22 +526,8 @@ partial def elabStmts (scope : Scope) (tailPos : Bool) : List Stmt → M Atom
         return ← elabStmts scope tailPos (stmts ++ rest)
     -- And the borrows given to a function whose result is given a name,
     -- lasting while the result is used: each is named first.
-    if let .call id (.name q f) args := value then
-      let borrows := args.filter fun a => (borrowOf a).isSome
-      unless borrows.isEmpty do
-        modify fun s => { s with twoWays := s.sites :: s.twoWays }
-      let mode := (← read).lends (← get).sites
-      if !borrows.isEmpty && mode ≥ 2 then
-        -- (Of a function, or of a callable the function was given.)
-        let callable ← match ← resolveName scope q f with
-          | .fn _ => pure true
-          | .local _ => pure true
-          | _ => pure false
-        if callable then
-          let site := (← get).sites
-          let (lets, args) := longBorrows site mode args
-          modify fun s => { s with sites := s.sites + 1, siteOwners := s.siteOwners.push s.owner }
-          return ← elabStmts scope tailPos (lets ++ .let_ pat (.call id (.name q f) args) :: rest)
+    if let some stmts ← namedBorrows scope value (.let_ pat ·) then
+      return ← elabStmts scope tailPos (stmts ++ rest)
     let a ← elabExpr scope false value
     let scope ← bindLet scope pat a
     elabStmts scope tailPos rest
@@ -531,22 +536,8 @@ partial def elabStmts (scope : Scope) (tailPos : Bool) : List Stmt → M Atom
       return ← elabStmts scope tailPos (stmts ++ rest)
     -- The borrows given to a function whose result a variable keeps, as for
     -- a name: lasting while the result is used, each named first.
-    if let .call id (.name q f) args := value then
-      let borrows := args.filter fun a => (borrowOf a).isSome
-      unless borrows.isEmpty do
-        modify fun s => { s with twoWays := s.sites :: s.twoWays }
-      let mode := (← read).lends (← get).sites
-      if !borrows.isEmpty && mode ≥ 2 then
-        -- (Of a function, or of a callable the function was given.)
-        let callable ← match ← resolveName scope q f with
-          | .fn _ => pure true
-          | .local _ => pure true
-          | _ => pure false
-        if callable then
-          let site := (← get).sites
-          let (lets, args) := longBorrows site mode args
-          modify fun s => { s with sites := s.sites + 1, siteOwners := s.siteOwners.push s.owner }
-          return ← elabStmts scope tailPos (lets ++ .letMut x (.call id (.name q f) args) :: rest)
+    if let some stmts ← namedBorrows scope value (.letMut x ·) then
+      return ← elabStmts scope tailPos (stmts ++ rest)
     let a ← elabExpr scope false value
     -- The rest of the block runs in the scope of the variable's cell, which is
     -- released however the block is left. It is given the cell as its argument.

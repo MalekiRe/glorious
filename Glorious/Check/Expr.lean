@@ -27,6 +27,33 @@ def fieldThrough (scope : Scope) (id : Nat) (uniq : Bool) (x : String) (path : L
     { s with fieldSites := s.fieldSites.push (id, true, whole, numbered, chosen, s.owner, s.pos) }
   pure (.ref (if uniq then .uniq else .shared) field cap')
 
+/-- The variable an expression is, if it is one: its binding and its name. -/
+def namedVal (scope : Scope) : Expr → Option (Nat × String)
+  | .name none x => match scope.lookup x with
+    | some (.val _ bid) => some (bid, x)
+    | _ => none
+  | _ => none
+
+/-- A field of `subject`, written `e`, read: where `e` is a variable, the
+part read is noted (by number `idx`, or by `name` until its type says);
+otherwise, if `known`, what is not taken is let go, and if not, the whole. -/
+def readPart (scope : Scope) (e : Expr) (subject : Ty) (idx : Nat) (name : String) (known : Bool) :
+    M Unit := do
+  let why := "taking one field of a value lets go of the rest"
+  match namedVal scope e with
+  | some (bid, x) => modify fun s => { s with partReads := s.partReads.push (bid, x, subject, idx, name, s.pos) }
+  | none =>
+    unless known do return ← mustDrop subject why
+    -- A value that is in no variable and has a `drop` of its own to
+    -- run: taking a field of it would let it go without that.
+    ownDropRead subject
+    match ← otherFields subject idx with
+    | some rest =>
+      for r in rest do
+        mustDrop r why
+        modify fun s => { s with leftBehind := s.leftBehind.push (r, s.pos ++ why) }
+    | none => mustDrop subject why
+
 mutual
 
 partial def inferExpr (scope : Scope) (amb : Row) : Expr → M Ty
@@ -129,12 +156,7 @@ partial def inferExpr (scope : Scope) (amb : Row) : Expr → M Ty
       return ← inferExpr scope amb (.proj e n)
     let subject ← inferExpr scope amb e
     -- (Of which name it is a part, where it is one of a name's.)
-    let whose := match e with
-      | .name none x => match scope.lookup x with
-        | some (.val _ bid) => some bid
-        | _ => none
-      | _ => none
-    modify fun s => { s with aparts := s.aparts.push (subject, s.pos, whose) }
+    modify fun s => { s with aparts := s.aparts.push (subject, s.pos, (namedVal scope e).map (·.1)) }
     let unknown := match ← find subject with
       | .var _ => true
       | _ => false
@@ -150,38 +172,13 @@ partial def inferExpr (scope : Scope) (amb : Row) : Expr → M Ty
       modify fun s => { s with fieldReads := s.fieldReads.push (id, idx) }
       -- The fields not taken are what is let go. Of a name, that is seen
       -- once every part read of it is known: one name may give several.
-      let named := match e with
-        | .name none x => match scope.lookup x with
-          | some (.val _ bid) => some (bid, x)
-          | _ => none
-        | _ => none
-      match named with
-      | some (bid, x) =>
-        modify fun s => { s with partReads := s.partReads.push (bid, x, subject, idx, name, s.pos) }
-      | none =>
-        -- A value that is in no variable and has a `drop` of its own to
-        -- run: taking a field of it would let it go without that.
-        ownDropRead subject
-        match ← otherFields subject idx with
-        | some rest =>
-          for r in rest do
-            mustDrop r "taking one field of a value lets go of the rest"
-            modify fun s => { s with leftBehind := s.leftBehind.push (r, s.pos ++ "taking one field of a value lets go of the rest") }
-        | none => mustDrop subject "taking one field of a value lets go of the rest"
+      readPart scope e subject idx name true
       pure t
     | none =>
       -- Not known yet: settled once the rest of the function is inferred.
       -- (Of a name, the part read is noted, by its name until the type
       -- says which it is.)
-      let named := match e with
-        | .name none x => match scope.lookup x with
-          | some (.val _ bid) => some (bid, x)
-          | _ => none
-        | _ => none
-      match named with
-      | some (bid, x) =>
-        modify fun s => { s with partReads := s.partReads.push (bid, x, subject, Syntax.partUnknown, name, s.pos) }
-      | none => mustDrop subject "taking one field of a value lets go of the rest"
+      readPart scope e subject Syntax.partUnknown name false
       let t ← freshTy
       modify fun s => { s with namedReads := s.namedReads.push (subject, name, t, id, s.pos) }
       pure t
@@ -189,46 +186,16 @@ partial def inferExpr (scope : Scope) (amb : Row) : Expr → M Ty
     if let some field ← inferFieldOfPlace scope (.proj e idx) then return field
     let subject ← inferExpr scope amb e
     -- (Of which name it is a part, where it is one of a name's.)
-    let whose := match e with
-      | .name none x => match scope.lookup x with
-        | some (.val _ bid) => some bid
-        | _ => none
-      | _ => none
-    modify fun s => { s with aparts := s.aparts.push (subject, s.pos, whose) }
+    modify fun s => { s with aparts := s.aparts.push (subject, s.pos, (namedVal scope e).map (·.1)) }
     match ← fieldType subject idx with
     | some t =>
-      let named := match e with
-        | .name none x => match scope.lookup x with
-          | some (.val _ bid) => some (bid, x)
-          | _ => none
-        | _ => none
-      match named with
-      | some (bid, x) =>
-        modify fun s => { s with partReads := s.partReads.push (bid, x, subject, idx, toString idx, s.pos) }
-      | none =>
-        -- A value that is in no variable and has a `drop` of its own to
-        -- run: taking a field of it would let it go without that.
-        ownDropRead subject
-        match ← otherFields subject idx with
-        | some rest =>
-          for r in rest do
-            mustDrop r "taking one field of a value lets go of the rest"
-            modify fun s => { s with leftBehind := s.leftBehind.push (r, s.pos ++ "taking one field of a value lets go of the rest") }
-        | none => mustDrop subject "taking one field of a value lets go of the rest"
+      readPart scope e subject idx (toString idx) true
       pure t
     | none => do
       -- Not known yet: settle it once the rest of the function is inferred.
       -- (Of a name, the part read is noted as it is where the type is
       -- known: what the name's value is left with is seen once it is.)
-      let named := match e with
-        | .name none x => match scope.lookup x with
-          | some (.val _ bid) => some (bid, x)
-          | _ => none
-        | _ => none
-      match named with
-      | some (bid, x) =>
-        modify fun s => { s with partReads := s.partReads.push (bid, x, subject, idx, toString idx, s.pos) }
-      | none => mustDrop subject "taking one field of a value lets go of the rest"
+      readPart scope e subject idx (toString idx) false
       let t ← freshTy
       modify fun s => { s with projections := s.projections.push (subject, idx, t, s.pos) }
       pure t

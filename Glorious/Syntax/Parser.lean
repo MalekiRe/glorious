@@ -446,29 +446,11 @@ private partial def parseType : P TypeExpr := do
     pure (.name assocOfMark [self, .name trait [], .name name []])
   | .op "&" =>
     advance
-    let life ← match ← peek with
-      | .ident x =>
-        if x.startsWith "'" then
-          advance
-          pure (some x)
-        else pure none
-      | _ => pure none
-    let uniq := (← peek) == .ident "mut"
-    if uniq then advance
-    pure (.ref uniq (← parseType) life)
+    parseRefRest
   | .op "&&" =>
     -- `&&T` (and `&&'a mut T`), which the lexer reads as one symbol.
     advance
-    let life ← match ← peek with
-      | .ident x =>
-        if x.startsWith "'" then
-          advance
-          pure (some x)
-        else pure none
-      | _ => pure none
-    let uniq := (← peek) == .ident "mut"
-    if uniq then advance
-    pure (.ref false (.ref uniq (← parseType) life) none)
+    pure (.ref false (← parseRefRest) none)
   | .ident "_" =>
     advance
     pure .hole
@@ -561,35 +543,57 @@ private partial def parseResult : P TypeExpr := do
     advance
     -- One effect may be written without braces.
     let braced ← acceptPunct "{"
-    let mut effects : Array (String × List TypeExpr) := #[]
-    repeat
-      if braced && (← peek) == .punct "}" then break
-      -- `| e`: and whatever the row parameter `e` stands for.
-      if braced && ((← peek) == .op "|" || (← peek) == .punct "|") then
-        advance
-        -- (Several, with commas: the row has each of them in it.)
-        repeat
-          effects := effects.push (rowMark, [← if ← isOp "<" then parseType else do pure (.name (← expectPath) [])])
-          if !(← acceptPunct ",") then break
-        break
-      let name ← expectPath
-      let mut args : Array TypeExpr := #[]
-      if (← peek) == .op "<" then
-        advance
-        repeat
-          if (← peek) == .op ">" then break
-          args := args.push (← parseType)
-          if !(← acceptPunct ",") then break
-        match ← peek with
-        | .op ">" => advance
-        | _ => failAt "expected `>`"
-      effects := effects.push (name, args.toList)
-      if !braced then break
-      if (← peek) == .op "|" || (← peek) == .punct "|" then continue
-      if !(← acceptPunct ",") then break
-    if braced then expectPunct "}"
-    pure (.performs ret effects.toList)
+    pure (.performs ret (← parseEffects braced))
   else pure ret
+
+/-- Effects, `E, F<T> | e` up to and including the `}` if `braced`, and
+otherwise one. -/
+private partial def parseEffects (braced : Bool) : P (List (String × List TypeExpr)) := do
+  let mut effects : Array (String × List TypeExpr) := #[]
+  repeat
+    if braced && (← peek) == .punct "}" then break
+    -- `| e`: and whatever the row parameter `e` stands for.
+    if braced && ((← peek) == .op "|" || (← peek) == .punct "|") then
+      advance
+      -- (Several, with commas: the row has each of them in it.)
+      repeat
+        effects := effects.push (rowMark, [← if ← isOp "<" then parseType else do pure (.name (← expectPath) [])])
+        if !(← acceptPunct ",") then break
+      break
+    let name ← expectPath
+    effects := effects.push (name, ← parseTypeArgs)
+    if !braced then break
+    if (← peek) == .op "|" || (← peek) == .punct "|" then continue
+    if !(← acceptPunct ",") then break
+  if braced then expectPunct "}"
+  pure effects.toList
+
+/-- `<A, B>`, if written. -/
+private partial def parseTypeArgs : P (List TypeExpr) := do
+  let mut args : Array TypeExpr := #[]
+  if (← peek) == .op "<" then
+    advance
+    repeat
+      if (← peek) == .op ">" then break
+      args := args.push (← parseType)
+      if !(← acceptPunct ",") then break
+    match ← peek with
+    | .op ">" => advance
+    | _ => failAt "expected `>`"
+  pure args.toList
+
+/-- What follows `&`: a lifetime, `mut`, and the type. -/
+private partial def parseRefRest : P TypeExpr := do
+  let life ← match ← peek with
+    | .ident x =>
+      if x.startsWith "'" then
+        advance
+        pure (some x)
+      else pure none
+    | _ => pure none
+  let uniq := (← peek) == .ident "mut"
+  if uniq then advance
+  pure (.ref uniq (← parseType) life)
 
 /-- Types separated by commas up to and including the closing punctuation. An
 item may be written `name: Type`. -/
@@ -646,32 +650,7 @@ private def parseQuantity : P (Nat × Option Nat) := do
 /-- A row of effects in braces, `{E, F<T>}`. -/
 private partial def parseRow : P (List (String × List TypeExpr)) := do
   expectPunct "{"
-  let mut effects : Array (String × List TypeExpr) := #[]
-  repeat
-    if (← peek) == .punct "}" then break
-    -- `| e`: and whatever the row parameter `e` stands for.
-    if (← peek) == .op "|" || (← peek) == .punct "|" then
-      advance
-      repeat
-        effects := effects.push (rowMark, [← if ← isOp "<" then parseType else do pure (.name (← expectPath) [])])
-        if !(← acceptPunct ",") then break
-      break
-    let name ← expectPath
-    let mut args : Array TypeExpr := #[]
-    if (← peek) == .op "<" then
-      advance
-      repeat
-        if (← peek) == .op ">" then break
-        args := args.push (← parseType)
-        if !(← acceptPunct ",") then break
-      match ← peek with
-      | .op ">" => advance
-      | _ => failAt "expected `>`"
-    effects := effects.push (name, args.toList)
-    if (← peek) == .op "|" || (← peek) == .punct "|" then continue
-    if !(← acceptPunct ",") then break
-  expectPunct "}"
-  pure effects.toList
+  parseEffects true
 
 /-- The arguments of a callable as a bound writes them: `()`, `(A,)`,
 `(A, B)`. One argument has the comma, so that it is not `A` in brackets. -/
