@@ -27,6 +27,26 @@ def notTail (n : Nat) : String :=
   "fn count(i, n) { match(i == n) { Ok(_) => i, Err(_) => count(i + 1, n) } }
    fn main() { count(0, " ++ toString n ++ ") }"
 
+/-- Whether a program compiled with what the checker kept of another, which
+differs from it in the body of a function, gives what it gives compiled
+afresh. -/
+def keptAfterEdit (before after : String) : Bool :=
+  match compileSource before true [] (few := true) with
+  | .error _ => false
+  | .ok c =>
+    match compileSource after true [] (few := true) (checkKept := c.checkKept) with
+    | .error _ => false
+    | .ok c' => !c.checkKept.isEmpty && evalCompiled c' [] 200000 == evalSource after
+
+def keptProgram (body : String) : String :=
+  "mod m {
+    pub trait D { fn d(&Self) -> Int }
+    impl D for () { fn d(x) { " ++ body ++ " } }
+    impl<T> D for (Int, T) where T: D { fn d(p) { <T as D>::d(&p.1) + p.0 } }
+    pub fn go() -> Int { d(&(2, (3, ()))) }
+  }
+  fn main() -> Int { m::go() }"
+
 /-- Each thing asked, with its number. -/
 def all : List (Nat × (Unit → Bool)) := [
   -- Stack depth. An explicit tail call keeps no frame, and a library loop runs
@@ -339,7 +359,12 @@ def all : List (Nat × (Unit → Bool)) := [
     fn drop_it(c: fn() -> Int) -> Int { cancel(c); 7 }
     fn main() -> Int { let mut n = 0;
       let got = handle { defer say(9); let a = ask(); n = n + a; a }() { ask(k) => drop_it({ k(1) }) };
-      got + n }" == some true)
+      got + n }" == some true),
+  -- What the checker kept of a program is taken for the next only as that
+  -- program has it: an implementation's function written longer before
+  -- another implementation's moves where the other's calls are.
+  (95, fun _ => keptAfterEdit (keptProgram "1") (keptProgram "let z = 0; 1 + z")),
+  (96, fun _ => keptAfterEdit (keptProgram "let z = 0; 1 + z") (keptProgram "1"))
 ]
 
 end Glorious.Checks

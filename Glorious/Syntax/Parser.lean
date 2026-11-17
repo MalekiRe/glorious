@@ -1966,35 +1966,14 @@ private partial def parseItem : P Item := do
     match ← peek with
     | .ident "for" => advance
     | _ => failAt "expected `for`: `impl Trait for Type`, or `{`: `impl Type { fn .. }`"
-    -- What it is for: a type made with a name, or a tuple, with its
-    -- arguments. An argument that is one of the implementation's type
-    -- parameters, the first time it is written, is that parameter. Any other
-    -- is a type the argument has to be: `impl<T, R> Get<T> for (Column<T>,
-    -- R)` is for the pairs whose first part is a `Column<T>`.
-    let (head, written) ← match ← parseType with
-      | .tuple ts => pure (s!"(tuple{ts.length})", ts)
-      | .name h ts => pure (h, ts)
-      -- `impl<P, R> System for fn(P) -> R`: for the functions of one
-      -- argument that perform nothing. `impl<T> Fetch for &mut T`.
-      | .fn ps r => pure (s!"(fn{ps.length})", ps ++ [r])
-      | .ref true t _ => pure ("(&mut)", [t])
-      | .ref false t _ => pure ("(&)", [t])
-      | _ => failAt "an implementation is for a type made with a name, a tuple, a function or a reference"
-    let mut names : Array String := #[]
-    let mut fresh : Array String := #[]
-    for (t, j) in written.zipIdx do
-      let plain := match t with
-        | .name p [] => if params.contains p && !names.contains p then some p else none
-        | _ => none
-      match plain with
-      | some p => names := names.push p
-      | none =>
-        let name := s!"%fixed{j}"
-        names := names.push name
-        fresh := fresh.push name
-        given := given.push (.typeAlias (fixedArgName j) [] t)
-    let args := names.toList
-    let params := params ++ fresh.toList
+-- What it is for: a type made with a name, a tuple, a callable or a
+    -- reference, or a type parameter said to be a callable.
+    let target ← parseType
+    -- (`impl<F: Fn<(A,), Output = R>> T for F`: what is asked of `F` is what
+    -- it is, a callable, so it is not asked as a trait is.)
+    let callableBound := fun (b : Bound) => b.trait == "Fn" || b.trait == "RunsIn"
+    let mut calls : Array Bound := (early.filter callableBound).toArray
+    let early := early.filter (!callableBound ·)
     let mut context : Array (String × String) := #[]
     -- (What `impl<T: Show>` asked of its parameters, as `where` asks it.)
     for b in early do
@@ -2018,6 +1997,13 @@ private partial def parseItem : P Item := do
           given := given.push (.typeAlias (ctxSubjectName context.size) [] subject)
           pure s!"%subject{context.size}"
         expectPunct ":"
+        if named && params.contains p then
+          match ← peek with
+          | .ident "Fn" | .ident "RunsIn" | .ident "for" =>
+            calls := calls ++ (← parseBoundsOf p).toArray
+            if !(← acceptPunct ",") then break
+            continue
+          | _ => pure ()
         let asked ← expectPath
         context := context.push (p, asked)
         -- `I: Iterator<Item = A>`: what the trait leaves to `I`'s
@@ -2038,6 +2024,65 @@ private partial def parseItem : P Item := do
             if !(← acceptPunct ",") then break
           expectOp ">"
         if !(← acceptPunct ",") then break
+    -- A type parameter said to be a callable is that callable's type:
+    -- `F: Fn<(A, B), Output = R, Effects = {E}>` is `fn(A, B) -> R / {E}`,
+    -- wherever the implementation writes `F`. Where nothing is said of what
+    -- it gives, that is a type parameter of its own.
+    let mut callable : List (String × TypeExpr) := []
+    let mut outputs : Array String := #[]
+    for b in calls do
+      unless params.contains b.subject do
+        failAt s!"`{b.subject}: {b.trait}`: `{b.subject}` is not a type parameter of the implementation"
+      if (callable.lookup b.subject).isSome then
+        failAt s!"`{b.subject}` is said twice to be a callable"
+      unless b.ranked.isEmpty do
+        failAt s!"`{b.subject}: for<..> {b.trait}`: an implementation is not for a callable at every lifetime"
+      for (name, _) in b.assoc do
+        unless name == "Output" || name == "Effects" do
+          failAt s!"`{b.subject}: {b.trait}`: `{name}` cannot be said of a callable here (`Output` and `Effects` can)"
+      let takes := if b.trait == "RunsIn" then b.args.drop 1 else b.args
+      let out ← match b.assoc.lookup "Output" with
+        | some t => pure t
+        | none =>
+          let name := s!"%output{outputs.size}"
+          outputs := outputs.push name
+          pure (TypeExpr.name name [])
+      let result := match b.assoc.lookup "Effects" with
+        | some (.performs _ effects) => TypeExpr.performs out effects
+        | _ => out
+      callable := callable ++ [(b.subject, .fn takes result)]
+    let params := params.filter (fun p => (callable.lookup p).isNone) ++ outputs.toList
+    given := given.map fun
+      | .typeAlias n ps body => .typeAlias n ps (substTypeExpr callable body)
+      | item => item
+    -- An argument that is one of the implementation's type parameters, the
+    -- first time it is written, is that parameter. Any other is a type the
+    -- argument has to be: `impl<T, R> Get<T> for (Column<T>, R)` is for the
+    -- pairs whose first part is a `Column<T>`.
+    let (head, written) ← match substTypeExpr callable target with
+      | .tuple ts => pure (s!"(tuple{ts.length})", ts)
+      | .name h ts => pure (h, ts)
+      -- `impl<P, R> System for fn(P) -> R`: for the functions of one
+      -- argument that perform nothing. `impl<T> Fetch for &mut T`.
+      | .fn ps r => pure (s!"(fn{ps.length})", ps ++ [r])
+      | .ref true t _ => pure ("(&mut)", [t])
+      | .ref false t _ => pure ("(&)", [t])
+      | _ => failAt "an implementation is for a type made with a name, a tuple, a function or a reference"
+    let mut names : Array String := #[]
+    let mut fresh : Array String := #[]
+    for (t, j) in written.zipIdx do
+      let plain := match t with
+        | .name p [] => if params.contains p && !names.contains p then some p else none
+        | _ => none
+      match plain with
+      | some p => names := names.push p
+      | none =>
+        let name := s!"%fixed{j}"
+        names := names.push name
+        fresh := fresh.push name
+        given := given.push (.typeAlias (fixedArgName j) [] t)
+    let args := names.toList
+    let params := params ++ fresh.toList
     expectPunct "{"
     let mut methods : Array Item := given
     repeat

@@ -443,7 +443,7 @@ impl<..T, X> Then<X> for (..T) { type Out = (..T, X); fn then(t, x) { let (..t) 
 // A function called with what was gathered for it, its arguments in order.
 // What it gives back is what the call gives.
 pub trait CallWith<G, O> { fn call_with(&Self, G) -> O }
-impl<G, ..P, O> CallWith<G, O> for fn(..P) -> O where G: Gathered<Flat = (..P)> {
+impl<G, ..P, O, F: Fn<(..P), Output = O>> CallWith<G, O> for F where G: Gathered<Flat = (..P)> {
     fn call_with(f, g) { let (..p) = flatten(g); (*f)(..p) }
 }
 
@@ -552,10 +552,10 @@ impl<E, S, X, Y> System<E, S> for (X, Y) where X: System<E, S>, Y: System<E, S> 
 }
 // A function, of however many parameters, each asking for something, no
 // two for the same.
-impl<E, S, ..P, ..A, L> System<E, S> for fn(..P) -> ()
-    where ..P: Parameter<Asks = A>, (..A): Tuple<Nested = L>, L: AllApart, L: Fetch<E, S, (), fn(..P) -> (), ()> {
+impl<E, S, ..P, ..A, L, F> System<E, S> for F
+    where F: Fn<(..P), Output = ()>, ..P: Parameter<Asks = A>, (..A): Tuple<Nested = L>, L: AllApart, L: Fetch<E, S, (), F, ()> {
     fn run(f, event, world, commands) {
-        <L as Fetch<E, S, (), fn(..P) -> (), ()>>::fetch(event, world, commands, (), f);
+        <L as Fetch<E, S, (), Self, ()>>::fetch(event, world, commands, (), f);
     }
 }
 

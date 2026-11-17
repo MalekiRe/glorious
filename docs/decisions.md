@@ -4713,6 +4713,37 @@ runtime library (median of 5): system `ld` 0.124 s, wild 0.029 s, lld 0.042 s,
 mold 0.048 s. The VM, which is the stub, is linked with wild through clang
 (`vm/.cargo/config.toml`; both must be on the PATH to build it).
 
+## Implementations for callables: `impl<F: Fn<..>> Trait for F`
+
+A type parameter of an implementation that is said to be a callable,
+`impl<F: Fn<(A, B), Output = R, Effects = {E}>>` or `where F: Fn<..>` (also
+`RunsIn`), is that callable's type, `fn(A, B) -> R / {E}`, wherever the
+implementation's head and conditions write it. This happens in the parser,
+before anything else reads the implementation. Where `Output` is not said, the
+result is a type parameter of the implementation's own; where `Effects` is
+not said, the callable performs nothing, as `fn(..) -> R` in a head always
+meant. `(..P)` works, so covey's `System` and `CallWith` are now
+`impl<.., F> System<E, S> for F where F: Fn<(..P), Output = ()>`. `F` is not
+named inside the functions; `Self` is. `Self` in an implementation's
+function is now the type the implementation is for (before, it was unknown).
+
+This is the first step. Callables still have one structural type each, so
+`F` is a signature, not a single item's identity. The agreed next step gives
+each item and closure a type of its own, which converts implicitly to the
+structural type, as Rust's items do to function pointers.
+
+Found while doing this: what the checker kept from an earlier compile
+(`checked`) carried that compile's implementation functions. Declarations
+are keyed without bodies, and a state taken from a group is the whole state,
+so an implementation function that was checked again was checked with the old
+text. Call identities are token positions, so after an edit above it the
+elaborator found no record for the new call (`unknown name ecs::dispatch`
+after a body edit in covey). Every state taken from what was kept now has
+this program's implementation functions put in, matched by order and trait
+(`withImplBodies`); where they do not line up, nothing is taken. Checks 95
+and 96 compile a program with what was kept of a version that differs in one
+body, both ways, and fail without the fix.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by

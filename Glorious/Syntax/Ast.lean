@@ -412,6 +412,24 @@ partial def TypeExpr.withSelf (self : TypeExpr) : TypeExpr → TypeExpr
   | .never => .never
   | .hole => .hole
 
+/-- A type with each of the named parameters replaced. -/
+partial def substTypeExpr (m : List (String × TypeExpr)) : TypeExpr → TypeExpr
+  | .name x args =>
+    match m.lookup x, args with
+    | some t, [] => t
+    | _, _ => .name x (args.map (substTypeExpr m))
+  | .tuple args => .tuple (args.map (substTypeExpr m))
+  | .fn ps r => .fn (ps.map (substTypeExpr m)) (substTypeExpr m r)
+  | .performs r effects =>
+    .performs (substTypeExpr m r) (effects.map fun (e, args) => (e, args.map (substTypeExpr m)))
+  | .ref uniq t life =>
+    -- A lifetime parameter is replaced by the lifetime it is given.
+    let life := match life.bind fun l => m.lookup l with
+      | some (TypeExpr.name l []) => some l
+      | _ => life
+    .ref uniq (substTypeExpr m t) life
+  | t => t
+
 /-- A type as it is written in the name of a trait at its arguments,
 `From<Option<Int>>`: one spelling for one type. -/
 partial def TypeExpr.spell : TypeExpr → String

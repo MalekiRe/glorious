@@ -3651,6 +3651,18 @@ def cases : List Case := [
     [], "5"⟩,
   ⟨"fn f(c: Int) -> u8 { match(c) { 1 => say(1); 5, _ => 10 } }\nfn main() -> Int { int(f(1)) }",
     [], "1\n5"⟩,
+  -- An implementation for every callable of a shape: `F: Fn<..>` is the callable's type.
+  ⟨"trait Twice { fn twice(&Self, Int) -> Int }\nimpl<F: Fn<(Int,), Output = Int>> Twice for F { fn twice(f, x) { (*f)((*f)(x)) } }\nfn inc(x: Int) -> Int { x + 1 }\nfn main() -> Int { let f = inc; let k = 3; let g = fn(x: Int) -> Int { x * k }; twice(&f, 5) + twice(&g, 1) }",
+    [], "16"⟩,
+  ⟨"trait Describe { fn describe(&Self) -> Int }\nimpl<F, R> Describe for F where F: Fn<(Int,), Output = R> { fn describe(f) { 1 } }\nimpl<F> Describe for F where F: Fn<(Int, Int)> { fn describe(f) { 2 } }\nimpl Describe for Int { fn describe(n) { 100 } }\nfn add(x: Int, y: Int) -> Int { x + y }\nfn neg(x: Int) -> Bool { x < 0 }\nfn main() -> Int { let a = add; let n = neg; describe(&a) + describe(&n) + describe(&5) }",
+    [], "103"⟩,
+  ⟨"trait Count { fn count(&Self) -> Int }\nimpl<..P, F: Fn<(..P), Output = ()>> Count for F { fn count(f) { 7 } }\nimpl<X, Y> Count for (X, Y) where X: Count, Y: Count { fn count(p) { count(&p.0) + count(&p.1) } }\nfn a(x: Int) { () }\nfn b(x: Int, y: Bool) { () }\nfn main() -> Int { count(&(a, b)) }",
+    [], "14"⟩,
+  -- (`Self` in an implementation's function is the type it is for.)
+  ⟨"trait Size { fn size() -> Int }\nimpl Size for Int { fn size() { 8 } }\nimpl<A, B> Size for (A, B) where A: Size, B: Size { fn size() { <A as Size>::size() + <B as Size>::size() } }\ntrait Twice { fn twice(&Self) -> Int }\nimpl<A, B> Twice for (A, B) where A: Size, B: Size { fn twice(p) { 2 * <Self as Size>::size() } }\nfn main() -> Int { twice(&(1, 2)) }",
+    [], "32"⟩,
+  ⟨"trait T { fn t(&Self) -> Int }\nimpl<F: Fn<(Int,)>> T for G { fn t(f) { 1 } }\nfn main() -> Int { 0 }",
+    [], "error: `impl T for G`: unknown type `G`"⟩,
   -- (An element of what a reference is to is borrowed through it.)
   ⟨"fn first(r: &[Int]) -> Int { let e = &r[0]; *e }\nfn main() -> Int { first(&[7, 8]) }",
     [], "7"⟩,

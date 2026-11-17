@@ -1215,6 +1215,8 @@ def checkGroup (decls : List FnDecl) : M Unit := do
               else if im.head == "(&mut)" then pure (Ty.ref Ty.uniq (parts.headD .unit) (← freshCap))
               else if im.head == "(&)" then pure (Ty.ref Ty.shared (parts.headD .unit) (← freshCap))
               else pure (Ty.con im.head parts)
+            -- (`Self` written in its body is that type.)
+            modify fun s => { s with rigidParams := s.rigidParams ++ [("Self", self)] }
             -- The trait at the arguments the implementation gives it, and the
             -- types it leaves to the implementation as the implementation says.
             let own := im.pvars.filterMap fun (p, id) => (rigid.lookup p).map fun t => (id, t)
@@ -1381,6 +1383,20 @@ partial def withoutBodies : Item → Item
 def groupKey (key : UInt64) (group : List FnDecl) : UInt64 :=
   group.foldl (fun h d => mixHash h (hash (d.name, d.params, d.annots, d.ret, d.clauses, d.bounds))) key
 
+/-- A state kept from an earlier check, with the functions of the
+implementations declared after the first `before` replaced by `written`
+(each implementation's trait and functions, in the order written), where
+those line up: none where they do not. -/
+def withImplBodies (st : St) (before : Nat) (written : List (String × List Item)) : Option St :=
+  let given := st.impls.toList.drop before
+  if written.length ≤ given.length && (written.zip given).all (fun (w, im) => w.1 == im.trait) then
+    let replaced : List ImplDecl := given.zipIdx.map fun (im, k) =>
+      match written[k]? with
+      | some w => { im with methods := w.2 }
+      | none => im
+    some { st with impls := ((st.impls.toList.take before) ++ replaced).toArray }
+  else none
+
 /-- Check items. With `kept` from an earlier check of a program that began
 alike (`seed`: what was checked before them), the state after each step whose
 key is among them is taken from there instead of checked again: the
@@ -1433,7 +1449,17 @@ def checkItems (items : List Item) (seed : UInt64 := 0) (kept : Kept := []) : M 
     let before := (← get).impls.size
     let mut made : Kept := []
     let mut key := mixHash seed (hash (items.map withoutBodies))
-    match kept.lookup key with
+    -- (A state kept from before has the implementations that program
+    -- declared, each with its functions whole; the declarations do not
+    -- depend on the bodies, so the ones put in their place are this
+    -- program's, in the order its implementations are written. Where they
+    -- do not line up, nothing kept is taken.)
+    let written : List (String × List Item) := items.filterMap fun
+      | .impl _ tr _ _ _ methods => some (tr, methods)
+      | _ => none
+    let ours := fun (st : St) => withImplBodies st before written
+    let look := fun (k : UInt64) => (kept.lookup k).bind ours
+    match look key with
     | some st => set st
     | none =>
       declare items
@@ -1457,7 +1483,7 @@ def checkItems (items : List Item) (seed : UInt64 := 0) (kept : Kept := []) : M 
     let groups := (components names deps).map fun comp => comp.filterMap fun n => decls.find? (·.name == n)
     for (group, k) in groups.zipIdx do
       key := groupKey key group
-      match kept.lookup key with
+      match look key with
       | some st => restore st ((groups.drop (k + 1)).flatten)
       | none => checkGroup group
       made := (key, ← get) :: made
@@ -1476,7 +1502,7 @@ def checkItems (items : List Item) (seed : UInt64 := 0) (kept : Kept := []) : M 
                                 params := im.params ++ inner ++ sig.mparams.map (·.1) ++ lifetimes, annots,
                                 ret, clauses, impl := some (im, sig) }
             key := groupKey key [d]
-            match kept.lookup key with
+            match look key with
             | some st => restore st []
             | none => checkGroup [d]
             made := (key, ← get) :: made
