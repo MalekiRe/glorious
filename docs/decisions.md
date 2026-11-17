@@ -4968,6 +4968,28 @@ Ways left:
 
 Parked: 22 ms is about 8% of an edit recompile of the simulation (0.27 s).
 
+## A unit that is the same is kept whole, and only whole
+
+`Check.checkItems` keys the unit's final state by every item whole
+(`mixHash seed (hash items)`); `checkUnitsKept` chains the next unit from
+that key. Where the key is kept, the unit is set to that state at once and
+nothing else of it is looked up or kept. Only a unit that changed keeps a
+state per step (declarations, each group, each implementation function).
+Kept states fell from 229 to 14 for the simulation after one edit, and
+`checked` from 6.3 MB to 1.4 MB.
+
+Saving the checker's states had become the largest single cost of an edit
+recompile: 64 of 277 ms for the simulation (optimized build). The compactor
+walks every object of every state.
+
+Cost: the first compile after editing a unit that had been kept whole checks
+that unit from its start, not from the edited group. From then on its steps
+are kept again.
+
+Measured (optimized build, edit of `main`, median of 5, before → after):
+simulation 0.27 → 0.20 s, calculator 0.31 → 0.17 s, orders 0.22 → 0.20 s,
+despawn 0.21 → 0.15 s, json 0.20 → 0.11 s, shapes 0.10 → 0.09 s.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by

@@ -1415,7 +1415,9 @@ declarations' key is of every item without the bodies of its functions, each
 group's is of the key before it and the group's functions whole. A step
 depends on no more than that: a group follows calls only into groups before
 it. What the functions of later groups are is put back as this program has
-them. Gives what this check kept. -/
+them. Gives what this check kept, the state after all of it first, under a
+key of every item whole: where that is kept, nothing else is looked at, and
+nothing else is kept. -/
 def checkItems (items : List Item) (seed : UInt64 := 0) (kept : Kept := []) : M Kept := do
   let written := items.filterMap fun
     | .bounds fn bounds => some (fn, bounds)
@@ -1457,6 +1459,12 @@ def checkItems (items : List Item) (seed : UInt64 := 0) (kept : Kept := []) : M 
   let deps := fun (name : String) =>
     if builtFrom.contains name then mentions name else (mentions name ++ coercing).eraseDups
   do
+    -- (The unit whole, as an earlier compile left it: every step taken from
+    -- there at once. A unit that is the same keeps only this.)
+    let whole := mixHash seed (hash items)
+    if let some st := kept.lookup whole then
+      set st
+      return [(whole, st)]
     let before := (← get).impls.size
     let mut made : Kept := []
     let mut key := mixHash seed (hash (items.map withoutBodies))
@@ -1524,7 +1532,7 @@ def checkItems (items : List Item) (seed : UInt64 := 0) (kept : Kept := []) : M 
     checkDrops (← get).lateDrops
     checkStays (← get).lateStays
     modify fun s => { s with lateDups := #[], lateDrops := #[], lateStays := #[] }
-    pure made
+    pure ((whole, ← get) :: made)
 
 /-- The declared types a type is made of. -/
 partial def namedIn : Ty → List String
