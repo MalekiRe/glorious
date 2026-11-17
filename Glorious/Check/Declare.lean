@@ -128,6 +128,15 @@ partial def resolveType (params : List (String × Ty)) (decl : Bool) : TypeExpr 
       else
         match (← get).types.lookup x with
         | some d =>
+          -- (Its lifetimes not written, `WorldQuery<'_, Q>` or `WorldQuery<Q>`:
+          -- each is one left to be found, as in a reference written `&T`.)
+          let args := if d.arity != args.length && (d.kinds.filter (!·)).length == args.length then
+              (d.kinds.foldl (fun (acc, rest) life =>
+                if life then (acc ++ [TypeExpr.name "'_" []], rest)
+                else match rest with
+                  | a :: more => (acc ++ [a], more)
+                  | [] => (acc, [])) (([] : List TypeExpr), args)).1
+            else args
           if d.arity != args.length then
             throw s!"type `{x}` takes {d.arity} arguments, but is given {args.length}"
           for (life, a) in d.kinds.zip args do

@@ -3703,6 +3703,10 @@ def cases : List Case := [
   -- a type parameter the trait is written of, and with the trait said.)
   ⟨"trait Tr<S> { type Had; fn had(Self) -> Self::Had }\nimpl<S> Tr<S> for Int { type Had = Str; fn had(x) { \"a\" } }\nimpl<S> Tr<S> for Str { type Had = Int; fn had(x) { 5 } }\nfn go<B, S>(b: B) -> B::Had where B: Tr<S> { <B as Tr<S>>::had(b) }\nfn again<B, S>(b: B) -> <B as Tr<S>>::Had where B: Tr<S> { <B as Tr<S>>::had(b) }\nfn main() -> Int { say(go<Int, ()>(3)); say(again<Int, Int>(4)); go<Str, Int>(\"x\") + again<Str, ()>(\"y\") }",
     [], "a\na\n10"⟩,
+  -- (Where a value is let go, numbered apart from where another module's
+  -- are, though the modules are checked side by side.)
+  ⟨"use core::iter::{into_iter, next};\nstruct D { n: Int }\nimpl Drop for D { fn drop(d) { say(d.n) } }\nfn apply<S>(queue: [S]) -> Int {\n    let mut each = into_iter(queue);\n    match(next(&mut each)) { Some(_) => 1, None => 0 }\n}\nfn main() -> Int { let d = D { n: 4 }; apply([d]) + apply([1, 2]) }",
+    [], "4\n2"⟩,
   -- (An element of what a reference is to is borrowed through it.)
   ⟨"fn first(r: &[Int]) -> Int { let e = &r[0]; *e }\nfn main() -> Int { first(&[7, 8]) }",
     [], "7"⟩,
