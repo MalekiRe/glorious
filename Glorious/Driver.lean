@@ -857,6 +857,12 @@ partial def compileSourceAt (src : String) (check : Bool := true)
       | .ok _ => pure ()
   let all := Elab.reachable roots all
   let declared := Elab.withDeclared written all
+  -- (What a compile gives, from what was elaborated and certified.)
+  let compiled := fun (out : Elab.Output) (cert : Option Typing.Cert) (lent : Nat)
+      (places : List ((String × Nat) × Nat)) (made : Infer.Made) =>
+    ({ core := out.program, ctorNames := out.ctorNames.map shownName, fnNames := out.fnNames
+       opNames := out.opNames, cert, lent, plain := out.plain, places, checkKept := checkMade
+       inferMade := made, firstMade, libraryKept := libraryMade } : Compiled)
   let plain := fun (blocks : Option Elab.Blocks) (failed : List (Bool × Bool)) => do
     let out ← Elab.elabProgram all blocks
     -- What is unsafe is outside what Core's rules are about: a program that
@@ -873,8 +879,7 @@ partial def compileSourceAt (src : String) (check : Bool := true)
     let way := match way with
       | some k => [(("%way", 0), k)]
       | none => []
-    pure (⟨out.program, out.ctorNames.map shownName, out.fnNames, out.opNames, cert, 0, out.plain,
-      way ++ (placeKeys out.siteOwners).toList.map (fun k => (k, 0)), checkMade, made, firstMade, libraryMade⟩ : Compiled)
+    pure (compiled out cert 0 (way ++ (placeKeys out.siteOwners).toList.map (fun k => (k, 0))) made)
   -- A borrow given a name, or written as an argument of a call of a function,
   -- is a scope of its own in Core if the program can then be shown to follow
   -- every rule. Where it cannot, the borrow is the reference it borrows, as in
@@ -903,9 +908,8 @@ partial def compileSourceAt (src : String) (check : Bool := true)
         match certifyWith kept declared out.program true out.envSizes true true ranked false memo with
         | .ok (cert, accepted, made) =>
           if out.lent != 0 && accepted then
-            some (⟨out.program, out.ctorNames.map shownName, out.fnNames, out.opNames, some cert, out.lent,
-              out.plain, ((placeKeys out.siteOwners).toList.zip (List.range out.sites)).map
-                (fun (k, i) => (k, sites i)), checkMade, made, firstMade, libraryMade⟩ : Compiled)
+            some (compiled out (some cert) out.lent
+              (((placeKeys out.siteOwners).toList.zip (List.range out.sites)).map fun (k, i) => (k, sites i)) made)
           else none
         | .error _ => none
     | .error _ => none
@@ -959,9 +963,9 @@ partial def compileSourceAt (src : String) (check : Bool := true)
                 match certifyWith kept declared o.program true o.envSizes true true ranked false memo with
                 | .ok (cert, accepted, made) =>
                   if o.lent != 0 && accepted then
-                    Sum.inl (⟨o.program, o.ctorNames.map shownName, o.fnNames, o.opNames, some cert,
-                      o.lent, o.plain, ((placeKeys o.siteOwners).toList.zip (List.range o.sites)).map
-                        (fun ((k : String × Nat), (i : Nat)) => (k, choice[i]?.getD 0)), checkMade, made, firstMade, libraryMade⟩ : Compiled)
+                    Sum.inl (compiled o (some cert) o.lent
+                      (((placeKeys o.siteOwners).toList.zip (List.range o.sites)).map
+                        fun ((k : String × Nat), (i : Nat)) => (k, choice[i]?.getD 0)) made)
                   else Sum.inr (cert.sigs.filterMap fun (e : Typing.SigEntry) =>
                     match o.program.fns[e.fn]? with
                     | some F => if Typing.checkFn cert e F then none else some e.fn
