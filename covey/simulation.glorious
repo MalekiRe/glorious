@@ -68,7 +68,7 @@ fn wound(hit: &Hit, healths: &mut Column<Health>) {
 }
 
 // And what has no health left ends, and is counted.
-fn reap(healths: &Column<Health>, commands: &mut Commands, ended: &mut Ended) {
+fn reap<S>(healths: &Column<Health>, commands: &mut Commands<S>, ended: &mut Ended) {
     let mut i = 0;
     while({ i < len_at(&healths.dense) }) {
         if(healths.dense[i].0 <= 0) { commands.end(healths.owners[i]); ended.0 = ended.0 + 1 } else { () };

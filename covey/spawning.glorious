@@ -13,7 +13,7 @@ struct Sprout(Int)
 struct Grow
 
 // Each seed puts out a sprout as tall as the seed is old.
-fn sprout(seeds: &Column<Seed>, sprouts: &mut Column<Sprout>, commands: &mut Commands) {
+fn sprout<S>(seeds: &Column<Seed>, sprouts: &mut Column<Sprout>, commands: &mut Commands<S>) {
     let mut i = 0;
     while({ i < len_at(&seeds.dense) }) {
         let made = commands.reserve();

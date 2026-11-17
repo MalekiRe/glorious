@@ -3111,9 +3111,12 @@ where
             | .punct "(" => depth := depth + 1
             | .punct "[" => depth := depth + 1
             | .punct "{" => depth := depth + 1
+            | .op "<" => depth := depth + 1
             | .punct ")" => depth := depth - 1
             | .punct "]" => depth := depth - 1
             | .punct "}" => depth := depth - 1
+            -- (A type's arguments, `Query<Q, N, St>`, are inside it.)
+            | .op ">" => if depth > 0 then depth := depth - 1
             | .punct "," => if depth == 0 then commas := commas + 1
             | _ => pure ()
           if commas == 0 && out.size > opened + 1 && !callLike out opened then

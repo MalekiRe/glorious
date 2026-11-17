@@ -5116,12 +5116,21 @@ Covey is the toolbox for finding what the language lacks. Rewriting it after
   - what the others said of associated types is settled between rounds;
   - the fourth round refuses what is left.
 
-  This is not enough for covey's `Commands<_>`. The world's type reaches a
+  This was not enough for covey's `Commands<_>`. The world's type reached a
   system's `Commands<S>` only through the associated types `Gathered::Flat`
-  and `Then::Out` of `CallWith`. Those are found, but the variable in the
-  system's type is not decided by them. Open; covey is being rewritten so
-  that a system's arguments are gathered flat (`(..G, X)`), which the
-  implementations' own arguments decide.
+  and `Then::Out` of `CallWith`, which did not decide the variable. Covey now
+  gathers a system's arguments flat (`Fetch<E, S, (..G), F, O>`, the next
+  `(..G, X)`), which the implementations' own arguments decide. Deciding a
+  variable through a chain of associated types is still open.
+- **A tuple of one written out from a list** (`(..G, &mut Query<Q, N,
+  St>)` with `G` empty) was counted as having parts at the commas of the type
+  arguments, so it was written `(&mut Query<..>)`, a type in brackets. The
+  commas inside `<..>` are now inside. Fixed.
+- **A bound whose type was not known when bounds were keyed**, of a trait
+  with several implementations for one head, kept the trait's plain name and
+  so found the first implementation. ("No implementation of `Columns` was
+  found; this is a compiler defect" for `(Resource<Ended>, ..)`.) Each bound
+  now chooses among the implementations when it is met. Fixed.
 
 ## Other standing decisions
 

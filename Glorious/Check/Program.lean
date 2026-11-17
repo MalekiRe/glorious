@@ -835,6 +835,15 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
    let now := waiting
    waiting := []
    for b in now do
+    -- (One whose type was not known when the others were keyed, as one that
+    -- waited: which of several implementations of its trait for the type it
+    -- now has.)
+    let b ← do
+      let head := (← find b.ty).head.map (·.1)
+      let several := ((← implsOfBase (Syntax.traitBase b.trait)).filter fun im => some im.head == head).length > 1
+      if (← get).patterned && several && b.trait == Syntax.traitBase b.trait then
+        pure { b with trait := ← implKey b.trait b.ty b.args }
+      else pure b
     let givens := (givensOf.lookup b.owner).getD []
     -- What `Traits.coherent` asks of the assumptions.
     unless Traits.distinct givens do
