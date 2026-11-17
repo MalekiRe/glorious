@@ -4946,6 +4946,57 @@ recompile of the simulation: about 0.37 s):
   the lexer work. For us they are about 9% of an edit recompile, so the
   repeated work (each text lexed about four times) comes first.
 
+## Notes: what makes Jai's compiler fast, and what applies here
+
+Sources:
+- The Way to Jai, ch. 4: https://github.com/Ivo-Balbaert/The_Way_to_Jai/blob/main/book/04A_More_info_about_the_compiler.md
+- An independent Jai compiler's measured compile-speed notes (jacket):
+  https://github.com/matteopolak/jacket/blob/main/docs/compiler/compile-speed.md
+
+What they report:
+- Front end for ~10k lines: about 0.025–0.08 s. Typical debug builds up to
+  250k lines under 1 s. Link is often the largest part (0.25–0.33 s of 0.32–0.43 s).
+- No processing in source order: declarations are worked on as jobs, which
+  wait on what they need (no forward declarations) and run on a job
+  system across threads.
+- One internal bytecode, then either a naive x64 backend written for speed
+  (no optimization) or LLVM for release.
+- A hand-written recursive-descent parser.
+- jacket, measured:
+  - lexing and parsing on worker threads ahead of semantic analysis;
+  - one interner that hashes a spelling once;
+  - 40-byte tokens;
+  - word compares for punctuation;
+  - code that only compile-time execution runs is not lowered;
+  - failure paths compiled without optimization;
+  - codegen split into units per core;
+  - memory leaked at exit (no teardown);
+  - mimalloc (about 8% overall).
+  Rejected after measuring: a bump arena (+2–3%) and early import discovery.
+
+What carries over to Glorious, by what it costs us now (an edit
+recompile of the simulation: about 0.37 s):
+- Our time is in checking and certificate inference, which Jai does not
+  have: those are where the job idea applies. Groups of functions (and
+  modules) as jobs that wait on their callees' schemes, run on `Task`s.
+  It needs per-group state that does not thread one checker state; see
+  "The library's modules, checked once" for what that takes.
+- Already done:
+  - our own naive x86 backend with no external linker (`glorious exe`);
+  - wild where we do link;
+  - only what `main` reaches is elaborated into Core;
+  - kept work keyed by content.
+- Cheap and worth doing:
+  - per-phase timings (`--timings`), as Jai and jacket print;
+  - leave the process without freeing what the compile built (Lean's
+    `lean_dec_ref`/`mi_free` were about 6–7% of profiles);
+  - lex each text once and keep the parsed library;
+  - lex and parse modules on `Task`s.
+- Parser micro-tuning (interning, token size): jacket found lexing and
+  parsing a quarter of a check of 600k generated lines and got 9% from
+  the lexer work. For us they are about 9% of an edit recompile, so the
+  repeated work (each text lexed about four times) comes first.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by
