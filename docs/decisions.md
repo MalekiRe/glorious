@@ -4648,6 +4648,26 @@ leaves to its implementation: `I::Item: Ord` is read as a type parameter of
 its own, `ItemOfI: Ord`, with `I: Iterator<Item = ItemOfI>`. Only where `I`
 is asked exactly one trait, which is then taken to be the one leaving `Item`.
 
+## Modules are units, checked in order
+
+Modules may not use each other in a circle (an earlier decision), so each
+module is a unit of compilation of its own. The resolver writes a mark
+before each module's items but the prelude's, and what each module uses;
+the driver puts the modules in an order that has each after those it uses,
+the library's before the program's (`Driver.unitsOf`). The checker checks
+unit after unit (`Check.checkUnitsKept`): each unit's declarations, then its
+groups, keyed by the key before it, its items, and what it reads of the
+program's modules besides them (the coercions that apply in it, the dot calls
+among its calls with more than one candidate, which fields of the
+constructors it can see are `pub`: `Driver.unitInfoKey`). So a change to
+one module leaves every unit before it, the library's above all, to be taken
+from what was kept, and what was kept is kept between runs (`Glorious/Store.lean`,
+the checker's states written as Lean writes `.olean` files).
+
+This is the first part of separate compilation: what is kept is a prefix of
+units in that order, not each unit apart from the others; and elaboration,
+certificates and Core are still made for the whole program.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by

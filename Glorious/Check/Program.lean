@@ -1621,6 +1621,26 @@ def checkAfter (first : St) (items : List Item) (modules : Syntax.ModuleInfo := 
   let (blocks, _) ← action.run first
   pure blocks
 
+/-- Check a program's units, each a module, in the order given, which has a
+module after those it uses: each unit's declarations and groups are checked
+after the units before it, and keyed by what they and those were made from
+(and, with each unit, what it reads of the program's modules besides its own
+items), so what an earlier check kept of a unit is taken from there where
+neither it nor any unit before it changed. -/
+def checkUnitsKept (first : St) (units : List (List Item × UInt64)) (modules : Syntax.ModuleInfo)
+    (seed : UInt64) (kept : Kept) : Except String (Elab.Blocks × Kept) := do
+  let action : M (Elab.Blocks × Kept) := do
+    modify fun s => { s with modules, ownItems := true }
+    let mut key := seed
+    let mut made : Kept := []
+    for (u, info) in units do
+      let mine ← checkItems u (mixHash key info) kept
+      if let some (k, _) := mine.head? then key := k
+      made := mine ++ made
+    pure (← finish, made)
+  let (r, _) ← action.run first
+  pure r
+
 /-- The same, taking what an earlier check of a program that began alike kept
 (`seed`: what the first items were), and giving what this one keeps. -/
 def checkAfterKept (first : St) (items : List Item) (modules : Syntax.ModuleInfo) (seed : UInt64)

@@ -221,7 +221,14 @@ structure ModuleInfo where
   The checker chooses the type's own where the value is of that type and the
   function in scope does not fit it. -/
   dotAlts : List (Nat × List String) := []
+  /-- For each module, by its key, the modules whose names it uses. -/
+  unitUses : List (String × List String) := []
   deriving Hashable
+
+/-- What the resolver writes before the items of each module but the
+prelude's, with the module's key: each module is a unit of the program,
+checked after those it uses (`Driver.unitsOf`). -/
+def unitMark : String := "%unit"
 
 /-- What the checker throws where a dot call is of a type's own function
 rather than the one in scope: the call and that function. The program is

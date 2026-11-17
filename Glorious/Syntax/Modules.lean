@@ -1512,6 +1512,7 @@ def resolve (prelude root : List Item) : Except String Resolved := do
     for u in units do
       let scope ← scopeOf u.path
       let ctx : Ctx := { here := u.path, scope := scope, named := byName scope, ctorsByLast := ctorsByLastName scope }
+      unless u.path.head? == preludePath.head? do out := out.push (.fieldNames unitMark [key u.path] [])
       for item in u.items do
         out := out ++ (← resolveItem ctx item).toArray
       -- The prelude's type of arrays, by the name it has in this program.
@@ -1560,7 +1561,9 @@ def resolve (prelude root : List Item) : Except String Resolved := do
     if b.entry.kind == .fn && !(b.entry.vis matches .priv) then some b.entry.global else none
   let privTypes := mine.flatMap fun u => u.own.filterMap fun b =>
     if b.entry.kind == .type && (b.entry.vis matches .priv) then some (b.entry.global, key u.path) else none
+  let unitUses := (units.filter (·.path.head? != preludePath.head?)).map fun u =>
+    (key u.path, ((st.edges.filter (·.1 == u.path)).map fun (_, t) => key t).eraseDups)
   pure ⟨items, ⟨st.homes, fieldVis, text, preludeNames.any taken.contains, pubFns, privTypes, coercions,
-    st.dotAlts⟩⟩
+    st.dotAlts, unitUses⟩⟩
 
 end Glorious.Syntax.Modules
