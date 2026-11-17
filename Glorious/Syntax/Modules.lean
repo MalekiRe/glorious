@@ -595,8 +595,9 @@ partial def resolveType (ctx : Ctx) (generics : List String) : TypeExpr → R Ty
     -- `<T as Trait>::Name`: the trait is a trait, and the name is the trait's.
     if x == assocOfMark then
       match args with
-      | [self, .name tr [], name] =>
-        return .name x [← resolveType ctx generics self, .name (← resolveNamed ctx .trait [] tr).1 [], name]
+      | [self, .name tr targs, name] =>
+        return .name x [← resolveType ctx generics self,
+          .name (← resolveNamed ctx .trait [] tr).1 (← targs.mapM (resolveType ctx generics)), name]
       | _ => throw "`<Type as Trait>::Name` names a trait and what it leaves to an implementation"
     pure (.name (← resolveNamed ctx .type generics x).1 (← args.mapM (resolveType ctx generics)))
   | .tuple args => .tuple <$> args.mapM (resolveType ctx generics)

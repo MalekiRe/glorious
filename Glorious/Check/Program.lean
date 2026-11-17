@@ -1213,6 +1213,9 @@ def checkGroup (decls : List FnDecl) : M Unit := do
                 modify fun s => { s with assocUses := s.assocUses.push (b.trait, subject, name, a, d.name, "") }
               | _, _ => throw s!"`{b.subject}: {Syntax.lastSegment b.trait}<{name} = ..>`: `{b.subject}` is not a type parameter of `{d.name}`, or `{Syntax.lastSegment b.trait}` is not a trait"
         let rankedBefore := (← get).ranked.length
+        -- (What is written of its type parameters: `B::Had` of `B: Bundle<S>`
+        -- is found by it.)
+        modify fun s => { s with paramTraits := d.bounds.map fun b => (b.subject, b.trait, b.args) }
         let annots ← d.annots.mapM fun
           | some t => some <$> resolveType rigid false t
           | none => pure none
@@ -1231,6 +1234,7 @@ def checkGroup (decls : List FnDecl) : M Unit := do
         let ret ← match retExpr with
           | some t => some <$> resolveType rigid false t
           | none => pure none
+        modify fun s => { s with paramTraits := [] }
         -- A function an implementation gives is the function its trait declares,
         -- at the implementation's type. What it is given is known from that
         -- before its clauses are looked at, so they can read a field of it.

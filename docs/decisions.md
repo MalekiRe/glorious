@@ -5171,9 +5171,10 @@ Covey is the toolbox for finding what the language lacks. Rewriting it after
 - **A constant of a type's own**, `impl Entity { pub const PLACEHOLDER:
   Entity = .. }`, could not be written. It is a value named `Entity::PLACEHOLDER`.
   Fixed.
-- **A type a trait with arguments leaves to its implementations** cannot be
-  named: `B::Had` of `B: Bundle<S>`, or `<B as Bundle<S>>::Had`. Open: covey
-  says it with a trait of its own without arguments (`Components`).
+- **A type a trait with arguments leaves to its implementations** could not
+  be named: `B::Had` of `B: Bundle<S>`, or `<B as Bundle<S>>::Had`. Both are
+  now read, asked of the type together with the arguments as the trait is;
+  a result type may start with `<`. Fixed, with a case.
 
 ## Other standing decisions
 

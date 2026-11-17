@@ -440,10 +440,19 @@ private partial def parseType : P TypeExpr := do
     unless (← peek) == .ident "as" do failAt "expected `as`: `<Type as Trait>::Name`"
     advance
     let trait ← expectPath
+    -- (`<B as Bundle<S>>::Had`: the trait at its arguments.)
+    let mut targs : Array TypeExpr := #[]
+    if ← isOp "<" then
+      advance
+      repeat
+        if ← isOp ">" then break
+        targs := targs.push (← parseType)
+        if !(← acceptPunct ",") then break
+      if ← isOp ">" then advance else failAt "expected `>`"
     if ← isOp ">" then advance else failAt "expected `>`"
     expectPunct "::"
     let name ← expectIdent
-    pure (.name assocOfMark [self, .name trait [], .name name []])
+    pure (.name assocOfMark [self, .name trait targs.toList, .name name []])
   | .op "&" =>
     advance
     parseRefRest
@@ -537,6 +546,7 @@ private partial def parseResult : P TypeExpr := do
     | .op "&" => true
     | .op "&&" => true
     | .op "*" => true
+    | .op "<" => true
     | _ => false
   let ret ← if startsType then parseType else pure (.tuple [])
   if (← peek) == .op "/" then

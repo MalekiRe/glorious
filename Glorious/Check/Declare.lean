@@ -27,13 +27,18 @@ partial def resolveType (params : List (String × Ty)) (decl : Bool) : TypeExpr 
     -- `<T as Trait>::Item`: the same, with the trait said.
     if x == Syntax.assocOfMark then
       match args with
-      | [self, .name tr [], .name name []] =>
+      | [self, .name tr targs, .name name []] =>
         let self ← resolveType params decl self
         match (← get).traitShape.find? fun (t', _, _) => t' == tr with
         | some (_, arity, assocs) =>
-          unless arity == 0 do throw s!"`<.. as {Syntax.lastSegment tr}>::{name}`: a trait with arguments is not asked this way"
+          unless arity == targs.length do
+            throw s!"`<.. as {Syntax.lastSegment tr}>::{name}`: `{Syntax.lastSegment tr}` takes {arity} arguments, and is given {targs.length}"
           unless assocs.contains name do
             throw s!"`{Syntax.lastSegment tr}` leaves no `{name}` to its implementations"
+          -- (Of a trait with arguments, it is asked of the type together
+          -- with them, as the trait is.)
+          let targs ← targs.mapM (resolveType params decl)
+          let self := if targs.isEmpty then self else Ty.tuple (self :: targs)
           -- (Of a type parameter of an implementation whose types are being
           -- read: kept as written, to be answered at each use.)
           if (freeTys self).any (← get).projecting.contains then
@@ -55,7 +60,22 @@ partial def resolveType (params : List (String × Ty)) (decl : Bool) : TypeExpr 
           if let some own := params.lookup name then return own
         let traits := (← get).traitShape.filter fun (_, arity, assocs) => arity == 0 && assocs.contains name
         -- (Several: the one written of the parameter, if one is.)
-        let written := (← get).paramTraits.filterMap fun (q, tr) => if q == p then some tr else none
+        let written := (← get).paramTraits.filterMap fun (q, tr, _) => if q == p then some tr else none
+        -- (None without arguments: one with them written of the parameter,
+        -- `B::Had` of `B: Bundle<S>`, asked of the type with those.)
+        if traits.isEmpty then
+          let withArgs ← (← get).paramTraits.filterMapM fun (q, tr, targs) => do
+            if q != p || targs.isEmpty then return none
+            match (← get).traitShape.find? fun (t', _, _) => t' == tr with
+            | some (_, arity, assocs) => pure (if arity == targs.length && assocs.contains name then some (tr, targs) else none)
+            | none => pure none
+          if let [(tr, targs)] := withArgs then
+            let subject := Ty.tuple (self :: (← targs.mapM (resolveType params decl)))
+            if (freeTys self).any (← get).projecting.contains then
+              return .con Syntax.projMark [subject, .con tr [], .con name []]
+            let a ← freshTy
+            modify fun s => { s with assocUses := s.assocUses.push (tr, subject, name, a, s.owner, s.pos) }
+            return a
         let traits := if traits.length > 1 && !written.isEmpty then
             traits.filter fun (tr, _, _) => written.any fun w => w == tr || Syntax.lastSegment tr == Syntax.lastSegment w
           else traits
@@ -804,7 +824,7 @@ def declare (items : List Item) : M Unit := do
             | _ => none
           | _ => none
         modify fun s => { s with projecting := ids
-                                 paramTraits := ((written.getD []).map fun b => (b.subject, b.trait)) }
+                                 paramTraits := ((written.getD []).map fun b => (b.subject, b.trait, b.args)) }
         let payload ← op.payload.mapM (resolveType opMap true)
         let result ← if op.terminal then pure none
           else match op.result with

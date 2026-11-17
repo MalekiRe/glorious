@@ -813,7 +813,7 @@ structure St where
   /-- While an effect's operations are read: the traits written of each of its
   type parameters, by which `S::Out` is told apart where several traits leave
   an `Out`. -/
-  paramTraits : List (String × String) := []
+  paramTraits : List (String × String × List TypeExpr) := []
   gatOccs : Array (String × List Ty × Nat) := #[]
   /-- A type a trait leaves at a lifetime, not yet known (`L::Item<'a>` where
   `L` is a type parameter): by its variable, the lifetimes it was asked at.

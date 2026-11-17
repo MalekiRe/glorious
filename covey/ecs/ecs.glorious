@@ -228,15 +228,13 @@ pub fn insert<T, S>(world: &mut World<S>, entity: Entity, value: T) -> Option<T>
 // Components given together: a tuple of them, each put in its column.
 // Components given together. Put on an entity, what it had of them comes
 // back; taken from one, what it had of them.
-// (What was had is said by a trait of its own: a type a trait with
-// arguments leaves to its implementations cannot be named yet.)
-pub trait Components { type Had; }
-impl<..T> Components for (..T) { type Had = (..Option<T>); }
-pub trait Bundle<S>: Components {
+pub trait Bundle<S> {
+    type Had;
     fn put_all(Self, &mut World<S>, Entity) -> Self::Had
     fn take_all(&mut World<S>, Entity) -> Self::Had
 }
 impl<..T, S> Bundle<S> for (..T) where ..S: Get<T> {
+    type Had = (..Option<T>);
     fn put_all(bundle, world, entity) {
         let (..t) = bundle;
         (..insert(world, entity, t))

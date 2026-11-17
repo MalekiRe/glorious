@@ -3699,6 +3699,10 @@ def cases : List Case := [
   -- and a block's own binding of the name is not the one after it.)
   ⟨"struct P { a: [Int], b: Int }\nfn main() -> Int {\n    let P { a, b } = P { a: [1, 2], b: 3 };\n    let n = len_at(&a);\n    let k = if(n == 2) { let a = [5]; len_at(&a) } else { 0 };\n    let m = len_at(&a);\n    let a = 9;\n    n * 1000 + k * 100 + m * 10 + a + b\n}",
     [], "2132"⟩,
+  -- (A type a trait with arguments leaves to its implementations, named of
+  -- a type parameter the trait is written of, and with the trait said.)
+  ⟨"trait Tr<S> { type Had; fn had(Self) -> Self::Had }\nimpl<S> Tr<S> for Int { type Had = Str; fn had(x) { \"a\" } }\nimpl<S> Tr<S> for Str { type Had = Int; fn had(x) { 5 } }\nfn go<B, S>(b: B) -> B::Had where B: Tr<S> { <B as Tr<S>>::had(b) }\nfn again<B, S>(b: B) -> <B as Tr<S>>::Had where B: Tr<S> { <B as Tr<S>>::had(b) }\nfn main() -> Int { say(go<Int, ()>(3)); say(again<Int, Int>(4)); go<Str, Int>(\"x\") + again<Str, ()>(\"y\") }",
+    [], "a\na\n10"⟩,
   -- (An element of what a reference is to is borrowed through it.)
   ⟨"fn first(r: &[Int]) -> Int { let e = &r[0]; *e }\nfn main() -> Int { first(&[7, 8]) }",
     [], "7"⟩,
