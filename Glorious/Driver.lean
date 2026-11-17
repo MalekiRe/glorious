@@ -476,17 +476,27 @@ def stdTokens (path : List String) (text : String) : Option (Array Syntax.Token)
     | .ok toks => some toks
     | .error _ => none
 
+/-- A program's own texts lexed: the first module's under the empty path. -/
+def lexTexts (src : String) (files : List (List String × String)) :
+    Except String (List (List String × Array Syntax.Token)) :=
+  (([], src) :: files).mapM fun (path, text) => do pure (path, ← Syntax.lex text)
+
+/-- The longest list of types any of them writes, and at least two. -/
+def longestOf (lexed : List (List String × Array Syntax.Token)) : Nat :=
+  lexed.foldl (fun m (_, toks) => max m (Syntax.longestList toks)) 2
+
 /-- The prelude and a program as written: the first module's text, and the
 texts of the modules that are files of their own, each with its path. Where
 the program says `mod name;` the items of that module's text are put. -/
 def parseProgram (src : String) (files : List (List String × String)) (check : Bool := true)
-    (few : Bool := false) (packs : Nat := 0) :
+    (few : Bool := false) (packs : Nat := 0) (lexed : List (List String × Array Syntax.Token) := []) :
     Except String (List Syntax.Item × List Syntax.Item) := do
+  -- (The program's own texts lexed once, where they were not already.)
+  let lexed ← if !lexed.isEmpty then pure lexed else lexTexts src files
+  let tokensOf := fun (path : List String) => lexed.lookup path
   -- Lists of types are written out to the longest list the program's texts
   -- write, unless told longer.
-  let packs ← if packs != 0 then pure packs else
-    (src :: files.map (·.2)).foldlM (fun m text => do
-      pure (max m (Syntax.longestList (← Syntax.lex text)))) 2
+  let packs := if packs != 0 then packs else longestOf lexed
   -- The library's texts are files of the program, before its own.
   -- (`#![no_std]`: without the library, whatever the text mentions.)
   let std := usesStd src files && (src.splitOn "#![no_std]").length == 1
@@ -508,8 +518,8 @@ def parseProgram (src : String) (files : List (List String × String)) (check : 
   -- Operators and the constructors with named fields are known to every
   -- text, whichever declares them.
   let said ← (([], src) :: own).mapM fun (path, text) => do
-    let _ ← Syntax.declaredSyntax fix text
-    Syntax.textSyntax path text
+    let _ ← Syntax.declaredSyntax fix text (tokensOf path)
+    Syntax.textSyntax path text (tokensOf path)
   let unread ← match read with
     | some _ => pure []
     | none => (if std then library else []).mapM fun (path, text) => do
@@ -535,7 +545,7 @@ def parseProgram (src : String) (files : List (List String × String)) (check : 
   -- `[a, b, c]` is depends on what is wanted of it.
   let fixed := ((src :: own.map (·.2)).any saysLength)
   let (items, _) ← Syntax.parse fix src (base := 1000000) (records := records) (tables := tables)
-    (fixed := fixed) (packs := packs)
+    (fixed := fixed) (packs := packs) (lexed := tokensOf [])
   let declares := items.any fun
     | .module "std" _ | .pub _ (.module "std" _) => true
     | _ => false
@@ -562,7 +572,7 @@ def parseProgram (src : String) (files : List (List String × String)) (check : 
               let text := ((files[k]?).map (·.2)).getD ""
               match Syntax.parse fix text (base := 1000000 * (k + 2)) (records := records)
                   (tables := tables) (path := here) (fixed := fixed && k ≥ (if std then library.length else 0))
-                  (packs := packs) (lexed := if k < library.length then stdTokens here text else none) with
+                  (packs := packs) (lexed := if k < library.length then stdTokens here text else tokensOf here) with
               | .ok (items, _) => pure items
               | .error e => throw s!"module `{shown}`: {e}"
           pure (wrap (.module name (some (← fill fuel here parsed))))
@@ -675,10 +685,9 @@ partial def compileSourceAt (src : String) (check : Bool := true)
     (known : List ((String × Nat) × Nat) := []) (packs : Nat := 0) (kept : List Typing.Cert := [])
     (checkKept : Check.Kept := []) (refPats : List (Nat × Bool × List Nat) := [])
     (dotPicks : List (Nat × String) := []) (search : Bool := true) (memo : Infer.Memo := {})
-    (firsts : List ((Bool × Bool) × (Nat × Check.St)) := []) : Except String Compiled := do
-  -- (What the default prelude has from the library, where the text uses it.)
-  let src := if refPats.isEmpty && dotPicks.isEmpty then src ++ stdPreludeUses src else src
-  let (prelude, items) ← parseProgram src files check few packs
+    (firsts : List ((Bool × Bool) × (Nat × Check.St)) := [])
+    (lexed : List (List String × Array Syntax.Token) := []) : Except String Compiled := do
+  let (prelude, items) ← parseProgram src files check few packs lexed
   -- (Clauses the checker found matching a reference with patterns of a
   -- value: read with those patterns written `&Pattern`.)
   let items := refPats.foldl (fun items (id, uniq, which) => Elab.refPatsItems id uniq which items) items
@@ -799,13 +808,13 @@ partial def compileSourceAt (src : String) (check : Bool := true)
       match Elab.refPatsFound e, Elab.dotOwnFound e with
       | some found, _ =>
         if check && refPats.length < 32 && !refPats.contains found then
-          match compileSourceAt src check files few known packs kept checkKept (refPats ++ [found]) dotPicks search memo firsts with
+          match compileSourceAt src check files few known packs kept checkKept (refPats ++ [found]) dotPicks search memo firsts lexed with
           | .ok c => return c
           | .error e' => throw (clean e')
         else if check then throw (clean e) else pure (none, [], [])
       | none, some found =>
         if check && dotPicks.length < 32 && !dotPicks.contains found then
-          match compileSourceAt src check files few known packs kept checkKept refPats (dotPicks ++ [found]) search memo firsts with
+          match compileSourceAt src check files few known packs kept checkKept refPats (dotPicks ++ [found]) search memo firsts lexed with
           | .ok c => return c
           | .error e' => throw (clean e')
         else if check then throw (clean e) else pure (none, [], [])
@@ -1126,8 +1135,11 @@ def compileSource (src : String) (check : Bool := true)
     (known : List ((String × Nat) × Nat) := []) (kept : List Typing.Cert := [])
     (checkKept : Check.Kept := []) (search : Bool := true) (memo : Infer.Memo := {})
     (firsts : List ((Bool × Bool) × (Nat × Check.St)) := []) : Except String Compiled := do
-  let packs ← (src :: files.map (·.2)).foldlM (fun m text => do
-    pure (max m (Syntax.longestList (← Syntax.lex text)))) 2
+  -- (What the default prelude has from the library, where the text uses it;
+  -- and each text lexed, once.)
+  let src := src ++ stdPreludeUses src
+  let lexed ← lexTexts src files
+  let packs := longestOf lexed
   -- (An implementation over several lists, as one that joins two, is
   -- written out to as many times as long: what it makes can be that long.)
   let lists := ((src :: files.map (·.2)).flatMap fun text =>
@@ -1137,7 +1149,8 @@ def compileSource (src : String) (check : Bool := true)
   -- (Only a program that has such an implementation is read again.)
   let lists := lists != 0
   let rec go (fuel packs : Nat) : Except String Compiled :=
-    match compileSourceAt src check files few known packs kept checkKept (search := search) (memo := memo) (firsts := firsts) with
+    match compileSourceAt src check files few known packs kept checkKept (search := search) (memo := memo)
+        (firsts := firsts) (lexed := lexed) with
     | .error e =>
       let wanted := longestUnimplemented e
       match fuel with
