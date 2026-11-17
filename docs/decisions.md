@@ -4772,6 +4772,19 @@ left of certificate inference after an edit is mostly the schemes of the
 functions `main` calls (30% of the simulation's run). Checking the prelude
 in every process is 12%, and reading the library 8%.
 
+## The prelude as checked is kept for every program
+
+Each process checked the prelude (and, where a program has the whole
+library, the library) before the program: 12% of an edited simulation's
+compile. The state after that check is now kept in the user's cache
+(`~/.cache/glorious/library/first-{std}-{drop}`, written as the other kept
+states are and read only by the compiler that wrote it), and a compile takes
+it from there. It is shared by every program, so a program's first compile
+gains too.
+
+Measured (edit of `main`, quick build, median of 3, before → after):
+simulation 0.65 → 0.55 s, calculator 0.66 → 0.50 s, shapes 0.25 → 0.15 s.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by

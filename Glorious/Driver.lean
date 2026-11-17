@@ -54,6 +54,9 @@ structure Compiled where
   checkKept : Check.Kept := []
   /-- What certificate inference made, for a later compile (`Infer.Memo`). -/
   inferMade : Array (UInt64 × Typing.FnSig × Infer.Remembered) := #[]
+  /-- The prelude (and library) as checked, where this compile checked it:
+  for a later process, by whether the library is in and whether `Drop` is. -/
+  firstMade : Option ((Bool × Bool) × (Nat × Check.St)) := none
 
 /-- Each place by the function it is in and how many places of that function
 come before it: what stays the same of a place when other functions change. -/
@@ -698,8 +701,8 @@ partial def compileSourceAt (src : String) (check : Bool := true)
     (files : List (List String × String) := []) (few : Bool := false)
     (known : List ((String × Nat) × Nat) := []) (packs : Nat := 0) (kept : List Typing.Cert := [])
     (checkKept : Check.Kept := []) (refPats : List (Nat × Bool × List Nat) := [])
-    (dotPicks : List (Nat × String) := []) (search : Bool := true) (memo : Infer.Memo := {}) :
-    Except String Compiled := do
+    (dotPicks : List (Nat × String) := []) (search : Bool := true) (memo : Infer.Memo := {})
+    (firsts : List ((Bool × Bool) × (Nat × Check.St)) := []) : Except String Compiled := do
   -- (What the default prelude has from the library, where the text uses it.)
   let src := if refPats.isEmpty && dotPicks.isEmpty then src ++ stdPreludeUses src else src
   let (prelude, items) ← parseProgram src files check few packs
@@ -736,11 +739,18 @@ partial def compileSourceAt (src : String) (check : Bool := true)
   -- (The library read for this program alone is checked with it.)
   let withStd := usesStd src files && (src.splitOn "#![no_std]").length == 1
     && !(few && (neededStd (src :: files.map (·.2))).isSome)
-  let first := match withStd, drops with
-    | true, false => checkedStd.get
-    | true, true => checkedStdDrop.get
-    | false, false => checkedPrelude.get
-    | false, true => checkedPreludeDrop.get
+  -- (Taken from what an earlier process kept, where it is given.)
+  let keptFirst := firsts.lookup (withStd, drops)
+  let first : Except String (Nat × Check.St) := match keptFirst, withStd, drops with
+    | some f, _, _ => .ok f
+    | none, true, false => checkedStd.get
+    | none, true, true => checkedStdDrop.get
+    | none, false, false => checkedPrelude.get
+    | none, false, true => checkedPreludeDrop.get
+  -- (What a later process can take instead of checking it again.)
+  let firstMade := match keptFirst, first with
+    | none, .ok f => some ((withStd, drops), f)
+    | _, _ => none
   -- (The library's modules read for this program alone: without what it
   -- cannot reach.)
   let all := match first with
@@ -813,13 +823,13 @@ partial def compileSourceAt (src : String) (check : Bool := true)
       match Elab.refPatsFound e, Elab.dotOwnFound e with
       | some found, _ =>
         if check && refPats.length < 32 && !refPats.contains found then
-          match compileSourceAt src check files few known packs kept checkKept (refPats ++ [found]) dotPicks search memo with
+          match compileSourceAt src check files few known packs kept checkKept (refPats ++ [found]) dotPicks search memo firsts with
           | .ok c => return c
           | .error e' => throw (clean e')
         else if check then throw (clean e) else pure (none, [])
       | none, some found =>
         if check && dotPicks.length < 32 && !dotPicks.contains found then
-          match compileSourceAt src check files few known packs kept checkKept refPats (dotPicks ++ [found]) search memo with
+          match compileSourceAt src check files few known packs kept checkKept refPats (dotPicks ++ [found]) search memo firsts with
           | .ok c => return c
           | .error e' => throw (clean e')
         else if check then throw (clean e) else pure (none, [])
@@ -872,7 +882,7 @@ partial def compileSourceAt (src : String) (check : Bool := true)
       | some k => [(("%way", 0), k)]
       | none => []
     pure (⟨out.program, out.ctorNames.map shownName, out.fnNames, out.opNames, cert, 0, out.plain,
-      way ++ (placeKeys out.siteOwners).toList.map (fun k => (k, 0)), checkMade, made⟩ : Compiled)
+      way ++ (placeKeys out.siteOwners).toList.map (fun k => (k, 0)), checkMade, made, firstMade⟩ : Compiled)
   -- A borrow given a name, or written as an argument of a call of a function,
   -- is a scope of its own in Core if the program can then be shown to follow
   -- every rule. Where it cannot, the borrow is the reference it borrows, as in
@@ -903,7 +913,7 @@ partial def compileSourceAt (src : String) (check : Bool := true)
           if out.lent != 0 && Typing.checkProgram cert out.program then
             some (⟨out.program, out.ctorNames.map shownName, out.fnNames, out.opNames, some cert, out.lent,
               out.plain, ((placeKeys out.siteOwners).toList.zip (List.range out.sites)).map
-                (fun (k, i) => (k, sites i)), checkMade, made⟩ : Compiled)
+                (fun (k, i) => (k, sites i)), checkMade, made, firstMade⟩ : Compiled)
           else none
         | .error _ => none
     | .error _ => none
@@ -959,7 +969,7 @@ partial def compileSourceAt (src : String) (check : Bool := true)
                   if o.lent != 0 && Typing.checkProgram cert o.program then
                     Sum.inl (⟨o.program, o.ctorNames.map shownName, o.fnNames, o.opNames, some cert,
                       o.lent, o.plain, ((placeKeys o.siteOwners).toList.zip (List.range o.sites)).map
-                        (fun ((k : String × Nat), (i : Nat)) => (k, choice[i]?.getD 0)), checkMade, made⟩ : Compiled)
+                        (fun ((k : String × Nat), (i : Nat)) => (k, choice[i]?.getD 0)), checkMade, made, firstMade⟩ : Compiled)
                   else Sum.inr (cert.sigs.filterMap fun (e : Typing.SigEntry) =>
                     match o.program.fns[e.fn]? with
                     | some F => if Typing.checkFn cert e F then none else some e.fn
@@ -1134,8 +1144,8 @@ is read again with lists that long. -/
 def compileSource (src : String) (check : Bool := true)
     (files : List (List String × String) := []) (few : Bool := false)
     (known : List ((String × Nat) × Nat) := []) (kept : List Typing.Cert := [])
-    (checkKept : Check.Kept := []) (search : Bool := true) (memo : Infer.Memo := {}) :
-    Except String Compiled := do
+    (checkKept : Check.Kept := []) (search : Bool := true) (memo : Infer.Memo := {})
+    (firsts : List ((Bool × Bool) × (Nat × Check.St)) := []) : Except String Compiled := do
   let packs ← (src :: files.map (·.2)).foldlM (fun m text => do
     pure (max m (Syntax.longestList (← Syntax.lex text)))) 2
   -- (An implementation over several lists, as one that joins two, is
@@ -1147,7 +1157,7 @@ def compileSource (src : String) (check : Bool := true)
   -- (Only a program that has such an implementation is read again.)
   let lists := lists != 0
   let rec go (fuel packs : Nat) : Except String Compiled :=
-    match compileSourceAt src check files few known packs kept checkKept (search := search) (memo := memo) with
+    match compileSourceAt src check files few known packs kept checkKept (search := search) (memo := memo) (firsts := firsts) with
     | .error e =>
       let wanted := longestUnimplemented e
       match fuel with

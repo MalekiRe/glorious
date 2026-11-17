@@ -301,6 +301,15 @@ def dirOf (path : String) : IO System.FilePath := do
       | none => System.FilePath.mk home / ".cache"
     pure (base / "glorious" / "build" / s!"{(hash whole.toString).toNat}")
 
+/-- Where what is kept for every program is: the prelude and the library as
+checked, in the user's cache. -/
+def libraryDir : IO System.FilePath := do
+  let home := (← IO.getEnv "HOME").getD "/tmp"
+  let base := match ← IO.getEnv "XDG_CACHE_HOME" with
+    | some dir => System.FilePath.mk dir
+    | none => System.FilePath.mk home / ".cache"
+  pure (base / "glorious" / "library")
+
 /-- What a compile is made from, written down: the compiler's file, by size
 and time, and every text, each with its module's path and its length. -/
 def keyOf (src : String) (files : List (List String × String)) : IO String := do

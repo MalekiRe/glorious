@@ -306,8 +306,15 @@ def compileFile (path : String) (checkKept : Check.Kept := []) (search : Bool :=
   -- (What certificate inference made the last time, by function and signature.)
   let memo ← if (← IO.getEnv "GLORIOUS_FRESH").isSome then pure {}
     else pure ((← Store.load (α := Infer.Memo) (dir / "infer") "infer").getD {})
+  -- (The prelude and library as checked, by an earlier process of this
+  -- compiler, for any program.)
+  let library ← Target.libraryDir
+  let firsts ← if (← IO.getEnv "GLORIOUS_FRESH").isSome then pure [] else
+    [(true, false), (true, true), (false, false), (false, true)].filterMapM fun (std, drop) => do
+      pure (((← Store.load (α := List (Nat × Check.St)) (library / s!"first-{std}-{drop}") "first").bind
+        (·.head?)).map ((std, drop), ·))
   let result := compileSource (← IO.FS.readFile path) true (← moduleFiles path) (few := true) known kept
-    checkKept search memo
+    checkKept search memo firsts
   if let .ok c := result then
     -- (What a compile that did not look for each place found is not kept
     -- for one that does.)
@@ -316,6 +323,8 @@ def compileFile (path : String) (checkKept : Check.Kept := []) (search : Bool :=
       if let some cert := c.cert then Target.writeCert dir cert
     unless c.checkKept.isEmpty do Store.save (dir / "checked") "checked" c.checkKept
     unless c.inferMade.isEmpty do Store.save (dir / "infer") "infer" (Infer.toMemo c.inferMade)
+    if let some ((std, drop), first) := c.firstMade then
+      Store.save (library / s!"first-{std}-{drop}") "first" [first]
     if let some k := List.lookup ("%way", 0) c.places then Store.save (dir / "way") "way" k
     -- (`GLORIOUS_CORE`: the Core that was compiled, with what destroys what.)
     if (← IO.getEnv "GLORIOUS_CORE").isSome then
