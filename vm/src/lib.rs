@@ -606,17 +606,42 @@ fn heights(code: &[Instr], start: usize) -> Option<Vec<usize>> {
     Some(h.into_iter().map(|x| x.unwrap_or(usize::MAX)).collect())
 }
 
+/// A set of locals, one bit each.
+#[derive(Clone, PartialEq)]
+struct Locals(Vec<u64>);
+
+impl Locals {
+    fn new(words: usize) -> Self {
+        Locals(vec![0; words])
+    }
+    fn insert(&mut self, i: usize) {
+        if let Some(w) = self.0.get_mut(i / 64) {
+            *w |= 1 << (i % 64);
+        }
+    }
+    fn contains(&self, i: usize) -> bool {
+        self.0.get(i / 64).is_some_and(|w| w & (1 << (i % 64)) != 0)
+    }
+}
+
 /// The locals read from each instruction on, a move counting as a reading.
 /// Code may go back, so this is gone over until nothing changes. Where the
 /// number of locals the code starts with is known, so is the local each
 /// instruction makes, and a local is not read before it is made.
-fn read_from(code: &mut [Instr], start: Option<usize>) -> Vec<std::collections::HashSet<usize>> {
+fn read_from(code: &mut [Instr], start: Option<usize>) -> Vec<Locals> {
+    read_from_but(code, start, |_| false)
+}
+
+/// The same, where an instruction `idle` says gives what nothing needs
+/// reads nothing if nothing reads what it gives: what such instructions read
+/// only for each other is not read. (So what a sweep takes away is found in
+/// one go, not one layer of them at a time.)
+fn read_from_but(code: &mut [Instr], start: Option<usize>, idle: impl Fn(&Instr) -> bool) -> Vec<Locals> {
     let n = code.len();
     let made: Vec<Option<usize>> = match start.and_then(|s| heights(code, s)) {
         Some(h) => (0..n).map(|pc| (pushes(&code[pc]) && h[pc] != usize::MAX).then_some(h[pc])).collect(),
         None => vec![None; n],
     };
-    let mut from: Vec<std::collections::HashSet<usize>> = vec![Default::default(); n + 1];
     let reads: Vec<Vec<usize>> = (0..n)
         .map(|pc| {
             let mut r: Vec<usize> = code[pc].place_var().into_iter().collect();
@@ -628,17 +653,36 @@ fn read_from(code: &mut [Instr], start: Option<usize>) -> Vec<std::collections::
             r
         })
         .collect();
+    let most = reads.iter().flatten().copied().max().unwrap_or(0);
+    let words = most / 64 + 1;
+    let nexts: Vec<Vec<usize>> = (0..n).map(|pc| follows(code, pc).into_iter().filter(|&x| x <= n).collect()).collect();
+    let mut from: Vec<Locals> = vec![Locals::new(words); n + 1];
+    // (One set worked in, swapped in where it differs: no allocation per
+    // instruction.)
+    let mut here = Locals::new(words);
     loop {
         let mut changed = false;
         for pc in (0..n).rev() {
-            let mut here: std::collections::HashSet<usize> = reads[pc].iter().copied().collect();
-            for next in follows(code, pc) {
-                if next <= n {
-                    here.extend(from[next].iter().copied().filter(|i| Some(*i) != made[pc]));
+            here.0.iter_mut().for_each(|w| *w = 0);
+            for &next in &nexts[pc] {
+                for (w, o) in here.0.iter_mut().zip(from[next].0.iter()) {
+                    *w |= *o;
                 }
             }
-            if here.len() != from[pc].len() {
-                from[pc] = here;
+            // (What this instruction makes is not read before it.)
+            let needed = made[pc].is_none_or(|m| here.contains(m));
+            if let Some(m) = made[pc] {
+                if let Some(w) = here.0.get_mut(m / 64) {
+                    *w &= !(1 << (m % 64));
+                }
+            }
+            if needed || !idle(&code[pc]) {
+                for &i in &reads[pc] {
+                    here.insert(i);
+                }
+            }
+            if here != from[pc] {
+                std::mem::swap(&mut here, &mut from[pc]);
                 changed = true;
             }
         }
@@ -652,23 +696,30 @@ fn read_from(code: &mut [Instr], start: Option<usize>) -> Vec<std::collections::
 fn mark_takes(code: &mut [Instr], start: Option<usize>) {
     let from = read_from(code, start);
     let n = code.len();
+    let words = from.first().map_or(1, |l| l.0.len());
     for pc in 0..n {
-        let mut after = std::collections::HashSet::new();
+        let mut after = Locals::new(words);
         for next in follows(code, pc) {
             if next <= n {
-                after.extend(from[next].iter().copied());
+                for (w, o) in after.0.iter_mut().zip(from[next].0.iter()) {
+                    *w |= *o;
+                }
             }
         }
         let place = code[pc].place_var();
-        let mut times: std::collections::HashMap<usize, usize> = Default::default();
+        let mut times: Vec<(usize, usize)> = Vec::new();
         for a in code[pc].atoms_mut() {
             if let Atom::Var(i) = a {
-                *times.entry(*i).or_default() += 1;
+                match times.iter_mut().find(|(j, _)| j == i) {
+                    Some((_, c)) => *c += 1,
+                    None => times.push((*i, 1)),
+                }
             }
         }
         for a in code[pc].atoms_mut() {
             if let Atom::Var(i) = *a {
-                if !after.contains(&i) && times[&i] == 1 && place != Some(i) {
+                let once = times.iter().any(|&(j, c)| j == i && c == 1);
+                if !after.contains(i) && once && place != Some(i) {
                     *a = Atom::Take(i);
                 }
             }

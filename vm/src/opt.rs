@@ -628,27 +628,24 @@ impl Opt<'_> {
 /// Do not make what nothing reads: a closure, a copy, a value built. What
 /// made it gives an integer instead, so that the locals keep their numbers.
 fn sweep(code: &mut [Instr], start: usize) {
-    loop {
-        let Some(h) = heights(code, start) else { return };
-        let from = read_from(code, Some(start));
-        let mut changed = false;
-        for pc in 0..code.len() {
-            // (Rebinding what is not a closure goes wrong, and so is not
-            // nothing; a program that was checked never does it.)
-            let pure = matches!(
-                &code[pc],
-                Instr::Op(Rhs::Closure(..))
-                    | Instr::Op(Rhs::Construct(..))
-                    | Instr::Op(Rhs::Rebind(..))
-                    | Instr::Op(Rhs::Atom(Atom::Var(_)))
-            );
-            if pure && h[pc] != usize::MAX && !from[pc + 1].contains(&h[pc]) {
-                code[pc] = Instr::Op(Rhs::Atom(Atom::Int(0)));
-                changed = true;
-            }
-        }
-        if !changed {
-            return;
+    // (Rebinding what is not a closure goes wrong, and so is not nothing; a
+    // program that was checked never does it.)
+    let pure = |i: &Instr| {
+        matches!(
+            i,
+            Instr::Op(Rhs::Closure(..))
+                | Instr::Op(Rhs::Construct(..))
+                | Instr::Op(Rhs::Rebind(..))
+                | Instr::Op(Rhs::Atom(Atom::Var(_)))
+        )
+    };
+    let Some(h) = heights(code, start) else { return };
+    // (What such instructions read only for each other is not read, so all
+    // of them are found at once.)
+    let from = read_from_but(code, Some(start), pure);
+    for pc in 0..code.len() {
+        if pure(&code[pc]) && h[pc] != usize::MAX && !from[pc + 1].contains(h[pc]) {
+            code[pc] = Instr::Op(Rhs::Atom(Atom::Int(0)));
         }
     }
 }
