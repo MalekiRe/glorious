@@ -4819,6 +4819,22 @@ Limits:
   reported; the first written wins.
 - The copies come after everything else, in the last unit.
 
+## Certificate attempts after the first run in parallel
+
+`certifyProgram` tries ways of finding a certificate in order: rules from
+strictest to weakest, each with up to four ways of reading callables and
+references. Once one passes, its number is kept, so the next compile tries
+it first. On a fresh build of a program that passes only with a later way,
+every earlier way ran one after another (despawn: 9 attempts). Now the
+first (kept or 0) runs alone, and if it fails, all the others start at once,
+each as a `Task`; the first of them in order that passes is taken, so the
+result is the same as before. Attempts that are not needed keep running in
+the background until they finish or the process ends.
+
+Measured (fresh build, quick build, median of 3, before → after): despawn
+1.35 → 0.76 s; json 0.44 → 0.48 s (two attempts: the second waits while
+the others use the machine); simulation 0.90 → 0.90 s (one attempt).
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by

@@ -274,10 +274,14 @@ def certifyProgram (items : List Syntax.Item) (p : Core.Program)
       if strict && regions && loans && failed.contains (ranked, widen) then none
       else one strict regions loans ranked widen
     | none => none
-  if let some k := first then
-    if let some (cert, made) := try_ k then return (cert, some k, made)
-  if let some found := (List.range attempts.length).findSome? fun k =>
-      if first == some k then none else (try_ k).map fun (cert, made) => (cert, some k, made) then
+  -- (The one that passed last time, or else the first; and if that does
+  -- not pass, the others all at once, each on a thread of its own, the
+  -- first of them in order that passes taken.)
+  let start := first.getD 0
+  if let some (cert, made) := try_ start then return (cert, some start, made)
+  let others := (List.range attempts.length).filter (· != start)
+  let tasks := others.map fun k => (k, Task.spawn fun _ => try_ k)
+  if let some found := tasks.findSome? fun (k, t) => t.get.map fun (cert, made) => (cert, some k, made) then
     return found
   let cert ← match Infer.certify items p false envSizes with
     | .ok cert => pure cert
