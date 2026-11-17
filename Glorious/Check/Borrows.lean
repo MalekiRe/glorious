@@ -298,7 +298,7 @@ def checkLoans : M Unit := do
             modify fun st => { st with seen := [] }
             if ← tyLooks brand held then
               fail u s!"`{x}` is given away while a callable this expression is still using uses it"
-  if s.loans.isEmpty then return
+  if s.loans.toArray.isEmpty then return
   for u in s.uses do
     match u.kind with
     | .var brand x how path =>
@@ -311,7 +311,7 @@ def checkLoans : M Unit := do
             if (← tyOwnsOnce [] t) || (← tyHasDrop [] t).isSome then pure Using.move else pure Using.read
           | none => pure Using.read
         | other => pure other
-      for l in s.loans do
+      for l in s.loans.toArray do
         -- Two fields get in each other's way only if one is inside the other.
         let meet := path.isPrefixOf l.path || l.path.isPrefixOf path
         if l.root == some brand && how.forbiddenBy l.uniq && meet then
@@ -325,7 +325,7 @@ def checkLoans : M Unit := do
               | .lend => s!"`{x}` is borrowed with `&mut` while {who} holds a {kind} to it")
     | .through cap name write path =>
       let root ← findCap cap
-      for l in s.loans do
+      for l in s.loans.toArray do
         if let some (parent, own) := l.parent then
           let meet := path.isPrefixOf l.path || l.path.isPrefixOf path
           -- A reference lent to the function it is a parameter of, from inside
@@ -341,7 +341,7 @@ def checkLoans : M Unit := do
       for (t, i) in tys.zipIdx do
         modify fun st => { st with seen := [] }
         for (brand, write) in ← tyTouches t [] do
-          for l in s.loans do
+          for l in s.loans.toArray do
             if l.root == some brand && (write || l.uniq) then
               let mut found ← holderOf l.id outer
               for ((t', made), j) in mine.zipIdx do
@@ -1063,7 +1063,7 @@ def fitAt (scope : Scope) (amb : Row) (what : String) (site : Option Elab.Site)
     for from_ in reach do
      for (_, held) in ← edgesFrom (← findCap from_) do
       if let .loan id := held then
-        if (s.loans[id]?.bind (·.root)).isSome then
+        if ((s.loans.get? id).bind (·.root)).isSome then
           return some s!"{what}: what this callable gives back borrows a variable, and the callable is wanted for references of any lifetime: it can give back only what borrows from what it is given"
     for (b, y) in s.rigidCaps do
       let root ← findCap b

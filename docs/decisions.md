@@ -4990,6 +4990,67 @@ Measured (optimized build, edit of `main`, median of 5, before → after):
 simulation 0.27 → 0.20 s, calculator 0.31 → 0.17 s, orders 0.22 → 0.20 s,
 despawn 0.21 → 0.15 s, json 0.20 → 0.11 s, shapes 0.10 → 0.09 s.
 
+## Modules that do not use each other are checked side by side
+
+`Check.checkUnitsKept` takes for each unit the units before it that it uses
+(`deps`, from the resolver's `unitUses`), and groups the units into levels:
+each one more than the highest level of what it uses. A level of one unit is
+checked as before. A level of several is checked side by side, a `Task`
+each, every one from the state before the level. The `j`-th numbers its
+new ids from `j` gaps (`unitGap`, 2^20) above:
+- the type, row, capture and edge stores;
+- loans;
+- rigid keys;
+- brands.
+
+Then what each added is put together (`mergeStates`), with a rule for each
+of the checker state's 144 fields:
+- stores by segment and piece;
+- lists and arrays grown at the front or the end;
+- maps and sets by entry;
+- flags by or;
+- the last function's leftovers from the last unit;
+- implementations' places shifted.
+
+Each rule asks of what was there before only whether it is the same object
+(`samePtr`). Where a field was changed by more than one unit, a unit's ids
+ran into the next one's, or a unit was refused, the level is checked one
+unit after another instead, so the result never differs from that.
+
+The stores (`Store`) are now segments: a `jumpTo` starts one, so a gap
+costs nothing. The first version padded one array of pieces across the gap,
+and every later write copied it: a fresh build of the simulation went from
+1 s to 7 s. Loans and rigid keys became stores, to be numbered the same way.
+
+Kept states:
+- A level put together is kept under a key of its own.
+- A unit kept whole is not what this level's start grew into, so what it
+  added could not be told.
+- What follows a level is keyed by what its units are made of, whichever way
+  they were checked.
+
+Measured (quick build, fresh build of four sibling modules of 80 functions
+each, median of 5): 0.57 s one after another, 0.40 s side by side, the check
+from 231 to 93 ms. The examples have no sibling modules of their own; the
+simulation's two library modules are checked side by side at no measurable
+cost.
+
+## Where a compile spends its time: `GLORIOUS_TRACE`
+
+`Glorious.Trace.timed` times a stage, pure or not: the compiler is strict,
+so the stage is computed between the two readings of the clock.
+`GLORIOUS_TRACE=1` prints each stage under the one it was part of (four deep)
+and the totals by name.
+
+Stages timed:
+- in Main: loading what was kept, the compile, saving what is kept;
+- the driver's stages: lex, parse, resolve, aliases, defaults, check,
+  lowering traits, elaborate, certify;
+- each certificate way and each borrow-scope attempt;
+- each unit's check.
+
+Unset, a stage is only its computation.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by

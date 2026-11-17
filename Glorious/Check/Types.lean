@@ -342,35 +342,91 @@ structure Bound where
   implementation's own name (`Get<T>` at `Int`). -/
   args : List Ty := []
 
-/-- An array kept in pieces. Where the checker tries something it may have
-to take back, it keeps what it knew; a write to a plain array that is kept
-elsewhere too copies all of it, and the checker's arrays are as long as the
-program and its library together. Here a write copies one piece, and the
-list of the pieces. -/
-structure Store (α : Type) where
+/-- Entries numbered from `base` on, in pieces of 64. Where the checker tries
+something it may have to take back, it keeps what it knew; a write to a
+plain array that is kept elsewhere too copies all of it, and the checker's
+arrays are as long as the program and its library together. Here a write
+copies one piece, and the list of the pieces. -/
+structure Seg (α : Type) where
+  base : Nat := 0
   pieces : Array (Array α) := #[]
-  size : Nat := 0
+  count : Nat := 0
+
+namespace Seg
+
+variable {α : Type}
+
+@[inline] def get? (s : Seg α) (i : Nat) : Option α :=
+  if i < s.count then (s.pieces.getD (i >>> 6) #[])[i &&& 63]? else none
+
+def push (s : Seg α) (x : α) : Seg α :=
+  if s.count &&& 63 == 0 then
+    { s with pieces := s.pieces.push ((Array.mkEmpty 64).push x), count := s.count + 1 }
+  else { s with pieces := s.pieces.modify (s.count >>> 6) (·.push x), count := s.count + 1 }
+
+def modify (s : Seg α) (i : Nat) (f : α → α) : Seg α :=
+  if i < s.count then { s with pieces := s.pieces.modify (i >>> 6) (·.modify (i &&& 63) f) } else s
+
+end Seg
+
+/-- A store of entries numbered as they are made. It is in segments: what is
+made after a `jumpTo` starts one of its own, so that two checks that go on
+from one state can each number from a place of its own, and what each made
+be put together again (`Check.mergeStore`). Mostly there is one. -/
+structure Store (α : Type) where
+  /-- The segments before the last, in the order of where they start. -/
+  older : Array (Seg α) := #[]
+  last : Seg α := {}
 
 namespace Store
 
 variable {α : Type}
 
+/-- The number the next entry made has. -/
+@[inline] def size (s : Store α) : Nat := s.last.base + s.last.count
+
+@[specialize] def olderGet? (older : Array (Seg α)) (i : Nat) : Option α := Id.run do
+  let mut k := older.size
+  while k > 0 do
+    k := k - 1
+    if let some seg := older[k]? then
+      if i ≥ seg.base then return seg.get? (i - seg.base)
+  return none
+
 @[inline] def get? (s : Store α) (i : Nat) : Option α :=
-  if i < s.size then (s.pieces.getD (i >>> 6) #[])[i &&& 63]? else none
+  if i ≥ s.last.base then s.last.get? (i - s.last.base) else olderGet? s.older i
 
 @[inline] def getD (s : Store α) (i : Nat) (d : α) : α := (s.get? i).getD d
 
-def push (s : Store α) (x : α) : Store α :=
-  if s.size &&& 63 == 0 then
-    { pieces := s.pieces.push ((Array.mkEmpty 64).push x), size := s.size + 1 }
-  else { pieces := s.pieces.modify (s.size >>> 6) (·.push x), size := s.size + 1 }
+def push (s : Store α) (x : α) : Store α := { s with last := s.last.push x }
 
 def modify (s : Store α) (i : Nat) (f : α → α) : Store α :=
-  if i < s.size then { s with pieces := s.pieces.modify (i >>> 6) (·.modify (i &&& 63) f) } else s
+  if i ≥ s.last.base then { s with last := s.last.modify (i - s.last.base) f }
+  else
+    match (List.range s.older.size).reverse.find? (fun k => (s.older[k]?.map (·.base)).getD 0 ≤ i) with
+    | some k => { s with older := s.older.modify k fun seg => seg.modify (i - seg.base) f }
+    | none => s
 
 def set! (s : Store α) (i : Nat) (x : α) : Store α := s.modify i fun _ => x
 
-def toArray (s : Store α) : Array α := s.pieces.foldl (· ++ ·) (Array.mkEmpty s.size)
+/-- Every segment, the last too, in order. -/
+def segs (s : Store α) : Array (Seg α) := s.older.push s.last
+
+def toArray (s : Store α) : Array α :=
+  s.segs.foldl (fun acc seg => seg.pieces.foldl (· ++ ·) acc) (Array.mkEmpty s.size)
+
+/-- Each entry with its number. -/
+def entries (s : Store α) : List (Nat × α) :=
+  s.segs.toList.flatMap fun seg =>
+    seg.pieces.toList.zipIdx.flatMap fun (piece, c) =>
+      piece.toList.zipIdx.map fun (x, j) => (seg.base + 64 * c + j, x)
+
+/-- What is made next has a number from `n` on, in a segment of its own:
+the numbers passed over are never made. -/
+def jumpTo (s : Store α) (n : Nat) : Store α :=
+  if n ≤ s.size then s
+  else if s.last.count == 0 then { s with last := { base := n } }
+  else { older := s.older.push s.last, last := { base := n } }
 
 end Store
 
@@ -645,7 +701,7 @@ structure St where
   /-- The values the expression being checked has computed and not yet used,
   each with how many borrows had been made when it was computed. -/
   temps : List (Ty × Nat) := []
-  loans : Array Loan := #[]
+  loans : Store Loan := {}
   /-- Mutable variables, by the brand of their block: the name, and the type held. -/
   cells : Array (Nat × String × Ty) := #[]
   /-- The patterns being looked at are only to say which cases clauses take:
@@ -713,7 +769,7 @@ structure St where
   groupUses : Array GroupUse := #[]
   /-- A function's own type parameters that bounds were needed of, each with
   the number it has for `Traits.solve`. -/
-  rigidKeys : Array String := #[]
+  rigidKeys : Store String := {}
   /-- What the implementation being checked assumes of its type parameters. -/
   implGivens : Option (List (String × Ty)) := none
   /-- Where the statement being checked starts. -/

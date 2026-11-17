@@ -3686,6 +3686,9 @@ def cases : List Case := [
     [], "8"⟩,
   ⟨"trait Show { fn show(&Self) -> Int }\ntrait A { fn a(&Self) -> Int }\ntrait B { fn b(&Self) -> Int }\nimpl A for Int { fn a(x) { 1 } }\nimpl B for Int { fn b(x) { 2 } }\nimpl<T: A> Show for T { fn show(x) { a(x) } }\nimpl<T: B> Show for T { fn show(x) { b(x) } }\nfn main() -> Int { show(&1) }",
     [], "error: `Show` is implemented twice for `Int`"⟩,
+  -- Modules that do not use each other are checked side by side and put together.
+  ⟨"mod shapes {\n  pub trait Area { fn area(&Self) -> Int }\n  pub struct Sq { pub s: Int }\n  impl Area for Sq { fn area(q) { q.s * q.s } }\n  pub fn total<T: Area>(xs: &[T]) -> Int { let mut n = 0; let mut i = 0; while({ i < len_at(xs) }) { n = n + area(&xs[i]); i = i + 1 }; n }\n}\nmod names {\n  pub trait Size { fn size(&Self) -> Int }\n  pub struct Word { pub n: Int }\n  impl Size for Word { fn size(w) { w.n } }\n  impl Size for Int { fn size(x) { *x + 100 } }\n  pub fn sizes<T: Size>(a: &T, b: &T) -> Int { size(a) + size(b) }\n}\nuse shapes::{Sq, total};\nuse names::{Word, sizes};\nfn main() -> Int { total(&[Sq { s: 2 }, Sq { s: 3 }]) + sizes(&Word { n: 4 }, &Word { n: 5 }) + sizes(&1, &2) }",
+    [], "225"⟩,
   -- (An element of what a reference is to is borrowed through it.)
   ⟨"fn first(r: &[Int]) -> Int { let e = &r[0]; *e }\nfn main() -> Int { first(&[7, 8]) }",
     [], "7"⟩,

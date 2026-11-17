@@ -302,7 +302,8 @@ def compileFile (path : String) (checkKept : Check.Kept := []) (search : Bool :=
   -- (What the checker kept the last time, where none is given: its state
   -- after each step, which a step made from the same is taken from.)
   let checkKept ← if !checkKept.isEmpty || (← IO.getEnv "GLORIOUS_FRESH").isSome then pure checkKept
-    else pure ((← Store.load (α := Check.Kept) (dir / "checked") "checked").getD [])
+    else Trace.timedIO "load kept checks" do
+      pure ((← Store.load (α := Check.Kept) (dir / "checked") "checked").getD [])
   -- (And what any program kept of the library's modules, checked first.)
   let library ← Target.libraryDir
   let libraryKept ← if (← IO.getEnv "GLORIOUS_FRESH").isSome then pure []
@@ -317,9 +318,11 @@ def compileFile (path : String) (checkKept : Check.Kept := []) (search : Bool :=
     [(true, false), (true, true), (false, false), (false, true)].filterMapM fun (std, drop) => do
       pure (((← Store.load (α := List (Nat × Check.St)) (library / s!"first-{std}-{drop}") "first").bind
         (·.head?)).map ((std, drop), ·))
-  let result := compileSource (← IO.FS.readFile path) true (← moduleFiles path) (few := true) known kept
-    checkKept search memo firsts
-  if let .ok c := result then
+  let text ← IO.FS.readFile path
+  let files ← moduleFiles path
+  let result ← Trace.timedIO "compile" (IO.lazyPure fun _ =>
+    compileSource text true files (few := true) known kept checkKept search memo firsts)
+  if let .ok c := result then Trace.timedIO "save what is kept" do
     -- (What a compile that did not look for each place found is not kept
     -- for one that does.)
     if search then
@@ -900,6 +903,11 @@ partial def watch (path : String) (input : List Int) : IO UInt32 := do
   pure 0
 
 def main (args : List String) : IO UInt32 := do
+  let code ← Trace.timedIO "glorious" (command args)
+  Trace.report
+  pure code
+where
+  command (args : List String) : IO UInt32 := do
   match args with
   | ["certify", path] => certify path false
   | ["certify", "--strict", path] => certify path true

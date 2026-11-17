@@ -1,5 +1,6 @@
 module
 
+public import Glorious.Trace
 public import Glorious.Syntax.Parser
 public import Glorious.Syntax.Resolve
 public import Glorious.Syntax.Modules
@@ -257,7 +258,7 @@ def certifyProgram (items : List Syntax.Item) (p : Core.Program)
   let try_ := fun (k : Nat) => match attempts[k]? with
     | some (strict, regions, loans, ranked, widen) =>
       if strict && regions && loans && failed.contains (ranked, widen) then none
-      else one strict regions loans ranked widen
+      else Trace.timed s!"certificate way {k}" fun _ => one strict regions loans ranked widen
     | none => none
   -- (The one that passed last time, or else the first; and if that does
   -- not pass, the others all at once, each on a thread of its own, the
@@ -687,7 +688,7 @@ partial def compileSourceAt (src : String) (check : Bool := true)
     (dotPicks : List (Nat × String) := []) (search : Bool := true) (memo : Infer.Memo := {})
     (firsts : List ((Bool × Bool) × (Nat × Check.St)) := [])
     (lexed : List (List String × Array Syntax.Token) := []) : Except String Compiled := do
-  let (prelude, items) ← parseProgram src files check few packs lexed
+  let (prelude, items) ← Trace.timed "parse" fun _ => parseProgram src files check few packs lexed
   -- (Clauses the checker found matching a reference with patterns of a
   -- value: read with those patterns written `&Pattern`.)
   let items := refPats.foldl (fun items (id, uniq, which) => Elab.refPatsItems id uniq which items) items
@@ -695,7 +696,7 @@ partial def compileSourceAt (src : String) (check : Bool := true)
   let items := dotPicks.foldl (fun items (call, fn) => Elab.dotOwnItems call fn items) items
   -- Every name is given its meaning: the modules become one list of items,
   -- each module a unit, after those it uses.
-  let resolved ← Syntax.Modules.resolve prelude items
+  let resolved ← Trace.timed "resolve names" fun _ => Syntax.Modules.resolve prelude items
   let (firstItems, unitItems) := unitsOf resolved.items resolved.info.unitUses
   let resolved := { resolved with items :=
     firstItems ++ unitItems.flatMap (fun (k, is) => Syntax.Item.fieldNames Syntax.unitMark [k] [] :: is) }
@@ -709,10 +710,10 @@ partial def compileSourceAt (src : String) (check : Bool := true)
       else Syntax.lastSegment name
     | none => Syntax.lastSegment name
   -- A type alias is written out wherever it is used.
-  let all ← Syntax.expandAliases resolved.items
+  let all ← Trace.timed "expand aliases" fun _ => Syntax.expandAliases resolved.items
   -- An implementation that does not write a function its trait gives a body
   -- has that body.
-  let all := Syntax.fillDefaults all
+  let all := Trace.timed "fill defaults, write out blankets" fun _ => Syntax.fillDefaults all
   -- What the checker learnt about blocks that share an environment. A program
   -- it rejects is elaborated without that.
   -- (Or that has a cleanup, which a resumption given up runs: what destroys
@@ -752,6 +753,10 @@ partial def compileSourceAt (src : String) (check : Bool := true)
     | .ok (count, _) => (unitsOf (all.drop count) resolved.info.unitUses).2
     | .error _ => []
   let units := unitList.map (fun (u : String × List Syntax.Item) => u.2)
+  -- (For each, the units before it that it uses.)
+  let unitDeps := unitList.zipIdx.map fun ((k, _), i) =>
+    let uses := (resolved.info.unitUses.lookup k).getD []
+    ((unitList.take i).zipIdx.filter fun ((k', _), _) => uses.contains k').map (·.2)
   -- (The library's modules among them, which come first.)
   let library := (unitList.takeWhile fun (k, _) => k == "std" || k.startsWith "std::").length
   let infoKeys := unitList.zipIdx.map fun ((k, is), i) =>
@@ -771,6 +776,7 @@ partial def compileSourceAt (src : String) (check : Bool := true)
     | true, false, .ok (count, first) =>
       Check.checkUnitsKept first (cut (all.drop count)) resolved.info (mixHash seed (hash count)) checkKept
         (library := if (units.map List.length).sum == (all.drop count).length then library else 0)
+        (deps := if (units.map List.length).sum == (all.drop count).length then unitDeps else [])
     -- (A program that declares a name the prelude has: the prelude checked
     -- with it, as the first unit, and nothing taken as the program's own.)
     | true, true, .ok (count, _) =>
@@ -795,7 +801,7 @@ partial def compileSourceAt (src : String) (check : Bool := true)
         | (all, true) => checkWith fuel all (some (first.getD e))
         | _ => (all, .error said)
       | _, _, _ => (all, .error said)
-  let (all, checked) := checkWith 64 all none
+  let (all, checked) := Trace.timed "check" fun _ => checkWith 64 all none
   -- (Dot calls the checker chose a type's own function for, by the value's
   -- type: written so for what follows.)
   let all := match checked with
@@ -827,7 +833,7 @@ partial def compileSourceAt (src : String) (check : Bool := true)
   -- is met, and each is now a value passed where it is needed.
   let (all, blocks) ← match blocks with
     | some b => do
-      let (items, b) ← lowered b written all
+      let (items, b) ← Trace.timed "lower traits to values" fun _ => lowered b written all
       pure (items, some b)
     | none => pure (all, none)
   -- What nothing reaches is not part of the program that runs. But what the
@@ -857,13 +863,13 @@ partial def compileSourceAt (src : String) (check : Bool := true)
        opNames := out.opNames, cert, lent, plain := out.plain, places, checkKept := checkMade
        inferMade := made, firstMade, libraryKept := libraryMade } : Compiled)
   let plain := fun (blocks : Option Elab.Blocks) (failed : List (Bool × Bool)) => do
-    let out ← Elab.elabProgram all blocks
+    let out ← Trace.timed "elaborate" fun _ => Elab.elabProgram all blocks
     -- What is unsafe is outside what Core's rules are about: a program that
     -- calls a foreign function or reads memory at an address has no
     -- certificate.
     let first := List.lookup ("%way", 0) known
     let (cert, way, made) ← if check && !out.foreign then
-        match certifyProgram declared out.program out.envSizes failed first kept memo with
+        match Trace.timed "certify" fun _ => certifyProgram declared out.program out.envSizes failed first kept memo with
         | .ok (cert, way, made) => pure (some cert, way, made)
         | .error e =>
           throw s!"the checker accepted this program, but its Core could not be shown to be well typed: {withFnNames out.fnNames e}. This is a defect in the compiler"
@@ -886,19 +892,21 @@ partial def compileSourceAt (src : String) (check : Bool := true)
   -- one of several cells, which a borrow's scope cannot give out, no place
   -- is tried alone.)
   let shownAtAll := fun (blocks : Option Elab.Blocks) (ranked : Bool) =>
-    match Elab.elabProgram all blocks (fun _ => 0) with
+    match Trace.timed "elaborate (borrow scopes)" fun _ => Elab.elabProgram all blocks (fun _ => 0) with
     | .ok out =>
-      match certifyWith kept declared out.program true out.envSizes true true ranked false memo with
+      match Trace.timed "certify (borrow scopes)" fun _ =>
+          certifyWith kept declared out.program true out.envSizes true true ranked false memo with
       | .ok (_, accepted, _) => some accepted
       | .error _ => none
     | .error _ => none
   let lending := fun (blocks : Option Elab.Blocks) (ways : List Bool) (sites : Nat → Nat) =>
-    match Elab.elabProgram all blocks sites with
+    match Trace.timed "elaborate (borrow scopes)" fun _ => Elab.elabProgram all blocks sites with
     | .ok out =>
       -- As it is, and then with callables taken to bind the regions of the
       -- references they are given: a function lent to by itself needs that.
       ways.findSome? fun ranked =>
-        match certifyWith kept declared out.program true out.envSizes true true ranked false memo with
+        match Trace.timed "certify (borrow scopes)" fun _ =>
+            certifyWith kept declared out.program true out.envSizes true true ranked false memo with
         | .ok (cert, accepted, made) =>
           if out.lent != 0 && accepted then
             some (compiled out (some cert) out.lent
@@ -953,7 +961,8 @@ partial def compileSourceAt (src : String) (check : Bool := true)
             | .error _ => Sum.inr []
             | .ok o =>
               let outcomes : List (Sum Compiled (List Nat)) := ways.map fun ranked =>
-                match certifyWith kept declared o.program true o.envSizes true true ranked false memo with
+                match Trace.timed "certify (borrow scopes)" fun _ =>
+                    certifyWith kept declared o.program true o.envSizes true true ranked false memo with
                 | .ok (cert, accepted, made) =>
                   if o.lent != 0 && accepted then
                     Sum.inl (compiled o (some cert) o.lent
@@ -1138,7 +1147,7 @@ def compileSource (src : String) (check : Bool := true)
   -- (What the default prelude has from the library, where the text uses it;
   -- and each text lexed, once.)
   let src := src ++ stdPreludeUses src
-  let lexed ← lexTexts src files
+  let lexed ← Trace.timed "lex" fun _ => lexTexts src files
   let packs := longestOf lexed
   -- (An implementation over several lists, as one that joins two, is
   -- written out to as many times as long: what it makes can be that long.)

@@ -1429,7 +1429,7 @@ def runLowerChecks (fnTy : Ty) : M Unit := do
     for cap in caps do
       let root ← findCap cap
       let mut names : List String := []
-      for ((src, what), name) in s.capEdges.toArray.zip s.capEdgeNames.toArray do
+      for ((_, (src, what)), (_, name)) in s.capEdges.entries.zip s.capEdgeNames.entries do
         if (← findCap src) == root then
           if let .ty t := what then
             modify fun st => { st with seen := [] }
@@ -1517,7 +1517,7 @@ def runLowerChecks (fnTy : Ty) : M Unit := do
     match owners with
     | [(owner, c)] =>
       let mut theirs : List (String × Nat) := []
-      for (((src, what), name), i) in (s.capEdges.toArray.zip s.capEdgeNames.toArray).zipIdx do
+      for ((i, (src, what)), (_, name)) in s.capEdges.entries.zip s.capEdgeNames.entries do
         if src == c then
           if let .ty held := what then
             if let some n := name then theirs := n :: theirs
@@ -1530,7 +1530,7 @@ def runLowerChecks (fnTy : Ty) : M Unit := do
             unless covered do
               modify fun st => { st with drops := st.drops.push (held,
                 why ++ ", and the block it is given was not run and holds a value this one does not mention") }
-      for (((src, what), name), i) in (s.capEdges.toArray.zip s.capEdgeNames.toArray).zipIdx do
+      for ((i, (src, what)), (_, name)) in s.capEdges.entries.zip s.capEdgeNames.entries do
         if src == own then
           if let .ty _ := what then
             if let some n := name then
