@@ -7,7 +7,7 @@
 // 7
 mod ecs;
 
-use ecs::{App, Entity, Query, With, Without, for_each, fold_all};
+use ecs::{App, Entity, Query, With, Without, fold_all};
 
 struct Position(Int)
 struct Velocity(Int)
@@ -15,7 +15,7 @@ struct Tick
 struct Look
 
 fn movement(query: &mut Query<(&mut Position, &Velocity)>) {
-    query.for_each(fn(entity: Entity, got: (&mut Position, &Velocity)) {
+    query.for_each(fn(got: (&mut Position, &Velocity)) {
         let (position, velocity) = got;
         position.0 = position.0 + velocity.0;
     })
@@ -23,7 +23,7 @@ fn movement(query: &mut Query<(&mut Position, &Velocity)>) {
 
 // Those that stand still: a position and no velocity.
 fn still(query: &mut Query<(&Position,), Without<Velocity>>) {
-    query.for_each(fn(entity: Entity, got: (&Position,)) { print(1) })
+    query.for_each(fn(got: (&Position,)) { print(1) })
 }
 
 fn main() -> Int {

@@ -630,6 +630,11 @@ partial def checkArgsIn (scope : Scope) (amb : Row) (what : String) (params : Li
       -- value: the program is read again with those patterns written
       -- `&Pattern`, binding references, as Rust's binding modes have them.
       if let .closure id clauses := a then
+        -- (What the arguments before it leave to implementations is found
+        -- first where it can be: what the clauses are given is then of a
+        -- type that is known, and a field read through a reference in them
+        -- is seen as one.)
+        unless (← get).assocUses.isEmpty do settleAssocs
         -- (Which clauses' first patterns are of a value: a constructor, a
         -- tuple, a constructor without fields written as a name.)
         let mut valuePats : List Nat := []

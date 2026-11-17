@@ -3695,6 +3695,10 @@ def cases : List Case := [
   -- (Which implementation fits a type not all known: each of its variables one type throughout.)
   ⟨"struct On<E, P>(E, P)\nstruct Up\nstruct Hit\ntrait Run<E> { fn run(&Self) -> Int }\nimpl<E> Run<E> for () { fn run(x) { 0 } }\nimpl<E, P, T> Run<E> for (On<E, P>, T) where T: Run<E> { fn run(l) { 1 + <T as Run<E>>::run(&l.1) } }\nimpl<E, F, P, T> Run<E> for (On<F, P>, T) where T: Run<E> { fn run(l) { 10 + <T as Run<E>>::run(&l.1) } }\nfn up<L: Run<Up>>(l: &L) -> Int { <L as Run<Up>>::run(l) }\nfn main() -> Int { let l = (On(Hit, []), (On(Up, 3), ())); up(&l) }",
     [], "11"⟩,
+  -- (A name borrowed and then bound again: the first is borrowed as it is,
+  -- and a block's own binding of the name is not the one after it.)
+  ⟨"struct P { a: [Int], b: Int }\nfn main() -> Int {\n    let P { a, b } = P { a: [1, 2], b: 3 };\n    let n = len_at(&a);\n    let k = if(n == 2) { let a = [5]; len_at(&a) } else { 0 };\n    let m = len_at(&a);\n    let a = 9;\n    n * 1000 + k * 100 + m * 10 + a + b\n}",
+    [], "2132"⟩,
   -- (An element of what a reference is to is borrowed through it.)
   ⟨"fn first(r: &[Int]) -> Int { let e = &r[0]; *e }\nfn main() -> Int { first(&[7, 8]) }",
     [], "7"⟩,

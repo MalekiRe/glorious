@@ -5152,6 +5152,19 @@ Covey is the toolbox for finding what the language lacks. Rewriting it after
   cannot be** (`app.insert_resource(..)` read as `World::insert_resource`,
   `&mut app` of an `app` that is not mutable) failed instead of trying the
   receiver's type's own function. It now tries it. Fixed.
+- **A name borrowed and then bound again** (`let a = ..; len_at(&a); let a =
+  ..`) could not be borrowed: the uses after the second binding were counted
+  as the first's, and any binding again kept the first from being kept where
+  a reference can point. The uses of a name now end at a statement that binds
+  it again, and a clause that binds it is not of it. Fixed, with a case.
+- **A field read through a reference that an associated type gives**, `p.0`
+  of `p` from a `Q::Got<'a>`, was read before the type was found. What the
+  arguments before a callable leave to implementations is now found before
+  the callable is read. Fixed.
+- **A dot call of a function of a type the module cannot name**, beside a
+  function of the name in scope (`app.world.get<Shield>(e)` with `World` not
+  imported, and the library's `get`), did not count the type's function among
+  the alternatives. It now does. Fixed.
 
 ## Other standing decisions
 

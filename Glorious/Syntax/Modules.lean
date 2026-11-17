@@ -1120,7 +1120,9 @@ partial def resolveExpr (ctx : Ctx) (bound : List String) : Expr → R Expr
       unless bound.contains name do
         if let some e := lookupIn (ctx.of name) .value name then
           if e.kind == .fn || e.kind == .method then
-            let alts := (← own false).map (·.entry.global)
+            -- (Of any type a value of which may be had here: one need not be
+            -- able to name the type to call its functions through a value.)
+            let alts := (← own true).map (·.entry.global)
             unless alts.isEmpty || id == 0 do
               modify fun s => { s with dotAlts := (id, alts) :: s.dotAlts }
             -- (Marked: whether it is borrowed for the call is decided once

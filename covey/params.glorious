@@ -1,0 +1,82 @@
+// Some of upstream's tests/params.rs:
+// `optional_items_and_presence_checks_follow_each_row`: a query of
+// `Option<&mut T>` and `Has<T>` finds every entity with the rest, with them
+// or not; and a system that takes a `Single` runs only while exactly one
+// entity matches (`singleton_requires_exactly_one_matching_row_across_all_tables`,
+// as a system: covey has no `world.single` yet).
+// expect:
+// 12
+// 10
+// 10
+// 0
+// 1
+// 1
+// 0
+// 1
+// 16
+mod ecs;
+
+use ecs::{App, Entity, Query, Single, Has, ResMut, chain};
+use core::value::{Default};
+
+struct Update
+struct Position(Int)
+struct Shield(Int)
+struct Stunned
+struct Tag
+struct Seen { singles: Int, at: [Int] }
+
+impl Default for Seen { fn default() { Seen { singles: 0, at: [] } } }
+
+// Shields charge unless stunned; those without one still match.
+fn charge(query: &mut Query<(&Position, Option<&mut Shield>, Has<Stunned>)>) {
+    query.for_each(fn(got: (&Position, Option<&mut Shield>, Bool)) {
+        let (position, shield, stunned) = got;
+        match(shield) {
+            Some(shield) => if(stunned) { () } else { shield.0 = shield.0 + position.0 },
+            None => ()
+        }
+    })
+}
+
+// Run only while exactly one entity has a `Tag` and a position.
+fn lone(single: &mut Single<(Entity, &Position), (ecs::With<Tag>,)>, seen: ResMut<Seen>) {
+    seen.singles = seen.singles + 1;
+    match(single.get_mut()) { Some(got) => let (_, p) = got; push_at(&mut seen.at, p.0), None => () }
+}
+
+fn shield_of<S, L>(app: &App<S, L>, entity: Entity) -> Int where S: ecs::Get<Shield> {
+    match(app.world.get<Shield>(entity)) { Some(s) => s.0, None => -1 }
+}
+
+fn main() -> Int {
+    let mut app = App::new()
+        .register<Position>()
+        .register<Shield>()
+        .register<Stunned>()
+        .register<Tag>()
+        .init_resource<Seen>()
+        .add_systems(Update, (charge, lone).chain())
+        .build();
+    let bare = app.world.spawn_bundle((Position(1),));
+    let shielded = app.world.spawn_bundle((Position(2), Shield(10)));
+    let stunned = app.world.spawn_bundle((Position(3), Shield(10), Stunned));
+    app.emit(&Update);
+    say(shield_of(&app, shielded));
+    say(shield_of(&app, stunned));
+    let _ = app.world.remove<Stunned>(stunned);
+    let _ = app.world.remove<Shield>(shielded);
+    app.world.insert(bare, (Tag,));
+    app.world.insert(stunned, (Tag,));
+    // Two tagged: `lone` is not run, and the shield charges once more.
+    app.emit(&Update);
+    say(shield_of(&app, stunned) - 3);
+    match(app.world.resource<Seen>()) { Some(s) => say(s.singles), None => () };
+    let _ = app.world.remove<Tag>(stunned);
+    app.emit(&Update);
+    match(app.world.resource<Seen>()) { Some(s) => say(len_at(&s.at)); say(s.at[0]), None => () };
+    let _ = app.world.despawn(shielded);
+    match(app.world.resource<Seen>()) { Some(s) => say(s.singles - 1), None => () };
+    say(app.world.count<Tag>());
+    shield_of(&app, stunned)
+}

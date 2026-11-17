@@ -1003,11 +1003,23 @@ partial def nameUseExpr (x : String) : Expr → NameUse
 
 partial def nameUseClause (x : String) : Clause → NameUse
   | .mk pats body =>
-    let u := nameUseStmts x body
-    if (pats.flatMap patternNames).contains x then { u with rebound := true } else u
+    -- (A clause that binds the name again: what it does is of that one.)
+    if (pats.flatMap patternNames).contains x then { rebound := true } else nameUseStmts x body
 
 partial def nameUseStmts (x : String) (body : List Stmt) : NameUse :=
-  body.foldl (fun u s => u.or (nameUseStmt x s)) {}
+  -- (What follows a statement that binds the name again is of that one.)
+  match body with
+  | [] => {}
+  | s :: rest =>
+    let u := nameUseStmt x s
+    if bindsAgain x s then u else u.or (nameUseStmts x rest)
+
+/-- Is this statement itself one that binds the name again? -/
+partial def bindsAgain (x : String) : Stmt → Bool
+  | .let_ pat _ => (patternNames pat).contains x
+  | .letMut y _ => y == x
+  | .located _ _ s => bindsAgain x s
+  | _ => false
 
 partial def nameUseStmt (x : String) : Stmt → NameUse
   | .let_ pat e =>
@@ -1338,14 +1350,14 @@ def borrowedOnly (x : String) (after : List Stmt) : Bool :=
   let u := nameUseStmts x after
   -- (A field of it may be borrowed too: it is kept where a reference can
   -- point either way.)
-  !x.startsWith "%" && u.shared && !u.changed && !u.rebound
+  !x.startsWith "%" && u.shared && !u.changed
 
 /-- Is a name bound here one of which what follows borrows a field with `&`,
 and never changes? If what it is bound to is a value and not a reference, it
 is kept where a reference can point, as one borrowed whole is. -/
 def fieldBorrowedOnly (x : String) (after : List Stmt) : Bool :=
   let u := nameUseStmts x after
-  !x.startsWith "%" && u.fielded && !u.changed && !u.rebound
+  !x.startsWith "%" && u.fielded && !u.changed
 
 /-- The label `@f` a function is also known by: the last part of its name,
 `f` of `m::f` or `T::f`, and of a function written in a block, `f%12`. -/
