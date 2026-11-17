@@ -5131,6 +5131,17 @@ Covey is the toolbox for finding what the language lacks. Rewriting it after
   so found the first implementation. ("No implementation of `Columns` was
   found; this is a compiler defect" for `(Resource<Ended>, ..)`.) Each bound
   now chooses among the implementations when it is met. Fixed.
+- **A type's own function's own type parameters** were after the type's, so
+  `app.on<E, P>(..)` gave `E, P` to `App<S, L>`. They now come first, as
+  `.on::<E, P>()` gives them in Rust; a function with none of its own still
+  takes the type's. Fixed.
+- **A state kept from an earlier compile** brought that program's module
+  facts with it, among them the alternatives of dot calls: `commands.insert`
+  then stayed `World::insert`. A kept state now takes this program's
+  (`adopt`). Fixed.
+- **A bound a function's needs come down to, at arguments** (`S: Get<Value>`
+  from `(Value,): Bundle<S>`), went into its type by name alone, and its
+  arguments were lost where it was used. It is now said with them. Fixed.
 
 ## Other standing decisions
 

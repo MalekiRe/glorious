@@ -1930,7 +1930,11 @@ private partial def parseItem : P Item := do
           if c.records.contains tr then { c with records := "Self" :: c.records } else c) parseFn
         match item with
         | .fn name ps annots ret clauses =>
-          let ps := params ++ ps.filter (!params.contains ·)
+          -- (Its own type parameters first: `app.on<E, P>(..)` gives those,
+          -- as `.on::<E, P>()` does in Rust; the type's are known from what
+          -- the function is given.)
+          let mine := ps.filter (!params.contains ·)
+          let ps := if (mine.filter (!·.startsWith "'")).isEmpty then params ++ mine else mine ++ params
           let own := s!"{tr}::{name}"
           let f := Item.fn own ps (annots.map (·.map (TypeExpr.withSelf self)))
             (ret.map (TypeExpr.withSelf self)) (clauses.map (selfClause tr none))

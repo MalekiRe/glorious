@@ -10,7 +10,7 @@
 // 3
 mod ecs;
 
-use ecs::{Entity, Column, Commands, end, app, register, add_systems, emit, spawn_with, despawn, count};
+use ecs::{App, Entity, Column, Commands, end};
 
 // A handle to something outside, closed when it is destroyed.
 struct Handle(Int)
@@ -32,13 +32,13 @@ fn age<S>(lives: &mut Column<Life>, commands: &mut Commands<S>) {
 }
 
 fn main() -> Int {
-    let mut game = app().register<Handle>().register<Life>().add_systems(Tick, age);
-    let a = game.world.spawn_with((Handle(7), Life(5)));
-    game.world.spawn_with((Handle(8), Life(1)));
-    game.world.spawn_with((Handle(9), Life(5)));
+    let mut game = App::new().register<Handle>().register<Life>().add_systems(Tick, age).build();
+    let a = game.world.spawn_bundle((Handle(7), Life(5)));
+    game.world.spawn_bundle((Handle(8), Life(1)));
+    game.world.spawn_bundle((Handle(9), Life(5)));
     game.world.despawn(a);
     say(game.world.count<Handle>());
-    game.emit(Tick);
+    game.emit(&Tick);
     say(game.world.count<Handle>());
     3
 }

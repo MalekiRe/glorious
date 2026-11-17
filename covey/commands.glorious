@@ -1,0 +1,61 @@
+// Upstream's `reserved_entities_are_usable_by_later_commands_and_apply_after_the_emit`:
+// entities a system spawns through commands can be used by its later
+// commands, and are there once the emit is done, not before.
+// expect:
+// 1
+// 1
+// 2
+// 0
+// 2
+mod ecs;
+
+use ecs::{App, World, Entity, Column, Commands, chain};
+
+struct Update
+struct Spawner
+struct Value(Int)
+struct Link(Entity)
+struct Seen([Int])
+
+fn spawn_pair<S>(spawners: &Column<Spawner>, commands: &mut Commands<S>) {
+    let child = commands.spawn((Value(1),));
+    let parent = commands.spawn((Value(2),));
+    commands.insert(child, (Link(parent),));
+}
+
+// Runs in the same emit: the spawns are not applied yet.
+fn look(values: &Column<Value>, seen: &mut Seen) {
+    push_at(&mut seen.0, len_at(&values.dense))
+}
+
+fn main() -> Int {
+    let mut app = App::new()
+        .register<Value>()
+        .register<Link>()
+        .register<Spawner>()
+        .insert_resource(Seen([]))
+        .add_systems(Update, (spawn_pair, look).chain())
+        .build();
+    app.world.spawn_bundle((Spawner,));
+    app.emit(&Update);
+    print(app.world.count<Link>());
+    let mut child_value = 0;
+    let mut parent_value = 0;
+    let all = app.world.entities();
+    let mut i = 0;
+    while({ i < len_at(&all) }) {
+        match(app.world.get<Link>(all[i])) {
+            Some(link) =>
+                match(app.world.get<Value>(all[i])) { Some(v) => child_value = v.0, None => () };
+                match(app.world.get<Value>(link.0)) { Some(v) => parent_value = v.0, None => () },
+            None => ()
+        };
+        i = i + 1
+    };
+    print(child_value);
+    print(parent_value);
+    app.emit(&Update);
+    // What `look` saw at each emit: nothing the first time, both the second.
+    match(app.world.with_resource(fn(seen: &mut Seen) -> Int { seen.0[0] })) { Some(n) => print(n), None => () };
+    match(app.world.with_resource(fn(seen: &mut Seen) -> Int { seen.0[1] })) { Some(n) => n, None => 99 }
+}

@@ -6,7 +6,7 @@
 // 7
 mod ecs;
 
-use ecs::{Entity, Column, Commands, reserve, give, app, register, add_systems, emit, spawn_with, count, fold_all};
+use ecs::{App, Entity, Column, Commands, reserve, give, fold_all};
 
 struct Seed(Int)
 struct Sprout(Int)
@@ -23,14 +23,14 @@ fn sprout<S>(seeds: &Column<Seed>, sprouts: &mut Column<Sprout>, commands: &mut 
 }
 
 fn main() -> Int {
-    let mut garden = app()
+    let mut garden = App::new()
         .register<Seed>()
         .register<Sprout>()
-        .add_systems(Grow, sprout);
-    garden.world.spawn_with((Seed(3),));
+        .add_systems(Grow, sprout).build();
+    garden.world.spawn_bundle((Seed(3),));
     print(garden.world.count<Seed>());
-    garden.emit(Grow);
-    garden.emit(Grow);
+    garden.emit(&Grow);
+    garden.emit(&Grow);
     print(garden.world.count<Sprout>() + garden.world.count<Seed>());
     garden.world.fold_all(1, fn(sum: Int, s: &Sprout) -> Int { sum + s.0 })
 }

@@ -7,7 +7,7 @@
 // 7
 mod ecs;
 
-use ecs::{Entity, Query, With, Without, for_each, app, register, add_systems, emit, spawn_with, fold_all};
+use ecs::{App, Entity, Query, With, Without, for_each, fold_all};
 
 struct Position(Int)
 struct Velocity(Int)
@@ -27,17 +27,17 @@ fn still(query: &mut Query<(&Position,), Without<Velocity>>) {
 }
 
 fn main() -> Int {
-    let mut game = app()
+    let mut game = App::new()
         .register<Position>()
         .register<Velocity>()
         .add_systems(Tick, movement)
-        .add_systems(Look, still);
-    game.world.spawn_with((Position(100), Velocity(4)));
-    game.world.spawn_with((Position(7),));
-    game.emit(Tick);
-    game.emit(Tick);
-    game.emit(Tick);
-    game.emit(Look);
+        .add_systems(Look, still).build();
+    game.world.spawn_bundle((Position(100), Velocity(4)));
+    game.world.spawn_bundle((Position(7),));
+    game.emit(&Tick);
+    game.emit(&Tick);
+    game.emit(&Tick);
+    game.emit(&Look);
     print(game.world.fold_all(0, fn(sum: Int, p: &Position) -> Int { if(p.0 > 50) { sum + p.0 } else { sum } }));
     game.world.fold_all(0, fn(sum: Int, p: &Position) -> Int { if(p.0 < 50) { sum + p.0 } else { sum } })
 }

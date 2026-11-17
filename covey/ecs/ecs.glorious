@@ -99,21 +99,25 @@ pub trait Get<T> {
     fn take(&mut Self) -> Column<T>
     fn put(&mut Self, Column<T>)
     fn has(&Self, Entity) -> Bool
+    fn column(&Self) -> &Column<T>
 }
 impl<T, R> Get<T> for (Column<T>, R) {
     fn take(columns) { replace(&mut columns.0, empty_column()) }
     fn put(columns, column) { columns.0 = column; }
     fn has(columns, entity) { slot_of(&columns.0, entity) >= 0 }
+    fn column(columns) { &columns.0 }
 }
 impl<T, H, R> Get<T> for (Column<H>, R) where R: Get<T> {
     fn take(columns) { <R as Get<T>>::take(&mut columns.1) }
     fn put(columns, column) { <R as Get<T>>::put(&mut columns.1, column) }
     fn has(columns, entity) { <R as Get<T>>::has(&columns.1, entity) }
+    fn column(columns) { <R as Get<T>>::column(&columns.1) }
 }
 impl<T, H, R> Get<T> for (Resource<H>, R) where R: Get<T> {
     fn take(columns) { <R as Get<T>>::take(&mut columns.1) }
     fn put(columns, column) { <R as Get<T>>::put(&mut columns.1, column) }
     fn has(columns, entity) { <R as Get<T>>::has(&columns.1, entity) }
+    fn column(columns) { <R as Get<T>>::column(&columns.1) }
 }
 
 // One value the whole world has, kept among its columns: a score, a clock.
@@ -217,6 +221,44 @@ pub fn count<T, S>(world: &mut World<S>) -> Int where S: Get<T> {
     let n = len_at(&column.dense);
     <S as Get<T>>::put(&mut world.columns, column);
     n
+}
+
+impl<S> World<S> {
+    // A new entity with the components given.
+    pub fn spawn_bundle<B>(world: &mut Self, bundle: B) -> Entity where B: Bundle<S> { spawn_with(world, bundle) }
+
+    // Give an entity components, or other values of ones it has.
+    pub fn insert<B>(world: &mut Self, entity: Entity, bundle: B) where B: Bundle<S> {
+        if(alive(&*world, entity)) { <B as Bundle<S>>::put_all(bundle, world, entity) } else { () }
+    }
+
+    // Take a component from an entity.
+    pub fn remove<T>(world: &mut Self, entity: Entity) -> Option<T> where S: Get<T> { remove<T, S>(world, entity) }
+
+    // End an entity; whether it was there.
+    pub fn despawn(world: &mut Self, entity: Entity) -> Bool where S: Columns {
+        let was = alive(&*world, entity);
+        despawn(world, entity);
+        was
+    }
+
+    // An entity's component.
+    pub fn get<T>(world: &Self, entity: Entity) -> Option<&T> where S: Get<T> {
+        let column = <S as Get<T>>::column(&world.columns);
+        let at = slot_of(column, entity);
+        if(at < 0) { None } else { Some(&column.dense[at]) }
+    }
+
+    // How many entities have the component.
+    pub fn count<T>(world: &mut Self) -> Int where S: Get<T> { count<T, S>(world) }
+
+    // Every entity there is.
+    pub fn entities(world: &Self) -> [Entity] { entities(world) }
+
+    // A resource, lent to `f`, if the world has it.
+    pub fn with_resource<T, X>(world: &mut Self, f: for<'a> fn(&'a mut T) -> X) -> Option<X> where S: Holds<T> {
+        with_resource(world, f)
+    }
 }
 
 // Every value of a component, folded into one.
@@ -659,53 +701,51 @@ impl<E, F, P, T, S> Dispatch<E, S> for (On<F, P>, T) where T: Dispatch<E, S> {
 // A world of columns `S` and the registered systems `L`.
 pub struct App<S, L> { pub world: World<S>, systems: L }
 
-pub fn app() -> App<(), ()> {
-    App { world: World { columns: (), generations: [], free: [] }, systems: () }
-}
-
-// Give the world a resource.
-pub fn insert_resource<T, S, L>(app: App<S, L>, value: T) -> App<(Resource<T>, S), L> {
-    match(app) {
-        App { world, systems } => match(world) {
-            World { columns, generations, free } =>
-                App { world: World { columns: (Resource { value: Some(value) }, columns), generations: generations, free: free }, systems: systems }
-        }
+impl<S, L> App<S, L> {
+    // An app with nothing in its world and no systems.
+    pub fn new() -> App<(), ()> {
+        App { world: World { columns: (), generations: [], free: [] }, systems: () }
     }
-}
 
-// Store a component.
-pub fn register<T, S, L>(app: App<S, L>) -> App<(Column<T>, S), L> {
-    match(app) {
-        App { world, systems } => match(world) {
-            World { columns, generations, free } =>
-                App { world: World { columns: (empty_column(), columns), generations: generations, free: free }, systems: systems }
-        }
+    // Give the world a resource.
+    pub fn insert_resource<T>(app: Self, value: T) -> App<(Resource<T>, S), L> {
+        let App { world, systems } = app;
+        let World { columns, generations, free } = world;
+        App { world: World { columns: (Resource { value: Some(value) }, columns), generations: generations, free: free }, systems: systems }
     }
-}
 
-// Register systems under a label, named by a value of it: `Update`.
-pub fn add_systems<S, L, E, P>(app: App<S, L>, label: E, systems: P) -> App<S, (On<E, P>, L)> {
-    app.on<E>(systems)
-}
-
-// Register systems under a label that carries something, named by its type:
-// `.on<Hit>(..)`. A system under it may take `&Hit` first.
-pub fn on<E, S, L, P>(app: App<S, L>, systems: P) -> App<S, (On<E, P>, L)> {
-    match(app) {
-        App { world, systems: before } =>
-            App { world: world, systems: (On { label: fn(event: E) { () }, systems: systems }, before) }
+    // Store a component.
+    pub fn register<T>(app: Self) -> App<(Column<T>, S), L> {
+        let App { world, systems } = app;
+        let World { columns, generations, free } = world;
+        App { world: World { columns: (empty_column(), columns), generations: generations, free: free }, systems: systems }
     }
-}
 
-// A plugin is a function from an app to an app.
-pub fn add_plugins<X, Y>(app: X, plugin: fn(X) -> Y) -> Y { plugin(app) }
+    // Register systems under a label, named by a value of it: `Update`.
+    pub fn add_systems<E, P>(app: Self, label: E, systems: P) -> App<S, (On<E, P>, L)> {
+        app.on<E, P>(systems)
+    }
 
-// Run every system registered under what is emitted, then do what they asked.
-pub fn emit<E, S, L>(app: &mut App<S, L>, event: E) where L: Dispatch<E, S>, S: Columns, L: Use<[0, infinity]> {
-    let mut commands = Commands { queue: [], next: len_at(&app.world.generations), made: 0 };
-    // (The systems are copied out first: so they and the world are two
-    // things, each borrowed alone.)
-    let systems = app.systems;
-    <L as Dispatch<E, S>>::dispatch(&systems, &event, &mut app.world, &mut commands);
-    apply(commands, &mut app.world)
+    // Register systems under a label that carries something, named by its
+    // type: `.on<Hit>(..)`. A system under it may take `&Hit` first.
+    pub fn on<E, P>(app: Self, systems: P) -> App<S, (On<E, P>, L)> {
+        let App { world, systems: before } = app;
+        App { world: world, systems: (On { label: fn(event: E) { () }, systems: systems }, before) }
+    }
+
+    // A plugin is a function from an app to an app.
+    pub fn add_plugins<Y>(app: Self, plugin: fn(Self) -> Y) -> Y { plugin(app) }
+
+    // The app, ready to run.
+    pub fn build(app: Self) -> Self { app }
+
+    // Run every system registered under what is emitted, then do what they asked.
+    pub fn emit<E>(app: &mut Self, event: &E) where L: Dispatch<E, S>, S: Columns, L: Use<[0, infinity]> {
+        let mut commands = Commands { queue: [], next: len_at(&app.world.generations), made: 0 };
+        // (The systems are copied out first: so they and the world are two
+        // things, each borrowed alone.)
+        let systems = app.systems;
+        <L as Dispatch<E, S>>::dispatch(&systems, event, &mut app.world, &mut commands);
+        apply(commands, &mut app.world)
+    }
 }

@@ -12,7 +12,7 @@
 // 12
 mod ecs;
 
-use ecs::{Entity, Column, Commands, end, app, register, insert_resource, with_resource, run_if, add_systems, on, add_plugins, chain, emit, spawn, insert, spawn_with, count, fold_all, each, Query, for_each};
+use ecs::{App, Entity, Column, Commands, end, with_resource, run_if, chain, spawn, fold_all, each, Query, for_each};
 
 struct Position(Int)
 struct Velocity(Int)
@@ -86,24 +86,24 @@ fn combat(app) {
 }
 
 fn main() -> Int {
-    let mut game = app()
+    let mut game = App::new()
         .register<Position>()
         .register<Velocity>()
         .register<Health>()
         .insert_resource(Ended(0))
         .add_plugins(physics)
-        .add_plugins(combat);
-    game.world.spawn_with((Position(0), Velocity(5), Health(3)));
-    game.world.spawn_with((Position(100), Velocity(7), Health(1)));
-    game.world.spawn_with((Position(1000), Health(2)));
+        .add_plugins(combat).build();
+    game.world.spawn_bundle((Position(0), Velocity(5), Health(3)));
+    game.world.spawn_bundle((Position(100), Velocity(7), Health(1)));
+    game.world.spawn_bundle((Position(1000), Health(2)));
     print(game.world.count<Health>());
-    game.emit(Update);
-    game.emit(Hit(1));
+    game.emit(&Update);
+    game.emit(&Hit(1));
     print(game.world.count<Health>());
-    game.emit(Update);
-    game.emit(Hit(1));
+    game.emit(&Update);
+    game.emit(&Hit(1));
     print(game.world.count<Health>());
-    game.emit(Update);
+    game.emit(&Update);
     match(game.world.with_resource(fn(ended: &mut Ended) -> Int { ended.0 })) { Some(n) => print(n), None => () };
     game.world.fold_all(0, fn(sum: Int, position: &Position) -> Int { sum + position.0 })
 }
