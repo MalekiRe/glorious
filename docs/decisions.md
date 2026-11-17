@@ -4744,6 +4744,34 @@ this program's implementation functions put in, matched by order and trait
 and 96 compile a program with what was kept of a version that differs in one
 body, both ways, and fail without the fix.
 
+## Certificate inference keeps its instantiations
+
+Inferring a certificate instantiates each function's group at each signature
+it is used at (`Infer.instantiate`): the group's scheme is copied, solved at
+that signature, and its entries and the uses of other functions it asks for
+come out. That depends on the group's Core, what is known of its functions
+(handler arms, capture counts, destructors), the functions it refers to, and
+the program's declarations and rules, and on nothing else. Each function now
+has a key made of those (`fnKeys`: per group, with the keys of the groups it
+refers to). What each instantiation gave is kept by key and signature in the
+build directory (`infer`). A later compile that instantiates a function
+with the same key at the same signature gives the same entries again, and
+asks for the same uses, with fresh regions for each one the use had.
+
+The proved checker checks the result like any other certificate. Where it
+turns it away, or inference fails with what was kept, the certificate is
+looked for afresh, so what is kept can make a compile faster but never
+different. Keys use Core's function numbers, so adding a function before
+others makes those others miss: a miss is only slower.
+
+Measured (edit of `main`, quick build, median of 3, without the kept
+instantiations → with them): calculator 0.79 → 0.66 s, orders 0.93 → 0.65 s,
+simulation 0.92 → 0.65 s, query 0.70 → 0.54 s, despawn 0.49 → 0.42 s,
+spawning 0.50 → 0.43 s, json 0.45 → 0.43 s, shapes 0.27 → 0.25 s. What is
+left of certificate inference after an edit is mostly the schemes of the
+functions `main` calls (30% of the simulation's run). Checking the prelude
+in every process is 12%, and reading the library 8%.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by

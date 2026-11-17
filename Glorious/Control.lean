@@ -201,6 +201,7 @@ inductive MemOp where
   zero. Given a constructor as well, the field is that constructor's: the
   reference then leads somewhere only while the value is built by it. -/
   | focus
+  deriving Hashable
 
 /-- The constructor of the value a path of field numbers leads to; `-1` if the
 path leads nowhere, or to something no constructor built. -/

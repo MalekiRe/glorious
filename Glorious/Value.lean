@@ -66,11 +66,13 @@ inductive Atom where
   /-- The local at position `i` of the current environment. -/
   | var (i : Nat)
   | int (n : Int)
+  deriving Hashable
 
 /-- A field path into a local: `var.path₀.path₁...`. -/
 structure Place where
   var : Nat
   path : List Nat
+  deriving Hashable
 
 /-- Machine intrinsics. Their meaning is shared by both machines. -/
 inductive Prim where
@@ -157,6 +159,7 @@ inductive Prim where
   | arrLen
   | arrPush
   | arrPop
+  deriving Hashable
 
 /-- A computation that produces a value without transferring control. -/
 inductive Rhs where
@@ -169,6 +172,7 @@ inductive Rhs where
   /-- What a closure captured, under the code of another function: the closure
   `a` is given up and `fn` runs in its place. -/
   | rebind (a : Atom) (fn : Nat)
+  deriving Hashable
 
 namespace Value
 

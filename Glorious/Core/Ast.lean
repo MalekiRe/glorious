@@ -28,6 +28,7 @@ inductive Pat where
   /-- Matches a `struct` or `enum` value with this constructor tag and one
   sub-pattern per field. -/
   | ctor (tag : Nat) (args : List Pat)
+  deriving Hashable
 
 /-- A Core computation. Each binding form appends its result to the environment. -/
 inductive Tm where
@@ -86,12 +87,14 @@ inductive Tm where
   | mem (op : MemOp) (args : List Atom) (body : Tm)
   /-- Ask the host to perform operation `id` and bind its result. -/
   | host (id : Nat) (args : List Atom) (body : Tm)
+  deriving Hashable
 
 /-- One clause of a callable: one pattern per argument, and a body. The body
 runs in the environment `arguments ++ captures ++ pattern bindings`. -/
 structure Clause where
   pats : List Pat
   body : Tm
+  deriving Hashable
 
 /-- A callable: ordered clauses, the first matching one runs. -/
 structure Fn where

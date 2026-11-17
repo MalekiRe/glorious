@@ -207,6 +207,21 @@ structure Scheme where
   exportedOnces : Array (ICls × List ITy)
   exportedShows : Array (ITy × List ITy)
 
+/-- What instantiating a function at a signature gave, kept for a later
+compile: the signature and hints of each function of its group (each by its
+key), and the uses of other functions it then asked for (each by its key,
+with what the use said: the signature, its regions, and the regions it
+binds). What a function and the functions it refers to are made of is in its
+key, so a later compile that finds the same key at the same signature takes
+this instead of working it out. The proved checker checks what comes of it
+like anything else. -/
+structure Remembered where
+  entries : List (UInt64 × FnSig × List (List Hint))
+  wanted : List (UInt64 × FnSig × List Nat × Option Nat × List Nat)
+
+/-- Instantiations kept, by the key of the function and the signature. -/
+abbrev Memo := Std.HashMap UInt64 (List (FnSig × Remembered))
+
 structure St where
   fns : Array Core.Fn
   /-- Counts the changes to what callables touch and to which regions are
@@ -325,6 +340,14 @@ structure St where
   /-- For a region standing for several places, by what stands for it: the
   regions of the references used as it. -/
   lows : Std.HashMap Nat (List Nat) := {}
+  /-- Each function's key (`fnKeys`), and the function with each key. -/
+  keys : Array UInt64 := #[]
+  byKey : Std.HashMap UInt64 Nat := {}
+  /-- What an earlier compile kept, and what this one made. -/
+  memo : Memo := {}
+  made : Array (UInt64 × FnSig × Remembered) := #[]
+  /-- Whether what this compile infers is to be kept. -/
+  remember : Bool := false
 
 abbrev M := StateT St (Except String)
 
@@ -2483,6 +2506,30 @@ and everything they refer to, at the types that follow. -/
 partial def instantiate (fn : Nat) (use : Use) : M Unit := do
   let sig := use.sig
   if ((← get).emitted[fn]?.getD []).contains sig then return
+  let key := ((← get).keys[fn]?).getD 0
+  -- (Kept from an earlier compile: what it gave is given again, with the
+  -- regions of each use made anew, one for each it had.)
+  let byKey := (← get).byKey
+  let kept := (((← get).memo.get? key).getD []).find? (·.1 == sig)
+  if let some (_, r) := kept then
+    let entries := r.entries.filterMap fun (k, g, hs) => (byKey.get? k).map (·, g, hs)
+    let wanted := r.wanted.filterMap fun (k, g, atoms, own, more) =>
+      (byKey.get? k).map (·, g, atoms, own, more)
+    if entries.length == r.entries.length && wanted.length == r.wanted.length then
+      for (f, ground, hints) in entries do
+        unless ((← get).emitted[f]?.getD []).contains ground do
+          modify fun s =>
+            { s with
+              emitted := s.emitted.insert f (ground :: s.emitted[f]?.getD [])
+              entries := s.entries.push ⟨f, ground, hints⟩ }
+      modify fun s => { s with made := s.made.push (key, sig, r) }
+      for (g, gsig, atoms, own, more) in wanted do
+        let mut fresh : Std.HashMap Nat Nat := {}
+        for a in atoms ++ own.toList ++ more do
+          unless fresh.contains a do fresh := fresh.insert a (← freshAtom)
+        let at_ := fun (a : Nat) => fresh.getD a a
+        instantiate g ⟨gsig, atoms.map at_, own.map at_, more.map at_⟩
+      return
   let sch ← schemeOf ((← get).scc[fn]?.getD fn)
   let outer ← get
   modify fun s =>
@@ -2526,6 +2573,7 @@ partial def instantiate (fn : Nat) (use : Use) : M Unit := do
     | kt => if ← bindsNone kt then givenUp kt amb self
   settleAll
   let mut wanted : List (Nat × Use) := []
+  let mut gave : List (UInt64 × FnSig × List (List Hint)) := []
   for m in members do
     let nb ← numbering m.sig
     let ground ← zonkSigWith nb m.sig
@@ -2534,6 +2582,7 @@ partial def instantiate (fn : Nat) (use : Use) : M Unit := do
     unless ((← get).emitted[m.fn]?.getD []).contains ground do
       let hints ← try m.hints.toList.mapM (zonkHints nb.body)
         catch e => throw s!"{e} (in function {m.fn})"
+      gave := gave ++ [(((← get).keys[m.fn]?).getD 0, ground, hints)]
       modify fun s =>
         { s with
           emitted := s.emitted.insert m.fn (ground :: s.emitted[m.fn]?.getD [])
@@ -2544,6 +2593,10 @@ partial def instantiate (fn : Nat) (use : Use) : M Unit := do
     { s with
       incls := outer.incls, places := outer.places, coerces := outer.coerces, nevers := outer.nevers
       onces := outer.onces, shows := outer.shows, opens := outer.opens, calls := outer.calls }
+  let keys := (← get).keys
+  modify fun s =>
+    { s with made := s.made.push (key, sig,
+        ⟨gave, wanted.map fun (g, u) => ((keys[g]?).getD 0, u.sig, u.atoms, u.own, u.more)⟩) }
   for (g, gs) in wanted do
     instantiate g gs
 
@@ -2977,6 +3030,39 @@ def captureCounts (p : Core.Program) : Array Nat := Id.run do
       out := visit out c.body
   visit out p.main
 
+/-- A key for each function: what it is made of, what is known of it
+(`extra`), and the keys of the functions it refers to, those of its own group
+taken together; and `globals`, what the program declares. Two compiles that
+give a function the same key infer the same of it at each signature. -/
+def fnKeys (fns : Array Core.Fn) (scc : Array Nat) (extra : Nat → UInt64) (globals : UInt64) :
+    Array UInt64 := Id.run do
+  let n := fns.size
+  let refs := fns.map fun F => (F.clauses.flatMap fun c => tmRefs c.body).eraseDups
+  let own := (List.range n).map fun f => mixHash (hash (fns[f]?.map (·.clauses))) (extra f)
+  -- (A group's key, once the keys of every group it refers to are known.)
+  let mut groupKey : Std.HashMap Nat UInt64 := {}
+  let members := (List.range n).foldl (fun (m : Std.HashMap Nat (List Nat)) f =>
+    let r := (scc[f]?).getD f
+    m.insert r ((m.getD r []) ++ [f])) {}
+  let mut left := members.toList
+  let mut fuel := n + 1
+  while fuel > 0 && !left.isEmpty do
+    fuel := fuel - 1
+    let mut later := []
+    for (r, ms) in left do
+      let outside := (ms.flatMap fun f => (refs[f]?).getD []).eraseDups.filterMap fun g =>
+        let rg := (scc[g]?).getD g
+        if rg == r then none else some rg
+      if outside.all groupKey.contains then
+        let k := ms.foldl (fun h f => mixHash h ((own[f]?).getD 0)) globals
+        let k := outside.foldl (fun h g => mixHash h (groupKey.getD g 0)) k
+        groupKey := groupKey.insert r k
+      else later := later ++ [(r, ms)]
+    left := later
+  pure ((List.range n).map fun f =>
+    let r := (scc[f]?).getD f
+    mixHash (groupKey.getD r 0) (hash (((members.getD r []).idxOf f), f))).toArray
+
 def certifyM (items : List Item) (g : Elab.Globals) (p : Core.Program)
     (envSizes : List (Nat × Nat × Nat)) : M Cert := do
   declare items g
@@ -2993,6 +3079,21 @@ def certifyM (items : List Item) (g : Elab.Globals) (p : Core.Program)
       givenUp := envSizes.map fun (fn, _, arity) => (fn, arity)
       globalTys := s.tys.size, globalRows := s.rows.size, globalClss := s.clss.size
       globalAccs := s.accs.size }
+  -- (Each function's key, for what an earlier compile kept.)
+  let st ← get
+  let capBy := st.capArities.fold (fun (m : Std.HashMap Nat (List (Nat × Nat))) (g, at_) k =>
+    m.insert g ((at_, k) :: m.getD g [])) {}
+  let extra := fun (f : Nat) =>
+    hash (st.armFns.contains f, st.ncaps[f]?, st.givenUp.lookup f, st.anyCallable.contains f,
+      p.drops.lookup f, (capBy.getD f []).mergeSort (fun (a : Nat × Nat) b => a.1 ≤ b.1))
+  let globals := hash (items.filter (fun
+      | .fn .. => false
+      | .pub _ (.fn ..) => false
+      | _ => true),
+    envSizes, st.strict, st.regions, st.loans, st.ranked, st.widen, p.drops)
+  let keys := if st.memo.isEmpty && !st.remember then #[] else fnKeys st.fns st.scc extra globals
+  modify fun s =>
+    { s with keys, byKey := (keys.zipIdx.foldl (fun (m : Std.HashMap UInt64 Nat) (k, f) => m.insert k f) {}) }
   let τ ← freshTy
   inferTm (← freshAcc) ⟨[], none⟩ τ #[] p.main
   let mainHints := (← get).hints
@@ -3063,6 +3164,23 @@ def certify (items : List Item) (p : Core.Program) (strict : Bool)
     { fns := p.fns.toArray, strict := strict, regions := regions, loans := loans, ranked := ranked
       widen := widen }
   pure cert
+
+/-- The same, taking what an earlier compile kept of its instantiations
+(`memo`), and giving what this one made, to be kept for the next. -/
+def certifyKept (items : List Item) (p : Core.Program) (strict : Bool)
+    (envSizes : List (Nat × Nat × Nat)) (regions loans ranked widen : Bool) (memo : Memo) :
+    Except String (Cert × Array (UInt64 × FnSig × Remembered)) := do
+  let (g, _, _) ← Elab.collect items
+  let (cert, st) ← (certifyM items g p envSizes).run
+    { fns := p.fns.toArray, strict := strict, regions := regions, loans := loans, ranked := ranked
+      widen := widen, memo := memo, remember := true }
+  pure (cert, st.made)
+
+/-- What was made, as kept for the next compile. -/
+def toMemo (made : Array (UInt64 × FnSig × Remembered)) : Memo :=
+  made.foldl (fun m (k, sig, r) =>
+    let old := m.getD k []
+    if old.any (·.1 == sig) then m else m.insert k ((sig, r) :: old)) {}
 
 /-- Which part of a program a certificate fails on, for reporting a defect in
 this pass or in the elaborator. -/

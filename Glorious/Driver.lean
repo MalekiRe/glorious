@@ -52,6 +52,8 @@ structure Compiled where
   /-- What the checker kept, for a later compile of the program in the same
   process (`Check.Kept`). -/
   checkKept : Check.Kept := []
+  /-- What certificate inference made, for a later compile (`Infer.Memo`). -/
+  inferMade : Array (UInt64 × Typing.FnSig × Infer.Remembered) := #[]
 
 /-- Each place by the function it is in and how many places of that function
 come before it: what stays the same of a place when other functions change. -/
@@ -210,22 +212,52 @@ def certifyWith (kept : List Typing.Cert) (items : List Syntax.Item) (p : Core.P
   | some c => .ok c
   | none => Infer.certify items p strict envSizes regions loans ranked widen
 
+/-- The same, taking what an earlier compile kept of its inference (`memo`)
+and giving what this one made (nothing, where a kept certificate passed). -/
+def certifyWithMemo (kept : List Typing.Cert) (items : List Syntax.Item) (p : Core.Program)
+    (strict : Bool) (envSizes : List (Nat × Nat × Nat)) (regions loans ranked widen : Bool)
+    (memo : Infer.Memo) : Except String (Typing.Cert × Array (UInt64 × Typing.FnSig × Infer.Remembered)) :=
+  match kept.find? fun c =>
+      c.strict == strict && c.regions == regions && c.loans == loans && Typing.checkProgram c p with
+  | some c => .ok (c, #[])
+  | none => Infer.certifyKept items p strict envSizes regions loans ranked widen memo
+
+/-- The same, looked for afresh where what comes of what was kept is turned
+away by the checker: what is kept makes a compile faster, never different. -/
+def certifyWithKept (kept : List Typing.Cert) (items : List Syntax.Item) (p : Core.Program)
+    (strict : Bool) (envSizes : List (Nat × Nat × Nat)) (regions loans ranked widen : Bool)
+    (memo : Infer.Memo) : Except String (Typing.Cert × Array (UInt64 × Typing.FnSig × Infer.Remembered)) :=
+  match certifyWithMemo kept items p strict envSizes regions loans ranked widen memo with
+  | .ok (cert, made) =>
+    if memo.isEmpty || Typing.checkProgram cert p then .ok (cert, made)
+    else certifyWithMemo kept items p strict envSizes regions loans ranked widen {}
+  | .error e =>
+    if memo.isEmpty then .error e
+    else certifyWithMemo kept items p strict envSizes regions loans ranked widen {}
+
 /-- Find a certificate for a program's Core and have the proved checker accept
 it: with the ownership rules and the region rules if the program can be shown
 to meet them, and otherwise with those of them it can, or as a typing only.
 An error here is a defect in the compiler, not in the program. -/
 def certifyProgram (items : List Syntax.Item) (p : Core.Program)
     (envSizes : List (Nat × Nat × Nat) := []) (failed : List (Bool × Bool) := [])
-    (first : Option Nat := none) (kept : List Typing.Cert := []) :
-    Except String (Typing.Cert × Option Nat) := do
+    (first : Option Nat := none) (kept : List Typing.Cert := []) (memo : Infer.Memo := {}) :
+    Except String (Typing.Cert × Option Nat × Array (UInt64 × Typing.FnSig × Infer.Remembered)) := do
   -- With the region rules, first with callables taken to bind a region
   -- where they are given a reference to a cell, and then without; and only
   -- then with references taken to be to one of several cells where they
   -- have to be.
-  let one (strict regions loans ranked widen : Bool) : Option Typing.Cert :=
-    match certifyWith kept items p strict envSizes regions loans ranked widen with
-    | .ok cert => if Typing.checkProgram cert p then some cert else none
-    | .error _ => none
+  -- (What was kept of an earlier compile's inference is taken first; if
+  -- what comes of it is turned away, the certificate is looked for afresh.)
+  let one (strict regions loans ranked widen : Bool) :
+      Option (Typing.Cert × Array (UInt64 × Typing.FnSig × Infer.Remembered)) :=
+    let tried := fun (memo : Infer.Memo) =>
+      match certifyWithMemo kept items p strict envSizes regions loans ranked widen memo with
+      | .ok (cert, made) => if Typing.checkProgram cert p then some (cert, made) else none
+      | .error _ => none
+    match tried memo with
+    | some r => some r
+    | none => if memo.isEmpty then none else tried {}
   -- (`failed`: ways already seen to fail with every rule, not tried again.
   -- `first`: the one of these attempts that passed last time, tried first.)
   let ways := [(true, false), (false, false), (false, true), (true, true)]
@@ -240,14 +272,14 @@ def certifyProgram (items : List Syntax.Item) (p : Core.Program)
       else one strict regions loans ranked widen
     | none => none
   if let some k := first then
-    if let some cert := try_ k then return (cert, some k)
+    if let some (cert, made) := try_ k then return (cert, some k, made)
   if let some found := (List.range attempts.length).findSome? fun k =>
-      if first == some k then none else (try_ k).map fun cert => (cert, some k) then
+      if first == some k then none else (try_ k).map fun (cert, made) => (cert, some k, made) then
     return found
   let cert ← match Infer.certify items p false envSizes with
     | .ok cert => pure cert
     | .error e => throw s!"no certificate was found: {e}"
-  if Typing.checkProgram cert p then pure (cert, none)
+  if Typing.checkProgram cert p then pure (cert, none, #[])
   else throw s!"the certificate was rejected: {Infer.rejected cert p}"
 
 /-- What the specification's default prelude has that this one keeps in the
@@ -666,7 +698,8 @@ partial def compileSourceAt (src : String) (check : Bool := true)
     (files : List (List String × String) := []) (few : Bool := false)
     (known : List ((String × Nat) × Nat) := []) (packs : Nat := 0) (kept : List Typing.Cert := [])
     (checkKept : Check.Kept := []) (refPats : List (Nat × Bool × List Nat) := [])
-    (dotPicks : List (Nat × String) := []) (search : Bool := true) : Except String Compiled := do
+    (dotPicks : List (Nat × String) := []) (search : Bool := true) (memo : Infer.Memo := {}) :
+    Except String Compiled := do
   -- (What the default prelude has from the library, where the text uses it.)
   let src := if refPats.isEmpty && dotPicks.isEmpty then src ++ stdPreludeUses src else src
   let (prelude, items) ← parseProgram src files check few packs
@@ -780,13 +813,13 @@ partial def compileSourceAt (src : String) (check : Bool := true)
       match Elab.refPatsFound e, Elab.dotOwnFound e with
       | some found, _ =>
         if check && refPats.length < 32 && !refPats.contains found then
-          match compileSourceAt src check files few known packs kept checkKept (refPats ++ [found]) dotPicks search with
+          match compileSourceAt src check files few known packs kept checkKept (refPats ++ [found]) dotPicks search memo with
           | .ok c => return c
           | .error e' => throw (clean e')
         else if check then throw (clean e) else pure (none, [])
       | none, some found =>
         if check && dotPicks.length < 32 && !dotPicks.contains found then
-          match compileSourceAt src check files few known packs kept checkKept refPats (dotPicks ++ [found]) search with
+          match compileSourceAt src check files few known packs kept checkKept refPats (dotPicks ++ [found]) search memo with
           | .ok c => return c
           | .error e' => throw (clean e')
         else if check then throw (clean e) else pure (none, [])
@@ -828,18 +861,18 @@ partial def compileSourceAt (src : String) (check : Bool := true)
     -- calls a foreign function or reads memory at an address has no
     -- certificate.
     let first := List.lookup ("%way", 0) known
-    let (cert, way) ← if check && !out.foreign then
-        match certifyProgram declared out.program out.envSizes failed first kept with
-        | .ok (cert, way) => pure (some cert, way)
+    let (cert, way, made) ← if check && !out.foreign then
+        match certifyProgram declared out.program out.envSizes failed first kept memo with
+        | .ok (cert, way, made) => pure (some cert, way, made)
         | .error e =>
           throw s!"the checker accepted this program, but its Core could not be shown to be well typed: {withFnNames out.fnNames e}. This is a defect in the compiler"
-      else pure (none, none)
+      else pure (none, none, #[])
     -- (And the way that passed, under a name no function has.)
     let way := match way with
       | some k => [(("%way", 0), k)]
       | none => []
     pure (⟨out.program, out.ctorNames.map shownName, out.fnNames, out.opNames, cert, 0, out.plain,
-      way ++ (placeKeys out.siteOwners).toList.map fun k => (k, 0), checkMade⟩ : Compiled)
+      way ++ (placeKeys out.siteOwners).toList.map (fun k => (k, 0)), checkMade, made⟩ : Compiled)
   -- A borrow given a name, or written as an argument of a call of a function,
   -- is a scope of its own in Core if the program can then be shown to follow
   -- every rule. Where it cannot, the borrow is the reference it borrows, as in
@@ -855,8 +888,8 @@ partial def compileSourceAt (src : String) (check : Bool := true)
   let shownAtAll := fun (blocks : Option Elab.Blocks) (ranked : Bool) =>
     match Elab.elabProgram all blocks (fun _ => 0) with
     | .ok out =>
-      match certifyWith kept declared out.program true out.envSizes true true ranked false with
-      | .ok cert => some (Typing.checkProgram cert out.program)
+      match certifyWithKept kept declared out.program true out.envSizes true true ranked false memo with
+      | .ok (cert, _) => some (Typing.checkProgram cert out.program)
       | .error _ => none
     | .error _ => none
   let lending := fun (blocks : Option Elab.Blocks) (ways : List Bool) (sites : Nat → Nat) =>
@@ -865,12 +898,12 @@ partial def compileSourceAt (src : String) (check : Bool := true)
       -- As it is, and then with callables taken to bind the regions of the
       -- references they are given: a function lent to by itself needs that.
       ways.findSome? fun ranked =>
-        match certifyWith kept declared out.program true out.envSizes true true ranked false with
-        | .ok cert =>
+        match certifyWithKept kept declared out.program true out.envSizes true true ranked false memo with
+        | .ok (cert, made) =>
           if out.lent != 0 && Typing.checkProgram cert out.program then
             some (⟨out.program, out.ctorNames.map shownName, out.fnNames, out.opNames, some cert, out.lent,
               out.plain, ((placeKeys out.siteOwners).toList.zip (List.range out.sites)).map
-                fun (k, i) => (k, sites i), checkMade⟩ : Compiled)
+                (fun (k, i) => (k, sites i)), checkMade, made⟩ : Compiled)
           else none
         | .error _ => none
     | .error _ => none
@@ -921,12 +954,12 @@ partial def compileSourceAt (src : String) (check : Bool := true)
             | .error _ => Sum.inr []
             | .ok o =>
               let outcomes : List (Sum Compiled (List Nat)) := ways.map fun ranked =>
-                match certifyWith kept declared o.program true o.envSizes true true ranked false with
-                | .ok cert =>
+                match certifyWithKept kept declared o.program true o.envSizes true true ranked false memo with
+                | .ok (cert, made) =>
                   if o.lent != 0 && Typing.checkProgram cert o.program then
                     Sum.inl (⟨o.program, o.ctorNames.map shownName, o.fnNames, o.opNames, some cert,
                       o.lent, o.plain, ((placeKeys o.siteOwners).toList.zip (List.range o.sites)).map
-                        fun ((k : String × Nat), (i : Nat)) => (k, choice[i]?.getD 0), checkMade⟩ : Compiled)
+                        (fun ((k : String × Nat), (i : Nat)) => (k, choice[i]?.getD 0)), checkMade, made⟩ : Compiled)
                   else Sum.inr (cert.sigs.filterMap fun (e : Typing.SigEntry) =>
                     match o.program.fns[e.fn]? with
                     | some F => if Typing.checkFn cert e F then none else some e.fn
@@ -1101,7 +1134,8 @@ is read again with lists that long. -/
 def compileSource (src : String) (check : Bool := true)
     (files : List (List String × String) := []) (few : Bool := false)
     (known : List ((String × Nat) × Nat) := []) (kept : List Typing.Cert := [])
-    (checkKept : Check.Kept := []) (search : Bool := true) : Except String Compiled := do
+    (checkKept : Check.Kept := []) (search : Bool := true) (memo : Infer.Memo := {}) :
+    Except String Compiled := do
   let packs ← (src :: files.map (·.2)).foldlM (fun m text => do
     pure (max m (Syntax.longestList (← Syntax.lex text)))) 2
   -- (An implementation over several lists, as one that joins two, is
@@ -1113,7 +1147,7 @@ def compileSource (src : String) (check : Bool := true)
   -- (Only a program that has such an implementation is read again.)
   let lists := lists != 0
   let rec go (fuel packs : Nat) : Except String Compiled :=
-    match compileSourceAt src check files few known packs kept checkKept (search := search) with
+    match compileSourceAt src check files few known packs kept checkKept (search := search) (memo := memo) with
     | .error e =>
       let wanted := longestUnimplemented e
       match fuel with
