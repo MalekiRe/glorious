@@ -41,6 +41,7 @@ public import Glorious.Prelude
 public import Glorious.Std
 public import Glorious.Driver
 public import Glorious.Target
+public import Glorious.Store
 public import Glorious.Bytecode.Encode
 public import Glorious.Cases
 public import Glorious.Bytecode.Decode

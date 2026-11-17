@@ -2,6 +2,7 @@ module
 
 public import Glorious.Driver
 public import Glorious.Target
+public import Glorious.Store
 public import Std.Async.TCP
 public import Glorious.Cases
 public import Glorious.Checks
@@ -290,6 +291,10 @@ def compileFile (path : String) (checkKept : Check.Kept := []) (search : Bool :=
   let dir ← Target.dirOf path
   let kept ← if (← IO.getEnv "GLORIOUS_FRESH").isSome then pure [] else
     pure ((← Target.readCert dir).toList)
+  -- (What the checker kept the last time, where none is given: its state
+  -- after each step, which a step made from the same is taken from.)
+  let checkKept ← if !checkKept.isEmpty || (← IO.getEnv "GLORIOUS_FRESH").isSome then pure checkKept
+    else pure ((← Store.load (α := Check.Kept) (dir / "checked") "checked").getD [])
   let result := compileSource (← IO.FS.readFile path) true (← moduleFiles path) (few := true) known kept
     checkKept search
   if let .ok c := result then
@@ -298,6 +303,7 @@ def compileFile (path : String) (checkKept : Check.Kept := []) (search : Bool :=
     if search then
       writePlaces file c.places
       if let some cert := c.cert then Target.writeCert dir cert
+    unless c.checkKept.isEmpty do Store.save (dir / "checked") "checked" c.checkKept
     -- (`GLORIOUS_CORE`: the Core that was compiled, with what destroys what.)
     if (← IO.getEnv "GLORIOUS_CORE").isSome then
       IO.eprintln (showCore c.fnNames c.core)
