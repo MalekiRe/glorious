@@ -340,11 +340,96 @@ partial def borrowReceivers (items : List Item) : List Item :=
     | item => item
   promoteItems (items.map go)
 
+/-- Each implementation for every type, `impl<T: Show> Print for T`, written
+out as one for each type made with a name, each tuple and callable of a few
+parts, and each reference, that has an implementation of every trait it asks
+of `T` (or every such type, if it asks none): `impl<A> Print for Option<A>
+where Option<A>: Show`. Not for a type that has an implementation of the
+trait for all its arguments: that one is the type's. A type with one for some
+of its arguments (`impl Print for Option<Int>`) has both, and the one that
+asks more of the type is the one for those (as for any two). In each copy
+`T` is the type it is for, and its calls are told apart from the other
+copies'. The copies come after everything else. -/
+def expandBlankets (items : List Item) : List Item := Id.run do
+  let blankets := items.filterMap fun
+    | .impl ps tr head [t] ctx ms => if head == blanketHead then some (ps, tr, t, ctx, ms) else none
+    | _ => none
+  if blankets.isEmpty then return items
+  let rest := items.filter fun
+    | .impl _ _ head _ _ _ => head != blanketHead
+    | _ => true
+  let declared : List (String × List String) := rest.filterMap fun
+    | .struct n ps _ | .pub _ (.struct n ps _) | .enum n ps _ | .pub _ (.enum n ps _) => some (n, ps)
+    | _ => none
+  let params := fun (n : Nat) => (List.range n).map (s!"T{·}")
+  let heads : List (String × List String) :=
+    [("Int", [])] ++ scalars.map (fun (n, _) => (n, [])) ++ declared
+      ++ (List.range 9).map (fun n => (s!"(tuple{n})", params n))
+      ++ (List.range 7).map (fun n => (s!"(fn{n})", params (n + 1)))
+      ++ [("(&)", ["T"]), ("(&mut)", ["T"])]
+  -- (Which trait each implementation is of, for which head, and whether for
+  -- all of the head's arguments.)
+  -- (The arguments an implementation gives its trait, as written.)
+  let givenArgs := fun (ms : List Item) => (List.range ms.length).filterMap fun i =>
+    ms.findSome? fun
+      | .typeAlias name _ body => if name == traitArgName i then some body.spell else none
+      | _ => none
+  -- (Which trait each implementation is of, at which arguments, for which
+  -- head.)
+  let implOf : Item → Option (String × String × List String) := fun
+    | .impl _ tr head _ _ ms => some (traitBase tr, head, givenArgs ms)
+    | _ => none
+  let mut known : List (String × String × List String) := rest.filterMap implOf
+  -- (`impl !Print for Secret {}`: not written out for that type.)
+  let last := fun (s : String) => (s.splitOn "::").getLast!
+  let denied := rest.filterMap fun
+    | .fieldNames mark [tr, head] _ => if mark == attrMark "negative_impl" then some (last tr, last head) else none
+    | _ => none
+  -- (What a function generic in `T` may take a trait of `T` to be met by:
+  -- see `Check.St.blanketTraits`.)
+  let mut out : Array Item := (blankets.map fun (_, tr, t, ctx, _) =>
+    Item.fieldNames (attrMark "blanket_impl")
+      (traitBase tr :: ctx.filterMap fun (p, c) => if p == t then some (traitBase c) else none) []).toArray
+  let mut copies := 0
+  -- (A copy may give what another asks: as many rounds as there are.)
+  for _ in List.range (blankets.length + 1) do
+    let mut more := false
+    for (ps, tr, t, ctx, ms) in blankets do
+      let asked := ctx.filterMap fun (p, c) => if p == t then some (traitBase c) else none
+      for (h, hps) in heads do
+        let fresh := hps.zipIdx.map fun (p, j) => if p.startsWith "'" then s!"'%b{j}" else s!"%b{j}"
+        let self := selfTypeOf h (fresh.map (TypeExpr.name · []))
+        let mine := givenArgs (ms.map fun
+          | .typeAlias n takes body => .typeAlias n takes (substTypeExpr [(t, self)] body)
+          | item => item)
+        if known.any (fun (tr', h', a) => tr' == traitBase tr && h' == h && a == mine) then continue
+        if denied.contains (last (traitBase tr), last h) then continue
+        unless asked.all (fun c => known.any fun (c', h', _) => c' == c && h' == h) do continue
+        let ctx' := ctx.zipIdx.map fun ((p, c), k) => if p == t then (s!"%subject{k}", c) else (p, c)
+        let subjects := (ctx.zipIdx.filter fun ((p, _), _) => p == t).map fun (_, k) =>
+          Item.typeAlias (ctxSubjectName k) [] self
+        copies := copies + 1
+        let shift := 100000000000000 * copies
+        let ms' := ms.map fun
+          | .typeAlias n takes body => .typeAlias n takes (substTypeExpr [(t, self)] body)
+          | .fn m fps annots ret clauses =>
+            .fn m fps (annots.map (·.map (substTypeExpr [(t, self)]))) (ret.map (substTypeExpr [(t, self)]))
+              (clauses.map (shiftClause shift))
+          | item => item
+        out := out.push (.impl (fresh ++ ps.filter (· != t)) tr h fresh ctx'
+          (ms' ++ subjects ++ [.typeAlias (blanketName t) [] self]))
+        known := known ++ [(traitBase tr, h, mine)]
+        more := true
+    unless more do break
+  pure (rest ++ out.toList)
+
 /-- Each implementation with the functions its trait gives a body that it
 does not write itself; and, where it gives its trait arguments, `impl
 From<Int> for u8`, as an implementation of the trait at those: `From<Int>` is
 the name of what it implements from here on. -/
 def fillDefaults (items : List Item) : List Item :=
+  -- (Implementations for every type written out for each.)
+  let items := expandBlankets items
   -- (First, with every declaration to hand: what dotted calls borrow.)
   let items := borrowReceivers items
   let defaults := items.filterMap fun

@@ -456,6 +456,18 @@ def traitBase (name : String) : String :=
   if name.any fun c => c == '<' || c == '#' then (name.takeWhile fun c => c != '<' && c != '#').toString
   else name
 
+/-- What an implementation for every type, `impl<T: Show> Print for T`, is
+for, before it is written out for each type (`expandBlankets`). -/
+def blanketHead : String := "(any)"
+
+/-- The name under which a copy of such an implementation keeps the type it
+is for, as what its type parameter `T` stands for in its functions. -/
+def blanketName (param : String) : String := s!"%blanket:{param}"
+
+/-- The type parameter a name made by `blanketName` is for. -/
+def blanketParam (name : String) : Option String :=
+  if name.startsWith "%blanket:" then some (name.drop 9).toString else none
+
 /-- The type an implementation is for, from the name it is made with and its
 arguments: see `Ty.head` in the checker for the names. -/
 def selfTypeOf (head : String) (args : List TypeExpr) : TypeExpr :=

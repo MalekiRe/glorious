@@ -769,10 +769,17 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
               for tr in key :: (← supersAll b.trait) do
                 unless written.any (fun w => w.1 == tr && w.2.1 == k) do
                   written := written ++ [(tr, k, t)]
+          let blankets := (← get).blanketTraits
           for (tr, k, t) in inferred do
             if let .con n [] := t then
               -- (How a type parameter is destroyed is never written.)
               unless tr == Syntax.destroyTrait || written.any (fun w => w.1 == tr && w.2.1 == k) do
+                -- (A trait every type has that has what is written of this
+                -- one is had by it too: met where the function is used.)
+                let had := fun (c : String) => written.any fun w => Syntax.traitBase w.1 == c && w.2.1 == k
+                if blankets.any (fun (b, asked) => b == Syntax.traitBase tr && asked.all had) then
+                  written := written ++ [(tr, k, t)]
+                else
                 throw (inFunction d.name s!"`{bareName n}` is not said to have `{tr}`: write `{bareName n}: {tr}`")
           pure (written ++ inferred.filter fun (tr, k, _) =>
             !written.any (fun w => w.1 == tr && w.2.1 == k))
@@ -1215,8 +1222,12 @@ def checkGroup (decls : List FnDecl) : M Unit := do
               else if im.head == "(&mut)" then pure (Ty.ref Ty.uniq (parts.headD .unit) (← freshCap))
               else if im.head == "(&)" then pure (Ty.ref Ty.shared (parts.headD .unit) (← freshCap))
               else pure (Ty.con im.head parts)
-            -- (`Self` written in its body is that type.)
-            modify fun s => { s with rigidParams := s.rigidParams ++ [("Self", self)] }
+            -- (`Self` written in its body is that type; so is `T` in a copy of
+            -- an implementation for every type, `impl<T: Show> .. for T`.)
+            let blanket := im.methods.filterMap fun
+              | .typeAlias n _ _ => (Syntax.blanketParam n).map (·, self)
+              | _ => none
+            modify fun s => { s with rigidParams := s.rigidParams ++ [("Self", self)] ++ blanket }
             -- The trait at the arguments the implementation gives it, and the
             -- types it leaves to the implementation as the implementation says.
             let own := im.pvars.filterMap fun (p, id) => (rigid.lookup p).map fun t => (id, t)

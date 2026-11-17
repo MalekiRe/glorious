@@ -691,6 +691,11 @@ structure St where
   implementation meets a bound is found by fitting types, here, and not by
   `Traits.solve`. -/
   patterned : Bool := false
+  /-- The traits with an implementation for every type, each with the
+  traits it asks of the type (`Syntax.expandBlankets`): a function whose
+  type parameter is said to have those has this one too, met where the
+  function is used, by the implementation for the type it is used at. -/
+  blanketTraits : List (String × List String) := []
   /-- The same of its `sites`. -/
   lastSites : List Ty := []
   /-- Where the function being checked performs or handles an operation of

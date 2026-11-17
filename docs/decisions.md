@@ -4785,6 +4785,40 @@ gains too.
 Measured (edit of `main`, quick build, median of 3, before → after):
 simulation 0.65 → 0.55 s, calculator 0.66 → 0.50 s, shapes 0.25 → 0.15 s.
 
+## Implementations for every type: `impl<T: Num> Double for T`
+
+An implementation whose head is one of its type parameters is written out,
+after parsing and before checking (`Syntax.expandBlankets`), as one
+implementation for each type that has an implementation of every trait it
+asks of `T`. Every type is a candidate when it asks none: Int, the scalars,
+each declared type, tuples of up to 8 parts, callables of up to 6 parameters,
+and both references. The copy for `Option` is
+`impl<A> Double for Option<A> where Option<A>: Num`. A copy is not made for
+a type that already has an implementation of the trait at the same trait
+arguments for its head, nor for one with `impl !Double for H {}`. Chains of
+these (`impl<T: B> C for T` over `impl<T: A> B for T`) are written out
+round by round. In each copy, `T` in the functions is the type it is for
+(`%blanket:T`, put in the function's type scope with `Self`), and its call
+identities are moved so that copies are told apart.
+
+**Specialization.** A type with its own implementation keeps it. One with an
+implementation for some of its arguments (`impl Double for Option<Int>`) has
+both, and the existing rule chooses the one that asks more of the type. A
+function generic in `T` that says `T: Num` may use `Double` of `T`: the
+blanket mark (`St.blanketTraits`) lets the need go to its callers, where it
+is met by the implementation for the type the function is used at. So
+`fn via<T: Num>(t: &T) { describe(t) }` used at `Int` runs `Int`'s own
+`describe`, as Rust's specialization does with monomorphization. This keeps
+dictionary passing coherent: no generic site chooses the blanket copy for a
+type that has a narrower one.
+
+Limits:
+- A blanket implementation in the prelude or library is not written out for
+  a program's own types. There is none.
+- Two blanket implementations of one trait at the same arguments are not
+  reported; the first written wins.
+- The copies come after everything else, in the last unit.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by

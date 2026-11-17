@@ -324,6 +324,10 @@ partial def writesRef : TypeExpr → Bool
 
 /-- Read the traits and their implementations. Types are declared by now. -/
 def declareTraits (items : List Item) : M Unit := do
+  for item in items do
+    if let .fieldNames mark (tr :: asked) [] := item then
+      if mark == Syntax.attrMark "blanket_impl" then
+        modify fun s => { s with blanketTraits := (tr, asked) :: s.blanketTraits }
   -- `Drop` is the compiler's: its function is run on what a variable holds
   -- when the variable's block ends.
   let dropSelf ← match ← freshTy with
