@@ -288,6 +288,12 @@ def compileFile (path : String) (checkKept : Check.Kept := []) (search : Bool :=
     IO (Except String Compiled) := do
   let file ← placesFile path
   let known ← if (← IO.getEnv "GLORIOUS_FRESH").isSome then pure [] else readPlaces file
+  -- (Which way of finding a certificate passed last time, kept by any
+  -- compile, where the places say none.)
+  let known ← if (← IO.getEnv "GLORIOUS_FRESH").isSome || (List.lookup ("%way", 0) known).isSome then pure known
+    else match ← Store.load (α := Nat) ((← Target.dirOf path) / "way") "way" with
+      | some k => pure ((("%way", 0), k) :: known)
+      | none => pure known
   let dir ← Target.dirOf path
   let kept ← if (← IO.getEnv "GLORIOUS_FRESH").isSome then pure [] else
     pure ((← Target.readCert dir).toList)
@@ -304,6 +310,7 @@ def compileFile (path : String) (checkKept : Check.Kept := []) (search : Bool :=
       writePlaces file c.places
       if let some cert := c.cert then Target.writeCert dir cert
     unless c.checkKept.isEmpty do Store.save (dir / "checked") "checked" c.checkKept
+    if let some k := List.lookup ("%way", 0) c.places then Store.save (dir / "way") "way" k
     -- (`GLORIOUS_CORE`: the Core that was compiled, with what destroys what.)
     if (← IO.getEnv "GLORIOUS_CORE").isSome then
       IO.eprintln (showCore c.fnNames c.core)

@@ -732,18 +732,23 @@ partial def compileSourceAt (src : String) (check : Bool := true)
   -- (And what the prelude and library checked first count, without marks.)
   let first := first.map fun (count, st) => ((withoutUnitMarks (all.take count)).length, st)
   let all := withoutUnitMarks all
+  -- (Each unit's items as the items now are: read again after the checker
+  -- asked for something to be written otherwise, each has as many items.)
+  let cut := fun (rest : List Syntax.Item) =>
+    if (units.map List.length).sum == rest.length then
+      ((units.foldl (fun (acc : List (List Syntax.Item) × List Syntax.Item) (u : List Syntax.Item) =>
+        (acc.1 ++ [acc.2.take u.length], acc.2.drop u.length)) ([], rest)).1).zip infoKeys
+    else [(rest, hash resolved.info)]
   let checkOnce := fun (all : List Syntax.Item) =>
-    match check && !resolved.info.shadowed, first with
-    | true, .ok (count, first) =>
-      -- (As the items now are: read again after the checker asked for
-      -- something to be written otherwise, each unit has as many items.)
-      let rest := all.drop count
-      let units := if (units.map List.length).sum == rest.length then
-          ((units.foldl (fun (acc : List (List Syntax.Item) × List Syntax.Item) (u : List Syntax.Item) =>
-            (acc.1 ++ [acc.2.take u.length], acc.2.drop u.length)) ([], rest)).1).zip infoKeys
-        else [(rest, hash resolved.info)]
-      Check.checkUnitsKept first units resolved.info (mixHash seed (hash count)) checkKept
-    | _, _ => (Check.checkProgram all resolved.info drops).map (·, [])
+    match check, resolved.info.shadowed, first with
+    | true, false, .ok (count, first) =>
+      Check.checkUnitsKept first (cut (all.drop count)) resolved.info (mixHash seed (hash count)) checkKept
+    -- (A program that declares a name the prelude has: the prelude checked
+    -- with it, as the first unit, and nothing taken as the program's own.)
+    | true, true, .ok (count, _) =>
+      Check.checkUnitsKept { dropMode := drops } ((all.take count, hash resolved.info.text) :: cut (all.drop count))
+        resolved.info (mixHash seed 77) checkKept (own := false)
+    | _, _, _ => (Check.checkProgram all resolved.info drops).map (·, [])
   -- (`..` in a tuple pattern: the checker says how many parts it stands
   -- for, and the program is read again with them written.)
   -- (A value used on one path and not on another, bound by `let`: kept in a
@@ -869,6 +874,8 @@ partial def compileSourceAt (src : String) (check : Bool := true)
           else none
         | .error _ => none
     | .error _ => none
+  -- (The places an earlier compile found, without the way that passed.)
+  let placesKnown := known.filter fun (k, _) => k.1 != "%way"
   let build := fun (blocks : Option Elab.Blocks) => do
     if check then
       if let .ok out := Elab.elabProgram all blocks (fun _ => 1) then
@@ -878,14 +885,14 @@ partial def compileSourceAt (src : String) (check : Bool := true)
           -- (Not looked for one by one: what an earlier compile found, all
           -- at once, and else none.)
           unless search do
-            unless known.isEmpty do
+            unless placesKnown.isEmpty do
               let guess := (placeKeys out.siteOwners).toList.map fun k => List.lookup k known
               let choice := fun (j : Nat) => match guess[j]? with
                 | some (some v) => v
                 | _ => 0
               if let some c := lending blocks [false, true] choice then return c
             return ← plain blocks []
-          unless known.isEmpty do
+          unless placesKnown.isEmpty do
             let guess := (placeKeys out.siteOwners).toList.map fun k => List.lookup k known
             let fresh := (List.range out.sites).filter fun i => (guess[i]?.join).isNone
             let alone := (fresh.map fun i => Task.spawn fun _ =>

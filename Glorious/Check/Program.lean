@@ -1628,9 +1628,9 @@ after the units before it, and keyed by what they and those were made from
 items), so what an earlier check kept of a unit is taken from there where
 neither it nor any unit before it changed. -/
 def checkUnitsKept (first : St) (units : List (List Item × UInt64)) (modules : Syntax.ModuleInfo)
-    (seed : UInt64) (kept : Kept) : Except String (Elab.Blocks × Kept) := do
+    (seed : UInt64) (kept : Kept) (own : Bool := true) : Except String (Elab.Blocks × Kept) := do
   let action : M (Elab.Blocks × Kept) := do
-    modify fun s => { s with modules, ownItems := true }
+    modify fun s => { s with modules, ownItems := own }
     let mut key := seed
     let mut made : Kept := []
     for (u, info) in units do

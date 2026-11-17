@@ -4666,7 +4666,24 @@ the checker's states written as Lean writes `.olean` files).
 
 This is the first part of separate compilation: what is kept is a prefix of
 units in that order, not each unit apart from the others; and elaboration,
-certificates and Core are still made for the whole program.
+certificates and Core are still made for the whole program. A program that
+declares a name the prelude has is checked the same way, the prelude its
+first unit (it was checked whole, every time).
+
+Which way of finding a certificate passed is kept too, so the next compile
+tries it first (it was kept only by `certify`). Kept, it is not taken as
+places a borrow was made a scope at: those start a search a `run` has no
+use for.
+
+**Kept schemes of certificate inference: tried, and not kept.** Each group's
+scheme was frozen (its own unknowns renumbered from the declarations' end,
+with its regions and records) and taken back by a key of the group's Core
+bodies and what they call. To be sound it could be taken only for a group
+whose inference left the declarations' unknowns and the waiting closures as
+they were; about two thirds of the groups were. On the 14 programs measured
+it made an edited run no faster (despawn 0.39 s with it, 0.40 s without;
+calculator 0.65 s and 0.67 s): what is left of certificate inference after
+an edit is mostly not inferring schemes. It was 400 lines; they are out.
 
 ## Other standing decisions
 
