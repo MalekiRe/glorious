@@ -20,11 +20,13 @@ public import Glorious.Bytecode.Encode
   between compiles; `run`, `certify` and `build` ask it where it runs.
 * `glorious watch FILE [INPUT...]` compiles and runs it again on every change.
 * `glorious exe FILE OUT` writes an executable of the program's own with no
-  other tool: the VM with the program at its end, compiled to x86-64 when it
-  starts. Needs the VM built.
+  other tool: the VM with the program at its end, loaded and compiled to
+  x86-64 ahead of time (its code is given addresses when it starts). Needs
+  the VM built.
 * `glorious native FILE OUT` builds it as a program of its own: bytecode, a
-  body for each function made by LLVM, and the runtime. Needs `clang`, and the
-  VM built (`cargo build --release` in `vm`).
+  body for each function made by LLVM, and the runtime, linked with wild where
+  it is installed. Needs `clang`, and the VM built (`cargo build --release` in
+  `vm`).
 * `glorious cases DIR` writes every test program, with its bytecode where it
   compiles, for what runs them from outside.
 * `glorious certify FILE` compiles it and says what the typing of its Core
@@ -925,9 +927,16 @@ def main (args : List String) : IO UInt32 := do
         IO.eprintln s!"glorious-vm: {ir.stderr}"
         return 1
       IO.FS.writeFile (out ++ ".ll") ir.stdout
+      -- Linked with wild where it is installed (much faster than the
+      -- system's linker), else with clang's own.
+      let wild ← try
+          let w ← IO.Process.output { cmd := "sh", args := #["-c", "command -v wild"] }
+          pure (if w.exitCode == 0 && !w.stdout.trimAscii.isEmpty then
+            #[s!"--ld-path={w.stdout.trimAscii}"] else #[])
+        catch _ => pure #[]
       let cc ← IO.Process.output
         { cmd := "clang",
-          args := #["-O2", "-Wno-override-module", out ++ ".ll",
+          args := #["-O2", "-Wno-override-module"] ++ wild ++ #[out ++ ".ll",
             (dir / "libglorious_vm.a").toString, "-o", out, "-lpthread", "-ldl", "-lm"] }
       if cc.exitCode != 0 then
         IO.eprintln s!"clang: {cc.stderr}"
@@ -938,7 +947,7 @@ def main (args : List String) : IO UInt32 := do
       pure 1
   | ["exe", path, out] =>
     -- An executable of the program's own with no other tool: the VM with
-    -- the program at its end, compiled to machine code when it starts.
+    -- the program at its end, loaded and compiled to machine code by it.
     match ← compileFile path (search := false) with
     | .ok c => do
       let dir ← match ← IO.getEnv "GLORIOUS_VM_DIR" with

@@ -106,9 +106,20 @@ function to x86-64 in memory, or does the one for two functions in three and
 the other for the rest. On x86-64 Linux it compiles unless told otherwise.
 
 `glorious-vm --bundle FILE OUT` writes an executable with no other tool: the
-VM itself with the program at its end. Run, it compiles the program to
-x86-64 in memory and runs it; what it is given is the program's input.
-`glorious exe prog.glorious prog` does both steps.
+VM itself with the program at its end, built ahead of time. The program is
+loaded and rewritten there (below), and every function compiled to x86-64
+code that has no address yet; what is put at the end is the rewritten
+program (`vm/src/image.rs`: the bytecode form, with moves and the
+instructions only the rewriting writes), the code, each table of
+instruction offsets in it, and each place where it calls an entry point of
+the runtime (`glo_step`, `glo_copy`, `glo_field`, `glo_is_ctor`,
+`glo_again`, `glo_load`, `glo_store`, by number). Run, it maps the code,
+writes the addresses those have in this process, adds the code's address to
+the tables, and runs; what it is given is the program's input. Nothing is
+rewritten or compiled when it starts. `GLORIOUS_BACKEND=interp` interprets
+the rewritten program instead, and `mix` compiles a third of it again.
+Elsewhere than x86-64 Linux the bytecode is put there as it was, and loaded
+when it starts. `glorious exe prog.glorious prog` does both steps.
 
 `glorious-vm --emit-llvm FILE` writes an LLVM module with a body for every
 function, the bytecode, and a `main` (`glorious native prog.glorious prog`
@@ -117,8 +128,11 @@ does all three steps):
 ```
 glorious build prog.glorious prog.gbc
 glorious-vm --emit-llvm prog.gbc > prog.ll
-clang -O2 prog.ll vm/target/release/libglorious_vm.a -o prog -lpthread -ldl -lm
+clang -O2 [--ld-path=wild] prog.ll vm/target/release/libglorious_vm.a -o prog -lpthread -ldl -lm
 ```
+
+`glorious native` and `vm/check-backends.sh` link with wild where it is
+installed.
 
 The program built this way reads `GLORIOUS_BACKEND` when it starts: unset,
 every function runs its LLVM body; `interp`, none does; `x86`, every function
@@ -147,8 +161,9 @@ the program, for this.
 
 Every test program that compiles (638 when this was written) is run
 interpreted as written, and then rewritten and interpreted, compiled to
-x86-64, mixed, built with LLVM, and built with LLVM and mixed three ways, and
-gives the same output and exit code each time.
+x86-64, mixed, built ahead of time (compiled and interpreted), built with
+LLVM, and built with LLVM and mixed three ways, and gives the same output and
+exit code each time.
 Those programs handle effects, resume and cancel resumptions, jump to
 labels, run cleanups, lend cells and call C, so the mixed runs take
 resumptions and unwinding through functions of all three engines.
@@ -160,7 +175,8 @@ resumptions and unwinding through functions of all three engines.
   interpreted code on the instructions between calls and no faster on calls;
   what makes programs fast is that the rewriting above leaves few calls.
   Compiling is fast: the x86-64 backend is one pass with no tool, and a
-  program is compiled when it starts.
+  program run by `glorious-vm` is compiled when it starts (one built with
+  `--bundle` was compiled when it was built).
 - **Not the layout contract of specification 17.2.** A value built by a
   constructor is the runtime's object. There are no declared sizes, offsets
   or tag widths for a program's types, no `repr(C)` records, and so nothing

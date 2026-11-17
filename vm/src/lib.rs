@@ -293,6 +293,8 @@ impl Reader<'_> {
         match self.byte()? {
             0 => Ok(Atom::Var(self.index()?)),
             1 => Ok(Atom::Int(self.int()?)),
+            // (Only a program already loaded has these: `image.rs`.)
+            2 => Ok(Atom::Take(self.index()?)),
             t => Err(format!("unknown operand tag {t}")),
         }
     }
@@ -1999,8 +2001,78 @@ fn bundled() -> Option<(Vec<u8>, u64)> {
     Some((bytes, start))
 }
 
+/// What a program built ahead of time starts with, at the end of this
+/// executable: then the program loaded (`image.rs`), and its machine code.
+const AHEAD: &[u8; 8] = b"GLAHEAD1";
+
+fn put(out: &mut Vec<u8>, n: usize) {
+    out.extend_from_slice(&(n as u64).to_le_bytes());
+}
+
+/// A program built ahead of time: loaded, rewritten, and compiled to x86-64,
+/// written out, with the places in its code a running program fills in.
+fn ahead(program: &Program) -> Vec<u8> {
+    let mut out = AHEAD.to_vec();
+    let loaded = image::write(program);
+    put(&mut out, loaded.len());
+    out.extend_from_slice(&loaded);
+    let code = x86::image(&program.codes, |_| true);
+    put(&mut out, code.code.len());
+    out.extend_from_slice(&code.code);
+    put(&mut out, code.relocs.len());
+    for (at, k) in &code.relocs {
+        put(&mut out, *at);
+        out.push(*k);
+    }
+    put(&mut out, code.tables.len());
+    for (at, count) in &code.tables {
+        put(&mut out, *at);
+        put(&mut out, *count);
+    }
+    put(&mut out, code.entries.len());
+    for e in &code.entries {
+        put(&mut out, e.map_or(usize::MAX, |e| e));
+    }
+    out
+}
+
+/// A program built ahead of time, read back: the program, and its machine
+/// code with no address yet.
+fn read_ahead(bytes: &[u8]) -> Option<(Program, x86::Image)> {
+    let mut at = AHEAD.len();
+    let get = |at: &mut usize| -> Option<usize> {
+        let n = u64::from_le_bytes(bytes.get(*at..*at + 8)?.try_into().ok()?) as usize;
+        *at += 8;
+        Some(n)
+    };
+    let n = get(&mut at)?;
+    let program = image::read(bytes.get(at..at + n)?).ok()?;
+    at += n;
+    let n = get(&mut at)?;
+    let code = bytes.get(at..at + n)?.to_vec();
+    at += n;
+    let mut relocs = Vec::new();
+    for _ in 0..get(&mut at)? {
+        let place = get(&mut at)?;
+        let k = *bytes.get(at)?;
+        at += 1;
+        relocs.push((place, k));
+    }
+    let mut tables = Vec::new();
+    for _ in 0..get(&mut at)? {
+        let place = get(&mut at)?;
+        tables.push((place, get(&mut at)?));
+    }
+    let mut entries = Vec::new();
+    for _ in 0..get(&mut at)? {
+        let e = get(&mut at)?;
+        entries.push((e != usize::MAX).then_some(e));
+    }
+    Some((program, x86::Image { code, relocs, tables, entries }))
+}
+
 /// Write an executable that is this one with a program at its end: run, it
-/// runs the program, compiled when it starts.
+/// runs the program.
 fn bundle(program: &[u8], out: &str) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
     let mut exe = std::fs::read(std::env::current_exe()?)?;
@@ -2026,6 +2098,21 @@ pub fn cli_main() -> ExitCode {
                 return ExitCode::from(64);
             }
         };
+        // (Built ahead of time: loaded and compiled already, and its code
+        // given addresses here.)
+        if bytes.starts_with(AHEAD) {
+            let Some((program, code)) = read_ahead(&bytes) else {
+                eprintln!("the program at the end of this executable cannot be read");
+                return ExitCode::from(1);
+            };
+            let bodies = match std::env::var("GLORIOUS_BACKEND").as_deref() {
+                Ok("interp") => Vec::new(),
+                Ok("mix") => x86::compile(&program.codes, |f| f % 3 != 1),
+                _ => x86::load(code),
+            };
+            let mut vm = machine(program, input);
+            return ExitCode::from(finish(&mut vm, &bodies));
+        }
         let rewrite = std::env::var("GLORIOUS_OPT").as_deref() != Ok("0");
         let program = match decode(&bytes, rewrite) {
             Ok(program) => program,
@@ -2093,11 +2180,22 @@ pub fn cli_main() -> ExitCode {
             eprintln!("usage: glorious-vm --bundle FILE OUT");
             return ExitCode::from(64);
         };
-        if let Err(e) = decode(&bytes, false) {
-            eprintln!("{path}: {e}");
-            return ExitCode::from(1);
-        }
-        return match bundle(&bytes, out) {
+        // Loaded and compiled here, once, not each time it starts (where
+        // there is a backend for the machine; elsewhere it is interpreted,
+        // and so loaded when it starts).
+        let program = match decode(&bytes, rewrite) {
+            Ok(program) => program,
+            Err(e) => {
+                eprintln!("{path}: {e}");
+                return ExitCode::from(1);
+            }
+        };
+        let payload = if cfg!(all(target_arch = "x86_64", target_os = "linux")) {
+            ahead(&program)
+        } else {
+            bytes
+        };
+        return match bundle(&payload, out) {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
                 eprintln!("{out}: {e}");
@@ -2137,5 +2235,6 @@ pub fn cli_main() -> ExitCode {
 
 mod llvm;
 mod native;
+mod image;
 mod opt;
 mod x86;

@@ -18,12 +18,43 @@ extern "C" {
 #[derive(Default)]
 struct Asm {
     buf: Vec<u8>,
+    /// Where the address of an entry point of the runtime is written, and
+    /// which (`ENTRIES`): what a program built ahead of time fills in when
+    /// it starts.
+    relocs: Vec<(usize, u8)>,
     /// Where each instruction of the function being compiled starts.
     at: Vec<usize>,
     /// Jumps to an instruction: where the offset is written, and which.
     jumps: Vec<(usize, usize)>,
     /// Jumps to the function's exit.
     exits: Vec<usize>,
+}
+
+/// The runtime's entry points compiled code calls, by number: where a program
+/// built ahead of time has a call of one, it has the number, and the address
+/// it has in this process is written there when the program starts.
+fn entries() -> [usize; 7] {
+    [
+        glo_step as *const () as usize,
+        glo_copy as *const () as usize,
+        glo_field as *const () as usize,
+        glo_is_ctor as *const () as usize,
+        glo_again as *const () as usize,
+        glo_load as *const () as usize,
+        glo_store as *const () as usize,
+    ]
+}
+
+/// Machine code for a program's functions, before it has an address: the
+/// code, where the runtime's entry points are called (`Asm::relocs`), each
+/// table of instruction addresses (where it is and how many it has, each an
+/// offset into the code until the code has an address), and where each
+/// function compiled starts.
+pub struct Image {
+    pub code: Vec<u8>,
+    pub relocs: Vec<(usize, u8)>,
+    pub tables: Vec<(usize, usize)>,
+    pub entries: Vec<Option<usize>>,
 }
 
 /// Does the integer fit the 64 bits compiled code works in?
@@ -75,6 +106,9 @@ impl Asm {
 
     fn call(&mut self, f: usize) {
         self.rax(f as u64);
+        if let Some(k) = entries().iter().position(|&e| e == f) {
+            self.relocs.push((self.buf.len() - 8, k as u8));
+        }
         self.b(&[0xFF, 0xD0]);
     }
 
@@ -392,42 +426,61 @@ impl Asm {
     }
 }
 
-/// Compile the functions `pick` chooses. The code is never freed: it lasts as
-/// long as the program runs.
-pub fn compile(codes: &[Vec<Instr>], pick: impl Fn(usize) -> bool) -> Vec<Option<Body>> {
+/// Compile the functions `pick` chooses, to code that has no address yet.
+pub fn image(codes: &[Vec<Instr>], pick: impl Fn(usize) -> bool) -> Image {
     let mut asm = Asm::default();
-    let mut placed: Vec<Option<(usize, usize, usize)>> = Vec::new();
+    let mut entries = Vec::new();
+    let mut tables = Vec::new();
     for (f, code) in codes.iter().enumerate() {
         if pick(f) && !code.is_empty() {
             let (entry, table) = asm.function(code);
-            placed.push(Some((entry, table, code.len())));
+            entries.push(Some(entry));
+            tables.push((table, code.len()));
         } else {
-            placed.push(None);
+            entries.push(None);
         }
     }
-    if asm.buf.is_empty() {
-        return vec![None; codes.len()];
+    Image { code: asm.buf, relocs: asm.relocs, tables, entries }
+}
+
+/// Put an image in memory that can run: the tables given the code's
+/// address, each call of the runtime its entry point's address here. The
+/// code is never freed: it lasts as long as the program runs.
+pub fn load(mut image: Image) -> Vec<Option<Body>> {
+    let n = image.entries.len();
+    if image.code.is_empty() {
+        return vec![None; n];
     }
     // Readable, writable and executable, private, backed by nothing.
-    let size = asm.buf.len().next_multiple_of(4096);
+    let size = image.code.len().next_multiple_of(4096);
     let base = unsafe { mmap(std::ptr::null_mut(), size, 7, 0x22, -1, 0) };
     if base as isize == -1 {
         eprintln!("no memory for compiled code: the program is interpreted");
-        return vec![None; codes.len()];
+        return vec![None; n];
     }
     // The tables hold addresses, which are known only now.
-    for (_, table, count) in placed.iter().flatten() {
-        for i in 0..*count {
+    for &(table, count) in &image.tables {
+        for i in 0..count {
             let at = table + i * 8;
-            let rel = u64::from_le_bytes(asm.buf[at..at + 8].try_into().unwrap());
-            asm.buf[at..at + 8].copy_from_slice(&(base as u64 + rel).to_le_bytes());
+            let rel = u64::from_le_bytes(image.code[at..at + 8].try_into().unwrap());
+            image.code[at..at + 8].copy_from_slice(&(base as u64 + rel).to_le_bytes());
         }
     }
-    unsafe { std::ptr::copy_nonoverlapping(asm.buf.as_ptr(), base, asm.buf.len()) };
-    placed
+    let here = entries();
+    for &(at, k) in &image.relocs {
+        let address = here[k as usize] as u64;
+        image.code[at..at + 8].copy_from_slice(&address.to_le_bytes());
+    }
+    unsafe { std::ptr::copy_nonoverlapping(image.code.as_ptr(), base, image.code.len()) };
+    image
+        .entries
         .iter()
-        .map(|p| {
-            p.map(|(entry, _, _)| unsafe { std::mem::transmute::<*mut u8, Body>(base.add(entry)) })
-        })
+        .map(|p| p.map(|entry| unsafe { std::mem::transmute::<*mut u8, Body>(base.add(entry)) }))
         .collect()
+}
+
+/// Compile the functions `pick` chooses, in memory. The code is never freed:
+/// it lasts as long as the program runs.
+pub fn compile(codes: &[Vec<Instr>], pick: impl Fn(usize) -> bool) -> Vec<Option<Body>> {
+    load(image(codes, pick))
 }

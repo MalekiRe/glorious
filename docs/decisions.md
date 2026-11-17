@@ -4685,6 +4685,34 @@ it made an edited run no faster (despawn 0.39 s with it, 0.40 s without;
 calculator 0.65 s and 0.67 s): what is left of certificate inference after
 an edit is mostly not inferring schemes. It was 400 lines; they are out.
 
+## Executables built ahead of time; wild links
+
+`glorious exe` (`glorious-vm --bundle`) puts at the end of the VM the program
+already loaded and rewritten, and its x86-64 code with what must be filled in
+when it starts: each call of a runtime entry point (by number) and each table
+of instruction offsets. At start it maps the code and writes those addresses;
+nothing is rewritten or compiled. This is the `aot_own` choice: our own code
+section and our own loader, no linker per program; the stub is the VM.
+
+Measured (calculator example, release VM, median of 9): `glorious-vm` on the
+bytecode, rewriting and compiling at start, 0.061 s; the executable built
+ahead of time 0.013 s. Before this, the rewrite itself took 0.26 s of a 0.26 s
+run: liveness was a hash set per instruction rebuilt every pass, and `sweep`
+ran it once per layer of dead code. It is now bit sets, and one sweep with
+"faint" liveness (an instruction that gives what nothing needs reads nothing).
+
+Cost: the executable holds the rewritten program and its code, not the
+bytecode: 4.5 MB for the calculator (0.9 MB VM, 0.27 MB rewritten program,
+3.0 MB code, 0.28 MB relocations and tables) against 0.9 MB before. The
+rewriting inlines heavily (15 KB of bytecode becomes 271 KB); the JIT made the
+same code at every start.
+
+The LLVM path links with wild where it is installed (`glorious native`,
+`vm/check-backends.sh`). Measured linking the calculator's object with the
+runtime library (median of 5): system `ld` 0.124 s, wild 0.029 s, lld 0.042 s,
+mold 0.048 s. The VM, which is the stub, is linked with wild through clang
+(`vm/.cargo/config.toml`; both must be on the PATH to build it).
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by
