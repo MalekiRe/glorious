@@ -31,10 +31,16 @@ partial def expandTypeExpr (aliases : List (String × List String × TypeExpr))
     let mut args ← args.mapM (expandTypeExpr aliases seen)
     -- A declared type written with fewer arguments than it has parameters:
     -- the rest are what its declaration says they are where not written.
+    -- (Of a use that writes no lifetime, by the place among the types,
+    -- which are what the default is given.)
+    let written := args.any fun | .name l [] => l.startsWith "'" | _ => false
+    let byTypes := !written && (List.range 16).any fun k => (aliases.lookup (defaultKey x k ++ "~")).isSome
     repeat
-      match aliases.lookup (defaultKey x args.length) with
+      match aliases.lookup (defaultKey x args.length ++ (if byTypes then "~" else "")) with
       | some (params, body) =>
-        let given := (genericParams params).zip args
+        let params := genericParams params
+        let params := if byTypes then params.filter (!·.startsWith "'") else params
+        let given := params.zip args
         args := args ++ [← expandTypeExpr aliases seen (substTypeExpr given body)]
       | none => break
     match aliases.lookup x with

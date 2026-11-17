@@ -8,6 +8,16 @@ namespace Glorious.Syntax
 
 open Parse
 
+/-- The aliases a declaration's type parameters' defaults are kept under:
+by their place among the parameters, and, where lifetimes come before, by
+their place among the types alone, for a use that writes no lifetime. -/
+private def defaultAliases (name : String) (params : List String)
+    (defaults : List (Nat × List String × TypeExpr)) : List Item :=
+  defaults.flatMap fun (i, earlier, ty) =>
+    let lives := ((params.take i).filter (·.startsWith "'")).length
+    .typeAlias (defaultName name i) earlier ty
+      :: (if lives == 0 then [] else [.typeAlias (defaultName name (i - lives) ++ "~") earlier ty])
+
 private partial def parseItem : P Item := do
   match ← peek with
   | .ident "effect" =>
@@ -810,7 +820,7 @@ private partial def parseItemGroup : P (List Item) := do
     let asked := bounds ++ before ++ after
     pure ([.struct name params fields, .fieldNames name names pubs]
       ++ (if asked.isEmpty then [] else [.bounds name asked])
-      ++ defaults.map fun (i, earlier, ty) => .typeAlias (defaultName name i) earlier ty)
+      ++ defaultAliases name params defaults)
   | .ident "enum" =>
     advance
     let name ← expectIdent
@@ -833,7 +843,7 @@ private partial def parseItemGroup : P (List Item) := do
     expectPunct "}"
     pure (.enum name params ctors.toList :: named.toList
       ++ (if asked.isEmpty then [] else [.bounds name asked])
-      ++ defaults.map fun (i, earlier, ty) => .typeAlias (defaultName name i) earlier ty)
+      ++ defaultAliases name params defaults)
   | .ident "type" =>
     advance
     let name ← expectIdent

@@ -35,7 +35,7 @@
 
 use std::tuple::{Tuple, nest};
 use core::option::{as_ref, as_mut, is_none, is_some};
-use core::value::{Default, default};
+use core::value::{Default, default, discard};
 use core::iter::{into_iter, next};
 
 // An entity: a place in the columns, and which of the entities that have had
@@ -267,12 +267,12 @@ impl<S> World<S> {
     // Give an entity a component, or another value of one it has: the one
     // it had, if it had one.
     pub fn insert<T>(world: &mut Self, entity: Entity, value: T) -> Option<T> where S: Get<T> {
-        if(alive(&*world, entity)) { insert(world, entity, value) } else { None }
+        if(alive(&*world, entity)) { insert(world, entity, value) } else { discard(value); None }
     }
 
     // Give an entity components; what it had of them.
     pub fn insert_bundle<B>(world: &mut Self, entity: Entity, bundle: B) -> Option<B::Had> where B: Bundle<S> {
-        if(alive(&*world, entity)) { Some(<B as Bundle<S>>::put_all(bundle, world, entity)) } else { None }
+        if(alive(&*world, entity)) { Some(<B as Bundle<S>>::put_all(bundle, world, entity)) } else { discard(bundle); None }
     }
 
     // Take components from an entity; what it had of them.
@@ -314,18 +314,19 @@ impl<S> World<S> {
     // Every entity there is.
     pub fn entities(world: &Self) -> [Entity] { entities(world) }
 
-    // A query of the world, lent to `f`: `world.query<(Entity, &Score)>(..)`.
-    // (Upstream gives it back to be used after; here its columns are out of
-    // the world while `f` has it.)
-    pub fn query<Q, X>(world: &mut Self, f: for<'a> fn(&'a mut Query<Q>) -> X) -> X where Q: Fill<S> {
-        world.query_filtered<Q, (), X>(f)
+    // A query of the world: `world.query<(Entity, &Score)>()`. While it is
+    // had, the world is borrowed by it; its columns go back when it is let go.
+    pub fn query<Q>(world: &mut Self) -> WorldQuery<'_, Q, (), S> where Q: Fill<S> {
+        world.query_filtered<Q, ()>()
     }
-    pub fn query_filtered<Q, N, X>(world: &mut Self, f: for<'a> fn(&'a mut Query<Q, N>) -> X) -> X where Q: Fill<S>, N: Only<S> {
-        let mut query = query_of<Q, N, S>(world);
-        let made = f(&mut query);
-        let Query { store, entities: _ } = query;
-        <Q as Fill<S>>::unfill(&mut world.columns, store);
-        made
+    pub fn query_filtered<Q, N>(world: &mut Self) -> WorldQuery<'_, Q, N, S> where Q: Fill<S>, N: Only<S> {
+        let query = query_of<Q, N, S>(world);
+        WorldQuery {
+            world: world,
+            query: query,
+            put_back: fn(world: &mut World<S>, store: <Q as Item>::Store) { <Q as Fill<S>>::unfill(&mut world.columns, store) },
+            blank: fn() -> <Q as Item>::Store { <Q as Fill<S>>::hollow() }
+        }
     }
 
     // The resource, if the world has it (none while a system has it).
@@ -456,34 +457,43 @@ impl<H, ..R> Item for (H, ..R) where H: Item, (..R): Item {
 pub trait Fill<S>: Item {
     fn fill(&mut S) -> Self::Store
     fn unfill(&mut S, Self::Store)
+    // What stands in the query's place once its columns are back.
+    fn hollow() -> Self::Store
 }
 impl<A, S> Fill<S> for &mut A where S: Get<A> {
     fn fill(columns) { <S as Get<A>>::take(columns) }
     fn unfill(columns, column) { <S as Get<A>>::put(columns, column) }
+    fn hollow() { empty_column() }
 }
 impl<A, S> Fill<S> for &A where S: Get<A> {
     fn fill(columns) { <S as Get<A>>::take(columns) }
     fn unfill(columns, column) { <S as Get<A>>::put(columns, column) }
+    fn hollow() { empty_column() }
 }
 impl<S> Fill<S> for () {
     fn fill(columns) { () }
     fn unfill(columns, store) { () }
+    fn hollow() { () }
 }
 impl<S> Fill<S> for Entity {
     fn fill(columns) { () }
     fn unfill(columns, store) { () }
+    fn hollow() { () }
 }
 impl<A, S> Fill<S> for Has<A> where S: Get<A> {
     fn fill(columns) { <S as Get<A>>::take(columns) }
     fn unfill(columns, column) { <S as Get<A>>::put(columns, column) }
+    fn hollow() { empty_column() }
 }
 impl<A, S> Fill<S> for Option<&mut A> where S: Get<A> {
     fn fill(columns) { <S as Get<A>>::take(columns) }
     fn unfill(columns, column) { <S as Get<A>>::put(columns, column) }
+    fn hollow() { empty_column() }
 }
 impl<A, S> Fill<S> for Option<&A> where S: Get<A> {
     fn fill(columns) { <S as Get<A>>::take(columns) }
     fn unfill(columns, column) { <S as Get<A>>::put(columns, column) }
+    fn hollow() { empty_column() }
 }
 impl<H, ..R, S> Fill<S> for (H, ..R) where H: Fill<S>, (..R): Fill<S>, H: Item, (..R): Item, ..R: Item {
     fn fill(columns) { (<H as Fill<S>>::fill(columns), <(..R) as Fill<S>>::fill(columns)) }
@@ -492,6 +502,7 @@ impl<H, ..R, S> Fill<S> for (H, ..R) where H: Fill<S>, (..R): Fill<S>, H: Item, 
         <H as Fill<S>>::unfill(columns, h);
         <(..R) as Fill<S>>::unfill(columns, rest)
     }
+    fn hollow() { (<H as Fill<S>>::hollow(), <(..R) as Fill<S>>::hollow()) }
 }
 
 pub struct Query<Q, Only = (), St = <Q as Item>::Store> { store: St, entities: [Entity] }
@@ -548,6 +559,28 @@ fn has_entity(entities: &[Entity], entity: Entity) -> Bool {
     found
 }
 
+// A query of a world, that has the world borrowed while it is had. Its
+// columns go back when it is let go, by what it was made with: a `Drop`
+// knows only the value's type, so how they go back is kept in the value.
+pub struct WorldQuery<'w, Q, N, S, St = <Q as Item>::Store> {
+    world: &'w mut World<S>,
+    query: Query<Q, N, St>,
+    put_back: fn(&mut World<S>, St) -> (),
+    blank: fn() -> St
+}
+impl<'w, Q, N, S, St> Drop for WorldQuery<'w, Q, N, S, St> {
+    fn drop(q) {
+        let store = replace(&mut q.query.store, (q.blank)());
+        (q.put_back)(q.world, store)
+    }
+}
+
+impl<'w, Q, N, S, St> WorldQuery<'w, Q, N, S, St> {
+    pub fn for_each(q: &mut Self, f: for<'a> fn(Q::Got<'a>)) where Q: Item<Store = St> { q.query.for_each(f) }
+    pub fn get_mut(q: &mut Self, entity: Entity) -> Option<Q::Got<'_>> where Q: Item<Store = St> { q.query.get_mut(entity) }
+    pub fn count(q: &mut Self) -> Int where Q: Item<Store = St> { q.query.count() }
+}
+
 // A query of exactly one entity: a system that takes one runs only while
 // there is exactly one.
 pub struct Single<Q, Only = (), St = <Q as Item>::Store> { query: Query<Q, Only, St> }
@@ -593,7 +626,7 @@ impl<S> Commands<S> {
     // Give an entity components, or other values of ones it has.
     pub fn insert<B>(commands: &mut Self, entity: Entity, bundle: B) where B: Bundle<S> {
         push_at(&mut commands.queue, fn(world: &mut World<S>) {
-            if(alive(&*world, entity)) { let _ = <B as Bundle<S>>::put_all(bundle, world, entity); } else { () }
+            if(alive(&*world, entity)) { let _ = <B as Bundle<S>>::put_all(bundle, world, entity); } else { discard(bundle) }
         })
     }
 
@@ -628,13 +661,11 @@ pub fn reserve<S>(commands: &mut Commands<S>) -> Entity {
 
 // What was asked, done in the order asked.
 fn apply<S>(commands: Commands<S>, world: &mut World<S>) {
-    let Commands { queue, next, made } = commands;
+    let mut commands = commands;
     let mut k = 0;
-    while({ k < made }) { push_at(&mut world.generations, 0); k = k + 1 };
-    let mut q = queue;
-    let mut order = [];
-    while({ len_at(&q) > 0 }) { match(pop_at(&mut q)) { Some(f) => push_at(&mut order, f), None => () } };
-    while({ len_at(&order) > 0 }) { match(pop_at(&mut order)) { Some(f) => f(world), None => () } }
+    while({ k < commands.made }) { push_at(&mut world.generations, 0); k = k + 1 };
+    let mut each = into_iter(replace(&mut commands.queue, []));
+    while({ match(next(&mut each)) { Some(f) => f(world); true, None => false } }) { () }
 }
 
 // What a parameter of a system asks for, without the reference: a column
@@ -736,54 +767,54 @@ impl<E, S, ..G, F, O, Rest> Fetch<E, S, (..G), F, O> for (Shared<E>, Rest) where
 impl<E, S, ..G, F, O, X, Rest> Fetch<E, S, (..G), F, O> for (Shared<X>, Rest)
     where S: Holds<X>, Rest: Fetch<E, S, (..G, &X), F, O> {
     fn fetch(event, world, commands, gathered, f) {
-        let (..g) = gathered;
         match(lift<X, S>(&mut world.columns)) {
             Some(value) =>
+                let (..g) = gathered;
                 let made = <Rest as Fetch<E, S, (..G, &X), F, O>>::fetch(event, world, commands, (..g, &value), f);
                 lower<X, S>(&mut world.columns, value);
                 made,
-            None => None
+            None => discard(gathered); None
         }
     }
 }
 impl<E, S, ..G, F, O, X, Rest> Fetch<E, S, (..G), F, O> for (Owned<X>, Rest)
     where S: Holds<X>, Rest: Fetch<E, S, (..G, &mut X), F, O> {
     fn fetch(event, world, commands, gathered, f) {
-        let (..g) = gathered;
         match(lift<X, S>(&mut world.columns)) {
             Some(value) =>
+                let (..g) = gathered;
                 let mut value = value;
                 let made = <Rest as Fetch<E, S, (..G, &mut X), F, O>>::fetch(event, world, commands, (..g, &mut value), f);
                 lower<X, S>(&mut world.columns, value);
                 made,
-            None => None
+            None => discard(gathered); None
         }
     }
 }
 impl<E, S, ..G, F, O, X, Rest> Fetch<E, S, (..G), F, O> for (Maybe<X>, Rest)
     where S: Holds<X>, Rest: Fetch<E, S, (..G, Option<&X>), F, O> {
     fn fetch(event, world, commands, gathered, f) {
-        let (..g) = gathered;
         match(lift<X, S>(&mut world.columns)) {
             Some(value) =>
+                let (..g) = gathered;
                 let made = <Rest as Fetch<E, S, (..G, Option<&X>), F, O>>::fetch(event, world, commands, (..g, Some(&value)), f);
                 lower<X, S>(&mut world.columns, value);
                 made,
-            None => <Rest as Fetch<E, S, (..G, Option<&X>), F, O>>::fetch(event, world, commands, (..g, None), f)
+            None => let (..g) = gathered; <Rest as Fetch<E, S, (..G, Option<&X>), F, O>>::fetch(event, world, commands, (..g, None), f)
         }
     }
 }
 impl<E, S, ..G, F, O, X, Rest> Fetch<E, S, (..G), F, O> for (MaybeOwned<X>, Rest)
     where S: Holds<X>, Rest: Fetch<E, S, (..G, Option<&mut X>), F, O> {
     fn fetch(event, world, commands, gathered, f) {
-        let (..g) = gathered;
         match(lift<X, S>(&mut world.columns)) {
             Some(value) =>
+                let (..g) = gathered;
                 let mut value = value;
                 let made = <Rest as Fetch<E, S, (..G, Option<&mut X>), F, O>>::fetch(event, world, commands, (..g, Some(&mut value)), f);
                 lower<X, S>(&mut world.columns, value);
                 made,
-            None => <Rest as Fetch<E, S, (..G, Option<&mut X>), F, O>>::fetch(event, world, commands, (..g, None), f)
+            None => let (..g) = gathered; <Rest as Fetch<E, S, (..G, Option<&mut X>), F, O>>::fetch(event, world, commands, (..g, None), f)
         }
     }
 }
@@ -814,7 +845,6 @@ impl<E, S, ..G, F, O, Q, N, St, Rest> Fetch<E, S, (..G), F, O> for (Querying<Q, 
 impl<E, S, ..G, F, O, Q, N, St, Rest> Fetch<E, S, (..G), F, O> for (Singling<Q, N, St>, Rest)
     where Q: Item<Store = St>, Q: Fill<S>, N: Only<S>, Rest: Fetch<E, S, (..G, &mut Single<Q, N, St>), F, O> {
     fn fetch(event, world, commands, gathered, f) {
-        let (..g) = gathered;
         let Query { store, entities: all } = query_of<Q, N, S>(world);
         let mut store = store;
         let mut found = [];
@@ -825,6 +855,7 @@ impl<E, S, ..G, F, O, Q, N, St, Rest> Fetch<E, S, (..G), F, O> for (Singling<Q, 
         };
         if(len_at(&found) == 1) {
             let mut single = Single { query: Query { store: store, entities: found } };
+            let (..g) = gathered;
             let made = <Rest as Fetch<E, S, (..G, &mut Single<Q, N, St>), F, O>>::fetch(event, world, commands, (..g, &mut single), f);
             let Single { query } = single;
             let Query { store, entities } = query;
@@ -832,6 +863,7 @@ impl<E, S, ..G, F, O, Q, N, St, Rest> Fetch<E, S, (..G), F, O> for (Singling<Q, 
             made
         } else {
             <Q as Fill<S>>::unfill(&mut world.columns, store);
+            discard(gathered);
             None
         }
     }

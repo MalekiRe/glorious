@@ -3707,6 +3707,12 @@ def cases : List Case := [
   -- are, though the modules are checked side by side.)
   ⟨"use core::iter::{into_iter, next};\nstruct D { n: Int }\nimpl Drop for D { fn drop(d) { say(d.n) } }\nfn apply<S>(queue: [S]) -> Int {\n    let mut each = into_iter(queue);\n    match(next(&mut each)) { Some(_) => 1, None => 0 }\n}\nfn main() -> Int { let d = D { n: 4 }; apply([d]) + apply([1, 2]) }",
     [], "4\n2"⟩,
+  -- (A type's defaults after a lifetime, where the use writes no lifetime;
+  -- and a `Drop` may not ask a trait with arguments.)
+  ⟨"trait It { type St; }\nimpl It for Int { type St = Str; }\nstruct Q2<'w, Q, N, St = <Q as It>::St> { w: &'w Int, st: St, n: N }\nfn make<'a>(w: &'a Int) -> Q2<'a, Int, Int> { Q2 { w: w, st: \"s\", n: 3 } }\nfn make2(w: &Int) -> Q2<Int, Int> { Q2 { w: w, st: \"t\", n: 4 } }\nfn main() -> Int { let k = 1; let a = make(&k); let b = make2(&k); say(a.st); say(b.st); a.n + b.n }",
+    [], "s\nt\n7"⟩,
+  ⟨"trait Tr<S> { fn f(Self) -> Int }\nstruct G<Q, S> { q: Q, s: [S] }\nimpl<Q, S> Drop for G<Q, S> where Q: Tr<S> { fn drop(g) { () } }\nfn main() -> Int { 0 }",
+    [], "error: `impl Drop for G`: a `Drop` may ask its type parameters only for traits without arguments; keep what it needs in the value instead (a callable made where the trait is known)"⟩,
   -- (An element of what a reference is to is borrowed through it.)
   ⟨"fn first(r: &[Int]) -> Int { let e = &r[0]; *e }\nfn main() -> Int { first(&[7, 8]) }",
     [], "7"⟩,

@@ -56,9 +56,7 @@ fn orders() {
     say_u32(second.get<u32>(second_number));
     say_u32(second.get<u32>(second_pair));
     say_i16(second.get<i16>(second_pair));
-    first.query<(&u32, &i16)>(fn(query: &mut Query<(&u32, &i16)>) {
-        query.for_each(fn(got: (&u32, &i16)) { let (a, b) = got; say(show(*a) ++ " " ++ show(*b)) })
-    });
+    first.query<(&u32, &i16)>().for_each(fn(got: (&u32, &i16)) { let (a, b) = got; say(show(*a) ++ " " ++ show(*b)) });
     flag(first.despawn(pair));
     flag(first.despawn(first_single));
     flag(first.despawn(reversed));
@@ -90,7 +88,7 @@ fn transitions() {
     say(opt(fourteen) ++ " " ++ opt(sixteen));
     let (eighteen, nineteen) = world.remove_bundle<(u8, u64)>(j);
     say(opt(eighteen) ++ " " ++ opt(nineteen));
-    say(world.query<&u32>(fn(query: &mut Query<&u32>) -> Int { query.count() }))
+    say(world.query<&u32>().count())
 }
 
 // `the_placeholder_entity_is_in_no_world`

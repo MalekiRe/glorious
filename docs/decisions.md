@@ -5175,6 +5175,26 @@ Covey is the toolbox for finding what the language lacks. Rewriting it after
   be named: `B::Had` of `B: Bundle<S>`, or `<B as Bundle<S>>::Had`. Both are
   now read, asked of the type together with the arguments as the trait is;
   a result type may start with `<`. Fixed, with a case.
+- **A `Drop` that asks a trait with arguments** of its type parameters
+  (`impl Drop for WorldQuery<..> where Q: Fill<S>`) was accepted, and the
+  destroy function was not given that dictionary: the certificate failed.
+  A value is destroyed knowing only its type's shape, so the checker now
+  refuses it and says to keep what is needed in the value (as Rust asks the
+  type's declaration to say it). Covey's `WorldQuery` keeps the callables
+  that put its columns back. Fixed, with a case.
+- **A type's defaults after a lifetime** (`WorldQuery<Q, N, S>` of
+  `WorldQuery<'w, Q, N, S, St = ..>`) were found by the place counting the
+  lifetime, so the default was not found where the lifetime is not written.
+  They are kept by the place among the types too. Fixed, with a case.
+- **Two sibling modules' drop sites** could share a number, so a function
+  was given another's dictionary ("unknown name `%dict2`"). Fixed, with a
+  case.
+- **`(q.blank)()`**, a field that is a callable, called in brackets, is read
+  as a dot call of a function of that name where the module has one. Open:
+  covey names such fields apart.
+- **A field through a field that is a reference** (`g.w.c`, `g.w: &mut W`)
+  is refused ("`&mut W` has no field `c`"). Open: covey passes `g.w` to a
+  function.
 
 ## Other standing decisions
 

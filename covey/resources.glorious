@@ -29,7 +29,7 @@
 mod ecs;
 
 use ecs::{App, Entity, Query, Commands, Res, ResMut, chain};
-use core::value::{Default};
+use core::value::{Default, discard};
 
 struct Update
 struct Score(Int)
@@ -63,10 +63,10 @@ fn unseen() {
     let mut world = App::new().register<Score>().register_resource<Score>().build().world;
     let _ = world.insert_resource(Score(1));
     let entity = world.spawn_bundle((Score(2),));
-    world.query<(Entity, &Score)>(fn(query: &mut Query<(Entity, &Score)>) {
-        query.for_each(fn(got: (Entity, &Score)) { let (e, s) = got; say(e.index); say(s.0) })
-    });
-    say(world.query<Entity>(fn(query: &mut Query<Entity>) -> Int { query.count() }));
+    let mut rows = world.query<(Entity, &Score)>();
+    rows.for_each(fn(got: (Entity, &Score)) { let (e, s) = got; say(e.index); say(s.0) });
+    discard(rows);
+    say(world.query<Entity>().count());
     say(shown(world.resource<Score>()))
 }
 

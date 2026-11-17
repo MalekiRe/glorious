@@ -589,6 +589,12 @@ def declareTraits (items : List Item) : M Unit := do
           if !args.contains p && !p.startsWith "'" && !p.startsWith ".." && !said.contains p then
             if let some subject := pmap.lookup p then
               extra := extra ++ [(Syntax.destroyTrait, [], subject)]
+      -- (A value is destroyed knowing only its type's shape and how its
+      -- parts are: a `Drop` may ask its type parameters for traits without
+      -- arguments, which every value of the type then has to have, and no
+      -- more. Rust asks the same: as the type's declaration does.)
+      if tr == "Drop" && extra.any (·.1 != Syntax.destroyTrait) then
+        throw s!"{what}: a `Drop` may ask its type parameters only for traits without arguments; keep what it needs in the value instead (a callable made where the trait is known)"
       let mut assocs : List (String × Ty) := []
       let mut gatParams : List (String × List (Bool × Nat)) := []
       for a in assocNames do
