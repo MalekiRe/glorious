@@ -195,6 +195,8 @@ def mergeStates (p a b : St) : Option St := do
   let bounds ← mergeArr p.bounds a.bounds b.bounds
   let groupUses ← mergeArr p.groupUses a.groupUses b.groupUses
   let rigidKeys ← mergeStore p.rigidKeys a.rigidKeys b.rigidKeys
+  let rigidAt ← mergeMap p.rigidAt a.rigidAt b.rigidAt
+  let conditionsAt ← mergeMap p.conditionsAt a.conditionsAt b.conditionsAt
   let dropCands ← mergeArr p.dropCands a.dropCands b.dropCands
   let unsafeFns ← mergeList p.unsafeFns a.unsafeFns b.unsafeFns
   let dropSites ← mergeArr p.dropSites a.dropSites b.dropSites
@@ -337,6 +339,8 @@ def mergeStates (p a b : St) : Option St := do
     bounds,
     groupUses,
     rigidKeys,
+    rigidAt,
+    conditionsAt,
     implGivens := b.implGivens,
     dropCands,
     unsafeFns,

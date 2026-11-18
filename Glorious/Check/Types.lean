@@ -776,6 +776,11 @@ structure St where
   /-- A function's own type parameters that bounds were needed of, each with
   the number it has for `Traits.solve`. -/
   rigidKeys : Store String := {}
+  /-- The number of each of `rigidKeys`, by its name. -/
+  rigidAt : Std.HashMap String Nat := {}
+  /-- The numbers of the conditions said of a type made from type parameters
+  (`'%condition:owner:key:type`), under `key:type`, of every owner. -/
+  conditionsAt : Std.HashMap String (List Nat) := {}
   /-- What the implementation being checked assumes of its type parameters. -/
   implGivens : Option (List (String × Ty)) := none
   /-- Where the statement being checked starts. -/

@@ -48,14 +48,30 @@ def keyOf (t : Ty) : M (Option Nat) := do
   | .var id => pure (some (2 * id))
   | .con n [] =>
     if n.startsWith "'" then
-      let keys := (← get).rigidKeys
-      match keys.entries.find? (·.2 == n) with
-      | some (i, _) => pure (some (2 * i + 1))
+      let s ← get
+      match s.rigidAt[n]? with
+      | some i => pure (some (2 * i + 1))
       | none =>
-        modify fun s => { s with rigidKeys := s.rigidKeys.push n }
-        pure (some (2 * keys.size + 1))
+        let i := s.rigidKeys.size
+        modify fun s => { s with rigidKeys := s.rigidKeys.push n, rigidAt := s.rigidAt.insert n i }
+        pure (some (2 * i + 1))
     else pure none
   | _ => pure none
+
+/-- The number a condition said in `owner` of a type made from type
+parameters is known by, `'%condition:owner:key:type`, kept also under
+`key:type` (`conditionKeys`). -/
+def conditionKey (owner key : String) (t : Ty) : M (Option Nat) := do
+  let spelled ← spellTy t
+  let name := s!"'%condition:{owner}:{key}:{spelled}"
+  let known := (← get).rigidAt.contains name
+  let k ← keyOf (Ty.con name [])
+  unless known do
+    if let some i := (← get).rigidAt[name]? then
+      modify fun s => { s with conditionsAt := s.conditionsAt.alter s!"{key}:{spelled}" fun
+        | some is => some (i :: is)
+        | none => some [i] }
+  pure k
 
 partial def toSTy (t : Ty) : M Traits.STy := do
   let t ← find t
@@ -178,9 +194,8 @@ def subKey (trait : String) (ty : Ty) (args : List Ty) : M String := do
 from its type parameters, `where (A, (B, ())): Fetch<W>`, is known in the
 implementation's functions: one for each function it was said in. -/
 def conditionKeys (key : String) (t : Ty) : M (List Nat) := do
-  let suffix := s!":{key}:{← spellTy (← zonk t)}"
-  pure (((← get).rigidKeys.entries.filter fun (_, n) =>
-    n.startsWith "'%condition:" && n.endsWith suffix).map fun (i, _) => 2 * i + 1)
+  let said := s!"{key}:{← spellTy (← zonk t)}"
+  pure ((((← get).conditionsAt[said]?).getD []).reverse.map (2 * · + 1))
 
 /-- A condition's type and the trait's arguments with what traits leave to
 implementations in them, `<H as Touches>::List`, found where it can be. -/
@@ -248,7 +263,7 @@ partial def leavesFitting (pos key : String) (t : Ty) (args : List Ty) (owner : 
   if let some k ← keyOf t then return [(key, k, t, args)]
   -- (What the function is given of a type made from its type parameters.)
   let said := s!"'%condition:{owner}:{key}:{← spellTy (← zonk t)}"
-  if let some (i, _) := (← get).rigidKeys.entries.find? (·.2 == said) then return [(key, 2 * i + 1, t, args)]
+  if let some i := (← get).rigidAt[said]? then return [(key, 2 * i + 1, t, args)]
   -- (What it was asked for, where it is a condition of another.)
   let because := match via with
     | [] => ""
@@ -574,7 +589,7 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
         let t := subst own [] [] subject
         if (← keyOf t).isNone then
           let key ← if cargs.isEmpty then pure tr else traitKey tr (cargs.map (subst own [] []))
-          let _ ← keyOf (Ty.con s!"'%condition:{d.name}:{key}:{← spellTy t}" [])
+          let _ ← conditionKey d.name key t
   -- What the group's functions need of the types they are generic in.
   let mut leafs : Array (String × Nat × Ty) := #[]
   -- (Those of a type whose head is known first: what their implementations
@@ -756,7 +771,7 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
             -- implementation has to meet it. In here it is known by a
             -- number of its own, which a need of the trait of that very
             -- type is met by.
-            let own ← keyOf (Ty.con s!"'%condition:{d.name}:{key}:{← spellTy t}" [])
+            let own ← conditionKey d.name key t
             pure (key, own.getD 0, t)
         for (key, _, t) in apart do
           if (← keyOf t).isNone then
