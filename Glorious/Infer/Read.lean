@@ -526,17 +526,20 @@ def canonArgs (args : List Ty) : M (List ITy × Pr) := do
     pure (iargs, { vars := vars.toList.zipIdx.map fun (r, k) => (r, Typing.Rgn.var k) })
   else pure (← args.mapM (ofTy {}), {})
 
+deriving instance Hashable for Glorious.Typing.Rgn, Glorious.Typing.Ty
+
 /-- The declarations behind every declared type and operation these types use,
 and behind those the declarations use in turn. A use is recorded by the shape
 of its type arguments. -/
-partial def declsFor (types : List Ty) (opsTodo : List (Nat × List Ty)) (datas : List DataInst)
-    (ops : List OpInst) : M (List DataInst × List OpInst) := do
-  if datas.length + ops.length ≥ 4000 then
+partial def declsFor (types : List Ty) (opsTodo : List (Nat × List Ty)) (datas : Array DataInst := #[])
+    (ops : Array OpInst := #[]) (seen : Std.HashSet (Nat × List Ty) := {})
+    (seenOps : Std.HashSet (Nat × List Ty) := {}) : M (List DataInst × List OpInst) := do
+  if datas.size + ops.size ≥ 4000 then
     throw "certificate: too many uses of declared types and operations"
   match opsTodo with
   | (op, args) :: rest =>
     let shape := args.map Ty.shape
-    if ops.any (fun o => o.op == op && o.args == shape) then declsFor types rest datas ops
+    if seenOps.contains (op, shape) then declsFor types rest datas ops seen seenOps
     else
       let d ← opDecl op
       let (iargs, pr) ← canonArgs args
@@ -544,16 +547,17 @@ partial def declsFor (types : List Ty) (opsTodo : List (Nat × List Ty)) (datas 
       let result ← match d.result with
         | some t => some <$> zonk pr (subst iargs t)
         | none => pure none
-      declsFor (payload ++ result.toList ++ types) rest datas (ops ++ [⟨op, shape, payload, result⟩])
+      declsFor (payload ++ result.toList ++ types) rest datas (ops.push ⟨op, shape, payload, result⟩) seen
+        (seenOps.insert (op, shape))
   | [] =>
     match types with
-    | [] => pure (datas, ops)
+    | [] => pure (datas.toList, ops.toList)
     | t :: rest =>
       -- (the type of arrays is not one a certificate declares)
       let newData := (dataUses t).filter fun (name, args) =>
-        name != arrayName && !datas.any (fun d => d.name == name && d.args == args.map Ty.shape)
+        name != arrayName && !seen.contains (name, args.map Ty.shape)
       match newData with
-      | [] => declsFor rest (opUses t) datas ops
+      | [] => declsFor rest (opUses t) datas ops seen seenOps
       | (name, args) :: _ =>
         let tags := (← get).types[name]?.getD []
         let (iargs, pr) ← canonArgs args
@@ -562,8 +566,9 @@ partial def declsFor (types : List Ty) (opsTodo : List (Nat × List Ty)) (datas 
           let d ← ctorDecl tag
           let fields ← d.fields.mapM fun f => zonk pr (subst iargs f)
           ctors := ctors ++ [(tag, fields)]
+        let shape := args.map Ty.shape
         declsFor (ctors.flatMap (·.2) ++ types) opsTodo
-          (datas ++ [⟨name, args.map Ty.shape, ctors, true⟩]) ops
+          (datas.push ⟨name, shape, ctors, true⟩) ops (seen.insert (name, shape)) seenOps
 
 /-! ## Declarations -/
 

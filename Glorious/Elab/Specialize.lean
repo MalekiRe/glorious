@@ -187,7 +187,7 @@ def oneExpr : List Clause → Option (List Pattern × Expr)
 `env` and the functions `fns`, if it is one: numbers, `int_add`, `int_sub`
 and `int_mul` of numbers, and calls of functions whose one clause takes plain
 names and is one expression. `fuel` bounds the calls followed. -/
-partial def foldInt (fns : List (String × List Clause)) (env : List (String × Int)) (fuel : Nat) :
+partial def foldInt (fns : Std.HashMap String (List Clause)) (env : List (String × Int)) (fuel : Nat) :
     Expr → Option Int
   | .int n => some n
   | .name none x => env.lookup x
@@ -208,7 +208,7 @@ partial def foldInt (fns : List (String × List Clause)) (env : List (String × 
       | "int_sub", [a, b] => fits (a - b)
       | "int_mul", [a, b] => fits (a * b)
       | _, _ =>
-        match (fns.lookup f).bind oneExpr with
+        match fns[f]?.bind oneExpr with
         | some (pats, body) =>
           let names ← pats.mapM fun
             | .var x => some x
@@ -220,11 +220,11 @@ partial def foldInt (fns : List (String × List Clause)) (env : List (String × 
 
 /-- Each call of a function that takes nothing and works out to a number
 (`known`) written as that number. -/
-def foldRewrite (known : List (String × Int)) : Rewrite where
+def foldRewrite (known : Std.HashMap String Int) : Rewrite where
   onExpr go
-    | .call _ (.name none f) [] => (known.lookup f).map .int
+    | .call _ (.name none f) [] => known[f]?.map .int
     | .call id (.name none mark) (.call i (.name none f) [] :: rest) =>
-      some (match known.lookup f with
+      some (match known[f]? with
         | some n => if mark == Syntax.instMark then .int n else .call id (.name none mark) (.int n :: rest)
         | none => .call id (.name none mark) (.call i (.name none f) [] :: rest.map go.ex))
     | _ => none
@@ -232,13 +232,17 @@ def foldRewrite (known : List (String × Int)) : Rewrite where
 /-- A program with every call of a function that takes nothing and works out
 to a number written as that number. -/
 def foldConstants (items : List Item) : List Item :=
-  let fns : List (String × List Clause) := items.filterMap fun
-    | .fn name _ _ _ clauses => some (name, clauses)
-    | _ => none
-  let known : List (String × Int) := fns.filterMap fun (name, clauses) =>
-    match oneExpr clauses with
-    | some ([], body) => (foldInt fns [] 64 body).map (name, ·)
-    | _ => none
+  let fns : Std.HashMap String (List Clause) := items.foldl (init := {}) fun m item => match item with
+    | .fn name _ _ _ clauses => m.insertIfNew name clauses
+    | _ => m
+  let known : Std.HashMap String Int := items.foldl (init := {}) fun m item => match item with
+    | .fn name _ _ _ clauses =>
+      match oneExpr clauses with
+      | some ([], body) => match foldInt fns [] 64 body with
+        | some n => m.insertIfNew name n
+        | none => m
+      | _ => m
+    | _ => m
   if known.isEmpty then items
   else items.map fun
     | .fn name ps annots ret clauses => .fn name ps annots ret (clauses.map (foldRewrite known).clause)

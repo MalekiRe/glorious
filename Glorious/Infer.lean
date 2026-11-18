@@ -1,6 +1,7 @@
 module
 
 public import Glorious.Infer.Read
+public import Glorious.Trace
 
 public section
 
@@ -189,7 +190,7 @@ def captureCounts (p : Core.Program) : Array Nat := Id.run do
 
 def certifyM (items : List Item) (g : Elab.Globals) (p : Core.Program)
     (envSizes : List (Nat × Nat × Nat)) : M Cert := do
-  declare items g
+  (fun s => Trace.timed "infer: declare" fun _ => (declare items g).run s : M Unit)
   modify fun s =>
     { s with
       anyCallable :=
@@ -228,10 +229,10 @@ def certifyM (items : List Item) (g : Elab.Globals) (p : Core.Program)
       ownKeys := (List.range n).toArray.map fun f => mixHash (hash (st.fns[f]?.map (·.clauses))) (extra f)
       members, outside, keyBase := globals }
   let τ ← freshTy
-  inferTm (← freshAcc) ⟨[], none⟩ τ #[] p.main
+  (fun s => Trace.timed "infer: main" fun _ => (do inferTm (← freshAcc) ⟨[], none⟩ τ #[] p.main : M Unit).run s : M Unit)
   let mainHints := (← get).hints
   let refs := (← get).refs
-  settleAll
+  (fun s => Trace.timed "infer: settle" fun _ => (settleAll).run s : M Unit)
   -- A callable type a declaration writes says nothing of regions, so a callable
   -- kept in such a place can touch none.
   -- (But for the regions its own type binds.)
@@ -244,8 +245,7 @@ def certifyM (items : List Item) (g : Elab.Globals) (p : Core.Program)
   let wanted ← refs.toList.mapM fun (g, gs) => do pure (g, (← demand {} gs).1)
   modify fun s =>
     { s with incls := #[], places := #[], coerces := #[], nevers := #[], onces := #[], shows := #[] }
-  for (g, gs) in wanted do
-    instantiate g gs
+  (fun s => Trace.timed "infer: instantiate" fun _ => (do for (g, gs) in wanted do instantiate g gs : M Unit).run s : M Unit)
   -- A function whose closures say how they are destroyed: the function that
   -- destroys one, at each of its signatures (`Typing.dropSig`). It is
   -- inferred at the regions the captures mention, and then said at all the
@@ -282,7 +282,10 @@ def certifyM (items : List Item) (g : Elab.Globals) (p : Core.Program)
   let opsUsed : List (Nat × List Ty) :=
     mainHints.flatMap hintOps
       ++ entries.flatMap fun e => e.sig.eff ++ e.hints.flatMap (·.flatMap hintOps)
-  let (datas, ops) ← declsFor types opsUsed [] []
+  -- (Each type once, where it is first: one met again says nothing new.)
+  let types := (types.foldl (fun (acc : Array Ty × Std.HashSet Ty) t =>
+    if acc.2.contains t then acc else (acc.1.push t, acc.2.insert t)) (#[], {})).1.toList
+  let (datas, ops) ← (fun s => Trace.timed "infer: decls" fun _ => (declsFor types opsUsed).run s : M _)
   let strict := (← get).strict
   pure ⟨entries, dupFlags datas, ops, mainTy, mainHints, strict, (← get).regions,
     (← get).regions && (← get).loans⟩
