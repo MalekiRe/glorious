@@ -282,6 +282,15 @@ def showCore (names : Array String) (p : Core.Program) : String := Id.run do
 
 instance : Nonempty Syntax.Fixities := ⟨{}⟩
 
+/-- What compiles are writing to keep, waited for before the process ends. -/
+initialize keeping : IO.Ref (Array (Task (Except IO.Error Unit))) ← IO.mkRef #[]
+
+/-- Write what is kept on a thread of its own: what was compiled is used, and
+run, while it is written. -/
+def keep (act : IO Unit) : IO Unit := do
+  let t ← IO.asTask act
+  keeping.modify (·.push t)
+
 /-- Compile the program at `path`, with the modules it has in other files.
 What the last compile of it found for each place where a borrow can be a scope
 of its own is where this one starts; and what this one finds is kept for the
@@ -330,7 +339,7 @@ def compileFile (path : String) (checkKept : Check.Kept := []) (search : Bool :=
   let files ← moduleFiles path
   let result ← Trace.timedIO "compile" (IO.lazyPure fun _ =>
     compileSource text true files (few := true) known kept checkKept search memo firsts parsedKept preludeKept)
-  if let .ok c := result then Trace.timedIO "save what is kept" do
+  if let .ok c := result then keep <| Trace.timedIO "save what is kept" do
     -- (What a compile that did not look for each place found is not kept
     -- for one that does.)
     if search then
@@ -916,6 +925,9 @@ partial def watch (path : String) (input : List Int) : IO UInt32 := do
 
 def main (args : List String) : IO UInt32 := do
   let code ← Trace.timedIO "glorious" (command args)
+  -- (What a compile keeps is written while the program it made runs.)
+  for t in ← keeping.get do
+    let _ ← IO.wait t
   Trace.report
   pure code
 where
