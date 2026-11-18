@@ -3,6 +3,7 @@ module
 public import Std.Data.HashMap
 public import Std.Data.HashSet
 public import Glorious.Syntax.Ast
+public import Glorious.Syntax.ByRef
 public import Glorious.Elab.Base
 public import Glorious.Traits
 

@@ -2,6 +2,7 @@ module
 
 public import Std.Data.HashMap
 public import Glorious.Syntax.Ast
+public import Glorious.Syntax.ByRef
 
 /-!
 # Modules
@@ -638,14 +639,6 @@ def freshId : R Nat := do
   modify fun s => { s with fresh := n + 1 }
   pure n
 
-/-- Is this pattern one that binds by reference, and for writing? -/
-def byRef? : Pattern → Option (Bool × Pattern)
-  | .ctor name none [p] =>
-    if name == byRefMark true then some (true, p)
-    else if name == byRefMark false then some (false, p)
-    else none
-  | _ => none
-
 /-- The constructor a constant is another name of, if it is one: `let Some =
 Ok;`. -/
 partial def aliased (fuel : Nat) (e : Entry) : R (Option String) := do
@@ -688,91 +681,6 @@ def restWritten (written : String) (e : Option Entry) (args : List Pattern) : R 
     if given > n then throw s!"`{written}` has {n} fields, and more than that are written"
     pure (args.flatMap fun p => if isRest p then List.replicate (n - given) Pattern.wild else [p])
   | none => throw s!"`..` stands for the rest of a constructor's fields, and `{written}` is not a constructor of a declared type"
-
-/-- A pattern as the test of a value's shape that it is, its names left out;
-and for each name, the way to the part it names: through tuples by number,
-through constructors by constructor and number. -/
-partial def shapeOf (ctx : Ctx) (way : List String) : Pattern → R (Pattern × List (String × List String))
-  | .wild => pure (.wild, [])
-  | .int n => pure (.int n, [])
-  | .var x => do
-    -- A constructor or a constant is a test; a new name names this part.
-    match lookupIn (ctx.of x) .value x with
-    | some e => if e.kind == .ctor || e.kind == .const then pure (.var x, []) else pure (.wild, [(x, way)])
-    | none => pure (.wild, [(x, way)])
-  | .tuple args => do
-    let mut pats : Array Pattern := #[]
-    let mut names : List (String × List String) := []
-    for (p, i) in args.zip (List.range args.length) do
-      let (p, ns) ← shapeOf ctx (way ++ [toString i]) p
-      pats := pats.push p
-      names := names ++ ns
-    pure (.tuple pats.toList, names)
-  | .ctor name qual args => do
-    if (byRef? (.ctor name qual args)).isSome then
-      throw "a pattern that binds by reference is written once, around the whole pattern"
-    let (_, global, entry) ← resolveValue ctx [] qual name
-    -- Fields given by name are put in the declared order first.
-    let args ← match args with
-      | .var mark :: gave =>
-        if mark == recordMark then
-          let names ← fieldNamesOf name entry
-          let rest := gave.any fun
-            | .var r => r == restMark
-            | _ => false
-          let gave := gave.filterMap fun
-            | .ctor mark none [p] => (fieldOfMark mark).map fun field => (field, p)
-            | _ => none
-          match orderFields name names gave (if rest then some Pattern.wild else none) with
-          | .ok ps => pure ps
-          | .error e => throw e
-        else restWritten name entry args
-      | _ => restWritten name entry args
-    -- A name declared for a constructor, `let Some = Ok;`, is that one.
-    let global ← match entry with
-      | some e =>
-        if e.kind == .ctor then pure global
-        else
-          let found ← aliased 8 e
-          match found with
-          | some g => pure g
-          | none => throw s!"`{name}` is not a constructor: a pattern that binds by reference is made of constructors, tuples and names"
-      | none => throw s!"`{name}` is not a constructor: a pattern that binds by reference is made of constructors, tuples and names"
-    let mut pats : Array Pattern := #[]
-    let mut names : List (String × List String) := []
-    for (p, i) in args.zip (List.range args.length) do
-      let (p, ns) ← shapeOf ctx (way ++ [ctorStep global i]) p
-      pats := pats.push p
-      names := names ++ ns
-    pure (.ctor name qual pats.toList, names)
-
-/-- What a shape asks of a value: at each path of field numbers where it names
-a constructor, that constructor. None if it asks for a number, which has to be
-read to be compared. -/
-partial def shapeTests (ctx : Ctx) (path : List Nat) :
-    Pattern → R (Option (List (List Nat × Expr)))
-  | .wild => pure (some [])
-  | .int _ => pure none
-  | .var x => do
-    match lookupIn (ctx.of x) .value x with
-    | some e => pure (if e.kind == .ctor then some [(path, .name none x)] else none)
-    | none => pure (some [])
-  | .tuple args => do
-    let mut out : List (List Nat × Expr) := []
-    for (p, i) in args.zipIdx do
-      match ← shapeTests ctx (path ++ [i]) p with
-      | some more => out := out ++ more
-      | none => return none
-    pure (some out)
-  | .ctor name qual args => do
-    let (_, _, entry) ← resolveValue ctx [] qual name
-    unless (entry.map (·.kind == .ctor)).getD false do return none
-    let mut out : List (List Nat × Expr) := [(path, .name qual name)]
-    for (p, i) in args.zipIdx do
-      match ← shapeTests ctx (path ++ [i]) p with
-      | some more => out := out ++ more
-      | none => return none
-    pure (some out)
 
 mutual
 
@@ -908,113 +816,44 @@ partial def nestedRefs (clauses : List Clause) (within : Bool := false) : R (Lis
       ++ (if asked.isEmpty then [.expr run]
           else [.let_ (.var result) run] ++ asked ++ [.expr (.name none result)]))]
 
-/-- The clauses of a callable in which a parameter binds by reference,
-`&mut Circle(r) => ..`: the callable takes the reference, looks at what it
-points to to choose a clause, and in the clause each name of the pattern is a
-borrow of the part it names, through the reference. So a part of one of a
-type's several constructors can be borrowed, once the value is known to be
-made by that one. Clauses without such a parameter are as they are. -/
-def byReference (ctx : Ctx) (clauses : List Clause) : R (List Clause) := do
-  let arity := match clauses.head? with
-    | some (.mk pats _) => pats.length
+/-- What the resolver knows of the names in a pattern it writes out by
+reference, before they are resolved. -/
+def refNamesOf (ctx : Ctx) : RefNames R where
+  kind x := pure <| match lookupIn (ctx.of x) .value x with
+    | some e => if e.kind == .ctor then 1 else if e.kind == .const then 2 else 0
     | none => 0
-  let places := (List.range arity).filter fun i => clauses.any fun
-    | .mk pats _ => ((pats[i]?).bind byRef?).isSome
-  if places.isEmpty then return clauses
-  let k ← freshId
-  let outer := (List.range arity).map fun i => s!"%given{k}_{i}"
-  -- What the clauses ask of what each reference points to: each constructor
-  -- at each place. A clause is chosen by asking the cell, which reads
-  -- nothing out of it, so what is pointed to need not be a value that can be
-  -- copied. Where a clause asks for a number, the value is read instead.
-  let mut asked : List (Nat × List (List Nat × Expr)) := []
-  let mut byTest := true
-  let same := fun (a b : List Nat × Expr) =>
-    a.1 == b.1 && (match a.2, b.2 with
-      | .name q x, .name q' x' => q == q' && x == x'
-      | _, _ => false)
-  for clause in clauses do
-    let .mk pats _ := clause
-    for (p, i) in pats.zip (List.range arity) do
-      if places.contains i then
-        if let some (_, p) := byRef? p then
-          let (shape, _) ← shapeOf ctx [] p
-          match ← shapeTests ctx [] shape with
-          | some found =>
-            let so := (asked.lookup i).getD []
-            let more := found.filter fun f => !so.any (same f)
-            asked := (i, so ++ more) :: asked.filter (·.1 != i)
-          | none => byTest := false
-  let mut inner : Array Clause := #[]
-  for clause in clauses do
-    let .mk pats body := clause
-    unless pats.length == arity do
-      throw "the clauses of a callable take different numbers of arguments"
-    let mut tests : Array Pattern := #[]
-    let mut binds : Array Stmt := #[]
-    for (p, i) in pats.zip (List.range arity) do
-      if places.contains i then
-        match byRef? p with
-        | some (uniq, p) =>
-          let (test, names) ← shapeOf ctx [] p
-          if byTest then
-            let mine := ((← shapeTests ctx [] test).getD [])
-            tests := tests.push (.tuple (((asked.lookup i).getD []).map fun a =>
-              if mine.any (same a) then Pattern.int 1 else Pattern.wild))
-          else tests := tests.push test
-          for (x, way) in names do
-            let id := 900000000 + (← freshId)
-            if way.isEmpty then
-              -- The whole of what is pointed to: the reference itself, lent.
-              binds := binds.push (.let_ (.var x) (.reborrow uniq (.name none s!"%given{k}_{i}")))
-            else
-              binds := binds.push (.let_ (.var x) (.refField id uniq s!"%given{k}_{i}" way true))
-        | none =>
-          -- A clause that takes the reference as it is, or lets it go.
-          match p with
-          | .wild => tests := tests.push .wild
-          | .var x =>
-            match lookupIn (ctx.of x) .value x with
-            | some _ => throw "where one clause binds a parameter by reference, `&mut Pattern`, every clause does, or takes the reference whole"
-            | none =>
-              tests := tests.push .wild
-              binds := binds.push (.let_ (.var x) (.name none s!"%given{k}_{i}"))
-          | _ =>
-            throw "where one clause binds a parameter by reference, `&mut Pattern`, every clause does, or takes the reference whole"
-      else tests := tests.push p
-    -- (Chosen by looking at a copy of what is pointed to: the copy is not
-    -- the clause's, and what its patterns let go is not destroyed.)
-    let observed := if byTest then [] else [Stmt.expr (.name none observedMark)]
-    inner := inner.push (.mk tests.toList (observed ++ binds.toList ++ body))
-  -- Asked of the cells, the clauses' tests are of numbers, which say nothing
-  -- of whether every case is covered: the patterns as written say that, to
-  -- the checker; and a last clause, never reached, stands for the rest.
-  let shapes ← if byTest then do
-      let mut rows : Array Clause := #[]
-      for clause in clauses do
-        let .mk pats _ := clause
-        let mut row : Array Pattern := #[]
-        for (p, i) in pats.zip (List.range arity) do
-          match (if places.contains i then byRef? p else none) with
-          | some (_, p) => row := row.push (← shapeOf ctx [] p).1
-          | none => row := row.push (if places.contains i then Pattern.wild else p)
-        rows := rows.push (.mk row.toList [])
-      pure [Stmt.expr (.call 0 (.name none "%shapes")
-        ((outer.zip (List.range arity)).map (fun (x, i) =>
-          if places.contains i then Expr.deref (.name none x) else Expr.name none x)
-          ++ [.closure 0 rows.toList]))]
-    else pure []
-  if byTest then
-    inner := inner.push (.mk (List.replicate arity Pattern.wild)
-      [.expr (.tailCall 0 (.name none "%never") [])])
-  let args := (outer.zip (List.range arity)).map fun (x, i) =>
-    if !places.contains i then Expr.name none x
-    else if byTest then
-      .tuple (((asked.lookup i).getD []).map fun (path, ctor) =>
-        .call 0 (.name none ctorIsMark)
-          ([Expr.name none x] ++ path.map (fun (n : Nat) => Expr.int (n : Int)) ++ [ctor]))
-    else Expr.deref (.name none x)
-  pure [.mk (outer.map Pattern.var) (shapes ++ [.expr (.call 0 (.closure 0 inner.toList) args)])]
+  ctor name qual args := do
+    let (_, global, entry) ← resolveValue ctx [] qual name
+    -- Fields given by name are put in the declared order first.
+    let args ← match args with
+      | .var mark :: gave =>
+        if mark == recordMark then
+          let names ← fieldNamesOf name entry
+          let rest := gave.any fun
+            | .var r => r == restMark
+            | _ => false
+          let gave := gave.filterMap fun
+            | .ctor mark none [p] => (fieldOfMark mark).map fun field => (field, p)
+            | _ => none
+          match orderFields name names gave (if rest then some Pattern.wild else none) with
+          | .ok ps => pure ps
+          | .error e => throw e
+        else restWritten name entry args
+      | _ => restWritten name entry args
+    -- A name declared for a constructor, `let Some = Ok;`, is that one.
+    let global ← match entry with
+      | some e =>
+        if e.kind == .ctor then pure global
+        else
+          match ← aliased 8 e with
+          | some g => pure g
+          | none => throw s!"`{name}` is not a constructor: a pattern that binds by reference is made of constructors, tuples and names"
+      | none => throw s!"`{name}` is not a constructor: a pattern that binds by reference is made of constructors, tuples and names"
+    pure (global, args)
+  ctorTest name qual := do
+    let (_, _, entry) ← resolveValue ctx [] qual name
+    pure (if (entry.map (·.kind == .ctor)).getD false then some (.name qual name) else none)
+  fresh := freshId
 
 /-- A pattern with its names resolved, and the names it binds. -/
 partial def resolvePattern (ctx : Ctx) : Pattern → R (Pattern × List String)
@@ -1237,7 +1076,7 @@ partial def resolveExpr (ctx : Ctx) (bound : List String) : Expr → R Expr
   | .deref e => .deref <$> resolveExpr ctx bound e
   | .reborrow uniq e => .reborrow uniq <$> resolveExpr ctx bound e
   | .closure id clauses => do
-    pure (.closure id (← (← byReference ctx (← nestedRefs clauses)).mapM (resolveClause ctx bound)))
+    pure (.closure id (← (← byReference (refNamesOf ctx) (← nestedRefs clauses)).mapM (resolveClause ctx bound)))
   | .handle subject arms => do
     pure (.handle (← resolveExpr ctx bound subject) (← arms.mapM (resolveClause ctx bound)))
   | .labelScope l body => .labelScope l <$> resolveStmts ctx bound body
@@ -1288,7 +1127,7 @@ partial def resolveStmts (ctx : Ctx) (bound : List String) : List Stmt → R (Li
     if let some (wrap, uniq, pat, value) := peel s then
       let k ← freshId
       let holder := s!"%given{k}_0"
-      let (_, names) ← shapeOf ctx [] pat
+      let (_, names) ← shapeOf (refNamesOf ctx) [] pat
       let mut lets : List Stmt := [wrap (.let_ (.var holder) value)]
       for (x, way) in names do
         let id := 900000000 + (← freshId)
@@ -1315,7 +1154,7 @@ def resolveFn (ctx : Ctx) (global : String) (generics : List String) :
     let ctx := { ctx with generics }
     let annots ← annots.mapM fun a => a.mapM (resolveType ctx generics)
     let ret ← ret.mapM (resolveType ctx generics)
-    let run := (do (← byReference ctx (← nestedRefs clauses)).mapM (resolveClause ctx [])).run (← get)
+    let run := (do (← byReference (refNamesOf ctx) (← nestedRefs clauses)).mapM (resolveClause ctx [])).run (← get)
     match run with
     | .ok (clauses, st) =>
       set st

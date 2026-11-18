@@ -267,19 +267,6 @@ callable's clauses, and the program is read again with their first patterns
 written `&Dot`, `&Line(n)`, so that they look at what the reference points to
 and bind references, as Rust's binding modes have it. -/
 
-/-- A program with the first patterns of one callable's clauses written
-`&Pattern`. -/
-def refPatsItems (id : Nat) (uniq : Bool) (which : List Nat) : List Item → List Item :=
-  -- (The callable is one: nothing inside it is changed.)
-  Rewrite.items { onExpr := fun _ => fun
-    | .closure i clauses =>
-      if i != id then none else
-      some (.closure i (clauses.zipIdx.map fun (c, k) => match c with
-        | .mk (p :: ps) body =>
-          if which.contains k then .mk (.ctor (Syntax.byRefMark uniq) none [p] :: ps) body else c
-        | c => c))
-    | _ => none }
-
 /-! ## A dot call of a type's own function
 
 `v.push(x)` where `push` is a function in scope that does not fit `v`, and
@@ -568,7 +555,10 @@ def decidedItems (decided : List Decision) (items : List Item) : List Item :=
   decided.foldl (fun items d => match d with
     | .rest id count => restItems id count items
     | .eta owner x arity => (etaItems owner x arity items).1
-    | .letMut owner line col x => (letMutItems owner line col x items).1) items
+    | .letMut owner line col x => (letMutItems owner line col x items).1
+    | .refPats id clauses => Rewrite.items (items := items) { onExpr := fun _ => fun
+        | .closure i _ => if i == id then some (.closure i clauses) else none
+        | _ => none }) items
 
 /-- A program with what the checker decided of it written in: `Decision`s
 first, then the function of each dot call it chose by the value's type,

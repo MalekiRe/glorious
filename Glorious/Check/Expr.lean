@@ -550,7 +550,7 @@ partial def checkArg (scope : Scope) (amb : Row) (what : String) (p : Ty) (a : E
         | some found =>
           -- (Found that a match is of a reference, or a dot call of a type's
           -- own function, knowing the types: the program is read again so.)
-          if found.reread.isSome then throwThe Elab.Said found
+          if found.passOn then throwThe Elab.Said found
           let said := found.msg
           set saved
           -- What went wrong with the types known is what is said if the
@@ -590,7 +590,7 @@ partial def dotAltFor (scope : Scope) (amb : Row) (call : Nat) (a : Expr) : M (O
       | .ref _ x => Expr.name none x
       | a => a
     let found ← tryCatchThe Elab.Said (some <$> inferExpr scope amb a) fun e =>
-      if e.reread.isSome then throwThe Elab.Said e else pure none
+      if e.passOn then throwThe Elab.Said e else pure none
     let rec head (fuel : Nat) (t : Ty) : M (Option String) := do
       match fuel, ← find t with
       | fuel + 1, .ref _ inner _ => head fuel inner
@@ -698,7 +698,30 @@ partial def checkArgsIn (scope : Scope) (amb : Row) (what : String) (params : Li
                 | .con "&mut" [] => true
                 | _ => false
               let shown := if uniq then "&mut " else "&"
-              throwThe Elab.Said { msg := s!"argument {i + 1} of {what}: what is matched is a reference: a pattern of what it points to is written `{shown}Pattern`, and binds references (`{shown}Some(x) => *x`)", reread := some (.refPats id uniq valuePats) }
+              -- (Written `&Pattern` and written out as the resolver writes
+              -- out what a program writes so, its names known.)
+              let wrapped := clauses.zipIdx.map fun (c, k) => match c with
+                | .mk (p :: ps) body =>
+                  if valuePats.contains k then Clause.mk (.ctor (Syntax.byRefMark uniq) none [p] :: ps) body else c
+                | c => c
+              -- (A constant, a constructor's other name too, is a test of a
+              -- value read, as the resolver has it.)
+              let kindOf := fun (x : String) => (do
+                let s ← getThe St
+                if (s.ctors.lookup x).isSome then return 1
+                if (s.aliases.lookup x).isSome then return 2
+                return 0 : StateT Nat M Nat)
+              let rn : Syntax.RefNames (StateT Nat M) :=
+                { kind := kindOf
+                  ctor := fun name qual args => do
+                    match ← (resolveCtor name qual : M _) with
+                    | some (global, _) => pure (global, args)
+                    | none => pure (name, args)
+                  ctorTest := fun name qual => do
+                    pure ((← (resolveCtor name qual : M _)).map fun (global, _) => Expr.name none global)
+                  fresh := modifyGet fun n => (n, n + 1) }
+              let lowered ← (Syntax.byReference rn wrapped).run' (500000000000000000 + id * 10000)
+              throwThe Elab.Said { msg := s!"argument {i + 1} of {what}: what is matched is a reference: a pattern of what it points to is written `{shown}Pattern`, and binds references (`{shown}Some(x) => *x`)", decision := some (.refPats id lowered) }
       -- (A value made where a dot call is made on it, named and borrowed for
       -- the call (`Resolve.receiverExpr`), that is a reference already: the
       -- reference is given.)
@@ -727,7 +750,7 @@ partial def checkArgsIn (scope : Scope) (amb : Row) (what : String) (params : Li
       -- function of its own of the name that takes it otherwise: that one.)
       let checked ← if i == 0 && call != 0 then
           tryCatchThe Elab.Said (checkArg scope amb s!"argument {i + 1} of {what}" p a site) fun ex => do
-            if ex.reread.isSome then throwThe Elab.Said ex
+            if ex.passOn then throwThe Elab.Said ex
             let failed ← get
             set before
             let alt ← dotAltFor scope amb call a

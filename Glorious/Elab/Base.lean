@@ -154,9 +154,6 @@ def implDictName (trait head : String) : String := s!"impl {trait} for {head}"
 /-- What the checker learns of how a program is to be read that the resolver
 decides: the program is compiled again with it. -/
 inductive Reread where
-  /-- The first patterns of these clauses of the callable `id` are of what
-  the reference matched points to (`&Pattern`, `&mut Pattern`). -/
-  | refPats (id : Nat) (uniq : Bool) (which : List Nat)
   /-- The dot call `call` is of the type's own function `fn`. -/
   | dotOwn (call : Nat) (fn : String)
   /-- The receiver of the dot call `call`, a name, is borrowed. -/
@@ -174,7 +171,11 @@ inductive Decision where
   /-- In `owner`, what the `let` of `x` at `line:col` binds is kept in a
   variable. -/
   | letMut (owner : String) (line col : Nat) (x : String)
-  deriving Inhabited, BEq
+  /-- The clauses of the callable `id` match what the reference they are
+  given points to (`&Pattern`): as they are written out so
+  (`Syntax.byReference`). -/
+  | refPats (id : Nat) (clauses : List Clause)
+  deriving Inhabited
 
 /-- What the checker says where it stops: why, and what it found to decide
 or to have the program read again with, where it stops for that; `result`
@@ -190,6 +191,14 @@ instance : Coe String Said := ⟨fun msg => { msg }⟩
 
 /-- The same, said otherwise: what it found kept. -/
 def Said.map (s : Said) (f : String → String) : Said := { s with msg := f s.msg }
+
+/-- Is it what a speculative check passes on at once rather than trying
+otherwise: a match found to be of a reference, or something the program is
+read again for? -/
+def Said.passOn (s : Said) : Bool :=
+  s.reread.isSome || match s.decision with
+    | some (.refPats ..) => true
+    | _ => false
 
 /-- What the checker tells the elaborator about the blocks of a program, each
 named by its identity. -/
