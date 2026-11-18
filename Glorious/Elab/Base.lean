@@ -786,8 +786,6 @@ def coerceRewrite (cs : Std.HashMap Site String) : Rewrite where
       some (.closure id (clauses.zipIdx.map fun (c, j) => coercedClause cs[Site.result id j]? (go.clause c)))
     | _ => none
 
-def coerceExpr (cs : Std.HashMap Site String) : Expr → Expr := (coerceRewrite cs).ex
-
 /-- A clause with the coercions in it written out, its value given to the
 coercion `result`, where there is one. -/
 def coerceClause (cs : Std.HashMap Site String) (result : Option String) (c : Clause) : Clause :=

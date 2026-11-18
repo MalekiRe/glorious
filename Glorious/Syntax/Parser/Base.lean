@@ -617,10 +617,6 @@ end
 
 
 
-/-- The fields of a constructor, struct or operation, if any are written. -/
-def parseFields : P (List TypeExpr) := do
-  if ← acceptPunct "(" then parseTypeList ")" else pure []
-
 def fixityKinds : List String := ["infixl", "infixr", "infix", "prefix"]
 
 /-- `[lower, upper]`: how often something is to be used. `infinity` is no upper

@@ -512,15 +512,4 @@ def checkUnitsKept (first : St) (units : List (List Item × UInt64)) (modules : 
   let (r, _) ← action.run first
   pure r
 
-/-- The same, taking what an earlier check of a program that began alike kept
-(`seed`: what the first items were), and giving what this one keeps. -/
-def checkAfterKept (first : St) (items : List Item) (modules : Syntax.ModuleInfo) (seed : UInt64)
-    (kept : Kept) : Except String (Elab.Blocks × Kept) := do
-  let action : M (Elab.Blocks × Kept) := do
-    modify fun s => { s with modules, ownItems := true }
-    let made ← checkItems items (mixHash seed (hash modules)) kept
-    pure (← finish, made)
-  let (r, _) ← action.run first
-  pure r
-
 end Glorious.Check

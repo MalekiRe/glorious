@@ -171,9 +171,6 @@ def zonkSigWith (nb : Numbering) (s : ISig) : M FnSig := do
   pure ⟨← s.caps.mapM (zonk nb.sig), ← s.params.mapM (zonk nb.sig), ← zonk nb.sig s.ret,
     ← zonkRow nb.sig s.row, nb.crgns, nb.rgns, ← zonkAcc nb.sig s.acc⟩
 
-def zonkSig (s : ISig) : M FnSig := do
-  zonkSigWith (← numbering s) s
-
 /-- A use of a function: the signature it is used at, and the cells its
 numbered regions and the region it binds are at this use. -/
 structure Use where

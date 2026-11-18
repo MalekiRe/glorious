@@ -315,11 +315,6 @@ its trait's types is, where `T` is one of its type parameters: answered at
 each use of the implementation, once `T` is known there. -/
 def projMark : String := "%proj"
 
-/-- How a trait's function says it has type parameters of its own, `fn
-single<T>(T) -> Of<T>`: what it gives is written under this mark, with the
-parameters after it. -/
-def methodGenericsMark : String := "%generic"
-
 /-- The name under which a name bound by the pattern of a `let` is known
 where it is destroyed: the place is the statement's, which a clause's own
 names are known by too when the statement is its first. -/
@@ -1005,9 +1000,7 @@ def selfRewrite (self : String) (trait : Option (String × Expr)) : Rewrite wher
     | _ => none
   onPat := selfPattern self
 
-def selfExpr (self : String) (trait : Option (String × Expr)) : Expr → Expr := (selfRewrite self trait).ex
 def selfClause (self : String) (trait : Option (String × Expr)) : Clause → Clause := (selfRewrite self trait).clause
-def selfStmt (self : String) (trait : Option (String × Expr)) : Stmt → Stmt := (selfRewrite self trait).st
 
 
 /-- `&value` and `&mut value` where the value has no name. -/
@@ -1244,8 +1237,6 @@ partial def splitDefersBodyM (body : List Stmt) : StateM (List Stmt) (List Stmt)
     | s => do pure [← s.traverse splitDefersM]
   pure (← body.mapM one).flatten
 
-partial def splitDefers (e : Expr) : Expr × List Stmt := (splitDefersM e).run []
-
 partial def splitDefersStmts (body : List Stmt) : List Stmt × List Stmt := (splitDefersBodyM body).run []
 
 end
@@ -1270,7 +1261,6 @@ def markMovesRewrite (x : String) : Rewrite where
     | .assign target e => some (.assign target (go.ex e))
     | _ => none
 
-def markMoves (x : String) : Expr → Expr := (markMovesRewrite x).ex
 def markMovesStmts (x : String) : List Stmt → List Stmt := (markMovesRewrite x).stmts
 
 /-- What follows a variable with each read of a part of it, `x.f`, left out:
@@ -1285,7 +1275,6 @@ def lessPartsRewrite (x : String) : Rewrite where
       if placeRoot target == some x then some (.assign (.name none "%place") (go.ex e)) else none
     | _ => none
 
-def lessParts (x : String) : Expr → Expr := (lessPartsRewrite x).ex
 def lessPartsStmts (x : String) : List Stmt → List Stmt := (lessPartsRewrite x).stmts
 
 /-- Is a name used other than by reading a part of it, `x.f`: as a whole,
@@ -1322,7 +1311,6 @@ where that one part is used. -/
 def onlyPartRewrite (x part : String) : Rewrite where
   onExpr _ e := (partRead x e).map fun p => if p == part then .name none x else .int 0
 
-def onlyPart (x part : String) : Expr → Expr := (onlyPartRewrite x part).ex
 def onlyPartStmts (x part : String) : List Stmt → List Stmt := (onlyPartRewrite x part).stmts
 
 /-- Is the value a name holds used as it is, with no borrow of the name and
@@ -1495,8 +1483,6 @@ def shiftRewrite (k : Nat) : Rewrite where
     | .closure id clauses => some (.closure (id + k) (clauses.map go.clause))
     | _ => none
 
-def shiftExpr (k : Nat) : Expr → Expr := (shiftRewrite k).ex
 def shiftClause (k : Nat) : Clause → Clause := (shiftRewrite k).clause
-def shiftStmt (k : Nat) : Stmt → Stmt := (shiftRewrite k).st
 
 end Glorious.Syntax

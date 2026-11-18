@@ -1160,11 +1160,6 @@ def joinFixities (prelude : Fixities) (texts : List TextSyntax) :
     pure (m, { infixes := fix.infixes ++ prelude.infixes, prefixes := fix.prefixes ++ prelude.prefixes,
                bound := fix.bound ++ prelude.bound })
 
-/-- The same from the texts themselves, each with the module it is. -/
-def scopedFixities (prelude : Fixities) (texts : List (List String × String)) :
-    Except String (List (List String × Fixities)) := do
-  joinFixities prelude (← texts.mapM fun (base, src) => textSyntax base src)
-
 /-! ## Lists of types as parameters
 
 `impl<H, ..R> Count for (H, ..R) where (..R): Count { .. }` is an
