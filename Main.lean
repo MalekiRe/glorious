@@ -386,7 +386,7 @@ def buildFile (path : String) (checkKept : Option (IO.Ref (List (String × Check
   | .ok c =>
     if let some ref := checkKept then
       ref.modify fun ks => (path, c.checkKept) :: ks.filter (·.1 != path)
-    let b := Target.Built.of c (startLocals c) search
+    let b := Trace.timed "bytecode" fun _ => Target.Built.of c (startLocals c) search
     Target.write dir key b
     pure (.ok b)
 

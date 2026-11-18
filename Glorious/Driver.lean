@@ -817,11 +817,11 @@ def compileSourceAt (src : String) (check : Bool := true)
     let reached := named (Elab.reachable roots all)
     let missing := own.filter (!reached.contains ·)
     unless missing.isEmpty do
-      match elaborate (Elab.reachable (roots ++ missing) all) blocks with
+      match Trace.timed "elaborate what main does not reach" fun _ => elaborate (Elab.reachable (roots ++ missing) all) blocks with
       | .error e => throw e
       | .ok _ => pure ()
-  let all := Elab.reachable roots all
-  let declared := Elab.withDeclared written all
+  let all := Trace.timed "what main reaches" fun _ => Elab.reachable roots all
+  let declared := Trace.timed "what is declared" fun _ => Elab.withDeclared written all
   -- (What a compile gives, from what was elaborated and certified.)
   let compiled := fun (out : Elab.Output) (cert : Option Typing.Cert) (lent : Nat)
       (places : List ((String × Nat) × Nat)) (made : Infer.Made) =>
