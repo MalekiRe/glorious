@@ -9,6 +9,24 @@ namespace Glorious.Infer
 open Syntax
 open Glorious.Typing (Ty FnSig Hint Cert SigEntry DataInst OpInst)
 
+/-- What inferring a group sets aside of the group it is inferred inside,
+and puts back when it is done. -/
+structure Around where
+  curScc : Option Nat
+  cur : List (Nat × ISig)
+  incls : Array Incl
+  places : Array (ITy × Nat × ITy)
+  coerces : Array (ITy × ITy × Bool)
+  nevers : Array ITy
+  onces : Array (ICls × List ITy)
+  shows : Array (ITy × List ITy)
+  opens : Array (ITy × ITy × List (Nat × Nat))
+  calls : Array Call
+  hints : Array IHint
+  refs : Array (Nat × ISig)
+  cancels : Array (ITy × IRow × Nat × Bool)
+  pending : Array (ITy × IRow × Nat)
+
 mutual
 
 /-- The general type of the group of `fn`, inferring the group if this is its first use. -/
@@ -22,21 +40,36 @@ partial def schemeOf (scc : Nat) : M Scheme := do
       let sch ← thaw fz
       modify fun s => { s with schemes := s.schemes.insert scc sch, frozenMade := s.frozenMade.push (key, fz) }
       return sch
-  let outer ← get
-  let startTy := outer.tys.size
-  let startRow := outer.rows.size
-  let startCls := outer.clss.size
-  let startRg := outer.rgs.size
-  let startAcc := outer.accs.size
-  let fns := (List.range outer.fns.size).filter fun f => outer.scc[f]?.getD f == scc
+  -- (What is put back once the group is done is kept, and not the whole
+  -- state: held, every array of it would be copied where the group first
+  -- changes it, and again in each group inferred inside this one.)
+  let (startTy, startRow, startCls, startRg, startAcc) ← do
+    let s ← get
+    pure (s.tys.size, s.rows.size, s.clss.size, s.rgs.size, s.accs.size)
+  let (allFns, sccs, ncaps) ← do
+    let s ← get
+    pure (s.fns, s.scc, s.ncaps)
+  let back : Around ← do
+    let s ← get
+    pure ⟨s.curScc, s.cur, s.incls, s.places, s.coerces, s.nevers, s.onces, s.shows,
+      s.opens, s.calls, s.hints, s.refs, s.cancels, s.pending⟩
+  -- (Of the declarations' variables, what they were: kept only where the
+  -- scheme may be kept for a later compile.)
+  let prefixes ← do
+    let s ← get
+    pure (if s.remember && key != 0 then
+      some (s.tys.extract 0 s.globalTys, s.rows.extract 0 s.globalRows,
+        s.clss.extract 0 s.globalClss, s.accs.extract 0 s.globalAccs, s.closureRanks)
+    else none)
+  let fns := (List.range allFns.size).filter fun f => sccs[f]?.getD f == scc
   -- A signature for each function of the group, before any body is looked at.
   let mut cur : List (Nat × ISig) := []
   for f in fns do
-    let arity := match outer.fns[f]? with
+    let arity := match allFns[f]? with
       | some ⟨c :: _⟩ => c.pats.length
       | _ => 0
     let sig : ISig :=
-      ⟨← freshTys (outer.ncaps[f]?.getD 0), ← freshTys arity, ← freshTy, ← freshRow, ← freshAcc⟩
+      ⟨← freshTys (ncaps[f]?.getD 0), ← freshTys arity, ← freshTy, ← freshRow, ← freshAcc⟩
     cur := cur ++ [(f, sig)]
   modify fun s =>
     { s with
@@ -44,7 +77,7 @@ partial def schemeOf (scc : Nat) : M Scheme := do
       onces := #[], shows := #[], opens := #[], calls := #[], cancels := #[], pending := #[] }
   let mut raw : List Member := []
   for (f, sig) in cur do
-    let F := (outer.fns[f]?).getD ⟨[]⟩
+    let F := (allFns[f]?).getD ⟨[]⟩
     modify fun s => { s with refs := #[] }
     let mut hints : Array (Array IHint) := #[]
     for c in F.clauses do
@@ -258,21 +291,21 @@ partial def schemeOf (scc : Nat) : M Scheme := do
   modify fun s =>
     { s with
       schemes := s.schemes.insert scc sch
-      curScc := outer.curScc, cur := outer.cur, incls := outer.incls, places := outer.places
-      coerces := outer.coerces, nevers := outer.nevers, onces := outer.onces, shows := outer.shows
-      opens := outer.opens, calls := outer.calls, hints := outer.hints, refs := outer.refs
-      cancels := outer.cancels, pending := outer.pending }
+      curScc := back.curScc, cur := back.cur, incls := back.incls, places := back.places
+      coerces := back.coerces, nevers := back.nevers, onces := back.onces, shows := back.shows
+      opens := back.opens, calls := back.calls, hints := back.hints, refs := back.refs
+      cancels := back.cancels, pending := back.pending }
   -- (Kept for a later compile where inferring it changed nothing of the
   -- declarations' and decided nothing left waiting by others: then the
   -- scheme, and what of its own it leaves waiting, is all it made.)
   let now ← get
-  let waiting := outer.closureRanks.size
-  if now.remember && key != 0
-      && samePrefix now.tys outer.tys now.globalTys && samePrefix now.rows outer.rows now.globalRows
-      && samePrefix now.clss outer.clss now.globalClss && samePrefix now.accs outer.accs now.globalAccs
-      && samePrefix now.closureRanks outer.closureRanks waiting then
-    if let some fz ← freeze sch (now.closureRanks.extract waiting now.closureRanks.size).toList then
-      modify fun s => { s with frozenMade := s.frozenMade.push (key, fz) }
+  if let some (tys, rows, clss, accs, ranks) := prefixes then
+    let waiting := ranks.size
+    if samePrefix now.tys tys now.globalTys && samePrefix now.rows rows now.globalRows
+        && samePrefix now.clss clss now.globalClss && samePrefix now.accs accs now.globalAccs
+        && samePrefix now.closureRanks ranks waiting then
+      if let some fz ← freeze sch (now.closureRanks.extract waiting now.closureRanks.size).toList then
+        modify fun s => { s with frozenMade := s.frozenMade.push (key, fz) }
   pure sch
 
 /-- The signature to use for a reference to `fn`: the group's own inside its
