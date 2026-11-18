@@ -243,13 +243,22 @@ partial def runProjections (final : Bool) : M Unit := do
   modify fun s => { s with namedReads := unnamed ++ s.namedReads }
   let waiting := (← get).projections
   modify fun s => { s with projections := #[] }
-  let mut left : Array (Ty × Nat × Ty × String) := #[]
-  for (subject, idx, result, pos) in waiting do
+  let mut left : Array (Ty × Nat × Ty × String × Nat) := #[]
+  for (subject, idx, result, pos, id) in waiting do
+    -- (Of what turns out to be a reference, read where it has a node: what
+    -- it is to has the field, read through it, which copies it.)
+    let (subject, through) ← match ← find subject with
+      | .ref _ inner _ => pure (if id != 0 then (inner, true) else (subject, false))
+      | _ => pure (subject, false)
     match ← (try fieldType subject idx catch e => throw (pos ++ e)) with
     | some t =>
       try unifyAt s!"the field `.{idx}`" result t
       catch e => throw (pos ++ e)
-    | none => left := left.push (subject, idx, result, pos)
+      if through then
+        modify fun s =>
+          { s with derefReads := s.derefReads.push id,
+                   dups := s.dups.push (t, pos ++ "reading through a reference copies the value (`replace` takes it out instead)") }
+    | none => left := left.push (subject, idx, result, pos, id)
   if left.isEmpty then pure ()
   else if left.size < waiting.size then
     modify fun s => { s with projections := left ++ s.projections }
@@ -258,7 +267,7 @@ partial def runProjections (final : Bool) : M Unit := do
     modify fun s => { s with projections := left ++ s.projections }
   else
     match left[0]? with
-    | some (_, idx, _, pos) =>
+    | some (_, idx, _, pos, _) =>
       throw s!"{pos}`.{idx}` reads a field of a value whose type is not known here; \
         annotate the value it is read from"
     | none => pure ()

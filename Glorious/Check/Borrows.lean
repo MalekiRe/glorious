@@ -608,7 +608,7 @@ def fieldAtThrough (t : Ty) (path : List String) :
     | some field => cur := field
     | none =>
       let field ← freshTy
-      modify fun s => { s with projections := s.projections.push (cur, idx, field, s.pos) }
+      modify fun s => { s with projections := s.projections.push (cur, idx, field, s.pos, 0) }
       cur := field
   pure (cur, numbered.toList, chosen.toList, through.toList)
 

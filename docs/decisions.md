@@ -5481,10 +5481,11 @@ component the query also takes, nor take `Sources<R>` twice (two `From` of
 one relation): a system takes a component once, as columns are lent whole
 (upstream allows `(&mut Cargo, To<DockedAt, &mut Cargo>)` with `each`).
 
-A hole found on the way: a field read of an indexed reference,
-`hulls[i].0` of `hulls: [&Hull]`, is refused; a name holding it reads it
-(`let hull = hulls[i]; hull.0`). A field read by number has no node of its
-own (`Expr.proj`) for the checker to say it goes through a reference.
+A hole found on the way, closed: a field by number of an indexed
+reference, `hulls[i].0` of `hulls: [&Hull]`, was refused, the element's type
+being known only once its read waited (`St.projections`); such a read now
+keeps its node, and one of what turns out to be a reference is read through
+it, as a field by name is.
 
 ## Other standing decisions
 

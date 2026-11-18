@@ -678,8 +678,9 @@ structure St where
   group : List (String × Ty) := []
   pending : Array Pending := #[]
   /-- Field reads whose subject was not yet known: subject, index, field type,
-  and where the read is. -/
-  projections : Array (Ty × Nat × Ty × String) := #[]
+  where the read is, and the read's node where it has one (else 0): one of
+  what turns out to be a reference is read through it. -/
+  projections : Array (Ty × Nat × Ty × String × Nat) := #[]
   /-- Fields read by name from values whose type was not known yet: the
   value's type, the name, the field's type, the read, and where. -/
   namedReads : Array (Ty × String × Ty × Nat × String) := #[]

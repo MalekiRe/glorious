@@ -206,7 +206,7 @@ partial def inferExpr (scope : Scope) (amb : Row) : Expr → M Ty
       | none =>
         readPart scope e subject n name false
         let t ← freshTy
-        modify fun s => { s with projections := s.projections.push (subject, n, t, s.pos) }
+        modify fun s => { s with projections := s.projections.push (subject, n, t, s.pos, id) }
         return t
     let unknown := match ← find subject with
       | .var _ => true
@@ -248,7 +248,7 @@ partial def inferExpr (scope : Scope) (amb : Row) : Expr → M Ty
       -- known: what the name's value is left with is seen once it is.)
       readPart scope e subject idx (toString idx) false
       let t ← freshTy
-      modify fun s => { s with projections := s.projections.push (subject, idx, t, s.pos) }
+      modify fun s => { s with projections := s.projections.push (subject, idx, t, s.pos, 0) }
       pure t
   | .call id f args => do
     -- Whether what a reference points to was built by a constructor: the
@@ -1513,7 +1513,7 @@ partial def inferStmts (scope : Scope) (amb : Row) (stmts : List Stmt)
           | .poly p => p.ty) :: keep
       for (_, t) in s.group do
         keep := t :: keep
-      for (subject, _, result, _) in s.projections do
+      for (subject, _, result, _, _) in s.projections do
         keep := subject :: result :: keep
       -- Decide the effects of what the callable calls, where nothing outside
       -- depends on them; calls still undecided keep their effects fixed.

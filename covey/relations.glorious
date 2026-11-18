@@ -69,7 +69,7 @@ fn roster(stations: &mut Query<(&Hold, From<DockedAt, &Hull>)>) {
         let (hold, hulls) = got;
         let mut sum = 0;
         let mut i = 0;
-        while({ i < len_at(&hulls) }) { let hull = hulls[i]; sum = sum + hull.0; i = i + 1 };
+        while({ i < len_at(&hulls) }) { sum = sum + hulls[i].0; i = i + 1 };
         if(len_at(&hulls) > 0) { say(sum); say(len_at(&hulls)) } else { () }
     })
 }

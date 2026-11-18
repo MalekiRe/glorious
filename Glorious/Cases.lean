@@ -35,6 +35,11 @@ fn first(a: &A) -> Int { a.get<Int>(3) + a.n }
 impl A { fn get<T>(a: &Self, x: T) -> T { x } }
 fn main() -> Int { let a = A { n: 1 }; first(&a) }",
     [], "4"⟩,
+  -- A field by number of an element that is a reference: read through it.
+  ⟨"struct P(Int)
+fn total(ps: [&P]) -> Int { let mut s = 0; let mut i = 0; while({ i < len_at(&ps) }) { s = s + ps[i].0; i = i + 1 }; s }
+fn main() -> Int { let a = P(2); let b = P(3); total([&a, &b]) }",
+    [], "5"⟩,
 
   -- Data, tuples and projection.
   ⟨"fn main() { (1, (2, 3)) }",
