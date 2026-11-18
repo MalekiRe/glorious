@@ -1365,10 +1365,10 @@ def runLowerChecks (fnTy : Ty) : M Unit := do
       unless s.flagged.contains pos || usesStmts resumptive x body == 0 || usedFirst quiet x body do
         if (pathUses { ctx with handed := true, capturesOwned := true } names x body) == some 0 then
           let place := ((pos.splitOn ":").take 2).filterMap String.toNat?
-          let mark := match place with
-            | [line, col] => Syntax.letMutMark s.owner line col x
-            | _ => Syntax.letMutMark s.owner 0 0 x
-          throw s!"{pos}`{x}` is used on one path and not on another, and its type may have a `drop` to run: where it is not used nothing would run it. Use it on every path, let it go there with a function that takes it, or keep it in a variable (`let mut {x}`), which is destroyed where it was not used{mark}"
+          let (line, col) := match place with
+            | [line, col] => (line, col)
+            | _ => (0, 0)
+          throwThe Elab.Said { msg := s!"{pos}`{x}` is used on one path and not on another, and its type may have a `drop` to run: where it is not used nothing would run it. Use it on every path, let it go there with a function that takes it, or keep it in a variable (`let mut {x}`), which is destroyed where it was not used", decision := some (.letMut s.owner line col x) }
     unless (free && !heldDrop) || (← tyMustUse roots [] t).isSome do
       -- A value with a `drop` to run that is used on one path and not on
       -- another: where it is not, nothing would run its `drop`, since the
@@ -1400,10 +1400,10 @@ def runLowerChecks (fnTy : Ty) : M Unit := do
             let place := ((pos.splitOn ":").take 2).filterMap String.toNat?
             let owner := (← get).owner
             -- (No place: a parameter.)
-            let mark := match place with
-              | [line, col] => Syntax.letMutMark owner line col x
-              | _ => Syntax.letMutMark owner 0 0 x
-            throw s!"{pos}`{x}` is used on one path and not on another, and a `{name}` has a `drop` to run: where it is not used nothing would run it. Use it on every path, let it go there with a function that takes it, or keep it in a variable (`let mut {x}`), which is destroyed where it was not used{mark}"
+            let (line, col) := match place with
+              | [line, col] => (line, col)
+              | _ => (0, 0)
+            throwThe Elab.Said { msg := s!"{pos}`{x}` is used on one path and not on another, and a `{name}` has a `drop` to run: where it is not used nothing would run it. Use it on every path, let it go there with a function that takes it, or keep it in a variable (`let mut {x}`), which is destroyed where it was not used", decision := some (.letMut owner line col x) }
       continue
     let mut unused := false
     if usesStmts resumptive x body == 0 then unused := true

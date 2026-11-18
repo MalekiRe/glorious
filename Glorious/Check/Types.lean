@@ -618,7 +618,7 @@ structure St where
   /-- What went wrong when a callable was first read, with the types of what
   it is given known, before it was read again without them: said if what is
   then wrong is only that those types were not known. -/
-  firstSaid : Option String := none
+  firstSaid : Option Elab.Said := none
   /-- Every call of a callee with a type, by the call's identity, and whether
   the callee was then seen to perform nothing: its effects were a variable of
   its own that none of its parameters mention. -/
@@ -842,7 +842,12 @@ structure St where
   methodCalls : Array (Nat × Nat) := #[]
   fnBounds : List (String × Nat) := []
 
-abbrev M := StateT St (Except String)
+abbrev M := StateT St (Except Elab.Said)
+
+/-- A message is what stops the checker, with nothing found. -/
+instance : MonadExceptOf String M where
+  throw msg := throwThe Elab.Said { msg }
+  tryCatch act handle := tryCatchThe Elab.Said act fun e => handle e.msg
 
 /-- Run `act`, and change an error it ends in with `f`. Unlike `try`, which
 keeps the state from before to go back to, nothing holds that state while
@@ -850,7 +855,7 @@ keeps the state from before to go back to, nothing holds that state while
 @[inline] def onError {α : Type} (act : M α) (f : String → String) : M α := fun s =>
   match act s with
   | .ok r => .ok r
-  | .error e => .error (f e)
+  | .error e => .error (e.map f)
 
 /-- The implementations of a trait, by its name without arguments. -/
 def implsOfBase (base : String) : M (List ImplDecl) := do

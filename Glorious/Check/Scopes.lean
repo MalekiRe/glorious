@@ -222,7 +222,7 @@ partial def runProjections (final : Bool) : M Unit := do
                                      dups := s.dups.push (t, pos ++ "reading through a reference copies the value (`replace` takes it out instead)") }
             continue
       match (← get).firstSaid with
-      | some said => throw said
+      | some said => throwThe Elab.Said said
       | none => throw s!"{pos}the field `{name}` is read through a reference, and where it is read the type of what it is read from is not known: say what that is"
     let found ← if unknown then pure none else
       match ← (try fieldIndex subject name catch e => throw (pos ++ e)) with

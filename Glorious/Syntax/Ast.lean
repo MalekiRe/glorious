@@ -236,17 +236,6 @@ prelude's, with the module's key: each module is a unit of the program,
 checked after those it uses (`Driver.unitsOf`). -/
 def unitMark : String := "%unit"
 
-/-- What the checker throws where a dot call is of a type's own function
-rather than the one in scope: the call and that function. The program is
-read again with it. -/
-def dotOwnMark (call : Nat) (fn : String) : String := s!"%dotown:{call}:{fn}%"
-
-/-- Said by the checker where a dot call's receiver is a name that holds a
-value and the function takes a reference to it: the program is read again
-with the name borrowed there, as Rust borrows it (`m.peek()` is
-`peek(&m)`). -/
-def recvRefMark (call : Nat) (uniq : Bool) : String := s!"%recvref:{call}:{if uniq then 1 else 0}%"
-
 /-- How the constructors of a text are named where values are shown: no
 program can write these names. -/
 def textEndName : String := "%end"
@@ -302,10 +291,6 @@ def tupleRestName (id : Nat) : String := s!"%tuplerest:{id}"
 def tupleRestOf (name : String) : Option Nat :=
   if name.startsWith "%tuplerest:" then (name.drop 11).toString.toNat? else none
 
-/-- What the checker says when it finds how many parts the `..` of a tuple
-pattern stands for: the program is then read again with them written `_`. -/
-def tupleRestFound (id count : Nat) : String := s!"%tuplerest:{id}:{count}%"
-
 /-- The type under which a type left to implementations is asked at types,
 `F::Of<Int>`: the type it is asked of, and then those. -/
 def gatMark : String := "%gat"
@@ -330,24 +315,6 @@ def captureSite (x : String) : String := s!"%capture:{x}"
 
 def captureSiteOf (name : String) : Option String :=
   if name.startsWith "%capture:" then some (name.drop 9).toString else none
-
-/-- What the checker throws where a function that needs a trait of a type it
-is used at is named as a value, not called: the program is read again with
-each such naming in `owner` a block that calls it, of `arity` parameters. -/
-def etaMark (owner : String) (x : String) (arity : Nat) : String :=
-  s!"%eta:{arity}:{x}:{owner}%"
-
-/-- What the checker says of a `let x` at a place in a function whose value is
-used on one path and not on another: the program is read again with that
-`let` written `let mut` (`Elab.letMutFound`). -/
-def letMutMark (owner : String) (line col : Nat) (x : String) : String :=
-  s!"%letmut:{line}:{col}:{x}:{owner}%"
-
-/-- What the checker throws where the clauses of a callable match what its
-first argument points to with patterns of a value (`Dot => ..` for a
-`&Shape`): the program is read again with those patterns written `&Dot`. -/
-def refPatsMark (id : Nat) (uniq : Bool) (clauses : List Nat) : String :=
-  s!"%refpats:{id}:{if uniq then 1 else 0}:{",".intercalate (clauses.map toString)}%"
 
 /-- A callable with what destroys it if it is let go: `%destroyed(callable,
 { .. })`, where the block destroys what the callable captured, by its names. -/

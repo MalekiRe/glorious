@@ -260,16 +260,6 @@ partial def restPat (id count : Nat) : Pattern → Pattern
 def restItems (id count : Nat) : List Item → List Item :=
   Rewrite.items { onPat := restPat id count }
 
-/-- What the checker said of a tuple pattern's `..`, if that is what it said:
-which pattern, and how many parts. -/
-def restFound (said : String) : Option (Nat × Nat) :=
-  match said.splitOn "%tuplerest:" with
-  | _ :: after :: _ =>
-    match ((after.splitOn "%").headD "").splitOn ":" with
-    | [id, count] => id.toNat?.bind fun id => count.toNat?.map fun count => (id, count)
-    | _ => none
-  | _ => none
-
 /-! ## Patterns of a value matched against a reference
 
 `match(s) { Dot => 0, Line(n) => *n }` for `s: &Shape`: the checker says which
@@ -290,21 +280,6 @@ def refPatsItems (id : Nat) (uniq : Bool) (which : List Nat) : List Item → Lis
         | c => c))
     | _ => none }
 
-/-- What the checker said of such clauses, if that is what it said. -/
-def refPatsFound (said : String) : Option (Nat × Bool × List Nat) :=
-  match said.splitOn "%refpats:" with
-  | _ :: after :: _ =>
-    match ((after.splitOn "%").headD "").splitOn ":" with
-    | [id, u, ks] => id.toNat?.map fun id => (id, u == "1", (ks.splitOn ",").filterMap String.toNat?)
-    | _ => none
-  | _ => none
-
-/-- What the checker says, without that mark. -/
-def withoutRefPats (said : String) : String :=
-  match said.splitOn "%refpats:" with
-  | before :: after :: _ => before ++ "%".intercalate ((after.splitOn "%").drop 1)
-  | _ => said
-
 /-! ## A dot call of a type's own function
 
 `v.push(x)` where `push` is a function in scope that does not fit `v`, and
@@ -319,38 +294,12 @@ def dotOwnItems (call : Nat) (fn : String) : List Item → List Item :=
     | _ => none }
 
 /-- A program with the receiver of one dot call, a name, borrowed:
-`Syntax.recvRefMark`. -/
+`Elab.Reread.recvRef`. -/
 def recvRefItems (call : Nat) (uniq : Bool) : List Item → List Item :=
   Rewrite.items { onExpr := fun go => fun
     | .call i (.fieldOf fi (.name none x) name) args =>
       if i == call then some (.call i (.fieldOf fi (.ref uniq x) name) (args.map go.ex)) else none
     | _ => none }
-
-def recvRefFound (said : String) : Option (Nat × Bool) :=
-  match said.splitOn "%recvref:" with
-  | _ :: after :: _ =>
-    match ((after.splitOn "%").headD "").splitOn ":" with
-    | [call, u] => call.toNat?.map fun c => (c, u == "1")
-    | _ => none
-  | _ => none
-
-def withoutRecvRef (said : String) : String :=
-  match said.splitOn "%recvref:" with
-  | before :: after :: _ => before ++ "%".intercalate ((after.splitOn "%").drop 1)
-  | _ => said
-
-def dotOwnFound (said : String) : Option (Nat × String) :=
-  match said.splitOn "%dotown:" with
-  | _ :: after :: _ =>
-    match ((after.splitOn "%").headD "").splitOn ":" with
-    | call :: fn => call.toNat?.map fun c => (c, ":".intercalate fn)
-    | _ => none
-  | _ => none
-
-def withoutDotOwn (said : String) : String :=
-  match said.splitOn "%dotown:" with
-  | before :: after :: _ => before ++ "%".intercalate ((after.splitOn "%").drop 1)
-  | _ => said
 
 /-! ## A value used on one path and not on another
 
@@ -358,23 +307,6 @@ A value with a `drop` to run that one path uses and another does not is kept
 in a variable, as `let mut` keeps it: where it was not used, the variable
 destroys it. The checker says which `let`, and the program is read again with
 that `let` written as `let mut`. -/
-
-/-- The `let` the checker asks to keep its value in a variable, if it does:
-the function, its place and the name. -/
-def letMutFound (said : String) : Option (String × Nat × Nat × String) :=
-  match said.splitOn "%letmut:" with
-  | _ :: after :: _ =>
-    match ((after.splitOn "%").headD "").splitOn ":" with
-    | line :: col :: x :: owner =>
-      line.toNat?.bind fun line => col.toNat?.map fun col => (":".intercalate owner, line, col, x)
-    | _ => none
-  | _ => none
-
-/-- What the checker says, without the marker. -/
-def withoutLetMut (said : String) : String :=
-  match said.splitOn "%letmut:" with
-  | before :: after :: _ => before ++ (((after.splitOn "%").drop 1).foldl (· ++ ·) "")
-  | _ => said
 
 /-- A program with the clauses of one function, of the program or of an
 implementation, made by `f`; and whether they changed. -/
@@ -432,22 +364,6 @@ whether there was such a `let`. -/
 def letMutItems (owner : String) (line col : Nat) (x : String) (items : List Item) :
     List Item × Bool :=
   ownerItems owner (·.map (letMutRewrite line col x).clause) items
-
-/-- What `etaMark` said: the function it is in, the function named, and how
-many parameters. -/
-def etaFound (said : String) : Option (String × String × Nat) :=
-  match said.splitOn "%eta:" with
-  | _ :: after :: _ =>
-    match ((after.splitOn "%").headD "").splitOn ":" with
-    | arity :: x :: owner => arity.toNat?.map fun n => (":".intercalate owner, x, n)
-    | _ => none
-  | _ => none
-
-/-- What the checker says, without the marker. -/
-def withoutEta (said : String) : String :=
-  match said.splitOn "%eta:" with
-  | before :: after :: _ => before ++ (((after.splitOn "%").drop 1).foldl (· ++ ·) "")
-  | _ => said
 
 mutual
 
@@ -653,16 +569,6 @@ def decidedItems (decided : List Decision) (items : List Item) : List Item :=
     | .rest id count => restItems id count items
     | .eta owner x arity => (etaItems owner x arity items).1
     | .letMut owner line col x => (letMutItems owner line col x items).1) items
-
-/-- What the checker says, if it is something to decide where it was found:
-`..` in a tuple pattern, a function named as a value, a value kept in a
-variable. -/
-def decisionFound (said : String) : Option Decision :=
-  match restFound said, etaFound said, letMutFound said with
-  | some (id, count), _, _ => some (.rest id count)
-  | none, some (owner, x, arity), _ => some (.eta owner x arity)
-  | none, none, some (owner, line, col, x) => some (.letMut owner line col x)
-  | none, none, none => none
 
 /-- A program with what the checker decided of it written in: `Decision`s
 first, then the function of each dot call it chose by the value's type,

@@ -151,6 +151,18 @@ def TraitInfo.index (t : TraitInfo) : TraitInfo :=
 /-- The function that makes an implementation a value. -/
 def implDictName (trait head : String) : String := s!"impl {trait} for {head}"
 
+/-- What the checker learns of how a program is to be read that the resolver
+decides: the program is compiled again with it. -/
+inductive Reread where
+  /-- The first patterns of these clauses of the callable `id` are of what
+  the reference matched points to (`&Pattern`, `&mut Pattern`). -/
+  | refPats (id : Nat) (uniq : Bool) (which : List Nat)
+  /-- The dot call `call` is of the type's own function `fn`. -/
+  | dotOwn (call : Nat) (fn : String)
+  /-- The receiver of the dot call `call`, a name, is borrowed. -/
+  | recvRef (call : Nat) (uniq : Bool)
+  deriving Inhabited, BEq
+
 /-- Something the checker decides of how a program is to be read, which it
 finds only once it knows types, decided where it is found: the function it
 is in is checked again with it, not the program. -/
@@ -163,6 +175,21 @@ inductive Decision where
   variable. -/
   | letMut (owner : String) (line col : Nat) (x : String)
   deriving Inhabited, BEq
+
+/-- What the checker says where it stops: why, and what it found to decide
+or to have the program read again with, where it stops for that; `result`
+where what does not fit is a clause's result. -/
+structure Said where
+  msg : String
+  decision : Option Decision := none
+  reread : Option Reread := none
+  result : Bool := false
+  deriving Inhabited
+
+instance : Coe String Said := ⟨fun msg => { msg }⟩
+
+/-- The same, said otherwise: what it found kept. -/
+def Said.map (s : Said) (f : String → String) : Said := { s with msg := f s.msg }
 
 /-- What the checker tells the elaborator about the blocks of a program, each
 named by its identity. -/

@@ -785,12 +785,11 @@ partial def compileSourceAt (src : String) (check : Bool := true)
     | true, true, .ok (count, _) =>
       Check.checkUnitsKept { dropMode := drops } ((all.take count, hash resolved.info.text) :: cut (all.drop count))
         resolved.info (mixHash seed 77) checkKept (own := false)
-    | _, _, _ => (Check.checkProgram all resolved.info drops).map (·, [], [])
+    | _, _, _ => ((Check.checkProgram all resolved.info drops).map (·, [], [])).mapError (fun e => ({ msg := e } : Elab.Said))
   -- (What the checker decides of how the program is read once it knows
   -- types, `..` in a tuple pattern, a function named as a value, a value
   -- kept in a variable, it decides where it finds it: `Check.checkDeciding`.)
-  let checkWith := fun (all : List Syntax.Item) =>
-    (all, (checkOnce all).mapError fun e => Elab.withoutEta (Elab.withoutLetMut e))
+  let checkWith := fun (all : List Syntax.Item) => (all, checkOnce all)
   let (all, checked) := Trace.timed "check" fun _ => checkWith all
   -- (Dot calls the checker chose a type's own function for, by the value's
   -- type: written so for what follows.)
@@ -801,27 +800,25 @@ partial def compileSourceAt (src : String) (check : Bool := true)
   let (blocks, checkMade, libraryMade) ← match checked with
     | .ok (blocks, made, shared) => pure (some blocks, made, shared)
     | .error e =>
-      let clean := fun (e : String) => Elab.withoutRecvRef (Elab.withoutDotOwn (Elab.withoutRefPats e))
-      match Elab.refPatsFound e, Elab.dotOwnFound e, Elab.recvRefFound e with
-      | some found, _, _ =>
-        if check && refPats.length < 32 && !refPats.contains found then
-          match Trace.timed "compile again: a pattern of a reference" fun _ => compileSourceAt src check files few known packs kept checkKept (refPats ++ [found]) dotPicks search memo firsts lexed recvRefs parsedKept preludeKept with
-          | .ok c => return c
-          | .error e' => throw (clean e')
-        else if check then throw (clean e) else pure (none, [], [])
-      | none, some found, _ =>
-        if check && dotPicks.length < 32 && !dotPicks.contains found then
-          match Trace.timed "compile again: a type's own function" fun _ => compileSourceAt src check files few known packs kept checkKept refPats (dotPicks ++ [found]) search memo firsts lexed recvRefs parsedKept preludeKept with
-          | .ok c => return c
-          | .error e' => throw (clean e')
-        else if check then throw (clean e) else pure (none, [], [])
-      | none, none, some found =>
-        if check && recvRefs.length < 32 && !recvRefs.contains found then
-          match Trace.timed "compile again: a receiver borrowed" fun _ => compileSourceAt src check files few known packs kept checkKept refPats dotPicks search memo firsts lexed (recvRefs ++ [found]) parsedKept preludeKept with
-          | .ok c => return c
-          | .error e' => throw (clean e')
-        else if check then throw (clean e) else pure (none, [], [])
-      | none, none, none => if check then throw e else pure (none, [], [])
+      -- (Found what the resolver decides: the program compiled again with it.)
+      let again := fun (refPats : List (Nat × Bool × List Nat)) (dotPicks : List (Nat × String))
+          (recvRefs : List (Nat × Bool)) (why : String) =>
+        Trace.timed s!"compile again: {why}" fun _ => compileSourceAt src check files few known packs kept checkKept refPats dotPicks search memo firsts lexed recvRefs parsedKept preludeKept
+      match check, e.reread with
+      | true, some (.refPats id uniq which) =>
+        if refPats.length < 32 && !refPats.contains (id, uniq, which) then
+          return ← again (refPats ++ [(id, uniq, which)]) dotPicks recvRefs "a pattern of a reference"
+        else throw e.msg
+      | true, some (.dotOwn call fn) =>
+        if dotPicks.length < 32 && !dotPicks.contains (call, fn) then
+          return ← again refPats (dotPicks ++ [(call, fn)]) recvRefs "a type's own function"
+        else throw e.msg
+      | true, some (.recvRef call uniq) =>
+        if recvRefs.length < 32 && !recvRefs.contains (call, uniq) then
+          return ← again refPats dotPicks (recvRefs ++ [(call, uniq)]) "a receiver borrowed"
+        else throw e.msg
+      | true, none => throw e.msg
+      | false, _ => pure (none, [], [])
   -- Lifetimes were the checker's to read; and, of what is declared, the
   -- certificate's.
   let written := all

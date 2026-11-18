@@ -997,11 +997,6 @@ def capsReached (t : Ty) : M (List Nat) := do
     todo := next
   pure reach
 
-/-- Marks a failure as a body's result not being the type wanted, which the
-clause the body belongs to can still answer by looking at its clauses in
-another order. -/
-def resultMark : String := "\x01"
-
 /-- Make what was found the type expected, by a declared coercion at `site` if
 the two differ. Gives the mismatch if neither works. -/
 def fitAtCore (scope : Scope) (amb : Row) (what : String) (site : Option Elab.Site)

@@ -78,10 +78,14 @@ unused (`first`). -/
 partial def checkDeciding (decls : List FnDecl) (fuel : Nat := 64) (first : Option String := none) :
     M Unit := do
   let before ← get
-  try checkGroup decls
-  catch e =>
-    let said := Elab.withoutEta (Elab.withoutLetMut ((first.filter fun _ => (Elab.letMutFound e).isNone).getD e))
-    match fuel, Elab.decisionFound e with
+  tryCatchThe Elab.Said (checkGroup decls) fun e => do
+    let isLetMut := match e.decision with
+      | some (.letMut ..) => true
+      | _ => false
+    let said : Elab.Said := match first with
+      | some f => if isLetMut then { e with decision := none } else f
+      | none => { e with decision := none }
+    match fuel, e.decision with
     | fuel + 1, some d =>
       let items := decls.map fun d => Item.fn d.name d.params d.annots d.ret d.clauses
       let after := Elab.decidedItems [d] items
@@ -89,7 +93,7 @@ partial def checkDeciding (decls : List FnDecl) (fuel : Nat := 64) (first : Opti
         | (d, .fn _ _ _ _ clauses) => { d with clauses }
         | (d, _) => d
       -- (Nothing changed: what was said stands.)
-      if (decls'.map (·.clauses)).map hash == (decls.map (·.clauses)).map hash then throw said
+      if (decls'.map (·.clauses)).map hash == (decls.map (·.clauses)).map hash then throwThe Elab.Said said
       set before
       modify fun s =>
         { s with decided := s.decided ++ [d]
@@ -99,10 +103,10 @@ partial def checkDeciding (decls : List FnDecl) (fuel : Nat := 64) (first : Opti
                    | none => (name, clauses)
                  runFns := decls'.foldl (fun m d => m.insert d.name d.clauses) s.runFns }
       let first := match d with
-        | .letMut .. => some (first.getD e)
+        | .letMut .. => some (first.getD e.msg)
         | _ => first
       checkDeciding decls' fuel first
-    | _, _ => throw said
+    | _, _ => throwThe Elab.Said said
 
 /-- Check items. With `kept` from an earlier check of a program that began
 alike (`seed`: what was checked before them), the state after each step whose
@@ -371,7 +375,7 @@ def checkProgram (items : List Item) (modules : Syntax.ModuleInfo := {}) (drops 
     modify fun s => { s with modules }
     let _ ← checkItems items
     finish
-  let (blocks, _) ← action.run { dropMode := drops }
+  let (blocks, _) ← (action.run { dropMode := drops }).mapError (·.msg)
   pure blocks
 
 /-- What is known once some items are checked: for a program that is checked
@@ -381,7 +385,7 @@ def checkFirst (items : List Item) (modules : Syntax.ModuleInfo := {}) (drops : 
   let action : M Unit := do
     modify fun s => { s with modules }
     let _ ← checkItems items
-  let (_, st) ← action.run { dropMode := drops }
+  let (_, st) ← (action.run { dropMode := drops }).mapError (·.msg)
   pure st
 
 /-- Check a program whose first items are already checked. -/
@@ -391,7 +395,7 @@ def checkAfter (first : St) (items : List Item) (modules : Syntax.ModuleInfo := 
     modify fun s => { s with modules, ownItems := true }
     let _ ← checkItems items
     finish
-  let (blocks, _) ← action.run first
+  let (blocks, _) ← (action.run first).mapError (·.msg)
   pure blocks
 
 
@@ -432,7 +436,7 @@ where it cannot be, or one of them is refused, they are checked one after
 another, as all were. -/
 def checkUnitsKept (first : St) (units : List (List Item × UInt64)) (modules : Syntax.ModuleInfo)
     (seed : UInt64) (kept : Kept) (own : Bool := true) (library : Nat := 0)
-    (deps : List (List Nat) := []) : Except String (Elab.Blocks × Kept × Kept) := do
+    (deps : List (List Nat) := []) : Except Elab.Said (Elab.Blocks × Kept × Kept) := do
   -- (Each unit's level: one more than the highest of the units it uses.)
   let levelOf := units.length.fold (init := (#[] : Array Nat)) fun i _ acc =>
     acc.push (((deps[i]?).getD []).foldl (fun m d => max m ((acc[d]?).getD 0 + 1)) 0)
@@ -501,7 +505,7 @@ def checkUnitsKept (first : St) (units : List (List Item × UInt64)) (modules : 
         let (mine, after) ← match Trace.timed s!"check unit {k}" fun _ =>
             (checkItems u (mixHash key info) kept).run before with
           | .ok r => pure r
-          | .error e => throw e
+          | .error e => throwThe Elab.Said e
         set after
         if let some (k, _) := mine.head? then key := k
         made := mine ++ made

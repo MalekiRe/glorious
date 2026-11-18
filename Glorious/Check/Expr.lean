@@ -102,10 +102,10 @@ partial def inferExpr (scope : Scope) (amb : Row) : Expr → M Ty
           | .fn ps _ _ _ _ => some ps.length
           | _ => none
         let owner := (← get).owner
-        let again := match arity with
-          | some n => if inGroup then "" else Syntax.etaMark owner x n
-          | none => ""
-        throw s!"{again}`{x}` needs a trait of a type it is used at, so it is called where it is named: write a block that calls it"
+        let decision := match arity with
+          | some n => if inGroup then none else some (Elab.Decision.eta owner x n)
+          | none => none
+        throwThe Elab.Said { msg := s!"`{x}` needs a trait of a type it is used at, so it is called where it is named: write a block that calls it", decision }
       if ((← get).fnGroups.lookup x).isSome then
         throw s!"`{x}` gives callables one environment to share, so it is called where it is named: write a block that calls it"
       if inGroup then
@@ -278,14 +278,13 @@ partial def inferExpr (scope : Scope) (amb : Row) : Expr → M Ty
         let drops := (← get).drops
         modify fun s => { s with shapes := true }
         -- (Whatever goes wrong, patterns are read as usual again after.)
-        let wrong ← try
+        let wrong ← tryCatchThe Elab.Said (do
             for c in clauses do
               let .mk pats _ := c
               let _ ← inferPats pats tys.toList
-            pure none
-          catch e => pure (some e)
+            pure none) fun e => pure (some e)
         modify fun s => { s with drops := drops, shapes := false }
-        if let some e := wrong then throw e
+        if let some e := wrong then throwThe Elab.Said e
         let check : Pending := ⟨(← get).pos, "the clauses of this callable do", tys.toList,
           clauses.map fun
             | .mk pats _ => pats⟩
@@ -541,19 +540,18 @@ partial def checkArg (scope : Scope) (amb : Row) (what : String) (p : Ty) (a : E
         if declared && !whole then widened := true
       if arity == ps.length && widened then
         let saved ← get
-        let tried ← try
+        let tried ← tryCatchThe Elab.Said (do
             let t ← inferCallable scope wider knownRet none clauses "the clauses of this callable do" id
             if let .fn _ _ _ _ cap := t then
               modify fun s => { s with blockCaps := s.blockCaps.push (id, cap) }
-            pure (if (← fitAt scope amb what site p t).isNone then none else some "")
-          catch e => pure (some e)
+            pure (if (← fitAt scope amb what site p t).isNone then none else some ("" : Elab.Said))) fun e => pure (some e)
         match tried with
         | none => return none
-        | some said =>
+        | some found =>
           -- (Found that a match is of a reference, or a dot call of a type's
           -- own function, knowing the types: the program is read again so.)
-          if (said.splitOn "%refpats:").length > 1 || (said.splitOn "%dotown:").length > 1
-              || (said.splitOn "%recvref:").length > 1 then throw said
+          if found.reread.isSome then throwThe Elab.Said found
+          let said := found.msg
           set saved
           -- What went wrong with the types known is what is said if the
           -- callable is wrong without them too: it was read knowing more.
@@ -561,7 +559,7 @@ partial def checkArg (scope : Scope) (amb : Row) (what : String) (p : Ty) (a : E
             -- (Where it was said, as the statement it is in would say it.)
             let at_ := (← get).at_
             let said := if at_.1 == 0 then said else Syntax.positioned at_.1 at_.2 said
-            modify fun s => { s with firstSaid := s.firstSaid <|> some said }
+            modify fun s => { s with firstSaid := s.firstSaid <|> some { found with msg := said } }
             try
               if arity == ps.length && annots.any (·.isSome) then
                 let t ← inferCallable scope annots knownRet none clauses "the clauses of this callable do" id
@@ -569,7 +567,7 @@ partial def checkArg (scope : Scope) (amb : Row) (what : String) (p : Ty) (a : E
                   modify fun s => { s with blockCaps := s.blockCaps.push (id, cap) }
                 return ← fitAt scope amb what site p t
               return ← fitAt scope amb what site p (← inferExpr scope amb a)
-            catch _ => throw said
+            catch _ => throwThe Elab.Said { found with msg := said }
       if arity == ps.length && annots.any (·.isSome) then
         let t ← inferCallable scope annots knownRet none clauses "the clauses of this callable do" id
         if let .fn _ _ _ _ cap := t then
@@ -591,9 +589,8 @@ partial def dotAltFor (scope : Scope) (amb : Row) (call : Nat) (a : Expr) : M (O
     let a := match a with
       | .ref _ x => Expr.name none x
       | a => a
-    let found ← try some <$> inferExpr scope amb a catch e =>
-      if (e.splitOn "%dotown:").length > 1 || (e.splitOn "%refpats:").length > 1
-          || (e.splitOn "%recvref:").length > 1 then throw e else pure none
+    let found ← tryCatchThe Elab.Said (some <$> inferExpr scope amb a) fun e =>
+      if e.reread.isSome then throwThe Elab.Said e else pure none
     let rec head (fuel : Nat) (t : Ty) : M (Option String) := do
       match fuel, ← find t with
       | fuel + 1, .ref _ inner _ => head fuel inner
@@ -701,7 +698,7 @@ partial def checkArgsIn (scope : Scope) (amb : Row) (what : String) (params : Li
                 | .con "&mut" [] => true
                 | _ => false
               let shown := if uniq then "&mut " else "&"
-              throw (Syntax.refPatsMark id uniq valuePats ++ s!"argument {i + 1} of {what}: what is matched is a reference: a pattern of what it points to is written `{shown}Pattern`, and binds references (`{shown}Some(x) => *x`)")
+              throwThe Elab.Said { msg := s!"argument {i + 1} of {what}: what is matched is a reference: a pattern of what it points to is written `{shown}Pattern`, and binds references (`{shown}Some(x) => *x`)", reread := some (.refPats id uniq valuePats) }
       -- (A value made where a dot call is made on it, named and borrowed for
       -- the call (`Resolve.receiverExpr`), that is a reference already: the
       -- reference is given.)
@@ -729,16 +726,17 @@ partial def checkArgsIn (scope : Scope) (amb : Row) (what : String) (params : Li
       -- `&mut app` of an `app` that is not mutable, where its type has a
       -- function of its own of the name that takes it otherwise: that one.)
       let checked ← if i == 0 && call != 0 then
-          try checkArg scope amb s!"argument {i + 1} of {what}" p a site catch ex => do
-            if (ex.splitOn "%dotown:").length > 1 || (ex.splitOn "%refpats:").length > 1
-                || (ex.splitOn "%recvref:").length > 1 then throw ex
+          tryCatchThe Elab.Said (checkArg scope amb s!"argument {i + 1} of {what}" p a site) fun ex => do
+            if ex.reread.isSome then throwThe Elab.Said ex
             let failed ← get
             set before
             let alt ← dotAltFor scope amb call a
             set failed
             match alt with
-            | some alt => if (what.splitOn s!"`{alt}`").length > 1 then throw ex else throw (Syntax.dotOwnMark call alt ++ ex)
-            | none => throw ex
+            | some alt =>
+              if (what.splitOn s!"`{alt}`").length > 1 then throwThe Elab.Said ex
+              else throwThe Elab.Said { ex with reread := some (.dotOwn call alt) }
+            | none => throwThe Elab.Said ex
         else checkArg scope amb s!"argument {i + 1} of {what}" p a site
       if let some e := checked then
         -- (A dot call's receiver, a name that holds a value, where the
@@ -754,7 +752,7 @@ partial def checkArgsIn (scope : Scope) (amb : Row) (what : String) (params : Li
                   let uniq := match ← find how with
                     | .con "&mut" [] => true
                     | _ => false
-                  throw (Syntax.recvRefMark call uniq ++ e)
+                  throwThe Elab.Said { msg := e, reread := some (.recvRef call uniq) }
         -- (Asked only once the function in scope does not fit: the program
         -- is read again, so what this finds on the way is not kept. The
         -- receiver's type is found as it was before it was made to fit.)
@@ -763,7 +761,7 @@ partial def checkArgsIn (scope : Scope) (amb : Row) (what : String) (params : Li
           set before
           let alt ← dotAltFor scope amb call a
           set failed
-          if let some alt := alt then throw (Syntax.dotOwnMark call alt ++ e)
+          if let some alt := alt then throwThe Elab.Said { msg := e, reread := some (.dotOwn call alt) }
         -- (Clauses one of which ends with a braced block, which is a callable
         -- there: likely meant to be run.)
         let blocky := match a with
@@ -797,7 +795,7 @@ partial def checkArgs (scope : Scope) (amb : Row) (what : String) (params : List
     -- arguments, of a value whose type has one of the name of its own.)
     if let some a := args.head? then
       if let some alt ← dotAltFor scope amb call a then
-        throw (Syntax.dotOwnMark call alt ++ s!"{what} takes {params.length} arguments")
+        throwThe Elab.Said { msg := s!"{what} takes {params.length} arguments", reread := some (.dotOwn call alt) }
     arityError what params.length args.length
   -- Whole numbers written without a type are looked at last: by then what
   -- is wanted of them may be known from the other arguments.
@@ -1335,7 +1333,8 @@ partial def inferCall (scope : Scope) (amb : Row) (f : Expr) (args : List Expr)
     -- (`value.name(..)` where `name` is no field: if types have a function of
     -- their own of that name, that is what was meant, and which one could
     -- not be told by the name alone.)
-    let callee ← try inferExpr scope amb f catch e =>
+    let callee ← tryCatchThe Elab.Said (inferExpr scope amb f) fun said => do
+      let e := said.msg
       match f with
       | .fieldOf _ recv name =>
         let theirs := (← get).fns.filter fun (fn, _) => fn.endsWith s!"::{name}"
@@ -1356,11 +1355,12 @@ partial def inferCall (scope : Scope) (amb : Row) (f : Expr) (args : List Expr)
           set saved
           if let some h := head then
             let own := s!"{h}::{name}"
-            if ((← get).fns.lookup own).isSome then throw (Syntax.dotOwnMark call own ++ e)
+            if ((← get).fns.lookup own).isSome then
+              throwThe Elab.Said { said with reread := some (.dotOwn call own) }
         if (e.splitOn "has no field").length > 1 && theirs.length > 1 then
           throw s!"{e}. More than one type has a function `{name}` of its own ({", ".intercalate (theirs.map fun (fn, _) => s!"`{bareName fn}`")}): say which, `Type::{name}(value, ..)`"
-        else throw e
-      | _ => throw e
+        else throwThe Elab.Said said
+      | _ => throwThe Elab.Said said
     -- (A field that holds no callable, `p.x()` where `x` is a field and the
     -- type's own function: the function, the program read again so.)
     if let .fieldOf _ recv name := f then
@@ -1382,7 +1382,7 @@ partial def inferCall (scope : Scope) (amb : Row) (f : Expr) (args : List Expr)
           if let some h := h then
             let own := s!"{h}::{name}"
             if ((← get).fns.lookup own).isSome then
-              throw (Syntax.dotOwnMark call own ++ s!"the field `{name}` is no callable")
+              throwThe Elab.Said { msg := s!"the field `{name}` is no callable", reread := some (.dotOwn call own) }
     applyTy scope amb "this callee" callee args call
 
 /-- The type of a block: that of its last expression, or unit. -/
@@ -1401,7 +1401,7 @@ partial def inferStmts (scope : Scope) (amb : Row) (stmts : List Stmt)
       modify fun s => { s with givingBack := before }
       match fitted with
       | none => pure expected
-      | some e => throw (resultMark ++ e) : M Ty)
+      | some e => throwThe Elab.Said { msg := e, result := true } : M Ty)
   match stmts with
   | [] => finish .unit false
   | .located line col s :: rest => do
@@ -1410,8 +1410,7 @@ partial def inferStmts (scope : Scope) (amb : Row) (stmts : List Stmt)
     for x in Elab.movedStmt s do
       if (Elab.fvStmts [] rest).contains x then
         throw (positioned line col s!"`{x}` is used after `move {x}` handed it on")
-    try inferStmts scope amb (s :: rest) want
-    catch e => throw (positioned line col e)
+    onError (inferStmts scope amb (s :: rest) want) (positioned line col)
   | .expr (.name none "%observed") :: rest => inferStmts scope amb rest want
   | .expr (.name none "%unsafe") :: rest => do
     -- What follows in this block may name what is unsafe.
@@ -1431,7 +1430,7 @@ partial def inferStmts (scope : Scope) (amb : Row) (stmts : List Stmt)
     if let (.int n, some (expected, _)) := (e, want) then
       match ← literalAt expected n with
       | some none => return expected
-      | some (some why) => throw (resultMark ++ s!"the result of a clause: {why}")
+      | some (some why) => throwThe Elab.Said { msg := s!"the result of a clause: {why}", result := true }
       | none => pure ()
     -- (`if(c) { a }` without `else` gives a `Result`: where a value is
     -- wanted, `else` is what is missing.)
@@ -1440,8 +1439,7 @@ partial def inferStmts (scope : Scope) (amb : Row) (stmts : List Stmt)
       | .con n _ =>
         unless Syntax.lastSegment n == "Result" do
           let t ← inferExpr scope amb e
-          try return ← finish t true
-          catch err => throw (err ++ ". `if(c) { a }` without `else` gives `Ok(a)` or `Err(..)`: write `else { b }` for the value where the condition fails")
+          return ← onError (finish t true) (· ++ ". `if(c) { a }` without `else` gives `Ok(a)` or `Err(..)`: write `else { b }` for the value where the condition fails")
       | _ => pure ()
     -- (A block a clause ends with is a callable, `{ .. }` as anywhere: one
     -- wanted to be run there is written without its braces.)
@@ -1450,8 +1448,7 @@ partial def inferStmts (scope : Scope) (amb : Row) (stmts : List Stmt)
       | .fn _ _ _ _ _ | .var _ => pure ()
       | _ =>
         let t ← inferExpr scope amb e
-        try return ← finish t true
-        catch err => throw (err ++ ". A block `{ .. }` a clause ends with is a callable; to run its statements there, write them without the braces: `pattern => a; b`")
+        return ← onError (finish t true) (· ++ ". A block `{ .. }` a clause ends with is a callable; to run its statements there, write them without the braces: `pattern => a; b`")
     finish (← inferExpr scope amb e) true
   | .expr e :: rest => do
     let t ← withLater (Elab.fvStmts [] rest) (inferExpr scope amb e)
@@ -1650,10 +1647,9 @@ partial def inferStmts (scope : Scope) (amb : Row) (stmts : List Stmt)
   | .defer e :: rest => do
     -- A cleanup performs no effects: it may run while its surroundings are
     -- being left, when no handler should be asked to do anything.
-    try
+    onError (do
       let t ← withLater (Elab.fvStmts [] rest) (inferExpr scope ⟨[], none⟩ e)
-      mustDrop t "what a `defer` gives is let go"
-    catch err => throw s!"a `defer` cannot perform effects: {err}"
+      mustDrop t "what a `defer` gives is let go") fun err => s!"a `defer` cannot perform effects: {err}"
     -- It runs when the rest is left, so what it mentions is still to be used
     -- throughout the rest.
     withLater (Elab.fvExpr [] e) (inferStmts scope amb rest want)
@@ -1702,7 +1698,7 @@ partial def inferPat (p : Pattern) (t : Ty) : M Scope := do
       | .tuple parts =>
         if parts.length + 1 < ps.length then
           throw s!"a tuple pattern with {ps.length - 1} parts and `..`, of a tuple of {parts.length}"
-        throw (Syntax.tupleRestFound id (parts.length + 1 - ps.length))
+        throwThe Elab.Said { msg := "`..` in a tuple pattern", decision := some (.rest id (parts.length + 1 - ps.length)) }
       | _ => throw "`..` in a tuple pattern stands for the parts not written, and how many the tuple has is not known here: say its type"
     -- (`()` of a reference to `()`: there is nothing in it to borrow.)
     if ps.isEmpty then
@@ -1866,13 +1862,12 @@ partial def inferCallable (scope : Scope) (annots : List (Option Ty)) (ret : Opt
         throw s!"`{x}` is bound twice by the patterns of one clause"
       let here := (← get).pos
       let at_ := if (Elab.wrapResult "" body).isSome then site j else none
-      let failure ← try
+      let failure ← tryCatchThe Elab.Said
           (do
             let _ ← inferStmts (binds ++ scope) row body (some (result, at_))
-            pure none)
-        catch e =>
-          if (e.splitOn resultMark).length > 1 then pure (some (e.replace resultMark ""))
-          else throw e
+            pure none) fun e =>
+          if e.result then pure (some e.msg)
+          else throwThe Elab.Said e
       match failure with
       | some e => pure (some e)
       | none =>
