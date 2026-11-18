@@ -252,40 +252,16 @@ partial def foldInt (fns : List (String × List Clause)) (env : List (String × 
         | none => none
   | _ => none
 
-mutual
-
-partial def foldExpr (known : List (String × Int)) : Expr → Expr
-  | .call id (.name none f) [] => match known.lookup f with
-    | some n => .int n
-    | none => .call id (.name none f) []
-  | .call id (.name none mark) (.call i (.name none f) [] :: rest) =>
-    match known.lookup f with
-    | some n => if mark == Syntax.instMark then .int n else .call id (.name none mark) (.int n :: rest)
-    | none => .call id (.name none mark) (.call i (.name none f) [] :: rest.map (foldExpr known))
-  | .call id f args => .call id (foldExpr known f) (args.map (foldExpr known))
-  | .tailCall id f args => .tailCall id (foldExpr known f) (args.map (foldExpr known))
-  | .tuple args => .tuple (args.map (foldExpr known))
-  | .proj e n => .proj (foldExpr known e) n
-  | .closure id clauses => .closure id (clauses.map (foldClause known))
-  | .handle subject arms => .handle (foldExpr known subject) (arms.map (foldClause known))
-  | .labelScope l body => .labelScope l (body.map (foldStmt known))
-  | .deref e => .deref (foldExpr known e)
-  | .reborrow uniq e => .reborrow uniq (foldExpr known e)
-  | .fieldOf i e name => .fieldOf i (foldExpr known e) name
-  | e => e
-
-partial def foldClause (known : List (String × Int)) : Clause → Clause
-  | .mk pats body => .mk pats (body.map (foldStmt known))
-
-partial def foldStmt (known : List (String × Int)) : Stmt → Stmt
-  | .let_ pat value => .let_ pat (foldExpr known value)
-  | .expr e => .expr (foldExpr known e)
-  | .defer e => .defer (foldExpr known e)
-  | .letMut x value => .letMut x (foldExpr known value)
-  | .assign target value => .assign (foldExpr known target) (foldExpr known value)
-  | .located line col s => .located line col (foldStmt known s)
-
-end
+/-- Each call of a function that takes nothing and works out to a number
+(`known`) written as that number. -/
+def foldRewrite (known : List (String × Int)) : Rewrite where
+  onExpr go
+    | .call _ (.name none f) [] => (known.lookup f).map .int
+    | .call id (.name none mark) (.call i (.name none f) [] :: rest) =>
+      some (match known.lookup f with
+        | some n => if mark == Syntax.instMark then .int n else .call id (.name none mark) (.int n :: rest)
+        | none => .call id (.name none mark) (.call i (.name none f) [] :: rest.map go.ex))
+    | _ => none
 
 /-- A program with every call of a function that takes nothing and works out
 to a number written as that number. -/
@@ -299,7 +275,7 @@ def foldConstants (items : List Item) : List Item :=
     | _ => none
   if known.isEmpty then items
   else items.map fun
-    | .fn name ps annots ret clauses => .fn name ps annots ret (clauses.map (foldClause known))
+    | .fn name ps annots ret clauses => .fn name ps annots ret (clauses.map (foldRewrite known).clause)
     | item => item
 
 /-! ## `..` in a tuple pattern
@@ -308,8 +284,6 @@ How many parts the `..` of `(first, ..)` stands for is known once the
 tuple's type is. The checker says so, and the program is then read with that
 many `_` written in its place. -/
 
-mutual
-
 partial def restPat (id count : Nat) : Pattern → Pattern
   | .tuple ps => .tuple (ps.flatMap fun
       | .var x => if Syntax.tupleRestOf x == some id then List.replicate count Pattern.wild else [.var x]
@@ -317,41 +291,9 @@ partial def restPat (id count : Nat) : Pattern → Pattern
   | .ctor c q ps => .ctor c q (ps.map (restPat id count))
   | p => p
 
-partial def restExprIn (id count : Nat) : Expr → Expr
-  | .call i f args => .call i (restExprIn id count f) (args.map (restExprIn id count))
-  | .tailCall i f args => .tailCall i (restExprIn id count f) (args.map (restExprIn id count))
-  | .tuple args => .tuple (args.map (restExprIn id count))
-  | .proj e n => .proj (restExprIn id count e) n
-  | .closure i clauses => .closure i (clauses.map (restClause id count))
-  | .handle subject arms => .handle (restExprIn id count subject) (arms.map (restClause id count))
-  | .labelScope l body => .labelScope l (body.map (restStmt id count))
-  | .deref e => .deref (restExprIn id count e)
-  | .reborrow uniq e => .reborrow uniq (restExprIn id count e)
-  | .fieldOf i e name => .fieldOf i (restExprIn id count e) name
-  | e => e
-
-partial def restClause (id count : Nat) : Clause → Clause
-  | .mk pats body => .mk (pats.map (restPat id count)) (body.map (restStmt id count))
-
-partial def restStmt (id count : Nat) : Stmt → Stmt
-  | .let_ pat value => .let_ (restPat id count pat) (restExprIn id count value)
-  | .expr e => .expr (restExprIn id count e)
-  | .defer e => .defer (restExprIn id count e)
-  | .letMut x value => .letMut x (restExprIn id count value)
-  | .assign target value => .assign (restExprIn id count target) (restExprIn id count value)
-  | .located line col s => .located line col (restStmt id count s)
-
-end
-
 /-- A program with the `..` of one tuple pattern written as so many `_`. -/
-partial def restItems (id count : Nat) (items : List Item) : List Item :=
-  items.map fun
-    | .fn name ps annots ret clauses => .fn name ps annots ret (clauses.map (restClause id count))
-    | .impl ps tr head args context methods => .impl ps tr head args context (restItems id count methods)
-    | .traitInfo n supers defaults params assocs => .traitInfo n supers (restItems id count defaults) params assocs
-    | .module name (some body) => .module name (some (restItems id count body))
-    | .pub parent item => .pub parent ((restItems id count [item]).headD item)
-    | item => item
+def restItems (id count : Nat) : List Item → List Item :=
+  Rewrite.items { onPat := restPat id count }
 
 /-- What the checker said of a tuple pattern's `..`, if that is what it said:
 which pattern, and how many parts. -/
@@ -370,51 +312,18 @@ callable's clauses, and the program is read again with their first patterns
 written `&Dot`, `&Line(n)`, so that they look at what the reference points to
 and bind references, as Rust's binding modes have it. -/
 
-mutual
-
-partial def refPatsExpr (id : Nat) (uniq : Bool) (which : List Nat) : Expr → Expr
-  | .call i f args => .call i (refPatsExpr id uniq which f) (args.map (refPatsExpr id uniq which))
-  | .tailCall i f args => .tailCall i (refPatsExpr id uniq which f) (args.map (refPatsExpr id uniq which))
-  | .tuple args => .tuple (args.map (refPatsExpr id uniq which))
-  | .proj e n => .proj (refPatsExpr id uniq which e) n
-  | .closure i clauses =>
-    let clauses := clauses.map (refPatsClause id uniq which)
-    if i != id then .closure i clauses else
-    .closure i (clauses.zipIdx.map fun
-      | (.mk (p :: ps) body, k) =>
-        if which.contains k then .mk (.ctor (Syntax.byRefMark uniq) none [p] :: ps) body
-        else .mk (p :: ps) body
-      | (c, _) => c)
-  | .handle subject arms => .handle (refPatsExpr id uniq which subject) (arms.map (refPatsClause id uniq which))
-  | .labelScope l body => .labelScope l (body.map (refPatsStmt id uniq which))
-  | .deref e => .deref (refPatsExpr id uniq which e)
-  | .reborrow u e => .reborrow u (refPatsExpr id uniq which e)
-  | .fieldOf i e name => .fieldOf i (refPatsExpr id uniq which e) name
-  | e => e
-
-partial def refPatsClause (id : Nat) (uniq : Bool) (which : List Nat) : Clause → Clause
-  | .mk pats body => .mk pats (body.map (refPatsStmt id uniq which))
-
-partial def refPatsStmt (id : Nat) (uniq : Bool) (which : List Nat) : Stmt → Stmt
-  | .let_ pat value => .let_ pat (refPatsExpr id uniq which value)
-  | .expr e => .expr (refPatsExpr id uniq which e)
-  | .defer e => .defer (refPatsExpr id uniq which e)
-  | .letMut x value => .letMut x (refPatsExpr id uniq which value)
-  | .assign target value => .assign (refPatsExpr id uniq which target) (refPatsExpr id uniq which value)
-  | .located line col s => .located line col (refPatsStmt id uniq which s)
-
-end
-
 /-- A program with the first patterns of one callable's clauses written
 `&Pattern`. -/
-partial def refPatsItems (id : Nat) (uniq : Bool) (which : List Nat) (items : List Item) : List Item :=
-  items.map fun
-    | .fn name ps annots ret clauses => .fn name ps annots ret (clauses.map (refPatsClause id uniq which))
-    | .impl ps tr head args context methods => .impl ps tr head args context (refPatsItems id uniq which methods)
-    | .traitInfo n supers defaults params assocs => .traitInfo n supers (refPatsItems id uniq which defaults) params assocs
-    | .module name (some body) => .module name (some (refPatsItems id uniq which body))
-    | .pub parent item => .pub parent ((refPatsItems id uniq which [item]).headD item)
-    | item => item
+def refPatsItems (id : Nat) (uniq : Bool) (which : List Nat) : List Item → List Item :=
+  -- (The callable is one: nothing inside it is changed.)
+  Rewrite.items { onExpr := fun _ => fun
+    | .closure i clauses =>
+      if i != id then none else
+      some (.closure i (clauses.zipIdx.map fun (c, k) => match c with
+        | .mk (p :: ps) body =>
+          if which.contains k then .mk (.ctor (Syntax.byRefMark uniq) none [p] :: ps) body else c
+        | c => c))
+    | _ => none }
 
 /-- What the checker said of such clauses, if that is what it said. -/
 def refPatsFound (said : String) : Option (Nat × Bool × List Nat) :=
@@ -438,174 +347,43 @@ def withoutRefPats (said : String) : String :=
 read again with the call written as one of that function
 (`.fieldOf _ v "%own:std::vec::Vec::push"`, which the resolver reads). -/
 
-mutual
-
-partial def dotOwnExpr (call : Nat) (fn : String) : Expr → Expr
-  | .call i f args =>
-    let args := args.map (dotOwnExpr call fn)
-    match f with
-    | .fieldOf fi recv name =>
-      let recv := dotOwnExpr call fn recv
-      if i == call then .call i (.fieldOf fi recv ("%own:" ++ fn)) args
-      else .call i (.fieldOf fi recv name) args
-    | f => .call i (dotOwnExpr call fn f) args
-  | .tailCall i f args => .tailCall i (dotOwnExpr call fn f) (args.map (dotOwnExpr call fn))
-  | .tuple args => .tuple (args.map (dotOwnExpr call fn))
-  | .proj e n => .proj (dotOwnExpr call fn e) n
-  | .closure i clauses => .closure i (clauses.map (dotOwnClause call fn))
-  | .handle subject arms => .handle (dotOwnExpr call fn subject) (arms.map (dotOwnClause call fn))
-  | .labelScope l body => .labelScope l (body.map (dotOwnStmt call fn))
-  | .deref e => .deref (dotOwnExpr call fn e)
-  | .reborrow u e => .reborrow u (dotOwnExpr call fn e)
-  | .fieldOf i e name => .fieldOf i (dotOwnExpr call fn e) name
-  | e => e
-
-partial def dotOwnClause (call : Nat) (fn : String) : Clause → Clause
-  | .mk pats body => .mk pats (body.map (dotOwnStmt call fn))
-
-partial def dotOwnStmt (call : Nat) (fn : String) : Stmt → Stmt
-  | .let_ pat value => .let_ pat (dotOwnExpr call fn value)
-  | .expr e => .expr (dotOwnExpr call fn e)
-  | .defer e => .defer (dotOwnExpr call fn e)
-  | .letMut x value => .letMut x (dotOwnExpr call fn value)
-  | .assign target value => .assign (dotOwnExpr call fn target) (dotOwnExpr call fn value)
-  | .located line col s => .located line col (dotOwnStmt call fn s)
-
-end
-
-partial def dotOwnItems (call : Nat) (fn : String) (items : List Item) : List Item :=
-  items.map fun
-    | .fn name ps annots ret clauses => .fn name ps annots ret (clauses.map (dotOwnClause call fn))
-    | .impl ps tr head args context methods => .impl ps tr head args context (dotOwnItems call fn methods)
-    | .traitInfo n supers defaults params assocs => .traitInfo n supers (dotOwnItems call fn defaults) params assocs
-    | .module name (some body) => .module name (some (dotOwnItems call fn body))
-    | .pub parent item => .pub parent ((dotOwnItems call fn [item]).headD item)
-    | item => item
+def dotOwnItems (call : Nat) (fn : String) : List Item → List Item :=
+  Rewrite.items { onExpr := fun go => fun
+    | .call i (.fieldOf fi recv _) args =>
+      if i == call then some (.call i (.fieldOf fi (go.ex recv) ("%own:" ++ fn)) (args.map go.ex)) else none
+    | _ => none }
 
 /-- A program with the arguments the checker chose to give as other than
 written (`Blocks.argsChosen`) written in. -/
-partial def argsChosenExpr (picks : List ((Nat × Nat) × Expr)) : Expr → Expr
-  | .call i f args =>
-    let args := (args.map (argsChosenExpr picks)).zipIdx.map fun (a, k) =>
-      (picks.lookup (i, k)).getD a
-    .call i (argsChosenExpr picks f) args
-  | .tailCall i f args => .tailCall i (argsChosenExpr picks f) (args.map (argsChosenExpr picks))
-  | .tuple args => .tuple (args.map (argsChosenExpr picks))
-  | .proj e n => .proj (argsChosenExpr picks e) n
-  | .closure i clauses => .closure i (clauses.map fun
-    | .mk pats body => .mk pats (body.map (argsChosenStmt picks)))
-  | .handle subject arms => .handle (argsChosenExpr picks subject) (arms.map fun
-    | .mk pats body => .mk pats (body.map (argsChosenStmt picks)))
-  | .labelScope l body => .labelScope l (body.map (argsChosenStmt picks))
-  | .deref e => .deref (argsChosenExpr picks e)
-  | .reborrow u e => .reborrow u (argsChosenExpr picks e)
-  | .fieldOf i e name => .fieldOf i (argsChosenExpr picks e) name
-  | e => e
-where
-  argsChosenStmt (picks : List ((Nat × Nat) × Expr)) : Stmt → Stmt
-    | .let_ pat value => .let_ pat (argsChosenExpr picks value)
-    | .expr e => .expr (argsChosenExpr picks e)
-    | .defer e => .defer (argsChosenExpr picks e)
-    | .letMut x value => .letMut x (argsChosenExpr picks value)
-    | .assign target value => .assign (argsChosenExpr picks target) (argsChosenExpr picks value)
-    | .located line col s => .located line col (argsChosenStmt picks s)
-
-partial def argsChosenItems (picks : List ((Nat × Nat) × Expr)) (items : List Item) : List Item :=
+def argsChosenItems (picks : List ((Nat × Nat) × Expr)) (items : List Item) : List Item :=
   if picks.isEmpty then items else
-  items.map fun
-    | .fn name ps annots ret clauses => .fn name ps annots ret (clauses.map fun
-      | .mk pats body => .mk pats (body.map (argsChosenExpr.argsChosenStmt picks)))
-    | .impl ps tr head args context methods => .impl ps tr head args context (argsChosenItems picks methods)
-    | .traitInfo n supers defaults params assocs => .traitInfo n supers (argsChosenItems picks defaults) params assocs
-    | .module name (some body) => .module name (some (argsChosenItems picks body))
-    | .pub parent item => .pub parent ((argsChosenItems picks [item]).headD item)
-    | item => item
+  Rewrite.items (items := items) { onExpr := fun go => fun
+    | .call i f args =>
+      some (.call i (go.ex f) ((args.map go.ex).zipIdx.map fun (a, k) => (picks.lookup (i, k)).getD a))
+    | _ => none }
 
 /-- A program with the functions of dot calls the checker chose by the
 value's type (`Blocks.dotChosen`) written in. -/
-partial def chosenExpr (picks : List (Nat × String × Nat)) : Expr → Expr
-  | .call i f args =>
-    let args := args.map (chosenExpr picks)
-    match f, picks.lookup i with
-    | .name _ _, some (fn, how) =>
-      let args := match how, args with
-        | 0, _ => args
-        | k, .name none v :: rest => .ref (k == 2) v :: rest
-        | _, _ => args
-      .call i (.name none fn) args
-    | f, _ => .call i (chosenExpr picks f) args
-  | .tailCall i f args => .tailCall i (chosenExpr picks f) (args.map (chosenExpr picks))
-  | .tuple args => .tuple (args.map (chosenExpr picks))
-  | .proj e n => .proj (chosenExpr picks e) n
-  | .closure i clauses => .closure i (clauses.map fun
-    | .mk pats body => .mk pats (body.map (chosenStmt picks)))
-  | .handle subject arms => .handle (chosenExpr picks subject) (arms.map fun
-    | .mk pats body => .mk pats (body.map (chosenStmt picks)))
-  | .labelScope l body => .labelScope l (body.map (chosenStmt picks))
-  | .deref e => .deref (chosenExpr picks e)
-  | .reborrow u e => .reborrow u (chosenExpr picks e)
-  | .fieldOf i e name => .fieldOf i (chosenExpr picks e) name
-  | e => e
-where
-  chosenStmt (picks : List (Nat × String × Nat)) : Stmt → Stmt
-    | .let_ pat value => .let_ pat (chosenExpr picks value)
-    | .expr e => .expr (chosenExpr picks e)
-    | .defer e => .defer (chosenExpr picks e)
-    | .letMut x value => .letMut x (chosenExpr picks value)
-    | .assign target value => .assign (chosenExpr picks target) (chosenExpr picks value)
-    | .located line col s => .located line col (chosenStmt picks s)
-
-partial def chosenItems (picks : List (Nat × String × Nat)) (items : List Item) : List Item :=
+def chosenItems (picks : List (Nat × String × Nat)) (items : List Item) : List Item :=
   if picks.isEmpty then items else
-  items.map fun
-    | .fn name ps annots ret clauses => .fn name ps annots ret (clauses.map fun
-      | .mk pats body => .mk pats (body.map (chosenExpr.chosenStmt picks)))
-    | .impl ps tr head args context methods => .impl ps tr head args context (chosenItems picks methods)
-    | .traitInfo n supers defaults params assocs => .traitInfo n supers (chosenItems picks defaults) params assocs
-    | .module name (some body) => .module name (some (chosenItems picks body))
-    | .pub parent item => .pub parent ((chosenItems picks [item]).headD item)
-    | item => item
+  Rewrite.items (items := items) { onExpr := fun go => fun
+    | .call i (.name _ _) args =>
+      (picks.lookup i).map fun (fn, how) =>
+        let args := args.map go.ex
+        let args := match how, args with
+          | 0, _ => args
+          | k, .name none v :: rest => .ref (k == 2) v :: rest
+          | _, _ => args
+        .call i (.name none fn) args
+    | _ => none }
 
 /-- A program with the receiver of one dot call, a name, borrowed:
 `Syntax.recvRefMark`. -/
-partial def recvRefExpr (call : Nat) (uniq : Bool) : Expr → Expr
-  | .call i f args =>
-    let args := args.map (recvRefExpr call uniq)
-    match f with
-    | .fieldOf fi (.name none x) name =>
-      if i == call then .call i (.fieldOf fi (.ref uniq x) name) args
-      else .call i (.fieldOf fi (.name none x) name) args
-    | f => .call i (recvRefExpr call uniq f) args
-  | .tailCall i f args => .tailCall i (recvRefExpr call uniq f) (args.map (recvRefExpr call uniq))
-  | .tuple args => .tuple (args.map (recvRefExpr call uniq))
-  | .proj e n => .proj (recvRefExpr call uniq e) n
-  | .closure i clauses => .closure i (clauses.map fun
-    | .mk pats body => .mk pats (body.map (recvRefStmt call uniq)))
-  | .handle subject arms => .handle (recvRefExpr call uniq subject) (arms.map fun
-    | .mk pats body => .mk pats (body.map (recvRefStmt call uniq)))
-  | .labelScope l body => .labelScope l (body.map (recvRefStmt call uniq))
-  | .deref e => .deref (recvRefExpr call uniq e)
-  | .reborrow u e => .reborrow u (recvRefExpr call uniq e)
-  | .fieldOf i e name => .fieldOf i (recvRefExpr call uniq e) name
-  | e => e
-where
-  recvRefStmt (call : Nat) (uniq : Bool) : Stmt → Stmt
-    | .let_ pat value => .let_ pat (recvRefExpr call uniq value)
-    | .expr e => .expr (recvRefExpr call uniq e)
-    | .defer e => .defer (recvRefExpr call uniq e)
-    | .letMut x value => .letMut x (recvRefExpr call uniq value)
-    | .assign target value => .assign (recvRefExpr call uniq target) (recvRefExpr call uniq value)
-    | .located line col s => .located line col (recvRefStmt call uniq s)
-
-partial def recvRefItems (call : Nat) (uniq : Bool) (items : List Item) : List Item :=
-  items.map fun
-    | .fn name ps annots ret clauses => .fn name ps annots ret (clauses.map fun
-      | .mk pats body => .mk pats (body.map (recvRefExpr.recvRefStmt call uniq)))
-    | .impl ps tr head args context methods => .impl ps tr head args context (recvRefItems call uniq methods)
-    | .traitInfo n supers defaults params assocs => .traitInfo n supers (recvRefItems call uniq defaults) params assocs
-    | .module name (some body) => .module name (some (recvRefItems call uniq body))
-    | .pub parent item => .pub parent ((recvRefItems call uniq [item]).headD item)
-    | item => item
+def recvRefItems (call : Nat) (uniq : Bool) : List Item → List Item :=
+  Rewrite.items { onExpr := fun go => fun
+    | .call i (.fieldOf fi (.name none x) name) args =>
+      if i == call then some (.call i (.fieldOf fi (.ref uniq x) name) (args.map go.ex)) else none
+    | _ => none }
 
 def recvRefFound (said : String) : Option (Nat × Bool) :=
   match said.splitOn "%recvref:" with
@@ -657,67 +435,12 @@ def withoutLetMut (said : String) : String :=
   | before :: after :: _ => before ++ (((after.splitOn "%").drop 1).foldl (· ++ ·) "")
   | _ => said
 
-mutual
-
-partial def letMutExpr (line col : Nat) (x : String) : Expr → Expr
-  | .call i f args => .call i (letMutExpr line col x f) (args.map (letMutExpr line col x))
-  | .tailCall i f args => .tailCall i (letMutExpr line col x f) (args.map (letMutExpr line col x))
-  | .tuple args => .tuple (args.map (letMutExpr line col x))
-  | .proj e n => .proj (letMutExpr line col x e) n
-  | .closure i clauses => .closure i (clauses.map (letMutClause line col x))
-  | .handle subject arms => .handle (letMutExpr line col x subject) (arms.map (letMutClause line col x))
-  | .labelScope l body => .labelScope l (letMutStmts line col x body)
-  | .deref e => .deref (letMutExpr line col x e)
-  | .reborrow uniq e => .reborrow uniq (letMutExpr line col x e)
-  | .fieldOf i e name => .fieldOf i (letMutExpr line col x e) name
-  | e => e
-
-/-- A clause; at place `0:0`, one that takes `x` as a parameter (or a name
-its patterns bind) starts by keeping it in a variable, written at the place
-of its first statement. -/
-partial def letMutClause (line col : Nat) (x : String) : Clause → Clause
-  | .mk pats body =>
-    let body := letMutStmts line col x body
-    if line == 0 && col == 0 && (pats.flatMap patVars).contains x then
-      match body with
-      | .located l c s :: rest => .mk pats (.located l c (.letMut x (.name none x)) :: .located l c s :: rest)
-      | _ => .mk pats body
-    else .mk pats body
-
-partial def letMutStmts (line col : Nat) (x : String) : List Stmt → List Stmt
-  | [] => []
-  | .located l c (.let_ pat value) :: rest =>
-    let value := letMutExpr line col x value
-    let rest := letMutStmts line col x rest
-    if l == line && c == col then
-      match pat with
-      | .var y =>
-        if y == x then .located l c (.letMut y value) :: rest
-        else .located l c (.let_ pat value) :: rest
-      | _ =>
-        -- (A name a pattern binds: kept in a variable straight after.)
-        if (patVars pat).contains x then
-          .located l c (.let_ pat value) :: .located l c (.letMut x (.name none x)) :: rest
-        else .located l c (.let_ pat value) :: rest
-    else .located l c (.let_ pat value) :: rest
-  | s :: rest => letMutStmt line col x s :: letMutStmts line col x rest
-
-partial def letMutStmt (line col : Nat) (x : String) : Stmt → Stmt
-  | .let_ pat value => .let_ pat (letMutExpr line col x value)
-  | .expr e => .expr (letMutExpr line col x e)
-  | .defer e => .defer (letMutExpr line col x e)
-  | .letMut y value => .letMut y (letMutExpr line col x value)
-  | .assign target value => .assign (letMutExpr line col x target) (letMutExpr line col x value)
-  | .located l c s => .located l c (letMutStmt line col x s)
-
-end
-
-/-- A program with one function's `let x` at a place written `let mut x`, and
-whether there was such a `let`. -/
-def letMutItems (owner : String) (line col : Nat) (x : String) (items : List Item) :
+/-- A program with the clauses of one function, of the program or of an
+implementation, made by `f`; and whether they changed. -/
+def ownerItems (owner : String) (f : List Clause → List Clause) (items : List Item) :
     List Item × Bool :=
   let fn := fun (clauses : List Clause) =>
-    let after := clauses.map (letMutClause line col x)
+    let after := f clauses
     (after, hash after != hash clauses)
   let out : List (Item × Bool) := items.map fun
     | .fn name ps annots ret clauses =>
@@ -736,6 +459,38 @@ def letMutItems (owner : String) (line col : Nat) (x : String) (items : List Ite
       (.impl ps tr head args context (methods.map (·.1)), methods.any (·.2))
     | item => (item, false)
   (out.map (·.1), out.any (·.2))
+
+/-- The `let x` at `line:col` written `let mut x`; a name a pattern binds kept
+in a variable straight after. At place `0:0`, a clause that takes `x` as a
+parameter (or a name its patterns bind) starts by keeping it in a variable,
+written at the place of its first statement. -/
+def letMutRewrite (line col : Nat) (x : String) : Rewrite where
+  onStmts go
+    | .located l c (.let_ pat value) :: rest =>
+      if l != line || c != col then none else
+      let value := go.ex value
+      let rest := go.stmts rest
+      some (match pat with
+        | .var y =>
+          if y == x then .located l c (.letMut y value) :: rest
+          else .located l c (.let_ pat value) :: rest
+        | _ =>
+          if (patVars pat).contains x then
+            .located l c (.let_ pat value) :: .located l c (.letMut x (.name none x)) :: rest
+          else .located l c (.let_ pat value) :: rest)
+    | _ => none
+  onClause go
+    | .mk pats body =>
+      if line != 0 || col != 0 || !(pats.flatMap patVars).contains x then none else
+      some (match go.stmts body with
+        | .located l c s :: rest => .mk pats (.located l c (.letMut x (.name none x)) :: .located l c s :: rest)
+        | body => .mk pats body)
+
+/-- A program with one function's `let x` at a place written `let mut x`, and
+whether there was such a `let`. -/
+def letMutItems (owner : String) (line col : Nat) (x : String) (items : List Item) :
+    List Item × Bool :=
+  ownerItems owner (·.map (letMutRewrite line col x).clause) items
 
 /-- What `etaMark` said: the function it is in, the function named, and how
 many parameters. -/
@@ -795,26 +550,7 @@ end
 block that calls it, and whether there was such a naming. -/
 def etaItems (owner x : String) (arity : Nat) (items : List Item) : List Item × Bool :=
   let base := 700000000000000 + 10000000000000 * (hash owner % 16).toNat
-  let fn := fun (clauses : List Clause) =>
-    let after := clauses.map (etaClause x arity base)
-    (after, hash after != hash clauses)
-  let out : List (Item × Bool) := items.map fun
-    | .fn name ps annots ret clauses =>
-      if name == owner then
-        let (after, changed) := fn clauses
-        (Item.fn name ps annots ret after, changed)
-      else (Item.fn name ps annots ret clauses, false)
-    | .impl ps tr head args context methods =>
-      let methods : List (Item × Bool) := methods.map fun
-        | .fn m mps annots ret clauses =>
-          if implFnName tr head m == owner then
-            let (after, changed) := fn clauses
-            (Item.fn m mps annots ret after, changed)
-          else (Item.fn m mps annots ret clauses, false)
-        | item => (item, false)
-      (.impl ps tr head args context (methods.map (·.1)), methods.any (·.2))
-    | item => (item, false)
-  (out.map (·.1), out.any (·.2))
+  ownerItems owner (·.map (etaClause x arity base)) items
 
 /-! ## A variable whose fields are borrowed apart
 
@@ -845,68 +581,48 @@ def Split.index (sp : Split) (s : String) : Option Nat :=
 def Split.var (sp : Split) (x : String) (i : Nat) : String :=
   fieldVar x ((sp.fields[i]?).getD (toString i))
 
-mutual
-
-partial def splitExpr (x : String) (sp : Split) : Expr → Expr
-  | .proj (.name none y) i =>
-    if y == x && i < sp.fields.length then .name none (sp.var x i) else .proj (.name none y) i
-  | .fieldOf id (.name none y) s =>
-    match sp.index s, y == x with
-    | some i, true => .name none (sp.var x i)
-    | _, _ => .fieldOf id (.name none y) s
-  | .refField id uniq y (s :: path) star =>
-    match sp.index s, y == x && !star with
-    | some i, true =>
-      if path.isEmpty then .ref uniq (sp.var x i) else .refField id uniq (sp.var x i) path false
-    | _, _ => .refField id uniq y (s :: path) star
-  | .name none y =>
-    if y == x then sp.make ((List.range sp.fields.length).map fun i => .name none (sp.var x i))
-    else .name none y
-  | .call i f args => .call i (splitExpr x sp f) (args.map (splitExpr x sp))
-  | .tailCall i f args => .tailCall i (splitExpr x sp f) (args.map (splitExpr x sp))
-  | .tuple args => .tuple (args.map (splitExpr x sp))
-  | .proj e i => .proj (splitExpr x sp e) i
-  | .closure i clauses => .closure i (clauses.map (splitClause x sp))
-  | .handle subject arms => .handle (splitExpr x sp subject) (arms.map (splitClause x sp))
-  | .labelScope l body => .labelScope l (splitStmts x sp body)
-  | .deref e => .deref (splitExpr x sp e)
-  | .reborrow uniq e => .reborrow uniq (splitExpr x sp e)
-  | .fieldOf i e name => .fieldOf i (splitExpr x sp e) name
-  | e => e
-
-partial def splitClause (x : String) (sp : Split) : Clause → Clause
-  | .mk pats body => if (pats.flatMap patVars).contains x then .mk pats body else .mk pats (splitStmts x sp body)
-
-/-- The statements after `x` is made, with its fields as variables of their
+/-- What follows the making of `x`, with its fields as variables of their
 own, up to where a name `x` is made again. -/
-partial def splitStmts (x : String) (sp : Split) : List Stmt → List Stmt
-  | [] => []
-  | .located l c s :: rest =>
-    match splitStmts x sp (s :: rest) with
-    | first :: more => .located l c first :: more
-    | [] => []
-  | .let_ pat value :: rest =>
-    let value := splitExpr x sp value
-    if (patVars pat).contains x then .let_ pat value :: rest
-    else .let_ pat value :: splitStmts x sp rest
-  | .letMut y value :: rest =>
-    let value := splitExpr x sp value
-    if y == x then .letMut y value :: rest
-    else .letMut y value :: splitStmts x sp rest
-  | .assign (.name none y) value :: rest =>
-    if y == x then
+def splitRewrite (x : String) (sp : Split) : Rewrite where
+  onExpr _
+    | .proj (.name none y) i =>
+      if y == x && i < sp.fields.length then some (.name none (sp.var x i)) else none
+    | .fieldOf _ (.name none y) s =>
+      match sp.index s, y == x with
+      | some i, true => some (.name none (sp.var x i))
+      | _, _ => none
+    | .refField id uniq y (s :: path) star =>
+      match sp.index s, y == x && !star with
+      | some i, true =>
+        some (if path.isEmpty then .ref uniq (sp.var x i) else .refField id uniq (sp.var x i) path false)
+      | _, _ => none
+    | .name none y =>
+      if y == x then some (sp.make ((List.range sp.fields.length).map fun i => .name none (sp.var x i)))
+      else none
+    | _ => none
+  onClause _
+    | .mk pats body => if (pats.flatMap patVars).contains x then some (.mk pats body) else none
+  onStmts go
+    | .located l c s :: rest =>
+      some (match go.stmts (s :: rest) with
+        | first :: more => .located l c first :: more
+        | [] => [])
+    | .let_ pat value :: rest =>
+      if (patVars pat).contains x then some (.let_ pat (go.ex value) :: rest) else none
+    | .letMut y value :: rest =>
+      if y == x then some (.letMut y (go.ex value) :: rest) else none
+    | .assign (.name none y) value :: rest =>
+      if y != x then none else
       -- (Assigning the whole: its parts, each to its variable.)
       let parts := (List.range sp.fields.length).map fun i => s!"%{sp.var x i}"
-      .let_ (sp.apart (parts.map Pattern.var)) (splitExpr x sp value)
+      some (.let_ (sp.apart (parts.map Pattern.var)) (go.ex value)
         :: (parts.zipIdx.map fun (p, i) => Stmt.assign (.name none (sp.var x i)) (.name none p))
-        ++ splitStmts x sp rest
-    else .assign (.name none y) (splitExpr x sp value) :: splitStmts x sp rest
-  | .assign target value :: rest =>
-    .assign (splitExpr x sp target) (splitExpr x sp value) :: splitStmts x sp rest
-  | .expr e :: rest => .expr (splitExpr x sp e) :: splitStmts x sp rest
-  | .defer e :: rest => .defer (splitExpr x sp e) :: splitStmts x sp rest
+        ++ go.stmts rest)
+    | _ => none
 
-end
+/-- The statements after `x` is made, with its fields as variables of their
+own (`splitRewrite`). -/
+def splitStmts (x : String) (sp : Split) : List Stmt → List Stmt := (splitRewrite x sp).stmts
 
 /-- Does `x` have a field borrowed in these statements, before it is made again? -/
 partial def fieldBorrowed (x : String) (stmts : List Stmt) : Bool :=
@@ -954,50 +670,19 @@ def splitOf (structs : Structs) : Expr → Option (Split × List Expr)
     | none => none
   | _ => none
 
-mutual
-
-/-- Every variable of these statements whose fields are borrowed, and that is
-used no other way than its fields and its whole value are, made one variable
-per field. -/
-partial def splitFieldVars (structs : Structs) : List Stmt → List Stmt
-  | [] => []
-  | .located l c (.letMut x value) :: rest =>
-    match splitOf structs value with
-    | some (sp, es) =>
-      let split := splitStmts x sp rest
-      -- (Kept as it is where it is used some other way: borrowed whole, say.)
-      if fieldBorrowed x rest && !(fvStmts [] split).contains x then
-        (es.zipIdx.map fun (e, i) => Stmt.located l c (.letMut (sp.var x i) (splitFieldsExpr structs e)))
-          ++ splitFieldVars structs split
-      else .located l c (.letMut x (splitFieldsExpr structs value)) :: splitFieldVars structs rest
-    | none => .located l c (.letMut x (splitFieldsExpr structs value)) :: splitFieldVars structs rest
-  | .located l c s :: rest =>
-    match splitFieldVars structs [s] with
-    | [s'] => .located l c s' :: splitFieldVars structs rest
-    | ss => ss.map (Stmt.located l c) ++ splitFieldVars structs rest
-  | .let_ pat value :: rest => .let_ pat (splitFieldsExpr structs value) :: splitFieldVars structs rest
-  | .letMut x value :: rest => .letMut x (splitFieldsExpr structs value) :: splitFieldVars structs rest
-  | .assign target value :: rest =>
-    .assign (splitFieldsExpr structs target) (splitFieldsExpr structs value) :: splitFieldVars structs rest
-  | .expr e :: rest => .expr (splitFieldsExpr structs e) :: splitFieldVars structs rest
-  | .defer e :: rest => .defer (splitFieldsExpr structs e) :: splitFieldVars structs rest
-
-partial def splitFieldsExpr (structs : Structs) : Expr → Expr
-  | .call i f args => .call i (splitFieldsExpr structs f) (args.map (splitFieldsExpr structs))
-  | .tailCall i f args => .tailCall i (splitFieldsExpr structs f) (args.map (splitFieldsExpr structs))
-  | .tuple args => .tuple (args.map (splitFieldsExpr structs))
-  | .proj e i => .proj (splitFieldsExpr structs e) i
-  | .closure i clauses => .closure i (clauses.map fun
-      | .mk pats body => .mk pats (splitFieldVars structs body))
-  | .handle subject arms => .handle (splitFieldsExpr structs subject) (arms.map fun
-      | .mk pats body => .mk pats (splitFieldVars structs body))
-  | .labelScope l body => .labelScope l (splitFieldVars structs body)
-  | .deref e => .deref (splitFieldsExpr structs e)
-  | .reborrow uniq e => .reborrow uniq (splitFieldsExpr structs e)
-  | .fieldOf i e name => .fieldOf i (splitFieldsExpr structs e) name
-  | e => e
-
-end
+/-- Every variable whose fields are borrowed, and that is used no other way
+than its fields and its whole value are, made one variable per field. -/
+def splitFieldsRewrite (structs : Structs) : Rewrite where
+  onStmts go
+    | .located l c (.letMut x value) :: rest =>
+      (splitOf structs value).bind fun (sp, es) =>
+        let split := splitStmts x sp rest
+        -- (Kept as it is where it is used some other way: borrowed whole, say.)
+        if fieldBorrowed x rest && !(fvStmts [] split).contains x then
+          some ((es.zipIdx.map fun (e, i) => Stmt.located l c (.letMut (sp.var x i) (go.ex e)))
+            ++ go.stmts split)
+        else none
+    | _ => none
 
 /-- A program's items with its variables whose fields are borrowed apart made
 one variable per field (`splitFieldVars`); `all` are every item of the
@@ -1012,8 +697,7 @@ def splitFieldItems (all items : List Item) : List Item :=
   let structs : Structs := all.filterMap fun item => match unwrap item with
     | .fieldNames ctor names _ => if dropped.contains ctor then none else some (ctor, names)
     | _ => none
-  let clause := fun (c : Clause) => match c with
-    | .mk pats body => Clause.mk pats (splitFieldVars structs body)
+  let clause := (splitFieldsRewrite structs).clause
   items.map fun
     | .fn name ps annots ret clauses => .fn name ps annots ret (clauses.map clause)
     | .impl ps tr head args context methods => .impl ps tr head args context (methods.map fun

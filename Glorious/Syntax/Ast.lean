@@ -804,6 +804,94 @@ inductive Item where
 
 deriving instance Hashable for OpDecl, Bound, Item
 
+/-! ## Rewriting a program
+
+Most passes over a program change one kind of expression, statement or
+pattern and rebuild everything else as it was. `Rewrite` is that rebuilding,
+once: each hook says what a node is written as, given the rewrite to use
+inside it (`Go`), or none to have it rebuilt from its parts. -/
+
+/-- The rewrite, inside a node a hook writes. -/
+structure Go where
+  ex : Expr → Expr
+  stmts : List Stmt → List Stmt
+  clause : Clause → Clause
+
+instance : Inhabited Go := ⟨⟨id, id, id⟩⟩
+
+/-- What a rewrite changes. -/
+structure Rewrite where
+  onExpr : Go → Expr → Option Expr := fun _ _ => none
+  /-- A block's statements from the first on. -/
+  onStmts : Go → List Stmt → Option (List Stmt) := fun _ _ => none
+  onClause : Go → Clause → Option Clause := fun _ _ => none
+  onPat : Pattern → Pattern := id
+
+mutual
+
+/-- An expression rewritten. -/
+partial def Rewrite.ex (r : Rewrite) (e : Expr) : Expr :=
+  match r.onExpr r.go e with
+  | some e => e
+  | none =>
+    match e with
+    | .call i f args => .call i (r.ex f) (args.map r.ex)
+    | .tailCall i f args => .tailCall i (r.ex f) (args.map r.ex)
+    | .tuple args => .tuple (args.map r.ex)
+    | .proj e n => .proj (r.ex e) n
+    | .closure i clauses => .closure i (clauses.map r.clause)
+    | .handle subject arms => .handle (r.ex subject) (arms.map r.clause)
+    | .labelScope l body => .labelScope l (r.stmts body)
+    | .deref e => .deref (r.ex e)
+    | .reborrow uniq e => .reborrow uniq (r.ex e)
+    | .fieldOf i e name => .fieldOf i (r.ex e) name
+    | e => e
+
+/-- A clause rewritten. -/
+partial def Rewrite.clause (r : Rewrite) (c : Clause) : Clause :=
+  match r.onClause r.go c with
+  | some c => c
+  | none =>
+    match c with
+    | .mk pats body => .mk (pats.map r.onPat) (r.stmts body)
+
+/-- Statements rewritten. -/
+partial def Rewrite.stmts (r : Rewrite) (ss : List Stmt) : List Stmt :=
+  match r.onStmts r.go ss with
+  | some ss => ss
+  | none =>
+    match ss with
+    | [] => []
+    | s :: rest => r.st s :: r.stmts rest
+
+/-- A statement rewritten. -/
+partial def Rewrite.st (r : Rewrite) : Stmt → Stmt
+  | .let_ pat value => .let_ (r.onPat pat) (r.ex value)
+  | .expr e => .expr (r.ex e)
+  | .defer e => .defer (r.ex e)
+  | .letMut x value => .letMut x (r.ex value)
+  | .assign target value => .assign (r.ex target) (r.ex value)
+  | .located line col s => .located line col (r.st s)
+
+/-- What a hook rewrites inside a node with. -/
+partial def Rewrite.go (r : Rewrite) : Go := ⟨r.ex, r.stmts, r.clause⟩
+
+end
+
+/-- Every function of a program with its clauses made by `f`: in
+implementations, traits' defaults and modules too. -/
+partial def Item.mapClauses (f : Clause → Clause) : Item → Item
+  | .fn name ps annots ret clauses => .fn name ps annots ret (clauses.map f)
+  | .impl ps tr head args context methods => .impl ps tr head args context (methods.map (·.mapClauses f))
+  | .traitInfo n supers defaults params assocs => .traitInfo n supers (defaults.map (·.mapClauses f)) params assocs
+  | .module name (some body) => .module name (some (body.map (·.mapClauses f)))
+  | .pub parent item => .pub parent (item.mapClauses f)
+  | item => item
+
+/-- A program rewritten. -/
+def Rewrite.items (r : Rewrite) (items : List Item) : List Item :=
+  items.map (·.mapClauses r.clause)
+
 /-- Every name a pattern could bind. -/
 partial def patternNames : Pattern → List String
   | .var x => [x]
