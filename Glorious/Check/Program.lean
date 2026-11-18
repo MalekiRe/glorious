@@ -497,7 +497,6 @@ def checkUnitsKept (first : St) (units : List (List Item × UInt64)) (modules : 
             if allLibrary then shared := (whole, st) :: shared
             key := after
             continue
-        let _ := Trace.timed "units side by side could not be put together" fun _ => ()
       -- One after another.
       let levelStart := key
       for ((u, info), k) in level do
@@ -512,6 +511,11 @@ def checkUnitsKept (first : St) (units : List (List Item × UInt64)) (modules : 
         if k < library then shared := mine ++ shared
       if level.length > 1 then
         key := level.foldl (fun h ((u, info), _) => mixHash h (mixHash info (hash u))) levelStart
+        -- (Kept as the level side by side would have been: a later compile
+        -- takes it whole, and does not try them side by side again.)
+        let whole := mixHash (mixHash levelStart (hash "side by side")) key
+        made := (whole, ← get) :: made
+        if level.all (fun (_, k) => k < library) then shared := (whole, ← get) :: shared
     pure (← finish, made, shared)
   let (r, _) ← action.run first
   pure r
