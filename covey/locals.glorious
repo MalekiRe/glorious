@@ -1,0 +1,37 @@
+// Upstream's `local_state_is_independent_per_registration_and_persists`:
+// a system's `Local` is its own for each time it is registered, and is kept
+// from one emit to the next. A condition's starts anew each time.
+// expect:
+// 1
+// 1
+// 2
+// 2
+// 3
+// 3
+// 6
+mod ecs;
+
+use ecs::{App, Local, Single, chain};
+
+struct Update
+struct Log([Int])
+
+fn record(local: &mut Local<Int>, log: &mut Single<(&mut Log,)>) {
+    local.0 = local.0 + 1;
+    match(log.get_mut()) { Some(got) => let (log,) = got; push_at(&mut log.0, local.0), None => () }
+}
+
+fn main() -> Int {
+    let mut app = App::new().register<Log>().add_systems(Update, (record, record).chain()).build();
+    let log = app.world.spawn_bundle((Log([]),));
+    app.emit(&Update);
+    app.emit(&Update);
+    app.emit(&Update);
+    match(app.world.get<Log>(log)) {
+        Some(log) =>
+            let mut i = 0;
+            while({ i < len_at(&log.0) }) { say(log.0[i]); i = i + 1 };
+            len_at(&log.0),
+        None => 0
+    }
+}

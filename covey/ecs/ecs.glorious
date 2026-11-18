@@ -730,91 +730,91 @@ impl<..P, O, F: Fn<(..P), Output = O>> CallWith<(..P), O> for F {
 // function is called with it; what it gives back comes back up. (None if a
 // resource was out of its place, which a system asking for each once rules
 // out.)
-pub trait Fetch<E, S, Gathered, F, O> {
-    fn fetch(&E, &mut World<S>, &mut Commands<S>, Gathered, &F) -> Option<O>
+pub trait Fetch<E, S, Gathered, F, O, Lc> {
+    fn fetch(&E, &mut World<S>, &mut Commands<S>, &mut Lc, Gathered, &F) -> Option<O>
 }
-impl<E, S, ..G, F, O> Fetch<E, S, (..G), F, O> for () where F: CallWith<(..G), O> {
-    fn fetch(event, world, commands, gathered, f) { Some(call_with(f, gathered)) }
+impl<E, S, ..G, F, O, Lc> Fetch<E, S, (..G), F, O, Lc> for () where F: CallWith<(..G), O> {
+    fn fetch(event, world, commands, state, gathered, f) { Some(call_with(f, gathered)) }
 }
-impl<E, S, ..G, F, O, A, Rest> Fetch<E, S, (..G), F, O> for (Changed<A>, Rest)
-    where S: Get<A>, Rest: Fetch<E, S, (..G, &mut Column<A>), F, O> {
-    fn fetch(event, world, commands, gathered, f) {
+impl<E, S, ..G, F, O, Lc, A, Rest> Fetch<E, S, (..G), F, O, Lc> for (Changed<A>, Rest)
+    where S: Get<A>, Rest: Fetch<E, S, (..G, &mut Column<A>), F, O, Lc> {
+    fn fetch(event, world, commands, state, gathered, f) {
         let (..g) = gathered;
         let mut a = <S as Get<A>>::take(&mut world.columns);
-        let made = <Rest as Fetch<E, S, (..G, &mut Column<A>), F, O>>::fetch(event, world, commands, (..g, &mut a), f);
+        let made = <Rest as Fetch<E, S, (..G, &mut Column<A>), F, O, Lc>>::fetch(event, world, commands, state, (..g, &mut a), f);
         <S as Get<A>>::put(&mut world.columns, a);
         made
     }
 }
-impl<E, S, ..G, F, O, A, Rest> Fetch<E, S, (..G), F, O> for (Read<A>, Rest)
-    where S: Get<A>, Rest: Fetch<E, S, (..G, &Column<A>), F, O> {
-    fn fetch(event, world, commands, gathered, f) {
+impl<E, S, ..G, F, O, Lc, A, Rest> Fetch<E, S, (..G), F, O, Lc> for (Read<A>, Rest)
+    where S: Get<A>, Rest: Fetch<E, S, (..G, &Column<A>), F, O, Lc> {
+    fn fetch(event, world, commands, state, gathered, f) {
         let (..g) = gathered;
         let a = <S as Get<A>>::take(&mut world.columns);
-        let made = <Rest as Fetch<E, S, (..G, &Column<A>), F, O>>::fetch(event, world, commands, (..g, &a), f);
+        let made = <Rest as Fetch<E, S, (..G, &Column<A>), F, O, Lc>>::fetch(event, world, commands, state, (..g, &a), f);
         <S as Get<A>>::put(&mut world.columns, a);
         made
     }
 }
 // A shared reference to the label's type is the value emitted; to any other
 // type, a resource.
-impl<E, S, ..G, F, O, Rest> Fetch<E, S, (..G), F, O> for (Shared<E>, Rest) where Rest: Fetch<E, S, (..G, &E), F, O> {
-    fn fetch(event, world, commands, gathered, f) {
+impl<E, S, ..G, F, O, Lc, Rest> Fetch<E, S, (..G), F, O, Lc> for (Shared<E>, Rest) where Rest: Fetch<E, S, (..G, &E), F, O, Lc> {
+    fn fetch(event, world, commands, state, gathered, f) {
         let (..g) = gathered;
-        <Rest as Fetch<E, S, (..G, &E), F, O>>::fetch(event, world, commands, (..g, event), f)
+        <Rest as Fetch<E, S, (..G, &E), F, O, Lc>>::fetch(event, world, commands, state, (..g, event), f)
     }
 }
-impl<E, S, ..G, F, O, X, Rest> Fetch<E, S, (..G), F, O> for (Shared<X>, Rest)
-    where S: Holds<X>, Rest: Fetch<E, S, (..G, &X), F, O> {
-    fn fetch(event, world, commands, gathered, f) {
+impl<E, S, ..G, F, O, Lc, X, Rest> Fetch<E, S, (..G), F, O, Lc> for (Shared<X>, Rest)
+    where S: Holds<X>, Rest: Fetch<E, S, (..G, &X), F, O, Lc> {
+    fn fetch(event, world, commands, state, gathered, f) {
         match(lift<X, S>(&mut world.columns)) {
             Some(value) =>
                 let (..g) = gathered;
-                let made = <Rest as Fetch<E, S, (..G, &X), F, O>>::fetch(event, world, commands, (..g, &value), f);
+                let made = <Rest as Fetch<E, S, (..G, &X), F, O, Lc>>::fetch(event, world, commands, state, (..g, &value), f);
                 lower<X, S>(&mut world.columns, value);
                 made,
             None => discard(gathered); None
         }
     }
 }
-impl<E, S, ..G, F, O, X, Rest> Fetch<E, S, (..G), F, O> for (Owned<X>, Rest)
-    where S: Holds<X>, Rest: Fetch<E, S, (..G, &mut X), F, O> {
-    fn fetch(event, world, commands, gathered, f) {
+impl<E, S, ..G, F, O, Lc, X, Rest> Fetch<E, S, (..G), F, O, Lc> for (Owned<X>, Rest)
+    where S: Holds<X>, Rest: Fetch<E, S, (..G, &mut X), F, O, Lc> {
+    fn fetch(event, world, commands, state, gathered, f) {
         match(lift<X, S>(&mut world.columns)) {
             Some(value) =>
                 let (..g) = gathered;
                 let mut value = value;
-                let made = <Rest as Fetch<E, S, (..G, &mut X), F, O>>::fetch(event, world, commands, (..g, &mut value), f);
+                let made = <Rest as Fetch<E, S, (..G, &mut X), F, O, Lc>>::fetch(event, world, commands, state, (..g, &mut value), f);
                 lower<X, S>(&mut world.columns, value);
                 made,
             None => discard(gathered); None
         }
     }
 }
-impl<E, S, ..G, F, O, X, Rest> Fetch<E, S, (..G), F, O> for (Maybe<X>, Rest)
-    where S: Holds<X>, Rest: Fetch<E, S, (..G, Option<&X>), F, O> {
-    fn fetch(event, world, commands, gathered, f) {
+impl<E, S, ..G, F, O, Lc, X, Rest> Fetch<E, S, (..G), F, O, Lc> for (Maybe<X>, Rest)
+    where S: Holds<X>, Rest: Fetch<E, S, (..G, Option<&X>), F, O, Lc> {
+    fn fetch(event, world, commands, state, gathered, f) {
         match(lift<X, S>(&mut world.columns)) {
             Some(value) =>
                 let (..g) = gathered;
-                let made = <Rest as Fetch<E, S, (..G, Option<&X>), F, O>>::fetch(event, world, commands, (..g, Some(&value)), f);
+                let made = <Rest as Fetch<E, S, (..G, Option<&X>), F, O, Lc>>::fetch(event, world, commands, state, (..g, Some(&value)), f);
                 lower<X, S>(&mut world.columns, value);
                 made,
-            None => let (..g) = gathered; <Rest as Fetch<E, S, (..G, Option<&X>), F, O>>::fetch(event, world, commands, (..g, None), f)
+            None => let (..g) = gathered; <Rest as Fetch<E, S, (..G, Option<&X>), F, O, Lc>>::fetch(event, world, commands, state, (..g, None), f)
         }
     }
 }
-impl<E, S, ..G, F, O, X, Rest> Fetch<E, S, (..G), F, O> for (MaybeOwned<X>, Rest)
-    where S: Holds<X>, Rest: Fetch<E, S, (..G, Option<&mut X>), F, O> {
-    fn fetch(event, world, commands, gathered, f) {
+impl<E, S, ..G, F, O, Lc, X, Rest> Fetch<E, S, (..G), F, O, Lc> for (MaybeOwned<X>, Rest)
+    where S: Holds<X>, Rest: Fetch<E, S, (..G, Option<&mut X>), F, O, Lc> {
+    fn fetch(event, world, commands, state, gathered, f) {
         match(lift<X, S>(&mut world.columns)) {
             Some(value) =>
                 let (..g) = gathered;
                 let mut value = value;
-                let made = <Rest as Fetch<E, S, (..G, Option<&mut X>), F, O>>::fetch(event, world, commands, (..g, Some(&mut value)), f);
+                let made = <Rest as Fetch<E, S, (..G, Option<&mut X>), F, O, Lc>>::fetch(event, world, commands, state, (..g, Some(&mut value)), f);
                 lower<X, S>(&mut world.columns, value);
                 made,
-            None => let (..g) = gathered; <Rest as Fetch<E, S, (..G, Option<&mut X>), F, O>>::fetch(event, world, commands, (..g, None), f)
+            None => let (..g) = gathered; <Rest as Fetch<E, S, (..G, Option<&mut X>), F, O, Lc>>::fetch(event, world, commands, state, (..g, None), f)
         }
     }
 }
@@ -830,21 +830,21 @@ fn query_of<Q, N, S>(world: &mut World<S>) -> Query<Q, N, <Q as Item>::Store> wh
     };
     Query { store: <Q as Fill<S>>::fill(&mut world.columns), entities: found }
 }
-impl<E, S, ..G, F, O, Q, N, St, Rest> Fetch<E, S, (..G), F, O> for (Querying<Q, N, St>, Rest)
-    where Q: Item<Store = St>, Q: Fill<S>, N: Only<S>, Rest: Fetch<E, S, (..G, &mut Query<Q, N, St>), F, O> {
-    fn fetch(event, world, commands, gathered, f) {
+impl<E, S, ..G, F, O, Lc, Q, N, St, Rest> Fetch<E, S, (..G), F, O, Lc> for (Querying<Q, N, St>, Rest)
+    where Q: Item<Store = St>, Q: Fill<S>, N: Only<S>, Rest: Fetch<E, S, (..G, &mut Query<Q, N, St>), F, O, Lc> {
+    fn fetch(event, world, commands, state, gathered, f) {
         let (..g) = gathered;
         let mut query = query_of<Q, N, S>(world);
-        let made = <Rest as Fetch<E, S, (..G, &mut Query<Q, N, St>), F, O>>::fetch(event, world, commands, (..g, &mut query), f);
+        let made = <Rest as Fetch<E, S, (..G, &mut Query<Q, N, St>), F, O, Lc>>::fetch(event, world, commands, state, (..g, &mut query), f);
         let Query { store, entities } = query;
         <Q as Fill<S>>::unfill(&mut world.columns, store);
         made
     }
 }
 // (Not run unless the query is of exactly one entity.)
-impl<E, S, ..G, F, O, Q, N, St, Rest> Fetch<E, S, (..G), F, O> for (Singling<Q, N, St>, Rest)
-    where Q: Item<Store = St>, Q: Fill<S>, N: Only<S>, Rest: Fetch<E, S, (..G, &mut Single<Q, N, St>), F, O> {
-    fn fetch(event, world, commands, gathered, f) {
+impl<E, S, ..G, F, O, Lc, Q, N, St, Rest> Fetch<E, S, (..G), F, O, Lc> for (Singling<Q, N, St>, Rest)
+    where Q: Item<Store = St>, Q: Fill<S>, N: Only<S>, Rest: Fetch<E, S, (..G, &mut Single<Q, N, St>), F, O, Lc> {
+    fn fetch(event, world, commands, state, gathered, f) {
         let Query { store, entities: all } = query_of<Q, N, S>(world);
         let mut store = store;
         let mut found = [];
@@ -856,7 +856,7 @@ impl<E, S, ..G, F, O, Q, N, St, Rest> Fetch<E, S, (..G), F, O> for (Singling<Q, 
         if(len_at(&found) == 1) {
             let mut single = Single { query: Query { store: store, entities: found } };
             let (..g) = gathered;
-            let made = <Rest as Fetch<E, S, (..G, &mut Single<Q, N, St>), F, O>>::fetch(event, world, commands, (..g, &mut single), f);
+            let made = <Rest as Fetch<E, S, (..G, &mut Single<Q, N, St>), F, O, Lc>>::fetch(event, world, commands, state, (..g, &mut single), f);
             let Single { query } = single;
             let Query { store, entities } = query;
             <Q as Fill<S>>::unfill(&mut world.columns, store);
@@ -868,47 +868,94 @@ impl<E, S, ..G, F, O, Q, N, St, Rest> Fetch<E, S, (..G), F, O> for (Singling<Q, 
         }
     }
 }
-impl<E, S, ..G, F, O, Rest> Fetch<E, S, (..G), F, O> for (Asking, Rest) where Rest: Fetch<E, S, (..G, &mut Commands<S>), F, O> {
-    fn fetch(event, world, commands, gathered, f) {
+impl<E, S, ..G, F, O, Lc, Rest> Fetch<E, S, (..G), F, O, Lc> for (Asking, Rest) where Rest: Fetch<E, S, (..G, &mut Commands<S>), F, O, Lc> {
+    fn fetch(event, world, commands, state, gathered, f) {
         let (..g) = gathered;
         let mut none = Commands { queue: [], next: 0, made: 0 };
-        <Rest as Fetch<E, S, (..G, &mut Commands<S>), F, O>>::fetch(event, world, &mut none, (..g, commands), f)
+        <Rest as Fetch<E, S, (..G, &mut Commands<S>), F, O, Lc>>::fetch(event, world, &mut none, state, (..g, commands), f)
     }
 }
 
-// Something that runs against a world when `E` is emitted. A function is
-// one, whatever its parameters ask for; two systems in a pair run one
-// after the other.
+// A system's own state, kept from one run to the next of the registration
+// it is of: `count: &mut Local<Int>`, at its type's start the first time.
+pub struct Local<T>(pub T)
+pub struct Localing<T>(T)
+impl<T> Parameter for &mut Local<T> { type Asks = Localing<T>; }
+impl<E, S, ..G, F, O, T, Lc, Rest> Fetch<E, S, (..G), F, O, (Local<T>, Lc)> for (Localing<T>, Rest)
+    where Rest: Fetch<E, S, (..G, &mut Local<T>), F, O, Lc> {
+    fn fetch(event, world, commands, state, gathered, f) {
+        let (..g) = gathered;
+        <Rest as Fetch<E, S, (..G, &mut Local<T>), F, O, Lc>>::fetch(event, world, commands, &mut state.1, (..g, &mut state.0), f)
+    }
+}
+
+// What the locals of a list of things asked for start as.
+pub trait Locals { type State; fn start() -> Self::State; }
+impl Locals for () { type State = (); fn start() { () } }
+impl<T: Default, R> Locals for (Localing<T>, R) where R: Locals {
+    type State = (Local<T>, R::State);
+    fn start() { (Local(default()), <R as Locals>::start()) }
+}
+impl<X, R> Locals for (X, R) where R: Locals {
+    type State = R::State;
+    fn start() { <R as Locals>::start() }
+}
+
+// Something that runs against a world when `E` is emitted: a function with
+// its locals, as it was registered; two systems in a pair run one after the
+// other.
 pub trait System<E, S> {
-    fn run(&Self, &E, &mut World<S>, &mut Commands<S>)
+    fn run(&mut Self, &E, &mut World<S>, &mut Commands<S>)
 }
 impl<E, S> System<E, S> for () {
     fn run(nothing, event, world, commands) { () }
 }
 impl<E, S, X, Y> System<E, S> for (X, Y) where X: System<E, S>, Y: System<E, S> {
     fn run(pair, event, world, commands) {
-        <X as System<E, S>>::run(&pair.0, event, world, commands);
-        <Y as System<E, S>>::run(&pair.1, event, world, commands)
+        <X as System<E, S>>::run(&mut pair.0, event, world, commands);
+        <Y as System<E, S>>::run(&mut pair.1, event, world, commands)
     }
 }
 // A function, of however many parameters, each asking for something, no
-// two for the same.
-impl<E, S, ..P, ..A, L, F> System<E, S> for F
-    where F: Fn<(..P), Output = ()>, ..P: Parameter<Asks = A>, (..A): Tuple<Nested = L>, L: AllApart, L: Fetch<E, S, (), F, ()> {
-    fn run(f, event, world, commands) {
-        <L as Fetch<E, S, (), Self, ()>>::fetch(event, world, commands, (), f);
+// two for the same; and what its locals hold.
+pub struct Sys<F, Lc> { f: F, locals: Lc }
+impl<E, S, ..P, ..A, L, F, Lc> System<E, S> for Sys<F, Lc>
+    where F: Fn<(..P), Output = ()>, ..P: Parameter<Asks = A>, (..A): Tuple<Nested = L>, L: AllApart, L: Fetch<E, S, (), F, (), Lc> {
+    fn run(sys, event, world, commands) {
+        let _ = <L as Fetch<E, S, (), F, (), Lc>>::fetch(event, world, commands, &mut sys.locals, (), &sys.f);
     }
 }
 
+// What is registered under `E` in a world of `S`, made a system: each
+// function given its locals, and seen to be one that can run there.
+pub trait IntoSystem<E, S> { type Out; fn into_system(Self) -> Self::Out; }
+impl<E, S> IntoSystem<E, S> for () { type Out = (); fn into_system(nothing) { () } }
+impl<E, S, X, Y> IntoSystem<E, S> for (X, Y) where X: IntoSystem<E, S>, Y: IntoSystem<E, S> {
+    type Out = (<X as IntoSystem<E, S>>::Out, <Y as IntoSystem<E, S>>::Out);
+    fn into_system(pair) {
+        let (x, y) = pair;
+        (<X as IntoSystem<E, S>>::into_system(x), <Y as IntoSystem<E, S>>::into_system(y))
+    }
+}
+impl<E, S, ..P, ..A, L, F, Lc> IntoSystem<E, S> for F
+    where F: Fn<(..P), Output = ()>, ..P: Parameter<Asks = A>, (..A): Tuple<Nested = L>, L: AllApart,
+          L: Locals<State = Lc>, L: Fetch<E, S, (), F, (), Lc> {
+    type Out = Sys<F, Lc>;
+    fn into_system(f) { Sys { f: f, locals: <L as Locals>::start() } }
+}
+
 // A condition: a function whose parameters ask for what a system's may,
-// and which says whether something is to run.
+// and which says whether something is to run. (Its locals start anew each
+// time it is asked.)
 pub trait Condition<E, S> {
     fn holds(&Self, &E, &mut World<S>, &mut Commands<S>) -> Bool
 }
-impl<E, S, ..P, ..A, L> Condition<E, S> for fn(..P) -> Bool
-    where ..P: Parameter<Asks = A>, (..A): Tuple<Nested = L>, L: AllApart, L: Fetch<E, S, (), fn(..P) -> Bool, Bool> {
+impl<E, S, ..P, ..A, L, Lc> Condition<E, S> for fn(..P) -> Bool
+    where ..P: Parameter<Asks = A>, (..A): Tuple<Nested = L>, L: AllApart, L: Locals<State = Lc>,
+          L: Fetch<E, S, (), fn(..P) -> Bool, Bool, Lc> {
     fn holds(f, event, world, commands) {
-        match(<L as Fetch<E, S, (), fn(..P) -> Bool, Bool>>::fetch(event, world, commands, (), f)) {
+        let mut locals = <L as Locals>::start();
+        match(<L as Fetch<E, S, (), fn(..P) -> Bool, Bool, Lc>>::fetch(event, world, commands, &mut locals, (), f)) {
             Some(answer) => answer,
             None => false
         }
@@ -921,8 +968,15 @@ pub fn run_if<P, C>(systems: P, condition: C) -> RunIf<P, C> { RunIf { systems: 
 impl<E, S, P, C> System<E, S> for RunIf<P, C> where P: System<E, S>, C: Condition<E, S> {
     fn run(guarded, event, world, commands) {
         if(<C as Condition<E, S>>::holds(&guarded.condition, event, world, commands)) {
-            <P as System<E, S>>::run(&guarded.systems, event, world, commands)
+            <P as System<E, S>>::run(&mut guarded.systems, event, world, commands)
         } else { () }
+    }
+}
+impl<E, S, P, C> IntoSystem<E, S> for RunIf<P, C> where P: IntoSystem<E, S>, C: Condition<E, S> {
+    type Out = RunIf<<P as IntoSystem<E, S>>::Out, C>;
+    fn into_system(guarded) {
+        let RunIf { systems, condition } = guarded;
+        RunIf { systems: <P as IntoSystem<E, S>>::into_system(systems), condition: condition }
     }
 }
 
@@ -931,25 +985,32 @@ impl<E, S, P, C> System<E, S> for RunIf<P, C> where P: System<E, S>, C: Conditio
 pub fn chain<T, L>(systems: T) -> L where T: Tuple<Nested = L> { nest(systems) }
 
 // The systems registered under a label.
-pub struct On<E, P> { label: fn(E) -> (), systems: P }
+// (Made systems, with their locals, the first time the label is emitted:
+// what they need of the world is then known.)
+pub struct On<E, P, Q> { label: fn(E) -> (), systems: Option<P>, made: Option<Q> }
 
 // Run what is registered under `E`, in the order it was registered. Of the
 // two implementations for a list the first is for one whose first entry is
 // under `E`; the second passes over an entry under another label.
 pub trait Dispatch<E, S> {
-    fn dispatch(&Self, &E, &mut World<S>, &mut Commands<S>)
+    fn dispatch(&mut Self, &E, &mut World<S>, &mut Commands<S>)
 }
 impl<E, S> Dispatch<E, S> for () {
     fn dispatch(nothing, event, world, commands) { () }
 }
-impl<E, P, T, S> Dispatch<E, S> for (On<E, P>, T) where P: System<E, S>, T: Dispatch<E, S> {
+impl<E, P, Q, T, S> Dispatch<E, S> for (On<E, P, Q>, T)
+    where P: IntoSystem<E, S, Out = Q>, Q: System<E, S>, T: Dispatch<E, S> {
     fn dispatch(list, event, world, commands) {
-        <T as Dispatch<E, S>>::dispatch(&list.1, event, world, commands);
-        <P as System<E, S>>::run(&list.0.systems, event, world, commands)
+        <T as Dispatch<E, S>>::dispatch(&mut list.1, event, world, commands);
+        match(replace(&mut list.0.systems, None)) {
+            Some(systems) => list.0.made = Some(<P as IntoSystem<E, S>>::into_system(systems));,
+            None => ()
+        };
+        match(as_mut(&mut list.0.made)) { Some(made) => <Q as System<E, S>>::run(made, event, world, commands), None => () }
     }
 }
-impl<E, F, P, T, S> Dispatch<E, S> for (On<F, P>, T) where T: Dispatch<E, S> {
-    fn dispatch(list, event, world, commands) { <T as Dispatch<E, S>>::dispatch(&list.1, event, world, commands) }
+impl<E, F, P, Q, T, S> Dispatch<E, S> for (On<F, P, Q>, T) where T: Dispatch<E, S> {
+    fn dispatch(list, event, world, commands) { <T as Dispatch<E, S>>::dispatch(&mut list.1, event, world, commands) }
 }
 
 // A world of columns `S` and the registered systems `L`.
@@ -987,15 +1048,15 @@ impl<S, L> App<S, L> {
     }
 
     // Register systems under a label, named by a value of it: `Update`.
-    pub fn add_systems<E, P>(app: Self, label: E, systems: P) -> App<S, (On<E, P>, L)> {
-        app.on<E, P>(systems)
+    pub fn add_systems<E, P, Q>(app: Self, label: E, systems: P) -> App<S, (On<E, P, Q>, L)> {
+        app.on<E, P, Q>(systems)
     }
 
     // Register systems under a label that carries something, named by its
     // type: `.on<Hit>(..)`. A system under it may take `&Hit` first.
-    pub fn on<E, P>(app: Self, systems: P) -> App<S, (On<E, P>, L)> {
+    pub fn on<E, P, Q>(app: Self, systems: P) -> App<S, (On<E, P, Q>, L)> {
         let App { world, systems: before } = app;
-        App { world: world, systems: (On { label: fn(event: E) { () }, systems: systems }, before) }
+        App { world: world, systems: (On { label: fn(event: E) { () }, systems: Some(systems), made: None }, before) }
     }
 
     // A plugin is a function from an app to an app.
@@ -1005,12 +1066,9 @@ impl<S, L> App<S, L> {
     pub fn build(app: Self) -> Self { app }
 
     // Run every system registered under what is emitted, then do what they asked.
-    pub fn emit<E>(app: &mut Self, event: &E) where L: Dispatch<E, S>, S: Columns, L: Use<[0, infinity]> {
+    pub fn emit<E>(app: &mut Self, event: &E) where L: Dispatch<E, S>, S: Columns {
         let mut commands = Commands { queue: [], next: len_at(&app.world.generations), made: 0 };
-        // (The systems are copied out first: so they and the world are two
-        // things, each borrowed alone.)
-        let systems = app.systems;
-        <L as Dispatch<E, S>>::dispatch(&systems, event, &mut app.world, &mut commands);
+        <L as Dispatch<E, S>>::dispatch(&mut app.systems, event, &mut app.world, &mut commands);
         apply(commands, &mut app.world)
     }
 }

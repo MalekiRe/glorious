@@ -1,6 +1,7 @@
 module
 
 public import Glorious.Syntax.Parser.Expr
+public import Glorious.Syntax.Resolve
 
 public section
 
@@ -340,7 +341,8 @@ private partial def parseItem : P Item := do
             pure (TypeExpr.fn [] (.performs (.tuple []) (← parseRow)))
           else parseType
         let _ ← acceptPunct ";"
-        methods := methods.push (.typeAlias name takes body)
+        -- (A type parameter said to be a callable is that callable here too.)
+        methods := methods.push (.typeAlias name takes (substTypeExpr callable body))
       | .ident "const" =>
         -- `const NAME: Type = value;`: the trait's function of that name,
         -- which takes nothing and gives the value.
@@ -356,10 +358,18 @@ private partial def parseItem : P Item := do
     expectPunct "}"
     -- `Self` is the type the implementation is for.
     let self := selfTypeOf head (args.map (TypeExpr.name · []))
+    -- (A type parameter said to be a callable is that callable in the
+    -- functions too: `<L as Fetch<F>>::fetch(..)`.)
+    let called := fun (t : TypeExpr) => substTypeExpr callable t
+    let calledClause := fun (c : Clause) =>
+      if callable.isEmpty then c else
+      match mapTypesClause (fun t => pure (called t)) c with
+      | .ok c => c
+      | .error _ => c
     let written := methods.toList.map fun
       | .fn name ps annots ret clauses =>
-        Item.fn name ps (annots.map (·.map (TypeExpr.withSelf self))) (ret.map (TypeExpr.withSelf self))
-          (clauses.map (selfClause head (some (tr, (TypeExpr.tuple [self]).asExpr))))
+        Item.fn name ps (annots.map (·.map (TypeExpr.withSelf self ∘ called))) (ret.map (TypeExpr.withSelf self ∘ called))
+          (clauses.map (selfClause head (some (tr, (TypeExpr.tuple [self]).asExpr)) ∘ calledClause))
       | other => other
     pure (.impl params tr head args context.toList written)
   | .ident "coerce" =>

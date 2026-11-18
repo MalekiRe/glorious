@@ -96,6 +96,11 @@ partial def leaves (pos trait : String) (t : Ty) : M (List (String × Nat × Ty)
           out := out ++ (← leaves pos tr' (args[j]?.getD .unit))
         pure out
       | none => missing
+    -- (A callable, of which there is one implementation, for all.)
+    | .fn .. =>
+      match Traits.findImpl trait "(callable)" 0 (← get).kimpls with
+      | some (_, I) => if I.context.isEmpty then pure [] else missing
+      | none => missing
     | _ => missing
 
 partial def toDictE (impls : Array ImplDecl) : Traits.Dict → Elab.DictE
@@ -256,6 +261,9 @@ partial def leavesFitting (pos key : String) (t : Ty) (args : List Ty) (owner : 
   -- `solveFitting` finds it: no condition is left of what it finds.)
   if key == Syntax.destroyTrait then
     if (← solveFitting [] 1 key t []).isSome then return []
+    -- (Nor is it asked of a callable, which is given up whole, as it is
+    -- not of a bound's own type.)
+    if let .fn .. := t then return []
   if let some k ← keyOf t then return [(key, k, t, args)]
   -- (What the function is given of a type made from its type parameters.)
   let said := s!"'%condition:{owner}:{key}:{← spellTy (← zonk t)}"

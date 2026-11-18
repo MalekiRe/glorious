@@ -5189,6 +5189,20 @@ Covey is the toolbox for finding what the language lacks. Rewriting it after
 - **Two sibling modules' drop sites** could share a number, so a function
   was given another's dictionary ("unknown name `%dict2`"). Fixed, with a
   case.
+- **A type a trait with arguments leaves to implementations, through a
+  pair** (`Out = (<X as Into<E>>::Out, <Y as Into<E>>::Out)`): the
+  implementation's parameter `E`, only in the trait's arguments, was a new
+  variable each time it was answered, so a part's answer was never found.
+  It is now what the trait is asked at. Fixed, with a case.
+- **A callable type parameter of an implementation** (`F: Fn<..>` in its
+  `where`) was not written out in its associated types and functions:
+  "unknown type `F`". Fixed.
+- **How a callable inside a condition is destroyed** was asked as of a
+  type without an implementation: callables have one, for all. Fixed.
+- **A plugin generic in the app** whose systems are made when registered
+  leaves their world's type undecided ("`Columns` is needed of a type that
+  nothing here decides"). Open: covey makes them, with their locals, the
+  first time their label is emitted.
 - **`(q.blank)()`**, a field that is a callable, called in brackets, is read
   as a dot call of a function of that name where the module has one. Open:
   covey names such fields apart.

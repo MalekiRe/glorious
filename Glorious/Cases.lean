@@ -3713,6 +3713,12 @@ def cases : List Case := [
     [], "s\nt\n7"⟩,
   ⟨"trait Tr<S> { fn f(Self) -> Int }\nstruct G<Q, S> { q: Q, s: [S] }\nimpl<Q, S> Drop for G<Q, S> where Q: Tr<S> { fn drop(g) { () } }\nfn main() -> Int { 0 }",
     [], "error: `impl Drop for G`: a `Drop` may ask its type parameters only for traits without arguments; keep what it needs in the value instead (a callable made where the trait is known)"⟩,
+  -- (A type a trait with arguments leaves to implementations, of a pair
+  -- made of what it leaves of each part, among them a callable's: the
+  -- implementation's parameter only in the trait's arguments is what it is
+  -- asked at.)
+  ⟨"trait Into2<E> { type Out; fn into2(Self) -> Self::Out; }\nstruct W<F> { f: F, n: Int }\nimpl<E, ..P, F> Into2<E> for F where F: Fn<(..P), Output = Int> { type Out = W<F>; fn into2(f) { W { f: f, n: 5 } } }\nimpl<E, X, Y> Into2<E> for (X, Y) where X: Into2<E>, Y: Into2<E> { type Out = (<X as Into2<E>>::Out, <Y as Into2<E>>::Out); fn into2(p) { let (x, y) = p; (<X as Into2<E>>::into2(x), <Y as Into2<E>>::into2(y)) } }\nimpl<E> Into2<E> for Int { type Out = W<Int>; fn into2(f) { W { f: f, n: 7 } } }\nfn mk<T: Into2<Str>>(t: T) -> <T as Into2<Str>>::Out { <T as Into2<Str>>::into2(t) }\nfn one() -> Int { 1 }\nfn main() -> Int { let w = mk((1, one)); w.0.n + w.1.n + (w.1.f)() }",
+    [], "13"⟩,
   -- (An element of what a reference is to is borrowed through it.)
   ⟨"fn first(r: &[Int]) -> Int { let e = &r[0]; *e }\nfn main() -> Int { first(&[7, 8]) }",
     [], "7"⟩,

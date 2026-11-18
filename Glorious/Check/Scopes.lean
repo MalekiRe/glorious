@@ -398,6 +398,9 @@ def assocAt (tr : String) (subject : Ty) (name : String) : M (Option Ty) := do
   for (j, want) in im.fixed do
     if let some got := hargs[j]? then
       try unify got (← fixedAt at_ want) catch _ => return none
+  -- (And those only in the trait's arguments are what it is asked at.)
+  for (want, got) in (im.targs.map (subst at_ [] [])).zip args do
+    try unify want got catch _ => return none
   conditionUses im at_ hargs (← get).owner (← get).pos
   pure (some (← unproject (gatAt at_ ((im.gatParams.lookup name).getD []) asked said)))
 
@@ -438,6 +441,9 @@ def settleAssocs : M Unit := do
           for (j, want) in im.fixed do
             if let some got := hargs[j]? then
               try unify got (← fixedAt at_ want) catch _ => pure ()
+          -- (And those only in the trait's arguments are what it is asked at.)
+          for (want, got) in (im.targs.map (subst at_ [] [])).zip args do
+            try unify want got catch _ => pure ()
           conditionUses im at_ hargs owner pos
           try unifyAt s!"`{name}` of `{key}` for `{bareName head}`" (← unproject (subst at_ [] [] said)) a
           catch e => throw (pos ++ e)
