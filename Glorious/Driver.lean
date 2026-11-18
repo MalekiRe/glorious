@@ -809,12 +809,12 @@ partial def compileSourceAt (src : String) (check : Bool := true)
         match Elab.etaFound e, Elab.restFound e, Elab.letMutFound e with
         | some (owner, x, arity), _, _ =>
           match Elab.etaItems owner x arity all with
-          | (all, true) => checkWith fuel all first
+          | (all, true) => Trace.timed "check again: a function named as a value" fun _ => checkWith fuel all first
           | _ => (all, .error (Elab.withoutEta said))
-        | none, some (id, count), _ => checkWith fuel (Elab.restItems id count all) first
+        | none, some (id, count), _ => Trace.timed "check again: `..` in a tuple pattern" fun _ => checkWith fuel (Elab.restItems id count all) first
         | none, none, some (owner, line, col, x) =>
           match Elab.letMutItems owner line col x all with
-          | (all, true) => checkWith fuel all (some (first.getD e))
+          | (all, true) => Trace.timed "check again: a value kept in a variable" fun _ => checkWith fuel all (some (first.getD e))
           | _ => (all, .error said)
         | none, none, none => (all, .error (Elab.withoutEta said))
   let (all, checked) := Trace.timed "check" fun _ => checkWith 64 all none
@@ -830,19 +830,19 @@ partial def compileSourceAt (src : String) (check : Bool := true)
       match Elab.refPatsFound e, Elab.dotOwnFound e, Elab.recvRefFound e with
       | some found, _, _ =>
         if check && refPats.length < 32 && !refPats.contains found then
-          match compileSourceAt src check files few known packs kept checkKept (refPats ++ [found]) dotPicks search memo firsts lexed recvRefs with
+          match Trace.timed "compile again: a pattern of a reference" fun _ => compileSourceAt src check files few known packs kept checkKept (refPats ++ [found]) dotPicks search memo firsts lexed recvRefs with
           | .ok c => return c
           | .error e' => throw (clean e')
         else if check then throw (clean e) else pure (none, [], [])
       | none, some found, _ =>
         if check && dotPicks.length < 32 && !dotPicks.contains found then
-          match compileSourceAt src check files few known packs kept checkKept refPats (dotPicks ++ [found]) search memo firsts lexed recvRefs with
+          match Trace.timed "compile again: a type's own function" fun _ => compileSourceAt src check files few known packs kept checkKept refPats (dotPicks ++ [found]) search memo firsts lexed recvRefs with
           | .ok c => return c
           | .error e' => throw (clean e')
         else if check then throw (clean e) else pure (none, [], [])
       | none, none, some found =>
         if check && recvRefs.length < 32 && !recvRefs.contains found then
-          match compileSourceAt src check files few known packs kept checkKept refPats dotPicks search memo firsts lexed (recvRefs ++ [found]) with
+          match Trace.timed "compile again: a receiver borrowed" fun _ => compileSourceAt src check files few known packs kept checkKept refPats dotPicks search memo firsts lexed (recvRefs ++ [found]) with
           | .ok c => return c
           | .error e' => throw (clean e')
         else if check then throw (clean e) else pure (none, [], [])

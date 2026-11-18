@@ -309,6 +309,26 @@ def fixedAt (at_ : List (Nat × Ty)) (want : Ty) : M Ty := do
 def traitKey (trait : String) (args : List Ty) : M String := do
   pure (Syntax.traitAt trait (← args.mapM spellTy))
 
+/-- An implementation fitted to a use of it: its type parameters as the use
+has them (`hargs` the head's arguments, `args` the trait's). The
+implementation's new variables are made what is asked, and not the other
+way: a type what the function is given is said of keeps its number. None
+where they do not fit; with `said`, what does not fit is said, under it. -/
+def fitHead (im : ImplDecl) (hargs args : List Ty) (said : Option String := none) :
+    M (Option (List (Nat × Ty))) := do
+  let at_ ← implAt im hargs
+  let fit := fun (want got : Ty) => (do
+    match said with
+    | some what => unifyAt what want got; pure true
+    | none => try unify want got; pure true catch _ => pure false : M Bool)
+  for (j, want) in im.fixed do
+    if let some got := hargs[j]? then
+      unless ← fit (← fixedAt at_ want) got do return none
+  -- (Those only in the trait's arguments are what it is asked at.)
+  for (want, got) in (im.targs.map (subst at_ [] [])).zip args do
+    unless ← fit want got do return none
+  pure (some at_)
+
 /-- The name of an implementation of a trait at arguments for a type. Where
 the type's implementation gives the trait arguments made of its own type
 parameters (`impl<T> From<T> for Wrap<T>`), the arguments asked are made
@@ -320,12 +340,7 @@ def implKey (trait : String) (self : Ty) (args : List Ty) : M String := do
       im.head == h && im.targs.length == args.length
     -- The implementation to make the arguments fit, and its name.
     let commit := fun (im : ImplDecl) => do
-      let at_ ← implAt im hargs
-      for (j, want) in im.fixed do
-        if let some got := hargs[j]? then
-          unifyAt s!"`{bareName trait}` for `{bareName h}`" (← fixedAt at_ want) got
-      for (want, got) in (im.targs.map (subst at_ [] [])).zip args do
-        unifyAt s!"`{bareName trait}` for `{bareName h}`" want got
+      let _ ← fitHead im hargs args (said := some s!"`{bareName trait}` for `{bareName h}`")
       pure im.trait
     match family with
     | [] => pure ()
@@ -386,21 +401,6 @@ def conditionUses (im : ImplDecl) (at_ : List (Nat × Ty)) (hargs : List Ty) (ow
   for (whole, asked, name, said) in im.extraEqual do
     let use := (asked, subst at_ [] [] whole, name, subst at_ [] [] said, owner, pos)
     modify fun s => { s with assocUses := s.assocUses.push use }
-
-/-- An implementation fitted to a use of it: its type parameters as the use
-has them (`hargs` the head's arguments, `args` the trait's). The
-implementation's new variables are made what is asked, and not the other
-way: a type what the function is given is said of keeps its number. None
-where they do not fit. -/
-def fitHead (im : ImplDecl) (hargs args : List Ty) : M (Option (List (Nat × Ty))) := do
-  let at_ ← implAt im hargs
-  for (j, want) in im.fixed do
-    if let some got := hargs[j]? then
-      try unify (← fixedAt at_ want) got catch _ => return none
-  -- (Those only in the trait's arguments are what it is asked at.)
-  for (want, got) in (im.targs.map (subst at_ [] [])).zip args do
-    try unify want got catch _ => return none
-  pure (some at_)
 
 /-- The type a trait leaves to its implementations, for a type whose
 implementation is known: `Elem` of `Index` for an array of `Int`. Nothing
