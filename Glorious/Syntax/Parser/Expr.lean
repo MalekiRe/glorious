@@ -182,7 +182,13 @@ partial def parseBinary (minPrec : Nat) (noBlock : Bool)
       let next := match assoc with
         | .right => prec
         | _ => prec + 1
+      -- `else if(c) { .. } else { .. }`: the `if` after `else` is its
+      -- fallback, a block run in its place, as `else { if(c) .. }` is.
+      let elseIf := name == "else" && (← peek) == .ident "if"
+      -- (The block is known by the place of `else`, which nothing else is.)
+      let blockId := id - 1
       let rhs ← parseBinary next noBlock (some (prec, assoc))
+      let rhs := if elseIf then Expr.closure blockId [.mk [] [.expr rhs]] else rhs
       let (qual, f) := splitPath (((← read).fix.function name false).splitOn "::")
       lhs := .call id (.name qual f) [lhs, rhs]
     | none =>

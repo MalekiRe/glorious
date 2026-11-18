@@ -3735,6 +3735,9 @@ def cases : List Case := [
   -- in brackets beside a function of its name.)
   ⟨"pub struct P(pub Int)\npub struct W { pub c: Int }\npub struct G<'w> { pub w: &'w mut W, pub p: P }\nimpl<'w> G<'w> { pub fn gp(g: &Self) -> &P { &g.p } pub fn peek(g: &Self) -> Int { g.w.c } }\nfn bump(g: &mut G) { g.w.c = g.w.c + 1 }\nfn hollow() -> Int { 100 }\nstruct S { hollow: fn() -> Int }\nfn main() -> Int {\n    let mut w = W { c: 1 };\n    let mut g = G { w: &mut w, p: P(5) };\n    bump(&mut g);\n    let a = g.gp().0 + g.w.c;\n    let b = match(Some(g)) { Some(h) => h.peek(), None => 0 };\n    let s = S { hollow: fn() -> Int { 7 } };\n    a * 100 + b * 10 + (s.hollow)()\n}",
     [], "727"⟩,
+  -- (`else if`: the `if` is the fallback, run in its place.)
+  ⟨"fn grade(x: Int) -> Int { if(x < 0) { 1 } else if(x < 3) { 2 } else if(x < 9) { 4 } else { 8 } }\nfn main() -> Int { let mut n = 0; if(n > 0) { n = 1 } else if(n == 0) { n = 5 } else { n = 9 }; grade(-1) + grade(1) * 10 + grade(5) * 100 + grade(20) * 1000 + n * 10000 }",
+    [], "58421"⟩,
   -- (An element of what a reference is to is borrowed through it.)
   ⟨"fn first(r: &[Int]) -> Int { let e = &r[0]; *e }\nfn main() -> Int { first(&[7, 8]) }",
     [], "7"⟩,
