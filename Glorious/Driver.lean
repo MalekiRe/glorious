@@ -62,6 +62,9 @@ structure Compiled where
   /-- What the checker kept of the library's modules, for any program that
   begins with them. -/
   libraryKept : Check.Kept := []
+  /-- Each module's items as this compile parsed them or took them, under
+  what they were parsed from: kept for the next. -/
+  parsedMade : List (UInt64 × List Syntax.Item) := []
 
 /-- Each place by the function it is in and how many places of that function
 come before it: what stays the same of a place when other functions change. -/
@@ -487,12 +490,31 @@ def lexTexts (src : String) (files : List (List String × String)) :
 def longestOf (lexed : List (List String × Array Syntax.Token)) : Nat :=
   lexed.foldl (fun m (_, toks) => max m (Syntax.longestList toks)) 2
 
+/-- Modules' items as an earlier compile parsed them, under what each was
+parsed from (`parseKey`). -/
+abbrev Parsed := Std.HashMap UInt64 (List Syntax.Item)
+
+/-- What a module's items are parsed from: its text, where its callables are
+numbered from, the constructors with named fields, its operators, its path,
+whether arrays have lengths, and how long lists of types are written out.
+(The prelude's operators are this compiler's, as is what keeps it.) -/
+def parseKey (text : String) (base : Nat) (records : List String)
+    (tables : List (List String × Syntax.Fixities)) (path : List String) (fixed : Bool) (packs : Nat) :
+    UInt64 :=
+  let fix := (tables.lookup path).map fun f =>
+    (f.infixes.map (fun (o, p, a) => (o, p, match a with
+      | .left => (0 : Nat)
+      | .right => 1
+      | .non => 2)), f.prefixes, f.bound)
+  mixHash (hash text) (hash (base, records, fix, path, fixed, packs))
+
 /-- The prelude and a program as written: the first module's text, and the
 texts of the modules that are files of their own, each with its path. Where
 the program says `mod name;` the items of that module's text are put. -/
 def parseProgram (src : String) (files : List (List String × String)) (check : Bool := true)
-    (few : Bool := false) (packs : Nat := 0) (lexed : List (List String × Array Syntax.Token) := []) :
-    Except String (List Syntax.Item × List Syntax.Item) := do
+    (few : Bool := false) (packs : Nat := 0) (lexed : List (List String × Array Syntax.Token) := [])
+    (parsedKept : Parsed := {}) (preludeKept : Option (List Syntax.Item × Syntax.Fixities) := none) :
+    Except String (List Syntax.Item × List Syntax.Item × List (UInt64 × List Syntax.Item)) := do
   -- (The program's own texts lexed once, where they were not already.)
   let lexed ← if !lexed.isEmpty then pure lexed else lexTexts src files
   let tokensOf := fun (path : List String) => lexed.lookup path
@@ -509,7 +531,9 @@ def parseProgram (src : String) (files : List (List String × String)) (check : 
   let needed := if few && std then neededStd (src :: own.map (·.2)) else none
   let library := needed.getD Std.texts
   let files := if std then library ++ files else files
-  let (prelude, fix) ← if check then readPrelude.get else
+  -- (The prelude as an earlier process of this compiler parsed it, where
+  -- one did: `preludeKept`.)
+  let (prelude, fix) ← Trace.timed "parse: the prelude" fun _ => if check then preludeKept.getDM readPrelude.get else
     match Syntax.parse {} Prelude.unchecked with
     | .ok r => pure r
     | .error e => throw s!"prelude: {e}"
@@ -519,10 +543,10 @@ def parseProgram (src : String) (files : List (List String × String)) (check : 
     else pure none
   -- Operators and the constructors with named fields are known to every
   -- text, whichever declares them.
-  let said ← (([], src) :: own).mapM fun (path, text) => do
+  let said ← Trace.timed "parse: what each text declares" fun _ => (([], src) :: own).mapM fun (path, text) => do
     let _ ← Syntax.declaredSyntax fix text (tokensOf path)
     Syntax.textSyntax path text (tokensOf path)
-  let unread ← match read with
+  let unread ← Trace.timed "parse: what the library declares" fun _ => match read with
     | some _ => pure []
     | none => (if std then library else []).mapM fun (path, text) => do
         let lexed := stdTokens path text
@@ -546,7 +570,7 @@ def parseProgram (src : String) (files : List (List String × String)) (check : 
   -- Whether the program has arrays of a length their type says: then what
   -- `[a, b, c]` is depends on what is wanted of it.
   let fixed := ((src :: own.map (·.2)).any saysLength)
-  let (items, _) ← Syntax.parse fix src (base := 1000000) (records := records) (tables := tables)
+  let (items, _) ← Trace.timed "parse: the program's text" fun _ => Syntax.parse fix src (base := 1000000) (records := records) (tables := tables)
     (fixed := fixed) (packs := packs) (lexed := tokensOf [])
   let declares := items.any fun
     | .module "std" _ | .pub _ (.module "std" _) => true
@@ -556,8 +580,10 @@ def parseProgram (src : String) (files : List (List String × String)) (check : 
       items ++ (["std", "core", "alloc"].filter fun r => library.any (·.1 == [r])).map fun r =>
         Syntax.Item.pub false (.module r none)
     else items
+  -- (A module's items as an earlier compile parsed them from the same, where
+  -- one did, `parsedKept`; and each module's items, for the next.)
   let rec fill (fuel : Nat) (path : List String) (items : List Syntax.Item) :
-      Except String (List Syntax.Item) :=
+      StateT (List (UInt64 × List Syntax.Item)) (Except String) (List Syntax.Item) :=
     items.mapM fun item => do
       let (wrap, inner) : (Syntax.Item → Syntax.Item) × Syntax.Item := match item with
         | .pub parent i => (Syntax.Item.pub parent, i)
@@ -572,19 +598,27 @@ def parseProgram (src : String) (files : List (List String × String)) (check : 
             | some items => pure items
             | none =>
               let text := ((files[k]?).map (·.2)).getD ""
-              match Syntax.parse fix text (base := 1000000 * (k + 2)) (records := records)
-                  (tables := tables) (path := here) (fixed := fixed && k ≥ (if std then library.length else 0))
-                  (packs := packs) (lexed := if k < library.length then stdTokens here text else tokensOf here) with
-              | .ok (items, _) => pure items
-              | .error e => throw s!"module `{shown}`: {e}"
+              let base := 1000000 * (k + 2)
+              let fixed := fixed && k ≥ (if std then library.length else 0)
+              let key := parseKey text base records tables here fixed packs
+              let items ← match parsedKept[key]? with
+                | some items => pure items
+                | none =>
+                  match Trace.timed s!"parse: module {shown}" fun _ => Syntax.parse fix text (base := base) (records := records)
+                      (tables := tables) (path := here) (fixed := fixed)
+                      (packs := packs) (lexed := if k < library.length then stdTokens here text else tokensOf here) with
+                  | .ok (items, _) => pure items
+                  | .error e => throw s!"module `{shown}`: {e}"
+              modify ((key, items) :: ·)
+              pure items
           pure (wrap (.module name (some (← fill fuel here parsed))))
         | none => throw s!"module `{shown}` has no file"
       | .module name (some body), fuel + 1 =>
         pure (wrap (.module name (some (← fill fuel (path ++ [name]) body))))
       | _, _ => pure item
-  let items ← fill 64 [] items
+  let (items, made) ← (fill 64 [] items).run []
   checkUnsafeImpls items
-  pure (prelude, items)
+  pure (prelude, items, made)
 
 /-- A program's items as the resolver gives them, each module's after a mark
 (`Syntax.unitMark`), put in an order that has every module after those it
@@ -634,7 +668,7 @@ def checkFirstPart (std drop : Bool) : Except String (Nat × Check.St) := do
     let resolved ← Syntax.Modules.resolve prelude []
     let all := withoutUnitMarks (Syntax.fillDefaults (← Syntax.expandAliases resolved.items))
     return (all.length, ← Check.checkFirst all resolved.info drop)
-  let (prelude, items) ← parseProgram "// std" []
+  let (prelude, items, _) ← parseProgram "// std" []
   let resolved ← Syntax.Modules.resolve prelude items
   -- (Its modules in the order a program has them, marks and all, so that
   -- what a program has first is these, item for item.)
@@ -694,8 +728,9 @@ partial def compileSourceAt (src : String) (check : Bool := true)
     (dotPicks : List (Nat × String) := []) (search : Bool := true) (memo : Infer.Memo := {})
     (firsts : List ((Bool × Bool) × (Nat × Check.St)) := [])
     (lexed : List (List String × Array Syntax.Token) := [])
-    (recvRefs : List (Nat × Bool) := []) : Except String Compiled := do
-  let (prelude, items) ← Trace.timed "parse" fun _ => parseProgram src files check few packs lexed
+    (recvRefs : List (Nat × Bool) := []) (parsedKept : Parsed := {})
+    (preludeKept : Option (List Syntax.Item × Syntax.Fixities) := none) : Except String Compiled := do
+  let (prelude, items, parsedMade) ← Trace.timed "parse" fun _ => parseProgram src files check few packs lexed parsedKept preludeKept
   -- (Clauses the checker found matching a reference with patterns of a
   -- value: read with those patterns written `&Pattern`.)
   let items := refPats.foldl (fun items (id, uniq, which) => Elab.refPatsItems id uniq which items) items
@@ -811,19 +846,19 @@ partial def compileSourceAt (src : String) (check : Bool := true)
       match Elab.refPatsFound e, Elab.dotOwnFound e, Elab.recvRefFound e with
       | some found, _, _ =>
         if check && refPats.length < 32 && !refPats.contains found then
-          match Trace.timed "compile again: a pattern of a reference" fun _ => compileSourceAt src check files few known packs kept checkKept (refPats ++ [found]) dotPicks search memo firsts lexed recvRefs with
+          match Trace.timed "compile again: a pattern of a reference" fun _ => compileSourceAt src check files few known packs kept checkKept (refPats ++ [found]) dotPicks search memo firsts lexed recvRefs parsedKept preludeKept with
           | .ok c => return c
           | .error e' => throw (clean e')
         else if check then throw (clean e) else pure (none, [], [])
       | none, some found, _ =>
         if check && dotPicks.length < 32 && !dotPicks.contains found then
-          match Trace.timed "compile again: a type's own function" fun _ => compileSourceAt src check files few known packs kept checkKept refPats (dotPicks ++ [found]) search memo firsts lexed recvRefs with
+          match Trace.timed "compile again: a type's own function" fun _ => compileSourceAt src check files few known packs kept checkKept refPats (dotPicks ++ [found]) search memo firsts lexed recvRefs parsedKept preludeKept with
           | .ok c => return c
           | .error e' => throw (clean e')
         else if check then throw (clean e) else pure (none, [], [])
       | none, none, some found =>
         if check && recvRefs.length < 32 && !recvRefs.contains found then
-          match Trace.timed "compile again: a receiver borrowed" fun _ => compileSourceAt src check files few known packs kept checkKept refPats dotPicks search memo firsts lexed (recvRefs ++ [found]) with
+          match Trace.timed "compile again: a receiver borrowed" fun _ => compileSourceAt src check files few known packs kept checkKept refPats dotPicks search memo firsts lexed (recvRefs ++ [found]) parsedKept preludeKept with
           | .ok c => return c
           | .error e' => throw (clean e')
         else if check then throw (clean e) else pure (none, [], [])
@@ -864,7 +899,7 @@ partial def compileSourceAt (src : String) (check : Bool := true)
       (places : List ((String × Nat) × Nat)) (made : Infer.Made) =>
     ({ core := out.program, ctorNames := out.ctorNames.map shownName, fnNames := out.fnNames
        opNames := out.opNames, cert, lent, plain := out.plain, places, checkKept := checkMade
-       inferMade := made, firstMade, libraryKept := libraryMade } : Compiled)
+       inferMade := made, firstMade, libraryKept := libraryMade, parsedMade } : Compiled)
   let plain := fun (blocks : Option Elab.Blocks) (failed : List (Bool × Bool)) => do
     let out ← Trace.timed "elaborate" fun _ => elaborate all blocks
     -- What is unsafe is outside what Core's rules are about: a program that
@@ -1146,7 +1181,8 @@ def compileSource (src : String) (check : Bool := true)
     (files : List (List String × String) := []) (few : Bool := false)
     (known : List ((String × Nat) × Nat) := []) (kept : List Typing.Cert := [])
     (checkKept : Check.Kept := []) (search : Bool := true) (memo : Infer.Memo := {})
-    (firsts : List ((Bool × Bool) × (Nat × Check.St)) := []) : Except String Compiled := do
+    (firsts : List ((Bool × Bool) × (Nat × Check.St)) := []) (parsedKept : Parsed := {})
+    (preludeKept : Option (List Syntax.Item × Syntax.Fixities) := none) : Except String Compiled := do
   -- (What the default prelude has from the library, where the text uses it;
   -- and each text lexed, once.)
   let src := src ++ stdPreludeUses src
@@ -1162,7 +1198,7 @@ def compileSource (src : String) (check : Bool := true)
   let lists := lists != 0
   let rec go (fuel packs : Nat) : Except String Compiled :=
     match compileSourceAt src check files few known packs kept checkKept (search := search) (memo := memo)
-        (firsts := firsts) (lexed := lexed) with
+        (firsts := firsts) (lexed := lexed) (parsedKept := parsedKept) (preludeKept := preludeKept) with
     | .error e =>
       let wanted := longestUnimplemented e
       match fuel with

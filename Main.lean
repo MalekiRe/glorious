@@ -280,6 +280,8 @@ def showCore (names : Array String) (p : Core.Program) : String := Id.run do
 
 
 
+instance : Nonempty Syntax.Fixities := ⟨{}⟩
+
 /-- Compile the program at `path`, with the modules it has in other files.
 What the last compile of it found for each place where a borrow can be a scope
 of its own is where this one starts; and what this one finds is kept for the
@@ -318,10 +320,16 @@ def compileFile (path : String) (checkKept : Check.Kept := []) (search : Bool :=
     [(true, false), (true, true), (false, false), (false, true)].filterMapM fun (std, drop) => do
       pure (((← Store.load (α := List (Nat × Check.St)) (library / s!"first-{std}-{drop}") "first").bind
         (·.head?)).map ((std, drop), ·))
+  -- (The prelude as any earlier process of this compiler parsed it.)
+  let preludeKept ← if (← IO.getEnv "GLORIOUS_FRESH").isSome then pure none else
+    Store.load (α := List Syntax.Item × Syntax.Fixities) (library / "prelude") "prelude"
+  -- (Modules' items as an earlier compile parsed them.)
+  let parsedKept : Parsed ← if (← IO.getEnv "GLORIOUS_FRESH").isSome then pure {} else
+    pure (Std.HashMap.ofList ((← Store.load (α := List (UInt64 × List Syntax.Item)) (dir / "parsed") "parsed").getD []))
   let text ← IO.FS.readFile path
   let files ← moduleFiles path
   let result ← Trace.timedIO "compile" (IO.lazyPure fun _ =>
-    compileSource text true files (few := true) known kept checkKept search memo firsts)
+    compileSource text true files (few := true) known kept checkKept search memo firsts parsedKept preludeKept)
   if let .ok c := result then Trace.timedIO "save what is kept" do
     -- (What a compile that did not look for each place found is not kept
     -- for one that does.)
@@ -329,6 +337,10 @@ def compileFile (path : String) (checkKept : Check.Kept := []) (search : Bool :=
       writePlaces file c.places
       if let some cert := c.cert then Target.writeCert dir cert
     unless c.checkKept.isEmpty do Store.save (dir / "checked") "checked" c.checkKept
+    if preludeKept.isNone then
+      if let .ok parsed := readPrelude.get then Store.save (library / "prelude") "prelude" parsed
+    -- (Saved again only where something was parsed anew.)
+    unless c.parsedMade.all (parsedKept.contains ·.1) do Store.save (dir / "parsed") "parsed" c.parsedMade
     unless c.inferMade.isEmpty do Store.save (dir / "infer") "infer" (Infer.toMemo c.inferMade)
     if let some ((std, drop), first) := c.firstMade then
       Store.save (library / s!"first-{std}-{drop}") "first" [first]
@@ -688,7 +700,7 @@ certificate with all of them asked for. -/
 def why (path : String) : IO UInt32 := do
   let src ← IO.FS.readFile path
   let files ← moduleFiles path
-  let .ok (prelude, items) := parseProgram src files | IO.println "parse failed"; return 1
+  let .ok (prelude, items, _) := parseProgram src files | IO.println "parse failed"; return 1
   let .ok resolved := Syntax.Modules.resolve prelude items | IO.println "resolve failed"; return 1
   let .ok all := Syntax.expandAliases resolved.items | IO.println "aliases failed"; return 1
   let all := Syntax.fillDefaults all
@@ -743,7 +755,7 @@ def stages (path : String) : IO UInt32 := do
     let now ← IO.monoMsNow
     IO.println s!"{what}: {now - last} ms"
     pure now
-  let .ok (prelude, items) := parseProgram src files | IO.println "parse failed"; return 1
+  let .ok (prelude, items, _) := parseProgram src files | IO.println "parse failed"; return 1
   IO.println s!"{prelude.length + items.length} items"
   last ← lap "parse" last
   let .ok resolved := Syntax.Modules.resolve prelude items | IO.println "resolve failed"; return 1
