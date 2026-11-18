@@ -1077,6 +1077,18 @@ impl<E, F, P, T, S> Dispatch<E, S> for (On<F, P>, T) where T: Dispatch<E, S> {
     fn dispatch(list, event, world, commands) { <T as Dispatch<E, S>>::dispatch(&mut list.1, event, world, commands) }
 }
 
+// What an app is given by a plugin: a type of its own whose `build` adds to
+// the app what the plugin has, or a function from an app to an app. What the
+// app is then is found from `build` (`type Out = _;`).
+pub trait Plugin<S, L> {
+    type Out;
+    fn build(Self, App<S, L>) -> Self::Out;
+}
+impl<S, L, Y> Plugin<S, L> for fn(App<S, L>) -> Y {
+    type Out = Y;
+    fn build(f, app) { f(app) }
+}
+
 // A world of columns `S` and the registered systems `L`.
 pub struct App<S, L> { pub world: World<S>, systems: L }
 
@@ -1123,8 +1135,10 @@ impl<S, L> App<S, L> {
         App { world: world, systems: (On { label: fn(event: E) { () }, systems: <P as IntoSystem<E, S>>::into_system(systems) }, before) }
     }
 
-    // A plugin is a function from an app to an app.
-    pub fn add_plugins<Y>(app: Self, plugin: fn(Self) -> Y) -> Y { plugin(app) }
+    // Add what a plugin has: its components, resources and systems.
+    pub fn add_plugins<P>(app: Self, plugin: P) -> <P as Plugin<S, L>>::Out where P: Plugin<S, L> {
+        <P as Plugin<S, L>>::build(plugin, app)
+    }
 
     // The app, ready to run.
     pub fn build(app: Self) -> Self { app }

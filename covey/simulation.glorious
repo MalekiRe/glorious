@@ -12,7 +12,7 @@
 // 12
 mod ecs;
 
-use ecs::{App, Entity, Mut, Column, Commands, end, run_if, chain, spawn, fold_all, each, Query};
+use ecs::{App, Plugin, Entity, Mut, Column, Commands, end, run_if, chain, spawn, fold_all, each, Query};
 
 struct Position(Int)
 struct Velocity(Int)
@@ -77,9 +77,14 @@ fn reap<S>(healths: &Column<Health>, commands: &mut Commands<S>, ended: &mut End
     }
 }
 
-// A plugin: a function from an app to an app.
-fn physics(app) {
-    app.add_systems(Update, (integrate, friction.run_if(moving), bound).chain())
+// Plugins: one a type of its own, what it builds found from `build`; one a
+// function from an app to an app.
+struct Physics
+impl<S, L> Plugin<S, L> for Physics {
+    type Out = _;
+    fn build(physics, app) {
+        app.add_systems(Update, (integrate, friction.run_if(moving), bound).chain())
+    }
 }
 
 fn combat(app) {
@@ -92,7 +97,7 @@ fn main() -> Int {
         .register<Velocity>()
         .register<Health>()
         .insert_resource(Ended(0))
-        .add_plugins(physics)
+        .add_plugins(Physics)
         .add_plugins(combat).build();
     game.world.spawn_bundle((Position(0), Velocity(5), Health(3)));
     game.world.spawn_bundle((Position(100), Velocity(7), Health(1)));

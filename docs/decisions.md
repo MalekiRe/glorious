@@ -5199,6 +5199,21 @@ Covey is the toolbox for finding what the language lacks. Rewriting it after
   "unknown type `F`". Fixed.
 - **How a callable inside a condition is destroyed** was asked as of a
   type without an implementation: callables have one, for all. Fixed.
+- **A type an implementation leaves to be found**, `type Out = _;`, was
+  read and never decided. It is now found from the implementation's
+  functions, which are checked before every function that may use it (but
+  those they are made from), and said in the implementation's own type
+  parameters; what those functions need of them the implementation assumes,
+  and whoever uses it meets. This is what upstream's `-> impl Systems<S>`
+  does for a plugin: covey's `Plugin<S, L>` has `type Out = _;` and a
+  `build`. Added, with a case.
+- **A block written for a function named as a value** takes references of
+  one lifetime, not of any: a plugin's systems kept in a value, called with
+  a borrow of something made after the value, are refused ("could be used
+  after its block has ended"). Open: covey does not call them so.
+- **Two queries of one component in one system**: the first takes the
+  column out of the world and the second finds it empty. Open (covey):
+  `changes.glorious` uses a system for each.
 - **A plugin generic in the app** whose systems are made when registered
   left their world's type undecided ("`Columns` is needed of a type that
   nothing here decides"), and then found no implementation. Two causes: the

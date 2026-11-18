@@ -342,6 +342,19 @@ def rekey (b : Bound) : M Bound := do
     pure { b with trait := ← implKey (Syntax.traitBase b.trait) b.ty b.args }
   else pure b
 
+/-- A type with the named type parameters it is made of, `'P@f`, the
+variables `back` says. -/
+partial def unrigidTy (back : List (String × Nat)) : Ty → Ty
+  | .con n [] => match back.lookup n with
+    | some id => .var id
+    | none => .con n []
+  | .con n as => .con n (as.map (unrigidTy back))
+  | .tuple ts => .tuple (ts.map (unrigidTy back))
+  | .fn ps r effs tail cap =>
+    .fn (ps.map (unrigidTy back)) (unrigidTy back r) (effs.map fun (e, as) => (e, as.map (unrigidTy back))) tail cap
+  | .ref how t cap => .ref how (unrigidTy back t) cap
+  | t => t
+
 /-- Meet the bounds of the group just inferred, and give each of its functions
 its type. A bound on a type the function is generic in becomes something the
 function is given; every other is met by `Traits.solve`. -/
@@ -785,7 +798,32 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
         for (key, _, t) in apart do
           if (← keyOf t).isNone then
             compound := (d.name, key, ← spellTy t, Ty.con s!"'%condition:{d.name}:{key}:{← spellTy t}" []) :: compound
-        pure (plain ++ apart)
+        let held := plain ++ apart
+        -- (One that leaves a type to be found from its functions, `type Out
+        -- = _;`, assumes what they need of its type parameters too: what is
+        -- found is found with that, and whoever uses the implementation has
+        -- to meet it.)
+        let holed := im.assocs.any fun (_, t) => match t with
+          | .var id => !im.pvars.any (·.2 == id)
+          | _ => false
+        if !holed then pure held
+        else
+          let back := im.pvars.map fun (p, id) => (s!"'{p}@{d.name}", id)
+          let more := leafs.toList.filter fun (tr, k, t) =>
+            match t with
+            | .con n [] => (back.lookup n).isSome && !held.any (fun h => h.1 == tr && h.2.1 == k)
+            | _ => false
+          let mut asked : List (String × List Ty × Ty) := []
+          for (tr, _, t) in more do
+            let (base, cargs) := match keyed.find? (·.1 == tr) with
+              | some (_, b, as) => (b, as)
+              | none => (tr, [])
+            let cargs ← cargs.mapM zonk
+            asked := asked ++ [(base, cargs.map (unrigidTy back), unrigidTy back t)]
+          unless asked.isEmpty do
+            modify fun s => { s with impls := s.impls.map fun i =>
+              if i.dictFn == im.dictFn then { i with extra := i.extra ++ asked } else i }
+          pure (held ++ more)
       | none =>
         let inferred := leafs.toList.filter fun (_, _, k) =>
           match k with

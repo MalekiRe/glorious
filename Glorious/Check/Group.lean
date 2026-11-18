@@ -482,6 +482,29 @@ def checkGroup (decls : List FnDecl) : M Unit := do
   checkLoans
   settleBounds decls defs
   modify fun s => { s with assocUses := #[] }
+  -- A type an implementation leaves to be found from its functions, found:
+  -- of the implementation's own type parameters, which are this function's
+  -- here.
+  for d in decls do
+    if let some (im, _) := d.impl then
+      let owner := rigidOwner decls d
+      let back := im.pvars.map fun (p, id) => (s!"'{p}@{owner}", id)
+      let unrigid := unrigidTy back
+      let mut assocs : List (String × Ty) := []
+      let mut found := false
+      for (n, t) in im.assocs do
+        match t with
+        | .var id =>
+          if im.pvars.any (·.2 == id) then assocs := assocs ++ [(n, t)]
+          else
+            let z ← zonk t
+            if let .var _ := z then
+              throw (inFunction d.name s!"what `{n}` is was left to be found from the implementation's functions, and they do not decide it")
+            assocs := assocs ++ [(n, unrigid z)]
+            found := true
+        | _ => assocs := assocs ++ [(n, t)]
+      if found then
+        modify fun s => { s with impls := s.impls.map fun i => if i.dictFn == im.dictFn then { i with assocs } else i }
   -- Later functions follow calls into these as they will be elaborated.
   let cs := (← get).coercions.toList
   unless cs.isEmpty do

@@ -46,6 +46,29 @@ def adopt (st : St) : M Unit := do
   let now ← get
   set { st with modules := now.modules, ownItems := now.ownItems }
 
+/-- Does an implementation leave a type to be found from its functions,
+`type Out = _;`? (What it says is then a variable of none of its own.) -/
+def implHoled (im : ImplDecl) : Bool :=
+  im.assocs.any fun (_, t) => match t with
+    | .var id => !im.pvars.any (·.2 == id)
+    | _ => false
+
+/-- The functions an implementation gives, as functions to check. -/
+def implFnDecls (im : ImplDecl) : M (List FnDecl) := do
+  let mut out : List FnDecl := []
+  for item in im.methods do
+    if let .fn m written annots ret clauses := item then
+      if let some sig := (← get).methods.lookup m then
+        -- (Its type parameters: the head's arguments, and then those that
+        -- are only inside one, or among the trait's own; and the lifetimes
+        -- it writes of its own, `fn at<'a>(..)`.)
+        let inner := (im.pvars.map (·.1)).filter (!im.params.contains ·)
+        let lifetimes := (genericParams written).filter isLifetime
+        out := out ++ [{ name := Syntax.implFnName im.trait im.head m,
+                         params := im.params ++ inner ++ sig.mparams.map (·.1) ++ lifetimes, annots,
+                         ret, clauses, impl := some (im, sig) }]
+  pure out
+
 /-- Check items. With `kept` from an earlier check of a program that began
 alike (`seed`: what was checked before them), the state after each step whose
 key is among them is taken from there instead of checked again: the
@@ -137,7 +160,27 @@ def checkItems (items : List Item) (seed : UInt64 := 0) (kept : Kept := []) : M 
                    | some d => (name, d.clauses)
                    | none => (name, clauses),
                  runFns := later.foldl (fun m d => m.insert d.name d.clauses) s.runFns } : M Unit)
-    let groups := (components names deps).map fun comp => comp.filterMap fun n => decls.find? (·.name == n)
+    -- The functions of implementations that leave a type to be found from
+    -- them (`type Out = _;`): checked before every function that may use
+    -- what they find, but those they are themselves made from.
+    let holed ← ((← get).impls.toList.drop before).filter implHoled |>.flatMapM implFnDecls
+    let holeNames := holed.map (·.name)
+    let allDecls := decls ++ holed
+    let allNames := names ++ holeNames
+    let mentionsAll := fun (name : String) =>
+      match allDecls.find? (·.name == name) with
+      | some d => ((d.clauses.flatMap (Elab.fvClause [])).filter allNames.contains).eraseDups
+      | none => []
+    let madeFrom := Id.run do
+      let mut seen := holeNames
+      for _ in [0:allNames.length] do
+        seen := (seen ++ seen.flatMap mentionsAll).eraseDups
+      pure seen
+    let deps := fun (name : String) =>
+      if holeNames.contains name then mentionsAll name
+      else if madeFrom.contains name then deps name
+      else (deps name ++ holeNames).eraseDups
+    let groups := (components allNames deps).map fun comp => comp.filterMap fun n => allDecls.find? (·.name == n)
     for (group, k) in groups.zipIdx do
       key := groupKey key group
       match look key with
@@ -146,23 +189,16 @@ def checkItems (items : List Item) (seed : UInt64 := 0) (kept : Kept := []) : M 
       made := (key, ← get) :: made
     -- The functions implementations give, each on its own: any function may
     -- call them, but only through a trait, whose types are declared.
+    -- (Those of one that leaves a type to be found were checked with the
+    -- rest, before what may use it.)
     for im in (← get).impls.toList.drop before do
-      for item in im.methods do
-        if let .fn m written annots ret clauses := item then
-          if let some sig := (← get).methods.lookup m then
-            -- (Its type parameters: the head's arguments, and then those
-            -- that are only inside one, or among the trait's own; and the
-            -- lifetimes it writes of its own, `fn at<'a>(..)`.)
-            let inner := (im.pvars.map (·.1)).filter (!im.params.contains ·)
-            let lifetimes := (genericParams written).filter isLifetime
-            let d : FnDecl := { name := Syntax.implFnName im.trait im.head m,
-                                params := im.params ++ inner ++ sig.mparams.map (·.1) ++ lifetimes, annots,
-                                ret, clauses, impl := some (im, sig) }
-            key := groupKey key [d]
-            match look key with
-            | some st => restore st []
-            | none => checkGroup [d]
-            made := (key, ← get) :: made
+      unless implHoled im do
+        for d in ← implFnDecls im do
+          key := groupKey key [d]
+          match look key with
+          | some st => restore st []
+          | none => checkGroup [d]
+          made := (key, ← get) :: made
     for c in coercing do
       unless (((← get).fnBounds.lookup c).getD 0) == 0 do
         throw s!"`coerce {c}`: a coercion cannot need a trait of a type it is used at"
