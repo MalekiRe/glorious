@@ -85,11 +85,46 @@ partial def toSTy (t : Ty) : M Traits.STy := do
     | .ref _ _ _ => pure (.con "(reference)" [])
     | .var _ => pure (.var 0)
 
+/-- What a trait leaves to an implementation that `t` stands for, where `t`
+is a type not yet known that was read from one (`unproject`): as written,
+`<H as Assoc>::Out`, with what it is of as now known. -/
+def projectionOf (t : Ty) : M (Option Ty) := do
+  let .var v ← find t | return none
+  for (tr, self, name, a, _, _) in (← get).assocUses do
+    if let .var w ← find a then
+      if w == v then return some (.con Syntax.projMark [← zonk self, .con tr [], .con name []])
+  return none
+
+/-- The numbers under which a condition of an implementation on a type made
+from its type parameters, `where (A, (B, ())): Fetch<W>`, is known in the
+implementation's functions: one for each function it was said in. -/
+def conditionKeys (key : String) (t : Ty) : M (List Nat) := do
+  let said := s!"{key}:{← spellTy (← zonk t)}"
+  let found := (((← get).conditionsAt[said]?).getD []).reverse.map (2 * · + 1)
+  if !found.isEmpty then return found
+  -- (Of what a trait leaves to an implementation, not known here: the
+  -- condition written of it, `where <H as Assoc>::Out: Act`.)
+  let some p ← projectionOf t | return []
+  let said := s!"{key}:{← spellTy p}"
+  pure ((((← get).conditionsAt[said]?).getD []).reverse.map (2 * · + 1))
+
+
+/-- The conditions written of what a trait leaves to an implementation,
+`where <H as Assoc>::Out: Act`, where `t` is that. -/
+def projectedCondition (key : String) (t : Ty) : M (List Nat) := do
+  match ← find t with
+  | .con n _ => if n == Syntax.projMark then conditionKeys key t else pure []
+  | .var _ => if (← projectionOf t).isSome then conditionKeys key t else pure []
+  | _ => pure []
+
 /-- The bounds on types a function is generic in that a bound comes down to,
 each with the number of its type. This is only to say what a function needs
 and to explain a failure: the evidence itself is `Traits.solve`'s. -/
 partial def leaves (pos trait : String) (t : Ty) : M (List (String × Nat × Ty)) := do
   let t ← find t
+  -- (What a trait leaves to an implementation, not known here, of which a
+  -- condition is written: that condition.)
+  if let k :: _ ← projectedCondition trait t then return [(trait, k, t)]
   match ← keyOf t with
   | some k => pure [(trait, k, t)]
   | none =>
@@ -189,13 +224,6 @@ def subKey (trait : String) (ty : Ty) (args : List Ty) : M String := do
   let several ← severalFor trait ((← find ty).head.map (·.1))
   if args.isEmpty && !several then pure trait else implKey trait ty args
 
-/-- The numbers under which a condition of an implementation on a type made
-from its type parameters, `where (A, (B, ())): Fetch<W>`, is known in the
-implementation's functions: one for each function it was said in. -/
-def conditionKeys (key : String) (t : Ty) : M (List Nat) := do
-  let said := s!"{key}:{← spellTy (← zonk t)}"
-  pure ((((← get).conditionsAt[said]?).getD []).reverse.map (2 * · + 1))
-
 /-- A condition's type and the trait's arguments with what traits leave to
 implementations in them, `<H as Touches>::List`, found where it can be. -/
 def unprojectedCondition (subject : Ty) (cargs : List Ty) : M (Ty × List Ty) := do
@@ -211,7 +239,7 @@ what fitting finds of it is the same each time it is asked in a group. -/
 partial def fitSpelled : Ty → M (Option String)
   | .con n args => do
     let some parts ← spelledAll args | return none
-    pure (some s!"{n}<{", ".intercalate parts}>")
+    pure (some (if parts.isEmpty then n else s!"{n}<{", ".intercalate parts}>"))
   | .tuple args => do
     let some parts ← spelledAll args | return none
     pure (some s!"({", ".intercalate parts})")
@@ -261,6 +289,8 @@ partial def solveFittingNow (givens : Traits.Givens) (fuel : Nat) (key : String)
       | .var k => if givens.contains (Syntax.destroyTrait, k) then .var k else .con "(reference)" []
       | .con n args => .con n (args.map settle)
     return Traits.solveIx (← get).kimpls givens 100000 key (settle (← toSTy ty))
+  for k in ← projectedCondition key ty do
+    if let some g := Traits.findGiven key k givens then return some (.given g)
   if let some k ← keyOf ty then return (Traits.findGiven key k givens).map .given
   -- (What the function is given of a type made from its type parameters.)
   for k in ← conditionKeys key ty do
@@ -295,19 +325,24 @@ mutual
 
 /-- `leaves`, where implementations are chosen by fitting types. -/
 partial def leavesFitting (pos key : String) (t : Ty) (args : List Ty) (owner : String := "")
-    (via : List String := []) : M (List (String × Nat × Ty × List Ty)) := do
-  if key == Syntax.destroyTrait then return ← leavesFittingNow pos key t args owner via
+    (via : List String := []) (asking : List String := []) : M (List (String × Nat × Ty × List Ty)) := do
+  if key == Syntax.destroyTrait then return ← leavesFittingNow pos key t args owner via asking
   -- (Found once in a group where the type is all known; what is refused is
   -- said each time, with where it was asked.)
-  let some spelled ← fitKey t args | leavesFittingNow pos key t args owner via
+  let some spelled ← fitKey t args | leavesFittingNow pos key t args owner via asking
   let k := (owner, key, spelled)
   if let some ls := (← get).leavesFit[k]? then return ls
-  let ls ← leavesFittingNow pos key t args owner via
+  -- (One asked again while it is being found: implementations whose
+  -- conditions ask each other, which no answer ends.)
+  let here := s!"{key} of {spelled}"
+  if asking.contains here then
+    throw s!"{pos}`{Syntax.traitShown key}` of `{showTy (← zonk t)}` asks itself: its implementation's conditions come back to it ({" -> ".intercalate ((here :: asking).reverse)})"
+  let ls ← leavesFittingNow pos key t args owner via (here :: asking)
   modify fun s => { s with leavesFit := s.leavesFit.insert k ls }
   pure ls
 
 partial def leavesFittingNow (pos key : String) (t : Ty) (args : List Ty) (owner : String := "")
-    (via : List String := []) : M (List (String × Nat × Ty × List Ty)) := do
+    (via : List String := []) (asking : List String := []) : M (List (String × Nat × Ty × List Ty)) := do
   let t ← find t
   -- (How a value is destroyed is found by the type's shape alone, as
   -- `solveFitting` finds it: no condition is left of what it finds.)
@@ -316,6 +351,7 @@ partial def leavesFittingNow (pos key : String) (t : Ty) (args : List Ty) (owner
     -- (Nor is it asked of a callable, which is given up whole, as it is
     -- not of a bound's own type.)
     if let .fn .. := t then return []
+  if let k :: _ ← projectedCondition key t then return [(key, k, t, args)]
   if let some k ← keyOf t then return [(key, k, t, args)]
   -- (What the function is given of a type made from its type parameters.)
   let said := s!"'%condition:{owner}:{key}:{← spellTy (← zonk t)}"
@@ -339,10 +375,10 @@ partial def leavesFittingNow (pos key : String) (t : Ty) (args : List Ty) (owner
   let this := s!"`{(shown.takeWhile (· != '<')).toString}` of `{showTy (← zonk t)}`"
   for (tr, j) in im.context do
     let arg := hargs[j]?.getD .unit
-    out := out ++ (← leavesFitting pos (← subKey tr arg []) arg [] owner (this :: via))
+    out := out ++ (← leavesFitting pos (← subKey tr arg []) arg [] owner (this :: via) asking)
   for (tr, cargs, subject) in im.extra do
     let (subject, cargs) ← unprojectedCondition (subst at_ [] [] subject) (cargs.map (subst at_ [] []))
-    out := out ++ (← leavesFitting pos (← subKey tr subject cargs) subject cargs owner (this :: via))
+    out := out ++ (← leavesFitting pos (← subKey tr subject cargs) subject cargs owner (this :: via) asking)
   pure out
 
 end
@@ -972,7 +1008,12 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
       owner == b.owner && Syntax.traitBase key == Syntax.traitBase b.trait && ty == spelled
     let solve := fun (trait : String) (ty : Ty) (sty : Traits.STy) => do
       if (← get).patterned && b.trait != Syntax.destroyTrait then solveFitting givens 200 trait ty b.args
-      else pure (Traits.solveIx kimpls givens 100000 trait sty)
+      else
+        -- (Of what a trait leaves to an implementation, not known here: the
+        -- condition written of it.)
+        let given ← (← projectedCondition trait ty).findSomeM? fun k => do
+          pure ((Traits.findGiven trait k givens).map Traits.Dict.given)
+        pure (given <|> Traits.solveIx kimpls givens 100000 trait sty)
     let solved ← match ← solve b.trait b.ty sty with
       | some d => pure (some d)
       | none =>

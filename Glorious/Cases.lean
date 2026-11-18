@@ -50,6 +50,18 @@ fn main() -> Int { let f = get; let x = 7; let a = f(&x); let y = 8; a + f(&y) }
   ⟨"fn walk(n: Int) -> Int { let mut i = 0; let mut s = 0; while({ i < n }) { s = s + walk(n - 1); i = i + 1 }; s + 1 }
 fn main() -> Int { walk(3) }",
     [], "16"⟩,
+  -- A trait's function called at what another trait leaves to an
+  -- implementation, by a condition the implementation writes of it.
+  ⟨"trait Assoc { type Out; }
+trait Act { fn act() -> Int }
+struct A
+struct B
+impl Assoc for A { type Out = B; }
+impl Act for B { fn act() { 7 } }
+trait Go { fn go() -> Int }
+impl<H> Go for (H,) where H: Assoc, <H as Assoc>::Out: Act { fn go() { <<H as Assoc>::Out as Act>::act() } }
+fn main() -> Int { <(A,) as Go>::go() }",
+    [], "7"⟩,
 
   -- Data, tuples and projection.
   ⟨"fn main() { (1, (2, 3)) }",
