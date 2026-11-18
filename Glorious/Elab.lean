@@ -932,7 +932,7 @@ partial def elabGiven (scope : Scope) (id : Nat) (body : List Stmt) : M Atom := 
   -- activation it stood for, if it was captured here or taken, in an
   -- activation inside this one, from what a block of this one captured.
   let layout : List (String × Option Atom) :=
-    match ((← read).blocks.getD {}).links.lookup id with
+    match ((← read).blocks.getD {}).links[id]? with
     | some owner =>
       match s.layouts.lookup owner with
       | some (uid, layout) =>
@@ -974,10 +974,10 @@ partial def elabGiven (scope : Scope) (id : Nat) (body : List Stmt) : M Atom := 
     -- The block given up took what it was given, if it was itself given
     -- something it did not name.
     let blocks := (← read).blocks.getD {}
-    let arity := match blocks.links.lookup id with
+    let arity := match blocks.links[id]? with
       | some owner =>
         if blocks.given.contains owner
-            || ((blocks.packs.lookup owner).map
+            || (blocks.packs[owner]?.map
                   (fun names => names != [Syntax.spreadMark] && names != [Syntax.nowMark])).getD false then 1
         else 0
       | none => 0
@@ -1455,17 +1455,18 @@ def untrait (blocks : Blocks) (items : List Item) : List Item × Blocks :=
     | .fn name params annots ret clauses => [fnItem name params annots ret clauses]
     | item => [item]
   let out := out ++ destroyers tr
-  let coercions := blocks.coercions.map fun (site, fn) =>
-    match site with
-    | .arg call index =>
-      match tr.dictsAt[call]?, tr.methodsAt[call]? with
-      | some ds, none => (Site.arg call (index + ds.length), fn)
-      | some [d], some idx =>
-        match staticMethod tr d idx with
-        | some (_, subs) => (Site.arg call (index + subs.length), fn)
-        | none => (site, fn)
-      | _, _ => (site, fn)
-    | _ => (site, fn)
+  let coercions := blocks.coercions.fold (init := {}) fun (m : Std.HashMap Site String) site fn =>
+    let site := match site with
+      | .arg call index =>
+        match tr.dictsAt[call]?, tr.methodsAt[call]? with
+        | some ds, none => Site.arg call (index + ds.length)
+        | some [d], some idx =>
+          match staticMethod tr d idx with
+          | some (_, subs) => Site.arg call (index + subs.length)
+          | none => site
+        | _, _ => site
+      | _ => site
+    m.insert site fn
   (out, { blocks with coercions := coercions })
 
 /-! ## Lifetimes
@@ -1547,18 +1548,18 @@ def neverName : String := "%never"
 goes through a reference, the way to the field by number, and what is gone
 through; and for each field read by name, which field it is. -/
 structure FieldInfo where
-  shapes : List (Nat × Bool × List Nat × List (Option String × Nat))
-  reads : List (Nat × Nat)
+  shapes : Std.HashMap Nat (Bool × List Nat × List (Option String × Nat))
+  reads : Std.HashMap Nat Nat
   /-- The blocks given what an `is` found, each with the names it then has. -/
-  packs : List (Nat × List String) := []
+  packs : Std.HashMap Nat (List String) := {}
   /-- In the function being written out: each callable that runs in an
   environment another holds, with the one that holds it. -/
   members : List (String × String) := []
   /-- Calls that give a name where a callable sharing an environment is
   wanted, and where. -/
-  wraps : List (Nat × List Nat) := []
+  wraps : Std.HashMap Nat (List Nat) := {}
   /-- The fields read by name of what a named reference points to. -/
-  derefs : List Nat := []
+  derefs : Std.HashSet Nat := {}
 
 /-- A call as it is where callables share an environment. In a function given
 such callables, a call of one that does not hold the environment gives it the
@@ -1566,7 +1567,7 @@ one that does, to run in its place. And where a name is given for such a
 callable, it is given as a callable that takes what holds the environment and
 calls the name. -/
 def shareEnv (info : FieldInfo) (id : Nat) (f : Expr) (args : List Expr) : Expr × List Expr :=
-  let args := match info.wraps.lookup id with
+  let args := match info.wraps[id]? with
     | some places =>
       (args.zip (List.range args.length)).map fun (a, i) =>
         if places.contains i then Expr.closure 0 [.mk [.wild] [.expr (.call 0 a [])]] else a
@@ -1591,7 +1592,7 @@ private partial def unfieldExpr (info : FieldInfo) : Expr → Expr
     .tailCall id (unfieldExpr info f) (args.map (unfieldExpr info))
   | .fieldOf id e name =>
     -- The checker said which field the name is.
-    match info.reads.lookup id with
+    match info.reads[id]? with
     | some i =>
       -- Of what a reference points to, if the checker found it so.
       if info.derefs.contains id then .proj (.deref (unfieldExpr info e)) i
@@ -1601,7 +1602,7 @@ private partial def unfieldExpr (info : FieldInfo) : Expr → Expr
   | .reborrow u e => .reborrow u (unfieldExpr info e)
   | .closure id clauses =>
     -- A block given what an `is` found takes it apart under its names.
-    match info.packs.lookup id, clauses with
+    match info.packs[id]?, clauses with
     | some names, [.mk [] body] =>
       -- A block that is run where it is written.
       if names == [Syntax.nowMark] then .call 0 (.closure id [.mk [] (unfieldStmts info body)]) []
@@ -1618,7 +1619,7 @@ private partial def unfieldExpr (info : FieldInfo) : Expr → Expr
       else .closure id (clauses.map (unfieldClause info))
     | _, _ => .closure id (clauses.map (unfieldClause info))
   | .refField id uniq x way star =>
-    match info.shapes.lookup id with
+    match info.shapes[id]? with
     | none => .refField id uniq x way star
     | some (viaRef, path, shape) =>
       -- A step into one of a type's several constructors is followed by
@@ -1663,7 +1664,7 @@ def unfield (b : Blocks) (items : List Item) : Except String (List Item) := do
   pure (items.map fun
     | .fn name params annots ret clauses =>
       -- Each callable that does not hold its environment, with the one that does.
-      let members := ((b.envFns.lookup name).getD []).flatMap fun group =>
+      let members := (b.envFns.getD name []).flatMap fun group =>
         match group with
         | holder :: rest => rest.map (·, holder)
         | [] => []

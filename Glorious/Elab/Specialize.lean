@@ -320,20 +320,20 @@ def dotOwnItems (call : Nat) (fn : String) : List Item → List Item :=
 
 /-- A program with the arguments the checker chose to give as other than
 written (`Blocks.argsChosen`) written in. -/
-def argsChosenItems (picks : List ((Nat × Nat) × Expr)) (items : List Item) : List Item :=
+def argsChosenItems (picks : Std.HashMap (Nat × Nat) Expr) (items : List Item) : List Item :=
   if picks.isEmpty then items else
   Rewrite.items (items := items) { onExpr := fun go => fun
     | .call i f args =>
-      some (.call i (go.ex f) ((args.map go.ex).zipIdx.map fun (a, k) => (picks.lookup (i, k)).getD a))
+      some (.call i (go.ex f) ((args.map go.ex).zipIdx.map fun (a, k) => picks.getD (i, k) a))
     | _ => none }
 
 /-- A program with the functions of dot calls the checker chose by the
 value's type (`Blocks.dotChosen`) written in. -/
-def chosenItems (picks : List (Nat × String × Nat)) (items : List Item) : List Item :=
+def chosenItems (picks : Std.HashMap Nat (String × Nat)) (items : List Item) : List Item :=
   if picks.isEmpty then items else
   Rewrite.items (items := items) { onExpr := fun go => fun
     | .call i (.name _ _) args =>
-      (picks.lookup i).map fun (fn, how) =>
+      picks[i]?.map fun (fn, how) =>
         let args := args.map go.ex
         let args := match how, args with
           | 0, _ => args

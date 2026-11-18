@@ -713,7 +713,7 @@ def why (path : String) : IO UInt32 := do
   let written := all
   let all := Elab.eraseLifetimes all
   let .ok (all, blocks) := lowered blocks written all | IO.println "lowering failed"; return 1
-  let all := Elab.reachable ("main" :: blocks.coercions.map (·.2)) all
+  let all := Elab.reachable ("main" :: blocks.coercions.toList.map (·.2)) all
   let declared := Elab.withDeclared written all
   -- (`GLORIOUS_LENDS=2,0,1`: how each place is tried, in place of all at once.)
   let asked := ((← IO.getEnv "GLORIOUS_LENDS").map fun s => (s.splitOn ",").map String.toNat!)
@@ -772,12 +772,12 @@ def stages (path : String) : IO UInt32 := do
   let blocks ← match Check.checkProgram all resolved.info drops with
     | .ok blocks => pure blocks
     | .error e => IO.println s!"check failed: {e}"; return 1
-  IO.println s!"{blocks.given.length} given"
+  IO.println s!"{blocks.given.size} given"
   last ← lap "check" last
   let written := all
   let all := Elab.eraseLifetimes all
   let .ok (all, blocks) := lowered blocks written all | IO.println "lowering failed"; return 1
-  let all := Elab.reachable ("main" :: blocks.coercions.map (·.2)) all
+  let all := Elab.reachable ("main" :: blocks.coercions.toList.map (·.2)) all
   IO.println s!"{all.length} plain"
   last ← lap "untrait, unfield, reach" last
   let .ok out := Elab.elabProgram all (some blocks) | IO.println "elab failed"; return 1
@@ -865,7 +865,7 @@ def stages (path : String) : IO UInt32 := do
   let first := if drops then checkedStdDrop.get else checkedStd.get
   if let .ok (count, first) := first then
     match Check.checkAfter first (all0.drop count) resolved.info with
-    | .ok b => IO.println s!"{b.given.length} given"
+    | .ok b => IO.println s!"{b.given.size} given"
     | .error e => IO.println s!"checkAfter: {e}"
     last ← lap "check, after the library" last
   match compileSource src true files with

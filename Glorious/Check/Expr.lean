@@ -1877,9 +1877,9 @@ partial def inferCallable (scope : Scope) (annots : List (Option Ty)) (ret : Opt
       | some e => pure (some e)
       | none =>
         -- Uses are counted in the body as it will be elaborated.
-        let cs := (← get).coercions.toList
+        let cs := Elab.firstOf (← get).coercions.toList
         let body := if cs.isEmpty then body else
-          match Elab.coerceClause cs ((site j).bind fun k => List.lookup k cs) (.mk pats body) with
+          match Elab.coerceClause cs ((site j).bind (cs[·]?)) (.mk pats body) with
           | .mk _ body => body
         checkUses here scope binds body
         pure none : M (Option String))

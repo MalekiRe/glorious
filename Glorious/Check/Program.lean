@@ -352,9 +352,14 @@ def finish : M Elab.Blocks := do
         impls := implEs
         drops := s.dropSites.toList
         destroys }
-    pure ⟨s.given.toList, links ++ s.envLinks.toList, s.coercions.toList, traitInfo.index,
-      s.fieldTable.toList, s.fieldReads.toList, s.packs.toList, s.envFns, s.envWraps.toList,
-      s.derefReads.toList, s.siteTable, s.siteTypes, s.dotChosen, s.argsChosen, s.decided⟩
+    pure { given := .ofList s.given.toList, links := Elab.firstOf (links ++ s.envLinks.toList)
+           coercions := Elab.firstOf s.coercions.toList, traits := traitInfo.index
+           fields := Elab.firstOf (s.fieldTable.toList.map fun (id, rest) => (id, rest))
+           fieldReads := Elab.firstOf s.fieldReads.toList, packs := Elab.firstOf s.packs.toList
+           envFns := Elab.firstOf s.envFns, envWraps := Elab.firstOf s.envWraps.toList
+           derefReads := .ofList s.derefReads.toList, sites := s.siteTable, siteTypes := s.siteTypes
+           dotChosen := Elab.firstOf s.dotChosen, argsChosen := Elab.firstOf s.argsChosen
+           decided := s.decided }
 
 /-- Check a whole program. Gives what the elaborator needs to know about its
 blocks: which take an argument they do not name, and for each that is handed a

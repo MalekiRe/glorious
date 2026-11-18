@@ -41,7 +41,7 @@ inductive Site where
   | arg (call index : Nat)
   | result (closure clause : Nat)
   | fnResult (fn : String) (clause : Nat)
-  deriving BEq
+  deriving BEq, Hashable
 
 /-- How a trait bound is met, for the elaborator: by the `k`-th of the bounds
 the function being elaborated is given, or by an implementation, named by the
@@ -169,27 +169,27 @@ named by its identity. -/
 structure Blocks where
   /-- Blocks written without parameters where a callable taking one argument is
   expected: they take the argument without naming it. -/
-  given : List Nat := []
+  given : Std.HashSet Nat := {}
   /-- Those of them whose argument is a block that was not run: each with the
   identity of that block, whose environment it can take over. -/
-  links : List (Nat × Nat) := []
-  /-- The coercions to apply, each with the place it is applied at. -/
-  coercions : List (Site × String) := []
+  links : Std.HashMap Nat Nat := {}
+  /-- The coercions to apply, by the place each is applied at. -/
+  coercions : Std.HashMap Site String := {}
   traits : TraitInfo := {}
   /-- For each borrow of a field, what is gone through to reach the field: at
   each step the constructor, or none for a tuple, and how many fields it has. -/
-  fields : List (Nat × Bool × List Nat × List (Option String × Nat)) := []
+  fields : Std.HashMap Nat (Bool × List Nat × List (Option String × Nat)) := {}
   /-- For each field read by name, which field it is. -/
-  fieldReads : List (Nat × Nat) := []
+  fieldReads : Std.HashMap Nat Nat := {}
   /-- The blocks given what an `is` found, each with the names it then has. -/
-  packs : List (Nat × List String) := []
+  packs : Std.HashMap Nat (List String) := {}
   /-- For a function whose callables share an environment: each group of
   them by name, the first the one that holds it. -/
-  envFns : List (String × List (List String)) := []
+  envFns : Std.HashMap String (List (List String)) := {}
   /-- Calls that give a name where such a callable is wanted, and where. -/
-  envWraps : List (Nat × List Nat) := []
+  envWraps : Std.HashMap Nat (List Nat) := {}
   /-- The fields read by name of what a named reference points to. -/
-  derefReads : List Nat := []
+  derefReads : Std.HashSet Nat := {}
   /-- For each function that performs or handles an operation of an effect
   with type parameters, or calls one that does: the places, by the number of
   the call, with which of `op`, `handle`, `call`, `ref` each is, the effect or
@@ -199,11 +199,12 @@ structure Blocks where
   function. -/
   siteTypes : List (String × List (Option Syntax.TypeExpr)) := []
   /-- Dot calls the checker found are of a type's own function, chosen by
-  the value's type: the call, the function, and how the receiver, a
+  the value's type: by the call, the function, and how the receiver, a
   variable, is now given (`0` as it was, `1` borrowed, `2` borrowed `&mut`). -/
-  dotChosen : List (Nat × String × Nat) := []
-  /-- Arguments given as other than written (`Check.argsChosen`). -/
-  argsChosen : List ((Nat × Nat) × Expr) := []
+  dotChosen : Std.HashMap Nat (String × Nat) := {}
+  /-- Arguments given as other than written (`Check.argsChosen`), by the call
+  and the place. -/
+  argsChosen : Std.HashMap (Nat × Nat) Expr := {}
   /-- What the checker decided of how the program is written, where it found
   it, in the order decided: written into the program once it is checked. -/
   decided : List Decision := []
@@ -771,32 +772,31 @@ def coercedClause (result : Option String) : Clause → Clause
   | .mk pats body => .mk pats ((result.bind fun fn => wrapResult fn body).getD body)
 
 /-- The coercions the checker decided on, written out as the calls they are. -/
-def coerceRewrite (cs : List (Site × String)) : Rewrite where
+def coerceRewrite (cs : Std.HashMap Site String) : Rewrite where
   onExpr go e :=
     let args := fun (call : Nat) (args : List Expr) => args.zipIdx.map fun (a, i) =>
       let a := go.ex a
-      match cs.lookup (.arg call i) with
+      match cs[Site.arg call i]? with
       | some fn => .call 0 (.name none fn) [a]
       | none => a
     match e with
     | .call id f as => some (.call id (go.ex f) (args id as))
     | .tailCall id f as => some (.tailCall id (go.ex f) (args id as))
     | .closure id clauses =>
-      some (.closure id (clauses.zipIdx.map fun (c, j) => coercedClause (cs.lookup (.result id j)) (go.clause c)))
+      some (.closure id (clauses.zipIdx.map fun (c, j) => coercedClause cs[Site.result id j]? (go.clause c)))
     | _ => none
 
-def coerceExpr (cs : List (Site × String)) : Expr → Expr := (coerceRewrite cs).ex
+def coerceExpr (cs : Std.HashMap Site String) : Expr → Expr := (coerceRewrite cs).ex
 
 /-- A clause with the coercions in it written out, its value given to the
 coercion `result`, where there is one. -/
-def coerceClause (cs : List (Site × String)) (result : Option String) (c : Clause) : Clause :=
+def coerceClause (cs : Std.HashMap Site String) (result : Option String) (c : Clause) : Clause :=
   coercedClause result ((coerceRewrite cs).clause c)
 
 /-- The clauses of a top-level function with its coercions written out. -/
-def coerceFn (cs : List (Site × String)) (name : String) (clauses : List Clause) : List Clause :=
+def coerceFn (cs : Std.HashMap Site String) (name : String) (clauses : List Clause) : List Clause :=
   if cs.isEmpty then clauses
-  else (clauses.zip (List.range clauses.length)).map fun (c, j) =>
-    coerceClause cs (cs.lookup (.fnResult name j)) c
+  else clauses.zipIdx.map fun (c, j) => coerceClause cs cs[Site.fnResult name j]? c
 
 /-! ## Names and patterns -/
 

@@ -511,7 +511,7 @@ def checkGroup (decls : List FnDecl) : M Unit := do
       if found then
         modify fun s => { s with impls := s.impls.map fun i => if i.dictFn == im.dictFn then { i with assocs } else i }
   -- Later functions follow calls into these as they will be elaborated.
-  let cs := (← get).coercions.toList
+  let cs := Elab.firstOf (← get).coercions.toList
   unless cs.isEmpty do
     modify fun s =>
       { s with fnBodies := s.fnBodies.map fun (name, clauses) =>

@@ -666,8 +666,10 @@ def lowered (b : Elab.Blocks) (written all : List Syntax.Item) :
   let items ← Trace.timed "lower: instances" fun _ => Elab.instances b written items
   let (items, copies) := Trace.timed "lower: specialize" fun _ => Elab.specialize b.traits items
   let items := Trace.timed "lower: fold constants" fun _ => Elab.foldConstants items
-  let b := { b with envFns := b.envFns ++ copies.filterMap fun (name, fn) =>
-    (b.envFns.lookup fn).map fun groups => (name, groups) }
+  let b := { b with envFns := copies.foldl (init := b.envFns) fun m (name, fn) =>
+    match b.envFns[fn]? with
+    | some groups => if m.contains name then m else m.insert name groups
+    | none => m }
   pure (items, b)
 
 /-- Elaborate, and work out the constants at compile time (`Comptime`). -/
@@ -835,7 +837,7 @@ partial def compileSourceAt (src : String) (check : Bool := true)
   -- program's own functions say is looked at wherever they are: one that
   -- `main` does not reach is elaborated too, for what the elaborator alone
   -- refuses, and then left out.
-  let roots := "main" :: ((blocks.map (·.coercions)).getD []).map (·.2)
+  let roots := "main" :: ((blocks.map (·.coercions.toList)).getD []).map (·.2)
   if check then
     let named := fun (items : List Syntax.Item) => items.filterMap fun
       | Syntax.Item.fn name _ _ _ _ => some name
@@ -1101,7 +1103,7 @@ partial def compileSourceAt (src : String) (check : Bool := true)
   | .ok c => pure c
   | .error e =>
     match blocks with
-    | some b => if b.links.isEmpty then throw e else build (some { b with links := [] })
+    | some b => if b.links.isEmpty then throw e else build (some { b with links := {} })
     | none => throw e
 
 /-- How many parts the first parentheses of a written type have at their top. -/
