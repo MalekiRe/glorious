@@ -6,6 +6,7 @@ public import Glorious.Syntax.Ast
 public import Glorious.Syntax.ByRef
 public import Glorious.Elab.Base
 public import Glorious.Traits
+public import Glorious.Trace
 
 public section
 
@@ -744,6 +745,14 @@ structure St where
   /-- The implementations of each trait, by the trait's name without its
   arguments: their places in `impls`. -/
   implsByBase : Std.HashMap String (Array Nat) := {}
+  /-- The same by the trait's name without its arguments and the type's head. -/
+  implsByHead : Std.HashMap (String × String) (Array Nat) := {}
+  /-- What fitting found of a trait at a type made of named types and tuples
+  alone, while one group's bounds are settled: by the function, the trait,
+  the type and arguments spelled, and what the function is given
+  (`solveFitting`, `leavesFitting`). -/
+  solvedFit : Std.HashMap (String × String × String × Traits.Givens) (Option Traits.Dict) := {}
+  leavesFit : Std.HashMap (String × String × String) (List (String × Nat × Ty × List Ty)) := {}
   /-- The implementations as `Traits.solve` sees them, in the same order. -/
   kimpls : Traits.ImplIndex := {}
   /-- The bounds of the scheme last instantiated, at that use. -/
@@ -843,6 +852,9 @@ structure St where
 
 abbrev M := StateT St (Except Elab.Said)
 
+/-- `act`, its time added to `label`'s where a compile is traced (`Trace`). -/
+def timedM {α : Type} (label : String) (act : M α) : M α := fun s => Trace.timed label fun _ => act.run s
+
 /-- A message is what stops the checker, with nothing found. -/
 instance : MonadExceptOf String M where
   throw msg := throwThe Elab.Said { msg }
@@ -860,6 +872,16 @@ keeps the state from before to go back to, nothing holds that state while
 def implsOfBase (base : String) : M (List ImplDecl) := do
   let s ← get
   pure ((s.implsByBase.getD base #[]).toList.filterMap fun i => s.impls[i]?)
+
+/-- Those for types of this head. -/
+def implsOfHead (base head : String) : M (List ImplDecl) := do
+  let s ← get
+  pure ((s.implsByHead.getD (base, head) #[]).toList.filterMap fun i => s.impls[i]?)
+
+/-- Has a trait more than one implementation for types of this head? -/
+def severalFor (base : String) : Option String → M Bool
+  | some head => do pure (((← get).implsByHead.getD (base, head) #[]).size > 1)
+  | none => pure false
 
 instance {α : Type} : Inhabited (M α) := ⟨throw "checker: unreachable"⟩
 

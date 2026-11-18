@@ -684,7 +684,7 @@ def declareTraits (items : List Item) : M Unit := do
 
       -- Chosen by fitting types: where an implementation has a condition
       -- kept apart, or shares its trait and type with another.
-      let shared := (← implsOfBase base).any fun I => I.head == head
+      let shared := !(← implsOfHead base head).isEmpty
       if !extra.isEmpty || shared || head.startsWith "(fn" || head.startsWith "(&" then
         modify fun s => { s with patterned := true }
       -- Two implementations of a trait for one type: no type is both's
@@ -699,8 +699,8 @@ def declareTraits (items : List Item) : M Unit := do
           | some t => t
           | none => (((params[j]?).bind fun p => pvars.lookup p).map Ty.var).getD (.var 0)
       let mine := patternOf targs fixed args pvars
-      for other in ← implsOfBase base do
-        if other.head == head && other.targs.length == targs.length then
+      for other in ← implsOfHead base head do
+        if other.targs.length == targs.length then
           let theirs := patternOf other.targs other.fixed other.params other.pvars
           let narrower := (Ty.fitsAll (other.pvars.map (·.2)) theirs mine []).isSome
           let wider := (Ty.fitsAll (pvars.map (·.2)) mine theirs []).isSome
@@ -712,6 +712,8 @@ def declareTraits (items : List Item) : M Unit := do
         { s with
           implsByBase := s.implsByBase.insert (Syntax.traitBase tr)
             ((s.implsByBase.getD (Syntax.traitBase tr) #[]).push s.impls.size)
+          implsByHead := s.implsByHead.insert (Syntax.traitBase tr, head)
+            ((s.implsByHead.getD (Syntax.traitBase tr, head) #[]).push s.impls.size)
           impls := s.impls.push
             { trait := tr, head, params := args, context := ctx, methods,
               dictFn := Elab.implDictName tr head, targs, assocs, pvars, fixed, equal, generic, extra,
@@ -744,6 +746,8 @@ def declareTraits (items : List Item) : M Unit := do
           { s with
             implsByBase := s.implsByBase.insert (Syntax.traitBase Syntax.destroyTrait)
               ((s.implsByBase.getD (Syntax.traitBase Syntax.destroyTrait) #[]).push s.impls.size)
+            implsByHead := s.implsByHead.insert (Syntax.traitBase Syntax.destroyTrait, head)
+              ((s.implsByHead.getD (Syntax.traitBase Syntax.destroyTrait, head) #[]).push s.impls.size)
             impls := s.impls.push
               ⟨Syntax.destroyTrait, head, (List.range arity).map (s!"T{·}"), ctx, [],
                 Elab.implDictName Syntax.destroyTrait head, [], [], [], [], [], false, [], [], []⟩

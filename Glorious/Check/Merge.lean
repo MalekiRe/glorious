@@ -121,6 +121,9 @@ def mergeStates (p a b : St) : Option St := do
   let implsByBase := b.implsByBase.fold (init := a.implsByBase) fun m key is =>
     let mine := (is.filter (· ≥ p.impls.size)).map (· + shift)
     if mine.isEmpty then m else m.insert key ((m.getD key #[]) ++ mine)
+  let implsByHead := b.implsByHead.fold (init := a.implsByHead) fun m key is =>
+    let mine := (is.filter (· ≥ p.impls.size)).map (· + shift)
+    if mine.isEmpty then m else m.insert key ((m.getD key #[]) ++ mine)
   pure { b with
     tys := ← m3 (·.tys), rows := ← m3 (·.rows), mono := ← m3 (·.mono),
     monoRows := ← m3 (·.monoRows), monoCaps := ← m3 (·.monoCaps), caps := ← m3 (·.caps),
@@ -168,6 +171,6 @@ def mergeStates (p a b : St) : Option St := do
     methodCalls := ← m3 (·.methodCalls), fnBounds := ← m3 (·.fnBounds), impls := ← m3 (·.impls),
     brands := max a.brands b.brands, anyMust := a.anyMust || b.anyMust, modules := a.modules,
     shapes := a.shapes || b.shapes, patterned := a.patterned || b.patterned, dropMode := a.dropMode,
-    dropAsked := max a.dropAsked b.dropAsked, implsByBase, at_ := p.at_ }
+    dropAsked := max a.dropAsked b.dropAsked, implsByBase, implsByHead, at_ := p.at_ }
 
 end Glorious.Check

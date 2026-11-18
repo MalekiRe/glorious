@@ -265,8 +265,7 @@ partial def namedIn : Ty → List String
   | .ref _ t _ => namedIn t
 
 /-- What the checker tells the elaborator, once every item is checked. -/
-def finish : M Elab.Blocks := do
-  do
+def finish : M Elab.Blocks := fun st => Trace.timed "check: finish" fun _ => (show M Elab.Blocks from do
     -- One who calls a `pub` function has to be able to write its type.
     let info := (← get).modules
     for f in info.pubFns do
@@ -363,7 +362,7 @@ def finish : M Elab.Blocks := do
            envFns := Elab.firstOf s.envFns, envWraps := Elab.firstOf s.envWraps.toList
            derefReads := .ofList s.derefReads.toList, sites := s.siteTable, siteTypes := s.siteTypes
            dotChosen := Elab.firstOf s.dotChosen, argsChosen := Elab.firstOf s.argsChosen
-           decided := s.decided }
+           decided := s.decided }).run st
 
 /-- Check a whole program. Gives what the elaborator needs to know about its
 blocks: which take an argument they do not name, and for each that is handed a

@@ -186,8 +186,7 @@ partial def needsDestroying (seen : List String) (t : Ty) : M Bool := do
 /-- The name of the implementation a condition of another comes down to: the
 trait itself, or the one chosen by fitting where there is a choice. -/
 def subKey (trait : String) (ty : Ty) (args : List Ty) : M String := do
-  let head := (← find ty).head.map (·.1)
-  let several := ((← implsOfBase trait).filter fun im => some im.head == head).length > 1
+  let several ← severalFor trait ((← find ty).head.map (·.1))
   if args.isEmpty && !several then pure trait else implKey trait ty args
 
 /-- The numbers under which a condition of an implementation on a type made
@@ -206,12 +205,40 @@ def unprojectedCondition (subject : Ty) (cargs : List Ty) : M (Ty × List Ty) :=
   if (← get).assocUses.size != before then settleAssocsAll
   pure (subject, cargs)
 
+/-- Is a type made of named types and tuples alone? -/
+partial def Ty.plain : Ty → Bool
+  | .con _ args | .tuple args => args.all Ty.plain
+  | _ => false
+
+/-- The type and arguments spelled, where all of them are made of named types
+and tuples alone: what fitting finds of them is the same each time it is
+asked in a group. -/
+def fitKey (ty : Ty) (args : List Ty) : M (Option String) := do
+  let ty ← zonk ty
+  let args ← args.mapM zonk
+  if ty.plain && args.all Ty.plain then
+    pure (some (";".intercalate (← (ty :: args).mapM spellTy)))
+  else pure none
+
+mutual
+
 /-- How a bound is met, where implementations are chosen by fitting types
 (`St.patterned`): as `Traits.solve` finds it, but each condition of the
 implementation found is looked for the same way, with the trait's arguments
 and the type the implementation says. Not proved, as `Traits.solve` is: what
 it finds is checked with the program's Core. -/
 partial def solveFitting (givens : Traits.Givens) (fuel : Nat) (key : String) (ty : Ty)
+    (args : List Ty) : M (Option Traits.Dict) := do
+  if fuel == 0 || key == Syntax.destroyTrait then return ← solveFittingNow givens fuel key ty args
+  -- (Found once in a group where the type is all known.)
+  let some spelled ← fitKey ty args | solveFittingNow givens fuel key ty args
+  let k := ((← get).owner, key, spelled, givens)
+  if let some d := (← get).solvedFit[k]? then return d
+  let d ← solveFittingNow givens fuel key ty args
+  modify fun s => { s with solvedFit := s.solvedFit.insert k d }
+  pure d
+
+partial def solveFittingNow (givens : Traits.Givens) (fuel : Nat) (key : String) (ty : Ty)
     (args : List Ty) : M (Option Traits.Dict) := do
   if fuel == 0 then return none
   let ty ← find ty
@@ -249,8 +276,24 @@ partial def solveFitting (givens : Traits.Givens) (fuel : Nat) (key : String) (t
     subs := subs ++ [d]
   pure (some (.impl i subs))
 
+end
+
+mutual
+
 /-- `leaves`, where implementations are chosen by fitting types. -/
 partial def leavesFitting (pos key : String) (t : Ty) (args : List Ty) (owner : String := "")
+    (via : List String := []) : M (List (String × Nat × Ty × List Ty)) := do
+  if key == Syntax.destroyTrait then return ← leavesFittingNow pos key t args owner via
+  -- (Found once in a group where the type is all known; what is refused is
+  -- said each time, with where it was asked.)
+  let some spelled ← fitKey t args | leavesFittingNow pos key t args owner via
+  let k := (owner, key, spelled)
+  if let some ls := (← get).leavesFit[k]? then return ls
+  let ls ← leavesFittingNow pos key t args owner via
+  modify fun s => { s with leavesFit := s.leavesFit.insert k ls }
+  pure ls
+
+partial def leavesFittingNow (pos key : String) (t : Ty) (args : List Ty) (owner : String := "")
     (via : List String := []) : M (List (String × Nat × Ty × List Ty)) := do
   let t ← find t
   -- (How a value is destroyed is found by the type's shape alone, as
@@ -289,6 +332,8 @@ partial def leavesFitting (pos key : String) (t : Ty) (args : List Ty) (owner : 
     out := out ++ (← leavesFitting pos (← subKey tr subject cargs) subject cargs owner (this :: via))
   pure out
 
+end
+
 /-- A dot call of a trait's function, of a value whose type does not
 implement the trait but has a function of the name of its own: that one,
 decided where it is found (`Elab.Decision.receiver`). -/
@@ -310,8 +355,7 @@ implementations for that type's head. (One whose name says the trait's
 arguments, `Get<Value>`, and that does not have them apart, is found by its
 name.) -/
 def rekey (b : Bound) : M Bound := do
-  let head := (← find b.ty).head.map (·.1)
-  let several := ((← implsOfBase (Syntax.traitBase b.trait)).filter fun im => some im.head == head).length > 1
+  let several ← severalFor (Syntax.traitBase b.trait) ((← find b.ty).head.map (·.1))
   if (← get).patterned && several && !b.trait.any (· == '#')
       && (!b.args.isEmpty || b.trait == Syntax.traitBase b.trait) then
     pure { b with trait := ← implKey (Syntax.traitBase b.trait) b.ty b.args }
@@ -334,6 +378,7 @@ partial def unrigidTy (back : List (String × Nat)) : Ty → Ty
 its type. A bound on a type the function is generic in becomes something the
 function is given; every other is met by `Traits.solve`. -/
 def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := do
+  modify fun s => { s with solvedFit := {}, leavesFit := {} }
   -- A name of which parts were read before its type was known, which is now:
   -- if the type has a `drop` of its own and the parts read can be used any
   -- number of times, the value stayed whole and is destroyed when its block
@@ -485,7 +530,7 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
             | .con h args => pure (some (h, args))
             | _ => pure none
           if let some (h, args) := found then
-            let mine := (← implsOfBase (Syntax.traitBase b.trait)).filter fun im => im.head == h
+            let mine ← implsOfHead (Syntax.traitBase b.trait) h
             if let [im] := mine then
               let at_ ← implAt im args
               for (given, want) in im.targs.zip wanted do
@@ -525,8 +570,7 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
       if let some (h, args) := named then
         -- (Where the type has several implementations of the trait, the one
         -- chosen makes the arguments fit when it is chosen.)
-        let several := ((← implsOfBase (Syntax.traitBase b.trait)).filter fun im =>
-          im.head == h).length > 1
+        let several ← severalFor (Syntax.traitBase b.trait) (some h)
         for im in (← get).impls do
           if im.trait == b.trait && im.head == h && !several then
             -- (The implementation's own type parameters are this type's
@@ -569,9 +613,7 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
     -- (Where a type has several implementations of the trait, which one
     -- is chosen by fitting, arguments or none.)
     let several ← do
-      let head := (← find self).head.map (·.1)
-      pure ((← get).patterned && ((← implsOfBase b.trait).filter fun im =>
-        some im.head == head).length > 1)
+      pure ((← get).patterned && (← severalFor b.trait ((← find self).head.map (·.1))))
     if args.isEmpty && !several then split := split.push b
     else
       let key ← try implKey b.trait self args
@@ -961,6 +1003,6 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
         | none =>
           throw (inFunction u.owner
             s!"{u.pos}`{u.callee}` needs `{g.1}` of a type that `{u.owner}` is not given")
-  modify fun s => { s with dictTable := s.dictTable ++ table.toArray }
+  modify fun s => { s with dictTable := s.dictTable ++ table.toArray, solvedFit := {}, leavesFit := {} }
 
 end Glorious.Check

@@ -419,7 +419,7 @@ def checkGroup (decls : List FnDecl) : M Unit := do
         let ret := ret <|> match wanted with
           | some (.fn _ r _ _ _, _) => some r
           | _ => none
-        let t ← inferCallable [] annots ret (some d.name) d.clauses s!"the clauses of `{d.name}` do"
+        let t ← timedM "group: infer" (inferCallable [] annots ret (some d.name) d.clauses s!"the clauses of `{d.name}` do")
         if let some effects := declared then
           let (effects, rest) ← resolveRow rigid false effects
           if let .fn _ _ effs tail _ ← find t then
@@ -444,7 +444,7 @@ def checkGroup (decls : List FnDecl) : M Unit := do
           reused := (d.name, used) :: reused
         defs := (d.name, t) :: defs
         runPending
-        runLowerChecks t
+        timedM "group: lower checks" (runLowerChecks t)
         checkDups (← get).dups
         checkGivenReads
         checkDrops (← get).drops
@@ -482,8 +482,8 @@ def checkGroup (decls : List FnDecl) : M Unit := do
     if let some t := defs.lookup name then
       try unify (← instantiate (← generalize t) (some name)) used
       catch e => throw (inFunction name s!"`{name}` is used recursively at a different type: {e}")
-  checkLoans
-  settleBounds decls defs
+  timedM "group: loans" checkLoans
+  timedM "group: bounds" (settleBounds decls defs)
   modify fun s => { s with assocUses := #[] }
   -- A type an implementation leaves to be found from its functions, found:
   -- of the implementation's own type parameters, which are this function's
