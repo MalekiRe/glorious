@@ -833,6 +833,8 @@ def compileSourceAt (src : String) (check : Bool := true)
   -- `main` does not reach is elaborated too, for what the elaborator alone
   -- refuses, and then left out.
   let roots := "main" :: ((blocks.map (·.coercions.toList)).getD []).map (·.2)
+  let unreached := all
+  let all := Trace.timed "what main reaches" fun _ => Elab.reachable roots all
   if check then
     let named := fun (items : List Syntax.Item) => items.filterMap fun
       | Syntax.Item.fn name _ _ _ _ => some name
@@ -840,19 +842,18 @@ def compileSourceAt (src : String) (check : Bool := true)
     let own := match first with
       | .ok (count, _) => named (written.drop count)
       | .error _ => []
-    let reached := named (Elab.reachable roots all)
+    let reached := named all
     -- (Those still there once traits are lowered: one made into copies is
     -- elaborated as each copy is.)
-    let lowered := named all
+    let lowered := named unreached
     let missing := own.filter fun f => !reached.contains f && lowered.contains f
     unless missing.isEmpty do
       -- (Only they and what they reach: what `main` reaches is elaborated
       -- below. Taken from the first of them, as a program is from `main`.)
       match Trace.timed "elaborate what main does not reach" fun _ =>
-          elaborate (Elab.reachable (roots.drop 1 ++ missing) all) blocks (root := missing.headD "main") with
+          elaborate (Elab.reachable (roots.drop 1 ++ missing) unreached) blocks (root := missing.headD "main") with
       | .error e => throw e
       | .ok _ => pure ()
-  let all := Trace.timed "what main reaches" fun _ => Elab.reachable roots all
   let declared := Trace.timed "what is declared" fun _ => Elab.withDeclared written all
   -- (What a compile gives, from what was elaborated and certified.)
   let compiled := fun (out : Elab.Output) (cert : Option Typing.Cert) (lent : Nat)
