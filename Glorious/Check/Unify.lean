@@ -247,6 +247,15 @@ partial def settleRows (bind : Option (Nat → Bool)) (final : Bool) : M Unit :=
     let held ← assocTails
     let candidates := ((left.toList.map (·.2.2.2)).eraseDups.filter fun ρ =>
       ok ρ && !held.contains ρ).mergeSort (· ≥ ·)
+    -- (One called only where nothing named is performed but another
+    -- unknown's effects first: that it is that unknown decides least. A
+    -- function called inside a loop of its own, `while({ .. }) { f(..) }`,
+    -- is otherwise given the loop's effect, which the loop handles.)
+    let mut plain : List Nat := []
+    for ρ in candidates do
+      let ambs ← (left.toList.filter (·.2.2.2 == ρ)).mapM fun (_, amb, _, _) => flattenRow amb
+      if ambs.all (·.effs.isEmpty) then plain := plain ++ [ρ]
+    let candidates := plain ++ candidates.filter (!plain.contains ·)
     for ρ in candidates do
       let mine := left.toList.filter (·.2.2.2 == ρ)
       let ambs ← mine.mapM fun (_, amb, _, _) => flattenRow amb

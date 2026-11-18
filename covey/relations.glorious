@@ -4,7 +4,8 @@
 // pilot patches the hull of the ship it pilots, each ship unloads into its
 // station, and each station tells of the ships docked at it (`From`).
 // Docking again moves a ship; a station that ends leaves its ships
-// undocked, and a ship that ends is no longer among a station's.
+// undocked, and a ship that ends is no longer among a station's. Ending a
+// carrier ends what is under it (`ChildOf`, `despawn_linked`).
 // expect:
 // 2
 // 1
@@ -19,9 +20,11 @@
 // 1
 // 0
 // 1
+// 4
+// 1
 mod ecs;
 
-use ecs::{App, Entity, Mut, Query, To, From, Relates};
+use ecs::{App, Entity, Mut, Query, To, From, Relates, ChildOf};
 
 struct DockedAt { berth: Int }
 struct Piloting
@@ -85,7 +88,7 @@ fn census(stations: &mut Query<(&Hold, From<DockedAt, Entity>)>) {
 fn main() -> Int {
     let mut fleet = App::new()
         .register<Skill>().register<Hull>().register<Cargo>().register<Hold>()
-        .relation<DockedAt>().relation<Piloting>()
+        .relation<DockedAt>().relation<Piloting>().relation<ChildOf>()
         .add_systems(Update, repair)
         .add_systems(Update, unload)
         .add_systems(Look, roster)
@@ -116,5 +119,14 @@ fn main() -> Int {
     match(fleet.world.target<DockedAt>(other)) { Some(t) => say(9), None => say(0) };
     // A ship that ends is no longer among the depot's.
     fleet.world.despawn(ship);
-    len_at(&fleet.world.sources<DockedAt>(depot)) + 1
+    say(len_at(&fleet.world.sources<DockedAt>(depot)) + 1);
+    // A carrier, its drones, and theirs: ending it ends all of them.
+    let carrier = fleet.world.spawn_bundle((Hull(50),));
+    let drone = fleet.world.spawn_bundle((Hull(5),));
+    let mite = fleet.world.spawn_bundle((Hull(1),));
+    fleet.world.relate(drone, ChildOf, carrier);
+    fleet.world.relate(mite, ChildOf, drone);
+    say(fleet.world.count<Hull>());
+    fleet.world.despawn_linked<ChildOf>(carrier);
+    fleet.world.count<Hull>()
 }

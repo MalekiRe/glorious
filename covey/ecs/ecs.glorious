@@ -232,6 +232,8 @@ pub fn despawn<S>(world: &mut World<S>, entity: Entity) where S: Columns, S: Unl
 // and the entity it relates to, one at a time. That one has a `Sources<R>`:
 // the entities that relate to it, in the order they came to.
 pub struct Relates<R> { pub relation: R, pub target: Entity }
+// The relation of a child to its parent.
+pub struct ChildOf
 pub struct Sources<R> { pub list: [Entity] }
 
 fn copied(list: &[Entity]) -> [Entity] {
@@ -443,6 +445,17 @@ impl<S> World<S> {
     // What relates to an entity by `R`, in the order they came to.
     pub fn sources<R>(world: &Self, target: Entity) -> [Entity] where S: Get<Sources<R>> {
         sources_in<R, S>(&world.columns, target)
+    }
+
+    // End an entity and, first, everything that relates to it by `R`, and
+    // what relates to those, as upstream's `LINKED` relations end with their
+    // target (`ChildOf`: a scene and all under it).
+    pub fn despawn_linked<R>(world: &mut Self, entity: Entity)
+        where S: Columns, S: Unlinks<S>, S: Get<Sources<R>>, S: Get<Relates<R>> {
+        let under = sources_in<R, S>(&world.columns, entity);
+        let mut i = 0;
+        while({ i < len_at(&under) }) { world.despawn_linked<R>(under[i]); i = i + 1 };
+        despawn(world, entity)
     }
 
     // End an entity; whether it was there.

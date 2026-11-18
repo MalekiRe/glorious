@@ -45,6 +45,11 @@ fn main() -> Int { let a = P(2); let b = P(3); total([&a, &b]) }",
   ⟨"fn get(r: &Int) -> Int { *r }
 fn main() -> Int { let f = get; let x = 7; let a = f(&x); let y = 8; a + f(&y) }",
     [], "15"⟩,
+  -- A function that calls itself inside a `while` of its own performs
+  -- nothing of the loop's.
+  ⟨"fn walk(n: Int) -> Int { let mut i = 0; let mut s = 0; while({ i < n }) { s = s + walk(n - 1); i = i + 1 }; s + 1 }
+fn main() -> Int { walk(3) }",
+    [], "16"⟩,
 
   -- Data, tuples and projection.
   ⟨"fn main() { (1, (2, 3)) }",
