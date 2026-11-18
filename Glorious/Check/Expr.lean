@@ -925,6 +925,15 @@ partial def inferCall (scope : Scope) (amb : Row) (f : Expr) (args : List Expr)
             if mine.isSome && mine == theirs then
               modify fun s => { s with dotChosen := (call, alt, 0) :: s.dotChosen }
               return ← inferCall scope amb (.name none alt) args call
+            -- (The one in scope takes a reference, the type's own the value
+            -- whole: the receiver, a name borrowed for the one in scope, is
+            -- given as it is.)
+            if let (some k, some 0, .ref _ v) := (mine, theirs, a) then
+              if k != 0 && !v.startsWith "borrowed%" then
+                let given := Expr.name none v
+                modify fun s => { s with dotChosen := (call, alt, 0) :: s.dotChosen,
+                                         argsChosen := ((call, 0), given) :: s.argsChosen }
+                return ← inferCall scope amb (.name none alt) (given :: args.drop 1) call
             -- (The one in scope takes the value whole, the type's own a
             -- reference: a mutable variable is borrowed for it.)
             if let (some 0, some k, .name none v) := (mine, theirs, a) then
