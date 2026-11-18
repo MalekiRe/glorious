@@ -34,14 +34,14 @@ open Glorious.Typing (Ty FnSig Hint Cert SigEntry DataInst OpInst)
 inductive ICls where
   | var (id : Nat)
   | lit (once : Bool)
-  deriving Inhabited, BEq
+  deriving Inhabited, BEq, Hashable
 
 /-- A region while it is being inferred: the same as another, or the cell of one
 scope. A region nothing is known about has neither. -/
 inductive IRg where
   | link (id : Nat)
   | atom
-  deriving Inhabited, BEq
+  deriving Inhabited, BEq, Hashable
 
 /-- What a callable may touch, while that is being inferred: some regions, and
 whatever some other callables may touch. -/
@@ -65,7 +65,7 @@ structure IAcc where
   are settled, and what it includes has been worked out and written here in
   its own `rgns` and `wrs`. A copy of it copies those and nothing further. -/
   final : Bool := false
-  deriving Inhabited, BEq
+  deriving Inhabited, BEq, Hashable
 
 /-- A type while it is being inferred. -/
 inductive ITy where
@@ -85,14 +85,14 @@ inductive ITy where
   | ref (ρ : Nat) (t : ITy)
   /-- The result of a call that does not return. -/
   | never
-  deriving Inhabited, BEq
+  deriving Inhabited, BEq, Hashable
 
 abbrev IOps := List (Nat × List ITy)
 
 structure IRow where
   ops : IOps
   tail : Option Nat
-  deriving Inhabited, BEq
+  deriving Inhabited, BEq, Hashable
 
 def ITy.unit : ITy := .tuple []
 
@@ -106,7 +106,7 @@ structure ISig where
   ret : ITy
   row : IRow
   acc : Nat
-  deriving Inhabited
+  deriving Inhabited, Hashable
 
 inductive IHint where
   | ty (t : ITy)
@@ -121,6 +121,7 @@ inductive IHint where
   /-- A call of a callable whose type binds a region: what the callable
   touches, by which its type is known, and the region the call chooses. -/
   | rgns (acc : Nat) (actuals : List Nat)
+  deriving Hashable
 
 /-- A lifetime a declared type or an effect is given is one of its arguments
 in Core: a type that carries the region, `&ρ ()`. In the declaration's own
@@ -149,6 +150,7 @@ structure Incl where
   sub : IRow
   under : IOps
   sup : IRow
+  deriving Hashable
 
 /-- A function of an inferred group: its signature, the hints of each clause,
 and the functions outside the group it refers to, each at the type it uses. -/
@@ -157,6 +159,7 @@ structure Member where
   sig : ISig
   hints : Array (Array IHint)
   refs : Array (Nat × ISig)
+  deriving Hashable
 
 /-- A call whose callable was not yet known when it was met: the callable,
 what it is given, what it gives and performs here, what it touches, the
@@ -171,6 +174,7 @@ structure Call where
   /-- Regions for this call to choose, as many as a callable type may bind. -/
   actuals : List Nat
   self : Nat
+  deriving Hashable
 
 /-- The general type of a group of mutually recursive functions. Variables made
 while the group was inferred stand for anything, except those in `fixed`, which
@@ -236,13 +240,27 @@ structure Frozen where
   are given is known. -/
   waiting : List (List ITy × List ITy × Nat) := []
 
+/-- What a kept scheme is, to the groups that use it: two that are the same
+give the same hash. -/
+def Frozen.face (fz : Frozen) : UInt64 :=
+  let s := fz.scheme
+  let set := fun (h : Std.HashSet Nat) => h.toList.mergeSort (· ≤ ·)
+  [hash s.members, hash s.incls, hash s.places, hash s.coerces, hash s.nevers, hash s.onces,
+    hash s.shows, hash s.opens, hash s.calls, hash s.givenUpOpen, hash s.exported,
+    hash s.exportedPlaces, hash s.exportedCoerces, hash s.exportedNevers, hash s.exportedOnces,
+    hash s.exportedShows, hash (set s.fixedTys), hash (set s.fixedRows), hash (set s.fixedClss),
+    hash (set s.fixedRgs), hash (set s.fixedAccs), hash fz.counts, hash fz.atoms, hash fz.ranks,
+    hash fz.nodes, hash fz.lows, hash fz.kept, hash fz.waiting].foldl mixHash 7
+
 /-- What certificate inference keeps between compiles: instantiations, by
 the key of the function and the signature, and groups' schemes, by key. -/
 structure Memo where
   inst : Std.HashMap UInt64 (List (FnSig × Remembered)) := {}
   schemes : Std.HashMap UInt64 Frozen := {}
+  /-- What each group showed those that use it (`faceOf`), by its key. -/
+  faces : Std.HashMap UInt64 UInt64 := {}
 
-def Memo.isEmpty (m : Memo) : Bool := m.inst.isEmpty && m.schemes.isEmpty
+def Memo.isEmpty (m : Memo) : Bool := m.inst.isEmpty && m.schemes.isEmpty && m.faces.isEmpty
 
 instance : Nonempty Memo := ⟨{}⟩
 
@@ -250,8 +268,9 @@ instance : Nonempty Memo := ⟨{}⟩
 structure Made where
   inst : Array (UInt64 × FnSig × Remembered) := #[]
   schemes : Array (UInt64 × Frozen) := #[]
+  faces : Array (UInt64 × UInt64) := #[]
 
-def Made.isEmpty (m : Made) : Bool := m.inst.isEmpty && m.schemes.isEmpty
+def Made.isEmpty (m : Made) : Bool := m.inst.isEmpty && m.schemes.isEmpty && m.faces.isEmpty
 
 structure St where
   fns : Array Core.Fn
@@ -371,8 +390,21 @@ structure St where
   /-- For a region standing for several places, by what stands for it: the
   regions of the references used as it. -/
   lows : Std.HashMap Nat (List Nat) := {}
-  /-- Each function's key (`fnKeys`), and the function with each key. -/
-  keys : Array UInt64 := #[]
+  /-- Whether functions are keyed, for what is kept (`groupKeyOf`): what
+  each function is made of and what is known of it, each group's functions
+  and the groups outside it they refer to, and what the program declares. -/
+  keyed : Bool := false
+  ownKeys : Array UInt64 := #[]
+  members : Std.HashMap Nat (List Nat) := {}
+  outside : Std.HashMap Nat (List Nat) := {}
+  keyBase : UInt64 := 0
+  /-- Groups' keys and what each shows those that use it, once worked out,
+  what an earlier compile found each key to show, and the function with each
+  key. -/
+  groupKeys : Std.HashMap Nat UInt64 := {}
+  faces : Std.HashMap Nat UInt64 := {}
+  keptFaces : Std.HashMap UInt64 UInt64 := {}
+  facesMade : Array (UInt64 × UInt64) := #[]
   byKey : Std.HashMap UInt64 Nat := {}
   /-- What an earlier compile kept, and what this one made. -/
   memo : Std.HashMap UInt64 (List (FnSig × Remembered)) := {}

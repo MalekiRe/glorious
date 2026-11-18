@@ -179,13 +179,13 @@ never different. -/
 def certifyWith (kept : List Typing.Cert) (items : List Syntax.Item) (p : Core.Program)
     (strict : Bool) (envSizes : List (Nat × Nat × Nat)) (regions loans ranked widen : Bool)
     (memo : Infer.Memo := {}) : Except String (Typing.Cert × Bool × Infer.Made) :=
-  match kept.find? fun c =>
+  match Trace.timed "certify: a kept certificate" fun _ => kept.find? fun c =>
       c.strict == strict && c.regions == regions && c.loans == loans && Typing.checkProgram c p with
   | some c => .ok (c, true, {})
   | none =>
     let infer := fun (memo : Infer.Memo) =>
-      (Infer.certifyKept items p strict envSizes regions loans ranked widen memo).map fun (cert, made) =>
-        (cert, Typing.checkProgram cert p, made)
+      (Trace.timed "certify: inference" fun _ => Infer.certifyKept items p strict envSizes regions loans ranked widen memo).map fun (cert, made) =>
+        (cert, Trace.timed "certify: the proved checker" fun _ => Typing.checkProgram cert p, made)
     match infer memo with
     | .ok (cert, true, made) => .ok (cert, true, made)
     | other => if memo.isEmpty then other else infer {}

@@ -187,39 +187,6 @@ def captureCounts (p : Core.Program) : Array Nat := Id.run do
       out := visit out c.body
   visit out p.main
 
-/-- A key for each function: what it is made of, what is known of it
-(`extra`), and the keys of the functions it refers to, those of its own group
-taken together; and `globals`, what the program declares. Two compiles that
-give a function the same key infer the same of it at each signature. -/
-def fnKeys (fns : Array Core.Fn) (scc : Array Nat) (extra : Nat → UInt64) (globals : UInt64) :
-    Array UInt64 := Id.run do
-  let n := fns.size
-  let refs := fns.map fun F => (F.clauses.flatMap fun c => tmRefs c.body).eraseDups
-  let own := (List.range n).map fun f => mixHash (hash (fns[f]?.map (·.clauses))) (extra f)
-  -- (A group's key, once the keys of every group it refers to are known.)
-  let mut groupKey : Std.HashMap Nat UInt64 := {}
-  let members := (List.range n).foldl (fun (m : Std.HashMap Nat (List Nat)) f =>
-    let r := (scc[f]?).getD f
-    m.insert r ((m.getD r []) ++ [f])) {}
-  let mut left := members.toList
-  let mut fuel := n + 1
-  while fuel > 0 && !left.isEmpty do
-    fuel := fuel - 1
-    let mut later := []
-    for (r, ms) in left do
-      let outside := (ms.flatMap fun f => (refs[f]?).getD []).eraseDups.filterMap fun g =>
-        let rg := (scc[g]?).getD g
-        if rg == r then none else some rg
-      if outside.all groupKey.contains then
-        let k := ms.foldl (fun h f => mixHash h ((own[f]?).getD 0)) globals
-        let k := outside.foldl (fun h g => mixHash h (groupKey.getD g 0)) k
-        groupKey := groupKey.insert r k
-      else later := later ++ [(r, ms)]
-    left := later
-  pure ((List.range n).map fun f =>
-    let r := (scc[f]?).getD f
-    mixHash (groupKey.getD r 0) (hash (((members.getD r []).idxOf f), f))).toArray
-
 def certifyM (items : List Item) (g : Elab.Globals) (p : Core.Program)
     (envSizes : List (Nat × Nat × Nat)) : M Cert := do
   declare items g
@@ -248,9 +215,18 @@ def certifyM (items : List Item) (g : Elab.Globals) (p : Core.Program)
       | .pub _ (.fn ..) => false
       | _ => true),
     envSizes, st.strict, st.regions, st.loans, st.ranked, st.widen, p.drops)
-  let keys := if st.memo.isEmpty && st.frozen.isEmpty && !st.remember then #[] else fnKeys st.fns st.scc extra globals
+  let n := st.fns.size
+  let members := (List.range n).foldl (fun (m : Std.HashMap Nat (List Nat)) f =>
+    let r := (st.scc[f]?).getD f
+    m.insert r ((m.getD r []) ++ [f])) {}
+  let outside := members.fold (fun (o : Std.HashMap Nat (List Nat)) r ms =>
+    o.insert r ((ms.flatMap fun f => ((st.fns[f]?).map fun F => F.clauses.flatMap fun c => tmRefs c.body).getD []).filterMap
+      (fun g => let rg := (st.scc[g]?).getD g; if rg == r then none else some rg) |>.eraseDups)) {}
   modify fun s =>
-    { s with keys, byKey := (keys.zipIdx.foldl (fun (m : Std.HashMap UInt64 Nat) (k, f) => m.insert k f) {}) }
+    { s with
+      keyed := !(st.memo.isEmpty && st.frozen.isEmpty && !st.remember)
+      ownKeys := (List.range n).toArray.map fun f => mixHash (hash (st.fns[f]?.map (·.clauses))) (extra f)
+      members, outside, keyBase := globals }
   let τ ← freshTy
   inferTm (← freshAcc) ⟨[], none⟩ τ #[] p.main
   let mainHints := (← get).hints
@@ -321,8 +297,8 @@ def certifyKept (items : List Item) (p : Core.Program) (strict : Bool)
   let (g, _, _) ← Elab.collect items
   let (cert, st) ← (certifyM items g p envSizes).run
     { fns := p.fns.toArray, strict, regions, loans, ranked, widen, memo := memo.inst
-      frozen := memo.schemes, remember }
-  pure (cert, ⟨st.made, st.frozenMade⟩)
+      frozen := memo.schemes, keptFaces := memo.faces, remember }
+  pure (cert, ⟨st.made, st.frozenMade, st.facesMade⟩)
 
 /-- The certificate alone, with nothing kept. -/
 def certify (items : List Item) (p : Core.Program) (strict : Bool)
@@ -335,7 +311,8 @@ def toMemo (made : Made) : Memo :=
   { inst := made.inst.foldl (fun m (k, sig, r) =>
       let old := m.getD k []
       if old.any (·.1 == sig) then m else m.insert k ((sig, r) :: old)) {}
-    schemes := made.schemes.foldl (fun m (k, fz) => m.insert k fz) {} }
+    schemes := made.schemes.foldl (fun m (k, fz) => m.insert k fz) {}
+    faces := made.faces.foldl (fun m (k, f) => m.insert k f) {} }
 
 /-- Which part of a program a certificate fails on, for reporting a defect in
 this pass or in the elaborator. -/

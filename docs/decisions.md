@@ -5409,6 +5409,18 @@ and its own segments of the stores) as a value of its own; a unit is its
 declarations and its groups' additions; reuse is adding them, and keeping
 is of additions, not states.
 
+## Certificate inference keys a group by what the groups it uses show
+
+A group's key, for the schemes and instantiations an earlier compile kept,
+is what its functions are made of and, of each group it refers to, a hash of
+that group's scheme as kept (`Frozen.face`), not that group's key. A change
+to a function's body that leaves its scheme as it was keys none of its users
+anew (Zig's early cutoff). Keys are worked out as they are needed
+(`groupKeyOf`, `faceOf`); a group whose scheme cannot be kept shows its key.
+Measured on a one-line edit of covey's simulation: certificate inference
+111 ms to 34 ms, certify 133 ms to 55 ms, the whole compile 0.63 s to
+0.55 s. What comes of it the proved checker checks like anything else.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by

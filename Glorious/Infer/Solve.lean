@@ -29,12 +29,53 @@ structure Around where
 
 mutual
 
+/-- The key of group `scc`, for what is kept: what its functions are made of,
+and what each group it refers to shows those that use it (`faceOf`), so that
+a change to a function that leaves its scheme as it was keys none of the
+groups that use it anew. Zero where nothing is keyed. -/
+partial def groupKeyOf (scc : Nat) : M UInt64 := do
+  let s ← get
+  if !s.keyed then return 0
+  if let some k := s.groupKeys[scc]? then return k
+  let ms := s.members.getD scc [scc]
+  let mut k := ms.foldl (fun h f => mixHash h ((s.ownKeys[f]?).getD 0)) s.keyBase
+  for g in s.outside.getD scc [] do
+    k := mixHash k (← faceOf g)
+  modify fun s =>
+    { s with
+      groupKeys := s.groupKeys.insert scc k
+      byKey := ms.zipIdx.foldl (fun m (f, i) => m.insert (mixHash k (hash (i, f))) f) s.byKey }
+  return k
+
+/-- The key of function `fn`: its group's, and which of the group it is. -/
+partial def fnKey (fn : Nat) : M UInt64 := do
+  let scc := ((← get).scc[fn]?).getD fn
+  let k ← groupKeyOf scc
+  if k == 0 then return 0
+  let i := (((← get).members.getD scc [scc]).idxOf fn)
+  return mixHash k (hash (i, fn))
+
+/-- What group `scc` shows the groups that use it: what an earlier compile
+found it to, for its key; or else of the scheme inferred now, where that can
+be kept, and its key where not. -/
+partial def faceOf (scc : Nat) : M UInt64 := do
+  if let some f := (← get).faces[scc]? then return f
+  let key ← fnKey scc
+  let face ← match (← get).keptFaces[key]? with
+    | some f => pure f
+    | none => do
+      discard <| schemeOf scc
+      let made := (← get).frozenMade
+      pure ((made.findRev? (·.1 == key)).map (·.2.face) |>.getD key)
+  modify fun s => { s with faces := s.faces.insert scc face, facesMade := s.facesMade.push (key, face) }
+  return face
+
 /-- The general type of the group of `fn`, inferring the group if this is its first use. -/
 partial def schemeOf (scc : Nat) : M Scheme := do
   if let some sch := (← get).schemes[scc]? then return sch
   -- (Kept from an earlier compile, where the group and all it reaches are
   -- the same: taken with new variables, and not inferred.)
-  let key := ((← get).keys[scc]?).getD 0
+  let key ← fnKey scc
   if key != 0 then
     if let some fz := (← get).frozen.get? key then
       let sch ← thaw fz

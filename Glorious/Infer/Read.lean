@@ -356,7 +356,7 @@ and everything they refer to, at the types that follow. -/
 partial def instantiate (fn : Nat) (use : Use) : M Unit := do
   let sig := use.sig
   if ((← get).emitted[fn]?.getD []).contains sig then return
-  let key := ((← get).keys[fn]?).getD 0
+  let key ← fnKey fn
   -- (Kept from an earlier compile: what it gave is given again, with the
   -- regions of each use made anew, one for each it had.)
   let byKey := (← get).byKey
@@ -432,7 +432,7 @@ partial def instantiate (fn : Nat) (use : Use) : M Unit := do
     unless ((← get).emitted[m.fn]?.getD []).contains ground do
       let hints ← try m.hints.toList.mapM (zonkHints nb.body)
         catch e => throw s!"{e} (in function {m.fn})"
-      gave := gave ++ [(((← get).keys[m.fn]?).getD 0, ground, hints)]
+      gave := gave ++ [(← fnKey m.fn, ground, hints)]
       modify fun s =>
         { s with
           emitted := s.emitted.insert m.fn (ground :: s.emitted[m.fn]?.getD [])
@@ -443,10 +443,8 @@ partial def instantiate (fn : Nat) (use : Use) : M Unit := do
     { s with
       incls := outer.incls, places := outer.places, coerces := outer.coerces, nevers := outer.nevers
       onces := outer.onces, shows := outer.shows, opens := outer.opens, calls := outer.calls }
-  let keys := (← get).keys
-  modify fun s =>
-    { s with made := s.made.push (key, sig,
-        ⟨gave, wanted.map fun (g, u) => ((keys[g]?).getD 0, u.sig, u.atoms, u.own, u.more)⟩) }
+  let wantedKeys ← wanted.mapM fun (g, u) => do pure (← fnKey g, u.sig, u.atoms, u.own, u.more)
+  modify fun s => { s with made := s.made.push (key, sig, ⟨gave, wantedKeys⟩) }
   for (g, gs) in wanted do
     instantiate g gs
 
