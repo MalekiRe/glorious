@@ -25,26 +25,56 @@ partial def elideLifetimes (lifes : List String) : TypeExpr → TypeExpr
   | .performs r effects => .performs (elideLifetimes lifes r) (effects.map fun (e, args) => (e, args.map (elideLifetimes lifes)))
   | t => t
 
+/-- The type a default's alias (`defaultKey`) is of, with whether it is of a
+place among the types (`~`). -/
+def defaultOf? (alias : String) : Option (String × Bool) :=
+  let segs := alias.splitOn "::"
+  let last := segs.getLast!
+  if last.startsWith "%default:" then
+    let parts := (last.drop "%default:".length).toString.splitOn ":"
+    some ("::".intercalate (segs.dropLast ++ [":".intercalate parts.dropLast]), alias.endsWith "~")
+  else none
+
+mutual
+
 /-- A type with every alias in it written out. `seen` are the aliases being
-written out already: one that stands for itself has no meaning. -/
+written out already: one that stands for itself has no meaning. `defaulted`:
+the types with defaults, each with whether one is of a place among the
+types. -/
 partial def expandTypeExpr (aliases : Std.HashMap String (List String × TypeExpr))
-    (seen : List String) : TypeExpr → Except String TypeExpr
+    (defaulted : Std.HashMap String Bool) (seen : List String) : TypeExpr → Except String TypeExpr
   | .name x args => do
-    let mut args ← args.mapM (expandTypeExpr aliases seen)
+    let mut args ← args.mapM (expandTypeExpr aliases defaulted seen)
+    let some byTypes := defaulted[x]? | expandNamed aliases defaulted seen x args
     -- A declared type written with fewer arguments than it has parameters:
     -- the rest are what its declaration says they are where not written.
     -- (Of a use that writes no lifetime, by the place among the types,
     -- which are what the default is given.)
     let written := args.any fun | .name l [] => l.startsWith "'" | _ => false
-    let byTypes := !written && (List.range 16).any fun k => aliases.contains (defaultKey x k ++ "~")
+    let byTypes := !written && byTypes
     repeat
       match aliases[defaultKey x args.length ++ (if byTypes then "~" else "")]? with
       | some (params, body) =>
         let params := genericParams params
         let params := if byTypes then params.filter (!·.startsWith "'") else params
         let given := params.zip args
-        args := args ++ [← expandTypeExpr aliases seen (substTypeExpr given body)]
+        args := args ++ [← expandTypeExpr aliases defaulted seen (substTypeExpr given body)]
       | none => break
+    expandNamed aliases defaulted seen x args
+  | .tuple args => .tuple <$> args.mapM (expandTypeExpr aliases defaulted seen)
+  | .fn ps r => do
+    pure (.fn (← ps.mapM (expandTypeExpr aliases defaulted seen)) (← expandTypeExpr aliases defaulted seen r))
+  | .performs r effects => do
+    let effects ← effects.mapM fun (e, args) => do
+      pure (e, ← args.mapM (expandTypeExpr aliases defaulted seen))
+    pure (.performs (← expandTypeExpr aliases defaulted seen r) effects)
+  | .ref uniq t life => do pure (.ref uniq (← expandTypeExpr aliases defaulted seen t) life)
+  | t => pure t
+
+/-- A named type, its arguments written out, with the alias it is written out. -/
+partial def expandNamed (aliases : Std.HashMap String (List String × TypeExpr))
+    (defaulted : Std.HashMap String Bool) (seen : List String) (x : String) (args : List TypeExpr) :
+    Except String TypeExpr := do
     match aliases[x]? with
     | none => pure (.name x args)
     | some (params, body) =>
@@ -57,16 +87,9 @@ partial def expandTypeExpr (aliases : Std.HashMap String (List String × TypeExp
         then (params.filter (!·.startsWith "'"), elideLifetimes lifes body) else (params, body)
       unless params.length == args.length do
         throw s!"type alias `{x}` takes {params.length} arguments, but is given {args.length}"
-      expandTypeExpr aliases (x :: seen) (substTypeExpr (params.zip args) body)
-  | .tuple args => .tuple <$> args.mapM (expandTypeExpr aliases seen)
-  | .fn ps r => do
-    pure (.fn (← ps.mapM (expandTypeExpr aliases seen)) (← expandTypeExpr aliases seen r))
-  | .performs r effects => do
-    let effects ← effects.mapM fun (e, args) => do
-      pure (e, ← args.mapM (expandTypeExpr aliases seen))
-    pure (.performs (← expandTypeExpr aliases seen r) effects)
-  | .ref uniq t life => do pure (.ref uniq (← expandTypeExpr aliases seen t) life)
-  | t => pure t
+      expandTypeExpr aliases defaulted (x :: seen) (substTypeExpr (params.zip args) body)
+
+end
 
 mutual
 
@@ -105,7 +128,11 @@ partial def expandAliases (items : List Item) : Except String (List Item) := do
   if aliases.isEmpty then return items
   let byName : Std.HashMap String (List String × TypeExpr) :=
     aliases.foldl (fun m (name, ps, body) => if m.contains name then m else m.insert name (ps, body)) {}
-  let ty := expandTypeExpr byName []
+  let defaulted : Std.HashMap String Bool := aliases.foldl (fun m (name, _, _) =>
+    match defaultOf? name with
+    | some (x, byTypes) => m.insert x (byTypes || m.getD x false)
+    | none => m) {}
+  let ty := expandTypeExpr byName defaulted []
   -- An argument of an implementation's type that is not one of its type
   -- parameters is a type: `impl T for Option<Int>`. It is fixed, as an
   -- argument another name of the type fixes is.
