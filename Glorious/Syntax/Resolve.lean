@@ -269,16 +269,8 @@ partial def receiverExpr (taken : List (String × Bool)) (known : List (String �
         .call id (.name q name) (given :: rest)
       else .call id f args
     | _, _ => .call id f args
-  | .tailCall id f args => .tailCall id (receiverExpr taken known f) (args.map (receiverExpr taken known))
-  | .tuple args => .tuple (args.map (receiverExpr taken known))
-  | .proj e n => .proj (receiverExpr taken known e) n
-  | .closure id clauses => .closure id (clauses.map (receiverClause taken known []))
-  | .handle subject arms => .handle (receiverExpr taken known subject) (arms.map (receiverClause taken known []))
-  | .labelScope l body => .labelScope l (receiverStmts taken known body)
-  | .deref e => .deref (receiverExpr taken known e)
-  | .reborrow uniq e => .reborrow uniq (receiverExpr taken known e)
-  | .fieldOf id e name => .fieldOf id (receiverExpr taken known e) name
-  | e => e
+  | e => Id.run (e.traverse (pure <| receiverExpr taken known ·) fun pats body =>
+      pure (match receiverClause taken known [] (.mk pats body) with | .mk _ body => body))
 
 /-- (`values`: the parameters written with types that are no reference's.) -/
 partial def receiverClause (taken : List (String × Bool)) (known : List (String × Nat))

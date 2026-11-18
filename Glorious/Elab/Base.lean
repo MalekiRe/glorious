@@ -466,21 +466,12 @@ partial def patVars : Pattern → List String
 mutual
 
 partial def fvExpr (bound : List String) : Expr → List String
-  | .int _ => []
   | .name qual x => if qual.isNone && !bound.contains x then [x] else []
   | .label l => if bound.contains (labelName l) then [] else [labelName l]
-  | .call _ f args => fvExpr bound f ++ args.flatMap (fvExpr bound)
-  | .tailCall _ f args => fvExpr bound f ++ args.flatMap (fvExpr bound)
-  | .tuple args => args.flatMap (fvExpr bound)
-  | .proj e _ => fvExpr bound e
-  | .closure _ clauses => clauses.flatMap (fvClause bound)
-  | .handle subject arms => fvExpr bound subject ++ arms.flatMap (fvClause bound)
   | .labelScope l body => fvStmts (labelName l :: bound) body
-  | .ref _ x => if bound.contains x then [] else [x]
-  | .deref e => fvExpr bound e
-  | .reborrow _ e => fvExpr bound e
-  | .refField _ _ x _ _ => if bound.contains x then [] else [x]
-  | .fieldOf _ e _ => fvExpr bound e
+  | .ref _ x | .refField _ _ x _ _ => if bound.contains x then [] else [x]
+  | e => e.direct.flatMap (fvExpr bound) ++ e.bodies.flatMap fun (pats, body) =>
+    fvStmts (pats.flatMap patVars ++ bound) body
 
 partial def fvClause (bound : List String) : Clause → List String
   | .mk pats body => fvStmts (pats.flatMap patVars ++ bound) body

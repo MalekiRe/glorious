@@ -1589,8 +1589,6 @@ private partial def unfieldExpr (info : FieldInfo) : Expr → Expr
   | .tailCall id f args =>
     let (f, args) := shareEnv info id f args
     .tailCall id (unfieldExpr info f) (args.map (unfieldExpr info))
-  | .tuple es => .tuple (es.map (unfieldExpr info))
-  | .proj e i => .proj (unfieldExpr info e) i
   | .fieldOf id e name =>
     -- The checker said which field the name is.
     match info.reads.lookup id with
@@ -1619,9 +1617,6 @@ private partial def unfieldExpr (info : FieldInfo) : Expr → Expr
       else if names == [Syntax.nowMark] then .call 0 (.closure id (clauses.map (unfieldClause info))) []
       else .closure id (clauses.map (unfieldClause info))
     | _, _ => .closure id (clauses.map (unfieldClause info))
-  | .labelScope l body => .labelScope l (unfieldStmts info body)
-  | .handle subject arms =>
-    .handle (unfieldExpr info subject) (arms.map (unfieldClause info))
   | .refField id uniq x way star =>
     match info.shapes.lookup id with
     | none => .refField id uniq x way star
@@ -1650,21 +1645,13 @@ private partial def unfieldExpr (info : FieldInfo) : Expr → Expr
             else (acc.1, acc.2 ++ stepOf n (some c))
           | none => (acc.1, acc.2 ++ stepOf n none)) (base, [])
       .call 0 (.name none Syntax.focusMark) (base :: steps)
-  | e => e
+  | e => Id.run (e.traverse (pure <| unfieldExpr info ·) fun _ b => pure (unfieldStmts info b))
 
 private partial def unfieldClause (info : FieldInfo) : Clause → Clause
   | .mk pats body => .mk pats (unfieldStmts info body)
 
-private partial def unfieldStmt (info : FieldInfo) : Stmt → Stmt
-  | .expr e => .expr (unfieldExpr info e)
-  | .let_ pat e => .let_ pat (unfieldExpr info e)
-  | .letMut y e => .letMut y (unfieldExpr info e)
-  | .assign target e => .assign (unfieldExpr info target) (unfieldExpr info e)
-  | .defer e => .defer (unfieldExpr info e)
-  | .located line col s => .located line col (unfieldStmt info s)
-
 private partial def unfieldStmts (info : FieldInfo) (stmts : List Stmt) : List Stmt :=
-  stmts.map (unfieldStmt info)
+  stmts.map fun s => Id.run (s.traverse (pure <| unfieldExpr info ·))
 
 end
 

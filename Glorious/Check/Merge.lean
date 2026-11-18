@@ -94,275 +94,75 @@ def mergeSet {κ : Type} [BEq κ] [Hashable κ] (p a b : Std.HashSet κ) : Optio
   if samePtr a p then some b else if samePtr b p then some a else
   some (b.fold (init := a) fun m x => m.insert x)
 
+/-- How a part of the state grown by two checks from one is put together. -/
+class Merge3 (α : Type) where
+  merge3 : α → α → α → Option α
+
+instance {α : Type} : Merge3 (List α) := ⟨mergeList⟩
+instance {α : Type} : Merge3 (Array α) := ⟨mergeArr⟩
+instance {α : Type} : Merge3 (Store α) := ⟨mergeStore⟩
+instance {κ ν : Type} [BEq κ] [Hashable κ] : Merge3 (Std.HashMap κ ν) := ⟨mergeMap⟩
+instance {κ : Type} [BEq κ] [Hashable κ] : Merge3 (Std.HashSet κ) := ⟨mergeSet⟩
+
 /-- The state after checking `b`'s units after `a`'s, both having gone on
-from `p`, where it can be put together from what each added. -/
+from `p`, where it can be put together from what each added: what both grew
+put together (`Merge3`); what says where the check is, `b`'s. -/
 def mergeStates (p a b : St) : Option St := do
-  let tys ← mergeStore p.tys a.tys b.tys
-  let rows ← mergeStore p.rows a.rows b.rows
-  let mono ← mergeList p.mono a.mono b.mono
-  let monoRows ← mergeList p.monoRows a.monoRows b.monoRows
-  let monoCaps ← mergeList p.monoCaps a.monoCaps b.monoCaps
-  let caps ← mergeStore p.caps a.caps b.caps
-  let capEdges ← mergeStore p.capEdges a.capEdges b.capEdges
-  let capOut ← mergeStore p.capOut a.capOut b.capOut
-  let capEdgeNames ← mergeStore p.capEdgeNames a.capEdgeNames b.capEdgeNames
-  let dups ← mergeArr p.dups a.dups b.dups
-  let lateDups ← mergeArr p.lateDups a.lateDups b.lateDups
-  let drops ← mergeArr p.drops a.drops b.drops
-  let lateDrops ← mergeArr p.lateDrops a.lateDrops b.lateDrops
-  let stays ← mergeArr p.stays a.stays b.stays
-  let lateStays ← mergeArr p.lateStays a.lateStays b.lateStays
-  let useDecls ← mergeList p.useDecls a.useDecls b.useDecls
-  let movedCells ← mergeList p.movedCells a.movedCells b.movedCells
-  let flagged ← mergeList p.flagged a.flagged b.flagged
-  let givenSites ← mergeList p.givenSites a.givenSites b.givenSites
-  let givenEdges ← mergeSet p.givenEdges a.givenEdges b.givenEdges
-  let givers ← mergeList p.givers a.givers b.givers
-  let givenReads ← mergeArr p.givenReads a.givenReads b.givenReads
-  let aparts ← mergeArr p.aparts a.aparts b.aparts
+  let m3 := fun {α : Type} [Merge3 α] (f : St → α) => Merge3.merge3 (f p) (f a) (f b)
   unless samePtr a.modules b.modules || samePtr a.modules p.modules || samePtr b.modules p.modules do none
-  let fieldNames ← mergeList p.fieldNames a.fieldNames b.fieldNames
-  let dotChosen ← mergeList p.dotChosen a.dotChosen b.dotChosen
-  let argsChosen ← mergeList p.argsChosen a.argsChosen b.argsChosen
-  let decided ← mergeList p.decided a.decided b.decided
-  let traitShape ← mergeList p.traitShape a.traitShape b.traitShape
-  let assocUses ← mergeArr p.assocUses a.assocUses b.assocUses
-  let writtenArgs ← mergeList p.writtenArgs a.writtenArgs b.writtenArgs
-  let supers ← mergeList p.supers a.supers b.supers
-  let ranked ← mergeList p.ranked a.ranked b.ranked
-  let packs ← mergeArr p.packs a.packs b.packs
-  let envGroups ← mergeArr p.envGroups a.envGroups b.envGroups
-  let envAfter ← mergeArr p.envAfter a.envAfter b.envAfter
-  let envLent ← mergeArr p.envLent a.envLent b.envLent
-  let fnGroups ← mergeList p.fnGroups a.fnGroups b.fnGroups
-  let envFns ← mergeList p.envFns a.envFns b.envFns
-  let envLinks ← mergeArr p.envLinks a.envLinks b.envLinks
-  let envWraps ← mergeArr p.envWraps a.envWraps b.envWraps
-  let envMust ← mergeList p.envMust a.envMust b.envMust
-  let envHeld ← mergeArr p.envHeld a.envHeld b.envHeld
-  let derefReads ← mergeArr p.derefReads a.derefReads b.derefReads
-  let rowChecks ← mergeList p.rowChecks a.rowChecks b.rowChecks
-  let typeBounds ← mergeList p.typeBounds a.typeBounds b.typeBounds
-  let typeParams ← mergeList p.typeParams a.typeParams b.typeParams
-  let fieldReads ← mergeArr p.fieldReads a.fieldReads b.fieldReads
-  let fieldSites ← mergeArr p.fieldSites a.fieldSites b.fieldSites
-  let fieldTable ← mergeArr p.fieldTable a.fieldTable b.fieldTable
-  let calls ← mergeArr p.calls a.calls b.calls
-  let instRows ← mergeList p.instRows a.instRows b.instRows
-  let unrunGiven ← mergeArr p.unrunGiven a.unrunGiven b.unrunGiven
-  let sharedEdges ← mergeSet p.sharedEdges a.sharedEdges b.sharedEdges
-  let assumedLinks ← mergeArr p.assumedLinks a.assumedLinks b.assumedLinks
-  let abandoned ← mergeArr p.abandoned a.abandoned b.abandoned
-  let sure ← mergeSet p.sure a.sure b.sure
-  let lowerChecks ← mergeArr p.lowerChecks a.lowerChecks b.lowerChecks
-  let fnBodies ← mergeList p.fnBodies a.fnBodies b.fnBodies
-  let runFns ← mergeMap p.runFns a.runFns b.runFns
-  let runCtors ← mergeSet p.runCtors a.runCtors b.runCtors
-  let runAliases ← mergeMap p.runAliases a.runAliases b.runAliases
-  let runOps ← mergeMap p.runOps a.runOps b.runOps
-  let runExact ← mergeSet p.runExact a.runExact b.runExact
-  let runNow ← mergeSet p.runNow a.runNow b.runNow
-  let rowIncl ← mergeArr p.rowIncl a.rowIncl b.rowIncl
-  let types ← mergeList p.types a.types b.types
-  let ctors ← mergeList p.ctors a.ctors b.ctors
-  let ops ← mergeList p.ops a.ops b.ops
-  let effects ← mergeList p.effects a.effects b.effects
-  let aliases ← mergeList p.aliases a.aliases b.aliases
-  let fns ← mergeList p.fns a.fns b.fns
-  let pending ← mergeArr p.pending a.pending b.pending
-  let projections ← mergeArr p.projections a.projections b.projections
-  let namedReads ← mergeArr p.namedReads a.namedReads b.namedReads
-  let blockCaps ← mergeArr p.blockCaps a.blockCaps b.blockCaps
-  let given ← mergeArr p.given a.given b.given
-  let unrun ← mergeArr p.unrun a.unrun b.unrun
-  let coercing ← mergeList p.coercing a.coercing b.coercing
-  let coercions ← mergeArr p.coercions a.coercions b.coercions
-  let loans ← mergeStore p.loans a.loans b.loans
-  let cells ← mergeArr p.cells a.cells b.cells
-  let bindSites ← mergeList p.bindSites a.bindSites b.bindSites
-  let leftBehind ← mergeArr p.leftBehind a.leftBehind b.leftBehind
-  let takenApart ← mergeArr p.takenApart a.takenApart b.takenApart
-  let partReads ← mergeArr p.partReads a.partReads b.partReads
-  let uses ← mergeArr p.uses a.uses b.uses
-  let heldMoves ← mergeArr p.heldMoves a.heldMoves b.heldMoves
-  let traits ← mergeList p.traits a.traits b.traits
-  let methods ← mergeList p.methods a.methods b.methods
-  let kimpls ← mergeList p.kimpls a.kimpls b.kimpls
-  let blanketTraits ← mergeList p.blanketTraits a.blanketTraits b.blanketTraits
-  let instSites ← mergeArr p.instSites a.instSites b.instSites
-  let siteTable ← mergeList p.siteTable a.siteTable b.siteTable
-  let siteTypes ← mergeList p.siteTypes a.siteTypes b.siteTypes
-  let bounds ← mergeArr p.bounds a.bounds b.bounds
-  let groupUses ← mergeArr p.groupUses a.groupUses b.groupUses
-  let rigidKeys ← mergeStore p.rigidKeys a.rigidKeys b.rigidKeys
-  let rigidAt ← mergeMap p.rigidAt a.rigidAt b.rigidAt
-  let conditionsAt ← mergeMap p.conditionsAt a.conditionsAt b.conditionsAt
-  let dropCands ← mergeArr p.dropCands a.dropCands b.dropCands
-  let unsafeFns ← mergeList p.unsafeFns a.unsafeFns b.unsafeFns
-  let dropSites ← mergeArr p.dropSites a.dropSites b.dropSites
-  let lateKeeps ← mergeArr p.lateKeeps a.lateKeeps b.lateKeeps
-  let quiets ← mergeArr p.quiets a.quiets b.quiets
-  let paramTraits ← mergeList p.paramTraits a.paramTraits b.paramTraits
-  let gatOccs ← mergeArr p.gatOccs a.gatOccs b.gatOccs
-  let gatHolds ← mergeArr p.gatHolds a.gatHolds b.gatHolds
   unless samePtr a.dropMode b.dropMode || samePtr a.dropMode p.dropMode || samePtr b.dropMode p.dropMode do none
-  let dictTable ← mergeArr p.dictTable a.dictTable b.dictTable
-  let methodCalls ← mergeArr p.methodCalls a.methodCalls b.methodCalls
-  let fnBounds ← mergeList p.fnBounds a.fnBounds b.fnBounds
-  let impls ← mergeArr p.impls a.impls b.impls
   -- (An implementation's place: `b`'s come after `a`'s.)
   let shift := a.impls.size - p.impls.size
   let implsByBase := b.implsByBase.fold (init := a.implsByBase) fun m key is =>
     let mine := (is.filter (· ≥ p.impls.size)).map (· + shift)
     if mine.isEmpty then m else m.insert key ((m.getD key #[]) ++ mine)
-  pure { p with
-    tys,
-    rows,
-    mono,
-    monoRows,
-    monoCaps,
-    caps,
-    capEdges,
-    capOut,
-    capEdgeNames,
-    brands := max a.brands b.brands,
-    seen := b.seen,
-    dups,
-    lateDups,
-    drops,
-    lateDrops,
-    stays,
-    lateStays,
-    useDecls,
-    anyMust := a.anyMust || b.anyMust,
-    anon := b.anon,
-    rigidCaps := b.rigidCaps,
-    givingBack := b.givingBack,
-    movedCells,
-    flagged,
-    givenSites,
-    givenEdges,
-    givers,
-    givenReads,
-    aparts,
-    outlives := b.outlives,
-    staticCap := b.staticCap,
-    modules := a.modules,
-    fieldNames,
-    rigidParams := b.rigidParams,
-    dotChosen,
-    argsChosen,
-    decided,
-    wantResult := b.wantResult,
-    traitShape,
-    assocUses,
-    writtenArgs,
-    supers,
-    ranked,
-    elided := b.elided,
-    packs,
-    envGroups,
-    envAfter,
-    envLent,
-    fnGroups,
-    envFns,
-    envLinks,
-    envWraps,
-    envMust,
-    envHeld,
-    derefReads,
-    rowChecks,
-    typeBounds,
-    typeParams,
-    instWith := b.instWith,
-    fieldReads,
-    fieldSites,
-    fieldTable,
-    firstSaid := b.firstSaid,
-    calls,
-    instRows,
-    unrunGiven,
-    sharedEdges,
-    assumedLinks,
-    abandoned,
-    sure,
-    lowerChecks,
-    fnBodies,
-    runFns,
-    runCtors,
-    runAliases,
-    runOps,
-    runExact,
-    runNow,
-    rowIncl,
-    types,
-    ctors,
-    ops,
-    effects,
-    aliases,
-    fns,
-    group := b.group,
-    pending,
-    projections,
-    namedReads,
-    pos := b.pos,
-    blockCaps,
-    given,
-    unrun,
-    coercing,
-    coercions,
-    owner := b.owner,
-    later := b.later,
-    dropLive := b.dropLive,
-    temps := b.temps,
-    loans,
-    cells,
-    shapes := a.shapes || b.shapes,
-    bindSites,
-    leftBehind,
-    takenApart,
-    partReads,
-    uses,
-    heldMoves,
-    traits,
-    methods,
-    impls,
-    implsByBase,
-    kimpls,
-    lastBounds := b.lastBounds,
-    patterned := a.patterned || b.patterned,
-    blanketTraits,
-    lastSites := b.lastSites,
-    instSites,
-    siteTable,
-    siteTypes,
-    bounds,
-    groupUses,
-    rigidKeys,
-    rigidAt,
-    conditionsAt,
-    implGivens := b.implGivens,
-    dropCands,
-    unsafeFns,
-    unsafeBlock := b.unsafeBlock,
-    arrayType := b.arrayType,
-    dropSites,
-    wildAt := b.wildAt,
-    wildCount := b.wildCount,
-    wildLet := b.wildLet,
-    letBinds := b.letBinds,
-    lateKeeps,
-    quiets,
-    gatScope := b.gatScope,
-    projecting := b.projecting,
-    ownItems := b.ownItems,
-    paramTraits,
-    gatOccs,
-    gatHolds,
-    dropMode := a.dropMode,
-    dropAsked := max a.dropAsked b.dropAsked,
-    dictTable,
-    methodCalls,
-    fnBounds }
+  pure { b with
+    tys := ← m3 (·.tys), rows := ← m3 (·.rows), mono := ← m3 (·.mono),
+    monoRows := ← m3 (·.monoRows), monoCaps := ← m3 (·.monoCaps), caps := ← m3 (·.caps),
+    capEdges := ← m3 (·.capEdges), capOut := ← m3 (·.capOut),
+    capEdgeNames := ← m3 (·.capEdgeNames), dups := ← m3 (·.dups), lateDups := ← m3 (·.lateDups),
+    drops := ← m3 (·.drops), lateDrops := ← m3 (·.lateDrops), stays := ← m3 (·.stays),
+    lateStays := ← m3 (·.lateStays), useDecls := ← m3 (·.useDecls),
+    movedCells := ← m3 (·.movedCells), flagged := ← m3 (·.flagged),
+    givenSites := ← m3 (·.givenSites), givenEdges := ← m3 (·.givenEdges),
+    givers := ← m3 (·.givers), givenReads := ← m3 (·.givenReads), aparts := ← m3 (·.aparts),
+    fieldNames := ← m3 (·.fieldNames), dotChosen := ← m3 (·.dotChosen),
+    argsChosen := ← m3 (·.argsChosen), decided := ← m3 (·.decided),
+    traitShape := ← m3 (·.traitShape), assocUses := ← m3 (·.assocUses),
+    writtenArgs := ← m3 (·.writtenArgs), supers := ← m3 (·.supers), ranked := ← m3 (·.ranked),
+    packs := ← m3 (·.packs), envGroups := ← m3 (·.envGroups), envAfter := ← m3 (·.envAfter),
+    envLent := ← m3 (·.envLent), fnGroups := ← m3 (·.fnGroups), envFns := ← m3 (·.envFns),
+    envLinks := ← m3 (·.envLinks), envWraps := ← m3 (·.envWraps), envMust := ← m3 (·.envMust),
+    envHeld := ← m3 (·.envHeld), derefReads := ← m3 (·.derefReads),
+    rowChecks := ← m3 (·.rowChecks), typeBounds := ← m3 (·.typeBounds),
+    typeParams := ← m3 (·.typeParams), fieldReads := ← m3 (·.fieldReads),
+    fieldSites := ← m3 (·.fieldSites), fieldTable := ← m3 (·.fieldTable), calls := ← m3 (·.calls),
+    instRows := ← m3 (·.instRows), unrunGiven := ← m3 (·.unrunGiven),
+    sharedEdges := ← m3 (·.sharedEdges), assumedLinks := ← m3 (·.assumedLinks),
+    abandoned := ← m3 (·.abandoned), sure := ← m3 (·.sure), lowerChecks := ← m3 (·.lowerChecks),
+    fnBodies := ← m3 (·.fnBodies), runFns := ← m3 (·.runFns), runCtors := ← m3 (·.runCtors),
+    runAliases := ← m3 (·.runAliases), runOps := ← m3 (·.runOps), runExact := ← m3 (·.runExact),
+    runNow := ← m3 (·.runNow), rowIncl := ← m3 (·.rowIncl), types := ← m3 (·.types),
+    ctors := ← m3 (·.ctors), ops := ← m3 (·.ops), effects := ← m3 (·.effects),
+    aliases := ← m3 (·.aliases), fns := ← m3 (·.fns), pending := ← m3 (·.pending),
+    projections := ← m3 (·.projections), namedReads := ← m3 (·.namedReads),
+    blockCaps := ← m3 (·.blockCaps), given := ← m3 (·.given), unrun := ← m3 (·.unrun),
+    coercing := ← m3 (·.coercing), coercions := ← m3 (·.coercions), loans := ← m3 (·.loans),
+    cells := ← m3 (·.cells), bindSites := ← m3 (·.bindSites), leftBehind := ← m3 (·.leftBehind),
+    takenApart := ← m3 (·.takenApart), partReads := ← m3 (·.partReads), uses := ← m3 (·.uses),
+    heldMoves := ← m3 (·.heldMoves), traits := ← m3 (·.traits), methods := ← m3 (·.methods),
+    kimpls := ← m3 (·.kimpls), blanketTraits := ← m3 (·.blanketTraits),
+    instSites := ← m3 (·.instSites), siteTable := ← m3 (·.siteTable),
+    siteTypes := ← m3 (·.siteTypes), bounds := ← m3 (·.bounds), groupUses := ← m3 (·.groupUses),
+    rigidKeys := ← m3 (·.rigidKeys), rigidAt := ← m3 (·.rigidAt),
+    conditionsAt := ← m3 (·.conditionsAt), dropCands := ← m3 (·.dropCands),
+    unsafeFns := ← m3 (·.unsafeFns), dropSites := ← m3 (·.dropSites),
+    lateKeeps := ← m3 (·.lateKeeps), quiets := ← m3 (·.quiets),
+    paramTraits := ← m3 (·.paramTraits), gatOccs := ← m3 (·.gatOccs),
+    gatHolds := ← m3 (·.gatHolds), dictTable := ← m3 (·.dictTable),
+    methodCalls := ← m3 (·.methodCalls), fnBounds := ← m3 (·.fnBounds), impls := ← m3 (·.impls),
+    brands := max a.brands b.brands, anyMust := a.anyMust || b.anyMust, modules := a.modules,
+    shapes := a.shapes || b.shapes, patterned := a.patterned || b.patterned, dropMode := a.dropMode,
+    dropAsked := max a.dropAsked b.dropAsked, implsByBase, at_ := p.at_ }
 
 end Glorious.Check
