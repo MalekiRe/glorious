@@ -1,5 +1,8 @@
 module
 
+public import Std.Data.HashMap
+public import Std.Data.HashSet
+
 /-!
 # Which implementation a trait bound is met by
 
@@ -133,14 +136,20 @@ def collect (f : String → STy → Option Dict) (args : List STy) :
       | _, _ => none
 
 /-- How `tr` holds of a type, if it can be found within `fuel` implementations
-one inside another. A type variable has a trait only if that is assumed. -/
-def solve (impls : List Impl) (givens : Givens) : Nat → String → STy → Option Dict
+one inside another, the implementation for a trait, a head and an arity found
+by `find`. A type variable has a trait only if that is assumed. -/
+def solveBy (find : String → String → Nat → Option (Nat × Impl)) (givens : Givens) :
+    Nat → String → STy → Option Dict
   | 0, _, _ => none
   | _ + 1, tr, .var v => (findGiven tr v givens).map .given
   | fuel + 1, tr, .con head args =>
-    match findImpl tr head args.length impls with
+    match find tr head args.length with
     | none => none
-    | some (i, I) => (collect (solve impls givens fuel) args I.context).map (.impl i)
+    | some (i, I) => (collect (solveBy find givens fuel) args I.context).map (.impl i)
+
+/-- `solveBy`, the implementations looked for in order. -/
+def solve (impls : List Impl) (givens : Givens) : Nat → String → STy → Option Dict :=
+  solveBy (fun tr head n => findImpl tr head n impls) givens
 
 theorem collect_sound {impls : List Impl} {givens : Givens} {f : String → STy → Option Dict}
     (hf : ∀ tr τ d, f tr τ = some d → Entails impls givens tr τ d) {args : List STy} :
@@ -161,12 +170,18 @@ theorem collect_sound {impls : List Impl} {givens : Givens} {f : String → STy 
         exact .cons hτ (hf tr τ d hd) (collect_sound hf hds)
       · cases h
 
-/-- **What is found is evidence.** -/
-theorem solve_sound {impls : List Impl} {givens : Givens} : ∀ (fuel : Nat) {tr : String}
-    {τ : STy} {d : Dict}, solve impls givens fuel tr τ = some d → Entails impls givens tr τ d
-  | 0, _, _, _, h => by simp [solve] at h
+/-- **What is found is evidence**, whatever finds implementations, so long as
+what it finds is the implementation at that place, for that trait, head and
+arity. -/
+theorem solveBy_sound {impls : List Impl} {givens : Givens}
+    {find : String → String → Nat → Option (Nat × Impl)}
+    (hf : ∀ {tr head : String} {n i : Nat} {I : Impl}, find tr head n = some (i, I) →
+      impls[i]? = some I ∧ I.trait = tr ∧ I.head = head ∧ I.arity = n) :
+    ∀ (fuel : Nat) {tr : String} {τ : STy} {d : Dict},
+      solveBy find givens fuel tr τ = some d → Entails impls givens tr τ d
+  | 0, _, _, _, h => by simp [solveBy] at h
   | fuel + 1, tr, .var v, d, h => by
-    simp only [solve] at h
+    simp only [solveBy] at h
     cases hk : findGiven tr v givens with
     | none => simp [hk] at h
     | some k =>
@@ -174,18 +189,85 @@ theorem solve_sound {impls : List Impl} {givens : Givens} : ∀ (fuel : Nat) {tr
       subst h
       exact .given (findGiven_sound hk)
   | fuel + 1, tr, .con head args, d, h => by
-    simp only [solve] at h
+    simp only [solveBy] at h
     split at h
     · cases h
     · rename_i i I hfind
-      obtain ⟨hi, htr, hhead, harity⟩ := findImpl_sound hfind
-      cases hc : collect (solve impls givens fuel) args I.context with
+      obtain ⟨hi, htr, hhead, harity⟩ := hf hfind
+      cases hc : collect (solveBy find givens fuel) args I.context with
       | none => simp [hc] at h
       | some ds =>
         simp [hc] at h
         subst h
         exact .impl hi htr hhead harity
-          (collect_sound (fun _ _ _ hd => solve_sound fuel hd) hc)
+          (collect_sound (fun _ _ _ hd => solveBy_sound hf fuel hd) hc)
+
+/-- **What is found is evidence.** -/
+theorem solve_sound {impls : List Impl} {givens : Givens} (fuel : Nat) {tr : String}
+    {τ : STy} {d : Dict} (h : solve impls givens fuel tr τ = some d) : Entails impls givens tr τ d :=
+  solveBy_sound (fun h => findImpl_sound h) fuel h
+
+/-! ## Found by key
+
+The implementations as the checker keeps them: in order, with the place of the
+first for each trait, head and arity, and whether a head has any of a trait.
+What is found by key is checked to be what is at that place, so it is evidence
+as `findImpl`'s is. -/
+
+structure ImplIndex where
+  impls : Array Impl := #[]
+  first : Std.HashMap (String × String × Nat) Nat := {}
+  heads : Std.HashMap (String × String) Nat := {}
+
+/-- One more implementation, after the others. -/
+def ImplIndex.push (ix : ImplIndex) (I : Impl) : ImplIndex :=
+  let i := ix.impls.size
+  { impls := ix.impls.push I
+    first := if ix.first.contains (I.trait, I.head, I.arity) then ix.first else ix.first.insert (I.trait, I.head, I.arity) i
+    heads := if ix.heads.contains (I.trait, I.head) then ix.heads else ix.heads.insert (I.trait, I.head) i }
+
+/-- The implementations, indexed. -/
+def ImplIndex.ofArray (impls : Array Impl) : ImplIndex := impls.foldl ImplIndex.push {}
+
+/-- The first implementation of `tr` for `head` at this arity, with its place. -/
+def ImplIndex.find (ix : ImplIndex) (tr head : String) (n : Nat) : Option (Nat × Impl) :=
+  match ix.first[(tr, head, n)]? with
+  | some i =>
+    match ix.impls[i]? with
+    | some I => if I.trait = tr ∧ I.head = head ∧ I.arity = n then some (i, I) else none
+    | none => none
+  | none => none
+
+theorem ImplIndex.find_sound {ix : ImplIndex} {tr head : String} {n i : Nat} {I : Impl}
+    (h : ix.find tr head n = some (i, I)) :
+    ix.impls.toList[i]? = some I ∧ I.trait = tr ∧ I.head = head ∧ I.arity = n := by
+  unfold ImplIndex.find at h
+  split at h
+  · split at h
+    · split at h
+      · rename_i J hJ hc
+        cases h
+        exact ⟨by simpa using hJ, hc⟩
+      · cases h
+    · cases h
+  · cases h
+
+/-- The first implementation of `tr` for `head`, at any arity. -/
+def ImplIndex.firstFor (ix : ImplIndex) (tr head : String) : Option Impl :=
+  ix.heads[(tr, head)]?.bind (ix.impls[·]?)
+
+/-- Is there an implementation of `tr` for `head`? -/
+def ImplIndex.has (ix : ImplIndex) (tr head : String) : Bool := ix.heads.contains (tr, head)
+
+/-- `solve`, the implementations found by key. -/
+def solveIx (ix : ImplIndex) (givens : Givens) : Nat → String → STy → Option Dict :=
+  solveBy ix.find givens
+
+/-- **What is found by key is evidence.** -/
+theorem solveIx_sound {ix : ImplIndex} {givens : Givens} (fuel : Nat) {tr : String}
+    {τ : STy} {d : Dict} (h : solveIx ix givens fuel tr τ = some d) :
+    Entails ix.impls.toList givens tr τ d :=
+  solveBy_sound (fun h => ImplIndex.find_sound h) fuel h
 
 /-! ## At most one way -/
 

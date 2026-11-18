@@ -684,7 +684,7 @@ partial def tyOwnsOnce (visiting : List String) (t : Ty) : M Bool := do
     if let some (_, once) := (← get).useDecls.lookup name then
       if once then return true
     -- A type with a `drop` of its own: a copy would run it again.
-    if (← get).kimpls.any (fun I => I.trait == "Drop" && I.head == name) then return true
+    if (← get).kimpls.has "Drop" name then return true
     if ← args.anyM (tyOwnsOnce visiting) then return true
     if visiting.contains name then return false
     match (← get).types.lookup name with
@@ -762,7 +762,7 @@ partial def tyHasDrop (visiting : List String) (t : Ty) : M (Option String) := d
         if let some name ← tyHasDrop visiting held then return some name
     return none
   | .con name args => do
-    if (← get).kimpls.any (fun I => I.trait == "Drop" && I.head == name) then
+    if (← get).kimpls.has "Drop" name then
       return some (bareName name)
     if let some w ← args.findSomeM? (tyHasDrop visiting) then return some w
     if visiting.contains name then return none
@@ -788,7 +788,7 @@ def checkDups (dups : Array (Ty × String)) : M Unit := do
       if let some name ← tyHasDrop [] t then
         let s ← get
         let through := (why.splitOn "reading through a reference").length > 1
-        let home := s.kimpls.any fun I =>
+        let home := s.kimpls.impls.any fun I =>
           I.trait == "Drop" && bareName I.head == name
             && (s.owner.splitOn "@").head? == some "Drop::drop"
         let observed := (why.splitOn "to choose a clause").length > 1

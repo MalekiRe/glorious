@@ -1742,7 +1742,7 @@ partial def inferPat (p : Pattern) (t : Ty) : M Scope := do
       -- it: anywhere else its function would not have run.
       if let .con n _ := result then
         let s ← get
-        if !ps.isEmpty && s.kimpls.any (fun I => I.trait == "Drop" && I.head == n) then
+        if !ps.isEmpty && s.kimpls.has "Drop" n then
           if let some here := s.modules.homes.lookup s.owner then
             let home := "::".intercalate ((n.splitOn "::").dropLast)
             unless here == home do

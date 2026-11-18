@@ -103,6 +103,11 @@ instance {α : Type} : Merge3 (Array α) := ⟨mergeArr⟩
 instance {α : Type} : Merge3 (Store α) := ⟨mergeStore⟩
 instance {κ ν : Type} [BEq κ] [Hashable κ] : Merge3 (Std.HashMap κ ν) := ⟨mergeMap⟩
 instance {κ : Type} [BEq κ] [Hashable κ] : Merge3 (Std.HashSet κ) := ⟨mergeSet⟩
+instance : Merge3 Traits.ImplIndex where
+  merge3 p a b := do
+    if samePtr a p then return b
+    if samePtr b p then return a
+    pure (.ofArray (← mergeArr p.impls a.impls b.impls))
 
 /-- The state after checking `b`'s units after `a`'s, both having gone on
 from `p`, where it can be put together from what each added: what both grew

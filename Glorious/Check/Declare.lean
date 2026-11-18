@@ -536,7 +536,7 @@ def declareTraits (items : List Item) : M Unit := do
       -- called: what is and is not used is then counted, as it is where a
       -- program declares something that has to be used.
       if tr == "Drop" then modify fun s => { s with anyMust := true }
-      if (← get).kimpls.any fun I => I.trait == tr && I.head == head then
+      if (← get).kimpls.has tr head then
         throw s!"`{tr}` is implemented twice for `{head}`"
       -- The arguments it gives its trait, and the types the trait leaves to it.
       let (arityOfTrait, assocNames) := ((← get).traitShape.lookup base).getD (0, [])
@@ -716,7 +716,7 @@ def declareTraits (items : List Item) : M Unit := do
             { trait := tr, head, params := args, context := ctx, methods,
               dictFn := Elab.implDictName tr head, targs, assocs, pvars, fixed, equal, generic, extra,
               gatParams, extraEqual }
-          kimpls := s.kimpls ++ [⟨tr, head, arity, ctx⟩] }
+          kimpls := s.kimpls.push ⟨tr, head, arity, ctx⟩ }
   -- Every type can be destroyed: by nothing at all, by its own `Drop` and
   -- then its parts', or part by part. Said as an implementation for each
   -- type, on condition that each type parameter can be destroyed, and that
@@ -736,9 +736,9 @@ def declareTraits (items : List Item) : M Unit := do
         else (h, 0, []))
       ++ declared
     for (head, arity, typeParams) in heads do
-      unless (← get).kimpls.any fun I => I.trait == Syntax.destroyTrait && I.head == head do
+      unless (← get).kimpls.has Syntax.destroyTrait head do
         let own := typeParams.map fun j => (Syntax.destroyTrait, j)
-        let drops := ((← get).kimpls.find? fun I => I.trait == "Drop" && I.head == head).map (·.context)
+        let drops := ((← get).kimpls.firstFor "Drop" head).map (·.context)
         let ctx := own ++ (drops.getD []).filter (!own.contains ·)
         modify fun s =>
           { s with
@@ -747,16 +747,16 @@ def declareTraits (items : List Item) : M Unit := do
             impls := s.impls.push
               ⟨Syntax.destroyTrait, head, (List.range arity).map (s!"T{·}"), ctx, [],
                 Elab.implDictName Syntax.destroyTrait head, [], [], [], [], [], false, [], [], []⟩
-            kimpls := s.kimpls ++ [⟨Syntax.destroyTrait, head, arity, ctx⟩] }
+            kimpls := s.kimpls.push ⟨Syntax.destroyTrait, head, arity, ctx⟩ }
   -- What `Traits.coherent` asks of the implementations.
-  unless Traits.noOverlap (← get).kimpls do
+  unless Traits.noOverlap (← get).kimpls.impls.toList do
     throw "two implementations are for the same trait and type"
   -- A type that has a trait has the traits that one needs, on no more
   -- conditions than it has the first.
   let kimpls := (← get).kimpls
-  for I in kimpls do
+  for I in kimpls.impls do
     for s in ((← get).supers.lookup (Syntax.traitBase I.trait)).getD [] do
-      match Traits.findImpl s I.head I.arity kimpls with
+      match kimpls.find s I.head I.arity with
       | some (_, J) =>
         for c in J.context do
           unless I.context.contains c do

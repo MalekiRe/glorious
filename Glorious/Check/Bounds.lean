@@ -103,7 +103,7 @@ partial def leaves (pos trait : String) (t : Ty) : M (List (String × Nat × Ty)
       | t => t.head
     match head with
     | some (n, args) =>
-      match Traits.findImpl trait n args.length (← get).kimpls with
+      match (← get).kimpls.find trait n args.length with
       | some (_, I) =>
         let mut out : List (String × Nat × Ty) := []
         for (tr', j) in I.context do
@@ -177,7 +177,7 @@ partial def needsDestroying (seen : List String) (t : Ty) : M Bool := do
     modify fun s => { s with seen := before }
     pure held.isSome
   | .con name args =>
-    if (← get).kimpls.any fun I => I.trait == "Drop" && I.head == name then return true
+    if (← get).kimpls.has "Drop" name then return true
     let key ← spellTy (.con name args)
     if seen.contains key then return false
     (← partsOf (.con name args)).anyM (needsDestroying (key :: seen))
@@ -220,7 +220,7 @@ partial def solveFitting (givens : Traits.Givens) (fuel : Nat) (key : String) (t
     let rec settle : Traits.STy → Traits.STy
       | .var k => if givens.contains (Syntax.destroyTrait, k) then .var k else .con "(reference)" []
       | .con n args => .con n (args.map settle)
-    return Traits.solve (← get).kimpls givens 100000 key (settle (← toSTy ty))
+    return Traits.solveIx (← get).kimpls givens 100000 key (settle (← toSTy ty))
   if let some k ← keyOf ty then return (Traits.findGiven key k givens).map .given
   -- (What the function is given of a type made from its type parameters.)
   for k in ← conditionKeys key ty do
@@ -230,7 +230,7 @@ partial def solveFitting (givens : Traits.Givens) (fuel : Nat) (key : String) (t
   if let .fn _ _ effs tail _ := ty then
     try unifyRow ⟨effs, tail⟩ ⟨[], none⟩ catch _ => return none
   let some (h, hargs) := ty.head | return none
-  let some (i, _) := Traits.findImpl key h hargs.length (← get).kimpls | return none
+  let some (i, _) := (← get).kimpls.find key h hargs.length | return none
   let some im := (← get).impls[i]? | return none
   let some at_ ← fitHead im hargs args | return none
   unless ← fitConditions im at_ hargs (← get).owner "" do return none
@@ -274,7 +274,7 @@ partial def leavesFitting (pos key : String) (t : Ty) (args : List Ty) (owner : 
     try unifyRow ⟨effs, tail⟩ ⟨[], none⟩
     catch _ => throw s!"{pos}`{showTy (← zonk t)}` performs effects, and `{Syntax.traitShown key}` is implemented for functions that perform none"
   let some (h, hargs) := t.head | missing
-  let some (i, _) := Traits.findImpl key h hargs.length (← get).kimpls | missing
+  let some (i, _) := (← get).kimpls.find key h hargs.length | missing
   let some im := (← get).impls[i]? | missing
   let some at_ ← fitHead im hargs args | missing
   unless ← fitConditions im at_ hargs owner pos do return ← missing
@@ -340,7 +340,7 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
   -- is left. A part that has to be destroyed cannot be moved out of it.
   for (site, t, reads, pos) in (← get).lateKeeps do
     if let .con n _ ← find t then
-      if (← get).kimpls.any (fun I => I.trait == "Drop" && I.head == n)
+      if (← get).kimpls.has "Drop" n
           && site.owner != Syntax.implFnName "Drop" n "drop" then
         for (subject, idx) in reads do
           let plain ← match ← (try fieldType subject idx catch _ => pure none) with
@@ -917,7 +917,7 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
       owner == b.owner && Syntax.traitBase key == Syntax.traitBase b.trait && ty == spelled
     let solve := fun (trait : String) (ty : Ty) (sty : Traits.STy) => do
       if (← get).patterned && b.trait != Syntax.destroyTrait then solveFitting givens 200 trait ty b.args
-      else pure (Traits.solve kimpls givens 100000 trait sty)
+      else pure (Traits.solveIx kimpls givens 100000 trait sty)
     let solved ← match ← solve b.trait b.ty sty with
       | some d => pure (some d)
       | none =>

@@ -322,8 +322,8 @@ def finish : M Elab.Blocks := do
         let givens : Traits.Givens := im.context
         let place := fun (j : Nat) => (im.context.idxOf? (Syntax.destroyTrait, j)).map Elab.DictE.param
         let arity := im.params.length
-        let hook := if s.kimpls.any fun I => I.trait == "Drop" && I.head == im.head then
-            (Traits.solve s.kimpls givens 1000 "Drop"
+        let hook := if s.kimpls.has "Drop" im.head then
+            (Traits.solveIx s.kimpls givens 1000 "Drop"
               (.con im.head ((List.range arity).map Traits.STy.var))).map (toDictE s.impls)
           else none
         let mut ctors : List (String × List (Option Elab.DictE)) := []
@@ -342,7 +342,7 @@ def finish : M Elab.Blocks := do
               for f in sig.fields do
                 let plain := (freeTys f).isEmpty && !(← needsDestroying [] f)
                 parts := parts ++ [if plain then none
-                  else (Traits.solve s.kimpls givens 1000 Syntax.destroyTrait (sty f)).map (toDictE s.impls)]
+                  else (Traits.solveIx s.kimpls givens 1000 Syntax.destroyTrait (sty f)).map (toDictE s.impls)]
               ctors := ctors ++ [(c, parts)]
         destroys := destroys ++ [⟨im.head, im.context.length, hook, isArray, ctors⟩]
     let traitInfo : Elab.TraitInfo :=

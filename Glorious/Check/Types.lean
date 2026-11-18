@@ -744,7 +744,7 @@ structure St where
   arguments: their places in `impls`. -/
   implsByBase : Std.HashMap String (Array Nat) := {}
   /-- The implementations as `Traits.solve` sees them, in the same order. -/
-  kimpls : List Traits.Impl := []
+  kimpls : Traits.ImplIndex := {}
   /-- The bounds of the scheme last instantiated, at that use. -/
   lastBounds : List (String × Ty) := []
   /-- Has some implementation a condition that is more than a trait of one
