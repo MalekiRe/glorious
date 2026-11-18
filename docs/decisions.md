@@ -5221,10 +5221,13 @@ Covey is the toolbox for finding what the language lacks. Rewriting it after
   gathered from all of them. Covey's `Plugin` has `Components`, registered
   by a default `register` before `build`; `simulation.glorious`'s `Physics`
   says its components.
-- **A block written for a function named as a value** takes references of
+- **A block written for a function named as a value** took references of
   one lifetime, not of any: a plugin's systems kept in a value, called with
-  a borrow of something made after the value, are refused ("could be used
-  after its block has ended"). Open: covey does not call them so.
+  a borrow of something made after the value, were refused ("could be used
+  after its block has ended"). Closed: a function named as a value, and the
+  block written for one (`Elab.etaItems`), is for every lifetime of the
+  references it is given (`rankParams`, `St.ranked`), as the function is
+  where it is called; it holds none of them. With a case.
 - **Two queries of one component in one system**: the first took the
   column out of the world and the second found it empty, silently. Covey
   now sees what each parameter touches, a query each component of its

@@ -75,6 +75,17 @@ def wholeReceiver (x : String) (t : Ty) : M Bool := do
   set saved
   pure whole
 
+/-- A callable type made for every lifetime of the references it is given
+(`St.ranked`), where it is one. -/
+def rankParams (t : Ty) : M Unit := do
+  if let .fn ps _ _ _ cap ← find t then
+    let lives ← ps.filterMapM fun p => do
+      match ← find p with
+      | .ref _ _ c => pure (some (← findCap c))
+      | _ => pure none
+    unless lives.isEmpty do
+      modify fun s => { s with ranked := (cap, lives.eraseDups.map (·, "'_")) :: s.ranked }
+
 mutual
 
 partial def inferExpr (scope : Scope) (amb : Row) : Expr → M Ty
@@ -114,6 +125,9 @@ partial def inferExpr (scope : Scope) (amb : Row) : Expr → M Ty
         let sites := (← get).lastSites
         unless sites.isEmpty do
           modify fun s => { s with instSites := s.instSites.push (s.owner, 0, "ref", x, sites) }
+        -- (Named as a value, it is for every lifetime of the references it
+        -- is given, as it is where it is called: it holds none of them.)
+        rankParams t
       pure t
     | .method sig =>
       throw s!"`{x}` is a function of the trait `{sig.trait}`, so it is called where it is named: write a block that calls it"
@@ -297,8 +311,14 @@ partial def inferExpr (scope : Scope) (amb : Row) : Expr → M Ty
     withTemps (inferCall scope amb f args id)
   | .closure id clauses => do
     let t ← inferCallable scope [] none none clauses "the clauses of this callable do" id
-    if let .fn _ _ _ _ cap := t then
+    if let .fn ps _ _ _ cap := t then
       modify fun s => { s with blockCaps := s.blockCaps.push (id, cap) }
+      -- A block written for a function named as a value (`Elab.etaItems`)
+      -- is for every lifetime of the references it is given, as the
+      -- function is: it holds none of them.
+      if let [.mk pats _] := clauses then
+        if !pats.isEmpty && pats.all (fun | .var x => x.startsWith "%eta" | _ => false) then
+          rankParams (.fn ps .unit [] none cap)
     pure t
   | .handle subject arms => inferHandle scope amb subject arms
   | .labelScope l body => do
