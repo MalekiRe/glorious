@@ -1056,9 +1056,7 @@ impl<E, S, P, C> IntoSystem<E, S> for RunIf<P, C> where P: IntoSystem<E, S>, C: 
 pub fn chain<T, L>(systems: T) -> L where T: Tuple<Nested = L> { nest(systems) }
 
 // The systems registered under a label.
-// (Made systems, with their locals, the first time the label is emitted:
-// what they need of the world is then known.)
-pub struct On<E, P, Q> { label: fn(E) -> (), systems: Option<P>, made: Option<Q> }
+pub struct On<E, P> { label: fn(E) -> (), systems: P }
 
 // Run what is registered under `E`, in the order it was registered. Of the
 // two implementations for a list the first is for one whose first entry is
@@ -1069,18 +1067,13 @@ pub trait Dispatch<E, S> {
 impl<E, S> Dispatch<E, S> for () {
     fn dispatch(nothing, event, world, commands) { () }
 }
-impl<E, P, Q, T, S> Dispatch<E, S> for (On<E, P, Q>, T)
-    where P: IntoSystem<E, S, Out = Q>, Q: System<E, S>, T: Dispatch<E, S> {
+impl<E, P, T, S> Dispatch<E, S> for (On<E, P>, T) where P: System<E, S>, T: Dispatch<E, S> {
     fn dispatch(list, event, world, commands) {
         <T as Dispatch<E, S>>::dispatch(&mut list.1, event, world, commands);
-        match(replace(&mut list.0.systems, None)) {
-            Some(systems) => list.0.made = Some(<P as IntoSystem<E, S>>::into_system(systems));,
-            None => ()
-        };
-        match(as_mut(&mut list.0.made)) { Some(made) => <Q as System<E, S>>::run(made, event, world, commands), None => () }
+        <P as System<E, S>>::run(&mut list.0.systems, event, world, commands)
     }
 }
-impl<E, F, P, Q, T, S> Dispatch<E, S> for (On<F, P, Q>, T) where T: Dispatch<E, S> {
+impl<E, F, P, T, S> Dispatch<E, S> for (On<F, P>, T) where T: Dispatch<E, S> {
     fn dispatch(list, event, world, commands) { <T as Dispatch<E, S>>::dispatch(&mut list.1, event, world, commands) }
 }
 
@@ -1119,15 +1112,15 @@ impl<S, L> App<S, L> {
     }
 
     // Register systems under a label, named by a value of it: `Update`.
-    pub fn add_systems<E, P, Q>(app: Self, label: E, systems: P) -> App<S, (On<E, P, Q>, L)> {
+    pub fn add_systems<E, P, Q>(app: Self, label: E, systems: P) -> App<S, (On<E, Q>, L)> where P: IntoSystem<E, S, Out = Q> {
         app.on<E, P, Q>(systems)
     }
 
     // Register systems under a label that carries something, named by its
     // type: `.on<Hit>(..)`. A system under it may take `&Hit` first.
-    pub fn on<E, P, Q>(app: Self, systems: P) -> App<S, (On<E, P, Q>, L)> {
+    pub fn on<E, P, Q>(app: Self, systems: P) -> App<S, (On<E, Q>, L)> where P: IntoSystem<E, S, Out = Q> {
         let App { world, systems: before } = app;
-        App { world: world, systems: (On { label: fn(event: E) { () }, systems: Some(systems), made: None }, before) }
+        App { world: world, systems: (On { label: fn(event: E) { () }, systems: <P as IntoSystem<E, S>>::into_system(systems) }, before) }
     }
 
     // A plugin is a function from an app to an app.

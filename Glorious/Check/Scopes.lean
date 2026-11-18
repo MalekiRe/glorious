@@ -407,7 +407,7 @@ def assocAt (tr : String) (subject : Ty) (name : String) : M (Option Ty) := do
   let at_ ← implAt im hargs
   for (j, want) in im.fixed do
     if let some got := hargs[j]? then
-      try unify got (← fixedAt at_ want) catch _ => return none
+      try unify (← fixedAt at_ want) got catch _ => return none
   -- (And those only in the trait's arguments are what it is asked at.)
   for (want, got) in (im.targs.map (subst at_ [] [])).zip args do
     try unify want got catch _ => return none
@@ -450,7 +450,7 @@ def settleAssocs : M Unit := do
           let at_ ← implAt im hargs
           for (j, want) in im.fixed do
             if let some got := hargs[j]? then
-              try unify got (← fixedAt at_ want) catch _ => pure ()
+              try unify (← fixedAt at_ want) got catch _ => pure ()
           -- (And those only in the trait's arguments are what it is asked at.)
           for (want, got) in (im.targs.map (subst at_ [] [])).zip args do
             try unify want got catch _ => pure ()

@@ -5200,9 +5200,14 @@ Covey is the toolbox for finding what the language lacks. Rewriting it after
 - **How a callable inside a condition is destroyed** was asked as of a
   type without an implementation: callables have one, for all. Fixed.
 - **A plugin generic in the app** whose systems are made when registered
-  leaves their world's type undecided ("`Columns` is needed of a type that
-  nothing here decides"). Open: covey makes them, with their locals, the
-  first time their label is emitted.
+  left their world's type undecided ("`Columns` is needed of a type that
+  nothing here decides"), and then found no implementation. Two causes: the
+  bounds were looked at in an order where the one that decides the type
+  came after the one that needs it; and fitting an implementation bound the
+  function's own variable to the implementation's new one, so a trait the
+  function is given of it was no longer found by its number. Bounds of known
+  heads come first, and an implementation's variables are made what is
+  asked. Covey makes systems when they are registered. Fixed, with a case.
 - **A borrow held by a value with a `drop`** ended at the value's last use,
   though its `drop` runs where its block ends and may use it: `let g = G {
   w: &mut w }; w.c = 10;` was accepted, and the `drop` then wrote through the

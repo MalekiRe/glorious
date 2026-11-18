@@ -216,9 +216,12 @@ partial def solveFitting (givens : Traits.Givens) (fuel : Nat) (key : String) (t
   let some (i, _) := Traits.findImpl key h hargs.length (← get).kimpls | return none
   let some im := (← get).impls[i]? | return none
   let at_ ← implAt im hargs
+  -- (The implementation's new variables are made what is asked, and not
+  -- the other way: a type what the function is given is said of keeps its
+  -- number.)
   for (j, want) in im.fixed do
     if let some got := hargs[j]? then
-      try unify got (← fixedAt at_ want) catch _ => return none
+      try unify (← fixedAt at_ want) got catch _ => return none
   -- (Its type parameters that are only in the trait's arguments are what
   -- those are asked at.)
   for (want, got) in (im.targs.map (subst at_ [] [])).zip args do
@@ -283,7 +286,7 @@ partial def leavesFitting (pos key : String) (t : Ty) (args : List Ty) (owner : 
   let at_ ← implAt im hargs
   for (j, want) in im.fixed do
     if let some got := hargs[j]? then
-      try unify got (← fixedAt at_ want) catch _ => return ← missing
+      try unify (← fixedAt at_ want) got catch _ => return ← missing
   for (want, got) in (im.targs.map (subst at_ [] [])).zip args do
     try unify want got catch _ => return ← missing
   for (j, asked, name, said) in im.equal do
@@ -547,9 +550,9 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
                 -- (A type made of the function's own type parameters may
                 -- have the trait by what the function assumes, not by this.)
                 if Ty.hasRigid got then
-                  try unify got want catch _ => pure ()
+                  try unify want got catch _ => pure ()
                 else
-                try unify got want
+                try unify want got
                 catch _ =>
                   let fits ← zonk want
                   let whole := match goal with
@@ -601,7 +604,16 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
           let _ ← keyOf (Ty.con s!"'%condition:{d.name}:{key}:{← spellTy t}" [])
   -- What the group's functions need of the types they are generic in.
   let mut leafs : Array (String × Nat × Ty) := #[]
+  -- (Those of a type whose head is known first: what their implementations
+  -- say may decide what the others are of, `F: Into<S>` the `S` of a block
+  -- named in place of a function that needs `S: Col`.)
+  let mut known : Array Bound := #[]
+  let mut unknown : Array Bound := #[]
   for b in pending do
+    match ← find b.ty with
+    | .var _ => unknown := unknown.push b
+    | _ => known := known.push b
+  for b in known ++ unknown do
     let b ← rekey b
     -- (How to destroy a type that nothing decides is not asked for.)
     let ls ← try (if (← get).patterned && b.trait != Syntax.destroyTrait then leavesFitting b.pos b.trait b.ty b.args b.owner
