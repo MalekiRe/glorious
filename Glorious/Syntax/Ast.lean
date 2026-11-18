@@ -871,6 +871,19 @@ def Expr.bodies : Expr → List (List Pattern × List Stmt)
 def Expr.children (e : Expr) : List Expr :=
   e.direct ++ e.bodies.flatMap fun (_, body) => body.flatMap Stmt.exprs
 
+/-- The identities of an expression's calls. -/
+partial def callIdsExpr (acc : List Nat) : Expr → List Nat
+  | .call id f args | .tailCall id f args => (f :: args).foldl callIdsExpr (id :: acc)
+  | e => e.children.foldl callIdsExpr acc
+
+partial def callIdsItem (acc : List Nat) : Item → List Nat
+  | .fn _ _ _ _ clauses => (clauses.flatMap fun | .mk _ body => body.flatMap Stmt.exprs).foldl callIdsExpr acc
+  | .impl _ _ _ _ _ methods => methods.foldl callIdsItem acc
+  | .traitInfo _ _ defaults _ _ => defaults.foldl callIdsItem acc
+  | .alias _ value => callIdsExpr acc value
+  | .pub _ item => callIdsItem acc item
+  | _ => acc
+
 /-- An expression with each expression directly inside it made by `fe`, and
 each block inside it (with the patterns of its clause) by `fb`. -/
 def Expr.traverse {m : Type → Type} [Monad m] (fe : Expr → m Expr)

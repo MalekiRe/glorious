@@ -215,13 +215,123 @@ pub fn alive<S>(world: &World<S>, entity: Entity) -> Bool {
     else { false }
 }
 
-// End an entity: every column forgets it.
-pub fn despawn<S>(world: &mut World<S>, entity: Entity) where S: Columns {
+// End an entity: what relates to it, and its own links, are undone, and
+// every column forgets it.
+pub fn despawn<S>(world: &mut World<S>, entity: Entity) where S: Columns, S: Unlinks<S> {
     if(alive(&*world, entity)) {
         world.generations[entity.index] = entity.generation + 1;
         push_at(&mut world.free, entity.index);
+        <S as Unlinks<S>>::unlink(&mut world.columns, entity);
         <S as Columns>::forget(&mut world.columns, entity)
     } else { () }
+}
+
+// Relations. A relation is a kind of link from one entity to another, a
+// type of its own (`ChildOf`), whose value is what the link carries (a
+// berth). An entity that relates to another has a `Relates<R>`: the value,
+// and the entity it relates to, one at a time. That one has a `Sources<R>`:
+// the entities that relate to it, in the order they came to.
+pub struct Relates<R> { pub relation: R, pub target: Entity }
+pub struct Sources<R> { pub list: [Entity] }
+
+fn copied(list: &[Entity]) -> [Entity] {
+    let mut out = [];
+    let mut i = 0;
+    while({ i < len_at(list) }) { push_at(&mut out, list[i]); i = i + 1 };
+    out
+}
+
+fn without(list: &[Entity], entity: Entity) -> [Entity] {
+    let mut out = [];
+    let mut i = 0;
+    while({ i < len_at(list) }) {
+        let same = if(list[i].index == entity.index) { list[i].generation == entity.generation } else { false };
+        if(same) { () } else { push_at(&mut out, list[i]) };
+        i = i + 1
+    };
+    out
+}
+
+// `source` no longer among what relates to `target`.
+fn drop_source<R, S>(columns: &mut S, target: Entity, source: Entity) where S: Get<Sources<R>> {
+    let column = <S as Get<Sources<R>>>::column_mut(columns);
+    let at = slot_of(&*column, target);
+    if(at >= 0) {
+        let kept = without(&column.dense[at].list, source);
+        column.dense[at].list = kept
+    } else { () }
+}
+
+// Relate `source` to `target` by `relation`, in place of what it related
+// to by `R` before: what that link carried, if there was one.
+pub fn relate<R, S>(world: &mut World<S>, source: Entity, relation: R, target: Entity) -> Option<R>
+    where S: Get<Relates<R>>, S: Get<Sources<R>> {
+    let before = unrelate<R, S>(world, source);
+    let _ = insert(world, source, Relates { relation: relation, target: target });
+    let mut column = take_at<Sources<R>, S>(world);
+    let at = slot_of(&column, target);
+    if(at >= 0) { push_at(&mut column.dense[at].list, source); column.changed[at] = column.now }
+    else { column_insert(&mut column, target, Sources { list: [source] }) };
+    <S as Get<Sources<R>>>::put(&mut world.columns, column);
+    before
+}
+
+// Undo `source`'s link by `R`: what it carried, if there was one.
+pub fn unrelate<R, S>(world: &mut World<S>, source: Entity) -> Option<R> where S: Get<Relates<R>>, S: Get<Sources<R>> {
+    match(remove<Relates<R>, S>(world, source)) {
+        Some(link) =>
+            let Relates { relation, target } = link;
+            drop_source<R, S>(&mut world.columns, target, source);
+            Some(relation),
+        None => None
+    }
+}
+
+// What an entity relates to by `R`, among the world's columns.
+fn target_in<R, S>(columns: &S, source: Entity) -> Option<Entity> where S: Get<Relates<R>> {
+    let links = <S as Get<Relates<R>>>::column(columns);
+    let at = slot_of(links, source);
+    if(at >= 0) { Some(links.dense[at].target) } else { None }
+}
+
+// What relates to an entity by `R`, among the world's columns.
+fn sources_in<R, S>(columns: &S, target: Entity) -> [Entity] where S: Get<Sources<R>> {
+    let sources = <S as Get<Sources<R>>>::column(columns);
+    let at = slot_of(sources, target);
+    if(at >= 0) { copied(&sources.dense[at].list) } else { [] }
+}
+
+// What despawning an entity undoes of the relations it is in: of each
+// relation's `Relates`, its link to what it relates to; of each `Sources`,
+// the links of what relates to it. Found by the world's columns, as a column
+// is.
+pub trait Unlinks<S> { fn unlink(&mut S, Entity) }
+impl<S> Unlinks<S> for () { fn unlink(columns, entity) { () } }
+impl<H, R, S> Unlinks<S> for (Column<H>, R) where R: Unlinks<S> {
+    fn unlink(columns, entity) { <R as Unlinks<S>>::unlink(columns, entity) }
+}
+impl<H, R, S> Unlinks<S> for (Resource<H>, R) where R: Unlinks<S> {
+    fn unlink(columns, entity) { <R as Unlinks<S>>::unlink(columns, entity) }
+}
+impl<X, R, S> Unlinks<S> for (Column<Relates<X>>, R) where S: Get<Relates<X>>, S: Get<Sources<X>>, R: Unlinks<S> {
+    fn unlink(columns, entity) {
+        match(target_in<X, S>(&*columns, entity)) {
+            Some(target) => drop_source<X, S>(columns, target, entity),
+            None => ()
+        };
+        <R as Unlinks<S>>::unlink(columns, entity)
+    }
+}
+impl<X, R, S> Unlinks<S> for (Column<Sources<X>>, R) where S: Get<Relates<X>>, S: Get<Sources<X>>, R: Unlinks<S> {
+    fn unlink(columns, entity) {
+        let list = sources_in<X, S>(&*columns, entity);
+        let mut i = 0;
+        while({ i < len_at(&list) }) {
+            discard(column_remove(<S as Get<Relates<X>>>::column_mut(columns), list[i]));
+            i = i + 1
+        };
+        <R as Unlinks<S>>::unlink(columns, entity)
+    }
 }
 
 // Take a component from an entity.
@@ -314,8 +424,29 @@ impl<S> World<S> {
     // Take a component from an entity.
     pub fn remove<T>(world: &mut Self, entity: Entity) -> Option<T> where S: Get<T> { remove<T, S>(world, entity) }
 
+    // Relate an entity to another by `R`, in place of what it related to by
+    // `R` before: what that link carried. (`ChildOf` of a child to its
+    // parent: `world.relate(child, ChildOf, parent)`.)
+    pub fn relate<R>(world: &mut Self, source: Entity, relation: R, target: Entity) -> Option<R>
+        where S: Get<Relates<R>>, S: Get<Sources<R>> {
+        if(if(alive(&*world, source)) { alive(&*world, target) } else { false }) { relate<R, S>(world, source, relation, target) }
+        else { discard(relation); None }
+    }
+    // Undo an entity's link by `R`: what it carried.
+    pub fn unrelate<R>(world: &mut Self, source: Entity) -> Option<R> where S: Get<Relates<R>>, S: Get<Sources<R>> {
+        unrelate<R, S>(world, source)
+    }
+    // What an entity relates to by `R`, if anything.
+    pub fn target<R>(world: &Self, source: Entity) -> Option<Entity> where S: Get<Relates<R>> {
+        target_in<R, S>(&world.columns, source)
+    }
+    // What relates to an entity by `R`, in the order they came to.
+    pub fn sources<R>(world: &Self, target: Entity) -> [Entity] where S: Get<Sources<R>> {
+        sources_in<R, S>(&world.columns, target)
+    }
+
     // End an entity; whether it was there.
-    pub fn despawn(world: &mut Self, entity: Entity) -> Bool where S: Columns {
+    pub fn despawn(world: &mut Self, entity: Entity) -> Bool where S: Columns, S: Unlinks<S> {
         let was = alive(&*world, entity);
         despawn(world, entity);
         was
@@ -476,6 +607,21 @@ impl<A> Item for Option<&A> {
     type Got<'a> = Option<&'a A>;
     fn item_at(store, entity) { Some(<&A as Item>::item_at(store, entity)) }
 }
+// Of what the entity relates to by `R`: `To<ChildOf, &Name>`, its parent's
+// name. None where it relates to nothing by `R`, or that has not what `Q`
+// asks.
+pub struct To<R, Q>(R, Q)
+impl<R, Q> Item for To<R, Q> where Q: Item {
+    type Store = (Column<Relates<R>>, Q::Store);
+    type Got<'a> = Option<Q::Got<'a>>;
+    fn item_at(store, entity) {
+        let at = slot_of(&store.0, entity);
+        if(at < 0) { Some(None) } else {
+            let target = store.0.dense[at].target;
+            Some(<Q as Item>::item_at(&mut store.1, target))
+        }
+    }
+}
 // (The columns as a pair of the first and the rest's, so that each is a
 // field of its own to borrow.)
 impl<H, ..R> Item for (H, ..R) where H: Item, (..R): Item {
@@ -540,6 +686,15 @@ impl<A, S> Fill<S> for Option<&A> where S: Get<A> {
     fn fill(columns, now) { take_now<A, S>(columns, now) }
     fn unfill(columns, column) { <S as Get<A>>::put(columns, column) }
     fn hollow() { empty_column() }
+}
+impl<R, Q, S> Fill<S> for To<R, Q> where S: Get<Relates<R>>, Q: Fill<S>, Q: Item {
+    fn fill(columns, now) { (take_now<Relates<R>, S>(columns, now), <Q as Fill<S>>::fill(columns, now)) }
+    fn unfill(columns, store) {
+        let (links, rest) = store;
+        <S as Get<Relates<R>>>::put(columns, links);
+        <Q as Fill<S>>::unfill(columns, rest)
+    }
+    fn hollow() { (empty_column(), <Q as Fill<S>>::hollow()) }
 }
 impl<H, ..R, S> Fill<S> for (H, ..R) where H: Fill<S>, (..R): Fill<S>, H: Item, (..R): Item, ..R: Item {
     fn fill(columns, now) { (<H as Fill<S>>::fill(columns, now), <(..R) as Fill<S>>::fill(columns, now)) }
@@ -706,12 +861,16 @@ impl<S> Commands<S> {
     pub fn remove_resource<T>(commands: &mut Self) where S: Holds<T> {
         push_at(&mut commands.queue, fn(world: &mut World<S>) { let _ = world.remove_resource<T>(); })
     }
-    pub fn despawn(commands: &mut Self, entity: Entity) where S: Columns {
+    pub fn despawn(commands: &mut Self, entity: Entity) where S: Columns, S: Unlinks<S> {
         push_at(&mut commands.queue, fn(world: &mut World<S>) { despawn(world, entity) })
+    }
+    // Relate an entity to another by `R`, once the systems have run.
+    pub fn relate<R>(commands: &mut Self, source: Entity, relation: R, target: Entity) where S: Get<Relates<R>>, S: Get<Sources<R>> {
+        push_at(&mut commands.queue, fn(world: &mut World<S>) { discard(world.relate(source, relation, target)) })
     }
 }
 
-pub fn end<S>(commands: &mut Commands<S>, entity: Entity) where S: Columns {
+pub fn end<S>(commands: &mut Commands<S>, entity: Entity) where S: Columns, S: Unlinks<S> {
     push_at(&mut commands.queue, fn(world: &mut World<S>) { despawn(world, entity) })
 }
 
@@ -794,6 +953,7 @@ impl<A> ItemTouches for Option<&mut A> { type List = (Writes<A>, ()); }
 impl<A> ItemTouches for Option<&A> { type List = (Read<A>, ()); }
 impl<A> ItemTouches for Has<A> { type List = (Read<A>, ()); }
 impl ItemTouches for Entity { type List = (); }
+impl<R, Q> ItemTouches for To<R, Q> where Q: ItemTouches { type List = (Read<Relates<R>>, <Q as ItemTouches>::List); }
 impl ItemTouches for () { type List = (); }
 impl<H, ..R> ItemTouches for (H, ..R) where H: ItemTouches, (..R): ItemTouches,
     <H as ItemTouches>::List: Concat<<(..R) as ItemTouches>::List> {
@@ -1193,6 +1353,11 @@ impl<S, L> App<S, L> {
         <P as Plugin<S, L>>::build(plugin, <P as Plugin<S, L>>::register(app))
     }
 
+    // Store a relation: what relates and what is related to.
+    pub fn relation<R>(app: Self) -> App<(Column<Relates<R>>, (Column<Sources<R>>, S)), L> {
+        app.register<Sources<R>>().register<Relates<R>>()
+    }
+
     // Store each of a list of components: `.register_all<(Position, Velocity)>()`.
     pub fn register_all<C>(app: Self) -> App<<C as Registers<S>>::Out, L> where C: Registers<S> {
         let App { world, systems } = app;
@@ -1204,7 +1369,7 @@ impl<S, L> App<S, L> {
     pub fn build(app: Self) -> Self { app }
 
     // Run every system registered under what is emitted, then do what they asked.
-    pub fn emit<E>(app: &mut Self, event: &E) where L: Dispatch<E, S>, S: Columns {
+    pub fn emit<E>(app: &mut Self, event: &E) where L: Dispatch<E, S>, S: Columns, S: Unlinks<S> {
         let mut commands = Commands { queue: [], next: len_at(&app.world.generations), made: 0 };
         <L as Dispatch<E, S>>::dispatch(&mut app.systems, event, &mut app.world, &mut commands);
         apply(commands, &mut app.world)

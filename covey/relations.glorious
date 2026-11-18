@@ -1,0 +1,91 @@
+// Relations: an entity linked to another by a kind of link, a type of its
+// own whose value is what the link carries. Ships dock at a station, each at
+// a berth; pilots pilot ships. A query reads through a link (`To`): each
+// pilot patches the hull of the ship it pilots, each ship unloads into its
+// station. Docking again moves a ship; a station that ends leaves its ships
+// undocked, and a ship that ends is no longer among a station's.
+// expect:
+// 2
+// 1
+// 60
+// 100
+// 3
+// 7
+// 0
+// 1
+// 0
+// 1
+mod ecs;
+
+use ecs::{App, Entity, Mut, Query, To, Relates};
+
+struct DockedAt { berth: Int }
+struct Piloting
+struct Skill(Int)
+struct Hull(Int)
+struct Cargo(Int)
+struct Hold(Int)
+struct Update
+
+// Each pilot patches the ship it pilots, up to 100.
+fn repair(pilots: &mut Query<(&Skill, To<Piloting, &mut Hull>)>) {
+    pilots.for_each(fn(got: (&Skill, Option<Mut<Hull>>)) {
+        let (skill, ship) = got;
+        match(ship) {
+            Some(hull) =>
+                let mut hull = hull;
+                let patched = hull.get().0 + skill.0;
+                hull.get_mut().0 = if(patched > 100) { 100 } else { patched },
+            None => ()
+        }
+    })
+}
+
+// Each docked ship unloads what it carries into its station's hold.
+fn unload(ships: &mut Query<(&mut Cargo, To<DockedAt, &mut Hold>)>) {
+    ships.for_each(fn(got: (Mut<Cargo>, Option<Mut<Hold>>)) {
+        let (cargo, station) = got;
+        let mut cargo = cargo;
+        match(station) {
+            Some(hold) =>
+                let mut hold = hold;
+                hold.get_mut().0 = hold.get().0 + cargo.get().0;
+                cargo.get_mut().0 = 0,
+            None => ()
+        }
+    })
+}
+
+fn main() -> Int {
+    let mut fleet = App::new()
+        .register<Skill>().register<Hull>().register<Cargo>().register<Hold>()
+        .relation<DockedAt>().relation<Piloting>()
+        .add_systems(Update, repair)
+        .add_systems(Update, unload).build();
+    let station = fleet.world.spawn_bundle((Hold(0),));
+    let depot = fleet.world.spawn_bundle((Hold(0),));
+    let ship = fleet.world.spawn_bundle((Hull(40), Cargo(3)));
+    let other = fleet.world.spawn_bundle((Hull(90), Cargo(4)));
+    let pilot = fleet.world.spawn_bundle((Skill(20),));
+    let ace = fleet.world.spawn_bundle((Skill(30),));
+    fleet.world.relate(ship, DockedAt { berth: 1 }, station);
+    fleet.world.relate(other, DockedAt { berth: 2 }, station);
+    fleet.world.relate(pilot, Piloting, ship);
+    fleet.world.relate(ace, Piloting, other);
+    say(len_at(&fleet.world.sources<DockedAt>(station)));
+    match(fleet.world.get<Relates<DockedAt>>(ship)) { Some(link) => say(link.relation.berth), None => () };
+    fleet.emit(&Update);
+    match(fleet.world.get<Hull>(ship)) { Some(h) => say(h.0), None => () };
+    match(fleet.world.get<Hull>(other)) { Some(h) => say(h.0), None => () };
+    match(fleet.world.get<Hold>(station)) { Some(h) => say(h.0 - 4), None => () };
+    // Docking again moves the ship: what the old link carried comes back.
+    match(fleet.world.relate(ship, DockedAt { berth: 7 }, depot)) { Some(old) => say(old.berth + 6), None => () };
+    say(len_at(&fleet.world.sources<DockedAt>(depot)) - 1);
+    say(len_at(&fleet.world.sources<DockedAt>(station)));
+    // The station ends: its ships are docked nowhere.
+    fleet.world.despawn(station);
+    match(fleet.world.target<DockedAt>(other)) { Some(t) => say(9), None => say(0) };
+    // A ship that ends is no longer among the depot's.
+    fleet.world.despawn(ship);
+    len_at(&fleet.world.sources<DockedAt>(depot)) + 1
+}

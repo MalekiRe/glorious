@@ -145,11 +145,17 @@ def checkItems (items : List Item) (seed : UInt64 := 0) (kept : Kept := []) : M 
     | .alias name value => some (name, Elab.fvExpr [] value)
     | .pub _ (.alias name value) => some (name, Elab.fvExpr [] value)
     | _ => none
+  -- (And the functions a dot call in it may turn out to be of, the types'
+  -- own of the name: one is checked before what may call it.)
+  let modules := (← get).modules
   let mentions := fun (name : String) =>
     match decls.find? (·.name == name) with
     | some d =>
       let fvs := d.clauses.flatMap (Elab.fvClause [])
-      ((fvs ++ fvs.flatMap fun x => (aliasOf.lookup x).getD []).filter names.contains).eraseDups
+      let alts := if modules.dotAlts.isEmpty then [] else
+        ((d.clauses.flatMap fun | .mk _ body => body.flatMap Stmt.exprs).foldl Syntax.callIdsExpr []).flatMap
+          fun id => (dotAltsOf modules id).getD []
+      ((fvs ++ alts ++ fvs.flatMap fun x => (aliasOf.lookup x).getD []).filter names.contains).eraseDups
     | none => []
   let coercing := items.filterMap fun
     | .coerce name => some name

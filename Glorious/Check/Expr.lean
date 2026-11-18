@@ -1024,7 +1024,16 @@ partial def inferCall (scope : Scope) (amb : Row) (f : Expr) (args : List Expr)
           return t
   match f with
   | .name q x =>
-    match ← resolveName scope q x with
+    -- (A dot call of a function in scope that cannot be called as written,
+    -- `v.get<T>(..)` of one without type parameters, of a value whose type
+    -- has a function of the name of its own: that one.)
+    let head ← tryCatchThe Elab.Said (resolveName scope q x) fun e => do
+      if e.passOn || e.decision.isSome || call == 0 then throwThe Elab.Said e
+      if let some a := args.head? then
+        if let some alt ← dotAltFor scope amb call a then
+          if alt != x then throwThe Elab.Said { e with decision := some (← receiverDecision call alt) }
+      throwThe Elab.Said e
+    match head with
     | .ctor sig written => do
       let (fields, result) ← instCtor sig
       -- A name given to the constructor with a type: built at that type.

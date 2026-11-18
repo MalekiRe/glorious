@@ -27,6 +27,14 @@ def cases : List Case := [
     [], "5"⟩,
   ⟨"fn main() { -7 + 2 }",
     [], "-5"⟩,
+  -- A dot call of a type's own function, written with types, where a
+  -- function of the name without type parameters is in scope (the
+  -- prelude's `get`): the type's own; and one of a function declared after.
+  ⟨"struct A { n: Int }
+fn first(a: &A) -> Int { a.get<Int>(3) + a.n }
+impl A { fn get<T>(a: &Self, x: T) -> T { x } }
+fn main() -> Int { let a = A { n: 1 }; first(&a) }",
+    [], "4"⟩,
 
   -- Data, tuples and projection.
   ⟨"fn main() { (1, (2, 3)) }",

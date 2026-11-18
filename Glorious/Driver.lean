@@ -102,26 +102,13 @@ partial def namesInExpr (acc : List String) : Syntax.Expr → List String
 def namesInClause (acc : List String) : Syntax.Clause → List String
   | .mk _ body => (body.flatMap Syntax.Stmt.exprs).foldl namesInExpr acc
 
-/-- The identities of an expression's calls. -/
-partial def callIdsExpr (acc : List Nat) : Syntax.Expr → List Nat
-  | .call id f args | .tailCall id f args => (f :: args).foldl callIdsExpr (id :: acc)
-  | e => e.children.foldl callIdsExpr acc
-
-partial def callIdsItem (acc : List Nat) : Syntax.Item → List Nat
-  | .fn _ _ _ _ clauses => (clauses.flatMap fun | .mk _ body => body.flatMap Syntax.Stmt.exprs).foldl callIdsExpr acc
-  | .impl _ _ _ _ _ methods => methods.foldl callIdsItem acc
-  | .traitInfo _ _ defaults _ _ => defaults.foldl callIdsItem acc
-  | .alias _ value => callIdsExpr acc value
-  | .pub _ item => callIdsItem acc item
-  | _ => acc
-
 /-- What of a program's modules a unit's check reads besides its own items:
 the coercions that apply in it, the dot calls among its calls the resolver
 found more than one function for, and which fields of the constructors of it
 and of the units before it are `pub`. -/
 def unitInfoKey (info : Syntax.ModuleInfo) (before : List String) (unit : String)
     (items : List Syntax.Item) : UInt64 :=
-  let ids : Std.HashSet Nat := items.foldl (fun set i => (callIdsItem [] i).foldl (·.insert ·) set) {}
+  let ids : Std.HashSet Nat := items.foldl (fun set i => (Syntax.callIdsItem [] i).foldl (·.insert ·) set) {}
   let alts := info.dotAlts.filter fun (id, _) => ids.contains id
   let seen := unit :: before
   let vis := info.fieldVis.filter fun (_, home, _) => seen.contains home
