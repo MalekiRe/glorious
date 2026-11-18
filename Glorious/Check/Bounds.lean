@@ -217,33 +217,8 @@ partial def solveFitting (givens : Traits.Givens) (fuel : Nat) (key : String) (t
   let some (h, hargs) := ty.head | return none
   let some (i, _) := Traits.findImpl key h hargs.length (← get).kimpls | return none
   let some im := (← get).impls[i]? | return none
-  let at_ ← implAt im hargs
-  -- (The implementation's new variables are made what is asked, and not
-  -- the other way: a type what the function is given is said of keeps its
-  -- number.)
-  for (j, want) in im.fixed do
-    if let some got := hargs[j]? then
-      try unify (← fixedAt at_ want) got catch _ => return none
-  -- (Its type parameters that are only in the trait's arguments are what
-  -- those are asked at.)
-  for (want, got) in (im.targs.map (subst at_ [] [])).zip args do
-    try unify want got catch _ => return none
-  -- (What its conditions say a type left to another trait's implementations
-  -- is: said of this use, which may be what decides a type parameter that
-  -- is only in the conditions.)
-  for (j, asked, name, said) in im.equal do
-    if let some subject := hargs[j]? then
-      if let some found ← assocAt asked subject name then
-        try unify (subst at_ [] [] said) found catch _ => return none
-  for (whole, asked, name, said) in im.extraEqual do
-    match ← assocAt asked (subst at_ [] [] whole) name with
-    | some found => try unify (subst at_ [] [] said) found catch _ => return none
-    | none =>
-      -- (Found once what it is asked of is known.)
-      let use := (asked, subst at_ [] [] whole, name, subst at_ [] [] said, (← get).owner, "")
-      modify fun s => { s with assocUses := s.assocUses.push use }
-  -- (What those decide, before the conditions on what they decide.)
-  unless im.equal.isEmpty && im.extraEqual.isEmpty do settleAssocsAll
+  let some at_ ← fitHead im hargs args | return none
+  unless ← fitConditions im at_ hargs (← get).owner "" do return none
   let mut subs : List Traits.Dict := []
   for (tr, j) in im.context do
     let some arg := hargs[j]? | return none
@@ -286,25 +261,8 @@ partial def leavesFitting (pos key : String) (t : Ty) (args : List Ty) (owner : 
   let some (h, hargs) := t.head | missing
   let some (i, _) := Traits.findImpl key h hargs.length (← get).kimpls | missing
   let some im := (← get).impls[i]? | missing
-  let at_ ← implAt im hargs
-  for (j, want) in im.fixed do
-    if let some got := hargs[j]? then
-      try unify (← fixedAt at_ want) got catch _ => return ← missing
-  for (want, got) in (im.targs.map (subst at_ [] [])).zip args do
-    try unify want got catch _ => return ← missing
-  for (j, asked, name, said) in im.equal do
-    if let some subject := hargs[j]? then
-      if let some found ← assocAt asked subject name then
-        try unify (subst at_ [] [] said) found catch _ => return ← missing
-  for (whole, asked, name, said) in im.extraEqual do
-    match ← assocAt asked (subst at_ [] [] whole) name with
-    | some found => try unify (subst at_ [] [] said) found catch _ => return ← missing
-    | none =>
-      -- (Found once what it is asked of is known.)
-      let use := (asked, subst at_ [] [] whole, name, subst at_ [] [] said, owner, pos)
-      modify fun s => { s with assocUses := s.assocUses.push use }
-  -- (What those decide, before the conditions on what they decide.)
-  unless im.equal.isEmpty && im.extraEqual.isEmpty do settleAssocsAll
+  let some at_ ← fitHead im hargs args | missing
+  unless ← fitConditions im at_ hargs owner pos do return ← missing
   let mut out : List (String × Nat × Ty × List Ty) := []
   let shown := Syntax.traitShown key
   let this := s!"`{(shown.takeWhile (· != '<')).toString}` of `{showTy (← zonk t)}`"

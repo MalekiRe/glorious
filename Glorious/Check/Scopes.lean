@@ -387,6 +387,21 @@ def conditionUses (im : ImplDecl) (at_ : List (Nat × Ty)) (hargs : List Ty) (ow
     let use := (asked, subst at_ [] [] whole, name, subst at_ [] [] said, owner, pos)
     modify fun s => { s with assocUses := s.assocUses.push use }
 
+/-- An implementation fitted to a use of it: its type parameters as the use
+has them (`hargs` the head's arguments, `args` the trait's). The
+implementation's new variables are made what is asked, and not the other
+way: a type what the function is given is said of keeps its number. None
+where they do not fit. -/
+def fitHead (im : ImplDecl) (hargs args : List Ty) : M (Option (List (Nat × Ty))) := do
+  let at_ ← implAt im hargs
+  for (j, want) in im.fixed do
+    if let some got := hargs[j]? then
+      try unify (← fixedAt at_ want) got catch _ => return none
+  -- (Those only in the trait's arguments are what it is asked at.)
+  for (want, got) in (im.targs.map (subst at_ [] [])).zip args do
+    try unify want got catch _ => return none
+  pure (some at_)
+
 /-- The type a trait leaves to its implementations, for a type whose
 implementation is known: `Elem` of `Index` for an array of `Int`. Nothing
 where the type is not known enough to say which implementation is its. -/
@@ -403,14 +418,7 @@ def assocAt (tr : String) (subject : Ty) (name : String) : M (Option Ty) := do
   let key ← try implKey tr self args catch _ => return none
   let some im := (← get).impls.toList.find? fun im => im.trait == key && im.head == head | return none
   let some said := im.assocs.lookup name | return none
-  -- (Its type parameters are the type's arguments, or inside them.)
-  let at_ ← implAt im hargs
-  for (j, want) in im.fixed do
-    if let some got := hargs[j]? then
-      try unify (← fixedAt at_ want) got catch _ => return none
-  -- (And those only in the trait's arguments are what it is asked at.)
-  for (want, got) in (im.targs.map (subst at_ [] [])).zip args do
-    try unify want got catch _ => return none
+  let some at_ ← fitHead im hargs args | return none
   conditionUses im at_ hargs (← get).owner (← get).pos
   pure (some (← unproject (gatAt at_ ((im.gatParams.lookup name).getD []) asked said)))
 
@@ -447,13 +455,9 @@ def settleAssocs : M Unit := do
         | some said =>
           -- The implementation's type parameters are the type's arguments,
           -- or inside them.
-          let at_ ← implAt im hargs
-          for (j, want) in im.fixed do
-            if let some got := hargs[j]? then
-              try unify (← fixedAt at_ want) got catch _ => pure ()
-          -- (And those only in the trait's arguments are what it is asked at.)
-          for (want, got) in (im.targs.map (subst at_ [] [])).zip args do
-            try unify want got catch _ => pure ()
+          let at_ ← match ← fitHead im hargs args with
+            | some at_ => pure at_
+            | none => implAt im hargs
           conditionUses im at_ hargs owner pos
           try unifyAt s!"`{name}` of `{key}` for `{bareName head}`" (← unproject (subst at_ [] [] said)) a
           catch e => throw (pos ++ e)
@@ -479,6 +483,27 @@ partial def settleAssocsAll (fuel : Nat := 16) : M Unit := do
   if fuel > 0 && (after.size < before.size || after.map (·.1) != before.map (·.1)
       || (← after.mapM fun u => spellTy u.2.1) != (← before.mapM fun u => spellTy u.2.1)) then
     settleAssocsAll (fuel - 1)
+
+
+/-- What an implementation's conditions say of types left to other traits'
+implementations (`where I: Iterator<Item = A>`), said of a use of it at
+`at_`: false where what is known says otherwise. What is not known yet is
+found once what it is asked of is. -/
+def fitConditions (im : ImplDecl) (at_ : List (Nat × Ty)) (hargs : List Ty) (owner pos : String) :
+    M Bool := do
+  for (j, asked, name, said) in im.equal do
+    if let some subject := hargs[j]? then
+      if let some found ← assocAt asked subject name then
+        try unify (subst at_ [] [] said) found catch _ => return false
+  for (whole, asked, name, said) in im.extraEqual do
+    match ← assocAt asked (subst at_ [] [] whole) name with
+    | some found => try unify (subst at_ [] [] said) found catch _ => return false
+    | none =>
+      let use := (asked, subst at_ [] [] whole, name, subst at_ [] [] said, owner, pos)
+      modify fun s => { s with assocUses := s.assocUses.push use }
+  -- (What those decide, before the conditions on what they decide.)
+  unless im.equal.isEmpty && im.extraEqual.isEmpty do settleAssocsAll
+  pure true
 
 def runPending : M Unit := do
   settleAssocs
