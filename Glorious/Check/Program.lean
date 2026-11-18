@@ -234,6 +234,34 @@ def checkItems (items : List Item) (seed : UInt64 := 0) (kept : Kept := []) : M 
       else if madeFrom.contains name then deps name
       else (deps name ++ holeNames).eraseDups
     let groups := (components allNames deps).map fun comp => comp.filterMap fun n => allDecls.find? (·.name == n)
+    -- The functions of the copies of an implementation for every type
+    -- (`impl<T> Requires for T`, one for each type the unit declares) that
+    -- name none of the unit's functions, where no coercion is: checked
+    -- before the others, so that what was found of them is kept where only
+    -- a function's body changed.
+    let blanket := fun (im : ImplDecl) => im.methods.any fun
+      | .typeAlias n _ _ => (Syntax.blanketParam n).isSome
+      | _ => false
+    let implDecls ← ((← get).impls.toList.drop before).filter (fun im => !implHoled im && blanket im) |>.flatMapM implFnDecls
+    let namesAny := fun (d : FnDecl) =>
+      ((d.clauses.flatMap (Elab.fvClause [])).flatMap fun x => x :: (aliasOf.lookup x).getD []).any allNames.contains
+    let early := if coercing.isEmpty then implDecls.filter (!namesAny ·) else []
+    -- (Of those kept, one after another, only the last is taken, and made
+    -- this program's: the key has its implementations as written, so they
+    -- line up.)
+    let mut taken : Option St := none
+    for d in early do
+      key := groupKey key [d]
+      match kept.lookup key with
+      | some st =>
+        taken := some st
+        made := (key, st) :: made
+      | none =>
+        if let some st := taken then restore ((ours st).getD st) allDecls
+        taken := none
+        checkDeciding [d]
+        made := (key, ← get) :: made
+    if let some st := taken then restore ((ours st).getD st) allDecls
     for (group, k) in groups.zipIdx do
       key := groupKey key group
       match look key with
@@ -244,9 +272,11 @@ def checkItems (items : List Item) (seed : UInt64 := 0) (kept : Kept := []) : M 
     -- call them, but only through a trait, whose types are declared.
     -- (Those of one that leaves a type to be found were checked with the
     -- rest, before what may use it.)
+    let earlyNames := early.map (·.name)
     for im in (← get).impls.toList.drop before do
       unless implHoled im do
         for d in ← implFnDecls im do
+          if earlyNames.contains d.name then continue
           key := groupKey key [d]
           match look key with
           | some st => restore st []

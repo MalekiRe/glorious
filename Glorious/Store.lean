@@ -105,7 +105,11 @@ def save {α : Type} (file : System.FilePath) (key : String) (value : α) (chain
       IO.FS.rename fresh file
       return
     let before ← headOf file
-    let deps := if before.length ≤ chain then before else []
+    -- (Only regions this process read, as this compiler: one it did not,
+    -- of another compiler or not read at all, is not pointed into, and
+    -- all is written again.)
+    let read := (← loaded.get).map (·.1)
+    let deps := if before.length ≤ chain && before.all (read.contains ·.toString) then before else []
     let name := s!"{file.fileName.getD "kept"}.{now}.region"
     saveRaw (dir / name) { compiler := ← identity, key, value } deps
     let files := deps ++ [dir / name]

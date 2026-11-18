@@ -5515,6 +5515,24 @@ said, not followed forever. A function's own `where` takes only type
 parameters and what they leave (`I::Item`), so `BringsOne` carries what a
 method like `World::insert` needs of a component.
 
+## One-of groups in covey
+
+`impl OneOf for Walking { type Groups = (Locomotion, Life); }`, as upstream
+writes it; any other component is of no group. Putting a component on an
+entity (a bundle, `World::insert`) first takes from it each other component
+that shares a group with it (`Evicts`, walking the world's columns; `Same`,
+whether two types are one; `HasGroup`, `Shares`). Only a component of some
+group walks the columns (`EvictOne`, by what its groups are): walking them
+for every component made a fresh compile of covey's simulation 5.0 s, this
+3.9 s, and none at all 3.45 s. `covey/one_of.glorious` is the example.
+
+What it needed of the compiler: a type read from what a trait leaves to an
+implementation is spelled as that is written (`spellTy`, `projectionOf`), so
+a condition whose trait's arguments are such a type, `<H as OneOf>::Groups:
+Shares<<T as OneOf>::Groups>`, is found as written.
+
+Upstream's one-of groups also move the entity's table; covey has no tables.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by

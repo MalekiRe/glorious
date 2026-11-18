@@ -1,0 +1,54 @@
+// Groups of components an entity has one of: walking and running are ways
+// to move, walking and being dead are states of life. Putting one on an
+// entity takes from it each other that shares a group with it; putting one
+// it has again only gives the new value.
+// expect:
+// 2
+// 0
+// 0
+// 7
+// 1
+// 0
+// 1
+// 3
+// 1
+// 1
+mod ecs;
+
+use ecs::{App, Entity, OneOf};
+
+struct Locomotion
+struct Life
+struct Walking(Int)
+struct Running(Int)
+struct Dead
+struct Pos(Int)
+
+impl OneOf for Walking { type Groups = (Locomotion, Life); }
+impl OneOf for Running { type Groups = (Locomotion,); }
+impl OneOf for Dead { type Groups = (Life,); }
+
+fn has<T, S>(world: &ecs::World<S>, e: Entity) -> Int where S: ecs::Get<T> {
+    match(world.get<T>(e)) { Some(_) => 1, None => 0 }
+}
+
+fn main() -> Int {
+    let mut app = App::new().register<Walking>().register<Running>().register<Dead>().register<Pos>().build();
+    // Running and dead share no group: they stay together.
+    let e = app.world.spawn_bundle((Running(1), Dead, Pos(7)));
+    app.world.insert(e, Walking(2));
+    match(app.world.get<Walking>(e)) { Some(w) => say(w.0), None => say(9) };
+    say(has<Running, _>(&app.world, e));
+    say(has<Dead, _>(&app.world, e));
+    match(app.world.get<Pos>(e)) { Some(p) => say(p.0), None => say(9) };
+    // Dead shares only life with walking.
+    app.world.insert(e, Dead);
+    say(has<Dead, _>(&app.world, e));
+    say(has<Walking, _>(&app.world, e));
+    app.world.insert(e, Running(3));
+    say(has<Dead, _>(&app.world, e));
+    // Again: the value it had comes back, and nothing else goes.
+    match(app.world.insert(e, Running(4))) { Some(r) => say(r.0), None => say(9) };
+    say(has<Dead, _>(&app.world, e));
+    app.world.count<Running>()
+}

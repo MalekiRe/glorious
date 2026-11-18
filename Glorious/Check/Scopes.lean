@@ -272,12 +272,27 @@ partial def runProjections (final : Bool) : M Unit := do
         annotate the value it is read from"
     | none => pure ()
 
+/-- What a trait leaves to an implementation that `t` stands for, where `t`
+is a type not yet known that was read from one (`unproject`): as written,
+`<H as Assoc>::Out`, with what it is of as now known. -/
+def projectionOf (t : Ty) : M (Option Ty) := do
+  let .var v ← find t | return none
+  for (tr, self, name, a, _, _) in (← get).assocUses do
+    if let .var w ← find a then
+      if w == v then return some (.con Syntax.projMark [← zonk self, .con tr [], .con name []])
+  return none
+
 /-- A type as it is written in the name of a trait at its arguments: the
 spelling `TypeExpr.spell` gives the type an implementation writes. A type not
 yet known is spelt by its variable. -/
 partial def spellTy (t : Ty) : M String := do
   match ← find t with
-  | .var id => pure s!"?{id}"
+  -- (One read from what a trait leaves to an implementation, not known
+  -- yet: as that is written, as a condition of it is.)
+  | .var id => do
+    match ← projectionOf (.var id) with
+    | some p => spellTy p
+    | none => pure s!"?{id}"
   | .con n [] => pure n
   | .con n args => do pure s!"{n}<{", ".intercalate (← args.mapM spellTy)}>"
   | .tuple args => do pure s!"({", ".intercalate (← args.mapM spellTy)})"

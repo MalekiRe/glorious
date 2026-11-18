@@ -85,16 +85,6 @@ partial def toSTy (t : Ty) : M Traits.STy := do
     | .ref _ _ _ => pure (.con "(reference)" [])
     | .var _ => pure (.var 0)
 
-/-- What a trait leaves to an implementation that `t` stands for, where `t`
-is a type not yet known that was read from one (`unproject`): as written,
-`<H as Assoc>::Out`, with what it is of as now known. -/
-def projectionOf (t : Ty) : M (Option Ty) := do
-  let .var v ← find t | return none
-  for (tr, self, name, a, _, _) in (← get).assocUses do
-    if let .var w ← find a then
-      if w == v then return some (.con Syntax.projMark [← zonk self, .con tr [], .con name []])
-  return none
-
 /-- The numbers under which a condition of an implementation on a type made
 from its type parameters, `where (A, (B, ())): Fetch<W>`, is known in the
 implementation's functions: one for each function it was said in. -/

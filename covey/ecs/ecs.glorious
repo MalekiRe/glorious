@@ -395,6 +395,47 @@ impl<H, ..R, S> BringsFor<S> for (H, ..R)
     }
 }
 
+// Components of which an entity has at most one of each group: `impl OneOf
+// for Walking { type Groups = (Locomotion, Life); }`. Putting one on an
+// entity takes from it each other that shares a group with it. Any other
+// component is of none.
+pub trait OneOf { type Groups; }
+impl<T> OneOf for T { type Groups = (); }
+
+// Whether two types are one.
+pub trait Same<T> { fn same() -> Bool }
+impl<T> Same<T> for T { fn same() { true } }
+impl<T, U> Same<T> for U { fn same() { false } }
+
+// Whether a list of groups has `G`; whether two lists share one.
+pub trait HasGroup<G> { fn has_group() -> Bool }
+impl<G> HasGroup<G> for () { fn has_group() { false } }
+impl<G, H, ..R> HasGroup<G> for (H, ..R) where H: Same<G>, (..R): HasGroup<G> {
+    fn has_group() { if(<H as Same<G>>::same()) { true } else { <(..R) as HasGroup<G>>::has_group() } }
+}
+pub trait Shares<L> { fn shares() -> Bool }
+impl<L> Shares<L> for () { fn shares() { false } }
+impl<H, ..R, L> Shares<L> for (H, ..R) where L: HasGroup<H>, (..R): Shares<L> {
+    fn shares() { if(<L as HasGroup<H>>::has_group()) { true } else { <(..R) as Shares<L>>::shares() } }
+}
+
+// Of a world's columns, each other component that shares a group with `T`,
+// taken from the entity.
+pub trait Evicts<T> { fn evict(&mut Self, Entity) }
+impl<T> Evicts<T> for () { fn evict(columns, entity) { () } }
+impl<T, H, R> Evicts<T> for (Column<H>, R)
+    where H: OneOf, T: OneOf, <H as OneOf>::Groups: Shares<<T as OneOf>::Groups>, H: Same<T>, R: Evicts<T> {
+    fn evict(columns, entity) {
+        if(<H as Same<T>>::same()) { () }
+        else if(<<H as OneOf>::Groups as Shares<<T as OneOf>::Groups>>::shares()) { discard(column_remove(&mut columns.0, entity)) }
+        else { () };
+        <R as Evicts<T>>::evict(&mut columns.1, entity)
+    }
+}
+impl<T, H, R> Evicts<T> for (Resource<H>, R) where R: Evicts<T> {
+    fn evict(columns, entity) { <R as Evicts<T>>::evict(&mut columns.1, entity) }
+}
+
 // Components given together: a tuple of them, each put in its column, and
 // then what they require. Put on an entity, what it had of them comes back;
 // taken from one, what it had of them.
@@ -403,15 +444,33 @@ pub trait Bundle<S> {
     fn put_all(Self, &mut World<S>, Entity) -> Self::Had
     fn take_all(&mut World<S>, Entity) -> Self::Had
 }
-impl<..T, S> Bundle<S> for (..T) where ..S: Get<T>, (..T): BringsFor<S> {
+impl<..T, S> Bundle<S> for (..T) where ..S: Get<T>, ..T: EvictOne<S>, (..T): BringsFor<S> {
     type Had = (..Option<T>);
     fn put_all(bundle, world, entity) {
         let (..t) = bundle;
-        let had = (..insert(world, entity, t));
+        let had = (..put_one(world, entity, t));
         <(..T) as BringsFor<S>>::bring_for(world, entity);
         had
     }
     fn take_all(world, entity) { (..remove<T, S>(world, entity)) }
+}
+
+// What putting a component on an entity takes from it: nothing, of one of
+// no group, which is not looked for among the columns.
+pub trait EvictsBy<T, S> { fn evict_by(&mut S, Entity) }
+impl<T, S> EvictsBy<T, S> for () { fn evict_by(columns, entity) { () } }
+impl<T, G, ..R, S> EvictsBy<T, S> for (G, ..R) where S: Evicts<T> {
+    fn evict_by(columns, entity) { <S as Evicts<T>>::evict(columns, entity) }
+}
+pub trait EvictOne<S> { fn evict_one(&mut S, Entity) }
+impl<T, S> EvictOne<S> for T where T: OneOf, <T as OneOf>::Groups: EvictsBy<T, S> {
+    fn evict_one(columns, entity) { <<T as OneOf>::Groups as EvictsBy<T, S>>::evict_by(columns, entity) }
+}
+
+// A component put on an entity, the others of its groups taken first.
+fn put_one<T, S>(world: &mut World<S>, entity: Entity, value: T) -> Option<T> where S: Get<T>, T: EvictOne<S> {
+    <T as EvictOne<S>>::evict_one(&mut world.columns, entity);
+    insert(world, entity, value)
 }
 
 // A new entity with the components given.
@@ -438,9 +497,9 @@ impl<S> World<S> {
 
     // Give an entity a component, or another value of one it has: the one
     // it had, if it had one.
-    pub fn insert<T>(world: &mut Self, entity: Entity, value: T) -> Option<T> where S: Get<T>, T: BringsOne<S> {
+    pub fn insert<T>(world: &mut Self, entity: Entity, value: T) -> Option<T> where S: Get<T>, T: EvictOne<S>, T: BringsOne<S> {
         if(alive(&*world, entity)) {
-            let had = insert(world, entity, value);
+            let had = put_one(world, entity, value);
             <T as BringsOne<S>>::bring_one(world, entity);
             had
         } else { discard(value); None }
