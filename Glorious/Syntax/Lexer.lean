@@ -52,17 +52,31 @@ private def isIdentStart (c : Char) : Bool := c.isAlpha || c == '_'
 
 private def isIdentRest (c : Char) : Bool := c.isAlphanum || c == '_'
 
-private def isOpChar (c : Char) : Bool := "+-*/<>=!&|%^~?".toList.contains c
+private def isOpChar : Char → Bool
+  | '+' | '-' | '*' | '/' | '<' | '>' | '=' | '!' | '&' | '|' | '%' | '^' | '~' | '?' => true
+  | _ => false
 
-private def isPunctChar (c : Char) : Bool := "(){}[],;.@#".toList.contains c
+/-- A punctuation character's token text, one string for every use of it. -/
+private def punctText : Char → Option String
+  | '(' => some "(" | ')' => some ")" | '{' => some "{" | '}' => some "}"
+  | '[' => some "[" | ']' => some "]" | ',' => some "," | ';' => some ";"
+  | '.' => some "." | '@' => some "@" | '#' => some "#"
+  | _ => none
+
+/-- An operator of one character's text, one string for every use of it. -/
+private def opText : Char → String
+  | '+' => "+" | '-' => "-" | '*' => "*" | '/' => "/" | '<' => "<" | '>' => ">"
+  | '=' => "=" | '!' => "!" | '&' => "&" | '|' => "|" | '%' => "%" | '^' => "^"
+  | '~' => "~" | '?' => "?" | c => String.singleton c
+
+/-- The character at `i`, or `'\x00'` past the end: no option made per look. -/
+@[inline] private def charAt (cs : Array Char) (i : Nat) : Char := cs.getD i '\x00'
 
 private def slice (cs : Array Char) (i j : Nat) : String :=
-  (cs.extract i j).foldl (fun s c => s.push c) ""
+  String.ofList (cs.extract i j).toList
 
 private partial def spanWhile (cs : Array Char) (p : Char → Bool) (i : Nat) : Nat :=
-  match cs[i]? with
-  | some c => if p c then spanWhile cs p (i + 1) else i
-  | none => i
+  if i < cs.size && p (charAt cs i) then spanWhile cs p (i + 1) else i
 
 private def digitOf (c : Char) : Option Nat :=
   if c.isDigit then some (c.toNat - '0'.toNat)
@@ -74,42 +88,42 @@ private def digitOf (c : Char) : Option Nat :=
 number, how many digits it has, and where they end. -/
 private partial def lexDigits (cs : Array Char) (base : Nat) (i : Nat) (n count : Nat) :
     Nat × Nat × Nat :=
-  match cs[i]? with
-  | some '_' =>
+  if i ≥ cs.size then (n, count, i) else
+  match charAt cs i with
+  | '_' =>
     -- Only between digits.
-    match cs[i + 1]?.bind digitOf with
+    match digitOf (charAt cs (i + 1)) with
     | some d => if d < base && count > 0 then lexDigits cs base (i + 1) n count else (n, count, i)
     | none => (n, count, i)
-  | some c =>
+  | c =>
     match digitOf c with
     | some d => if d < base then lexDigits cs base (i + 1) (n * base + d) (count + 1) else (n, count, i)
     | none => (n, count, i)
-  | none => (n, count, i)
 
 /-- What is written after `\` in a character or a text: the code it stands
 for and where it ends. -/
 private partial def lexEscape (cs : Array Char) (i line col : Nat) (byte : Bool := false) :
     Except String (Nat × Nat) :=
-  match cs[i]? with
-  | some 'n' => pure (10, i + 1)
-  | some 'r' => pure (13, i + 1)
-  | some 't' => pure (9, i + 1)
-  | some '0' => pure (0, i + 1)
-  | some '\\' => pure (92, i + 1)
-  | some '\'' => pure (39, i + 1)
-  | some '"' => pure (34, i + 1)
-  | some 'x' =>
-    match cs[i + 1]?.bind digitOf, cs[i + 2]?.bind digitOf with
+  match charAt cs i with
+  | 'n' => pure (10, i + 1)
+  | 'r' => pure (13, i + 1)
+  | 't' => pure (9, i + 1)
+  | '0' => pure (0, i + 1)
+  | '\\' => pure (92, i + 1)
+  | '\'' => pure (39, i + 1)
+  | '"' => pure (34, i + 1)
+  | 'x' =>
+    match digitOf (charAt cs (i + 1)), digitOf (charAt cs (i + 2)) with
     | some a, some b =>
       -- (a byte may be any code that fits one)
       if a * 16 + b < 128 || byte then pure (a * 16 + b, i + 3)
       else throw s!"{line}:{col}: `\\x` is for the codes below 80; write `\\u\{..}`"
     | _, _ => throw s!"{line}:{col}: `\\x` is followed by two digits in base 16"
-  | some 'u' =>
-    if cs[i + 1]? != some '{' then throw s!"{line}:{col}: `\\u` is followed by `\{`, digits in base 16, and `}`"
+  | 'u' =>
+    if charAt cs (i + 1) != '{' then throw s!"{line}:{col}: `\\u` is followed by `\{`, digits in base 16, and `}`"
     else
       let (n, count, j) := lexDigits cs 16 (i + 2) 0 0
-      if count == 0 || cs[j]? != some '}' then
+      if count == 0 || charAt cs (j) != '}' then
         throw s!"{line}:{col}: `\\u` is followed by `\{`, digits in base 16, and `}`"
       else if n > 0x10FFFF || (0xD800 ≤ n && n ≤ 0xDFFF) then
         throw s!"{line}:{col}: `\\u\{..}` is not the code of a character"
@@ -120,42 +134,41 @@ private partial def lexEscape (cs : Array Char) (i line col : Nat) (byte : Bool 
 where the text ends. -/
 private partial def lexText (cs : Array Char) (i line col : Nat) (acc : Array Nat)
     (byte : Bool := false) : Except String (List Nat × Nat) :=
-  match cs[i]? with
-  | none => throw s!"{line}:{col}: this text is not closed"
-  | some '\n' => throw s!"{line}:{col}: this text is not closed on its line (`\\n` is a new line)"
-  | some '"' => pure (acc.toList, i + 1)
-  | some '\\' => do
+  if i ≥ cs.size then throw s!"{line}:{col}: this text is not closed" else
+  match charAt cs i with
+  | '\n' => throw s!"{line}:{col}: this text is not closed on its line (`\\n` is a new line)"
+  | '"' => pure (acc.toList, i + 1)
+  | '\\' => do
     let (code, j) ← lexEscape cs (i + 1) line col byte
     lexText cs j line col (acc.push code) byte
-  | some c => lexText cs (i + 1) line col (acc.push c.toNat) byte
+  | c => lexText cs (i + 1) line col (acc.push c.toNat) byte
 
 /-- Past a `/* .. */` comment whose inside starts at `i`, `depth` deep:
 where it ends, and the line and column there. -/
 private partial def skipComment (cs : Array Char) (i line col depth : Nat) :
     Option (Nat × Nat × Nat) :=
-  match cs[i]?, cs[i + 1]? with
-  | none, _ => none
-  | some '*', some '/' =>
+  if i ≥ cs.size then none else
+  match charAt cs i, charAt cs (i + 1) with
+  | '*', '/' =>
     if depth == 1 then some (i + 2, line, col + 2) else skipComment cs (i + 2) line (col + 2) (depth - 1)
-  | some '/', some '*' => skipComment cs (i + 2) line (col + 2) (depth + 1)
-  | some '\n', _ => skipComment cs (i + 1) (line + 1) 1 depth
-  | some _, _ => skipComment cs (i + 1) line (col + 1) depth
+  | '/', '*' => skipComment cs (i + 2) line (col + 2) (depth + 1)
+  | '\n', _ => skipComment cs (i + 1) (line + 1) 1 depth
+  | _, _ => skipComment cs (i + 1) line (col + 1) depth
 
 private partial def lexLoop (cs : Array Char) (i line col : Nat) (acc : Array Token) :
     Except String (Array Token) :=
-  match cs[i]? with
-  | none => pure (acc.push ⟨.eof, line, col⟩)
-  | some c =>
+  if i ≥ cs.size then pure (acc.push ⟨.eof, line, col⟩) else
+    let c := charAt cs i
     if c == '\n' then lexLoop cs (i + 1) (line + 1) 1 acc
     else if c.isWhitespace then lexLoop cs (i + 1) line (col + 1) acc
-    else if c == '/' && cs[i + 1]? == some '/' then
+    else if c == '/' && charAt cs (i + 1) == '/' then
       lexLoop cs (spanWhile cs (· != '\n') i) line col acc
-    else if c == '/' && cs[i + 1]? == some '*' then
+    else if c == '/' && charAt cs (i + 1) == '*' then
       -- `/* .. */`, which may have others inside it.
       match skipComment cs (i + 2) line (col + 2) 1 with
       | some (j, line', col') => lexLoop cs j line' col' acc
       | none => throw s!"{line}:{col}: this comment is not closed"
-    else if c == 'b' && cs[i + 1]? == some '"' then
+    else if c == 'b' && charAt cs (i + 1) == '"' then
       -- `b"abc"`: bytes, each a character below 128 or `\xNN`.
       match lexText cs (i + 2) line col #[] true with
       | .ok (codes, j) =>
@@ -163,25 +176,25 @@ private partial def lexLoop (cs : Array Char) (i line col : Nat) (acc : Array To
           throw s!"{line}:{col}: a byte is a character below 128, or `\\xNN`"
         else lexLoop cs j line (col + (j - i)) (acc.push ⟨.bytes codes, line, col⟩)
       | .error e => throw e
-    else if c == 'b' && cs[i + 1]? == some '\'' then
+    else if c == 'b' && charAt cs (i + 1) == '\'' then
       -- `b'x'`: a byte, which is a `u8`.
       let read : Except String (Nat × Nat) :=
-        if cs[i + 2]? == some '\\' then lexEscape cs (i + 3) line col true
-        else match cs[i + 2]? with
-          | some ch =>
-            if ch.toNat > 127 then throw s!"{line}:{col}: a byte is a character below 128, or `\\xNN`"
-            else pure (ch.toNat, i + 3)
-          | none => throw s!"{line}:{col}: a byte is closed with `'`"
+        if charAt cs (i + 2) == '\\' then lexEscape cs (i + 3) line col true
+        else if i + 2 ≥ cs.size then throw s!"{line}:{col}: a byte is closed with `'`"
+        else
+          let ch := charAt cs (i + 2)
+          if ch.toNat > 127 then throw s!"{line}:{col}: a byte is a character below 128, or `\\xNN`"
+          else pure (ch.toNat, i + 3)
       match read with
       | .ok (code, j) =>
-        if cs[j]? != some '\'' then throw s!"{line}:{col}: a byte is closed with `'`"
+        if charAt cs (j) != '\'' then throw s!"{line}:{col}: a byte is closed with `'`"
         else if code > 255 then throw s!"{line}:{col}: a byte is a character below 128, or `\\xNN`"
         else lexLoop cs (j + 1) line (col + (j + 1 - i)) (acc.push ⟨.typed code "u8", line, col⟩)
       | .error e => throw e
     else if c.isDigit then
-      let next := cs[i + 1]?
-      let base := if c == '0' && next == some 'x' then 16 else if c == '0' && next == some 'b' then 2
-        else if c == '0' && next == some 'o' then 8 else 10
+      let next := charAt cs (i + 1)
+      let base := if c == '0' && next == 'x' then 16 else if c == '0' && next == 'b' then 2
+        else if c == '0' && next == 'o' then 8 else 10
       let start := if base == 10 then i else i + 2
       let (n, count, j) := lexDigits cs base start 0 0
       if count == 0 then throw s!"{line}:{col}: a number needs a digit after its base"
@@ -190,21 +203,21 @@ private partial def lexLoop (cs : Array Char) (i line col : Nat) (acc : Array To
         -- `p.0.1` the `0.1` is two fields.
         let afterPoint := (acc.back?.map (·.tok)) == some (Tok.punct ".")
         let (digits, exp10, j, floating) :=
-          if base == 10 && !afterPoint && cs[j]? == some '.' && ((cs[j + 1]?.map Char.isDigit).getD false) then
+          if base == 10 && !afterPoint && charAt cs (j) == '.' && (charAt cs (j + 1)).isDigit then
             let (m, places, k) := lexDigits cs 10 (j + 1) n 0
             (m, -(places : Int), k, true)
           else (n, (0 : Int), j, false)
         -- An exponent.
         let (exp10, j, floating) :=
-          if base == 10 && !afterPoint && (cs[j]? == some 'e' || cs[j]? == some 'E') then
-            let signed := cs[j + 1]? == some '-' || cs[j + 1]? == some '+'
+          if base == 10 && !afterPoint && (charAt cs (j) == 'e' || charAt cs (j) == 'E') then
+            let signed := charAt cs (j + 1) == '-' || charAt cs (j + 1) == '+'
             let from_ := if signed then j + 2 else j + 1
             let (e, count, k) := lexDigits cs 10 from_ 0 0
             if count == 0 then (exp10, j, floating)
-            else (exp10 + (if cs[j + 1]? == some '-' then -(e : Int) else (e : Int)), k, true)
+            else (exp10 + (if charAt cs (j + 1) == '-' then -(e : Int) else (e : Int)), k, true)
           else (exp10, j, floating)
         -- The type, written straight after.
-        let k := if (cs[j]?.map isIdentStart).getD false then spanWhile cs isIdentRest j else j
+        let k := if isIdentStart (charAt cs j) then spanWhile cs isIdentRest j else j
         let suffix := slice cs j k
         let tok := if floating || suffix == "f32" || suffix == "f64" then Tok.float digits exp10 suffix
           else if suffix.isEmpty then Tok.int digits
@@ -217,16 +230,16 @@ private partial def lexLoop (cs : Array Char) (i line col : Nat) (acc : Array To
       match lexText cs (i + 1) line col #[] with
       | .ok (codes, j) => lexLoop cs j line (col + (j - i)) (acc.push ⟨.str codes, line, col⟩)
       | .error e => throw e
-    else if c == '\'' && cs[i + 1]? == some '\\' then
+    else if c == '\'' && charAt cs (i + 1) == '\\' then
       match lexEscape cs (i + 2) line col with
       | .ok (code, j) =>
-        if cs[j]? == some '\'' then lexLoop cs (j + 1) line (col + (j + 1 - i)) (acc.push ⟨.char code, line, col⟩)
+        if charAt cs (j) == '\'' then lexLoop cs (j + 1) line (col + (j + 1 - i)) (acc.push ⟨.char code, line, col⟩)
         else throw s!"{line}:{col}: a character is closed with `'`"
       | .error e => throw e
-    else if c == '\'' && cs[i + 2]? == some '\'' && cs[i + 1]?.isSome then
+    else if c == '\'' && charAt cs (i + 2) == '\'' && i + 1 < cs.size then
       -- `'a'` is a character; `'a` with no `'` after it is a lifetime.
-      lexLoop cs (i + 3) line (col + 3) (acc.push ⟨.char ((cs[i + 1]?.getD ' ').toNat), line, col⟩)
-    else if c == '\'' && (cs[i + 1]?.map isIdentStart).getD false then
+      lexLoop cs (i + 3) line (col + 3) (acc.push ⟨.char ((charAt cs (i + 1)).toNat), line, col⟩)
+    else if c == '\'' && isIdentStart (charAt cs (i + 1)) then
       -- A lifetime, `'a`: a name that keeps its mark.
       let j := spanWhile cs isIdentRest (i + 1)
       lexLoop cs j line (col + (j - i)) (acc.push ⟨.ident (slice cs i j), line, col⟩)
@@ -237,28 +250,29 @@ private partial def lexLoop (cs : Array Char) (i line col : Nat) (acc : Array To
       -- argument is a qualified path (`Option<<T as Tr>::Out>`); neither is
       -- one operator.
       if j > i + 1 && ((cs.extract i j).all (· == '>') || (cs.extract i j).all (· == '<')) then
-        lexLoop cs (i + 1) line (col + 1) (acc.push ⟨.op (String.singleton c), line, col⟩)
+        lexLoop cs (i + 1) line (col + 1) (acc.push ⟨.op (opText c), line, col⟩)
       -- `<&` opens a type argument list with a reference in it.
-      else if j > i + 1 && c == '<' && cs[i + 1]? == some '&' then
+      else if j > i + 1 && c == '<' && charAt cs (i + 1) == '&' then
         lexLoop cs (i + 1) line (col + 1) (acc.push ⟨.op "<", line, col⟩)
       -- `*<T as Tr>::f(..)`, `&<..>`, `!<..>`, `-<..>`: a prefix operator
       -- on a qualified path.
-      else if j > i + 1 && "*&!-".toList.contains c && cs[i + 1]? == some '<' then
-        lexLoop cs (i + 1) line (col + 1) (acc.push ⟨.op (String.singleton c), line, col⟩)
+      else if j > i + 1 && (c == '*' || c == '&' || c == '!' || c == '-') && charAt cs (i + 1) == '<' then
+        lexLoop cs (i + 1) line (col + 1) (acc.push ⟨.op (opText c), line, col⟩)
       else
-        let tok := if ["=", "=>", "->"].contains s then Tok.punct s else Tok.op s
+        let s := if j == i + 1 then opText c else s
+        let tok := if s == "=" || s == "=>" || s == "->" then Tok.punct s else Tok.op s
         lexLoop cs j line (col + (j - i)) (acc.push ⟨tok, line, col⟩)
-    else if c == ':' && cs[i + 1]? == some ':' then
+    else if c == ':' && charAt cs (i + 1) == ':' then
       lexLoop cs (i + 2) line (col + 2) (acc.push ⟨.punct "::", line, col⟩)
     else if c == ':' then
       lexLoop cs (i + 1) line (col + 1) (acc.push ⟨.punct ":", line, col⟩)
-    else if isPunctChar c then
-      lexLoop cs (i + 1) line (col + 1) (acc.push ⟨.punct (String.singleton c), line, col⟩)
-    else throw s!"{line}:{col}: unexpected character `{c}`"
+    else match punctText c with
+      | some p => lexLoop cs (i + 1) line (col + 1) (acc.push ⟨.punct p, line, col⟩)
+      | none => throw s!"{line}:{col}: unexpected character `{c}`"
 
 def lex (src : String) : Except String (Array Token) :=
   -- A byte-order mark at the very start is not part of the text.
-  let cs := src.toList.toArray
-  lexLoop cs (if cs[0]? == some '\uFEFF' then 1 else 0) 1 1 #[]
+  let cs := src.foldl (fun (a : Array Char) c => a.push c) (Array.mkEmpty src.utf8ByteSize)
+  lexLoop cs (if charAt cs 0 == '\uFEFF' then 1 else 0) 1 1 #[]
 
 end Glorious.Syntax
