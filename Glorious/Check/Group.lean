@@ -409,7 +409,10 @@ def checkGroup (decls : List FnDecl) : M Unit := do
             pure (some (want, sig.trait))
         let annots := match wanted with
           | some (.fn ps _ _ _ _, _) =>
-            if ps.length == annots.length then (annots.zip ps).map fun (a, p) => a <|> some p else annots
+            if ps.length == annots.length then (annots.zip ps).map fun (a, p) => a <|> some p
+            -- (One it takes from its trait, which says nothing of its own.)
+            else if annots.all Option.isNone then ps.map some
+            else annots
           | _ => annots
         -- (And what it gives, as its trait says: a borrow made in its body is
         -- known to be given back while the body is checked, not only after.)
@@ -487,6 +490,8 @@ def checkGroup (decls : List FnDecl) : M Unit := do
   -- here.
   for d in decls do
     if let some (im, _) := d.impl then
+      -- (As it is now: another of its functions may have found it already.)
+      let im := ((← get).impls.toList.find? (·.dictFn == im.dictFn)).getD im
       let owner := rigidOwner decls d
       let back := im.pvars.map fun (p, id) => (s!"'{p}@{owner}", id)
       let unrigid := unrigidTy back

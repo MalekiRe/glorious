@@ -561,7 +561,7 @@ partial def checkArg (scope : Scope) (amb : Row) (what : String) (p : Ty) (a : E
 one of the name (`ModuleInfo.dotAlts`): the receiver's type is found on a
 copy of what is known. -/
 partial def dotAltFor (scope : Scope) (amb : Row) (call : Nat) (a : Expr) : M (Option String) := do
-  match (← get).modules.dotAlts.lookup call with
+  match dotAltsOf (← get).modules call with
   | none => pure none
   | some alts =>
     let saved ← get
@@ -917,7 +917,7 @@ partial def inferCall (scope : Scope) (amb : Row) (f : Expr) (args : List Expr)
   -- that the receiver is borrowed as it should be); the program is read
   -- again only where it does not.
   if let .name none x := f then
-    if let some alts := (← get).modules.dotAlts.lookup call then
+    if let some alts := dotAltsOf (← get).modules call then
       if let some a := args.head? then
         if let some alt ← dotAltFor scope amb call a then
           if alt != x && alts.contains alt then

@@ -440,7 +440,11 @@ def declareTraits (items : List Item) : M Unit := do
         modify fun s => { s with elided := if (ret.map writesRef).getD false then some one else none }
         -- (A type another trait of `Self` leaves, `Self::Store` of a trait
         -- this one asks: kept as written, for each implementation and use.)
-        modify fun s => { s with projecting := [self] }
+        -- (And one of what the trait leaves or of its parameters, `<Self::
+        -- Components as Registers<S>>::Out`: so each use has its own.)
+        modify fun s => { s with projecting := self :: scope.filterMap fun
+          | (_, .var id) => some id
+          | _ => none }
         let ps ← params.mapM fun p => closeRows <$> resolveType scope false p
         -- What it performs, where the trait says: those effects, and the
         -- row it leaves to an implementation if it names one.

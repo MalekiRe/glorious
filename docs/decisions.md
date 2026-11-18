@@ -5207,6 +5207,20 @@ Covey is the toolbox for finding what the language lacks. Rewriting it after
   and whoever uses it meets. This is what upstream's `-> impl Systems<S>`
   does for a plugin: covey's `Plugin<S, L>` has `type Out = _;` and a
   `build`. Added, with a case.
+- **Upstream's `type Components = (Pos, Vel)` of a plugin** needed four
+  things the compiler did not have or got wrong, now added or fixed, with a
+  case: a trait's default for a type it leaves (`type Components = ();`, as
+  `associated_type_defaults`); `Self::Name` in an implementation's
+  functions, which is its trait's at its type; `<Self::Components as
+  Registers<S>>::Out` in a trait's function, which was answered once for
+  every implementation (the first's) and is now kept as written for each;
+  and a function an implementation takes from its trait, which did not know
+  what it is given, so a dot call in it chose a trait's function of the
+  name. Also, a type an implementation leaves to be found is found once, by
+  the first of its functions, and what they need of its parameters is
+  gathered from all of them. Covey's `Plugin` has `Components`, registered
+  by a default `register` before `build`; `simulation.glorious`'s `Physics`
+  says its components.
 - **A block written for a function named as a value** takes references of
   one lifetime, not of any: a plugin's systems kept in a value, called with
   a borrow of something made after the value, are refused ("could be used

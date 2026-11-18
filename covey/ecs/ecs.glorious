@@ -1116,13 +1116,30 @@ impl<E, F, P, T, S> Dispatch<E, S> for (On<F, P>, T) where T: Dispatch<E, S> {
 // What an app is given by a plugin: a type of its own whose `build` adds to
 // the app what the plugin has, or a function from an app to an app. What the
 // app is then is found from `build` (`type Out = _;`).
+// (Its `Components`, registered before it builds: none, unless it says.)
 pub trait Plugin<S, L> {
+    type Components = ();
     type Out;
-    fn build(Self, App<S, L>) -> Self::Out;
+    fn register(app: App<S, L>) -> App<<Self::Components as Registers<S>>::Out, L> { app.register_all<Self::Components>() }
+    fn build(Self, App<<Self::Components as Registers<S>>::Out, L>) -> Self::Out;
 }
 impl<S, L, Y> Plugin<S, L> for fn(App<S, L>) -> Y {
     type Out = Y;
     fn build(f, app) { f(app) }
+}
+
+// The columns of a list of components, before a world's columns.
+pub trait Registers<S> {
+    type Out;
+    fn register_all(S) -> Self::Out;
+}
+impl<S> Registers<S> for () {
+    type Out = S;
+    fn register_all(columns) { columns }
+}
+impl<H, ..R, S> Registers<S> for (H, ..R) where (..R): Registers<S> {
+    type Out = (Column<H>, <(..R) as Registers<S>>::Out);
+    fn register_all(columns) { (empty_column(), <(..R) as Registers<S>>::register_all(columns)) }
 }
 
 // A world of columns `S` and the registered systems `L`.
@@ -1171,9 +1188,16 @@ impl<S, L> App<S, L> {
         App { world: world, systems: (On { label: fn(event: E) { () }, systems: <P as IntoSystem<E, S>>::into_system(systems) }, before) }
     }
 
-    // Add what a plugin has: its components, resources and systems.
+    // Add what a plugin has: its components, then what it builds.
     pub fn add_plugins<P>(app: Self, plugin: P) -> <P as Plugin<S, L>>::Out where P: Plugin<S, L> {
-        <P as Plugin<S, L>>::build(plugin, app)
+        <P as Plugin<S, L>>::build(plugin, <P as Plugin<S, L>>::register(app))
+    }
+
+    // Store each of a list of components: `.register_all<(Position, Velocity)>()`.
+    pub fn register_all<C>(app: Self) -> App<<C as Registers<S>>::Out, L> where C: Registers<S> {
+        let App { world, systems } = app;
+        let World { columns, generations, free, tick, since } = world;
+        App { world: World { columns: <C as Registers<S>>::register_all(columns), generations: generations, free: free, tick: tick, since: since }, systems: systems }
     }
 
     // The app, ready to run.

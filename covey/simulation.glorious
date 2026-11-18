@@ -77,10 +77,11 @@ fn reap<S>(healths: &Column<Health>, commands: &mut Commands<S>, ended: &mut End
     }
 }
 
-// Plugins: one a type of its own, what it builds found from `build`; one a
-// function from an app to an app.
+// Plugins: one a type of its own, with the components it registers and what
+// it builds found from `build`; one a function from an app to an app.
 struct Physics
 impl<S, L> Plugin<S, L> for Physics {
+    type Components = (Position, Velocity);
     type Out = _;
     fn build(physics, app) {
         app.add_systems(Update, (integrate, friction.run_if(moving), bound).chain())
@@ -93,8 +94,6 @@ fn combat(app) {
 
 fn main() -> Int {
     let mut game = App::new()
-        .register<Position>()
-        .register<Velocity>()
         .register<Health>()
         .insert_resource(Ended(0))
         .add_plugins(Physics)

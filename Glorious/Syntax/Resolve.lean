@@ -450,6 +450,20 @@ def expandBlankets (items : List Item) : List Item := Id.run do
     unless more do break
   pure (rest ++ out.toList)
 
+/-- A type with `Self::Name` in it written `<Self as Trait<..>>::Name`, of
+the implementation's own trait and type. -/
+partial def selfAssocs (self : TypeExpr) (tr : String) (targs : List TypeExpr) : TypeExpr → TypeExpr
+  | .name x args =>
+    match x.splitOn "::" with
+    | ["Self", name] => if args.isEmpty then .name assocOfMark [self, .name tr targs, .name name []]
+      else .name x (args.map (selfAssocs self tr targs))
+    | _ => .name x (args.map (selfAssocs self tr targs))
+  | .tuple ts => .tuple (ts.map (selfAssocs self tr targs))
+  | .fn ps r => .fn (ps.map (selfAssocs self tr targs)) (selfAssocs self tr targs r)
+  | .performs r effs => .performs (selfAssocs self tr targs r) (effs.map fun (e, as) => (e, as.map (selfAssocs self tr targs)))
+  | .ref u t l => .ref u (selfAssocs self tr targs t) l
+  | t => t
+
 /-- Each implementation with the functions its trait gives a body that it
 does not write itself; and, where it gives its trait arguments, `impl
 From<Int> for u8`, as an implementation of the trait at those: `From<Int>` is
@@ -467,8 +481,12 @@ def fillDefaults (items : List Item) : List Item :=
       let written := methods.filterMap fun
         | .fn m _ _ _ _ => some m
         | _ => none
+      let said := methods.filterMap fun
+        | .typeAlias n _ _ => some n
+        | _ => none
       let missing := ((defaults.lookup tr).getD []).filter fun
         | .fn m _ _ _ _ => !written.contains m
+        | .typeAlias n _ _ => !said.contains n
         | _ => false
       let given := (List.range methods.length).filterMap fun i =>
         methods.findSome? fun
@@ -487,6 +505,8 @@ def fillDefaults (items : List Item) : List Item :=
           Item.fn m fps (annots.map fun _ => none) none
             (clauses.map fun c =>
               shiftClause (10000000000 * (index + 1)) (selfClause head (some (tr, (TypeExpr.tuple [self]).asExpr)) c))
+        -- (A type's default is written against `Self` too.)
+        | .typeAlias n takes body => .typeAlias n takes (TypeExpr.withSelf self body)
         | item => item
       -- Two implementations of a trait for one type, written with the
       -- same arguments (`impl<T, R> Get<T> for (Column<T>, R)` and
@@ -500,8 +520,22 @@ def fillDefaults (items : List Item) : List Item :=
               | _ => none) == given
         | _ => false
       let before := ((items.take index).filter same).length
+      -- (`Self::Components` in its functions: what this implementation's
+      -- trait leaves, at this type.)
+      let targs := (List.range methods.length).filterMap fun i =>
+        methods.findSome? fun
+          | .typeAlias name _ body => if name == traitArgName i then some body else none
+          | _ => none
+      let ofSelf := selfAssocs self tr targs
+      let all := (methods ++ missing).map fun
+        | .fn m fps annots ret clauses =>
+          Item.fn m fps (annots.map (·.map ofSelf)) (ret.map ofSelf)
+            (clauses.map fun c => match mapTypesClause (fun t => pure (ofSelf t)) c with
+              | .ok c => c
+              | .error _ => c)
+        | item => item
       let tr := if before == 0 then tr else s!"{tr}#{before}"
-      .impl ps (traitAt tr given) head args context (methods ++ missing)
+      .impl ps (traitAt tr given) head args context all
     | (item, _) => item
 
 end Glorious.Syntax

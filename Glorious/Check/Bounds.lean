@@ -320,7 +320,7 @@ partial def leavesFitting (pos key : String) (t : Ty) (args : List Ty) (owner : 
 implement the trait but has a function of the name of its own: that one,
 and the program read again (`Syntax.dotOwnMark`). -/
 def dotOwnInstead (call : Nat) (ty : Ty) (said : String) : M Unit := do
-  if let some alts := (← get).modules.dotAlts.lookup call then
+  if let some alts := dotAltsOf (← get).modules call then
     let rec head (fuel : Nat) (t : Ty) : M (Option String) := do
       match fuel, ← find t with
       | fuel + 1, .ref _ inner _ => head fuel inner
@@ -778,6 +778,9 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
         seen := seen''
     let mine : List (String × Nat × Ty) ← match d.impl with
       | some (im, _) =>
+        -- (As it is now: another of its functions may have found more that
+        -- it assumes.)
+        let im := ((← get).impls.toList.find? (·.dictFn == im.dictFn)).getD im
         -- An implementation says what it assumes.
         let plain ← im.context.mapM fun (tr, j) => do
           let t := Ty.con s!"'{(im.params[j]?).getD ""}@{d.name}" []

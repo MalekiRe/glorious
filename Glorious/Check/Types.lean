@@ -1484,4 +1484,11 @@ partial def Ty.hasRigid : Ty → Bool
   | .ref _ t _ => Ty.hasRigid t
   | _ => false
 
+/-- The functions of their own of the types a dot call may be of, as the
+resolver found them. (A call in a function an implementation takes from its
+trait is the trait's, its number moved on by `10000000000` times one more
+than the implementation's place: its alternatives are the trait's call's.) -/
+def dotAltsOf (modules : Syntax.ModuleInfo) (call : Nat) : Option (List String) :=
+  modules.dotAlts.lookup call <|> (if call ≥ 10000000000 then modules.dotAlts.lookup (call % 10000000000) else none)
+
 end Glorious.Check
