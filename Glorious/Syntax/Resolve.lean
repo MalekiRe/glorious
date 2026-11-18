@@ -1,6 +1,7 @@
 module
 
 public import Glorious.Syntax.Ast
+public import Glorious.Trace
 public import Std.Data.HashMap
 public import Std.Data.HashSet
 
@@ -240,7 +241,7 @@ mutable variable, `2` a name bound to what is plainly a value (see
 `valueLike`), or a parameter written with a type that is no reference's.
 Anything else is given as it is: a reference already, or a value `f` takes
 whole. -/
-partial def receiverExpr (taken : List (String × Bool)) (known : List (String × Nat)) : Expr → Expr
+partial def receiverExpr (taken : Std.HashMap String Bool) (known : List (String × Nat)) : Expr → Expr
   | .call id f args =>
     let f := receiverExpr taken known f
     let args := args.map (receiverExpr taken known)
@@ -275,7 +276,7 @@ partial def receiverExpr (taken : List (String × Bool)) (known : List (String �
             base.map fun b =>
               if uniq then .call cid (.name none "place_at") [i, b] else .call cid (.name none "element_at") [b, i]
           | _ => none
-        let given := match taken.lookup name, place receiver, throughRef receiver with
+        let given := match taken[name]?, place receiver, throughRef receiver with
           | some uniq, some (x, [], _), _ => Expr.ref uniq x
           | some uniq, some (x, path, fid), _ => if fid == 0 then receiver else .refField fid uniq x path false
           | some uniq, none, some (x, path, fid) => .refField fid uniq x path true
@@ -288,7 +289,7 @@ partial def receiverExpr (taken : List (String × Bool)) (known : List (String �
               match receiver with
               -- (Not what a function written to give a reference gives.)
               | .call _ (.name _ g) _ =>
-                if (taken.lookup (givesKey g)).isSome then receiver
+                if taken.contains (givesKey g) then receiver
                 else .call id (.name none (if uniq then borrowMutMark else borrowMark)) [receiver]
               | .call .. => .call id (.name none (if uniq then borrowMutMark else borrowMark)) [receiver]
               -- (A constructor without fields or a constant, `D.greet()`.)
@@ -305,14 +306,14 @@ partial def receiverExpr (taken : List (String × Bool)) (known : List (String �
       pure (match receiverClause taken known [] (.mk pats body) with | .mk _ body => body))
 
 /-- (`values`: the parameters written with types that are no reference's.) -/
-partial def receiverClause (taken : List (String × Bool)) (known : List (String × Nat))
+partial def receiverClause (taken : Std.HashMap String Bool) (known : List (String × Nat))
     (values : List String) : Clause → Clause
   | .mk pats body =>
     let named := (pats.flatMap patternNames).map fun x =>
       (x, if values.contains x then 2 else if known.lookup x == some 3 then 3 else 0)
     .mk pats (receiverStmts taken (named ++ known) body)
 
-partial def receiverStmts (taken : List (String × Bool)) (known : List (String × Nat)) :
+partial def receiverStmts (taken : Std.HashMap String Bool) (known : List (String × Nat)) :
     List Stmt → List Stmt
   | [] => []
   | s :: rest =>
@@ -339,15 +340,26 @@ partial def receiverStmts (taken : List (String × Bool)) (known : List (String 
 
 end
 
+/-- Does an expression call, on what it is called on, a function that takes
+a reference (`taken`), so that `receiverExpr` may borrow it? -/
+partial def borrowsReceiver (taken : Std.HashMap String Bool) (e : Expr) : Bool :=
+  (match e with
+    | .call _ (.name _ name) (.call _ (.name none mark) _ :: _) => mark == receiverMark && taken.contains name
+    | _ => false) || e.children.any (borrowsReceiver taken)
+
 /-- Every dotted call of a program with what it is called on borrowed where
 the function takes a reference: see `receiverExpr`. A name that is then
 borrowed and was not a variable is kept where a reference can point, as one
-borrowed with `&` in the text is (`promoteItems`). -/
+borrowed with `&` in the text is (`promoteFnClause`): in each function's
+clause where a borrow may be made, the rest as the text's were made so. -/
 partial def borrowReceivers (items : List Item) : List Item :=
-  let taken := takesReference items ++ (givesReference items).map (givesKey ·, false)
-  let rec go : Item → Item
-    | .pub parent item => .pub parent (go item)
-    | .module name (some body) => .module name (some (body.map go))
+  let taken : Std.HashMap String Bool :=
+    (takesReference items ++ (givesReference items).map (givesKey ·, false)).foldl (fun m (k, v) => m.insertIfNew k v) {}
+  -- (`promote`: not of a trait's defaults, which are made so where they are
+  -- written out.)
+  let rec go (promote : Bool) : Item → Item
+    | .pub parent item => .pub parent (go promote item)
+    | .module name (some body) => .module name (some (body.map (go promote)))
     | .fn name ps annots ret clauses =>
       .fn name ps annots ret (clauses.map fun c =>
         let values := match c with
@@ -361,12 +373,15 @@ partial def borrowReceivers (items : List Item) : List Item :=
           | .mk pats _ => (pats.zip annots).filterMap fun
             | (Pattern.var x, some (TypeExpr.ref _ _ _)) => some x
             | _ => none
-        nameBorrowsClause (receiverClause taken (refs.map (·, 3)) values c))
-    | .impl ps tr head args context methods => .impl ps tr head args context (methods.map go)
-    | .traitInfo name supers defaults params assocs => .traitInfo name supers (defaults.map go) params assocs
+        let borrows := match c with
+          | .mk _ body => body.any fun s => s.exprs.any (borrowsReceiver taken)
+        let c' := nameBorrowsClause (receiverClause taken (refs.map (·, 3)) values c)
+        if promote && borrows then promoteFnClause annots c' else c')
+    | .impl ps tr head args context methods => .impl ps tr head args context (methods.map (go promote))
+    | .traitInfo name supers defaults params assocs => .traitInfo name supers (defaults.map (go false)) params assocs
     | .alias name value => .alias name (receiverExpr taken [] value)
     | item => item
-  promoteItems (items.map go)
+  items.map (go true)
 
 /-- The arguments an implementation gives its trait, as written
 (`traitArgName`), in order. -/
@@ -486,9 +501,9 @@ From<Int> for u8`, as an implementation of the trait at those: `From<Int>` is
 the name of what it implements from here on. -/
 def fillDefaults (items : List Item) : List Item :=
   -- (Implementations for every type written out for each.)
-  let items := expandBlankets items
+  let items := Trace.timed "fill: blankets" fun _ => expandBlankets items
   -- (First, with every declaration to hand: what dotted calls borrow.)
-  let items := borrowReceivers items
+  let items := Trace.timed "fill: borrow receivers" fun _ => borrowReceivers items
   let defaults := items.filterMap fun
     | .traitInfo name _ fns _ _ => some (name, fns)
     | _ => none

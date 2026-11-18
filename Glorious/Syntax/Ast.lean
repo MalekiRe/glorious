@@ -1414,26 +1414,29 @@ whose written types are not references'. -/
 def promoteClause (values : List String) : Clause → Clause
   | .mk pats body => promoteHeld values (.mk pats (promoteRewrite.stmts body))
 
+/-- A clause of a function whose parameters are written with `annots`, made
+so (`promoteClause`). -/
+def promoteFnClause (annots : List (Option TypeExpr)) (c : Clause) : Clause :=
+  -- A parameter written with a type that is no reference's is a value.
+  let values := match c with
+    | .mk pats _ => (pats.zip annots).filterMap fun
+      | (.var _, some (.ref _ _ _)) => none
+      | (.var x, some _) => some x
+      | _ => none
+  -- (One written with a reference's type, `list: &[T]`: `&list[0]` is the
+  -- element through that reference, not through one to it.)
+  let refs := match c with
+    | .mk pats _ => (pats.zip annots).filterMap fun
+      | (.var x, some (.ref _ _ _)) => some x
+      | _ => none
+  let c := if refs.isEmpty then c else match c with
+    | .mk pats body => .mk pats ((throughParamsRewrite refs).stmts body)
+  promoteClause values (nameBorrowsClause c)
+
 /-- The same for every function of a text. -/
 partial def promoteItems (items : List Item) : List Item :=
   items.map fun
-    | .fn name ps annots ret clauses =>
-      .fn name ps annots ret (clauses.map fun c =>
-        -- A parameter written with a type that is no reference's is a value.
-        let values := match c with
-          | .mk pats _ => (pats.zip annots).filterMap fun
-            | (.var _, some (.ref _ _ _)) => none
-            | (.var x, some _) => some x
-            | _ => none
-        -- (One written with a reference's type, `list: &[T]`: `&list[0]` is
-        -- the element through that reference, not through one to it.)
-        let refs := match c with
-          | .mk pats _ => (pats.zip annots).filterMap fun
-            | (.var x, some (.ref _ _ _)) => some x
-            | _ => none
-        let c := if refs.isEmpty then c else match c with
-          | .mk pats body => .mk pats ((throughParamsRewrite refs).stmts body)
-        promoteClause values (nameBorrowsClause c))
+    | .fn name ps annots ret clauses => .fn name ps annots ret (clauses.map (promoteFnClause annots))
     | .pub parent item => .pub parent ((promoteItems [item]).headD item)
     | .module name (some inner) => .module name (some (promoteItems inner))
     | .impl ps tr head args context methods => .impl ps tr head args context (promoteItems methods)

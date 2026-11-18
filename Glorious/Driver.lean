@@ -762,7 +762,7 @@ def compileSourceAt (src : String) (check : Bool := true)
   -- (The program's own tuple variables whose fields are borrowed apart: a
   -- variable per field. The library, checked once for every program, is as
   -- it was checked.)
-  let all := match first with
+  let all := Trace.timed "split fields borrowed apart" fun _ => match first with
     | .ok (count, _) => all.take count ++ Elab.splitFieldItems all (all.drop count)
     | .error _ => Elab.splitFieldItems all all
   -- (`kept`: what an earlier check of the same program kept, in the same
@@ -779,7 +779,7 @@ def compileSourceAt (src : String) (check : Bool := true)
     ((unitList.take i).zipIdx.filter fun ((k', _), _) => uses.contains k').map (·.2)
   -- (The library's modules among them, which come first.)
   let library := (unitList.takeWhile fun (k, _) => k == "std" || k.startsWith "std::").length
-  let infoKeys := unitList.zipIdx.map fun ((k, is), i) =>
+  let infoKeys := Trace.timed "units' keys" fun _ => unitList.zipIdx.map fun ((k, is), i) =>
     unitInfoKey resolved.info ((unitList.take i).map (·.1)) k is
   -- (And what the prelude and library checked first count, without marks.)
   let first := first.map fun (count, st) => ((withoutUnitMarks (all.take count)).length, st)
@@ -810,7 +810,7 @@ def compileSourceAt (src : String) (check : Bool := true)
   let (all, checked) := Trace.timed "check" fun _ => checkWith all
   -- (Dot calls the checker chose a type's own function for, by the value's
   -- type: written so for what follows.)
-  let all := match checked with
+  let all := Trace.timed "what the checker decided, written in" fun _ => match checked with
     | .ok (blocks, _) =>
       Elab.decidedProgram blocks all
     | .error _ => all
@@ -820,7 +820,7 @@ def compileSourceAt (src : String) (check : Bool := true)
   -- Lifetimes were the checker's to read; and, of what is declared, the
   -- certificate's.
   let written := all
-  let all := Elab.eraseLifetimes all
+  let all := Trace.timed "erase lifetimes" fun _ => Elab.eraseLifetimes all
   -- From here on the program has no traits: the checker said how each bound
   -- is met, and each is now a value passed where it is needed.
   let (all, blocks) ← match blocks with

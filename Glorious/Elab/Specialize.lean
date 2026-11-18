@@ -584,9 +584,9 @@ where
     let calleeName := match fn with
       | some g => g
       | none => ""
-    let taken := match borrow with
-      | some u => [(calleeName, mutable (some u))]
-      | none => []
+    let taken : Std.HashMap String Bool := match borrow with
+      | some u => ({} : Std.HashMap String Bool).insert calleeName (mutable (some u))
+      | none => {}
     Syntax.promoteClause values (Syntax.nameBorrowsClause (Syntax.receiverClause taken (refs.map (·, 3)) values marked))
 
 /-- A program with what the checker decided written in, in the order it
