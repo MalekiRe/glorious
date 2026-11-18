@@ -205,20 +205,33 @@ def unprojectedCondition (subject : Ty) (cargs : List Ty) : M (Ty × List Ty) :=
   if (← get).assocUses.size != before then settleAssocsAll
   pure (subject, cargs)
 
-/-- Is a type made of named types and tuples alone? -/
-partial def Ty.plain : Ty → Bool
-  | .con _ args | .tuple args => args.all Ty.plain
-  | _ => false
+/-- A type spelled with each reference's lifetime, where it is made of named
+types, tuples and references alone (with nothing in it still to be found):
+what fitting finds of it is the same each time it is asked in a group. -/
+partial def fitSpelled : Ty → M (Option String)
+  | .con n args => do
+    let some parts ← spelledAll args | return none
+    pure (some s!"{n}<{", ".intercalate parts}>")
+  | .tuple args => do
+    let some parts ← spelledAll args | return none
+    pure (some s!"({", ".intercalate parts})")
+  | .ref how inner cap => do
+    let .con h [] ← find how | return none
+    let some i ← fitSpelled (← find inner) | return none
+    pure (some s!"{h}'{← findCap cap} {i}")
+  | _ => pure none
+where
+  spelledAll (ts : List Ty) : M (Option (List String)) := do
+    let mut out := #[]
+    for t in ts do
+      let some s ← fitSpelled (← find t) | return none
+      out := out.push s
+    pure (some out.toList)
 
-/-- The type and arguments spelled, where all of them are made of named types
-and tuples alone: what fitting finds of them is the same each time it is
-asked in a group. -/
+/-- The type and arguments so spelled, where each can be. -/
 def fitKey (ty : Ty) (args : List Ty) : M (Option String) := do
-  let ty ← zonk ty
-  let args ← args.mapM zonk
-  if ty.plain && args.all Ty.plain then
-    pure (some (";".intercalate (← (ty :: args).mapM spellTy)))
-  else pure none
+  let some parts ← fitSpelled.spelledAll (ty :: args) | return none
+  pure (some (";".intercalate parts))
 
 mutual
 
