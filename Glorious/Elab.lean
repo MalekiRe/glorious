@@ -1139,7 +1139,7 @@ something the enclosing function was given. -/
 def staticMethod (tr : TraitInfo) (d : DictE) (idx : Nat) : Option (String × List DictE) :=
   match d with
   | .impl dictFn subs =>
-    match tr.impls.find? (·.dictFn == dictFn) with
+    match tr.implsAt[dictFn]? with
     | some im => (im.methods[idx]?).map fun (fn, _) => (fn, subs)
     | none => none
   | .param _ => none
@@ -1190,7 +1190,7 @@ private def destroyCall (tr : TraitInfo) (d : DictE) (value : Expr) : Expr :=
 /-- The call that destroys what `x` holds, if this is a place where that
 happens and its type has something to destroy. -/
 private def dropHook (tr : TraitInfo) (site : DropSite) : Option Expr :=
-  match (tr.drops.lookup site).bind fun id => tr.dicts.lookup id with
+  match (tr.dropsAt[site]?).bind fun id => tr.dictsAt[id]? with
   | some [d] =>
     -- (A part of a name's value that nothing reads: that part.)
     some (destroyCall tr d (match Syntax.partOf site.name, Syntax.letSiteOf site.name,
@@ -1204,10 +1204,7 @@ private def dropHook (tr : TraitInfo) (site : DropSite) : Option Expr :=
 /-- The cleanups of the parts of a name's value that are never read, where
 the name is bound at a place. -/
 private def partHooks (tr : TraitInfo) (owner : String) (pos : Nat × Nat) (x : String) : List Expr :=
-  tr.drops.filterMap fun (site, _) =>
-    if site.owner == owner && site.line == pos.1 && site.col == pos.2 && !site.assign
-        && (Syntax.partOf site.name).map (·.1) == some x then dropHook tr site
-    else none
+  ((tr.partsAt[(owner, pos.1, pos.2, x)]?).getD #[]).toList.filterMap (dropHook tr)
 
 /-- The functions that destroy values, for each type: the one that does it,
 given how each of the type's parameters is destroyed and then the value, and
@@ -1334,7 +1331,7 @@ private partial def untraitCall (tr : TraitInfo) (owner : String) (id : Nat) (f 
   let args := args.map (untraitExpr tr owner)
   let mk := fun (f : Expr) (args : List Expr) =>
     if isTail then Expr.tailCall id f args else Expr.call id f args
-  match tr.dicts.lookup id, tr.methods.lookup id with
+  match tr.dictsAt[id]?, tr.methodsAt[id]? with
   | some [d], some idx =>
     -- Where the implementation is known, its function is called by name,
     -- given what the implementation's conditions need: a call like any other,
@@ -1390,7 +1387,7 @@ private partial def untraitStmts (tr : TraitInfo) (owner : String) (pos : Nat ×
       -- holds is destroyed when its block is left only if it was not. A
       -- flag says, set wherever the value is used.
       match (tr.drops.lookup ⟨owner, pos.1, pos.2, Syntax.givenSite x, false⟩).bind
-          fun id => tr.dicts.lookup id with
+          fun id => tr.dictsAt[id]? with
       | some [d] =>
         let flag := Syntax.movedFlag x
         let unless_moved := Expr.call 0 (.closure 0
@@ -1429,7 +1426,7 @@ private partial def untraitStmts (tr : TraitInfo) (owner : String) (pos : Nat ×
     | .deref place =>
       -- What was where the reference points is destroyed, once the new
       -- value is made and the place found.
-      match (tr.drops.lookup ⟨owner, pos.1, pos.2, derefSite, true⟩).bind fun id => tr.dicts.lookup id with
+      match (tr.dropsAt[(⟨owner, pos.1, pos.2, derefSite, true⟩ : DropSite)]?).bind fun id => tr.dictsAt[id]? with
       | some [d] =>
         .let_ (.var "%assigned") value :: .let_ (.var "%place") place
           :: .expr (destroyCall tr d (.deref (.name none "%place")))
@@ -1458,7 +1455,7 @@ def untrait (blocks : Blocks) (items : List Item) : List Item × Blocks :=
   let tr := blocks.traits
   let fnItem := fun (name : String) (params : List String) (annots : List (Option TypeExpr))
       (ret : Option TypeExpr) (clauses : List Clause) =>
-    let n := (tr.bounded.lookup name).getD 0
+    let n := (tr.boundedAt[name]?).getD 0
     Item.fn name params ((List.replicate n none) ++ annots) ret
       (withDicts n (clauses.map (untraitClause tr name)))
   let out := items.flatMap fun
@@ -1471,9 +1468,9 @@ def untrait (blocks : Blocks) (items : List Item) : List Item × Blocks :=
       let dictFn := implDictName trait head
       -- (as many as the checker says: how each type parameter is destroyed
       -- is among them, written or not)
-      let conditions := ((tr.impls.find? (·.dictFn == dictFn)).map (·.conditions)).getD context.length
+      let conditions := ((tr.implsAt[dictFn]?).map (·.conditions)).getD context.length
       let dicts := (List.range conditions).map fun k => s!"%dict{k}"
-      let fns := ((tr.impls.find? (·.dictFn == dictFn)).map (·.methods)).getD []
+      let fns := ((tr.implsAt[dictFn]?).map (·.methods)).getD []
       let closures := fns.map fun (fn, arity) =>
         let argNames := (List.range arity).map fun k => s!"%arg{k}"
         Expr.closure 0 [.mk (argNames.map Pattern.var)
@@ -1485,7 +1482,7 @@ def untrait (blocks : Blocks) (items : List Item) : List Item × Blocks :=
   let coercions := blocks.coercions.map fun (site, fn) =>
     match site with
     | .arg call index =>
-      match tr.dicts.lookup call, tr.methods.lookup call with
+      match tr.dictsAt[call]?, tr.methodsAt[call]? with
       | some ds, none => (Site.arg call (index + ds.length), fn)
       | some [d], some idx =>
         match staticMethod tr d idx with

@@ -345,8 +345,14 @@ def finish : M Elab.Blocks := do
                   else (Traits.solve s.kimpls givens 1000 Syntax.destroyTrait (sty f)).map (toDictE s.impls)]
               ctors := ctors ++ [(c, parts)]
         destroys := destroys ++ [⟨im.head, im.context.length, hook, isArray, ctors⟩]
-    pure ⟨s.given.toList, links ++ s.envLinks.toList, s.coercions.toList,
-      ⟨s.dictTable.toList, s.methodCalls.toList, s.fnBounds, implEs, s.dropSites.toList, destroys⟩,
+    let traitInfo : Elab.TraitInfo :=
+      { dicts := s.dictTable.toList
+        methods := s.methodCalls.toList
+        bounded := s.fnBounds
+        impls := implEs
+        drops := s.dropSites.toList
+        destroys }
+    pure ⟨s.given.toList, links ++ s.envLinks.toList, s.coercions.toList, traitInfo.index,
       s.fieldTable.toList, s.fieldReads.toList, s.packs.toList, s.envFns, s.envWraps.toList,
       s.derefReads.toList, s.siteTable, s.siteTypes, s.dotChosen, s.argsChosen, s.decided⟩
 

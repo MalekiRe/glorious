@@ -35,8 +35,8 @@ open Glorious.Syntax
 
 /-- An implementation as a value with nothing left to be known: the function
 that makes one, known others like it. -/
-partial def closedDict (impls : List ImplE) : Expr → Bool
-  | .call _ (.name none f) subs => impls.any (·.dictFn == f) && subs.all (closedDict impls)
+partial def closedDict (impls : Std.HashMap String ImplE) : Expr → Bool
+  | .call _ (.name none f) subs => impls.contains f && subs.all (closedDict impls)
   | _ => false
 
 /-- Such a value as it is written into a name. -/
@@ -89,15 +89,15 @@ partial def specCall (tr : TraitInfo) (known : List (String × Expr)) (f : Expr)
     let d ← specExpr tr known d
     match d with
     | .call _ (.name none dictFn) subs =>
-      match closedDict tr.impls d, (tr.impls.find? (·.dictFn == dictFn)).bind (·.methods[idx]?) with
+      match closedDict tr.implsAt d, (tr.implsAt[dictFn]?).bind (·.methods[idx]?) with
       | true, some (fn, _) =>
         if subs.isEmpty then pure (.name none fn, args)
         else pure (.name none (← askCopy fn subs true), args)
       | _, _ => pure (.proj d idx, args)
     | _ => pure (.proj d idx, args)
   | .name none g =>
-    let n := (tr.bounded.lookup g).getD 0
-    if n > 0 && args.length ≥ n && (args.take n).all (closedDict tr.impls) then
+    let n := (tr.boundedAt[g]?).getD 0
+    if n > 0 && args.length ≥ n && (args.take n).all (closedDict tr.implsAt) then
       let copy ← askCopy g (args.take n) false
       pure (.name none copy, List.replicate n (.tuple []) ++ args.drop n)
     else pure (.name none g, args)
@@ -124,7 +124,7 @@ end
 def specRoot (tr : TraitInfo) (item : Item) : StateM Copies Item :=
   match item with
   | .fn name ps annots ret clauses =>
-    if (tr.bounded.lookup name).getD 0 == 0 then do
+    if (tr.boundedAt[name]?).getD 0 == 0 then do
       let clauses ← clauses.mapM (specClause tr [])
       pure (Item.fn name ps annots ret clauses)
     else pure item

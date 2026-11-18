@@ -82,7 +82,7 @@ structure DropSite where
   col : Nat
   name : String
   assign : Bool
-  deriving BEq
+  deriving BEq, Hashable
 
 /-- The site under which the checker says how what `x` holds is destroyed when
 the callable written as `written` (its hash), which captured it, is let go. -/
@@ -119,6 +119,34 @@ structure TraitInfo where
   drops : List (DropSite × Nat) := []
   /-- How each type is destroyed. -/
   destroys : List Destroy := []
+  /-- `dicts`, `methods`, `bounded`, `impls` and `drops` by what they are
+  looked up by (`index`): the first of each, as `lookup` finds it. -/
+  dictsAt : Std.HashMap Nat (List DictE) := {}
+  methodsAt : Std.HashMap Nat Nat := {}
+  boundedAt : Std.HashMap String Nat := {}
+  implsAt : Std.HashMap String ImplE := {}
+  dropsAt : Std.HashMap DropSite Nat := {}
+  /-- The sites of the parts of a name's value, by where the name is bound
+  and the name, in the order `drops` has them. -/
+  partsAt : Std.HashMap (String × Nat × Nat × String) (Array DropSite) := {}
+
+/-- The first value of each key. -/
+def firstOf {κ ν : Type} [BEq κ] [Hashable κ] (l : List (κ × ν)) : Std.HashMap κ ν :=
+  l.foldl (fun m (k, v) => if m.contains k then m else m.insert k v) {}
+
+/-- What the elaborator looks up of a program's traits, by what it looks it
+up by. -/
+def TraitInfo.index (t : TraitInfo) : TraitInfo :=
+  { t with
+    dictsAt := firstOf t.dicts, methodsAt := firstOf t.methods, boundedAt := firstOf t.bounded
+    implsAt := firstOf (t.impls.map fun im => (im.dictFn, im)), dropsAt := firstOf t.drops
+    partsAt := t.drops.foldl (fun m (site, _) =>
+      match Syntax.partOf site.name, site.assign with
+      | some (x, _), false =>
+        m.alter (site.owner, site.line, site.col, x) fun
+          | some sites => some (sites.push site)
+          | none => some #[site]
+      | _, _ => m) {} }
 
 /-- The function that makes an implementation a value. -/
 def implDictName (trait head : String) : String := s!"impl {trait} for {head}"
