@@ -781,6 +781,42 @@ pub trait AllApart {}
 impl AllApart for () {}
 impl<First, Rest> AllApart for (First, Rest) where Rest: ApartFrom<First>, Rest: AllApart {}
 
+// What a system's parameters touch, each a list: a query touches each
+// component its items read or write, so two of them, or one and a column,
+// are seen apart as any two parameters are.
+pub trait Concat<B> { type Out; }
+impl<B> Concat<B> for () { type Out = B; }
+impl<H, T, B> Concat<B> for (H, T) where T: Concat<B> { type Out = (H, <T as Concat<B>>::Out); }
+pub trait ItemTouches { type List; }
+impl<A> ItemTouches for &mut A { type List = (Writes<A>, ()); }
+impl<A> ItemTouches for &A { type List = (Read<A>, ()); }
+impl<A> ItemTouches for Option<&mut A> { type List = (Writes<A>, ()); }
+impl<A> ItemTouches for Option<&A> { type List = (Read<A>, ()); }
+impl<A> ItemTouches for Has<A> { type List = (Read<A>, ()); }
+impl ItemTouches for Entity { type List = (); }
+impl ItemTouches for () { type List = (); }
+impl<H, ..R> ItemTouches for (H, ..R) where H: ItemTouches, (..R): ItemTouches,
+    <H as ItemTouches>::List: Concat<<(..R) as ItemTouches>::List> {
+    type List = <<H as ItemTouches>::List as Concat<<(..R) as ItemTouches>::List>>::Out;
+}
+pub trait Touches { type List; }
+impl<A> Touches for Writes<A> { type List = (Writes<A>, ()); }
+impl<A> Touches for Read<A> { type List = (Read<A>, ()); }
+impl<X> Touches for Owned<X> { type List = (Owned<X>, ()); }
+impl<X> Touches for Shared<X> { type List = (Shared<X>, ()); }
+impl<X> Touches for Maybe<X> { type List = (Shared<X>, ()); }
+impl<X> Touches for MaybeOwned<X> { type List = (Owned<X>, ()); }
+impl Touches for Asking { type List = (); }
+impl<T> Touches for Localing<T> { type List = (); }
+impl<Q, N, St> Touches for Querying<Q, N, St> where Q: ItemTouches { type List = <Q as ItemTouches>::List; }
+impl<Q, N, St> Touches for Singling<Q, N, St> where Q: ItemTouches { type List = <Q as ItemTouches>::List; }
+pub trait AllTouches { type List; }
+impl AllTouches for () { type List = (); }
+impl<H, R> AllTouches for (H, R) where H: Touches, R: AllTouches,
+    <H as Touches>::List: Concat<<R as AllTouches>::List> {
+    type List = <<H as Touches>::List as Concat<<R as AllTouches>::List>>::Out;
+}
+
 // A function called with what was gathered for it, its arguments in order.
 // What it gives back is what the call gives.
 pub trait CallWith<G, O> { fn call_with(&Self, G) -> O }
@@ -985,8 +1021,8 @@ impl<E, S, X, Y> System<E, S> for (X, Y) where X: System<E, S>, Y: System<E, S> 
 // (`last`: the world's time when it last ran, of which it sees what was
 // put in or changed after.)
 pub struct Sys<F, Lc> { f: F, locals: Lc, last: Int }
-impl<E, S, ..P, ..A, L, F, Lc> System<E, S> for Sys<F, Lc>
-    where F: Fn<(..P), Output = ()>, ..P: Parameter<Asks = A>, (..A): Tuple<Nested = L>, L: AllApart, L: Fetch<E, S, (), F, (), Lc> {
+impl<E, S, ..P, ..A, L, Ts, F, Lc> System<E, S> for Sys<F, Lc>
+    where F: Fn<(..P), Output = ()>, ..P: Parameter<Asks = A>, (..A): Tuple<Nested = L>, L: AllTouches<List = Ts>, Ts: AllApart, L: Fetch<E, S, (), F, (), Lc> {
     fn run(sys, event, world, commands) {
         world.since = sys.last;
         let ran = is_some(<L as Fetch<E, S, (), F, (), Lc>>::fetch(event, world, commands, &mut sys.locals, (), &sys.f));
@@ -1008,8 +1044,8 @@ impl<E, S, X, Y> IntoSystem<E, S> for (X, Y) where X: IntoSystem<E, S>, Y: IntoS
         (<X as IntoSystem<E, S>>::into_system(x), <Y as IntoSystem<E, S>>::into_system(y))
     }
 }
-impl<E, S, ..P, ..A, L, F, Lc> IntoSystem<E, S> for F
-    where F: Fn<(..P), Output = ()>, ..P: Parameter<Asks = A>, (..A): Tuple<Nested = L>, L: AllApart,
+impl<E, S, ..P, ..A, L, Ts, F, Lc> IntoSystem<E, S> for F
+    where F: Fn<(..P), Output = ()>, ..P: Parameter<Asks = A>, (..A): Tuple<Nested = L>, L: AllTouches<List = Ts>, Ts: AllApart,
           L: Locals<State = Lc>, L: Fetch<E, S, (), F, (), Lc> {
     type Out = Sys<F, Lc>;
     fn into_system(f) { Sys { f: f, locals: <L as Locals>::start(), last: 0 } }
@@ -1021,8 +1057,8 @@ impl<E, S, ..P, ..A, L, F, Lc> IntoSystem<E, S> for F
 pub trait Condition<E, S> {
     fn holds(&Self, &E, &mut World<S>, &mut Commands<S>) -> Bool
 }
-impl<E, S, ..P, ..A, L, Lc> Condition<E, S> for fn(..P) -> Bool
-    where ..P: Parameter<Asks = A>, (..A): Tuple<Nested = L>, L: AllApart, L: Locals<State = Lc>,
+impl<E, S, ..P, ..A, L, Ts, Lc> Condition<E, S> for fn(..P) -> Bool
+    where ..P: Parameter<Asks = A>, (..A): Tuple<Nested = L>, L: AllTouches<List = Ts>, Ts: AllApart, L: Locals<State = Lc>,
           L: Fetch<E, S, (), fn(..P) -> Bool, Bool, Lc> {
     fn holds(f, event, world, commands) {
         let mut locals = <L as Locals>::start();

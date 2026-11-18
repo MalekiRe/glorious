@@ -471,10 +471,14 @@ def settleAssocs : M Unit := do
 
 /-- `settleAssocs` until it settles nothing more. -/
 partial def settleAssocsAll (fuel : Nat := 16) : M Unit := do
-  let before := (← get).assocUses.size
+  let before := (← get).assocUses
   settleAssocs
-  let after := (← get).assocUses.size
-  if fuel > 0 && after < before then settleAssocsAll (fuel - 1)
+  let after := (← get).assocUses
+  -- (Again while any was answered: an answer may itself ask another,
+  -- `<Q as ItemTouches>::List`, which is then there in its place.)
+  if fuel > 0 && (after.size < before.size || after.map (·.1) != before.map (·.1)
+      || (← after.mapM fun u => spellTy u.2.1) != (← before.mapM fun u => spellTy u.2.1)) then
+    settleAssocsAll (fuel - 1)
 
 def runPending : M Unit := do
   settleAssocs

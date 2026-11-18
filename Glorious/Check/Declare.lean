@@ -559,6 +559,12 @@ def declareTraits (items : List Item) : M Unit := do
       let generic := targs.any fun t => !(freeTys t).isEmpty
       -- The conditions kept apart, in the implementation's type parameters.
       let mut extra : List (String × List Ty × Ty) := []
+      -- (What a trait leaves to implementations, of the implementation's own
+      -- type parameters, is kept as written, to be answered at each use:
+      -- `<H as Touches>::List: Concat<..>`.)
+      modify fun s => { s with projecting := pmap.filterMap fun (_, t) => match t with
+        | .var id => some id
+        | _ => none }
       for ((p, t'), k) in context.zipIdx do
         if general k p then
           unless ((← get).traits.lookup t').isSome do throw s!"{what}: unknown trait `{t'}`"
@@ -578,6 +584,7 @@ def declareTraits (items : List Item) : M Unit := do
             | some body => cargs := cargs ++ [← zonk (← resolveType pmap false body)]
             | none => throw s!"{what}: `{Syntax.lastSegment t'}` takes arguments: `{p}: {Syntax.lastSegment t'}<..>`"
           extra := extra ++ [(t', cargs, subject)]
+      modify fun s => { s with projecting := [] }
       -- A type parameter inside one of the head's arguments (`H` of
       -- `(Column<H>, R)`): its functions may let go of a value of it too, so
       -- it is given how that is destroyed, as a head's argument is.

@@ -5211,9 +5211,20 @@ Covey is the toolbox for finding what the language lacks. Rewriting it after
   one lifetime, not of any: a plugin's systems kept in a value, called with
   a borrow of something made after the value, are refused ("could be used
   after its block has ended"). Open: covey does not call them so.
-- **Two queries of one component in one system**: the first takes the
-  column out of the world and the second finds it empty. Open (covey):
-  `changes.glorious` uses a system for each.
+- **Two queries of one component in one system**: the first took the
+  column out of the world and the second found it empty, silently. Covey
+  now sees what each parameter touches, a query each component of its
+  items (`Touches`, `ItemTouches`, `AllTouches`, `Concat`), and such a
+  system does not compile, naming the component. (Upstream lets two reads
+  share; covey takes a column out to lend it, which one can do once.)
+  Writing it needed three fixes:
+  - a condition of an implementation whose type is one a trait leaves to
+    implementations, `<H as Touches>::List: Concat<..>`, was read as a new
+    variable: it is kept as written and answered at each use;
+  - answering what a trait leaves stopped when an answer asked another
+    (`<Q as ItemTouches>::List`): it goes on while any is answered;
+  - the explanation of a missing implementation knew only names and tuples:
+    it knows references and callables. Fixed, with a case.
 - **A plugin generic in the app** whose systems are made when registered
   left their world's type undecided ("`Columns` is needed of a type that
   nothing here decides"), and then found no implementation. Two causes: the

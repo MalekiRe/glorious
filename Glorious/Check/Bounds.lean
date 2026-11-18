@@ -79,8 +79,14 @@ partial def leaves (pos trait : String) (t : Ty) : M (List (String × Nat × Ty)
   | none =>
     let missing : M (List (String × Nat × Ty)) := do
       throw s!"{pos}`{showTy (← zonk t)}` does not implement `{trait}`"
-    match t with
-    | .con n args =>
+    -- (Its head's: a name, a tuple, a callable, a reference; of how a
+    -- value is destroyed, one for every callable and every reference.)
+    let head := match t with
+      | .fn .. => if trait == Syntax.destroyTrait then some ("(callable)", []) else t.head
+      | .ref .. => if trait == Syntax.destroyTrait then some ("(reference)", []) else t.head
+      | t => t.head
+    match head with
+    | some (n, args) =>
       match Traits.findImpl trait n args.length (← get).kimpls with
       | some (_, I) =>
         let mut out : List (String × Nat × Ty) := []
@@ -88,20 +94,7 @@ partial def leaves (pos trait : String) (t : Ty) : M (List (String × Nat × Ty)
           out := out ++ (← leaves pos tr' (args[j]?.getD .unit))
         pure out
       | none => missing
-    | .tuple args =>
-      match Traits.findImpl trait s!"(tuple{args.length})" args.length (← get).kimpls with
-      | some (_, I) =>
-        let mut out : List (String × Nat × Ty) := []
-        for (tr', j) in I.context do
-          out := out ++ (← leaves pos tr' (args[j]?.getD .unit))
-        pure out
-      | none => missing
-    -- (A callable, of which there is one implementation, for all.)
-    | .fn .. =>
-      match Traits.findImpl trait "(callable)" 0 (← get).kimpls with
-      | some (_, I) => if I.context.isEmpty then pure [] else missing
-      | none => missing
-    | _ => missing
+    | none => missing
 
 partial def toDictE (impls : Array ImplDecl) : Traits.Dict → Elab.DictE
   | .given k => .param k
@@ -189,6 +182,15 @@ def conditionKeys (key : String) (t : Ty) : M (List Nat) := do
   pure (((← get).rigidKeys.entries.filter fun (_, n) =>
     n.startsWith "'%condition:" && n.endsWith suffix).map fun (i, _) => 2 * i + 1)
 
+/-- A condition's type and the trait's arguments with what traits leave to
+implementations in them, `<H as Touches>::List`, found where it can be. -/
+def unprojectedCondition (subject : Ty) (cargs : List Ty) : M (Ty × List Ty) := do
+  let before := (← get).assocUses.size
+  let subject ← unproject subject
+  let cargs ← cargs.mapM unproject
+  if (← get).assocUses.size != before then settleAssocsAll
+  pure (subject, cargs)
+
 /-- How a bound is met, where implementations are chosen by fitting types
 (`St.patterned`): as `Traits.solve` finds it, but each condition of the
 implementation found is looked for the same way, with the trait's arguments
@@ -249,8 +251,9 @@ partial def solveFitting (givens : Traits.Givens) (fuel : Nat) (key : String) (t
       | return none
     subs := subs ++ [d]
   for (tr, cargs, subject) in im.extra do
-    let subject := subst at_ [] [] subject
-    let cargs := cargs.map (subst at_ [] [])
+    -- (A condition of a type a trait leaves to implementations,
+    -- `<H as Touches>::List: Concat<..>`: of what that is here.)
+    let (subject, cargs) ← unprojectedCondition (subst at_ [] [] subject) (cargs.map (subst at_ [] []))
     let some d ← solveFitting givens (fuel - 1) (← subKey tr subject cargs) subject cargs
       | return none
     subs := subs ++ [d]
@@ -309,8 +312,7 @@ partial def leavesFitting (pos key : String) (t : Ty) (args : List Ty) (owner : 
     let arg := hargs[j]?.getD .unit
     out := out ++ (← leavesFitting pos (← subKey tr arg []) arg [] owner (this :: via))
   for (tr, cargs, subject) in im.extra do
-    let subject := subst at_ [] [] subject
-    let cargs := cargs.map (subst at_ [] [])
+    let (subject, cargs) ← unprojectedCondition (subst at_ [] [] subject) (cargs.map (subst at_ [] []))
     out := out ++ (← leavesFitting pos (← subKey tr subject cargs) subject cargs owner (this :: via))
   pure out
 
