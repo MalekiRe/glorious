@@ -151,15 +151,6 @@ def TraitInfo.index (t : TraitInfo) : TraitInfo :=
 /-- The function that makes an implementation a value. -/
 def implDictName (trait head : String) : String := s!"impl {trait} for {head}"
 
-/-- What the checker learns of how a program is to be read that the resolver
-decides: the program is compiled again with it. -/
-inductive Reread where
-  /-- The dot call `call` is of the type's own function `fn`. -/
-  | dotOwn (call : Nat) (fn : String)
-  /-- The receiver of the dot call `call`, a name, is borrowed. -/
-  | recvRef (call : Nat) (uniq : Bool)
-  deriving Inhabited, BEq
-
 /-- Something the checker decides of how a program is to be read, which it
 finds only once it knows types, decided where it is found: the function it
 is in is checked again with it, not the program. -/
@@ -175,15 +166,18 @@ inductive Decision where
   given points to (`&Pattern`): as they are written out so
   (`Syntax.byReference`). -/
   | refPats (id : Nat) (clauses : List Clause)
+  /-- The dot call `call` is of `fn` (the type's own function of the name),
+  or of the function it is of, its receiver, a name, borrowed: given as the
+  function takes it, borrowed (`&mut` where `some true`) or whole. -/
+  | receiver (call : Nat) (fn : Option String) (borrow : Option Bool)
   deriving Inhabited
 
-/-- What the checker says where it stops: why, and what it found to decide
-or to have the program read again with, where it stops for that; `result`
+/-- What the checker says where it stops: why, and what it found to decide,
+where it stops for that; `result`
 where what does not fit is a clause's result. -/
 structure Said where
   msg : String
   decision : Option Decision := none
-  reread : Option Reread := none
   result : Bool := false
   deriving Inhabited
 
@@ -193,12 +187,12 @@ instance : Coe String Said := ⟨fun msg => { msg }⟩
 def Said.map (s : Said) (f : String → String) : Said := { s with msg := f s.msg }
 
 /-- Is it what a speculative check passes on at once rather than trying
-otherwise: a match found to be of a reference, or something the program is
-read again for? -/
+otherwise: a match found to be of a reference, or a dot call's function or
+receiver found? -/
 def Said.passOn (s : Said) : Bool :=
-  s.reread.isSome || match s.decision with
-    | some (.refPats ..) => true
-    | _ => false
+  match s.decision with
+  | some (.refPats ..) | some (.receiver ..) => true
+  | _ => false
 
 /-- What the checker tells the elaborator about the blocks of a program, each
 named by its identity. -/

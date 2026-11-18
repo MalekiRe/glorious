@@ -5323,12 +5323,15 @@ again.
   where the receiver's type's own function of the name takes it whole, takes
   that one in place: a name is given as it is; a value made there, named to
   be borrowed, is known where it is made to be given away (`wholeReceiver`).
-- Still compiled again: patterns of a value matched against a reference
-  (`&Pattern`, written out by the resolver), a receiver to be borrowed, and
-  other dot calls of a type's own function. These are decided before names
-  are resolved; deciding them in place takes the resolver's guesses about
-  receivers and `&Pattern` moved after the checker. In the suite: 16 of 1911
-  programs; in covey, none.
+- Patterns of a value matched against a reference are written out by the
+  checker as the resolver writes out `&Pattern` (`Syntax.byReference`, over
+  what each knows of names), and decided in place (`Decision.refPats`).
+- A dot call of a type's own function, or whose receiver is to be borrowed,
+  is decided in place too (`Decision.receiver`): the clause it is in is
+  written again with the call's function and its receiver borrowed as the
+  resolver borrows one (`receiverClause`, `nameBorrowsClause`,
+  `promoteClause`). Nothing is compiled again: the driver's loop for it,
+  and the resolver's `%own:` names, are gone.
 
 ## Why a borrow is not a scope of its own (measured)
 

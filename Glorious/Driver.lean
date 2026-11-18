@@ -680,20 +680,14 @@ def elaborate (items : List Syntax.Item) (blocks : Option Elab.Blocks)
 /-- Parse, check and elaborate a program together with the prelude, and have the
 proved Core type checker accept the result. With `check := false` both checks
 are skipped, so that programs which go wrong can still be run. -/
-partial def compileSourceAt (src : String) (check : Bool := true)
+def compileSourceAt (src : String) (check : Bool := true)
     (files : List (List String × String) := []) (few : Bool := false)
     (known : List ((String × Nat) × Nat) := []) (packs : Nat := 0) (kept : List Typing.Cert := [])
-    (checkKept : Check.Kept := [])
-    (dotPicks : List (Nat × String) := []) (search : Bool := true) (memo : Infer.Memo := {})
+    (checkKept : Check.Kept := []) (search : Bool := true) (memo : Infer.Memo := {})
     (firsts : List ((Bool × Bool) × (Nat × Check.St)) := [])
-    (lexed : List (List String × Array Syntax.Token) := [])
-    (recvRefs : List (Nat × Bool) := []) (parsedKept : Parsed := {})
+    (lexed : List (List String × Array Syntax.Token) := []) (parsedKept : Parsed := {})
     (preludeKept : Option (List Syntax.Item × Syntax.Fixities) := none) : Except String Compiled := do
   let (prelude, items, parsedMade) ← Trace.timed "parse" fun _ => parseProgram src files check few packs lexed parsedKept preludeKept
-  -- (Dot calls the checker found are of a type's own function.)
-  let items := dotPicks.foldl (fun items (call, fn) => Elab.dotOwnItems call fn items) items
-  -- (Dot calls whose receiver, a name, the function takes a reference to.)
-  let items := recvRefs.foldl (fun items (call, uniq) => Elab.recvRefItems call uniq items) items
   -- Every name is given its meaning: the modules become one list of items,
   -- each module a unit, after those it uses.
   let resolved ← Trace.timed "resolve names" fun _ => Syntax.Modules.resolve prelude items
@@ -796,21 +790,7 @@ partial def compileSourceAt (src : String) (check : Bool := true)
     | .error _ => all
   let (blocks, checkMade, libraryMade) ← match checked with
     | .ok (blocks, made, shared) => pure (some blocks, made, shared)
-    | .error e =>
-      -- (Found what the resolver decides: the program compiled again with it.)
-      let again := fun (dotPicks : List (Nat × String)) (recvRefs : List (Nat × Bool)) (why : String) =>
-        Trace.timed s!"compile again: {why}" fun _ => compileSourceAt src check files few known packs kept checkKept dotPicks search memo firsts lexed recvRefs parsedKept preludeKept
-      match check, e.reread with
-      | true, some (.dotOwn call fn) =>
-        if dotPicks.length < 32 && !dotPicks.contains (call, fn) then
-          return ← again (dotPicks ++ [(call, fn)]) recvRefs "a type's own function"
-        else throw e.msg
-      | true, some (.recvRef call uniq) =>
-        if recvRefs.length < 32 && !recvRefs.contains (call, uniq) then
-          return ← again dotPicks (recvRefs ++ [(call, uniq)]) "a receiver borrowed"
-        else throw e.msg
-      | true, none => throw e.msg
-      | false, _ => pure (none, [], [])
+    | .error e => if check then throw e.msg else pure (none, [], [])
   -- Lifetimes were the checker's to read; and, of what is declared, the
   -- certificate's.
   let written := all

@@ -938,12 +938,6 @@ partial def resolveExpr (ctx : Ctx) (bound : List String) : Expr → R Expr
     -- function that can be named here. (Where it is neither, `f` is a field
     -- that holds a callable, as it was.)
     if let .fieldOf _ receiver name := f then
-      -- (One the checker chose a type's own function for: that one.)
-      if name.startsWith "%own:" then
-        let receiver ← resolveExpr ctx bound receiver
-        let args ← args.mapM (resolveExpr ctx bound)
-        return .call id (.name none (name.drop 5).toString)
-          (.call 0 (.name none receiverMark) [receiver] :: args)
       -- Types' own functions of the name, that can be named here.
       -- (`anywhere`: also of a type that cannot be named here, a value of
       -- which is had, and its functions called through the value.)

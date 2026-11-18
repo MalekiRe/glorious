@@ -1079,4 +1079,32 @@ def fitAt (scope : Scope) (amb : Row) (what : String) (site : Option Elab.Site)
         return some s!"{what}: what this callable gives back lasts for `{y}`, and the callable is wanted for references of any lifetime: it can give back only what borrows from what it is given"
   pure found
 
+/-- How a function takes its first argument: borrowed (`&mut` where `some
+true`), or whole (none). -/
+def receiverTaken (fn : String) : M (Option Bool) := do
+  let how := fun (t : Ty) => (do
+    match ← find t with
+    | .ref how _ _ =>
+      match ← find how with
+      | .con "&mut" [] => pure (some true)
+      | _ => pure (some false)
+    | _ => pure none : M (Option Bool))
+  match (← get).fns.lookup fn with
+  | some scheme =>
+    let saved ← get
+    let taken ← match ← instantiate scheme with
+      | .fn (p :: _) _ _ _ _ => how p
+      | _ => pure none
+    set saved
+    pure taken
+  | none =>
+    match ((← get).methods.lookup fn).bind (·.params.head?) with
+    | some p => how p
+    | none => pure none
+
+/-- The decision that a dot call is of `fn`, its receiver given as `fn`
+takes it. -/
+def receiverDecision (call : Nat) (fn : String) : M Elab.Decision := do
+  pure (.receiver call (some fn) (← receiverTaken fn))
+
 end Glorious.Check

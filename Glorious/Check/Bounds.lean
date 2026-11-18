@@ -291,7 +291,7 @@ partial def leavesFitting (pos key : String) (t : Ty) (args : List Ty) (owner : 
 
 /-- A dot call of a trait's function, of a value whose type does not
 implement the trait but has a function of the name of its own: that one,
-and the program read again (`Elab.Reread.dotOwn`). -/
+decided where it is found (`Elab.Decision.receiver`). -/
 def dotOwnInstead (call : Nat) (ty : Ty) (said : String) : M Unit := do
   if let some alts := dotAltsOf (← get).modules call then
     let rec head (fuel : Nat) (t : Ty) : M (Option String) := do
@@ -301,7 +301,7 @@ def dotOwnInstead (call : Nat) (ty : Ty) (said : String) : M Unit := do
       | _, _ => pure none
     if let some h ← head 8 ty then
       if let some alt := alts.find? (·.startsWith (h ++ "::")) then
-        throwThe Elab.Said { msg := said, reread := some (.dotOwn call alt) }
+        throwThe Elab.Said { msg := said, decision := some (← receiverDecision call alt) }
 
 /-- A bound as its trait's implementations for the type it now has are told
 apart: one whose type was not known when the bounds were keyed, or that

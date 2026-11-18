@@ -758,7 +758,7 @@ partial def checkArgsIn (scope : Scope) (amb : Row) (what : String) (params : Li
             match alt with
             | some alt =>
               if (what.splitOn s!"`{alt}`").length > 1 then throwThe Elab.Said ex
-              else throwThe Elab.Said { ex with reread := some (.dotOwn call alt) }
+              else throwThe Elab.Said { ex with decision := some (← receiverDecision call alt) }
             | none => throwThe Elab.Said ex
         else checkArg scope amb s!"argument {i + 1} of {what}" p a site
       if let some e := checked then
@@ -775,7 +775,7 @@ partial def checkArgsIn (scope : Scope) (amb : Row) (what : String) (params : Li
                   let uniq := match ← find how with
                     | .con "&mut" [] => true
                     | _ => false
-                  throwThe Elab.Said { msg := e, reread := some (.recvRef call uniq) }
+                  throwThe Elab.Said { msg := e, decision := some (.receiver call none (some uniq)) }
         -- (Asked only once the function in scope does not fit: the program
         -- is read again, so what this finds on the way is not kept. The
         -- receiver's type is found as it was before it was made to fit.)
@@ -784,7 +784,7 @@ partial def checkArgsIn (scope : Scope) (amb : Row) (what : String) (params : Li
           set before
           let alt ← dotAltFor scope amb call a
           set failed
-          if let some alt := alt then throwThe Elab.Said { msg := e, reread := some (.dotOwn call alt) }
+          if let some alt := alt then throwThe Elab.Said { msg := e, decision := some (← receiverDecision call alt) }
         -- (Clauses one of which ends with a braced block, which is a callable
         -- there: likely meant to be run.)
         let blocky := match a with
@@ -818,7 +818,7 @@ partial def checkArgs (scope : Scope) (amb : Row) (what : String) (params : List
     -- arguments, of a value whose type has one of the name of its own.)
     if let some a := args.head? then
       if let some alt ← dotAltFor scope amb call a then
-        throwThe Elab.Said { msg := s!"{what} takes {params.length} arguments", reread := some (.dotOwn call alt) }
+        throwThe Elab.Said { msg := s!"{what} takes {params.length} arguments", decision := some (← receiverDecision call alt) }
     arityError what params.length args.length
   -- Whole numbers written without a type are looked at last: by then what
   -- is wanted of them may be known from the other arguments.
@@ -1379,7 +1379,7 @@ partial def inferCall (scope : Scope) (amb : Row) (f : Expr) (args : List Expr)
           if let some h := head then
             let own := s!"{h}::{name}"
             if ((← get).fns.lookup own).isSome then
-              throwThe Elab.Said { said with reread := some (.dotOwn call own) }
+              throwThe Elab.Said { said with decision := some (← receiverDecision call own) }
         if (e.splitOn "has no field").length > 1 && theirs.length > 1 then
           throw s!"{e}. More than one type has a function `{name}` of its own ({", ".intercalate (theirs.map fun (fn, _) => s!"`{bareName fn}`")}): say which, `Type::{name}(value, ..)`"
         else throwThe Elab.Said said
@@ -1405,7 +1405,7 @@ partial def inferCall (scope : Scope) (amb : Row) (f : Expr) (args : List Expr)
           if let some h := h then
             let own := s!"{h}::{name}"
             if ((← get).fns.lookup own).isSome then
-              throwThe Elab.Said { msg := s!"the field `{name}` is no callable", reread := some (.dotOwn call own) }
+              throwThe Elab.Said { msg := s!"the field `{name}` is no callable", decision := some (← receiverDecision call own) }
     applyTy scope amb "this callee" callee args call
 
 /-- The type of a block: that of its last expression, or unit. -/

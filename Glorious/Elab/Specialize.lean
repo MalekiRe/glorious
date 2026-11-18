@@ -1,6 +1,7 @@
 module
 
 public import Glorious.Elab.Base
+public import Glorious.Syntax.Resolve
 
 /-!
 # A function for each implementation it is used at
@@ -259,34 +260,6 @@ partial def restPat (id count : Nat) : Pattern → Pattern
 /-- A program with the `..` of one tuple pattern written as so many `_`. -/
 def restItems (id count : Nat) : List Item → List Item :=
   Rewrite.items { onPat := restPat id count }
-
-/-! ## Patterns of a value matched against a reference
-
-`match(s) { Dot => 0, Line(n) => *n }` for `s: &Shape`: the checker says which
-callable's clauses, and the program is read again with their first patterns
-written `&Dot`, `&Line(n)`, so that they look at what the reference points to
-and bind references, as Rust's binding modes have it. -/
-
-/-! ## A dot call of a type's own function
-
-`v.push(x)` where `push` is a function in scope that does not fit `v`, and
-`v`'s type has a `push` of its own: the checker says so, and the program is
-read again with the call written as one of that function
-(`.fieldOf _ v "%own:std::vec::Vec::push"`, which the resolver reads). -/
-
-def dotOwnItems (call : Nat) (fn : String) : List Item → List Item :=
-  Rewrite.items { onExpr := fun go => fun
-    | .call i (.fieldOf fi recv _) args =>
-      if i == call then some (.call i (.fieldOf fi (go.ex recv) ("%own:" ++ fn)) (args.map go.ex)) else none
-    | _ => none }
-
-/-- A program with the receiver of one dot call, a name, borrowed:
-`Elab.Reread.recvRef`. -/
-def recvRefItems (call : Nat) (uniq : Bool) : List Item → List Item :=
-  Rewrite.items { onExpr := fun go => fun
-    | .call i (.fieldOf fi (.name none x) name) args =>
-      if i == call then some (.call i (.fieldOf fi (.ref uniq x) name) (args.map go.ex)) else none
-    | _ => none }
 
 /-! ## A value used on one path and not on another
 
@@ -549,6 +522,73 @@ def splitFieldItems (all items : List Item) : List Item :=
         | item => item)
     | item => item
 
+/-- Does an expression have the call `id` in it? -/
+partial def hasCall (id : Nat) : Expr → Bool
+  | .call i f args | .tailCall i f args => i == id || (f :: args).any (hasCall id)
+  | e => e.children.any (hasCall id)
+
+/-- A program with the dot call `call` of `fn` (or of the function it is of),
+its receiver given as that takes it: borrowed as the resolver borrows a
+receiver (`Syntax.receiverClause`), a name given whole borrowed where `fn`
+is none; and then named and kept where a reference can point, as anything
+borrowed is (`nameBorrowsClause`, `promoteClause`). Only the clause the call
+is in is written again. -/
+partial def receiverItems (call : Nat) (fn : Option String) (borrow : Option Bool) :
+    List Item → List Item :=
+  List.map go
+where
+  go : Item → Item
+    | .fn name ps annots ret clauses => .fn name ps annots ret (clauses.map (clause annots))
+    | .impl ps tr head args context methods => .impl ps tr head args context (methods.map go)
+    | .traitInfo n supers defaults params assocs => .traitInfo n supers (defaults.map go) params assocs
+    | .module name (some body) => .module name (some (body.map go))
+    | .pub parent item => .pub parent (go item)
+    | item => item
+  clause (annots : List (Option TypeExpr)) (c : Clause) : Clause :=
+    let .mk pats body := c
+    if !(body.flatMap Stmt.exprs).any (hasCall call) then c else
+    let values := (pats.zip annots).filterMap fun
+      | (.var _, some (.ref _ _ _)) => none
+      | (.var x, some _) => some x
+      | _ => none
+    let refs := (pats.zip annots).filterMap fun
+      | (.var x, some (.ref _ _ _)) => some x
+      | _ => none
+    let mutable := fun (u : Option Bool) => u.getD false
+    let marked := ({ onExpr := fun go => fun
+        -- (A field's callable called, `v.queue(f)`, where the type's own
+        -- function was meant: the value is its receiver.)
+        | .call i (.fieldOf _ recv _) args =>
+          match fn with
+          | some g =>
+            if i != call then none else
+            some (.call i (.name none g) (.call 0 (.name none Syntax.receiverMark) [go.ex recv] :: args.map go.ex))
+          | none => none
+        | .call i f (a :: rest) =>
+          if i != call then none else
+          let callee := match fn with
+            | some g => Expr.name none g
+            | none => f
+          -- (The receiver as written: what the function first chosen made of
+          -- it undone.)
+          let written := match a with
+            | .ref _ x => Expr.name none x
+            | .refField fid _ x path _ => path.foldl (fun e step => .fieldOf fid e step) (.name none x)
+            | a => a
+          let given := match fn, borrow, written with
+            | none, some u, .name none x => Expr.ref u x
+            | none, _, _ => a
+            | some _, _, _ => .call 0 (.name none Syntax.receiverMark) [written]
+          some (.call i callee (given :: rest.map go.ex))
+        | _ => none } : Rewrite).clause c
+    let calleeName := match fn with
+      | some g => g
+      | none => ""
+    let taken := match borrow with
+      | some u => [(calleeName, mutable (some u))]
+      | none => []
+    Syntax.promoteClause values (Syntax.nameBorrowsClause (Syntax.receiverClause taken (refs.map (·, 3)) values marked))
+
 /-- A program with what the checker decided written in, in the order it
 decided it; and whether each changed something. -/
 def decidedItems (decided : List Decision) (items : List Item) : List Item :=
@@ -558,7 +598,8 @@ def decidedItems (decided : List Decision) (items : List Item) : List Item :=
     | .letMut owner line col x => (letMutItems owner line col x items).1
     | .refPats id clauses => Rewrite.items (items := items) { onExpr := fun _ => fun
         | .closure i _ => if i == id then some (.closure i clauses) else none
-        | _ => none }) items
+        | _ => none }
+    | .receiver call fn borrow => receiverItems call fn borrow items) items
 
 /-- A program with what the checker decided of it written in: `Decision`s
 first, then the function of each dot call it chose by the value's type,
