@@ -1,6 +1,7 @@
 module
 
 public import Std.Data.HashMap
+public import Std.Data.HashSet
 public import Glorious.Syntax.Ast
 public import Glorious.Syntax.ByRef
 
@@ -143,6 +144,13 @@ structure St where
   fresh : Nat := 0
   /-- Dot calls with a function in scope and types' own of the same name. -/
   dotAlts : List (Nat × List String) := []
+  /-- Types' own functions, `Type::f`, by `f`: each with its module and the
+  type's name, in the order of the modules; the types each module declares;
+  and the fields written with names, by name, each with its module and
+  whether it is `pub`. -/
+  typeFns : Std.HashMap String (Array (List String × Bound × String)) := {}
+  typesOf : Std.HashMap (List String) (Std.HashSet String) := {}
+  fieldsNamed : Std.HashMap String (Array (List String × Bool)) := {}
 
 abbrev R := StateT St (Except String)
 
@@ -942,15 +950,14 @@ partial def resolveExpr (ctx : Ctx) (bound : List String) : Expr → R Expr
       -- (`anywhere`: also of a type that cannot be named here, a value of
       -- which is had, and its functions called through the value.)
       let own := fun (anywhere : Bool) => (do
-        pure ((← get).units.flatMap fun u => u.own.filter fun b =>
-          match b.name.splitOn "::" with
-          | [ty, fn] =>
-            fn == name && b.entry.kind.space == .value
-              && (u.path == ctx.here || visible b.shown u.path ctx.here)
-              && (if anywhere then u.own.any fun named => named.name == ty && named.entry.kind == .type
-                else (ctx.of ty).any fun named => named.name == ty && named.entry.kind == .type
-                  && named.entry.home == u.path)
-          | _ => false) : R (List Bound))
+        let st ← get
+        let found := (st.typeFns.getD name #[]).toList.filter fun (path, b, ty) =>
+          b.entry.kind.space == .value
+            && (path == ctx.here || visible b.shown path ctx.here)
+            && (if anywhere then (st.typesOf.getD path {}).contains ty
+              else (ctx.of ty).any fun named => named.name == ty && named.entry.kind == .type
+                && named.entry.home == path)
+        pure (found.map (·.2.1)) : R (List Bound))
       unless bound.contains name do
         if let some e := lookupIn (ctx.of name) .value name then
           if e.kind == .fn || e.kind == .method then
@@ -970,13 +977,7 @@ partial def resolveExpr (ctx : Ctx) (bound : List String) : Expr → R Expr
         -- their meaning.
         -- (A field of the name that can be read here: one that is `pub`, or
         -- of a type of this module.)
-        let fieldNamed := (← get).units.any fun u => u.items.any fun item =>
-          match (match item with
-            | .pub _ inner => inner
-            | other => other) with
-          | .fieldNames _ names pubs =>
-            (names.zip pubs).any fun (n, p) => n == name && (p || u.path == ctx.here)
-          | _ => false
+        let fieldNamed := ((← get).fieldsNamed.getD name #[]).any fun (path, p) => p || path == ctx.here
         unless fieldNamed do
           let found ← own true
           -- (Of several types: the first, and the checker told of the rest,
@@ -1376,7 +1377,23 @@ def resolve (prelude root : List Item) : Except String Resolved := do
   let bare := root.any fun
     | .fieldNames mark _ _ => mark == attrMark "no_std" || mark == attrMark "no_implicit_prelude"
     | _ => false
-  let ((items, coercions), st) ← match run.run { units, fields, hidden, bare } with
+  -- (For dot calls: see `St.typeFns`.)
+  let typeFns := units.foldl (init := {}) fun (m : Std.HashMap String (Array (List String × Bound × String))) u =>
+    u.own.foldl (init := m) fun m b => match b.name.splitOn "::" with
+      | [ty, fn] => m.insert fn ((m.getD fn #[]).push (u.path, b, ty))
+      | _ => m
+  let typesOf := units.foldl (init := {}) fun (m : Std.HashMap (List String) (Std.HashSet String)) u =>
+    m.insert u.path (u.own.foldl (init := m.getD u.path {}) fun s b =>
+      if b.entry.kind == .type then s.insert b.name else s)
+  let fieldsNamed := units.foldl (init := {}) fun (m : Std.HashMap String (Array (List String × Bool))) u =>
+    u.items.foldl (init := m) fun m item =>
+      match (match item with
+        | .pub _ inner => inner
+        | other => other) with
+      | .fieldNames _ names pubs => (names.zip pubs).foldl (init := m) fun m (n, p) =>
+        m.insert n ((m.getD n #[]).push (u.path, p))
+      | _ => m
+  let ((items, coercions), st) ← match run.run { units, fields, hidden, bare, typeFns, typesOf, fieldsNamed } with
     | .ok r => pure r
     | .error e => throw e
   if let some cycle := findCycle st.edges then
