@@ -5438,6 +5438,31 @@ states 75 ms to 8 ms (75 ms every fifth edit), about 0.8 MB written in
 place of 8.8 MB. With the program's bytecode written while it runs, the
 edit's wall time went from 0.49 s to 0.42 s.
 
+## What a group's check gives, and why it is not yet a delta
+
+A group's check could be kept as what it adds, and added again in a later
+compile, only if what it adds names nothing of the stores but by its own
+numbers. Read from the code: a scheme does (`generalize`: its variables are
+quantified by number, instantiated by substitution, and its free ones are the
+declarations'), and so do the elaborator's tables (by node: `dictTable`,
+`fieldReads`, `dotChosen`, `argsChosen`, `given`, `packs`, `decided`,
+`siteTable`). But `blockCaps`, `unrun`, `unrunGiven`, `assumedLinks` and
+`lateDups`/`lateDrops`/`lateStays` name capture and type variables, and
+`finish` reads them across groups: a block given a block not run is linked
+to the block whose capture variable is found to be the same (`findCap`),
+and capture variables of different groups are made the same by
+instantiating schemes. So a group's capture variables are the program's,
+and what a group adds is not closed.
+
+Measured on an edit of covey's simulation, where it would pay: the edited
+function's group checks in 7 ms, the group of `main`, which uses everything,
+in about 60 ms (52 of them settling its trait bounds). Reusing groups by
+what they use saves none of that; reusing `main` needs its check keyed by
+the schemes of what it uses (an early cutoff, as certificate inference now
+has), and that needs what a group adds closed: each group's capture links
+settled to its own, or `finish`'s links found per group. That is the work
+the item "Checker state as per-module deltas" is.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by
