@@ -130,34 +130,13 @@ def specRoot (tr : TraitInfo) (item : Item) : StateM Copies Item :=
     else pure item
   | other => pure other
 
-mutual
-
 /-- Does an expression name the label `l`? -/
 partial def namesLabel (l : String) : Expr → Bool
   | .label x => x == l
-  | .call _ f args => namesLabel l f || args.any (namesLabel l)
-  | .tailCall _ f args => namesLabel l f || args.any (namesLabel l)
-  | .tuple args => args.any (namesLabel l)
-  | .proj e _ => namesLabel l e
-  | .closure _ clauses => clauses.any fun
-    | .mk _ body => body.any (stmtNamesLabel l)
-  | .handle subject arms => namesLabel l subject || arms.any fun
-    | .mk _ body => body.any (stmtNamesLabel l)
-  | .labelScope x body => x != l && body.any (stmtNamesLabel l)
-  | .deref e => namesLabel l e
-  | .reborrow _ e => namesLabel l e
-  | .fieldOf _ e _ => namesLabel l e
-  | _ => false
+  | .labelScope x body => x != l && body.any (·.exprs.any (namesLabel l))
+  | e => e.children.any (namesLabel l)
 
-partial def stmtNamesLabel (l : String) : Stmt → Bool
-  | .let_ _ value => namesLabel l value
-  | .expr e => namesLabel l e
-  | .defer e => namesLabel l e
-  | .letMut _ value => namesLabel l value
-  | .assign target value => namesLabel l target || namesLabel l value
-  | .located _ _ s => stmtNamesLabel l s
-
-end
+def stmtNamesLabel (l : String) (s : Stmt) : Bool := s.exprs.any (namesLabel l)
 
 /-- A clause of a copy: the parameters for implementations dropped, or each
 taking `()`, and the body written out for the implementations. -/

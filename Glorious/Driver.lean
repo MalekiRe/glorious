@@ -77,72 +77,29 @@ def placeKeys (owners : Array String) : Array (String × Nat) := Id.run do
     count := count.insert o (k + 1)
   pure out
 
-mutual
 /-- Every name an expression writes, bound or not, and every field or function
 named after a dot: more than it can mean, never less. -/
 partial def namesInExpr (acc : List String) : Syntax.Expr → List String
-  | .name _ n => n :: acc
-  | .call _ f args => args.foldl namesInExpr (namesInExpr acc f)
-  | .tailCall _ f args => args.foldl namesInExpr (namesInExpr acc f)
-  | .tuple args => args.foldl namesInExpr acc
-  | .proj e _ => namesInExpr acc e
-  | .closure _ clauses => clauses.foldl namesInClause acc
-  | .handle subject arms => arms.foldl namesInClause (namesInExpr acc subject)
-  | .labelScope _ body => body.foldl namesInStmt acc
-  | .ref _ n => n :: acc
-  | .deref e => namesInExpr acc e
-  | .reborrow _ e => namesInExpr acc e
+  | .name _ n | .ref _ n => n :: acc
   | .refField _ _ n path _ => n :: path ++ acc
   | .fieldOf _ e n => namesInExpr (n :: acc) e
-  | .int _ => acc
-  | .label _ => acc
+  | e => e.children.foldl namesInExpr acc
 
-partial def namesInStmt (acc : List String) : Syntax.Stmt → List String
-  | .let_ _ value => namesInExpr acc value
-  | .expr e => namesInExpr acc e
-  | .defer e => namesInExpr acc e
-  | .letMut _ value => namesInExpr acc value
-  | .assign target value => namesInExpr (namesInExpr acc target) value
-  | .located _ _ s => namesInStmt acc s
+def namesInClause (acc : List String) : Syntax.Clause → List String
+  | .mk _ body => (body.flatMap Syntax.Stmt.exprs).foldl namesInExpr acc
 
-partial def namesInClause (acc : List String) : Syntax.Clause → List String
-  | .mk _ body => body.foldl namesInStmt acc
-end
-
-mutual
 /-- The identities of an expression's calls. -/
 partial def callIdsExpr (acc : List Nat) : Syntax.Expr → List Nat
-  | .call id f args => args.foldl callIdsExpr (callIdsExpr (id :: acc) f)
-  | .tailCall id f args => args.foldl callIdsExpr (callIdsExpr (id :: acc) f)
-  | .tuple args => args.foldl callIdsExpr acc
-  | .proj e _ => callIdsExpr acc e
-  | .closure _ clauses => clauses.foldl callIdsClause acc
-  | .handle subject arms => arms.foldl callIdsClause (callIdsExpr acc subject)
-  | .labelScope _ body => body.foldl callIdsStmt acc
-  | .deref e => callIdsExpr acc e
-  | .reborrow _ e => callIdsExpr acc e
-  | .fieldOf _ e _ => callIdsExpr acc e
-  | _ => acc
-
-partial def callIdsStmt (acc : List Nat) : Syntax.Stmt → List Nat
-  | .let_ _ value => callIdsExpr acc value
-  | .expr e => callIdsExpr acc e
-  | .defer e => callIdsExpr acc e
-  | .letMut _ value => callIdsExpr acc value
-  | .assign target value => callIdsExpr (callIdsExpr acc target) value
-  | .located _ _ s => callIdsStmt acc s
-
-partial def callIdsClause (acc : List Nat) : Syntax.Clause → List Nat
-  | .mk _ body => body.foldl callIdsStmt acc
+  | .call id f args | .tailCall id f args => (f :: args).foldl callIdsExpr (id :: acc)
+  | e => e.children.foldl callIdsExpr acc
 
 partial def callIdsItem (acc : List Nat) : Syntax.Item → List Nat
-  | .fn _ _ _ _ clauses => clauses.foldl callIdsClause acc
+  | .fn _ _ _ _ clauses => (clauses.flatMap fun | .mk _ body => body.flatMap Syntax.Stmt.exprs).foldl callIdsExpr acc
   | .impl _ _ _ _ _ methods => methods.foldl callIdsItem acc
   | .traitInfo _ _ defaults _ _ => defaults.foldl callIdsItem acc
   | .alias _ value => callIdsExpr acc value
   | .pub _ item => callIdsItem acc item
   | _ => acc
-end
 
 /-- What of a program's modules a unit's check reads besides its own items:
 the coercions that apply in it, the dot calls among its calls the resolver

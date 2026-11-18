@@ -75,51 +75,28 @@ def Copy.callee (c : Copy) (id : Nat) (x : String) : String :=
     | some (_, _, _, off, len) => instName x (c.key off len)
     | none => if x == c.self.1 then c.self.2 else x
 
-mutual
+/-- A function's body for one copy: each call with the instance's callee,
+each handler's arms of an effect it handles an instance of named so. -/
+def copyRewrite (c : Copy) : Rewrite where
+  onExpr go
+    | .call id (.name q x) args => some (.call id (.name q (c.callee id x)) (args.map go.ex))
+    | .tailCall id (.name q x) args => some (.tailCall id (.name q (c.callee id x)) (args.map go.ex))
+    | .handle subject arms =>
+      let id := match subject with
+        | .call id _ _ => id
+        | _ => 0
+      -- The effects this handler handles an instance of, with which.
+      let handled := c.table.filterMap fun (i, kind, e, off, len) =>
+        if i == id && id != 0 && kind == "handle" && c.several.contains e then some (e, c.key off len) else none
+      some (.handle (go.ex subject) (arms.map fun
+        | .mk [.ctor x q ps] body =>
+          match (c.opOf.lookup x).bind fun e => handled.lookup e with
+          | some key => Clause.mk [.ctor (instName x key) q ps] (go.stmts body)
+          | none => .mk [.ctor x q ps] (go.stmts body)
+        | arm => go.clause arm))
+    | _ => none
 
-partial def copyExpr (c : Copy) : Expr → Expr
-  | .call id (.name q x) args => .call id (.name q (c.callee id x)) (args.map (copyExpr c))
-  | .tailCall id (.name q x) args => .tailCall id (.name q (c.callee id x)) (args.map (copyExpr c))
-  | .call id f args => .call id (copyExpr c f) (args.map (copyExpr c))
-  | .tailCall id f args => .tailCall id (copyExpr c f) (args.map (copyExpr c))
-  | .tuple args => .tuple (args.map (copyExpr c))
-  | .proj e n => .proj (copyExpr c e) n
-  | .closure id clauses => .closure id (clauses.map (copyClause c))
-  | .handle subject arms =>
-    let id := match subject with
-      | .call id _ _ => id
-      | _ => 0
-    -- The effects this handler handles an instance of, with which.
-    let handled := c.table.filterMap fun (i, kind, e, off, len) =>
-      if i == id && id != 0 && kind == "handle" && c.several.contains e then some (e, c.key off len) else none
-    let arms := arms.map fun
-      | .mk [.ctor x q ps] body =>
-        match (c.opOf.lookup x).bind fun e => handled.lookup e with
-        | some key => Clause.mk [.ctor (instName x key) q ps] (copyStmts c body)
-        | none => .mk [.ctor x q ps] (copyStmts c body)
-      | arm => copyClause c arm
-    .handle (copyExpr c subject) arms
-  | .labelScope l body => .labelScope l (copyStmts c body)
-  | .deref e => .deref (copyExpr c e)
-  | .reborrow uniq e => .reborrow uniq (copyExpr c e)
-  | .fieldOf id e name => .fieldOf id (copyExpr c e) name
-  | e => e
-
-partial def copyStmts (c : Copy) (stmts : List Stmt) : List Stmt :=
-  stmts.map (copyStmt c)
-
-partial def copyStmt (c : Copy) : Stmt → Stmt
-  | .let_ pat value => .let_ pat (copyExpr c value)
-  | .expr e => .expr (copyExpr c e)
-  | .defer e => .defer (copyExpr c e)
-  | .letMut x value => .letMut x (copyExpr c value)
-  | .assign target value => .assign (copyExpr c target) (copyExpr c value)
-  | .located line col s => .located line col (copyStmt c s)
-
-partial def copyClause (c : Copy) : Clause → Clause
-  | .mk pats body => .mk pats (copyStmts c body)
-
-end
+def copyClause (c : Copy) : Clause → Clause := (copyRewrite c).clause
 
 /-- Each instance of an effect a program uses made an effect of its own, and
 each function that is about an instance of its caller's choosing written out

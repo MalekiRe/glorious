@@ -497,35 +497,12 @@ partial def fvStmts (bound : List String) : List Stmt → List String
 
 end
 
-mutual
-
 /-- The names an expression hands on with `move name`, wherever in it. -/
 partial def movedExpr : Expr → List String
-  | .call _ (.name none mark) [.name none x] =>
-    if mark == Syntax.moveMark then [x] else []
-  | .call _ f args => movedExpr f ++ args.flatMap movedExpr
-  | .tailCall _ f args => movedExpr f ++ args.flatMap movedExpr
-  | .tuple args => args.flatMap movedExpr
-  | .proj e _ => movedExpr e
-  | .closure _ clauses => clauses.flatMap fun
-    | .mk _ body => body.flatMap movedStmt
-  | .handle subject arms => movedExpr subject ++ arms.flatMap fun
-    | .mk _ body => body.flatMap movedStmt
-  | .labelScope _ body => body.flatMap movedStmt
-  | .deref e => movedExpr e
-  | .reborrow _ e => movedExpr e
-  | .fieldOf _ e _ => movedExpr e
-  | _ => []
+  | .call _ (.name none mark) [.name none x] => if mark == Syntax.moveMark then [x] else []
+  | e => e.children.flatMap movedExpr
 
-partial def movedStmt : Stmt → List String
-  | .let_ _ value => movedExpr value
-  | .expr e => movedExpr e
-  | .defer e => movedExpr e
-  | .located _ _ s => movedStmt s
-  | .letMut _ value => movedExpr value
-  | .assign target value => movedExpr target ++ movedExpr value
-
-end
+def movedStmt (s : Stmt) : List String := s.exprs.flatMap movedExpr
 
 /-- Where a body starts: the place of its first statement, by which what
 its clause is given is known. -/
@@ -740,44 +717,27 @@ def letNames (ss : List Stmt) : List String :=
 
 mutual
 
-/-- With how many arguments the name `p` is applied, at each place it is. -/
-partial def appliedExpr (p : String) : Expr → List Nat
-  | .int _ => []
-  | .name _ _ => []
-  | .label _ => []
-  | .call _ f args => appliedCall p f args
-  | .tailCall _ f args => appliedCall p f args
-  | .tuple args => args.flatMap (appliedExpr p)
-  | .proj e _ => appliedExpr p e
-  | .closure _ clauses => clauses.flatMap (appliedClause p)
-  | .handle subject arms => appliedExpr p subject ++ arms.flatMap (appliedClause p)
-  | .labelScope _ body => appliedStmts p body
-  | .ref _ _ => []
-  | .deref e => appliedExpr p e
-  | .reborrow _ e => appliedExpr p e
-  | .refField _ _ _ _ _ => []
-  | .fieldOf _ e _ => appliedExpr p e
-
-partial def appliedCall (p : String) (f : Expr) (args : List Expr) : List Nat :=
-  let here := match f with
-    | .name none x => if x == p then [args.length] else []
-    | _ => appliedExpr p f
-  here ++ args.flatMap (appliedExpr p)
-
-partial def appliedClause (p : String) : Clause → List Nat
-  | .mk pats body => if (pats.flatMap patVars).contains p then [] else appliedStmts p body
+/-- With how many arguments the name `p` is applied, at each place it is,
+up to where a name `p` is bound again. -/
+partial def appliedExpr (p : String) (e : Expr) : List Nat :=
+  let here := match e with
+    | .call _ (.name none x) args | .tailCall _ (.name none x) args => if x == p then [args.length] else []
+    | _ => []
+  let direct := match e with
+    | .call _ (.name none _) args | .tailCall _ (.name none _) args => args
+    | e => e.direct
+  here ++ direct.flatMap (appliedExpr p) ++ e.bodies.flatMap fun (pats, body) =>
+    if (pats.flatMap patVars).contains p then [] else appliedStmts p body
 
 partial def appliedStmts (p : String) : List Stmt → List Nat
   | [] => []
-  | .let_ pat value :: rest =>
-    appliedExpr p value ++ (if (patVars pat).contains p then [] else appliedStmts p rest)
-  | .expr e :: rest => appliedExpr p e ++ appliedStmts p rest
-  | .defer e :: rest => appliedExpr p e ++ appliedStmts p rest
   | .located _ _ s :: rest => appliedStmts p (s :: rest)
-  | .letMut x value :: rest =>
-    appliedExpr p value ++ (if x == p then [] else appliedStmts p rest)
-  | .assign target value :: rest =>
-    appliedExpr p target ++ appliedExpr p value ++ appliedStmts p rest
+  | s :: rest =>
+    let stops := match s with
+      | .let_ pat _ => (patVars pat).contains p
+      | .letMut x _ => x == p
+      | _ => false
+    s.exprs.flatMap (appliedExpr p) ++ (if stops then [] else appliedStmts p rest)
 
 end
 
@@ -815,48 +775,31 @@ partial def wrapResult (fn : String) : List Stmt → Option (List Stmt)
   | [_] => none
   | s :: rest => (wrapResult fn rest).map (s :: ·)
 
-mutual
+/-- A clause's value given to the coercion `fn`, where there is one. -/
+def coercedClause (result : Option String) : Clause → Clause
+  | .mk pats body => .mk pats ((result.bind fun fn => wrapResult fn body).getD body)
 
-/-- Write out the coercions the checker decided on, as the calls they are. -/
-partial def coerceExpr (cs : List (Site × String)) : Expr → Expr
-  | .call id f args => .call id (coerceExpr cs f) (coerceArgs cs id args)
-  | .tailCall id f args => .tailCall id (coerceExpr cs f) (coerceArgs cs id args)
-  | .tuple args => .tuple (args.map (coerceExpr cs))
-  | .proj e idx => .proj (coerceExpr cs e) idx
-  | .closure id clauses =>
-    .closure id ((clauses.zip (List.range clauses.length)).map fun (c, j) =>
-      coerceClause cs (cs.lookup (.result id j)) c)
-  | .handle subject arms => .handle (coerceExpr cs subject) (arms.map (coerceClause cs none))
-  | .labelScope l body => .labelScope l (coerceStmts cs body)
-  | .deref e => .deref (coerceExpr cs e)
-  | .reborrow uniq e => .reborrow uniq (coerceExpr cs e)
-  | .fieldOf id e name => .fieldOf id (coerceExpr cs e) name
-  | e => e
+/-- The coercions the checker decided on, written out as the calls they are. -/
+def coerceRewrite (cs : List (Site × String)) : Rewrite where
+  onExpr go e :=
+    let args := fun (call : Nat) (args : List Expr) => args.zipIdx.map fun (a, i) =>
+      let a := go.ex a
+      match cs.lookup (.arg call i) with
+      | some fn => .call 0 (.name none fn) [a]
+      | none => a
+    match e with
+    | .call id f as => some (.call id (go.ex f) (args id as))
+    | .tailCall id f as => some (.tailCall id (go.ex f) (args id as))
+    | .closure id clauses =>
+      some (.closure id (clauses.zipIdx.map fun (c, j) => coercedClause (cs.lookup (.result id j)) (go.clause c)))
+    | _ => none
 
-partial def coerceArgs (cs : List (Site × String)) (call : Nat) (args : List Expr) : List Expr :=
-  (args.zip (List.range args.length)).map fun (a, i) =>
-    let a := coerceExpr cs a
-    match cs.lookup (.arg call i) with
-    | some fn => .call 0 (.name none fn) [a]
-    | none => a
+def coerceExpr (cs : List (Site × String)) : Expr → Expr := (coerceRewrite cs).ex
 
-partial def coerceClause (cs : List (Site × String)) (result : Option String) : Clause → Clause
-  | .mk pats body =>
-    let body := coerceStmts cs body
-    .mk pats ((result.bind fun fn => wrapResult fn body).getD body)
-
-partial def coerceStmts (cs : List (Site × String)) (body : List Stmt) : List Stmt :=
-  body.map (coerceStmt cs)
-
-partial def coerceStmt (cs : List (Site × String)) : Stmt → Stmt
-  | .let_ pat value => .let_ pat (coerceExpr cs value)
-  | .expr e => .expr (coerceExpr cs e)
-  | .defer e => .defer (coerceExpr cs e)
-  | .letMut x value => .letMut x (coerceExpr cs value)
-  | .assign target value => .assign (coerceExpr cs target) (coerceExpr cs value)
-  | .located line col s => .located line col (coerceStmt cs s)
-
-end
+/-- A clause with the coercions in it written out, its value given to the
+coercion `result`, where there is one. -/
+def coerceClause (cs : List (Site × String)) (result : Option String) (c : Clause) : Clause :=
+  coercedClause result ((coerceRewrite cs).clause c)
 
 /-- The clauses of a top-level function with its coercions written out. -/
 def coerceFn (cs : List (Site × String)) (name : String) (clauses : List Clause) : List Clause :=

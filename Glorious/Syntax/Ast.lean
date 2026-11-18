@@ -814,16 +814,18 @@ inside it (`Go`), or none to have it rebuilt from its parts. -/
 /-- The rewrite, inside a node a hook writes. -/
 structure Go where
   ex : Expr → Expr
+  st : Stmt → Stmt
   stmts : List Stmt → List Stmt
   clause : Clause → Clause
 
-instance : Inhabited Go := ⟨⟨id, id, id⟩⟩
+instance : Inhabited Go := ⟨⟨id, id, id, id⟩⟩
 
 /-- What a rewrite changes. -/
 structure Rewrite where
   onExpr : Go → Expr → Option Expr := fun _ _ => none
   /-- A block's statements from the first on. -/
   onStmts : Go → List Stmt → Option (List Stmt) := fun _ _ => none
+  onStmt : Go → Stmt → Option Stmt := fun _ _ => none
   onClause : Go → Clause → Option Clause := fun _ _ => none
   onPat : Pattern → Pattern := id
 
@@ -865,18 +867,47 @@ partial def Rewrite.stmts (r : Rewrite) (ss : List Stmt) : List Stmt :=
     | s :: rest => r.st s :: r.stmts rest
 
 /-- A statement rewritten. -/
-partial def Rewrite.st (r : Rewrite) : Stmt → Stmt
-  | .let_ pat value => .let_ (r.onPat pat) (r.ex value)
-  | .expr e => .expr (r.ex e)
-  | .defer e => .defer (r.ex e)
-  | .letMut x value => .letMut x (r.ex value)
-  | .assign target value => .assign (r.ex target) (r.ex value)
-  | .located line col s => .located line col (r.st s)
+partial def Rewrite.st (r : Rewrite) (s : Stmt) : Stmt :=
+  match r.onStmt r.go s with
+  | some s => s
+  | none =>
+    match s with
+    | .let_ pat value => .let_ (r.onPat pat) (r.ex value)
+    | .expr e => .expr (r.ex e)
+    | .defer e => .defer (r.ex e)
+    | .letMut x value => .letMut x (r.ex value)
+    | .assign target value => .assign (r.ex target) (r.ex value)
+    | .located line col s => .located line col (r.st s)
 
 /-- What a hook rewrites inside a node with. -/
-partial def Rewrite.go (r : Rewrite) : Go := ⟨r.ex, r.stmts, r.clause⟩
+partial def Rewrite.go (r : Rewrite) : Go := ⟨r.ex, r.st, r.stmts, r.clause⟩
 
 end
+
+/-- The expressions a statement has. -/
+def Stmt.exprs : Stmt → List Expr
+  | .let_ _ v | .expr v | .defer v | .letMut _ v => [v]
+  | .assign target v => [target, v]
+  | .located _ _ s => s.exprs
+
+/-- The expressions directly inside an expression, outside any block. -/
+def Expr.direct : Expr → List Expr
+  | .call _ f args | .tailCall _ f args => f :: args
+  | .tuple args => args
+  | .proj e _ | .deref e | .reborrow _ e | .fieldOf _ e _ => [e]
+  | .handle subject _ => [subject]
+  | _ => []
+
+/-- The blocks directly inside an expression: each clause's patterns and
+statements, and a labelled block's statements. -/
+def Expr.bodies : Expr → List (List Pattern × List Stmt)
+  | .closure _ clauses | .handle _ clauses => clauses.map fun | .mk pats body => (pats, body)
+  | .labelScope _ body => [([], body)]
+  | _ => []
+
+/-- The expressions inside an expression, one level down, blocks' too. -/
+def Expr.children (e : Expr) : List Expr :=
+  e.direct ++ e.bodies.flatMap fun (_, body) => body.flatMap Stmt.exprs
 
 /-- Every function of a program with its clauses made by `f`: in
 implementations, traits' defaults and modules too. -/
@@ -948,45 +979,22 @@ partial def selfPattern (self : String) : Pattern → Pattern
   | .tuple args => .tuple (args.map (selfPattern self))
   | p => p
 
-mutual
+/-- `Self` written out as the type an implementation is for: `Self::f`,
+`Self { .. }` and `Self(..)`. In an implementation of a trait `Self::f(..)`
+is the trait's function for that type, `<Self as Trait>::f(..)`. -/
+def selfRewrite (self : String) (trait : Option (String × Expr)) : Rewrite where
+  onExpr go
+    | .name qual z =>
+      some (.name (if qual == some "Self" then some ((trait.map (·.1)).getD self) else qual)
+        (if z == "Self" then self else z))
+    | .call id (.name (some "Self") z) args =>
+      trait.map fun (tr, at_) => .call 0 (.name none instMark) [.call id (.name (some tr) z) (args.map go.ex), at_]
+    | _ => none
+  onPat := selfPattern self
 
-/-- An expression with `Self` written out as the type an implementation is
-for: `Self::f`, `Self { .. }` and `Self(..)`. In an implementation of a trait
-`Self::f(..)` is the trait's function for that type, `<Self as Trait>::f(..)`. -/
-partial def selfExpr (self : String) (trait : Option (String × Expr)) : Expr → Expr
-  | .name qual z =>
-    .name (if qual == some "Self" then some ((trait.map (·.1)).getD self) else qual)
-      (if z == "Self" then self else z)
-  | .call id f args =>
-    let args := args.map (selfExpr self trait)
-    match f, trait with
-    | .name (some "Self") z, some (tr, at_) =>
-      .call 0 (.name none instMark) [.call id (.name (some tr) z) args, at_]
-    | _, _ => .call id (selfExpr self trait f) args
-  | .tailCall id f args => .tailCall id (selfExpr self trait f) (args.map (selfExpr self trait))
-  | .tuple args => .tuple (args.map (selfExpr self trait))
-  | .proj e i => .proj (selfExpr self trait e) i
-  | .closure id clauses => .closure id (clauses.map (selfClause self trait))
-  | .handle subject arms =>
-    .handle (selfExpr self trait subject) (arms.map (selfClause self trait))
-  | .labelScope l body => .labelScope l (body.map (selfStmt self trait))
-  | .deref e => .deref (selfExpr self trait e)
-  | .reborrow uniq e => .reborrow uniq (selfExpr self trait e)
-  | .fieldOf id e name => .fieldOf id (selfExpr self trait e) name
-  | e => e
-
-partial def selfClause (self : String) (trait : Option (String × Expr)) : Clause → Clause
-  | .mk pats body => .mk (pats.map (selfPattern self)) (body.map (selfStmt self trait))
-
-partial def selfStmt (self : String) (trait : Option (String × Expr)) : Stmt → Stmt
-  | .let_ pat value => .let_ (selfPattern self pat) (selfExpr self trait value)
-  | .letMut z value => .letMut z (selfExpr self trait value)
-  | .expr e => .expr (selfExpr self trait e)
-  | .defer e => .defer (selfExpr self trait e)
-  | .located line col s => .located line col (selfStmt self trait s)
-  | .assign target value => .assign (selfExpr self trait target) (selfExpr self trait value)
-
-end
+def selfExpr (self : String) (trait : Option (String × Expr)) : Expr → Expr := (selfRewrite self trait).ex
+def selfClause (self : String) (trait : Option (String × Expr)) : Clause → Clause := (selfRewrite self trait).clause
+def selfStmt (self : String) (trait : Option (String × Expr)) : Stmt → Stmt := (selfRewrite self trait).st
 
 
 /-- `&value` and `&mut value` where the value has no name. -/
@@ -1282,110 +1290,47 @@ and the name the variable's cleanup is known by where it is one that asks. -/
 def movedFlag (x : String) : String := s!"%moved:{x}"
 def givenSite (x : String) : String := s!"%given:{x}"
 
-mutual
-
 /-- Every use of a variable's value marked: the flag is set, and then the
-value read. Borrows of the variable are left as they are. -/
-partial def markMoves (x : String) : Expr → Expr
-  | .name none y =>
-    if y == x then
-      .labelScope "%block" [.assign (.name none (movedFlag x)) (.int 1), .expr (.name none x)]
-    else .name none y
-  | .call id f args => .call id (markMoves x f) (args.map (markMoves x))
-  | .tailCall id f args => .tailCall id (markMoves x f) (args.map (markMoves x))
-  | .tuple args => .tuple (args.map (markMoves x))
-  -- (A part of the variable read where it is is not its value used.)
-  | .proj e i => if placeRoot e == some x then .proj e i else .proj (markMoves x e) i
-  | .deref e => .deref (markMoves x e)
-  | .reborrow u e => .reborrow u (markMoves x e)
-  | .fieldOf id e n => if placeRoot e == some x then .fieldOf id e n else .fieldOf id (markMoves x e) n
-  | .closure id clauses => .closure id (clauses.map fun
-      | .mk pats body => .mk pats (markMovesStmts x body))
-  | .handle subject arms => .handle (markMoves x subject) (arms.map fun
-      | .mk pats body => .mk pats (markMovesStmts x body))
-  | .labelScope l body => .labelScope l (markMovesStmts x body)
-  | e => e
+value read. Borrows of the variable are left as they are; and a part of the
+variable read where it is is not its value used. -/
+def markMovesRewrite (x : String) : Rewrite where
+  onExpr _
+    | .name none y =>
+      if y == x then some (.labelScope "%block" [.assign (.name none (movedFlag x)) (.int 1), .expr (.name none x)])
+      else none
+    | .proj e i => if placeRoot e == some x then some (.proj e i) else none
+    | .fieldOf id e n => if placeRoot e == some x then some (.fieldOf id e n) else none
+    | _ => none
+  onStmt go
+    | .assign target e => some (.assign target (go.ex e))
+    | _ => none
 
-partial def markMovesStmts (x : String) (body : List Stmt) : List Stmt :=
-  body.map (markMovesStmt x)
-
-partial def markMovesStmt (x : String) : Stmt → Stmt
-  | .let_ p e => .let_ p (markMoves x e)
-  | .letMut y e => .letMut y (markMoves x e)
-  | .expr e => .expr (markMoves x e)
-  | .defer e => .defer (markMoves x e)
-  | .located l c s => .located l c (markMovesStmt x s)
-  | .assign target e => .assign target (markMoves x e)
-
-end
-
-mutual
+def markMoves (x : String) : Expr → Expr := (markMovesRewrite x).ex
+def markMovesStmts (x : String) : List Stmt → List Stmt := (markMovesRewrite x).stmts
 
 /-- What follows a variable with each read of a part of it, `x.f`, left out:
 what remains is where the variable's whole value is used. -/
-partial def lessParts (x : String) : Expr → Expr
-  | .call id f args => .call id (lessParts x f) (args.map (lessParts x))
-  | .tailCall id f args => .tailCall id (lessParts x f) (args.map (lessParts x))
-  | .tuple args => .tuple (args.map (lessParts x))
-  | .proj e i => if placeRoot e == some x then .int 0 else .proj (lessParts x e) i
-  | .deref e => .deref (lessParts x e)
-  | .reborrow u e => .reborrow u (lessParts x e)
-  | .fieldOf id e n => if placeRoot e == some x then .int 0 else .fieldOf id (lessParts x e) n
-  | .closure id clauses => .closure id (clauses.map fun
-      | .mk pats body => .mk pats (lessPartsStmts x body))
-  | .handle subject arms => .handle (lessParts x subject) (arms.map fun
-      | .mk pats body => .mk pats (lessPartsStmts x body))
-  | .labelScope l body => .labelScope l (lessPartsStmts x body)
-  | e => e
-
-partial def lessPartsStmts (x : String) (body : List Stmt) : List Stmt :=
-  body.map (lessPartsStmt x)
-
-partial def lessPartsStmt (x : String) : Stmt → Stmt
-  | .let_ p e => .let_ p (lessParts x e)
-  | .letMut y e => .letMut y (lessParts x e)
-  | .expr e => .expr (lessParts x e)
-  | .defer e => .defer (lessParts x e)
-  | .located l c s => .located l c (lessPartsStmt x s)
-  | .assign target e =>
+def lessPartsRewrite (x : String) : Rewrite where
+  onExpr _
+    | .proj e _ | .fieldOf _ e _ => if placeRoot e == some x then some (.int 0) else none
+    | _ => none
+  onStmt go
     -- (Nor is a part of it written.)
-    .assign (if placeRoot target == some x then .name none "%place" else lessParts x target) (lessParts x e)
+    | .assign target e =>
+      if placeRoot target == some x then some (.assign (.name none "%place") (go.ex e)) else none
+    | _ => none
 
-end
-
-mutual
+def lessParts (x : String) : Expr → Expr := (lessPartsRewrite x).ex
+def lessPartsStmts (x : String) : List Stmt → List Stmt := (lessPartsRewrite x).stmts
 
 /-- Is a name used other than by reading a part of it, `x.f`: as a whole,
 borrowed, or written? -/
 partial def usedWhole (x : String) : Expr → Bool
-  | .name none y => y == x
-  | .ref _ y => y == x
-  | .refField _ _ y _ _ => y == x
-  | .fieldOf _ (.name none _) _ => false
-  | .proj (.name none _) _ => false
-  | .call _ f args => (f :: args).any (usedWhole x)
-  | .tailCall _ f args => (f :: args).any (usedWhole x)
-  | .tuple args => args.any (usedWhole x)
-  | .proj e _ => usedWhole x e
-  | .deref e => usedWhole x e
-  | .reborrow _ e => usedWhole x e
-  | .fieldOf _ e _ => usedWhole x e
-  | .closure _ clauses => clauses.any fun
-      | .mk _ body => body.any (usedWholeStmt x)
-  | .handle subject arms => usedWhole x subject || arms.any fun
-      | .mk _ body => body.any (usedWholeStmt x)
-  | .labelScope _ body => body.any (usedWholeStmt x)
-  | _ => false
+  | .name none y | .ref _ y | .refField _ _ y _ _ => y == x
+  | .fieldOf _ (.name none _) _ | .proj (.name none _) _ => false
+  | e => e.children.any (usedWhole x)
 
-partial def usedWholeStmt (x : String) : Stmt → Bool
-  | .let_ _ e => usedWhole x e
-  | .letMut _ e => usedWhole x e
-  | .expr e => usedWhole x e
-  | .defer e => usedWhole x e
-  | .located _ _ s => usedWholeStmt x s
-  | .assign target e => usedWhole x target || usedWhole x e
-
-end
+def usedWholeStmt (x : String) (s : Stmt) : Bool := s.exprs.any (usedWhole x)
 
 /-- The place of a field read by name before the type it is read from was
 known: found from the name once the type is. -/
@@ -1407,43 +1352,13 @@ def partRead (x : String) : Expr → Option String
   | .proj (.name none y) i => if y == x then some (toString i) else none
   | _ => none
 
-mutual
-
 /-- What follows a name with every read of a part of it but one left out:
 where that one part is used. -/
-partial def onlyPart (x part : String) : Expr → Expr
-  | .call id f args => .call id (onlyPart x part f) (args.map (onlyPart x part))
-  | .tailCall id f args => .tailCall id (onlyPart x part f) (args.map (onlyPart x part))
-  | .tuple args => .tuple (args.map (onlyPart x part))
-  | .proj e i =>
-    match partRead x (.proj e i) with
-    | some p => if p == part then .name none x else .int 0
-    | none => .proj (onlyPart x part e) i
-  | .deref e => .deref (onlyPart x part e)
-  | .reborrow u e => .reborrow u (onlyPart x part e)
-  | .fieldOf id e n =>
-    match partRead x (.fieldOf id e n) with
-    | some p => if p == part then .name none x else .int 0
-    | none => .fieldOf id (onlyPart x part e) n
-  | .closure id clauses => .closure id (clauses.map fun
-      | .mk pats body => .mk pats (onlyPartStmts x part body))
-  | .handle subject arms => .handle (onlyPart x part subject) (arms.map fun
-      | .mk pats body => .mk pats (onlyPartStmts x part body))
-  | .labelScope l body => .labelScope l (onlyPartStmts x part body)
-  | e => e
+def onlyPartRewrite (x part : String) : Rewrite where
+  onExpr _ e := (partRead x e).map fun p => if p == part then .name none x else .int 0
 
-partial def onlyPartStmts (x part : String) (body : List Stmt) : List Stmt :=
-  body.map (onlyPartStmt x part)
-
-partial def onlyPartStmt (x part : String) : Stmt → Stmt
-  | .let_ p e => .let_ p (onlyPart x part e)
-  | .letMut y e => .letMut y (onlyPart x part e)
-  | .expr e => .expr (onlyPart x part e)
-  | .defer e => .defer (onlyPart x part e)
-  | .located l c s => .located l c (onlyPartStmt x part s)
-  | .assign target e => .assign (onlyPart x part target) (onlyPart x part e)
-
-end
+def onlyPart (x part : String) : Expr → Expr := (onlyPartRewrite x part).ex
+def onlyPartStmts (x part : String) : List Stmt → List Stmt := (onlyPartRewrite x part).stmts
 
 /-- Is the value a name holds used as it is, with no borrow of the name and
 nothing written to it after? Then the name gives its value away where it is
@@ -1503,84 +1418,24 @@ def valueLike : Expr → Bool
   | .call _ _ _ => true
   | _ => false
 
-mutual
-
 /-- `&list[i]` of a parameter `list` written with a reference's type: the
 element through `list`, as `element_at(list, i)`. -/
-partial def throughParamsExpr (refs : List String) : Expr → Expr
-  | .call id f args =>
-    let args := args.map (throughParamsExpr refs)
-    let args := match f, args with
-      | .name _ "element_at", [.ref false x, i] => if refs.contains x then [Expr.name none x, i] else args
-      | .name _ "place_at", [i, .ref true x] => if refs.contains x then [i, Expr.name none x] else args
-      | _, _ => args
-    .call id (throughParamsExpr refs f) args
-  | .tailCall id f args => .tailCall id (throughParamsExpr refs f) (args.map (throughParamsExpr refs))
-  | .tuple args => .tuple (args.map (throughParamsExpr refs))
-  | .proj e i => .proj (throughParamsExpr refs e) i
-  | .closure id clauses => .closure id (clauses.map fun
-    | .mk pats body => .mk pats (body.map (throughParamsStmt refs)))
-  | .handle subject arms => .handle (throughParamsExpr refs subject) (arms.map fun
-    | .mk pats body => .mk pats (body.map (throughParamsStmt refs)))
-  | .labelScope l body => .labelScope l (body.map (throughParamsStmt refs))
-  | .deref e => .deref (throughParamsExpr refs e)
-  | .reborrow u e => .reborrow u (throughParamsExpr refs e)
-  | .fieldOf id e name => .fieldOf id (throughParamsExpr refs e) name
-  | e => e
+def throughParamsRewrite (refs : List String) : Rewrite where
+  onExpr go
+    | .call id f args =>
+      let args := args.map go.ex
+      let args := match f, args with
+        | .name _ "element_at", [.ref false x, i] => if refs.contains x then [Expr.name none x, i] else args
+        | .name _ "place_at", [i, .ref true x] => if refs.contains x then [i, Expr.name none x] else args
+        | _, _ => args
+      some (.call id (go.ex f) args)
+    | _ => none
 
-partial def throughParamsStmt (refs : List String) : Stmt → Stmt
-  | .let_ pat value => .let_ pat (throughParamsExpr refs value)
-  | .letMut x value => .letMut x (throughParamsExpr refs value)
-  | .expr e => .expr (throughParamsExpr refs e)
-  | .defer e => .defer (throughParamsExpr refs e)
-  | .assign target value => .assign (throughParamsExpr refs target) (throughParamsExpr refs value)
-  | .located line col s => .located line col (throughParamsStmt refs s)
-
-end
-
-mutual
-
-/-- A value that is given a name and then borrowed with `&` has to be
-somewhere a reference can point. Where the name is never changed, borrowed
-for writing or bound again, the binding is made a variable's, which is such a
-place; the checker still sees no assignment to it, since there is none. -/
-partial def promoteExpr : Expr → Expr
-  | .call id f args =>
-    -- (`if(e is Some(n)) { .. &n .. }`: the names an `is` among the
-    -- arguments binds are the blocks' after it, and are kept where a
-    -- reference can point as a clause's are.)
-    let isNames := fun (e : Expr) => match e with
-      | .call _ (.name none m) [_, .closure _ [.mk [pat] []]] =>
-        if m == isMark then patternNames pat else []
-      | .closure _ [.mk [] [.expr (.call _ (.name none m) [_, .closure _ [.mk [pat] []]])]] =>
-        if m == isMark then patternNames pat else []
-      | _ => []
-    let named := args.flatMap isNames
-    let args := args.map promoteExpr
-    let args := if named.isEmpty then args else args.map fun
-      | .closure cid [.mk [] body] =>
-        let held := named.eraseDups.filter (borrowedOnly · body)
-        let placed := fun (s : Stmt) => match body with
-          | .located line col _ :: _ => Stmt.located line col s
-          | _ => s
-        .closure cid [.mk [] (held.map (fun x => placed (.letMut x (.name none x))) ++ body)]
-      | a => a
-    .call id (promoteExpr f) args
-  | .tailCall id f args => .tailCall id (promoteExpr f) (args.map promoteExpr)
-  | .tuple args => .tuple (args.map promoteExpr)
-  | .proj e i => .proj (promoteExpr e) i
-  | .closure id clauses => .closure id (clauses.map (promoteClause []))
-  | .handle subject arms => .handle (promoteExpr subject) (arms.map (promoteClause []))
-  | .labelScope l body => .labelScope l (promoteStmts body)
-  | .deref e => .deref (promoteExpr e)
-  | .reborrow uniq e => .reborrow uniq (promoteExpr e)
-  | .fieldOf id e name => .fieldOf id (promoteExpr e) name
-  | e => e
-
-partial def promoteClause (values : List String) : Clause → Clause
+/-- The names a clause binds that are only borrowed in it, or (of `values`,
+the parameters whose written types are not references') only borrowed by
+field, each kept in a variable of the same name where the clause starts. -/
+def promoteHeld (values : List String) : Clause → Clause
   | .mk pats body =>
-    let body := promoteStmts body
-    -- (`values`: the parameters whose written types are not references'.)
     let held := ((pats.flatMap patternNames).eraseDups).filter fun x =>
       borrowedOnly x body || (values.contains x && fieldBorrowedOnly x body)
     -- (Each is where the clause's first statement is: what the variable
@@ -1590,25 +1445,54 @@ partial def promoteClause (values : List String) : Clause → Clause
       | _ => s
     .mk pats (held.map (fun x => placed (.letMut x (.name none x))) ++ body)
 
-partial def promoteStmts : List Stmt → List Stmt
-  | [] => []
-  | s :: rest =>
-    let rest := promoteStmts rest
-    let rec here : Stmt → List Stmt
-      | .located line col s => (here s).map (.located line col)
-      | .let_ (.var x) e =>
-        if borrowedOnly x rest || (valueLike e && fieldBorrowedOnly x rest) then [.letMut x (promoteExpr e)]
-        else [.let_ (.var x) (promoteExpr e)]
-      | .let_ pat e =>
-        let held := (patternNames pat).eraseDups.filter (borrowedOnly · rest)
-        .let_ pat (promoteExpr e) :: held.map fun x => Stmt.letMut x (.name none x)
-      | .letMut y e => [.letMut y (promoteExpr e)]
-      | .expr e => [.expr (promoteExpr e)]
-      | .defer e => [.defer (promoteExpr e)]
-      | .assign target e => [.assign (promoteExpr target) (promoteExpr e)]
-    here s ++ rest
+/-- A value that is given a name and then borrowed with `&` has to be
+somewhere a reference can point. Where the name is never changed, borrowed
+for writing or bound again, the binding is made a variable's, which is such a
+place; the checker still sees no assignment to it, since there is none. -/
+def promoteRewrite : Rewrite where
+  onExpr go
+    | .call id f args =>
+      -- (`if(e is Some(n)) { .. &n .. }`: the names an `is` among the
+      -- arguments binds are the blocks' after it, and are kept where a
+      -- reference can point as a clause's are.)
+      let isNames := fun (e : Expr) => match e with
+        | .call _ (.name none m) [_, .closure _ [.mk [pat] []]] =>
+          if m == isMark then patternNames pat else []
+        | .closure _ [.mk [] [.expr (.call _ (.name none m) [_, .closure _ [.mk [pat] []]])]] =>
+          if m == isMark then patternNames pat else []
+        | _ => []
+      let named := args.flatMap isNames
+      let args := args.map go.ex
+      let args := if named.isEmpty then args else args.map fun
+        | .closure cid [.mk [] body] =>
+          let held := named.eraseDups.filter (borrowedOnly · body)
+          let placed := fun (s : Stmt) => match body with
+            | .located line col _ :: _ => Stmt.located line col s
+            | _ => s
+          .closure cid [.mk [] (held.map (fun x => placed (.letMut x (.name none x))) ++ body)]
+        | a => a
+      some (.call id (go.ex f) args)
+    | _ => none
+  onClause go c := some (promoteHeld [] (match c with | .mk pats body => .mk pats (go.stmts body)))
+  onStmts go
+    | [] => none
+    | s :: rest =>
+      let rest := go.stmts rest
+      let rec here : Stmt → List Stmt
+        | .located line col s => (here s).map (.located line col)
+        | .let_ (.var x) e =>
+          if borrowedOnly x rest || (valueLike e && fieldBorrowedOnly x rest) then [.letMut x (go.ex e)]
+          else [.let_ (.var x) (go.ex e)]
+        | .let_ pat e =>
+          let held := (patternNames pat).eraseDups.filter (borrowedOnly · rest)
+          .let_ pat (go.ex e) :: held.map fun x => Stmt.letMut x (.name none x)
+        | s => [go.st s]
+      some (here s ++ rest)
 
-end
+/-- A clause made so (`promoteRewrite`), with `values` as its parameters
+whose written types are not references'. -/
+def promoteClause (values : List String) : Clause → Clause
+  | .mk pats body => promoteHeld values (.mk pats (promoteRewrite.stmts body))
 
 /-- The same for every function of a text. -/
 partial def promoteItems (items : List Item) : List Item :=
@@ -1628,42 +1512,26 @@ partial def promoteItems (items : List Item) : List Item :=
             | (.var x, some (.ref _ _ _)) => some x
             | _ => none
         let c := if refs.isEmpty then c else match c with
-          | .mk pats body => .mk pats (body.map (throughParamsStmt refs))
+          | .mk pats body => .mk pats ((throughParamsRewrite refs).stmts body)
         promoteClause values (nameBorrowsClause c))
     | .pub parent item => .pub parent ((promoteItems [item]).headD item)
     | .module name (some inner) => .module name (some (promoteItems inner))
     | .impl ps tr head args context methods => .impl ps tr head args context (promoteItems methods)
     | item => item
 
-mutual
+/-- Every identity moved on by `k`: a copy of a function is then told apart
+from the function and from every other copy. -/
+def shiftRewrite (k : Nat) : Rewrite where
+  onExpr go
+    | .call id g args => some (.call (id + k) (go.ex g) (args.map go.ex))
+    | .tailCall id g args => some (.tailCall (id + k) (go.ex g) (args.map go.ex))
+    | .fieldOf id e name => some (.fieldOf (id + k) (go.ex e) name)
+    | .refField id uniq name path star => some (.refField (id + k) uniq name path star)
+    | .closure id clauses => some (.closure (id + k) (clauses.map go.clause))
+    | _ => none
 
-/-- An expression with every identity in it moved on by `k`: a copy of a
-function is then told apart from the function and from every other copy. -/
-partial def shiftExpr (k : Nat) : Expr → Expr
-  | .call id g args => .call (id + k) (shiftExpr k g) (args.map (shiftExpr k))
-  | .tailCall id g args => .tailCall (id + k) (shiftExpr k g) (args.map (shiftExpr k))
-  | .tuple args => .tuple (args.map (shiftExpr k))
-  | .proj e i => .proj (shiftExpr k e) i
-  | .fieldOf id e name => .fieldOf (id + k) (shiftExpr k e) name
-  | .refField id uniq name path star => .refField (id + k) uniq name path star
-  | .deref e => .deref (shiftExpr k e)
-  | .reborrow u e => .reborrow u (shiftExpr k e)
-  | .closure id clauses => .closure (id + k) (clauses.map (shiftClause k))
-  | .handle subject arms => .handle (shiftExpr k subject) (arms.map (shiftClause k))
-  | .labelScope l body => .labelScope l (body.map (shiftStmt k))
-  | e => e
-
-partial def shiftClause (k : Nat) : Clause → Clause
-  | .mk pats body => .mk pats (body.map (shiftStmt k))
-
-partial def shiftStmt (k : Nat) : Stmt → Stmt
-  | .let_ pat value => .let_ pat (shiftExpr k value)
-  | .letMut x value => .letMut x (shiftExpr k value)
-  | .expr e => .expr (shiftExpr k e)
-  | .defer e => .defer (shiftExpr k e)
-  | .assign target value => .assign (shiftExpr k target) (shiftExpr k value)
-  | .located line col s => .located line col (shiftStmt k s)
-
-end
+def shiftExpr (k : Nat) : Expr → Expr := (shiftRewrite k).ex
+def shiftClause (k : Nat) : Clause → Clause := (shiftRewrite k).clause
+def shiftStmt (k : Nat) : Stmt → Stmt := (shiftRewrite k).st
 
 end Glorious.Syntax

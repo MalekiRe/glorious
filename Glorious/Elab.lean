@@ -1144,36 +1144,12 @@ def staticMethod (tr : TraitInfo) (d : DictE) (idx : Nat) : Option (String × Li
     | none => none
   | .param _ => none
 
-mutual
-
 /-- Is there a `tail` call in an expression, at any depth? -/
 partial def tailsExpr : Expr → Bool
   | .tailCall _ _ _ => true
-  | .call _ f args => tailsExpr f || args.any tailsExpr
-  | .tuple args => args.any tailsExpr
-  | .proj e _ => tailsExpr e
-  | .deref e => tailsExpr e
-  | .reborrow _ e => tailsExpr e
-  | .fieldOf _ e _ => tailsExpr e
-  | .closure _ clauses => clauses.any fun
-    | .mk _ body => tailsStmts body
-  | .handle subject arms => tailsExpr subject || arms.any fun
-    | .mk _ body => tailsStmts body
-  | .labelScope _ body => tailsStmts body
-  | _ => false
+  | e => e.children.any tailsExpr
 
-partial def tailsStmts (body : List Stmt) : Bool :=
-  body.any fun s =>
-    let rec one : Stmt → Bool
-      | .let_ _ e => tailsExpr e
-      | .letMut _ e => tailsExpr e
-      | .expr e => tailsExpr e
-      | .defer e => tailsExpr e
-      | .located _ _ s => one s
-      | .assign target e => tailsExpr target || tailsExpr e
-    one s
-
-end
+def tailsStmts (body : List Stmt) : Bool := body.any (·.exprs.any tailsExpr)
 
 /-- The call that destroys a value, given how its type is destroyed: the
 type's function by name where the type is known, and else the function the
@@ -1386,7 +1362,7 @@ private partial def untraitStmts (tr : TraitInfo) (owner : String) (pos : Nat ×
       -- A variable that gives its value away where it is used: what it
       -- holds is destroyed when its block is left only if it was not. A
       -- flag says, set wherever the value is used.
-      match (tr.drops.lookup ⟨owner, pos.1, pos.2, Syntax.givenSite x, false⟩).bind
+      match (tr.dropsAt[(⟨owner, pos.1, pos.2, Syntax.givenSite x, false⟩ : DropSite)]?).bind
           fun id => tr.dictsAt[id]? with
       | some [d] =>
         let flag := Syntax.movedFlag x

@@ -376,38 +376,21 @@ mutual
 
 /-- Does the code assign the mutable variable `x`, or borrow it with `&mut`? -/
 partial def assignsExpr (x : String) : Expr → Bool
-  | .int _ => false
-  | .name _ _ => false
-  | .label _ => false
-  | .call _ f args => assignsExpr x f || args.any (assignsExpr x)
-  | .tailCall _ f args => assignsExpr x f || args.any (assignsExpr x)
-  | .tuple args => args.any (assignsExpr x)
-  | .proj e _ => assignsExpr x e
-  | .closure _ clauses => clauses.any (assignsClause x)
-  | .handle subject arms => assignsExpr x subject || arms.any (assignsClause x)
-  | .labelScope _ body => assignsStmts x body
-  | .ref uniq y => uniq && y == x
-  | .deref e => assignsExpr x e
-  | .reborrow _ e => assignsExpr x e
-  | .refField _ uniq y _ _ => uniq && y == x
-  | .fieldOf _ e _ => assignsExpr x e
+  | .ref uniq y | .refField _ uniq y _ _ => uniq && y == x
+  | e => e.direct.any (assignsExpr x) || e.bodies.any fun (_, body) => assignsStmts x body
 
-partial def assignsClause (x : String) : Clause → Bool
-  | .mk _ body => assignsStmts x body
-
-partial def assignsStmts (x : String) : List Stmt → Bool
-  | [] => false
-  | .let_ _ value :: rest => assignsExpr x value || assignsStmts x rest
-  | .expr e :: rest => assignsExpr x e || assignsStmts x rest
-  | .defer e :: rest => assignsExpr x e || assignsStmts x rest
-  | .located _ _ s :: rest => assignsStmts x (s :: rest)
-  | .letMut _ value :: rest => assignsExpr x value || assignsStmts x rest
-  | .assign target value :: rest =>
-    (match target with
-      | .name none y => y == x
-      | e => assignsExpr x e) || assignsExpr x value || assignsStmts x rest
+partial def assignsStmts (x : String) (body : List Stmt) : Bool :=
+  body.any fun s =>
+    let rec one : Stmt → Bool
+      | .located _ _ s => one s
+      | .assign (.name none y) value => y == x || assignsExpr x value
+      | s => s.exprs.any (assignsExpr x)
+    one s
 
 end
+
+def assignsClause (x : String) : Clause → Bool
+  | .mk _ body => assignsStmts x body
 
 /-- A `&mut` reference used as a value is lent: what is given is a reference
 that borrows from it. Anything else is given as it is. -/
