@@ -5330,6 +5330,24 @@ again.
   receivers and `&Pattern` moved after the checker. In the suite: 16 of 1911
   programs; in covey, none.
 
+## Why a borrow is not a scope of its own (measured)
+
+Of the suite's tries of one borrow alone as a scope of its own that fail
+(704, each with and without callables taken to bind the regions of the
+references they are given):
+
+| Why | Tries |
+|---|---|
+| The certificate inference found is turned away by the proved checker ("not typed at one of its signatures") | 337 |
+| A region leaves its variable's block | 185 |
+| A function's instance touches a region more than its use expects | 135 |
+| Two variables' references used as one | 34 |
+| Other | 13 |
+
+So nearly half are inference and the proved checker disagreeing about a
+lend, not the program: deciding scopes in inference (the plan's step 5)
+starts there, by making inference's account of `lend` the checker's.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by
