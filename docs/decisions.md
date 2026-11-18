@@ -5348,6 +5348,12 @@ So nearly half are inference and the proved checker disagreeing about a
 lend, not the program: deciding scopes in inference (the plan's step 5)
 starts there, by making inference's account of `lend` the checker's.
 
+How the search leaves the suite's places, in 672 programs: 1845 a scope
+around the statement or call (`1`), 75 lasting while what is made of them is
+used (`2`), 3 the third way, and 847 the plain reference (`0`). The search
+starts from every place a scope and takes out what fails; most of its tries
+are spent finding the `0`s.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by
