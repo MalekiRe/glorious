@@ -3765,6 +3765,18 @@ def cases : List Case := [
   -- what that is; `Self::Components` in an implementation's functions.)
   ⟨"pub struct Col<T>(T)\npub trait Registers<S> { type Out; fn register_all(S) -> Self::Out; }\nimpl<S> Registers<S> for () { type Out = S; fn register_all(c) { c } }\nimpl<H, ..R, S> Registers<S> for (H, ..R) where (..R): Registers<S>, H: Default {\n    type Out = (Col<H>, <(..R) as Registers<S>>::Out);\n    fn register_all(c) { (Col(default<H>()), <(..R) as Registers<S>>::register_all(c)) }\n}\npub struct App<S> { s: S }\nimpl<S> App<S> {\n    pub fn register_all<C>(app: Self) -> App<<C as Registers<S>>::Out> where C: Registers<S> {\n        let App { s } = app;\n        App { s: <C as Registers<S>>::register_all(s) }\n    }\n}\nuse core::value::{Default, default};\npub trait Plugin<S> {\n    type Components = ();\n    fn register(app: App<S>) -> App<<Self::Components as Registers<S>>::Out> { app.register_all<Self::Components>() }\n    fn build(Self, App<<Self::Components as Registers<S>>::Out>) -> Int;\n}\npub struct P\npub struct Q\nimpl<S> Plugin<S> for P {\n    type Components = (Int,);\n    fn build(p, app) { let App { s } = app; let (Col(n), _) = s; n + 7 }\n}\nimpl<S> Plugin<S> for Q {\n    fn build(q, app) { 1 }\n}\nfn add<S, X>(app: App<S>, x: X) -> Int where X: Plugin<S> { <X as Plugin<S>>::build(x, <X as Plugin<S>>::register(app)) }\nfn main() -> Int { add(App { s: () }, P) + add(App { s: \"x\" }, Q) * 100 }",
     [], "107"⟩,
+  -- (Constants, and `const { .. }` blocks, are worked out at compile
+  -- time, on the Core machine: what goes wrong there is said there.)
+  ⟨"fn fact(n: Int) -> Int { if(n <= 1) { 1 } else { n * fact(n - 1) } }\nconst F: Int = fact(10);\nfn main() -> Int { let x = const { F / 100 }; x }",
+    [], "36288"⟩,
+  ⟨"fn checked() -> Int { assert_message(1 + 1 == 3, \"arithmetic is broken\"); 5 }\nconst OK: Int = checked();\nfn main() -> Int { OK }",
+    [], "error: the constant `OK` could not be worked out at compile time: it went wrong, having written: arithmetic is broken"⟩,
+  ⟨"trait Valid { const VALID: Bool; }\nstruct A\nimpl Valid for A { const VALID: Bool = false; }\nfn main() -> Int { const { assert_message(<A as Valid>::VALID, \"A is not valid\") }; 0 }",
+    [], "error: a `const { .. }` block could not be worked out at compile time: it went wrong, having written: A is not valid"⟩,
+  ⟨"fn spin(n: Int) -> Int { spin(n + 1) }\nconst L: Int = spin(0);\nfn main() -> Int { L }",
+    [], "error: the constant `L` could not be worked out at compile time: it did not finish in 1000000 steps"⟩,
+  ⟨"fn main() -> Int { let y = 3; const { y + 1 } }",
+    [], "error: 1:39: in a `const { .. }` block (worked out at compile time, from constants and functions alone): unknown name `y`"⟩,
   -- (An element of what a reference is to is borrowed through it.)
   ⟨"fn first(r: &[Int]) -> Int { let e = &r[0]; *e }\nfn main() -> Int { first(&[7, 8]) }",
     [], "7"⟩,

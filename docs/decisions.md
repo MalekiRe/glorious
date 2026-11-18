@@ -5272,6 +5272,36 @@ Covey is the toolbox for finding what the language lacks. Rewriting it after
   borrowed, as Rust borrows it: the checker asks for the program to be read
   again with that one borrowed. Fixed.
 
+## Constants are worked out at compile time
+
+A constant, `const NAME: T = value;`, was a name for its expression, worked
+out again at every use, while the program ran. Constants are now worked out
+once, when the program is compiled, as Jai's `#run` and Zig's `comptime`
+are:
+
+- A constant whose value is not written out (`fact(10)`, `3 * 4`) is a
+  function of its own, `NAME$const`, which every use calls. Once the program
+  is Core, `Comptime.evaluate` runs each such function on the Core machine,
+  the proved one, for at most a million steps, and writes what it gives back
+  as the function's body: a value built from nothing (`Comptime.literal`).
+  What runs is the value, not the work of making it.
+- A value written out (`3`, `Some(4)`, `"text"`) stays a name for it, as
+  before: such a constant can be a pattern.
+- `const { .. }` in an expression is a block worked out the same way: a
+  function of the module, which uses nothing of where it is written.
+  Upstream covey's `const { assert!(F::VALID) }` is
+  `const { assert_message(<F as Access>::VALID, "..") }`.
+- What goes wrong while a constant is worked out is a compile error that
+  names the constant or the block and says what it wrote (a failed
+  `assert_message` writes its message), or that it did not finish. A value
+  there only while a program runs, a callable or a reference, cannot be a
+  constant.
+
+Not yet: a constant of a type parameter, `<F as Access>::VALID` in a generic
+function, worked out in each copy of the function at the types it is used
+at. That needs those copies, which the elaborator makes only where every
+dictionary is known.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by

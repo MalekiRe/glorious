@@ -1801,6 +1801,8 @@ def reachable (roots : List String) (items : List Item) : List Item := Id.run do
     match item with
     | .fn name _ _ _ clauses =>
       acc.insert name ((acc.getD name []) ++ clauses.flatMap (fvClause []))
+    -- (A name for an expression, a constant's: what the expression uses.)
+    | .alias name value => acc.insert name ((acc.getD name []) ++ fvExpr [] value)
     | _ => acc
   let mut seen : Std.HashSet String := {}
   let mut todo := roots

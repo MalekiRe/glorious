@@ -81,7 +81,8 @@ private partial def parseItem : P Item := do
       | some ty => Expr.call 0 (.name none ascribeMark) [value, ty.asExpr]
       | none => value))
   | .ident "const" =>
-    -- `const NAME: Type = value;`: a value with a name, as `let` is here.
+    -- `const NAME: Type = value;`: worked out once, at compile time
+    -- (`constItems`).
     advance
     let name ← expectIdent
     expectPunct ":"
@@ -89,7 +90,7 @@ private partial def parseItem : P Item := do
     expectPunct "="
     let value ← parseBinary 0 false
     expectPunct ";"
-    pure (.alias name (Expr.call 0 (.name none ascribeMark) [value, ty.asExpr]))
+    pure (.alias name (Expr.call 0 (.name none comptimeMark) [Expr.call 0 (.name none ascribeMark) [value, ty.asExpr]]))
   | .ident "impl" =>
     advance
     -- (`impl<T: Show> ..`: what is asked of a parameter, as `where T: Show`.)
@@ -170,7 +171,8 @@ private partial def parseItem : P Item := do
           expectPunct "="
           let value ← parseBinary 0 false
           expectPunct ";"
-          let c := Item.alias s!"{tr}::{name}" (Expr.call 0 (.name none ascribeMark) [value, ty.asExpr])
+          let c := Item.alias s!"{tr}::{name}"
+            (Expr.call 0 (.name none comptimeMark) [Expr.call 0 (.name none ascribeMark) [value, ty.asExpr]])
           items := items.push (match vis with
             | some parent => .pub parent c
             | none => c)
@@ -764,6 +766,38 @@ private partial def parseExtern : P (List Item) := do
   expectPunct "}"
   pure items.toList
 
+/-- Is this a value written out, with nothing to work out: a number, a
+text, a constructor of such, a tuple of them, given a type? -/
+private partial def writtenOut : Expr → Bool
+  | .int _ => true
+  | .name none x => (x.splitOn "::").getLastD x |>.front.isUpper
+  | .tuple es => es.all writtenOut
+  | .call _ (.name none mark) [value, _] => mark == ascribeMark && writtenOut value
+  | .call _ (.name q f) args =>
+    (q == some "%prelude" || ((f.splitOn "::").getLastD f).front.isUpper || isScalar f) && args.all writtenOut
+  | _ => false
+
+/-- Each constant, `const NAME: T = value;`, as a function that works its
+value out (`NAME$const`, run at compile time), and the name, which reads
+what that function gave. -/
+private def constItems (items : List Item) : List Item :=
+  items.flatMap fun
+    | .alias name (.call _ (.name none mark) [value]) =>
+      -- (A value written out, `3`, `Some(4)`, `"text"`, is one already: it
+      -- stays a name for it, which a pattern can be.)
+      if mark == comptimeMark && writtenOut value then [.alias name value]
+      else if mark == comptimeMark then
+        let fn := constFnName name
+        [.alias name (.call 0 (.name none fn) []), .fn fn [] [] none [.mk [] [.expr value]]]
+      else [.alias name (.call 0 (.name none mark) [value])]
+    | .pub parent (.alias name (.call _ (.name none mark) [value])) =>
+      if mark == comptimeMark && writtenOut value then [.pub parent (.alias name value)]
+      else if mark == comptimeMark then
+        let fn := constFnName name
+        [.pub parent (.alias name (.call 0 (.name none fn) [])), .pub parent (.fn fn [] [] none [.mk [] [.expr value]])]
+      else [.pub parent (.alias name (.call 0 (.name none mark) [value]))]
+    | item => [item]
+
 /-- A declaration, and with it what was written beside it. -/
 private partial def parseItemGroup : P (List Item) := do
   match ← peek with
@@ -780,7 +814,10 @@ private partial def parseItemGroup : P (List Item) := do
     -- not for what is written out beside it.
     match ← parseItemGroup with
     | items@(.import _ _ _ :: _) => pure (items.map (.pub parent))
-    | item :: more => pure (.pub parent item :: more)
+    -- (A constant's function is as visible as it is: its uses call it.)
+    | item :: more => pure (.pub parent item :: more.map fun
+        | .fn n ps annots ret clauses => if isConstFn n then .pub parent (.fn n ps annots ret clauses) else .fn n ps annots ret clauses
+        | other => other)
     | [] => pure []
   | .ident "mod" =>
     advance
@@ -876,8 +913,8 @@ private partial def parseItemGroup : P (List Item) := do
   | _ =>
     match ← parseItem with
     -- The functions of `impl Type { .. }` are this module's.
-    | .module name (some items) => if name == inherentMark then pure items else pure [.module name (some items)]
-    | item => pure [item]
+    | .module name (some items) => if name == inherentMark then pure (constItems items) else pure [.module name (some items)]
+    | item => pure (constItems [item])
 
 private partial def parseItems : P (List Item) := do
   let mut out : Array Item := #[]

@@ -101,11 +101,17 @@ def positioned (line col : Nat) (msg : String) : String :=
 
 /-- Name the function a message is about, keeping its position in front. -/
 def inFunction (name : String) (msg : String) : String :=
+  -- (A constant's function is said as the constant, or as the block.)
+  let said := match name.splitOn "$const" with
+    | [bare, ""] =>
+      if ((bare.splitOn "::").getLastD bare).startsWith "const%" then "a `const { .. }` block (worked out at compile time, from constants and functions alone)"
+      else s!"the constant `{bare}`"
+    | _ => s!"`{name}`"
   if hasPosition msg then
     match msg.splitOn ": " with
-    | pos :: rest => s!"{pos}: in `{name}`: {": ".intercalate rest}"
+    | pos :: rest => s!"{pos}: in {said}: {": ".intercalate rest}"
     | [] => msg
-  else s!"in `{name}`: {msg}"
+  else s!"in {said}: {msg}"
 
 instance : Inhabited Clause := ⟨.mk [] []⟩
 
@@ -504,6 +510,17 @@ the type written as an expression so that it can sit among expressions: see
 `TypeExpr.asExpr`. The checker makes the value that type; after it the value
 stands alone. -/
 def ascribeMark : String := "%as"
+
+/-- Said of a constant's value, `const NAME: T = value;`: worked out once, at
+compile time, by a function of its own (`constFnName`, `NAME$const`), whose result is then
+what every use of the name reads. -/
+def comptimeMark : String := "%comptime"
+
+/-- The function that works out the constant `name` at compile time. -/
+def constFnName (name : String) : String := name ++ "$const"
+
+/-- Is this the function of a constant? -/
+def isConstFn (name : String) : Bool := name.endsWith "$const"
 
 /-- The trait every type has of being destroyed, and its one function. The
 compiler's own: where a value is let go, its type's function is called, and a

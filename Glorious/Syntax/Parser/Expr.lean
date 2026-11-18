@@ -523,6 +523,18 @@ partial def parsePrimary (noBlock : Bool) : P Expr := do
     let arms ← parseClauses
     expectPunct "}"
     pure (.handle subject arms)
+  | .ident "const" =>
+    -- `const { .. }`: a block worked out at compile time, as a constant is,
+    -- by a function of the module (it uses nothing of where it is written).
+    if (← peek 1) != .punct "{" then failAt "expected an expression"
+    let id := (← read).base + (← get)
+    advance
+    match ← parseBraces with
+    | .closure _ clauses =>
+      let fn := constFnName s!"const%{id}"
+      modifyThe (Array Item) (·.push (.fn fn [] [] none clauses))
+      pure (.call 0 (.name none fn) [])
+    | _ => failAt "expected a block after `const`"
   | .ident "fn" =>
     -- `fn(a: A, b) -> R / {E} { body }`: a callable written out. A type may
     -- be written of a parameter, and what it gives and performs after.

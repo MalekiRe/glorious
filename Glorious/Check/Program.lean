@@ -100,9 +100,17 @@ def checkItems (items : List Item) (seed : UInt64 := 0) (kept : Kept := []) : M 
           if b.trait.startsWith "'" || !b.args.isEmpty then none
           else (params.idxOf? b.subject).map (b.trait, ·)) }
   let names := decls.map (·.name)
+  -- (A name that stands for an expression, a constant's, mentions what that
+  -- does: the function that works the constant out.)
+  let aliasOf := items.filterMap fun
+    | .alias name value => some (name, Elab.fvExpr [] value)
+    | .pub _ (.alias name value) => some (name, Elab.fvExpr [] value)
+    | _ => none
   let mentions := fun (name : String) =>
     match decls.find? (·.name == name) with
-    | some d => ((d.clauses.flatMap (Elab.fvClause [])).filter names.contains).eraseDups
+    | some d =>
+      let fvs := d.clauses.flatMap (Elab.fvClause [])
+      ((fvs ++ fvs.flatMap fun x => (aliasOf.lookup x).getD []).filter names.contains).eraseDups
     | none => []
   let coercing := items.filterMap fun
     | .coerce name => some name

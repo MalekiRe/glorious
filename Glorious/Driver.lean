@@ -7,6 +7,7 @@ public import Glorious.Syntax.Modules
 public import Glorious.Elab
 public import Glorious.Elab.Instances
 public import Glorious.Elab.Specialize
+public import Glorious.Comptime
 public import Glorious.Check
 public import Glorious.Infer
 public import Glorious.Prelude
@@ -678,6 +679,11 @@ def lowered (b : Elab.Blocks) (written all : List Syntax.Item) :
     (b.envFns.lookup fn).map fun groups => (name, groups) }
   pure (items, b)
 
+/-- Elaborate, and work out the constants at compile time (`Comptime`). -/
+def elaborate (items : List Syntax.Item) (blocks : Option Elab.Blocks)
+    (lends : Nat → Nat := fun _ => 0) : Except String Elab.Output := do
+  Comptime.evaluate (← Elab.elabProgram items blocks lends)
+
 /-- Parse, check and elaborate a program together with the prelude, and have the
 proved Core type checker accept the result. With `check := false` both checks
 are skipped, so that programs which go wrong can still be run. -/
@@ -867,7 +873,7 @@ partial def compileSourceAt (src : String) (check : Bool := true)
     let reached := named (Elab.reachable roots all)
     let missing := own.filter (!reached.contains ·)
     unless missing.isEmpty do
-      match Elab.elabProgram (Elab.reachable (roots ++ missing) all) blocks with
+      match elaborate (Elab.reachable (roots ++ missing) all) blocks with
       | .error e => throw e
       | .ok _ => pure ()
   let all := Elab.reachable roots all
@@ -879,7 +885,7 @@ partial def compileSourceAt (src : String) (check : Bool := true)
        opNames := out.opNames, cert, lent, plain := out.plain, places, checkKept := checkMade
        inferMade := made, firstMade, libraryKept := libraryMade } : Compiled)
   let plain := fun (blocks : Option Elab.Blocks) (failed : List (Bool × Bool)) => do
-    let out ← Trace.timed "elaborate" fun _ => Elab.elabProgram all blocks
+    let out ← Trace.timed "elaborate" fun _ => elaborate all blocks
     -- What is unsafe is outside what Core's rules are about: a program that
     -- calls a foreign function or reads memory at an address has no
     -- certificate.
@@ -908,7 +914,7 @@ partial def compileSourceAt (src : String) (check : Bool := true)
   -- one of several cells, which a borrow's scope cannot give out, no place
   -- is tried alone.)
   let shownAtAll := fun (blocks : Option Elab.Blocks) (ranked : Bool) =>
-    match Trace.timed "elaborate (borrow scopes)" fun _ => Elab.elabProgram all blocks (fun _ => 0) with
+    match Trace.timed "elaborate (borrow scopes)" fun _ => elaborate all blocks (fun _ => 0) with
     | .ok out =>
       match Trace.timed "certify (borrow scopes)" fun _ =>
           certifyWith kept declared out.program true out.envSizes true true ranked false memo with
@@ -916,7 +922,7 @@ partial def compileSourceAt (src : String) (check : Bool := true)
       | .error _ => none
     | .error _ => none
   let lending := fun (blocks : Option Elab.Blocks) (ways : List Bool) (sites : Nat → Nat) =>
-    match Trace.timed "elaborate (borrow scopes)" fun _ => Elab.elabProgram all blocks sites with
+    match Trace.timed "elaborate (borrow scopes)" fun _ => elaborate all blocks sites with
     | .ok out =>
       -- As it is, and then with callables taken to bind the regions of the
       -- references they are given: a function lent to by itself needs that.
@@ -934,7 +940,7 @@ partial def compileSourceAt (src : String) (check : Bool := true)
   let placesKnown := known.filter fun (k, _) => k.1 != "%way"
   let build := fun (blocks : Option Elab.Blocks) => do
     if check then
-      if let .ok out := Elab.elabProgram all blocks (fun _ => 1) then
+      if let .ok out := elaborate all blocks (fun _ => 1) then
         if out.lent != 0 && !out.foreign then
           -- What an earlier compile found for each place is asked first, all
           -- at once; a place it did not see is asked alone first.
@@ -973,7 +979,7 @@ partial def compileSourceAt (src : String) (check : Bool := true)
           -- function, and the place it was made for, or every place of the
           -- function it is. Then each place taken out is tried back.
           let blame : List Nat → Sum Compiled (List Nat) := fun choice =>
-            match Elab.elabProgram all blocks (fun j => choice[j]?.getD 0) with
+            match elaborate all blocks (fun j => choice[j]?.getD 0) with
             | .error _ => Sum.inr []
             | .ok o =>
               let outcomes : List (Sum Compiled (List Nat)) := ways.map fun ranked =>
