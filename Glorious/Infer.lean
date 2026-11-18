@@ -193,7 +193,7 @@ def certifyM (items : List Item) (g : Elab.Globals) (p : Core.Program)
   modify fun s =>
     { s with
       anyCallable :=
-        (g.fns.lookup (implFnName Syntax.destroyTrait Syntax.callableHead Syntax.destroyFn)).toList
+        (g.fns[implFnName Syntax.destroyTrait Syntax.callableHead Syntax.destroyFn]?).toList
           ++ p.drops.map (·.2)
       armFns := armsOf p
       capArities := captureArities p

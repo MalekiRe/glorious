@@ -240,12 +240,12 @@ structure Blocks where
   decided : List Decision := []
 
 structure Globals where
-  ctors : List (String × CtorInfo) := []
+  ctors : Std.HashMap String CtorInfo := {}
   ops : List (String × OpInfo) := []
-  fns : List (String × Nat) := []
-  aliases : List (String × Expr) := []
+  fns : Std.HashMap String Nat := {}
+  aliases : Std.HashMap String Expr := {}
   /-- The clauses of each top-level function, by name. -/
-  bodies : List (String × List Clause) := []
+  bodies : Std.HashMap String (List Clause) := {}
   /-- The prelude's type of arrays, its function that adds an element, and
   the trait of `a[i]`, by the names they have in this program. -/
   arrays : Option (String × String × String) := none
@@ -831,7 +831,7 @@ def coerceFn (cs : Std.HashMap Site String) (name : String) (clauses : List Clau
 /-- Resolve a name to a constructor, following constructor aliases. -/
 partial def resolveCtor (name : String) (qual : Option String) : M (Option CtorInfo) := do
   let g ← read
-  match g.ctors.lookup name with
+  match g.ctors[name]? with
   | some info =>
     match qual with
     | some q =>
@@ -843,14 +843,14 @@ partial def resolveCtor (name : String) (qual : Option String) : M (Option CtorI
     -- many elements.
     if let some n := Syntax.arrayPatLen name then
       return some { owner := "", tag := arrayBase + n, arity := n, single := false }
-    match (g.aliases.lookup name).map Syntax.aliasValue with
+    match (g.aliases[name]?).map Syntax.aliasValue with
     | some (.name q y) => resolveCtor y q
     | _ => pure none
 
 /-- Does a bare name in a pattern bind a variable? -/
 def isBinder (x : String) : M Bool := do
   if (← resolveCtor x none).isSome then return false
-  return ((← read).aliases.lookup x).isNone
+  return !(← read).aliases.contains x
 
 /-- Does this pattern match every value? Decided from its shape alone, as the
 checker decides it. -/

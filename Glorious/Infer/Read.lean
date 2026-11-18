@@ -669,7 +669,7 @@ def declare (items : List Item) (g : Elab.Globals) : M Unit := do
     | .enum name params ctors =>
       let owner := (typeNames.idxOf? name).getD 0
       for (c, fields) in ctors do
-        match g.ctors.lookup c with
+        match g.ctors[c]? with
         | some info =>
           let fields ← fields.mapM (resolveType typeNames params [])
           modify fun s =>
@@ -679,7 +679,7 @@ def declare (items : List Item) (g : Elab.Globals) : M Unit := do
         | none => throw s!"constructor `{c}` was not collected"
     | .struct name params fields =>
       let owner := (typeNames.idxOf? name).getD 0
-      match g.ctors.lookup name with
+      match g.ctors[name]? with
       | some info =>
         let fields ← fields.mapM (resolveType typeNames params [])
         modify fun s =>

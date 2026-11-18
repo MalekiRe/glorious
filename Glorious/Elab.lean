@@ -46,7 +46,7 @@ partial def toCorePat : Pattern → M (Core.Pat × List String)
       if info.arity == 0 then pure (.ctor info.tag [], [])
       else throw s!"constructor `{x}` takes {info.arity} arguments"
     | none =>
-      match (← read).aliases.lookup x with
+      match (← read).aliases[x]? with
       | some e => do toCorePat (← exprToPat e)
       | none => pure (.bind, [x])
   | .ctor x q args => do
@@ -103,7 +103,7 @@ def resolveName (scope : Scope) (asked : Option String) (x : String) : M Head :=
     if let some q := qual then
       unless q == info.owner do throw s!"`{x}` is not an operation of `{q}`"
     return .op info
-  if let some idx := g.fns.lookup x then return .fn idx
+  if let some idx := g.fns[x]? then return .fn idx
   if let some (p, n) := prims.lookup x then return .prim p n
   if (Syntax.scalarCast x).isSome then return .cast
   if (Syntax.packNames x).isSome then return .pack
@@ -113,7 +113,7 @@ def resolveName (scope : Scope) (asked : Option String) (x : String) : M Head :=
   if x == "replace" then return .replace
   if x == "swap" then return .swap
   if x == "overwrite" then return .overwrite
-  if let some e := g.aliases.lookup x then return .const e
+  if let some e := g.aliases[x]? then return .const e
   throw s!"unknown name `{x}`"
 
 /-! ## Expressions -/
@@ -338,7 +338,7 @@ partial def elabCall (scope : Scope) (isTail : Bool) (f : Expr) (args : List Exp
       let callee ← emit (.mem .load [c])
       elabApply scope isTail callee args
     | .fn idx => do
-      let gives := givesOne (((← read).bodies.lookup x).getD [])
+      let gives := givesOne (((← read).bodies[x]?).getD [])
       let borrows := (args.zip (List.range args.length)).filterMap fun (a, i) =>
         (borrowOf a).map fun (uniq, _) => (i, uniq)
       -- (A borrow that was made before the statement, to last as long as
@@ -1689,13 +1689,13 @@ def collect (items : List Item) :
     match item with
     | .enum owner _ ctors =>
       for (c, fields) in ctors do
-        if (g.ctors.lookup c).isSome then throw s!"constructor `{c}` is declared twice"
+        if g.ctors.contains c then throw s!"constructor `{c}` is declared twice"
         g := { g with
-          ctors := (c, ⟨owner, names.size, fields.length, ctors.length == 1⟩) :: g.ctors }
+          ctors := g.ctors.insert c ⟨owner, names.size, fields.length, ctors.length == 1⟩ }
         names := names.push c
     | .struct owner _ fields =>
-      if (g.ctors.lookup owner).isSome then throw s!"constructor `{owner}` is declared twice"
-      g := { g with ctors := (owner, ⟨owner, names.size, fields.length, true⟩) :: g.ctors }
+      if g.ctors.contains owner then throw s!"constructor `{owner}` is declared twice"
+      g := { g with ctors := g.ctors.insert owner ⟨owner, names.size, fields.length, true⟩ }
       names := names.push owner
     | .effect owner _ ops =>
       for op in ops do
@@ -1705,10 +1705,10 @@ def collect (items : List Item) :
           ops := (op.name, ⟨owner, nextOp, op.payload.length, op.terminal⟩) :: g.ops }
         nextOp := nextOp + 1
     | .fn name _ _ _ clauses =>
-      if (g.fns.lookup name).isSome then throw s!"function `{name}` is declared twice"
-      g := { g with fns := (name, fns.size) :: g.fns, bodies := (name, clauses) :: g.bodies }
+      if g.fns.contains name then throw s!"function `{name}` is declared twice"
+      g := { g with fns := g.fns.insert name fns.size, bodies := g.bodies.insert name clauses }
       fns := fns.push (name, clauses)
-    | .alias name value => g := { g with aliases := (name, value) :: g.aliases }
+    | .alias name value => g := { g with aliases := g.aliases.insert name value }
     | .fixity => pure ()
     | .coerce _ => pure ()
     -- How often a value is to be used is the checker's business.
@@ -1789,7 +1789,7 @@ def elabProgram (items : List Item) (blocks : Option Blocks := none)
   let g := { g with blocks := blocks, lends := lends }
   let coercions := (blocks.getD {}).coercions
   let fns := fns.map fun (name, clauses) => (name, coerceFn coercions name clauses)
-  let mainIdx ← match g.fns.lookup "main" with
+  let mainIdx ← match g.fns["main"]? with
     | some idx => pure idx
     | none => throw "the program has no `main` function"
   let action : M Unit := do
