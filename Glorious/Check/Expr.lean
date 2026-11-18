@@ -55,6 +55,26 @@ def readPart (scope : Scope) (e : Expr) (subject : Ty) (idx : Nat) (name : Strin
         modify fun s => { s with leftBehind := s.leftBehind.push (r, s.pos ++ why) }
     | none => mustDrop subject why
 
+/-- Is `x` a value made where a dot call is made on it (`borrowed%call`),
+whose type has a function of its own of the name that takes it whole, where
+the function the resolver took borrows it? -/
+def wholeReceiver (x : String) (t : Ty) : M Bool := do
+  let some call := (x.splitOn "borrowed%").getLast? |>.bind String.toNat? | return false
+  unless x.startsWith "borrowed%" do return false
+  let some alts := dotAltsOf (← get).modules call | return false
+  let some (h, _) := (← find t).head | return false
+  let some alt := alts.find? (·.startsWith (h ++ "::")) | return false
+  let some scheme := (← get).fns.lookup alt | return false
+  let saved ← get
+  let whole ← match ← instantiate scheme with
+    | .fn (p :: _) _ _ _ _ =>
+      match ← find p with
+      | .ref .. => pure false
+      | _ => pure true
+    | _ => pure false
+  set saved
+  pure whole
+
 mutual
 
 partial def inferExpr (scope : Scope) (amb : Row) : Expr → M Ty
@@ -929,7 +949,11 @@ partial def inferCall (scope : Scope) (amb : Row) (f : Expr) (args : List Expr)
             -- whole: the receiver, a name borrowed for the one in scope, is
             -- given as it is.)
             if let (some k, some 0, .ref _ v) := (mine, theirs, a) then
-              if k != 0 && !v.startsWith "borrowed%" then
+              let moved := (← get).movedCells
+              let held := match scope.lookup v with
+                | some (.cell _ brand) => moved.contains brand
+                | _ => false
+              if k != 0 && (!v.startsWith "borrowed%" || held) then
                 let given := Expr.name none v
                 modify fun s => { s with dotChosen := (call, alt, 0) :: s.dotChosen,
                                          argsChosen := ((call, 0), given) :: s.argsChosen }
@@ -1546,7 +1570,10 @@ partial def inferStmts (scope : Scope) (amb : Row) (stmts : List Stmt)
     -- that can be borrowed: the value is given away by the use, counted as
     -- a name's uses are, and is not the variable's to destroy.
     -- (And is not borrowed again once it has been.)
-    let given := Syntax.givenAway x rest
+    -- (A value made where a dot call is made on it, named to be borrowed for
+    -- the function the resolver took, whose type's own function of the name
+    -- takes it whole: given to that one, `wholeReceiver`.)
+    let given := Syntax.givenAway x rest || (← wholeReceiver x t)
     modify fun s =>
       { s with
         cells := s.cells.push (brand, x, t)

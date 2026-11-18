@@ -3783,6 +3783,11 @@ def cases : List Case := [
     [], "7"⟩,
   ⟨"trait Valid { const VALID: Bool; }\nstruct A\nstruct B\nimpl Valid for A { const VALID: Bool = true; }\nimpl Valid for B { const VALID: Bool = false; }\nfn run<F>() -> Int where F: Valid { const { assert_message(<F as Valid>::VALID, \"this access is not valid\") }; 1 }\nfn main() -> Int { run<A>() + run<B>() }",
     [], "error: a `const { .. }` block could not be worked out at compile time: it went wrong, having written: this access is not valid"⟩,
+  -- (A dot call of a value made where it is called on, whose type's own
+  -- function takes it whole where another of the name borrows: chosen in
+  -- place, the value given whole.)
+  ⟨"pub struct W { pub n: Int }\npub struct A { pub n: Int }\nimpl W { pub fn add(w: &mut Self, k: Int) { w.n = w.n + k } }\nimpl A { pub fn add(a: Self, k: Int) -> A { A { n: a.n + k } } pub fn new() -> A { A { n: 1 } } pub fn twice(a: Self) -> A { A { n: a.n * 2 } } }\nfn main() -> Int { let mut w = W { n: 0 }; w.add(5); let a = A::new().twice().add(3); w.n * 100 + a.n }",
+    [], "505"⟩,
   -- (An element of what a reference is to is borrowed through it.)
   ⟨"fn first(r: &[Int]) -> Int { let e = &r[0]; *e }\nfn main() -> Int { first(&[7, 8]) }",
     [], "7"⟩,
