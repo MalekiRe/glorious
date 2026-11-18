@@ -2,6 +2,7 @@ module
 
 public import Glorious.Check.Group
 public import Glorious.Check.Merge
+public import Glorious.Elab.Specialize
 
 public section
 
@@ -68,6 +69,40 @@ def implFnDecls (im : ImplDecl) : M (List FnDecl) := do
                          params := im.params ++ inner ++ sig.mparams.map (·.1) ++ lifetimes, annots,
                          ret, clauses, impl := some (im, sig) }]
   pure out
+
+/-- Check a group, deciding where it is found what can be known only once
+types are (`Elab.Decision`): the group is checked again with it, from where
+it began, and it is kept for the program to be written with. What is said if
+a value kept in a variable is then refused is why it could not be left
+unused (`first`). -/
+partial def checkDeciding (decls : List FnDecl) (fuel : Nat := 64) (first : Option String := none) :
+    M Unit := do
+  let before ← get
+  try checkGroup decls
+  catch e =>
+    let said := Elab.withoutEta (Elab.withoutLetMut ((first.filter fun _ => (Elab.letMutFound e).isNone).getD e))
+    match fuel, Elab.decisionFound e with
+    | fuel + 1, some d =>
+      let items := decls.map fun d => Item.fn d.name d.params d.annots d.ret d.clauses
+      let after := Elab.decidedItems [d] items
+      let decls' := (decls.zip after).map fun
+        | (d, .fn _ _ _ _ clauses) => { d with clauses }
+        | (d, _) => d
+      -- (Nothing changed: what was said stands.)
+      if (decls'.map (·.clauses)).map hash == (decls.map (·.clauses)).map hash then throw said
+      set before
+      modify fun s =>
+        { s with decided := s.decided ++ [d]
+                 fnBodies := s.fnBodies.map fun (name, clauses) =>
+                   match decls'.find? (·.name == name) with
+                   | some d => (name, d.clauses)
+                   | none => (name, clauses)
+                 runFns := decls'.foldl (fun m d => m.insert d.name d.clauses) s.runFns }
+      let first := match d with
+        | .letMut .. => some (first.getD e)
+        | _ => first
+      checkDeciding decls' fuel first
+    | _, _ => throw said
 
 /-- Check items. With `kept` from an earlier check of a program that began
 alike (`seed`: what was checked before them), the state after each step whose
@@ -193,7 +228,7 @@ def checkItems (items : List Item) (seed : UInt64 := 0) (kept : Kept := []) : M 
       key := groupKey key group
       match look key with
       | some st => restore st ((groups.drop (k + 1)).flatten)
-      | none => checkGroup group
+      | none => checkDeciding group
       made := (key, ← get) :: made
     -- The functions implementations give, each on its own: any function may
     -- call them, but only through a trait, whose types are declared.
@@ -205,7 +240,7 @@ def checkItems (items : List Item) (seed : UInt64 := 0) (kept : Kept := []) : M 
           key := groupKey key [d]
           match look key with
           | some st => restore st []
-          | none => checkGroup [d]
+          | none => checkDeciding [d]
           made := (key, ← get) :: made
     for c in coercing do
       unless (((← get).fnBounds.lookup c).getD 0) == 0 do
@@ -313,7 +348,7 @@ def finish : M Elab.Blocks := do
     pure ⟨s.given.toList, links ++ s.envLinks.toList, s.coercions.toList,
       ⟨s.dictTable.toList, s.methodCalls.toList, s.fnBounds, implEs, s.dropSites.toList, destroys⟩,
       s.fieldTable.toList, s.fieldReads.toList, s.packs.toList, s.envFns, s.envWraps.toList,
-      s.derefReads.toList, s.siteTable, s.siteTypes, s.dotChosen, s.argsChosen⟩
+      s.derefReads.toList, s.siteTable, s.siteTypes, s.dotChosen, s.argsChosen, s.decided⟩
 
 /-- Check a whole program. Gives what the elaborator needs to know about its
 blocks: which take an argument they do not name, and for each that is handed a

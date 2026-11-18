@@ -124,6 +124,7 @@ def mergeStates (p a b : St) : Option St := do
   let fieldNames ← mergeList p.fieldNames a.fieldNames b.fieldNames
   let dotChosen ← mergeList p.dotChosen a.dotChosen b.dotChosen
   let argsChosen ← mergeList p.argsChosen a.argsChosen b.argsChosen
+  let decided ← mergeList p.decided a.decided b.decided
   let traitShape ← mergeList p.traitShape a.traitShape b.traitShape
   let assocUses ← mergeArr p.assocUses a.assocUses b.assocUses
   let writtenArgs ← mergeList p.writtenArgs a.writtenArgs b.writtenArgs
@@ -249,6 +250,7 @@ def mergeStates (p a b : St) : Option St := do
     rigidParams := b.rigidParams,
     dotChosen,
     argsChosen,
+    decided,
     wantResult := b.wantResult,
     traitShape,
     assocUses,

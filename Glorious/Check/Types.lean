@@ -532,6 +532,9 @@ structure St where
   by the call and the argument's place: a field borrowed where it is, or a
   reference made where the call is given as it is. -/
   argsChosen : List ((Nat × Nat) × Expr) := []
+  /-- What it decided of how the program is read, where it found it
+  (`Elab.Decision`). -/
+  decided : List Elab.Decision := []
   /-- The result a call is wanted to have, by the call (`applyTy`). -/
   wantResult : Option (Nat × Ty) := none
   /-- For each trait, how many type parameters it has and the names of the

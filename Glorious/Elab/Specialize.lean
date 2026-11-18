@@ -1021,4 +1021,22 @@ def splitFieldItems (all items : List Item) : List Item :=
         | item => item)
     | item => item
 
+/-- A program with what the checker decided written in, in the order it
+decided it; and whether each changed something. -/
+def decidedItems (decided : List Decision) (items : List Item) : List Item :=
+  decided.foldl (fun items d => match d with
+    | .rest id count => restItems id count items
+    | .eta owner x arity => (etaItems owner x arity items).1
+    | .letMut owner line col x => (letMutItems owner line col x items).1) items
+
+/-- What the checker says, if it is something to decide where it was found:
+`..` in a tuple pattern, a function named as a value, a value kept in a
+variable. -/
+def decisionFound (said : String) : Option Decision :=
+  match restFound said, etaFound said, letMutFound said with
+  | some (id, count), _, _ => some (.rest id count)
+  | none, some (owner, x, arity), _ => some (.eta owner x arity)
+  | none, none, some (owner, line, col, x) => some (.letMut owner line col x)
+  | none, none, none => none
+
 end Glorious.Elab

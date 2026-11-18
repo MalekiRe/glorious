@@ -123,6 +123,19 @@ structure TraitInfo where
 /-- The function that makes an implementation a value. -/
 def implDictName (trait head : String) : String := s!"impl {trait} for {head}"
 
+/-- Something the checker decides of how a program is to be read, which it
+finds only once it knows types, decided where it is found: the function it
+is in is checked again with it, not the program. -/
+inductive Decision where
+  /-- `..` in the tuple pattern `id` stands for `count` parts. -/
+  | rest (id count : Nat)
+  /-- In `owner`, the function `x` named as a value is a block that calls it. -/
+  | eta (owner x : String) (arity : Nat)
+  /-- In `owner`, what the `let` of `x` at `line:col` binds is kept in a
+  variable. -/
+  | letMut (owner : String) (line col : Nat) (x : String)
+  deriving Inhabited, BEq
+
 /-- What the checker tells the elaborator about the blocks of a program, each
 named by its identity. -/
 structure Blocks where
@@ -163,6 +176,9 @@ structure Blocks where
   dotChosen : List (Nat × String × Nat) := []
   /-- Arguments given as other than written (`Check.argsChosen`). -/
   argsChosen : List ((Nat × Nat) × Expr) := []
+  /-- What the checker decided of how the program is written, where it found
+  it, in the order decided: written into the program once it is checked. -/
+  decided : List Decision := []
 
 structure Globals where
   ctors : List (String × CtorInfo) := []

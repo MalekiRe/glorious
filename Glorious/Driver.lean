@@ -792,36 +792,17 @@ partial def compileSourceAt (src : String) (check : Bool := true)
       Check.checkUnitsKept { dropMode := drops } ((all.take count, hash resolved.info.text) :: cut (all.drop count))
         resolved.info (mixHash seed 77) checkKept (own := false)
     | _, _, _ => (Check.checkProgram all resolved.info drops).map (·, [], [])
-  -- (`..` in a tuple pattern: the checker says how many parts it stands
-  -- for, and the program is read again with them written.)
-  -- (A value used on one path and not on another, bound by `let`: kept in a
-  -- variable, as `let mut` keeps it, and the program read again. If that is
-  -- refused, what is said is why the value could not be left unused.)
-  let rec checkWith (fuel : Nat) (all : List Syntax.Item) (first : Option String) :
-      List Syntax.Item × Except String (Elab.Blocks × Check.Kept × Check.Kept) :=
-    match checkOnce all with
-    | .ok blocks => (all, .ok blocks)
-    | .error e =>
-      let said := Elab.withoutLetMut ((first.filter fun _ => (Elab.letMutFound e).isNone).getD e)
-      match fuel with
-      | 0 => (all, .error (Elab.withoutEta said))
-      | fuel + 1 =>
-        match Elab.etaFound e, Elab.restFound e, Elab.letMutFound e with
-        | some (owner, x, arity), _, _ =>
-          match Elab.etaItems owner x arity all with
-          | (all, true) => Trace.timed "check again: a function named as a value" fun _ => checkWith fuel all first
-          | _ => (all, .error (Elab.withoutEta said))
-        | none, some (id, count), _ => Trace.timed "check again: `..` in a tuple pattern" fun _ => checkWith fuel (Elab.restItems id count all) first
-        | none, none, some (owner, line, col, x) =>
-          match Elab.letMutItems owner line col x all with
-          | (all, true) => Trace.timed "check again: a value kept in a variable" fun _ => checkWith fuel all (some (first.getD e))
-          | _ => (all, .error said)
-        | none, none, none => (all, .error (Elab.withoutEta said))
-  let (all, checked) := Trace.timed "check" fun _ => checkWith 64 all none
+  -- (What the checker decides of how the program is read once it knows
+  -- types, `..` in a tuple pattern, a function named as a value, a value
+  -- kept in a variable, it decides where it finds it: `Check.checkDeciding`.)
+  let checkWith := fun (all : List Syntax.Item) =>
+    (all, (checkOnce all).mapError fun e => Elab.withoutEta (Elab.withoutLetMut e))
+  let (all, checked) := Trace.timed "check" fun _ => checkWith all
   -- (Dot calls the checker chose a type's own function for, by the value's
   -- type: written so for what follows.)
   let all := match checked with
-    | .ok (blocks, _) => Elab.argsChosenItems blocks.argsChosen (Elab.chosenItems blocks.dotChosen all)
+    | .ok (blocks, _) =>
+      Elab.argsChosenItems blocks.argsChosen (Elab.chosenItems blocks.dotChosen (Elab.decidedItems blocks.decided all))
     | .error _ => all
   let (blocks, checkMade, libraryMade) ← match checked with
     | .ok (blocks, made, shared) => pure (some blocks, made, shared)
