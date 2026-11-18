@@ -1784,14 +1784,14 @@ def reachable (roots : List String) (items : List Item) : List Item := Id.run do
 /-- Elaborate a program. `blocks` is what the checker learnt about its blocks;
 without it, every block captures what it mentions for itself. -/
 def elabProgram (items : List Item) (blocks : Option Blocks := none)
-    (lends : Nat → Nat := fun _ => 0) : Except String Output := do
+    (lends : Nat → Nat := fun _ => 0) (root : String := "main") : Except String Output := do
   let (g, fns, names) ← collect items
   let g := { g with blocks := blocks, lends := lends }
   let coercions := (blocks.getD {}).coercions
   let fns := fns.map fun (name, clauses) => (name, coerceFn coercions name clauses)
-  let mainIdx ← match g.fns["main"]? with
+  let mainIdx ← match g.fns[root]? with
     | some idx => pure idx
-    | none => throw "the program has no `main` function"
+    | none => throw s!"the program has no `{root}` function"
   let action : M Unit := do
     let mut idx := 0
     for (name, clauses) in fns do

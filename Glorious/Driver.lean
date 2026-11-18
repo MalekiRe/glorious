@@ -698,8 +698,8 @@ def lowered (b : Elab.Blocks) (written all : List Syntax.Item) :
 
 /-- Elaborate, and work out the constants at compile time (`Comptime`). -/
 def elaborate (items : List Syntax.Item) (blocks : Option Elab.Blocks)
-    (lends : Nat → Nat := fun _ => 0) : Except String Elab.Output := do
-  Comptime.evaluate (← Elab.elabProgram items blocks lends)
+    (lends : Nat → Nat := fun _ => 0) (root : String := "main") : Except String Elab.Output := do
+  Comptime.evaluate (← Elab.elabProgram items blocks lends root)
 
 /-- Parse, check and elaborate a program together with the prelude, and have the
 proved Core type checker accept the result. With `check := false` both checks
@@ -841,9 +841,15 @@ def compileSourceAt (src : String) (check : Bool := true)
       | .ok (count, _) => named (written.drop count)
       | .error _ => []
     let reached := named (Elab.reachable roots all)
-    let missing := own.filter (!reached.contains ·)
+    -- (Those still there once traits are lowered: one made into copies is
+    -- elaborated as each copy is.)
+    let lowered := named all
+    let missing := own.filter fun f => !reached.contains f && lowered.contains f
     unless missing.isEmpty do
-      match Trace.timed "elaborate what main does not reach" fun _ => elaborate (Elab.reachable (roots ++ missing) all) blocks with
+      -- (Only they and what they reach: what `main` reaches is elaborated
+      -- below. Taken from the first of them, as a program is from `main`.)
+      match Trace.timed "elaborate what main does not reach" fun _ =>
+          elaborate (Elab.reachable (roots.drop 1 ++ missing) all) blocks (root := missing.headD "main") with
       | .error e => throw e
       | .ok _ => pure ()
   let all := Trace.timed "what main reaches" fun _ => Elab.reachable roots all
