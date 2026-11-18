@@ -796,7 +796,7 @@ partial def compileSourceAt (src : String) (check : Bool := true)
   -- type: written so for what follows.)
   let all := match checked with
     | .ok (blocks, _) =>
-      Elab.argsChosenItems blocks.argsChosen (Elab.chosenItems blocks.dotChosen (Elab.decidedItems blocks.decided all))
+      Elab.decidedProgram blocks all
     | .error _ => all
   let (blocks, checkMade, libraryMade) ← match checked with
     | .ok (blocks, made, shared) => pure (some blocks, made, shared)

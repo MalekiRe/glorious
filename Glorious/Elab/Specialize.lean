@@ -318,30 +318,6 @@ def dotOwnItems (call : Nat) (fn : String) : List Item → List Item :=
       if i == call then some (.call i (.fieldOf fi (go.ex recv) ("%own:" ++ fn)) (args.map go.ex)) else none
     | _ => none }
 
-/-- A program with the arguments the checker chose to give as other than
-written (`Blocks.argsChosen`) written in. -/
-def argsChosenItems (picks : Std.HashMap (Nat × Nat) Expr) (items : List Item) : List Item :=
-  if picks.isEmpty then items else
-  Rewrite.items (items := items) { onExpr := fun go => fun
-    | .call i f args =>
-      some (.call i (go.ex f) ((args.map go.ex).zipIdx.map fun (a, k) => picks.getD (i, k) a))
-    | _ => none }
-
-/-- A program with the functions of dot calls the checker chose by the
-value's type (`Blocks.dotChosen`) written in. -/
-def chosenItems (picks : Std.HashMap Nat (String × Nat)) (items : List Item) : List Item :=
-  if picks.isEmpty then items else
-  Rewrite.items (items := items) { onExpr := fun go => fun
-    | .call i (.name _ _) args =>
-      picks[i]?.map fun (fn, how) =>
-        let args := args.map go.ex
-        let args := match how, args with
-          | 0, _ => args
-          | k, .name none v :: rest => .ref (k == 2) v :: rest
-          | _, _ => args
-        .call i (.name none fn) args
-    | _ => none }
-
 /-- A program with the receiver of one dot call, a name, borrowed:
 `Syntax.recvRefMark`. -/
 def recvRefItems (call : Nat) (uniq : Bool) : List Item → List Item :=
@@ -687,5 +663,27 @@ def decisionFound (said : String) : Option Decision :=
   | none, some (owner, x, arity), _ => some (.eta owner x arity)
   | none, none, some (owner, line, col, x) => some (.letMut owner line col x)
   | none, none, none => none
+
+/-- A program with what the checker decided of it written in: `Decision`s
+first, then the function of each dot call it chose by the value's type,
+with the receiver, a variable, given as that one takes it (`0` as it was,
+`1` borrowed, `2` borrowed `&mut`), and each argument it chose to give as
+other than written. -/
+def decidedProgram (b : Blocks) (items : List Item) : List Item :=
+  let items := decidedItems b.decided items
+  if b.dotChosen.isEmpty && b.argsChosen.isEmpty then items else
+  Rewrite.items (items := items) { onExpr := fun go => fun
+    | .call i f args =>
+      let args := args.map go.ex
+      let (f, args) : Expr × List Expr := match f, b.dotChosen[i]? with
+        | .name _ _, some (fn, how) =>
+          (.name none fn, match how, args with
+            | 0, _ => args
+            | k, .name none v :: rest => .ref (k == 2) v :: rest
+            | _, _ => args)
+        | f, _ => (go.ex f, args)
+      some (.call i f (args.zipIdx.map fun (a, k) => b.argsChosen.getD (i, k) a))
+    | _ => none }
+
 
 end Glorious.Elab
