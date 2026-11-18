@@ -5463,6 +5463,29 @@ has), and that needs what a group adds closed: each group's capture links
 settled to its own, or `finish`'s links found per group. That is the work
 the item "Checker state as per-module deltas" is.
 
+## Relations in covey
+
+`covey/ecs` has relations as upstream's non-fragmenting ones: `Relates<R>`
+on the entity that relates (the link's value and its target), `Sources<R>`
+on the target (who relates to it, in order), `relate`, `unrelate`,
+`target`, `sources`, `App::relation<R>`, and despawning undoes an entity's
+links both ways (`Unlinks<S>`, found by the world's columns as a column is,
+the narrower implementation chosen for a relation's columns). Queries read
+through a link, `To<R, Q>`, and from what relates, `From<R, &A>` and
+`From<R, Entity>`. `covey/relations.glorious` is the example.
+
+Not there against upstream: one target per source (no many-to-many, nothing
+keeps one-to-one one-to-one), fragmenting relations, `LINKED`, `ACYCLIC`,
+`ORDERED`, `Relinked`, `cascade`. A query through a link cannot write a
+component the query also takes, nor take `Sources<R>` twice (two `From` of
+one relation): a system takes a component once, as columns are lent whole
+(upstream allows `(&mut Cargo, To<DockedAt, &mut Cargo>)` with `each`).
+
+A hole found on the way: a field read of an indexed reference,
+`hulls[i].0` of `hulls: [&Hull]`, is refused; a name holding it reads it
+(`let hull = hulls[i]; hull.0`). A field read by number has no node of its
+own (`Expr.proj`) for the checker to say it goes through a reference.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by

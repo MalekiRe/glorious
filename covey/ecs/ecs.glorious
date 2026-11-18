@@ -622,6 +622,37 @@ impl<R, Q> Item for To<R, Q> where Q: Item {
         }
     }
 }
+// Of each entity that relates to it by `R`, in the order they came to:
+// `From<DockedAt, &Hull>`, the hulls of the ships docked at a station. (Of
+// a component to read, or the entities themselves.)
+pub struct From<R, Q>(R, Q)
+impl<R, A> Item for From<R, &A> {
+    type Store = (Column<Sources<R>>, Column<A>);
+    type Got<'a> = [&'a A];
+    fn item_at(store, entity) {
+        let mut out = [];
+        let at = slot_of(&store.0, entity);
+        if(at >= 0) {
+            let list = &store.0.dense[at].list;
+            let column = &store.1;
+            let mut i = 0;
+            while({ i < len_at(list) }) {
+                let there = slot_of(column, list[i]);
+                if(there >= 0) { push_at(&mut out, &column.dense[there]) } else { () };
+                i = i + 1
+            }
+        } else { () };
+        Some(out)
+    }
+}
+impl<R> Item for From<R, Entity> {
+    type Store = Column<Sources<R>>;
+    type Got<'a> = [Entity];
+    fn item_at(store, entity) {
+        let at = slot_of(&*store, entity);
+        Some(if(at >= 0) { copied(&store.dense[at].list) } else { [] })
+    }
+}
 // (The columns as a pair of the first and the rest's, so that each is a
 // field of its own to borrow.)
 impl<H, ..R> Item for (H, ..R) where H: Item, (..R): Item {
@@ -695,6 +726,20 @@ impl<R, Q, S> Fill<S> for To<R, Q> where S: Get<Relates<R>>, Q: Fill<S>, Q: Item
         <Q as Fill<S>>::unfill(columns, rest)
     }
     fn hollow() { (empty_column(), <Q as Fill<S>>::hollow()) }
+}
+impl<R, A, S> Fill<S> for From<R, &A> where S: Get<Sources<R>>, S: Get<A> {
+    fn fill(columns, now) { (take_now<Sources<R>, S>(columns, now), take_now<A, S>(columns, now)) }
+    fn unfill(columns, store) {
+        let (sources, column) = store;
+        <S as Get<Sources<R>>>::put(columns, sources);
+        <S as Get<A>>::put(columns, column)
+    }
+    fn hollow() { (empty_column(), empty_column()) }
+}
+impl<R, S> Fill<S> for From<R, Entity> where S: Get<Sources<R>> {
+    fn fill(columns, now) { take_now<Sources<R>, S>(columns, now) }
+    fn unfill(columns, store) { <S as Get<Sources<R>>>::put(columns, store) }
+    fn hollow() { empty_column() }
 }
 impl<H, ..R, S> Fill<S> for (H, ..R) where H: Fill<S>, (..R): Fill<S>, H: Item, (..R): Item, ..R: Item {
     fn fill(columns, now) { (<H as Fill<S>>::fill(columns, now), <(..R) as Fill<S>>::fill(columns, now)) }
@@ -954,6 +999,8 @@ impl<A> ItemTouches for Option<&A> { type List = (Read<A>, ()); }
 impl<A> ItemTouches for Has<A> { type List = (Read<A>, ()); }
 impl ItemTouches for Entity { type List = (); }
 impl<R, Q> ItemTouches for To<R, Q> where Q: ItemTouches { type List = (Read<Relates<R>>, <Q as ItemTouches>::List); }
+impl<R, A> ItemTouches for From<R, &A> { type List = (Read<Sources<R>>, (Read<A>, ())); }
+impl<R> ItemTouches for From<R, Entity> { type List = (Read<Sources<R>>, ()); }
 impl ItemTouches for () { type List = (); }
 impl<H, ..R> ItemTouches for (H, ..R) where H: ItemTouches, (..R): ItemTouches,
     <H as ItemTouches>::List: Concat<<(..R) as ItemTouches>::List> {

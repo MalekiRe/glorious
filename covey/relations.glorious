@@ -2,7 +2,8 @@
 // own whose value is what the link carries. Ships dock at a station, each at
 // a berth; pilots pilot ships. A query reads through a link (`To`): each
 // pilot patches the hull of the ship it pilots, each ship unloads into its
-// station. Docking again moves a ship; a station that ends leaves its ships
+// station, and each station tells of the ships docked at it (`From`).
+// Docking again moves a ship; a station that ends leaves its ships
 // undocked, and a ship that ends is no longer among a station's.
 // expect:
 // 2
@@ -10,6 +11,9 @@
 // 60
 // 100
 // 3
+// 160
+// 2
+// 12
 // 7
 // 0
 // 1
@@ -17,7 +21,7 @@
 // 1
 mod ecs;
 
-use ecs::{App, Entity, Mut, Query, To, Relates};
+use ecs::{App, Entity, Mut, Query, To, From, Relates};
 
 struct DockedAt { berth: Int }
 struct Piloting
@@ -56,12 +60,36 @@ fn unload(ships: &mut Query<(&mut Cargo, To<DockedAt, &mut Hold>)>) {
     })
 }
 
+struct Look
+
+// Each station says the hulls of the ships docked at it, added up, and how
+// many there are.
+fn roster(stations: &mut Query<(&Hold, From<DockedAt, &Hull>)>) {
+    stations.for_each(fn(got: (&Hold, [&Hull])) {
+        let (hold, hulls) = got;
+        let mut sum = 0;
+        let mut i = 0;
+        while({ i < len_at(&hulls) }) { let hull = hulls[i]; sum = sum + hull.0; i = i + 1 };
+        if(len_at(&hulls) > 0) { say(sum); say(len_at(&hulls)) } else { () }
+    })
+}
+
+// Each station with ships docked says how many, from the ships themselves.
+fn census(stations: &mut Query<(&Hold, From<DockedAt, Entity>)>) {
+    stations.for_each(fn(got: (&Hold, [Entity])) {
+        let (hold, ships) = got;
+        if(len_at(&ships) > 0) { say(len_at(&ships) + 10) } else { () }
+    })
+}
+
 fn main() -> Int {
     let mut fleet = App::new()
         .register<Skill>().register<Hull>().register<Cargo>().register<Hold>()
         .relation<DockedAt>().relation<Piloting>()
         .add_systems(Update, repair)
-        .add_systems(Update, unload).build();
+        .add_systems(Update, unload)
+        .add_systems(Look, roster)
+        .add_systems(Look, census).build();
     let station = fleet.world.spawn_bundle((Hold(0),));
     let depot = fleet.world.spawn_bundle((Hold(0),));
     let ship = fleet.world.spawn_bundle((Hull(40), Cargo(3)));
@@ -78,6 +106,7 @@ fn main() -> Int {
     match(fleet.world.get<Hull>(ship)) { Some(h) => say(h.0), None => () };
     match(fleet.world.get<Hull>(other)) { Some(h) => say(h.0), None => () };
     match(fleet.world.get<Hold>(station)) { Some(h) => say(h.0 - 4), None => () };
+    fleet.emit(&Look);
     // Docking again moves the ship: what the old link carried comes back.
     match(fleet.world.relate(ship, DockedAt { berth: 7 }, depot)) { Some(old) => say(old.berth + 6), None => () };
     say(len_at(&fleet.world.sources<DockedAt>(depot)) - 1);
