@@ -5203,6 +5203,16 @@ Covey is the toolbox for finding what the language lacks. Rewriting it after
   leaves their world's type undecided ("`Columns` is needed of a type that
   nothing here decides"). Open: covey makes them, with their locals, the
   first time their label is emitted.
+- **A borrow held by a value with a `drop`** ended at the value's last use,
+  though its `drop` runs where its block ends and may use it: `let g = G {
+  w: &mut w }; w.c = 10;` was accepted, and the `drop` then wrote through the
+  borrow. Such a value is now used where its block ends, unless it is given
+  away before. Fixed, with cases. (Unsound before.)
+- **A value with a `drop` made where it is borrowed** (`make(8).poke();`,
+  `&mut make(9)`) was named without a place, so its cleanup was never found:
+  it was never let go. It is placed where its statement is; in a statement
+  that is an expression it is let go where the statement ends. Fixed, with
+  a case.
 - **`(q.blank)()`**, a field that is a callable, called in brackets, is read
   as a dot call of a function of that name where the module has one. Open:
   covey names such fields apart.

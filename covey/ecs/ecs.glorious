@@ -47,10 +47,12 @@ impl Entity {
 }
 
 // One component's values: packed, each with the entity it belongs to, and
-// for each entity's place where its value is among them.
-pub struct Column<T> { pub dense: [T], pub owners: [Entity], pub slots: [Int] }
+// for each entity's place where its value is among them. With each value,
+// when it was put in and when it was last changed (`now`: the time a write
+// through the column is now).
+pub struct Column<T> { pub dense: [T], pub owners: [Entity], pub slots: [Int], added: [Int], changed: [Int], now: Int }
 
-pub fn empty_column<T>() -> Column<T> { Column { dense: [], owners: [], slots: [] } }
+pub fn empty_column<T>() -> Column<T> { Column { dense: [], owners: [], slots: [], added: [], changed: [], now: 0 } }
 
 // Where an entity's value is in a column, or -1.
 pub fn slot_of<T>(column: &Column<T>, entity: Entity) -> Int {
@@ -73,10 +75,13 @@ fn column_insert<T>(column: &mut Column<T>, entity: Entity, value: T) {
     if(at >= 0) {
         column.dense[at] = value;
         column.owners[at] = entity;
+        column.changed[at] = column.now;
     } else {
         column.slots[entity.index] = len_at(&column.dense);
         push_at(&mut column.dense, value);
         push_at(&mut column.owners, entity);
+        push_at(&mut column.added, column.now);
+        push_at(&mut column.changed, column.now);
     }
 }
 
@@ -87,6 +92,8 @@ fn column_remove<T>(column: &mut Column<T>, entity: Entity) -> Option<T> {
         let last = len_at(&column.dense) - 1;
         let moved = column.owners[last];
         let _ = pop_at(&mut column.owners);
+        match(pop_at(&mut column.added)) { Some(t) => if(at < last) { column.added[at] = t } else { () }, None => () };
+        match(pop_at(&mut column.changed)) { Some(t) => if(at < last) { column.changed[at] = t } else { () }, None => () };
         match(pop_at(&mut column.dense)) {
             None => None,
             Some(final) =>
@@ -109,24 +116,35 @@ pub trait Get<T> {
     fn put(&mut Self, Column<T>)
     fn has(&Self, Entity) -> Bool
     fn column(&Self) -> &Column<T>
+    fn column_mut(&mut Self) -> &mut Column<T>
 }
 impl<T, R> Get<T> for (Column<T>, R) {
     fn take(columns) { replace(&mut columns.0, empty_column()) }
     fn put(columns, column) { columns.0 = column; }
     fn has(columns, entity) { slot_of(&columns.0, entity) >= 0 }
     fn column(columns) { &columns.0 }
+    fn column_mut(columns) { &mut columns.0 }
 }
 impl<T, H, R> Get<T> for (Column<H>, R) where R: Get<T> {
     fn take(columns) { <R as Get<T>>::take(&mut columns.1) }
     fn put(columns, column) { <R as Get<T>>::put(&mut columns.1, column) }
     fn has(columns, entity) { <R as Get<T>>::has(&columns.1, entity) }
     fn column(columns) { <R as Get<T>>::column(&columns.1) }
+    fn column_mut(columns) { <R as Get<T>>::column_mut(&mut columns.1) }
 }
 impl<T, H, R> Get<T> for (Resource<H>, R) where R: Get<T> {
     fn take(columns) { <R as Get<T>>::take(&mut columns.1) }
     fn put(columns, column) { <R as Get<T>>::put(&mut columns.1, column) }
     fn has(columns, entity) { <R as Get<T>>::has(&columns.1, entity) }
     fn column(columns) { <R as Get<T>>::column(&columns.1) }
+    fn column_mut(columns) { <R as Get<T>>::column_mut(&mut columns.1) }
+}
+
+// A column taken out of the world, its writes of the world's time now.
+fn take_at<T, S>(world: &mut World<S>) -> Column<T> where S: Get<T> {
+    let mut column = <S as Get<T>>::take(&mut world.columns);
+    column.now = world.tick;
+    column
 }
 
 // One value the whole world has, kept among its columns: a score, a clock.
@@ -182,7 +200,7 @@ impl<H, R> Columns for (Resource<H>, R) where R: Columns {
 }
 
 // The columns, and which entities there are.
-pub struct World<S> { pub columns: S, generations: [Int], free: [Int] }
+pub struct World<S> { pub columns: S, generations: [Int], free: [Int], tick: Int, since: Int }
 
 pub fn spawn<S>(world: &mut World<S>) -> Entity {
     match(pop_at(&mut world.free)) {
@@ -210,7 +228,7 @@ pub fn despawn<S>(world: &mut World<S>, entity: Entity) where S: Columns {
 
 // Take a component from an entity.
 pub fn remove<T, S>(world: &mut World<S>, entity: Entity) -> Option<T> where S: Get<T> {
-    let mut column = <S as Get<T>>::take(&mut world.columns);
+    let mut column = take_at<T, S>(world);
     let taken = column_remove(&mut column, entity);
     <S as Get<T>>::put(&mut world.columns, column);
     taken
@@ -218,9 +236,13 @@ pub fn remove<T, S>(world: &mut World<S>, entity: Entity) -> Option<T> where S: 
 
 // Give an entity a component, or another value of one it has.
 pub fn insert<T, S>(world: &mut World<S>, entity: Entity, value: T) -> Option<T> where S: Get<T> {
-    let mut column = <S as Get<T>>::take(&mut world.columns);
-    let had = column_remove(&mut column, entity);
-    column_insert(&mut column, entity, value);
+    let mut column = take_at<T, S>(world);
+    // (Another value of one it has is a change, and not an addition.)
+    let at = slot_of(&column, entity);
+    let had = if(at >= 0) {
+        column.changed[at] = column.now;
+        Some(replace(&mut column.dense[at], value))
+    } else { column_insert(&mut column, entity, value); None };
     <S as Get<T>>::put(&mut world.columns, column);
     had
 }
@@ -251,7 +273,7 @@ pub fn spawn_with<B, S>(world: &mut World<S>, bundle: B) -> Entity where B: Bund
 
 // How many entities have the component.
 pub fn count<T, S>(world: &mut World<S>) -> Int where S: Get<T> {
-    let column = <S as Get<T>>::take(&mut world.columns);
+    let column = take_at<T, S>(world);
     let n = len_at(&column.dense);
     <S as Get<T>>::put(&mut world.columns, column);
     n
@@ -262,7 +284,7 @@ impl<S> World<S> {
     pub fn spawn_bundle<B>(world: &mut Self, bundle: B) -> Entity where B: Bundle<S> { spawn_with(world, bundle) }
 
     // An empty world of the columns `S`.
-    pub fn new() -> World<S> where S: Columns { World { columns: <S as Columns>::empty(), generations: [], free: [] } }
+    pub fn new() -> World<S> where S: Columns { World { columns: <S as Columns>::empty(), generations: [], free: [], tick: 1, since: 0 } }
 
     // Give an entity a component, or another value of one it has: the one
     // it had, if it had one.
@@ -306,6 +328,15 @@ impl<S> World<S> {
         let column = <S as Get<T>>::column(&world.columns);
         let at = slot_of(column, entity);
         if(at < 0) { None } else { Some(&column.dense[at]) }
+    }
+
+    // An entity's component, to change: a change once `get_mut` is asked of it.
+    pub fn get_mut<T>(world: &mut Self, entity: Entity) -> Option<Mut<'_, T>> where S: Get<T> {
+        let now = world.tick;
+        let column = <S as Get<T>>::column_mut(&mut world.columns);
+        column.now = now;
+        let at = slot_of(&*column, entity);
+        if(at < 0) { None } else { Some(mut_at(column, at)) }
     }
 
     // How many entities have the component.
@@ -352,7 +383,7 @@ impl<S> World<S> {
 
 // Every value of a component, folded into one.
 pub fn fold_all<T, S, R>(world: &mut World<S>, start: R, f: for<'a> fn(R, &'a T) -> R) -> R where S: Get<T> {
-    let column = <S as Get<T>>::take(&mut world.columns);
+    let column = take_at<T, S>(world);
     let mut result = start;
     let mut i = 0;
     while({ i < len_at(&column.dense) }) {
@@ -391,12 +422,23 @@ pub trait Item {
     type Got<'a>;
     fn item_at<'a>(&'a mut Store, Entity) -> Option<Got<'a>>
 }
+// A component that may be changed: what is read of it through `get` is not
+// a change; what is had of it through `get_mut` is, at the time it is had.
+pub struct Mut<'a, T> { value: &'a mut T, tick: &'a mut Int, now: Int }
+impl<'a, T> Mut<'a, T> {
+    pub fn get(m: &Self) -> &T { &*m.value }
+    pub fn get_mut(m: &mut Self) -> &mut T { *m.tick = m.now; &mut *m.value }
+}
+fn mut_at<'a, A>(column: &'a mut Column<A>, at: Int) -> Mut<'a, A> {
+    Mut { value: &mut column.dense[at], tick: &mut column.changed[at], now: column.now }
+}
+
 impl<A> Item for &mut A {
     type Store = Column<A>;
-    type Got<'a> = &'a mut A;
+    type Got<'a> = Mut<'a, A>;
     fn item_at(store, entity) {
         let at = slot_of(&*store, entity);
-        if(at >= 0) { Some(&mut store.dense[at]) } else { None }
+        if(at >= 0) { Some(mut_at(store, at)) } else { None }
     }
 }
 impl<A> Item for &A {
@@ -428,7 +470,7 @@ impl<A> Item for Has<A> {
 // Its `A` if it has one: every entity is found, with it or not.
 impl<A> Item for Option<&mut A> {
     type Store = Column<A>;
-    type Got<'a> = Option<&'a mut A>;
+    type Got<'a> = Option<Mut<'a, A>>;
     fn item_at(store, entity) { Some(<&mut A as Item>::item_at(store, entity)) }
 }
 impl<A> Item for Option<&A> {
@@ -454,49 +496,55 @@ impl<H, ..R> Item for (H, ..R) where H: Item, (..R): Item {
 
 // The columns a query asks for, taken out of the world while it is used and
 // put back after: each is found as a column is.
+fn take_now<A, S>(columns: &mut S, now: Int) -> Column<A> where S: Get<A> {
+    let mut column = <S as Get<A>>::take(columns);
+    column.now = now;
+    column
+}
+
 pub trait Fill<S>: Item {
-    fn fill(&mut S) -> Self::Store
+    fn fill(&mut S, Int) -> Self::Store
     fn unfill(&mut S, Self::Store)
     // What stands in the query's place once its columns are back.
     fn hollow() -> Self::Store
 }
 impl<A, S> Fill<S> for &mut A where S: Get<A> {
-    fn fill(columns) { <S as Get<A>>::take(columns) }
+    fn fill(columns, now) { take_now<A, S>(columns, now) }
     fn unfill(columns, column) { <S as Get<A>>::put(columns, column) }
     fn hollow() { empty_column() }
 }
 impl<A, S> Fill<S> for &A where S: Get<A> {
-    fn fill(columns) { <S as Get<A>>::take(columns) }
+    fn fill(columns, now) { take_now<A, S>(columns, now) }
     fn unfill(columns, column) { <S as Get<A>>::put(columns, column) }
     fn hollow() { empty_column() }
 }
 impl<S> Fill<S> for () {
-    fn fill(columns) { () }
+    fn fill(columns, now) { () }
     fn unfill(columns, store) { () }
     fn hollow() { () }
 }
 impl<S> Fill<S> for Entity {
-    fn fill(columns) { () }
+    fn fill(columns, now) { () }
     fn unfill(columns, store) { () }
     fn hollow() { () }
 }
 impl<A, S> Fill<S> for Has<A> where S: Get<A> {
-    fn fill(columns) { <S as Get<A>>::take(columns) }
+    fn fill(columns, now) { take_now<A, S>(columns, now) }
     fn unfill(columns, column) { <S as Get<A>>::put(columns, column) }
     fn hollow() { empty_column() }
 }
 impl<A, S> Fill<S> for Option<&mut A> where S: Get<A> {
-    fn fill(columns) { <S as Get<A>>::take(columns) }
+    fn fill(columns, now) { take_now<A, S>(columns, now) }
     fn unfill(columns, column) { <S as Get<A>>::put(columns, column) }
     fn hollow() { empty_column() }
 }
 impl<A, S> Fill<S> for Option<&A> where S: Get<A> {
-    fn fill(columns) { <S as Get<A>>::take(columns) }
+    fn fill(columns, now) { take_now<A, S>(columns, now) }
     fn unfill(columns, column) { <S as Get<A>>::put(columns, column) }
     fn hollow() { empty_column() }
 }
 impl<H, ..R, S> Fill<S> for (H, ..R) where H: Fill<S>, (..R): Fill<S>, H: Item, (..R): Item, ..R: Item {
-    fn fill(columns) { (<H as Fill<S>>::fill(columns), <(..R) as Fill<S>>::fill(columns)) }
+    fn fill(columns, now) { (<H as Fill<S>>::fill(columns, now), <(..R) as Fill<S>>::fill(columns, now)) }
     fn unfill(columns, store) {
         let (h, rest) = store;
         <H as Fill<S>>::unfill(columns, h);
@@ -512,13 +560,31 @@ pub struct Query<Q, Only = (), St = <Q as Item>::Store> { store: St, entities: [
 // lets through.
 pub struct With<T>(T)
 pub struct Without<T>(T)
-pub trait Only<S> { fn lets(&S, Entity) -> Bool }
-impl<S> Only<S> for () { fn lets(columns, entity) { true } }
-impl<T, S> Only<S> for With<T> where S: Get<T> { fn lets(columns, entity) { <S as Get<T>>::has(columns, entity) } }
-impl<T, S> Only<S> for Without<T> where S: Get<T> { fn lets(columns, entity) { not(<S as Get<T>>::has(columns, entity)) } }
+pub trait Only<S> { fn lets(&S, Entity, Int) -> Bool }
+impl<S> Only<S> for () { fn lets(columns, entity, since) { true } }
+impl<T, S> Only<S> for With<T> where S: Get<T> { fn lets(columns, entity, since) { <S as Get<T>>::has(columns, entity) } }
+impl<T, S> Only<S> for Without<T> where S: Get<T> { fn lets(columns, entity, since) { not(<S as Get<T>>::has(columns, entity)) } }
+// Those whose `T` was put in, or changed, since the system last ran (since
+// the world began, outside a system).
+pub struct Added<T>(T)
+pub struct Changed<T>(T)
+impl<T, S> Only<S> for Added<T> where S: Get<T> {
+    fn lets(columns, entity, since) {
+        let column = <S as Get<T>>::column(columns);
+        let at = slot_of(column, entity);
+        if(at < 0) { false } else { column.added[at] > since }
+    }
+}
+impl<T, S> Only<S> for Changed<T> where S: Get<T> {
+    fn lets(columns, entity, since) {
+        let column = <S as Get<T>>::column(columns);
+        let at = slot_of(column, entity);
+        if(at < 0) { false } else { column.changed[at] > since }
+    }
+}
 impl<H, ..R, S> Only<S> for (H, ..R) where H: Only<S>, (..R): Only<S> {
-    fn lets(columns, entity) {
-        if(<H as Only<S>>::lets(columns, entity)) { <(..R) as Only<S>>::lets(columns, entity) } else { false }
+    fn lets(columns, entity, since) {
+        if(<H as Only<S>>::lets(columns, entity, since)) { <(..R) as Only<S>>::lets(columns, entity, since) } else { false }
     }
 }
 
@@ -671,7 +737,7 @@ fn apply<S>(commands: Commands<S>, world: &mut World<S>) {
 // What a parameter of a system asks for, without the reference: a column
 // to change, a column to read, the value emitted, or the commands. Found
 // from the parameter's type, so a system is written as any function is.
-pub struct Changed<A>(A)
+pub struct Writes<A>(A)
 pub struct Read<A>(A)
 pub struct Asking
 pub struct Querying<Q, Only, St>(Q, Only, St)
@@ -681,7 +747,7 @@ pub struct Owned<X>(X)
 pub struct Maybe<X>(X)
 pub struct MaybeOwned<X>(X)
 pub trait Parameter { type Asks; }
-impl<A> Parameter for &mut Column<A> { type Asks = Changed<A>; }
+impl<A> Parameter for &mut Column<A> { type Asks = Writes<A>; }
 impl<A> Parameter for &Column<A> { type Asks = Read<A>; }
 impl<S> Parameter for &mut Commands<S> { type Asks = Asking; }
 impl<Q, Only, St> Parameter for &mut Query<Q, Only, St> { type Asks = Querying<Q, Only, St>; }
@@ -701,9 +767,9 @@ impl<X> Parameter for Option<&X> { type Asks = Maybe<X>; }
 pub trait ASystemTakesAComponentOnce {}
 pub trait Apart {}
 impl<X, Y> Apart for (X, Y) {}
-impl<A> Apart for (Changed<A>, Changed<A>) where A: ASystemTakesAComponentOnce {}
-impl<A> Apart for (Changed<A>, Read<A>) where A: ASystemTakesAComponentOnce {}
-impl<A> Apart for (Read<A>, Changed<A>) where A: ASystemTakesAComponentOnce {}
+impl<A> Apart for (Writes<A>, Writes<A>) where A: ASystemTakesAComponentOnce {}
+impl<A> Apart for (Writes<A>, Read<A>) where A: ASystemTakesAComponentOnce {}
+impl<A> Apart for (Read<A>, Writes<A>) where A: ASystemTakesAComponentOnce {}
 impl<A> Apart for (Read<A>, Read<A>) where A: ASystemTakesAComponentOnce {}
 impl<X> Apart for (Owned<X>, Owned<X>) where X: ASystemTakesAComponentOnce {}
 impl<X> Apart for (Owned<X>, Shared<X>) where X: ASystemTakesAComponentOnce {}
@@ -736,11 +802,11 @@ pub trait Fetch<E, S, Gathered, F, O, Lc> {
 impl<E, S, ..G, F, O, Lc> Fetch<E, S, (..G), F, O, Lc> for () where F: CallWith<(..G), O> {
     fn fetch(event, world, commands, state, gathered, f) { Some(call_with(f, gathered)) }
 }
-impl<E, S, ..G, F, O, Lc, A, Rest> Fetch<E, S, (..G), F, O, Lc> for (Changed<A>, Rest)
+impl<E, S, ..G, F, O, Lc, A, Rest> Fetch<E, S, (..G), F, O, Lc> for (Writes<A>, Rest)
     where S: Get<A>, Rest: Fetch<E, S, (..G, &mut Column<A>), F, O, Lc> {
     fn fetch(event, world, commands, state, gathered, f) {
         let (..g) = gathered;
-        let mut a = <S as Get<A>>::take(&mut world.columns);
+        let mut a = take_at<A, S>(world);
         let made = <Rest as Fetch<E, S, (..G, &mut Column<A>), F, O, Lc>>::fetch(event, world, commands, state, (..g, &mut a), f);
         <S as Get<A>>::put(&mut world.columns, a);
         made
@@ -750,7 +816,7 @@ impl<E, S, ..G, F, O, Lc, A, Rest> Fetch<E, S, (..G), F, O, Lc> for (Read<A>, Re
     where S: Get<A>, Rest: Fetch<E, S, (..G, &Column<A>), F, O, Lc> {
     fn fetch(event, world, commands, state, gathered, f) {
         let (..g) = gathered;
-        let a = <S as Get<A>>::take(&mut world.columns);
+        let a = take_at<A, S>(world);
         let made = <Rest as Fetch<E, S, (..G, &Column<A>), F, O, Lc>>::fetch(event, world, commands, state, (..g, &a), f);
         <S as Get<A>>::put(&mut world.columns, a);
         made
@@ -825,10 +891,10 @@ fn query_of<Q, N, S>(world: &mut World<S>) -> Query<Q, N, <Q as Item>::Store> wh
     let mut found = [];
     let mut i = 0;
     while({ i < len_at(&all) }) {
-        if(<N as Only<S>>::lets(&world.columns, all[i])) { push_at(&mut found, all[i]) } else { () };
+        if(<N as Only<S>>::lets(&world.columns, all[i], world.since)) { push_at(&mut found, all[i]) } else { () };
         i = i + 1
     };
-    Query { store: <Q as Fill<S>>::fill(&mut world.columns), entities: found }
+    Query { store: <Q as Fill<S>>::fill(&mut world.columns, world.tick), entities: found }
 }
 impl<E, S, ..G, F, O, Lc, Q, N, St, Rest> Fetch<E, S, (..G), F, O, Lc> for (Querying<Q, N, St>, Rest)
     where Q: Item<Store = St>, Q: Fill<S>, N: Only<S>, Rest: Fetch<E, S, (..G, &mut Query<Q, N, St>), F, O, Lc> {
@@ -918,11 +984,18 @@ impl<E, S, X, Y> System<E, S> for (X, Y) where X: System<E, S>, Y: System<E, S> 
 }
 // A function, of however many parameters, each asking for something, no
 // two for the same; and what its locals hold.
-pub struct Sys<F, Lc> { f: F, locals: Lc }
+// (`last`: the world's time when it last ran, of which it sees what was
+// put in or changed after.)
+pub struct Sys<F, Lc> { f: F, locals: Lc, last: Int }
 impl<E, S, ..P, ..A, L, F, Lc> System<E, S> for Sys<F, Lc>
     where F: Fn<(..P), Output = ()>, ..P: Parameter<Asks = A>, (..A): Tuple<Nested = L>, L: AllApart, L: Fetch<E, S, (), F, (), Lc> {
     fn run(sys, event, world, commands) {
-        let _ = <L as Fetch<E, S, (), F, (), Lc>>::fetch(event, world, commands, &mut sys.locals, (), &sys.f);
+        world.since = sys.last;
+        let ran = is_some(<L as Fetch<E, S, (), F, (), Lc>>::fetch(event, world, commands, &mut sys.locals, (), &sys.f));
+        world.since = 0;
+        // (One that was not run, for want of what it asks, still sees what
+        // changed before.)
+        if(ran) { sys.last = world.tick; world.tick = world.tick + 1 } else { () }
     }
 }
 
@@ -941,7 +1014,7 @@ impl<E, S, ..P, ..A, L, F, Lc> IntoSystem<E, S> for F
     where F: Fn<(..P), Output = ()>, ..P: Parameter<Asks = A>, (..A): Tuple<Nested = L>, L: AllApart,
           L: Locals<State = Lc>, L: Fetch<E, S, (), F, (), Lc> {
     type Out = Sys<F, Lc>;
-    fn into_system(f) { Sys { f: f, locals: <L as Locals>::start() } }
+    fn into_system(f) { Sys { f: f, locals: <L as Locals>::start(), last: 0 } }
 }
 
 // A condition: a function whose parameters ask for what a system's may,
@@ -1019,14 +1092,14 @@ pub struct App<S, L> { pub world: World<S>, systems: L }
 impl<S, L> App<S, L> {
     // An app with nothing in its world and no systems.
     pub fn new() -> App<(), ()> {
-        App { world: World { columns: (), generations: [], free: [] }, systems: () }
+        App { world: World { columns: (), generations: [], free: [], tick: 1, since: 0 }, systems: () }
     }
 
     // Give the world a resource.
     pub fn insert_resource<T>(app: Self, value: T) -> App<(Resource<T>, S), L> {
         let App { world, systems } = app;
-        let World { columns, generations, free } = world;
-        App { world: World { columns: (Resource { value: Some(value) }, columns), generations: generations, free: free }, systems: systems }
+        let World { columns, generations, free, tick, since } = world;
+        App { world: World { columns: (Resource { value: Some(value) }, columns), generations: generations, free: free, tick: tick, since: since }, systems: systems }
     }
 
     // The resource at its type's start.
@@ -1036,15 +1109,15 @@ impl<S, L> App<S, L> {
     // it from the systems that ask for it.)
     pub fn register_resource<T>(app: Self) -> App<(Resource<T>, S), L> {
         let App { world, systems } = app;
-        let World { columns, generations, free } = world;
-        App { world: World { columns: (Resource { value: None }, columns), generations: generations, free: free }, systems: systems }
+        let World { columns, generations, free, tick, since } = world;
+        App { world: World { columns: (Resource { value: None }, columns), generations: generations, free: free, tick: tick, since: since }, systems: systems }
     }
 
     // Store a component.
     pub fn register<T>(app: Self) -> App<(Column<T>, S), L> {
         let App { world, systems } = app;
-        let World { columns, generations, free } = world;
-        App { world: World { columns: (empty_column(), columns), generations: generations, free: free }, systems: systems }
+        let World { columns, generations, free, tick, since } = world;
+        App { world: World { columns: (empty_column(), columns), generations: generations, free: free, tick: tick, since: since }, systems: systems }
     }
 
     // Register systems under a label, named by a value of it: `Update`.

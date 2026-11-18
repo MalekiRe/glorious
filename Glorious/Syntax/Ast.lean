@@ -887,7 +887,8 @@ mutual
 /-- A value that is borrowed where it is made, `&f(x)`, is given a name first:
 the statement it is in is preceded by the `let` that binds it, and what was
 written is a borrow of that name. The value then lasts to the end of the
-block the statement is in. -/
+block the statement is in, or, where the statement is an expression, to
+the end of the statement. -/
 partial def nameBorrows : Expr → Expr × List Stmt
   | .call id f args =>
     match f, args with
@@ -930,16 +931,22 @@ partial def nameBorrowsClause : Clause → Clause
 partial def nameBorrowsStmt : Stmt → List Stmt
   | .let_ pat e => let (e, before) := nameBorrows e; before ++ [.let_ pat e]
   | .letMut x e => let (e, before) := nameBorrows e; before ++ [.letMut x e]
-  | .expr e => let (e, before) := nameBorrows e; before ++ [.expr e]
+  -- (Of a statement that is an expression, the values named are let go
+  -- where it ends: a block of its own.)
+  | .expr e =>
+    let (e, before) := nameBorrows e
+    if before.isEmpty then [.expr e] else [.expr (.labelScope "%block" (before ++ [.expr e]))]
   | .defer e => let (e, before) := nameBorrows e; before ++ [.defer e]
   | .assign target e =>
     let (target, first) := nameBorrows target
     let (e, second) := nameBorrows e
     first ++ second ++ [.assign target e]
   | .located line col s =>
-    match (nameBorrowsStmt s).reverse with
-    | last :: before => before.reverse ++ [.located line col last]
-    | [] => []
+    -- (Each `let` made where the statement is: what a value so named holds
+    -- is let go where its block ends, found by that place.)
+    (nameBorrowsStmt s).map fun
+      | .expr (.labelScope "%block" body) => .located line col (.expr (.labelScope "%block" (body.map (.located line col))))
+      | s => .located line col s
 
 partial def nameBorrowsStmts (body : List Stmt) : List Stmt :=
   body.flatMap nameBorrowsStmt

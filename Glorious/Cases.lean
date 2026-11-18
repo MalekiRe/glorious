@@ -3719,6 +3719,17 @@ def cases : List Case := [
   -- asked at.)
   ⟨"trait Into2<E> { type Out; fn into2(Self) -> Self::Out; }\nstruct W<F> { f: F, n: Int }\nimpl<E, ..P, F> Into2<E> for F where F: Fn<(..P), Output = Int> { type Out = W<F>; fn into2(f) { W { f: f, n: 5 } } }\nimpl<E, X, Y> Into2<E> for (X, Y) where X: Into2<E>, Y: Into2<E> { type Out = (<X as Into2<E>>::Out, <Y as Into2<E>>::Out); fn into2(p) { let (x, y) = p; (<X as Into2<E>>::into2(x), <Y as Into2<E>>::into2(y)) } }\nimpl<E> Into2<E> for Int { type Out = W<Int>; fn into2(f) { W { f: f, n: 7 } } }\nfn mk<T: Into2<Str>>(t: T) -> <T as Into2<Str>>::Out { <T as Into2<Str>>::into2(t) }\nfn one() -> Int { 1 }\nfn main() -> Int { let w = mk((1, one)); w.0.n + w.1.n + (w.1.f)() }",
     [], "13"⟩,
+  -- (A value with a `drop` made where it is borrowed: let go where its
+  -- statement ends, `make(8).poke();`, or, made in a `let`, where the
+  -- block ends.)
+  ⟨"struct G { n: Int }\nimpl Drop for G { fn drop(g) { say(g.n) } }\nimpl G { pub fn poke(g: &mut Self) -> Int { g.n } }\nfn make(n: Int) -> G { G { n: n } }\nfn main() -> Int { make(8).poke(); let k = G::poke(&mut make(9)); k }",
+    [], "8\n9\n9"⟩,
+  -- (What a value with a `drop` borrows is held till it is let go: its
+  -- `drop` may use it.)
+  ⟨"struct W { c: Int }\nstruct G<'a> { w: &'a mut W }\nimpl<'a> Drop for G<'a> { fn drop(g) { bump(g.w) } }\nfn bump(w: &mut W) { w.c = w.c + 1 }\nfn main() -> Int { let mut w = W { c: 1 }; let g = G { w: &mut w }; w.c = 10; 0 }",
+    [], "error: 5:69: in `main`: `w` is borrowed with `&mut` while `g` holds a `&mut` reference to it"⟩,
+  ⟨"struct W { c: Int }\nstruct G<'a> { w: &'a mut W }\nimpl<'a> Drop for G<'a> { fn drop(g) { bump(g.w) } }\nfn bump(w: &mut W) { w.c = w.c + 1 }\nfn mk<'a>(w: &'a mut W) -> G<'a> { G { w: w } }\nfn touch(g: &mut G) { bump(g.w) }\nfn main() -> Int { let mut w = W { c: 1 }; let g = G { w: &mut w }; discard(g); w.c = 10; touch(&mut mk(&mut w)); w.c = w.c + 100; w.c }",
+    [], "112"⟩,
   -- (An element of what a reference is to is borrowed through it.)
   ⟨"fn first(r: &[Int]) -> Int { let e = &r[0]; *e }\nfn main() -> Int { first(&[7, 8]) }",
     [], "7"⟩,

@@ -16,8 +16,8 @@
 // 16
 mod ecs;
 
-use ecs::{App, Entity, Query, Single, Has, ResMut, chain};
-use core::value::{Default};
+use ecs::{App, Entity, Mut, Query, Single, Has, ResMut, chain};
+use core::value::{Default, discard};
 
 struct Update
 struct Position(Int)
@@ -30,10 +30,10 @@ impl Default for Seen { fn default() { Seen { singles: 0, at: [] } } }
 
 // Shields charge unless stunned; those without one still match.
 fn charge(query: &mut Query<(&Position, Option<&mut Shield>, Has<Stunned>)>) {
-    query.for_each(fn(got: (&Position, Option<&mut Shield>, Bool)) {
+    query.for_each(fn(got: (&Position, Option<Mut<Shield>>, Bool)) {
         let (position, shield, stunned) = got;
         match(shield) {
-            Some(shield) => if(stunned) { () } else { shield.0 = shield.0 + position.0 },
+            Some(shield) => if(stunned) { discard(shield) } else { let mut shield = shield; let s = shield.get_mut(); s.0 = s.0 + position.0 },
             None => ()
         }
     })

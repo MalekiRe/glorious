@@ -698,6 +698,9 @@ structure St where
   owner : String := ""
   /-- The names the computation still mentions after the expression being checked. -/
   later : List String := []
+  /-- Names bound in the blocks being read whose values have a `drop` to run
+  where their block ends: what they hold is held till then. -/
+  dropLive : List String := []
   /-- The values the expression being checked has computed and not yet used,
   each with how many borrows had been made when it was computed. -/
   temps : List (Ty × Nat) := []

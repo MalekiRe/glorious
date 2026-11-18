@@ -31,10 +31,22 @@ checked once the types say what holds which borrow.
 
 def withLater {α : Type} (names : List String) (act : M α) : M α := do
   let outer := (← get).later
-  modify fun s => { s with later := names ++ outer }
+  -- (A name whose value has a `drop` to run where its block ends is used
+  -- there: what it holds is held till then.)
+  modify fun s => { s with later := names ++ s.dropLive ++ outer }
   let r ← act
   modify fun s => { s with later := outer }
   pure r
+
+/-- Does a value of this type have a `drop` of its own to run, or hold one
+that has, as far as its type's arguments say? -/
+partial def hasDropOwn (t : Ty) : M Bool := do
+  match ← find t with
+  | .con n args =>
+    if (← get).kimpls.any fun I => I.trait == "Drop" && I.head == n then return true
+    args.anyM hasDropOwn
+  | .tuple parts => parts.anyM hasDropOwn
+  | _ => pure false
 
 /-- Run a part of an expression, forgetting the values it computed on the way. -/
 def withTemps {α : Type} (act : M α) : M α := do

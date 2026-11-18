@@ -309,6 +309,7 @@ def mergeStates (p a b : St) : Option St := do
     coercions,
     owner := b.owner,
     later := b.later,
+    dropLive := b.dropLive,
     temps := b.temps,
     loans,
     cells,

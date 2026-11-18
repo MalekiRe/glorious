@@ -1,0 +1,100 @@
+// Upstream's tests/changes.rs: `Added<T>` and `Changed<T>` let through what
+// was put in, or changed, since the system last ran. Reading, even through
+// `get_mut`'s `Mut`, is no change; writing through it is; putting in another
+// value is a change and not an addition; taking out and putting back is an
+// addition. A `Single` that waited sees what changed while it waited.
+// (`reads_replacements_migration_and_reinsertion_preserve_change_semantics`,
+// with a system for each filter; `successful_changed_single_resumes_after_a_quiet_frame`.)
+// expect:
+// 1
+// 2
+// added: 1 2 | - | - | 5 |
+// changed: 1 2 | - | 3 4 | 5 |
+// single: 1 2
+// 0
+mod ecs;
+
+use ecs::{App, Entity, Mut, Query, Single, Added, Changed, ResMut, chain};
+use core::value::{Default, discard};
+
+struct Update
+struct Value(Int)
+struct Tag
+struct Log { added: [Int], changed: [Int] }
+impl Default for Log { fn default() { Log { added: [], changed: [] } } }
+
+fn added(query: &mut Query<(&Value,), (Added<Value>,)>, log: ResMut<Log>) {
+    query.for_each(fn(got: (&Value,)) { let (v,) = got; push_at(&mut log.added, v.0) });
+    push_at(&mut log.added, -1)
+}
+fn changed(query: &mut Query<(&Value,), (Changed<Value>,)>, log: ResMut<Log>) {
+    query.for_each(fn(got: (&Value,)) { let (v,) = got; push_at(&mut log.changed, v.0) });
+    push_at(&mut log.changed, -1)
+}
+
+fn read(m: &Mut<Value>) -> Int { let v = m.get(); v.0 }
+
+fn shown(name: Str, xs: &[Int]) -> Str {
+    let mut out = name ++ ":";
+    let mut empty = true;
+    let mut i = 0;
+    while({ i < len_at(xs) }) {
+        if(xs[i] < 0) { out = out ++ (if(empty) { " - |" } else { " |" }); empty = true }
+        else { out = out ++ " " ++ show(xs[i]); empty = false };
+        i = i + 1
+    };
+    out
+}
+
+fn semantics() {
+    let mut app = App::new()
+        .register<Value>()
+        .register<Tag>()
+        .init_resource<Log>()
+        .add_systems(Update, (added, changed).chain())
+        .build();
+    let a = app.world.spawn_bundle((Value(1), Tag));
+    let b = app.world.spawn_bundle((Value(2),));
+    app.emit(&Update);
+    // Merely fetching mutable data does not change it.
+    match(app.world.get_mut<Value>(a)) { Some(m) => say(read(&m)), None => () };
+    app.world.query<(&mut Value,)>().for_each(fn(got: (Mut<Value>,)) { let (v,) = got; discard(v) });
+    let _ = app.world.remove<Tag>(a);
+    let _ = app.world.insert(b, Tag);
+    app.emit(&Update);
+    match(app.world.get_mut<Value>(a)) { Some(m) => let mut m = m; let v = m.get_mut(); v.0 = 3;, None => () };
+    match(app.world.insert(b, Value(4))) { Some(old) => say(old.0), None => () };
+    app.emit(&Update);
+    let _ = app.world.remove<Value>(a);
+    let _ = app.world.insert(a, Value(5));
+    let _ = app.world.despawn(b);
+    app.emit(&Update);
+    match(app.world.resource<Log>()) {
+        Some(log) => say(shown("added", &log.added)); say(shown("changed", &log.changed)),
+        None => ()
+    }
+}
+
+struct Seen([Int])
+impl Default for Seen { fn default() { Seen([]) } }
+fn watch(single: &mut Single<(&Value,), (Changed<Value>,)>, seen: ResMut<Seen>) {
+    match(single.get_mut()) { Some(got) => let (v,) = got; push_at(&mut seen.0, v.0), None => () }
+}
+
+fn quiet() -> Int {
+    let mut app = App::new().register<Value>().init_resource<Seen>().add_systems(Update, watch).build();
+    let a = app.world.spawn_bundle((Value(1),));
+    app.emit(&Update);
+    app.emit(&Update);
+    match(app.world.get_mut<Value>(a)) { Some(m) => let mut m = m; let v = m.get_mut(); v.0 = 2;, None => () };
+    app.emit(&Update);
+    match(app.world.resource<Seen>()) {
+        Some(seen) => say("single: " ++ show(seen.0[0]) ++ " " ++ show(seen.0[1])); len_at(&seen.0) - 2,
+        None => 9
+    }
+}
+
+fn main() -> Int {
+    semantics();
+    quiet()
+}

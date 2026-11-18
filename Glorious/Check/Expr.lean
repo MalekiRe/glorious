@@ -1471,7 +1471,16 @@ partial def inferStmts (scope : Scope) (amb : Row) (stmts : List Stmt)
     let check : Pending := ⟨(← get).pos, "the pattern of this `let` does", [t], [[pat]]⟩
     modify fun s => { s with pending := s.pending.push check }
     let here := (← get).pos
+    -- (What has a `drop` to run where the block ends, and is not given away
+    -- before, holds what it borrows till then.)
+    let held ← binds.filterMapM fun (x, b) => do
+      match b with
+      | .val tx _ => pure (if !Syntax.givenAway x rest && (← hasDropOwn tx) then some x else none)
+      | _ => pure none
+    let outerLive := (← get).dropLive
+    modify fun s => { s with dropLive := held ++ s.dropLive }
     let result ← inferStmts (binds ++ scope) amb rest want
+    modify fun s => { s with dropLive := outerLive }
     checkUses here scope binds rest
     pure result
   | .letMut x value :: rest => do
@@ -1514,7 +1523,12 @@ partial def inferStmts (scope : Scope) (amb : Row) (stmts : List Stmt)
         { s with
           flagged := here :: s.flagged
           givenSites := (here, ⟨s.owner, at_.1, at_.2, Syntax.givenSite x, false⟩, t, pos) :: s.givenSites }
+    -- (What it holds has a `drop` to run where the block ends: what that
+    -- borrows is held till then.)
+    let outerLive := (← get).dropLive
+    if !given && (← hasDropOwn t) then modify fun s => { s with dropLive := x :: s.dropLive }
     let result ← inferStmts ((x, .cell t brand) :: scope) amb rest want
+    modify fun s => { s with dropLive := outerLive }
     if given then checkUses here scope [(x, .val t brand)] (Syntax.lessPartsStmts x rest)
     checkEscape brand s!"`{x}` could be used after its block has ended"
       (("something that uses it is the block's result", result) :: scopeRoots scope) amb
