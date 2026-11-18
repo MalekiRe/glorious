@@ -402,13 +402,9 @@ private partial def parseItem : P Item := do
 of a module, or names in braces that share what is before them. -/
 private partial def parseUseTree (before : List String) : P (List Item) := do
   if ← acceptPunct "{" then
-    let mut out : Array Item := #[]
-    repeat
-      if (← peek) == .punct "}" then break
-      out := out ++ (← parseUseTree before).toArray
-      if !(← acceptPunct ",") then break
+    let out ← listUntil (atPunct "}") (parseUseTree before)
     expectPunct "}"
-    pure out.toList
+    pure out.flatten
   else if (← peek) == .op "*" then
     advance
     pure [.import before none true]
@@ -703,13 +699,10 @@ private partial def parseExtern : P (List Item) := do
     advance
     let name ← expectIdent
     expectPunct "("
-    let mut params : Array TypeExpr := #[]
-    repeat
-      if (← peek) == .punct ")" then break
+    let params ← listUntil (atPunct ")") do
       let _ ← expectIdent
       expectPunct ":"
-      params := params.push (← parseType)
-      if !(← acceptPunct ",") then break
+      parseType
     expectPunct ")"
     let ret ← if ← acceptPunct "->" then parseType else pure (.tuple [])
     expectPunct ";"
@@ -743,7 +736,7 @@ private partial def parseExtern : P (List Item) := do
     let mut declared : Array TypeExpr := #[]
     let mut classes : Nat := 0
     let mut place : Nat := 1
-    for (p, i) in params.toList.zipIdx do
+    for (p, i) in params.zipIdx do
       let (ty, into, _, _, cls) ← kind 4 p
       declared := declared.push ty
       args := args.push (into (Expr.name none s!"%a{i}"))
@@ -760,7 +753,7 @@ private partial def parseExtern : P (List Item) := do
     let body : List Stmt := match ret with
       | .tuple [] => [.expr call, .expr (.tuple [])]
       | _ => [.expr (back call)]
-    let pats := (List.range params.size).map fun i => Pattern.var s!"%a{i}"
+    let pats := (List.range params.length).map fun i => Pattern.var s!"%a{i}"
     items := items.push (.fn name [] (declared.toList.map some) (some retTy) [.mk pats body])
     items := items.push (.unsafeFn name)
   expectPunct "}"

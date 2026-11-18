@@ -424,6 +424,34 @@ def isOp (s : String) : P Bool := do
 def expectOp (s : String) : P Unit := do
   if (← peek) == .op s then advance else failAt s!"expected `{s}`"
 
+/-- Items separated by commas, up to where `closed` says the list ends (not
+taken). -/
+partial def listUntil {α : Type} (closed : P Bool) (one : P α) : P (List α) := do
+  let mut out : Array α := #[]
+  repeat
+    if ← closed then break
+    out := out.push (← one)
+    if !(← acceptPunct ",") then break
+  pure out.toList
+
+/-- Is the next token the punctuation `s`? -/
+def atPunct (s : String) : P Bool := do pure ((← peek) == .punct s)
+
+/-- `<a, b>`, if written. -/
+def angledList {α : Type} (one : P α) : P (List α) := do
+  if !(← isOp "<") then return []
+  advance
+  let out ← listUntil (isOp ">") one
+  expectOp ">"
+  pure out
+
+/-- `<'a, 'b>` after `for`. -/
+def parseLifetimes : P (List String) :=
+  angledList do
+    let l ← expectIdent
+    unless l.startsWith "'" do failAt "expected a lifetime: `for<'a>`"
+    pure l
+
 mutual
 
 partial def parseType : P TypeExpr := do
@@ -445,18 +473,11 @@ partial def parseType : P TypeExpr := do
     advance
     let trait ← expectPath
     -- (`<B as Bundle<S>>::Had`: the trait at its arguments.)
-    let mut targs : Array TypeExpr := #[]
-    if ← isOp "<" then
-      advance
-      repeat
-        if ← isOp ">" then break
-        targs := targs.push (← parseType)
-        if !(← acceptPunct ",") then break
-      if ← isOp ">" then advance else failAt "expected `>`"
-    if ← isOp ">" then advance else failAt "expected `>`"
+    let targs ← angledList parseType
+    expectOp ">"
     expectPunct "::"
     let name ← expectIdent
-    pure (.name assocOfMark [self, .name trait targs.toList, .name name []])
+    pure (.name assocOfMark [self, .name trait targs, .name name []])
   | .op "&" =>
     advance
     parseRefRest
@@ -477,33 +498,16 @@ partial def parseType : P TypeExpr := do
     advance
     if x == "for" && (← isOp "<") then
       -- `for<'a> fn(&'a T) -> R`: a callable for every such lifetime.
-      advance
-      let mut lifetimes : Array TypeExpr := #[]
-      repeat
-        if ← isOp ">" then break
-        let l ← expectIdent
-        unless l.startsWith "'" do failAt "expected a lifetime: `for<'a>`"
-        lifetimes := lifetimes.push (.name l [])
-        if !(← acceptPunct ",") then break
-      expectOp ">"
-      let inner ← parseType
-      return .name rankedMark (lifetimes.toList ++ [inner])
+      let lifetimes ← parseLifetimes
+      return .name rankedMark (lifetimes.map (.name · []) ++ [← parseType])
     let x := "::".intercalate (← parsePathRest x)
-    if ← isOp "<" then
-      advance
-      let mut args : Array TypeExpr := #[]
-      repeat
-        if ← isOp ">" then break
-        -- (`'_`: a lifetime left to be found, which is to say not written.)
-        if (← peek) == .ident "'_" then
-          advance
-          if !(← acceptPunct ",") then break
-          continue
-        args := args.push (← parseType)
-        if !(← acceptPunct ",") then break
-      expectOp ">"
-      pure (.name x args.toList)
-    else pure (.name x [])
+    -- (`'_`: a lifetime left to be found, which is to say not written.)
+    let args ← angledList do
+      if (← peek) == .ident "'_" then
+        advance
+        pure none
+      else some <$> parseType
+    pure (.name x args.reduceOption)
   | .int n =>
     -- A whole number where a type is written: the type that stands for it.
     advance
@@ -583,18 +587,7 @@ partial def parseEffects (braced : Bool) : P (List (String × List TypeExpr)) :=
   pure effects.toList
 
 /-- `<A, B>`, if written. -/
-partial def parseTypeArgs : P (List TypeExpr) := do
-  let mut args : Array TypeExpr := #[]
-  if (← peek) == .op "<" then
-    advance
-    repeat
-      if (← peek) == .op ">" then break
-      args := args.push (← parseType)
-      if !(← acceptPunct ",") then break
-    match ← peek with
-    | .op ">" => advance
-    | _ => failAt "expected `>`"
-  pure args.toList
+partial def parseTypeArgs : P (List TypeExpr) := angledList parseType
 
 /-- What follows `&`: a lifetime, `mut`, and the type. -/
 partial def parseRefRest : P TypeExpr := do
@@ -612,18 +605,13 @@ partial def parseRefRest : P TypeExpr := do
 /-- Types separated by commas up to and including the closing punctuation. An
 item may be written `name: Type`. -/
 partial def parseTypeList (close : String) : P (List TypeExpr) := do
-  let mut out : Array TypeExpr := #[]
-  repeat
-    if (← peek) == .punct close then break
-    match ← peek, ← peek 1 with
-    | .ident _, .punct ":" =>
+  let out ← listUntil (atPunct close) do
+    if let (.ident _, .punct ":") := (← peek, ← peek 1) then
       advance
       advance
-    | _, _ => pure ()
-    out := out.push (← parseType)
-    if !(← acceptPunct ",") then break
+    parseType
   expectPunct close
-  pure out.toList
+  pure out
 
 end
 
@@ -701,30 +689,23 @@ partial def parseBoundsOf (subject : String) : P (List Bound) := do
   repeat
     let mut tr ← expectPath
     -- `for<'a>` before a callable: it is asked for at every such lifetime.
-    let mut ranked : Array String := #[]
+    let mut ranked : List String := []
     if tr == "for" && (← isOp "<") then
-      advance
-      repeat
-        if ← isOp ">" then break
-        let l ← expectIdent
-        unless l.startsWith "'" do failAt "expected a lifetime: `for<'a>`"
-        ranked := ranked.push l
-        if !(← acceptPunct ",") then break
-      expectOp ">"
+      ranked ← parseLifetimes
       tr ← expectPath
       unless tr == "Fn" || tr == "RunsIn" do failAt "`for<..>` is written before `Fn` or `RunsIn`"
     if tr == "Fn" then
       if !(← isOp "<") then failAt "expected `<`: `Fn<(A, B), Output = R>`"
       advance
       let pack ← parsePack
-      out := out.push { subject, trait := tr, args := pack, assoc := ← parseAssoc, ranked := ranked.toList }
+      out := out.push { subject, trait := tr, args := pack, assoc := ← parseAssoc, ranked }
     else if tr == "RunsIn" then
       if !(← isOp "<") then failAt "expected `<`: `RunsIn<E, (A, B), Output = R>`"
       advance
       let access ← parseType
       expectPunct ","
       let pack ← parsePack
-      out := out.push { subject, trait := tr, args := access :: pack, assoc := ← parseAssoc, ranked := ranked.toList }
+      out := out.push { subject, trait := tr, args := access :: pack, assoc := ← parseAssoc, ranked }
     else if tr == "Use" then
       if !(← isOp "<") then failAt "expected `<`: `Use<[1, 1]>`"
       advance

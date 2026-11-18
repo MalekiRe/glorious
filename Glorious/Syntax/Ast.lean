@@ -909,6 +909,31 @@ def Expr.bodies : Expr → List (List Pattern × List Stmt)
 def Expr.children (e : Expr) : List Expr :=
   e.direct ++ e.bodies.flatMap fun (_, body) => body.flatMap Stmt.exprs
 
+/-- An expression with each expression directly inside it made by `fe`, and
+each block inside it (with the patterns of its clause) by `fb`. -/
+def Expr.traverse {m : Type → Type} [Monad m] (fe : Expr → m Expr)
+    (fb : List Pattern → List Stmt → m (List Stmt)) : Expr → m Expr
+  | .call i g args => do pure (.call i (← fe g) (← args.mapM fe))
+  | .tailCall i g args => do pure (.tailCall i (← fe g) (← args.mapM fe))
+  | .tuple args => .tuple <$> args.mapM fe
+  | .proj e n => (.proj · n) <$> fe e
+  | .deref e => .deref <$> fe e
+  | .reborrow u e => .reborrow u <$> fe e
+  | .fieldOf i e n => (.fieldOf i · n) <$> fe e
+  | .closure i clauses => .closure i <$> clauses.mapM fun | .mk ps b => .mk ps <$> fb ps b
+  | .handle s arms => do pure (.handle (← fe s) (← arms.mapM fun | .mk ps b => .mk ps <$> fb ps b))
+  | .labelScope l b => .labelScope l <$> fb [] b
+  | e => pure e
+
+/-- A statement with each expression in it made by `fe`, in order. -/
+def Stmt.traverse {m : Type → Type} [Monad m] (fe : Expr → m Expr) : Stmt → m Stmt
+  | .let_ p v => .let_ p <$> fe v
+  | .expr e => .expr <$> fe e
+  | .defer e => .defer <$> fe e
+  | .letMut x v => .letMut x <$> fe v
+  | .assign t v => do pure (.assign (← fe t) (← fe v))
+  | .located l c s => .located l c <$> s.traverse fe
+
 /-- Every function of a program with its clauses made by `f`: in
 implementations, traits' defaults and modules too. -/
 partial def Item.mapClauses (f : Clause → Clause) : Item → Item
@@ -936,23 +961,11 @@ mutual
 outside: not under a pattern, a `let` or a parameter that names `x` anew. -/
 partial def renameExpr (x y : String) (bound : List String) : Expr → Expr
   | .name none z => if z == x && !bound.contains x then .name none y else .name none z
-  | .call id f args => .call id (renameExpr x y bound f) (args.map (renameExpr x y bound))
-  | .tailCall id f args => .tailCall id (renameExpr x y bound f) (args.map (renameExpr x y bound))
-  | .tuple args => .tuple (args.map (renameExpr x y bound))
-  | .proj e i => .proj (renameExpr x y bound e) i
-  | .closure id clauses => .closure id (clauses.map (renameClause x y bound))
-  | .handle subject arms => .handle (renameExpr x y bound subject) (arms.map (renameClause x y bound))
-  | .labelScope l body => .labelScope l (renameStmts x y bound body)
   | .ref uniq z => .ref uniq (if z == x && !bound.contains x then y else z)
-  | .deref e => .deref (renameExpr x y bound e)
-  | .reborrow uniq e => .reborrow uniq (renameExpr x y bound e)
   | .refField id uniq z path star =>
     .refField id uniq (if z == x && !bound.contains x then y else z) path star
-  | .fieldOf id e name => .fieldOf id (renameExpr x y bound e) name
-  | e => e
-
-partial def renameClause (x y : String) (bound : List String) : Clause → Clause
-  | .mk pats body => .mk pats (renameStmts x y (pats.flatMap patternNames ++ bound) body)
+  | e => Id.run (e.traverse (pure <| renameExpr x y bound ·)
+      fun ps b => pure (renameStmts x y (ps.flatMap patternNames ++ bound) b))
 
 partial def renameStmts (x y : String) (bound : List String) : List Stmt → List Stmt
   | [] => []
@@ -1008,41 +1021,22 @@ the statement it is in is preceded by the `let` that binds it, and what was
 written is a borrow of that name. The value then lasts to the end of the
 block the statement is in, or, where the statement is an expression, to
 the end of the statement. -/
-partial def nameBorrows : Expr → Expr × List Stmt
-  | .call id f args =>
-    match f, args with
-    | .name none mark, [e] =>
-      if mark == borrowMark || mark == borrowMutMark then
-        let (e, before) := nameBorrows e
-        let x := s!"borrowed%{id}"
-        let uniq := mark == borrowMutMark
-        (.ref uniq x, before ++ [if uniq then Stmt.letMut x e else .let_ (.var x) e])
-      else
-        let (e, before) := nameBorrows e
-        (.call id f [e], before)
-    | _, _ =>
-      let (f, before) := nameBorrows f
-      let parts := args.map nameBorrows
-      (.call id f (parts.map (·.1)), before ++ parts.flatMap (·.2))
-  | .tailCall id f args =>
-    let (f, before) := nameBorrows f
-    let parts := args.map nameBorrows
-    (.tailCall id f (parts.map (·.1)), before ++ parts.flatMap (·.2))
-  | .tuple args =>
-    let parts := args.map nameBorrows
-    (.tuple (parts.map (·.1)), parts.flatMap (·.2))
-  | .proj e i => let (e, before) := nameBorrows e; (.proj e i, before)
-  | .deref e => let (e, before) := nameBorrows e; (.deref e, before)
-  | .reborrow uniq e => let (e, before) := nameBorrows e; (.reborrow uniq e, before)
-  | .fieldOf id e name => let (e, before) := nameBorrows e; (.fieldOf id e name, before)
-  | .closure id clauses => (.closure id (clauses.map nameBorrowsClause), [])
-  | .handle subject arms =>
+partial def nameBorrowsM : Expr → StateM (List Stmt) Expr
+  | .call id (.name none mark) [e] => do
+    let e ← nameBorrowsM e
+    if mark != borrowMark && mark != borrowMutMark then return .call id (.name none mark) [e]
+    let x := s!"borrowed%{id}"
+    let uniq := mark == borrowMutMark
+    modify (· ++ [if uniq then Stmt.letMut x e else .let_ (.var x) e])
+    pure (.ref uniq x)
+  | .handle subject arms => do
     -- What is handled is run under the handler: so is what it borrows.
-    let (subject, before) := nameBorrows subject
+    let (subject, before) := (nameBorrowsM subject).run []
     let subject := if before.isEmpty then subject else .labelScope "%block" (before ++ [.expr subject])
-    (.handle subject (arms.map nameBorrowsClause), [])
-  | .labelScope l body => (.labelScope l (nameBorrowsStmts body), [])
-  | e => (e, [])
+    pure (.handle subject (arms.map nameBorrowsClause))
+  | e => e.traverse nameBorrowsM fun _ b => pure (nameBorrowsStmts b)
+
+partial def nameBorrows (e : Expr) : Expr × List Stmt := (nameBorrowsM e).run []
 
 partial def nameBorrowsClause : Clause → Clause
   | .mk pats body => .mk pats (nameBorrowsStmts body)
@@ -1238,50 +1232,21 @@ mutual
 
 /-- The cleanups written in an expression, at any depth, and the expression
 without them. -/
-partial def splitDefers : Expr → Expr × List Stmt
-  | .call id f args =>
-    let (f, ds) := splitDefers f
-    let parts := args.map splitDefers
-    (.call id f (parts.map (·.1)), ds ++ parts.flatMap (·.2))
-  | .tailCall id f args =>
-    let (f, ds) := splitDefers f
-    let parts := args.map splitDefers
-    (.tailCall id f (parts.map (·.1)), ds ++ parts.flatMap (·.2))
-  | .tuple args =>
-    let parts := args.map splitDefers
-    (.tuple (parts.map (·.1)), parts.flatMap (·.2))
-  | .proj e i => let (e, ds) := splitDefers e; (.proj e i, ds)
-  | .deref e => let (e, ds) := splitDefers e; (.deref e, ds)
-  | .reborrow u e => let (e, ds) := splitDefers e; (.reborrow u e, ds)
-  | .fieldOf id e n => let (e, ds) := splitDefers e; (.fieldOf id e n, ds)
-  | .closure id clauses =>
-    let parts := clauses.map fun
-      | .mk pats body => let (body, ds) := splitDefersStmts body; (Clause.mk pats body, ds)
-    (.closure id (parts.map (·.1)), parts.flatMap (·.2))
-  | .handle subject arms =>
-    let (subject, ds) := splitDefers subject
-    let parts := arms.map fun
-      | .mk pats body => let (body, ds) := splitDefersStmts body; (Clause.mk pats body, ds)
-    (.handle subject (parts.map (·.1)), ds ++ parts.flatMap (·.2))
-  | .labelScope l body => let (body, ds) := splitDefersStmts body; (.labelScope l body, ds)
-  | e => (e, [])
+partial def splitDefersM (e : Expr) : StateM (List Stmt) Expr :=
+  e.traverse splitDefersM fun _ b => splitDefersBodyM b
 
-partial def splitDefersStmts : List Stmt → List Stmt × List Stmt
-  | [] => ([], [])
-  | s :: rest =>
-    let (rest, more) := splitDefersStmts rest
-    let rec one : Stmt → List Stmt × List Stmt
-      | .defer e => ([], [.defer e])
-      | .located l c s => let (kept, ds) := one s; (kept.map (.located l c), ds)
-      | .let_ p e => let (e, ds) := splitDefers e; ([.let_ p e], ds)
-      | .letMut y e => let (e, ds) := splitDefers e; ([.letMut y e], ds)
-      | .expr e => let (e, ds) := splitDefers e; ([.expr e], ds)
-      | .assign target e =>
-        let (target, d1) := splitDefers target
-        let (e, d2) := splitDefers e
-        ([.assign target e], d1 ++ d2)
-    let (kept, ds) := one s
-    (kept ++ rest, ds ++ more)
+partial def splitDefersBodyM (body : List Stmt) : StateM (List Stmt) (List Stmt) := do
+  let rec one : Stmt → StateM (List Stmt) (List Stmt)
+    | .defer e => do
+      modify (· ++ [.defer e])
+      pure []
+    | .located l c s => do pure ((← one s).map (.located l c))
+    | s => do pure [← s.traverse splitDefersM]
+  pure (← body.mapM one).flatten
+
+partial def splitDefers (e : Expr) : Expr × List Stmt := (splitDefersM e).run []
+
+partial def splitDefersStmts (body : List Stmt) : List Stmt × List Stmt := (splitDefersBodyM body).run []
 
 end
 

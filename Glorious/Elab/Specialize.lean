@@ -67,16 +67,7 @@ partial def specExpr (tr : TraitInfo) (known : List (String × Expr)) : Expr →
   | .tailCall id f args => do
     let (f, args) ← specCall tr known f args
     pure (.tailCall id f args)
-  | .tuple args => .tuple <$> args.mapM (specExpr tr known)
-  | .proj e n => do pure (.proj (← specExpr tr known e) n)
-  | .closure id clauses => .closure id <$> clauses.mapM (specClause tr known)
-  | .handle subject arms => do
-    pure (.handle (← specExpr tr known subject) (← arms.mapM (specClause tr known)))
-  | .labelScope l body => .labelScope l <$> specStmts tr known body
-  | .deref e => .deref <$> specExpr tr known e
-  | .reborrow uniq e => .reborrow uniq <$> specExpr tr known e
-  | .fieldOf id e name => do pure (.fieldOf id (← specExpr tr known e) name)
-  | e => pure e
+  | e => e.traverse (specExpr tr known) fun _ b => specStmts tr known b
 
 /-- What is called and what it is known, at a call. -/
 partial def specCall (tr : TraitInfo) (known : List (String × Expr)) (f : Expr) (args : List Expr) :
@@ -110,13 +101,8 @@ partial def specStmts (tr : TraitInfo) (known : List (String × Expr)) (stmts : 
     StateM Copies (List Stmt) :=
   stmts.mapM (specStmt tr known)
 
-partial def specStmt (tr : TraitInfo) (known : List (String × Expr)) : Stmt → StateM Copies Stmt
-  | .let_ pat value => .let_ pat <$> specExpr tr known value
-  | .expr e => .expr <$> specExpr tr known e
-  | .defer e => .defer <$> specExpr tr known e
-  | .letMut x value => .letMut x <$> specExpr tr known value
-  | .assign target value => do pure (.assign (← specExpr tr known target) (← specExpr tr known value))
-  | .located line col s => .located line col <$> specStmt tr known s
+partial def specStmt (tr : TraitInfo) (known : List (String × Expr)) (s : Stmt) : StateM Copies Stmt :=
+  s.traverse (specExpr tr known)
 
 end
 

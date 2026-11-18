@@ -132,28 +132,21 @@ partial def parsePattern : P Pattern := do
   | _ => parsePatternRest
 
 partial def parsePatternList : P (List Pattern) := do
-  let mut out : Array Pattern := #[]
-  repeat
-    if (← peek) == .punct ")" then break
+  let out ← listUntil (atPunct ")") do
     -- `..`: the fields not written, let go.
     if (← peek) == .punct "." && (← peek 1) == .punct "." then
       advance
       advance
-      out := out.push (.var restMark)
-    else out := out.push (← parsePattern)
-    if !(← acceptPunct ",") then break
+      pure (.var restMark)
+    else parsePattern
   expectPunct ")"
-  pure out.toList
+  pure out
 
 /-- Expressions separated by commas up to and including the closing `)`. -/
 partial def parseArgs : P (List Expr) := do
-  let mut out : Array Expr := #[]
-  repeat
-    if (← peek) == .punct ")" then break
-    out := out.push (← parseBinary 0 false)
-    if !(← acceptPunct ",") then break
+  let out ← listUntil (atPunct ")") (parseBinary 0 false)
   expectPunct ")"
-  pure out.toList
+  pure out
 
 /-- Binary operators by precedence climbing. With `noBlock`, a `{` after a call
 is not taken as a trailing block. -/
@@ -313,15 +306,11 @@ partial def parsePostfix (noBlock : Bool) : P Expr := do
       let attempt : P (Option (List TypeExpr)) :=
         try
           advance
-          let mut tys : Array TypeExpr := #[]
-          repeat
-            if ← isOp ">" then break
-            tys := tys.push (← parseType)
-            if !(← acceptPunct ",") then break
+          let tys ← listUntil (isOp ">") parseType
           if !(← isOp ">") then pure none
           else
             advance
-            if (← peek) != .punct "(" then pure none else pure (some tys.toList)
+            if (← peek) != .punct "(" then pure none else pure (some tys)
         catch _ => pure none
       match ← attempt with
       | none =>
@@ -639,12 +628,7 @@ partial def parseBraces : P Expr := do
 
 /-- Clauses separated by commas, up to but not including the closing `}`. -/
 partial def parseClauses : P (List Clause) := do
-  let mut out : Array Clause := #[]
-  repeat
-    if (← peek) == .punct "}" then break
-    out := out.push (← parseClause)
-    if !(← acceptPunct ",") then break
-  pure (restClauses out.toList)
+  pure (restClauses (← listUntil (atPunct "}") parseClause))
 
 /-- One clause: a single pattern for the argument, or none for a callable taking
 no arguments. Callables of several arguments are written `fn(x, y) { body }`. -/

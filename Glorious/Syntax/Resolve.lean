@@ -74,29 +74,13 @@ partial def mapTypesExpr (f : TypeExpr → Except String TypeExpr) : Expr → Ex
     if mark == ascribeMark || mark == instMark then
       pure (.call id (.name none mark) [← mapTypesExpr f value, (← f (TypeExpr.ofExpr ty)).asExpr])
     else pure (.call id (.name none mark) [← mapTypesExpr f value, ← mapTypesExpr f ty])
-  | .call id g args => do pure (.call id (← mapTypesExpr f g) (← args.mapM (mapTypesExpr f)))
-  | .tailCall id g args => do pure (.tailCall id (← mapTypesExpr f g) (← args.mapM (mapTypesExpr f)))
-  | .tuple args => .tuple <$> args.mapM (mapTypesExpr f)
-  | .proj e i => do pure (.proj (← mapTypesExpr f e) i)
-  | .fieldOf id e name => do pure (.fieldOf id (← mapTypesExpr f e) name)
-  | .deref e => .deref <$> mapTypesExpr f e
-  | .reborrow u e => .reborrow u <$> mapTypesExpr f e
-  | .closure id clauses => .closure id <$> clauses.mapM (mapTypesClause f)
-  | .handle subject arms => do
-    pure (.handle (← mapTypesExpr f subject) (← arms.mapM (mapTypesClause f)))
-  | .labelScope l body => .labelScope l <$> body.mapM (mapTypesStmt f)
-  | e => pure e
+  | e => e.traverse (mapTypesExpr f) fun _ b => b.mapM (mapTypesStmt f)
 
 partial def mapTypesClause (f : TypeExpr → Except String TypeExpr) : Clause → Except String Clause
   | .mk pats body => .mk pats <$> body.mapM (mapTypesStmt f)
 
-partial def mapTypesStmt (f : TypeExpr → Except String TypeExpr) : Stmt → Except String Stmt
-  | .let_ pat value => .let_ pat <$> mapTypesExpr f value
-  | .letMut x value => .letMut x <$> mapTypesExpr f value
-  | .expr e => .expr <$> mapTypesExpr f e
-  | .defer e => .defer <$> mapTypesExpr f e
-  | .assign target value => do pure (.assign (← mapTypesExpr f target) (← mapTypesExpr f value))
-  | .located line col s => .located line col <$> mapTypesStmt f s
+partial def mapTypesStmt (f : TypeExpr → Except String TypeExpr) (s : Stmt) : Except String Stmt :=
+  s.traverse (mapTypesExpr f)
 
 end
 
