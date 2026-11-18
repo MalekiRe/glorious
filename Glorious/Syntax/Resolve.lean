@@ -1,6 +1,8 @@
 module
 
 public import Glorious.Syntax.Ast
+public import Std.Data.HashMap
+public import Std.Data.HashSet
 
 /-!
 # What is settled before a program is checked
@@ -25,7 +27,7 @@ partial def elideLifetimes (lifes : List String) : TypeExpr → TypeExpr
 
 /-- A type with every alias in it written out. `seen` are the aliases being
 written out already: one that stands for itself has no meaning. -/
-partial def expandTypeExpr (aliases : List (String × List String × TypeExpr))
+partial def expandTypeExpr (aliases : Std.HashMap String (List String × TypeExpr))
     (seen : List String) : TypeExpr → Except String TypeExpr
   | .name x args => do
     let mut args ← args.mapM (expandTypeExpr aliases seen)
@@ -34,16 +36,16 @@ partial def expandTypeExpr (aliases : List (String × List String × TypeExpr))
     -- (Of a use that writes no lifetime, by the place among the types,
     -- which are what the default is given.)
     let written := args.any fun | .name l [] => l.startsWith "'" | _ => false
-    let byTypes := !written && (List.range 16).any fun k => (aliases.lookup (defaultKey x k ++ "~")).isSome
+    let byTypes := !written && (List.range 16).any fun k => aliases.contains (defaultKey x k ++ "~")
     repeat
-      match aliases.lookup (defaultKey x args.length ++ (if byTypes then "~" else "")) with
+      match aliases[defaultKey x args.length ++ (if byTypes then "~" else "")]? with
       | some (params, body) =>
         let params := genericParams params
         let params := if byTypes then params.filter (!·.startsWith "'") else params
         let given := params.zip args
         args := args ++ [← expandTypeExpr aliases seen (substTypeExpr given body)]
       | none => break
-    match aliases.lookup x with
+    match aliases[x]? with
     | none => pure (.name x args)
     | some (params, body) =>
       if seen.contains x then throw s!"type alias `{x}` stands for itself"
@@ -89,18 +91,21 @@ partial def expandAliases (items : List Item) : Except String (List Item) := do
   let aliases := items.filterMap fun
     | .typeAlias name params body => some (name, params, body)
     | _ => none
+  let mut seen : Std.HashSet String := {}
   for (name, _, _) in aliases do
-    if (aliases.filter (·.1 == name)).length > 1 then
-      throw s!"type alias `{name}` is declared twice"
+    if seen.contains name then throw s!"type alias `{name}` is declared twice"
+    seen := seen.insert name
   -- A type the program declares is that type, whatever an alias of the same
   -- name would have stood for.
-  let declared := items.filterMap fun
+  let declared : Std.HashSet String := .ofList (items.filterMap fun
     | .enum name _ _ => some name
     | .struct name _ _ => some name
-    | _ => none
+    | _ => none)
   let aliases := aliases.filter fun (name, _, _) => !declared.contains name
   if aliases.isEmpty then return items
-  let ty := expandTypeExpr aliases []
+  let byName : Std.HashMap String (List String × TypeExpr) :=
+    aliases.foldl (fun m (name, ps, body) => if m.contains name then m else m.insert name (ps, body)) {}
+  let ty := expandTypeExpr byName []
   -- An argument of an implementation's type that is not one of its type
   -- parameters is a type: `impl T for Option<Int>`. It is fixed, as an
   -- argument another name of the type fixes is.
@@ -138,8 +143,8 @@ partial def expandAliases (items : List Item) : Except String (List Item) := do
       -- An implementation for another name of a type, `impl T for
       -- Option<A>`, is one for the type the name stands for, with the
       -- arguments the name fixes said beside it.
-      match aliases.find? (·.1 == head) with
-      | some (_, aps, .name target targs) =>
+      match byName[head]? with
+      | some (aps, .name target targs) =>
         let given := aps.zip args
         let mut newArgs : Array String := #[]
         let mut fresh : Array String := #[]
@@ -336,6 +341,14 @@ partial def borrowReceivers (items : List Item) : List Item :=
     | item => item
   promoteItems (items.map go)
 
+/-- The arguments an implementation gives its trait, as written
+(`traitArgName`), in order. -/
+def givenTraitArgs (ms : List Item) : List TypeExpr :=
+  let named := ms.filterMap fun
+    | .typeAlias name _ body => some (name, body)
+    | _ => none
+  (List.range named.length).filterMap fun i => named.lookup (traitArgName i)
+
 /-- Each implementation for every type, `impl<T: Show> Print for T`, written
 out as one for each type made with a name, each tuple and callable of a few
 parts, and each reference, that has an implementation of every trait it asks
@@ -366,20 +379,19 @@ def expandBlankets (items : List Item) : List Item := Id.run do
   -- (Which trait each implementation is of, for which head, and whether for
   -- all of the head's arguments.)
   -- (The arguments an implementation gives its trait, as written.)
-  let givenArgs := fun (ms : List Item) => (List.range ms.length).filterMap fun i =>
-    ms.findSome? fun
-      | .typeAlias name _ body => if name == traitArgName i then some body.spell else none
-      | _ => none
+  let givenArgs := fun (ms : List Item) => (givenTraitArgs ms).map (·.spell)
   -- (Which trait each implementation is of, at which arguments, for which
   -- head.)
   let implOf : Item → Option (String × String × List String) := fun
     | .impl _ tr head _ _ ms => some (traitBase tr, head, givenArgs ms)
     | _ => none
-  let mut known : List (String × String × List String) := rest.filterMap implOf
+  let mut known : Std.HashSet (String × String × List String) := .ofList (rest.filterMap implOf)
+  -- (Which traits each head has some implementation of.)
+  let mut has : Std.HashSet (String × String) := .ofList ((rest.filterMap implOf).map fun (tr, h, _) => (tr, h))
   -- (Those another implementation for every type gave, by which: two of
   -- them for one trait both written out for a type are two implementations
   -- of it for that type, which the checker refuses.)
-  let mut byBlanket : List (Nat × String × String × List String) := []
+  let mut byBlanket : Std.HashMap (String × String × List String) (List Nat) := {}
   -- (`impl !Print for Secret {}`: not written out for that type.)
   let last := fun (s : String) => (s.splitOn "::").getLast!
   let denied := rest.filterMap fun
@@ -396,17 +408,17 @@ def expandBlankets (items : List Item) : List Item := Id.run do
     let mut more := false
     for ((ps, tr, t, ctx, ms), b) in blankets.zipIdx do
       let asked := ctx.filterMap fun (p, c) => if p == t then some (traitBase c) else none
+      let bodies := givenTraitArgs ms
       for (h, hps) in heads do
         let fresh := hps.zipIdx.map fun (p, j) => if p.startsWith "'" then s!"'%b{j}" else s!"%b{j}"
         let self := selfTypeOf h (fresh.map (TypeExpr.name · []))
-        let mine := givenArgs (ms.map fun
-          | .typeAlias n takes body => .typeAlias n takes (substTypeExpr [(t, self)] body)
-          | item => item)
-        if byBlanket.any (fun (b', tr', h', a) => b' == b && tr' == traitBase tr && h' == h && a == mine) then continue
-        let mineToo := byBlanket.any fun (b', tr', h', a) => b' != b && tr' == traitBase tr && h' == h && a == mine
-        if !mineToo && known.any (fun (tr', h', a) => tr' == traitBase tr && h' == h && a == mine) then continue
+        let mine := bodies.map fun body => (substTypeExpr [(t, self)] body).spell
+        let givers := byBlanket.getD (traitBase tr, h, mine) []
+        if givers.contains b then continue
+        let mineToo := givers.any (· != b)
+        if !mineToo && known.contains (traitBase tr, h, mine) then continue
         if denied.contains (last (traitBase tr), last h) then continue
-        unless asked.all (fun c => known.any fun (c', h', _) => c' == c && h' == h) do continue
+        unless asked.all (fun c => has.contains (c, h)) do continue
         let ctx' := ctx.zipIdx.map fun ((p, c), k) => if p == t then (s!"%subject{k}", c) else (p, c)
         let subjects := (ctx.zipIdx.filter fun ((p, _), _) => p == t).map fun (_, k) =>
           Item.typeAlias (ctxSubjectName k) [] self
@@ -420,8 +432,9 @@ def expandBlankets (items : List Item) : List Item := Id.run do
           | item => item
         out := out.push (.impl (fresh ++ ps.filter (· != t)) tr h fresh ctx'
           (ms' ++ subjects ++ [.typeAlias (blanketName t) [] self]))
-        known := known ++ [(traitBase tr, h, mine)]
-        byBlanket := byBlanket ++ [(b, traitBase tr, h, mine)]
+        known := known.insert (traitBase tr, h, mine)
+        has := has.insert (traitBase tr, h)
+        byBlanket := byBlanket.insert (traitBase tr, h, mine) (givers ++ [b])
         more := true
     unless more do break
   pure (rest ++ out.toList)
@@ -452,8 +465,14 @@ def fillDefaults (items : List Item) : List Item :=
   let defaults := items.filterMap fun
     | .traitInfo name _ fns _ _ => some (name, fns)
     | _ => none
-  items.zipIdx.map fun
-    | (.impl ps tr head args context methods, index) =>
+  -- (How many implementations of each trait for each type, at the same
+  -- arguments, came before: the later ones are numbered.)
+  let (_, out) := items.zipIdx.foldl (init := (({} : Std.HashMap (String × String × List String) Nat), #[]))
+    fun (seen, out) (item, index) => match item with
+    | .impl ps tr head args context methods =>
+      let targs := givenTraitArgs methods
+      let given := targs.map (·.spell)
+      let before := seen.getD (tr, head, given) 0
       let written := methods.filterMap fun
         | .fn m _ _ _ _ => some m
         | _ => none
@@ -464,10 +483,6 @@ def fillDefaults (items : List Item) : List Item :=
         | .fn m _ _ _ _ => !written.contains m
         | .typeAlias n _ _ => !said.contains n
         | _ => false
-      let given := (List.range methods.length).filterMap fun i =>
-        methods.findSome? fun
-          | .typeAlias name _ body => if name == traitArgName i then some body.spell else none
-          | _ => none
       -- A default is written against `Self`; in the implementation its types
       -- are the trait's at the implementing type, as for a function the
       -- implementation writes itself without saying them.
@@ -488,20 +503,8 @@ def fillDefaults (items : List Item) : List Item :=
       -- same arguments (`impl<T, R> Get<T> for (Column<T>, R)` and
       -- `impl<T, H, R> Get<T> for (Column<H>, R)`): each is known by a
       -- name of its own, the later ones numbered.
-      let same := fun (other : Item) => match other with
-        | .impl _ tr' head' _ _ methods' =>
-          tr' == tr && head' == head && (List.range methods'.length).filterMap (fun i =>
-            methods'.findSome? fun
-              | .typeAlias name _ body => if name == traitArgName i then some body.spell else none
-              | _ => none) == given
-        | _ => false
-      let before := ((items.take index).filter same).length
       -- (`Self::Components` in its functions: what this implementation's
       -- trait leaves, at this type.)
-      let targs := (List.range methods.length).filterMap fun i =>
-        methods.findSome? fun
-          | .typeAlias name _ body => if name == traitArgName i then some body else none
-          | _ => none
       let ofSelf := selfAssocs self tr targs
       let all := (methods ++ missing).map fun
         | .fn m fps annots ret clauses =>
@@ -510,8 +513,9 @@ def fillDefaults (items : List Item) : List Item :=
               | .ok c => c
               | .error _ => c)
         | item => item
-      let tr := if before == 0 then tr else s!"{tr}#{before}"
-      .impl ps (traitAt tr given) head args context all
-    | (item, _) => item
+      let named := if before == 0 then tr else s!"{tr}#{before}"
+      (seen.insert (tr, head, given) (before + 1), out.push (.impl ps (traitAt named given) head args context all))
+    | item => (seen, out.push item)
+  out.toList
 
 end Glorious.Syntax
