@@ -5375,6 +5375,40 @@ smaller. Taken out. What it needs to pay: each unit keeping what each group
 added, not states, and numbering that does not make stores slower to read:
 the per-module deltas of the plan.
 
+## The checker's state, by what each part is (for the split into deltas)
+
+The checker's state (`St`, 148 parts) read from where each part is written,
+read and emptied:
+
+- **Declared** (made from the items before any group is checked, read after):
+  `types`, `ctors`, `ops`, `effects`, `aliases`, `traits`, `methods`,
+  `impls`, `implsByBase`, `kimpls`, `traitShape`, `supers`, `fieldNames`,
+  `typeBounds`, `typeParams`, `writtenArgs`, `useDecls`, `blanketTraits`,
+  `gatOccs`, `gatHolds`, `coercing`, `unsafeFns`, `arrayType`, `patterned`,
+  `runCtors`, `runAliases`, `runOps`, `runExact`, `modules`. (`impls`
+  also has what a holed implementation's functions find written into it.)
+- **One group's, while it is checked** (emptied in `checkGroup`,
+  `settleBounds`, `runLowerChecks`, `runPending`, ...): `dups`, `drops`,
+  `stays`, `seen`, `anon`, `outlives`, `group`, `later`, `temps`, `bounds`,
+  `groupUses`, `assocUses`, `dropCands`, `lateKeeps`, `instSites`,
+  `fieldSites`, `firstSaid`, `rowChecks`, `pending`, `projections`,
+  `namedReads`, `uses`, `heldMoves`, `lowerChecks`, `calls`, `env*`, the
+  `wild*`, `owner`, `pos`, `at_`, ...
+- **What a group gives** (grown by each, read by later groups or the
+  elaborator): `fns`, `fnBounds`, `fnBodies`, `runFns`, `dotChosen`,
+  `argsChosen`, `decided`, `packs`, `envFns`, `envLinks`, `envWraps`,
+  `derefReads`, `fieldReads`, `fieldTable`, `blockCaps`, `given`, `unrun`,
+  `coercions`, `dictTable`, `methodCalls`, `dropSites`, `siteTable`,
+  `siteTypes`, `movedCells`, `flagged`, `givenSites`, ...
+- **Numbered stores** (inference): `tys`, `rows`, `caps`, `capEdges`,
+  `capOut`, `capEdgeNames`, `loans`, `rigidKeys` (with `rigidAt`,
+  `conditionsAt`), and the counters `brands`, `dropAsked`.
+
+The split: a group's check gives what it adds (its part of the third kind,
+and its own segments of the stores) as a value of its own; a unit is its
+declarations and its groups' additions; reuse is adding them, and keeping
+is of additions, not states.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by
