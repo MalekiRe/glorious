@@ -529,11 +529,20 @@ partial def parsePrimary (noBlock : Bool) : P Expr := do
     if (← peek 1) != .punct "{" then failAt "expected an expression"
     let id := (← read).base + (← get)
     advance
+    let (types, bounds) := (← read).enclosing
     match ← parseBraces with
     | .closure _ clauses =>
       let fn := constFnName s!"const%{id}"
-      modifyThe (Array Item) (·.push (.fn fn [] [] none clauses))
-      pure (.call 0 (.name none fn) [])
+      -- (Generic in the type parameters of the function it is in, with what
+      -- is written of them: each copy of that function at known types has
+      -- one at those types.)
+      let wanted := bounds.filter (types.contains ·.subject)
+      modifyThe (Array Item) fun made =>
+        (made.push (.fn fn types [] none clauses)) ++ (if wanted.isEmpty then #[] else #[.bounds fn wanted])
+      -- (Known by the place of `const`: what it needs is given there.)
+      let call := Expr.call id (.name none fn) []
+      if types.isEmpty then pure call
+      else pure (.call 0 (.name none instMark) [call, (TypeExpr.tuple (types.map (TypeExpr.name · []))).asExpr])
     | _ => failAt "expected a block after `const`"
   | .ident "fn" =>
     -- `fn(a: A, b) -> R / {E} { body }`: a callable written out. A type may
@@ -882,7 +891,8 @@ partial def parseFn : P (Item × List Bound) := do
       | _ => c
     expectPunct "{"
     let consts := (bounds.filter (·.trait == knownTrait)).map (·.subject)
-    let body ← withReader (fun ctx => { ctx with consts := consts ++ ctx.consts }) parseStmts
+    let types := params.filter (!·.startsWith "'")
+    let body ← withReader (fun ctx => { ctx with consts := consts ++ ctx.consts, enclosing := (types, bounds ++ more) }) parseStmts
     expectPunct "}"
     -- `-> !`: a function that does not come back gives whatever is wanted
     -- of it, which only a body that does not come back can.

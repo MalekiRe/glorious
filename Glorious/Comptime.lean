@@ -40,9 +40,10 @@ partial def reify (v : Value) (next : Nat) : Option (List Rhs × Atom × Nat) :=
     pure (rhss ++ [.construct tag atoms], .var at_, at_ + 1)
   | _ => none
 
-/-- The body of a function that gives the value. -/
-def literal (v : Value) : Option Tm := do
-  let (rhss, a, _) ← reify v 0
+/-- The body of a function that gives the value, its locals after the
+`params` it is given. -/
+def literal (v : Value) (params : Nat := 0) : Option Tm := do
+  let (rhss, a, _) ← reify v params
   pure (rhss.foldr (fun r t => .let_ r t) (.ret a))
 
 /-- How a constant is said: by its name, or as the block it is. -/
@@ -53,9 +54,12 @@ def constName (fnName : String) : String :=
 
 /-- Run function `fn` of the program, given nothing, for at most `fuel`
 steps: the value, or what went wrong, with what it wrote (`display`). -/
-def runConst (p : Program) (fn : Nat) (fuel : Nat) (display : Value → String) :
+def runConst (p : Program) (fn : Nat) (fuel : Nat) (display : Value → String) (arity : Nat := 0) :
     Except String Value := do
-  let main := Tm.let_ (.closure fn []) (.call (.var 0) [] (.ret (.var 1)))
+  -- (Given `()` for each place a copy at known types keeps.)
+  let units := (List.range arity).map fun _ => Rhs.construct 0 []
+  let main := units.foldr (fun r t => Tm.let_ r t)
+    (.let_ (.closure fn []) (.call (.var arity) ((List.range arity).map Atom.var) (.ret (.var (arity + 1)))))
   let q := { p with main }
   let rec go : Nat → Config → Except String Value
     | 0, _ => throw s!"it did not finish in {fuel} steps"
@@ -99,11 +103,20 @@ def evaluate (out : Elab.Output) (display : Value → String := shown out.ctorNa
   let mut fns := out.program.fns.toArray
   for (name, i) in out.fnNames.toList.zipIdx do
     unless (name.splitOn "$const").length > 1 do continue
-    let v ← match runConst { out.program with fns := fns.toList } i fuel display with
+    -- (One generic in types, given how they have what it asks of them, is
+    -- worked out in each copy at known types, `NAME$const⟨impl ..⟩`, which
+    -- is given in their place nothing it reads.)
+    let some f := fns[i]? | continue
+    let arity := (f.clauses.head?.map (·.pats.length)).getD 0
+    let plain := f.clauses.all fun c => c.pats.all fun
+      | .wild | .bind => true
+      | _ => false
+    unless arity == 0 || ((name.splitOn "⟨").length > 1 && plain) do continue
+    let v ← match runConst { out.program with fns := fns.toList } i fuel display arity with
       | .ok v => pure v
       | .error e => throw s!"{constName name} could not be worked out at compile time: {e}"
-    match literal v with
-    | some body => fns := fns.set! i { clauses := [⟨[], body⟩] }
+    match literal v arity with
+    | some body => fns := fns.set! i { clauses := [⟨(List.range arity).map fun _ => .wild, body⟩] }
     | none =>
       throw s!"{constName name} gives a value that is there only while a program runs (a callable, a reference): it cannot be worked out at compile time"
   pure { out with program := { out.program with fns := fns.toList } }

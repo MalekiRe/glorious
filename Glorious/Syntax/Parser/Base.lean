@@ -42,6 +42,10 @@ structure PCtx where
   same in every module, and the module being read. -/
   tables : List (List String × Fixities) := []
   path : List String := []
+  /-- The type parameters of the function being read, and what is written of
+  them: a `const { .. }` block in it is a function of the module generic in
+  them, worked out at compile time at the types each copy is made at. -/
+  enclosing : List String × List Bound := ([], [])
 
 /-- What the parser does: given what it reads from, where it is, and the
 functions written inside blocks so far (on their way to the module the block

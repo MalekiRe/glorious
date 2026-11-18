@@ -5297,10 +5297,15 @@ are:
   there only while a program runs, a callable or a reference, cannot be a
   constant.
 
-Not yet: a constant of a type parameter, `<F as Access>::VALID` in a generic
-function, worked out in each copy of the function at the types it is used
-at. That needs those copies, which the elaborator makes only where every
-dictionary is known.
+A `const { .. }` block in a generic function is a function generic in the
+same type parameters, with what is written of them, called at them. Each
+copy the elaborator makes of the function at known types,
+`run⟨impl Valid for B⟩`, has one of the block, given `()` where the copy
+keeps a place for what it no longer needs; those copies are worked out
+here. So upstream's `const { assert!(F::VALID) }` refuses `run<B>()` while
+compiling. Where a generic function is called with what is known only while
+the program runs, there is no copy, and the block is worked out when it
+runs.
 
 ## Other standing decisions
 

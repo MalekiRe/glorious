@@ -3777,6 +3777,12 @@ def cases : List Case := [
     [], "error: the constant `L` could not be worked out at compile time: it did not finish in 1000000 steps"⟩,
   ⟨"fn main() -> Int { let y = 3; const { y + 1 } }",
     [], "error: 1:39: in a `const { .. }` block (worked out at compile time, from constants and functions alone): unknown name `y`"⟩,
+  -- (A `const { .. }` block in a generic function is worked out in each
+  -- copy of it at known types: `run<B>()` is refused while compiling.)
+  ⟨"trait Valid { const VALID: Bool; }\nstruct A\nstruct B\nimpl Valid for A { const VALID: Bool = true; }\nimpl Valid for B { const VALID: Bool = false; }\nfn run<F>() -> Int where F: Valid { let n = const { assert_message(<F as Valid>::VALID, \"this access is not valid\"); (7, \"x\") }; n.0 }\nfn main() -> Int { run<A>() }",
+    [], "7"⟩,
+  ⟨"trait Valid { const VALID: Bool; }\nstruct A\nstruct B\nimpl Valid for A { const VALID: Bool = true; }\nimpl Valid for B { const VALID: Bool = false; }\nfn run<F>() -> Int where F: Valid { const { assert_message(<F as Valid>::VALID, \"this access is not valid\") }; 1 }\nfn main() -> Int { run<A>() + run<B>() }",
+    [], "error: a `const { .. }` block could not be worked out at compile time: it went wrong, having written: this access is not valid"⟩,
   -- (An element of what a reference is to is borrowed through it.)
   ⟨"fn first(r: &[Int]) -> Int { let e = &r[0]; *e }\nfn main() -> Int { first(&[7, 8]) }",
     [], "7"⟩,
