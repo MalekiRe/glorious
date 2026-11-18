@@ -5344,9 +5344,14 @@ references they are given):
 | Two variables' references used as one | 34 |
 | Other | 13 |
 
-So nearly half are inference and the proved checker disagreeing about a
-lend, not the program: deciding scopes in inference (the plan's step 5)
-starts there, by making inference's account of `lend` the checker's.
+Those turned away are mostly failures found late, not chances missed: in
+`fn twice(f, r: &mut Int) { f(r); f(r) }` called as `twice({ p => *p = *p
+* 3 }, &mut n)`, the callable is made before the scope and is given its
+reference inside it, which only a callable that binds the region of what
+it is given can take (the search's other way, `ranked`); inference does not
+see the region leave and the proved checker does. Deciding scopes in
+inference (the plan's step 5) starts by having inference refuse what the
+checker would.
 
 How the search leaves the suite's places, in 672 programs: 1845 a scope
 around the statement or call (`1`), 75 lasting while what is made of them is
