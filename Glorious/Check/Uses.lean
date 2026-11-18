@@ -571,7 +571,9 @@ partial def callValue (ctx : ACtx) (depth : Nat) (f : AVal) (args : List AVal) :
   | .fn name =>
     match depth, ctx.fns[name]? with
     | d + 1, some clauses =>
-      if ctx.active.contains name then unfollowed ctx depth args
+      -- (A call of a function being followed, again: it comes back, or never
+      -- does, as the first call does; that one's paths are counted there.)
+      if ctx.active.contains name then unfollowed ctx depth args (quiet := true)
       else
         let follow := applyClauses { ctx with active := name :: ctx.active } d clauses [] args
         -- (A call followed before, with the same values and in the same

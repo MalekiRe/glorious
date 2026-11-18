@@ -725,10 +725,10 @@ pub fn reserve<S>(commands: &mut Commands<S>) -> Entity {
 
 // What was asked, done in the order asked.
 fn apply<S>(commands: Commands<S>, world: &mut World<S>) {
-    let mut commands = commands;
+    let Commands { queue, next: _, made } = commands;
     let mut k = 0;
-    while({ k < commands.made }) { push_at(&mut world.generations, 0); k = k + 1 };
-    let mut each = into_iter(replace(&mut commands.queue, []));
+    while({ k < made }) { push_at(&mut world.generations, 0); k = k + 1 };
+    let mut each = into_iter(queue);
     while({ match(next(&mut each)) { Some(f) => f(world); true, None => false } }) { () }
 }
 

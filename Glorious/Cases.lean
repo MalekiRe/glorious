@@ -3738,6 +3738,11 @@ def cases : List Case := [
   -- (`else if`: the `if` is the fallback, run in its place.)
   ⟨"fn grade(x: Int) -> Int { if(x < 0) { 1 } else if(x < 3) { 2 } else if(x < 9) { 4 } else { 8 } }\nfn main() -> Int { let mut n = 0; if(n > 0) { n = 1 } else if(n == 0) { n = 5 } else { n = 9 }; grade(-1) + grade(1) * 10 + grade(5) * 100 + grade(20) * 1000 + n * 10000 }",
     [], "58421"⟩,
+  -- (A value of a type a function is generic in, taken by a pattern and
+  -- used after a loop: a loop is a call that comes back, not a path on
+  -- which it is left unused.)
+  ⟨"mod m {\nuse core::iter::{into_iter, next};\npub struct World<S> { pub columns: S, pub generations: [Int], pub free: [Int] }\npub struct Commands<S> { pub queue: [fn(&mut World<S>) -> ()], pub next: Int, pub made: Int }\nimpl<S> Commands<S> {\n    pub fn queue(commands: &mut Self, f: fn(&mut World<S>) -> ()) { push_at(&mut commands.queue, f) }\n}\npub struct WQ<'w, S> { world: &'w mut World<S>, put_back: fn(&mut World<S>) -> () }\nimpl<'w, S> Drop for WQ<'w, S> { fn drop(q) { (q.put_back)(q.world) } }\npub fn apply<S>(commands: Commands<S>, world: &mut World<S>) {\n    let Commands { queue, next: _, made } = commands;\n    let mut k = 0;\n    while({ k < made }) { push_at(&mut world.generations, 0); k = k + 1 };\n    let mut each = into_iter(queue);\n    while({ match(next(&mut each)) { Some(f) => f(world); true, None => false } }) { () }\n}\n}\nuse m::{World, Commands, apply};\nfn main() -> Int {\n    let mut w = World { columns: 5, generations: [], free: [] };\n    let mut c = Commands { queue: [], next: 0, made: 2 };\n    c.queue(fn(w: &mut World<Int>) { w.columns = w.columns + 1 });\n    apply(c, &mut w);\n    w.columns + len_at(&w.generations)\n}",
+    [], "8"⟩,
   -- (An element of what a reference is to is borrowed through it.)
   ⟨"fn first(r: &[Int]) -> Int { let e = &r[0]; *e }\nfn main() -> Int { first(&[7, 8]) }",
     [], "7"⟩,
