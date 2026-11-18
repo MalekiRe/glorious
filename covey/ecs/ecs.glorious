@@ -357,19 +357,59 @@ pub fn insert<T, S>(world: &mut World<S>, entity: Entity, value: T) -> Option<T>
     had
 }
 
-// Components given together: a tuple of them, each put in its column.
-// Components given together. Put on an entity, what it had of them comes
-// back; taken from one, what it had of them.
+// Components that come with another: `impl Requires for Bird { type
+// Required = (Pos, Vel); }`. Putting a `Bird` on an entity gives it each of
+// those it does not have, at its type's start (`Default`), and what those
+// require; given with it, or had already, they stay as they are. Any other
+// component requires nothing. (The world stores each: register it.)
+pub trait Requires { type Required; }
+impl<T> Requires for T { type Required = (); }
+
+// Each of a list of components the entity does not have, put on it at its
+// start, and what it requires.
+pub trait Brings<S> { fn bring(&mut World<S>, Entity) }
+impl<S> Brings<S> for () { fn bring(world, entity) { () } }
+impl<H: Default, ..R, S> Brings<S> for (H, ..R)
+    where S: Get<H>, H: Requires, <H as Requires>::Required: Brings<S>, (..R): Brings<S> {
+    fn bring(world, entity) {
+        if(<S as Get<H>>::has(&world.columns, entity)) { () } else {
+            let _ = insert(world, entity, default<H>());
+            <<H as Requires>::Required as Brings<S>>::bring(world, entity)
+        };
+        <(..R) as Brings<S>>::bring(world, entity)
+    }
+}
+// What one component requires, brought.
+pub trait BringsOne<S> { fn bring_one(&mut World<S>, Entity) }
+impl<T, S> BringsOne<S> for T where T: Requires, <T as Requires>::Required: Brings<S> {
+    fn bring_one(world, entity) { <<T as Requires>::Required as Brings<S>>::bring(world, entity) }
+}
+// What each of a list of components requires, brought.
+pub trait BringsFor<S> { fn bring_for(&mut World<S>, Entity) }
+impl<S> BringsFor<S> for () { fn bring_for(world, entity) { () } }
+impl<H, ..R, S> BringsFor<S> for (H, ..R)
+    where H: Requires, <H as Requires>::Required: Brings<S>, (..R): BringsFor<S> {
+    fn bring_for(world, entity) {
+        <<H as Requires>::Required as Brings<S>>::bring(world, entity);
+        <(..R) as BringsFor<S>>::bring_for(world, entity)
+    }
+}
+
+// Components given together: a tuple of them, each put in its column, and
+// then what they require. Put on an entity, what it had of them comes back;
+// taken from one, what it had of them.
 pub trait Bundle<S> {
     type Had;
     fn put_all(Self, &mut World<S>, Entity) -> Self::Had
     fn take_all(&mut World<S>, Entity) -> Self::Had
 }
-impl<..T, S> Bundle<S> for (..T) where ..S: Get<T> {
+impl<..T, S> Bundle<S> for (..T) where ..S: Get<T>, (..T): BringsFor<S> {
     type Had = (..Option<T>);
     fn put_all(bundle, world, entity) {
         let (..t) = bundle;
-        (..insert(world, entity, t))
+        let had = (..insert(world, entity, t));
+        <(..T) as BringsFor<S>>::bring_for(world, entity);
+        had
     }
     fn take_all(world, entity) { (..remove<T, S>(world, entity)) }
 }
@@ -398,8 +438,12 @@ impl<S> World<S> {
 
     // Give an entity a component, or another value of one it has: the one
     // it had, if it had one.
-    pub fn insert<T>(world: &mut Self, entity: Entity, value: T) -> Option<T> where S: Get<T> {
-        if(alive(&*world, entity)) { insert(world, entity, value) } else { discard(value); None }
+    pub fn insert<T>(world: &mut Self, entity: Entity, value: T) -> Option<T> where S: Get<T>, T: BringsOne<S> {
+        if(alive(&*world, entity)) {
+            let had = insert(world, entity, value);
+            <T as BringsOne<S>>::bring_one(world, entity);
+            had
+        } else { discard(value); None }
     }
 
     // Give an entity components; what it had of them.

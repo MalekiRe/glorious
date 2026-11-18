@@ -5490,6 +5490,31 @@ being known only once its read waited (`St.projections`); such a read now
 keeps its node, and one of what turns out to be a reference is read through
 it, as a field by name is.
 
+## Required components in covey
+
+`impl Requires for Bird { type Required = (Pos, Vel); }`, as upstream
+writes it. Every other component requires nothing (`impl<T> Requires for T
+{ type Required = (); }`, the narrower implementation chosen). Putting a
+bundle on an entity (`Bundle::put_all`, so spawning too) and
+`World::insert` bring each required component the entity does not have, at
+its type's start, and what it requires (`Brings`, `BringsFor`,
+`BringsOne`); given with it, or had already, it stays. `covey/required.
+glorious` is the example.
+
+Not there against upstream: requirements that come back to themselves
+(`Left` requires `Right` requires `Left`) are refused, saying the cycle (a
+dictionary is a tree: a cycle would need one that refers to itself, or the
+copies specialization makes to call each other); required components are
+not registered by registering what requires them; and hooks on adding them
+(upstream's `OnAdd`, `OnInsert`) are not there.
+
+Writing it needed two fixes: a trait's function called at what another
+trait leaves to an implementation, by a condition the implementation writes
+of it (`projectedCondition`); and such conditions that ask each other are
+said, not followed forever. A function's own `where` takes only type
+parameters and what they leave (`I::Item`), so `BringsOne` carries what a
+method like `World::insert` needs of a component.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by

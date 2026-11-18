@@ -1,0 +1,49 @@
+// Required components: a component brings those it requires, each at its
+// type's start, and what they require; given with it, or had already, they
+// stay as they are. A bird has a position and a velocity, and a velocity a
+// mass.
+// expect:
+// 0
+// 0
+// 0
+// 5
+// 0
+// 1
+// 7
+// 0
+// 4
+mod ecs;
+
+use ecs::{App, Entity, Requires};
+use core::value::Default;
+
+struct Pos(Int)
+impl Default for Pos { fn default() { Pos(0) } }
+struct Vel(Int)
+impl Default for Vel { fn default() { Vel(0) } }
+struct Mass(Int)
+impl Default for Mass { fn default() { Mass(0) } }
+struct Bird
+
+impl Requires for Bird { type Required = (Pos, Vel); }
+impl Requires for Vel { type Required = (Mass,); }
+
+fn main() -> Int {
+    let mut app = App::new().register<Bird>().register<Pos>().register<Vel>().register<Mass>().build();
+    // Spawned alone: what it requires, at its start.
+    let plain = app.world.spawn_bundle((Bird,));
+    match(app.world.get<Pos>(plain)) { Some(p) => say(p.0), None => say(9) };
+    match(app.world.get<Vel>(plain)) { Some(v) => say(v.0), None => say(9) };
+    match(app.world.get<Mass>(plain)) { Some(m) => say(m.0), None => say(9) };
+    // Given with it: as given; and what that requires.
+    let given = app.world.spawn_bundle((Vel(5), Bird));
+    match(app.world.get<Vel>(given)) { Some(v) => say(v.0), None => say(9) };
+    match(app.world.get<Mass>(given)) { Some(m) => say(m.0), None => say(9) };
+    // Put on an entity that has some: those stay.
+    let placed = app.world.spawn_bundle((Mass(1), Pos(7)));
+    app.world.insert(placed, Bird);
+    match(app.world.get<Mass>(placed)) { Some(m) => say(m.0), None => say(9) };
+    match(app.world.get<Pos>(placed)) { Some(p) => say(p.0), None => say(9) };
+    match(app.world.get<Vel>(placed)) { Some(v) => say(v.0), None => say(9) };
+    app.world.count<Mass>() + 1
+}
