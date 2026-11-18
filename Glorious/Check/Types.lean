@@ -782,8 +782,6 @@ structure St where
   /-- The numbers of the conditions said of a type made from type parameters
   (`'%condition:owner:key:type`), under `key:type`, of every owner. -/
   conditionsAt : Std.HashMap String (List Nat) := {}
-  /-- What the implementation being checked assumes of its type parameters. -/
-  implGivens : Option (List (String × Ty)) := none
   /-- Where the statement being checked starts. -/
   at_ : Nat × Nat := (0, 0)
   /-- Variables whose value is destroyed if its type turns out to have `Drop`:
