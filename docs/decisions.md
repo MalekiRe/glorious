@@ -5477,8 +5477,12 @@ the narrower implementation chosen for a relation's columns). Queries read
 through a link, `To<R, Q>`, and from what relates, `From<R, &A>` and
 `From<R, Entity>`. `covey/relations.glorious` is the example.
 
-Not there against upstream: one target per source (no many-to-many, nothing
-keeps one-to-one one-to-one), fragmenting relations, `LINKED`, `ACYCLIC`,
+A relation says its kind, as upstream's do: `impl Relation for Piloting {
+type Kind = OneToOne; }`. `OneToMany` is one target for each entity that
+relates; `OneToOne` is one each way, and relating to a target another
+relates to undoes that one's link (`Relating`, `RelateBy`).
+
+Not there against upstream: many-to-many relations, fragmenting relations, `LINKED`, `ACYCLIC`,
 `ORDERED`, `Relinked`, `cascade`. A query through a link cannot write a
 component the query also takes, nor take `Sources<R>` twice (two `From` of
 one relation): a system takes a component once, as columns are lent whole

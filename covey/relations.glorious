@@ -20,14 +20,18 @@
 // 1
 // 0
 // 1
+// 0
+// 1
 // 4
 // 1
 mod ecs;
 
-use ecs::{App, Entity, Mut, Query, To, From, Relates, ChildOf};
+use ecs::{App, Entity, Mut, Query, To, From, Relates, ChildOf, Relation, OneToMany, OneToOne};
 
 struct DockedAt { berth: Int }
+impl Relation for DockedAt { type Kind = OneToMany; }
 struct Piloting
+impl Relation for Piloting { type Kind = OneToOne; }
 struct Skill(Int)
 struct Hull(Int)
 struct Cargo(Int)
@@ -120,6 +124,13 @@ fn main() -> Int {
     // A ship that ends is no longer among the depot's.
     fleet.world.despawn(ship);
     say(len_at(&fleet.world.sources<DockedAt>(depot)) + 1);
+    // One pilot to a ship: another taking it over leaves the first piloting
+    // nothing.
+    fleet.world.relate(ace, Piloting, other);
+    let rookie = fleet.world.spawn_bundle((Skill(1),));
+    fleet.world.relate(rookie, Piloting, other);
+    match(fleet.world.target<Piloting>(ace)) { Some(_) => say(9), None => say(0) };
+    say(len_at(&fleet.world.sources<Piloting>(other)));
     // A carrier, its drones, and theirs: ending it ends all of them.
     let carrier = fleet.world.spawn_bundle((Hull(50),));
     let drone = fleet.world.spawn_bundle((Hull(5),));

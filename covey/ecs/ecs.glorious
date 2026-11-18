@@ -232,8 +232,43 @@ pub fn despawn<S>(world: &mut World<S>, entity: Entity) where S: Columns, S: Unl
 // and the entity it relates to, one at a time. That one has a `Sources<R>`:
 // the entities that relate to it, in the order they came to.
 pub struct Relates<R> { pub relation: R, pub target: Entity }
+
+// A relation says how many entities each side relates to: `impl Relation
+// for Piloting { type Kind = OneToOne; }`. One target for each entity that
+// relates (`OneToMany`: a ship docks at one station, a station has many), or
+// one each way (`OneToOne`: relating to a target another relates to undoes
+// that one's link).
+pub trait Relation { type Kind; }
+pub struct OneToMany
+pub struct OneToOne
+
+// How an entity is related to another, by the relation's kind.
+pub trait Relating<R, S> { fn relate_by(&mut World<S>, Entity, R, Entity) -> Option<R> }
+impl<R, S> Relating<R, S> for OneToMany where S: Get<Relates<R>>, S: Get<Sources<R>> {
+    fn relate_by(world, source, relation, target) { relate<R, S>(world, source, relation, target) }
+}
+impl<R, S> Relating<R, S> for OneToOne where S: Get<Relates<R>>, S: Get<Sources<R>> {
+    fn relate_by(world, source, relation, target) {
+        let others = sources_in<R, S>(&world.columns, target);
+        let mut i = 0;
+        while({ i < len_at(&others) }) {
+            let other = others[i];
+            let same = if(other.index == source.index) { other.generation == source.generation } else { false };
+            if(same) { () } else { discard(unrelate<R, S>(world, other)) };
+            i = i + 1
+        };
+        relate<R, S>(world, source, relation, target)
+    }
+}
+// A relation related by its kind.
+pub trait RelateBy<S> { fn relate_as(&mut World<S>, Entity, Self, Entity) -> Option<Self> }
+impl<R, S> RelateBy<S> for R where R: Relation, <R as Relation>::Kind: Relating<R, S> {
+    fn relate_as(world, source, relation, target) { <<R as Relation>::Kind as Relating<R, S>>::relate_by(world, source, relation, target) }
+}
+
 // The relation of a child to its parent.
 pub struct ChildOf
+impl Relation for ChildOf { type Kind = OneToMany; }
 pub struct Sources<R> { pub list: [Entity] }
 
 fn copied(list: &[Entity]) -> [Entity] {
@@ -533,8 +568,8 @@ impl<S> World<S> {
     // `R` before: what that link carried. (`ChildOf` of a child to its
     // parent: `world.relate(child, ChildOf, parent)`.)
     pub fn relate<R>(world: &mut Self, source: Entity, relation: R, target: Entity) -> Option<R>
-        where S: Get<Relates<R>>, S: Get<Sources<R>> {
-        if(if(alive(&*world, source)) { alive(&*world, target) } else { false }) { relate<R, S>(world, source, relation, target) }
+        where R: RelateBy<S> {
+        if(if(alive(&*world, source)) { alive(&*world, target) } else { false }) { <R as RelateBy<S>>::relate_as(world, source, relation, target) }
         else { discard(relation); None }
     }
     // Undo an entity's link by `R`: what it carried.
@@ -1026,7 +1061,7 @@ impl<S> Commands<S> {
         push_at(&mut commands.queue, fn(world: &mut World<S>) { despawn(world, entity) })
     }
     // Relate an entity to another by `R`, once the systems have run.
-    pub fn relate<R>(commands: &mut Self, source: Entity, relation: R, target: Entity) where S: Get<Relates<R>>, S: Get<Sources<R>> {
+    pub fn relate<R>(commands: &mut Self, source: Entity, relation: R, target: Entity) where R: RelateBy<S> {
         push_at(&mut commands.queue, fn(world: &mut World<S>) { discard(world.relate(source, relation, target)) })
     }
 }
