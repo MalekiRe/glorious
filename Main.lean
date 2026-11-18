@@ -347,7 +347,7 @@ def compileFile (path : String) (checkKept : Check.Kept := []) (search : Bool :=
     if search then
       writePlaces file c.places
       if let some cert := c.cert then Target.writeCert dir cert
-    unless c.checkKept.isEmpty do Store.save (dir / "checked") "checked" c.checkKept
+    unless c.checkKept.isEmpty do Trace.timedIO "save: checked" (Store.save (dir / "checked") "checked" c.checkKept (chain := 4))
     if preludeKept.isNone then
       if let .ok parsed := readPrelude.get then Store.save (library / "prelude") "prelude" parsed
     -- (Saved again only where something was parsed anew.)
@@ -377,7 +377,7 @@ def buildFile (path : String) (checkKept : Option (IO.Ref (List (String × Check
   let dir ← Target.dirOf path
   let key ← Target.keyOf (← IO.FS.readFile path) (← moduleFiles path)
   if (← IO.getEnv "GLORIOUS_FRESH").isNone then
-    if let some b ← Target.read dir key then
+    if let some b ← Trace.timedIO "read the program" (Target.read dir key) then
       -- (One built without looking for each place serves what does not
       -- ask for that.)
       if b.searched || !search then return .ok b
@@ -390,7 +390,8 @@ def buildFile (path : String) (checkKept : Option (IO.Ref (List (String × Check
     if let some ref := checkKept then
       ref.modify fun ks => (path, c.checkKept) :: ks.filter (·.1 != path)
     let b := Trace.timed "bytecode" fun _ => Target.Built.of c (startLocals c) search
-    Target.write dir key b
+    -- (Written while it runs.)
+    keep <| Trace.timedIO "write the program" (Target.write dir key b)
     pure (.ok b)
 
 /-! ## The compile server
@@ -1077,7 +1078,7 @@ where
         | .error e =>
           IO.eprintln s!"{path}: {e}"
           return 1
-      match ← runStreaming b.ctorNames b.bytecode (Bytecode.initIO b.bytecode input) 0 with
+      match ← Trace.timedIO "run" (runStreaming b.ctorNames b.bytecode (Bytecode.initIO b.bytecode input) 0) with
       | .halt r =>
         -- (A `main` that gives nothing, `fn main() { .. }`, shows nothing.)
         let shown := showValue b.ctorNames r.value

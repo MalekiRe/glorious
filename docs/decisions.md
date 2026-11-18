@@ -5421,6 +5421,23 @@ Measured on a one-line edit of covey's simulation: certificate inference
 111 ms to 34 ms, certify 133 ms to 55 ms, the whole compile 0.63 s to
 0.55 s. What comes of it the proved checker checks like anything else.
 
+## Kept checker states point into the ones kept before
+
+`Store.save` with `chain` writes only what is new: the region it writes
+points into the regions of what was kept in that file before
+(`Lean.CompactedRegion.save`'s regions to point into), and the file kept
+under the name says which regions, in order (`headMark`). Up to `chain` of
+them (four for the checker's states); then all is written again. A region
+file once written is never written again, only taken away when the head no
+longer names it, so nothing a region points into changes under it. Each
+file is read at a place of its own (the key the region is saved under), so
+two read in one process are not moved for each other.
+
+Measured on a one-line edit of covey's simulation: saving the checker's
+states 75 ms to 8 ms (75 ms every fifth edit), about 0.8 MB written in
+place of 8.8 MB. With the program's bytecode written while it runs, the
+edit's wall time went from 0.49 s to 0.42 s.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by
