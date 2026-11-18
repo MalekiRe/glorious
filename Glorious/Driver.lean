@@ -28,6 +28,18 @@ public section
 
 namespace Glorious
 
+/-- What is read of a text before any text is parsed: what it declares, and
+the longest list of types it writes. -/
+structure TextRead where
+  said : Syntax.TextSyntax
+  longest : Nat
+
+/-- Texts as an earlier compile read them, under each text and its path
+(`textKey`): one that is the same is not lexed again for this. -/
+abbrev Texts := Std.HashMap UInt64 TextRead
+
+def textKey (path : List String) (text : String) : UInt64 := mixHash (hash text) (hash path)
+
 structure Compiled where
   core : Core.Program
   ctorNames : Array String
@@ -65,6 +77,8 @@ structure Compiled where
   /-- Each module's items as this compile parsed them or took them, under
   what they were parsed from: kept for the next. -/
   parsedMade : List (UInt64 × List Syntax.Item) := []
+  /-- Each text as this compile read it or took it (`Texts`), for the next. -/
+  textsMade : List (UInt64 × TextRead) := []
 
 /-- Each place by the function it is in and how many places of that function
 come before it: what stays the same of a place when other functions change. -/
@@ -447,6 +461,17 @@ def lexTexts (src : String) (files : List (List String × String)) :
 def longestOf (lexed : List (List String × Array Syntax.Token)) : Nat :=
   lexed.foldl (fun m (_, toks) => max m (Syntax.longestList toks)) 2
 
+/-- A text read so: as `kept` has it, or from its tokens. -/
+def readText (fix : Syntax.Fixities) (kept : Texts) (path : List String) (text : String)
+    (toks : Option (Array Syntax.Token)) : Except String (UInt64 × TextRead) := do
+  let key := textKey path text
+  if let some r := kept[key]? then return (key, r)
+  let toks ← match toks with
+    | some t => pure t
+    | none => Syntax.lex text
+  let _ ← Syntax.declaredSyntax fix text toks
+  pure (key, ⟨← Syntax.textSyntax path text toks, Syntax.longestList toks⟩)
+
 /-- Modules' items as an earlier compile parsed them, under what each was
 parsed from (`parseKey`). -/
 abbrev Parsed := Std.HashMap UInt64 (List Syntax.Item)
@@ -470,10 +495,12 @@ texts of the modules that are files of their own, each with its path. Where
 the program says `mod name;` the items of that module's text are put. -/
 def parseProgram (src : String) (files : List (List String × String)) (check : Bool := true)
     (few : Bool := false) (packs : Nat := 0) (lexed : List (List String × Array Syntax.Token) := [])
-    (parsedKept : Parsed := {}) (preludeKept : Option (List Syntax.Item × Syntax.Fixities) := none) :
-    Except String (List Syntax.Item × List Syntax.Item × List (UInt64 × List Syntax.Item)) := do
-  -- (The program's own texts lexed once, where they were not already.)
-  let lexed ← if !lexed.isEmpty then pure lexed else lexTexts src files
+    (parsedKept : Parsed := {}) (preludeKept : Option (List Syntax.Item × Syntax.Fixities) := none)
+    (texts : Texts := {}) :
+    Except String (List Syntax.Item × List Syntax.Item × List (UInt64 × List Syntax.Item) × List (UInt64 × TextRead)) := do
+  -- (The program's own texts lexed once, where they were not already, and
+  -- none told how long its lists are.)
+  let lexed ← if !lexed.isEmpty || packs != 0 then pure lexed else lexTexts src files
   let tokensOf := fun (path : List String) => lexed.lookup path
   -- Lists of types are written out to the longest list the program's texts
   -- write, unless told longer.
@@ -500,18 +527,15 @@ def parseProgram (src : String) (files : List (List String × String)) (check : 
     else pure none
   -- Operators and the constructors with named fields are known to every
   -- text, whichever declares them.
-  let said ← Trace.timed "parse: what each text declares" fun _ => (([], src) :: own).mapM fun (path, text) => do
-    let _ ← Syntax.declaredSyntax fix text (tokensOf path)
-    Syntax.textSyntax path text (tokensOf path)
+  let ownRead ← Trace.timed "parse: what each text declares" fun _ => (([], src) :: own).mapM fun (path, text) =>
+    readText fix texts path text (tokensOf path)
+  let said := ownRead.map (·.2.said)
   let unread ← Trace.timed "parse: what the library declares" fun _ => match read with
     | some _ => pure []
-    | none => (if std then library else []).mapM fun (path, text) => do
-        let lexed := stdTokens path text
-        let _ ← Syntax.declaredSyntax fix text lexed
-        Syntax.textSyntax path text lexed
+    | none => (if std then library else []).mapM fun (path, text) => readText fix texts path text (stdTokens path text)
   let librarySaid := match read with
     | some r => r.said
-    | none => unread
+    | none => unread.map (·.2.said)
   let ordered := said.take 1 ++ librarySaid ++ said.drop 1
   let records := ordered.flatMap (·.records)
   -- An operator's fixity is its module's.
@@ -575,7 +599,7 @@ def parseProgram (src : String) (files : List (List String × String)) (check : 
       | _, _ => pure item
   let (items, made) ← (fill 64 [] items).run []
   checkUnsafeImpls items
-  pure (prelude, items, made)
+  pure (prelude, items, made, ownRead ++ unread)
 
 /-- A program's items as the resolver gives them, each module's after a mark
 (`Syntax.unitMark`), put in an order that has every module after those it
@@ -625,7 +649,7 @@ def checkFirstPart (std drop : Bool) : Except String (Nat × Check.St) := do
     let resolved ← Syntax.Modules.resolve prelude []
     let all := withoutUnitMarks (Syntax.fillDefaults (← Syntax.expandAliases resolved.items))
     return (all.length, ← Check.checkFirst all resolved.info drop)
-  let (prelude, items, _) ← parseProgram "// std" []
+  let (prelude, items, _, _) ← parseProgram "// std" []
   let resolved ← Syntax.Modules.resolve prelude items
   -- (Its modules in the order a program has them, marks and all, so that
   -- what a program has first is these, item for item.)
@@ -686,8 +710,10 @@ def compileSourceAt (src : String) (check : Bool := true)
     (checkKept : Check.Kept := []) (search : Bool := true) (memo : Infer.Memo := {})
     (firsts : List ((Bool × Bool) × (Nat × Check.St)) := [])
     (lexed : List (List String × Array Syntax.Token) := []) (parsedKept : Parsed := {})
-    (preludeKept : Option (List Syntax.Item × Syntax.Fixities) := none) : Except String Compiled := do
-  let (prelude, items, parsedMade) ← Trace.timed "parse" fun _ => parseProgram src files check few packs lexed parsedKept preludeKept
+    (preludeKept : Option (List Syntax.Item × Syntax.Fixities) := none) (texts : Texts := {}) :
+    Except String Compiled := do
+  let (prelude, items, parsedMade, textsMade) ← Trace.timed "parse" fun _ =>
+    parseProgram src files check few packs lexed parsedKept preludeKept texts
   -- Every name is given its meaning: the modules become one list of items,
   -- each module a unit, after those it uses.
   let resolved ← Trace.timed "resolve names" fun _ => Syntax.Modules.resolve prelude items
@@ -827,7 +853,7 @@ def compileSourceAt (src : String) (check : Bool := true)
       (places : List ((String × Nat) × Nat)) (made : Infer.Made) =>
     ({ core := out.program, ctorNames := out.ctorNames.map shownName, fnNames := out.fnNames
        opNames := out.opNames, cert, lent, plain := out.plain, places, checkKept := checkMade
-       inferMade := made, firstMade, libraryKept := libraryMade, parsedMade } : Compiled)
+       inferMade := made, firstMade, libraryKept := libraryMade, parsedMade, textsMade } : Compiled)
   let plain := fun (blocks : Option Elab.Blocks) (failed : List (Bool × Bool)) => do
     let out ← Trace.timed "elaborate" fun _ => elaborate all blocks
     -- What is unsafe is outside what Core's rules are about: a program that
@@ -1110,12 +1136,19 @@ def compileSource (src : String) (check : Bool := true)
     (known : List ((String × Nat) × Nat) := []) (kept : List Typing.Cert := [])
     (checkKept : Check.Kept := []) (search : Bool := true) (memo : Infer.Memo := {})
     (firsts : List ((Bool × Bool) × (Nat × Check.St)) := []) (parsedKept : Parsed := {})
-    (preludeKept : Option (List Syntax.Item × Syntax.Fixities) := none) : Except String Compiled := do
+    (preludeKept : Option (List Syntax.Item × Syntax.Fixities) := none) (texts : Texts := {}) :
+    Except String Compiled := do
   -- (What the default prelude has from the library, where the text uses it;
-  -- and each text lexed, once.)
+  -- and each text lexed, once: each that an earlier compile read as it is,
+  -- `texts`, not.)
   let src := src ++ stdPreludeUses src
-  let lexed ← Trace.timed "lex" fun _ => lexTexts src files
-  let packs := longestOf lexed
+  let all := ([], src) :: files
+  let lexed ← Trace.timed "lex" fun _ =>
+    (all.filter fun (path, text) => !texts.contains (textKey path text)).mapM fun (path, text) => do
+      pure (path, ← Syntax.lex text)
+  let packs := all.foldl (fun m (path, text) => max m (match texts[textKey path text]? with
+    | some r => r.longest
+    | none => ((lexed.lookup path).map Syntax.longestList).getD 2)) 2
   -- (An implementation over several lists, as one that joins two, is
   -- written out to as many times as long: what it makes can be that long.)
   let lists := ((src :: files.map (·.2)).flatMap fun text =>
@@ -1126,7 +1159,7 @@ def compileSource (src : String) (check : Bool := true)
   let lists := lists != 0
   let rec go (fuel packs : Nat) : Except String Compiled :=
     match compileSourceAt src check files few known packs kept checkKept (search := search) (memo := memo)
-        (firsts := firsts) (lexed := lexed) (parsedKept := parsedKept) (preludeKept := preludeKept) with
+        (firsts := firsts) (lexed := lexed) (parsedKept := parsedKept) (preludeKept := preludeKept) (texts := texts) with
     | .error e =>
       let wanted := longestUnimplemented e
       match fuel with

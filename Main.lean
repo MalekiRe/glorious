@@ -335,10 +335,12 @@ def compileFile (path : String) (checkKept : Check.Kept := []) (search : Bool :=
   -- (Modules' items as an earlier compile parsed them.)
   let parsedKept : Parsed ← if (← IO.getEnv "GLORIOUS_FRESH").isSome then pure {} else
     pure (Std.HashMap.ofList ((← Store.load (α := List (UInt64 × List Syntax.Item)) (dir / "parsed") "parsed").getD []))
+  let texts : Texts ← if (← IO.getEnv "GLORIOUS_FRESH").isSome then pure {} else
+    pure (Std.HashMap.ofList ((← Store.load (α := List (UInt64 × TextRead)) (dir / "texts") "texts").getD []))
   let text ← IO.FS.readFile path
   let files ← moduleFiles path
   let result ← Trace.timedIO "compile" (IO.lazyPure fun _ =>
-    compileSource text true files (few := true) known kept checkKept search memo firsts parsedKept preludeKept)
+    compileSource text true files (few := true) known kept checkKept search memo firsts parsedKept preludeKept texts)
   if let .ok c := result then keep <| Trace.timedIO "save what is kept" do
     -- (What a compile that did not look for each place found is not kept
     -- for one that does.)
@@ -350,6 +352,7 @@ def compileFile (path : String) (checkKept : Check.Kept := []) (search : Bool :=
       if let .ok parsed := readPrelude.get then Store.save (library / "prelude") "prelude" parsed
     -- (Saved again only where something was parsed anew.)
     unless c.parsedMade.all (parsedKept.contains ·.1) do Store.save (dir / "parsed") "parsed" c.parsedMade
+    unless c.textsMade.all (texts.contains ·.1) do Store.save (dir / "texts") "texts" c.textsMade
     unless c.inferMade.isEmpty do Store.save (dir / "infer") "infer" (Infer.toMemo c.inferMade)
     if let some ((std, drop), first) := c.firstMade then
       Store.save (library / s!"first-{std}-{drop}") "first" [first]
@@ -709,7 +712,7 @@ certificate with all of them asked for. -/
 def why (path : String) : IO UInt32 := do
   let src ← IO.FS.readFile path
   let files ← moduleFiles path
-  let .ok (prelude, items, _) := parseProgram src files | IO.println "parse failed"; return 1
+  let .ok (prelude, items, _, _) := parseProgram src files | IO.println "parse failed"; return 1
   let .ok resolved := Syntax.Modules.resolve prelude items | IO.println "resolve failed"; return 1
   let .ok all := Syntax.expandAliases resolved.items | IO.println "aliases failed"; return 1
   let all := Syntax.fillDefaults all
@@ -764,7 +767,7 @@ def stages (path : String) : IO UInt32 := do
     let now ← IO.monoMsNow
     IO.println s!"{what}: {now - last} ms"
     pure now
-  let .ok (prelude, items, _) := parseProgram src files | IO.println "parse failed"; return 1
+  let .ok (prelude, items, _, _) := parseProgram src files | IO.println "parse failed"; return 1
   IO.println s!"{prelude.length + items.length} items"
   last ← lap "parse" last
   let .ok resolved := Syntax.Modules.resolve prelude items | IO.println "resolve failed"; return 1
