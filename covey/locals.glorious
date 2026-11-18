@@ -18,7 +18,7 @@ struct Log([Int])
 
 fn record(local: &mut Local<Int>, log: &mut Single<(&mut Log,)>) {
     local.0 = local.0 + 1;
-    match(log.get_mut()) { Some(got) => let (log,) = got; let mut log = log; let l = log.get_mut(); push_at(&mut l.0, local.0), None => () }
+    match(log.get_mut()) { Some(got) => let (log,) = got; let mut log = log; push_at(&mut log.get_mut().0, local.0), None => () }
 }
 
 fn main() -> Int {

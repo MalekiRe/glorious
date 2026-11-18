@@ -32,8 +32,6 @@ fn changed(query: &mut Query<(&Value,), (Changed<Value>,)>, log: ResMut<Log>) {
     push_at(&mut log.changed, -1)
 }
 
-fn read(m: &Mut<Value>) -> Int { let v = m.get(); v.0 }
-
 fn shown(name: Str, xs: &[Int]) -> Str {
     let mut out = name ++ ":";
     let mut empty = true;
@@ -57,12 +55,12 @@ fn semantics() {
     let b = app.world.spawn_bundle((Value(2),));
     app.emit(&Update);
     // Merely fetching mutable data does not change it.
-    match(app.world.get_mut<Value>(a)) { Some(m) => say(read(&m)), None => () };
+    match(app.world.get_mut<Value>(a)) { Some(m) => say(m.get().0), None => () };
     app.world.query<(&mut Value,)>().for_each(fn(got: (Mut<Value>,)) { let (v,) = got; discard(v) });
     let _ = app.world.remove<Tag>(a);
     let _ = app.world.insert(b, Tag);
     app.emit(&Update);
-    match(app.world.get_mut<Value>(a)) { Some(m) => let mut m = m; let v = m.get_mut(); v.0 = 3;, None => () };
+    match(app.world.get_mut<Value>(a)) { Some(m) => let mut m = m; m.get_mut().0 = 3;, None => () };
     match(app.world.insert(b, Value(4))) { Some(old) => say(old.0), None => () };
     app.emit(&Update);
     let _ = app.world.remove<Value>(a);
@@ -86,7 +84,7 @@ fn quiet() -> Int {
     let a = app.world.spawn_bundle((Value(1),));
     app.emit(&Update);
     app.emit(&Update);
-    match(app.world.get_mut<Value>(a)) { Some(m) => let mut m = m; let v = m.get_mut(); v.0 = 2;, None => () };
+    match(app.world.get_mut<Value>(a)) { Some(m) => let mut m = m; m.get_mut().0 = 2;, None => () };
     app.emit(&Update);
     match(app.world.resource<Seen>()) {
         Some(seen) => say("single: " ++ show(seen.0[0]) ++ " " ++ show(seen.0[1])); len_at(&seen.0) - 2,

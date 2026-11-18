@@ -33,7 +33,7 @@ fn charge(query: &mut Query<(&Position, Option<&mut Shield>, Has<Stunned>)>) {
     query.for_each(fn(got: (&Position, Option<Mut<Shield>>, Bool)) {
         let (position, shield, stunned) = got;
         match(shield) {
-            Some(shield) => if(stunned) { discard(shield) } else { let mut shield = shield; let s = shield.get_mut(); s.0 = s.0 + position.0 },
+            Some(shield) => if(stunned) { discard(shield) } else { let mut shield = shield; shield.get_mut().0 = shield.get().0 + position.0 },
             None => ()
         }
     })

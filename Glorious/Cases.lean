@@ -3730,6 +3730,11 @@ def cases : List Case := [
     [], "error: 5:69: in `main`: `w` is borrowed with `&mut` while `g` holds a `&mut` reference to it"⟩,
   ⟨"struct W { c: Int }\nstruct G<'a> { w: &'a mut W }\nimpl<'a> Drop for G<'a> { fn drop(g) { bump(g.w) } }\nfn bump(w: &mut W) { w.c = w.c + 1 }\nfn mk<'a>(w: &'a mut W) -> G<'a> { G { w: w } }\nfn touch(g: &mut G) { bump(g.w) }\nfn main() -> Int { let mut w = W { c: 1 }; let g = G { w: &mut w }; discard(g); w.c = 10; touch(&mut mk(&mut w)); w.c = w.c + 100; w.c }",
     [], "112"⟩,
+  -- (Fields past references: of a field that is one, of what a call gives
+  -- one to; a dot call of a value a clause binds; a callable field called
+  -- in brackets beside a function of its name.)
+  ⟨"pub struct P(pub Int)\npub struct W { pub c: Int }\npub struct G<'w> { pub w: &'w mut W, pub p: P }\nimpl<'w> G<'w> { pub fn gp(g: &Self) -> &P { &g.p } pub fn peek(g: &Self) -> Int { g.w.c } }\nfn bump(g: &mut G) { g.w.c = g.w.c + 1 }\nfn hollow() -> Int { 100 }\nstruct S { hollow: fn() -> Int }\nfn main() -> Int {\n    let mut w = W { c: 1 };\n    let mut g = G { w: &mut w, p: P(5) };\n    bump(&mut g);\n    let a = g.gp().0 + g.w.c;\n    let b = match(Some(g)) { Some(h) => h.peek(), None => 0 };\n    let s = S { hollow: fn() -> Int { 7 } };\n    a * 100 + b * 10 + (s.hollow)()\n}",
+    [], "727"⟩,
   -- (An element of what a reference is to is borrowed through it.)
   ⟨"fn first(r: &[Int]) -> Int { let e = &r[0]; *e }\nfn main() -> Int { first(&[7, 8]) }",
     [], "7"⟩,

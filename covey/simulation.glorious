@@ -30,8 +30,7 @@ fn integrate(query: &mut Query<(&mut Position, &Velocity)>) {
     query.for_each(fn(got: (Mut<Position>, &Velocity)) {
         let (position, velocity) = got;
         let mut position = position;
-        let p = position.get_mut();
-        p.0 = p.0 + velocity.0;
+        position.get_mut().0 = position.get().0 + velocity.0;
     })
 }
 
