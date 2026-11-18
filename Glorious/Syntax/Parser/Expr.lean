@@ -371,13 +371,14 @@ partial def parsePostfix (noBlock : Bool) : P Expr := do
     | .punct "." =>
       match ← peek 1 with
       | .int n =>
-        -- A field of what a name stands for is known by an identity, so
-        -- that the checker can say it is read through a reference.
+        -- A field of what a name stands for, or of what a call gives, is
+        -- known by an identity, so that the checker can say it is read
+        -- through a reference.
         let id := (← read).base + (← get) + 1
         advance
         advance
         e := match e with
-          | .name none _ => .fieldOf id e (toString n)
+          | .name none _ | .call .. => .fieldOf id e (toString n)
           | _ => .proj e n
       | .ident field =>
         let id := (← read).base + (← get) + 1
@@ -580,7 +581,15 @@ partial def parsePrimary (noBlock : Bool) : P Expr := do
     advance
     let args ← parseArgs
     match args with
-    | [e] => if ← closedAfterComma then pure (.tuple [e]) else pure e
+    | [e] =>
+      if ← closedAfterComma then pure (.tuple [e])
+      -- `(s.f)(..)`: the field, a callable, called; not the function of the
+      -- name of what `s` is. (A block of its own, which a dot call is not.)
+      else if (← peek) == .punct "(" then
+        match e with
+        | .fieldOf .. => pure (.labelScope "%paren" [.expr e])
+        | _ => pure e
+      else pure e
     | _ => pure (.tuple args)
   | .punct "{" => parseBraces
   | .op "|" => failAt "a callable is written `{ x => body }`, or `fn(x) { body }`; `|x| body` is not read"

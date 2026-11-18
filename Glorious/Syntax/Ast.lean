@@ -235,6 +235,12 @@ rather than the one in scope: the call and that function. The program is
 read again with it. -/
 def dotOwnMark (call : Nat) (fn : String) : String := s!"%dotown:{call}:{fn}%"
 
+/-- Said by the checker where a dot call's receiver is a name that holds a
+value and the function takes a reference to it: the program is read again
+with the name borrowed there, as Rust borrows it (`m.peek()` is
+`peek(&m)`). -/
+def recvRefMark (call : Nat) (uniq : Bool) : String := s!"%recvref:{call}:{if uniq then 1 else 0}%"
+
 /-- How the constructors of a text are named where values are shown: no
 program can write these names. -/
 def textEndName : String := "%end"

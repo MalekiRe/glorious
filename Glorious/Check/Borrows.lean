@@ -594,11 +594,18 @@ def fieldOfDeref : Expr → Option (String × List (String × Option Nat))
 /-- The type of the field reached by `path` in a value of type `t`, and the
 way to it by number. Where `t` is not known yet, a step by number is settled
 once the rest of the function is inferred. -/
-def fieldAt (t : Ty) (path : List String) : M (Ty × List Nat × List (Option String)) := do
+def fieldAtThrough (t : Ty) (path : List String) :
+    M (Ty × List Nat × List (Option String) × List (Nat × Ty × Nat)) := do
   let mut cur := t
   let mut numbered : Array Nat := #[]
   let mut chosen : Array (Option String) := #[]
-  for step in path do
+  -- (The steps that go past a reference a field before holds, with how
+  -- it borrows and what it lasts as long as.)
+  let mut through : Array (Nat × Ty × Nat) := #[]
+  for (step, k) in path.zipIdx do
+    if let .ref how inner cap ← find cur then
+      cur := inner
+      through := through.push (k, how, cap)
     -- A field of one of several constructors: the value was just found to
     -- be made by that one.
     if let some (ctor, idx) := Syntax.splitCtorStep step then
@@ -620,13 +627,24 @@ def fieldAt (t : Ty) (path : List String) : M (Ty × List Nat × List (Option St
       let field ← freshTy
       modify fun s => { s with projections := s.projections.push (cur, idx, field, s.pos) }
       cur := field
-  pure (cur, numbered.toList, chosen.toList)
+  pure (cur, numbered.toList, chosen.toList, through.toList)
+
+/-- A field reached past references fields hold, borrowed (`&mut g.w.c`,
+`g.w: &mut W`): as long as each of those, and for writing only where each is
+a `&mut`. -/
+def throughBorrowed (through : List (Nat × Ty × Nat)) (uniq : Bool) (cap' : Nat) : M Unit := do
+  for (_, how, cap) in through do
+    if uniq then unifyAt "a field is borrowed for writing through a `&mut` reference a field holds" how .uniq
+    captures cap' (.loan (← freshLoan none uniq (some (cap, cap')) []))
 
 /-- Note, for each step that was a name, which field it turned out to be. -/
-def noteFieldReads (path : List (String × Option Nat)) (numbered : List Nat) : M Unit := do
-  for ((_, id), idx) in path.zip numbered do
+def noteFieldReads (path : List (String × Option Nat)) (numbered : List Nat) (through : List (Nat × Ty × Nat) := []) :
+    M Unit := do
+  for (((_, id), idx), k) in (path.zip numbered).zipIdx do
     if let some id := id then
       modify fun s => { s with fieldReads := s.fieldReads.push (id, idx) }
+      -- (Read past a reference a field before holds.)
+      if through.any (·.1 == k) then modify fun s => { s with derefReads := s.derefReads.push id }
 
 /-- Record that `cap` captures the named bindings: a value by its type, a label
 or a mutable variable by the brand of its scope as well. -/

@@ -1655,7 +1655,7 @@ private partial def unfieldExpr (info : FieldInfo) : Expr → Expr
     | some (viaRef, path, shape) =>
       -- A step into one of a type's several constructors is followed by
       -- the constructor's name.
-      let steps := (path.zip (shape ++ path.map fun _ => (none, 0))).flatMap fun (n, c, _) =>
+      let stepOf := fun (n : Nat) (c : Option String) =>
         match c with
         | some c =>
           if c.startsWith "#" then [Expr.int (Int.ofNat n), .name none (c.drop 1).toString]
@@ -1663,7 +1663,20 @@ private partial def unfieldExpr (info : FieldInfo) : Expr → Expr
         | none => [Expr.int (Int.ofNat n)]
       -- Of what a reference points to, that reference; of a variable, a
       -- borrow of the variable.
-      .call 0 (.name none Syntax.focusMark) ((if viaRef then .name none x else .ref uniq x) :: steps)
+      let base := if viaRef then Expr.name none x else .ref uniq x
+      -- (A step marked `*` is past a reference the field before holds: what
+      -- is focused so far is read for that reference, and focused from.)
+      let (base, steps) := (path.zip (shape ++ path.map fun _ => (none, 0))).foldl
+        (fun (acc : Expr × List Expr) (n, c, _) =>
+          match c with
+          | some c =>
+            if c.startsWith "*" then
+              let rest := (c.drop 1).toString
+              (.deref (.call 0 (.name none Syntax.focusMark) (acc.1 :: acc.2)),
+                stepOf n (if rest.isEmpty then none else some rest))
+            else (acc.1, acc.2 ++ stepOf n (some c))
+          | none => (acc.1, acc.2 ++ stepOf n none)) (base, [])
+      .call 0 (.name none Syntax.focusMark) (base :: steps)
   | e => e
 
 private partial def unfieldClause (info : FieldInfo) : Clause → Clause

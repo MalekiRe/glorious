@@ -5213,12 +5213,19 @@ Covey is the toolbox for finding what the language lacks. Rewriting it after
   it was never let go. It is placed where its statement is; in a statement
   that is an expression it is let go where the statement ends. Fixed, with
   a case.
-- **`(q.blank)()`**, a field that is a callable, called in brackets, is read
-  as a dot call of a function of that name where the module has one. Open:
-  covey names such fields apart.
+- **A field that is a callable, called in brackets**, `(q.blank)()`, was
+  read as a dot call of a function of that name where the module has one. In
+  brackets it is the field. Fixed.
 - **A field through a field that is a reference** (`g.w.c`, `g.w: &mut W`)
-  is refused ("`&mut W` has no field `c`"). Open: covey passes `g.w` to a
-  function.
+  was refused ("`&mut W` has no field `c`"). It is read and written past the
+  reference, and borrowed for writing only where each reference on the way
+  is a `&mut`. Fixed.
+- **A field of what a call gives a reference to** (`m.get().0`, `h.gq().x`)
+  was refused. Read through the reference, as of a name holding one. Fixed.
+- **A dot call of a value a clause binds** (`Some(m) => m.peek()`, `peek`
+  taking `&Self`) made the clause one of a reference. The receiver is
+  borrowed, as Rust borrows it: the checker asks for the program to be read
+  again with that one borrowed. Fixed.
 
 ## Other standing decisions
 

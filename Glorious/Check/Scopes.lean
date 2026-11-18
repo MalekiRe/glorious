@@ -210,7 +210,17 @@ partial def runProjections (final : Bool) : M Unit := do
     -- where it is read, with the reference's type known there. If the
     -- callable was first read with it known and something else was wrong,
     -- that is what is wrong.)
-    if let .ref _ _ _ ← find subject then
+    -- (A reference, known only now: what it is to has the field, read
+    -- through it, which copies it, as where it is known at once.)
+    if let .ref _ inner _ ← find subject then
+      if let .con .. ← find inner then
+        if let some idx ← (try fieldIndex inner name catch e => throw (pos ++ e)) then
+          if let some t ← (try fieldType inner idx catch e => throw (pos ++ e)) then
+            try unifyAt s!"the field `{name}`" result t
+            catch e => throw (pos ++ e)
+            modify fun s => { s with fieldReads := s.fieldReads.push (id, idx), derefReads := s.derefReads.push id,
+                                     dups := s.dups.push (t, pos ++ "reading through a reference copies the value (`replace` takes it out instead)") }
+            continue
       match (← get).firstSaid with
       | some said => throw said
       | none => throw s!"{pos}the field `{name}` is read through a reference, and where it is read the type of what it is read from is not known: say what that is"
@@ -235,7 +245,7 @@ partial def runProjections (final : Bool) : M Unit := do
   modify fun s => { s with projections := #[] }
   let mut left : Array (Ty × Nat × Ty × String) := #[]
   for (subject, idx, result, pos) in waiting do
-    match ← fieldType subject idx with
+    match ← (try fieldType subject idx catch e => throw (pos ++ e)) with
     | some t =>
       try unifyAt s!"the field `.{idx}`" result t
       catch e => throw (pos ++ e)

@@ -566,6 +566,60 @@ partial def chosenItems (picks : List (Nat × String × Nat)) (items : List Item
     | .pub parent item => .pub parent ((chosenItems picks [item]).headD item)
     | item => item
 
+/-- A program with the receiver of one dot call, a name, borrowed:
+`Syntax.recvRefMark`. -/
+partial def recvRefExpr (call : Nat) (uniq : Bool) : Expr → Expr
+  | .call i f args =>
+    let args := args.map (recvRefExpr call uniq)
+    match f with
+    | .fieldOf fi (.name none x) name =>
+      if i == call then .call i (.fieldOf fi (.ref uniq x) name) args
+      else .call i (.fieldOf fi (.name none x) name) args
+    | f => .call i (recvRefExpr call uniq f) args
+  | .tailCall i f args => .tailCall i (recvRefExpr call uniq f) (args.map (recvRefExpr call uniq))
+  | .tuple args => .tuple (args.map (recvRefExpr call uniq))
+  | .proj e n => .proj (recvRefExpr call uniq e) n
+  | .closure i clauses => .closure i (clauses.map fun
+    | .mk pats body => .mk pats (body.map (recvRefStmt call uniq)))
+  | .handle subject arms => .handle (recvRefExpr call uniq subject) (arms.map fun
+    | .mk pats body => .mk pats (body.map (recvRefStmt call uniq)))
+  | .labelScope l body => .labelScope l (body.map (recvRefStmt call uniq))
+  | .deref e => .deref (recvRefExpr call uniq e)
+  | .reborrow u e => .reborrow u (recvRefExpr call uniq e)
+  | .fieldOf i e name => .fieldOf i (recvRefExpr call uniq e) name
+  | e => e
+where
+  recvRefStmt (call : Nat) (uniq : Bool) : Stmt → Stmt
+    | .let_ pat value => .let_ pat (recvRefExpr call uniq value)
+    | .expr e => .expr (recvRefExpr call uniq e)
+    | .defer e => .defer (recvRefExpr call uniq e)
+    | .letMut x value => .letMut x (recvRefExpr call uniq value)
+    | .assign target value => .assign (recvRefExpr call uniq target) (recvRefExpr call uniq value)
+    | .located line col s => .located line col (recvRefStmt call uniq s)
+
+partial def recvRefItems (call : Nat) (uniq : Bool) (items : List Item) : List Item :=
+  items.map fun
+    | .fn name ps annots ret clauses => .fn name ps annots ret (clauses.map fun
+      | .mk pats body => .mk pats (body.map (recvRefExpr.recvRefStmt call uniq)))
+    | .impl ps tr head args context methods => .impl ps tr head args context (recvRefItems call uniq methods)
+    | .traitInfo n supers defaults params assocs => .traitInfo n supers (recvRefItems call uniq defaults) params assocs
+    | .module name (some body) => .module name (some (recvRefItems call uniq body))
+    | .pub parent item => .pub parent ((recvRefItems call uniq [item]).headD item)
+    | item => item
+
+def recvRefFound (said : String) : Option (Nat × Bool) :=
+  match said.splitOn "%recvref:" with
+  | _ :: after :: _ =>
+    match ((after.splitOn "%").headD "").splitOn ":" with
+    | [call, u] => call.toNat?.map fun c => (c, u == "1")
+    | _ => none
+  | _ => none
+
+def withoutRecvRef (said : String) : String :=
+  match said.splitOn "%recvref:" with
+  | before :: after :: _ => before ++ "%".intercalate ((after.splitOn "%").drop 1)
+  | _ => said
+
 def dotOwnFound (said : String) : Option (Nat × String) :=
   match said.splitOn "%dotown:" with
   | _ :: after :: _ =>

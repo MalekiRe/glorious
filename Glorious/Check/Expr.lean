@@ -18,11 +18,12 @@ def fieldThrough (scope : Scope) (id : Nat) (uniq : Bool) (x : String) (path : L
   let how ← if uniq then pure Ty.uniq else freshTy
   unifyAt (if uniq then "a field is borrowed for writing through a `&mut` reference"
     else "a field is borrowed through a reference") (.ref how whole cap) t
-  let (field, numbered, chosen) ← fieldAt whole path
+  let (field, numbered, chosen, through) ← fieldAtThrough whole path
   use scope (.through cap s!"`{x}`" uniq numbered)
   let cap' ← freshCap
   captures cap' (.loan (← freshLoan none uniq (some (cap, cap')) numbered))
   captures cap' (.ty t)
+  throughBorrowed through uniq cap'
   modify fun s =>
     { s with fieldSites := s.fieldSites.push (id, true, whole, numbered, chosen, s.owner, s.pos) }
   pure (.ref (if uniq then .uniq else .shared) field cap')
@@ -134,11 +135,12 @@ partial def inferExpr (scope : Scope) (amb : Row) : Expr → M Ty
         return ← fieldThrough scope id uniq x path t
       if star then
         throw s!"`{x}` is a mutable variable, not a reference: its field is `{x}.{path.headD ""}`"
-      let (field, numbered, chosen) ← fieldAt t path
+      let (field, numbered, chosen, through) ← fieldAtThrough t path
       use scope (.var brand x (if uniq then .lend else .share) numbered)
       let cap ← freshCap
       captures cap (.brand brand)
       captures cap (.loan (← freshLoan (some brand) uniq none numbered))
+      throughBorrowed through uniq cap
       modify fun s =>
         { s with fieldSites := s.fieldSites.push (id, false, t, numbered, chosen, s.owner, s.pos) }
       pure (.ref (if uniq then .uniq else .shared) field cap)
@@ -158,14 +160,34 @@ partial def inferExpr (scope : Scope) (amb : Row) : Expr → M Ty
     | none => throw s!"unknown name `{x}`"
   | .fieldOf id e name => do
     if let some field ← inferFieldOfPlace scope (.fieldOf id e name) then return field
+    let subject ← inferExpr scope amb e
+    -- A field of what a reference is to, the reference given by what is
+    -- written (`m.get().0`, `r.x`): read through it, which copies it, as a
+    -- field of what a name holding one is to is.
+    if let .ref _ inner _ ← find subject then
+      let idx ← match name.toNat? with
+        | some n => pure (some n)
+        | none => fieldIndex inner name
+      if let some idx := idx then
+        if let some t ← fieldType inner idx then
+          modify fun s => { s with fieldReads := s.fieldReads.push (id, idx), derefReads := s.derefReads.push id }
+          mustDup t "reading through a reference copies the value (`replace` takes it out instead)"
+          return t
+    -- (Of which name it is a part, where it is one of a name's.)
+    modify fun s => { s with aparts := s.aparts.push (subject, s.pos, (namedVal scope e).map (·.1)) }
     -- A field by number of a value whose type is not known yet is settled
     -- once the rest of the function is inferred, as `e.0` of any value is.
     if let some n := name.toNat? then
       modify fun s => { s with fieldReads := s.fieldReads.push (id, n) }
-      return ← inferExpr scope amb (.proj e n)
-    let subject ← inferExpr scope amb e
-    -- (Of which name it is a part, where it is one of a name's.)
-    modify fun s => { s with aparts := s.aparts.push (subject, s.pos, (namedVal scope e).map (·.1)) }
+      match ← fieldType subject n with
+      | some t =>
+        readPart scope e subject n name true
+        return t
+      | none =>
+        readPart scope e subject n name false
+        let t ← freshTy
+        modify fun s => { s with projections := s.projections.push (subject, n, t, s.pos) }
+        return t
     let unknown := match ← find subject with
       | .var _ => true
       | _ => false
@@ -328,8 +350,8 @@ field is in the way. None if the expression is not that. -/
 partial def inferFieldOfPlace (scope : Scope) (whole : Expr) : M (Option Ty) := do
   if let some (x, path) := fieldOfName whole then
     if let some (.cell t brand) := scope.lookup x then
-      let (field, numbered, _) ← fieldAt t (path.map (·.1))
-      noteFieldReads path numbered
+      let (field, numbered, _, through) ← fieldAtThrough t (path.map (·.1))
+      noteFieldReads path numbered through
       mustDup field (readsCell x)
       use scope (.var brand x .read numbered)
       return some field
@@ -339,8 +361,8 @@ partial def inferFieldOfPlace (scope : Scope) (whole : Expr) : M (Option Ty) := 
     if let some (.val t _) := scope.lookup x then
       if let .ref _ inner cap ← find t then
         if let some (_, some first) := path.head? then
-          let (field, numbered, _) ← fieldAt inner (path.map (·.1))
-          noteFieldReads path numbered
+          let (field, numbered, _, through) ← fieldAtThrough inner (path.map (·.1))
+          noteFieldReads path numbered through
           modify fun s => { s with derefReads := s.derefReads.push first }
           mustDup field "reading through a reference copies the value (`replace` takes it out instead)"
           use scope (.through cap s!"`{x}`" false numbered)
@@ -350,8 +372,8 @@ partial def inferFieldOfPlace (scope : Scope) (whole : Expr) : M (Option Ty) := 
       let inner ← freshTy
       let cap ← freshCap
       unifyAt "`*` reads through a reference" (.ref (← freshTy) inner cap) t
-      let (field, numbered, _) ← fieldAt inner (path.map (·.1))
-      noteFieldReads path numbered
+      let (field, numbered, _, through) ← fieldAtThrough inner (path.map (·.1))
+      noteFieldReads path numbered through
       mustDup field "reading through a reference copies the value (`replace` takes it out instead)"
       use scope (.through cap s!"`{x}`" false numbered)
       return some field
@@ -510,11 +532,15 @@ partial def checkArg (scope : Scope) (amb : Row) (what : String) (p : Ty) (a : E
         | some said =>
           -- (Found that a match is of a reference, or a dot call of a type's
           -- own function, knowing the types: the program is read again so.)
-          if (said.splitOn "%refpats:").length > 1 || (said.splitOn "%dotown:").length > 1 then throw said
+          if (said.splitOn "%refpats:").length > 1 || (said.splitOn "%dotown:").length > 1
+              || (said.splitOn "%recvref:").length > 1 then throw said
           set saved
           -- What went wrong with the types known is what is said if the
           -- callable is wrong without them too: it was read knowing more.
           unless said.isEmpty do
+            -- (Where it was said, as the statement it is in would say it.)
+            let at_ := (← get).at_
+            let said := if at_.1 == 0 then said else Syntax.positioned at_.1 at_.2 said
             modify fun s => { s with firstSaid := s.firstSaid <|> some said }
             try
               if arity == ps.length && annots.any (·.isSome) then
@@ -546,7 +572,8 @@ partial def dotAltFor (scope : Scope) (amb : Row) (call : Nat) (a : Expr) : M (O
       | .ref _ x => Expr.name none x
       | a => a
     let found ← try some <$> inferExpr scope amb a catch e =>
-      if (e.splitOn "%dotown:").length > 1 || (e.splitOn "%refpats:").length > 1 then throw e else pure none
+      if (e.splitOn "%dotown:").length > 1 || (e.splitOn "%refpats:").length > 1
+          || (e.splitOn "%recvref:").length > 1 then throw e else pure none
     let rec head (fuel : Nat) (t : Ty) : M (Option String) := do
       match fuel, ← find t with
       | fuel + 1, .ref _ inner _ => head fuel inner
@@ -683,7 +710,8 @@ partial def checkArgsIn (scope : Scope) (amb : Row) (what : String) (params : Li
       -- function of its own of the name that takes it otherwise: that one.)
       let checked ← if i == 0 && call != 0 then
           try checkArg scope amb s!"argument {i + 1} of {what}" p a site catch ex => do
-            if (ex.splitOn "%dotown:").length > 1 || (ex.splitOn "%refpats:").length > 1 then throw ex
+            if (ex.splitOn "%dotown:").length > 1 || (ex.splitOn "%refpats:").length > 1
+                || (ex.splitOn "%recvref:").length > 1 then throw ex
             let failed ← get
             set before
             let alt ← dotAltFor scope amb call a
@@ -693,6 +721,20 @@ partial def checkArgsIn (scope : Scope) (amb : Row) (what : String) (params : Li
             | none => throw ex
         else checkArg scope amb s!"argument {i + 1} of {what}" p a site
       if let some e := checked then
+        -- (A dot call's receiver, a name that holds a value, where the
+        -- function takes a reference to it: read again with it borrowed, as
+        -- Rust borrows it.)
+        if i == 0 && call != 0 then
+          if let .name none x := a then
+            if let some (.val t _) := scope.lookup x then
+              if let .ref how _ _ ← find p then
+                match ← find t with
+                | .ref .. | .var _ => pure ()
+                | _ =>
+                  let uniq := match ← find how with
+                    | .con "&mut" [] => true
+                    | _ => false
+                  throw (Syntax.recvRefMark call uniq ++ e)
         -- (Asked only once the function in scope does not fit: the program
         -- is read again, so what this finds on the way is not kept. The
         -- receiver's type is found as it was before it was made to fit.)

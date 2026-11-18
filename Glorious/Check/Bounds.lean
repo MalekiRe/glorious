@@ -419,9 +419,17 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
     let mut cur ← zonk ty
     let mut steps : Array (Option String × Nat) := #[]
     for (idx, said) in path.zip (chosen ++ path.map fun _ => none) do
+      -- (Past a reference a field before holds: the step is marked `*`,
+      -- and taken from what the reference points to.)
+      let past := match cur with
+        | .ref .. => !steps.isEmpty
+        | _ => false
+      if past then
+        if let .ref _ inner _ := cur then cur ← zonk inner
+      let mark := fun (c : Option String) => if past then some ("*" ++ c.getD "") else c
       match cur with
       | .tuple ts =>
-        steps := steps.push (none, ts.length)
+        steps := steps.push (mark none, ts.length)
         cur := ts.getD idx .unit
       | .con n args =>
         let declared := (← get).types
@@ -442,7 +450,7 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
           let several := match declared.lookup n with
             | some decl => decl.ctors.length != 1
             | none => true
-          steps := steps.push (some (if said.isSome && several then "#" ++ c else c), fields.length)
+          steps := steps.push (mark (some (if said.isSome && several then "#" ++ c else c)), fields.length)
           cur ← zonk (fields.getD idx .unit)
         | none =>
           throw (inFunction owner (pos ++ s!"a field of a `{showTy cur}` cannot be borrowed: it has more than one constructor"))

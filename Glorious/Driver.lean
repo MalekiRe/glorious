@@ -687,13 +687,16 @@ partial def compileSourceAt (src : String) (check : Bool := true)
     (checkKept : Check.Kept := []) (refPats : List (Nat × Bool × List Nat) := [])
     (dotPicks : List (Nat × String) := []) (search : Bool := true) (memo : Infer.Memo := {})
     (firsts : List ((Bool × Bool) × (Nat × Check.St)) := [])
-    (lexed : List (List String × Array Syntax.Token) := []) : Except String Compiled := do
+    (lexed : List (List String × Array Syntax.Token) := [])
+    (recvRefs : List (Nat × Bool) := []) : Except String Compiled := do
   let (prelude, items) ← Trace.timed "parse" fun _ => parseProgram src files check few packs lexed
   -- (Clauses the checker found matching a reference with patterns of a
   -- value: read with those patterns written `&Pattern`.)
   let items := refPats.foldl (fun items (id, uniq, which) => Elab.refPatsItems id uniq which items) items
   -- (Dot calls the checker found are of a type's own function.)
   let items := dotPicks.foldl (fun items (call, fn) => Elab.dotOwnItems call fn items) items
+  -- (Dot calls whose receiver, a name, the function takes a reference to.)
+  let items := recvRefs.foldl (fun items (call, uniq) => Elab.recvRefItems call uniq items) items
   -- Every name is given its meaning: the modules become one list of items,
   -- each module a unit, after those it uses.
   let resolved ← Trace.timed "resolve names" fun _ => Syntax.Modules.resolve prelude items
@@ -817,21 +820,27 @@ partial def compileSourceAt (src : String) (check : Bool := true)
   let (blocks, checkMade, libraryMade) ← match checked with
     | .ok (blocks, made, shared) => pure (some blocks, made, shared)
     | .error e =>
-      let clean := fun (e : String) => Elab.withoutDotOwn (Elab.withoutRefPats e)
-      match Elab.refPatsFound e, Elab.dotOwnFound e with
-      | some found, _ =>
+      let clean := fun (e : String) => Elab.withoutRecvRef (Elab.withoutDotOwn (Elab.withoutRefPats e))
+      match Elab.refPatsFound e, Elab.dotOwnFound e, Elab.recvRefFound e with
+      | some found, _, _ =>
         if check && refPats.length < 32 && !refPats.contains found then
-          match compileSourceAt src check files few known packs kept checkKept (refPats ++ [found]) dotPicks search memo firsts lexed with
+          match compileSourceAt src check files few known packs kept checkKept (refPats ++ [found]) dotPicks search memo firsts lexed recvRefs with
           | .ok c => return c
           | .error e' => throw (clean e')
         else if check then throw (clean e) else pure (none, [], [])
-      | none, some found =>
+      | none, some found, _ =>
         if check && dotPicks.length < 32 && !dotPicks.contains found then
-          match compileSourceAt src check files few known packs kept checkKept refPats (dotPicks ++ [found]) search memo firsts lexed with
+          match compileSourceAt src check files few known packs kept checkKept refPats (dotPicks ++ [found]) search memo firsts lexed recvRefs with
           | .ok c => return c
           | .error e' => throw (clean e')
         else if check then throw (clean e) else pure (none, [], [])
-      | none, none => if check then throw e else pure (none, [], [])
+      | none, none, some found =>
+        if check && recvRefs.length < 32 && !recvRefs.contains found then
+          match compileSourceAt src check files few known packs kept checkKept refPats dotPicks search memo firsts lexed (recvRefs ++ [found]) with
+          | .ok c => return c
+          | .error e' => throw (clean e')
+        else if check then throw (clean e) else pure (none, [], [])
+      | none, none, none => if check then throw e else pure (none, [], [])
   -- Lifetimes were the checker's to read; and, of what is declared, the
   -- certificate's.
   let written := all
