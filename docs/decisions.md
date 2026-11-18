@@ -5362,6 +5362,19 @@ used (`2`), 3 the third way, and 847 the plain reference (`0`). The search
 starts from every place a scope and takes out what fails; most of its tries
 are spent finding the `0`s.
 
+## Tried: a group's check reused by what it uses (not kept)
+
+Each group keyed by what it and the groups it uses are made of, numbered
+from a place of that key's own (stores with segments anywhere, found by
+halving), and what an earlier compile's check of it added put onto this
+state with `mergeStates`. Measured on covey's simulation: no group's
+addition was taken on an edit (a unit found whole keeps only its whole state,
+so what its groups added was not there the next time), a fresh compile went
+from 3.3 s to 4.0 s, the suite from 22 s to 31 s, and the kept file was no
+smaller. Taken out. What it needs to pay: each unit keeping what each group
+added, not states, and numbering that does not make stores slower to read:
+the per-module deltas of the plan.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by
