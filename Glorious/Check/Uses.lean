@@ -1244,6 +1244,15 @@ def checkStays (stays : Array (Ty × String)) : M Unit := do
     if ← tyJumps t then
       throw s!"{why}, but what it is given here can jump to a label and not come back"
 
+/-- The edges whose source is the capture variable `c` itself, in the order
+made: each by its number, with what it is and the name it is under. -/
+def edgesOfSource (c : Nat) : M (List (Nat × Captured × Option (String × Nat))) := do
+  let s ← get
+  let mine := ((s.capOut.getD (← findCap c) #[]).toList.mergeSort (· ≤ ·)).eraseDups
+  pure (mine.filterMap fun i => match s.capEdges.get? i with
+    | some (src, what) => if src == c then some (i, what, (s.capEdgeNames.get? i).join) else none
+    | none => none)
+
 /-- With the types of a function known: note which of its calls certainly come
 back, and look at each binding that may have to be used. `fnTy` is the
 function's type.
@@ -1519,8 +1528,8 @@ def runLowerChecks (fnTy : Ty) : M Unit := do
     match owners with
     | [(owner, c)] =>
       let mut theirs : List (String × Nat) := []
-      for ((i, (src, what)), (_, name)) in s.capEdges.entries.zip s.capEdgeNames.entries do
-        if src == c then
+      for (i, what, name) in ← edgesOfSource c do
+        do
           if let .ty held := what then
             if let some n := name then theirs := n :: theirs
             -- (What a variable would have given a block that was not run
@@ -1532,8 +1541,8 @@ def runLowerChecks (fnTy : Ty) : M Unit := do
             unless covered do
               modify fun st => { st with drops := st.drops.push (held,
                 why ++ ", and the block it is given was not run and holds a value this one does not mention") }
-      for ((i, (src, what)), (_, name)) in s.capEdges.entries.zip s.capEdgeNames.entries do
-        if src == own then
+      for (i, what, name) in ← edgesOfSource own do
+        do
           if let .ty _ := what then
             if let some n := name then
               if theirs.contains n then
