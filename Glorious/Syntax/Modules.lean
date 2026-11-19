@@ -100,6 +100,10 @@ structure Module where
 /-- The path the prelude has as a module. Nothing can write it. -/
 def preludePath : List String := ["%prelude"]
 
+/-- The library's prelude: the names of the library every module of a
+program that has it can write. -/
+def stdPreludePath : List String := ["std", "prelude"]
+
 /-- How a module is written in a message. -/
 def showPath (p : List String) : String :=
   if p.isEmpty then "the first module" else if p == preludePath then "the prelude"
@@ -330,6 +334,14 @@ partial def scopeOf (p : List String) : R (List Bound) := do
   if p != preludePath && !((← get).bare && p.head? != some "std" && p.head? != preludePath.head?) then
     if let some prelude ← unitOf preludePath then
       out := out ++ prelude.own.map fun b => { b with shown := .priv, rank := 2 }
+  -- The library's prelude, after all of that, in a module of the program
+  -- that has the library: what `std::prelude` brings.
+  let library := ["std", "core", "alloc"].any (p.head? == some ·) || p.head? == preludePath.head?
+  if !library && !(← get).bare then
+    if (← unitOf stdPreludePath).isSome then
+      for b in ← scopeOf stdPreludePath do
+        if b.rank == 0 && b.shown == .pub && b.entry.kind != .module then
+          out := out ++ [{ b with shown := .priv, rank := 3 }]
   modify fun s => { s with busy := s.busy.filter (· != p), scopes := (p, out) :: s.scopes }
   pure out
 

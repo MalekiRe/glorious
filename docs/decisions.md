@@ -5637,6 +5637,21 @@ all the parameters, so a use that leaves out lifetimes written before it is
 not read rightly. covey's `Query<Q, Only, St>` has parameters after the
 query, so it keeps its tuple.
 
+## The library's prelude is a module
+
+The names the specification's default prelude has from the library
+(`Vec`, `Ordering`, `identity`, `fail`, ...; `Std.preludeNames`) are what
+the module `std::prelude` brings with `pub use`, and every module of a
+program that has the library can name them after what it declares, what
+its `use`s bring and the prelude (`scopeOf`, rank 3). Before, `use` lines
+for them were added to the end of the program's text where the text was
+found to mention one and not to declare or bring it, by searching the text.
+A module of the library does not have them; `#![no_implicit_prelude]` and
+`#![no_std]` leave them out, as they do the prelude. Whether a program has
+the library at all is still told from its text (it names `std`, or a name
+of the library's prelude): what it decides is what is read, not what a name
+means.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by

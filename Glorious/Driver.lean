@@ -246,68 +246,26 @@ def certifyProgram (items : List Syntax.Item) (p : Core.Program)
   if Typing.checkProgram cert p then pure (cert, none, {})
   else throw s!"the certificate was rejected: {Infer.rejected cert p}"
 
-/-- What the specification's default prelude has that this one keeps in the
-library (§3): each name, with its module. -/
-def stdPreludeNames : List (String × String) :=
-  [("identity", "value"), ("discard", "value"), ("Either", "value"),
-   ("Left", "value"), ("Right", "value"), ("Rejected", "value"), ("Ordering", "cmp"),
-   ("Less", "cmp"), ("Equal", "cmp"), ("Greater", "cmp"), ("Range", "iterator"),
-   ("Fail", "value"), ("fail", "value"), ("Report", "value"), ("report", "value"),
-   ("catch_fail", "value"), ("Vec", "vec"), ("String", "text"), ("Iterator", "iterator")]
-
-/-- The names of the default prelude a program's text uses and does not
-declare or bring in itself: `use` lines for them, written after the text (so
-that no position in it moves). Where the text names no library, none. -/
-def stdPreludeUses (src : String) : String := Id.run do
-  -- (Nor where the text brings in whole modules, whose names could be any.)
-  if (src.splitOn "#![no_std]").length > 1 || (src.splitOn "#![no_implicit_prelude]").length > 1
-      || (src.splitOn "mod std").length > 1 || (src.splitOn "::*").length > 1 then
-    return ""
+/-- Does a text write `name` as a name of its own: not after `::`, `.` or
+another letter, nor before one? -/
+def mentionsName (text name : String) : Bool := Id.run do
   let isWord := fun (c : Char) => c.isAlphanum || c == '_'
-  -- (Written as a name of its own: not after `::`, `.` or another letter,
-  -- nor before one.)
-  let mentions := fun (name : String) => Id.run do
-    let parts := src.splitOn name
-    let mut found := false
-    for (before, after) in parts.zip (parts.drop 1) do
-      let prev := before.toList.getLast?
-      let next := after.toList.head?
-      let okBefore := match prev with
-        | some c => !isWord c && c != '.' && c != ':'
-        | none => true
-      let okAfter := match next with
-        | some c => !isWord c
-        | none => true
-      if okBefore && okAfter then found := true
-    pure found
-  let declares := fun (name : String) =>
-    ["fn ", "enum ", "struct ", "type ", "trait ", "effect ", "const ", "let "].any fun k =>
-      (src.splitOn (k ++ name)).length > 1
-  -- (What the text's `use`s name, `use m::{a, b};` too.)
-  let uses := (src.splitOn "use ").drop 1 |>.map fun after => (after.splitOn ";").headD ""
-  let inUse := fun (name : String) => uses.any fun u =>
-    let parts := u.splitOn name
-    (parts.zip (parts.drop 1)).any fun (before, after) =>
-      (before.toList.getLast?.all fun c => !isWord c) && (after.toList.head?.all fun c => !isWord c)
-  let brought := fun (name : String) =>
-    (src.splitOn ("::" ++ name)).length > 1 || inUse name
-  -- (An operation goes with its effect: where the text declares the effect,
-  -- or an operation of the name in an effect of its own, neither is.)
-  let opOf : List (String × String) := [("fail", "Fail"), ("report", "Report")]
-  let ownOp := fun (name : String) =>
-    (src.splitOn "effect ").drop 1 |>.any fun after =>
-      let body := ((after.splitOn "}").headD "")
-      (body.splitOn (name ++ "(")).length > 1
-  let blocked := fun (name : String) =>
-    declares name || brought name || ownOp name
-      || (opOf.lookup name).any (fun e => declares e || brought e)
-      || (opOf.find? (·.2 == name)).any (fun (op, _) => ownOp op)
-  let wanted := stdPreludeNames.filter fun (name, _) => mentions name && !blocked name
-  if wanted.isEmpty then return ""
-  let mods := wanted.map (·.2) |>.eraseDups
-  let lines := mods.map fun m =>
-    s!"use std::{m}::\{{", ".intercalate ((wanted.filter (·.2 == m)).map (·.1))}};"
-  return "\n" ++ "\n".intercalate lines ++ "\n"
+  let parts := text.splitOn name
+  let mut found := false
+  for (before, after) in parts.zip (parts.drop 1) do
+    let okBefore := match before.toList.getLast? with
+      | some c => !isWord c && c != '.' && c != ':'
+      | none => true
+    let okAfter := match after.toList.head? with
+      | some c => !isWord c
+      | none => true
+    if okBefore && okAfter then found := true
+  pure found
+
+/-- Does a text write a name of the library's prelude (`Std.preludeNames`)?
+Then the program has the library, whose prelude its modules can name. -/
+def mentionsPrelude (text : String) : Bool :=
+  Std.preludeNames.any fun (name, _) => mentionsName text name
 
 /-- Does a program have the standard library: does it name `std`, and have no
 module `std` of its own? -/
@@ -317,7 +275,7 @@ def usesStd (src : String) (files : List (List String × String)) : Bool :=
       || (text.splitOn "alloc::").length > 1
   let own := fun (text : String) =>
     (text.splitOn "mod std {").length > 1 || (text.splitOn "mod std{").length > 1
-  (named src || files.any fun (_, text) => named text)
+  (named src || mentionsPrelude src || files.any fun (_, text) => named text || mentionsPrelude text)
     && !own src && !files.any fun (path, _) => path.head? == some "std"
 
 /-- An `unsafe trait` is implemented with `unsafe impl`, and nothing else is. -/
@@ -417,7 +375,9 @@ def neededStd (texts : List String) : Option (List (List String × String)) :=
         else match Std.texts.lookup path with
           | some text => close fuel (path :: have_) (named text ++ rest)
           | none => close fuel have_ rest
-    let needed := close 4096 [] (texts.flatMap named)
+    -- (The library's prelude, where a text writes one of its names.)
+    let prelude := if texts.any mentionsPrelude then [["std", "prelude"]] else []
+    let needed := close 4096 [] (prelude ++ texts.flatMap named)
     -- (With the modules inside each, and what those name.)
     let inside := fun (have_ : List (List String)) =>
       (Std.texts.filter fun (path, _) => have_.any fun p => p.length < path.length && p.isPrefixOf path)
@@ -1140,7 +1100,6 @@ def compileSource (src : String) (check : Bool := true)
   -- (What the default prelude has from the library, where the text uses it;
   -- and each text lexed, once: each that an earlier compile read as it is,
   -- `texts`, not.)
-  let src := src ++ stdPreludeUses src
   let all := ([], src) :: files
   let lexed ← Trace.timed "lex" fun _ =>
     (all.filter fun (path, text) => !texts.contains (textKey path text)).mapM fun (path, text) => do

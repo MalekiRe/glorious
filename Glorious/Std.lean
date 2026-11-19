@@ -14,6 +14,7 @@ namespace Glorious.Std
 
 private def root : String := r#"// The standard library: what is not in the prelude. A module is brought in
 // by its name: `use std::vec::sort;`.
+pub mod prelude;
 pub mod option;
 pub mod result;
 pub mod cmp;
@@ -5075,9 +5076,26 @@ impl<First, Rest> Count for (First, Rest) where Rest: Count { const COUNT: Int =
 
 "# ++ String.join ((List.range 13).map one)
 
+/-- What the specification's default prelude has from the library (§3):
+each name, with its module. `std::prelude` brings them, and every module of
+a program that has the library can name them, after what it declares and
+brings and after the prelude (`Syntax.scopeOf`). -/
+def preludeNames : List (String × String) :=
+  [("identity", "value"), ("discard", "value"), ("Either", "value"),
+   ("Left", "value"), ("Right", "value"), ("Rejected", "value"), ("Ordering", "cmp"),
+   ("Less", "cmp"), ("Equal", "cmp"), ("Greater", "cmp"), ("Range", "iterator"),
+   ("Fail", "value"), ("fail", "value"), ("Report", "value"), ("report", "value"),
+   ("catch_fail", "value"), ("Vec", "vec"), ("String", "text"), ("Iterator", "iterator")]
+
+private def preludeText : String :=
+  let mods := (preludeNames.map (·.2)).eraseDups
+  String.join (mods.map fun m =>
+    s!"pub use std::{m}::\{{", ".intercalate ((preludeNames.filter (·.2 == m)).map (·.1))}};\n")
+
 /-- The texts of the library, each with the module it is. -/
 def texts : List (List String × String) :=
   [(["std"], root),
+   (["std", "prelude"], preludeText),
    (["std", "option"], optionText),
    (["std", "result"], resultText),
    (["std", "cmp"], cmpText),
