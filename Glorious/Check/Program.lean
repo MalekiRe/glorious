@@ -15,6 +15,10 @@ checker's state after the declarations and after each group of functions,
 each under a key of everything it was made from, in order. -/
 abbrev Kept := List (UInt64 × St)
 
+/-- How often a state is kept among a unit's groups (or implementations'
+functions), so that a unit keeps some 48 at most: each is the whole state. -/
+def keptEvery (n : Nat) : Nat := max 1 ((n + 47) / 48)
+
 /-- An item as its declarations have it: its functions without their bodies. -/
 partial def withoutBodies : Item → Item
   | .fn name params annots ret _ => .fn name params annots ret []
@@ -262,26 +266,53 @@ def checkItems (items : List Item) (seed : UInt64 := 0) (kept : Kept := []) : M 
         checkDeciding [d]
         made := (key, ← get) :: made
     if let some st := taken then restore ((ours st).getD st) allDecls
-    for (group, k) in groups.zipIdx do
-      key := groupKey key group
-      match look key with
-      | some st => restore st ((groups.drop (k + 1)).flatten)
-      | none => checkDeciding group
-      made := (key, ← get) :: made
+    -- The state after the last group whose key, and so every key before
+    -- it, is kept is taken; the groups after it are checked. A state is
+    -- kept after a group only now and then, in a unit of many (`keptEvery`):
+    -- each kept is the whole state, and the next change to it copies what
+    -- it holds, so one after every group grew with the square of their
+    -- number, in time and in what is saved.
+    let keys := (groups.foldl (fun (acc : List UInt64 × UInt64) g =>
+      let k := groupKey acc.2 g
+      (k :: acc.1, k)) ([], key)).1.reverse
+    let every := keptEvery groups.length
+    let start := ((keys.zipIdx.reverse.find? fun (k, _) => (look k).isSome).map (·.2 + 1)).getD 0
+    if start > 0 then
+      if let some k := keys[start - 1]? then
+        if let some st := look k then
+          restore st ((groups.drop start).flatten)
+          made := (k, st) :: made
+    for (group, k) in (groups.zipIdx.drop start) do
+      checkDeciding group
+      if (k + 1) % every == 0 || k + 1 == groups.length then
+        made := (keys[k]!, ← get) :: made
+    if let some k := keys.getLast? then key := k
     -- The functions implementations give, each on its own: any function may
     -- call them, but only through a trait, whose types are declared.
     -- (Those of one that leaves a type to be found were checked with the
     -- rest, before what may use it.)
     let earlyNames := early.map (·.name)
+    let mut implGroups : Array (List FnDecl) := #[]
     for im in (← get).impls.toList.drop before do
       unless implHoled im do
         for d in ← implFnDecls im do
-          if earlyNames.contains d.name then continue
-          key := groupKey key [d]
-          match look key with
-          | some st => restore st []
-          | none => checkDeciding [d]
-          made := (key, ← get) :: made
+          unless earlyNames.contains d.name do implGroups := implGroups.push [d]
+    -- (Taken, checked and kept as the groups are.)
+    let implKeys := (implGroups.toList.foldl (fun (acc : List UInt64 × UInt64) g =>
+      let k := groupKey acc.2 g
+      (k :: acc.1, k)) ([], key)).1.reverse
+    let implEvery := keptEvery implGroups.size
+    let implStart := ((implKeys.zipIdx.reverse.find? fun (k, _) => (look k).isSome).map (·.2 + 1)).getD 0
+    if implStart > 0 then
+      if let some k := implKeys[implStart - 1]? then
+        if let some st := look k then
+          restore st []
+          made := (k, st) :: made
+    for (group, k) in (implGroups.toList.zipIdx.drop implStart) do
+      checkDeciding group
+      if (k + 1) % implEvery == 0 || k + 1 == implGroups.size then
+        made := (implKeys[k]!, ← get) :: made
+    if let some k := implKeys.getLast? then key := k
     for c in coercing do
       unless (((← get).fnBounds.lookup c).getD 0) == 0 do
         throw s!"`coerce {c}`: a coercion cannot need a trait of a type it is used at"
