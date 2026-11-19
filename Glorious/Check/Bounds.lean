@@ -315,7 +315,7 @@ mutual
 
 /-- `leaves`, where implementations are chosen by fitting types. -/
 partial def leavesFitting (pos key : String) (t : Ty) (args : List Ty) (owner : String := "")
-    (via : List String := []) (asking : List String := []) : M (List (String × Nat × Ty × List Ty)) := do
+    (via : List (String × Ty) := []) (asking : List String := []) : M (List (String × Nat × Ty × List Ty)) := do
   if key == Syntax.destroyTrait then return ← leavesFittingNow pos key t args owner via asking
   -- (Found once in a group where the type is all known; what is refused is
   -- said each time, with where it was asked.)
@@ -332,7 +332,7 @@ partial def leavesFitting (pos key : String) (t : Ty) (args : List Ty) (owner : 
   pure ls
 
 partial def leavesFittingNow (pos key : String) (t : Ty) (args : List Ty) (owner : String := "")
-    (via : List String := []) (asking : List String := []) : M (List (String × Nat × Ty × List Ty)) := do
+    (via : List (String × Ty) := []) (asking : List String := []) : M (List (String × Nat × Ty × List Ty)) := do
   let t ← find t
   -- (How a value is destroyed is found by the type's shape alone, as
   -- `solveFitting` finds it: no condition is left of what it finds.)
@@ -343,14 +343,20 @@ partial def leavesFittingNow (pos key : String) (t : Ty) (args : List Ty) (owner
     if let .fn .. := t then return []
   if let k :: _ ← projectedCondition key t then return [(key, k, t, args)]
   if let some k ← keyOf t then return [(key, k, t, args)]
-  -- (What the function is given of a type made from its type parameters.)
-  let said := s!"'%condition:{owner}:{key}:{← spellTy (← zonk t)}"
-  if let some i := (← get).rigidAt[said]? then return [(key, 2 * i + 1, t, args)]
-  -- (What it was asked for, where it is a condition of another.)
-  let because := match via with
-    | [] => ""
-    | ws => s!", which {", which ".intercalate (ws.map (· ++ " needs"))}"
+  -- (What the function is given of a type made from its type parameters:
+  -- one made of none has none.)
+  let t' ← zonk t
+  if Ty.hasRigid t' then
+    let said := s!"'%condition:{owner}:{key}:{← spellTy t'}"
+    if let some i := (← get).rigidAt[said]? then return [(key, 2 * i + 1, t, args)]
+  -- (What it was asked for, where it is a condition of another: said only
+  -- where it is refused.)
   let missing : M (List (String × Nat × Ty × List Ty)) := do
+    let mut ws : List String := []
+    for (tr, ty) in via do ws := ws ++ [s!"`{tr}` of `{showTy (← zonk ty)}`"]
+    let because := match ws with
+      | [] => ""
+      | ws => s!", which {", which ".intercalate (ws.map (· ++ " needs"))}"
     throw s!"{pos}`{showTy (← zonk t)}` does not implement `{Syntax.traitShown key}`{because}"
   if let .fn _ _ effs tail _ := t then
     try unifyRow ⟨effs, tail⟩ ⟨[], none⟩
@@ -362,7 +368,7 @@ partial def leavesFittingNow (pos key : String) (t : Ty) (args : List Ty) (owner
   unless ← fitConditions im at_ hargs owner pos do return ← missing
   let mut out : List (String × Nat × Ty × List Ty) := []
   let shown := Syntax.traitShown key
-  let this := s!"`{(shown.takeWhile (· != '<')).toString}` of `{showTy (← zonk t)}`"
+  let this := ((shown.takeWhile (· != '<')).toString, t)
   for (tr, j) in im.context do
     let arg := hargs[j]?.getD .unit
     out := out ++ (← leavesFitting pos (← subKey tr arg []) arg [] owner (this :: via) asking)
