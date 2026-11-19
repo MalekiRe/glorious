@@ -1,0 +1,74 @@
+// Hooks: systems run when a component is added, put in, about to be replaced
+// or about to be taken away, given the entities. They compose in the order
+// they were registered, and see the value before it goes. A batch fires each
+// hook once, with every entity.
+// expect:
+// add 1
+// insert 1
+// insert again
+// replace 1
+// insert 2
+// insert again
+// add 1
+// insert 3
+// insert again
+// add 1
+// insert 4
+// insert again
+// remove 3
+// 3
+// -1
+// remove 4
+// true
+// true
+// add 3
+// insert 5
+// insert again
+// 3
+// 0
+mod ecs;
+
+use ecs::{App, Entity, Query, OnAdd, OnInsert, OnReplace, OnRemove};
+
+struct Health(Int)
+struct Marker
+
+fn value_of(query: &mut Query<(Entity, &Health)>, entity: Entity) -> Int {
+    match(query.get_mut(entity)) { Some((_, h)) => h.0, None => 0 - 1 }
+}
+
+fn added(trigger: &OnAdd<Health>) { say("add " ++ show(len_at(&trigger.entities))) }
+fn inserted(trigger: &OnInsert<Health>, health: &mut Query<(Entity, &Health)>) {
+    say("insert " ++ show(value_of(health, trigger.entities[0])))
+}
+fn again(trigger: &OnInsert<Health>) { say("insert again") }
+fn replaced(trigger: &OnReplace<Health>, health: &mut Query<(Entity, &Health)>) {
+    say("replace " ++ show(value_of(health, trigger.entities[0])))
+}
+fn removed(trigger: &OnRemove<Health>, health: &mut Query<(Entity, &Health)>) {
+    say("remove " ++ show(value_of(health, trigger.entities[0])))
+}
+
+fn main() -> Int {
+    let mut app = App::new()
+        .register<Health>()
+        .register<Marker>()
+        .on<OnAdd<Health>, _, _>(added)
+        .on<OnInsert<Health>, _, _>(inserted)
+        .on<OnInsert<Health>, _, _>(again)
+        .on<OnReplace<Health>, _, _>(replaced)
+        .on<OnRemove<Health>, _, _>(removed)
+        .build();
+    let entity = app.spawn_bundle((Health(1),));
+    discard(app.insert(entity, Health(2)));
+    let a = app.spawn_bundle((Health(3),));
+    let b = app.spawn_bundle((Health(4), Marker));
+    let plain = app.spawn_bundle((Marker,));
+    say(match(app.remove<Health>(a)) { Some(h) => h.0, None => 0 - 1 });
+    say(match(app.remove<Health>(a)) { Some(h) => h.0, None => 0 - 1 });
+    say(app.despawn(b));
+    say(app.despawn(plain));
+    let many = app.spawn_batch([(Health(5),), (Health(6),), (Health(7),)]);
+    say(len_at(&many));
+    0
+}

@@ -41,6 +41,7 @@ use core::iter::{into_iter, next};
 // An entity: a place in the columns, and which of the entities that have had
 // that place this one is.
 pub struct Entity { pub index: Int, pub generation: Int }
+impl Clone for Entity { fn clone(e: &Entity) -> Entity { *e } }
 impl Entity {
     // An entity no world has, to start with where one is needed.
     pub const PLACEHOLDER: Entity = Entity { index: -1, generation: -1 };
@@ -1697,6 +1698,44 @@ impl<H, ..R, S> Registers<S> for (H, ..R) where (..R): Registers<S> {
 }
 
 // A world of columns `S` and the registered systems `L`.
+// Hooks: systems run when a component is added to entities, put in (added
+// or another value given), about to be replaced, or about to be taken away,
+// given the entities (`trigger.entities`). Registered as any label's,
+// `app.on<OnAdd<Health>, _, _>(systems)`, and fired by the app's own
+// structural operations, `app.spawn_bundle`, `app.spawn_batch`,
+// `app.insert`, `app.remove` and `app.despawn`, before they return: what
+// the hooks command is done then, and may fire hooks of its own.
+pub struct OnAdd<T> { pub entities: [Entity], none: [T] }
+pub struct OnInsert<T> { pub entities: [Entity], none: [T] }
+pub struct OnReplace<T> { pub entities: [Entity], none: [T] }
+pub struct OnRemove<T> { pub entities: [Entity], none: [T] }
+// (A bundle's components, each added and put in.)
+pub trait Hooked<S, L> { fn added(&mut App<S, L>, [Entity]) }
+impl<S, L> Hooked<S, L> for () { fn added(app: &mut App<S, L>, entities: [Entity]) { discard(entities) } }
+impl<H, ..R, S, L> Hooked<S, L> for (H, ..R)
+    where L: Dispatch<OnAdd<H>, S>, L: Dispatch<OnInsert<H>, S>, S: Columns, S: Unlinks<S>, (..R): Hooked<S, L> {
+    fn added(app: &mut App<S, L>, entities: [Entity]) {
+        if(len_at(&entities) > 0) {
+            app.emit<OnAdd<H>>(&OnAdd { entities: clone(&entities), none: [] });
+            app.emit<OnInsert<H>>(&OnInsert { entities: clone(&entities), none: [] })
+        };
+        <(..R) as Hooked<S, L>>::added(app, entities)
+    }
+}
+// (The columns an entity has, each about to be taken away.)
+pub trait RemoveHooks<S, L> { fn removing(&mut App<S, L>, Entity) }
+impl<S, L> RemoveHooks<S, L> for () { fn removing(app: &mut App<S, L>, entity: Entity) { () } }
+impl<T, R, S, L> RemoveHooks<S, L> for (Column<T>, R)
+    where S: Get<T>, L: Dispatch<OnRemove<T>, S>, S: Columns, S: Unlinks<S>, R: RemoveHooks<S, L> {
+    fn removing(app: &mut App<S, L>, entity: Entity) {
+        if(<S as Get<T>>::has(&app.world.columns, entity)) { app.emit<OnRemove<T>>(&OnRemove { entities: [entity], none: [] }) };
+        <R as RemoveHooks<S, L>>::removing(app, entity)
+    }
+}
+impl<T, R, S, L> RemoveHooks<S, L> for (Resource<T>, R) where R: RemoveHooks<S, L> {
+    fn removing(app: &mut App<S, L>, entity: Entity) { <R as RemoveHooks<S, L>>::removing(app, entity) }
+}
+
 pub struct App<S, L> { pub world: World<S>, systems: L }
 
 impl<S, L> App<S, L> {
@@ -1765,6 +1804,39 @@ impl<S, L> App<S, L> {
     pub fn build(app: Self) -> Self { app }
 
     // Run every system registered under what is emitted, then do what they asked.
+    // The world's structural operations, with the hooks they fire.
+    pub fn spawn_bundle<B>(app: &mut Self, bundle: B) -> Entity where B: Bundle<S>, B: Hooked<S, L> {
+        let entity = app.world.spawn_bundle(bundle);
+        <B as Hooked<S, L>>::added(app, [entity]);
+        entity
+    }
+    pub fn spawn_batch<B>(app: &mut Self, bundles: [B]) -> [Entity] where B: Bundle<S>, B: Hooked<S, L> {
+        let made = app.world.spawn_batch(bundles);
+        <B as Hooked<S, L>>::added(app, clone(&made));
+        made
+    }
+    pub fn insert<T>(app: &mut Self, entity: Entity, value: T) -> Option<T>
+        where S: Get<T>, T: EvictOne<S>, T: BringsOne<S>, T: Use<[0, *]>, S: Columns, S: Unlinks<S>,
+              L: Dispatch<OnAdd<T>, S>, L: Dispatch<OnInsert<T>, S>, L: Dispatch<OnReplace<T>, S> {
+        let had = <S as Get<T>>::has(&app.world.columns, entity);
+        if(had) { app.emit<OnReplace<T>>(&OnReplace { entities: [entity], none: [] }) };
+        let old = app.world.insert(entity, value);
+        if(not(had)) { app.emit<OnAdd<T>>(&OnAdd { entities: [entity], none: [] }) };
+        app.emit<OnInsert<T>>(&OnInsert { entities: [entity], none: [] });
+        old
+    }
+    pub fn remove<T>(app: &mut Self, entity: Entity) -> Option<T> where S: Get<T>, S: Columns, S: Unlinks<S>, L: Dispatch<OnRemove<T>, S> {
+        if(<S as Get<T>>::has(&app.world.columns, entity)) { app.emit<OnRemove<T>>(&OnRemove { entities: [entity], none: [] }) };
+        app.world.remove<T>(entity)
+    }
+    pub fn despawn(app: &mut Self, entity: Entity) -> Bool where S: Columns, S: Unlinks<S>, S: RemoveHooks<S, L> {
+        if(alive(&app.world, entity)) {
+            <S as RemoveHooks<S, L>>::removing(app, entity);
+            despawn(&mut app.world, entity);
+            true
+        } else { false }
+    }
+
     pub fn emit<E>(app: &mut Self, event: &E) where L: Dispatch<E, S>, S: Columns, S: Unlinks<S> {
         let mut commands = Commands { queue: [], next: len_at(&app.world.generations), made: 0 };
         <L as Dispatch<E, S>>::dispatch(&mut app.systems, event, &mut app.world, &mut commands);
