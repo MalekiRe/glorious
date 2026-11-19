@@ -170,6 +170,10 @@ inductive Decision where
   or of the function it is of, its receiver, a name, borrowed: given as the
   function takes it, borrowed (`&mut` where `some true`) or whole. -/
   | receiver (call : Nat) (fn : Option String) (borrow : Option Bool)
+  /-- The field read `id` (or borrowed, `&mut` where `uniq`) is not one the
+  value shows, and the value's type implements `Deref`: it is of what
+  `Deref::deref` (`DerefMut::deref_mut`) gives (`Mut<T>` as its `T`). -/
+  | derefField (id : Nat) (uniq : Bool)
   deriving Inhabited
 
 /-- What the checker says where it stops: why, and what it found to decide,
@@ -191,7 +195,7 @@ otherwise: a match found to be of a reference, or a dot call's function or
 receiver found? -/
 def Said.passOn (s : Said) : Bool :=
   match s.decision with
-  | some (.refPats ..) | some (.receiver ..) => true
+  | some (.refPats ..) | some (.receiver ..) | some (.derefField ..) => true
   | _ => false
 
 /-- What the checker tells the elaborator about the blocks of a program, each

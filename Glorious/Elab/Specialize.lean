@@ -593,6 +593,71 @@ where
       | none => {}
     Syntax.promoteClause values (Syntax.nameBorrowsClause (Syntax.receiverClause taken (refs.map (·, 3)) values marked))
 
+/-- Is `id` the identity of a field read or borrowed in an expression? -/
+partial def hasField (id : Nat) : Expr → Bool
+  | .fieldOf i e _ => i == id || hasField id e
+  | .refField i _ _ _ _ => i == id
+  | e => e.children.any (hasField id)
+
+/-- The name the field borrow `id` is of, in an expression outside any
+block in it. -/
+partial def refFieldOf (id : Nat) : Expr → Option String
+  | .refField i _ x _ _ => if i == id then some x else none
+  | e => e.direct.findSome? (refFieldOf id)
+
+/-- A program with the field `id` read (or borrowed, `&mut` where `uniq`) of
+what `Deref::deref` (`DerefMut::deref_mut`) gives of the name it was of:
+`m.0` as `Deref::deref(&m).0`. A field borrowed is of a reference named
+before the statement; one assigned, after its value is computed, so that
+reading the value does not meet the borrow. -/
+partial def derefItems (id : Nat) (uniq : Bool) : List Item → List Item :=
+  List.map go
+where
+  go : Item → Item
+    | .fn name ps annots ret clauses => .fn name ps annots ret (clauses.map (clause annots))
+    | .impl ps tr head args context methods => .impl ps tr head args context (methods.map go)
+    | .traitInfo n supers defaults params assocs => .traitInfo n supers (defaults.map go) params assocs
+    | .module name (some body) => .module name (some (body.map go))
+    | .pub parent item => .pub parent (go item)
+    | item => item
+  clause (annots : List (Option TypeExpr)) (c : Clause) : Clause :=
+    let .mk pats body := c
+    if !(body.flatMap Stmt.exprs).any (hasField id) then c else
+    let values := (pats.zip annots).filterMap fun
+      | (.var _, some (.ref _ _ _)) => none
+      | (.var x, some _) => some x
+      | _ => none
+    let refs := (pats.zip annots).filterMap fun
+      | (.var x, some (.ref _ _ _)) => some x
+      | _ => none
+    let fn := if uniq then "deref_mut" else "deref"
+    -- (Its own identity, clear of every token's: the checker may decide
+    -- how the name is given to it.)
+    let given := fun (x : String) =>
+      Expr.call (900000000000 + id) (.name none fn) [.call 0 (.name none Syntax.receiverMark) [.name none x]]
+    let held := s!"%deref{id}"
+    let toHeld : Rewrite := { onExpr := fun _ => fun
+      | .refField i u _ path _ => if i == id then some (.refField i u held path false) else none
+      | _ => none }
+    let onE : Syntax.Go → Expr → Option Expr := fun _ e => match e with
+      | .fieldOf i (.name none x) f => if i == id then some (.fieldOf i (given x) f) else none
+      | _ => none
+    let onS : Syntax.Go → List Stmt → Option (List Stmt) := fun go ss => match ss with
+      | s :: rest => (here go given held toHeld s).map (· ++ go.stmts rest)
+      | [] => none
+    let marked := ({ onExpr := onE, onStmts := onS } : Rewrite).clause c
+    let taken : Std.HashMap String Bool := ({} : Std.HashMap String Bool).insert fn uniq
+    Syntax.promoteClause values (Syntax.nameBorrowsClause (Syntax.receiverClause taken (refs.map (·, 3)) values marked))
+  here (go : Syntax.Go) (given : String → Expr) (held : String) (toHeld : Rewrite) : Stmt → Option (List Stmt)
+    | .located l c s => (here go given held toHeld s).map (·.map (.located l c))
+    | .assign (.deref (.refField i u x path _)) v =>
+      if i != id then none else
+      let value := held ++ "v"
+      some [.let_ (.var value) (go.ex v), .let_ (.var held) (given x),
+        .assign (.deref (.refField i u held path false)) (.name none value)]
+    | s => (s.exprs.findSome? (refFieldOf id)).map fun x =>
+      .let_ (.var held) (given x) :: (toHeld.stmts [s]).map go.st
+
 /-- A program with what the checker decided written in, in the order it
 decided it; and whether each changed something. -/
 def decidedItems (decided : List Decision) (items : List Item) : List Item :=
@@ -603,7 +668,8 @@ def decidedItems (decided : List Decision) (items : List Item) : List Item :=
     | .refPats id clauses => Rewrite.items (items := items) { onExpr := fun _ => fun
         | .closure i _ => if i == id then some (.closure i clauses) else none
         | _ => none }
-    | .receiver call fn borrow => receiverItems call fn borrow items) items
+    | .receiver call fn borrow => receiverItems call fn borrow items
+    | .derefField id uniq => derefItems id uniq items) items
 
 /-- A program with what the checker decided of it written in: `Decision`s
 first, then the function of each dot call it chose by the value's type,

@@ -805,6 +805,12 @@ fn say(value) { host_write(show(value)) }
 // specification's §3.1): of what is copied as it is read, the copy; of a
 // tuple, a `Result` or an array, each part's.
 trait Clone { fn clone(value: &Self) -> Self }
+
+// What a value stands for where a field is read of it that it does not show:
+// the field is of what `deref` gives, and of what `deref_mut` gives where it
+// is written or borrowed `&mut` (a `Mut<T>` as its `T`).
+trait Deref { type Target; fn deref(value: &Self) -> &Target }
+trait DerefMut { type Target; fn deref_mut(value: &mut Self) -> &mut Target }
 impl Clone for Int { fn clone(v) { *v } }
 impl Clone for Str { fn clone(v) { *v } }
 impl Clone for char { fn clone(v) { *v } }

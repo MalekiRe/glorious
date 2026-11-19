@@ -836,6 +836,10 @@ impl<'a, T> Mut<'a, T> {
     pub fn get(m: &Self) -> &T { &*m.value }
     pub fn get_mut(m: &mut Self) -> &mut T { *m.tick = m.now; &mut *m.value }
 }
+// A field of the component is read and written as one of a `Mut` (`hull.0`);
+// written or borrowed `&mut`, the component is marked changed.
+impl<'a, T> Deref for Mut<'a, T> { type Target = T; fn deref(m) { &*m.value } }
+impl<'a, T> DerefMut for Mut<'a, T> { type Target = T; fn deref_mut(m) { *m.tick = m.now; &mut *m.value } }
 fn mut_at<'a, A>(column: &'a mut Column<A>, at: Int) -> Mut<'a, A> {
     Mut { value: &mut column.dense[at], tick: &mut column.changed[at], now: column.now }
 }

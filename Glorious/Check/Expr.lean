@@ -86,6 +86,37 @@ def rankParams (t : Ty) : M Unit := do
     unless lives.isEmpty do
       modify fun s => { s with ranked := (cap, lives.eraseDups.map (·, "'_")) :: s.ranked }
 
+
+/-- Is the field `step` of a value of type `t` (or of what a reference of the
+type points to) one the value does not show here, its type implementing
+`Deref`? It is then of what `deref` gives. -/
+def derefsFor (t : Ty) (step : String) : M Bool := do
+  let t ← match ← find t with
+    | .ref _ inner _ => find inner
+    | t => pure t
+  let .con n _ := t | return false
+  if (← implsOfHead "Deref" n).isEmpty then return false
+  let saved ← get
+  let shown ← try
+      match ← fieldIndex t step with
+      | some idx => pure (← fieldType t idx).isSome
+      | none => pure true
+    catch _ => pure false
+  set saved
+  pure !shown
+
+/-- The field `step` of `x`, read (borrowed `&mut` where `uniq`) at `id`:
+where it is one `x` does not show and `x`'s type implements `Deref`, the
+program is read again with it of what `deref` (`deref_mut`) gives. -/
+def derefAt (scope : Scope) (id : Nat) (uniq : Bool) (x step : String) : M Unit := do
+  let t := match scope.lookup x with
+    | some (.val t _) => some t
+    | some (.cell t _) => some t
+    | _ => none
+  if let some t := t then
+    if ← derefsFor t step then
+      throwThe Elab.Said { msg := s!"`{x}.{step}` is a field of what `{x}` stands for (`Deref`)", decision := some (.derefField id uniq) }
+
 mutual
 
 partial def inferExpr (scope : Scope) (amb : Row) : Expr → M Ty
@@ -159,7 +190,8 @@ partial def inferExpr (scope : Scope) (amb : Row) : Expr → M Ty
       pushAnon e t
       ts := ts.push t
     pure (.tuple ts.toList)
-  | .refField id uniq x path star =>
+  | .refField id uniq x path star => do
+    derefAt scope id uniq x (path.headD "")
     match scope.lookup x with
     | some (.cell t brand) => do
       -- A variable that holds a reference: the field is of what that points
@@ -193,6 +225,7 @@ partial def inferExpr (scope : Scope) (amb : Row) : Expr → M Ty
       throw s!"`{x}` is not a mutable variable or a reference, so no field of it can be borrowed"
     | none => throw s!"unknown name `{x}`"
   | .fieldOf id e name => do
+    if let .name none x := e then derefAt scope id false x name
     if let some field ← inferFieldOfPlace scope (.fieldOf id e name) then return field
     let subject ← inferExpr scope amb e
     -- A field of what a reference is to, the reference given by what is
@@ -203,10 +236,20 @@ partial def inferExpr (scope : Scope) (amb : Row) : Expr → M Ty
         | some n => pure (some n)
         | none => fieldIndex inner name
       if let some idx := idx then
-        if let some t ← fieldType inner idx then
+        match ← fieldType inner idx with
+        | some t =>
           modify fun s => { s with fieldReads := s.fieldReads.push (id, idx), derefReads := s.derefReads.push id }
           mustDup t "reading through a reference copies the value (`replace` takes it out instead)"
           return t
+        | none =>
+          -- (Of a reference to what is not known yet, `deref(&m).0`: the
+          -- field is settled once it is.)
+          if name.toNat?.isSome then
+            let t ← freshTy
+            modify fun s => { s with fieldReads := s.fieldReads.push (id, idx), derefReads := s.derefReads.push id,
+                                     projections := s.projections.push (inner, idx, t, s.pos, id) }
+            mustDup t "reading through a reference copies the value (`replace` takes it out instead)"
+            return t
     -- (Of which name it is a part, where it is one of a name's.)
     modify fun s => { s with aparts := s.aparts.push (subject, s.pos, (namedVal scope e).map (·.1)) }
     -- A field by number of a value whose type is not known yet is settled

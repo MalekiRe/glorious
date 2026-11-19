@@ -50,7 +50,7 @@ struct Update
 fn repair(pilots: &mut Query<(&Skill, To<Piloting, &mut Hull>)>) {
     pilots.for_each(fn((skill, ship)) {
         match(ship) {
-            Some(mut hull) => hull.get_mut().0 = (hull.get().0 + skill.0).min(100),
+            Some(mut hull) => hull.0 = (hull.0 + skill.0).min(100),
             None => ()
         }
     })
@@ -58,14 +58,11 @@ fn repair(pilots: &mut Query<(&Skill, To<Piloting, &mut Hull>)>) {
 
 // Each docked ship unloads what it carries into its station's hold.
 fn unload(ships: &mut Query<(&mut Cargo, To<DockedAt, &mut Hold>)>) {
-    ships.for_each(fn(got: (Mut<Cargo>, Option<Mut<Hold>>)) {
-        let (cargo, station) = got;
-        let mut cargo = cargo;
+    ships.for_each(fn((mut cargo, station)) {
         match(station) {
-            Some(hold) =>
-                let mut hold = hold;
-                hold.get_mut().0 = hold.get().0 + cargo.get().0;
-                cargo.get_mut().0 = 0,
+            Some(mut hold) =>
+                hold.0 = hold.0 + cargo.0;
+                cargo.0 = 0,
             None => ()
         }
     })

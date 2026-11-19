@@ -4651,7 +4651,10 @@ fn main() -> Int { <(A,) as Go>::go() }",
     [], "error: the program has no `main` function"⟩,
   -- `mut name` in a pattern: a parameter's, a `let`'s, a callable's, an arm's.
   ⟨"fn bump(mut x: Int) -> Int { x = x + 1; x }\nfn each(xs: [(Int, Int)], f: fn((Int, Int)) -> ()) { let mut i = 0; while({ i < len_at(&xs) }) { f(xs[i]); i = i + 1 } }\nfn main() -> Int {\n    let (mut a, b) = (1, 2);\n    a = a + b;\n    let mut s = 0;\n    each([(1, 2), (3, 4)], fn((mut p, q)) { p = p * q; s = s + p });\n    let n = match(Some(3)) { Some(mut n) => n = n * 10; n, None => 0 };\n    bump(a) + s + n\n}",
-    [], "48"⟩
+    [], "48"⟩,
+  -- A field a value does not show, of a type implementing `Deref`: read of what `deref` gives, written through what `deref_mut` gives, after the value is computed.
+  ⟨"mod m {\n    pub struct W<T> { value: T, n: Int }\n    impl<T> W<T> { pub fn new(v: T) -> W<T> { W { value: v, n: 0 } } pub fn n(w: &Self) -> Int { w.n } }\n    impl<T> Deref for W<T> { type Target = T; fn deref(w) { &w.value } }\n    impl<T> DerefMut for W<T> { type Target = T; fn deref_mut(w) { w.n = w.n + 1; &mut w.value } }\n}\nuse m::W;\nstruct P(Int, Int);\nfn main() -> Int {\n    let mut w = W::new(P(1, 2));\n    let a = w.0;\n    w.1 = a + 10;\n    w.1 * 10 + W::n(&w)\n}",
+    [], "111"⟩
 ]
 
 /-- Programs that call foreign functions and read and write memory at an

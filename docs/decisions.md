@@ -5545,6 +5545,24 @@ Shares<<T as OneOf>::Groups>`, is found as written.
 
 Upstream's one-of groups also move the entity's table; covey has no tables.
 
+## A field a value does not show is of what `Deref` gives
+
+`m.0` where `m` is a `Mut<T>` (or any type implementing the Prelude's
+`Deref`) and the field is not one `m` shows there, private or missing: the
+checker decides (`Decision.derefField`) and the program is read again with
+`deref(&m).0`; written or borrowed `&mut`, `deref_mut(&mut m)`, so that
+covey's `Mut` marks the component changed only where it is written, as
+upstream's `DerefMut` does. An assignment computes its value before the
+`deref_mut` borrow is taken (named `%deref<id>v`, then `%deref<id>`), so the
+value may read the same field. Limits: only a field of a name (`m.0`,
+`m.0 = v`, `&mut m.0`), one step of deref, and the traits' methods are the
+global `deref` and `deref_mut`, so a free function of either name clashes.
+Each such field is one more decision, so one more reading of its group:
+covey's simulation edit loop went from about 0.46 s to 0.48 s wall.
+
+`mut name` in a pattern is the parser's alone: a plain name, and `let mut
+name = name` where what the pattern is of starts (`Syntax.unmutItems`).
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by
