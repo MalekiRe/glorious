@@ -419,12 +419,17 @@ def finish : M Elab.Blocks := fun st => Trace.timed "check: finish" fun _ => (sh
       | _ => pure ()
     let s ← get
     let mut links : List (Nat × Nat) := []
+    -- (The blocks given to run in an environment, by the root of what they
+    -- capture: found once, not for each block that was not run.)
+    let mut byRoot : Std.HashMap Nat (List Nat) := {}
+    for (owner, c) in s.blockCaps do
+      if owner != 0 && s.envBlocks.contains owner then
+        let root ← findCap c
+        let had := byRoot.getD root []
+        unless had.contains owner do byRoot := byRoot.insert root (owner :: had)
     for (id, cap) in s.unrun do
       let root ← findCap cap
-      let mut owners : List Nat := []
-      for (owner, c) in s.blockCaps do
-        if owner != id && owner != 0 && s.envBlocks.contains owner && (← findCap c) == root && !owners.contains owner then
-          owners := owner :: owners
+      let owners := (byRoot.getD root []).filter (· != id)
       if let [owner] := owners then links := (id, owner) :: links
     -- A block taken to be given one particular block, where in the end it
     -- may be given another, lets go of whatever it is given.
@@ -433,17 +438,22 @@ def finish : M Elab.Blocks := fun st => Trace.timed "check: finish" fun _ => (sh
       unless links.contains (id, owner) do unlinked := unlinked.push (input, why)
     -- (What such a block lets go of, nothing destroys.)
     checkDrops unlinked (callables := true)
+    -- (Each trait's functions and each function's arity, the first of each
+    -- name as a lookup finds it, found once.)
+    let traitsBy := Elab.firstOf s.traits
+    let arityBy : Std.HashMap String Nat := s.methods.foldl (fun m (n, sig) =>
+      if m.contains n then m else m.insert n sig.params.length) {}
     let implEs := s.impls.toList.map fun im =>
-      let names := (s.traits.lookup (Syntax.traitBase im.trait)).getD []
+      let names := traitsBy.getD (Syntax.traitBase im.trait) []
       (⟨im.dictFn, im.context.length + im.extra.length, names.map fun m =>
         (Syntax.implFnName im.trait im.head m,
           if im.trait == Syntax.destroyTrait then 1
-          else ((s.methods.lookup m).map (·.params.length)).getD 0)⟩ :
+          else arityBy.getD m 0)⟩ :
         Elab.ImplE)
     -- How each type is destroyed, for the elaborator to write the function:
     -- its own `Drop` first, if it has one, and then for each constructor
     -- which fields are destroyed, each by how its type is.
-    let mut destroys : List Elab.Destroy := []
+    let mut destroys : Array Elab.Destroy := #[]
     for im in s.impls do
       if im.trait == Syntax.destroyTrait then
         let givens : Traits.Givens := im.context
@@ -471,14 +481,14 @@ def finish : M Elab.Blocks := fun st => Trace.timed "check: finish" fun _ => (sh
                 parts := parts ++ [if plain then none
                   else (Traits.solveIx s.kimpls givens 1000 Syntax.destroyTrait (sty f)).map (toDictE s.impls)]
               ctors := ctors ++ [(c, parts)]
-        destroys := destroys ++ [⟨im.head, im.context.length, hook, isArray, ctors⟩]
+        destroys := destroys.push ⟨im.head, im.context.length, hook, isArray, ctors⟩
     let traitInfo : Elab.TraitInfo :=
       { dicts := s.dictTable.toList
         methods := s.methodCalls.toList
         bounded := s.fnBounds
         impls := implEs
         drops := s.dropSites.toList
-        destroys }
+        destroys := destroys.toList }
     pure { given := .ofList s.given.toList, links := Elab.firstOf links
            coercions := Elab.firstOf s.coercions.toList, traits := traitInfo.index
            fields := Elab.firstOf (s.fieldTable.toList.map fun (id, rest) => (id, rest))
