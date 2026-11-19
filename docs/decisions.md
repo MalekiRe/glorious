@@ -5683,7 +5683,12 @@ their own, was 1586, and 742 are not, was 782.
 ## Every function's signature is written
 
 A `fn` item writes the type of each parameter, and its result after `->`; no
-`->` is `()`. An implementation's function restates its trait's function at
+`->` is `()`. What it performs is written after its result, `/ {Log | e}`; none
+written is nothing (an implementation's function performs what its trait's
+says). A function that passes on what a callable it is given performs says
+so with a row parameter: `fn each<e: EffectRow>(f: fn(Int) -> () / {| e}) / {| e}`,
+and one generic in a trait that leaves its effects to implementations names
+them, `/ {| <R as Read>::Effects}`. An implementation's function restates its trait's function at
 the implementation's types. A function written as clauses, `fn f { 0 => 1 }`,
 has nowhere to write its types, and is refused: `fn f(x: Int) -> Int { match(x)
 { 0 => 1 } }`. Callables written in place, `fn(x) { .. }` and blocks, are not

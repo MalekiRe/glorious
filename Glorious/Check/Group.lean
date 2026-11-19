@@ -343,9 +343,12 @@ def checkGroup (decls : List FnDecl) : M Unit := do
               unless lives.isEmpty do
                 modify fun s => { s with ranked := (cap, lives.eraseDups.map (·, "'_")) :: s.ranked }
         -- The result may say what the function performs: that, and no more.
+        -- What it performs is written, as what it takes and gives is: nothing
+        -- written is nothing. (An implementation's function performs what
+        -- its trait's says.)
         let (retExpr, declared) := match d.ret with
           | some (.performs t effects) => (some t, some effects)
-          | other => (other, none)
+          | other => (other, if d.impl.isNone then some [] else none)
         let ret ← match retExpr with
           | some t => some <$> resolveType rigid false t
           | none => pure none

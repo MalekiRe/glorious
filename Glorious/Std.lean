@@ -276,7 +276,7 @@ pub fn zip<T, U, V, W>(a: T, b: U) -> [(V, W)] where T: Len, U: Len, T: Index, U
 
 // The place of the first element `wanted` says yes to.
 pub fn position<T, U, V, W, e: EffectRow>(a: T, wanted: fn(U) -> Result<V, W> / {| e}) -> Option<Int> / {| e} where T: Len, T: Index { position_from(a, wanted, 0) }
-fn position_from<T, U, V, W, e: EffectRow>(a: T, wanted: fn(U) -> Result<V, W> / {| e}, i: Int) -> Option<Int> where T: Len, T: Index {
+fn position_from<T, U, V, W, e: EffectRow>(a: T, wanted: fn(U) -> Result<V, W> / {| e}, i: Int) -> Option<Int> / {| e} where T: Len, T: Index {
     if(i < len(a)) {
         if(wanted(a[i])) { Some(i) } else { tail position_from(a, wanted, i + 1) }
     } else { None }
@@ -475,7 +475,7 @@ impl<T> Vec<T> {
         let all = sort(replace(items, []));
         unsafe { restore_at(items, all) };
     }
-    pub fn sort_by(value: &mut Self, before: fn(T, T) -> Bool) {
+    pub fn sort_by<e: EffectRow>(value: &mut Self, before: fn(T, T) -> Bool / {| e}) / {| e} {
         let items = &mut value.items;
         let all = sort_by(replace(items, []), before);
         unsafe { restore_at(items, all) };
@@ -557,7 +557,7 @@ impl<T> Vec<T> {
         else { let mut i = n; while({ i < length }) { push_at(&mut value.items, fill); i = i + 1 } }
     }
     // Those for which the test holds, kept in order; the rest let go.
-    pub fn retain(value: &mut Self, keep: for<'a> fn(&'a T) -> Bool) {
+    pub fn retain<e: EffectRow>(value: &mut Self, keep: for<'a> fn(&'a T) -> Bool / {| e}) / {| e} {
         let mut all = turned(replace(&mut value.items, []), []);
         let mut kept = [];
         loop({
@@ -645,7 +645,7 @@ pub fn char_at(text: Str, i: Int) -> Option<char> {
     match(text) { StrEnd => None, StrChar(c, rest) => if(i == 0) { Some(c) } else { tail char_at(rest, i - 1) } }
 }
 
-pub fn map<e: EffectRow>(text: Str, f: fn(char) -> char / {| e}) -> Str {
+pub fn map<e: EffectRow>(text: Str, f: fn(char) -> char / {| e}) -> Str / {| e} {
     match(text) { StrEnd => "", StrChar(c, rest) => StrChar(f(c), map(rest, f)) }
 }
 pub fn to_upper(text: Str) -> Str { map(text, std::char::to_upper) }
@@ -1296,22 +1296,22 @@ pub fn run_host<T, e: EffectRow>(main: fn() -> T / {Console, FileRead, FileWrite
 }
 
 // A text on standard output, and the same with a line's end.
-pub fn print(text: Str) { write_stdout(utf8(text)); () }
-pub fn println(text: Str) { print(text ++ "\n") }
-pub fn eprintln(text: Str) { write_stderr(utf8(text ++ "\n")); () }
+pub fn print(text: Str) / {Console} { write_stdout(utf8(text)); () }
+pub fn println(text: Str) / {Console} { print(text ++ "\n") }
+pub fn eprintln(text: Str) / {Console} { write_stderr(utf8(text ++ "\n")); () }
 
 // A file as text, if it is UTF-8.
-pub fn read_text(path: Str) -> Result<Str, IoError> {
+pub fn read_text(path: Str) -> Result<Str, IoError> / {FileRead} {
     match(read_file(path)) {
         Ok(bytes) => match(from_utf8(bytes)) { Some(text) => Ok(text), None => Err(IoError { code: 84 }) },
         Err(e) => Err(e)
     }
 }
-pub fn write_text(path: Str, text: Str) -> Result<(), IoError> { write_file(path, utf8(text)) }
+pub fn write_text(path: Str, text: Str) -> Result<(), IoError> / {FileWrite} { write_file(path, utf8(text)) }
 
 // The next line of standard input without its end, or nothing at the end.
-pub fn read_line() -> Option<Str> { line_from([], false) }
-fn line_from(line: [u8], any: Bool) -> Option<Str> {
+pub fn read_line() -> Option<Str> / {Console} { line_from([], false) }
+fn line_from(line: [u8], any: Bool) -> Option<Str> / {Console} {
     match(read_stdin(1)) {
         Err(_) => None,
         Ok(bytes) =>
@@ -1489,7 +1489,7 @@ impl<T> Iterator for IntoIter<T> {
 }
 
 // Every value, folded into one.
-pub fn fold<I: Iterator, A>(it: &mut I, acc: A, f: fn(A, I::Item) -> A) -> A {
+pub fn fold<I: Iterator, A, e: EffectRow>(it: &mut I, acc: A, f: fn(A, I::Item) -> A / {| e}) -> A / {| e} {
     match(next(it)) {
         Some(x) => tail fold(it, f(acc, x), f),
         None => acc
@@ -1497,7 +1497,7 @@ pub fn fold<I: Iterator, A>(it: &mut I, acc: A, f: fn(A, I::Item) -> A) -> A {
 }
 
 // Something done with every value.
-pub fn for_each<I: Iterator>(it: &mut I, f: fn(I::Item) -> ()) {
+pub fn for_each<I: Iterator, e: EffectRow>(it: &mut I, f: fn(I::Item) -> () / {| e}) / {| e} {
     match(next(it)) {
         Some(x) => f(x); tail for_each(it, f),
         None => ()
@@ -1523,8 +1523,8 @@ fn collect_onto<I: Iterator>(it: &mut I, out: [I::Item]) -> [I::Item] {
 }
 
 // What a function makes of each value, as an array.
-pub fn map_collect<I: Iterator, B>(it: &mut I, f: fn(I::Item) -> B) -> [B] { map_onto(it, f, []) }
-fn map_onto<I: Iterator, B>(it: &mut I, f: fn(I::Item) -> B, out: [B]) -> [B] {
+pub fn map_collect<I: Iterator, B, e: EffectRow>(it: &mut I, f: fn(I::Item) -> B / {| e}) -> [B] / {| e} { map_onto(it, f, []) }
+fn map_onto<I: Iterator, B, e: EffectRow>(it: &mut I, f: fn(I::Item) -> B / {| e}, out: [B]) -> [B] / {| e} {
     match(next(it)) {
         Some(x) => tail map_onto(it, f, push(out, f(x))),
         None => out
@@ -1651,7 +1651,7 @@ pub fn chain<I: Iterator, J: Iterator<Item = I::Item>>(a: I, b: J) -> Chain<I, J
 }
 
 // The first value a test passes, if one does; those before it are let go.
-pub fn find<I: Iterator>(it: &mut I, wanted: for<'a> fn(&'a I::Item) -> Bool) -> Option<I::Item> {
+pub fn find<I: Iterator, e: EffectRow>(it: &mut I, wanted: for<'a> fn(&'a I::Item) -> Bool / {| e}) -> Option<I::Item> / {| e} {
     match(next(it)) {
         Some(x) => if(wanted(&x)) { Some(x) } else { tail find(it, wanted) },
         None => None
@@ -1660,7 +1660,7 @@ pub fn find<I: Iterator>(it: &mut I, wanted: for<'a> fn(&'a I::Item) -> Bool) ->
 
 // The first thing a function makes of a value, where it makes anything; the
 // values before that are let go.
-pub fn find_map<I: Iterator, B>(it: &mut I, f: fn(I::Item) -> Option<B>) -> Option<B> {
+pub fn find_map<I: Iterator, B, e: EffectRow>(it: &mut I, f: fn(I::Item) -> Option<B> / {| e}) -> Option<B> / {| e} {
     match(next(it)) {
         Some(x) => match(f(x)) {
             Some(found) => Some(found),
@@ -1684,13 +1684,13 @@ pub fn product<I: Iterator<Item = Int>>(it: &mut I) -> Int { fold(it, 1, { (a, x
 
 // Whether some value left passes a test, and whether every one does: each
 // stops at the first that settles it.
-pub fn any<I: Iterator>(it: &mut I, test: fn(I::Item) -> Bool) -> Bool {
+pub fn any<I: Iterator, e: EffectRow>(it: &mut I, test: fn(I::Item) -> Bool / {| e}) -> Bool / {| e} {
     match(next(it)) {
         Some(x) => if(test(x)) { true } else { tail any(it, test) },
         None => false
     }
 }
-pub fn all<I: Iterator>(it: &mut I, test: fn(I::Item) -> Bool) -> Bool {
+pub fn all<I: Iterator, e: EffectRow>(it: &mut I, test: fn(I::Item) -> Bool / {| e}) -> Bool / {| e} {
     match(next(it)) {
         Some(x) => if(test(x)) { tail all(it, test) } else { false },
         None => true
@@ -1698,8 +1698,8 @@ pub fn all<I: Iterator>(it: &mut I, test: fn(I::Item) -> Bool) -> Bool {
 }
 
 // Where the first value left that passes a test is, counting from here.
-pub fn position<I: Iterator>(it: &mut I, test: fn(I::Item) -> Bool) -> Option<Int> { position_from(it, test, 0) }
-fn position_from<I: Iterator>(it: &mut I, test: fn(I::Item) -> Bool, at: Int) -> Option<Int> {
+pub fn position<I: Iterator, e: EffectRow>(it: &mut I, test: fn(I::Item) -> Bool / {| e}) -> Option<Int> / {| e} { position_from(it, test, 0) }
+fn position_from<I: Iterator, e: EffectRow>(it: &mut I, test: fn(I::Item) -> Bool / {| e}, at: Int) -> Option<Int> / {| e} {
     match(next(it)) {
         Some(x) => if(test(x)) { Some(at) } else { tail position_from(it, test, at + 1) },
         None => None
@@ -2857,7 +2857,7 @@ fn places_of<Tag>(flags: &[Bool], i: Int, out: [Id<Tag>]) -> [Id<Tag>] {
 
 // One set changed by another, a place at a time: `keep(mine, theirs)` is
 // whether a place is in afterwards. How many places changed.
-fn merged(mine: [Bool], theirs: &[Bool], i: Int, changed: Int, keep: fn(Bool, Bool) -> Bool) -> ([Bool], Int) {
+fn merged<e: EffectRow>(mine: [Bool], theirs: &[Bool], i: Int, changed: Int, keep: fn(Bool, Bool) -> Bool / {| e}) -> ([Bool], Int) / {| e} {
     if(i >= len(mine) and { i >= len_at(theirs) }) { (mine, changed) } else {
         let was = flag_at(&mine, i);
         let now = keep(was, flag_at(theirs, i));
@@ -2883,7 +2883,7 @@ impl<Tag> BitSet<Tag> {
         if(flag_at(&s.flags, int(id.0))) { s.flags = with_flag(s.flags, int(id.0), false); s.count = s.count - 1; true } else { false }
     }
     pub fn clear(s: &mut Self) { s.flags = []; s.count = 0; }
-    fn merge(s: &mut Self, other: &Self, keep: fn(Bool, Bool) -> Bool) -> Bool {
+    fn merge<e: EffectRow>(s: &mut Self, other: &Self, keep: fn(Bool, Bool) -> Bool / {| e}) -> Bool / {| e} {
         match(merged(s.flags, &other.flags, 0, 0, keep)) {
             (flags, changed) => s.count = counted(&flags, 0, 0); s.flags = flags; changed > 0
         }
@@ -4912,7 +4912,7 @@ impl<'a, K, V> Entry<'a, K, V> {
     pub fn or_insert(e: Self, item: V) -> &'a mut V where K: Hash {
         match(e) { Occupied(v) => v, Vacant(m, k) => HashMap::insert_new(m, k, item) }
     }
-    pub fn or_insert_with(e: Self, make: fn() -> V) -> &'a mut V where K: Hash {
+    pub fn or_insert_with<e: EffectRow>(e: Self, make: fn() -> V / {| e}) -> &'a mut V / {| e} where K: Hash {
         match(e) { Occupied(v) => v, Vacant(m, k) => HashMap::insert_new(m, k, make()) }
     }
     pub fn or_insert_default(e: Self) -> &'a mut V where K: Hash, V: std::value::Default {

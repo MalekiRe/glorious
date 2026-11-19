@@ -250,11 +250,11 @@ fn loop<T, U, e: EffectRow>(body: fn() -> T / {LoopControl<U> | e}) -> U / {| e}
 // Leaving for a label with a value: out of a function, `return(v, @f)`, or
 // out of a scope, `break_at(v, @outer)`. A label is where to go; these are
 // functions like any other.
-fn return<T, L>(value: T, target: L) -> ! where L: Label<T> {
+fn return<T, L, e: EffectRow>(value: T, target: L) -> ! / {| e} where L: Label<T> {
     target(value)
 }
 
-fn break_at<T, L>(value: T, target: L) -> ! where L: Label<T> {
+fn break_at<T, L, e: EffectRow>(value: T, target: L) -> ! / {| e} where L: Label<T> {
     target(value)
 }
 
@@ -848,7 +848,7 @@ fn clone_onto<T: Clone>(a: &Array<T>, i: Int, out: Array<T>) -> Array<T> {
 // error made another first; leaving with an error unless a condition holds;
 // and of an option, what `Some` holds or else leaving with what a fallback
 // gives. (The library specification's §6. There is no `?`.)
-fn try<T, E, R, L>(value: Result<T, E>, target: L) -> T where L: Label<Result<R, E>> {
+fn try<T, E, R, L, e: EffectRow>(value: Result<T, E>, target: L) -> T / {| e} where L: Label<Result<R, E>> {
     match(value) { Ok(v) => v, Err(e) => target(Err(e)) }
 }
 fn try_map_error<T, E, D, R, L, e: EffectRow>(value: Result<T, E>, target: L, map_error: fn(E) -> D / {| e}) -> T / {| e} where L: Label<Result<R, D>> {
@@ -882,7 +882,7 @@ impl<T, E> Result<T, E> {
     fn or_else<V, e: EffectRow>(value: Self, f: fn(E) -> Result<T, V> / {| e}) -> Result<T, V> / {| e} { match(value) { Ok(x) => Ok(x), Err(e) => f(e) } }
     fn ok_or<D>(value: Self, error: D) -> Result<T, D> { match(value) { Ok(x) => Ok(x), Err(_) => Err(error) } }
     fn ok(value: Self) -> Option<T> { match(value) { Ok(x) => Some(x), Err(_) => None } }
-    fn filter(value: Self, keep: for<'a> fn(&'a T) -> Bool) -> Result<T, ()> {
+    fn filter<e: EffectRow>(value: Self, keep: for<'a> fn(&'a T) -> Bool / {| e}) -> Result<T, ()> / {| e} {
         match(value) { Ok(x) => if(keep(&x)) { Ok(x) } else { Err(()) }, Err(_) => Err(()) }
     }
 }

@@ -179,7 +179,7 @@ def all : List (Nat × (Unit → Bool)) := [
   -- A reference kept in a declared type, or given by an effect, is of the
   -- region its lifetime says.
   (60, fun _ => borrowChecked "struct Holder<'a>(&'a Int)\n    fn get<'a>(h: Holder<'a>) -> &'a Int { match(h) { Holder(r) => r } }\n    fn main() -> Int { let mut x = 7; *get(Holder(&x)) }" == some true),
-  (61, fun _ => borrowChecked "effect Reader<'a> { ask() -> &'a Int }\n    fn use_it() -> Int { *ask() + 1 }\n    fn main() -> Int { let mut x = 41; handle use_it() { ask(k) => k(&x) } }" == some true),
+  (61, fun _ => borrowChecked "effect Reader<'a> { ask() -> &'a Int }\n    fn use_it<'a>() -> Int / {Reader<'a>} { *ask() + 1 }\n    fn main() -> Int { let mut x = 41; handle use_it() { ask(k) => k(&x) } }" == some true),
   -- What the region rules have no type for compiles as before, without that
   -- proof: a variable that holds something that uses the variable.
   (62, fun _ => borrowChecked "effect Yield { yield(Int) }\n    fn main() -> Int { let mut saved = None; handle (yield(1) + 1) { yield(v, k) => saved = Some(k); 0 };\n      match(replace(&mut saved, None)) { Some(k) => k(41), None => 0 } }" == some false),
