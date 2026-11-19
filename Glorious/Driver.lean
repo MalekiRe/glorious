@@ -191,6 +191,11 @@ def certifyWith (kept : List Typing.Cert) (items : List Syntax.Item) (p : Core.P
     | .ok (cert, true, made) => .ok (cert, true, made)
     | other => if memo.isEmpty then other else infer {}
 
+/-- Functions in a Core program from which, with no way kept that passed, the
+ways to certify it are all tried at once (covey's simulation has about 2000,
+a test program well under 100). -/
+def largeProgram : Nat := 400
+
 /-- Find a certificate for a program's Core and have the proved checker accept
 it: with the ownership rules and the region rules if the program can be shown
 to meet them, and otherwise with those of them it can, or as a typing only.
@@ -225,9 +230,13 @@ def certifyProgram (items : List Syntax.Item) (p : Core.Program)
   -- (The one that passed last time, or else the first; and if that does
   -- not pass, the others all at once, each on a thread of its own, the
   -- first of them in order that passes taken.)
+  -- (A large program with nothing kept to start with: all at once from
+  -- the start, where the first alone takes as long as the rest together.)
+  let large := first.isNone && p.fns.length ≥ largeProgram
   let start := first.getD 0
-  if let some (cert, made) := try_ start then return (cert, some start, made)
-  let others := (List.range attempts.length).filter (· != start)
+  if !large then
+    if let some (cert, made) := try_ start then return (cert, some start, made)
+  let others := (List.range attempts.length).filter (large || · != start)
   let tasks := others.map fun k => (k, Task.spawn fun _ => try_ k)
   if let some found := tasks.findSome? fun (k, t) => t.get.map fun (cert, made) => (cert, some k, made) then
     return found
