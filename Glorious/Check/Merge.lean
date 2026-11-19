@@ -46,7 +46,7 @@ def mergeArr {α : Type} (p a b : Array α) : Option (Array α) :=
   else none
 
 /-- Two segments grown from `p`: each piece changed by at most one of them. -/
-def mergeSeg {α : Type} (p a b : Seg α) : Option (Seg α) := do
+def mergeSeg {α : Type} (p a b : Seg α) (same : α → α → Bool := fun _ _ => false) : Option (Seg α) := do
   if samePtr a p then return b
   if samePtr b p then return a
   let mut out : Array (Array α) := #[]
@@ -56,21 +56,53 @@ def mergeSeg {α : Type} (p a b : Seg α) : Option (Seg α) := do
     let pp := p.pieces.getD i #[]
     if samePtr pb pp || pb.isEmpty then out := out.push pa
     else if samePtr pa pp || pa.isEmpty then out := out.push pb
-    else none
+    else
+      -- (Each entry changed by at most one of them.)
+      let mut piece : Array α := #[]
+      for k in [0:max pa.size pb.size] do
+        match pa[k]?, pb[k]?, pp[k]? with
+        | some x, some y, some z =>
+          if samePtr y z then piece := piece.push x
+          else if samePtr x z then piece := piece.push y
+          -- (Both made it the same: as for a variable both bound alike.)
+          else if same x y then piece := piece.push x
+          else none
+        | some x, none, _ => piece := piece.push x
+        | none, some y, _ => piece := piece.push y
+        | some _, some _, none => none
+        | none, none, _ => pure ()
+      out := out.push piece
   pure { base := p.base, pieces := out, count := max a.count b.count }
 
 /-- Two stores grown from `p`: segments by where they start, each changed by
 at most one of them, or with pieces changed by at most one; and what each
 began of its own. -/
-def mergeStore {α : Type} (p a b : Store α) : Option (Store α) := do
+def mergeStore {α : Type} (p a b : Store α) (same : α → α → Bool := fun _ _ => false) : Option (Store α) := do
   if samePtr a p then return b
   if samePtr b p then return a
-  let bases := ((a.segs ++ b.segs).toList.map (·.base)).eraseDups.mergeSort (· ≤ ·)
-  let find := fun (s : Store α) (base : Nat) => s.segs.find? (·.base == base)
-  let mut out : Array (Seg α) := #[]
-  for base in bases do
-    match find p base, find a base, find b base with
-    | some sp, some sa, some sb => out := out.push (← mergeSeg sp sa sb)
+  let ps := p.segs
+  let as := a.segs
+  let bs := b.segs
+  let mut out : Array (Seg α) := Array.mkEmpty (as.size + bs.size)
+  let mut i := 0
+  let mut j := 0
+  let mut k := 0
+  -- (In the order of where they start, all three: each segment of `p` is
+  -- in both, but one begun with nothing in it, which one that jumped left
+  -- for a segment of its own, as if it were still there.)
+  while i < as.size || j < bs.size do
+    let ba := (as[i]?.map (·.base)).getD (bs[j]?.map (·.base) |>.getD 0)
+    let bb := (bs[j]?.map (·.base)).getD ba
+    let base := min (if i < as.size then ba else bb) (if j < bs.size then bb else ba)
+    while k < ps.size && ((ps[k]?.map (·.base)).getD 0) < base do k := k + 1
+    let sp := (ps[k]?).filter (·.base == base)
+    let sa := (as[i]?).filter (·.base == base)
+    let sb := (bs[j]?).filter (·.base == base)
+    if sa.isSome then i := i + 1
+    if sb.isSome then j := j + 1
+    let empty := sp.filter (·.count == 0)
+    match sp, sa.orElse fun _ => empty, sb.orElse fun _ => empty with
+    | some sp, some sa, some sb => out := out.push (← mergeSeg sp sa sb same)
     | none, some sa, none => out := out.push sa
     | none, none, some sb => out := out.push sb
     | _, _, _ => none
@@ -78,21 +110,37 @@ def mergeStore {α : Type} (p a b : Store α) : Option (Store α) := do
   | some last => pure { older := out.pop, last }
   | none => pure {}
 
+/-- The entries of `b` in the buckets it changed of `p`'s, where it has as many
+buckets: a bucket not changed is the same object. -/
+def changedEntries {κ ν : Type} [BEq κ] [Hashable κ] (p b : Std.HashMap κ ν) : Option (List (κ × ν)) :=
+  let pb := p.inner.1.buckets
+  let bb := b.inner.1.buckets
+  if pb.size != bb.size then none else
+  some ((List.range bb.size).foldl (fun acc i =>
+    match bb[i]?, pb[i]? with
+    | some bl, some pl => if samePtr bl pl then acc else bl.toList.foldl (fun acc e => (e.1, e.2) :: acc) acc
+    | _, _ => acc) [])
+
 /-- Two maps grown from `p`: an entry changed by at most one of them. -/
 def mergeMap {κ ν : Type} [BEq κ] [Hashable κ] (p a b : Std.HashMap κ ν) : Option (Std.HashMap κ ν) :=
   if samePtr a p then some b else if samePtr b p then some a else
-  b.fold (init := some a) fun acc key val => acc.bind fun m =>
+  let step := fun (acc : Option (Std.HashMap κ ν)) (key : κ) (val : ν) => acc.bind fun m =>
     match p.get? key, a.get? key with
     | some pv, some av =>
       if samePtr val pv then some m else if samePtr av pv then some (m.insert key val) else none
     | some _, none => none
     | none, some av => if samePtr av val then some m else none
     | none, none => some (m.insert key val)
+  match changedEntries p b with
+  | some es => es.foldl (fun acc (k, v) => step acc k v) (some a)
+  | none => b.fold (init := some a) step
 
 /-- Two sets grown from `p`. -/
 def mergeSet {κ : Type} [BEq κ] [Hashable κ] (p a b : Std.HashSet κ) : Option (Std.HashSet κ) :=
   if samePtr a p then some b else if samePtr b p then some a else
-  some (b.fold (init := a) fun m x => m.insert x)
+  match changedEntries p.inner b.inner with
+  | some es => some (es.foldl (fun m (x, _) => m.insert x) a)
+  | none => some (b.fold (init := a) fun m x => m.insert x)
 
 /-- How a part of the state grown by two checks from one is put together. -/
 class Merge3 (α : Type) where
@@ -100,8 +148,32 @@ class Merge3 (α : Type) where
 
 instance {α : Type} : Merge3 (List α) := ⟨mergeList⟩
 instance {α : Type} : Merge3 (Array α) := ⟨mergeArr⟩
-instance {α : Type} : Merge3 (Store α) := ⟨mergeStore⟩
-instance {κ ν : Type} [BEq κ] [Hashable κ] : Merge3 (Std.HashMap κ ν) := ⟨mergeMap⟩
+instance (priority := low) {α : Type} : Merge3 (Store α) := ⟨fun p a b => mergeStore p a b⟩
+/-- (A type variable both bound to the same type, written alike with nothing
+unknown in it.) -/
+instance : Merge3 (Store (Option Ty)) := ⟨fun p a b => mergeStore p a b fun
+  | some x, some y => let s := showTy x; s == showTy y && !s.contains '?'
+  | _, _ => false⟩
+instance (priority := low) {κ ν : Type} [BEq κ] [Hashable κ] : Merge3 (Std.HashMap κ ν) := ⟨mergeMap⟩
+/-- (A row variable both bound to the same effects, with no row after.) -/
+instance : Merge3 (Store (Option Row)) := ⟨fun p a b => mergeStore p a b fun
+  | some x, some y => x.tail.isNone && y.tail.isNone && showEffs x.effs == showEffs y.effs && !(showEffs x.effs).contains '?'
+  | _, _ => false⟩
+/-- (A list under a key, grown by both: the two grown together.) -/
+instance {κ ν : Type} [BEq κ] [Hashable κ] : Merge3 (Std.HashMap κ (List ν)) where
+  merge3 p a b :=
+    if samePtr a p then some b else if samePtr b p then some a else
+    let step := fun (acc : Option (Std.HashMap κ (List ν))) (key : κ) (val : List ν) => acc.bind fun m =>
+      match p.get? key, a.get? key with
+      | some pv, some av =>
+        if samePtr val pv then some m else if samePtr av pv then some (m.insert key val)
+        else (mergeList pv av val).map (m.insert key ·)
+      | some _, none => none
+      | none, some av => (mergeList [] av val).map (m.insert key ·)
+      | none, none => some (m.insert key val)
+    match changedEntries p b with
+    | some es => es.foldl (fun acc (k, v) => step acc k v) (some a)
+    | none => b.fold (init := some a) step
 instance {κ : Type} [BEq κ] [Hashable κ] : Merge3 (Std.HashSet κ) := ⟨mergeSet⟩
 instance : Merge3 Traits.ImplIndex where
   merge3 p a b := do
@@ -113,7 +185,6 @@ instance : Merge3 Traits.ImplIndex where
 from `p`, where it can be put together from what each added: what both grew
 put together (`Merge3`); what says where the check is, `b`'s. -/
 def mergeStates (p a b : St) : Option St := do
-  let m3 := fun {α : Type} [Merge3 α] (f : St → α) => Merge3.merge3 (f p) (f a) (f b)
   unless samePtr a.modules b.modules || samePtr a.modules p.modules || samePtr b.modules p.modules do none
   unless samePtr a.dropMode b.dropMode || samePtr a.dropMode p.dropMode || samePtr b.dropMode p.dropMode do none
   -- (An implementation's place: `b`'s come after `a`'s.)
@@ -124,6 +195,7 @@ def mergeStates (p a b : St) : Option St := do
   let implsByHead := b.implsByHead.fold (init := a.implsByHead) fun m key is =>
     let mine := (is.filter (· ≥ p.impls.size)).map (· + shift)
     if mine.isEmpty then m else m.insert key ((m.getD key #[]) ++ mine)
+  let m3 := fun {α : Type} [Merge3 α] (f : St → α) => Merge3.merge3 (f p) (f a) (f b)
   pure { b with
     tys := ← m3 (·.tys), rows := ← m3 (·.rows), mono := ← m3 (·.mono),
     monoRows := ← m3 (·.monoRows), monoCaps := ← m3 (·.monoCaps), caps := ← m3 (·.caps),
@@ -136,7 +208,7 @@ def mergeStates (p a b : St) : Option St := do
     givers := ← m3 (·.givers), givenReads := ← m3 (·.givenReads), aparts := ← m3 (·.aparts),
     fieldNames := ← m3 (·.fieldNames), dotChosen := ← m3 (·.dotChosen),
     argsChosen := ← m3 (·.argsChosen), decided := ← m3 (·.decided),
-    traitShape := ← m3 (·.traitShape), assocUses := ← m3 (·.assocUses),
+    traitShape := ← m3 (·.traitShape), assocUses := ← (if a.assocUses.isEmpty && b.assocUses.isEmpty then some #[] else m3 (·.assocUses)),
     writtenArgs := ← m3 (·.writtenArgs), supers := ← m3 (·.supers), ranked := ← m3 (·.ranked),
     packs := ← m3 (·.packs), envGroups := ← m3 (·.envGroups), envAfter := ← m3 (·.envAfter),
     envLent := ← m3 (·.envLent), fnGroups := ← m3 (·.fnGroups), fnRunsIn := ← m3 (·.fnRunsIn), bindLoans := ← m3 (·.bindLoans),
@@ -148,7 +220,7 @@ def mergeStates (p a b : St) : Option St := do
     instRows := ← m3 (·.instRows), unrunGiven := ← m3 (·.unrunGiven),
     sharedEdges := ← m3 (·.sharedEdges), assumedLinks := ← m3 (·.assumedLinks),
     abandoned := ← m3 (·.abandoned), sure := ← m3 (·.sure), lowerChecks := ← m3 (·.lowerChecks),
-    fnBodies := ← m3 (·.fnBodies), runFns := ← m3 (·.runFns), runCtors := ← m3 (·.runCtors),
+    runFns := ← m3 (·.runFns), runCtors := ← m3 (·.runCtors),
     runAliases := ← m3 (·.runAliases), runOps := ← m3 (·.runOps), runExact := ← m3 (·.runExact),
     runNow := ← m3 (·.runNow), rowIncl := ← m3 (·.rowIncl), types := ← m3 (·.types),
     ctors := ← m3 (·.ctors), ops := ← m3 (·.ops), effects := ← m3 (·.effects),

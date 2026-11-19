@@ -101,10 +101,6 @@ partial def checkDeciding (decls : List FnDecl) (fuel : Nat := 64) (first : Opti
       set before
       modify fun s =>
         { s with decided := s.decided ++ [d]
-                 fnBodies := s.fnBodies.map fun (name, clauses) =>
-                   match decls'.find? (·.name == name) with
-                   | some d => (name, d.clauses)
-                   | none => (name, clauses)
                  runFns := decls'.foldl (fun m d => m.insert d.name d.clauses) s.runFns }
       let first := match d with
         | .letMut .. => some (first.getD e.msg)
@@ -117,6 +113,71 @@ partial def checkDeciding (decls : List FnDecl) (fuel : Nat := 64) (first : Opti
 def checkMaybe (decls : List FnDecl) : M Unit := do
   if (← get).lenient then tryCatchThe Elab.Said (checkDeciding decls) fun _ => pure ()
   else checkDeciding decls
+
+/-- How far apart the ids of units checked side by side start: room for the
+runs of groups each checks side by side, a level after another
+(`runGap`). -/
+def unitGap : Nat := 1 <<< 40
+
+/-- How far apart the ids of the runs of groups of one level start. -/
+def runGap : Nat := 1 <<< 28
+
+/-- The state each unit of a level is checked from, its ids numbered from a
+place of its own: the `j`-th from `j` gaps on. -/
+def jumpedFor (s : St) (j : Nat) (gap : Nat := unitGap) : St :=
+  if j == 0 then s else
+  let at_ := fun (n : Nat) => n + j * gap
+  { s with
+    tys := s.tys.jumpTo (at_ s.tys.size), rows := s.rows.jumpTo (at_ s.rows.size)
+    caps := s.caps.jumpTo (at_ s.caps.size), capOut := s.capOut.jumpTo (at_ s.caps.size)
+    capEdges := s.capEdges.jumpTo (at_ s.capEdges.size)
+    capEdgeNames := s.capEdgeNames.jumpTo (at_ s.capEdges.size)
+    loans := s.loans.jumpTo (at_ s.loans.size), rigidKeys := s.rigidKeys.jumpTo (at_ s.rigidKeys.size)
+    brands := at_ s.brands, dropAsked := at_ s.dropAsked }
+
+/-- Did the `j`-th unit of a level stay below where the next one's ids start? -/
+def stayedBelow (s from_ : St) (j : Nat) (gap : Nat := unitGap) : Bool :=
+  let below := fun (now start : Nat) => now ≤ start + (j + 1) * gap
+  below s.tys.size from_.tys.size && below s.rows.size from_.rows.size
+    && below s.caps.size from_.caps.size && below s.capEdges.size from_.capEdges.size
+    && below s.loans.size from_.loans.size && below s.rigidKeys.size from_.rigidKeys.size
+    && below s.brands from_.brands && below s.dropAsked from_.dropAsked
+
+/-- How many threads the groups of one level are checked on, at most. -/
+def sideThreads : Nat := 16
+
+/-- Groups none of which uses another, checked side by side: a few runs of
+them, each on a thread of its own from the state before, its ids from a place
+of its own (`jumpedFor`), and what each added put together (`mergeStates`),
+as if one had been checked after another. A run that cannot be put with those
+before it (both changed one thing that was there: a lifetime a declared type
+has, which each binds), or that was refused, is checked again after them: what
+is said is then the first refusal in their order, as one after another would
+say it. -/
+def checkSideBySide (groups : List (List FnDecl)) : M Unit := do
+  if groups.length < 8 then
+    for g in groups do checkMaybe g
+    return
+  let threads := min (groups.length / 4 + 1) sideThreads
+  let size := (groups.length + threads - 1) / threads
+  let runs := (List.range threads).filterMap fun t =>
+    match (groups.drop (t * size)).take size with
+    | [] => none
+    | run => some run
+  let start ← get
+  let tasks := runs.zipIdx.map fun (run, j) =>
+    (run, j, Task.spawn (prio := .dedicated) fun _ => (run.forM checkMaybe : M Unit).run (jumpedFor start j runGap))
+  -- (In order: a run that cannot be put with those before it, or was
+  -- refused, is checked again after them, as one after another would.)
+  for (run, j, t) in tasks do
+    let here ← get
+    let got := Trace.timed "side: wait" fun _ => t.get
+    let put := match got with
+      | .ok ((), after) => if stayedBelow after start j runGap then Trace.timed "side: merge" fun _ => mergeStates start here after else none
+      | .error _ => none
+    match put with
+    | some st => set st
+    | none => timedM "side: again" (for g in run do checkMaybe g)
 
 /-- Check items. With `kept` from an earlier check of a program that began
 alike (`seed`: what was checked before them), the state after each step whose
@@ -211,23 +272,23 @@ def checkItems (items : List Item) (seed : UInt64 := 0) (kept : Kept := []) : M 
       checkUseDecls
     made := (key, ← get) :: made
     modify fun s =>
-      { s with fnBodies := s.fnBodies ++ (decls.map fun d => (d.name, d.clauses)),
-               runFns := decls.foldl (fun m d => m.insertIfNew d.name d.clauses) s.runFns }
+      { s with runFns := decls.foldl (fun m d => m.insertIfNew d.name d.clauses) s.runFns }
     -- (A state kept from before has the bodies that program's later
     -- functions had: this one's are put in their place.)
     let restore := fun (st : St) (later : List FnDecl) => (do
       adopt st
       modify fun s =>
-        { s with fnBodies := s.fnBodies.map fun (name, clauses) =>
-                   match later.find? (·.name == name) with
-                   | some d => (name, d.clauses)
-                   | none => (name, clauses),
-                 runFns := later.foldl (fun m d => m.insert d.name d.clauses) s.runFns } : M Unit)
+        { s with runFns := later.foldl (fun m d => m.insert d.name d.clauses) s.runFns } : M Unit)
     -- The functions of implementations that leave a type to be found from
     -- them (`type Out = _;`): checked before every function that may use
     -- what they find, but those they are themselves made from.
-    let holed ← ((← get).impls.toList.drop before).filter implHoled |>.flatMapM implFnDecls
+    let holedImpls ← ((← get).impls.toList.drop before).filter implHoled |>.mapM implFnDecls
+    let holed := holedImpls.flatten
     let holeNames := holed.map (·.name)
+    -- (Each of one implementation's functions after the one written before
+    -- it: what it leaves to be found may be found by any of them.)
+    let afterIn : Std.HashMap String String := holedImpls.foldl (fun m fs =>
+      (fs.zip (fs.drop 1)).foldl (fun m (a, b) => m.insert b.name a.name) m) {}
     let allDecls := decls ++ holed
     let allNames := names ++ holeNames
     let mentionsAll := fun (name : String) =>
@@ -240,10 +301,24 @@ def checkItems (items : List Item) (seed : UInt64 := 0) (kept : Kept := []) : M 
         seen := (seen ++ seen.flatMap mentionsAll).eraseDups
       pure seen
     let deps := fun (name : String) =>
-      if holeNames.contains name then mentionsAll name
+      if holeNames.contains name then (mentionsAll name ++ (afterIn[name]?).toList).eraseDups
       else if madeFrom.contains name then deps name
       else (deps name ++ holeNames).eraseDups
     let groups := (components allNames deps).map fun comp => comp.filterMap fun n => allDecls.find? (·.name == n)
+    -- Each group's level: one more than the highest of the groups it calls
+    -- into. Groups of one level use none of each other, so they are checked
+    -- side by side (`checkSideBySide`), each level after those before it.
+    let groupOf : Std.HashMap String Nat := groups.zipIdx.foldl (fun m (g, i) =>
+      g.foldl (fun m d => m.insert d.name i) m) {}
+    let levelOf := groups.zipIdx.foldl (fun (acc : Array Nat) (g, i) =>
+      acc.push (g.foldl (fun l d => (deps d.name).foldl (fun l n =>
+        match groupOf[n]? with
+        | some j => if j < i then max l ((acc[j]?).getD 0 + 1) else l
+        | none => l) l) 0)) #[]
+    let sorted := (groups.zipIdx.map fun (g, i) => ((levelOf[i]?).getD 0, i, g)).mergeSort
+      fun a b => a.1 < b.1 || (a.1 == b.1 && a.2.1 ≤ b.2.1)
+    let groups := sorted.map (·.2.2)
+    let levels := (sorted.map (·.1)).toArray
     -- The functions of the copies of an implementation for every type
     -- (`impl<T> Requires for T`, one for each type the unit declares) that
     -- name none of the unit's functions, where no coercion is: checked
@@ -288,10 +363,18 @@ def checkItems (items : List Item) (seed : UInt64 := 0) (kept : Kept := []) : M 
         if let some st := look k then
           restore st ((groups.drop start).flatten)
           made := (k, st) :: made
-    for (group, k) in (groups.zipIdx.drop start) do
-      checkMaybe group
-      if (k + 1) % every == 0 || k + 1 == groups.length then
-        made := (keys[k]!, ← get) :: made
+    let rest := (groups.zipIdx.drop start).toArray
+    let mut i := 0
+    while i < rest.size do
+      let level := (levels[(rest[i]?.map (·.2)).getD 0]?).getD 0
+      let mut j := i
+      while j < rest.size && (levels[(rest[j]?.map (·.2)).getD 0]?).getD 0 == level do j := j + 1
+      let run := (rest.extract i j).toList
+      checkSideBySide (run.map (·.1))
+      let last := (run.getLast?.map (·.2)).getD 0
+      if run.any (fun (_, k) => (k + 1) % every == 0) || last + 1 == groups.length then
+        made := (keys[last]!, ← get) :: made
+      i := j
     if let some k := keys.getLast? then key := k
     -- The functions implementations give, each on its own: any function may
     -- call them, but only through a trait, whose types are declared.
@@ -307,17 +390,16 @@ def checkItems (items : List Item) (seed : UInt64 := 0) (kept : Kept := []) : M 
     let implKeys := (implGroups.toList.foldl (fun (acc : List UInt64 × UInt64) g =>
       let k := groupKey acc.2 g
       (k :: acc.1, k)) ([], key)).1.reverse
-    let implEvery := keptEvery implGroups.size
     let implStart := ((implKeys.zipIdx.reverse.find? fun (k, _) => (look k).isSome).map (·.2 + 1)).getD 0
     if implStart > 0 then
       if let some k := implKeys[implStart - 1]? then
         if let some st := look k then
           restore st []
           made := (k, st) :: made
-    for (group, k) in (implGroups.toList.zipIdx.drop implStart) do
-      checkMaybe group
-      if (k + 1) % implEvery == 0 || k + 1 == implGroups.size then
-        made := (implKeys[k]!, ← get) :: made
+    -- (None uses another: all side by side.)
+    checkSideBySide (implGroups.toList.drop implStart)
+    if implStart < implGroups.size then
+      if let some k := implKeys.getLast? then made := (k, ← get) :: made
     if let some k := implKeys.getLast? then key := k
     for c in coercing do
       unless (((← get).fnBounds.lookup c).getD 0) == 0 do
@@ -469,30 +551,6 @@ def checkAfter (first : St) (items : List Item) (modules : Syntax.ModuleInfo := 
   let (blocks, _) ← (action.run first).mapError (·.msg)
   pure blocks
 
-
-/-- How far apart the ids of units checked side by side start. -/
-def unitGap : Nat := 1 <<< 20
-
-/-- The state each unit of a level is checked from, its ids numbered from a
-place of its own: the `j`-th from `j` gaps on. -/
-def jumpedFor (s : St) (j : Nat) : St :=
-  if j == 0 then s else
-  let at_ := fun (n : Nat) => n + j * unitGap
-  { s with
-    tys := s.tys.jumpTo (at_ s.tys.size), rows := s.rows.jumpTo (at_ s.rows.size)
-    caps := s.caps.jumpTo (at_ s.caps.size), capOut := s.capOut.jumpTo (at_ s.caps.size)
-    capEdges := s.capEdges.jumpTo (at_ s.capEdges.size)
-    capEdgeNames := s.capEdgeNames.jumpTo (at_ s.capEdges.size)
-    loans := s.loans.jumpTo (at_ s.loans.size), rigidKeys := s.rigidKeys.jumpTo (at_ s.rigidKeys.size)
-    brands := at_ s.brands, dropAsked := at_ s.dropAsked }
-
-/-- Did the `j`-th unit of a level stay below where the next one's ids start? -/
-def stayedBelow (s from_ : St) (j : Nat) : Bool :=
-  let below := fun (now start : Nat) => now ≤ start + (j + 1) * unitGap
-  below s.tys.size from_.tys.size && below s.rows.size from_.rows.size
-    && below s.caps.size from_.caps.size && below s.capEdges.size from_.capEdges.size
-    && below s.loans.size from_.loans.size && below s.rigidKeys.size from_.rigidKeys.size
-    && below s.brands from_.brands && below s.dropAsked from_.dropAsked
 
 /-- Check a program's units, each a module, in the order given, which has a
 module after those it uses (`deps`: for each, the units before it that it

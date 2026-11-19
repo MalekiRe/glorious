@@ -158,20 +158,22 @@ partial def resolveType (params : List (String × Ty)) (decl : Bool) : TypeExpr 
   | .fn ps r => do
     let ps ← ps.mapM (resolveType params decl)
     let cap ← freshCap
+    if decl then modify fun s => { s with monoCaps := cap :: s.monoCaps }
     match r with
     | .performs r effects =>
       -- What it performs is said: these effects and no others, or these
       -- and whatever a row parameter stands for.
       let r ← resolveType params decl r
       let (effs, tail) ← resolveRow params decl effects
-      if decl then modify fun s => { s with monoCaps := cap :: s.monoCaps }
       pure (.fn ps r effs tail cap)
     | _ =>
       let r ← resolveType params decl r
-      let tail ← freshRowVar
-      if decl then
-        modify fun s => { s with monoRows := tail :: s.monoRows, monoCaps := cap :: s.monoCaps }
-      pure (.fn ps r [] (some tail) cap)
+      -- In a declaration, what it performs is what is written: nothing,
+      -- where nothing is, as a signature says. (One shared by every function
+      -- that uses the type, found from them, would make each depend on the
+      -- others' bodies.)
+      if decl then pure (.fn ps r [] none cap)
+      else pure (.fn ps r [] (some (← freshRowVar)) cap)
   | .performs _ _ =>
     throw "what a callable performs is written after its result: `fn(A) -> R / {Effect}`"
   | .ref uniq t life => do
@@ -413,7 +415,10 @@ def declareTraits (items : List Item) : M Unit := do
             rowVars := rowVars ++ [(a, k)]
           else extra := extra ++ [(a, .var id)]
           assocVars := assocVars ++ [(a, id)]
-      let shapes := (← get).traitShape.filter (·.1 != name)
+      -- (In front of what was there, which is kept as it was where it had no
+      -- shape of this trait: units checked side by side are put together.)
+      let had := (← get).traitShape
+      let shapes := if had.any (·.1 == name) then had.filter (·.1 != name) else had
       modify fun s => { s with traitShape := (name, tparams.length, assocNames) :: shapes }
       let mut index := 0
       for (m, params, ret) in methods do

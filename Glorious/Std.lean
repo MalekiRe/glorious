@@ -1007,7 +1007,7 @@ pub fn range(from: Int, to: Int) -> Iter<Int> {
 }
 
 // `seed`, `f(seed)`, `f(f(seed))`, without end.
-pub fn iterate<T, e: EffectRow>(seed: T, f: fn(T) -> T / {| e}) -> Iter<T> / {| e} { Iter({ Some((seed, iterate(f(seed), f))) }) }
+pub fn iterate<T>(seed: T, f: fn(T) -> T / {}) -> Iter<T> { Iter({ Some((seed, iterate(f(seed), f))) }) }
 
 pub fn repeat<T>(x: T) -> Iter<T> { Iter({ Some((x, repeat(x))) }) }
 
@@ -1015,12 +1015,12 @@ pub fn repeat<T>(x: T) -> Iter<T> { Iter({ Some((x, repeat(x))) }) }
 pub fn of<T, U>(a: T) -> Iter<U> where T: Len, T: Index { of_from(a, 0) }
 fn of_from<T, U>(a: T, i: Int) -> Iter<U> where T: Len, T: Index { Iter({ if(i < len(a)) { Some((a[i], of_from(a, i + 1))) } else { None } }) }
 
-pub fn map<T, U, e: EffectRow>(it: Iter<T>, f: fn(T) -> U / {| e}) -> Iter<U> / {| e} {
+pub fn map<T, U>(it: Iter<T>, f: fn(T) -> U / {}) -> Iter<U> {
     Iter({ match(next(it)) { Some((x, rest)) => Some((f(x), map(rest, f))), None => None } })
 }
 
-pub fn filter<T, U, V, e: EffectRow>(it: Iter<T>, keep: fn(T) -> Result<U, V> / {| e}) -> Iter<T> / {| e} { Iter({ filter_next(it, keep) }) }
-fn filter_next<T, U, V, e: EffectRow>(it: Iter<T>, keep: fn(T) -> Result<U, V> / {| e}) -> Option<(T, Iter<T>)> / {| e} {
+pub fn filter<T, U, V>(it: Iter<T>, keep: fn(T) -> Result<U, V> / {}) -> Iter<T> { Iter({ filter_next(it, keep) }) }
+fn filter_next<T, U, V>(it: Iter<T>, keep: fn(T) -> Result<U, V> / {}) -> Option<(T, Iter<T>)> {
     match(next(it)) {
         Some((x, rest)) => if(keep(x)) { Some((x, filter(rest, keep))) } else { tail filter_next(rest, keep) },
         None => None
@@ -1036,7 +1036,7 @@ pub fn skip<T>(it: Iter<T>, n: Int) -> Iter<T> {
 }
 
 // The values while `keep` says yes.
-pub fn take_while<T, U, V, e: EffectRow>(it: Iter<T>, keep: fn(T) -> Result<U, V> / {| e}) -> Iter<T> / {| e} {
+pub fn take_while<T, U, V>(it: Iter<T>, keep: fn(T) -> Result<U, V> / {}) -> Iter<T> {
     Iter({ match(next(it)) {
         Some((x, rest)) => if(keep(x)) { Some((x, take_while(rest, keep))) } else { None },
         None => None

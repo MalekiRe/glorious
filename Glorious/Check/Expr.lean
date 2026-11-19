@@ -2034,7 +2034,7 @@ partial def inferHandle (scope : Scope) (amb : Row) (subject : Expr) (arms : Lis
   let subjectTy ← inferExpr scope ⟨insts ++ ambFlat.effs, ambFlat.tail⟩ subject
   -- The borrows the handled computation makes. While it is suspended in an
   -- arm, its resumption holds them: the arm must not use what they exclude.
-  let suspendedLoans := (List.range (← get).loans.size).drop loansBefore
+  let suspendedLoans := List.range' loansBefore ((← get).loans.size - loansBefore)
   let result ← freshTy
   if completions.isEmpty then unify result subjectTy
   else

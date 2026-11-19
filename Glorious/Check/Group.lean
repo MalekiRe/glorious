@@ -540,10 +540,7 @@ def checkGroup (decls : List FnDecl) : M Unit := do
   let cs := Elab.firstOf (← get).coercions.toList
   unless cs.isEmpty do
     modify fun s =>
-      { s with fnBodies := s.fnBodies.map fun (name, clauses) =>
-          if decls.any (·.name == name) then (name, Elab.coerceFn cs name clauses)
-          else (name, clauses),
-               runFns := decls.foldl (fun m d =>
+      { s with runFns := decls.foldl (fun m d =>
                  match m[d.name]? with
                  | some clauses => m.insert d.name (Elab.coerceFn cs d.name clauses)
                  | none => m) s.runFns }

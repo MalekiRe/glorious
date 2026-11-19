@@ -5709,6 +5709,43 @@ What came with it:
   writes what the checker found, a type an implementation leaves to be found
   as its projection `<F as Trait<S>>::Out`.
 
+## A unit's functions checked side by side, a level at a time
+
+Within a unit, each group of functions (those that call each other) has a
+level: one more than the highest of the groups it calls into. The groups of a
+level use none of each other, so they are checked side by side: in up to 16
+runs, each on a thread of its own from the state before the level, with its
+ids from a place of its own (`runGap` apart; units side by side are
+`unitGap` apart, room for the runs of every level of each). What each run
+added is put together with what the runs before it added (`mergeStates`), as
+if they had been checked one after another. The functions implementations
+give are one level: none calls another but through a trait.
+
+A run is checked again, after those before it, where what it changed cannot
+be put with what they changed. That is so where both changed one thing that
+was there before the level: a lifetime a declared type's callable has, which
+every function that uses the type binds; or a variable both bound to
+different types. (Both bound to the same type, written alike with nothing
+unknown in it, is put together.) A run that was refused is checked again in
+the same way, so what is said is the first refusal in the order the groups
+are written.
+
+What made the side-by-side checks agree with one after another:
+
+- A callable type in a declaration performs what is written: nothing, where
+  nothing is (`fn(A) -> B` in a struct is `fn(A) -> B / {}`). Before, its
+  effects were one row shared by every function that used the type, found
+  from all of them. The lazy iterator's `iterate`, `map`, `filter` and
+  `take_while` take callables that perform nothing.
+- The functions of an implementation that leaves a type to be found
+  (`type Out = _;`) are each after the one written before it.
+- Stores find a segment by halves; two stores are put together in one walk
+  of their segments, and two maps through the buckets that changed.
+
+Measured: covey's simulation compiles in about 1.07 s (check 0.52 s), from
+1.34 s (check 0.85 s); the edit loop is as it was (compile about 0.3 s). The
+suite runs in 15 s.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by

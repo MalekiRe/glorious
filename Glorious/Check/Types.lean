@@ -387,13 +387,25 @@ variable {α : Type}
 /-- The number the next entry made has. -/
 @[inline] def size (s : Store α) : Nat := s.last.base + s.last.count
 
-@[specialize] def olderGet? (older : Array (Seg α)) (i : Nat) : Option α := Id.run do
-  let mut k := older.size
-  while k > 0 do
-    k := k - 1
-    if let some seg := older[k]? then
-      if i ≥ seg.base then return seg.get? (i - seg.base)
-  return none
+/-- The place of the last segment that starts at or before `i`, the segments
+being in the order of where they start: by halves. -/
+@[inline] def olderAt (older : Array (Seg α)) (i : Nat) : Option Nat := Id.run do
+  -- (Most are found in the last ones.)
+  match older.back? with
+  | some seg => if i ≥ seg.base then return some (older.size - 1)
+  | none => return none
+  let mut lo := 0
+  let mut hi := older.size
+  -- The answer is below `hi`, and at or after `lo` if there is one.
+  while lo + 1 < hi do
+    let mid := (lo + hi) / 2
+    if ((older[mid]?.map (·.base)).getD 0) ≤ i then lo := mid else hi := mid
+  if ((older[lo]?.map (·.base)).getD (i + 1)) ≤ i then some lo else none
+
+@[specialize] def olderGet? (older : Array (Seg α)) (i : Nat) : Option α :=
+  match olderAt older i with
+  | some k => (older[k]?).bind fun seg => seg.get? (i - seg.base)
+  | none => none
 
 @[inline] def get? (s : Store α) (i : Nat) : Option α :=
   if i ≥ s.last.base then s.last.get? (i - s.last.base) else olderGet? s.older i
@@ -405,7 +417,7 @@ def push (s : Store α) (x : α) : Store α := { s with last := s.last.push x }
 def modify (s : Store α) (i : Nat) (f : α → α) : Store α :=
   if i ≥ s.last.base then { s with last := s.last.modify (i - s.last.base) f }
   else
-    match (List.range s.older.size).reverse.find? (fun k => (s.older[k]?.map (·.base)).getD 0 ≤ i) with
+    match olderAt s.older i with
     | some k => { s with older := s.older.modify k fun seg => seg.modify (i - seg.base) f }
     | none => s
 
@@ -658,9 +670,6 @@ structure St where
   other names in scope, and the code the name is in scope of. -/
   lowerChecks : Array (String × String × Ty × List String × List Stmt) := #[]
 
-  /-- The clauses of every top-level function, for following calls when uses
-  are counted. -/
-  fnBodies : List (String × List Clause) := []
   /-- What the count of uses reads of what is declared, kept as it is
   declared and found in one look: the bodies of functions, the names of
   constructors, the aliases, whether each operation gives something back,
