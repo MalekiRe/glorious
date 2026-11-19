@@ -66,7 +66,7 @@ where E: Environment<'e>, G: RunsIn<E, (X,), Output = B, Effects = {| e}>
 // Any failure can be forgotten: a `Result` is an `Option` wherever one is
 // expected, and what failed is dropped.
 coerce option
-fn option(value) {
+fn option<T, U>(value: Result<T, U>) -> Option<T> {
     match(value) {
         Ok(result) => Ok(result),
         Err(_) => None
@@ -158,28 +158,28 @@ trait Ord: Eq {
     fn >=(a: Self, b: Self) -> Bool { not (a < b) }
 }
 
-impl Add for Int { fn +(a, b) { int_add(a, b) } }
-impl Sub for Int { fn -(a, b) { int_sub(a, b) } }
-impl Mul for Int { fn *(a, b) { int_mul(a, b) } }
-impl Div for Int { fn /(a, b) { int_fit(int_div(a, b), 64) } }
-impl Rem for Int { fn %(a, b) { int_rem(a, b) } }
-impl Neg for Int { fn negate(a) { int_sub(0, a) } }
+impl Add for Int { fn +(a: Int, b: Int) -> Int { int_add(a, b) } }
+impl Sub for Int { fn -(a: Int, b: Int) -> Int { int_sub(a, b) } }
+impl Mul for Int { fn *(a: Int, b: Int) -> Int { int_mul(a, b) } }
+impl Div for Int { fn /(a: Int, b: Int) -> Int { int_fit(int_div(a, b), 64) } }
+impl Rem for Int { fn %(a: Int, b: Int) -> Int { int_rem(a, b) } }
+impl Neg for Int { fn negate(a: Int) -> Int { int_sub(0, a) } }
 impl Bits for Int {
-    fn bit_and(a, b) { int_and(a, b) }
-    fn bit_or(a, b) { int_or(a, b) }
-    fn bit_xor(a, b) { int_xor(a, b) }
-    fn shl(a, n) { int_fit(int_shl(a, n), 64) }
-    fn shr(a, n) { int_shr(a, n) }
+    fn bit_and(a: Int, b: Int) -> Int { int_and(a, b) }
+    fn bit_or(a: Int, b: Int) -> Int { int_or(a, b) }
+    fn bit_xor(a: Int, b: Int) -> Int { int_xor(a, b) }
+    fn shl(a: Int, n: Int) -> Int { int_fit(int_shl(a, n), 64) }
+    fn shr(a: Int, n: Int) -> Int { int_shr(a, n) }
 }
 impl Eq for Int {
-    fn ==(a, b) { bool(int_eq(a, b)) }
-    fn !=(a, b) { not bool(int_eq(a, b)) }
+    fn ==(a: Int, b: Int) -> Bool { bool(int_eq(a, b)) }
+    fn !=(a: Int, b: Int) -> Bool { not bool(int_eq(a, b)) }
 }
 impl Ord for Int {
     fn <(a, b) { bool(int_lt(a, b)) }
-    fn >(a, b) { bool(int_lt(b, a)) }
+    fn >(a: Int, b: Int) -> Bool { bool(int_lt(b, a)) }
     fn <=(a, b) { not bool(int_lt(b, a)) }
-    fn >=(a, b) { not bool(int_lt(a, b)) }
+    fn >=(a: Int, b: Int) -> Bool { not bool(int_lt(a, b)) }
 }
 
 "#
@@ -191,22 +191,21 @@ infixl 6 -
 infixl 7 *
 infixl 7 /
 infixl 7 %
-fn +(a, b) { int_add(a, b) }
-fn -(a, b) { int_sub(a, b) }
-fn *(a, b) { int_mul(a, b) }
-fn /(a, b) { int_div(a, b) }
-fn %(a, b) { int_rem(a, b) }
+fn +(a: Int, b: Int) -> Int { int_add(a, b) }
+fn -(a: Int, b: Int) -> Int { int_sub(a, b) }
+fn *(a: Int, b: Int) -> Int { int_mul(a, b) }
+fn /(a: Int, b: Int) -> Int { int_div(a, b) }
+fn %(a: Int, b: Int) -> Int { int_rem(a, b) }
 prefix 9 - = negate
-fn negate(a) { int_sub(0, a) }
-fn bit_and(a, b) { int_and(a, b) }
-fn bit_or(a, b) { int_or(a, b) }
-fn bit_xor(a, b) { int_xor(a, b) }
-fn shl(a, n) { int_fit(int_shl(a, n), 64) }
-fn shr(a, n) { int_shr(a, n) }
+fn negate(a: Int) -> Int { int_sub(0, a) }
+fn bit_and(a: Int, b: Int) -> Int { int_and(a, b) }
+fn bit_or(a: Int, b: Int) -> Int { int_or(a, b) }
+fn bit_xor(a: Int, b: Int) -> Int { int_xor(a, b) }
+fn shl(a: Int, n: Int) -> Int { int_fit(int_shl(a, n), 64) }
+fn shr(a: Int, n: Int) -> Int { int_shr(a, n) }
 
-fn bool {
-    0 => false,
-    _ => true
+fn bool(n: Int) -> Bool {
+    match(n) { 0 => false, _ => true }
 }
 
 infix 4 <
@@ -215,20 +214,20 @@ infix 4 <=
 infix 4 >=
 infix 4 ==
 infix 4 !=
-fn <(a, b) { bool(int_lt(a, b)) }
-fn >(a, b) { bool(int_lt(b, a)) }
-fn <=(a, b) { not bool(int_lt(b, a)) }
-fn >=(a, b) { not bool(int_lt(a, b)) }
-fn ==(a, b) { bool(int_eq(a, b)) }
-fn !=(a, b) { not bool(int_eq(a, b)) }
+fn <(a: Int, b: Int) -> Bool { bool(int_lt(a, b)) }
+fn >(a: Int, b: Int) -> Bool { bool(int_lt(b, a)) }
+fn <=(a: Int, b: Int) -> Bool { not bool(int_lt(b, a)) }
+fn >=(a: Int, b: Int) -> Bool { not bool(int_lt(a, b)) }
+fn ==(a: Int, b: Int) -> Bool { bool(int_eq(a, b)) }
+fn !=(a: Int, b: Int) -> Bool { not bool(int_eq(a, b)) }
 
 "#
 
 private def world : String := r#"
 // The outside world.
-fn print(value) { host_write(value) }
+fn print<T>(value: T) { host_write(value) }
 
-fn read() {
+fn read() -> Option<Int> {
     match(host_read()) {
         (1, value) => Some(value),
         _ => None
@@ -241,7 +240,7 @@ effect LoopControl<B> {
     continue() -> !
 }
 
-fn loop(body) {
+fn loop<T, U, e: EffectRow>(body: fn() -> T / {LoopControl<U> | e}) -> U / {| e} {
     handle body() {
         _ => tail loop(body),
         break(value) => value,
@@ -264,7 +263,7 @@ fn break_at<T, L>(value: T, target: L) -> ! where L: Label<T> {
 // what the loop gives.
 enum LoopStep<S, B> { Continue(S), Break(B) }
 
-fn loop_state(initial, body) {
+fn loop_state<T, U, e: EffectRow>(initial: T, body: fn(T) -> LoopStep<T, U> / {| e}) -> U / {| e} {
     match(body(initial)) {
         Continue(next) => tail loop_state(next, body),
         Break(value) => value
@@ -272,7 +271,7 @@ fn loop_state(initial, body) {
 }
 
 // The body so many times.
-fn repeat_n(count: Int, body) {
+fn repeat_n<T, e: EffectRow>(count: Int, body: fn() -> T / {| e}) -> () / {| e} {
     match(int_lt(0, count)) {
         0 => (),
         _ => body(); tail repeat_n(int_sub(count, 1), body)
