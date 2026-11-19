@@ -535,14 +535,6 @@ partial def checkArg (scope : Scope) (amb : Row) (what : String) (p : Ty) (a : E
       | _ => mustDrop input why
       pure none
   | _, _ => do
-    -- A name whose type is not known yet, where a `&mut` reference is wanted:
-    -- it is one, so it is lent rather than handed over.
-    if let .name none x := a then
-      if let some (.val t _) := scope.lookup x then
-        if let .var _ ← find t then
-          if let .ref how inner _ ← find p then
-            if let .con "&mut" [] ← find how then
-              unify t (.ref how inner (← freshCap))
     -- `{ (x, y) => .. }` where a callable of several arguments is wanted:
     -- each clause's one tuple is the arguments (5.4).
     if let (.closure id clauses, .fn ps _ _ _ _) := (a, ← find p) then

@@ -5746,6 +5746,52 @@ Measured: covey's simulation compiles in about 1.07 s (check 0.52 s), from
 1.34 s (check 0.85 s); the edit loop is as it was (compile about 0.3 s). The
 suite runs in 15 s.
 
+## The audit of what the checker decides and what an argument may be
+
+With every function's signature written, each rule that reads a program by
+what the checker finds of its types was looked at again, against Rust.
+
+What the checker decides (`Elab.Decision`), each kept:
+
+- `rest`: how many parts `..` stands for in a tuple pattern. Rust does the same.
+- `eta`: a function named as a value is a callable that calls it, as a Rust
+  `fn` item is a function pointer.
+- `refPats`: a match of a reference reads its patterns through it, Rust's
+  default binding modes.
+- `receiver`: a dot call borrows its receiver as the function takes it,
+  Rust's autoref.
+- `derefField`: a field read through a type that implements `Deref`, Rust's
+  auto-deref.
+- `letMut`: a `let` whose value a callable keeps and changes is kept in a
+  cell. Rust says this with `move` and `RefCell`; here the cell is what the
+  language means by a mutable variable a callable holds, and it is decided
+  where it is found.
+
+The special cases of an argument (`checkArg`):
+
+- A whole number where a type of whole numbers is wanted is of it: Rust's
+  literal inference. Kept.
+- A block where what is wanted is known and is no callable is run there
+  (5.4). Kept, as the one rule for it: with signatures written, what is
+  wanted is the written parameter type, so whether the block runs is read
+  from the signature. Where it is a type parameter, the block is a callable.
+- A block written without parameters where a callable of one argument is
+  wanted takes the argument without naming it. Kept, as the one rule for
+  it: `if` gives its body what the test found, `()` for a comparison, and
+  `else` its fallback what failed; `{ _ => .. }` everywhere would say
+  nothing more.
+- `{ (x, y) => .. }` where a callable of several arguments is wanted takes
+  them as one tuple (5.4). Kept: `{ x, y => .. }` says the same, and the
+  library uses both.
+- The parameters of a callable written where one is wanted are of the
+  wanted types where those are declared types, so a field read by name in
+  it is read knowing them: Rust infers a closure's parameters from the
+  expected type. Kept.
+- Removed: a name whose type was not known where a `&mut` reference was
+  wanted was made a reference, so it was lent rather than handed over.
+  With parameters' types written, a name's type is known where it is
+  given, and nothing in the suite used the rule.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by
