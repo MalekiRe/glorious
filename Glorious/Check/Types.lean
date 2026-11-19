@@ -1510,15 +1510,36 @@ def generalize (t : Ty) (keep : List Ty := []) (top : Bool := true) : M Scheme :
   let cvars := reach.filter (!fixedCaps.contains ·)
   let cset : Std.HashSet Nat := cvars.foldl (·.insert ·) {}
   let tvars := general
-  let mine := dups.toList.filter fun (d, _) =>
-    (freeTys d).any generalSet.contains || (freeCaps d).any cset.contains
-  let unused := drops.toList.filter fun (d, _) =>
-    (freeTys d).any generalSet.contains || (freeCaps d).any cset.contains
+  let callers := fun (d : Ty) => (freeTys d).any generalSet.contains || (freeCaps d).any cset.contains
+  -- A need of what the function made for itself, a callable that holds
+  -- one it was given (a block that calls `body`, given to `loop`): what
+  -- that holds of the caller's is needed in turn, as the caller's.
+  let lift := fun (needs : Array (Ty × String)) => do
+    let mut out : Array (Ty × String) := #[]
+    for (d, why) in needs do
+      if callers d then out := out.push (d, why); continue
+      let mut seen : Std.HashSet Nat := {}
+      let mut todo := (freeCaps d).eraseDups
+      while !todo.isEmpty do
+        let mut next : List Nat := []
+        for c in todo do
+          let root ← findCap c
+          if seen.contains root then continue
+          seen := seen.insert root
+          for i in s.capOut.getD root #[] do
+            if s.sharedEdges.contains i then continue
+            if let some (_, .ty target) := s.capEdges.get? i then
+              let target ← zonk target
+              if callers target then out := out.push (target, why)
+              else next := next ++ freeCaps target
+        todo := next
+    pure out
+  let mine ← lift dups
+  let unused ← lift drops
+  let held ← lift stays
   pure { tvars, rvars := (freeRows t).eraseDups.filter (!fixedRows.contains ·), cvars,
-         edges := all.toList.filter (cset.contains ·.1), dups := mine, ty := t,
-         drops := unused,
-         stays := stays.toList.filter fun (d, _) =>
-           (freeTys d).any generalSet.contains || (freeCaps d).any cset.contains }
+         edges := all.toList.filter (cset.contains ·.1), dups := mine.toList, ty := t,
+         drops := unused.toList, stays := held.toList }
 
 /-- Does the type have one of a function's own type parameters in it? -/
 partial def Ty.hasRigid : Ty → Bool

@@ -5598,8 +5598,15 @@ it says: `B: RunsIn<E, (A,)>` and `b(a)`. A function whose callables run in
 an environment can be named as a value; the blocks given to it there are
 then plain callables.
 
-Limits: `while` and `match` are still written without types; the
-environment's lifetime is read and not used; what an `is` found still
+`while` and `match` are declared too, their callables with `Fn` bounds
+(`while`'s may leave the loop, `LoopControl<()>`). For that a need had to
+pass on: a callable a function makes for itself that holds one it was
+given (the block `while` gives `loop`, which calls `body`) is needed more
+than once, or let go, as `loop` says; what it holds of the caller's is then
+needed so of the caller (`generalize`, `lift`), as it was when `body`'s
+type was a variable.
+
+Limits: the environment's lifetime is read and not used; what an `is` found still
 reaches a block without parameters as a value whose type carries the names.
 Measured against the commit before, the
 suite built and run the same way: 1361 programs compile (1360), 1351 well

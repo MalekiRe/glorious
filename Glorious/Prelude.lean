@@ -29,8 +29,10 @@ let None = Err(());
 let true: Result<(), ()> = Ok(());
 let false: Result<(), ()> = Err(());
 
-// Matching is applying a pattern callable.
-fn match(subject, arms) { tail arms(subject) }
+// Matching is applying a pattern callable: its clauses are the arms.
+fn match<S, R, F, e: EffectRow>(subject: S, arms: F) -> R / {| e}
+where F: Fn<(S,), Output = R, Effects = {| e}>
+{ tail arms(subject) }
 
 // `if` gives the result of its body on success, and gives the body what the
 // test found: nothing, for a comparison; for `value is Pattern`, what the
@@ -277,7 +279,13 @@ fn repeat_n(count: Int, body) {
     }
 }
 
-fn while(condition, body) {
+// The body for as long as the condition holds, given what the condition
+// found; both may leave the loop (`LoopControl`), and perform what `while`
+// does.
+fn while<A, X, C, F, e: EffectRow>(condition: C, body: F) -> () / {| e}
+where C: Fn<(), Output = Result<A, X>, Effects = {LoopControl<()> | e}>,
+      F: Fn<(A,), Output = (), Effects = {LoopControl<()> | e}>
+{
     loop {
         match(condition()) {
             Ok(found) => body(found),
