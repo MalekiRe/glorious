@@ -31,7 +31,7 @@ let false: Result<(), ()> = Err(());
 
 // Matching is applying a pattern callable: its clauses are the arms.
 fn match<S, R, F, e: EffectRow>(subject: S, arms: F) -> R / {| e}
-where F: Fn<(S,), Output = R, Effects = {| e}>
+where F: Fn<(S,), Output = R, Effects = {| e}>, F: Use<[1, 1]>, S: Use<[1, 1]>, R: Use<[1, 1]>
 { tail arms(subject) }
 
 // `if` gives the result of its body on success, and gives the body what the
@@ -41,7 +41,7 @@ where F: Fn<(S,), Output = R, Effects = {| e}>
 // still there to be used. The body runs in an environment of its own (`E`),
 // and performs what `if` does.
 fn if<'e, E, A, X, B, F, e: EffectRow>(condition: Result<A, X>, body: F) -> Result<B, F> / {| e}
-where E: Environment<'e>, F: RunsIn<E, (A,), Output = B, Effects = {| e}>
+where E: Environment<'e>, F: RunsIn<E, (A,), Output = B, Effects = {| e}>, A: Use<[1, 1]>, B: Use<[1, 1]>
 {
     match(condition) {
         Ok(found) => Ok(body(found)),
@@ -55,7 +55,7 @@ where E: Environment<'e>, F: RunsIn<E, (A,), Output = B, Effects = {| e}>
 // too, so the fallback runs in its place, over what it captured.
 infixr 1 else
 fn else<'e, E, B, X, G, e: EffectRow>(value: Result<B, X>, fallback: G) -> B / {| e}
-where E: Environment<'e>, G: RunsIn<E, (X,), Output = B, Effects = {| e}>
+where E: Environment<'e>, G: RunsIn<E, (X,), Output = B, Effects = {| e}>, X: Use<[1, 1]>, B: Use<[1, 1]>
 {
     match(value) {
         Ok(result) => result,
@@ -66,7 +66,7 @@ where E: Environment<'e>, G: RunsIn<E, (X,), Output = B, Effects = {| e}>
 // Any failure can be forgotten: a `Result` is an `Option` wherever one is
 // expected, and what failed is dropped.
 coerce option
-fn option<T, U>(value: Result<T, U>) -> Option<T> {
+fn option<T, U>(value: Result<T, U>) -> Option<T> where T: Use<[1, 1]> {
     match(value) {
         Ok(result) => Ok(result),
         Err(_) => None
@@ -77,7 +77,7 @@ fn option<T, U>(value: Result<T, U>) -> Option<T> {
 // That of `and` is given what the left one found, as the body of an `if` is.
 infixl 3 and
 fn and<A, X, B, F, e: EffectRow>(left: Result<A, X>, right: F) -> Result<B, X> / {| e}
-where F: Fn<(A,), Output = Result<B, X>, Effects = {| e}>
+where F: Fn<(A,), Output = Result<B, X>, Effects = {| e}>, F: Use<[0, 1]>, A: Use<[1, 1]>, X: Use<[1, 1]>, B: Use<[1, 1]>
 {
     match(left) {
         Ok(found) => tail right(found),
@@ -91,7 +91,7 @@ where F: Fn<(A,), Output = Result<B, X>, Effects = {| e}>
 // over what the first body captured.
 infixl 2 or
 fn or<'e, E, A, X, Y, G, e: EffectRow>(left: Result<A, X>, right: G) -> Result<A, Y> / {| e}
-where E: Environment<'e>, G: RunsIn<E, (X,), Output = Result<A, Y>, Effects = {| e}>
+where E: Environment<'e>, G: RunsIn<E, (X,), Output = Result<A, Y>, Effects = {| e}>, X: Use<[1, 1]>, A: Use<[1, 1]>, Y: Use<[1, 1]>
 {
     match(left) {
         Ok(value) => Ok(value),
@@ -100,7 +100,7 @@ where E: Environment<'e>, G: RunsIn<E, (X,), Output = Result<A, Y>, Effects = {|
 }
 
 prefix 8 not
-fn not<A, X>(value: Result<A, X>) -> Result<X, A> {
+fn not<A, X>(value: Result<A, X>) -> Result<X, A> where A: Use<[1, 1]>, X: Use<[1, 1]> {
     match(value) {
         Ok(payload) => Err(payload),
         Err(payload) => Ok(payload)
@@ -224,7 +224,7 @@ fn !=(a: Int, b: Int) -> Bool { not bool(int_eq(a, b)) }
 
 private def world : String := r#"
 // The outside world.
-fn print<T>(value: T) { host_write(value) }
+fn print<T>(value: T) where T: Use<[1, 1]> { host_write(value) }
 
 fn read() -> Option<Int> {
     match(host_read()) {
@@ -239,7 +239,7 @@ effect LoopControl<B> {
     continue() -> !
 }
 
-fn loop<T, U, e: EffectRow>(body: fn() -> T / {LoopControl<U> | e}) -> U / {| e} {
+fn loop<T, U, e: EffectRow>(body: fn() -> T / {LoopControl<U> | e}) -> U / {| e} where U: Use<[1, 1]> {
     handle body() {
         _ => tail loop(body),
         break(value) => value,
@@ -250,11 +250,11 @@ fn loop<T, U, e: EffectRow>(body: fn() -> T / {LoopControl<U> | e}) -> U / {| e}
 // Leaving for a label with a value: out of a function, `return(v, @f)`, or
 // out of a scope, `break_at(v, @outer)`. A label is where to go; these are
 // functions like any other.
-fn return<T, L, e: EffectRow>(value: T, target: L) -> ! / {| e} where L: Label<T> {
+fn return<T, L, e: EffectRow>(value: T, target: L) -> ! / {| e} where L: Label<T>, T: Use<[1, 1]> {
     target(value)
 }
 
-fn break_at<T, L, e: EffectRow>(value: T, target: L) -> ! / {| e} where L: Label<T> {
+fn break_at<T, L, e: EffectRow>(value: T, target: L) -> ! / {| e} where L: Label<T>, T: Use<[1, 1]> {
     target(value)
 }
 
@@ -262,7 +262,7 @@ fn break_at<T, L, e: EffectRow>(value: T, target: L) -> ! / {| e} where L: Label
 // what the loop gives.
 enum LoopStep<S, B> { Continue(S), Break(B) }
 
-fn loop_state<T, U, e: EffectRow>(initial: T, body: fn(T) -> LoopStep<T, U> / {| e}) -> U / {| e} {
+fn loop_state<T, U, e: EffectRow>(initial: T, body: fn(T) -> LoopStep<T, U> / {| e}) -> U / {| e} where T: Use<[1, 1]>, U: Use<[1, 1]> {
     match(body(initial)) {
         Continue(next) => tail loop_state(next, body),
         Break(value) => value
@@ -282,7 +282,7 @@ fn repeat_n<T, e: EffectRow>(count: Int, body: fn() -> T / {| e}) -> () / {| e} 
 // does.
 fn while<A, X, C, F, e: EffectRow>(condition: C, body: F) -> () / {| e}
 where C: Fn<(), Output = Result<A, X>, Effects = {LoopControl<()> | e}>,
-      F: Fn<(A,), Output = (), Effects = {LoopControl<()> | e}>
+      F: Fn<(A,), Output = (), Effects = {LoopControl<()> | e}>, A: Use<[1, 1]>
 {
     loop {
         match(condition()) {
@@ -389,7 +389,7 @@ impl Whole for char {
     fn whole(c: char) -> i128 { i128_of(char_bits(c)) }
     fn of_whole(n: i128) -> char { char(int_fit(i128_bits(n), 64)) else { '\u{FFFD}' } }
 }
-fn to<T, U>(x: T) -> U where T: Whole, U: Whole { of_whole(whole(x)) }
+fn to<T, U>(x: T) -> U where T: Whole, U: Whole, T: Use<[1, 1]>, U: Use<[1, 1]> { of_whole(whole(x)) }
 
 // One type made from another: `impl From<Meters> for Feet`.
 trait From<T> { fn from(T) -> Self }
@@ -566,11 +566,11 @@ struct Array<T>(T)
 struct Ptr<T>(usize)
 struct PtrMut<T>(usize)
 
-fn ptr_at<T>(address: usize) -> *const T { Ptr(address) }
-fn ptr_mut_at<T>(address: usize) -> *mut T { PtrMut(address) }
-fn ptr_address<T>(p: *const T) -> usize { p.0 }
-fn ptr_mut_address<T>(p: *mut T) -> usize { p.0 }
-fn ptr_const<T>(p: *mut T) -> *const T { Ptr(p.0) }
+fn ptr_at<T>(address: usize) -> *const T where T: Use<[1, 1]> { Ptr(address) }
+fn ptr_mut_at<T>(address: usize) -> *mut T where T: Use<[1, 1]> { PtrMut(address) }
+fn ptr_address<T>(p: *const T) -> usize where T: Use<[1, 1]> { p.0 }
+fn ptr_mut_address<T>(p: *mut T) -> usize where T: Use<[1, 1]> { p.0 }
+fn ptr_const<T>(p: *mut T) -> *const T where T: Use<[1, 1]> { Ptr(p.0) }
 
 // `a[i]` is `index(a, i)`, and `a[i] = v` makes `a` be `index_set(a, i, v)`.
 // A place that is not there has no meaning: the program stops.
@@ -591,15 +591,15 @@ impl Len for Str { fn len(text: Str) -> Int { length(text) } }
 
 // What `[a, b]` and `[x; n]` are made with.
 fn array_empty<T>() -> [T] { arr_new() }
-fn array_repeat<T>(x: T, n: Int) -> [T] { repeat_onto(x, n, arr_new()) }
-fn repeat_onto<T>(x: T, n: Int, out: [T]) -> [T] {
+fn array_repeat<T>(x: T, n: Int) -> [T] where T: Use<[0, *]> { repeat_onto(x, n, arr_new()) }
+fn repeat_onto<T>(x: T, n: Int, out: [T]) -> [T] where T: Use<[0, *]> {
     match(int_lt(0, n)) {
         0 => out,
         _ => tail repeat_onto(x, int_sub(n, 1), arr_push(out, x))
     }
 }
 
-fn push<T>(a: [T], v: T) -> [T] { arr_push(a, v) }
+fn push<T>(a: [T], v: T) -> [T] where T: Use<[1, 1]> { arr_push(a, v) }
 
 // Whole numbers as types, for how long a `[T; N]` is: the bits from the
 // lowest, `B1<B0<B1<Z>>>` for five. What number a type stands for is its
@@ -623,7 +623,7 @@ impl<T, N> Len for Fixed<T, N> where N: Known { fn len(a: Fixed<T, N>) -> Int { 
 // Its elements as an array that can grow.
 fn to_array<T, N>(a: Fixed<T, N>) -> Array<T> { a.0 }
 // `N` of one value.
-fn fixed_repeat<T, N>(x: T) -> Fixed<T, N> where N: Known { Fixed(array_repeat(x, N::VALUE)) }
+fn fixed_repeat<T, N>(x: T) -> Fixed<T, N> where N: Known, T: Use<[0, *]> { Fixed(array_repeat(x, N::VALUE)) }
 
 // What `[a, b, c]` is in a program that has arrays of a fixed length: an
 // array, or one of exactly three. Where nothing says which, an array.
@@ -637,28 +637,28 @@ fn array_literal<N, T, A>(items: Array<T>) -> A where A: Literal<T, N> {
 // What `[first, ..rest]` in a pattern is read with: whether an array has so
 // many elements, and the array without its first or its last.
 enum ArrayRest<T> { RestFits(Array<T>), RestShort(Array<T>) }
-fn rest_fits<T>(a: Array<T>, n: Int) -> ArrayRest<T> {
+fn rest_fits<T>(a: Array<T>, n: Int) -> ArrayRest<T> where T: Use<[1, 1]> {
     match(int_lt(arr_len_at(&a), n)) { 0 => RestFits(a), _ => RestShort(a) }
 }
-fn rest_last<T>(a: Array<T>) -> (Array<T>, T) { arr_pop(a, 0) }
+fn rest_last<T>(a: Array<T>) -> (Array<T>, T) where T: Use<[1, 1]> { arr_pop(a, 0) }
 // Where no array comes: the clauses were shown to cover every shorter one.
-fn rest_unreached<T, R>(a: Array<T>) -> R { match(int_div(1, 0)) { _ => tail rest_unreached(a) } }
-fn rest_first<T>(a: Array<T>) -> (T, Array<T>) {
+fn rest_unreached<T, R>(a: Array<T>) -> R where T: Use<[1, 1]>, R: Use<[1, 1]> { match(int_div(1, 0)) { _ => tail rest_unreached(a) } }
+fn rest_first<T>(a: Array<T>) -> (T, Array<T>) where T: Use<[1, 1]> {
     let (turned, first) = arr_pop(rest_turn(a, arr_new()), 0);
     (first, rest_turn(turned, arr_new()))
 }
-fn rest_turn<T>(from: Array<T>, onto: Array<T>) -> Array<T> {
+fn rest_turn<T>(from: Array<T>, onto: Array<T>) -> Array<T> where T: Use<[1, 1]> {
     match(from) {
         [] => onto,
         some => tail rest_turn_one(arr_pop(some, 0), onto)
     }
 }
-fn rest_turn_one<T>(popped: (Array<T>, T), onto: Array<T>) -> Array<T> {
+fn rest_turn_one<T>(popped: (Array<T>, T), onto: Array<T>) -> Array<T> where T: Use<[1, 1]> {
     match(popped) { (shorter, x) => tail rest_turn(shorter, arr_push(onto, x)) }
 }
 
 // The array without its last element, and that element; nothing if it is empty.
-fn pop<T>(a: [T]) -> Option<([T], T)> {
+fn pop<T>(a: [T]) -> Option<([T], T)> where T: Use<[1, 1]> {
     match(a) {
         [] => None,
         some => Some(arr_pop(some, 0))
@@ -674,10 +674,10 @@ fn get<T>(a: [T], i: Int) -> Option<T> {
 }
 
 // How many elements the array a reference points to has.
-fn len_at<T>(a: &Array<T>) -> Int { arr_len_at(a) }
+fn len_at<T>(a: &Array<T>) -> Int where T: Use<[1, 1]> { arr_len_at(a) }
 
 // The element at a place, by reference, if the place is there.
-fn element<T>(a: &Array<T>, i: Int) -> Option<&T> {
+fn element<T>(a: &Array<T>, i: Int) -> Option<&T> where T: Use<[1, 1]> {
     match(int_mul(int_lt(-1, i), int_lt(i, arr_len_at(a)))) {
         0 => None,
         _ => Some(arr_at(a, i))
@@ -740,7 +740,7 @@ impl<'a, A> Index for &'a mut A where A: Indexed {
 }
 
 // The same to write through.
-fn element_mut<T>(a: &mut Array<T>, i: Int) -> Option<&mut T> {
+fn element_mut<T>(a: &mut Array<T>, i: Int) -> Option<&mut T> where T: Use<[1, 1]> {
     match(int_mul(int_lt(-1, i), int_lt(i, arr_len_at(&*a)))) {
         0 => None,
         _ => Some(arr_at(a, i))
@@ -752,16 +752,16 @@ fn element_mut<T>(a: &mut Array<T>, i: Int) -> Option<&mut T> {
 // written over: it holds nothing, so nothing is lost, whatever an element is.
 // Unsafe, since that is for whoever calls it to have seen to: an array that
 // was not taken out would be lost with all it holds.
-unsafe fn restore_at<T>(a: &mut Array<T>, items: Array<T>) { overwrite(a, items) }
+unsafe fn restore_at<T>(a: &mut Array<T>, items: Array<T>) where T: Use<[1, 1]> { overwrite(a, items) }
 
 // An element added to the array a reference points to.
-fn push_at<T>(a: &mut Array<T>, x: T) {
+fn push_at<T>(a: &mut Array<T>, x: T) where T: Use<[1, 1]> {
     let more = push(replace(a, array_empty()), x);
     unsafe { restore_at(a, more) }
 }
 
 // The last element taken off it, if it has one.
-fn pop_at<T>(a: &mut Array<T>) -> Option<T> {
+fn pop_at<T>(a: &mut Array<T>) -> Option<T> where T: Use<[1, 1]> {
     match(pop(replace(a, array_empty()))) {
         Some((rest, last)) => unsafe { restore_at(a, rest) }; Some(last),
         None => None
@@ -769,8 +769,8 @@ fn pop_at<T>(a: &mut Array<T>) -> Option<T> {
 }
 
 // The elements from one place up to, not including, another.
-fn slice<T, U>(a: T, from: Int, to: Int) -> [U] where T: Index { slice_onto(a, from, to, array_empty()) }
-fn slice_onto<T, U>(a: T, i: Int, to: Int, out: [U]) -> [U] where T: Index {
+fn slice<T, U>(a: T, from: Int, to: Int) -> [U] where T: Index, T: Use<[0, *]>, U: Use<[0, *]> { slice_onto(a, from, to, array_empty()) }
+fn slice_onto<T, U>(a: T, i: Int, to: Int, out: [U]) -> [U] where T: Index, T: Use<[0, *]>, U: Use<[0, *]> {
     match(int_lt(i, to)) {
         0 => out,
         _ => tail slice_onto(a, int_add(i, 1), to, push(out, index(a, i)))
@@ -785,8 +785,8 @@ fn chars_onto(text: Str, out: [char]) -> [char] {
         StrChar(c, rest) => tail chars_onto(rest, push(out, c))
     }
 }
-fn text<T>(a: T) -> Str where T: Len, T: Index { text_before(a, len(a), StrEnd) }
-fn text_before<T>(a: T, i: Int, rest: Str) -> Str where T: Index {
+fn text<T>(a: T) -> Str where T: Len, T: Index, T: Use<[0, *]> { text_before(a, len(a), StrEnd) }
+fn text_before<T>(a: T, i: Int, rest: Str) -> Str where T: Index, T: Use<[0, *]> {
     match(i) {
         0 => rest,
         _ => tail text_before(a, int_sub(i, 1), StrChar(index(a, int_sub(i, 1)), rest))
@@ -794,14 +794,14 @@ fn text_before<T>(a: T, i: Int, rest: Str) -> Str where T: Index {
 }
 
 // `f(f(f(init, a[0]), a[1]), ..)`.
-fn fold<T, U, e: EffectRow>(a: [T], init: U, f: fn(U, T) -> U / {| e}) -> U / {| e} { fold_from(a, arr_len(a, 0), 0, init, f) }
-fn fold_from<T, U, e: EffectRow>(a: [T], n: Int, i: Int, acc: U, f: fn(U, T) -> U / {| e}) -> U / {| e} {
+fn fold<T, U, e: EffectRow>(a: [T], init: U, f: fn(U, T) -> U / {| e}) -> U / {| e} where T: Use<[0, *]>, T: Use<[1, 1]>, U: Use<[1, 1]> { fold_from(a, arr_len(a, 0), 0, init, f) }
+fn fold_from<T, U, e: EffectRow>(a: [T], n: Int, i: Int, acc: U, f: fn(U, T) -> U / {| e}) -> U / {| e} where T: Use<[0, *]>, T: Use<[1, 1]>, U: Use<[1, 1]> {
     match(int_lt(i, n)) {
         0 => acc,
         _ => tail fold_from(a, n, int_add(i, 1), f(acc, arr_get(a, i)), f)
     }
 }
-fn each<T, e: EffectRow>(a: [T], f: fn(T) -> () / {| e}) -> () / {| e} { fold(a, (), fn(done, x) { f(x) }) }
+fn each<T, e: EffectRow>(a: [T], f: fn(T) -> () / {| e}) -> () / {| e} where T: Use<[0, *]>, T: Use<[1, 1]> { fold(a, (), fn(done, x) { f(x) }) }
 
 impl<T> Show for Array<T> where T: Show {
     fn show(a: Array<T>) -> Str {
@@ -815,7 +815,7 @@ impl<T> Show for Array<T> where T: Show {
 }
 
 // Write a value as text.
-fn say<T>(value: T) where T: Show { host_write(show(value)) }
+fn say<T>(value: T) where T: Show, T: Use<[1, 1]> { host_write(show(value)) }
 
 // A value owned anew, from one read through a reference (the library
 // specification's §3.1): of what is copied as it is read, the copy; of a
@@ -848,23 +848,23 @@ fn clone_onto<T: Clone>(a: &Array<T>, i: Int, out: Array<T>) -> Array<T> {
 // error made another first; leaving with an error unless a condition holds;
 // and of an option, what `Some` holds or else leaving with what a fallback
 // gives. (The library specification's §6. There is no `?`.)
-fn try<T, E, R, L, e: EffectRow>(value: Result<T, E>, target: L) -> T / {| e} where L: Label<Result<R, E>> {
+fn try<T, E, R, L, e: EffectRow>(value: Result<T, E>, target: L) -> T / {| e} where L: Label<Result<R, E>>, T: Use<[1, 1]>, E: Use<[1, 1]>, R: Use<[1, 1]> {
     match(value) { Ok(v) => v, Err(e) => target(Err(e)) }
 }
-fn try_map_error<T, E, D, R, L, e: EffectRow>(value: Result<T, E>, target: L, map_error: fn(E) -> D / {| e}) -> T / {| e} where L: Label<Result<R, D>> {
+fn try_map_error<T, E, D, R, L, e: EffectRow>(value: Result<T, E>, target: L, map_error: fn(E) -> D / {| e}) -> T / {| e} where L: Label<Result<R, D>>, T: Use<[1, 1]>, E: Use<[1, 1]>, D: Use<[1, 1]>, R: Use<[1, 1]> {
     match(value) { Ok(v) => v, Err(e) => target(Err(map_error(e))) }
 }
-fn ensure<R, E, L, e: EffectRow>(condition: Result<(), ()>, target: L, make_error: fn() -> E / {| e}) -> () / {| e} where L: Label<Result<R, E>> {
+fn ensure<R, E, L, e: EffectRow>(condition: Result<(), ()>, target: L, make_error: fn() -> E / {| e}) -> () / {| e} where L: Label<Result<R, E>>, R: Use<[1, 1]>, E: Use<[1, 1]> {
     match(condition) { Ok(_) => (), Err(_) => target(Err(make_error())) }
 }
-fn some_or_leave<T, R, L, e: EffectRow>(value: Result<T, ()>, target: L, fallback: fn() -> R / {| e}) -> T / {| e} where L: Label<R> {
+fn some_or_leave<T, R, L, e: EffectRow>(value: Result<T, ()>, target: L, fallback: fn() -> R / {| e}) -> T / {| e} where L: Label<R>, T: Use<[1, 1]>, R: Use<[1, 1]> {
     match(value) { Ok(v) => v, Err(_) => target(fallback()) }
 }
 
 // Stopping: what is said is written, and the program stops there, with no
 // cleanup run (the library specification's §6.1).
 fn abort<T>(message: Str) -> T { host_write(message); arr_get(arr_new(), 0) }
-fn unreachable<T>(message: Str) -> T { abort(message) }
+fn unreachable<T>(message: Str) -> T where T: Use<[1, 1]> { abort(message) }
 // What an `Option` or a `Result` has, asked of it as a value's own: `o.map(f)`.
 // (An `Option<T>` is a `Result<T, ()>`, so each is both's.)
 impl<T, E> Result<T, E> {
@@ -872,26 +872,26 @@ impl<T, E> Result<T, E> {
     fn is_none(value: &Self) -> Bool { match(value) { &Ok(_) => false, &Err(_) => true } }
     fn is_ok(value: &Self) -> Bool { match(value) { &Ok(_) => true, &Err(_) => false } }
     fn is_err(value: &Self) -> Bool { match(value) { &Ok(_) => false, &Err(_) => true } }
-    fn unwrap(value: Self) -> T { match(value) { Ok(x) => x, Err(_) => abort("unwrap of nothing") } }
-    fn expect(value: Self, message: Str) -> T { match(value) { Ok(x) => x, Err(_) => abort(message) } }
+    fn unwrap(value: Self) -> T where T: Use<[1, 1]> { match(value) { Ok(x) => x, Err(_) => abort("unwrap of nothing") } }
+    fn expect(value: Self, message: Str) -> T where T: Use<[1, 1]> { match(value) { Ok(x) => x, Err(_) => abort(message) } }
     fn unwrap_or(value: Self, other: T) -> T { match(value) { Ok(x) => x, Err(_) => other } }
-    fn unwrap_or_else<e: EffectRow>(value: Self, other: fn(E) -> T / {| e}) -> T / {| e} { match(value) { Ok(x) => x, Err(e) => other(e) } }
-    fn map<V, e: EffectRow>(value: Self, f: fn(T) -> V / {| e}) -> Result<V, E> / {| e} { match(value) { Ok(x) => Ok(f(x)), Err(e) => Err(e) } }
-    fn map_err<V, e: EffectRow>(value: Self, f: fn(E) -> V / {| e}) -> Result<T, V> / {| e} { match(value) { Ok(x) => Ok(x), Err(e) => Err(f(e)) } }
-    fn and_then<V, e: EffectRow>(value: Self, f: fn(T) -> Result<V, E> / {| e}) -> Result<V, E> / {| e} { match(value) { Ok(x) => f(x), Err(e) => Err(e) } }
-    fn or_else<V, e: EffectRow>(value: Self, f: fn(E) -> Result<T, V> / {| e}) -> Result<T, V> / {| e} { match(value) { Ok(x) => Ok(x), Err(e) => f(e) } }
-    fn ok_or<D>(value: Self, error: D) -> Result<T, D> { match(value) { Ok(x) => Ok(x), Err(_) => Err(error) } }
-    fn ok(value: Self) -> Option<T> { match(value) { Ok(x) => Some(x), Err(_) => None } }
+    fn unwrap_or_else<e: EffectRow>(value: Self, other: fn(E) -> T / {| e}) -> T / {| e} where T: Use<[1, 1]>, E: Use<[1, 1]> { match(value) { Ok(x) => x, Err(e) => other(e) } }
+    fn map<V, e: EffectRow>(value: Self, f: fn(T) -> V / {| e}) -> Result<V, E> / {| e} where V: Use<[1, 1]>, T: Use<[1, 1]> { match(value) { Ok(x) => Ok(f(x)), Err(e) => Err(e) } }
+    fn map_err<V, e: EffectRow>(value: Self, f: fn(E) -> V / {| e}) -> Result<T, V> / {| e} where V: Use<[1, 1]>, E: Use<[1, 1]> { match(value) { Ok(x) => Ok(x), Err(e) => Err(f(e)) } }
+    fn and_then<V, e: EffectRow>(value: Self, f: fn(T) -> Result<V, E> / {| e}) -> Result<V, E> / {| e} where V: Use<[1, 1]>, T: Use<[1, 1]>, E: Use<[1, 1]> { match(value) { Ok(x) => f(x), Err(e) => Err(e) } }
+    fn or_else<V, e: EffectRow>(value: Self, f: fn(E) -> Result<T, V> / {| e}) -> Result<T, V> / {| e} where V: Use<[1, 1]>, T: Use<[1, 1]>, E: Use<[1, 1]> { match(value) { Ok(x) => Ok(x), Err(e) => f(e) } }
+    fn ok_or<D>(value: Self, error: D) -> Result<T, D> where T: Use<[1, 1]> { match(value) { Ok(x) => Ok(x), Err(_) => Err(error) } }
+    fn ok(value: Self) -> Option<T> where T: Use<[1, 1]> { match(value) { Ok(x) => Some(x), Err(_) => None } }
     fn filter<e: EffectRow>(value: Self, keep: for<'a> fn(&'a T) -> Bool / {| e}) -> Result<T, ()> / {| e} {
         match(value) { Ok(x) => if(keep(&x)) { Ok(x) } else { Err(()) }, Err(_) => Err(()) }
     }
 }
 fn assert(condition: Result<(), ()>) { match(condition) { Ok(_) => (), Err(_) => abort("assertion failed") } }
 fn assert_message(condition: Result<(), ()>, message: Str) { match(condition) { Ok(_) => (), Err(_) => abort(message) } }
-fn assert_eq<T>(left: &T, right: &T) where T: Eq, T: Show {
+fn assert_eq<T>(left: &T, right: &T) where T: Eq, T: Show, T: Use<[0, *]> {
     match(*left == *right) { Ok(_) => (), Err(_) => abort(show(*left) ++ " is not " ++ show(*right)) }
 }
-fn assert_ne<T>(left: &T, right: &T) where T: Eq, T: Show {
+fn assert_ne<T>(left: &T, right: &T) where T: Eq, T: Show, T: Use<[0, *]> {
     match(*left == *right) { Ok(_) => abort(show(*left) ++ " is what it should not be"), Err(_) => () }
 }
 
@@ -918,7 +918,7 @@ impl<T> Eq for Array<T> where T: Eq {
         match(int_eq(len(a), len(b))) { 0 => false, _ => same_from(a, b, 0) }
     }
 }
-fn same_from<T>(a: Array<T>, b: Array<T>, i: Int) -> Bool where T: Eq {
+fn same_from<T>(a: Array<T>, b: Array<T>, i: Int) -> Bool where T: Eq, T: Use<[0, *]> {
     match(int_lt(i, len(a))) {
         0 => true,
         _ => match(index(a, i) == index(b, i)) { Ok(_) => tail same_from(a, b, int_add(i, 1)), Err(_) => false }

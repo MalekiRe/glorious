@@ -111,7 +111,9 @@ partial def checkDeciding (decls : List FnDecl) (fuel : Nat := 64) (first : Opti
 /-- A group checked; where only what can be found of a program is asked
 (`St.lenient`), one that is refused is let be. -/
 def checkMaybe (decls : List FnDecl) : M Unit := do
-  if (← get).lenient then tryCatchThe Elab.Said (checkDeciding decls) fun _ => pure ()
+  if (← get).lenient then
+    tryCatchThe Elab.Said (checkDeciding decls) fun e => do
+      modify fun s => { s with refusals := s.refusals.push e.msg }
   else checkDeciding decls
 
 /-- How far apart the ids of units checked side by side start: room for the

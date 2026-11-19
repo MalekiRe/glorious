@@ -867,6 +867,8 @@ structure St where
   dropMode : Bool := false
   /-- How many `Drop`s have been asked for, to name each. -/
   dropAsked : Nat := 0
+  /-- What was refused, where only what can be found is asked (`lenient`). -/
+  refusals : Array String := #[]
   /-- How each call's bounds are met, for the elaborator. -/
   dictTable : Array (Nat × List Elab.DictE) := #[]
   methodCalls : Array (Nat × Nat) := #[]

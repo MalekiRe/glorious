@@ -672,9 +672,20 @@ def declare (items : List Item) (g : Elab.Globals) : M Unit := do
     { s with types := Array.replicate typeNames.length [], typeLifetimes := typeLifetimes.toArray, typeNames }
   -- What each function says of its parameters.
   let mut declared : Std.HashMap Nat (List String × List (Option TypeExpr)) := {}
+  -- (A type parameter said to be a callable is a callable's type, which
+  -- says nothing here.)
+  let callables : Std.HashMap String (List String) := items.foldl (fun m item =>
+    match item with
+    | .bounds name bs => m.insert name (bs.filterMap fun b =>
+        if ["Fn", "RunsIn", "Label"].contains b.trait then some b.subject else none)
+    | _ => m) {}
   for item in items do
     if let .fn name ps annots _ _ := item then
       if let some f := g.fns[name]? then
+        let said := callables.getD name []
+        let annots := annots.map fun
+          | some (.name x []) => if said.contains x then none else some (TypeExpr.name x [])
+          | a => a
         if annots.any Option.isSome then declared := declared.insert f (Syntax.genericParams ps, annots)
   modify fun s => { s with declared }
   for item in items do

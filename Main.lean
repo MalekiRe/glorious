@@ -776,6 +776,8 @@ def signatures (path : String) (library : Bool) : IO UInt32 := do
           | .ok w =>
             IO.println s!"{name} ¦ {", ".intercalate w.generics} ¦ {" ;; ".intercalate w.params} ¦ {w.ret} ¦ {w.effects} ¦ {" ;; ".intercalate w.asks}"
           | .error e => IO.println s!"{name} ¦ ERROR ¦ {e}"
+        for r in st.refusals do
+          IO.println s!"REFUSED ¦ {r}"
         for (name, w) in Check.writtenMethods st do
           match w with
           | .ok w =>

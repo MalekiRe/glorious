@@ -5797,6 +5797,37 @@ The special cases of an argument (`checkArg`):
   With parameters' types written, a name's type is known where it is
   given, and nothing in the suite used the rule.
 
+## What a function needs of what it is given is its signature's
+
+A function's type says what its caller has to give: how often each type
+parameter's values may be used, and how often a callable it is given may be
+called. That is now its signature's, not found from its body, so a caller's
+check reads nothing of the body. (Chosen as Rust has it.)
+
+- A type parameter with nothing written is one the function may let go but
+  not use twice, as Rust's `T` is: `T: Use<[0, 1]>`. One it uses any number
+  of times says `T: Use<[0, *]>` (as `T: Copy`); one it uses exactly once,
+  `T: Use<[1, 1]>`, and can then be given a value that has to be used. A type
+  parameter of nothing the function is given, `fn empty<T>() -> [T]`, asks
+  nothing.
+- A callable it is given it may call any number of times and let go, as
+  Rust's `Fn`. One called at most once is a type parameter said so,
+  `F: Fn<(A,), Output = B>, F: Use<[0, 1]>` (as `FnOnce`); `Use<[1, 1]>` for
+  one it has to call or give on.
+- The body is held to that: using a `T` twice where it says nothing is
+  refused, `write T: Use<[0, *]>`.
+- What is still found from the body: what an implementation's functions need
+  of the implementation's type parameters (asked where the implementation is
+  chosen); what a callable that runs in an environment the function is given
+  needs (the environment's rules); and that a callable comes back where the
+  function holds a value that has to be used while calling it.
+
+The library says it everywhere it passes values on (`T: Use<[1, 1]>`) and
+where it copies them (`Use<[0, *]>`): found by giving every type parameter
+`Use<[1, 1]>` and taking it back from each function whose body lets a value
+go, until nothing changed. `if`, `else`, `or`, `and` and `match` pass on what
+they are given.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by

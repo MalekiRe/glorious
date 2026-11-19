@@ -220,7 +220,7 @@ def mergeStates (p a b : St) : Option St := do
     instRows := ← m3 (·.instRows), unrunGiven := ← m3 (·.unrunGiven),
     sharedEdges := ← m3 (·.sharedEdges), assumedLinks := ← m3 (·.assumedLinks),
     abandoned := ← m3 (·.abandoned), sure := ← m3 (·.sure), lowerChecks := ← m3 (·.lowerChecks),
-    runFns := ← m3 (·.runFns), runCtors := ← m3 (·.runCtors),
+    refusals := ← m3 (·.refusals), runFns := ← m3 (·.runFns), runCtors := ← m3 (·.runCtors),
     runAliases := ← m3 (·.runAliases), runOps := ← m3 (·.runOps), runExact := ← m3 (·.runExact),
     runNow := ← m3 (·.runNow), rowIncl := ← m3 (·.rowIncl), types := ← m3 (·.types),
     ctors := ← m3 (·.ctors), ops := ← m3 (·.ops), effects := ← m3 (·.effects),

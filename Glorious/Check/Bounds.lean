@@ -760,29 +760,90 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
       opened := opened.push out
     modify fun s =>
       { s with dups := opened.getD 0 #[], drops := opened.getD 1 #[], stays := opened.getD 2 #[] }
-    -- `T: Use<[fewest, most]>`: what is said of a type parameter is all the
-    -- body may need of it, and is what a caller has to give.
+    -- What a function needs of what its caller gives is what its signature
+    -- says, not what its body is found to do: `T: Use<[fewest, most]>` of a
+    -- type parameter, and where nothing is said, one that it may let go but
+    -- not use twice, as Rust's `T` is. A callable it is given, it may call
+    -- any number of times and let go, as Rust's `Fn`: a callable type
+    -- parameter said `Use<[.., 1]>` is called at most once. The body's needs
+    -- are held to that; the function's type says that and no more.
     let mut said : Array (Ty × Bool × Bool) := #[]
-    for b in d.bounds do
-      if b.trait == "Use" then
-        if let (some (lower, upper), some param) := (b.quantity, seen.lookup s!"'{b.subject}@{rigidOwner decls d}") then
-          -- (What is needed of a reference to a `T` is not needed of a `T`.)
-          let mentions := fun (need : Ty) => show M Bool from match param with
-            | .var id => tyHoldsVar [] id need
-            | _ => pure false
-          if lower ≥ 1 then
-            if let some (_, why) ← (opened.getD 1 #[]).findM? fun (need, _) => mentions need then
-              throw (inFunction d.name s!"`{b.subject}: Use<[{lower}, ..]>` says a `{b.subject}` has to be used, but {why}")
-          if upper.isSome then
-            if let some (_, why) ← (opened.getD 0 #[]).findM? fun (need, _) => mentions need then
-              throw (inFunction d.name s!"`{b.subject}: Use<[.., 1]>` says a `{b.subject}` is used at most once, but {why}")
-          said := said.push (param, lower == 0, upper.isNone)
+    let quantityOf := fun (p : String) =>
+      (d.bounds.find? fun b => b.trait == "Use" && b.subject == p).bind (·.quantity)
+    let rowOrLife := fun (p : String) => p.startsWith "'" || (Syntax.rowParam p).isSome
+    -- (An implementation's function: what it needs of the implementation's
+    -- type parameters is asked of the implementation where it is chosen,
+    -- as before; of its own, as of any function's.)
+    let own := if d.impl.isNone then genericParams d.params else []
+    for p in genericParams d.params do
+      if rowOrLife p then continue
+      if !own.contains p && (quantityOf p).isNone then continue
+      if let some param := seen.lookup s!"'{p}@{rigidOwner decls d}" then
+        let written := quantityOf p
+        let (lower, upper) := written.getD (0, some 1)
+        -- (What is needed of a reference to a `T` is not needed of a `T`.)
+        let mentions := fun (need : Ty) => show M Bool from match param with
+          | .var id => tyHoldsVar [] id need
+          | _ => pure false
+        -- (A type parameter of none of what it is given: nothing of one is the
+        -- function's to let go or to use twice, `fn empty<T>() -> [T]`.)
+        let given ← match ← find t1 with
+          | .fn ps _ _ _ _ => match param with
+            | .var id => ps.anyM fun q => tyHoldsVar [] id q
+            | _ => pure true
+          | _ => pure true
+        if written.isNone && !given then continue
+        let nothing := s!"`{p}` says nothing of how often it is used, so"
+        if lower ≥ 1 then
+          if let some (_, why) ← (opened.getD 1 #[]).findM? fun (need, _) => mentions need then
+            throw (inFunction d.name s!"`{p}: Use<[{lower}, ..]>` says a `{p}` has to be used, but {why}")
+        if upper.isSome then
+          let said_ := if written.isSome then s!"`{p}: Use<[.., 1]>` says" else nothing
+          if let some (_, why) ← (opened.getD 0 #[]).findM? fun (need, _) => mentions need then
+            let hint := if written.isNone then s!": write `{p}: Use<[0, *]>` for one that can be used any number of times" else ""
+            throw (inFunction d.name s!"{said_} a `{p}` is used at most once, but {why}{hint}")
+        said := said.push (param, lower == 0, upper.isNone)
+    -- (A callable it is given: as many times as it likes, or none, unless
+    -- its type parameter says how often, `F: Use<[1, 1]>` for once.)
+    let mut envNeeds : List ((Ty × String) × Bool) := []
+    if d.impl.isNone then
+      if let .fn ps _ _ _ _ ← find t1 then
+        for (q, annot) in ps.zip d.annots do
+          if let .fn _ _ _ _ cap ← find q then
+            let named := match annot with
+              | some (.name f []) => some f
+              | _ => none
+            let written := named.bind quantityOf
+            let (lower, upper) := written.getD (0, none)
+            let root ← findCap cap
+            let isIt := fun (need : Ty) => show M Bool from do
+              match ← find need with
+              | .fn _ _ _ _ c => pure ((← findCap c) == root)
+              | _ => pure false
+            let f := named.getD "the callable"
+            -- (One that runs in an environment the function is given: which
+            -- of those runs, and how, the environment's rules say, from what
+            -- the body does.)
+            if named.any fun f => d.bounds.any fun b => b.trait == "RunsIn" && b.subject == f then
+              envNeeds := envNeeds ++ ((← (opened.getD 0 #[]).filterM fun (need, _) => isIt need).toList.map (·, true))
+                ++ ((← (opened.getD 1 #[]).filterM fun (need, _) => isIt need).toList.map (·, false))
+              continue
+            if lower ≥ 1 then
+              if let some (_, why) ← (opened.getD 1 #[]).findM? fun (need, _) => isIt need then
+                throw (inFunction d.name s!"`{f}: Use<[{lower}, ..]>` says it has to be called, but {why}")
+            if upper.isSome then
+              if let some (_, why) ← (opened.getD 0 #[]).findM? fun (need, _) => isIt need then
+                throw (inFunction d.name s!"`{f}: Use<[.., 1]>` says it is called at most once, but {why}")
+            said := said.push (q, lower == 0, upper.isNone)
+    let saidDrops := said.filterMap fun (param, drops, _) =>
+      if drops then some (param, "its type parameter is said to be one that can go unused") else none
+    let saidDups := said.filterMap fun (param, _, dups) =>
+      if dups then some (param, "its type parameter is said to be one that can be used more than once") else none
+    let envDups := (envNeeds.filter (·.2)).map (·.1)
+    let envDrops := (envNeeds.filter (!·.2)).map (·.1)
     modify fun s =>
-      { s with
-        drops := s.drops ++ said.filterMap fun (param, drops, _) =>
-          if drops then some (param, "its type parameter is said to be one that can go unused") else none
-        dups := s.dups ++ said.filterMap fun (param, _, dups) =>
-          if dups then some (param, "its type parameter is said to be one that can be used more than once") else none }
+      if d.impl.isNone then { s with drops := saidDrops ++ envDrops.toArray, dups := saidDups ++ envDups.toArray }
+      else { s with drops := s.drops ++ saidDrops, dups := s.dups ++ saidDups }
     let scheme ← generalize t1 [] false
     modify fun s => { s with dups := before.dups, drops := before.drops, stays := before.stays }
     -- What a lifetime is said to hold of a type parameter, it holds of the

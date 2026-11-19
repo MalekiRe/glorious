@@ -177,12 +177,14 @@ def writeSignature (s : Scheme) (named : List (Nat × String) := []) : M (Except
           | none => none)
       | none => pure none
     let effects ← writeEffs effs own
+    let facts ← ((s.dups.map (("%dup", ·))) ++ (s.drops.map (("%drop", ·))) ++ (s.stays.map (("%stay", ·))) ++ (s.quiets.map (("%quiet", ·)))).mapM fun (k, t, _) => do
+      pure s!"{k} {← writeTy t}"
     let asks ← s.bounds.mapM fun (tr, t) => do
       match ← (find t : M Ty) with
       | .tuple (self :: targs) =>
         pure s!"{← writeTy self}: {typeName tr}<{", ".intercalate (← targs.mapM writeTy)}>"
       | _ => pure s!"{← writeTy t}: {typeName tr}"
-    pure (params, ret, effects, asks)
+    pure (params, ret, effects, asks ++ facts)
   -- (Each named variable by what it now stands for.)
   let named ← named.filterMapM fun (v, n) => do
     match ← find (.var v) with

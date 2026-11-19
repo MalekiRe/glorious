@@ -12,7 +12,7 @@ effect Search<T> { [1, 1] found(T) }
 
 // Report every subset of the items. `picked` holds the items chosen so far,
 // most recent first.
-fn subsets<T>(items: List<T>, picked: List<T>) -> () / {Search<List<T>>} {
+fn subsets<T>(items: List<T>, picked: List<T>) -> () / {Search<List<T>>} where T: Use<[0, *]> {
     match(items) {
         Nil => found(picked),
         Cons(head, rest) =>

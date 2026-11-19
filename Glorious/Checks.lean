@@ -132,7 +132,7 @@ def all : List (Nat × (Unit → Bool)) := [
   -- rule names `if` or `else`; a function a program defines does the same.
   (37, fun _ => owned "effect Ask { ask() -> Int }\n    fn main() -> Int { handle ask() + 1 { ask(k) => if(1 < 2) { k(10) } else { k(20) } } }" == some true),
   (38, fun _ => owned "effect Ask { ask() -> Int }\n    fn main() -> Int { handle ask() + 1 { ask(k) =>\n      if(1 < 2) { if(2 < 1) { k(1) } else { k(2) } } else { k(3) } } }" == some true),
-  (39, fun _ => owned "effect Ask { ask() -> Int }\n    fn decide<T, U, V, e: EffectRow>(c: Result<T, U>, k: fn(Int) -> V / {| e}) -> V / {| e} { if(c) { k(1) } else { k(2) } }\n    fn main() -> Int { handle ask() + 1 { ask(k) => decide(1 < 2, k) } }" == some true),
+  (39, fun _ => owned "effect Ask { ask() -> Int }\n    fn decide<T, U, V, F0, e: EffectRow>(c: Result<T, U>, k: F0) -> V / {| e} where F0: Fn<(Int,), Output = V, Effects = {| e}>, F0: Use<[0, 1]> { if(c) { k(1) } else { k(2) } }\n    fn main() -> Int { handle ask() + 1 { ask(k) => decide(1 < 2, k) } }" == some true),
   -- A chain of alternatives: `or` gives the body that was not run to its right
   -- operand, which runs in its place and gives back, if it fails too, a body
   -- made from what it took over. The block after `else` takes over from that
@@ -146,7 +146,7 @@ def all : List (Nat × (Unit → Bool)) := [
   -- Two callables that each took the resumption for themselves own it twice,
   -- whichever of them is later run. Such a program compiles, typed but not shown
   -- well owned.
-  (44, fun _ => owned "effect Ask { ask() -> Int }\n    fn pick<T, U, V, e: EffectRow>(c: Result<T, U>, a: fn() -> V / {| e}, b: fn() -> V / {| e}) -> V / {| e} { match(c) { Ok(_) => a(), Err(_) => b() } }\n    fn main() -> Int { handle ask() + 1 { ask(k) => pick(1 < 2, { k(1) }, { k(2) }) } }" == some false),
+  (44, fun _ => owned "effect Ask { ask() -> Int }\n    fn pick<T, U, V, F0, F1, e: EffectRow>(c: Result<T, U>, a: F0, b: F1) -> V / {| e} where F0: Fn<(), Output = V, Effects = {| e}>, F0: Use<[0, 1]>, F1: Fn<(), Output = V, Effects = {| e}>, F1: Use<[0, 1]> { match(c) { Ok(_) => a(), Err(_) => b() } }\n    fn main() -> Int { handle ask() + 1 { ask(k) => pick(1 < 2, { k(1) }, { k(2) }) } }" == some false),
   (45, fun _ => owned "effect Ask { ask() -> Int }\n    fn main() -> Int { handle ask() + 1 { ask(k) =>\n      let a = { k(1) }; let b = { k(2) }; if(1 < 2) { a() } else { b() } } }" == some false),
   -- Regions. A program whose Core follows the region rules is certified with
   -- them, and the proof then says it never reads or writes a mutable variable
@@ -257,8 +257,8 @@ def all : List (Nat × (Unit → Bool)) := [
   -- A call with one borrow among its arguments is, in Core, a call with a scope
   -- around it: nothing is made for it. A second borrow costs a callable, and so
   -- does one given a name, whose scope is some statements and not a call.
-  (89, fun _ => borrowFns "fn f<T>(a: T, p: &mut T, b: T) where T: Add { *p = *p + a + b }\n    fn main() -> Int { let mut x = 5; f(1, &mut x, 2); x }" == some 0),
-  (90, fun _ => borrowFns "fn swap<T>(a: &mut T, b: &mut T) { let t = *a; *a = *b; *b = t; }\n    fn main() -> (Int, Int) { let mut x = 1; let mut y = 2; swap(&mut x, &mut y); (x, y) }" == some 1),
+  (89, fun _ => borrowFns "fn f<T>(a: T, p: &mut T, b: T) where T: Add, T: Use<[0, *]> { *p = *p + a + b }\n    fn main() -> Int { let mut x = 5; f(1, &mut x, 2); x }" == some 0),
+  (90, fun _ => borrowFns "fn swap<T>(a: &mut T, b: &mut T) where T: Use<[0, *]> { let t = *a; *a = *b; *b = t; }\n    fn main() -> (Int, Int) { let mut x = 1; let mut y = 2; swap(&mut x, &mut y); (x, y) }" == some 1),
   (91, fun _ => borrowFns "fn main() -> Int { let mut x = 1; let p = &mut x; *p = 2; x }" == some 1),
   -- Putting a new value in a variable and taking the old one is not a borrow.
   (92, fun _ => unprovedBorrows "fn main() -> (Int, Int) { let mut x = 1; let old = replace(&mut x, 5); (old, x) }"
@@ -266,11 +266,7 @@ def all : List (Nat × (Unit → Bool)) := [
   -- A closure holding a resumption whose cleanup writes a variable, given up
   -- by a function that takes any callable: its destructor, and the function,
   -- touch the variable, and the region rules hold.
-  (94, fun _ => borrowChecked "effect Ask { ask() -> Int }
-    fn drop_it(c: fn() -> Int) -> Int { cancel(c); 7 }
-    fn main() -> Int { let mut n = 0;
-      let got = handle { defer say(9); let a = ask(); n = n + a; a }() { ask(k) => drop_it({ k(1) }) };
-      got + n }" == some true),
+  (94, fun _ => borrowChecked "effect Ask { ask() -> Int }\n    fn drop_it<F0>(c: F0) -> Int where F0: Fn<(), Output = Int>, F0: Use<[1, 1]> { cancel(c); 7 }\n    fn main() -> Int { let mut n = 0;\n      let got = handle { defer say(9); let a = ask(); n = n + a; a }() { ask(k) => drop_it({ k(1) }) };\n      got + n }" == some true),
   -- What the checker kept of a program is taken for the next only as that
   -- program has it: an implementation's function written longer before
   -- another implementation's moves where the other's calls are.
