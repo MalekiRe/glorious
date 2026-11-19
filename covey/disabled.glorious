@@ -1,0 +1,75 @@
+// Disabled entities: a query is not of an entity that has a component that
+// disables, `Disabled` or one the program says disables (`Prefab`), unless
+// it mentions that component: asks for it, optionally or not, tests for it,
+// or filters by it. Asking the world for a component directly sees them, and
+// enabling is taking the component away.
+// expect:
+// [0]
+// [1]
+// [0, 1]
+// [0, 1]
+// [1]
+// [0]
+// [0, 1]
+// [1]
+// [0, 2]
+// [0, 1, 2]
+// 0
+// 1
+// [0, 1]
+// 0
+mod ecs;
+
+use ecs::{App, Entity, Query, Has, With, Without, MayHave, Disabled, Disabling};
+
+struct Hp(Int)
+struct Prefab
+impl Disabling for Prefab { const DISABLES: Bool = true; }
+
+fn main() -> Int {
+    let mut world = App::new()
+        .register<Hp>()
+        .register<Disabled>()
+        .register<Prefab>()
+        .build().world;
+    let enabled = world.spawn_bundle((Hp(0),));
+    let disabled = world.spawn_bundle((Hp(1), Disabled));
+    let prefab = world.spawn_bundle((Hp(2), Prefab));
+    let mut seen = [];
+    world.query<(&Hp,)>().for_each() { (h,) => seen = push(seen, h.0); };
+    say(seen);
+    seen = [];
+    world.query<(&Hp, &Disabled)>().for_each() { h, _ => seen = push(seen, h.0); };
+    say(seen);
+    seen = [];
+    world.query<(&Hp, Option<&Disabled>)>().for_each() { h, _ => seen = push(seen, h.0); };
+    say(seen);
+    seen = [];
+    world.query<(&Hp, Has<Disabled>)>().for_each() { h, _ => seen = push(seen, h.0); };
+    say(seen);
+    seen = [];
+    world.query_filtered<(&Hp,), With<Disabled>>().for_each() { (h,) => seen = push(seen, h.0); };
+    say(seen);
+    seen = [];
+    world.query_filtered<(&Hp,), Without<Disabled>>().for_each() { (h,) => seen = push(seen, h.0); };
+    say(seen);
+    seen = [];
+    world.query_filtered<(&Hp,), MayHave<Disabled>>().for_each() { (h,) => seen = push(seen, h.0); };
+    say(seen);
+    seen = [];
+    world.query_filtered<(&Hp,), (With<Disabled>, MayHave<Prefab>)>().for_each() { (h,) => seen = push(seen, h.0); };
+    say(seen);
+    seen = [];
+    world.query_filtered<(&Hp,), MayHave<Prefab>>().for_each() { (h,) => seen = push(seen, h.0); };
+    say(seen);
+    seen = [];
+    world.query_filtered<(&Hp,), (MayHave<Prefab>, MayHave<Disabled>)>().for_each() { (h,) => seen = push(seen, h.0); };
+    say(seen);
+    say(match(world.query<(&Hp,)>().get_mut(disabled)) { Some(_) => 1, None => 0 });
+    say(match(world.get<Hp>(disabled)) { Some(h) => h.0, None => 0 - 1 });
+    discard(world.remove<Disabled>(disabled));
+    seen = [];
+    world.query<(&Hp,)>().for_each() { (h,) => seen = push(seen, h.0); };
+    say(seen);
+    0
+}

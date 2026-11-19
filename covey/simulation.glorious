@@ -76,7 +76,7 @@ fn reap<S>(healths: &Column<Health>, commands: &mut Commands<S>, ended: &mut End
 // Plugins: one a type of its own, with the components it registers and what
 // it builds found from `build`; one a function from an app to an app.
 struct Physics
-impl<S, L> Plugin<S, L> for Physics {
+impl<S, L> Plugin<S, L> for Physics where S: ecs::Hidden<(&mut Position, &Velocity), ()> {
     type Components = (Position, Velocity);
     type Out = ecs::App<(ecs::Column<Position>, (ecs::Column<Velocity>, S)), (ecs::On<Update, (ecs::Sys<fn(&mut ecs::Query<(&mut Position, &Velocity), (), (ecs::Column<Position>, (ecs::Column<Velocity>, ()))>) -> (), ()>, (ecs::RunIf<ecs::Sys<fn(&mut ecs::Column<Velocity>) -> (), ()>, fn(&ecs::Column<Velocity>) -> Bool>, (ecs::Sys<fn(&mut ecs::Column<Position>) -> (), ()>, ())))>, L)>;
     fn build(physics: Physics, app: ecs::App<<(Position, Velocity) as ecs::Registers<S>>::Out, L>) -> ecs::App<(ecs::Column<Position>, (ecs::Column<Velocity>, S)), (ecs::On<Update, (ecs::Sys<fn(&mut ecs::Query<(&mut Position, &Velocity), (), (ecs::Column<Position>, (ecs::Column<Velocity>, ()))>) -> (), ()>, (ecs::RunIf<ecs::Sys<fn(&mut ecs::Column<Velocity>) -> (), ()>, fn(&ecs::Column<Velocity>) -> Bool>, (ecs::Sys<fn(&mut ecs::Column<Position>) -> (), ()>, ())))>, L)> {

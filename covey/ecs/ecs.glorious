@@ -754,10 +754,10 @@ impl<S> World<S> {
 
     // A query of the world: `world.query<(Entity, &Score)>()`. While it is
     // had, the world is borrowed by it; its columns go back when it is let go.
-    pub fn query<Q>(world: &mut Self) -> WorldQuery<'_, Q, (), S> where Q: Fill<S> {
+    pub fn query<Q>(world: &mut Self) -> WorldQuery<'_, Q, (), S> where Q: Fill<S>, S: Hidden<Q, ()> {
         world.query_filtered<Q, ()>()
     }
-    pub fn query_filtered<Q, N>(world: &mut Self) -> WorldQuery<'_, Q, N, S> where Q: Fill<S>, N: Only<S> {
+    pub fn query_filtered<Q, N>(world: &mut Self) -> WorldQuery<'_, Q, N, S> where Q: Fill<S>, N: Only<S>, S: Hidden<Q, N> {
         let query = query_of<Q, N, S>(world);
         WorldQuery {
             world: world,
@@ -1066,6 +1066,56 @@ impl<H, ..R, S> Only<S> for (H, ..R) where H: Only<S>, (..R): Only<S> {
     fn lets(columns: &S, entity: Entity, since: Int) -> Bool {
         if(<H as Only<S>>::lets(columns, entity, since)) { <(..R) as Only<S>>::lets(columns, entity, since) } else { false }
     }
+}
+
+// Entities that are disabled: those with a component whose type says it
+// disables, `Disabled` or one of the program's (`impl Disabling for Prefab`).
+// A query is not of them unless it mentions that component: asks for it,
+// optionally or not, tests for it (`Has`), or filters by it (`With`,
+// `Without`, `MayHave`). Asking a world for a component directly sees them.
+// (Every type says whether it disables: none does, but those that say so,
+// as `Disabled` does.)
+pub struct Disabled
+pub trait Disabling { const DISABLES: Bool; }
+impl<T> Disabling for T { const DISABLES: Bool = false; }
+impl Disabling for Disabled { const DISABLES: Bool = true; }
+// Every entity, with it or not: a filter that mentions `T` and lets all through.
+pub struct MayHave<T>(T)
+impl<T, S> Only<S> for MayHave<T> { fn lets(columns: &S, entity: Entity, since: Int) -> Bool { true } }
+// Does what a query asks for, or its filter, mention `D`?
+pub trait Mentions<D> { fn mentions() -> Bool }
+impl<D> Mentions<D> for () { fn mentions() -> Bool { false } }
+impl<D> Mentions<D> for Entity { fn mentions() -> Bool { false } }
+impl<A, D> Mentions<D> for &mut A where A: Same<D> { fn mentions() -> Bool { <A as Same<D>>::same() } }
+impl<A, D> Mentions<D> for &A where A: Same<D> { fn mentions() -> Bool { <A as Same<D>>::same() } }
+impl<A, D> Mentions<D> for Option<&mut A> where A: Same<D> { fn mentions() -> Bool { <A as Same<D>>::same() } }
+impl<A, D> Mentions<D> for Option<&A> where A: Same<D> { fn mentions() -> Bool { <A as Same<D>>::same() } }
+impl<A, D> Mentions<D> for Has<A> where A: Same<D> { fn mentions() -> Bool { <A as Same<D>>::same() } }
+impl<A, D> Mentions<D> for With<A> where A: Same<D> { fn mentions() -> Bool { <A as Same<D>>::same() } }
+impl<A, D> Mentions<D> for Without<A> where A: Same<D> { fn mentions() -> Bool { <A as Same<D>>::same() } }
+impl<A, D> Mentions<D> for MayHave<A> where A: Same<D> { fn mentions() -> Bool { <A as Same<D>>::same() } }
+impl<A, D> Mentions<D> for Added<A> where A: Same<D> { fn mentions() -> Bool { <A as Same<D>>::same() } }
+impl<A, D> Mentions<D> for Changed<A> where A: Same<D> { fn mentions() -> Bool { <A as Same<D>>::same() } }
+impl<R, Q, D> Mentions<D> for To<R, Q> { fn mentions() -> Bool { false } }
+impl<R, Q, D> Mentions<D> for From<R, Q> { fn mentions() -> Bool { false } }
+impl<H, ..R, D> Mentions<D> for (H, ..R) where H: Mentions<D>, (..R): Mentions<D> {
+    fn mentions() -> Bool { if(<H as Mentions<D>>::mentions()) { true } else { <(..R) as Mentions<D>>::mentions() } }
+}
+// Is an entity hidden from a query of `Q` with `N` by a component it has?
+pub trait Hidden<Q, N> { fn hidden(&Self, Entity) -> Bool }
+impl<Q, N> Hidden<Q, N> for () { fn hidden(columns: &(), entity: Entity) -> Bool { false } }
+impl<T, R, Q, N> Hidden<Q, N> for (Column<T>, R) where T: Disabling, Q: Mentions<T>, N: Mentions<T>, R: Hidden<Q, N> {
+    fn hidden(columns: &(Column<T>, R), entity: Entity) -> Bool {
+        let here = if(<T as Disabling>::DISABLES) {
+            if(<Q as Mentions<T>>::mentions()) { false }
+            else if(<N as Mentions<T>>::mentions()) { false }
+            else { slot_of(&columns.0, entity) >= 0 }
+        } else { false };
+        if(here) { true } else { <R as Hidden<Q, N>>::hidden(&columns.1, entity) }
+    }
+}
+impl<T, R, Q, N> Hidden<Q, N> for (Resource<T>, R) where R: Hidden<Q, N> {
+    fn hidden(columns: &(Resource<T>, R), entity: Entity) -> Bool { <R as Hidden<Q, N>>::hidden(&columns.1, entity) }
 }
 
 impl<Q, N, St> Query<Q, N, St> {
@@ -1409,18 +1459,20 @@ impl<E, S, ..G, F, O, Lc, X, Rest> Fetch<E, S, (..G), F, O, Lc> for (MaybeOwned<
 }
 // (The commands are given once: what comes after has none to give.)
 // The entities a query of `Q` with `N` is of, in the world's columns.
-fn query_of<Q, N, S>(world: &mut World<S>) -> Query<Q, N, <Q as Item>::Store> where Q: Fill<S>, N: Only<S> {
+fn query_of<Q, N, S>(world: &mut World<S>) -> Query<Q, N, <Q as Item>::Store> where Q: Fill<S>, N: Only<S>, S: Hidden<Q, N> {
     let all = entities(&*world);
     let mut found = [];
     let mut i = 0;
     while({ i < len_at(&all) }) {
-        if(<N as Only<S>>::lets(&world.columns, all[i], world.since)) { push_at(&mut found, all[i]) };
+        if(<N as Only<S>>::lets(&world.columns, all[i], world.since)) {
+            if(not(<S as Hidden<Q, N>>::hidden(&world.columns, all[i]))) { push_at(&mut found, all[i]) };
+        };
         i = i + 1
     };
     Query { store: <Q as Fill<S>>::fill(&mut world.columns, world.tick), entities: found }
 }
 impl<E, S, ..G, F, O, Lc, Q, N, St, Rest> Fetch<E, S, (..G), F, O, Lc> for (Querying<Q, N, St>, Rest)
-    where Q: Item<Store = St>, Q: Fill<S>, N: Only<S>, Rest: Fetch<E, S, (..G, &mut Query<Q, N, St>), F, O, Lc> {
+    where Q: Item<Store = St>, Q: Fill<S>, N: Only<S>, S: Hidden<Q, N>, Rest: Fetch<E, S, (..G, &mut Query<Q, N, St>), F, O, Lc> {
     fn fetch(event: &E, world: &mut World<S>, commands: &mut Commands<S>, state: &mut Lc, gathered: (..G), f: &F) -> Option<O> {
         let (..g) = gathered;
         let mut query = query_of<Q, N, S>(world);
@@ -1432,7 +1484,7 @@ impl<E, S, ..G, F, O, Lc, Q, N, St, Rest> Fetch<E, S, (..G), F, O, Lc> for (Quer
 }
 // (Not run unless the query is of exactly one entity.)
 impl<E, S, ..G, F, O, Lc, Q, N, St, Rest> Fetch<E, S, (..G), F, O, Lc> for (Singling<Q, N, St>, Rest)
-    where Q: Item<Store = St>, Q: Fill<S>, N: Only<S>, Rest: Fetch<E, S, (..G, &mut Single<Q, N, St>), F, O, Lc> {
+    where Q: Item<Store = St>, Q: Fill<S>, N: Only<S>, S: Hidden<Q, N>, Rest: Fetch<E, S, (..G, &mut Single<Q, N, St>), F, O, Lc> {
     fn fetch(event: &E, world: &mut World<S>, commands: &mut Commands<S>, state: &mut Lc, gathered: (..G), f: &F) -> Option<O> {
         let Query { store, entities: all } = query_of<Q, N, S>(world);
         let mut store = store;
