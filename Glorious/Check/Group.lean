@@ -520,7 +520,7 @@ def checkGroup (decls : List FnDecl) : M Unit := do
   for d in decls do
     if let some (im, _) := d.impl then
       -- (As it is now: another of its functions may have found it already.)
-      let im := ((← get).impls.toList.find? (·.dictFn == im.dictFn)).getD im
+      let im := ((← implsOfHead (Syntax.traitBase im.trait) im.head).find? (·.dictFn == im.dictFn)).getD im
       let owner := rigidOwner decls d
       let back := im.pvars.map fun (p, id) => (s!"'{p}@{owner}", id)
       let unrigid := unrigidTy back

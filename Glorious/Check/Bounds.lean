@@ -610,8 +610,8 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
         -- (Where the type has several implementations of the trait, the one
         -- chosen makes the arguments fit when it is chosen.)
         let several ← severalFor (Syntax.traitBase b.trait) (some h)
-        for im in (← get).impls do
-          if im.trait == b.trait && im.head == h && !several then
+        for im in ← implsOfHead (Syntax.traitBase b.trait) h do
+          if im.trait == b.trait && !several then
             -- (The implementation's own type parameters are this type's
             -- arguments here, not what another use of it made them.)
             let at_ ← implAt im args
@@ -895,7 +895,7 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
       | some (im, _) =>
         -- (As it is now: another of its functions may have found more that
         -- it assumes.)
-        let im := ((← get).impls.toList.find? (·.dictFn == im.dictFn)).getD im
+        let im := ((← implsOfHead (Syntax.traitBase im.trait) im.head).find? (·.dictFn == im.dictFn)).getD im
         -- An implementation says what it assumes.
         let plain ← im.context.mapM fun (tr, j) => do
           let t := Ty.con s!"'{(im.params[j]?).getD ""}@{d.name}" []

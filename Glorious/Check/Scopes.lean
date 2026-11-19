@@ -439,7 +439,7 @@ def assocAt (tr : String) (subject : Ty) (name : String) : M (Option Ty) := do
     | other => pure other.head
   let some (head, hargs) := known | return none
   let key ← try implKey tr self args catch _ => return none
-  let some im := (← get).impls.toList.find? fun im => im.trait == key && im.head == head | return none
+  let some im := (← implsOfHead (Syntax.traitBase key) head).find? fun im => im.trait == key | return none
   let some said := im.assocs.lookup name | return none
   let some at_ ← fitHead im hargs args | return none
   conditionUses im at_ hargs (← get).owner (← get).pos
@@ -472,7 +472,7 @@ def settleAssocs : M Unit := do
     match known, ground with
     | some (head, hargs), true =>
       let key ← implKey tr self args
-      match (← get).impls.toList.find? fun im => im.trait == key && im.head == head with
+      match (← implsOfHead (Syntax.traitBase key) head).find? fun im => im.trait == key with
       | some im =>
         match im.assocs.lookup name with
         | some said =>
