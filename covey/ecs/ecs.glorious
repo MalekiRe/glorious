@@ -223,7 +223,7 @@ pub fn despawn<S>(world: &mut World<S>, entity: Entity) where S: Columns, S: Unl
         push_at(&mut world.free, entity.index);
         <S as Unlinks<S>>::unlink(&mut world.columns, entity);
         <S as Columns>::forget(&mut world.columns, entity)
-    } else { () }
+    };
 }
 
 // Relations. A relation is a kind of link from one entity to another, a
@@ -326,7 +326,7 @@ fn targets_in<R, S>(columns: &S, source: Entity) -> [Entity] where S: Get<Links<
         let list = &links.dense[at].list;
         let mut i = 0;
         while({ i < len_at(list) }) { push_at(&mut out, list[i].target); i = i + 1 }
-    } else { () };
+    };
     out
 }
 
@@ -387,7 +387,7 @@ fn drop_source<R, S>(columns: &mut S, target: Entity, source: Entity) where S: G
     if(at >= 0) {
         let kept = without(&column.dense[at].list, source);
         column.dense[at].list = kept
-    } else { () }
+    };
 }
 
 // Relate `source` to `target` by `relation`, in place of what it related
@@ -479,7 +479,7 @@ impl<X, S> UnlinksSources<X, S> for ManyToMany where S: Get<Links<X>> {
         let mut i = 0;
         while({ i < len_at(&list) }) {
             let at = slot_of(&*column, list[i]);
-            if(at >= 0) { discard(take_link(&mut column.dense[at], entity)) } else { () };
+            if(at >= 0) { discard(take_link(&mut column.dense[at], entity)) };
             i = i + 1
         }
     }
@@ -784,7 +784,7 @@ impl<S> World<S> {
     // The resource at its type's start, if the world does not have one.
     pub fn init_resource<T: Default>(world: &mut Self) where S: Holds<T> {
         let slot = <S as Holds<T>>::slot_mut(&mut world.columns);
-        if(is_none(as_ref(&*slot))) { *slot = Some(default()) } else { () }
+        if(is_none(as_ref(&*slot))) { *slot = Some(default()) };
     }
 }
 
@@ -816,7 +816,7 @@ pub fn each2<A, B>(first: &mut Column<A>, second: &Column<B>, f: for<'a, 'b> fn(
     while({ i < len_at(&first.dense) }) {
         let entity = first.owners[i];
         let at = slot_of(second, entity);
-        if(at >= 0) { f(entity, &mut first.dense[i], &second.dense[at]) } else { () };
+        if(at >= 0) { f(entity, &mut first.dense[i], &second.dense[at]) };
         i = i + 1
     }
 }
@@ -920,10 +920,10 @@ impl<R, A> Item for From<R, &A> {
             let mut i = 0;
             while({ i < len_at(list) }) {
                 let there = slot_of(column, list[i]);
-                if(there >= 0) { push_at(&mut out, &column.dense[there]) } else { () };
+                if(there >= 0) { push_at(&mut out, &column.dense[there]) };
                 i = i + 1
             }
-        } else { () };
+        };
         Some(out)
     }
 }
@@ -1088,7 +1088,7 @@ impl<Q, N, St> Query<Q, N, St> {
         let mut n = 0;
         let mut i = 0;
         while({ i < len_at(&query.entities) }) {
-            if(is_some(<Q as Item>::item_at(&mut query.store, query.entities[i]))) { n = n + 1 } else { () };
+            if(is_some(<Q as Item>::item_at(&mut query.store, query.entities[i]))) { n = n + 1 };
             i = i + 1
         };
         n
@@ -1099,7 +1099,7 @@ fn has_entity(entities: &[Entity], entity: Entity) -> Bool {
     let mut i = 0;
     let mut found = false;
     while({ i < len_at(entities) }) {
-        if(entities[i].index == entity.index) { if(entities[i].generation == entity.generation) { found = true } else { () } } else { () };
+        if(entities[i].index == entity.index) { if(entities[i].generation == entity.generation) { found = true }; };
         i = i + 1
     };
     found
@@ -1146,8 +1146,8 @@ pub fn entities<S>(world: &World<S>) -> [Entity] {
     while({ i < len_at(&world.generations) }) {
         let mut free = false;
         let mut j = 0;
-        while({ j < len_at(&world.free) }) { if(world.free[j] == i) { free = true } else { () }; j = j + 1 };
-        if(not(free)) { push_at(&mut out, Entity { index: i, generation: world.generations[i] }) } else { () };
+        while({ j < len_at(&world.free) }) { if(world.free[j] == i) { free = true }; j = j + 1 };
+        if(not(free)) { push_at(&mut out, Entity { index: i, generation: world.generations[i] }) };
         i = i + 1
     };
     out
@@ -1414,7 +1414,7 @@ fn query_of<Q, N, S>(world: &mut World<S>) -> Query<Q, N, <Q as Item>::Store> wh
     let mut found = [];
     let mut i = 0;
     while({ i < len_at(&all) }) {
-        if(<N as Only<S>>::lets(&world.columns, all[i], world.since)) { push_at(&mut found, all[i]) } else { () };
+        if(<N as Only<S>>::lets(&world.columns, all[i], world.since)) { push_at(&mut found, all[i]) };
         i = i + 1
     };
     Query { store: <Q as Fill<S>>::fill(&mut world.columns, world.tick), entities: found }
@@ -1439,7 +1439,7 @@ impl<E, S, ..G, F, O, Lc, Q, N, St, Rest> Fetch<E, S, (..G), F, O, Lc> for (Sing
         let mut found = [];
         let mut i = 0;
         while({ i < len_at(&all) }) {
-            if(is_some(<Q as Item>::item_at(&mut store, all[i]))) { push_at(&mut found, all[i]) } else { () };
+            if(is_some(<Q as Item>::item_at(&mut store, all[i]))) { push_at(&mut found, all[i]) };
             i = i + 1
         };
         if(len_at(&found) == 1) {
@@ -1518,7 +1518,7 @@ impl<E, S, ..P, ..A, L, Ts, F, Lc> System<E, S> for Sys<F, Lc>
         world.since = 0;
         // (One that was not run, for want of what it asks, still sees what
         // changed before.)
-        if(ran) { sys.last = world.tick; world.tick = world.tick + 1 } else { () }
+        if(ran) { sys.last = world.tick; world.tick = world.tick + 1 };
     }
 }
 
@@ -1565,7 +1565,7 @@ impl<E, S, P, C> System<E, S> for RunIf<P, C> where P: System<E, S>, C: Conditio
     fn run(guarded: &mut RunIf<P, C>, event: &E, world: &mut World<S>, commands: &mut Commands<S>) {
         if(<C as Condition<E, S>>::holds(&guarded.condition, event, world, commands)) {
             <P as System<E, S>>::run(&mut guarded.systems, event, world, commands)
-        } else { () }
+        };
     }
 }
 impl<E, S, P, C> IntoSystem<E, S> for RunIf<P, C> where P: IntoSystem<E, S>, C: Condition<E, S> {

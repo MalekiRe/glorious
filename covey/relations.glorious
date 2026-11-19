@@ -77,14 +77,14 @@ fn roster(stations: &mut Query<(&Hold, From<DockedAt, &Hull>)>) {
         let mut sum = 0;
         let mut i = 0;
         while({ i < len_at(&hulls) }) { sum = sum + hulls[i].0; i = i + 1 };
-        if(len_at(&hulls) > 0) { say(sum); say(len_at(&hulls)) } else { () }
+        if(len_at(&hulls) > 0) { say(sum); say(len_at(&hulls)) };
     }
 }
 
 // Each station with ships docked says how many, from the ships themselves.
 fn census(stations: &mut Query<(&Hold, From<DockedAt, Entity>)>) {
     stations.for_each() { hold, ships =>
-        if(len_at(&ships) > 0) { say(len_at(&ships) + 10) } else { () }
+        if(len_at(&ships) > 0) { say(len_at(&ships) + 10) };
     }
 }
 
