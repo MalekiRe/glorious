@@ -67,6 +67,8 @@ partial def refLives : TypeExpr → List (Option String)
 
 /-- Infer one group of mutually recursive functions and generalise their types. -/
 def checkGroup (decls : List FnDecl) : M Unit := do
+  let loansAt := (← get).loans.size
+  let cellsAt := (← get).cells.size
   let mut group : List (String × Ty) := []
   for d in decls do
     group := (d.name, ← freshTy) :: group
@@ -482,7 +484,7 @@ def checkGroup (decls : List FnDecl) : M Unit := do
     if let some t := defs.lookup name then
       try unify (← instantiate (← generalize t) (some name)) used
       catch e => throw (inFunction name s!"`{name}` is used recursively at a different type: {e}")
-  timedM "group: loans" checkLoans
+  timedM "group: loans" (checkLoans loansAt cellsAt)
   timedM "group: bounds" (settleBounds decls defs)
   modify fun s => { s with assocUses := #[] }
   -- A type an implementation leaves to be found from its functions, found:

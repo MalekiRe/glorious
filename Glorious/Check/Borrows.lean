@@ -289,8 +289,13 @@ partial def bothAtOnce (loan brand : Nat) (write : Bool) (t : Ty) : M Bool := do
   | _ => pure true
 
 /-- Check the uses recorded against the borrows, now that types are known. -/
-def checkLoans : M Unit := do
-  let s ← get
+def checkLoans (loansAt cellsAt : Nat := 0) : M Unit := do
+  let s0 ← get
+  -- (Of the loans and cells made since the group began: a use of the group
+  -- meets no other function's.)
+  let loans := (List.range' loansAt (s0.loans.size - loansAt)).toArray.filterMap s0.loans.get?
+  let cells := s0.cells.extract cellsAt s0.cells.size
+  let s := { s0 with cells }
   modify fun st => { st with uses := #[], heldMoves := #[] }
   let fail := fun (u : Use) (msg : String) => (throw (inFunction u.owner (u.pos ++ msg)) : M Unit)
   -- A variable that gives its value away is not looked at again: a callable
@@ -310,7 +315,7 @@ def checkLoans : M Unit := do
             modify fun st => { st with seen := [] }
             if ← tyLooks brand held then
               fail u s!"`{x}` is given away while a callable this expression is still using uses it"
-  if s.loans.toArray.isEmpty then return
+  if loans.isEmpty then return
   for u in s.uses do
     match u.kind with
     | .var brand x how path =>
@@ -323,7 +328,7 @@ def checkLoans : M Unit := do
             if (← tyOwnsOnce [] t) || (← tyHasDrop [] t).isSome then pure Using.move else pure Using.read
           | none => pure Using.read
         | other => pure other
-      for l in s.loans.toArray do
+      for l in loans do
         -- Two fields get in each other's way only if one is inside the other.
         let meet := path.isPrefixOf l.path || l.path.isPrefixOf path
         if l.root == some brand && how.forbiddenBy l.uniq && meet then
@@ -337,7 +342,7 @@ def checkLoans : M Unit := do
               | .lend => s!"`{x}` is borrowed with `&mut` while {who} holds a {kind} to it")
     | .through cap name write path =>
       let root ← findCap cap
-      for l in s.loans.toArray do
+      for l in loans do
         if let some (parent, own) := l.parent then
           let meet := path.isPrefixOf l.path || l.path.isPrefixOf path
           -- A reference lent to the function it is a parameter of, from inside
@@ -353,7 +358,7 @@ def checkLoans : M Unit := do
       for (t, i) in tys.zipIdx do
         modify fun st => { st with seen := [] }
         for (brand, write) in ← tyTouches t [] do
-          for l in s.loans.toArray do
+          for l in loans do
             if l.root == some brand && (write || l.uniq) then
               let mut found ← holderOf l.id outer
               for ((t', made), j) in mine.zipIdx do
