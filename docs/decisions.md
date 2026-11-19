@@ -5680,6 +5680,35 @@ Measured (all ways together; the compile's wall time after): 100 functions
 fresh 1.56 s, was 1.74 s. In the test programs 1626 borrows are scopes of
 their own, was 1586, and 742 are not, was 782.
 
+## Every function's signature is written
+
+A `fn` item writes the type of each parameter, and its result after `->`; no
+`->` is `()`. An implementation's function restates its trait's function at
+the implementation's types. A function written as clauses, `fn f { 0 => 1 }`,
+has nowhere to write its types, and is refused: `fn f(x: Int) -> Int { match(x)
+{ 0 => 1 } }`. Callables written in place, `fn(x) { .. }` and blocks, are not
+items: theirs are still found from where they are used.
+
+Why: a function's body is checked against its signature, and every use of it
+against the signature alone. That is what lets each body be checked on its
+own, over declarations that do not change while it is (the next step), and it
+is what Rust asks. The tests that showed what inference could not find (a
+field read of a parameter of unknown type, a recursion at another type) are
+now tests that the missing signature is refused.
+
+What came with it:
+
+- A parameter written as a callable whose references have no lifetime,
+  `f: fn(&mut T)`, is for every lifetime of them, as in Rust.
+- A need of a trait at arguments nothing has decided yet, `T: Unlinks<?>`, is
+  the written `where` bound's when they fit.
+- An implementation's own lifetimes, `impl<'a, A> .. for &'a A`, are not named
+  in its functions' types: there they are the one the type has at each use,
+  as `Self`'s is. (A limit: two mentions of `'a` there are two lifetimes.)
+- `glorious signatures` (`--library` for the prelude's and library's too)
+  writes what the checker found, a type an implementation leaves to be found
+  as its projection `<F as Trait<S>>::Out`.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by

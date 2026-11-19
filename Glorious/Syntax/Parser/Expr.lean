@@ -845,7 +845,8 @@ partial def parseFn : P (Item × List Bound) := do
     let mut bounds := bounds
     repeat
       if (← peek) == .punct ")" then break
-      pats := pats.push (← parsePattern)
+      let pat ← parsePattern
+      pats := pats.push pat
       if ← acceptPunct ":" then
         -- `x: impl Trait`: a type parameter of its own with the trait.
         if (← peek) == .ident "impl" then
@@ -855,11 +856,14 @@ partial def parseFn : P (Item × List Bound) := do
           bounds := bounds ++ (← parseBoundsOf p)
           annots := annots.push (some (.name p []))
         else annots := annots.push (some (← parseType))
-      else annots := annots.push none
+      -- What a function takes is written, as in Rust: its body is checked
+      -- against it, and every use of it is checked against it alone.
+      else failAt s!"parameter {pats.size} of `{name}` has no type: write it, `{name}(x: T)`"
       if !(← acceptPunct ",") then break
     expectPunct ")"
     -- `-> R`, `-> R / {E}`, or `/ {E}` alone for a function that gives `()`.
-    let ret ← if (← acceptPunct "->") || (← peek) == .op "/" then some <$> parseResult else pure none
+    -- (No result written is `()`.)
+    let ret ← if (← acceptPunct "->") || (← peek) == .op "/" then some <$> parseResult else pure (some (.tuple []))
     let (lifetimes, more) ← parseWhere
     -- `where I::Item: Ord`: a type parameter for `I::Item`, which `I`'s one
     -- written trait is asked to leave (`I: Iterator<Item = ItemOfI>`).
@@ -897,10 +901,7 @@ partial def parseFn : P (Item × List Bound) := do
       | other => (params, other)
     pure (.fn name (allParams ++ lifetimes) annots.toList ret [.mk pats.toList body], bounds ++ more)
   else
-    expectPunct "{"
-    let clauses ← parseClauses
-    expectPunct "}"
-    pure (.fn name params [] none clauses, bounds)
+    failAt s!"`{name}` is written as clauses, which say no types: write `fn {name}(x: T) -> R \{ match(x) \{ .. } }`"
 
 end
 

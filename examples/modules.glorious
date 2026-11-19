@@ -17,7 +17,7 @@ mod report {
 
 use account::{open, deposit, withdraw, close};
 
-fn main() {
+fn main() -> Int {
     let a = deposit(open(100), 20);
     let a = withdraw(a, 50);
     // An account has to be closed, and only `account` can take one apart:

@@ -5015,13 +5015,13 @@ private def tupleText : String :=
     let places := List.range n
     s!"impl{generics} Tuple for {tuple ps} \{
     type Nested = {nested ps};
-    fn nest(t) \{ {nested (places.map fun i => s!"t.{i}")} }
-    fn flat(n) \{ {tuple (places.map (part "n"))} }
+    fn nest(t: {tuple ps}) -> {nested ps} \{ {nested (places.map fun i => s!"t.{i}")} }
+    fn flat(n: {nested ps}) -> {tuple ps} \{ {tuple (places.map (part "n"))} }
 }
 impl<{", ".intercalate (ps ++ ["R"])}> Callable for fn({", ".intercalate ps}) -> R \{
     type Args = {nested ps};
     type Output = R;
-    fn call_with(f, args) \{ (*f)({", ".intercalate (places.map (part "args"))}) }
+    fn call_with(f: &fn({", ".intercalate ps}) -> R, args: {nested ps}) -> R \{ (*f)({", ".intercalate (places.map (part "args"))}) }
 }
 "
   r#"// Tuples and functions of any length, through one form: the tuple
@@ -5061,11 +5061,11 @@ pub trait Concat<Other> {
 }
 impl<Other> Concat<Other> for () {
     type Joined = Other;
-    fn concat(nothing, other) { other }
+    fn concat(nothing: (), other: Other) -> Other { other }
 }
 impl<First, Rest, Other, J> Concat<Other> for (First, Rest) where Rest: Concat<Other, Joined = J> {
     type Joined = (First, J);
-    fn concat(pair, other) { (pair.0, concat(pair.1, other)) }
+    fn concat(pair: (First, Rest), other: Other) -> (First, J) { (pair.0, concat(pair.1, other)) }
 }
 
 // How many a list of pairs has.

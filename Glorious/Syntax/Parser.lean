@@ -369,9 +369,24 @@ private partial def parseItem : P Item := do
       match mapTypesClause (fun t => pure (called t)) c with
       | .ok c => c
       | .error _ => c
+    -- (A lifetime of the implementation, `impl<'a, A> .. for &'a A`, is in
+    -- its functions' types the one the type it is for has at each use, which
+    -- is not named there: as `Self`'s is.)
+    let implLives := params.filter (·.startsWith "'")
+    let rec unnamed (mine : List String) : TypeExpr → TypeExpr
+      | .name x [] => if implLives.contains x && !mine.contains x then .name "'_" [] else .name x []
+      | .name x args => .name x (args.map (unnamed mine))
+      | .tuple args => .tuple (args.map (unnamed mine))
+      | .fn ps r => .fn (ps.map (unnamed mine)) (unnamed mine r)
+      | .performs r effects => .performs (unnamed mine r) (effects.map fun (e, args) => (e, args.map (unnamed mine)))
+      | .ref uniq t (some l) => .ref uniq (unnamed mine t) (if implLives.contains l && !mine.contains l then none else some l)
+      | .ref uniq t none => .ref uniq (unnamed mine t) none
+      | .never => .never
+      | .hole => .hole
     let written := methods.toList.map fun
       | .fn name ps annots ret clauses =>
-        Item.fn name ps (annots.map (·.map (TypeExpr.withSelf self ∘ called))) (ret.map (TypeExpr.withSelf self ∘ called))
+        let fix := unnamed ps ∘ TypeExpr.withSelf self ∘ called
+        Item.fn name ps (annots.map (·.map fix)) (ret.map fix)
           (clauses.map (selfClause head (some (tr, (TypeExpr.tuple [self]).asExpr)) ∘ calledClause))
       | other => other
     pure (.impl params tr head args context.toList written)
