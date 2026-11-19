@@ -8,7 +8,7 @@
 effect Yield { yield(value) }
 
 // Yield the integers from `i` up to but not including `to`.
-fn count(i, to) {
+fn count(i: Int, to: Int) -> () / {Yield} {
     match(i < to) {
         Ok(_) => yield(i); tail count(i + 1, to),
         Err(_) => ()
@@ -18,7 +18,7 @@ fn count(i, to) {
 // Fold over everything a generator yields. The handler turns each `yield`
 // into a function of the accumulator, so the state is threaded through the
 // resumptions without any mutable variable.
-fn fold(generator, initial, step) {
+fn fold<T, U, e: EffectRow>(generator: fn() -> T / {Yield | e}, initial: U, step: fn(U, Int) -> U / {| e}) -> U / {| e} {
     let run = handle generator() {
         _ => { acc => acc },
         yield(value, k) => { acc => (k(()))(step(acc, value)) }
@@ -28,14 +28,14 @@ fn fold(generator, initial, step) {
 
 // Stop a generator early: the first value satisfying `wanted`, if any. The
 // rest of the generator is cancelled, which runs its cleanups.
-fn find(generator, wanted: fn(Int) -> Bool / {}) {
+fn find<T, e: EffectRow>(generator: fn() -> T / {Yield | e}, wanted: fn(Int) -> Bool / {}) -> Option<Int> / {| e} {
     handle generator() {
         _ => None,
         yield(value, k) => if(wanted(value)) { cancel(k); Some(value) } else { k(()) }
     }
 }
 
-fn main() {
+fn main() -> (Int, Option<Int>) {
     let squares = fold({ count(1, 11) }, 0, fn(acc, x) { acc + x * x });
     let first_big = find({ count(1, 1000000) }, { x => x * x > 200 });
     (squares, first_big)

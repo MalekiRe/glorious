@@ -11,7 +11,7 @@
 
 enum List { Nil, Cons(head, tail) }
 
-fn append(a, b) {
+fn append(a: List, b: List) -> List {
     match(a) {
         Nil => b,
         Cons(head, rest) => Cons(head, append(rest, b))
@@ -24,7 +24,7 @@ effect Task {
 }
 
 // Run every task in a list, in turn.
-fn run_all(tasks) {
+fn run_all(tasks: List) {
     match(tasks) {
         Nil => (),
         Cons(task, rest) => task(); run_all(rest)
@@ -34,12 +34,12 @@ fn run_all(tasks) {
 // A waiting task holds a resumption, which has to be used, and once. So the
 // queue is never copied or overwritten: what it holds is taken out with
 // `replace`, and whatever `replace` gives back is run.
-fn push(queue, task) {
+fn push(queue: &mut List, task: fn() -> ()) {
     let waiting = replace(queue, Nil);
     run_all(replace(queue, append(waiting, Cons(task, Nil))))
 }
 
-fn run_next(queue) {
+fn run_next(queue: &mut List) {
     match(replace(queue, Nil)) {
         Nil => (),
         Cons(task, rest) => run_all(replace(queue, rest)); task()
@@ -48,7 +48,7 @@ fn run_next(queue) {
 
 // Run a task under the scheduler. Yielding puts the rest of the task at the
 // back of the queue. Spawning queues the rest of the parent and runs the child.
-fn run_task(queue, task) {
+fn run_task(queue: &mut List, task: fn() -> () / {Task}) {
     handle task() {
         _ => run_next(queue),
         yield_now(k) => push(queue, { k(()) }); run_next(queue),
@@ -57,13 +57,13 @@ fn run_task(queue, task) {
 }
 
 // The queue ends empty; the cleanup says what happens to a task if it does not.
-fn run(main_task) {
+fn run(main_task: fn() -> () / {Task}) {
     let mut queue = Nil;
     defer run_all(replace(&mut queue, Nil));
     run_task(&mut queue, main_task)
 }
 
-fn worker(name, steps) {
+fn worker<T>(name: T, steps: Int) -> () / {Task} {
     let mut i = 0;
     while({ i < steps }) {
         print((name, i));

@@ -17,8 +17,8 @@ use std::vec::{Vec};
 trait Shape { fn area(&Self) -> Int; fn name(s: &Self) -> Str { "shape" } }
 struct Square(Int)
 struct Rect { w: Int, h: Int }
-impl Shape for Square { fn area(s) { s.0 * s.0 } fn name(s) { "square" } }
-impl Shape for Rect { fn area(r) { r.w * r.h } }
+impl Shape for Square { fn area(s: &Square) -> Int { s.0 * s.0 } fn name(s: &Square) -> Str { "square" } }
+impl Shape for Rect { fn area(r: &Rect) -> Int { r.w * r.h } }
 
 fn describe<S: Shape>(s: &S) -> Str { name(s) ++ " of " ++ show(area(s)) }
 

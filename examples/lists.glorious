@@ -6,28 +6,28 @@
 
 enum List { Nil, Cons(head, tail) }
 
-fn append(a, b) {
+fn append(a: List, b: List) -> List {
     match(a) {
         Nil => b,
         Cons(head, rest) => Cons(head, append(rest, b))
     }
 }
 
-fn range(from, to) {
+fn range(from: Int, to: Int) -> List {
     match(from < to) {
         Ok(_) => Cons(from, range(from + 1, to)),
         Err(_) => Nil
     }
 }
 
-fn map(list, f) {
+fn map<e: EffectRow>(list: List, f: fn(Int) -> Int / {| e}) -> List / {| e} {
     match(list) {
         Nil => Nil,
         Cons(head, rest) => Cons(f(head), map(rest, f))
     }
 }
 
-fn filter(list, keep) {
+fn filter<T, U, e: EffectRow>(list: List, keep: fn(Int) -> Result<T, U> / {| e}) -> List / {| e} {
     match(list) {
         Nil => Nil,
         Cons(head, others) =>
@@ -36,14 +36,14 @@ fn filter(list, keep) {
     }
 }
 
-fn fold(list, initial, step) {
+fn fold<T, e: EffectRow>(list: List, initial: T, step: fn(T, Int) -> T / {| e}) -> T / {| e} {
     tail match(list) {
         Nil => initial,
         Cons(head, rest) => tail fold(rest, step(initial, head), step)
     }
 }
 
-fn sort(list) {
+fn sort(list: List) -> List {
     match(list) {
         Nil => Nil,
         Cons(pivot, rest) =>
@@ -53,7 +53,7 @@ fn sort(list) {
     }
 }
 
-fn main() {
+fn main() -> Int {
     let numbers = Cons(5, Cons(3, Cons(9, Cons(1, Cons(7, Nil)))));
     print(sort(numbers));
     print(map(range(1, 6), { x => x * x }));

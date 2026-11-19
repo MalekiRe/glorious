@@ -6,13 +6,13 @@
 // 12
 // 12
 // 12
-fn main() {
+fn main() -> Int {
     let total = running(0);
     print(total);
     total
 }
 
-fn running(total) {
+fn running(total: Int) -> Int {
     match(read()) {
         Some(n) => print(total + n); tail running(total + n),
         None => total

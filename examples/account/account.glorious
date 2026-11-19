@@ -7,8 +7,8 @@ impl Use<[1, 1]> for Account {}
 
 pub fn open(amount: Int) -> Account { Account(amount) }
 
-pub fn deposit(Account(n), amount: Int) -> Account { Account(ledger::add(n, amount)) }
+pub fn deposit(Account(n): Account, amount: Int) -> Account { Account(ledger::add(n, amount)) }
 
-pub fn withdraw(Account(n), amount: Int) -> Account { Account(ledger::add(n, 0 - amount)) }
+pub fn withdraw(Account(n): Account, amount: Int) -> Account { Account(ledger::add(n, 0 - amount)) }
 
-pub fn close(Account(n)) -> Int { n }
+pub fn close(Account(n): Account) -> Int { n }

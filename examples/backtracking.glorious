@@ -12,7 +12,7 @@ effect Search<T> { [1, 1] found(T) }
 
 // Report every subset of the items. `picked` holds the items chosen so far,
 // most recent first.
-fn subsets(items, picked) {
+fn subsets<T>(items: List<T>, picked: List<T>) -> () / {Search<List<T>>} {
     match(items) {
         Nil => found(picked),
         Cons(head, rest) =>
@@ -21,7 +21,7 @@ fn subsets(items, picked) {
     }
 }
 
-fn sum(list) {
+fn sum(list: List<Int>) -> Int {
     match(list) {
         Nil => 0,
         Cons(head, rest) => head + sum(rest)
@@ -29,7 +29,7 @@ fn sum(list) {
 }
 
 // The subsets of 3, 5, 8, 2 that add up to 10.
-fn main() {
+fn main() -> List<List<Int>> {
     let mut solutions = Nil;
     handle subsets(Cons(3, Cons(5, Cons(8, Cons(2, Nil)))), Nil) {
         found(picked) =>
