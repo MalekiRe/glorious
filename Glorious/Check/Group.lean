@@ -156,7 +156,7 @@ def checkGroup (decls : List FnDecl) : M Unit := do
               (if b.ranked.isEmpty then written
                else .name Syntax.rankedMark (b.ranked.map (TypeExpr.name · []) ++ [written]))
             unifyAt s!"`{b.subject}` is said twice to be a callable" ((rigid.lookup b.subject).getD said) said
-          else if b.trait == "Environment" || b.trait == "Use" then pure ()
+          else if b.trait == "Environment" || b.trait == "Use" || b.trait == "Returns" then pure ()
           else if b.trait.startsWith "'" then
             -- `T: 'a`: what lasts for `'a` may hold a `T`, so a `T` given here
             -- has to last as long: whatever it borrows, `'a` is taken to.
@@ -300,7 +300,7 @@ def checkGroup (decls : List FnDecl) : M Unit := do
         -- `T: Trait<Item = Type>`: the type the trait leaves to `T`'s
         -- implementation is that one, in the body and for whoever calls.
         for b in d.bounds do
-          unless ["Fn", "RunsIn", "Environment", "Use", "Label"].contains b.trait do
+          unless ["Fn", "RunsIn", "Environment", "Use", "Label", "Returns"].contains b.trait do
             for (name, said) in b.assoc do
               match rigid.lookup b.subject, (← get).traitShape.find? fun (tr, _, _) => tr == b.trait with
               | some self, some (_, _, assocs) =>

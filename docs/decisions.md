@@ -5816,11 +5816,15 @@ check reads nothing of the body. (Chosen as Rust has it.)
   one it has to call or give on.
 - The body is held to that: using a `T` twice where it says nothing is
   refused, `write T: Use<[0, *]>`.
+- A callable it is given may jump to a label and not come back, unless it
+  says it comes back: `F: Fn<..>, F: Returns`. A function that holds a value
+  that has to be used while it calls one has to say so (else that value
+  could be left behind by the jump); a caller can then give it no block that
+  jumps.
 - What is still found from the body: what an implementation's functions need
   of the implementation's type parameters (asked where the implementation is
-  chosen); what a callable that runs in an environment the function is given
-  needs (the environment's rules); and that a callable comes back where the
-  function holds a value that has to be used while calling it.
+  chosen), and what a callable that runs in an environment the function is
+  given needs (the environment's rules, which its bounds say).
 
 The library says it everywhere it passes values on (`T: Use<[1, 1]>`) and
 where it copies them (`Use<[0, *]>`): found by giving every type parameter

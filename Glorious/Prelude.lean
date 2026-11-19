@@ -127,6 +127,10 @@ trait Rem { fn %(Self, Self) -> Self }
 prefix 9 - = negate
 trait Neg { fn negate(Self) -> Self }
 // The bits of a whole number; `shl` and `shr` move them up and down.
+// What a callable given to a function that holds a value that has to be
+// used while it calls it says: that it comes back, and jumps to no label.
+trait Returns {}
+
 trait Bits {
     fn bit_and(Self, Self) -> Self
     fn bit_or(Self, Self) -> Self
@@ -794,14 +798,14 @@ fn text_before<T>(a: T, i: Int, rest: Str) -> Str where T: Index, T: Use<[0, *]>
 }
 
 // `f(f(f(init, a[0]), a[1]), ..)`.
-fn fold<T, U, e: EffectRow>(a: [T], init: U, f: fn(U, T) -> U / {| e}) -> U / {| e} where T: Use<[0, *]>, T: Use<[1, 1]>, U: Use<[1, 1]> { fold_from(a, arr_len(a, 0), 0, init, f) }
-fn fold_from<T, U, e: EffectRow>(a: [T], n: Int, i: Int, acc: U, f: fn(U, T) -> U / {| e}) -> U / {| e} where T: Use<[0, *]>, T: Use<[1, 1]>, U: Use<[1, 1]> {
+fn fold<T, U, e: EffectRow>(a: [T], init: U, f: fn(U, T) -> U / {| e}) -> U / {| e} where T: Use<[0, *]>, U: Use<[1, 1]> { fold_from(a, arr_len(a, 0), 0, init, f) }
+fn fold_from<T, U, e: EffectRow>(a: [T], n: Int, i: Int, acc: U, f: fn(U, T) -> U / {| e}) -> U / {| e} where T: Use<[0, *]>, U: Use<[1, 1]> {
     match(int_lt(i, n)) {
         0 => acc,
         _ => tail fold_from(a, n, int_add(i, 1), f(acc, arr_get(a, i)), f)
     }
 }
-fn each<T, e: EffectRow>(a: [T], f: fn(T) -> () / {| e}) -> () / {| e} where T: Use<[0, *]>, T: Use<[1, 1]> { fold(a, (), fn(done, x) { f(x) }) }
+fn each<T, e: EffectRow>(a: [T], f: fn(T) -> () / {| e}) -> () / {| e} where T: Use<[0, *]> { fold(a, (), fn(done, x) { f(x) }) }
 
 impl<T> Show for Array<T> where T: Show {
     fn show(a: Array<T>) -> Str {

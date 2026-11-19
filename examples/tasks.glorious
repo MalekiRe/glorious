@@ -48,7 +48,7 @@ fn run_next(queue: &mut List) {
 
 // Run a task under the scheduler. Yielding puts the rest of the task at the
 // back of the queue. Spawning queues the rest of the parent and runs the child.
-fn run_task(queue: &mut List, task: fn() -> () / {Task}) {
+fn run_task<F>(queue: &mut List, task: F) where F: Fn<(), Output = (), Effects = {Task}>, F: Returns {
     handle task() {
         _ => run_next(queue),
         yield_now(k) => push(queue, { k(()) }); run_next(queue),

@@ -73,7 +73,7 @@ pub fn map<T, U, e: EffectRow>(o: Option<T>, f: fn(T) -> U / {| e}) -> Option<U>
 pub fn and_then<T, U, e: EffectRow>(o: Option<T>, f: fn(T) -> Option<U> / {| e}) -> Option<U> / {| e} where T: Use<[1, 1]>, U: Use<[1, 1]> { match(o) { Some(x) => f(x), None => None } }
 
 // What is there if `keep` says so.
-pub fn filter<T, U, V, e: EffectRow>(o: Option<T>, keep: fn(T) -> Result<U, V> / {| e}) -> Option<T> / {| e} where T: Use<[0, *]>, T: Use<[1, 1]> {
+pub fn filter<T, U, V, e: EffectRow>(o: Option<T>, keep: fn(T) -> Result<U, V> / {| e}) -> Option<T> / {| e} where T: Use<[0, *]> {
     match(o) {
         Some(x) => if(keep(x)) { Some(x) } else { None },
         None => None
@@ -251,10 +251,10 @@ fn from_fn_onto<T, e: EffectRow>(n: Int, f: fn(Int) -> T / {| e}, i: Int, out: [
     if(i < n) { tail from_fn_onto(n, f, i + 1, push(out, f(i))) } else { out }
 }
 
-pub fn map<T, U, e: EffectRow>(a: [T], f: fn(T) -> U / {| e}) -> [U] / {| e} where T: Use<[0, *]>, T: Use<[1, 1]> { fold(a, [], fn(out, x) { push(out, f(x)) }) }
+pub fn map<T, U, e: EffectRow>(a: [T], f: fn(T) -> U / {| e}) -> [U] / {| e} where T: Use<[0, *]> { fold(a, [], fn(out, x) { push(out, f(x)) }) }
 
 // The elements `keep` says yes to.
-pub fn filter<T, U, V, e: EffectRow>(a: [T], keep: fn(T) -> Result<U, V> / {| e}) -> [T] / {| e} where T: Use<[0, *]>, T: Use<[1, 1]> { fold(a, [], fn(out, x) { if(keep(x)) { push(out, x) } else { out } }) }
+pub fn filter<T, U, V, e: EffectRow>(a: [T], keep: fn(T) -> Result<U, V> / {| e}) -> [T] / {| e} where T: Use<[0, *]> { fold(a, [], fn(out, x) { if(keep(x)) { push(out, x) } else { out } }) }
 
 // Each element with its place.
 pub fn enumerate<T, U>(a: T) -> [(Int, U)] where T: Len, T: Index, T: Use<[0, *]>, U: Use<[0, *]> { from_fn(len(a), { i => (i, a[i]) }) }
@@ -275,22 +275,22 @@ pub fn drop<T, U>(a: T, n: Int) -> [U] where T: Len, T: Index, T: Use<[0, *]>, U
 pub fn zip<T, U, V, W>(a: T, b: U) -> [(V, W)] where T: Len, U: Len, T: Index, U: Index, T: Use<[0, *]>, U: Use<[0, *]>, V: Use<[0, *]>, W: Use<[0, *]> { from_fn(if(len(a) < len(b)) { len(a) } else { len(b) }, { i => (a[i], b[i]) }) }
 
 // The place of the first element `wanted` says yes to.
-pub fn position<T, U, V, W, e: EffectRow>(a: T, wanted: fn(U) -> Result<V, W> / {| e}) -> Option<Int> / {| e} where T: Len, T: Index, T: Use<[0, *]>, U: Use<[0, *]>, T: Use<[1, 1]>, U: Use<[1, 1]>, V: Use<[1, 1]>, W: Use<[1, 1]> { position_from(a, wanted, 0) }
-fn position_from<T, U, V, W, e: EffectRow>(a: T, wanted: fn(U) -> Result<V, W> / {| e}, i: Int) -> Option<Int> / {| e} where T: Len, T: Index, T: Use<[0, *]>, U: Use<[0, *]>, T: Use<[1, 1]>, U: Use<[1, 1]> {
+pub fn position<T, U, V, W, e: EffectRow>(a: T, wanted: fn(U) -> Result<V, W> / {| e}) -> Option<Int> / {| e} where T: Len, T: Index, T: Use<[0, *]>, U: Use<[0, *]>, V: Use<[1, 1]>, W: Use<[1, 1]> { position_from(a, wanted, 0) }
+fn position_from<T, U, V, W, e: EffectRow>(a: T, wanted: fn(U) -> Result<V, W> / {| e}, i: Int) -> Option<Int> / {| e} where T: Len, T: Index, T: Use<[0, *]>, U: Use<[0, *]> {
     if(i < len(a)) {
         if(wanted(a[i])) { Some(i) } else { tail position_from(a, wanted, i + 1) }
     } else { None }
 }
 
 // The first element `wanted` says yes to.
-pub fn find<T, U, V, W, e: EffectRow>(a: T, wanted: fn(U) -> Result<V, W> / {| e}) -> Option<U> / {| e} where T: Len, T: Index, T: Use<[0, *]>, U: Use<[0, *]>, T: Use<[1, 1]>, U: Use<[1, 1]>, V: Use<[1, 1]>, W: Use<[1, 1]> { match(position(a, wanted)) { Some(i) => Some(a[i]), None => None } }
+pub fn find<T, U, V, W, e: EffectRow>(a: T, wanted: fn(U) -> Result<V, W> / {| e}) -> Option<U> / {| e} where T: Len, T: Index, T: Use<[0, *]>, U: Use<[0, *]>, V: Use<[1, 1]>, W: Use<[1, 1]> { match(position(a, wanted)) { Some(i) => Some(a[i]), None => None } }
 
-pub fn any<T, U, V, W, e: EffectRow>(a: T, wanted: fn(U) -> Result<V, W> / {| e}) -> Bool / {| e} where T: Len, T: Index, T: Use<[0, *]>, U: Use<[0, *]>, T: Use<[1, 1]>, U: Use<[1, 1]>, V: Use<[1, 1]>, W: Use<[1, 1]> { match(position(a, wanted)) { Some(_) => true, None => false } }
-pub fn all<T, U, V, W, e: EffectRow>(a: T, wanted: fn(U) -> Result<V, W> / {| e}) -> Bool / {| e} where T: Len, T: Index, T: Use<[0, *]>, U: Use<[0, *]>, T: Use<[1, 1]>, U: Use<[1, 1]>, V: Use<[1, 1]>, W: Use<[1, 1]> { not any(a, { x => not wanted(x) }) }
+pub fn any<T, U, V, W, e: EffectRow>(a: T, wanted: fn(U) -> Result<V, W> / {| e}) -> Bool / {| e} where T: Len, T: Index, T: Use<[0, *]>, U: Use<[0, *]>, V: Use<[1, 1]>, W: Use<[1, 1]> { match(position(a, wanted)) { Some(_) => true, None => false } }
+pub fn all<T, U, V, W, e: EffectRow>(a: T, wanted: fn(U) -> Result<V, W> / {| e}) -> Bool / {| e} where T: Len, T: Index, T: Use<[0, *]>, U: Use<[0, *]>, V: Use<[1, 1]>, W: Use<[1, 1]> { not any(a, { x => not wanted(x) }) }
 pub fn contains<T, U>(a: T, x: U) -> Bool where U: Eq, T: Len, T: Index, T: Use<[0, *]>, U: Use<[0, *]> { any(a, { y => y == x }) }
 
 // How many elements `wanted` says yes to.
-pub fn count<T, U, V, e: EffectRow>(a: [T], wanted: fn(T) -> Result<U, V> / {| e}) -> Int / {| e} where T: Use<[0, *]>, T: Use<[1, 1]> { fold(a, 0, fn(n, x) { if(wanted(x)) { n + 1 } else { n } }) }
+pub fn count<T, U, V, e: EffectRow>(a: [T], wanted: fn(T) -> Result<U, V> / {| e}) -> Int / {| e} where T: Use<[0, *]> { fold(a, 0, fn(n, x) { if(wanted(x)) { n + 1 } else { n } }) }
 
 pub fn sum(a: [Int]) -> Int { fold(a, 0, fn(total, x) { total + x }) }
 pub fn product(a: [Int]) -> Int { fold(a, 1, fn(total, x) { total * x }) }
@@ -316,7 +316,7 @@ pub fn sort<T>(a: [T]) -> [T] where T: Ord, T: Use<[0, *]> { sort_by(a, fn(x, y)
 
 // The elements in the order `before` gives: `before(x, y)` says `x` comes
 // before `y`.
-pub fn sort_by<T, U, V, e: EffectRow>(a: [T], before: fn(T, T) -> Result<U, V> / {| e}) -> [T] / {| e} where T: Use<[0, *]>, T: Use<[1, 1]>, U: Use<[1, 1]>, V: Use<[1, 1]> {
+pub fn sort_by<T, U, V, e: EffectRow>(a: [T], before: fn(T, T) -> Result<U, V> / {| e}) -> [T] / {| e} where T: Use<[0, *]>, U: Use<[1, 1]>, V: Use<[1, 1]> {
     if(len(a) < 2) { a } else {
         let half = len(a) / 2;
         merge(sort_by(slice(a, 0, half), before), sort_by(slice(a, half, len(a)), before), before)
@@ -324,8 +324,8 @@ pub fn sort_by<T, U, V, e: EffectRow>(a: [T], before: fn(T, T) -> Result<U, V> /
 }
 
 // Two arrays in order as one in order.
-fn merge<T, U, V, W, X, e: EffectRow>(a: T, b: U, before: fn(V, V) -> Result<W, X> / {| e}) -> [V] / {| e} where T: Len, U: Len, U: Index, T: Index, T: Use<[0, *]>, U: Use<[0, *]>, V: Use<[0, *]>, T: Use<[1, 1]>, U: Use<[1, 1]>, V: Use<[1, 1]>, W: Use<[1, 1]>, X: Use<[1, 1]> { merge_from(a, b, before, 0, 0, []) }
-fn merge_from<T, U, V, W, X, e: EffectRow>(a: T, b: U, before: fn(V, V) -> Result<W, X> / {| e}, i: Int, j: Int, out: [V]) -> [V] / {| e} where T: Len, U: Len, U: Index, T: Index, T: Use<[0, *]>, U: Use<[0, *]>, V: Use<[0, *]>, T: Use<[1, 1]>, U: Use<[1, 1]>, V: Use<[1, 1]> {
+fn merge<T, U, V, W, X, e: EffectRow>(a: T, b: U, before: fn(V, V) -> Result<W, X> / {| e}) -> [V] / {| e} where T: Len, U: Len, U: Index, T: Index, T: Use<[0, *]>, U: Use<[0, *]>, V: Use<[0, *]>, W: Use<[1, 1]>, X: Use<[1, 1]> { merge_from(a, b, before, 0, 0, []) }
+fn merge_from<T, U, V, W, X, e: EffectRow>(a: T, b: U, before: fn(V, V) -> Result<W, X> / {| e}, i: Int, j: Int, out: [V]) -> [V] / {| e} where T: Len, U: Len, U: Index, T: Index, T: Use<[0, *]>, U: Use<[0, *]>, V: Use<[0, *]> {
     if(i < len(a)) {
         if(j < len(b)) {
             if(before(b[j], a[i])) { tail merge_from(a, b, before, i, j + 1, push(out, b[j])) }
@@ -356,7 +356,7 @@ pub fn dedup<T>(a: [T]) -> [T] where T: Eq, T: Use<[0, *]> {
 }
 
 // `f(f(init, a0, b0), a1, b1)` and so on, of an array of pairs.
-pub fn fold_pairs<T, U, V, e: EffectRow>(pairs: [(T, U)], init: V, f: fn(V, T, U) -> V / {| e}) -> V / {| e} where T: Use<[0, *]>, U: Use<[0, *]>, T: Use<[1, 1]>, U: Use<[1, 1]>, V: Use<[1, 1]> { fold(pairs, init, fn(acc, pair) { match(pair) { (a, b) => f(acc, a, b) } }) }
+pub fn fold_pairs<T, U, V, e: EffectRow>(pairs: [(T, U)], init: V, f: fn(V, T, U) -> V / {| e}) -> V / {| e} where T: Use<[0, *]>, U: Use<[0, *]>, V: Use<[1, 1]> { fold(pairs, init, fn(acc, pair) { match(pair) { (a, b) => f(acc, a, b) } }) }
 
 // How long an array is (the prelude's `len`, of arrays alone).
 pub fn len_of<T>(a: [T]) -> Int where T: Use<[1, 1]> { len(a) }
@@ -955,7 +955,7 @@ pub fn entries<T, U>(m: Map<T, U>) -> [(T, U)] { fold(m, [], fn(out, k, v) { pus
 pub fn from<T, U>(pairs: [(T, U)]) -> Map<T, U> where T: Ord, T: Use<[0, *]>, U: Use<[0, *]> { std::vec::fold_pairs(pairs, new(), fn(m, k, v) { insert(m, k, v) }) }
 
 // The map with `key` standing for what `f` makes of what it stood for.
-pub fn update<T, U, e: EffectRow>(m: Map<T, U>, key: T, f: fn(Option<U>) -> U / {| e}) -> Map<T, U> / {| e} where T: Ord, T: Use<[0, *]>, U: Use<[0, *]>, T: Use<[1, 1]>, U: Use<[1, 1]> { insert(m, key, f(get(m, key))) }
+pub fn update<T, U, e: EffectRow>(m: Map<T, U>, key: T, f: fn(Option<U>) -> U / {| e}) -> Map<T, U> / {| e} where T: Ord, T: Use<[0, *]>, U: Use<[0, *]> { insert(m, key, f(get(m, key))) }
 
 // The least and the greatest key, each with what it stands for.
 pub fn least<T, U>(m: Map<T, U>) -> Option<(T, U)> { match(entries(m)) { es => std::vec::first(es) } }
@@ -1015,12 +1015,12 @@ pub fn repeat<T>(x: T) -> Iter<T> where T: Use<[0, *]> { Iter({ Some((x, repeat(
 pub fn of<T, U>(a: T) -> Iter<U> where T: Len, T: Index, T: Use<[0, *]>, U: Use<[0, *]> { of_from(a, 0) }
 fn of_from<T, U>(a: T, i: Int) -> Iter<U> where T: Len, T: Index, T: Use<[0, *]>, U: Use<[0, *]> { Iter({ if(i < len(a)) { Some((a[i], of_from(a, i + 1))) } else { None } }) }
 
-pub fn map<T, U>(it: Iter<T>, f: fn(T) -> U / {}) -> Iter<U> where T: Use<[1, 1]> {
+pub fn map<T, U, F>(it: Iter<T>, f: F) -> Iter<U> where T: Use<[1, 1]>, F: Fn<(T,), Output = U, Effects = {}>, F: Returns {
     Iter({ match(next(it)) { Some((x, rest)) => Some((f(x), map(rest, f))), None => None } })
 }
 
-pub fn filter<T, U, V>(it: Iter<T>, keep: fn(T) -> Result<U, V> / {}) -> Iter<T> where T: Use<[0, *]> { Iter({ filter_next(it, keep) }) }
-fn filter_next<T, U, V>(it: Iter<T>, keep: fn(T) -> Result<U, V> / {}) -> Option<(T, Iter<T>)> where T: Use<[0, *]> {
+pub fn filter<T, U, V, F>(it: Iter<T>, keep: F) -> Iter<T> where T: Use<[0, *]>, F: Fn<(T,), Output = Result<U, V>, Effects = {}>, F: Returns { Iter({ filter_next(it, keep) }) }
+fn filter_next<T, U, V, F>(it: Iter<T>, keep: F) -> Option<(T, Iter<T>)> where T: Use<[0, *]>, F: Fn<(T,), Output = Result<U, V>, Effects = {}>, F: Returns {
     match(next(it)) {
         Some((x, rest)) => if(keep(x)) { Some((x, filter(rest, keep))) } else { tail filter_next(rest, keep) },
         None => None
@@ -1070,14 +1070,14 @@ pub fn sum(it: Iter<Int>) -> Int { fold(it, 0, fn(total, x) { total + x }) }
 pub fn each<T, e: EffectRow>(it: Iter<T>, f: fn(T) -> () / {| e}) -> () / {| e} where T: Use<[1, 1]> { fold(it, (), fn(done, x) { f(x) }) }
 
 // The first value `wanted` says yes to.
-pub fn find<T, U, V, e: EffectRow>(it: Iter<T>, wanted: fn(T) -> Result<U, V> / {| e}) -> Option<T> / {| e} where T: Use<[0, *]>, T: Use<[1, 1]> {
+pub fn find<T, U, V, e: EffectRow>(it: Iter<T>, wanted: fn(T) -> Result<U, V> / {| e}) -> Option<T> / {| e} where T: Use<[0, *]> {
     match(next(it)) {
         Some((x, rest)) => if(wanted(x)) { Some(x) } else { tail find(rest, wanted) },
         None => None
     }
 }
-pub fn any<T, U, V, e: EffectRow>(it: Iter<T>, wanted: fn(T) -> Result<U, V> / {| e}) -> Bool / {| e} where T: Use<[0, *]>, T: Use<[1, 1]>, U: Use<[1, 1]>, V: Use<[1, 1]> { match(find(it, wanted)) { Some(_) => true, None => false } }
-pub fn all<T, U, V, e: EffectRow>(it: Iter<T>, wanted: fn(T) -> Result<U, V> / {| e}) -> Bool / {| e} where T: Use<[0, *]>, T: Use<[1, 1]>, U: Use<[1, 1]>, V: Use<[1, 1]> { not any(it, { x => not wanted(x) }) }
+pub fn any<T, U, V, e: EffectRow>(it: Iter<T>, wanted: fn(T) -> Result<U, V> / {| e}) -> Bool / {| e} where T: Use<[0, *]>, U: Use<[1, 1]>, V: Use<[1, 1]> { match(find(it, wanted)) { Some(_) => true, None => false } }
+pub fn all<T, U, V, e: EffectRow>(it: Iter<T>, wanted: fn(T) -> Result<U, V> / {| e}) -> Bool / {| e} where T: Use<[0, *]>, U: Use<[1, 1]>, V: Use<[1, 1]> { not any(it, { x => not wanted(x) }) }
 "#
 
 private def hostText : String := r#"// What a program asks of the machine it runs on: the console, files, the
@@ -4984,7 +4984,7 @@ impl<T> HashSet<T> {
     }
 }
 
-pub fn fold_map<T, U, V, e: EffectRow>(m: HashMap<T, U>, init: V, f: fn(V, T, U) -> V / {| e}) -> V / {| e} where T: Use<[0, *]>, U: Use<[0, *]>, T: Use<[1, 1]>, U: Use<[1, 1]>, V: Use<[1, 1]> {
+pub fn fold_map<T, U, V, e: EffectRow>(m: HashMap<T, U>, init: V, f: fn(V, T, U) -> V / {| e}) -> V / {| e} where T: Use<[0, *]>, U: Use<[0, *]>, V: Use<[1, 1]> {
     match(m) {
         HashMap(buckets, _) => fold(buckets, init, fn(acc, bucket) {
             fold(bucket, acc, fn(a, pair) { match(pair) { (k, v) => f(a, k, v) } })

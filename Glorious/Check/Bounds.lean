@@ -745,7 +745,7 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
       -- (Not one said to be a callable or a label: that is its type, and
       -- the parameter's name is not in the function's type for that reason.)
       let intrinsic := d.bounds.filterMap fun b =>
-        if ["Fn", "RunsIn", "Environment", "Use", "Label"].contains b.trait then some b.subject else none
+        if ["Fn", "RunsIn", "Environment", "Use", "Label", "Returns"].contains b.trait then some b.subject else none
       for p in d.params do
         let key := s!"'{p}@{rigidOwner decls d}"
         if !p.startsWith "'" && !intrinsic.contains p && (seen.lookup key).isNone then
@@ -812,9 +812,11 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
     -- (A callable it is given: as many times as it likes, or none, unless
     -- its type parameter says how often, `F: Use<[1, 1]>` for once.)
     let mut envNeeds : List ((Ty × String) × Bool) := []
+    let mut saidStays : Array (Ty × String) := #[]
+    let mut envStays : List (Ty × String) := []
     if d.impl.isNone then
       if let .fn ps _ _ _ _ ← find t1 then
-        for (q, annot) in ps.zip d.annots do
+        for ((q, annot), place) in (ps.zip d.annots).zipIdx do
           if let .fn _ _ _ _ cap ← find q then
             let named := match annot with
               | some (.name f []) => some f
@@ -833,6 +835,7 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
             if named.any fun f => d.bounds.any fun b => b.trait == "RunsIn" && b.subject == f then
               envNeeds := envNeeds ++ ((← (opened.getD 0 #[]).filterM fun (need, _) => isIt need).toList.map (·, true))
                 ++ ((← (opened.getD 1 #[]).filterM fun (need, _) => isIt need).toList.map (·, false))
+              envStays := envStays ++ (← (opened.getD 2 #[]).filterM fun (need, _) => isIt need).toList
               continue
             if lower ≥ 1 then
               if let some (_, why) ← (opened.getD 1 #[]).findM? fun (need, _) => isIt need then
@@ -841,6 +844,16 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
               if let some (_, why) ← (opened.getD 0 #[]).findM? fun (need, _) => isIt need then
                 throw (inFunction d.name s!"`{f}: Use<[.., 1]>` says it is called at most once, but {why}")
             said := said.push (q, lower == 0, upper.isNone)
+            -- (One the function calls while it holds a value that has to be
+            -- used has to come back: `F: Returns`. Any other may jump to a
+            -- label it was made under.)
+            let returns := named.any fun f => d.bounds.any fun b => b.trait == "Returns" && b.subject == f
+            if returns then saidStays := saidStays.push (q, "it is said to come back when called")
+            else if let some (_, why) ← (opened.getD 2 #[]).findM? fun (need, _) => isIt need then
+              let hint := match named with
+                | some f => s!"write `{f}: Returns`"
+                | none => s!"say so of a type parameter for parameter {place + 1}, `F: Fn<..>, F: Returns`"
+              throw (inFunction d.name s!"{why}, and what it is given may jump to a label and not come back: {hint}")
     let saidDrops := said.filterMap fun (param, drops, _) =>
       if drops then some (param, "its type parameter is said to be one that can go unused") else none
     let saidDups := said.filterMap fun (param, _, dups) =>
@@ -848,7 +861,9 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
     let envDups := (envNeeds.filter (·.2)).map (·.1)
     let envDrops := (envNeeds.filter (!·.2)).map (·.1)
     modify fun s =>
-      if d.impl.isNone then { s with drops := saidDrops ++ envDrops.toArray, dups := saidDups ++ envDups.toArray }
+      if d.impl.isNone then
+        { s with drops := saidDrops ++ envDrops.toArray, dups := saidDups ++ envDups.toArray
+                 stays := saidStays ++ envStays.toArray }
       else { s with drops := s.drops ++ saidDrops, dups := s.dups ++ saidDups }
     let scheme ← generalize t1 [] false
     modify fun s => { s with dups := before.dups, drops := before.drops, stays := before.stays }
@@ -935,7 +950,7 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
         -- are all a type parameter has: what the body needs of one must be
         -- among them, or among the traits those need.
         let ordinary := d.bounds.filter fun b =>
-          !["Fn", "RunsIn", "Environment", "Use"].contains b.trait && !b.trait.startsWith "'"
+          !["Fn", "RunsIn", "Environment", "Use", "Returns"].contains b.trait && !b.trait.startsWith "'"
         if ordinary.isEmpty then pure inferred
         else
           let mut written : List (String × Nat × Ty) := []
