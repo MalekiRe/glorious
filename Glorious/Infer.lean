@@ -137,8 +137,9 @@ same: what is given up without its type known in the function's own body
 is then known to be such a callable. -/
 partial def captureArities (p : Core.Program) (ncaps : Array Nat) : Std.HashMap (Nat × Nat) Nat :=
   Id.run do
+  let fnsArr := p.fns.toArray
   let arityOf := fun (g : Nat) =>
-    match p.fns[g]? with
+    match fnsArr[g]? with
     | some ⟨c :: _⟩ => Slot.arity c.pats.length
     | _ => Slot.none
   let rec visit (env : Array Slot) (acc : Array ((Nat × Nat) × Slot)) : Core.Tm → Array ((Nat × Nat) × Slot)
