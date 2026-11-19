@@ -305,7 +305,7 @@ def finish : M Elab.Blocks := fun st => Trace.timed "check: finish" fun _ => (sh
     -- One who calls a `pub` function has to be able to write its type.
     let info := (← get).modules
     for f in info.pubFns do
-      if let some scheme := (← get).fns.lookup f then
+      if let some scheme := (← get).fns[f]? then
         let t ← zonk (← instantiate scheme)
         for n in namedIn t do
           -- (A type's own function is named through the type: where the
@@ -316,7 +316,7 @@ def finish : M Elab.Blocks := fun st => Trace.timed "check: finish" fun _ => (sh
               throw s!"`{Syntax.lastSegment f}` is `pub`, but its type, `{showTy t}`, has `{Syntax.lastSegment n}` in it, which is private to its module: one who calls `{Syntax.lastSegment f}` could not write that type (`pub struct` with fields that are not `pub` keeps what is inside private)"
     unless (((← get).fnBounds.lookup "main").getD 0) == 0 do
       throw "`main` needs a trait of a type that nothing decides"
-    match (← get).fns.lookup "main" with
+    match (← get).fns["main"]? with
     | none => pure ()
     | some scheme =>
       match ← zonk (← instantiate scheme) with
@@ -372,7 +372,7 @@ def finish : M Elab.Blocks := fun st => Trace.timed "check: finish" fun _ => (sh
           ctors := [("", (List.range arity).map place)]
         else if let some decl := s.types.lookup im.head then
           for c in decl.ctors do
-            if let some sig := s.ctors.lookup c then
+            if let some sig := s.ctors[c]? then
               -- A field's type, as the solver knows types: a parameter of
               -- the type by its place among them.
               let places := (List.range arity).filter fun j => sig.kinds[j]? != some true

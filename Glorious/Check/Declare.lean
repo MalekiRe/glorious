@@ -791,7 +791,7 @@ def declare (items : List Item) : M Unit := do
       modify fun s =>
         { s with types := (name, ⟨params.length, [name], params.map isLifetime, []⟩) :: s.types }
     | .alias name value => modify fun s =>
-      { s with aliases := (name, value) :: s.aliases, runAliases := s.runAliases.insert name value }
+      { s with aliases := s.aliases.insert name value, runAliases := s.runAliases.insert name value }
     | .coerce name => modify fun s => { s with coercing := s.coercing ++ [name] }
     | .unsafeFn name => modify fun s => { s with unsafeFns := name :: s.unsafeFns }
     | .fieldNames ctor names _ =>
@@ -809,15 +809,14 @@ def declare (items : List Item) : M Unit := do
       for (c, fields) in ctors do
         let fields ← fields.mapM (resolveType pmap true)
         modify fun s =>
-          { s with ctors := (c, ⟨name, ids, fields, result, caps, kinds⟩) :: s.ctors,
+          { s with ctors := s.ctors.insert c ⟨name, ids, fields, result, caps, kinds⟩,
                    runCtors := s.runCtors.insert c }
     | .struct name params fields =>
       let (pmap, ids, caps) ← freshParams params
       let kinds := (genericParams params).map isLifetime
       let fields ← fields.mapM (resolveType pmap true)
       modify fun s =>
-        { s with ctors :=
-            (name, ⟨name, ids, fields, .con name (pmap.map (·.2)), caps, kinds⟩) :: s.ctors,
+        { s with ctors := s.ctors.insert name ⟨name, ids, fields, .con name (pmap.map (·.2)), caps, kinds⟩,
                  runCtors := s.runCtors.insert name }
     | .effect name params ops =>
       -- A lifetime of an effect is given where the effect is handled: what
@@ -923,7 +922,7 @@ def declare (items : List Item) : M Unit := do
     for (n, d) in s.types do
       unless founded.contains n do
         let ok := d.ctors.any fun c =>
-          match s.ctors.lookup c with
+          match s.ctors[c]? with
           | some sig => (sig.fields.flatMap heads).all fun h =>
               founded.contains h || (s.types.lookup h).isNone
           | none => true
@@ -960,7 +959,7 @@ def instOp (sig : OpSig) (inst : List Ty) (own : List (Nat × Nat) := []) : List
 /-- Resolve a name to a constructor, following constructor aliases. -/
 partial def resolveCtor (name : String) (qual : Option String) : M (Option (String × CtorSig)) := do
   let s ← get
-  match s.ctors.lookup name with
+  match s.ctors[name]? with
   | some sig =>
     match qual with
     | some q =>
@@ -971,9 +970,9 @@ partial def resolveCtor (name : String) (qual : Option String) : M (Option (Stri
     -- `[a, b, c]` in a pattern: the array type's constructor of so many
     -- elements, each of the element's type.
     if let (some n, some array) := (Syntax.arrayPatLen name, s.arrayType) then
-      if let some sig := s.ctors.lookup array then
+      if let some sig := s.ctors[array]? then
         return some (name, { sig with fields := List.replicate n (sig.fields.headD .unit) })
-    match (s.aliases.lookup name).map Syntax.aliasValue with
+    match (s.aliases[name]?).map Syntax.aliasValue with
     | some (.name q y) => resolveCtor y q
     | _ => pure none
 

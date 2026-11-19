@@ -64,7 +64,7 @@ def wholeReceiver (x : String) (t : Ty) : M Bool := do
   let some alts := dotAltsOf (← get).modules call | return false
   let some (h, _) := (← find t).head | return false
   let some alt := alts.find? (·.startsWith (h ++ "::")) | return false
-  let some scheme := (← get).fns.lookup alt | return false
+  let some scheme := (← get).fns[alt]? | return false
   let saved ← get
   let whole ← match ← instantiate scheme with
     | .fn (p :: _) _ _ _ _ =>
@@ -627,7 +627,7 @@ partial def dotAltFor (scope : Scope) (amb : Row) (call : Nat) (a : Expr) : M (O
 reference, `2` by a `&mut` one (none where it is no function known so). -/
 partial def receiverKinds (f g : String) : M (Option Nat × Option Nat) := do
   let first := fun (name : String) => (do
-    match (← get).fns.lookup name with
+    match (← get).fns[name]? with
     | none =>
       -- (A trait's function: as its first parameter is written.)
       match (← get).methods.lookup name with
@@ -728,8 +728,8 @@ partial def checkArgsIn (scope : Scope) (amb : Row) (what : String) (params : Li
               -- value read, as the resolver has it.)
               let kindOf := fun (x : String) => (do
                 let s ← getThe St
-                if (s.ctors.lookup x).isSome then return 1
-                if (s.aliases.lookup x).isSome then return 2
+                if (s.ctors[x]?).isSome then return 1
+                if (s.aliases[x]?).isSome then return 2
                 return 0 : StateT Nat M Nat)
               let rn : Syntax.RefNames (StateT Nat M) :=
                 { kind := kindOf
@@ -1389,7 +1389,7 @@ partial def inferCall (scope : Scope) (amb : Row) (f : Expr) (args : List Expr)
       let e := said.msg
       match f with
       | .fieldOf _ recv name =>
-        let theirs := (← get).fns.filter fun (fn, _) => fn.endsWith s!"::{name}"
+        let theirs := (((← get).fns.toList.filter fun (fn, _) => fn.endsWith s!"::{name}").map (·.1)).mergeSort (· ≤ ·)
         -- (Taken for a field because some type has a field of the name: the
         -- function of the value's type's own, if it has one; read again.)
         if call != 0 && (e.splitOn "has no field").length > 1 then
@@ -1407,10 +1407,10 @@ partial def inferCall (scope : Scope) (amb : Row) (f : Expr) (args : List Expr)
           set saved
           if let some h := head then
             let own := s!"{h}::{name}"
-            if ((← get).fns.lookup own).isSome then
+            if ((← get).fns[own]?).isSome then
               throwThe Elab.Said { said with decision := some (← receiverDecision call own) }
         if (e.splitOn "has no field").length > 1 && theirs.length > 1 then
-          throw s!"{e}. More than one type has a function `{name}` of its own ({", ".intercalate (theirs.map fun (fn, _) => s!"`{bareName fn}`")}): say which, `Type::{name}(value, ..)`"
+          throw s!"{e}. More than one type has a function `{name}` of its own ({", ".intercalate (theirs.map fun fn => s!"`{bareName fn}`")}): say which, `Type::{name}(value, ..)`"
         else throwThe Elab.Said said
       | _ => throwThe Elab.Said said
     -- (A field that holds no callable, `p.x()` where `x` is a field and the
@@ -1433,7 +1433,7 @@ partial def inferCall (scope : Scope) (amb : Row) (f : Expr) (args : List Expr)
           set saved
           if let some h := h then
             let own := s!"{h}::{name}"
-            if ((← get).fns.lookup own).isSome then
+            if ((← get).fns[own]?).isSome then
               throwThe Elab.Said { msg := s!"the field `{name}` is no callable", decision := some (← receiverDecision call own) }
     applyTy scope amb "this callee" callee args call
 
@@ -1512,7 +1512,7 @@ partial def inferStmts (scope : Scope) (amb : Row) (stmts : List Stmt)
   | .let_ (.var x) (.closure id clauses) :: rest => do
     let (at_, pos) := ((← get).at_, (← get).pos)
     let t ← withLater (Elab.fvStmts [x] rest) (inferExpr scope amb (.closure id clauses))
-    if (← resolveCtor x none).isSome || ((← get).aliases.lookup x).isSome then
+    if (← resolveCtor x none).isSome || ((← get).aliases[x]?).isSome then
       let binds ← inferPat (.var x) t
       inferStmts (binds ++ scope) amb rest want
     else
@@ -1565,7 +1565,7 @@ partial def inferStmts (scope : Scope) (amb : Row) (stmts : List Stmt)
     -- is one to destroy, that happens when the block ends.
     if let .var x := pat then
       unless (Elab.fvStmts [] rest).contains x || (← resolveCtor x none).isSome
-          || ((← get).aliases.lookup x).isSome do
+          || ((← get).aliases[x]?).isSome do
         modify fun s =>
           { s with dropCands := s.dropCands.push (⟨s.owner, at_.1, at_.2, x, false⟩, t, pos) }
     -- (A type left to an implementation is found now where it can be: what
@@ -1768,7 +1768,7 @@ partial def inferPat (p : Pattern) (t : Ty) : M Scope := do
       unifyAt s!"the pattern `{x}`" result t
       pure []
     | none =>
-      match (← get).aliases.lookup x with
+      match (← get).aliases[x]? with
       | some e => do inferPat (← exprToPat e) t
       | none => do
         let id ← freshBrand

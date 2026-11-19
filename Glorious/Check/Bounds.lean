@@ -165,7 +165,7 @@ def partsOf (t : Ty) : M (List Ty) := do
     | none => pure []
     | some decl =>
       decl.ctors.flatMapM fun c => do
-        match (← get).ctors.lookup c with
+        match (← get).ctors[c]? with
         | none => pure []
         | some sig => pure (sig.fieldsAt args)
   | _ => pure []
@@ -517,7 +517,7 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
               | _ => none
             | none => none
         let known := (← get).ctors
-        match ctor.bind fun c => (known.lookup c).map fun sig => (c, sig) with
+        match ctor.bind fun c => (known[c]?).map fun sig => (c, sig) with
         | some (c, sig) =>
           let fields := sig.fieldsAt args
           -- `#` marks one of several constructors: its fields are taken by
@@ -957,7 +957,7 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
     givensOf := (d.name, mine.map fun (tr, k, _) => (tr, k)) :: givensOf
     modify fun s =>
       { s with
-        fns := (d.name, { scheme with bounds := bounds }) :: s.fns
+        fns := s.fns.insert d.name { scheme with bounds := bounds }
         fnBounds := (d.name, mine.length) :: s.fnBounds }
   let impls := (← get).impls
   let kimpls := (← get).kimpls

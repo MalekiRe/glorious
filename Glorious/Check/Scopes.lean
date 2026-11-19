@@ -27,7 +27,7 @@ partial def normPat : Pattern → M NPat
     match ← resolveCtor x none with
     | some (name, _) => pure (.ctor name [])
     | none =>
-      match (← get).aliases.lookup x with
+      match (← get).aliases[x]? with
       | some e => do normPat (← exprToPat e)
       | none => pure .any
   | .ctor x q ps => do
@@ -66,7 +66,7 @@ partial def exhaustive (tys : List Ty) (rows : List (List NPat)) : M Bool := do
           | _ => false
         if !tested then fallback
         else decl.ctors.allM fun c => do
-          match (← get).ctors.lookup c with
+          match (← get).ctors[c]? with
           | none => pure false
           | some sig =>
             let fields := sig.fieldsAt args
@@ -109,7 +109,7 @@ partial def uncovered (tys : List Ty) (rows : List (List NPat)) : M (Option (Lis
         if !tested then fallback
         else
           for c in decl.ctors do
-            if let some sig := (← get).ctors.lookup c then
+            if let some sig := (← get).ctors[c]? then
               let fields := sig.fieldsAt args
               let found ← uncovered (fields ++ rest) (rows.filterMap fun
                 | .ctor c' ps :: tl => if c' == c then some (ps ++ tl) else none
@@ -143,7 +143,7 @@ def otherFields (t : Ty) (idx : Nat) : M (Option (List Ty)) := do
   match ← find t with
   | .tuple ts => pure (some ((ts.zipIdx.filter (·.2 != idx)).map (·.1)))
   | .con name args =>
-    match (← get).ctors.lookup name with
+    match (← get).ctors[name]? with
     | some sig => pure (some (((sig.fieldsAt args).zipIdx.filter (·.2 != idx)).map (·.1)))
     | none => pure none
   | _ => pure none
@@ -157,7 +157,7 @@ def fieldType (t : Ty) (idx : Nat) : M (Option Ty) := do
     | some t => pure (some t)
     | none => throw s!"a tuple of {ts.length} values has no field {idx}"
   | .con name args =>
-    match (← get).ctors.lookup name with
+    match (← get).ctors[name]? with
     | some sig =>
       -- A field that is not `pub` is its module's to read and to borrow.
       let s ← get
@@ -714,7 +714,7 @@ partial def tyOwnsOnce (visiting : List String) (t : Ty) : M Bool := do
     | none => pure false
     | some decl =>
       decl.ctors.anyM fun c => do
-        match (← get).ctors.lookup c with
+        match (← get).ctors[c]? with
         | none => pure false
         | some sig =>
           (sig.fieldsAt args).anyM
@@ -741,7 +741,7 @@ partial def tyHoldsVar (visiting : List String) (id : Nat) (t : Ty) : M Bool := 
       -- what it is given.)
       if decl.ctors.isEmpty then return ← args.anyM (tyHoldsVar visiting id)
       decl.ctors.anyM fun c => do
-        match s.ctors.lookup c with
+        match s.ctors[c]? with
         | none => args.anyM (tyHoldsVar visiting id)
         | some sig => (sig.fieldsAt args).anyM (tyHoldsVar (name :: visiting) id)
 
@@ -763,7 +763,7 @@ partial def onceBy (visiting : List String) (t : Ty) : M (Option String) := do
     | none => pure none
     | some decl =>
       decl.ctors.findSomeM? fun c => do
-        match (← get).ctors.lookup c with
+        match (← get).ctors[c]? with
         | none => pure none
         | some sig =>
           (sig.fieldsAt args).findSomeM?
@@ -793,7 +793,7 @@ partial def tyHasDrop (visiting : List String) (t : Ty) : M (Option String) := d
     | none => pure none
     | some decl =>
       decl.ctors.findSomeM? fun c => do
-        match (← get).ctors.lookup c with
+        match (← get).ctors[c]? with
         | none => pure none
         | some sig => (sig.fieldsAt args).findSomeM? (tyHasDrop (name :: visiting))
   | _ => pure none
@@ -834,7 +834,7 @@ partial def tyHoldsOnceCallable (visiting : List String) (t : Ty) : M Bool := do
     | none => pure false
     | some decl =>
       decl.ctors.anyM fun c => do
-        match (← get).ctors.lookup c with
+        match (← get).ctors[c]? with
         | none => pure false
         | some sig => (sig.fieldsAt args).anyM (tyHoldsOnceCallable (name :: visiting))
 

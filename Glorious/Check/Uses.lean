@@ -91,7 +91,7 @@ partial def tyMustUse (info : MustInfo) (visiting : List String) (t : Ty)
     | none => pure none
     | some decl =>
       decl.ctors.findSomeM? fun c => do
-        match (← get).ctors.lookup c with
+        match (← get).ctors[c]? with
         | none => pure none
         | some sig =>
           (sig.fieldsAt args).findSomeM?
@@ -1548,7 +1548,7 @@ partial def irrefutable : Pattern → M Bool
   | .tuple ps => ps.allM irrefutable
   | .var x => do
     if (← resolveCtor x none).isSome then return false
-    return ((← get).aliases.lookup x).isNone
+    return ((← get).aliases[x]?).isNone
   | .ctor _ _ _ => pure false
 
 end Glorious.Check

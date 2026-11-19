@@ -281,7 +281,7 @@ partial def bothAtOnce (loan brand : Nat) (write : Bool) (t : Ty) : M Bool := do
     | none => pure true
     | some decl =>
       for c in decl.ctors do
-        match (← get).ctors.lookup c with
+        match (← get).ctors[c]? with
         | none => return true
         | some sig =>
           if ← together (sig.fieldsAt args) then return true
@@ -450,7 +450,7 @@ partial def holdsNothing (e : Expr) : M Bool :=
     match ← resolveCtor x q with
     | some (_, sig) => pure (sig.fields.isEmpty && !(← mustByDecl sig.owner))
     | none =>
-      match (← get).aliases.lookup x with
+      match (← get).aliases[x]? with
       | some e => holdsNothing e
       | none => pure false
   | .call _ (.name q x) args => do
@@ -500,7 +500,7 @@ def resolveName (scope : Scope) (asked : Option String) (x : String) : M Head :=
     if let some b := scope.lookup x then return .local b
     -- A name for a constructor that was written with a type is of that
     -- type where it is used as a value; a pattern looks through it.
-    if let some e := (← get).aliases.lookup x then
+    if let some e := (← get).aliases[x]? then
       if Syntax.aliasTyped e then
         match e, Syntax.aliasValue e with
         | .call _ _ [_, ty], .name q y =>
@@ -523,7 +523,7 @@ def resolveName (scope : Scope) (asked : Option String) (x : String) : M Head :=
     -- its type parameters are what they are in here.)
     modify fun st => { st with instWith := none }
     return .fn t [] true
-  if let some scheme := s.fns.lookup x then
+  if let some scheme := s.fns[x]? then
     if s.unsafeFns.contains x && !(s.unsafeBlock || s.unsafeFns.contains s.owner) then
       throw s!"`{Syntax.lastSegment x}` is unsafe: it can be named only in `unsafe \{ .. }` or in an `unsafe fn`"
     -- `x<A, B>(..)`: the first type parameters are the types written.
@@ -548,7 +548,7 @@ def resolveName (scope : Scope) (asked : Option String) (x : String) : M Head :=
   if x == "replace" then return .replace
   if x == "swap" then return .swap
   if x == "overwrite" then return .overwrite
-  if let some e := s.aliases.lookup x then return .const e
+  if let some e := s.aliases[x]? then return .const e
   throw s!"unknown name `{x}`"
 
 /-- A call needs these traits of these types: to be met when the types are known. -/
@@ -597,7 +597,7 @@ def fieldAtThrough (t : Ty) (path : List String) :
     -- A field of one of several constructors: the value was just found to
     -- be made by that one.
     if let some (ctor, idx) := Syntax.splitCtorStep step then
-      match (← get).ctors.lookup ctor with
+      match (← get).ctors[ctor]? with
       | some sig =>
         let (fields, result) ← instCtor sig
         unifyAt s!"a field of a `{Syntax.lastSegment ctor}`" result cur
@@ -694,7 +694,7 @@ def coerceTo (scope : Scope) (amb : Row) (expected actual : Ty) : M (List String
   let mine := (s.modules.homes.lookup s.owner).bind fun home => s.modules.coercions.lookup home
   for name in s.coercing.filter fun name => (mine.map (·.contains name)).getD true do
     if (scope.lookup name).isNone then
-      if let some scheme := s.fns.lookup name then
+      if let some scheme := s.fns[name]? then
         let saved ← get
         let ok ← try
             (do
@@ -709,7 +709,7 @@ def coerceTo (scope : Scope) (amb : Row) (expected actual : Ty) : M (List String
         if ok then fits := name :: fits
   match fits with
   | [name] =>
-    match s.fns.lookup name with
+    match s.fns[name]? with
     | some scheme =>
       match ← find (← instantiate scheme (some name)) with
       | .fn [a] b effs tail _ => do
@@ -866,7 +866,7 @@ partial def computeVariances : M Unit := do
       let mut found : List ((Bool × Nat) × Variance) := []
       let mut keys : List (Bool × Nat) := []
       for c in decl.ctors do
-        let some sig := s.ctors.lookup c | continue
+        let some sig := s.ctors[c]? | continue
         keys := keysOf sig
         for field in sig.fields do
           found := found ++ occurrences s .co field
@@ -1094,7 +1094,7 @@ def receiverTaken (fn : String) : M (Option Bool) := do
       | .con "&mut" [] => pure (some true)
       | _ => pure (some false)
     | _ => pure none : M (Option Bool))
-  match (← get).fns.lookup fn with
+  match (← get).fns[fn]? with
   | some scheme =>
     let saved ← get
     let taken ← match ← instantiate scheme with

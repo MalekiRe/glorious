@@ -669,11 +669,11 @@ structure St where
   permitted where it is called, and a description of the call. -/
   rowIncl : Array (Row × Row × String) := #[]
   types : List (String × TypeDecl) := []
-  ctors : List (String × CtorSig) := []
+  ctors : Std.HashMap String CtorSig := {}
   ops : List (String × OpSig) := []
   effects : List (String × EffectDecl) := []
-  aliases : List (String × Expr) := []
-  fns : List (String × Scheme) := []
+  aliases : Std.HashMap String Expr := {}
+  fns : Std.HashMap String Scheme := {}
   /-- The functions being inferred together, with their types so far. -/
   group : List (String × Ty) := []
   pending : Array Pending := #[]
