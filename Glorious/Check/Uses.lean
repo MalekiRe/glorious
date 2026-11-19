@@ -86,7 +86,7 @@ partial def tyMustUse (info : MustInfo) (visiting : List String) (t : Ty)
     return none
   | .ref _ _ _ => pure none
   | .con name args => do
-    if let some (must, _) := (← get).useDecls.lookup name then
+    if let some (must, _) := (← get).useDecls[name]? then
       if must then return some s!"a `{bareName name}`"
     if let some w ← args.findSomeM? (tyMustUse info visiting · callables) then return some w
     if visiting.contains name then return none

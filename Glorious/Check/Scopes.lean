@@ -185,7 +185,7 @@ def fieldIndex (t : Ty) (step : String) : M (Option Nat) := do
         | _ => none
       | none => none
     let declared := (← get).fieldNames
-    match ctor.bind fun c => declared.lookup c with
+    match ctor.bind fun c => declared[c]? with
     | some names =>
       match names.idxOf? step with
       | some i => pure (some i)
@@ -704,7 +704,7 @@ partial def tyOwnsOnce (visiting : List String) (t : Ty) : M Bool := do
   | .fn _ _ _ _ cap => capOwnsOnce cap
   | .ref _ _ _ => pure false
   | .con name args => do
-    if let some (_, once) := (← get).useDecls.lookup name then
+    if let some (_, once) := (← get).useDecls[name]? then
       if once then return true
     -- A type with a `drop` of its own: a copy would run it again.
     if (← get).kimpls.has "Drop" name then return true
@@ -755,7 +755,7 @@ partial def onceBy (visiting : List String) (t : Ty) : M (Option String) := do
   match ← find t with
   | .tuple args => args.findSomeM? (onceBy visiting)
   | .con name args => do
-    if let some (_, once) := (← get).useDecls.lookup name then
+    if let some (_, once) := (← get).useDecls[name]? then
       if once then return some name
     if let some n ← args.findSomeM? (onceBy visiting) then return some n
     if visiting.contains name then return none

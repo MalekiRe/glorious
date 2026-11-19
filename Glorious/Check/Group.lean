@@ -10,7 +10,7 @@ open Syntax
 
 /-- What a type says of its own uses may only narrow what its fields allow. -/
 def checkUseDecls : M Unit := do
-  for (head, must, once) in (← get).useDecls do
+  for (head, must, once) in ((← get).useDecls.toList.map fun (h, m, o) => (h, m, o)).mergeSort (fun a b => a.1 ≤ b.1) do
     if must && (← get).kimpls.has "Drop" head then
       throw s!"`impl Drop for {Syntax.lastSegment head}`: a `{Syntax.lastSegment head}` has to be used, so one is never destroyed, and `drop` would never run"
     let arity := (((← get).types.lookup head).map (·.arity)).getD 0

@@ -810,7 +810,7 @@ def declare (items : List Item) : M Unit := do
       if ctor == Syntax.arrayMark then
         modify fun s => { s with arrayType := names.head? }
       else unless names.isEmpty do
-        modify fun s => { s with fieldNames := (ctor, names) :: s.fieldNames }
+        modify fun s => { s with fieldNames := s.fieldNames.insert ctor names }
     | _ => pure ()
   for item in items do
     match item with
@@ -906,14 +906,14 @@ def declare (items : List Item) : M Unit := do
     | .use head lower upper =>
       unless ((← get).types.lookup head).isSome do
         throw s!"`impl Use` for `{head}`: there is no such declared type"
-      if ((← get).useDecls.lookup head).isSome then
+      if (← get).useDecls.contains head then
         throw s!"`impl Use` for `{head}` is written twice"
       -- The language has three: any number of uses, at most one, and exactly
       -- one (specification 7.1). At least one is counted here as well.
       unless lower ≤ 1 && (upper == some 1 || upper == none) do
         throw s!"`impl Use` for `{head}`: a type is used any number of times (`[0, infinity]`), at most once (`[0, 1]`) or exactly once (`[1, 1]`); the language has no other count"
       if lower == 1 then modify fun s => { s with anyMust := true }
-      modify fun s => { s with useDecls := (head, lower == 1, upper == some 1) :: s.useDecls }
+      modify fun s => { s with useDecls := s.useDecls.insert head (lower == 1, upper == some 1) }
     | _ => pure ()
   -- A type each constructor of which holds a value of the type itself, with
   -- nothing between, has no value that can be built: its layout does not end

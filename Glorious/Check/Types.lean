@@ -495,7 +495,7 @@ structure St where
   lateStays : Array (Ty × String) := #[]
   /-- What `impl Use<[lower, upper]>` says of a declared type: whether a value
   has to be used, and whether it can be used only once. -/
-  useDecls : List (String × Bool × Bool) := []
+  useDecls : Std.HashMap String (Bool × Bool) := {}
   /-- Whether the program declares anything that has to be used. Without it
   nothing can have to be, and nothing is checked. -/
   anyMust : Bool := false
@@ -542,7 +542,7 @@ structure St where
   /-- What is known of the program's modules: see `ModuleInfo`. -/
   modules : Syntax.ModuleInfo := {}
   /-- The names of the fields of each constructor declared with names. -/
-  fieldNames : List (String × List String) := []
+  fieldNames : Std.HashMap String (List String) := {}
   /-- The type parameters of the function being checked, each as what it
   stands for while it is. -/
   rigidParams : List (String × Ty) := []

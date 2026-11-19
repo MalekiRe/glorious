@@ -584,7 +584,7 @@ partial def checkArg (scope : Scope) (amb : Row) (what : String) (p : Ty) (a : E
               let st ← get
               pure (match st.types.lookup name with
                 | some decl => match decl.ctors with
-                  | [c] => (st.fieldNames.lookup c).isSome
+                  | [c] => st.fieldNames.contains c
                   | _ => false
                 | none => false)
             | _ => pure false

@@ -477,7 +477,7 @@ partial def holdsNothing (e : Expr) : M Bool :=
 where
   -- A value of a type that says it has to be used is one, whatever is in it.
   mustByDecl (owner : String) : M Bool := do
-    pure (match (← get).useDecls.lookup owner with
+    pure (match (← get).useDecls[owner]? with
       | some (must, _) => must
       | none => false)
 
