@@ -158,7 +158,10 @@ partial def resolveType (params : List (String × Ty)) (decl : Bool) : TypeExpr 
   | .fn ps r => do
     let ps ← ps.mapM (resolveType params decl)
     let cap ← freshCap
-    if decl then modify fun s => { s with monoCaps := cap :: s.monoCaps }
+    -- (In a declaration, one fixed lifetime of its own, as one written is:
+    -- what a function that uses the type gives it becomes it, and it does
+    -- not become what one function gave, which the next would then see.)
+    if decl then modify fun s => { s with monoCaps := cap :: s.monoCaps, rigidCaps := (cap, "the lifetime of a callable a type holds") :: s.rigidCaps }
     match r with
     | .performs r effects =>
       -- What it performs is said: these effects and no others, or these
