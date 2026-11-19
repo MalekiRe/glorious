@@ -5657,6 +5657,29 @@ a name means. Measured on covey's simulation edit loop (the build as
 `lake build glorious` makes it): about 270 ms before, 281-295 ms after, of
 which parsing 12 ms then and 17-18 ms now.
 
+## Certificate inference starts from the types a function writes
+
+A program of functions each calling the one before, all given a reference
+(`fn f(p: &P, k: Int) -> Int`), took a time that grew with the square of
+their number to certify: 100 functions 5.3 s of inference (all ways
+together), 200 20 s, 500 113 s. Core says nothing of types, so `p`'s type
+was not known until `main` made a `P`; every field read of it waited, and
+each function's scheme handed on what those it called left waiting, as
+did the records of what callables captured, so each copy of a scheme
+grew with every level.
+
+Now a function's signature starts from what it writes of its parameters
+(`declaredParams`): a declared type, a whole number, a tuple, a reference
+of such (a region of its own), its type parameters each an unknown; a
+callable's type and anything else are not taken. And field reads that wait
+on one subject, at one field, are one (`settle`). The proved checker still
+checks every certificate.
+
+Measured (all ways together; the compile's wall time after): 100 functions
+2.0 s (0.51 s), 200 4.6 s (0.92 s), 500 14 s (2.1 s). covey's simulation
+fresh 1.56 s, was 1.74 s. In the test programs 1626 borrows are scopes of
+their own, was 1586, and 742 are not, was 782.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by

@@ -27,6 +27,46 @@ structure Around where
   cancels : Array (ITy × IRow × Nat × Bool)
   pending : Array (ITy × IRow × Nat)
 
+/-- A type a function writes of a parameter, as a type inference starts
+from: a declared type, a whole number, a tuple or a reference of such, each
+of its type parameters one unknown (`vars`); anything else an unknown. -/
+partial def writtenTy (vars : List (String × ITy)) : TypeExpr → M ITy
+  | .name x args => do
+    if let some t := vars.lookup x then return t
+    if x == "Int" || Syntax.isScalar x then return .int
+    let s ← get
+    if s.arrayType == some x then
+      return .data arrayName (← args.mapM (writtenTy vars))
+    match s.typeNames.idxOf? x with
+    | some id =>
+      -- (Of a type with lifetimes, the regions are not said here.)
+      if (s.typeLifetimes[id]?.getD []).any (· == true) then return ← freshTy
+      if args.any (fun | .name l [] => l.startsWith "'" | _ => false) then return ← freshTy
+      pure (.data id (← args.mapM (writtenTy vars)))
+    | none => freshTy
+  | .tuple args => do pure (.tuple (← args.mapM (writtenTy vars)))
+  | .ref _ t _ => do pure (.ref (← freshRg) (← writtenTy vars t))
+  | _ => freshTy
+
+/-- What the function says of its parameters, where it says it: each
+parameter's type starts as the one written. -/
+def declaredParams (f : Nat) (params : List ITy) : M Unit := do
+  let some (tparams, annots) := (← get).declared[f]? | return
+  unless annots.length == params.length do return
+  let vars ← tparams.mapM fun p => do pure (p, ← freshTy)
+  for (p, annot) in params.zip annots do
+    if let some te := annot then
+      -- (A type that says nothing here, a callable's, is not taken.)
+      if says te then
+        let t ← writtenTy vars te
+        try unify p t catch _ => pure ()
+where
+  says : TypeExpr → Bool
+    | .name _ _ => true
+    | .tuple _ => true
+    | .ref _ _ _ => true
+    | _ => false
+
 mutual
 
 /-- The key of group `scc`, for what is kept: what its functions are made of,
@@ -111,6 +151,7 @@ partial def schemeOf (scc : Nat) : M Scheme := do
       | _ => 0
     let sig : ISig :=
       ⟨← freshTys (ncaps[f]?.getD 0), ← freshTys arity, ← freshTy, ← freshRow, ← freshAcc⟩
+    declaredParams f sig.params
     cur := cur ++ [(f, sig)]
   modify fun s =>
     { s with
@@ -237,11 +278,15 @@ partial def schemeOf (scc : Nat) : M Scheme := do
   -- So a record is settled only if it is not such a one and includes none.
   if (← get).regions then
     let mut open_ : Std.HashSet Nat := {}
+    -- (The group's own records, kept for those who use it: worked out all
+    -- the same where they reach nothing open, as a use copies them and
+    -- adds to the copy, not to them.)
+    let mut mine : Std.HashSet Nat := {}
     for m in members do
       for ty in m.sig.caps ++ m.sig.params ++ [m.sig.ret] do
         open_ ← namedAccs ty open_
       open_ ← namedAccsRow m.sig.row open_
-      open_ := open_.insert (← findAcc m.sig.acc)
+      mine := mine.insert (← findAcc m.sig.acc)
     for c in incls do
       open_ ← namedAccsRow c.sub open_
       open_ ← namedAccsRow ⟨c.under, none⟩ open_
@@ -273,7 +318,7 @@ partial def schemeOf (scc : Nat) : M Scheme := do
       open_ := open_.insert (← findAcc self)
     -- (And the same of the groups settled while this one was inferred,
     -- whose records are among this one's.)
-    modify fun s => { s with kept := open_.fold (fun k a => k.insert a) s.kept }
+    modify fun s => { s with kept := (open_.fold (fun k a => k.insert a) s.kept).insertMany mine }
     let kept := (← get).kept
     let last := (← get).accs.size
     -- A record is settled if nothing it reaches is open: older than the
@@ -293,7 +338,8 @@ partial def schemeOf (scc : Nat) : M Scheme := do
       stack := stack.pop
       let x ← accNode n
       unless x.final do
-        if n < startAcc || shared.2.contains n || kept.contains n then opened := opened.push n
+        if n < startAcc || shared.2.contains n || (kept.contains n && !(mine.contains n && !open_.contains n)) then
+          opened := opened.push n
         else
           for next in x.subs.map (·.1) ++ x.insts.map (·.1) do
             let m ← findAcc next

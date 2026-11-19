@@ -271,7 +271,7 @@ def certifyM (items : List Item) (g : Elab.Globals) (p : Core.Program)
             if let some e' := s.entries.find? (fun x => x.fn == d && x.sig == want) then
               modify fun s =>
                 { s with
-                  emitted := s.emitted.insert d (full :: s.emitted[d]?.getD [])
+                  emitted := let old := s.emitted.getD d []; s.emitted.insert d (full :: old)
                   entries := s.entries.push ⟨d, full, e'.hints⟩ }
   let entries := (← get).entries.toList
   let types : List Ty :=

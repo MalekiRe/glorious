@@ -321,6 +321,12 @@ structure St where
   arrayType : Option String := none
   /-- For each declared type, which of its parameters are lifetimes. -/
   typeLifetimes : Array (List Bool) := #[]
+  /-- The declared types by name, in the order of their numbers. -/
+  typeNames : List String := []
+  /-- What each function a program wrote says of its parameters: its type
+  parameters, and the written type of each parameter where it is written.
+  A function's signature starts from these (`declaredParams`). -/
+  declared : Std.HashMap Nat (List String × List (Option TypeExpr)) := {}
   /-- The group being inferred, and the signatures of its functions. -/
   curScc : Option Nat := none
   /-- Callables made where what they are given was not yet known: whether
@@ -623,7 +629,9 @@ def accSolve (writes : Bool) (a : Nat) : M (List Nat) := do
         sets := sets.insert n mine
         changed := true
   -- (Every callable reached was worked out on the way.)
-  let mut memo := (← get).accMemo
+  -- (Taken out of the state first: held twice, the whole map would be
+  -- copied at the first insert, each time.)
+  let mut memo ← modifyGet fun s => (s.accMemo, { s with accMemo := {} })
   for n in nodes do
     memo := memo.insert (n, writes) (sets.getD n {}).toList
   modify fun s => { s with accMemo := memo }

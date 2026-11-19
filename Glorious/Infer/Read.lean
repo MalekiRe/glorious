@@ -370,7 +370,7 @@ partial def instantiate (fn : Nat) (use : Use) : M Unit := do
         unless ((← get).emitted[f]?.getD []).contains ground do
           modify fun s =>
             { s with
-              emitted := s.emitted.insert f (ground :: s.emitted[f]?.getD [])
+              emitted := let old := s.emitted.getD f []; s.emitted.insert f (ground :: old)
               entries := s.entries.push ⟨f, ground, hints⟩ }
       modify fun s => { s with made := s.made.push (key, sig, r) }
       for (g, gsig, atoms, own, more) in wanted do
@@ -381,10 +381,12 @@ partial def instantiate (fn : Nat) (use : Use) : M Unit := do
         instantiate g ⟨gsig, atoms.map at_, own.map at_, more.map at_⟩
       return
   let sch ← schemeOf ((← get).scc[fn]?.getD fn)
-  let outer ← get
-  modify fun s =>
-    { s with incls := #[], places := #[], coerces := #[], nevers := #[], onces := #[], shows := #[]
-             opens := #[], calls := #[] }
+  -- (What is put back afterwards is taken out, and not the whole state:
+  -- held, every array of it would be copied where this first changes it.)
+  let outer ← modifyGet fun s =>
+    ((s.incls, s.places, s.coerces, s.nevers, s.onces, s.shows, s.opens, s.calls),
+     { s with incls := #[], places := #[], coerces := #[], nevers := #[], onces := #[], shows := #[]
+              opens := #[], calls := #[] })
   startCopy
   let members ← sch.members.mapM fun m => do
     pure { m with
@@ -435,14 +437,13 @@ partial def instantiate (fn : Nat) (use : Use) : M Unit := do
       gave := gave ++ [(← fnKey m.fn, ground, hints)]
       modify fun s =>
         { s with
-          emitted := s.emitted.insert m.fn (ground :: s.emitted[m.fn]?.getD [])
+          emitted := let old := s.emitted.getD m.fn []; s.emitted.insert m.fn (ground :: old)
           entries := s.entries.push ⟨m.fn, ground, hints⟩ }
       for (g, gs) in m.refs do
         wanted := wanted ++ [(g, (← demand nb.body gs).1)]
+  let (incls, places, coerces, nevers, onces, shows, opens, calls) := outer
   modify fun s =>
-    { s with
-      incls := outer.incls, places := outer.places, coerces := outer.coerces, nevers := outer.nevers
-      onces := outer.onces, shows := outer.shows, opens := outer.opens, calls := outer.calls }
+    { s with incls, places, coerces, nevers, onces, shows, opens, calls }
   let wantedKeys ← wanted.mapM fun (g, u) => do pure (← fnKey g, u.sig, u.atoms, u.own, u.more)
   modify fun s => { s with made := s.made.push (key, sig, ⟨gave, wantedKeys⟩) }
   for (g, gs) in wanted do
@@ -668,7 +669,14 @@ def declare (items : List Item) (g : Elab.Globals) : M Unit := do
     | .struct _ params _ => some (lifetimesOf params)
     | _ => none
   modify fun s =>
-    { s with types := Array.replicate typeNames.length [], typeLifetimes := typeLifetimes.toArray }
+    { s with types := Array.replicate typeNames.length [], typeLifetimes := typeLifetimes.toArray, typeNames }
+  -- What each function says of its parameters.
+  let mut declared : Std.HashMap Nat (List String × List (Option TypeExpr)) := {}
+  for item in items do
+    if let .fn name ps annots _ _ := item then
+      if let some f := g.fns[name]? then
+        if annots.any Option.isSome then declared := declared.insert f (Syntax.genericParams ps, annots)
+  modify fun s => { s with declared }
   for item in items do
     match item with
     | .enum name params ctors =>

@@ -610,10 +610,22 @@ partial def settle : M Unit := do
       | none => requireOp c.sup op targs
   let waiting := (← get).places
   modify fun s => { s with places := #[] }
+  -- (One field of one subject is one type: a read waiting as another did
+  -- is that one, and waits no longer apart. A group copies what those it
+  -- uses leave waiting, so without this they grew with every level.)
+  let mut seen : Std.HashMap (Nat × Nat) ITy := {}
   for (t, i, r) in waiting do
     match ← fieldNow t i with
     | some f => unify f r
-    | none => modify fun s => { s with places := s.places.push (t, i, r) }
+    | none =>
+      match ← find t with
+      | .var v =>
+        match seen[(v, i)]? with
+        | some r' => unify r r'
+        | none =>
+          seen := seen.insert (v, i) r
+          modify fun s => { s with places := s.places.push (t, i, r) }
+      | _ => modify fun s => { s with places := s.places.push (t, i, r) }
   let pending := (← get).coerces
   modify fun s => { s with coerces := #[] }
   for (r, b, w) in pending do
