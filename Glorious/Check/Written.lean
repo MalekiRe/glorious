@@ -199,7 +199,11 @@ def writeMethod (ms : MethodSig) : M (Except String Written) := do
     let ret ← writeTy ms.ret
     let effects ← writeEffs ms.row.effs ms.row.tail
     pure (params, ret, effects)
-  let ((params, ret, effects), names) ← act.run { tys := named }
+  let rows ← ms.rowAssocs.filterMapM fun (n, v) => do
+    match (← flattenRow ⟨[], some v⟩).tail with
+    | some r => pure (some (r, s!"Self::{n}"))
+    | none => pure none
+  let ((params, ret, effects), names) ← act.run { tys := named, rows }
   if let some what := names.unwritable then
     return .error s!"its type has `{what}` in it, which no program writes"
   let own := names.tys.filter fun (v, _) => !named.any (·.1 == v)
@@ -217,9 +221,9 @@ def writtenMethods (st : St) : List (String × Except String Written) :=
 
 /-- The signature of each function a state has checked, by its name, that is
 not the library's or the prelude's: written, or why not. -/
-def writtenSignatures (st : St) : List (String × Except String Written) :=
+def writtenSignatures (st : St) (library : Bool := false) : List (String × Except String Written) :=
   let names := st.fns.toList.filter fun (name, _) =>
-    !libraryOwner name && !(st.modules.homes.lookup name).any (· == "%prelude")
+    library || (!libraryOwner name && !(st.modules.homes.lookup name).any (· == "%prelude"))
   let sorted := names.mergeSort fun a b => a.1 ≤ b.1
   -- (A function an implementation gives: its type parameters are the
   -- implementation's, by their names.)

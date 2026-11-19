@@ -759,6 +759,34 @@ def why (path : String) : IO UInt32 := do
     | .error e => IO.println s!"lends={lends}: no certificate: {e}"
   pure 0
 
+/-- The signature of each function a program writes, as the checker found it
+(name, type parameters, parameters, result, effects, asks), and each trait's
+functions as declared; with `library`, the prelude's and library's too. -/
+def signatures (path : String) (library : Bool) : IO UInt32 := do
+  match compileSource (← IO.FS.readFile path) true (← moduleFiles path) (search := false) (lenient := true) with
+    | .ok c =>
+      let st := c.checkKept.foldl (fun (best : Option Check.St) (_, s) =>
+        match best with
+        | some b => if s.fns.size > b.fns.size then some s else some b
+        | none => some s) none
+      match st with
+      | some st =>
+        for (name, w) in Check.writtenSignatures st library do
+          match w with
+          | .ok w =>
+            IO.println s!"{name} ¦ {", ".intercalate w.generics} ¦ {" ;; ".intercalate w.params} ¦ {w.ret} ¦ {w.effects} ¦ {" ;; ".intercalate w.asks}"
+          | .error e => IO.println s!"{name} ¦ ERROR ¦ {e}"
+        for (name, w) in Check.writtenMethods st do
+          match w with
+          | .ok w =>
+            IO.println s!"TRAIT {name} ¦ {", ".intercalate w.generics} ¦ {" ;; ".intercalate w.params} ¦ {w.ret} ¦ {w.effects} ¦ "
+          | .error e => IO.println s!"TRAIT {name} ¦ ERROR ¦ {e}"
+        pure 0
+      | none => IO.eprintln "nothing was checked"; pure 1
+    | .error e =>
+      IO.eprintln s!"{path}: {e}"
+      pure 1
+
 /-- How long each stage of compiling a program takes, in milliseconds. -/
 def stages (path : String) : IO UInt32 := do
   let src ← IO.FS.readFile path
@@ -953,30 +981,8 @@ where
     | none => IO.println "does not compile, or does not finish"; pure 1
   -- (The signature of each function the program writes, as the checker
   -- found it: name, type parameters, parameters, result, effects, asks.)
-  | ["signatures", path] =>
-    match compileSource (← IO.FS.readFile path) true (← moduleFiles path) (search := false) (lenient := true) with
-    | .ok c =>
-      let st := c.checkKept.foldl (fun (best : Option Check.St) (_, s) =>
-        match best with
-        | some b => if s.fns.size > b.fns.size then some s else some b
-        | none => some s) none
-      match st with
-      | some st =>
-        for (name, w) in Check.writtenSignatures st do
-          match w with
-          | .ok w =>
-            IO.println s!"{name} ¦ {", ".intercalate w.generics} ¦ {" ;; ".intercalate w.params} ¦ {w.ret} ¦ {w.effects} ¦ {" ;; ".intercalate w.asks}"
-          | .error e => IO.println s!"{name} ¦ ERROR ¦ {e}"
-        for (name, w) in Check.writtenMethods st do
-          match w with
-          | .ok w =>
-            IO.println s!"TRAIT {name} ¦ {", ".intercalate w.generics} ¦ {" ;; ".intercalate w.params} ¦ {w.ret} ¦ {w.effects} ¦ "
-          | .error e => IO.println s!"TRAIT {name} ¦ ERROR ¦ {e}"
-        pure 0
-      | none => IO.eprintln "nothing was checked"; pure 1
-    | .error e =>
-      IO.eprintln s!"{path}: {e}"
-      pure 1
+  | ["signatures", path] => signatures path false
+  | ["signatures", "--library", path] => signatures path true
   | ["sigs", path] =>
     match ← compileFile path with
     | .ok c =>

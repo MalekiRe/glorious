@@ -58,22 +58,22 @@ pub mod ffi;
 
 private def optionText : String := r#"// An `Option<T>` is a `Result<T, ()>`: `Some(x)` or `None`.
 
-pub fn is_some(o) { match(o) { Some(_) => true, None => false } }
-pub fn is_none(o) { match(o) { Some(_) => false, None => true } }
+pub fn is_some<T>(o: Option<T>) -> Bool { match(o) { Some(_) => true, None => false } }
+pub fn is_none<T>(o: Option<T>) -> Bool { match(o) { Some(_) => false, None => true } }
 
 // What is there, or a value to use instead.
-pub fn unwrap_or(o, other) { match(o) { Some(x) => x, None => other } }
+pub fn unwrap_or<T>(o: Option<T>, other: T) -> T { match(o) { Some(x) => x, None => other } }
 
 // What is there, or what a callable gives.
-pub fn unwrap_or_else(o, other) { match(o) { Some(x) => x, None => other() } }
+pub fn unwrap_or_else<T, e: EffectRow>(o: Option<T>, other: fn() -> T / {| e}) -> T / {| e} { match(o) { Some(x) => x, None => other() } }
 
-pub fn map(o, f) { match(o) { Some(x) => Some(f(x)), None => None } }
+pub fn map<T, U, e: EffectRow>(o: Option<T>, f: fn(T) -> U / {| e}) -> Option<U> / {| e} { match(o) { Some(x) => Some(f(x)), None => None } }
 
 // `f` of what is there, which may itself be nothing.
-pub fn and_then(o, f) { match(o) { Some(x) => f(x), None => None } }
+pub fn and_then<T, U, e: EffectRow>(o: Option<T>, f: fn(T) -> Option<U> / {| e}) -> Option<U> / {| e} { match(o) { Some(x) => f(x), None => None } }
 
 // What is there if `keep` says so.
-pub fn filter(o, keep) {
+pub fn filter<T, U, V, e: EffectRow>(o: Option<T>, keep: fn(T) -> Result<U, V> / {| e}) -> Option<T> / {| e} {
     match(o) {
         Some(x) => if(keep(x)) { Some(x) } else { None },
         None => None
@@ -81,10 +81,10 @@ pub fn filter(o, keep) {
 }
 
 // The first that is there.
-pub fn or_else(o, other) { match(o) { Some(x) => Some(x), None => other() } }
+pub fn or_else<T, e: EffectRow>(o: Option<T>, other: fn() -> Option<T> / {| e}) -> Option<T> / {| e} { match(o) { Some(x) => Some(x), None => other() } }
 
 // Both, if both are there.
-pub fn zip(a, b) {
+pub fn zip<T, U>(a: Option<T>, b: Option<U>) -> Option<(T, U)> {
     match(a) {
         Some(x) => match(b) { Some(y) => Some((x, y)), None => None },
         None => None
@@ -92,9 +92,9 @@ pub fn zip(a, b) {
 }
 
 // A `Result` that fails with `error` where there was nothing.
-pub fn ok_or(o, error) { match(o) { Some(x) => Ok(x), None => Err(error) } }
+pub fn ok_or<T, U>(o: Option<T>, error: U) -> Result<T, U> { match(o) { Some(x) => Ok(x), None => Err(error) } }
 
-pub fn fold(o, init, f) { match(o) { Some(x) => f(init, x), None => init } }
+pub fn fold<T, U, e: EffectRow>(o: Option<T>, init: U, f: fn(U, T) -> U / {| e}) -> U / {| e} { match(o) { Some(x) => f(init, x), None => init } }
 
 // What is there, where it is: looked at or changed without being taken.
 pub fn as_ref<'a, T>(o: &'a Option<T>) -> Option<&'a T> {
@@ -110,26 +110,26 @@ pub fn take<T>(o: &mut Option<T>) -> Option<T> { replace(o, None) }
 
 private def resultText : String := r#"// `Result<T, E>`: `Ok(value)` or `Err(error)`.
 
-pub fn is_ok(r) { match(r) { Ok(_) => true, Err(_) => false } }
-pub fn is_err(r) { match(r) { Ok(_) => false, Err(_) => true } }
+pub fn is_ok<T, U>(r: Result<T, U>) -> Bool { match(r) { Ok(_) => true, Err(_) => false } }
+pub fn is_err<T, U>(r: Result<T, U>) -> Bool { match(r) { Ok(_) => false, Err(_) => true } }
 
-pub fn unwrap_or(r, other) { match(r) { Ok(x) => x, Err(_) => other } }
-pub fn unwrap_or_else(r, other) { match(r) { Ok(x) => x, Err(e) => other(e) } }
+pub fn unwrap_or<T, U>(r: Result<T, U>, other: T) -> T { match(r) { Ok(x) => x, Err(_) => other } }
+pub fn unwrap_or_else<T, U, e: EffectRow>(r: Result<T, U>, other: fn(U) -> T / {| e}) -> T / {| e} { match(r) { Ok(x) => x, Err(e) => other(e) } }
 
-pub fn map(r, f) { match(r) { Ok(x) => Ok(f(x)), Err(e) => Err(e) } }
-pub fn map_err(r, f) { match(r) { Ok(x) => Ok(x), Err(e) => Err(f(e)) } }
+pub fn map<T, U, V, e: EffectRow>(r: Result<T, U>, f: fn(T) -> V / {| e}) -> Result<V, U> / {| e} { match(r) { Ok(x) => Ok(f(x)), Err(e) => Err(e) } }
+pub fn map_err<T, U, V, e: EffectRow>(r: Result<T, U>, f: fn(U) -> V / {| e}) -> Result<T, V> / {| e} { match(r) { Ok(x) => Ok(x), Err(e) => Err(f(e)) } }
 
 // `f` of what succeeded, which may itself fail.
-pub fn and_then(r, f) { match(r) { Ok(x) => f(x), Err(e) => Err(e) } }
+pub fn and_then<T, U, V, e: EffectRow>(r: Result<T, U>, f: fn(T) -> Result<V, U> / {| e}) -> Result<V, U> / {| e} { match(r) { Ok(x) => f(x), Err(e) => Err(e) } }
 
 // What succeeded, or what `f` makes of the failure.
-pub fn or_else(r, f) { match(r) { Ok(x) => Ok(x), Err(e) => f(e) } }
+pub fn or_else<T, U, V, e: EffectRow>(r: Result<T, U>, f: fn(U) -> Result<T, V> / {| e}) -> Result<T, V> / {| e} { match(r) { Ok(x) => Ok(x), Err(e) => f(e) } }
 
 // The value, forgetting why there is none.
-pub fn ok(r) { match(r) { Ok(x) => Some(x), Err(_) => None } }
+pub fn ok<T, U>(r: Result<T, U>) -> Option<T> { match(r) { Ok(x) => Some(x), Err(_) => None } }
 
 // The failure, if it failed.
-pub fn err(r) { match(r) { Ok(_) => None, Err(e) => Some(e) } }
+pub fn err<T, U>(r: Result<T, U>) -> Option<U> { match(r) { Ok(_) => None, Err(e) => Some(e) } }
 
 // What succeeded or failed, where it is.
 pub fn as_ref<'a, T, E>(r: &'a Result<T, E>) -> Result<&'a T, &'a E> {
@@ -145,25 +145,25 @@ private def cmpText : String := r#"// Putting values in order.
 pub enum Ordering { Less, Equal, Greater }
 
 // How `a` stands to `b`.
-pub fn compare(a, b) {
+pub fn compare<T>(a: T, b: T) -> Ordering where T: Ord, T: Eq {
     if(a < b) { Less } else { if(a == b) { Equal } else { Greater } }
 }
 
-pub fn min(a, b) { if(b < a) { b } else { a } }
-pub fn max(a, b) { if(b < a) { a } else { b } }
+pub fn min<T>(a: T, b: T) -> T where T: Ord { if(b < a) { b } else { a } }
+pub fn max<T>(a: T, b: T) -> T where T: Ord { if(b < a) { a } else { b } }
 
 // `x`, kept between `low` and `high`.
-pub fn clamp(x, low, high) { if(x < low) { low } else { if(high < x) { high } else { x } } }
+pub fn clamp<T>(x: T, low: T, high: T) -> T where T: Ord { if(x < low) { low } else { if(high < x) { high } else { x } } }
 
 // The order the other way round.
-pub fn reverse(o) { match(o) { Less => Greater, Equal => Equal, Greater => Less } }
+pub fn reverse(o: Ordering) -> Ordering { match(o) { Less => Greater, Equal => Equal, Greater => Less } }
 
 // This order, or where it says equal, another.
-pub fn then(o, other) { match(o) { Equal => other, _ => o } }
+pub fn then(o: Ordering, other: Ordering) -> Ordering { match(o) { Equal => other, _ => o } }
 
-pub fn is_less(o) { match(o) { Less => true, _ => false } }
-pub fn is_equal(o) { match(o) { Equal => true, _ => false } }
-pub fn is_greater(o) { match(o) { Greater => true, _ => false } }
+pub fn is_less(o: Ordering) -> Bool { match(o) { Less => true, _ => false } }
+pub fn is_equal(o: Ordering) -> Bool { match(o) { Equal => true, _ => false } }
+pub fn is_greater(o: Ordering) -> Bool { match(o) { Greater => true, _ => false } }
 "#
 
 private def intText : String := r#"// Whole numbers.
@@ -234,10 +234,10 @@ pub fn to_lower(c: char) -> char { if(is_upper(c)) { char(int(c) + 32) else { c 
 
 private def vecText : String := r#"// Arrays: `[T]`. Nothing here changes an array it is given; each gives a new one.
 
-pub fn is_empty(a) { len(a) == 0 }
+pub fn is_empty<T>(a: T) -> Bool where T: Len { len(a) == 0 }
 
-pub fn first(a) { get(a, 0) }
-pub fn last(a) { get(a, len(a) - 1) }
+pub fn first<T>(a: [T]) -> Option<T> { get(a, 0) }
+pub fn last<T>(a: [T]) -> Option<T> { get(a, len(a) - 1) }
 
 // The numbers from `from` up to, not including, `to`.
 pub fn range(from: Int, to: Int) -> [Int] { range_onto(from, to, []) }
@@ -246,65 +246,65 @@ fn range_onto(i: Int, to: Int, out: [Int]) -> [Int] {
 }
 
 // `n` elements, the one at each place what `f` gives for the place.
-pub fn from_fn(n: Int, f) { from_fn_onto(n, f, 0, []) }
-fn from_fn_onto(n: Int, f, i: Int, out) {
+pub fn from_fn<T, e: EffectRow>(n: Int, f: fn(Int) -> T / {| e}) -> [T] / {| e} { from_fn_onto(n, f, 0, []) }
+fn from_fn_onto<T, e: EffectRow>(n: Int, f: fn(Int) -> T / {| e}, i: Int, out: [T]) -> [T] / {| e} {
     if(i < n) { tail from_fn_onto(n, f, i + 1, push(out, f(i))) } else { out }
 }
 
-pub fn map(a, f) { fold(a, [], fn(out, x) { push(out, f(x)) }) }
+pub fn map<T, U, e: EffectRow>(a: [T], f: fn(T) -> U / {| e}) -> [U] / {| e} { fold(a, [], fn(out, x) { push(out, f(x)) }) }
 
 // The elements `keep` says yes to.
-pub fn filter(a, keep) { fold(a, [], fn(out, x) { if(keep(x)) { push(out, x) } else { out } }) }
+pub fn filter<T, U, V, e: EffectRow>(a: [T], keep: fn(T) -> Result<U, V> / {| e}) -> [T] / {| e} { fold(a, [], fn(out, x) { if(keep(x)) { push(out, x) } else { out } }) }
 
 // Each element with its place.
-pub fn enumerate(a) { from_fn(len(a), { i => (i, a[i]) }) }
+pub fn enumerate<T, U>(a: T) -> [(Int, U)] where T: Len, T: Index { from_fn(len(a), { i => (i, a[i]) }) }
 
-pub fn reverse(a) { from_fn(len(a), { i => a[len(a) - 1 - i] }) }
+pub fn reverse<T, U>(a: T) -> [U] where T: Len, T: Index { from_fn(len(a), { i => a[len(a) - 1 - i] }) }
 
 // One array after another.
-pub fn append(a, b) { fold(b, a, fn(out, x) { push(out, x) }) }
+pub fn append<T>(a: [T], b: [T]) -> [T] { fold(b, a, fn(out, x) { push(out, x) }) }
 
 // The arrays of an array, one after another.
-pub fn concat(parts) { fold(parts, [], fn(out, part) { append(out, part) }) }
+pub fn concat<T>(parts: [[T]]) -> [T] { fold(parts, [], fn(out, part) { append(out, part) }) }
 
 // The first `n` elements, and the rest.
-pub fn take(a, n: Int) { slice(a, 0, if(n < len(a)) { n } else { len(a) }) }
-pub fn drop(a, n: Int) { slice(a, if(n < len(a)) { n } else { len(a) }, len(a)) }
+pub fn take<T, U>(a: T, n: Int) -> [U] where T: Len, T: Index { slice(a, 0, if(n < len(a)) { n } else { len(a) }) }
+pub fn drop<T, U>(a: T, n: Int) -> [U] where T: Len, T: Index { slice(a, if(n < len(a)) { n } else { len(a) }, len(a)) }
 
 // Pairs of the elements at the same places, as many as the shorter has.
-pub fn zip(a, b) { from_fn(if(len(a) < len(b)) { len(a) } else { len(b) }, { i => (a[i], b[i]) }) }
+pub fn zip<T, U, V, W>(a: T, b: U) -> [(V, W)] where T: Len, U: Len, T: Index, U: Index { from_fn(if(len(a) < len(b)) { len(a) } else { len(b) }, { i => (a[i], b[i]) }) }
 
 // The place of the first element `wanted` says yes to.
-pub fn position(a, wanted) { position_from(a, wanted, 0) }
-fn position_from(a, wanted, i: Int) -> Option<Int> {
+pub fn position<T, U, V, W, e: EffectRow>(a: T, wanted: fn(U) -> Result<V, W> / {| e}) -> Option<Int> / {| e} where T: Len, T: Index { position_from(a, wanted, 0) }
+fn position_from<T, U, V, W, e: EffectRow>(a: T, wanted: fn(U) -> Result<V, W> / {| e}, i: Int) -> Option<Int> where T: Len, T: Index {
     if(i < len(a)) {
         if(wanted(a[i])) { Some(i) } else { tail position_from(a, wanted, i + 1) }
     } else { None }
 }
 
 // The first element `wanted` says yes to.
-pub fn find(a, wanted) { match(position(a, wanted)) { Some(i) => Some(a[i]), None => None } }
+pub fn find<T, U, V, W, e: EffectRow>(a: T, wanted: fn(U) -> Result<V, W> / {| e}) -> Option<U> / {| e} where T: Len, T: Index { match(position(a, wanted)) { Some(i) => Some(a[i]), None => None } }
 
-pub fn any(a, wanted) { match(position(a, wanted)) { Some(_) => true, None => false } }
-pub fn all(a, wanted) { not any(a, { x => not wanted(x) }) }
-pub fn contains(a, x) { any(a, { y => y == x }) }
+pub fn any<T, U, V, W, e: EffectRow>(a: T, wanted: fn(U) -> Result<V, W> / {| e}) -> Bool / {| e} where T: Len, T: Index { match(position(a, wanted)) { Some(_) => true, None => false } }
+pub fn all<T, U, V, W, e: EffectRow>(a: T, wanted: fn(U) -> Result<V, W> / {| e}) -> Bool / {| e} where T: Len, T: Index { not any(a, { x => not wanted(x) }) }
+pub fn contains<T, U>(a: T, x: U) -> Bool where U: Eq, T: Len, T: Index { any(a, { y => y == x }) }
 
 // How many elements `wanted` says yes to.
-pub fn count(a, wanted) { fold(a, 0, fn(n, x) { if(wanted(x)) { n + 1 } else { n } }) }
+pub fn count<T, U, V, e: EffectRow>(a: [T], wanted: fn(T) -> Result<U, V> / {| e}) -> Int / {| e} { fold(a, 0, fn(n, x) { if(wanted(x)) { n + 1 } else { n } }) }
 
-pub fn sum(a) { fold(a, 0, fn(total, x) { total + x }) }
-pub fn product(a) { fold(a, 1, fn(total, x) { total * x }) }
+pub fn sum(a: [Int]) -> Int { fold(a, 0, fn(total, x) { total + x }) }
+pub fn product(a: [Int]) -> Int { fold(a, 1, fn(total, x) { total * x }) }
 
 // The least and the greatest, if there is any element.
-pub fn minimum(a) {
+pub fn minimum<T>(a: [T]) -> Option<T> where T: Ord {
     if(len(a) == 0) { None } else { Some(fold(a, a[0], fn(m, x) { if(x < m) { x } else { m } })) }
 }
-pub fn maximum(a) {
+pub fn maximum<T>(a: [T]) -> Option<T> where T: Ord {
     if(len(a) == 0) { None } else { Some(fold(a, a[0], fn(m, x) { if(m < x) { x } else { m } })) }
 }
 
 // The array with the elements at two places changed over.
-pub fn swap(a, i: Int, j: Int) {
+pub fn swap<T>(a: T, i: Int, j: Int) -> T where T: Index {
     let x = a[i];
     let y = a[j];
     index_set(index_set(a, i, y), j, x)
@@ -312,11 +312,11 @@ pub fn swap(a, i: Int, j: Int) {
 
 // The elements in order, by `<`. Elements that are equal stay as they were
 // to each other.
-pub fn sort(a) { sort_by(a, fn(x, y) { x < y }) }
+pub fn sort<T>(a: [T]) -> [T] where T: Ord { sort_by(a, fn(x, y) { x < y }) }
 
 // The elements in the order `before` gives: `before(x, y)` says `x` comes
 // before `y`.
-pub fn sort_by(a, before) {
+pub fn sort_by<T, U, V, e: EffectRow>(a: [T], before: fn(T, T) -> Result<U, V> / {| e}) -> [T] / {| e} {
     if(len(a) < 2) { a } else {
         let half = len(a) / 2;
         merge(sort_by(slice(a, 0, half), before), sort_by(slice(a, half, len(a)), before), before)
@@ -324,8 +324,8 @@ pub fn sort_by(a, before) {
 }
 
 // Two arrays in order as one in order.
-fn merge(a, b, before) { merge_from(a, b, before, 0, 0, []) }
-fn merge_from(a, b, before, i: Int, j: Int, out) {
+fn merge<T, U, V, W, X, e: EffectRow>(a: T, b: U, before: fn(V, V) -> Result<W, X> / {| e}) -> [V] / {| e} where T: Len, U: Len, U: Index, T: Index { merge_from(a, b, before, 0, 0, []) }
+fn merge_from<T, U, V, W, X, e: EffectRow>(a: T, b: U, before: fn(V, V) -> Result<W, X> / {| e}, i: Int, j: Int, out: [V]) -> [V] / {| e} where T: Len, U: Len, U: Index, T: Index {
     if(i < len(a)) {
         if(j < len(b)) {
             if(before(b[j], a[i])) { tail merge_from(a, b, before, i, j + 1, push(out, b[j])) }
@@ -337,8 +337,8 @@ fn merge_from(a, b, before, i: Int, j: Int, out) {
 }
 
 // Where `x` is in an array in order, or where it would go.
-pub fn binary_search(a, x) -> Result<Int, Int> { search_in(a, x, 0, len(a)) }
-fn search_in(a, x, low: Int, high: Int) -> Result<Int, Int> {
+pub fn binary_search<T, U>(a: T, x: U) -> Result<Int, Int> where T: Len, T: Index, U: Ord { search_in(a, x, 0, len(a)) }
+fn search_in<T, U>(a: T, x: U, low: Int, high: Int) -> Result<Int, Int> where T: Index, U: Ord {
     if(low < high) {
         let mid = low + (high - low) / 2;
         if(a[mid] < x) { tail search_in(a, x, mid + 1, high) }
@@ -347,7 +347,7 @@ fn search_in(a, x, low: Int, high: Int) -> Result<Int, Int> {
 }
 
 // The array without an element that is equal to the one before it.
-pub fn dedup(a) {
+pub fn dedup<T>(a: [T]) -> [T] where T: Eq {
     fold(a, [], fn(out, x) {
         if(len(out) == 0) { push(out, x) } else {
             if(out[len(out) - 1] == x) { out } else { push(out, x) }
@@ -356,7 +356,7 @@ pub fn dedup(a) {
 }
 
 // `f(f(init, a0, b0), a1, b1)` and so on, of an array of pairs.
-pub fn fold_pairs(pairs, init, f) { fold(pairs, init, fn(acc, pair) { match(pair) { (a, b) => f(acc, a, b) } }) }
+pub fn fold_pairs<T, U, V, e: EffectRow>(pairs: [(T, U)], init: V, f: fn(V, T, U) -> V / {| e}) -> V / {| e} { fold(pairs, init, fn(acc, pair) { match(pair) { (a, b) => f(acc, a, b) } }) }
 
 // How long an array is (the prelude's `len`, of arrays alone).
 pub fn len_of<T>(a: [T]) -> Int { len(a) }
@@ -398,16 +398,16 @@ fn put_back<T>(a: [T], off: [T]) -> [T] {
 // there stops the program.
 impl<T> Index for Vec<T> {
     type Elem = T;
-    fn index(v, i) { arr_get(v.items, i) }
-    fn index_set(v, i, x) { Vec { items: arr_set(v.items, i, x) } }
+    fn index(v: Vec<T>, i: Int) -> T { arr_get(v.items, i) }
+    fn index_set(v: Vec<T>, i: Int, x: T) -> Vec<T> { Vec { items: arr_set(v.items, i, x) } }
 }
 impl<T> Indexed for Vec<T> {
     type Element = T;
-    fn element_at(v, i) { element_at(&v.items, i) }
-    fn size_at(v) { len_at(&v.items) }
+    fn element_at(v: &Vec<T>, i: Int) -> &T { element_at(&v.items, i) }
+    fn size_at(v: &Vec<T>) -> Int { len_at(&v.items) }
 }
-impl<T> IndexedMut for Vec<T> { fn place_at(i, v) { place_at(i, &mut v.items) } }
-impl<T> Clone for Vec<T> where T: Clone { fn clone(v) { Vec { items: clone(&v.items) } } }
+impl<T> IndexedMut for Vec<T> { fn place_at(i: Int, v: &mut Vec<T>) -> &mut <Vec<T> as Indexed>::Element { place_at(i, &mut v.items) } }
+impl<T> Clone for Vec<T> where T: Clone { fn clone(v: &Vec<T>) -> Vec<T> { Vec { items: clone(&v.items) } } }
 
 impl<T> Vec<T> {
     pub fn new() -> Self { Self { items: [] } }
@@ -645,7 +645,7 @@ pub fn char_at(text: Str, i: Int) -> Option<char> {
     match(text) { StrEnd => None, StrChar(c, rest) => if(i == 0) { Some(c) } else { tail char_at(rest, i - 1) } }
 }
 
-pub fn map(text: Str, f) -> Str {
+pub fn map<e: EffectRow>(text: Str, f: fn(char) -> char / {| e}) -> Str {
     match(text) { StrEnd => "", StrChar(c, rest) => StrChar(f(c), map(rest, f)) }
 }
 pub fn to_upper(text: Str) -> Str { map(text, std::char::to_upper) }
@@ -795,7 +795,7 @@ impl String {
     // The text as a value of its own, as Rust names it.
     pub fn as_str(value: &Self) -> Str { String::to_str(value) }
 }
-impl Show for String { fn show(s) { String::to_str(&s) } }
+impl Show for String { fn show(s: String) -> Str { String::to_str(&s) } }
 "#
 
 private def mapText : String := r#"// A map from keys to values, the keys kept in order: a tree that stays
@@ -806,18 +806,18 @@ enum Node<K, V> { Leaf, Branch(Node<K, V>, K, V, Node<K, V>, Int) }
 
 pub struct Map<K, V>(Node<K, V>)
 
-pub fn new() { Map(Leaf) }
+pub fn new<T, U>() -> Map<T, U> { Map(Leaf) }
 
-fn height(n) { match(n) { Leaf => 0, Branch(_, _, _, _, h) => h } }
+fn height<T, U>(n: Node<T, U>) -> Int { match(n) { Leaf => 0, Branch(_, _, _, _, h) => h } }
 
-fn branch(l, k, v, r) {
+fn branch<T, U>(l: Node<T, U>, k: T, v: U, r: Node<T, U>) -> Node<T, U> {
     let hl = height(l);
     let hr = height(r);
     Branch(l, k, v, r, 1 + (if(hl < hr) { hr } else { hl }))
 }
 
 // A tree with these parts, turned if one side is two deeper than the other.
-fn balance(l, k, v, r) {
+fn balance<T, U>(l: Node<T, U>, k: T, v: U, r: Node<T, U>) -> Node<T, U> {
     let hl = height(l);
     let hr = height(r);
     if(hl > hr + 1) {
@@ -851,7 +851,7 @@ fn balance(l, k, v, r) {
     }
 }
 
-fn put(n, key, value) {
+fn put<T, U>(n: Node<T, U>, key: T, value: U) -> Node<T, U> where T: Ord {
     match(n) {
         Leaf => Branch(Leaf, key, value, Leaf, 1),
         Branch(l, k, v, r, h) =>
@@ -861,9 +861,9 @@ fn put(n, key, value) {
 }
 
 // The map with `key` standing for `value`, whatever it stood for.
-pub fn insert(m, key, value) { match(m) { Map(n) => Map(put(n, key, value)) } }
+pub fn insert<T, U>(m: Map<T, U>, key: T, value: U) -> Map<T, U> where T: Ord { match(m) { Map(n) => Map(put(n, key, value)) } }
 
-fn look(n, key) {
+fn look<T, U>(n: Node<T, U>, key: T) -> Option<U> where T: Ord {
     match(n) {
         Leaf => None,
         Branch(l, k, v, r, _) =>
@@ -872,7 +872,7 @@ fn look(n, key) {
 }
 
 // What `key` stands for.
-pub fn get(m, key) { match(m) { Map(n) => look(n, key) } }
+pub fn get<T, U>(m: Map<T, U>, key: T) -> Option<U> where T: Ord { match(m) { Map(n) => look(n, key) } }
 
 // What a key stands for, where it is in the tree.
 fn look_ref<'a, K, V>(n: &'a Node<K, V>, key: K) -> Option<&'a V> where K: Ord {
@@ -902,10 +902,10 @@ impl<K, V> Map<K, V> {
     }
 }
 
-pub fn contains_key(m, key) { match(get(m, key)) { Some(_) => true, None => false } }
+pub fn contains_key<T, U>(m: Map<T, U>, key: T) -> Bool where T: Ord { match(get(m, key)) { Some(_) => true, None => false } }
 
 // The least key of a tree that is not empty, what it stands for, and the rest.
-fn take_least(l, k, v, r) {
+fn take_least<T, U>(l: Node<T, U>, k: T, v: U, r: Node<T, U>) -> (T, U, Node<T, U>) {
     match(l) {
         Leaf => (k, v, r),
         Branch(ll, lk, lv, lr, _) =>
@@ -913,7 +913,7 @@ fn take_least(l, k, v, r) {
     }
 }
 
-fn cut(n, key) {
+fn cut<T, U>(n: Node<T, U>, key: T) -> Node<T, U> where T: Ord {
     match(n) {
         Leaf => Leaf,
         Branch(l, k, v, r, _) =>
@@ -932,9 +932,9 @@ fn cut(n, key) {
 }
 
 // The map without `key`.
-pub fn remove(m, key) { match(m) { Map(n) => Map(cut(n, key)) } }
+pub fn remove<T, U>(m: Map<T, U>, key: T) -> Map<T, U> where T: Ord { match(m) { Map(n) => Map(cut(n, key)) } }
 
-fn walk(n, init, f) {
+fn walk<T, U, V, e: EffectRow>(n: Node<T, U>, init: V, f: fn(V, T, U) -> V / {| e}) -> V / {| e} {
     match(n) {
         Leaf => init,
         Branch(l, k, v, r, _) => walk(r, f(walk(l, init, f), k, v), f)
@@ -942,24 +942,24 @@ fn walk(n, init, f) {
 }
 
 // `f(f(init, k0, v0), k1, v1)` and so on, the keys in order.
-pub fn fold(m, init, f) { match(m) { Map(n) => walk(n, init, f) } }
+pub fn fold<T, U, V, e: EffectRow>(m: Map<T, U>, init: V, f: fn(V, T, U) -> V / {| e}) -> V / {| e} { match(m) { Map(n) => walk(n, init, f) } }
 
-pub fn len(m) { fold(m, 0, fn(n, k, v) { n + 1 }) }
-pub fn is_empty(m) { match(m) { Map(Leaf) => true, _ => false } }
+pub fn len<T, U>(m: Map<T, U>) -> Int { fold(m, 0, fn(n, k, v) { n + 1 }) }
+pub fn is_empty<T, U>(m: Map<T, U>) -> Bool { match(m) { Map(Leaf) => true, _ => false } }
 
-pub fn keys(m) { fold(m, [], fn(out, k, v) { push(out, k) }) }
-pub fn values(m) { fold(m, [], fn(out, k, v) { push(out, v) }) }
-pub fn entries(m) { fold(m, [], fn(out, k, v) { push(out, (k, v)) }) }
+pub fn keys<T, U>(m: Map<T, U>) -> [T] { fold(m, [], fn(out, k, v) { push(out, k) }) }
+pub fn values<T, U>(m: Map<T, U>) -> [U] { fold(m, [], fn(out, k, v) { push(out, v) }) }
+pub fn entries<T, U>(m: Map<T, U>) -> [(T, U)] { fold(m, [], fn(out, k, v) { push(out, (k, v)) }) }
 
 // The map of an array of keys with what each stands for; a later one wins.
-pub fn from(pairs) { std::vec::fold_pairs(pairs, new(), fn(m, k, v) { insert(m, k, v) }) }
+pub fn from<T, U>(pairs: [(T, U)]) -> Map<T, U> where T: Ord { std::vec::fold_pairs(pairs, new(), fn(m, k, v) { insert(m, k, v) }) }
 
 // The map with `key` standing for what `f` makes of what it stood for.
-pub fn update(m, key, f) { insert(m, key, f(get(m, key))) }
+pub fn update<T, U, e: EffectRow>(m: Map<T, U>, key: T, f: fn(Option<U>) -> U / {| e}) -> Map<T, U> / {| e} where T: Ord { insert(m, key, f(get(m, key))) }
 
 // The least and the greatest key, each with what it stands for.
-pub fn least(m) { match(entries(m)) { es => std::vec::first(es) } }
-pub fn greatest(m) { match(entries(m)) { es => std::vec::last(es) } }
+pub fn least<T, U>(m: Map<T, U>) -> Option<(T, U)> { match(entries(m)) { es => std::vec::first(es) } }
+pub fn greatest<T, U>(m: Map<T, U>) -> Option<(T, U)> { match(entries(m)) { es => std::vec::last(es) } }
 "#
 
 private def setText : String := r#"// A set of values kept in order: a map from each to nothing.
@@ -969,27 +969,27 @@ use std::map::Map;
 
 pub struct Set<T>(Map<T, ()>)
 
-pub fn new() { Set(map::new()) }
+pub fn new<T>() -> Set<T> { Set(map::new()) }
 
-pub fn insert(s, x) { match(s) { Set(m) => Set(map::insert(m, x, ())) } }
-pub fn remove(s, x) { match(s) { Set(m) => Set(map::remove(m, x)) } }
-pub fn contains(s, x) { match(s) { Set(m) => map::contains_key(m, x) } }
-pub fn len(s) { match(s) { Set(m) => map::len(m) } }
-pub fn is_empty(s) { match(s) { Set(m) => map::is_empty(m) } }
+pub fn insert<T>(s: Set<T>, x: T) -> Set<T> where T: Ord { match(s) { Set(m) => Set(map::insert(m, x, ())) } }
+pub fn remove<T>(s: Set<T>, x: T) -> Set<T> where T: Ord { match(s) { Set(m) => Set(map::remove(m, x)) } }
+pub fn contains<T>(s: Set<T>, x: T) -> Bool where T: Ord { match(s) { Set(m) => map::contains_key(m, x) } }
+pub fn len<T>(s: Set<T>) -> Int { match(s) { Set(m) => map::len(m) } }
+pub fn is_empty<T>(s: Set<T>) -> Bool { match(s) { Set(m) => map::is_empty(m) } }
 
 // The values, in order.
-pub fn to_array(s) { match(s) { Set(m) => map::keys(m) } }
+pub fn to_array<T>(s: Set<T>) -> [T] { match(s) { Set(m) => map::keys(m) } }
 
 // The set of the values of an array.
-pub fn from(a) { fold(a, new(), fn(s, x) { insert(s, x) }) }
+pub fn from<T>(a: [T]) -> Set<T> where T: Ord { fold(a, new(), fn(s, x) { insert(s, x) }) }
 
-pub fn fold_set(s, init, f) { match(s) { Set(m) => map::fold(m, init, fn(acc, k, v) { f(acc, k) }) } }
+pub fn fold_set<T, U, e: EffectRow>(s: Set<T>, init: U, f: fn(U, T) -> U / {| e}) -> U / {| e} { match(s) { Set(m) => map::fold(m, init, fn(acc, k, v) { f(acc, k) }) } }
 
 // What is in either, in both, and in the first but not the second.
-pub fn union(a, b) { fold_set(b, a, fn(s, x) { insert(s, x) }) }
-pub fn intersection(a, b) { fold_set(a, new(), fn(s, x) { if(contains(b, x)) { insert(s, x) } else { s } }) }
-pub fn difference(a, b) { fold_set(b, a, fn(s, x) { remove(s, x) }) }
-pub fn is_subset(a, b) { fold_set(a, true, fn(ok, x) { ok and { contains(b, x) } }) }
+pub fn union<T>(a: Set<T>, b: Set<T>) -> Set<T> where T: Ord { fold_set(b, a, fn(s, x) { insert(s, x) }) }
+pub fn intersection<T>(a: Set<T>, b: Set<T>) -> Set<T> where T: Ord { fold_set(a, new(), fn(s, x) { if(contains(b, x)) { insert(s, x) } else { s } }) }
+pub fn difference<T>(a: Set<T>, b: Set<T>) -> Set<T> where T: Ord { fold_set(b, a, fn(s, x) { remove(s, x) }) }
+pub fn is_subset<T>(a: Set<T>, b: Set<T>) -> Bool where T: Ord { fold_set(a, true, fn(ok, x) { ok and { contains(b, x) } }) }
 "#
 
 private def iterText : String := r#"// Values one at a time, each made when it is asked for. An `Iter<T>` is asked
@@ -997,9 +997,9 @@ private def iterText : String := r#"// Values one at a time, each made when it i
 
 pub struct Iter<T>(fn() -> Option<(T, Iter<T>)>)
 
-pub fn next(it) { match(it) { Iter(step) => step() } }
+pub fn next<T>(it: Iter<T>) -> Option<(T, Iter<T>)> { match(it) { Iter(step) => step() } }
 
-pub fn empty() { Iter({ None }) }
+pub fn empty<T>() -> Iter<T> { Iter({ None }) }
 
 // The numbers from `from` up to, not including, `to`.
 pub fn range(from: Int, to: Int) -> Iter<Int> {
@@ -1007,20 +1007,20 @@ pub fn range(from: Int, to: Int) -> Iter<Int> {
 }
 
 // `seed`, `f(seed)`, `f(f(seed))`, without end.
-pub fn iterate(seed, f) { Iter({ Some((seed, iterate(f(seed), f))) }) }
+pub fn iterate<T, e: EffectRow>(seed: T, f: fn(T) -> T / {| e}) -> Iter<T> / {| e} { Iter({ Some((seed, iterate(f(seed), f))) }) }
 
-pub fn repeat(x) { Iter({ Some((x, repeat(x))) }) }
+pub fn repeat<T>(x: T) -> Iter<T> { Iter({ Some((x, repeat(x))) }) }
 
 // The elements of an array.
-pub fn of(a) { of_from(a, 0) }
-fn of_from(a, i: Int) { Iter({ if(i < len(a)) { Some((a[i], of_from(a, i + 1))) } else { None } }) }
+pub fn of<T, U>(a: T) -> Iter<U> where T: Len, T: Index { of_from(a, 0) }
+fn of_from<T, U>(a: T, i: Int) -> Iter<U> where T: Len, T: Index { Iter({ if(i < len(a)) { Some((a[i], of_from(a, i + 1))) } else { None } }) }
 
-pub fn map(it, f) {
+pub fn map<T, U, e: EffectRow>(it: Iter<T>, f: fn(T) -> U / {| e}) -> Iter<U> / {| e} {
     Iter({ match(next(it)) { Some((x, rest)) => Some((f(x), map(rest, f))), None => None } })
 }
 
-pub fn filter(it, keep) { Iter({ filter_next(it, keep) }) }
-fn filter_next(it, keep) {
+pub fn filter<T, U, V, e: EffectRow>(it: Iter<T>, keep: fn(T) -> Result<U, V> / {| e}) -> Iter<T> / {| e} { Iter({ filter_next(it, keep) }) }
+fn filter_next<T, U, V, e: EffectRow>(it: Iter<T>, keep: fn(T) -> Result<U, V> / {| e}) -> Option<(T, Iter<T>)> / {| e} {
     match(next(it)) {
         Some((x, rest)) => if(keep(x)) { Some((x, filter(rest, keep))) } else { tail filter_next(rest, keep) },
         None => None
@@ -1028,15 +1028,15 @@ fn filter_next(it, keep) {
 }
 
 // The first `n`, and what is after them.
-pub fn take(it, n: Int) {
+pub fn take<T>(it: Iter<T>, n: Int) -> Iter<T> {
     Iter({ if(n <= 0) { None } else { match(next(it)) { Some((x, rest)) => Some((x, take(rest, n - 1))), None => None } } })
 }
-pub fn skip(it, n: Int) {
+pub fn skip<T>(it: Iter<T>, n: Int) -> Iter<T> {
     if(n <= 0) { it } else { match(next(it)) { Some((_, rest)) => tail skip(rest, n - 1), None => empty() } }
 }
 
 // The values while `keep` says yes.
-pub fn take_while(it, keep) {
+pub fn take_while<T, U, V, e: EffectRow>(it: Iter<T>, keep: fn(T) -> Result<U, V> / {| e}) -> Iter<T> / {| e} {
     Iter({ match(next(it)) {
         Some((x, rest)) => if(keep(x)) { Some((x, take_while(rest, keep))) } else { None },
         None => None
@@ -1044,12 +1044,12 @@ pub fn take_while(it, keep) {
 }
 
 // One after another.
-pub fn chain(a, b) {
+pub fn chain<T>(a: Iter<T>, b: Iter<T>) -> Iter<T> {
     Iter({ match(next(a)) { Some((x, rest)) => Some((x, chain(rest, b))), None => next(b) } })
 }
 
 // Pairs, as many as the shorter gives.
-pub fn zip(a, b) {
+pub fn zip<T, U>(a: Iter<T>, b: Iter<U>) -> Iter<(T, U)> {
     Iter({ match(next(a)) {
         Some((x, ra)) => match(next(b)) { Some((y, rb)) => Some(((x, y), zip(ra, rb))), None => None },
         None => None
@@ -1057,27 +1057,27 @@ pub fn zip(a, b) {
 }
 
 // Each value with how many came before it.
-pub fn enumerate(it) { zip(iterate(0, { n => n + 1 }), it) }
+pub fn enumerate<T>(it: Iter<T>) -> Iter<(Int, T)> { zip(iterate(0, { n => n + 1 }), it) }
 
 // `f(f(init, x0), x1)` and so on, of every value.
-pub fn fold(it, init, f) {
+pub fn fold<T, U, e: EffectRow>(it: Iter<T>, init: U, f: fn(U, T) -> U / {| e}) -> U / {| e} {
     match(next(it)) { Some((x, rest)) => tail fold(rest, f(init, x), f), None => init }
 }
 
-pub fn collect(it) { fold(it, [], fn(out, x) { push(out, x) }) }
-pub fn count(it) { fold(it, 0, fn(n, x) { n + 1 }) }
-pub fn sum(it) { fold(it, 0, fn(total, x) { total + x }) }
-pub fn each(it, f) { fold(it, (), fn(done, x) { f(x) }) }
+pub fn collect<T>(it: Iter<T>) -> [T] { fold(it, [], fn(out, x) { push(out, x) }) }
+pub fn count<T>(it: Iter<T>) -> Int { fold(it, 0, fn(n, x) { n + 1 }) }
+pub fn sum(it: Iter<Int>) -> Int { fold(it, 0, fn(total, x) { total + x }) }
+pub fn each<T, e: EffectRow>(it: Iter<T>, f: fn(T) -> () / {| e}) -> () / {| e} { fold(it, (), fn(done, x) { f(x) }) }
 
 // The first value `wanted` says yes to.
-pub fn find(it, wanted) {
+pub fn find<T, U, V, e: EffectRow>(it: Iter<T>, wanted: fn(T) -> Result<U, V> / {| e}) -> Option<T> / {| e} {
     match(next(it)) {
         Some((x, rest)) => if(wanted(x)) { Some(x) } else { tail find(rest, wanted) },
         None => None
     }
 }
-pub fn any(it, wanted) { match(find(it, wanted)) { Some(_) => true, None => false } }
-pub fn all(it, wanted) { not any(it, { x => not wanted(x) }) }
+pub fn any<T, U, V, e: EffectRow>(it: Iter<T>, wanted: fn(T) -> Result<U, V> / {| e}) -> Bool / {| e} { match(find(it, wanted)) { Some(_) => true, None => false } }
+pub fn all<T, U, V, e: EffectRow>(it: Iter<T>, wanted: fn(T) -> Result<U, V> / {| e}) -> Bool / {| e} { not any(it, { x => not wanted(x) }) }
 "#
 
 private def hostText : String := r#"// What a program asks of the machine it runs on: the console, files, the
@@ -1274,7 +1274,7 @@ unsafe fn chance(n: Int) -> Result<[u8], IoError> {
 }
 
 // Run a computation with the operating system answering what it asks for.
-pub fn run_host(main) {
+pub fn run_host<T, e: EffectRow>(main: fn() -> T / {Console, FileRead, FileWrite, Diagnostic, ProcessEnvironment, ProcessArgs, Clock, Entropy | e}) -> T / {| e} {
     handle(main()) {
         write_stdout(bytes, k) => k(unsafe { write_all(1i32, bytes) }),
         write_stderr(bytes, k) => k(unsafe { write_all(2i32, bytes) }),
@@ -1468,7 +1468,7 @@ pub struct Range<T> { pub start: T, pub end: T }
 pub fn range(from: Int, to: Int) -> Range<Int> { Range { start: from, end: to } }
 impl Iterator for Range<Int> {
     type Item = Int;
-    fn next(r) { if(r.start < r.end) { let v = r.start; r.start = v + 1; Some(v) } else { None } }
+    fn next(r: &mut Range<Int>) -> Option<Int> { if(r.start < r.end) { let v = r.start; r.start = v + 1; Some(v) } else { None } }
 }
 
 fn turned<T>(from: [T], onto: [T]) -> [T] {
@@ -1483,7 +1483,7 @@ pub struct IntoIter<T> { rest: [T] }
 pub fn into_iter<T>(items: [T]) -> IntoIter<T> { IntoIter { rest: turned(items, []) } }
 impl<T> Iterator for IntoIter<T> {
     type Item = T;
-    fn next(it) {
+    fn next(it: &mut IntoIter<T>) -> Option<T> {
         pop_at(&mut it.rest)
     }
 }
@@ -1540,7 +1540,7 @@ fn map_onto<I: Iterator, B>(it: &mut I, f: fn(I::Item) -> B, out: [B]) -> [B] {
 pub struct Map<I, A, B> { inner: I, f: fn(A) -> B }
 impl<I, A, B> Iterator for Map<I, A, B> where I: Iterator<Item = A> {
     type Item = B;
-    fn next(it) {
+    fn next(it: &mut Map<I, A, B>) -> Option<B> {
         match(next(&mut it.inner)) {
             Some(x) => Some((it.f)(x)),
             None => None
@@ -1555,7 +1555,7 @@ pub fn map<I: Iterator, B>(it: I, f: fn(I::Item) -> B) -> Map<I, I::Item, B> {
 pub struct Filter<I, A> { inner: I, keep: for<'a> fn(&'a A) -> Bool }
 impl<I, A> Iterator for Filter<I, A> where I: Iterator<Item = A> {
     type Item = A;
-    fn next(it) {
+    fn next(it: &mut Filter<I, A>) -> Option<A> {
         match(next(&mut it.inner)) {
             Some(x) => if((it.keep)(&x)) { Some(x) } else { next(it) },
             None => None
@@ -1570,7 +1570,7 @@ pub fn filter<I: Iterator>(it: I, keep: for<'a> fn(&'a I::Item) -> Bool) -> Filt
 pub struct Take<I, A> { inner: I, left: Int }
 impl<I, A> Iterator for Take<I, A> where I: Iterator<Item = A> {
     type Item = A;
-    fn next(it) {
+    fn next(it: &mut Take<I, A>) -> Option<A> {
         if(it.left <= 0) { None } else {
             it.left = it.left - 1;
             next(&mut it.inner)
@@ -1585,7 +1585,7 @@ pub fn take<I: Iterator>(it: I, n: Int) -> Take<I, I::Item> {
 pub struct Skip<I, A> { inner: I, left: Int }
 impl<I, A> Iterator for Skip<I, A> where I: Iterator<Item = A> {
     type Item = A;
-    fn next(it) {
+    fn next(it: &mut Skip<I, A>) -> Option<A> {
         if(it.left <= 0) { next(&mut it.inner) } else {
             it.left = it.left - 1;
             match(next(&mut it.inner)) {
@@ -1603,7 +1603,7 @@ pub fn skip<I: Iterator>(it: I, n: Int) -> Skip<I, I::Item> {
 pub struct Enumerate<I, A> { inner: I, at: Int }
 impl<I, A> Iterator for Enumerate<I, A> where I: Iterator<Item = A> {
     type Item = (Int, A);
-    fn next(it) {
+    fn next(it: &mut Enumerate<I, A>) -> Option<(Int, A)> {
         match(next(&mut it.inner)) {
             Some(x) =>
                 let i = it.at;
@@ -1621,7 +1621,7 @@ pub fn enumerate<I: Iterator>(it: I) -> Enumerate<I, I::Item> {
 pub struct Zip<I, J, A, B> { left: I, right: J }
 impl<I, J, A, B> Iterator for Zip<I, J, A, B> where I: Iterator<Item = A>, J: Iterator<Item = B> {
     type Item = (A, B);
-    fn next(it) {
+    fn next(it: &mut Zip<I, J, A, B>) -> Option<(A, B)> {
         match(next(&mut it.left)) {
             Some(a) => match(next(&mut it.right)) {
                 Some(b) => Some((a, b)),
@@ -1639,7 +1639,7 @@ pub fn zip<I: Iterator, J: Iterator>(a: I, b: J) -> Zip<I, J, I::Item, J::Item> 
 pub struct Chain<I, J, A> { first: I, second: J }
 impl<I, J, A> Iterator for Chain<I, J, A> where I: Iterator<Item = A>, J: Iterator<Item = A> {
     type Item = A;
-    fn next(it) {
+    fn next(it: &mut Chain<I, J, A>) -> Option<A> {
         match(next(&mut it.first)) {
             Some(x) => Some(x),
             None => next(&mut it.second)
@@ -1785,7 +1785,7 @@ pub struct SliceIter<'a, T> { items: &'a [T], at: Int, end: Int }
 
 impl<'a, T> Iterator for SliceIter<'a, T> {
     type Item = &'a T;
-    fn next(it) {
+    fn next(it: &mut SliceIter<'a, T>) -> Option<&'a T> {
         if(it.at < it.end) { let i = it.at; it.at = i + 1; element(it.items, i) } else { None }
     }
 }
@@ -1865,10 +1865,10 @@ pub fn format<T: Display>(value: &T) -> String {
 }
 
 
-impl Display for Int { fn fmt(n, out) { Formatter::write_str(out, show(*n)) } }
-impl Display for Str { fn fmt(text, out) { Formatter::write_str(out, *text) } }
-impl Display for char { fn fmt(c, out) { Formatter::write_char(out, *c) } }
-impl Display for String { fn fmt(text, out) { Formatter::write_str(out, String::to_str(text)) } }
+impl Display for Int { fn fmt(n: &Int, out: &mut Formatter) { Formatter::write_str(out, show(*n)) } }
+impl Display for Str { fn fmt(text: &Str, out: &mut Formatter) { Formatter::write_str(out, *text) } }
+impl Display for char { fn fmt(c: &char, out: &mut Formatter) { Formatter::write_char(out, *c) } }
+impl Display for String { fn fmt(text: &String, out: &mut Formatter) { Formatter::write_str(out, String::to_str(text)) } }
 "#
 
 private def streamText : String := r#"// Streams of bytes, in the shape the library specification gives them (28): a
@@ -1923,7 +1923,7 @@ impl MemoryCursor {
 
 impl Read for MemoryCursor {
     type Effects = {};
-    fn read(cursor, most) {
+    fn read(cursor: &mut MemoryCursor, most: Int) -> Result<[u8], IoError> {
         let from = cursor.at;
         let n = len_at(&cursor.bytes);
         let upto = if(from + most > n) { n } else { from + most };
@@ -1934,12 +1934,12 @@ impl Read for MemoryCursor {
 
 impl Write for MemoryCursor {
     type Effects = {};
-    fn write(cursor, bytes) {
+    fn write(cursor: &mut MemoryCursor, bytes: [u8]) -> Result<Int, IoError> {
         let held = &mut cursor.bytes;
         *held = joined(replace(held, []), &bytes, 0);
         Ok(len(bytes))
     }
-    fn flush(cursor) { Ok(()) }
+    fn flush(cursor: &mut MemoryCursor) -> Result<(), IoError> { Ok(()) }
 }
 
 // The host's standard streams.
@@ -1949,19 +1949,19 @@ pub struct Stdin
 
 impl Write for Stdout {
     type Effects = {Console};
-    fn write(out, bytes) { write_stdout(bytes) }
-    fn flush(out) { Ok(()) }
+    fn write(out: &mut Stdout, bytes: [u8]) -> Result<Int, IoError> / {Console} { write_stdout(bytes) }
+    fn flush(out: &mut Stdout) -> Result<(), IoError> / {Console} { Ok(()) }
 }
 
 impl Write for Stderr {
     type Effects = {Console};
-    fn write(out, bytes) { write_stderr(bytes) }
-    fn flush(out) { Ok(()) }
+    fn write(out: &mut Stderr, bytes: [u8]) -> Result<Int, IoError> / {Console} { write_stderr(bytes) }
+    fn flush(out: &mut Stderr) -> Result<(), IoError> / {Console} { Ok(()) }
 }
 
 impl Read for Stdin {
     type Effects = {Console};
-    fn read(from, most) { read_stdin(most) }
+    fn read(from: &mut Stdin, most: Int) -> Result<[u8], IoError> / {Console} { read_stdin(most) }
 }
 
 // How far `write_all` got before it failed.
@@ -2079,7 +2079,7 @@ impl<W> BufferWriter<W> {
 
 impl<W> Write for BufferWriter<W> where W: Write {
     type Effects = { | <W as Write>::Effects };
-    fn write(b, bytes) {
+    fn write(b: &mut BufferWriter<W>, bytes: [u8]) -> Result<Int, IoError> / {| <W as Write>::Effects} {
         b.held = joined(b.held, &bytes, 0);
         if(len_at(&b.held) >= b.capacity) {
             match(write_from(&mut b.inner, b.held, 0)) {
@@ -2089,7 +2089,7 @@ impl<W> Write for BufferWriter<W> where W: Write {
             }
         } else { Ok(len(bytes)) }
     }
-    fn flush(b) {
+    fn flush(b: &mut BufferWriter<W>) -> Result<(), IoError> / {| <W as Write>::Effects} {
         match(write_from(&mut b.inner, b.held, 0)) {
             Ok(_) => b.held = []; flush(&mut b.inner),
             Err(e) => b.held = piece(&b.held, e.written, len_at(&b.held), []); Err(e.error)
@@ -2113,7 +2113,7 @@ impl<R> BufferReader<R> {
 
 impl<R> Read for BufferReader<R> where R: Read {
     type Effects = { | <R as Read>::Effects };
-    fn read(b, most) {
+    fn read(b: &mut BufferReader<R>, most: Int) -> Result<[u8], IoError> / {| <R as Read>::Effects} {
         if(b.at < len_at(&b.held)) {
             let from = b.at;
             let n = len_at(&b.held);
@@ -2156,10 +2156,10 @@ pub trait Default {
     fn default() -> Self;
 }
 
-impl Default for Int { fn default() { 0 } }
-impl Default for Str { fn default() { "" } }
+impl Default for Int { fn default() -> Int { 0 } }
+impl Default for Str { fn default() -> Str { "" } }
 // (`Bool` is an `Option<()>`: its start is `false`.)
-impl<A> Default for Option<A> { fn default() { None } }
+impl<A> Default for Option<A> { fn default() -> Option<A> { None } }
 
 // What a reference points to, taken; the type's start is left in its place.
 pub fn take<T: Default>(target: &mut T) -> T { replace(target, default()) }
@@ -2169,7 +2169,7 @@ pub fn take<T: Default>(target: &mut T) -> T { replace(target, default()) }
 // `Ok` of what it gives, or `Err` of what it failed with.
 pub effect Fail<E> { fail(E) -> ! }
 pub effect Report<D> { report(D) }
-pub fn catch_fail(body) {
+pub fn catch_fail<T, U, e: EffectRow>(body: fn() -> T / {Fail<U> | e}) -> Result<T, U> / {| e} {
     handle body() {
         r => Ok(r),
         fail(e) => Err(e)
@@ -3744,7 +3744,7 @@ pub struct Ready<T> { value: T }
 pub fn ready<T>(value: T) -> Ready<T> { Ready { value: value } }
 impl<T> Future for Ready<T> {
     type Output = T;
-    fn poll(r) { match(r) { Ready { value } => FutureStep::Ready(value) } }
+    fn poll(r: Ready<T>) -> FutureStep<T, Ready<T>> { match(r) { Ready { value } => FutureStep::Ready(value) } }
 }
 
 // A future polled until it is done.
@@ -3794,7 +3794,7 @@ impl<Y, R, T> Generator for Coroutine<Y, R, T> {
     type Resume = R;
     type Return = T;
     type Effects = {};
-    fn resume(g, input) { match(g) { Coroutine(k) => k(input) } }
+    fn resume(g: Coroutine<Y, R, T>, input: R) -> GeneratorStep<Y, T, Coroutine<Y, R, T>> { match(g) { Coroutine(k) => k(input) } }
 }
 
 // A computation as a generator that has not started. What it is first
@@ -3815,7 +3815,7 @@ pub struct Generated<G, Y> { state: Option<G>, of: fn() -> Option<Y> }
 
 impl<G, Y> Iterator for Generated<G, Y> where G: Generator<Yield = Y, Resume = ()> {
     type Item = Y;
-    fn next(it) {
+    fn next(it: &mut Generated<G, Y>) -> Option<Y> {
         match(replace(&mut it.state, None)) {
             Some(g) => match(resume(g, ())) {
                 Yielded { value, rest } => it.state = Some(rest); Some(value),
@@ -4019,7 +4019,7 @@ impl Digest256 {
         }
     }
 }
-impl Eq for Digest256 { fn ==(a, b) { a.bytes == b.bytes } }
+impl Eq for Digest256 { fn ==(a: Digest256, b: Digest256) -> Bool { a.bytes == b.bytes } }
 
 pub fn blake3<'a>(bytes: Slice<'a, u8>) -> Digest256 { digest_of(&all_onto([], &bytes, 0)) }
 
@@ -4348,7 +4348,7 @@ pub struct HostEntropy;
 
 impl RandomSource for HostEntropy {
     type Effects = {Entropy};
-    fn fill(source, count) {
+    fn fill(source: &mut HostEntropy, count: Int) -> Result<[u8], RandomError> / {Entropy} {
         match(random_bytes(count)) { Ok(bytes) => Ok(bytes), Err(e) => Err(RandomError::Host(e)) }
     }
 }
@@ -4412,7 +4412,7 @@ fn seeded_bytes(rng: &mut SeededRng, count: Int, out: [u8]) -> [u8] {
 
 impl RandomSource for SeededRng {
     type Effects = {};
-    fn fill(source, count) { Ok(seeded_bytes(source, count, [])) }
+    fn fill(source: &mut SeededRng, count: Int) -> Result<[u8], RandomError> { Ok(seeded_bytes(source, count, [])) }
 }
 
 // Sixty-four bits: eight bytes of the source, the least first.
@@ -4702,55 +4702,55 @@ fn mix(h: Int) -> Int {
 }
 pub fn combine(a: Int, b: Int) -> Int { mix(int_xor(mix(a), int_add(int_and(b, 4611686018427387903), 1))) }
 
-impl Hash for Int { fn hash(n) { mix(int_and(n, 9223372036854775807)) } }
-impl Hash for char { fn hash(c) { mix(int(c)) } }
-impl Hash for () { fn hash(u) { 7 } }
+impl Hash for Int { fn hash(n: Int) -> Int { mix(int_and(n, 9223372036854775807)) } }
+impl Hash for char { fn hash(c: char) -> Int { mix(int(c)) } }
+impl Hash for () { fn hash(u: ()) -> Int { 7 } }
 impl Hash for Str {
-    fn hash(text) { hash_text(text, 5381) }
+    fn hash(text: Str) -> Int { hash_text(text, 5381) }
 }
 fn hash_text(text: Str, h: Int) -> Int {
     match(text) { StrEnd => h, StrChar(c, rest) => tail hash_text(rest, combine(h, int(c))) }
 }
 impl<A, B> Hash for (A, B) where A: Hash, B: Hash {
-    fn hash(p) { match(p) { (a, b) => combine(hash(a), hash(b)) } }
+    fn hash(p: (A, B)) -> Int { match(p) { (a, b) => combine(hash(a), hash(b)) } }
 }
 impl<T> Hash for Array<T> where T: Hash {
-    fn hash(a) { fold(a, 17, fn(h, x) { combine(h, hash(x)) }) }
+    fn hash(a: Array<T>) -> Int { fold(a, 17, fn(h, x) { combine(h, hash(x)) }) }
 }
 
 // A map: its buckets, and how many keys it has.
 pub struct HashMap<K, V>([[(K, V)]], Int)
 
-pub fn new() { HashMap([[]; 8], 0) }
+pub fn new<T, U>() -> HashMap<T, U> { HashMap([[]; 8], 0) }
 
-pub fn len(m) { match(m) { HashMap(_, n) => n } }
-pub fn is_empty(m) { len(m) == 0 }
+pub fn len<T, U>(m: HashMap<T, U>) -> Int { match(m) { HashMap(_, n) => n } }
+pub fn is_empty<T, U>(m: HashMap<T, U>) -> Bool { len(m) == 0 }
 
-fn bucket_of(key, buckets) -> Int { int_rem(hash(key), std::vec::len_of(buckets)) }
+fn bucket_of<T, U>(key: T, buckets: [U]) -> Int where T: Hash { int_rem(hash(key), std::vec::len_of(buckets)) }
 
 // What `key` stands for.
-pub fn get(m, key) {
+pub fn get<T, U>(m: HashMap<T, U>, key: T) -> Option<U> where T: Hash, T: Eq {
     match(m) {
         HashMap(buckets, _) => in_bucket(buckets[bucket_of(key, buckets)], key, 0)
     }
 }
-fn in_bucket(bucket, key, i: Int) {
+fn in_bucket<T, U>(bucket: [(T, U)], key: T, i: Int) -> Option<U> where T: Eq {
     if(i < std::vec::len_of(bucket)) {
         match(bucket[i]) { (k, v) => if(k == key) { Some(v) } else { tail in_bucket(bucket, key, i + 1) } }
     } else { None }
 }
 
-pub fn contains_key(m, key) { match(get(m, key)) { Some(_) => true, None => false } }
+pub fn contains_key<T, U>(m: HashMap<T, U>, key: T) -> Bool where T: Hash, T: Eq { match(get(m, key)) { Some(_) => true, None => false } }
 
 // Where `key` is in a bucket.
-fn place_in(bucket, key, i: Int) -> Option<Int> {
+fn place_in<T, U>(bucket: [(T, U)], key: T, i: Int) -> Option<Int> where T: Eq {
     if(i < std::vec::len_of(bucket)) {
         match(bucket[i]) { (k, _) => if(k == key) { Some(i) } else { tail place_in(bucket, key, i + 1) } }
     } else { None }
 }
 
 // The map with `key` standing for `value`, whatever it stood for.
-pub fn insert(m, key, value) {
+pub fn insert<T, U>(m: HashMap<T, U>, key: T, value: U) -> HashMap<T, U> where T: Hash, T: Eq {
     match(m) {
         HashMap(buckets, n) =>
             let at = bucket_of(key, buckets);
@@ -4763,7 +4763,7 @@ pub fn insert(m, key, value) {
 }
 
 // With twice the buckets, once there are more keys than buckets.
-fn grown(m) {
+fn grown<T, U>(m: HashMap<T, U>) -> HashMap<T, U> where T: Hash {
     match(m) {
         HashMap(buckets, n) =>
             if(n <= std::vec::len_of(buckets)) { m } else {
@@ -4774,7 +4774,7 @@ fn grown(m) {
     }
 }
 // A key the map is known not to have.
-fn put_new(m, key, value) {
+fn put_new<T, U>(m: HashMap<T, U>, key: T, value: U) -> HashMap<T, U> where T: Hash {
     match(m) {
         HashMap(buckets, n) =>
             let at = bucket_of(key, buckets);
@@ -4783,7 +4783,7 @@ fn put_new(m, key, value) {
 }
 
 // The map without `key`.
-pub fn remove(m, key) {
+pub fn remove<T, U>(m: HashMap<T, U>, key: T) -> HashMap<T, U> where T: Hash, T: Eq {
     match(m) {
         HashMap(buckets, n) =>
             let at = bucket_of(key, buckets);
@@ -4984,17 +4984,17 @@ impl<T> HashSet<T> {
     }
 }
 
-pub fn fold_map(m, init, f) {
+pub fn fold_map<T, U, V, e: EffectRow>(m: HashMap<T, U>, init: V, f: fn(V, T, U) -> V / {| e}) -> V / {| e} {
     match(m) {
         HashMap(buckets, _) => fold(buckets, init, fn(acc, bucket) {
             fold(bucket, acc, fn(a, pair) { match(pair) { (k, v) => f(a, k, v) } })
         })
     }
 }
-pub fn keys(m) { fold_map(m, [], fn(out, k, v) { push(out, k) }) }
-pub fn values(m) { fold_map(m, [], fn(out, k, v) { push(out, v) }) }
-pub fn entries(m) { fold_map(m, [], fn(out, k, v) { push(out, (k, v)) }) }
-pub fn from(pairs) { fold(pairs, new(), fn(m, pair) { match(pair) { (k, v) => insert(m, k, v) } }) }
+pub fn keys<T, U>(m: HashMap<T, U>) -> [T] { fold_map(m, [], fn(out, k, v) { push(out, k) }) }
+pub fn values<T, U>(m: HashMap<T, U>) -> [U] { fold_map(m, [], fn(out, k, v) { push(out, v) }) }
+pub fn entries<T, U>(m: HashMap<T, U>) -> [(T, U)] { fold_map(m, [], fn(out, k, v) { push(out, (k, v)) }) }
+pub fn from<T, U>(pairs: [(T, U)]) -> HashMap<T, U> where T: Hash, T: Eq { fold(pairs, new(), fn(m, pair) { match(pair) { (k, v) => insert(m, k, v) } }) }
 
 "#
 
