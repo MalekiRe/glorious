@@ -241,6 +241,94 @@ pub struct Relates<R> { pub relation: R, pub target: Entity }
 pub trait Relation { type Kind; }
 pub struct OneToMany
 pub struct OneToOne
+// Any number each way (`Allied`): an entity that relates has `Links<R>`, a
+// link for each target, in the order made.
+pub struct ManyToMany
+pub struct Links<R> { pub list: [Relates<R>] }
+
+// The columns a relation is stored in, by its kind.
+pub trait KindColumns<R, S> { type Out; fn columns(S) -> Self::Out; }
+impl<R, S> KindColumns<R, S> for OneToMany {
+    type Out = (Column<Relates<R>>, (Column<Sources<R>>, S));
+    fn columns(columns) { (empty_column(), (empty_column(), columns)) }
+}
+impl<R, S> KindColumns<R, S> for OneToOne {
+    type Out = (Column<Relates<R>>, (Column<Sources<R>>, S));
+    fn columns(columns) { (empty_column(), (empty_column(), columns)) }
+}
+impl<R, S> KindColumns<R, S> for ManyToMany {
+    type Out = (Column<Links<R>>, (Column<Sources<R>>, S));
+    fn columns(columns) { (empty_column(), (empty_column(), columns)) }
+}
+pub trait RelationColumns<S> { type Out; fn relation_columns(S) -> Self::Out; }
+impl<R, S> RelationColumns<S> for R where R: Relation, <R as Relation>::Kind: KindColumns<R, S> {
+    type Out = <<R as Relation>::Kind as KindColumns<R, S>>::Out;
+    fn relation_columns(columns) { <<R as Relation>::Kind as KindColumns<R, S>>::columns(columns) }
+}
+
+// What a source's link to `target` carried, taken out of its links.
+fn take_link<R>(links: &mut Links<R>, target: Entity) -> Option<R> {
+    let mut kept = [];
+    let mut found = None;
+    let mut rest = into_iter(replace(&mut links.list, []));
+    while({ match(next(&mut rest)) {
+        Some(link) =>
+            let same = if(link.target.index == target.index) { link.target.generation == target.generation } else { false };
+            if(same) { let Relates { relation, target: _ } = link; discard(replace(&mut found, Some(relation))) } else { push_at(&mut kept, link) };
+            true,
+        None => false } }) { () };
+    links.list = kept;
+    found
+}
+
+// Relate `source` to `target` too, by a relation of any number each way: what
+// a link of the two carried before, if there was one.
+fn link<R, S>(world: &mut World<S>, source: Entity, relation: R, target: Entity) -> Option<R>
+    where S: Get<Links<R>>, S: Get<Sources<R>> {
+    let mut column = take_at<Links<R>, S>(world);
+    let at = slot_of(&column, source);
+    let before = if(at >= 0) {
+        let had = take_link(&mut column.dense[at], target);
+        push_at(&mut column.dense[at].list, Relates { relation: relation, target: target });
+        column.changed[at] = column.now;
+        had
+    } else { column_insert(&mut column, source, Links { list: [Relates { relation: relation, target: target }] }); None };
+    <S as Get<Links<R>>>::put(&mut world.columns, column);
+    match(before) {
+        Some(_) => (),
+        None =>
+            let mut sources = take_at<Sources<R>, S>(world);
+            let at = slot_of(&sources, target);
+            if(at >= 0) { push_at(&mut sources.dense[at].list, source); sources.changed[at] = sources.now }
+            else { column_insert(&mut sources, target, Sources { list: [source] }) };
+            <S as Get<Sources<R>>>::put(&mut world.columns, sources)
+    };
+    before
+}
+
+// Undo `source`'s link to `target` by a relation of any number each way.
+pub fn unlink_from<R, S>(world: &mut World<S>, source: Entity, target: Entity) -> Option<R> where S: Get<Links<R>>, S: Get<Sources<R>> {
+    let column = <S as Get<Links<R>>>::column_mut(&mut world.columns);
+    let at = slot_of(&*column, source);
+    let had = if(at >= 0) { take_link(&mut column.dense[at], target) } else { None };
+    match(had) {
+        Some(r) => drop_source<R, S>(&mut world.columns, target, source); Some(r),
+        None => None
+    }
+}
+
+// What an entity relates to by a relation of any number each way.
+fn targets_in<R, S>(columns: &S, source: Entity) -> [Entity] where S: Get<Links<R>> {
+    let links = <S as Get<Links<R>>>::column(columns);
+    let at = slot_of(links, source);
+    let mut out = [];
+    if(at >= 0) {
+        let list = &links.dense[at].list;
+        let mut i = 0;
+        while({ i < len_at(list) }) { push_at(&mut out, list[i].target); i = i + 1 }
+    } else { () };
+    out
+}
 
 // How an entity is related to another, by the relation's kind.
 pub trait Relating<R, S> { fn relate_by(&mut World<S>, Entity, R, Entity) -> Option<R> }
@@ -259,6 +347,9 @@ impl<R, S> Relating<R, S> for OneToOne where S: Get<Relates<R>>, S: Get<Sources<
         };
         relate<R, S>(world, source, relation, target)
     }
+}
+impl<R, S> Relating<R, S> for ManyToMany where S: Get<Links<R>>, S: Get<Sources<R>> {
+    fn relate_by(world, source, relation, target) { link<R, S>(world, source, relation, target) }
 }
 // A relation related by its kind.
 pub trait RelateBy<S> { fn relate_as(&mut World<S>, Entity, Self, Entity) -> Option<Self> }
@@ -359,15 +450,45 @@ impl<X, R, S> Unlinks<S> for (Column<Relates<X>>, R) where S: Get<Relates<X>>, S
         <R as Unlinks<S>>::unlink(columns, entity)
     }
 }
-impl<X, R, S> Unlinks<S> for (Column<Sources<X>>, R) where S: Get<Relates<X>>, S: Get<Sources<X>>, R: Unlinks<S> {
+impl<X, R, S> Unlinks<S> for (Column<Links<X>>, R) where S: Get<Links<X>>, S: Get<Sources<X>>, R: Unlinks<S> {
+    fn unlink(columns, entity) {
+        let list = targets_in<X, S>(&*columns, entity);
+        let mut i = 0;
+        while({ i < len_at(&list) }) { drop_source<X, S>(columns, list[i], entity); i = i + 1 };
+        <R as Unlinks<S>>::unlink(columns, entity)
+    }
+}
+impl<X, R, S> Unlinks<S> for (Column<Sources<X>>, R) where X: Relation, <X as Relation>::Kind: UnlinksSources<X, S>, S: Get<Sources<X>>, R: Unlinks<S> {
     fn unlink(columns, entity) {
         let list = sources_in<X, S>(&*columns, entity);
+        <<X as Relation>::Kind as UnlinksSources<X, S>>::unlink_sources(columns, list, entity);
+        <R as Unlinks<S>>::unlink(columns, entity)
+    }
+}
+// What relates to an entity that ends no longer does, by the relation's kind.
+pub trait UnlinksSources<X, S> { fn unlink_sources(&mut S, [Entity], Entity) }
+impl<X, S> UnlinksSources<X, S> for OneToMany where S: Get<Relates<X>> {
+    fn unlink_sources(columns, list, entity) { forget_links<X, S>(columns, list) }
+}
+impl<X, S> UnlinksSources<X, S> for OneToOne where S: Get<Relates<X>> {
+    fn unlink_sources(columns, list, entity) { forget_links<X, S>(columns, list) }
+}
+impl<X, S> UnlinksSources<X, S> for ManyToMany where S: Get<Links<X>> {
+    fn unlink_sources(columns, list, entity) {
+        let column = <S as Get<Links<X>>>::column_mut(columns);
         let mut i = 0;
         while({ i < len_at(&list) }) {
-            discard(column_remove(<S as Get<Relates<X>>>::column_mut(columns), list[i]));
+            let at = slot_of(&*column, list[i]);
+            if(at >= 0) { discard(take_link(&mut column.dense[at], entity)) } else { () };
             i = i + 1
-        };
-        <R as Unlinks<S>>::unlink(columns, entity)
+        }
+    }
+}
+fn forget_links<X, S>(columns: &mut S, list: [Entity]) where S: Get<Relates<X>> {
+    let mut i = 0;
+    while({ i < len_at(&list) }) {
+        discard(column_remove(<S as Get<Relates<X>>>::column_mut(columns), list[i]));
+        i = i + 1
     }
 }
 
@@ -576,6 +697,12 @@ impl<S> World<S> {
     pub fn unrelate<R>(world: &mut Self, source: Entity) -> Option<R> where S: Get<Relates<R>>, S: Get<Sources<R>> {
         unrelate<R, S>(world, source)
     }
+    // Undo an entity's link to a target by a relation of any number each way.
+    pub fn unlink<R>(world: &mut Self, source: Entity, target: Entity) -> Option<R> where S: Get<Links<R>>, S: Get<Sources<R>> {
+        unlink_from<R, S>(world, source, target)
+    }
+    // What an entity relates to by a relation of any number each way.
+    pub fn targets<R>(world: &Self, source: Entity) -> [Entity] where S: Get<Links<R>> { targets_in<R, S>(&world.columns, source) }
     // What an entity relates to by `R`, if anything.
     pub fn target<R>(world: &Self, source: Entity) -> Option<Entity> where S: Get<Relates<R>> {
         target_in<R, S>(&world.columns, source)
@@ -1552,8 +1679,10 @@ impl<S, L> App<S, L> {
     }
 
     // Store a relation: what relates and what is related to.
-    pub fn relation<R>(app: Self) -> App<(Column<Relates<R>>, (Column<Sources<R>>, S)), L> {
-        app.register<Sources<R>>().register<Relates<R>>()
+    pub fn relation<R>(app: Self) -> App<<R as RelationColumns<S>>::Out, L> where R: RelationColumns<S> {
+        let App { world, systems } = app;
+        let World { columns, generations, free, tick, since } = world;
+        App { world: World { columns: <R as RelationColumns<S>>::relation_columns(columns), generations: generations, free: free, tick: tick, since: since }, systems: systems }
     }
 
     // Store each of a list of components: `.register_all<(Position, Velocity)>()`.

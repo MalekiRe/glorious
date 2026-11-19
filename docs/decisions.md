@@ -5482,7 +5482,15 @@ type Kind = OneToOne; }`. `OneToMany` is one target for each entity that
 relates; `OneToOne` is one each way, and relating to a target another
 relates to undoes that one's link (`Relating`, `RelateBy`).
 
-Not there against upstream: many-to-many relations, fragmenting relations, `LINKED`, `ACYCLIC`,
+`ManyToMany` is any number each way: the entity that relates has
+`Links<R>`, a link for each target in the order made; `relate` adds one (or
+gives the one it had of that target a new value), `unlink` undoes one,
+`targets` lists them. `App::relation<R>` stores the columns the kind needs
+(`KindColumns`, `RelationColumns`), and despawning undoes links by the kind
+(`UnlinksSources`).
+
+Not there against upstream: `To`/`From` through many-to-many links,
+fragmenting relations, `LINKED`, `ACYCLIC`,
 `ORDERED`, `Relinked`, `cascade`. A query through a link cannot write a
 component the query also takes, nor take `Sources<R>` twice (two `From` of
 one relation): a system takes a component once, as columns are lent whole

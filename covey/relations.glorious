@@ -4,7 +4,9 @@
 // pilot patches the hull of the ship it pilots, each ship unloads into its
 // station, and each station tells of the ships docked at it (`From`).
 // Docking again moves a ship; a station that ends leaves its ships
-// undocked, and a ship that ends is no longer among a station's. Ending a
+// undocked, and a ship that ends is no longer among a station's. A pilot
+// pilots one ship and a ship has one pilot; allies are any number each way.
+// Ending a
 // carrier ends what is under it (`ChildOf`, `despawn_linked`).
 // expect:
 // 2
@@ -22,16 +24,21 @@
 // 1
 // 0
 // 1
+// 22
+// 11
+// 0
 // 4
 // 1
 mod ecs;
 
-use ecs::{App, Entity, Mut, Query, To, From, Relates, ChildOf, Relation, OneToMany, OneToOne};
+use ecs::{App, Entity, Mut, Query, To, From, Relates, ChildOf, Relation, OneToMany, OneToOne, ManyToMany};
 
 struct DockedAt { berth: Int }
 impl Relation for DockedAt { type Kind = OneToMany; }
 struct Piloting
 impl Relation for Piloting { type Kind = OneToOne; }
+struct Allied
+impl Relation for Allied { type Kind = ManyToMany; }
 struct Skill(Int)
 struct Hull(Int)
 struct Cargo(Int)
@@ -92,7 +99,7 @@ fn census(stations: &mut Query<(&Hold, From<DockedAt, Entity>)>) {
 fn main() -> Int {
     let mut fleet = App::new()
         .register<Skill>().register<Hull>().register<Cargo>().register<Hold>()
-        .relation<DockedAt>().relation<Piloting>().relation<ChildOf>()
+        .relation<DockedAt>().relation<Piloting>().relation<ChildOf>().relation<Allied>()
         .add_systems(Update, repair)
         .add_systems(Update, unload)
         .add_systems(Look, roster)
@@ -131,6 +138,14 @@ fn main() -> Int {
     fleet.world.relate(rookie, Piloting, other);
     match(fleet.world.target<Piloting>(ace)) { Some(_) => say(9), None => say(0) };
     say(len_at(&fleet.world.sources<Piloting>(other)));
+    // Allies, any number each way; one that ends is no one's ally.
+    fleet.world.relate(ace, Allied, rookie);
+    fleet.world.relate(ace, Allied, other);
+    fleet.world.relate(rookie, Allied, other);
+    say(len_at(&fleet.world.targets<Allied>(ace)) * 10 + len_at(&fleet.world.sources<Allied>(other)));
+    fleet.world.despawn(rookie);
+    say(len_at(&fleet.world.targets<Allied>(ace)) * 10 + len_at(&fleet.world.sources<Allied>(other)));
+    match(fleet.world.unlink<Allied>(ace, other)) { Some(_) => say(len_at(&fleet.world.targets<Allied>(ace))), None => say(9) };
     // A carrier, its drones, and theirs: ending it ends all of them.
     let carrier = fleet.world.spawn_bundle((Hull(50),));
     let drone = fleet.world.spawn_bundle((Hull(5),));
