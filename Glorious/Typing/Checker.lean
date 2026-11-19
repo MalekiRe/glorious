@@ -61,7 +61,7 @@ structure SigEntry where
 
 /-- Everything the checker needs beyond the program. -/
 structure Cert where
-  sigs : List SigEntry
+  sigs : Array SigEntry
   datas : List DataInst
   ops : List OpInst
   mainTy : Ty
@@ -76,6 +76,31 @@ structure Cert where
   is the reference it was lent from, and nothing is shown about who uses a cell
   while it is lent. -/
   loans : Bool
+  /-- Where in `sigs` each function's signatures are, to find them without
+  going through all (`Cert.withIndex`). Only a way to find them: what is
+  found is taken from `sigs`, so a wrong index can only miss one. Empty, all
+  are gone through. -/
+  byFn : Array (List Nat) := #[]
+
+/-- Each function's signatures, where they are in `sigs`. -/
+def Cert.withIndex (C : Cert) : Cert :=
+  let n := C.sigs.foldl (fun m e => max m (e.fn + 1)) 0
+  let byFn := (C.sigs.toList.zipIdx.foldr (fun (e, i) (acc : Array (List Nat)) =>
+    acc.modify e.fn (i :: ·)) (Array.replicate n []))
+  { C with byFn }
+
+/-- The signatures of `fn`, as the index has them, each from `sigs`. -/
+def Cert.sigsOf (C : Cert) (fn : Nat) : List SigEntry :=
+  if C.byFn.isEmpty then C.sigs.toList
+  else ((C.byFn[fn]?).getD []).filterMap fun i => C.sigs[i]?
+
+theorem Cert.sigsOf_mem {C : Cert} {fn : Nat} {e : SigEntry} (h : e ∈ C.sigsOf fn) :
+    e ∈ C.sigs.toList := by
+  unfold Cert.sigsOf at h
+  split at h
+  · exact h
+  · obtain ⟨i, _, hi⟩ := List.mem_filterMap.mp h
+    exact Array.mem_toList_iff.mpr (Array.mem_of_getElem? hi)
 
 /-- The regions of some types, in order. -/
 def freesOf (ts : List Ty) : List Rgn := ts.flatMap Ty.frees
@@ -233,7 +258,7 @@ end
 
 /-- The typing context a certificate describes. -/
 def Cert.ctx (C : Cert) : Ctx where
-  fnSig fn sig := ∃ e, e ∈ C.sigs ∧ e.fn = fn ∧ e.sig = sig
+  fnSig fn sig := ∃ e, e ∈ C.sigs.toList ∧ e.fn = fn ∧ e.sig = sig
   opSig op args := findOp C.ops op args
   dup τ := C.strict = false ∨ dupTy C τ = true
   ctorFields tag name args := C.fields tag name args
@@ -628,7 +653,7 @@ theorem envOk_sound {env : Option (List Ty)} {Cs : List Ty} (h : envOk env Cs = 
 the regions `θ`, at one of the function's signatures? -/
 def closes (C : Cert) (fn : Nat) (Cs : List Ty) (θ : List Rgn) (σ : Ty) (once : Bool)
     (env : Option (List Ty)) : Bool :=
-  C.sigs.any fun e =>
+  (C.sigsOf fn).any fun e =>
     e.fn == fn && θ.length == e.sig.crgns && Cs == e.sig.caps.map (Ty.inst θ)
       && σ == e.sig.ty θ once env && (once || e.sig.caps.all (dupOk C)) && envOk env Cs
 
@@ -640,7 +665,7 @@ theorem closes_sound {fn : Nat} {Cs : List Ty} {θ : List Rgn} {σ : Ty} {once :
   obtain ⟨e, he, hc⟩ := List.any_eq_true.mp h
   simp only [Bool.and_eq_true, beq_iff_eq, Bool.or_eq_true] at hc
   obtain ⟨⟨⟨⟨⟨hfn, hθ⟩, hcs⟩, hσ⟩, hdup⟩, henv⟩ := hc
-  refine ⟨e.sig, ⟨e, he, hfn, rfl⟩, hθ, hcs, hσ, fun ho => ?_, envOk_sound henv⟩
+  refine ⟨e.sig, ⟨e, Cert.sigsOf_mem he, hfn, rfl⟩, hθ, hcs, hσ, fun ho => ?_, envOk_sound henv⟩
   rcases hdup with h2 | h2
   · rw [ho] at h2
     cases h2
@@ -650,7 +675,7 @@ theorem closes_sound {fn : Nat} {Cs : List Ty} {θ : List Rgn} {σ : Ty} {once :
 signature gives them, made with the regions `θ`. -/
 def closesFit (C : Cert) (Γ : TEnv) (fn : Nat) (captures : List Atom) (θ : List Rgn) (σ : Ty)
     (once : Bool) (env : Option (List Ty)) : Bool :=
-  C.sigs.any fun e =>
+  (C.sigsOf fn).any fun e =>
     e.fn == fn && θ.length == e.sig.crgns && atomsFit Γ captures (e.sig.caps.map (Ty.inst θ))
       && σ == e.sig.ty θ once env && (once || e.sig.caps.all (dupOk C))
       && envOk env (e.sig.caps.map (Ty.inst θ))
@@ -664,7 +689,7 @@ theorem closesFit_sound {Γ : TEnv} {fn : Nat} {captures : List Atom} {θ : List
   obtain ⟨e, he, hc⟩ := List.any_eq_true.mp h
   simp only [Bool.and_eq_true, beq_iff_eq, Bool.or_eq_true] at hc
   obtain ⟨⟨⟨⟨⟨hfn, hθ⟩, hcs⟩, hσ⟩, hdup⟩, henv⟩ := hc
-  refine ⟨e.sig, ⟨e, he, hfn, rfl⟩, hθ, atomsFit_sound hcs, hσ, fun ho => ?_, envOk_sound henv⟩
+  refine ⟨e.sig, ⟨e, Cert.sigsOf_mem he, hfn, rfl⟩, hθ, atomsFit_sound hcs, hσ, fun ho => ?_, envOk_sound henv⟩
   rcases hdup with h2 | h2
   · rw [ho] at h2
     cases h2
@@ -922,7 +947,7 @@ theorem checkRhs_sound {Γ : TEnv} {θ : List Rgn} {rhs : Rhs} {σ : Ty}
 `θ`, to give a `ρ` within `ε` and `Φ`? -/
 def enters (C : Cert) (fn : Nat) (θ : List Rgn) (Cs Ps : List Ty) (ρ : Ty) (ε : Row)
     (Φ : List Rgn) : Bool :=
-  C.sigs.any fun e =>
+  (C.sigsOf fn).any fun e =>
     e.fn == fn && θ.length == e.sig.crgns && e.sig.rgns == 0
       && Cs == e.sig.caps.map (Ty.inst θ) && Ps == e.sig.params.map (Ty.inst θ)
       && ρ == e.sig.ret.inst θ && rowLe (e.sig.eff.inst θ) ε
@@ -933,7 +958,7 @@ theorem enters_sound {fn : Nat} {θ : List Rgn} {Cs Ps : List Ty} {ρ : Ty} {ε 
   obtain ⟨e, he, hc⟩ := List.any_eq_true.mp h
   simp only [Bool.and_eq_true, beq_iff_eq] at hc
   obtain ⟨⟨⟨⟨⟨⟨⟨⟨hfn, hθ⟩, hn⟩, hcaps⟩, hps⟩, hret⟩, hrow⟩, hacc⟩, hnd⟩ := hc
-  exact ⟨e.sig, θ, ⟨e, he, hfn, rfl⟩, hθ, hn, hcaps, hps, hret, rowLe_sound hrow,
+  exact ⟨e.sig, θ, ⟨e, Cert.sigsOf_mem he, hfn, rfl⟩, hθ, hn, hcaps, hps, hret, rowLe_sound hrow,
     subB_sound hacc, nodupOk_sound hnd⟩
 
 def checkArms (C : Cert) (Cs : List Ty) (ρ : Ty) (ε : Row) (Φ : List Rgn) :

@@ -55,7 +55,7 @@ structure Built where
 def Built.of (c : Compiled) (startLocals : List Nat) (searched : Bool := true) : Built :=
   let has := fun (f : Typing.Cert → Bool) => (c.cert.map f).getD false
   { bytecode := compile c.core, ctorNames := c.ctorNames, startLocals
-    sigs := (c.cert.map (·.sigs.length)).getD 0, certified := c.cert.isSome
+    sigs := (c.cert.map (·.sigs.size)).getD 0, certified := c.cert.isSome
     strict := has (·.strict), regions := has (·.regions), loans := has (·.loans)
     lent := c.lent, plain := c.plain.map (·.show), places := c.places, searched }
 
@@ -170,7 +170,7 @@ def hint : Typing.Hint → Bytes
 
 open Bytecode.Encode (nat list) in
 def cert (c : Typing.Cert) : Bytes :=
-  list (fun (e : Typing.SigEntry) => nat e.fn ++ sig e.sig ++ list (list hint) e.hints) c.sigs
+  list (fun (e : Typing.SigEntry) => nat e.fn ++ sig e.sig ++ list (list hint) e.hints) c.sigs.toList
     ++ list (fun (d : Typing.DataInst) =>
         nat d.name ++ list ty d.args ++ list (fun (k, fs) => nat k ++ list ty fs) d.ctors ++ bool d.dup) c.datas
     ++ list (fun (o : Typing.OpInst) =>
@@ -282,7 +282,7 @@ def cert (bs : Bytes) : Option (Typing.Cert × Bytes) := do
   let (strict, bs) ← bool bs
   let (regions, bs) ← bool bs
   let (loans, bs) ← bool bs
-  pure ({ sigs, datas, ops, mainTy, mainHints, strict, regions, loans }, bs)
+  pure (Typing.Cert.withIndex { sigs := sigs.toArray, datas, ops, mainTy, mainHints, strict, regions, loans }, bs)
 end Dec
 
 /-! ## Where it is kept -/

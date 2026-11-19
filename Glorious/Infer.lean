@@ -97,7 +97,7 @@ def sccs (fns : Array Core.Fn) : Array Nat := Id.run do
 /-- Say which uses of declared types are duplicable: all of them, except those
 with a field that is not, found by taking flags away until nothing changes. -/
 partial def dupFlags (datas : List DataInst) : List DataInst :=
-  let C : Cert := ⟨[], datas, [], .int, [], true, false, false⟩
+  let C : Cert := ⟨#[], datas, [], .int, [], true, false, false, #[]⟩
   let next := datas.map fun d =>
     { d with dup := d.dup && d.ctors.all fun c => Typing.dupTys C c.2 }
   if next.zip datas |>.all (fun (a, b) => a.dup == b.dup) then next else dupFlags next
@@ -316,8 +316,8 @@ def certifyM (items : List Item) (g : Elab.Globals) (p : Core.Program)
     if acc.2.contains t then acc else (acc.1.push t, acc.2.insert t)) (#[], {})).1.toList
   let (datas, ops) ← (fun s => Trace.timed "infer: decls" fun _ => (declsFor types opsUsed).run s : M _)
   let strict := (← get).strict
-  pure ⟨entries, dupFlags datas, ops, mainTy, mainHints, strict, (← get).regions,
-    (← get).regions && (← get).loans⟩
+  pure (Cert.withIndex ⟨entries.toArray, dupFlags datas, ops, mainTy, mainHints, strict, (← get).regions,
+    (← get).regions && (← get).loans, #[]⟩)
 
 /-- Find a certificate for an elaborated program, with the ownership rules or
 without, and with the region rules or without; taking what an earlier compile
@@ -349,7 +349,7 @@ def toMemo (made : Made) : Memo :=
 /-- Which part of a program a certificate fails on, for reporting a defect in
 this pass or in the elaborator. -/
 def rejected (C : Cert) (p : Core.Program) : String :=
-  let bad := C.sigs.filterMap fun e =>
+  let bad := C.sigs.toList.filterMap fun e =>
     match p.fns[e.fn]? with
     | some F =>
       if Typing.checkFn C e F then none

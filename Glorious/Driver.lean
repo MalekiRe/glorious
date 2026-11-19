@@ -941,7 +941,7 @@ def compileSourceAt (src : String) (check : Bool := true)
                     Sum.inl (compiled o (some cert) o.lent
                       (((placeKeys o.siteOwners).toList.zip (List.range o.sites)).map
                         fun ((k : String × Nat), (i : Nat)) => (k, choice[i]?.getD 0)) made)
-                  else Sum.inr (cert.sigs.filterMap fun (e : Typing.SigEntry) =>
+                  else Sum.inr (cert.sigs.toList.filterMap fun (e : Typing.SigEntry) =>
                     match o.program.fns[e.fn]? with
                     | some F => if Typing.checkFn cert e F then none else some e.fn
                     | none => none)

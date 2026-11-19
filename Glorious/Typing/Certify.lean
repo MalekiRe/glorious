@@ -66,14 +66,14 @@ def dropSig (sig : FnSig) : FnSig :=
 /-- Every signature of a function whose closures say how they are destroyed
 has its destructor given the signature that destroys one. -/
 def dropsOk (C : Cert) (p : Program) : Bool :=
-  C.sigs.all fun e =>
+  C.sigs.toList.all fun e =>
     match p.drops.lookup e.fn with
     | none => true
-    | some d => C.sigs.any fun e' => e'.fn == d && decide (e'.sig = dropSig e.sig)
+    | some d => C.sigs.toList.any fun e' => e'.fn == d && decide (e'.sig = dropSig e.sig)
 
 /-- Check a program against a certificate. -/
 def checkProgram (C : Cert) (p : Program) : Bool :=
-  C.sigs.all (fun e =>
+  C.sigs.toList.all (fun e =>
       match p.fns[e.fn]? with
       | some F => checkFn C e F
       | none => false)
