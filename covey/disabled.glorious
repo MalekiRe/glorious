@@ -11,7 +11,7 @@
 // [1]
 // [0]
 // [0, 1]
-// [1]
+// [1, 2]
 // [0, 2]
 // [0, 1, 2]
 // 0
@@ -20,7 +20,7 @@
 // 0
 mod ecs;
 
-use ecs::{App, Entity, Query, Has, With, Without, MayHave, Disabled, Disabling};
+use ecs::{App, Entity, Query, Has, With, Without, MayHave, Or, Disabled, Disabling};
 
 struct Hp(Int)
 struct Prefab
@@ -57,7 +57,7 @@ fn main() -> Int {
     world.query_filtered<(&Hp,), MayHave<Disabled>>().for_each() { (h,) => seen = push(seen, h.0); };
     say(seen);
     seen = [];
-    world.query_filtered<(&Hp,), (With<Disabled>, MayHave<Prefab>)>().for_each() { (h,) => seen = push(seen, h.0); };
+    world.query_filtered<(&Hp,), Or<(With<Disabled>, With<Prefab>)>>().for_each() { (h,) => seen = push(seen, h.0); };
     say(seen);
     seen = [];
     world.query_filtered<(&Hp,), MayHave<Prefab>>().for_each() { (h,) => seen = push(seen, h.0); };

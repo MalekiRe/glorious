@@ -1079,6 +1079,18 @@ pub struct Disabled
 pub trait Disabling { const DISABLES: Bool; }
 impl<T> Disabling for T { const DISABLES: Bool = false; }
 impl Disabling for Disabled { const DISABLES: Bool = true; }
+// Those any of the filters lets through: `Or<(With<A>, With<B>)>`.
+pub struct Or<T>(T)
+pub trait AnyOnly<S> { fn any_lets(&S, Entity, Int) -> Bool }
+impl<S> AnyOnly<S> for () { fn any_lets(columns: &S, entity: Entity, since: Int) -> Bool { false } }
+impl<H, ..R, S> AnyOnly<S> for (H, ..R) where H: Only<S>, (..R): AnyOnly<S> {
+    fn any_lets(columns: &S, entity: Entity, since: Int) -> Bool {
+        if(<H as Only<S>>::lets(columns, entity, since)) { true } else { <(..R) as AnyOnly<S>>::any_lets(columns, entity, since) }
+    }
+}
+impl<T, S> Only<S> for Or<T> where T: AnyOnly<S> {
+    fn lets(columns: &S, entity: Entity, since: Int) -> Bool { <T as AnyOnly<S>>::any_lets(columns, entity, since) }
+}
 // Every entity, with it or not: a filter that mentions `T` and lets all through.
 pub struct MayHave<T>(T)
 impl<T, S> Only<S> for MayHave<T> { fn lets(columns: &S, entity: Entity, since: Int) -> Bool { true } }
@@ -1096,6 +1108,7 @@ impl<A, D> Mentions<D> for Without<A> where A: Same<D> { fn mentions() -> Bool {
 impl<A, D> Mentions<D> for MayHave<A> where A: Same<D> { fn mentions() -> Bool { <A as Same<D>>::same() } }
 impl<A, D> Mentions<D> for Added<A> where A: Same<D> { fn mentions() -> Bool { <A as Same<D>>::same() } }
 impl<A, D> Mentions<D> for Changed<A> where A: Same<D> { fn mentions() -> Bool { <A as Same<D>>::same() } }
+impl<T, D> Mentions<D> for Or<T> where T: Mentions<D> { fn mentions() -> Bool { <T as Mentions<D>>::mentions() } }
 impl<R, Q, D> Mentions<D> for To<R, Q> { fn mentions() -> Bool { false } }
 impl<R, Q, D> Mentions<D> for From<R, Q> { fn mentions() -> Bool { false } }
 impl<H, ..R, D> Mentions<D> for (H, ..R) where H: Mentions<D>, (..R): Mentions<D> {
