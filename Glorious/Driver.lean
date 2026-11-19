@@ -246,26 +246,39 @@ def certifyProgram (items : List Syntax.Item) (p : Core.Program)
   if Typing.checkProgram cert p then pure (cert, none, {})
   else throw s!"the certificate was rejected: {Infer.rejected cert p}"
 
-/-- Does a text write `name` as a name of its own: not after `::`, `.` or
-another letter, nor before one? -/
-def mentionsName (text name : String) : Bool := Id.run do
+/-- The modules of the names of the library's prelude a text writes
+(`Syntax.Modules.libraryPrelude`) as names of their own, and neither
+declares nor brings itself: the program then reads the library, and those.
+(What is read, not what a name means: a name the text declares is its own
+whatever is read.) One pass over the text's words. -/
+def preludeModules (text : String) : List String := Id.run do
   let isWord := fun (c : Char) => c.isAlphanum || c == '_'
-  let parts := text.splitOn name
-  let mut found := false
-  for (before, after) in parts.zip (parts.drop 1) do
-    let okBefore := match before.toList.getLast? with
-      | some c => !isWord c && c != '.' && c != ':'
-      | none => true
-    let okAfter := match after.toList.head? with
-      | some c => !isWord c
-      | none => true
-    if okBefore && okAfter then found := true
-  pure found
+  let decls := ["fn", "enum", "struct", "type", "trait", "effect", "const", "let"]
+  let mut mentioned : Std.HashSet String := {}
+  let mut own : Std.HashSet String := {}
+  let mut word : Array Char := #[]
+  let mut before : Char := ' '
+  let mut afterPath := false
+  let mut prev := ""
+  let mut inUse := false
+  for c in text.toList ++ [' '] do
+    if isWord c then
+      if word.isEmpty then afterPath := before == ':' || before == '.'
+      word := word.push c
+    else
+      unless word.isEmpty do
+        let w := String.ofList word.toList
+        if w == "use" then inUse := true
+        else if inUse || afterPath || decls.contains prev then own := own.insert w
+        else mentioned := mentioned.insert w
+        prev := w
+        word := #[]
+      if c == ';' then inUse := false
+      unless c == ' ' || c == '\n' do before := c
+  pure ((Syntax.Modules.libraryPrelude.filter fun (name, _) =>
+    mentioned.contains name && !own.contains name).map (·.2)).eraseDups
 
-/-- Does a text write a name of the library's prelude (`Std.preludeNames`)?
-Then the program has the library, whose prelude its modules can name. -/
-def mentionsPrelude (text : String) : Bool :=
-  Std.preludeNames.any fun (name, _) => mentionsName text name
+def mentionsPrelude (text : String) : Bool := !(preludeModules text).isEmpty
 
 /-- Does a program have the standard library: does it name `std`, and have no
 module `std` of its own? -/
@@ -375,8 +388,8 @@ def neededStd (texts : List String) : Option (List (List String × String)) :=
         else match Std.texts.lookup path with
           | some text => close fuel (path :: have_) (named text ++ rest)
           | none => close fuel have_ rest
-    -- (The library's prelude, where a text writes one of its names.)
-    let prelude := if texts.any mentionsPrelude then [["std", "prelude"]] else []
+    -- (The modules of the library's prelude a text writes names of.)
+    let prelude := (texts.flatMap preludeModules).eraseDups.map (["std", ·])
     let needed := close 4096 [] (prelude ++ texts.flatMap named)
     -- (With the modules inside each, and what those name.)
     let inside := fun (have_ : List (List String)) =>

@@ -5637,20 +5637,25 @@ all the parameters, so a use that leaves out lifetimes written before it is
 not read rightly. covey's `Query<Q, Only, St>` has parameters after the
 query, so it keeps its tuple.
 
-## The library's prelude is a module
+## The library's prelude is declared, not added to the text
 
 The names the specification's default prelude has from the library
-(`Vec`, `Ordering`, `identity`, `fail`, ...; `Std.preludeNames`) are what
-the module `std::prelude` brings with `pub use`, and every module of a
-program that has the library can name them after what it declares, what
-its `use`s bring and the prelude (`scopeOf`, rank 3). Before, `use` lines
-for them were added to the end of the program's text where the text was
-found to mention one and not to declare or bring it, by searching the text.
-A module of the library does not have them; `#![no_implicit_prelude]` and
-`#![no_std]` leave them out, as they do the prelude. Whether a program has
-the library at all is still told from its text (it names `std`, or a name
-of the library's prelude): what it decides is what is read, not what a name
-means.
+(`Vec`, `Ordering`, `identity`, `fail`, ...) are a table,
+`Syntax.Modules.libraryPrelude`, each with its module; every module of a
+program that has the library can name them, from those modules, after what
+it declares, what its `use`s bring and the prelude (`scopeOf`, rank 3,
+found once per program). Before, `use` lines for them were added to the end
+of the program's text where a search of the text found one it did not
+declare or bring (`stdPreludeUses`, removed). A module of the library does
+not have them; `#![no_implicit_prelude]` and `#![no_std]` leave them out, as
+they do the prelude.
+
+Which of the library's modules are read is still told from the texts: one
+pass over each text's words (`preludeModules`) finds the prelude's names it
+writes and neither declares nor brings. That decides what is read, not what
+a name means. Measured on covey's simulation edit loop (the build as
+`lake build glorious` makes it): about 270 ms before, 281-295 ms after, of
+which parsing 12 ms then and 17-18 ms now.
 
 ## Other standing decisions
 

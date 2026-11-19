@@ -100,9 +100,16 @@ structure Module where
 /-- The path the prelude has as a module. Nothing can write it. -/
 def preludePath : List String := ["%prelude"]
 
-/-- The library's prelude: the names of the library every module of a
-program that has it can write. -/
-def stdPreludePath : List String := ["std", "prelude"]
+/-- What the specification's default prelude has from the library (§3):
+each name, with its module. Every module of a program that has the
+library can name them, after what it declares and brings and after the
+prelude (`scopeOf`). -/
+def libraryPrelude : List (String × String) :=
+  [("identity", "value"), ("discard", "value"), ("Either", "value"),
+   ("Left", "value"), ("Right", "value"), ("Rejected", "value"), ("Ordering", "cmp"),
+   ("Less", "cmp"), ("Equal", "cmp"), ("Greater", "cmp"), ("Range", "iterator"),
+   ("Fail", "value"), ("fail", "value"), ("Report", "value"), ("report", "value"),
+   ("catch_fail", "value"), ("Vec", "vec"), ("String", "text"), ("Iterator", "iterator")]
 
 /-- How a module is written in a message. -/
 def showPath (p : List String) : String :=
@@ -123,6 +130,9 @@ def visible (v : Vis) (home viewer : List String) : Bool :=
 
 structure St where
   units : List Module := []
+  /-- The names of the library's prelude, as every module of the program
+  has them: found once. -/
+  libraryBounds : Option (List Bound) := none
   /-- What each module can write, once its `use`s are settled. -/
   scopes : List (List String × List Bound) := []
   /-- The modules whose `use`s are being settled. -/
@@ -335,13 +345,20 @@ partial def scopeOf (p : List String) : R (List Bound) := do
     if let some prelude ← unitOf preludePath then
       out := out ++ prelude.own.map fun b => { b with shown := .priv, rank := 2 }
   -- The library's prelude, after all of that, in a module of the program
-  -- that has the library: what `std::prelude` brings.
+  -- that has the library: each name from its module, where that is read.
   let library := ["std", "core", "alloc"].any (p.head? == some ·) || p.head? == preludePath.head?
   if !library && !(← get).bare then
-    if (← unitOf stdPreludePath).isSome then
-      for b in ← scopeOf stdPreludePath do
-        if b.rank == 0 && b.shown == .pub && b.entry.kind != .module then
-          out := out ++ [{ b with shown := .priv, rank := 3 }]
+    let lib ← match (← get).libraryBounds with
+      | some bs => pure bs
+      | none => do
+        let mut bs : Array Bound := #[]
+        for (name, m) in libraryPrelude do
+          if (← unitOf ["std", m]).isSome then
+            for b in ← exported [] ["std", m] name do
+              bs := bs.push { b with shown := .priv, rank := 3 }
+        modify fun s => { s with libraryBounds := some bs.toList }
+        pure bs.toList
+    out := out ++ lib
   modify fun s => { s with busy := s.busy.filter (· != p), scopes := (p, out) :: s.scopes }
   pure out
 
