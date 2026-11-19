@@ -33,9 +33,12 @@ since the callables written do not change while its types are looked at. -/
 def mustInfo : M MustInfo := do
   let s ← get
   unless s.anyMust do return {}
-  let mut blocks : Std.HashSet Nat := {}
-  for (_, c) in s.blockCaps do
-    blocks := blocks.insert (← findCap c)
+  -- (Of the block captures made since it was last asked: the rest are
+  -- kept as they are joined, `unifyCap`.)
+  let mut blocks := s.blockRoots
+  for k in [s.blockRootsAt:s.blockCaps.size] do
+    if let some (_, c) := s.blockCaps[k]? then blocks := blocks.insert (← findCap c)
+  modify fun st => { st with blockRoots := blocks, blockRootsAt := s.blockCaps.size }
   pure { blocks }
 
 /-- What in a type has to be used, if anything: said for the message. A

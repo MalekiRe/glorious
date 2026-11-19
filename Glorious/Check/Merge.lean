@@ -171,6 +171,8 @@ def mergeStates (p a b : St) : Option St := do
     methodCalls := ← m3 (·.methodCalls), fnBounds := ← m3 (·.fnBounds), impls := ← m3 (·.impls),
     brands := max a.brands b.brands, anyMust := a.anyMust || b.anyMust, modules := a.modules,
     shapes := a.shapes || b.shapes, patterned := a.patterned || b.patterned, dropMode := a.dropMode,
-    dropAsked := max a.dropAsked b.dropAsked, implsByBase, implsByHead, at_ := p.at_ }
+    dropAsked := max a.dropAsked b.dropAsked, implsByBase, implsByHead, at_ := p.at_,
+    -- (Found again from the block captures put together.)
+    blockRoots := {}, blockRootsAt := 0 }
 
 end Glorious.Check

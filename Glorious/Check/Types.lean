@@ -689,6 +689,10 @@ structure St where
   pos : String := ""
   /-- The capture variable of each callable literal, by the literal's identity. -/
   blockCaps : Array (Nat × Nat) := #[]
+  /-- The roots of the capture variables of `blockCaps`, and perhaps some
+  that were roots once: kept as they are joined (`unifyCap`). -/
+  blockRoots : Std.HashSet Nat := {}
+  blockRootsAt : Nat := 0
   /-- Blocks written without parameters where a callable taking one argument
   is expected. -/
   given : Array Nat := #[]
@@ -926,11 +930,13 @@ def unifyCap (a b : Nat) : M Unit := do
     | some _, none => modify fun s =>
         let moved := s.capOut.getD rb #[]
         let out := s.capOut.set! rb #[]
-        { s with caps := s.caps.set! rb (some ra), capOut := out.modify ra (· ++ moved) }
+        { s with caps := s.caps.set! rb (some ra), capOut := out.modify ra (· ++ moved),
+                 blockRoots := if s.blockRoots.contains rb then s.blockRoots.insert ra else s.blockRoots }
     | _, _ => modify fun s =>
         let moved := s.capOut.getD ra #[]
         let out := s.capOut.set! ra #[]
-        { s with caps := s.caps.set! ra (some rb), capOut := out.modify rb (· ++ moved) }
+        { s with caps := s.caps.set! ra (some rb), capOut := out.modify rb (· ++ moved),
+                 blockRoots := if s.blockRoots.contains ra then s.blockRoots.insert rb else s.blockRoots }
 
 def captures (cap : Nat) (what : Captured) (name : Option (String × Nat) := none) : M Unit := do
   let root ← findCap cap
