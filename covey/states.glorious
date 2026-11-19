@@ -1,0 +1,51 @@
+// States: one type per state, each of a group, of which one at most is
+// active. Setting one exits the active one (its `OnExit` systems see it before
+// it goes), enters the new one, and then runs the systems of the transition.
+// Another value of the active state is a transition too.
+// expect:
+// enter menu
+// exit menu
+// enter playing 1
+// menu -> playing
+// exit playing 1
+// enter playing 2
+// playing -> playing
+// exit playing 2
+// enter menu
+// 0
+// 0
+mod ecs;
+
+use ecs::{App, State, OnEnter, OnExit, OnTransition};
+
+struct Game
+struct Menu
+struct Playing { level: Int }
+impl State for Menu { type Group = Game; }
+impl State for Playing { type Group = Game; }
+
+fn enter_menu(e: &OnEnter<Menu>) { say("enter menu") }
+fn exit_menu(e: &OnExit<Menu>) { say("exit menu") }
+fn enter_playing(e: &OnEnter<Playing>, playing: &Playing) { say("enter playing " ++ show(playing.level)) }
+fn exit_playing(e: &OnExit<Playing>, playing: &Playing) { say("exit playing " ++ show(playing.level)) }
+fn menu_to_playing(e: &OnTransition<Menu, Playing>) { say("menu -> playing") }
+fn playing_to_playing(e: &OnTransition<Playing, Playing>) { say("playing -> playing") }
+
+fn main() -> Int {
+    let mut app = App::new()
+        .register_resource<Menu>()
+        .register_resource<Playing>()
+        .on<OnEnter<Menu>, _, _>(enter_menu)
+        .on<OnExit<Menu>, _, _>(exit_menu)
+        .on<OnEnter<Playing>, _, _>(enter_playing)
+        .on<OnExit<Playing>, _, _>(exit_playing)
+        .on<OnTransition<Menu, Playing>, _, _>(menu_to_playing)
+        .on<OnTransition<Playing, Playing>, _, _>(playing_to_playing)
+        .build();
+    app.set_state(Menu);
+    app.set_state(Playing { level: 1 });
+    app.set_state(Playing { level: 2 });
+    app.set_state(Menu);
+    say(match(app.world.resource<Playing>()) { Some(p) => p.level, None => 0 });
+    0
+}

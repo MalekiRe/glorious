@@ -1736,6 +1736,39 @@ impl<T, R, S, L> RemoveHooks<S, L> for (Resource<T>, R) where R: RemoveHooks<S, 
     fn removing(app: &mut App<S, L>, entity: Entity) { <R as RemoveHooks<S, L>>::removing(app, entity) }
 }
 
+// States: one type per state, each of a group (`impl State for Menu { type
+// Group = Game; }`), of which one at most is active, kept as a resource (a
+// place for each, `register_resource`). `app.set_state(state)` exits the
+// group's active state, if there is one (`OnExit` systems run while it can
+// still be read, and then it is taken away), enters the new one (put in;
+// `OnEnter`), and then runs the `OnTransition<Old, New>` systems. No values
+// are compared: another value of the active state is a transition too.
+pub struct NoGroup
+pub trait State { type Group; }
+impl<T> State for T { type Group = NoGroup; }
+pub struct OnEnter<T> { none: [T] }
+pub struct OnExit<T> { none: [T] }
+pub struct OnTransition<A, B> { none: [(A, B)] }
+// (The resources of the group `G`: the active one exited, and what runs
+// once `N` is entered.)
+pub trait ExitGroup<G, N, S, L> { fn exit_group(&mut App<S, L>) -> Option<fn(&mut App<S, L>) -> ()> }
+impl<G, N, S, L> ExitGroup<G, N, S, L> for () { fn exit_group(app: &mut App<S, L>) -> Option<fn(&mut App<S, L>) -> ()> { None } }
+impl<X, R, G, N, S, L> ExitGroup<G, N, S, L> for (Resource<X>, R)
+    where X: State, <X as State>::Group: Same<G>, S: Holds<X>, S: Columns, S: Unlinks<S>,
+          L: Dispatch<OnExit<X>, S>, L: Dispatch<OnTransition<X, N>, S>, R: ExitGroup<G, N, S, L> {
+    fn exit_group(app: &mut App<S, L>) -> Option<fn(&mut App<S, L>) -> ()> {
+        let active = if(<<X as State>::Group as Same<G>>::same()) { is_some(app.world.resource<X>()) } else { false };
+        if(active) {
+            app.emit<OnExit<X>>(&OnExit { none: [] });
+            discard(app.world.remove_resource<X>());
+            Some(fn(app: &mut App<S, L>) { app.emit<OnTransition<X, N>>(&OnTransition { none: [] }) })
+        } else { <R as ExitGroup<G, N, S, L>>::exit_group(app) }
+    }
+}
+impl<X, R, G, N, S, L> ExitGroup<G, N, S, L> for (Column<X>, R) where R: ExitGroup<G, N, S, L> {
+    fn exit_group(app: &mut App<S, L>) -> Option<fn(&mut App<S, L>) -> ()> { <R as ExitGroup<G, N, S, L>>::exit_group(app) }
+}
+
 pub struct App<S, L> { pub world: World<S>, systems: L }
 
 impl<S, L> App<S, L> {
@@ -1804,6 +1837,14 @@ impl<S, L> App<S, L> {
     pub fn build(app: Self) -> Self { app }
 
     // Run every system registered under what is emitted, then do what they asked.
+    // Make `state` its group's active state.
+    pub fn set_state<T>(app: &mut Self, state: T)
+        where T: State, S: ExitGroup<<T as State>::Group, T, S, L>, S: Holds<T>, S: Columns, S: Unlinks<S>, L: Dispatch<OnEnter<T>, S> {
+        let after = <S as ExitGroup<<T as State>::Group, T, S, L>>::exit_group(app);
+        discard(app.world.insert_resource(state));
+        app.emit<OnEnter<T>>(&OnEnter { none: [] });
+        match(after) { Some(f) => f(app), None => () }
+    }
     // The world's structural operations, with the hooks they fire.
     pub fn spawn_bundle<B>(app: &mut Self, bundle: B) -> Entity where B: Bundle<S>, B: Hooked<S, L> {
         let entity = app.world.spawn_bundle(bundle);
