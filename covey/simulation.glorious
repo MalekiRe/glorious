@@ -84,7 +84,7 @@ impl<S, L> Plugin<S, L> for Physics {
     }
 }
 
-fn combat(app) {
+fn combat<T, U>(app: ecs::App<T, U>) -> ecs::App<T, (ecs::On<Hit, <(fn(&Hit, &mut ecs::Column<Health>) -> (), (fn(&ecs::Column<Health>, &mut ecs::Commands<T>, &mut Ended) -> (), ())) as ecs::IntoSystem<Hit, T>>::Out>, U)> where T: ecs::Get<Health>, T: ecs::Holds<Ended>, T: ecs::Columns, T: ecs::Unlinks<T> {
     app.on<Hit>((wound, reap).chain())
 }
 

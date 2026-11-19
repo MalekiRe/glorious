@@ -328,6 +328,20 @@ def checkGroup (decls : List FnDecl) : M Unit := do
         for (cap, _) in (← get).ranked.take ((← get).ranked.length - rankedBefore) do
           unless asked.contains cap do
             throw "`for<..>` is written of the type of a parameter, not inside another type"
+        -- A callable parameter whose references are written without a
+        -- lifetime is for every lifetime of them, as `fn(&mut T)` is in Rust:
+        -- the lifetimes are each call's to choose.
+        for (written, t) in d.annots.zip annots do
+          if let (some (.fn ps _), some (.fn tps _ _ _ cap)) := (written, t) then
+            unless (← get).ranked.any (·.1 == cap) do
+              let lives ← ((ps.zip tps).filterMapM fun
+                | (.ref _ _ none, p) => do
+                  match ← find p with
+                  | .ref _ _ c => pure (some (← findCap c))
+                  | _ => pure none
+                | _ => pure none)
+              unless lives.isEmpty do
+                modify fun s => { s with ranked := (cap, lives.eraseDups.map (·, "'_")) :: s.ranked }
         -- The result may say what the function performs: that, and no more.
         let (retExpr, declared) := match d.ret with
           | some (.performs t effects) => (some t, some effects)

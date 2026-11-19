@@ -924,7 +924,23 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
                 if blankets.any (fun (b, asked) => b == Syntax.traitBase tr && asked.all had) then
                   written := written ++ [(tr, k, t)]
                 else
-                throw (inFunction d.name s!"`{bareName n}` is not said to have `{tr}`: write `{bareName n}: {tr}`")
+                -- A need of the trait at arguments nothing has decided yet is
+                -- the written one's, where they fit (`T: Unlinks<?>` with
+                -- `T: Unlinks<T>` written): as Rust takes a `where` bound.
+                let mut fitted := false
+                if let some (_, _, args) := keyed.find? (·.1 == tr) then
+                  for w in written do
+                    if !fitted && Syntax.traitBase w.1 == Syntax.traitBase tr && w.2.1 == k then
+                      if let some (_, _, wargs) := keyed.find? (·.1 == w.1) then
+                        if wargs.length == args.length then
+                          let saved ← get
+                          try
+                            for (a, b) in args.zip wargs do unify a b
+                            fitted := true
+                          catch _ => set saved
+                if fitted then written := written ++ [(tr, k, t)]
+                else
+                  throw (inFunction d.name s!"`{bareName n}` is not said to have `{tr}`: write `{bareName n}: {tr}`")
           pure (written ++ inferred.filter fun (tr, k, _) =>
             !written.any (fun w => w.1 == tr && w.2.1 == k))
     -- As the function's type has them: a trait with arguments is asked of

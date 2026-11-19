@@ -154,6 +154,16 @@ def writeSignature (s : Scheme) (named : List (Nat × String) := []) : M (Except
   let ty ← zonk s.ty
   let .fn ps r effs tail _ := ty | return .error "not a function"
   let act : StateT Names M (List String × String × String × List String) := do
+    -- (What an implementation leaves to be found, and the function does not
+    -- choose, by its projection: `<F as Trait<S>>::Out`.)
+    for (tr, subject, name, v) in s.assocs do
+      if let .var r ← (find v : M Ty) then
+        unless (← get).tys.any (·.1 == r) do
+          let shown ← match ← (find subject : M Ty) with
+            | .tuple (self :: targs) =>
+              pure s!"<{← writeTy self} as {typeName tr}<{", ".intercalate (← targs.mapM writeTy)}>>::{name}"
+            | t => pure s!"<{← writeTy t} as {typeName tr}>::{name}"
+          modify fun n => { n with tys := (r, shown) :: n.tys }
     let params ← ps.mapM writeTy
     let ret ← writeTy r
     -- (A row of effects of its own that nothing it is given performs is
@@ -181,7 +191,7 @@ def writeSignature (s : Scheme) (named : List (Nat × String) := []) : M (Except
   let ((params, ret, effects, asks), names) ← act.run { tys := named }
   if let some what := names.unwritable then
     return .error s!"its type has `{what}` in it, which no program writes"
-  let own := names.tys.filter fun (v, _) => !named.any (·.1 == v)
+  let own := names.tys.filter fun (v, n) => !named.any (·.1 == v) && !n.startsWith "<"
   let generics := own.map (·.2) ++ names.rows.map fun (_, n) => s!"{n}: EffectRow"
   pure (.ok ⟨generics, params, ret, effects, asks⟩)
 
