@@ -56,7 +56,7 @@ fn orders() {
     say_u32(second.get<u32>(second_number));
     say_u32(second.get<u32>(second_pair));
     say_i16(second.get<i16>(second_pair));
-    first.query<(&u32, &i16)>().for_each(fn(got: (&u32, &i16)) { let (a, b) = got; say(show(*a) ++ " " ++ show(*b)) });
+    first.query<(&u32, &i16)>().for_each() { a, b => say(show(*a) ++ " " ++ show(*b)) };
     flag(first.despawn(pair));
     flag(first.despawn(first_single));
     flag(first.despawn(reversed));

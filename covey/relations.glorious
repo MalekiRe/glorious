@@ -48,24 +48,24 @@ struct Update
 
 // Each pilot patches the ship it pilots, up to 100.
 fn repair(pilots: &mut Query<(&Skill, To<Piloting, &mut Hull>)>) {
-    pilots.for_each(fn((skill, ship)) {
+    pilots.for_each() { skill, ship =>
         match(ship) {
             Some(mut hull) => hull.0 = (hull.0 + skill.0).min(100),
             None => ()
         }
-    })
+    }
 }
 
 // Each docked ship unloads what it carries into its station's hold.
 fn unload(ships: &mut Query<(&mut Cargo, To<DockedAt, &mut Hold>)>) {
-    ships.for_each(fn((mut cargo, station)) {
+    ships.for_each() { mut cargo, station =>
         match(station) {
             Some(mut hold) =>
                 hold.0 = hold.0 + cargo.0;
                 cargo.0 = 0,
             None => ()
         }
-    })
+    }
 }
 
 struct Look
@@ -73,21 +73,19 @@ struct Look
 // Each station says the hulls of the ships docked at it, added up, and how
 // many there are.
 fn roster(stations: &mut Query<(&Hold, From<DockedAt, &Hull>)>) {
-    stations.for_each(fn(got: (&Hold, [&Hull])) {
-        let (hold, hulls) = got;
+    stations.for_each() { hold, hulls =>
         let mut sum = 0;
         let mut i = 0;
         while({ i < len_at(&hulls) }) { sum = sum + hulls[i].0; i = i + 1 };
         if(len_at(&hulls) > 0) { say(sum); say(len_at(&hulls)) } else { () }
-    })
+    }
 }
 
 // Each station with ships docked says how many, from the ships themselves.
 fn census(stations: &mut Query<(&Hold, From<DockedAt, Entity>)>) {
-    stations.for_each(fn(got: (&Hold, [Entity])) {
-        let (hold, ships) = got;
+    stations.for_each() { hold, ships =>
         if(len_at(&ships) > 0) { say(len_at(&ships) + 10) } else { () }
-    })
+    }
 }
 
 fn main() -> Int {

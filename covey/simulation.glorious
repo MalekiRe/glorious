@@ -27,7 +27,7 @@ struct Hit(Int)
 
 // Everything that moves, moves.
 fn integrate(query: &mut Query<(&mut Position, &Velocity)>) {
-    query.for_each(fn((mut position, velocity)) { position.0 = position.0 + velocity.0; })
+    query.for_each() { mut position, velocity => position.0 = position.0 + velocity.0; }
 }
 
 // What moves, slows.

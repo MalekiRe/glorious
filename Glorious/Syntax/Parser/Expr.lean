@@ -634,13 +634,19 @@ partial def parseBraces : P Expr := do
 partial def parseClauses : P (List Clause) := do
   pure (restClauses (← listUntil (atPunct "}") parseClause))
 
-/-- One clause: a single pattern for the argument, or none for a callable taking
-no arguments. Callables of several arguments are written `fn(x, y) { body }`. -/
+/-- One clause: a pattern for the argument, or none for a callable taking no
+arguments. Several patterns, `{ a, b, c => .. }`, are one tuple taken apart,
+`{ (a, b, c) => .. }`: given one tuple, its parts; wanted where a callable of
+several arguments is, the arguments (5.4). -/
 partial def parseClause : P Clause := do
   let pats ←
     if (← peek) == .punct "=>" then pure []
     else do
-      pure [← parsePattern]
+      let first ← parsePattern
+      let mut more : Array Pattern := #[]
+      while ← acceptPunct "," do
+        more := more.push (← parsePattern)
+      pure [if more.isEmpty then first else .tuple (first :: more.toList)]
   -- (Rust's, which version 1 does not have.)
   if (← peek) == .ident "if" then
     failAt "a pattern has no guard: test in the clause, `x => if(c) { .. } else { .. }`, or match again"

@@ -30,13 +30,12 @@ impl Default for Seen { fn default() { Seen { singles: 0, at: [] } } }
 
 // Shields charge unless stunned; those without one still match.
 fn charge(query: &mut Query<(&Position, Option<&mut Shield>, Has<Stunned>)>) {
-    query.for_each(fn(got: (&Position, Option<Mut<Shield>>, Bool)) {
-        let (position, shield, stunned) = got;
+    query.for_each() { position, shield, stunned =>
         match(shield) {
             Some(mut shield) => if(stunned) { discard(shield) } else { shield.0 = shield.0 + position.0 },
             None => ()
         }
-    })
+    }
 }
 
 // Run only while exactly one entity has a `Tag` and a position.

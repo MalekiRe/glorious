@@ -148,8 +148,6 @@ partial def inferExpr (scope : Scope) (amb : Row) : Expr → M Ty
           | some n => if inGroup then none else some (Elab.Decision.eta owner x n)
           | none => none
         throwThe Elab.Said { msg := s!"`{x}` needs a trait of a type it is used at, so it is called where it is named: write a block that calls it", decision }
-      if ((← get).fnGroups.lookup x).isSome then
-        throw s!"`{x}` gives callables one environment to share, so it is called where it is named: write a block that calls it"
       if inGroup then
         modify fun s => { s with groupUses := s.groupUses.push ⟨0, x, s.owner, s.pos⟩ }
       else
@@ -522,17 +520,19 @@ partial def checkArg (scope : Scope) (amb : Row) (what : String) (p : Ty) (a : E
         match scope.lookup x with
         | some (.val _ id) => some (x, id)
         | _ => none
+      -- Given to run in an environment and given a callable: if that is a
+      -- block given to run in one too, this runs in its place (whether it
+      -- is, is known once the program is), taking over what it captured.
       match ← find input with
       | .fn _ _ _ _ cap =>
-        if (← get).anyMust then
-          modify fun s =>
-            { s with unrunGiven :=
-                s.unrunGiven.push (id, cap, input, mentioned, s.pos ++ why, own) }
+        if (← get).inPlace.contains id then
+          if (← get).anyMust then
+            modify fun s =>
+              { s with unrunGiven :=
+                  s.unrunGiven.push (id, cap, input, mentioned, s.pos ++ why, own) }
+          modify fun s => { s with unrun := s.unrun.push (id, cap) }
+        else mustDrop input why
       | _ => mustDrop input why
-      -- A callable that takes no arguments, given to a block: a block that was
-      -- not run, whose environment this one can take over.
-      if let .fn _ _ _ _ cap ← find input then
-        modify fun s => { s with unrun := s.unrun.push (id, cap) }
       pure none
   | _, _ => do
     -- A name whose type is not known yet, where a `&mut` reference is wanted:
@@ -1306,26 +1306,13 @@ partial def inferCall (scope : Scope) (amb : Row) (f : Expr) (args : List Expr)
         let sites := (← get).lastSites
         unless sites.isEmpty do
           modify fun s => { s with instSites := s.instSites.push (s.owner, call, "call", x, sites) }
-      -- Callables that share an environment: the first holds it, and each
-      -- other is built over what the first captured, to run in its place.
-      for group in ((← get).fnGroups.lookup x).getD [] do
-        let holder := (group.head?.bind fun i => args[i]?).bind Elab.plainBlock
-        let mut named : List Nat := []
-        for i in group.drop 1 do
-          match args[i]? with
-          | some (.name none _) => named := named ++ [i]
-          | some a =>
-            match Elab.plainBlock a with
-            | some (id, _) =>
-              modify fun s => { s with given := s.given.push id }
-              if let some (owner, _) := holder then
-                modify fun s => { s with envLinks := s.envLinks.push (id, owner) }
-            | none =>
-              throw s!"argument {i + 1} of `{x}` shares an environment with another: write a block there, or a name"
-          | none => pure ()
-        unless named.isEmpty do
-          if call == 0 then throw s!"`{x}` is called where the checker has no name for the call; this is a compiler defect"
-          modify fun s => { s with envWraps := s.envWraps.push (call, named) }
+      -- Blocks given to run in an environment, as the function says; of
+      -- them, those given what holds it run in its place (`checkArg`).
+      for (i, inPlace) in ((← get).fnRunsIn.lookup x).getD [] do
+        if let some (id, _) := (args[i]?).bind Elab.plainBlock then
+          modify fun s =>
+            { s with envBlocks := s.envBlocks.insert id
+                     inPlace := if inPlace then s.inPlace.insert id else s.inPlace }
       let before := (← get).blockCaps.size
       let r ← applyTy scope amb s!"`{x}`" t args call
       -- One of them is certainly called, and the rest let go: what has to be

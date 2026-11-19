@@ -1552,44 +1552,16 @@ structure FieldInfo where
   reads : Std.HashMap Nat Nat
   /-- The blocks given what an `is` found, each with the names it then has. -/
   packs : Std.HashMap Nat (List String) := {}
-  /-- In the function being written out: each callable that runs in an
-  environment another holds, with the one that holds it. -/
-  members : List (String × String) := []
-  /-- Calls that give a name where a callable sharing an environment is
-  wanted, and where. -/
-  wraps : Std.HashMap Nat (List Nat) := {}
   /-- The fields read by name of what a named reference points to. -/
   derefs : Std.HashSet Nat := {}
-
-/-- A call as it is where callables share an environment. In a function given
-such callables, a call of one that does not hold the environment gives it the
-one that does, to run in its place. And where a name is given for such a
-callable, it is given as a callable that takes what holds the environment and
-calls the name. -/
-def shareEnv (info : FieldInfo) (id : Nat) (f : Expr) (args : List Expr) : Expr × List Expr :=
-  let args := match info.wraps[id]? with
-    | some places =>
-      (args.zip (List.range args.length)).map fun (a, i) =>
-        if places.contains i then Expr.closure 0 [.mk [.wild] [.expr (.call 0 a [])]] else a
-    | none => args
-  match f, args with
-  | .name none b, [] =>
-    match info.members.lookup b with
-    | some holder => (f, [.name none holder])
-    | none => (f, args)
-  | _, _ => (f, args)
 
 mutual
 
 /-- The callables and scopes written inside an expression, with the borrows of
 fields in them written out, each where it is written. -/
 private partial def unfieldExpr (info : FieldInfo) : Expr → Expr
-  | .call id f args =>
-    let (f, args) := shareEnv info id f args
-    .call id (unfieldExpr info f) (args.map (unfieldExpr info))
-  | .tailCall id f args =>
-    let (f, args) := shareEnv info id f args
-    .tailCall id (unfieldExpr info f) (args.map (unfieldExpr info))
+  | .call id f args => .call id (unfieldExpr info f) (args.map (unfieldExpr info))
+  | .tailCall id f args => .tailCall id (unfieldExpr info f) (args.map (unfieldExpr info))
   | .fieldOf id e name =>
     -- The checker said which field the name is.
     match info.reads[id]? with
@@ -1659,23 +1631,15 @@ end
 /-- Write out every borrow of a field, and every field read by name: see
 above. What the checker found says how. -/
 def unfield (b : Blocks) (items : List Item) : Except String (List Item) := do
-  if b.fields.isEmpty && b.fieldReads.isEmpty && b.packs.isEmpty && b.envFns.isEmpty then
+  if b.fields.isEmpty && b.fieldReads.isEmpty && b.packs.isEmpty then
     return items
+  let info : FieldInfo :=
+    { shapes := b.fields
+      reads := b.fieldReads
+      packs := b.packs
+      derefs := b.derefReads }
   pure (items.map fun
-    | .fn name params annots ret clauses =>
-      -- Each callable that does not hold its environment, with the one that does.
-      let members := (b.envFns.getD name []).flatMap fun group =>
-        match group with
-        | holder :: rest => rest.map (·, holder)
-        | [] => []
-      let info : FieldInfo :=
-        { shapes := b.fields
-          reads := b.fieldReads
-          packs := b.packs
-          members := members
-          wraps := b.envWraps
-          derefs := b.derefReads }
-      .fn name params annots ret (clauses.map (unfieldClause info))
+    | .fn name params annots ret clauses => .fn name params annots ret (clauses.map (unfieldClause info))
     | item => item)
 
 /-- Collect the global declarations. -/

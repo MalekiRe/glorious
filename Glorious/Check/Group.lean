@@ -203,9 +203,7 @@ def checkGroup (decls : List FnDecl) : M Unit := do
             unless members.isEmpty do
               let names := pats.flatMap Elab.patVars
               modify fun s => { s with envGroups := s.envGroups.push (env, members, must, names, body) }
-              -- Several that take nothing: a caller can build them over one
-              -- environment, which the first holds.
-              if members.length ≥ 2 && members.all (·.2 == 0) then
+              if members.length ≥ 2 then
                 let places := members.filterMap fun (x, _) =>
                   pats.findIdx? fun
                     | .var y => y == x
@@ -214,9 +212,21 @@ def checkGroup (decls : List FnDecl) : M Unit := do
                 modify fun s =>
                   { s with
                     fnGroups := (d.name, places :: ((s.fnGroups.lookup d.name).getD []))
-                      :: s.fnGroups.filter (·.1 != d.name)
-                    envFns := (d.name, members.map (·.1) :: ((s.envFns.lookup d.name).getD []))
-                      :: s.envFns.filter (·.1 != d.name) }
+                      :: s.fnGroups.filter (·.1 != d.name) }
+        -- The parameters said to run in an environment, and of them those given
+        -- one argument of a type parameter's type: a caller's block for one
+        -- of those runs in the place of what it is given, where that is a
+        -- block given to run in an environment too.
+        let runsIn := (d.annots.zipIdx).filterMap fun (annot, i) =>
+          match annot with
+          | some (.name f []) =>
+            (d.bounds.find? fun b => b.trait == "RunsIn" && b.subject == f).map fun b =>
+              (i, match b.args.drop 1 with
+                | [.name x []] => (genericParams d.params).contains x
+                | _ => false)
+          | _ => none
+        unless runsIn.isEmpty do
+          modify fun s => { s with fnRunsIn := (d.name, runsIn) :: s.fnRunsIn.filter (·.1 != d.name) }
         -- `After = E2`: the environment a callable leaves, in which others run
         -- only once it has.
         let (pats', body') := match d.clauses with

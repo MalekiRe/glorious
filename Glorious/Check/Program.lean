@@ -335,7 +335,7 @@ def finish : M Elab.Blocks := fun st => Trace.timed "check: finish" fun _ => (sh
       let root ← findCap cap
       let mut owners : List Nat := []
       for (owner, c) in s.blockCaps do
-        if owner != id && owner != 0 && (← findCap c) == root && !owners.contains owner then
+        if owner != id && owner != 0 && s.envBlocks.contains owner && (← findCap c) == root && !owners.contains owner then
           owners := owner :: owners
       if let [owner] := owners then links := (id, owner) :: links
     -- A block taken to be given one particular block, where in the end it
@@ -391,11 +391,10 @@ def finish : M Elab.Blocks := fun st => Trace.timed "check: finish" fun _ => (sh
         impls := implEs
         drops := s.dropSites.toList
         destroys }
-    pure { given := .ofList s.given.toList, links := Elab.firstOf (links ++ s.envLinks.toList)
+    pure { given := .ofList s.given.toList, links := Elab.firstOf links
            coercions := Elab.firstOf s.coercions.toList, traits := traitInfo.index
            fields := Elab.firstOf (s.fieldTable.toList.map fun (id, rest) => (id, rest))
            fieldReads := Elab.firstOf s.fieldReads.toList, packs := Elab.firstOf s.packs.toList
-           envFns := Elab.firstOf s.envFns, envWraps := Elab.firstOf s.envWraps.toList
            derefReads := .ofList s.derefReads.toList, sites := s.siteTable, siteTypes := s.siteTypes
            dotChosen := Elab.firstOf s.dotChosen, argsChosen := Elab.firstOf s.argsChosen
            decided := s.decided }).run st

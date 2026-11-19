@@ -24,11 +24,11 @@ struct Log { added: [Int], changed: [Int] }
 impl Default for Log { fn default() { Log { added: [], changed: [] } } }
 
 fn added(query: &mut Query<(&Value,), (Added<Value>,)>, log: ResMut<Log>) {
-    query.for_each(fn(got: (&Value,)) { let (v,) = got; push_at(&mut log.added, v.0) });
+    query.for_each() { (v,) => push_at(&mut log.added, v.0) };
     push_at(&mut log.added, -1)
 }
 fn changed(query: &mut Query<(&Value,), (Changed<Value>,)>, log: ResMut<Log>) {
-    query.for_each(fn(got: (&Value,)) { let (v,) = got; push_at(&mut log.changed, v.0) });
+    query.for_each() { (v,) => push_at(&mut log.changed, v.0) };
     push_at(&mut log.changed, -1)
 }
 
@@ -56,7 +56,7 @@ fn semantics() {
     app.emit(&Update);
     // Merely fetching mutable data does not change it.
     match(app.world.get_mut<Value>(a)) { Some(m) => say(m.0), None => () };
-    app.world.query<(&mut Value,)>().for_each(fn(got: (Mut<Value>,)) { let (v,) = got; discard(v) });
+    app.world.query<(&mut Value,)>().for_each() { (v,) => discard(v) };
     let _ = app.world.remove<Tag>(a);
     let _ = app.world.insert(b, Tag);
     app.emit(&Update);

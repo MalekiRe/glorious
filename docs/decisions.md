@@ -5563,6 +5563,57 @@ covey's simulation edit loop went from about 0.46 s to 0.48 s wall.
 `mut name` in a pattern is the parser's alone: a plain name, and `let mut
 name = name` where what the pattern is of starts (`Syntax.unmutItems`).
 
+## An environment is shared where signatures say so
+
+**Decision (user): `if` and `else` are declared, and no rule of the checker
+makes one block run in another's place by the shape of a call.** The
+prelude's `if`, `else`, `and`, `or` and `not` have signatures, which say what
+they take, what they give, what they perform and which callables run in an
+environment:
+
+```
+fn if<'e, E, A, X, B, F, e: EffectRow>(condition: Result<A, X>, body: F) -> Result<B, F> / {| e}
+where E: Environment<'e>, F: RunsIn<E, (A,), Output = B, Effects = {| e}>
+
+fn else<'e, E, B, X, G, e: EffectRow>(value: Result<B, X>, fallback: G) -> B / {| e}
+where E: Environment<'e>, G: RunsIn<E, (X,), Output = B, Effects = {| e}>
+```
+
+The one rule: **a callable said to run in an environment and given one
+argument of a type parameter's type (`G: RunsIn<E, (X,)>`), where what it
+is given at the call is a block that was itself given to run in an
+environment, runs in that block's place**: the block written for it is built
+over what that block captured (Core's `rebind`), and given it. So
+`if(c) { close(f) } else { close(f) + 1 }` holds `f` once: `if` gives back
+its body unrun, `else` gives what failed to its fallback, and both say they
+run in an environment. Where what `else` is given is not such a block (`x
+else { 0 }` of any `Result`), the fallback is given it and lets it go.
+
+What went: the checker's rule that any block written without parameters,
+given a callable, took over that callable's environment if one block of the
+program could be it; and, for a function whose callables share an
+environment, the call of one that does not hold it being given the holder
+unseen. A function that selects among callables now hands the holder on as
+it says: `B: RunsIn<E, (A,)>` and `b(a)`. A function whose callables run in
+an environment can be named as a value; the blocks given to it there are
+then plain callables.
+
+Limits: `while` and `match` are still written without types; the
+environment's lifetime is read and not used; what an `is` found still
+reaches a block without parameters as a value whose type carries the names.
+Measured against the commit before, the
+suite built and run the same way: 1361 programs compile (1360), 1351 well
+owned (1351), 1332 with regions and with loans (1331), 1323 with all three
+(1323); 1582 borrows are scopes of their own (1582).
+
+## A clause of several patterns takes one tuple apart
+
+`{ a, b, c => body }` is `{ (a, b, c) => body }`: given one tuple, its
+parts; where a callable of several arguments is wanted, its arguments, as a
+clause of one tuple already was. So a system is written
+`query.for_each() { position, velocity => .. }`, the block after the call
+being its last argument. A one-part tuple is still `{ (v,) => .. }`.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by

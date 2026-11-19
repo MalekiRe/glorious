@@ -577,17 +577,19 @@ structure St where
   environment, those given it, those lent it, the other names in scope, and
   the function's body. None lent it can be called once one given it has been. -/
   envLent : Array (String × List (String × Nat) × List (String × Nat) × List String × List Stmt) := #[]
-  /-- For a function whose callables share an environment and take no
-  arguments: which of its parameters they are, the first being the one that
-  holds the environment; and the same by name. A caller builds the others
-  over what the first captured. -/
+  /-- For a function whose callables run in an environment given whole:
+  which of its parameters they are, for each such environment. -/
   fnGroups : List (String × List (List Nat)) := []
-  envFns : List (String × List (List String)) := []
-  /-- Blocks built over the environment of another block of the same call. -/
-  envLinks : Array (Nat × Nat) := #[]
-  /-- Calls that give a name where a callable sharing an environment is
-  wanted: the call, and which arguments. -/
-  envWraps : Array (Nat × List Nat) := #[]
+  /-- For each function, its parameters said to run in an environment
+  (`F: RunsIn<E, ..>`), each with whether it is given one argument of a
+  type parameter's type (`G: RunsIn<E, (X,)>`): a block given for such a
+  one runs in the place of what it is given, if that is a block given to
+  run in an environment too. -/
+  fnRunsIn : List (String × List (Nat × Bool)) := []
+  /-- Blocks given where a callable that runs in an environment is wanted. -/
+  envBlocks : Std.HashSet Nat := {}
+  /-- Of those, the blocks that run in the place of what they are given. -/
+  inPlace : Std.HashSet Nat := {}
   /-- Of such functions, those of whose callables one is certainly called. -/
   envMust : List String := []
   /-- Blocks given to such a function at one call, of which one certainly

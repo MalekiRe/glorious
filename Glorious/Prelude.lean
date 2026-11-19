@@ -36,19 +36,25 @@ fn match(subject, arms) { tail arms(subject) }
 // test found: nothing, for a comparison; for `value is Pattern`, what the
 // pattern's names stand for, which a block then has under those names. On
 // failure it gives the body back: it was not run, so whatever it captured is
-// still there to be used.
-fn if(condition, body) {
+// still there to be used. The body runs in an environment of its own (`E`),
+// and performs what `if` does.
+fn if<'e, E, A, X, B, F, e: EffectRow>(condition: Result<A, X>, body: F) -> Result<B, F> / {| e}
+where E: Environment<'e>, F: RunsIn<E, (A,), Output = B, Effects = {| e}>
+{
     match(condition) {
         Ok(found) => Ok(body(found)),
         Err(_) => Err(body)
     }
 }
 
-// `else` unwraps success, and on failure gives what failed to its fallback. A
-// fallback written as a plain block after an `if` is thereby given the body
-// that was not run, and runs in its place.
+// `else` unwraps success, and on failure gives what failed to its fallback.
+// The fallback runs in an environment and is given what failed: after an
+// `if`, that is the body that was not run, given to run in an environment
+// too, so the fallback runs in its place, over what it captured.
 infixr 1 else
-fn else(value, fallback) {
+fn else<'e, E, B, X, G, e: EffectRow>(value: Result<B, X>, fallback: G) -> B / {| e}
+where E: Environment<'e>, G: RunsIn<E, (X,), Output = B, Effects = {| e}>
+{
     match(value) {
         Ok(result) => result,
         Err(failure) => tail fallback(failure)
@@ -68,7 +74,9 @@ fn option(value) {
 // The right operands of `and` and `or` are callables, run only when needed.
 // That of `and` is given what the left one found, as the body of an `if` is.
 infixl 3 and
-fn and(left, right) {
+fn and<A, X, B, F, e: EffectRow>(left: Result<A, X>, right: F) -> Result<B, X> / {| e}
+where F: Fn<(A,), Output = Result<B, X>, Effects = {| e}>
+{
     match(left) {
         Ok(found) => tail right(found),
         Err(error) => Err(error)
@@ -80,7 +88,9 @@ fn and(left, right) {
 // `if(a) { .. } or { if(b) { .. } } else { .. }` is a chain of alternatives
 // over what the first body captured.
 infixl 2 or
-fn or(left, right) {
+fn or<'e, E, A, X, Y, G, e: EffectRow>(left: Result<A, X>, right: G) -> Result<A, Y> / {| e}
+where E: Environment<'e>, G: RunsIn<E, (X,), Output = Result<A, Y>, Effects = {| e}>
+{
     match(left) {
         Ok(value) => Ok(value),
         Err(failure) => tail right(failure)
@@ -88,7 +98,7 @@ fn or(left, right) {
 }
 
 prefix 8 not
-fn not(value) {
+fn not<A, X>(value: Result<A, X>) -> Result<X, A> {
     match(value) {
         Ok(payload) => Err(payload),
         Err(payload) => Ok(payload)

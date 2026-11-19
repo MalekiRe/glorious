@@ -1526,7 +1526,7 @@ def runLowerChecks (fnTy : Ty) : M Unit := do
     let root ← findCap cap
     let mut owners : List (Nat × Nat) := []
     for (owner, c) in s.blockCaps do
-      if owner != id && owner != 0 && (← findCap c) == root && !owners.any (·.1 == owner) then
+      if owner != id && owner != 0 && s.envBlocks.contains owner && (← findCap c) == root && !owners.any (·.1 == owner) then
         owners := (owner, c) :: owners
     match owners with
     | [(owner, c)] =>

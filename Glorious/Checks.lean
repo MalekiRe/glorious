@@ -167,10 +167,14 @@ def all : List (Nat × (Unit → Bool)) := [
     == some true),
   -- A function that selects among three and hands the first on does the same.
   (42, fun _ => owned "effect Ask { ask() -> Int }
-    fn pick3(n, a, b, c) { match(n) { 0 => a(), 1 => b(a), _ => c(a) } }
+    fn pick3<'e, E, A, B, C>(n: Int, a: A, b: B, c: C) -> Int
+    where E: Environment<'e>, A: RunsIn<E, (), Output = Int>, B: RunsIn<E, (A,), Output = Int>, C: RunsIn<E, (A,), Output = Int>
+    { match(n) { 0 => a(), 1 => b(a), _ => c(a) } }
     fn main() { handle ask() + 1 { ask(k) => pick3(1, { k(1) }, { k(2) }, { k(3) }) } }" == some true),
   (43, fun _ => owned "effect Ask { ask() -> Int }
-    fn pick(c, a, b) { match(c) { Ok(_) => a(), Err(_) => b(a) } }
+    fn pick<'e, E, A, B>(c: Bool, a: A, b: B) -> Int
+    where E: Environment<'e>, A: RunsIn<E, (), Output = Int>, B: RunsIn<E, (A,), Output = Int>
+    { match(c) { Ok(_) => a(), Err(_) => b(a) } }
     fn main() { handle ask() + 1 { ask(k) => pick(2 < 1, { k(1) }, { k(2) }) } }" == some true),
   -- Two callables that each took the resumption for themselves own it twice,
   -- whichever of them is later run. Such a program compiles, typed but not shown

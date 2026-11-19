@@ -684,12 +684,8 @@ def lowered (b : Elab.Blocks) (written all : List Syntax.Item) :
   let (items, b) := Trace.timed "lower: untrait" fun _ => Elab.untrait b all
   let items ← Trace.timed "lower: fields" fun _ => Elab.unfield b items
   let items ← Trace.timed "lower: instances" fun _ => Elab.instances b written items
-  let (items, copies) := Trace.timed "lower: specialize" fun _ => Elab.specialize b.traits items
+  let (items, _) := Trace.timed "lower: specialize" fun _ => Elab.specialize b.traits items
   let items := Trace.timed "lower: fold constants" fun _ => Elab.foldConstants items
-  let b := { b with envFns := copies.foldl (init := b.envFns) fun m (name, fn) =>
-    match b.envFns[fn]? with
-    | some groups => if m.contains name then m else m.insert name groups
-    | none => m }
   pure (items, b)
 
 /-- Elaborate, and work out the constants at compile time (`Comptime`). -/

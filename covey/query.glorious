@@ -15,12 +15,12 @@ struct Tick
 struct Look
 
 fn movement(query: &mut Query<(&mut Position, &Velocity)>) {
-    query.for_each(fn((mut position, velocity)) { position.0 = position.0 + velocity.0; })
+    query.for_each() { mut position, velocity => position.0 = position.0 + velocity.0; }
 }
 
 // Those that stand still: a position and no velocity.
 fn still(query: &mut Query<(&Position,), Without<Velocity>>) {
-    query.for_each(fn(got: (&Position,)) { print(1) })
+    query.for_each() { (_,) => print(1) }
 }
 
 fn main() -> Int {

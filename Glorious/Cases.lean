@@ -1523,7 +1523,7 @@ fn main() -> Int { <(A,) as Go>::go() }",
   -- most one is called, and if the environment has to be used, one. Blocks
   -- given for them are built over one environment, which Core shows is
   -- owned once.
-  ⟨"fn pick<'e, E, A, B>(c: Bool, a: A, b: B) -> Int where E: Environment<'e>, A: RunsIn<E, (), Output = Int>, B: RunsIn<E, (), Output = Int> { match(c) { Ok(_) => a(), Err(_) => b() } }\neffect Ask { ask() -> Int }\nfn main() { handle ask() + 1 { ask(k) => pick(1 < 2, { k(1) }, { k(2) }) } }",
+  ⟨"fn pick<'e, E, A, B>(c: Bool, a: A, b: B) -> Int where E: Environment<'e>, A: RunsIn<E, (), Output = Int>, B: RunsIn<E, (A,), Output = Int> { match(c) { Ok(_) => a(), Err(_) => b(a) } }\neffect Ask { ask() -> Int }\nfn main() { handle ask() + 1 { ask(k) => pick(1 < 2, { k(1) }, { k(2) }) } }",
     [], "2"⟩,
   ⟨"fn both<'e, E, A, B>(a: A, b: B) -> Int where E: Environment<'e>, A: RunsIn<E, (), Output = Int>, B: RunsIn<E, (), Output = Int> { a() + b() }\nfn main() { both({ 1 }, { 2 }) }",
     [], "error: in `both`: `a`, `b` run in the environment `E`, which is used up by the first that is called: on some path more than one call is made"⟩,
@@ -1535,20 +1535,18 @@ fn main() -> Int { <(A,) as Go>::go() }",
     [], "8"⟩,
   ⟨"fn again<'e, E, A>(a: A) -> Int where E: Environment<'e>, A: RunsIn<E, (), Output = Int> { a() + a() }\nfn main() { again({ 4 }) }",
     [], "error: in `again`: `a` run in the environment `E`, which is used up by the first that is called: on some path more than one call is made"⟩,
-  ⟨"fn pick<'e, E, A, B>(c: Bool, a: A, b: B) -> Int where E: Environment<'e>, A: RunsIn<E, (), Output = Int>, B: RunsIn<E, (), Output = Int> { match(c) { Ok(_) => a(), Err(_) => b() } }\nfn one() { 1 }\nfn two() { 2 }\nfn main() { pick(1 < 2, one, two) + pick(2 < 1, { 10 }, two) }",
+  ⟨"fn pick<'e, E, A, B>(c: Bool, a: A, b: B) -> Int where E: Environment<'e>, A: RunsIn<E, (), Output = Int>, B: RunsIn<E, (A,), Output = Int> { match(c) { Ok(_) => a(), Err(_) => b(a) } }\nfn one() { 1 }\nfn two() { 2 }\nfn main() { pick(1 < 2, one, { two() }) + pick(2 < 1, { 10 }, { two() }) }",
     [], "3"⟩,
-  ⟨"fn pick<'e, E, A, B>(c: Bool, a: A, b: B) -> Int where E: Environment<'e>, A: RunsIn<E, (), Output = Int>, B: RunsIn<E, (), Output = Int> { match(c) { Ok(_) => a(), Err(_) => b() } }\nfn main() { let p = pick; 0 }",
-    [], "error: 2:13: in `main`: `pick` gives callables one environment to share, so it is called where it is named: write a block that calls it"⟩,
-  ⟨"struct File(Int)\nimpl Use<[1, 1]> for File {}\nfn close(File(fd)) { host_write(fd); fd }\nfn pick<'e, E, A, B>(c: Bool, a: A, b: B) -> Int where E: Environment<'e> + Use<[1, 1]>, A: RunsIn<E, (), Output = Int>, B: RunsIn<E, (), Output = Int> { match(c) { Ok(_) => a(), Err(_) => b() } }\nfn main() { let f = File(3); pick(2 < 1, { close(f) }, { close(f) + 1 }) }",
+  ⟨"struct File(Int)\nimpl Use<[1, 1]> for File {}\nfn close(File(fd)) { host_write(fd); fd }\nfn pick<'e, E, A, B>(c: Bool, a: A, b: B) -> Int where E: Environment<'e> + Use<[1, 1]>, A: RunsIn<E, (), Output = Int>, B: RunsIn<E, (A,), Output = Int> { match(c) { Ok(_) => a(), Err(_) => b(a) } }\nfn main() { let f = File(3); pick(2 < 1, { close(f) }, { close(f) + 1 }) }",
     [], "3\n4"⟩,
-  ⟨"fn three<'e, E, A, B, C>(n: Int, a: A, b: B, c: C) -> Int where E: Environment<'e>, A: RunsIn<E, (), Output = Int>, B: RunsIn<E, (), Output = Int>, C: RunsIn<E, (), Output = Int> { match(n) { 0 => a(), 1 => b(), _ => c() } }\neffect Ask { ask() -> Int }\nfn main() { handle ask() + 1 { ask(k) => let m = 5; three(1, { k(m) }, { k(m + 1) }, { k(m + 2) }) } }",
+  ⟨"fn three<'e, E, A, B, C>(n: Int, a: A, b: B, c: C) -> Int where E: Environment<'e>, A: RunsIn<E, (), Output = Int>, B: RunsIn<E, (A,), Output = Int>, C: RunsIn<E, (A,), Output = Int> { match(n) { 0 => a(), 1 => b(a), _ => c(a) } }\neffect Ask { ask() -> Int }\nfn main() { handle ask() + 1 { ask(k) => let m = 5; three(1, { k(m) }, { k(m + 1) }, { k(m + 2) }) } }",
     [], "7"⟩,
-  ⟨"struct File(Int)\nimpl Use<[1, 1]> for File {}\nfn close(File(fd)) { host_write(fd); fd }\nfn pick<'e, E, A, B>(c: Bool, a: A, b: B) -> Int where E: Environment<'e> + Use<[1, 1]>, A: RunsIn<E, (), Output = Int>, B: RunsIn<E, (), Output = Int> { match(c) { Ok(_) => a(), Err(_) => b() } }\nfn main() { let f = File(3); let g = File(4); let r = pick(2 < 1, { close(f) }, { close(f) + close(g) }); r }",
+  ⟨"struct File(Int)\nimpl Use<[1, 1]> for File {}\nfn close(File(fd)) { host_write(fd); fd }\nfn pick<'e, E, A, B>(c: Bool, a: A, b: B) -> Int where E: Environment<'e> + Use<[1, 1]>, A: RunsIn<E, (), Output = Int>, B: RunsIn<E, (A,), Output = Int> { match(c) { Ok(_) => a(), Err(_) => b(a) } }\nfn main() { let f = File(3); let g = File(4); let r = pick(2 < 1, { close(f) }, { close(f) + close(g) }); r }",
     [], "error: 5:47: in `main`: `g` has to be used, and one of the blocks given to `pick` holds it but not every one: only one of them runs"⟩,
-  ⟨"struct File(Int)\nimpl Use<[1, 1]> for File {}\nfn close(File(fd)) { host_write(fd); fd }\nfn pick<'e, E, A, B>(c: Bool, a: A, b: B) -> Int where E: Environment<'e>, A: RunsIn<E, (), Output = Int>, B: RunsIn<E, (), Output = Int> { match(c) { Ok(_) => a(), Err(_) => b() } }\nfn main() { let f = File(3); pick(2 < 1, { close(f) }, { close(f) + 1 }) }",
-    [], "error: 5:30: in `main`: `pick` may leave what it is given unused, but a callable that holds a `File` has to be used"⟩,
-  ⟨"struct File(Int)\nimpl Use<[1, 1]> for File {}\nfn close(File(fd)) { host_write(fd); fd }\nfn pick<'e, E, A, B>(c: Bool, a: A, b: B) -> Int where E: Environment<'e> + Use<[1, 1]>, A: RunsIn<E, (), Output = Int>, B: RunsIn<E, (), Output = Int> { match(c) { Ok(_) => a(), Err(_) => b() } }\nfn main() { let f = File(3); let h = { close(f) }; pick(2 < 1, { 1 }, h) }",
-    [], "error: 5:30: in `main`: `h` is not used on every path, but a callable that holds a `File` has to be used"⟩,
+  ⟨"struct File(Int)\nimpl Use<[1, 1]> for File {}\nfn close(File(fd)) { host_write(fd); fd }\nfn pick<'e, E, A, B>(c: Bool, a: A, b: B) -> Int where E: Environment<'e>, A: RunsIn<E, (), Output = Int>, B: RunsIn<E, (A,), Output = Int> { match(c) { Ok(_) => a(), Err(_) => b(a) } }\nfn main() { let f = File(3); pick(2 < 1, { close(f) }, { close(f) + 1 }) }",
+    [], "3\n4"⟩,
+  ⟨"struct File(Int)\nimpl Use<[1, 1]> for File {}\nfn close(File(fd)) { host_write(fd); fd }\nfn pick<'e, E, A, B>(c: Bool, a: A, b: B) -> Int where E: Environment<'e> + Use<[1, 1]>, A: RunsIn<E, (), Output = Int>, B: RunsIn<E, (A,), Output = Int> { match(c) { Ok(_) => a(), Err(_) => b(a) } }\nfn main() { let f = File(3); let h = { close(f) }; pick(2 < 1, { 1 }, { h() }) }",
+    [], "error: 5:52: in `main`: `h` has to be used, and one of the blocks given to `pick` holds it but not every one: only one of them runs"⟩,
   ⟨"fn bad<A>(a: A) -> Int where A: RunsIn<E, (), Output = Int> { a() }\nfn main() { 0 }",
     [], "error: in `bad`: `A: RunsIn<E, ..>`: `E` is not said to be an environment (`E: Environment<'e>`)"⟩,
   ⟨"trait Show { fn show(Self) -> Int }\nimpl Show for Int { fn show(n) { n } }\nfn f<T>(x: T) -> Int where T: Show { show(x) }\nfn main() { f(3) }",
@@ -4654,7 +4652,15 @@ fn main() -> Int { <(A,) as Go>::go() }",
     [], "48"⟩,
   -- A field a value does not show, of a type implementing `Deref`: read of what `deref` gives, written through what `deref_mut` gives, after the value is computed.
   ⟨"mod m {\n    pub struct W<T> { value: T, n: Int }\n    impl<T> W<T> { pub fn new(v: T) -> W<T> { W { value: v, n: 0 } } pub fn n(w: &Self) -> Int { w.n } }\n    impl<T> Deref for W<T> { type Target = T; fn deref(w) { &w.value } }\n    impl<T> DerefMut for W<T> { type Target = T; fn deref_mut(w) { w.n = w.n + 1; &mut w.value } }\n}\nuse m::W;\nstruct P(Int, Int);\nfn main() -> Int {\n    let mut w = W::new(P(1, 2));\n    let a = w.0;\n    w.1 = a + 10;\n    w.1 * 10 + W::n(&w)\n}",
-    [], "111"⟩
+    [], "111"⟩,
+  -- Several patterns in a clause take one tuple apart; where a callable of two arguments is wanted, they are its arguments.
+  ⟨"fn each(xs: [(Int, Int)], f: fn((Int, Int)) -> ()) { let mut i = 0; while({ i < len_at(&xs) }) { f(xs[i]); i = i + 1 } }\nfn main() -> Int {\n    let mut s = 0;\n    each([(1, 2), (3, 4)]) { a, mut b => b = b + 1; s = s + a * b };\n    s\n}",
+    [], "18"⟩,
+  ⟨"fn apply2(f: fn(Int, Int) -> Int) -> Int { f(3, 4) + f(0, 9) }\nfn main() -> Int { apply2({ 0, y => y, x, y => x * y }) }",
+    [], "21"⟩,
+  -- `else`'s fallback runs in the place of the body `if` did not run, because both say they run in an environment: a value used once is in both.
+  ⟨"struct File(Int)\nimpl Use<[1, 1]> for File {}\nfn close(File(fd)) { fd }\nfn main() -> Int {\n    let f = File(3);\n    if(2 < 1) { close(f) } else { close(f) + 1 }\n}",
+    [], "4"⟩
 ]
 
 /-- Programs that call foreign functions and read and write memory at an

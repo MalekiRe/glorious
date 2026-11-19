@@ -217,11 +217,6 @@ structure Blocks where
   fieldReads : Std.HashMap Nat Nat := {}
   /-- The blocks given what an `is` found, each with the names it then has. -/
   packs : Std.HashMap Nat (List String) := {}
-  /-- For a function whose callables share an environment: each group of
-  them by name, the first the one that holds it. -/
-  envFns : Std.HashMap String (List (List String)) := {}
-  /-- Calls that give a name where such a callable is wanted, and where. -/
-  envWraps : Std.HashMap Nat (List Nat) := {}
   /-- The fields read by name of what a named reference points to. -/
   derefReads : Std.HashSet Nat := {}
   /-- For each function that performs or handles an operation of an effect

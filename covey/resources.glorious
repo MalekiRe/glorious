@@ -64,7 +64,7 @@ fn unseen() {
     let _ = world.insert_resource(Score(1));
     let entity = world.spawn_bundle((Score(2),));
     let mut rows = world.query<(Entity, &Score)>();
-    rows.for_each(fn(got: (Entity, &Score)) { let (e, s) = got; say(e.index); say(s.0) });
+    rows.for_each() { e, s => say(e.index); say(s.0) };
     discard(rows);
     say(world.query<Entity>().count());
     say(shown(world.resource<Score>()))
