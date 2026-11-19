@@ -804,25 +804,28 @@ def compileSourceAt (src : String) (check : Bool := true)
   let roots := "main" :: ((blocks.map (·.coercions.toList)).getD []).map (·.2)
   let unreached := all
   let all := Trace.timed "what main reaches" fun _ => Elab.reachable roots all
-  if check then
-    let named := fun (items : List Syntax.Item) => items.filterMap fun
-      | Syntax.Item.fn name _ _ _ _ => some name
-      | _ => none
-    let own := match first with
-      | .ok (count, _) => named (written.drop count)
-      | .error _ => []
-    let reached := named all
-    -- (Those still there once traits are lowered: one made into copies is
-    -- elaborated as each copy is.)
-    let lowered := named unreached
-    let missing := own.filter fun f => !reached.contains f && lowered.contains f
-    unless missing.isEmpty do
-      -- (Only they and what they reach: what `main` reaches is elaborated
-      -- below. Taken from the first of them, as a program is from `main`.)
-      match Trace.timed "elaborate what main does not reach" fun _ =>
-          elaborate (Elab.reachable (roots.drop 1 ++ missing) unreached) blocks (root := missing.headD "main") with
-      | .error e => throw e
-      | .ok _ => pure ()
+  -- (Only they and what they reach: what `main` reaches is elaborated below.
+  -- Taken from the first of them, as a program is from `main`; beside what
+  -- follows, on a thread of its own, and what it refuses said first.)
+  let missing := if check then
+      let named := fun (items : List Syntax.Item) => items.filterMap fun
+        | Syntax.Item.fn name _ _ _ _ => some name
+        | _ => none
+      let own := match first with
+        | .ok (count, _) => named (written.drop count)
+        | .error _ => []
+      let reached := named all
+      -- (Those still there once traits are lowered: one made into copies is
+      -- elaborated as each copy is.)
+      let lowered := named unreached
+      own.filter fun f => !reached.contains f && lowered.contains f
+    else []
+  let aside : Task (Except String Unit) := Task.spawn fun _ =>
+    if missing.isEmpty then .ok () else
+    match Trace.timed "elaborate what main does not reach" fun _ =>
+        elaborate (Elab.reachable (roots.drop 1 ++ missing) unreached) blocks (root := missing.headD "main") with
+    | .error e => .error e
+    | .ok _ => .ok ()
   let declared := Trace.timed "what is declared" fun _ => Elab.withDeclared written all
   -- (What a compile gives, from what was elaborated and certified.)
   let compiled := fun (out : Elab.Output) (cert : Option Typing.Cert) (lent : Nat)
@@ -831,7 +834,9 @@ def compileSourceAt (src : String) (check : Bool := true)
        opNames := out.opNames, cert, lent, plain := out.plain, places, checkKept := checkMade
        inferMade := made, firstMade, libraryKept := libraryMade, parsedMade, textsMade } : Compiled)
   let plain := fun (blocks : Option Elab.Blocks) (failed : List (Bool × Bool)) => do
-    let out ← Trace.timed "elaborate" fun _ => elaborate all blocks
+    let out ← match Trace.timed "elaborate" fun _ => elaborate all blocks with
+      | .ok out => do aside.get; pure out
+      | .error e => do aside.get; throw e
     -- What is unsafe is outside what Core's rules are about: a program that
     -- calls a foreign function or reads memory at an address has no
     -- certificate.
