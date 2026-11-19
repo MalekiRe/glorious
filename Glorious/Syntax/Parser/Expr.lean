@@ -46,6 +46,10 @@ partial def parsePatternRest : P Pattern := do
     -- `let name`: a new name, whatever constant or constructor has it.
     advance
     pure (.ctor letMark none [.var (← expectIdent)])
+  | .ident "mut" =>
+    -- `mut name`: what it binds is a variable (`unmutItems`).
+    advance
+    pure (.ctor mutPatMark none [.var (← expectIdent)])
   | .ident x =>
     advance
     let (qual, name) := splitPath (← parsePathRest x)

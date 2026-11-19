@@ -506,6 +506,10 @@ def defaultKey (global : String) (i : Nat) : String :=
 constructor of that name. -/
 def letMark : String := "%let"
 
+/-- `mut name` in a pattern: what it binds is a variable, as `let mut` makes
+one (`unmutItems`). -/
+def mutPatMark : String := "%mut"
+
 /-- Said of a block, as `spreadMark` is: it is written where a value that is
 no callable is wanted, so it is run there and is its value. -/
 def nowMark : String := "%now"
@@ -1426,6 +1430,42 @@ def promoteRewrite : Rewrite where
 whose written types are not references'. -/
 def promoteClause (values : List String) : Clause → Clause
   | .mk pats body => promoteHeld values (.mk pats (promoteRewrite.stmts body))
+
+/-- The names `mut name` binds in a pattern, and the pattern with each a
+plain name. -/
+partial def unmutPat : Pattern → Pattern × List String
+  | .ctor m none [.var x] => if m == mutPatMark then (.var x, [x]) else (.ctor m none [.var x], [])
+  | .ctor c q args =>
+    let parts := args.map unmutPat
+    (.ctor c q (parts.map (·.1)), parts.flatMap (·.2))
+  | .tuple args =>
+    let parts := args.map unmutPat
+    (.tuple (parts.map (·.1)), parts.flatMap (·.2))
+  | p => (p, [])
+
+/-- Each name a pattern binds with `mut` a variable of the same name where
+what the pattern is of starts: `Some(mut n) => n = n + 1` as `Some(n) => let
+mut n = n; n = n + 1`; in a `let`, after it. -/
+def unmutRewrite : Rewrite where
+  onClause go
+    | .mk pats body =>
+      let parts := pats.map unmutPat
+      let names := parts.flatMap (·.2)
+      if names.isEmpty then none
+      else some (.mk (parts.map (·.1)) (names.map (fun x => Stmt.letMut x (.name none x)) ++ go.stmts body))
+  onStmts go
+    | s :: rest =>
+      let rec here : Stmt → Option (List Stmt)
+        | .located l c s => (here s).map (·.map (.located l c))
+        | .let_ pat value =>
+          let (pat, names) := unmutPat pat
+          if names.isEmpty then none
+          else some (.let_ pat (go.ex value) :: names.map fun x => Stmt.letMut x (.name none x))
+        | _ => none
+      (here s).map (· ++ go.stmts rest)
+    | [] => none
+
+def unmutItems (items : List Item) : List Item := unmutRewrite.items items
 
 /-- A clause of a function whose parameters are written with `annots`, made
 so (`promoteClause`). -/

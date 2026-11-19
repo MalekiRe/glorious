@@ -1442,6 +1442,6 @@ def parse (fix : Fixities) (src : String) (base : Nat := 0) (records : List Stri
   let fix ← if tables.isEmpty then collectFixities toks fix else pure ((tables.lookup path).getD fix)
   let (items, _, local_) ← parseItems
     { toks, fix, records := collectRecords toks ++ records, base, tables, path, fixed } 0 #[]
-  pure (promoteItems (items ++ local_.toList), fix)
+  pure (promoteItems (unmutItems (items ++ local_.toList)), fix)
 
 end Glorious.Syntax

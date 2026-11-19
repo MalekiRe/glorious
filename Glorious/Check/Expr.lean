@@ -698,7 +698,7 @@ partial def checkArgsIn (scope : Scope) (amb : Row) (what : String) (params : Li
         -- first where it can be: what the clauses are given is then of a
         -- type that is known, and a field read through a reference in them
         -- is seen as one.)
-        unless (← get).assocUses.isEmpty do settleAssocs
+        unless (← get).assocUses.isEmpty do settleAssocsAll
         -- (Which clauses' first patterns are of a value: a constructor, a
         -- tuple, a constructor without fields written as a name.)
         let mut valuePats : List Nat := []

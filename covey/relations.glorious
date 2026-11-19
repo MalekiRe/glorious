@@ -32,6 +32,7 @@
 mod ecs;
 
 use ecs::{App, Entity, Mut, Query, To, From, Relates, ChildOf, Relation, OneToMany, OneToOne, ManyToMany};
+use std::cmp::min;
 
 struct DockedAt { berth: Int }
 impl Relation for DockedAt { type Kind = OneToMany; }
@@ -47,13 +48,9 @@ struct Update
 
 // Each pilot patches the ship it pilots, up to 100.
 fn repair(pilots: &mut Query<(&Skill, To<Piloting, &mut Hull>)>) {
-    pilots.for_each(fn(got: (&Skill, Option<Mut<Hull>>)) {
-        let (skill, ship) = got;
+    pilots.for_each(fn((skill, ship)) {
         match(ship) {
-            Some(hull) =>
-                let mut hull = hull;
-                let patched = hull.get().0 + skill.0;
-                hull.get_mut().0 = if(patched > 100) { 100 } else { patched },
+            Some(mut hull) => hull.get_mut().0 = (hull.get().0 + skill.0).min(100),
             None => ()
         }
     })
