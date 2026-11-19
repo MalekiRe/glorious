@@ -207,34 +207,38 @@ def checkItems (items : List Item) (seed : UInt64 := 0) (kept : Kept := []) : M 
   let names := decls.map (·.name)
   -- (A name that stands for an expression, a constant's, mentions what that
   -- does: the function that works the constant out.)
-  let aliasOf := items.filterMap fun
+  let aliasOf : Std.HashMap String (List String) := Elab.firstOf (items.filterMap fun
     | .alias name value => some (name, Elab.fvExpr [] value)
     | .pub _ (.alias name value) => some (name, Elab.fvExpr [] value)
-    | _ => none
+    | _ => none)
+  let nameSet : Std.HashSet String := names.foldl (·.insert ·) {}
   -- (And the functions a dot call in it may turn out to be of, the types'
   -- own of the name: one is checked before what may call it.)
   let modules := (← get).modules
-  let mentions := fun (name : String) =>
-    match decls.find? (·.name == name) with
-    | some d =>
-      let fvs := d.clauses.flatMap (Elab.fvClause [])
-      let alts := if modules.dotAlts.isEmpty then [] else
-        ((d.clauses.flatMap fun | .mk _ body => body.flatMap Stmt.exprs).foldl Syntax.callIdsExpr []).flatMap
-          fun id => (dotAltsOf modules id).getD []
-      ((fvs ++ alts ++ fvs.flatMap fun x => (aliasOf.lookup x).getD []).filter names.contains).eraseDups
-    | none => []
+  -- (What each function mentions, found once for each.)
+  let mentioned : Std.HashMap String (List String) := decls.foldl (fun m d =>
+    let fvs := d.clauses.flatMap (Elab.fvClause [])
+    let alts := if modules.dotAlts.isEmpty then [] else
+      ((d.clauses.flatMap fun | .mk _ body => body.flatMap Stmt.exprs).foldl Syntax.callIdsExpr []).flatMap
+        fun id => (dotAltsOf modules id).getD []
+    if m.contains d.name then m
+    else m.insert d.name ((fvs ++ alts ++ fvs.flatMap fun x => aliasOf.getD x []).filter nameSet.contains).eraseDups) {}
+  let mentions := fun (name : String) => mentioned.getD name []
   let coercing := items.filterMap fun
     | .coerce name => some name
     | _ => none
   for c in coercing do
-    unless names.contains c do throw s!"`coerce {c}`: there is no function `{c}`"
+    unless nameSet.contains c do throw s!"`coerce {c}`: there is no function `{c}`"
   -- A coercion can be applied in any function, so the coercions are checked
   -- before all the others: all, that is, but the functions the coercions are
   -- themselves built from, in which none is applied.
   let builtFrom := Id.run do
     let mut seen := coercing
-    for _ in [0:names.length] do
-      seen := (seen ++ seen.flatMap mentions).eraseDups
+    if !coercing.isEmpty then
+      for _ in [0:names.length] do
+        let more := (seen ++ seen.flatMap mentions).eraseDups
+        if more.length == seen.length then break
+        seen := more
     pure seen
   let deps := fun (name : String) =>
     if builtFrom.contains name then mentions name else (mentions name ++ coercing).eraseDups
@@ -274,7 +278,8 @@ def checkItems (items : List Item) (seed : UInt64 := 0) (kept : Kept := []) : M 
       adopt st
       modify fun s =>
         { s with runFns := later.foldl (fun m d => m.insert d.name d.clauses) s.runFns } : M Unit)
-    let groups := (components names deps).map fun comp => comp.filterMap fun n => decls.find? (·.name == n)
+    let declBy : Std.HashMap String FnDecl := decls.foldl (fun m d => if m.contains d.name then m else m.insert d.name d) {}
+    let groups := (components names deps).map fun comp => comp.filterMap fun n => declBy[n]?
     -- Each group's level: one more than the highest of the groups it calls
     -- into. Groups of one level use none of each other, so they are checked
     -- side by side (`checkSideBySide`), each level after those before it.
@@ -299,7 +304,7 @@ def checkItems (items : List Item) (seed : UInt64 := 0) (kept : Kept := []) : M 
       | _ => false
     let implDecls ← ((← get).impls.toList.drop before).filter blanket |>.flatMapM implFnDecls
     let namesAny := fun (d : FnDecl) =>
-      ((d.clauses.flatMap (Elab.fvClause [])).flatMap fun x => x :: (aliasOf.lookup x).getD []).any names.contains
+      ((d.clauses.flatMap (Elab.fvClause [])).flatMap fun x => x :: aliasOf.getD x []).any nameSet.contains
     let early := if coercing.isEmpty then implDecls.filter (!namesAny ·) else []
     -- (Of those kept, one after another, only the last is taken, and made
     -- this program's: the key has its implementations as written, so they

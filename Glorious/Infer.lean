@@ -36,33 +36,62 @@ partial def tmRefs : Core.Tm → List Nat
   | .mem _ _ body => tmRefs body
   | .host _ _ body => tmRefs body
 
-/-- For each function, the least function it is mutually recursive with. -/
+/-- For each function, the least function it is mutually recursive with:
+the strongly connected parts of what each refers to (Tarjan's way, with a
+stack of its own in place of recursion). -/
 def sccs (fns : Array Core.Fn) : Array Nat := Id.run do
   let n := fns.size
-  let refs := fns.map fun F => F.clauses.flatMap fun c => tmRefs c.body
-  -- reach[i][j]: function i refers, directly or not, to function j.
-  let mut reach : Array (Array Bool) := #[]
-  for i in [0:n] do
-    let mut seen := Array.replicate n false
-    let mut stack := refs[i]?.getD []
-    let mut fuel := n * n + refs.foldl (fun acc r => acc + r.length) 0 + 1
-    while fuel > 0 && !stack.isEmpty do
-      fuel := fuel - 1
-      match stack with
-      | [] => pure ()
-      | j :: rest =>
-        stack := rest
-        if j < n && !(seen[j]?.getD true) then
-          seen := seen.set! j true
-          stack := (refs[j]?.getD []) ++ stack
-    reach := reach.push seen
-  let mut out : Array Nat := #[]
-  for i in [0:n] do
-    let mut least := i
-    for j in [0:i] do
-      if least == i && (reach[i]?.bind (·[j]?)).getD false && (reach[j]?.bind (·[i]?)).getD false then
-        least := j
-    out := out.push least
+  let refs : Array (Array Nat) := fns.map fun F =>
+    ((F.clauses.flatMap fun c => tmRefs c.body).filter (· < n)).toArray
+  let unseen := n + 1
+  let mut index : Array Nat := Array.replicate n unseen
+  let mut low : Array Nat := Array.replicate n 0
+  let mut onStack : Array Bool := Array.replicate n false
+  let mut stack : Array Nat := #[]
+  let mut out : Array Nat := Array.replicate n 0
+  let mut counter := 0
+  for root in [0:n] do
+    if index[root]! != unseen then continue
+    -- (Each frame: a function and how many of its references are done.)
+    let mut frames : Array (Nat × Nat) := #[(root, 0)]
+    index := index.set! root counter
+    low := low.set! root counter
+    counter := counter + 1
+    stack := stack.push root
+    onStack := onStack.set! root true
+    while !frames.isEmpty do
+      let (v, k) := frames.back!
+      let rs := refs[v]!
+      if k < rs.size then
+        frames := frames.set! (frames.size - 1) (v, k + 1)
+        let w := rs[k]!
+        if index[w]! == unseen then
+          index := index.set! w counter
+          low := low.set! w counter
+          counter := counter + 1
+          stack := stack.push w
+          onStack := onStack.set! w true
+          frames := frames.push (w, 0)
+        else if onStack[w]! then
+          low := low.set! v (min low[v]! index[w]!)
+      else
+        frames := frames.pop
+        if let some (u, _) := frames.back? then
+          low := low.set! u (min low[u]! low[v]!)
+        if low[v]! == index[v]! then
+          -- (The part `v` roots: each its least member.)
+          let mut members : Array Nat := #[]
+          let mut going := true
+          while going do
+            match stack.back? with
+            | some w =>
+              stack := stack.pop
+              onStack := onStack.set! w false
+              members := members.push w
+              if w == v then going := false
+            | .none => going := false
+          let least := members.foldl min v
+          for w in members do out := out.set! w least
   pure out
 
 /-- Say which uses of declared types are duplicable: all of them, except those
