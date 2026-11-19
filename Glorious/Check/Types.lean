@@ -441,6 +441,9 @@ structure GroupUse where
   pos : String
 
 structure St where
+  /-- Reading a program for what can be found of it (`glorious signatures`):
+  a group that is refused is let be, and the rest are checked. -/
+  lenient : Bool := false
   tys : Store (Option Ty) := {}
   rows : Store (Option Row) := {}
   /-- Variables standing for the inferred types of declarations: never generalised. -/

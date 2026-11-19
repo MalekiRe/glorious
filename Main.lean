@@ -951,6 +951,27 @@ where
       IO.println s!"{installed} installed, {started} started, {held} left in resumptions never taken"
       pure 0
     | none => IO.println "does not compile, or does not finish"; pure 1
+  -- (The signature of each function the program writes, as the checker
+  -- found it: name, type parameters, parameters, result, effects, asks.)
+  | ["signatures", path] =>
+    match compileSource (← IO.FS.readFile path) true (← moduleFiles path) (search := false) (lenient := true) with
+    | .ok c =>
+      let st := c.checkKept.foldl (fun (best : Option Check.St) (_, s) =>
+        match best with
+        | some b => if s.fns.size > b.fns.size then some s else some b
+        | none => some s) none
+      match st with
+      | some st =>
+        for (name, w) in Check.writtenSignatures st do
+          match w with
+          | .ok w =>
+            IO.println s!"{name} ¦ {", ".intercalate w.generics} ¦ {" ;; ".intercalate w.params} ¦ {w.ret} ¦ {w.effects} ¦ {" ;; ".intercalate w.asks}"
+          | .error e => IO.println s!"{name} ¦ ERROR ¦ {e}"
+        pure 0
+      | none => IO.eprintln "nothing was checked"; pure 1
+    | .error e =>
+      IO.eprintln s!"{path}: {e}"
+      pure 1
   | ["sigs", path] =>
     match ← compileFile path with
     | .ok c =>

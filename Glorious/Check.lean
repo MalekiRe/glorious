@@ -1,6 +1,7 @@
 module
 
 public import Glorious.Check.Program
+public import Glorious.Check.Written
 
 /-!
 # Type and effect inference

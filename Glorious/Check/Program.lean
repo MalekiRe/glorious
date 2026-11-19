@@ -112,6 +112,12 @@ partial def checkDeciding (decls : List FnDecl) (fuel : Nat := 64) (first : Opti
       checkDeciding decls' fuel first
     | _, _ => throwThe Elab.Said said
 
+/-- A group checked; where only what can be found of a program is asked
+(`St.lenient`), one that is refused is let be. -/
+def checkMaybe (decls : List FnDecl) : M Unit := do
+  if (← get).lenient then tryCatchThe Elab.Said (checkDeciding decls) fun _ => pure ()
+  else checkDeciding decls
+
 /-- Check items. With `kept` from an earlier check of a program that began
 alike (`seed`: what was checked before them), the state after each step whose
 key is among them is taken from there instead of checked again: the
@@ -263,7 +269,7 @@ def checkItems (items : List Item) (seed : UInt64 := 0) (kept : Kept := []) : M 
       | none =>
         if let some st := taken then restore ((ours st).getD st) allDecls
         taken := none
-        checkDeciding [d]
+        checkMaybe [d]
         made := (key, ← get) :: made
     if let some st := taken then restore ((ours st).getD st) allDecls
     -- The state after the last group whose key, and so every key before
@@ -283,7 +289,7 @@ def checkItems (items : List Item) (seed : UInt64 := 0) (kept : Kept := []) : M 
           restore st ((groups.drop start).flatten)
           made := (k, st) :: made
     for (group, k) in (groups.zipIdx.drop start) do
-      checkDeciding group
+      checkMaybe group
       if (k + 1) % every == 0 || k + 1 == groups.length then
         made := (keys[k]!, ← get) :: made
     if let some k := keys.getLast? then key := k
@@ -309,7 +315,7 @@ def checkItems (items : List Item) (seed : UInt64 := 0) (kept : Kept := []) : M 
           restore st []
           made := (k, st) :: made
     for (group, k) in (implGroups.toList.zipIdx.drop implStart) do
-      checkDeciding group
+      checkMaybe group
       if (k + 1) % implEvery == 0 || k + 1 == implGroups.size then
         made := (implKeys[k]!, ← get) :: made
     if let some k := implKeys.getLast? then key := k

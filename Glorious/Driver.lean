@@ -675,7 +675,8 @@ def compileSourceAt (src : String) (check : Bool := true)
     (checkKept : Check.Kept := []) (search : Bool := true) (memo : Infer.Memo := {})
     (firsts : List ((Bool × Bool) × (Nat × Check.St)) := [])
     (lexed : List (List String × Array Syntax.Token) := []) (parsedKept : Parsed := {})
-    (preludeKept : Option (List Syntax.Item × Syntax.Fixities) := none) (texts : Texts := {}) :
+    (preludeKept : Option (List Syntax.Item × Syntax.Fixities) := none) (texts : Texts := {})
+    (lenient : Bool := false) :
     Except String Compiled := do
   let (prelude, items, parsedMade, textsMade) ← Trace.timed "parse" fun _ =>
     parseProgram src files check few packs lexed parsedKept preludeKept texts
@@ -759,7 +760,7 @@ def compileSourceAt (src : String) (check : Bool := true)
   let checkOnce := fun (all : List Syntax.Item) =>
     match check, resolved.info.shadowed, first with
     | true, false, .ok (count, first) =>
-      Check.checkUnitsKept first (cut (all.drop count)) resolved.info (mixHash seed (hash count)) checkKept
+      Check.checkUnitsKept { first with lenient } (cut (all.drop count)) resolved.info (mixHash seed (hash count)) checkKept
         (library := if (units.map List.length).sum == (all.drop count).length then library else 0)
         (deps := if (units.map List.length).sum == (all.drop count).length then unitDeps else [])
     -- (A program that declares a name the prelude has: the prelude checked
@@ -782,6 +783,9 @@ def compileSourceAt (src : String) (check : Bool := true)
   let (blocks, checkMade, libraryMade) ← match checked with
     | .ok (blocks, made, shared) => pure (some blocks, made, shared)
     | .error e => if check then throw e.msg else pure (none, [], [])
+  -- (Where only what the checker found is asked, that is all.)
+  if lenient then
+    return { core := ⟨[], .ret (.int 0), []⟩, ctorNames := #[], fnNames := #[], opNames := #[], checkKept := checkMade }
   -- Lifetimes were the checker's to read; and, of what is declared, the
   -- certificate's.
   let written := all
@@ -1108,7 +1112,8 @@ def compileSource (src : String) (check : Bool := true)
     (known : List ((String × Nat) × Nat) := []) (kept : List Typing.Cert := [])
     (checkKept : Check.Kept := []) (search : Bool := true) (memo : Infer.Memo := {})
     (firsts : List ((Bool × Bool) × (Nat × Check.St)) := []) (parsedKept : Parsed := {})
-    (preludeKept : Option (List Syntax.Item × Syntax.Fixities) := none) (texts : Texts := {}) :
+    (preludeKept : Option (List Syntax.Item × Syntax.Fixities) := none) (texts : Texts := {})
+    (lenient : Bool := false) :
     Except String Compiled := do
   -- (What the default prelude has from the library, where the text uses it;
   -- and each text lexed, once: each that an earlier compile read as it is,
@@ -1130,7 +1135,8 @@ def compileSource (src : String) (check : Bool := true)
   let lists := lists != 0
   let rec go (fuel packs : Nat) : Except String Compiled :=
     match compileSourceAt src check files few known packs kept checkKept (search := search) (memo := memo)
-        (firsts := firsts) (lexed := lexed) (parsedKept := parsedKept) (preludeKept := preludeKept) (texts := texts) with
+        (firsts := firsts) (lexed := lexed) (parsedKept := parsedKept) (preludeKept := preludeKept) (texts := texts)
+        (lenient := lenient) with
     | .error e =>
       let wanted := longestUnimplemented e
       match fuel with
