@@ -51,13 +51,6 @@ def adopt (st : St) : M Unit := do
   let now ← get
   set { st with modules := now.modules, ownItems := now.ownItems }
 
-/-- Does an implementation leave a type to be found from its functions,
-`type Out = _;`? (What it says is then a variable of none of its own.) -/
-def implHoled (im : ImplDecl) : Bool :=
-  im.assocs.any fun (_, t) => match t with
-    | .var id => !im.pvars.any (·.2 == id)
-    | _ => false
-
 /-- The functions an implementation gives, as functions to check. -/
 def implFnDecls (im : ImplDecl) : M (List FnDecl) := do
   let mut out : List FnDecl := []
@@ -281,32 +274,7 @@ def checkItems (items : List Item) (seed : UInt64 := 0) (kept : Kept := []) : M 
       adopt st
       modify fun s =>
         { s with runFns := later.foldl (fun m d => m.insert d.name d.clauses) s.runFns } : M Unit)
-    -- The functions of implementations that leave a type to be found from
-    -- them (`type Out = _;`): checked before every function that may use
-    -- what they find, but those they are themselves made from.
-    let holedImpls ← ((← get).impls.toList.drop before).filter implHoled |>.mapM implFnDecls
-    let holed := holedImpls.flatten
-    let holeNames := holed.map (·.name)
-    -- (Each of one implementation's functions after the one written before
-    -- it: what it leaves to be found may be found by any of them.)
-    let afterIn : Std.HashMap String String := holedImpls.foldl (fun m fs =>
-      (fs.zip (fs.drop 1)).foldl (fun m (a, b) => m.insert b.name a.name) m) {}
-    let allDecls := decls ++ holed
-    let allNames := names ++ holeNames
-    let mentionsAll := fun (name : String) =>
-      match allDecls.find? (·.name == name) with
-      | some d => ((d.clauses.flatMap (Elab.fvClause [])).filter allNames.contains).eraseDups
-      | none => []
-    let madeFrom := Id.run do
-      let mut seen := holeNames
-      for _ in [0:allNames.length] do
-        seen := (seen ++ seen.flatMap mentionsAll).eraseDups
-      pure seen
-    let deps := fun (name : String) =>
-      if holeNames.contains name then (mentionsAll name ++ (afterIn[name]?).toList).eraseDups
-      else if madeFrom.contains name then deps name
-      else (deps name ++ holeNames).eraseDups
-    let groups := (components allNames deps).map fun comp => comp.filterMap fun n => allDecls.find? (·.name == n)
+    let groups := (components names deps).map fun comp => comp.filterMap fun n => decls.find? (·.name == n)
     -- Each group's level: one more than the highest of the groups it calls
     -- into. Groups of one level use none of each other, so they are checked
     -- side by side (`checkSideBySide`), each level after those before it.
@@ -329,9 +297,9 @@ def checkItems (items : List Item) (seed : UInt64 := 0) (kept : Kept := []) : M 
     let blanket := fun (im : ImplDecl) => im.methods.any fun
       | .typeAlias n _ _ => (Syntax.blanketParam n).isSome
       | _ => false
-    let implDecls ← ((← get).impls.toList.drop before).filter (fun im => !implHoled im && blanket im) |>.flatMapM implFnDecls
+    let implDecls ← ((← get).impls.toList.drop before).filter blanket |>.flatMapM implFnDecls
     let namesAny := fun (d : FnDecl) =>
-      ((d.clauses.flatMap (Elab.fvClause [])).flatMap fun x => x :: (aliasOf.lookup x).getD []).any allNames.contains
+      ((d.clauses.flatMap (Elab.fvClause [])).flatMap fun x => x :: (aliasOf.lookup x).getD []).any names.contains
     let early := if coercing.isEmpty then implDecls.filter (!namesAny ·) else []
     -- (Of those kept, one after another, only the last is taken, and made
     -- this program's: the key has its implementations as written, so they
@@ -344,11 +312,11 @@ def checkItems (items : List Item) (seed : UInt64 := 0) (kept : Kept := []) : M 
         taken := some st
         made := (key, st) :: made
       | none =>
-        if let some st := taken then restore ((ours st).getD st) allDecls
+        if let some st := taken then restore ((ours st).getD st) decls
         taken := none
         checkMaybe [d]
         made := (key, ← get) :: made
-    if let some st := taken then restore ((ours st).getD st) allDecls
+    if let some st := taken then restore ((ours st).getD st) decls
     -- The state after the last group whose key, and so every key before
     -- it, is kept is taken; the groups after it are checked. A state is
     -- kept after a group only now and then, in a unit of many (`keptEvery`):
@@ -385,9 +353,8 @@ def checkItems (items : List Item) (seed : UInt64 := 0) (kept : Kept := []) : M 
     let earlyNames := early.map (·.name)
     let mut implGroups : Array (List FnDecl) := #[]
     for im in (← get).impls.toList.drop before do
-      unless implHoled im do
-        for d in ← implFnDecls im do
-          unless earlyNames.contains d.name do implGroups := implGroups.push [d]
+      for d in ← implFnDecls im do
+        unless earlyNames.contains d.name do implGroups := implGroups.push [d]
     -- (Taken, checked and kept as the groups are.)
     let implKeys := (implGroups.toList.foldl (fun (acc : List UInt64 × UInt64) g =>
       let k := groupKey acc.2 g

@@ -621,6 +621,10 @@ def declareTraits (items : List Item) : M Unit := do
             | .typeAlias n takes body => if n == a then some (takes, body) else none
             | _ => none with
         | some (takes, body) =>
+          -- What an implementation gives is said, as Rust has it: every type
+          -- it gives is known before any function's body is checked.
+          if let .hole := body then
+            throw s!"{what}: `type {a} = _;`: an implementation says what each type it gives is: write it, `type {a} = ..;`"
           -- (`type Of<T> = [T];`: what it takes, a variable each.)
           let mut own : List (String × Ty) := []
           let mut ids : List (Bool × Nat) := []

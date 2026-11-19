@@ -3679,11 +3679,9 @@ fn main() -> Int { walk(3) }",
   -- made what is asked, so what the function is given keeps its number.)
   ⟨"trait Col { fn n() -> Int }\ntrait Get<T> { fn g() -> Int }\nimpl Get<Int> for Int { fn g() -> Int { 4 } }\nimpl Col for Int { fn n() -> Int { 3 } }\nstruct Cmd<S> { s: [S] }\nfn end<S>(c: &mut Cmd<S>) -> Int where S: Col { <S as Col>::n() }\nfn reap<S>(c: &mut Cmd<S>) -> Int where S: Col { end(c) }\nstruct W<F> { f: F }\ntrait Into2<S> { type Out; fn into2(Self) -> Self::Out; }\nimpl<S, F> Into2<S> for F where F: Fn<(&mut Cmd<S>,), Output = Int>, S: Get<Int> { type Out = W<F>; fn into2(f: F) -> W<F> { W { f: f } } }\nstruct App<S, L> { s: S, l: L }\nimpl<S, L> App<S, L> {\n    pub fn on<P, Q>(app: Self, p: P) -> App<S, (Q, L)> where P: Into2<S, Out = Q> {\n        let App { s, l } = app;\n        App { s: s, l: (<P as Into2<S>>::into2(p), l) }\n    }\n}\nfn plugin<T, U>(app: App<T, U>) -> App<T, (<fn(&mut Cmd<T>) -> Int as Into2<T>>::Out, U)> where T: Get<Int>, T: Col { app.on(reap) }\nfn main() -> Int {\n    let mut c = Cmd { s: [] };\n    let a = plugin(App { s: 1, l: () });\n    (a.l.0.f)(&mut c)\n}",
     [], "3"⟩,
-  -- (A type an implementation leaves to be found from its functions, `type
-  -- Out = _;`, of one generic or not; what its functions need of its type
-  -- parameters it assumes, and whoever uses it meets.)
+  -- (An implementation says every type it gives: `type Out = _;` is refused.)
   ⟨"trait Make { type Out; fn make(Self) -> Self::Out; }\nstruct A\nimpl Make for A { type Out = _; fn make(a: A) -> (Int, Str) { (1, \"x\") } }\ntrait Wrap<S> { type Out; fn wrap(Self, S) -> Self::Out; }\nstruct B\nfn helper<T>(t: T) -> [T] { [t] }\nimpl<S> Wrap<S> for B { type Out = _; fn wrap(b: B, s: S) -> _ { helper(s) } }\ntrait Shout<S> { type Out; fn shout(Self, S) -> Self::Out; }\nstruct C\nimpl<S> Shout<S> for C { type Out = _; fn shout(c: C, s: S) -> _ { show(s) ++ \"!\" } }\nfn main() -> Int { let (n, s) = A.make(); say(s); say(C.shout(7)); let xs = B.wrap(5); let ys = B.wrap(\"a\"); n + len_at(&xs) + len_at(&ys) }",
-    [], "x\n7!\n3"⟩,
+    [], "error: `impl Make for A`: `type Out = _;`: an implementation says what each type it gives is: write it, `type Out = ..;`"⟩,
   -- (A condition of a type a trait leaves to implementations,
   -- `<H as Touches>::List: Concat<..>`, of what it is at each use; and an
   -- answer that asks another, `<Q as ItemTouches>::List`, answered too.)

@@ -5828,6 +5828,16 @@ where it copies them (`Use<[0, *]>`): found by giving every type parameter
 go, until nothing changed. `if`, `else`, `or`, `and` and `match` pass on what
 they are given.
 
+## Every trait, implementation and type they give known before any body
+
+An implementation says every type it gives: `type Out = _;`, a type found
+from its functions' bodies, is refused, as Rust refuses it. So every trait,
+every implementation and the index of them is resolved, with what each
+gives, before any function's body is checked; the checker's way of checking
+an implementation that left a type to be found before what may use it, and
+of passing on what its functions needed of its type parameters, is gone.
+covey's simulation writes what its plugin's app is in full.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by
