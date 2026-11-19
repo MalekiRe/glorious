@@ -121,6 +121,10 @@ partial def schemeOf (scc : Nat) : M Scheme := do
       let sch ← thaw fz
       modify fun s => { s with schemes := s.schemes.insert scc sch, frozenMade := s.frozenMade.push (key, fz) }
       return sch
+  -- The groups it refers to, first: each then has its scheme before this one
+  -- begins, and what this one makes is its own, not theirs inside it too.
+  for g in (← get).outside.getD scc [] do
+    discard (schemeOf g)
   -- (What is put back once the group is done is kept, and not the whole
   -- state: held, every array of it would be copied where the group first
   -- changes it, and again in each group inferred inside this one.)
@@ -142,7 +146,11 @@ partial def schemeOf (scc : Nat) : M Scheme := do
       some (s.tys.extract 0 s.globalTys, s.rows.extract 0 s.globalRows,
         s.clss.extract 0 s.globalClss, s.accs.extract 0 s.globalAccs, s.closureRanks)
     else none)
-  let fns := (List.range allFns.size).filter fun f => sccs[f]?.getD f == scc
+  -- (The group's functions, as certifyM found them once.)
+  let st0 ← get
+  let fns : List Nat := match Std.HashMap.get? st0.members scc with
+    | some ms => ms
+    | none => (List.range allFns.size).filter fun f => sccs[f]?.getD f == scc
   -- A signature for each function of the group, before any body is looked at.
   let mut cur : List (Nat × ISig) := []
   for f in fns do
