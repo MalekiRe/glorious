@@ -14,7 +14,7 @@ use ecs::{App, Entity, Column, Commands, end};
 
 // A handle to something outside, closed when it is destroyed.
 struct Handle(Int)
-impl Drop for Handle { fn drop(h) { say(h.0) } }
+impl Drop for Handle { fn drop(h: &mut Handle) { say(h.0) } }
 
 // How many ticks an entity has left.
 struct Life(Int)

@@ -79,7 +79,7 @@ struct Physics
 impl<S, L> Plugin<S, L> for Physics {
     type Components = (Position, Velocity);
     type Out = _;
-    fn build(physics, app) {
+    fn build(physics: Physics, app: ecs::App<<(Position, Velocity) as ecs::Registers<S>>::Out, L>) -> _ {
         app.add_systems(Update, (integrate, friction.run_if(moving), bound).chain())
     }
 }

@@ -21,7 +21,7 @@ struct Update
 struct Value(Int)
 struct Tag
 struct Log { added: [Int], changed: [Int] }
-impl Default for Log { fn default() { Log { added: [], changed: [] } } }
+impl Default for Log { fn default() -> Log { Log { added: [], changed: [] } } }
 
 fn added(query: &mut Query<(&Value,), (Added<Value>,)>, log: ResMut<Log>) {
     query.for_each() { (v,) => push_at(&mut log.added, v.0) };
@@ -74,7 +74,7 @@ fn semantics() {
 }
 
 struct Seen([Int])
-impl Default for Seen { fn default() { Seen([]) } }
+impl Default for Seen { fn default() -> Seen { Seen([]) } }
 fn watch(single: &mut Single<(&Value,), (Changed<Value>,)>, seen: ResMut<Seen>) {
     match(single.get_mut()) { Some(got) => let (v,) = got; push_at(&mut seen.0, v.0), None => () }
 }

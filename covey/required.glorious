@@ -18,11 +18,11 @@ use ecs::{App, Entity, Requires};
 use core::value::Default;
 
 struct Pos(Int)
-impl Default for Pos { fn default() { Pos(0) } }
+impl Default for Pos { fn default() -> Pos { Pos(0) } }
 struct Vel(Int)
-impl Default for Vel { fn default() { Vel(0) } }
+impl Default for Vel { fn default() -> Vel { Vel(0) } }
 struct Mass(Int)
-impl Default for Mass { fn default() { Mass(0) } }
+impl Default for Mass { fn default() -> Mass { Mass(0) } }
 struct Bird
 
 impl Requires for Bird { type Required = (Pos, Vel); }

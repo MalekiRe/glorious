@@ -26,7 +26,7 @@ struct Stunned
 struct Tag
 struct Seen { singles: Int, at: [Int] }
 
-impl Default for Seen { fn default() { Seen { singles: 0, at: [] } } }
+impl Default for Seen { fn default() -> Seen { Seen { singles: 0, at: [] } } }
 
 // Shields charge unless stunned; those without one still match.
 fn charge(query: &mut Query<(&Position, Option<&mut Shield>, Has<Stunned>)>) {

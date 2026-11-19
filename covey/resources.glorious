@@ -36,8 +36,8 @@ struct Score(Int)
 struct Speed(Int)
 struct Tally { ran: Int, saw: Int }
 
-impl Default for Score { fn default() { Score(0) } }
-impl Default for Tally { fn default() { Tally { ran: 0, saw: 0 } } }
+impl Default for Score { fn default() -> Score { Score(0) } }
+impl Default for Tally { fn default() -> Tally { Tally { ran: 0, saw: 0 } } }
 
 fn shown(score: Option<&Score>) -> Int { match(score) { Some(s) => s.0, None => -1 } }
 fn had(score: Option<Score>) -> Int { match(score) { Some(s) => s.0, None => -1 } }

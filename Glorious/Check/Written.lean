@@ -84,7 +84,7 @@ partial def writeTy (t : Ty) : StateT Names M String := do
         | _ => pure (subject, targs)
       let ta ← targs.mapM writeTy
       let ga ← gargs.mapM writeTy
-      let trait := Syntax.lastSegment tr
+      let trait := typeName tr
       let trait := if ta.isEmpty then trait else s!"{trait}<{", ".intercalate ta}>"
       let gat := if ga.isEmpty then "" else s!"<{", ".intercalate ga}>"
       pure s!"<{← writeTy self} as {trait}>::{name}{gat}"
@@ -170,8 +170,8 @@ def writeSignature (s : Scheme) (named : List (Nat × String) := []) : M (Except
     let asks ← s.bounds.mapM fun (tr, t) => do
       match ← (find t : M Ty) with
       | .tuple (self :: targs) =>
-        pure s!"{← writeTy self}: {Syntax.lastSegment tr}<{", ".intercalate (← targs.mapM writeTy)}>"
-      | _ => pure s!"{← writeTy t}: {Syntax.lastSegment tr}"
+        pure s!"{← writeTy self}: {typeName tr}<{", ".intercalate (← targs.mapM writeTy)}>"
+      | _ => pure s!"{← writeTy t}: {typeName tr}"
     pure (params, ret, effects, asks)
   -- (Each named variable by what it now stands for.)
   let named ← named.filterMapM fun (v, n) => do
