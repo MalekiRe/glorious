@@ -139,7 +139,7 @@ def mergeStates (p a b : St) : Option St := do
     traitShape := ← m3 (·.traitShape), assocUses := ← m3 (·.assocUses),
     writtenArgs := ← m3 (·.writtenArgs), supers := ← m3 (·.supers), ranked := ← m3 (·.ranked),
     packs := ← m3 (·.packs), envGroups := ← m3 (·.envGroups), envAfter := ← m3 (·.envAfter),
-    envLent := ← m3 (·.envLent), fnGroups := ← m3 (·.fnGroups), fnRunsIn := ← m3 (·.fnRunsIn),
+    envLent := ← m3 (·.envLent), fnGroups := ← m3 (·.fnGroups), fnRunsIn := ← m3 (·.fnRunsIn), bindLoans := ← m3 (·.bindLoans),
     envBlocks := ← m3 (·.envBlocks), inPlace := ← m3 (·.inPlace), envMust := ← m3 (·.envMust),
     envHeld := ← m3 (·.envHeld), derefReads := ← m3 (·.derefReads),
     rowChecks := ← m3 (·.rowChecks), typeBounds := ← m3 (·.typeBounds),

@@ -74,6 +74,23 @@ partial def writeTy (t : Ty) : StateT Names M String := do
       modify fun s => { s with unwritable := some n }
       pure "_"
     else pure (typeName n)
+  | .con n [subject, .con tr targs, .con name gargs] =>
+    if n == Syntax.projMark then
+      -- (Of a trait with arguments, the subject is the type with them after
+      -- it, as a tuple.)
+      let arity := ((← (get : M St)).traitShape.lookup tr).map (·.1) |>.getD 0
+      let (self, targs) ← match ← (find subject : M Ty) with
+        | .tuple (self :: rest) => pure (if arity > 0 && rest.length == arity then (self, rest) else (subject, targs))
+        | _ => pure (subject, targs)
+      let ta ← targs.mapM writeTy
+      let ga ← gargs.mapM writeTy
+      let trait := Syntax.lastSegment tr
+      let trait := if ta.isEmpty then trait else s!"{trait}<{", ".intercalate ta}>"
+      let gat := if ga.isEmpty then "" else s!"<{", ".intercalate ga}>"
+      pure s!"<{← writeTy self} as {trait}>::{name}{gat}"
+    else
+      let last := typeName n
+      pure s!"{last}<{", ".intercalate (← [subject, .con tr targs, .con name gargs].mapM writeTy)}>"
   | .con n args =>
     let last := typeName n
     match last, args with
@@ -167,6 +184,36 @@ def writeSignature (s : Scheme) (named : List (Nat × String) := []) : M (Except
   let own := names.tys.filter fun (v, _) => !named.any (·.1 == v)
   let generics := own.map (·.2) ++ names.rows.map fun (_, n) => s!"{n}: EffectRow"
   pure (.ok ⟨generics, params, ret, effects, asks⟩)
+
+/-- A trait's function as declared, for an implementation to restate: `Self`
+for the type it is for, `%P0`, `%P1`, .. for the trait's own parameters (the
+implementation's arguments go there), `Self::Name` for what the trait leaves
+to the implementation, and its own type parameters by name. -/
+def writeMethod (ms : MethodSig) : M (Except String Written) := do
+  let named : List (Nat × String) := [(ms.self, "Self")]
+    ++ ms.tparams.zipIdx.map (fun (v, i) => (v, s!"%P{i}"))
+    ++ ms.assocs.map (fun (n, v) => (v, s!"Self::{n}"))
+    ++ ms.mparams.map (fun (n, v) => (v, n))
+  let act : StateT Names M (List String × String × String) := do
+    let params ← ms.params.mapM writeTy
+    let ret ← writeTy ms.ret
+    let effects ← writeEffs ms.row.effs ms.row.tail
+    pure (params, ret, effects)
+  let ((params, ret, effects), names) ← act.run { tys := named }
+  if let some what := names.unwritable then
+    return .error s!"its type has `{what}` in it, which no program writes"
+  let own := names.tys.filter fun (v, _) => !named.any (·.1 == v)
+  -- (A type the trait leaves to implementations at types, `Got<'a>`, is
+  -- not written here.)
+  unless own.isEmpty do return .error "it has a type the trait leaves to implementations at types"
+  pure (.ok ⟨ms.mparams.map (·.1), params, ret, effects, []⟩)
+
+/-- Each trait's functions as declared (`writeMethod`), by `Trait::name`. -/
+def writtenMethods (st : St) : List (String × Except String Written) :=
+  st.methods.filterMap fun (name, ms) =>
+    match (writeMethod ms).run st with
+    | .ok (w, _) => some (s!"{ms.trait}::{name}", w)
+    | .error _ => none
 
 /-- The signature of each function a state has checked, by its name, that is
 not the library's or the prelude's: written, or why not. -/

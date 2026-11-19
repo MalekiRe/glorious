@@ -246,11 +246,25 @@ def tempHolds (loan : Nat) (u : Use) (t : Ty) (made : Nat) : M Bool := do
       if ← holdsLoan loan t then return true
   return false
 
-/-- What still holds a borrow where a use happens, if anything does. -/
-def holderOf (loan : Nat) (u : Use) : M (Option String) := do
+/-- What still holds a borrow where a use happens, if anything does. A value
+bound before the borrow was made does not hold it, as a value computed before
+does not (`tempHolds`), unless a variable that keeps what an earlier run of
+the same code borrowed does: its type may say it could (`m: &mut M<'a, T>`,
+whose lifetime a result written `-> &mut T` is), but its value was there
+first. -/
+def holderOf (loan : Nat) (u : Use) (byTime : Bool := false) : M (Option String) := do
+  let s ← get
   for name in u.later.eraseDups do
     if let some t := (u.scope.lookup name).bind Binding.held then
-      if ← holdsLoan loan t then
+      let before := byTime && match u.scope.lookup name with
+        | some (.val _ id) => (s.bindLoans[id]?).any (loan ≥ ·)
+        | _ => false
+      let kept ← if before then
+          u.scope.anyM fun (_, b) => match b with
+            | .cell t _ => holdsLoan loan t
+            | _ => pure false
+        else pure true
+      if kept && (← holdsLoan loan t) then
         if name == "%resumed" then return some "the computation this arm resumes"
         return some s!"`{name}`"
   for (t, made) in u.temps do
@@ -348,7 +362,7 @@ def checkLoans (loansAt cellsAt : Nat := 0) : M Unit := do
           -- A reference lent to the function it is a parameter of, from inside
           -- it, has become the same as what was lent from it: nothing to tell apart.
           if (l.uniq || write) && meet && (← findCap parent) == root && (← findCap own) != root then
-            if let some who ← holderOf l.id u then
+            if let some who ← holderOf l.id u (byTime := true) then
               fail u s!"{name} is used while {who}, which borrows from it, is still in use"
     | .call what tys =>
       -- The values of the call are the last of the values computed: the

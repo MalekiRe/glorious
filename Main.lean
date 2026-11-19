@@ -967,6 +967,11 @@ where
           | .ok w =>
             IO.println s!"{name} ¦ {", ".intercalate w.generics} ¦ {" ;; ".intercalate w.params} ¦ {w.ret} ¦ {w.effects} ¦ {" ;; ".intercalate w.asks}"
           | .error e => IO.println s!"{name} ¦ ERROR ¦ {e}"
+        for (name, w) in Check.writtenMethods st do
+          match w with
+          | .ok w =>
+            IO.println s!"TRAIT {name} ¦ {", ".intercalate w.generics} ¦ {" ;; ".intercalate w.params} ¦ {w.ret} ¦ {w.effects} ¦ "
+          | .error e => IO.println s!"TRAIT {name} ¦ ERROR ¦ {e}"
         pure 0
       | none => IO.eprintln "nothing was checked"; pure 1
     | .error e =>

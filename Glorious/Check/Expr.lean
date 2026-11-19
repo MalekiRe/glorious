@@ -1802,6 +1802,7 @@ partial def inferPat (p : Pattern) (t : Ty) : M Scope := do
       | some e => do inferPat (← exprToPat e) t
       | none => do
         let id ← freshBrand
+        modify fun s => { s with bindLoans := s.bindLoans.insert id s.loans.size }
         pure [(x, .val t id)]
   | .ctor x q ps => do
     if let some (scalar, _) := Syntax.scalarPattern (.ctor x q ps) then

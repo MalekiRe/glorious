@@ -444,6 +444,9 @@ structure St where
   /-- Reading a program for what can be found of it (`glorious signatures`):
   a group that is refused is let be, and the rest are checked. -/
   lenient : Bool := false
+  /-- For each value bound by a pattern, how many borrows had been made
+  when it was: one made later it does not hold (`holderOf`). -/
+  bindLoans : Std.HashMap Nat Nat := {}
   tys : Store (Option Ty) := {}
   rows : Store (Option Row) := {}
   /-- Variables standing for the inferred types of declarations: never generalised. -/
