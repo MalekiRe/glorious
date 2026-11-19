@@ -15,6 +15,7 @@ their place among the types alone, for a use that writes no lifetime. -/
 private def defaultAliases (name : String) (params : List String)
     (defaults : List (Nat × List String × TypeExpr)) : List Item :=
   defaults.flatMap fun (i, earlier, ty) =>
+    if earlier == [variadicMark] then [.typeAlias (variadicName name) [] (.name (toString i) [])] else
     let lives := ((params.take i).filter (·.startsWith "'")).length
     .typeAlias (defaultName name i) earlier ty
       :: (if lives == 0 then [] else [.typeAlias (defaultName name (i - lives) ++ "~") earlier ty])

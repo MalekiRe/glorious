@@ -754,6 +754,15 @@ partial def parseGenericsFull :
       bounds := bounds.push { subject := x, trait := knownTrait }
       if !(← acceptPunct ",") then break
       continue
+    -- `..T`, last: the rest of the arguments a use writes, as one tuple.
+    if (← peek) == .punct "." && (← peek 1) == .punct "." then
+      advance
+      advance
+      let x ← expectIdent
+      defaults := defaults.push ((genericParams out.toList).length, [variadicMark], .hole)
+      out := out.push x
+      unless ← isOp ">" do failAt "`..T` takes the rest of the arguments: it is the last parameter"
+      break
     let x ← expectIdent
     let before := out.toList
     out := out.push x
@@ -779,6 +788,8 @@ partial def parseGenericsFull :
 partial def parseGenericsWith : P (List String × List Bound) := do
   let (params, bounds, defaults) ← parseGenericsFull
   unless defaults.isEmpty do
+    if defaults.any (·.2.1 == [variadicMark]) then
+      failAt "`..T` is a declared type's: a function takes its arguments as it says"
     failAt "what a parameter is where it is not written, `T = Type`, is said of a declared type's"
   pure (params, bounds)
 

@@ -502,6 +502,18 @@ def defaultKey (global : String) (i : Nat) : String :=
   let segs := global.splitOn "::"
   "::".intercalate (segs.dropLast ++ [defaultName (segs.getLast!) i])
 
+/-- The name under which a declared type's last parameter, written `..T`,
+is kept as taking the rest of the arguments as one tuple: an alias beside
+the declaration whose body is the parameter's place. -/
+def variadicName (type : String) : String := s!"%variadic:{type}"
+
+def variadicKey (global : String) : String :=
+  let segs := global.splitOn "::"
+  "::".intercalate (segs.dropLast ++ [variadicName (segs.getLast!)])
+
+/-- What a parse of type parameters marks `..T` with, among the defaults. -/
+def variadicMark : String := "%variadic"
+
 /-- `let name` in a pattern: `name` is a new name there, not the constant or
 constructor of that name. -/
 def letMark : String := "%let"

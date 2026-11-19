@@ -4660,7 +4660,12 @@ fn main() -> Int { <(A,) as Go>::go() }",
     [], "21"⟩,
   -- `else`'s fallback runs in the place of the body `if` did not run, because both say they run in an environment: a value used once is in both.
   ⟨"struct File(Int)\nimpl Use<[1, 1]> for File {}\nfn close(File(fd)) { fd }\nfn main() -> Int {\n    let f = File(3);\n    if(2 < 1) { close(f) } else { close(f) + 1 }\n}",
-    [], "4"⟩
+    [], "4"⟩,
+  -- A declared type's last parameter `..T` takes the rest of what is written as one tuple, in a type and in an implementation's head.
+  ⟨"struct Pack<..T>(T);\nfn sum(p: Pack<Int, Int, Int>) -> Int { let Pack((a, b, c)) = p; a + b + c }\nfn one(p: &Pack<Int>) -> Int { (p.0).0 }\nfn main() -> Int { let q: Pack<Int> = Pack((5,)); sum(Pack((1, 2, 3))) * 10 + one(&q) }",
+    [], "65"⟩,
+  ⟨"struct Pack<..T>(T);\ntrait Count { fn count(&Self) -> Int }\nimpl<A, B> Count for Pack<A, B> { fn count(p) { 2 } }\nimpl<A> Count for Pack<A> { fn count(p) { 1 } }\nfn main() -> Int { let p: Pack<Int, Int> = Pack((1, 2)); let q: Pack<Int> = Pack((7,)); p.count() * 10 + q.count() }",
+    [], "21"⟩
 ]
 
 /-- Programs that call foreign functions and read and write memory at an

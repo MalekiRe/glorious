@@ -5621,6 +5621,22 @@ clause of one tuple already was. So a system is written
 `query.for_each() { position, velocity => .. }`, the block after the call
 being its last argument. A one-part tuple is still `{ (v,) => .. }`.
 
+## A declared type's last parameter may take the rest
+
+`struct Pack<..T>(T)`: the last parameter of a declared type, written
+`..T`, is what a use writes from there on, as one tuple. `Pack<Int, Int>` is
+`Pack<(Int, Int)>` and `Pack<Int>` is `Pack<(Int,)>`; so a tuple written
+there is one part (`Pack<(A, B)>` is `Pack<((A, B),)>`). It is kept as an
+alias beside the declaration (`variadicName`), as a parameter's default
+is, and written out where aliases are (`expandTypeExpr`); an
+implementation's head, `impl<A, B> Count for Pack<A, B>`, takes the rest as
+one argument it fixes, as it would `Pack<(A, B)>`.
+
+Limits: a type's, not a function's; no defaults with it; counted among
+all the parameters, so a use that leaves out lifetimes written before it is
+not read rightly. covey's `Query<Q, Only, St>` has parameters after the
+query, so it keeps its tuple.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by

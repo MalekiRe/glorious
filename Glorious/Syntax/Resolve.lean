@@ -46,6 +46,10 @@ partial def expandTypeExpr (aliases : Std.HashMap String (List String × TypeExp
     (defaulted : Std.HashMap String Bool) (seen : List String) : TypeExpr → Except String TypeExpr
   | .name x args => do
     let mut args ← args.mapM (expandTypeExpr aliases defaulted seen)
+    -- A declared type whose last parameter is `..T`: what is written from
+    -- there on is one tuple.
+    if let some (_, .name k []) := aliases[variadicKey x]? then
+      if let some k := k.toNat? then args := args.take k ++ [.tuple (args.drop k)]
     let some byTypes := defaulted[x]? | expandNamed aliases defaulted seen x args
     -- A declared type written with fewer arguments than it has parameters:
     -- the rest are what its declaration says they are where not written.
@@ -168,6 +172,25 @@ partial def expandAliases (items : List Item) : Except String (List Item) := do
       let methods ← methods.mapM fun
         | .typeAlias name aps body => do pure (.typeAlias name aps (← ty body))
         | m => item m
+      -- For a type whose last parameter is `..T`: the arguments written from
+      -- there on are one tuple, an argument the implementation fixes.
+      let (ps, args, methods) := match byName[variadicKey head]? with
+        | some (_, .name kk []) =>
+          match kk.toNat? with
+          | some k =>
+            let fixedOf := fun (j : Nat) => methods.findSome? fun
+              | .typeAlias n [] body => if n == fixedArgName j then some body else none
+              | _ => none
+            let parts := (args.drop k).zipIdx.map fun (a, i) =>
+              if ps.contains a then TypeExpr.name a [] else (fixedOf (k + i)).getD (.name a [])
+            let rest := methods.filter fun
+              | .typeAlias n [] _ => !((List.range args.length).drop k |>.any (fixedArgName · == n))
+              | _ => true
+            let name := s!"%fixed{k}"
+            (ps.filter (fun p => !((List.range args.length).drop k |>.any (s!"%fixed{·}" == p))) ++ [name],
+              args.take k ++ [name], rest ++ [.typeAlias (fixedArgName k) [] (.tuple parts)])
+          | none => (ps, args, methods)
+        | _ => (ps, args, methods)
       -- An implementation for another name of a type, `impl T for
       -- Option<A>`, is one for the type the name stands for, with the
       -- arguments the name fixes said beside it.
