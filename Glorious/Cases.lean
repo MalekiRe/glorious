@@ -4648,7 +4648,10 @@ fn main() -> Int { <(A,) as Go>::go() }",
   ⟨"struct File(Int)\nimpl Drop for File { fn drop(p) { match(replace(p, File(0))) { File(fd) => host_write(fd) } } }\nfn main() { let mut f = File(7); drop(&mut f); 0 }",
     [], "error: 3:34: in `main`: `drop` is run when what holds a value ends; a program does not call it"⟩,
   ⟨"fn f() { 1 }",
-    [], "error: the program has no `main` function"⟩
+    [], "error: the program has no `main` function"⟩,
+  -- `mut name` in a pattern: a parameter's, a `let`'s, a callable's, an arm's.
+  ⟨"fn bump(mut x: Int) -> Int { x = x + 1; x }\nfn each(xs: [(Int, Int)], f: fn((Int, Int)) -> ()) { let mut i = 0; while({ i < len_at(&xs) }) { f(xs[i]); i = i + 1 } }\nfn main() -> Int {\n    let (mut a, b) = (1, 2);\n    a = a + b;\n    let mut s = 0;\n    each([(1, 2), (3, 4)], fn((mut p, q)) { p = p * q; s = s + p });\n    let n = match(Some(3)) { Some(mut n) => n = n * 10; n, None => 0 };\n    bump(a) + s + n\n}",
+    [], "48"⟩
 ]
 
 /-- Programs that call foreign functions and read and write memory at an
@@ -4713,10 +4716,7 @@ def foreignCases : List Case := [
     [], "012345678920"⟩,
   -- Texts for C in memory of their own, C's truth value, and memory filled and copied (library 22.2, 22.4).
   ⟨"use std::ffi::{CString, CStr, CStrError, NulError, c_bool_from_bool, bool_from_c_bool, null, ptr_is_null, ptr_add, ptr_write_bytes, ptr_copy, read_bytes, bytes_at, Layout, allocate, Allocation};\nuse std::slice::{Slice};\nuse std::value::{Rejected};\nextern \"C\" { fn strlen(s: usize) -> usize; fn toupper(c: i32) -> i32; }\nfn main() -> Int {\n    // A text given to C, and its bytes taken back.\n    match(CString::from_str(\"hello\")) {\n        Err(_) => 0 - 1,\n        Ok(text) =>\n            say(unsafe { strlen(CString::as_ptr(&text)) });\n            say(match(unsafe { bytes_at(CString::as_ptr(&text), 100) }) { Ok(bytes) => len(bytes), Err(_) => 0 - 1 });\n            say(CString::into_bytes(text));\n            // A zero inside is refused, and says where.\n            say(match(CString::from_vec([104u8, 0u8, 105u8])) { Ok(made) => CString::release(made); 0 - 1, Err(Rejected { value, error }) => error.position * 10 + len(value) });\n            let raw = [111u8, 107u8, 0u8];\n            say(match(CStr::from_bytes_with_nul(Slice::of(&raw))) { Ok(view) => match(CStr::to_str(view)) { Some(s) => s, None => \"?\" }, Err(_) => \"bad\" });\n            let cut = [111u8, 107u8];\n            say(match(CStr::from_bytes_with_nul(Slice::of(&cut))) { Ok(_) => \"ok\", Err(CStrError::MissingTerminator) => \"no zero\", Err(_) => \"bad\" });\n            say(bool_from_c_bool(c_bool_from_bool(true)));\n            say(ptr_is_null(null()));\n            // Memory filled, and copied along itself.\n            match(Layout::from_size_align(8, 1)) {\n                Err(_) => 0 - 2,\n                Ok(layout) => match(allocate(layout)) {\n                    Err(_) => 0 - 3,\n                    Ok(memory) =>\n                        let at = Allocation::as_ptr(&memory);\n                        unsafe { ptr_write_bytes(at, 7u8, 8) };\n                        unsafe { ptr_write_bytes(at, 1u8, 2) };\n                        unsafe { ptr_copy(at, ptr_add(at, 1), 4) };\n                        say(unsafe { read_bytes(at, 8) });\n                        Allocation::release(memory);\n                        0\n                }\n            }\n    }\n}\n",
-    [], "5\n6\n[104, 101, 108, 108, 111]\n13\nok\nno zero\ntrue\ntrue\n[1, 1, 1, 7, 7, 7, 7, 7]\n0"⟩,
-  -- `mut name` in a pattern: a parameter's, a `let`'s, a callable's, an arm's.
-  ⟨"fn bump(mut x: Int) -> Int { x = x + 1; x }\nfn each(xs: [(Int, Int)], f: fn((Int, Int)) -> ()) { let mut i = 0; while({ i < len_at(&xs) }) { f(xs[i]); i = i + 1 } }\nfn main() -> Int {\n    let (mut a, b) = (1, 2);\n    a = a + b;\n    let mut s = 0;\n    each([(1, 2), (3, 4)], fn((mut p, q)) { p = p * q; s = s + p });\n    let n = match(Some(3)) { Some(mut n) => n = n * 10; n, None => 0 };\n    bump(a) + s + n\n}",
-    [], "48"⟩
+    [], "5\n6\n[104, 101, 108, 108, 111]\n13\nok\nno zero\ntrue\ntrue\n[1, 1, 1, 7, 7, 7, 7, 7]\n0"⟩
 ]
 
 /-- Programs that take the Lean machines too long: compiled as any other, and
