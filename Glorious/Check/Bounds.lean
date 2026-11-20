@@ -156,6 +156,19 @@ partial def leaves (pos trait : String) (t : Ty) : M (List (String × Nat × Ty)
       | none => missing
     | none => missing
 
+/-- `toDictE`, each dictionary object made once in a group's bounds: the same
+one found for many calls (as `solveFitting` finds them) is the same value,
+not a copy for each, in what the program is elaborated with and what is
+kept of the checker. -/
+partial def toDictEShared (impls : Array ImplDecl) (d : Traits.Dict) : M Elab.DictE := do
+  if let some (_, e) := (← get).dictShared[addrOf d]? then return e
+  let e ← match d with
+    | .given k => pure (Elab.DictE.param k)
+    | .impl i subs => do
+      pure (Elab.DictE.impl ((impls[i]?.map (·.dictFn)).getD "") (← subs.mapM (toDictEShared impls)))
+  modify fun s => { s with dictShared := s.dictShared.insert (addrOf d) (d, e) }
+  pure e
+
 partial def toDictE (impls : Array ImplDecl) : Traits.Dict → Elab.DictE
   | .given k => .param k
   | .impl i subs => .impl ((impls[i]?.map (·.dictFn)).getD "") (subs.map (toDictE impls))
@@ -478,7 +491,7 @@ partial def unrigidTy (back : List (String × Nat)) : Ty → Ty
 its type. A bound on a type the function is generic in becomes something the
 function is given; every other is met by `Traits.solve`. -/
 def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := do
-  modify fun s => { s with solvedFit := {}, leavesFit := {}, leavesAt := {}, tyIds := {}, tyIdCount := 0 }
+  modify fun s => { s with solvedFit := {}, leavesFit := {}, leavesAt := {}, tyIds := {}, tyIdCount := 0, dictShared := {} }
   -- A name of which parts were read before its type was known, which is now:
   -- if the type has a `drop` of its own and the parts read can be used any
   -- number of times, the value stayed whole and is destroyed when its block
@@ -1139,7 +1152,7 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
         | some (_, key, _, cond) => solve key cond (← toSTy cond)
         | none => pure none
     match solved with
-    | some d => table := record table b.call (toDictE impls d)
+    | some d => table := record table b.call (← toDictEShared impls d)
     | none =>
       if b.trait == Syntax.destroyTrait then continue
       if !last && !(← zonk b.ty).ground then

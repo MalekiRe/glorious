@@ -22,7 +22,7 @@ def keptEvery (n : Nat) : Nat := max 1 ((n + 47) / 48)
 /-- A state as it is kept: without what a group's bounds found, which the
 next group's start anew (`settleBounds`). -/
 def forKeeping (st : St) : St :=
-  { st with solvedFit := {}, leavesFit := {}, leavesAt := {}, tyIds := {}, tyIdCount := 0 }
+  { st with solvedFit := {}, leavesFit := {}, leavesAt := {}, tyIds := {}, tyIdCount := 0, dictShared := {} }
 
 /-- An item as its declarations have it: its functions without their bodies. -/
 partial def withoutBodies : Item → Item

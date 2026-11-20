@@ -784,6 +784,8 @@ structure St where
   them are. -/
   tyIds : PMap (String × List Nat) Nat := {}
   tyIdCount : Nat := 0
+  /-- Dictionaries made for a group's calls, by the object each was found as. -/
+  dictShared : PMap USize (Traits.Dict × Elab.DictE) := {}
   /-- `leavesFit` by where the type and its arguments are, kept with them so
   that no other object comes to be there. -/
   leavesAt : PMap (String × String × USize × List USize) (Ty × List Ty × List (String × Nat × Ty × List Ty)) := {}
