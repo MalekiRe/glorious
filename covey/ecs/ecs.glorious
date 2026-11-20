@@ -2414,8 +2414,11 @@ fn settle_step<S>(task: &mut TaskOf<S>, step: TaskStep<S>, world: &mut World<S>)
 
 // A task at its place in a dispatch of the label named `label`: run as far as
 // it can go there.
+// (A step it asks of the label once more waits for the label's next
+// dispatch: one dispatch, one step of it, as a system runs once.)
 fn drive_task<S>(task: &mut TaskOf<S>, label: Str, world: &mut World<S>) where S: Columns {
     let mut going = true;
+    let mut stepped = false;
     while({ going }) {
         going = match(replace(&mut task.state, TaskState::Over)) {
             TaskState::Fresh(body) => settle_step(task, start_task(body), world),
@@ -2424,7 +2427,7 @@ fn drive_task<S>(task: &mut TaskOf<S>, label: Str, world: &mut World<S>) where S
                     Some(ready) => ready(),
                     None => match(ask.inbox) {
                         Some(waiting) => waiting(&*world),
-                        None => if(ask.label == "") { false } else { ask.label == label }
+                        None => if(ask.label == "") { false } else { if(stepped) { false } else { stepped = true; ask.label == label } }
                     }
                 };
                 if(now) {
