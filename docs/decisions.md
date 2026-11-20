@@ -5985,7 +5985,9 @@ alone, every body side by side, and a body's edit checks that body only.
 
 ## Covey drafts: what each still needs (measured)
 
-Six of the 18 drafts still fail the suite. What each needs:
+Three of the 18 drafts still fail the suite (plugins, remote, tasks), and
+behaviors, devtools, one_of2, required2 and the rest pass. What each
+still needs:
 
 - **plugins**: hooks fired from an exclusive system's world. Upstream runs a
   component's hooks inside the world, at the spawn (`hp added x1` before the
@@ -6012,10 +6014,9 @@ Six of the 18 drafts still fail the suite. What each needs:
 - **remote**: a system given to `Remote::bridge` performs `Threads`
   (`enter` locks and yields); `RunsOnWorld` takes only systems that perform
   nothing.
-- **behaviors**: passes at 200 entities; at upstream's 1000 it takes 2m36 on
-  the bytecode machine, whose cells are a list (`Control.Cells`): reading a
-  cell walks the list. Cells as an array is what takes it away.
-- **one more out of steps**: the same.
+- ~~**behaviors**~~: passes, at upstream's 1000 entities, in 2m36 on the
+  bytecode machine, whose cells are a list (`Control.Cells`): reading a
+  cell walks the list. Cells as an array is what makes it fast.
 
 ## Other standing decisions
 
