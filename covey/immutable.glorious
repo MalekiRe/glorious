@@ -1,0 +1,30 @@
+// Upstream's immutable components (src/immutable.rs): a component said to
+// be `Immutable` is never written in place: it is changed by inserting a
+// new value, which its hooks see. Writing it in place is refused where the
+// program is compiled: `world.get_mut<Level>(e)` is "`ecs::Immutable` does
+// not implement `ecs::InPlace`, which `ecs::Writable` of `Level` needs", and
+// a query of `&mut Level` the same, through `ecs::Fill` of `&mut Level`.
+// expect:
+// 1
+// 2
+// 5
+// 0
+mod ecs;
+
+use ecs::{App, Entity, Query, Mutability, Immutable};
+
+struct Level(Int)
+impl Mutability for Level { type Writes = Immutable; }
+struct Hp(Int)
+
+fn main() -> Int {
+    let mut world = App::new().register<Level>().register<Hp>().build().world;
+    let e = world.spawn_bundle((Level(1), Hp(3)));
+    say(match(world.get<Level>(e)) { Some(l) => l.0, None => 0 });
+    discard(world.insert(e, Level(2)));
+    say(match(world.get<Level>(e)) { Some(l) => l.0, None => 0 });
+    // (Another component is written in place as before.)
+    match(world.get_mut<Hp>(e)) { Some(mut h) => h.get_mut().0 = 5, None => () };
+    say(match(world.get<Hp>(e)) { Some(h) => h.0, None => 0 });
+    0
+}

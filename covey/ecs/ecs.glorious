@@ -215,6 +215,20 @@ impl<H, R> Columns for (Resource<H>, R) where R: Columns {
     fn copy_onto(columns: &mut (Resource<H>, R), from: Entity, to: Entity) { <R as Columns>::copy_onto(&mut columns.1, from, to) }
 }
 
+// Components that are never written in place, upstream's `Immutable`:
+// `impl Mutability for Level { type Writes = Immutable; }`. A query's `&mut
+// Level`, `get_mut<Level>`, a `ResMut<Level>` and a system's `&mut
+// Column<Level>` are then refused; a new value is inserted instead, so its
+// hooks see every change. Any other component is `Mutable`.
+pub struct Mutable
+pub struct Immutable
+pub trait Mutability { type Writes; }
+impl<T> Mutability for T { type Writes = Mutable; }
+pub trait InPlace {}
+impl InPlace for Mutable {}
+pub trait Writable {}
+impl<T> Writable for T where <T as Mutability>::Writes: InPlace {}
+
 // How a component is copied when its entity is: `impl Cloner for Label {
 // const CLONER: Option<fn(&Label) -> Label> = Some(clone); }`, as upstream's
 // `Clone` components are. Any other is not copied (relations' links are not:
@@ -809,7 +823,7 @@ impl<S> World<S> {
     }
 
     // An entity's component, to change: a change once `get_mut` is asked of it.
-    pub fn get_mut<T>(world: &mut Self, entity: Entity) -> Option<Mut<'_, T>> where S: Get<T> {
+    pub fn get_mut<T>(world: &mut Self, entity: Entity) -> Option<Mut<'_, T>> where S: Get<T>, T: Writable {
         let now = world.tick;
         let column = <S as Get<T>>::column_mut(&mut world.columns);
         column.now = now;
@@ -1036,7 +1050,7 @@ pub trait Fill<S>: Item {
     // What stands in the query's place once its columns are back.
     fn hollow() -> Self::Store
 }
-impl<A, S> Fill<S> for &mut A where S: Get<A> {
+impl<A, S> Fill<S> for &mut A where S: Get<A>, A: Writable {
     fn fill(columns: &mut S, now: Int) -> <&mut A as Item>::Store { take_now<A, S>(columns, now) }
     fn unfill(columns: &mut S, column: <&mut A as Item>::Store) { <S as Get<A>>::put(columns, column) }
     fn hollow() -> <&mut A as Item>::Store { empty_column() }
@@ -1061,7 +1075,7 @@ impl<A, S> Fill<S> for Has<A> where S: Get<A> {
     fn unfill(columns: &mut S, column: <Has<A> as Item>::Store) { <S as Get<A>>::put(columns, column) }
     fn hollow() -> <Has<A> as Item>::Store { empty_column() }
 }
-impl<A, S> Fill<S> for Option<&mut A> where S: Get<A> {
+impl<A, S> Fill<S> for Option<&mut A> where S: Get<A>, A: Writable {
     fn fill(columns: &mut S, now: Int) -> <Option<&mut A> as Item>::Store { take_now<A, S>(columns, now) }
     fn unfill(columns: &mut S, column: <Option<&mut A> as Item>::Store) { <S as Get<A>>::put(columns, column) }
     fn hollow() -> <Option<&mut A> as Item>::Store { empty_column() }
@@ -1460,7 +1474,7 @@ impl<E, S, ..G, F, O, Lc> Fetch<E, S, (..G), F, O, Lc> for () where F: CallWith<
     fn fetch(event: &E, world: &mut World<S>, commands: &mut Commands<S>, state: &mut Lc, gathered: (..G), f: &F) -> Option<O> { Some(call_with(f, gathered)) }
 }
 impl<E, S, ..G, F, O, Lc, A, Rest> Fetch<E, S, (..G), F, O, Lc> for (Writes<A>, Rest)
-    where S: Get<A>, Rest: Fetch<E, S, (..G, &mut Column<A>), F, O, Lc> {
+    where S: Get<A>, Rest: Fetch<E, S, (..G, &mut Column<A>), F, O, Lc>, A: Writable {
     fn fetch(event: &E, world: &mut World<S>, commands: &mut Commands<S>, state: &mut Lc, gathered: (..G), f: &F) -> Option<O> {
         let (..g) = gathered;
         let mut a = take_at<A, S>(world);
@@ -1501,7 +1515,7 @@ impl<E, S, ..G, F, O, Lc, X, Rest> Fetch<E, S, (..G), F, O, Lc> for (Shared<X>, 
     }
 }
 impl<E, S, ..G, F, O, Lc, X, Rest> Fetch<E, S, (..G), F, O, Lc> for (Owned<X>, Rest)
-    where S: Holds<X>, Rest: Fetch<E, S, (..G, &mut X), F, O, Lc> {
+    where S: Holds<X>, Rest: Fetch<E, S, (..G, &mut X), F, O, Lc>, X: Writable {
     fn fetch(event: &E, world: &mut World<S>, commands: &mut Commands<S>, state: &mut Lc, gathered: (..G), f: &F) -> Option<O> {
         match(lift<X, S>(&mut world.columns)) {
             Some(value) =>
