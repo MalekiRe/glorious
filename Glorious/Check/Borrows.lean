@@ -105,7 +105,7 @@ partial def capHoldsLoan (loan : Nat) (cap : Nat) (suspended : Bool := false)
       if let .once := what then suspended := true
   let mark := 2 * root + (if suspended then 1 else 0)
   if s.seen.contains mark then return false
-  modify fun s => { s with seen := mark :: s.seen }
+  modify fun s => { s with seen := s.seen.insert mark }
   for (_, what) in ← edgesFrom root do
     match what with
     | .loan l => if l == loan then return true
@@ -160,7 +160,7 @@ mutual
 partial def capTouches (cap : Nat) (out : List (Nat × Bool)) : M (List (Nat × Bool)) := do
   let root ← findCap cap
   if (← get).seen.contains root then return out
-  modify fun s => { s with seen := root :: s.seen }
+  modify fun s => { s with seen := s.seen.insert root }
   let mut out := out
   for (_, what) in ← edgesFrom root do
     match what with
@@ -189,7 +189,7 @@ would not be given the value. -/
 partial def capLooks (brand : Nat) (cap : Nat) : M Bool := do
   let root ← findCap cap
   if (← get).seen.contains root then return false
-  modify fun s => { s with seen := root :: s.seen }
+  modify fun s => { s with seen := s.seen.insert root }
   let mut takes := false
   for (c, b) in (← get).givers do
     if b == brand && (← findCap c) == root then takes := true
@@ -227,11 +227,11 @@ def Binding.held : Binding → Option Ty
   | .label _ _ => none
 
 def holdsLoan (loan : Nat) (t : Ty) : M Bool := do
-  modify fun s => { s with seen := [] }
+  modify fun s => { s with seen := {} }
   tyHoldsLoan loan t
 
 def touchesVar (brand : Nat) (write : Bool) (t : Ty) : M Bool := do
-  modify fun s => { s with seen := [] }
+  modify fun s => { s with seen := {} }
   let touched ← tyTouches t []
   pure (touched.any fun (b, w) => b == brand && (w || !write))
 
@@ -317,16 +317,16 @@ def checkLoans (loansAt cellsAt : Nat := 0) : M Unit := do
   for u in s.uses ++ s.heldMoves do
     if let .var brand x .move _ := u.kind then
       if let some (_, _, t) := s.cells.toList.find? (·.1 == brand) then
-        modify fun st => { st with seen := [] }
+        modify fun st => { st with seen := {} }
         if (← tyOwnsOnce [] t) || (← tyHasDrop [] t).isSome then
           for name in u.later.eraseDups do
             if name != x then
               if let some held := (u.scope.lookup name).bind Binding.held then
-                modify fun st => { st with seen := [] }
+                modify fun st => { st with seen := {} }
                 if ← tyLooks brand held then
                   fail u s!"`{x}` is given away while `{name}`, which uses it, can still be called"
           for (held, _) in u.temps do
-            modify fun st => { st with seen := [] }
+            modify fun st => { st with seen := {} }
             if ← tyLooks brand held then
               fail u s!"`{x}` is given away while a callable this expression is still using uses it"
   if loans.isEmpty then return
@@ -338,7 +338,7 @@ def checkLoans (loansAt cellsAt : Nat := 0) : M Unit := do
         | .move => do
           match s.cells.toList.find? (·.1 == brand) with
           | some (_, _, t) =>
-            modify fun st => { st with seen := [] }
+            modify fun st => { st with seen := {} }
             if (← tyOwnsOnce [] t) || (← tyHasDrop [] t).isSome then pure Using.move else pure Using.read
           | none => pure Using.read
         | other => pure other
@@ -370,7 +370,7 @@ def checkLoans (loansAt cellsAt : Nat := 0) : M Unit := do
       let mine := (u.temps.take tys.length).reverse
       let outer := { u with temps := u.temps.drop tys.length }
       for (t, i) in tys.zipIdx do
-        modify fun st => { st with seen := [] }
+        modify fun st => { st with seen := {} }
         for (brand, write) in ← tyTouches t [] do
           for l in loans do
             if l.root == some brand && (write || l.uniq) then
@@ -381,7 +381,7 @@ def checkLoans (loansAt cellsAt : Nat := 0) : M Unit := do
                     -- A resumption both holds the borrows of the computation
                     -- it suspended and uses what that computation uses:
                     -- resuming it is that computation going on.
-                    modify fun st => { st with seen := [] }
+                    modify fun st => { st with seen := {} }
                     let own ← if i == j then tyHoldsLoan l.id t' false true else pure true
                     if i != j || (own && (← bothAtOnce l.id brand write t')) then
                       found := some "a value this expression is still using"

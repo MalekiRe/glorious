@@ -583,7 +583,7 @@ mutual
 partial def capHolds (brand : Nat) (cap : Nat) : M Bool := do
   let root ← findCap cap
   if (← get).seen.contains root then return false
-  modify fun s => { s with seen := root :: s.seen }
+  modify fun s => { s with seen := s.seen.insert root }
   for (_, what) in ← edgesFrom root do
     match what with
     | .brand b => if b == brand then return true
@@ -628,7 +628,7 @@ def checkEscape (brand : Nat) (what : String) (roots : List (String × Ty)) (amb
   settleRows none false
   settleAssocs
   let holds := fun (t : Ty) => do
-    modify fun s => { s with seen := [] }
+    modify fun s => { s with seen := {} }
     tyHolds brand t
   let escape := fun (how : String) =>
     (throw s!"{what}: {how}" : M Unit)
@@ -644,11 +644,11 @@ def checkEscape (brand : Nat) (what : String) (roots : List (String × Ty)) (amb
       escape "it is stored in a declaration whose field types are inferred; \
         give that declaration a type parameter"
   if let some cap := s.staticCap then
-    modify fun s => { s with seen := [] }
+    modify fun s => { s with seen := {} }
     if ← capHolds brand cap then
       escape "it is borrowed for `'static`, and no variable lasts that long"
   for cap in s.monoCaps do
-    modify fun s => { s with seen := [] }
+    modify fun s => { s with seen := {} }
     if ← capHolds brand cap then
       escape "it is stored in a declaration's `fn` field; give that declaration a \
         type parameter for the field"
@@ -690,7 +690,7 @@ mutual
 partial def capOwnsOnce (cap : Nat) : M Bool := do
   let root ← findCap cap
   if (← get).seen.contains root then return false
-  modify fun s => { s with seen := root :: s.seen }
+  modify fun s => { s with seen := s.seen.insert root }
   for (_, what) in ← edgesFrom root do
     match what with
     | .once => return true
@@ -786,7 +786,7 @@ partial def tyHasDrop (visiting : List String) (t : Ty) : M (Option String) := d
   | .fn _ _ _ _ cap => do
     let root ← findCap cap
     if (← get).seen.contains root then return none
-    modify fun s => { s with seen := root :: s.seen }
+    modify fun s => { s with seen := s.seen.insert root }
     for (_, what) in ← edgesFrom root do
       if let .ty held := what then
         if let some name ← tyHasDrop visiting held then return some name
@@ -807,14 +807,14 @@ partial def tyHasDrop (visiting : List String) (t : Ty) : M (Option String) := d
 
 def checkDups (dups : Array (Ty × String)) : M Unit := do
   for (t, why) in dups do
-    modify fun s => { s with seen := [] }
+    modify fun s => { s with seen := {} }
     if ← tyOwnsOnce [] t then
       if let some name ← onceBy [] t then
         throw s!"{why}, but a `{name}` can be used only once"
       -- A value with a `drop` to run is not copied: each copy would run it.
       -- (Its `drop` may read one through a reference, as it takes one apart,
       -- to see what to do; nothing else may.)
-      modify fun s => { s with seen := [] }
+      modify fun s => { s with seen := {} }
       if let some name ← tyHasDrop [] t then
         let s ← get
         let through := (why.splitOn "reading through a reference").length > 1
@@ -850,13 +850,13 @@ def checkUnrun : M Unit := do
   let apart := (← get).takenApart
   modify fun s => { s with takenApart := #[] }
   for (t, why) in apart do
-    modify fun s => { s with seen := [] }
+    modify fun s => { s with seen := {} }
     if ← tyHoldsOnceCallable [] t then
       throw s!"{why}, but a value that holds a resumption can be used only once"
   let left := (← get).leftBehind
   modify fun s => { s with leftBehind := #[] }
   for (t, why) in left do
-    modify fun s => { s with seen := [] }
+    modify fun s => { s with seen := {} }
     if let some name ← tyHasDrop [] t then
       throw s!"{why}, and here nothing would run the `drop` of a `{name}` in it: take the value apart with a pattern, which destroys what it does not name"
 
@@ -867,10 +867,10 @@ def checkGivenReads : M Unit := do
   let reads := (← get).givenReads
   modify fun s => { s with givenReads := #[] }
   for (t, why) in reads do
-    modify fun s => { s with seen := [] }
+    modify fun s => { s with seen := {} }
     if ← tyOwnsOnce [] t then
       if (← onceBy [] t).isNone then
-        modify fun s => { s with seen := [] }
+        modify fun s => { s with seen := {} }
         if (← tyHasDrop [] t).isNone then
           throw s!"{why}, but a value that holds a resumption can be used only once"
 

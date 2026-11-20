@@ -63,7 +63,7 @@ partial def tyMustUse (info : MustInfo) (visiting : List String) (t : Ty)
     if mine.any (fun (_, what) => match what with | .once => true | _ => false)
         && !info.blocks.contains root then return none
     if s.seen.contains root then return none
-    modify fun s => { s with seen := root :: s.seen }
+    modify fun s => { s with seen := s.seen.insert root }
     -- (What a block shares with the one it runs in place of, the other holds.)
     for (i, what) in mine do
       if let .ty held := what then
@@ -138,7 +138,7 @@ def checkDrops (drops : Array (Ty × String)) (callables : Bool := false) : M Un
   if drops.isEmpty then return
   let info ← mustInfo
   for (t, why) in drops do
-    modify fun s => { s with seen := [] }
+    modify fun s => { s with seen := {} }
     if let some what ← tyMustUse info [] t callables then
       throw s!"{why}, but {what} has to be used"
 
@@ -1113,7 +1113,7 @@ def checkUses (pos : String) (outer : Scope) (binds : Scope) (body : List Stmt) 
               match ← (try fieldType subject idx catch _ => pure none) with
               | some ft =>
                 let ft ← zonk ft
-                modify fun st => { st with seen := [] }
+                modify fun st => { st with seen := {} }
                 unless (freeTys ft).isEmpty && (freeCaps ft).isEmpty && !hasParam ft
                     && !(← tyOwnsOnce [] ft) && (← tyHasDrop [] ft).isNone do
                   plain := false
@@ -1173,7 +1173,7 @@ def checkUses (pos : String) (outer : Scope) (binds : Scope) (body : List Stmt) 
           let ft := (← (try fieldType subject idx catch _ => pure none)).getD subject
           if usesStmts resumptive x only ≥ 2 then
             let ft ← zonk ft
-            modify fun st => { st with seen := [] }
+            modify fun st => { st with seen := {} }
             let dropped := (← tyHasDrop [] ft).isSome
             let twice : Bool := match pathUses (if dropped then { ctx with handed := true } else ctx)
                 (names.filter (· != x)) x only with
@@ -1202,7 +1202,7 @@ def checkUses (pos : String) (outer : Scope) (binds : Scope) (body : List Stmt) 
       let mentions := usesStmts resumptive x body
       if mentions ≥ 2 then
         let t ← zonk t
-        modify fun st => { st with seen := [] }
+        modify fun st => { st with seen := {} }
         -- (A value with a `drop` to run is used where it is given away,
         -- whatever takes it does: giving it away twice would run it twice.)
         let dropped := (← tyHasDrop [] t).isSome
@@ -1232,7 +1232,7 @@ partial def tyJumps (t : Ty) : M Bool := do
     if ← tyJumps r then return true
     let root ← findCap cap
     if (← get).seen.contains root then return false
-    modify fun s => { s with seen := root :: s.seen }
+    modify fun s => { s with seen := s.seen.insert root }
     for (_, what) in ← edgesFrom root do
       match what with
       | .brand b => unless (← get).cells.any (·.1 == b) do return true
@@ -1265,7 +1265,7 @@ def checkStatics (statics : Array (Ty × String)) : M Unit := do
 /-- A callable that has to come back when called may hold no label. -/
 def checkStays (stays : Array (Ty × String)) : M Unit := do
   for (t, why) in stays do
-    modify fun s => { s with seen := [] }
+    modify fun s => { s with seen := {} }
     if ← tyJumps t then
       throw s!"{why}, but what it is given here can jump to a label and not come back"
 
@@ -1307,7 +1307,7 @@ def runLowerChecks (fnTy : Ty) : M Unit := do
   for (id, callee, silent) in s.calls do
     let callee ← zonk callee
     if let .fn _ _ effs tail _ := callee then
-      modify fun st => { st with seen := [] }
+      modify fun st => { st with seen := {} }
       -- (An effect all of whose operations are declared `[1, 1]` is always
       -- resumed: a callable that performs nothing else comes back.)
       let resumed := effs.all fun (e, _) =>
@@ -1358,14 +1358,14 @@ def runLowerChecks (fnTy : Ty) : M Unit := do
     let t ← zonk t
     -- Only a type that has to be used, or one not yet known, needs the count.
     let free := !(freeTys t).isEmpty || !(freeCaps t).isEmpty || hasParam t
-    modify fun st => { st with seen := [] }
+    modify fun st => { st with seen := {} }
     -- (A callable kept by `let` is general in what it captures, but what it
     -- holds is known: it has a `drop` to run if what it holds does.)
     let heldDrop ← match ← find t with
       | .fn _ _ _ _ cap => do
-        modify fun st => { st with seen := [] }
+        modify fun st => { st with seen := {} }
         let held ← tyHasDrop [] t
-        modify fun st => { st with seen := [] }
+        modify fun st => { st with seen := {} }
         -- (Or, in the program's own function, a value of a type it is
         -- generic in, which may have one.)
         let generic ← if s.ownItems && !libraryOwner s.owner then do
@@ -1408,7 +1408,7 @@ def runLowerChecks (fnTy : Ty) : M Unit := do
       -- another: where it is not, nothing would run its `drop`, since the
       -- paths are callables and it is theirs. (One no path uses stays in
       -- its variable, and is destroyed there.)
-      modify fun st => { st with seen := [] }
+      modify fun st => { st with seen := {} }
       -- (A callable that holds a value of a type the function is generic in
       -- is asked the same, of that value.)
       let named ← tyHasDrop [] t
@@ -1468,7 +1468,7 @@ def runLowerChecks (fnTy : Ty) : M Unit := do
       for ((_, (src, what)), (_, name)) in s.capEdges.entries.zip s.capEdgeNames.entries do
         if (← findCap src) == root then
           if let .ty t := what then
-            modify fun st => { st with seen := [] }
+            modify fun st => { st with seen := {} }
             if (← tyMustUse roots [] t).isSome then
               names := ((name.map (·.1)).getD "%unnamed") :: names
       held := held ++ [names]

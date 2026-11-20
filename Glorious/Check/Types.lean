@@ -396,18 +396,24 @@ variable {α : Type}
 
 /-- The place of the last segment that starts at or before `i`, the segments
 being in the order of where they start: by halves. -/
-@[inline] def olderAt (older : Array (Seg α)) (i : Nat) : Option Nat := Id.run do
-  -- (Most are found in the last ones.)
-  match older.back? with
-  | some seg => if i ≥ seg.base then return some (older.size - 1)
-  | none => return none
-  let mut lo := 0
-  let mut hi := older.size
-  -- The answer is below `hi`, and at or after `lo` if there is one.
-  while lo + 1 < hi do
+@[inline] def baseAt (older : Array (Seg α)) (k : Nat) (d : Nat) : Nat :=
+  if h : k < older.size then older[k].base else d
+
+/-- (The answer is below `hi`, and at or after `lo` if there is one.) -/
+def olderSearch (older : Array (Seg α)) (i lo hi : Nat) : Nat :=
+  if lo + 1 < hi then
     let mid := (lo + hi) / 2
-    if ((older[mid]?.map (·.base)).getD 0) ≤ i then lo := mid else hi := mid
-  if ((older[lo]?.map (·.base)).getD (i + 1)) ≤ i then some lo else none
+    if baseAt older mid 0 ≤ i then olderSearch older i mid hi else olderSearch older i lo mid
+  else lo
+termination_by hi - lo
+
+@[inline] def olderAt (older : Array (Seg α)) (i : Nat) : Option Nat :=
+  -- (Most are found in the last ones.)
+  if older.size == 0 then none
+  else if baseAt older (older.size - 1) 0 ≤ i then some (older.size - 1)
+  else
+    let lo := olderSearch older i 0 older.size
+    if baseAt older lo (i + 1) ≤ i then some lo else none
 
 @[specialize] def olderGet? (older : Array (Seg α)) (i : Nat) : Option α :=
   match olderAt older i with
@@ -487,7 +493,7 @@ structure St where
   capEdgeNames : Store (Option (String × Nat)) := {}
   brands : Nat := 0
   /-- Capture variables already visited by the search in progress. -/
-  seen : List Nat := []
+  seen : Std.HashSet Nat := {}
   /-- Types that must be free to use more than once, with the reason; checked
   once the types are known. -/
   dups : Array (Ty × String) := #[]

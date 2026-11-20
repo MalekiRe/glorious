@@ -107,10 +107,16 @@ def projectedCondition (key : String) (t : Ty) : M (List Nat) := do
   | .var _ => if (← projectionOf t).isSome then conditionKeys key t else pure []
   | _ => pure []
 
+/-- The type an implementation is for, as it writes it: `W<T>`, `(H, R)`. -/
+def implShown (im : ImplDecl) : String :=
+  if im.head.startsWith "(tuple" then s!"({", ".intercalate im.params})"
+  else if im.params.isEmpty then im.head
+  else s!"{im.head}<{", ".intercalate im.params}>"
+
 /-- How often an implementation chosen for a type uses a value of each of its
 type parameters, as its where says, `T: Use<[0, *]>`, at most once where it
 says nothing: asked of what each is there. -/
-def askUses (im : ImplDecl) (at_ : List (Nat × Ty)) (pos : String) (whole : Ty) : M Unit := do
+def askUses (im : ImplDecl) (at_ : List (Nat × Ty)) (pos : String) : M Unit := do
   if im.trait == Syntax.destroyTrait then return
   for (p, id) in im.pvars do
     if let some t := at_.lookup id then
@@ -119,7 +125,9 @@ def askUses (im : ImplDecl) (at_ : List (Nat × Ty)) (pos : String) (whole : Ty)
             if q == p then some (lo, hi) else none
         | _ => none).getD (0, some 1)
       if lower == 0 || upper.isNone then
-        let whose := s!"{pos}the implementation of `{Syntax.traitShown im.trait}` for `{showTy (← zonk whole)}`"
+        -- (Said as the implementation writes its type, which names the
+        -- parameter: not the type here, which would be spelled each time.)
+        let whose := s!"{pos}the implementation of `{Syntax.traitShown im.trait}` for `{implShown im}`"
         if lower == 0 then
           modify fun s => { s with drops := s.drops.push (t, s!"{whose} may leave a `{p}` unused") }
         if upper.isNone then
@@ -148,7 +156,7 @@ partial def leaves (pos trait : String) (t : Ty) : M (List (String × Nat × Ty)
     | some (n, args) =>
       match (← get).kimpls.find trait n args.length with
       | some (i, I) =>
-        if let some im := (← get).impls[i]? then askUses im (← implAt im args) pos t
+        if let some im := (← get).impls[i]? then askUses im (← implAt im args) pos
         let mut out : List (String × Nat × Ty) := []
         for (tr', j) in I.context do
           out := out ++ (← leaves pos tr' (args[j]?.getD .unit))
@@ -229,7 +237,7 @@ partial def needsDestroying (seen : List String) (t : Ty) : M Bool := do
             | .fn .. => pure ()
             | _ => return true
     let before := (← get).seen
-    modify fun s => { s with seen := [] }
+    modify fun s => { s with seen := {} }
     let held ← tyHasDrop [] t
     modify fun s => { s with seen := before }
     pure held.isSome
@@ -439,7 +447,7 @@ partial def leavesFittingNow (pos key : String) (t : Ty) (args : List Ty) (owner
   let some im := (← get).impls[i]? | missing
   let some at_ ← fitHead im hargs args | missing
   unless ← fitConditions im at_ hargs owner pos do return ← missing
-  askUses im at_ pos t
+  askUses im at_ pos
   let mut out : List (String × Nat × Ty × List Ty) := []
   let shown := Syntax.traitShown key
   let this := ((shown.takeWhile (· != '<')).toString, t)
@@ -510,7 +518,7 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
           let plain ← match ← (try fieldType subject idx catch _ => pure none) with
             | some ft => do
               let ft ← zonk ft
-              modify fun st => { st with seen := [] }
+              modify fun st => { st with seen := {} }
               pure ((freeTys ft).isEmpty && (freeCaps ft).isEmpty && !hasParam ft
                 && !(← tyOwnsOnce [] ft) && (← tyHasDrop [] ft).isNone)
             | none => pure false

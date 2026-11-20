@@ -20,7 +20,7 @@ def checkUseDecls : M Unit := do
         if let some what ← tyMustUse {} [head] part then
           throw s!"`impl Use` for `{head}`: it holds {what}, which has to be used, so the fewest uses of a `{head}` cannot be 0"
       unless once do
-        modify fun s => { s with seen := [] }
+        modify fun s => { s with seen := {} }
         if ← tyOwnsOnce [head] part then
           throw s!"`impl Use` for `{head}`: it holds a value that can be used only once, so the most uses of a `{head}` cannot be `infinity`"
 
