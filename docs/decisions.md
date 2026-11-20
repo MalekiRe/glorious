@@ -6141,6 +6141,21 @@ function with many bounds (states2's `main`: 263, about 0.6 s of bounds), is
 not near Zig's front end, which is 10–20 times faster per program. Jai
 is not available here to measure.
 
+## Bounds met once, cached across groups and compiles: tried, undone
+
+Editing `main` in states2 checks it again (2.6 s at HEAD after the devtools
+and hooks work; fresh 3.7 s, up from 3.4 s, as ecs grew by the stepping,
+`why_not`, hook and name machinery). Most of `main`'s check is its 263
+bounds, all of types all known. Tried: a cache of how such a bound is met
+(`(trait, type spelled) -> Dict`) kept across a unit's groups and carried
+from one compile to the next under the same declarations key, so that a
+bound met once is neither looked at by `leaves` nor solved again. Measured
+slower: fresh 4.07 s, `main` edited 2.85 s, and 3.4 s / 2.8 s with the cache
+kept only in the unit's last state. Spelling each bound's type to key it,
+twice, and merging the map at every side-by-side join cost more than the
+hits saved. Undone. What would make it pay: keys that are already there
+(interned types, the InternPool redesign), not spelled per bound.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by
