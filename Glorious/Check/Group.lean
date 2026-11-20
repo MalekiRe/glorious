@@ -184,7 +184,7 @@ def checkGroup (decls : List FnDecl) (signature : Bool := false) : M Unit := do
           else
             unless ((← get).traits.lookup b.trait).isSome do
               throw s!"`{b.subject}: {b.trait}`: unknown trait `{b.trait}`"
-            let arity := (((← get).traitShape.lookup b.trait).map (·.1)).getD 0
+            let arity := (((← get).traitShape[b.trait]?).map (·.1)).getD 0
             unless b.args.length == arity do
               throw s!"`{b.subject}: {b.trait}`: `{b.trait}` takes {arity} type arguments, but is given {b.args.length}"
             let args ← b.args.mapM (resolveType rigid false)
@@ -321,7 +321,7 @@ def checkGroup (decls : List FnDecl) (signature : Bool := false) : M Unit := do
         for b in d.bounds do
           unless ["Fn", "RunsIn", "Environment", "Use", "Label", "Returns"].contains b.trait do
             for (name, said) in b.assoc do
-              match rigid.lookup b.subject, (← get).traitShape.find? fun (tr, _, _) => tr == b.trait with
+              match rigid.lookup b.subject, ((← get).traitShape[b.trait]?).map (fun x => (b.trait, x)) with
               | some self, some (_, _, assocs) =>
                 unless assocs.contains name do
                   throw s!"`{b.subject}: {Syntax.lastSegment b.trait}<{name} = ..>`: `{Syntax.lastSegment b.trait}` leaves no type `{name}` to its implementations"

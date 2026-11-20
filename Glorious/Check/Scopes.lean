@@ -306,7 +306,7 @@ partial def spellTy (t : Ty) : M String := do
 /-- What a trait is asked of, taken apart: the type, and the trait's own
 arguments if it has some. -/
 def subjectOf (trait : String) (subject : Ty) : M (Ty × List Ty) := do
-  let arity := (((← get).traitShape.lookup trait).map (·.1)).getD 0
+  let arity := (((← get).traitShape[trait]?).map (·.1)).getD 0
   if arity == 0 then return (subject, [])
   match ← find subject with
   | .tuple (self :: args) => pure (self, args)

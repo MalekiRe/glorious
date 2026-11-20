@@ -574,7 +574,7 @@ structure St where
   wantResult : Option (Nat × Ty) := none
   /-- For each trait, how many type parameters it has and the names of the
   types it leaves to implementations. -/
-  traitShape : List (String × Nat × List String) := []
+  traitShape : Std.HashMap String (Nat × List String) := {}
   /-- A type a trait leaves to its implementations, at a use: the trait, what
   it is asked of (the type, and after it the trait's arguments if it has
   some), which type, the variable that stands for it, the function this is in,

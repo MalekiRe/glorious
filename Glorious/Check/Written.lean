@@ -78,7 +78,7 @@ partial def writeTy (t : Ty) : StateT Names M String := do
     if n == Syntax.projMark then
       -- (Of a trait with arguments, the subject is the type with them after
       -- it, as a tuple.)
-      let arity := ((← (get : M St)).traitShape.lookup tr).map (·.1) |>.getD 0
+      let arity := ((← (get : M St)).traitShape[tr]?).map (·.1) |>.getD 0
       let (self, targs) ← match ← (find subject : M Ty) with
         | .tuple (self :: rest) => pure (if arity > 0 && rest.length == arity then (self, rest) else (subject, targs))
         | _ => pure (subject, targs)

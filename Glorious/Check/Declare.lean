@@ -29,7 +29,7 @@ partial def resolveType (params : List (String × Ty)) (decl : Bool) : TypeExpr 
       match args with
       | [self, .name tr targs, .name name []] =>
         let self ← resolveType params decl self
-        match (← get).traitShape.find? fun (t', _, _) => t' == tr with
+        match ((← get).traitShape[tr]?).map (fun x => (tr, x)) with
         | some (_, arity, assocs) =>
           unless arity == targs.length do
             throw s!"`<.. as {Syntax.lastSegment tr}>::{name}`: `{Syntax.lastSegment tr}` takes {arity} arguments, and is given {targs.length}"
@@ -58,7 +58,7 @@ partial def resolveType (params : List (String × Ty)) (decl : Bool) : TypeExpr 
           if !args.isEmpty && (← get).gatScope.contains name then
             return ← resolveType params decl (.name name args)
           if let some own := params.lookup name then return own
-        let traits := (← get).traitShape.filter fun (_, arity, assocs) => arity == 0 && assocs.contains name
+        let traits := (← get).traitShape.toList.filter fun (_, arity, assocs) => arity == 0 && assocs.contains name
         -- (Several: the one written of the parameter, if one is.)
         let written := (← get).paramTraits.filterMap fun (q, tr, _) => if q == p then some tr else none
         -- (None without arguments: one with them written of the parameter,
@@ -66,7 +66,7 @@ partial def resolveType (params : List (String × Ty)) (decl : Bool) : TypeExpr 
         if traits.isEmpty then
           let withArgs ← (← get).paramTraits.filterMapM fun (q, tr, targs) => do
             if q != p || targs.isEmpty then return none
-            match (← get).traitShape.find? fun (t', _, _) => t' == tr with
+            match ((← get).traitShape[tr]?).map (fun x => (tr, x)) with
             | some (_, arity, assocs) => pure (if arity == targs.length && assocs.contains name then some (tr, targs) else none)
             | none => pure none
           if let [(tr, targs)] := withArgs then
@@ -419,9 +419,7 @@ def declareTraits (items : List Item) : M Unit := do
           assocVars := assocVars ++ [(a, id)]
       -- (In front of what was there, which is kept as it was where it had no
       -- shape of this trait: units checked side by side are put together.)
-      let had := (← get).traitShape
-      let shapes := if had.any (·.1 == name) then had.filter (·.1 != name) else had
-      modify fun s => { s with traitShape := (name, tparams.length, assocNames) :: shapes }
+      modify fun s => { s with traitShape := s.traitShape.insert name (tparams.length, assocNames) }
       let mut index := 0
       for (m, params, ret) in methods do
         -- (The type parameters of its own: a variable each.)
@@ -548,7 +546,7 @@ def declareTraits (items : List Item) : M Unit := do
       if (← get).kimpls.has tr head then
         throw s!"`{tr}` is implemented twice for `{head}`"
       -- The arguments it gives its trait, and the types the trait leaves to it.
-      let (arityOfTrait, assocNames) := ((← get).traitShape.lookup base).getD (0, [])
+      let (arityOfTrait, assocNames) := ((← get).traitShape[base]?).getD (0, [])
       let (pmap, _, _) ← freshParams params
       let pvars := pmap.filterMap fun
         | (p, .var id) => some (p, id)
@@ -590,7 +588,7 @@ def declareTraits (items : List Item) : M Unit := do
               | some body => zonk (← resolveType pmap false body)
               | none => throw s!"{what}: `{p}` is not one of its type parameters"
           let mut cargs : List Ty := []
-          for i in List.range ((((← get).traitShape.lookup t').map (·.1)).getD 0) do
+          for i in List.range ((((← get).traitShape[t']?).map (·.1)).getD 0) do
             match methods.findSome? fun
                 | .typeAlias n _ body => if n == Syntax.ctxArgName k i then some body else none
                 | _ => none with
@@ -665,7 +663,7 @@ def declareTraits (items : List Item) : M Unit := do
           if let some (k, name) := Syntax.equalArgParts n then
             match context[k]? with
             | some (subject, asked) =>
-              let left := (((← get).traitShape.lookup asked).map (·.2)).getD []
+              let left := (((← get).traitShape[asked]?).map (·.2)).getD []
               unless left.contains name do
                 throw s!"{what}: `{Syntax.lastSegment asked}` leaves no type `{name}` to its implementations"
               match args.idxOf? subject with
@@ -682,7 +680,7 @@ def declareTraits (items : List Item) : M Unit := do
                     | none => throw s!"{what}: `{subject}` is not one of its type parameters"
                 -- (The trait's own arguments go with the type asked of.)
                 let mut cargs : List Ty := []
-                for i in List.range ((((← get).traitShape.lookup asked).map (·.1)).getD 0) do
+                for i in List.range ((((← get).traitShape[asked]?).map (·.1)).getD 0) do
                   match methods.findSome? fun
                       | .typeAlias n _ b => if n == Syntax.ctxArgName k i then some b else none
                       | _ => none with
@@ -786,9 +784,9 @@ def declare (items : List Item) : M Unit := do
   -- operation may name it of the effect's type parameters (`S::Out`).
   for item in items do
     if let .traitInfo n _ _ params assocs := item then
-      unless (← get).traitShape.any (·.1 == n) do
+      unless (← get).traitShape.contains n do
         let params := (genericParams params).filter (!isLifetime ·)
-        modify fun s => { s with traitShape := (n, params.length, assocs) :: s.traitShape }
+        modify fun s => { s with traitShape := s.traitShape.insert n (params.length, assocs) }
   -- Names first, so that declarations may refer to each other.
   for item in items do
     match item with
