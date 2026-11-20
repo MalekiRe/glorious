@@ -285,7 +285,9 @@ pub struct World<S> { pub columns: S, generations: [Int], free: [Int], tick: Int
     brought_entities: [Entity], brought_names: [Str],
     // (The app's lifecycle hooks, kept by the world, and whether an exclusive
     // system has it, when its own structural operations run them.)
-    hooks: [WorldHook<S>], direct: Bool }
+    hooks: [WorldHook<S>], direct: Bool,
+    // (Where `app.step` is in the pass it is stepping through.)
+    stepping: Int }
 use std::thread::{Mutex, Threads, lock, channel, send, recv};
 fn no_remotes<S>() -> Mutex<[Request<S>]> { Mutex::new([]) }
 
@@ -801,7 +803,7 @@ impl<S> World<S> {
     }
 
     // An empty world of the columns `S`.
-    pub fn new() -> World<S> where S: Columns { World { columns: <S as Columns>::empty(), generations: [], free: [], tick: 1, since: 0, remotes: no_remotes(), id: std::thread::fresh_number(), bring_names: [], bring_fns: [], brought_entities: [], brought_names: [], hooks: [], direct: false } }
+    pub fn new() -> World<S> where S: Columns { World { columns: <S as Columns>::empty(), generations: [], free: [], tick: 1, since: 0, remotes: no_remotes(), id: std::thread::fresh_number(), bring_names: [], bring_fns: [], brought_entities: [], brought_names: [], hooks: [], direct: false, stepping: 0 } }
 
     // Give an entity a component, or another value of one it has: the one
     // it had, if it had one.
@@ -1879,18 +1881,32 @@ impl<X, R> Locals for (X, R) where R: Locals {
 // Something that runs against a world when `E` is emitted: a function with
 // its locals, as it was registered; two systems in a pair run one after the
 // other.
+// Where a step of a pass is: the units gone past (`at`), the one to run
+// (`target`), and what ran there: `kind` 1 a system (`flag`: whether it
+// ran), 2 a condition (`flag`: what it said), 0 none yet.
+pub struct Stepper { at: Int, target: Int, kind: Int, flag: Bool }
+pub struct StepReport { pub index: Int, pub kind: Int, pub flag: Bool, pub finished: Bool }
+
 pub trait System<E, S> {
     fn run(&mut Self, &E, &mut World<S>, &mut Commands<S>)
     // (The names of its functions, after those given: upstream's
     // `app.systems()`.)
     fn system_names(&Self, [Str]) -> [Str]
+    // (One step of a pass, upstream's `app.step`: the system or condition
+    // the stepper is at, run, and the stepper past what this has.)
+    fn step(&mut Self, &E, &mut World<S>, &mut Commands<S>, Stepper) -> Stepper
 }
 impl<E, S> System<E, S> for () {
+    fn step(nothing: &mut (), event: &E, world: &mut World<S>, commands: &mut Commands<S>, at: Stepper) -> Stepper { at }
     fn run(nothing: &mut (), event: &E, world: &mut World<S>, commands: &mut Commands<S>) { () }
     fn system_names(nothing: &(), names: [Str]) -> [Str] { names }
 }
 impl<E, S, X, Y> System<E, S> for (X, Y) where X: System<E, S>, Y: System<E, S> {
     fn system_names(pair: &(X, Y), names: [Str]) -> [Str] { <Y as System<E, S>>::system_names(&pair.1, <X as System<E, S>>::system_names(&pair.0, names)) }
+    fn step(pair: &mut (X, Y), event: &E, world: &mut World<S>, commands: &mut Commands<S>, at: Stepper) -> Stepper {
+        let after = <X as System<E, S>>::step(&mut pair.0, event, world, commands, at);
+        <Y as System<E, S>>::step(&mut pair.1, event, world, commands, after)
+    }
     fn run(pair: &mut (X, Y), event: &E, world: &mut World<S>, commands: &mut Commands<S>) {
         <X as System<E, S>>::run(&mut pair.0, event, world, commands);
         <Y as System<E, S>>::run(&mut pair.1, event, world, commands)
@@ -1904,6 +1920,15 @@ pub struct Sys<F, Lc> { f: F, locals: Lc, last: Int, name: Str }
 impl<E, S, ..P, ..A, L, Ts, F, Lc> System<E, S> for Sys<F, Lc>
     where F: Fn<(..P), Output = ()>, ..P: Parameter<Asks = A>, (..A): Tuple<Nested = L>, L: AllTouches<List = Ts>, Ts: AllApart, L: Fetch<E, S, (), F, (), Lc> {
     fn system_names(sys: &Sys<F, Lc>, names: [Str]) -> [Str] { push(names, sys.name) }
+    fn step(sys: &mut Sys<F, Lc>, event: &E, world: &mut World<S>, commands: &mut Commands<S>, at: Stepper) -> Stepper {
+        if(at.at == at.target) {
+            world.since = if(sys.last > world.tick) { 0 } else { sys.last };
+            let ran = is_some(<L as Fetch<E, S, (), F, (), Lc>>::fetch(event, world, commands, &mut sys.locals, (), &sys.f));
+            world.since = 0;
+            if(ran) { sys.last = world.tick; world.tick = world.tick + 1 };
+            Stepper { at: at.at + 1, target: at.target, kind: 1, flag: ran }
+        } else { Stepper { at: at.at + 1, target: at.target, kind: at.kind, flag: at.flag } }
+    }
     fn run(sys: &mut Sys<F, Lc>, event: &E, world: &mut World<S>, commands: &mut Commands<S>) {
         // (A world put in the app's place after the system last ran has a
         // clock of its own: all of it is new to the system.)
@@ -1956,10 +1981,19 @@ impl<E, S, ..P, ..A, L, Ts, Lc> Condition<E, S> for fn(..P) -> Bool
 }
 
 // Systems that run only when a condition holds: `friction.run_if(moving)`.
-pub struct RunIf<P, C> { systems: P, condition: C }
-pub fn run_if<P, C>(systems: P, condition: C) -> RunIf<P, C> { RunIf { systems: systems, condition: condition } }
+// (`held`: what the condition said when it was last stepped.)
+pub struct RunIf<P, C> { systems: P, condition: C, held: Bool }
+pub fn run_if<P, C>(systems: P, condition: C) -> RunIf<P, C> { RunIf { systems: systems, condition: condition, held: false } }
 impl<E, S, P, C> System<E, S> for RunIf<P, C> where P: System<E, S>, C: Condition<E, S> {
     fn system_names(guarded: &RunIf<P, C>, names: [Str]) -> [Str] { <P as System<E, S>>::system_names(&guarded.systems, names) }
+    // (Its condition a step of its own; what it guards, steps only where it held.)
+    fn step(guarded: &mut RunIf<P, C>, event: &E, world: &mut World<S>, commands: &mut Commands<S>, at: Stepper) -> Stepper {
+        let here = if(at.at == at.target) {
+            guarded.held = <C as Condition<E, S>>::holds(&guarded.condition, event, world, commands);
+            Stepper { at: at.at + 1, target: at.target, kind: 2, flag: guarded.held }
+        } else { Stepper { at: at.at + 1, target: at.target, kind: at.kind, flag: at.flag } };
+        if(guarded.held) { <P as System<E, S>>::step(&mut guarded.systems, event, world, commands, here) } else { here }
+    }
     fn run(guarded: &mut RunIf<P, C>, event: &E, world: &mut World<S>, commands: &mut Commands<S>) {
         if(<C as Condition<E, S>>::holds(&guarded.condition, event, world, commands)) {
             <P as System<E, S>>::run(&mut guarded.systems, event, world, commands)
@@ -1969,8 +2003,8 @@ impl<E, S, P, C> System<E, S> for RunIf<P, C> where P: System<E, S>, C: Conditio
 impl<E, S, P, C> IntoSystem<E, S> for RunIf<P, C> where P: IntoSystem<E, S>, C: Condition<E, S> {
     type Out = RunIf<<P as IntoSystem<E, S>>::Out, C>;
     fn into_system(guarded: RunIf<P, C>) -> RunIf<<P as IntoSystem<E, S>>::Out, C> {
-        let RunIf { systems, condition } = guarded;
-        RunIf { systems: <P as IntoSystem<E, S>>::into_system(systems), condition: condition }
+        let RunIf { systems, condition, held } = guarded;
+        RunIf { systems: <P as IntoSystem<E, S>>::into_system(systems), condition: condition, held: held }
     }
 }
 
@@ -1983,6 +2017,12 @@ pub fn exclusive<F>(f: F) -> Exclusive<F> { let (name, f) = std::any::fn_name(f)
 // system makes its own.)
 impl<E, S, F> System<E, S> for Exclusive<F> where F: Fn<(&mut World<S>,), Output = ()> {
     fn system_names(system: &Exclusive<F>, names: [Str]) -> [Str] { push(names, system.name) }
+    fn step(system: &mut Exclusive<F>, event: &E, world: &mut World<S>, commands: &mut Commands<S>, at: Stepper) -> Stepper {
+        if(at.at == at.target) {
+            <Exclusive<F> as System<E, S>>::run(system, event, world, commands);
+            Stepper { at: at.at + 1, target: at.target, kind: 1, flag: true }
+        } else { Stepper { at: at.at + 1, target: at.target, kind: at.kind, flag: at.flag } }
+    }
     fn run(system: &mut Exclusive<F>, event: &E, world: &mut World<S>, commands: &mut Commands<S>) {
         let asked = replace(commands, no_commands(&*world));
         apply(asked, world);
@@ -1997,6 +2037,12 @@ pub struct ExclusiveWith<F> { f: F, name: Str }
 pub fn exclusive_with<F>(f: F) -> ExclusiveWith<F> { let (name, f) = std::any::fn_name(f); ExclusiveWith { f: f, name: name } }
 impl<E, S, F> System<E, S> for ExclusiveWith<F> where F: Fn<(&E, &mut World<S>), Output = ()> {
     fn system_names(system: &ExclusiveWith<F>, names: [Str]) -> [Str] { push(names, system.name) }
+    fn step(system: &mut ExclusiveWith<F>, event: &E, world: &mut World<S>, commands: &mut Commands<S>, at: Stepper) -> Stepper {
+        if(at.at == at.target) {
+            <ExclusiveWith<F> as System<E, S>>::run(system, event, world, commands);
+            Stepper { at: at.at + 1, target: at.target, kind: 1, flag: true }
+        } else { Stepper { at: at.at + 1, target: at.target, kind: at.kind, flag: at.flag } }
+    }
     fn run(system: &mut ExclusiveWith<F>, event: &E, world: &mut World<S>, commands: &mut Commands<S>) {
         let asked = replace(commands, no_commands(&*world));
         apply(asked, world);
@@ -2023,10 +2069,14 @@ impl<E, S, F> IntoSystem<E, S> for Exclusive<F> where F: Fn<(&mut World<S>,), Ou
 // take of the world apart is not yet given to each apart.)
 pub struct Parallel<P> { branches: P }
 pub fn parallel<T, P>(systems: T) -> Parallel<P> where T: Tuple<Nested = P> { Parallel { branches: nest(systems) } }
-pub trait Branches<E, S> { fn run_branches(&mut Self, &E, &mut World<S>, &mut Commands<S>) fn branch_names(&Self, [Str]) -> [Str] }
-impl<E, S> Branches<E, S> for () { fn run_branches(none: &mut (), event: &E, world: &mut World<S>, commands: &mut Commands<S>) { () } fn branch_names(none: &(), names: [Str]) -> [Str] { names } }
+pub trait Branches<E, S> { fn run_branches(&mut Self, &E, &mut World<S>, &mut Commands<S>) fn branch_names(&Self, [Str]) -> [Str] fn step_branches(&mut Self, &E, &mut World<S>, &mut Commands<S>, Stepper) -> Stepper }
+impl<E, S> Branches<E, S> for () { fn run_branches(none: &mut (), event: &E, world: &mut World<S>, commands: &mut Commands<S>) { () } fn branch_names(none: &(), names: [Str]) -> [Str] { names } fn step_branches(none: &mut (), event: &E, world: &mut World<S>, commands: &mut Commands<S>, at: Stepper) -> Stepper { at } }
 impl<E, S, X, R> Branches<E, S> for (X, R) where X: System<E, S>, R: Branches<E, S> {
     fn branch_names(list: &(X, R), names: [Str]) -> [Str] { <R as Branches<E, S>>::branch_names(&list.1, <X as System<E, S>>::system_names(&list.0, names)) }
+    fn step_branches(list: &mut (X, R), event: &E, world: &mut World<S>, commands: &mut Commands<S>, at: Stepper) -> Stepper {
+        let after = <X as System<E, S>>::step(&mut list.0, event, world, commands, at);
+        <R as Branches<E, S>>::step_branches(&mut list.1, event, world, commands, after)
+    }
     fn run_branches(list: &mut (X, R), event: &E, world: &mut World<S>, commands: &mut Commands<S>) {
         std::thread::scope(fn(s: &std::thread::Scope) {
             (std::thread::Scope::spawn_joined(s, fn() / {std::thread::Threads} { <X as System<E, S>>::run(&mut list.0, event, world, commands) }))
@@ -2036,6 +2086,7 @@ impl<E, S, X, R> Branches<E, S> for (X, R) where X: System<E, S>, R: Branches<E,
 }
 impl<E, S, P> System<E, S> for Parallel<P> where P: Branches<E, S> {
     fn system_names(group: &Parallel<P>, names: [Str]) -> [Str] { <P as Branches<E, S>>::branch_names(&group.branches, names) }
+    fn step(group: &mut Parallel<P>, event: &E, world: &mut World<S>, commands: &mut Commands<S>, at: Stepper) -> Stepper { <P as Branches<E, S>>::step_branches(&mut group.branches, event, world, commands, at) }
     fn run(group: &mut Parallel<P>, event: &E, world: &mut World<S>, commands: &mut Commands<S>) {
         <P as Branches<E, S>>::run_branches(&mut group.branches, event, world, commands)
     }
@@ -2106,6 +2157,12 @@ impl<N, P, D, R> CountNodes for (Node<N, P, D>, R) where R: CountNodes { fn coun
 impl<E, S, Ns> System<E, S> for Graph<Ns> where Ns: RunNodes<E, S, Ns>, Ns: CountNodes {
     // (Its nodes' names are not said.)
     fn system_names(graph: &Graph<Ns>, names: [Str]) -> [Str] { names }
+    fn step(system: &mut Graph<Ns>, event: &E, world: &mut World<S>, commands: &mut Commands<S>, at: Stepper) -> Stepper {
+        if(at.at == at.target) {
+            <Graph<Ns> as System<E, S>>::run(system, event, world, commands);
+            Stepper { at: at.at + 1, target: at.target, kind: 1, flag: true }
+        } else { Stepper { at: at.at + 1, target: at.target, kind: at.kind, flag: at.flag } }
+    }
     fn run(graph: &mut Graph<Ns>, event: &E, world: &mut World<S>, commands: &mut Commands<S>) {
         let mut done = [];
         let mut i = 0;
@@ -2174,6 +2231,9 @@ pub struct SharedSystem<Q> { shared: Mutex<Q> }
 impl<Q> Use<[0, *]> for SharedSystem<Q> {}
 impl<E, S, Q> System<E, S> for SharedSystem<Q> where Q: System<E, S> {
     fn system_names(system: &SharedSystem<Q>, names: [Str]) -> [Str] { lock(&system.shared, fn(q: &mut Q) -> [Str] { <Q as System<E, S>>::system_names(&*q, names) }) }
+    fn step(system: &mut SharedSystem<Q>, event: &E, world: &mut World<S>, commands: &mut Commands<S>, at: Stepper) -> Stepper {
+        lock(&system.shared, fn(q: &mut Q) -> Stepper { <Q as System<E, S>>::step(q, event, world, commands, at) })
+    }
     fn run(system: &mut SharedSystem<Q>, event: &E, world: &mut World<S>, commands: &mut Commands<S>) {
         lock(&system.shared, fn(q: &mut Q) { <Q as System<E, S>>::run(q, event, world, commands) })
     }
@@ -2250,24 +2310,34 @@ fn fire_world<S>(world: &mut World<S>, kind: Int, names: &[Str], entities: &[Ent
 // under `E`; the second passes over an entry under another label.
 pub trait Dispatch<E, S> {
     fn dispatch(&mut Self, &E, &mut World<S>, &mut Commands<S>)
+    // (One step of the pass: `app.step`. Tasks and behaviors are not stepped.)
+    fn dispatch_step(&mut Self, &E, &mut World<S>, &mut Commands<S>, Stepper) -> Stepper
 }
 impl<E, S> Dispatch<E, S> for () {
     fn dispatch(nothing: &mut (), event: &E, world: &mut World<S>, commands: &mut Commands<S>) { () }
+    fn dispatch_step(nothing: &mut (), event: &E, world: &mut World<S>, commands: &mut Commands<S>, at: Stepper) -> Stepper { at }
 }
 impl<E, P, T, S> Dispatch<E, S> for (On<E, P>, T) where P: System<E, S>, T: Dispatch<E, S> {
     fn dispatch(list: &mut (On<E, P>, T), event: &E, world: &mut World<S>, commands: &mut Commands<S>) {
         <T as Dispatch<E, S>>::dispatch(&mut list.1, event, world, commands);
         <P as System<E, S>>::run(&mut list.0.systems, event, world, commands)
     }
+    fn dispatch_step(list: &mut (On<E, P>, T), event: &E, world: &mut World<S>, commands: &mut Commands<S>, at: Stepper) -> Stepper {
+        let after = <T as Dispatch<E, S>>::dispatch_step(&mut list.1, event, world, commands, at);
+        <P as System<E, S>>::step(&mut list.0.systems, event, world, commands, after)
+    }
 }
 impl<E, P, X, T, S> Dispatch<E, S> for (SubOf<P, X>, T) where T: Dispatch<E, S> {
     fn dispatch(list: &mut (SubOf<P, X>, T), event: &E, world: &mut World<S>, commands: &mut Commands<S>) { <T as Dispatch<E, S>>::dispatch(&mut list.1, event, world, commands) }
+    fn dispatch_step(list: &mut (SubOf<P, X>, T), event: &E, world: &mut World<S>, commands: &mut Commands<S>, at: Stepper) -> Stepper { <T as Dispatch<E, S>>::dispatch_step(&mut list.1, event, world, commands, at) }
 }
 impl<E, P, C, T, S> Dispatch<E, S> for (ComputedOf<P, C>, T) where T: Dispatch<E, S> {
     fn dispatch(list: &mut (ComputedOf<P, C>, T), event: &E, world: &mut World<S>, commands: &mut Commands<S>) { <T as Dispatch<E, S>>::dispatch(&mut list.1, event, world, commands) }
+    fn dispatch_step(list: &mut (ComputedOf<P, C>, T), event: &E, world: &mut World<S>, commands: &mut Commands<S>, at: Stepper) -> Stepper { <T as Dispatch<E, S>>::dispatch_step(&mut list.1, event, world, commands, at) }
 }
 impl<E, F, P, T, S> Dispatch<E, S> for (On<F, P>, T) where T: Dispatch<E, S> {
     fn dispatch(list: &mut (On<F, P>, T), event: &E, world: &mut World<S>, commands: &mut Commands<S>) { <T as Dispatch<E, S>>::dispatch(&mut list.1, event, world, commands) }
+    fn dispatch_step(list: &mut (On<F, P>, T), event: &E, world: &mut World<S>, commands: &mut Commands<S>, at: Stepper) -> Stepper { <T as Dispatch<E, S>>::dispatch_step(&mut list.1, event, world, commands, at) }
 }
 
 // What an app is given by a plugin: a type of its own whose `build` adds to
@@ -2904,6 +2974,7 @@ impl<E, S, T> Dispatch<E, S> for (TaskOf<S>, T) where T: Dispatch<E, S>, E: Sche
         <T as Dispatch<E, S>>::dispatch(&mut list.1, event, world, commands);
         drive_task(&mut list.0, <E as Schedule>::NAME, world)
     }
+    fn dispatch_step(list: &mut (TaskOf<S>, T), event: &E, world: &mut World<S>, commands: &mut Commands<S>, at: Stepper) -> Stepper { <T as Dispatch<E, S>>::dispatch_step(&mut list.1, event, world, commands, at) }
 }
 impl<X, S, T, L> Links<X, S, L> for (TaskOf<S>, T) where T: Links<X, S, L> {
     fn leave_links(app: &mut App<S, L>, commands: &mut Commands<S>) { <T as Links<X, S, L>>::leave_links(app, commands) }
@@ -3119,6 +3190,7 @@ impl<E, S, B, T> Dispatch<E, S> for (BehaviorsOf<B, S>, T)
         <T as Dispatch<E, S>>::dispatch(&mut list.1, event, world, commands);
         if(<E as Schedule>::NAME == list.0.label) { run_behaviors<B, S>(&mut list.0, world) } else { () }
     }
+    fn dispatch_step(list: &mut (BehaviorsOf<B, S>, T), event: &E, world: &mut World<S>, commands: &mut Commands<S>, at: Stepper) -> Stepper { <T as Dispatch<E, S>>::dispatch_step(&mut list.1, event, world, commands, at) }
 }
 fn run_behaviors<B, S>(behaviors: &mut BehaviorsOf<B, S>, world: &mut World<S>) where S: Columns, S: Get<B>, S: Holds<Instances>, S: Hides, B: Behavior<S> {
     // Those whose entity lost the marker, or ended: dropped.
@@ -3267,6 +3339,12 @@ pub struct SyncPointOf<P> { none: [P] }
 pub fn sync_point<P>(point: P) -> SyncPointOf<P> { discard(point); SyncPointOf { none: [] } }
 impl<E, S, P> System<E, S> for SyncPointOf<P> where P: Schedule, P: PointKind {
     fn system_names(system: &SyncPointOf<P>, names: [Str]) -> [Str] { names }
+    fn step(system: &mut SyncPointOf<P>, event: &E, world: &mut World<S>, commands: &mut Commands<S>, at: Stepper) -> Stepper {
+        if(at.at == at.target) {
+            <SyncPointOf<P> as System<E, S>>::run(system, event, world, commands);
+            Stepper { at: at.at + 1, target: at.target, kind: 1, flag: true }
+        } else { Stepper { at: at.at + 1, target: at.target, kind: at.kind, flag: at.flag } }
+    }
     fn run(system: &mut SyncPointOf<P>, event: &E, world: &mut World<S>, commands: &mut Commands<S>) {
         let name = <P as Schedule>::NAME;
         let asked = lock(&world.remotes, fn(queue: &mut [Request<S>]) -> [Request<S>] { replace(queue, []) });
@@ -3326,6 +3404,8 @@ impl<S> World<S> {
         // (A copy of the same world: its entities are the world's.)
         copy.id = world.id;
         copy.bring_names = clone(&world.bring_names);
+        // (And its hooks: handles to the app's.)
+        copy.hooks = world.hooks;
         let mut k = 0;
         while({ k < len_at(&world.bring_fns) }) { let f = world.bring_fns[k]; push_at(&mut copy.bring_fns, f); k = k + 1 };
         copy.generations = clone(&world.generations);
@@ -3426,15 +3506,15 @@ pub struct App<S, L> { pub world: World<S>, systems: L }
 impl<S, L> App<S, L> {
     // An app with nothing in its world and no systems.
     pub fn new() -> App<(), ()> {
-        App { world: World { columns: (), generations: [], free: [], tick: 1, since: 0, remotes: no_remotes(), id: std::thread::fresh_number(), bring_names: [], bring_fns: [], brought_entities: [], brought_names: [], hooks: [], direct: false }, systems: () }
+        App { world: World { columns: (), generations: [], free: [], tick: 1, since: 0, remotes: no_remotes(), id: std::thread::fresh_number(), bring_names: [], bring_fns: [], brought_entities: [], brought_names: [], hooks: [], direct: false, stepping: 0 }, systems: () }
     }
 
     // Give the world a resource.
     pub fn insert_resource<T>(app: Self, value: T) -> App<(Resource<T>, S), L> {
         let App { world, systems } = app;
-        let World { columns, generations, free, tick, since, remotes, id, bring_names: _, bring_fns: _, brought_entities: _, brought_names: _, hooks: _, direct: _ } = world;
+        let World { columns, generations, free, tick, since, remotes, id, bring_names: _, bring_fns: _, brought_entities: _, brought_names: _, hooks: _, direct: _, stepping: _ } = world;
         discard(remotes);
-        App { world: World { columns: (Resource { value: Some(value) }, columns), generations: generations, free: free, tick: tick, since: since, remotes: no_remotes(), id: id, bring_names: [], bring_fns: [], brought_entities: [], brought_names: [], hooks: [], direct: false }, systems: systems }
+        App { world: World { columns: (Resource { value: Some(value) }, columns), generations: generations, free: free, tick: tick, since: since, remotes: no_remotes(), id: id, bring_names: [], bring_fns: [], brought_entities: [], brought_names: [], hooks: [], direct: false, stepping: 0 }, systems: systems }
     }
 
     // The resource at its type's start.
@@ -3444,17 +3524,17 @@ impl<S, L> App<S, L> {
     // it from the systems that ask for it.)
     pub fn register_resource<T>(app: Self) -> App<(Resource<T>, S), L> {
         let App { world, systems } = app;
-        let World { columns, generations, free, tick, since, remotes, id, bring_names: _, bring_fns: _, brought_entities: _, brought_names: _, hooks: _, direct: _ } = world;
+        let World { columns, generations, free, tick, since, remotes, id, bring_names: _, bring_fns: _, brought_entities: _, brought_names: _, hooks: _, direct: _, stepping: _ } = world;
         discard(remotes);
-        App { world: World { columns: (Resource { value: None }, columns), generations: generations, free: free, tick: tick, since: since, remotes: no_remotes(), id: id, bring_names: [], bring_fns: [], brought_entities: [], brought_names: [], hooks: [], direct: false }, systems: systems }
+        App { world: World { columns: (Resource { value: None }, columns), generations: generations, free: free, tick: tick, since: since, remotes: no_remotes(), id: id, bring_names: [], bring_fns: [], brought_entities: [], brought_names: [], hooks: [], direct: false, stepping: 0 }, systems: systems }
     }
 
     // Store a component.
     pub fn register<T>(app: Self) -> App<(Column<T>, S), L> {
         let App { world, systems } = app;
-        let World { columns, generations, free, tick, since, remotes, id, bring_names: _, bring_fns: _, brought_entities: _, brought_names: _, hooks: _, direct: _ } = world;
+        let World { columns, generations, free, tick, since, remotes, id, bring_names: _, bring_fns: _, brought_entities: _, brought_names: _, hooks: _, direct: _, stepping: _ } = world;
         discard(remotes);
-        App { world: World { columns: (empty_column(), columns), generations: generations, free: free, tick: tick, since: since, remotes: no_remotes(), id: id, bring_names: [], bring_fns: [], brought_entities: [], brought_names: [], hooks: [], direct: false }, systems: systems }
+        App { world: World { columns: (empty_column(), columns), generations: generations, free: free, tick: tick, since: since, remotes: no_remotes(), id: id, bring_names: [], bring_fns: [], brought_entities: [], brought_names: [], hooks: [], direct: false, stepping: 0 }, systems: systems }
     }
 
     // Register systems under a label, named by a value of it: `Update`.
@@ -3478,17 +3558,17 @@ impl<S, L> App<S, L> {
     // Store a relation: what relates and what is related to.
     pub fn relation<R>(app: Self) -> App<<R as RelationColumns<S>>::Out, L> where R: RelationColumns<S> {
         let App { world, systems } = app;
-        let World { columns, generations, free, tick, since, remotes, id, bring_names: _, bring_fns: _, brought_entities: _, brought_names: _, hooks: _, direct: _ } = world;
+        let World { columns, generations, free, tick, since, remotes, id, bring_names: _, bring_fns: _, brought_entities: _, brought_names: _, hooks: _, direct: _, stepping: _ } = world;
         discard(remotes);
-        App { world: World { columns: <R as RelationColumns<S>>::relation_columns(columns), generations: generations, free: free, tick: tick, since: since, remotes: no_remotes(), id: id, bring_names: [], bring_fns: [], brought_entities: [], brought_names: [], hooks: [], direct: false }, systems: systems }
+        App { world: World { columns: <R as RelationColumns<S>>::relation_columns(columns), generations: generations, free: free, tick: tick, since: since, remotes: no_remotes(), id: id, bring_names: [], bring_fns: [], brought_entities: [], brought_names: [], hooks: [], direct: false, stepping: 0 }, systems: systems }
     }
 
     // Store each of a list of components: `.register_all<(Position, Velocity)>()`.
     pub fn register_all<C>(app: Self) -> App<<C as Registers<S>>::Out, L> where C: Registers<S> {
         let App { world, systems } = app;
-        let World { columns, generations, free, tick, since, remotes, id, bring_names: _, bring_fns: _, brought_entities: _, brought_names: _, hooks: _, direct: _ } = world;
+        let World { columns, generations, free, tick, since, remotes, id, bring_names: _, bring_fns: _, brought_entities: _, brought_names: _, hooks: _, direct: _, stepping: _ } = world;
         discard(remotes);
-        App { world: World { columns: <C as Registers<S>>::register_all(columns), generations: generations, free: free, tick: tick, since: since, remotes: no_remotes(), id: id, bring_names: [], bring_fns: [], brought_entities: [], brought_names: [], hooks: [], direct: false }, systems: systems }
+        App { world: World { columns: <C as Registers<S>>::register_all(columns), generations: generations, free: free, tick: tick, since: since, remotes: no_remotes(), id: id, bring_names: [], bring_fns: [], brought_entities: [], brought_names: [], hooks: [], direct: false, stepping: 0 }, systems: systems }
     }
 
     // The app, ready to run.
@@ -3617,6 +3697,25 @@ impl<S, L> App<S, L> {
             despawn(&mut app.world, entity);
             true
         } else { false }
+    }
+
+    // Run the next system or condition of a pass of what is emitted, upstream's
+    // `app.step`, and do what it asked: which it was (`kind` 1 a system,
+    // `flag` whether it ran; 2 a condition, `flag` what it said), at which
+    // place of the pass, or that the pass is done (`finished`), when the next
+    // starts over.
+    pub fn step<E>(app: &mut Self, event: &E) -> StepReport where L: Dispatch<E, S>, S: Fires<S, L>, S: Requests<S, L> {
+        let index = app.world.stepping;
+        let mut commands = no_commands(&app.world);
+        let after = <L as Dispatch<E, S>>::dispatch_step(&mut app.systems, event, &mut app.world, &mut commands, Stepper { at: 0, target: index, kind: 0, flag: false });
+        flush(app, commands);
+        if(after.kind == 0) {
+            app.world.stepping = 0;
+            StepReport { index: index, kind: 0, flag: false, finished: true }
+        } else {
+            app.world.stepping = index + 1;
+            StepReport { index: index, kind: after.kind, flag: after.flag, finished: false }
+        }
     }
 
     // Run every system registered under what is emitted, then do what they

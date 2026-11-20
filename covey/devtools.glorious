@@ -8,8 +8,9 @@
 // - `task_console_shows_what_each_task_waits_for`.
 // - `rewinding_and_forking_restore_and_diverge`: a copy of the world to go
 //   back to, and one run apart and compared.
-// Not ported: `stepping_runs_one_system_or_condition_at_a_time`,
-// `why_not_names_the_mismatch_of_each_query`,
+// - `stepping_runs_one_system_or_condition_at_a_time`: each step a system
+//   or a condition, what it did, and a pass done and started over.
+// Not ported: `why_not_names_the_mismatch_of_each_query`,
 // `explains_why_components_exist_and_why_systems_are_ordered`,
 // `values_are_described_and_edited_without_debug`,
 // `debug_output_parses_into_values`, `mcp_tools_serve_a_live_app_on_its_own_thread`
@@ -39,10 +40,19 @@
 // 0
 // 1
 // 90
+// --
+// 1 true
+// 1
+// 20
+// 2 true
+// 1 true
+// 19
+// done
+// 0
 // 0
 mod ecs;
 
-use ecs::{App, World, Entity, Query, History, TaskStatus, AsyncWorld, Bridge, Schedule, Cloner, bridge, record, chain};
+use ecs::{App, World, Entity, Query, History, TaskStatus, AsyncWorld, Bridge, Schedule, Cloner, bridge, record, chain, run_if};
 
 struct Update
 struct Later
@@ -55,6 +65,11 @@ impl Clone for Damage { fn clone(d: &Damage) -> Damage { Damage(d.0) } }
 
 fn ramp(q: &mut Query<(&mut Damage,), ()>) { q.for_each() { (mut d,) => d.0 = d.0 + 1; } }
 fn apply_damage(q: &mut Query<(&Damage, &mut Hp), ()>) { q.for_each() { d, mut hp => hp.0 = hp.0 - d.0; } }
+fn some_hp(q: &mut Query<(&Hp,), ()>) -> Bool { q.count() > 0 }
+// A step as `kind flag`, or `done` where the pass is.
+fn shown(step: ecs::StepReport) -> Str {
+    if(step.finished) { "done" } else { show(step.kind) ++ " " ++ (if(step.flag) { "true" } else { "false" }) }
+}
 
 fn new_history() -> History<Hp> { History::new() }
 fn record_hp(q: &mut Query<(Entity, &Hp), ()>, history: &mut History<Hp>) { record(q, history) }
@@ -141,5 +156,19 @@ fn main() -> Int {
     say(if(if(len_at(&diff.spawned) == 1) { diff.changed[0] == e } else { false }) { 1 } else { 0 });
     app.emit(&Update);
     say(hp_of(&app.world, e));
+    say("--");
+
+    // `stepping_runs_one_system_or_condition_at_a_time`
+    let mut app = App::new().register<Hp>().register<Damage>()
+        .add_systems(Update, (ramp, apply_damage.run_if(some_hp)).chain()).build();
+    let e = app.world.spawn_bundle((Hp(20), Damage(0)));
+    say(shown(app.step(&Update)));
+    say(match(app.world.get<Damage>(e)) { Some(d) => d.0, None => 0 });
+    say(hp_of(&app.world, e));
+    say(shown(app.step(&Update)));
+    say(shown(app.step(&Update)));
+    say(hp_of(&app.world, e));
+    say(shown(app.step(&Update)));
+    say(app.step(&Update).index);
     0
 }

@@ -5960,8 +5960,13 @@ Each is to go; none is a design covey keeps.
   request's commands done at once (covey/remote,
   `envelope_commands_apply_when_the_emit_ends`). Still: `Env` is not held
   to, and such a point does not run beside the systems it does not
-  conflict with. Not yet: stepping and `why_not` (systems now say which
-  function they are).
+  conflict with. ~~Stepping~~: `app.step(&Update)` runs the next system or
+  condition of a pass and says which (`StepReport`: a system and whether it
+  ran, or a condition and what it said; `finished` past the end, when the
+  next starts over), through `System::step` / `Dispatch::dispatch_step`; a
+  `run_if` keeps what its condition said for the steps it guards
+  (covey/devtools). Tasks and behaviors are not stepped, and a graph is one
+  step. Not yet: `why_not`.
 
 ## Each function its own universe: where the checker is
 
