@@ -1,0 +1,61 @@
+// `joins_follow_retargets_and_despawns_in_both_storages` (upstream's
+// tests/relations.rs): `To` follows a link put again toward another target,
+// by a value put on the entity or by `relate`; `From` sees the sources move;
+// and a despawned target leaves the joins empty. (Each join to `Name` in a
+// query of its own, upstream's both in one.)
+// expect:
+// 10 10
+// 11 11
+// 0 0
+// 1 1
+// -1 -1
+// 0
+mod ecs;
+
+use ecs::{App, World, Entity, Relation, OneToMany, Relates, To, From, to};
+
+struct Name(Int)
+struct DockedAt { berth: Int }
+impl Relation for DockedAt { type Kind = OneToMany; }
+struct InSquad
+impl Relation for InSquad { type Kind = OneToMany; }
+
+// (Each join in a query of its own: a query here takes a component once,
+// and two joins to `Name` would both take its column.)
+fn read<S>(world: &mut World<S>, unit: Entity) -> Str
+    where S: ecs::Get<Name>, S: ecs::Get<Relates<DockedAt>>, S: ecs::Get<Relates<InSquad>>,
+          S: ecs::Hidden<(To<DockedAt, (&Name,)>,), ()>, S: ecs::Hidden<(To<InSquad, (&Name,)>,), ()>, S: ecs::Hidden<(&Name,), ()> {
+    let docked = docked_to(world, unit);
+    let squad = squad_of(world, unit);
+    show(docked) ++ " " ++ show(squad)
+}
+fn docked_to<S>(world: &mut World<S>, unit: Entity) -> Int where S: ecs::Get<Name>, S: ecs::Get<Relates<DockedAt>>, S: ecs::Hidden<(To<DockedAt, (&Name,)>,), ()>, S: ecs::Hidden<(&Name,), ()> {
+    match(world.query<(To<DockedAt, (&Name,)>,)>().get_mut(unit)) { Some((Some((n,)),)) => n.0, _ => 0 - 1 }
+}
+fn squad_of<S>(world: &mut World<S>, unit: Entity) -> Int where S: ecs::Get<Name>, S: ecs::Get<Relates<InSquad>>, S: ecs::Hidden<(To<InSquad, (&Name,)>,), ()>, S: ecs::Hidden<(&Name,), ()> {
+    match(world.query<(To<InSquad, (&Name,)>,)>().get_mut(unit)) { Some((Some((n,)),)) => n.0, _ => 0 - 1 }
+}
+fn crew<S>(world: &mut World<S>, e: Entity) -> Str
+    where S: ecs::Get<ecs::Sources<DockedAt>>, S: ecs::Get<ecs::Sources<InSquad>>,
+          S: ecs::Hidden<(From<DockedAt, Entity>, From<InSquad, Entity>), ()> {
+    match(world.query<(From<DockedAt, Entity>, From<InSquad, Entity>)>().get_mut(e)) {
+        Some((d, s)) => show(len_at(&d)) ++ " " ++ show(len_at(&s)),
+        None => "0 0"
+    }
+}
+
+fn main() -> Int {
+    let mut world = App::new().relation<DockedAt>().relation<InSquad>().register<Name>().build().world;
+    let a = world.spawn_bundle((Name(10),));
+    let b = world.spawn_bundle((Name(11),));
+    let unit = world.spawn_bundle((Name(1), DockedAt { berth: 0 }.to(a), InSquad.to(a)));
+    say(read(&mut world, unit));
+    discard(world.insert(unit, InSquad.to(b)));
+    discard(world.relate(unit, DockedAt { berth: 1 }, b));
+    say(read(&mut world, unit));
+    say(crew(&mut world, a));
+    say(crew(&mut world, b));
+    discard(world.despawn(b));
+    say(read(&mut world, unit));
+    0
+}

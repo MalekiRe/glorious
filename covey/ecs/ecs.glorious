@@ -1098,10 +1098,12 @@ impl<S> World<S> {
     // `world.single<(&mut Position,)>()` (upstream's `world.single`), and
     // with a filter, `single_filtered`. Written through the query it makes,
     // which puts the columns back when it is let go.
-    pub fn query<Q>(world: &mut Self) -> WorldQuery<'_, Q, (), S> where Q: Fill<S>, S: Hidden<Q, ()> {
+    // (A query takes each component it asks for once: asked for twice, as
+    // two joins to one component are, it is refused, `AllApart`.)
+    pub fn query<Q, Ts>(world: &mut Self) -> WorldQuery<'_, Q, (), S> where Q: Fill<S>, S: Hidden<Q, ()>, Q: ItemTouches<List = Ts>, Ts: AllApart {
         world.query_filtered<Q, ()>()
     }
-    pub fn query_filtered<Q, N>(world: &mut Self) -> WorldQuery<'_, Q, N, S> where Q: Fill<S>, N: Only<S>, S: Hidden<Q, N> {
+    pub fn query_filtered<Q, N, Ts>(world: &mut Self) -> WorldQuery<'_, Q, N, S> where Q: Fill<S>, N: Only<S>, S: Hidden<Q, N>, Q: ItemTouches<List = Ts>, Ts: AllApart {
         let query = query_of<Q, N, S>(world);
         WorldQuery {
             world: world,
