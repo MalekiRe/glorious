@@ -3851,6 +3851,7 @@ pub trait Share { fn share(&Self) -> Self }
 
 // A value threads share, changed only by one at a time.
 pub struct Mutex<T> { cell: Int, none: [T] }
+impl<T> Use<[0, *]> for Mutex<T> {}
 impl<T> Mutex<T> {
     pub fn new(value: T) -> Mutex<T> { Mutex { cell: new_cell(value), none: [] } }
 }
@@ -3865,6 +3866,7 @@ pub fn lock<T, R, F>(m: &Mutex<T>, f: F) -> R where F: for<'a> Fn<(&'a mut T,), 
 
 // A value many threads hold and read.
 pub struct Shared<T> { cell: Int, none: [T] }
+impl<T> Use<[0, *]> for Shared<T> {}
 impl<T> Shared<T> {
     pub fn new(value: T) -> Shared<T> { Shared { cell: new_cell(value), none: [] } }
 }
@@ -3880,6 +3882,7 @@ pub fn share<T>(s: &T) -> T where T: Share { <T as Share>::share(s) }
 
 // A whole number threads share.
 pub struct AtomicInt { cell: Int }
+impl Use<[0, *]> for AtomicInt {}
 impl AtomicInt {
     pub fn new(value: Int) -> AtomicInt { AtomicInt { cell: new_cell(value) } }
 }
@@ -3897,7 +3900,9 @@ pub fn compare_exchange(a: &AtomicInt, old: Int, new: Int) -> Int {
 
 // Values sent from one thread to another, in the order sent.
 pub struct Sender<T> { cell: Int, none: [T] }
+impl<T> Use<[0, *]> for Sender<T> {}
 pub struct Receiver<T> { cell: Int, none: [T] }
+impl<T> Use<[0, *]> for Receiver<T> {}
 pub fn channel<T>() -> (Sender<T>, Receiver<T>) {
     let cell = new_cell<[T]>([]);
     (Sender { cell: cell, none: [] }, Receiver { cell: cell, none: [] })

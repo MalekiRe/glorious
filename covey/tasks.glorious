@@ -63,16 +63,16 @@ fn spawn_player<S>(commands: &mut Commands<S>) -> Entity where S: ecs::Get<Healt
 }
 fn first_health(q: &mut Query<(Entity, &Health), ()>) -> Option<(Entity, Int)> {
     let mut found = None;
-    q.for_each() { e, h => if(ecs::none_at(&found)) { found = Some((e, h.0)) }; };
+    q.for_each() { e, h => if(ecs::none_at(&found)) { found = Some((e, h.0)) } else { () }; };
     found
 }
 fn positioned<S>(world: AsyncWorld<S>) -> AsyncWorld<S> / {Bridge<S>}
-    where S: ecs::Get<Health>, S: ecs::Get<Player>, S: ecs::Columns, S: ecs::Unlinks<S> {
+    where S: ecs::Get<Health>, S: ecs::Get<Player>, S: ecs::Columns, S: ecs::Unlinks<S>, S: ecs::Hidden<(Entity, &Health), ()> {
     let mut world = world;
-    let spawned = match(bridge(&mut world, Update, spawn_player<S>)) { Ok(e) => e, Err(_) => ecs::PLACEHOLDER };
+    let spawned = match(bridge(&mut world, Update, spawn_player)) { Ok(e) => e, Err(_) => Entity::PLACEHOLDER };
     // The same emit: the spawn is done already.
     let health = match(bridge(&mut world, Update, first_health)) { Ok(h) => h, Err(_) => None };
-    match(health) { Some((e, h)) => if(if(e == spawned) { h == 10 } else { false }) { say("task") }, None => () };
+    match(health) { Some((e, h)) => if(if(e == spawned) { h == 10 } else { false }) { say("task") } else { () }, None => () };
     world
 }
 
@@ -100,7 +100,7 @@ fn healths(q: &mut Query<(&Health,), ()>) -> [Int] {
 fn locals<S>(world: AsyncWorld<S>) -> AsyncWorld<S> / {Bridge<S>} where S: ecs::Get<Health>, S: ecs::Columns {
     let mut world = world;
     let mut local = [];
-    bridge_world(&mut world, Update, two_healths<S>);
+    bridge_world(&mut world, Update, two_healths);
     match(bridge(&mut world, Update, healths)) { Ok(hs) => local = hs, Err(_) => () };
     say(sort(local));
     say(fold(local, 0, fn(sum: Int, h: Int) -> Int { sum + h }));
@@ -128,11 +128,11 @@ fn kept<S>(world: AsyncWorld<S>) -> AsyncWorld<S> / {Bridge<S>} where S: ecs::Ge
 }
 
 // `a_woken_task_resumes_at_the_next_emit_of_any_label`
-fn flagged<S>(flag: Shared<AtomicInt>) -> fn(AsyncWorld<S>) -> AsyncWorld<S> / {Bridge<S>} {
+fn flagged<S>(flag: AtomicInt) -> fn(AsyncWorld<S>) -> AsyncWorld<S> / {Bridge<S>} {
     fn(world: AsyncWorld<S>) -> AsyncWorld<S> / {Bridge<S>} {
         let mut world = world;
-        let mine = std::thread::share(&flag);
-        wait_until(&mut world, fn() -> Bool { std::thread::load(&*mine) == 1 });
+        let mine = flag;
+        wait_until(&mut world, fn() -> Bool { let m = mine; std::thread::load(&m) == 1 });
         say(1);
         world
     }
@@ -154,7 +154,7 @@ fn count_a(q: &mut Query<(&A,), ()>) { if(q.count() == 2) { say("after 2") } els
 fn see_b(q: &mut Query<(&B,), ()>) { () }
 fn between<S>(world: AsyncWorld<S>) -> AsyncWorld<S> / {Bridge<S>} where S: ecs::Get<A>, S: ecs::Get<B>, S: ecs::Columns, S: ecs::Unlinks<S> {
     let mut world = world;
-    let mut system = keep(sum_and_spawn<S>);
+    let mut system = keep(sum_and_spawn);
     let mut going = true;
     while({ going }) {
         match(system.bridge(&mut world, Update)) {
@@ -200,13 +200,13 @@ fn main() -> Int {
     app.emit(&Update);
     say("--");
 
-    let flag = Shared::new(AtomicInt::new(0));
+    let flag = (AtomicInt::new(0));
     let mut app = App::new().add_task(flagged(std::thread::share(&flag))).build();
     app.emit(&Update);
     app.emit(&Render);
     say(0);
     let remote = std::thread::share(&flag);
-    join(spawn_detached(fn() { std::thread::store(&*remote, 1) }));
+    spawn_detached(fn() { std::thread::store(&*remote, 1) }).wait();
     app.emit(&Render);
     say("--");
 

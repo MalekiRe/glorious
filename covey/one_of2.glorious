@@ -49,7 +49,7 @@ fn replaced(t: &OnReplace<Running>, q: &mut Query<(Entity, &Running), ()>) { mat
 fn removed(t: &OnRemove<Running>, q: &mut Query<(Entity, &Running), ()>) { match(q.get_mut(t.entities[0])) { Some((_, r)) => say("remove running " ++ show(r.0)), None => () } }
 fn removed_dead(t: &OnRemove<Dead>) { say("remove dead") }
 fn added_walking(t: &OnAdd<Walking>, q: &mut Query<(Entity, Has<Running>, Has<Dead>), ()>) {
-    match(q.get_mut(t.entities[0])) { Some((_, r, d)) => say("add walking " ++ (if(r.0) { "1" } else { "0" }) ++ " " ++ (if(d.0) { "1" } else { "0" })), None => () }
+    match(q.get_mut(t.entities[0])) { Some((_, r, d)) => say("add walking " ++ (if(r) { "1" } else { "0" }) ++ " " ++ (if(d) { "1" } else { "0" })), None => () }
 }
 fn inserted_walking(t: &OnInsert<Walking>) { say("insert walking") }
 

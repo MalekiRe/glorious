@@ -38,10 +38,12 @@ struct Hp(Int)
 struct Seen(Int)
 
 fn count_hp(q: &mut Query<(&Hp,), ()>, seen: &mut Seen) { seen.0 = q.count() }
+fn count_all<S>(world: &mut World<S>) -> Int where S: ecs::Get<Hp>, S: ecs::Get<Disabled>, S: ecs::Hidden<(&Hp,), (MayHave<Disabled>,)> { world.query_filtered<(&Hp,), (MayHave<Disabled>,)>().count() }
+fn count_seen<S>(world: &mut World<S>) -> Int where S: ecs::Get<Hp>, S: ecs::Hidden<(&Hp,), ()> { world.query<(&Hp,)>().count() }
 fn seen_of<S>(world: &World<S>) -> Int where S: ecs::Holds<Seen> { match(world.resource<Seen>()) { Some(s) => s.0, None => 0 - 1 } }
 
 fn hide_root<S>(commands: &mut Commands<S>, q: &mut Query<(Entity, &Hp), ()>) where S: ecs::Get<ecs::Sources<ChildOf>>, S: ecs::Get<Disabled>, S: ecs::Get<HiddenBy> {
-    q.for_each() { e, h => if(h.0 == 0) { commands.disable_subtree<ChildOf>(e) }; }
+    q.for_each() { e, h => if(h.0 == 0) { commands.disable_subtree<ChildOf>(e) } else { () }; }
 }
 
 fn visible(q: &mut Query<(&Hp,), ()>, seen: &mut Seen) { seen.0 = seen.0 + q.count() }
@@ -68,7 +70,7 @@ fn main() -> Int {
     discard(world.relate(child, ChildOf, root));
     discard(world.relate(closed, ChildOf, child));
     world.disable_subtree<ChildOf>(root);
-    say(world.query_filtered<(&Hp,), (MayHave<Disabled>,)>().count() - world.query<(&Hp,)>().count() - 2);
+    say(count_all(&mut world) - count_seen(&mut world) - 2);
     say(world.query<(&Hp,)>().count());
     world.enable_subtree<ChildOf>(root);
     // What was hidden on its own stays hidden.
@@ -76,7 +78,7 @@ fn main() -> Int {
     say("--");
 
     let mut app = App::new().register<Hp>().register<Disabled>().register<HiddenBy>().relation<ChildOf>().insert_resource(Seen(0))
-        .add_systems(Update, (count_hp, hide_root<_>)).build();
+        .add_systems(Update, (count_hp, hide_root)).build();
     let root = app.world.spawn_bundle((Hp(0),));
     let child = app.world.spawn_bundle((Hp(1),));
     discard(app.world.relate(child, ChildOf, root));

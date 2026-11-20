@@ -83,7 +83,7 @@ fn main() -> Int {
     let mut i = 0;
     while({ i < 10 }) {
         if(pos(&app.world, es[i]) != i + 1) { right = false };
-        match(app.world.get<Velocity>(es[i])) { Some(v) => if(v.0 != i * 10 + 1) { right = false }, None => right = false };
+        match(app.world.get<Velocity>(es[i])) { Some(v) => if(v.0 != i * 10 + 1) { right = false } else { () }, None => right = false };
         i = i + 1
     };
     say(if(right) { 1 } else { 0 });

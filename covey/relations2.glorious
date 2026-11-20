@@ -141,7 +141,7 @@ fn main() -> Int {
     let mut app = App::new().register<Name>().relation<ChildOf>().add_systems(Update, family).build();
     app.emit(&Update);
     let mut most = 0;
-    app.world.query<(Entity, &Name)>().for_each() { e, n => if(n.0 == 0) { most = len_at(&app.world.sources<ChildOf>(e)) }; };
+    app.world.query<(Entity, &Name)>().for_each() { e, n => if(n.0 == 0) { most = len_at(&app.world.sources<ChildOf>(e)) } else { () }; };
     say(most);
     say("--");
 
@@ -188,7 +188,7 @@ fn main() -> Int {
     let at = fn(e: Entity) -> Int { let mut k = 0 - 1; let mut j = 0; while({ j < len_at(&order) }) { if(order[j] == e) { k = j }; j = j + 1 }; k };
     let mut parents_first = true;
     let mut i = 0;
-    while({ i < len_at(&links) }) { let (child, parent) = links[i]; if(parent != 0) { if(at(ns[parent]) > at(ns[child])) { parents_first = false } }; i = i + 1 };
+    while({ i < len_at(&links) }) { let (child, parent) = links[i]; if(parent != 0) { if(at(ns[parent]) > at(ns[child])) { parents_first = false } else { () } }; i = i + 1 };
     flag(parents_first);
     say("--");
 

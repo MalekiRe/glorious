@@ -64,7 +64,7 @@ fn count_up(q: &mut Query<(&mut Spawned,), ()>) -> Int {
     q.for_each() { (mut s,) => s.0 = s.0 + 1; };
     q.count()
 }
-fn ticking<S>(world: AsyncWorld<S>) -> AsyncWorld<S> / {Bridge<S>} where S: ecs::Get<Spawned> {
+fn ticking<S>(world: AsyncWorld<S>) -> AsyncWorld<S> / {Bridge<S>} where S: ecs::Get<Spawned>, S: ecs::Hidden<(&mut Spawned,), ()> {
     let mut world = world;
     let mut system = keep(count_up);
     let mut going = true;
@@ -78,12 +78,13 @@ fn game<S, L>(app: App<S, L>) -> App<S, (ecs::TaskOf<S>, (ecs::On<Update, ecs::E
         (ecs::On<Update, <fn(&mut Query<(&Pos,), ()>, &mut Commands<S>) -> () as ecs::IntoSystem<Update, S>>::Out>,
         (ecs::On<Update, <ecs::Parallel<(fn(&mut Query<(&mut Pos, &Vel), ()>) -> (), (fn(&mut Local<Int>, &mut Commands<S>) -> (), ()))> as ecs::IntoSystem<Update, S>>::Out>, L)))))>
     where S: ecs::Get<Pos>, S: ecs::Get<Vel>, S: ecs::Get<Hp>, S: ecs::Get<Spawned>, S: ecs::Columns, S: ecs::Unlinks<S>,
-          S: ecs::Get<ecs::Relates<ChildOf>>, S: ecs::Get<ecs::Sources<ChildOf>> {
-    app.add_systems(Update, parallel((mover, spawner<S>)))
-        .add_systems(Update, looker<S>)
+          S: ecs::Get<ecs::Relates<ChildOf>>, S: ecs::Get<ecs::Sources<ChildOf>>, S: ecs::Hidden<(&mut Pos, &Vel), ()>,
+          S: ecs::Hidden<(&Pos,), ()>, S: ecs::Hidden<(&mut Spawned,), ()> {
+    app.add_systems(Update, parallel((mover, spawner)))
+        .add_systems(Update, looker)
         .on<OnAdd<Hp>, _, _>(hp_added)
-        .add_systems(Update, exclusive(linked<S>))
-        .add_task(ticking<S>)
+        .add_systems(Update, exclusive(linked))
+        .add_task(ticking)
 }
 
 // `plugins_choose_storage_for_their_components`

@@ -80,8 +80,8 @@ fn main() -> Int {
     while({ i < 32 }) { discard(world.insert(entities[i], Tag(i))); i = i + 1 };
     let mut i = 0;
     while({ i < 32 }) {
-        match(world.remove<Tag>(entities[i])) { Some(t) => if(t.0 != i) { kept = false }, None => kept = false };
-        match(world.get<Number>(entities[i])) { Some(n) => if(n.0 != i) { kept = false }, None => kept = false };
+        match(world.remove<Tag>(entities[i])) { Some(t) => if(t.0 != i) { kept = false } else { () }, None => kept = false };
+        match(world.get<Number>(entities[i])) { Some(n) => if(n.0 != i) { kept = false } else { () }, None => kept = false };
         i = i + 1
     };
     flag(kept);

@@ -66,7 +66,9 @@ struct Calls(Int)
 fn bump(v: &mut Single<(&mut Value,), ()>, by: Int) { match(v.get_mut()) { Some((mut x,)) => x.0 = x.0 + by;, None => () } }
 fn value_of<S>(world: &World<S>) -> Int where S: ecs::Get<Value> {
     let mut out = 0 - 1;
-    match(ecs::entities(world)) { es => { let mut i = 0; while({ i < len_at(&es) }) { match(world.get<Value>(es[i])) { Some(v) => out = v.0, None => () }; i = i + 1 } } };
+    let es = ecs::entities(world);
+    let mut i = 0;
+    while({ i < len_at(&es) }) { match(world.get<Value>(es[i])) { Some(v) => out = v.0, None => () }; i = i + 1 };
     out
 }
 
@@ -78,7 +80,7 @@ fn times_three(v: &mut Single<(&mut Value,), ()>) { match(v.get_mut()) { Some((m
 fn times_ten(v: &mut Single<(&mut Value,), ()>) { match(v.get_mut()) { Some((mut x,)) => x.0 = x.0 * 10;, None => () } }
 
 // `serial_graph_releases_dependents_after_parameter_and_condition_skips`
-fn observe(v: &mut Single<(&Value,), ()>, calls: &mut Calls) { if(is_some(v.get_mut())) { calls.0 = calls.0 + 1 } }
+fn observe(v: &mut Single<(&Value,), ()>, calls: &mut Calls) { if(is_some(v.get_mut())) { calls.0 = calls.0 + 1 } else { () } }
 fn never() -> Bool { false }
 fn skipped_body() { abort("skipped body") }
 fn bump_or_spawn<S>(world: &mut World<S>) where S: ecs::Get<Value>, S: ecs::Columns {
@@ -89,7 +91,7 @@ fn bump_or_spawn<S>(world: &mut World<S>) where S: ecs::Get<Value>, S: ecs::Colu
         match(world.get_mut<Value>(es[i])) { Some(mut v) => v.get_mut().0 = v.0 + 1; found = true, None => () };
         i = i + 1
     };
-    if(not_(found)) { discard(world.spawn_bundle((Value(1),))) }
+    if(not_(found)) { discard(world.spawn_bundle((Value(1),))) } else { () }
 }
 fn not_(b: Bool) -> Bool { if(b) { false } else { true } }
 

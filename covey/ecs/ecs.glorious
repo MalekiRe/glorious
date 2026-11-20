@@ -1764,7 +1764,9 @@ pub struct Sys<F, Lc> { f: F, locals: Lc, last: Int }
 impl<E, S, ..P, ..A, L, Ts, F, Lc> System<E, S> for Sys<F, Lc>
     where F: Fn<(..P), Output = ()>, ..P: Parameter<Asks = A>, (..A): Tuple<Nested = L>, L: AllTouches<List = Ts>, Ts: AllApart, L: Fetch<E, S, (), F, (), Lc> {
     fn run(sys: &mut Sys<F, Lc>, event: &E, world: &mut World<S>, commands: &mut Commands<S>) {
-        world.since = sys.last;
+        // (A world put in the app's place after the system last ran has a
+        // clock of its own: all of it is new to the system.)
+        world.since = if(sys.last > world.tick) { 0 } else { sys.last };
         let ran = is_some(<L as Fetch<E, S, (), F, (), Lc>>::fetch(event, world, commands, &mut sys.locals, (), &sys.f));
         world.since = 0;
         // (One that was not run, for want of what it asks, still sees what
@@ -2975,16 +2977,22 @@ impl<T> History<T> {
     }
     // The runs of frames, first and last, over which `holds` held.
     pub fn when(h: &Self, entity: Entity, holds: fn(&T) -> Bool) -> [(Int, Int)] {
+        let held = h.held_at(entity, holds, 0, []);
         let mut out = [];
         let mut start = 0 - 1;
         let mut f = 0;
-        while({ f < len_at(&h.entities) }) {
-            let now = match(h.value_at(entity, f)) { Some(v) => holds(v), None => false };
-            if(now) { if(start < 0) { start = f } } else { if(start >= 0) { out = push(out, (start, f - 1)); start = 0 - 1 } };
+        while({ f < len_at(&held) }) {
+            if(held[f]) { if(start < 0) { start = f } else { () } } else { if(start >= 0) { out = push(out, (start, f - 1)); start = 0 - 1 } else { () } };
             f = f + 1
         };
-        if(start >= 0) { out = push(out, (start, len_at(&h.entities) - 1)) };
+        if(start >= 0) { out = push(out, (start, len_at(&held) - 1)) };
         out
+    }
+    fn held_at(h: &Self, entity: Entity, holds: fn(&T) -> Bool, f: Int, acc: [Bool]) -> [Bool] {
+        if(f >= len_at(&h.entities)) { acc } else {
+            let now = match(h.value_at(entity, f)) { Some(v) => holds(v), None => false };
+            h.held_at(entity, holds, f + 1, push(acc, now))
+        }
     }
 }
 // The system that keeps this frame's values of `T`.

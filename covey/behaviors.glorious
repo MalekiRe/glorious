@@ -86,7 +86,6 @@ impl<S> Behavior<S> for Counter where S: ecs::Holds<Inbox<Press>>, S: ecs::Holds
             poll(&mut cx);
             discard(with(&mut cx, fn(q: &mut Query<(Entity, &mut Count), ()>) { add_count(q, me, n) }))
         };
-        discard(guard);
         cx
     }
 }
@@ -104,14 +103,14 @@ impl<S> Behavior<S> for Racer where S: ecs::Holds<Inbox<Press>>, S: ecs::Holds<I
 }
 
 struct Waiter
-struct Signal(Shared<AtomicInt>)
+struct Signal(AtomicInt)
 impl<S> Behavior<S> for Waiter where S: ecs::Get<Count>, S: ecs::Get<Signal> {
     fn behave(me: Entity, cx: Cx<S>) -> Cx<S> / {Bridge<S>} {
         let mut cx = cx;
-        let signal = match(with(&mut cx, fn(q: &mut Query<(Entity, &Signal), ()>) -> Option<Shared<AtomicInt>> {
+        let signal = match(with(&mut cx, fn(q: &mut Query<(Entity, &Signal), ()>) -> Option<AtomicInt> {
             match(q.get_mut(me)) { Some((_, s)) => Some(std::thread::share(&s.0)), None => None }
-        })) { Ok(Some(s)) => s, _ => Shared::new(AtomicInt::new(1)) };
-        wait_for(&mut cx, fn() -> Bool { std::thread::load(&*signal) == 1 });
+        })) { Ok(Some(s)) => s, _ => (AtomicInt::new(1)) };
+        wait_for(&mut cx, fn() -> Bool { std::thread::load(&signal) == 1 });
         discard(with(&mut cx, fn(q: &mut Query<(Entity, &mut Count), ()>) { add_count(q, me, 1) }));
         cx
     }
@@ -158,7 +157,7 @@ fn count_of<S>(world: &World<S>, e: Entity) -> Int where S: ecs::Get<Count> { ma
 fn polls<S>(world: &mut World<S>) -> Int where S: ecs::Holds<Polls> {
     match(world.resource_mut<Polls>()) { Some(p) => let n = p.0; p.0 = 0; n, None => 0 - 1 }
 }
-fn waiters<E, S>(world: &World<S>, e: Entity) -> Int where S: ecs::Holds<Inbox<E>>, S: ecs::Holds<Instances> {
+fn waiting_of<E, S>(world: &World<S>, e: Entity) -> Int where S: ecs::Holds<Inbox<E>>, S: ecs::Holds<Instances> {
     match((world.resource<Inbox<E>>(), world.resource<Instances>())) { (Some(inbox), Some(instances)) => inbox.waiters<S>(instances, e), _ => 0 - 1 }
 }
 
@@ -181,7 +180,7 @@ fn main() -> Int {
     say(count_of(&app.world, buttons[17]));
     let mut others = true;
     let mut i = 0;
-    while({ i < 1000 }) { if(i != 17) { if(count_of(&app.world, buttons[i]) != 0) { others = false } }; i = i + 1 };
+    while({ i < 1000 }) { if(i != 17) { if(count_of(&app.world, buttons[i]) != 0) { others = false } else { () } }; i = i + 1 };
     flag(others);
     say("--");
 
@@ -191,13 +190,13 @@ fn main() -> Int {
     let a = app.world.spawn_bundle((Counter, Count(0)));
     let b = app.world.spawn_bundle((Counter, Count(0)));
     app.emit(&Frame);
-    say(waiters<Press, _>(&app.world, a));
-    say(waiters<Press, _>(&app.world, b));
+    say(waiting_of<Press, _>(&app.world, a));
+    say(waiting_of<Press, _>(&app.world, b));
     discard(app.world.remove<Counter>(a));
     discard(app.world.despawn(b));
     app.emit(&Frame);
-    say(waiters<Press, _>(&app.world, a));
-    say(waiters<Press, _>(&app.world, b));
+    say(waiting_of<Press, _>(&app.world, a));
+    say(waiting_of<Press, _>(&app.world, b));
     flag(app.world.deliver(a, Press(1)));
     // Putting it back starts it anew.
     discard(app.world.insert(a, Counter));
@@ -242,25 +241,25 @@ fn main() -> Int {
     while({ round < 50 }) {
         if(round % 2 == 0) { discard(app.world.deliver(racer, Press(1))) } else { discard(app.world.deliver(racer, Release)) };
         app.emit(&Frame);
-        if(waiters<Press, _>(&app.world, racer) != 1) { stale = true };
-        if(waiters<Release, _>(&app.world, racer) != 1) { stale = true };
+        if(waiting_of<Press, _>(&app.world, racer) != 1) { stale = true };
+        if(waiting_of<Release, _>(&app.world, racer) != 1) { stale = true };
         round = round + 1
     };
     flag(if(stale) { false } else { true });
-    say(waiters<Press, _>(&app.world, racer));
+    say(waiting_of<Press, _>(&app.world, racer));
     say(count_of(&app.world, racer));
     say("--");
 
     // `external_wakers_queue_the_behavior_and_call_wakeup`
     let mut app = App::new().register<Waiter>().register<Count>().register<Signal>()
         .add_behaviors().add_behavior<Waiter, Frame>().build();
-    let flagged = Shared::new(AtomicInt::new(0));
+    let flagged = (AtomicInt::new(0));
     let entity = app.world.spawn_bundle((Waiter, Count(0), Signal(std::thread::share(&flagged))));
     app.emit(&Frame);
     app.emit(&Frame);
     say(count_of(&app.world, entity));
     let remote = std::thread::share(&flagged);
-    join(spawn_detached(fn() { std::thread::store(&*remote, 1) }));
+    spawn_detached(fn() { std::thread::store(&remote, 1) }).wait();
     app.emit(&Frame);
     say(count_of(&app.world, entity));
     say("--");
@@ -305,7 +304,7 @@ fn main() -> Int {
     // An entity with no behaviors keeps nothing.
     let plain = app.world.spawn_bundle((Count(0),));
     flag(app.world.deliver(plain, Release));
-    say(waiters<Release, _>(&app.world, plain));
+    say(waiting_of<Release, _>(&app.world, plain));
     say("--");
 
     // `every_behavior_listening_on_an_entity_takes_each_event_once`

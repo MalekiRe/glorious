@@ -58,11 +58,12 @@ impl Cloner for Damage { const CLONER: Option<fn(&Damage) -> Damage> = Some(clon
 fn ramp(q: &mut Query<(&mut Damage,), ()>) { q.for_each() { (mut d,) => d.0 = d.0 + 1; } }
 fn apply_damage(q: &mut Query<(&Damage, &mut Hp), ()>) { q.for_each() { d, mut hp => hp.0 = hp.0 - d.0; } }
 
+fn record_hp(q: &mut Query<(Entity, &Hp), ()>, history: &mut History<Hp>) { record(q, history) }
 fn below_12(h: &Hp) -> Bool { h.0 < 12 }
 fn from_10_to_17(h: &Hp) -> Bool { if(h.0 >= 10) { h.0 <= 17 } else { false } }
 
 fn hp_seen(q: &mut Query<(&Hp,), ()>) { () }
-fn console<S>(world: AsyncWorld<S>) -> AsyncWorld<S> / {Bridge<S>} where S: ecs::Get<Hp> {
+fn console<S>(world: AsyncWorld<S>) -> AsyncWorld<S> / {Bridge<S>} where S: ecs::Get<Hp>, S: ecs::Hidden<(&Hp,), ()> {
     let mut world = world;
     discard(bridge(&mut world, Update, hp_seen));
     discard(bridge(&mut world, Later, hp_seen));
@@ -71,7 +72,7 @@ fn console<S>(world: AsyncWorld<S>) -> AsyncWorld<S> / {Bridge<S>} where S: ecs:
 fn status(s: &TaskStatus) -> Str {
     match(s) {
         &TaskStatus::NotStarted => "not started",
-        &TaskStatus::WaitingFor(label) => "waiting for " ++ label,
+        &TaskStatus::WaitingFor(label) => "waiting for " ++ *label,
         &TaskStatus::WaitingOnItsOwn => "waiting",
         &TaskStatus::Finished => "finished"
     }
@@ -91,7 +92,7 @@ fn main() -> Int {
     say("--");
 
     let mut app = App::new().register<Hp>().register<Damage>().insert_resource(History::new())
-        .add_systems(Update, (ramp, apply_damage, record<Hp>).chain()).build();
+        .add_systems(Update, (ramp, apply_damage, record_hp).chain()).build();
     let e = app.world.spawn_bundle((Hp(20), Damage(0)));
     let mut i = 0;
     while({ i < 5 }) { app.emit(&Update); i = i + 1 };
