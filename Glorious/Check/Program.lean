@@ -424,17 +424,16 @@ def checkItems (items : List Item) (seed : UInt64 := 0) (kept : Kept := []) : M 
     let earlyKeys := (early.foldl (fun (acc : List UInt64 × UInt64) d =>
       let k := groupKey acc.2 [d]
       (k :: acc.1, k)) ([], key)).1.reverse
-    let everyEarly := keptEvery early.length
     let earlyStart := ((earlyKeys.zipIdx.reverse.find? fun (k, _) => (kept.lookup k).isSome).map (·.2 + 1)).getD 0
     if earlyStart > 0 then
       if let some k := earlyKeys[earlyStart - 1]? then
         if let some st := kept.lookup k then
           restore ((ours st).getD st) decls
           made := (k, st) :: made
-    for (d, idx) in early.zipIdx.drop earlyStart do
-      checkMaybe [d]
-      if (idx + 1) % everyEarly == 0 || idx + 1 == early.length then
-        made := (earlyKeys[idx]!, forKeeping (← get)) :: made
+    -- (None of them uses another: all side by side, the state kept after.)
+    if earlyStart < early.length then
+      checkSideBySide ((early.drop earlyStart).map ([·]))
+      made := (earlyKeys[early.length - 1]!, forKeeping (← get)) :: made
     if let some k := earlyKeys.getLast? then key := k
     -- The state after the last group whose key, and so every key before
     -- it, is kept is taken; the groups after it are checked. A state is
