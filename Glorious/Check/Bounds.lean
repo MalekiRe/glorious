@@ -107,6 +107,24 @@ def projectedCondition (key : String) (t : Ty) : M (List Nat) := do
   | .var _ => if (← projectionOf t).isSome then conditionKeys key t else pure []
   | _ => pure []
 
+/-- How often an implementation chosen for a type uses a value of each of its
+type parameters, as its where says, `T: Use<[0, *]>`, at most once where it
+says nothing: asked of what each is there. -/
+def askUses (im : ImplDecl) (at_ : List (Nat × Ty)) (pos : String) (whole : Ty) : M Unit := do
+  if im.trait == Syntax.destroyTrait then return
+  for (p, id) in im.pvars do
+    if let some t := at_.lookup id then
+      let (lower, upper) := (im.methods.findSome? fun
+        | .typeAlias n _ _ => (Syntax.useMarked n).bind fun (q, lo, hi) =>
+            if q == p then some (lo, hi) else none
+        | _ => none).getD (0, some 1)
+      if lower == 0 || upper.isNone then
+        let whose := s!"{pos}the implementation of `{Syntax.traitShown im.trait}` for `{showTy (← zonk whole)}`"
+        if lower == 0 then
+          modify fun s => { s with drops := s.drops.push (t, s!"{whose} may leave a `{p}` unused") }
+        if upper.isNone then
+          modify fun s => { s with dups := s.dups.push (t, s!"{whose} may use a `{p}` more than once") }
+
 /-- The bounds on types a function is generic in that a bound comes down to,
 each with the number of its type. This is only to say what a function needs
 and to explain a failure: the evidence itself is `Traits.solve`'s. -/
@@ -129,7 +147,8 @@ partial def leaves (pos trait : String) (t : Ty) : M (List (String × Nat × Ty)
     match head with
     | some (n, args) =>
       match (← get).kimpls.find trait n args.length with
-      | some (_, I) =>
+      | some (i, I) =>
+        if let some im := (← get).impls[i]? then askUses im (← implAt im args) pos t
         let mut out : List (String × Nat × Ty) := []
         for (tr', j) in I.context do
           out := out ++ (← leaves pos tr' (args[j]?.getD .unit))
@@ -366,6 +385,7 @@ partial def leavesFittingNow (pos key : String) (t : Ty) (args : List Ty) (owner
   let some im := (← get).impls[i]? | missing
   let some at_ ← fitHead im hargs args | missing
   unless ← fitConditions im at_ hargs owner pos do return ← missing
+  askUses im at_ pos t
   let mut out : List (String × Nat × Ty × List Ty) := []
   let shown := Syntax.traitShown key
   let this := ((shown.takeWhile (· != '<')).toString, t)
@@ -621,21 +641,6 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
             -- (The implementation's own type parameters are this type's
             -- arguments here, not what another use of it made them.)
             let at_ ← implAt im args
-            -- How often its functions use a value of one of its type
-            -- parameters is asked of what that is here, as its where says,
-            -- `T: Use<[0, *]>`: where it says nothing, at most once.
-            unless im.trait == Syntax.destroyTrait do
-              for (p, id) in im.pvars do
-                if let some t := at_.lookup id then
-                  let (lower, upper) := (im.methods.findSome? fun
-                    | .typeAlias n _ _ => (Syntax.useMarked n).bind fun (q, lo, hi) =>
-                        if q == p then some (lo, hi) else none
-                    | _ => none).getD (0, some 1)
-                  let whose := s!"{b.pos}the implementation of `{b.trait}` for `{showTy goal}`"
-                  if lower == 0 then
-                    modify fun s => { s with drops := s.drops.push (t, s!"{whose} may leave a `{p}` unused") }
-                  if upper.isNone then
-                    modify fun s => { s with dups := s.dups.push (t, s!"{whose} may use a `{p}` more than once") }
             for (j, want) in im.fixed do
               if let some got := args[j]? then
                 let want ← fixedAt at_ want
