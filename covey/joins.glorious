@@ -1,0 +1,40 @@
+// `joins_skip_disabled_targets_unless_the_inner_query_mentions_the_component`
+// (upstream's tests/disabled.rs): a join does not see a disabled target or
+// source, unless what it asks of it mentions what disables it.
+//
+// expect:
+// -1
+// 10
+// -1
+// 10
+// [3]
+// 0
+mod ecs;
+
+use ecs::{App, World, Entity, ChildOf, To, From, Has, Disabled, Relation, OneToMany};
+
+struct Hp(Int)
+struct InSquad
+impl Relation for InSquad { type Kind = OneToMany; }
+
+fn main() -> Int {
+    let mut app = App::new().relation<ChildOf>().relation<InSquad>().register<Hp>().register<Disabled>().build();
+    let hidden = app.world.spawn_bundle((Hp(10), Disabled));
+    let shown = app.world.spawn_bundle((Hp(20),));
+    let a = app.world.spawn_bundle((Hp(1),));
+    let b = app.world.spawn_bundle((Hp(2), Disabled));
+    discard(app.world.relate(a, ChildOf, hidden));
+    discard(app.world.relate(a, InSquad, hidden));
+    discard(app.world.relate(b, ChildOf, shown));
+    discard(app.world.relate(b, InSquad, shown));
+    let c = app.world.spawn_bundle((Hp(3),));
+    discard(app.world.relate(c, ChildOf, shown));
+    discard(app.world.relate(c, InSquad, shown));
+    say(match(app.world.query<(To<ChildOf, (&Hp,)>,)>().get_mut(a)) { Some((Some((h,)),)) => h.0, _ => 0 - 1 });
+    say(match(app.world.query<(To<ChildOf, (&Hp, Has<Disabled>)>,)>().get_mut(a)) { Some((Some((h, _)),)) => h.0, _ => 0 - 1 });
+    say(match(app.world.query<(To<InSquad, (&Hp,)>,)>().get_mut(a)) { Some((Some((h,)),)) => h.0, _ => 0 - 1 });
+    say(match(app.world.query<(To<InSquad, (&Hp, Has<Disabled>)>,)>().get_mut(a)) { Some((Some((h, _)),)) => h.0, _ => 0 - 1 });
+    let children = match(app.world.query<(From<ChildOf, &Hp>,)>().get_mut(shown)) { Some((hs,)) => fold(hs, [], fn(out: [Int], h: &Hp) -> [Int] { push(out, h.0) }), None => [] };
+    say(children);
+    0
+}

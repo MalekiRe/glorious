@@ -5922,8 +5922,11 @@ Each is to go; none is a design covey keeps.
   run destructors and can be caught.
 - An entity does not say which world it is of. Taken away by an `Entity`
   that does.
-- Not yet written: `world.single`, joins that hide disabled targets,
-  envelope sync points, stepping and `why_not`.
+- ~~`world.single`~~ (`world.query<Q>().single()`, covey/single) and
+  ~~joins that hide disabled targets~~ (`To` and `From` do not see a
+  disabled entity unless what they ask of it mentions what disables it,
+  covey/joins) are written. Not yet: envelope sync points, stepping and
+  `why_not` (both need systems that say which function they are).
 
 ## Each function its own universe: where the checker is
 

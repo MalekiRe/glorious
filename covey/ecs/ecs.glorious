@@ -1067,14 +1067,18 @@ impl<A> Item for Option<&A> {
 // name. None where it relates to nothing by `R`, or that has not what `Q`
 // asks.
 pub struct To<R, Q>(R, Q)
+// (A target disabled is not one, unless the inner query mentions what
+// disables it: `To<ChildOf, (&Hp, Has<Disabled>)>` sees it. Which are, found
+// when the query is made.)
 impl<R, Q> Item for To<R, Q> where Q: Item {
-    type Store = (Column<Relates<R>>, Q::Store);
+    type Store = (Column<Relates<R>>, (Q::Store, [Entity]));
     type Got<'a> = Option<Q::Got<'a>>;
-    fn item_at<'a>(store: &'a mut (Column<Relates<R>>, Q::Store), entity: Entity) -> Option<Option<Q::Got<'a>>> {
+    fn item_at<'a>(store: &'a mut (Column<Relates<R>>, (Q::Store, [Entity])), entity: Entity) -> Option<Option<Q::Got<'a>>> {
         let at = slot_of(&store.0, entity);
         if(at < 0) { Some(None) } else {
             let target = store.0.dense[at].target;
-            Some(<Q as Item>::item_at(&mut store.1, target))
+            if(has_entity(&store.1.1, target)) { Some(None) }
+            else { Some(<Q as Item>::item_at(&mut store.1.0, target)) }
         }
     }
 }
@@ -1082,19 +1086,21 @@ impl<R, Q> Item for To<R, Q> where Q: Item {
 // `From<DockedAt, &Hull>`, the hulls of the ships docked at a station. (Of
 // a component to read, or the entities themselves.)
 pub struct From<R, Q>(R, Q)
+// (A source disabled is not one, as a target is not to `To`.)
 impl<R, A> Item for From<R, &A> {
-    type Store = (Column<Sources<R>>, Column<A>);
+    type Store = (Column<Sources<R>>, (Column<A>, [Entity]));
     type Got<'a> = [&'a A];
-    fn item_at<'a>(store: &'a mut (Column<Sources<R>>, Column<A>), entity: Entity) -> Option<[&'a A]> {
+    fn item_at<'a>(store: &'a mut (Column<Sources<R>>, (Column<A>, [Entity])), entity: Entity) -> Option<[&'a A]> {
         let mut out = [];
         let at = slot_of(&store.0, entity);
         if(at >= 0) {
             let list = &store.0.dense[at].list;
-            let column = &store.1;
+            let column = &store.1.0;
+            let hidden = &store.1.1;
             let mut i = 0;
             while({ i < len_at(list) }) {
                 let there = slot_of(column, list[i]);
-                if(there >= 0) { push_at(&mut out, &column.dense[there]) };
+                if(there >= 0) { if(not_b(has_entity(hidden, list[i]))) { push_at(&mut out, &column.dense[there]) } else { () } };
                 i = i + 1
             }
         };
@@ -1174,23 +1180,49 @@ impl<A, S> Fill<S> for Option<&A> where S: Get<A> {
     fn unfill(columns: &mut S, column: <Option<&A> as Item>::Store) { <S as Get<A>>::put(columns, column) }
     fn hollow() -> <Option<&A> as Item>::Store { empty_column() }
 }
-impl<R, Q, S> Fill<S> for To<R, Q> where S: Get<Relates<R>>, Q: Fill<S>, Q: Item {
-    fn fill(columns: &mut S, now: Int) -> <To<R, Q> as Item>::Store { (take_now<Relates<R>, S>(columns, now), <Q as Fill<S>>::fill(columns, now)) }
+impl<R, Q, S> Fill<S> for To<R, Q> where S: Get<Relates<R>>, Q: Fill<S>, Q: Item, S: Hidden<Q, ()> {
+    fn fill(columns: &mut S, now: Int) -> <To<R, Q> as Item>::Store {
+        let links = take_now<Relates<R>, S>(columns, now);
+        let mut hidden = [];
+        let mut i = 0;
+        while({ i < len_at(&links.dense) }) {
+            let target = links.dense[i].target;
+            if(<S as Hidden<Q, ()>>::hidden(&*columns, target)) { push_at(&mut hidden, target) } else { () };
+            i = i + 1
+        };
+        (links, (<Q as Fill<S>>::fill(columns, now), hidden))
+    }
     fn unfill(columns: &mut S, store: <To<R, Q> as Item>::Store) {
         let (links, rest) = store;
+        let (inner, _) = rest;
         <S as Get<Relates<R>>>::put(columns, links);
-        <Q as Fill<S>>::unfill(columns, rest)
+        <Q as Fill<S>>::unfill(columns, inner)
     }
-    fn hollow() -> <To<R, Q> as Item>::Store { (empty_column(), <Q as Fill<S>>::hollow()) }
+    fn hollow() -> <To<R, Q> as Item>::Store { (empty_column(), (<Q as Fill<S>>::hollow(), [])) }
 }
-impl<R, A, S> Fill<S> for From<R, &A> where S: Get<Sources<R>>, S: Get<A> {
-    fn fill(columns: &mut S, now: Int) -> <From<R, &A> as Item>::Store { (take_now<Sources<R>, S>(columns, now), take_now<A, S>(columns, now)) }
+impl<R, A, S> Fill<S> for From<R, &A> where S: Get<Sources<R>>, S: Get<A>, S: Hidden<(&A,), ()> {
+    fn fill(columns: &mut S, now: Int) -> <From<R, &A> as Item>::Store {
+        let sources = take_now<Sources<R>, S>(columns, now);
+        let mut hidden = [];
+        let mut i = 0;
+        while({ i < len_at(&sources.dense) }) {
+            let list = &sources.dense[i].list;
+            let mut k = 0;
+            while({ k < len_at(list) }) {
+                if(<S as Hidden<(&A,), ()>>::hidden(&*columns, list[k])) { push_at(&mut hidden, list[k]) } else { () };
+                k = k + 1
+            };
+            i = i + 1
+        };
+        (sources, (take_now<A, S>(columns, now), hidden))
+    }
     fn unfill(columns: &mut S, store: <From<R, &A> as Item>::Store) {
-        let (sources, column) = store;
+        let (sources, rest) = store;
+        let (column, _) = rest;
         <S as Get<Sources<R>>>::put(columns, sources);
         <S as Get<A>>::put(columns, column)
     }
-    fn hollow() -> <From<R, &A> as Item>::Store { (empty_column(), empty_column()) }
+    fn hollow() -> <From<R, &A> as Item>::Store { (empty_column(), (empty_column(), [])) }
 }
 impl<R, S> Fill<S> for From<R, Entity> where S: Get<Sources<R>> {
     fn fill(columns: &mut S, now: Int) -> <From<R, Entity> as Item>::Store { take_now<Sources<R>, S>(columns, now) }
