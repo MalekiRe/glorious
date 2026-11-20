@@ -1,0 +1,88 @@
+// Upstream's tests/clone.rs: cloning an entity copies the components that
+// say how they are copied (`Cloner`, upstream's `Clone` ones), and not the
+// others or its links; cloning a subtree along a one-parent relation copies
+// each entity under it, linked to its parent's copy in order, and a marker
+// that is not copied (a `Disabling` template) is what leaves the copies
+// seen where the prototype is hidden.
+// expect:
+// 1
+// 3
+// 1
+// 0
+// [0]
+// 1
+// 0
+// 7
+// [10, 11, 12]
+// [1, 1, 1]
+// 3
+// 0
+// 7
+// 0
+mod ecs;
+
+use ecs::{App, Entity, Query, With, ChildOf, Relation, ManyToMany, Disabling, Cloner};
+use std::vec::map;
+
+struct Label(Int)
+impl Clone for Label { fn clone(l: &Label) -> Label { Label(l.0) } }
+impl Cloner for Label { const CLONER: Option<fn(&Label) -> Label> = Some(clone); }
+struct Size(Int)
+impl Clone for Size { fn clone(s: &Size) -> Size { Size(s.0) } }
+impl Cloner for Size { const CLONER: Option<fn(&Size) -> Size> = Some(clone); }
+// Not copied: prototypes keep it, copies do not.
+struct Template
+impl Disabling for Template { const DISABLES: Bool = true; }
+// Not copied either.
+struct Handle(Int)
+struct Likes
+impl Relation for Likes { type Kind = ManyToMany; }
+
+fn flag(b: Bool) { if(b) { say(1) } else { say(0) } }
+
+fn main() -> Int {
+    let mut world = App::new().relation<ChildOf>().relation<Likes>()
+        .register<Label>().register<Size>().register<Template>().register<Handle>().build().world;
+    let other = world.spawn_bundle((Label(0),));
+    let original = world.spawn_bundle((Label(1), Size(3), Handle(1)));
+    discard(world.relate(original, Likes, other));
+    let copy = match(world.clone_entity(original)) { Some(c) => c, None => original };
+    say(match(world.get<Label>(copy)) { Some(l) => l.0, None => 0 - 1 });
+    say(match(world.get<Size>(copy)) { Some(s) => s.0, None => 0 - 1 });
+    flag(match(world.get<Handle>(copy)) { Some(_) => false, None => true });
+    say(len(world.targets<Likes>(copy)));
+    say(map(world.targets<Likes>(original), { e => e.index }));
+    discard(world.despawn(original));
+    flag(match(world.clone_entity(original)) { Some(_) => false, None => true });
+
+    let mut world = App::new().relation<ChildOf>().relation<Likes>()
+        .register<Label>().register<Size>().register<Template>().register<Handle>().build().world;
+    let row = world.spawn_bundle((Label(1), Template));
+    let mut n = 0;
+    while({ n < 3 }) {
+        let child = world.spawn_bundle((Label(10 + n), Size(1), Template));
+        discard(world.relate(child, ChildOf, row));
+        let inner = world.spawn_bundle((Label(20 + n), Template));
+        discard(world.relate(inner, ChildOf, child));
+        n = n + 1
+    };
+    let mut seen = 0;
+    world.query<(&Label,)>().for_each() { (_l,) => seen = seen + 1; };
+    say(seen);
+    let copy = match(world.clone_subtree<ChildOf>(row)) { Some(c) => c, None => row };
+    seen = 0;
+    world.query<(&Label,)>().for_each() { (_l,) => seen = seen + 1; };
+    say(seen);
+    let children = world.sources<ChildOf>(copy);
+    say(map(children, { c => match(world.get<Label>(c)) { Some(l) => l.0, None => 0 - 1 } }));
+    say(map(children, { c => len(world.sources<ChildOf>(c)) }));
+    say(len(world.sources<ChildOf>(row)));
+    world.despawn_linked<ChildOf>(copy);
+    seen = 0;
+    world.query<(&Label,)>().for_each() { (_l,) => seen = seen + 1; };
+    say(seen);
+    seen = 0;
+    world.query_filtered<(&Label,), With<Template>>().for_each() { (_l,) => seen = seen + 1; };
+    say(seen);
+    0
+}

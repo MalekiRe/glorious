@@ -181,22 +181,46 @@ fn lower<T, S>(columns: &mut S, value: T) where S: Holds<T> { *<S as Holds<T>>::
 pub trait Columns {
     fn forget(&mut Self, Entity)
     fn empty() -> Self
+    fn copy_onto(&mut Self, Entity, Entity)
 }
 impl Columns for () {
     fn forget(columns: &mut (), entity: Entity) { () }
     fn empty() { () }
+    fn copy_onto(columns: &mut (), from: Entity, to: Entity) { () }
 }
-impl<H, R> Columns for (Column<H>, R) where R: Columns {
+impl<H, R> Columns for (Column<H>, R) where R: Columns, H: Cloner {
     fn forget(columns: &mut (Column<H>, R), entity: Entity) {
         let _ = column_remove(&mut columns.0, entity);
         <R as Columns>::forget(&mut columns.1, entity)
     }
     fn empty() -> (Column<H>, R) { (empty_column(), <R as Columns>::empty()) }
+    // (A component of a type that says how it is copied, `impl Cloner for
+    // Label`, copied; any other left out.)
+    fn copy_onto(columns: &mut (Column<H>, R), from: Entity, to: Entity) {
+        match(<H as Cloner>::CLONER) {
+            Some(copy) =>
+                let at = slot_of(&columns.0, from);
+                if(at >= 0) {
+                    let value = copy(&columns.0.dense[at]);
+                    column_insert(&mut columns.0, to, value)
+                } else { () },
+            None => ()
+        };
+        <R as Columns>::copy_onto(&mut columns.1, from, to)
+    }
 }
 impl<H, R> Columns for (Resource<H>, R) where R: Columns {
     fn forget(columns: &mut (Resource<H>, R), entity: Entity) { <R as Columns>::forget(&mut columns.1, entity) }
     fn empty() -> (Resource<H>, R) { (Resource { value: None }, <R as Columns>::empty()) }
+    fn copy_onto(columns: &mut (Resource<H>, R), from: Entity, to: Entity) { <R as Columns>::copy_onto(&mut columns.1, from, to) }
 }
+
+// How a component is copied when its entity is: `impl Cloner for Label {
+// const CLONER: Option<fn(&Label) -> Label> = Some(clone); }`, as upstream's
+// `Clone` components are. Any other is not copied (relations' links are not:
+// a copy is linked anew).
+pub trait Cloner { const CLONER: Option<fn(&Self) -> Self>; }
+impl<T> Cloner for T { const CLONER: Option<fn(&T) -> T> = None; }
 
 // The columns, and which entities there are.
 pub struct World<S> { pub columns: S, generations: [Int], free: [Int], tick: Int, since: Int }
@@ -361,6 +385,7 @@ impl<R, S> RelateBy<S> for R where R: Relation, <R as Relation>::Kind: Relating<
 // The relation of a child to its parent.
 pub struct ChildOf
 impl Relation for ChildOf { type Kind = OneToMany; }
+impl Clone for ChildOf { fn clone(c: &ChildOf) -> ChildOf { ChildOf } }
 pub struct Sources<R> { pub list: [Entity] }
 
 fn copied(list: &[Entity]) -> [Entity] {
@@ -489,6 +514,30 @@ fn forget_links<X, S>(columns: &mut S, list: [Entity]) where S: Get<Relates<X>> 
     let mut i = 0;
     while({ i < len_at(&list) }) {
         discard(column_remove(<S as Get<Relates<X>>>::column_mut(columns), list[i]));
+        i = i + 1
+    }
+}
+
+// Copies of what relates to `from` by `R`, related to `to` by copies of
+// their links, and of what relates to those, in order.
+fn copy_children<R, S>(world: &mut World<S>, from: Entity, to: Entity)
+    where S: Columns, S: Get<Sources<R>>, S: Get<Relates<R>>, R: Clone, R: RelateBy<S> {
+    let children = sources_in<R, S>(&world.columns, from);
+    let mut i = 0;
+    while({ i < len_at(&children) }) {
+        let child = children[i];
+        let links = <S as Get<Relates<R>>>::column(&world.columns);
+        let at = slot_of(links, child);
+        let link = if(at >= 0) { Some(clone(&links.dense[at].relation)) } else { None };
+        match(world.clone_entity(child)) {
+            Some(copy) =>
+                match(link) {
+                    Some(relation) => discard(world.relate(copy, relation, to)),
+                    None => ()
+                };
+                copy_children<R, S>(world, child, copy),
+            None => discard(link)
+        };
         i = i + 1
     }
 }
@@ -711,6 +760,27 @@ impl<S> World<S> {
     // What relates to an entity by `R`, in the order they came to.
     pub fn sources<R>(world: &Self, target: Entity) -> [Entity] where S: Get<Sources<R>> {
         sources_in<R, S>(&world.columns, target)
+    }
+
+    // A new entity with a copy of each of an entity's components that says
+    // how it is copied (`Cloner`), and nothing else; `None` if it has ended.
+    pub fn clone_entity(world: &mut Self, entity: Entity) -> Option<Entity> where S: Columns {
+        if(alive(&*world, entity)) {
+            let copy = spawn(world);
+            <S as Columns>::copy_onto(&mut world.columns, entity, copy);
+            Some(copy)
+        } else { None }
+    }
+    // A copy of an entity and of all that relates to it by `R`, one parent
+    // each, and what relates to those: each copy linked to its parent's
+    // copy by a copy of what the link carries, in the order they came to.
+    // The root's copy is not linked; `None` if the root has ended.
+    pub fn clone_subtree<R>(world: &mut Self, root: Entity) -> Option<Entity>
+        where S: Columns, S: Get<Sources<R>>, S: Get<Relates<R>>, R: Clone, R: RelateBy<S> {
+        match(world.clone_entity(root)) {
+            Some(copy) => copy_children<R, S>(world, root, copy); Some(copy),
+            None => None
+        }
     }
 
     // End an entity and, first, everything that relates to it by `R`, and
