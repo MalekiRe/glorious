@@ -47,11 +47,9 @@ struct Later
 
 struct Hp(Int)
 impl Clone for Hp { fn clone(h: &Hp) -> Hp { Hp(h.0) } }
-impl Cloner for Hp { const CLONER: Option<fn(&Hp) -> Hp> = Some(clone); }
 impl Eq for Hp { fn ==(a: Hp, b: Hp) -> Bool { a.0 == b.0 } }
 struct Damage(Int)
 impl Clone for Damage { fn clone(d: &Damage) -> Damage { Damage(d.0) } }
-impl Cloner for Damage { const CLONER: Option<fn(&Damage) -> Damage> = Some(clone); }
 
 fn ramp(q: &mut Query<(&mut Damage,), ()>) { q.for_each() { (mut d,) => d.0 = d.0 + 1; } }
 fn apply_damage(q: &mut Query<(&Damage, &mut Hp), ()>) { q.for_each() { d, mut hp => hp.0 = hp.0 - d.0; } }

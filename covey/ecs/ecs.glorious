@@ -262,11 +262,11 @@ impl<A, B, S> StorageChoice<S> for (A, B) where A: StorageChoice<S>, B: StorageC
 // (Says that `Disabled` was put on by a subtree toggle.)
 pub struct HiddenBy
 
-// How a component is copied when its entity is: `impl Cloner for Label {
-// const CLONER: Option<fn(&Label) -> Label> = Some(clone); }`, as upstream's
-// `Clone` components are. Any other is not copied (relations' links are not:
-// a copy is linked anew).
+// How a component is copied when its entity is: one that is `Clone`, by its
+// `clone`, as upstream's `Clone` components are. Any other is not copied
+// (relations' links are not: a copy is linked anew).
 pub trait Cloner { const CLONER: Option<fn(&Self) -> Self>; }
+impl<T> Cloner for T where T: Clone { const CLONER: Option<fn(&T) -> T> = Some(clone); }
 impl<T> Cloner for T { const CLONER: Option<fn(&T) -> T> = None; }
 
 // The columns, and which entities there are.

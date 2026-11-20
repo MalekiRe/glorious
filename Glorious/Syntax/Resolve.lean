@@ -468,6 +468,14 @@ def expandBlankets (items : List Item) : List Item := Id.run do
     Item.fieldNames (attrMark "blanket_impl")
       (traitBase tr :: ctx.filterMap fun (p, c) => if p == t then some (traitBase c) else none) []).toArray
   let mut copies := 0
+  -- (How many traits of its type each asks: of two for one trait that both
+  -- apply to a type, the one that asks more is that type's, `impl<T> Cloner
+  -- for T where T: Clone` beside `impl<T> Cloner for T`; tried first.)
+  let askedOf := fun (b : Nat) => match blankets[b]? with
+    | some (_, _, t, ctx, _) => (ctx.filter fun (pc : String × String) => pc.1 == t).length
+    | none => 0
+  let order := (List.range blankets.length).mergeSort fun a b => askedOf a ≥ askedOf b
+  let blankets := order.filterMap fun b => blankets[b]?
   -- (A copy may give what another asks: as many rounds as there are.)
   for _ in List.range (blankets.length + 1) do
     let mut more := false
@@ -480,6 +488,11 @@ def expandBlankets (items : List Item) : List Item := Id.run do
         let mine := bodies.map fun body => (substTypeExpr [(t, self)] body).spell
         let givers := byBlanket.getD (traitBase tr, h, mine) []
         if givers.contains b then continue
+        -- (One that asks more already gave it this type: that one is its.)
+        let asksOf := fun (g : Nat) => match blankets[g]? with
+          | some (_, _, t', ctx', _) => (ctx'.filter fun (pc : String × String) => pc.1 == t').length
+          | none => 0
+        if givers.any (fun g => asksOf g > asked.length) then continue
         let mineToo := givers.any (· != b)
         if !mineToo && known.contains (traitBase tr, h, mine) then continue
         if denied.contains (last (traitBase tr), last h) then continue

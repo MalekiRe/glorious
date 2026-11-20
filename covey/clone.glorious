@@ -26,10 +26,8 @@ use std::vec::map;
 
 struct Label(Int)
 impl Clone for Label { fn clone(l: &Label) -> Label { Label(l.0) } }
-impl Cloner for Label { const CLONER: Option<fn(&Label) -> Label> = Some(clone); }
 struct Size(Int)
 impl Clone for Size { fn clone(s: &Size) -> Size { Size(s.0) } }
-impl Cloner for Size { const CLONER: Option<fn(&Size) -> Size> = Some(clone); }
 // Not copied: prototypes keep it, copies do not.
 struct Template
 impl Disabling for Template { const DISABLES: Bool = true; }
