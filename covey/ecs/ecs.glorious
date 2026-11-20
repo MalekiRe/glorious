@@ -753,12 +753,16 @@ impl<S> World<S> {
 
     // Give an entity a component, or another value of one it has: the one
     // it had, if it had one.
-    pub fn insert<T>(world: &mut Self, entity: Entity, value: T) -> Option<T> where S: Get<T>, T: EvictOne<S>, T: BringsOne<S>, T: Use<[0, *]> {
-        if(alive(&*world, entity)) {
-            let had = put_one(world, entity, value);
-            <T as BringsOne<S>>::bring_one(world, entity);
-            had
-        } else { discard(value); None }
+    pub fn insert<T>(world: &mut Self, entity: Entity, value: T) -> Option<T> where S: Get<T>, T: EvictOne<S>, T: BringsOne<S> {
+        // (A match, whose clauses are given the value each once: a value
+        // that has a `drop` is put.)
+        match(alive(&*world, entity)) {
+            Ok(_) =>
+                let had = put_one(world, entity, value);
+                <T as BringsOne<S>>::bring_one(world, entity);
+                had,
+            Err(_) => discard(value); None
+        }
     }
 
     // Give an entity components; what it had of them.

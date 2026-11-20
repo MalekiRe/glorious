@@ -16,7 +16,7 @@
 // 1
 // 1
 // --
-// 0
+// 1
 // 0
 // 0
 // 1
@@ -53,7 +53,8 @@ impl Drop for Owned {
 }
 
 fn flag(b: Bool) { if(b) { say(1) } else { say(0) } }
-fn id_of(o: &Option<Owned>) -> Int { match(o) { &Some(r) => r.id, &None => 0 - 1 } }
+fn owned_id(r: &Owned) -> Int { r.id }
+fn id_of(o: &Option<Owned>) -> Int { match(o) { Some(r) => owned_id(r), None => 0 - 1 } }
 fn counted(drops: &Mutex<[Int]>, at: Int) -> Int { lock(&*drops, fn(d: &mut [Int]) -> Int { d[at] }) }
 
 fn main() -> Int {
@@ -129,7 +130,7 @@ fn main() -> Int {
     flag(world.despawn(owned[2]));
     say(counted(&drops, 1));
     say(counted(&drops, 2));
-    discard(world);
+    discard(replace(&mut world, World::new()));
     say(fold(range(2, 65), 0, fn(sum: Int, i: Int) -> Int { sum + counted(&drops, i) }));
     discard(replaced);
     discard(removed);
