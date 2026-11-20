@@ -5997,14 +5997,19 @@ Three of the 18 drafts still fail the suite (plugins, remote, tasks), and
 behaviors, devtools, one_of2, required2 and the rest pass. What each
 still needs:
 
-- **plugins**: hooks fired from an exclusive system's world. Upstream runs a
-  component's hooks inside the world, at the spawn (`hp added x1` before the
-  system's own line); covey's hooks are the App's systems (`On<OnAdd<T>,
-  ..>` in `L`), which a `&mut World<S>` cannot reach. Taking it away means
-  the world keeps runnable hooks: each registered hook adapted to run on a
-  `World<S>` (as `RunsOnWorld` runs a system), kept by the component's place
-  among the columns (a `Get<T>` slot), and run by the world's insert,
-  remove and despawn.
+- **plugins**: all but its first lines pass (its storage is said among its
+  components, and an exclusive system is a point where what commands asked
+  is done). Its first lines are hooks fired from an exclusive system's
+  world: upstream runs a component's hooks inside the world, at the spawn
+  (`hp added x1` before the system's own line); covey's hooks are the
+  App's systems (`On<OnAdd<T>, ..>` in `L`), which a `&mut World<S>`
+  cannot reach. Tried: the app's hook systems copied into the world when it
+  is built (`WorldHooks` over `L`, each a callable the world keeps, run on
+  it by name where an exclusive system has it). The checker refuses it: a
+  system read out of `&app.systems` is taken to hold a borrow of the app,
+  which a callable kept in a declared type may not. What takes it away:
+  hooks registered with the world from the start (`.on` putting the system
+  in the world, not in `L`), so nothing is copied out of the app.
 - ~~**required2**~~: passes. What a component requires is brought by a
   table the app makes when it is built (`Bringers`: each component's name,
   and what brings what it requires), and what a brought component requires
