@@ -307,27 +307,27 @@ theorem StoreOk.push_cont {S : StoreTy} {conts : Conts Frame} {labels : Nat} {ce
 
 theorem StoreOk.push_cell {S : StoreTy} {conts : Conts Frame} {labels : Nat} {cells : Cells}
     {v : Value} {σ : Ty} (hs : StoreOk Δ S ⟨conts, labels, cells⟩) (hv : HasVal Δ S v σ) :
-    ∃ S', S.Le S' ∧ S'.cells cells.length = some σ
-      ∧ StoreOk Δ S' ⟨conts, labels, cells ++ [some v]⟩ := by
-  have hfresh : S.cells cells.length = none := by
-    cases h : S.cells cells.length with
+    ∃ S', S.Le S' ∧ S'.cells cells.size = some σ
+      ∧ StoreOk Δ S' ⟨conts, labels, cells.push (some v)⟩ := by
+  have hfresh : S.cells cells.size = none := by
+    cases h : S.cells cells.size with
     | none => rfl
     | some y => exact absurd (hs.cells _ _ h).1 (Nat.lt_irrefl _)
   let S' : StoreTy :=
-    { S with cells := fun i => if i = cells.length then some σ else S.cells i }
+    { S with cells := fun i => if i = cells.size then some σ else S.cells i }
   have hle : S.Le S' := ⟨fun _ _ h => h, fun _ _ h => h, fun _ _ h => h, fun i y h => by
-    show (if i = cells.length then some σ else S.cells i) = some y
-    by_cases he : i = cells.length
+    show (if i = cells.size then some σ else S.cells i) = some y
+    by_cases he : i = cells.size
     · subst he
       rw [hfresh] at h
       cases h
     · simp [he, h], fun _ _ h => h⟩
-  refine ⟨S', hle, by show (if cells.length = cells.length then some σ else _) = _; simp, ?_⟩
+  refine ⟨S', hle, by show (if cells.size = cells.size then some σ else _) = _; simp, ?_⟩
   refine ⟨fun id o ρ ε₀ Φ h => ?_, hs.labels, hs.handlers, fun a τ h => ?_, hs.loans, hs.quiet⟩
   · obtain ⟨hlt, hseg⟩ := hs.conts id o ρ ε₀ Φ h
     exact ⟨hlt, fun seg hg => (hseg seg hg).mono hle⟩
-  · have h' : (if a = cells.length then some σ else S.cells a) = some τ := h
-    by_cases he : a = cells.length
+  · have h' : (if a = cells.size then some σ else S.cells a) = some τ := h
+    by_cases he : a = cells.size
     · subst he
       simp at h'
       subst h'
@@ -337,20 +337,20 @@ theorem StoreOk.push_cell {S : StoreTy} {conts : Conts Frame} {labels : Nat} {ce
       exact hv.mono hle
     · simp [he] at h'
       obtain ⟨hlt, hval⟩ := hs.cells a τ h'
-      have hlt : a < cells.length := hlt
-      refine ⟨(by simp; omega : a < (cells ++ [some v]).length), fun w hg => ?_⟩
-      rw [List.getElem?_append_left hlt] at hg
+      have hlt : a < cells.size := hlt
+      refine ⟨(by simp; omega : a < (cells.push (some v)).size), fun w hg => ?_⟩
+      simp only [Array.getElem?_push, show a ≠ cells.size from Nat.ne_of_lt hlt, ite_false] at hg
       exact (hval w hg).mono hle
 
 /-- Overwriting or freeing a cell keeps the store typed. -/
 theorem StoreOk.set_cell {S : StoreTy} {conts : Conts Frame} {labels : Nat} {cells : Cells}
     {a : Nat} {τ : Ty} {x : Option Value} (hs : StoreOk Δ S ⟨conts, labels, cells⟩)
     (ha : S.cells a = some τ) (hx : ∀ v, x = some v → HasVal Δ S v τ) :
-    StoreOk Δ S ⟨conts, labels, cells.set a x⟩ := by
+    StoreOk Δ S ⟨conts, labels, cells.setIfInBounds a x⟩ := by
   refine ⟨hs.conts, hs.labels, hs.handlers, fun a' τ' h => ?_, hs.loans, hs.quiet⟩
   obtain ⟨hlt, hv⟩ := hs.cells a' τ' h
   refine ⟨by simpa using hlt, fun v hg => ?_⟩
-  rw [List.getElem?_set] at hg
+  rw [Array.getElem?_setIfInBounds] at hg
   by_cases he : a = a'
   · subst he
     rw [ha] at h
@@ -1169,17 +1169,17 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
     have hnd := hform.apart
     have hrow := hform.row
     obtain ⟨v, hv, hvt⟩ := atom_ok henv hinit
-    have hfr := hst.fresh (r := .cell cells.length)
+    have hfr := hst.fresh (r := .cell cells.size)
       fun ⟨_, h⟩ => absurd (hs.cells _ _ h).1 (Nat.lt_irrefl _)
     obtain ⟨S', hS, hcell, hs'⟩ := hs.push_cell hvt
     obtain ⟨rs, hrs, hl, hρo, hεo, hgrant, hnd'⟩ :=
       cell_enter (Δ := Δ) hcell hσ hρ hε hn hreg hacc hsub hnd hfr
     obtain ⟨c, hc, hcok, hck, hcl, hocc⟩ :=
-      evalScope_ok (S := S') (l := .ref cells.length 0 []) (henv.mono hS) hthunk hrs hl
+      evalScope_ok (S := S') (l := .ref cells.size 0 []) (henv.mono hS) hthunk hrs hl
     rw [hρo, hεo] at hcok
     have h1 : step p ⟨.cell init thunk body, env, stack, ⟨conts, labels, cells⟩⟩
-        = apply p c (.cell cells.length :: .call env body :: stack)
-            ⟨conts, labels, cells ++ [some v]⟩ := by
+        = apply p c (.cell cells.size :: .call env body :: stack)
+            ⟨conts, labels, cells.push (some v)⟩ := by
       simp [step, hv, hc, Store.alloc]
     rw [h1]
     refine .of_apply
@@ -1204,16 +1204,16 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
     have hnd := hform.apart
     have hrow := hform.row
     obtain ⟨v, hv, hvt⟩ := atom_ok henv hinit
-    have hfr := hst.fresh (r := .cell cells.length)
+    have hfr := hst.fresh (r := .cell cells.size)
       fun ⟨_, h⟩ => absurd (hs.cells _ _ h).1 (Nat.lt_irrefl _)
     obtain ⟨S', hS, hcell, hs'⟩ := hs.push_cell hvt
     obtain ⟨rs, hrs, hl, hρo, hεo, hgrant, hnd'⟩ :=
       cell_enter (Δ := Δ) hcell hσ hτ hε hn hreg hacc hsub hnd hfr
     obtain ⟨c, hc, hcok, hck, hcl, hocc⟩ :=
-      evalScope_ok (S := S') (l := .ref cells.length 0 []) (henv.mono hS) hthunk hrs hl
+      evalScope_ok (S := S') (l := .ref cells.size 0 []) (henv.mono hS) hthunk hrs hl
     rw [hρo, hεo] at hcok
     have h1 : step p ⟨.cellTail init thunk, env, stack, ⟨conts, labels, cells⟩⟩
-        = apply p c (.cell cells.length :: stack) ⟨conts, labels, cells ++ [some v]⟩ := by
+        = apply p c (.cell cells.size :: stack) ⟨conts, labels, cells.push (some v)⟩ := by
       simp [step, hv, hc, Store.alloc]
     rw [h1]
     refine .of_apply
@@ -1286,7 +1286,7 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
     obtain ⟨addr, tag, pth, σ₀, rfl, hcell, hpl, _, _⟩ := hvt.ref_inv
     obtain ⟨hlt, hval⟩ := hs.cells addr σ₀ hcell
     cases hget : cells[addr]? with
-    | none => exact absurd hlt (by simpa using List.getElem?_eq_none_iff.mp hget)
+    | none => exact absurd hlt (by simpa using Array.getElem?_eq_none_iff.mp hget)
     | some x =>
       cases x with
       | none =>
@@ -1321,7 +1321,7 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
     obtain ⟨addr, tg, pth, σ₀, rfl, hcell, hpl, _, _⟩ := hvt.ref_inv
     obtain ⟨hlt, hval⟩ := hs.cells addr σ₀ hcell
     cases hget : cells[addr]? with
-    | none => exact absurd hlt (by simpa using List.getElem?_eq_none_iff.mp hget)
+    | none => exact absurd hlt (by simpa using Array.getElem?_eq_none_iff.mp hget)
     | some x =>
       cases x with
       | none =>
@@ -1358,7 +1358,7 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
     obtain ⟨addr, tag, pth, σ₀, rfl, hcell, hpl, _, _⟩ := hvt.ref_inv
     obtain ⟨hlt, hval⟩ := hs.cells addr σ₀ hcell
     cases hget : cells[addr]? with
-    | none => exact absurd hlt (by simpa using List.getElem?_eq_none_iff.mp hget)
+    | none => exact absurd hlt (by simpa using Array.getElem?_eq_none_iff.mp hget)
     | some x =>
       cases x with
       | none =>
@@ -1379,7 +1379,7 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
         have hvt' := putPart_ok hpl (hval old₀ hget) hwt hput
         have h1 : step p ⟨.mem .store [a, b] body, env, stack, ⟨conts, labels, cells⟩⟩
             = .next ⟨body, env ++ [Value.unit], stack,
-                ⟨conts, labels, cells.set addr (some v')⟩⟩ := by
+                ⟨conts, labels, cells.setIfInBounds addr (some v')⟩⟩ := by
           simp [step, evalAtoms, hv, hw, MemOp.eval, hget, hput]
         rw [h1]
         refine .next (.mk (henv.snoc .unit) hbody hle hsub hst
@@ -1406,7 +1406,7 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
     obtain ⟨addr, tag, pth, σ₀, rfl, hcell, hpl, _, _⟩ := hvt.ref_inv
     obtain ⟨hlt, hval⟩ := hs.cells addr σ₀ hcell
     cases hget : cells[addr]? with
-    | none => exact absurd hlt (by simpa using List.getElem?_eq_none_iff.mp hget)
+    | none => exact absurd hlt (by simpa using Array.getElem?_eq_none_iff.mp hget)
     | some x =>
       cases x with
       | none =>
@@ -1428,7 +1428,7 @@ theorem step_ok {p : Program} {S : StoreTy} {s : State} (hp : ProgramOk Δ p)
         have hvt' := putPart_ok hpl (hval old₀ hget) hwt hput
         have h1 : step p ⟨.mem .swap [a, b] body, env, stack, ⟨conts, labels, cells⟩⟩
             = .next ⟨body, env ++ [old], stack,
-                ⟨conts, labels, cells.set addr (some v')⟩⟩ := by
+                ⟨conts, labels, cells.setIfInBounds addr (some v')⟩⟩ := by
           simp [step, evalAtoms, hv, hw, MemOp.eval, hget, hfo, hput]
         rw [h1]
         refine .next (.mk (henv.snoc hot) hbody hle hsub hst

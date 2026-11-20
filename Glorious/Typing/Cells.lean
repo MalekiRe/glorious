@@ -101,45 +101,47 @@ theorem OwnsAt.release {a : Nat} {st : List Frame} {store : Store Frame}
     omega
   obtain ⟨v, hv⟩ := h2 (by omega)
   refine ⟨v, ?_⟩
-  show (store.cells.set a none)[b]? = some (some v)
-  rw [List.getElem?_set_ne hne]
+  show (store.cells.setIfInBounds a none)[b]? = some (some v)
+  rw [Array.getElem?_setIfInBounds_ne hne]
   exact hv
 
 /-- Pushing the scope of a new cell. -/
 theorem OwnsAt.alloc {st : List Frame} {store : Store Frame} (h : OwnsAt st store) (v : Value) :
-    OwnsAt (.cell store.cells.length :: st) (store.alloc v) := by
+    OwnsAt (.cell store.cells.size :: st) (store.alloc v) := by
   intro b
   obtain ⟨h1, h2⟩ := h b
-  by_cases hb : store.cells.length = b
+  by_cases hb : store.cells.size = b
   · subst hb
-    have hz : ownStack store.cells.length st + osum (ownStack store.cells.length) store.conts
+    have hz : ownStack store.cells.size st + osum (ownStack store.cells.size) store.conts
         = 0 := by
-      cases hn : ownStack store.cells.length st + osum (ownStack store.cells.length) store.conts
+      cases hn : ownStack store.cells.size st + osum (ownStack store.cells.size) store.conts
         with
       | zero => rfl
       | succ k =>
         obtain ⟨w, hw⟩ := h2 (by omega)
-        have := (List.getElem?_eq_some_iff.mp hw).1
+        have := (Array.getElem?_eq_some_iff.mp hw).1
         omega
     refine ⟨?_, fun _ => ⟨v, ?_⟩⟩
-    · show ownFrame _ (Frame.cell store.cells.length) + ownStack _ st
+    · show ownFrame _ (Frame.cell store.cells.size) + ownStack _ st
         + osum (ownStack _) store.conts ≤ 1
       simp only [ownFrame, ↓reduceIte]
       omega
-    · show (store.cells ++ [some v])[store.cells.length]? = some (some v)
+    · show (store.cells.push (some v))[store.cells.size]? = some (some v)
       simp
   · refine ⟨?_, fun hp => ?_⟩
-    · show ownFrame b (Frame.cell store.cells.length) + ownStack b st
+    · show ownFrame b (Frame.cell store.cells.size) + ownStack b st
         + osum (ownStack b) store.conts ≤ 1
       simp only [ownFrame, hb, ↓reduceIte]
       omega
-    · have hp' : 0 < ownFrame b (Frame.cell store.cells.length) + ownStack b st
+    · have hp' : 0 < ownFrame b (Frame.cell store.cells.size) + ownStack b st
           + osum (ownStack b) store.conts := hp
       simp only [ownFrame, hb, ↓reduceIte] at hp'
       obtain ⟨w, hw⟩ := h2 (by omega)
       refine ⟨w, ?_⟩
-      show (store.cells ++ [some v])[b]? = some (some w)
-      rw [List.getElem?_append_left (List.getElem?_eq_some_iff.mp hw).1]
+      show (store.cells.push (some v))[b]? = some (some w)
+      have hlt := (Array.getElem?_eq_some_iff.mp hw).1
+      rw [Array.getElem?_push_lt hlt]
+      rw [Array.getElem?_eq_getElem hlt] at hw
       exact hw
 
 theorem callFn_next {p : Program} {fn : Nat} {captures vs : List Value} {st : List Frame}
@@ -297,17 +299,17 @@ theorem apply_owns {p : Program} {c : Callee} {st : List Frame} {store : Store F
     · cases h
 
 theorem live_set {cells : Cells} {a b : Nat} {x : Value} (h : Live cells a) :
-    Live (cells.set b (some x)) a := by
+    Live (cells.setIfInBounds b (some x)) a := by
   obtain ⟨w, hw⟩ := h
   by_cases hb : b = a
   · subst hb
-    exact ⟨x, by rw [List.getElem?_set_self (List.getElem?_eq_some_iff.mp hw).1]⟩
-  · exact ⟨w, by rw [List.getElem?_set_ne hb]; exact hw⟩
+    exact ⟨x, by rw [Array.getElem?_setIfInBounds_self_of_lt (Array.getElem?_eq_some_iff.mp hw).1]⟩
+  · exact ⟨w, by rw [Array.getElem?_setIfInBounds_ne hb]; exact hw⟩
 
 /-- A memory operation leaves the cells as they are or sets one of them. -/
 theorem mem_cells {op : MemOp} {cells cells' : Cells} {vs : List Value} {r : Value}
     (h : op.eval cells vs = some (r, cells')) :
-    cells' = cells ∨ ∃ a x, cells' = cells.set a (some x) := by
+    cells' = cells ∨ ∃ a x, cells' = cells.setIfInBounds a (some x) := by
   unfold MemOp.eval at h
   split at h
   · split at h
@@ -456,14 +458,14 @@ theorem step_owns {p : Program} {s s' : State} (ho : Owns s) (h : step p s = .ne
   | cell init thunk body =>
     simp only [step] at h
     split at h
-    · exact apply_owns (st := .cell cells.length :: .call env body :: stack)
+    · exact apply_owns (st := .cell cells.size :: .call env body :: stack)
         (OwnsAt.alloc (st := .call env body :: stack) (store := ⟨conts, labels, cells⟩)
           (ho'.push (fun _ => rfl)) _) h
     · cases h
   | cellTail init thunk =>
     simp only [step] at h
     split at h
-    · exact apply_owns (st := .cell cells.length :: stack)
+    · exact apply_owns (st := .cell cells.size :: stack)
         (OwnsAt.alloc (store := ⟨conts, labels, cells⟩) ho' _) h
     · cases h
   | lend uniq r thunk pre post body =>

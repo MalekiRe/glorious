@@ -273,7 +273,7 @@ structure StoreOk (Δ : Ctx) (S : StoreTy) (store : Store Frame) : Prop where
   labels : ∀ id τ, S.labels id = some τ → id < store.labels
   handlers : ∀ id x, S.handlers id = some x → id < store.labels
   cells : ∀ a τ, S.cells a = some τ →
-    a < store.cells.length ∧ ∀ v, store.cells[a]? = some (some v) → HasVal Δ S v τ
+    a < store.cells.size ∧ ∀ v, store.cells[a]? = some (some v) → HasVal Δ S v τ
   loans : ∀ b a, S.loans b = some a → b ≤ store.labels
   /-- Under the rules for borrows no resumption captured the scope of one. -/
   quiet : Δ.regions ∧ Δ.loans → ∀ (id : Nat) (seg : List Frame),

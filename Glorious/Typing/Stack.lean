@@ -416,7 +416,7 @@ theorem StoreOk.release {S : StoreTy} {store : Store Frame} (hs : StoreOk Δ S s
   obtain ⟨hlt, hv⟩ := hs.cells a' τ' h
   refine ⟨by simpa [Store.release] using hlt, fun v hg => ?_⟩
   simp only [Store.release] at hg
-  rw [List.getElem?_set] at hg
+  rw [Array.getElem?_setIfInBounds] at hg
   by_cases he : a = a'
   · subst he
     simp at hg

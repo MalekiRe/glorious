@@ -6014,9 +6014,22 @@ still needs:
 - **remote**: a system given to `Remote::bridge` performs `Threads`
   (`enter` locks and yields); `RunsOnWorld` takes only systems that perform
   nothing.
-- ~~**behaviors**~~: passes, at upstream's 1000 entities, in 2m36 on the
-  bytecode machine, whose cells are a list (`Control.Cells`): reading a
-  cell walks the list. Cells as an array is what makes it fast.
+- ~~**behaviors**~~: passes, at upstream's 1000 entities, in 20 s with
+  its compile (2m36 while the machines' cells were a list).
+
+## The machines' cells are an array
+
+`Control.Cells`, the memory cells both machines run on, was a list: reading
+or writing cell `a` walked `a` cells, and a program that makes many (each
+behavior's suspended run holds some) slowed with the square of how many.
+It is an `Array (Option Value)` now: a cell is pushed (`Store.alloc`) and
+set in place (`setIfInBounds`, what `List.set` was out of bounds: nothing),
+and read by index. The proofs say the same of it through the array
+lemmas (`Array.getElem?_push_lt`, `getElem?_setIfInBounds_ne`, ...), and
+`occCells` counts over `cells.toList`.
+
+Measured: covey/behaviors (1000 entities) 2m36 -> 20 s; the whole suite
+196 s -> 38 s.
 
 ## Other standing decisions
 

@@ -1349,8 +1349,8 @@ def explainStuck (c : Compiled) (cfg : Core.Config) : String :=
   | .raise op _ => performed op
   | .perform op _ _ => performed op
   | .cancel _ _ => "`cancel` is applied to something that is not a usable resumption"
-  | .cell _ thunk _ => applied thunk (some [.ref s.store.cells.length 0 []])
-  | .cellTail _ thunk => applied thunk (some [.ref s.store.cells.length 0 []])
+  | .cell _ thunk _ => applied thunk (some [.ref s.store.cells.size 0 []])
+  | .cellTail _ thunk => applied thunk (some [.ref s.store.cells.size 0 []])
   | .lend _ r thunk pre post _ =>
     match r.eval s.env with
     | some (.ref a _ path) =>
@@ -1417,7 +1417,7 @@ def liveCells (src : String) (input : List Int := []) (fuel : Nat := 4000000) : 
             | .cell a => some a
             | _ => none
           let cells := cfg.state.store.cells
-          some ((List.range cells.length).filter fun a =>
+          some ((List.range cells.size).filter fun a =>
             (cells[a]?.getD none).isSome && !leaving.contains a).length
         | .stuck => none
     go fuel (Bytecode.initIO bytecode input)

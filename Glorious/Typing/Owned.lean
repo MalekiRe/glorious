@@ -600,7 +600,7 @@ theorem osum_set {α : Type} (w : α → Nat) : ∀ (l : List (Option α)) (i : 
     have ih := osum_set w l i x old h
     cases c <;> simp [osum] <;> omega
 
-def occCells (id : Nat) (cells : Cells) : Nat := osum (occ id) cells
+def occCells (id : Nat) (cells : Cells) : Nat := osum (occ id) cells.toList
 
 def occConts (id : Nat) (conts : Conts Frame) : Nat := osum (occStack id) conts
 
@@ -729,21 +729,22 @@ theorem atomVars_head_sub {a : Atom} {as : List Atom} {i : Nat} (h : i ∈ atomV
   | int n => cases h
 
 theorem occCells_push (id : Nat) (cells : Cells) (v : Value) :
-    occCells id (cells ++ [some v]) = occCells id cells + occ id v := by
+    occCells id (cells.push (some v)) = occCells id cells + occ id v := by
   simp [occCells, osum_append, osum]
 
 theorem occCells_set (id : Nat) {cells : Cells} {a : Nat} {old : Option Value}
     (h : cells[a]? = some old) (x : Option Value) :
-    occCells id (cells.set a x) + oweight (occ id) old = occCells id cells + oweight (occ id) x :=
-  osum_set (occ id) cells a x old h
+    occCells id (cells.setIfInBounds a x) + oweight (occ id) old = occCells id cells + oweight (occ id) x := by
+  have h' : cells.toList[a]? = some old := by simpa using h
+  simpa [occCells, Array.toList_setIfInBounds] using osum_set (occ id) cells.toList a x old h'
 
 /-- Releasing a cell drops what it held. -/
 theorem occCells_release_le (id : Nat) (cells : Cells) (a : Nat) :
-    occCells id (cells.set a none) ≤ occCells id cells := by
+    occCells id (cells.setIfInBounds a none) ≤ occCells id cells := by
   cases h : cells[a]? with
   | none =>
-    have hlen : cells.length ≤ a := List.getElem?_eq_none_iff.mp h
-    rw [List.set_eq_of_length_le hlen]
+    have hlen : cells.size ≤ a := Array.getElem?_eq_none_iff.mp h
+    rw [Array.setIfInBounds_eq_of_size_le hlen]
     exact Nat.le_refl _
   | some old =>
     have := occCells_set id h none

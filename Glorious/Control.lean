@@ -216,7 +216,7 @@ def tagAt : Value → List Value → Int
   | _, _ => -1
 
 /-- Memory: a cell is live with a value, or has been freed. Addresses are never reused. -/
-abbrev Cells := List (Option Value)
+abbrev Cells := Array (Option Value)
 
 /-- Perform a memory operation: its result and the memory afterwards. -/
 def MemOp.eval (cells : Cells) : MemOp → List Value → Option (Value × Cells)
@@ -226,13 +226,13 @@ def MemOp.eval (cells : Cells) : MemOp → List Value → Option (Value × Cells
     | _ => none
   | .store, [.ref a _ p, w] =>
     match cells[a]? with
-    | some (some v) => (v.putPart p w).map fun v' => (.unit, cells.set a (some v'))
+    | some (some v) => (v.putPart p w).map fun v' => (.unit, cells.setIfInBounds a (some v'))
     | _ => none
   | .swap, [.ref a _ p, w] =>
     match cells[a]? with
     | some (some v) =>
       match v.part p, v.putPart p w with
-      | some old, some v' => some (old, cells.set a (some v'))
+      | some old, some v' => some (old, cells.setIfInBounds a (some v'))
       | _, _ => none
     | _ => none
   | .tag, .ref a _ p :: path =>
@@ -256,10 +256,10 @@ structure Store (φ : Type) where
 
 /-- The store after the scope of cell `a` has ended: the cell is released. -/
 def Store.release {φ : Type} (store : Store φ) (a : Nat) : Store φ :=
-  ⟨store.conts, store.labels, store.cells.set a none⟩
+  ⟨store.conts, store.labels, store.cells.setIfInBounds a none⟩
 
 /-- The store with a new cell holding `v`; its address is the old number of cells. -/
 def Store.alloc {φ : Type} (store : Store φ) (v : Value) : Store φ :=
-  ⟨store.conts, store.labels, store.cells ++ [some v]⟩
+  ⟨store.conts, store.labels, store.cells.push (some v)⟩
 
 end Glorious

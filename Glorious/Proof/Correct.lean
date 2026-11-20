@@ -736,7 +736,7 @@ theorem step_sim (p : Core.Program) {s : Core.State} {t : Bytecode.State} (hm : 
       rw [h1]
       exact .stuck
     | some v =>
-      cases he : evalScope ρ thunk (.ref cells.length 0 []) with
+      cases he : evalScope ρ thunk (.ref cells.size 0 []) with
       | none =>
         have h1 : Core.step p ⟨.cell init thunk body, ρ, stack, ⟨conts, labels, cells⟩⟩
             = .stuck := by
@@ -745,12 +745,12 @@ theorem step_sim (p : Core.Program) {s : Core.State} {t : Bytecode.State} (hm : 
         exact .stuck
       | some c =>
         have h1 : Core.step p ⟨.cell init thunk body, ρ, stack, ⟨conts, labels, cells⟩⟩
-            = Core.apply p c (.cell cells.length :: .call ρ body :: stack)
+            = Core.apply p c (.cell cells.size :: .call ρ body :: stack)
                 (Store.alloc ⟨conts, labels, cells⟩ v) := by
           simp [Core.step, hv, he]
         have h2 : Bytecode.step (compile p) ⟨code, pc, ρ, frames, ⟨conts', labels, cells⟩⟩
             = Bytecode.apply (compile p) c
-                (.cell cells.length :: .ret code (pc + 1) ρ :: frames)
+                (.cell cells.size :: .ret code (pc + 1) ρ :: frames)
                 (Store.alloc ⟨conts', labels, cells⟩ v) := by
           simp [Bytecode.step, hi, hv, he]
         rw [h1, h2]
@@ -765,7 +765,7 @@ theorem step_sim (p : Core.Program) {s : Core.State} {t : Bytecode.State} (hm : 
       rw [h1]
       exact .stuck
     | some v =>
-      cases he : evalScope ρ thunk (.ref cells.length 0 []) with
+      cases he : evalScope ρ thunk (.ref cells.size 0 []) with
       | none =>
         have h1 : Core.step p ⟨.cellTail init thunk, ρ, stack, ⟨conts, labels, cells⟩⟩
             = .stuck := by
@@ -774,11 +774,11 @@ theorem step_sim (p : Core.Program) {s : Core.State} {t : Bytecode.State} (hm : 
         exact .stuck
       | some c =>
         have h1 : Core.step p ⟨.cellTail init thunk, ρ, stack, ⟨conts, labels, cells⟩⟩
-            = Core.apply p c (.cell cells.length :: stack)
+            = Core.apply p c (.cell cells.size :: stack)
                 (Store.alloc ⟨conts, labels, cells⟩ v) := by
           simp [Core.step, hv, he]
         have h2 : Bytecode.step (compile p) ⟨code, pc, ρ, frames, ⟨conts', labels, cells⟩⟩
-            = Bytecode.apply (compile p) c (.cell cells.length :: frames)
+            = Bytecode.apply (compile p) c (.cell cells.size :: frames)
                 (Store.alloc ⟨conts', labels, cells⟩ v) := by
           simp [Bytecode.step, hi, hv, he]
         rw [h1, h2]

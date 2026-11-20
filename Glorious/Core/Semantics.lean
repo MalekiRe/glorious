@@ -284,13 +284,13 @@ def step (p : Program) (s : State) : Step State Value :=
           ⟨conts, s.store.labels + 1, s.store.cells⟩
       | none => .stuck
   | .cell init thunk body =>
-    match init.eval s.env, evalScope s.env thunk (.ref s.store.cells.length 0 []) with
+    match init.eval s.env, evalScope s.env thunk (.ref s.store.cells.size 0 []) with
     | some v, some c =>
-      apply p c (.cell s.store.cells.length :: .call s.env body :: s.stack) (s.store.alloc v)
+      apply p c (.cell s.store.cells.size :: .call s.env body :: s.stack) (s.store.alloc v)
     | _, _ => .stuck
   | .cellTail init thunk =>
-    match init.eval s.env, evalScope s.env thunk (.ref s.store.cells.length 0 []) with
-    | some v, some c => apply p c (.cell s.store.cells.length :: s.stack) (s.store.alloc v)
+    match init.eval s.env, evalScope s.env thunk (.ref s.store.cells.size 0 []) with
+    | some v, some c => apply p c (.cell s.store.cells.size :: s.stack) (s.store.alloc v)
     | _, _ => .stuck
   | .lend uniq r thunk pre post body =>
     match evalLend s.env r thunk pre post (s.store.labels + 1) with
@@ -310,7 +310,7 @@ def step (p : Program) (s : State) : Step State Value :=
   -- A host operation is a step of the program in its world; see `stepIO`.
   | .host _ _ _ => .stuck
 
-def init (p : Program) : State := ⟨p.main, [], [], ⟨[], 0, []⟩⟩
+def init (p : Program) : State := ⟨p.main, [], [], ⟨[], 0, #[]⟩⟩
 
 /-- A machine state together with the world outside the program. -/
 structure Config where
