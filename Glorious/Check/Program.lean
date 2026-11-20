@@ -322,22 +322,26 @@ def checkItems (items : List Item) (seed : UInt64 := 0) (kept : Kept := []) : M 
     let namesAny := fun (d : FnDecl) =>
       ((d.clauses.flatMap (Elab.fvClause [])).flatMap fun x => x :: aliasOf.getD x []).any nameSet.contains
     let early := if coercing.isEmpty then implDecls.filter (!namesAny ·) else []
-    -- (Of those kept, one after another, only the last is taken, and made
-    -- this program's: the key has its implementations as written, so they
-    -- line up.)
-    let mut taken : Option St := none
-    for d in early do
-      key := groupKey key [d]
-      match kept.lookup key with
-      | some st =>
-        taken := some st
-        made := (key, st) :: made
-      | none =>
-        if let some st := taken then restore ((ours st).getD st) decls
-        taken := none
-        checkMaybe [d]
-        made := (key, ← get) :: made
-    if let some st := taken then restore ((ours st).getD st) decls
+    -- (Of those kept, the last is taken, and made this program's: the key
+    -- has its implementations as written, so they line up. Kept now and
+    -- then, as the groups are: a unit declaring many types has a copy of
+    -- each for every one, and a state after each was most of what a
+    -- program kept.)
+    let earlyKeys := (early.foldl (fun (acc : List UInt64 × UInt64) d =>
+      let k := groupKey acc.2 [d]
+      (k :: acc.1, k)) ([], key)).1.reverse
+    let everyEarly := keptEvery early.length
+    let earlyStart := ((earlyKeys.zipIdx.reverse.find? fun (k, _) => (kept.lookup k).isSome).map (·.2 + 1)).getD 0
+    if earlyStart > 0 then
+      if let some k := earlyKeys[earlyStart - 1]? then
+        if let some st := kept.lookup k then
+          restore ((ours st).getD st) decls
+          made := (k, st) :: made
+    for (d, idx) in early.zipIdx.drop earlyStart do
+      checkMaybe [d]
+      if (idx + 1) % everyEarly == 0 || idx + 1 == early.length then
+        made := (earlyKeys[idx]!, forKeeping (← get)) :: made
+    if let some k := earlyKeys.getLast? then key := k
     -- The state after the last group whose key, and so every key before
     -- it, is kept is taken; the groups after it are checked. A state is
     -- kept after a group only now and then, in a unit of many (`keptEvery`):

@@ -347,7 +347,12 @@ def compileFile (path : String) (checkKept : Check.Kept := []) (search : Bool :=
     if search then
       writePlaces file c.places
       if let some cert := c.cert then Target.writeCert dir cert
-    unless c.checkKept.isEmpty do Trace.timedIO "save: checked" (Store.save (dir / "checked") "checked" c.checkKept (chain := 4))
+    -- (Without the library's modules' states: those are kept with the
+    -- library, and read with the program's.)
+    let ofLibrary := fun (k : UInt64) => libraryKept.any (·.1 == k) || c.libraryKept.any (·.1 == k)
+    let mine := c.checkKept.filter fun (k, _) => !ofLibrary k
+    unless mine.isEmpty do
+      Trace.timedIO "save: checked" (Store.save (dir / "checked") "checked" mine (chain := 4))
     if preludeKept.isNone then
       if let .ok parsed := readPrelude.get then Store.save (library / "prelude") "prelude" parsed
     -- (Saved again only where something was parsed anew.)
