@@ -13,7 +13,7 @@ def checkUseDecls : M Unit := do
   for (head, must, once) in ((← get).useDecls.toList.map fun (h, m, o) => (h, m, o)).mergeSort (fun a b => a.1 ≤ b.1) do
     if must && (← get).kimpls.has "Drop" head then
       throw s!"`impl Drop for {Syntax.lastSegment head}`: a `{Syntax.lastSegment head}` has to be used, so one is never destroyed, and `drop` would never run"
-    let arity := (((← get).types.lookup head).map (·.arity)).getD 0
+    let arity := (((← get).types[head]?).map (·.arity)).getD 0
     let args ← (List.range arity).mapM fun _ => freshTy
     for part in ← partsOf (.con head args) do
       unless must do

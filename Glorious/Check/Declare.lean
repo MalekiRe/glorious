@@ -126,7 +126,7 @@ partial def resolveType (params : List (String × Ty)) (decl : Bool) : TypeExpr 
       else if Syntax.isScalar x then
         if args.isEmpty then pure (.con x []) else throw s!"`{x}` takes no arguments"
       else
-        match (← get).types.lookup x with
+        match (← get).types[x]? with
         | some d =>
           -- (Its lifetimes not written, `WorldQuery<'_, Q>` or `WorldQuery<Q>`:
           -- each is one left to be found, as in a reference written `&T`.)
@@ -372,8 +372,7 @@ def declareTraits (items : List Item) : M Unit := do
     modify fun s =>
       { s with
         traits := ("Drop", ["drop"]) :: s.traits
-        methods := ("drop", ⟨"Drop", 0, dropSelf, [.ref .uniq (.var dropSelf) dropCap], .unit, [], [], [], ⟨[], none⟩, [], [], [], []⟩)
-          :: s.methods }
+        methods := s.methods.insert "drop" ⟨"Drop", 0, dropSelf, [.ref .uniq (.var dropSelf) dropCap], .unit, [], [], [], ⟨[], none⟩, [], [], [], []⟩ }
   for item in items do
     if let .trait name methods := item then
       if ((← get).traits.lookup name).isSome then throw s!"trait `{name}` is declared twice"
@@ -434,7 +433,7 @@ def declareTraits (items : List Item) : M Unit := do
         for g in ownNames.filter (!·.startsWith "'") do
           if let .var id ← freshTy then mparams := mparams ++ [(g, id)]
         modify fun s => { s with gatScope := assocNames, gatOccs := #[] }
-        if ((← get).methods.lookup m).isSome then
+        if ((← get).methods[m]?).isSome then
           throw s!"`{m}` is declared twice as a function of a trait"
         -- A trait's function has no body its lifetimes could be found from,
         -- so the unwritten ones are one: what it gives may borrow whatever
@@ -474,7 +473,7 @@ def declareTraits (items : List Item) : M Unit := do
         modify fun s => { s with gatScope := [], gatOccs := #[] }
         let sig : MethodSig :=
           ⟨name, index, self, ps, r, (one, "'_") :: written, tparams, assocVars, row, rowVars, mparams, gats, uses⟩
-        modify fun s => { s with methods := (m, sig) :: s.methods }
+        modify fun s => { s with methods := s.methods.insert m sig }
         index := index + 1
       modify fun s => { s with traits := (name, methods.map (·.1)) :: s.traits }
   for item in items do
@@ -499,7 +498,7 @@ def declareTraits (items : List Item) : M Unit := do
         -- reference's, with what it is to.)
         else if head.startsWith "(fn" then pure args.length
         else if head == "(&)" || head == "(&mut)" then pure 1
-        else match (← get).types.lookup head with
+        else match (← get).types[head]? with
           | some d => pure d.arity
           | none => throw s!"{what}: unknown type `{head}`"
       unless args.length == arity do
@@ -742,7 +741,7 @@ def declareTraits (items : List Item) : M Unit := do
       modify fun s => { s with traits := (Syntax.destroyTrait, [Syntax.destroyFn]) :: s.traits }
     let builtin := ["Int", "(callable)", "(reference)"] ++ Syntax.scalars.map (·.1)
       ++ (List.range 13).map fun n => s!"(tuple{n})"
-    let declared := (← get).types.map fun (name, decl) =>
+    let declared := (← get).types.toList.map fun (name, decl) =>
       -- (which of its parameters are types)
       (name, decl.arity, (List.range decl.arity).filter fun j => decl.kinds[j]? != some true)
     let heads := builtin.map (fun h =>
@@ -794,16 +793,16 @@ def declare (items : List Item) : M Unit := do
   for item in items do
     match item with
     | .enum name params ctors =>
-      if ((← get).types.lookup name).isSome then throw s!"type `{name}` is declared twice"
+      if ((← get).types[name]?).isSome then throw s!"type `{name}` is declared twice"
       let params := genericParams params
       modify fun s =>
         { s with types :=
-            (name, ⟨params.length, ctors.map (·.1), params.map isLifetime, []⟩) :: s.types }
+            s.types.insert name ⟨params.length, ctors.map (·.1), params.map isLifetime, []⟩ }
     | .struct name params _ =>
-      if ((← get).types.lookup name).isSome then throw s!"type `{name}` is declared twice"
+      if ((← get).types[name]?).isSome then throw s!"type `{name}` is declared twice"
       let params := genericParams params
       modify fun s =>
-        { s with types := (name, ⟨params.length, [name], params.map isLifetime, []⟩) :: s.types }
+        { s with types := s.types.insert name ⟨params.length, [name], params.map isLifetime, []⟩ }
     | .alias name value => modify fun s =>
       { s with aliases := s.aliases.insert name value, runAliases := s.runAliases.insert name value }
     | .coerce name => modify fun s => { s with coercing := s.coercing ++ [name] }
@@ -906,7 +905,7 @@ def declare (items : List Item) : M Unit := do
       modify fun s =>
         { s with effects := (name, ⟨ids, ops.map (·.name), lifetimes.map (·.isSome)⟩) :: s.effects }
     | .use head lower upper =>
-      unless ((← get).types.lookup head).isSome do
+      unless ((← get).types[head]?).isSome do
         throw s!"`impl Use` for `{head}`: there is no such declared type"
       if (← get).useDecls.contains head then
         throw s!"`impl Use` for `{head}` is written twice"
@@ -926,10 +925,10 @@ def declare (items : List Item) : M Unit := do
     | .con n _ => [n]
     | .tuple ts => ts.flatMap heads
     | _ => []
-  let ctorsOf := fun (n : String) => ((s.types.lookup n).map (·.ctors)).getD []
-  let mut founded : List String := (s.types.filter fun (_, d) => d.ctors.isEmpty).map (·.1)
+  let ctorsOf := fun (n : String) => ((s.types[n]?).map (·.ctors)).getD []
+  let mut founded : List String := (s.types.toList.filter fun (_, d) => d.ctors.isEmpty).map (·.1)
   let mut changed := true
-  let mut fuel := s.types.length + 1
+  let mut fuel := s.types.size + 1
   while changed && fuel > 0 do
     changed := false
     fuel := fuel - 1
@@ -938,7 +937,7 @@ def declare (items : List Item) : M Unit := do
         let ok := d.ctors.any fun c =>
           match s.ctors[c]? with
           | some sig => (sig.fields.flatMap heads).all fun h =>
-              founded.contains h || (s.types.lookup h).isNone
+              founded.contains h || (s.types[h]?).isNone
           | none => true
         if ok then
           founded := n :: founded

@@ -582,7 +582,7 @@ partial def checkArg (scope : Scope) (amb : Row) (what : String) (p : Ty) (a : E
             | .tuple (_ :: _) => pure true
             | .con name _ =>
               let st ← get
-              pure (match st.types.lookup name with
+              pure (match st.types[name]? with
                 | some decl => match decl.ctors with
                   | [c] => st.fieldNames.contains c
                   | _ => false
@@ -665,7 +665,7 @@ partial def receiverKinds (f g : String) : M (Option Nat × Option Nat) := do
     match (← get).fns[name]? with
     | none =>
       -- (A trait's function: as its first parameter is written.)
-      match (← get).methods.lookup name with
+      match (← get).methods[name]? with
       | some sig =>
         match sig.params.head? with
         | some (.ref how _ _) =>
@@ -1071,7 +1071,7 @@ partial def inferCall (scope : Scope) (amb : Row) (f : Expr) (args : List Expr)
   -- `<T as Trait>::f(..)` is.
   if let .name (some q) x := f then
     if let some self := (← get).rigidParams.lookup q then
-      if let some sig := (← get).methods.lookup x then
+      if let some sig := (← get).methods[x]? then
         if (← get).instWith.isNone then
           modify fun s => { s with instWith := some [self] }
           let t ← inferCall scope amb (.name (some sig.trait) x) args call

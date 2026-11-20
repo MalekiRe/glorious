@@ -61,7 +61,7 @@ def implFnDecls (im : ImplDecl) : M (List FnDecl) := do
   let mut out : List FnDecl := []
   for item in im.methods do
     if let .fn m written annots ret clauses := item then
-      if let some sig := (← get).methods.lookup m then
+      if let some sig := (← get).methods[m]? then
         -- (Its type parameters: the head's arguments, and then those that
         -- are only inside one, or among the trait's own; and the lifetimes
         -- it writes of its own, `fn at<'a>(..)`.)
@@ -573,8 +573,7 @@ def finish : M Elab.Blocks := fun st => Trace.timed "check: finish" fun _ => (sh
     -- (Each trait's functions and each function's arity, the first of each
     -- name as a lookup finds it, found once.)
     let traitsBy := Elab.firstOf s.traits
-    let arityBy : Std.HashMap String Nat := s.methods.foldl (fun m (n, sig) =>
-      if m.contains n then m else m.insert n sig.params.length) {}
+    let arityBy : Std.HashMap String Nat := s.methods.fold (fun m n sig => m.insert n sig.params.length) {}
     let implEs := s.impls.toList.map fun im =>
       let names := traitsBy.getD (Syntax.traitBase im.trait) []
       (⟨im.dictFn, im.context.length + im.extra.length, names.map fun m =>
@@ -600,7 +599,7 @@ def finish : M Elab.Blocks := fun st => Trace.timed "check: finish" fun _ => (sh
         if isArray then ctors := [("%each", [place 0])]
         else if im.head.startsWith "(tuple" then
           ctors := [("", (List.range arity).map place)]
-        else if let some decl := s.types.lookup im.head then
+        else if let some decl := s.types[im.head]? then
           for c in decl.ctors do
             if let some sig := s.ctors[c]? then
               -- A field's type, as the solver knows types: a parameter of

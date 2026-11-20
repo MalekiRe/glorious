@@ -90,7 +90,7 @@ partial def tyMustUse (info : MustInfo) (visiting : List String) (t : Ty)
       if must then return some s!"a `{bareName name}`"
     if let some w ← args.findSomeM? (tyMustUse info visiting · callables) then return some w
     if visiting.contains name then return none
-    match (← get).types.lookup name with
+    match (← get).types[name]? with
     | none => pure none
     | some decl =>
       decl.ctors.findSomeM? fun c => do

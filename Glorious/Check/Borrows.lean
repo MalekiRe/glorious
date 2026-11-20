@@ -291,7 +291,7 @@ partial def bothAtOnce (loan brand : Nat) (write : Bool) (t : Ty) : M Bool := do
   match ← find t with
   | .tuple fields => together fields
   | .con name args =>
-    match (← get).types.lookup name with
+    match (← get).types[name]? with
     | none => pure true
     | some decl =>
       for c in decl.ctors do
@@ -528,7 +528,7 @@ def resolveName (scope : Scope) (asked : Option String) (x : String) : M Head :=
     if let some q := qual then
       unless q == sig.effect do throw s!"`{x}` is not an operation of `{q}`"
     return .op sig
-  if let some sig := s.methods.lookup x then
+  if let some sig := s.methods[x]? then
     if let some q := qual then
       unless q == sig.trait do throw s!"`{x}` is not a function of `{q}`"
     return .method sig
@@ -823,7 +823,7 @@ partial def fitLifetimes (pos : Variance) (expected actual : Ty) (whole : Bool :
   | .con n es, .con m as =>
     if n != m || es.length != as.length then unify e a
     else
-      let variances := (((← get).types.lookup n).map (·.variances)).getD []
+      let variances := (((← get).types[n]?).map (·.variances)).getD []
       for ((x, y), i) in (es.zip as).zipIdx do
         fitLifetimes (pos.through (variances.getD i .inv)) x y whole
   | .fn ps r effs tail cap, .fn ps' r' effs' tail' cap' =>
@@ -861,7 +861,7 @@ partial def mentionsRef (t : Ty) : M Bool := do
 fields of its constructors, and for a type that mentions itself or another,
 by starting from no dependence and adding until nothing changes. -/
 partial def computeVariances : M Unit := do
-  let names := (← get).types.map (·.1)
+  let names := (← get).types.toList.map (·.1)
   -- A parameter is a type variable or a lifetime's capture variable.
   let keysOf := fun (sig : CtorSig) =>
     let rec go : List Bool → List Nat → List Nat → List (Bool × Nat)
@@ -876,7 +876,7 @@ partial def computeVariances : M Unit := do
     rounds := rounds + 1
     for name in names do
       let s ← get
-      let some decl := s.types.lookup name | continue
+      let some decl := s.types[name]? | continue
       let mut found : List ((Bool × Nat) × Variance) := []
       let mut keys : List (Bool × Nat) := []
       for c in decl.ctors do
@@ -889,8 +889,7 @@ partial def computeVariances : M Unit := do
       unless variances == decl.variances || keys.isEmpty do
         changed := true
         modify fun st =>
-          { st with types := st.types.map fun (n, d) =>
-              if n == name then (n, { d with variances := variances }) else (n, d) }
+          { st with types := st.types.modify name fun d => { d with variances := variances } }
 where
   /-- Where a type mentions type variables and capture variables, and how. -/
   occurrences (s : St) (pos : Variance) : Ty → List ((Bool × Nat) × Variance)
@@ -905,7 +904,7 @@ where
       ((true, cap), pos) :: ps.flatMap (occurrences s pos.flip) ++ occurrences s pos r
         ++ effs.flatMap fun (_, args) => args.flatMap (occurrences s (pos.through .inv))
     | .con n args =>
-      let variances := ((s.types.lookup n).map (·.variances)).getD []
+      let variances := ((s.types[n]?).map (·.variances)).getD []
       (args.zip (List.range args.length)).flatMap fun (arg, i) =>
         occurrences s (pos.through (variances.getD i .bi)) arg
 
@@ -1117,7 +1116,7 @@ def receiverTaken (fn : String) : M (Option Bool) := do
     set saved
     pure taken
   | none =>
-    match ((← get).methods.lookup fn).bind (·.params.head?) with
+    match ((← get).methods[fn]?).bind (·.params.head?) with
     | some p => how p
     | none => pure none
 

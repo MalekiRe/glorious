@@ -57,7 +57,7 @@ partial def exhaustive (tys : List Ty) (rows : List (List NPat)) : M Bool := do
         | .any :: tl => some (List.replicate ts.length .any ++ tl)
         | _ => none)
     | .con name args =>
-      match (← get).types.lookup name with
+      match (← get).types[name]? with
       | some decl =>
         -- Split by constructor only where some clause tests for one; a recursive
         -- type would otherwise be unfolded for ever.
@@ -101,7 +101,7 @@ partial def uncovered (tys : List Ty) (rows : List (List NPat)) : M (Option (Lis
       | some w => pure (some (s!"({", ".intercalate (w.take ts.length)})" :: w.drop ts.length))
       | none => pure none
     | .con name args =>
-      match (← get).types.lookup name with
+      match (← get).types[name]? with
       | some decl =>
         let tested := rows.any fun
           | .ctor _ _ :: _ => true
@@ -179,7 +179,7 @@ def fieldIndex (t : Ty) (step : String) : M (Option Nat) := do
   if let some n := step.toNat? then return some n
   match ← find t with
   | .con name _ =>
-    let ctor := match (← get).types.lookup name with
+    let ctor := match (← get).types[name]? with
       | some decl => match decl.ctors with
         | [c] => some c
         | _ => none
@@ -717,7 +717,7 @@ partial def tyOwnsOnce (visiting : List String) (t : Ty) : M Bool := do
     if (← get).kimpls.has "Drop" name then return true
     if ← args.anyM (tyOwnsOnce visiting) then return true
     if visiting.contains name then return false
-    match (← get).types.lookup name with
+    match (← get).types[name]? with
     | none => pure false
     | some decl =>
       decl.ctors.anyM fun c => do
@@ -740,7 +740,7 @@ partial def tyHoldsVar (visiting : List String) (id : Nat) (t : Ty) : M Bool := 
   | .ref _ _ _ => pure false
   | .con name args => do
     if visiting.contains name then return false
-    match (← get).types.lookup name with
+    match (← get).types[name]? with
     | none => args.anyM (tyHoldsVar visiting id)
     | some decl =>
       let s ← get
@@ -766,7 +766,7 @@ partial def onceBy (visiting : List String) (t : Ty) : M (Option String) := do
       if once then return some name
     if let some n ← args.findSomeM? (onceBy visiting) then return some n
     if visiting.contains name then return none
-    match (← get).types.lookup name with
+    match (← get).types[name]? with
     | none => pure none
     | some decl =>
       decl.ctors.findSomeM? fun c => do
@@ -796,7 +796,7 @@ partial def tyHasDrop (visiting : List String) (t : Ty) : M (Option String) := d
       return some (bareName name)
     if let some w ← args.findSomeM? (tyHasDrop visiting) then return some w
     if visiting.contains name then return none
-    match (← get).types.lookup name with
+    match (← get).types[name]? with
     | none => pure none
     | some decl =>
       decl.ctors.findSomeM? fun c => do
@@ -837,7 +837,7 @@ partial def tyHoldsOnceCallable (visiting : List String) (t : Ty) : M Bool := do
   | .con name args => do
     if ← args.anyM (tyHoldsOnceCallable visiting) then return true
     if visiting.contains name then return false
-    match (← get).types.lookup name with
+    match (← get).types[name]? with
     | none => pure false
     | some decl =>
       decl.ctors.anyM fun c => do

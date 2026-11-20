@@ -201,7 +201,7 @@ def partsOf (t : Ty) : M (List Ty) := do
   match ← find t with
   | .tuple args => pure args
   | .con name args =>
-    match (← get).types.lookup name with
+    match (← get).types[name]? with
     | none => pure []
     | some decl =>
       decl.ctors.flatMapM fun c => do
@@ -599,7 +599,7 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
         let ctor := match said with
           | some c => some c
           | none =>
-            match declared.lookup n with
+            match declared[n]? with
             | some decl => match decl.ctors with
               | [c] => some c
               | _ => none
@@ -610,7 +610,7 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
           let fields := sig.fieldsAt args
           -- `#` marks one of several constructors: its fields are taken by
           -- matching, since which a value has cannot be read off it.
-          let several := match declared.lookup n with
+          let several := match declared[n]? with
             | some decl => decl.ctors.length != 1
             | none => true
           steps := steps.push (mark (some (if said.isSome && several then "#" ++ c else c)), fields.length)

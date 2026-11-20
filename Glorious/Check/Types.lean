@@ -700,7 +700,7 @@ structure St where
   /-- Calls whose callee has effects not yet known: the callee's row, the row
   permitted where it is called, and a description of the call. -/
   rowIncl : Array (Row × Row × String) := #[]
-  types : List (String × TypeDecl) := []
+  types : Std.HashMap String TypeDecl := {}
   ctors : Std.HashMap String CtorSig := {}
   ops : List (String × OpSig) := []
   effects : List (String × EffectDecl) := []
@@ -777,7 +777,7 @@ structure St where
   heldMoves : Array Use := #[]
   /-- The functions of each trait, in order. -/
   traits : List (String × List String) := []
-  methods : List (String × MethodSig) := []
+  methods : Std.HashMap String MethodSig := {}
   impls : Array ImplDecl := #[]
   /-- The implementations of each trait, by the trait's name without its
   arguments: their places in `impls`. -/

@@ -226,7 +226,7 @@ def writeMethod (ms : MethodSig) : M (Except String Written) := do
 
 /-- Each trait's functions as declared (`writeMethod`), by `Trait::name`. -/
 def writtenMethods (st : St) : List (String × Except String Written) :=
-  st.methods.filterMap fun (name, ms) =>
+  st.methods.toList.filterMap fun (name, ms) =>
     match (writeMethod ms).run st with
     | .ok (w, _) => some (s!"{ms.trait}::{name}", w)
     | .error _ => none
