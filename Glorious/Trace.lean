@@ -40,8 +40,8 @@ initialize spans : IO.Ref (Array Span) ← IO.mkRef #[]
 initialize depth : IO.Ref Nat ← IO.mkRef 0
 
 /-- Time an action. -/
-def timedIO {α : Type} (name : String) (act : IO α) : IO α := do
-  if groupsTraced then
+def timedIO {α : Type} (name : String) (act : IO α) (said : Bool := true) : IO α := do
+  if groupsTraced && said then
     let t0 ← IO.monoNanosNow
     IO.eprintln s!"stage {name}..."
     let r ← act
@@ -58,8 +58,8 @@ def timedIO {α : Type} (name : String) (act : IO α) : IO α := do
   pure r
 
 @[noinline] unsafe def timedImpl {α : Type} (name : String) (f : Unit → α) : α :=
-  if !enabled && !groupsTraced then f () else
-  match unsafeBaseIO (timedIO name (IO.lazyPure f)).toBaseIO with
+  if !enabled then f () else
+  match unsafeBaseIO (timedIO name (IO.lazyPure f) (said := false)).toBaseIO with
   | .ok r => r
   | .error _ => f ()
 
