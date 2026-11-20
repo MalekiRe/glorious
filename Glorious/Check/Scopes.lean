@@ -394,6 +394,13 @@ def implKey (trait : String) (self : Ty) (args : List Ty) : M String := do
         -- (One that may yet fit and asks more would be the one, if it
         -- came to fit: that is not known here.)
         if let some other := maybe.find? fun m => !narrower im m then
+          -- (Of a type made of the function's own type parameters that the
+          -- function is said to have it of, `(..R): Registers<S>`: met so,
+          -- not by one of these.)
+          if !rigids.isEmpty then
+            let key ← traitKey trait args
+            let spelled ← spellTy (← zonk self)
+            if (← get).implConds.contains (key, spelled) then return key
           throw s!"which implementation of `{bareName trait}` this is, is not known here: `{showTy (← zonk self)}` may turn out to be a type that another implementation of `{Syntax.traitShown other.trait}` is for. Say it of the type, `where .. : {bareName trait}`"
         return ← commit im
       | none =>

@@ -5890,7 +5890,15 @@ the host's threads by the Lean machine and the native targets.
 
 Each is to go; none is a design covey keeps.
 
-- A plugin's storage is said after its components are registered
+- ~~A plugin's storage is said after its components are registered~~: said
+  among them now (`type Components = (Summarized<Hot>, Cold, Sparse<Flag>)`,
+  covey/plugins), by `Registers` implementations for `(Sparse<T>, ..R)` and
+  `(Summarized<T>, ..R)` beside the one for every `(H, ..R)`. What made it
+  ambiguous: in the one for every `(H, ..R)`, `<(..R) as Registers<S>>` was
+  told apart from the others before what the implementation says of `(..R)`
+  was looked at; now, where the type is made of the function's own type
+  parameters and the implementation says it of that type (`St.implConds`),
+  that is what meets it. (The rest of this entry, as it was:)
   (`app.storage<..>()`), not among them: two implementations of `Registers`
   for a list whose rest is generic were ambiguous to the solver. Taken away
   by choosing between such implementations by fitting.

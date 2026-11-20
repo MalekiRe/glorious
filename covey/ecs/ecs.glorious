@@ -2119,6 +2119,24 @@ impl<H, ..R, S> Registers<S> for (H, ..R) where (..R): Registers<S> {
     type Out = (Column<H>, <(..R) as Registers<S>>::Out);
     fn register_all(columns: S) -> (Column<H>, <(..R) as Registers<S>>::Out) { (empty_column(), <(..R) as Registers<S>>::register_all(columns)) }
 }
+// (A component said with how it is kept, `Sparse<Flag>` among a plugin's
+// components: its column, kept so. The narrower implementation is the one.)
+impl<T, ..R, S> Registers<S> for (Sparse<T>, ..R) where (..R): Registers<S> {
+    type Out = (Column<T>, <(..R) as Registers<S>>::Out);
+    fn register_all(columns: S) -> (Column<T>, <(..R) as Registers<S>>::Out) {
+        let mut column = empty_column();
+        column.sparse = true;
+        (column, <(..R) as Registers<S>>::register_all(columns))
+    }
+}
+impl<T, ..R, S> Registers<S> for (Summarized<T>, ..R) where (..R): Registers<S> {
+    type Out = (Column<T>, <(..R) as Registers<S>>::Out);
+    fn register_all(columns: S) -> (Column<T>, <(..R) as Registers<S>>::Out) {
+        let mut column = empty_column();
+        column.summary = true;
+        (column, <(..R) as Registers<S>>::register_all(columns))
+    }
+}
 
 // A world of columns `S` and the registered systems `L`.
 // Hooks: systems run when a component is added to entities, put in (added

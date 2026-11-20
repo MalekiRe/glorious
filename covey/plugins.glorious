@@ -92,9 +92,9 @@ struct Flag
 fn heat(q: &mut Query<(&mut Hot,), (Changed<Cold>,)>) { q.for_each() { (mut h,) => h.0 = h.0 + 1; } }
 struct Tuned
 impl<S, L> Plugin<S, L> for Tuned {
-    type Components = (Hot, Cold, Flag);
-    type Out = App<<(Hot, Cold, Flag) as ecs::Registers<S>>::Out, L>;
-    fn build(tuned: Tuned, app: App<<(Hot, Cold, Flag) as ecs::Registers<S>>::Out, L>) -> App<<(Hot, Cold, Flag) as ecs::Registers<S>>::Out, L> { app }
+    type Components = (Summarized<Hot>, Cold, Sparse<Flag>);
+    type Out = App<<(Summarized<Hot>, Cold, Sparse<Flag>) as ecs::Registers<S>>::Out, L>;
+    fn build(tuned: Tuned, app: App<<(Summarized<Hot>, Cold, Sparse<Flag>) as ecs::Registers<S>>::Out, L>) -> App<<(Summarized<Hot>, Cold, Sparse<Flag>) as ecs::Registers<S>>::Out, L> { app }
 }
 
 // `a_plugin_may_only_declare_components`
@@ -102,9 +102,9 @@ struct Marker
 struct Count(Int)
 struct Vocabulary
 impl<S, L> Plugin<S, L> for Vocabulary {
-    type Components = (Marker, Count);
-    type Out = App<<(Marker, Count) as ecs::Registers<S>>::Out, L>;
-    fn build(v: Vocabulary, app: App<<(Marker, Count) as ecs::Registers<S>>::Out, L>) -> App<<(Marker, Count) as ecs::Registers<S>>::Out, L> { app }
+    type Components = (Sparse<Marker>, Count);
+    type Out = App<<(Sparse<Marker>, Count) as ecs::Registers<S>>::Out, L>;
+    fn build(v: Vocabulary, app: App<<(Sparse<Marker>, Count) as ecs::Registers<S>>::Out, L>) -> App<<(Sparse<Marker>, Count) as ecs::Registers<S>>::Out, L> { app }
 }
 fn count_marked(q: &mut Query<(&mut Count,), (With<Marker>,)>) { q.for_each() { (mut c,) => c.0 = c.0 + 1; } }
 
@@ -128,7 +128,7 @@ fn main() -> Int {
     say("--");
 
     // (The plugin's components, kept as it says: in covey, said once they are there.)
-    let mut app = App::new().add_plugins(Tuned).storage<(Summarized<Hot>, Sparse<Flag>)>().add_systems((), heat).build();
+    let mut app = App::new().add_plugins(Tuned).add_systems((), heat).build();
     say(if(app.world.stores<Hot>().summary) { 1 } else { 0 });
     say(if(app.world.stores<Cold>().summary) { 1 } else { 0 });
     say(if(app.world.stores<Flag>().sparse) { 1 } else { 0 });
@@ -137,7 +137,7 @@ fn main() -> Int {
     say(match(app.world.get<Hot>(e)) { Some(h) => h.0, None => 0 });
     say("--");
 
-    let mut app = App::new().add_plugins(Vocabulary).storage<Sparse<Marker>>().add_systems((), count_marked).build();
+    let mut app = App::new().add_plugins(Vocabulary).add_systems((), count_marked).build();
     let e = app.world.spawn_bundle((Count(0), Marker));
     app.emit(&());
     say(match(app.world.get<Count>(e)) { Some(c) => c.0, None => 0 });

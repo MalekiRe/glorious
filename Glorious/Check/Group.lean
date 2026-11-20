@@ -91,7 +91,7 @@ def checkGroup (decls : List FnDecl) (signature : Bool := false) : M Unit := do
     let (defs', reused') ← onError (do
         let mut defs := defs
         let mut reused := reused
-        modify fun s => { s with pos := "", owner := d.name, later := [], temps := [], anon := [] }
+        modify fun s => { s with pos := "", owner := d.name, later := [], temps := [], anon := [], implConds := [] }
         -- The function's own type parameters stand for themselves while it is
         -- checked, and so do its lifetimes: each is no other.
         let mut rigid : List (String × Ty) := []
@@ -118,6 +118,13 @@ def checkGroup (decls : List FnDecl) (signature : Bool := false) : M Unit := do
               rigid := rigid.map fun (p, old) => if p == name then (p, fixed) else (p, old)
           -- What its conditions say of a type left to another trait's
           -- implementations holds in its functions.
+          -- (What it says of types made of them, as this function names
+          -- them: met by that, where an implementation would be chosen.)
+          let mine := im.pvars.filterMap fun (p, id) => (rigid.lookup p).map fun t => (id, t)
+          let conds ← im.extra.mapM fun (tr, cargs, subject) => do
+            let key ← traitKey tr (cargs.map (subst mine [] []))
+            pure (key, ← spellTy (subst mine [] [] subject))
+          modify fun s => { s with implConds := conds }
           for (j, asked, name, said) in im.equal do
             match (im.params[j]?).bind fun p => rigid.lookup p with
             | some subject =>

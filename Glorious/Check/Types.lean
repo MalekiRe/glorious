@@ -784,6 +784,10 @@ structure St where
   them are. -/
   tyIds : PMap (String × List Nat) Nat := {}
   tyIdCount : Nat := 0
+  /-- What the implementation whose function is being checked says of types
+  made of its type parameters, `(..R): Registers<S>`: the trait at its
+  arguments and the type, spelled, as this function names them. -/
+  implConds : List (String × String) := []
   /-- The number of each type object numbered already (`internTy`), kept with
   it: a type all known stays so, so the same object is the same number. -/
   tyMemo : Std.HashMap USize (Ty × Nat) := {}
