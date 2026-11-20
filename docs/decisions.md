@@ -5953,8 +5953,15 @@ Each is to go; none is a design covey keeps.
 - ~~`world.single`~~ (`world.query<Q>().single()`, covey/single) and
   ~~joins that hide disabled targets~~ (`To` and `From` do not see a
   disabled entity unless what they ask of it mentions what disables it,
-  covey/joins) are written. Not yet: envelope sync points, stepping and
-  `why_not` (both need systems that say which function they are).
+  covey/joins) are written. ~~Envelope sync points~~: a point that says
+  what its bridges may touch (`impl Enveloped for Reads { type Env = ..; }`,
+  chosen by whether that holds, `PointKind`) has its bridges' commands done
+  when the emit ends, with the systems'; any other is exclusive, each
+  request's commands done at once (covey/remote,
+  `envelope_commands_apply_when_the_emit_ends`). Still: `Env` is not held
+  to, and such a point does not run beside the systems it does not
+  conflict with. Not yet: stepping and `why_not` (systems now say which
+  function they are).
 
 ## Each function its own universe: where the checker is
 

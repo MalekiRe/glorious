@@ -3252,10 +3252,20 @@ fn until_request<S, F, O>(point: Str, f: F, tx: std::thread::Sender<O>) -> Reque
     } }
 }
 
+// A sync point that says what its bridges may touch, upstream's envelope
+// (`impl Enveloped for Reads { type Env = Query<(&A,), ()>; }`): what its
+// bridges ask through commands is done when the emit ends, with what the
+// systems asked. Any other point is exclusive: each wave's commands are done
+// at once. (What `Env` says is not yet held to: a bridge may reach past it.)
+pub trait Enveloped { type Env; }
+pub trait PointKind { const EXCLUSIVE: Bool; }
+impl<P> PointKind for P where P: Enveloped { const EXCLUSIVE: Bool = false; }
+impl<P> PointKind for P { const EXCLUSIVE: Bool = true; }
+
 // The system that runs what was asked of the sync point named `P`.
 pub struct SyncPointOf<P> { none: [P] }
 pub fn sync_point<P>(point: P) -> SyncPointOf<P> { discard(point); SyncPointOf { none: [] } }
-impl<E, S, P> System<E, S> for SyncPointOf<P> where P: Schedule {
+impl<E, S, P> System<E, S> for SyncPointOf<P> where P: Schedule, P: PointKind {
     fn system_names(system: &SyncPointOf<P>, names: [Str]) -> [Str] { names }
     fn run(system: &mut SyncPointOf<P>, event: &E, world: &mut World<S>, commands: &mut Commands<S>) {
         let name = <P as Schedule>::NAME;
@@ -3266,9 +3276,15 @@ impl<E, S, P> System<E, S> for SyncPointOf<P> where P: Schedule {
             Some(request) =>
                 let Request { point, run } = request;
                 if(point == name) {
-                    let mut mine = no_commands(&*world);
-                    let again = run(world, &mut mine);
-                    apply(mine, world);
+                    // (Exclusive: what each asks is done at once. An
+                    // envelope's is done with the systems', when the emit
+                    // ends.)
+                    let again = if(<P as PointKind>::EXCLUSIVE) {
+                        let mut mine = no_commands(&*world);
+                        let again = run(world, &mut mine);
+                        apply(mine, world);
+                        again
+                    } else { run(world, commands) };
                     match(again) { Some(later) => kept = push(kept, later), None => () }
                 } else { kept = push(kept, Request { point: point, run: run }) };
                 true,
@@ -3277,7 +3293,7 @@ impl<E, S, P> System<E, S> for SyncPointOf<P> where P: Schedule {
         lock(&world.remotes, fn(queue: &mut [Request<S>]) { let mut later = replace(queue, []); *queue = join_onto(kept, later) })
     }
 }
-impl<E, S, P> IntoSystem<E, S> for SyncPointOf<P> where P: Schedule {
+impl<E, S, P> IntoSystem<E, S> for SyncPointOf<P> where P: Schedule, P: PointKind {
     type Out = SyncPointOf<P>;
     fn into_system(system: SyncPointOf<P>) -> SyncPointOf<P> { system }
 }
