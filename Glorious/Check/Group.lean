@@ -65,8 +65,10 @@ partial def refLives : TypeExpr → List (Option String)
   | .performs r _ => refLives r
   | _ => []
 
-/-- Infer one group of mutually recursive functions and generalise their types. -/
-def checkGroup (decls : List FnDecl) : M Unit := do
+/-- Infer one group of mutually recursive functions and generalise their types.
+With `signature`, each function's type is what its signature says, its
+clauses not looked at: what a caller is checked with (`declareSignatures`). -/
+def checkGroup (decls : List FnDecl) (signature : Bool := false) : M Unit := do
   if Glorious.Trace.groupsTraced then
     (dbgTrace s!"group: {", ".intercalate (decls.map (·.name))}" fun _ => (pure () : M Unit))
   let loansAt := (← get).loans.size
@@ -450,7 +452,17 @@ def checkGroup (decls : List FnDecl) : M Unit := do
         let ret := ret <|> match wanted with
           | some (.fn _ r _ _ _, _) => some r
           | _ => none
-        let t ← (fun s => Glorious.Trace.said "infer" fun _ => (timedM "group: infer" (inferCallable [] annots ret (some d.name) d.clauses s!"the clauses of `{d.name}` do") : M Ty).run s : M Ty)
+        let t ← if signature then do
+            -- (What it takes and gives as written, what it performs as the
+            -- signature or its trait says, below.)
+            let ps ← annots.mapM fun
+              | some t => pure t
+              | none => freshTy
+            let r ← match ret with
+              | some r => pure r
+              | none => pure Ty.unit
+            pure (Ty.fn ps r [] (some (← freshRowVar)) (← freshCap))
+          else (fun s => Glorious.Trace.said "infer" fun _ => (timedM "group: infer" (inferCallable [] annots ret (some d.name) d.clauses s!"the clauses of `{d.name}` do") : M Ty).run s : M Ty)
         if let some effects := declared then
           let (effects, rest) ← resolveRow rigid false effects
           if let .fn _ _ effs tail _ ← find t then

@@ -157,6 +157,22 @@ def stayedBelow (s from_ : St) (j : Nat) (gap : Nat := unitGap) : Bool :=
 /-- How many threads the groups of one level are checked on, at most. -/
 def sideThreads : Nat := 16
 
+/-- A function's type as callers see it, its variables numbered in order:
+the same of a signature and of the body it says. -/
+def schemeShape (s : Scheme) : String :=
+  let text := s!"{showTy s.ty} b{s.bounds.length} e{s.edges.length} u{s.dups.length} d{s.drops.length} s{s.stays.length}"
+  -- (Each number by its place among those before it.)
+  let (out, _, cur) := text.foldl (fun (acc : String × List (String × Nat) × String) c =>
+    let (out, seen, cur) := acc
+    if c.isDigit then (out, seen, cur.push c)
+    else if cur.isEmpty then (out.push c, seen, "")
+    else
+      let (n, seen) := match seen.lookup cur with
+        | some n => (n, seen)
+        | none => (seen.length, seen ++ [(cur, seen.length)])
+      ((out ++ s!"#{n}").push c, seen, "")) ("", [], "")
+  out ++ cur
+
 /-- Groups none of which uses another, checked side by side: a few runs of
 them, each on a thread of its own from the state before, its ids from a place
 of its own (`jumpedFor`), and what each added put together (`mergeStates`),
@@ -359,7 +375,40 @@ def checkItems (items : List Item) (seed : UInt64 := 0) (kept : Kept := []) : M 
           restore st ((groups.drop start).flatten)
           made := (k, st) :: made
     let rest := (groups.zipIdx.drop start).toArray
-    let mut i := 0
+    -- Each function's type as its signature says, first; then every body
+    -- checked from that, side by side, none waiting for another's. Where a
+    -- body's type is not what its signature said, the groups are checked
+    -- as before, callees first.
+    let pre ← get
+    let signed ← if !Trace.universesAsked then pure false else tryCatchThe Elab.Said (do
+        for (g, _) in rest do
+          for d in g do checkGroup [d] (signature := true)
+        pure true)
+      fun _ => do set pre; pure false
+    let mut universes := false
+    if signed && rest.size > 0 then
+      let sigs := (← get).fns
+      let ok ← tryCatchThe Elab.Said (do checkSideBySide (rest.toList.map (·.1)); pure true) fun _ => pure false
+      let now := (← get).fns
+      let same := ok && rest.all fun (g, _) => g.all fun d =>
+        match sigs[d.name]?, now[d.name]? with
+        | some a, some b => schemeShape a == schemeShape b
+        | _, _ => false
+      if same then
+        universes := true
+        if let some (_, last) := rest.back? then
+          made := (keys[last]!, forKeeping (← get)) :: made
+      else
+        if Trace.groupsTraced then
+          for (g, _) in rest do
+            for d in g do
+              match sigs[d.name]?, now[d.name]? with
+              | some a, some b =>
+                unless schemeShape a == schemeShape b do
+                  (dbgTrace s!"signature differs{if d.bounds.any (fun b => b.trait == "RunsIn" || b.trait == "Environment" || b.trait == "Label") then " (environment)" else ""}: {d.name}: {schemeShape a} / {schemeShape b}" fun _ => (pure () : M Unit))
+              | _, _ => pure ()
+        set pre
+    let mut i := if universes then rest.size else 0
     while i < rest.size do
       let level := (levels[(rest[i]?.map (·.2)).getD 0]?).getD 0
       let mut j := i

@@ -5915,6 +5915,36 @@ Each is to go; none is a design covey keeps.
 - Not yet written: `world.single`, joins that hide disabled targets,
   envelope sync points, stepping and `why_not`.
 
+## Each function its own universe: where the checker is
+
+Measured on the suite and on `covey/states2.glorious` (2768 groups):
+
+- **Bodies do not read each other's checking**, except through the callee's
+  type (`St.fns`). With every group put in one level, checked side by side
+  from the same state and merged, the suite gives the same 14 failures as
+  callees first. The runs that had to be checked again (36 on `states2`)
+  all failed on "unknown name": a callee whose type was not yet there.
+- **A function's type can be taken from its signature** (`checkGroup
+  (signature := true)`: what it takes and gives as written, what it performs
+  as said, its clauses not looked at). With `GLORIOUS_UNIVERSES=1`,
+  `checkItems` declares every signature first and then checks every body
+  from those, side by side, comparing each body's type with its
+  signature's (`schemeShape`).
+- **Not yet the same for 207 of the 2768.** The type agrees; what differs is
+  what callers are held to beyond it: what the result captures of the
+  arguments (`Scheme.edges`: `element(&[T], Int) -> Option<&T>`,
+  `push_at(&mut [T], T)`), and what must be free to use twice or to let go
+  (`dups`, `drops`) where the body decides it (`discard`, `unwrap`, `if`,
+  `loop`). So the universe path is not the default: where any function's
+  differs, the unit is checked callees first, as before.
+
+What takes the difference away: a signature that says what Rust's says.
+Captures by lifetimes, with elision (`checkGroup` already refuses a
+reference given back with two to choose from); and a type parameter's
+occurrences one type with one set of captures, as `T` is in Rust, so that
+`push_at` needs no edge. Then each body is checked against its signature
+alone, every body side by side, and a body's edit checks that body only.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by
