@@ -2101,65 +2101,77 @@ impl<E, S, T, Rest> Takes<E, S> for (Localing<T>, Rest) where Rest: Takes<E, S> 
 }
 // The function called with what was taken: as `Fetch` gathers, from `taken`.
 pub trait CallTaken<E, S, Gathered, F, O, Lc> {
-    fn call_taken(&E, &mut <Self as Takes<E, S>>::Taken, &mut Commands<S>, &mut Lc, Gathered, &F) -> O
+    fn call_taken(&E, &mut <Self as Takes<E, S>>::Taken, &mut Commands<S>, &mut Lc, Gathered, &F) -> O / {std::thread::Threads}
 }
-impl<E, S, ..G, F, O, Lc> CallTaken<E, S, (..G), F, O, Lc> for () where F: CallWith<(..G), O> {
-    fn call_taken(event: &E, taken: &mut (), commands: &mut Commands<S>, state: &mut Lc, gathered: (..G), f: &F) -> O { call_with(f, gathered) }
+impl<E, S, ..G, F, O, Lc> CallTaken<E, S, (..G), F, O, Lc> for () where F: CallWaiting<(..G), O> {
+    fn call_taken(event: &E, taken: &mut (), commands: &mut Commands<S>, state: &mut Lc, gathered: (..G), f: &F) -> O / {std::thread::Threads} { <F as CallWaiting<(..G), O>>::call_waiting(f, gathered) }
+}
+// A function called where it may wait (`Threads`): any function that
+// performs nothing, or one made a system by `waits(f)`, which may wait at a
+// barrier or for a channel, as a graph's node beside others.
+pub trait CallWaiting<G, O> { fn call_waiting(&Self, G) -> O / {std::thread::Threads} }
+impl<..P, O, F: Fn<(..P), Output = O>> CallWaiting<(..P), O> for F {
+    fn call_waiting(f: &F, g: (..P)) -> O / {std::thread::Threads} { let (..p) = g; (*f)(..p) }
+}
+pub struct Waits<F> { f: F }
+pub fn waits<F>(f: F) -> Waits<F> { Waits { f: f } }
+impl<..P, O, F> CallWaiting<(..P), O> for Waits<F> where F: Fn<(..P), Output = O, Effects = {std::thread::Threads}> {
+    fn call_waiting(w: &Waits<F>, g: (..P)) -> O / {std::thread::Threads} { let (..p) = g; (w.f)(..p) }
 }
 impl<E, S, ..G, F, O, Lc, A, Rest> CallTaken<E, S, (..G), F, O, Lc> for (Writes<A>, Rest)
     where S: Get<A>, Rest: Takes<E, S>, Rest: CallTaken<E, S, (..G, &mut Column<A>), F, O, Lc> {
-    fn call_taken(event: &E, taken: &mut (Column<A>, <Rest as Takes<E, S>>::Taken), commands: &mut Commands<S>, state: &mut Lc, gathered: (..G), f: &F) -> O {
+    fn call_taken(event: &E, taken: &mut (Column<A>, <Rest as Takes<E, S>>::Taken), commands: &mut Commands<S>, state: &mut Lc, gathered: (..G), f: &F) -> O / {std::thread::Threads} {
         let (..g) = gathered;
         <Rest as CallTaken<E, S, (..G, &mut Column<A>), F, O, Lc>>::call_taken(event, &mut taken.1, commands, state, (..g, &mut taken.0), f)
     }
 }
 impl<E, S, ..G, F, O, Lc, A, Rest> CallTaken<E, S, (..G), F, O, Lc> for (Read<A>, Rest)
     where S: Get<A>, Rest: Takes<E, S>, Rest: CallTaken<E, S, (..G, &Column<A>), F, O, Lc> {
-    fn call_taken(event: &E, taken: &mut (Column<A>, <Rest as Takes<E, S>>::Taken), commands: &mut Commands<S>, state: &mut Lc, gathered: (..G), f: &F) -> O {
+    fn call_taken(event: &E, taken: &mut (Column<A>, <Rest as Takes<E, S>>::Taken), commands: &mut Commands<S>, state: &mut Lc, gathered: (..G), f: &F) -> O / {std::thread::Threads} {
         let (..g) = gathered;
         <Rest as CallTaken<E, S, (..G, &Column<A>), F, O, Lc>>::call_taken(event, &mut taken.1, commands, state, (..g, &taken.0), f)
     }
 }
 impl<E, S, ..G, F, O, Lc, Rest> CallTaken<E, S, (..G), F, O, Lc> for (Shared<E>, Rest) where (Shared<E>, Rest): Takes<E, S>, Rest: Takes<E, S>, Rest: CallTaken<E, S, (..G, &E), F, O, Lc> {
-    fn call_taken(event: &E, taken: &mut <Rest as Takes<E, S>>::Taken, commands: &mut Commands<S>, state: &mut Lc, gathered: (..G), f: &F) -> O {
+    fn call_taken(event: &E, taken: &mut <Rest as Takes<E, S>>::Taken, commands: &mut Commands<S>, state: &mut Lc, gathered: (..G), f: &F) -> O / {std::thread::Threads} {
         let (..g) = gathered;
         <Rest as CallTaken<E, S, (..G, &E), F, O, Lc>>::call_taken(event, taken, commands, state, (..g, event), f)
     }
 }
 impl<E, S, ..G, F, O, Lc, X, Rest> CallTaken<E, S, (..G), F, O, Lc> for (Shared<X>, Rest) where (Shared<X>, Rest): Takes<E, S>, S: Holds<X>, Rest: Takes<E, S>, Rest: CallTaken<E, S, (..G, &X), F, O, Lc> {
-    fn call_taken(event: &E, taken: &mut (X, <Rest as Takes<E, S>>::Taken), commands: &mut Commands<S>, state: &mut Lc, gathered: (..G), f: &F) -> O {
+    fn call_taken(event: &E, taken: &mut (X, <Rest as Takes<E, S>>::Taken), commands: &mut Commands<S>, state: &mut Lc, gathered: (..G), f: &F) -> O / {std::thread::Threads} {
         let (..g) = gathered;
         <Rest as CallTaken<E, S, (..G, &X), F, O, Lc>>::call_taken(event, &mut taken.1, commands, state, (..g, &taken.0), f)
     }
 }
 impl<E, S, ..G, F, O, Lc, X, Rest> CallTaken<E, S, (..G), F, O, Lc> for (Owned<X>, Rest) where S: Holds<X>, Rest: Takes<E, S>, Rest: CallTaken<E, S, (..G, &mut X), F, O, Lc> {
-    fn call_taken(event: &E, taken: &mut (X, <Rest as Takes<E, S>>::Taken), commands: &mut Commands<S>, state: &mut Lc, gathered: (..G), f: &F) -> O {
+    fn call_taken(event: &E, taken: &mut (X, <Rest as Takes<E, S>>::Taken), commands: &mut Commands<S>, state: &mut Lc, gathered: (..G), f: &F) -> O / {std::thread::Threads} {
         let (..g) = gathered;
         <Rest as CallTaken<E, S, (..G, &mut X), F, O, Lc>>::call_taken(event, &mut taken.1, commands, state, (..g, &mut taken.0), f)
     }
 }
 impl<E, S, ..G, F, O, Lc, X, Rest> CallTaken<E, S, (..G), F, O, Lc> for (Maybe<X>, Rest) {
-    fn call_taken(event: &E, taken: &mut (), commands: &mut Commands<S>, state: &mut Lc, gathered: (..G), f: &F) -> O { discard(gathered); abort("an optional resource is not taken") }
+    fn call_taken(event: &E, taken: &mut (), commands: &mut Commands<S>, state: &mut Lc, gathered: (..G), f: &F) -> O / {std::thread::Threads} { discard(gathered); abort("an optional resource is not taken") }
 }
 impl<E, S, ..G, F, O, Lc, X, Rest> CallTaken<E, S, (..G), F, O, Lc> for (MaybeOwned<X>, Rest) {
-    fn call_taken(event: &E, taken: &mut (), commands: &mut Commands<S>, state: &mut Lc, gathered: (..G), f: &F) -> O { discard(gathered); abort("an optional resource is not taken") }
+    fn call_taken(event: &E, taken: &mut (), commands: &mut Commands<S>, state: &mut Lc, gathered: (..G), f: &F) -> O / {std::thread::Threads} { discard(gathered); abort("an optional resource is not taken") }
 }
 impl<E, S, ..G, F, O, Lc, Q, N, St, Rest> CallTaken<E, S, (..G), F, O, Lc> for (Querying<Q, N, St>, Rest)
     where Q: Item<Store = St>, Q: Fill<S>, N: Only<S>, S: Hidden<Q, N>, Rest: Takes<E, S>, Rest: CallTaken<E, S, (..G, &mut Query<Q, N, St>), F, O, Lc> {
-    fn call_taken(event: &E, taken: &mut (Query<Q, N, St>, <Rest as Takes<E, S>>::Taken), commands: &mut Commands<S>, state: &mut Lc, gathered: (..G), f: &F) -> O {
+    fn call_taken(event: &E, taken: &mut (Query<Q, N, St>, <Rest as Takes<E, S>>::Taken), commands: &mut Commands<S>, state: &mut Lc, gathered: (..G), f: &F) -> O / {std::thread::Threads} {
         let (..g) = gathered;
         <Rest as CallTaken<E, S, (..G, &mut Query<Q, N, St>), F, O, Lc>>::call_taken(event, &mut taken.1, commands, state, (..g, &mut taken.0), f)
     }
 }
 impl<E, S, ..G, F, O, Lc, Q, N, St, Rest> CallTaken<E, S, (..G), F, O, Lc> for (Singling<Q, N, St>, Rest)
     where Q: Item<Store = St>, Q: Fill<S>, N: Only<S>, S: Hidden<Q, N>, Rest: Takes<E, S>, Rest: CallTaken<E, S, (..G, &mut Single<Q, N, St>), F, O, Lc> {
-    fn call_taken(event: &E, taken: &mut (Single<Q, N, St>, <Rest as Takes<E, S>>::Taken), commands: &mut Commands<S>, state: &mut Lc, gathered: (..G), f: &F) -> O {
+    fn call_taken(event: &E, taken: &mut (Single<Q, N, St>, <Rest as Takes<E, S>>::Taken), commands: &mut Commands<S>, state: &mut Lc, gathered: (..G), f: &F) -> O / {std::thread::Threads} {
         let (..g) = gathered;
         <Rest as CallTaken<E, S, (..G, &mut Single<Q, N, St>), F, O, Lc>>::call_taken(event, &mut taken.1, commands, state, (..g, &mut taken.0), f)
     }
 }
 impl<E, S, ..G, F, O, Lc, Rest> CallTaken<E, S, (..G), F, O, Lc> for (Asking, Rest) where Rest: Takes<E, S>, Rest: CallTaken<E, S, (..G, &mut Commands<S>), F, O, Lc> {
-    fn call_taken(event: &E, taken: &mut <Rest as Takes<E, S>>::Taken, commands: &mut Commands<S>, state: &mut Lc, gathered: (..G), f: &F) -> O {
+    fn call_taken(event: &E, taken: &mut <Rest as Takes<E, S>>::Taken, commands: &mut Commands<S>, state: &mut Lc, gathered: (..G), f: &F) -> O / {std::thread::Threads} {
         let (..g) = gathered;
         let mut none = Commands { queue: [], next: 0, made: std::thread::AtomicInt::new(0), world: commands.world };
         <Rest as CallTaken<E, S, (..G, &mut Commands<S>), F, O, Lc>>::call_taken(event, taken, &mut none, state, (..g, commands), f)
@@ -2167,7 +2179,7 @@ impl<E, S, ..G, F, O, Lc, Rest> CallTaken<E, S, (..G), F, O, Lc> for (Asking, Re
 }
 impl<E, S, ..G, F, O, Tl, Lc, Rest> CallTaken<E, S, (..G), F, O, (Local<Tl>, Lc)> for (Localing<Tl>, Rest)
     where Rest: Takes<E, S>, Rest: CallTaken<E, S, (..G, &mut Local<Tl>), F, O, Lc> {
-    fn call_taken(event: &E, taken: &mut <Rest as Takes<E, S>>::Taken, commands: &mut Commands<S>, state: &mut (Local<Tl>, Lc), gathered: (..G), f: &F) -> O {
+    fn call_taken(event: &E, taken: &mut <Rest as Takes<E, S>>::Taken, commands: &mut Commands<S>, state: &mut (Local<Tl>, Lc), gathered: (..G), f: &F) -> O / {std::thread::Threads} {
         let (..g) = gathered;
         <Rest as CallTaken<E, S, (..G, &mut Local<Tl>), F, O, Lc>>::call_taken(event, taken, commands, &mut state.1, (..g, &mut state.0), f)
     }
@@ -2249,7 +2261,7 @@ pub trait System<E, S> {
     // (What it touches, `TouchNames`: of one not run this way, everything.)
     fn touches(&Self) -> [Str]
     fn prepare(&mut Self, &E, &mut World<S>) -> Option<Self::Prepared>
-    fn run_prepared(&mut Self, &E, &mut Self::Prepared, &mut Commands<S>)
+    fn run_prepared(&mut Self, &E, &mut Self::Prepared, &mut Commands<S>) / {std::thread::Threads}
     fn finish(&mut Self, &mut World<S>, Self::Prepared)
 }
 impl<E, S> System<E, S> for () {
@@ -2257,7 +2269,7 @@ impl<E, S> System<E, S> for () {
     type Prepared = ();
     fn touches(system: &()) -> [Str] { ["w:*"] }
     fn prepare(system: &mut (), event: &E, world: &mut World<S>) -> Option<()> { None }
-    fn run_prepared(system: &mut (), event: &E, prepared: &mut (), commands: &mut Commands<S>) { () }
+    fn run_prepared(system: &mut (), event: &E, prepared: &mut (), commands: &mut Commands<S>) / {std::thread::Threads} { () }
     fn finish(system: &mut (), world: &mut World<S>, prepared: ()) { () }
     fn why_not(nothing: &(), name: &Str, world: &World<S>, entity: Entity) -> Option<[Str]> { None }
     fn run(nothing: &mut (), event: &E, world: &mut World<S>, commands: &mut Commands<S>) { () }
@@ -2268,7 +2280,7 @@ impl<E, S, X, Y> System<E, S> for (X, Y) where X: System<E, S>, Y: System<E, S> 
     type Prepared = ();
     fn touches(system: &(X, Y)) -> [Str] { ["w:*"] }
     fn prepare(system: &mut (X, Y), event: &E, world: &mut World<S>) -> Option<()> { None }
-    fn run_prepared(system: &mut (X, Y), event: &E, prepared: &mut (), commands: &mut Commands<S>) { () }
+    fn run_prepared(system: &mut (X, Y), event: &E, prepared: &mut (), commands: &mut Commands<S>) / {std::thread::Threads} { () }
     fn finish(system: &mut (X, Y), world: &mut World<S>, prepared: ()) { () }
     fn why_not(pair: &(X, Y), name: &Str, world: &World<S>, entity: Entity) -> Option<[Str]> {
         match(<X as System<E, S>>::why_not(&pair.0, name, world, entity)) { Some(why) => Some(why), None => <Y as System<E, S>>::why_not(&pair.1, name, world, entity) }
@@ -2382,7 +2394,7 @@ impl<E, S, ..P, ..A, L, Ts, F, Lc> System<E, S> for Sys<F, Lc>
         world.since = 0;
         taken
     }
-    fn run_prepared(sys: &mut Sys<F, Lc>, event: &E, prepared: &mut <L as Takes<E, S>>::Taken, commands: &mut Commands<S>) {
+    fn run_prepared(sys: &mut Sys<F, Lc>, event: &E, prepared: &mut <L as Takes<E, S>>::Taken, commands: &mut Commands<S>) / {std::thread::Threads} {
         <L as CallTaken<E, S, (), F, (), Lc>>::call_taken(event, prepared, commands, &mut sys.locals, (), &sys.f)
     }
     fn finish(sys: &mut Sys<F, Lc>, world: &mut World<S>, prepared: <L as Takes<E, S>>::Taken) {
@@ -2436,6 +2448,73 @@ impl<E, S, ..P, ..A, L, Ts, F, Lc> IntoSystem<E, S> for F
     }
 }
 
+// (Run alone, with the world lent: what it asks for taken out, and the
+// function run among the threads of a run of its own.)
+fn run_waiting<E, S, F, L, Lc>(sys: &mut Sys<Waits<F>, Lc>, event: &E, world: &mut World<S>, commands: &mut Commands<S>) -> Bool
+    where L: Takes<E, S>, L: CallTaken<E, S, (), Waits<F>, (), Lc> {
+    world.since = if(sys.last > world.tick) { 0 } else { sys.last };
+    let taken = <L as Takes<E, S>>::take_asked(world);
+    world.since = 0;
+    match(taken) {
+        Some(t) =>
+            let mut prepared = t;
+            std::thread::scope(fn(s: &std::thread::Scope) / {std::thread::Threads} {
+                <L as CallTaken<E, S, (), Waits<F>, (), Lc>>::call_taken(event, &mut prepared, commands, &mut sys.locals, (), &sys.f)
+            });
+            <L as Takes<E, S>>::put_asked_back(world, prepared);
+            sys.last = world.tick;
+            world.tick = world.tick + 1;
+            true,
+        None => false
+    }
+}
+// A function that may wait (`Threads`: at a barrier, for a channel) made a
+// system: `node(B, waits(fn() / {Threads} { .. }))`. In a graph it runs on a
+// thread of its own beside the nodes it is apart from; anywhere else alone,
+// waiting among the threads of its own run. (Upstream's systems may block
+// as any Rust function may; a function here says it may wait.)
+impl<E, S, ..P, ..A, L, Ts, F, Lc> IntoSystem<E, S> for Waits<F>
+    where F: Fn<(..P), Output = (), Effects = {std::thread::Threads}>, ..P: Parameter<Asks = A>, (..A): Tuple<Nested = L>, L: AllTouches<List = Ts>, Ts: AllApart,
+          L: Locals<State = Lc>, L: Takes<E, S>, L: CallTaken<E, S, (), Waits<F>, (), Lc>, L: TouchNames {
+    type Out = Sys<Waits<F>, Lc>;
+    fn into_system(w: Waits<F>) -> Sys<Waits<F>, Lc> {
+        let Waits { f } = w;
+        let (name, f) = std::any::fn_name(f);
+        Sys { f: Waits { f: f }, locals: <L as Locals>::start(), last: 0, name: name }
+    }
+}
+impl<E, S, ..P, ..A, L, Ts, F, Lc> System<E, S> for Sys<Waits<F>, Lc>
+    where F: Fn<(..P), Output = (), Effects = {std::thread::Threads}>, ..P: Parameter<Asks = A>, (..A): Tuple<Nested = L>, L: AllTouches<List = Ts>, Ts: AllApart,
+          L: Takes<E, S>, L: CallTaken<E, S, (), Waits<F>, (), Lc>, L: TouchNames {
+    type Prepared = <L as Takes<E, S>>::Taken;
+    fn touches(sys: &Sys<Waits<F>, Lc>) -> [Str] { <L as TouchNames>::touch_names([]) }
+    fn prepare(sys: &mut Sys<Waits<F>, Lc>, event: &E, world: &mut World<S>) -> Option<<L as Takes<E, S>>::Taken> {
+        world.since = if(sys.last > world.tick) { 0 } else { sys.last };
+        let taken = <L as Takes<E, S>>::take_asked(world);
+        world.since = 0;
+        taken
+    }
+    fn run_prepared(sys: &mut Sys<Waits<F>, Lc>, event: &E, prepared: &mut <L as Takes<E, S>>::Taken, commands: &mut Commands<S>) / {std::thread::Threads} {
+        <L as CallTaken<E, S, (), Waits<F>, (), Lc>>::call_taken(event, prepared, commands, &mut sys.locals, (), &sys.f)
+    }
+    fn finish(sys: &mut Sys<Waits<F>, Lc>, world: &mut World<S>, prepared: <L as Takes<E, S>>::Taken) {
+        <L as Takes<E, S>>::put_asked_back(world, prepared);
+        sys.last = world.tick;
+        world.tick = world.tick + 1
+    }
+    fn system_names(sys: &Sys<Waits<F>, Lc>, names: [Str]) -> [Str] { push(names, sys.name) }
+    fn why_not(sys: &Sys<Waits<F>, Lc>, name: &Str, world: &World<S>, entity: Entity) -> Option<[Str]> { None }
+    fn step(sys: &mut Sys<Waits<F>, Lc>, event: &E, world: &mut World<S>, commands: &mut Commands<S>, at: Stepper) -> Stepper {
+        if(at.at == at.target) {
+            let ran = run_waiting<E, S, F, L, Lc>(sys, event, world, commands);
+            Stepper { at: at.at + 1, target: at.target, kind: 1, flag: ran }
+        } else { Stepper { at: at.at + 1, target: at.target, kind: at.kind, flag: at.flag } }
+    }
+    fn run(sys: &mut Sys<Waits<F>, Lc>, event: &E, world: &mut World<S>, commands: &mut Commands<S>) {
+        discard(run_waiting<E, S, F, L, Lc>(sys, event, world, commands))
+    }
+}
+
 // A condition: a function whose parameters ask for what a system's may,
 // and which says whether something is to run. Made one when its systems are
 // (`IntoCondition`): its locals are its own, kept from one asking to the
@@ -2471,7 +2550,7 @@ impl<E, S, P, C> System<E, S> for RunIf<P, C> where P: System<E, S>, C: Conditio
     type Prepared = ();
     fn touches(system: &RunIf<P, C>) -> [Str] { ["w:*"] }
     fn prepare(system: &mut RunIf<P, C>, event: &E, world: &mut World<S>) -> Option<()> { None }
-    fn run_prepared(system: &mut RunIf<P, C>, event: &E, prepared: &mut (), commands: &mut Commands<S>) { () }
+    fn run_prepared(system: &mut RunIf<P, C>, event: &E, prepared: &mut (), commands: &mut Commands<S>) / {std::thread::Threads} { () }
     fn finish(system: &mut RunIf<P, C>, world: &mut World<S>, prepared: ()) { () }
     fn why_not(guarded: &RunIf<P, C>, name: &Str, world: &World<S>, entity: Entity) -> Option<[Str]> { <P as System<E, S>>::why_not(&guarded.systems, name, world, entity) }
     // (Its condition a step of its own; what it guards, steps only where it held.)
@@ -2508,7 +2587,7 @@ impl<E, S, F> System<E, S> for Exclusive<F> where F: Fn<(&mut World<S>,), Output
     type Prepared = ();
     fn touches(system: &Exclusive<F>) -> [Str] { ["w:*"] }
     fn prepare(system: &mut Exclusive<F>, event: &E, world: &mut World<S>) -> Option<()> { None }
-    fn run_prepared(system: &mut Exclusive<F>, event: &E, prepared: &mut (), commands: &mut Commands<S>) { () }
+    fn run_prepared(system: &mut Exclusive<F>, event: &E, prepared: &mut (), commands: &mut Commands<S>) / {std::thread::Threads} { () }
     fn finish(system: &mut Exclusive<F>, world: &mut World<S>, prepared: ()) { () }
     fn why_not(system: &Exclusive<F>, name: &Str, world: &World<S>, entity: Entity) -> Option<[Str]> { None }
     fn step(system: &mut Exclusive<F>, event: &E, world: &mut World<S>, commands: &mut Commands<S>, at: Stepper) -> Stepper {
@@ -2534,7 +2613,7 @@ impl<E, S, F> System<E, S> for ExclusiveWith<F> where F: Fn<(&E, &mut World<S>),
     type Prepared = ();
     fn touches(system: &ExclusiveWith<F>) -> [Str] { ["w:*"] }
     fn prepare(system: &mut ExclusiveWith<F>, event: &E, world: &mut World<S>) -> Option<()> { None }
-    fn run_prepared(system: &mut ExclusiveWith<F>, event: &E, prepared: &mut (), commands: &mut Commands<S>) { () }
+    fn run_prepared(system: &mut ExclusiveWith<F>, event: &E, prepared: &mut (), commands: &mut Commands<S>) / {std::thread::Threads} { () }
     fn finish(system: &mut ExclusiveWith<F>, world: &mut World<S>, prepared: ()) { () }
     fn why_not(system: &ExclusiveWith<F>, name: &Str, world: &World<S>, entity: Entity) -> Option<[Str]> { None }
     fn step(system: &mut ExclusiveWith<F>, event: &E, world: &mut World<S>, commands: &mut Commands<S>, at: Stepper) -> Stepper {
@@ -2592,7 +2671,7 @@ impl<E, S, P> System<E, S> for Parallel<P> where P: Branches<E, S> {
     type Prepared = ();
     fn touches(system: &Parallel<P>) -> [Str] { ["w:*"] }
     fn prepare(system: &mut Parallel<P>, event: &E, world: &mut World<S>) -> Option<()> { None }
-    fn run_prepared(system: &mut Parallel<P>, event: &E, prepared: &mut (), commands: &mut Commands<S>) { () }
+    fn run_prepared(system: &mut Parallel<P>, event: &E, prepared: &mut (), commands: &mut Commands<S>) / {std::thread::Threads} { () }
     fn finish(system: &mut Parallel<P>, world: &mut World<S>, prepared: ()) { () }
     fn why_not(group: &Parallel<P>, name: &Str, world: &World<S>, entity: Entity) -> Option<[Str]> { <P as Branches<E, S>>::why_not_branches(&group.branches, name, world, entity) }
     fn step(group: &mut Parallel<P>, event: &E, world: &mut World<S>, commands: &mut Commands<S>, at: Stepper) -> Stepper { <P as Branches<E, S>>::step_branches(&mut group.branches, event, world, commands, at) }
@@ -2731,7 +2810,7 @@ impl<E, S, Ns> System<E, S> for Graph<Ns> where Ns: StartNodes<E, S, Ns>, Ns: Co
     type Prepared = ();
     fn touches(system: &Graph<Ns>) -> [Str] { ["w:*"] }
     fn prepare(system: &mut Graph<Ns>, event: &E, world: &mut World<S>) -> Option<()> { None }
-    fn run_prepared(system: &mut Graph<Ns>, event: &E, prepared: &mut (), commands: &mut Commands<S>) { () }
+    fn run_prepared(system: &mut Graph<Ns>, event: &E, prepared: &mut (), commands: &mut Commands<S>) / {std::thread::Threads} { () }
     fn finish(system: &mut Graph<Ns>, world: &mut World<S>, prepared: ()) { () }
     fn why_not(system: &Graph<Ns>, name: &Str, world: &World<S>, entity: Entity) -> Option<[Str]> { None }
     fn step(system: &mut Graph<Ns>, event: &E, world: &mut World<S>, commands: &mut Commands<S>, at: Stepper) -> Stepper {
@@ -2824,7 +2903,7 @@ impl<E, S, Q> System<E, S> for SharedSystem<Q> where Q: System<E, S> {
     type Prepared = ();
     fn touches(system: &SharedSystem<Q>) -> [Str] { ["w:*"] }
     fn prepare(system: &mut SharedSystem<Q>, event: &E, world: &mut World<S>) -> Option<()> { None }
-    fn run_prepared(system: &mut SharedSystem<Q>, event: &E, prepared: &mut (), commands: &mut Commands<S>) { () }
+    fn run_prepared(system: &mut SharedSystem<Q>, event: &E, prepared: &mut (), commands: &mut Commands<S>) / {std::thread::Threads} { () }
     fn finish(system: &mut SharedSystem<Q>, world: &mut World<S>, prepared: ()) { () }
     fn why_not(system: &SharedSystem<Q>, name: &Str, world: &World<S>, entity: Entity) -> Option<[Str]> {
         lock(&system.shared, fn(q: &mut Q) -> Option<[Str]> { <Q as System<E, S>>::why_not(&*q, name, world, entity) })
@@ -3958,7 +4037,7 @@ impl<E, S, P> System<E, S> for SyncPointOf<P> where P: Schedule, P: PointKind {
     type Prepared = ();
     fn touches(system: &SyncPointOf<P>) -> [Str] { ["w:*"] }
     fn prepare(system: &mut SyncPointOf<P>, event: &E, world: &mut World<S>) -> Option<()> { None }
-    fn run_prepared(system: &mut SyncPointOf<P>, event: &E, prepared: &mut (), commands: &mut Commands<S>) { () }
+    fn run_prepared(system: &mut SyncPointOf<P>, event: &E, prepared: &mut (), commands: &mut Commands<S>) / {std::thread::Threads} { () }
     fn finish(system: &mut SyncPointOf<P>, world: &mut World<S>, prepared: ()) { () }
     fn why_not(system: &SyncPointOf<P>, name: &Str, world: &World<S>, entity: Entity) -> Option<[Str]> { None }
     fn step(system: &mut SyncPointOf<P>, event: &E, world: &mut World<S>, commands: &mut Commands<S>, at: Stepper) -> Stepper {

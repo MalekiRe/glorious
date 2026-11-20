@@ -1,0 +1,63 @@
+// `dependent_runs_before_unrelated_root_finishes` (upstream's
+// tests/execution.rs): a graph's nodes run at once where they can. `A` and
+// `B` meet at a barrier, so neither goes on until the other has started;
+// `C`, after `A`, sends what it reads to `B`, still running, which waits for
+// it; `D` runs after `A` and `B`. Twice: 0 -> 1 -> 11 -> 12 -> 22. (A node
+// that waits is made a system by `waits`.)
+// expect:
+// 1
+// 11
+// 1
+// 22
+// 0
+mod ecs;
+
+use ecs::{App, World, Single, ready, node, waits};
+use std::thread::{AtomicInt, channel, send, recv, fetch_add, load, yield_now, Threads};
+
+struct Update
+struct A
+struct B
+struct C
+struct D
+struct Value(Int)
+
+// A barrier of two: each arrives, and goes on once both have.
+fn meet(at: &AtomicInt) / {Threads} {
+    let round = load(at) / 2;
+    discard(fetch_add(at, 1));
+    while({ load(at) < (round + 1) * 2 }) { yield_now() }
+}
+
+fn main() -> Int {
+    let barrier = AtomicInt::new(0);
+    let (tx, rx) = channel<Int>();
+    let mut app = App::new().register<Value>()
+        .add_systems(Update, ready((
+            node(A, waits(fn(value: &mut Single<(&mut Value,), ()>) / {Threads} {
+                let b = barrier;
+                meet(&b);
+                match(value.get_mut()) { Some((mut v,)) => v.0 = v.0 + 1;, None => () }
+            })),
+            node(B, waits(fn() / {Threads} {
+                let b = barrier;
+                let r = rx;
+                meet(&b);
+                say(match(recv(&r)) { Some(n) => n % 11, None => 0 - 1 })
+            })),
+            node(C, fn(value: &mut Single<(&Value,), ()>) {
+                let t = tx;
+                match(value.get_mut()) { Some((v,)) => send(&t, v.0), None => () }
+            }).after(A),
+            node(D, fn(value: &mut Single<(&mut Value,), ()>) {
+                match(value.get_mut()) { Some((mut v,)) => v.0 = v.0 + 10;, None => () }
+            }).after(A).after(B)
+        )))
+        .build();
+    let entity = app.world.spawn_bundle((Value(0),));
+    app.emit(&Update);
+    say(match(app.world.get<Value>(entity)) { Some(v) => v.0, None => 0 });
+    app.emit(&Update);
+    say(match(app.world.get<Value>(entity)) { Some(v) => v.0, None => 0 });
+    0
+}

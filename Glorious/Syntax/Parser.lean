@@ -1266,13 +1266,19 @@ def expandPacks (toks : Array Token) (most : Nat) : Array Token := Id.run do
         i := i + 1
         continue
       -- The implementation runs to the `}` that closes its body.
+      -- (Braces inside `<..>`, an effect row's `Effects = {Threads}` in a
+      -- condition, are not its body's.)
       let mut e := j
       let mut braces := 0
       let mut opened := false
+      let mut angle : Int := 0
       while e < toks.size && !(opened && braces == 0) do
         match tok e with
-        | .punct "{" => braces := braces + 1; opened := true
-        | .punct "}" => braces := braces - 1
+        | .op "<" => if !opened then angle := angle + 1
+        | .op ">" => if !opened then angle := angle - 1
+        | .op ">>" => if !opened then angle := angle - 2
+        | .punct "{" => if opened || angle <= 0 then braces := braces + 1; opened := true
+        | .punct "}" => if opened then braces := braces - 1
         | _ => pure ()
         e := e + 1
       let body := toks.extract i e
@@ -1287,14 +1293,15 @@ def expandPacks (toks : Array Token) (most : Nat) : Array Token := Id.run do
             (lengths ps (left - n)).map ((p, n) :: ·)
       for choice in lengths leaders most do
         let all := packs.map fun p => (p, (choice.lookup ((together.lookup p).getD p)).getD 0)
-        -- (Each copy says it is one, `type %pack = ();` first in its body:
-        -- one nothing uses need not be checked, `Check.checkItems`.)
+        -- (Each copy says it is one, `type %pack = ();` last in its body,
+        -- before the `}` that closes it: one nothing uses need not be
+        -- checked, `Check.checkItems`.)
         let copy := expandOne body all
-        let opens := (copy.findIdx? fun t => t.tok == .punct "{").getD copy.size
-        let at_ := copy[opens]?.getD default
+        let closes := copy.size - 1
+        let at_ := copy[closes]?.getD default
         let mark : Array Token := #[.ident "type", .ident Syntax.packCopyName, .punct "=", .punct "(", .punct ")", .punct ";"].map
           fun tk => { at_ with tok := tk }
-        out := out ++ copy.extract 0 (opens + 1) ++ mark ++ copy.extract (opens + 1) copy.size
+        out := out ++ copy.extract 0 closes ++ mark ++ copy.extract closes copy.size
       i := e
     else
       out := out.push toks[i]!

@@ -6242,11 +6242,21 @@ Done:
 - std::thread: `spawn_unchecked`, `cell_finished`, `take_finished`,
   `join_cell`, `wait_until`.
 
-Not yet: a system cannot perform `Threads` (a function is a system only if
-it performs nothing), so no node can wait at a barrier or for a channel,
-and the nodes started together still run one after another. The barrier
-tests need systems that may perform `Threads`: `IntoSystem` for a function
-of any row, and `System::run` and `run_prepared` performing it.
+- A function that may wait (`/ {Threads}`) is made a system by
+  `waits(f)` (`Waits<F>`, its own `IntoSystem` and `System` for
+  `Sys<Waits<F>, Lc>`): `run_prepared` and `CallTaken::call_taken` perform
+  `Threads` (`CallWaiting` calls a function that performs nothing or a
+  `Waits`), so in a graph such a node waits at a barrier or for a channel
+  while the nodes beside it go on; alone, it waits among the threads of a
+  run of its own. covey/barrier ports
+  `dependent_runs_before_unrelated_root_finishes`.
+- `Syntax.expandPacks` found an implementation's body by its first `{`,
+  which an effect row in a condition (`Effects = {Threads}`) has first; it
+  counts braces outside `<..>` now.
+
+Still departing: upstream's systems may block as any Rust function may;
+here a function that may wait says so (`waits`). And a parallel group's
+branches, and `Single` nodes inside one, still run one after another.
 
 ## Other standing decisions
 
