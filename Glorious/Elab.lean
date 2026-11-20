@@ -1129,9 +1129,14 @@ an argument, before its own; a call of it passes the value; a call of one of a
 trait's functions takes the function out of the value. The checker said, for
 each call, which value. After this rewriting a program has no traits. -/
 
-private partial def dictExpr : DictE → Expr
-  | .param k => .name none s!"%dict{k}"
-  | .impl fn subs => .call 0 (.name none fn) (subs.map dictExpr)
+/-- An implementation as a value: its number where it has one
+(`TraitInfo.knownOf`), and otherwise written out. -/
+private partial def dictExpr (tr : TraitInfo) (d : DictE) : Expr :=
+  match tr.knownOf[addrOf d]? with
+  | some n => .name none s!"%known#{n}"
+  | none => match d with
+    | .param k => .name none s!"%dict{k}"
+    | .impl fn subs => .call 0 (.name none fn) (subs.map (dictExpr tr))
 
 /-- The function an implementation gives for the trait's function `idx`, and
 the evidence its conditions need, if the evidence is an implementation and not
@@ -1160,8 +1165,8 @@ private def destroyCall (tr : TraitInfo) (d : DictE) (value : Expr) : Expr :=
     -- (A callable is given up where it is.)
     if fn == Syntax.implFnName Syntax.destroyTrait Syntax.callableHead Syntax.destroyFn then
       .call dropCallId (.name none "cancel") [value]
-    else .call dropCallId (.name none fn) (subs.map dictExpr ++ [value])
-  | none => .call dropCallId (.proj (dictExpr d) 0) [value]
+    else .call dropCallId (.name none fn) (subs.map (dictExpr tr) ++ [value])
+  | none => .call dropCallId (.proj ((dictExpr tr) d) 0) [value]
 
 /-- The call that destroys what `x` holds, if this is a place where that
 happens and its type has something to destroy. -/
@@ -1235,8 +1240,8 @@ def destroyers (tr : TraitInfo) : List Item :=
     | some d =>
       let hook := match staticMethod tr d 0 with
         | some (fn, subs) => fun (args : List Expr) =>
-          Expr.call dropCallId (.name none fn) (subs.map dictExpr ++ args)
-        | none => fun args => Expr.call dropCallId (.proj (dictExpr d) 0) args
+          Expr.call dropCallId (.name none fn) (subs.map (dictExpr tr) ++ args)
+        | none => fun args => Expr.call dropCallId (.proj ((dictExpr tr) d) 0) args
       let fields := s!"%fields {D.head}"
       [asValue,
         Item.fn method [] blank none
@@ -1313,9 +1318,9 @@ private partial def untraitCall (tr : TraitInfo) (owner : String) (id : Nat) (f 
     -- given what the implementation's conditions need: a call like any other,
     -- so that a borrow passed to it can be a scope.
     match staticMethod tr d idx with
-    | some (fn, subs) => mk (.name none fn) (subs.map dictExpr ++ args)
-    | none => mk (.proj (dictExpr d) idx) args
-  | some ds, none => mk (untraitExpr tr owner f) (ds.map dictExpr ++ args)
+    | some (fn, subs) => mk (.name none fn) (subs.map (dictExpr tr) ++ args)
+    | none => mk (.proj ((dictExpr tr) d) idx) args
+  | some ds, none => mk (untraitExpr tr owner f) (ds.map (dictExpr tr) ++ args)
   | _, _ => mk (untraitExpr tr owner f) args
 
 private partial def untraitClause (tr : TraitInfo) (owner : String) : Clause → Clause

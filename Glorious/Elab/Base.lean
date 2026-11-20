@@ -4,6 +4,7 @@ public import Std.Data.HashMap
 public import Std.Data.HashSet
 public import Glorious.Syntax.Ast
 public import Glorious.Core.Ast
+public import Glorious.Addr
 
 /-!
 # What the elaborator and the checker share
@@ -129,6 +130,48 @@ structure TraitInfo where
   /-- The sites of the parts of a name's value, by where the name is bound
   and the name, in the order `drops` has them. -/
   partsAt : Std.HashMap (String × Nat × Nat × String) (Array DropSite) := {}
+  /-- The implementations with nothing left to be known, numbered once for
+  the program: each its function and its parts' numbers (`knownPool`), and
+  back (`knownIds`); and the number of each such dictionary object the
+  checker gave (`knownOf`, by the object). A body given one has its number
+  (`%known#n`) and not the implementation written out, so what follows walks
+  a name where it would walk the implementation, of a size that grows with
+  how deep the types are; the specializer starts from these numbers and
+  writes out what is left of them. -/
+  knownPool : Array (String × List Nat) := #[]
+  knownIds : Std.HashMap (String × List Nat) Nat := {}
+  knownOf : Std.HashMap USize Nat := {}
+
+/-- Numbering the implementations with nothing left to be known: by object
+(none for one with a parameter left), by function and parts, and back. -/
+structure Numbering where
+  byObject : Std.HashMap USize (DictE × Option Nat) := {}
+  ids : Std.HashMap (String × List Nat) Nat := {}
+  pool : Array (String × List Nat) := #[]
+
+/-- A dictionary's number, and its parts', each object looked at once. -/
+partial def numberDict (d : DictE) : StateM Numbering (Option Nat) := do
+  if let some (_, r) := (← get).byObject[addrOf d]? then return r
+  let r ← match d with
+    | .param _ => pure none
+    | .impl fn subs => do
+      let mut ids : Array Nat := #[]
+      let mut closed := true
+      for s in subs do
+        match ← numberDict s with
+        | some n => ids := ids.push n
+        | none => closed := false
+      if !closed then pure none else
+      let key := (fn, ids.toList)
+      match (← get).ids[key]? with
+      | some n => pure (some n)
+      | none =>
+        let n := (← get).pool.size
+        modify fun s => { s with ids := s.ids.insert key n, pool := s.pool.push key }
+        pure (some n)
+  -- (The object is kept with its number, so no other comes to be where it is.)
+  modify fun s => { s with byObject := s.byObject.insert (addrOf d) (d, r) }
+  pure r
 
 /-- The first value of each key. -/
 def firstOf {κ ν : Type} [BEq κ] [Hashable κ] (l : List (κ × ν)) : Std.HashMap κ ν :=
@@ -137,7 +180,14 @@ def firstOf {κ ν : Type} [BEq κ] [Hashable κ] (l : List (κ × ν)) : Std.Ha
 /-- What the elaborator looks up of a program's traits, by what it looks it
 up by. -/
 def TraitInfo.index (t : TraitInfo) : TraitInfo :=
+  let every : List DictE := t.dicts.flatMap (·.2) ++ t.destroys.flatMap fun d =>
+    d.hook.toList ++ d.ctors.flatMap fun (_, fs) => fs.filterMap id
+  let numbered := ((every.forM fun d => discard (numberDict d)).run {}).2
   { t with
+    knownPool := numbered.pool, knownIds := numbered.ids
+    knownOf := numbered.byObject.fold (init := {}) fun m k (_, r) => match r with
+      | some n => m.insert k n
+      | none => m
     dictsAt := firstOf t.dicts, methodsAt := firstOf t.methods, boundedAt := firstOf t.bounded
     implsAt := firstOf (t.impls.map fun im => (im.dictFn, im)), dropsAt := firstOf t.drops
     partsAt := t.drops.foldl (fun m (site, _) =>

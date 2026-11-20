@@ -35,18 +35,6 @@ namespace Glorious.Elab
 
 open Glorious.Syntax
 
-/-- An implementation as a value with nothing left to be known: the function
-that makes one, known others like it. -/
-partial def closedDict (impls : Std.HashMap String ImplE) : Expr → Bool
-  | .call _ (.name none f) subs => impls.contains f && subs.all (closedDict impls)
-  | _ => false
-
-/-- Such a value as it is written into a name. -/
-partial def dictKey : Expr → String
-  | .call _ (.name none f) [] => f
-  | .call _ (.name none f) subs => s!"{f}({", ".intercalate (subs.map dictKey)})"
-  | _ => "?"
-
 /-- The copies asked for: each by its name, with the function it is of, the
 implementations it is for, and whether their places are dropped. An
 implementation with nothing left to be known is a number here (`pool`: its
@@ -197,10 +185,6 @@ def specCopyClause (tr : TraitInfo) (known : List (String × Expr)) (n : Nat) (d
   | .mk pats body => do
     let pats := if drop then pats.drop n else List.replicate n Pattern.wild ++ pats.drop n
     let body ← specStmts tr known body
-    -- (What is left of the implementations it was given, as values: written
-    -- out.)
-    let byId := (← get).byId
-    let body := body.map (unref byId)
     -- (A function's name is the label its body leaves by, `@find(..)`: the
     -- copy has another name, so its body is given that label.)
     let body := if body.any (stmtNamesLabel fn) then [Stmt.expr (.labelScope fn body)] else body
@@ -217,7 +201,9 @@ partial def specialize (tr : TraitInfo) (items : List Item) (fuel : Nat := 50000
     match item with
     | .fn name _ _ _ _ => if m.contains name then m else m.insert name item
     | _ => m
-  let (roots, asked) := (items.mapM (specRoot tr)).run {}
+  -- (Numbered as the elaborator numbered them, which the bodies say.)
+  let (roots, asked) := (items.mapM (specRoot tr)).run { pool := tr.knownIds, byId := tr.knownPool }
+  let byId := tr.knownPool
   let rec make (fuel done : Nat) (copies : Copies) (out : Array Item) : Option (Array Item × Copies) :=
     match fuel, copies.list[done]? with
     | _, none => some (out, copies)
@@ -232,13 +218,18 @@ partial def specialize (tr : TraitInfo) (items : List Item) (fuel : Nat := 50000
         let annots := if drop then annots.drop n else annots
         make fuel (done + 1) copies (out.push (Item.fn name ps annots ret clauses))
       | _ => make fuel (done + 1) copies out
+  -- (What is left of the implementations, as values: written out.)
+  let written := fun (byId : Array (String × List Nat)) (items : List Item) => items.map fun (item : Item) =>
+    match item with
+    | .fn name ps annots ret clauses => Item.fn name ps annots ret (clauses.map fun (.mk pats body) => Clause.mk pats (body.map (unref byId)))
+    | other => other
   match make fuel 0 asked #[] with
   | some (made, copies) =>
-    let out := (roots ++ made.toList, copies.list.toList.map fun (name, fn, _, _) => (name, fn))
+    let out := (written copies.byId (roots ++ made.toList), copies.list.toList.map fun (name, fn, _, _) => (name, fn))
     if Glorious.Trace.groupsTraced then
       dbgTrace s!"specialize: {copies.list.size} copies, {copies.pool.size} implementation values, {made.size} made" fun _ => out
     else out
-  | none => (items, [])
+  | none => (written byId items, [])
 
 /-! ## Constants worked out once
 
