@@ -477,10 +477,14 @@ fn without(list: &[Entity], entity: Entity) -> [Entity] {
 fn drop_source<R, S>(columns: &mut S, target: Entity, source: Entity) where S: Get<Sources<R>> {
     let column = <S as Get<Sources<R>>>::column_mut(columns);
     let at = slot_of(&*column, target);
-    if(at >= 0) {
+    // (A target nothing relates to any more has no `Sources`, as upstream's.)
+    let empty = if(at >= 0) {
         let kept = without(&column.dense[at].list, source);
-        column.dense[at].list = kept
-    };
+        let none = len_at(&kept) == 0;
+        column.dense[at].list = kept;
+        none
+    } else { false };
+    if(empty) { discard(column_remove(column, target)) } else { () }
 }
 
 // Relate `source` to `target` by `relation`, in place of what it related
@@ -740,12 +744,12 @@ pub trait Bundle<S> {
     fn put_all(Self, &mut World<S>, Entity) -> Self::Had
     fn take_all(&mut World<S>, Entity) -> Self::Had
 }
-impl<..T, S> Bundle<S> for (..T) where ..S: Get<T>, ..T: EvictOne<S>, (..T): BringsFor<S>, (..T): NamesOf {
+impl<..T, S> Bundle<S> for (..T) where ..S: Get<T>, ..T: EvictOne<S>, ..T: Put<S>, (..T): BringsFor<S>, (..T): NamesOf {
     type Had = (..Option<T>);
     fn names() -> [Str] { <(..T) as NamesOf>::names_of() }
     fn put_all(bundle: (..T), world: &mut World<S>, entity: Entity) -> (..Option<T>) {
         let (..t) = bundle;
-        let had = (..put_one(world, entity, t));
+        let had = (..<T as Put<S>>::put_value(world, entity, t));
         <(..T) as BringsFor<S>>::bring_for(world, entity);
         had
     }
@@ -774,6 +778,39 @@ fn put_one<T, S>(world: &mut World<S>, entity: Entity, value: T) -> Option<T> wh
 pub trait NamesOf { fn names_of() -> [Str] }
 impl NamesOf for () { fn names_of() -> [Str] { [] } }
 impl<H, ..R> NamesOf for (H, ..R) where (..R): NamesOf, H: Schedule { fn names_of() -> [Str] { push(<(..R) as NamesOf>::names_of(), <H as Schedule>::NAME) } }
+
+// What putting a value on an entity does: a component is put in its column;
+// a relation's value (`DockedAt { berth: 3 }.to(kestrel)`, a `Relates`)
+// relates the entity, as `world.relate` does, the old link undone and none
+// made to a target that is gone.
+pub trait Put<S> { fn put_value(&mut World<S>, Entity, Self) -> Option<Self> }
+pub trait LinksWhenPut {}
+impl<R> LinksWhenPut for Relates<R> {}
+pub trait PutLink<S> { fn put_link(&mut World<S>, Entity, Self) -> Option<Self> }
+impl<R, S> PutLink<S> for Relates<R> where R: RelateBy<S>, S: Get<Relates<R>> {
+    fn put_link(world: &mut World<S>, entity: Entity, value: Relates<R>) -> Option<Relates<R>> {
+        let Relates { relation, target } = value;
+        let before = match(world.get<Relates<R>>(entity)) { Some(r) => r.target, None => Entity::PLACEHOLDER };
+        match(world.relate(entity, relation, target)) { Some(r) => Some(Relates { relation: r, target: before }), None => None }
+    }
+}
+impl<T, S> Put<S> for T where T: LinksWhenPut, T: PutLink<S> { fn put_value(world: &mut World<S>, entity: Entity, value: T) -> Option<T> { <T as PutLink<S>>::put_link(world, entity, value) } }
+impl<T, S> Put<S> for T where S: Get<T>, T: EvictOne<S> { fn put_value(world: &mut World<S>, entity: Entity, value: T) -> Option<T> { put_one(world, entity, value) } }
+// What taking a value off an entity does: a component is taken from its
+// column; a relation's value is the link, undone as `world.unrelate` does.
+pub trait Take<S> { fn take_value(&mut World<S>, Entity) -> Option<Self> }
+pub trait TakeLink<S> { fn unlink_value(&mut World<S>, Entity) -> Option<Self> }
+impl<R, S> TakeLink<S> for Relates<R> where S: Get<Relates<R>>, S: Get<Sources<R>> {
+    fn unlink_value(world: &mut World<S>, entity: Entity) -> Option<Relates<R>> {
+        let target = match(world.get<Relates<R>>(entity)) { Some(r) => r.target, None => Entity::PLACEHOLDER };
+        match(world.unrelate<R>(entity)) { Some(r) => Some(Relates { relation: r, target: target }), None => None }
+    }
+}
+impl<T, S> Take<S> for T where T: LinksWhenPut, T: TakeLink<S> { fn take_value(world: &mut World<S>, entity: Entity) -> Option<T> { <T as TakeLink<S>>::unlink_value(world, entity) } }
+impl<T, S> Take<S> for T where S: Get<T> { fn take_value(world: &mut World<S>, entity: Entity) -> Option<T> { remove<T, S>(world, entity) } }
+// A relation's value for a link to `target`, to put on an entity:
+// `world.spawn_bundle((Name(3), DockedAt { berth: 3 }.to(kestrel)))`.
+pub fn to<R>(relation: R, target: Entity) -> Relates<R> { Relates { relation: relation, target: target } }
 
 pub fn spawn_with<B, S>(world: &mut World<S>, bundle: B) -> Entity where B: Bundle<S> {
     let entity = spawn(world);
@@ -807,7 +844,7 @@ impl<S> World<S> {
 
     // Give an entity a component, or another value of one it has: the one
     // it had, if it had one.
-    pub fn insert<T>(world: &mut Self, entity: Entity, value: T) -> Option<T> where S: Get<T>, T: EvictOne<S>, T: Schedule {
+    pub fn insert<T>(world: &mut Self, entity: Entity, value: T) -> Option<T> where S: Get<T>, T: EvictOne<S>, T: Schedule, T: Put<S> {
         // (A match, whose clauses are given the value each once: a value
         // that has a `drop` is put.)
         match(alive(&*world, entity)) {
@@ -816,7 +853,7 @@ impl<S> World<S> {
                 let made = [entity];
                 let was = <S as Get<T>>::has(&world.columns, entity);
                 if(was) { fire_world(world, 2, &names, &made) } else { () };
-                let had = put_one(world, entity, value);
+                let had = <T as Put<S>>::put_value(world, entity, value);
                 bring_named(world, <T as Schedule>::NAME, entity);
                 if(was) { () } else { fire_world(world, 0, &names, &made) };
                 fire_world(world, 1, &names, &made);
@@ -852,7 +889,7 @@ impl<S> World<S> {
     }
 
     // Take a component from an entity.
-    pub fn remove<T>(world: &mut Self, entity: Entity) -> Option<T> where S: Get<T>, T: Schedule {
+    pub fn remove<T>(world: &mut Self, entity: Entity) -> Option<T> where S: Get<T>, T: Schedule, T: Take<S> {
         if(alive(&*world, entity)) {
             if(<S as Get<T>>::has(&world.columns, entity)) {
                 let names = [<T as Schedule>::NAME];
@@ -860,7 +897,7 @@ impl<S> World<S> {
                 fire_world(world, 2, &names, &gone);
                 fire_world(world, 3, &names, &gone)
             } else { () };
-            remove<T, S>(world, entity)
+            <T as Take<S>>::take_value(world, entity)
         } else { None }
     }
 
@@ -3803,7 +3840,7 @@ impl<S, L> App<S, L> {
         made
     }
     pub fn insert<T>(app: &mut Self, entity: Entity, value: T) -> Option<T>
-        where S: Get<T>, T: EvictOne<S>, T: Schedule, T: Use<[0, *]>, S: Fires<S, L>, S: Requests<S, L>,
+        where S: Get<T>, T: EvictOne<S>, T: Schedule, T: Put<S>, T: Use<[0, *]>, S: Fires<S, L>, S: Requests<S, L>,
               L: Dispatch<OnAdd<T>, S>, L: Dispatch<OnInsert<T>, S>, L: Dispatch<OnReplace<T>, S>, T: EvictsHooked<S, L>, S: ByName<S, L> {
         <T as EvictsHooked<S, L>>::evicting_hooked(app, entity);
         let had = <S as Get<T>>::has(&app.world.columns, entity);
@@ -3817,7 +3854,7 @@ impl<S, L> App<S, L> {
         fire_brought(app, &brought, &names, 1);
         old
     }
-    pub fn remove<T>(app: &mut Self, entity: Entity) -> Option<T> where S: Get<T>, T: Schedule, S: Fires<S, L>, S: Requests<S, L>, L: Dispatch<OnRemove<T>, S> {
+    pub fn remove<T>(app: &mut Self, entity: Entity) -> Option<T> where S: Get<T>, T: Schedule, T: Take<S>, S: Fires<S, L>, S: Requests<S, L>, L: Dispatch<OnRemove<T>, S> {
         if(<S as Get<T>>::has(&app.world.columns, entity)) { app.emit<OnRemove<T>>(&OnRemove { entities: [entity], none: [] }) };
         app.world.remove<T>(entity)
     }

@@ -1,0 +1,92 @@
+// Upstream's tests/relations.rs:
+// - `bundle_values_relate_retarget_and_unrelate_with_edge_data`: a
+//   relation's value put on an entity (`DockedAt { berth: 3 }.to(kestrel)`)
+//   relates it, put again retargets it, taken off unrelates it, and toward
+//   a target that is gone makes no link.
+// - `spawning_toward_a_target_despawned_in_the_same_flush_links_nothing`.
+// expect:
+// 1 3
+// [3]
+// 2 5
+// 0
+// [3]
+// 0
+// 0
+// --
+// 0
+// 2
+// 0 0
+// 0 0
+// 0
+mod ecs;
+
+use ecs::{App, World, Entity, Commands, Query, Single, Relation, OneToMany, Relates, Sources, to};
+use std::vec::sort;
+use core::option::is_none;
+
+struct Update
+struct Name(Int)
+struct DockedAt { berth: Int }
+impl Relation for DockedAt { type Kind = OneToMany; }
+struct InSquad
+impl Relation for InSquad { type Kind = OneToMany; }
+struct Station(Entity)
+
+fn names<S>(world: &World<S>, es: [Entity]) -> [Int] where S: ecs::Get<Name> {
+    sort(fold(es, [], fn(out: [Int], e: Entity) -> [Int] { match(world.get<Name>(e)) { Some(n) => push(out, n.0), None => out } }))
+}
+fn flag(b: Bool) { say(if(b) { 1 } else { 0 }) }
+fn docked<S>(world: &World<S>, ship: Entity) -> Str where S: ecs::Get<Relates<DockedAt>>, S: ecs::Get<Name> {
+    match(world.get<Relates<DockedAt>>(ship)) {
+        Some(d) => show(match(world.get<Name>(d.target)) { Some(n) => n.0, None => 0 - 1 }) ++ " " ++ show(d.relation.berth),
+        None => "none"
+    }
+}
+
+fn spawning<S>(s: &mut Single<(&Station,), ()>, commands: &mut Commands<S>)
+    where S: ecs::Get<Name>, S: ecs::Columns, S: ecs::Unlinks<S>, S: ecs::Get<Relates<DockedAt>>, S: ecs::Get<Sources<DockedAt>>,
+          S: ecs::Get<Relates<InSquad>>, S: ecs::Get<Sources<InSquad>> {
+    match(s.get_mut()) {
+        Some((station,)) =>
+            let target = station.0;
+            discard(commands.spawn((Name(1), DockedAt { berth: 0 }.to(target), InSquad.to(target))));
+            commands.despawn(target);
+            discard(commands.spawn((Name(2), DockedAt { berth: 0 }.to(target), InSquad.to(target))));,
+        None => ()
+    }
+}
+
+fn main() -> Int {
+    let mut world = App::new().register<Name>().relation<DockedAt>().build().world;
+    let kestrel = world.spawn_bundle((Name(1),));
+    let osprey = world.spawn_bundle((Name(2),));
+    let ship = world.spawn_bundle((Name(3), DockedAt { berth: 3 }.to(kestrel)));
+    say(docked(&world, ship));
+    say(names(&world, world.sources<DockedAt>(kestrel)));
+    discard(world.insert(ship, DockedAt { berth: 5 }.to(osprey)));
+    say(docked(&world, ship));
+    flag(is_none(world.get<Sources<DockedAt>>(kestrel)) == false);
+    say(names(&world, world.sources<DockedAt>(osprey)));
+    discard(world.remove<Relates<DockedAt>>(ship));
+    flag(is_none(world.get<Sources<DockedAt>>(osprey)) == false);
+    discard(world.despawn(kestrel));
+    discard(world.insert(ship, DockedAt { berth: 1 }.to(kestrel)));
+    flag(is_none(world.get<Relates<DockedAt>>(ship)) == false);
+    say("--");
+
+    let mut app = App::new().register<Name>().register<Station>().relation<DockedAt>().relation<InSquad>()
+        .add_systems(Update, spawning).build();
+    let station = app.world.spawn_bundle((Name(9),));
+    discard(app.world.spawn_bundle((Station(station),)));
+    app.emit(&Update);
+    flag(app.world.contains(station));
+    let ships = fold(ecs::entities(&app.world), [], fn(out: [Entity], e: Entity) -> [Entity] { match(app.world.get<Name>(e)) { Some(_) => push(out, e), None => out } });
+    say(len_at(&ships));
+    let mut i = 0;
+    while({ i < len_at(&ships) }) {
+        let ship = ships[i];
+        say(show(if(is_none(app.world.get<Relates<DockedAt>>(ship))) { 0 } else { 1 }) ++ " " ++ show(if(is_none(app.world.get<Relates<InSquad>>(ship))) { 0 } else { 1 }));
+        i = i + 1
+    };
+    0
+}
