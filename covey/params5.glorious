@@ -1,0 +1,108 @@
+// Upstream's tests/params.rs, of filtered singletons in parallel groups and
+// conditions over nested groups:
+// - `filtered_single_and_query_can_write_complementary_populations`.
+// - `parallel_read_singletons_join_before_dependents`.
+// - `condition_skips_nested_group_without_advancing_system_locals`.
+// Not ported: `filtered_parameters_retain_disjoint_mutable_items_together`
+// (one system writing a component through two parameters whose filters
+// keep them apart: a system here takes a component once).
+// expect:
+// 15
+// 3
+// --
+// 10
+// 6
+// 3
+// --
+//
+// 1 1 1
+// 1 1 1
+// 1 1 1
+// 1 1 1
+// 1 1 1 2 2 2
+// 0
+mod ecs;
+
+use ecs::{App, World, Entity, Query, Single, Local, With, Without, chain, parallel, run_if};
+
+struct Update
+struct Global
+struct Value(Int)
+struct Step(Int)
+struct Position(Int)
+struct Velocity(Int)
+struct Log([Int])
+struct Enabled(Bool)
+
+fn triple(value: &mut Single<(&mut Value,), (With<Global>,)>) { match(value.get_mut()) { Some((mut v,)) => v.0 = v.0 * 3;, None => () } }
+fn add_two(values: &mut Query<(&mut Value,), (Without<Global>,)>) { values.for_each() { (mut v,) => v.0 = v.0 + 2; } }
+
+fn step_of(step: &mut Single<(&Step,), ()>) -> Int { match(step.get_mut()) { Some((s,)) => s.0, None => 0 } }
+fn move_by(step: &mut Single<(&Step,), ()>, query: &mut Query<(&mut Position,), ()>) { let by = step_of(step); query.for_each() { (mut p,) => p.0 = p.0 + by; } }
+fn scale_by(step: &mut Single<(&Step,), ()>, query: &mut Query<(&mut Velocity,), ()>) { let by = step_of(step); query.for_each() { (mut v,) => v.0 = v.0 * by; } }
+fn integrate(query: &mut Query<(&mut Position, &Velocity), ()>) { query.for_each() { mut p, v => p.0 = p.0 + v.0; } }
+
+fn every_other(calls: &mut Local<Int>, enabled: &mut Single<(&Enabled,), ()>, query: &mut Query<(&Value,), ()>) -> Bool {
+    calls.0 = calls.0 + 1;
+    let on = match(enabled.get_mut()) { Some((e,)) => e.0, None => false };
+    let mut any = false;
+    query.for_each() { (v,) => if(v.0 > 0) { any = true } else { () }; };
+    if(calls.0 % 2 == 0) { if(on) { any } else { false } } else { false }
+}
+fn record(calls: &mut Local<Int>, log: &mut Single<(&mut Log,), ()>) {
+    calls.0 = calls.0 + 1;
+    let n = calls.0;
+    match(log.get_mut()) { Some((mut l,)) => push_at(&mut l.0, n);, None => () }
+}
+
+fn value<S>(world: &World<S>, e: Entity) -> Int where S: ecs::Get<Value> { match(world.get<Value>(e)) { Some(v) => v.0, None => 0 - 1 } }
+fn logged<S>(world: &World<S>, e: Entity) -> Str where S: ecs::Get<Log> {
+    match(world.get<Log>(e)) { Some(l) => std::text::join(std::vec::map(clone(&l.0), fn(n: Int) -> Str { show(n) }), " "), None => "" }
+}
+fn set_enabled<S>(world: &mut World<S>, e: Entity, to: Bool) where S: ecs::Get<Enabled> { match(world.get_mut<Enabled>(e)) { Some(mut x) => x.0 = to;, None => () } }
+fn set_value<S>(world: &mut World<S>, e: Entity, to: Int) where S: ecs::Get<Value> { match(world.get_mut<Value>(e)) { Some(mut x) => x.0 = to;, None => () } }
+
+fn main() -> Int {
+    let mut app = App::new().register<Value>().register<Global>()
+        .add_systems(Update, parallel((triple, add_two))).build();
+    let global = app.world.spawn_bundle((Value(5), Global));
+    let ordinary = app.world.spawn_bundle((Value(1),));
+    app.emit(&Update);
+    say(value(&app.world, global));
+    say(value(&app.world, ordinary));
+    say("--");
+
+    let mut app = App::new().register<Step>().register<Position>().register<Velocity>()
+        .add_systems(Update, (parallel((move_by, scale_by)), integrate).chain()).build();
+    let global = app.world.spawn_bundle((Step(3),));
+    let entity = app.world.spawn_bundle((Position(1), Velocity(2)));
+    app.emit(&Update);
+    say(match(app.world.get<Position>(entity)) { Some(p) => p.0, None => 0 });
+    say(match(app.world.get<Velocity>(entity)) { Some(v) => v.0, None => 0 });
+    say(match(app.world.get<Step>(global)) { Some(s) => s.0, None => 0 });
+    say("--");
+
+    let mut app = App::new().register<Log>().register<Enabled>().register<Value>()
+        .add_systems(Update, (record, (record, record).chain()).run_if(every_other)).build();
+    let global = app.world.spawn_bundle((Log([]), Enabled(true)));
+    let entity = app.world.spawn_bundle((Value(1),));
+    app.emit(&Update);
+    say(logged(&app.world, global));
+    app.emit(&Update);
+    say(logged(&app.world, global));
+    set_enabled(&mut app.world, global, false);
+    app.emit(&Update);
+    app.emit(&Update);
+    say(logged(&app.world, global));
+    set_enabled(&mut app.world, global, true);
+    set_value(&mut app.world, entity, 0);
+    app.emit(&Update);
+    app.emit(&Update);
+    say(logged(&app.world, global));
+    set_value(&mut app.world, entity, 1);
+    app.emit(&Update);
+    say(logged(&app.world, global));
+    app.emit(&Update);
+    say(logged(&app.world, global));
+    0
+}
