@@ -5902,12 +5902,16 @@ Each is to go; none is a design covey keeps.
   (`app.storage<..>()`), not among them: two implementations of `Registers`
   for a list whose rest is generic were ambiguous to the solver. Taken away
   by choosing between such implementations by fitting.
-- Threads take turns where one waits (`std::thread`), and a parallel group's
-  branches and a graph's nodes run one after another, so the upstream tests
-  of branches that meet at a barrier are not ported. Taken away by real
-  threads in the machines (a concurrent store and atomics in Core) and, in
-  covey, a system's parameters taken out of the world for each branch, the
-  branches run at once, and put back.
+- Threads take turns where one waits (`std::thread`): the machines run one
+  at a time. ~~A parallel group's branches and a graph's nodes run one
+  after another~~: a system's parameters are taken out of the world for
+  each branch and node (`System::prepare`, `run_prepared`, `finish`), and
+  those apart run at once, each on a thread of its own, put back when they
+  finish; a function that may wait is a system by `waits(f)`. The barrier
+  tests are ported (covey/barrier, covey/continuations). Still departing:
+  the threads take turns, not run on more than one core, which takes real
+  threads in the machines (a concurrent store and atomics in Core); and a
+  function that may wait says so (`waits`).
 - ~~No implementation chosen by whether a condition holds~~: of two
   implementations for every type of one trait that both apply to a type,
   the one that asks more of the type is its (`expandBlankets`, tried most
@@ -6254,9 +6258,14 @@ Done:
   which an effect row in a condition (`Effects = {Threads}`) has first; it
   counts braces outside `<..>` now.
 
+- A parallel group's branches run at once in the same way
+  (`StartBranches`), their commands joined in the branches' order;
+  covey/continuations ports three tests of branches and nodes that meet at
+  a barrier, skip under a condition, or are kept apart by what they write.
+
 Still departing: upstream's systems may block as any Rust function may;
-here a function that may wait says so (`waits`). And a parallel group's
-branches, and `Single` nodes inside one, still run one after another.
+here a function that may wait says so (`waits`). And the threads take
+turns on one core.
 
 ## Other standing decisions
 
