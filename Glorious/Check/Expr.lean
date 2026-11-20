@@ -1400,6 +1400,16 @@ partial def inferCall (scope : Scope) (amb : Row) (f : Expr) (args : List Expr)
         let lives := asked.filterMap fun | .ref (.con "'" []) _ c => some c | _ => none
         if let .var v := answer then
           unless lives.isEmpty do modify fun s => { s with gatHolds := s.gatHolds.push (v, lives) }
+      -- (A callable it is given may be called any number of times, or not
+      -- at all, by an implementation, as a function's may: what it holds
+      -- is asked to be one that can be.)
+      if let .fn ps _ _ _ _ ← find callee then
+        let pos := (← get).pos
+        for p in ps do
+          if let .fn .. ← find p then
+            modify fun s =>
+              { s with dups := s.dups.push (p, s!"{pos}`{x}` may call what it is given more than once")
+                       drops := s.drops.push (p, s!"{pos}`{x}` may leave what it is given uncalled") }
       let r ← applyTy scope amb s!"`{x}`" callee args call
       needBounds call [(sig.trait, subject)]
       modify fun s => { s with methodCalls := s.methodCalls.push (call, sig.index) }

@@ -832,8 +832,7 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
     let mut envNeeds : List ((Ty × String) × Bool) := []
     let mut saidStays : Array (Ty × String) := #[]
     let mut envStays : List (Ty × String) := []
-    if d.impl.isNone then
-      if let .fn ps _ _ _ _ ← find t1 then
+    if let .fn ps _ _ _ _ ← find t1 then
         for ((q, annot), place) in (ps.zip d.annots).zipIdx do
           if let .fn _ _ _ _ cap ← find q then
             let named := match annot with
@@ -879,15 +878,8 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
     let envDups := (envNeeds.filter (·.2)).map (·.1)
     let envDrops := (envNeeds.filter (!·.2)).map (·.1)
     modify fun s =>
-      if d.impl.isNone then
-        { s with drops := saidDrops ++ envDrops.toArray, dups := saidDups ++ envDups.toArray
-                 stays := saidStays ++ envStays.toArray }
-      else
-        -- (What it needs of a callable it is given, its body still says.)
-        let callable := fun ((need, _) : Ty × String) => match need with
-          | .fn .. => true
-          | _ => false
-        { s with drops := s.drops.filter callable ++ saidDrops, dups := s.dups.filter callable ++ saidDups }
+      { s with drops := saidDrops ++ envDrops.toArray, dups := saidDups ++ envDups.toArray
+               stays := saidStays ++ envStays.toArray }
     let scheme ← generalize t1 [] false
     modify fun s => { s with dups := before.dups, drops := before.drops, stays := before.stays }
     -- What a lifetime is said to hold of a type parameter, it holds of the

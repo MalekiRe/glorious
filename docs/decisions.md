@@ -5834,10 +5834,13 @@ check reads nothing of the body. (Chosen as Rust has it.)
   trait, `fn twice<T>(Self, T) -> (T, T) where T: Use<[0, *]>`, at most once
   where nothing is said: every implementation's function is held to it, and
   a call asks it of what it is given.
-- What is still found from the body, besides: what a callable that runs in an
-  environment the function is given needs (the environment's rules, which
-  its bounds say), and what an implementation's function needs of a
-  callable it is given.
+- A callable a trait's function is given is as a function's: called any
+  number of times, or not at all, by an implementation, which is held to
+  that, and a call asks it of what is given. Before, an implementation that
+  called it twice could be given a block that redeems a `Ticket`.
+- What is still found from the body: what a callable that runs in an
+  environment the function is given needs, by the environment's rules,
+  which its bounds (`RunsIn`, `Environment`) say.
 
 The library says it everywhere it passes values on (`T: Use<[1, 1]>`) and
 where it copies them (`Use<[0, *]>`): found by giving every type parameter
