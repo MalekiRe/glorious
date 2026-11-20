@@ -16,29 +16,14 @@
 //   two parallel groups sees what the first did and what it asks is there
 //   for the second.
 // (task_alloc.rs counts allocations: not ported.)
+// (This one: upstream's `bridges_run_at_the_tasks_position_and_see_earlier_bridges_effects`; each of them is a program of its own, as each is a test of its own.)
+//
 // expect:
 // before 0
 // task
 // after 1
 // before 1
 // after 1
-// --
-// invalid
-// seven
-// --
-// [4, 5]
-// 9
-// --
-// 1 [1]
-// 2 []
-// 3 [2]
-// --
-// 0
-// 1
-// --
-// before
-// first
-// after 2
 // 0
 mod ecs;
 
@@ -170,51 +155,6 @@ fn main() -> Int {
         .add_systems(Update, after)
         .build();
     app.emit(&Update);
-    app.emit(&Update);
-    say("--");
-
-    let mut app = App::new().register<Health>().register<Player>().add_task(waiting).build();
-    app.emit(&Update);
-    // No player yet: still waiting.
-    app.emit(&Render);
-    app.emit(&Update);
-    let player = app.world.spawn_bundle(());
-    discard(app.world.insert_bundle(player, (Health(7), Player)));
-    // The wrong label.
-    app.emit(&Update);
-    app.emit(&Render);
-    say("--");
-
-    let mut app = App::new().register<Health>().add_task(locals).build();
-    app.emit(&Update);
-    say("--");
-
-    let mut app = App::new().register<Health>().add_task(kept).build();
-    let a = app.world.spawn_bundle(());
-    discard(app.world.insert(a, Health(1)));
-    app.emit(&Update);
-    app.emit(&Update);
-    match(app.world.get_mut<Health>(a)) { Some(mut h) => h.0 = 2;, None => () };
-    app.emit(&Update);
-    say("--");
-
-    let flag = (AtomicInt::new(0));
-    let mut app = App::new().add_task(flagged(std::thread::share(&flag))).build();
-    app.emit(&Update);
-    app.emit(&Render);
-    say(0);
-    let remote = flag;
-    spawn_detached(fn() { std::thread::store(&remote, 1) }).wait();
-    app.emit(&Render);
-    say("--");
-
-    let mut app = App::new().register<A>().register<B>()
-        .add_systems(Update, parallel((add_a, add_b)))
-        .add_systems(Update, say_before)
-        .add_task(between)
-        .add_systems(Update, parallel((count_a, see_b)))
-        .build();
-    discard(app.world.spawn_bundle((A(0), B(0))));
     app.emit(&Update);
     0
 }

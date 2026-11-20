@@ -2572,7 +2572,9 @@ pub enum BridgeError { Invalid }
 pub struct AsyncWorld<S> { held: Option<(World<S>, Commands<S>)> }
 // What a task waits for: a label's name, or something of its own; and the
 // world given back.
-pub struct Ask<S> { label: Str, ready: Option<fn() -> Bool>, inbox: Option<fn(&World<S>) -> Bool>, back: Option<(World<S>, Commands<S>)> }
+// (`once`: a kept system's, which runs once a dispatch of its label, as a
+// system does; any other bridge of the label is taken in the same one.)
+pub struct Ask<S> { label: Str, ready: Option<fn() -> Bool>, inbox: Option<fn(&World<S>) -> Bool>, back: Option<(World<S>, Commands<S>)>, once: Bool }
 pub effect Bridge<S> { reach(Ask<S>) -> (World<S>, Commands<S>) }
 
 pub enum TaskStep<S> { Waiting { ask: Ask<S>, rest: fn((World<S>, Commands<S>)) -> TaskStep<S> }, Ended(AsyncWorld<S>) }
@@ -2600,9 +2602,9 @@ fn give_back<S>(back: Option<(World<S>, Commands<S>)>, world: &mut World<S>) {
 fn settle_step<S>(task: &mut TaskOf<S>, step: TaskStep<S>, world: &mut World<S>) -> Bool {
     match(step) {
         TaskStep::Waiting { ask, rest } =>
-            let Ask { label, ready, inbox, back } = ask;
+            let Ask { label, ready, inbox, back, once } = ask;
             give_back(back, world);
-            task.state = TaskState::Paused(Ask { label: label, ready: ready, inbox: inbox, back: None }, rest);
+            task.state = TaskState::Paused(Ask { label: label, ready: ready, inbox: inbox, back: None, once: once }, rest);
             true,
         TaskStep::Ended(done) => give_back(done.held, world); false
     }
@@ -2628,7 +2630,7 @@ fn drive_task<S>(task: &mut TaskOf<S>, label: Str, world: &mut World<S>) where S
                     Some(ready) => ready(),
                     None => match(ask.inbox) {
                         Some(waiting) => waiting(&*world),
-                        None => if(ask.label == "") { false } else { if(stepped) { false } else { stepped = true; ask.label == label } }
+                        None => if(ask.label == "") { false } else { if(ask.once) { if(stepped) { false } else { stepped = true; ask.label == label } } else { ask.label == label } }
                     }
                 };
                 if(now) {
@@ -2657,7 +2659,7 @@ impl<S, O, ..P, ..A, L, Ts, Lc, F> RunsOnWorld<S, O> for F
 pub fn bridge<L, F, O, S>(world: &mut AsyncWorld<S>, label: L, f: F) -> Result<O, BridgeError> / {Bridge<S>}
     where L: Schedule, F: RunsOnWorld<S, O> {
     discard(label);
-    let (w, c) = reach(Ask { label: <L as Schedule>::NAME, ready: None, inbox: None, back: replace(&mut world.held, None) });
+    let (w, c) = reach(Ask { label: <L as Schedule>::NAME, ready: None, inbox: None, back: replace(&mut world.held, None), once: false });
     let mut w = w;
     let mut c = c;
     let made = <F as RunsOnWorld<S, O>>::run_on(&f, &mut w, &mut c);
@@ -2670,12 +2672,15 @@ pub fn until<L, F, O, S>(world: &mut AsyncWorld<S>, label: L, f: F) -> O / {Brid
     where L: Schedule, F: RunsOnWorld<S, O> {
     discard(label);
     let mut made = None;
+    // (Asked again, at a later dispatch: once a dispatch.)
+    let mut again = false;
     while({ is_none(made) }) {
-        let (w, c) = reach(Ask { label: <L as Schedule>::NAME, ready: None, inbox: None, back: replace(&mut world.held, None) });
+        let (w, c) = reach(Ask { label: <L as Schedule>::NAME, ready: None, inbox: None, back: replace(&mut world.held, None), once: again });
         let mut w = w;
         let mut c = c;
         made = <F as RunsOnWorld<S, O>>::run_on(&f, &mut w, &mut c);
-        world.held = Some((w, c))
+        world.held = Some((w, c));
+        again = true
     };
     match(made) { Some(out) => out, None => abort("until") }
 }
@@ -2683,7 +2688,7 @@ pub fn until<L, F, O, S>(world: &mut AsyncWorld<S>, label: L, f: F) -> O / {Brid
 // Wait for the label `L` and run `f` on the whole world there.
 pub fn bridge_world<L, O, S>(world: &mut AsyncWorld<S>, label: L, f: fn(&mut World<S>) -> O) -> O / {Bridge<S>} where L: Schedule {
     discard(label);
-    let (w, c) = reach(Ask { label: <L as Schedule>::NAME, ready: None, inbox: None, back: replace(&mut world.held, None) });
+    let (w, c) = reach(Ask { label: <L as Schedule>::NAME, ready: None, inbox: None, back: replace(&mut world.held, None), once: false });
     let mut w = w;
     let made = f(&mut w);
     world.held = Some((w, c));
@@ -2710,7 +2715,7 @@ impl<F, Lc> Kept<F, Lc> {
     pub fn bridge<L, O, S>(kept: &mut Self, world: &mut AsyncWorld<S>, label: L) -> Result<O, BridgeError> / {Bridge<S>}
         where L: Schedule, F: KeptRun<S, O, Lc> {
         discard(label);
-        let (w, c) = reach(Ask { label: <L as Schedule>::NAME, ready: None, inbox: None, back: replace(&mut world.held, None) });
+        let (w, c) = reach(Ask { label: <L as Schedule>::NAME, ready: None, inbox: None, back: replace(&mut world.held, None), once: true });
         let mut w = w;
         let mut c = c;
         w.since = kept.last;
@@ -2724,7 +2729,7 @@ impl<F, Lc> Kept<F, Lc> {
 
 // Wait until `ready` holds, and go on at the first emit after.
 pub fn wait_until<S>(world: &mut AsyncWorld<S>, ready: fn() -> Bool) / {Bridge<S>} {
-    let (w, c) = reach(Ask { label: "", ready: Some(ready), inbox: None, back: replace(&mut world.held, None) });
+    let (w, c) = reach(Ask { label: "", ready: Some(ready), inbox: None, back: replace(&mut world.held, None), once: false });
     world.held = Some((w, c))
 }
 
@@ -2878,7 +2883,7 @@ pub fn on<E, S>(cx: &mut Cx<S>) -> E / {Bridge<S>} where S: Holds<Inbox<E>> {
         };
         if(none_at(&got)) {
             let (w, c) = reach(Ask { label: "", ready: None, inbox: Some(fn(world: &World<S>) -> Bool { has_event<E, S>(world, id) }),
-                                     back: replace(&mut cx.world.held, None) });
+                                     back: replace(&mut cx.world.held, None), once: false });
             cx.world.held = Some((w, c))
         };
     };
@@ -2901,7 +2906,7 @@ pub fn on_either<A, B, S>(cx: &mut Cx<S>) -> Result<A, B> / {Bridge<S>} where S:
         if(none_at(&got)) {
             let (w, c) = reach(Ask { label: "", ready: None,
                                      inbox: Some(fn(world: &World<S>) -> Bool { if(has_event<A, S>(world, id)) { true } else { has_event<B, S>(world, id) } }),
-                                     back: replace(&mut cx.world.held, None) });
+                                     back: replace(&mut cx.world.held, None), once: false });
             cx.world.held = Some((w, c))
         };
     };

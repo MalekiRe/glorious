@@ -6019,11 +6019,18 @@ still needs:
   once with all its entities, after the bundle's). Still departing: a
   plugin's components do not register what they require; the plugin says
   them (`Flock`).
-- **tasks**: the instances pass (`Elab.instances`) drops a function that
-  performs an effect of its caller's choosing when nothing calls it by name;
-  a trait's function reached through an implementation's dictionary is not
-  called by name until the specializer runs, which is after. The fourth
-  `Dispatch` for tuples is one.
+- ~~**tasks**~~: passes, as six programs (tasks, tasks_waiting,
+  tasks_locals, tasks_kept, tasks_woken, tasks_parallel), one of
+  upstream's tests each, as upstream has them; one program with six apps
+  had six instances of the `Bridge<S>` family, and the instances pass
+  (`Elab.instances`) drops a function that performs an effect of its
+  caller's choosing when nothing calls it by name (a trait's function
+  reached through an implementation's dictionary is not, until the
+  specializer runs, which is after). That stays to fix in the compiler:
+  instances after the specializer. A kept system's bridge runs once a
+  dispatch of its label (`Ask.once`), any other bridge of the label is
+  taken in the same dispatch: a loop runs once per drive, a chain may
+  finish in one, as upstream says.
 - **remote**: a system given to `Remote::bridge` performs `Threads`
   (`enter` locks and yields); `RunsOnWorld` takes only systems that perform
   nothing.
