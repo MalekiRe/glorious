@@ -1,0 +1,85 @@
+// `ordered_relations_keep_both_sides_in_order_through_random_edits`
+// (upstream's tests/relations.rs): a relation of any number each way keeps
+// each source's targets in the order they came, and each target's sources
+// in the order they came or were put at (`relate_at`), through relating,
+// unrelating and despawning at random, checked against a model at each step.
+// (500 steps, upstream's 4000.)
+// expect:
+// 0
+// 0
+mod ecs;
+
+use ecs::{App, World, Entity, Relation, ManyToMany};
+
+struct Name(Int)
+struct Ordered
+impl Relation for Ordered { type Kind = ManyToMany; }
+impl Use<[0, *]> for Ordered {}
+
+fn has(list: &[Int], x: Int) -> Bool { let mut i = 0; let mut found = false; while({ i < len_at(list) }) { if(list[i] == x) { found = true } else { () }; i = i + 1 }; found }
+fn without_one(list: &[Int], x: Int) -> [Int] { fold(clone(list), [], fn(out: [Int], y: Int) -> [Int] { if(y == x) { out } else { push(out, y) } }) }
+fn insert_at(list: [Int], at: Int, x: Int) -> [Int] {
+    let mut out = [];
+    let mut i = 0;
+    let mut put = false;
+    while({ i < len_at(&list) }) { if(i == at) { push_at(&mut out, x); put = true } else { () }; push_at(&mut out, list[i]); i = i + 1 };
+    if(put) { () } else { push_at(&mut out, x) };
+    out
+}
+
+fn main() -> Int {
+    let mut world = App::new().register<Name>().relation<Ordered>().build().world;
+    let mut es = [];
+    let mut alive = [];
+    let mut targets = [];
+    let mut sources = [];
+    let mut i = 0;
+    while({ i < 24 }) { es = push(es, world.spawn_bundle((Name(i),))); alive = push(alive, i); targets = push(targets, []); sources = push(sources, []); i = i + 1 };
+    let mut seed = 88172645;
+    let mut wrong = 0;
+    let mut step = 0;
+    while({ step < 500 }) {
+        seed = (seed * 1103515245 + 12345) % 2147483648;
+        let a = alive[(seed / 7) % len_at(&alive)];
+        seed = (seed * 1103515245 + 12345) % 2147483648;
+        let b = alive[(seed / 7) % len_at(&alive)];
+        seed = (seed * 1103515245 + 12345) % 2147483648;
+        let what = (seed / 7) % 12;
+        if(what <= 3) {
+            discard(world.relate(es[a], Ordered, es[b]));
+            if(has(&targets[a], b)) { () } else { targets[a] = push(clone(&targets[a]), b); sources[b] = push(clone(&sources[b]), a) }
+        } else if(what <= 6) {
+            seed = (seed * 1103515245 + 12345) % 2147483648;
+            let position = (seed / 7) % 6;
+            discard(world.relate_at(es[a], Ordered, es[b], position));
+            if(has(&targets[a], b)) { () } else { targets[a] = push(clone(&targets[a]), b) };
+            sources[b] = insert_at(without_one(&sources[b], a), position, a)
+        } else if(what <= 9) {
+            let existed = has(&targets[a], b);
+            let was = match(world.unlink<Ordered>(es[a], es[b])) { Some(_) => true, None => false };
+            if(was == existed) { () } else { wrong = wrong + 1 };
+            if(existed) { targets[a] = without_one(&targets[a], b); sources[b] = without_one(&sources[b], a) } else { () }
+        } else if(len_at(&alive) > 8) {
+            discard(world.despawn(es[a]));
+            alive = without_one(&alive, a);
+            let mut k = 0;
+            while({ k < 24 }) { targets[k] = without_one(&targets[k], a); sources[k] = without_one(&sources[k], a); k = k + 1 };
+            targets[a] = [];
+            sources[a] = []
+        } else { () };
+        let mut k = 0;
+        while({ k < len_at(&alive) }) {
+            let e = alive[k];
+            let got = fold(world.targets<Ordered>(es[e]), [], fn(out: [Int], t: Entity) -> [Int] { push(out, t.index) });
+            let want = fold(clone(&targets[e]), [], fn(out: [Int], t: Int) -> [Int] { push(out, es[t].index) });
+            if(got == want) { () } else { wrong = wrong + 1 };
+            let got_s = fold(world.sources<Ordered>(es[e]), [], fn(out: [Int], t: Entity) -> [Int] { push(out, t.index) });
+            let want_s = fold(clone(&sources[e]), [], fn(out: [Int], t: Int) -> [Int] { push(out, es[t].index) });
+            if(got_s == want_s) { () } else { wrong = wrong + 1 };
+            k = k + 1
+        };
+        step = step + 1
+    };
+    say(wrong);
+    0
+}

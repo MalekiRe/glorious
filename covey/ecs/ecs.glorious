@@ -375,13 +375,56 @@ fn take_link<R>(links: &mut Links<R>, target: Entity) -> Option<R> {
 
 // Relate `source` to `target` too, by a relation of any number each way: what
 // a link of the two carried before, if there was one.
+fn same_entity(a: Entity, b: Entity) -> Bool { if(a.index == b.index) { a.generation == b.generation } else { false } }
+// (A source's links with `value` in the place of the one to its target, or
+// after them all; and what that one carried.)
+fn replace_link<R>(list: [Relates<R>], target: Entity, value: Relates<R>) -> ([Relates<R>], Option<R>) {
+    let mut out = [];
+    let mut had = None;
+    let mut putting = Some(value);
+    let mut each = into_iter(list);
+    while({ match(next(&mut each)) {
+        Some(link) =>
+            let Relates { relation, target: there } = link;
+            if(same_entity(there, target)) {
+                had = Some(relation);
+                match(replace(&mut putting, None)) { Some(v) => push_at(&mut out, v), None => () }
+            } else { push_at(&mut out, Relates { relation: relation, target: there }) };
+            true,
+        None => false
+    } }) { () };
+    match(replace(&mut putting, None)) { Some(v) => push_at(&mut out, v), None => () };
+    (out, had)
+}
+// (`source` moved to `position` among those that relate to `target`, as far as there are.)
+fn move_source<R, S>(columns: &mut S, target: Entity, source: Entity, position: Int) where S: Get<Sources<R>> {
+    let column = <S as Get<Sources<R>>>::column_mut(columns);
+    let at = slot_of(&*column, target);
+    if(at >= 0) {
+        let rest = without(&column.dense[at].list, source);
+        let mut out = [];
+        let mut i = 0;
+        let mut put = false;
+        while({ i < len_at(&rest) }) {
+            if(i == position) { push_at(&mut out, source); put = true } else { () };
+            push_at(&mut out, rest[i]);
+            i = i + 1
+        };
+        if(put) { () } else { push_at(&mut out, source) };
+        column.dense[at].list = out
+    } else { () }
+}
+
 fn link<R, S>(world: &mut World<S>, source: Entity, relation: R, target: Entity) -> Option<R>
     where S: Get<Links<R>>, S: Get<Sources<R>>, R: Use<[0, *]> {
     let mut column = take_at<Links<R>, S>(world);
     let at = slot_of(&column, source);
     let before = if(at >= 0) {
-        let had = take_link(&mut column.dense[at], target);
-        push_at(&mut column.dense[at].list, Relates { relation: relation, target: target });
+        // (A link there already keeps its place among the source's, its
+        // value put in its place.)
+        let list = replace(&mut column.dense[at].list, []);
+        let (relinked, had) = replace_link(list, target, Relates { relation: relation, target: target });
+        column.dense[at].list = relinked;
         column.changed[at] = column.now;
         had
     } else { column_insert(&mut column, source, Links { list: [Relates { relation: relation, target: target }] }); None };
@@ -914,6 +957,16 @@ impl<S> World<S> {
         unrelate<R, S>(world, source)
     }
     // Undo an entity's link to a target by a relation of any number each way.
+    // Relate by a relation of any number each way, `source` put at `position`
+    // among those that relate to `target` (upstream's `relate_at`).
+    pub fn relate_at<R>(world: &mut Self, source: Entity, relation: R, target: Entity, position: Int) -> Option<R>
+        where S: Get<Links<R>>, S: Get<Sources<R>>, R: Use<[0, *]> {
+        if(if(alive(&*world, source)) { alive(&*world, target) } else { false }) {
+            let had = link<R, S>(world, source, relation, target);
+            move_source<R, S>(&mut world.columns, target, source, position);
+            had
+        } else { discard(relation); None }
+    }
     pub fn unlink<R>(world: &mut Self, source: Entity, target: Entity) -> Option<R> where S: Get<Links<R>>, S: Get<Sources<R>> {
         unlink_from<R, S>(world, source, target)
     }
