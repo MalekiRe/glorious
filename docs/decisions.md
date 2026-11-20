@@ -5917,8 +5917,17 @@ Each is to go; none is a design covey keeps.
   much are two implementations, refused. Still said by each type, as an
   attribute is upstream: `Mutability` (upstream's `immutable`) and
   `Disabling`.
-- Hooks belong to the app: what the world does on its own, and exclusive
-  systems, fire none. Taken away by hooks the world keeps.
+- ~~Hooks belong to the app: what the world does on its own, and exclusive
+  systems, fire none~~: the world keeps a table of the app's lifecycle hooks
+  (`WorldHook<S>`: kind, component name, a callable), made at `build` from
+  `L` (`WorldHooks`, `HookFor` by whether the label is a `LifecycleEvent`).
+  A hook registered with `.on` is a `SharedSystem<Q>`, its state in a
+  `Mutex`, so the app's entry and the world's table run the same system.
+  `World::spawn_bundle` and `World::insert` run them where an exclusive
+  system has the world (`direct`). Still: what a world hook's commands do
+  runs no world hooks (the table is out while they run); `remove` and
+  `despawn` on the world run none yet; a signature that spells what `.on`
+  gives says `SharedSystem<..>` (dispatch, simulation, plugins).
 - ~~A label a task or behavior waits for says its name~~: a type's name is
   the compiler's now. `self_name()` in an implementation for every type is,
   in its copy for each type, the type's name (`impl<T> Schedule for T {
@@ -5993,23 +6002,18 @@ alone, every body side by side, and a body's edit checks that body only.
 
 ## Covey drafts: what each still needs (measured)
 
-Three of the 18 drafts still fail the suite (plugins, remote, tasks), and
-behaviors, devtools, one_of2, required2 and the rest pass. What each
+None of the drafts fails the suite now. What each
 still needs:
 
-- **plugins**: all but its first lines pass (its storage is said among its
-  components, and an exclusive system is a point where what commands asked
-  is done). Its first lines are hooks fired from an exclusive system's
-  world: upstream runs a component's hooks inside the world, at the spawn
-  (`hp added x1` before the system's own line); covey's hooks are the
-  App's systems (`On<OnAdd<T>, ..>` in `L`), which a `&mut World<S>`
-  cannot reach. Tried: the app's hook systems copied into the world when it
-  is built (`WorldHooks` over `L`, each a callable the world keeps, run on
-  it by name where an exclusive system has it). The checker refuses it: a
-  system read out of `&app.systems` is taken to hold a borrow of the app,
-  which a callable kept in a declared type may not. What takes it away:
-  hooks registered with the world from the start (`.on` putting the system
-  in the world, not in `L`), so nothing is copied out of the app.
+- ~~**plugins**~~: passes. Its first lines are hooks fired from an
+  exclusive system's world, `hp added x1` before the system's own line, as
+  upstream runs them inside the world. The first try copied the hook
+  systems out of `&app.systems` into world callables, which the checker
+  refused (a callable kept in a declared type may not borrow the app). What
+  works: `.on` keeps the system in a `Mutex` (`SharedSystem`), and the
+  world's table holds a copy of the handle, not of the system.
+- ~~**remote**~~: passes. It was accepted and went wrong at run time; the
+  checker hole is closed (see "A thread borrows nothing").
 - ~~**required2**~~: passes. What a component requires is brought by a
   table the app makes when it is built (`Bringers`: each component's name,
   and what brings what it requires), and what a brought component requires

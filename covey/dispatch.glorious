@@ -53,9 +53,9 @@ struct Unhandled
 fn first_seen(e: &first::Event, count: &mut Local<Int>) { count.0 = count.0 + 1; say("first " ++ show(e.0 * count.0)) }
 fn other_seen(e: &second::Event) { say("other " ++ show(e.0)) }
 fn last_seen(e: &first::Event) { say("last " ++ show(e.0)) }
-fn events<S, L>(app: App<S, L>) -> App<S, (ecs::On<first::Event, <fn(&first::Event) -> () as ecs::IntoSystem<first::Event, S>>::Out>,
-        (ecs::On<second::Event, <fn(&second::Event) -> () as ecs::IntoSystem<second::Event, S>>::Out>,
-        (ecs::On<first::Event, <fn(&first::Event, &mut Local<Int>) -> () as ecs::IntoSystem<first::Event, S>>::Out>, L)))> {
+fn events<S, L>(app: App<S, L>) -> App<S, (ecs::On<first::Event, ecs::SharedSystem<<fn(&first::Event) -> () as ecs::IntoSystem<first::Event, S>>::Out>>,
+        (ecs::On<second::Event, ecs::SharedSystem<<fn(&second::Event) -> () as ecs::IntoSystem<second::Event, S>>::Out>>,
+        (ecs::On<first::Event, ecs::SharedSystem<<fn(&first::Event, &mut Local<Int>) -> () as ecs::IntoSystem<first::Event, S>>::Out>>, L)))> {
     app.on<first::Event, _, _>(first_seen).on<second::Event, _, _>(other_seen).on<first::Event, _, _>(last_seen)
 }
 

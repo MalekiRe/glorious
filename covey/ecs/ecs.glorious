@@ -274,7 +274,10 @@ impl<T> Cloner for T { const CLONER: Option<fn(&T) -> T> = None; }
 pub struct World<S> { pub columns: S, generations: [Int], free: [Int], tick: Int, since: Int, remotes: std::thread::Mutex<[Request<S>]>, id: Int,
     bring_names: [Str], bring_fns: [fn(&mut World<S>, Entity) -> ()],
     // (What was brought since the app last looked: the entity and the component's name.)
-    brought_entities: [Entity], brought_names: [Str] }
+    brought_entities: [Entity], brought_names: [Str],
+    // (The app's lifecycle hooks, kept by the world, and whether an exclusive
+    // system has it, when its own structural operations run them.)
+    hooks: [WorldHook<S>], direct: Bool }
 use std::thread::{Mutex, Threads, lock, channel, send, recv};
 fn no_remotes<S>() -> Mutex<[Request<S>]> { Mutex::new([]) }
 
@@ -722,11 +725,14 @@ impl<T, H, R> Evicts<T> for (Resource<H>, R) where R: Evicts<T> {
 // taken from one, what it had of them.
 pub trait Bundle<S> {
     type Had;
+    // (The names of its components, for the hooks the world keeps.)
+    fn names() -> [Str]
     fn put_all(Self, &mut World<S>, Entity) -> Self::Had
     fn take_all(&mut World<S>, Entity) -> Self::Had
 }
-impl<..T, S> Bundle<S> for (..T) where ..S: Get<T>, ..T: EvictOne<S>, (..T): BringsFor<S> {
+impl<..T, S> Bundle<S> for (..T) where ..S: Get<T>, ..T: EvictOne<S>, (..T): BringsFor<S>, (..T): NamesOf {
     type Had = (..Option<T>);
+    fn names() -> [Str] { <(..T) as NamesOf>::names_of() }
     fn put_all(bundle: (..T), world: &mut World<S>, entity: Entity) -> (..Option<T>) {
         let (..t) = bundle;
         let had = (..put_one(world, entity, t));
@@ -755,6 +761,10 @@ fn put_one<T, S>(world: &mut World<S>, entity: Entity, value: T) -> Option<T> wh
 }
 
 // A new entity with the components given.
+pub trait NamesOf { fn names_of() -> [Str] }
+impl NamesOf for () { fn names_of() -> [Str] { [] } }
+impl<H, ..R> NamesOf for (H, ..R) where (..R): NamesOf, H: Schedule { fn names_of() -> [Str] { push(<(..R) as NamesOf>::names_of(), <H as Schedule>::NAME) } }
+
 pub fn spawn_with<B, S>(world: &mut World<S>, bundle: B) -> Entity where B: Bundle<S> {
     let entity = spawn(world);
     <B as Bundle<S>>::put_all(bundle, world, entity);
@@ -771,10 +781,19 @@ pub fn count<T, S>(world: &mut World<S>) -> Int where S: Get<T> {
 
 impl<S> World<S> {
     // A new entity with the components given.
-    pub fn spawn_bundle<B>(world: &mut Self, bundle: B) -> Entity where B: Bundle<S> { spawn_with(world, bundle) }
+    pub fn spawn_bundle<B>(world: &mut Self, bundle: B) -> Entity where B: Bundle<S> {
+        let entity = spawn_with(world, bundle);
+        if(world.direct) {
+            let names = <B as Bundle<S>>::names();
+            let made = [entity];
+            fire_world(world, 0, &names, &made);
+            fire_world(world, 1, &names, &made)
+        } else { () };
+        entity
+    }
 
     // An empty world of the columns `S`.
-    pub fn new() -> World<S> where S: Columns { World { columns: <S as Columns>::empty(), generations: [], free: [], tick: 1, since: 0, remotes: no_remotes(), id: std::thread::fresh_number(), bring_names: [], bring_fns: [], brought_entities: [], brought_names: [] } }
+    pub fn new() -> World<S> where S: Columns { World { columns: <S as Columns>::empty(), generations: [], free: [], tick: 1, since: 0, remotes: no_remotes(), id: std::thread::fresh_number(), bring_names: [], bring_fns: [], brought_entities: [], brought_names: [], hooks: [], direct: false } }
 
     // Give an entity a component, or another value of one it has: the one
     // it had, if it had one.
@@ -783,8 +802,14 @@ impl<S> World<S> {
         // that has a `drop` is put.)
         match(alive(&*world, entity)) {
             Ok(_) =>
+                let names = [<T as Schedule>::NAME];
+                let made = [entity];
+                let was = <S as Get<T>>::has(&world.columns, entity);
+                if(was) { fire_world(world, 2, &names, &made) } else { () };
                 let had = put_one(world, entity, value);
                 bring_named(world, <T as Schedule>::NAME, entity);
+                if(was) { () } else { fire_world(world, 0, &names, &made) };
+                fire_world(world, 1, &names, &made);
                 had,
             Err(_) => discard(value); None
         }
@@ -1924,7 +1949,9 @@ impl<E, S, F> System<E, S> for Exclusive<F> where F: Fn<(&mut World<S>,), Output
     fn run(system: &mut Exclusive<F>, event: &E, world: &mut World<S>, commands: &mut Commands<S>) {
         let asked = replace(commands, no_commands(&*world));
         apply(asked, world);
+        world.direct = true;
         (system.f)(world);
+        world.direct = false;
         *commands = no_commands(&*world)
     }
 }
@@ -1935,7 +1962,9 @@ impl<E, S, F> System<E, S> for ExclusiveWith<F> where F: Fn<(&E, &mut World<S>),
     fn run(system: &mut ExclusiveWith<F>, event: &E, world: &mut World<S>, commands: &mut Commands<S>) {
         let asked = replace(commands, no_commands(&*world));
         apply(asked, world);
+        world.direct = true;
         (system.f)(event, world);
+        world.direct = false;
         *commands = no_commands(&*world)
     }
 }
@@ -2078,6 +2107,84 @@ pub fn chain<T, L>(systems: T) -> L where T: Tuple<Nested = L> { nest(systems) }
 
 // The systems registered under a label.
 pub struct On<E, P> { label: fn(E) -> (), systems: P }
+
+// Lifecycle hooks the world keeps, as upstream's world owns its hook table:
+// each of the app's (`app.on(OnAdd<T>, ..)`), with its kind (0 `OnAdd`, 1
+// `OnInsert`, 2 `OnReplace`, 3 `OnRemove`) and its component's name, made
+// when the app is built. The world's own structural operations run them
+// while an exclusive system has it (`direct`); the app fires its hooks
+// itself everywhere else, as it did. (A hook's commands are done before the
+// operation that ran it returns. While the world's hooks run, what their
+// commands do runs none of them.)
+pub struct WorldHook<S> { kind: Int, name: Str, run: fn(&[Entity], &mut World<S>) -> () }
+
+pub trait LifecycleEvent { const KIND: Int; fn component() -> Str; fn of([Entity]) -> Self }
+impl<T> LifecycleEvent for OnAdd<T> where T: Schedule { const KIND: Int = 0; fn component() -> Str { <T as Schedule>::NAME } fn of(entities: [Entity]) -> OnAdd<T> { OnAdd { entities: entities, none: [] } } }
+impl<T> LifecycleEvent for OnInsert<T> where T: Schedule { const KIND: Int = 1; fn component() -> Str { <T as Schedule>::NAME } fn of(entities: [Entity]) -> OnInsert<T> { OnInsert { entities: entities, none: [] } } }
+impl<T> LifecycleEvent for OnReplace<T> where T: Schedule { const KIND: Int = 2; fn component() -> Str { <T as Schedule>::NAME } fn of(entities: [Entity]) -> OnReplace<T> { OnReplace { entities: entities, none: [] } } }
+impl<T> LifecycleEvent for OnRemove<T> where T: Schedule { const KIND: Int = 3; fn component() -> Str { <T as Schedule>::NAME } fn of(entities: [Entity]) -> OnRemove<T> { OnRemove { entities: entities, none: [] } } }
+
+// A hook's system, where both the app and the world's table reach it.
+pub struct SharedSystem<Q> { shared: Mutex<Q> }
+impl<Q> Use<[0, *]> for SharedSystem<Q> {}
+impl<E, S, Q> System<E, S> for SharedSystem<Q> where Q: System<E, S> {
+    fn run(system: &mut SharedSystem<Q>, event: &E, world: &mut World<S>, commands: &mut Commands<S>) {
+        lock(&system.shared, fn(q: &mut Q) { <Q as System<E, S>>::run(q, event, world, commands) })
+    }
+}
+pub trait LendsHook<E, S> { fn world_hook(&Self) -> WorldHook<S> }
+impl<E, S, Q> LendsHook<E, S> for SharedSystem<Q> where Q: System<E, S>, E: LifecycleEvent {
+    fn world_hook(system: &SharedSystem<Q>) -> WorldHook<S> {
+        let shared = std::thread::share(&system.shared);
+        WorldHook { kind: <E as LifecycleEvent>::KIND, name: <E as LifecycleEvent>::component(), run: fn(entities: &[Entity], world: &mut World<S>) {
+            let mine = shared;
+            let event = <E as LifecycleEvent>::of(clone(entities));
+            let mut commands = no_commands(&*world);
+            lock(&mine, fn(q: &mut Q) { <Q as System<E, S>>::run(q, &event, world, &mut commands) });
+            apply(commands, world)
+        } }
+    }
+}
+// (Of a label that is a lifecycle event, its hook; of any other, none.)
+pub trait HookFor<P, S> { fn hook_for(&P, [WorldHook<S>]) -> [WorldHook<S>] }
+impl<E, P, S> HookFor<P, S> for E where E: LifecycleEvent, P: LendsHook<E, S> {
+    fn hook_for(systems: &P, hooks: [WorldHook<S>]) -> [WorldHook<S>] { push(hooks, <P as LendsHook<E, S>>::world_hook(systems)) }
+}
+impl<E, P, S> HookFor<P, S> for E { fn hook_for(systems: &P, hooks: [WorldHook<S>]) -> [WorldHook<S>] { hooks } }
+// The app's hooks, in the order they were registered.
+pub trait WorldHooks<S> { fn world_hooks(&Self, [WorldHook<S>]) -> [WorldHook<S>] }
+impl<S> WorldHooks<S> for () { fn world_hooks(list: &(), hooks: [WorldHook<S>]) -> [WorldHook<S>] { hooks } }
+impl<E, P, R, S> WorldHooks<S> for (On<E, P>, R) where E: HookFor<P, S>, R: WorldHooks<S> {
+    fn world_hooks(list: &(On<E, P>, R), hooks: [WorldHook<S>]) -> [WorldHook<S>] {
+        let before = <R as WorldHooks<S>>::world_hooks(&list.1, hooks);
+        <E as HookFor<P, S>>::hook_for(&list.0.systems, before)
+    }
+}
+impl<X, R, S> WorldHooks<S> for (TaskOf<X>, R) where R: WorldHooks<S> { fn world_hooks(list: &(TaskOf<X>, R), hooks: [WorldHook<S>]) -> [WorldHook<S>] { <R as WorldHooks<S>>::world_hooks(&list.1, hooks) } }
+impl<P, X, R, S> WorldHooks<S> for (SubOf<P, X>, R) where R: WorldHooks<S> { fn world_hooks(list: &(SubOf<P, X>, R), hooks: [WorldHook<S>]) -> [WorldHook<S>] { <R as WorldHooks<S>>::world_hooks(&list.1, hooks) } }
+impl<P, C, R, S> WorldHooks<S> for (ComputedOf<P, C>, R) where R: WorldHooks<S> { fn world_hooks(list: &(ComputedOf<P, C>, R), hooks: [WorldHook<S>]) -> [WorldHook<S>] { <R as WorldHooks<S>>::world_hooks(&list.1, hooks) } }
+impl<B, X, R, S> WorldHooks<S> for (BehaviorsOf<B, X>, R) where R: WorldHooks<S> { fn world_hooks(list: &(BehaviorsOf<B, X>, R), hooks: [WorldHook<S>]) -> [WorldHook<S>] { <R as WorldHooks<S>>::world_hooks(&list.1, hooks) } }
+
+fn named_in(names: &[Str], name: &Str) -> Bool {
+    let mut i = 0;
+    let mut found = false;
+    while({ i < len_at(names) }) { if(names[i] == *name) { found = true } else { () }; i = i + 1 };
+    found
+}
+// Run the world's hooks of `kind` for the components named, where an
+// exclusive system has the world.
+fn fire_world<S>(world: &mut World<S>, kind: Int, names: &[Str], entities: &[Entity]) {
+    if(world.direct) {
+        let hooks: [WorldHook<S>] = replace(&mut world.hooks, []);
+        let mut i = 0;
+        while({ i < len_at(&hooks) }) {
+            let hook: &WorldHook<S> = &hooks[i];
+            if(hook.kind == kind) { if(named_in(names, &hook.name)) { (hook.run)(entities, world) } else { () } } else { () };
+            i = i + 1
+        };
+        world.hooks = hooks
+    } else { () }
+}
 
 // Run what is registered under `E`, in the order it was registered. Of the
 // two implementations for a list the first is for one whose first entry is
@@ -3243,15 +3350,15 @@ pub struct App<S, L> { pub world: World<S>, systems: L }
 impl<S, L> App<S, L> {
     // An app with nothing in its world and no systems.
     pub fn new() -> App<(), ()> {
-        App { world: World { columns: (), generations: [], free: [], tick: 1, since: 0, remotes: no_remotes(), id: std::thread::fresh_number(), bring_names: [], bring_fns: [], brought_entities: [], brought_names: [] }, systems: () }
+        App { world: World { columns: (), generations: [], free: [], tick: 1, since: 0, remotes: no_remotes(), id: std::thread::fresh_number(), bring_names: [], bring_fns: [], brought_entities: [], brought_names: [], hooks: [], direct: false }, systems: () }
     }
 
     // Give the world a resource.
     pub fn insert_resource<T>(app: Self, value: T) -> App<(Resource<T>, S), L> {
         let App { world, systems } = app;
-        let World { columns, generations, free, tick, since, remotes, id, bring_names: _, bring_fns: _, brought_entities: _, brought_names: _ } = world;
+        let World { columns, generations, free, tick, since, remotes, id, bring_names: _, bring_fns: _, brought_entities: _, brought_names: _, hooks: _, direct: _ } = world;
         discard(remotes);
-        App { world: World { columns: (Resource { value: Some(value) }, columns), generations: generations, free: free, tick: tick, since: since, remotes: no_remotes(), id: id, bring_names: [], bring_fns: [], brought_entities: [], brought_names: [] }, systems: systems }
+        App { world: World { columns: (Resource { value: Some(value) }, columns), generations: generations, free: free, tick: tick, since: since, remotes: no_remotes(), id: id, bring_names: [], bring_fns: [], brought_entities: [], brought_names: [], hooks: [], direct: false }, systems: systems }
     }
 
     // The resource at its type's start.
@@ -3261,29 +3368,30 @@ impl<S, L> App<S, L> {
     // it from the systems that ask for it.)
     pub fn register_resource<T>(app: Self) -> App<(Resource<T>, S), L> {
         let App { world, systems } = app;
-        let World { columns, generations, free, tick, since, remotes, id, bring_names: _, bring_fns: _, brought_entities: _, brought_names: _ } = world;
+        let World { columns, generations, free, tick, since, remotes, id, bring_names: _, bring_fns: _, brought_entities: _, brought_names: _, hooks: _, direct: _ } = world;
         discard(remotes);
-        App { world: World { columns: (Resource { value: None }, columns), generations: generations, free: free, tick: tick, since: since, remotes: no_remotes(), id: id, bring_names: [], bring_fns: [], brought_entities: [], brought_names: [] }, systems: systems }
+        App { world: World { columns: (Resource { value: None }, columns), generations: generations, free: free, tick: tick, since: since, remotes: no_remotes(), id: id, bring_names: [], bring_fns: [], brought_entities: [], brought_names: [], hooks: [], direct: false }, systems: systems }
     }
 
     // Store a component.
     pub fn register<T>(app: Self) -> App<(Column<T>, S), L> {
         let App { world, systems } = app;
-        let World { columns, generations, free, tick, since, remotes, id, bring_names: _, bring_fns: _, brought_entities: _, brought_names: _ } = world;
+        let World { columns, generations, free, tick, since, remotes, id, bring_names: _, bring_fns: _, brought_entities: _, brought_names: _, hooks: _, direct: _ } = world;
         discard(remotes);
-        App { world: World { columns: (empty_column(), columns), generations: generations, free: free, tick: tick, since: since, remotes: no_remotes(), id: id, bring_names: [], bring_fns: [], brought_entities: [], brought_names: [] }, systems: systems }
+        App { world: World { columns: (empty_column(), columns), generations: generations, free: free, tick: tick, since: since, remotes: no_remotes(), id: id, bring_names: [], bring_fns: [], brought_entities: [], brought_names: [], hooks: [], direct: false }, systems: systems }
     }
 
     // Register systems under a label, named by a value of it: `Update`.
     pub fn add_systems<E, P, Q>(app: Self, label: E, systems: P) -> App<S, (On<E, Q>, L)> where P: IntoSystem<E, S, Out = Q> {
-        app.on<E, P, Q>(systems)
+        let App { world, systems: before } = app;
+        App { world: world, systems: (On { label: fn(event: E) { () }, systems: <P as IntoSystem<E, S>>::into_system(systems) }, before) }
     }
 
     // Register systems under a label that carries something, named by its
     // type: `.on<Hit>(..)`. A system under it may take `&Hit` first.
-    pub fn on<E, P, Q>(app: Self, systems: P) -> App<S, (On<E, Q>, L)> where P: IntoSystem<E, S, Out = Q> {
+    pub fn on<E, P, Q>(app: Self, systems: P) -> App<S, (On<E, SharedSystem<Q>>, L)> where P: IntoSystem<E, S, Out = Q> {
         let App { world, systems: before } = app;
-        App { world: world, systems: (On { label: fn(event: E) { () }, systems: <P as IntoSystem<E, S>>::into_system(systems) }, before) }
+        App { world: world, systems: (On { label: fn(event: E) { () }, systems: SharedSystem { shared: Mutex::new(<P as IntoSystem<E, S>>::into_system(systems)) } }, before) }
     }
 
     // Add what a plugin has: its components, then what it builds.
@@ -3294,27 +3402,28 @@ impl<S, L> App<S, L> {
     // Store a relation: what relates and what is related to.
     pub fn relation<R>(app: Self) -> App<<R as RelationColumns<S>>::Out, L> where R: RelationColumns<S> {
         let App { world, systems } = app;
-        let World { columns, generations, free, tick, since, remotes, id, bring_names: _, bring_fns: _, brought_entities: _, brought_names: _ } = world;
+        let World { columns, generations, free, tick, since, remotes, id, bring_names: _, bring_fns: _, brought_entities: _, brought_names: _, hooks: _, direct: _ } = world;
         discard(remotes);
-        App { world: World { columns: <R as RelationColumns<S>>::relation_columns(columns), generations: generations, free: free, tick: tick, since: since, remotes: no_remotes(), id: id, bring_names: [], bring_fns: [], brought_entities: [], brought_names: [] }, systems: systems }
+        App { world: World { columns: <R as RelationColumns<S>>::relation_columns(columns), generations: generations, free: free, tick: tick, since: since, remotes: no_remotes(), id: id, bring_names: [], bring_fns: [], brought_entities: [], brought_names: [], hooks: [], direct: false }, systems: systems }
     }
 
     // Store each of a list of components: `.register_all<(Position, Velocity)>()`.
     pub fn register_all<C>(app: Self) -> App<<C as Registers<S>>::Out, L> where C: Registers<S> {
         let App { world, systems } = app;
-        let World { columns, generations, free, tick, since, remotes, id, bring_names: _, bring_fns: _, brought_entities: _, brought_names: _ } = world;
+        let World { columns, generations, free, tick, since, remotes, id, bring_names: _, bring_fns: _, brought_entities: _, brought_names: _, hooks: _, direct: _ } = world;
         discard(remotes);
-        App { world: World { columns: <C as Registers<S>>::register_all(columns), generations: generations, free: free, tick: tick, since: since, remotes: no_remotes(), id: id, bring_names: [], bring_fns: [], brought_entities: [], brought_names: [] }, systems: systems }
+        App { world: World { columns: <C as Registers<S>>::register_all(columns), generations: generations, free: free, tick: tick, since: since, remotes: no_remotes(), id: id, bring_names: [], bring_fns: [], brought_entities: [], brought_names: [], hooks: [], direct: false }, systems: systems }
     }
 
     // The app, ready to run.
     // The app, ready: what brings what each component requires found, of
     // the components it has.
-    pub fn build(app: Self) -> Self where S: Bringers<S> {
+    pub fn build(app: Self) -> Self where S: Bringers<S>, L: WorldHooks<S> {
         let mut app = app;
         let (names, fns) = <S as Bringers<S>>::bringers();
         app.world.bring_names = names;
         app.world.bring_fns = fns;
+        app.world.hooks = <L as WorldHooks<S>>::world_hooks(&app.systems, []);
         app
     }
 

@@ -70,9 +70,7 @@ fn ticking<S>(world: AsyncWorld<S>) -> AsyncWorld<S> / {Bridge<S>} where S: ecs:
     world
 }
 
-// The hooks of `Hp` run in the app here, so the exclusive system's spawns
-// are given to the app's: through its commands.
-fn game<S, L>(app: App<S, L>) -> App<S, (ecs::TaskOf<S>, (ecs::On<Update, ecs::Exclusive<fn(&mut World<S>) -> ()>>, (ecs::On<OnAdd<Hp>, <fn(&OnAdd<Hp>) -> () as ecs::IntoSystem<OnAdd<Hp>, S>>::Out>,
+fn game<S, L>(app: App<S, L>) -> App<S, (ecs::TaskOf<S>, (ecs::On<Update, ecs::Exclusive<fn(&mut World<S>) -> ()>>, (ecs::On<OnAdd<Hp>, ecs::SharedSystem<<fn(&OnAdd<Hp>) -> () as ecs::IntoSystem<OnAdd<Hp>, S>>::Out>>,
         (ecs::On<Update, <fn(&mut Query<(&Pos,), ()>, &mut Commands<S>) -> () as ecs::IntoSystem<Update, S>>::Out>,
         (ecs::On<Update, <ecs::Parallel<(fn(&mut Query<(&mut Pos, &Vel), ()>) -> (), (fn(&mut Local<Int>, &mut Commands<S>) -> (), ()))> as ecs::IntoSystem<Update, S>>::Out>, L)))))>
     where S: ecs::Get<Pos>, S: ecs::Get<Vel>, S: ecs::Get<Hp>, S: ecs::Get<Spawned>, S: ecs::Columns, S: ecs::Unlinks<S>,
