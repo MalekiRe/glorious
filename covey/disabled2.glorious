@@ -6,8 +6,8 @@
 // - `subtree_toggles_through_commands_apply_after_the_frame`.
 // - `disabled_entities_keep_their_relation_links_consistent`.
 // - `queries_that_never_see_a_disabling_component_run_beside_ones_requiring_it`.
-// Not ported: `joins_skip_disabled_targets_unless_the_inner_query_mentions_the_component`
-// (covey's joins, `To` and `From`, do not yet hide disabled targets).
+// `joins_skip_disabled_targets_unless_the_inner_query_mentions_the_component`
+// is in joins.glorious.
 // expect:
 // 2
 // 1

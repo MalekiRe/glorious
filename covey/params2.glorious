@@ -6,11 +6,10 @@
 //   between emits.
 // - `retained_mutable_items_span_multiple_tables`: changes through a query
 //   reach every entity it has, whatever else each has.
-// Not ported: the others of the file, which ask of `world.single` (not in
-// covey yet), of singletons inside parallel groups, of locals registered
-// twice and of complementary parallel access (what parallel groups run side
-// by side), and the compile-fail cases; `local_state_is_independent_per_registration_and_persists`
-// is in locals.glorious.
+// The others of the file are in single.glorious, params3.glorious and
+// locals.glorious, or not ported: of singletons inside parallel groups, of
+// complementary parallel access (what parallel groups run side by side),
+// and the compile-fail cases.
 // expect:
 // 18
 // 12
