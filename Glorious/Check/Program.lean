@@ -412,12 +412,19 @@ def checkItems (items : List Item) (seed : UInt64 := 0) (kept : Kept := []) : M 
     let blanket := fun (im : ImplDecl) => im.methods.any fun
       | .typeAlias n _ _ => (Syntax.blanketParam n).isSome
       | _ => false
-    let mut copies : Array (String × FnDecl) := #[]
-    for im in ((← get).impls.toList.drop before).filter blanket do
-      for d in ← implFnDecls im do copies := copies.push (im.dictFn, d)
+    -- (And the copies of an implementation written out for each length of a
+    -- list of types: of most lengths, nothing uses them.)
+    let packed := fun (im : ImplDecl) => im.methods.any fun
+      | .typeAlias n _ _ => n == Syntax.packCopyName
+      | _ => false
+    let mut copies : Array (String × FnDecl × Bool) := #[]
+    for im in ((← get).impls.toList.drop before).filter (fun im => blanket im || packed im) do
+      for d in ← implFnDecls im do copies := copies.push (im.dictFn, d, packed im)
     let namesAny := fun (d : FnDecl) =>
       ((d.clauses.flatMap (Elab.fvClause [])).flatMap fun x => x :: aliasOf.getD x []).any nameSet.contains
-    let earlyCopies := if coercing.isEmpty then copies.filter (fun (_, d) => !namesAny d) else #[]
+    let earlyCopies : Array (String × FnDecl) := if coercing.isEmpty then
+        (copies.filter (fun (_, d, isPack) => isPack || !namesAny d)).map fun (f, d, _) => (f, d)
+      else #[]
     let early := earlyCopies.toList.map (·.2)
     -- (Checked only where something uses them, at the end of this unit or
     -- of a later one: most are of types no bound asks them of. What a kept

@@ -444,6 +444,10 @@ def blanketHead : String := "(any)"
 is for, as what its type parameter `T` stands for in its functions. -/
 def blanketName (param : String) : String := s!"%blanket:{param}"
 
+/-- The name of the type alias that says an implementation is one of the
+copies written out for each length of a list of types (`expandPacks`). -/
+def packCopyName : String := "%pack"
+
 /-- The type parameter a name made by `blanketName` is for. -/
 def blanketParam (name : String) : Option String :=
   if name.startsWith "%blanket:" then some (name.drop 9).toString else none
