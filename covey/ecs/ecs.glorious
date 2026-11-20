@@ -2666,7 +2666,77 @@ impl<E, S, X, R> Branches<E, S> for (X, R) where X: System<E, S>, R: Branches<E,
         <R as Branches<E, S>>::run_branches(&mut list.1, event, world, commands)
     }
 }
-impl<E, S, P> System<E, S> for Parallel<P> where P: Branches<E, S> {
+// Branches run at once where they can, as a graph's nodes are (without
+// dependencies): what each commands is joined to the group's in the order
+// of the branches. (`kept`: each branch's commands, once it has finished.)
+pub trait StartBranches<E, S> {
+    fn start_branches(&mut Self, &E, &mut World<S>, &Commands<S>, &std::thread::Scope, &mut [Bool], &mut [Int], &mut [[Str]], &mut [Commands<S>], Int) -> Bool
+    fn any_branch_finished(&Self, &[Int], Int) -> Bool
+    fn finish_branches(&mut Self, &mut World<S>, &mut [Bool], &mut [Int], &mut [[Str]], &mut [Commands<S>], Int)
+    fn count_branches() -> Int
+}
+impl<E, S> StartBranches<E, S> for () {
+    fn start_branches(none: &mut (), event: &E, world: &mut World<S>, commands: &Commands<S>, s: &std::thread::Scope, done: &mut [Bool], running: &mut [Int], touching: &mut [[Str]], kept: &mut [Commands<S>], at: Int) -> Bool { false }
+    fn any_branch_finished(none: &(), running: &[Int], at: Int) -> Bool { false }
+    fn finish_branches(none: &mut (), world: &mut World<S>, done: &mut [Bool], running: &mut [Int], touching: &mut [[Str]], kept: &mut [Commands<S>], at: Int) { () }
+    fn count_branches() -> Int { 0 }
+}
+impl<E, S, X, R> StartBranches<E, S> for (X, R) where X: System<E, S>, R: StartBranches<E, S> {
+    fn start_branches(list: &mut (X, R), event: &E, world: &mut World<S>, commands: &Commands<S>, s: &std::thread::Scope,
+                      done: &mut [Bool], running: &mut [Int], touching: &mut [[Str]], kept: &mut [Commands<S>], at: Int) -> Bool {
+        let can = if(done[at]) { false } else { running[at] < 0 };
+        let started = if(can) {
+            let mine = <X as System<E, S>>::touches(&list.0);
+            if(apart_from_running(&mine, &*running, &*touching)) {
+                match(<X as System<E, S>>::prepare(&mut list.0, event, world)) {
+                    Some(prepared) =>
+                        let sys = &mut list.0;
+                        let cmds = commands_beside(commands);
+                        let cell = unsafe { std::thread::spawn_unchecked(s, fn() -> (<X as System<E, S>>::Prepared, Commands<S>) / {std::thread::Threads} {
+                            let mut taken = prepared;
+                            let mut theirs = cmds;
+                            <X as System<E, S>>::run_prepared(sys, event, &mut taken, &mut theirs);
+                            (taken, theirs)
+                        }) };
+                        running[at] = cell;
+                        touching[at] = mine;
+                        true,
+                    None =>
+                        if(none_running(&*running)) {
+                            let mut theirs = commands_beside(commands);
+                            <X as System<E, S>>::run(&mut list.0, event, world, &mut theirs);
+                            kept[at] = theirs;
+                            done[at] = true;
+                            true
+                        } else { false }
+                }
+            } else { false }
+        } else { false };
+        let rest = <R as StartBranches<E, S>>::start_branches(&mut list.1, event, world, commands, s, done, running, touching, kept, at + 1);
+        if(started) { true } else { rest }
+    }
+    fn any_branch_finished(list: &(X, R), running: &[Int], at: Int) -> Bool {
+        let here = if(running[at] >= 0) { unsafe { std::thread::cell_finished<(<X as System<E, S>>::Prepared, Commands<S>)>(running[at]) } } else { false };
+        if(here) { true } else { <R as StartBranches<E, S>>::any_branch_finished(&list.1, running, at + 1) }
+    }
+    fn finish_branches(list: &mut (X, R), world: &mut World<S>, done: &mut [Bool], running: &mut [Int], touching: &mut [[Str]], kept: &mut [Commands<S>], at: Int) {
+        if(running[at] >= 0) {
+            let cell = running[at];
+            if(unsafe { std::thread::cell_finished<(<X as System<E, S>>::Prepared, Commands<S>)>(cell) }) {
+                let (taken, theirs) = unsafe { std::thread::take_finished<(<X as System<E, S>>::Prepared, Commands<S>)>(cell) };
+                <X as System<E, S>>::finish(&mut list.0, world, taken);
+                kept[at] = theirs;
+                done[at] = true;
+                running[at] = 0 - 1;
+                touching[at] = []
+            } else { () }
+        } else { () };
+        <R as StartBranches<E, S>>::finish_branches(&mut list.1, world, done, running, touching, kept, at + 1)
+    }
+    fn count_branches() -> Int { 1 + <R as StartBranches<E, S>>::count_branches() }
+}
+
+impl<E, S, P> System<E, S> for Parallel<P> where P: Branches<E, S>, P: StartBranches<E, S> {
     fn system_names(group: &Parallel<P>, names: [Str]) -> [Str] { <P as Branches<E, S>>::branch_names(&group.branches, names) }
     type Prepared = ();
     fn touches(system: &Parallel<P>) -> [Str] { ["w:*"] }
@@ -2676,7 +2746,28 @@ impl<E, S, P> System<E, S> for Parallel<P> where P: Branches<E, S> {
     fn why_not(group: &Parallel<P>, name: &Str, world: &World<S>, entity: Entity) -> Option<[Str]> { <P as Branches<E, S>>::why_not_branches(&group.branches, name, world, entity) }
     fn step(group: &mut Parallel<P>, event: &E, world: &mut World<S>, commands: &mut Commands<S>, at: Stepper) -> Stepper { <P as Branches<E, S>>::step_branches(&mut group.branches, event, world, commands, at) }
     fn run(group: &mut Parallel<P>, event: &E, world: &mut World<S>, commands: &mut Commands<S>) {
-        <P as Branches<E, S>>::run_branches(&mut group.branches, event, world, commands)
+        let n = <P as StartBranches<E, S>>::count_branches();
+        let mut done = [];
+        let mut running = [];
+        let mut touching = [];
+        let mut kept = [];
+        let mut i = 0;
+        while({ i < n }) { done = push(done, false); running = push(running, 0 - 1); touching = push(touching, []); kept = push(kept, commands_beside(&*commands)); i = i + 1 };
+        std::thread::scope(fn(s: &std::thread::Scope) / {std::thread::Threads} {
+            let mut going = true;
+            while({ going }) {
+                let started = <P as StartBranches<E, S>>::start_branches(&mut group.branches, event, world, &*commands, s, &mut done, &mut running, &mut touching, &mut kept, 0);
+                if(none_running(&running)) {
+                    if(started) { () } else { going = false }
+                } else {
+                    while({ not(<P as StartBranches<E, S>>::any_branch_finished(&group.branches, &running, 0)) }) { std::thread::yield_now() };
+                    <P as StartBranches<E, S>>::finish_branches(&mut group.branches, world, &mut done, &mut running, &mut touching, &mut kept, 0)
+                }
+            }
+        });
+        // (What each branch commanded, in the order of the branches.)
+        let mut each = into_iter(kept);
+        while({ match(next(&mut each)) { Some(c) => join_commands(commands, c); true, None => false } }) { () }
     }
 }
 impl<E, S, P> IntoSystem<E, S> for Parallel<P> where P: IntoSystem<E, S> {
