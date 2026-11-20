@@ -239,6 +239,14 @@ private partial def parseItem : P Item := do
             calls := calls ++ (← parseBoundsOf p).toArray
             if !(← acceptPunct ",") then break
             continue
+          -- `T: Use<[0, *]>`: how often the implementation's functions use a
+          -- `T`, said to them all.
+          | .ident "Use" =>
+            for b in ← parseBoundsOf p do
+              if let some (lower, upper) := b.quantity then
+                given := given.push (.typeAlias (useMark p lower upper) [] .hole)
+            if !(← acceptPunct ",") then break
+            continue
           | _ => pure ()
         let asked ← expectPath
         context := context.push (p, asked)

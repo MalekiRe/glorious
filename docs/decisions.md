@@ -5821,10 +5821,21 @@ check reads nothing of the body. (Chosen as Rust has it.)
   that has to be used while it calls one has to say so (else that value
   could be left behind by the jump); a caller can then give it no block that
   jumps.
-- What is still found from the body: what an implementation's functions need
-  of the implementation's type parameters (asked where the implementation is
-  chosen), and what a callable that runs in an environment the function is
-  given needs (the environment's rules, which its bounds say).
+- An implementation's type parameters are as a function's: at most once
+  where nothing is said, and `impl<T> Twice for W<T> where T: Use<[0, *]>`
+  (or `..T: Use<[0, 1]>` of a list) says otherwise. Its functions' bodies are
+  held to that, and where the implementation is chosen, what it says is
+  asked of the types it is chosen at: `W<Ticket>` is refused by one that may
+  let a `T` go. Before, what the bodies needed was not asked at all where the
+  implementation was chosen (a trait's function is typed by the trait), so a
+  `Ticket` could be copied through one. The library's implementations that
+  never let one go say `Use<[1, 1]>`, so must-use values can be indexed and
+  measured. A type parameter of the trait's function itself (`fn twice<T>`)
+  is still found from the body, as the trait's signature says nothing of it.
+- What is still found from the body, besides: what a callable that runs in an
+  environment the function is given needs (the environment's rules, which
+  its bounds say), and what an implementation's function needs of a
+  callable it is given.
 
 The library says it everywhere it passes values on (`T: Use<[1, 1]>`) and
 where it copies them (`Use<[0, *]>`): found by giving every type parameter

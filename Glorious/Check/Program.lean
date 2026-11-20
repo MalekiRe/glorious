@@ -62,9 +62,15 @@ def implFnDecls (im : ImplDecl) : M (List FnDecl) := do
         -- it writes of its own, `fn at<'a>(..)`.)
         let inner := (im.pvars.map (·.1)).filter (!im.params.contains ·)
         let lifetimes := (genericParams written).filter isLifetime
+        -- (How often its functions use a value of a type parameter, where the
+        -- implementation says it.)
+        let uses := im.methods.filterMap fun
+          | .typeAlias n _ _ => (Syntax.useMarked n).map fun (p, lo, hi) =>
+              ({ subject := p, trait := "Use", quantity := some (lo, hi) } : Syntax.Bound)
+          | _ => none
         out := out ++ [{ name := Syntax.implFnName im.trait im.head m,
                          params := im.params ++ inner ++ sig.mparams.map (·.1) ++ lifetimes, annots,
-                         ret, clauses, impl := some (im, sig) }]
+                         ret, clauses, impl := some (im, sig), bounds := uses }]
   pure out
 
 /-- Check a group, deciding where it is found what can be known only once

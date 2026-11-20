@@ -621,6 +621,21 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
             -- (The implementation's own type parameters are this type's
             -- arguments here, not what another use of it made them.)
             let at_ ← implAt im args
+            -- How often its functions use a value of one of its type
+            -- parameters is asked of what that is here, as its where says,
+            -- `T: Use<[0, *]>`: where it says nothing, at most once.
+            unless im.trait == Syntax.destroyTrait do
+              for (p, id) in im.pvars do
+                if let some t := at_.lookup id then
+                  let (lower, upper) := (im.methods.findSome? fun
+                    | .typeAlias n _ _ => (Syntax.useMarked n).bind fun (q, lo, hi) =>
+                        if q == p then some (lo, hi) else none
+                    | _ => none).getD (0, some 1)
+                  let whose := s!"{b.pos}the implementation of `{b.trait}` for `{showTy goal}`"
+                  if lower == 0 then
+                    modify fun s => { s with drops := s.drops.push (t, s!"{whose} may leave a `{p}` unused") }
+                  if upper.isNone then
+                    modify fun s => { s with dups := s.dups.push (t, s!"{whose} may use a `{p}` more than once") }
             for (j, want) in im.fixed do
               if let some got := args[j]? then
                 let want ← fixedAt at_ want
@@ -777,13 +792,17 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
     let quantityOf := fun (p : String) =>
       (d.bounds.find? fun b => b.trait == "Use" && b.subject == p).bind (·.quantity)
     let rowOrLife := fun (p : String) => p.startsWith "'" || (Syntax.rowParam p).isSome
-    -- (An implementation's function: what it needs of the implementation's
-    -- type parameters is asked of the implementation where it is chosen,
-    -- as before; of its own, as of any function's.)
-    let own := if d.impl.isNone then genericParams d.params else []
+    -- (An implementation's function: of the implementation's type
+    -- parameters, what the implementation says, `impl<T> .. where T:
+    -- Use<[0, *]>`, as of its own.)
+    -- (A type parameter of the trait's function, `fn twice<T>(Self, T)`:
+    -- what the body needs of it, as before, unless it is said.)
+    let methodParams := match d.impl with
+      | some (_, sig) => sig.mparams.map (fun ((n, _) : String × Nat) => n)
+      | none => []
     for p in genericParams d.params do
       if rowOrLife p then continue
-      if !own.contains p && (quantityOf p).isNone then continue
+      if methodParams.contains p && (quantityOf p).isNone then continue
       if let some param := seen.lookup s!"'{p}@{rigidOwner decls d}" then
         let written := quantityOf p
         let (lower, upper) := written.getD (0, some 1)
@@ -802,6 +821,8 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
         let nothing := s!"`{p}` says nothing of how often it is used, so"
         if lower ≥ 1 then
           if let some (_, why) ← (opened.getD 1 #[]).findM? fun (need, _) => mentions need then
+            if written.isNone then
+              throw (inFunction d.name s!"{nothing} a `{p}` has to be used, but {why}: write `{p}: Use<[0, 1]>` for one that can go unused")
             throw (inFunction d.name s!"`{p}: Use<[{lower}, ..]>` says a `{p}` has to be used, but {why}")
         if upper.isSome then
           let said_ := if written.isSome then s!"`{p}: Use<[.., 1]>` says" else nothing
@@ -864,7 +885,12 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
       if d.impl.isNone then
         { s with drops := saidDrops ++ envDrops.toArray, dups := saidDups ++ envDups.toArray
                  stays := saidStays ++ envStays.toArray }
-      else { s with drops := s.drops ++ saidDrops, dups := s.dups ++ saidDups }
+      else
+        -- (What it needs of a callable it is given, its body still says.)
+        let callable := fun ((need, _) : Ty × String) => match need with
+          | .fn .. => true
+          | _ => false
+        { s with drops := s.drops.filter callable ++ saidDrops, dups := s.dups.filter callable ++ saidDups }
     let scheme ← generalize t1 [] false
     modify fun s => { s with dups := before.dups, drops := before.drops, stays := before.stays }
     -- What a lifetime is said to hold of a type parameter, it holds of the

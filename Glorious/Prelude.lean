@@ -590,7 +590,7 @@ impl<T> Index for Array<T> {
 }
 
 trait Len { fn len(Self) -> Int }
-impl<T> Len for Array<T> { fn len(a: Array<T>) -> Int { arr_len(a, 0) } }
+impl<T> Len for Array<T> where T: Use<[1, 1]> { fn len(a: Array<T>) -> Int { arr_len(a, 0) } }
 impl Len for Str { fn len(text: Str) -> Int { length(text) } }
 
 // What `[a, b]` and `[x; n]` are made with.
@@ -700,12 +700,12 @@ trait Indexed {
 trait IndexedMut: Indexed {
     fn place_at(Int, &mut Self) -> &mut Self::Element
 }
-impl<T> Indexed for Array<T> {
+impl<T> Indexed for Array<T> where T: Use<[1, 1]> {
     type Element = T;
     fn element_at(a: &Array<T>, i: Int) -> &T { arr_at(a, i) }
     fn size_at(a: &Array<T>) -> Int { arr_len_at(a) }
 }
-impl<T> IndexedMut for Array<T> { fn place_at(i: Int, a: &mut Array<T>) -> &mut <Array<T> as Indexed>::Element { arr_at(a, i) } }
+impl<T> IndexedMut for Array<T> where T: Use<[1, 1]> { fn place_at(i: Int, a: &mut Array<T>) -> &mut <Array<T> as Indexed>::Element { arr_at(a, i) } }
 impl<T, N> Indexed for Fixed<T, N> {
     type Element = T;
     fn element_at(a: &Fixed<T, N>, i: Int) -> &T { arr_at(&a.0, i) }
@@ -807,7 +807,7 @@ fn fold_from<T, U, e: EffectRow>(a: [T], n: Int, i: Int, acc: U, f: fn(U, T) -> 
 }
 fn each<T, e: EffectRow>(a: [T], f: fn(T) -> () / {| e}) -> () / {| e} where T: Use<[0, *]> { fold(a, (), fn(done, x) { f(x) }) }
 
-impl<T> Show for Array<T> where T: Show {
+impl<T> Show for Array<T> where T: Show, T: Use<[0, *]> {
     fn show(a: Array<T>) -> Str {
         "[" ++ fold(a, "", fn(text, x) {
             match(text) {
@@ -917,7 +917,7 @@ impl<T, E> Eq for Result<T, E> where T: Eq, E: Eq {
         }
     }
 }
-impl<T> Eq for Array<T> where T: Eq {
+impl<T> Eq for Array<T> where T: Eq, T: Use<[0, *]> {
     fn ==(a: Array<T>, b: Array<T>) -> Bool {
         match(int_eq(len(a), len(b))) { 0 => false, _ => same_from(a, b, 0) }
     }
@@ -931,7 +931,7 @@ fn same_from<T>(a: Array<T>, b: Array<T>, i: Int) -> Bool where T: Eq, T: Use<[0
 
 // Pairs in order: by the first, and then by the second. Texts as in a
 // dictionary of character codes.
-impl<A, B> Ord for (A, B) where A: Ord, B: Ord {
+impl<A, B> Ord for (A, B) where A: Ord, B: Ord, A: Use<[0, *]> {
     fn <(x: (A, B), y: (A, B)) -> Bool { match((x, y)) { ((a, b), (c, d)) => a < c or { a == c and { b < d } } } }
 }
 impl Ord for Str {

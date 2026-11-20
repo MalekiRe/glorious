@@ -722,6 +722,17 @@ structure Bound where
   every one of. -/
   ranked : List String := []
 
+/-- How often an implementation's functions use a value of its type parameter
+`p`, `where T: Use<[lower, upper]>`, kept among its items. -/
+def useMark (p : String) (lower : Nat) (upper : Option Nat) : String :=
+  s!"%use:{p}:{lower}:{(upper.map toString).getD "*"}"
+
+/-- What `useMark` says. -/
+def useMarked (name : String) : Option (String × Nat × Option Nat) :=
+  match name.splitOn ":" with
+  | ["%use", p, lo, hi] => lo.toNat?.map fun lo => (p, lo, hi.toNat?)
+  | _ => none
+
 /-- `for<'a, 'b> fn(&'a T) -> &'a T`, a callable that takes any lifetimes for
 those named, is the type `%for<'a, 'b, fn(&'a T) -> &'a T>`. -/
 def rankedMark : String := "%for"

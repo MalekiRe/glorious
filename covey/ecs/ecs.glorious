@@ -349,7 +349,7 @@ impl<R, S> Relating<R, S> for OneToOne where S: Get<Relates<R>>, S: Get<Sources<
         relate<R, S>(world, source, relation, target)
     }
 }
-impl<R, S> Relating<R, S> for ManyToMany where S: Get<Links<R>>, S: Get<Sources<R>> {
+impl<R, S> Relating<R, S> for ManyToMany where S: Get<Links<R>>, S: Get<Sources<R>>, R: Use<[0, *]> {
     fn relate_by(world: &mut World<S>, source: Entity, relation: R, target: Entity) -> Option<R> { link<R, S>(world, source, relation, target) }
 }
 // A relation related by its kind.

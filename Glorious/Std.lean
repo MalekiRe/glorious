@@ -3789,7 +3789,7 @@ pub trait Generator {
 // A computation that yields, stopped where it last did.
 pub struct Coroutine<Y, R, T>(fn(R) -> GeneratorStep<Y, T, Coroutine<Y, R, T>>)
 
-impl<Y, R, T> Generator for Coroutine<Y, R, T> {
+impl<Y, R, T> Generator for Coroutine<Y, R, T> where T: Use<[1, 1]> {
     type Yield = Y;
     type Resume = R;
     type Return = T;
@@ -4714,7 +4714,7 @@ fn hash_text(text: Str, h: Int) -> Int {
 impl<A, B> Hash for (A, B) where A: Hash, B: Hash {
     fn hash(p: (A, B)) -> Int { match(p) { (a, b) => combine(hash(a), hash(b)) } }
 }
-impl<T> Hash for Array<T> where T: Hash {
+impl<T> Hash for Array<T> where T: Hash, T: Use<[0, *]> {
     fn hash(a: Array<T>) -> Int { fold(a, 17, fn(h, x) { combine(h, hash(x)) }) }
 }
 
@@ -5008,7 +5008,6 @@ private def tupleText : String :=
     | [x] => s!"({x},)"
     | xs => s!"({", ".intercalate xs})"
   let nested := fun (xs : List String) => xs.foldr (fun x rest => s!"({x}, {rest})") "()"
-  let part := fun (v : String) (k : Nat) => (List.range k).foldl (fun e _ => s!"({e}.1)") v ++ ".0"
   let one := fun (n : Nat) =>
     let ps := names.take n
     let generics := if ps.isEmpty then "" else s!"<{", ".intercalate ps}>"
@@ -5016,12 +5015,12 @@ private def tupleText : String :=
     s!"impl{generics} Tuple for {tuple ps} \{
     type Nested = {nested ps};
     fn nest(t: {tuple ps}) -> {nested ps} \{ {nested (places.map fun i => s!"t.{i}")} }
-    fn flat(n: {nested ps}) -> {tuple ps} \{ {tuple (places.map (part "n"))} }
+    fn flat(n: {nested ps}) -> {tuple ps} \{ match(n) \{ {nested (places.map (s!"x{·}"))} => {tuple (places.map (s!"x{·}"))} } }
 }
 impl<{", ".intercalate (ps ++ ["R"])}> Callable for fn({", ".intercalate ps}) -> R \{
     type Args = {nested ps};
     type Output = R;
-    fn call_with(f: &fn({", ".intercalate ps}) -> R, args: {nested ps}) -> R \{ (*f)({", ".intercalate (places.map (part "args"))}) }
+    fn call_with(f: &fn({", ".intercalate ps}) -> R, args: {nested ps}) -> R \{ match(args) \{ {nested (places.map (s!"x{·}"))} => (*f)({", ".intercalate (places.map (s!"x{·}"))}) } }
 }
 "
   r#"// Tuples and functions of any length, through one form: the tuple
