@@ -1726,6 +1726,18 @@ impl<E, S, P, C> IntoSystem<E, S> for RunIf<P, C> where P: IntoSystem<E, S>, C: 
     }
 }
 
+// A system that has the whole world, and nothing else: `exclusive({ world
+// => .. })`. What it does is done when it runs, not queued.
+pub struct Exclusive<F> { f: F }
+pub fn exclusive<F>(f: F) -> Exclusive<F> { Exclusive { f: f } }
+impl<E, S, F> System<E, S> for Exclusive<F> where F: Fn<(&mut World<S>,), Output = ()> {
+    fn run(system: &mut Exclusive<F>, event: &E, world: &mut World<S>, commands: &mut Commands<S>) { (system.f)(world) }
+}
+impl<E, S, F> IntoSystem<E, S> for Exclusive<F> where F: Fn<(&mut World<S>,), Output = ()> {
+    type Out = Exclusive<F>;
+    fn into_system(system: Exclusive<F>) -> Exclusive<F> { system }
+}
+
 // Systems in the order written, however many: `(a, b, c).chain()`. A tuple
 // is the pairs it is made of, and a pair of systems is a system.
 pub fn chain<T, L>(systems: T) -> L where T: Tuple<Nested = L> { nest(systems) }

@@ -1,0 +1,45 @@
+// Upstream's exclusive systems (`exclusive(|world: &mut World<S>| ..)`, in
+// tests/plugins.rs): a system that has the whole world, and does what it
+// does there and then, between systems that ask for parts of it. Here one
+// spawns a parent and a child linked to it each frame, ends the parent,
+// which takes the child with it, and keeps whether the child is left.
+// expect:
+// 3
+// 0
+// 1
+// 0
+mod ecs;
+
+use ecs::{App, World, Entity, Query, ChildOf, exclusive};
+
+struct Update
+struct Hp(Int)
+struct Left(Int)
+
+fn grow(query: &mut Query<(&mut Hp,)>) {
+    query.for_each() { (mut h,) => h.0 = h.0 + 1; }
+}
+
+fn churn<S>(world: &mut World<S>) where S: ecs::Get<Hp>, S: ecs::Get<ecs::Relates<ChildOf>>, S: ecs::Get<ecs::Sources<ChildOf>>,
+    S: ecs::Columns, S: ecs::Unlinks<S>, S: ecs::Holds<Left>, S: ecs::BringsOne<S> {
+    let parent = world.spawn_bundle((Hp(0),));
+    let child = world.spawn_bundle((Hp(0),));
+    discard(world.relate(child, ChildOf, parent));
+    world.despawn_linked<ChildOf>(parent);
+    let left = if(world.contains(child)) { 1 } else { 0 };
+    discard(world.insert_resource(Left(left)))
+}
+
+fn main() -> Int {
+    let mut app = App::new().relation<ChildOf>().register<Hp>().register_resource<Left>()
+        .add_systems(Update, (grow, exclusive(churn))).build();
+    let e = app.world.spawn_bundle((Hp(0),));
+    app.emit(&Update);
+    app.emit(&Update);
+    app.emit(&Update);
+    say(match(app.world.get<Hp>(e)) { Some(h) => h.0, None => 0 - 1 });
+    say(match(app.world.resource<Left>()) { Some(l) => l.0, None => 0 - 1 });
+    // (The entity spawned, and none of what the system spawned and ended.)
+    say(app.world.query<(&Hp,)>().count());
+    0
+}
