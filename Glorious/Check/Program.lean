@@ -160,7 +160,8 @@ def sideThreads : Nat := 16
 /-- A function's type as callers see it, its variables numbered in order:
 the same of a signature and of the body it says. -/
 def schemeShape (s : Scheme) : String :=
-  let text := s!"{showTy s.ty} b{s.bounds.length} e{s.edges.length} u{s.dups.length} d{s.drops.length} s{s.stays.length}"
+  let n := fun (k : Nat) => String.ofList (List.replicate k '|')
+  let text := s!"{showTy s.ty} b{n s.bounds.length} e{n s.edges.length} u{n s.dups.length} d{n s.drops.length} s{n s.stays.length}"
   -- (Each number by its place among those before it.)
   let (out, _, cur) := text.foldl (fun (acc : String × List (String × Nat) × String) c =>
     let (out, seen, cur) := acc
@@ -172,6 +173,28 @@ def schemeShape (s : Scheme) : String :=
         | none => (seen.length, seen ++ [(cur, seen.length)])
       ((out ++ s!"#{n}").push c, seen, "")) ("", [], "")
   out ++ cur
+
+/-- A type with its variables and captures numbered (to see where two differ). -/
+partial def showTyCaps : Ty → String
+  | .var id => s!"?{id}"
+  | .con n args => if args.isEmpty then n else s!"{n}<{", ".intercalate (args.map showTyCaps)}>"
+  | .tuple args => s!"({", ".intercalate (args.map showTyCaps)})"
+  | .fn ps r _ _ cap => s!"fn^{cap}({", ".intercalate (ps.map showTyCaps)}) -> {showTyCaps r}"
+  | .ref how t cap => s!"&^{cap}[{showTyCaps how}] {showTyCaps t}"
+
+/-- What a scheme holds callers to, written out (to see where two differ). -/
+def schemeDetail (s : Scheme) : String :=
+  let dups := s.dups.map fun (t, w) => (showTy t, w)
+  let drops := s.drops.map fun (t, w) => (showTy t, w)
+  let what := fun (c : Captured) => match c with
+    | .brand b => s!"brand {b}"
+    | .ty t => s!"ty {showTy t}"
+    | .once => "once"
+    | .must => "must"
+    | .loan l => s!"loan {l}"
+    | .touch b w => s!"touch {b} {w}"
+    | .inner l => s!"inner {l}"
+  s!"dups {dups} drops {drops} edges {s.edges.map fun (c, w) => (c, what w)} cvars {s.cvars} tvars {s.tvars} ty {showTyCaps s.ty}"
 
 /-- Groups none of which uses another, checked side by side: a few runs of
 them, each on a thread of its own from the state before, its ids from a place
@@ -380,11 +403,12 @@ def checkItems (items : List Item) (seed : UInt64 := 0) (kept : Kept := []) : M 
     -- body's type is not what its signature said, the groups are checked
     -- as before, callees first.
     let pre ← get
-    let signed ← if !Trace.universesAsked then pure false else tryCatchThe Elab.Said (do
-        for (g, _) in rest do
-          for d in g do checkGroup [d] (signature := true)
-        pure true)
-      fun _ => do set pre; pure false
+    let signed ← if !Trace.universesAsked then pure false else
+      tryCatchThe Elab.Said (do
+          for (g, _) in rest do
+            for d in g do checkGroup [d] (signature := true)
+          pure true)
+        fun _ => do set pre; pure false
     let mut universes := false
     if signed && rest.size > 0 then
       let sigs := (← get).fns
@@ -405,7 +429,7 @@ def checkItems (items : List Item) (seed : UInt64 := 0) (kept : Kept := []) : M 
               match sigs[d.name]?, now[d.name]? with
               | some a, some b =>
                 unless schemeShape a == schemeShape b do
-                  (dbgTrace s!"signature differs{if d.bounds.any (fun b => b.trait == "RunsIn" || b.trait == "Environment" || b.trait == "Label") then " (environment)" else ""}: {d.name}: {schemeShape a} / {schemeShape b}" fun _ => (pure () : M Unit))
+                  (dbgTrace s!"signature differs: {d.name}: {schemeShape a} / {schemeShape b}\n  sig {schemeDetail a}\n  body {schemeDetail b}" fun _ => (pure () : M Unit))
               | _, _ => pure ()
         set pre
     let mut i := if universes then rest.size else 0
