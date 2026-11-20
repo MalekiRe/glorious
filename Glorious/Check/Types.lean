@@ -7,6 +7,7 @@ public import Glorious.Syntax.ByRef
 public import Glorious.Elab.Base
 public import Glorious.Traits
 public import Glorious.Trace
+public import Glorious.Check.PMap
 
 public section
 
@@ -776,8 +777,16 @@ structure St where
   alone, while one group's bounds are settled: by the function, the trait,
   the type and arguments spelled, and what the function is given
   (`solveFitting`, `leavesFitting`). -/
-  solvedFit : Std.HashMap (String × String × String × Traits.Givens) (Option Traits.Dict) := {}
-  leavesFit : Std.HashMap (String × String × String) (List (String × Nat × Ty × List Ty)) := {}
+  solvedFit : PMap (String × String × List Nat × Traits.Givens) (Option Traits.Dict) := {}
+  leavesFit : PMap (String × String × List Nat) (List (String × Nat × Ty × List Ty)) := {}
+  /-- Types all known, each a number: its head and its parts' numbers (see
+  `internTy`). Made anew for each group's bounds, as the caches keyed by
+  them are. -/
+  tyIds : PMap (String × List Nat) Nat := {}
+  tyIdCount : Nat := 0
+  /-- `leavesFit` by where the type and its arguments are, kept with them so
+  that no other object comes to be there. -/
+  leavesAt : PMap (String × String × USize × List USize) (Ty × List Ty × List (String × Nat × Ty × List Ty)) := {}
   /-- The implementations as `Traits.solve` sees them, in the same order. -/
   kimpls : Traits.ImplIndex := {}
   /-- The bounds of the scheme last instantiated, at that use. -/

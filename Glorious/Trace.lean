@@ -25,11 +25,28 @@ structure Span where
   nanos : Nat
 
 initialize enabled : Bool ← do pure (← IO.getEnv "GLORIOUS_TRACE").isSome
+/-- `GLORIOUS_TRACE=groups`: each group of functions named on standard error as
+its check starts, to see where a compile that does not end is. -/
+initialize groupsTraced : Bool ← do pure ((← IO.getEnv "GLORIOUS_TRACE") == some "groups")
+
+@[noinline] unsafe def noteImpl (line : String) : Unit :=
+  if !groupsTraced then () else
+  match unsafeBaseIO (IO.eprintln line).toBaseIO with
+  | _ => ()
+
+/-- Say a line on standard error, under `GLORIOUS_TRACE=groups`. -/
+@[implemented_by noteImpl] def note (line : String) : Unit := let _ := line; ()
 initialize spans : IO.Ref (Array Span) ← IO.mkRef #[]
 initialize depth : IO.Ref Nat ← IO.mkRef 0
 
 /-- Time an action. -/
 def timedIO {α : Type} (name : String) (act : IO α) : IO α := do
+  if groupsTraced then
+    let t0 ← IO.monoNanosNow
+    IO.eprintln s!"stage {name}..."
+    let r ← act
+    IO.eprintln s!"stage {name}: {((← IO.monoNanosNow) - t0) / 1000000} ms"
+    return r
   if !enabled then return ← act
   let d ← depth.get
   depth.set (d + 1)
@@ -41,13 +58,28 @@ def timedIO {α : Type} (name : String) (act : IO α) : IO α := do
   pure r
 
 @[noinline] unsafe def timedImpl {α : Type} (name : String) (f : Unit → α) : α :=
-  if !enabled then f () else
+  if !enabled && !groupsTraced then f () else
   match unsafeBaseIO (timedIO name (IO.lazyPure f)).toBaseIO with
   | .ok r => r
   | .error _ => f ()
 
 /-- Time a computation. -/
 @[implemented_by timedImpl] def timed {α : Type} (name : String) (f : Unit → α) : α := f ()
+
+@[noinline] unsafe def saidImpl {α : Type} (name : String) (f : Unit → α) : α :=
+  if !groupsTraced then f () else
+  let io : IO α := do
+    let t0 ← IO.monoNanosNow
+    let r ← IO.lazyPure f
+    let t1 ← IO.monoNanosNow
+    IO.eprintln s!"  {name}: {(t1 - t0) / 1000000} ms"
+    pure r
+  match unsafeBaseIO io.toBaseIO with
+  | Except.ok r => r
+  | Except.error _ => f ()
+
+/-- Time a computation and say it at once, under `GLORIOUS_TRACE=groups`. -/
+@[implemented_by saidImpl] def said {α : Type} (name : String) (f : Unit → α) : α := f ()
 
 /-- Write out what was timed: each stage under the one it was part of, in
 the order they ended; and then, for each name, its total and how many times

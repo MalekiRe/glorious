@@ -351,9 +351,9 @@ def compileFile (path : String) (checkKept : Check.Kept := []) (search : Bool :=
     if preludeKept.isNone then
       if let .ok parsed := readPrelude.get then Store.save (library / "prelude") "prelude" parsed
     -- (Saved again only where something was parsed anew.)
-    unless c.parsedMade.all (parsedKept.contains ·.1) do Store.save (dir / "parsed") "parsed" c.parsedMade
-    unless c.textsMade.all (texts.contains ·.1) do Store.save (dir / "texts") "texts" c.textsMade
-    unless c.inferMade.isEmpty do Store.save (dir / "infer") "infer" (Infer.toMemo c.inferMade)
+    unless c.parsedMade.all (parsedKept.contains ·.1) do Trace.timedIO "save: parsed" (Store.save (dir / "parsed") "parsed" c.parsedMade)
+    unless c.textsMade.all (texts.contains ·.1) do Trace.timedIO "save: texts" (Store.save (dir / "texts") "texts" c.textsMade)
+    unless c.inferMade.isEmpty do Trace.timedIO "save: infer" (Store.save (dir / "infer") "infer" (Infer.toMemo c.inferMade))
     if let some ((std, drop), first) := c.firstMade then
       Store.save (library / s!"first-{std}-{drop}") "first" [first]
     -- (The library's modules as this compile checked them, with those kept

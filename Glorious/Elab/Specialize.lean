@@ -2,6 +2,7 @@ module
 
 public import Glorious.Elab.Base
 public import Glorious.Syntax.Resolve
+public import Glorious.Addr
 
 /-!
 # A function for each implementation it is used at
@@ -47,13 +48,59 @@ partial def dictKey : Expr → String
   | _ => "?"
 
 /-- The copies asked for: each by its name, with the function it is of, the
-implementations it is for, and whether their places are dropped. -/
-abbrev Copies := List (String × String × List Expr × Bool)
+implementations it is for, and whether their places are dropped. An
+implementation with nothing left to be known is a number here (`pool`: its
+function and its parts' numbers; `byId` back), and stands in a body being
+written out as a name of its own (`dictRef`) until it is called or taken
+apart: so a copy is found, and a body written out, without implementations
+written out and looked at again and again. -/
+structure Copies where
+  pool : Std.HashMap (String × List Nat) Nat := {}
+  byId : Array (String × List Nat) := #[]
+  byKey : Std.HashMap (String × List Nat × Bool) String := {}
+  list : Array (String × String × List Nat × Bool) := #[]
 
-def askCopy (fn : String) (dicts : List Expr) (drop : Bool) : StateM Copies String := do
-  let name := s!"{fn}⟨{", ".intercalate (dicts.map dictKey)}⟩{if drop then "'" else ""}"
-  unless (← get).any (·.1 == name) do
-    modify fun copies => copies ++ [(name, fn, dicts, drop)]
+/-- The name an implementation's number stands as in a body. -/
+def dictRef (n : Nat) : Expr := .name none s!"%known#{n}"
+
+/-- The number a `dictRef` stands for. -/
+def dictRefOf? : Expr → Option Nat
+  | .name none x => if x.startsWith "%known#" then (x.drop 7).toString.toNat? else none
+  | _ => none
+
+def internId (f : String) (ids : List Nat) : StateM Copies Nat := do
+  match (← get).pool[(f, ids)]? with
+  | some n => pure n
+  | none =>
+    let n := (← get).byId.size
+    modify fun c => { c with pool := c.pool.insert (f, ids) n, byId := c.byId.push (f, ids) }
+    pure n
+
+/-- The number of an implementation with nothing left to be known; none for
+anything else. -/
+partial def dictId (impls : Std.HashMap String ImplE) (e : Expr) : StateM Copies (Option Nat) := do
+  if let some n := dictRefOf? e then return some n
+  match e with
+  | .call _ (.name none f) subs =>
+    unless impls.contains f do return none
+    let mut ids := #[]
+    for sub in subs do
+      let some n ← dictId impls sub | return none
+      ids := ids.push n
+    some <$> internId f ids.toList
+  | _ => pure none
+
+/-- The implementation a number is, written out. -/
+partial def dictExprOf (byId : Array (String × List Nat)) (n : Nat) : Expr :=
+  match byId[n]? with
+  | some (f, ids) => .call 0 (.name none f) (ids.map (dictExprOf byId))
+  | none => .tuple []
+
+def askCopy (fn : String) (ids : List Nat) (drop : Bool) : StateM Copies String := do
+  let key := (fn, ids, drop)
+  if let some name := (← get).byKey[key]? then return name
+  let name := s!"{fn}⟨{",".intercalate (ids.map toString)}⟩{if drop then "'" else ""}"
+  modify fun c => { c with byKey := c.byKey.insert key name, list := c.list.push (name, fn, ids, drop) }
   pure name
 
 mutual
@@ -79,20 +126,27 @@ partial def specCall (tr : TraitInfo) (known : List (String × Expr)) (f : Expr)
     -- A trait's function taken out of an implementation that is known: the
     -- implementation's function, for what its own conditions are met by.
     let d ← specExpr tr known d
-    match d with
-    | .call _ (.name none dictFn) subs =>
-      match closedDict tr.implsAt d, (tr.implsAt[dictFn]?).bind (·.methods[idx]?) with
-      | true, some (fn, _) =>
-        if subs.isEmpty then pure (.name none fn, args)
-        else pure (.name none (← askCopy fn subs true), args)
-      | _, _ => pure (.proj d idx, args)
-    | _ => pure (.proj d idx, args)
+    match ← dictId tr.implsAt d with
+    | some n =>
+      match (← get).byId[n]? with
+      | some (dictFn, subs) =>
+        match (tr.implsAt[dictFn]?).bind (·.methods[idx]?) with
+        | some (fn, _) =>
+          if subs.isEmpty then pure (.name none fn, args)
+          else pure (.name none (← askCopy fn subs true), args)
+        | none => pure (.proj d idx, args)
+      | none => pure (.proj d idx, args)
+    | none => pure (.proj d idx, args)
   | .name none g =>
     let n := (tr.boundedAt[g]?).getD 0
-    if n > 0 && args.length ≥ n && (args.take n).all (closedDict tr.implsAt) then
-      let copy ← askCopy g (args.take n) false
-      pure (.name none copy, List.replicate n (.tuple []) ++ args.drop n)
-    else pure (.name none g, args)
+    if n > 0 && args.length ≥ n then
+      let mut ids : Array Nat := #[]
+      for a in args.take n do
+        if let some i ← dictId tr.implsAt a then ids := ids.push i
+      if ids.size == n then
+        let copy ← askCopy g ids.toList false
+        return (.name none copy, List.replicate n (.tuple []) ++ args.drop n)
+    pure (.name none g, args)
   | f => do pure (← specExpr tr known f, args)
 
 partial def specClause (tr : TraitInfo) (known : List (String × Expr)) : Clause → StateM Copies Clause
@@ -125,6 +179,16 @@ partial def namesLabel (l : String) : Expr → Bool
 
 def stmtNamesLabel (l : String) (s : Stmt) : Bool := s.exprs.any (namesLabel l)
 
+/-- Each `dictRef` left in an expression, written out as the implementation. -/
+partial def unrefExpr (byId : Array (String × List Nat)) (e : Expr) : Expr :=
+  match dictRefOf? e with
+  | some n => dictExprOf byId n
+  | none => Id.run (e.traverse (fun x => pure (unrefExpr byId x)) fun _ b => pure (b.map (unref byId)))
+where
+  unref (byId : Array (String × List Nat)) (s : Stmt) : Stmt := Id.run (s.traverse fun x => pure (unrefExpr byId x))
+
+def unref (byId : Array (String × List Nat)) (s : Stmt) : Stmt := unrefExpr.unref byId s
+
 /-- A clause of a copy: the parameters for implementations dropped, or each
 taking `()`, and the body written out for the implementations. -/
 def specCopyClause (tr : TraitInfo) (known : List (String × Expr)) (n : Nat) (drop : Bool)
@@ -133,6 +197,10 @@ def specCopyClause (tr : TraitInfo) (known : List (String × Expr)) (n : Nat) (d
   | .mk pats body => do
     let pats := if drop then pats.drop n else List.replicate n Pattern.wild ++ pats.drop n
     let body ← specStmts tr known body
+    -- (What is left of the implementations it was given, as values: written
+    -- out.)
+    let byId := (← get).byId
+    let body := body.map (unref byId)
     -- (A function's name is the label its body leaves by, `@find(..)`: the
     -- copy has another name, so its body is given that label.)
     let body := if body.any (stmtNamesLabel fn) then [Stmt.expr (.labelScope fn body)] else body
@@ -145,27 +213,31 @@ that calls itself with an implementation made from the one it was given) is
 left as it was. -/
 partial def specialize (tr : TraitInfo) (items : List Item) (fuel : Nat := 50000) :
     List Item × List (String × String) :=
-  let fns : List (String × Item) := items.filterMap fun (item : Item) =>
+  let fns : Std.HashMap String Item := items.foldl (init := {}) fun m (item : Item) =>
     match item with
-    | .fn name _ _ _ _ => some (name, item)
-    | _ => none
-  let (roots, asked) := (items.mapM (specRoot tr)).run []
+    | .fn name _ _ _ _ => if m.contains name then m else m.insert name item
+    | _ => m
+  let (roots, asked) := (items.mapM (specRoot tr)).run {}
   let rec make (fuel done : Nat) (copies : Copies) (out : Array Item) : Option (Array Item × Copies) :=
-    match fuel, copies[done]? with
+    match fuel, copies.list[done]? with
     | _, none => some (out, copies)
     | 0, some _ => none
     | fuel + 1, some (name, fn, dicts, drop) =>
-      match fns.lookup fn with
+      match fns[fn]? with
       | some (.fn _ ps annots ret clauses) =>
         let n := dicts.length
         let known : List (String × Expr) :=
-          (List.range n).map fun k => (s!"%dict{k}", dicts[k]?.getD (Expr.tuple []))
+          (List.range n).map fun k => (s!"%dict{k}", dictRef (dicts[k]?.getD 0))
         let (clauses, copies) := (clauses.mapM (specCopyClause tr known n drop fn)).run copies
         let annots := if drop then annots.drop n else annots
         make fuel (done + 1) copies (out.push (Item.fn name ps annots ret clauses))
       | _ => make fuel (done + 1) copies out
   match make fuel 0 asked #[] with
-  | some (made, copies) => (roots ++ made.toList, copies.map fun (name, fn, _, _) => (name, fn))
+  | some (made, copies) =>
+    let out := (roots ++ made.toList, copies.list.toList.map fun (name, fn, _, _) => (name, fn))
+    if Glorious.Trace.groupsTraced then
+      dbgTrace s!"specialize: {copies.list.size} copies, {copies.pool.size} implementation values, {made.size} made" fun _ => out
+    else out
   | none => (items, [])
 
 /-! ## Constants worked out once

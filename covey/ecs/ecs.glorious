@@ -1862,7 +1862,7 @@ impl<E, S> Branches<E, S> for () { fn run_branches(none: &mut (), event: &E, wor
 impl<E, S, X, R> Branches<E, S> for (X, R) where X: System<E, S>, R: Branches<E, S> {
     fn run_branches(list: &mut (X, R), event: &E, world: &mut World<S>, commands: &mut Commands<S>) {
         std::thread::scope(fn(s: &std::thread::Scope) {
-            std::thread::join(s.spawn({ <X as System<E, S>>::run(&mut list.0, event, world, commands) }))
+            std::thread::join(std::thread::Scope::spawn(s, fn() / {std::thread::Threads} { <X as System<E, S>>::run(&mut list.0, event, world, commands) }))
         });
         <R as Branches<E, S>>::run_branches(&mut list.1, event, world, commands)
     }
@@ -1924,7 +1924,7 @@ impl<E, S, Ns, N, P, D, R> RunNodes<E, S, Ns> for (Node<N, P, D>, R) where P: Sy
         let can = if(done[at]) { false } else { <D as DepsDone<Ns>>::deps_done(&*done) };
         if(can) {
             std::thread::scope(fn(s: &std::thread::Scope) {
-                std::thread::join(s.spawn({ <P as System<E, S>>::run(&mut list.0.systems, event, world, commands) }))
+                std::thread::join(std::thread::Scope::spawn(s, fn() / {std::thread::Threads} { <P as System<E, S>>::run(&mut list.0.systems, event, world, commands) }))
             });
             done[at] = true
         };

@@ -242,33 +242,53 @@ def unprojectedCondition (subject : Ty) (cargs : List Ty) : M (Ty × List Ty) :=
   if (← get).assocUses.size != before then settleAssocsAll
   pure (subject, cargs)
 
-/-- A type spelled with each reference's lifetime, where it is made of named
-types, tuples and references alone (with nothing in it still to be found):
-what fitting finds of it is the same each time it is asked in a group. -/
-partial def fitSpelled : Ty → M (Option String)
+/-- A type all known, as its number in the pool of such types (`St.tyIds`):
+the same number for the same type, made of its head and its parts' numbers.
+None where a part is not known yet. -/
+partial def internTy : Ty → M (Option Nat)
   | .con n args => do
-    let some parts ← spelledAll args | return none
-    pure (some (if parts.isEmpty then n else s!"{n}<{", ".intercalate parts}>"))
+    let some parts ← internAll args | return none
+    poolId ("c" ++ n) parts
   | .tuple args => do
-    let some parts ← spelledAll args | return none
-    pure (some s!"({", ".intercalate parts})")
+    let some parts ← internAll args | return none
+    poolId "()" parts
   | .ref how inner cap => do
     let .con h [] ← find how | return none
-    let some i ← fitSpelled (← find inner) | return none
-    pure (some s!"{h}'{← findCap cap} {i}")
+    let some i ← internTy (← find inner) | return none
+    poolId s!"&{h}'{← findCap cap}" [i]
+  -- (A callable: what it takes and gives, what it performs, and what it
+  -- holds, by the record of that.)
+  | .fn ps r effs tail cap => do
+    let some parts ← internAll ps | return none
+    let some out ← internTy (← find r) | return none
+    let row ← flattenRow ⟨effs, tail⟩
+    let mut said : Array Nat := #[]
+    for (e, as) in row.effs do
+      let some ss ← internAll as | return none
+      let some n ← poolId ("!" ++ e) ss | return none
+      said := said.push n
+    let rest := match row.tail with
+      | some k => s!"|{k}"
+      | none => ""
+    poolId s!"fn'{← findCap cap}{rest}" (parts ++ [out] ++ said.toList)
   | _ => pure none
 where
-  spelledAll (ts : List Ty) : M (Option (List String)) := do
+  internAll (ts : List Ty) : M (Option (List Nat)) := do
     let mut out := #[]
     for t in ts do
-      let some s ← fitSpelled (← find t) | return none
+      let some s ← internTy (← find t) | return none
       out := out.push s
     pure (some out.toList)
+  poolId (head : String) (parts : List Nat) : M (Option Nat) := do
+    match (← get).tyIds[(head, parts)]? with
+    | some n => pure (some n)
+    | none =>
+      let n := (← get).tyIdCount
+      modify fun s => { s with tyIds := s.tyIds.insert (head, parts) n, tyIdCount := n + 1 }
+      pure (some n)
 
-/-- The type and arguments so spelled, where each can be. -/
-def fitKey (ty : Ty) (args : List Ty) : M (Option String) := do
-  let some parts ← fitSpelled.spelledAll (ty :: args) | return none
-  pure (some (";".intercalate parts))
+/-- The type and arguments so numbered, where each can be. -/
+def fitKey (ty : Ty) (args : List Ty) : M (Option (List Nat)) := internTy.internAll (ty :: args)
 
 mutual
 
@@ -334,24 +354,39 @@ mutual
 
 /-- `leaves`, where implementations are chosen by fitting types. -/
 partial def leavesFitting (pos key : String) (t : Ty) (args : List Ty) (owner : String := "")
-    (via : List (String × Ty) := []) (asking : List String := []) : M (List (String × Nat × Ty × List Ty)) := do
-  if key == Syntax.destroyTrait then return ← leavesFittingNow pos key t args owner via asking
+    (via : List (String × Ty) := []) (asking : List ((String × List Nat) × Ty) := []) : M (List (String × Nat × Ty × List Ty)) := do
+  if key == Syntax.destroyTrait then
+    -- (A type of nothing still to be found, and no type parameter: how it
+    -- is destroyed asks nothing of anyone. What destroys it is found when
+    -- the program is written, by its shape.)
+    let z ← zonk t
+    if (freeTys z).isEmpty && !z.hasRigid then return []
+    return ← leavesFittingNow pos key t args owner via asking
   -- (Found once in a group where the type is all known; what is refused is
-  -- said each time, with where it was asked.)
+  -- said each time, with where it was asked. The same objects asked again,
+  -- as the rest of a list is by each of its entries' implementations, are
+  -- found by where they are, before they are spelled.)
+  let t' ← find t
+  let args' ← args.mapM find
+  let at_ := (owner, key, addrOf t', args'.map addrOf)
+  if let some (_, _, ls) := (← get).leavesAt[at_]? then return ls
   let some spelled ← fitKey t args | leavesFittingNow pos key t args owner via asking
   let k := (owner, key, spelled)
-  if let some ls := (← get).leavesFit[k]? then return ls
+  if let some ls := (← get).leavesFit[k]? then
+    modify fun s => { s with leavesAt := s.leavesAt.insert at_ (t', args', ls) }
+    return ls
   -- (One asked again while it is being found: implementations whose
   -- conditions ask each other, which no answer ends.)
-  let here := s!"{key} of {spelled}"
-  if asking.contains here then
-    throw s!"{pos}`{Syntax.traitShown key}` of `{showTy (← zonk t)}` asks itself: its implementation's conditions come back to it ({" -> ".intercalate ((here :: asking).reverse)})"
-  let ls ← leavesFittingNow pos key t args owner via (here :: asking)
-  modify fun s => { s with leavesFit := s.leavesFit.insert k ls }
+  let here := (key, spelled)
+  if asking.any (·.1 == here) then
+    let chain ← ((here, t) :: asking).reverse.mapM fun ((k, _), ty) => do pure s!"{k} of {showTy (← zonk ty)}"
+    throw s!"{pos}`{Syntax.traitShown key}` of `{showTy (← zonk t)}` asks itself: its implementation's conditions come back to it ({" -> ".intercalate chain})"
+  let ls ← leavesFittingNow pos key t args owner via ((here, t) :: asking)
+  modify fun s => { s with leavesFit := s.leavesFit.insert k ls, leavesAt := s.leavesAt.insert at_ (t', args', ls) }
   pure ls
 
 partial def leavesFittingNow (pos key : String) (t : Ty) (args : List Ty) (owner : String := "")
-    (via : List (String × Ty) := []) (asking : List String := []) : M (List (String × Nat × Ty × List Ty)) := do
+    (via : List (String × Ty) := []) (asking : List ((String × List Nat) × Ty) := []) : M (List (String × Nat × Ty × List Ty)) := do
   let t ← find t
   -- (How a value is destroyed is found by the type's shape alone, as
   -- `solveFitting` finds it: no condition is left of what it finds.)
@@ -443,7 +478,7 @@ partial def unrigidTy (back : List (String × Nat)) : Ty → Ty
 its type. A bound on a type the function is generic in becomes something the
 function is given; every other is met by `Traits.solve`. -/
 def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := do
-  modify fun s => { s with solvedFit := {}, leavesFit := {} }
+  modify fun s => { s with solvedFit := {}, leavesFit := {}, leavesAt := {}, tyIds := {}, tyIdCount := 0 }
   -- A name of which parts were read before its type was known, which is now:
   -- if the type has a `drop` of its own and the parts read can be used any
   -- number of times, the value stayed whole and is destroyed when its block

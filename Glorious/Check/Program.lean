@@ -19,6 +19,11 @@ abbrev Kept := List (UInt64 × St)
 functions), so that a unit keeps some 48 at most: each is the whole state. -/
 def keptEvery (n : Nat) : Nat := max 1 ((n + 47) / 48)
 
+/-- A state as it is kept: without what a group's bounds found, which the
+next group's start anew (`settleBounds`). -/
+def forKeeping (st : St) : St :=
+  { st with solvedFit := {}, leavesFit := {}, leavesAt := {}, tyIds := {}, tyIdCount := 0 }
+
 /-- An item as its declarations have it: its functions without their bodies. -/
 partial def withoutBodies : Item → Item
   | .fn name params annots ret _ => .fn name params annots ret []
@@ -93,6 +98,8 @@ partial def checkDeciding (decls : List FnDecl) (fuel : Nat := 64) (first : Opti
       | none => { e with decision := none }
     match fuel, e.decision with
     | fuel + 1, some d =>
+      if Glorious.Trace.groupsTraced then
+        (dbgTrace s!"decision {fuel}: {e.msg.take 200}" fun _ => (pure () : M Unit))
       let items := decls.map fun d => Item.fn d.name d.params d.annots d.ret d.clauses
       let after := Elab.decidedItems [d] items
       let decls' := (decls.zip after).map fun
@@ -357,7 +364,7 @@ def checkItems (items : List Item) (seed : UInt64 := 0) (kept : Kept := []) : M 
       checkSideBySide (run.map (·.1))
       let last := (run.getLast?.map (·.2)).getD 0
       if run.any (fun (_, k) => (k + 1) % every == 0) || last + 1 == groups.length then
-        made := (keys[last]!, ← get) :: made
+        made := (keys[last]!, forKeeping (← get)) :: made
       i := j
     if let some k := keys.getLast? then key := k
     -- The functions implementations give, each on its own: any function may

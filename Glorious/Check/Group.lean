@@ -67,6 +67,8 @@ partial def refLives : TypeExpr → List (Option String)
 
 /-- Infer one group of mutually recursive functions and generalise their types. -/
 def checkGroup (decls : List FnDecl) : M Unit := do
+  if Glorious.Trace.groupsTraced then
+    (dbgTrace s!"group: {", ".intercalate (decls.map (·.name))}" fun _ => (pure () : M Unit))
   let loansAt := (← get).loans.size
   let cellsAt := (← get).cells.size
   let mut group : List (String × Ty) := []
@@ -448,7 +450,7 @@ def checkGroup (decls : List FnDecl) : M Unit := do
         let ret := ret <|> match wanted with
           | some (.fn _ r _ _ _, _) => some r
           | _ => none
-        let t ← timedM "group: infer" (inferCallable [] annots ret (some d.name) d.clauses s!"the clauses of `{d.name}` do")
+        let t ← (fun s => Glorious.Trace.said "infer" fun _ => (timedM "group: infer" (inferCallable [] annots ret (some d.name) d.clauses s!"the clauses of `{d.name}` do") : M Ty).run s : M Ty)
         if let some effects := declared then
           let (effects, rest) ← resolveRow rigid false effects
           if let .fn _ _ effs tail _ ← find t then
@@ -472,15 +474,15 @@ def checkGroup (decls : List FnDecl) : M Unit := do
           unifyAt s!"`{d.name}` is used recursively at a different type" (← freshenCaps used) t
           reused := (d.name, used) :: reused
         defs := (d.name, t) :: defs
-        runPending
-        timedM "group: lower checks" (runLowerChecks t)
-        checkDups (← get).dups
-        checkGivenReads
-        checkDrops (← get).drops
-        checkAparts
-        checkUnrun
-        checkStays (← get).stays
-        checkLifetimes
+        (fun s => Glorious.Trace.said "pending" fun _ => (runPending : M Unit).run s : M Unit)
+        (fun s => Glorious.Trace.said "lower" fun _ => (timedM "group: lower checks" (runLowerChecks t) : M Unit).run s : M Unit)
+        (fun s => Glorious.Trace.said "dups" fun _ => (do checkDups (← get).dups : M Unit).run s : M Unit)
+        (fun s => Glorious.Trace.said "reads" fun _ => (checkGivenReads : M Unit).run s : M Unit)
+        (fun s => Glorious.Trace.said "drops" fun _ => (do checkDrops (← get).drops : M Unit).run s : M Unit)
+        (fun s => Glorious.Trace.said "aparts" fun _ => (checkAparts : M Unit).run s : M Unit)
+        (fun s => Glorious.Trace.said "unrun" fun _ => (checkUnrun : M Unit).run s : M Unit)
+        (fun s => Glorious.Trace.said "stays" fun _ => (do checkStays (← get).stays : M Unit).run s : M Unit)
+        (fun s => Glorious.Trace.said "lifetimes" fun _ => (checkLifetimes : M Unit).run s : M Unit)
         modify fun s =>
           { s with rigidCaps := s.rigidCaps.filter (·.2 == "'static"), outlives := [] }
         pure (defs, reused))
@@ -511,8 +513,8 @@ def checkGroup (decls : List FnDecl) : M Unit := do
     if let some t := defs.lookup name then
       try unify (← instantiate (← generalize t) (some name)) used
       catch e => throw (inFunction name s!"`{name}` is used recursively at a different type: {e}")
-  timedM "group: loans" (checkLoans loansAt cellsAt)
-  timedM "group: bounds" (settleBounds decls defs)
+  (fun s => Glorious.Trace.said "loans" fun _ => (timedM "group: loans" (checkLoans loansAt cellsAt) : M Unit).run s : M Unit)
+  (fun s => Glorious.Trace.said "bounds" fun _ => (timedM "group: bounds" (settleBounds decls defs) : M Unit).run s : M Unit)
   modify fun s => { s with assocUses := #[] }
   -- Later functions follow calls into these as they will be elaborated.
   let cs := Elab.firstOf (← get).coercions.toList

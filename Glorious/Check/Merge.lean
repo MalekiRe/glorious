@@ -175,6 +175,17 @@ instance {κ ν : Type} [BEq κ] [Hashable κ] : Merge3 (Std.HashMap κ (List ν
     | some es => es.foldl (fun acc (k, v) => step acc k v) (some a)
     | none => b.fold (init := some a) step
 instance {κ : Type} [BEq κ] [Hashable κ] : Merge3 (Std.HashSet κ) := ⟨mergeSet⟩
+/-- Two persistent maps grown from `p`: an entry changed by at most one of them. -/
+def mergePMap {κ ν : Type} [BEq κ] [Hashable κ] (p a b : PMap κ ν) : Option (PMap κ ν) :=
+  if samePtr a p then some b else if samePtr b p then some a else
+  b.fold (init := some a) fun acc key val => acc.bind fun m =>
+    match p.get? key, a.get? key with
+    | some pv, some av =>
+      if samePtr val pv then some m else if samePtr av pv then some (m.insert key val) else none
+    | some _, none => none
+    | none, some av => if samePtr av val then some m else none
+    | none, none => some (m.insert key val)
+instance {κ ν : Type} [BEq κ] [Hashable κ] : Merge3 (PMap κ ν) := ⟨mergePMap⟩
 instance : Merge3 Traits.ImplIndex where
   merge3 p a b := do
     if samePtr a p then return b
