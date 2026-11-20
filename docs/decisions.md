@@ -6156,6 +6156,16 @@ twice, and merging the map at every side-by-side join cost more than the
 hits saved. Undone. What would make it pay: keys that are already there
 (interned types, the InternPool redesign), not spelled per bound.
 
+Tried again with keys that are cheap: a hash of each type's shape (its
+captures left out, memoized by where the type is), kept in a persistent
+map, the larger one taken at a side-by-side join. Still slower (fresh 3.57
+s against 3.35 s, `main` edited 2.25 s against 2.07 s), and counted: of
+the 640 bounds `main`'s edit solves, 455 are of types not all known when
+they are met (a variable or an open row of what a callable performs), 91
+missed, 94 hit. The bounds that cost are not of known types; what would
+take them away is meeting a bound once for the function's generic
+signature, not for each use. Undone.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by
