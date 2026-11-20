@@ -288,6 +288,9 @@ structure MethodSig where
   types, `Of<T>`: the name, what it is asked at, and the variable that
   stands for the answer there. -/
   gats : List (String × List Ty × Nat) := []
+  /-- How often it uses a value of a type parameter of its own, where it
+  says, `fn twice<T>(Self, T) -> (T, T) where T: Use<[0, *]>`. -/
+  uses : List (String × Nat × Option Nat) := []
 
 structure ImplDecl where
   trait : String

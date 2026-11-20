@@ -1360,8 +1360,17 @@ partial def inferCall (scope : Scope) (amb : Row) (f : Expr) (args : List Expr)
       -- (Its own type parameters anew, and an answer for each place its
       -- types ask a type the trait leaves at types.)
       let mut anew : List (Nat × Ty) := []
-      for (_, id) in sig.mparams do
-        anew := anew ++ [(id, ← freshTy)]
+      for (g, id) in sig.mparams do
+        let t ← freshTy
+        anew := anew ++ [(id, t)]
+        -- (How often it uses a value of one, as the trait says: at most
+        -- once, where it says nothing.)
+        let (lower, upper) := (sig.uses.find? (·.1 == g)).map (·.2) |>.getD (0, some 1)
+        let pos := (← get).pos
+        if lower == 0 then
+          modify fun s => { s with drops := s.drops.push (t, s!"{pos}`{x}` may leave a `{g}` unused") }
+        if upper.isNone then
+          modify fun s => { s with dups := s.dups.push (t, s!"{pos}`{x}` may use a `{g}` more than once") }
       for (_, _, id) in sig.gats do
         anew := anew ++ [(id, ← freshTy)]
       let tm := (sig.self, self) :: sig.tparams.zip targs ++ (sig.assocs.map (·.2)).zip found ++ anew

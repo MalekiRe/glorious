@@ -372,7 +372,7 @@ def declareTraits (items : List Item) : M Unit := do
     modify fun s =>
       { s with
         traits := ("Drop", ["drop"]) :: s.traits
-        methods := ("drop", ⟨"Drop", 0, dropSelf, [.ref .uniq (.var dropSelf) dropCap], .unit, [], [], [], ⟨[], none⟩, [], [], []⟩)
+        methods := ("drop", ⟨"Drop", 0, dropSelf, [.ref .uniq (.var dropSelf) dropCap], .unit, [], [], [], ⟨[], none⟩, [], [], [], []⟩)
           :: s.methods }
   for item in items do
     if let .trait name methods := item then
@@ -427,6 +427,8 @@ def declareTraits (items : List Item) : M Unit := do
       for (m, params, ret) in methods do
         -- (The type parameters of its own: a variable each.)
         let (ret, ownNames) := Syntax.methodGenerics ret
+        let uses := ownNames.filterMap Syntax.useMarked
+        let ownNames := ownNames.filter (!·.startsWith "%")
         let mut mparams : List (String × Nat) := []
         -- (A lifetime among them is one of its lifetimes, as any written.)
         for g in ownNames.filter (!·.startsWith "'") do
@@ -471,7 +473,7 @@ def declareTraits (items : List Item) : M Unit := do
         let gats := (← get).gatOccs.toList
         modify fun s => { s with gatScope := [], gatOccs := #[] }
         let sig : MethodSig :=
-          ⟨name, index, self, ps, r, (one, "'_") :: written, tparams, assocVars, row, rowVars, mparams, gats⟩
+          ⟨name, index, self, ps, r, (one, "'_") :: written, tparams, assocVars, row, rowVars, mparams, gats, uses⟩
         modify fun s => { s with methods := (m, sig) :: s.methods }
         index := index + 1
       modify fun s => { s with traits := (name, methods.map (·.1)) :: s.traits }

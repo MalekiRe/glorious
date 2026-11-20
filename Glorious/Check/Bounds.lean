@@ -795,14 +795,8 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
     -- (An implementation's function: of the implementation's type
     -- parameters, what the implementation says, `impl<T> .. where T:
     -- Use<[0, *]>`, as of its own.)
-    -- (A type parameter of the trait's function, `fn twice<T>(Self, T)`:
-    -- what the body needs of it, as before, unless it is said.)
-    let methodParams := match d.impl with
-      | some (_, sig) => sig.mparams.map (fun ((n, _) : String × Nat) => n)
-      | none => []
     for p in genericParams d.params do
       if rowOrLife p then continue
-      if methodParams.contains p && (quantityOf p).isNone then continue
       if let some param := seen.lookup s!"'{p}@{rigidOwner decls d}" then
         let written := quantityOf p
         let (lower, upper) := written.getD (0, some 1)
@@ -827,7 +821,10 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
         if upper.isSome then
           let said_ := if written.isSome then s!"`{p}: Use<[.., 1]>` says" else nothing
           if let some (_, why) ← (opened.getD 0 #[]).findM? fun (need, _) => mentions need then
-            let hint := if written.isNone then s!": write `{p}: Use<[0, *]>` for one that can be used any number of times" else ""
+            let whereTo := match d.impl with
+              | some (_, sig) => if sig.mparams.any (·.1 == p) then " in the trait's function" else ""
+              | none => ""
+            let hint := if written.isNone then s!": write `{p}: Use<[0, *]>`{whereTo} for one that can be used any number of times" else ""
             throw (inFunction d.name s!"{said_} a `{p}` is used at most once, but {why}{hint}")
         said := said.push (param, lower == 0, upper.isNone)
     -- (A callable it is given: as many times as it likes, or none, unless

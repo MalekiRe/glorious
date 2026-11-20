@@ -559,7 +559,20 @@ private partial def parseTrait : P (List Item) := do
     expectPunct ")"
     -- `-> R`, `-> R / {E}`, or `/ {E}` alone for a function that gives `()`.
     let ret ← if (← acceptPunct "->") || (← peek) == .op "/" then some <$> parseResult else pure none
-    methods := methods.push (m, types.toList, withMethodGenerics ret (genericParams own))
+    -- `where T: Use<[0, *]>`: how often it uses a value of a type parameter
+    -- of its own, carried among them.
+    let mut uses : Array String := #[]
+    if (← peek) == .ident "where" then
+      advance
+      repeat
+        let p ← expectIdent
+        expectPunct ":"
+        for b in ← parseBoundsOf p do
+          match b.trait, b.quantity with
+          | "Use", some (lower, upper) => uses := uses.push (useMark p lower upper)
+          | _, _ => failAt "a trait's function says here only how often it uses a type parameter of its own: `T: Use<[0, *]>`"
+        if !(← acceptPunct ",") then break
+    methods := methods.push (m, types.toList, withMethodGenerics ret (genericParams own ++ uses.toList))
     if (← peek) == .punct "{" then
       -- A body: what an implementation gets if it does not write its own.
       let pats ← names.toList.mapM fun

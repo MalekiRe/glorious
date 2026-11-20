@@ -68,6 +68,9 @@ def implFnDecls (im : ImplDecl) : M (List FnDecl) := do
           | .typeAlias n _ _ => (Syntax.useMarked n).map fun (p, lo, hi) =>
               ({ subject := p, trait := "Use", quantity := some (lo, hi) } : Syntax.Bound)
           | _ => none
+        -- (And of the trait's function's own, what the trait says.)
+        let uses := uses ++ sig.uses.map fun (p, lo, hi) =>
+          ({ subject := p, trait := "Use", quantity := some (lo, hi) } : Syntax.Bound)
         out := out ++ [{ name := Syntax.implFnName im.trait im.head m,
                          params := im.params ++ inner ++ sig.mparams.map (·.1) ++ lifetimes, annots,
                          ret, clauses, impl := some (im, sig), bounds := uses }]

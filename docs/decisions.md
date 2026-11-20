@@ -5830,8 +5830,10 @@ check reads nothing of the body. (Chosen as Rust has it.)
   implementation was chosen (a trait's function is typed by the trait), so a
   `Ticket` could be copied through one. The library's implementations that
   never let one go say `Use<[1, 1]>`, so must-use values can be indexed and
-  measured. A type parameter of the trait's function itself (`fn twice<T>`)
-  is still found from the body, as the trait's signature says nothing of it.
+  measured. A type parameter of the trait's function's own is said in the
+  trait, `fn twice<T>(Self, T) -> (T, T) where T: Use<[0, *]>`, at most once
+  where nothing is said: every implementation's function is held to it, and
+  a call asks it of what it is given.
 - What is still found from the body, besides: what a callable that runs in an
   environment the function is given needs (the environment's rules, which
   its bounds say), and what an implementation's function needs of a
