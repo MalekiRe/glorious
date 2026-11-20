@@ -784,6 +784,9 @@ structure St where
   them are. -/
   tyIds : PMap (String × List Nat) Nat := {}
   tyIdCount : Nat := 0
+  /-- The number of each type object numbered already (`internTy`), kept with
+  it: a type all known stays so, so the same object is the same number. -/
+  tyMemo : Std.HashMap USize (Ty × Nat) := {}
   /-- Dictionaries made for a group's calls, by the object each was found as. -/
   dictShared : PMap USize (Traits.Dict × Elab.DictE) := {}
   /-- `leavesFit` by where the type and its arguments are, kept with them so

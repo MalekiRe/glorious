@@ -258,7 +258,14 @@ def unprojectedCondition (subject : Ty) (cargs : List Ty) : M (Ty × List Ty) :=
 /-- A type all known, as its number in the pool of such types (`St.tyIds`):
 the same number for the same type, made of its head and its parts' numbers.
 None where a part is not known yet. -/
-partial def internTy : Ty → M (Option Nat)
+partial def internTy (t : Ty) : M (Option Nat) := do
+  if let some (_, n) := (← get).tyMemo[addrOf t]? then return some n
+  let r ← internTyAt t
+  if let some n := r then
+    modify fun s => { s with tyMemo := s.tyMemo.insert (addrOf t) (t, n) }
+  pure r
+where
+  internTyAt : Ty → M (Option Nat)
   | .con n args => do
     let some parts ← internAll args | return none
     poolId ("c" ++ n) parts
@@ -285,7 +292,6 @@ partial def internTy : Ty → M (Option Nat)
       | none => ""
     poolId s!"fn'{← findCap cap}{rest}" (parts ++ [out] ++ said.toList)
   | _ => pure none
-where
   internAll (ts : List Ty) : M (Option (List Nat)) := do
     let mut out := #[]
     for t in ts do
@@ -491,7 +497,7 @@ partial def unrigidTy (back : List (String × Nat)) : Ty → Ty
 its type. A bound on a type the function is generic in becomes something the
 function is given; every other is met by `Traits.solve`. -/
 def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := do
-  modify fun s => { s with solvedFit := {}, leavesFit := {}, leavesAt := {}, tyIds := {}, tyIdCount := 0, dictShared := {} }
+  modify fun s => { s with solvedFit := {}, leavesFit := {}, leavesAt := {}, tyIds := {}, tyIdCount := 0, tyMemo := {}, dictShared := {} }
   -- A name of which parts were read before its type was known, which is now:
   -- if the type has a `drop` of its own and the parts read can be used any
   -- number of times, the value stayed whole and is destroyed when its block
