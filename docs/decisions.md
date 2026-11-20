@@ -5943,6 +5943,15 @@ Each is to go; none is a design covey keeps.
   a graph's nodes are not listed, and what wrote a change is not kept.
 - No unwinding: tests of panics are not ported. Taken away by panics that
   run destructors and can be caught.
+- A system, and a world's query, takes each component it asks for once: a
+  query takes a component's column out of the world while it is used, so
+  a second use of the column in the same query or system would find it
+  empty. Upstream reads a component twice (two joins to `Name`), and
+  writes one through two queries whose filters keep them apart
+  (`With<Tag>`, `Without<Tag>`). Both are refused here (`AllApart`, for
+  `world.query` too since it silently found nothing), and the ported
+  tests split them (covey/joins2, covey/params7). Taken away by queries
+  that lend a column, not take it.
 - ~~An entity does not say which world it is of~~: an `Entity` has its
   world's number (`World.id`, a fresh cell's place, `std::thread::
   fresh_number`), and a world finds none of another's: `contains`, `get`,
