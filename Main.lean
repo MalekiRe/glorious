@@ -58,14 +58,23 @@ partial def runToEnd {σ : Type} (step : σ → Step σ Result) (s : σ) (steps 
   | .next s' => runToEnd step s' (steps + 1)
   | r => (r, steps + 1)
 
-/-- Run the bytecode machine, printing each value as soon as it is written. -/
+@[noinline] unsafe def sameOutputImpl (a b : List Value) : Bool := ptrEq a b
+
+/-- Is this the very output seen before (so nothing was written since)?
+Answered `false` where it cannot be told, and then what is new is looked for. -/
+@[implemented_by sameOutputImpl] def sameOutput (a b : List Value) : Bool := let _ := (a, b); false
+
+/-- Run the bytecode machine, printing each value as soon as it is written.
+(The output is walked only where the step wrote some: most write none.) -/
 partial def runStreaming (names : Array String) (bytecode : Bytecode.Program)
-    (c : Bytecode.Config) (printed : Nat) : IO (Step Bytecode.Config Result) := do
+    (c : Bytecode.Config) (printed : Nat) (seen : List Value := []) : IO (Step Bytecode.Config Result) := do
   let out := c.world.output
-  for v in out.drop printed do
-    IO.println (showValue names v)
+  let printed ← if sameOutput out seen then pure printed else do
+    for v in out.drop printed do
+      IO.println (showValue names v)
+    pure out.length
   match Bytecode.stepIO bytecode c with
-  | .next c' => runStreaming names bytecode c' out.length
+  | .next c' => runStreaming names bytecode c' printed out
   | r => pure r
 
 /-- The configuration at which a Core program has no next step. -/
