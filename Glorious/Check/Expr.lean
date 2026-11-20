@@ -59,8 +59,8 @@ def readPart (scope : Scope) (e : Expr) (subject : Ty) (idx : Nat) (name : Strin
 whose type has a function of its own of the name that takes it whole, where
 the function the resolver took borrows it? -/
 def wholeReceiver (x : String) (t : Ty) : M Bool := do
-  let some call := (x.splitOn "borrowed%").getLast? |>.bind String.toNat? | return false
   unless x.startsWith "borrowed%" do return false
+  let some call := (x.splitOn "borrowed%").getLast? |>.bind String.toNat? | return false
   let some alts := dotAltsOf (← get).modules call | return false
   let some (h, _) := (← find t).head | return false
   let some alt := alts.find? (·.startsWith (h ++ "::")) | return false

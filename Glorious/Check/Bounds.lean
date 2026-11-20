@@ -1146,9 +1146,12 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
       else toSTy b.ty
     -- (A need of the trait of a type the implementation said has it: met by
     -- what it said.)
-    let spelled ← spellTy b.ty
-    let said := compound.find? fun (owner, key, ty, _) =>
-      owner == b.owner && Syntax.traitBase key == Syntax.traitBase b.trait && ty == spelled
+    -- (Spelled only where it is asked: most are met before.)
+    let saidOf : M (Option (String × String × String × Ty)) := do
+      if compound.isEmpty then return none
+      let spelled ← spellTy b.ty
+      pure (compound.find? fun (owner, key, ty, _) =>
+        owner == b.owner && Syntax.traitBase key == Syntax.traitBase b.trait && ty == spelled)
     let solve := fun (trait : String) (ty : Ty) (sty : Traits.STy) => do
       -- (As deep as a condition's conditions go: a list of sixteen, each
       -- apart from those after it, goes some hundreds deep.)
@@ -1162,7 +1165,7 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
     let solved ← match ← solve b.trait b.ty sty with
       | some d => pure (some d)
       | none =>
-        match said with
+        match ← saidOf with
         | some (_, key, _, cond) => solve key cond (← toSTy cond)
         | none => pure none
     match solved with

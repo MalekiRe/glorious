@@ -628,9 +628,10 @@ def checkEscape (brand : Nat) (what : String) (roots : List (String × Ty)) (amb
   runProjections false
   settleRows none false
   settleAssocs
-  let holds := fun (t : Ty) => do
-    modify fun s => { s with seen := {} }
-    tyHolds brand t
+  -- (What was gone through without finding the brand does not hold it
+  -- however it is reached again: gone through once for all the roots.)
+  modify fun s => { s with seen := {} }
+  let holds := fun (t : Ty) => tyHolds brand t
   let escape := fun (how : String) =>
     (throw s!"{what}: {how}" : M Unit)
   for (how, t) in roots do
@@ -645,11 +646,9 @@ def checkEscape (brand : Nat) (what : String) (roots : List (String × Ty)) (amb
       escape "it is stored in a declaration whose field types are inferred; \
         give that declaration a type parameter"
   if let some cap := s.staticCap then
-    modify fun s => { s with seen := {} }
     if ← capHolds brand cap then
       escape "it is borrowed for `'static`, and no variable lasts that long"
   for cap in s.monoCaps do
-    modify fun s => { s with seen := {} }
     if ← capHolds brand cap then
       escape "it is stored in a declaration's `fn` field; give that declaration a \
         type parameter for the field"
