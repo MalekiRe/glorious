@@ -157,21 +157,55 @@ def stayedBelow (s from_ : St) (j : Nat) (gap : Nat := unitGap) : Bool :=
 /-- How many threads the groups of one level are checked on, at most. -/
 def sideThreads : Nat := 16
 
-/-- A function's type as callers see it, its variables numbered in order:
-the same of a signature and of the body it says. -/
+/-- The captures of a type, in the order it has them. -/
+partial def capsOf : Ty → List Nat
+  | .ref how t c => capsOf how ++ capsOf t ++ [c]
+  | .fn ps r _ _ c => ps.flatMap capsOf ++ capsOf r ++ [c]
+  | .con _ args => args.flatMap capsOf
+  | .tuple args => args.flatMap capsOf
+  | .var _ => []
+
+/-- A function's type as callers see it: the type, with its variables
+numbered in order; how many bounds, of what; and for each capture of the
+type, what it holds in the end, through captures the type does not have
+(by place among the type's, or what it is). The same of a signature and of
+the body it says, whichever variables each was given. A borrow a callable
+makes while it runs (`inner`) is the function's own, and not a caller's to
+see where it performs nothing: then none can be held across a suspension. -/
 def schemeShape (s : Scheme) : String :=
+  let caps := capsOf s.ty
+  let place := fun (c : Nat) => caps.idxOf? c
+  let quiet := match s.ty with
+    | .fn _ _ effs tail _ => effs.isEmpty && tail.isNone
+    | _ => false
+  let rec holds (fuel : Nat) (seen : List Nat) (c : Nat) : List String :=
+    match fuel with
+    | 0 => []
+    | fuel + 1 =>
+      (s.edges.filter (·.1 == c)).flatMap fun (_, w) => match w with
+        | .ty (.ref (.con "'" []) (.tuple []) c') => match place c' with
+          | some k => [s!"life#{k}"]
+          | none => if seen.contains c' then [] else holds fuel (c' :: seen) c'
+        | .ty t => [s!"ty {showTy t}"]
+        | .inner _ => if quiet then [] else ["inner"]
+        | .brand _ => ["brand"]
+        | .once => ["once"]
+        | .must => ["must"]
+        | .loan _ => ["loan"]
+        | .touch _ w => [s!"touch {w}"]
+  let held := caps.map fun c => ((holds 32 [c] c).eraseDups.mergeSort (· ≤ ·))
   let n := fun (k : Nat) => String.ofList (List.replicate k '|')
-  let text := s!"{showTy s.ty} b{n s.bounds.length} e{n s.edges.length} u{n s.dups.length} d{n s.drops.length} s{n s.stays.length}"
-  -- (Each number by its place among those before it.)
+  let text := s!"{showTy s.ty} b{n s.bounds.length} {(s.bounds.map (·.1)).mergeSort (· ≤ ·)} u{n s.dups.length} d{n s.drops.length} s{n s.stays.length} holds {held}"
+  -- (The type's variables by their place among those before it.)
   let (out, _, cur) := text.foldl (fun (acc : String × List (String × Nat) × String) c =>
     let (out, seen, cur) := acc
     if c.isDigit then (out, seen, cur.push c)
     else if cur.isEmpty then (out.push c, seen, "")
     else
-      let (n, seen) := match seen.lookup cur with
-        | some n => (n, seen)
+      let (k, seen) := match seen.lookup cur with
+        | some k => (k, seen)
         | none => (seen.length, seen ++ [(cur, seen.length)])
-      ((out ++ s!"#{n}").push c, seen, "")) ("", [], "")
+      ((out ++ s!"#{k}").push c, seen, "")) ("", [], "")
   out ++ cur
 
 /-- A type with its variables and captures numbered (to see where two differ). -/
@@ -194,7 +228,7 @@ def schemeDetail (s : Scheme) : String :=
     | .loan l => s!"loan {l}"
     | .touch b w => s!"touch {b} {w}"
     | .inner l => s!"inner {l}"
-  s!"dups {dups} drops {drops} edges {s.edges.map fun (c, w) => (c, what w)} cvars {s.cvars} tvars {s.tvars} ty {showTyCaps s.ty}"
+  s!"bounds {s.bounds.map fun (tr, t) => (tr, showTy t)} dups {dups} drops {drops} edges {s.edges.map fun (c, w) => (c, what w)} cvars {s.cvars} tvars {s.tvars} ty {showTyCaps s.ty}"
 
 /-- Groups none of which uses another, checked side by side: a few runs of
 them, each on a thread of its own from the state before, its ids from a place

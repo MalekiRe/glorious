@@ -5938,6 +5938,19 @@ Measured on the suite and on `covey/states2.glorious` (2768 groups):
   `loop`). So the universe path is not the default: where any function's
   differs, the unit is checked callees first, as before.
 
+Then, with a reference given back linked to the one it is given in the
+signature (elision, as `checkGroup` already demands of what is written) and
+schemes compared by what each capture of the type holds in the end
+(`schemeShape`), 121 differ on `states2`, about 90 of them only in a
+`%Destroy` bound: how a type parameter's values are destroyed, which the
+function takes where its body lets one go. Giving it by the signature
+instead (each type parameter the function is given values of and may let
+go) takes those to 8, all in the prelude; but a call does not pass a
+`%Destroy` as the dictionary it passes for a trait (`settleBounds` leaves
+those out of the call's table), so 441 programs then had calls of one
+argument fewer than the function takes. Undone; the convention for
+`%Destroy` at calls is what comes first.
+
 What takes the difference away: a signature that says what Rust's says.
 Captures by lifetimes, with elision (`checkGroup` already refuses a
 reference given back with two to choose from); and a type parameter's

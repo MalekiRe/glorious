@@ -65,6 +65,14 @@ partial def refLives : TypeExpr → List (Option String)
   | .performs r _ => refLives r
   | _ => []
 
+/-- The captures of the references a type has in it, not looking inside a
+callable's type, which has lifetimes of its own. -/
+partial def outerRefCaps : Ty → List Nat
+  | .ref _ t c => c :: outerRefCaps t
+  | .con _ args => args.flatMap outerRefCaps
+  | .tuple args => args.flatMap outerRefCaps
+  | _ => []
+
 /-- Infer one group of mutually recursive functions and generalise their types.
 With `signature`, each function's type is what its signature says, its
 clauses not looked at: what a caller is checked with (`declareSignatures`). -/
@@ -461,6 +469,19 @@ def checkGroup (decls : List FnDecl) (signature : Bool := false) : M Unit := do
             let r ← match ret with
               | some r => pure r
               | none => pure Ty.unit
+            -- A reference given back with no lifetime written lasts as long
+            -- as the one reference it is given (refused above where there
+            -- are more): what it holds, that one holds.
+            let named ← (rigid.filterMap fun (_, t) => match t with
+              | .ref _ _ c => some c
+              | _ => none).mapM findCap
+            let given ← (ps.flatMap outerRefCaps).mapM findCap
+            let given := given.eraseDups.filter (!named.contains ·)
+            if let [one] := given then
+              for c in outerRefCaps r do
+                let c ← findCap c
+                unless named.contains c || c == one do
+                  captures c (.ty (Ty.life one))
             pure (Ty.fn ps r [] (some (← freshRowVar)) (← freshCap))
           else (fun s => Glorious.Trace.said "infer" fun _ => (timedM "group: infer" (inferCallable [] annots ret (some d.name) d.clauses s!"the clauses of `{d.name}` do") : M Ty).run s : M Ty)
         if let some effects := declared then
