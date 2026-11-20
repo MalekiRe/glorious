@@ -5934,10 +5934,13 @@ Each is to go; none is a design covey keeps.
 - ~~A label a task or behavior waits for says its name~~: a type's name is
   the compiler's now. `self_name()` in an implementation for every type is,
   in its copy for each type, the type's name (`impl<T> Schedule for T {
-  const NAME: Str = self_name(); }`), and no program writes one. Still
-  departing: devtools cannot name a system, since a function's type does
-  not say which function it is. Taken away by function types that do, or
-  ids the compiler gives functions.
+  const NAME: Str = self_name(); }`), and no program writes one. ~~Devtools
+  cannot name a system~~: a program is told the name of the function a
+  callable is of (`std::any::fn_name`, host operation 9 over the names the
+  program carries), each system keeps it (`Sys.name`, `Exclusive.name`), and
+  `app.systems()` lists them in the order they were added (covey/devtools).
+  Still: a block written in place is named `""` (upstream's `{{closure}}`),
+  a graph's nodes are not listed, and what wrote a change is not kept.
 - No unwinding: tests of panics are not ported. Taken away by panics that
   run destructors and can be caught.
 - ~~An entity does not say which world it is of~~: an `Entity` has its

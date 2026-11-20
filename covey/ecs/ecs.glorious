@@ -1881,11 +1881,16 @@ impl<X, R> Locals for (X, R) where R: Locals {
 // other.
 pub trait System<E, S> {
     fn run(&mut Self, &E, &mut World<S>, &mut Commands<S>)
+    // (The names of its functions, after those given: upstream's
+    // `app.systems()`.)
+    fn system_names(&Self, [Str]) -> [Str]
 }
 impl<E, S> System<E, S> for () {
     fn run(nothing: &mut (), event: &E, world: &mut World<S>, commands: &mut Commands<S>) { () }
+    fn system_names(nothing: &(), names: [Str]) -> [Str] { names }
 }
 impl<E, S, X, Y> System<E, S> for (X, Y) where X: System<E, S>, Y: System<E, S> {
+    fn system_names(pair: &(X, Y), names: [Str]) -> [Str] { <Y as System<E, S>>::system_names(&pair.1, <X as System<E, S>>::system_names(&pair.0, names)) }
     fn run(pair: &mut (X, Y), event: &E, world: &mut World<S>, commands: &mut Commands<S>) {
         <X as System<E, S>>::run(&mut pair.0, event, world, commands);
         <Y as System<E, S>>::run(&mut pair.1, event, world, commands)
@@ -1895,9 +1900,10 @@ impl<E, S, X, Y> System<E, S> for (X, Y) where X: System<E, S>, Y: System<E, S> 
 // two for the same; and what its locals hold.
 // (`last`: the world's time when it last ran, of which it sees what was
 // put in or changed after.)
-pub struct Sys<F, Lc> { f: F, locals: Lc, last: Int }
+pub struct Sys<F, Lc> { f: F, locals: Lc, last: Int, name: Str }
 impl<E, S, ..P, ..A, L, Ts, F, Lc> System<E, S> for Sys<F, Lc>
     where F: Fn<(..P), Output = ()>, ..P: Parameter<Asks = A>, (..A): Tuple<Nested = L>, L: AllTouches<List = Ts>, Ts: AllApart, L: Fetch<E, S, (), F, (), Lc> {
+    fn system_names(sys: &Sys<F, Lc>, names: [Str]) -> [Str] { push(names, sys.name) }
     fn run(sys: &mut Sys<F, Lc>, event: &E, world: &mut World<S>, commands: &mut Commands<S>) {
         // (A world put in the app's place after the system last ran has a
         // clock of its own: all of it is new to the system.)
@@ -1925,7 +1931,10 @@ impl<E, S, ..P, ..A, L, Ts, F, Lc> IntoSystem<E, S> for F
     where F: Fn<(..P), Output = ()>, ..P: Parameter<Asks = A>, (..A): Tuple<Nested = L>, L: AllTouches<List = Ts>, Ts: AllApart,
           L: Locals<State = Lc>, L: Fetch<E, S, (), F, (), Lc> {
     type Out = Sys<F, Lc>;
-    fn into_system(f: F) -> Sys<F, Lc> { Sys { f: f, locals: <L as Locals>::start(), last: 0 } }
+    fn into_system(f: F) -> Sys<F, Lc> {
+        let (name, f) = std::any::fn_name(f);
+        Sys { f: f, locals: <L as Locals>::start(), last: 0, name: name }
+    }
 }
 
 // A condition: a function whose parameters ask for what a system's may,
@@ -1950,6 +1959,7 @@ impl<E, S, ..P, ..A, L, Ts, Lc> Condition<E, S> for fn(..P) -> Bool
 pub struct RunIf<P, C> { systems: P, condition: C }
 pub fn run_if<P, C>(systems: P, condition: C) -> RunIf<P, C> { RunIf { systems: systems, condition: condition } }
 impl<E, S, P, C> System<E, S> for RunIf<P, C> where P: System<E, S>, C: Condition<E, S> {
+    fn system_names(guarded: &RunIf<P, C>, names: [Str]) -> [Str] { <P as System<E, S>>::system_names(&guarded.systems, names) }
     fn run(guarded: &mut RunIf<P, C>, event: &E, world: &mut World<S>, commands: &mut Commands<S>) {
         if(<C as Condition<E, S>>::holds(&guarded.condition, event, world, commands)) {
             <P as System<E, S>>::run(&mut guarded.systems, event, world, commands)
@@ -1966,12 +1976,13 @@ impl<E, S, P, C> IntoSystem<E, S> for RunIf<P, C> where P: IntoSystem<E, S>, C: 
 
 // A system that has the whole world, and nothing else: `exclusive({ world
 // => .. })`. What it does is done when it runs, not queued.
-pub struct Exclusive<F> { f: F }
-pub fn exclusive<F>(f: F) -> Exclusive<F> { Exclusive { f: f } }
+pub struct Exclusive<F> { f: F, name: Str }
+pub fn exclusive<F>(f: F) -> Exclusive<F> { let (name, f) = std::any::fn_name(f); Exclusive { f: f, name: name } }
 // (A point where what was asked so far is done, as upstream's exclusive
 // systems are: the entities commands made have their places before the
 // system makes its own.)
 impl<E, S, F> System<E, S> for Exclusive<F> where F: Fn<(&mut World<S>,), Output = ()> {
+    fn system_names(system: &Exclusive<F>, names: [Str]) -> [Str] { push(names, system.name) }
     fn run(system: &mut Exclusive<F>, event: &E, world: &mut World<S>, commands: &mut Commands<S>) {
         let asked = replace(commands, no_commands(&*world));
         apply(asked, world);
@@ -1982,9 +1993,10 @@ impl<E, S, F> System<E, S> for Exclusive<F> where F: Fn<(&mut World<S>,), Output
     }
 }
 // One that is given what was emitted too: `exclusive_with({ event, world => .. })`.
-pub struct ExclusiveWith<F> { f: F }
-pub fn exclusive_with<F>(f: F) -> ExclusiveWith<F> { ExclusiveWith { f: f } }
+pub struct ExclusiveWith<F> { f: F, name: Str }
+pub fn exclusive_with<F>(f: F) -> ExclusiveWith<F> { let (name, f) = std::any::fn_name(f); ExclusiveWith { f: f, name: name } }
 impl<E, S, F> System<E, S> for ExclusiveWith<F> where F: Fn<(&E, &mut World<S>), Output = ()> {
+    fn system_names(system: &ExclusiveWith<F>, names: [Str]) -> [Str] { push(names, system.name) }
     fn run(system: &mut ExclusiveWith<F>, event: &E, world: &mut World<S>, commands: &mut Commands<S>) {
         let asked = replace(commands, no_commands(&*world));
         apply(asked, world);
@@ -2011,9 +2023,10 @@ impl<E, S, F> IntoSystem<E, S> for Exclusive<F> where F: Fn<(&mut World<S>,), Ou
 // take of the world apart is not yet given to each apart.)
 pub struct Parallel<P> { branches: P }
 pub fn parallel<T, P>(systems: T) -> Parallel<P> where T: Tuple<Nested = P> { Parallel { branches: nest(systems) } }
-pub trait Branches<E, S> { fn run_branches(&mut Self, &E, &mut World<S>, &mut Commands<S>) }
-impl<E, S> Branches<E, S> for () { fn run_branches(none: &mut (), event: &E, world: &mut World<S>, commands: &mut Commands<S>) { () } }
+pub trait Branches<E, S> { fn run_branches(&mut Self, &E, &mut World<S>, &mut Commands<S>) fn branch_names(&Self, [Str]) -> [Str] }
+impl<E, S> Branches<E, S> for () { fn run_branches(none: &mut (), event: &E, world: &mut World<S>, commands: &mut Commands<S>) { () } fn branch_names(none: &(), names: [Str]) -> [Str] { names } }
 impl<E, S, X, R> Branches<E, S> for (X, R) where X: System<E, S>, R: Branches<E, S> {
+    fn branch_names(list: &(X, R), names: [Str]) -> [Str] { <R as Branches<E, S>>::branch_names(&list.1, <X as System<E, S>>::system_names(&list.0, names)) }
     fn run_branches(list: &mut (X, R), event: &E, world: &mut World<S>, commands: &mut Commands<S>) {
         std::thread::scope(fn(s: &std::thread::Scope) {
             (std::thread::Scope::spawn_joined(s, fn() / {std::thread::Threads} { <X as System<E, S>>::run(&mut list.0, event, world, commands) }))
@@ -2022,6 +2035,7 @@ impl<E, S, X, R> Branches<E, S> for (X, R) where X: System<E, S>, R: Branches<E,
     }
 }
 impl<E, S, P> System<E, S> for Parallel<P> where P: Branches<E, S> {
+    fn system_names(group: &Parallel<P>, names: [Str]) -> [Str] { <P as Branches<E, S>>::branch_names(&group.branches, names) }
     fn run(group: &mut Parallel<P>, event: &E, world: &mut World<S>, commands: &mut Commands<S>) {
         <P as Branches<E, S>>::run_branches(&mut group.branches, event, world, commands)
     }
@@ -2090,6 +2104,8 @@ pub trait CountNodes { fn count_nodes() -> Int }
 impl CountNodes for () { fn count_nodes() -> Int { 0 } }
 impl<N, P, D, R> CountNodes for (Node<N, P, D>, R) where R: CountNodes { fn count_nodes() -> Int { 1 + <R as CountNodes>::count_nodes() } }
 impl<E, S, Ns> System<E, S> for Graph<Ns> where Ns: RunNodes<E, S, Ns>, Ns: CountNodes {
+    // (Its nodes' names are not said.)
+    fn system_names(graph: &Graph<Ns>, names: [Str]) -> [Str] { names }
     fn run(graph: &mut Graph<Ns>, event: &E, world: &mut World<S>, commands: &mut Commands<S>) {
         let mut done = [];
         let mut i = 0;
@@ -2157,6 +2173,7 @@ impl<T> LifecycleEvent for OnRemove<T> where T: Schedule { const KIND: Int = 3; 
 pub struct SharedSystem<Q> { shared: Mutex<Q> }
 impl<Q> Use<[0, *]> for SharedSystem<Q> {}
 impl<E, S, Q> System<E, S> for SharedSystem<Q> where Q: System<E, S> {
+    fn system_names(system: &SharedSystem<Q>, names: [Str]) -> [Str] { lock(&system.shared, fn(q: &mut Q) -> [Str] { <Q as System<E, S>>::system_names(&*q, names) }) }
     fn run(system: &mut SharedSystem<Q>, event: &E, world: &mut World<S>, commands: &mut Commands<S>) {
         lock(&system.shared, fn(q: &mut Q) { <Q as System<E, S>>::run(q, event, world, commands) })
     }
@@ -2193,6 +2210,18 @@ impl<X, R, S> WorldHooks<S> for (TaskOf<X>, R) where R: WorldHooks<S> { fn world
 impl<P, X, R, S> WorldHooks<S> for (SubOf<P, X>, R) where R: WorldHooks<S> { fn world_hooks(list: &(SubOf<P, X>, R), hooks: [WorldHook<S>]) -> [WorldHook<S>] { <R as WorldHooks<S>>::world_hooks(&list.1, hooks) } }
 impl<P, C, R, S> WorldHooks<S> for (ComputedOf<P, C>, R) where R: WorldHooks<S> { fn world_hooks(list: &(ComputedOf<P, C>, R), hooks: [WorldHook<S>]) -> [WorldHook<S>] { <R as WorldHooks<S>>::world_hooks(&list.1, hooks) } }
 impl<B, X, R, S> WorldHooks<S> for (BehaviorsOf<B, X>, R) where R: WorldHooks<S> { fn world_hooks(list: &(BehaviorsOf<B, X>, R), hooks: [WorldHook<S>]) -> [WorldHook<S>] { <R as WorldHooks<S>>::world_hooks(&list.1, hooks) } }
+
+// The names of the app's systems, in the order they were added (upstream's
+// `app.systems()`): each function's name, `""` of a block written in place.
+pub trait Listed<S> { fn listed(&Self, [Str]) -> [Str] }
+impl<S> Listed<S> for () { fn listed(list: &(), names: [Str]) -> [Str] { names } }
+impl<E, P, R, S> Listed<S> for (On<E, P>, R) where P: System<E, S>, R: Listed<S> {
+    fn listed(list: &(On<E, P>, R), names: [Str]) -> [Str] { <P as System<E, S>>::system_names(&list.0.systems, <R as Listed<S>>::listed(&list.1, names)) }
+}
+impl<X, R, S> Listed<S> for (TaskOf<X>, R) where R: Listed<S> { fn listed(list: &(TaskOf<X>, R), names: [Str]) -> [Str] { <R as Listed<S>>::listed(&list.1, names) } }
+impl<P, X, R, S> Listed<S> for (SubOf<P, X>, R) where R: Listed<S> { fn listed(list: &(SubOf<P, X>, R), names: [Str]) -> [Str] { <R as Listed<S>>::listed(&list.1, names) } }
+impl<P, C, R, S> Listed<S> for (ComputedOf<P, C>, R) where R: Listed<S> { fn listed(list: &(ComputedOf<P, C>, R), names: [Str]) -> [Str] { <R as Listed<S>>::listed(&list.1, names) } }
+impl<B, X, R, S> Listed<S> for (BehaviorsOf<B, X>, R) where R: Listed<S> { fn listed(list: &(BehaviorsOf<B, X>, R), names: [Str]) -> [Str] { <R as Listed<S>>::listed(&list.1, names) } }
 
 fn named_in(names: &[Str], name: &Str) -> Bool {
     let mut i = 0;
@@ -3227,6 +3256,7 @@ fn until_request<S, F, O>(point: Str, f: F, tx: std::thread::Sender<O>) -> Reque
 pub struct SyncPointOf<P> { none: [P] }
 pub fn sync_point<P>(point: P) -> SyncPointOf<P> { discard(point); SyncPointOf { none: [] } }
 impl<E, S, P> System<E, S> for SyncPointOf<P> where P: Schedule {
+    fn system_names(system: &SyncPointOf<P>, names: [Str]) -> [Str] { names }
     fn run(system: &mut SyncPointOf<P>, event: &E, world: &mut World<S>, commands: &mut Commands<S>) {
         let name = <P as Schedule>::NAME;
         let asked = lock(&world.remotes, fn(queue: &mut [Request<S>]) -> [Request<S>] { replace(queue, []) });
@@ -3448,6 +3478,9 @@ impl<S, L> App<S, L> {
     // The app, ready to run.
     // The app, ready: what brings what each component requires found, of
     // the components it has.
+    // The names of its systems, in the order they were added.
+    pub fn systems(app: &Self) -> [Str] where L: Listed<S> { <L as Listed<S>>::listed(&app.systems, []) }
+
     pub fn build(app: Self) -> Self where S: Bringers<S>, L: WorldHooks<S> {
         let mut app = app;
         let (names, fns) = <S as Bringers<S>>::bringers();

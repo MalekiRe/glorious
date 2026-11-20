@@ -1,7 +1,8 @@
 // Upstream's tests/devtools.rs, the parts that need no names of types or
 // places in the source:
-// - `changes_report_who_wrote_them_with_source_locations`: what changed since
-//   a tick, added or changed (not who wrote it: systems have no names here).
+// - `changes_report_who_wrote_them_with_source_locations`: the app's systems
+//   by name, and what changed since a tick, added or changed (not who wrote
+//   it, nor where).
 // - `history_answers_questions_over_frames_and_explains_values`: each frame's
 //   values, and the first frame and the runs of frames a condition held.
 // - `task_console_shows_what_each_task_waits_for`.
@@ -15,6 +16,7 @@
 // and `assembly_is_collected_through_inline_chains`: they read the names of
 // types and systems, values through reflection, or the binary.
 // expect:
+// ramp, apply_damage
 // 2
 // 1
 // 1
@@ -78,6 +80,7 @@ fn hp_of<S>(world: &World<S>, e: Entity) -> Int where S: ecs::Get<Hp> { match(wo
 
 fn main() -> Int {
     let mut app = App::new().register<Hp>().register<Damage>().add_systems(Update, (ramp, apply_damage).chain()).build();
+    say(std::text::join(app.systems(), ", "));
     let e = app.world.spawn_bundle((Hp(3), Damage(1)));
     let spawn = app.world.changes_since<Hp>(0);
     say(len_at(&spawn) + len_at(&app.world.changes_since<Damage>(0)));
