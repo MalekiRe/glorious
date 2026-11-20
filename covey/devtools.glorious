@@ -1,0 +1,143 @@
+// Upstream's tests/devtools.rs, the parts that need no names of types or
+// places in the source:
+// - `changes_report_who_wrote_them_with_source_locations`: what changed since
+//   a tick, added or changed (not who wrote it: systems have no names here).
+// - `history_answers_questions_over_frames_and_explains_values`: each frame's
+//   values, and the first frame and the runs of frames a condition held.
+// - `task_console_shows_what_each_task_waits_for`.
+// - `rewinding_and_forking_restore_and_diverge`: a copy of the world to go
+//   back to, and one run apart and compared.
+// Not ported: `stepping_runs_one_system_or_condition_at_a_time`,
+// `why_not_names_the_mismatch_of_each_query`,
+// `explains_why_components_exist_and_why_systems_are_ordered`,
+// `values_are_described_and_edited_without_debug`,
+// `debug_output_parses_into_values`, `mcp_tools_serve_a_live_app_on_its_own_thread`
+// and `assembly_is_collected_through_inline_chains`: they read the names of
+// types and systems, values through reflection, or the binary.
+// expect:
+// 2
+// 1
+// 1
+// 1
+// --
+// 19
+// 10
+// 3
+// [(3, 4)]
+// [(1, 3)]
+// --
+// not started
+// waiting for Later
+// finished
+// --
+// 90
+// 97
+// 94
+// 85
+// 0
+// 1
+// 90
+// 0
+mod ecs;
+
+use ecs::{App, World, Entity, Query, History, TaskStatus, AsyncWorld, Bridge, Schedule, Cloner, bridge, record, chain};
+
+struct Update
+impl Schedule for Update { const NAME: Str = "Update"; }
+struct Later
+impl Schedule for Later { const NAME: Str = "Later"; }
+
+struct Hp(Int)
+impl Clone for Hp { fn clone(h: &Hp) -> Hp { Hp(h.0) } }
+impl Cloner for Hp { const CLONER: Option<fn(&Hp) -> Hp> = Some(clone); }
+impl Eq for Hp { fn ==(a: Hp, b: Hp) -> Bool { a.0 == b.0 } }
+struct Damage(Int)
+impl Clone for Damage { fn clone(d: &Damage) -> Damage { Damage(d.0) } }
+impl Cloner for Damage { const CLONER: Option<fn(&Damage) -> Damage> = Some(clone); }
+
+fn ramp(q: &mut Query<(&mut Damage,), ()>) { q.for_each() { (mut d,) => d.0 = d.0 + 1; } }
+fn apply_damage(q: &mut Query<(&Damage, &mut Hp), ()>) { q.for_each() { d, mut hp => hp.0 = hp.0 - d.0; } }
+
+fn below_12(h: &Hp) -> Bool { h.0 < 12 }
+fn from_10_to_17(h: &Hp) -> Bool { if(h.0 >= 10) { h.0 <= 17 } else { false } }
+
+fn hp_seen(q: &mut Query<(&Hp,), ()>) { () }
+fn console<S>(world: AsyncWorld<S>) -> AsyncWorld<S> / {Bridge<S>} where S: ecs::Get<Hp> {
+    let mut world = world;
+    discard(bridge(&mut world, Update, hp_seen));
+    discard(bridge(&mut world, Later, hp_seen));
+    world
+}
+fn status(s: &TaskStatus) -> Str {
+    match(s) {
+        &TaskStatus::NotStarted => "not started",
+        &TaskStatus::WaitingFor(label) => "waiting for " ++ label,
+        &TaskStatus::WaitingOnItsOwn => "waiting",
+        &TaskStatus::Finished => "finished"
+    }
+}
+fn hp_of<S>(world: &World<S>, e: Entity) -> Int where S: ecs::Get<Hp> { match(world.get<Hp>(e)) { Some(h) => h.0, None => 0 - 1 } }
+
+fn main() -> Int {
+    let mut app = App::new().register<Hp>().register<Damage>().add_systems(Update, (ramp, apply_damage).chain()).build();
+    let e = app.world.spawn_bundle((Hp(3), Damage(1)));
+    let spawn = app.world.changes_since<Hp>(0);
+    say(len_at(&spawn) + len_at(&app.world.changes_since<Damage>(0)));
+    say(if(spawn[0].1) { 1 } else { 0 });
+    let before = app.world.tick();
+    app.emit(&Update);
+    say(len_at(&app.world.changes_since<Hp>(before)));
+    say(len_at(&app.world.changes_since<Damage>(before)));
+    say("--");
+
+    let mut app = App::new().register<Hp>().register<Damage>().insert_resource(History::new())
+        .add_systems(Update, (ramp, apply_damage, record<Hp>).chain()).build();
+    let e = app.world.spawn_bundle((Hp(20), Damage(0)));
+    let mut i = 0;
+    while({ i < 5 }) { app.emit(&Update); i = i + 1 };
+    match(app.world.resource<History<Hp>>()) {
+        Some(history) =>
+            say(match(history.value_at(e, 0)) { Some(h) => h.0, None => 0 });
+            say(match(history.value_at(e, 3)) { Some(h) => h.0, None => 0 });
+            say(match(history.first(e, below_12)) { Some(f) => f, None => 0 - 1 });
+            say(history.when(e, below_12));
+            say(history.when(e, from_10_to_17)),
+        None => ()
+    };
+    say("--");
+
+    let mut app = App::new().register<Hp>().add_task(console).build();
+    say(status(&app.tasks()[0]));
+    app.emit(&Update);
+    app.emit(&Update);
+    say(status(&app.tasks()[0]));
+    app.emit(&Later);
+    say(status(&app.tasks()[0]));
+    say("--");
+
+    let mut app = App::new().register<Hp>().register<Damage>().add_systems(Update, (ramp, apply_damage).chain()).build();
+    let e = app.world.spawn_bundle((Hp(100), Damage(0)));
+    let mut snapshots = [];
+    let mut i = 0;
+    while({ i < 4 }) { app.emit(&Update); snapshots = push(snapshots, app.world.snapshot()); i = i + 1 };
+    say(hp_of(&app.world, e));
+    // Back to the second frame.
+    app.world = remove_at(&mut snapshots, 1);
+    say(hp_of(&app.world, e));
+    // Running on from there repeats what happened.
+    app.emit(&Update);
+    say(hp_of(&app.world, e));
+    // A copy run apart.
+    let kept = replace(&mut app.world, app.world.snapshot());
+    let other = app.world.spawn_bundle((Hp(5), Damage(10)));
+    app.emit(&Update);
+    app.emit(&Update);
+    let fork = replace(&mut app.world, kept);
+    say(hp_of(&fork, e));
+    say(if(app.world.contains(other)) { 1 } else { 0 });
+    let diff = app.world.diff<Hp>(&fork);
+    say(if(if(len_at(&diff.spawned) == 1) { diff.changed[0] == e } else { false }) { 1 } else { 0 });
+    app.emit(&Update);
+    say(hp_of(&app.world, e));
+    0
+}

@@ -5858,6 +5858,34 @@ an implementation that left a type to be found before what may use it, and
 of passing on what its functions needed of its type parameters, is gone.
 covey's simulation writes what its plugin's app is in full.
 
+## Threads: the API covey is written against (to be built)
+
+Covey's parallel system groups, its executor and its async tasks are
+written against this API of `std::thread`, which the compiler and its
+runtime are to give. It is scoped, so what a thread borrows is a borrow the
+checker already knows, and `Send`/`Sync` are traits the checker finds of a
+type by what it holds (a resumption, a `Cell`, a non-`Sync` reference: not).
+
+- `scope(f)`: `fn scope<R>(f: for<'s> fn(&'s Scope) -> R) -> R`; every thread
+  spawned in it is joined before it returns.
+- `s.spawn(f)`: `fn spawn<T, F>(s: &Scope, f: F) -> Handle<T> where F: Fn<(),
+  Output = T>, F: Send, T: Send`; `join(h: Handle<T>) -> T` waits for it.
+- `spawn_detached(f)`: a thread of its own, for what holds nothing borrowed
+  (`F: Send`, and `'static`); `join` the same.
+- `Mutex<T>`: `Mutex::new(v)`, `lock(m: &Mutex<T>, f: fn(&mut T) -> R) -> R`
+  (the lock is held while `f` runs, and only then); `Mutex<T>: Sync` where
+  `T: Send`.
+- `Shared<T>`: a value many threads hold, counted: `Shared::new(v)`,
+  `share(&Shared<T>) -> Shared<T>`, `&*s` to read it; `T: Sync`.
+- `channel<T>() -> (Sender<T>, Receiver<T>)`; `send(&Sender<T>, T)`,
+  `recv(&Receiver<T>) -> Option<T>` (`None` once every sender has gone),
+  `try_recv`; `Sender<T>: Use<[0, *]>` by `share`.
+- `AtomicInt`: `load`, `store`, `fetch_add`, `compare_exchange`.
+- `available_parallelism() -> Int`.
+
+A program that uses none of it runs as it does now; one that does is run on
+the host's threads by the Lean machine and the native targets.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by

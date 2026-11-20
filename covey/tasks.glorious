@@ -1,0 +1,222 @@
+// Upstream's tests/tasks.rs:
+// - `bridges_run_at_the_tasks_position_and_see_earlier_bridges_effects`: a
+//   task's bridges run at its place among the systems; a second bridge in
+//   the same emit sees what the first one's commands did.
+// - `a_bridge_waits_for_its_label_and_until_waits_for_valid_parameters`:
+//   `bridge` of a system whose `Single` has no row says `Invalid`; `until`
+//   waits, emit after emit of its label, until it can run.
+// - `closures_borrow_non_send_task_locals_mutably`: a task's own values,
+//   changed by what its bridges give back.
+// - `shared_state_keeps_locals_and_change_detection_between_bridges`: a kept
+//   system's locals and what it has seen changed, from one bridge to the next.
+// - `a_woken_task_resumes_at_the_next_emit_of_any_label`: a task waiting for
+//   something of its own, made to hold by another thread, goes on at the
+//   next emit.
+// - `send_tasks_bridge_between_parallel_groups_on_workers`: a task between
+//   two parallel groups sees what the first did and what it asks is there
+//   for the second.
+// (task_alloc.rs counts allocations: not ported.)
+// expect:
+// before 0
+// task
+// after 1
+// before 1
+// after 1
+// --
+// invalid
+// seven
+// --
+// [4, 5]
+// 9
+// --
+// 1 [1]
+// 2 []
+// 3 [2]
+// --
+// 0
+// 1
+// --
+// before
+// first
+// after 2
+// 0
+mod ecs;
+
+use ecs::{App, World, Entity, Commands, Query, Single, Changed, With, Local, AsyncWorld, Bridge, Schedule, BridgeError,
+          bridge, until, bridge_world, keep, wait_until, parallel};
+use std::vec::sort;
+use std::thread::{Mutex, Shared, AtomicInt, spawn_detached, join};
+
+struct Update
+impl Schedule for Update { const NAME: Str = "Update"; }
+struct Render
+impl Schedule for Render { const NAME: Str = "Render"; }
+
+struct Health(Int)
+struct Player
+
+// `bridges_run_at_the_tasks_position_and_see_earlier_bridges_effects`
+fn before(q: &mut Query<(&Health,), ()>) { say("before " ++ show(q.count())) }
+fn after(q: &mut Query<(&Health,), (With<Player>,)>) { say("after " ++ show(q.count())) }
+fn spawn_player<S>(commands: &mut Commands<S>) -> Entity where S: ecs::Get<Health>, S: ecs::Get<Player>, S: ecs::Columns, S: ecs::Unlinks<S> {
+    commands.spawn((Health(10), Player))
+}
+fn first_health(q: &mut Query<(Entity, &Health), ()>) -> Option<(Entity, Int)> {
+    let mut found = None;
+    q.for_each() { e, h => if(ecs::none_at(&found)) { found = Some((e, h.0)) }; };
+    found
+}
+fn positioned<S>(world: AsyncWorld<S>) -> AsyncWorld<S> / {Bridge<S>}
+    where S: ecs::Get<Health>, S: ecs::Get<Player>, S: ecs::Columns, S: ecs::Unlinks<S> {
+    let mut world = world;
+    let spawned = match(bridge(&mut world, Update, spawn_player<S>)) { Ok(e) => e, Err(_) => ecs::PLACEHOLDER };
+    // The same emit: the spawn is done already.
+    let health = match(bridge(&mut world, Update, first_health)) { Ok(h) => h, Err(_) => None };
+    match(health) { Some((e, h)) => if(if(e == spawned) { h == 10 } else { false }) { say("task") }, None => () };
+    world
+}
+
+// `a_bridge_waits_for_its_label_and_until_waits_for_valid_parameters`
+fn needs_player(h: &mut Single<(&Health,), (With<Player>,)>) { () }
+fn player_health(h: &mut Single<(&Health,), (With<Player>,)>) -> Int { match(h.get_mut()) { Some((h,)) => h.0, None => 0 } }
+fn waiting<S>(world: AsyncWorld<S>) -> AsyncWorld<S> / {Bridge<S>} where S: ecs::Get<Health>, S: ecs::Get<Player> {
+    let mut world = world;
+    match(bridge(&mut world, Update, needs_player)) { Err(BridgeError::Invalid) => say("invalid"), Ok(_) => say("ran") };
+    let hp = until(&mut world, Render, player_health);
+    if(hp == 7) { say("seven") } else { say("other") };
+    world
+}
+
+// `closures_borrow_non_send_task_locals_mutably`
+fn two_healths<S>(w: &mut World<S>) where S: ecs::Get<Health>, S: ecs::Columns {
+    discard(w.spawn_bundle((Health(4),)));
+    discard(w.spawn_bundle((Health(5),)))
+}
+fn healths(q: &mut Query<(&Health,), ()>) -> [Int] {
+    let mut out = [];
+    q.for_each() { (h,) => out = push(out, h.0); };
+    out
+}
+fn locals<S>(world: AsyncWorld<S>) -> AsyncWorld<S> / {Bridge<S>} where S: ecs::Get<Health>, S: ecs::Columns {
+    let mut world = world;
+    let mut local = [];
+    bridge_world(&mut world, Update, two_healths<S>);
+    match(bridge(&mut world, Update, healths)) { Ok(hs) => local = hs, Err(_) => () };
+    say(sort(local));
+    say(fold(local, 0, fn(sum: Int, h: Int) -> Int { sum + h }));
+    world
+}
+
+// `shared_state_keeps_locals_and_change_detection_between_bridges`
+fn counted(n: &mut Local<Int>, q: &mut Query<(&Health,), (Changed<Health>,)>) -> (Int, [Int]) {
+    n.0 = n.0 + 1;
+    let mut seen = [];
+    q.for_each() { (h,) => seen = push(seen, h.0); };
+    (n.0, seen)
+}
+fn kept<S>(world: AsyncWorld<S>) -> AsyncWorld<S> / {Bridge<S>} where S: ecs::Get<Health> {
+    let mut world = world;
+    let mut system = keep(counted);
+    let mut going = true;
+    while({ going }) {
+        match(system.bridge(&mut world, Update)) {
+            Ok((count, ids)) => say(show(count) ++ " " ++ show(ids)),
+            Err(_) => going = false
+        }
+    };
+    world
+}
+
+// `a_woken_task_resumes_at_the_next_emit_of_any_label`
+fn flagged<S>(flag: Shared<AtomicInt>) -> fn(AsyncWorld<S>) -> AsyncWorld<S> / {Bridge<S>} {
+    fn(world: AsyncWorld<S>) -> AsyncWorld<S> / {Bridge<S>} {
+        let mut world = world;
+        let mine = std::thread::share(&flag);
+        wait_until(&mut world, fn() -> Bool { std::thread::load(&*mine) == 1 });
+        say(1);
+        world
+    }
+}
+
+// `send_tasks_bridge_between_parallel_groups_on_workers`
+struct A(Int)
+struct B(Int)
+fn add_a(q: &mut Query<(&mut A,), ()>) { q.for_each() { (mut a,) => a.0 = a.0 + 1; } }
+fn add_b(q: &mut Query<(&mut B,), ()>) { q.for_each() { (mut b,) => b.0 = b.0 + 10; } }
+fn say_before() { say("before") }
+fn sum_and_spawn<S>(q: &mut Query<(&A, &B), ()>, commands: &mut Commands<S>) -> Int where S: ecs::Get<A>, S: ecs::Get<B>, S: ecs::Columns, S: ecs::Unlinks<S> {
+    let mut sum = 0;
+    q.for_each() { a, b => sum = sum + a.0 + b.0; };
+    discard(commands.spawn((A(0), B(0))));
+    sum
+}
+fn count_a(q: &mut Query<(&A,), ()>) { if(q.count() == 2) { say("after 2") } else { say("after ?") } }
+fn see_b(q: &mut Query<(&B,), ()>) { () }
+fn between<S>(world: AsyncWorld<S>) -> AsyncWorld<S> / {Bridge<S>} where S: ecs::Get<A>, S: ecs::Get<B>, S: ecs::Columns, S: ecs::Unlinks<S> {
+    let mut world = world;
+    let mut system = keep(sum_and_spawn<S>);
+    let mut going = true;
+    while({ going }) {
+        match(system.bridge(&mut world, Update)) {
+            Ok(sum) => if(sum == 11) { say("first") } else { say("later") },
+            Err(_) => going = false
+        }
+    };
+    world
+}
+
+fn main() -> Int {
+    let mut app = App::new().register<Health>().register<Player>()
+        .add_systems(Update, before)
+        .add_task(positioned)
+        .add_systems(Update, after)
+        .build();
+    app.emit(&Update);
+    app.emit(&Update);
+    say("--");
+
+    let mut app = App::new().register<Health>().register<Player>().add_task(waiting).build();
+    app.emit(&Update);
+    // No player yet: still waiting.
+    app.emit(&Render);
+    app.emit(&Update);
+    let player = app.world.spawn_bundle(());
+    discard(app.world.insert_bundle(player, (Health(7), Player)));
+    // The wrong label.
+    app.emit(&Update);
+    app.emit(&Render);
+    say("--");
+
+    let mut app = App::new().register<Health>().add_task(locals).build();
+    app.emit(&Update);
+    say("--");
+
+    let mut app = App::new().register<Health>().add_task(kept).build();
+    let a = app.world.spawn_bundle(());
+    discard(app.world.insert(a, Health(1)));
+    app.emit(&Update);
+    app.emit(&Update);
+    match(app.world.get_mut<Health>(a)) { Some(mut h) => h.0 = 2;, None => () };
+    app.emit(&Update);
+    say("--");
+
+    let flag = Shared::new(AtomicInt::new(0));
+    let mut app = App::new().add_task(flagged(std::thread::share(&flag))).build();
+    app.emit(&Update);
+    app.emit(&Render);
+    say(0);
+    let remote = std::thread::share(&flag);
+    join(spawn_detached(fn() { std::thread::store(&*remote, 1) }));
+    app.emit(&Render);
+    say("--");
+
+    let mut app = App::new().register<A>().register<B>()
+        .add_systems(Update, parallel((add_a, add_b)))
+        .add_systems(Update, say_before)
+        .add_task(between)
+        .add_systems(Update, parallel((count_a, see_b)))
+        .build();
+    discard(app.world.spawn_bundle((A(0), B(0))));
+    app.emit(&Update);
+    0
+}

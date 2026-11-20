@@ -1,0 +1,202 @@
+// Upstream's tests/states.rs:
+// - `transitions_exit_innermost_first_and_enter_outermost_first`: a group
+//   that follows a state (`add_sub_state`) and a state worked out from one
+//   (`add_computed_state`); what follows is left newest first and innermost
+//   first, and entered oldest first after the transition; a state of a group
+//   whose parent is not active is let be; clearing a group leaves its state.
+// - `hook_commands_apply_after_the_whole_transition`: what the systems of a
+//   transition ask through commands is done once the whole of it is, and a
+//   state asked for then is entered after it.
+// - `states_gate_systems_and_change_through_commands`: `in_state` lets a
+//   system run only while a state is active; commands set and clear states,
+//   done after the emit.
+// Not ported: `a_state_group_follows_one_parent` (a second parent for a group
+// aborts the program when it is built; a program here cannot go on after).
+// Upstream's `state_name` (a type's name) is asked here as whether the
+// state's resource is there.
+// expect:
+// enter menu
+// --
+// exit menu
+// enter playing 1
+// menu -> playing
+// enter running
+// --
+// exit running
+// enter paused
+// --
+// exit paused
+// exit playing 1
+// enter playing 3
+// playing -> playing
+// enter running
+// enter hard
+// --
+// exit hard
+// exit running
+// exit playing 3
+// enter menu
+// 0
+// 0
+// 0
+// --
+// 0
+// --
+// exit menu
+// enter playing 1
+// enter running
+// --
+// exit running
+// exit playing 1
+// 0
+// ==
+// enter running
+// queued
+// ==
+// exit running
+// enter menu
+// 1
+// ==
+// --
+// playing
+// 2
+// --
+// playing
+// 0
+// --
+// 0
+mod ecs;
+
+use core::option::{is_some, is_none};
+
+use core::value::Default;
+
+use ecs::{App, World, Commands, State, OnEnter, OnExit, OnTransition, Next, Clear, in_state, run_if, chain};
+
+struct Update
+struct Game
+struct Menu
+struct Playing { level: Int }
+impl State for Menu { type Group = Game; }
+impl State for Playing { type Group = Game; }
+// The group that follows `Playing`.
+struct Run
+struct Running
+impl Default for Running { fn default() -> Running { Running } }
+struct Paused
+impl State for Running { type Group = Run; }
+impl State for Paused { type Group = Run; }
+// Worked out from `Playing`.
+struct Difficulty
+struct Hard
+impl State for Hard { type Group = Difficulty; }
+
+fn flag(b: Bool) { if(b) { say(1) } else { say(0) } }
+
+fn enter_menu(e: &OnEnter<Menu>) { say("enter menu") }
+fn exit_menu(e: &OnExit<Menu>) { say("exit menu") }
+fn enter_playing(e: &OnEnter<Playing>, playing: &Playing) { say("enter playing " ++ show(playing.level)) }
+// (The state can still be read while it is left.)
+fn exit_playing(e: &OnExit<Playing>, playing: &Playing) { say("exit playing " ++ show(playing.level)) }
+fn menu_to_playing(e: &OnTransition<Menu, Playing>) { say("menu -> playing") }
+fn playing_to_playing(e: &OnTransition<Playing, Playing>) { say("playing -> playing") }
+fn enter_running(e: &OnEnter<Running>) { say("enter running") }
+fn exit_running(e: &OnExit<Running>) { say("exit running") }
+fn enter_paused(e: &OnEnter<Paused>) { say("enter paused") }
+fn exit_paused(e: &OnExit<Paused>) { say("exit paused") }
+fn enter_hard(e: &OnEnter<Hard>) { say("enter hard") }
+fn exit_hard(e: &OnExit<Hard>) { say("exit hard") }
+fn hard_of(playing: &Playing) -> Option<Hard> { if(playing.level >= 3) { Some(Hard) } else { None } }
+
+fn queue_log<S>(e: &OnEnter<Playing>, commands: &mut Commands<S>) { commands.queue(fn(world: &mut World<S>) { say("queued") }) }
+fn redirect<S>(e: &OnEnter<Running>, commands: &mut Commands<S>) where S: ecs::Holds<Next<Menu>> { commands.set_state(Menu) }
+
+fn start<S>(commands: &mut Commands<S>, menu: &Menu) where S: ecs::Holds<Next<Playing>> { commands.set_state(Playing { level: 1 }) }
+fn playing_log() { say("playing") }
+fn step<S>(commands: &mut Commands<S>, playing: &Playing) where S: ecs::Holds<Next<Playing>>, S: ecs::Holds<Clear<Game>> {
+    if(playing.level == 2) { commands.clear_state<Game>() } else { commands.set_state(Playing { level: 2 }) }
+}
+
+fn main() -> Int {
+    let mut app = App::new()
+        .add_state<Menu>().add_state<Playing>().add_state<Running>().add_state<Paused>().add_state<Hard>()
+        .add_state_group<Game>()
+        .on<OnEnter<Menu>, _, _>(enter_menu)
+        .on<OnExit<Menu>, _, _>(exit_menu)
+        .on<OnEnter<Playing>, _, _>(enter_playing)
+        .on<OnExit<Playing>, _, _>(exit_playing)
+        .on<OnTransition<Menu, Playing>, _, _>(menu_to_playing)
+        .on<OnTransition<Playing, Playing>, _, _>(playing_to_playing)
+        .on<OnEnter<Running>, _, _>(enter_running)
+        .on<OnExit<Running>, _, _>(exit_running)
+        .on<OnEnter<Paused>, _, _>(enter_paused)
+        .on<OnExit<Paused>, _, _>(exit_paused)
+        .on<OnEnter<Hard>, _, _>(enter_hard)
+        .on<OnExit<Hard>, _, _>(exit_hard)
+        .add_sub_state<Playing, Running>()
+        .add_computed_state(hard_of)
+        .init_state(Menu)
+        .build();
+    say("--");
+    app.set_state(Playing { level: 1 });
+    say("--");
+    app.set_state(Paused);
+    say("--");
+    // Another value is a transition: what follows is left first and entered after.
+    app.set_state(Playing { level: 3 });
+    say("--");
+    app.set_state(Menu);
+    flag(is_some(app.world.resource<Playing>()));
+    flag(if(is_some(app.world.resource<Running>())) { true } else { is_some(app.world.resource<Paused>()) });
+    flag(is_some(app.world.resource<Hard>()));
+    say("--");
+    // A state of a group whose parent is not active is let be.
+    app.set_state(Paused);
+    flag(is_some(app.world.resource<Paused>()));
+    say("--");
+    // Entering from nothing is no transition from `Menu`.
+    app.clear_state<Game>();
+    app.set_state(Playing { level: 1 });
+    say("--");
+    app.clear_state<Game>();
+    flag(if(is_some(app.world.resource<Menu>())) { true } else { is_some(app.world.resource<Playing>()) });
+    say("==");
+
+    let mut queued = App::new()
+        .add_state<Menu>().add_state<Playing>().add_state<Running>()
+        .on<OnEnter<Playing>, _, _>(queue_log)
+        .on<OnEnter<Running>, _, _>(enter_running)
+        .on<OnEnter<Menu>, _, _>(enter_menu)
+        .add_sub_state<Playing, Running>()
+        .build();
+    queued.set_state(Playing { level: 1 });
+    say("==");
+
+    let mut redirected = App::new()
+        .add_state<Menu>().add_state<Playing>().add_state<Running>()
+        .on<OnEnter<Running>, _, _>(redirect)
+        .on<OnEnter<Menu>, _, _>(enter_menu)
+        .on<OnExit<Running>, _, _>(exit_running)
+        .add_sub_state<Playing, Running>()
+        .build();
+    redirected.set_state(Playing { level: 1 });
+    flag(is_some(redirected.world.resource<Menu>()));
+    say("==");
+
+    let mut gated = App::new()
+        .add_state<Menu>().add_state<Playing>().add_state_group<Game>()
+        .add_systems(Update, (start, playing_log.run_if(in_state<Playing>()), step).chain())
+        .init_state(Menu)
+        .build();
+    // Menu, then Playing 1: what commands ask is done after the emit.
+    gated.emit(&Update);
+    say("--");
+    gated.emit(&Update);
+    say(match(gated.world.resource<Playing>()) { Some(p) => p.level, None => 0 });
+    say("--");
+    gated.emit(&Update);
+    flag(if(is_some(gated.world.resource<Menu>())) { true } else { is_some(gated.world.resource<Playing>()) });
+    say("--");
+    gated.emit(&Update);
+    0
+}

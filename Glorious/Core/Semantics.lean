@@ -338,7 +338,7 @@ def stepIO (p : Program) (c : Config) : Step Config Result :=
   | _ => lift c.world (step p c.state)
 
 /-- The program about to start, with `input` waiting to be read. -/
-def initIO (p : Program) (input : List Int) : Config := ⟨init p, ⟨input, []⟩⟩
+def initIO (p : Program) (input : List Int) : Config := ⟨init p, ⟨input, [], []⟩⟩
 
 /-- Given `input`, the program finishes with result `r`. -/
 def Halts (p : Program) (input : List Int) (r : Result) : Prop :=

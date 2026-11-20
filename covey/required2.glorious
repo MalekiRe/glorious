@@ -1,0 +1,144 @@
+// Upstream's tests/required.rs, the tests required.glorious does not follow:
+// - `inserting_keeps_components_the_entity_already_has_per_source_table`:
+//   putting in a component keeps what the entity has of what it requires;
+//   putting it in again changes nothing else, and taking a required one away
+//   is allowed.
+// - `cycles_add_each_member_once`: components that require each other.
+// - `required_components_fire_add_then_insert_hooks_only_when_added`: what a
+//   component brings fires `OnAdd` and `OnInsert`, only where it was added.
+// - `commands_spawn_and_insert_with_requirements`: through commands too.
+// - `plugin_components_bring_their_requirements`: a plugin's components bring
+//   theirs, stored without being named.
+// expect:
+// 1
+// 0
+// 7
+// 0
+// 8
+// 0
+// 1
+// --
+// 1
+// 1
+// --
+// add bird
+// add pos
+// insert bird
+// insert mass
+// add pos
+// insert mass
+// add bird
+// insert bird
+// add bird
+// add pos
+// insert bird
+// insert 2 mass
+// --
+// 0
+// 3
+// 0
+// --
+// 0
+// 0
+mod ecs;
+
+use core::option::{is_some, is_none};
+
+use ecs::{App, Entity, Commands, Requires, Plugin, OnAdd, OnInsert};
+use core::value::Default;
+
+struct Update
+struct Pos(Int)
+impl Default for Pos { fn default() -> Pos { Pos(0) } }
+struct Vel(Int)
+impl Default for Vel { fn default() -> Vel { Vel(0) } }
+struct Mass(Int)
+impl Default for Mass { fn default() -> Mass { Mass(0) } }
+struct Bird
+impl Requires for Bird { type Required = (Pos, Vel); }
+impl Requires for Vel { type Required = (Mass,); }
+
+struct Left
+impl Default for Left { fn default() -> Left { Left } }
+struct Right
+impl Default for Right { fn default() -> Right { Right } }
+impl Requires for Left { type Required = (Right,); }
+impl Requires for Right { type Required = (Left,); }
+
+fn flag(b: Bool) { if(b) { say(1) } else { say(0) } }
+fn pos_of(o: Option<&Pos>) -> Int { match(o) { Some(p) => p.0, None => 0 - 1 } }
+
+fn add_bird(t: &OnAdd<Bird>) { say("add bird") }
+fn add_pos(t: &OnAdd<Pos>) { say("add pos") }
+fn insert_bird(t: &OnInsert<Bird>) { say("insert bird") }
+fn insert_mass(t: &OnInsert<Mass>) { if(len_at(&t.entities) == 2) { say("insert 2 mass") } else { say("insert mass") } }
+
+struct Done([Entity])
+fn spawn_birds<S>(commands: &mut Commands<S>, done: &mut Done)
+    where S: ecs::Get<Bird>, S: ecs::Get<Vel>, S: ecs::Get<Pos>, S: ecs::Get<Mass>, S: ecs::Columns, S: ecs::Unlinks<S> {
+    let spawned = commands.spawn((Bird,));
+    let target = commands.spawn((Vel(3),));
+    commands.insert(target, (Bird,));
+    done.0 = [spawned, target]
+}
+
+struct Flock
+impl<S, L> Plugin<S, L> for Flock {
+    type Components = (Bird,);
+    type Out = ecs::App<<(Bird,) as ecs::Registers<S>>::Out, L>;
+    fn build(flock: Flock, app: ecs::App<<(Bird,) as ecs::Registers<S>>::Out, L>) -> ecs::App<<(Bird,) as ecs::Registers<S>>::Out, L> { app }
+}
+
+fn main() -> Int {
+    let mut world = App::new().register<Bird>().register<Pos>().register<Vel>().register<Mass>().build().world;
+    let fresh = world.spawn_bundle((Mass(1),));
+    let moving = world.spawn_bundle((Mass(2), Pos(7)));
+    discard(world.insert(fresh, Bird));
+    discard(world.insert(moving, Bird));
+    say(match(world.get<Mass>(fresh)) { Some(m) => m.0, None => 0 - 1 });
+    say(pos_of(world.get<Pos>(fresh)));
+    say(pos_of(world.get<Pos>(moving)));
+    say(match(world.get<Vel>(moving)) { Some(v) => v.0, None => 0 - 1 });
+    // Putting it in again changes nothing else; taking a required one away is allowed.
+    discard(world.insert(moving, Pos(8)));
+    discard(world.insert(moving, Bird));
+    say(pos_of(world.get<Pos>(moving)));
+    say(match(world.remove<Vel>(moving)) { Some(v) => v.0, None => 0 - 1 });
+    flag(is_some(world.get<Bird>(moving)));
+    say("--");
+
+    let mut cycle = App::new().register<Left>().register<Right>().build().world;
+    let l = cycle.spawn_bundle((Left,));
+    flag(is_some(cycle.get<Right>(l)));
+    let r = cycle.spawn_bundle((Right,));
+    flag(is_some(cycle.get<Left>(r)));
+    say("--");
+
+    let mut app = App::new().register<Bird>().register<Pos>().register<Vel>().register<Mass>()
+        .on<OnAdd<Bird>, _, _>(add_bird)
+        .on<OnAdd<Pos>, _, _>(add_pos)
+        .on<OnInsert<Bird>, _, _>(insert_bird)
+        .on<OnInsert<Mass>, _, _>(insert_mass)
+        .build();
+    discard(app.spawn_bundle((Bird,)));
+    // Spawned with `Pos` and `Mass`: their hooks run then, not again.
+    let placed = app.spawn_bundle((Pos(1), Mass(1)));
+    discard(app.insert(placed, Bird));
+    discard(app.spawn_batch([(Bird,), (Bird,)]));
+    say("--");
+
+    let mut asked = App::new().register<Bird>().register<Pos>().register<Vel>().register<Mass>()
+        .insert_resource(Done([]))
+        .add_systems(Update, spawn_birds).build();
+    asked.emit(&Update);
+    let made = match(asked.world.resource<Done>()) { Some(d) => d.0, None => [] };
+    say(pos_of(asked.world.get<Pos>(made[0])));
+    say(match(asked.world.get<Vel>(made[1])) { Some(v) => v.0, None => 0 - 1 });
+    say(match(asked.world.get<Mass>(made[1])) { Some(m) => m.0, None => 0 - 1 });
+    say("--");
+
+    let mut flock = App::new().add_plugins(Flock).build().world;
+    let e = flock.spawn_bundle((Bird,));
+    say(match(flock.get<Mass>(e)) { Some(m) => m.0, None => 0 - 1 });
+    0
+}

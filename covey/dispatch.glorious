@@ -1,0 +1,151 @@
+// Upstream's tests/dispatch.rs:
+// - `specialization_filters_types_preserving_order_and_captures`: two event
+//   types of one name in two modules; a plugin's systems, each under its
+//   type, run in the order registered, with what they keep of their own.
+// - `schedule_labels_and_event_payloads_select_only_matching_systems`: an
+//   exclusive system given the event.
+// - `the_world_stores_every_component_any_registration_uses_once`: a sparse
+//   column; a plugin's structural system, generic over the app's world.
+// - `plugins_run_where_they_were_added_in_tuples_of_any_shape`.
+// expect:
+// first 3
+// last 3
+// other 7
+// first 10
+// last 5
+// --
+// 10
+// 22
+// 22
+// 46
+// --
+// 12
+// 21
+// 1
+// 2
+// 1
+// 21
+// 1
+// --
+// app first
+// single
+// between
+// a
+// b
+// c
+// d
+// e
+// f
+// g
+// app last
+// 0
+mod ecs;
+
+use core::option::{is_some, is_none};
+
+use ecs::{App, World, Entity, Query, Single, Local, With, Without, Plugin, Sparse, exclusive, exclusive_with, chain};
+
+mod first { pub struct Event(pub Int) }
+mod second { pub struct Event(pub Int) }
+struct Unhandled
+
+// `specialization_filters_types_preserving_order_and_captures`
+fn first_seen(e: &first::Event, count: &mut Local<Int>) { count.0 = count.0 + 1; say("first " ++ show(e.0 * count.0)) }
+fn other_seen(e: &second::Event) { say("other " ++ show(e.0)) }
+fn last_seen(e: &first::Event) { say("last " ++ show(e.0)) }
+fn events<S, L>(app: App<S, L>) -> App<S, (ecs::On<first::Event, <fn(&first::Event) -> () as ecs::IntoSystem<first::Event, S>>::Out>,
+        (ecs::On<second::Event, <fn(&second::Event) -> () as ecs::IntoSystem<second::Event, S>>::Out>,
+        (ecs::On<first::Event, <fn(&first::Event, &mut Local<Int>) -> () as ecs::IntoSystem<first::Event, S>>::Out>, L)))> {
+    app.on<first::Event, _, _>(first_seen).on<second::Event, _, _>(other_seen).on<first::Event, _, _>(last_seen)
+}
+
+// `schedule_labels_and_event_payloads_select_only_matching_systems`
+struct Update
+struct Set(Int)
+struct Number(Int)
+fn plus_one(n: &mut Single<(&mut Number,), ()>) { match(n.get_mut()) { Some((mut x,)) => x.0 = x.0 + 1;, None => () } }
+fn doubled(n: &mut Single<(&mut Number,), ()>) { match(n.get_mut()) { Some((mut x,)) => x.0 = x.0 * 2;, None => () } }
+fn set_all<S>(event: &Set, world: &mut World<S>) where S: ecs::Get<Number> {
+    world.query<(&mut Number,)>().for_each() { (mut n,) => n.0 = event.0; }
+}
+
+// `the_world_stores_every_component_any_registration_uses_once`
+struct Wide(Int)
+struct Total(Int)
+struct Tag
+struct Marker
+fn bump_wide(q: &mut Query<(&mut Wide,), ()>) { q.for_each() { (mut v,) => v.0 = v.0 + 1; } }
+fn tag_new<S>(world: &mut World<S>) where S: ecs::Get<Wide>, S: ecs::Get<Tag>, S: ecs::Columns {
+    let mut untagged = [];
+    world.query_filtered<(Entity,), (With<Wide>, Without<Tag>)>().for_each() { (e,) => untagged = push(untagged, e); };
+    let mut i = 0;
+    while({ i < len_at(&untagged) }) { discard(world.insert(untagged[i], Tag)); i = i + 1 }
+}
+fn count_tagged(q: &mut Query<(&Wide,), (With<Tag>,)>, sum: &mut Single<(&mut Total,), ()>) {
+    let n = q.count();
+    match(sum.get_mut()) { Some((mut t,)) => t.0 = n;, None => () }
+}
+
+// `plugins_run_where_they_were_added_in_tuples_of_any_shape`
+struct Tick
+struct Named(Str)
+fn app_first() { say("app first") }
+fn between() { say("between") }
+fn app_last() { say("app last") }
+fn push_named(name: Str) -> fn() -> () { fn() { say(name) } }
+
+fn main() -> Int {
+    let mut app = App::new().add_plugins(events).build();
+    app.emit(&first::Event(3));
+    app.emit(&Unhandled);
+    app.emit(&second::Event(7));
+    app.emit(&first::Event(5));
+    say("--");
+
+    let mut app = App::new().register<Number>()
+        .add_systems(Update, plus_one)
+        .on<Set, _, _>(exclusive_with(set_all))
+        .add_systems(Update, doubled)
+        .build();
+    let entity = app.world.spawn_bundle((Number(0),));
+    app.emit(&Set(10));
+    say(match(app.world.get<Number>(entity)) { Some(n) => n.0, None => 0 });
+    app.emit(&Update);
+    say(match(app.world.get<Number>(entity)) { Some(n) => n.0, None => 0 });
+    app.emit(&Unhandled);
+    say(match(app.world.get<Number>(entity)) { Some(n) => n.0, None => 0 });
+    app.emit(&Update);
+    say(match(app.world.get<Number>(entity)) { Some(n) => n.0, None => 0 });
+    say("--");
+
+    let mut app = App::new().register<Tag>().register<Marker>().register<Wide>().register<Total>()
+        .storage<Sparse<Marker>>()
+        .add_systems(Update, bump_wide)
+        .add_systems(Update, exclusive(tag_new))
+        .add_systems(Update, count_tagged)
+        .build();
+    let total = app.world.spawn_bundle((Total(0),));
+    let a = app.world.spawn_bundle((Wide(10),));
+    app.emit(&Update);
+    let b = app.world.spawn_bundle((Wide(20), Marker));
+    app.emit(&Update);
+    say(match(app.world.get<Wide>(a)) { Some(w) => w.0, None => 0 });
+    say(match(app.world.get<Wide>(b)) { Some(w) => w.0, None => 0 });
+    say(if(is_some(app.world.get<Tag>(a))) { if(is_some(app.world.get<Tag>(b))) { 1 } else { 0 } } else { 0 });
+    say(match(app.world.get<Total>(total)) { Some(t) => t.0, None => 0 });
+    // A sparse column's membership leaves the others' rows in place.
+    say(if(is_some(app.world.remove<Marker>(b))) { 1 } else { 0 });
+    say(match(app.world.get<Wide>(b)) { Some(w) => w.0, None => 0 });
+    say(if(app.world.stores<Marker>().sparse) { 1 } else { 0 });
+    say("--");
+
+    let mut app = App::new()
+        .add_systems(Tick, app_first)
+        .add_systems(Tick, push_named("single"))
+        .add_systems(Tick, between)
+        .add_systems(Tick, (push_named("a"), push_named("b"), (push_named("c"), push_named("d")).chain(), push_named("e"), push_named("f"), push_named("g")).chain())
+        .add_systems(Tick, app_last)
+        .build();
+    app.emit(&Tick);
+    0
+}

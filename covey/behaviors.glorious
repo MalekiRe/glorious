@@ -1,0 +1,324 @@
+// Upstream's tests/behaviors.rs:
+// - `a_delivery_polls_exactly_the_awaiting_behavior`: each starts once; idle
+//   ones are not run; a delivery runs exactly the one that waits for it.
+// - `removing_the_marker_or_despawning_drops_the_future_and_its_waiters`.
+// - `hidden_entities_freeze_their_behaviors_until_shown`.
+// - `racing_events_leaves_no_stale_waiters`.
+// - `external_wakers_queue_the_behavior_and_call_wakeup`: something of its
+//   own, made to hold by another thread.
+// - `a_behavior_may_despawn_its_own_entity`.
+// - `a_burst_delivered_while_suspended_is_handled_in_order`.
+// - `events_for_a_running_behavior_wait_even_before_it_first_awaits_their_type`.
+// - `every_behavior_listening_on_an_entity_takes_each_event_once`.
+// (behavior_alloc.rs counts allocations: not ported.)
+// expect:
+// 1000
+// 0
+// 1
+// 0
+// 1
+// 3
+// 1
+// --
+// 1
+// 1
+// dropped
+// dropped
+// 0
+// 0
+// 0
+// 4
+// --
+// 0
+// 0
+// 1
+// 2
+// 0
+// 1
+// --
+// 1
+// 1
+// 2525
+// --
+// 0
+// 1
+// --
+// 0
+// --
+// 11
+// 11
+// --
+// 1
+// 0
+// 5
+// 0
+// 0
+// --
+// 101
+// 303
+// 0
+mod ecs;
+
+use ecs::{App, World, Entity, Commands, Query, Disabled, Behavior, Cx, Bridge, Schedule, Inbox, Instances, on, on_either, with, wait_for, me};
+use std::thread::{Shared, AtomicInt, spawn_detached, join};
+
+struct Frame
+impl Schedule for Frame { const NAME: Str = "Frame"; }
+struct Press(Int)
+struct Release
+struct Count(Int)
+struct Polls(Int)
+
+struct Guard
+impl Drop for Guard { fn drop(g: &mut Guard) { say("dropped") } }
+
+fn add_count(q: &mut Query<(Entity, &mut Count), ()>, at: Entity, n: Int) { match(q.get_mut(at)) { Some((_, mut c)) => c.0 = c.0 + n;, None => () } }
+fn poll<S>(cx: &mut Cx<S>) where S: ecs::Holds<Polls> { discard(with(cx, fn(p: &mut Polls) { p.0 = p.0 + 1 })) }
+
+struct Counter
+impl<S> Behavior<S> for Counter where S: ecs::Holds<Inbox<Press>>, S: ecs::Holds<Polls>, S: ecs::Get<Count> {
+    fn behave(me: Entity, cx: Cx<S>) -> Cx<S> / {Bridge<S>} {
+        let mut cx = cx;
+        let guard = Guard;
+        poll(&mut cx);
+        while({ true }) {
+            let Press(n) = on<Press, S>(&mut cx);
+            poll(&mut cx);
+            discard(with(&mut cx, fn(q: &mut Query<(Entity, &mut Count), ()>) { add_count(q, me, n) }))
+        };
+        discard(guard);
+        cx
+    }
+}
+
+struct Racer
+impl<S> Behavior<S> for Racer where S: ecs::Holds<Inbox<Press>>, S: ecs::Holds<Inbox<Release>>, S: ecs::Get<Count> {
+    fn behave(me: Entity, cx: Cx<S>) -> Cx<S> / {Bridge<S>} {
+        let mut cx = cx;
+        while({ true }) {
+            let n = match(on_either<Press, Release, S>(&mut cx)) { Ok(Press(n)) => n, Err(_) => 100 };
+            discard(with(&mut cx, fn(q: &mut Query<(Entity, &mut Count), ()>) { add_count(q, me, n) }))
+        };
+        cx
+    }
+}
+
+struct Waiter
+struct Signal(Shared<AtomicInt>)
+impl<S> Behavior<S> for Waiter where S: ecs::Get<Count>, S: ecs::Get<Signal> {
+    fn behave(me: Entity, cx: Cx<S>) -> Cx<S> / {Bridge<S>} {
+        let mut cx = cx;
+        let signal = match(with(&mut cx, fn(q: &mut Query<(Entity, &Signal), ()>) -> Option<Shared<AtomicInt>> {
+            match(q.get_mut(me)) { Some((_, s)) => Some(std::thread::share(&s.0)), None => None }
+        })) { Ok(Some(s)) => s, _ => Shared::new(AtomicInt::new(1)) };
+        wait_for(&mut cx, fn() -> Bool { std::thread::load(&*signal) == 1 });
+        discard(with(&mut cx, fn(q: &mut Query<(Entity, &mut Count), ()>) { add_count(q, me, 1) }));
+        cx
+    }
+}
+
+struct SelfDestruct
+impl<S> Behavior<S> for SelfDestruct where S: ecs::Holds<Inbox<Press>>, S: ecs::Get<Count>, S: ecs::Columns, S: ecs::Unlinks<S> {
+    fn behave(me: Entity, cx: Cx<S>) -> Cx<S> / {Bridge<S>} {
+        let mut cx = cx;
+        discard(on<Press, S>(&mut cx));
+        discard(with(&mut cx, fn(commands: &mut Commands<S>) { commands.despawn(me) }));
+        discard(on<Press, S>(&mut cx));
+        abort("dropped before it is run again")
+    }
+}
+
+struct PressRelease
+impl<S> Behavior<S> for PressRelease where S: ecs::Holds<Inbox<Press>>, S: ecs::Holds<Inbox<Release>>, S: ecs::Get<Count> {
+    fn behave(me: Entity, cx: Cx<S>) -> Cx<S> / {Bridge<S>} {
+        let mut cx = cx;
+        while({ true }) {
+            let Press(n) = on<Press, S>(&mut cx);
+            discard(on<Release, S>(&mut cx));
+            discard(with(&mut cx, fn(q: &mut Query<(Entity, &mut Count), ()>) { add_count(q, me, n) }))
+        };
+        cx
+    }
+}
+
+struct Echo
+impl<S> Behavior<S> for Echo where S: ecs::Holds<Inbox<Press>>, S: ecs::Get<Count> {
+    fn behave(me: Entity, cx: Cx<S>) -> Cx<S> / {Bridge<S>} {
+        let mut cx = cx;
+        while({ true }) {
+            let Press(n) = on<Press, S>(&mut cx);
+            discard(with(&mut cx, fn(q: &mut Query<(Entity, &mut Count), ()>) { add_count(q, me, 100 * n) }))
+        };
+        cx
+    }
+}
+
+fn flag(b: Bool) { if(b) { say(1) } else { say(0) } }
+fn count_of<S>(world: &World<S>, e: Entity) -> Int where S: ecs::Get<Count> { match(world.get<Count>(e)) { Some(c) => c.0, None => 0 - 1 } }
+fn polls<S>(world: &mut World<S>) -> Int where S: ecs::Holds<Polls> {
+    match(world.resource_mut<Polls>()) { Some(p) => let n = p.0; p.0 = 0; n, None => 0 - 1 }
+}
+fn waiters<E, S>(world: &World<S>, e: Entity) -> Int where S: ecs::Holds<Inbox<E>>, S: ecs::Holds<Instances> {
+    match((world.resource<Inbox<E>>(), world.resource<Instances>())) { (Some(inbox), Some(instances)) => inbox.waiters<S>(instances, e), _ => 0 - 1 }
+}
+
+fn main() -> Int {
+    // `a_delivery_polls_exactly_the_awaiting_behavior`
+    let mut app = App::new().register<Counter>().register<Count>().insert_resource(Polls(0))
+        .add_behaviors().add_inbox<Press>().add_inbox<Release>().add_behavior<Counter, Frame>().build();
+    let mut buttons = [];
+    let mut i = 0;
+    while({ i < 1000 }) { buttons = push(buttons, app.world.spawn_bundle((Counter, Count(0)))); i = i + 1 };
+    app.emit(&Frame);
+    say(polls(&mut app.world));
+    let mut i = 0;
+    while({ i < 5 }) { app.emit(&Frame); i = i + 1 };
+    say(polls(&mut app.world));
+    flag(app.world.deliver(buttons[17], Press(3)));
+    flag(app.world.deliver(buttons[18], Release));
+    app.emit(&Frame);
+    say(polls(&mut app.world));
+    say(count_of(&app.world, buttons[17]));
+    let mut others = true;
+    let mut i = 0;
+    while({ i < 1000 }) { if(i != 17) { if(count_of(&app.world, buttons[i]) != 0) { others = false } }; i = i + 1 };
+    flag(others);
+    say("--");
+
+    // `removing_the_marker_or_despawning_drops_the_future_and_its_waiters`
+    let mut app = App::new().register<Counter>().register<Count>().insert_resource(Polls(0))
+        .add_behaviors().add_inbox<Press>().add_behavior<Counter, Frame>().build();
+    let a = app.world.spawn_bundle((Counter, Count(0)));
+    let b = app.world.spawn_bundle((Counter, Count(0)));
+    app.emit(&Frame);
+    say(waiters<Press, _>(&app.world, a));
+    say(waiters<Press, _>(&app.world, b));
+    discard(app.world.remove<Counter>(a));
+    discard(app.world.despawn(b));
+    app.emit(&Frame);
+    say(waiters<Press, _>(&app.world, a));
+    say(waiters<Press, _>(&app.world, b));
+    flag(app.world.deliver(a, Press(1)));
+    // Putting it back starts it anew.
+    discard(app.world.insert(a, Counter));
+    app.emit(&Frame);
+    discard(app.world.deliver(a, Press(4)));
+    app.emit(&Frame);
+    say(count_of(&app.world, a));
+    say("--");
+
+    // `hidden_entities_freeze_their_behaviors_until_shown`
+    let mut app = App::new().register<Counter>().register<Count>().register<Disabled>().insert_resource(Polls(0))
+        .add_behaviors().add_inbox<Press>().add_behavior<Counter, Frame>().build();
+    let button = app.world.spawn_bundle((Counter, Count(0)));
+    app.emit(&Frame);
+    discard(app.world.insert(button, Disabled));
+    discard(app.world.deliver(button, Press(2)));
+    discard(polls(&mut app.world));
+    app.emit(&Frame);
+    app.emit(&Frame);
+    say(polls(&mut app.world));
+    say(count_of(&app.world, button));
+    discard(app.world.remove<Disabled>(button));
+    app.emit(&Frame);
+    say(polls(&mut app.world));
+    say(count_of(&app.world, button));
+    // Started while hidden: its first run waits too.
+    let hidden = app.world.spawn_bundle((Counter, Count(0), Disabled));
+    app.emit(&Frame);
+    say(polls(&mut app.world));
+    discard(app.world.remove<Disabled>(hidden));
+    app.emit(&Frame);
+    say(polls(&mut app.world));
+    say("--");
+
+    // `racing_events_leaves_no_stale_waiters`
+    let mut app = App::new().register<Racer>().register<Count>()
+        .add_behaviors().add_inbox<Press>().add_inbox<Release>().add_behavior<Racer, Frame>().build();
+    let racer = app.world.spawn_bundle((Racer, Count(0)));
+    app.emit(&Frame);
+    let mut stale = false;
+    let mut round = 0;
+    while({ round < 50 }) {
+        if(round % 2 == 0) { discard(app.world.deliver(racer, Press(1))) } else { discard(app.world.deliver(racer, Release)) };
+        app.emit(&Frame);
+        if(waiters<Press, _>(&app.world, racer) != 1) { stale = true };
+        if(waiters<Release, _>(&app.world, racer) != 1) { stale = true };
+        round = round + 1
+    };
+    flag(if(stale) { false } else { true });
+    say(waiters<Press, _>(&app.world, racer));
+    say(count_of(&app.world, racer));
+    say("--");
+
+    // `external_wakers_queue_the_behavior_and_call_wakeup`
+    let mut app = App::new().register<Waiter>().register<Count>().register<Signal>()
+        .add_behaviors().add_behavior<Waiter, Frame>().build();
+    let flagged = Shared::new(AtomicInt::new(0));
+    let entity = app.world.spawn_bundle((Waiter, Count(0), Signal(std::thread::share(&flagged))));
+    app.emit(&Frame);
+    app.emit(&Frame);
+    say(count_of(&app.world, entity));
+    let remote = std::thread::share(&flagged);
+    join(spawn_detached(fn() { std::thread::store(&*remote, 1) }));
+    app.emit(&Frame);
+    say(count_of(&app.world, entity));
+    say("--");
+
+    // `a_behavior_may_despawn_its_own_entity`
+    let mut app = App::new().register<SelfDestruct>().register<Count>()
+        .add_behaviors().add_inbox<Press>().add_behavior<SelfDestruct, Frame>().build();
+    let entity = app.world.spawn_bundle((SelfDestruct, Count(0)));
+    app.emit(&Frame);
+    discard(app.world.deliver(entity, Press(0)));
+    app.emit(&Frame);
+    flag(app.world.contains(entity));
+    app.emit(&Frame);
+    say("--");
+
+    // `a_burst_delivered_while_suspended_is_handled_in_order`
+    let mut app = App::new().register<PressRelease>().register<Count>()
+        .add_behaviors().add_inbox<Press>().add_inbox<Release>().add_behavior<PressRelease, Frame>().build();
+    let entity = app.world.spawn_bundle((PressRelease, Count(0)));
+    app.emit(&Frame);
+    discard(app.world.deliver(entity, Press(1)));
+    app.emit(&Frame);
+    discard(app.world.deliver(entity, Release));
+    discard(app.world.deliver(entity, Press(10)));
+    discard(app.world.deliver(entity, Release));
+    app.emit(&Frame);
+    say(count_of(&app.world, entity));
+    // What came before it last ran is not given again.
+    app.emit(&Frame);
+    say(count_of(&app.world, entity));
+    say("--");
+
+    // `events_for_a_running_behavior_wait_even_before_it_first_awaits_their_type`
+    let mut app = App::new().register<PressRelease>().register<Count>()
+        .add_behaviors().add_inbox<Press>().add_inbox<Release>().add_behavior<PressRelease, Frame>().build();
+    let entity = app.world.spawn_bundle((PressRelease, Count(0)));
+    app.emit(&Frame);
+    flag(app.world.deliver(entity, Press(5)));
+    flag(app.world.deliver(entity, Release));
+    app.emit(&Frame);
+    say(count_of(&app.world, entity));
+    // An entity with no behaviors keeps nothing.
+    let plain = app.world.spawn_bundle((Count(0),));
+    flag(app.world.deliver(plain, Release));
+    say(waiters<Release, _>(&app.world, plain));
+    say("--");
+
+    // `every_behavior_listening_on_an_entity_takes_each_event_once`
+    let mut app = App::new().register<Counter>().register<Echo>().register<Count>().insert_resource(Polls(0))
+        .add_behaviors().add_inbox<Press>().add_behavior<Counter, Frame>().add_behavior<Echo, Frame>().build();
+    let entity = app.world.spawn_bundle((Counter, Echo, Count(0)));
+    app.emit(&Frame);
+    discard(app.world.deliver(entity, Press(1)));
+    app.emit(&Frame);
+    app.emit(&Frame);
+    say(count_of(&app.world, entity));
+    discard(app.world.deliver(entity, Press(2)));
+    app.emit(&Frame);
+    say(count_of(&app.world, entity));
+    0
+}

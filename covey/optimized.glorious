@@ -1,0 +1,150 @@
+// Upstream's tests/optimized.rs:
+// - `remaining_cardinality_and_count_span_archetypes`: how many a query has,
+//   across entities with other components, and with a filter.
+// - `sparse_toggles_preserve_dense_rows_and_generations_reject_stale_handles`.
+// - `bundle_replacement_and_removal_preserve_unrelated_sparse_values`.
+// - `summary_windows_survive_sparse_membership_changes_and_world_replacement`.
+// - `mixed_or_filters_do_not_count_structurally_missing_branches`.
+// Not ported: `tracked_chunks_only_mark_mutably_accessed_rows` (a query's
+// rows as slices of memory, `contiguous_mut`: values here are not reached
+// as raw memory) and `sparse_and_dense_destructors_finish_after_unwind` (a
+// destructor that panics: no unwinding). Upstream's iterator size hints are
+// asked as the query's count.
+// expect:
+// 12
+// 8
+// --
+// 1
+// 1
+// 1
+// 0
+// 100
+// 1
+// --
+// before
+// 9
+// after
+// 42
+// 0
+// 9
+// 1
+// --
+// [0, 1, 2, 3, 4, 5]
+// []
+// [30]
+// []
+// [99]
+// --
+// 6
+// 2
+// 3
+// 0
+mod ecs;
+
+use ecs::{App, World, Entity, Query, Changed, With, Without, Or, Sparse, Summarized, ExecutionMode};
+use std::vec::sort;
+
+struct Update
+struct Tag(Int)
+struct Number(Int)
+struct Label(Str)
+
+fn flag(b: Bool) { if(b) { say(1) } else { say(0) } }
+
+fn changed_numbers(q: &mut Query<(&Number,), (Changed<Number>,)>) {
+    let mut out = [];
+    q.for_each() { (n,) => out = push(out, n.0); };
+    say(sort(out))
+}
+fn tagged_or_changed(q: &mut Query<(&Number,), (Or<(With<Tag>, Changed<Number>)>,)>) { say(q.count()) }
+
+fn main() -> Int {
+    let mut world = App::new().register<Number>().register<Tag>().build().world;
+    let mut batch = [];
+    let mut i = 0;
+    while({ i < 12 }) { batch = push(batch, (Number(i),)); i = i + 1 };
+    let entities = world.spawn_batch(batch);
+    let mut i = 3;
+    while({ i < 7 }) { discard(world.insert(entities[i], Tag(1))); i = i + 1 };
+    say(world.query<(&Number,)>().count());
+    say(world.query_filtered<(Entity,), (Without<Tag>,)>().count());
+    say("--");
+
+    let mut world = App::new().register<Number>().register<Tag>().storage<Sparse<Tag>>().build().world;
+    let mut batch = [];
+    let mut i = 0;
+    while({ i < 32 }) { batch = push(batch, (Number(i),)); i = i + 1 };
+    let entities = world.spawn_batch(batch);
+    let mut kept = true;
+    let mut i = 0;
+    while({ i < 32 }) { discard(world.insert(entities[i], Tag(i))); i = i + 1 };
+    let mut i = 0;
+    while({ i < 32 }) {
+        match(world.remove<Tag>(entities[i])) { Some(t) => if(t.0 != i) { kept = false }, None => kept = false };
+        match(world.get<Number>(entities[i])) { Some(n) => if(n.0 != i) { kept = false }, None => kept = false };
+        i = i + 1
+    };
+    flag(kept);
+    let stale = entities[7];
+    flag(world.despawn(stale));
+    let fresh = world.spawn_bundle((Number(100),));
+    flag(if(fresh.index == stale.index) { fresh.generation != stale.generation } else { true });
+    flag(world.contains(stale));
+    say(match(world.get<Number>(fresh)) { Some(n) => n.0, None => 0 });
+    let mut values = [];
+    world.query<(&Number,)>().for_each() { (n,) => values = push(values, n.0); };
+    flag(len_at(&values) == 32);
+    say("--");
+
+    let mut world = App::new().register<Label>().register<Number>().register<Tag>().storage<Sparse<Tag>>().build().world;
+    let entity = world.spawn_bundle((Label("before"), Tag(9)));
+    match(world.insert_bundle(entity, (Label("after"), Number(42)))) {
+        Some((Some(l), _)) => say(l.0),
+        _ => say("none")
+    };
+    say(match(world.get<Tag>(entity)) { Some(t) => t.0, None => 0 });
+    match(world.remove_bundle<(Label, Number)>(entity)) {
+        (Some(l), Some(n)) => say(l.0); say(n.0),
+        _ => say("none")
+    };
+    match(world.remove_bundle<(Label, Number)>(entity)) { (None, None) => say(0), _ => say(1) };
+    say(match(world.get<Tag>(entity)) { Some(t) => t.0, None => 0 });
+    flag(world.despawn(entity));
+    say("--");
+
+    let mut app = App::new().register<Number>().register<Tag>()
+        .storage<(Summarized<Number>, Sparse<Tag>)>()
+        .with_execution_mode(ExecutionMode::Serial)
+        .add_systems(Update, changed_numbers)
+        .build();
+    let mut batch = [];
+    let mut i = 0;
+    while({ i < 6 }) { batch = push(batch, (Number(i),)); i = i + 1 };
+    let entities = app.world.spawn_batch(batch);
+    app.emit(&Update);
+    app.emit(&Update);
+    discard(app.world.insert(entities[1], Tag(1)));
+    match(app.world.get_mut<Number>(entities[3])) { Some(mut n) => n.0 = 30;, None => () };
+    app.emit(&Update);
+    app.emit(&Update);
+    app.world = App::new().register<Number>().register<Tag>().build().world;
+    discard(app.world.spawn_bundle((Number(99),)));
+    app.emit(&Update);
+    say("--");
+
+    let mut app = App::new().register<Number>().register<Tag>()
+        .storage<(Summarized<Number>, Sparse<Tag>)>()
+        .add_systems(Update, tagged_or_changed)
+        .build();
+    let mut batch = [];
+    let mut i = 0;
+    while({ i < 6 }) { batch = push(batch, (Number(i),)); i = i + 1 };
+    let entities = app.world.spawn_batch(batch);
+    discard(app.world.insert(entities[1], Tag(1)));
+    discard(app.world.insert(entities[4], Tag(4)));
+    app.emit(&Update);
+    app.emit(&Update);
+    match(app.world.get_mut<Number>(entities[2])) { Some(mut n) => n.0 = 20;, None => () };
+    app.emit(&Update);
+    0
+}

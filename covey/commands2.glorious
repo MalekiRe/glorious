@@ -1,0 +1,70 @@
+// Upstream's tests/commands.rs, the tests commands.glorious does not follow:
+// - `parallel_systems_reserve_distinct_entities_and_apply_in_system_order`:
+//   two systems of a `parallel` group each ask for a hundred new entities;
+//   each gets its own, and their commands are done in the order of the
+//   systems. A world spawn afterwards still works.
+// - `commands_on_despawned_entities_do_nothing`: what is asked of an entity
+//   ended earlier among the same commands is not done.
+// Not ported: `a_panicking_command_drops_every_remaining_command_exactly_once`
+// (a command that fails ends the program here: there is no unwinding).
+// expect:
+// 0
+// 1
+// 200
+// 0
+// 19900
+// 999
+// --
+// 0
+// 0
+// 0
+mod ecs;
+
+use ecs::{App, World, Entity, Commands, Query, parallel};
+
+struct Update
+struct Value(Int)
+struct Link(Entity)
+
+fn first<S>(commands: &mut Commands<S>) where S: ecs::Get<Value>, S: ecs::Columns, S: ecs::Unlinks<S> {
+    let mut i = 0;
+    while({ i < 100 }) { discard(commands.spawn((Value(i),))); i = i + 1 };
+    commands.queue(fn(world: &mut World<S>) { say(0) })
+}
+fn second<S>(commands: &mut Commands<S>) where S: ecs::Get<Value>, S: ecs::Columns, S: ecs::Unlinks<S> {
+    let mut i = 100;
+    while({ i < 200 }) { discard(commands.spawn((Value(i),))); i = i + 1 };
+    commands.queue(fn(world: &mut World<S>) { say(1) })
+}
+
+fn undo<S>(commands: &mut Commands<S>, query: &mut Query<(Entity, &Value), ()>)
+    where S: ecs::Get<Link>, S: ecs::Get<Value>, S: ecs::Columns, S: ecs::Unlinks<S> {
+    query.for_each() { entity, _ =>
+        commands.despawn(entity);
+        commands.insert(entity, (Link(entity),));
+        commands.remove<Value>(entity);
+    }
+}
+
+fn flag(b: Bool) { if(b) { say(1) } else { say(0) } }
+
+fn main() -> Int {
+    let mut app = App::new().register<Value>().add_systems(Update, parallel((first, second))).build();
+    app.emit(&Update);
+    let mut values = [];
+    let mut lowest = 1000;
+    app.world.query<(&Value,)>().for_each() { (v,) => values = push(values, v.0); if(v.0 < lowest) { lowest = v.0 }; };
+    say(len_at(&values));
+    say(lowest);
+    say(fold(values, 0, fn(sum: Int, v: Int) -> Int { sum + v }));
+    let direct = app.world.spawn_bundle((Value(999),));
+    say(match(app.world.get<Value>(direct)) { Some(v) => v.0, None => 0 });
+    say("--");
+
+    let mut ended = App::new().register<Value>().register<Link>().add_systems(Update, undo).build();
+    let entity = ended.world.spawn_bundle((Value(1),));
+    ended.emit(&Update);
+    flag(ended.world.contains(entity));
+    say(ended.world.query<(&Link,)>().count());
+    0
+}

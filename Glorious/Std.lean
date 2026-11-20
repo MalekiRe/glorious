@@ -3723,6 +3723,214 @@ impl PathBuf {
 }
 "#
 
+private def threadText : String := r#"// Threads, as the library has them: computations that run in turn, each
+// until it waits for something (`join`, `recv`, `yield_now`), under the
+// scope that has them (`scope`). Every thread spawned in a scope is done
+// before the scope returns. What threads share is kept in cells more than
+// one of them reaches: `Mutex`, `AtomicInt`, channels, `Shared`; using one
+// is not waiting, so no other thread runs while a thread has it.
+//
+// (They are run one at a time, by the machine that runs the program: which
+// waits for which is what a program can tell, not whether they run at the
+// same moment.)
+
+use core::value::discard;
+
+// Waiting until something holds: whoever handles it runs other threads
+// until then.
+pub effect Threads { block_until(fn() -> Bool) }
+
+// The threads waiting in a scope: what each waits for, and the rest of it.
+struct Waiting { ready: [fn() -> Bool], rest: [fn() -> ()] }
+
+pub struct Scope { queue: Int }
+
+fn take_cell<T>(cell: Int) -> T where T: Use<[1, 1]> { unsafe { heap_take(cell) } }
+fn put_cell<T>(cell: Int, value: T) where T: Use<[1, 1]> { unsafe { heap_put(cell, value) } }
+fn new_cell<T>(value: T) -> Int where T: Use<[1, 1]> { unsafe { heap_new(value) } }
+
+fn waiting_count(queue: Int) -> Int {
+    let w = take_cell<Waiting>(queue);
+    let n = len_at(&w.rest);
+    put_cell(queue, w);
+    n
+}
+fn push_waiting(queue: Int, ready: fn() -> Bool, rest: fn() -> ()) {
+    let mut w = take_cell<Waiting>(queue);
+    push_at(&mut w.ready, ready);
+    push_at(&mut w.rest, rest);
+    put_cell(queue, w)
+}
+
+// Where the first wait that is over is, or -1.
+fn first_ready(ready: &[fn() -> Bool]) -> Int { first_ready_from(ready, 0) }
+fn first_ready_from(ready: &[fn() -> Bool], i: Int) -> Int {
+    if(i >= len_at(ready)) { 0 - 1 } else {
+        let f = ready[i];
+        if(f()) { i } else { first_ready_from(ready, i + 1) }
+    }
+}
+
+// Run the first waiting thread whose wait is over, if any.
+fn run_next(queue: Int) {
+    let mut w = take_cell<Waiting>(queue);
+    let at = first_ready(&w.ready);
+    let next = if(at < 0) { None } else { discard(remove_at(&mut w.ready, at)); Some(remove_at(&mut w.rest, at)) };
+    let empty = len_at(&w.rest) == 0;
+    put_cell(queue, w);
+    match(next) {
+        Some(k) => k(),
+        None => if(empty) { () } else { abort("every thread of a scope waits for another: none can go on") }
+    }
+}
+
+// A thread's computation, its waits handled by the scope's queue.
+fn run_thread(queue: Int, body: fn() -> () / {Threads}) {
+    handle body() {
+        _ => run_next(queue),
+        block_until(ready, k) => push_waiting(queue, ready, { k(()) }); run_next(queue)
+    }
+}
+
+fn always() -> Bool { true }
+
+// Run `f` with a scope in which it may spawn threads; each is done before
+// this returns.
+pub fn scope<R>(f: fn(&Scope) -> R / {Threads}) -> R {
+    let queue = new_cell(Waiting { ready: [], rest: [] });
+    let result = new_cell<Option<R>>(None);
+    let s = Scope { queue: queue };
+    run_thread(queue, fn() / {Threads} { let r = f(&s); put_cell(result, Some(r)) });
+    // (What is still waiting when the first is done.)
+    let mut going = true;
+    while({ going }) {
+        going = waiting_count(queue) > 0;
+        if(going) { run_next(queue) };
+    };
+    match(take_cell<Option<R>>(result)) { Some(r) => r, None => abort("a scope's own computation did not finish") }
+}
+
+// A thread's result, once it is done.
+pub struct Handle<T> { cell: Int, none: [T] }
+
+impl Scope {
+    // A thread in this scope; it runs once the spawning thread waits.
+    pub fn spawn<T>(s: &Self, f: fn() -> T / {Threads}) -> Handle<T> {
+        let cell = new_cell<Option<T>>(None);
+        let queue = s.queue;
+        push_waiting(queue, always, { run_thread(queue, fn() / {Threads} { let r = f(); put_cell(cell, Some(r)) }) });
+        Handle { cell: cell, none: [] }
+    }
+}
+
+fn filled<T>(cell: Int) -> Bool {
+    let held = take_cell<Option<T>>(cell);
+    let full = match(&held) { &Some(_) => true, &None => false };
+    put_cell(cell, held);
+    full
+}
+
+// Wait for a thread to be done, and what it gave.
+pub fn join<T>(h: Handle<T>) -> T / {Threads} {
+    let cell = h.cell;
+    block_until(fn() -> Bool { filled<T>(cell) });
+    match(take_cell<Option<T>>(cell)) { Some(r) => r, None => abort("join") }
+}
+
+// Let the other threads that can go on run first.
+pub fn yield_now() / {Threads} { block_until(always) }
+
+// A computation of its own, done now, that waits for nothing: what it gave,
+// by `wait`.
+pub struct Detached<T> { value: T }
+pub fn spawn_detached<T>(f: fn() -> T) -> Detached<T> { Detached { value: f() } }
+impl<T> Detached<T> { pub fn wait(d: Self) -> T { d.value } }
+
+// Another holder of something threads share.
+pub trait Share { fn share(&Self) -> Self }
+
+// A value threads share, changed only by one at a time.
+pub struct Mutex<T> { cell: Int, none: [T] }
+impl<T> Mutex<T> {
+    pub fn new(value: T) -> Mutex<T> { Mutex { cell: new_cell(value), none: [] } }
+}
+impl<T> Share for Mutex<T> { fn share(m: &Mutex<T>) -> Mutex<T> { Mutex { cell: m.cell, none: [] } } }
+// Run `f` with the value: no other thread has it meanwhile.
+pub fn lock<T, R, F>(m: &Mutex<T>, f: F) -> R where F: for<'a> Fn<(&'a mut T,), Output = R>, F: Returns {
+    let mut value = take_cell<T>(m.cell);
+    let r = f(&mut value);
+    put_cell(m.cell, value);
+    r
+}
+
+// A value many threads hold and read.
+pub struct Shared<T> { cell: Int, none: [T] }
+impl<T> Shared<T> {
+    pub fn new(value: T) -> Shared<T> { Shared { cell: new_cell(value), none: [] } }
+}
+impl<T> Share for Shared<T> { fn share(s: &Shared<T>) -> Shared<T> { Shared { cell: s.cell, none: [] } } }
+// Run `f` with the value.
+pub fn with_shared<T, R, F>(s: &Shared<T>, f: F) -> R where F: for<'a> Fn<(&'a T,), Output = R>, F: Returns {
+    let value = take_cell<T>(s.cell);
+    let r = f(&value);
+    put_cell(s.cell, value);
+    r
+}
+pub fn share<T>(s: &T) -> T where T: Share { <T as Share>::share(s) }
+
+// A whole number threads share.
+pub struct AtomicInt { cell: Int }
+impl AtomicInt {
+    pub fn new(value: Int) -> AtomicInt { AtomicInt { cell: new_cell(value) } }
+}
+impl Share for AtomicInt { fn share(a: &AtomicInt) -> AtomicInt { AtomicInt { cell: a.cell } } }
+pub fn load(a: &AtomicInt) -> Int { let v = take_cell<Int>(a.cell); put_cell(a.cell, v); v }
+pub fn store(a: &AtomicInt, value: Int) { discard(take_cell<Int>(a.cell)); put_cell(a.cell, value) }
+// Add to it; what it was.
+pub fn fetch_add(a: &AtomicInt, by: Int) -> Int { let v = take_cell<Int>(a.cell); put_cell(a.cell, v + by); v }
+// Put `new` in if it holds `old`; what it held.
+pub fn compare_exchange(a: &AtomicInt, old: Int, new: Int) -> Int {
+    let v = take_cell<Int>(a.cell);
+    put_cell(a.cell, if(v == old) { new } else { v });
+    v
+}
+
+// Values sent from one thread to another, in the order sent.
+pub struct Sender<T> { cell: Int, none: [T] }
+pub struct Receiver<T> { cell: Int, none: [T] }
+pub fn channel<T>() -> (Sender<T>, Receiver<T>) {
+    let cell = new_cell<[T]>([]);
+    (Sender { cell: cell, none: [] }, Receiver { cell: cell, none: [] })
+}
+impl<T> Share for Sender<T> { fn share(s: &Sender<T>) -> Sender<T> { Sender { cell: s.cell, none: [] } } }
+pub fn send<T>(s: &Sender<T>, value: T) {
+    let queue = take_cell<[T]>(s.cell);
+    put_cell(s.cell, push(queue, value))
+}
+fn waiting_values<T>(cell: Int) -> Bool {
+    let queue = take_cell<[T]>(cell);
+    let any = len_at(&queue) > 0;
+    put_cell(cell, queue);
+    any
+}
+// The next value sent; waits until there is one.
+pub fn recv<T>(r: &Receiver<T>) -> Option<T> / {Threads} {
+    let cell = r.cell;
+    block_until(fn() -> Bool { waiting_values<T>(cell) });
+    try_recv(r)
+}
+// The next value sent, if there is one now.
+pub fn try_recv<T>(r: &Receiver<T>) -> Option<T> {
+    let mut queue = take_cell<[T]>(r.cell);
+    let got = if(len_at(&queue) > 0) { Some(remove_at(&mut queue, 0)) } else { None };
+    put_cell(r.cell, queue);
+    got
+}
+
+// How many threads can run at the same moment: one, here.
+pub fn available_parallelism() -> Int { 1 }
+"#
+
 private def futureText : String := r#"// Computations that may not be done yet, as the library specification has
 // them (30.3): polling one uses it up, and gives its result or the future
 // that goes on. Who polls, and when, is whoever handles `await`.
@@ -5103,6 +5311,7 @@ def texts : List (List String × String) :=
    (["std", "task"], taskText),
    (["std", "path"], pathText),
    (["std", "future"], futureText),
+   (["std", "thread"], threadText),
    (["alloc", "boxed"], "pub use std::boxed::*;\n"),
    (["std", "iterator"], iteratorText),
    (["std", "slice"], sliceText),

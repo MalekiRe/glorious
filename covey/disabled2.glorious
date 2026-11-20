@@ -1,0 +1,107 @@
+// Upstream's tests/disabled.rs, the tests disabled.glorious does not follow:
+// - `cached_system_queries_follow_entities_in_and_out_of_disabled_tables`.
+// - `subtree_toggles_hide_descendants_and_keep_nested_closes`: hiding a
+//   subtree hides what is under it; showing it again leaves hidden what was
+//   hidden on its own.
+// - `subtree_toggles_through_commands_apply_after_the_frame`.
+// - `disabled_entities_keep_their_relation_links_consistent`.
+// - `queries_that_never_see_a_disabling_component_run_beside_ones_requiring_it`.
+// Not ported: `joins_skip_disabled_targets_unless_the_inner_query_mentions_the_component`
+// (covey's joins, `To` and `From`, do not yet hide disabled targets).
+// expect:
+// 2
+// 1
+// 2
+// --
+// 1
+// 0
+// 3
+// --
+// 3
+// 3
+// 0
+// --
+// 1
+// 1
+// --
+// 1
+// 1
+// 0
+mod ecs;
+
+use core::option::{is_some, is_none};
+
+use ecs::{App, World, Entity, Commands, Query, Disabled, HiddenBy, ChildOf, With, MayHave};
+
+struct Update
+struct Hp(Int)
+struct Seen(Int)
+
+fn count_hp(q: &mut Query<(&Hp,), ()>, seen: &mut Seen) { seen.0 = q.count() }
+fn seen_of<S>(world: &World<S>) -> Int where S: ecs::Holds<Seen> { match(world.resource<Seen>()) { Some(s) => s.0, None => 0 - 1 } }
+
+fn hide_root<S>(commands: &mut Commands<S>, q: &mut Query<(Entity, &Hp), ()>) where S: ecs::Get<ecs::Sources<ChildOf>>, S: ecs::Get<Disabled>, S: ecs::Get<HiddenBy> {
+    q.for_each() { e, h => if(h.0 == 0) { commands.disable_subtree<ChildOf>(e) }; }
+}
+
+fn visible(q: &mut Query<(&Hp,), ()>, seen: &mut Seen) { seen.0 = seen.0 + q.count() }
+fn hidden(q: &mut Query<(&Hp,), (With<Disabled>,)>, seen: &mut Seen) { seen.0 = seen.0 + 10 * q.count() }
+
+fn main() -> Int {
+    let mut app = App::new().register<Hp>().register<Disabled>().insert_resource(Seen(0)).add_systems(Update, count_hp).build();
+    let a = app.world.spawn_bundle((Hp(1),));
+    discard(app.world.spawn_bundle((Hp(2),)));
+    app.emit(&Update);
+    say(seen_of(&app.world));
+    discard(app.world.insert(a, Disabled));
+    app.emit(&Update);
+    say(seen_of(&app.world));
+    discard(app.world.remove<Disabled>(a));
+    app.emit(&Update);
+    say(seen_of(&app.world));
+    say("--");
+
+    let mut world = App::new().register<Hp>().register<Disabled>().register<HiddenBy>().relation<ChildOf>().build().world;
+    let root = world.spawn_bundle((Hp(0),));
+    let child = world.spawn_bundle((Hp(1),));
+    let closed = world.spawn_bundle((Hp(2), Disabled));
+    discard(world.relate(child, ChildOf, root));
+    discard(world.relate(closed, ChildOf, child));
+    world.disable_subtree<ChildOf>(root);
+    say(world.query_filtered<(&Hp,), (MayHave<Disabled>,)>().count() - world.query<(&Hp,)>().count() - 2);
+    say(world.query<(&Hp,)>().count());
+    world.enable_subtree<ChildOf>(root);
+    // What was hidden on its own stays hidden.
+    say(world.query<(&Hp,)>().count() + (if(is_some(world.get<Disabled>(closed))) { 1 } else { 0 }));
+    say("--");
+
+    let mut app = App::new().register<Hp>().register<Disabled>().register<HiddenBy>().relation<ChildOf>().insert_resource(Seen(0))
+        .add_systems(Update, (count_hp, hide_root<_>)).build();
+    let root = app.world.spawn_bundle((Hp(0),));
+    let child = app.world.spawn_bundle((Hp(1),));
+    discard(app.world.relate(child, ChildOf, root));
+    discard(app.world.spawn_bundle((Hp(5),)));
+    app.emit(&Update);
+    // Hidden after the frame, not during it.
+    say(seen_of(&app.world));
+    say(app.world.query_filtered<(&Hp,), (MayHave<Disabled>,)>().count());
+    say(app.world.query<(&Hp,)>().count() - 1);
+    say("--");
+
+    let mut world = App::new().register<Hp>().register<Disabled>().register<HiddenBy>().relation<ChildOf>().build().world;
+    let root = world.spawn_bundle((Hp(0),));
+    let child = world.spawn_bundle((Hp(1),));
+    discard(world.relate(child, ChildOf, root));
+    discard(world.insert(child, Disabled));
+    say(len_at(&world.sources<ChildOf>(root)));
+    say(match(world.target<ChildOf>(child)) { Some(t) => if(t == root) { 1 } else { 0 }, None => 0 });
+    say("--");
+
+    let mut app = App::new().register<Hp>().register<Disabled>().insert_resource(Seen(0)).add_systems(Update, ecs::parallel((visible, hidden))).build();
+    discard(app.world.spawn_bundle((Hp(1),)));
+    discard(app.world.spawn_bundle((Hp(2), Disabled)));
+    app.emit(&Update);
+    say(seen_of(&app.world) % 10);
+    say(seen_of(&app.world) / 10);
+    0
+}

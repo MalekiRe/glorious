@@ -1,0 +1,92 @@
+// Upstream's tests/one_of.rs, the tests one_of.glorious does not follow:
+// - `bundles_remove_every_member_their_members_exclude`.
+// - `removed_members_fire_replace_and_remove_with_old_values_before_add`:
+//   what is taken out for a member fires its hooks, seeing the old values,
+//   before the new member's.
+// - `required_members_remove_their_siblings`.
+// - `sibling_filters_are_disjoint_so_their_writers_run_together`: queries of
+//   each member, filtered by the other's absence, both run.
+// Not ported: `removed_values_drop_once_from_dense_and_sparse_columns`
+// (as behavior.glorious's drops) and `a_panicking_drop_still_completes_the_move`.
+// expect:
+// 1
+// 0
+// 0
+// --
+// replace running 3
+// remove running 3
+// remove dead
+// add walking 0 0
+// insert walking
+// --
+// 0
+// 0
+// --
+// 2
+// 0
+mod ecs;
+
+use ecs::{App, World, Entity, Query, OneOf, Requires, Has, Without, OnReplace, OnRemove, OnAdd, OnInsert};
+use core::value::Default;
+
+struct Update
+struct Locomotion
+struct Life
+struct Walking(Int)
+impl Default for Walking { fn default() -> Walking { Walking(0) } }
+struct Running(Int)
+struct Dead
+struct Pos(Int)
+impl OneOf for Walking { type Groups = (Locomotion, Life); }
+impl OneOf for Running { type Groups = (Locomotion,); }
+impl OneOf for Dead { type Groups = (Life,); }
+struct Rider
+impl Requires for Rider { type Required = (Walking,); }
+
+fn has<T, S>(world: &World<S>, e: Entity) -> Int where S: ecs::Get<T> { match(world.get<T>(e)) { Some(_) => 1, None => 0 } }
+
+fn replaced(t: &OnReplace<Running>, q: &mut Query<(Entity, &Running), ()>) { match(q.get_mut(t.entities[0])) { Some((_, r)) => say("replace running " ++ show(r.0)), None => () } }
+fn removed(t: &OnRemove<Running>, q: &mut Query<(Entity, &Running), ()>) { match(q.get_mut(t.entities[0])) { Some((_, r)) => say("remove running " ++ show(r.0)), None => () } }
+fn removed_dead(t: &OnRemove<Dead>) { say("remove dead") }
+fn added_walking(t: &OnAdd<Walking>, q: &mut Query<(Entity, Has<Running>, Has<Dead>), ()>) {
+    match(q.get_mut(t.entities[0])) { Some((_, r, d)) => say("add walking " ++ (if(r.0) { "1" } else { "0" }) ++ " " ++ (if(d.0) { "1" } else { "0" })), None => () }
+}
+fn inserted_walking(t: &OnInsert<Walking>) { say("insert walking") }
+
+fn walkers(q: &mut Query<(&mut Walking,), (Without<Running>,)>) { q.for_each() { (mut w,) => w.0 = w.0 + 1; } }
+fn runners(q: &mut Query<(&mut Running,), (Without<Walking>,)>) { q.for_each() { (mut r,) => r.0 = r.0 + 1; } }
+
+fn main() -> Int {
+    let mut world = App::new().register<Walking>().register<Running>().register<Dead>().register<Pos>().build().world;
+    let e = world.spawn_bundle((Running(1), Dead));
+    discard(world.insert_bundle(e, (Walking(2), Pos(1))));
+    say(has<Walking, _>(&world, e));
+    say(has<Running, _>(&world, e));
+    say(has<Dead, _>(&world, e));
+    say("--");
+
+    let mut app = App::new().register<Walking>().register<Running>().register<Dead>()
+        .on<OnReplace<Running>, _, _>(replaced)
+        .on<OnRemove<Running>, _, _>(removed)
+        .on<OnRemove<Dead>, _, _>(removed_dead)
+        .on<OnAdd<Walking>, _, _>(added_walking)
+        .on<OnInsert<Walking>, _, _>(inserted_walking)
+        .build();
+    let e = app.spawn_bundle((Running(3), Dead));
+    discard(app.insert(e, Walking(1)));
+    say("--");
+
+    let mut world = App::new().register<Rider>().register<Walking>().register<Running>().register<Dead>().build().world;
+    let e = world.spawn_bundle((Running(1),));
+    discard(world.insert(e, Rider));
+    say(match(world.get<Walking>(e)) { Some(w) => w.0, None => 0 - 1 });
+    say(has<Running, _>(&world, e));
+    say("--");
+
+    let mut app = App::new().register<Walking>().register<Running>().add_systems(Update, (walkers, runners)).build();
+    let w = app.world.spawn_bundle((Walking(0),));
+    let r = app.world.spawn_bundle((Running(0),));
+    app.emit(&Update);
+    say(match((app.world.get<Walking>(w), app.world.get<Running>(r))) { (Some(a), Some(b)) => a.0 + b.0, _ => 0 });
+    0
+}

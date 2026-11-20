@@ -1,0 +1,152 @@
+// Upstream's tests/plugins.rs:
+// - `plugins_build_systems_of_every_kind_for_the_app_world`: a plugin with a
+//   parallel group of a query system and one that spawns through commands
+//   with a local; another that uses the first's systems, a relation, a hook,
+//   an exclusive system and a task that bridges every frame.
+// - `plugins_choose_storage_for_their_components`.
+// - `a_plugin_may_only_declare_components`.
+// - `payload_labels_with_named_fields_are_named_by_type`.
+// expect:
+// hp added x1
+// hp added x1
+// child alive: 0
+// hp added x1
+// hp added x1
+// child alive: 0
+// hp added x1
+// hp added x1
+// child alive: 0
+// [(0, 3), (2, 1), (2, 2)]
+// 3
+// --
+// 1
+// 0
+// 1
+// 1
+// --
+// 1
+// --
+// 6
+// 0
+mod ecs;
+
+use ecs::{App, World, Entity, Commands, Query, Local, With, Changed, Plugin, Sparse, Summarized, ChildOf, OnAdd, AsyncWorld, Bridge, Schedule,
+          exclusive, parallel, keep};
+use std::vec::sort;
+
+struct Update
+impl Schedule for Update { const NAME: Str = "Update"; }
+struct Never
+impl Schedule for Never { const NAME: Str = "Never"; }
+
+struct Pos(Int)
+struct Vel(Int)
+struct Spawned(Int)
+struct Hp
+
+// Moves things; spawns one mover a frame through commands.
+fn mover(q: &mut Query<(&mut Pos, &Vel), ()>) { q.for_each() { mut p, v => p.0 = p.0 + v.0; } }
+fn spawner<S>(spawned: &mut Local<Int>, commands: &mut Commands<S>) where S: ecs::Get<Pos>, S: ecs::Get<Vel>, S: ecs::Columns, S: ecs::Unlinks<S> {
+    spawned.0 = spawned.0 + 1;
+    discard(commands.spawn((Pos(0), Vel(spawned.0))))
+}
+fn looker<S>(q: &mut Query<(&Pos,), ()>, commands: &mut Commands<S>) { () }
+
+fn hp_added(trigger: &OnAdd<Hp>) { say("hp added x" ++ show(len_at(&trigger.entities))) }
+fn linked<S>(world: &mut World<S>) where S: ecs::Get<Hp>, S: ecs::Columns, S: ecs::Unlinks<S>, S: ecs::Get<ecs::Relates<ChildOf>>, S: ecs::Get<ecs::Sources<ChildOf>> {
+    let parent = world.spawn_bundle((Hp,));
+    let child = world.spawn_bundle((Hp,));
+    discard(world.relate(child, ChildOf, parent));
+    world.despawn_linked<ChildOf>(parent);
+    say("child alive: " ++ (if(world.contains(child)) { "1" } else { "0" }))
+}
+fn count_up(q: &mut Query<(&mut Spawned,), ()>) -> Int {
+    q.for_each() { (mut s,) => s.0 = s.0 + 1; };
+    q.count()
+}
+fn ticking<S>(world: AsyncWorld<S>) -> AsyncWorld<S> / {Bridge<S>} where S: ecs::Get<Spawned> {
+    let mut world = world;
+    let mut system = keep(count_up);
+    let mut going = true;
+    while({ going }) { match(system.bridge(&mut world, Update)) { Ok(_) => (), Err(_) => going = false } };
+    world
+}
+
+// The hooks of `Hp` run in the app here, so the exclusive system's spawns
+// are given to the app's: through its commands.
+fn game<S, L>(app: App<S, L>) -> App<S, (ecs::TaskOf<S>, (ecs::On<Update, ecs::Exclusive<fn(&mut World<S>) -> ()>>, (ecs::On<OnAdd<Hp>, <fn(&OnAdd<Hp>) -> () as ecs::IntoSystem<OnAdd<Hp>, S>>::Out>,
+        (ecs::On<Update, <fn(&mut Query<(&Pos,), ()>, &mut Commands<S>) -> () as ecs::IntoSystem<Update, S>>::Out>,
+        (ecs::On<Update, <ecs::Parallel<(fn(&mut Query<(&mut Pos, &Vel), ()>) -> (), (fn(&mut Local<Int>, &mut Commands<S>) -> (), ()))> as ecs::IntoSystem<Update, S>>::Out>, L)))))>
+    where S: ecs::Get<Pos>, S: ecs::Get<Vel>, S: ecs::Get<Hp>, S: ecs::Get<Spawned>, S: ecs::Columns, S: ecs::Unlinks<S>,
+          S: ecs::Get<ecs::Relates<ChildOf>>, S: ecs::Get<ecs::Sources<ChildOf>> {
+    app.add_systems(Update, parallel((mover, spawner<S>)))
+        .add_systems(Update, looker<S>)
+        .on<OnAdd<Hp>, _, _>(hp_added)
+        .add_systems(Update, exclusive(linked<S>))
+        .add_task(ticking<S>)
+}
+
+// `plugins_choose_storage_for_their_components`
+struct Hot(Int)
+struct Cold(Int)
+struct Flag
+fn heat(q: &mut Query<(&mut Hot,), (Changed<Cold>,)>) { q.for_each() { (mut h,) => h.0 = h.0 + 1; } }
+struct Tuned
+impl<S, L> Plugin<S, L> for Tuned {
+    type Components = (Hot, Cold, Flag);
+    type Out = App<<(Hot, Cold, Flag) as ecs::Registers<S>>::Out, L>;
+    fn build(tuned: Tuned, app: App<<(Hot, Cold, Flag) as ecs::Registers<S>>::Out, L>) -> App<<(Hot, Cold, Flag) as ecs::Registers<S>>::Out, L> { app }
+}
+
+// `a_plugin_may_only_declare_components`
+struct Marker
+struct Count(Int)
+struct Vocabulary
+impl<S, L> Plugin<S, L> for Vocabulary {
+    type Components = (Marker, Count);
+    type Out = App<<(Marker, Count) as ecs::Registers<S>>::Out, L>;
+    fn build(v: Vocabulary, app: App<<(Marker, Count) as ecs::Registers<S>>::Out, L>) -> App<<(Marker, Count) as ecs::Registers<S>>::Out, L> { app }
+}
+fn count_marked(q: &mut Query<(&mut Count,), (With<Marker>,)>) { q.for_each() { (mut c,) => c.0 = c.0 + 1; } }
+
+// `payload_labels_with_named_fields_are_named_by_type`
+struct Hit { target: Entity, amount: Int }
+struct Health(Int)
+fn hurt(hit: &Hit, q: &mut Query<(Entity, &mut Health), ()>) { match(q.get_mut(hit.target)) { Some((_, mut h)) => h.0 = h.0 - hit.amount;, None => () } }
+
+fn main() -> Int {
+    let mut app = App::new().register<Pos>().register<Vel>().register<Spawned>().register<Hp>().relation<ChildOf>()
+        .add_plugins(game).build();
+    let counter = app.world.spawn_bundle((Spawned(0),));
+    app.emit(&Update);
+    app.emit(&Update);
+    app.emit(&Never);
+    app.emit(&Update);
+    let mut movers = [];
+    app.world.query<(&Pos, &Vel)>().for_each() { p, v => movers = push(movers, (p.0, v.0)); };
+    say(sort(movers));
+    say(match(app.world.get<Spawned>(counter)) { Some(s) => s.0, None => 0 });
+    say("--");
+
+    // (The plugin's components, kept as it says: in covey, said once they are there.)
+    let mut app = App::new().add_plugins(Tuned).storage<(Summarized<Hot>, Sparse<Flag>)>().add_systems((), heat).build();
+    say(if(app.world.stores<Hot>().summary) { 1 } else { 0 });
+    say(if(app.world.stores<Cold>().summary) { 1 } else { 0 });
+    say(if(app.world.stores<Flag>().sparse) { 1 } else { 0 });
+    let e = app.world.spawn_bundle((Hot(0), Cold(0), Flag));
+    app.emit(&());
+    say(match(app.world.get<Hot>(e)) { Some(h) => h.0, None => 0 });
+    say("--");
+
+    let mut app = App::new().add_plugins(Vocabulary).storage<Sparse<Marker>>().add_systems((), count_marked).build();
+    let e = app.world.spawn_bundle((Count(0), Marker));
+    app.emit(&());
+    say(match(app.world.get<Count>(e)) { Some(c) => c.0, None => 0 });
+    say("--");
+
+    let mut app = App::new().register<Health>().on<Hit, _, _>(hurt).build();
+    let target = app.world.spawn_bundle((Health(10),));
+    app.emit(&Hit { target: target, amount: 4 });
+    say(match(app.world.get<Health>(target)) { Some(h) => h.0, None => 0 });
+    0
+}

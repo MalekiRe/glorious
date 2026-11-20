@@ -41,6 +41,7 @@ use core::iter::{into_iter, next};
 // An entity: a place in the columns, and which of the entities that have had
 // that place this one is.
 pub struct Entity { pub index: Int, pub generation: Int }
+impl Eq for Entity { fn ==(a: Entity, b: Entity) -> Bool { if(a.index == b.index) { a.generation == b.generation } else { false } } }
 impl Clone for Entity { fn clone(e: &Entity) -> Entity { *e } }
 impl Entity {
     // An entity no world has, to start with where one is needed.
@@ -51,9 +52,9 @@ impl Entity {
 // for each entity's place where its value is among them. With each value,
 // when it was put in and when it was last changed (`now`: the time a write
 // through the column is now).
-pub struct Column<T> { pub dense: [T], pub owners: [Entity], pub slots: [Int], added: [Int], changed: [Int], now: Int }
+pub struct Column<T> { pub dense: [T], pub owners: [Entity], pub slots: [Int], added: [Int], changed: [Int], now: Int, sparse: Bool, summary: Bool }
 
-pub fn empty_column<T>() -> Column<T> { Column { dense: [], owners: [], slots: [], added: [], changed: [], now: 0 } }
+pub fn empty_column<T>() -> Column<T> { Column { dense: [], owners: [], slots: [], added: [], changed: [], now: 0, sparse: false, summary: false } }
 
 // Where an entity's value is in a column, or -1.
 pub fn slot_of<T>(column: &Column<T>, entity: Entity) -> Int {
@@ -182,11 +183,13 @@ pub trait Columns {
     fn forget(&mut Self, Entity)
     fn empty() -> Self
     fn copy_onto(&mut Self, Entity, Entity)
+    fn copy_all(&Self, &mut Self)
 }
 impl Columns for () {
     fn forget(columns: &mut (), entity: Entity) { () }
     fn empty() { () }
     fn copy_onto(columns: &mut (), from: Entity, to: Entity) { () }
+    fn copy_all(columns: &(), into: &mut ()) { () }
 }
 impl<H, R> Columns for (Column<H>, R) where R: Columns, H: Cloner {
     fn forget(columns: &mut (Column<H>, R), entity: Entity) {
@@ -208,11 +211,21 @@ impl<H, R> Columns for (Column<H>, R) where R: Columns, H: Cloner {
         };
         <R as Columns>::copy_onto(&mut columns.1, from, to)
     }
+    fn copy_all(columns: &(Column<H>, R), into: &mut (Column<H>, R)) {
+        match(<H as Cloner>::CLONER) {
+            Some(copy) =>
+                let mut i = 0;
+                while({ i < len_at(&columns.0.owners) }) { column_insert(&mut into.0, columns.0.owners[i], copy(&columns.0.dense[i])); i = i + 1 },
+            None => ()
+        };
+        <R as Columns>::copy_all(&columns.1, &mut into.1)
+    }
 }
 impl<H, R> Columns for (Resource<H>, R) where R: Columns {
     fn forget(columns: &mut (Resource<H>, R), entity: Entity) { <R as Columns>::forget(&mut columns.1, entity) }
     fn empty() -> (Resource<H>, R) { (Resource { value: None }, <R as Columns>::empty()) }
     fn copy_onto(columns: &mut (Resource<H>, R), from: Entity, to: Entity) { <R as Columns>::copy_onto(&mut columns.1, from, to) }
+    fn copy_all(columns: &(Resource<H>, R), into: &mut (Resource<H>, R)) { <R as Columns>::copy_all(&columns.1, &mut into.1) }
 }
 
 // Components that are never written in place, upstream's `Immutable`:
@@ -229,6 +242,26 @@ impl InPlace for Mutable {}
 pub trait Writable {}
 impl<T> Writable for T where <T as Mutability>::Writes: InPlace {}
 
+// How a component's column is kept, upstream's `Components<T, SUMMARY>` and
+// `Sparse<T>`: `app.storage<Sparse<Marker>>()`, or a plugin's `type Storage`.
+// Every column here is a sparse set with its values packed, so the choice
+// changes how it is said to be kept (`world.stores<T>()`), not what it does.
+pub struct Sparse<T> { none: [T] }
+pub struct Summarized<T> { none: [T] }
+pub struct Dense<T> { none: [T] }
+pub struct Keeping { pub sparse: Bool, pub summary: Bool }
+pub trait StorageChoice<S> { fn choose(&mut S) }
+impl<T, S> StorageChoice<S> for Sparse<T> where S: Get<T> { fn choose(columns: &mut S) { <S as Get<T>>::column_mut(columns).sparse = true } }
+impl<T, S> StorageChoice<S> for Summarized<T> where S: Get<T> { fn choose(columns: &mut S) { <S as Get<T>>::column_mut(columns).summary = true } }
+impl<T, S> StorageChoice<S> for Dense<T> where S: Get<T> { fn choose(columns: &mut S) { () } }
+impl<S> StorageChoice<S> for () { fn choose(columns: &mut S) { () } }
+impl<A, B, S> StorageChoice<S> for (A, B) where A: StorageChoice<S>, B: StorageChoice<S> {
+    fn choose(columns: &mut S) { <A as StorageChoice<S>>::choose(columns); <B as StorageChoice<S>>::choose(columns) }
+}
+
+// (Says that `Disabled` was put on by a subtree toggle.)
+pub struct HiddenBy
+
 // How a component is copied when its entity is: `impl Cloner for Label {
 // const CLONER: Option<fn(&Label) -> Label> = Some(clone); }`, as upstream's
 // `Clone` components are. Any other is not copied (relations' links are not:
@@ -237,7 +270,9 @@ pub trait Cloner { const CLONER: Option<fn(&Self) -> Self>; }
 impl<T> Cloner for T { const CLONER: Option<fn(&T) -> T> = None; }
 
 // The columns, and which entities there are.
-pub struct World<S> { pub columns: S, generations: [Int], free: [Int], tick: Int, since: Int }
+pub struct World<S> { pub columns: S, generations: [Int], free: [Int], tick: Int, since: Int, remotes: std::thread::Mutex<[Request<S>]> }
+use std::thread::{Mutex, Threads, lock, channel, send, recv};
+fn no_remotes<S>() -> Mutex<[Request<S>]> { Mutex::new([]) }
 
 pub fn spawn<S>(world: &mut World<S>) -> Entity {
     match(pop_at(&mut world.free)) {
@@ -713,7 +748,7 @@ impl<S> World<S> {
     pub fn spawn_bundle<B>(world: &mut Self, bundle: B) -> Entity where B: Bundle<S> { spawn_with(world, bundle) }
 
     // An empty world of the columns `S`.
-    pub fn new() -> World<S> where S: Columns { World { columns: <S as Columns>::empty(), generations: [], free: [], tick: 1, since: 0 } }
+    pub fn new() -> World<S> where S: Columns { World { columns: <S as Columns>::empty(), generations: [], free: [], tick: 1, since: 0, remotes: no_remotes() } }
 
     // Give an entity a component, or another value of one it has: the one
     // it had, if it had one.
@@ -745,6 +780,11 @@ impl<S> World<S> {
 
     // Whether the entity is there.
     pub fn contains(world: &Self, entity: Entity) -> Bool { alive(world, entity) }
+    // How the column of `T` is kept.
+    pub fn stores<T>(world: &Self) -> Keeping where S: Get<T> {
+        let column = <S as Get<T>>::column(&world.columns);
+        Keeping { sparse: column.sparse, summary: column.summary }
+    }
 
     // Take a component from an entity.
     pub fn remove<T>(world: &mut Self, entity: Entity) -> Option<T> where S: Get<T> { remove<T, S>(world, entity) }
@@ -802,10 +842,50 @@ impl<S> World<S> {
     // target (`ChildOf`: a scene and all under it).
     pub fn despawn_linked<R>(world: &mut Self, entity: Entity)
         where S: Columns, S: Unlinks<S>, S: Get<Sources<R>>, S: Get<Relates<R>> {
+        // (Ended first, so a link back to it is gone when what is under it
+        // is ended: a cycle ends.)
         let under = sources_in<R, S>(&world.columns, entity);
+        despawn(world, entity);
         let mut i = 0;
-        while({ i < len_at(&under) }) { world.despawn_linked<R>(under[i]); i = i + 1 };
-        despawn(world, entity)
+        while({ i < len_at(&under) }) { if(alive(&*world, under[i])) { world.despawn_linked<R>(under[i]) }; i = i + 1 }
+    }
+    // Hide an entity and all under it by `R` (`Disabled` on each), upstream's
+    // subtree toggle; one already hidden on its own stays so when shown.
+    pub fn disable_subtree<R>(world: &mut Self, entity: Entity) where S: Get<Sources<R>>, S: Get<Disabled>, S: Get<HiddenBy> {
+        let all = push(world.descendants<R>(entity), entity);
+        let mut i = 0;
+        while({ i < len_at(&all) }) {
+            let e = all[i];
+            if(not_b(<S as Get<Disabled>>::has(&world.columns, e))) { discard(insert<HiddenBy, S>(world, e, HiddenBy)); discard(insert<Disabled, S>(world, e, Disabled)) };
+            i = i + 1
+        }
+    }
+    // Show what `disable_subtree` hid.
+    pub fn enable_subtree<R>(world: &mut Self, entity: Entity) where S: Get<Sources<R>>, S: Get<Disabled>, S: Get<HiddenBy> {
+        let all = push(world.descendants<R>(entity), entity);
+        let mut i = 0;
+        while({ i < len_at(&all) }) {
+            let e = all[i];
+            if(is_some(remove<HiddenBy, S>(world, e))) { discard(remove<Disabled, S>(world, e)) };
+            i = i + 1
+        }
+    }
+    // What relates to an entity by `R`, and what relates to those, parents
+    // before their children, each once.
+    pub fn descendants<R>(world: &Self, entity: Entity) -> [Entity] where S: Get<Sources<R>> {
+        let mut out = [];
+        let mut next = sources_in<R, S>(&world.columns, entity);
+        while({ len_at(&next) > 0 }) {
+            let mut after = [];
+            let mut i = 0;
+            while({ i < len_at(&next) }) {
+                let e = next[i];
+                if(not_seen(&out, e)) { if(e != entity) { out = push(out, e); after = join_onto(after, sources_in<R, S>(&world.columns, e)) } };
+                i = i + 1
+            };
+            next = after
+        };
+        out
     }
 
     // End an entity; whether it was there.
@@ -1343,6 +1423,27 @@ impl<S> Commands<S> {
     pub fn relate<R>(commands: &mut Self, source: Entity, relation: R, target: Entity) where R: RelateBy<S> {
         push_at(&mut commands.queue, fn(world: &mut World<S>) { discard(world.relate(source, relation, target)) })
     }
+    // Make `state` its group's active state once the systems have run (its
+    // place: `add_state`).
+    pub fn set_state<T>(commands: &mut Self, state: T) where S: Holds<Next<T>> {
+        push_at(&mut commands.queue, fn(world: &mut World<S>) {
+            match(world.resource_mut<Next<T>>()) { Some(next) => next.value = Some(state), None => discard(state) }
+        })
+    }
+    // Hide, or show, an entity and all under it by `R`, once the systems have run.
+    pub fn disable_subtree<R>(commands: &mut Self, entity: Entity) where S: Get<Sources<R>>, S: Get<Disabled>, S: Get<HiddenBy> {
+        push_at(&mut commands.queue, fn(world: &mut World<S>) { world.disable_subtree<R>(entity) })
+    }
+    pub fn enable_subtree<R>(commands: &mut Self, entity: Entity) where S: Get<Sources<R>>, S: Get<Disabled>, S: Get<HiddenBy> {
+        push_at(&mut commands.queue, fn(world: &mut World<S>) { world.enable_subtree<R>(entity) })
+    }
+    // Leave the group `G`'s active state once the systems have run (its
+    // place: `add_state_group`).
+    pub fn clear_state<G>(commands: &mut Self) where S: Holds<Clear<G>> {
+        push_at(&mut commands.queue, fn(world: &mut World<S>) {
+            match(world.resource_mut<Clear<G>>()) { Some(clear) => clear.asked = true, None => () }
+        })
+    }
 }
 
 pub fn end<S>(commands: &mut Commands<S>, entity: Entity) where S: Columns, S: Unlinks<S> {
@@ -1733,9 +1834,143 @@ pub fn exclusive<F>(f: F) -> Exclusive<F> { Exclusive { f: f } }
 impl<E, S, F> System<E, S> for Exclusive<F> where F: Fn<(&mut World<S>,), Output = ()> {
     fn run(system: &mut Exclusive<F>, event: &E, world: &mut World<S>, commands: &mut Commands<S>) { (system.f)(world) }
 }
+// One that is given what was emitted too: `exclusive_with({ event, world => .. })`.
+pub struct ExclusiveWith<F> { f: F }
+pub fn exclusive_with<F>(f: F) -> ExclusiveWith<F> { ExclusiveWith { f: f } }
+impl<E, S, F> System<E, S> for ExclusiveWith<F> where F: Fn<(&E, &mut World<S>), Output = ()> {
+    fn run(system: &mut ExclusiveWith<F>, event: &E, world: &mut World<S>, commands: &mut Commands<S>) { (system.f)(event, world) }
+}
+impl<E, S, F> IntoSystem<E, S> for ExclusiveWith<F> where F: Fn<(&E, &mut World<S>), Output = ()> {
+    type Out = ExclusiveWith<F>;
+    fn into_system(system: ExclusiveWith<F>) -> ExclusiveWith<F> { system }
+}
 impl<E, S, F> IntoSystem<E, S> for Exclusive<F> where F: Fn<(&mut World<S>,), Output = ()> {
     type Out = Exclusive<F>;
     fn into_system(system: Exclusive<F>) -> Exclusive<F> { system }
+}
+
+// Systems that may run side by side, upstream's `.parallel()`: each branch
+// on a thread of its own, `parallel((a, (b, c).chain()))`. What they ask
+// through commands is done in the order of the branches, and new entities
+// they ask for are told apart. (Each branch has the whole world while it
+// runs, so they are run one after another, each on its thread: what they
+// take of the world apart is not yet given to each apart.)
+pub struct Parallel<P> { branches: P }
+pub fn parallel<T, P>(systems: T) -> Parallel<P> where T: Tuple<Nested = P> { Parallel { branches: nest(systems) } }
+pub trait Branches<E, S> { fn run_branches(&mut Self, &E, &mut World<S>, &mut Commands<S>) }
+impl<E, S> Branches<E, S> for () { fn run_branches(none: &mut (), event: &E, world: &mut World<S>, commands: &mut Commands<S>) { () } }
+impl<E, S, X, R> Branches<E, S> for (X, R) where X: System<E, S>, R: Branches<E, S> {
+    fn run_branches(list: &mut (X, R), event: &E, world: &mut World<S>, commands: &mut Commands<S>) {
+        std::thread::scope(fn(s: &std::thread::Scope) {
+            std::thread::join(s.spawn({ <X as System<E, S>>::run(&mut list.0, event, world, commands) }))
+        });
+        <R as Branches<E, S>>::run_branches(&mut list.1, event, world, commands)
+    }
+}
+impl<E, S, P> System<E, S> for Parallel<P> where P: Branches<E, S> {
+    fn run(group: &mut Parallel<P>, event: &E, world: &mut World<S>, commands: &mut Commands<S>) {
+        <P as Branches<E, S>>::run_branches(&mut group.branches, event, world, commands)
+    }
+}
+impl<E, S, P> IntoSystem<E, S> for Parallel<P> where P: IntoSystem<E, S> {
+    type Out = Parallel<<P as IntoSystem<E, S>>::Out>;
+    fn into_system(group: Parallel<P>) -> Parallel<<P as IntoSystem<E, S>>::Out> { Parallel { branches: <P as IntoSystem<E, S>>::into_system(group.branches) } }
+}
+
+// A graph of systems (upstream's `ready((node(A, a), node(B, b).after(A)))`):
+// each node has a name of its own, a type, and runs after the nodes it is
+// said to follow, whatever order they were given in. Nodes that follow none
+// of each other may run side by side, each on a thread; nodes that touch the
+// same columns are run one after the other. A node may be a graph itself.
+// (Run in passes over the nodes, in the order given: each node whose nodes
+// before it have run is run, on a thread of its own, one after another.)
+pub struct Node<N, P, D> { systems: P, none: [(N, D)] }
+pub fn node<N, P>(name: N, systems: P) -> Node<N, P, ()> { discard(name); Node { systems: systems, none: [] } }
+impl<N, P, D> Node<N, P, D> {
+    // This node runs after the node named `other`.
+    pub fn after<M>(n: Self, other: M) -> Node<N, P, (M, D)> {
+        discard(other);
+        let Node { systems, none } = n;
+        discard(none);
+        Node { systems: systems, none: [] }
+    }
+}
+pub struct Graph<Ns> { nodes: Ns }
+pub fn ready<T, Ns>(nodes: T) -> Graph<Ns> where T: Tuple<Nested = Ns> { Graph { nodes: nest(nodes) } }
+
+// Where the node named `M` is among the nodes.
+pub trait IndexOf<M> { fn index_of(Int) -> Int }
+impl<M> IndexOf<M> for () { fn index_of(at: Int) -> Int { 0 - 1 } }
+impl<M, N, P, D, R> IndexOf<M> for (Node<N, P, D>, R) where N: Same<M>, R: IndexOf<M> {
+    fn index_of(at: Int) -> Int { if(<N as Same<M>>::same()) { at } else { <R as IndexOf<M>>::index_of(at + 1) } }
+}
+// Whether every node a node follows has run.
+pub trait DepsDone<Ns> { fn deps_done(&[Bool]) -> Bool }
+impl<Ns> DepsDone<Ns> for () { fn deps_done(done: &[Bool]) -> Bool { true } }
+impl<M, R, Ns> DepsDone<Ns> for (M, R) where Ns: IndexOf<M>, R: DepsDone<Ns> {
+    fn deps_done(done: &[Bool]) -> Bool {
+        let at = <Ns as IndexOf<M>>::index_of(0);
+        let here = if(at < 0) { true } else { done[at] };
+        if(here) { <R as DepsDone<Ns>>::deps_done(done) } else { false }
+    }
+}
+// One pass over the nodes: each that can run is run. Whether any was.
+pub trait RunNodes<E, S, Ns> { fn run_nodes(&mut Self, &E, &mut World<S>, &mut Commands<S>, &mut [Bool], Int) -> Bool }
+impl<E, S, Ns> RunNodes<E, S, Ns> for () {
+    fn run_nodes(none: &mut (), event: &E, world: &mut World<S>, commands: &mut Commands<S>, done: &mut [Bool], at: Int) -> Bool { false }
+}
+impl<E, S, Ns, N, P, D, R> RunNodes<E, S, Ns> for (Node<N, P, D>, R) where P: System<E, S>, D: DepsDone<Ns>, R: RunNodes<E, S, Ns> {
+    fn run_nodes(list: &mut (Node<N, P, D>, R), event: &E, world: &mut World<S>, commands: &mut Commands<S>, done: &mut [Bool], at: Int) -> Bool {
+        let can = if(done[at]) { false } else { <D as DepsDone<Ns>>::deps_done(&*done) };
+        if(can) {
+            std::thread::scope(fn(s: &std::thread::Scope) {
+                std::thread::join(s.spawn({ <P as System<E, S>>::run(&mut list.0.systems, event, world, commands) }))
+            });
+            done[at] = true
+        };
+        let rest = <R as RunNodes<E, S, Ns>>::run_nodes(&mut list.1, event, world, commands, done, at + 1);
+        if(can) { true } else { rest }
+    }
+}
+pub trait CountNodes { fn count_nodes() -> Int }
+impl CountNodes for () { fn count_nodes() -> Int { 0 } }
+impl<N, P, D, R> CountNodes for (Node<N, P, D>, R) where R: CountNodes { fn count_nodes() -> Int { 1 + <R as CountNodes>::count_nodes() } }
+impl<E, S, Ns> System<E, S> for Graph<Ns> where Ns: RunNodes<E, S, Ns>, Ns: CountNodes {
+    fn run(graph: &mut Graph<Ns>, event: &E, world: &mut World<S>, commands: &mut Commands<S>) {
+        let mut done = [];
+        let mut i = 0;
+        while({ i < <Ns as CountNodes>::count_nodes() }) { done = push(done, false); i = i + 1 };
+        let mut going = true;
+        while({ going }) { going = <Ns as RunNodes<E, S, Ns>>::run_nodes(&mut graph.nodes, event, world, commands, &mut done, 0) }
+    }
+}
+// A graph's nodes made systems.
+pub trait IntoNodes<E, S> { type Out; fn into_nodes(Self) -> Self::Out; }
+impl<E, S> IntoNodes<E, S> for () { type Out = (); fn into_nodes(none: ()) { () } }
+impl<E, S, N, P, D, R> IntoNodes<E, S> for (Node<N, P, D>, R) where P: IntoSystem<E, S>, R: IntoNodes<E, S> {
+    type Out = (Node<N, <P as IntoSystem<E, S>>::Out, D>, <R as IntoNodes<E, S>>::Out);
+    fn into_nodes(list: (Node<N, P, D>, R)) -> (Node<N, <P as IntoSystem<E, S>>::Out, D>, <R as IntoNodes<E, S>>::Out) {
+        let (n, rest) = list;
+        let Node { systems, none } = n;
+        discard(none);
+        (Node { systems: <P as IntoSystem<E, S>>::into_system(systems), none: [] }, <R as IntoNodes<E, S>>::into_nodes(rest))
+    }
+}
+impl<E, S, Ns> IntoSystem<E, S> for Graph<Ns> where Ns: IntoNodes<E, S> {
+    type Out = Graph<<Ns as IntoNodes<E, S>>::Out>;
+    fn into_system(graph: Graph<Ns>) -> Graph<<Ns as IntoNodes<E, S>>::Out> { Graph { nodes: <Ns as IntoNodes<E, S>>::into_nodes(graph.nodes) } }
+}
+
+// How an app runs side by side what may (upstream's `ExecutionMode`): on
+// threads, or all on the thread that emits. And the threads it may use
+// (upstream's `WorkerPool`), with how much work a group needs before it is
+// worth giving to them.
+pub enum ExecutionMode { Parallel, Serial }
+pub struct WorkerPool { threads: Int, least: Int }
+impl WorkerPool {
+    pub fn new(threads: Int) -> WorkerPool { WorkerPool { threads: threads, least: 2 } }
+    pub fn with_min_parallel_work(pool: Self, least: Int) -> WorkerPool { WorkerPool { threads: pool.threads, least: least } }
+    pub fn install<R>(pool: &Self, f: fn() -> R) -> R { f() }
 }
 
 // Systems in the order written, however many: `(a, b, c).chain()`. A tuple
@@ -1759,6 +1994,12 @@ impl<E, P, T, S> Dispatch<E, S> for (On<E, P>, T) where P: System<E, S>, T: Disp
         <T as Dispatch<E, S>>::dispatch(&mut list.1, event, world, commands);
         <P as System<E, S>>::run(&mut list.0.systems, event, world, commands)
     }
+}
+impl<E, P, X, T, S> Dispatch<E, S> for (SubOf<P, X>, T) where T: Dispatch<E, S> {
+    fn dispatch(list: &mut (SubOf<P, X>, T), event: &E, world: &mut World<S>, commands: &mut Commands<S>) { <T as Dispatch<E, S>>::dispatch(&mut list.1, event, world, commands) }
+}
+impl<E, P, C, T, S> Dispatch<E, S> for (ComputedOf<P, C>, T) where T: Dispatch<E, S> {
+    fn dispatch(list: &mut (ComputedOf<P, C>, T), event: &E, world: &mut World<S>, commands: &mut Commands<S>) { <T as Dispatch<E, S>>::dispatch(&mut list.1, event, world, commands) }
 }
 impl<E, F, P, T, S> Dispatch<E, S> for (On<F, P>, T) where T: Dispatch<E, S> {
     fn dispatch(list: &mut (On<F, P>, T), event: &E, world: &mut World<S>, commands: &mut Commands<S>) { <T as Dispatch<E, S>>::dispatch(&mut list.1, event, world, commands) }
@@ -1809,7 +2050,7 @@ pub struct OnRemove<T> { pub entities: [Entity], none: [T] }
 pub trait Hooked<S, L> { fn added(&mut App<S, L>, [Entity]) }
 impl<S, L> Hooked<S, L> for () { fn added(app: &mut App<S, L>, entities: [Entity]) { discard(entities) } }
 impl<H, ..R, S, L> Hooked<S, L> for (H, ..R)
-    where L: Dispatch<OnAdd<H>, S>, L: Dispatch<OnInsert<H>, S>, S: Columns, S: Unlinks<S>, (..R): Hooked<S, L> {
+    where L: Dispatch<OnAdd<H>, S>, L: Dispatch<OnInsert<H>, S>, S: Fires<S, L>, S: Requests<S, L>, (..R): Hooked<S, L> {
     fn added(app: &mut App<S, L>, entities: [Entity]) {
         if(len_at(&entities) > 0) {
             app.emit<OnAdd<H>>(&OnAdd { entities: clone(&entities), none: [] });
@@ -1822,7 +2063,7 @@ impl<H, ..R, S, L> Hooked<S, L> for (H, ..R)
 pub trait RemoveHooks<S, L> { fn removing(&mut App<S, L>, Entity) }
 impl<S, L> RemoveHooks<S, L> for () { fn removing(app: &mut App<S, L>, entity: Entity) { () } }
 impl<T, R, S, L> RemoveHooks<S, L> for (Column<T>, R)
-    where S: Get<T>, L: Dispatch<OnRemove<T>, S>, S: Columns, S: Unlinks<S>, R: RemoveHooks<S, L> {
+    where S: Get<T>, L: Dispatch<OnRemove<T>, S>, S: Fires<S, L>, S: Requests<S, L>, R: RemoveHooks<S, L> {
     fn removing(app: &mut App<S, L>, entity: Entity) {
         if(<S as Get<T>>::has(&app.world.columns, entity)) { app.emit<OnRemove<T>>(&OnRemove { entities: [entity], none: [] }) };
         <R as RemoveHooks<S, L>>::removing(app, entity)
@@ -1833,51 +2074,961 @@ impl<T, R, S, L> RemoveHooks<S, L> for (Resource<T>, R) where R: RemoveHooks<S, 
 }
 
 // States: one type per state, each of a group (`impl State for Menu { type
-// Group = Game; }`), of which one at most is active, kept as a resource (a
-// place for each, `register_resource`). `app.set_state(state)` exits the
-// group's active state, if there is one (`OnExit` systems run while it can
-// still be read, and then it is taken away), enters the new one (put in;
-// `OnEnter`), and then runs the `OnTransition<Old, New>` systems. No values
-// are compared: another value of the active state is a transition too.
+// Group = Game; }`), of which one at most is active, kept as a resource
+// (`add_state<Menu>()` gives it its place, and a place for a state asked for
+// through commands). `app.set_state(state)` exits the group's active state,
+// if there is one (`OnExit` systems run while it can still be read, and then
+// it is taken away), enters the new one (put in; `OnEnter`), and then runs
+// the `OnTransition<Old, New>` systems. No values are compared: another value
+// of the active state is a transition too.
+//
+// A group may follow a state of another (`add_sub_state<Playing, Run>`): it
+// is entered, at its start (`Default`), each time that state is, and left
+// before it is; a state of it asked for while that state is not active is
+// let be. A state may be worked out from another's value each time that one
+// is entered (`add_computed_state(f)`, `f(&Playing) -> Option<Hard>`), and
+// left before it. What follows a state is left newest first, innermost
+// first, and entered oldest first, after the transition's systems. What the
+// systems of a transition ask through commands is done once the whole
+// transition is: a state asked for then is entered after it.
 pub struct NoGroup
 pub trait State { type Group; }
 impl<T> State for T { type Group = NoGroup; }
 pub struct OnEnter<T> { none: [T] }
 pub struct OnExit<T> { none: [T] }
 pub struct OnTransition<A, B> { none: [(A, B)] }
-// (The resources of the group `G`: the active one exited, and what runs
-// once `N` is entered.)
-pub trait ExitGroup<G, N, S, L> { fn exit_group(&mut App<S, L>) -> Option<fn(&mut App<S, L>) -> ()> }
-impl<G, N, S, L> ExitGroup<G, N, S, L> for () { fn exit_group(app: &mut App<S, L>) -> Option<fn(&mut App<S, L>) -> ()> { None } }
-impl<X, R, G, N, S, L> ExitGroup<G, N, S, L> for (Resource<X>, R)
-    where X: State, <X as State>::Group: Same<G>, S: Holds<X>, S: Columns, S: Unlinks<S>,
-          L: Dispatch<OnExit<X>, S>, L: Dispatch<OnTransition<X, N>, S>, R: ExitGroup<G, N, S, L> {
-    fn exit_group(app: &mut App<S, L>) -> Option<fn(&mut App<S, L>) -> ()> {
+// (What commands ask: a state to enter, a group to leave, once the systems
+// have run.)
+pub struct Next<T> { value: Option<T> }
+pub struct Clear<G> { asked: Bool }
+// (Left without a transition: a group cleared, or one that follows.)
+pub struct Cleared
+// (A group that follows the state `P`, named by one of its states: entered
+// at that state's start.)
+pub struct SubOf<P, X> { none: [(P, X)] }
+// (A state worked out from `P`'s value, by the function kept as a resource.)
+pub struct ComputedOf<P, C> { none: [(P, C)] }
+pub struct Computer<P, C> { f: fn(&P) -> Option<C> }
+
+// The systems registered under `E`, run with commands kept for later.
+fn hooks<E, S, L>(app: &mut App<S, L>, event: &E, commands: &mut Commands<S>) where L: Dispatch<E, S> {
+    <L as Dispatch<E, S>>::dispatch(&mut app.systems, event, &mut app.world, commands)
+}
+
+// Commands that ask nothing yet, numbering new entities after the world's.
+fn no_commands<S>(world: &World<S>) -> Commands<S> { Commands { queue: [], next: len_at(&world.generations), made: 0 } }
+
+// (The group `G`'s active state exited, after what follows it, and then
+// `next` entered, with the transition's systems run after; or, cleared, no
+// state entered.)
+pub trait ExitGroup<G, N, S, L> { fn switch_to(&mut App<S, L>, &mut Commands<S>, N) }
+impl<G, N, S, L> ExitGroup<G, N, S, L> for () where S: Holds<N>, L: Dispatch<OnEnter<N>, S> {
+    fn switch_to(app: &mut App<S, L>, commands: &mut Commands<S>, next: N) {
+        discard(app.world.insert_resource(next));
+        hooks<OnEnter<N>, S, L>(app, &OnEnter { none: [] }, commands)
+    }
+}
+pub trait ClearGroup<G, S, L> { fn clear_group(&mut App<S, L>, &mut Commands<S>) }
+impl<G, S, L> ClearGroup<G, S, L> for () { fn clear_group(app: &mut App<S, L>, commands: &mut Commands<S>) { () } }
+impl<X, R, G, S, L> ClearGroup<G, S, L> for (Resource<X>, R)
+    where X: State, <X as State>::Group: Same<G>, S: Holds<X>, L: Links<X, S, L>, L: Dispatch<OnExit<X>, S>, R: ClearGroup<G, S, L> {
+    fn clear_group(app: &mut App<S, L>, commands: &mut Commands<S>) {
         let active = if(<<X as State>::Group as Same<G>>::same()) { is_some(app.world.resource<X>()) } else { false };
         if(active) {
-            app.emit<OnExit<X>>(&OnExit { none: [] });
+            <L as Links<X, S, L>>::leave_links(app, commands);
+            hooks<OnExit<X>, S, L>(app, &OnExit { none: [] }, commands);
+            discard(app.world.remove_resource<X>())
+        } else { <R as ClearGroup<G, S, L>>::clear_group(app, commands) }
+    }
+}
+impl<X, R, G, S, L> ClearGroup<G, S, L> for (Column<X>, R) where R: ClearGroup<G, S, L> {
+    fn clear_group(app: &mut App<S, L>, commands: &mut Commands<S>) { <R as ClearGroup<G, S, L>>::clear_group(app, commands) }
+}
+impl<X, R, G, N, S, L> ExitGroup<G, N, S, L> for (Resource<X>, R)
+    where X: State, <X as State>::Group: Same<G>, S: Holds<X>, S: Holds<N>, L: Links<X, S, L>,
+          L: Dispatch<OnExit<X>, S>, L: Dispatch<OnEnter<N>, S>, L: Dispatch<OnTransition<X, N>, S>, R: ExitGroup<G, N, S, L> {
+    fn switch_to(app: &mut App<S, L>, commands: &mut Commands<S>, next: N) {
+        let active = if(<<X as State>::Group as Same<G>>::same()) { is_some(app.world.resource<X>()) } else { false };
+        if(active) {
+            <L as Links<X, S, L>>::leave_links(app, commands);
+            hooks<OnExit<X>, S, L>(app, &OnExit { none: [] }, commands);
             discard(app.world.remove_resource<X>());
-            Some(fn(app: &mut App<S, L>) { app.emit<OnTransition<X, N>>(&OnTransition { none: [] }) })
-        } else { <R as ExitGroup<G, N, S, L>>::exit_group(app) }
+            discard(app.world.insert_resource(next));
+            hooks<OnEnter<N>, S, L>(app, &OnEnter { none: [] }, commands);
+            hooks<OnTransition<X, N>, S, L>(app, &OnTransition { none: [] }, commands)
+        } else { <R as ExitGroup<G, N, S, L>>::switch_to(app, commands, next) }
     }
 }
 impl<X, R, G, N, S, L> ExitGroup<G, N, S, L> for (Column<X>, R) where R: ExitGroup<G, N, S, L> {
-    fn exit_group(app: &mut App<S, L>) -> Option<fn(&mut App<S, L>) -> ()> { <R as ExitGroup<G, N, S, L>>::exit_group(app) }
+    fn switch_to(app: &mut App<S, L>, commands: &mut Commands<S>, next: N) { <R as ExitGroup<G, N, S, L>>::switch_to(app, commands, next) }
 }
+
+// (A group that follows another's state left: its active state exited, with
+// nothing that follows it in turn.)
+pub trait LeaveGroup<G, S, L> { fn leave_group(&mut App<S, L>, &mut Commands<S>) }
+impl<G, S, L> LeaveGroup<G, S, L> for () { fn leave_group(app: &mut App<S, L>, commands: &mut Commands<S>) { () } }
+impl<X, R, G, S, L> LeaveGroup<G, S, L> for (Resource<X>, R)
+    where X: State, <X as State>::Group: Same<G>, S: Holds<X>, L: Dispatch<OnExit<X>, S>, R: LeaveGroup<G, S, L> {
+    fn leave_group(app: &mut App<S, L>, commands: &mut Commands<S>) {
+        let active = if(<<X as State>::Group as Same<G>>::same()) { is_some(app.world.resource<X>()) } else { false };
+        if(active) {
+            hooks<OnExit<X>, S, L>(app, &OnExit { none: [] }, commands);
+            discard(app.world.remove_resource<X>())
+        } else { <R as LeaveGroup<G, S, L>>::leave_group(app, commands) }
+    }
+}
+impl<X, R, G, S, L> LeaveGroup<G, S, L> for (Column<X>, R) where R: LeaveGroup<G, S, L> {
+    fn leave_group(app: &mut App<S, L>, commands: &mut Commands<S>) { <R as LeaveGroup<G, S, L>>::leave_group(app, commands) }
+}
+
+// (A state put in, and its `OnEnter` systems run: no transition.)
+fn enter_plain<Y, S, L>(app: &mut App<S, L>, state: Y, commands: &mut Commands<S>) where S: Holds<Y>, L: Dispatch<OnEnter<Y>, S> {
+    discard(app.world.insert_resource(state));
+    hooks<OnEnter<Y>, S, L>(app, &OnEnter { none: [] }, commands)
+}
+
+// What follows the state `X` among the app's systems: left newest first,
+// entered oldest first.
+pub trait Links<X, S, L> {
+    fn leave_links(&mut App<S, L>, &mut Commands<S>)
+    fn enter_links(&mut App<S, L>, &mut Commands<S>)
+}
+impl<X, S, L> Links<X, S, L> for () {
+    fn leave_links(app: &mut App<S, L>, commands: &mut Commands<S>) { () }
+    fn enter_links(app: &mut App<S, L>, commands: &mut Commands<S>) { () }
+}
+impl<E, Q, R, X, S, L> Links<X, S, L> for (On<E, Q>, R) where R: Links<X, S, L> {
+    fn leave_links(app: &mut App<S, L>, commands: &mut Commands<S>) { <R as Links<X, S, L>>::leave_links(app, commands) }
+    fn enter_links(app: &mut App<S, L>, commands: &mut Commands<S>) { <R as Links<X, S, L>>::enter_links(app, commands) }
+}
+impl<P, Y, R, X, S, L> Links<X, S, L> for (SubOf<P, Y>, R)
+    where Y: State, Y: Default, S: Holds<Y>, P: Same<X>, S: LeaveGroup<<Y as State>::Group, S, L>,
+          L: Dispatch<OnEnter<Y>, S>, R: Links<X, S, L> {
+    fn leave_links(app: &mut App<S, L>, commands: &mut Commands<S>) {
+        if(<P as Same<X>>::same()) { <S as LeaveGroup<<Y as State>::Group, S, L>>::leave_group(app, commands) };
+        <R as Links<X, S, L>>::leave_links(app, commands)
+    }
+    fn enter_links(app: &mut App<S, L>, commands: &mut Commands<S>) {
+        <R as Links<X, S, L>>::enter_links(app, commands);
+        if(<P as Same<X>>::same()) { enter_plain<Y, S, L>(app, default<Y>(), commands) } else { () }
+    }
+}
+impl<P, C, R, X, S, L> Links<X, S, L> for (ComputedOf<P, C>, R)
+    where C: State, S: Holds<C>, S: Holds<P>, S: Holds<Computer<P, C>>, P: Same<X>,
+          S: LeaveGroup<<C as State>::Group, S, L>, L: Dispatch<OnEnter<C>, S>, R: Links<X, S, L> {
+    fn leave_links(app: &mut App<S, L>, commands: &mut Commands<S>) {
+        if(<P as Same<X>>::same()) { <S as LeaveGroup<<C as State>::Group, S, L>>::leave_group(app, commands) };
+        <R as Links<X, S, L>>::leave_links(app, commands)
+    }
+    fn enter_links(app: &mut App<S, L>, commands: &mut Commands<S>) {
+        <R as Links<X, S, L>>::enter_links(app, commands);
+        if(<P as Same<X>>::same()) {
+            let made = match(app.world.resource<Computer<P, C>>()) {
+                Some(computer) => match(app.world.resource<P>()) { Some(parent) => (computer.f)(parent), None => None },
+                None => None
+            };
+            match(made) { Some(state) => enter_plain<C, S, L>(app, state, commands), None => () }
+        } else { () }
+    }
+}
+
+// Whether the state a group follows, if it follows one, is active.
+pub trait Follows<G, S> {
+    fn parent_active(&World<S>) -> Bool
+    fn has_parent() -> Bool
+}
+impl<G, S> Follows<G, S> for () {
+    fn parent_active(world: &World<S>) -> Bool { true }
+    fn has_parent() -> Bool { false }
+}
+impl<E, Q, R, G, S> Follows<G, S> for (On<E, Q>, R) where R: Follows<G, S> {
+    fn parent_active(world: &World<S>) -> Bool { <R as Follows<G, S>>::parent_active(world) }
+    fn has_parent() -> Bool { <R as Follows<G, S>>::has_parent() }
+}
+impl<P, Y, R, G, S> Follows<G, S> for (SubOf<P, Y>, R) where Y: State, <Y as State>::Group: Same<G>, S: Holds<P>, R: Follows<G, S> {
+    fn parent_active(world: &World<S>) -> Bool {
+        if(<<Y as State>::Group as Same<G>>::same()) { is_some(world.resource<P>()) } else { <R as Follows<G, S>>::parent_active(world) }
+    }
+    fn has_parent() -> Bool { if(<<Y as State>::Group as Same<G>>::same()) { true } else { <R as Follows<G, S>>::has_parent() } }
+}
+impl<P, C, R, G, S> Follows<G, S> for (ComputedOf<P, C>, R) where C: State, <C as State>::Group: Same<G>, S: Holds<P>, R: Follows<G, S> {
+    fn parent_active(world: &World<S>) -> Bool {
+        if(<<C as State>::Group as Same<G>>::same()) { is_some(world.resource<P>()) } else { <R as Follows<G, S>>::parent_active(world) }
+    }
+    fn has_parent() -> Bool { if(<<C as State>::Group as Same<G>>::same()) { true } else { <R as Follows<G, S>>::has_parent() } }
+}
+
+// A state entered: the group's active one exited, the new one put in, its
+// `OnEnter` systems, the transition's, and then what follows it.
+fn enter_state<T, S, L>(app: &mut App<S, L>, state: T, commands: &mut Commands<S>)
+    where T: State, S: ExitGroup<<T as State>::Group, T, S, L>, S: Holds<T>, L: Dispatch<OnEnter<T>, S>,
+          L: Links<T, S, L>, L: Follows<<T as State>::Group, S> {
+    if(<L as Follows<<T as State>::Group, S>>::parent_active(&app.world)) {
+        <S as ExitGroup<<T as State>::Group, T, S, L>>::switch_to(app, commands, state);
+        <L as Links<T, S, L>>::enter_links(app, commands)
+    } else { discard(state) }
+}
+
+// What commands asked of states, done: each state asked for entered, each
+// group asked to be left left. Whether anything was.
+pub trait Requests<S, L> { fn take_requests(&mut App<S, L>, &mut Commands<S>) -> Bool }
+impl<S, L> Requests<S, L> for () { fn take_requests(app: &mut App<S, L>, commands: &mut Commands<S>) -> Bool { false } }
+impl<X, R, S, L> Requests<S, L> for (Resource<Next<X>>, R)
+    where X: State, S: Holds<Next<X>>, S: ExitGroup<<X as State>::Group, X, S, L>, S: Holds<X>, L: Dispatch<OnEnter<X>, S>,
+          L: Links<X, S, L>, L: Follows<<X as State>::Group, S>, R: Requests<S, L> {
+    fn take_requests(app: &mut App<S, L>, commands: &mut Commands<S>) -> Bool {
+        let asked = match(app.world.resource_mut<Next<X>>()) { Some(next) => replace(&mut next.value, None), None => None };
+        let here = match(asked) { Some(state) => enter_state<X, S, L>(app, state, commands); true, None => false };
+        let rest = <R as Requests<S, L>>::take_requests(app, commands);
+        if(here) { true } else { rest }
+    }
+}
+impl<G, R, S, L> Requests<S, L> for (Resource<Clear<G>>, R) where S: Holds<Clear<G>>, S: ClearGroup<G, S, L>, R: Requests<S, L> {
+    fn take_requests(app: &mut App<S, L>, commands: &mut Commands<S>) -> Bool {
+        let asked = match(app.world.resource_mut<Clear<G>>()) { Some(clear) => replace(&mut clear.asked, false), None => false };
+        if(asked) { <S as ClearGroup<G, S, L>>::clear_group(app, commands) };
+        let rest = <R as Requests<S, L>>::take_requests(app, commands);
+        if(asked) { true } else { rest }
+    }
+}
+impl<H, R, S, L> Requests<S, L> for (Resource<H>, R) where R: Requests<S, L> {
+    fn take_requests(app: &mut App<S, L>, commands: &mut Commands<S>) -> Bool { <R as Requests<S, L>>::take_requests(app, commands) }
+}
+impl<H, R, S, L> Requests<S, L> for (Column<H>, R) where R: Requests<S, L> {
+    fn take_requests(app: &mut App<S, L>, commands: &mut Commands<S>) -> Bool { <R as Requests<S, L>>::take_requests(app, commands) }
+}
+
+// Hooks fired by what commands did: for each column, the entities that came
+// to it while they were done (`OnAdd` and `OnInsert`, once each with all of
+// them). What those hooks ask is done in the same flush, and fires in turn.
+// (Read off where each column's entities end: what was taken out while they
+// were done may hide what came in.)
+pub trait Fires<S, L> {
+    fn lengths(&Self) -> [Int]
+    fn fire(&mut App<S, L>, &[Int], Int, &mut Commands<S>) -> Bool
+}
+impl<S, L> Fires<S, L> for () {
+    fn lengths(columns: &()) -> [Int] { [] }
+    fn fire(app: &mut App<S, L>, before: &[Int], depth: Int, commands: &mut Commands<S>) -> Bool { false }
+}
+impl<H, R, S, L> Fires<S, L> for (Column<H>, R) where S: Get<H>, L: Dispatch<OnAdd<H>, S>, L: Dispatch<OnInsert<H>, S>, R: Fires<S, L> {
+    fn lengths(columns: &(Column<H>, R)) -> [Int] { push(<R as Fires<S, L>>::lengths(&columns.1), len_at(&columns.0.owners)) }
+    fn fire(app: &mut App<S, L>, before: &[Int], depth: Int, commands: &mut Commands<S>) -> Bool {
+        let old = before[len_at(before) - 1 - depth];
+        let came = owners_from(<S as Get<H>>::column(&app.world.columns), old);
+        let here = if(len_at(&came) > 0) {
+            hooks<OnAdd<H>, S, L>(app, &OnAdd { entities: clone(&came), none: [] }, commands);
+            hooks<OnInsert<H>, S, L>(app, &OnInsert { entities: came, none: [] }, commands);
+            true
+        } else { false };
+        let rest = <R as Fires<S, L>>::fire(app, before, depth + 1, commands);
+        if(here) { true } else { rest }
+    }
+}
+impl<H, R, S, L> Fires<S, L> for (Resource<H>, R) where R: Fires<S, L> {
+    fn lengths(columns: &(Resource<H>, R)) -> [Int] { <R as Fires<S, L>>::lengths(&columns.1) }
+    fn fire(app: &mut App<S, L>, before: &[Int], depth: Int, commands: &mut Commands<S>) -> Bool { <R as Fires<S, L>>::fire(app, before, depth, commands) }
+}
+
+// Commands done, and then what they fire and ask, until nothing more is.
+fn flush<S, L>(app: &mut App<S, L>, commands: Commands<S>) where S: Fires<S, L>, S: Requests<S, L> {
+    let mut pending = commands;
+    let mut going = true;
+    while({ going }) {
+        let before = <S as Fires<S, L>>::lengths(&app.world.columns);
+        apply(pending, &mut app.world);
+        let mut more = no_commands(&app.world);
+        let fired = <S as Fires<S, L>>::fire(app, &before, 0, &mut more);
+        let asked = <S as Requests<S, L>>::take_requests(app, &mut more);
+        going = if(fired) { true } else { if(asked) { true } else { len_at(&more.queue) > 0 } };
+        pending = more
+    };
+    apply(pending, &mut app.world)
+}
+
+// A condition that holds while `T` is the active state of its group.
+pub fn in_state<T>() -> fn(Option<&T>) -> Bool { fn(state: Option<&T>) -> Bool { is_some(state) } }
+
+// Tasks, upstream's `task(|world: AsyncWorld<_>| async move { .. })`: a
+// computation the app keeps from one emit to the next, at its place among
+// the systems. It waits for a label (`bridge(&mut world, Update, system)`):
+// when that label is emitted and the dispatch reaches its place, the system
+// is run there on the world, with what it asks for, and the task goes on
+// with what the system gave, until it waits for another label or ends. What
+// the system asks through commands is done before the task goes on, so a
+// second bridge in the same emit sees it. `until` waits, emit after emit,
+// until the system's parameters are there; `bridge` says `Invalid` at once.
+// A task may wait for something of its own (`wait_until(&mut world, ready)`),
+// and then goes on at the first emit, of any label, after it holds.
+//
+// A label a task waits for says its name: `impl Schedule for Update { const
+// NAME: Str = "Update"; }`. A task is added once the world's columns are all
+// registered (`add_task(f)`), as it is a function of that world.
+pub trait Schedule { const NAME: Str; }
+impl<T> Schedule for T { const NAME: Str = ""; }
+
+pub enum BridgeError { Invalid }
+
+// What a task holds of the world while it runs: the world itself, and
+// commands, given to it at its place and given back when it waits.
+pub struct AsyncWorld<S> { held: Option<(World<S>, Commands<S>)> }
+// What a task waits for: a label's name, or something of its own; and the
+// world given back.
+pub struct Ask<S> { label: Str, ready: Option<fn() -> Bool>, inbox: Option<fn(&World<S>) -> Bool>, back: Option<(World<S>, Commands<S>)> }
+pub effect Bridge<S> { reach(Ask<S>) -> (World<S>, Commands<S>) }
+
+pub enum TaskStep<S> { Waiting { ask: Ask<S>, rest: fn((World<S>, Commands<S>)) -> TaskStep<S> }, Ended(AsyncWorld<S>) }
+pub enum TaskState<S> { Fresh(fn(AsyncWorld<S>) -> AsyncWorld<S> / {Bridge<S>}), Paused(Ask<S>, fn((World<S>, Commands<S>)) -> TaskStep<S>), Over }
+pub struct TaskOf<S> { state: TaskState<S> }
+
+// A task's computation, run until it waits or ends.
+fn start_task<S>(body: fn(AsyncWorld<S>) -> AsyncWorld<S> / {Bridge<S>}) -> TaskStep<S> {
+    handle body(AsyncWorld { held: None }) {
+        done => TaskStep::Ended(done),
+        reach(ask, k) => TaskStep::Waiting { ask: ask, rest: k }
+    }
+}
+
+// The world a task gives back, put in its place with what was asked of it done.
+fn give_back<S>(back: Option<(World<S>, Commands<S>)>, world: &mut World<S>) {
+    match(back) {
+        Some((w, c)) => let mut w = w; apply(c, &mut w); *world = w,
+        None => ()
+    }
+}
+
+// Where a task's run stopped: it waits, with the world given back, or it ended.
+// Whether it waits.
+fn settle_step<S>(task: &mut TaskOf<S>, step: TaskStep<S>, world: &mut World<S>) -> Bool {
+    match(step) {
+        TaskStep::Waiting { ask, rest } =>
+            let Ask { label, ready, inbox, back } = ask;
+            give_back(back, world);
+            task.state = TaskState::Paused(Ask { label: label, ready: ready, inbox: inbox, back: None }, rest);
+            true,
+        TaskStep::Ended(done) => give_back(done.held, world); false
+    }
+}
+
+// A task at its place in a dispatch of the label named `label`: run as far as
+// it can go there.
+fn drive_task<S>(task: &mut TaskOf<S>, label: Str, world: &mut World<S>) where S: Columns {
+    let mut going = true;
+    while({ going }) {
+        going = match(replace(&mut task.state, TaskState::Over)) {
+            TaskState::Fresh(body) => settle_step(task, start_task(body), world),
+            TaskState::Paused(ask, rest) =>
+                let now = match(ask.ready) {
+                    Some(ready) => ready(),
+                    None => match(ask.inbox) {
+                        Some(waiting) => waiting(&*world),
+                        None => if(ask.label == "") { false } else { ask.label == label }
+                    }
+                };
+                if(now) {
+                    let lent = replace(world, World::new());
+                    let commands = no_commands(&lent);
+                    settle_step(task, rest((lent, commands)), world)
+                } else { task.state = TaskState::Paused(ask, rest); false },
+            TaskState::Over => false
+        }
+    }
+}
+
+// Run a system-like function on a world: its parameters fetched as a
+// system's are; `None` if one of them is not there.
+pub trait RunsOnWorld<S, O> { fn run_on(&Self, &mut World<S>, &mut Commands<S>) -> Option<O> }
+impl<S, O, ..P, ..A, L, Ts, Lc, F> RunsOnWorld<S, O> for F
+    where F: Fn<(..P), Output = O>, ..P: Parameter<Asks = A>, (..A): Tuple<Nested = L>, L: AllTouches<List = Ts>, Ts: AllApart,
+          L: Locals<State = Lc>, L: Fetch<(), S, (), F, O, Lc> {
+    fn run_on(f: &F, world: &mut World<S>, commands: &mut Commands<S>) -> Option<O> {
+        let mut locals = <L as Locals>::start();
+        <L as Fetch<(), S, (), F, O, Lc>>::fetch(&(), world, commands, &mut locals, (), f)
+    }
+}
+
+// Wait for the label `L` and run `f` there; `Invalid` if it cannot run then.
+pub fn bridge<L, F, O, S>(world: &mut AsyncWorld<S>, label: L, f: F) -> Result<O, BridgeError> / {Bridge<S>}
+    where L: Schedule, F: RunsOnWorld<S, O> {
+    discard(label);
+    let (w, c) = reach(Ask { label: <L as Schedule>::NAME, ready: None, inbox: None, back: replace(&mut world.held, None) });
+    let mut w = w;
+    let mut c = c;
+    let made = <F as RunsOnWorld<S, O>>::run_on(&f, &mut w, &mut c);
+    world.held = Some((w, c));
+    match(made) { Some(out) => Ok(out), None => Err(BridgeError::Invalid) }
+}
+
+// Wait for the label `L`, emit after emit, until `f` can run there.
+pub fn until<L, F, O, S>(world: &mut AsyncWorld<S>, label: L, f: F) -> O / {Bridge<S>}
+    where L: Schedule, F: RunsOnWorld<S, O> {
+    discard(label);
+    let mut made = None;
+    while({ is_none(made) }) {
+        let (w, c) = reach(Ask { label: <L as Schedule>::NAME, ready: None, inbox: None, back: replace(&mut world.held, None) });
+        let mut w = w;
+        let mut c = c;
+        made = <F as RunsOnWorld<S, O>>::run_on(&f, &mut w, &mut c);
+        world.held = Some((w, c))
+    };
+    match(made) { Some(out) => out, None => abort("until") }
+}
+
+// Wait for the label `L` and run `f` on the whole world there.
+pub fn bridge_world<L, O, S>(world: &mut AsyncWorld<S>, label: L, f: fn(&mut World<S>) -> O) -> O / {Bridge<S>} where L: Schedule {
+    discard(label);
+    let (w, c) = reach(Ask { label: <L as Schedule>::NAME, ready: None, inbox: None, back: replace(&mut world.held, None) });
+    let mut w = w;
+    let made = f(&mut w);
+    world.held = Some((w, c));
+    made
+}
+
+// A system a task keeps from one bridge to the next: its locals, and what
+// it has seen changed (upstream's `world.state()`).
+pub struct Kept<F, Lc> { f: F, locals: Lc, last: Int }
+pub trait StartLocals<Lc> { fn start_locals() -> Lc }
+impl<..P, ..A, L, Lc, F> StartLocals<Lc> for F where F: Fn<(..P)>, ..P: Parameter<Asks = A>, (..A): Tuple<Nested = L>, L: Locals<State = Lc> {
+    fn start_locals() -> Lc { <L as Locals>::start() }
+}
+pub trait KeptRun<S, O, Lc> { fn run_kept(&Self, &mut World<S>, &mut Commands<S>, &mut Lc) -> Option<O> }
+impl<S, O, ..P, ..A, L, Ts, Lc, F> KeptRun<S, O, Lc> for F
+    where F: Fn<(..P), Output = O>, ..P: Parameter<Asks = A>, (..A): Tuple<Nested = L>, L: AllTouches<List = Ts>, Ts: AllApart,
+          L: Fetch<(), S, (), F, O, Lc> {
+    fn run_kept(f: &F, world: &mut World<S>, commands: &mut Commands<S>, locals: &mut Lc) -> Option<O> {
+        <L as Fetch<(), S, (), F, O, Lc>>::fetch(&(), world, commands, locals, (), f)
+    }
+}
+pub fn keep<F, Lc>(f: F) -> Kept<F, Lc> where F: StartLocals<Lc> { Kept { f: f, locals: <F as StartLocals<Lc>>::start_locals(), last: 0 } }
+impl<F, Lc> Kept<F, Lc> {
+    pub fn bridge<L, O, S>(kept: &mut Self, world: &mut AsyncWorld<S>, label: L) -> Result<O, BridgeError> / {Bridge<S>}
+        where L: Schedule, F: KeptRun<S, O, Lc> {
+        discard(label);
+        let (w, c) = reach(Ask { label: <L as Schedule>::NAME, ready: None, inbox: None, back: replace(&mut world.held, None) });
+        let mut w = w;
+        let mut c = c;
+        w.since = kept.last;
+        let made = <F as KeptRun<S, O, Lc>>::run_kept(&kept.f, &mut w, &mut c, &mut kept.locals);
+        w.since = 0;
+        if(some_at(&made)) { kept.last = w.tick; w.tick = w.tick + 1 };
+        world.held = Some((w, c));
+        match(made) { Some(out) => Ok(out), None => Err(BridgeError::Invalid) }
+    }
+}
+
+// Wait until `ready` holds, and go on at the first emit after.
+pub fn wait_until<S>(world: &mut AsyncWorld<S>, ready: fn() -> Bool) / {Bridge<S>} {
+    let (w, c) = reach(Ask { label: "", ready: Some(ready), inbox: None, back: replace(&mut world.held, None) });
+    world.held = Some((w, c))
+}
+
+impl<E, S, T> Dispatch<E, S> for (TaskOf<S>, T) where T: Dispatch<E, S>, E: Schedule, S: Columns {
+    fn dispatch(list: &mut (TaskOf<S>, T), event: &E, world: &mut World<S>, commands: &mut Commands<S>) {
+        <T as Dispatch<E, S>>::dispatch(&mut list.1, event, world, commands);
+        drive_task(&mut list.0, <E as Schedule>::NAME, world)
+    }
+}
+impl<X, S, T, L> Links<X, S, L> for (TaskOf<S>, T) where T: Links<X, S, L> {
+    fn leave_links(app: &mut App<S, L>, commands: &mut Commands<S>) { <T as Links<X, S, L>>::leave_links(app, commands) }
+    fn enter_links(app: &mut App<S, L>, commands: &mut Commands<S>) { <T as Links<X, S, L>>::enter_links(app, commands) }
+}
+impl<G, S, T> Follows<G, S> for (TaskOf<S>, T) where T: Follows<G, S> {
+    fn parent_active(world: &World<S>) -> Bool { <T as Follows<G, S>>::parent_active(world) }
+    fn has_parent() -> Bool { <T as Follows<G, S>>::has_parent() }
+}
+
+// Behaviors, upstream's `Behavior`: a computation for each entity that has a
+// marker component, started when the entity gets it (at the next emit of
+// the behavior's label) and dropped when it loses it or ends. It waits for
+// events delivered to its entity (`on<Press>(&mut cx)`), and runs systems
+// there and then (`with(&mut cx, system)`). One not waiting for anything it
+// has been given is not run. One whose entity is hidden (`Disabling`) waits
+// until it is shown. Every behavior of an entity takes each event once.
+// Events for an entity with a running behavior are kept for it even before
+// it first waits for their type; `deliver` says whether one waits for them.
+// (`add_behaviors()` once, then `add_behavior<Counter, Frame>()` for each;
+// an `Inbox<Press>` resource for each event type: `add_inbox<Press>()`.)
+pub trait Behavior<S> { fn behave(Entity, Cx<S>) -> Cx<S> / {Bridge<S>} }
+
+// What a behavior has while it runs: its entity's world, as a task has it,
+// and which instance it is.
+pub struct Cx<S> { world: AsyncWorld<S>, me: Entity, id: Int }
+
+// The running instances, by entity, and the next one's number.
+pub struct Instances { running: [(Entity, Int)], next: Int }
+// Events of one type, for each instance of a behavior of the entity they were
+// delivered to; and which instances wait for them, or have.
+pub struct Inbox<E> { ids: [Int], queues: [[E]], listening: [Int], waiting: [Int] }
+impl<E> Inbox<E> {
+    pub fn new() -> Inbox<E> { Inbox { ids: [], queues: [], listening: [], waiting: [] } }
+    // How many instances of behaviors of `entity` wait for one now.
+    pub fn waiters<S>(inbox: &Self, instances: &Instances, entity: Entity) -> Int {
+        let mut n = 0;
+        let mut i = 0;
+        while({ i < len_at(&instances.running) }) {
+            let (e, id) = instances.running[i];
+            if(e == entity) { if(contains(&inbox.waiting, id)) { n = n + 1 } };
+            i = i + 1
+        };
+        n
+    }
+}
+fn contains(list: &[Int], x: Int) -> Bool {
+    let mut i = 0;
+    let mut found = false;
+    while({ i < len_at(list) }) { if(list[i] == x) { found = true }; i = i + 1 };
+    found
+}
+fn drop_id(list: [Int], x: Int) -> [Int] { fold(list, [], fn(out: [Int], y: Int) -> [Int] { if(y == x) { out } else { push(out, y) } }) }
+
+impl<S> World<S> {
+    // Give `entity` an event: kept for each of its running behaviors.
+    // Whether one of them waits for events of this type.
+    pub fn deliver<E>(world: &mut Self, entity: Entity, event: E) -> Bool where S: Holds<Inbox<E>>, S: Holds<Instances>, E: Use<[0, *]> {
+        let ids = match(world.resource<Instances>()) {
+            Some(instances) => fold(clone(&instances.running), [], fn(out: [Int], pair: (Entity, Int)) -> [Int] { if(pair.0 == entity) { push(out, pair.1) } else { out } }),
+            None => []
+        };
+        match(world.resource_mut<Inbox<E>>()) {
+            Some(inbox) =>
+                let mut taken = false;
+                let mut i = 0;
+                while({ i < len_at(&ids) }) {
+                    let id = ids[i];
+                    if(contains(&inbox.listening, id)) { taken = true };
+                    let at = place_of(&inbox.ids, id);
+                    if(at >= 0) { let queue = &mut inbox.queues[at]; push_at(queue, event) }
+                    else { push_at(&mut inbox.ids, id); push_at(&mut inbox.queues, [event]) };
+                    i = i + 1
+                };
+                taken,
+            None => false
+        }
+    }
+}
+fn not_b(b: Bool) -> Bool { if(b) { false } else { true } }
+// The entities of a column from a place on.
+fn owners_from<T>(column: &Column<T>, from: Int) -> [Entity] {
+    let mut out = [];
+    let mut i = from;
+    while({ i < len_at(&column.owners) }) { out = push(out, column.owners[i]); i = i + 1 };
+    out
+}
+// The elements of `b` after those of `a`, moved.
+fn join_onto<T>(a: [T], b: [T]) -> [T] {
+    let mut out = a;
+    let mut rest = b;
+    let mut back = [];
+    while({ len_at(&rest) > 0 }) { match(pop_at(&mut rest)) { Some(x) => push_at(&mut back, x), None => () } };
+    while({ len_at(&back) > 0 }) { match(pop_at(&mut back)) { Some(x) => push_at(&mut out, x), None => () } };
+    out
+}
+pub fn some_at<T>(o: &Option<T>) -> Bool { match(o) { &Some(_) => true, &None => false } }
+pub fn none_at<T>(o: &Option<T>) -> Bool { match(o) { &Some(_) => false, &None => true } }
+fn not_seen(list: &[Entity], e: Entity) -> Bool { let mut i = 0; let mut fresh = true; while({ i < len_at(list) }) { if(list[i] == e) { fresh = false }; i = i + 1 }; fresh }
+
+// The next event of type `E` for this instance, if one is kept.
+fn take_event<E, S>(world: &mut World<S>, id: Int) -> Option<E> where S: Holds<Inbox<E>> {
+    match(world.resource_mut<Inbox<E>>()) {
+        Some(inbox) =>
+            let at = place_of(&inbox.ids, id);
+            if(at >= 0) {
+                let queue = &mut inbox.queues[at];
+                if(len_at(&*queue) > 0) { Some(remove_at(queue, 0)) } else { None }
+            } else { None },
+        None => None
+    }
+}
+fn has_event<E, S>(world: &World<S>, id: Int) -> Bool where S: Holds<Inbox<E>> {
+    match(world.resource<Inbox<E>>()) {
+        Some(inbox) => let at = place_of(&inbox.ids, id); if(at >= 0) { len_at(&inbox.queues[at]) > 0 } else { false },
+        None => false
+    }
+}
+fn place_of(ids: &[Int], id: Int) -> Int {
+    let mut at = 0 - 1;
+    let mut k = 0;
+    while({ k < len_at(ids) }) { if(ids[k] == id) { at = k }; k = k + 1 };
+    at
+}
+fn mark<E, S>(world: &mut World<S>, id: Int, waiting: Bool) where S: Holds<Inbox<E>> {
+    match(world.resource_mut<Inbox<E>>()) {
+        Some(inbox) =>
+            if(not_b(contains(&inbox.listening, id))) { push_at(&mut inbox.listening, id) };
+            inbox.waiting = drop_id(replace(&mut inbox.waiting, []), id);
+            if(waiting) { push_at(&mut inbox.waiting, id) } else { () },
+        None => ()
+    }
+}
+
+// Wait for the next event of type `E` delivered to this behavior's entity.
+pub fn on<E, S>(cx: &mut Cx<S>) -> E / {Bridge<S>} where S: Holds<Inbox<E>> {
+    let id = cx.id;
+    let mut got = None;
+    while({ none_at(&got) }) {
+        // (What is kept already is taken without waiting.)
+        match(replace(&mut cx.world.held, None)) {
+            Some((w, c)) =>
+                let mut w = w;
+                got = take_event<E, S>(&mut w, id);
+                mark<E, S>(&mut w, id, none_at(&got));
+                cx.world.held = Some((w, c)),
+            None => ()
+        };
+        if(none_at(&got)) {
+            let (w, c) = reach(Ask { label: "", ready: None, inbox: Some(fn(world: &World<S>) -> Bool { has_event<E, S>(world, id) }),
+                                     back: replace(&mut cx.world.held, None) });
+            cx.world.held = Some((w, c))
+        };
+    };
+    match(got) { Some(e) => e, None => abort("on") }
+}
+// Wait for the next event of either type: `Ok` of the first, `Err` of the second.
+pub fn on_either<A, B, S>(cx: &mut Cx<S>) -> Result<A, B> / {Bridge<S>} where S: Holds<Inbox<A>>, S: Holds<Inbox<B>> {
+    let id = cx.id;
+    let mut got = None;
+    while({ none_at(&got) }) {
+        match(replace(&mut cx.world.held, None)) {
+            Some((w, c)) =>
+                let mut w = w;
+                got = match(take_event<A, S>(&mut w, id)) { Some(a) => Some(Ok(a)), None => match(take_event<B, S>(&mut w, id)) { Some(b) => Some(Err(b)), None => None } };
+                mark<A, S>(&mut w, id, none_at(&got));
+                mark<B, S>(&mut w, id, none_at(&got));
+                cx.world.held = Some((w, c)),
+            None => ()
+        };
+        if(none_at(&got)) {
+            let (w, c) = reach(Ask { label: "", ready: None,
+                                     inbox: Some(fn(world: &World<S>) -> Bool { if(has_event<A, S>(world, id)) { true } else { has_event<B, S>(world, id) } }),
+                                     back: replace(&mut cx.world.held, None) });
+            cx.world.held = Some((w, c))
+        };
+    };
+    match(got) { Some(r) => r, None => abort("on_either") }
+}
+// Run a system-like function on the world now, as `bridge` does at its label.
+pub fn with<F, O, S>(cx: &mut Cx<S>, f: F) -> Result<O, BridgeError> where F: RunsOnWorld<S, O> {
+    match(replace(&mut cx.world.held, None)) {
+        Some((w, c)) =>
+            let mut w = w;
+            let mut c = c;
+            let made = <F as RunsOnWorld<S, O>>::run_on(&f, &mut w, &mut c);
+            cx.world.held = Some((w, c));
+            match(made) { Some(out) => Ok(out), None => Err(BridgeError::Invalid) },
+        None => Err(BridgeError::Invalid)
+    }
+}
+// Wait until `ready` holds (set, say, by another thread).
+pub fn wait_for<S>(cx: &mut Cx<S>, ready: fn() -> Bool) / {Bridge<S>} { wait_until(&mut cx.world, ready) }
+// The entity this behavior is of.
+pub fn me<S>(cx: &Cx<S>) -> Entity { cx.me }
+
+// Whether an entity has a component that hides it.
+pub trait Hides { fn hides(&Self, Entity) -> Bool }
+impl Hides for () { fn hides(columns: &(), entity: Entity) -> Bool { false } }
+impl<H, R> Hides for (Column<H>, R) where H: Disabling, R: Hides {
+    fn hides(columns: &(Column<H>, R), entity: Entity) -> Bool {
+        if(if(<H as Disabling>::DISABLES) { slot_of(&columns.0, entity) >= 0 } else { false }) { true } else { <R as Hides>::hides(&columns.1, entity) }
+    }
+}
+impl<H, R> Hides for (Resource<H>, R) where R: Hides { fn hides(columns: &(Resource<H>, R), entity: Entity) -> Bool { <R as Hides>::hides(&columns.1, entity) } }
+
+// The instances of the behavior `B`, run at the label named `label`.
+pub struct BehaviorsOf<B, S> { label: Str, entities: [Entity], ids: [Int], states: [TaskState<S>], none: [B] }
+pub fn start_behavior<B, S>(me: Entity, id: Int) -> fn(AsyncWorld<S>) -> AsyncWorld<S> / {Bridge<S>} where B: Behavior<S> {
+    fn(world: AsyncWorld<S>) -> AsyncWorld<S> / {Bridge<S>} {
+        let cx = <B as Behavior<S>>::behave(me, Cx { world: world, me: me, id: id });
+        cx.world
+    }
+}
+impl<E, S, B, T> Dispatch<E, S> for (BehaviorsOf<B, S>, T)
+    where T: Dispatch<E, S>, E: Schedule, S: Columns, S: Get<B>, S: Holds<Instances>, S: Hides, B: Behavior<S> {
+    fn dispatch(list: &mut (BehaviorsOf<B, S>, T), event: &E, world: &mut World<S>, commands: &mut Commands<S>) {
+        <T as Dispatch<E, S>>::dispatch(&mut list.1, event, world, commands);
+        if(<E as Schedule>::NAME == list.0.label) { run_behaviors<B, S>(&mut list.0, world) } else { () }
+    }
+}
+fn run_behaviors<B, S>(behaviors: &mut BehaviorsOf<B, S>, world: &mut World<S>) where S: Columns, S: Get<B>, S: Holds<Instances>, S: Hides, B: Behavior<S> {
+    // Those whose entity lost the marker, or ended: dropped.
+    let entities = replace(&mut behaviors.entities, []);
+    let ids = replace(&mut behaviors.ids, []);
+    let mut states = into_iter(replace(&mut behaviors.states, []));
+    let mut i = 0;
+    while({ i < len_at(&entities) }) {
+        match(next(&mut states)) {
+            Some(state) =>
+                let e = entities[i];
+                if(<S as Get<B>>::has(&world.columns, e)) {
+                    push_at(&mut behaviors.entities, e);
+                    push_at(&mut behaviors.ids, ids[i]);
+                    push_at(&mut behaviors.states, state)
+                } else { forget_instance(world, ids[i]); drop_task(state) },
+            None => ()
+        };
+        i = i + 1
+    };
+    // Those whose entity has the marker and none running: started.
+    let owners = clone(&<S as Get<B>>::column(&world.columns).owners);
+    let mut i = 0;
+    while({ i < len_at(&owners) }) {
+        let e = owners[i];
+        if(not_seen(&behaviors.entities, e)) {
+            let id = match(world.resource_mut<Instances>()) {
+                Some(instances) => let id = instances.next; instances.next = id + 1; push_at(&mut instances.running, (e, id)); id,
+                None => 0 - 1
+            };
+            push_at(&mut behaviors.entities, e);
+            push_at(&mut behaviors.ids, id);
+            push_at(&mut behaviors.states, TaskState::Fresh(start_behavior<B, S>(e, id)))
+        };
+        i = i + 1
+    };
+    // Each one not hidden that can go on, run as far as it can.
+    let mut k = 0;
+    while({ k < len_at(&behaviors.entities) }) {
+        let e = behaviors.entities[k];
+        if(not_b(<S as Hides>::hides(&world.columns, e))) {
+            let slot = &mut behaviors.states[k];
+            let mut task = TaskOf { state: replace(slot, TaskState::Over) };
+            drive_task(&mut task, "", world);
+            let state = replace(&mut task.state, TaskState::Over);
+            let slot = &mut behaviors.states[k];
+            *slot = state
+        };
+        k = k + 1
+    }
+}
+fn forget_instance<S>(world: &mut World<S>, id: Int) where S: Holds<Instances> {
+    match(world.resource_mut<Instances>()) {
+        Some(instances) => instances.running = fold(replace(&mut instances.running, []), [], fn(out: [(Entity, Int)], p: (Entity, Int)) -> [(Entity, Int)] { if(p.1 == id) { out } else { push(out, p) } }),
+        None => ()
+    }
+}
+// A task dropped: what it waits with is let go of.
+fn drop_task<S>(state: TaskState<S>) {
+    match(state) { TaskState::Paused(ask, rest) => discard(ask); cancel(rest), TaskState::Fresh(body) => discard(body), TaskState::Over => () }
+}
+impl<X, S, B, T, L> Links<X, S, L> for (BehaviorsOf<B, S>, T) where T: Links<X, S, L> {
+    fn leave_links(app: &mut App<S, L>, commands: &mut Commands<S>) { <T as Links<X, S, L>>::leave_links(app, commands) }
+    fn enter_links(app: &mut App<S, L>, commands: &mut Commands<S>) { <T as Links<X, S, L>>::enter_links(app, commands) }
+}
+impl<G, S, B, T> Follows<G, S> for (BehaviorsOf<B, S>, T) where T: Follows<G, S> {
+    fn parent_active(world: &World<S>) -> Bool { <T as Follows<G, S>>::parent_active(world) }
+    fn has_parent() -> Bool { <T as Follows<G, S>>::has_parent() }
+}
+
+// Remote bridges, upstream's `Remote`: a thread that is not the app's asks
+// for a function to be run on the world (`remote.bridge(Net, system)`), and
+// waits; the next time a sync point of that name runs (`sync_point(Net)`,
+// placed among the systems), what was asked of it is run there, in the
+// order asked, and what each gave is sent back. What they ask through
+// commands is done before the sync point is left. `until` asks again at the
+// next sync point while its parameters are not there.
+// (Those granted at one sync point are run one after another.)
+pub struct Request<S> { point: Str, run: for<'a, 'b> fn(&'a mut World<S>, &'b mut Commands<S>) -> Option<Request<S>> }
+pub struct Remote<S> { queue: Mutex<[Request<S>]> }
+impl<S> World<S> {
+    // A handle other threads ask through.
+    pub fn remote(world: &Self) -> Remote<S> { Remote { queue: std::thread::share(&world.remotes) } }
+}
+impl<S> Remote<S> {
+    // Another handle to the same world.
+    pub fn share(remote: &Self) -> Remote<S> { Remote { queue: std::thread::share(&remote.queue) } }
+    // Run `f` at the next sync point named `P`, and wait for what it gives.
+    pub fn bridge<P, F, O>(remote: &Self, point: P, f: F) -> Result<O, BridgeError> / {Threads} where P: Schedule, F: RunsOnWorld<S, O>, F: Use<[0, *]>, O: Use<[0, *]> {
+        discard(point);
+        let (tx, rx) = channel();
+        let asked = bridge_request<S, F, O>(<P as Schedule>::NAME, f, tx);
+        lock(&remote.queue, fn(queue: &mut [Request<S>]) { push_at(queue, asked) });
+        match(recv(&rx)) { Some(answer) => answer, None => Err(BridgeError::Invalid) }
+    }
+    // The same, asked again at each sync point until it can run.
+    pub fn until<P, F, O>(remote: &Self, point: P, f: F) -> O / {Threads} where P: Schedule, F: RunsOnWorld<S, O>, F: Use<[0, *]>, O: Use<[0, *]> {
+        discard(point);
+        let (tx, rx) = channel();
+        let asked = until_request<S, F, O>(<P as Schedule>::NAME, f, tx);
+        lock(&remote.queue, fn(queue: &mut [Request<S>]) { push_at(queue, asked) });
+        match(recv(&rx)) { Some(out) => out, None => abort("the app ended before the sync point ran") }
+    }
+    // How many requests wait.
+    pub fn waiting(remote: &Self) -> Int { lock(&remote.queue, fn(queue: &mut [Request<S>]) -> Int { len_at(&*queue) }) }
+}
+// What is asked of a sync point: run `f` there, and send back what it gave.
+fn bridge_request<S, F, O>(point: Str, f: F, tx: std::thread::Sender<Result<O, BridgeError>>) -> Request<S> where F: RunsOnWorld<S, O>, F: Use<[0, *]>, O: Use<[0, *]> {
+    Request { point: point, run: fn(world: &mut World<S>, commands: &mut Commands<S>) -> Option<Request<S>> {
+        let g = f;
+        let to = tx;
+        match(<F as RunsOnWorld<S, O>>::run_on(&g, world, commands)) { Some(out) => send(&to, Ok(out)), None => send(&to, Err(BridgeError::Invalid)) };
+        None
+    } }
+}
+// (Asked again at the next sync point while it cannot run.)
+fn until_request<S, F, O>(point: Str, f: F, tx: std::thread::Sender<O>) -> Request<S> where F: RunsOnWorld<S, O>, F: Use<[0, *]>, O: Use<[0, *]> {
+    Request { point: point, run: fn(world: &mut World<S>, commands: &mut Commands<S>) -> Option<Request<S>> {
+        let g = f;
+        let to = tx;
+        match(<F as RunsOnWorld<S, O>>::run_on(&g, world, commands)) {
+            Some(out) => send(&to, out); None,
+            None => Some(until_request<S, F, O>(point, g, to))
+        }
+    } }
+}
+
+// The system that runs what was asked of the sync point named `P`.
+pub struct SyncPointOf<P> { none: [P] }
+pub fn sync_point<P>(point: P) -> SyncPointOf<P> { discard(point); SyncPointOf { none: [] } }
+impl<E, S, P> System<E, S> for SyncPointOf<P> where P: Schedule {
+    fn run(system: &mut SyncPointOf<P>, event: &E, world: &mut World<S>, commands: &mut Commands<S>) {
+        let name = <P as Schedule>::NAME;
+        let asked = lock(&world.remotes, fn(queue: &mut [Request<S>]) -> [Request<S>] { replace(queue, []) });
+        let mut kept = [];
+        let mut each = into_iter(asked);
+        while({ match(next(&mut each)) {
+            Some(request) =>
+                let Request { point, run } = request;
+                if(point == name) {
+                    let mut mine = no_commands(&*world);
+                    let again = run(world, &mut mine);
+                    apply(mine, world);
+                    match(again) { Some(later) => kept = push(kept, later), None => () }
+                } else { kept = push(kept, Request { point: point, run: run }) };
+                true,
+            None => false
+        } }) { () };
+        lock(&world.remotes, fn(queue: &mut [Request<S>]) { let mut later = replace(queue, []); *queue = join_onto(kept, later) })
+    }
+}
+impl<E, S, P> IntoSystem<E, S> for SyncPointOf<P> where P: Schedule {
+    type Out = SyncPointOf<P>;
+    fn into_system(system: SyncPointOf<P>) -> SyncPointOf<P> { system }
+}
+
+// Development tools, upstream's `devtools` (the parts that need no names of
+// types or places in the source): what changed since a tick, and whether it
+// was added; each frame's values of a component, kept by a system placed
+// where they are to be read (`record<Hp>`), and questions over them; what
+// each task waits for; and copies of the world to go back to, or to run
+// apart and compare.
+impl<S> World<S> {
+    // The world's clock: each system's run is a tick.
+    pub fn tick(world: &Self) -> Int { world.tick }
+    // The entities whose `T` was put in or changed after `since`: whether added.
+    pub fn changes_since<T>(world: &Self, since: Int) -> [(Entity, Bool)] where S: Get<T> {
+        let column = <S as Get<T>>::column(&world.columns);
+        let mut out = [];
+        let mut i = 0;
+        while({ i < len_at(&column.owners) }) {
+            if(column.changed[i] > since) { out = push(out, (column.owners[i], column.added[i] > since)) };
+            i = i + 1
+        };
+        out
+    }
+    // A copy of the world: of each component that says how it is copied.
+    pub fn snapshot(world: &Self) -> World<S> where S: Columns {
+        let mut copy = World::new();
+        copy.generations = clone(&world.generations);
+        copy.free = clone(&world.free);
+        copy.tick = world.tick;
+        <S as Columns>::copy_all(&world.columns, &mut copy.columns);
+        copy
+    }
+    // What another world has that this one does not: entities, and the
+    // entities whose `T` differs.
+    pub fn diff<T>(world: &Self, other: &World<S>) -> WorldDiff where S: Get<T>, T: Eq {
+        let mine = entities(world);
+        let spawned = fold(entities(other), [], fn(out: [Entity], e: Entity) -> [Entity] { if(alive(world, e)) { out } else { push(out, e) } });
+        let changed = fold(mine, [], fn(out: [Entity], e: Entity) -> [Entity] {
+            match((world.get<T>(e), other.get<T>(e))) { (Some(a), Some(b)) => if(*a == *b) { out } else { push(out, e) }, _ => out }
+        });
+        WorldDiff { spawned: spawned, changed: changed }
+    }
+}
+fn place_in(es: &[Entity], entity: Entity) -> Int {
+    let mut at = 0 - 1;
+    let mut i = 0;
+    while({ i < len_at(es) }) { if(es[i] == entity) { at = i }; i = i + 1 };
+    at
+}
+pub struct WorldDiff { pub spawned: [Entity], pub changed: [Entity] }
+
+// Each frame's values of `T`, by entity.
+pub struct History<T> { pub entities: [[Entity]], pub values: [[T]] }
+impl<T> History<T> {
+    pub fn new() -> History<T> { History { entities: [], values: [] } }
+    pub fn frames(h: &Self) -> Int { len_at(&h.entities) }
+    // The value an entity had at a frame.
+    pub fn value_at(h: &Self, entity: Entity, frame: Int) -> Option<&T> {
+        if(frame < len_at(&h.entities)) {
+            let at = place_in(&h.entities[frame], entity);
+            if(at >= 0) { Some(&h.values[frame][at]) } else { None }
+        } else { None }
+    }
+    // The first frame at which `holds` held of an entity's value.
+    pub fn first(h: &Self, entity: Entity, holds: fn(&T) -> Bool) -> Option<Int> {
+        let mut out = None;
+        let mut f = 0;
+        while({ f < len_at(&h.entities) }) {
+            if(none_at(&out)) { match(h.value_at(entity, f)) { Some(v) => if(holds(v)) { out = Some(f) } else { () }, None => () } };
+            f = f + 1
+        };
+        out
+    }
+    // The runs of frames, first and last, over which `holds` held.
+    pub fn when(h: &Self, entity: Entity, holds: fn(&T) -> Bool) -> [(Int, Int)] {
+        let mut out = [];
+        let mut start = 0 - 1;
+        let mut f = 0;
+        while({ f < len_at(&h.entities) }) {
+            let now = match(h.value_at(entity, f)) { Some(v) => holds(v), None => false };
+            if(now) { if(start < 0) { start = f } } else { if(start >= 0) { out = push(out, (start, f - 1)); start = 0 - 1 } };
+            f = f + 1
+        };
+        if(start >= 0) { out = push(out, (start, len_at(&h.entities) - 1)) };
+        out
+    }
+}
+// The system that keeps this frame's values of `T`.
+pub fn record<T>(q: &mut Query<(Entity, &T), ()>, history: &mut History<T>) where T: Clone {
+    let mut es = [];
+    let mut vs = [];
+    q.for_each() { e, v => es = push(es, e); vs = push(vs, clone(v)); };
+    push_at(&mut history.entities, es);
+    push_at(&mut history.values, vs)
+}
+
+// What a task waits for.
+pub enum TaskStatus { NotStarted, WaitingFor(Str), WaitingOnItsOwn, Finished }
+pub trait TaskStatuses { fn statuses(&Self) -> [TaskStatus] }
+impl TaskStatuses for () { fn statuses(none: &()) -> [TaskStatus] { [] } }
+impl<S, T> TaskStatuses for (TaskOf<S>, T) where T: TaskStatuses {
+    fn statuses(list: &(TaskOf<S>, T)) -> [TaskStatus] {
+        let here = match(&list.0.state) {
+            &TaskState::Fresh(_) => TaskStatus::NotStarted,
+            &TaskState::Paused(ask, _) => if(ask.label == "") { TaskStatus::WaitingOnItsOwn } else { TaskStatus::WaitingFor(ask.label) },
+            &TaskState::Over => TaskStatus::Finished
+        };
+        join_onto(<T as TaskStatuses>::statuses(&list.1), [here])
+    }
+}
+impl<E, P, T> TaskStatuses for (On<E, P>, T) where T: TaskStatuses { fn statuses(list: &(On<E, P>, T)) -> [TaskStatus] { <T as TaskStatuses>::statuses(&list.1) } }
+impl<P, X, T> TaskStatuses for (SubOf<P, X>, T) where T: TaskStatuses { fn statuses(list: &(SubOf<P, X>, T)) -> [TaskStatus] { <T as TaskStatuses>::statuses(&list.1) } }
+impl<P, C, T> TaskStatuses for (ComputedOf<P, C>, T) where T: TaskStatuses { fn statuses(list: &(ComputedOf<P, C>, T)) -> [TaskStatus] { <T as TaskStatuses>::statuses(&list.1) } }
+impl<B, S, T> TaskStatuses for (BehaviorsOf<B, S>, T) where T: TaskStatuses { fn statuses(list: &(BehaviorsOf<B, S>, T)) -> [TaskStatus] { <T as TaskStatuses>::statuses(&list.1) } }
 
 pub struct App<S, L> { pub world: World<S>, systems: L }
 
 impl<S, L> App<S, L> {
     // An app with nothing in its world and no systems.
     pub fn new() -> App<(), ()> {
-        App { world: World { columns: (), generations: [], free: [], tick: 1, since: 0 }, systems: () }
+        App { world: World { columns: (), generations: [], free: [], tick: 1, since: 0, remotes: no_remotes() }, systems: () }
     }
 
     // Give the world a resource.
     pub fn insert_resource<T>(app: Self, value: T) -> App<(Resource<T>, S), L> {
         let App { world, systems } = app;
-        let World { columns, generations, free, tick, since } = world;
-        App { world: World { columns: (Resource { value: Some(value) }, columns), generations: generations, free: free, tick: tick, since: since }, systems: systems }
+        let World { columns, generations, free, tick, since, remotes } = world;
+        discard(remotes);
+        App { world: World { columns: (Resource { value: Some(value) }, columns), generations: generations, free: free, tick: tick, since: since, remotes: no_remotes() }, systems: systems }
     }
 
     // The resource at its type's start.
@@ -1887,15 +3038,17 @@ impl<S, L> App<S, L> {
     // it from the systems that ask for it.)
     pub fn register_resource<T>(app: Self) -> App<(Resource<T>, S), L> {
         let App { world, systems } = app;
-        let World { columns, generations, free, tick, since } = world;
-        App { world: World { columns: (Resource { value: None }, columns), generations: generations, free: free, tick: tick, since: since }, systems: systems }
+        let World { columns, generations, free, tick, since, remotes } = world;
+        discard(remotes);
+        App { world: World { columns: (Resource { value: None }, columns), generations: generations, free: free, tick: tick, since: since, remotes: no_remotes() }, systems: systems }
     }
 
     // Store a component.
     pub fn register<T>(app: Self) -> App<(Column<T>, S), L> {
         let App { world, systems } = app;
-        let World { columns, generations, free, tick, since } = world;
-        App { world: World { columns: (empty_column(), columns), generations: generations, free: free, tick: tick, since: since }, systems: systems }
+        let World { columns, generations, free, tick, since, remotes } = world;
+        discard(remotes);
+        App { world: World { columns: (empty_column(), columns), generations: generations, free: free, tick: tick, since: since, remotes: no_remotes() }, systems: systems }
     }
 
     // Register systems under a label, named by a value of it: `Update`.
@@ -1918,28 +3071,86 @@ impl<S, L> App<S, L> {
     // Store a relation: what relates and what is related to.
     pub fn relation<R>(app: Self) -> App<<R as RelationColumns<S>>::Out, L> where R: RelationColumns<S> {
         let App { world, systems } = app;
-        let World { columns, generations, free, tick, since } = world;
-        App { world: World { columns: <R as RelationColumns<S>>::relation_columns(columns), generations: generations, free: free, tick: tick, since: since }, systems: systems }
+        let World { columns, generations, free, tick, since, remotes } = world;
+        discard(remotes);
+        App { world: World { columns: <R as RelationColumns<S>>::relation_columns(columns), generations: generations, free: free, tick: tick, since: since, remotes: no_remotes() }, systems: systems }
     }
 
     // Store each of a list of components: `.register_all<(Position, Velocity)>()`.
     pub fn register_all<C>(app: Self) -> App<<C as Registers<S>>::Out, L> where C: Registers<S> {
         let App { world, systems } = app;
-        let World { columns, generations, free, tick, since } = world;
-        App { world: World { columns: <C as Registers<S>>::register_all(columns), generations: generations, free: free, tick: tick, since: since }, systems: systems }
+        let World { columns, generations, free, tick, since, remotes } = world;
+        discard(remotes);
+        App { world: World { columns: <C as Registers<S>>::register_all(columns), generations: generations, free: free, tick: tick, since: since, remotes: no_remotes() }, systems: systems }
     }
 
     // The app, ready to run.
     pub fn build(app: Self) -> Self { app }
 
-    // Run every system registered under what is emitted, then do what they asked.
     // Make `state` its group's active state.
     pub fn set_state<T>(app: &mut Self, state: T)
-        where T: State, S: ExitGroup<<T as State>::Group, T, S, L>, S: Holds<T>, S: Columns, S: Unlinks<S>, L: Dispatch<OnEnter<T>, S> {
-        let after = <S as ExitGroup<<T as State>::Group, T, S, L>>::exit_group(app);
-        discard(app.world.insert_resource(state));
-        app.emit<OnEnter<T>>(&OnEnter { none: [] });
-        match(after) { Some(f) => f(app), None => () }
+        where T: State, S: ExitGroup<<T as State>::Group, T, S, L>, S: Holds<T>, L: Dispatch<OnEnter<T>, S>,
+              L: Links<T, S, L>, L: Follows<<T as State>::Group, S>, S: Fires<S, L>, S: Requests<S, L> {
+        let mut commands = no_commands(&app.world);
+        enter_state<T, S, L>(app, state, &mut commands);
+        flush(app, commands)
+    }
+    // Leave the group `G`'s active state, if there is one: no transition.
+    pub fn clear_state<G>(app: &mut Self) where S: ClearGroup<G, S, L>, S: Fires<S, L>, S: Requests<S, L> {
+        let mut commands = no_commands(&app.world);
+        <S as ClearGroup<G, S, L>>::clear_group(app, &mut commands);
+        flush(app, commands)
+    }
+    // The app, with `state` its group's active state from the start.
+    pub fn init_state<T>(app: Self, state: T) -> Self
+        where T: State, S: ExitGroup<<T as State>::Group, T, S, L>, S: Holds<T>, L: Dispatch<OnEnter<T>, S>,
+              L: Links<T, S, L>, L: Follows<<T as State>::Group, S>, S: Fires<S, L>, S: Requests<S, L> {
+        let mut app = app;
+        app.set_state(state);
+        app
+    }
+    // A place for the state `T`, and for one asked for through commands.
+    pub fn add_state<T>(app: Self) -> App<(Resource<Next<T>>, (Resource<T>, S)), L> {
+        app.register_resource<T>().insert_resource(Next { value: None })
+    }
+    // A place for commands to ask that the group `G` be left.
+    pub fn add_state_group<G>(app: Self) -> App<(Resource<Clear<G>>, S), L> { app.insert_resource(Clear { asked: false }) }
+    // The group of `X` follows the state `P`. A group follows one state.
+    pub fn add_sub_state<P, X>(app: Self) -> App<S, (SubOf<P, X>, L)> where X: State, L: Follows<<X as State>::Group, S> {
+        if(<L as Follows<<X as State>::Group, S>>::has_parent()) { abort("the state group already follows a parent state") };
+        let App { world, systems } = app;
+        App { world: world, systems: (SubOf { none: [] }, systems) }
+    }
+    // Behaviors, and the instances they keep.
+    pub fn add_behaviors(app: Self) -> App<(Resource<Instances>, S), L> { app.insert_resource(Instances { running: [], next: 0 }) }
+    // The behavior `B`, run at the label `E`.
+    pub fn add_behavior<B, E>(app: Self) -> App<S, (BehaviorsOf<B, S>, L)> where E: Schedule {
+        let App { world, systems } = app;
+        App { world: world, systems: (BehaviorsOf { label: <E as Schedule>::NAME, entities: [], ids: [], states: [], none: [] }, systems) }
+    }
+    // A place for the events of type `E` delivered to entities.
+    pub fn add_inbox<E>(app: Self) -> App<(Resource<Inbox<E>>, S), L> { app.insert_resource(Inbox::new()) }
+    // Keep the columns named as said: `storage<Sparse<Marker>>()`.
+    pub fn storage<C>(app: Self) -> Self where C: StorageChoice<S> {
+        let mut app = app;
+        <C as StorageChoice<S>>::choose(&mut app.world.columns);
+        app
+    }
+    // What each task waits for, in the order they were added.
+    pub fn tasks(app: &Self) -> [TaskStatus] where L: TaskStatuses { <L as TaskStatuses>::statuses(&app.systems) }
+    // How what may run side by side is run.
+    pub fn with_execution_mode(app: Self, mode: ExecutionMode) -> Self { discard(mode); app }
+    // A task, at this place among the systems (see `TaskOf`).
+    pub fn add_task(app: Self, body: fn(AsyncWorld<S>) -> AsyncWorld<S> / {Bridge<S>}) -> App<S, (TaskOf<S>, L)> {
+        let App { world, systems } = app;
+        App { world: world, systems: (TaskOf { state: TaskState::Fresh(body) }, systems) }
+    }
+    // A state worked out from `P`'s value whenever `P` is entered.
+    pub fn add_computed_state<P, C>(app: Self, f: fn(&P) -> Option<C>) -> App<(Resource<Computer<P, C>>, S), (ComputedOf<P, C>, L)>
+        where C: State, L: Follows<<C as State>::Group, S> {
+        if(<L as Follows<<C as State>::Group, S>>::has_parent()) { abort("the state group already follows a parent state") };
+        let App { world, systems } = app.insert_resource(Computer { f: f });
+        App { world: world, systems: (ComputedOf { none: [] }, systems) }
     }
     // The world's structural operations, with the hooks they fire.
     pub fn spawn_bundle<B>(app: &mut Self, bundle: B) -> Entity where B: Bundle<S>, B: Hooked<S, L> {
@@ -1953,7 +3164,7 @@ impl<S, L> App<S, L> {
         made
     }
     pub fn insert<T>(app: &mut Self, entity: Entity, value: T) -> Option<T>
-        where S: Get<T>, T: EvictOne<S>, T: BringsOne<S>, T: Use<[0, *]>, S: Columns, S: Unlinks<S>,
+        where S: Get<T>, T: EvictOne<S>, T: BringsOne<S>, T: Use<[0, *]>, S: Fires<S, L>, S: Requests<S, L>,
               L: Dispatch<OnAdd<T>, S>, L: Dispatch<OnInsert<T>, S>, L: Dispatch<OnReplace<T>, S> {
         let had = <S as Get<T>>::has(&app.world.columns, entity);
         if(had) { app.emit<OnReplace<T>>(&OnReplace { entities: [entity], none: [] }) };
@@ -1962,7 +3173,7 @@ impl<S, L> App<S, L> {
         app.emit<OnInsert<T>>(&OnInsert { entities: [entity], none: [] });
         old
     }
-    pub fn remove<T>(app: &mut Self, entity: Entity) -> Option<T> where S: Get<T>, S: Columns, S: Unlinks<S>, L: Dispatch<OnRemove<T>, S> {
+    pub fn remove<T>(app: &mut Self, entity: Entity) -> Option<T> where S: Get<T>, S: Fires<S, L>, S: Requests<S, L>, L: Dispatch<OnRemove<T>, S> {
         if(<S as Get<T>>::has(&app.world.columns, entity)) { app.emit<OnRemove<T>>(&OnRemove { entities: [entity], none: [] }) };
         app.world.remove<T>(entity)
     }
@@ -1974,9 +3185,11 @@ impl<S, L> App<S, L> {
         } else { false }
     }
 
-    pub fn emit<E>(app: &mut Self, event: &E) where L: Dispatch<E, S>, S: Columns, S: Unlinks<S> {
-        let mut commands = Commands { queue: [], next: len_at(&app.world.generations), made: 0 };
+    // Run every system registered under what is emitted, then do what they
+    // asked, and what that fires and asks in turn.
+    pub fn emit<E>(app: &mut Self, event: &E) where L: Dispatch<E, S>, S: Fires<S, L>, S: Requests<S, L> {
+        let mut commands = no_commands(&app.world);
         <L as Dispatch<E, S>>::dispatch(&mut app.systems, event, &mut app.world, &mut commands);
-        apply(commands, &mut app.world)
+        flush(app, commands)
     }
 }

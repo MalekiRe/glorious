@@ -1361,7 +1361,8 @@ def explainStuck (c : Compiled) (cfg : Core.Config) : String :=
     | some vs => s!"a memory operation is applied to ({shown vs}), which is not a reference"
     | none => unbound
   | .host id _ _ =>
-    if id ≥ 2 then "a foreign function or memory at an address has no meaning on this machine: build the program and run it on the Rust VM"
+    if id ≥ 6 then "a shared cell is used that is not there, or holds nothing"
+    else if id ≥ 2 then "a foreign function or memory at an address has no meaning on this machine: build the program and run it on the Rust VM"
     else s!"host operation {id} rejected its arguments"
 
 /-- Run a program on the Core machine and, if it goes wrong, say why. -/

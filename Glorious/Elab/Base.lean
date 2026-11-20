@@ -311,7 +311,12 @@ def hosts : List (String × Nat × Nat) :=
    ("ptr_read", 3, 2), ("ptr_write", 4, 3),
    -- Unsafe: an address C can call, which runs a callable of so many whole
    -- numbers, at most five, that gives one.
-   ("c_callback", 5, 2)]
+   ("c_callback", 5, 2),
+   -- Unsafe: cells more than one holder reaches, by number: a new one
+   -- holding a value, the value taken out of one, and one put in. What a
+   -- cell holds is not seen by the checker: the library's shared values
+   -- and threads, which are safe, are made of them.
+   ("heap_new", 6, 1), ("heap_take", 7, 1), ("heap_put", 8, 2)]
 
 /-- The Core computation under construction: binding forms awaiting their
 continuation, the number of locals so far, and the terminator once one is known. -/

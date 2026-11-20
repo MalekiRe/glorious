@@ -1,0 +1,148 @@
+// Upstream's tests/behavior.rs, of how the world keeps values:
+// - `table_moves_swap_rows_and_reallocation_preserve_entity_alignment`:
+//   values moved about as entities gain and lose components stay with their
+//   entity.
+// - `stale_and_foreign_handles_cannot_address_live_rows`: an ended entity's
+//   handle reaches nothing, and a new entity is another handle.
+// - `moved_replaced_removed_and_despawned_values_drop_exactly_once`.
+// - `empty_schema_tracks_entity_lifetimes`.
+// Not ported: the three of a destructor or an iteration that panics
+// (`panicking_destructor_leaves_surviving_rows_addressable`,
+// `batch_iteration_panic_keeps_prefix_and_allows_further_growth_and_migration`,
+// `nested_destructor_unwinding_finishes_remaining_columns`): there is no
+// unwinding; and of a handle from another world, as an entity here does not
+// say which world it is of.
+// expect:
+// 1
+// 1
+// --
+// 0
+// 0
+// 0
+// 1
+// 50
+// --
+// 1
+// 0
+// 1
+// 0
+// 1
+// 63
+// 64
+// --
+// 1
+// [1]
+// 1
+// 0
+// 0
+mod ecs;
+
+use core::option::{is_some, is_none};
+
+use ecs::{App, World, Entity, Query};
+use std::thread::{Shared, Mutex, lock};
+
+struct Position(Int)
+struct Velocity(Int)
+struct Tag
+
+struct Owned { id: Int, drops: Shared<Mutex<[Int]>> }
+impl Drop for Owned {
+    fn drop(o: &mut Owned) { lock(&*o.drops, fn(d: &mut [Int]) { d[o.id] = d[o.id] + 1 }) }
+}
+
+fn flag(b: Bool) { if(b) { say(1) } else { say(0) } }
+fn counted(drops: &Shared<Mutex<[Int]>>, at: Int) -> Int { lock(&**drops, fn(d: &mut [Int]) -> Int { d[at] }) }
+
+fn main() -> Int {
+    let mut world = App::new().register<Position>().register<Velocity>().register<Tag>().build().world;
+    let mut entities = [];
+    let mut i = 0;
+    while({ i < 96 }) { entities = push(entities, world.spawn_bundle(())); i = i + 1 };
+    let mut i = 0;
+    while({ i < 96 }) {
+        let e = entities[i];
+        discard(world.insert(e, Position(i)));
+        if(i % 2 == 0) { discard(world.insert(e, Velocity(1000 + i))) };
+        if(i % 3 == 0) { discard(world.insert(e, Tag)) };
+        i = i + 1
+    };
+    let mut ok = true;
+    let mut i = 0;
+    while({ i < 96 }) {
+        let e = entities[i];
+        if(i % 5 == 0) { if(not_b(world.despawn(e))) { ok = false } } else {
+            if(i % 2 == 0) { match(world.remove<Velocity>(e)) { Some(v) => if(v.0 != 1000 + i) { ok = false }, None => ok = false } };
+            discard(world.insert(e, Velocity(2000 + i)));
+            if(i % 3 == 0) { if(is_none(world.remove<Tag>(e))) { ok = false } } else { discard(world.insert(e, Tag)) };
+            match(world.insert(e, Position(10 * i))) { Some(p) => if(p.0 != i) { ok = false }, None => ok = false }
+        };
+        i = i + 1
+    };
+    world.query<(Entity, &mut Position, &Velocity)>().for_each() { e, mut p, v => p.0 = p.0 + v.0; };
+    let mut i = 0;
+    while({ i < 96 }) {
+        let e = entities[i];
+        if(world.contains(e) != (i % 5 != 0)) { ok = false };
+        if(i % 5 == 0) { if(is_some(world.get<Position>(e))) { ok = false } } else {
+            match(world.get<Position>(e)) { Some(p) => if(p.0 != 2000 + 11 * i) { ok = false }, None => ok = false };
+            if(is_some(world.get<Tag>(e)) != (i % 3 != 0)) { ok = false }
+        };
+        i = i + 1
+    };
+    flag(ok);
+    flag(true);
+    say("--");
+
+    let mut first = App::new().register<Int>().build().world;
+    let a = first.spawn_bundle(());
+    discard(first.insert(a, 10));
+    flag(first.despawn(a));
+    flag(first.despawn(a));
+    flag(is_some(first.get<Int>(a)));
+    let fresh = first.spawn_bundle(());
+    flag(if(fresh.index == a.index) { fresh.generation != a.generation } else { true });
+    discard(first.insert(fresh, 50));
+    say(match(first.get<Int>(fresh)) { Some(n) => *n, None => 0 });
+    say("--");
+
+    let drops = Shared::new(Mutex::new(fold(range(0, 65), [], fn(out: [Int], i: Int) -> [Int] { push(out, 0) })));
+    let mut world = App::new().register<Owned>().register<Tag>().build().world;
+    let mut owned = [];
+    let mut id = 0;
+    while({ id < 64 }) {
+        let e = world.spawn_bundle(());
+        discard(world.insert(e, Owned { id: id, drops: std::thread::share(&drops) }));
+        owned = push(owned, e);
+        id = id + 1
+    };
+    let mut i = 0;
+    while({ i < 64 }) { discard(world.insert(owned[i], Tag)); i = i + 1 };
+    let mut i = 0;
+    while({ i < 64 }) { discard(world.remove<Tag>(owned[i])); i = i + 2 };
+    let replaced = world.insert(owned[0], Owned { id: 64, drops: std::thread::share(&drops) });
+    let removed = world.remove<Owned>(owned[1]);
+    flag(match(&replaced) { &Some(ref r) => r.id == 0, &None => false });
+    say(counted(&drops, 0));
+    flag(world.despawn(owned[2]));
+    say(counted(&drops, 1));
+    say(counted(&drops, 2));
+    discard(world);
+    say(fold(range(2, 65), 0, fn(sum: Int, i: Int) -> Int { sum + counted(&drops, i) }));
+    discard(replaced);
+    discard(removed);
+    say(fold(range(0, 65), 0, fn(sum: Int, i: Int) -> Int { sum + counted(&drops, i) }) - 1);
+    say("--");
+
+    let mut world = App::new().build().world;
+    let a = world.spawn_bundle(());
+    let b = world.spawn_bundle(());
+    flag(world.despawn(a));
+    say(map_entities(&world));
+    flag(world.despawn(b));
+    say(len_at(&ecs::entities(&world)));
+    0
+}
+
+fn not_b(b: Bool) -> Bool { if(b) { false } else { true } }
+fn map_entities<S>(world: &World<S>) -> [Int] { fold(ecs::entities(world), [], fn(out: [Int], e: Entity) -> [Int] { push(out, e.index) }) }

@@ -1,0 +1,60 @@
+// Upstream's tests/hooks.rs:
+// - `hook_commands_apply_before_the_structural_operation_returns`: what a
+//   hook asks through commands is done before the operation that fired it
+//   returns, and fires hooks of its own in the same flush; components that a
+//   system's commands put in fire their hooks once the emit's commands are
+//   done.
+// - `worlds_without_hooks_fire_nothing_and_keep_working`: a world used on its
+//   own, with no app, does all of it with nothing fired.
+// (The other three are in hooks.glorious.)
+// expect:
+// marked 1
+// 1
+// marked 1
+// [1, 9]
+// 1
+// 0
+mod ecs;
+
+use std::vec::sort;
+
+use core::option::{is_some, is_none};
+
+use ecs::{App, World, Entity, Commands, Query, OnAdd};
+
+struct Update
+struct Health(Int)
+struct Marker
+
+fn mark<S>(trigger: &OnAdd<Health>, commands: &mut Commands<S>) where S: ecs::Get<Marker>, S: ecs::Columns, S: ecs::Unlinks<S> {
+    let mut i = 0;
+    while({ i < len_at(&trigger.entities) }) { commands.insert(trigger.entities[i], (Marker,)); i = i + 1 }
+}
+fn marked(trigger: &OnAdd<Marker>) { say("marked " ++ show(len_at(&trigger.entities))) }
+fn spawner<S>(commands: &mut Commands<S>) where S: ecs::Get<Health>, S: ecs::Columns, S: ecs::Unlinks<S> { discard(commands.spawn((Health(9),))) }
+
+fn flag(b: Bool) { if(b) { say(1) } else { say(0) } }
+
+fn main() -> Int {
+    let mut app = App::new()
+        .register<Health>()
+        .register<Marker>()
+        .on<OnAdd<Health>, _, _>(mark)
+        // A hook reacting to the first one's commands, in the same flush.
+        .on<OnAdd<Marker>, _, _>(marked)
+        .add_systems(Update, spawner)
+        .build();
+    let direct = app.spawn_bundle((Health(1),));
+    flag(is_some(app.world.get<Marker>(direct)));
+    app.emit(&Update);
+    let mut seen = [];
+    app.world.query<(&Health, &Marker)>().for_each() { h, _ => seen = push(seen, h.0); };
+    say(sort(seen));
+
+    let mut world = App::new().register<Health>().register<Marker>().build().world;
+    let entity = world.spawn_bundle((Health(1),));
+    discard(world.insert(entity, Marker));
+    discard(world.remove<Health>(entity));
+    flag(world.despawn(entity));
+    0
+}

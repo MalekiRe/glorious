@@ -1,0 +1,91 @@
+// Upstream's tests/params.rs, more of the tests params.glorious does not
+// follow:
+// - `heterogeneous_queries_skip_tables_missing_any_requested_component`: a
+//   query of several components sees only entities that have all of them,
+//   however they came by them; and follows what is put in and taken out
+//   between emits.
+// - `retained_mutable_items_span_multiple_tables`: changes through a query
+//   reach every entity it has, whatever else each has.
+// Not ported: the others of the file, which ask of `world.single` (not in
+// covey yet), of singletons inside parallel groups, of locals registered
+// twice and of complementary parallel access (what parallel groups run side
+// by side), and the compile-fail cases; `local_state_is_independent_per_registration_and_persists`
+// is in locals.glorious.
+// expect:
+// 18
+// 12
+// 10
+// 10
+// -1
+// -1
+// 26
+// 16
+// --
+// 1
+// 0
+mod ecs;
+
+use ecs::{App, World, Entity, Query};
+
+struct Update
+struct Position(Int)
+struct Velocity(Int)
+struct Boost(Int)
+struct Tag
+
+fn moving(q: &mut Query<(&mut Position, &Velocity), ()>) { q.for_each() { mut p, v => p.0 = p.0 + v.0; } }
+fn boosted(q: &mut Query<(&mut Position, &Velocity, &Boost), ()>) { q.for_each() { mut p, v, b => p.0 = p.0 + v.0 * b.0; } }
+fn grow(q: &mut Query<(&mut Position, &mut Velocity), ()>) { q.for_each() { mut p, mut v => p.0 = p.0 + 1; v.0 = v.0 + 1; } }
+
+fn pos<S>(world: &World<S>, e: Entity) -> Int where S: ecs::Get<Position> { match(world.get<Position>(e)) { Some(p) => p.0, None => 0 - 1 } }
+
+fn main() -> Int {
+    let mut app = App::new().register<Position>().register<Velocity>().register<Boost>()
+        .add_systems(Update, (moving, boosted)).build();
+    let complete = app.world.spawn_bundle((Position(10), Velocity(2), Boost(3)));
+    let pair = app.world.spawn_bundle((Position(10), Velocity(2)));
+    let position_only = app.world.spawn_bundle((Position(10),));
+    let removed = app.world.spawn_bundle((Position(10), Velocity(2)));
+    let dead = app.world.spawn_bundle((Position(10), Velocity(2)));
+    discard(app.world.remove<Velocity>(removed));
+    discard(app.world.despawn(dead));
+    let no_position = app.world.spawn_bundle((Velocity(100), Boost(100)));
+    app.emit(&Update);
+    say(pos(&app.world, complete));
+    say(pos(&app.world, pair));
+    say(pos(&app.world, position_only));
+    say(pos(&app.world, removed));
+    say(pos(&app.world, dead));
+    say(pos(&app.world, no_position));
+    discard(app.world.insert(removed, Velocity(4)));
+    discard(app.world.despawn(complete));
+    app.emit(&Update);
+    app.emit(&Update);
+    app.emit(&Update);
+    app.emit(&Update);
+    say(pos(&app.world, removed));
+    discard(app.world.despawn(removed));
+    app.emit(&Update);
+    say(pos(&app.world, pair) - 6);
+    say("--");
+
+    let mut app = App::new().register<Position>().register<Velocity>().register<Tag>().add_systems(Update, grow).build();
+    let mut es = [];
+    let mut i = 0;
+    while({ i < 10 }) {
+        let e = app.world.spawn_bundle((Position(i), Velocity(i * 10)));
+        if(i % 2 == 0) { discard(app.world.insert(e, Tag)) };
+        es = push(es, e);
+        i = i + 1
+    };
+    app.emit(&Update);
+    let mut right = true;
+    let mut i = 0;
+    while({ i < 10 }) {
+        if(pos(&app.world, es[i]) != i + 1) { right = false };
+        match(app.world.get<Velocity>(es[i])) { Some(v) => if(v.0 != i * 10 + 1) { right = false }, None => right = false };
+        i = i + 1
+    };
+    say(if(right) { 1 } else { 0 });
+    0
+}

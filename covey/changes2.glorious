@@ -1,0 +1,202 @@
+// Upstream's tests/changes.rs, the tests changes.glorious does not follow:
+// - `skipped_single_and_conditions_do_not_consume_pending_changes`: a system
+//   not run, because its condition does not hold or its `Single` has no one
+//   row, sees later what changed while it was not run.
+// - `row_filters_compose_and_single_counts_only_matching_rows`: `Or` of a
+//   change and a component; a `Single` of changed rows counts only those.
+// - `replacing_the_world_resets_system_change_windows`: a new world, and
+//   what is added to it is new to the systems.
+// - `cached_matches_follow_new_tables_growth_and_repopulated_empty_tables`:
+//   a query sees entities that come after it last ran, in any column set.
+// - `read_only_cursors_do_not_consume_subsequent_system_writes`: a reader
+//   before a writer sees the write the next frame; one after it, the same one.
+// - `parallel_writers_are_seen_exactly_once_by_readers_before_and_after_the_join`:
+//   systems in a `parallel` group, on threads, whose writes a reader before
+//   the group sees once the next frame and a reader after it sees once now.
+// expect:
+// [9]
+// []
+// --
+// [1, 2]
+// [3]
+// 3
+// --
+// [1, 2]
+// --
+// [1]
+// []
+// 33
+// --
+// before [1]
+// after [1]
+// before []
+// after []
+// before []
+// after [2]
+// before [2]
+// after [3]
+// before [3]
+// after []
+// --
+// 150
+// 50
+// 100
+// 0
+mod ecs;
+
+use std::vec::sort;
+
+use ecs::{App, World, Entity, Query, Single, Added, Changed, With, Or, chain, parallel, run_if};
+use core::value::Default;
+use std::vec::{map, sort};
+
+struct Update
+struct Value(Int)
+struct Tag
+struct Gate
+struct Count(Int)
+struct Other(Int)
+
+fn values(q: &mut Query<(&Value,), (Changed<Value>,)>) -> [Int] {
+    let mut out = [];
+    q.for_each() { (v,) => out = push(out, v.0); };
+    sort(out)
+}
+
+// `skipped_single_and_conditions_do_not_consume_pending_changes`
+fn gated(q: &mut Query<(&Value,), (Changed<Value>,)>, gate: &mut Single<(&Gate,), ()>) { say(values(q)) }
+fn tagged(q: &mut Query<(&Tag,), ()>) -> Bool { q.count() > 0 }
+fn skipped() {
+    let mut app = App::new().register<Value>().register<Tag>().register<Gate>()
+        .add_systems(Update, gated.run_if(tagged)).build();
+    let value = app.world.spawn_bundle((Value(1),));
+    let gate = app.world.spawn_bundle(());
+    app.emit(&Update);
+    discard(app.world.insert(gate, Tag));
+    // The condition holds; the `Single` has no row.
+    app.emit(&Update);
+    match(app.world.get_mut<Value>(value)) { Some(mut m) => m.0 = 9;, None => () };
+    discard(app.world.insert(gate, Gate));
+    app.emit(&Update);
+    app.emit(&Update)
+}
+
+// `row_filters_compose_and_single_counts_only_matching_rows`
+fn changed_or_tagged(q: &mut Query<(&Value,), (Or<(Changed<Value>, With<Tag>)>,)>) {
+    let mut out = [];
+    q.for_each() { (v,) => out = push(out, v.0); };
+    say(sort(out))
+}
+fn bump(single: &mut Single<(&mut Value,), (Changed<Value>,)>) {
+    match(single.get_mut()) { Some((mut v,)) => v.0 = v.0 + 10;, None => () }
+}
+fn composed() {
+    let mut app = App::new().register<Value>().register<Tag>()
+        .add_systems(Update, (changed_or_tagged, bump).chain()).build();
+    let a = app.world.spawn_bundle((Value(1), Tag));
+    discard(app.world.spawn_bundle((Value(2),)));
+    // Two changed rows: the `Single` is not run.
+    app.emit(&Update);
+    match(app.world.get_mut<Value>(a)) { Some(mut m) => m.0 = 3;, None => () };
+    // Still two changes since the `Single` has never run.
+    app.emit(&Update);
+    say(match(app.world.get<Value>(a)) { Some(v) => v.0, None => 0 })
+}
+
+// `replacing_the_world_resets_system_change_windows`
+fn added_values(q: &mut Query<(&Value,), (Added<Value>,)>, seen: &mut Count) {
+    q.for_each() { (v,) => seen.0 = seen.0 * 10 + v.0; };
+}
+fn replaced() {
+    let mut app = App::new().register<Value>().register<Tag>().insert_resource(Count(0))
+        .add_systems(Update, added_values).build();
+    discard(app.world.spawn_bundle((Value(1),)));
+    let mut i = 0;
+    while({ i < 10 }) { app.emit(&Update); i = i + 1 };
+    let count = match(app.world.remove_resource<Count>()) { Some(c) => c.0, None => 0 };
+    app.world = App::new().register<Value>().register<Tag>().insert_resource(Count(count)).build().world;
+    // The same place now holds another set of columns.
+    discard(app.world.spawn_bundle((Tag,)));
+    discard(app.world.spawn_bundle((Value(2),)));
+    app.emit(&Update);
+    say(match(app.world.resource<Count>()) { Some(c) => [c.0 / 10, c.0 % 10], None => [] })
+}
+
+// `cached_matches_follow_new_tables_growth_and_repopulated_empty_tables`
+fn all_values(q: &mut Query<(&Value,), ()>) {
+    let mut out = [];
+    q.for_each() { (v,) => out = push(out, v.0); };
+    let n = len_at(&out);
+    if(n > 3) { say(n) } else { say(sort(out)) }
+}
+fn cached() {
+    let mut app = App::new().register<Value>().register<Tag>().register<Gate>()
+        .add_systems(Update, all_values).build();
+    let original = app.world.spawn_bundle((Value(1),));
+    app.emit(&Update);
+    discard(app.world.despawn(original));
+    app.emit(&Update);
+    let mut i = 2;
+    let mut batch = [];
+    while({ i < 34 }) { batch = push(batch, (Value(i),)); i = i + 1 };
+    discard(app.world.spawn_batch(batch));
+    discard(app.world.spawn_bundle((Value(34), Tag)));
+    discard(app.world.spawn_bundle((Gate,)));
+    app.emit(&Update)
+}
+
+// `read_only_cursors_do_not_consume_subsequent_system_writes`
+fn before_write(q: &mut Query<(&Value,), (Changed<Value>,)>) { say("before " ++ show(values(q))) }
+fn write(value: &mut Single<(&mut Value,), ()>, gate: &mut Single<(&Gate,), ()>) {
+    match(value.get_mut()) { Some((mut v,)) => v.0 = v.0 + 1;, None => () }
+}
+fn after_write(q: &mut Query<(&Value,), (Changed<Value>,)>) { say("after " ++ show(values(q))) }
+fn cursors() {
+    let mut app = App::new().register<Value>().register<Gate>()
+        .add_systems(Update, (before_write, write, after_write).chain()).build();
+    discard(app.world.spawn_bundle((Value(1),)));
+    app.emit(&Update);
+    app.emit(&Update);
+    let gate = app.world.spawn_bundle((Gate,));
+    app.emit(&Update);
+    app.emit(&Update);
+    discard(app.world.despawn(gate));
+    app.emit(&Update)
+}
+
+// `parallel_writers_are_seen_exactly_once_by_readers_before_and_after_the_join`
+struct Seen { before: Int, after: Int }
+fn count_before(q: &mut Query<(&Count,), (Changed<Count>,)>, seen: &mut Seen) { seen.before = seen.before + q.count() }
+fn add_a(a: &mut Single<(&mut Count,), ()>) { match(a.get_mut()) { Some((mut c,)) => c.0 = c.0 + 1;, None => () } }
+fn add_b(b: &mut Single<(&mut Other,), ()>) { match(b.get_mut()) { Some((mut o,)) => o.0 = o.0 + 1;, None => () } }
+fn count_after(a: &mut Query<(&Count,), (Changed<Count>,)>, b: &mut Query<(&Other,), (Changed<Other>,)>, seen: &mut Seen) {
+    seen.after = seen.after + a.count() + b.count()
+}
+fn joined() {
+    let mut app = App::new().register<Count>().register<Other>().insert_resource(Seen { before: 0, after: 0 })
+        .add_systems(Update, count_before)
+        // The longer branch makes more changes; the join keeps its clock.
+        .add_systems(Update, parallel(((add_a, add_a, add_a).chain(), add_b)))
+        .add_systems(Update, count_after)
+        .build();
+    let entity = app.world.spawn_bundle((Count(0), Other(0)));
+    let mut i = 0;
+    while({ i < 50 }) { app.emit(&Update); i = i + 1 };
+    say(match(app.world.get<Count>(entity)) { Some(c) => c.0, None => 0 });
+    match(app.world.resource<Seen>()) { Some(seen) => say(seen.before); say(seen.after), None => () }
+}
+
+fn main() -> Int {
+    skipped();
+    say("--");
+    composed();
+    say("--");
+    replaced();
+    say("--");
+    cached();
+    say("--");
+    cursors();
+    say("--");
+    joined();
+    0
+}

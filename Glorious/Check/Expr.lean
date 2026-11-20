@@ -1224,6 +1224,15 @@ partial def inferCall (scope : Scope) (amb : Row) (f : Expr) (args : List Expr)
         let given := Ty.func (List.replicate arity (.con "usize" [])) .int ⟨[], none⟩ (← freshCap)
         checkArgs scope amb s!"`{x}`" [given, .int] args call
         pure (.con "usize" [])
+      else if id == 6 then
+        checkArgs scope amb s!"`{x}`" [← freshTy] args call
+        pure .int
+      else if id == 7 then
+        checkArgs scope amb s!"`{x}`" [.int] args call
+        freshTy
+      else if id == 8 then
+        checkArgs scope amb s!"`{x}`" [.int, ← freshTy] args call
+        pure .unit
       else
         checkArgs scope amb s!"`{x}`" [] args call
         pure (.tuple [.int, .int])

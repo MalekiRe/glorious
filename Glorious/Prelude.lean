@@ -771,6 +771,14 @@ fn pop_at<T>(a: &mut Array<T>) -> Option<T> where T: Use<[1, 1]> {
         None => None
     }
 }
+// Take out the element at a place: those after it move down one.
+fn remove_at<T>(a: &mut Array<T>, at: Int) -> T {
+    let mut after = [];
+    while({ len_at(&*a) > at + 1 }) { match(pop_at(a)) { Some(x) => push_at(&mut after, x), None => () } };
+    let taken = match(pop_at(a)) { Some(x) => x, None => abort("remove_at: no element at that place") };
+    while({ len_at(&after) > 0 }) { match(pop_at(&mut after)) { Some(x) => push_at(a, x), None => () } };
+    taken
+}
 
 // The elements from one place up to, not including, another.
 fn slice<T, U>(a: T, from: Int, to: Int) -> [U] where T: Index, T: Use<[0, *]>, U: Use<[0, *]> { slice_onto(a, from, to, array_empty()) }

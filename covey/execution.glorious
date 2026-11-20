@@ -1,0 +1,195 @@
+// Upstream's tests/execution.rs and tests/continuations.rs, of system graphs
+// (`ready`, `node`, `after`), parallel groups and execution modes:
+// - `conflicting_nodes_are_serialized_without_dependency_edges`: nodes that
+//   write the same value both run, one after the other, every emit.
+// - `serial_graph_releases_dependents_after_parameter_and_condition_skips`:
+//   a node not run, for want of a parameter or because its condition does
+//   not hold, still lets those after it run; an exclusive node.
+// - `serial_mode_keeps_nested_parallel_groups_on_calling_thread`: parallel
+//   groups inside parallel groups, all run.
+// - `single_worker_nested_graphs_complete_without_blocked_workers`: a graph
+//   as a node of a graph.
+// - `conflict_order_respects_dependencies_not_registration_order`.
+// - `later_registrations_observe_every_branch_of_earlier_parallel_ones`.
+// - `non_send_systems_and_listeners_still_run_parallel_groups`.
+// - `explicit_work_threshold_runs_small_groups_on_caller`: a pool's least
+//   work for a group, every system still run.
+// Not ported: the tests that need two branches to run at the same moment
+// (a barrier both wait at: `dependent_runs_before_unrelated_root_finishes`,
+// `narrow_prefix_reactivates_workers_and_nested_groups_join`,
+// `flattened_condition_skips_preserve_locals_and_release_dependents`), and
+// those of a system that panics (`panic_joins_running_nodes_and_graph_can_run_again`,
+// `dynamic_reentry_is_direct_and_pool_binding_restores_after_unwind`,
+// `multiple_panics_release_payloads_on_the_caller_and_pool_is_reusable`,
+// `cancelled_invocations_return_only_after_every_published_branch_finishes`),
+// and `simultaneous_callers_keep_worlds_and_invocation_lifetimes_separate`
+// (two threads emitting into apps at once: an app is not shared here).
+// expect:
+// 150
+// --
+// 2
+// 3
+// --
+// 3
+// --
+// 5
+// --
+// 60
+// --
+// 400
+// 400
+// --
+// 3
+// 9
+// --
+// 40
+// 0
+mod ecs;
+
+use core::option::{is_some, is_none};
+
+use ecs::{App, World, Local, Single, ExecutionMode, WorkerPool, ready, node, parallel, exclusive, run_if, chain};
+
+struct Update
+struct A
+struct B
+struct C
+struct D
+struct Prefix
+struct Fork
+struct Join
+
+struct Value(Int)
+struct Wide(Int)
+struct Calls(Int)
+
+fn bump(v: &mut Single<(&mut Value,), ()>, by: Int) { match(v.get_mut()) { Some((mut x,)) => x.0 = x.0 + by;, None => () } }
+fn value_of<S>(world: &World<S>) -> Int where S: ecs::Get<Value> {
+    let mut out = 0 - 1;
+    match(ecs::entities(world)) { es => { let mut i = 0; while({ i < len_at(&es) }) { match(world.get<Value>(es[i])) { Some(v) => out = v.0, None => () }; i = i + 1 } } };
+    out
+}
+
+// `conflicting_nodes_are_serialized_without_dependency_edges`
+fn plus_one(v: &mut Single<(&mut Value,), ()>) { bump(v, 1) }
+fn plus_two(v: &mut Single<(&mut Value,), ()>) { bump(v, 2) }
+fn plus_three(v: &mut Single<(&mut Value,), ()>) { bump(v, 3) }
+fn times_three(v: &mut Single<(&mut Value,), ()>) { match(v.get_mut()) { Some((mut x,)) => x.0 = x.0 * 3;, None => () } }
+fn times_ten(v: &mut Single<(&mut Value,), ()>) { match(v.get_mut()) { Some((mut x,)) => x.0 = x.0 * 10;, None => () } }
+
+// `serial_graph_releases_dependents_after_parameter_and_condition_skips`
+fn observe(v: &mut Single<(&Value,), ()>, calls: &mut Calls) { if(is_some(v.get_mut())) { calls.0 = calls.0 + 1 } }
+fn never() -> Bool { false }
+fn skipped_body() { abort("skipped body") }
+fn bump_or_spawn<S>(world: &mut World<S>) where S: ecs::Get<Value>, S: ecs::Columns {
+    let es = ecs::entities(&*world);
+    let mut found = false;
+    let mut i = 0;
+    while({ i < len_at(&es) }) {
+        match(world.get_mut<Value>(es[i])) { Some(mut v) => v.get_mut().0 = v.0 + 1; found = true, None => () };
+        i = i + 1
+    };
+    if(not_(found)) { discard(world.spawn_bundle((Value(1),))) }
+}
+fn not_(b: Bool) -> Bool { if(b) { false } else { true } }
+
+// `serial_mode_keeps_nested_parallel_groups_on_calling_thread`
+fn visit(calls: &mut Calls) { calls.0 = calls.0 + 1 }
+fn always() -> Bool { true }
+
+// `later_registrations_observe_every_branch_of_earlier_parallel_ones`
+fn wide_bump(w: &mut Single<(&mut Wide,), ()>) { match(w.get_mut()) { Some((mut x,)) => x.0 = x.0 + 1;, None => () } }
+fn same(a: &mut Single<(&Value,), ()>, b: &mut Single<(&Wide,), ()>) {
+    match((a.get_mut(), b.get_mut())) { (Some((x,)), Some((y,))) => if(x.0 == y.0) { () } else { abort("branches not joined") }, _ => () }
+}
+
+// `non_send_systems_and_listeners_still_run_parallel_groups`
+struct Seen(Int)
+fn listen<S>(world: &mut World<S>) where S: ecs::Get<Value>, S: ecs::Holds<Seen> {
+    let v = value_of(&*world);
+    match(world.resource_mut<Seen>()) { Some(seen) => seen.0 = seen.0 + v, None => () }
+}
+fn local_count(calls: &mut Calls) { calls.0 = calls.0 + 1 }
+
+fn main() -> Int {
+    let pool = WorkerPool::new(3);
+    let mut app = App::new().register<Value>()
+        .add_systems(Update, ready((node(A, plus_one), node(B, plus_two)))).build();
+    discard(app.world.spawn_bundle((Value(0),)));
+    let mut i = 0;
+    while({ i < 50 }) { pool.install(fn() { app.emit(&Update) }); i = i + 1 };
+    say(value_of(&app.world));
+    say("--");
+
+    let mut app = App::new().register<Value>().insert_resource(Calls(0))
+        .with_execution_mode(ExecutionMode::Serial)
+        .add_systems(Update, ready((
+            node(A, observe),
+            node(B, skipped_body.run_if(never)).after(A),
+            node(C, exclusive(bump_or_spawn)).after(B)
+        ))).build();
+    app.emit(&Update);
+    app.emit(&Update);
+    app.emit(&Update);
+    say(match(app.world.resource<Calls>()) { Some(c) => c.0, None => 0 });
+    say(value_of(&app.world));
+    say("--");
+
+    let mut app = App::new().insert_resource(Calls(0))
+        .with_execution_mode(ExecutionMode::Serial)
+        .add_systems(Update, parallel((parallel((visit, visit)), visit)).run_if(always)).build();
+    app.emit(&Update);
+    say(match(app.world.resource<Calls>()) { Some(c) => c.0, None => 0 });
+    say("--");
+
+    let mut app = App::new().register<Value>()
+        .add_systems(Update, ready((
+            node(A, ready((node(C, plus_one), node(D, times_three).after(C)))),
+            node(B, plus_two).after(A)
+        ))).build();
+    discard(app.world.spawn_bundle((Value(0),)));
+    WorkerPool::new(1).install(fn() { app.emit(&Update) });
+    say(value_of(&app.world));
+    say("--");
+
+    let mut app = App::new().register<Value>()
+        .add_systems(Update, ready((
+            node(Join, times_ten).after(Fork),
+            node(Prefix, plus_two),
+            node(Fork, plus_three).after(Prefix)
+        ))).build();
+    discard(app.world.spawn_bundle((Value(1),)));
+    app.emit(&Update);
+    say(value_of(&app.world));
+    say("--");
+
+    let mut app = App::new().register<Value>().register<Wide>()
+        .add_systems(Update, parallel((plus_one, wide_bump)))
+        .add_systems(Update, same)
+        .add_systems(Update, parallel((plus_one, wide_bump)))
+        .build();
+    let e = app.world.spawn_bundle((Value(0), Wide(0)));
+    let mut i = 0;
+    while({ i < 200 }) { app.emit(&Update); i = i + 1 };
+    say(match(app.world.get<Value>(e)) { Some(v) => v.0, None => 0 });
+    say(match(app.world.get<Wide>(e)) { Some(w) => w.0, None => 0 });
+    say("--");
+
+    let mut app = App::new().register<Value>().register<Wide>().insert_resource(Calls(0)).insert_resource(Seen(0))
+        .add_systems(Update, (local_count, parallel((plus_one, wide_bump))))
+        .add_systems(Update, exclusive(listen))
+        .build();
+    let e = app.world.spawn_bundle((Value(0), Wide(0)));
+    let mut i = 0;
+    while({ i < 3 }) { WorkerPool::new(2).install(fn() { app.emit(&Update) }); i = i + 1 };
+    say(match(app.world.get<Wide>(e)) { Some(w) => w.0, None => 0 });
+    say(match((app.world.resource<Calls>(), app.world.resource<Seen>())) { (Some(c), Some(s)) => c.0 + s.0, _ => 0 });
+    say("--");
+
+    let mut app = App::new().insert_resource(Calls(0)).add_systems(Update, parallel((visit, visit))).build();
+    let small = WorkerPool::new(3).with_min_parallel_work(3);
+    let mut i = 0;
+    while({ i < 20 }) { small.install(fn() { app.emit(&Update) }); i = i + 1 };
+    say(match(app.world.resource<Calls>()) { Some(c) => c.0, None => 0 });
+    0
+}
