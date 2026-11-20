@@ -181,18 +181,25 @@ fn lower<T, S>(columns: &mut S, value: T) where S: Holds<T> { *<S as Holds<T>>::
 
 // What is done to every column of a world when an entity ends.
 pub trait Columns {
+    // (The names of the components an entity has, for the world's hooks.)
+    fn held(&Self, Entity, [Str]) -> [Str]
     fn forget(&mut Self, Entity)
     fn empty() -> Self
     fn copy_onto(&mut Self, Entity, Entity)
     fn copy_all(&Self, &mut Self)
 }
 impl Columns for () {
+    fn held(columns: &(), entity: Entity, names: [Str]) -> [Str] { names }
     fn forget(columns: &mut (), entity: Entity) { () }
     fn empty() { () }
     fn copy_onto(columns: &mut (), from: Entity, to: Entity) { () }
     fn copy_all(columns: &(), into: &mut ()) { () }
 }
-impl<H, R> Columns for (Column<H>, R) where R: Columns, H: Cloner {
+impl<H, R> Columns for (Column<H>, R) where R: Columns, H: Cloner, H: Schedule {
+    fn held(columns: &(Column<H>, R), entity: Entity, names: [Str]) -> [Str] {
+        let rest = <R as Columns>::held(&columns.1, entity, names);
+        if(slot_of(&columns.0, entity) < 0) { rest } else { push(rest, <H as Schedule>::NAME) }
+    }
     fn forget(columns: &mut (Column<H>, R), entity: Entity) {
         let _ = column_remove(&mut columns.0, entity);
         <R as Columns>::forget(&mut columns.1, entity)
@@ -223,6 +230,7 @@ impl<H, R> Columns for (Column<H>, R) where R: Columns, H: Cloner {
     }
 }
 impl<H, R> Columns for (Resource<H>, R) where R: Columns {
+    fn held(columns: &(Resource<H>, R), entity: Entity, names: [Str]) -> [Str] { <R as Columns>::held(&columns.1, entity, names) }
     fn forget(columns: &mut (Resource<H>, R), entity: Entity) { <R as Columns>::forget(&mut columns.1, entity) }
     fn empty() -> (Resource<H>, R) { (Resource { value: None }, <R as Columns>::empty()) }
     fn copy_onto(columns: &mut (Resource<H>, R), from: Entity, to: Entity) { <R as Columns>::copy_onto(&mut columns.1, from, to) }
@@ -842,7 +850,17 @@ impl<S> World<S> {
     }
 
     // Take a component from an entity.
-    pub fn remove<T>(world: &mut Self, entity: Entity) -> Option<T> where S: Get<T> { if(alive(&*world, entity)) { remove<T, S>(world, entity) } else { None } }
+    pub fn remove<T>(world: &mut Self, entity: Entity) -> Option<T> where S: Get<T>, T: Schedule {
+        if(alive(&*world, entity)) {
+            if(<S as Get<T>>::has(&world.columns, entity)) {
+                let names = [<T as Schedule>::NAME];
+                let gone = [entity];
+                fire_world(world, 2, &names, &gone);
+                fire_world(world, 3, &names, &gone)
+            } else { () };
+            remove<T, S>(world, entity)
+        } else { None }
+    }
 
     // Relate an entity to another by `R`, in place of what it related to by
     // `R` before: what that link carried. (`ChildOf` of a child to its
@@ -946,6 +964,14 @@ impl<S> World<S> {
     // End an entity; whether it was there.
     pub fn despawn(world: &mut Self, entity: Entity) -> Bool where S: Columns, S: Unlinks<S> {
         let was = alive(&*world, entity);
+        if(was) {
+            if(world.direct) {
+                let names = <S as Columns>::held(&world.columns, entity, []);
+                let gone = [entity];
+                fire_world(world, 2, &names, &gone);
+                fire_world(world, 3, &names, &gone)
+            } else { () }
+        } else { () };
         despawn(world, entity);
         was
     }
@@ -2114,9 +2140,12 @@ pub struct On<E, P> { label: fn(E) -> (), systems: P }
 // when the app is built. The world's own structural operations run them
 // while an exclusive system has it (`direct`); the app fires its hooks
 // itself everywhere else, as it did. (A hook's commands are done before the
-// operation that ran it returns. While the world's hooks run, what their
-// commands do runs none of them.)
-pub struct WorldHook<S> { kind: Int, name: Str, run: fn(&[Entity], &mut World<S>) -> () }
+// operation that ran it returns, and fire hooks in turn; one whose own
+// commands would run it again stops the program, its handle being taken.)
+pub struct WorldHook<S> { kind: Int, name: Str, run: Mutex<fn(&[Entity], &mut World<S>) -> ()> }
+// (A handle: the table is gone through as a copy, so what a hook's commands
+// do runs the world's hooks too.)
+impl<S> Use<[0, *]> for WorldHook<S> {}
 
 pub trait LifecycleEvent { const KIND: Int; fn component() -> Str; fn of([Entity]) -> Self }
 impl<T> LifecycleEvent for OnAdd<T> where T: Schedule { const KIND: Int = 0; fn component() -> Str { <T as Schedule>::NAME } fn of(entities: [Entity]) -> OnAdd<T> { OnAdd { entities: entities, none: [] } } }
@@ -2136,13 +2165,13 @@ pub trait LendsHook<E, S> { fn world_hook(&Self) -> WorldHook<S> }
 impl<E, S, Q> LendsHook<E, S> for SharedSystem<Q> where Q: System<E, S>, E: LifecycleEvent {
     fn world_hook(system: &SharedSystem<Q>) -> WorldHook<S> {
         let shared = std::thread::share(&system.shared);
-        WorldHook { kind: <E as LifecycleEvent>::KIND, name: <E as LifecycleEvent>::component(), run: fn(entities: &[Entity], world: &mut World<S>) {
+        WorldHook { kind: <E as LifecycleEvent>::KIND, name: <E as LifecycleEvent>::component(), run: Mutex::new(fn(entities: &[Entity], world: &mut World<S>) {
             let mine = shared;
             let event = <E as LifecycleEvent>::of(clone(entities));
             let mut commands = no_commands(&*world);
             lock(&mine, fn(q: &mut Q) { <Q as System<E, S>>::run(q, &event, world, &mut commands) });
             apply(commands, world)
-        } }
+        }) }
     }
 }
 // (Of a label that is a lifecycle event, its hook; of any other, none.)
@@ -2175,14 +2204,15 @@ fn named_in(names: &[Str], name: &Str) -> Bool {
 // exclusive system has the world.
 fn fire_world<S>(world: &mut World<S>, kind: Int, names: &[Str], entities: &[Entity]) {
     if(world.direct) {
-        let hooks: [WorldHook<S>] = replace(&mut world.hooks, []);
+        let hooks: [WorldHook<S>] = world.hooks;
         let mut i = 0;
         while({ i < len_at(&hooks) }) {
-            let hook: &WorldHook<S> = &hooks[i];
-            if(hook.kind == kind) { if(named_in(names, &hook.name)) { (hook.run)(entities, world) } else { () } } else { () };
+            let hook: WorldHook<S> = hooks[i];
+            if(hook.kind == kind) {
+                if(named_in(names, &hook.name)) { lock(&hook.run, fn(run: &mut fn(&[Entity], &mut World<S>) -> ()) { (*run)(entities, world) }) } else { () }
+            } else { () };
             i = i + 1
-        };
-        world.hooks = hooks
+        }
     } else { () }
 }
 
@@ -3528,7 +3558,7 @@ impl<S, L> App<S, L> {
         fire_brought(app, &brought, &names, 1);
         old
     }
-    pub fn remove<T>(app: &mut Self, entity: Entity) -> Option<T> where S: Get<T>, S: Fires<S, L>, S: Requests<S, L>, L: Dispatch<OnRemove<T>, S> {
+    pub fn remove<T>(app: &mut Self, entity: Entity) -> Option<T> where S: Get<T>, T: Schedule, S: Fires<S, L>, S: Requests<S, L>, L: Dispatch<OnRemove<T>, S> {
         if(<S as Get<T>>::has(&app.world.columns, entity)) { app.emit<OnRemove<T>>(&OnRemove { entities: [entity], none: [] }) };
         app.world.remove<T>(entity)
     }

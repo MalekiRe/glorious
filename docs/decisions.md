@@ -5924,10 +5924,13 @@ Each is to go; none is a design covey keeps.
   A hook registered with `.on` is a `SharedSystem<Q>`, its state in a
   `Mutex`, so the app's entry and the world's table run the same system.
   `World::spawn_bundle` and `World::insert` run them where an exclusive
-  system has the world (`direct`). Still: what a world hook's commands do
-  runs no world hooks (the table is out while they run); `remove` and
-  `despawn` on the world run none yet; a signature that spells what `.on`
-  gives says `SharedSystem<..>` (dispatch, simulation, plugins).
+  system has the world (`direct`), and so do `World::remove` and
+  `World::despawn` (`OnReplace`, `OnRemove`; `Columns::held` names what an
+  entity has). The table is gone through as a copy of handles (each hook's
+  callable in a `Mutex`), so what a hook's commands do fires hooks in turn.
+  Still: a hook whose own commands would run it again stops the program; a
+  signature that spells what `.on` gives says `SharedSystem<..>` (dispatch,
+  simulation, plugins).
 - ~~A label a task or behavior waits for says its name~~: a type's name is
   the compiler's now. `self_name()` in an implementation for every type is,
   in its copy for each type, the type's name (`impl<T> Schedule for T {
