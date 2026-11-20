@@ -5886,6 +5886,35 @@ type by what it holds (a resumption, a `Cell`, a non-`Sync` reference: not).
 A program that uses none of it runs as it does now; one that does is run on
 the host's threads by the Lean machine and the native targets.
 
+## Where covey departs from upstream, and what takes each away
+
+Each is to go; none is a design covey keeps.
+
+- A plugin's storage is said after its components are registered
+  (`app.storage<..>()`), not among them: two implementations of `Registers`
+  for a list whose rest is generic were ambiguous to the solver. Taken away
+  by choosing between such implementations by fitting.
+- Threads take turns where one waits (`std::thread`), and a parallel group's
+  branches and a graph's nodes run one after another, so the upstream tests
+  of branches that meet at a barrier are not ported. Taken away by real
+  threads in the machines (a concurrent store and atomics in Core) and, in
+  covey, a system's parameters taken out of the world for each branch, the
+  branches run at once, and put back.
+- No implementation chosen by whether a condition holds: `Cloner`,
+  `Mutability`, `Disabling` are said by each type. Taken away by that choice
+  in the language, `impl<T> X for T where T: Clone` beside `impl<T> X for T`.
+- Hooks belong to the app: what the world does on its own, and exclusive
+  systems, fire none. Taken away by hooks the world keeps.
+- A label a task or behavior waits for says its name (`Schedule::NAME`), and
+  devtools cannot name types or systems. Taken away by names, or ids, of
+  types and functions the compiler gives.
+- No unwinding: tests of panics are not ported. Taken away by panics that
+  run destructors and can be caught.
+- An entity does not say which world it is of. Taken away by an `Entity`
+  that does.
+- Not yet written: `world.single`, joins that hide disabled targets,
+  envelope sync points, stepping and `why_not`.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by
