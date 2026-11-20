@@ -924,6 +924,10 @@ impl<S> World<S> {
 
     // A query of the world: `world.query<(Entity, &Score)>()`. While it is
     // had, the world is borrowed by it; its columns go back when it is let go.
+    // What `Q` asks of the one entity that has it, if exactly one does:
+    // `world.single<(&mut Position,)>()` (upstream's `world.single`), and
+    // with a filter, `single_filtered`. Written through the query it makes,
+    // which puts the columns back when it is let go.
     pub fn query<Q>(world: &mut Self) -> WorldQuery<'_, Q, (), S> where Q: Fill<S>, S: Hidden<Q, ()> {
         world.query_filtered<Q, ()>()
     }
@@ -1326,6 +1330,17 @@ impl<Q, N, St> Query<Q, N, St> {
         };
         n
     }
+    // The one entity it is of, if it is of exactly one.
+    pub fn only_entity(query: &mut Self) -> Option<Entity> where Q: Item<Store = St> {
+        let mut found = None;
+        let mut n = 0;
+        let mut i = 0;
+        while({ i < len_at(&query.entities) }) {
+            if(is_some(<Q as Item>::item_at(&mut query.store, query.entities[i]))) { n = n + 1; found = Some(query.entities[i]) } else { () };
+            i = i + 1
+        };
+        if(n == 1) { found } else { None }
+    }
 }
 
 fn has_entity(entities: &[Entity], entity: Entity) -> Bool {
@@ -1358,6 +1373,11 @@ impl<'w, Q, N, S, St> WorldQuery<'w, Q, N, S, St> {
     pub fn for_each(q: &mut Self, f: for<'a> fn(Q::Got<'a>)) where Q: Item<Store = St> { q.query.for_each(f) }
     pub fn get_mut(q: &mut Self, entity: Entity) -> Option<Q::Got<'_>> where Q: Item<Store = St> { q.query.get_mut(entity) }
     pub fn count(q: &mut Self) -> Int where Q: Item<Store = St> { q.query.count() }
+    // What it asks for of the one entity it is of, if exactly one (upstream's
+    // `world.single`).
+    pub fn single(q: &mut Self) -> Option<Q::Got<'_>> where Q: Item<Store = St> {
+        match(q.query.only_entity()) { Some(e) => q.query.get_mut(e), None => None }
+    }
 }
 
 // A query of exactly one entity: a system that takes one runs only while

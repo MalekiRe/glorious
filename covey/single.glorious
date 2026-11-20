@@ -1,0 +1,37 @@
+// `singleton_requires_exactly_one_matching_row_across_all_tables`
+// (upstream's tests/params.rs): `world.single` is of exactly one entity.
+//
+// expect:
+// 1
+// 4
+// 1
+// 1
+// 0
+// 0
+mod ecs;
+
+use ecs::{App, World, Entity, With};
+use core::option::is_none;
+
+struct Position(Int)
+struct Velocity(Int)
+struct Tag
+
+fn flag(b: Bool) { if(b) { say(1) } else { say(0) } }
+
+fn main() -> Int {
+    let mut world = App::new().register<Position>().register<Velocity>().register<Tag>().build().world;
+    flag(is_none(world.query<(&Position,)>().single()));
+    let a = world.spawn_bundle(());
+    discard(world.insert(a, Position(1)));
+    discard(world.insert(a, Velocity(2)));
+    match(world.query<(&mut Position,)>().single()) { Some((mut p,)) => p.0 = p.0 + 3, None => () };
+    say(match(world.query<(&Position,)>().single()) { Some((p,)) => p.0, None => 0 });
+    let b = world.spawn_bundle(());
+    discard(world.insert(b, Position(10)));
+    flag(is_none(world.query<(&Position,)>().single()));
+    flag(is_none(world.query_filtered<(&Position,), (With<Tag>,)>().single()));
+    discard(world.insert(a, Tag));
+    say(match(world.query_filtered<(&Position, &Velocity), (With<Tag>,)>().single()) { Some((p, v)) => if(p.0 + v.0 == 6) { 0 } else { 1 }, None => 1 });
+    0
+}
