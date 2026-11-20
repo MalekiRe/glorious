@@ -412,29 +412,20 @@ def checkItems (items : List Item) (seed : UInt64 := 0) (kept : Kept := []) : M 
     let blanket := fun (im : ImplDecl) => im.methods.any fun
       | .typeAlias n _ _ => (Syntax.blanketParam n).isSome
       | _ => false
-    let implDecls ← ((← get).impls.toList.drop before).filter blanket |>.flatMapM implFnDecls
+    let mut copies : Array (String × FnDecl) := #[]
+    for im in ((← get).impls.toList.drop before).filter blanket do
+      for d in ← implFnDecls im do copies := copies.push (im.dictFn, d)
     let namesAny := fun (d : FnDecl) =>
       ((d.clauses.flatMap (Elab.fvClause [])).flatMap fun x => x :: aliasOf.getD x []).any nameSet.contains
-    let early := if coercing.isEmpty then implDecls.filter (!namesAny ·) else []
-    -- (Of those kept, the last is taken, and made this program's: the key
-    -- has its implementations as written, so they line up. Kept now and
-    -- then, as the groups are: a unit declaring many types has a copy of
-    -- each for every one, and a state after each was most of what a
-    -- program kept.)
-    let earlyKeys := (early.foldl (fun (acc : List UInt64 × UInt64) d =>
-      let k := groupKey acc.2 [d]
-      (k :: acc.1, k)) ([], key)).1.reverse
-    let earlyStart := ((earlyKeys.zipIdx.reverse.find? fun (k, _) => (kept.lookup k).isSome).map (·.2 + 1)).getD 0
-    if earlyStart > 0 then
-      if let some k := earlyKeys[earlyStart - 1]? then
-        if let some st := kept.lookup k then
-          restore ((ours st).getD st) decls
-          made := (k, st) :: made
-    -- (None of them uses another: all side by side, the state kept after.)
-    if earlyStart < early.length then
-      checkSideBySide ((early.drop earlyStart).map ([·]))
-      made := (earlyKeys[early.length - 1]!, forKeeping (← get)) :: made
-    if let some k := earlyKeys.getLast? then key := k
+    let earlyCopies := if coercing.isEmpty then copies.filter (fun (_, d) => !namesAny d) else #[]
+    let early := earlyCopies.toList.map (·.2)
+    -- (Checked only where something uses them, at the end of this unit or
+    -- of a later one: most are of types no bound asks them of. What a kept
+    -- state had of this unit's is put back as they are now.)
+    let earlySet : Std.HashSet String := early.foldl (fun s d => s.insert d.name) {}
+    let refreshCopies : M Unit := modify fun s =>
+      { s with pendingCopies := (s.pendingCopies.filter fun (_, d) => !earlySet.contains d.name) ++ earlyCopies }
+    refreshCopies
     -- The state after the last group whose key, and so every key before
     -- it, is kept is taken; the groups after it are checked. A state is
     -- kept after a group only now and then, in a unit of many (`keptEvery`):
@@ -450,6 +441,7 @@ def checkItems (items : List Item) (seed : UInt64 := 0) (kept : Kept := []) : M 
       if let some k := keys[start - 1]? then
         if let some st := look k then
           restore st ((groups.drop start).flatten)
+          refreshCopies
           made := (k, st) :: made
     let rest := (groups.zipIdx.drop start).toArray
     -- Each function's type as its signature says, first; then every body
@@ -516,6 +508,7 @@ def checkItems (items : List Item) (seed : UInt64 := 0) (kept : Kept := []) : M 
       if let some k := implKeys[implStart - 1]? then
         if let some st := look k then
           restore st []
+          refreshCopies
           made := (k, st) :: made
     -- (None uses another: all side by side.)
     checkSideBySide (implGroups.toList.drop implStart)
@@ -525,6 +518,34 @@ def checkItems (items : List Item) (seed : UInt64 := 0) (kept : Kept := []) : M 
     for c in coercing do
       unless (((← get).fnBounds.lookup c).getD 0) == 0 do
         throw s!"`coerce {c}`: a coercion cannot need a trait of a type it is used at"
+    -- The copies of implementations for every type that something now
+    -- uses: checked, and then those that they use, until none is left that
+    -- is used.
+    -- (What the table names, gone through once for each entry made since the
+    -- last look, and once for each dictionary however often it is shared.)
+    let mut asking := true
+    let mut used : Std.HashSet String := {}
+    let mut seen : Std.HashSet USize := {}
+    let mut scanned := 0
+    while asking do
+      let table := (← get).dictTable
+      let mut todo : Array Elab.DictE := #[]
+      for k in [scanned:table.size] do
+        if let some (_, ds) := table[k]? then todo := todo ++ ds.toArray
+      scanned := table.size
+      while !todo.isEmpty do
+        let d := todo.back!
+        todo := todo.pop
+        unless seen.contains (addrOf d) do
+          seen := seen.insert (addrOf d)
+          if let .impl f subs := d then
+            used := used.insert f
+            todo := todo ++ subs.toArray
+      let (ready, rest) := (← get).pendingCopies.partition fun (f, _) => used.contains f
+      if ready.isEmpty then asking := false
+      else
+        modify fun s => { s with pendingCopies := rest }
+        checkSideBySide (ready.toList.map fun (_, d) => [d])
     checkDups (← get).lateDups
     checkDrops (← get).lateDrops
     checkStays (← get).lateStays

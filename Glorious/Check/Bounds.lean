@@ -11,18 +11,6 @@ open Syntax
 
 /-! ## Programs -/
 
-structure FnDecl where
-  name : String
-  params : List String
-  annots : List (Option TypeExpr)
-  ret : Option TypeExpr
-  clauses : List Clause
-  /-- For a function an implementation gives: the implementation, and the
-  trait's function it is. -/
-  impl : Option (ImplDecl × MethodSig) := none
-  /-- What is written of its type parameters. -/
-  bounds : List Syntax.Bound := []
-
 /-! ## Traits
 
 A bound is a trait needed of a type. Where the type is made with a name, an

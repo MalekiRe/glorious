@@ -457,6 +457,19 @@ def jumpTo (s : Store α) (n : Nat) : Store α :=
 
 end Store
 
+/-- A function to check: its name, what is written of it, and its clauses. -/
+structure FnDecl where
+  name : String
+  params : List String
+  annots : List (Option TypeExpr)
+  ret : Option TypeExpr
+  clauses : List Clause
+  /-- For a function an implementation gives: the implementation, and the
+  trait's function it is. -/
+  impl : Option (ImplDecl × MethodSig) := none
+  /-- What is written of its type parameters. -/
+  bounds : List Syntax.Bound := []
+
 /-- A use of a function inside the group it is inferred with: its bounds are
 not known until the group is done. `call` is zero where it is not called. -/
 structure GroupUse where
@@ -903,6 +916,10 @@ structure St where
   refusals : Array String := #[]
   /-- How each call's bounds are met, for the elaborator. -/
   dictTable : Array (Nat × List Elab.DictE) := #[]
+  /-- The functions of copies of implementations for every type not yet
+  checked, by the implementation's dictionary function: checked once
+  something uses the implementation (`checkItems`, at a unit's end). -/
+  pendingCopies : Array (String × FnDecl) := #[]
   methodCalls : Array (Nat × Nat) := #[]
   fnBounds : List (String × Nat) := []
 

@@ -213,7 +213,7 @@ def mergeStates (p a b : St) : Option St := do
     capEdges := ← m3 (·.capEdges), capOut := ← m3 (·.capOut),
     capEdgeNames := ← m3 (·.capEdgeNames), dups := ← m3 (·.dups), lateDups := ← m3 (·.lateDups),
     drops := ← m3 (·.drops), lateDrops := ← m3 (·.lateDrops), stays := ← m3 (·.stays),
-    lateStays := ← m3 (·.lateStays), statics := ← m3 (·.statics), useDecls := ← m3 (·.useDecls),
+    lateStays := ← m3 (·.lateStays), statics := ← m3 (·.statics), pendingCopies := ← m3 (·.pendingCopies), useDecls := ← m3 (·.useDecls),
     movedCells := ← m3 (·.movedCells), flagged := ← m3 (·.flagged),
     givenSites := ← m3 (·.givenSites), givenEdges := ← m3 (·.givenEdges),
     givers := ← m3 (·.givers), givenReads := ← m3 (·.givenReads), aparts := ← m3 (·.aparts),
