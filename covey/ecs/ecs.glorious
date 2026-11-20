@@ -1895,14 +1895,21 @@ pub trait System<E, S> {
     // (One step of a pass, upstream's `app.step`: the system or condition
     // the stepper is at, run, and the stepper past what this has.)
     fn step(&mut Self, &E, &mut World<S>, &mut Commands<S>, Stepper) -> Stepper
+    // (Why the system of the name is not run on an entity, if it is one of
+    // these: what its queries say against it.)
+    fn why_not(&Self, &Str, &World<S>, Entity) -> Option<[Str]>
 }
 impl<E, S> System<E, S> for () {
     fn step(nothing: &mut (), event: &E, world: &mut World<S>, commands: &mut Commands<S>, at: Stepper) -> Stepper { at }
+    fn why_not(nothing: &(), name: &Str, world: &World<S>, entity: Entity) -> Option<[Str]> { None }
     fn run(nothing: &mut (), event: &E, world: &mut World<S>, commands: &mut Commands<S>) { () }
     fn system_names(nothing: &(), names: [Str]) -> [Str] { names }
 }
 impl<E, S, X, Y> System<E, S> for (X, Y) where X: System<E, S>, Y: System<E, S> {
     fn system_names(pair: &(X, Y), names: [Str]) -> [Str] { <Y as System<E, S>>::system_names(&pair.1, <X as System<E, S>>::system_names(&pair.0, names)) }
+    fn why_not(pair: &(X, Y), name: &Str, world: &World<S>, entity: Entity) -> Option<[Str]> {
+        match(<X as System<E, S>>::why_not(&pair.0, name, world, entity)) { Some(why) => Some(why), None => <Y as System<E, S>>::why_not(&pair.1, name, world, entity) }
+    }
     fn step(pair: &mut (X, Y), event: &E, world: &mut World<S>, commands: &mut Commands<S>, at: Stepper) -> Stepper {
         let after = <X as System<E, S>>::step(&mut pair.0, event, world, commands, at);
         <Y as System<E, S>>::step(&mut pair.1, event, world, commands, after)
@@ -1916,10 +1923,97 @@ impl<E, S, X, Y> System<E, S> for (X, Y) where X: System<E, S>, Y: System<E, S> 
 // two for the same; and what its locals hold.
 // (`last`: the world's time when it last ran, of which it sees what was
 // put in or changed after.)
+// Why a query is not of an entity, upstream's `app.why_not`: what each term
+// of what it asks for lacks (`lacks `Damage``), what each filter says against
+// it (`Without<Dead>: has `Dead``, `Changed<Damage>: changed at 3, not after
+// 3`), and a component that disables it and that the query does not mention.
+pub trait WhyFill<S> { fn why_fill(&S, Entity, [Str]) -> [Str] }
+fn lacking<A, S>(columns: &S, entity: Entity, why: [Str]) -> [Str] where S: Get<A>, A: Schedule {
+    if(<S as Get<A>>::has(columns, entity)) { why } else { push(why, "lacks `" ++ <A as Schedule>::NAME ++ "`") }
+}
+impl<A, S> WhyFill<S> for &mut A where S: Get<A>, A: Schedule { fn why_fill(columns: &S, entity: Entity, why: [Str]) -> [Str] { lacking<A, S>(columns, entity, why) } }
+impl<A, S> WhyFill<S> for &A where S: Get<A>, A: Schedule { fn why_fill(columns: &S, entity: Entity, why: [Str]) -> [Str] { lacking<A, S>(columns, entity, why) } }
+impl<S> WhyFill<S> for () { fn why_fill(columns: &S, entity: Entity, why: [Str]) -> [Str] { why } }
+impl<S> WhyFill<S> for Entity { fn why_fill(columns: &S, entity: Entity, why: [Str]) -> [Str] { why } }
+impl<A, S> WhyFill<S> for Has<A> { fn why_fill(columns: &S, entity: Entity, why: [Str]) -> [Str] { why } }
+impl<A, S> WhyFill<S> for Option<&mut A> { fn why_fill(columns: &S, entity: Entity, why: [Str]) -> [Str] { why } }
+impl<A, S> WhyFill<S> for Option<&A> { fn why_fill(columns: &S, entity: Entity, why: [Str]) -> [Str] { why } }
+// (A join is not explained further than whether there is a link.)
+impl<R, Q, S> WhyFill<S> for To<R, Q> where S: Get<Relates<R>>, R: Schedule {
+    fn why_fill(columns: &S, entity: Entity, why: [Str]) -> [Str] { if(<S as Get<Relates<R>>>::has(columns, entity)) { why } else { push(why, "relates to nothing by `" ++ <R as Schedule>::NAME ++ "`") } }
+}
+impl<R, Q, S> WhyFill<S> for From<R, Q> where S: Get<Sources<R>>, R: Schedule {
+    fn why_fill(columns: &S, entity: Entity, why: [Str]) -> [Str] { if(<S as Get<Sources<R>>>::has(columns, entity)) { why } else { push(why, "nothing relates to it by `" ++ <R as Schedule>::NAME ++ "`") } }
+}
+impl<H, ..R, S> WhyFill<S> for (H, ..R) where H: WhyFill<S>, (..R): WhyFill<S> {
+    fn why_fill(columns: &S, entity: Entity, why: [Str]) -> [Str] { <(..R) as WhyFill<S>>::why_fill(columns, entity, <H as WhyFill<S>>::why_fill(columns, entity, why)) }
+}
+pub trait WhyOnly<S> { fn why_only(&S, Entity, Int, [Str]) -> [Str] }
+impl<S> WhyOnly<S> for () { fn why_only(columns: &S, entity: Entity, since: Int, why: [Str]) -> [Str] { why } }
+impl<T, S> WhyOnly<S> for With<T> where S: Get<T>, T: Schedule {
+    fn why_only(columns: &S, entity: Entity, since: Int, why: [Str]) -> [Str] {
+        if(<S as Get<T>>::has(columns, entity)) { why } else { push(why, "With<" ++ <T as Schedule>::NAME ++ ">: lacks `" ++ <T as Schedule>::NAME ++ "`") }
+    }
+}
+impl<T, S> WhyOnly<S> for Without<T> where S: Get<T>, T: Schedule {
+    fn why_only(columns: &S, entity: Entity, since: Int, why: [Str]) -> [Str] {
+        if(<S as Get<T>>::has(columns, entity)) { push(why, "Without<" ++ <T as Schedule>::NAME ++ ">: has `" ++ <T as Schedule>::NAME ++ "`") } else { why }
+    }
+}
+fn why_since<T, S>(columns: &S, entity: Entity, since: Int, why: [Str], what: Str, added: Bool) -> [Str] where S: Get<T>, T: Schedule {
+    let column = <S as Get<T>>::column(columns);
+    let at = slot_of(column, entity);
+    if(at < 0) { push(why, what ++ "<" ++ <T as Schedule>::NAME ++ ">: lacks `" ++ <T as Schedule>::NAME ++ "`") }
+    else {
+        let tick = if(added) { column.added[at] } else { column.changed[at] };
+        if(tick > since) { why } else { push(why, what ++ "<" ++ <T as Schedule>::NAME ++ ">: " ++ (if(added) { "added" } else { "changed" }) ++ " at " ++ show(tick) ++ ", not after " ++ show(since)) }
+    }
+}
+impl<T, S> WhyOnly<S> for Added<T> where S: Get<T>, T: Schedule { fn why_only(columns: &S, entity: Entity, since: Int, why: [Str]) -> [Str] { why_since<T, S>(columns, entity, since, why, "Added", true) } }
+impl<T, S> WhyOnly<S> for Changed<T> where S: Get<T>, T: Schedule { fn why_only(columns: &S, entity: Entity, since: Int, why: [Str]) -> [Str] { why_since<T, S>(columns, entity, since, why, "Changed", false) } }
+impl<T, S> WhyOnly<S> for Or<T> where T: AnyOnly<S> {
+    fn why_only(columns: &S, entity: Entity, since: Int, why: [Str]) -> [Str] {
+        if(<T as AnyOnly<S>>::any_lets(columns, entity, since)) { why } else { push(why, "Or<..>: none of it lets it through") }
+    }
+}
+impl<T, S> WhyOnly<S> for MayHave<T> { fn why_only(columns: &S, entity: Entity, since: Int, why: [Str]) -> [Str] { why } }
+impl<H, ..R, S> WhyOnly<S> for (H, ..R) where H: WhyOnly<S>, (..R): WhyOnly<S> {
+    fn why_only(columns: &S, entity: Entity, since: Int, why: [Str]) -> [Str] { <(..R) as WhyOnly<S>>::why_only(columns, entity, since, <H as WhyOnly<S>>::why_only(columns, entity, since, why)) }
+}
+// What a system's parameters say: each query's reasons, of what it asks.
+pub trait WhyAll<S> { fn why_all(&World<S>, Entity, Int, [Str]) -> [Str] }
+impl<S> WhyAll<S> for () { fn why_all(world: &World<S>, entity: Entity, since: Int, why: [Str]) -> [Str] { why } }
+fn why_query<Q, N, S>(world: &World<S>, entity: Entity, since: Int, why: [Str]) -> [Str] where Q: WhyFill<S>, N: WhyOnly<S>, S: Hidden<Q, N> {
+    // (One for each query: the first it has to say.)
+    let asked = <Q as WhyFill<S>>::why_fill(&world.columns, entity, []);
+    let filtered = <N as WhyOnly<S>>::why_only(&world.columns, entity, since, asked);
+    let all = if(<S as Hidden<Q, N>>::hidden(&world.columns, entity)) {
+        push(filtered, "a component that disables it (`Disabled`) hides it from a query that does not mention it: ask for MayHave<Disabled>")
+    } else { filtered };
+    if(len_at(&all) > 0) { push(why, all[0]) } else { why }
+}
+impl<Q, N, St, Rest, S> WhyAll<S> for (Querying<Q, N, St>, Rest) where Q: WhyFill<S>, N: WhyOnly<S>, S: Hidden<Q, N>, Rest: WhyAll<S> {
+    fn why_all(world: &World<S>, entity: Entity, since: Int, why: [Str]) -> [Str] { <Rest as WhyAll<S>>::why_all(world, entity, since, why_query<Q, N, S>(world, entity, since, why)) }
+}
+impl<Q, N, St, Rest, S> WhyAll<S> for (Singling<Q, N, St>, Rest) where Q: WhyFill<S>, N: WhyOnly<S>, S: Hidden<Q, N>, Rest: WhyAll<S> {
+    fn why_all(world: &World<S>, entity: Entity, since: Int, why: [Str]) -> [Str] { <Rest as WhyAll<S>>::why_all(world, entity, since, why_query<Q, N, S>(world, entity, since, why)) }
+}
+impl<A, Rest, S> WhyAll<S> for (Writes<A>, Rest) where Rest: WhyAll<S> { fn why_all(world: &World<S>, entity: Entity, since: Int, why: [Str]) -> [Str] { <Rest as WhyAll<S>>::why_all(world, entity, since, why) } }
+impl<A, Rest, S> WhyAll<S> for (Read<A>, Rest) where Rest: WhyAll<S> { fn why_all(world: &World<S>, entity: Entity, since: Int, why: [Str]) -> [Str] { <Rest as WhyAll<S>>::why_all(world, entity, since, why) } }
+impl<Rest, S> WhyAll<S> for (Asking, Rest) where Rest: WhyAll<S> { fn why_all(world: &World<S>, entity: Entity, since: Int, why: [Str]) -> [Str] { <Rest as WhyAll<S>>::why_all(world, entity, since, why) } }
+impl<X, Rest, S> WhyAll<S> for (Shared<X>, Rest) where Rest: WhyAll<S> { fn why_all(world: &World<S>, entity: Entity, since: Int, why: [Str]) -> [Str] { <Rest as WhyAll<S>>::why_all(world, entity, since, why) } }
+impl<X, Rest, S> WhyAll<S> for (Owned<X>, Rest) where Rest: WhyAll<S> { fn why_all(world: &World<S>, entity: Entity, since: Int, why: [Str]) -> [Str] { <Rest as WhyAll<S>>::why_all(world, entity, since, why) } }
+impl<X, Rest, S> WhyAll<S> for (Maybe<X>, Rest) where Rest: WhyAll<S> { fn why_all(world: &World<S>, entity: Entity, since: Int, why: [Str]) -> [Str] { <Rest as WhyAll<S>>::why_all(world, entity, since, why) } }
+impl<X, Rest, S> WhyAll<S> for (MaybeOwned<X>, Rest) where Rest: WhyAll<S> { fn why_all(world: &World<S>, entity: Entity, since: Int, why: [Str]) -> [Str] { <Rest as WhyAll<S>>::why_all(world, entity, since, why) } }
+impl<T, Rest, S> WhyAll<S> for (Localing<T>, Rest) where Rest: WhyAll<S> { fn why_all(world: &World<S>, entity: Entity, since: Int, why: [Str]) -> [Str] { <Rest as WhyAll<S>>::why_all(world, entity, since, why) } }
+
 pub struct Sys<F, Lc> { f: F, locals: Lc, last: Int, name: Str }
 impl<E, S, ..P, ..A, L, Ts, F, Lc> System<E, S> for Sys<F, Lc>
-    where F: Fn<(..P), Output = ()>, ..P: Parameter<Asks = A>, (..A): Tuple<Nested = L>, L: AllTouches<List = Ts>, Ts: AllApart, L: Fetch<E, S, (), F, (), Lc> {
+    where F: Fn<(..P), Output = ()>, ..P: Parameter<Asks = A>, (..A): Tuple<Nested = L>, L: AllTouches<List = Ts>, Ts: AllApart, L: Fetch<E, S, (), F, (), Lc>, L: WhyAll<S> {
     fn system_names(sys: &Sys<F, Lc>, names: [Str]) -> [Str] { push(names, sys.name) }
+    fn why_not(sys: &Sys<F, Lc>, name: &Str, world: &World<S>, entity: Entity) -> Option<[Str]> {
+        if(sys.name == *name) { Some(<L as WhyAll<S>>::why_all(world, entity, sys.last, [])) } else { None }
+    }
     fn step(sys: &mut Sys<F, Lc>, event: &E, world: &mut World<S>, commands: &mut Commands<S>, at: Stepper) -> Stepper {
         if(at.at == at.target) {
             world.since = if(sys.last > world.tick) { 0 } else { sys.last };
@@ -1986,6 +2080,7 @@ pub struct RunIf<P, C> { systems: P, condition: C, held: Bool }
 pub fn run_if<P, C>(systems: P, condition: C) -> RunIf<P, C> { RunIf { systems: systems, condition: condition, held: false } }
 impl<E, S, P, C> System<E, S> for RunIf<P, C> where P: System<E, S>, C: Condition<E, S> {
     fn system_names(guarded: &RunIf<P, C>, names: [Str]) -> [Str] { <P as System<E, S>>::system_names(&guarded.systems, names) }
+    fn why_not(guarded: &RunIf<P, C>, name: &Str, world: &World<S>, entity: Entity) -> Option<[Str]> { <P as System<E, S>>::why_not(&guarded.systems, name, world, entity) }
     // (Its condition a step of its own; what it guards, steps only where it held.)
     fn step(guarded: &mut RunIf<P, C>, event: &E, world: &mut World<S>, commands: &mut Commands<S>, at: Stepper) -> Stepper {
         let here = if(at.at == at.target) {
@@ -2017,6 +2112,7 @@ pub fn exclusive<F>(f: F) -> Exclusive<F> { let (name, f) = std::any::fn_name(f)
 // system makes its own.)
 impl<E, S, F> System<E, S> for Exclusive<F> where F: Fn<(&mut World<S>,), Output = ()> {
     fn system_names(system: &Exclusive<F>, names: [Str]) -> [Str] { push(names, system.name) }
+    fn why_not(system: &Exclusive<F>, name: &Str, world: &World<S>, entity: Entity) -> Option<[Str]> { None }
     fn step(system: &mut Exclusive<F>, event: &E, world: &mut World<S>, commands: &mut Commands<S>, at: Stepper) -> Stepper {
         if(at.at == at.target) {
             <Exclusive<F> as System<E, S>>::run(system, event, world, commands);
@@ -2037,6 +2133,7 @@ pub struct ExclusiveWith<F> { f: F, name: Str }
 pub fn exclusive_with<F>(f: F) -> ExclusiveWith<F> { let (name, f) = std::any::fn_name(f); ExclusiveWith { f: f, name: name } }
 impl<E, S, F> System<E, S> for ExclusiveWith<F> where F: Fn<(&E, &mut World<S>), Output = ()> {
     fn system_names(system: &ExclusiveWith<F>, names: [Str]) -> [Str] { push(names, system.name) }
+    fn why_not(system: &ExclusiveWith<F>, name: &Str, world: &World<S>, entity: Entity) -> Option<[Str]> { None }
     fn step(system: &mut ExclusiveWith<F>, event: &E, world: &mut World<S>, commands: &mut Commands<S>, at: Stepper) -> Stepper {
         if(at.at == at.target) {
             <ExclusiveWith<F> as System<E, S>>::run(system, event, world, commands);
@@ -2069,10 +2166,13 @@ impl<E, S, F> IntoSystem<E, S> for Exclusive<F> where F: Fn<(&mut World<S>,), Ou
 // take of the world apart is not yet given to each apart.)
 pub struct Parallel<P> { branches: P }
 pub fn parallel<T, P>(systems: T) -> Parallel<P> where T: Tuple<Nested = P> { Parallel { branches: nest(systems) } }
-pub trait Branches<E, S> { fn run_branches(&mut Self, &E, &mut World<S>, &mut Commands<S>) fn branch_names(&Self, [Str]) -> [Str] fn step_branches(&mut Self, &E, &mut World<S>, &mut Commands<S>, Stepper) -> Stepper }
-impl<E, S> Branches<E, S> for () { fn run_branches(none: &mut (), event: &E, world: &mut World<S>, commands: &mut Commands<S>) { () } fn branch_names(none: &(), names: [Str]) -> [Str] { names } fn step_branches(none: &mut (), event: &E, world: &mut World<S>, commands: &mut Commands<S>, at: Stepper) -> Stepper { at } }
+pub trait Branches<E, S> { fn run_branches(&mut Self, &E, &mut World<S>, &mut Commands<S>) fn branch_names(&Self, [Str]) -> [Str] fn step_branches(&mut Self, &E, &mut World<S>, &mut Commands<S>, Stepper) -> Stepper fn why_not_branches(&Self, &Str, &World<S>, Entity) -> Option<[Str]> }
+impl<E, S> Branches<E, S> for () { fn run_branches(none: &mut (), event: &E, world: &mut World<S>, commands: &mut Commands<S>) { () } fn branch_names(none: &(), names: [Str]) -> [Str] { names } fn step_branches(none: &mut (), event: &E, world: &mut World<S>, commands: &mut Commands<S>, at: Stepper) -> Stepper { at } fn why_not_branches(none: &(), name: &Str, world: &World<S>, entity: Entity) -> Option<[Str]> { None } }
 impl<E, S, X, R> Branches<E, S> for (X, R) where X: System<E, S>, R: Branches<E, S> {
     fn branch_names(list: &(X, R), names: [Str]) -> [Str] { <R as Branches<E, S>>::branch_names(&list.1, <X as System<E, S>>::system_names(&list.0, names)) }
+    fn why_not_branches(list: &(X, R), name: &Str, world: &World<S>, entity: Entity) -> Option<[Str]> {
+        match(<X as System<E, S>>::why_not(&list.0, name, world, entity)) { Some(why) => Some(why), None => <R as Branches<E, S>>::why_not_branches(&list.1, name, world, entity) }
+    }
     fn step_branches(list: &mut (X, R), event: &E, world: &mut World<S>, commands: &mut Commands<S>, at: Stepper) -> Stepper {
         let after = <X as System<E, S>>::step(&mut list.0, event, world, commands, at);
         <R as Branches<E, S>>::step_branches(&mut list.1, event, world, commands, after)
@@ -2086,6 +2186,7 @@ impl<E, S, X, R> Branches<E, S> for (X, R) where X: System<E, S>, R: Branches<E,
 }
 impl<E, S, P> System<E, S> for Parallel<P> where P: Branches<E, S> {
     fn system_names(group: &Parallel<P>, names: [Str]) -> [Str] { <P as Branches<E, S>>::branch_names(&group.branches, names) }
+    fn why_not(group: &Parallel<P>, name: &Str, world: &World<S>, entity: Entity) -> Option<[Str]> { <P as Branches<E, S>>::why_not_branches(&group.branches, name, world, entity) }
     fn step(group: &mut Parallel<P>, event: &E, world: &mut World<S>, commands: &mut Commands<S>, at: Stepper) -> Stepper { <P as Branches<E, S>>::step_branches(&mut group.branches, event, world, commands, at) }
     fn run(group: &mut Parallel<P>, event: &E, world: &mut World<S>, commands: &mut Commands<S>) {
         <P as Branches<E, S>>::run_branches(&mut group.branches, event, world, commands)
@@ -2157,6 +2258,7 @@ impl<N, P, D, R> CountNodes for (Node<N, P, D>, R) where R: CountNodes { fn coun
 impl<E, S, Ns> System<E, S> for Graph<Ns> where Ns: RunNodes<E, S, Ns>, Ns: CountNodes {
     // (Its nodes' names are not said.)
     fn system_names(graph: &Graph<Ns>, names: [Str]) -> [Str] { names }
+    fn why_not(system: &Graph<Ns>, name: &Str, world: &World<S>, entity: Entity) -> Option<[Str]> { None }
     fn step(system: &mut Graph<Ns>, event: &E, world: &mut World<S>, commands: &mut Commands<S>, at: Stepper) -> Stepper {
         if(at.at == at.target) {
             <Graph<Ns> as System<E, S>>::run(system, event, world, commands);
@@ -2231,6 +2333,9 @@ pub struct SharedSystem<Q> { shared: Mutex<Q> }
 impl<Q> Use<[0, *]> for SharedSystem<Q> {}
 impl<E, S, Q> System<E, S> for SharedSystem<Q> where Q: System<E, S> {
     fn system_names(system: &SharedSystem<Q>, names: [Str]) -> [Str] { lock(&system.shared, fn(q: &mut Q) -> [Str] { <Q as System<E, S>>::system_names(&*q, names) }) }
+    fn why_not(system: &SharedSystem<Q>, name: &Str, world: &World<S>, entity: Entity) -> Option<[Str]> {
+        lock(&system.shared, fn(q: &mut Q) -> Option<[Str]> { <Q as System<E, S>>::why_not(&*q, name, world, entity) })
+    }
     fn step(system: &mut SharedSystem<Q>, event: &E, world: &mut World<S>, commands: &mut Commands<S>, at: Stepper) -> Stepper {
         lock(&system.shared, fn(q: &mut Q) -> Stepper { <Q as System<E, S>>::step(q, event, world, commands, at) })
     }
@@ -2273,15 +2378,18 @@ impl<B, X, R, S> WorldHooks<S> for (BehaviorsOf<B, X>, R) where R: WorldHooks<S>
 
 // The names of the app's systems, in the order they were added (upstream's
 // `app.systems()`): each function's name, `""` of a block written in place.
-pub trait Listed<S> { fn listed(&Self, [Str]) -> [Str] }
-impl<S> Listed<S> for () { fn listed(list: &(), names: [Str]) -> [Str] { names } }
+pub trait Listed<S> { fn listed(&Self, [Str]) -> [Str] fn why_listed(&Self, &Str, &World<S>, Entity) -> Option<[Str]> }
+impl<S> Listed<S> for () { fn listed(list: &(), names: [Str]) -> [Str] { names } fn why_listed(list: &(), name: &Str, world: &World<S>, entity: Entity) -> Option<[Str]> { None } }
 impl<E, P, R, S> Listed<S> for (On<E, P>, R) where P: System<E, S>, R: Listed<S> {
     fn listed(list: &(On<E, P>, R), names: [Str]) -> [Str] { <P as System<E, S>>::system_names(&list.0.systems, <R as Listed<S>>::listed(&list.1, names)) }
+    fn why_listed(list: &(On<E, P>, R), name: &Str, world: &World<S>, entity: Entity) -> Option<[Str]> {
+        match(<R as Listed<S>>::why_listed(&list.1, name, world, entity)) { Some(why) => Some(why), None => <P as System<E, S>>::why_not(&list.0.systems, name, world, entity) }
+    }
 }
-impl<X, R, S> Listed<S> for (TaskOf<X>, R) where R: Listed<S> { fn listed(list: &(TaskOf<X>, R), names: [Str]) -> [Str] { <R as Listed<S>>::listed(&list.1, names) } }
-impl<P, X, R, S> Listed<S> for (SubOf<P, X>, R) where R: Listed<S> { fn listed(list: &(SubOf<P, X>, R), names: [Str]) -> [Str] { <R as Listed<S>>::listed(&list.1, names) } }
-impl<P, C, R, S> Listed<S> for (ComputedOf<P, C>, R) where R: Listed<S> { fn listed(list: &(ComputedOf<P, C>, R), names: [Str]) -> [Str] { <R as Listed<S>>::listed(&list.1, names) } }
-impl<B, X, R, S> Listed<S> for (BehaviorsOf<B, X>, R) where R: Listed<S> { fn listed(list: &(BehaviorsOf<B, X>, R), names: [Str]) -> [Str] { <R as Listed<S>>::listed(&list.1, names) } }
+impl<X, R, S> Listed<S> for (TaskOf<X>, R) where R: Listed<S> { fn why_listed(list: &(TaskOf<X>, R), name: &Str, world: &World<S>, entity: Entity) -> Option<[Str]> { <R as Listed<S>>::why_listed(&list.1, name, world, entity) } fn listed(list: &(TaskOf<X>, R), names: [Str]) -> [Str] { <R as Listed<S>>::listed(&list.1, names) } }
+impl<P, X, R, S> Listed<S> for (SubOf<P, X>, R) where R: Listed<S> { fn why_listed(list: &(SubOf<P, X>, R), name: &Str, world: &World<S>, entity: Entity) -> Option<[Str]> { <R as Listed<S>>::why_listed(&list.1, name, world, entity) } fn listed(list: &(SubOf<P, X>, R), names: [Str]) -> [Str] { <R as Listed<S>>::listed(&list.1, names) } }
+impl<P, C, R, S> Listed<S> for (ComputedOf<P, C>, R) where R: Listed<S> { fn why_listed(list: &(ComputedOf<P, C>, R), name: &Str, world: &World<S>, entity: Entity) -> Option<[Str]> { <R as Listed<S>>::why_listed(&list.1, name, world, entity) } fn listed(list: &(ComputedOf<P, C>, R), names: [Str]) -> [Str] { <R as Listed<S>>::listed(&list.1, names) } }
+impl<B, X, R, S> Listed<S> for (BehaviorsOf<B, X>, R) where R: Listed<S> { fn why_listed(list: &(BehaviorsOf<B, X>, R), name: &Str, world: &World<S>, entity: Entity) -> Option<[Str]> { <R as Listed<S>>::why_listed(&list.1, name, world, entity) } fn listed(list: &(BehaviorsOf<B, X>, R), names: [Str]) -> [Str] { <R as Listed<S>>::listed(&list.1, names) } }
 
 fn named_in(names: &[Str], name: &Str) -> Bool {
     let mut i = 0;
@@ -3339,6 +3447,7 @@ pub struct SyncPointOf<P> { none: [P] }
 pub fn sync_point<P>(point: P) -> SyncPointOf<P> { discard(point); SyncPointOf { none: [] } }
 impl<E, S, P> System<E, S> for SyncPointOf<P> where P: Schedule, P: PointKind {
     fn system_names(system: &SyncPointOf<P>, names: [Str]) -> [Str] { names }
+    fn why_not(system: &SyncPointOf<P>, name: &Str, world: &World<S>, entity: Entity) -> Option<[Str]> { None }
     fn step(system: &mut SyncPointOf<P>, event: &E, world: &mut World<S>, commands: &mut Commands<S>, at: Stepper) -> Stepper {
         if(at.at == at.target) {
             <SyncPointOf<P> as System<E, S>>::run(system, event, world, commands);
@@ -3576,6 +3685,10 @@ impl<S, L> App<S, L> {
     // the components it has.
     // The names of its systems, in the order they were added.
     pub fn systems(app: &Self) -> [Str] where L: Listed<S> { <L as Listed<S>>::listed(&app.systems, []) }
+    // Why the system of the name does not run on the entity: what each of its
+    // queries says against it (none if it would); none at all if no system
+    // has the name.
+    pub fn why_not(app: &Self, name: Str, entity: Entity) -> Option<[Str]> where L: Listed<S> { <L as Listed<S>>::why_listed(&app.systems, &name, &app.world, entity) }
 
     pub fn build(app: Self) -> Self where S: Bringers<S>, L: WorldHooks<S> {
         let mut app = app;

@@ -5966,7 +5966,13 @@ Each is to go; none is a design covey keeps.
   next starts over), through `System::step` / `Dispatch::dispatch_step`; a
   `run_if` keeps what its condition said for the steps it guards
   (covey/devtools). Tasks and behaviors are not stepped, and a graph is one
-  step. Not yet: `why_not`.
+  step. ~~`why_not`~~: `app.why_not(name, entity)` gives, for each query of
+  the system of that name, the first thing it says against the entity (what
+  it lacks, a filter's `Without<Dead>: has `Dead``, `Changed<Damage>:
+  changed at 1, not after 1`, or a disabling component it does not mention),
+  through `WhyFill`/`WhyOnly`/`WhyAll` over what a system asks. Still: a
+  system is found by its function's name, and a join only says whether there
+  is a link.
 
 ## Each function its own universe: where the checker is
 

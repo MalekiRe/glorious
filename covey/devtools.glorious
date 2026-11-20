@@ -10,12 +10,13 @@
 //   back to, and one run apart and compared.
 // - `stepping_runs_one_system_or_condition_at_a_time`: each step a system
 //   or a condition, what it did, and a pass done and started over.
-// Not ported: `why_not_names_the_mismatch_of_each_query`,
-// `explains_why_components_exist_and_why_systems_are_ordered`,
+// - `why_not_names_the_mismatch_of_each_query`: for each query of a system
+//   named, the first thing it says against an entity.
+// Not ported: `explains_why_components_exist_and_why_systems_are_ordered`,
 // `values_are_described_and_edited_without_debug`,
 // `debug_output_parses_into_values`, `mcp_tools_serve_a_live_app_on_its_own_thread`
-// and `assembly_is_collected_through_inline_chains`: they read the names of
-// types and systems, values through reflection, or the binary.
+// and `assembly_is_collected_through_inline_chains`: they read values
+// through reflection, places in the source, or the binary.
 // expect:
 // ramp, apply_damage
 // 2
@@ -49,6 +50,10 @@
 // 19
 // done
 // 0
+// --
+// 2: Without<Dead>: has `Dead`; lacks `Damage`
+// 2: a component that disables it (`Disabled`) hides it from a query that does not mention it: ask for MayHave<Disabled>; a component that disables it (`Disabled`) hides it from a query that does not mention it: ask for MayHave<Disabled>
+// 1: Changed<Damage>: changed at 1, not after 1
 // 0
 mod ecs;
 
@@ -66,6 +71,11 @@ impl Clone for Damage { fn clone(d: &Damage) -> Damage { Damage(d.0) } }
 fn ramp(q: &mut Query<(&mut Damage,), ()>) { q.for_each() { (mut d,) => d.0 = d.0 + 1; } }
 fn apply_damage(q: &mut Query<(&Damage, &mut Hp), ()>) { q.for_each() { d, mut hp => hp.0 = hp.0 - d.0; } }
 fn some_hp(q: &mut Query<(&Hp,), ()>) -> Bool { q.count() > 0 }
+struct Dead
+fn watcher(alive: &mut Query<(&Hp,), (ecs::Without<Dead>,)>, hurt: &mut Query<(&Damage,), (ecs::Changed<Damage>,)>) { () }
+fn say_all(why: Option<[Str]>) {
+    match(why) { Some(reasons) => say(show(len_at(&reasons)) ++ ": " ++ std::text::join(reasons, "; ")), None => say("no such system") }
+}
 // A step as `kind flag`, or `done` where the pass is.
 fn shown(step: ecs::StepReport) -> Str {
     if(step.finished) { "done" } else { show(step.kind) ++ " " ++ (if(step.flag) { "true" } else { "false" }) }
@@ -170,5 +180,17 @@ fn main() -> Int {
     say(hp_of(&app.world, e));
     say(shown(app.step(&Update)));
     say(app.step(&Update).index);
+    say("--");
+
+    // `why_not_names_the_mismatch_of_each_query`
+    let mut app = App::new().register<Hp>().register<Damage>().register<Dead>().register<ecs::Disabled>()
+        .add_systems(Update, watcher).build();
+    let e = app.world.spawn_bundle((Hp(1), Dead));
+    say_all(app.why_not("watcher", e));
+    let f = app.world.spawn_bundle((Hp(1), Damage(1), ecs::Disabled));
+    say_all(app.why_not("watcher", f));
+    let g = app.world.spawn_bundle((Hp(1), Damage(1)));
+    app.emit(&Update);
+    say_all(app.why_not("watcher", g));
     0
 }
