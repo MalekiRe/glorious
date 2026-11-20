@@ -2426,8 +2426,8 @@ pub enum TaskState<S> { Fresh(fn(AsyncWorld<S>) -> AsyncWorld<S> / {Bridge<S>}),
 pub struct TaskOf<S> { state: TaskState<S> }
 
 // A task's computation, run until it waits or ends.
-fn start_task<S>(body: fn(AsyncWorld<S>) -> AsyncWorld<S> / {Bridge<S>}) -> TaskStep<S> {
-    handle body(AsyncWorld { held: None }) {
+fn start_task<S>(body: fn(AsyncWorld<S>) -> AsyncWorld<S> / {Bridge<S>}, held: Option<(World<S>, Commands<S>)>) -> TaskStep<S> {
+    handle body(AsyncWorld { held: held }) {
         done => TaskStep::Ended(done),
         reach(ask, k) => TaskStep::Waiting { ask: ask, rest: k }
     }
@@ -2463,7 +2463,12 @@ fn drive_task<S>(task: &mut TaskOf<S>, label: Str, world: &mut World<S>) where S
     let mut stepped = false;
     while({ going }) {
         going = match(replace(&mut task.state, TaskState::Over)) {
-            TaskState::Fresh(body) => settle_step(task, start_task(body), world),
+            // (Started where it is run, with the world lent to it, as a
+            // behavior is: what it does first, it does there.)
+            TaskState::Fresh(body) =>
+                let lent = replace(world, World::new());
+                let commands = no_commands(&lent);
+                settle_step(task, start_task(body, Some((lent, commands))), world),
             TaskState::Paused(ask, rest) =>
                 let now = match(ask.ready) {
                     Some(ready) => ready(),
@@ -2604,29 +2609,31 @@ pub struct Cx<S> { world: AsyncWorld<S>, me: Entity, id: Int }
 // The running instances, by entity, and the next one's number.
 pub struct Instances { running: [(Entity, Int)], next: Int }
 // Events of one type, for each instance of a behavior of the entity they were
-// delivered to; and which instances wait for them, or have.
-pub struct Inbox<E> { ids: [Int], queues: [[E]], listening: [Int], waiting: [Int] }
+// delivered to; and which instances wait for them, or have: each by the
+// instance's number, which instances are given one after another.
+pub struct Inbox<E> { queues: [[E]], listening: [Bool], waiting: [Bool] }
 impl<E> Inbox<E> {
-    pub fn new() -> Inbox<E> { Inbox { ids: [], queues: [], listening: [], waiting: [] } }
+    pub fn new() -> Inbox<E> { Inbox { queues: [], listening: [], waiting: [] } }
+    // (Room for the instance numbered `id`.)
+    fn reach_id(inbox: &mut Self, id: Int) {
+        while({ len_at(&inbox.queues) <= id }) {
+            push_at(&mut inbox.queues, []);
+            push_at(&mut inbox.listening, false);
+            push_at(&mut inbox.waiting, false)
+        }
+    }
     // How many instances of behaviors of `entity` wait for one now.
     pub fn waiters<S>(inbox: &Self, instances: &Instances, entity: Entity) -> Int {
         let mut n = 0;
         let mut i = 0;
         while({ i < len_at(&instances.running) }) {
             let (e, id) = instances.running[i];
-            if(e == entity) { if(contains(&inbox.waiting, id)) { n = n + 1 } };
+            if(e == entity) { if(id < len_at(&inbox.waiting)) { if(inbox.waiting[id]) { n = n + 1 } else { () } } else { () } };
             i = i + 1
         };
         n
     }
 }
-fn contains(list: &[Int], x: Int) -> Bool {
-    let mut i = 0;
-    let mut found = false;
-    while({ i < len_at(list) }) { if(list[i] == x) { found = true }; i = i + 1 };
-    found
-}
-fn drop_id(list: [Int], x: Int) -> [Int] { fold(list, [], fn(out: [Int], y: Int) -> [Int] { if(y == x) { out } else { push(out, y) } }) }
 
 impl<S> World<S> {
     // Give `entity` an event: kept for each of its running behaviors.
@@ -2642,10 +2649,10 @@ impl<S> World<S> {
                 let mut i = 0;
                 while({ i < len_at(&ids) }) {
                     let id = ids[i];
-                    if(contains(&inbox.listening, id)) { taken = true };
-                    let at = place_of(&inbox.ids, id);
-                    if(at >= 0) { let queue = &mut inbox.queues[at]; push_at(queue, event) }
-                    else { push_at(&mut inbox.ids, id); push_at(&mut inbox.queues, [event]) };
+                    inbox.reach_id(id);
+                    if(inbox.listening[id]) { taken = true };
+                    let queue = &mut inbox.queues[id];
+                    push_at(queue, event);
                     i = i + 1
                 };
                 taken,
@@ -2678,9 +2685,8 @@ fn not_seen(list: &[Entity], e: Entity) -> Bool { let mut i = 0; let mut fresh =
 fn take_event<E, S>(world: &mut World<S>, id: Int) -> Option<E> where S: Holds<Inbox<E>> {
     match(world.resource_mut<Inbox<E>>()) {
         Some(inbox) =>
-            let at = place_of(&inbox.ids, id);
-            if(at >= 0) {
-                let queue = &mut inbox.queues[at];
+            if(id < len_at(&inbox.queues)) {
+                let queue = &mut inbox.queues[id];
                 if(len_at(&*queue) > 0) { Some(remove_at(queue, 0)) } else { None }
             } else { None },
         None => None
@@ -2688,22 +2694,16 @@ fn take_event<E, S>(world: &mut World<S>, id: Int) -> Option<E> where S: Holds<I
 }
 fn has_event<E, S>(world: &World<S>, id: Int) -> Bool where S: Holds<Inbox<E>> {
     match(world.resource<Inbox<E>>()) {
-        Some(inbox) => let at = place_of(&inbox.ids, id); if(at >= 0) { len_at(&inbox.queues[at]) > 0 } else { false },
+        Some(inbox) => if(id < len_at(&inbox.queues)) { len_at(&inbox.queues[id]) > 0 } else { false },
         None => false
     }
-}
-fn place_of(ids: &[Int], id: Int) -> Int {
-    let mut at = 0 - 1;
-    let mut k = 0;
-    while({ k < len_at(ids) }) { if(ids[k] == id) { at = k }; k = k + 1 };
-    at
 }
 fn mark<E, S>(world: &mut World<S>, id: Int, waiting: Bool) where S: Holds<Inbox<E>> {
     match(world.resource_mut<Inbox<E>>()) {
         Some(inbox) =>
-            if(not_b(contains(&inbox.listening, id))) { push_at(&mut inbox.listening, id) };
-            inbox.waiting = drop_id(replace(&mut inbox.waiting, []), id);
-            if(waiting) { push_at(&mut inbox.waiting, id) } else { () },
+            inbox.reach_id(id);
+            inbox.listening[id] = true;
+            inbox.waiting[id] = waiting,
         None => ()
     }
 }
@@ -2814,12 +2814,16 @@ fn run_behaviors<B, S>(behaviors: &mut BehaviorsOf<B, S>, world: &mut World<S>) 
         };
         i = i + 1
     };
-    // Those whose entity has the marker and none running: started.
+    // Those whose entity has the marker and none running: started. (Which
+    // run, marked by the entity's place: one look each.)
     let owners = clone(&<S as Get<B>>::column(&world.columns).owners);
+    let mut running = [false; len_at(&world.generations)];
+    let mut r = 0;
+    while({ r < len_at(&behaviors.entities) }) { running[behaviors.entities[r].index] = true; r = r + 1 };
     let mut i = 0;
     while({ i < len_at(&owners) }) {
         let e = owners[i];
-        if(not_seen(&behaviors.entities, e)) {
+        if(not_b(running[e.index])) {
             let id = match(world.resource_mut<Instances>()) {
                 Some(instances) => let id = instances.next; instances.next = id + 1; push_at(&mut instances.running, (e, id)); id,
                 None => 0 - 1
@@ -2958,7 +2962,9 @@ impl<E, S, P> IntoSystem<E, S> for SyncPointOf<P> where P: Schedule {
 // apart and compare.
 impl<S> World<S> {
     // The world's clock: each system's run is a tick.
-    pub fn tick(world: &Self) -> Int { world.tick }
+    // The time of the last change that can have been made: what a change
+    // made after now is later than (`changes_since`).
+    pub fn tick(world: &Self) -> Int { world.tick - 1 }
     // The entities whose `T` was put in or changed after `since`: whether added.
     pub fn changes_since<T>(world: &Self, since: Int) -> [(Entity, Bool)] where S: Get<T> {
         let column = <S as Get<T>>::column(&world.columns);

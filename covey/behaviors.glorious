@@ -76,7 +76,7 @@ fn add_count(q: &mut Query<(Entity, &mut Count), ()>, at: Entity, n: Int) { matc
 fn poll<S>(cx: &mut Cx<S>) where S: ecs::Holds<Polls> { discard(with(cx, fn(p: &mut Polls) { p.0 = p.0 + 1 })) }
 
 struct Counter
-impl<S> Behavior<S> for Counter where S: ecs::Holds<Inbox<Press>>, S: ecs::Holds<Polls>, S: ecs::Get<Count> {
+impl<S> Behavior<S> for Counter where S: ecs::Holds<Inbox<Press>>, S: ecs::Holds<Polls>, S: ecs::Get<Count>, S: ecs::Hidden<(Entity, &mut Count), ()> {
     fn behave(me: Entity, cx: Cx<S>) -> Cx<S> / {Bridge<S>} {
         let mut cx = cx;
         let guard = Guard;
@@ -91,7 +91,7 @@ impl<S> Behavior<S> for Counter where S: ecs::Holds<Inbox<Press>>, S: ecs::Holds
 }
 
 struct Racer
-impl<S> Behavior<S> for Racer where S: ecs::Holds<Inbox<Press>>, S: ecs::Holds<Inbox<Release>>, S: ecs::Get<Count> {
+impl<S> Behavior<S> for Racer where S: ecs::Holds<Inbox<Press>>, S: ecs::Holds<Inbox<Release>>, S: ecs::Get<Count>, S: ecs::Hidden<(Entity, &mut Count), ()> {
     fn behave(me: Entity, cx: Cx<S>) -> Cx<S> / {Bridge<S>} {
         let mut cx = cx;
         while({ true }) {
@@ -104,13 +104,13 @@ impl<S> Behavior<S> for Racer where S: ecs::Holds<Inbox<Press>>, S: ecs::Holds<I
 
 struct Waiter
 struct Signal(AtomicInt)
-impl<S> Behavior<S> for Waiter where S: ecs::Get<Count>, S: ecs::Get<Signal> {
+impl<S> Behavior<S> for Waiter where S: ecs::Get<Count>, S: ecs::Get<Signal>, S: ecs::Hidden<(Entity, &mut Count), ()>, S: ecs::Hidden<(Entity, &Signal), ()> {
     fn behave(me: Entity, cx: Cx<S>) -> Cx<S> / {Bridge<S>} {
         let mut cx = cx;
         let signal = match(with(&mut cx, fn(q: &mut Query<(Entity, &Signal), ()>) -> Option<AtomicInt> {
             match(q.get_mut(me)) { Some((_, s)) => Some(std::thread::share(&s.0)), None => None }
         })) { Ok(Some(s)) => s, _ => (AtomicInt::new(1)) };
-        wait_for(&mut cx, fn() -> Bool { std::thread::load(&signal) == 1 });
+        wait_for(&mut cx, fn() -> Bool { let held = signal; std::thread::load(&held) == 1 });
         discard(with(&mut cx, fn(q: &mut Query<(Entity, &mut Count), ()>) { add_count(q, me, 1) }));
         cx
     }
@@ -128,7 +128,7 @@ impl<S> Behavior<S> for SelfDestruct where S: ecs::Holds<Inbox<Press>>, S: ecs::
 }
 
 struct PressRelease
-impl<S> Behavior<S> for PressRelease where S: ecs::Holds<Inbox<Press>>, S: ecs::Holds<Inbox<Release>>, S: ecs::Get<Count> {
+impl<S> Behavior<S> for PressRelease where S: ecs::Holds<Inbox<Press>>, S: ecs::Holds<Inbox<Release>>, S: ecs::Get<Count>, S: ecs::Hidden<(Entity, &mut Count), ()> {
     fn behave(me: Entity, cx: Cx<S>) -> Cx<S> / {Bridge<S>} {
         let mut cx = cx;
         while({ true }) {
@@ -141,7 +141,7 @@ impl<S> Behavior<S> for PressRelease where S: ecs::Holds<Inbox<Press>>, S: ecs::
 }
 
 struct Echo
-impl<S> Behavior<S> for Echo where S: ecs::Holds<Inbox<Press>>, S: ecs::Get<Count> {
+impl<S> Behavior<S> for Echo where S: ecs::Holds<Inbox<Press>>, S: ecs::Get<Count>, S: ecs::Hidden<(Entity, &mut Count), ()> {
     fn behave(me: Entity, cx: Cx<S>) -> Cx<S> / {Bridge<S>} {
         let mut cx = cx;
         while({ true }) {
