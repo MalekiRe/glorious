@@ -6166,6 +6166,39 @@ missed, 94 hit. The bounds that cost are not of known types; what would
 take them away is meeting a bound once for the function's generic
 signature, not for each use. Undone.
 
+## Variadic implementations truly generic: where it stands
+
+A variadic implementation (`impl<..T, S> Bundle<S> for (..T) where ..S:
+Get<T>`, `impl<H, ..R> Fill<S> for (H, ..R)`) is written out by
+`Syntax.expandPacks`, on tokens before parsing, once for every length up to
+the longest parenthesized list any of the program's texts writes (two at
+least). Every copy is then declared and checked as an implementation of its
+own. A program that writes one list of sixteen (covey/sixteen) gets every
+variadic implementation of std and ecs at every length to sixteen: 8921
+groups checked against states2's 2731, 22 s to compile, 7.3 s of it saving
+what is kept.
+
+What makes it one implementation for every length (the todo item):
+- **A list of types as a kind of its own in the checker** (`Ty.pack`, a
+  variable for a list and a list made of heads and a rest), unified by
+  length and element, and in schemes.
+- **Per-element conditions checked once** (`..S: Get<T>`: for every element
+  `T` of the list, as a condition of the variable element) and met at a use
+  by the list the use has, element by element.
+- **Expansions in types and terms** (`(..Option<T>)`, `(..put_one(world,
+  entity, t))`) typed against the pack, and written out only where the
+  specializer makes the copy for the length a use has.
+- **Recursive ones** (`(H, ..R)` with a condition of `(..R)`) checked once
+  with `..R` a list variable, their uses unfolded as deep as the list a use
+  has.
+
+Not started. A smaller step that would cut most of the cost without it:
+write out only the lengths the program's lists have, and below them only
+for the implementations whose conditions ask of a shorter list (the `(H,
+..R)` ones); and turn those recursive ones into implementations on nested
+pairs (`(H, R)`, as `AllTouches` is), which are never written out, with
+one bridge from the flat tuple through `std::tuple::Tuple`.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by
