@@ -2356,20 +2356,25 @@ impl<E, S, Q> LendsHook<E, S> for SharedSystem<Q> where Q: System<E, S>, E: Life
         }) }
     }
 }
-// (Of a label that is a lifecycle event, its hook; of any other, none.)
-pub trait HookFor<P, S> { fn hook_for(&P, [WorldHook<S>]) -> [WorldHook<S>] }
-impl<E, P, S> HookFor<P, S> for E where E: LifecycleEvent, P: LendsHook<E, S> {
-    fn hook_for(systems: &P, hooks: [WorldHook<S>]) -> [WorldHook<S>] { push(hooks, <P as LendsHook<E, S>>::world_hook(systems)) }
-}
-impl<E, P, S> HookFor<P, S> for E { fn hook_for(systems: &P, hooks: [WorldHook<S>]) -> [WorldHook<S>] { hooks } }
-// The app's hooks, in the order they were registered.
+// The app's hooks, in the order they were registered: an entry under a
+// lifecycle label gives its hook (the first four, chosen by fitting the
+// label), any other none.
 pub trait WorldHooks<S> { fn world_hooks(&Self, [WorldHook<S>]) -> [WorldHook<S>] }
 impl<S> WorldHooks<S> for () { fn world_hooks(list: &(), hooks: [WorldHook<S>]) -> [WorldHook<S>] { hooks } }
-impl<E, P, R, S> WorldHooks<S> for (On<E, P>, R) where E: HookFor<P, S>, R: WorldHooks<S> {
-    fn world_hooks(list: &(On<E, P>, R), hooks: [WorldHook<S>]) -> [WorldHook<S>] {
-        let before = <R as WorldHooks<S>>::world_hooks(&list.1, hooks);
-        <E as HookFor<P, S>>::hook_for(&list.0.systems, before)
-    }
+impl<T, P, R, S> WorldHooks<S> for (On<OnAdd<T>, P>, R) where P: LendsHook<OnAdd<T>, S>, R: WorldHooks<S> {
+    fn world_hooks(list: &(On<OnAdd<T>, P>, R), hooks: [WorldHook<S>]) -> [WorldHook<S>] { push(<R as WorldHooks<S>>::world_hooks(&list.1, hooks), <P as LendsHook<OnAdd<T>, S>>::world_hook(&list.0.systems)) }
+}
+impl<T, P, R, S> WorldHooks<S> for (On<OnInsert<T>, P>, R) where P: LendsHook<OnInsert<T>, S>, R: WorldHooks<S> {
+    fn world_hooks(list: &(On<OnInsert<T>, P>, R), hooks: [WorldHook<S>]) -> [WorldHook<S>] { push(<R as WorldHooks<S>>::world_hooks(&list.1, hooks), <P as LendsHook<OnInsert<T>, S>>::world_hook(&list.0.systems)) }
+}
+impl<T, P, R, S> WorldHooks<S> for (On<OnReplace<T>, P>, R) where P: LendsHook<OnReplace<T>, S>, R: WorldHooks<S> {
+    fn world_hooks(list: &(On<OnReplace<T>, P>, R), hooks: [WorldHook<S>]) -> [WorldHook<S>] { push(<R as WorldHooks<S>>::world_hooks(&list.1, hooks), <P as LendsHook<OnReplace<T>, S>>::world_hook(&list.0.systems)) }
+}
+impl<T, P, R, S> WorldHooks<S> for (On<OnRemove<T>, P>, R) where P: LendsHook<OnRemove<T>, S>, R: WorldHooks<S> {
+    fn world_hooks(list: &(On<OnRemove<T>, P>, R), hooks: [WorldHook<S>]) -> [WorldHook<S>] { push(<R as WorldHooks<S>>::world_hooks(&list.1, hooks), <P as LendsHook<OnRemove<T>, S>>::world_hook(&list.0.systems)) }
+}
+impl<E, P, R, S> WorldHooks<S> for (On<E, P>, R) where R: WorldHooks<S> {
+    fn world_hooks(list: &(On<E, P>, R), hooks: [WorldHook<S>]) -> [WorldHook<S>] { <R as WorldHooks<S>>::world_hooks(&list.1, hooks) }
 }
 impl<X, R, S> WorldHooks<S> for (TaskOf<X>, R) where R: WorldHooks<S> { fn world_hooks(list: &(TaskOf<X>, R), hooks: [WorldHook<S>]) -> [WorldHook<S>] { <R as WorldHooks<S>>::world_hooks(&list.1, hooks) } }
 impl<P, X, R, S> WorldHooks<S> for (SubOf<P, X>, R) where R: WorldHooks<S> { fn world_hooks(list: &(SubOf<P, X>, R), hooks: [WorldHook<S>]) -> [WorldHook<S>] { <R as WorldHooks<S>>::world_hooks(&list.1, hooks) } }
