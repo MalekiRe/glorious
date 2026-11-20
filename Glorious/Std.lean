@@ -56,6 +56,7 @@ pub mod time;
 pub mod random;
 pub mod tuple;
 pub mod ffi;
+pub mod ptr;
 "#
 
 private def optionText : String := r#"// An `Option<T>` is a `Result<T, ()>`: `Some(x)` or `None`.
@@ -3725,6 +3726,39 @@ impl PathBuf {
 }
 "#
 
+private def ptrText : String := r#"// Pointers: a place as a value, with no borrow and no lifetime, as Rust's
+// `*const T` and `*mut T`. Making one is safe; going through one is unsafe,
+// as the one who does says the place is there and that nothing else uses it
+// meanwhile in a way the borrow said would not happen. What a pointer holds
+// is the reference it was made of, seen as a number (`transmute`): nothing
+// is done to it, and nothing should be, but making it back into one.
+
+// A place to read.
+pub struct Ptr<T> { at: Int }
+// A place to read and write.
+pub struct PtrMut<T> { at: Int }
+impl<T> Use<[0, *]> for Ptr<T> {}
+impl<T> Use<[0, *]> for PtrMut<T> {}
+
+// Where a reference points.
+pub fn ptr<T>(r: &T) -> Ptr<T> { Ptr { at: unsafe { transmute(r) } } }
+pub fn ptr_mut<T>(r: &mut T) -> PtrMut<T> { PtrMut { at: unsafe { transmute(r) } } }
+// The same place, to read only.
+pub fn as_const<T>(p: PtrMut<T>) -> Ptr<T> { Ptr { at: p.at } }
+
+// The place, borrowed for as long as whoever says so says.
+pub unsafe fn as_ref<'a, T>(p: Ptr<T>) -> &'a T { transmute(p.at) }
+pub unsafe fn as_mut<'a, T>(p: PtrMut<T>) -> &'a mut T { transmute(p.at) }
+
+// The place of an array's element: `i` is within it.
+pub unsafe fn element<T>(p: Ptr<[T]>, i: Int) -> Ptr<T> { let xs: &[T] = as_ref(p); ptr(&xs[i]) }
+pub unsafe fn element_mut<T>(p: PtrMut<[T]>, i: Int) -> PtrMut<T> { let xs: &mut [T] = as_mut(p); ptr_mut(&mut xs[i]) }
+
+// What is at the place, taken out, and what is put there with what was
+// there neither given back nor destroyed.
+pub unsafe fn write<T>(p: PtrMut<T>, value: T) where T: Use<[1, 1]> { overwrite(as_mut(p), value) }
+"#
+
 private def anyText : String := r#"// What a program is told of its own functions.
 
 // The name of the function a callable is of, as the program names it (a
@@ -5393,6 +5427,7 @@ def texts : List (List String × String) :=
    (["std", "random"], randomText),
    (["std", "tuple"], tupleText),
    (["std", "ffi"], "pub use std::c::*;\n"),
+   (["std", "ptr"], ptrText),
    (["core"], "pub mod option;\npub mod result;\npub mod cmp;\npub mod num;\npub mod char;\npub mod iter;\npub mod slice;\npub mod hash;\npub mod value;\n"),
    (["core", "value"], "pub use std::value::*;\n"),
    (["core", "option"], "pub use std::option::*;\n"),

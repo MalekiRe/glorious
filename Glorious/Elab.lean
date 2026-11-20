@@ -87,6 +87,7 @@ inductive Head where
   | replace
   | swap
   | overwrite
+  | transmute
   | const (e : Expr)
 
 def resolveName (scope : Scope) (asked : Option String) (x : String) : M Head := do
@@ -113,6 +114,7 @@ def resolveName (scope : Scope) (asked : Option String) (x : String) : M Head :=
   if x == "replace" then return .replace
   if x == "swap" then return .swap
   if x == "overwrite" then return .overwrite
+  if x == "transmute" then return .transmute
   if let some e := g.aliases[x]? then return .const e
   throw s!"unknown name `{x}`"
 
@@ -179,6 +181,7 @@ partial def elabExpr (scope : Scope) (tailPos : Bool) : Expr → M Atom
     | .replace => throw "`replace` must be called"
     | .swap => throw "`swap` must be called"
     | .overwrite => throw "`overwrite` must be called"
+    | .transmute => throw "`transmute` must be called"
     | .const e => elabExpr [] false e
   | .label l =>
     match scope.lookup (labelName l) with
@@ -463,6 +466,15 @@ partial def elabCall (scope : Scope) (isTail : Bool) (f : Expr) (args : List Exp
       match ← elabArgs scope args with
       | [target, value] => emit (.mem .store [target, value])
       | _ => throw "`overwrite` takes a reference and a value"
+    | .transmute => do
+      -- The value as it is: only its type is another.
+      if isTail then throw "`tail` applies to calls, not to `transmute`"
+      -- (Core's rules are about values of one type each: a program that
+      -- sees one as of another has no certificate, as one that is foreign.)
+      modify fun s => { s with foreign := true }
+      match ← elabArgs scope args with
+      | [a] => emit (.let_ (.atom a))
+      | _ => throw "`transmute` takes one value"
     | .const e => do
       let callee ← elabExpr [] false e
       elabApply scope isTail callee args

@@ -1556,9 +1556,9 @@ line always checks.
 ## What is unsafe
 
 **Decision: `unsafe` marks what the proofs say nothing of, and a program
-that does any of it has no certificate.** Three things are unsafe: calling a
+that does any of it has no certificate.** Four things are unsafe: calling a
 function that is not written in the language, reading the bits at an address,
-and writing them. The checker lets them be named only in `unsafe { .. }` or
+writing them, and seeing a value as of another type (`transmute`). The checker lets them be named only in `unsafe { .. }` or
 in the body of an `unsafe fn`, which is itself unsafe to name. Everything
 else about such a program is checked as before; its Core is not shown to
 follow Core's rules, because Core's host has no such operations: on the
@@ -1578,14 +1578,28 @@ proved machines the program stops there, and says so. The Rust VM runs it.
   once it is a value the one who named it has answered for it.
 - `std::c` has `malloc`, `free`, `strlen`, bytes at an address, and texts as
   C has them (`c_string`, `text_at`), over `std::text::utf8` and `from_utf8`.
+- `transmute(v)` is `v`, of whatever type is wanted of it; nothing is done to
+  it. The checker asks nothing of the two types, and a reference given is
+  not a borrow the result holds. Core's rules are about values of one type
+  each, so a program that transmutes has no certificate, as one that is
+  foreign; the machines run it, as a value is what it is to them whatever
+  its type.
+- `std::ptr` has pointers made of it, as Rust's `*const T` and `*mut T`:
+  `Ptr<T>` and `PtrMut<T>` are a reference seen as a number, with no borrow
+  and no lifetime, and any number of copies. `ptr(&x)` and `ptr_mut(&mut x)`
+  are safe; `as_ref` and `as_mut` give the place back borrowed for as long
+  as whoever writes them says, `element`/`element_mut` the place of an
+  array's element, and `write` puts a value there; these are unsafe. With
+  them a library says what the borrow checker cannot see: that two `&mut`
+  into one column are of rows two filters keep apart (covey's queries).
 
 Why nothing in Lean. A foreign function is not something Core's host can be
 said to do: `Host.call` is a function, and the proofs are about it. Giving
 foreign calls a meaning there would be an axiom about C. So they have none,
 and the line between what is proved and what is not is the word `unsafe`.
 
-Limits, against the specification (15, 16): no typed pointers (`*T`), no
-layouts (`repr`), no floating point or structures across the boundary, no
+Limits, against the specification (15, 16): pointers are `std::ptr`'s, not
+written `*T`, and are not addresses C can be given; no layouts (`repr`), no floating point or structures across the boundary, no
 callbacks from C, no functions with a varying number of arguments, no
 linking of a library by name (what the process has loaded is what there is),
 and no rules for when unsafe code is sound: a safe function with an `unsafe`

@@ -175,6 +175,7 @@ partial def inferExpr (scope : Scope) (amb : Row) : Expr → M Ty
     | .replace => throw "`replace` must be called"
     | .swap => throw "`swap` must be called"
     | .overwrite => throw "`overwrite` must be called"
+    | .transmute => throw "`transmute` must be called"
     | .const e => inferExpr [] amb e
   | .label l =>
     match scope.lookup ("@" ++ l) with
@@ -1297,6 +1298,16 @@ partial def inferCall (scope : Scope) (amb : Row) (f : Expr) (args : List Expr)
       checkArgs scope amb "`overwrite`" [.ref .uniq t cap, t] args call
       use scope (.through cap "the reference given to `overwrite`" true)
       pure .unit
+    | .transmute => do
+      -- A value seen as of another type, which nothing is asked of: a
+      -- reference's borrow, given, is not one the result is said to hold.
+      -- What the two types are is the writer's word, which is why it is
+      -- unsafe.
+      let s ← get
+      unless s.unsafeBlock || s.unsafeFns.contains s.owner do
+        throw "`transmute` is unsafe: a value is seen as of another type, which nothing checks. It can be named only in `unsafe { .. }` or in an `unsafe fn`"
+      checkArgs scope amb "`transmute`" [← freshTy] args call
+      freshTy
     | .local (.val t _) => applyTy scope amb s!"`{x}`" t args call
     | .local (.cell t brand) => do
       mustDup t (readsCell x)

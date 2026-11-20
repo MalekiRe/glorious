@@ -504,6 +504,7 @@ inductive Head where
   | replace
   | swap
   | overwrite
+  | transmute
   | const (e : Expr)
 
 def resolveName (scope : Scope) (asked : Option String) (x : String) : M Head := do
@@ -562,6 +563,7 @@ def resolveName (scope : Scope) (asked : Option String) (x : String) : M Head :=
   if x == "replace" then return .replace
   if x == "swap" then return .swap
   if x == "overwrite" then return .overwrite
+  if x == "transmute" then return .transmute
   if let some e := s.aliases[x]? then return .const e
   throw s!"unknown name `{x}`"
 
