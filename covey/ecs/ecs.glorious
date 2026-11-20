@@ -1459,7 +1459,8 @@ fn has_entity(entities: &[Entity], entity: Entity) -> Bool {
     let mut i = 0;
     let mut found = false;
     while({ i < len_at(entities) }) {
-        if(entities[i].index == entity.index) { if(entities[i].generation == entity.generation) { found = true }; };
+        // (An entity of another world is not one of these, whatever its place.)
+        if(entities[i].index == entity.index) { if(entities[i].generation == entity.generation) { if(entities[i].world == entity.world) { found = true } }; };
         i = i + 1
     };
     found
@@ -1506,13 +1507,16 @@ impl<Q, N, St> Single<Q, N, St> {
 
 // The entities a world has, oldest place first.
 pub fn entities<S>(world: &World<S>) -> [Entity] {
-    let mut out = [];
+    // (Which places are free, found once: not looked for again for each.)
+    let mut free = [];
     let mut i = 0;
+    while({ i < len_at(&world.generations) }) { push_at(&mut free, false); i = i + 1 };
+    let mut j = 0;
+    while({ j < len_at(&world.free) }) { free[world.free[j]] = true; j = j + 1 };
+    let mut out = [];
+    i = 0;
     while({ i < len_at(&world.generations) }) {
-        let mut free = false;
-        let mut j = 0;
-        while({ j < len_at(&world.free) }) { if(world.free[j] == i) { free = true }; j = j + 1 };
-        if(not(free)) { push_at(&mut out, Entity { index: i, generation: world.generations[i], world: world.id }) };
+        if(not(free[i])) { push_at(&mut out, Entity { index: i, generation: world.generations[i], world: world.id }) };
         i = i + 1
     };
     out

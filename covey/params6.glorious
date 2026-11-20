@@ -1,0 +1,93 @@
+// Upstream's tests/params.rs:
+// - `get_mut_resolves_one_entity_through_data_archetype_and_row_filters`: a
+//   query's `get_mut` is of an entity only where the query is: one with
+//   all it asks for, alive, of this world, let through by its filters, and
+//   by a change filter only where it changed.
+// - `presence_checks_run_beside_writers_and_options_conflict_like_writes`:
+//   `Has` beside a writer of the component, in one parallel group.
+// expect:
+// 1
+// 0
+// 0
+// 0
+// 7
+// 1
+// 0
+// 10 -1 11
+// --
+// 1
+// 0
+mod ecs;
+
+use ecs::{App, World, Entity, Query, Single, Has, Without, Changed, parallel};
+use core::option::is_none;
+
+struct Update
+struct Position(Int)
+struct Velocity(Int)
+struct Tag
+struct Other
+struct Watch(Entity, [Int])
+struct Stunned
+struct Count(Int)
+
+fn flag(b: Bool) { say(if(b) { 1 } else { 0 }) }
+
+fn watching(positions: &mut Query<(&Position,), (Changed<Position>,)>, watch: &mut Single<(&mut Watch,), ()>) {
+    match(watch.get_mut()) {
+        Some((mut w,)) =>
+            let seen = match(positions.get_mut(w.0)) { Some((p,)) => p.0, None => 0 - 1 };
+            push_at(&mut w.1, seen);,
+        None => ()
+    }
+}
+fn count_stunned(q: &mut Query<(Has<Stunned>,), ()>, count: &mut Single<(&mut Count,), ()>) {
+    let mut n = 0;
+    q.for_each() { (has,) => if(has) { n = n + 1 } else { () }; };
+    match(count.get_mut()) { Some((mut c,)) => c.0 = c.0 + n;, None => () }
+}
+fn touch_stunned(q: &mut Query<(&mut Stunned,), ()>) { q.for_each() { (s,) => discard(s); } }
+
+fn through_query<S>(world: &mut World<S>, es: [Entity]) where S: ecs::Get<Position>, S: ecs::Get<Velocity>, S: ecs::Hidden<(&mut Position, &Velocity), ()> {
+    let mut query = world.query<(&mut Position, &Velocity)>();
+    flag(match(query.get_mut(es[0])) { Some((mut p, v)) => p.0 = p.0 + v.0; true, None => false });
+    flag(is_none(query.get_mut(es[1])) == false);
+    flag(is_none(query.get_mut(es[2])) == false);
+    flag(is_none(query.get_mut(es[3])) == false)
+}
+fn untagged<S>(world: &mut World<S>, moving: Entity, tagged: Entity) where S: ecs::Get<Position>, S: ecs::Get<Tag>, S: ecs::Hidden<(&Position,), (Without<Tag>,)> {
+    let mut untagged = world.query_filtered<(&Position,), (Without<Tag>,)>();
+    say(match(untagged.get_mut(moving)) { Some((p,)) => p.0, None => 0 });
+    flag(is_none(untagged.get_mut(tagged)) == false)
+}
+
+fn main() -> Int {
+    let mut world = App::new().register<Position>().register<Velocity>().register<Tag>().register<Other>().storage<ecs::Sparse<Tag>>().build().world;
+    let moving = world.spawn_bundle((Position(1), Velocity(2)));
+    let tagged = world.spawn_bundle((Position(3), Velocity(4), Tag));
+    let still = world.spawn_bundle((Position(5),));
+    let gone = world.spawn_bundle((Position(6), Velocity(7)));
+    discard(world.despawn(gone));
+    let mut other = App::new().register<Position>().register<Velocity>().build().world;
+    let elsewhere = other.spawn_bundle((Position(8), Velocity(9)));
+    through_query(&mut world, [tagged, still, gone, elsewhere]);
+    say(match(world.get<Position>(tagged)) { Some(p) => p.0, None => 0 });
+    untagged(&mut world, moving, tagged);
+    let mut app = App::new().register<Position>().register<Watch>().add_systems(Update, watching).build();
+    let watched = app.world.spawn_bundle((Position(10),));
+    let log = app.world.spawn_bundle((Watch(watched, []),));
+    app.emit(&Update);
+    app.emit(&Update);
+    match(app.world.get_mut<Position>(watched)) { Some(mut p) => p.0 = 11;, None => () };
+    app.emit(&Update);
+    say(match(app.world.get<Watch>(log)) { Some(w) => std::text::join(std::vec::map(clone(&w.1), fn(n: Int) -> Str { show(n) }), " "), None => "" });
+    say("--");
+
+    let mut app = App::new().register<Stunned>().register<Count>()
+        .add_systems(Update, parallel((count_stunned, touch_stunned))).build();
+    let counter = app.world.spawn_bundle((Count(0),));
+    discard(app.world.spawn_bundle((Stunned,)));
+    app.emit(&Update);
+    say(match(app.world.get<Count>(counter)) { Some(c) => c.0, None => 0 });
+    0
+}
