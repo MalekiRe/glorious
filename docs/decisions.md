@@ -5965,6 +5965,36 @@ occurrences one type with one set of captures, as `T` is in Rust, so that
 `push_at` needs no edge. Then each body is checked against its signature
 alone, every body side by side, and a body's edit checks that body only.
 
+## Covey drafts: what each still needs (measured)
+
+Six of the 18 drafts still fail the suite. What each needs:
+
+- **plugins**: hooks fired from an exclusive system's world. Upstream runs a
+  component's hooks inside the world, at the spawn (`hp added x1` before the
+  system's own line); covey's hooks are the App's systems (`On<OnAdd<T>,
+  ..>` in `L`), which a `&mut World<S>` cannot reach. Taking it away means
+  the world keeps runnable hooks: each registered hook adapted to run on a
+  `World<S>` (as `RunsOnWorld` runs a system), kept by the component's place
+  among the columns (a `Get<T>` slot), and run by the world's insert,
+  remove and despawn.
+- **required2**: components that require each other. `Brings<S>` asks the
+  required list's own `Brings` at the type level, which is a cycle for
+  `Left` and `Right`; upstream finds them at run time. Needs either a
+  run-time registry of what each component brings (made at `register`) or
+  a trait solver that takes such a cycle as met (coinductively).
+- **tasks**: the instances pass (`Elab.instances`) drops a function that
+  performs an effect of its caller's choosing when nothing calls it by name;
+  a trait's function reached through an implementation's dictionary is not
+  called by name until the specializer runs, which is after. The fourth
+  `Dispatch` for tuples is one.
+- **remote**: a system given to `Remote::bridge` performs `Threads`
+  (`enter` locks and yields); `RunsOnWorld` takes only systems that perform
+  nothing.
+- **behaviors**: passes at 200 entities; at upstream's 1000 it takes 2m36 on
+  the bytecode machine, whose cells are a list (`Control.Cells`): reading a
+  cell walks the list. Cells as an array is what takes it away.
+- **one more out of steps**: the same.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by
