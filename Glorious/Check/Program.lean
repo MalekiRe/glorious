@@ -340,7 +340,17 @@ def checkItems (items : List Item) (seed : UInt64 := 0) (kept : Kept := []) : M 
       return [(whole, st)]
     let before := (← get).impls.size
     let mut made : Kept := []
-    let mut key := mixHash seed (hash (items.map withoutBodies))
+    -- (A function is declared by checking it, with its group: what is
+    -- declared first is the rest, so a function added, or a signature
+    -- changed, keeps what was found of the declarations and the groups
+    -- before it.)
+    let fnNames : Std.HashSet String := decls.foldl (fun s d => s.insert d.name) {}
+    let declared := items.filter fun
+      | .fn .. => false
+      | .pub _ (.fn ..) => false
+      | .bounds f _ => !fnNames.contains f
+      | _ => true
+    let mut key := mixHash seed (hash (declared.map withoutBodies))
     -- (A state kept from before has the implementations that program
     -- declared, each with its functions whole; the declarations do not
     -- depend on the bodies, so the ones put in their place are this
@@ -369,17 +379,28 @@ def checkItems (items : List Item) (seed : UInt64 := 0) (kept : Kept := []) : M 
         { s with runFns := later.foldl (fun m d => m.insert d.name d.clauses) s.runFns } : M Unit)
     let declBy : Std.HashMap String FnDecl := decls.foldl (fun m d => if m.contains d.name then m else m.insert d.name d) {}
     let groups := (components names deps).map fun comp => comp.filterMap fun n => declBy[n]?
-    -- Each group's level: one more than the highest of the groups it calls
-    -- into. Groups of one level use none of each other, so they are checked
-    -- side by side (`checkSideBySide`), each level after those before it.
+    -- Each group's level: groups of one level use none of each other, so
+    -- they are checked side by side (`checkSideBySide`), each level after
+    -- those before it.
     let groupOf : Std.HashMap String Nat := groups.zipIdx.foldl (fun m (g, i) =>
       g.foldl (fun m d => m.insert d.name i) m) {}
+    -- Each group's level, one more than the highest of the groups it calls
+    -- into; but one that nothing in the unit calls, as a function just added
+    -- is, is of the last level, after every other, so that adding one leaves
+    -- the rest as they were.
     let levelOf := groups.zipIdx.foldl (fun (acc : Array Nat) (g, i) =>
       acc.push (g.foldl (fun l d => (deps d.name).foldl (fun l n =>
         match groupOf[n]? with
         | some j => if j < i then max l ((acc[j]?).getD 0 + 1) else l
         | none => l) l) 0)) #[]
-    let sorted := (groups.zipIdx.map fun (g, i) => ((levelOf[i]?).getD 0, i, g)).mergeSort
+    let called := groups.zipIdx.foldl (fun (acc : Array Bool) (g, i) =>
+      g.foldl (fun acc d => (deps d.name).foldl (fun acc n =>
+        match groupOf[n]? with
+        | some j => if j < i then acc.set! j true else acc
+        | none => acc) acc) acc) (Array.replicate groups.length false)
+    let last := levelOf.foldl max 0 + 1
+    let sorted := (groups.zipIdx.map fun (g, i) =>
+        (if (called[i]?).getD false then (levelOf[i]?).getD 0 else last, i, g)).mergeSort
       fun a b => a.1 < b.1 || (a.1 == b.1 && a.2.1 ≤ b.2.1)
     let groups := sorted.map (·.2.2)
     let levels := (sorted.map (·.1)).toArray
