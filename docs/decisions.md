@@ -6192,7 +6192,15 @@ What makes it one implementation for every length (the todo item):
   with `..R` a list variable, their uses unfolded as deep as the list a use
   has.
 
-Not started. A smaller step that would cut most of the cost without it:
+Done so far, the cost without the generality: each written-out copy says
+it is one (`type %pack = ();`), and its functions, as those of the copies
+of an implementation for every type, are checked only once the dictionary
+table names the implementation (`St.pendingCopies`, at a unit's end, until
+none is left that something uses). covey/sixteen 21 s -> 7 s, states2
+2731 -> about 1400 groups, the suite 26-33 s -> 20 s. They are still
+declared, one implementation for each length, and parsed.
+
+The step before that, not taken:
 write out only the lengths the program's lists have, and below them only
 for the implementations whose conditions ask of a shorter list (the `(H,
 ..R)` ones); and turn those recursive ones into implementations on nested
