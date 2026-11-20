@@ -1548,7 +1548,7 @@ theorem stepIO_ok {p : Program} {c : Config} (hp : ProgramOk Δ p) (ht : Typed �
     | @write _ a _ σ _ _ ha hbody =>
       obtain ⟨v, hv, hvt⟩ := atom_ok henv ha
       have h1 : stepIO p ⟨⟨.host 0 [a] body, env, stack, store⟩, w⟩
-          = .next ⟨⟨body, env ++ [.data 0 []], stack, store⟩, ⟨w.input, w.output ++ [v], w.heap⟩⟩ := by
+          = .next ⟨⟨body, env ++ [.data 0 []], stack, store⟩, { w with output := w.output ++ [v] }⟩ := by
         simp [stepIO, evalAtoms, hv, Host.call]
       rw [h1]
       exact ⟨⟨S, .mk (henv.snoc .unit) hbody hle hsub hst hs⟩,

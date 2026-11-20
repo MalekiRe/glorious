@@ -366,7 +366,9 @@ def hosts : List (String × Nat × Nat) :=
    -- holding a value, the value taken out of one, and one put in. What a
    -- cell holds is not seen by the checker: the library's shared values
    -- and threads, which are safe, are made of them.
-   ("heap_new", 6, 1), ("heap_take", 7, 1), ("heap_put", 8, 2)]
+   ("heap_new", 6, 1), ("heap_take", 7, 1), ("heap_put", 8, 2),
+   -- The name of the function a callable is of, and the callable back.
+   ("host_fn_name", 9, 1)]
 
 /-- The Core computation under construction: binding forms awaiting their
 continuation, the number of locals so far, and the terminator once one is known. -/

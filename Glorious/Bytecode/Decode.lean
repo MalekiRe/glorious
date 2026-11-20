@@ -220,14 +220,15 @@ def code (bs : Bytes) : Option (Code × Bytes) := list instr bs
 
 def fn (bs : Bytes) : Option (Fn × Bytes) := (code bs).map fun (c, rest) => (⟨c⟩, rest)
 
-/-- Decode a whole program; nothing may follow it. -/
+/-- Decode a whole program; nothing may follow it. (Its functions' names are
+not written: a program read back has none.) -/
 def program (bs : Bytes) : Option Program :=
   match list fn bs with
   | some (fns, rest) =>
     match code rest with
     | some (main, rest) =>
       match list pair rest with
-      | some (drops, []) => some ⟨fns.toArray, main, drops⟩
+      | some (drops, []) => some ⟨fns.toArray, main, drops, #[]⟩
       | _ => none
     | none => none
   | none => none
@@ -319,8 +320,9 @@ theorem fn_encode (f : Fn) (rest : Bytes) :
     fn (Encode.code f.code ++ rest) = some (f, rest) := by
   simp [fn]
 
-/-- **The format is lossless.** Decoding an encoded program gives the program back. -/
-theorem program_encode (p : Program) : program (Encode.program p) = some p := by
+/-- **The format is lossless**, but for the functions' names, which it does
+not write: decoding an encoded program gives the program back without them. -/
+theorem program_encode (p : Program) : program (Encode.program p) = some { p with names := #[] } := by
   have h := list_encode (enc := fun f : Fn => Encode.code f.code) fn_encode p.fns.toList
     (Encode.code p.main ++ Encode.list Encode.pair p.drops)
   have hmain := code_encode p.main (Encode.list Encode.pair p.drops)

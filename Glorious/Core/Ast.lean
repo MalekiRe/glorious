@@ -107,5 +107,8 @@ structure Program where
   function, the function that destroys what a closure of it captured, given
   the captures as its arguments. `cancel` of such a closure calls it. -/
   drops : List (Nat × Nat) := []
+  /-- Each function's name, by its index: what a program is told of a
+  callable of its own (`Host.call` 9). -/
+  names : Array String := #[]
 
 end Glorious.Core

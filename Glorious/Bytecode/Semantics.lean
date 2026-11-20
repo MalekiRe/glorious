@@ -289,7 +289,7 @@ def stepIO (p : Program) (c : Config) : Step Config Result :=
           c.state.store⟩, world⟩
   | _ => lift c.world (step p c.state)
 
-def initIO (p : Program) (input : List Int) : Config := ⟨init p, ⟨input, [], []⟩⟩
+def initIO (p : Program) (input : List Int) : Config := ⟨init p, { input := input, output := [], names := p.names }⟩
 
 def Halts (p : Program) (input : List Int) (r : Result) : Prop :=
   Machine.Halts (stepIO p) (initIO p input) r

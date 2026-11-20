@@ -1787,7 +1787,7 @@ def elabProgram (items : List Item) (blocks : Option Blocks := none)
     for (name, info) in g.ops do
       out := out.set! info.id name
     pure out
-  pure ⟨⟨st.fns, .let_ (.closure mainIdx []) (.tail (.var 0) []), st.drops.reverse⟩, names, st.names,
+  pure ⟨⟨st.fns, .let_ (.closure mainIdx []) (.tail (.var 0) []), st.drops.reverse, fns.toArray.map (·.1)⟩, names, st.names,
     opNames, st.envSizes, st.lent, st.sites, st.plain.reverse, st.foreign, st.under, st.twoWays,
     st.siteOwners, st.fnSites⟩
 

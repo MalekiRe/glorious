@@ -41,6 +41,7 @@ pub mod task;
 pub mod path;
 pub mod future;
 pub mod thread;
+pub mod any;
 pub mod iterator;
 pub mod slice;
 pub mod collections;
@@ -3724,6 +3725,20 @@ impl PathBuf {
 }
 "#
 
+private def anyText : String := r#"// What a program is told of its own functions.
+
+// The name of the function a callable is of, as the program names it (a
+// copy made for types it is given has them after `@`), and the callable
+// back. `""` of one written in place.
+pub fn fn_name<F>(f: F) -> (Str, F) {
+    let (codes, back) = unsafe { host_fn_name(f) };
+    let mut out = "";
+    let mut i = len_at(&codes);
+    while({ i > 0 }) { i = i - 1; out = StrChar(char_of(codes[i]), out) };
+    (out, back)
+}
+"#
+
 private def threadText : String := r#"// Threads, as the library has them: computations that run in turn, each
 // until it waits for something (`join`, `recv`, `yield_now`), under the
 // scope that has them (`scope`). Every thread spawned in a scope is done
@@ -5334,6 +5349,7 @@ def texts : List (List String × String) :=
    (["std", "path"], pathText),
    (["std", "future"], futureText),
    (["std", "thread"], threadText),
+   (["std", "any"], anyText),
    (["alloc", "boxed"], "pub use std::boxed::*;\n"),
    (["std", "iterator"], iteratorText),
    (["std", "slice"], sliceText),

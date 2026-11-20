@@ -785,7 +785,7 @@ def compileSourceAt (src : String) (check : Bool := true)
     | .error e => if check then throw e.msg else pure (none, [], [])
   -- (Where only what the checker found is asked, that is all.)
   if lenient then
-    return { core := ⟨#[], .ret (.int 0), []⟩, ctorNames := #[], fnNames := #[], opNames := #[], checkKept := checkMade }
+    return { core := ⟨#[], .ret (.int 0), [], #[]⟩, ctorNames := #[], fnNames := #[], opNames := #[], checkKept := checkMade }
   -- Lifetimes were the checker's to read; and, of what is declared, the
   -- certificate's.
   let written := all

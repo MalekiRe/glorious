@@ -2593,6 +2593,10 @@ fn main() -> Int { walk(3) }",
     [], "5"⟩,
   ⟨"struct P { x: Int, y: Int }\nfn pick<'a>(p: &'a mut P, c: Bool) -> &'a mut Int { if(c) { let x = &mut p.x; x } else { &mut p.y } }\nfn main() -> Int { let mut p = P { x: 1, y: 2 }; let r = pick(&mut p, true); *r = 7; p.x }",
     [], "7"⟩,
+  -- What a program is told of its own functions: the name of the one a
+  -- callable is of, and none of one written in place.
+  ⟨"use std::any::fn_name;\nfn mover(x: Int) -> Int { x + 1 }\nfn named<F>(f: F) -> Str where F: Fn<(Int,), Output = Int> { let (n, g) = fn_name(f); discard(g(1)); n }\nfn main() -> Int { say(named(mover)); say(named(fn(x: Int) -> Int { x })); 0 }",
+    [], "mover\n\n0"⟩,
   -- A thread runs later, after the block a borrow it held would be of may
   -- have ended: what it uses it is given, a copy, not a borrow.
   ⟨"use std::thread::{scope, Scope, Threads, yield_now};\nfn main() -> Int {\n    scope(fn(s: &Scope) -> Int / {Threads} {\n        let mut i = 0;\n        while({ i < 2 }) { let mut v = [1, 2]; discard(s.spawn({ push_at(&mut v, 3); len_at(&v) })); i = i + 1 };\n        yield_now();\n        0\n    })\n}",

@@ -1233,6 +1233,11 @@ partial def inferCall (scope : Scope) (amb : Row) (f : Expr) (args : List Expr)
       else if id == 8 then
         checkArgs scope amb s!"`{x}`" [.int, ← freshTy] args call
         pure .unit
+      else if id == 9 then
+        -- (A value, given back with the codes of its function's name.)
+        let v ← freshTy
+        checkArgs scope amb s!"`{x}`" [v] args call
+        pure (.tuple [.con ((← get).arrayType.getD "Array") [.int], v])
       else
         checkArgs scope amb s!"`{x}`" [] args call
         pure (.tuple [.int, .int])

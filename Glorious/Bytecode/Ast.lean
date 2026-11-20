@@ -71,5 +71,7 @@ structure Program where
   /-- As Core's: each function whose closures say how they are destroyed, and
   the function that destroys what one captured. -/
   drops : List (Nat × Nat) := []
+  /-- As Core's: each function's name, by its index. -/
+  names : Array String := #[]
 
 end Glorious.Bytecode
