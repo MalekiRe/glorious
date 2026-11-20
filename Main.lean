@@ -127,7 +127,9 @@ def outcome (run : Bool) (c : Case) (files : List (List String × String)) (few 
   | .error e => { lean := s!"error: {e}", error := some e }
   | .ok compiled =>
     let has := fun (f : Typing.Cert → Bool) => (compiled.cert.map f).getD false
-    { lean := if run then evalCompiled compiled c.input else ""
+    -- (An example, a program as long as it needs, is given more steps on
+    -- bytecode.)
+    { lean := if run then evalCompiled compiled c.input (vmScale := if few then 200 else 20) else ""
       bytes := some (bytecodeBytes compiled)
       certified := compiled.cert.isSome
       strict := has (·.strict), regions := has (·.regions), loans := has (·.loans)

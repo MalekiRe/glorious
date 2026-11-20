@@ -5920,8 +5920,13 @@ Each is to go; none is a design covey keeps.
   ids the compiler gives functions.
 - No unwinding: tests of panics are not ported. Taken away by panics that
   run destructors and can be caught.
-- An entity does not say which world it is of. Taken away by an `Entity`
-  that does.
+- ~~An entity does not say which world it is of~~: an `Entity` has its
+  world's number (`World.id`, a fresh cell's place, `std::thread::
+  fresh_number`), and a world finds none of another's: `contains`, `get`,
+  `get_mut`, `remove` and `despawn` of it are none or false, as upstream's
+  `stale_and_foreign_handles_cannot_address_live_rows` (covey/behavior)
+  asks, but for the `insert` that panics there, which is not ported (no
+  unwinding).
 - ~~`world.single`~~ (`world.query<Q>().single()`, covey/single) and
   ~~joins that hide disabled targets~~ (`To` and `From` do not see a
   disabled entity unless what they ask of it mentions what disables it,

@@ -40,12 +40,13 @@ use core::iter::{into_iter, next};
 
 // An entity: a place in the columns, and which of the entities that have had
 // that place this one is.
-pub struct Entity { pub index: Int, pub generation: Int }
-impl Eq for Entity { fn ==(a: Entity, b: Entity) -> Bool { if(a.index == b.index) { a.generation == b.generation } else { false } } }
+// (And which world it is of: one world's entity is none of another's.)
+pub struct Entity { pub index: Int, pub generation: Int, pub world: Int }
+impl Eq for Entity { fn ==(a: Entity, b: Entity) -> Bool { if(a.index == b.index) { if(a.generation == b.generation) { a.world == b.world } else { false } } else { false } } }
 impl Clone for Entity { fn clone(e: &Entity) -> Entity { *e } }
 impl Entity {
     // An entity no world has, to start with where one is needed.
-    pub const PLACEHOLDER: Entity = Entity { index: -1, generation: -1 };
+    pub const PLACEHOLDER: Entity = Entity { index: -1, generation: -1, world: -1 };
 }
 
 // One component's values: packed, each with the entity it belongs to, and
@@ -270,21 +271,22 @@ impl<T> Cloner for T where T: Clone { const CLONER: Option<fn(&T) -> T> = Some(c
 impl<T> Cloner for T { const CLONER: Option<fn(&T) -> T> = None; }
 
 // The columns, and which entities there are.
-pub struct World<S> { pub columns: S, generations: [Int], free: [Int], tick: Int, since: Int, remotes: std::thread::Mutex<[Request<S>]> }
+pub struct World<S> { pub columns: S, generations: [Int], free: [Int], tick: Int, since: Int, remotes: std::thread::Mutex<[Request<S>]>, id: Int }
 use std::thread::{Mutex, Threads, lock, channel, send, recv};
 fn no_remotes<S>() -> Mutex<[Request<S>]> { Mutex::new([]) }
 
 pub fn spawn<S>(world: &mut World<S>) -> Entity {
     match(pop_at(&mut world.free)) {
-        Some(index) => Entity { index: index, generation: world.generations[index] },
+        Some(index) => Entity { index: index, generation: world.generations[index], world: world.id },
         None =>
             push_at(&mut world.generations, 0);
-            Entity { index: len_at(&world.generations) - 1, generation: 0 }
+            Entity { index: len_at(&world.generations) - 1, generation: 0, world: world.id }
     }
 }
 
 pub fn alive<S>(world: &World<S>, entity: Entity) -> Bool {
     if(entity.index < 0) { false }
+    else if(entity.world != world.id) { false }
     else if(entity.index < len_at(&world.generations)) { world.generations[entity.index] == entity.generation }
     else { false }
 }
@@ -749,7 +751,7 @@ impl<S> World<S> {
     pub fn spawn_bundle<B>(world: &mut Self, bundle: B) -> Entity where B: Bundle<S> { spawn_with(world, bundle) }
 
     // An empty world of the columns `S`.
-    pub fn new() -> World<S> where S: Columns { World { columns: <S as Columns>::empty(), generations: [], free: [], tick: 1, since: 0, remotes: no_remotes() } }
+    pub fn new() -> World<S> where S: Columns { World { columns: <S as Columns>::empty(), generations: [], free: [], tick: 1, since: 0, remotes: no_remotes(), id: std::thread::fresh_number() } }
 
     // Give an entity a component, or another value of one it has: the one
     // it had, if it had one.
@@ -792,7 +794,7 @@ impl<S> World<S> {
     }
 
     // Take a component from an entity.
-    pub fn remove<T>(world: &mut Self, entity: Entity) -> Option<T> where S: Get<T> { remove<T, S>(world, entity) }
+    pub fn remove<T>(world: &mut Self, entity: Entity) -> Option<T> where S: Get<T> { if(alive(&*world, entity)) { remove<T, S>(world, entity) } else { None } }
 
     // Relate an entity to another by `R`, in place of what it related to by
     // `R` before: what that link carried. (`ChildOf` of a child to its
@@ -903,16 +905,18 @@ impl<S> World<S> {
     // An entity's component.
     pub fn get<T>(world: &Self, entity: Entity) -> Option<&T> where S: Get<T> {
         let column = <S as Get<T>>::column(&world.columns);
-        let at = slot_of(column, entity);
+        // (Of another world, or gone: none of this world's.)
+        let at = if(alive(world, entity)) { slot_of(column, entity) } else { 0 - 1 };
         if(at < 0) { None } else { Some(&column.dense[at]) }
     }
 
     // An entity's component, to change: a change once `get_mut` is asked of it.
     pub fn get_mut<T>(world: &mut Self, entity: Entity) -> Option<Mut<'_, T>> where S: Get<T>, T: Writable {
         let now = world.tick;
+        let here = alive(&*world, entity);
         let column = <S as Get<T>>::column_mut(&mut world.columns);
         column.now = now;
-        let at = slot_of(&*column, entity);
+        let at = if(here) { slot_of(&*column, entity) } else { 0 - 1 };
         if(at < 0) { None } else { Some(mut_at(column, at)) }
     }
 
@@ -1432,7 +1436,7 @@ pub fn entities<S>(world: &World<S>) -> [Entity] {
         let mut free = false;
         let mut j = 0;
         while({ j < len_at(&world.free) }) { if(world.free[j] == i) { free = true }; j = j + 1 };
-        if(not(free)) { push_at(&mut out, Entity { index: i, generation: world.generations[i] }) };
+        if(not(free)) { push_at(&mut out, Entity { index: i, generation: world.generations[i], world: world.id }) };
         i = i + 1
     };
     out
@@ -1441,7 +1445,7 @@ pub fn entities<S>(world: &World<S>) -> [Entity] {
 // What a system asks to be done to the world once the systems have run, in
 // the order asked: a system has no hold on the world itself. Each is a
 // callable given the world when the emit is done.
-pub struct Commands<S> { queue: [fn(&mut World<S>) -> ()], next: Int, made: Int }
+pub struct Commands<S> { queue: [fn(&mut World<S>) -> ()], next: Int, made: Int, world: Int }
 
 impl<S> Commands<S> {
     // Do something to the world once the systems have run.
@@ -1510,14 +1514,14 @@ pub fn end<S>(commands: &mut Commands<S>, entity: Entity) where S: Columns, S: U
 // A new entity, there once the systems have run: give it components through
 // the columns the system has.
 pub fn reserve<S>(commands: &mut Commands<S>) -> Entity {
-    let entity = Entity { index: commands.next + commands.made, generation: 0 };
+    let entity = Entity { index: commands.next + commands.made, generation: 0, world: commands.world };
     commands.made = commands.made + 1;
     entity
 }
 
 // What was asked, done in the order asked.
 fn apply<S>(commands: Commands<S>, world: &mut World<S>) {
-    let Commands { queue, next: _, made } = commands;
+    let Commands { queue, next: _, made, world: _ } = commands;
     let mut k = 0;
     while({ k < made }) { push_at(&mut world.generations, 0); k = k + 1 };
     let mut each = into_iter(queue);
@@ -1768,7 +1772,7 @@ impl<E, S, ..G, F, O, Lc, Q, N, St, Rest> Fetch<E, S, (..G), F, O, Lc> for (Sing
 impl<E, S, ..G, F, O, Lc, Rest> Fetch<E, S, (..G), F, O, Lc> for (Asking, Rest) where Rest: Fetch<E, S, (..G, &mut Commands<S>), F, O, Lc> {
     fn fetch(event: &E, world: &mut World<S>, commands: &mut Commands<S>, state: &mut Lc, gathered: (..G), f: &F) -> Option<O> {
         let (..g) = gathered;
-        let mut none = Commands { queue: [], next: 0, made: 0 };
+        let mut none = Commands { queue: [], next: 0, made: 0, world: world.id };
         <Rest as Fetch<E, S, (..G, &mut Commands<S>), F, O, Lc>>::fetch(event, world, &mut none, state, (..g, commands), f)
     }
 }
@@ -2212,7 +2216,7 @@ fn hooks<E, S, L>(app: &mut App<S, L>, event: &E, commands: &mut Commands<S>) wh
 }
 
 // Commands that ask nothing yet, numbering new entities after the world's.
-fn no_commands<S>(world: &World<S>) -> Commands<S> { Commands { queue: [], next: len_at(&world.generations), made: 0 } }
+fn no_commands<S>(world: &World<S>) -> Commands<S> { Commands { queue: [], next: len_at(&world.generations), made: 0, world: world.id } }
 
 // (The group `G`'s active state exited, after what follows it, and then
 // `next` entered, with the transition's systems run after; or, cleared, no
@@ -3031,6 +3035,8 @@ impl<S> World<S> {
     // A copy of the world: of each component that says how it is copied.
     pub fn snapshot(world: &Self) -> World<S> where S: Columns {
         let mut copy = World::new();
+        // (A copy of the same world: its entities are the world's.)
+        copy.id = world.id;
         copy.generations = clone(&world.generations);
         copy.free = clone(&world.free);
         copy.tick = world.tick;
@@ -3129,15 +3135,15 @@ pub struct App<S, L> { pub world: World<S>, systems: L }
 impl<S, L> App<S, L> {
     // An app with nothing in its world and no systems.
     pub fn new() -> App<(), ()> {
-        App { world: World { columns: (), generations: [], free: [], tick: 1, since: 0, remotes: no_remotes() }, systems: () }
+        App { world: World { columns: (), generations: [], free: [], tick: 1, since: 0, remotes: no_remotes(), id: std::thread::fresh_number() }, systems: () }
     }
 
     // Give the world a resource.
     pub fn insert_resource<T>(app: Self, value: T) -> App<(Resource<T>, S), L> {
         let App { world, systems } = app;
-        let World { columns, generations, free, tick, since, remotes } = world;
+        let World { columns, generations, free, tick, since, remotes, id } = world;
         discard(remotes);
-        App { world: World { columns: (Resource { value: Some(value) }, columns), generations: generations, free: free, tick: tick, since: since, remotes: no_remotes() }, systems: systems }
+        App { world: World { columns: (Resource { value: Some(value) }, columns), generations: generations, free: free, tick: tick, since: since, remotes: no_remotes(), id: id }, systems: systems }
     }
 
     // The resource at its type's start.
@@ -3147,17 +3153,17 @@ impl<S, L> App<S, L> {
     // it from the systems that ask for it.)
     pub fn register_resource<T>(app: Self) -> App<(Resource<T>, S), L> {
         let App { world, systems } = app;
-        let World { columns, generations, free, tick, since, remotes } = world;
+        let World { columns, generations, free, tick, since, remotes, id } = world;
         discard(remotes);
-        App { world: World { columns: (Resource { value: None }, columns), generations: generations, free: free, tick: tick, since: since, remotes: no_remotes() }, systems: systems }
+        App { world: World { columns: (Resource { value: None }, columns), generations: generations, free: free, tick: tick, since: since, remotes: no_remotes(), id: id }, systems: systems }
     }
 
     // Store a component.
     pub fn register<T>(app: Self) -> App<(Column<T>, S), L> {
         let App { world, systems } = app;
-        let World { columns, generations, free, tick, since, remotes } = world;
+        let World { columns, generations, free, tick, since, remotes, id } = world;
         discard(remotes);
-        App { world: World { columns: (empty_column(), columns), generations: generations, free: free, tick: tick, since: since, remotes: no_remotes() }, systems: systems }
+        App { world: World { columns: (empty_column(), columns), generations: generations, free: free, tick: tick, since: since, remotes: no_remotes(), id: id }, systems: systems }
     }
 
     // Register systems under a label, named by a value of it: `Update`.
@@ -3180,17 +3186,17 @@ impl<S, L> App<S, L> {
     // Store a relation: what relates and what is related to.
     pub fn relation<R>(app: Self) -> App<<R as RelationColumns<S>>::Out, L> where R: RelationColumns<S> {
         let App { world, systems } = app;
-        let World { columns, generations, free, tick, since, remotes } = world;
+        let World { columns, generations, free, tick, since, remotes, id } = world;
         discard(remotes);
-        App { world: World { columns: <R as RelationColumns<S>>::relation_columns(columns), generations: generations, free: free, tick: tick, since: since, remotes: no_remotes() }, systems: systems }
+        App { world: World { columns: <R as RelationColumns<S>>::relation_columns(columns), generations: generations, free: free, tick: tick, since: since, remotes: no_remotes(), id: id }, systems: systems }
     }
 
     // Store each of a list of components: `.register_all<(Position, Velocity)>()`.
     pub fn register_all<C>(app: Self) -> App<<C as Registers<S>>::Out, L> where C: Registers<S> {
         let App { world, systems } = app;
-        let World { columns, generations, free, tick, since, remotes } = world;
+        let World { columns, generations, free, tick, since, remotes, id } = world;
         discard(remotes);
-        App { world: World { columns: <C as Registers<S>>::register_all(columns), generations: generations, free: free, tick: tick, since: since, remotes: no_remotes() }, systems: systems }
+        App { world: World { columns: <C as Registers<S>>::register_all(columns), generations: generations, free: free, tick: tick, since: since, remotes: no_remotes(), id: id }, systems: systems }
     }
 
     // The app, ready to run.

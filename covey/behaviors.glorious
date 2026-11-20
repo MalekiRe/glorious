@@ -56,6 +56,7 @@
 // --
 // 101
 // 303
+// dropped
 // 0
 mod ecs;
 
@@ -76,6 +77,21 @@ fn poll<S>(cx: &mut Cx<S>) where S: ecs::Holds<Polls> { discard(with(cx, fn(p: &
 
 struct Counter
 impl<S> Behavior<S> for Counter where S: ecs::Holds<Inbox<Press>>, S: ecs::Holds<Polls>, S: ecs::Get<Count>, S: ecs::Hidden<(Entity, &mut Count), ()> {
+    fn behave(me: Entity, cx: Cx<S>) -> Cx<S> / {Bridge<S>} {
+        let mut cx = cx;
+        poll(&mut cx);
+        while({ true }) {
+            let Press(n) = on<Press, S>(&mut cx);
+            poll(&mut cx);
+            discard(with(&mut cx, fn(q: &mut Query<(Entity, &mut Count), ()>) { add_count(q, me, n) }))
+        };
+        cx
+    }
+}
+
+// (A counter whose run holds a guard: what is dropped with it is seen.)
+struct Guarded
+impl<S> Behavior<S> for Guarded where S: ecs::Holds<Inbox<Press>>, S: ecs::Holds<Polls>, S: ecs::Get<Count>, S: ecs::Hidden<(Entity, &mut Count), ()> {
     fn behave(me: Entity, cx: Cx<S>) -> Cx<S> / {Bridge<S>} {
         let mut cx = cx;
         let guard = Guard;
@@ -184,21 +200,21 @@ fn main() -> Int {
     say("--");
 
     // `removing_the_marker_or_despawning_drops_the_future_and_its_waiters`
-    let mut app = App::new().register<Counter>().register<Count>().insert_resource(Polls(0))
-        .add_behaviors().add_inbox<Press>().add_behavior<Counter, Frame>().build();
-    let a = app.world.spawn_bundle((Counter, Count(0)));
-    let b = app.world.spawn_bundle((Counter, Count(0)));
+    let mut app = App::new().register<Guarded>().register<Count>().insert_resource(Polls(0))
+        .add_behaviors().add_inbox<Press>().add_behavior<Guarded, Frame>().build();
+    let a = app.world.spawn_bundle((Guarded, Count(0)));
+    let b = app.world.spawn_bundle((Guarded, Count(0)));
     app.emit(&Frame);
     say(waiting_of<Press, _>(&app.world, a));
     say(waiting_of<Press, _>(&app.world, b));
-    discard(app.world.remove<Counter>(a));
+    discard(app.world.remove<Guarded>(a));
     discard(app.world.despawn(b));
     app.emit(&Frame);
     say(waiting_of<Press, _>(&app.world, a));
     say(waiting_of<Press, _>(&app.world, b));
     flag(app.world.deliver(a, Press(1)));
     // Putting it back starts it anew.
-    discard(app.world.insert(a, Counter));
+    discard(app.world.insert(a, Guarded));
     app.emit(&Frame);
     discard(app.world.deliver(a, Press(4)));
     app.emit(&Frame);

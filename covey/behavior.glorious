@@ -18,9 +18,15 @@
 // --
 // 1
 // 0
+// 1
+// 1
+// 0
+// 1
+// 0
 // 0
 // 1
 // 50
+// 20
 // --
 // 1
 // 0
@@ -98,8 +104,16 @@ fn main() -> Int {
     say("--");
 
     let mut first = App::new().register<Int>().build().world;
+    let mut second = App::new().register<Int>().build().world;
     let a = first.spawn_bundle(());
+    let b = second.spawn_bundle(());
     discard(first.insert(a, 10));
+    discard(second.insert(b, 20));
+    flag(a != b);
+    flag(second.contains(a));
+    flag(is_none(second.get<Int>(a)));
+    flag(is_none(second.remove<Int>(a)));
+    flag(second.despawn(a));
     flag(first.despawn(a));
     flag(first.despawn(a));
     flag(is_some(first.get<Int>(a)));
@@ -107,6 +121,7 @@ fn main() -> Int {
     flag(if(fresh.index == a.index) { fresh.generation != a.generation } else { true });
     discard(first.insert(fresh, 50));
     say(match(first.get<Int>(fresh)) { Some(n) => *n, None => 0 });
+    say(match(second.get<Int>(b)) { Some(n) => *n, None => 0 });
     say("--");
 
     let drops = (Mutex::new(fold(range(0, 65), [], fn(out: [Int], i: Int) -> [Int] { push(out, 0) })));

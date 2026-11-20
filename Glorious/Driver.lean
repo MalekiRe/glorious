@@ -1245,14 +1245,14 @@ def showOutcome {σ : Type} (names : Array String) : Step σ Result → String
 
 /-- Run a compiled program on both machines with the given input: what it
 wrote followed by its value, or what went wrong; both, if they disagree. -/
-def evalCompiled (c : Compiled) (input : List Int := []) (fuel : Nat := 200000) : String :=
+def evalCompiled (c : Compiled) (input : List Int := []) (fuel : Nat := 200000) (vmScale : Nat := 20) : String :=
   let bytecode := compile c.core
   let onCore := showOutcome c.ctorNames
     (Machine.exec (Core.stepIO c.core) fuel (Core.initIO c.core input))
   let onVm := showOutcome c.ctorNames
-    (Machine.exec (Bytecode.stepIO bytecode) (fuel * 20) (Bytecode.initIO bytecode input))
+    (Machine.exec (Bytecode.stepIO bytecode) (fuel * vmScale) (Bytecode.initIO bytecode input))
   -- (A program the Core machine does not finish in its steps, and bytecode
-  -- does in twenty times as many: as long programs are, run on bytecode
+  -- does in `vmScale` times as many: as long programs are, run on bytecode
   -- alone.)
   if onCore == onVm || (onCore == "out of fuel" && onVm != "out of fuel") then onVm
   else s!"MISMATCH: Core gives {onCore}, bytecode gives {onVm}"

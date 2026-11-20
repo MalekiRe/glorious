@@ -3747,6 +3747,8 @@ pub struct Scope { queue: Int }
 
 fn take_cell<T>(cell: Int) -> T where T: Use<[1, 1]> { unsafe { heap_take(cell) } }
 fn put_cell<T>(cell: Int, value: T) where T: Use<[1, 1]> { unsafe { heap_put(cell, value) } }
+// A number no other call of this gives in the run: a new cell's place.
+pub fn fresh_number() -> Int { new_cell(0) }
 fn new_cell<T>(value: T) -> Int where T: Use<[1, 1]> { unsafe { heap_new(value) } }
 
 fn waiting_count(queue: Int) -> Int {
