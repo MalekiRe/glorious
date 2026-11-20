@@ -4,6 +4,9 @@
 //   relates it, put again retargets it, taken off unrelates it, and toward
 //   a target that is gone makes no link.
 // - `spawning_toward_a_target_despawned_in_the_same_flush_links_nothing`.
+// - `commands_spawn_related_entities_and_many_to_many_values_replace_edges`:
+//   commands spawn an entity related by a value; a many-to-many value put
+//   on an entity replaces every link it had, where `relate` adds one.
 // expect:
 // 1 3
 // [3]
@@ -17,10 +20,16 @@
 // 2
 // 0 0
 // 0 0
+// --
+// 7
+// 2
+// [10]
+// 0
+// [10, 12]
 // 0
 mod ecs;
 
-use ecs::{App, World, Entity, Commands, Query, Single, Relation, OneToMany, Relates, Sources, to};
+use ecs::{App, World, Entity, Commands, Query, Single, Relation, OneToMany, ManyToMany, Relates, Sources, to};
 use std::vec::sort;
 use core::option::is_none;
 
@@ -31,6 +40,9 @@ impl Relation for DockedAt { type Kind = OneToMany; }
 struct InSquad
 impl Relation for InSquad { type Kind = OneToMany; }
 struct Station(Entity)
+struct Likes
+impl Relation for Likes { type Kind = ManyToMany; }
+impl Use<[0, *]> for Likes {}
 
 fn names<S>(world: &World<S>, es: [Entity]) -> [Int] where S: ecs::Get<Name> {
     sort(fold(es, [], fn(out: [Int], e: Entity) -> [Int] { match(world.get<Name>(e)) { Some(n) => push(out, n.0), None => out } }))
@@ -54,6 +66,11 @@ fn spawning<S>(s: &mut Single<(&Station,), ()>, commands: &mut Commands<S>)
             discard(commands.spawn((Name(2), DockedAt { berth: 0 }.to(target), InSquad.to(target))));,
         None => ()
     }
+}
+
+fn docking<S>(s: &mut Single<(&Station,), ()>, commands: &mut Commands<S>)
+    where S: ecs::Get<Name>, S: ecs::Columns, S: ecs::Unlinks<S>, S: ecs::Get<Relates<DockedAt>>, S: ecs::Get<Sources<DockedAt>> {
+    match(s.get_mut()) { Some((station,)) => let target = station.0; discard(commands.spawn((Name(20), DockedAt { berth: 7 }.to(target))));, None => () }
 }
 
 fn main() -> Int {
@@ -88,5 +105,26 @@ fn main() -> Int {
         say(show(if(is_none(app.world.get<Relates<DockedAt>>(ship))) { 0 } else { 1 }) ++ " " ++ show(if(is_none(app.world.get<Relates<InSquad>>(ship))) { 0 } else { 1 }));
         i = i + 1
     };
+    say("--");
+
+    let mut app = App::new().register<Name>().register<Station>().relation<DockedAt>().relation<Likes>()
+        .add_systems(Update, docking).build();
+    let dock = app.world.spawn_bundle((Name(9),));
+    discard(app.world.spawn_bundle((Station(dock),)));
+    app.emit(&Update);
+    let ship = app.world.sources<DockedAt>(dock)[0];
+    say(match(app.world.get<Relates<DockedAt>>(ship)) { Some(d) => d.relation.berth, None => 0 - 1 });
+    let station = app.world.spawn_bundle((Name(10),));
+    let fan = app.world.spawn_bundle((Name(11),));
+    let a = app.world.spawn_bundle((Name(12),));
+    let b = app.world.spawn_bundle((Name(13),));
+    discard(app.world.relate(fan, Likes, a));
+    discard(app.world.relate(fan, Likes, b));
+    say(len_at(&app.world.targets<Likes>(fan)));
+    discard(app.world.insert(fan, Likes.to(station)));
+    say(names(&app.world, app.world.targets<Likes>(fan)));
+    flag(is_none(app.world.get<Sources<Likes>>(a)) == false);
+    discard(app.world.relate(fan, Likes, a));
+    say(names(&app.world, app.world.targets<Likes>(fan)));
     0
 }

@@ -855,19 +855,54 @@ impl<H, ..R> NamesOf for (H, ..R) where (..R): NamesOf, H: Schedule { fn names_o
 // a relation's value (`DockedAt { berth: 3 }.to(kestrel)`, a `Relates`)
 // relates the entity, as `world.relate` does, the old link undone and none
 // made to a target that is gone.
-pub trait Put<S> { fn put_value(&mut World<S>, Entity, Self) -> Option<Self> }
+pub trait Put<S> { fn put_value(&mut World<S>, Entity, Self) -> Option<Self> fn is_on(&World<S>, Entity) -> Bool }
 pub trait LinksWhenPut {}
 impl<R> LinksWhenPut for Relates<R> {}
-pub trait PutLink<S> { fn put_link(&mut World<S>, Entity, Self) -> Option<Self> }
-impl<R, S> PutLink<S> for Relates<R> where R: RelateBy<S>, S: Get<Relates<R>> {
+pub trait PutLink<S> { fn put_link(&mut World<S>, Entity, Self) -> Option<Self> fn linked(&World<S>, Entity) -> Bool }
+impl<R, S> PutLink<S> for Relates<R> where R: Relation, <R as Relation>::Kind: PutsBy<R, S> {
     fn put_link(world: &mut World<S>, entity: Entity, value: Relates<R>) -> Option<Relates<R>> {
         let Relates { relation, target } = value;
-        let before = match(world.get<Relates<R>>(entity)) { Some(r) => r.target, None => Entity::PLACEHOLDER };
-        match(world.relate(entity, relation, target)) { Some(r) => Some(Relates { relation: r, target: before }), None => None }
+        <<R as Relation>::Kind as PutsBy<R, S>>::put_by(world, entity, relation, target)
+    }
+    fn linked(world: &World<S>, entity: Entity) -> Bool { <<R as Relation>::Kind as PutsBy<R, S>>::linked_by(world, entity) }
+}
+// How a relation's value put on an entity relates it, by the relation's
+// kind: one target each way or one way, as `world.relate` does; any number
+// each way, in place of every link the entity had (upstream's: a value
+// replaces every edge of a many-to-many source, `relate` adds one).
+pub trait PutsBy<R, S> { fn put_by(&mut World<S>, Entity, R, Entity) -> Option<Relates<R>> fn linked_by(&World<S>, Entity) -> Bool }
+fn put_one_way<R, S>(world: &mut World<S>, entity: Entity, relation: R, target: Entity) -> Option<Relates<R>> where R: RelateBy<S>, S: Get<Relates<R>> {
+    let before = match(world.get<Relates<R>>(entity)) { Some(r) => r.target, None => Entity::PLACEHOLDER };
+    match(world.relate(entity, relation, target)) { Some(r) => Some(Relates { relation: r, target: before }), None => None }
+}
+impl<R, S> PutsBy<R, S> for OneToMany where R: RelateBy<S>, S: Get<Relates<R>> {
+    fn put_by(world: &mut World<S>, entity: Entity, relation: R, target: Entity) -> Option<Relates<R>> { put_one_way<R, S>(world, entity, relation, target) }
+    fn linked_by(world: &World<S>, entity: Entity) -> Bool { <S as Get<Relates<R>>>::has(&world.columns, entity) }
+}
+impl<R, S> PutsBy<R, S> for OneToOne where R: RelateBy<S>, S: Get<Relates<R>> {
+    fn put_by(world: &mut World<S>, entity: Entity, relation: R, target: Entity) -> Option<Relates<R>> { put_one_way<R, S>(world, entity, relation, target) }
+    fn linked_by(world: &World<S>, entity: Entity) -> Bool { <S as Get<Relates<R>>>::has(&world.columns, entity) }
+}
+impl<R, S> PutsBy<R, S> for ManyToMany where S: Get<Links<R>>, S: Get<Sources<R>>, R: Use<[0, *]> {
+    fn linked_by(world: &World<S>, entity: Entity) -> Bool { len_at(&targets_in<R, S>(&world.columns, entity)) > 0 }
+    fn put_by(world: &mut World<S>, entity: Entity, relation: R, target: Entity) -> Option<Relates<R>> {
+        if(if(alive(&*world, entity)) { alive(&*world, target) } else { false }) {
+            let had = targets_in<R, S>(&world.columns, entity);
+            let mut i = 0;
+            while({ i < len_at(&had) }) { discard(unlink_from<R, S>(world, entity, had[i])); i = i + 1 };
+            discard(link<R, S>(world, entity, relation, target));
+            None
+        } else { discard(relation); None }
     }
 }
-impl<T, S> Put<S> for T where T: LinksWhenPut, T: PutLink<S> { fn put_value(world: &mut World<S>, entity: Entity, value: T) -> Option<T> { <T as PutLink<S>>::put_link(world, entity, value) } }
-impl<T, S> Put<S> for T where S: Get<T>, T: EvictOne<S> { fn put_value(world: &mut World<S>, entity: Entity, value: T) -> Option<T> { put_one(world, entity, value) } }
+impl<T, S> Put<S> for T where T: LinksWhenPut, T: PutLink<S> {
+    fn put_value(world: &mut World<S>, entity: Entity, value: T) -> Option<T> { <T as PutLink<S>>::put_link(world, entity, value) }
+    fn is_on(world: &World<S>, entity: Entity) -> Bool { <T as PutLink<S>>::linked(world, entity) }
+}
+impl<T, S> Put<S> for T where S: Get<T>, T: EvictOne<S> {
+    fn put_value(world: &mut World<S>, entity: Entity, value: T) -> Option<T> { put_one(world, entity, value) }
+    fn is_on(world: &World<S>, entity: Entity) -> Bool { <S as Get<T>>::has(&world.columns, entity) }
+}
 // What taking a value off an entity does: a component is taken from its
 // column; a relation's value is the link, undone as `world.unrelate` does.
 pub trait Take<S> { fn take_value(&mut World<S>, Entity) -> Option<Self> }
@@ -916,14 +951,14 @@ impl<S> World<S> {
 
     // Give an entity a component, or another value of one it has: the one
     // it had, if it had one.
-    pub fn insert<T>(world: &mut Self, entity: Entity, value: T) -> Option<T> where S: Get<T>, T: EvictOne<S>, T: Schedule, T: Put<S> {
+    pub fn insert<T>(world: &mut Self, entity: Entity, value: T) -> Option<T> where T: EvictOne<S>, T: Schedule, T: Put<S> {
         // (A match, whose clauses are given the value each once: a value
         // that has a `drop` is put.)
         match(alive(&*world, entity)) {
             Ok(_) =>
                 let names = [<T as Schedule>::NAME];
                 let made = [entity];
-                let was = <S as Get<T>>::has(&world.columns, entity);
+                let was = <T as Put<S>>::is_on(&*world, entity);
                 if(was) { fire_world(world, 2, &names, &made) } else { () };
                 let had = <T as Put<S>>::put_value(world, entity, value);
                 bring_named(world, <T as Schedule>::NAME, entity);
