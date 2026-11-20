@@ -101,7 +101,7 @@ structure Fn where
   clauses : List Clause
 
 structure Program where
-  fns : List Fn
+  fns : Array Fn
   main : Tm
   /-- The functions that say how a closure of them is destroyed: for each such
   function, the function that destroys what a closure of it captured, given

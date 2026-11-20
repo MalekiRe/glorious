@@ -74,7 +74,7 @@ def dropsOk (C : Cert) (p : Program) : Bool :=
 /-- Check a program against a certificate. -/
 def checkProgram (C : Cert) (p : Program) : Bool :=
   -- (The functions as an array, to find each by its number at once.)
-  let fns := p.fns.toArray
+  let fns := p.fns
   C.sigs.toList.all (fun e =>
       match fns[e.fn]? with
       | some F => checkFn C e F
@@ -101,7 +101,6 @@ theorem checkProgram_sound {p : Program} (h : checkProgram C p = true) : Program
   have hfn := List.all_eq_true.mp hfns e he
   split at hfn
   · rename_i F hF
-    rw [List.getElem?_toArray] at hF
     simp only [checkFn, Bool.and_eq_true] at hfn
     obtain ⟨⟨hwf, hclauses⟩, hcovers⟩ := hfn
     have htyped := checkClauses_sound hclauses

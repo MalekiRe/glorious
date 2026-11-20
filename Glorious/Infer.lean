@@ -137,7 +137,7 @@ same: what is given up without its type known in the function's own body
 is then known to be such a callable. -/
 partial def captureArities (p : Core.Program) (ncaps : Array Nat) : Std.HashMap (Nat × Nat) Nat :=
   Id.run do
-  let fnsArr := p.fns.toArray
+  let fnsArr := p.fns
   let arityOf := fun (g : Nat) =>
     match fnsArr[g]? with
     | some ⟨c :: _⟩ => Slot.arity c.pats.length
@@ -188,7 +188,7 @@ where
 
 /-- How many values each function captures, read off the places that build it. -/
 def captureCounts (p : Core.Program) : Array Nat := Id.run do
-  let mut out := Array.replicate p.fns.length 0
+  let mut out := Array.replicate p.fns.size 0
   let rec visit (out : Array Nat) : Core.Tm → Array Nat
     | .ret _ => out
     | .let_ rhs body =>
@@ -329,7 +329,7 @@ def certifyKept (items : List Item) (p : Core.Program) (strict : Bool)
     (memo : Memo := {}) (remember : Bool := true) : Except String (Cert × Made) := do
   let (g, _, _) ← Elab.collect items
   let (cert, st) ← (certifyM items g p envSizes).run
-    { fns := p.fns.toArray, strict, regions, loans, ranked, widen, memo := memo.inst
+    { fns := p.fns, strict, regions, loans, ranked, widen, memo := memo.inst
       frozen := memo.schemes, keptFaces := memo.faces, remember }
   pure (cert, ⟨st.made, st.frozenMade, st.facesMade⟩)
 

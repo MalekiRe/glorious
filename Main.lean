@@ -84,7 +84,7 @@ def usage : String :=
 closure captured, and one more; zero where the certificate does not say.
 What runs the bytecode does not need this: it is for what rewrites it. -/
 def startLocals (c : Compiled) : List Nat :=
-  (List.range c.core.fns.length).map fun i =>
+  (List.range c.core.fns.size).map fun i =>
     match c.cert.bind fun cert => cert.sigs.find? (·.fn == i) with
     | some entry => entry.sig.params.length + entry.sig.caps.length + 1
     | none => 0
@@ -831,7 +831,7 @@ def stages (path : String) : IO UInt32 := do
   IO.println s!"{all.length} plain"
   last ← lap "untrait, unfield, reach" last
   let .ok out := Elab.elabProgram all (some blocks) | IO.println "elab failed"; return 1
-  IO.println s!"{out.program.fns.length} functions"
+  IO.println s!"{out.program.fns.size} functions"
   last ← lap "elaborate" last
   if (← IO.getEnv "GLORIOUS_CORE").isSome then IO.println (showCore out.fnNames out.program)
   -- One try of the search for borrows that are scopes of their own: every
@@ -875,7 +875,7 @@ def stages (path : String) : IO UInt32 := do
                   | .rgns rs => s!"rgns {rs.map Infer.showRgn}"}"
     | .error e => IO.println s!"certify one of several (ranked {ranked}): {e}"
   let bytecode := compile out.program
-  IO.println s!"{bytecode.fns.length} compiled"
+  IO.println s!"{bytecode.fns.size} compiled"
   last ← lap "compile" last
   -- The search for which borrows can be scopes of their own, a step at a
   -- time: every place at once, each place alone, those that passed alone

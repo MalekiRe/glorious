@@ -6014,8 +6014,8 @@ still needs:
 - **remote**: a system given to `Remote::bridge` performs `Threads`
   (`enter` locks and yields); `RunsOnWorld` takes only systems that perform
   nothing.
-- ~~**behaviors**~~: passes, at upstream's 1000 entities, in 20 s with
-  its compile (2m36 while the machines' cells were a list).
+- ~~**behaviors**~~: passes, at upstream's 1000 entities, in 6.5 s with
+  its compile (2m36 while the machines' cells and functions were lists).
 
 ## The machines' cells are an array
 
@@ -6030,6 +6030,11 @@ lemmas (`Array.getElem?_push_lt`, `getElem?_setIfInBounds_ne`, ...), and
 
 Measured: covey/behaviors (1000 entities) 2m36 -> 20 s; the whole suite
 196 s -> 38 s.
+
+And a program's functions (`Core.Program.fns`, `Bytecode.Program.fns`)
+are an array: every call looked its function up by walking the list.
+behaviors 20 s -> 6.5 s; the suite 38 s -> 21 s. (The bytecode's code of
+a function and a frame's locals are lists still.)
 
 ## Other standing decisions
 

@@ -129,7 +129,7 @@ def instr : Instr → Bytes
 def code (c : Code) : Bytes := list instr c
 
 def program (p : Program) : Bytes :=
-  list (fun f => code f.code) p.fns ++ code p.main ++ list pair p.drops
+  list (fun (f : Fn) => code f.code) p.fns.toList ++ code p.main ++ list pair p.drops
 
 def string (s : String) : Bytes := list (fun b => [b.toNat]) s.toUTF8.toList
 

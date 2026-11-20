@@ -227,7 +227,7 @@ def program (bs : Bytes) : Option Program :=
     match code rest with
     | some (main, rest) =>
       match list pair rest with
-      | some (drops, []) => some ⟨fns, main, drops⟩
+      | some (drops, []) => some ⟨fns.toArray, main, drops⟩
       | _ => none
     | none => none
   | none => none
@@ -321,7 +321,7 @@ theorem fn_encode (f : Fn) (rest : Bytes) :
 
 /-- **The format is lossless.** Decoding an encoded program gives the program back. -/
 theorem program_encode (p : Program) : program (Encode.program p) = some p := by
-  have h := list_encode (enc := fun f : Fn => Encode.code f.code) fn_encode p.fns
+  have h := list_encode (enc := fun f : Fn => Encode.code f.code) fn_encode p.fns.toList
     (Encode.code p.main ++ Encode.list Encode.pair p.drops)
   have hmain := code_encode p.main (Encode.list Encode.pair p.drops)
   have hdrops := pairs_encode p.drops []

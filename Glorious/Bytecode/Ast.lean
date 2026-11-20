@@ -66,7 +66,7 @@ structure Fn where
   code : Code
 
 structure Program where
-  fns : List Fn
+  fns : Array Fn
   main : Code
   /-- As Core's: each function whose closures say how they are destroyed, and
   the function that destroys what one captured. -/

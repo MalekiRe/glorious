@@ -232,7 +232,7 @@ def certifyProgram (items : List Syntax.Item) (p : Core.Program)
   -- first of them in order that passes taken.)
   -- (A large program with nothing kept to start with: all at once from
   -- the start, where the first alone takes as long as the rest together.)
-  let large := first.isNone && p.fns.length ≥ largeProgram
+  let large := first.isNone && p.fns.size ≥ largeProgram
   let start := first.getD 0
   if !large then
     if let some (cert, made) := try_ start then return (cert, some start, made)
@@ -785,7 +785,7 @@ def compileSourceAt (src : String) (check : Bool := true)
     | .error e => if check then throw e.msg else pure (none, [], [])
   -- (Where only what the checker found is asked, that is all.)
   if lenient then
-    return { core := ⟨[], .ret (.int 0), []⟩, ctorNames := #[], fnNames := #[], opNames := #[], checkKept := checkMade }
+    return { core := ⟨#[], .ret (.int 0), []⟩, ctorNames := #[], fnNames := #[], opNames := #[], checkKept := checkMade }
   -- Lifetimes were the checker's to read; and, of what is declared, the
   -- certificate's.
   let written := all

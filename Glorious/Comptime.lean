@@ -100,7 +100,7 @@ partial def shown (names : Array String) (v : Value) : String :=
 here. -/
 def evaluate (out : Elab.Output) (display : Value → String := shown out.ctorNames) (fuel : Nat := 1000000) :
     Except String Elab.Output := do
-  let mut fns := out.program.fns.toArray
+  let mut fns := out.program.fns
   for (name, i) in out.fnNames.toList.zipIdx do
     unless (name.splitOn "$const").length > 1 do continue
     -- (One generic in types, given how they have what it asks of them, is
@@ -112,13 +112,13 @@ def evaluate (out : Elab.Output) (display : Value → String := shown out.ctorNa
       | .wild | .bind => true
       | _ => false
     unless arity == 0 || ((name.splitOn "⟨").length > 1 && plain) do continue
-    let v ← match runConst { out.program with fns := fns.toList } i fuel display arity with
+    let v ← match runConst { out.program with fns := fns } i fuel display arity with
       | .ok v => pure v
       | .error e => throw s!"{constName name} could not be worked out at compile time: {e}"
     match literal v arity with
     | some body => fns := fns.set! i { clauses := [⟨(List.range arity).map fun _ => .wild, body⟩] }
     | none =>
       throw s!"{constName name} gives a value that is there only while a program runs (a callable, a reference): it cannot be worked out at compile time"
-  pure { out with program := { out.program with fns := fns.toList } }
+  pure { out with program := { out.program with fns := fns } }
 
 end Glorious.Comptime
