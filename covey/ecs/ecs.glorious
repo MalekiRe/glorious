@@ -2057,21 +2057,29 @@ impl<E, S, ..P, ..A, L, Ts, F, Lc> IntoSystem<E, S> for F
 }
 
 // A condition: a function whose parameters ask for what a system's may,
-// and which says whether something is to run. (Its locals start anew each
-// time it is asked.)
+// and which says whether something is to run. Made one when its systems are
+// (`IntoCondition`): its locals are its own, kept from one asking to the
+// next, as a system's are.
+pub struct Cond<F, Lc> { f: F, locals: Lc }
 pub trait Condition<E, S> {
-    fn holds(&Self, &E, &mut World<S>, &mut Commands<S>) -> Bool
+    fn holds(&mut Self, &E, &mut World<S>, &mut Commands<S>) -> Bool
 }
-impl<E, S, ..P, ..A, L, Ts, Lc> Condition<E, S> for fn(..P) -> Bool
+impl<E, S, ..P, ..A, L, Ts, Lc> Condition<E, S> for Cond<fn(..P) -> Bool, Lc>
     where ..P: Parameter<Asks = A>, (..A): Tuple<Nested = L>, L: AllTouches<List = Ts>, Ts: AllApart, L: Locals<State = Lc>,
           L: Fetch<E, S, (), fn(..P) -> Bool, Bool, Lc> {
-    fn holds(f: &fn(..P) -> Bool, event: &E, world: &mut World<S>, commands: &mut Commands<S>) -> Bool {
-        let mut locals = <L as Locals>::start();
-        match(<L as Fetch<E, S, (), fn(..P) -> Bool, Bool, Lc>>::fetch(event, world, commands, &mut locals, (), f)) {
+    fn holds(c: &mut Cond<fn(..P) -> Bool, Lc>, event: &E, world: &mut World<S>, commands: &mut Commands<S>) -> Bool {
+        match(<L as Fetch<E, S, (), fn(..P) -> Bool, Bool, Lc>>::fetch(event, world, commands, &mut c.locals, (), &c.f)) {
             Some(answer) => answer,
             None => false
         }
     }
+}
+pub trait IntoCondition<E, S> { type Out; fn into_condition(Self) -> Self::Out; }
+impl<E, S, ..P, ..A, L, Ts, Lc> IntoCondition<E, S> for fn(..P) -> Bool
+    where ..P: Parameter<Asks = A>, (..A): Tuple<Nested = L>, L: AllTouches<List = Ts>, Ts: AllApart, L: Locals<State = Lc>,
+          L: Fetch<E, S, (), fn(..P) -> Bool, Bool, Lc> {
+    type Out = Cond<fn(..P) -> Bool, Lc>;
+    fn into_condition(f: fn(..P) -> Bool) -> Cond<fn(..P) -> Bool, Lc> { Cond { f: f, locals: <L as Locals>::start() } }
 }
 
 // Systems that run only when a condition holds: `friction.run_if(moving)`.
@@ -2084,22 +2092,22 @@ impl<E, S, P, C> System<E, S> for RunIf<P, C> where P: System<E, S>, C: Conditio
     // (Its condition a step of its own; what it guards, steps only where it held.)
     fn step(guarded: &mut RunIf<P, C>, event: &E, world: &mut World<S>, commands: &mut Commands<S>, at: Stepper) -> Stepper {
         let here = if(at.at == at.target) {
-            guarded.held = <C as Condition<E, S>>::holds(&guarded.condition, event, world, commands);
+            guarded.held = <C as Condition<E, S>>::holds(&mut guarded.condition, event, world, commands);
             Stepper { at: at.at + 1, target: at.target, kind: 2, flag: guarded.held }
         } else { Stepper { at: at.at + 1, target: at.target, kind: at.kind, flag: at.flag } };
         if(guarded.held) { <P as System<E, S>>::step(&mut guarded.systems, event, world, commands, here) } else { here }
     }
     fn run(guarded: &mut RunIf<P, C>, event: &E, world: &mut World<S>, commands: &mut Commands<S>) {
-        if(<C as Condition<E, S>>::holds(&guarded.condition, event, world, commands)) {
+        if(<C as Condition<E, S>>::holds(&mut guarded.condition, event, world, commands)) {
             <P as System<E, S>>::run(&mut guarded.systems, event, world, commands)
         };
     }
 }
-impl<E, S, P, C> IntoSystem<E, S> for RunIf<P, C> where P: IntoSystem<E, S>, C: Condition<E, S> {
-    type Out = RunIf<<P as IntoSystem<E, S>>::Out, C>;
-    fn into_system(guarded: RunIf<P, C>) -> RunIf<<P as IntoSystem<E, S>>::Out, C> {
+impl<E, S, P, C> IntoSystem<E, S> for RunIf<P, C> where P: IntoSystem<E, S>, C: IntoCondition<E, S> {
+    type Out = RunIf<<P as IntoSystem<E, S>>::Out, <C as IntoCondition<E, S>>::Out>;
+    fn into_system(guarded: RunIf<P, C>) -> RunIf<<P as IntoSystem<E, S>>::Out, <C as IntoCondition<E, S>>::Out> {
         let RunIf { systems, condition, held } = guarded;
-        RunIf { systems: <P as IntoSystem<E, S>>::into_system(systems), condition: condition, held: held }
+        RunIf { systems: <P as IntoSystem<E, S>>::into_system(systems), condition: <C as IntoCondition<E, S>>::into_condition(condition), held: held }
     }
 }
 

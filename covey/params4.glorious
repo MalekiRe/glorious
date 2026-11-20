@@ -1,0 +1,146 @@
+// Upstream's tests/params.rs, of singletons:
+// - `singleton_skips_preserve_body_state_and_resume_when_all_parameters_match`:
+//   a system whose `Single`s are not each of one entity is not run, its
+//   locals as they were, and a sibling after it runs every time.
+// - `invalid_singleton_condition_skips_group_without_advancing_locals`: a
+//   condition whose `Single` is not of one entity says no, and what it
+//   guards keeps its locals; the condition keeps its own.
+// - `parallel_singleton_skips_leave_siblings_running`.
+// expect:
+// 1
+// 3
+// 20
+// 3
+// 5
+// 9
+// 1 2 3 4
+// 9
+// --
+// 1 1
+// 1 1
+// 1 1 2 2
+// 1 1 2 2 3 3
+// --
+// 3
+// 4
+// 1
+// 2
+// 5
+// 11
+// 0
+mod ecs;
+
+use ecs::{App, World, Entity, Query, Single, Local, With, chain, parallel, run_if};
+use std::thread::{AtomicInt, load, fetch_add};
+
+struct Update
+struct Position(Int)
+struct Velocity(Int)
+struct Log([Int])
+struct Enabled(Bool)
+struct Tag
+
+fn update(calls: &mut Local<Int>, p: &mut Single<(&mut Position,), ()>, v: &mut Single<(&Velocity,), ()>, log: &mut Single<(&mut Log,), ()>) {
+    calls.0 = calls.0 + 1;
+    let by = match(v.get_mut()) { Some((v,)) => v.0, None => 0 };
+    match(p.get_mut()) { Some((mut p,)) => p.0 = p.0 + by;, None => () };
+    let n = calls.0;
+    match(log.get_mut()) { Some((mut l,)) => push_at(&mut l.0, n);, None => () }
+}
+fn condition(calls: &mut Local<Int>, enabled: &mut Single<(&Enabled,), (With<Tag>,)>) -> Bool {
+    calls.0 = calls.0 + 1;
+    let on = match(enabled.get_mut()) { Some((e,)) => e.0, None => false };
+    if(on) { calls.0 % 2 == 1 } else { false }
+}
+fn record(calls: &mut Local<Int>, log: &mut Single<(&mut Log,), ()>) {
+    calls.0 = calls.0 + 1;
+    let n = calls.0;
+    match(log.get_mut()) { Some((mut l,)) => push_at(&mut l.0, n);, None => () }
+}
+fn bump(p: &mut Single<(&mut Position,), ()>) { match(p.get_mut()) { Some((mut p,)) => p.0 = p.0 + 10;, None => () } }
+fn faster(q: &mut Query<(&mut Velocity,), ()>) { q.for_each() { (mut v,) => v.0 = v.0 + 1; } }
+
+fn pos<S>(world: &World<S>, e: Entity) -> Int where S: ecs::Get<Position> { match(world.get<Position>(e)) { Some(p) => p.0, None => 0 - 1 } }
+fn vel<S>(world: &World<S>, e: Entity) -> Int where S: ecs::Get<Velocity> { match(world.get<Velocity>(e)) { Some(v) => v.0, None => 0 - 1 } }
+fn logged<S>(world: &World<S>, e: Entity) -> Str where S: ecs::Get<Log> {
+    match(world.get<Log>(e)) { Some(l) => std::text::join(std::vec::map(clone(&l.0), fn(n: Int) -> Str { show(n) }), " "), None => "" }
+}
+
+fn main() -> Int {
+    let siblings = AtomicInt::new(0);
+    let seen = std::thread::share(&siblings);
+    let mut app = App::new().register<Position>().register<Velocity>().register<Log>()
+        .add_systems(Update, (update, fn() { let s = seen; discard(fetch_add(&s, 1)) }).chain())
+        .build();
+    let log = app.world.spawn_bundle((Log([]),));
+    app.emit(&Update);
+    let p = app.world.spawn_bundle((Position(1),));
+    app.emit(&Update);
+    say(pos(&app.world, p));
+    let v = app.world.spawn_bundle((Velocity(2),));
+    app.emit(&Update);
+    say(pos(&app.world, p));
+    let duplicate = app.world.spawn_bundle((Position(20),));
+    app.emit(&Update);
+    say(pos(&app.world, duplicate));
+    say(pos(&app.world, p));
+    discard(app.world.remove<Position>(duplicate));
+    app.emit(&Update);
+    discard(app.world.insert(duplicate, Velocity(50)));
+    app.emit(&Update);
+    say(pos(&app.world, p));
+    discard(app.world.despawn(duplicate));
+    app.emit(&Update);
+    discard(app.world.remove<Velocity>(v));
+    app.emit(&Update);
+    discard(app.world.insert(v, Velocity(2)));
+    app.emit(&Update);
+    say(pos(&app.world, p));
+    say(logged(&app.world, log));
+    say(load(&siblings));
+    say("--");
+
+    let mut app = App::new().register<Log>().register<Enabled>().register<Tag>()
+        .add_systems(Update, (record, record).chain().run_if(condition))
+        .build();
+    let log = app.world.spawn_bundle((Log([]),));
+    app.emit(&Update);
+    let enabled = app.world.spawn_bundle((Enabled(true),));
+    app.emit(&Update);
+    discard(app.world.insert(enabled, Tag));
+    app.emit(&Update);
+    say(logged(&app.world, log));
+    let duplicate = app.world.spawn_bundle((Enabled(true), Tag));
+    app.emit(&Update);
+    discard(app.world.remove<Tag>(duplicate));
+    app.emit(&Update);
+    say(logged(&app.world, log));
+    app.emit(&Update);
+    say(logged(&app.world, log));
+    discard(app.world.remove<Enabled>(enabled));
+    app.emit(&Update);
+    discard(app.world.insert(enabled, Enabled(false)));
+    app.emit(&Update);
+    match(app.world.get_mut<Enabled>(enabled)) { Some(mut e) => e.0 = true;, None => () };
+    app.emit(&Update);
+    say(logged(&app.world, log));
+    say("--");
+
+    let mut app = App::new().register<Position>().register<Velocity>()
+        .add_systems(Update, parallel((bump, faster)))
+        .build();
+    let velocity = app.world.spawn_bundle((Velocity(2),));
+    app.emit(&Update);
+    say(vel(&app.world, velocity));
+    let a = app.world.spawn_bundle((Position(1),));
+    let b = app.world.spawn_bundle((Position(2),));
+    app.emit(&Update);
+    say(vel(&app.world, velocity));
+    say(pos(&app.world, a));
+    say(pos(&app.world, b));
+    discard(app.world.despawn(b));
+    app.emit(&Update);
+    say(vel(&app.world, velocity));
+    say(pos(&app.world, a));
+    0
+}
