@@ -738,7 +738,7 @@ def declareTraits (items : List Item) : M Unit := do
     unless ((← get).traits.lookup Syntax.destroyTrait).isSome do
       modify fun s => { s with traits := (Syntax.destroyTrait, [Syntax.destroyFn]) :: s.traits }
     let builtin := ["Int", "(callable)", "(reference)"] ++ Syntax.scalars.map (·.1)
-      ++ (List.range 13).map fun n => s!"(tuple{n})"
+      ++ (List.range 17).map fun n => s!"(tuple{n})"
     let declared := (← get).types.toList.map fun (name, decl) =>
       -- (which of its parameters are types)
       (name, decl.arity, (List.range decl.arity).filter fun j => decl.kinds[j]? != some true)

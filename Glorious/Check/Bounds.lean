@@ -1129,9 +1129,15 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
   -- may decide it. In the last round, what is left is refused.)
   let mut waiting := pending.toList
   let mut round := 0
+  -- (Rounds go on while one meets any: a type left to an implementation of
+  -- a type left to another, as deep as it is written, is found one level a
+  -- round. The last is the first that met none, or the hundredth.)
+  let mut before := waiting.length + 1
+  let mut last := false
   while !waiting.isEmpty do
    round := round + 1
-   let last := round > 3
+   last := last || waiting.length == before || round > 100
+   before := waiting.length
    -- (What the bounds met so far said a type left to an implementation is.)
    if round > 1 then settleAssocsAll
    let now := waiting
@@ -1156,7 +1162,9 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
     let said := compound.find? fun (owner, key, ty, _) =>
       owner == b.owner && Syntax.traitBase key == Syntax.traitBase b.trait && ty == spelled
     let solve := fun (trait : String) (ty : Ty) (sty : Traits.STy) => do
-      if (← get).patterned && b.trait != Syntax.destroyTrait then solveFitting givens 200 trait ty b.args
+      -- (As deep as a condition's conditions go: a list of sixteen, each
+      -- apart from those after it, goes some hundreds deep.)
+      if (← get).patterned && b.trait != Syntax.destroyTrait then solveFitting givens 4000 trait ty b.args
       else
         -- (Of what a trait leaves to an implementation, not known here: the
         -- condition written of it.)
@@ -1191,7 +1199,9 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
           | _ =>
             throw (inFunction b.owner
               s!"{b.pos}`{tr}` is needed of a type that nothing here decides")
-      throw (inFunction b.owner s!"{b.pos}no implementation of `{b.trait}` was found; this is a compiler defect")
+      let shownArgs ← b.args.mapM fun a => do pure (showTy (← zonk a))
+      let at_ := if shownArgs.isEmpty then "" else s!" at {", ".intercalate shownArgs}"
+      throw (inFunction b.owner s!"{b.pos}no implementation of `{b.trait}` was found for `{showTy (← zonk b.ty)}`{at_}; this is a compiler defect")
   -- A use of one of the group's functions inside the group passes on what the
   -- function it is in was given.
   for u in uses do

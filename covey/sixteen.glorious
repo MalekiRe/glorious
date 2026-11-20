@@ -1,0 +1,57 @@
+// `tuples_reach_sixteen_for_queries_filters_bundles_params_and_chains`
+// (upstream's tests/params.rs): a query of sixteen components with sixteen
+// filters, a system of sixteen parameters, a chain of sixteen systems and a
+// bundle of sixteen.
+// expect:
+// 1
+// 105
+// 0
+// 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15
+// 0
+mod ecs;
+
+use ecs::{App, World, Entity, Query, With, Without, chain};
+use std::thread::{Mutex, lock};
+
+struct Update
+struct Tag
+struct C0(Int)
+struct C1(Int)
+struct C2(Int)
+struct C3(Int)
+struct C4(Int)
+struct C5(Int)
+struct C6(Int)
+struct C7(Int)
+struct C8(Int)
+struct C9(Int)
+struct C10(Int)
+struct C11(Int)
+struct C12(Int)
+struct C13(Int)
+struct C14(Int)
+struct C15(Int)
+
+fn sum(q: &mut Query<(&C0, &C1, &C2, &C3, &C4, &C5, &C6, &C7, &C8, &C9, &C10, &C11, &C12, &C13, &C14, &mut C15), (With<C0>, With<C1>, With<C2>, With<C3>, With<C4>, With<C5>, With<C6>, With<C7>, With<C8>, With<C9>, With<C10>, With<C11>, With<C12>, With<C13>, With<C14>, Without<Tag>)>) { q.for_each() { c0, c1, c2, c3, c4, c5, c6, c7, c8, c9, c10, c11, c12, c13, c14, mut c15 => c15.0 = c0.0 + c1.0 + c2.0 + c3.0 + c4.0 + c5.0 + c6.0 + c7.0 + c8.0 + c9.0 + c10.0 + c11.0 + c12.0 + c13.0 + c14.0; } }
+fn sixteen_params(q0: &mut Query<(&C0,), ()>, q1: &mut Query<(&C1,), ()>, q2: &mut Query<(&C2,), ()>, q3: &mut Query<(&C3,), ()>, q4: &mut Query<(&C4,), ()>, q5: &mut Query<(&C5,), ()>, q6: &mut Query<(&C6,), ()>, q7: &mut Query<(&C7,), ()>, q8: &mut Query<(&C8,), ()>, q9: &mut Query<(&C9,), ()>, q10: &mut Query<(&C10,), ()>, q11: &mut Query<(&C11,), ()>, q12: &mut Query<(&C12,), ()>, q13: &mut Query<(&C13,), ()>, q14: &mut Query<(&C14,), ()>, q15: &mut Query<(&C15,), ()>) {
+    let mut n = 0;
+    q15.for_each() { (c,) => if(c.0 == 105) { n = n + 1 } else { () }; };
+    say(n)
+}
+
+fn main() -> Int {
+    let log: Mutex<[Int]> = Mutex::new([]);
+    let mut app = App::new().register<Tag>().register<C0>().register<C1>().register<C2>().register<C3>().register<C4>().register<C5>().register<C6>().register<C7>().register<C8>().register<C9>().register<C10>().register<C11>().register<C12>().register<C13>().register<C14>().register<C15>()
+        .add_systems(Update, sum)
+        .add_systems(Update, sixteen_params)
+        .add_systems(Update, (fn() { let l = log; lock(&l, fn(v: &mut [Int]) { push_at(v, 0) }) }, fn() { let l = log; lock(&l, fn(v: &mut [Int]) { push_at(v, 1) }) }, fn() { let l = log; lock(&l, fn(v: &mut [Int]) { push_at(v, 2) }) }, fn() { let l = log; lock(&l, fn(v: &mut [Int]) { push_at(v, 3) }) }, fn() { let l = log; lock(&l, fn(v: &mut [Int]) { push_at(v, 4) }) }, fn() { let l = log; lock(&l, fn(v: &mut [Int]) { push_at(v, 5) }) }, fn() { let l = log; lock(&l, fn(v: &mut [Int]) { push_at(v, 6) }) }, fn() { let l = log; lock(&l, fn(v: &mut [Int]) { push_at(v, 7) }) }, fn() { let l = log; lock(&l, fn(v: &mut [Int]) { push_at(v, 8) }) }, fn() { let l = log; lock(&l, fn(v: &mut [Int]) { push_at(v, 9) }) }, fn() { let l = log; lock(&l, fn(v: &mut [Int]) { push_at(v, 10) }) }, fn() { let l = log; lock(&l, fn(v: &mut [Int]) { push_at(v, 11) }) }, fn() { let l = log; lock(&l, fn(v: &mut [Int]) { push_at(v, 12) }) }, fn() { let l = log; lock(&l, fn(v: &mut [Int]) { push_at(v, 13) }) }, fn() { let l = log; lock(&l, fn(v: &mut [Int]) { push_at(v, 14) }) }, fn() { let l = log; lock(&l, fn(v: &mut [Int]) { push_at(v, 15) }) }).chain())
+        .build();
+    let entity = app.world.spawn_bundle((C0(0), C1(1), C2(2), C3(3), C4(4), C5(5), C6(6), C7(7), C8(8), C9(9), C10(10), C11(11), C12(12), C13(13), C14(14), C15(0)));
+    let tagged = app.world.spawn_bundle((C0(0), C1(1), C2(2), C3(3), C4(4), C5(5), C6(6), C7(7), C8(8), C9(9), C10(10), C11(11), C12(12), C13(13), C14(14), C15(0)));
+    discard(app.world.insert(tagged, Tag));
+    app.emit(&Update);
+    say(match(app.world.get<C15>(entity)) { Some(c) => c.0, None => 0 - 1 });
+    say(match(app.world.get<C15>(tagged)) { Some(c) => c.0, None => 0 - 1 });
+    say(lock(&log, fn(v: &mut [Int]) -> Str { std::text::join(std::vec::map(clone(&*v), fn(n: Int) -> Str { show(n) }), " ") }));
+    0
+}

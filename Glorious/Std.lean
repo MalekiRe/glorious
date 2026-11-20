@@ -5244,10 +5244,10 @@ pub fn from<T, U>(pairs: [(T, U)]) -> HashMap<T, U> where T: Hash, T: Eq, T: Use
 "#
 
 /-- `std::tuple`: tuples and functions of any length through one form. What
-is written for each length is written here, for up to twelve, so that what a
+is written for each length is written here, for up to sixteen, so that what a
 program writes is written once. -/
 private def tupleText : String :=
-  let names := ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L"]
+  let names := ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P"]
   let tuple := fun (xs : List String) => match xs with
     | [] => "()"
     | [x] => s!"({x},)"
@@ -5277,7 +5277,7 @@ impl<{", ".intercalate (ps ++ ["R"])}> Callable for fn({", ".intercalate ps}) ->
 //     impl<Rest> Total for (Int, Rest) where Rest: Total { fn total(p) { p.0 + total(p.1) } }
 //     total(nest((1, 2, 3)))
 //
-// Up to twelve.
+// Up to sixteen.
 
 // A tuple, and the pairs it is.
 pub trait Tuple {
@@ -5317,7 +5317,7 @@ pub trait Count { const COUNT: Int; }
 impl Count for () { const COUNT: Int = 0; }
 impl<First, Rest> Count for (First, Rest) where Rest: Count { const COUNT: Int = 1 + Rest::COUNT; }
 
-"# ++ String.join ((List.range 13).map one)
+"# ++ String.join ((List.range 17).map one)
 
 /-- The texts of the library, each with the module it is. -/
 def texts : List (List String × String) :=

@@ -503,8 +503,9 @@ def settleAssocs : M Unit := do
     | none => seen := (question, a) :: seen
   modify fun s => { s with assocUses := left ++ s.assocUses }
 
-/-- `settleAssocs` until it settles nothing more. -/
-partial def settleAssocsAll (fuel : Nat := 16) : M Unit := do
+/-- `settleAssocs` until it settles nothing more (a list of sixteen's types,
+each made of the rest's, take some dozens of rounds). -/
+partial def settleAssocsAll (fuel : Nat := 256) : M Unit := do
   let before := (← get).assocUses
   settleAssocs
   let after := (← get).assocUses
