@@ -54,10 +54,13 @@ fn wait_for<S>(remote: &Remote<S>, n: Int) / {Threads} { while({ remote.waiting(
 
 // `conflicting_shared_state_and_exclusive_bridges_never_share_a_wave`
 struct Flight { now: AtomicInt, most: AtomicInt }
-fn enter(flight: &Flight) / {Threads} {
+// (Upstream's waits here, to give another bridge the chance to overlap;
+// a system run at a sync point runs to its end here, so none can, and a
+// wait would be a callable that performs `Threads`, which a bridged system
+// may not.)
+fn enter(flight: &Flight) {
     let now = fetch_add(&flight.now, 1) + 1;
-    if(now > load(&flight.most)) { store(&flight.most, now) };
-    yield_now();
+    if(now > load(&flight.most)) { store(&flight.most, now) } else { () };
     discard(fetch_add(&flight.now, 0 - 1))
 }
 

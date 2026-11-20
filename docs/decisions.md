@@ -6031,9 +6031,14 @@ still needs:
   dispatch of its label (`Ask.once`), any other bridge of the label is
   taken in the same dispatch: a loop runs once per drive, a chain may
   finish in one, as upstream says.
-- **remote**: a system given to `Remote::bridge` performs `Threads`
-  (`enter` locks and yields); `RunsOnWorld` takes only systems that perform
-  nothing.
+- **remote**: its bridged systems no longer wait (a system run at a sync
+  point runs to its end, so none can overlap; the wait upstream's has would
+  perform `Threads`, which a bridged system may not). It now compiles, and
+  goes wrong at run time in its first test: "a reference is used after the
+  cell it points to was freed", on the bytecode machine, which does not
+  check what the checker let through. A checker hole to find: a request's
+  callable kept in the world's queue, run at the sync point after the
+  thread that made it waits on its channel.
 - ~~**behaviors**~~: passes, at upstream's 1000 entities, in 6.5 s with
   its compile (2m36 while the machines' cells and functions were lists).
 
