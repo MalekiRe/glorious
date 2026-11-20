@@ -1,0 +1,76 @@
+// Upstream's tests/params.rs, of queries apart by their filters:
+// - `complementary_parallel_queries_follow_structural_changes_between_emissions`.
+// - `complementary_access_survives_parameter_and_nested_group_composition`,
+//   but for its last system, which writes one component through two queries
+//   kept apart by their filters: here a system takes a component once (its
+//   queries take the component's column while it runs), so it is two systems.
+// Not ported: `filtered_parameters_retain_disjoint_mutable_items_together`
+// (as that last system).
+// expect:
+// 10
+// 101
+// 11
+// 111
+// 210
+// 12
+// -1
+// -1
+// --
+// 40
+// 60
+// 6
+// 0
+mod ecs;
+
+use ecs::{App, World, Entity, Query, With, Without, Or, chain, parallel};
+
+struct Update
+struct Tag
+struct Other
+struct Value(Int)
+struct Position(Int)
+
+fn tagged(query: &mut Query<(&mut Position,), (With<Tag>,)>) { query.for_each() { (mut p,) => p.0 = p.0 + 10; } }
+fn untagged(query: &mut Query<(&mut Position,), (Without<Tag>,)>) { query.for_each() { (mut p,) => p.0 = p.0 + 1; } }
+
+fn either(values: &mut Query<(&mut Value,), (Or<(With<Tag>, With<Other>)>,)>) { values.for_each() { (mut v,) => v.0 = v.0 + 10; } }
+fn neither(values: &mut Query<(&mut Value,), (Without<Tag>, Without<Other>)>) { values.for_each() { (mut v,) => v.0 = v.0 + 1; } }
+fn doubled(tagged: &mut Query<(&mut Value,), (With<Tag>,)>) { tagged.for_each() { (mut v,) => v.0 = v.0 * 2; } }
+fn tripled(untagged: &mut Query<(&mut Value,), (Without<Tag>,)>) { untagged.for_each() { (mut v,) => v.0 = v.0 * 3; } }
+
+fn value<S>(world: &World<S>, e: Entity) -> Int where S: ecs::Get<Value> { match(world.get<Value>(e)) { Some(v) => v.0, None => 0 - 1 } }
+fn pos<S>(world: &World<S>, e: Entity) -> Int where S: ecs::Get<Position> { match(world.get<Position>(e)) { Some(p) => p.0, None => 0 - 1 } }
+
+fn main() -> Int {
+    let mut app = App::new().register<Position>().register<Tag>().add_systems(Update, parallel((tagged, untagged))).build();
+    let a = app.world.spawn_bundle((Position(0), Tag));
+    let b = app.world.spawn_bundle((Position(100),));
+    app.emit(&Update);
+    say(pos(&app.world, a));
+    say(pos(&app.world, b));
+    discard(app.world.remove<Tag>(a));
+    discard(app.world.insert(b, Tag));
+    let c = app.world.spawn_bundle((Position(200), Tag));
+    app.emit(&Update);
+    say(pos(&app.world, a));
+    say(pos(&app.world, b));
+    say(pos(&app.world, c));
+    discard(app.world.remove<Position>(b));
+    discard(app.world.despawn(c));
+    app.emit(&Update);
+    say(pos(&app.world, a));
+    say(pos(&app.world, b));
+    say(pos(&app.world, c));
+    say("--");
+
+    let mut app = App::new().register<Value>().register<Tag>().register<Other>()
+        .add_systems(Update, (parallel(((either, either).chain(), (neither, neither).chain())), doubled, tripled).chain()).build();
+    let e0 = app.world.spawn_bundle((Value(0), Tag));
+    let e1 = app.world.spawn_bundle((Value(0), Other));
+    let e2 = app.world.spawn_bundle((Value(0),));
+    app.emit(&Update);
+    say(value(&app.world, e0));
+    say(value(&app.world, e1));
+    say(value(&app.world, e2));
+    0
+}
