@@ -5948,8 +5948,15 @@ instead (each type parameter the function is given values of and may let
 go) takes those to 8, all in the prelude; but a call does not pass a
 `%Destroy` as the dictionary it passes for a trait (`settleBounds` leaves
 those out of the call's table), so 441 programs then had calls of one
-argument fewer than the function takes. Undone; the convention for
-`%Destroy` at calls is what comes first.
+argument fewer than the function takes. With a destroyer that does
+nothing passed where the type has nothing to destroy, all but 4 of those
+pass; the 4 name a generic function as a value (`id(id)`, `apply(twice,
+21)`), whose closure is made after checking and passes no dictionaries.
+Undone, because what that closure should pass is the question under it: a
+generic function's body today does not destroy a value of its type
+parameter at all (`settleBounds` destroys a type nothing decides "as a
+reference"), so giving it the means changes what programs do. That is
+what comes first: where a value of a type parameter is destroyed.
 
 What takes the difference away: a signature that says what Rust's says.
 Captures by lifetimes, with elision (`checkGroup` already refuses a
