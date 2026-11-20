@@ -489,11 +489,20 @@ def expandBlankets (items : List Item) : List Item := Id.run do
           Item.typeAlias (ctxSubjectName k) [] self
         copies := copies + 1
         let shift := 100000000000000 * copies
+        -- (`self_name()` in it: this type's name.)
+        let named : Rewrite := { onExpr := fun _ e => match e with
+          | .call _ (.name none f) [] =>
+            -- (Written as the resolver has written texts by now: the
+            -- prelude's constructors by their own names.)
+            if f == selfNameFn then some ((last h).toList.foldr (fun c rest =>
+              .call 0 (.name none "StrChar") [scalarValue "char_of" (c.toNat : Int), rest]) (.name none "StrEnd"))
+            else none
+          | _ => none }
         let ms' := ms.map fun
           | .typeAlias n takes body => .typeAlias n takes (substTypeExpr [(t, self)] body)
           | .fn m fps annots ret clauses =>
             .fn m fps (annots.map (·.map (substTypeExpr [(t, self)]))) (ret.map (substTypeExpr [(t, self)]))
-              (clauses.map (shiftClause shift))
+              (clauses.map fun c => named.clause (shiftClause shift c))
           | item => item
         out := out.push (.impl (fresh ++ ps.filter (· != t)) tr h fresh ctx'
           (ms' ++ subjects ++ [.typeAlias (blanketName t) [] self]))

@@ -5905,9 +5905,13 @@ Each is to go; none is a design covey keeps.
   in the language, `impl<T> X for T where T: Clone` beside `impl<T> X for T`.
 - Hooks belong to the app: what the world does on its own, and exclusive
   systems, fire none. Taken away by hooks the world keeps.
-- A label a task or behavior waits for says its name (`Schedule::NAME`), and
-  devtools cannot name types or systems. Taken away by names, or ids, of
-  types and functions the compiler gives.
+- ~~A label a task or behavior waits for says its name~~: a type's name is
+  the compiler's now. `self_name()` in an implementation for every type is,
+  in its copy for each type, the type's name (`impl<T> Schedule for T {
+  const NAME: Str = self_name(); }`), and no program writes one. Still
+  departing: devtools cannot name a system, since a function's type does
+  not say which function it is. Taken away by function types that do, or
+  ids the compiler gives functions.
 - No unwinding: tests of panics are not ported. Taken away by panics that
   run destructors and can be caught.
 - An entity does not say which world it is of. Taken away by an `Entity`

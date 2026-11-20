@@ -63,7 +63,6 @@ use ecs::{App, World, Entity, Commands, Query, Disabled, Behavior, Cx, Bridge, S
 use std::thread::{Shared, AtomicInt, spawn_detached, join};
 
 struct Frame
-impl Schedule for Frame { const NAME: Str = "Frame"; }
 struct Press(Int)
 struct Release
 struct Count(Int)

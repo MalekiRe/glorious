@@ -2409,7 +2409,7 @@ pub fn in_state<T>() -> fn(Option<&T>) -> Bool { fn(state: Option<&T>) -> Bool {
 // NAME: Str = "Update"; }`. A task is added once the world's columns are all
 // registered (`add_task(f)`), as it is a function of that world.
 pub trait Schedule { const NAME: Str; }
-impl<T> Schedule for T { const NAME: Str = ""; }
+impl<T> Schedule for T { const NAME: Str = self_name(); }
 
 pub enum BridgeError { Invalid }
 

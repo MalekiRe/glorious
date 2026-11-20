@@ -490,6 +490,20 @@ function that lets go of a value of a type it is generic in is given that
 type's, as it is given any trait's functions. -/
 def destroyTrait : String := "%Destroy"
 
+/-- The value a scalar's name makes of an integer. -/
+def scalarValue (name : String) (n : Int) : Expr := .call 0 (.name none name) [.int n]
+
+/-- A text as a value: its characters, one after another. -/
+def textValue (codes : List Nat) : Expr :=
+  codes.foldr (fun (c : Nat) rest =>
+      .call 0 (.name (some "%prelude::Str") "StrChar") [scalarValue "char_of" (c : Int), rest])
+    (.name (some "%prelude::Str") "StrEnd")
+
+/-- `self_name()` in an implementation for every type: in its copy for each
+type, the type's name, as a text (what Rust's `type_name::<Self>()` names
+the type by, without its path). -/
+def selfNameFn : String := "self_name"
+
 def destroyFn : String := "%destroy"
 
 /-- The name under which the type a declared type's parameter is, where it is

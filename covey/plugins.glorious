@@ -35,9 +35,7 @@ use ecs::{App, World, Entity, Commands, Query, Local, With, Changed, Plugin, Spa
 use std::vec::sort;
 
 struct Update
-impl Schedule for Update { const NAME: Str = "Update"; }
 struct Never
-impl Schedule for Never { const NAME: Str = "Never"; }
 
 struct Pos(Int)
 struct Vel(Int)

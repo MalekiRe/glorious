@@ -48,9 +48,7 @@ use std::vec::sort;
 use std::thread::{Mutex, Shared, AtomicInt, spawn_detached, join};
 
 struct Update
-impl Schedule for Update { const NAME: Str = "Update"; }
 struct Render
-impl Schedule for Render { const NAME: Str = "Render"; }
 
 struct Health(Int)
 struct Player

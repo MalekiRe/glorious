@@ -43,9 +43,7 @@ mod ecs;
 use ecs::{App, World, Entity, Query, History, TaskStatus, AsyncWorld, Bridge, Schedule, Cloner, bridge, record, chain};
 
 struct Update
-impl Schedule for Update { const NAME: Str = "Update"; }
 struct Later
-impl Schedule for Later { const NAME: Str = "Later"; }
 
 struct Hp(Int)
 impl Clone for Hp { fn clone(h: &Hp) -> Hp { Hp(h.0) } }

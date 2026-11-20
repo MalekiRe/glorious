@@ -42,9 +42,7 @@ use ecs::{App, World, Entity, Commands, Query, Single, With, Remote, BridgeError
 use std::thread::{scope, Scope, Threads, join, yield_now, AtomicInt, load, store, fetch_add};
 
 struct Update
-impl Schedule for Update { const NAME: Str = "Update"; }
 struct Net
-impl Schedule for Net { const NAME: Str = "Net"; }
 struct A(Int)
 struct B(Int)
 struct Player

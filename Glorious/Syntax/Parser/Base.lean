@@ -183,15 +183,6 @@ def floatBits (neg : Bool) (digits : Nat) (exp10 : Int) (suffix : String) :
   if bits == format.infBits neg then failAt "this number is too large for its type"
   pure (if suffix == "f32" then "f32_of" else "f64_of", Ieee.ofBits bits)
 
-/-- The value a scalar's name makes of an integer. -/
-def scalarValue (name : String) (n : Int) : Expr := .call 0 (.name none name) [.int n]
-
-/-- A text as a value: its characters, one after another. -/
-def textValue (codes : List Nat) : Expr :=
-  codes.foldr (fun (c : Nat) rest =>
-      .call 0 (.name (some "%prelude::Str") "StrChar") [scalarValue "char_of" (c : Int), rest])
-    (.name (some "%prelude::Str") "StrEnd")
-
 /-- A function of the prelude that the compiler writes a literal or an index
 with, whatever the program has in scope. -/
 def preludeFn (name : String) : Expr := .name (some "%prelude") name
