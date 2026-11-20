@@ -3872,6 +3872,34 @@ pub fn join<'h, T>(h: Handle<'h, T>) -> T / {Threads} {
 // Let the other threads that can go on run first.
 pub fn yield_now() / {Threads} { block_until(always) }
 
+// Wait, letting other threads run, until `ready` says so.
+pub fn wait_until(ready: fn() -> Bool) / {Threads} { block_until(ready) }
+
+// A thread in this scope, as `spawn` makes one, that may borrow what its
+// caller has: whoever spawns it says the borrow lasts until it is joined
+// (`join_cell`), which nothing here sees, hence unsafe. (For a library that
+// joins every thread it spawns before what they borrow ends: covey's graph
+// of systems.) Its handle as the number of the cell its result goes in.
+pub unsafe fn spawn_unchecked<T>(s: &Scope, f: fn() -> T / {Threads}) -> Int {
+    let cell = new_cell<Option<T>>(None);
+    let queue = s.queue;
+    push_waiting(queue, always, { run_thread(queue, fn() / {Threads} { let r = f(); put_cell(cell, Some(r)) }) });
+    cell
+}
+// Whether the thread of a cell `spawn_unchecked` gave has finished: what it
+// gives is a `T`, as its caller says.
+pub unsafe fn cell_finished<T>(cell: Int) -> Bool { filled<T>(cell) }
+// What the thread of such a cell gave, where it has finished
+// (`cell_finished`): not waited for.
+pub unsafe fn take_finished<T>(cell: Int) -> T {
+    match(take_cell<Option<T>>(cell)) { Some(r) => r, None => abort("the thread has not finished") }
+}
+// What the thread of such a cell gave, once it has: waited for.
+pub unsafe fn join_cell<T>(cell: Int) -> T / {Threads} {
+    block_until(fn() -> Bool { filled<T>(cell) });
+    match(take_cell<Option<T>>(cell)) { Some(r) => r, None => abort("join") }
+}
+
 // A computation of its own, done now, that waits for nothing: what it gave,
 // by `wait`.
 pub struct Detached<T> { value: T }

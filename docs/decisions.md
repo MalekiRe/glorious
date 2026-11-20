@@ -6216,6 +6216,38 @@ for the implementations whose conditions ask of a shorter list (the `(H,
 pairs (`(H, R)`, as `AllTouches` is), which are never written out, with
 one bridge from the flat tuple through `std::tuple::Tuple`.
 
+## A graph's nodes on threads of their own: where it is
+
+Upstream's executor runs a graph's nodes at once where it can: a node's
+parameters are taken out of the world before it starts, so nodes that touch
+apart can run beside each other, and one waiting (a barrier, a channel)
+lets the others go on. covey's graph ran its nodes one after another, each
+with the whole world lent, and its systems cannot wait.
+
+Done:
+- A system in three steps (`System::prepare`, `run_prepared`, `finish`;
+  `Takes` and `CallTaken` over what its parameters ask, mirroring `Fetch`):
+  what it asks for taken out of the world, the function called with it
+  where no world is lent, and put back. A function's system does it; any
+  other kind says it cannot (`None`), and runs alone with the world lent.
+- What a system touches, by name (`touches`, `TouchNames`: `w:` written,
+  `r:` read; `w:*` for one not run in three steps).
+- `Graph::run` starts every node its dependencies let run and whose
+  touches are apart from those running on a thread of its own
+  (`std::thread::spawn_unchecked`, unsafe: the graph joins every thread
+  before what they borrow ends), and when one finishes puts back what it
+  took, joins its commands to the graph's (`commands_beside`,
+  `join_commands`: the entities they reserve are counted in one shared
+  counter, `Commands.made` an `AtomicInt`) and starts what can now run.
+- std::thread: `spawn_unchecked`, `cell_finished`, `take_finished`,
+  `join_cell`, `wait_until`.
+
+Not yet: a system cannot perform `Threads` (a function is a system only if
+it performs nothing), so no node can wait at a barrier or for a channel,
+and the nodes started together still run one after another. The barrier
+tests need systems that may perform `Threads`: `IntoSystem` for a function
+of any row, and `System::run` and `run_prepared` performing it.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by
