@@ -625,10 +625,11 @@ impl<T> Requires for T { type Required = (); }
 pub trait Brings<S> { fn bring(&mut World<S>, Entity) }
 impl<S> Brings<S> for () { fn bring(world: &mut World<S>, entity: Entity) { () } }
 impl<H: Default, ..R, S> Brings<S> for (H, ..R)
-    where S: Get<H>, H: Requires, <H as Requires>::Required: Brings<S>, (..R): Brings<S> {
+    where S: Get<H>, H: Requires, H: EvictOne<S>, <H as Requires>::Required: Brings<S>, (..R): Brings<S> {
     fn bring(world: &mut World<S>, entity: Entity) {
         if(<S as Get<H>>::has(&world.columns, entity)) { () } else {
-            let _ = insert(world, entity, default<H>());
+            // (Brought as it is put: the others of its groups taken away.)
+            let _ = put_one(world, entity, default<H>());
             <<H as Requires>::Required as Brings<S>>::bring(world, entity)
         };
         <(..R) as Brings<S>>::bring(world, entity)
@@ -2074,6 +2075,43 @@ impl<T, R, S, L> RemoveHooks<S, L> for (Column<T>, R)
 impl<T, R, S, L> RemoveHooks<S, L> for (Resource<T>, R) where R: RemoveHooks<S, L> {
     fn removing(app: &mut App<S, L>, entity: Entity) { <R as RemoveHooks<S, L>>::removing(app, entity) }
 }
+// The components an entity has of `T`'s groups, other than `T`, which
+// putting a `T` on it takes away: each is replaced and removed, its hooks
+// run as a remove's are, before; group by group, in the order `T` names
+// them.
+pub trait EvictHooks<T, S, L> { fn evicting(&mut App<S, L>, Entity) }
+impl<T, S, L> EvictHooks<T, S, L> for () { fn evicting(app: &mut App<S, L>, entity: Entity) { () } }
+impl<T, G, ..R, S, L> EvictHooks<T, S, L> for (G, ..R) where S: EvictIn<G, T, S, L>, (..R): EvictHooks<T, S, L> {
+    fn evicting(app: &mut App<S, L>, entity: Entity) {
+        <S as EvictIn<G, T, S, L>>::evicting_in(app, entity);
+        <(..R) as EvictHooks<T, S, L>>::evicting(app, entity)
+    }
+}
+// The same, of a component, by its groups.
+pub trait EvictsHooked<S, L> { fn evicting_hooked(&mut App<S, L>, Entity) }
+impl<T, S, L> EvictsHooked<S, L> for T where T: OneOf, <T as OneOf>::Groups: EvictHooks<T, S, L> {
+    fn evicting_hooked(app: &mut App<S, L>, entity: Entity) { <<T as OneOf>::Groups as EvictHooks<T, S, L>>::evicting(app, entity) }
+}
+// Those of the group `G`, as the world's columns have them.
+pub trait EvictIn<G, T, S, L> { fn evicting_in(&mut App<S, L>, Entity) }
+impl<G, T, S, L> EvictIn<G, T, S, L> for () { fn evicting_in(app: &mut App<S, L>, entity: Entity) { () } }
+impl<G, T, H, R, S, L> EvictIn<G, T, S, L> for (Column<H>, R)
+    where H: OneOf, <H as OneOf>::Groups: Shares<(G,)>, H: Same<T>, S: Get<H>,
+          L: Dispatch<OnReplace<H>, S>, L: Dispatch<OnRemove<H>, S>, S: Fires<S, L>, S: Requests<S, L>, R: EvictIn<G, T, S, L> {
+    fn evicting_in(app: &mut App<S, L>, entity: Entity) {
+        if(<H as Same<T>>::same()) { () }
+        else if(<<H as OneOf>::Groups as Shares<(G,)>>::shares()) {
+            if(<S as Get<H>>::has(&app.world.columns, entity)) {
+                app.emit<OnReplace<H>>(&OnReplace { entities: [entity], none: [] });
+                app.emit<OnRemove<H>>(&OnRemove { entities: [entity], none: [] })
+            } else { () }
+        } else { () };
+        <R as EvictIn<G, T, S, L>>::evicting_in(app, entity)
+    }
+}
+impl<G, T, X, R, S, L> EvictIn<G, T, S, L> for (Resource<X>, R) where R: EvictIn<G, T, S, L> {
+    fn evicting_in(app: &mut App<S, L>, entity: Entity) { <R as EvictIn<G, T, S, L>>::evicting_in(app, entity) }
+}
 
 // States: one type per state, each of a group (`impl State for Menu { type
 // Group = Game; }`), of which one at most is active, kept as a resource
@@ -3174,7 +3212,8 @@ impl<S, L> App<S, L> {
     }
     pub fn insert<T>(app: &mut Self, entity: Entity, value: T) -> Option<T>
         where S: Get<T>, T: EvictOne<S>, T: BringsOne<S>, T: Use<[0, *]>, S: Fires<S, L>, S: Requests<S, L>,
-              L: Dispatch<OnAdd<T>, S>, L: Dispatch<OnInsert<T>, S>, L: Dispatch<OnReplace<T>, S> {
+              L: Dispatch<OnAdd<T>, S>, L: Dispatch<OnInsert<T>, S>, L: Dispatch<OnReplace<T>, S>, T: EvictsHooked<S, L> {
+        <T as EvictsHooked<S, L>>::evicting_hooked(app, entity);
         let had = <S as Get<T>>::has(&app.world.columns, entity);
         if(had) { app.emit<OnReplace<T>>(&OnReplace { entities: [entity], none: [] }) };
         let old = app.world.insert(entity, value);
