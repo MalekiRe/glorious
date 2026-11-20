@@ -1240,6 +1240,28 @@ partial def tyJumps (t : Ty) : M Bool := do
       | _ => pure ()
     return false
 
+/-- Does a value of this type hold a borrow, of a variable or through one:
+what its captures hold, followed through the types they hold. -/
+partial def tyBorrows (t : Ty) (seen : List Nat := []) : M Bool := do
+  let mut seen := seen
+  for c in freeCaps (← zonk t) do
+    let root ← findCap c
+    if seen.contains root then continue
+    seen := root :: seen
+    for (_, what) in ← edgesFrom root do
+      match what with
+      | .loan _ => return true
+      | .brand _ => return true
+      | .touch _ _ => return true
+      | .ty t' => if ← tyBorrows t' seen then return true
+      | _ => pure ()
+  pure false
+
+/-- What must borrow nothing does not: a thread's callable (`F: 'static`). -/
+def checkStatics (statics : Array (Ty × String)) : M Unit := do
+  for (t, why) in statics do
+    if ← tyBorrows t then throw why
+
 /-- A callable that has to come back when called may hold no label. -/
 def checkStays (stays : Array (Ty × String)) : M Unit := do
   for (t, why) in stays do

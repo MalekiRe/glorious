@@ -40,6 +40,7 @@ pub mod boxed;
 pub mod task;
 pub mod path;
 pub mod future;
+pub mod thread;
 pub mod iterator;
 pub mod slice;
 pub mod collections;
@@ -3813,15 +3814,29 @@ pub fn scope<R>(f: fn(&Scope) -> R / {Threads}) -> R {
 }
 
 // A thread's result, once it is done.
-pub struct Handle<T> { cell: Int, none: [T] }
+// (Holding what the thread borrows, `'h`: while the handle is there, so is
+// what it borrows.)
+pub struct Handle<'h, T> { cell: Int, none: [T], held: Option<&'h ()> }
 
 impl Scope {
-    // A thread in this scope; it runs once the spawning thread waits.
-    pub fn spawn<T>(s: &Self, f: fn() -> T / {Threads}) -> Handle<T> {
+    // A thread in this scope; it runs once the spawning thread waits. It
+    // borrows nothing (`F: 'static`): it runs later, after the block a borrow
+    // would be of may have ended; what it uses it is given (`let m = mine;`
+    // in its block), as a handle to something threads share is.
+    pub fn spawn<'s, T, F>(s: &'s Self, f: F) -> Handle<'s, T> where F: Fn<(), Output = T, Effects = {Threads}>, F: 'static {
         let cell = new_cell<Option<T>>(None);
         let queue = s.queue;
         push_waiting(queue, always, { run_thread(queue, fn() / {Threads} { let r = f(); put_cell(cell, Some(r)) }) });
-        Handle { cell: cell, none: [] }
+        Handle { cell: cell, none: [], held: None }
+    }
+    // A thread in this scope, waited for before this gives back what it
+    // gave: it may borrow what the caller has, since it is done before the
+    // call is (a parallel group's branches).
+    pub fn spawn_joined<T>(s: &Self, f: fn() -> T / {Threads}) -> T / {Threads} {
+        let cell = new_cell<Option<T>>(None);
+        let queue = s.queue;
+        push_waiting(queue, always, { run_thread(queue, fn() / {Threads} { let r = f(); put_cell(cell, Some(r)) }) });
+        join(Handle { cell: cell, none: [], held: None })
     }
 }
 
@@ -3833,7 +3848,7 @@ fn filled<T>(cell: Int) -> Bool {
 }
 
 // Wait for a thread to be done, and what it gave.
-pub fn join<T>(h: Handle<T>) -> T / {Threads} {
+pub fn join<'h, T>(h: Handle<'h, T>) -> T / {Threads} {
     let cell = h.cell;
     block_until(fn() -> Bool { filled<T>(cell) });
     match(take_cell<Option<T>>(cell)) { Some(r) => r, None => abort("join") }

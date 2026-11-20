@@ -6061,6 +6061,36 @@ are an array: every call looked its function up by walking the list.
 behaviors 20 s -> 6.5 s; the suite 38 s -> 21 s. (The bytecode's code of
 a function and a frame's locals are lists still.)
 
+## A thread borrows nothing: `F: 'static` checked at the call
+
+`covey/remote` went wrong at run time ("a reference is used after the cell it
+points to was freed") though it was accepted. `Scope::spawn` keeps the
+callable in the scope's queue, through `unsafe` host cells, and runs it once
+the spawning thread waits: by then a block whose variable it borrowed may
+have ended (remote's second test spawned inside a `while` body). The checker
+saw nothing wrong, as nothing in `spawn`'s type said the callable outlives
+the call.
+
+Writing `F: 's` (or `Handle<'s, T>`) did not help: a lifetime bound on a
+type parameter is not carried into the scheme, so callers never check it.
+`F: 'static` now is, as one more contract fact beside `stays`:
+`Scheme.statics` / `St.statics`, filled in `settleBounds` for a callable
+parameter whose type parameter says `'static`, instantiated at each call, and
+checked at the end of the caller's body (`checkStatics`, `tyBorrows`: no
+loan, brand or touch reachable through what the type captures).
+
+- `Scope::spawn` asks `F: 'static`; a thread is given copies (`let mut m =
+  mine;` in its block; `Remote` and the program's `Flight` are `Use<[0, *]>`,
+  handles to what threads share).
+- `Scope::spawn_joined` spawns and waits before it returns, so it may borrow
+  what its caller has: the parallel branches in covey's ecs use it.
+- Rust's scoped threads also let a thread borrow what outlives the scope
+  (`'env`); that needs `F: 'a` for a general `'a` in schemes, not done.
+- The library's root did not say `pub mod thread;`, so the suite's programs
+  could not use threads at all; now it does.
+- remote's loops that update until a worker is done yield between updates
+  (threads run in turn here).
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by

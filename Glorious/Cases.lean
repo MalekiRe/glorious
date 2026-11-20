@@ -2593,6 +2593,12 @@ fn main() -> Int { walk(3) }",
     [], "5"⟩,
   ⟨"struct P { x: Int, y: Int }\nfn pick<'a>(p: &'a mut P, c: Bool) -> &'a mut Int { if(c) { let x = &mut p.x; x } else { &mut p.y } }\nfn main() -> Int { let mut p = P { x: 1, y: 2 }; let r = pick(&mut p, true); *r = 7; p.x }",
     [], "7"⟩,
+  -- A thread runs later, after the block a borrow it held would be of may
+  -- have ended: what it uses it is given, a copy, not a borrow.
+  ⟨"use std::thread::{scope, Scope, Threads, yield_now};\nfn main() -> Int {\n    scope(fn(s: &Scope) -> Int / {Threads} {\n        let mut i = 0;\n        while({ i < 2 }) { let mut v = [1, 2]; discard(s.spawn({ push_at(&mut v, 3); len_at(&v) })); i = i + 1 };\n        yield_now();\n        0\n    })\n}",
+    [], "error: 5:48: in `main`: `F: 'static` says it borrows nothing, as a thread's does, which runs after the block a borrow would be of may have ended: give it what it uses (`let m = mine;` in its block)"⟩,
+  ⟨"use std::thread::{scope, Scope, Threads, join};\nfn main() -> Int {\n    scope(fn(s: &Scope) -> Int / {Threads} {\n        let v = [1, 2];\n        let h = s.spawn({ let mut w = v; push_at(&mut w, 3); len_at(&w) });\n        join(h)\n    })\n}",
+    [], "3"⟩,
   -- Still refused: the reference is used while what was borrowed from it is.
   ⟨"struct P { x: Int, y: Int }\nfn gx<'a>(p: &'a mut P) -> &'a mut Int { let x = &mut p.x; p.x = 3; x }\nfn main() -> Int { let mut p = P { x: 1, y: 2 }; let r = gx(&mut p); *r = 7; p.x }",
     [], "error: 2:60: in `gx`: `p` is used while `x`, which borrows from it, is still in use"⟩,

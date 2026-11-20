@@ -94,6 +94,9 @@ structure Scheme where
   /-- Types of callables that must come back when called: they may hold no
   label to jump to. With the reason. -/
   stays : List (Ty × String) := []
+  /-- Types of callables that must borrow nothing (`F: 'static`): a thread's,
+  run after the block a borrow would be of may have ended. With the reason. -/
+  statics : List (Ty × String) := []
   /-- The types that say which instance of an effect each operation performed
   or handled in the function is, and which those of the functions it calls
   are: one after another, in the order of the function's text. A use of the
@@ -496,6 +499,8 @@ structure St where
   lateDrops : Array (Ty × String) := #[]
   /-- Types of callables that must come back when called, with the reason. -/
   stays : Array (Ty × String) := #[]
+  /-- What must borrow nothing, as `stays` are: from the functions called. -/
+  statics : Array (Ty × String) := #[]
   lateStays : Array (Ty × String) := #[]
   /-- What `impl Use<[lower, upper]>` says of a declared type: whether a value
   has to be used, and whether it can be used only once. -/
@@ -1371,6 +1376,8 @@ def instantiate (s : Scheme) (via : Option String := none) (fixed : List (Nat ×
       | some f => s!"{pos}`{f}` holds a value that has to be used while it calls what it is given"
       | none => why
     modify fun st => { st with stays := st.stays.push (subst tm rm cm t, why) }
+  for (t, why) in s.statics do
+    modify fun st => { st with statics := st.statics.push (subst tm rm cm t, pos ++ why) }
   for (t, why) in s.quiets do
     modify fun st => { st with quiets := st.quiets.push (subst tm rm cm t, pos ++ why) }
   for (t, why) in s.dups do
@@ -1482,6 +1489,9 @@ def generalize (t : Ty) (keep : List Ty := []) (top : Bool := true) : M Scheme :
   let mut stays : Array (Ty × String) := #[]
   for (d, why) in s.stays do
     stays := stays.push (← zonk d, why)
+  let mut statics : Array (Ty × String) := #[]
+  for (d, why) in s.statics do
+    statics := statics.push (← zonk d, why)
 -- Capture variables reachable from the type through what they capture,
   -- and what each captures: found from the type outwards, not by going
   -- through every edge of the program.
@@ -1575,9 +1585,10 @@ def generalize (t : Ty) (keep : List Ty := []) (top : Bool := true) : M Scheme :
   let mine ← lift dups
   let unused ← lift drops
   let held ← lift stays
+  let borrowless ← lift statics
   pure { tvars, rvars := (freeRows t).eraseDups.filter (!fixedRows.contains ·), cvars,
          edges := all.toList.filter (cset.contains ·.1), dups := mine.toList, ty := t,
-         drops := unused.toList, stays := held.toList }
+         drops := unused.toList, stays := held.toList, statics := borrowless.toList }
 
 /-- Does the type have one of a function's own type parameters in it? -/
 partial def Ty.hasRigid : Ty → Bool

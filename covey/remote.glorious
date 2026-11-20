@@ -54,6 +54,7 @@ fn wait_for<S>(remote: &Remote<S>, n: Int) / {Threads} { while({ remote.waiting(
 
 // `conflicting_shared_state_and_exclusive_bridges_never_share_a_wave`
 struct Flight { now: AtomicInt, most: AtomicInt }
+impl Use<[0, *]> for Flight {}
 // (Upstream's waits here, to give another bridge the chance to overlap;
 // a system run at a sync point runs to its end here, so none can, and a
 // wait would be a callable that performs `Threads`, which a bridged system
@@ -75,8 +76,8 @@ fn main() -> Int {
         .build();
     let remote = app.world.remote();
     let entity = scope(fn(s: &Scope) -> Entity / {Threads} {
-        let mut mine = remote.share();
-        let worker = s.spawn({ match(mine.bridge(Net, spawn_a)) { Ok(e) => e, Err(_) => Entity::PLACEHOLDER } });
+        let mine = remote.share();
+        let worker = s.spawn({ let mut m = mine; match(m.bridge(Net, spawn_a)) { Ok(e) => e, Err(_) => Entity::PLACEHOLDER } });
         wait_for(&remote, 1);
         app.emit(&Update);
         join(worker)
@@ -94,12 +95,15 @@ fn main() -> Int {
             let mut side = 0;
             let mut workers = [];
             while({ side < 2 }) {
-                let mut mine = remote.share();
+                let mine = remote.share();
                 let f = Flight { now: std::thread::share(&flight.now), most: std::thread::share(&flight.most) };
+                let k = case;
                 workers = push(workers, s.spawn({
-                    if(case == 0) { discard(mine.bridge(Net, fn(q: &mut Query<(&mut A,), ()>) { enter(&f) })) }
-                    else if(case == 1) { discard(mine.bridge(Net, fn(q: &mut Query<(&B,), ()>) { enter(&f) })) }
-                    else { discard(mine.bridge(Net, fn(q: &mut Query<(&B,), ()>) { enter(&f) })) }
+                    let mut m = mine;
+                    let g = f;
+                    if(k == 0) { discard(m.bridge(Net, fn(q: &mut Query<(&mut A,), ()>) { let h = g; enter(&h) })) }
+                    else if(k == 1) { discard(m.bridge(Net, fn(q: &mut Query<(&B,), ()>) { let h = g; enter(&h) })) }
+                    else { discard(m.bridge(Net, fn(q: &mut Query<(&B,), ()>) { let h = g; enter(&h) })) }
                 }));
                 side = side + 1
             };
@@ -117,12 +121,14 @@ fn main() -> Int {
     let remote = app.world.remote();
     let done = (AtomicInt::new(0));
     scope(fn(s: &Scope) / {Threads} {
-        let mut mine = remote.share();
+        let mine = remote.share();
         let finished = std::thread::share(&done);
         let worker = s.spawn({
-            match(mine.bridge(Net, needs_player)) { Err(BridgeError::Invalid) => say("invalid"), Ok(_) => say("ran") };
-            let value = mine.until(Net, player_a);
-            store(&finished, value)
+            let mut m = mine;
+            let mut to = finished;
+            match(m.bridge(Net, needs_player)) { Err(BridgeError::Invalid) => say("invalid"), Ok(_) => say("ran") };
+            let value = ecs::Remote::until(&m, Net, player_a);
+            store(&to, value)
         });
         wait_for(&remote, 1);
         app.emit(&Update);
@@ -131,7 +137,7 @@ fn main() -> Int {
         while({ i < 3 }) { app.emit(&Update); i = i + 1 };
         say(load(&done));
         discard(app.world.spawn_bundle((A(9), Player)));
-        while({ load(&done) == 0 }) { app.emit(&Update) };
+        while({ load(&done) == 0 }) { app.emit(&Update); yield_now() };
         join(worker)
     });
     say(load(&done));
@@ -142,12 +148,14 @@ fn main() -> Int {
     let runs = (AtomicInt::new(0));
     let stop = (AtomicInt::new(0));
     scope(fn(s: &Scope) / {Threads} {
-        let mut mine = remote.share();
+        let mine = remote.share();
         let (r, st) = (std::thread::share(&runs), std::thread::share(&stop));
         let worker = s.spawn({
+            let mut m = mine;
+            let (r2, st2) = (r, st);
             let mut going = true;
             while({ going }) {
-                let done = match(mine.bridge(Net, fn(q: &mut Query<(&A,), ()>) -> Bool { discard(fetch_add(&r, 1)); load(&st) == 1 })) { Ok(d) => d, Err(_) => true };
+                let done = match(m.bridge(Net, fn(q: &mut Query<(&A,), ()>) -> Bool { let (r3, st3) = (r2, st2); discard(fetch_add(&r3, 1)); load(&st3) == 1 })) { Ok(d) => d, Err(_) => true };
                 if(done) { going = false } else { () }
             }
         });
@@ -159,7 +167,7 @@ fn main() -> Int {
             emit = emit + 1
         };
         store(&stop, 1);
-        while({ load(&runs) <= 5 }) { app.emit(&Update) };
+        while({ load(&runs) <= 5 }) { app.emit(&Update); yield_now() };
         join(worker)
     });
     say(load(&runs));
@@ -170,8 +178,8 @@ fn main() -> Int {
     let remote = app.world.remote();
     discard(app.world.spawn_bundle((A(1),)));
     let got = scope(fn(s: &Scope) -> Int / {Threads} {
-        let mut mine = remote.share();
-        let worker = s.spawn({ match(mine.bridge(Net, fn(q: &mut Query<(&mut A,), ()>) -> Int { q.for_each() { (mut a,) => a.0 = a.0 + 2; }; 3 })) { Ok(n) => n, Err(_) => 0 } });
+        let mine = remote.share();
+        let worker = s.spawn({ let mut m = mine; match(m.bridge(Net, fn(q: &mut Query<(&mut A,), ()>) -> Int { q.for_each() { (mut a,) => a.0 = a.0 + 2; }; 3 })) { Ok(n) => n, Err(_) => 0 } });
         wait_for(&remote, 1);
         app.emit(&Update);
         join(worker)

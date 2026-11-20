@@ -890,6 +890,7 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
     -- its type parameter says how often, `F: Use<[1, 1]>` for once.)
     let mut envNeeds : List ((Ty × String) × Bool) := []
     let mut saidStays : Array (Ty × String) := #[]
+    let mut saidStatics : Array (Ty × String) := #[]
     let mut envStays : List (Ty × String) := []
     if let .fn ps _ _ _ _ ← find t1 then
         for ((q, annot), place) in (ps.zip d.annots).zipIdx do
@@ -897,6 +898,9 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
             let named := match annot with
               | some (.name f []) => some f
               | _ => none
+            -- (`F: 'static`: what it is given borrows nothing.)
+            if named.any fun f => d.bounds.any fun b => b.subject == f && b.trait == "'static" then
+              saidStatics := saidStatics.push (q, s!"`{named.getD "F"}: 'static` says it borrows nothing, as a thread's does, which runs after the block a borrow would be of may have ended: give it what it uses (`let m = mine;` in its block)")
             let written := named.bind quantityOf
             let (lower, upper) := written.getD (0, none)
             let root ← findCap cap
@@ -938,9 +942,9 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
     let envDrops := (envNeeds.filter (!·.2)).map (·.1)
     modify fun s =>
       { s with drops := saidDrops ++ envDrops.toArray, dups := saidDups ++ envDups.toArray
-               stays := saidStays ++ envStays.toArray }
+               stays := saidStays ++ envStays.toArray, statics := saidStatics }
     let scheme ← generalize t1 [] false
-    modify fun s => { s with dups := before.dups, drops := before.drops, stays := before.stays }
+    modify fun s => { s with dups := before.dups, drops := before.drops, stays := before.stays, statics := before.statics }
     -- What a lifetime is said to hold of a type parameter, it holds of the
     -- type the parameter is at each use.
     let mut edges : Array (Nat × Captured) := #[]

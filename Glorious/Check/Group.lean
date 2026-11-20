@@ -522,6 +522,8 @@ def checkGroup (decls : List FnDecl) (signature : Bool := false) : M Unit := do
         (fun s => Glorious.Trace.said "aparts" fun _ => (checkAparts : M Unit).run s : M Unit)
         (fun s => Glorious.Trace.said "unrun" fun _ => (checkUnrun : M Unit).run s : M Unit)
         (fun s => Glorious.Trace.said "stays" fun _ => (do checkStays (← get).stays : M Unit).run s : M Unit)
+        checkStatics (← get).statics
+        modify fun s => { s with statics := #[] }
         (fun s => Glorious.Trace.said "lifetimes" fun _ => (checkLifetimes : M Unit).run s : M Unit)
         modify fun s =>
           { s with rigidCaps := s.rigidCaps.filter (·.2 == "'static"), outlives := [] }
