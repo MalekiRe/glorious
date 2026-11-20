@@ -467,10 +467,10 @@ fn targets_in<R, S>(columns: &S, source: Entity) -> [Entity] where S: Get<Links<
 
 // How an entity is related to another, by the relation's kind.
 pub trait Relating<R, S> { fn relate_by(&mut World<S>, Entity, R, Entity) -> Option<R> }
-impl<R, S> Relating<R, S> for OneToMany where S: Get<Relates<R>>, S: Get<Sources<R>> {
+impl<R, S> Relating<R, S> for OneToMany where S: Get<Relates<R>>, S: Get<Sources<R>>, R: SameLink {
     fn relate_by(world: &mut World<S>, source: Entity, relation: R, target: Entity) -> Option<R> { relate<R, S>(world, source, relation, target) }
 }
-impl<R, S> Relating<R, S> for OneToOne where S: Get<Relates<R>>, S: Get<Sources<R>> {
+impl<R, S> Relating<R, S> for OneToOne where S: Get<Relates<R>>, S: Get<Sources<R>>, R: SameLink {
     fn relate_by(world: &mut World<S>, source: Entity, relation: R, target: Entity) -> Option<R> {
         let others = sources_in<R, S>(&world.columns, target);
         let mut i = 0;
@@ -532,7 +532,36 @@ fn drop_source<R, S>(columns: &mut S, target: Entity, source: Entity) where S: G
 
 // Relate `source` to `target` by `relation`, in place of what it related
 // to by `R` before: what that link carried, if there was one.
+// Whether two values of a relation are the same link: of one that can say
+// (`Eq`, and `Clone` to compare them), by `==`; of any other, never, so that
+// relating again changes the link (`Changed<Relates<R>>`, upstream's
+// `Relinked`).
+pub trait SameLink { fn same_link(&Self, &Self) -> Bool }
+impl<R> SameLink for R where R: Eq, R: Clone { fn same_link(a: &R, b: &R) -> Bool { clone(a) == clone(b) } }
+impl<R> SameLink for R { fn same_link(a: &R, b: &R) -> Bool { false } }
+
 pub fn relate<R, S>(world: &mut World<S>, source: Entity, relation: R, target: Entity) -> Option<R>
+    where S: Get<Relates<R>>, S: Get<Sources<R>>, R: SameLink {
+    // (A link to the same target keeps its place; it changes only where
+    // its value is not the same.)
+    let column = <S as Get<Relates<R>>>::column(&world.columns);
+    let at = slot_of(column, source);
+    let same_target = if(at >= 0) { same_entity(target_of(&column.dense[at]), target) } else { false };
+    match(same_target) { true => relink_in_place<R, S>(world, source, relation), false => relink<R, S>(world, source, relation, target) }
+}
+fn target_of<R>(link: &Relates<R>) -> Entity { link.target }
+fn swap_relation<R>(link: &mut Relates<R>, relation: R) -> R { replace(&mut link.relation, relation) }
+fn same_relation<R>(old: &R, link: &Relates<R>) -> Bool where R: SameLink { <R as SameLink>::same_link(old, &link.relation) }
+fn relink_in_place<R, S>(world: &mut World<S>, source: Entity, relation: R) -> Option<R> where S: Get<Relates<R>>, R: SameLink {
+    let mut column = take_at<Relates<R>, S>(world);
+    let at = slot_of(&column, source);
+    let old = swap_relation(&mut column.dense[at], relation);
+    let same = same_relation(&old, &column.dense[at]);
+    if(same) { () } else { column.changed[at] = column.now };
+    <S as Get<Relates<R>>>::put(&mut world.columns, column);
+    Some(old)
+}
+fn relink<R, S>(world: &mut World<S>, source: Entity, relation: R, target: Entity) -> Option<R>
     where S: Get<Relates<R>>, S: Get<Sources<R>> {
     let before = unrelate<R, S>(world, source);
     let _ = insert(world, source, Relates { relation: relation, target: target });
@@ -1469,6 +1498,13 @@ impl<H, ..R, S> AnyOnly<S> for (H, ..R) where H: Only<S>, (..R): AnyOnly<S> {
 impl<T, S> Only<S> for Or<T> where T: AnyOnly<S> {
     fn lets(columns: &S, entity: Entity, since: Int) -> Bool { <T as AnyOnly<S>>::any_lets(columns, entity, since) }
 }
+// Those whose link by `R` was made or changed since the system last ran:
+// upstream's `Relinked<R>`, `Changed<Relates<R>>` (the same link again,
+// the same value to the same target, is no change: `SameLink`).
+pub struct Relinked<R>(R)
+impl<R, S> Only<S> for Relinked<R> where S: Get<Relates<R>> {
+    fn lets(columns: &S, entity: Entity, since: Int) -> Bool { <Changed<Relates<R>> as Only<S>>::lets(columns, entity, since) }
+}
 // Every entity, with it or not: a filter that mentions `T` and lets all through.
 pub struct MayHave<T>(T)
 impl<T, S> Only<S> for MayHave<T> { fn lets(columns: &S, entity: Entity, since: Int) -> Bool { true } }
@@ -1486,6 +1522,7 @@ impl<A, D> Mentions<D> for Without<A> where A: Same<D> { fn mentions() -> Bool {
 impl<A, D> Mentions<D> for MayHave<A> where A: Same<D> { fn mentions() -> Bool { <A as Same<D>>::same() } }
 impl<A, D> Mentions<D> for Added<A> where A: Same<D> { fn mentions() -> Bool { <A as Same<D>>::same() } }
 impl<A, D> Mentions<D> for Changed<A> where A: Same<D> { fn mentions() -> Bool { <A as Same<D>>::same() } }
+impl<R, D> Mentions<D> for Relinked<R> where Relates<R>: Same<D> { fn mentions() -> Bool { <Relates<R> as Same<D>>::same() } }
 impl<T, D> Mentions<D> for Or<T> where T: Mentions<D> { fn mentions() -> Bool { <T as Mentions<D>>::mentions() } }
 impl<R, Q, D> Mentions<D> for To<R, Q> { fn mentions() -> Bool { false } }
 impl<R, Q, D> Mentions<D> for From<R, Q> { fn mentions() -> Bool { false } }
@@ -2345,6 +2382,7 @@ fn why_since<T, S>(columns: &S, entity: Entity, since: Int, why: [Str], what: St
     }
 }
 impl<T, S> WhyOnly<S> for Added<T> where S: Get<T>, T: Schedule { fn why_only(columns: &S, entity: Entity, since: Int, why: [Str]) -> [Str] { why_since<T, S>(columns, entity, since, why, "Added", true) } }
+impl<R, S> WhyOnly<S> for Relinked<R> where S: Get<Relates<R>>, Relates<R>: Schedule { fn why_only(columns: &S, entity: Entity, since: Int, why: [Str]) -> [Str] { why_since<Relates<R>, S>(columns, entity, since, why, "Relinked", false) } }
 impl<T, S> WhyOnly<S> for Changed<T> where S: Get<T>, T: Schedule { fn why_only(columns: &S, entity: Entity, since: Int, why: [Str]) -> [Str] { why_since<T, S>(columns, entity, since, why, "Changed", false) } }
 impl<T, S> WhyOnly<S> for Or<T> where T: AnyOnly<S> {
     fn why_only(columns: &S, entity: Entity, since: Int, why: [Str]) -> [Str] {

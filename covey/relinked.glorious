@@ -1,0 +1,71 @@
+// `relinked_matches_changed_links_for_both_storages` (upstream's
+// tests/relations.rs): `Relinked<R>` is of the entities whose link by `R`
+// was made or changed since the system last ran: retargeted, or given
+// another value; the same link again changes nothing, and a target that
+// is gone leaves nothing to match. (`InSquad` says `Eq`, by which the same
+// link again is seen to be the same.)
+// expect:
+// 1 2 101 102
+//
+// 1 102
+// 2
+//
+// 0
+mod ecs;
+
+use ecs::{App, World, Entity, Query, Single, Relation, OneToMany, Relates, Relinked, to, chain};
+use std::vec::sort;
+
+struct Update
+struct Name(Int)
+struct DockedAt { berth: Int }
+impl Relation for DockedAt { type Kind = OneToMany; }
+struct InSquad
+impl Relation for InSquad { type Kind = OneToMany; }
+impl Eq for InSquad { fn ==(a: InSquad, b: InSquad) -> Bool { true } }
+impl Clone for InSquad { fn clone(s: &InSquad) -> InSquad { InSquad } }
+// (What each emit saw, and what it has seen so far: the two queries read
+// `Name`, so they are two systems, a query here taking a component once.)
+struct Seen([Str], [Int])
+
+fn watch_docked(docked: &mut Query<(&Name,), (Relinked<DockedAt>,)>, seen: &mut Single<(&mut Seen,), ()>) {
+    let mut all = [];
+    docked.for_each() { (n,) => all = push(all, n.0); };
+    match(seen.get_mut()) { Some((mut s,)) => s.1 = all;, None => () }
+}
+fn watch_squads(squads: &mut Query<(&Name,), (Relinked<InSquad>,)>, seen: &mut Single<(&mut Seen,), ()>) {
+    let mut all = [];
+    squads.for_each() { (n,) => all = push(all, n.0 + 100); };
+    match(seen.get_mut()) {
+        Some((mut s,)) =>
+            let both = fold(all, clone(&s.1), fn(out: [Int], v: Int) -> [Int] { push(out, v) });
+            let line = std::text::join(std::vec::map(sort(both), fn(v: Int) -> Str { show(v) }), " ");
+            push_at(&mut s.0, line);,
+        None => ()
+    }
+}
+
+fn main() -> Int {
+    let mut app = App::new().register<Name>().register<Seen>().relation<DockedAt>().relation<InSquad>().add_systems(Update, (watch_docked, watch_squads).chain()).build();
+    let seen = app.world.spawn_bundle((Seen([], []),));
+    let a = app.world.spawn_bundle((Name(10),));
+    let b = app.world.spawn_bundle((Name(11),));
+    let ship0 = app.world.spawn_bundle((Name(1), DockedAt { berth: 0 }.to(a)));
+    let ship1 = app.world.spawn_bundle((Name(2), DockedAt { berth: 0 }.to(a)));
+    let member0 = app.world.spawn_bundle((Name(1), InSquad.to(a)));
+    let member1 = app.world.spawn_bundle((Name(2), InSquad.to(a)));
+    app.emit(&Update);
+    app.emit(&Update);
+    discard(app.world.relate(ship0, DockedAt { berth: 0 }, b));
+    discard(app.world.relate(member1, InSquad, b));
+    app.emit(&Update);
+    discard(app.world.relate(ship1, DockedAt { berth: 4 }, a));
+    discard(app.world.relate(member1, InSquad, b));
+    app.emit(&Update);
+    discard(app.world.despawn(b));
+    app.emit(&Update);
+    let lines = match(app.world.get<Seen>(seen)) { Some(s) => clone(&s.0), None => [] };
+    let mut i = 0;
+    while({ i < len_at(&lines) }) { say(lines[i]); i = i + 1 };
+    0
+}
