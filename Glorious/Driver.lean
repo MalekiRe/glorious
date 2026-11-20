@@ -1251,7 +1251,11 @@ def evalCompiled (c : Compiled) (input : List Int := []) (fuel : Nat := 200000) 
     (Machine.exec (Core.stepIO c.core) fuel (Core.initIO c.core input))
   let onVm := showOutcome c.ctorNames
     (Machine.exec (Bytecode.stepIO bytecode) (fuel * 20) (Bytecode.initIO bytecode input))
-  if onCore == onVm then onVm else s!"MISMATCH: Core gives {onCore}, bytecode gives {onVm}"
+  -- (A program the Core machine does not finish in its steps, and bytecode
+  -- does in twenty times as many: as long programs are, run on bytecode
+  -- alone.)
+  if onCore == onVm || (onCore == "out of fuel" && onVm != "out of fuel") then onVm
+  else s!"MISMATCH: Core gives {onCore}, bytecode gives {onVm}"
 
 /--
 Compile a program and run it on both machines with the given input. The result

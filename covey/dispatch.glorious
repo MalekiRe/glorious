@@ -65,7 +65,7 @@ struct Set(Int)
 struct Number(Int)
 fn plus_one(n: &mut Single<(&mut Number,), ()>) { match(n.get_mut()) { Some((mut x,)) => x.0 = x.0 + 1;, None => () } }
 fn doubled(n: &mut Single<(&mut Number,), ()>) { match(n.get_mut()) { Some((mut x,)) => x.0 = x.0 * 2;, None => () } }
-fn set_all<S>(event: &Set, world: &mut World<S>) where S: ecs::Get<Number> {
+fn set_all<S>(event: &Set, world: &mut World<S>) where S: ecs::Get<Number>, S: ecs::Hidden<(&mut Number,), ()> {
     world.query<(&mut Number,)>().for_each() { (mut n,) => n.0 = event.0; }
 }
 
@@ -75,7 +75,7 @@ struct Total(Int)
 struct Tag
 struct Marker
 fn bump_wide(q: &mut Query<(&mut Wide,), ()>) { q.for_each() { (mut v,) => v.0 = v.0 + 1; } }
-fn tag_new<S>(world: &mut World<S>) where S: ecs::Get<Wide>, S: ecs::Get<Tag>, S: ecs::Columns {
+fn tag_new<S>(world: &mut World<S>) where S: ecs::Get<Wide>, S: ecs::Get<Tag>, S: ecs::Columns, S: ecs::Hidden<(Entity,), (ecs::With<Wide>, ecs::Without<Tag>)> {
     let mut untagged = [];
     world.query_filtered<(Entity,), (With<Wide>, Without<Tag>)>().for_each() { (e,) => untagged = push(untagged, e); };
     let mut i = 0;

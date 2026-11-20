@@ -78,7 +78,7 @@ fn names<S>(world: &World<S>, es: [Entity]) -> [Int] where S: ecs::Get<Name> {
 }
 fn flag(b: Bool) { if(b) { say(1) } else { say(0) } }
 
-fn family<S>(commands: &mut Commands<S>) where S: ecs::Get<Name>, S: ecs::Columns, S: ecs::Unlinks<S>, ChildOf: ecs::RelateBy<S> {
+fn family<S>(commands: &mut Commands<S>) where S: ecs::Get<Name>, S: ecs::Columns, S: ecs::Unlinks<S>, S: ecs::Get<ecs::Relates<ecs::ChildOf>>, S: ecs::Get<ecs::Sources<ecs::ChildOf>> {
     let parent = commands.spawn((Name(0),));
     let mut i = 1;
     while({ i <= 3 }) { let child = commands.spawn((Name(i),)); commands.relate(child, ChildOf, parent); i = i + 1 }
@@ -141,7 +141,10 @@ fn main() -> Int {
     let mut app = App::new().register<Name>().relation<ChildOf>().add_systems(Update, family).build();
     app.emit(&Update);
     let mut most = 0;
-    app.world.query<(Entity, &Name)>().for_each() { e, n => if(n.0 == 0) { most = len_at(&app.world.sources<ChildOf>(e)) } else { () }; };
+    let mut roots = [];
+    app.world.query<(Entity, &Name)>().for_each() { e, n => if(n.0 == 0) { roots = push(roots, e) } else { () }; };
+    let mut r = 0;
+    while({ r < len_at(&roots) }) { most = len_at(&app.world.sources<ChildOf>(roots[r])); r = r + 1 };
     say(most);
     say("--");
 

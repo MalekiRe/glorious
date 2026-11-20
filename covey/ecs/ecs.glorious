@@ -2966,14 +2966,12 @@ impl<T> History<T> {
         } else { None }
     }
     // The first frame at which `holds` held of an entity's value.
-    pub fn first(h: &Self, entity: Entity, holds: fn(&T) -> Bool) -> Option<Int> {
-        let mut out = None;
-        let mut f = 0;
-        while({ f < len_at(&h.entities) }) {
-            if(none_at(&out)) { match(h.value_at(entity, f)) { Some(v) => if(holds(v)) { out = Some(f) } else { () }, None => () } };
-            f = f + 1
-        };
-        out
+    pub fn first(h: &Self, entity: Entity, holds: fn(&T) -> Bool) -> Option<Int> { h.first_from(entity, holds, 0) }
+    fn first_from(h: &Self, entity: Entity, holds: fn(&T) -> Bool, f: Int) -> Option<Int> {
+        if(f >= len_at(&h.entities)) { None } else {
+            let now = match(h.value_at(entity, f)) { Some(v) => holds(v), None => false };
+            if(now) { Some(f) } else { h.first_from(entity, holds, f + 1) }
+        }
     }
     // The runs of frames, first and last, over which `holds` held.
     pub fn when(h: &Self, entity: Entity, holds: fn(&T) -> Bool) -> [(Int, Int)] {

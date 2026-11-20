@@ -79,7 +79,7 @@ fn positioned<S>(world: AsyncWorld<S>) -> AsyncWorld<S> / {Bridge<S>}
 // `a_bridge_waits_for_its_label_and_until_waits_for_valid_parameters`
 fn needs_player(h: &mut Single<(&Health,), (With<Player>,)>) { () }
 fn player_health(h: &mut Single<(&Health,), (With<Player>,)>) -> Int { match(h.get_mut()) { Some((h,)) => h.0, None => 0 } }
-fn waiting<S>(world: AsyncWorld<S>) -> AsyncWorld<S> / {Bridge<S>} where S: ecs::Get<Health>, S: ecs::Get<Player> {
+fn waiting<S>(world: AsyncWorld<S>) -> AsyncWorld<S> / {Bridge<S>} where S: ecs::Get<Health>, S: ecs::Get<Player>, S: ecs::Hidden<(&Health,), (ecs::With<Player>,)> {
     let mut world = world;
     match(bridge(&mut world, Update, needs_player)) { Err(BridgeError::Invalid) => say("invalid"), Ok(_) => say("ran") };
     let hp = until(&mut world, Render, player_health);
@@ -97,7 +97,7 @@ fn healths(q: &mut Query<(&Health,), ()>) -> [Int] {
     q.for_each() { (h,) => out = push(out, h.0); };
     out
 }
-fn locals<S>(world: AsyncWorld<S>) -> AsyncWorld<S> / {Bridge<S>} where S: ecs::Get<Health>, S: ecs::Columns {
+fn locals<S>(world: AsyncWorld<S>) -> AsyncWorld<S> / {Bridge<S>} where S: ecs::Get<Health>, S: ecs::Columns, S: ecs::Hidden<(&Health,), ()> {
     let mut world = world;
     let mut local = [];
     bridge_world(&mut world, Update, two_healths);
@@ -114,7 +114,7 @@ fn counted(n: &mut Local<Int>, q: &mut Query<(&Health,), (Changed<Health>,)>) ->
     q.for_each() { (h,) => seen = push(seen, h.0); };
     (n.0, seen)
 }
-fn kept<S>(world: AsyncWorld<S>) -> AsyncWorld<S> / {Bridge<S>} where S: ecs::Get<Health> {
+fn kept<S>(world: AsyncWorld<S>) -> AsyncWorld<S> / {Bridge<S>} where S: ecs::Get<Health>, S: ecs::Hidden<(&Health,), (ecs::Changed<Health>,)> {
     let mut world = world;
     let mut system = keep(counted);
     let mut going = true;
@@ -152,7 +152,7 @@ fn sum_and_spawn<S>(q: &mut Query<(&A, &B), ()>, commands: &mut Commands<S>) -> 
 }
 fn count_a(q: &mut Query<(&A,), ()>) { if(q.count() == 2) { say("after 2") } else { say("after ?") } }
 fn see_b(q: &mut Query<(&B,), ()>) { () }
-fn between<S>(world: AsyncWorld<S>) -> AsyncWorld<S> / {Bridge<S>} where S: ecs::Get<A>, S: ecs::Get<B>, S: ecs::Columns, S: ecs::Unlinks<S> {
+fn between<S>(world: AsyncWorld<S>) -> AsyncWorld<S> / {Bridge<S>} where S: ecs::Get<A>, S: ecs::Get<B>, S: ecs::Columns, S: ecs::Unlinks<S>, S: ecs::Hidden<(&A, &B), ()> {
     let mut world = world;
     let mut system = keep(sum_and_spawn);
     let mut going = true;
@@ -205,8 +205,8 @@ fn main() -> Int {
     app.emit(&Update);
     app.emit(&Render);
     say(0);
-    let remote = std::thread::share(&flag);
-    spawn_detached(fn() { std::thread::store(&*remote, 1) }).wait();
+    let remote = flag;
+    spawn_detached(fn() { std::thread::store(&remote, 1) }).wait();
     app.emit(&Render);
     say("--");
 

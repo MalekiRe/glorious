@@ -38,6 +38,7 @@
 mod ecs;
 
 use core::option::{is_some, is_none};
+use std::vec::range;
 
 use ecs::{App, World, Entity, Query};
 use std::thread::{Shared, Mutex, lock};
@@ -52,6 +53,7 @@ impl Drop for Owned {
 }
 
 fn flag(b: Bool) { if(b) { say(1) } else { say(0) } }
+fn id_of(o: &Option<Owned>) -> Int { match(o) { &Some(r) => r.id, &None => 0 - 1 } }
 fn counted(drops: &Mutex<[Int]>, at: Int) -> Int { lock(&*drops, fn(d: &mut [Int]) -> Int { d[at] }) }
 
 fn main() -> Int {
@@ -86,7 +88,7 @@ fn main() -> Int {
         if(world.contains(e) != (i % 5 != 0)) { ok = false };
         if(i % 5 == 0) { if(is_some(world.get<Position>(e))) { ok = false } else { () } } else {
             match(world.get<Position>(e)) { Some(p) => if(p.0 != 2000 + 11 * i) { ok = false } else { () }, None => ok = false };
-            if(is_some(world.get<Tag>(e)) != (i % 3 != 0)) { ok = false }
+            if(is_some(world.get<Tag>(e)) != (i % 3 != 0)) { ok = false } else { () }
         };
         i = i + 1
     };
@@ -120,9 +122,9 @@ fn main() -> Int {
     while({ i < 64 }) { discard(world.insert(owned[i], Tag)); i = i + 1 };
     let mut i = 0;
     while({ i < 64 }) { discard(world.remove<Tag>(owned[i])); i = i + 2 };
-    let replaced = world.insert(owned[0], Owned { id: 64, drops: std::thread::share(&drops) });
+    let replaced: Option<Owned> = world.insert(owned[0], Owned { id: 64, drops: std::thread::share(&drops) });
     let removed = world.remove<Owned>(owned[1]);
-    flag(match(&replaced) { &Some(r) => r.id == 0, &None => false });
+    flag(id_of(&replaced) == 0);
     say(counted(&drops, 0));
     flag(world.despawn(owned[2]));
     say(counted(&drops, 1));
