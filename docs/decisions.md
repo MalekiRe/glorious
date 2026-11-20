@@ -6098,6 +6098,28 @@ loan, brand or touch reachable through what the type captures).
 - remote's loops that update until a worker is done yield between updates
   (threads run in turn here).
 
+## Compile times measured against Zig
+
+Zig 0.13.0 (the release tarball; the `zig` in `~/.cargo/bin` has no lib
+directory), on a 13-line program that uses `std.AutoHashMap`, `ArrayList`,
+`mem.sort` and `debug.print`, fresh caches each time but the last two:
+
+| | Zig 0.13.0 | Glorious |
+|---|---|---|
+| front end only, fresh (Zig `-fno-emit-bin`) | 165 ms | 210–440 ms (`examples/json`, `calculator`; the library's checking kept) |
+| same program again | — | 70–85 ms |
+| debug executable, fresh (compiler_rt built too) | 3.2 s | — |
+| debug executable, after an edit | 1.08 s | — |
+| covey/states2 (202 lines + ecs's 3580), fresh | — | 3.4 s |
+| states2, a function added | — | 0.76 s |
+| states2, main's body edited | — | 2.4 s |
+
+Where Glorious stands: an edit that adds a function is in Zig's debug
+rebuild's range; a fresh check of a program of ecs's size, or an edit of a
+function with many bounds (states2's `main`: 263, about 0.6 s of bounds), is
+not near Zig's front end, which is 10–20 times faster per program. Jai
+is not available here to measure.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by
