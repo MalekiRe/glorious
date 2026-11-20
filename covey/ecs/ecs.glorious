@@ -271,7 +271,10 @@ impl<T> Cloner for T where T: Clone { const CLONER: Option<fn(&T) -> T> = Some(c
 impl<T> Cloner for T { const CLONER: Option<fn(&T) -> T> = None; }
 
 // The columns, and which entities there are.
-pub struct World<S> { pub columns: S, generations: [Int], free: [Int], tick: Int, since: Int, remotes: std::thread::Mutex<[Request<S>]>, id: Int }
+pub struct World<S> { pub columns: S, generations: [Int], free: [Int], tick: Int, since: Int, remotes: std::thread::Mutex<[Request<S>]>, id: Int,
+    bring_names: [Str], bring_fns: [fn(&mut World<S>, Entity) -> ()],
+    // (What was brought since the app last looked: the entity and the component's name.)
+    brought_entities: [Entity], brought_names: [Str] }
 use std::thread::{Mutex, Threads, lock, channel, send, recv};
 fn no_remotes<S>() -> Mutex<[Request<S>]> { Mutex::new([]) }
 
@@ -624,31 +627,51 @@ impl<T> Requires for T { type Required = (); }
 
 // Each of a list of components the entity does not have, put on it at its
 // start, and what it requires.
-pub trait Brings<S> { fn bring(&mut World<S>, Entity) }
-impl<S> Brings<S> for () { fn bring(world: &mut World<S>, entity: Entity) { () } }
-impl<H: Default, ..R, S> Brings<S> for (H, ..R)
-    where S: Get<H>, H: Requires, H: EvictOne<S>, <H as Requires>::Required: Brings<S>, (..R): Brings<S> {
-    fn bring(world: &mut World<S>, entity: Entity) {
+pub trait BringsDirect<S> { fn bring_direct(&mut World<S>, Entity) }
+impl<S> BringsDirect<S> for () { fn bring_direct(world: &mut World<S>, entity: Entity) { () } }
+impl<H: Default, ..R, S> BringsDirect<S> for (H, ..R) where S: Get<H>, H: EvictOne<S>, H: Schedule, (..R): BringsDirect<S> {
+    fn bring_direct(world: &mut World<S>, entity: Entity) {
         if(<S as Get<H>>::has(&world.columns, entity)) { () } else {
-            // (Brought as it is put: the others of its groups taken away.)
+            // (Brought as it is put: the others of its groups taken away;
+            // and what it requires in turn, found by its name.)
             let _ = put_one(world, entity, default<H>());
-            <<H as Requires>::Required as Brings<S>>::bring(world, entity)
+            push_at(&mut world.brought_entities, entity);
+            push_at(&mut world.brought_names, <H as Schedule>::NAME);
+            bring_named(world, <H as Schedule>::NAME, entity)
         };
-        <(..R) as Brings<S>>::bring(world, entity)
+        <(..R) as BringsDirect<S>>::bring_direct(world, entity)
     }
 }
-// What one component requires, brought.
-pub trait BringsOne<S> { fn bring_one(&mut World<S>, Entity) }
-impl<T, S> BringsOne<S> for T where T: Requires, <T as Requires>::Required: Brings<S> {
-    fn bring_one(world: &mut World<S>, entity: Entity) { <<T as Requires>::Required as Brings<S>>::bring(world, entity) }
+// What brings what each of the world's components requires, by the
+// component's name: made once the app is built (`Bringers`), so that what
+// a required component requires is found when it is brought, and not asked
+// of its type, where components that require each other would ask it of
+// themselves (upstream's `cycles_add_each_member_once`).
+pub trait Bringers<S> { fn bringers() -> ([Str], [fn(&mut World<S>, Entity) -> ()]) }
+impl<S> Bringers<S> for () { fn bringers() -> ([Str], [fn(&mut World<S>, Entity) -> ()]) { ([], []) } }
+impl<H, R, S> Bringers<S> for (Column<H>, R) where H: Requires, <H as Requires>::Required: BringsDirect<S>, H: Schedule, R: Bringers<S> {
+    fn bringers() -> ([Str], [fn(&mut World<S>, Entity) -> ()]) {
+        let (names, fns) = <R as Bringers<S>>::bringers();
+        (push(names, <H as Schedule>::NAME), push(fns, fn(world: &mut World<S>, entity: Entity) { <<H as Requires>::Required as BringsDirect<S>>::bring_direct(world, entity) }))
+    }
+}
+impl<H, R, S> Bringers<S> for (Resource<H>, R) where R: Bringers<S> {
+    fn bringers() -> ([Str], [fn(&mut World<S>, Entity) -> ()]) { <R as Bringers<S>>::bringers() }
+}
+// What the component named `name` requires, brought.
+fn bring_named<S>(world: &mut World<S>, name: Str, entity: Entity) {
+    let mut i = 0;
+    while({ i < len_at(&world.bring_names) }) {
+        if(world.bring_names[i] == name) { let f = world.bring_fns[i]; f(world, entity) } else { () };
+        i = i + 1
+    }
 }
 // What each of a list of components requires, brought.
 pub trait BringsFor<S> { fn bring_for(&mut World<S>, Entity) }
 impl<S> BringsFor<S> for () { fn bring_for(world: &mut World<S>, entity: Entity) { () } }
-impl<H, ..R, S> BringsFor<S> for (H, ..R)
-    where H: Requires, <H as Requires>::Required: Brings<S>, (..R): BringsFor<S> {
+impl<H, ..R, S> BringsFor<S> for (H, ..R) where H: Schedule, (..R): BringsFor<S> {
     fn bring_for(world: &mut World<S>, entity: Entity) {
-        <<H as Requires>::Required as Brings<S>>::bring(world, entity);
+        bring_named(world, <H as Schedule>::NAME, entity);
         <(..R) as BringsFor<S>>::bring_for(world, entity)
     }
 }
@@ -751,17 +774,17 @@ impl<S> World<S> {
     pub fn spawn_bundle<B>(world: &mut Self, bundle: B) -> Entity where B: Bundle<S> { spawn_with(world, bundle) }
 
     // An empty world of the columns `S`.
-    pub fn new() -> World<S> where S: Columns { World { columns: <S as Columns>::empty(), generations: [], free: [], tick: 1, since: 0, remotes: no_remotes(), id: std::thread::fresh_number() } }
+    pub fn new() -> World<S> where S: Columns { World { columns: <S as Columns>::empty(), generations: [], free: [], tick: 1, since: 0, remotes: no_remotes(), id: std::thread::fresh_number(), bring_names: [], bring_fns: [], brought_entities: [], brought_names: [] } }
 
     // Give an entity a component, or another value of one it has: the one
     // it had, if it had one.
-    pub fn insert<T>(world: &mut Self, entity: Entity, value: T) -> Option<T> where S: Get<T>, T: EvictOne<S>, T: BringsOne<S> {
+    pub fn insert<T>(world: &mut Self, entity: Entity, value: T) -> Option<T> where S: Get<T>, T: EvictOne<S>, T: Schedule {
         // (A match, whose clauses are given the value each once: a value
         // that has a `drop` is put.)
         match(alive(&*world, entity)) {
             Ok(_) =>
                 let had = put_one(world, entity, value);
-                <T as BringsOne<S>>::bring_one(world, entity);
+                bring_named(world, <T as Schedule>::NAME, entity);
                 had,
             Err(_) => discard(value); None
         }
@@ -2110,16 +2133,60 @@ pub struct OnInsert<T> { pub entities: [Entity], none: [T] }
 pub struct OnReplace<T> { pub entities: [Entity], none: [T] }
 pub struct OnRemove<T> { pub entities: [Entity], none: [T] }
 // (A bundle's components, each added and put in.)
-pub trait Hooked<S, L> { fn added(&mut App<S, L>, [Entity]) }
-impl<S, L> Hooked<S, L> for () { fn added(app: &mut App<S, L>, entities: [Entity]) { discard(entities) } }
+// (All the `OnAdd`s first, of the bundle and then of what it brought, and
+// then all the `OnInsert`s, as upstream fires them.)
+// A component's hook, by the component's name: `kind` 0 its `OnAdd`, 1 its
+// `OnInsert` (what a required component brought fires).
+pub trait ByName<S, L> { fn fire_by_name(&mut App<S, L>, Int, Str, [Entity]) }
+impl<S, L> ByName<S, L> for () { fn fire_by_name(app: &mut App<S, L>, kind: Int, name: Str, entities: [Entity]) { discard(entities) } }
+impl<H, R, S, L> ByName<S, L> for (Column<H>, R)
+    where H: Schedule, L: Dispatch<OnAdd<H>, S>, L: Dispatch<OnInsert<H>, S>, S: Fires<S, L>, S: Requests<S, L>, R: ByName<S, L> {
+    fn fire_by_name(app: &mut App<S, L>, kind: Int, name: Str, entities: [Entity]) {
+        if(<H as Schedule>::NAME == name) {
+            if(kind == 0) { app.emit<OnAdd<H>>(&OnAdd { entities: entities, none: [] }) }
+            else { app.emit<OnInsert<H>>(&OnInsert { entities: entities, none: [] }) }
+        } else { <R as ByName<S, L>>::fire_by_name(app, kind, name, entities) }
+    }
+}
+impl<H, R, S, L> ByName<S, L> for (Resource<H>, R) where R: ByName<S, L> {
+    fn fire_by_name(app: &mut App<S, L>, kind: Int, name: Str, entities: [Entity]) { <R as ByName<S, L>>::fire_by_name(app, kind, name, entities) }
+}
+// The hooks of what was brought since the app last looked, of `kind`: each
+// component's once, with every entity it was brought to, in the order they
+// were first brought.
+fn fire_brought<S, L>(app: &mut App<S, L>, entities: &[Entity], names: &[Str], kind: Int) where S: ByName<S, L> {
+    let mut order = [];
+    let mut i = 0;
+    while({ i < len_at(names) }) {
+        let mut seen = false;
+        let mut k = 0;
+        while({ k < len_at(&order) }) { if(order[k] == names[i]) { seen = true } else { () }; k = k + 1 };
+        if(not(seen)) { push_at(&mut order, names[i]) } else { () };
+        i = i + 1
+    };
+    let mut n = 0;
+    while({ n < len_at(&order) }) {
+        let mut those = [];
+        let mut j = 0;
+        while({ j < len_at(names) }) { if(names[j] == order[n]) { push_at(&mut those, entities[j]) } else { () }; j = j + 1 };
+        <S as ByName<S, L>>::fire_by_name(app, kind, order[n], those);
+        n = n + 1
+    }
+}
+pub trait Hooked<S, L> { fn adds(&mut App<S, L>, [Entity]) fn inserts(&mut App<S, L>, [Entity]) }
+impl<S, L> Hooked<S, L> for () {
+    fn adds(app: &mut App<S, L>, entities: [Entity]) { discard(entities) }
+    fn inserts(app: &mut App<S, L>, entities: [Entity]) { discard(entities) }
+}
 impl<H, ..R, S, L> Hooked<S, L> for (H, ..R)
     where L: Dispatch<OnAdd<H>, S>, L: Dispatch<OnInsert<H>, S>, S: Fires<S, L>, S: Requests<S, L>, (..R): Hooked<S, L> {
-    fn added(app: &mut App<S, L>, entities: [Entity]) {
-        if(len_at(&entities) > 0) {
-            app.emit<OnAdd<H>>(&OnAdd { entities: clone(&entities), none: [] });
-            app.emit<OnInsert<H>>(&OnInsert { entities: clone(&entities), none: [] })
-        };
-        <(..R) as Hooked<S, L>>::added(app, entities)
+    fn adds(app: &mut App<S, L>, entities: [Entity]) {
+        if(len_at(&entities) > 0) { app.emit<OnAdd<H>>(&OnAdd { entities: clone(&entities), none: [] }) } else { () };
+        <(..R) as Hooked<S, L>>::adds(app, entities)
+    }
+    fn inserts(app: &mut App<S, L>, entities: [Entity]) {
+        if(len_at(&entities) > 0) { app.emit<OnInsert<H>>(&OnInsert { entities: clone(&entities), none: [] }) } else { () };
+        <(..R) as Hooked<S, L>>::inserts(app, entities)
     }
 }
 // (The columns an entity has, each about to be taken away.)
@@ -3037,6 +3104,9 @@ impl<S> World<S> {
         let mut copy = World::new();
         // (A copy of the same world: its entities are the world's.)
         copy.id = world.id;
+        copy.bring_names = clone(&world.bring_names);
+        let mut k = 0;
+        while({ k < len_at(&world.bring_fns) }) { let f = world.bring_fns[k]; push_at(&mut copy.bring_fns, f); k = k + 1 };
         copy.generations = clone(&world.generations);
         copy.free = clone(&world.free);
         copy.tick = world.tick;
@@ -3135,15 +3205,15 @@ pub struct App<S, L> { pub world: World<S>, systems: L }
 impl<S, L> App<S, L> {
     // An app with nothing in its world and no systems.
     pub fn new() -> App<(), ()> {
-        App { world: World { columns: (), generations: [], free: [], tick: 1, since: 0, remotes: no_remotes(), id: std::thread::fresh_number() }, systems: () }
+        App { world: World { columns: (), generations: [], free: [], tick: 1, since: 0, remotes: no_remotes(), id: std::thread::fresh_number(), bring_names: [], bring_fns: [], brought_entities: [], brought_names: [] }, systems: () }
     }
 
     // Give the world a resource.
     pub fn insert_resource<T>(app: Self, value: T) -> App<(Resource<T>, S), L> {
         let App { world, systems } = app;
-        let World { columns, generations, free, tick, since, remotes, id } = world;
+        let World { columns, generations, free, tick, since, remotes, id, bring_names: _, bring_fns: _, brought_entities: _, brought_names: _ } = world;
         discard(remotes);
-        App { world: World { columns: (Resource { value: Some(value) }, columns), generations: generations, free: free, tick: tick, since: since, remotes: no_remotes(), id: id }, systems: systems }
+        App { world: World { columns: (Resource { value: Some(value) }, columns), generations: generations, free: free, tick: tick, since: since, remotes: no_remotes(), id: id, bring_names: [], bring_fns: [], brought_entities: [], brought_names: [] }, systems: systems }
     }
 
     // The resource at its type's start.
@@ -3153,17 +3223,17 @@ impl<S, L> App<S, L> {
     // it from the systems that ask for it.)
     pub fn register_resource<T>(app: Self) -> App<(Resource<T>, S), L> {
         let App { world, systems } = app;
-        let World { columns, generations, free, tick, since, remotes, id } = world;
+        let World { columns, generations, free, tick, since, remotes, id, bring_names: _, bring_fns: _, brought_entities: _, brought_names: _ } = world;
         discard(remotes);
-        App { world: World { columns: (Resource { value: None }, columns), generations: generations, free: free, tick: tick, since: since, remotes: no_remotes(), id: id }, systems: systems }
+        App { world: World { columns: (Resource { value: None }, columns), generations: generations, free: free, tick: tick, since: since, remotes: no_remotes(), id: id, bring_names: [], bring_fns: [], brought_entities: [], brought_names: [] }, systems: systems }
     }
 
     // Store a component.
     pub fn register<T>(app: Self) -> App<(Column<T>, S), L> {
         let App { world, systems } = app;
-        let World { columns, generations, free, tick, since, remotes, id } = world;
+        let World { columns, generations, free, tick, since, remotes, id, bring_names: _, bring_fns: _, brought_entities: _, brought_names: _ } = world;
         discard(remotes);
-        App { world: World { columns: (empty_column(), columns), generations: generations, free: free, tick: tick, since: since, remotes: no_remotes(), id: id }, systems: systems }
+        App { world: World { columns: (empty_column(), columns), generations: generations, free: free, tick: tick, since: since, remotes: no_remotes(), id: id, bring_names: [], bring_fns: [], brought_entities: [], brought_names: [] }, systems: systems }
     }
 
     // Register systems under a label, named by a value of it: `Update`.
@@ -3186,21 +3256,29 @@ impl<S, L> App<S, L> {
     // Store a relation: what relates and what is related to.
     pub fn relation<R>(app: Self) -> App<<R as RelationColumns<S>>::Out, L> where R: RelationColumns<S> {
         let App { world, systems } = app;
-        let World { columns, generations, free, tick, since, remotes, id } = world;
+        let World { columns, generations, free, tick, since, remotes, id, bring_names: _, bring_fns: _, brought_entities: _, brought_names: _ } = world;
         discard(remotes);
-        App { world: World { columns: <R as RelationColumns<S>>::relation_columns(columns), generations: generations, free: free, tick: tick, since: since, remotes: no_remotes(), id: id }, systems: systems }
+        App { world: World { columns: <R as RelationColumns<S>>::relation_columns(columns), generations: generations, free: free, tick: tick, since: since, remotes: no_remotes(), id: id, bring_names: [], bring_fns: [], brought_entities: [], brought_names: [] }, systems: systems }
     }
 
     // Store each of a list of components: `.register_all<(Position, Velocity)>()`.
     pub fn register_all<C>(app: Self) -> App<<C as Registers<S>>::Out, L> where C: Registers<S> {
         let App { world, systems } = app;
-        let World { columns, generations, free, tick, since, remotes, id } = world;
+        let World { columns, generations, free, tick, since, remotes, id, bring_names: _, bring_fns: _, brought_entities: _, brought_names: _ } = world;
         discard(remotes);
-        App { world: World { columns: <C as Registers<S>>::register_all(columns), generations: generations, free: free, tick: tick, since: since, remotes: no_remotes(), id: id }, systems: systems }
+        App { world: World { columns: <C as Registers<S>>::register_all(columns), generations: generations, free: free, tick: tick, since: since, remotes: no_remotes(), id: id, bring_names: [], bring_fns: [], brought_entities: [], brought_names: [] }, systems: systems }
     }
 
     // The app, ready to run.
-    pub fn build(app: Self) -> Self { app }
+    // The app, ready: what brings what each component requires found, of
+    // the components it has.
+    pub fn build(app: Self) -> Self where S: Bringers<S> {
+        let mut app = app;
+        let (names, fns) = <S as Bringers<S>>::bringers();
+        app.world.bring_names = names;
+        app.world.bring_fns = fns;
+        app
+    }
 
     // Make `state` its group's active state.
     pub fn set_state<T>(app: &mut Self, state: T)
@@ -3268,25 +3346,39 @@ impl<S, L> App<S, L> {
         App { world: world, systems: (ComputedOf { none: [] }, systems) }
     }
     // The world's structural operations, with the hooks they fire.
-    pub fn spawn_bundle<B>(app: &mut Self, bundle: B) -> Entity where B: Bundle<S>, B: Hooked<S, L> {
+    pub fn spawn_bundle<B>(app: &mut Self, bundle: B) -> Entity where B: Bundle<S>, B: Hooked<S, L>, S: ByName<S, L> {
         let entity = app.world.spawn_bundle(bundle);
-        <B as Hooked<S, L>>::added(app, [entity]);
+        let brought = replace(&mut app.world.brought_entities, []);
+        let names = replace(&mut app.world.brought_names, []);
+        <B as Hooked<S, L>>::adds(app, [entity]);
+        fire_brought(app, &brought, &names, 0);
+        <B as Hooked<S, L>>::inserts(app, [entity]);
+        fire_brought(app, &brought, &names, 1);
         entity
     }
-    pub fn spawn_batch<B>(app: &mut Self, bundles: [B]) -> [Entity] where B: Bundle<S>, B: Hooked<S, L> {
+    pub fn spawn_batch<B>(app: &mut Self, bundles: [B]) -> [Entity] where B: Bundle<S>, B: Hooked<S, L>, S: ByName<S, L> {
         let made = app.world.spawn_batch(bundles);
-        <B as Hooked<S, L>>::added(app, clone(&made));
+        let brought = replace(&mut app.world.brought_entities, []);
+        let names = replace(&mut app.world.brought_names, []);
+        <B as Hooked<S, L>>::adds(app, clone(&made));
+        fire_brought(app, &brought, &names, 0);
+        <B as Hooked<S, L>>::inserts(app, clone(&made));
+        fire_brought(app, &brought, &names, 1);
         made
     }
     pub fn insert<T>(app: &mut Self, entity: Entity, value: T) -> Option<T>
-        where S: Get<T>, T: EvictOne<S>, T: BringsOne<S>, T: Use<[0, *]>, S: Fires<S, L>, S: Requests<S, L>,
-              L: Dispatch<OnAdd<T>, S>, L: Dispatch<OnInsert<T>, S>, L: Dispatch<OnReplace<T>, S>, T: EvictsHooked<S, L> {
+        where S: Get<T>, T: EvictOne<S>, T: Schedule, T: Use<[0, *]>, S: Fires<S, L>, S: Requests<S, L>,
+              L: Dispatch<OnAdd<T>, S>, L: Dispatch<OnInsert<T>, S>, L: Dispatch<OnReplace<T>, S>, T: EvictsHooked<S, L>, S: ByName<S, L> {
         <T as EvictsHooked<S, L>>::evicting_hooked(app, entity);
         let had = <S as Get<T>>::has(&app.world.columns, entity);
         if(had) { app.emit<OnReplace<T>>(&OnReplace { entities: [entity], none: [] }) };
         let old = app.world.insert(entity, value);
+        let brought = replace(&mut app.world.brought_entities, []);
+        let names = replace(&mut app.world.brought_names, []);
         if(not(had)) { app.emit<OnAdd<T>>(&OnAdd { entities: [entity], none: [] }) };
+        fire_brought(app, &brought, &names, 0);
         app.emit<OnInsert<T>>(&OnInsert { entities: [entity], none: [] });
+        fire_brought(app, &brought, &names, 1);
         old
     }
     pub fn remove<T>(app: &mut Self, entity: Entity) -> Option<T> where S: Get<T>, S: Fires<S, L>, S: Requests<S, L>, L: Dispatch<OnRemove<T>, S> {

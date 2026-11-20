@@ -5995,11 +5995,15 @@ Six of the 18 drafts still fail the suite. What each needs:
   `World<S>` (as `RunsOnWorld` runs a system), kept by the component's place
   among the columns (a `Get<T>` slot), and run by the world's insert,
   remove and despawn.
-- **required2**: components that require each other. `Brings<S>` asks the
-  required list's own `Brings` at the type level, which is a cycle for
-  `Left` and `Right`; upstream finds them at run time. Needs either a
-  run-time registry of what each component brings (made at `register`) or
-  a trait solver that takes such a cycle as met (coinductively).
+- ~~**required2**~~: passes. What a component requires is brought by a
+  table the app makes when it is built (`Bringers`: each component's name,
+  and what brings what it requires), and what a brought component requires
+  is found by its name when it is brought: no type asks it of itself, so
+  `Left` and `Right` requiring each other each bring the other once. What
+  is brought fires its `OnAdd` and `OnInsert` (`ByName`, each component's
+  once with all its entities, after the bundle's). Still departing: a
+  plugin's components do not register what they require; the plugin says
+  them (`Flock`).
 - **tasks**: the instances pass (`Elab.instances`) drops a function that
   performs an effect of its caller's choosing when nothing calls it by name;
   a trait's function reached through an implementation's dictionary is not

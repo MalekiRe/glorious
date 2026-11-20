@@ -83,10 +83,12 @@ fn spawn_birds<S>(commands: &mut Commands<S>, done: &mut Done)
 }
 
 struct Flock
+// (Its components, and what they require, said: a plugin's components do
+// not register what they require here; see docs/decisions.md.)
 impl<S, L> Plugin<S, L> for Flock {
-    type Components = (Bird,);
-    type Out = ecs::App<<(Bird,) as ecs::Registers<S>>::Out, L>;
-    fn build(flock: Flock, app: ecs::App<<(Bird,) as ecs::Registers<S>>::Out, L>) -> ecs::App<<(Bird,) as ecs::Registers<S>>::Out, L> { app }
+    type Components = (Bird, Pos, Vel, Mass);
+    type Out = ecs::App<<(Bird, Pos, Vel, Mass) as ecs::Registers<S>>::Out, L>;
+    fn build(flock: Flock, app: ecs::App<<(Bird, Pos, Vel, Mass) as ecs::Registers<S>>::Out, L>) -> ecs::App<<(Bird, Pos, Vel, Mass) as ecs::Registers<S>>::Out, L> { app }
 }
 
 fn main() -> Int {
