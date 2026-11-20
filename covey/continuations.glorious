@@ -1,0 +1,113 @@
+// Upstream's tests/continuations.rs and tests/execution.rs, of nodes and
+// branches that run at once:
+// - `narrow_prefix_reactivates_workers_and_nested_groups_join`: a node that
+//   is a parallel group whose branches meet at a barrier, after a node and
+//   before one that sees both branches done. (20 emits, upstream's 100.)
+// - `flattened_condition_skips_preserve_locals_and_release_dependents`.
+// - `conflicting_nodes_are_serialized_without_dependency_edges`: two nodes
+//   that write one component, each yielding while it runs, never run at
+//   once. (20 emits, upstream's 50.)
+// expect:
+// 40
+// 0
+// --
+// 2 2 2 6
+// --
+// 60
+// 0
+// 0
+mod ecs;
+
+use ecs::{App, World, Single, Local, ready, node, parallel, run_if, waits};
+use std::thread::{AtomicInt, fetch_add, load, store, yield_now, Threads, Mutex, lock};
+
+struct Update
+struct Prefix
+struct Fork
+struct Join
+struct A
+struct B
+struct Gate(Bool)
+struct Value(Int)
+
+fn meet(at: &AtomicInt) / {Threads} {
+    let round = load(at) / 2;
+    discard(fetch_add(at, 1));
+    while({ load(at) < (round + 1) * 2 }) { yield_now() }
+}
+fn gate_open(gate: &mut Single<(&Gate,), ()>) -> Bool { match(gate.get_mut()) { Some((g,)) => g.0, None => false } }
+
+fn main() -> Int {
+    let rendezvous = AtomicInt::new(0);
+    let count = AtomicInt::new(0);
+    let wrong = AtomicInt::new(0);
+    let mut app = App::new()
+        .add_systems(Update, ready((
+            node(Prefix, fn() { () }),
+            node(Fork, parallel((
+                waits(fn() / {Threads} { let r = rendezvous; let c = count; meet(&r); discard(fetch_add(&c, 1)) }),
+                waits(fn() / {Threads} { let r = rendezvous; let c = count; meet(&r); discard(fetch_add(&c, 1)) })
+            ))).after(Prefix),
+            node(Join, fn(invocation: &mut Local<Int>) {
+                let c = count;
+                let w = wrong;
+                invocation.0 = invocation.0 + 1;
+                if(load(&c) == invocation.0 * 2) { () } else { discard(fetch_add(&w, 1)) }
+            }).after(Fork)
+        )))
+        .build();
+    let mut i = 0;
+    while({ i < 20 }) { app.emit(&Update); i = i + 1 };
+    say(load(&count));
+    say(load(&wrong));
+    say("--");
+
+    let total = AtomicInt::new(0);
+    let visits: Mutex<[Int]> = Mutex::new([]);
+    let mut app = App::new().register<Gate>()
+        .add_systems(Update, ready((
+            node(Fork, parallel((
+                fn(local: &mut Local<Int>) { let t = total; local.0 = local.0 + 1; discard(fetch_add(&t, local.0)) },
+                fn(local: &mut Local<Int>) { let t = total; local.0 = local.0 + 1; discard(fetch_add(&t, local.0)) }
+            )).run_if(gate_open)),
+            node(Join, fn() { let t = total; let v = visits; let n = load(&t); lock(&v, fn(list: &mut [Int]) { push_at(list, n) }) }).after(Fork)
+        )))
+        .build();
+    let gate = app.world.spawn_bundle((Gate(true),));
+    let enabled = [true, false, false, true];
+    let mut k = 0;
+    while({ k < 4 }) {
+        match(app.world.get_mut<Gate>(gate)) { Some(mut g) => g.0 = enabled[k];, None => () };
+        app.emit(&Update);
+        k = k + 1
+    };
+    say(lock(&visits, fn(list: &mut [Int]) -> Str { std::text::join(std::vec::map(clone(&*list), fn(n: Int) -> Str { show(n) }), " ") }));
+    say("--");
+
+    let active = AtomicInt::new(0);
+    let overlapped = AtomicInt::new(0);
+    let mut app = App::new().register<Value>()
+        .add_systems(Update, ready((
+            node(A, waits(fn(value: &mut Single<(&mut Value,), ()>) / {Threads} {
+                let a = active; let o = overlapped;
+                if(fetch_add(&a, 1) == 0) { () } else { discard(fetch_add(&o, 1)) };
+                yield_now();
+                match(value.get_mut()) { Some((mut v,)) => v.0 = v.0 + 1;, None => () };
+                discard(fetch_add(&a, 0 - 1))
+            })),
+            node(B, waits(fn(value: &mut Single<(&mut Value,), ()>) / {Threads} {
+                let a = active; let o = overlapped;
+                if(fetch_add(&a, 1) == 0) { () } else { discard(fetch_add(&o, 1)) };
+                yield_now();
+                match(value.get_mut()) { Some((mut v,)) => v.0 = v.0 + 2;, None => () };
+                discard(fetch_add(&a, 0 - 1))
+            }))
+        )))
+        .build();
+    let entity = app.world.spawn_bundle((Value(0),));
+    let mut j = 0;
+    while({ j < 20 }) { app.emit(&Update); j = j + 1 };
+    say(match(app.world.get<Value>(entity)) { Some(v) => v.0, None => 0 });
+    say(load(&overlapped));
+    0
+}
