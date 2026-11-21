@@ -1,0 +1,68 @@
+// Upstream's tests/relations.rs, of fragmenting relations (kept as pairs,
+// with the entity: `Fragmenting`, which carries nothing):
+// - `fragmenting_bundle_values_become_pairs`: a value put on an entity
+//   relates it, and is no component of it; put again, it moves the link.
+// - `churning_fragmenting_targets_reuses_dead_tables`: relating to a new
+//   target round after round, the world comes to no more kinds of entity
+//   (`archetype_count`) than after the first.
+// expect:
+// [1]
+// none
+// [2]
+// [3]
+// []
+// [0, 1, 2]
+// 0
+// 0
+mod ecs;
+
+use ecs::{App, World, Entity, Relation, OneToMany, Fragmenting, Relates, to};
+
+struct Name(Int)
+struct InSquad
+impl Relation for InSquad { type Kind = OneToMany; }
+impl Fragmenting for InSquad {}
+impl Eq for InSquad { fn ==(a: InSquad, b: InSquad) -> Bool { true } }
+impl Clone for InSquad { fn clone(s: &InSquad) -> InSquad { InSquad } }
+
+fn names<S>(world: &World<S>, es: [Entity]) -> [Int] where S: ecs::Get<Name> {
+    let mut out = [];
+    let mut i = 0;
+    while({ i < len_at(&es) }) { out = push(out, match(world.get<Name>(es[i])) { Some(n) => n.0, None => 0 - 1 }); i = i + 1 };
+    std::vec::sort(out)
+}
+
+fn main() -> Int {
+    let mut world = App::new().relation<InSquad>().register<Name>().build().into_world();
+    let alpha = world.spawn_bundle((Name(1),));
+    let beta = world.spawn_bundle((Name(2),));
+    let member = world.spawn_bundle((Name(3), InSquad.to(alpha)));
+    say(names(&world, world.targets<InSquad>(member)));
+    say(match(world.get<Relates<InSquad>>(member)) { Some(_) => "some", None => "none" });
+    discard(world.insert(member, InSquad.to(beta)));
+    say(names(&world, world.targets<InSquad>(member)));
+    say(names(&world, world.sources<InSquad>(beta)));
+    say(names(&world, world.sources<InSquad>(alpha)));
+
+    let mut first = 0 - 1;
+    let mut grew = 0;
+    let mut round = 0;
+    let mut shown = false;
+    while({ round < 20 }) {
+        let squad = world.spawn_bundle((Name(1000),));
+        let mut members = [];
+        let mut k = 0;
+        while({ k < 3 }) { members = push(members, world.spawn_bundle((Name(k),))); k = k + 1 };
+        let mut m = 0;
+        while({ m < 3 }) { discard(world.relate(members[m], InSquad, squad)); m = m + 1 };
+        if(shown) { () } else { say(names(&world, world.sources<InSquad>(squad))); shown = true };
+        let mut d = 0;
+        while({ d < 3 }) { discard(world.despawn(members[d])); d = d + 1 };
+        discard(world.despawn(squad));
+        let tables = world.archetype_count();
+        if(first < 0) { first = tables } else if(tables != first) { grew = grew + 1 } else { () };
+        round = round + 1
+    };
+    say(grew);
+    0
+}

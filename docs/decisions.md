@@ -6453,6 +6453,25 @@ Found on the way: a `drop` reading through the reference it is given
 the unit's end, which looked at the function then being checked, not the
 one the requirement was made in; it now reads that from the requirement.
 
+## Fragmenting relations in covey
+
+**Decision: a relation is kept as pairs (upstream's `FRAGMENTING`) where it
+says so, `impl Fragmenting for InSquad {}`, and `Fragmenting` asks
+`NilRepresented`, so one that carries something is refused where it says
+it (upstream's `size_of::<R>() == 0` in a const assertion).** What relates
+by such a relation is kept with the entity, as part of what it is: its link
+is no component (`World::get` and `get_mut` of `Relates<R>` or `Links<R>`
+are none, `Visible`), while `targets`, `sources`, `Related` and joins go on
+as before. `archetype_count` counts the kinds of entity the world has: the
+components each has, with each fragmenting relation's target (`kind_of`,
+`PairKey`); covey keeps columns, not tables, so it counts the kinds of the
+entities there are, and a kind no entity is of any more is not counted, as
+a table upstream uses again is not a new one. `targets` is of every kind
+of relation (`TargetsBy`). covey/fragmenting ports
+`fragmenting_bundle_values_become_pairs` and
+`churning_fragmenting_targets_reuses_dead_tables`; covey/joins4's relations
+are fragmenting, as upstream's are.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by

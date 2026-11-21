@@ -11,8 +11,8 @@
 // - `descendants_come_parents_first_for_both_storages`.
 // - `linked_fragmenting_relations_despawn_subtrees_and_terminate_on_cycles`.
 // - `many_to_many_relations_allow_self_edges`.
-// Not ported: `churning_fragmenting_targets_reuses_dead_tables` and the
-// others that count tables (`archetype_count`): covey has no tables.
+// `churning_fragmenting_targets_reuses_dead_tables` and
+// `fragmenting_bundle_values_become_pairs` are in fragmenting.glorious.
 // expect:
 // [1, 2]
 // [0]

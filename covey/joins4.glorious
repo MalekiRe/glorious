@@ -1,5 +1,5 @@
-// Upstream's tests/relations.rs, of joins inside systems (its relations
-// are fragmenting, which covey's are not: the same joins, of columns):
+// Upstream's tests/relations.rs, of joins inside systems, of fragmenting
+// relations (kept as pairs: `Fragmenting`):
 // - `fragmenting_joins_run_in_systems_and_infer_joined_components`: a
 //   system writes the target's `Fuel` through `To<InSquad, &mut Fuel>`,
 //   another each source's through `From<InSquad, &mut Fuel>`; the two run
@@ -38,10 +38,12 @@ struct Name(Int)
 struct Fuel(Int)
 struct InSquad
 impl Relation for InSquad { type Kind = OneToMany; }
+impl ecs::Fragmenting for InSquad {}
 impl Eq for InSquad { fn ==(a: InSquad, b: InSquad) -> Bool { true } }
 impl Clone for InSquad { fn clone(a: &InSquad) -> InSquad { InSquad } }
 struct Tagged
 impl Relation for Tagged { type Kind = ManyToMany; }
+impl ecs::Fragmenting for Tagged {}
 impl Use<[0, *]> for Tagged {}
 struct Log([(Int, Int)], Int)
 

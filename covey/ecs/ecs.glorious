@@ -184,6 +184,9 @@ fn lower<T, S>(columns: &mut S, value: T) where S: Holds<T> { *<S as Holds<T>>::
 pub trait Columns {
     // (The names of the components an entity has, for the world's hooks.)
     fn held(&Self, Entity, [Str]) -> [Str]
+    // (What it is: each component it has, with what a fragmenting relation's
+    // link says, `archetype_count`.)
+    fn kind_of(&Self, Entity, Str) -> Str
     fn forget(&mut Self, Entity)
     fn empty() -> Self
     fn copy_onto(&mut Self, Entity, Entity)
@@ -191,15 +194,21 @@ pub trait Columns {
 }
 impl Columns for () {
     fn held(columns: &(), entity: Entity, names: [Str]) -> [Str] { names }
+    fn kind_of(columns: &(), entity: Entity, kind: Str) -> Str { kind }
     fn forget(columns: &mut (), entity: Entity) { () }
     fn empty() { () }
     fn copy_onto(columns: &mut (), from: Entity, to: Entity) { () }
     fn copy_all(columns: &(), into: &mut ()) { () }
 }
-impl<H, R> Columns for (Column<H>, R) where R: Columns, H: Cloner, H: Schedule {
+impl<H, R> Columns for (Column<H>, R) where R: Columns, H: Cloner, H: Schedule, H: PairKey {
     fn held(columns: &(Column<H>, R), entity: Entity, names: [Str]) -> [Str] {
         let rest = <R as Columns>::held(&columns.1, entity, names);
         if(slot_of(&columns.0, entity) < 0) { rest } else { push(rest, <H as Schedule>::NAME) }
+    }
+    fn kind_of(columns: &(Column<H>, R), entity: Entity, kind: Str) -> Str {
+        let at = slot_of(&columns.0, entity);
+        let mine = if(at < 0) { kind } else { kind ++ "," ++ <H as Schedule>::NAME ++ <H as PairKey>::pair_key(&columns.0.dense[at]) };
+        <R as Columns>::kind_of(&columns.1, entity, mine)
     }
     fn forget(columns: &mut (Column<H>, R), entity: Entity) {
         let _ = column_remove(&mut columns.0, entity);
@@ -232,6 +241,7 @@ impl<H, R> Columns for (Column<H>, R) where R: Columns, H: Cloner, H: Schedule {
 }
 impl<H, R> Columns for (Resource<H>, R) where R: Columns {
     fn held(columns: &(Resource<H>, R), entity: Entity, names: [Str]) -> [Str] { <R as Columns>::held(&columns.1, entity, names) }
+    fn kind_of(columns: &(Resource<H>, R), entity: Entity, kind: Str) -> Str { <R as Columns>::kind_of(&columns.1, entity, kind) }
     fn forget(columns: &mut (Resource<H>, R), entity: Entity) { <R as Columns>::forget(&mut columns.1, entity) }
     fn empty() -> (Resource<H>, R) { (Resource { value: None }, <R as Columns>::empty()) }
     fn copy_onto(columns: &mut (Resource<H>, R), from: Entity, to: Entity) { <R as Columns>::copy_onto(&mut columns.1, from, to) }
@@ -348,6 +358,38 @@ pub struct Relates<R> { pub relation: R, pub target: Entity }
 // one each way (`OneToOne`: relating to a target another relates to undoes
 // that one's link).
 pub trait Relation { type Kind; }
+// A relation kept as pairs, upstream's `FRAGMENTING`: what relates is kept
+// with the entity it relates to, as part of what it is (a table of its own,
+// upstream), not as a component, so `world.get<Relates<R>>` is none of it
+// while `targets`, `sources` and joins go on as before. It carries nothing
+// (`NilRepresented`, upstream's `size_of::<R>() == 0`):
+// `impl Fragmenting for InSquad {}`.
+pub trait Fragmenting: NilRepresented {}
+pub trait FragmentIs { const FRAGMENTS: Bool; }
+impl<R> FragmentIs for R where R: Fragmenting { const FRAGMENTS: Bool = true; }
+impl<R> FragmentIs for R { const FRAGMENTS: Bool = false; }
+// Whether a component is seen as one: a fragmenting relation's link is not.
+pub trait Visible { fn visible() -> Bool }
+impl<T> Visible for T { fn visible() -> Bool { true } }
+impl<R> Visible for Relates<R> where R: FragmentIs { fn visible() -> Bool { not(<R as FragmentIs>::FRAGMENTS) } }
+impl<R> Visible for Links<R> where R: FragmentIs { fn visible() -> Bool { not(<R as FragmentIs>::FRAGMENTS) } }
+// What part of what an entity is a component says, beside that it has it:
+// a fragmenting relation's target (as upstream's table is the pair's).
+pub trait PairKey { fn pair_key(&Self) -> Str }
+impl<T> PairKey for T { fn pair_key(value: &T) -> Str { "" } }
+impl<R> PairKey for Relates<R> where R: FragmentIs {
+    fn pair_key(link: &Relates<R>) -> Str { if(<R as FragmentIs>::FRAGMENTS) { "->" ++ show(link.target.index) } else { "" } }
+}
+impl<R> PairKey for Links<R> where R: FragmentIs {
+    fn pair_key(links: &Links<R>) -> Str {
+        if(<R as FragmentIs>::FRAGMENTS) {
+            let mut out = "";
+            let mut i = 0;
+            while({ i < len_at(&links.list) }) { out = out ++ "->" ++ show(links.list[i].target.index); i = i + 1 };
+            out
+        } else { "" }
+    }
+}
 pub struct OneToMany
 pub struct OneToOne
 // Any number each way (`Allied`): an entity that relates has `Links<R>`, a
@@ -655,6 +697,12 @@ fn target_in<R, S>(columns: &S, source: Entity) -> Option<Entity> where S: Get<R
     if(at >= 0) { Some(links.dense[at].target) } else { None }
 }
 
+// What an entity relates to by `R`, by the relation's kind.
+pub trait TargetsBy<R, S> { fn targets_by(&S, Entity) -> [Entity] }
+impl<R, S> TargetsBy<R, S> for OneToMany where S: Get<Relates<R>> { fn targets_by(columns: &S, source: Entity) -> [Entity] { match(target_in<R, S>(columns, source)) { Some(t) => [t], None => [] } } }
+impl<R, S> TargetsBy<R, S> for OneToOne where S: Get<Relates<R>> { fn targets_by(columns: &S, source: Entity) -> [Entity] { match(target_in<R, S>(columns, source)) { Some(t) => [t], None => [] } } }
+impl<R, S> TargetsBy<R, S> for ManyToMany where S: Get<Links<R>> { fn targets_by(columns: &S, source: Entity) -> [Entity] { targets_in<R, S>(columns, source) } }
+
 // What relates to an entity by `R`, among the world's columns.
 fn sources_in<R, S>(columns: &S, target: Entity) -> [Entity] where S: Get<Sources<R>> {
     let sources = <S as Get<Sources<R>>>::column(columns);
@@ -946,7 +994,7 @@ impl<R, S> PutLink<S> for Relates<R> where R: Relation, <R as Relation>::Kind: P
 // replaces every edge of a many-to-many source, `relate` adds one).
 pub trait PutsBy<R, S> { fn put_by(&mut World<S>, Entity, R, Entity) -> Option<Relates<R>> fn linked_by(&World<S>, Entity) -> Bool }
 fn put_one_way<R, S>(world: &mut World<S>, entity: Entity, relation: R, target: Entity) -> Option<Relates<R>> where R: RelateBy<S>, S: Get<Relates<R>> {
-    let before = match(world.get<Relates<R>>(entity)) { Some(r) => r.target, None => Entity::PLACEHOLDER };
+    let before = match(target_in<R, S>(&world.columns, entity)) { Some(t) => t, None => Entity::PLACEHOLDER };
     match(world.relate(entity, relation, target)) { Some(r) => Some(Relates { relation: r, target: before }), None => None }
 }
 impl<R, S> PutsBy<R, S> for OneToMany where R: RelateBy<S>, S: Get<Relates<R>> {
@@ -983,7 +1031,7 @@ pub trait Take<S> { fn take_value(&mut World<S>, Entity) -> Option<Self> }
 pub trait TakeLink<S> { fn unlink_value(&mut World<S>, Entity) -> Option<Self> }
 impl<R, S> TakeLink<S> for Relates<R> where S: Get<Relates<R>>, S: Get<Sources<R>> {
     fn unlink_value(world: &mut World<S>, entity: Entity) -> Option<Relates<R>> {
-        let target = match(world.get<Relates<R>>(entity)) { Some(r) => r.target, None => Entity::PLACEHOLDER };
+        let target = match(target_in<R, S>(&world.columns, entity)) { Some(t) => t, None => Entity::PLACEHOLDER };
         match(world.unrelate<R>(entity)) { Some(r) => Some(Relates { relation: r, target: target }), None => None }
     }
 }
@@ -1109,7 +1157,7 @@ impl<S> World<S> {
         unlink_from<R, S>(world, source, target)
     }
     // What an entity relates to by a relation of any number each way.
-    pub fn targets<R>(world: &Self, source: Entity) -> [Entity] where S: Get<Links<R>> { targets_in<R, S>(&world.columns, source) }
+    pub fn targets<R, K>(world: &Self, source: Entity) -> [Entity] where R: Relation<Kind = K>, K: TargetsBy<R, S> { <K as TargetsBy<R, S>>::targets_by(&world.columns, source) }
     // What an entity relates to by `R`, if anything.
     pub fn target<R>(world: &Self, source: Entity) -> Option<Entity> where S: Get<Relates<R>> {
         target_in<R, S>(&world.columns, source)
@@ -1206,18 +1254,39 @@ impl<S> World<S> {
         was
     }
 
+    // How many kinds of entity the world has, upstream's tables: entities
+    // with the same components, and the same target of each fragmenting
+    // relation, are of one. (covey keeps components in columns, not tables:
+    // this counts the kinds of the entities there are, so a kind no entity
+    // is of any more is none, as a table upstream uses again.)
+    pub fn archetype_count(world: &Self) -> Int where S: Columns {
+        let all = entities(world);
+        let mut kinds: [Str] = [];
+        let mut i = 0;
+        while({ i < len_at(&all) }) {
+            let k = <S as Columns>::kind_of(&world.columns, all[i], "");
+            let mut known = false;
+            let mut j = 0;
+            while({ j < len_at(&kinds) }) { if(kinds[j] == k) { known = true } else { () }; j = j + 1 };
+            if(known) { () } else { kinds = push(kinds, k) };
+            i = i + 1
+        };
+        len_at(&kinds)
+    }
+
     // An entity's component.
-    pub fn get<T>(world: &Self, entity: Entity) -> Option<&T> where S: Get<T> {
+    pub fn get<T>(world: &Self, entity: Entity) -> Option<&T> where S: Get<T>, T: Visible {
         let column = <S as Get<T>>::column(&world.columns);
-        // (Of another world, or gone: none of this world's.)
-        let at = if(alive(world, entity)) { slot_of(column, entity) } else { 0 - 1 };
+        // (Of another world, or gone: none of this world's. A fragmenting
+        // relation's link is not a component.)
+        let at = if(if(alive(world, entity)) { <T as Visible>::visible() } else { false }) { slot_of(column, entity) } else { 0 - 1 };
         if(at < 0) { None } else { Some(&column.dense[at]) }
     }
 
     // An entity's component, to change: a change once `get_mut` is asked of it.
-    pub fn get_mut<T>(world: &mut Self, entity: Entity) -> Option<Mut<'_, T>> where S: Get<T>, T: Writable {
+    pub fn get_mut<T>(world: &mut Self, entity: Entity) -> Option<Mut<'_, T>> where S: Get<T>, T: Writable, T: Visible {
         let now = world.tick;
-        let here = alive(&*world, entity);
+        let here = if(alive(&*world, entity)) { <T as Visible>::visible() } else { false };
         let column = <S as Get<T>>::column_mut(&mut world.columns);
         column.now = now;
         let at = if(here) { slot_of(&*column, entity) } else { 0 - 1 };
@@ -4807,7 +4876,7 @@ impl<S> World<S> {
     }
     // What another world has that this one does not: entities, and the
     // entities whose `T` differs.
-    pub fn diff<T>(world: &Self, other: &World<S>) -> WorldDiff where S: Get<T>, T: Eq {
+    pub fn diff<T>(world: &Self, other: &World<S>) -> WorldDiff where S: Get<T>, T: Eq, T: Visible {
         let mine = entities(world);
         let spawned = fold(entities(other), [], fn(out: [Entity], e: Entity) -> [Entity] { if(alive(world, e)) { out } else { push(out, e) } });
         let changed = fold(mine, [], fn(out: [Entity], e: Entity) -> [Entity] {
