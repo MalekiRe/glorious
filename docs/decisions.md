@@ -6687,19 +6687,48 @@ written out (0.22), fields borrowed apart split (0.03), checked (2.2),
 what the checker decided written in (0.18), lifetimes erased (0.02), traits
 lowered to values (0.37), what main reaches (0.07), elaborated (0.2).
 
-The way there, each step with the suite as it was:
-1. **The flat form, and back** (this step): `flatten`, `unflatten`;
-   check 97 says the prelude's and the library's modules come back as they
-   were.
+The way there was to be, each step with the suite as it was:
+1. **The flat form, and back**: `flatten`, `unflatten`; check 97 says the
+   prelude's and the library's modules come back as they were.
 2. The parser writes the flat form; the trees are made from it.
 3. The passes before the checker go over the flat form, one at a time,
    then as one pass: names, aliases, defaults, fields.
-4. What the checker decides is a table by node (`dotChosen`, `argsChosen`,
-   `decided`, coercions, dictionaries, drop sites are by id already): the
-   elaborator reads it there, and "what the checker decided, written in"
-   goes.
+4. What the checker decides is a table by node: "what the checker decided,
+   written in" goes.
 5. The checker and the elaborator read the flat form; lowering traits is
    done as the elaborator reads (one Sema pass, as Zig's from ZIR to AIR).
+
+**Measured, steps 2, 3 and 5 do not pay in Lean, and are set aside.**
+- A node of the flat form is still an object of its own: Lean has no
+  arrays of unboxed variants, so the arrays point at nodes as a tree's
+  nodes point at each other. Nothing is nearer in memory.
+- Kept flat, the parsed modules of `states2` are 7.7 MB where kept as
+  trees they are 4.4 MB (a compacted tree shares; the arrays and indices
+  are more), and reading them back took 80 ms where trees take 71.
+- Flattening the whole program takes 19 ms and making trees of it again
+  12 ms; one rewrite of the whole program (`Rewrite.items`) about 35. The
+  passes take 16 to 170 ms each: their time is the work they do (names
+  looked up, blankets written out, implementations specialized), not the
+  nodes they rebuild. A pass on the flat form saves at most the rebuilding,
+  and each place the form changes back costs about as much.
+- Of the check (1.8 s), `main`'s bounds are 0.74 s; the three times the
+  checker stops in `main` for a decision and starts the group again cost
+  7 ms each (it stops early in the group).
+
+**What is kept of it: what is decided is written where it is, and a pass
+leaves alone what it has nothing to do in.**
+- What the checker decided (`decidedProgram`) is written into the items it
+  is of alone, found by the identities it is of (`Decided`: calls,
+  callables, fields, tuple patterns, and the functions an `eta` or
+  `let mut` is in): 81 ms to 12 on `states2`, where each of its 10
+  decisions went over the whole program.
+- Constants folded (`foldConstants`), fields written out (`unfield`) and
+  variables split (`splitFieldItems`) rewrite only the functions with
+  something to do, found by a read that builds nothing
+  (`Expr.anyExpr`/`Item.anyExpr`): 66 ms to 27, 28 to 21, 24 to 16.
+- The flat form stays, with its check (97), for what keeps things by node
+  later (per-declaration caching).
+
 
 ## Other standing decisions
 

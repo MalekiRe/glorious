@@ -982,6 +982,41 @@ partial def Item.mapClauses (f : Clause → Clause) : Item → Item
 def Rewrite.items (r : Rewrite) (items : List Item) : List Item :=
   items.map (·.mapClauses r.clause)
 
+mutual
+
+/-- Is `p` true of an expression or of one inside it, blocks' too? (Read
+only: a pass that has nothing to do in an item leaves it as it is.) -/
+partial def Expr.anyExpr (p : Expr → Bool) (e : Expr) : Bool :=
+  p e || match e with
+    | .call _ f args | .tailCall _ f args => f.anyExpr p || args.any (·.anyExpr p)
+    | .tuple args => args.any (·.anyExpr p)
+    | .proj e _ | .deref e | .reborrow _ e | .fieldOf _ e _ => e.anyExpr p
+    | .closure _ clauses => clauses.any (·.anyExpr p)
+    | .handle subject arms => subject.anyExpr p || arms.any (·.anyExpr p)
+    | .labelScope _ body => body.any (·.anyExpr p)
+    | _ => false
+
+partial def Clause.anyExpr (p : Expr → Bool) : Clause → Bool
+  | .mk _ body => body.any (·.anyExpr p)
+
+partial def Stmt.anyExpr (p : Expr → Bool) : Stmt → Bool
+  | .let_ _ v | .expr v | .defer v | .letMut _ v => v.anyExpr p
+  | .assign t v => t.anyExpr p || v.anyExpr p
+  | .located _ _ s => s.anyExpr p
+
+end
+
+/-- Is `p` true of an expression in an item: its functions' (in
+implementations, traits' defaults and modules too) and a constant's. -/
+partial def Item.anyExpr (p : Expr → Bool) : Item → Bool
+  | .fn _ _ _ _ clauses => clauses.any (·.anyExpr p)
+  | .impl _ _ _ _ _ methods => methods.any (·.anyExpr p)
+  | .traitInfo _ _ defaults _ _ => defaults.any (·.anyExpr p)
+  | .module _ (some body) => body.any (·.anyExpr p)
+  | .pub _ item => item.anyExpr p
+  | .alias _ value => value.anyExpr p
+  | _ => false
+
 /-- Every name a pattern could bind. -/
 partial def patternNames : Pattern → List String
   | .var x => [x]

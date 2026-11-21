@@ -306,9 +306,15 @@ def foldConstants (items : List Item) : List Item :=
         | none => m
       | _ => m
     | _ => m
-  if known.isEmpty then items
-  else items.map fun
-    | .fn name ps annots ret clauses => .fn name ps annots ret (clauses.map (foldRewrite known).clause)
+  if known.isEmpty then items else
+  -- (Only the functions that call one are written again.)
+  let calls := fun (e : Expr) => match e with
+    | .call _ (.name none f) [] => known.contains f
+    | _ => false
+  items.map fun
+    | .fn name ps annots ret clauses =>
+      if clauses.any (·.anyExpr calls) then .fn name ps annots ret (clauses.map (foldRewrite known).clause)
+      else .fn name ps annots ret clauses
     | item => item
 
 /-! ## `..` in a tuple pattern
@@ -581,7 +587,11 @@ def splitFieldItems (all items : List Item) : List Item :=
   let structs : Structs := all.filterMap fun item => match unwrap item with
     | .fieldNames ctor names _ => if dropped.contains ctor then none else some (ctor, names)
     | _ => none
-  let clause := (splitFieldsRewrite structs).clause
+  -- (Only a clause with a field borrowed, `fieldBorrowed`, has one to split.)
+  let borrowed := fun (e : Expr) => match e with
+    | .refField _ _ _ (_ :: _) false => true
+    | _ => false
+  let clause := fun (c : Clause) => if c.anyExpr borrowed then (splitFieldsRewrite structs).clause c else c
   items.map fun
     | .fn name ps annots ret clauses => .fn name ps annots ret (clauses.map clause)
     | .impl ps tr head args context methods => .impl ps tr head args context (methods.map fun
@@ -734,26 +744,103 @@ def decidedItems (decided : List Decision) (items : List Item) : List Item :=
     | .receiver call fn borrow => receiverItems call fn borrow items
     | .derefField id uniq => derefItems id uniq items) items
 
+/-- What the checker decided is of: the identities of the calls, callables,
+fields and tuple patterns it decided something of, and the functions it
+decided something in. -/
+structure Decided where
+  calls : Std.HashSet Nat := {}
+  closures : Std.HashSet Nat := {}
+  fields : Std.HashSet Nat := {}
+  rests : Std.HashSet Nat := {}
+  owners : Std.HashSet String := {}
+
+def Decided.of (b : Blocks) : Decided := Id.run do
+  let mut d : Decided := {}
+  for decision in b.decided do
+    d := match decision with
+      | .rest id _ => { d with rests := d.rests.insert id }
+      | .eta owner _ _ => { d with owners := d.owners.insert owner }
+      | .letMut owner _ _ _ => { d with owners := d.owners.insert owner }
+      | .refPats id _ => { d with closures := d.closures.insert id }
+      | .receiver call _ _ => { d with calls := d.calls.insert call }
+      | .derefField id _ => { d with fields := d.fields.insert id }
+  for (call, _) in b.dotChosen do d := { d with calls := d.calls.insert call }
+  for ((call, _), _) in b.argsChosen do d := { d with calls := d.calls.insert call }
+  pure d
+
+mutual
+
+partial def Decided.pat (d : Decided) : Pattern → Bool
+  | .var x => (tupleRestOf x).any d.rests.contains
+  | .ctor _ _ ps | .tuple ps => ps.any d.pat
+  | _ => false
+
+/-- Does an expression have something in it the checker decided of? -/
+partial def Decided.expr (d : Decided) : Expr → Bool
+  | .call i f args | .tailCall i f args => d.calls.contains i || d.expr f || args.any d.expr
+  | .closure i clauses => d.closures.contains i || clauses.any d.clause
+  | .handle subject arms => d.expr subject || arms.any d.clause
+  | .labelScope _ body => body.any d.stmt
+  | .fieldOf i e _ => d.fields.contains i || d.expr e
+  | .refField i _ _ _ _ => d.fields.contains i
+  | .tuple args => args.any d.expr
+  | .proj e _ | .deref e | .reborrow _ e => d.expr e
+  | _ => false
+
+partial def Decided.clause (d : Decided) : Clause → Bool
+  | .mk pats body => pats.any d.pat || body.any d.stmt
+
+partial def Decided.stmt (d : Decided) : Stmt → Bool
+  | .let_ pat v => d.pat pat || d.expr v
+  | .expr v | .defer v | .letMut _ v => d.expr v
+  | .assign t v => d.expr t || d.expr v
+  | .located _ _ s => d.stmt s
+
+end
+
+/-- Does an item have something in it the checker decided of? -/
+partial def Decided.item (d : Decided) : Item → Bool
+  | .fn name _ _ _ clauses => d.owners.contains name || clauses.any d.clause
+  | .impl _ tr head _ _ methods => methods.any fun
+    | .fn m _ _ _ clauses => d.owners.contains (implFnName tr head m) || clauses.any d.clause
+    | item => d.item item
+  | .traitInfo _ _ defaults _ _ => defaults.any d.item
+  | .module _ (some body) => body.any d.item
+  | .pub _ item => d.item item
+  | .alias _ value => d.expr value
+  | _ => false
+
 /-- A program with what the checker decided of it written in: `Decision`s
 first, then the function of each dot call it chose by the value's type,
 with the receiver, a variable, given as that one takes it (`0` as it was,
 `1` borrowed, `2` borrowed `&mut`), and each argument it chose to give as
-other than written. -/
-def decidedProgram (b : Blocks) (items : List Item) : List Item :=
-  let items := decidedItems b.decided items
-  if b.dotChosen.isEmpty && b.argsChosen.isEmpty then items else
-  Rewrite.items (items := items) { onExpr := fun go => fun
-    | .call i f args =>
-      let args := args.map go.ex
-      let (f, args) : Expr × List Expr := match f, b.dotChosen[i]? with
-        | .name _ _, some (fn, how) =>
-          (.name none fn, match how, args with
-            | 0, _ => args
-            | k, .name none v :: rest => .ref (k == 2) v :: rest
-            | _, _ => args)
-        | f, _ => (go.ex f, args)
-      some (.call i f (args.zipIdx.map fun (a, k) => b.argsChosen.getD (i, k) a))
-    | _ => none }
-
+other than written. Only the items it decided something in are written
+again: what is decided of an item changes that item alone. -/
+def decidedProgram (b : Blocks) (items : List Item) : List Item := Id.run do
+  let d := Decided.of b
+  if d.calls.isEmpty && d.closures.isEmpty && d.fields.isEmpty && d.rests.isEmpty && d.owners.isEmpty then
+    return items
+  let places := items.zipIdx.filter fun (item, _) => d.item item
+  let mine := decidedIn b (places.map (·.1))
+  let mut all := items.toArray
+  for ((_, i), item) in places.zip mine do
+    all := all.set! i item
+  pure all.toList
+where
+  decidedIn (b : Blocks) (items : List Item) : List Item :=
+    let items := decidedItems b.decided items
+    if b.dotChosen.isEmpty && b.argsChosen.isEmpty then items else
+    Rewrite.items (items := items) { onExpr := fun go => fun
+      | .call i f args =>
+        let args := args.map go.ex
+        let (f, args) : Expr × List Expr := match f, b.dotChosen[i]? with
+          | .name _ _, some (fn, how) =>
+            (.name none fn, match how, args with
+              | 0, _ => args
+              | k, .name none v :: rest => .ref (k == 2) v :: rest
+              | _, _ => args)
+          | f, _ => (go.ex f, args)
+        some (.call i f (args.zipIdx.map fun (a, k) => b.argsChosen.getD (i, k) a))
+      | _ => none }
 
 end Glorious.Elab

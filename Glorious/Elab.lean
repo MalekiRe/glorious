@@ -1656,8 +1656,16 @@ def unfield (b : Blocks) (items : List Item) : Except String (List Item) := do
       reads := b.fieldReads
       packs := b.packs
       derefs := b.derefReads }
+  -- (Only the functions with something in them the checker found of.)
+  let found := fun (e : Expr) => match e with
+    | .fieldOf id _ _ => info.reads.contains id
+    | .refField id _ _ _ _ => info.shapes.contains id
+    | .closure id _ => info.packs.contains id
+    | _ => false
   pure (items.map fun
-    | .fn name params annots ret clauses => .fn name params annots ret (clauses.map (unfieldClause info))
+    | .fn name params annots ret clauses =>
+      if clauses.any (·.anyExpr found) then .fn name params annots ret (clauses.map (unfieldClause info))
+      else .fn name params annots ret clauses
     | item => item)
 
 /-- Collect the global declarations. -/
