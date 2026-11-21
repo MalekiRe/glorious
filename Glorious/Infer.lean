@@ -238,9 +238,13 @@ def certifyM (items : List Item) (g : Elab.Globals) (p : Core.Program)
   let st ← get
   let capBy := st.capArities.fold (fun (m : Std.HashMap Nat (List (Nat × Nat))) (g, at_) k =>
     m.insert g ((at_, k) :: m.getD g [])) {}
+  -- (Looked up by function: each list once into a map.)
+  let givenUpBy : Std.HashMap Nat Nat := st.givenUp.foldl (fun m (f, a) => m.insertIfNew f a) {}
+  let dropsBy : Std.HashMap Nat Nat := p.drops.foldl (fun m (f, d) => m.insertIfNew f d) {}
+  let anySet : Std.HashSet Nat := st.anyCallable.foldl (·.insert ·) {}
   let extra := fun (f : Nat) =>
-    hash (st.armFns.contains f, st.ncaps[f]?, st.givenUp.lookup f, st.anyCallable.contains f,
-      p.drops.lookup f, (capBy.getD f []).mergeSort (fun (a : Nat × Nat) b => a.1 ≤ b.1))
+    hash (st.armFns.contains f, st.ncaps[f]?, givenUpBy[f]?, anySet.contains f,
+      dropsBy[f]?, (capBy.getD f []).mergeSort (fun (a : Nat × Nat) b => a.1 ≤ b.1))
   let globals := hash (items.filter (fun
       | .fn .. => false
       | .pub _ (.fn ..) => false

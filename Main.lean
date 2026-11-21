@@ -392,7 +392,12 @@ def compileFile (path : String) (checkKept : Check.Kept := []) (search : Bool :=
     -- (Saved again only where something was parsed anew.)
     unless c.parsedMade.all (parsedKept.contains ·.1) do Trace.timedIO "save: parsed" (Store.save (dir / "parsed") "parsed" c.parsedMade)
     unless c.textsMade.all (texts.contains ·.1) do Trace.timedIO "save: texts" (Store.save (dir / "texts") "texts" c.textsMade)
-    unless c.inferMade.isEmpty do Trace.timedIO "save: infer" (Store.save (dir / "infer") "infer" (Infer.toMemo c.inferMade))
+    -- (Saved again only where something was made anew, pointing into what
+    -- was read.)
+    let inferNew := c.inferMade.inst.any (fun (k, sig, _) => !((memo.inst.get? k).getD []).any (·.1 == sig))
+      || c.inferMade.schemes.any (fun (k, _) => !memo.schemes.contains k)
+      || c.inferMade.faces.any (fun (k, _) => !memo.faces.contains k)
+    if inferNew then Trace.timedIO "save: infer" (Store.save (dir / "infer") "infer" (Infer.toMemo c.inferMade) (chain := 64))
     if let some ((std, drop), first) := c.firstMade then
       Store.save (library / s!"first-{std}-{drop}") "first" [first]
     -- (The library's modules, and the program's modules that are files, as

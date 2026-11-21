@@ -150,6 +150,19 @@ def diff (p b : Store α) : Option (StoreD α) := do
 
 def apply [Absorb α] (a : Store α) (d : StoreD α) : Option (Store α) := do
   if d.segs.isEmpty && d.grown.isEmpty && d.sets.isEmpty then return a
+  -- (Mostly segments of its own, after all of `a`'s: put after them, the
+  -- rest of `a` let be.)
+  -- (What it pushed onto `a`'s last segment, begun with as many: pushed.)
+  let onLast := d.grown.foldl (init := some a) fun st (base, before, pushed) => st.bind fun st =>
+    if base == st.last.base && st.last.count == before then some { st with last := pushed.foldl Seg.push st.last }
+    else none
+  if d.sets.isEmpty then
+    let after := d.segs.foldl (init := onLast) fun st s => st.bind fun st =>
+      if s.base == st.last.base && st.last.count == 0 then some { st with last := s }
+      else if s.base ≥ st.last.base + st.last.count && s.base > st.last.base then
+        some (if st.last.count == 0 then { st with last := s } else { older := st.older.push st.last, last := s })
+      else none
+    if let some st := after then return st
   let mut segs := a.segs
   for (base, before, pushed) in d.grown do
     match segs.findIdx? (·.base == base) with

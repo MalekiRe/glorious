@@ -6878,9 +6878,15 @@ number changed in the middle function. Wall time, on this machine (load
 
 | | Cold | An edit of the middle function | An edit of the last |
 |---|---|---|---|
-| Glorious | 5.1 s | 1.6 s | 1.1 s |
+| Glorious | 5.1 s | 1.6 s | 0.89 s |
 | Zig, LLVM backend (Debug) | 4.2 s | 1.7 s | |
 | Zig, its own x86 backend | 0.59 s | 0.59 s | |
+
+Of an edit of the last function, 0.14 s is the process starting and
+reading what is kept, 0.05 s reading the edited text again, 0.12 s putting
+the 1,999 groups kept on the state, 0.05 s the certificate (once 0.43:
+what each function is keyed by was looked up in lists, `List.lookup` for
+each of the 2,000).
 
 An edit of the middle function checks it and the thousand that call it,
 each kept group of the program a delta (above). Each group checked costs
