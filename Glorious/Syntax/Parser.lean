@@ -1475,6 +1475,120 @@ where
       i := i + 1
     return out
 
+/-! ## What the compiler writes of each type: its `Reflect`
+
+Each declared struct and enum is given `impl Reflect for T`, written as text
+and read as the program's is, after the module's items: its description
+(`INFO`: its name, kind, whether it is `pub`, each constructor's fields
+with their names, types and whether each is `pub`), and how a value is
+described and a field set from text, field by field. A field of a type the
+program describes is described by its type's; a reference or a callable is
+opaque. A type with a field whose type is left to be found has none. -/
+
+/-- A text in Glorious, quoted. -/
+def quoted (s : String) : String :=
+  "\"" ++ (s.toList.map fun c => if c == '"' then "\\\"" else if c == '\\' then "\\\\" else c.toString).foldl (· ++ ·) "" ++ "\""
+
+/-- Is a field's type one a value of can be described: not a reference, a
+callable, or a type left to be found. -/
+partial def describable (t : TypeExpr) : Bool :=
+  match t with
+  | .name x args => !x.isEmpty && (x.toList.headD 'a').isUpper || x == "Int" || (scalars.lookup x).isSome || args.all describable
+  | .tuple _ => false
+  | _ => false
+
+/-- The text of `impl Reflect for` a declared type, or nothing. -/
+def reflectText (name : String) (params : List String) (isPub : Bool)
+    (ctors : List (String × List TypeExpr × List String × List Bool)) (enum : Bool) : Option String := Id.run do
+  if name == "Array" || name == "Str" then return none
+  let tys := params.filter (!·.startsWith "'")
+  let head := if params.isEmpty then name else s!"{name}<{", ".intercalate params}>"
+  let generics := if params.isEmpty then "" else s!"<{", ".intercalate params}>"
+  let bounds := if tys.isEmpty then "" else " where " ++ ", ".intercalate (tys.map (· ++ ": std::reflect::Reflect"))
+  -- (A bare field name, whose type is left to be found: no description.)
+  for (_, fs, _, _) in ctors do
+    for f in fs do
+      if let .name x [] := f then
+        if !(x.toList.headD 'a').isUpper && x != "Int" && (scalars.lookup x).isNone && !params.contains x then return none
+  let fieldInfo := fun (n : String) (t : TypeExpr) (p : Bool) =>
+    s!"std::reflect::field_info({quoted n}, {quoted t.spell}, {if p then "true" else "false"})"
+  let variants := ctors.map fun (c, fs, ns, ps) =>
+    s!"std::reflect::variant_info({quoted c}, [{", ".intercalate ((fs.zip (ns.zip ps)).map fun (t, n, p) => fieldInfo n t p)}])"
+  let kind := if enum then "std::reflect::KindEnum" else "std::reflect::KindStruct"
+  let info := s!"std::reflect::type_info_of({quoted name}, {kind}, {if isPub then "true" else "false"}, [{", ".intercalate variants}])"
+  -- (Each constructor's pattern, its fields bound `f0`, `f1`, ..)
+  let pattern := fun (c0 : String) (fs : List TypeExpr) (ns : List String) =>
+    -- (An enum's constructor by its type's name: another type of the
+    -- module may have one of the same name.)
+    let c := if enum then s!"{name}::{c0}" else c0
+    let named := !ns.isEmpty && !(ns.headD "").all Char.isDigit
+    if fs.isEmpty then c
+    else if named then s!"{c} \{ {", ".intercalate ((ns.zipIdx).map fun (n, k) => s!"{n}: f{k}")} }"
+    else s!"{c}({", ".intercalate ((List.range fs.length).map (s!"f{·}"))})"
+  let describeArm := fun (c : String) (fs : List TypeExpr) (ns : List String) (ps : List Bool) =>
+    let parts := (fs.zip (ns.zip ps)).zipIdx.map fun ((t, n, p), k) =>
+      let value := if t.spell == "Bool" then s!"std::reflect::FlagValue(*f{k})"
+        else if describable t then s!"std::reflect::reflect_describe(f{k}, all, token)" else s!"std::reflect::OpaqueValue({quoted t.spell})"
+      s!"if({if p then "true" else "all"}) \{ fields = push(fields, ({quoted n}, {value})) } else \{ () };"
+    s!"{pattern c fs ns} => let mut fields = []; {" ".intercalate parts} std::reflect::StructValue({quoted c}, fields)"
+  let setArm := fun (c : String) (fs : List TypeExpr) (ns : List String) (ps : List Bool) =>
+    let tries := (fs.zip (ns.zip ps)).zipIdx.map fun ((t, n, p), k) =>
+      let set := if t.spell == "Bool" then s!"match(std::reflect::reflect_bool(text)) \{ Some(b) => *f{k} = b; Ok(std::reflect::FlagValue(b)), None => Err(\"not true or false\") }"
+        else if describable t then s!"std::reflect::reflect_set(f{k}, text, all, token)" else s!"Err({quoted ("`" ++ n ++ "` is not set from text")})"
+      s!"if(path == {quoted n}) \{ if({if p then "true" else "all"}) \{ {set} } else \{ Err({quoted ("`" ++ n ++ "` is private: set it with `set_field_unchecked`")}) } } else "
+    let none := s!"Err(\"no field `\" ++ path ++ \"` in `{c}`\")"
+    if tries.isEmpty then s!"{pattern c fs ns} => {none}" else s!"{pattern c fs ns} => {String.join tries}\{ {none} }"
+  let arms := fun (f : String → List TypeExpr → List String → List Bool → String) =>
+    ", ".intercalate (ctors.map fun (c, fs, ns, ps) => f c fs ns ps)
+  some s!"impl{generics} std::reflect::Reflect for {head}{bounds} \{
+    const INFO: std::reflect::TypeInfo = {info};
+    fn describe_as(v: &{head}, all: Bool, token: std::reflect::Unchecked) -> std::reflect::Described \{ if(if(all) \{ true } else \{ {if isPub then "true" else "false"} }) \{ match(v) \{ {arms describeArm} } } else \{ std::reflect::OpaqueValue({quoted name}) } }
+    fn set_from(v: &mut {head}, path: Str, text: Str, all: Bool, token: std::reflect::Unchecked) -> Result<std::reflect::Described, Str> \{ match(v) \{ {arms setArm} } }
+}
+"
+
+/-- The `Reflect` of each declared type of a module's items, as text. -/
+def reflectTexts (items : List Item) : List String := Id.run do
+  let mut out : List String := []
+  for (item, k) in items.zipIdx do
+    let (isPub, inner) : Bool × Item := match item with
+      | .pub _ i => (true, i)
+      | i => (false, i)
+    -- (The names of its constructors' fields, written beside it.)
+    let beside : List (String × List String × List Bool) :=
+      ((items.drop (k + 1)).takeWhile fun
+        | .fieldNames c _ _ => !c.startsWith "%"
+        | _ => false).filterMap fun
+        | .fieldNames c ns ps => some (c, ns, ps)
+        | _ => none
+    let fieldsOf := fun (c : String) (n : Nat) =>
+      match beside.find? (·.1 == c) with
+      | some (_, ns, ps) => (ns, ps)
+      | none => ((List.range n).map toString, List.replicate n false)
+    match inner with
+    | .struct n ps fs =>
+      let (ns, pubs) := fieldsOf n fs.length
+      if let some t := reflectText n ps isPub [(n, fs, ns, pubs)] false then out := out ++ [t]
+    | .enum n ps cs =>
+      let ctors := cs.map fun (c, fs) => let (ns, pubs) := fieldsOf c fs.length; (c, fs, ns, pubs)
+      if let some t := reflectText n ps isPub ctors true then out := out ++ [t]
+    | _ => pure ()
+  out
+
+/-- Each declared type's `Reflect` among a module's items, read as its text
+is; checked only where something asks it, as a copy for each length of a
+list is. -/
+def reflectionsOf (fix : Fixities) (items : List Item) (base : Nat) (records : List String)
+    (tables : List (List String × Fixities)) (path : List String) (fixed : Bool) : Except String (List Item) := do
+  let texts := reflectTexts items
+  if texts.isEmpty then return []
+  let gtoks ← lex (String.join texts)
+  let fix := if tables.isEmpty then fix else ((tables.lookup path).getD fix)
+  let (gitems, _, glocal) ← parseItems { toks := gtoks, fix, records, base, tables, path, fixed } 0 #[]
+  pure ((gitems ++ glocal.toList).map fun
+    | .impl ps tr h args ctx ms => Item.impl ps tr h args ctx (ms ++ [.typeAlias packCopyName [] (.tuple [])])
+    | other => other)
+
 /-- Parse a source text, given the fixities already in scope. Returns the items
 and the fixities including those it declares. `base` keeps the identities of
 this text's callable literals apart from those of a text parsed before it.
@@ -1482,7 +1596,8 @@ With `tables`, each module of the text has the operators the table gives it,
 and the text is the module `path`. -/
 def parse (fix : Fixities) (src : String) (base : Nat := 0) (records : List String := [])
     (tables : List (List String × Fixities) := []) (path : List String := [])
-    (fixed : Bool := false) (packs : Nat := 0) (lexed : Option (Array Token) := none) :
+    (fixed : Bool := false) (packs : Nat := 0) (lexed : Option (Array Token) := none)
+    (reflect : Bool := true) :
     Except String (List Item × Fixities) := do
   -- (`packs`: how long lists of types are written out to; by default, as
   -- long as the longest list this text writes.)
@@ -1493,6 +1608,11 @@ def parse (fix : Fixities) (src : String) (base : Nat := 0) (records : List Stri
   let fix ← if tables.isEmpty then collectFixities toks fix else pure ((tables.lookup path).getD fix)
   let (items, _, local_) ← parseItems
     { toks, fix, records := collectRecords toks ++ records, base, tables, path, fixed } 0 #[]
-  pure (promoteItems (unmutItems (items ++ local_.toList)), fix)
+  let items := items ++ local_.toList
+  -- (Each declared type's `Reflect`, read as the text is, after its items;
+  -- checked only where something asks it, as a copy for each length of a
+  -- list is.)
+  let made ← if reflect then reflectionsOf fix items (base + 700000) (collectRecords toks ++ records) tables path fixed else pure []
+  pure (promoteItems (unmutItems (items ++ made)), fix)
 
 end Glorious.Syntax

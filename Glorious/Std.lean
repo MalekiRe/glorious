@@ -1,5 +1,7 @@
 module
 
+public import Glorious.Syntax.Ast
+
 /-!
 # The standard library
 
@@ -57,6 +59,7 @@ pub mod random;
 pub mod tuple;
 pub mod ffi;
 pub mod ptr;
+pub mod reflect;
 "#
 
 private def optionText : String := r#"// An `Option<T>` is a `Result<T, ()>`: `Some(x)` or `None`.
@@ -3762,6 +3765,146 @@ pub unsafe fn element_mut<T>(p: PtrMut<[T]>, i: Int) -> PtrMut<T> { let xs: &mut
 pub unsafe fn write<T>(p: PtrMut<T>, value: T) where T: Use<[1, 1]> { overwrite(as_mut(p), value) }
 "#
 
+private def reflectText : String := r#"
+// What a type is, from its declaration, and a value of it described, or a
+// field of one set from text (reflection, as Rust's `type_info`). Each
+// declared type has `Reflect`, written for it beside its items. What is not
+// `pub` is seen only by the unsafe ones: `type_info_unchecked`,
+// `describe_unchecked`, `set_field_unchecked`; the safe ones see a type that
+// is not `pub` as opaque, and none of a type's fields that are not.
+pub enum TypeKind { KindWhole, KindFloat, KindFlag, KindChar, KindText, KindStruct, KindEnum, KindList, KindOpaque }
+pub struct FieldInfo { pub name: Str, pub type_name: Str, pub public: Bool }
+pub struct VariantInfo { pub name: Str, pub fields: [FieldInfo] }
+pub struct TypeInfo { pub name: Str, pub kind: TypeKind, pub public: Bool, pub variants: [VariantInfo] }
+pub enum Described { NoValue, FlagValue(Bool), WholeValue(Int), FloatValue(f64), CharValue(char), TextValue(Str), StructValue(Str, [(Str, Described)]), ListValue([Described]), OpaqueValue(Str) }
+// (What says a description may see what is not `pub`: made only here, by
+// the unsafe ones, and by the safe ones, which then do not.)
+pub struct Unchecked { none: () }
+impl Use<[0, *]> for Unchecked {}
+pub trait Reflect {
+    const INFO: TypeInfo;
+    fn describe_as(&Self, Bool, Unchecked) -> Described
+    fn set_from(&mut Self, Str, Str, Bool, Unchecked) -> Result<Described, Str>
+}
+pub fn field_info(name: Str, type_name: Str, public: Bool) -> FieldInfo { FieldInfo { name: name, type_name: type_name, public: public } }
+pub fn variant_info(name: Str, fields: [FieldInfo]) -> VariantInfo { VariantInfo { name: name, fields: fields } }
+pub fn type_info_of(name: Str, kind: TypeKind, public: Bool, variants: [VariantInfo]) -> TypeInfo { TypeInfo { name: name, kind: kind, public: public, variants: variants } }
+pub fn reflect_describe<T>(v: &T, all: Bool, token: Unchecked) -> Described where T: Reflect { <T as Reflect>::describe_as(v, all, token) }
+pub fn reflect_set<T>(v: &mut T, text: Str, all: Bool, token: Unchecked) -> Result<Described, Str> where T: Reflect { <T as Reflect>::set_from(v, "", text, all, token) }
+// (A description without what is not `pub`.)
+pub fn public_fields(fields: [FieldInfo]) -> [FieldInfo] { fold(fields, [], fn(out: [FieldInfo], f: FieldInfo) -> [FieldInfo] { if(f.public) { push(out, f) } else { out } }) }
+pub fn public_only(info: TypeInfo) -> TypeInfo {
+    let TypeInfo { name, kind, public, variants } = info;
+    if(public) {
+        TypeInfo { name: name, kind: kind, public: public, variants: fold(variants, [], fn(out: [VariantInfo], v: VariantInfo) -> [VariantInfo] {
+            let VariantInfo { name, fields } = v;
+            push(out, VariantInfo { name: name, fields: public_fields(fields) })
+        }) }
+    } else { TypeInfo { name: name, kind: KindOpaque, public: public, variants: [] } }
+}
+pub fn type_info<T>() -> TypeInfo where T: Reflect { public_only(<T as Reflect>::INFO) }
+pub unsafe fn type_info_unchecked<T>() -> TypeInfo where T: Reflect { <T as Reflect>::INFO }
+pub fn describe<T>(v: &T) -> Described where T: Reflect { <T as Reflect>::describe_as(v, false, Unchecked { none: () }) }
+pub unsafe fn describe_unchecked<T>(v: &T) -> Described where T: Reflect { <T as Reflect>::describe_as(v, true, Unchecked { none: () }) }
+// A field set from text: `"200"`, `"true"`; what it was set to.
+pub fn set_field<T>(v: &mut T, field: Str, text: Str) -> Result<Described, Str> where T: Reflect { <T as Reflect>::set_from(v, field, text, false, Unchecked { none: () }) }
+pub unsafe fn set_field_unchecked<T>(v: &mut T, field: Str, text: Str) -> Result<Described, Str> where T: Reflect { <T as Reflect>::set_from(v, field, text, true, Unchecked { none: () }) }
+// (A whole number written in a text, with a sign or none.)
+pub fn reflect_digits(text: Str, n: Int, any: Bool) -> Option<Int> {
+    match(text) {
+        StrEnd => if(any) { Some(n) } else { None },
+        StrChar(c, rest) => let d = char_bits(c) - 48; if(d < 0) { None } else if(d > 9) { None } else { reflect_digits(rest, n * 10 + d, true) }
+    }
+}
+pub fn reflect_int(text: Str) -> Option<Int> {
+    match(text) {
+        StrChar(c, rest) => if(char_bits(c) == 45) { match(reflect_digits(rest, 0, false)) { Some(n) => Some(0 - n), None => None } } else { reflect_digits(StrChar(c, rest), 0, false) },
+        StrEnd => None
+    }
+}
+pub fn reflect_whole_any(text: Str) -> Result<Int, Str> { match(reflect_int(text)) { Some(n) => Ok(n), None => Err("not a whole number") } }
+pub fn reflect_bool(text: Str) -> Option<Bool> { if(text == "true") { Some(true) } else if(text == "false") { Some(false) } else { None } }
+pub fn reflect_whole(text: Str, low: Int, high: Int) -> Result<Int, Str> {
+    match(reflect_int(text)) {
+        Some(n) => if(n < low) { Err("out of range") } else if(n > high) { Err("out of range") } else { Ok(n) },
+        None => Err("not a whole number")
+    }
+}
+impl Reflect for Int {
+    const INFO: TypeInfo = TypeInfo { name: "Int", kind: KindWhole, public: true, variants: [] };
+    fn describe_as(v: &Int, all: Bool, token: Unchecked) -> Described { WholeValue(*v) }
+    fn set_from(v: &mut Int, path: Str, text: Str, all: Bool, token: Unchecked) -> Result<Described, Str> {
+        match(reflect_int(text)) { Some(n) => *v = n; Ok(WholeValue(n)), None => Err("not a whole number") }
+    }
+}
+// (`Option<T>` is `Result<T, ()>`, and `Bool` is `Result<(), ()>`: one of
+// those is said as what it is, a flag.)
+impl<T, E> Reflect for Result<T, E> where T: Reflect, E: Reflect {
+    const INFO: TypeInfo = TypeInfo { name: "Result", kind: KindEnum, public: true, variants: [VariantInfo { name: "Ok", fields: [field_info("0", "T", true)] }, VariantInfo { name: "Err", fields: [field_info("0", "E", true)] }] };
+    fn describe_as(v: &Result<T, E>, all: Bool, token: Unchecked) -> Described {
+        match(v) {
+            Ok(x) => match(reflect_describe(x, all, token)) { NoValue => FlagValue(true), d => StructValue("Ok", [("0", d)]) },
+            Err(x) => match(reflect_describe(x, all, token)) { NoValue => FlagValue(false), d => StructValue("Err", [("0", d)]) }
+        }
+    }
+    fn set_from(v: &mut Result<T, E>, path: Str, text: Str, all: Bool, token: Unchecked) -> Result<Described, Str> {
+        match(v) { Ok(x) => if(path == "0") { reflect_set(x, text, all, token) } else { Err("no field") }, Err(x) => if(path == "0") { reflect_set(x, text, all, token) } else { Err("no field") } }
+    }
+}
+impl Reflect for () {
+    const INFO: TypeInfo = TypeInfo { name: "()", kind: KindStruct, public: true, variants: [] };
+    fn describe_as(v: &(), all: Bool, token: Unchecked) -> Described { NoValue }
+    fn set_from(v: &mut (), path: Str, text: Str, all: Bool, token: Unchecked) -> Result<Described, Str> { Err("`()` is not set from text") }
+}
+impl Reflect for Str {
+    const INFO: TypeInfo = TypeInfo { name: "Str", kind: KindText, public: true, variants: [] };
+    fn describe_as(v: &Str, all: Bool, token: Unchecked) -> Described { TextValue(clone(v)) }
+    fn set_from(v: &mut Str, path: Str, text: Str, all: Bool, token: Unchecked) -> Result<Described, Str> { *v = clone(&text); Ok(TextValue(text)) }
+}
+impl<T> Reflect for Array<T> where T: Reflect {
+    const INFO: TypeInfo = TypeInfo { name: "Array", kind: KindList, public: true, variants: [] };
+    fn describe_as(v: &Array<T>, all: Bool, token: Unchecked) -> Described {
+        let mut out = [];
+        let mut i = 0;
+        while({ i < len_at(v) }) { out = push(out, reflect_describe(&v[i], all, token)); i = i + 1 };
+        ListValue(out)
+    }
+    fn set_from(v: &mut Array<T>, path: Str, text: Str, all: Bool, token: Unchecked) -> Result<Described, Str> { Err("a list is not set from text") }
+}
+impl Reflect for f64 {
+    const INFO: TypeInfo = TypeInfo { name: "f64", kind: KindFloat, public: true, variants: [] };
+    fn describe_as(v: &f64, all: Bool, token: Unchecked) -> Described { FloatValue(*v) }
+    fn set_from(v: &mut f64, path: Str, text: Str, all: Bool, token: Unchecked) -> Result<Described, Str> { Err("a float is not set from text") }
+}
+impl Reflect for char {
+    const INFO: TypeInfo = TypeInfo { name: "char", kind: KindChar, public: true, variants: [] };
+    fn describe_as(v: &char, all: Bool, token: Unchecked) -> Described { CharValue(*v) }
+    fn set_from(v: &mut char, path: Str, text: Str, all: Bool, token: Unchecked) -> Result<Described, Str> {
+        match(text) { StrChar(c, StrEnd) => *v = c; Ok(CharValue(c)), _ => Err("not one character") }
+    }
+}
+"#
+
+/-- `Reflect` for each whole-number scalar: described as its number, set from
+a text within its range. -/
+private def reflectWhole (t : String) (width : Int) : String :=
+  let bits := width.natAbs
+  let (lo, hi) : Int × Int := if width < 0 then (0, (2 : Int) ^ bits - 1) else (-((2 : Int) ^ (bits - 1)), (2 : Int) ^ (bits - 1) - 1)
+  let lit := fun (n : Int) => if n < 0 then s!"(0 - {-n})" else toString n
+  -- (Of one as wide as `Int` or wider: any whole number `Int` holds.)
+  let range := if bits >= 64 then "reflect_whole_any(text)" else s!"reflect_whole(text, {lit lo}, {lit hi})"
+  s!"impl Reflect for {t} \{
+    const INFO: TypeInfo = TypeInfo \{ name: \"{t}\", kind: KindWhole, public: true, variants: [] };
+    fn describe_as(v: &{t}, all: Bool, token: Unchecked) -> Described \{ WholeValue({t}_bits(*v)) }
+    fn set_from(v: &mut {t}, path: Str, text: Str, all: Bool, token: Unchecked) -> Result<Described, Str> \{
+        match({range}) \{ Ok(n) => *v = {t}_of(n); Ok(WholeValue(n)), Err(e) => Err(e) }
+    }
+}
+"
+
+private def reflectScalars : String :=
+  String.join (Syntax.scalars.filterMap fun (t, w) => w.map (reflectWhole t ·))
+
 private def anyText : String := r#"// What a program is told of its own functions.
 
 // The name of the function a callable is of, as the program names it (a
@@ -5431,6 +5574,7 @@ def texts : List (List String × String) :=
    (["std", "tuple"], tupleText),
    (["std", "ffi"], "pub use std::c::*;\n"),
    (["std", "ptr"], ptrText),
+   (["std", "reflect"], reflectText ++ reflectScalars),
    (["core"], "pub mod option;\npub mod result;\npub mod cmp;\npub mod num;\npub mod char;\npub mod iter;\npub mod slice;\npub mod hash;\npub mod value;\n"),
    (["core", "value"], "pub use std::value::*;\n"),
    (["core", "option"], "pub use std::option::*;\n"),

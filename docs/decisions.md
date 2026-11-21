@@ -6472,6 +6472,48 @@ of relation (`TargetsBy`). covey/fragmenting ports
 `churning_fragmenting_targets_reuses_dead_tables`; covey/joins4's relations
 are fragmenting, as upstream's are.
 
+## Reflection (std::reflect)
+
+**Decision: each declared type's description is written by the compiler
+beside its declaration, as Rust's `type_info` gives one (option A of the
+reflection report); a program asks it through `std::reflect`.** Each
+struct and enum is given `impl std::reflect::Reflect for T` (written as
+text and read with the module's, `Syntax.reflectionsOf`): `INFO`, a
+`TypeInfo` (its name, kind, whether it is `pub`, each constructor with its
+fields' names, types and whether each is `pub`), a constant worked out
+while compiling; and how a value is described (`Described`: a flag, a whole
+number, a float, a char, a text, a struct of named fields, a list, or
+opaque) and a field set from text, field by field, each field by its own
+type's `Reflect`. A reference or a callable is opaque; a type with a field
+whose type is left to be found has none. `std::reflect` has them of the
+prelude's types (`Int`, each scalar with its range, `f64`, `char`, `Str`,
+arrays, `()`, `Result`, of which `Bool` is said as a flag).
+
+**Privacy.** The safe functions (`type_info`, `describe`, `set_field`) see
+a type that is not `pub` as opaque, and none of a type's fields that are
+not `pub`. The unsafe ones (`type_info_unchecked`, `describe_unchecked`,
+`set_field_unchecked`) see and set everything: reaching what is private is
+an unsafe operation, named in `unsafe { .. }`. A token only `std::reflect`
+can make (`Unchecked`, a private field) is what each type's functions are
+given, so a program cannot reach what is private by calling them itself.
+
+**Planned: fields readable where they are `pub` and writable only where
+they are declared** (read-only `pub`). The same rule will hold of them:
+written from outside their module only by an unsafe operation, through
+reflection or otherwise.
+
+**Cost.** A program's types, and the library's, have their `Reflect` only
+where one of its texts names `std::reflect`: nothing else can ask it, and
+reading and declaring one for each type of the library cost about a
+second in states2. The library checked once (the first part) is then not
+taken, since its types lack theirs. Each is checked only where asked (as a
+copy for each length of a list is).
+
+Not yet: a description at compile time that code is written from, field by
+field (option C: types as values, `inline for`), which would make a typed
+`set_field` safe; enums' active constructor read without matching; and
+tuples' fields (opaque, as upstream's).
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by

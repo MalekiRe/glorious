@@ -326,7 +326,7 @@ partial def checkUnsafeImpls (items : List Syntax.Item) : Except String Unit := 
 
 /-- The prelude read, once. -/
 def readPrelude : Thunk (Except String (List Syntax.Item × Syntax.Fixities)) := Thunk.mk fun _ =>
-  match Syntax.parse {} Prelude.source with
+  match Syntax.parse {} Prelude.source (reflect := false) with
   | .ok r => .ok r
   | .error e => .error s!"prelude: {e}"
 
@@ -351,7 +351,7 @@ def readStd : Thunk (Except String StdRead) := Thunk.mk fun _ => do
   let mut parsed : Array (List Syntax.Item) := #[]
   for ((path, text), k) in Std.texts.zipIdx do
     match Syntax.parse fix text (base := 1000000 * (k + 2)) (records := records) (tables := tables)
-        (path := path) with
+        (path := path) (reflect := false) with
     | .ok (items, _) => parsed := parsed.push items
     | .error e => throw s!"module `{"::".intercalate path}`: {e}"
   let names := syn.foldl (fun set s => s.names.foldl (fun set n => set.insert n) set) {}
@@ -450,14 +450,19 @@ numbered from, the constructors with named fields, its operators, its path,
 whether arrays have lengths, and how long lists of types are written out.
 (The prelude's operators are this compiler's, as is what keeps it.) -/
 def parseKey (text : String) (base : Nat) (records : List String)
-    (tables : List (List String × Syntax.Fixities)) (path : List String) (fixed : Bool) (packs : Nat) :
+    (tables : List (List String × Syntax.Fixities)) (path : List String) (fixed : Bool) (packs : Nat)
+    (reflect : Bool := false) :
     UInt64 :=
   let fix := (tables.lookup path).map fun f =>
     (f.infixes.map (fun (o, p, a) => (o, p, match a with
       | .left => (0 : Nat)
       | .right => 1
       | .non => 2)), f.prefixes, f.bound)
-  mixHash (hash text) (hash (base, records, fix, path, fixed, packs))
+  mixHash (hash text) (hash (base, records, fix, path, fixed, packs, reflect))
+
+/-- Does a text name reflection, `std::reflect`, through which alone
+anything asks a type's `Reflect`. -/
+def mentionsReflection (text : String) : Bool := (text.splitOn "std::reflect").length > 1
 
 /-- The prelude and a program as written: the first module's text, and the
 texts of the modules that are files of their own, each with its path. Where
@@ -487,7 +492,7 @@ def parseProgram (src : String) (files : List (List String × String)) (check : 
   -- (The prelude as an earlier process of this compiler parsed it, where
   -- one did: `preludeKept`.)
   let (prelude, fix) ← Trace.timed "parse: the prelude" fun _ => if check then preludeKept.getDM readPrelude.get else
-    match Syntax.parse {} Prelude.unchecked with
+    match Syntax.parse {} Prelude.unchecked (reflect := false) with
     | .ok r => pure r
     | .error e => throw s!"prelude: {e}"
   -- The library's texts as they were read once, where the program names it.
@@ -512,6 +517,10 @@ def parseProgram (src : String) (files : List (List String × String)) (check : 
   -- The library as it was read once is the library as this program reads
   -- it, if none of the program's own constructors with named fields is a
   -- name the library writes, and its modules have the operators they had.
+  -- (Each type's `Reflect` is written only where a text names reflection:
+  -- otherwise nothing could ask it, and it would be read and declared for
+  -- nothing. The prelude's types always have theirs.)
+  let reflect := check && ((src :: own.map (·.2)) ++ library.map (·.2)).any mentionsReflection
   let kept : Option StdRead := read.bind fun r =>
     let mine := said.flatMap (·.records)
     if mine.any r.names.contains then none
@@ -521,7 +530,7 @@ def parseProgram (src : String) (files : List (List String × String)) (check : 
   -- `[a, b, c]` is depends on what is wanted of it.
   let fixed := ((src :: own.map (·.2)).any saysLength)
   let (items, _) ← Trace.timed "parse: the program's text" fun _ => Syntax.parse fix src (base := 1000000) (records := records) (tables := tables)
-    (fixed := fixed) (packs := packs) (lexed := tokensOf [])
+    (fixed := fixed) (packs := packs) (lexed := tokensOf []) (reflect := reflect)
   let declares := items.any fun
     | .module "std" _ | .pub _ (.module "std" _) => true
     | _ => false
@@ -545,18 +554,25 @@ def parseProgram (src : String) (files : List (List String × String)) (check : 
         match files.findIdx? (·.1 == here) with
         | some k =>
           let parsed ← match (if k < library.length then kept.bind (·.parsed[k]?) else none) with
-            | some items => pure items
+            | some items =>
+              -- (Read once without each type's `Reflect`: theirs, where the
+              -- program names reflection.)
+              if reflect then
+                match Syntax.reflectionsOf fix items (1000000 * (k + 2) + 700000) records tables here false with
+                | .ok made => pure (items ++ made)
+                | .error e => throw s!"module `{shown}`: {e}"
+              else pure items
             | none =>
               let text := ((files[k]?).map (·.2)).getD ""
               let base := 1000000 * (k + 2)
               let fixed := fixed && k ≥ (if std then library.length else 0)
-              let key := parseKey text base records tables here fixed packs
+              let key := parseKey text base records tables here fixed packs reflect
               let items ← match parsedKept[key]? with
                 | some items => pure items
                 | none =>
                   match Trace.timed s!"parse: module {shown}" fun _ => Syntax.parse fix text (base := base) (records := records)
                       (tables := tables) (path := here) (fixed := fixed)
-                      (packs := packs) (lexed := if k < library.length then stdTokens here text else tokensOf here) with
+                      (packs := packs) (lexed := if k < library.length then stdTokens here text else tokensOf here) (reflect := reflect) with
                   | .ok (items, _) => pure items
                   | .error e => throw s!"module `{shown}`: {e}"
               modify ((key, items) :: ·)
@@ -708,6 +724,9 @@ def compileSourceAt (src : String) (check : Bool := true)
   -- (The library read for this program alone is checked with it.)
   let withStd := usesStd src files && (src.splitOn "#![no_std]").length == 1
     && !(few && (neededStd (src :: files.map (·.2))).isSome)
+    -- (Where reflection is named, the library's types have their
+    -- `Reflect`, which the library checked once has not.)
+    && !((src :: files.map (·.2)).any mentionsReflection)
   -- (Taken from what an earlier process kept, where it is given.)
   let keptFirst := firsts.lookup (withStd, drops)
   let first : Except String (Nat × Check.St) := match keptFirst, withStd, drops with
