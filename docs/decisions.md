@@ -6360,6 +6360,15 @@ After one left for a later wave the rest wait too, so requests still run
 in the order asked. An envelope's are run in turn, their commands done
 with the systems' when the emit ends.
 
+An envelope's point says what its bridges touch (`PointTouches`: its
+`Env` query's), so it runs beside the systems apart from that, as a
+parallel group's branch: its requests within the envelope are taken when
+it is prepared, run on its thread with the world lent through a pointer,
+and what they ask again put back when it finishes; one reaching past the
+envelope waits for a point that runs alone. covey/remote ports
+`an_envelope_point_runs_beside_disjoint_systems_and_infers_its_components`
+(its component registered: a world has what it is said to have).
+
 A bridge's function may wait, as a system's may, said by `waits(f)`
 (`RunsRemote`: taken out as a waiting system's parameters are, and called
 among the threads of the point's run), so two bridges that wait for each

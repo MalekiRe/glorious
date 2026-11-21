@@ -4432,13 +4432,80 @@ impl<P> PointKind for P { const EXCLUSIVE: Bool = true; }
 // The system that runs what was asked of the sync point named `P`.
 pub struct SyncPointOf<P> { none: [P] }
 pub fn sync_point<P>(point: P) -> SyncPointOf<P> { discard(point); SyncPointOf { none: [] } }
-impl<E, S, P> System<E, S> for SyncPointOf<P> where P: Schedule, P: PointKind {
+// What a point's bridges may touch: of an envelope, what its `Env` query
+// does; of any other, everything.
+pub trait PointTouches { fn point_touches() -> [Str] }
+impl<P> PointTouches for P where P: Enveloped, <P as Enveloped>::Env: EnvTouches { fn point_touches() -> [Str] { <<P as Enveloped>::Env as EnvTouches>::env_touches() } }
+impl<P> PointTouches for P { fn point_touches() -> [Str] { ["w:*"] } }
+pub trait EnvTouches { fn env_touches() -> [Str] }
+impl<Q, N, St> EnvTouches for Query<Q, N, St> where Q: ItemTouches, <Q as ItemTouches>::List: TouchNames { fn env_touches() -> [Str] { <<Q as ItemTouches>::List as TouchNames>::touch_names([]) } }
+// Whether each of a request's touches is among what its point's say.
+fn within(mine: &[Str], allowed: &[Str]) -> Bool {
+    let mut i = 0;
+    let mut all = true;
+    while({ i < len_at(mine) }) {
+        let x = mine[i];
+        let mut j = 0;
+        let mut found = false;
+        while({ j < len_at(allowed) }) {
+            let y = allowed[j];
+            // (A write is allowed by a write; a read by either.)
+            if(std::text::drop(x, 2) == std::text::drop(y, 2)) {
+                if(std::text::starts_with(x, "r:")) { found = true } else if(std::text::starts_with(y, "w:")) { found = true } else { () }
+            } else { () };
+            j = j + 1
+        };
+        if(found) { () } else { all = false };
+        i = i + 1
+    };
+    all
+}
+impl<E, S, P> System<E, S> for SyncPointOf<P> where P: Schedule, P: PointKind, P: PointTouches {
     fn system_names(system: &SyncPointOf<P>, names: [Str]) -> [Str] { names }
-    type Prepared = ();
-    fn touches(system: &SyncPointOf<P>) -> [Str] { ["w:*"] }
-    fn prepare(system: &mut SyncPointOf<P>, event: &E, world: &mut World<S>) -> Option<()> { None }
-    fn run_prepared(system: &mut SyncPointOf<P>, event: &E, prepared: &mut (), commands: &mut Commands<S>) / {std::thread::Threads} { () }
-    fn finish(system: &mut SyncPointOf<P>, world: &mut World<S>, prepared: ()) { () }
+    // (An envelope's: the world, lent to the point's thread, and the
+    // requests within its envelope, run there beside the systems apart from
+    // it; what they ask again.)
+    type Prepared = (PtrMut<World<S>>, [Request<S>], [Request<S>]);
+    fn touches(system: &SyncPointOf<P>) -> [Str] { <P as PointTouches>::point_touches() }
+    fn prepare(system: &mut SyncPointOf<P>, event: &E, world: &mut World<S>) -> Option<(PtrMut<World<S>>, [Request<S>], [Request<S>])> {
+        if(<P as PointKind>::EXCLUSIVE) { None } else {
+            let name = <P as Schedule>::NAME;
+            let allowed = <P as PointTouches>::point_touches();
+            let asked = lock(&world.remotes, fn(queue: &mut [Request<S>]) -> [Request<S>] { replace(queue, []) });
+            let mut kept = [];
+            let mut mine = [];
+            let mut each = into_iter(asked);
+            while({ match(next(&mut each)) {
+                Some(request) =>
+                    let request: Request<S> = request;
+                    if(if(request.point == name) { within(&request.touches, &allowed) } else { false }) { mine = push(mine, request) } else { kept = push(kept, request) };
+                    true,
+                None => false
+            } }) { () };
+            lock(&world.remotes, fn(queue: &mut [Request<S>]) { let mut later = replace(queue, []); *queue = join_onto(kept, later) });
+            Some((ptr_mut(world), mine, []))
+        }
+    }
+    fn run_prepared(system: &mut SyncPointOf<P>, event: &E, prepared: &mut (PtrMut<World<S>>, [Request<S>], [Request<S>]), commands: &mut Commands<S>) / {std::thread::Threads} {
+        let at = prepared.0;
+        let mine = replace(&mut prepared.1, []);
+        let mut again = [];
+        let mut each = into_iter(mine);
+        while({ match(next(&mut each)) {
+            Some(request) =>
+                let Request { point, touches, run } = request;
+                let world: &mut World<S> = unsafe { std::ptr::as_mut(at) };
+                match(run(world, commands)) { Some(later) => again = push(again, later), None => () };
+                true,
+            None => false
+        } }) { () };
+        prepared.2 = again
+    }
+    fn finish(system: &mut SyncPointOf<P>, world: &mut World<S>, prepared: (PtrMut<World<S>>, [Request<S>], [Request<S>])) {
+        let (_, left, again) = prepared;
+        let back = join_onto(left, again);
+        lock(&world.remotes, fn(queue: &mut [Request<S>]) { let mut later = replace(queue, []); *queue = join_onto(back, later) })
+    }
     fn why_not(system: &SyncPointOf<P>, name: &Str, world: &World<S>, entity: Entity) -> Option<[Str]> { None }
     fn step(system: &mut SyncPointOf<P>, event: &E, world: &mut World<S>, commands: &mut Commands<S>, at: Stepper) -> Stepper {
         if(at.at == at.target) {
@@ -4555,7 +4622,7 @@ fn run_wave<S>(wave: [Request<S>], world: &mut World<S>) -> [Request<S>] {
         again
     }
 }
-impl<E, S, P> IntoSystem<E, S> for SyncPointOf<P> where P: Schedule, P: PointKind {
+impl<E, S, P> IntoSystem<E, S> for SyncPointOf<P> where P: Schedule, P: PointKind, P: PointTouches {
     type Out = SyncPointOf<P>;
     fn into_system(system: SyncPointOf<P>) -> SyncPointOf<P> { system }
 }

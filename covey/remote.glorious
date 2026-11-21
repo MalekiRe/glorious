@@ -8,6 +8,10 @@
 // - `disjoint_bridges_run_in_parallel_in_one_wave`: two bridges that wait
 //   for each other (`waits`, at a barrier) touch what is apart, so they run
 //   at once, in one wave.
+// - `an_envelope_point_runs_beside_disjoint_systems_and_infers_its_components`:
+//   an envelope point in a parallel group runs its bridge on a thread of
+//   its own beside a system apart from it, the two meeting at a barrier
+//   (but for inferring its components: `A` is registered here).
 // Not ported: `dropping_the_app_or_a_granted_bridge_never_strands_anyone`
 // (a request is not failed when the app is dropped); the envelope sync
 // points that run beside other systems
@@ -40,12 +44,14 @@
 // 1
 // --
 // 1 1
+// --
+// 2 2 2
 // 0
 mod ecs;
 
 use core::iter::{into_iter, next};
 
-use ecs::{App, World, Entity, Commands, Query, Single, With, Remote, BridgeError, Schedule, sync_point, waits};
+use ecs::{App, World, Entity, Commands, Query, Single, With, Remote, BridgeError, Schedule, sync_point, waits, parallel};
 use std::thread::{scope, Scope, Threads, join, yield_now, AtomicInt, load, store, fetch_add};
 
 struct Update
@@ -53,6 +59,8 @@ struct Net
 // (An envelope point: what its bridges ask is done when the emit ends.)
 struct Reads
 impl ecs::Enveloped for Reads { type Env = Query<(&A,), ()>; }
+struct Writes
+impl ecs::Enveloped for Writes { type Env = Query<(&mut A,), ()>; }
 struct A(Int)
 struct B(Int)
 struct Player
@@ -255,5 +263,43 @@ fn main() -> Int {
         join(two)
     });
     say(show(match(app.world.get<A>(both)) { Some(a) => a.0, None => 0 - 1 }) ++ " " ++ show(match(app.world.get<B>(both)) { Some(b) => b.0, None => 0 - 1 }));
+    say("--");
+
+    let meeting = AtomicInt::new(0);
+    let met = AtomicInt::new(0);
+    let on_system = std::thread::share(&meeting);
+    let system_met = std::thread::share(&met);
+    let mut app = App::new().register<A>().register<B>()
+        .add_systems(Update, parallel((sync_point(Writes), waits(fn(q: &mut Query<(&mut B,), ()>) / {Threads} {
+            let b = on_system;
+            let m = system_met;
+            meet(&b);
+            discard(fetch_add(&m, 1));
+            q.for_each() { (mut x,) => x.0 = x.0 + 1; }
+        }))))
+        .build();
+    let remote = app.world.remote();
+    let entity = app.world.spawn_bundle((A(1), B(1)));
+    scope(fn(s: &Scope) / {Threads} {
+        let mine = remote.share();
+        let at = std::thread::share(&meeting);
+        let bridge_met = std::thread::share(&met);
+        let worker = s.spawn({
+            let m = mine;
+            let b = at;
+            let c = bridge_met;
+            discard(m.bridge(Writes, waits(fn(q: &mut Query<(&mut A,), ()>) / {Threads} {
+                let bb = b;
+                let cc = c;
+                meet(&bb);
+                discard(fetch_add(&cc, 1));
+                q.for_each() { (mut x,) => x.0 = x.0 + 1; }
+            })))
+        });
+        wait_for(&remote, 1);
+        app.emit(&Update);
+        join(worker)
+    });
+    say(show(match(app.world.get<A>(entity)) { Some(a) => a.0, None => 0 - 1 }) ++ " " ++ show(match(app.world.get<B>(entity)) { Some(b) => b.0, None => 0 - 1 }) ++ " " ++ show(load(&met)));
     0
 }
