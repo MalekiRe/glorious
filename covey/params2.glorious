@@ -6,10 +6,8 @@
 //   between emits.
 // - `retained_mutable_items_span_multiple_tables`: changes through a query
 //   reach every entity it has, whatever else each has.
-// The others of the file are in single.glorious, params3.glorious and
-// locals.glorious, or not ported: of singletons inside parallel groups, of
-// complementary parallel access (what parallel groups run side by side),
-// and the compile-fail cases.
+// The others of the file are in single.glorious, params3.glorious to
+// params7.glorious and locals.glorious.
 // expect:
 // 18
 // 12
