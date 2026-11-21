@@ -6923,17 +6923,19 @@ one of the reasons each function could not be checked from its callees'
 signatures alone (see "Each function its own universe").
 
 - The destroyers come last among a function's bounds, in the order of its
-  type parameters; one its body asks of a type that is no type parameter
-  (what a trait leaves to an implementation) after them.
+  type parameters, then one for each type its signature says a trait leaves
+  to an implementation (`<I as Iterator>::Item`, from `assocUses`); one its
+  body asks of any other type after them.
 - Calls the parser made without an identity that now need a bound were
   given one: `[x; n]` (`array_repeat`), the pushes of a byte literal, and
   array literals past the first 100,000 tokens of a text, whose identities
   ran into the next text's (`numbered`, `scalarLiteral`).
 
 Measured: with `GLORIOUS_UNIVERSES=1`, the functions of `covey/states2`
-whose body gives a type other than its signature's went from 139 to 57;
-what is left is what the result holds of the arguments (`holds`, edges)
-and one bound of an associated type. An edit of `main` 1.40 s -> 1.46 s
+whose body gives a type other than its signature's went from 139 to 52;
+what is left is what the result holds of the arguments (`holds`, edges),
+what a callable parameter performs or gives where the signature leaves it
+open, and which uses of a type parameter are written. An edit of `main` 1.40 s -> 1.46 s
 (the destroyers passed, most of them written out by specialization).
 
 ## Not done, and why (measured)

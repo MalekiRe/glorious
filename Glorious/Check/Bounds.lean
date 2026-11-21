@@ -1048,6 +1048,17 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
             if (seen.lookup s!"'{p}@{rigidOwner decls d}").isSome then
               let k := (← keyOf t).getD 0
               inferred := inferred ++ [(Syntax.destroyTrait, k, t)]
+          -- (And of each type its signature says a trait leaves to an
+          -- implementation, `<I as Iterator>::Item`: what the function is
+          -- given values of as much as its type parameters.)
+          for (_, _, _, a, owner, _) in (← get).assocUses do
+            if owner == d.name then
+              let t ← find a
+              if let .var id := t then
+                if scheme.tvars.contains id then
+                  let k := (← keyOf t).getD 0
+                  unless inferred.any (fun (tr, k', _) => tr == Syntax.destroyTrait && k' == k) do
+                    inferred := inferred ++ [(Syntax.destroyTrait, k, t)]
           for b in byBody do
             unless inferred.any (fun (tr, k', _) => tr == Syntax.destroyTrait && k' == b.2.1) do
               inferred := inferred ++ [b]
