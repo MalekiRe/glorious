@@ -10,13 +10,16 @@
 // 0
 mod ecs;
 
-use ecs::{App, World, Entity, Query, Relation, OneToMany, To};
+use ecs::{App, World, Entity, Query, Relation, OneToMany, Acyclic, To};
 
 struct Update
 struct Local(Int)
 struct Global(Int)
 struct Attached
 impl Relation for Attached { type Kind = OneToMany; }
+// (A query cascades only through a relation without cycles, upstream's
+// `ACYCLIC`.)
+impl Acyclic for Attached {}
 impl Eq for Attached { fn ==(a: Attached, b: Attached) -> Bool { true } }
 impl Clone for Attached { fn clone(a: &Attached) -> Attached { Attached } }
 

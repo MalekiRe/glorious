@@ -1,0 +1,18 @@
+// Upstream's tests/ui/join_parallel_conflict.rs, refused when compiled: a join's write beside a reader in a parallel group.
+// expect:
+// error containing: ApartAcross
+mod ecs;
+
+use ecs::{App, World, Entity, Query, Relation, OneToMany, OneToOne, ManyToMany, Relates, Sources, To, From, parallel};
+
+struct Update
+struct Value(Int)
+struct Docked
+impl Relation for Docked { type Kind = OneToMany; }
+struct Partner
+impl Relation for Partner { type Kind = OneToOne; }
+struct Likes
+impl Relation for Likes { type Kind = ManyToMany; }
+fn joins(q: &mut Query<(To<Docked, (&mut Value,)>,), ()>) { () }
+fn reads(q: &mut Query<(&Value,), ()>) { () }
+fn main() -> Int { let app = App::new().relation<Docked>().register<Value>().add_systems(Update, parallel((joins, reads))).build(); discard(app); 0 }

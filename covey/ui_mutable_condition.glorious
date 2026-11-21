@@ -1,0 +1,16 @@
+// Upstream's tests/ui/mutable_condition.rs, refused when compiled: a condition that writes.
+// expect:
+// error containing: AConditionOnlyReads
+mod ecs;
+
+use ecs::{App, World, Entity, Query, Single, With, Without, Changed, Or, MayHave, parallel, run_if, exclusive, node, ready};
+
+struct Update
+struct Value(Int)
+struct Other(Int)
+struct Tag
+struct A
+struct B
+fn condition(value: &mut Single<(&mut Value,), ()>) -> Bool { match(value.get_mut()) { Some((mut v,)) => v.0 = v.0 + 1; v.0 > 0, None => false } }
+fn system() { () }
+fn main() -> Int { let app = App::new().register<Value>().add_systems(Update, run_if(system, condition)).build(); discard(app); 0 }

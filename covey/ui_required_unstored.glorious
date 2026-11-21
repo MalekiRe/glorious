@@ -1,0 +1,23 @@
+// Upstream's tests/ui/required_unstored.rs, refused when compiled: a required component the world does not store.
+// expect:
+// error containing: does not implement `ecs::Get<Mass>`
+mod ecs;
+
+use ecs::{App, World, Entity, Query, Single, With, Without, Changed, Or, MayHave, parallel, run_if, exclusive, node, ready};
+
+struct Update
+struct Value(Int)
+struct Other(Int)
+struct Tag
+struct A
+struct B
+use ecs::{Requires};
+use core::value::Default;
+struct Pos
+impl Default for Pos { fn default() -> Pos { Pos } }
+struct Mass
+impl Default for Mass { fn default() -> Mass { Mass } }
+struct Bird
+impl Requires for Bird { type Required = (Pos,); }
+impl Requires for Pos { type Required = (Mass,); }
+fn main() -> Int { let mut world = App::new().register<Bird>().register<Pos>().build().into_world(); discard(world.spawn_bundle((Bird,))); 0 }

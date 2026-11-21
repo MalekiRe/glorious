@@ -1,0 +1,16 @@
+// Upstream's tests/ui/missing_dependency.rs, refused when compiled: a node that runs after a node its graph does not have.
+// expect:
+// error containing: ANodeRunsAfterNodesOfItsGraph
+mod ecs;
+
+use ecs::{App, World, Entity, Query, Single, With, Without, Changed, Or, MayHave, parallel, run_if, exclusive, node, ready};
+
+struct Update
+struct Value(Int)
+struct Other(Int)
+struct Tag
+struct A
+struct B
+struct Missing
+fn nothing() { () }
+fn main() -> Int { let app = App::new().add_systems(Update, ready((node(A, nothing).after(Missing),))).build(); discard(app); 0 }

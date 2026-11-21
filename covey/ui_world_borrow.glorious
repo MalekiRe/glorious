@@ -1,0 +1,22 @@
+// Upstream's tests/ui/world_borrow.rs, refused when compiled: an entity despawned while a query's item of it is held.
+// expect:
+// error containing: `world` is borrowed with `&mut` while `item` holds
+mod ecs;
+
+use ecs::{App, World, Entity, Query, Single, With, Without, Changed, Or, MayHave, parallel, run_if, exclusive, node, ready};
+
+struct Update
+struct Value(Int)
+struct Other(Int)
+struct Tag
+struct A
+struct B
+fn main() -> Int {
+    let mut world = App::new().register<Value>().build().into_world();
+    let e = world.spawn_bundle((Value(1),));
+    let mut query = world.query<(&mut Value,)>();
+    let item = query.get_mut(e);
+    world.despawn(e);
+    discard(item);
+    0
+}

@@ -1,0 +1,20 @@
+// Upstream's tests/ui/default_filter_conflict.rs, refused when compiled: writers in a parallel group, one that may see disabled rows, the other only those.
+// expect:
+// error containing: ApartAcross
+mod ecs;
+
+use ecs::{App, World, Entity, Query, Single, With, Without, Changed, Or, MayHave, parallel, run_if, exclusive, node, ready};
+
+struct Update
+struct Value(Int)
+struct Other(Int)
+struct Tag
+struct A
+struct B
+use ecs::{Disabling};
+struct Hp(Int)
+struct Prefab
+impl Disabling for Prefab { const DISABLES: Bool = true; }
+fn all(q: &mut Query<(&mut Hp,), (MayHave<Prefab>,)>) { () }
+fn prefabs(q: &mut Query<(&mut Hp,), (With<Prefab>,)>) { () }
+fn main() -> Int { let app = App::new().register<Hp>().register<Prefab>().add_systems(Update, parallel((all, prefabs))).build(); discard(app); 0 }

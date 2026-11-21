@@ -1,0 +1,15 @@
+// Upstream's tests/ui/single_alias.rs, refused when compiled: a system that writes a component through one singleton and reads it through another.
+// expect:
+// error containing: AComponentWrittenIsUsedOnceUnlessFiltersKeepItApart
+mod ecs;
+
+use ecs::{App, World, Entity, Query, Single, With, Without, Changed, Or, MayHave, parallel, run_if, exclusive, node, ready};
+
+struct Update
+struct Value(Int)
+struct Other(Int)
+struct Tag
+struct A
+struct B
+fn alias(write: &mut Single<(&mut Value,), ()>, read: &mut Single<(&Value,), ()>) { () }
+fn main() -> Int { let app = App::new().register<Value>().add_systems(Update, alias).build(); discard(app); 0 }

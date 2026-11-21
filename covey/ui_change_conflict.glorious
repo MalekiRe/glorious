@@ -1,0 +1,16 @@
+// Upstream's tests/ui/change_conflict.rs, refused when compiled: a query filtered by a component's changes beside a writer of it, in a parallel group.
+// expect:
+// error containing: ecs::Ticks<Value>
+mod ecs;
+
+use ecs::{App, World, Entity, Query, Single, With, Without, Changed, Or, MayHave, parallel, run_if, exclusive, node, ready};
+
+struct Update
+struct Value(Int)
+struct Other(Int)
+struct Tag
+struct A
+struct B
+fn changed(q: &mut Query<(Entity,), (Changed<Value>,)>) { () }
+fn write(q: &mut Query<(&mut Value,), ()>) { () }
+fn main() -> Int { let mut app = App::new().register<Value>().add_systems(Update, parallel((changed, write))).build(); app.emit(&Update); 0 }

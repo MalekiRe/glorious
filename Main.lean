@@ -533,6 +533,13 @@ def exampleCases (dir : System.FilePath) :
         out := out.push (⟨src, input, expect⟩, ← moduleFiles entry.path)
   pure out.toList
 
+/-- Does what a program gave match what it should: the same, or, of one
+said to be refused (`error containing: ..`), an error that says that. -/
+def expectMatches (expect got : String) : Bool :=
+  if expect.startsWith "error containing: " then
+    got.startsWith "error: " && (got.splitOn (expect.drop "error containing: ".length).toString).length > 1
+  else got == expect
+
 /-- Run every test program and every example on the Lean machines, and on the
 Rust VM if its path is given. Each is compiled once; the programs are gone
 through side by side, and what failed is said in the order they are in. Then
@@ -572,7 +579,7 @@ def selftest (vm : Option String) : IO UInt32 := do
   for ((c, _), i) in all.zipIdx do
     let got := (found[i]?.map (·.lean)).getD ""
     if i < quick.length then
-      if got != c.expect then
+      if !expectMatches c.expect got then
         failures := failures.push (2 * i, s!"lean machines: expected\n{c.expect}\ngot\n{got}\nfor\n{c.src}\n")
     else if let some e := found[i]?.bind (·.error) then
       failures := failures.push (2 * i, s!"does not compile: {e}\nfor\n{c.src}\n")

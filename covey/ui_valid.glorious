@@ -1,0 +1,27 @@
+// Upstream's tests/ui/valid.rs: a singleton and a query that write one
+// component, kept apart by their filters, in one parallel group.
+// expect:
+// 1
+// 12
+// 0
+mod ecs;
+
+use ecs::{App, World, Entity, Query, Single, With, Without, Changed, Or, MayHave, parallel, run_if, exclusive, node, ready};
+
+struct Update
+struct Value(Int)
+struct Other(Int)
+struct Tag
+struct A
+struct B
+fn tagged(value: &mut Single<(&mut Value,), (With<Tag>,)>) { match(value.get_mut()) { Some((mut v,)) => v.0 = v.0 + 1;, None => () } }
+fn others(values: &mut Query<(&mut Value,), (Without<Tag>,)>) { values.for_each() { (mut v,) => v.0 = v.0 + 2; } }
+fn main() -> Int {
+    let mut app = App::new().register<Value>().register<Tag>().add_systems(Update, parallel((tagged, others))).build();
+    let a = app.world.spawn_bundle((Value(0), Tag));
+    let b = app.world.spawn_bundle((Value(10),));
+    app.emit(&Update);
+    say(match(app.world.get<Value>(a)) { Some(v) => v.0, None => 0 - 1 });
+    say(match(app.world.get<Value>(b)) { Some(v) => v.0, None => 0 - 1 });
+    0
+}

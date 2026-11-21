@@ -1,0 +1,16 @@
+// Upstream's tests/ui/exclusive_parallel.rs, refused when compiled: an exclusive system in a parallel group.
+// expect:
+// error containing: AnExclusiveSystemRunsAloneNotBesideAnother
+mod ecs;
+
+use ecs::{App, World, Entity, Query, Single, With, Without, Changed, Or, MayHave, parallel, run_if, exclusive, node, ready};
+
+struct Update
+struct Value(Int)
+struct Other(Int)
+struct Tag
+struct A
+struct B
+fn spawn_one<S>(world: &mut World<S>) { discard(world.spawn_bundle(())) }
+fn read(q: &mut Query<(&Value,), ()>) { () }
+fn main() -> Int { let mut app = App::new().register<Value>().add_systems(Update, parallel((exclusive(spawn_one), read))).build(); app.emit(&Update); 0 }

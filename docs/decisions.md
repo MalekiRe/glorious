@@ -6514,6 +6514,71 @@ field (option C: types as values, `inline for`), which would make a typed
 `set_field` safe; enums' active constructor read without matching; and
 tuples' fields (opaque, as upstream's).
 
+## Covey: what upstream refuses when compiled
+
+Upstream's `invalid_parameter_access_is_rejected_at_compile_time` compiles
+37 programs (tests/ui) and expects each refused. covey/ui_*.glorious are
+those programs, each expecting its refusal (`// error containing: ..`, a
+form of expectation the suite reads: an error that says that). What was
+added to refuse them, all of it facts of types, checked when compiled:
+
+- **A parallel group's branches are apart** (`BranchesApart`): what one
+  writes the others neither read nor write, unless filters keep them
+  apart. A branch's touches are its systems' (`SystemTouches`: of a
+  function, a chain, a condition, a nested group, a graph's nodes); an
+  exclusive system and a sync point without an envelope touch everything.
+  Across branches two that read one resource are apart, and a join is as
+  what it joins. Branches used to be kept apart when run, one after
+  another where they were not; covey programs that counted with one
+  resource in several branches now count with an atomic each reads, as
+  upstream's tests do.
+- **A query filtered by a component's changes reads its ticks** (`Ticks`),
+  which a writer beside it changes.
+- **A query's own items are of one row** (`SameRow`): two of one
+  component are not kept apart by its filters, even one nothing passes. A
+  many-to-many join may lead to the row's own entity (`Fan`): not apart
+  from the row's own items, nor from another join's.
+- **A write through joins of a list** (a `From`'s sources, a many-to-many's
+  targets) leads each to its own entity only through a one-to-one join or
+  a `From` of a relation each source has one target of (`OneEach`).
+- **Conditions only read** (`OnlyReads` of their touches).
+- **`Has<T>` does not touch `T`'s values**: apart from a writer of `T`.
+- **`Or` of alternatives is excluded by a filter that excludes each.**
+- **A bundle gives each component once and no two of one `OneOf` group**
+  (`MembersApart`). (One whose member shares a group with what another
+  requires still aborts when put, as upstream's panics.)
+- **A relation's links are not written in place** (`Relates`, `Links`,
+  `Sources` are `Immutable`).
+- **A state is not put in as a resource** (`NotAState<T>` of the store:
+  one that keeps `Next<T>` keeps a state `T`); its transitions put it.
+- **A graph's node names are given once, and each node runs after nodes of
+  its graph.**
+- **A bridge touches only what its sync point's envelope holds**
+  (`RemoteWithin`).
+- **`cascade` goes through an `Acyclic` relation only.** `Acyclic` is now a
+  marker, `impl Acyclic for R {}`; `AcyclicIs::ACYCLIC` is what generic
+  code reads.
+
+Two compiler fixes came of it: a borrow given back as what a type
+parameter's trait leaves at a lifetime (`Q::Got<'_>`) is tied to what it
+borrows (see the checker commit), so two items of one query cannot be held
+at once; and `'_` is kept among type arguments.
+
+Not ported, by design:
+- `late_storage` and `duplicate_component`: covey's storage choice is a
+  flag of a column, not a type, and registering twice adds a column the
+  first lookup shadows; neither changes what a system's type says.
+- `unplaced_sync_point`: a `Remote` is the world's, which does not know
+  the app's systems; a bridge to a point the app does not run is
+  `BridgeError::Closed` when the app ends.
+- `join_shared_iter` and `join_many_to_many_write`: covey lends one row
+  at a time, and a row's many-to-many targets are distinct entities, so
+  neither aliases; upstream refuses them for its iterators.
+- `non_send_component`: Glorious has no `Rc`; values a world holds are
+  all sendable.
+
+Cost: states2 4.9 s to 5.2 s; the suite 39 s to 48 s (32 programs more).
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by

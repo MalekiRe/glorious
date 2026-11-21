@@ -1,0 +1,18 @@
+// Upstream's tests/ui/bridge_outside_envelope.rs, refused when compiled: a bridge that writes what its sync point's envelope does not hold.
+// expect:
+// error containing: ABridgeTouchesOnlyWhatItsSyncPointsEnvelopeHolds
+mod ecs;
+use ecs::{App, Query, sync_point};
+use std::thread::{scope, Scope, Threads};
+struct Update
+struct A
+struct B
+struct Writes
+impl ecs::Enveloped for Writes { type Env = Query<(&mut A,), ()>; }
+fn touch(q: &mut Query<(&mut B,), ()>) { () }
+fn main() -> Int {
+    let app = App::new().register<A>().register<B>().add_systems(Update, sync_point(Writes)).build();
+    let remote = app.world.remote();
+    scope(fn(s: &Scope) / {Threads} { let mine = remote.share(); discard(mine.bridge(Writes, touch)) });
+    0
+}

@@ -46,8 +46,11 @@ fn hide_root<S>(commands: &mut Commands<S>, q: &mut Query<(Entity, &Hp), ()>) wh
     q.for_each() { e, h => if(h.0 == 0) { commands.disable_subtree<ChildOf>(e) } else { () }; }
 }
 
-fn visible(q: &mut Query<(&Hp,), ()>, seen: &mut Seen) { seen.0 = seen.0 + q.count() }
-fn hidden(q: &mut Query<(&Hp,), (With<Disabled>,)>, seen: &mut Seen) { seen.0 = seen.0 + 10 * q.count() }
+// (A count both branches add to, as upstream's atomic: each only reads the
+// resource, so they are apart.)
+struct Tally(std::thread::AtomicInt)
+fn visible(q: &mut Query<(&Hp,), ()>, tally: &Tally) { discard(std::thread::fetch_add(&tally.0, q.count())) }
+fn hidden(q: &mut Query<(&Hp,), (With<Disabled>,)>, tally: &Tally) { discard(std::thread::fetch_add(&tally.0, 10 * q.count())) }
 
 fn main() -> Int {
     let mut app = App::new().register<Hp>().register<Disabled>().insert_resource(Seen(0)).add_systems(Update, count_hp).build();
@@ -99,11 +102,12 @@ fn main() -> Int {
     say(match(world.target<ChildOf>(child)) { Some(t) => if(t == root) { 1 } else { 0 }, None => 0 });
     say("--");
 
-    let mut app = App::new().register<Hp>().register<Disabled>().insert_resource(Seen(0)).add_systems(Update, ecs::parallel((visible, hidden))).build();
+    let mut app = App::new().register<Hp>().register<Disabled>().insert_resource(Tally(std::thread::AtomicInt::new(0))).add_systems(Update, ecs::parallel((visible, hidden))).build();
     discard(app.world.spawn_bundle((Hp(1),)));
     discard(app.world.spawn_bundle((Hp(2), Disabled)));
     app.emit(&Update);
-    say(seen_of(&app.world) % 10);
-    say(seen_of(&app.world) / 10);
+    let tally = match(app.world.resource<Tally>()) { Some(t) => std::thread::load(&t.0), None => 0 - 1 };
+    say(tally % 10);
+    say(tally / 10);
     0
 }

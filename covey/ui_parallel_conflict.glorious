@@ -1,0 +1,16 @@
+// Upstream's tests/ui/parallel_conflict.rs, refused when compiled: a parallel group whose branches write and read one component.
+// expect:
+// error containing: AComponentWrittenIsUsedOnceUnlessFiltersKeepItApart
+mod ecs;
+
+use ecs::{App, World, Entity, Query, Single, With, Without, Changed, Or, MayHave, parallel, run_if, exclusive, node, ready};
+
+struct Update
+struct Value(Int)
+struct Other(Int)
+struct Tag
+struct A
+struct B
+fn bump(value: &mut Single<(&mut Value,), ()>) { match(value.get_mut()) { Some((mut v,)) => v.0 = v.0 + 1;, None => () } }
+fn read(values: &mut Query<(&Value,), ()>) { values.for_each() { (v,) => discard(v.0); } }
+fn main() -> Int { let app = App::new().register<Value>().add_systems(Update, parallel((bump, read))).build(); discard(app); 0 }

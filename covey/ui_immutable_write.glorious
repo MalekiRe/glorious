@@ -1,0 +1,10 @@
+// Upstream's tests/ui/immutable_write.rs, refused when compiled: a query that writes an immutable component.
+// expect:
+// error containing: `ecs::Immutable` does not implement `ecs::InPlace`
+mod ecs;
+use ecs::{App, Query, Mutability, Immutable};
+struct Update
+struct Level(Int)
+impl Mutability for Level { type Writes = Immutable; }
+fn system(q: &mut Query<(&mut Level,), ()>) { q.for_each() { (mut l,) => l.0 = l.0 + 1; } }
+fn main() -> Int { let mut app = App::new().register<Level>().add_systems(Update, system).build(); app.emit(&Update); 0 }

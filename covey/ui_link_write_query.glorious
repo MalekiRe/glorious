@@ -1,0 +1,17 @@
+// Upstream's tests/ui/link_write_query.rs, refused when compiled: a query that writes a relation's links.
+// expect:
+// error containing: `ecs::Immutable` does not implement `ecs::InPlace`
+mod ecs;
+
+use ecs::{App, World, Entity, Query, Relation, OneToMany, OneToOne, ManyToMany, Relates, Sources, To, From, parallel};
+
+struct Update
+struct Value(Int)
+struct Docked
+impl Relation for Docked { type Kind = OneToMany; }
+struct Partner
+impl Relation for Partner { type Kind = OneToOne; }
+struct Likes
+impl Relation for Likes { type Kind = ManyToMany; }
+fn system(q: &mut Query<(&mut Relates<Docked>,), ()>) { () }
+fn main() -> Int { let mut app = App::new().relation<Docked>().add_systems(Update, system).build(); app.emit(&Update); 0 }

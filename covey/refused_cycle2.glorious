@@ -10,7 +10,7 @@ use ecs::{App, Relation, OneToMany, Acyclic, Fragmenting, to};
 struct Carried
 impl Relation for Carried { type Kind = OneToMany; }
 impl Use<[0, *]> for Carried {}
-impl Acyclic for Carried { const ACYCLIC: Bool = true; }
+impl Acyclic for Carried {}
 impl Fragmenting for Carried {}
 
 fn main() -> Int {

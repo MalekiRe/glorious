@@ -1,0 +1,10 @@
+// Upstream's tests/ui/immutable_res_mut.rs, refused when compiled: a system that writes an immutable resource.
+// expect:
+// error containing: `ecs::Immutable` does not implement `ecs::InPlace`
+mod ecs;
+use ecs::{App, Mutability, Immutable};
+struct Update
+struct Level(Int)
+impl Mutability for Level { type Writes = Immutable; }
+fn system(level: &mut Level) { level.0 = level.0 + 1 }
+fn main() -> Int { let mut app = App::new().insert_resource(Level(0)).add_systems(Update, system).build(); app.emit(&Update); 0 }

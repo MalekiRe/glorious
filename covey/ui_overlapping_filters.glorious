@@ -1,0 +1,16 @@
+// Upstream's tests/ui/overlapping_filters.rs, refused when compiled: writers in a parallel group whose filters do not keep them apart (two markers).
+// expect:
+// error containing: ApartAcross
+mod ecs;
+
+use ecs::{App, World, Entity, Query, Single, With, Without, Changed, Or, MayHave, parallel, run_if, exclusive, node, ready};
+
+struct Update
+struct Value(Int)
+struct Other(Int)
+struct Tag
+struct A
+struct B
+fn a(q: &mut Query<(&mut Value,), (With<A>,)>) { () }
+fn b(q: &mut Query<(&mut Value,), (With<B>,)>) { () }
+fn main() -> Int { let app = App::new().register<Value>().register<A>().register<B>().add_systems(Update, parallel((a, b))).build(); discard(app); 0 }

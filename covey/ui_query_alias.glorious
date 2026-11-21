@@ -1,0 +1,15 @@
+// Upstream's tests/ui/query_alias.rs, refused when compiled: a query that writes and reads one component.
+// expect:
+// error containing: SameRow
+mod ecs;
+
+use ecs::{App, World, Entity, Query, Single, With, Without, Changed, Or, MayHave, parallel, run_if, exclusive, node, ready};
+
+struct Update
+struct Value(Int)
+struct Other(Int)
+struct Tag
+struct A
+struct B
+fn alias(query: &mut Query<(&mut Value, &Value), ()>) { query.for_each() { mut w, r => w.0 = w.0 + r.0; } }
+fn main() -> Int { let app = App::new().register<Value>().add_systems(Update, alias).build(); discard(app); 0 }

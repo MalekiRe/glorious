@@ -14,7 +14,7 @@ use ecs::{App, Entity, Relation, ManyToMany, Acyclic};
 struct Precedes
 impl Relation for Precedes { type Kind = ManyToMany; }
 impl Use<[0, *]> for Precedes {}
-impl Acyclic for Precedes { const ACYCLIC: Bool = true; }
+impl Acyclic for Precedes {}
 
 fn main() -> Int {
     let mut world = App::new().relation<Precedes>().build().into_world();

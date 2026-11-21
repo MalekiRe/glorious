@@ -1,0 +1,16 @@
+// Upstream's tests/ui/overlapping_or.rs, refused when compiled: writers in a parallel group, one filtered by either of two, the other by the absence of one.
+// expect:
+// error containing: ApartAcross
+mod ecs;
+
+use ecs::{App, World, Entity, Query, Single, With, Without, Changed, Or, MayHave, parallel, run_if, exclusive, node, ready};
+
+struct Update
+struct Value(Int)
+struct Other(Int)
+struct Tag
+struct A
+struct B
+fn a(q: &mut Query<(&mut Value,), (Or<(With<A>, With<B>)>,)>) { () }
+fn b(q: &mut Query<(&mut Value,), (Without<A>,)>) { () }
+fn main() -> Int { let app = App::new().register<Value>().register<A>().register<B>().add_systems(Update, parallel((a, b))).build(); discard(app); 0 }

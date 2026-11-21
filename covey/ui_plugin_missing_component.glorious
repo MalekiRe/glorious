@@ -1,0 +1,16 @@
+// Upstream's tests/ui/plugin_missing_component.rs, refused when compiled: a plugin's system that reads a component the plugin does not declare.
+// expect:
+// error containing: does not implement `ecs::Get<Vel>`
+mod ecs;
+use ecs::{App, Query, Plugin};
+struct Update
+struct Pos(Int)
+struct Vel(Int)
+fn step(q: &mut Query<(&mut Pos, &Vel), ()>) { q.for_each() { mut p, v => p.0 = p.0 + v.0; } }
+struct Physics
+impl<S, L> Plugin<S, L> for Physics {
+    type Components = (Pos,);
+    type Out = App<<(Pos,) as ecs::Registers<S>>::Out, (ecs::On<Update, ecs::Sys<fn(&mut Query<(&mut Pos, &Vel), ()>), ()>>, L)>;
+    fn build(p: Physics, app: App<<(Pos,) as ecs::Registers<S>>::Out, L>) -> App<<(Pos,) as ecs::Registers<S>>::Out, (ecs::On<Update, ecs::Sys<fn(&mut Query<(&mut Pos, &Vel), ()>), ()>>, L)> { app.add_systems(Update, step) }
+}
+fn main() -> Int { let mut app = App::new().add_plugins(Physics).build(); app.emit(&Update); 0 }

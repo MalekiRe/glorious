@@ -1,0 +1,22 @@
+// Upstream's tests/ui/query_borrow.rs, refused when compiled: two items of one query held at once.
+// expect:
+// error containing: `query` is borrowed with `&mut` while `first` holds
+mod ecs;
+
+use ecs::{App, World, Entity, Query, Single, With, Without, Changed, Or, MayHave, parallel, run_if, exclusive, node, ready};
+
+struct Update
+struct Value(Int)
+struct Other(Int)
+struct Tag
+struct A
+struct B
+fn main() -> Int {
+    let mut world = App::new().register<Value>().build().into_world();
+    let e = world.spawn_bundle((Value(1),));
+    let mut query = world.query<(&mut Value,)>();
+    let first = query.get_mut(e);
+    let second = query.get_mut(e);
+    discard(first); discard(second);
+    0
+}

@@ -1,0 +1,17 @@
+// Upstream's tests/ui/join_nested_alias.rs, refused when compiled: a write through joins that may lead two sources to one target.
+// expect:
+// error containing: AWriteThroughJoinsOfAListLeadsEachToItsOwnEntity
+mod ecs;
+
+use ecs::{App, World, Entity, Query, Relation, OneToMany, OneToOne, ManyToMany, Relates, Sources, To, From, parallel};
+
+struct Update
+struct Value(Int)
+struct Docked
+impl Relation for Docked { type Kind = OneToMany; }
+struct Partner
+impl Relation for Partner { type Kind = OneToOne; }
+struct Likes
+impl Relation for Likes { type Kind = ManyToMany; }
+fn system(q: &mut Query<(From<Docked, (To<Partner, (To<Docked, (&mut Value,)>,)>,)>,), ()>) { q.for_each() { sources => discard(sources); } }
+fn main() -> Int { let mut app = App::new().relation<Docked>().relation<Partner>().relation<Likes>().register<Value>().add_systems(Update, system).build(); app.emit(&Update); 0 }

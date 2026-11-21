@@ -286,6 +286,11 @@ pub trait InPlace {}
 impl InPlace for Mutable {}
 pub trait Writable {}
 impl<T> Writable for T where <T as Mutability>::Writes: InPlace {}
+// (A relation's links are changed through the world, `relate` and
+// `unrelate`, which keep both sides: never written in place.)
+impl<R> Mutability for Relates<R> { type Writes = Immutable; }
+impl<R> Mutability for Links<R> { type Writes = Immutable; }
+impl<R> Mutability for Sources<R> { type Writes = Immutable; }
 
 // How a component's column is kept, upstream's `Components<T, SUMMARY>` and
 // `Sparse<T>`: `app.storage<Sparse<Marker>>()`, or a plugin's `type Storage`.
@@ -500,8 +505,8 @@ fn move_source<R, S>(columns: &mut S, target: Entity, source: Entity, position: 
 }
 
 fn link<R, S>(world: &mut World<S>, source: Entity, relation: R, target: Entity) -> Option<R>
-    where S: Get<Links<R>>, S: Get<Sources<R>>, R: Use<[0, *]>, R: Acyclic {
-    if(<R as Acyclic>::ACYCLIC) {
+    where S: Get<Links<R>>, S: Get<Sources<R>>, R: Use<[0, *]>, R: AcyclicIs {
+    if(<R as AcyclicIs>::ACYCLIC) {
         if(if(same_entity(source, target)) { true } else { reaches_many<R, S>(&world.columns, target, source) }) { abort("relate: would close a cycle") } else { () }
     } else { () };
     let mut column = take_at<Links<R>, S>(world);
@@ -554,10 +559,10 @@ fn targets_in<R, S>(columns: &S, source: Entity) -> [Entity] where S: Get<Links<
 
 // How an entity is related to another, by the relation's kind.
 pub trait Relating<R, S> { fn relate_by(&mut World<S>, Entity, R, Entity) -> Option<R> }
-impl<R, S> Relating<R, S> for OneToMany where S: Get<Relates<R>>, S: Get<Sources<R>>, R: SameLink, R: Acyclic {
+impl<R, S> Relating<R, S> for OneToMany where S: Get<Relates<R>>, S: Get<Sources<R>>, R: SameLink, R: AcyclicIs {
     fn relate_by(world: &mut World<S>, source: Entity, relation: R, target: Entity) -> Option<R> { relate<R, S>(world, source, relation, target) }
 }
-impl<R, S> Relating<R, S> for OneToOne where S: Get<Relates<R>>, S: Get<Sources<R>>, R: SameLink, R: Acyclic {
+impl<R, S> Relating<R, S> for OneToOne where S: Get<Relates<R>>, S: Get<Sources<R>>, R: SameLink, R: AcyclicIs {
     fn relate_by(world: &mut World<S>, source: Entity, relation: R, target: Entity) -> Option<R> {
         let others = sources_in<R, S>(&world.columns, target);
         let mut i = 0;
@@ -570,7 +575,7 @@ impl<R, S> Relating<R, S> for OneToOne where S: Get<Relates<R>>, S: Get<Sources<
         relate<R, S>(world, source, relation, target)
     }
 }
-impl<R, S> Relating<R, S> for ManyToMany where S: Get<Links<R>>, S: Get<Sources<R>>, R: Use<[0, *]>, R: Acyclic {
+impl<R, S> Relating<R, S> for ManyToMany where S: Get<Links<R>>, S: Get<Sources<R>>, R: Use<[0, *]>, R: AcyclicIs {
     fn relate_by(world: &mut World<S>, source: Entity, relation: R, target: Entity) -> Option<R> { link<R, S>(world, source, relation, target) }
 }
 // A relation related by its kind.
@@ -628,10 +633,12 @@ impl<R> SameLink for R where R: Eq, R: Clone { fn same_link(a: &R, b: &R) -> Boo
 impl<R> SameLink for R { fn same_link(a: &R, b: &R) -> Bool { false } }
 
 // A relation no chain of links may close into a cycle (upstream's
-// `ACYCLIC`): `impl Acyclic for Precedes { const ACYCLIC: Bool = true; }`.
-// Relating what would close one aborts.
-pub trait Acyclic { const ACYCLIC: Bool; }
-impl<T> Acyclic for T { const ACYCLIC: Bool = false; }
+// `ACYCLIC`): `impl Acyclic for Precedes {}`. Relating what would close one
+// aborts; a query cascades only through one (a cycle has no first).
+pub trait Acyclic {}
+pub trait AcyclicIs { const ACYCLIC: Bool; }
+impl<T> AcyclicIs for T where T: Acyclic { const ACYCLIC: Bool = true; }
+impl<T> AcyclicIs for T { const ACYCLIC: Bool = false; }
 // Whether following one-target links from `from` comes to `to`.
 fn reaches_one<R, S>(columns: &S, from: Entity, to: Entity) -> Bool where S: Get<Relates<R>> {
     let column = <S as Get<Relates<R>>>::column(columns);
@@ -669,10 +676,10 @@ fn reaches_many<R, S>(columns: &S, from: Entity, to: Entity) -> Bool where S: Ge
 }
 
 pub fn relate<R, S>(world: &mut World<S>, source: Entity, relation: R, target: Entity) -> Option<R>
-    where S: Get<Relates<R>>, S: Get<Sources<R>>, R: SameLink, R: Acyclic {
+    where S: Get<Relates<R>>, S: Get<Sources<R>>, R: SameLink, R: AcyclicIs {
     // (Upstream's: what a join of a row gives is then of another entity.)
     if(same_entity(source, target)) { abort("relate: an entity cannot relate to itself through a relation with a one-side") } else { () };
-    if(<R as Acyclic>::ACYCLIC) { if(reaches_one<R, S>(&world.columns, target, source)) { abort("relate: would close a cycle") } else { () } } else { () };
+    if(<R as AcyclicIs>::ACYCLIC) { if(reaches_one<R, S>(&world.columns, target, source)) { abort("relate: would close a cycle") } else { () } } else { () };
     // (A link to the same target keeps its place; it changes only where
     // its value is not the same.)
     let column = <S as Get<Relates<R>>>::column(&world.columns);
@@ -977,6 +984,32 @@ impl<N, ..R, All> RequiresClash<All> for (N, ..R) where N: Requires, All: AnyCla
     fn requires_clash() -> Bool { if(<All as AnyClash<<N as Requires>::Required>>::any_clash()) { true } else { <(..R) as RequiresClash<All>>::requires_clash() } }
 }
 
+// A bundle's members: each component once, and no two of one `OneOf` group
+// (which could not both be kept); both facts of their types.
+pub trait AComponentIsGivenOnceInABundle {}
+pub trait ABundleHoldsOneMemberOfEachOneOfGroup {}
+pub trait HasGroupIs<G> { type Is; }
+impl<G> HasGroupIs<G> for () { type Is = No; }
+impl<G, H, ..R> HasGroupIs<G> for (H, ..R) where H: SameIs<G>, (..R): HasGroupIs<G>, (<H as SameIs<G>>::Is, <(..R) as HasGroupIs<G>>::Is): Either { type Is = <(<H as SameIs<G>>::Is, <(..R) as HasGroupIs<G>>::Is) as Either>::Out; }
+pub trait SharesIs<L> { type Is; }
+impl<L> SharesIs<L> for () { type Is = No; }
+impl<H, ..R, L> SharesIs<L> for (H, ..R) where L: HasGroupIs<H>, (..R): SharesIs<L>, (<L as HasGroupIs<H>>::Is, <(..R) as SharesIs<L>>::Is): Either { type Is = <(<L as HasGroupIs<H>>::Is, <(..R) as SharesIs<L>>::Is) as Either>::Out; }
+pub trait GivenOnce {}
+impl<M> GivenOnce for (M, No) {}
+impl<M> GivenOnce for (M, Yes) where M: AComponentIsGivenOnceInABundle {}
+pub trait OneOfEachGroup {}
+impl<M> OneOfEachGroup for (M, No) {}
+impl<M> OneOfEachGroup for (M, Yes) where M: ABundleHoldsOneMemberOfEachOneOfGroup {}
+pub trait MemberPair {}
+impl<M, H> MemberPair for (M, H) where H: SameIs<M>, (M, <H as SameIs<M>>::Is): GivenOnce, M: OneOf, H: OneOf,
+    <M as OneOf>::Groups: SharesIs<<H as OneOf>::Groups>, (M, <<M as OneOf>::Groups as SharesIs<<H as OneOf>::Groups>>::Is): OneOfEachGroup {}
+pub trait MembersApartFrom<M> {}
+impl<M> MembersApartFrom<M> for () {}
+impl<M, H, ..R> MembersApartFrom<M> for (H, ..R) where (M, H): MemberPair, (..R): MembersApartFrom<M> {}
+pub trait MembersApart {}
+impl MembersApart for () {}
+impl<H, ..R> MembersApart for (H, ..R) where (..R): MembersApartFrom<H>, (..R): MembersApart {}
+
 // Components given together: a tuple of them, each put in its column, and
 // then what they require. A bundle one of whose members shares a `OneOf`
 // group with what another requires is refused (the program aborts):
@@ -990,7 +1023,7 @@ pub trait Bundle<S> {
     fn put_all(Self, &mut World<S>, Entity) -> Self::Had
     fn take_all(&mut World<S>, Entity) -> Self::Had
 }
-impl<..T, S> Bundle<S> for (..T) where ..S: Get<T>, ..T: EvictOne<S>, ..T: Put<S>, (..T): BringsFor<S>, (..T): NamesOf, (..T): RequiresClash<(..T)> {
+impl<..T, S> Bundle<S> for (..T) where ..S: Get<T>, ..T: EvictOne<S>, ..T: Put<S>, (..T): BringsFor<S>, (..T): NamesOf, (..T): RequiresClash<(..T)>, (..T): MembersApart {
     type Had = (..Option<T>);
     fn names() -> [Str] { <(..T) as NamesOf>::names_of() }
     fn put_all(bundle: (..T), world: &mut World<S>, entity: Entity) -> (..Option<T>) {
@@ -1060,7 +1093,7 @@ impl<R, S> PutsBy<R, S> for OneToOne where R: RelateBy<S>, S: Get<Relates<R>> {
     fn put_by(world: &mut World<S>, entity: Entity, relation: R, target: Entity) -> Option<Relates<R>> { put_one_way<R, S>(world, entity, relation, target) }
     fn linked_by(world: &World<S>, entity: Entity) -> Bool { <S as Get<Relates<R>>>::has(&world.columns, entity) }
 }
-impl<R, S> PutsBy<R, S> for ManyToMany where S: Get<Links<R>>, S: Get<Sources<R>>, R: Use<[0, *]>, R: Acyclic {
+impl<R, S> PutsBy<R, S> for ManyToMany where S: Get<Links<R>>, S: Get<Sources<R>>, R: Use<[0, *]>, R: AcyclicIs {
     fn linked_by(world: &World<S>, entity: Entity) -> Bool { len_at(&targets_in<R, S>(&world.columns, entity)) > 0 }
     fn put_by(world: &mut World<S>, entity: Entity, relation: R, target: Entity) -> Option<Relates<R>> {
         if(if(alive(&*world, entity)) { alive(&*world, target) } else { false }) {
@@ -1382,7 +1415,9 @@ impl<S> World<S> {
     }
 
     // Give the world the resource; the one it had, if it had one.
-    pub fn insert_resource<T>(world: &mut Self, value: T) -> Option<T> where S: Holds<T> {
+    pub fn insert_resource<T>(world: &mut Self, value: T) -> Option<T> where S: Holds<T>, S: NotAState<T> { world.put_resource(value) }
+    // (Of a state too: what its transitions put.)
+    fn put_resource<T>(world: &mut Self, value: T) -> Option<T> where S: Holds<T> {
         replace(<S as Holds<T>>::slot_mut(&mut world.columns), Some(value))
     }
     pub fn remove_resource<T>(world: &mut Self) -> Option<T> where S: Holds<T> {
@@ -1885,8 +1920,8 @@ impl<Q, N, St> Query<Q, N, St> {
     // `To<R, P>`, so `P` reads the parent as already updated (transforms).
     // Rows whose parent is not a row of the query come first; the order is
     // fixed before `f` runs, so writes cannot reorder or repeat rows.
-    // (Upstream's `cascade`. A cycle's rows, which have no first, come
-    // last, in the query's order.)
+    // (Upstream's `cascade`: through an `Acyclic` relation, whose rows each
+    // have a first.)
     pub fn cascade(query: &mut Self, f: for<'a> fn(Q::Got<'a>)) where Q: Item<Store = St>, St: Cascading {
         let rows = copied(&query.entities);
         let mut placed = std::vec::map(copied(&rows), fn(e: Entity) -> Bool { false });
@@ -1953,7 +1988,7 @@ fn row_placed(rows: &[Entity], placed: &[Bool], parent: Entity) -> Bool {
 // What a query led by a join, `(To<R, P>, ..)`, keeps: the entity a row's
 // join leads to.
 pub trait Cascading { fn parent_in(&Self, Entity) -> Option<Entity> }
-impl<R, Inner, Rest> Cascading for ((Ptr<Column<Relates<R>>>, Inner), Rest) {
+impl<R, Inner, Rest> Cascading for ((Ptr<Column<Relates<R>>>, Inner), Rest) where R: Acyclic {
     fn parent_in(store: &((Ptr<Column<Relates<R>>>, Inner), Rest), entity: Entity) -> Option<Entity> {
         let links: &Column<Relates<R>> = unsafe { lent(store.0.0) };
         let at = slot_of(links, entity);
@@ -2058,7 +2093,7 @@ impl<S> Commands<S> {
     }
 
     // End an entity.
-    pub fn insert_resource<T>(commands: &mut Self, value: T) where S: Holds<T> {
+    pub fn insert_resource<T>(commands: &mut Self, value: T) where S: Holds<T>, S: NotAState<T> {
         push_at(&mut commands.queue, fn(world: &mut World<S>) { let _ = world.insert_resource(value); })
     }
     pub fn remove_resource<T>(commands: &mut Self) where S: Holds<T> {
@@ -2214,7 +2249,14 @@ impl<T, U> WithoutOf<T> for Relinked<U> { type Is = No; }
 impl<U, N> ExcludesIs<N> for Relinked<U> { type Is = No; }
 impl<T, U> WithOf<T> for Or<U> { type Is = No; }
 impl<T, U> WithoutOf<T> for Or<U> { type Is = No; }
-impl<U, N> ExcludesIs<N> for Or<U> { type Is = No; }
+// (Of alternatives, each excluded.)
+impl<U, N> ExcludesIs<N> for Or<U> where U: AllExcluded<N> { type Is = <U as AllExcluded<N>>::Is; }
+pub trait AllExcluded<N> { type Is; }
+impl<N> AllExcluded<N> for () { type Is = Yes; }
+impl<N, H, ..R> AllExcluded<N> for (H, ..R) where H: ExcludesIs<N>, (..R): AllExcluded<N>, (<H as ExcludesIs<N>>::Is, <(..R) as AllExcluded<N>>::Is): Both { type Is = <(<H as ExcludesIs<N>>::Is, <(..R) as AllExcluded<N>>::Is) as Both>::Out; }
+pub trait Both { type Out; }
+impl<X> Both for (Yes, X) { type Out = X; }
+impl<X> Both for (No, X) { type Out = No; }
 impl<T> WithOf<T> for () { type Is = No; }
 impl<T> WithoutOf<T> for () { type Is = No; }
 impl<N> ExcludesIs<N> for () { type Is = No; }
@@ -2230,6 +2272,7 @@ impl<H, T, N> Under<N> for (H, T) where H: UnderOne<N>, T: Under<N> { type Out =
 pub trait UnderOne<N> { type Out; }
 impl<K, N> UnderOne<N> for K { type Out = Filtered<K, N>; }
 impl<K, N> UnderOne<N> for Joined<K> { type Out = Joined<Filtered<K, ()>>; }
+impl<K, N> UnderOne<N> for Fan<K> { type Out = Fan<Filtered<K, ()>>; }
 // One thing asked for, apart from each of a list; and a list each of whose
 // members is apart from those after it.
 pub trait ApartFrom<X> {}
@@ -2250,7 +2293,9 @@ impl<A> ItemTouches for &mut A { type List = (Writes<A>, ()); }
 impl<A> ItemTouches for &A { type List = (Read<A>, ()); }
 impl<A> ItemTouches for Option<&mut A> { type List = (Writes<A>, ()); }
 impl<A> ItemTouches for Option<&A> { type List = (Read<A>, ()); }
-impl<A> ItemTouches for Has<A> { type List = (Read<A>, ()); }
+// (Whether an entity has a component is not its value: apart from a writer
+// of it, as upstream's `Has`.)
+impl<A> ItemTouches for Has<A> { type List = (); }
 impl ItemTouches for Entity { type List = (); }
 // (What a join touches is of the entity it relates to, not of the one the
 // row is of: an entity relates to itself by no relation with a one-side,
@@ -2261,13 +2306,63 @@ pub struct Joined<K>(K)
 pub trait Joining { type Out; }
 impl Joining for () { type Out = (); }
 impl<H, T> Joining for (H, T) where T: Joining { type Out = (Joined<H>, <T as Joining>::Out); }
-impl<R, Q, K, C> ItemTouches for To<R, Q> where R: Relation<Kind = K>, K: LinkColumn<R, Col = C>, Q: ItemTouches, <Q as ItemTouches>::List: Joining { type List = (Read<C>, <<Q as ItemTouches>::List as Joining>::Out); }
+impl<R, Q, K, C> ItemTouches for To<R, Q> where R: Relation<Kind = K>, K: LinkColumn<R, Col = C>, K: ListJoin<Q>, Q: ItemTouches, K: JoinWrap<<Q as ItemTouches>::List> { type List = (Read<C>, <K as JoinWrap<<Q as ItemTouches>::List>>::Out); }
+// (A many-to-many's targets may be the row's own entity, which relates to
+// itself: what is written through it is not apart from the row's own.)
+pub struct Fan<K>(K)
+pub trait Fanning { type Out; }
+impl Fanning for () { type Out = (); }
+impl<H, T> Fanning for (H, T) where T: Fanning { type Out = (Fan<H>, <T as Fanning>::Out); }
+pub trait JoinWrap<L> { type Out; }
+impl<L> JoinWrap<L> for OneToOne where L: Joining { type Out = <L as Joining>::Out; }
+impl<L> JoinWrap<L> for OneToMany where L: Joining { type Out = <L as Joining>::Out; }
+impl<L> JoinWrap<L> for ManyToMany where L: Fanning { type Out = <L as Fanning>::Out; }
 // The column a relation's kind keeps an entity's links in.
 pub trait LinkColumn<R> { type Col; }
 impl<R> LinkColumn<R> for OneToMany { type Col = Relates<R>; }
 impl<R> LinkColumn<R> for OneToOne { type Col = Relates<R>; }
 impl<R> LinkColumn<R> for ManyToMany { type Col = Links<R>; }
-impl<R, Q> ItemTouches for From<R, Q> where Q: ItemTouches, <Q as ItemTouches>::List: Joining { type List = (Read<Sources<R>>, <<Q as ItemTouches>::List as Joining>::Out); }
+impl<R, Q> ItemTouches for From<R, Q> where Q: ItemTouches, Q: OneEach, <Q as ItemTouches>::List: Joining { type List = (Read<Sources<R>>, <<Q as ItemTouches>::List as Joining>::Out); }
+// What a list a join gives lends each of (a many-to-many's targets, a
+// `From`'s sources): distinct entities, so a write through a join of each
+// is apart from the others' only where it leads each to its own entity, a
+// one-to-one's, or a `From` of a relation each source has one target of.
+// (A one-target join of a row is one entity: nothing to compare.)
+pub trait AWriteThroughJoinsOfAListLeadsEachToItsOwnEntity {}
+pub trait ListJoin<Q> {}
+impl<Q> ListJoin<Q> for OneToOne {}
+impl<Q> ListJoin<Q> for OneToMany {}
+impl<Q> ListJoin<Q> for ManyToMany where Q: OneEach {}
+pub trait OneEach {}
+impl<A> OneEach for &A {}
+impl<A> OneEach for &mut A {}
+impl<A> OneEach for Option<&A> {}
+impl<A> OneEach for Option<&mut A> {}
+impl<A> OneEach for Has<A> {}
+impl OneEach for Entity {}
+impl OneEach for () {}
+impl<H, ..R> OneEach for (H, ..R) where H: OneEach, (..R): OneEach {}
+impl<R, Q, K> OneEach for To<R, Q> where R: Relation<Kind = K>, K: EachJoin<Q> {}
+impl<R, Q, K> OneEach for From<R, Q> where R: Relation<Kind = K>, K: EachFrom<Q> {}
+pub trait EachJoin<Q> {}
+impl<Q> EachJoin<Q> for OneToOne where Q: OneEach {}
+impl<Q> EachJoin<Q> for OneToMany where Q: ItemReadsOnly {}
+impl<Q> EachJoin<Q> for ManyToMany where Q: ItemReadsOnly {}
+pub trait EachFrom<Q> {}
+impl<Q> EachFrom<Q> for OneToOne where Q: OneEach {}
+impl<Q> EachFrom<Q> for OneToMany where Q: OneEach {}
+impl<Q> EachFrom<Q> for ManyToMany where Q: ItemReadsOnly {}
+pub trait ItemReadsOnly {}
+impl<A> ItemReadsOnly for &A {}
+impl<A> ItemReadsOnly for &mut A where A: AWriteThroughJoinsOfAListLeadsEachToItsOwnEntity {}
+impl<A> ItemReadsOnly for Option<&A> {}
+impl<A> ItemReadsOnly for Option<&mut A> where A: AWriteThroughJoinsOfAListLeadsEachToItsOwnEntity {}
+impl<A> ItemReadsOnly for Has<A> {}
+impl ItemReadsOnly for Entity {}
+impl ItemReadsOnly for () {}
+impl<H, ..R> ItemReadsOnly for (H, ..R) where H: ItemReadsOnly, (..R): ItemReadsOnly {}
+impl<R, Q> ItemReadsOnly for To<R, Q> where Q: ItemReadsOnly {}
+impl<R, Q> ItemReadsOnly for From<R, Q> where Q: ItemReadsOnly {}
 impl ItemTouches for () { type List = (); }
 impl<H, ..R> ItemTouches for (H, ..R) where H: ItemTouches, (..R): ItemTouches,
     <H as ItemTouches>::List: Concat<<(..R) as ItemTouches>::List> {
@@ -2286,10 +2381,54 @@ impl<X> Touches for Maybe<X> { type List = (Group<(Shared<X>, ())>, ()); }
 impl<X> Touches for MaybeOwned<X> { type List = (Group<(Owned<X>, ())>, ()); }
 impl Touches for Asking { type List = (); }
 impl<T> Touches for Localing<T> { type List = (); }
-impl<Q, N, St> Touches for Querying<Q, N, St> where Q: ItemTouches, <Q as ItemTouches>::List: Under<N> { type List = (Group<<<Q as ItemTouches>::List as Under<N>>::Out>, ()); }
+impl<Q, N, St> Touches for Querying<Q, N, St> where Q: ItemTouches, <Q as ItemTouches>::List: Under<N>, N: FilterTicks, <<Q as ItemTouches>::List as Under<N>>::Out: Concat<<N as FilterTicks>::List> { type List = (Group<<<<Q as ItemTouches>::List as Under<N>>::Out as Concat<<N as FilterTicks>::List>>::Out>, ()); }
+// What a query's filters read of a component: when it was added or changed
+// (`Ticks`), which a system writing it beside the query changes. (Within a
+// system it is apart from all: the system runs one thing at a time.)
+pub struct Ticks<A>(A)
+pub trait FilterTicks { type List; }
+impl<K> FilterTicks for K { type List = (); }
+impl<U> FilterTicks for Changed<U> { type List = (Filtered<Ticks<U>, ()>, ()); }
+impl<U> FilterTicks for Added<U> { type List = (Filtered<Ticks<U>, ()>, ()); }
+impl<T> FilterTicks for Or<T> where T: FilterTicks { type List = <T as FilterTicks>::List; }
+impl FilterTicks for () { type List = (); }
+impl<H, ..R> FilterTicks for (H, ..R) where H: FilterTicks, (..R): FilterTicks, <H as FilterTicks>::List: Concat<<(..R) as FilterTicks>::List> {
+    type List = <<H as FilterTicks>::List as Concat<<(..R) as FilterTicks>::List>>::Out;
+}
 impl<Q, N, St> Touches for Singling<Q, N, St> where Q: ItemTouches, <Q as ItemTouches>::List: Under<N> { type List = (Group<<<Q as ItemTouches>::List as Under<N>>::Out>, ()); }
 impl<L1, L2> Apart for (Group<L1>, Group<L2>) where L1: CrossApart<L2> {}
-impl<L, Rest> AllApart for (Group<L>, Rest) where L: AllApart, Rest: ApartFrom<Group<L>>, Rest: AllApart {}
+impl<L, Rest> AllApart for (Group<L>, Rest) where L: RowApart, Rest: ApartFrom<Group<L>>, Rest: AllApart {}
+// (A query's own items are of one row: two of one component are not kept
+// apart by its filters, which are the row's, even ones nothing passes.)
+pub trait RowApart {}
+impl RowApart for () {}
+impl<First, Rest> RowApart for (First, Rest) where Rest: RowFrom<First>, Rest: RowApart {}
+pub trait RowFrom<X> {}
+impl<X> RowFrom<X> for () {}
+impl<X, F, R> RowFrom<X> for (F, R) where (X, F): SameRow, R: RowFrom<X> {}
+pub trait SameRow {}
+impl<X, Y> SameRow for (X, Y) {}
+impl<A, N1, N2> SameRow for (Filtered<Writes<A>, N1>, Filtered<Writes<A>, N2>) where A: AComponentWrittenIsUsedOnceUnlessFiltersKeepItApart {}
+impl<A, N1, N2> SameRow for (Filtered<Writes<A>, N1>, Filtered<Read<A>, N2>) where A: AComponentWrittenIsUsedOnceUnlessFiltersKeepItApart {}
+impl<A, N1, N2> SameRow for (Filtered<Read<A>, N1>, Filtered<Writes<A>, N2>) where A: AComponentWrittenIsUsedOnceUnlessFiltersKeepItApart {}
+impl<A, N1, N2> SameRow for (Joined<Filtered<Writes<A>, N1>>, Joined<Filtered<Writes<A>, N2>>) where A: AComponentWrittenIsUsedOnceUnlessFiltersKeepItApart {}
+impl<A, N1, N2> SameRow for (Joined<Filtered<Writes<A>, N1>>, Joined<Filtered<Read<A>, N2>>) where A: AComponentWrittenIsUsedOnceUnlessFiltersKeepItApart {}
+impl<A, N1, N2> SameRow for (Joined<Filtered<Read<A>, N1>>, Joined<Filtered<Writes<A>, N2>>) where A: AComponentWrittenIsUsedOnceUnlessFiltersKeepItApart {}
+impl<A, N1, N2> SameRow for (Fan<Filtered<Writes<A>, N1>>, Filtered<Writes<A>, N2>) where A: AComponentWrittenIsUsedOnceUnlessFiltersKeepItApart {}
+impl<A, N1, N2> SameRow for (Fan<Filtered<Writes<A>, N1>>, Filtered<Read<A>, N2>) where A: AComponentWrittenIsUsedOnceUnlessFiltersKeepItApart {}
+impl<A, N1, N2> SameRow for (Fan<Filtered<Read<A>, N1>>, Filtered<Writes<A>, N2>) where A: AComponentWrittenIsUsedOnceUnlessFiltersKeepItApart {}
+impl<A, N1, N2> SameRow for (Filtered<Writes<A>, N1>, Fan<Filtered<Writes<A>, N2>>) where A: AComponentWrittenIsUsedOnceUnlessFiltersKeepItApart {}
+impl<A, N1, N2> SameRow for (Filtered<Read<A>, N1>, Fan<Filtered<Writes<A>, N2>>) where A: AComponentWrittenIsUsedOnceUnlessFiltersKeepItApart {}
+impl<A, N1, N2> SameRow for (Filtered<Writes<A>, N1>, Fan<Filtered<Read<A>, N2>>) where A: AComponentWrittenIsUsedOnceUnlessFiltersKeepItApart {}
+impl<A, N1, N2> SameRow for (Fan<Filtered<Writes<A>, N1>>, Fan<Filtered<Writes<A>, N2>>) where A: AComponentWrittenIsUsedOnceUnlessFiltersKeepItApart {}
+impl<A, N1, N2> SameRow for (Fan<Filtered<Writes<A>, N1>>, Joined<Filtered<Writes<A>, N2>>) where A: AComponentWrittenIsUsedOnceUnlessFiltersKeepItApart {}
+impl<A, N1, N2> SameRow for (Joined<Filtered<Writes<A>, N1>>, Fan<Filtered<Writes<A>, N2>>) where A: AComponentWrittenIsUsedOnceUnlessFiltersKeepItApart {}
+impl<A, N1, N2> SameRow for (Fan<Filtered<Writes<A>, N1>>, Fan<Filtered<Read<A>, N2>>) where A: AComponentWrittenIsUsedOnceUnlessFiltersKeepItApart {}
+impl<A, N1, N2> SameRow for (Fan<Filtered<Writes<A>, N1>>, Joined<Filtered<Read<A>, N2>>) where A: AComponentWrittenIsUsedOnceUnlessFiltersKeepItApart {}
+impl<A, N1, N2> SameRow for (Joined<Filtered<Writes<A>, N1>>, Fan<Filtered<Read<A>, N2>>) where A: AComponentWrittenIsUsedOnceUnlessFiltersKeepItApart {}
+impl<A, N1, N2> SameRow for (Fan<Filtered<Read<A>, N1>>, Fan<Filtered<Writes<A>, N2>>) where A: AComponentWrittenIsUsedOnceUnlessFiltersKeepItApart {}
+impl<A, N1, N2> SameRow for (Fan<Filtered<Read<A>, N1>>, Joined<Filtered<Writes<A>, N2>>) where A: AComponentWrittenIsUsedOnceUnlessFiltersKeepItApart {}
+impl<A, N1, N2> SameRow for (Joined<Filtered<Read<A>, N1>>, Fan<Filtered<Writes<A>, N2>>) where A: AComponentWrittenIsUsedOnceUnlessFiltersKeepItApart {}
 // Each of one list apart from each of another, a join's as what it joins.
 pub trait CrossApart<L> {}
 impl<L> CrossApart<L> for () {}
@@ -2300,12 +2439,128 @@ impl<X, F, R> CrossFrom<X> for (F, R) where F: Bare, (X, <F as Bare>::Out): Apar
 pub trait Bare { type Out; }
 impl<K> Bare for K { type Out = K; }
 impl<K> Bare for Joined<K> { type Out = K; }
+impl<K> Bare for Fan<K> { type Out = K; }
 pub trait AllTouches { type List; }
 impl AllTouches for () { type List = (); }
 impl<H, R> AllTouches for (H, R) where H: Touches, R: AllTouches,
     <H as Touches>::List: Concat<<R as AllTouches>::List> {
     type List = <<H as Touches>::List as Concat<<R as AllTouches>::List>>::Out;
 }
+
+// What a system touches, all of it: each of its parameters' groups, of each
+// function in it (upstream's access sets). The branches of a parallel group
+// run at once, so each is apart from each other (`BranchesApart`): what one
+// writes the others neither read nor write, unless filters keep them apart;
+// an exclusive system or a sync point touches everything. A branch's own
+// systems run in turn, and are not compared.
+pub struct Everything
+pub trait AnExclusiveSystemRunsAloneNotBesideAnother {}
+pub trait SystemTouches { type List; }
+impl<..P, ..A, L, Ts, F> SystemTouches for F where F: Fn<(..P), Output = ()>, ..P: Parameter<Asks = A>, (..A): Tuple<Nested = L>, L: AllTouches<List = Ts> { type List = Ts; }
+impl<..P, ..A, L, Ts, F> SystemTouches for Waits<F> where F: Fn<(..P), Output = (), Effects = {std::thread::Threads}>, ..P: Parameter<Asks = A>, (..A): Tuple<Nested = L>, L: AllTouches<List = Ts> { type List = Ts; }
+impl SystemTouches for () { type List = (); }
+impl<X, Y> SystemTouches for (X, Y) where X: SystemTouches, Y: SystemTouches, <X as SystemTouches>::List: Concat<<Y as SystemTouches>::List> {
+    type List = <<X as SystemTouches>::List as Concat<<Y as SystemTouches>::List>>::Out;
+}
+impl<P, C> SystemTouches for RunIf<P, C> where P: SystemTouches, C: ConditionTouches, <P as SystemTouches>::List: Concat<<C as ConditionTouches>::List> {
+    type List = <<P as SystemTouches>::List as Concat<<C as ConditionTouches>::List>>::Out;
+}
+impl<F> SystemTouches for Exclusive<F> { type List = (Group<(Everything, ())>, ()); }
+impl<F> SystemTouches for ExclusiveWith<F> { type List = (Group<(Everything, ())>, ()); }
+// (A sync point with an envelope, what its envelope touches; any other,
+// everything.)
+impl<P> SystemTouches for SyncPointOf<P> where P: PointGroups { type List = <P as PointGroups>::List; }
+pub trait PointGroups { type List; }
+impl<P> PointGroups for P where P: Enveloped, <P as Enveloped>::Env: EnvGroups { type List = <<P as Enveloped>::Env as EnvGroups>::List; }
+impl<P> PointGroups for P { type List = (Group<(Everything, ())>, ()); }
+pub trait EnvGroups { type List; }
+// What a bridge run at a sync point touches is within the point's envelope:
+// each column it reads or writes one the envelope holds as much of (a point
+// without one holds everything).
+pub trait ABridgeTouchesOnlyWhatItsSyncPointsEnvelopeHolds {}
+pub trait CoversIs<X> { type Is; }
+impl<X> CoversIs<X> for Everything { type Is = Yes; }
+impl<A, B, N1, N2> CoversIs<Filtered<Writes<B>, N2>> for Filtered<Writes<A>, N1> where A: SameIs<B> { type Is = <A as SameIs<B>>::Is; }
+impl<A, B, N1, N2> CoversIs<Filtered<Read<B>, N2>> for Filtered<Writes<A>, N1> where A: SameIs<B> { type Is = <A as SameIs<B>>::Is; }
+impl<A, B, N1, N2> CoversIs<Filtered<Read<B>, N2>> for Filtered<Read<A>, N1> where A: SameIs<B> { type Is = <A as SameIs<B>>::Is; }
+impl<A, B, N1, N2> CoversIs<Filtered<Ticks<B>, N2>> for Filtered<Writes<A>, N1> where A: SameIs<B> { type Is = <A as SameIs<B>>::Is; }
+impl<A, B, N1, N2> CoversIs<Filtered<Ticks<B>, N2>> for Filtered<Read<A>, N1> where A: SameIs<B> { type Is = <A as SameIs<B>>::Is; }
+impl<A, B, N1, N2> CoversIs<Filtered<Writes<B>, N2>> for Filtered<Read<A>, N1> { type Is = No; }
+impl<A, N1, X> CoversIs<Owned<X>> for Filtered<Writes<A>, N1> { type Is = No; }
+impl<A, N1, X> CoversIs<Shared<X>> for Filtered<Writes<A>, N1> { type Is = No; }
+impl<A, N1, X> CoversIs<Owned<X>> for Filtered<Read<A>, N1> { type Is = No; }
+impl<A, N1, X> CoversIs<Shared<X>> for Filtered<Read<A>, N1> { type Is = No; }
+pub trait ItemsCoverIs<X> { type Is; }
+impl<X> ItemsCoverIs<X> for () { type Is = No; }
+impl<X, H, T> ItemsCoverIs<X> for (H, T) where H: Bare, <H as Bare>::Out: CoversIs<X>, T: ItemsCoverIs<X>, (<<H as Bare>::Out as CoversIs<X>>::Is, <T as ItemsCoverIs<X>>::Is): Either { type Is = <(<<H as Bare>::Out as CoversIs<X>>::Is, <T as ItemsCoverIs<X>>::Is) as Either>::Out; }
+pub trait GroupsCoverIs<X> { type Is; }
+impl<X> GroupsCoverIs<X> for () { type Is = No; }
+impl<X, L, T> GroupsCoverIs<X> for (Group<L>, T) where L: ItemsCoverIs<X>, T: GroupsCoverIs<X>, (<L as ItemsCoverIs<X>>::Is, <T as GroupsCoverIs<X>>::Is): Either { type Is = <(<L as ItemsCoverIs<X>>::Is, <T as GroupsCoverIs<X>>::Is) as Either>::Out; }
+pub trait Enveloped_ {}
+impl<X> Enveloped_ for (X, Yes) {}
+impl<X> Enveloped_ for (X, No) where X: ABridgeTouchesOnlyWhatItsSyncPointsEnvelopeHolds {}
+pub trait ItemsWithin<Env> {}
+impl<Env> ItemsWithin<Env> for () {}
+impl<Env, H, T> ItemsWithin<Env> for (H, T) where H: Bare, Env: GroupsCoverIs<<H as Bare>::Out>, (<H as Bare>::Out, <Env as GroupsCoverIs<<H as Bare>::Out>>::Is): Enveloped_, T: ItemsWithin<Env> {}
+pub trait WithinEnvelope<Env> {}
+impl<Env> WithinEnvelope<Env> for () {}
+impl<Env, L, T> WithinEnvelope<Env> for (Group<L>, T) where L: ItemsWithin<Env>, T: WithinEnvelope<Env> {}
+impl<Q, N, St> EnvGroups for Query<Q, N, St> where Q: ItemTouches, <Q as ItemTouches>::List: Under<N> { type List = (Group<<<Q as ItemTouches>::List as Under<N>>::Out>, ()); }
+impl<P> SystemTouches for Parallel<P> where P: SystemTouches { type List = <P as SystemTouches>::List; }
+impl<Ns> SystemTouches for Graph<Ns> where Ns: SystemTouches { type List = <Ns as SystemTouches>::List; }
+impl<N, P, D> SystemTouches for Node<N, P, D> where P: SystemTouches { type List = <P as SystemTouches>::List; }
+pub trait ConditionTouches { type List; }
+impl<..P, ..A, L, Ts> ConditionTouches for fn(..P) -> Bool where ..P: Parameter<Asks = A>, (..A): Tuple<Nested = L>, L: AllTouches<List = Ts> { type List = Ts; }
+// (Two at once: what is apart within a system, but a join is as what it
+// joins, and two that read one resource are apart.)
+pub trait ApartAcross {}
+impl<X, Y> ApartAcross for (X, Y) {}
+impl<A, N1, N2> ApartAcross for (Filtered<Writes<A>, N1>, Filtered<Writes<A>, N2>) where (A, N1, N2): KeptApart {}
+impl<A, N1, N2> ApartAcross for (Filtered<Writes<A>, N1>, Filtered<Read<A>, N2>) where (A, N1, N2): KeptApart {}
+impl<A, N1, N2> ApartAcross for (Filtered<Read<A>, N1>, Filtered<Writes<A>, N2>) where (A, N1, N2): KeptApart {}
+impl<A, N1, N2> ApartAcross for (Filtered<Writes<A>, N1>, Filtered<Ticks<A>, N2>) where (A, N1, N2): KeptApart {}
+impl<A, N1, N2> ApartAcross for (Filtered<Ticks<A>, N1>, Filtered<Writes<A>, N2>) where (A, N1, N2): KeptApart {}
+impl<X> ApartAcross for (Owned<X>, Owned<X>) where X: AComponentWrittenIsUsedOnceUnlessFiltersKeepItApart {}
+impl<X> ApartAcross for (Owned<X>, Shared<X>) where X: AComponentWrittenIsUsedOnceUnlessFiltersKeepItApart {}
+impl<X> ApartAcross for (Shared<X>, Owned<X>) where X: AComponentWrittenIsUsedOnceUnlessFiltersKeepItApart {}
+impl<Y> ApartAcross for (Everything, Y) where Y: AnExclusiveSystemRunsAloneNotBesideAnother {}
+// (And the other way round.)
+pub trait AloneIfExclusive {}
+impl<X, Y> AloneIfExclusive for (X, Y) {}
+impl<Y> AloneIfExclusive for (Everything, Y) where Y: AnExclusiveSystemRunsAloneNotBesideAnother {}
+pub trait ItemFrom<X> {}
+impl<X> ItemFrom<X> for () {}
+impl<X, F, R> ItemFrom<X> for (F, R) where F: Bare, (X, <F as Bare>::Out): ApartAcross, (<F as Bare>::Out, X): AloneIfExclusive, R: ItemFrom<X> {}
+pub trait ItemsAcross<L2> {}
+impl<L2> ItemsAcross<L2> for () {}
+impl<H, T, L2> ItemsAcross<L2> for (H, T) where H: Bare, L2: ItemFrom<<H as Bare>::Out>, T: ItemsAcross<L2> {}
+pub trait GroupsAcross {}
+impl<L1, L2> GroupsAcross for (Group<L1>, Group<L2>) where L1: ItemsAcross<L2> {}
+pub trait GroupFrom<G> {}
+impl<G> GroupFrom<G> for () {}
+impl<G, H, T> GroupFrom<G> for (H, T) where (G, H): GroupsAcross, T: GroupFrom<G> {}
+pub trait BranchApart<L2> {}
+impl<L2> BranchApart<L2> for () {}
+impl<G, T, L2> BranchApart<L2> for (G, T) where L2: GroupFrom<G>, T: BranchApart<L2> {}
+pub trait BranchesFrom<L> {}
+impl<L> BranchesFrom<L> for () {}
+impl<L, Y, R> BranchesFrom<L> for (Y, R) where Y: SystemTouches, L: BranchApart<<Y as SystemTouches>::List>, R: BranchesFrom<L> {}
+pub trait BranchesApart {}
+impl BranchesApart for () {}
+impl<X, R> BranchesApart for (X, R) where X: SystemTouches, R: BranchesFrom<<X as SystemTouches>::List>, R: BranchesApart {}
+// A condition only reads (upstream's: a condition may not write).
+pub trait AConditionOnlyReads {}
+pub trait OnlyReads {}
+impl OnlyReads for () {}
+impl<H, T> OnlyReads for (H, T) where H: ReadsOnly, T: OnlyReads {}
+pub trait ReadsOnly {}
+impl<L> ReadsOnly for Group<L> where L: OnlyReads {}
+impl<A, N> ReadsOnly for Filtered<Read<A>, N> {}
+impl<A, N> ReadsOnly for Filtered<Ticks<A>, N> {}
+impl<A, N> ReadsOnly for Filtered<Writes<A>, N> where A: AConditionOnlyReads {}
+impl<K> ReadsOnly for Joined<K> where K: ReadsOnly {}
+impl<X> ReadsOnly for Shared<X> {}
+impl<X> ReadsOnly for Owned<X> where X: AConditionOnlyReads {}
 
 // A function called with what was gathered for it, its arguments in order.
 // What it gives back is what the call gives.
@@ -3072,7 +3327,7 @@ impl<E, S, ..P, ..A, L, Ts, Lc> Condition<E, S> for Cond<fn(..P) -> Bool, Lc>
 }
 pub trait IntoCondition<E, S> { type Out; fn into_condition(Self) -> Self::Out; }
 impl<E, S, ..P, ..A, L, Ts, Lc> IntoCondition<E, S> for fn(..P) -> Bool
-    where ..P: Parameter<Asks = A>, (..A): Tuple<Nested = L>, L: AllTouches<List = Ts>, Ts: AllApart, L: Locals<State = Lc>,
+    where ..P: Parameter<Asks = A>, (..A): Tuple<Nested = L>, L: AllTouches<List = Ts>, Ts: AllApart, Ts: OnlyReads, L: Locals<State = Lc>,
           L: Fetch<E, S, (), fn(..P) -> Bool, Bool, Lc> {
     type Out = Cond<fn(..P) -> Bool, Lc>;
     fn into_condition(f: fn(..P) -> Bool) -> Cond<fn(..P) -> Bool, Lc> { Cond { f: f, locals: <L as Locals>::start() } }
@@ -3307,7 +3562,7 @@ impl<E, S, P> System<E, S> for Parallel<P> where P: Branches<E, S>, P: StartBran
         while({ match(next(&mut each)) { Some(c) => join_commands(commands, c); true, None => false } }) { () }
     }
 }
-impl<E, S, P> IntoSystem<E, S> for Parallel<P> where P: IntoSystem<E, S> {
+impl<E, S, P> IntoSystem<E, S> for Parallel<P> where P: IntoSystem<E, S>, P: BranchesApart {
     type Out = Parallel<<P as IntoSystem<E, S>>::Out>;
     fn into_system(group: Parallel<P>) -> Parallel<<P as IntoSystem<E, S>>::Out> { Parallel { branches: <P as IntoSystem<E, S>>::into_system(group.branches) } }
 }
@@ -3480,7 +3735,29 @@ impl<E, S, N, P, D, R> IntoNodes<E, S> for (Node<N, P, D>, R) where P: IntoSyste
         (Node { systems: <P as IntoSystem<E, S>>::into_system(systems), none: [] }, <R as IntoNodes<E, S>>::into_nodes(rest))
     }
 }
-impl<E, S, Ns> IntoSystem<E, S> for Graph<Ns> where Ns: IntoNodes<E, S> {
+// A graph's nodes: each name once, and each name a node runs after one of
+// the graph's (upstream's, checked when compiled).
+pub trait ANodeNameIsGivenOnceInAGraph {}
+pub trait ANodeRunsAfterNodesOfItsGraph {}
+pub trait NamedOnce {}
+impl<N> NamedOnce for (N, No) {}
+impl<N> NamedOnce for (N, Yes) where N: ANodeNameIsGivenOnceInAGraph {}
+pub trait NamedThere {}
+impl<M> NamedThere for (M, Yes) {}
+impl<M> NamedThere for (M, No) where M: ANodeRunsAfterNodesOfItsGraph {}
+pub trait NodeNamesIs<M> { type Is; }
+impl<M> NodeNamesIs<M> for () { type Is = No; }
+impl<M, N, P, D, R> NodeNamesIs<M> for (Node<N, P, D>, R) where N: SameIs<M>, R: NodeNamesIs<M>, (<N as SameIs<M>>::Is, <R as NodeNamesIs<M>>::Is): Either { type Is = <(<N as SameIs<M>>::Is, <R as NodeNamesIs<M>>::Is) as Either>::Out; }
+pub trait NodesNamedOnce {}
+impl NodesNamedOnce for () {}
+impl<N, P, D, R> NodesNamedOnce for (Node<N, P, D>, R) where R: NodeNamesIs<N>, (N, <R as NodeNamesIs<N>>::Is): NamedOnce, R: NodesNamedOnce {}
+pub trait AfterKnown<Ns> {}
+impl<Ns> AfterKnown<Ns> for () {}
+impl<Ns, M, D> AfterKnown<Ns> for (M, D) where Ns: NodeNamesIs<M>, (M, <Ns as NodeNamesIs<M>>::Is): NamedThere, D: AfterKnown<Ns> {}
+pub trait NodesAfterKnown<Ns> {}
+impl<Ns> NodesAfterKnown<Ns> for () {}
+impl<Ns, N, P, D, R> NodesAfterKnown<Ns> for (Node<N, P, D>, R) where D: AfterKnown<Ns>, R: NodesAfterKnown<Ns> {}
+impl<E, S, Ns> IntoSystem<E, S> for Graph<Ns> where Ns: IntoNodes<E, S>, Ns: NodesNamedOnce, Ns: NodesAfterKnown<Ns> {
     type Out = Graph<<Ns as IntoNodes<E, S>>::Out>;
     fn into_system(graph: Graph<Ns>) -> Graph<<Ns as IntoNodes<E, S>>::Out> { Graph { nodes: <Ns as IntoNodes<E, S>>::into_nodes(graph.nodes) } }
 }
@@ -3850,6 +4127,15 @@ impl<G, T, X, R, S, L> EvictIn<G, T, S, L> for (Resource<X>, R) where R: EvictIn
 // transition is: a state asked for then is entered after it.
 pub struct NoGroup
 pub trait State { type Group; }
+// (A state is changed through `set_state` and `clear_state`, which run its
+// transitions: not put in as a resource.)
+// (A world that keeps a state keeps where the next is asked, `Next<T>`.)
+pub trait AStateChangesOnlyThroughSetState {}
+pub trait NotAState<T> {}
+impl<T> NotAState<T> for () {}
+impl<T, R> NotAState<T> for (Resource<Next<T>>, R) where T: AStateChangesOnlyThroughSetState {}
+impl<T, X, R> NotAState<T> for (Resource<X>, R) where R: NotAState<T> {}
+impl<T, H, R> NotAState<T> for (Column<H>, R) where R: NotAState<T> {}
 impl<T> State for T { type Group = NoGroup; }
 pub struct OnEnter<T> { none: [T] }
 pub struct OnExit<T> { none: [T] }
@@ -3891,7 +4177,7 @@ fn join_commands<S>(parent: &mut Commands<S>, child: Commands<S>) {
 pub trait ExitGroup<G, N, S, L> { fn switch_to(&mut App<S, L>, &mut Commands<S>, N) }
 impl<G, N, S, L> ExitGroup<G, N, S, L> for () where S: Holds<N>, L: Dispatch<OnEnter<N>, S> {
     fn switch_to(app: &mut App<S, L>, commands: &mut Commands<S>, next: N) {
-        discard(app.world.insert_resource(next));
+        discard(app.world.put_resource(next));
         hooks<OnEnter<N>, S, L>(app, &OnEnter { none: [] }, commands)
     }
 }
@@ -3920,7 +4206,7 @@ impl<X, R, G, N, S, L> ExitGroup<G, N, S, L> for (Resource<X>, R)
             <L as Links<X, S, L>>::leave_links(app, commands);
             hooks<OnExit<X>, S, L>(app, &OnExit { none: [] }, commands);
             discard(app.world.remove_resource<X>());
-            discard(app.world.insert_resource(next));
+            discard(app.world.put_resource(next));
             hooks<OnEnter<N>, S, L>(app, &OnEnter { none: [] }, commands);
             hooks<OnTransition<X, N>, S, L>(app, &OnTransition { none: [] }, commands)
         } else { <R as ExitGroup<G, N, S, L>>::switch_to(app, commands, next) }
@@ -3950,7 +4236,7 @@ impl<X, R, G, S, L> LeaveGroup<G, S, L> for (Column<X>, R) where R: LeaveGroup<G
 
 // (A state put in, and its `OnEnter` systems run: no transition.)
 fn enter_plain<Y, S, L>(app: &mut App<S, L>, state: Y, commands: &mut Commands<S>) where S: Holds<Y>, L: Dispatch<OnEnter<Y>, S> {
-    discard(app.world.insert_resource(state));
+    discard(app.world.put_resource(state));
     hooks<OnEnter<Y>, S, L>(app, &OnEnter { none: [] }, commands)
 }
 
@@ -4611,10 +4897,15 @@ pub struct Request<S> { point: Str, touches: [Str], run: for<'a, 'b> fn(&'a mut 
 // What a sync point runs for another thread: a function as a system is, or
 // one that may wait (`waits(f)`: at a barrier, for a channel), run among
 // the threads of the point's run.
-pub trait RunsRemote<S, O> { fn run_remote(&Self, &mut World<S>, &mut Commands<S>) -> Option<O> / {Threads} fn remote_touches() -> [Str] }
+// (What it touches within the envelope of the point `P` it is run at.)
+pub trait RemoteWithin<P> {}
+impl<P, Env, ..Q, ..A, L, Ts, F> RemoteWithin<P> for F where F: Fn<(..Q)>, ..Q: Parameter<Asks = A>, (..A): Tuple<Nested = L>, L: AllTouches<List = Ts>, P: PointGroups<List = Env>, Ts: WithinEnvelope<Env> {}
+impl<P, Env, ..Q, ..A, L, Ts, F> RemoteWithin<P> for Waits<F> where F: Fn<(..Q)>, ..Q: Parameter<Asks = A>, (..A): Tuple<Nested = L>, L: AllTouches<List = Ts>, P: PointGroups<List = Env>, Ts: WithinEnvelope<Env> {}
+pub trait RunsRemote<S, O> { type Touched; fn run_remote(&Self, &mut World<S>, &mut Commands<S>) -> Option<O> / {Threads} fn remote_touches() -> [Str] }
 impl<S, O, ..P, ..A, L, Ts, Lc, F> RunsRemote<S, O> for F
     where F: Fn<(..P), Output = O>, ..P: Parameter<Asks = A>, (..A): Tuple<Nested = L>, L: AllTouches<List = Ts>, Ts: AllApart,
           L: Locals<State = Lc>, L: Fetch<(), S, (), F, O, Lc>, L: TouchNames {
+    type Touched = Ts;
     fn run_remote(f: &F, world: &mut World<S>, commands: &mut Commands<S>) -> Option<O> / {Threads} {
         let mut locals = <L as Locals>::start();
         <L as Fetch<(), S, (), F, O, Lc>>::fetch(&(), world, commands, &mut locals, (), f)
@@ -4624,6 +4915,7 @@ impl<S, O, ..P, ..A, L, Ts, Lc, F> RunsRemote<S, O> for F
 impl<S, O, ..P, ..A, L, Ts, Lc, F> RunsRemote<S, O> for Waits<F>
     where F: Fn<(..P), Output = O, Effects = {Threads}>, ..P: Parameter<Asks = A>, (..A): Tuple<Nested = L>, L: AllTouches<List = Ts>, Ts: AllApart,
           L: Locals<State = Lc>, L: Takes<(), S>, L: CallTaken<(), S, (), Waits<F>, O, Lc>, L: TouchNames {
+    type Touched = Ts;
     fn run_remote(w: &Waits<F>, world: &mut World<S>, commands: &mut Commands<S>) -> Option<O> / {Threads} {
         match(<L as Takes<(), S>>::take_asked(world)) {
             Some(taken) =>
@@ -4648,7 +4940,7 @@ impl<S> Remote<S> {
     // Another handle to the same world.
     pub fn share(remote: &Self) -> Remote<S> { Remote { queue: std::thread::share(&remote.queue) } }
     // Run `f` at the next sync point named `P`, and wait for what it gives.
-    pub fn bridge<P, F, O>(remote: &Self, point: P, f: F) -> Result<O, BridgeError> / {Threads} where P: Schedule, F: RunsRemote<S, O>, F: Use<[0, *]>, O: Use<[0, *]> {
+    pub fn bridge<P, F, O>(remote: &Self, point: P, f: F) -> Result<O, BridgeError> / {Threads} where P: Schedule, F: RunsRemote<S, O>, F: Use<[0, *]>, O: Use<[0, *]>, F: RemoteWithin<P> {
         discard(point);
         let (tx, rx) = channel();
         let asked = bridge_request<S, F, O>(<P as Schedule>::NAME, f, tx);

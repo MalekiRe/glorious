@@ -1,0 +1,14 @@
+// Upstream's tests/ui/duplicate_bundle.rs, refused when compiled: a bundle that gives one component twice.
+// expect:
+// error containing: AComponentIsGivenOnceInABundle
+mod ecs;
+
+use ecs::{App, World, Entity, Query, Single, With, Without, Changed, Or, MayHave, parallel, run_if, exclusive, node, ready};
+
+struct Update
+struct Value(Int)
+struct Other(Int)
+struct Tag
+struct A
+struct B
+fn main() -> Int { let mut world = App::new().register<Value>().build().into_world(); discard(world.spawn_bundle((Value(1), Value(2)))); 0 }

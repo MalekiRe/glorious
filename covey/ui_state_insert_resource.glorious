@@ -1,0 +1,9 @@
+// Upstream's tests/ui/state_insert_resource.rs, refused when compiled: a state put in as a resource.
+// expect:
+// error containing: AStateChangesOnlyThroughSetState
+mod ecs;
+use ecs::{App, State};
+struct Game
+struct Menu
+impl State for Menu { type Group = Game; }
+fn main() -> Int { let mut world = App::new().add_state<Menu>().init_state(Menu).build().into_world(); discard(world.insert_resource(Menu)); 0 }

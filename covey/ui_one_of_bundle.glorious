@@ -1,0 +1,21 @@
+// Upstream's tests/ui/one_of_bundle.rs, refused when compiled: a bundle of two members of one `OneOf` group.
+// expect:
+// error containing: ABundleHoldsOneMemberOfEachOneOfGroup
+mod ecs;
+
+use ecs::{App, World, Entity, Query, Single, With, Without, Changed, Or, MayHave, parallel, run_if, exclusive, node, ready};
+
+struct Update
+struct Value(Int)
+struct Other(Int)
+struct Tag
+struct A
+struct B
+use ecs::{OneOf};
+struct Locomotion
+struct Life
+struct Walking
+struct Dead
+impl OneOf for Walking { type Groups = (Locomotion, Life); }
+impl OneOf for Dead { type Groups = (Life,); }
+fn main() -> Int { let mut world = App::new().register<Walking>().register<Dead>().build().into_world(); discard(world.spawn_bundle((Walking, Dead))); 0 }

@@ -1,0 +1,15 @@
+// Upstream's tests/ui/duplicate_node.rs, refused when compiled: two nodes of one name in a graph.
+// expect:
+// error containing: ANodeNameIsGivenOnceInAGraph
+mod ecs;
+
+use ecs::{App, World, Entity, Query, Single, With, Without, Changed, Or, MayHave, parallel, run_if, exclusive, node, ready};
+
+struct Update
+struct Value(Int)
+struct Other(Int)
+struct Tag
+struct A
+struct B
+fn nothing() { () }
+fn main() -> Int { let app = App::new().add_systems(Update, ready((node(A, nothing), node(A, nothing)))).build(); discard(app); 0 }

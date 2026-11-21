@@ -21,7 +21,7 @@ fn grow(query: &mut Query<(&mut Hp,)>) {
 }
 
 fn churn<S>(world: &mut World<S>) where S: ecs::Get<Hp>, S: ecs::Get<ecs::Relates<ChildOf>>, S: ecs::Get<ecs::Sources<ChildOf>>,
-    S: ecs::Columns, S: ecs::Unlinks<S>, S: ecs::Holds<Left>, S: ecs::Schedule {
+    S: ecs::Columns, S: ecs::Unlinks<S>, S: ecs::Holds<Left>, S: ecs::NotAState<Left>, S: ecs::Schedule {
     let parent = world.spawn_bundle((Hp(0),));
     let child = world.spawn_bundle((Hp(0),));
     discard(world.relate(child, ChildOf, parent));

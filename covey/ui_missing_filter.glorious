@@ -1,0 +1,15 @@
+// Upstream's tests/ui/missing_filter.rs, refused when compiled: a filter of a component the world does not store.
+// expect:
+// error containing: does not implement `ecs::Get<Missing>`
+mod ecs;
+
+use ecs::{App, World, Entity, Query, Single, With, Without, Changed, Or, MayHave, parallel, run_if, exclusive, node, ready};
+
+struct Update
+struct Value(Int)
+struct Other(Int)
+struct Tag
+struct A
+struct B
+struct Missing
+fn main() -> Int { let mut world = App::new().register<Value>().build().into_world(); let q = world.query_filtered<(&Value,), (Without<Missing>,), _>(); discard(q); 0 }

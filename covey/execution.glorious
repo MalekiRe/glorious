@@ -98,7 +98,11 @@ fn bump_or_spawn<S>(world: &mut World<S>) where S: ecs::Get<Value>, S: ecs::Colu
 fn not_(b: Bool) -> Bool { if(b) { false } else { true } }
 
 // `serial_mode_keeps_nested_parallel_groups_on_calling_thread`
-fn visit(calls: &mut Calls) { calls.0 = calls.0 + 1 }
+// (A count the branches share, as upstream's atomic: each only reads the
+// resource, so they are apart.)
+struct Visits(std::thread::AtomicInt)
+fn visit(visits: &Visits) { discard(std::thread::fetch_add(&visits.0, 1)) }
+fn visits_of<S>(world: &World<S>) -> Int where S: ecs::Holds<Visits> { match(world.resource<Visits>()) { Some(v) => std::thread::load(&v.0), None => 0 } }
 fn always() -> Bool { true }
 
 // `later_registrations_observe_every_branch_of_earlier_parallel_ones`
@@ -139,11 +143,11 @@ fn main() -> Int {
     say(value_of(&app.world));
     say("--");
 
-    let mut app = App::new().insert_resource(Calls(0))
+    let mut app = App::new().insert_resource(Visits(std::thread::AtomicInt::new(0)))
         .with_execution_mode(ExecutionMode::Serial)
         .add_systems(Update, parallel((parallel((visit, visit)), visit)).run_if(always)).build();
     app.emit(&Update);
-    say(match(app.world.resource<Calls>()) { Some(c) => c.0, None => 0 });
+    say(visits_of(&app.world));
     say("--");
 
     let mut app = App::new().register<Value>()
@@ -190,10 +194,10 @@ fn main() -> Int {
     say(match((app.world.resource<Calls>(), app.world.resource<Seen>())) { (Some(c), Some(s)) => c.0 + s.0, _ => 0 });
     say("--");
 
-    let mut app = App::new().insert_resource(Calls(0)).add_systems(Update, parallel((visit, visit))).build();
+    let mut app = App::new().insert_resource(Visits(std::thread::AtomicInt::new(0))).add_systems(Update, parallel((visit, visit))).build();
     let small = WorkerPool::new(3).with_min_parallel_work(3);
     let mut i = 0;
     while({ i < 20 }) { small.install(fn() { app.emit(&Update) }); i = i + 1 };
-    say(match(app.world.resource<Calls>()) { Some(c) => c.0, None => 0 });
+    say(visits_of(&app.world));
     0
 }

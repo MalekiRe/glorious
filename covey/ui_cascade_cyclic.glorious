@@ -1,0 +1,19 @@
+// Upstream's tests/ui/cascade_cyclic.rs, refused when compiled: a cascade through a relation that may have cycles.
+// expect:
+// error containing: does not implement `ecs::Acyclic`
+mod ecs;
+
+use ecs::{App, World, Entity, Query, Relation, OneToMany, OneToOne, ManyToMany, Relates, Sources, To, From, parallel};
+
+struct Update
+struct Value(Int)
+struct Docked
+impl Relation for Docked { type Kind = OneToMany; }
+struct Partner
+impl Relation for Partner { type Kind = OneToOne; }
+struct Likes
+impl Relation for Likes { type Kind = ManyToMany; }
+struct ChildOf
+impl Relation for ChildOf { type Kind = OneToMany; }
+fn system(q: &mut Query<(To<ChildOf, (&Value,)>, (&mut Value,)), ()>) { q.cascade() { (parent, (mut value,)) => value.0 = value.0 + match(parent) { Some((p,)) => p.0, None => 0 }; } }
+fn main() -> Int { let mut app = App::new().relation<ChildOf>().register<Value>().add_systems(Update, system).build(); app.emit(&Update); 0 }

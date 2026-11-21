@@ -1,0 +1,23 @@
+// Upstream's tests/ui/one_of_unshared_parallel.rs, refused when compiled: writers in a parallel group filtered by members of different `OneOf` groups.
+// expect:
+// error containing: ApartAcross
+mod ecs;
+
+use ecs::{App, World, Entity, Query, Single, With, Without, Changed, Or, MayHave, parallel, run_if, exclusive, node, ready};
+
+struct Update
+struct Value(Int)
+struct Other(Int)
+struct Tag
+struct A
+struct B
+use ecs::{OneOf};
+struct Locomotion
+struct Life
+struct Running
+struct Dead
+impl OneOf for Running { type Groups = (Locomotion,); }
+impl OneOf for Dead { type Groups = (Life,); }
+fn a(q: &mut Query<(&mut Value,), (With<Running>,)>) { () }
+fn b(q: &mut Query<(&mut Value,), (With<Dead>,)>) { () }
+fn main() -> Int { let app = App::new().register<Value>().register<Running>().register<Dead>().add_systems(Update, parallel((a, b))).build(); discard(app); 0 }

@@ -12,7 +12,7 @@ use ecs::{App, Relation, OneToMany, Acyclic};
 struct Attached
 impl Relation for Attached { type Kind = OneToMany; }
 impl Use<[0, *]> for Attached {}
-impl Acyclic for Attached { const ACYCLIC: Bool = true; }
+impl Acyclic for Attached {}
 
 fn main() -> Int {
     let mut world = App::new().relation<Attached>().build().into_world();

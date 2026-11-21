@@ -1,0 +1,23 @@
+// Upstream's tests/ui/link_write_world.rs, refused when compiled: a relation's sources written through the world.
+// expect:
+// error containing: `ecs::Immutable` does not implement `ecs::InPlace`
+mod ecs;
+
+use ecs::{App, World, Entity, Query, Relation, OneToMany, OneToOne, ManyToMany, Relates, Sources, To, From, parallel};
+
+struct Update
+struct Value(Int)
+struct Docked
+impl Relation for Docked { type Kind = OneToMany; }
+struct Partner
+impl Relation for Partner { type Kind = OneToOne; }
+struct Likes
+impl Relation for Likes { type Kind = ManyToMany; }
+fn main() -> Int {
+    let mut world = App::new().relation<Docked>().build().into_world();
+    let ship = world.spawn_bundle(());
+    let station = world.spawn_bundle(());
+    discard(world.relate(ship, Docked, station));
+    discard(world.get_mut<Sources<Docked>>(station));
+    0
+}

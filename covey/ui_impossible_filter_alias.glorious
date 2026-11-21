@@ -1,0 +1,15 @@
+// Upstream's tests/ui/impossible_filter_alias.rs, refused when compiled: a query that writes and reads one component, under a filter nothing passes.
+// expect:
+// error containing: SameRow
+mod ecs;
+
+use ecs::{App, World, Entity, Query, Single, With, Without, Changed, Or, MayHave, parallel, run_if, exclusive, node, ready};
+
+struct Update
+struct Value(Int)
+struct Other(Int)
+struct Tag
+struct A
+struct B
+fn alias(q: &mut Query<(&mut Value, &Value), (With<Tag>, Without<Tag>)>) { () }
+fn main() -> Int { let app = App::new().register<Value>().register<Tag>().add_systems(Update, alias).build(); discard(app); 0 }

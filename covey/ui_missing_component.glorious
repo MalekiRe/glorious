@@ -1,0 +1,15 @@
+// Upstream's tests/ui/missing_component.rs, refused when compiled: a bundle of a component the world does not store.
+// expect:
+// error containing: does not implement `ecs::Get<Other>`
+mod ecs;
+
+use ecs::{App, World, Entity, Query, Single, With, Without, Changed, Or, MayHave, parallel, run_if, exclusive, node, ready};
+
+struct Update
+struct Value(Int)
+struct Other(Int)
+struct Tag
+struct A
+struct B
+fn read(values: &mut Query<(&Value,), ()>) { () }
+fn main() -> Int { let mut app = App::new().register<Value>().add_systems(Update, read).build(); discard(app.world.spawn_bundle((Other(1),))); 0 }
