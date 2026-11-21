@@ -448,7 +448,8 @@ def onlyPartStmts (b : Body) (x part : String) (ss : List StmtId) : Body × List
 
 /-! ## What the front end writes out, flat -/
 
-/-- Every identity moved on by `k` (`Syntax.shiftRewrite`). -/
+/-- Every identity moved on by `k`: a copy of a function is then told apart
+from the function and from every other copy. -/
 def shiftRewrite (k : Nat) : FRewrite where
   onExpr go b e :=
     match b.expr e with

@@ -1103,7 +1103,7 @@ private def layouts : String := r#"
 // alignment; an enum a tag where it has more than one constructor, then the
 // widest of its constructors' fields. A type with no fields and one
 // constructor is nothing (`size_of<()>()` is 0). Written out for each type
-// from its structure (`Syntax.writeLayouts`).
+// from its structure (`Syntax.Flat.writeLayouts`).
 trait Layout { const SIZE: Int; const ALIGN: Int; }
 // A type with one value, which is nothing: no payload, no finalizer (the
 // specification's `nil_represented`, 4): `()`, a struct with no fields, a

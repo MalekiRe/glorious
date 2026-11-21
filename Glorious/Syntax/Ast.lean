@@ -1585,17 +1585,4 @@ partial def promoteItems (items : List Item) : List Item :=
     | .impl ps tr head args context methods => .impl ps tr head args context (promoteItems methods)
     | item => item
 
-/-- Every identity moved on by `k`: a copy of a function is then told apart
-from the function and from every other copy. -/
-def shiftRewrite (k : Nat) : Rewrite where
-  onExpr go
-    | .call id g args => some (.call (id + k) (go.ex g) (args.map go.ex))
-    | .tailCall id g args => some (.tailCall (id + k) (go.ex g) (args.map go.ex))
-    | .fieldOf id e name => some (.fieldOf (id + k) (go.ex e) name)
-    | .refField id uniq name path star => some (.refField (id + k) uniq name path star)
-    | .closure id clauses => some (.closure (id + k) (clauses.map go.clause))
-    | _ => none
-
-def shiftClause (k : Nat) : Clause → Clause := (shiftRewrite k).clause
-
 end Glorious.Syntax

@@ -364,49 +364,6 @@ partial def receiverStmts (taken : Std.HashMap String Bool) (known : List (Strin
 
 end
 
-/-- Does an expression call, on what it is called on, a function that takes
-a reference (`taken`), so that `receiverExpr` may borrow it? -/
-partial def borrowsReceiver (taken : Std.HashMap String Bool) (e : Expr) : Bool :=
-  (match e with
-    | .call _ (.name _ name) (.call _ (.name none mark) _ :: _) => mark == receiverMark && taken.contains name
-    | _ => false) || e.children.any (borrowsReceiver taken)
-
-/-- Every dotted call of a program with what it is called on borrowed where
-the function takes a reference: see `receiverExpr`. A name that is then
-borrowed and was not a variable is kept where a reference can point, as one
-borrowed with `&` in the text is (`promoteFnClause`): in each function's
-clause where a borrow may be made, the rest as the text's were made so. -/
-partial def borrowReceivers (items : List Item) : List Item :=
-  let taken : Std.HashMap String Bool :=
-    (takesReference items ++ (givesReference items).map (givesKey ·, false)).foldl (fun m (k, v) => m.insertIfNew k v) {}
-  -- (`promote`: not of a trait's defaults, which are made so where they are
-  -- written out.)
-  let rec go (promote : Bool) : Item → Item
-    | .pub parent item => .pub parent (go promote item)
-    | .module name (some body) => .module name (some (body.map (go promote)))
-    | .fn name ps annots ret clauses =>
-      .fn name ps annots ret (clauses.map fun c =>
-        let values := match c with
-          | .mk pats _ => (pats.zip annots).filterMap fun
-            | (.var _, some (.ref _ _ _)) => none
-            | (.var x, some _) => some x
-            | _ => none
-        -- (Those written with a reference's type: a field of what one points
-        -- to is borrowed through it.)
-        let refs : List String := match c with
-          | .mk pats _ => (pats.zip annots).filterMap fun
-            | (Pattern.var x, some (TypeExpr.ref _ _ _)) => some x
-            | _ => none
-        let borrows := match c with
-          | .mk _ body => body.any fun s => s.exprs.any (borrowsReceiver taken)
-        let c' := nameBorrowsClause (receiverClause taken (refs.map (·, 3)) values c)
-        if promote && borrows then promoteFnClause annots c' else c')
-    | .impl ps tr head args context methods => .impl ps tr head args context (methods.map (go promote))
-    | .traitInfo name supers defaults params assocs => .traitInfo name supers (defaults.map (go false)) params assocs
-    | .alias name value => .alias name (receiverExpr taken [] value)
-    | item => item
-  items.map (go true)
-
 /-- The arguments an implementation gives its trait, as written
 (`traitArgName`), in order. -/
 def givenTraitArgs (ms : List Item) : List TypeExpr :=
@@ -536,223 +493,6 @@ partial def typedField (known : Std.HashSet String) (ps : List String) : TypeExp
   | .tuple args => args.all (typedField known ps)
   | _ => true
 
-/-- `Layout` (the prelude's) for each type: each declared type's right after
-its declaration, and those of the types with no declaration (`Int`, each
-scalar, tuples, callables, references) right after the trait's; each from the
-type's structure (`layoutOf`), asking `Layout` of each of its type
-parameters. In place, so that the prelude's are the same, item for item, in
-a program as where the prelude is checked alone. -/
-def writeLayouts (items : List Item) : List Item := Id.run do
-  let rec flat : List Item → List Item
-    | [] => []
-    | .module _ (some body) :: rest => flat body ++ flat rest
-    | .pub _ inner :: rest => flat [inner] ++ flat rest
-    | item :: rest => item :: flat rest
-  let all := flat items
-  unless all.any (fun | .trait n _ => n == layoutTrait | _ => false) do return items
-  let hasNil := all.any (fun | .trait n _ => n == nilTrait | _ => false)
-  let fieldsOf : Std.HashMap String (List String × List (List TypeExpr)) := all.foldl (init := {}) fun m item =>
-    match item with
-    | .struct n ps fs => m.insert n (ps, [fs])
-    | .enum n ps cs => m.insert n (ps, cs.map (·.2))
-    | _ => m
-  let params := fun (n : Nat) => (List.range n).map (s!"T{·}")
-  let count := 0
-  -- (The trait's functions, by the names the program has for them.)
-  let (sizeName, alignName) := match all.findSome? (fun | .trait n ms => if n == layoutTrait then some ms else none | _ => none) with
-    | some [(s, _, _), (a, _, _)] => (s, a)
-    | _ => ("SIZE", "ALIGN")
-  -- (The types a field may be of: those declared, and those with none.)
-  let known : Std.HashSet String := Std.HashSet.ofList (fieldsOf.toList.map (·.1) ++ ["Int"] ++ scalars.map (·.1))
-  let typed := fun (ps : List String) (t : TypeExpr) => typedField known ps t
-  -- (The implementation for one head, its calls numbered apart; none for a
-  -- type with a field whose type is left to be found.)
-  let implFor := fun (count : Nat) (head : String) (ps : List String) =>
-    let fresh := ps.zipIdx.map fun (p, j) => if p.startsWith "'" then s!"'%l{j}" else s!"%l{j}"
-    let (sizeE, alignE) := layoutOf fieldsOf head fresh (9000000000000000 + 1000 * count)
-    let int := TypeExpr.name "Int" []
-    let untyped := match fieldsOf[head]? with
-      | some (ps, cs) => cs.any (·.any (!typed ps ·))
-      | none => false
-    if untyped then [] else
-    -- (`NilRepresented`, of one with no payload: one constructor, each field a
-    -- type parameter, asked it too, or of a type that is nothing itself; and
-    -- no `drop` to run.)
-    let nils : List Item := match (if head.startsWith "(tuple" then some (ps, [ps.map (TypeExpr.name · [])]) else fieldsOf[head]?) with
-      | some (hps, [fs]) =>
-        let isParam := fun (f : TypeExpr) => match f with
-          | .name x [] => hps.contains x
-          | _ => false
-        let nothing := fun (f : TypeExpr) => isParam f || (staticLayout fieldsOf [head] f).any (·.1 == 0)
-        let dropped := all.any fun
-          | .impl _ tr h _ _ _ => (tr.splitOn "::").getLast! == "Drop" && h == head
-          | _ => false
-        if hasNil && !dropped && fs.all nothing then
-          let m := hps.zip fresh
-          let asked := (fs.filterMap fun f => match f with
-            | .name x [] => m.lookup x
-            | _ => none).eraseDups
-          [Item.impl fresh nilTrait head fresh (asked.map (·, nilTrait)) []]
-        else []
-      | _ => []
-    nils ++ [Item.impl fresh layoutTrait head fresh ((fresh.filter (!·.startsWith "'")).map (·, layoutTrait))
-      -- (Checked only where something asks it, as a copy of an
-      -- implementation for every length is: `packCopyName`.)
-      [.fn sizeName [] [] (some int) [.mk [] [.expr sizeE]], .fn alignName [] [] (some int) [.mk [] [.expr alignE]],
-       .typeAlias packCopyName [] (.tuple [])]]
-  -- (After what is written out beside a declaration, `fieldNames`.)
-  let rec beside : List Item → List Item × List Item
-    | (.fieldNames m ns ps) :: rest =>
-      if m.startsWith "%" then ([], .fieldNames m ns ps :: rest) else
-      let (mine, after) := beside rest
-      (.fieldNames m ns ps :: mine, after)
-    | rest => ([], rest)
-  -- (`fuel`: one for each item.)
-  let rec go (fuel count : Nat) : List Item → (List Item × Nat)
-    | [] => ([], count)
-    | item :: rest =>
-      match fuel with
-      | 0 => (item :: rest, count)
-      | fuel + 1 =>
-        let declared : Option (String × List String) := match item with
-          | .struct n ps _ | .enum n ps _ | .pub _ (.struct n ps _) | .pub _ (.enum n ps _) => some (n, ps)
-          | _ => none
-        match declared with
-        | some (n, ps) =>
-          let (names, rest) := beside rest
-          let (more, count') := go fuel (count + 1) rest
-          (item :: names ++ implFor count n ps ++ more, count')
-        | none =>
-          let (mine, count) : List Item × Nat := match item with
-            | .trait n _ =>
-              if n == layoutTrait then
-                let heads := [("Int", [])] ++ scalars.map (fun (n, _) => (n, []))
-                  ++ (List.range 9).map (fun n => (s!"(tuple{n})", params n))
-                  ++ (List.range 7).map (fun n => (s!"(fn{n})", params (n + 1)))
-                  ++ [("(&)", ["T"]), ("(&mut)", ["T"])]
-                let (out, c) := heads.foldl (fun (acc : List Item × Nat) (h, ps) => (acc.1 ++ implFor acc.2 h ps, acc.2 + 1)) ([], count)
-                (item :: out, c)
-              else ([item], count)
-            | .module name (some body) =>
-              let (body, c) := go fuel count body
-              ([.module name (some body)], c)
-            | other => ([other], count)
-          let (more, count) := go fuel count rest
-          (mine ++ more, count)
-  (go (2 * (flat items).length + 2) count items).1
-
-/-- Each implementation for every type, `impl<T: Show> Print for T`, written
-out as one for each type made with a name, each tuple and callable of a few
-parts, and each reference, that has an implementation of every trait it asks
-of `T` (or every such type, if it asks none): `impl<A> Print for Option<A>
-where Option<A>: Show`. Not for a type that has an implementation of the
-trait for all its arguments: that one is the type's. A type with one for some
-of its arguments (`impl Print for Option<Int>`) has both, and the one that
-asks more of the type is the one for those (as for any two). In each copy
-`T` is the type it is for, and its calls are told apart from the other
-copies'. The copies come after everything else. -/
-def expandBlankets (items : List Item) : List Item := Id.run do
-  let blankets := items.filterMap fun
-    | .impl ps tr head [t] ctx ms => if head == blanketHead then some (ps, tr, t, ctx, ms) else none
-    | _ => none
-  if blankets.isEmpty then return items
-  let rest := items.filter fun
-    | .impl _ _ head _ _ _ => head != blanketHead
-    | _ => true
-  let declared : List (String × List String) := rest.filterMap fun
-    | .struct n ps _ | .pub _ (.struct n ps _) | .enum n ps _ | .pub _ (.enum n ps _) => some (n, ps)
-    | _ => none
-  let params := fun (n : Nat) => (List.range n).map (s!"T{·}")
-  let heads : List (String × List String) :=
-    [("Int", [])] ++ scalars.map (fun (n, _) => (n, [])) ++ declared
-      ++ (List.range 9).map (fun n => (s!"(tuple{n})", params n))
-      ++ (List.range 7).map (fun n => (s!"(fn{n})", params (n + 1)))
-      ++ [("(&)", ["T"]), ("(&mut)", ["T"])]
-  -- (Which trait each implementation is of, for which head, and whether for
-  -- all of the head's arguments.)
-  -- (The arguments an implementation gives its trait, as written.)
-  let givenArgs := fun (ms : List Item) => (givenTraitArgs ms).map (·.spell)
-  -- (Which trait each implementation is of, at which arguments, for which
-  -- head.)
-  let implOf : Item → Option (String × String × List String) := fun
-    | .impl _ tr head _ _ ms => some (traitBase tr, head, givenArgs ms)
-    | _ => none
-  let mut known : Std.HashSet (String × String × List String) := .ofList (rest.filterMap implOf)
-  -- (Which traits each head has some implementation of.)
-  let mut has : Std.HashSet (String × String) := .ofList ((rest.filterMap implOf).map fun (tr, h, _) => (tr, h))
-  -- (Those another implementation for every type gave, by which: two of
-  -- them for one trait both written out for a type are two implementations
-  -- of it for that type, which the checker refuses.)
-  let mut byBlanket : Std.HashMap (String × String × List String) (List Nat) := {}
-  -- (`impl !Print for Secret {}`: not written out for that type.)
-  let last := fun (s : String) => (s.splitOn "::").getLast!
-  let denied := rest.filterMap fun
-    | .fieldNames mark [tr, head] _ => if mark == attrMark "negative_impl" then some (last tr, last head) else none
-    | _ => none
-  -- (What a function generic in `T` may take a trait of `T` to be met by:
-  -- see `Check.St.blanketTraits`.)
-  let mut out : Array Item := (blankets.map fun (_, tr, t, ctx, _) =>
-    Item.fieldNames (attrMark "blanket_impl")
-      (traitBase tr :: ctx.filterMap fun (p, c) => if p == t then some (traitBase c) else none) []).toArray
-  let mut copies := 0
-  -- (How many traits of its type each asks: of two for one trait that both
-  -- apply to a type, the one that asks more is that type's, `impl<T> Cloner
-  -- for T where T: Clone` beside `impl<T> Cloner for T`; tried first.)
-  let askedOf := fun (b : Nat) => match blankets[b]? with
-    | some (_, _, t, ctx, _) => (ctx.filter fun (pc : String × String) => pc.1 == t).length
-    | none => 0
-  let order := (List.range blankets.length).mergeSort fun a b => askedOf a ≥ askedOf b
-  let blankets := order.filterMap fun b => blankets[b]?
-  -- (A copy may give what another asks: as many rounds as there are.)
-  for _ in List.range (blankets.length + 1) do
-    let mut more := false
-    for ((ps, tr, t, ctx, ms), b) in blankets.zipIdx do
-      let asked := ctx.filterMap fun (p, c) => if p == t then some (traitBase c) else none
-      let bodies := givenTraitArgs ms
-      for (h, hps) in heads do
-        let fresh := hps.zipIdx.map fun (p, j) => if p.startsWith "'" then s!"'%b{j}" else s!"%b{j}"
-        let self := selfTypeOf h (fresh.map (TypeExpr.name · []))
-        let mine := bodies.map fun body => (substTypeExpr [(t, self)] body).spell
-        let givers := byBlanket.getD (traitBase tr, h, mine) []
-        if givers.contains b then continue
-        -- (One that asks more already gave it this type: that one is its.)
-        let asksOf := fun (g : Nat) => match blankets[g]? with
-          | some (_, _, t', ctx', _) => (ctx'.filter fun (pc : String × String) => pc.1 == t').length
-          | none => 0
-        if givers.any (fun g => asksOf g > asked.length) then continue
-        let mineToo := givers.any (· != b)
-        if !mineToo && known.contains (traitBase tr, h, mine) then continue
-        if denied.contains (last (traitBase tr), last h) then continue
-        unless asked.all (fun c => has.contains (c, h)) do continue
-        let ctx' := ctx.zipIdx.map fun ((p, c), k) => if p == t then (s!"%subject{k}", c) else (p, c)
-        let subjects := (ctx.zipIdx.filter fun ((p, _), _) => p == t).map fun (_, k) =>
-          Item.typeAlias (ctxSubjectName k) [] self
-        copies := copies + 1
-        let shift := 100000000000000 * copies
-        -- (`self_name()` in it: this type's name.)
-        let named : Rewrite := { onExpr := fun _ e => match e with
-          | .call _ (.name none f) [] =>
-            -- (Written as the resolver has written texts by now: the
-            -- prelude's constructors by their own names.)
-            if f == selfNameFn then some ((last h).toList.foldr (fun c rest =>
-              .call 0 (.name none "StrChar") [scalarValue "char_of" (c.toNat : Int), rest]) (.name none "StrEnd"))
-            else none
-          | _ => none }
-        let ms' := ms.map fun
-          | .typeAlias n takes body => .typeAlias n takes (substTypeExpr [(t, self)] body)
-          | .fn m fps annots ret clauses =>
-            .fn m fps (annots.map (·.map (substTypeExpr [(t, self)]))) (ret.map (substTypeExpr [(t, self)]))
-              (clauses.map fun c => named.clause (shiftClause shift c))
-          | item => item
-        out := out.push (.impl (fresh ++ ps.filter (· != t)) tr h fresh ctx'
-          (ms' ++ subjects ++ [.typeAlias (blanketName t) [] self]))
-        known := known.insert (traitBase tr, h, mine)
-        has := has.insert (traitBase tr, h)
-        byBlanket := byBlanket.insert (traitBase tr, h, mine) (givers ++ [b])
-        more := true
-    unless more do break
-  pure (rest ++ out.toList)
-
 /-- A type with `Self::Name` in it written `<Self as Trait<..>>::Name`, of
 the implementation's own trait and type. -/
 partial def selfAssocs (self : TypeExpr) (tr : String) (targs : List TypeExpr) : TypeExpr → TypeExpr
@@ -766,72 +506,6 @@ partial def selfAssocs (self : TypeExpr) (tr : String) (targs : List TypeExpr) :
   | .performs r effs => .performs (selfAssocs self tr targs r) (effs.map fun (e, as) => (e, as.map (selfAssocs self tr targs)))
   | .ref u t l => .ref u (selfAssocs self tr targs t) l
   | t => t
-
-/-- Each implementation with the functions its trait gives a body that it
-does not write itself; and, where it gives its trait arguments, `impl
-From<Int> for u8`, as an implementation of the trait at those: `From<Int>` is
-the name of what it implements from here on. -/
-def fillDefaults (items : List Item) : List Item :=
-  -- (Implementations for every type written out for each.)
-  let items := writeLayouts items
-  let items := Trace.timed "fill: blankets" fun _ => expandBlankets items
-  -- (First, with every declaration to hand: what dotted calls borrow.)
-  let items := Trace.timed "fill: borrow receivers" fun _ => borrowReceivers items
-  let defaults := items.filterMap fun
-    | .traitInfo name _ fns _ _ => some (name, fns)
-    | _ => none
-  -- (How many implementations of each trait for each type, at the same
-  -- arguments, came before: the later ones are numbered.)
-  let (_, out) := items.zipIdx.foldl (init := (({} : Std.HashMap (String × String × List String) Nat), #[]))
-    fun (seen, out) (item, index) => match item with
-    | .impl ps tr head args context methods =>
-      let targs := givenTraitArgs methods
-      let given := targs.map (·.spell)
-      let before := seen.getD (tr, head, given) 0
-      let written := methods.filterMap fun
-        | .fn m _ _ _ _ => some m
-        | _ => none
-      let said := methods.filterMap fun
-        | .typeAlias n _ _ => some n
-        | _ => none
-      let missing := ((defaults.lookup tr).getD []).filter fun
-        | .fn m _ _ _ _ => !written.contains m
-        | .typeAlias n _ _ => !said.contains n
-        | _ => false
-      -- A default is written against `Self`; in the implementation its types
-      -- are the trait's at the implementing type, as for a function the
-      -- implementation writes itself without saying them.
-      -- Each implementation has its own copy: the calls in it are met by
-      -- this implementation's types, and are known by their identities.
-      -- (`Self::f(..)` in it is this implementation's `f`, as it is in a
-      -- function the implementation writes.)
-      let self := selfTypeOf head (args.map (TypeExpr.name · []))
-      let missing := missing.map fun
-        | .fn m fps annots _ clauses =>
-          Item.fn m fps (annots.map fun _ => none) none
-            (clauses.map fun c =>
-              shiftClause (10000000000 * (index + 1)) (selfClause head (some (tr, (TypeExpr.tuple [self]).asExpr)) c))
-        -- (A type's default is written against `Self` too.)
-        | .typeAlias n takes body => .typeAlias n takes (TypeExpr.withSelf self body)
-        | item => item
-      -- Two implementations of a trait for one type, written with the
-      -- same arguments (`impl<T, R> Get<T> for (Column<T>, R)` and
-      -- `impl<T, H, R> Get<T> for (Column<H>, R)`): each is known by a
-      -- name of its own, the later ones numbered.
-      -- (`Self::Components` in its functions: what this implementation's
-      -- trait leaves, at this type.)
-      let ofSelf := selfAssocs self tr targs
-      let all := (methods ++ missing).map fun
-        | .fn m fps annots ret clauses =>
-          Item.fn m fps (annots.map (·.map ofSelf)) (ret.map ofSelf)
-            (clauses.map fun c => match mapTypesClause (fun t => pure (ofSelf t)) c with
-              | .ok c => c
-              | .error _ => c)
-        | item => item
-      let named := if before == 0 then tr else s!"{tr}#{before}"
-      (seen.insert (tr, head, given) (before + 1), out.push (.impl ps (traitAt named given) head args context all))
-    | item => (seen, out.push item)
-  out.toList
 
 namespace Flat
 
@@ -979,8 +653,8 @@ partial def receiverStmts (taken : Std.HashMap String Bool) (known : List (Strin
 
 end
 
-/-- Does a body call, on what it is called on, a function that takes a
-reference (`Syntax.borrowsReceiver`)? -/
+/-- Does a body call, on what it is called on, a function that takes
+a reference (`taken`), so that `receiverExpr` may borrow it? -/
 def Body.borrowsReceiver (b : Body) (taken : Std.HashMap String Bool) (body : Array StmtId) : Bool :=
   body.any fun s => b.anyStmt (fun n => match n with
     | .call _ f args =>
@@ -990,7 +664,10 @@ def Body.borrowsReceiver (b : Body) (taken : Std.HashMap String Bool) (body : Ar
     | _ => false) s
 
 /-- Every dotted call of a program with what it is called on borrowed where
-the function takes a reference (`Syntax.borrowReceivers`). -/
+the function takes a reference: see `receiverExpr`. A name that is then
+borrowed and was not a variable is kept where a reference can point, as one
+borrowed with `&` in the text is (`promoteFnClause`): in each function's
+clause where a borrow may be made, the rest as the text's were made so. -/
 partial def borrowReceivers (items : List FItem) : List FItem :=
   let decls := items.map FItem.declared
   let taken : Std.HashMap String Bool :=
@@ -1025,8 +702,12 @@ partial def borrowReceivers (items : List FItem) : List FItem :=
     | item => item
   items.map (go true)
 
-/-- `Layout` (the prelude's) for each type (`Syntax.writeLayouts`), over
-flat items: what is written out is made as trees and then flat. -/
+/-- `Layout` (the prelude's) for each type: each declared type's right after
+its declaration, and those of the types with no declaration (`Int`, each
+scalar, tuples, callables, references) right after the trait's; each from the
+type's structure (`layoutOf`), asking `Layout` of each of its type
+parameters. In place, so that the prelude's are the same, item for item, in
+a program as where the prelude is checked alone. -/
 def writeLayouts (items : List FItem) : List FItem := Id.run do
   let rec flatAll : List FItem → List FItem
     | [] => []
@@ -1127,8 +808,16 @@ def writeLayouts (items : List FItem) : List FItem := Id.run do
           (mine ++ more, count)
   (go (2 * (flatAll items).length + 2) count items).1
 
-/-- Each implementation for every type written out as one for each type
-(`Syntax.expandBlankets`), over flat items. -/
+/-- Each implementation for every type, `impl<T: Show> Print for T`, written
+out as one for each type made with a name, each tuple and callable of a few
+parts, and each reference, that has an implementation of every trait it asks
+of `T` (or every such type, if it asks none): `impl<A> Print for Option<A>
+where Option<A>: Show`. Not for a type that has an implementation of the
+trait for all its arguments: that one is the type's. A type with one for some
+of its arguments (`impl Print for Option<Int>`) has both, and the one that
+asks more of the type is the one for those (as for any two). In each copy
+`T` is the type it is for, and its calls are told apart from the other
+copies'. The copies come after everything else. -/
 def expandBlankets (items : List FItem) : List FItem := Id.run do
   let blankets := items.filterMap fun
     | .impl ps tr head [t] ctx ms => if head == blanketHead then some (ps, tr, t, ctx, ms) else none
@@ -1226,7 +915,9 @@ def expandBlankets (items : List FItem) : List FItem := Id.run do
   pure (rest ++ out.toList)
 
 /-- Each implementation with the functions its trait gives a body that it
-does not write itself (`Syntax.fillDefaults`), over flat items. -/
+does not write itself; and, where it gives its trait arguments, `impl
+From<Int> for u8`, as an implementation of the trait at those: `From<Int>` is
+the name of what it implements from here on. -/
 def fillDefaults (items : List FItem) : List FItem :=
   -- (Implementations for every type written out for each.)
   let items := writeLayouts items

@@ -838,7 +838,7 @@ structure St where
   `Traits.solve`. -/
   patterned : Bool := false
   /-- The traits with an implementation for every type, each with the
-  traits it asks of the type (`Syntax.expandBlankets`): a function whose
+  traits it asks of the type (`Syntax.Flat.expandBlankets`): a function whose
   type parameter is said to have those has this one too, met where the
   function is used, by the implementation for the type it is used at. -/
   blanketTraits : List (String × List String) := []

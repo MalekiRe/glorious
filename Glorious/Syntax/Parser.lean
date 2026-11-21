@@ -306,7 +306,7 @@ private partial def parseItem : P Item := do
     let (head, written) ← match substTypeExpr callable target with
       | .tuple ts => pure (s!"(tuple{ts.length})", ts)
       -- `impl<T: Show> Print for T`: for every type, written out for each
-      -- that may have what is asked of `T` (`Syntax.expandBlankets`).
+      -- that may have what is asked of `T` (`Syntax.Flat.expandBlankets`).
       | .name h [] => if params.contains h then pure (blanketHead, [.name h []]) else pure (h, [])
       | .name h ts => pure (h, ts)
       -- `impl<P, R> System for fn(P) -> R`: for the functions of one
