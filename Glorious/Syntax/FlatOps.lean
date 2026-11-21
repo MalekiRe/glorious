@@ -309,16 +309,21 @@ end Body
 /-- A rewrite of a body: an expression made otherwise (`some`, whose parts are
 not looked at again), or a statement. What does not change keeps its place;
 what has a part that changed is a node made anew. -/
+structure FGo where
+  ex : ExprId → Build ExprId
+  st : StmtId → Build StmtId
+  clause : ClauseId → Build ClauseId
+
 structure FRewrite where
-  onExpr : Body → ExprId → Option FExpr := fun _ _ => none
-  /-- (Given how an expression is rewritten.) -/
-  onStmt : (ExprId → Build ExprId) → Body → StmtId → Option (Build StmtId) := fun _ _ _ => none
+  /-- (Given how the rest is rewritten.) -/
+  onExpr : FGo → Body → ExprId → Option (Build ExprId) := fun _ _ _ => none
+  onStmt : FGo → Body → StmtId → Option (Build StmtId) := fun _ _ _ => none
 
 mutual
 
 partial def FRewrite.ex (r : FRewrite) (e : ExprId) : Build ExprId := do
   let b ← get
-  if let some n := r.onExpr b e then return ← pushExpr n
+  if let some made := r.onExpr ⟨r.ex, r.st, r.clause⟩ b e then return ← made
   match b.expr e with
   | .call id f args => do
     let f' ← r.ex f
@@ -362,7 +367,7 @@ partial def FRewrite.clause (r : FRewrite) (c : ClauseId) : Build ClauseId := do
 
 partial def FRewrite.st (r : FRewrite) (s : StmtId) : Build StmtId := do
   let b ← get
-  if let some made := r.onStmt r.ex b s then return ← made
+  if let some made := r.onStmt ⟨r.ex, r.st, r.clause⟩ b s then return ← made
   match b.stmt s with
   | .let_ p v => do
     let v' ← r.ex v
@@ -386,6 +391,11 @@ partial def FRewrite.st (r : FRewrite) (s : StmtId) : Build StmtId := do
 
 end
 
+/-- A body's own clauses rewritten, in the body grown by what is made. -/
+def FRewrite.body (r : FRewrite) (b : Body) : Body :=
+  let (roots, b) := (b.roots.mapM r.clause).run b
+  { b with roots }
+
 /-- Statements rewritten, in a body that grows by what is made. -/
 def FRewrite.stmts (r : FRewrite) (b : Body) (ss : List StmtId) : Body × List StmtId :=
   let (out, b) := (ss.mapM r.st).run b
@@ -395,14 +405,14 @@ def FRewrite.stmts (r : FRewrite) (b : Body) (ss : List StmtId) : Body × List S
 (`Syntax.lessPartsStmts`). -/
 def lessPartsStmts (b : Body) (x : String) (ss : List StmtId) : Body × List StmtId :=
   let r : FRewrite :=
-    { onExpr := fun b e => match b.expr e with
-        | .proj e' _ | .fieldOf _ e' _ => if b.placeRoot e' == some x then some (.int 0) else none
+    { onExpr := fun _ b e => match b.expr e with
+        | .proj e' _ | .fieldOf _ e' _ => if b.placeRoot e' == some x then some (pushExpr (.int 0)) else none
         | _ => none
-      onStmt := fun ex b s => match b.stmt s with
+      onStmt := fun go b s => match b.stmt s with
         | .assign target e =>
           if b.placeRoot target == some x then some (do
             let place ← pushExpr (.name none "%place")
-            let e' ← ex e
+            let e' ← go.ex e
             pushStmt (.assign place e'))
           else none
         | _ => none }
@@ -412,7 +422,7 @@ def lessPartsStmts (b : Body) (x : String) (ss : List StmtId) : Body × List Stm
 (`Syntax.onlyPartStmts`). -/
 def onlyPartStmts (b : Body) (x part : String) (ss : List StmtId) : Body × List StmtId :=
   let r : FRewrite :=
-    { onExpr := fun b e => (b.partRead x e).map fun p => if p == part then .name none x else .int 0 }
+    { onExpr := fun _ b e => (b.partRead x e).map fun p => pushExpr (if p == part then .name none x else .int 0) }
   r.stmts b ss
 
 end Glorious.Syntax.Flat

@@ -668,8 +668,8 @@ its families of effects (each instance used an effect of its own); and, where
 an implementation given to a function is known, the function written out for
 it with its trait's functions called by name. `written` has the declarations
 with their lifetimes, `all` is without them. -/
-def lowered (b : Elab.Blocks) (written all : List Syntax.Item) :
-    Except String (List Syntax.Item × Elab.Blocks) := do
+def lowered (b : Elab.Blocks) (written : List Syntax.Item) (all : List Syntax.Flat.FItem) :
+    Except String (List Syntax.Flat.FItem × Elab.Blocks) := do
   let (items, b) := Trace.timed "lower: untrait" fun _ => Elab.untrait b all
   let items ← Trace.timed "lower: fields" fun _ => Elab.unfield b items
   let items ← Trace.timed "lower: instances" fun _ => Elab.instances b written items
@@ -798,6 +798,7 @@ def compileSourceAt (src : String) (check : Bool := true)
   let (all, checked) := Trace.timed "check" fun _ => checkWith all
   -- (Dot calls the checker chose a type's own function for, by the value's
   -- type: written so for what follows.)
+  let all := Trace.timed "flat bodies" fun _ => Syntax.Flat.ofItems all
   let all := Trace.timed "what the checker decided, written in" fun _ => match checked with
     | .ok (blocks, _) =>
       Elab.decidedProgram blocks all
@@ -810,7 +811,7 @@ def compileSourceAt (src : String) (check : Bool := true)
     return { core := ⟨#[], .ret (.int 0), [], #[]⟩, ctorNames := #[], fnNames := #[], opNames := #[], checkKept := checkMade }
   -- Lifetimes were the checker's to read; and, of what is declared, the
   -- certificate's.
-  let written := all
+  let written := Elab.declaredOf all
   let all := Trace.timed "erase lifetimes" fun _ => Elab.eraseLifetimes all
   -- From here on the program has no traits: the checker said how each bound
   -- is met, and each is now a value passed where it is needed.
@@ -824,8 +825,6 @@ def compileSourceAt (src : String) (check : Bool := true)
   -- `main` does not reach is elaborated too, for what the elaborator alone
   -- refuses, and then left out.
   let roots := "main" :: ((blocks.map (·.coercions.toList)).getD []).map (·.2)
-  -- (Elaborated from flat bodies.)
-  let all := Trace.timed "flat bodies" fun _ => Syntax.Flat.ofItems all
   let unreached := all
   let all := Trace.timed "what main reaches" fun _ => Elab.reachable roots all
   -- (Only they and what they reach: what `main` reaches is elaborated below.

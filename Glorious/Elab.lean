@@ -1247,12 +1247,9 @@ def staticMethod (tr : TraitInfo) (d : DictE) (idx : Nat) : Option (String × Li
     | none => none
   | .param _ => none
 
-/-- Is there a `tail` call in an expression, at any depth? -/
-partial def tailsExpr : Expr → Bool
-  | .tailCall _ _ _ => true
-  | e => e.children.any tailsExpr
-
-def tailsStmts (body : List Stmt) : Bool := body.any (·.exprs.any tailsExpr)
+/-- Is there a `tail` call in statements, at any depth? -/
+def tailsStmts (b : Flat.Body) (body : List Flat.StmtId) : Bool :=
+  body.any (b.anyStmt fun | .tailCall .. => true | _ => false)
 
 /-- The call that destroys a value, given how its type is destroyed: the
 type's function by name where the type is known, and else the function the
@@ -1381,168 +1378,219 @@ partial def nameWild (named : Nat → Bool) : Pattern → Nat → Pattern × Nat
 
 end
 
+/-- Every use of a variable's value marked: the flag is set, and then the
+value read (`Syntax.markMovesStmts`). -/
+def markMoves (x : String) : Flat.FRewrite where
+  onExpr _ b e :=
+    match b.expr e with
+    | .name none y =>
+      if y == x then some (Flat.flatExpr (.labelScope "%block"
+        [.assign (.name none (Syntax.movedFlag x)) (.int 1), .expr (.name none x)]))
+      else none
+    | .proj e' _ | .fieldOf _ e' _ => if b.placeRoot e' == some x then some (pure e) else none
+    | _ => none
+  onStmt go b s :=
+    match b.stmt s with
+    | .assign target e => some (do Flat.pushStmt (.assign target (← go.ex e)))
+    | _ => none
+
+open Flat in
 mutual
 
-private partial def untraitExpr (tr : TraitInfo) (owner : String) : Expr → Expr
+private partial def untraitExpr (tr : TraitInfo) (owner : String) (e : ExprId) : Build ExprId := do
+  let b ← get
+  match b.expr e with
   | .call id f args => untraitCall tr owner id f args false
   | .tailCall id f args => untraitCall tr owner id f args true
-  | .tuple args => .tuple (args.map (untraitExpr tr owner))
-  | .proj e idx => .proj (untraitExpr tr owner e) idx
-  | .closure id clauses =>
+  | .tuple args => do pushExpr (.tuple (← args.mapM (untraitExpr tr owner)))
+  | .proj x idx => do pushExpr (.proj (← untraitExpr tr owner x) idx)
+  | .closure id clauses => do
     -- What the callable captures is destroyed if it is let go uncalled.
-    let written := hash (Expr.closure id clauses)
-    let hooks := (clauses.flatMap (fvClause [])).eraseDups.filterMap fun x =>
+    let written := hash (Expr.closure id (clauses.toList.map (treeClause b)))
+    let hooks := (b.fvClauses clauses).eraseDups.filterMap fun x =>
       dropHook tr (captureDropSite owner written x)
-    let c := Expr.closure id (clauses.map (untraitClause tr owner))
-    if hooks.isEmpty then c
-    else .call 0 (.name none Syntax.destroyedMark)
-      [c, .closure 0 [.mk [] (hooks.map Stmt.expr ++ [.expr (.tuple [])])]]
-  | .handle subject arms =>
-    .handle (untraitExpr tr owner subject) (arms.map (untraitClause tr owner))
-  | .labelScope l body => .labelScope l (untraitStmts tr owner (0, 0) body)
-  | .deref e => .deref (untraitExpr tr owner e)
-  | .reborrow uniq e => .reborrow uniq (untraitExpr tr owner e)
-  | .fieldOf id e name => .fieldOf id (untraitExpr tr owner e) name
-  | e => e
+    let c ← pushExpr (.closure id (← clauses.mapM (untraitClause tr owner)))
+    if hooks.isEmpty then pure c
+    else
+      let mut stmts : Array StmtId := #[]
+      for h in hooks do
+        stmts := stmts.push (← pushStmt (.expr (← flatExpr h)))
+      stmts := stmts.push (← pushStmt (.expr (← pushExpr (.tuple #[]))))
+      let destroyer ← pushExpr (.closure 0 #[← pushClause ⟨[], stmts⟩])
+      pushExpr (.call 0 (← pushExpr (.name none Syntax.destroyedMark)) #[c, destroyer])
+  | .handle subject arms => do
+    pushExpr (.handle (← untraitExpr tr owner subject) (← arms.mapM (untraitClause tr owner)))
+  | .labelScope l body => do
+    pushExpr (.labelScope l (← untraitStmts tr owner (0, 0) body.toList).toArray)
+  | .deref x => do pushExpr (.deref (← untraitExpr tr owner x))
+  | .reborrow uniq x => do pushExpr (.reborrow uniq (← untraitExpr tr owner x))
+  | .fieldOf id x name => do pushExpr (.fieldOf id (← untraitExpr tr owner x) name)
+  | _ => pure e
 
-private partial def untraitCall (tr : TraitInfo) (owner : String) (id : Nat) (f : Expr)
-    (args : List Expr) (isTail : Bool) : Expr :=
-  let args := args.map (untraitExpr tr owner)
-  let mk := fun (f : Expr) (args : List Expr) =>
-    if isTail then Expr.tailCall id f args else Expr.call id f args
+private partial def untraitCall (tr : TraitInfo) (owner : String) (id : Nat) (f : ExprId)
+    (args : Array ExprId) (isTail : Bool) : Build ExprId := do
+  let args ← args.mapM (untraitExpr tr owner)
+  let mk := fun (f : ExprId) (args : Array ExprId) =>
+    pushExpr (if isTail then .tailCall id f args else .call id f args)
+  let dicts := fun (ds : List DictE) => ds.toArray.mapM fun d => flatExpr (dictExpr tr d)
   match tr.dictsAt[id]?, tr.methodsAt[id]? with
   | some [d], some idx =>
     -- Where the implementation is known, its function is called by name,
     -- given what the implementation's conditions need: a call like any other,
     -- so that a borrow passed to it can be a scope.
     match staticMethod tr d idx with
-    | some (fn, subs) => mk (.name none fn) (subs.map (dictExpr tr) ++ args)
-    | none => mk (.proj ((dictExpr tr) d) idx) args
-  | some ds, none => mk (untraitExpr tr owner f) (ds.map (dictExpr tr) ++ args)
-  | _, _ => mk (untraitExpr tr owner f) args
+    | some (fn, subs) => mk (← pushExpr (.name none fn)) ((← dicts subs) ++ args)
+    | none => mk (← pushExpr (.proj (← flatExpr (dictExpr tr d)) idx)) args
+  | some ds, none => mk (← untraitExpr tr owner f) ((← dicts ds) ++ args)
+  | _, _ => mk (← untraitExpr tr owner f) args
 
-private partial def untraitClause (tr : TraitInfo) (owner : String) : Clause → Clause
-  | .mk pats body =>
-    -- What the clause is given under a name and does not mention is
-    -- destroyed when the clause is done; and so is what a `_` takes, which
-    -- is given a name for it. Where the clause hands its place on with
-    -- `tail`, nothing can be done after: what it does not use is destroyed
-    -- before it starts, which is the cleanup a `tail` call has before it.
-    let first := clausePlace body
-    let (pats, _) := nameWilds (fun k => (dropHook tr ⟨owner, first.1, first.2, wildName k, false⟩).isSome) pats 0
-    let early := tailsStmts body
-    -- (A name the clause straight away makes a variable of the same name,
-    -- to be borrowed, is the variable's to destroy: the place and the name
-    -- are the same for both.)
-    let variables := (body.takeWhile fun s =>
-      match unlocated s with
-      | .letMut y (.name none y') => y == y'
-      | _ => false).filterMap fun s =>
-        match unlocated s with
-        | .letMut y _ => some y
-        | _ => none
-    let hooks := ((pats.flatMap patVars).filter (!variables.contains ·)).flatMap fun x =>
-      ((dropHook tr ⟨owner, first.1, first.2, x, false⟩).toList ++ partHooks tr owner first x).map
-        (if early then Stmt.expr else Stmt.defer)
-    .mk pats (hooks ++ untraitStmts tr owner (0, 0) body)
+private partial def untraitClause (tr : TraitInfo) (owner : String) (c : ClauseId) : Build ClauseId := do
+  let b ← get
+  let ⟨pats, body⟩ := b.clause c
+  let body := body.toList
+  -- What the clause is given under a name and does not mention is
+  -- destroyed when the clause is done; and so is what a `_` takes, which
+  -- is given a name for it. Where the clause hands its place on with
+  -- `tail`, nothing can be done after: what it does not use is destroyed
+  -- before it starts, which is the cleanup a `tail` call has before it.
+  let first := b.clausePlace body
+  let (pats, _) := nameWilds (fun k => (dropHook tr ⟨owner, first.1, first.2, wildName k, false⟩).isSome) pats 0
+  let early := tailsStmts b body
+  -- (A name the clause straight away makes a variable of the same name,
+  -- to be borrowed, is the variable's to destroy: the place and the name
+  -- are the same for both.)
+  let variables := (body.takeWhile fun s =>
+    match b.stmt (b.unlocated s) with
+    | .letMut y v => b.bare? v == some y
+    | _ => false).filterMap fun s =>
+      match b.stmt (b.unlocated s) with
+      | .letMut y _ => some y
+      | _ => none
+  let hooks := ((pats.flatMap patVars).filter (!variables.contains ·)).flatMap fun x =>
+    (dropHook tr ⟨owner, first.1, first.2, x, false⟩).toList ++ partHooks tr owner first x
+  let hooks ← hooks.mapM fun h => do
+    let e ← flatExpr h
+    pushStmt (if early then .expr e else .defer e)
+  let rest ← untraitStmts tr owner (0, 0) body
+  pushClause ⟨pats, (hooks ++ rest).toArray⟩
 
 /-- The statements of a block. A variable whose value is to be destroyed is
 followed by a cleanup that does it when the block is left; an assignment to one
 destroys what it held, once the new value is computed. -/
 private partial def untraitStmts (tr : TraitInfo) (owner : String) (pos : Nat × Nat) :
-    List Stmt → List Stmt
-  | [] => []
-  | .located line col s :: rest =>
-    match untraitStmts tr owner (line, col) (s :: rest) with
-    | first :: more => .located line col first :: more
-    | [] => []
-  | .letMut x value :: rest =>
-    let value := untraitExpr tr owner value
-    let rest := untraitStmts tr owner pos rest
-    match dropHook tr ⟨owner, pos.1, pos.2, x, false⟩ with
-    | some hook => .letMut x value :: .defer hook :: rest
-    | none =>
-      -- A variable that gives its value away where it is used: what it
-      -- holds is destroyed when its block is left only if it was not. A
-      -- flag says, set wherever the value is used.
-      match (tr.dropsAt[(⟨owner, pos.1, pos.2, Syntax.givenSite x, false⟩ : DropSite)]?).bind
-          fun id => tr.dictsAt[id]? with
-      | some [d] =>
-        let flag := Syntax.movedFlag x
-        let unless_moved := Expr.call 0 (.closure 0
-          [.mk [.int 0] [.expr (destroyCall tr d (.name none x))],
-           .mk [.wild] [.expr (.tuple [])]]) [.name none flag]
-        .letMut x value :: .letMut flag (.int 0) :: .defer unless_moved
-          :: Syntax.markMovesStmts x rest
-      | _ => .letMut x value :: rest
-  | .let_ pat value :: rest =>
-    let value := untraitExpr tr owner value
-    let rest := untraitStmts tr owner pos rest
-    match pat with
-    | .var x =>
-      let hooks := (dropHook tr ⟨owner, pos.1, pos.2, x, false⟩).toList ++ partHooks tr owner pos x
-      -- (Before a `tail` call there is no later: see the clause's own.)
-      .let_ pat value :: hooks.map (if tailsStmts rest then Stmt.expr else Stmt.defer) ++ rest
-    | _ =>
-      -- What the pattern takes under a name nothing uses, or under `_`
-      -- (given a name for it), is destroyed likewise.
-      let site := fun (x : String) => (⟨owner, pos.1, pos.2, Syntax.letSite x, false⟩ : DropSite)
-      let (pats, _) := nameWilds (fun k => (dropHook tr (site (letWildName pos.1 pos.2 k))).isSome) [pat] 0
-      let pat := letWilds pos ((pats.head?).getD pat)
-      let hooks := (patVars pat).flatMap fun x => (dropHook tr (site x)).toList ++ partHooks tr owner pos x
-      .let_ pat value :: hooks.map (if tailsStmts rest then Stmt.expr else Stmt.defer) ++ rest
-  | .assign target value :: rest =>
-    let value := untraitExpr tr owner value
-    let target := untraitExpr tr owner target
-    let rest := untraitStmts tr owner pos rest
-    match target with
-    | .name none x =>
-      match dropHook tr ⟨owner, pos.1, pos.2, x, true⟩ with
-      | some hook =>
-        .let_ (.var "%assigned") value :: .expr hook
-          :: .assign target (.name none "%assigned") :: rest
-      | none => .assign target value :: rest
-    | .deref place =>
-      -- What was where the reference points is destroyed, once the new
-      -- value is made and the place found.
-      match (tr.dropsAt[(⟨owner, pos.1, pos.2, derefSite, true⟩ : DropSite)]?).bind fun id => tr.dictsAt[id]? with
-      | some [d] =>
-        .let_ (.var "%assigned") value :: .let_ (.var "%place") place
-          :: .expr (destroyCall tr d (.deref (.name none "%place")))
-          :: .assign (.deref (.name none "%place")) (.name none "%assigned") :: rest
-      | _ => .assign target value :: rest
-    | _ => .assign target value :: rest
-  | .expr e :: rest =>
-    let e := untraitExpr tr owner e
-    let rest := untraitStmts tr owner pos rest
-    -- A value nothing takes, of a type to destroy, is destroyed there.
-    match (if rest.isEmpty then none else dropHook tr ⟨owner, pos.1, pos.2, stmtValue, false⟩) with
-    | some hook => .let_ (.var stmtValue) e :: .expr hook :: rest
-    | none => .expr e :: rest
-  | .defer e :: rest => .defer (untraitExpr tr owner e) :: untraitStmts tr owner pos rest
+    List StmtId → Build (List StmtId)
+  | [] => pure []
+  | s :: rest => do
+    let b ← get
+    let hookS := fun (h : Expr) (now : Bool) => (do
+      let e ← flatExpr h
+      pushStmt (if now then .expr e else .defer e) : Build StmtId)
+    match b.stmt s with
+    | .located line col inner =>
+      match ← untraitStmts tr owner (line, col) (inner :: rest) with
+      | first :: more => pure ((← pushStmt (.located line col first)) :: more)
+      | [] => pure []
+    | .letMut x value =>
+      let value ← untraitExpr tr owner value
+      let rest ← untraitStmts tr owner pos rest
+      match dropHook tr ⟨owner, pos.1, pos.2, x, false⟩ with
+      | some hook => pure ((← pushStmt (.letMut x value)) :: (← hookS hook false) :: rest)
+      | none =>
+        -- A variable that gives its value away where it is used: what it
+        -- holds is destroyed when its block is left only if it was not. A
+        -- flag says, set wherever the value is used.
+        match (tr.dropsAt[(⟨owner, pos.1, pos.2, Syntax.givenSite x, false⟩ : DropSite)]?).bind
+            fun id => tr.dictsAt[id]? with
+        | some [d] =>
+          let flag := Syntax.movedFlag x
+          let unless_moved := Expr.call 0 (.closure 0
+            [.mk [.int 0] [.expr (destroyCall tr d (.name none x))],
+             .mk [.wild] [.expr (.tuple [])]]) [.name none flag]
+          let marked ← rest.mapM (markMoves x).st
+          pure ((← pushStmt (.letMut x value)) :: (← pushStmt (.letMut flag (← pushExpr (.int 0))))
+            :: (← hookS unless_moved false) :: marked)
+        | _ => pure ((← pushStmt (.letMut x value)) :: rest)
+    | .let_ pat value =>
+      let value ← untraitExpr tr owner value
+      let rest ← untraitStmts tr owner pos rest
+      match pat with
+      | .var x =>
+        let hooks := (dropHook tr ⟨owner, pos.1, pos.2, x, false⟩).toList ++ partHooks tr owner pos x
+        -- (Before a `tail` call there is no later: see the clause's own.)
+        let now := tailsStmts (← get) rest
+        let hooks ← hooks.mapM fun h => hookS h now
+        pure ((← pushStmt (.let_ pat value)) :: hooks ++ rest)
+      | _ =>
+        -- What the pattern takes under a name nothing uses, or under `_`
+        -- (given a name for it), is destroyed likewise.
+        let site := fun (x : String) => (⟨owner, pos.1, pos.2, Syntax.letSite x, false⟩ : DropSite)
+        let (pats, _) := nameWilds (fun k => (dropHook tr (site (letWildName pos.1 pos.2 k))).isSome) [pat] 0
+        let pat := letWilds pos ((pats.head?).getD pat)
+        let hooks := (patVars pat).flatMap fun x => (dropHook tr (site x)).toList ++ partHooks tr owner pos x
+        let now := tailsStmts (← get) rest
+        let hooks ← hooks.mapM fun h => hookS h now
+        pure ((← pushStmt (.let_ pat value)) :: hooks ++ rest)
+    | .assign target value =>
+      let value ← untraitExpr tr owner value
+      let target ← untraitExpr tr owner target
+      let rest ← untraitStmts tr owner pos rest
+      let b ← get
+      match b.expr target with
+      | .name none x =>
+        match dropHook tr ⟨owner, pos.1, pos.2, x, true⟩ with
+        | some hook =>
+          pure ((← pushStmt (.let_ (.var "%assigned") value)) :: (← hookS hook true)
+            :: (← pushStmt (.assign target (← pushExpr (.name none "%assigned")))) :: rest)
+        | none => pure ((← pushStmt (.assign target value)) :: rest)
+      | .deref place =>
+        -- What was there where the reference points is destroyed, once the new
+        -- value is made and the place found.
+        match (tr.dropsAt[(⟨owner, pos.1, pos.2, derefSite, true⟩ : DropSite)]?).bind fun id => tr.dictsAt[id]? with
+        | some [d] =>
+          let first ← pushStmt (.let_ (.var "%assigned") value)
+          let second ← pushStmt (.let_ (.var "%place") place)
+          let destroy ← hookS (destroyCall tr d (.deref (.name none "%place"))) true
+          let placeRef ← pushExpr (.deref (← pushExpr (.name none "%place")))
+          let last ← pushStmt (.assign placeRef (← pushExpr (.name none "%assigned")))
+          pure (first :: second :: destroy :: last :: rest)
+        | _ => pure ((← pushStmt (.assign target value)) :: rest)
+      | _ => pure ((← pushStmt (.assign target value)) :: rest)
+    | .expr e =>
+      let e ← untraitExpr tr owner e
+      let rest ← untraitStmts tr owner pos rest
+      -- A value nothing takes, of a type to destroy, is destroyed there.
+      match (if rest.isEmpty then none else dropHook tr ⟨owner, pos.1, pos.2, stmtValue, false⟩) with
+      | some hook => pure ((← pushStmt (.let_ (.var stmtValue) e)) :: (← hookS hook true) :: rest)
+      | none => pure ((← pushStmt (.expr e)) :: rest)
+    | .defer e =>
+      let e ← untraitExpr tr owner e
+      pure ((← pushStmt (.defer e)) :: (← untraitStmts tr owner pos rest))
 
 end
 
-/-- The clauses of a function that is given `n` bounds: each takes them first. -/
-private def withDicts (n : Nat) (clauses : List Clause) : List Clause :=
-  clauses.map fun
-    | .mk pats body => .mk ((List.range n).map (fun k => Pattern.var s!"%dict{k}") ++ pats) body
+/-- A body that is given `n` bounds: each clause takes them first. -/
+private def withDicts (n : Nat) (b : Flat.Body) : Flat.Body := Id.run do
+  if n == 0 then return b
+  let (roots, b) := (b.roots.mapM fun c => (do
+    let ⟨pats, body⟩ := (← get).clause c
+    Flat.pushClause ⟨(List.range n).map (fun k => Pattern.var s!"%dict{k}") ++ pats, body⟩ : Flat.Build Flat.ClauseId)).run b
+  pure { b with roots }
 
 /-- A program without its traits, and what the checker said of it with the
 places of arguments moved to where they now are. -/
-def untrait (blocks : Blocks) (items : List Item) : List Item × Blocks :=
+def untrait (blocks : Blocks) (items : List Flat.FItem) : List Flat.FItem × Blocks :=
   let tr := blocks.traits
   let fnItem := fun (name : String) (params : List String) (annots : List (Option TypeExpr))
-      (ret : Option TypeExpr) (clauses : List Clause) =>
+      (ret : Option TypeExpr) (b : Flat.Body) =>
     let n := (tr.boundedAt[name]?).getD 0
-    Item.fn name params ((List.replicate n none) ++ annots) ret
-      (withDicts n (clauses.map (untraitClause tr name)))
+    let (roots, b) := (b.roots.mapM (untraitClause tr name)).run b
+    Flat.FItem.fn name params ((List.replicate n none) ++ annots) ret (withDicts n { b with roots })
   let out := items.flatMap fun
-    | .trait _ _ => []
+    | .other (.trait _ _) => []
     | .impl params trait head _ context methods =>
       let own := methods.filterMap fun
-        | .fn m _ annots ret clauses =>
-          some (fnItem (implFnName trait head m) params annots ret clauses)
+        | .fn m _ annots ret b =>
+          some (fnItem (implFnName trait head m) params annots ret b)
         | _ => none
       let dictFn := implDictName trait head
       -- (as many as the checker says: how each type parameter is destroyed
@@ -1554,11 +1602,11 @@ def untrait (blocks : Blocks) (items : List Item) : List Item × Blocks :=
         let argNames := (List.range arity).map fun k => s!"%arg{k}"
         Expr.closure 0 [.mk (argNames.map Pattern.var)
           [.expr (.call 0 (.name none fn) ((dicts ++ argNames).map (Expr.name none)))]]
-      own ++ [Item.fn dictFn [] [] none [.mk (dicts.map Pattern.var) [.expr (.tuple closures)]]]
-    | .fn name params annots ret clauses => [fnItem name params annots ret clauses]
+      own ++ [Flat.ofItem (Item.fn dictFn [] [] none [.mk (dicts.map Pattern.var) [.expr (.tuple closures)]])]
+    | .fn name params annots ret b => [fnItem name params annots ret b]
     | item => [item]
-  let out := out ++ destroyers tr
-    ++ [Item.fn Syntax.markerDict [] [] none [.mk [] [.expr (.tuple [])]]]
+  let out := out ++ (destroyers tr).map Flat.ofItem
+    ++ [Flat.ofItem (Item.fn Syntax.markerDict [] [] none [.mk [] [.expr (.tuple [])]])]
   let coercions := blocks.coercions.fold (init := {}) fun (m : Std.HashMap Site String) site fn =>
     let site := match site with
       | .arg call index =>
@@ -1597,21 +1645,21 @@ private partial def eraseLifetimesTy : TypeExpr → TypeExpr
   | .ref uniq t _ => .ref uniq (eraseLifetimesTy t) none
   | t => t
 
-partial def eraseLifetimes (items : List Item) : List Item :=
+partial def eraseLifetimes (items : List Flat.FItem) : List Flat.FItem :=
   let params := fun (ps : List String) => ps.filter fun p => !p.startsWith "'"
   items.map fun
-    | .enum name ps ctors =>
-      .enum name (params ps) (ctors.map fun (c, fields) => (c, fields.map eraseLifetimesTy))
-    | .struct name ps fields => .struct name (params ps) (fields.map eraseLifetimesTy)
-    | .effect name ps ops =>
-      .effect name (params ps) (ops.map fun op =>
+    | .other (.enum name ps ctors) =>
+      .other (.enum name (params ps) (ctors.map fun (c, fields) => (c, fields.map eraseLifetimesTy)))
+    | .other (.struct name ps fields) => .other (.struct name (params ps) (fields.map eraseLifetimesTy))
+    | .other (.effect name ps ops) =>
+      .other (.effect name (params ps) (ops.map fun op =>
         { op with payload := op.payload.map eraseLifetimesTy,
-                  result := op.result.map eraseLifetimesTy })
-    | .fn name ps annots ret clauses =>
-      .fn name (params ps) (annots.map (·.map eraseLifetimesTy)) (ret.map eraseLifetimesTy) clauses
-    | .trait name methods =>
-      .trait name (methods.map fun (m, ps, r) =>
-        (m, ps.map eraseLifetimesTy, r.map eraseLifetimesTy))
+                  result := op.result.map eraseLifetimesTy }))
+    | .fn name ps annots ret b =>
+      .fn name (params ps) (annots.map (·.map eraseLifetimesTy)) (ret.map eraseLifetimesTy) b
+    | .other (.trait name methods) =>
+      .other (.trait name (methods.map fun (m, ps, r) =>
+        (m, ps.map eraseLifetimesTy, r.map eraseLifetimesTy)))
     | .impl ps tr head args context methods =>
       .impl (params ps) tr head (params args) context (eraseLifetimes methods)
     | item => item
@@ -1659,82 +1707,84 @@ structure FieldInfo where
   /-- The fields read by name of what a named reference points to. -/
   derefs : Std.HashSet Nat := {}
 
-mutual
-
-/-- The callables and scopes written inside an expression, with the borrows of
-fields in them written out, each where it is written. -/
-private partial def unfieldExpr (info : FieldInfo) : Expr → Expr
-  | .call id f args => .call id (unfieldExpr info f) (args.map (unfieldExpr info))
-  | .tailCall id f args => .tailCall id (unfieldExpr info f) (args.map (unfieldExpr info))
-  | .fieldOf id e name =>
-    -- The checker said which field the name is.
-    match info.reads[id]? with
-    | some i =>
-      -- Of what a reference points to, if the checker found it so.
-      if info.derefs.contains id then .proj (.deref (unfieldExpr info e)) i
-      else .proj (unfieldExpr info e) i
-    | none => .fieldOf id (unfieldExpr info e) name
-  | .deref e => .deref (unfieldExpr info e)
-  | .reborrow u e => .reborrow u (unfieldExpr info e)
-  | .closure id clauses =>
-    -- A block given what an `is` found takes it apart under its names.
-    match info.packs[id]?, clauses with
-    | some names, [.mk [] body] =>
-      -- A block that is run where it is written.
-      if names == [Syntax.nowMark] then .call 0 (.closure id [.mk [] (unfieldStmts info body)]) []
-      else .closure id [.mk [.tuple (names.map Pattern.var)] (unfieldStmts info body)]
-    | some names, _ =>
-      -- Clauses of one tuple given several arguments: the tuple's parts are
-      -- the parameters.
-      if names == [Syntax.spreadMark] then
-        .closure id (clauses.map fun
-          | .mk [.tuple parts] body => unfieldClause info (.mk parts body)
-          | c => unfieldClause info c)
-      -- A block that is run where it is written.
-      else if names == [Syntax.nowMark] then .call 0 (.closure id (clauses.map (unfieldClause info))) []
-      else .closure id (clauses.map (unfieldClause info))
-    | _, _ => .closure id (clauses.map (unfieldClause info))
-  | .refField id uniq x way star =>
-    match info.shapes[id]? with
-    | none => .refField id uniq x way star
-    | some (viaRef, path, shape) =>
-      -- A step into one of a type's several constructors is followed by
-      -- the constructor's name.
-      let stepOf := fun (n : Nat) (c : Option String) =>
-        match c with
-        | some c =>
-          if c.startsWith "#" then [Expr.int (Int.ofNat n), .name none (c.drop 1).toString]
-          else [Expr.int (Int.ofNat n)]
-        | none => [Expr.int (Int.ofNat n)]
-      -- Of what a reference points to, that reference; of a variable, a
-      -- borrow of the variable.
-      let base := if viaRef then Expr.name none x else .ref uniq x
-      -- (A step marked `*` is past a reference the field before holds: what
-      -- is focused so far is read for that reference, and focused from.)
-      let (base, steps) := (path.zip (shape ++ path.map fun _ => (none, 0))).foldl
-        (fun (acc : Expr × List Expr) (n, c, _) =>
+/-- The borrows of fields written out, and every field read by name: see
+above. What the checker found says how. -/
+def unfieldRewrite (info : FieldInfo) : Flat.FRewrite where
+  onExpr go b e :=
+    match b.expr e with
+    | .fieldOf id x _ =>
+      -- The checker said which field the name is.
+      match info.reads[id]? with
+      | some i => some (do
+        let x' ← go.ex x
+        -- Of what a reference points to, if the checker found it so.
+        if info.derefs.contains id then Flat.pushExpr (.proj (← Flat.pushExpr (.deref x')) i)
+        else Flat.pushExpr (.proj x' i))
+      | none => none
+    | .closure id clauses =>
+      -- A block given what an `is` found takes it apart under its names.
+      match info.packs[id]? with
+      | none => none
+      | some names => some (do
+        let cs := clauses.toList.map b.clause
+        match cs with
+        | [⟨[], body⟩] =>
+          let body' ← body.mapM go.st
+          -- A block that is run where it is written.
+          if names == [Syntax.nowMark] then
+            let c ← Flat.pushClause ⟨[], body'⟩
+            let cl ← Flat.pushExpr (.closure id #[c])
+            Flat.pushExpr (.call 0 cl #[])
+          else
+            let c ← Flat.pushClause ⟨[.tuple (names.map Pattern.var)], body'⟩
+            Flat.pushExpr (.closure id #[c])
+        | _ =>
+          -- Clauses of one tuple given several arguments: the tuple's parts are
+          -- the parameters.
+          if names == [Syntax.spreadMark] then
+            let cs' ← clauses.mapM fun c => do
+              match b.clause c with
+              | ⟨[.tuple parts], body⟩ => Flat.pushClause ⟨parts, ← body.mapM go.st⟩
+              | _ => go.clause c
+            Flat.pushExpr (.closure id cs')
+          -- A block that is run where it is written.
+          else if names == [Syntax.nowMark] then
+            let cl ← Flat.pushExpr (.closure id (← clauses.mapM go.clause))
+            Flat.pushExpr (.call 0 cl #[])
+          else Flat.pushExpr (.closure id (← clauses.mapM go.clause)))
+    | .refField id uniq x _ _ =>
+      match info.shapes[id]? with
+      | none => none
+      | some (viaRef, path, shape) =>
+        -- A step into one of a type's several constructors is followed by
+        -- the constructor's name.
+        let stepOf := fun (n : Nat) (c : Option String) =>
           match c with
           | some c =>
-            if c.startsWith "*" then
-              let rest := (c.drop 1).toString
-              (.deref (.call 0 (.name none Syntax.focusMark) (acc.1 :: acc.2)),
-                stepOf n (if rest.isEmpty then none else some rest))
-            else (acc.1, acc.2 ++ stepOf n (some c))
-          | none => (acc.1, acc.2 ++ stepOf n none)) (base, [])
-      .call 0 (.name none Syntax.focusMark) (base :: steps)
-  | e => Id.run (e.traverse (pure <| unfieldExpr info ·) fun _ b => pure (unfieldStmts info b))
-
-private partial def unfieldClause (info : FieldInfo) : Clause → Clause
-  | .mk pats body => .mk pats (unfieldStmts info body)
-
-private partial def unfieldStmts (info : FieldInfo) (stmts : List Stmt) : List Stmt :=
-  stmts.map fun s => Id.run (s.traverse (pure <| unfieldExpr info ·))
-
-end
+            if c.startsWith "#" then [Expr.int (Int.ofNat n), .name none (c.drop 1).toString]
+            else [Expr.int (Int.ofNat n)]
+          | none => [Expr.int (Int.ofNat n)]
+        -- Of what a reference points to, that reference; of a variable, a
+        -- borrow of the variable.
+        let base := if viaRef then Expr.name none x else .ref uniq x
+        -- (A step marked `*` is past a reference the field before holds: what
+        -- is focused so far is read for that reference, and focused from.)
+        let (base, steps) := (path.zip (shape ++ path.map fun _ => (none, 0))).foldl
+          (fun (acc : Expr × List Expr) (n, c, _) =>
+            match c with
+            | some c =>
+              if c.startsWith "*" then
+                let rest := (c.drop 1).toString
+                (.deref (.call 0 (.name none Syntax.focusMark) (acc.1 :: acc.2)),
+                  stepOf n (if rest.isEmpty then none else some rest))
+              else (acc.1, acc.2 ++ stepOf n (some c))
+            | none => (acc.1, acc.2 ++ stepOf n none)) (base, [])
+        some (Flat.flatExpr (.call 0 (.name none Syntax.focusMark) (base :: steps)))
+    | _ => none
 
 /-- Write out every borrow of a field, and every field read by name: see
 above. What the checker found says how. -/
-def unfield (b : Blocks) (items : List Item) : Except String (List Item) := do
+def unfield (b : Blocks) (items : List Flat.FItem) : Except String (List Flat.FItem) := do
   if b.fields.isEmpty && b.fieldReads.isEmpty && b.packs.isEmpty then
     return items
   let info : FieldInfo :=
@@ -1743,15 +1793,15 @@ def unfield (b : Blocks) (items : List Item) : Except String (List Item) := do
       packs := b.packs
       derefs := b.derefReads }
   -- (Only the functions with something in them the checker found of.)
-  let found := fun (e : Expr) => match e with
+  let found := fun (n : Flat.FExpr) => match n with
     | .fieldOf id _ _ => info.reads.contains id
     | .refField id _ _ _ _ => info.shapes.contains id
     | .closure id _ => info.packs.contains id
     | _ => false
   pure (items.map fun
-    | .fn name params annots ret clauses =>
-      if clauses.any (·.anyExpr found) then .fn name params annots ret (clauses.map (unfieldClause info))
-      else .fn name params annots ret clauses
+    | .fn name params annots ret body =>
+      if body.roots.any (body.anyClause found) then .fn name params annots ret ((unfieldRewrite info).body body)
+      else .fn name params annots ret body
     | item => item)
 
 /-- Collect the global declarations. -/

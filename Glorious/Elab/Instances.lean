@@ -77,31 +77,44 @@ def Copy.callee (c : Copy) (id : Nat) (x : String) : String :=
 
 /-- A function's body for one copy: each call with the instance's callee,
 each handler's arms of an effect it handles an instance of named so. -/
-def copyRewrite (c : Copy) : Rewrite where
-  onExpr go
-    | .call id (.name q x) args => some (.call id (.name q (c.callee id x)) (args.map go.ex))
-    | .tailCall id (.name q x) args => some (.tailCall id (.name q (c.callee id x)) (args.map go.ex))
+def copyRewrite (c : Copy) : Flat.FRewrite where
+  onExpr go b e :=
+    let named := fun (id : Nat) (f : Flat.ExprId) (args : Array Flat.ExprId) (tail : Bool) =>
+      match b.expr f with
+      | .name q x => some (do
+        let f' ← Flat.pushExpr (.name q (c.callee id x))
+        let args' ← args.mapM go.ex
+        Flat.pushExpr (if tail then .tailCall id f' args' else .call id f' args'))
+      | _ => none
+    match b.expr e with
+    | .call id f args => named id f args false
+    | .tailCall id f args => named id f args true
     | .handle subject arms =>
-      let id := match subject with
+      let id := match b.expr subject with
         | .call id _ _ => id
         | _ => 0
       -- The effects this handler handles an instance of, with which.
       let handled := c.table.filterMap fun (i, kind, e, off, len) =>
         if i == id && id != 0 && kind == "handle" && c.several.contains e then some (e, c.key off len) else none
-      some (.handle (go.ex subject) (arms.map fun
-        | .mk [.ctor x q ps] body =>
-          match (c.opOf.lookup x).bind fun e => handled.lookup e with
-          | some key => Clause.mk [.ctor (instName x key) q ps] (go.stmts body)
-          | none => .mk [.ctor x q ps] (go.stmts body)
-        | arm => go.clause arm))
+      some (do
+        let subject' ← go.ex subject
+        let arms' ← arms.mapM fun arm => do
+          let ⟨pats, body⟩ := (← get).clause arm
+          match pats with
+          | [.ctor x q ps] =>
+            let pats' := match (c.opOf.lookup x).bind fun e => handled.lookup e with
+              | some key => [Pattern.ctor (instName x key) q ps]
+              | none => pats
+            let body' ← body.mapM go.st
+            Flat.pushClause ⟨pats', body'⟩
+          | _ => go.clause arm
+        Flat.pushExpr (.handle subject' arms'))
     | _ => none
-
-def copyClause (c : Copy) : Clause → Clause := (copyRewrite c).clause
 
 /-- Each instance of an effect a program uses made an effect of its own, and
 each function that is about an instance of its caller's choosing written out
 for each choice. `written` has the effects with the types they declare. -/
-partial def instances (b : Blocks) (written items : List Item) : Except String (List Item) := do
+partial def instances (b : Blocks) (written : List Item) (items : List Flat.FItem) : Except String (List Flat.FItem) := do
   let rec bare : Item → Item
     | .pub _ i => bare i
     | i => i
@@ -144,15 +157,18 @@ partial def instances (b : Blocks) (written items : List Item) : Except String (
     | .effect name ps ops => some (name, ps, ops)
     | _ => none
   let opOf := effects.flatMap fun (name, _, ops) => ops.map fun o => (o.name, name)
-  let copyOf := fun (f name : String) (types : List TypeExpr) (item : Item) =>
+  let copyOf := fun (f name : String) (types : List TypeExpr) (item : Flat.FItem) =>
     let c : Copy := ⟨tableOf f, types, several, copied, opOf, (f, name)⟩
     match item with
-    | .fn _ ps annots ret clauses => Item.fn name ps annots ret (clauses.map (copyClause c))
+    | .fn _ ps annots ret body => Flat.FItem.fn name ps annots ret ((copyRewrite c).body body)
     | other => other
-  let mut out : Array Item := #[]
+  let rec bareF : Flat.FItem → Flat.FItem
+    | .pub _ i => bareF i
+    | i => i
+  let mut out : Array Flat.FItem := #[]
   for item in items do
-    match bare item with
-    | .effect name ps ops =>
+    match bareF item with
+    | .other (.effect name ps ops) =>
       if several.contains name then
         -- One effect for each instance, with the family's types written in.
         let typed := (effects.find? (·.1 == name)).map fun (_, ps, ops) => (ps, ops)
@@ -160,11 +176,11 @@ partial def instances (b : Blocks) (written items : List Item) : Except String (
         let places := ps.filter (!·.startsWith "'")
         for (key, types) in (found.lookup name).getD [] do
           let σ := places.zip types
-          out := out.push (.effect (instName name key) (ps.filter (·.startsWith "'")) (ops.map fun o =>
+          out := out.push (.other (.effect (instName name key) (ps.filter (·.startsWith "'")) (ops.map fun o =>
             { o with name := instName o.name key, payload := o.payload.map (substType σ)
-                     result := o.result.map (substType σ) }))
+                     result := o.result.map (substType σ) })))
       else out := out.push item
-    | .fn name ps annots ret clauses =>
+    | .fn name ps annots ret body =>
       let mine := all.filter (·.1 == name)
       if mine.isEmpty then
         -- No place of its own: as it is, unless it is one that is copied
@@ -172,7 +188,7 @@ partial def instances (b : Blocks) (written items : List Item) : Except String (
         unless copied.contains name do out := out.push item
       else
         for (f, copy, types) in mine do
-          out := out.push (copyOf f copy types (.fn name ps annots ret clauses))
+          out := out.push (copyOf f copy types (.fn name ps annots ret body))
     | _ => out := out.push item
   pure out.toList
 

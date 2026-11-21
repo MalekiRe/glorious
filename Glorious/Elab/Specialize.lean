@@ -64,18 +64,32 @@ def internId (f : String) (ids : List Nat) : StateM Copies Nat := do
     modify fun c => { c with pool := c.pool.insert (f, ids) n, byId := c.byId.push (f, ids) }
     pure n
 
+/-- A body being written out for implementations, with the copies asked. -/
+abbrev SpecM := StateT Flat.Body (StateM Copies)
+
+def specPush (n : Flat.FExpr) : SpecM Flat.ExprId := modifyGet fun b => (b.exprs.size, { b with exprs := b.exprs.push n })
+def specPushS (n : Flat.FStmt) : SpecM Flat.StmtId := modifyGet fun b => (b.stmts.size, { b with stmts := b.stmts.push n })
+def specPushC (n : Flat.FClause) : SpecM Flat.ClauseId := modifyGet fun b => (b.clauses.size, { b with clauses := b.clauses.push n })
+
+/-- The number a `dictRef` stands for. -/
+def dictRefOfName? (x : String) : Option Nat :=
+  if x.startsWith "%known#" then (x.drop 7).toString.toNat? else none
+
 /-- The number of an implementation with nothing left to be known; none for
 anything else. -/
-partial def dictId (impls : Std.HashMap String ImplE) (e : Expr) : StateM Copies (Option Nat) := do
-  if let some n := dictRefOf? e then return some n
-  match e with
-  | .call _ (.name none f) subs =>
+partial def dictId (impls : Std.HashMap String ImplE) (e : Flat.ExprId) : SpecM (Option Nat) := do
+  let b ← get
+  if let some x := b.bare? e then
+    if let some n := dictRefOfName? x then return some n
+  match b.expr e with
+  | .call _ fe subs =>
+    let some f := b.bare? fe | return none
     unless impls.contains f do return none
     let mut ids := #[]
     for sub in subs do
       let some n ← dictId impls sub | return none
       ids := ids.push n
-    some <$> internId f ids.toList
+    some <$> (internId f ids.toList : StateM Copies Nat)
   | _ => pure none
 
 /-- The implementation a number is, written out. -/
@@ -94,134 +108,185 @@ def askCopy (fn : String) (ids : List Nat) (drop : Bool) : StateM Copies String 
 mutual
 
 /-- An expression of a function written out for the implementations `known`
-(by the names its parameters for them had). -/
-partial def specExpr (tr : TraitInfo) (known : List (String × Expr)) : Expr → StateM Copies Expr
-  | .name none x => pure ((known.lookup x).getD (.name none x))
+(by the names its parameters for them had, each the name it stands as). -/
+partial def specExpr (tr : TraitInfo) (known : List (String × String)) (e : Flat.ExprId) : SpecM Flat.ExprId := do
+  let b ← get
+  match b.expr e with
+  | .name none x =>
+    match known.lookup x with
+    | some y => specPush (.name none y)
+    | none => pure e
   | .call id f args => do
-    let (f, args) ← specCall tr known f args
-    pure (.call id f args)
+    let (f', args') ← specCall tr known f args
+    if f' == f && args' == args then pure e else specPush (.call id f' args')
   | .tailCall id f args => do
-    let (f, args) ← specCall tr known f args
-    pure (.tailCall id f args)
-  | e => e.traverse (specExpr tr known) fun _ b => specStmts tr known b
+    let (f', args') ← specCall tr known f args
+    if f' == f && args' == args then pure e else specPush (.tailCall id f' args')
+  | .tuple args => do
+    let args' ← args.mapM (specExpr tr known)
+    if args' == args then pure e else specPush (.tuple args')
+  | .proj x i => do
+    let x' ← specExpr tr known x
+    if x' == x then pure e else specPush (.proj x' i)
+  | .closure id cs => do
+    let cs' ← cs.mapM (specClause tr known)
+    if cs' == cs then pure e else specPush (.closure id cs')
+  | .handle s cs => do
+    let s' ← specExpr tr known s
+    let cs' ← cs.mapM (specClause tr known)
+    if s' == s && cs' == cs then pure e else specPush (.handle s' cs')
+  | .labelScope l body => do
+    let body' ← body.mapM (specStmt tr known)
+    if body' == body then pure e else specPush (.labelScope l body')
+  | .deref x => do
+    let x' ← specExpr tr known x
+    if x' == x then pure e else specPush (.deref x')
+  | .reborrow u x => do
+    let x' ← specExpr tr known x
+    if x' == x then pure e else specPush (.reborrow u x')
+  | .fieldOf id x n => do
+    let x' ← specExpr tr known x
+    if x' == x then pure e else specPush (.fieldOf id x' n)
+  | _ => pure e
 
-/-- What is called and what it is known, at a call. -/
-partial def specCall (tr : TraitInfo) (known : List (String × Expr)) (f : Expr) (args : List Expr) :
-    StateM Copies (Expr × List Expr) := do
+/-- What is called and what it is given, at a call. -/
+partial def specCall (tr : TraitInfo) (known : List (String × String)) (f : Flat.ExprId) (args : Array Flat.ExprId) :
+    SpecM (Flat.ExprId × Array Flat.ExprId) := do
   let args ← args.mapM (specExpr tr known)
-  match f with
+  match (← get).expr f with
   | .proj d idx =>
     -- A trait's function taken out of an implementation that is known: the
     -- implementation's function, for what its own conditions are met by.
     let d ← specExpr tr known d
+    let kept := fun (_ : Unit) => (do
+      if d == (match (← get).expr f with | .proj d0 _ => d0 | _ => d) then pure (f, args)
+      else pure (← specPush (.proj d idx), args) : SpecM (Flat.ExprId × Array Flat.ExprId))
     match ← dictId tr.implsAt d with
     | some n =>
-      match (← get).byId[n]? with
+      match (← getThe Copies).byId[n]? with
       | some (dictFn, subs) =>
         match (tr.implsAt[dictFn]?).bind (·.methods[idx]?) with
         | some (fn, _) =>
-          if subs.isEmpty then pure (.name none fn, args)
-          else pure (.name none (← askCopy fn subs true), args)
-        | none => pure (.proj d idx, args)
-      | none => pure (.proj d idx, args)
-    | none => pure (.proj d idx, args)
+          if subs.isEmpty then pure (← specPush (.name none fn), args)
+          else pure (← specPush (.name none (← (askCopy fn subs true : StateM Copies String))), args)
+        | none => kept ()
+      | none => kept ()
+    | none => kept ()
   | .name none g =>
     let n := (tr.boundedAt[g]?).getD 0
-    if n > 0 && args.length ≥ n then
+    if n > 0 && args.size ≥ n then
       let mut ids : Array Nat := #[]
-      for a in args.take n do
+      for a in args.extract 0 n do
         if let some i ← dictId tr.implsAt a then ids := ids.push i
       if ids.size == n then
-        let copy ← askCopy g ids.toList false
-        return (.name none copy, List.replicate n (.tuple []) ++ args.drop n)
-    pure (.name none g, args)
-  | f => do pure (← specExpr tr known f, args)
+        let copy ← (askCopy g ids.toList false : StateM Copies String)
+        let unit ← (List.range n).mapM fun _ => specPush (.tuple #[])
+        return (← specPush (.name none copy), unit.toArray ++ args.extract n args.size)
+    pure (f, args)
+  | _ => do pure (← specExpr tr known f, args)
 
-partial def specClause (tr : TraitInfo) (known : List (String × Expr)) : Clause → StateM Copies Clause
-  | .mk pats body => .mk pats <$> specStmts tr known body
+partial def specClause (tr : TraitInfo) (known : List (String × String)) (c : Flat.ClauseId) : SpecM Flat.ClauseId := do
+  let ⟨pats, body⟩ := (← get).clause c
+  let body' ← body.mapM (specStmt tr known)
+  if body' == body then pure c else specPushC ⟨pats, body'⟩
 
-partial def specStmts (tr : TraitInfo) (known : List (String × Expr)) (stmts : List Stmt) :
-    StateM Copies (List Stmt) :=
-  stmts.mapM (specStmt tr known)
-
-partial def specStmt (tr : TraitInfo) (known : List (String × Expr)) (s : Stmt) : StateM Copies Stmt :=
-  s.traverse (specExpr tr known)
+partial def specStmt (tr : TraitInfo) (known : List (String × String)) (s : Flat.StmtId) : SpecM Flat.StmtId := do
+  match (← get).stmt s with
+  | .let_ p v => do
+    let v' ← specExpr tr known v
+    if v' == v then pure s else specPushS (.let_ p v')
+  | .expr v => do
+    let v' ← specExpr tr known v
+    if v' == v then pure s else specPushS (.expr v')
+  | .defer v => do
+    let v' ← specExpr tr known v
+    if v' == v then pure s else specPushS (.defer v')
+  | .letMut x v => do
+    let v' ← specExpr tr known v
+    if v' == v then pure s else specPushS (.letMut x v')
+  | .assign t v => do
+    let t' ← specExpr tr known t
+    let v' ← specExpr tr known v
+    if t' == t && v' == v then pure s else specPushS (.assign t' v')
+  | .located l c inner => do
+    let inner' ← specStmt tr known inner
+    if inner' == inner then pure s else specPushS (.located l c inner')
 
 end
 
 /-- A function given no implementation, with the calls in it sent to copies. -/
-def specRoot (tr : TraitInfo) (item : Item) : StateM Copies Item :=
+def specRoot (tr : TraitInfo) (item : Flat.FItem) : StateM Copies Flat.FItem :=
   match item with
-  | .fn name ps annots ret clauses =>
+  | .fn name ps annots ret b =>
     if (tr.boundedAt[name]?).getD 0 == 0 then do
-      let clauses ← clauses.mapM (specClause tr [])
-      pure (Item.fn name ps annots ret clauses)
+      let (roots, b) ← (b.roots.mapM (specClause tr [])).run b
+      pure (.fn name ps annots ret { b with roots })
     else pure item
   | other => pure other
 
 /-- Does an expression name the label `l`? -/
-partial def namesLabel (l : String) : Expr → Bool
+partial def namesLabel (b : Flat.Body) (l : String) (e : Flat.ExprId) : Bool :=
+  match b.expr e with
   | .label x => x == l
-  | .labelScope x body => x != l && body.any (·.exprs.any (namesLabel l))
-  | e => e.children.any (namesLabel l)
+  | .labelScope x body => x != l && body.any fun s => (b.stmtExprs s).any (namesLabel b l)
+  | _ => (b.children e).any (namesLabel b l)
 
-def stmtNamesLabel (l : String) (s : Stmt) : Bool := s.exprs.any (namesLabel l)
+def stmtNamesLabel (b : Flat.Body) (l : String) (s : Flat.StmtId) : Bool := (b.stmtExprs s).any (namesLabel b l)
 
-/-- Each `dictRef` left in an expression, written out as the implementation. -/
-partial def unrefExpr (byId : Array (String × List Nat)) (e : Expr) : Expr :=
-  match dictRefOf? e with
-  | some n => dictExprOf byId n
-  | none => Id.run (e.traverse (fun x => pure (unrefExpr byId x)) fun _ b => pure (b.map (unref byId)))
-where
-  unref (byId : Array (String × List Nat)) (s : Stmt) : Stmt := Id.run (s.traverse fun x => pure (unrefExpr byId x))
-
-def unref (byId : Array (String × List Nat)) (s : Stmt) : Stmt := unrefExpr.unref byId s
+/-- Each `dictRef` left in a body, written out as the implementation. -/
+def unrefBody (byId : Array (String × List Nat)) (b : Flat.Body) : Flat.Body :=
+  let r : Flat.FRewrite := { onExpr := fun _ b e =>
+    (b.bare? e >>= dictRefOfName?).map fun n => Flat.flatExpr (dictExprOf byId n) }
+  r.body b
 
 /-- A clause of a copy: the parameters for implementations dropped, or each
 taking `()`, and the body written out for the implementations. -/
-def specCopyClause (tr : TraitInfo) (known : List (String × Expr)) (n : Nat) (drop : Bool)
-    (fn : String) (clause : Clause) : StateM Copies Clause :=
-  match clause with
-  | .mk pats body => do
-    let pats := if drop then pats.drop n else List.replicate n Pattern.wild ++ pats.drop n
-    let body ← specStmts tr known body
-    -- (A function's name is the label its body leaves by, `@find(..)`: the
-    -- copy has another name, so its body is given that label.)
-    let body := if body.any (stmtNamesLabel fn) then [Stmt.expr (.labelScope fn body)] else body
-    pure (Clause.mk pats body)
+def specCopyClause (tr : TraitInfo) (known : List (String × String)) (n : Nat) (drop : Bool)
+    (fn : String) (clause : Flat.ClauseId) : SpecM Flat.ClauseId := do
+  let ⟨pats, body⟩ := (← get).clause clause
+  let pats := if drop then pats.drop n else List.replicate n Pattern.wild ++ pats.drop n
+  let body ← body.mapM (specStmt tr known)
+  -- (A function's name is the label its body leaves by, `@find(..)`: the
+  -- copy has another name, so its body is given that label.)
+  let b ← get
+  let body ← if body.any (stmtNamesLabel b fn) then do
+      let scope ← specPush (.labelScope fn body)
+      pure #[← specPushS (.expr scope)]
+    else pure body
+  specPushC ⟨pats, body⟩
 
 /-- A program with a copy of each function for each known implementation it
 is called with, and the names of the copies with the functions they are of.
 `fuel` bounds how many are made: a program that would need more (a function
 that calls itself with an implementation made from the one it was given) is
 left as it was. -/
-partial def specialize (tr : TraitInfo) (items : List Item) (fuel : Nat := 50000) :
-    List Item × List (String × String) :=
-  let fns : Std.HashMap String Item := items.foldl (init := {}) fun m (item : Item) =>
+partial def specialize (tr : TraitInfo) (items : List Flat.FItem) (fuel : Nat := 50000) :
+    List Flat.FItem × List (String × String) :=
+  let fns : Std.HashMap String Flat.FItem := items.foldl (init := {}) fun m (item : Flat.FItem) =>
     match item with
     | .fn name _ _ _ _ => if m.contains name then m else m.insert name item
     | _ => m
   -- (Numbered as the elaborator numbered them, which the bodies say.)
   let (roots, asked) := (items.mapM (specRoot tr)).run { pool := tr.knownIds, byId := tr.knownPool }
   let byId := tr.knownPool
-  let rec make (fuel done : Nat) (copies : Copies) (out : Array Item) : Option (Array Item × Copies) :=
+  let rec make (fuel done : Nat) (copies : Copies) (out : Array Flat.FItem) : Option (Array Flat.FItem × Copies) :=
     match fuel, copies.list[done]? with
     | _, none => some (out, copies)
     | 0, some _ => none
     | fuel + 1, some (name, fn, dicts, drop) =>
       match fns[fn]? with
-      | some (.fn _ ps annots ret clauses) =>
+      | some (.fn _ ps annots ret b) =>
         let n := dicts.length
-        let known : List (String × Expr) :=
-          (List.range n).map fun k => (s!"%dict{k}", dictRef (dicts[k]?.getD 0))
-        let (clauses, copies) := (clauses.mapM (specCopyClause tr known n drop fn)).run copies
+        let known : List (String × String) :=
+          (List.range n).map fun k => (s!"%dict{k}", s!"%known#{dicts[k]?.getD 0}")
+        let ((roots, b), copies) := ((b.roots.mapM (specCopyClause tr known n drop fn)).run b).run copies
         let annots := if drop then annots.drop n else annots
-        make fuel (done + 1) copies (out.push (Item.fn name ps annots ret clauses))
+        make fuel (done + 1) copies (out.push (.fn name ps annots ret { b with roots }))
       | _ => make fuel (done + 1) copies out
   -- (What is left of the implementations, as values: written out.)
-  let written := fun (byId : Array (String × List Nat)) (items : List Item) => items.map fun (item : Item) =>
+  let written := fun (byId : Array (String × List Nat)) (items : List Flat.FItem) => items.map fun (item : Flat.FItem) =>
     match item with
-    | .fn name ps annots ret clauses => Item.fn name ps annots ret (clauses.map fun (.mk pats body) => Clause.mk pats (body.map (unref byId)))
+    | .fn name ps annots ret b => Flat.FItem.fn name ps annots ret (unrefBody byId b)
     | other => other
   match make fuel 0 asked #[] with
   | some (made, copies) =>
@@ -240,81 +305,109 @@ arithmetic of numbers and of such calls has its number worked out here, and
 every call of it is that number. A result that does not fit in 64 bits is
 left to go wrong when the program runs, as it would have. -/
 
-/-- A function's one clause, if its body is one expression. -/
-def oneExpr : List Clause → Option (List Pattern × Expr)
-  | [.mk pats [.expr body]] => some (pats, body)
-  | [.mk pats [.located _ _ (.expr body)]] => some (pats, body)
+/-- A function's one clause, if its body is one expression: its patterns and
+the expression. -/
+def oneExpr (b : Flat.Body) : Option (List Pattern × Flat.ExprId) :=
+  match b.roots with
+  | #[c] =>
+    let ⟨pats, body⟩ := b.clause c
+    match body with
+    | #[s] =>
+      match b.stmt s with
+      | .expr e => some (pats, e)
+      | .located _ _ inner =>
+        match b.stmt inner with
+        | .expr e => some (pats, e)
+        | _ => none
+      | _ => none
+    | _ => none
   | _ => none
 
 /-- The number an expression stands for, given the numbers of the names in
 `env` and the functions `fns`, if it is one: numbers, `int_add`, `int_sub`
 and `int_mul` of numbers, and calls of functions whose one clause takes plain
 names and is one expression. `fuel` bounds the calls followed. -/
-partial def foldInt (fns : Std.HashMap String (List Clause)) (env : List (String × Int)) (fuel : Nat) :
-    Expr → Option Int
+partial def foldInt (fns : Std.HashMap String Flat.Body) (env : List (String × Int)) (fuel : Nat)
+    (b : Flat.Body) (e : Flat.ExprId) : Option Int :=
+  match b.expr e with
   | .int n => some n
   | .name none x => env.lookup x
-  | .call _ (.name none f) args => do
+  | .call _ fe args => do
+    let f ← b.bare? fe
     if fuel == 0 then none
     -- (A type written for a value, or for a function's parameters, says
     -- nothing of its number.)
     if f == Syntax.ascribeMark || f == Syntax.instMark then
-      match args with
-      | a :: _ => foldInt fns env (fuel - 1) a
-      | [] => none
+      match args[0]? with
+      | some a => foldInt fns env (fuel - 1) b a
+      | none => none
     else
-      let vals ← args.mapM (foldInt fns env (fuel - 1))
+      let vals ← args.toList.mapM (foldInt fns env (fuel - 1) b)
       let fits := fun (n : Int) =>
         if -9223372036854775808 ≤ n && n ≤ 9223372036854775807 then some n else none
       match f, vals with
-      | "int_add", [a, b] => fits (a + b)
-      | "int_sub", [a, b] => fits (a - b)
-      | "int_mul", [a, b] => fits (a * b)
+      | "int_add", [x, y] => fits (x + y)
+      | "int_sub", [x, y] => fits (x - y)
+      | "int_mul", [x, y] => fits (x * y)
       | _, _ =>
-        match fns[f]?.bind oneExpr with
-        | some (pats, body) =>
-          let names ← pats.mapM fun
-            | .var x => some x
-            | _ => none
-          if names.length != vals.length then none
-          else foldInt fns (names.zip vals) (fuel - 1) body
+        match fns[f]? with
+        | some fb =>
+          match oneExpr fb with
+          | some (pats, body) =>
+            let names ← pats.mapM fun
+              | .var x => some x
+              | _ => none
+            if names.length != vals.length then none
+            else foldInt fns (names.zip vals) (fuel - 1) fb body
+          | none => none
         | none => none
   | _ => none
 
 /-- Each call of a function that takes nothing and works out to a number
 (`known`) written as that number. -/
-def foldRewrite (known : Std.HashMap String Int) : Rewrite where
-  onExpr go
-    | .call _ (.name none f) [] => known[f]?.map .int
-    | .call id (.name none mark) (.call i (.name none f) [] :: rest) =>
-      some (match known[f]? with
-        | some n => if mark == Syntax.instMark then .int n else .call id (.name none mark) (.int n :: rest)
-        | none => .call id (.name none mark) (.call i (.name none f) [] :: rest.map go.ex))
+def foldRewrite (known : Std.HashMap String Int) : Flat.FRewrite where
+  onExpr _ b e :=
+    match b.expr e with
+    | .call id fe args =>
+      match b.bare? fe, args.toList with
+      | some f, [] => known[f]?.map fun n => Flat.pushExpr (.int n)
+      | some mark, inner :: rest =>
+        match b.expr inner with
+        | .call _ g #[] =>
+          match b.bare? g >>= (known[·]?) with
+          | some n =>
+            if mark == Syntax.instMark then some (Flat.pushExpr (.int n))
+            else some (do
+              let v ← Flat.pushExpr (.int n)
+              Flat.pushExpr (.call id fe (#[v] ++ rest.toArray)))
+          | none => none
+        | _ => none
+      | _, _ => none
     | _ => none
 
 /-- A program with every call of a function that takes nothing and works out
 to a number written as that number. -/
-def foldConstants (items : List Item) : List Item :=
-  let fns : Std.HashMap String (List Clause) := items.foldl (init := {}) fun m item => match item with
-    | .fn name _ _ _ clauses => m.insertIfNew name clauses
+def foldConstants (items : List Flat.FItem) : List Flat.FItem :=
+  let fns : Std.HashMap String Flat.Body := items.foldl (init := {}) fun m item => match item with
+    | .fn name _ _ _ b => m.insertIfNew name b
     | _ => m
   let known : Std.HashMap String Int := items.foldl (init := {}) fun m item => match item with
-    | .fn name _ _ _ clauses =>
-      match oneExpr clauses with
-      | some ([], body) => match foldInt fns [] 64 body with
+    | .fn name _ _ _ b =>
+      match oneExpr b with
+      | some ([], body) => match foldInt fns [] 64 b body with
         | some n => m.insertIfNew name n
         | none => m
       | _ => m
     | _ => m
   if known.isEmpty then items else
-  -- (Only the functions that call one are written again.)
-  let calls := fun (e : Expr) => match e with
-    | .call _ (.name none f) [] => known.contains f
-    | _ => false
   items.map fun
-    | .fn name ps annots ret clauses =>
-      if clauses.any (·.anyExpr calls) then .fn name ps annots ret (clauses.map (foldRewrite known).clause)
-      else .fn name ps annots ret clauses
+    | .fn name ps annots ret b =>
+      -- (Only the functions that call one are written again.)
+      let calls := fun (n : Flat.FExpr) => match n with
+        | .call _ fe #[] => (b.bare? fe).any known.contains
+        | _ => false
+      if b.roots.any (b.anyClause calls) then .fn name ps annots ret ((foldRewrite known).body b)
+      else .fn name ps annots ret b
     | item => item
 
 /-! ## `..` in a tuple pattern
@@ -798,49 +891,80 @@ partial def Decided.stmt (d : Decided) : Stmt → Bool
 
 end
 
+/-- Does a body have something in it the checker decided of? Its nodes are
+looked at where they are kept, each kind in its array. -/
+def Decided.body (d : Decided) (b : Flat.Body) : Bool :=
+  b.exprs.any (fun
+    | .call i _ _ | .tailCall i _ _ => d.calls.contains i
+    | .closure i _ => d.closures.contains i
+    | .fieldOf i _ _ | .refField i _ _ _ _ => d.fields.contains i
+    | _ => false)
+  || (!d.rests.isEmpty && (b.clauses.any (·.pats.any d.pat)
+    || b.stmts.any fun | .let_ p _ => d.pat p | _ => false))
+
 /-- Does an item have something in it the checker decided of? -/
-partial def Decided.item (d : Decided) : Item → Bool
-  | .fn name _ _ _ clauses => d.owners.contains name || clauses.any d.clause
+partial def Decided.item (d : Decided) : Flat.FItem → Bool
+  | .fn name _ _ _ b => d.owners.contains name || d.body b
   | .impl _ tr head _ _ methods => methods.any fun
-    | .fn m _ _ _ clauses => d.owners.contains (implFnName tr head m) || clauses.any d.clause
+    | .fn m _ _ _ b => d.owners.contains (implFnName tr head m) || d.body b
     | item => d.item item
   | .traitInfo _ _ defaults _ _ => defaults.any d.item
   | .module _ (some body) => body.any d.item
   | .pub _ item => d.item item
-  | .alias _ value => d.expr value
+  | .alias _ b _ => d.body b
   | _ => false
 
+/-- The function of each dot call the checker chose by the value's type,
+with the receiver, a variable, given as that one takes it (`0` as it was, `1`
+borrowed, `2` borrowed `&mut`), and each argument it chose to give as other
+than written: written into the call where it is. -/
+def chosenRewrite (b : Blocks) : Flat.FRewrite where
+  onExpr go body e :=
+    match body.expr e with
+    | .call i f args =>
+      if !(b.dotChosen.contains i || (List.range args.size).any fun k => b.argsChosen.contains (i, k)) then none
+      else some (do
+        let args ← args.mapM go.ex
+        let (f, args) ← match (← get).expr f, b.dotChosen[i]? with
+          | .name _ _, some (fn, how) => do
+            let f ← Flat.pushExpr (.name none fn)
+            let args ← match how, args.toList with
+              | 0, _ => pure args
+              | k, a :: rest =>
+                match (← get).bare? a with
+                | some v => pure (#[← Flat.pushExpr (.ref (k == 2) v)] ++ rest.toArray)
+                | none => pure args
+              | _, _ => pure args
+            pure (f, args)
+          | _, _ => do pure (← go.ex f, args)
+        let mut out : Array Flat.ExprId := #[]
+        for (a, k) in args.toList.zipIdx do
+          match b.argsChosen[(i, k)]? with
+          | some given => out := out.push (← Flat.flatExpr given)
+          | none => out := out.push a
+        Flat.pushExpr (.call i f out))
+    | _ => none
+
 /-- A program with what the checker decided of it written in: `Decision`s
-first, then the function of each dot call it chose by the value's type,
-with the receiver, a variable, given as that one takes it (`0` as it was,
-`1` borrowed, `2` borrowed `&mut`), and each argument it chose to give as
-other than written. Only the items it decided something in are written
-again: what is decided of an item changes that item alone. -/
-def decidedProgram (b : Blocks) (items : List Item) : List Item := Id.run do
+first (through the item as a tree, `decidedItems`), then the dot calls and
+arguments it chose, where they are (`chosenRewrite`). Only the items it
+decided something in are written again: what is decided of an item changes
+that item alone. -/
+def decidedProgram (b : Blocks) (items : List Flat.FItem) : List Flat.FItem := Id.run do
   let d := Decided.of b
   if d.calls.isEmpty && d.closures.isEmpty && d.fields.isEmpty && d.rests.isEmpty && d.owners.isEmpty then
     return items
-  let places := items.zipIdx.filter fun (item, _) => d.item item
-  let mine := decidedIn b (places.map (·.1))
-  let mut all := items.toArray
-  for ((_, i), item) in places.zip mine do
-    all := all.set! i item
-  pure all.toList
-where
-  decidedIn (b : Blocks) (items : List Item) : List Item :=
-    let items := decidedItems b.decided items
-    if b.dotChosen.isEmpty && b.argsChosen.isEmpty then items else
-    Rewrite.items (items := items) { onExpr := fun go => fun
-      | .call i f args =>
-        let args := args.map go.ex
-        let (f, args) : Expr × List Expr := match f, b.dotChosen[i]? with
-          | .name _ _, some (fn, how) =>
-            (.name none fn, match how, args with
-              | 0, _ => args
-              | k, .name none v :: rest => .ref (k == 2) v :: rest
-              | _, _ => args)
-          | f, _ => (go.ex f, args)
-        some (.call i f (args.zipIdx.map fun (a, k) => b.argsChosen.getD (i, k) a))
-      | _ => none }
+  -- (What the `Decision`s are of, alone.)
+  let decisions := Decided.of { b with dotChosen := {}, argsChosen := {} }
+  let chosen := !b.dotChosen.isEmpty || !b.argsChosen.isEmpty
+  let rw := chosenRewrite b
+  items.map fun item =>
+    if !d.item item then item else
+    let item := if decisions.item item then
+        match decidedItems b.decided [item.toItem] with
+        | [tree] => Flat.ofItem tree
+        | _ => item
+      else item
+    if chosen then item.mapBodies rw.body else item
 
 end Glorious.Elab
