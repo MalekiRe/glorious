@@ -2,6 +2,9 @@
 // or about to be taken away, given the entities. They compose in the order
 // they were registered, and see the value before it goes. A batch fires each
 // hook once, with every entity.
+// (`hooks_compose_in_registration_order_and_distinguish_add_insert_and_replace`,
+// `removal_and_despawn_hooks_see_the_value_before_it_goes`,
+// `batch_spawns_fire_each_hook_once_with_every_entity`.)
 // expect:
 // add 1
 // insert 1

@@ -2,6 +2,7 @@
 // to move, walking and being dead are states of life. Putting one on an
 // entity takes from it each other that shares a group with it; putting one
 // it has again only gives the new value.
+// (`inserting_a_member_removes_the_members_of_each_of_its_groups`.)
 // expect:
 // 2
 // 0

@@ -4,6 +4,8 @@
 // each entity under it, linked to its parent's copy in order, and a marker
 // that is not copied (a `Disabling` template) is what leaves the copies
 // seen where the prototype is hidden.
+// (`cloning_an_entity_copies_only_clone_components`,
+// `cloning_a_template_subtree_yields_a_visible_copy_in_order`.)
 // expect:
 // 1
 // 3

@@ -2,6 +2,7 @@
 // type's start, and what they require; given with it, or had already, they
 // stay as they are. A bird has a position and a velocity, and a velocity a
 // mass.
+// (`spawning_adds_missing_required_components_recursively_keeping_given_values`.)
 // expect:
 // 0
 // 0

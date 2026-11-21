@@ -6579,6 +6579,20 @@ Not ported, by design:
 
 Cost: states2 4.9 s to 5.2 s; the suite 39 s to 48 s (32 programs more).
 
+## Covey: upstream's tests not ported
+
+Every upstream test of crates/static-ecs is named in a covey program's
+head (225 test functions; 209 named), but for these:
+- The five that count allocations (`closing_and_opening_a_warm_panel_allocates_nothing`,
+  `delivering_and_polling_warm_behaviors_allocates_nothing`,
+  `idle_visits_and_warm_bridges_allocate_nothing`, `warm_joins_allocate_nothing`,
+  `warm_remote_bridges_allocate_nothing_on_either_side`): Glorious has no
+  allocator a program can count.
+- `panic_propagates_only_after_parallel_sibling_finishes`: a panic aborts
+  (specification 20.3); nothing catches it.
+- `error_reply`, `reply_text`, `with_workers`, `birds`: helpers of the
+  tests, not tests.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by

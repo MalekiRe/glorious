@@ -3,6 +3,7 @@
 // it mentions that component: asks for it, optionally or not, tests for it,
 // or filters by it. Asking the world for a component directly sees them, and
 // enabling is taking the component away.
+// (`queries_skip_disabled_rows_unless_they_mention_the_component`.)
 // expect:
 // [0]
 // [1]
