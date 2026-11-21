@@ -46,7 +46,9 @@ structure Copies where
   pool : Std.HashMap (String × List Nat) Nat := {}
   byId : Array (String × List Nat) := #[]
   byKey : Std.HashMap (String × List Nat × Bool) String := {}
-  list : Array (String × String × List Nat × Bool) := #[]
+  /-- Each copy by its name: the function it is of, the implementations it
+  is for, and whether their places are dropped. -/
+  byName : Std.HashMap String (String × List Nat × Bool) := {}
 
 /-- The name an implementation's number stands as in a body. -/
 def dictRef (n : Nat) : Expr := .name none s!"%known#{n}"
@@ -102,7 +104,7 @@ def askCopy (fn : String) (ids : List Nat) (drop : Bool) : StateM Copies String 
   let key := (fn, ids, drop)
   if let some name := (← get).byKey[key]? then return name
   let name := s!"{fn}⟨{",".intercalate (ids.map toString)}⟩{if drop then "'" else ""}"
-  modify fun c => { c with byKey := c.byKey.insert key name, list := c.list.push (name, fn, ids, drop) }
+  modify fun c => { c with byKey := c.byKey.insert key name, byName := c.byName.insert name key }
   pure name
 
 mutual
@@ -255,46 +257,18 @@ def specCopyClause (tr : TraitInfo) (known : List (String × String)) (n : Nat) 
     else pure body
   specPushC ⟨pats, body⟩
 
-/-- A program with a copy of each function for each known implementation it
-is called with, and the names of the copies with the functions they are of.
-`fuel` bounds how many are made: a program that would need more (a function
-that calls itself with an implementation made from the one it was given) is
-left as it was. -/
-partial def specialize (tr : TraitInfo) (items : List Flat.FItem) (fuel : Nat := 50000) :
-    List Flat.FItem × List (String × String) :=
-  let fns : Std.HashMap String Flat.FItem := items.foldl (init := {}) fun m (item : Flat.FItem) =>
-    match item with
-    | .fn name _ _ _ _ => if m.contains name then m else m.insert name item
-    | _ => m
-  -- (Numbered as the elaborator numbered them, which the bodies say.)
-  let (roots, asked) := (items.mapM (specRoot tr)).run { pool := tr.knownIds, byId := tr.knownPool }
-  let byId := tr.knownPool
-  let rec make (fuel done : Nat) (copies : Copies) (out : Array Flat.FItem) : Option (Array Flat.FItem × Copies) :=
-    match fuel, copies.list[done]? with
-    | _, none => some (out, copies)
-    | 0, some _ => none
-    | fuel + 1, some (name, fn, dicts, drop) =>
-      match fns[fn]? with
-      | some (.fn _ ps annots ret b) =>
-        let n := dicts.length
-        let known : List (String × String) :=
-          (List.range n).map fun k => (s!"%dict{k}", s!"%known#{dicts[k]?.getD 0}")
-        let ((roots, b), copies) := ((b.roots.mapM (specCopyClause tr known n drop fn)).run b).run copies
-        let annots := if drop then annots.drop n else annots
-        make fuel (done + 1) copies (out.push (.fn name ps annots ret { b with roots }))
-      | _ => make fuel (done + 1) copies out
-  -- (What is left of the implementations, as values: written out.)
-  let written := fun (byId : Array (String × List Nat)) (items : List Flat.FItem) => items.map fun (item : Flat.FItem) =>
-    match item with
-    | .fn name ps annots ret b => Flat.FItem.fn name ps annots ret (unrefBody byId b)
-    | other => other
-  match make fuel 0 asked #[] with
-  | some (made, copies) =>
-    let out := (written copies.byId (roots ++ made.toList), copies.list.toList.map fun (name, fn, _, _) => (name, fn))
-    if Glorious.Trace.groupsTraced then
-      dbgTrace s!"specialize: {copies.list.size} copies, {copies.pool.size} implementation values, {made.size} made" fun _ => out
-    else out
-  | none => (written byId items, [])
+/-- The copy of a function (`item`, without traits) for the implementations
+`dicts`, named `name`, their places dropped if `drop`. -/
+def specCopy (tr : TraitInfo) (name : String) (dicts : List Nat) (drop : Bool) :
+    Flat.FItem → StateM Copies (Option Flat.FItem)
+  | .fn fn ps annots ret b => do
+    let n := dicts.length
+    let known : List (String × String) :=
+      (List.range n).map fun k => (s!"%dict{k}", s!"%known#{dicts[k]?.getD 0}")
+    let (roots, b) ← (b.roots.mapM (specCopyClause tr known n drop fn)).run b
+    let annots := if drop then annots.drop n else annots
+    pure (some (.fn name ps annots ret { b with roots }))
+  | _ => pure none
 
 /-! ## Constants worked out once
 

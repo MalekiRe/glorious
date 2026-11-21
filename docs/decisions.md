@@ -6709,6 +6709,23 @@ checks the group again and after the check into the items it is of; the dot
 calls and arguments it chose are written into those calls (`chosenRewrite`).
 The items with something decided are found by scanning their bodies' arrays.
 
+**Lowering is done as what is elaborated reaches it** (`Elab/Lower.lean`).
+Of a program with its library most functions are what nothing the program
+runs reaches (3,190 of 18,403 on `covey/states2`), and the five lowering
+passes went over all of them before `reachable` threw them away. Now what
+reads the checker's tables is worked out once (`instancesOf`,
+`untraitBlocks`), each function is given a way to be made
+(`untraitItem`, `unfieldItem`, the instances for it, made once and only
+when asked), and a worklist from `main` and the coercions lowers a function
+when something lowered names it: a copy for known implementations
+(`specCopy`) when a body asks for it (`Copies.byName`), a function given no
+implementation with its calls sent to copies (`specRoot`), each with the
+implementations left as values written out (`unrefBody`). Constants are
+worked out over what was reached. The functions of the program's own that
+`main` does not reach are lowered on from there, for the elaborator's look
+at them beside the rest. A program that would need more than 50,000 copies
+is lowered again without them, as before.
+
 **A pass leaves alone what it has nothing to do in.** Constants folded,
 fields written out and variables split rewrite only the bodies with
 something to do in them; `FRewrite` keeps the place of every node that does
@@ -6726,16 +6743,17 @@ not change.
   values (`dictExpr`), destroyers and layouts.
 
 **Measured** against the compiler just before it (85ef0920), each built and
-run alone on the same edits of `covey/states2`: 2.96 s before, 3.17 s now.
+run alone on the same edits of `covey/states2`: 2.96 s before, 2.93–2.98 s
+now (3.17 s before lowering went by what is reached: lowering and what main
+reaches took 320 ms, now 93).
 - Writing in what the checker decided went from 81 ms (each decision went
   over the whole program) to 5–9.
 - The check is as fast as it was (1.63 s against 1.62 for the program's
   unit), once kept states stopped carrying bodies (`noBodies`) and bodies
   were compacted before it (`Body.compact`): what an earlier rewrite left
   behind was hashed and copied by everything after.
-- What is still slower: lowering (+40 ms), defaults and blankets (+40),
-  aliases (+13), resolution (+12), what main reaches (+12), making the
-  program flat and compact (+26). In Lean a node of a body is still an
+- What is still slower: defaults and blankets (+40 ms), aliases (+13),
+  resolution (+12), making the program flat and compact (+26). In Lean a node of a body is still an
   object of its own (there are no arrays of unboxed variants), so nothing is
   nearer in memory; a rewrite copies a body's arrays where a tree's would
   share what it did not change; and a pass's time is mostly the work it

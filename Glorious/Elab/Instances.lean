@@ -111,10 +111,23 @@ def copyRewrite (c : Copy) : Flat.FRewrite where
         Flat.pushExpr (.handle subject' arms'))
     | _ => none
 
+/-- How each item is written for the instances of effects: worked out once
+for the whole program (`instancesOf`), each item then on its own. -/
+structure Instances where
+  /-- The functions a function is written as, by name: itself, or a copy for
+  each instance it is called at, or none (one that is copied and nothing
+  calls). -/
+  names : String → List String
+  /-- A function written as those. -/
+  fn : Flat.FItem → List Flat.FItem
+  /-- Any other item: an effect with several instances, one for each. -/
+  other : Flat.FItem → List Flat.FItem
+
 /-- Each instance of an effect a program uses made an effect of its own, and
 each function that is about an instance of its caller's choosing written out
 for each choice. `written` has the effects with the types they declare. -/
-partial def instances (b : Blocks) (written : List Item) (items : List Flat.FItem) : Except String (List Flat.FItem) := do
+partial def instancesOf (b : Blocks) (written : List Item) : Except String Instances := do
+  let same : Instances := { names := fun f => [f], fn := fun i => [i], other := fun i => [i] }
   let rec bare : Item → Item
     | .pub _ i => bare i
     | i => i
@@ -151,7 +164,7 @@ partial def instances (b : Blocks) (written : List Item) (items : List Flat.FIte
         unless known.any (·.1 == key) do
           found := (e, known ++ [(key, slice)]) :: found.filter (·.1 != e)
   let several := found.filterMap fun (e, known) => if known.length > 1 then some e else none
-  if several.isEmpty then return items
+  if several.isEmpty then return same
   let effects := written.filterMap fun i =>
     match bare i with
     | .effect name ps ops => some (name, ps, ops)
@@ -165,31 +178,35 @@ partial def instances (b : Blocks) (written : List Item) (items : List Flat.FIte
   let rec bareF : Flat.FItem → Flat.FItem
     | .pub _ i => bareF i
     | i => i
-  let mut out : Array Flat.FItem := #[]
-  for item in items do
-    match bareF item with
-    | .other (.effect name ps ops) =>
-      if several.contains name then
-        -- One effect for each instance, with the family's types written in.
-        let typed := (effects.find? (·.1 == name)).map fun (_, ps, ops) => (ps, ops)
-        let (ps, ops) := typed.getD (ps, ops)
-        let places := ps.filter (!·.startsWith "'")
-        for (key, types) in (found.lookup name).getD [] do
-          let σ := places.zip types
-          out := out.push (.other (.effect (instName name key) (ps.filter (·.startsWith "'")) (ops.map fun o =>
-            { o with name := instName o.name key, payload := o.payload.map (substType σ)
-                     result := o.result.map (substType σ) })))
-      else out := out.push item
-    | .fn name ps annots ret body =>
-      let mine := all.filter (·.1 == name)
-      if mine.isEmpty then
-        -- No place of its own: as it is, unless it is one that is copied
-        -- and nothing calls.
-        unless copied.contains name do out := out.push item
-      else
-        for (f, copy, types) in mine do
-          out := out.push (copyOf f copy types (.fn name ps annots ret body))
-    | _ => out := out.push item
-  pure out.toList
+  let mineOf := fun (name : String) => all.filter (·.1 == name)
+  pure
+    { names := fun name =>
+        match mineOf name with
+        -- (No place of its own: as it is, unless it is one that is copied
+        -- and nothing calls.)
+        | [] => if copied.contains name then [] else [name]
+        | mine => mine.map (·.2.1)
+      fn := fun item =>
+        match item with
+        | .fn name ps annots ret body =>
+          match mineOf name with
+          | [] => if copied.contains name then [] else [item]
+          | mine => mine.map fun (f, copy, types) => copyOf f copy types (.fn name ps annots ret body)
+        | _ => [item]
+      other := fun item =>
+        match bareF item with
+        | .other (.effect name ps ops) =>
+          if several.contains name then
+            -- One effect for each instance, with the family's types written in.
+            let typed := (effects.find? (·.1 == name)).map fun (_, ps, ops) => (ps, ops)
+            let (ps, ops) := typed.getD (ps, ops)
+            let places := ps.filter (!·.startsWith "'")
+            ((found.lookup name).getD []).map fun (key, types) =>
+              let σ := places.zip types
+              .other (.effect (instName name key) (ps.filter (·.startsWith "'")) (ops.map fun o =>
+                { o with name := instName o.name key, payload := o.payload.map (substType σ)
+                         result := o.result.map (substType σ) }))
+          else [item]
+        | _ => [item] }
 
 end Glorious.Elab

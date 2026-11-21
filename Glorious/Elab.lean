@@ -1576,38 +1576,64 @@ private def withDicts (n : Nat) (b : Flat.Body) : Flat.Body := Id.run do
     Flat.pushClause ⟨(List.range n).map (fun k => Pattern.var s!"%dict{k}") ++ pats, body⟩ : Flat.Build Flat.ClauseId)).run b
   pure { b with roots }
 
-/-- A program without its traits, and what the checker said of it with the
-places of arguments moved to where they now are. -/
-def untrait (blocks : Blocks) (items : List Flat.FItem) : List Flat.FItem × Blocks :=
+/-- A function without traits: given the bounds it needs first, and each
+call of a trait's function a call of a value. -/
+def untraitFn (tr : TraitInfo) (name : String) (params : List String) (annots : List (Option TypeExpr))
+    (ret : Option TypeExpr) (b : Flat.Body) : Flat.FItem :=
+  let n := (tr.boundedAt[name]?).getD 0
+  let (roots, b) := (b.roots.mapM (untraitClause tr name)).run b
+  -- (Every node is made anew: what was there is reached by nothing.)
+  Flat.FItem.fn name params ((List.replicate n none) ++ annots) ret (withDicts n { b with roots }).compact
+
+/-- The function that makes an implementation's value: given what its
+conditions are met by (`written` of them, if the checker says nothing), a
+closure for each of the trait's functions. -/
+def implDictItem (tr : TraitInfo) (trait head : String) (written : Nat) : Flat.FItem :=
+  let dictFn := implDictName trait head
+  -- (as many as the checker says: how each type parameter is destroyed
+  -- is among them, written or not)
+  let conditions := ((tr.implsAt[dictFn]?).map (·.conditions)).getD written
+  let dicts := (List.range conditions).map fun k => s!"%dict{k}"
+  let fns := ((tr.implsAt[dictFn]?).map (·.methods)).getD []
+  let closures := fns.map fun (fn, arity) =>
+    let argNames := (List.range arity).map fun k => s!"%arg{k}"
+    Expr.closure 0 [.mk (argNames.map Pattern.var)
+      [.expr (.call 0 (.name none fn) ((dicts ++ argNames).map (Expr.name none)))]]
+  Flat.ofItem (Item.fn dictFn [] [] none [.mk (dicts.map Pattern.var) [.expr (.tuple closures)]])
+
+/-- What an item is without traits: the functions it is made into, each by
+its name and made only when asked (`fn`), or an item kept as it is (`item`).
+A trait is nothing; an implementation its functions and the function that
+makes its value. -/
+inductive Untraited where
+  | fn (name : String) (make : Unit → Flat.FItem)
+  | item (item : Flat.FItem)
+
+/-- An item without traits (`Untraited`). -/
+def untraitItem (tr : TraitInfo) : Flat.FItem → List Untraited
+  | .other (.trait _ _) => []
+  | .impl params trait head _ context methods =>
+    let own := methods.filterMap fun
+      | .fn m _ annots ret b =>
+        let name := implFnName trait head m
+        some (Untraited.fn name fun _ => untraitFn tr name params annots ret b)
+      | _ => none
+    own ++ [.fn (implDictName trait head) fun _ => implDictItem tr trait head context.length]
+  | .fn name params annots ret b => [.fn name fun _ => untraitFn tr name params annots ret b]
+  | item => [.item item]
+
+/-- The functions a program without traits has besides its items': each
+destroyer, and the value a marker trait is met by. -/
+def untraitExtra (tr : TraitInfo) : List Untraited :=
+  ((destroyers tr) ++ [Item.fn Syntax.markerDict [] [] none [.mk [] [.expr (.tuple [])]]]).map fun item =>
+    match item with
+    | .fn name .. => .fn name fun _ => Flat.ofItem item
+    | _ => .item (Flat.ofItem item)
+
+/-- What the checker said of a program, with the places of arguments moved to
+where they are once its traits are values. -/
+def untraitBlocks (blocks : Blocks) : Blocks :=
   let tr := blocks.traits
-  let fnItem := fun (name : String) (params : List String) (annots : List (Option TypeExpr))
-      (ret : Option TypeExpr) (b : Flat.Body) =>
-    let n := (tr.boundedAt[name]?).getD 0
-    let (roots, b) := (b.roots.mapM (untraitClause tr name)).run b
-    -- (Every node is made anew: what was there is reached by nothing.)
-    Flat.FItem.fn name params ((List.replicate n none) ++ annots) ret (withDicts n { b with roots }).compact
-  let out := items.flatMap fun
-    | .other (.trait _ _) => []
-    | .impl params trait head _ context methods =>
-      let own := methods.filterMap fun
-        | .fn m _ annots ret b =>
-          some (fnItem (implFnName trait head m) params annots ret b)
-        | _ => none
-      let dictFn := implDictName trait head
-      -- (as many as the checker says: how each type parameter is destroyed
-      -- is among them, written or not)
-      let conditions := ((tr.implsAt[dictFn]?).map (·.conditions)).getD context.length
-      let dicts := (List.range conditions).map fun k => s!"%dict{k}"
-      let fns := ((tr.implsAt[dictFn]?).map (·.methods)).getD []
-      let closures := fns.map fun (fn, arity) =>
-        let argNames := (List.range arity).map fun k => s!"%arg{k}"
-        Expr.closure 0 [.mk (argNames.map Pattern.var)
-          [.expr (.call 0 (.name none fn) ((dicts ++ argNames).map (Expr.name none)))]]
-      own ++ [Flat.ofItem (Item.fn dictFn [] [] none [.mk (dicts.map Pattern.var) [.expr (.tuple closures)]])]
-    | .fn name params annots ret b => [fnItem name params annots ret b]
-    | item => [item]
-  let out := out ++ (destroyers tr).map Flat.ofItem
-    ++ [Flat.ofItem (Item.fn Syntax.markerDict [] [] none [.mk [] [.expr (.tuple [])]])]
   let coercions := blocks.coercions.fold (init := {}) fun (m : Std.HashMap Site String) site fn =>
     let site := match site with
       | .arg call index =>
@@ -1620,7 +1646,7 @@ def untrait (blocks : Blocks) (items : List Flat.FItem) : List Flat.FItem × Blo
         | _, _ => site
       | _ => site
     m.insert site fn
-  (out, { blocks with coercions := coercions })
+  { blocks with coercions := coercions }
 
 /-! ## Lifetimes
 
@@ -1783,27 +1809,25 @@ def unfieldRewrite (info : FieldInfo) : Flat.FRewrite where
         some (Flat.flatExpr (.call 0 (.name none Syntax.focusMark) (base :: steps)))
     | _ => none
 
-/-- Write out every borrow of a field, and every field read by name: see
-above. What the checker found says how. -/
-def unfield (b : Blocks) (items : List Flat.FItem) : Except String (List Flat.FItem) := do
-  if b.fields.isEmpty && b.fieldReads.isEmpty && b.packs.isEmpty then
-    return items
-  let info : FieldInfo :=
-    { shapes := b.fields
-      reads := b.fieldReads
-      packs := b.packs
-      derefs := b.derefReads }
-  -- (Only the functions with something in them the checker found of.)
-  let found := fun (n : Flat.FExpr) => match n with
-    | .fieldOf id _ _ => info.reads.contains id
-    | .refField id _ _ _ _ => info.shapes.contains id
-    | .closure id _ => info.packs.contains id
-    | _ => false
-  pure (items.map fun
-    | .fn name params annots ret body =>
-      if body.roots.any (body.anyClause found) then .fn name params annots ret ((unfieldRewrite info).body body)
-      else .fn name params annots ret body
-    | item => item)
+/-- What the checker found of fields, if anything. -/
+def fieldInfo (b : Blocks) : Option FieldInfo :=
+  if b.fields.isEmpty && b.fieldReads.isEmpty && b.packs.isEmpty then none
+  else some { shapes := b.fields, reads := b.fieldReads, packs := b.packs, derefs := b.derefReads }
+
+/-- A function with every borrow of a field, and every field read by name,
+written out: see above. What the checker found says how. -/
+def unfieldItem (info : Option FieldInfo) (item : Flat.FItem) : Flat.FItem :=
+  match info, item with
+  | some info, .fn name params annots ret body =>
+    -- (Only a function with something in it the checker found of.)
+    let found := fun (n : Flat.FExpr) => match n with
+      | .fieldOf id _ _ => info.reads.contains id
+      | .refField id _ _ _ _ => info.shapes.contains id
+      | .closure id _ => info.packs.contains id
+      | _ => false
+    if body.roots.any (body.anyClause found) then .fn name params annots ret ((unfieldRewrite info).body body)
+    else item
+  | _, item => item
 
 /-- Collect the global declarations. -/
 def collect (items : List Flat.FItem) :

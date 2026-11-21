@@ -7,6 +7,7 @@ public import Glorious.Syntax.Modules
 public import Glorious.Elab
 public import Glorious.Elab.Instances
 public import Glorious.Elab.Specialize
+public import Glorious.Elab.Lower
 public import Glorious.Comptime
 public import Glorious.Check
 public import Glorious.Infer
@@ -687,12 +688,9 @@ it with its trait's functions called by name. `written` has the declarations
 with their lifetimes, `all` is without them. -/
 def lowered (b : Elab.Blocks) (written : List Syntax.Item) (all : List Syntax.Flat.FItem) :
     Except String (List Syntax.Flat.FItem × Elab.Blocks) := do
-  let (items, b) := Trace.timed "lower: untrait" fun _ => Elab.untrait b all
-  let items ← Trace.timed "lower: fields" fun _ => Elab.unfield b items
-  let items ← Trace.timed "lower: instances" fun _ => Elab.instances b written items
-  let (items, _) := Trace.timed "lower: specialize" fun _ => Elab.specialize b.traits items
-  let items := Trace.timed "lower: fold constants" fun _ => Elab.foldConstants items
-  pure (items, b)
+  let L ← Elab.lowering b written all
+  let roots := "main" :: L.blocks.coercions.toList.map (·.2)
+  pure (Elab.reachable roots (L.items (L.reach L.start roots)), L.blocks)
 
 /-- Elaborate, and work out the constants at compile time (`Comptime`). -/
 def elaborate (items : List Syntax.Flat.FItem) (blocks : Option Elab.Blocks)
@@ -834,45 +832,53 @@ def compileSourceAt (src : String) (check : Bool := true)
   -- certificate's.
   let written := Elab.declaredOf all
   let all := Trace.timed "erase lifetimes" fun _ => Elab.eraseLifetimes all
-  -- From here on the program has no traits: the checker said how each bound
-  -- is met, and each is now a value passed where it is needed.
-  let (all, blocks) ← match blocks with
-    | some b => do
-      let (items, b) ← Trace.timed "lower traits to values" fun _ => lowered b written all
-      pure (items, some b)
-    | none => pure (all, none)
+-- From here on the program has no traits: the checker said how each bound
+  -- is met, and each is now a value passed where it is needed. Lowered only
+  -- as far as what is elaborated reaches (`Elab.Lower`).
+  let lowering ← match blocks with
+    | some b => do pure (some (← Trace.timed "lower: each function's way" fun _ => Elab.lowering b written all))
+    | none => pure none
+  let blocks := match lowering with
+    | some L => some L.blocks
+    | none => blocks
   -- What nothing reaches is not part of the program that runs. But what the
   -- program's own functions say is looked at wherever they are: one that
   -- `main` does not reach is elaborated too, for what the elaborator alone
   -- refuses, and then left out.
   let roots := "main" :: ((blocks.map (·.coercions.toList)).getD []).map (·.2)
-  let unreached := all
-  let all := Trace.timed "what main reaches" fun _ => Elab.reachable roots all
+  let (all, lowered) := Trace.timed "lower what main reaches" fun _ =>
+    match lowering with
+    | some L =>
+      let st := L.reach L.start roots
+      (Elab.reachable roots (L.items st), some st)
+    | none => (Elab.reachable roots all, none)
   -- (Only they and what they reach: what `main` reaches is elaborated below.
   -- Taken from the first of them, as a program is from `main`; beside what
   -- follows, on a thread of its own, and what it refuses said first.)
-  let missing := if check then
+  let missing := match check, lowering with
+    | true, some L =>
       let named := fun (items : List Syntax.Item) => items.filterMap fun
         | Syntax.Item.fn name _ _ _ _ => some name
-        | _ => none
-      let namedFlat := fun (items : List Syntax.Flat.FItem) => items.filterMap fun
-        | .fn name _ _ _ _ => some name
         | _ => none
       let own := match first with
         | .ok (count, _) => named (written.drop count)
         | .error _ => []
-      let reached := namedFlat all
+      let reached : Std.HashSet String := all.foldl (init := {}) fun s item => match item with
+        | Syntax.Flat.FItem.fn name _ _ _ _ => s.insert name
+        | _ => s
       -- (Those still there once traits are lowered: one made into copies is
       -- elaborated as each copy is.)
-      let lowered := namedFlat unreached
-      own.filter fun f => !reached.contains f && lowered.contains f
-    else []
+      own.filter fun f => !reached.contains f && L.fns.contains f
+    | _, _ => []
   let aside : Task (Except String Unit) := Task.spawn fun _ =>
-    if missing.isEmpty then .ok () else
-    match Trace.timed "elaborate what main does not reach" fun _ =>
-        elaborate (Elab.reachable (roots.drop 1 ++ missing) unreached) blocks (root := missing.headD "main") with
-    | .error e => .error e
-    | .ok _ => .ok ()
+    match missing.isEmpty, lowering, lowered with
+    | false, some L, some st =>
+      match Trace.timed "elaborate what main does not reach" fun _ =>
+          elaborate (Elab.reachable (roots.drop 1 ++ missing) (L.items (L.reach st missing))) blocks
+            (root := missing.headD "main") with
+      | .error e => .error e
+      | .ok _ => .ok ()
+    | _, _, _ => .ok ()
   let declared := Trace.timed "what is declared" fun _ => Elab.withDeclared written (Elab.declaredOf all)
   -- (What a compile gives, from what was elaborated and certified.)
   let compiled := fun (out : Elab.Output) (cert : Option Typing.Cert) (lent : Nat)

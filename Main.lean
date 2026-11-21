@@ -774,7 +774,6 @@ def why (path : String) : IO UInt32 := do
   let written := Elab.declaredOf all
   let all := Elab.eraseLifetimes all
   let .ok (all, blocks) := lowered blocks written all | IO.println "lowering failed"; return 1
-  let all := Elab.reachable ("main" :: blocks.coercions.toList.map (·.2)) all
   let declared := Elab.withDeclared written (Elab.declaredOf all)
   -- (`GLORIOUS_LENDS=2,0,1`: how each place is tried, in place of all at once.)
   let asked := ((← IO.getEnv "GLORIOUS_LENDS").map fun s => (s.splitOn ",").map String.toNat!)
@@ -868,7 +867,6 @@ def stages (path : String) : IO UInt32 := do
   let written := Elab.declaredOf all
   let all := Elab.eraseLifetimes all
   let .ok (all, blocks) := lowered blocks written all | IO.println "lowering failed"; return 1
-  let all := Elab.reachable ("main" :: blocks.coercions.toList.map (·.2)) all
   IO.println s!"{all.length} plain"
   last ← lap "untrait, unfield, reach" last
   let .ok out := Elab.elabProgram all (some blocks) | IO.println "elab failed"; return 1
