@@ -264,27 +264,22 @@ whatever is read.) One pass over the text's words. -/
 def preludeModules (text : String) : List String := Id.run do
   let isWord := fun (c : Char) => c.isAlphanum || c == '_'
   let decls := ["fn", "enum", "struct", "type", "trait", "effect", "const", "let"]
-  let mut mentioned : Std.HashSet String := {}
-  let mut own : Std.HashSet String := {}
-  let mut word : Array Char := #[]
-  let mut before : Char := ' '
-  let mut afterPath := false
-  let mut prev := ""
-  let mut inUse := false
-  for c in text.toList ++ [' '] do
-    if isWord c then
-      if word.isEmpty then afterPath := before == ':' || before == '.'
-      word := word.push c
-    else
-      unless word.isEmpty do
-        let w := String.ofList word.toList
-        if w == "use" then inUse := true
-        else if inUse || afterPath || decls.contains prev then own := own.insert w
-        else mentioned := mentioned.insert w
-        prev := w
-        word := #[]
-      if c == ';' then inUse := false
-      unless c == ' ' || c == '\n' do before := c
+  -- (One pass over the characters, each word made once.)
+  let (_, _, mentioned, own, _, _, _) := (text.push ' ').foldl
+    (init := ("", ' ', ({} : Std.HashSet String), ({} : Std.HashSet String), false, "", false))
+    fun (word, before, mentioned, own, afterPath, prev, inUse) c =>
+      if isWord c then
+        let afterPath := if word.isEmpty then before == ':' || before == '.' else afterPath
+        (word.push c, before, mentioned, own, afterPath, prev, inUse)
+      else
+        let (mentioned, own, prev, inUse) :=
+          if word.isEmpty then (mentioned, own, prev, inUse)
+          else if word == "use" then (mentioned, own, word, true)
+          else if inUse || afterPath || decls.contains prev then (mentioned, own.insert word, word, inUse)
+          else (mentioned.insert word, own, word, inUse)
+        let inUse := if c == ';' then false else inUse
+        let before := if c == ' ' || c == '\n' then before else c
+        ("", before, mentioned, own, afterPath, prev, inUse)
   pure ((Syntax.Modules.libraryPrelude.filter fun (name, _) =>
     mentioned.contains name && !own.contains name).map (·.2)).eraseDups
 
@@ -377,18 +372,54 @@ def saysLength (text : String) : Bool :=
       !word.isEmpty && word.all fun c => c.isAlphanum || c == '_'
     | _ => false
 
+/-- Where a scan for names of the library is (`libraryNames`). -/
+structure LibScan where
+  word : String := ""
+  last : String := ""
+  /-- The root the last word was, where only colons came after it. -/
+  root : Option String := none
+  colons : Nat := 0
+  /-- The root whose module the word being read names. -/
+  module : Option String := none
+  many : Bool := false
+  named : List (List String) := []
+
+/-- How a text names the library: whether some way says more than one
+module, or all (`std::{a, b}`, `std::*`, `use std;`), and each
+`root::module` it writes. One pass over the characters. -/
+def libraryNames (text : String) : Bool × List (List String) :=
+  let roots := ["std", "core", "alloc"]
+  let isWord := fun (c : Char) => c.isAlphanum || c == '_'
+  let s := (text.push ' ').foldl (init := ({} : LibScan)) fun s c =>
+    if isWord c then
+      if s.word.isEmpty then
+        { s with word := s.word.push c, module := if s.colons == 2 then s.root else none }
+      else { s with word := s.word.push c }
+    else
+      -- (A word ends.)
+      let s := if s.word.isEmpty then s else
+        { s with
+          named := match s.module with
+            | some r => [r, s.word] :: s.named
+            | none => s.named
+          many := s.many || (c == ';' && s.last == "use" && roots.contains s.word)
+          root := if roots.contains s.word then some s.word else none
+          last := s.word, word := "", module := none, colons := 0 }
+      if c == ':' && s.root.isSome && s.colons < 2 then { s with colons := s.colons + 1 }
+      else if s.colons == 2 && (c == '{' || c == '*') then { s with many := true, colons := 0, root := none }
+      else { s with colons := 0, root := none }
+  (s.many, s.named.reverse)
+
 /-- The library's modules a program needs: those its texts name after
 `std::`, `core::` or `alloc::`, and those that these name in turn; with the
 texts of the three roots cut down to them. Nothing where the texts name the
 library some other way (`use std::{a, b}`), and all of it is then read. -/
 def neededStd (texts : List String) : Option (List (List String × String)) :=
   let roots := ["std", "core", "alloc"]
-  if texts.any (fun text => roots.any fun r => (text.splitOn s!"{r}::\{").length > 1
-      || (text.splitOn s!"{r}::*").length > 1 || (text.splitOn s!"use {r};").length > 1) then none
+  let scanned := texts.map libraryNames
+  if scanned.any (·.1) then none
   else
-    let named := fun (text : String) => roots.flatMap fun r =>
-      ((text.splitOn s!"{r}::").drop 1).map fun after =>
-        [r, String.ofList (after.toList.takeWhile fun c => c.isAlphanum || c == '_')]
+    let named := fun (text : String) => (libraryNames text).2
     let rec close (fuel : Nat) (have_ todo : List (List String)) : List (List String) :=
       match fuel, todo with
       | 0, _ => have_
@@ -400,7 +431,7 @@ def neededStd (texts : List String) : Option (List (List String × String)) :=
           | none => close fuel have_ rest
     -- (The modules of the library's prelude a text writes names of.)
     let prelude := (texts.flatMap preludeModules).eraseDups.map (["std", ·])
-    let needed := close 4096 [] (prelude ++ texts.flatMap named)
+    let needed := close 4096 [] (prelude ++ scanned.flatMap (·.2))
     -- (With the modules inside each, and what those name.)
     let inside := fun (have_ : List (List String)) =>
       (Std.texts.filter fun (path, _) => have_.any fun p => p.length < path.length && p.isPrefixOf path)
