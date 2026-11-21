@@ -2,9 +2,8 @@
 // (upstream's tests/relations.rs): a target's sources, read through
 // `From<Child, &Name>`, in the order they came or were put at
 // (`relate_at`), through despawning one, moving one to the front and to
-// the end, moving one to another parent, and ending the parent and all
-// under it. (Upstream's `Child` is `LINKED`, so ending the parent ends its
-// children; here that is `despawn_linked`.)
+// the end, moving one to another parent, and ending the parent, which ends
+// its children (`Child` is `Linked`).
 // expect:
 // [0, 1, 2, 3, 4]
 // [0, 2, 3, 4]
@@ -17,11 +16,12 @@
 // 0
 mod ecs;
 
-use ecs::{App, World, Entity, Relation, OneToMany, From, to};
+use ecs::{App, World, Entity, Relation, OneToMany, From, Linked, to};
 
 struct Name(Int)
 struct Child
 impl Relation for Child { type Kind = OneToMany; }
+impl Linked for Child { const LINKED: Bool = true; }
 impl Eq for Child { fn ==(a: Child, b: Child) -> Bool { true } }
 impl Clone for Child { fn clone(c: &Child) -> Child { Child } }
 
@@ -52,7 +52,7 @@ fn main() -> Int {
     say(names(&mut world, other));
     discard(world.relate_at(kids[0], Child, root, 2));
     say(names(&mut world, root));
-    world.despawn_linked<Child>(root);
+    discard(world.despawn(root));
     let mut alive = 0;
     let mut k = 0;
     while({ k < len_at(&kids) }) { if(world.contains(kids[k])) { alive = alive + 1 } else { () }; k = k + 1 };

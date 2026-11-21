@@ -6402,6 +6402,23 @@ among the threads of the point's run), so two bridges that wait for each
 other at a barrier finish in one wave (covey/remote ports
 `disjoint_bridges_run_in_parallel_in_one_wave`).
 
+## Components are registered, not inferred
+
+**Decision: a world has the components it is said to have
+(`.register<T>()`, `.relation<R>()`), and no others; what a system or a
+join names is not added for it.** Upstream's world comes to store a
+component its systems' joins or an envelope name. covey's does not, by
+choice: the world's type is written by what builds it, and a system that
+asks for what the world lacks does not compile, naming it. The ported
+tests that rely on the inference register the component instead.
+
+`LINKED` (upstream's: a relation whose sources end with their target) is a
+`Linked` implementation saying it is true, a blanket one false: `despawn`
+asks each relation's sources column what is under the entity by such
+relations (`Unlinks::linked_under`), ends the entity, then each of those,
+and what is under them (covey/ordered2, as upstream's `Child`).
+`despawn_linked<R>` ends what is under an entity by any one relation.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by

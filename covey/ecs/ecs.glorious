@@ -310,14 +310,24 @@ pub fn alive<S>(world: &World<S>, entity: Entity) -> Bool {
 
 // End an entity: what relates to it, and its own links, are undone, and
 // every column forgets it.
+// (What relates to it by a `Linked` relation ends after it, and what relates
+// to those: a scene and all under it. Ended first, so a link back to it is
+// gone when what is under it is ended: a cycle ends.)
 pub fn despawn<S>(world: &mut World<S>, entity: Entity) where S: Columns, S: Unlinks<S> {
     if(alive(&*world, entity)) {
+        let under = <S as Unlinks<S>>::linked_under(&world.columns, entity, []);
         world.generations[entity.index] = entity.generation + 1;
         push_at(&mut world.free, entity.index);
         <S as Unlinks<S>>::unlink(&mut world.columns, entity);
-        <S as Columns>::forget(&mut world.columns, entity)
+        <S as Columns>::forget(&mut world.columns, entity);
+        let mut i = 0;
+        while({ i < len_at(&under) }) { despawn(world, under[i]); i = i + 1 }
     };
 }
+// A relation whose sources end with their target (upstream's `LINKED`):
+// `impl Linked for ChildOf { const LINKED: Bool = true; }`.
+pub trait Linked { const LINKED: Bool; }
+impl<T> Linked for T { const LINKED: Bool = false; }
 
 // Relations. A relation is a kind of link from one entity to another, a
 // type of its own (`ChildOf`), whose value is what the link carries (a
@@ -650,13 +660,17 @@ fn sources_in<R, S>(columns: &S, target: Entity) -> [Entity] where S: Get<Source
 // relation's `Relates`, its link to what it relates to; of each `Sources`,
 // the links of what relates to it. Found by the world's columns, as a column
 // is.
-pub trait Unlinks<S> { fn unlink(&mut S, Entity) }
-impl<S> Unlinks<S> for () { fn unlink(columns: &mut S, entity: Entity) { () } }
+// (And what relates to an entity by a `Linked` relation, which ends with
+// it: `linked_under`.)
+pub trait Unlinks<S> { fn unlink(&mut S, Entity) fn linked_under(&S, Entity, [Entity]) -> [Entity] }
+impl<S> Unlinks<S> for () { fn unlink(columns: &mut S, entity: Entity) { () } fn linked_under(columns: &S, entity: Entity, under: [Entity]) -> [Entity] { under } }
 impl<H, R, S> Unlinks<S> for (Column<H>, R) where R: Unlinks<S> {
     fn unlink(columns: &mut S, entity: Entity) { <R as Unlinks<S>>::unlink(columns, entity) }
+    fn linked_under(columns: &S, entity: Entity, under: [Entity]) -> [Entity] { <R as Unlinks<S>>::linked_under(columns, entity, under) }
 }
 impl<H, R, S> Unlinks<S> for (Resource<H>, R) where R: Unlinks<S> {
     fn unlink(columns: &mut S, entity: Entity) { <R as Unlinks<S>>::unlink(columns, entity) }
+    fn linked_under(columns: &S, entity: Entity, under: [Entity]) -> [Entity] { <R as Unlinks<S>>::linked_under(columns, entity, under) }
 }
 impl<X, R, S> Unlinks<S> for (Column<Relates<X>>, R) where S: Get<Relates<X>>, S: Get<Sources<X>>, R: Unlinks<S> {
     fn unlink(columns: &mut S, entity: Entity) {
@@ -666,6 +680,7 @@ impl<X, R, S> Unlinks<S> for (Column<Relates<X>>, R) where S: Get<Relates<X>>, S
         };
         <R as Unlinks<S>>::unlink(columns, entity)
     }
+    fn linked_under(columns: &S, entity: Entity, under: [Entity]) -> [Entity] { <R as Unlinks<S>>::linked_under(columns, entity, under) }
 }
 impl<X, R, S> Unlinks<S> for (Column<Links<X>>, R) where S: Get<Links<X>>, S: Get<Sources<X>>, R: Unlinks<S> {
     fn unlink(columns: &mut S, entity: Entity) {
@@ -674,12 +689,17 @@ impl<X, R, S> Unlinks<S> for (Column<Links<X>>, R) where S: Get<Links<X>>, S: Ge
         while({ i < len_at(&list) }) { drop_source<X, S>(columns, list[i], entity); i = i + 1 };
         <R as Unlinks<S>>::unlink(columns, entity)
     }
+    fn linked_under(columns: &S, entity: Entity, under: [Entity]) -> [Entity] { <R as Unlinks<S>>::linked_under(columns, entity, under) }
 }
-impl<X, R, S> Unlinks<S> for (Column<Sources<X>>, R) where X: Relation, <X as Relation>::Kind: UnlinksSources<X, S>, S: Get<Sources<X>>, R: Unlinks<S> {
+impl<X, R, S> Unlinks<S> for (Column<Sources<X>>, R) where X: Relation, <X as Relation>::Kind: UnlinksSources<X, S>, S: Get<Sources<X>>, R: Unlinks<S>, X: Linked {
     fn unlink(columns: &mut S, entity: Entity) {
         let list = sources_in<X, S>(&*columns, entity);
         <<X as Relation>::Kind as UnlinksSources<X, S>>::unlink_sources(columns, list, entity);
         <R as Unlinks<S>>::unlink(columns, entity)
+    }
+    fn linked_under(columns: &S, entity: Entity, under: [Entity]) -> [Entity] {
+        let mine = if(<X as Linked>::LINKED) { join_onto(under, sources_in<X, S>(columns, entity)) } else { under };
+        <R as Unlinks<S>>::linked_under(columns, entity, mine)
     }
 }
 // What relates to an entity that ends no longer does, by the relation's kind.
