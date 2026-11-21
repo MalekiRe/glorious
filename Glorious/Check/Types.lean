@@ -1046,11 +1046,21 @@ def unifyCap (a b : Nat) : M Unit := do
         let out := s.capOut.set! rb #[]
         { s with caps := s.caps.set! rb (some ra), capOut := out.modify ra (· ++ moved),
                  blockRoots := if s.blockRoots.contains rb then s.blockRoots.insert ra else s.blockRoots }
-    | _, _ => modify fun s =>
+    | none, some _ => modify fun s =>
         let moved := s.capOut.getD ra #[]
         let out := s.capOut.set! ra #[]
         { s with caps := s.caps.set! ra (some rb), capOut := out.modify rb (· ++ moved),
                  blockRoots := if s.blockRoots.contains ra then s.blockRoots.insert rb else s.blockRoots }
+    -- (Of two unknown, the newer gives way: a check that only joins what it
+    -- made to what it began with changes nothing it began with but what the
+    -- older captures, which only grows (`mergeStates`).)
+    | none, none =>
+      let (old, new) := if ra < rb then (ra, rb) else (rb, ra)
+      modify fun s =>
+        let moved := s.capOut.getD new #[]
+        let out := s.capOut.set! new #[]
+        { s with caps := s.caps.set! new (some old), capOut := out.modify old (· ++ moved),
+                 blockRoots := if s.blockRoots.contains new then s.blockRoots.insert old else s.blockRoots }
 
 def captures (cap : Nat) (what : Captured) (name : Option (String × Nat) := none) : M Unit := do
   let root ← findCap cap

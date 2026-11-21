@@ -141,6 +141,15 @@ partial def unifyRow (r1 r2 : Row) : M Unit := do
       match only1 ++ only2 with
       | e :: _ => unhandled e
       | [] => pure ()
+    -- (Where one side has nothing the other lacks, its variable stands for
+    -- the other's row, and the other's is let be: what a check bound of the
+    -- variables it began with is what it did not make, and one that only
+    -- adds is put with another that did (`mergeStates`). Of two with
+    -- nothing the other lacks, the newer stands for the older.)
+    else if only1.isEmpty && only2.isEmpty then
+      if i < j then bindRow j ⟨[], some i⟩ else bindRow i ⟨[], some j⟩
+    else if only1.isEmpty then bindRow i ⟨only2, some j⟩
+    else if only2.isEmpty then bindRow j ⟨only1, some i⟩
     else do
       let k ← freshRowVar
       bindRow i ⟨only2, some k⟩

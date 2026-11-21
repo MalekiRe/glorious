@@ -46,7 +46,7 @@ def mergeArr {α : Type} (p a b : Array α) : Option (Array α) :=
   else none
 
 /-- Two segments grown from `p`: each piece changed by at most one of them. -/
-def mergeSeg {α : Type} (p a b : Seg α) (same : α → α → Bool := fun _ _ => false) : Option (Seg α) := do
+def mergeSeg {α : Type} (p a b : Seg α) (both : α → α → α → Option α := fun _ _ _ => none) : Option (Seg α) := do
   if samePtr a p then return b
   if samePtr b p then return a
   let mut out : Array (Array α) := #[]
@@ -64,9 +64,11 @@ def mergeSeg {α : Type} (p a b : Seg α) (same : α → α → Bool := fun _ _ 
         | some x, some y, some z =>
           if samePtr y z then piece := piece.push x
           else if samePtr x z then piece := piece.push y
-          -- (Both made it the same: as for a variable both bound alike.)
-          else if same x y then piece := piece.push x
-          else none
+          -- (Both changed it: where that can be put together, as for a
+          -- variable both bound alike.)
+          else match both z x y with
+            | some w => piece := piece.push w
+            | none => none
         | some x, none, _ => piece := piece.push x
         | none, some y, _ => piece := piece.push y
         | some _, some _, none => none
@@ -77,7 +79,7 @@ def mergeSeg {α : Type} (p a b : Seg α) (same : α → α → Bool := fun _ _ 
 /-- Two stores grown from `p`: segments by where they start, each changed by
 at most one of them, or with pieces changed by at most one; and what each
 began of its own. -/
-def mergeStore {α : Type} (p a b : Store α) (same : α → α → Bool := fun _ _ => false) : Option (Store α) := do
+def mergeStore {α : Type} (p a b : Store α) (both : α → α → α → Option α := fun _ _ _ => none) : Option (Store α) := do
   if samePtr a p then return b
   if samePtr b p then return a
   let ps := p.segs
@@ -102,7 +104,7 @@ def mergeStore {α : Type} (p a b : Store α) (same : α → α → Bool := fun 
     if sb.isSome then j := j + 1
     let empty := sp.filter (·.count == 0)
     match sp, sa.orElse fun _ => empty, sb.orElse fun _ => empty with
-    | some sp, some sa, some sb => out := out.push (← mergeSeg sp sa sb same)
+    | some sp, some sa, some sb => out := out.push (← mergeSeg sp sa sb both)
     | none, some sa, none => out := out.push sa
     | none, none, some sb => out := out.push sb
     | _, _, _ => none
@@ -152,13 +154,21 @@ instance (priority := low) {α : Type} : Merge3 (Store α) := ⟨fun p a b => me
 /-- (A type variable both bound to the same type, written alike with nothing
 unknown in it.) -/
 instance : Merge3 (Store (Option Ty)) := ⟨fun p a b => mergeStore p a b fun
-  | some x, some y => let s := showTy x; s == showTy y && !s.contains '?'
-  | _, _ => false⟩
+  | _, some x, some y => let s := showTy x; if s == showTy y && !s.contains '?' then some (some x) else none
+  | _, _, _ => none⟩
+/-- (What a capture variable captures, grown by both: what each added after
+what was there, first's first.) -/
+instance : Merge3 (Store (Array Nat)) := ⟨fun p a b => mergeStore p a b fun z x y =>
+  if x.size ≥ z.size && y.size ≥ z.size && x.extract 0 z.size == z && y.extract 0 z.size == z then
+    some (x ++ y.extract z.size y.size)
+  else none⟩
 instance (priority := low) {κ ν : Type} [BEq κ] [Hashable κ] : Merge3 (Std.HashMap κ ν) := ⟨mergeMap⟩
 /-- (A row variable both bound to the same effects, with no row after.) -/
 instance : Merge3 (Store (Option Row)) := ⟨fun p a b => mergeStore p a b fun
-  | some x, some y => x.tail.isNone && y.tail.isNone && showEffs x.effs == showEffs y.effs && !(showEffs x.effs).contains '?'
-  | _, _ => false⟩
+  | _, some x, some y =>
+    if x.tail.isNone && y.tail.isNone && showEffs x.effs == showEffs y.effs && !(showEffs x.effs).contains '?' then some (some x)
+    else none
+  | _, _, _ => none⟩
 /-- (A list under a key, grown by both: the two grown together.) -/
 instance {κ ν : Type} [BEq κ] [Hashable κ] : Merge3 (Std.HashMap κ (List ν)) where
   merge3 p a b :=
