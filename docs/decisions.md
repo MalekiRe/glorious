@@ -6812,12 +6812,12 @@ where it does not go on (`applyDelta` gives none), the group is checked.
 **Measured** on `covey/states2` (each against a build of the same text with
 `GLORIOUS_FRESH`, the programs written byte for byte the same):
 
-| Edit | Before | Groups kept | And modules resolved kept |
-|---|---|---|---|
-| a comment in `main` (no line moves) | 3.0 s | 1.35 s | 1.03 s |
-| a string in `main` | 3.0 s | 2.57 s | 2.26 s |
-| a string in a small function | 3.0 s | 2.60 s | 2.25 s |
-| a line added at the top (every place moves) | 3.0 s | 2.5 s | 2.32 s |
+| Edit | Before | Groups kept | And modules resolved kept | And the front end's items |
+|---|---|---|---|---|
+| a comment in `main` (no line moves) | 3.0 s | 1.35 s | 1.03 s | 0.68 s |
+| a string in `main` | 3.0 s | 2.57 s | 2.26 s | 1.85 s |
+| a string in a small function | 3.0 s | 2.60 s | 2.25 s | 1.85 s |
+| a line added at the top (every place moves) | 3.0 s | 2.5 s | 2.32 s | 1.94 s |
 
 **Each module's resolution is kept too** (`Syntax.Modules.UnitsKept`, the
 build directory's `resolved`): a module's items as resolution made them,
@@ -6827,6 +6827,21 @@ what every module declares, its own items and the counters where it began.
 Name resolution of an edited `covey/states2` went from 184 ms to 14. It is
 saved pointing into what was read (`Store.save (chain := 8)`): 2 ms, where
 writing it all was 300.
+
+**And each item through the front end's passes** (`Syntax.Flat.FrontMemo`,
+the build directory's `front`): aliases written out, each type's `Layout`,
+what dotted calls borrow and each implementation's defaults, each item's
+result under a key of the pass, what the pass reads of the rest of the
+program (the aliases and types declared; each declared type's fields and
+which have a `drop`; what each function takes by reference; the trait's
+defaults, the implementation's place and how many of its trait at its
+arguments came before), and the item. A compile that changed one body
+makes its items anew; filling defaults went from 160 ms to 55, aliases
+from 43 to 7. What implementations for every type are written out as
+(`expandBlankets`, 26 ms) is made anew each time.
+
+Kept files are written again only where something was made anew, pointing
+into what was read (up to 64 files of each, then all of it again).
 
 Each kept group is a file of its own (`groups/<key>`): a compile writes
 those it made anew, and takes away those no group of it is. A group's

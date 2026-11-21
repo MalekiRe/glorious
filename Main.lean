@@ -370,11 +370,14 @@ def compileFile (path : String) (checkKept : Check.Kept := []) (search : Bool :=
   let unitsKept : Syntax.Modules.UnitsKept ← if (← IO.getEnv "GLORIOUS_FRESH").isSome then pure {} else
     pure (Std.HashMap.ofList ((← Store.load (α := List (UInt64 × List Syntax.Flat.FItem × Syntax.Modules.UnitMade))
       (dir / "resolved") "resolved").getD []))
+  -- (And what the front end's passes made of each item.)
+  let frontKept : Std.HashMap UInt64 (List Syntax.Flat.FItem) ← if (← IO.getEnv "GLORIOUS_FRESH").isSome then pure {} else
+    pure (Std.HashMap.ofList ((← Store.load (α := List (UInt64 × List Syntax.Flat.FItem)) (dir / "front") "front").getD []))
   let text ← IO.FS.readFile path
   let files ← moduleFiles path
   let result ← Trace.timedIO "compile" (IO.lazyPure fun _ =>
     compileSource text true files (few := true) known kept checkKept search memo firsts parsedKept preludeKept texts
-      (groupsKept := some groupsKept) (unitsKept := some unitsKept))
+      (groupsKept := some groupsKept) (unitsKept := some unitsKept) (frontKept := some frontKept))
   if let .ok c := result then keep <| Trace.timedIO "save what is kept" do
     -- (What a compile that did not look for each place found is not kept
     -- for one that does.)
@@ -400,8 +403,12 @@ def compileFile (path : String) (checkKept : Check.Kept := []) (search : Bool :=
       Store.save (library / "units") "units"
         ((c.libraryKept ++ libraryKept.filter fun (k, _) => !newKeys.contains k).take 96)
     if let some k := List.lookup ("%way", 0) c.places then Store.save (dir / "way") "way" k
-    unless c.unitsMade.all (fun (k, _) => unitsKept.contains k) && c.unitsMade.length == unitsKept.size do
-      Trace.timedIO "save: resolved" (Store.save (dir / "resolved") "resolved" c.unitsMade (chain := 8))
+    -- (Saved again only where something was made anew; pointing into what
+    -- was read, up to 64 files, then all written again.)
+    unless c.frontMade.all (fun (k, _) => frontKept.contains k) do
+      Trace.timedIO "save: front" (Store.save (dir / "front") "front" c.frontMade.toList (chain := 64))
+    unless c.unitsMade.all (fun (k, _) => unitsKept.contains k) do
+      Trace.timedIO "save: resolved" (Store.save (dir / "resolved") "resolved" c.unitsMade (chain := 64))
     -- (Saved again only where a group was checked anew.)
     Trace.timedIO "save: groups" do
       for (k, d) in c.groupsMade do
@@ -796,8 +803,8 @@ def why (path : String) : IO UInt32 := do
   let files ← moduleFiles path
   let .ok (prelude, items, _, _) := parseProgram src files | IO.println "parse failed"; return 1
   let .ok resolved := Syntax.Modules.resolve (Syntax.Flat.ofItems prelude) (Syntax.Flat.ofItems items) | IO.println "resolve failed"; return 1
-  let .ok all := Syntax.Flat.expandAliases resolved.items | IO.println "aliases failed"; return 1
-  let all := Syntax.Flat.fillDefaults all
+  let .ok (all, _) := Syntax.Flat.expandAliases resolved.items | IO.println "aliases failed"; return 1
+  let all := (Syntax.Flat.fillDefaults all).1
   -- (With what destroys values written, where the program has something to
   -- destroy, as a compile has it.)
   let drops := hasDrop items || (src.splitOn "defer").length > 1
@@ -884,8 +891,8 @@ def stages (path : String) : IO UInt32 := do
   let .ok resolved := Syntax.Modules.resolve (Syntax.Flat.ofItems prelude) (Syntax.Flat.ofItems items) | IO.println "resolve failed"; return 1
   IO.println s!"{resolved.items.length} resolved"
   last ← lap "resolve" last
-  let .ok all := Syntax.Flat.expandAliases resolved.items | IO.println "aliases failed"; return 1
-  let all := Syntax.Flat.fillDefaults all
+  let .ok (all, _) := Syntax.Flat.expandAliases resolved.items | IO.println "aliases failed"; return 1
+  let all := (Syntax.Flat.fillDefaults all).1
   let all0 := all
   IO.println s!"{all.length} filled"
   last ← lap "aliases, defaults" last

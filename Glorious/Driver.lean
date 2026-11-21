@@ -81,6 +81,9 @@ structure Compiled where
   /-- Each module's items as name resolution made them, where `unitsKept`
   was given: for the next compile (`Syntax.Modules.UnitsKept`). -/
   unitsMade : List (UInt64 × List Syntax.Flat.FItem × Syntax.Modules.UnitMade) := []
+  /-- What the front end's passes made of each item, where `frontKept` was
+  given: for the next compile (`Syntax.Flat.FrontMemo`). -/
+  frontMade : Array (UInt64 × List Syntax.Flat.FItem) := #[]
   /-- Each module's items as this compile parsed them or took them, under
   what they were parsed from: kept for the next. -/
   parsedMade : List (UInt64 × List Syntax.Item) := []
@@ -682,7 +685,7 @@ def checkFirstPart (std drop : Bool) : Except String (Nat × Check.St) := do
   if !std then
     let (prelude, _) ← readPrelude.get
     let resolved ← Syntax.Modules.resolve (Syntax.Flat.ofItems prelude) []
-    let all := withoutUnitMarksFlat (Syntax.Flat.fillDefaults (← Syntax.Flat.expandAliases resolved.items))
+    let all := withoutUnitMarksFlat (Syntax.Flat.fillDefaults (← Syntax.Flat.expandAliases resolved.items).1).1
     return (all.length, ← Check.checkFirst all resolved.info drop)
   let (prelude, items, _, _) ← parseProgram "// std" []
   let resolved ← Syntax.Modules.resolve (Syntax.Flat.ofItems prelude) (Syntax.Flat.ofItems items)
@@ -690,7 +693,7 @@ def checkFirstPart (std drop : Bool) : Except String (Nat × Check.St) := do
   -- what a program has first is these, item for item.)
   let (first, units) := unitsOfFlat resolved.items resolved.info.unitUses
   let items := first ++ units.flatMap (fun (k, is) => Syntax.Flat.FItem.other (Syntax.Item.fieldNames Syntax.unitMark [k] []) :: is)
-  let all := Syntax.Flat.fillDefaults (← Syntax.Flat.expandAliases items)
+  let all := (Syntax.Flat.fillDefaults (← Syntax.Flat.expandAliases items).1).1
   -- (Without the first module's mark, at the end: it has nothing.)
   let all := match all.getLast? with
     | some (.other (.fieldNames m [""] [])) => if m == Syntax.unitMark then all.dropLast else all
@@ -740,7 +743,8 @@ def compileSourceAt (src : String) (check : Bool := true)
     (lexed : List (List String × Array Syntax.Token) := []) (parsedKept : Parsed := {})
     (preludeKept : Option (List Syntax.Item × Syntax.Fixities) := none) (texts : Texts := {})
     (lenient : Bool := false) (groupsKept : Option Check.Deltas := none)
-    (unitsKept : Option Syntax.Modules.UnitsKept := none) :
+    (unitsKept : Option Syntax.Modules.UnitsKept := none)
+    (frontKept : Option (Std.HashMap UInt64 (List Syntax.Flat.FItem)) := none) :
     Except String Compiled := do
   let (prelude, items, parsedMade, textsMade) ← Trace.timed "parse" fun _ =>
     parseProgram src files check few packs lexed parsedKept preludeKept texts
@@ -762,10 +766,13 @@ def compileSourceAt (src : String) (check : Bool := true)
       else Syntax.lastSegment name
     | none => Syntax.lastSegment name
   -- A type alias is written out wherever it is used.
-  let all ← Trace.timed "expand aliases" fun _ => Syntax.Flat.expandAliases resolved.items
+  -- (Each item as an earlier compile made it, where what it was made from is
+  -- the same: `Syntax.Flat.FrontMemo`.)
+  let front : Syntax.Flat.FrontMemo := { kept := frontKept.getD {}, keep := frontKept.isSome }
+  let (all, front) ← Trace.timed "expand aliases" fun _ => Syntax.Flat.expandAliases resolved.items front
   -- An implementation that does not write a function its trait gives a body
   -- has that body.
-  let all := Trace.timed "fill defaults, write out blankets" fun _ => Syntax.Flat.fillDefaults all
+  let (all, front) := Trace.timed "fill defaults, write out blankets" fun _ => Syntax.Flat.fillDefaults all front
   -- What the checker learnt about blocks that share an environment. A program
   -- it rejects is elaborated without that.
   -- (Or that has a cleanup, which a resumption given up runs: what destroys
@@ -919,7 +926,7 @@ def compileSourceAt (src : String) (check : Bool := true)
       (places : List ((String × Nat) × Nat)) (made : Infer.Made) =>
     ({ core := out.program, ctorNames := out.ctorNames.map shownName, fnNames := out.fnNames
        opNames := out.opNames, cert, lent, plain := out.plain, places, checkKept := checkMade
-       inferMade := made, firstMade, libraryKept := libraryMade, groupsMade, unitsMade := resolved.unitsMade,
+       inferMade := made, firstMade, libraryKept := libraryMade, groupsMade, unitsMade := resolved.unitsMade, frontMade := front.made,
        parsedMade, textsMade } : Compiled)
   let plain := fun (blocks : Option Elab.Blocks) (failed : List (Bool × Bool)) => do
     let out ← match Trace.timed "elaborate" fun _ => elaborate all blocks with
@@ -1207,7 +1214,8 @@ def compileSource (src : String) (check : Bool := true)
     (firsts : List ((Bool × Bool) × (Nat × Check.St)) := []) (parsedKept : Parsed := {})
     (preludeKept : Option (List Syntax.Item × Syntax.Fixities) := none) (texts : Texts := {})
     (lenient : Bool := false) (groupsKept : Option Check.Deltas := none)
-    (unitsKept : Option Syntax.Modules.UnitsKept := none) :
+    (unitsKept : Option Syntax.Modules.UnitsKept := none)
+    (frontKept : Option (Std.HashMap UInt64 (List Syntax.Flat.FItem)) := none) :
     Except String Compiled := do
   -- (What the default prelude has from the library, where the text uses it;
   -- and each text lexed, once: each that an earlier compile read as it is,
@@ -1230,7 +1238,7 @@ def compileSource (src : String) (check : Bool := true)
   let rec go (fuel packs : Nat) : Except String Compiled :=
     match compileSourceAt src check files few known packs kept checkKept (search := search) (memo := memo)
         (firsts := firsts) (lexed := lexed) (parsedKept := parsedKept) (preludeKept := preludeKept) (texts := texts)
-        (lenient := lenient) (groupsKept := groupsKept) (unitsKept := unitsKept) with
+        (lenient := lenient) (groupsKept := groupsKept) (unitsKept := unitsKept) (frontKept := frontKept) with
     | .error e =>
       let wanted := longestUnimplemented e
       match fuel with
