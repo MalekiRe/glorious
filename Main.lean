@@ -774,8 +774,8 @@ def why (path : String) : IO UInt32 := do
   let written := all
   let all := Elab.eraseLifetimes all
   let .ok (all, blocks) := lowered blocks written all | IO.println "lowering failed"; return 1
-  let all := Elab.reachable ("main" :: blocks.coercions.toList.map (·.2)) all
-  let declared := Elab.withDeclared written all
+  let all := Elab.reachable ("main" :: blocks.coercions.toList.map (·.2)) (Syntax.Flat.ofItems all)
+  let declared := Elab.withDeclared written (Elab.declaredOf all)
   -- (`GLORIOUS_LENDS=2,0,1`: how each place is tried, in place of all at once.)
   let asked := ((← IO.getEnv "GLORIOUS_LENDS").map fun s => (s.splitOn ",").map String.toNat!)
   for lends in [1, 0] do
@@ -868,7 +868,7 @@ def stages (path : String) : IO UInt32 := do
   let written := all
   let all := Elab.eraseLifetimes all
   let .ok (all, blocks) := lowered blocks written all | IO.println "lowering failed"; return 1
-  let all := Elab.reachable ("main" :: blocks.coercions.toList.map (·.2)) all
+  let all := Elab.reachable ("main" :: blocks.coercions.toList.map (·.2)) (Syntax.Flat.ofItems all)
   IO.println s!"{all.length} plain"
   last ← lap "untrait, unfield, reach" last
   let .ok out := Elab.elabProgram all (some blocks) | IO.println "elab failed"; return 1
@@ -877,7 +877,7 @@ def stages (path : String) : IO UInt32 := do
   if (← IO.getEnv "GLORIOUS_CORE").isSome then IO.println (showCore out.fnNames out.program)
   -- One try of the search for borrows that are scopes of their own: every
   -- place lent, then certified as it is and with ranked callables.
-  let declared := Elab.withDeclared all0 all
+  let declared := Elab.withDeclared all0 (Elab.declaredOf all)
   if let .ok lentOut := Elab.elabProgram all (some blocks) (fun _ => 1) then
     IO.println s!"{lentOut.sites} places a borrow could be a scope, {lentOut.lent} made one"
     last ← lap "elaborate, every place lent" last
@@ -891,7 +891,7 @@ def stages (path : String) : IO UInt32 := do
       | .error e =>
         IO.println s!"certify lent: {(e.take 300).toString}"
         last ← lap s!"certify lent (ranked {ranked}, widen {widen}), refused" last
-  match Infer.certify all out.program true out.envSizes true true with
+  match Infer.certify (Elab.declaredOf all) out.program true out.envSizes true true with
   | .ok cert =>
     last ← lap "infer certificate" last
     IO.println s!"{Typing.checkProgram cert out.program}"
@@ -899,7 +899,7 @@ def stages (path : String) : IO UInt32 := do
   | .error e => IO.println s!"certify: {e}"
   -- With references taken to be to one of several cells where they have to be.
   for ranked in [true, false] do
-    match Infer.certify all out.program true out.envSizes true false ranked true with
+    match Infer.certify (Elab.declaredOf all) out.program true out.envSizes true false ranked true with
     | .ok cert =>
       let ok := Typing.checkProgram cert out.program
       IO.println s!"certify one of several (ranked {ranked}): {ok}{if ok then "" else s!": {Infer.rejected cert out.program}"}"

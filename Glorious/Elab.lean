@@ -23,12 +23,40 @@ namespace Glorious.Elab
 
 open Syntax
 
+/-! ## The body being elaborated -/
+
+/-- Nodes made in the body being elaborated. -/
+def ebuild {α : Type} (act : Flat.Build α) : M α :=
+  modifyGet fun s =>
+    let (a, b) := act.run s.body
+    (a, { s with body := b })
+
+def epush (n : Flat.FExpr) : M Flat.ExprId := ebuild (Flat.pushExpr n)
+def epushS (n : Flat.FStmt) : M Flat.StmtId := ebuild (Flat.pushStmt n)
+def epushC (c : Flat.FClause) : M Flat.ClauseId := ebuild (Flat.pushClause c)
+
+/-- `act` elaborated with another body (a constant's), the one being
+elaborated after as it was. -/
+def withElabBody {α : Type} (b : Flat.Body) (act : M α) : M α := do
+  let before := (← get).body
+  modify fun s => { s with body := b }
+  try
+    let r ← act
+    modify fun s => { s with body := before }
+    pure r
+  catch e =>
+    modify fun s => { s with body := before }
+    throw e
+
 /-- A borrow as it is written: of a variable, or of a part of one, which is
 a borrow of the variable narrowed. Whether for writing, and the variable. -/
-def borrowOf : Expr → Option (Bool × String)
+def borrowOf (b : Flat.Body) (e : Flat.ExprId) : Option (Bool × String) :=
+  match b.expr e with
   | .ref uniq y => some (uniq, y)
-  | .call _ (.name none mark) (.ref uniq y :: _) =>
-    if mark == Syntax.focusMark then some (uniq, y) else none
+  | .call _ f args =>
+    match b.bare? f, args[0]?.map b.expr with
+    | some mark, some (.ref uniq y) => if mark == Syntax.focusMark then some (uniq, y) else none
+    | _, _ => none
   | _ => none
 
 mutual
@@ -124,25 +152,32 @@ def resolveName (scope : Scope) (asked : Option String) (x : String) : M Head :=
 made first, each lasting while the result is used (`mode` 2), or only the
 `(mode - 3)`th of them, the others lasting as long as the call: what a
 result may keep of its arguments is in some of them only. -/
-def longBorrows (site mode : Nat) (args : List Expr) : List Stmt × List Expr :=
-  let borrowAt := (args.zip (List.range args.length)).filter fun (a, _) => (borrowOf a).isSome
-  let long := fun (i : Nat) => mode == 2 || (borrowAt.map (·.2))[mode - 3]? == some i
+def longBorrows (site mode : Nat) (args : Array Flat.ExprId) : Flat.Build (List Flat.StmtId × Array Flat.ExprId) := do
+  let b ← get
+  let borrowAt := (List.range args.size).filter fun i => (borrowOf b args[i]!).isSome
+  let long := fun (i : Nat) => mode == 2 || borrowAt[mode - 3]? == some i
   -- (The others are named too, each a scope around the statement alone.)
   let nameOf := fun (i : Nat) => if long i then s!"%borrow{site}.{i}" else s!"%lend{site}.{i}"
-  let named := (args.zip (List.range args.length)).map fun (a, i) =>
-    match borrowOf a with
-    | some _ => (Expr.name none (nameOf i), some (i, a))
-    | none => (a, none)
-  let lets := named.filterMap fun (_, b) => b.map fun (i, a) => Stmt.let_ (.var (nameOf i)) a
-  (lets, named.map (·.1))
+  let mut lets : List Flat.StmtId := []
+  let mut out : Array Flat.ExprId := #[]
+  for i in List.range args.size do
+    let a := args[i]!
+    match borrowOf b a with
+    | some _ =>
+      lets := lets ++ [← Flat.pushStmt (.let_ (.var (nameOf i)) a)]
+      out := out.push (← Flat.pushExpr (.name none (nameOf i)))
+    | none => out := out.push a
+  pure (lets, out)
 
 /-- A call whose result is kept, by `make`, with borrows given to it that last
 while the result is used: the statements with each borrow named first, where
 `lends` says they are for this place, and only of a function or a callable
 the function was given. -/
-def namedBorrows (scope : Scope) (value : Expr) (make : Expr → Stmt) : M (Option (List Stmt)) := do
-  let .call id (.name q f) args := value | return none
-  let borrows := args.filter fun a => (borrowOf a).isSome
+def namedBorrows (scope : Scope) (value : Flat.ExprId) (make : Flat.ExprId → Flat.FStmt) : M (Option (List Flat.StmtId)) := do
+  let b := (← get).body
+  let .call id fe args := b.expr value | return none
+  let .name q f := b.expr fe | return none
+  let borrows := args.filter fun a => (borrowOf b a).isSome
   unless borrows.isEmpty do
     modify fun s => { s with twoWays := s.sites :: s.twoWays }
   let mode := (← read).lends (← get).sites
@@ -150,14 +185,17 @@ def namedBorrows (scope : Scope) (value : Expr) (make : Expr → Stmt) : M (Opti
   match ← resolveName scope q f with
   | .fn _ | .local _ =>
     let site := (← get).sites
-    let (lets, args) := longBorrows site mode args
+    let (lets, args) ← ebuild (longBorrows site mode args)
     modify fun s => { s with sites := s.sites + 1, siteOwners := s.siteOwners.push s.owner }
-    pure (some (lets ++ [make (.call id (.name q f) args)]))
+    let call ← epush (.call id (← epush (.name q f)) args)
+    pure (some (lets ++ [← epushS (make call)]))
   | _ => pure none
 
 mutual
 
-partial def elabExpr (scope : Scope) (tailPos : Bool) : Expr → M Atom
+partial def elabExpr (scope : Scope) (tailPos : Bool) (e0 : Flat.ExprId) : M Atom := do
+  let b := (← get).body
+  match b.expr e0 with
   | .int n =>
     -- What holds an integer holds 128 bits; a literal's own type was asked
     -- of it where it was read.
@@ -182,13 +220,15 @@ partial def elabExpr (scope : Scope) (tailPos : Bool) : Expr → M Atom
     | .swap => throw "`swap` must be called"
     | .overwrite => throw "`overwrite` must be called"
     | .transmute => throw "`transmute` must be called"
-    | .const e => elabExpr [] false e
+    | .const e =>
+      let (cb, ce) := Flat.ofExpr e
+      withElabBody cb (elabExpr [] false ce)
   | .label l =>
     match scope.lookup (labelName l) with
     | some a => pure a
     | none => throw s!"unknown label `@{l}`"
   | .tuple args => do
-    let atoms ← args.mapM (elabExpr scope false)
+    let atoms ← args.toList.mapM (elabExpr scope false)
     emit (.let_ (.construct 0 atoms))
   | .proj e idx => do
     match ← elabExpr scope false e with
@@ -196,14 +236,16 @@ partial def elabExpr (scope : Scope) (tailPos : Bool) : Expr → M Atom
     | .int _ => throw "an integer has no fields"
   | .call id f args => do
     -- A value written with its type is the value: the type was the checker's.
-    if let (.name none mark, [value, _]) := (f, args) then
+    if let (some mark, #[value, _]) := (b.bare? f, args) then
       if mark == Syntax.ascribeMark || mark == Syntax.instMark then
         return ← elabExpr scope tailPos value
-    if let (.name none mark, [value]) := (f, args) then
+    if let (some mark, #[value]) := (b.bare? f, args) then
       if mark == Syntax.moveMark then return ← elabExpr scope tailPos value
     -- A callable with what destroys what it captured if it is let go.
-    if let (.name none mark, [.closure id clauses, .closure _ [.mk [] destroy]]) := (f, args) then
-      if mark == Syntax.destroyedMark then return ← elabClosure scope clauses id destroy
+    if let (some mark, #[c, d]) := (b.bare? f, args) then
+      if let (.closure id clauses, .closure _ #[dc]) := (b.expr c, b.expr d) then
+        let ⟨dps, destroy⟩ := b.clause dc
+        if mark == Syntax.destroyedMark && dps.isEmpty then return ← elabClosure scope clauses id destroy.toList
     let before := (← get).plain.length
     let r ← elabCall scope false f args
     -- The borrow a destruction passes is the compiler's, not the program's.
@@ -218,7 +260,7 @@ partial def elabExpr (scope : Scope) (tailPos : Bool) : Expr → M Atom
   | .closure id clauses => elabClosure scope clauses id
   | .handle subject arms => elabHandle scope tailPos subject arms
   | .labelScope l body => do
-    let thunk ← elabClosure scope [.mk [.var (labelName l)] body]
+    let thunk ← elabClosure scope #[← epushC ⟨[.var (labelName l)], body⟩]
     if tailPos then
       terminate (.labelTail thunk)
       pure (.int 0)
@@ -231,7 +273,7 @@ partial def elabExpr (scope : Scope) (tailPos : Bool) : Expr → M Atom
     -- (One the checker let through holds a `&mut` reference: borrowed
     -- through, it is that reference.)
     | some (false, _, _) =>
-      if uniq then elabExpr scope false (.name none x)
+      if uniq then elabExpr scope false (← epush (.name none x))
       else throw s!"`{x}` is not a mutable variable, so it cannot be borrowed"
     | none => throw s!"unknown name `{x}`"
   -- A reference borrowed from a reference is, to the machine, that reference.
@@ -241,7 +283,7 @@ partial def elabExpr (scope : Scope) (tailPos : Bool) : Expr → M Atom
   | .fieldOf id e name =>
     -- A field by number needs no checker to be found.
     match name.toNat? with
-    | some n => elabExpr scope tailPos (.proj e n)
+    | some n => elabExpr scope tailPos (← epush (.proj e n))
     | none => throw s!"the field `{name}` is found by the checker: the program is elaborated only after it (read {id})"
   | .deref e => do
     let p ← elabExpr scope false e
@@ -249,19 +291,19 @@ partial def elabExpr (scope : Scope) (tailPos : Bool) : Expr → M Atom
 
 /-- The arguments of a call. A block written without parameters, where a
 callable taking one argument is expected, takes that argument. -/
-partial def elabArgs (scope : Scope) (args : List Expr) (gives : Nat → Bool := fun _ => false) :
+partial def elabArgs (scope : Scope) (args : Array Flat.ExprId) (gives : Nat → Bool := fun _ => false) :
     M (List Atom) := do
   let blocks := (← read).blocks
-  (args.zip (List.range args.length)).mapM fun (a, i) =>
-    match plainBlock a with
+  (args.toList.zip (List.range args.size)).mapM fun (a, i) => do
+    match (← get).body.plainBlock a with
     | some (id, body) =>
       let given := match blocks with
-        | some b => b.given.contains id
+        | some bl => bl.given.contains id
         | none => gives i
-      if given then elabGiven scope id body else elabExpr scope false a
+      if given then elabGiven scope id body.toList else elabExpr scope false a
     | none => elabExpr scope false a
 
-partial def elabApply (scope : Scope) (isTail : Bool) (callee : Atom) (args : List Expr)
+partial def elabApply (scope : Scope) (isTail : Bool) (callee : Atom) (args : Array Flat.ExprId)
     (gives : Nat → Bool := fun _ => false) : M Atom := do
   let atoms ← elabArgs scope args gives
   if isTail then
@@ -297,21 +339,23 @@ partial def lendCall (idx : Nat) (atoms : List Atom) : List (Nat × Bool) → M 
     let thunk ← emit (.let_ (.closure f atoms))
     emit (.lend uniq lentRef thunk [] [])
 
-partial def elabCall (scope : Scope) (isTail : Bool) (f : Expr) (args : List Expr) : M Atom := do
+partial def elabCall (scope : Scope) (isTail : Bool) (f : Flat.ExprId) (args : Array Flat.ExprId) : M Atom := do
+  let b := (← get).body
   -- Whether what a reference points to was built by a constructor, at a
   -- path of field numbers: the cell is asked, and nothing is read out of it.
   -- What the clauses of a callable that binds by reference ask of the values:
   -- the checker's to read, and nothing to do.
-  if let .name none "%shapes" := f then
+  if b.bare? f == some "%shapes" then
     return ← emit (.let_ (.construct 0 []))
-  if let (.name none mark, r :: rest) := (f, args) then
+  if let (some mark, r :: rest) := (b.bare? f, args.toList) then
+    let rest := rest.map b.expr
     -- A reference to a field of what a reference points to: the reference,
     -- one field further in at each step.
     if mark == Syntax.focusMark then
       let mut at_ ← elabExpr scope false r
       -- A step into one of a type's several constructors is followed by the
       -- constructor's name.
-      for (step, next) in rest.zip (rest.drop 1 ++ [.int 0]) do
+      for (step, next) in rest.zip (rest.drop 1 ++ [Flat.FExpr.int 0]) do
         if let .int i := step then
           match next with
           | .name q c =>
@@ -333,7 +377,7 @@ partial def elabCall (scope : Scope) (isTail : Bool) (f : Expr) (args : List Exp
         | _ => throw "a test of a constructor names the constructor"
       let found ← emit (.mem .tag (cell :: path))
       return ← emit (.let_ (.prim .intEq [found, .int tag]))
-  match f with
+  match b.expr f with
   | .name q x =>
     match ← resolveName scope q x with
     | .local a => do elabApply scope isTail (← useLocal a) args
@@ -341,12 +385,14 @@ partial def elabCall (scope : Scope) (isTail : Bool) (f : Expr) (args : List Exp
       let callee ← emit (.mem .load [c])
       elabApply scope isTail callee args
     | .fn idx => do
-      let gives := givesOne (((← read).bodies[x]?).getD [])
-      let borrows := (args.zip (List.range args.length)).filterMap fun (a, i) =>
-        (borrowOf a).map fun (uniq, _) => (i, uniq)
+      let gives := match (← read).bodies[x]? with
+        | some fb => givesOne fb
+        | none => fun _ => false
+      let borrows := (args.toList.zip (List.range args.size)).filterMap fun (a, i) =>
+        (borrowOf b a).map fun (uniq, _) => (i, uniq)
       -- (A borrow that was made before the statement, to last as long as
       -- it, has left its name: the call is still a place.)
-      let held := args.findSome? fun
+      let held := args.toList.findSome? fun a => match b.expr a with
         | .name none n =>
           if n.startsWith "%held" then
             -- (`%held12.0`, `%heldw12.0`: the statement's place is 12.)
@@ -366,7 +412,7 @@ partial def elabCall (scope : Scope) (isTail : Bool) (f : Expr) (args : List Exp
         let atoms ← elabArgs scope args gives
         -- These borrows are scopes: take back what elaborating them noted.
         for a in args do
-          if let some (uniq, y) := borrowOf a then
+          if let some (uniq, y) := borrowOf b a then
             modify fun s =>
               { s with plain := s.plain.erase ⟨s.owner, pos.1, pos.2, y, uniq⟩ }
         if (← get).b.done.isSome then pure (.int 0) else lendCall idx atoms borrows
@@ -375,14 +421,14 @@ partial def elabCall (scope : Scope) (isTail : Bool) (f : Expr) (args : List Exp
         elabApply scope isTail callee args gives
     | .ctor info => do
       if isTail then throw s!"`tail` applies to calls, not to the constructor `{x}`"
-      if info.arity != args.length then
-        throw s!"constructor `{x}` takes {info.arity} arguments, but is given {args.length}"
+      if info.arity != args.size then
+        throw s!"constructor `{x}` takes {info.arity} arguments, but is given {args.size}"
       let atoms ← elabArgs scope args
       emit (.let_ (.construct info.tag atoms))
     | .op info => do
       if isTail then throw s!"`tail` applies to calls, not to the operation `{x}`"
-      if info.arity != args.length then
-        throw s!"operation `{x}` takes {info.arity} arguments, but is given {args.length}"
+      if info.arity != args.size then
+        throw s!"operation `{x}` takes {info.arity} arguments, but is given {args.size}"
       let atoms ← elabArgs scope args
       if info.terminal then
         terminate (.raise info.id atoms)
@@ -390,8 +436,8 @@ partial def elabCall (scope : Scope) (isTail : Bool) (f : Expr) (args : List Exp
       else emit (.perform info.id atoms)
     | .prim p n => do
       if isTail then throw s!"`tail` applies to calls, not to the intrinsic `{x}`"
-      if n != args.length then
-        throw s!"intrinsic `{x}` takes {n} arguments, but is given {args.length}"
+      if n != args.size then
+        throw s!"intrinsic `{x}` takes {n} arguments, but is given {args.size}"
       let atoms ← elabArgs scope args
       if x == "arr_new" then emit (.let_ (.construct arrayBase []))
       else if x == "arr_at" then
@@ -417,18 +463,18 @@ partial def elabCall (scope : Scope) (isTail : Bool) (f : Expr) (args : List Exp
       if isTail then throw s!"`tail` applies to calls, not to the intrinsic `{x}`"
       match ← elabArgs scope args with
       | [a] => emit (.let_ (.atom a))
-      | _ => throw s!"intrinsic `{x}` takes 1 argument, but is given {args.length}"
+      | _ => throw s!"intrinsic `{x}` takes 1 argument, but is given {args.size}"
     | .host id n => do
       if isTail then throw s!"`tail` applies to calls, not to the host operation `{x}`"
-      if n != args.length && id != 2 then
-        throw s!"host operation `{x}` takes {n} arguments, but is given {args.length}"
+      if n != args.size && id != 2 then
+        throw s!"host operation `{x}` takes {n} arguments, but is given {args.size}"
       let atoms ← elabArgs scope args
       -- What is unsafe is outside what Core's rules are about.
       if id ≥ 2 then modify fun s => { s with foreign := true }
       emit (.host id atoms)
     | .cancel => do
       if isTail then throw "`tail` applies to calls, not to `cancel`"
-      match args with
+      match args.toList with
       | [_] => do
         match ← elabArgs scope args with
         | [atom] => emit (.cancel atom)
@@ -437,13 +483,13 @@ partial def elabCall (scope : Scope) (isTail : Bool) (f : Expr) (args : List Exp
     | .replace => do
       -- Take the value out of a cell and put another in its place.
       if isTail then throw "`tail` applies to calls, not to `replace`"
-      match args with
+      match args.toList with
       | [target, _] => do
         match ← elabArgs scope args with
         | [cell, new] =>
           -- Written on a variable this is an assignment that gives the old
           -- value back: the reference does not outlast it.
-          if let .ref uniq y := target then
+          if let .ref uniq y := b.expr target then
             modify fun s =>
               { s with plain := s.plain.erase ⟨s.owner, s.pos.1, s.pos.2, y, uniq⟩ }
           emit (.mem .swap [cell, new])
@@ -476,42 +522,52 @@ partial def elabCall (scope : Scope) (isTail : Bool) (f : Expr) (args : List Exp
       | [a] => emit (.let_ (.atom a))
       | _ => throw "`transmute` takes one value"
     | .const e => do
-      let callee ← elabExpr [] false e
+      let (cb, ce) := Flat.ofExpr e
+      let callee ← withElabBody cb (elabExpr [] false ce)
       elabApply scope isTail callee args
   | _ => do
     let callee ← elabExpr scope false f
     elabApply scope isTail callee args
 
 /-- Statements in sequence; the value is that of the last expression, or unit. -/
-partial def elabStmts (scope : Scope) (tailPos : Bool) : List Stmt → M Atom
+partial def elabStmts (scope : Scope) (tailPos : Bool) : List Flat.StmtId → M Atom
   | [] => emit (.let_ (.construct 0 []))
-  | .located line col s :: rest => do
+  | s0 :: rest => do
+  let b := (← get).body
+  match b.stmt s0 with
+  | .located _ _ _ => do
     -- A borrow given a name is made where it is first used.
-    match sinkBorrows (.located line col s :: rest) with
-    | .located line col s :: rest =>
-      modify fun st => { st with pos := (line, col) }
-      try elabStmts scope tailPos (s :: rest)
-      catch e => throw (positioned line col e)
-    | other => elabStmts scope tailPos other
-  -- Where `unsafe { .. }` begins: nothing to do.
-  | [.expr (.name none "%unsafe")] => emit (.let_ (.construct 0 []))
-  | .expr (.name none "%unsafe") :: rest => elabStmts scope tailPos rest
-  | [.expr (.name none "%observed")] => emit (.let_ (.construct 0 []))
-  | .expr (.name none "%observed") :: rest => elabStmts scope tailPos rest
-  | [.expr e] => do
-    -- A borrow written in a statement can be a scope that lasts while the
-    -- statement runs.
-    match ← lendWithin scope (.expr e) with
-    | some stmts => elabStmts scope tailPos stmts
-    | none => elabExpr scope tailPos e
-  | .expr e :: rest => do
-    if let some stmts ← lendWithin scope (.expr e) then
-      return ← elabStmts scope tailPos (stmts ++ rest)
-    let _ ← elabExpr scope false e
-    elabStmts scope tailPos rest
-  | .let_ pat value :: rest => do
+    let sunk := sinkBorrows b (s0 :: rest)
+    match sunk with
+    | first :: rest =>
+      match b.stmt first with
+      | .located line col s =>
+        modify fun st => { st with pos := (line, col) }
+        try elabStmts scope tailPos (s :: rest)
+        catch e => throw (positioned line col e)
+      | _ => elabStmts scope tailPos sunk
+    | [] => elabStmts scope tailPos sunk
+  | .expr e => do
+    match b.bare? e, rest with
+    -- Where `unsafe { .. }` begins: nothing to do.
+    | some "%unsafe", [] => emit (.let_ (.construct 0 []))
+    | some "%unsafe", rest => elabStmts scope tailPos rest
+    | some "%observed", [] => emit (.let_ (.construct 0 []))
+    | some "%observed", rest => elabStmts scope tailPos rest
+    | _, [] =>
+      -- A borrow written in a statement can be a scope that lasts while the
+      -- statement runs.
+      match ← lendWithin scope s0 with
+      | some stmts => elabStmts scope tailPos stmts
+      | none => elabExpr scope tailPos e
+    | _, rest => do
+      if let some stmts ← lendWithin scope s0 then
+        return ← elabStmts scope tailPos (stmts ++ rest)
+      let _ ← elabExpr scope false e
+      elabStmts scope tailPos rest
+  | .let_ pat value => do
     -- A borrow given a name can be a scope of its own.
-    if let (.var p, some (uniq, x)) := (pat, borrowOf value) then
+    if let (.var p, some (uniq, x)) := (pat, borrowOf b value) then
       if let some (true, _, _) := lookupVar scope x then
         if ← isBinder p then
           -- What is lent: the variable's reference, narrowed if the borrow
@@ -533,8 +589,8 @@ partial def elabStmts (scope : Scope) (tailPos : Bool) : List Stmt → M Atom
           if mode != 0 then
             return ← atSite site (elabBorrowScope scope tailPos p uniq (← lent) rest (mode == 2))
     -- So can a borrow written anywhere else in what is given the name.
-    if (borrowOf value).isNone then
-      if let some stmts ← lendWithin scope (.let_ pat value) then
+    if (borrowOf b value).isNone then
+      if let some stmts ← lendWithin scope s0 then
         return ← elabStmts scope tailPos (stmts ++ rest)
     -- And the borrows given to a function whose result is given a name,
     -- lasting while the result is used: each is named first.
@@ -543,8 +599,8 @@ partial def elabStmts (scope : Scope) (tailPos : Bool) : List Stmt → M Atom
     let a ← elabExpr scope false value
     let scope ← bindLet scope pat a
     elabStmts scope tailPos rest
-  | .letMut x value :: rest => do
-    if let some stmts ← lendWithin scope (.letMut x value) then
+  | .letMut x value => do
+    if let some stmts ← lendWithin scope s0 then
       return ← elabStmts scope tailPos (stmts ++ rest)
     -- The borrows given to a function whose result a variable keeps, as for
     -- a name: lasting while the result is used, each named first.
@@ -556,7 +612,7 @@ partial def elabStmts (scope : Scope) (tailPos : Bool) : List Stmt → M Atom
     -- A `tail` call written directly in it would leave the cell's scope behind
     -- on every iteration, so it is refused.
     let why := s!"`{x}` is released after the call returns"
-    let captures := captureNames scope (fvStmts [x] rest)
+    let captures := captureNames scope (b.fvStmts [x] rest)
     let body ← mkClause captures [.var (cellKey x)]
       (fun sc => withNoTail (some why) (elabStmts sc true rest))
     let idx ← addFn ⟨[body]⟩ s!"the scope of `{x}` in `{(← get).owner}`"
@@ -566,21 +622,22 @@ partial def elabStmts (scope : Scope) (tailPos : Bool) : List Stmt → M Atom
       terminate (.cellTail a thunk)
       pure (.int 0)
     else emit (.cell a thunk)
-  | .assign target value :: rest => do
+  | .assign target value => do
     -- What is assigned through a reference is computed first, and then the
     -- place it goes: a borrow the place is reached by need not last while
     -- the value is worked out, which may read the variable it is of.
-    if let .deref _ := target then
-      let atomic := match value with
+    if let .deref _ := b.expr target then
+      let atomic := match b.expr value with
         | .name none _ => true
         | .int _ => true
         | _ => false
       unless atomic do
-        return ← elabStmts scope tailPos
-          (.let_ (.var "%assigned") value :: .assign target (.name none "%assigned") :: rest)
-    if let some stmts ← lendWithin scope (.assign target value) then
+        let first ← epushS (.let_ (.var "%assigned") value)
+        let then_ ← epushS (.assign target (← epush (.name none "%assigned")))
+        return ← elabStmts scope tailPos (first :: then_ :: rest)
+    if let some stmts ← lendWithin scope s0 then
       return ← elabStmts scope tailPos (stmts ++ rest)
-    let cell ← match target with
+    let cell ← match b.expr target with
       | .name none x =>
         match lookupVar scope x with
         | some (true, _, c) => pure c
@@ -592,14 +649,18 @@ partial def elabStmts (scope : Scope) (tailPos : Bool) : List Stmt → M Atom
     -- array is taken out of the variable, an empty one left in its place,
     -- changed, and put back. Nothing else holds it meanwhile, so a machine
     -- that can change it where it is may.
-    let inPlace : Option (Prim × List Expr) := match target, value, (← read).arrays with
-      | .name none x, .call _ (.name none f) (.name none y :: more), some (array, push, index) =>
-        if x == y && (lookupVar scope f).isNone then
-          if f == push && more.length == 1 then some (.arrPush, more)
-          else if f == Syntax.implFnName index array "index_set" && more.length == 2 then
-            some (.arrSet, more)
+    let inPlace : Option (Prim × Array Flat.ExprId) := match b.expr target, b.expr value, (← read).arrays with
+      | .name none x, .call _ fe vargs, some (array, push, index) =>
+        match b.bare? fe, vargs[0]?.bind b.bare? with
+        | some f, some y =>
+          let more := vargs.extract 1 vargs.size
+          if x == y && (lookupVar scope f).isNone then
+            if f == push && more.size == 1 then some (.arrPush, more)
+            else if f == Syntax.implFnName index array "index_set" && more.size == 2 then
+              some (.arrSet, more)
+            else none
           else none
-        else none
+        | _, _ => none
       | _, _, _ => none
     match inPlace with
     | some (p, more) =>
@@ -612,9 +673,10 @@ partial def elabStmts (scope : Scope) (tailPos : Bool) : List Stmt → M Atom
       let a ← elabExpr scope false value
       let _ ← emit (.mem .store [cell, a])
     elabStmts scope tailPos rest
-  | .defer e :: rest => do
+  | .defer e => do
     -- The rest of the block runs under a guard whose cleanup is `e`.
-    let cleanup ← elabClosure scope [.mk [] [.expr e]]
+    let st ← epushS (.expr e)
+    let cleanup ← elabClosure scope #[← epushC ⟨[], #[st]⟩]
     elabGuarded scope tailPos cleanup rest "a `defer` runs after the call returns"
 
 /-- An expression with the borrows of variables written in it replaced by
@@ -632,14 +694,18 @@ So is any inside a callable written there, which runs when it is called. An
 argument of a function called further in is named `%held..`: that call still
 counts as a place a borrow could be a scope, so that the places are numbered
 the same whichever way each is tried. -/
-partial def nameBorrows (scope : Scope) (site : Nat) (wide all : Bool) (e : Expr) :
-    M (Expr × List (String × Expr)) := do
-  let (e, found) ← match e with
-    | .call id (.name q f) args => do
-      if ← isFn q f then
-        let (args, found) ← goArgs false false false args []
-        pure (Expr.call id (.name q f) args, found)
-      else go true e []
+partial def nameBorrows (scope : Scope) (site : Nat) (wide all : Bool) (e : Flat.ExprId) :
+    M (Flat.ExprId × List (String × Flat.ExprId)) := do
+  let b := (← get).body
+  let (e, found) ← match b.expr e with
+    | .call id fe args => do
+      match b.expr fe with
+      | .name q f =>
+        if ← isFn q f then
+          let (args, found) ← goArgs false false false args []
+          pure (← epush (.call id fe args), found)
+        else go true e []
+      | _ => go true e []
     | _ => go true e []
   pure (e, found.reverse)
 where
@@ -652,71 +718,75 @@ where
       | .fn _ => pure true
       | _ => pure false
     catch _ => pure false
-  go (stored : Bool) (e : Expr) (found : List (String × Expr)) :
-      M (Expr × List (String × Expr)) := do
-    match e with
+  go (stored : Bool) (e : Flat.ExprId) (found : List (String × Flat.ExprId)) :
+      M (Flat.ExprId × List (String × Flat.ExprId)) := do
+    let b := (← get).body
+    match b.expr e with
     | .tuple args => do
       let (args, found) ← goArgs stored true false args found
-      pure (.tuple args, found)
-    | .call id (.name q f) args => do
-      if ← isFn q f then
-        let (args, found) ← goArgs false true true args found
-        return (.call id (.name q f) args, found)
-      let stored := stored && (← resolveCtor f q).isSome
-      let (args, found) ← goArgs stored true false args found
-      pure (.call id (.name q f) args, found)
-    | .call id f args => do
-      let (f, found) ← go false f found
-      let (args, found) ← goArgs false true false args found
-      pure (.call id f args, found)
-    | .deref e => do
-      let (es, found) ← goArgs false true false [e] found
-      pure (.deref (es.headD e), found)
-    | .proj e n => do
-      let (es, found) ← goArgs false true false [e] found
-      pure (.proj (es.headD e) n, found)
+      pure (← epush (.tuple args), found)
+    | .call id fe args => do
+      match b.expr fe with
+      | .name q f =>
+        if ← isFn q f then
+          let (args, found) ← goArgs false true true args found
+          return (← epush (.call id fe args), found)
+        let stored := stored && (← resolveCtor f q).isSome
+        let (args, found) ← goArgs stored true false args found
+        pure (← epush (.call id fe args), found)
+      | _ =>
+        let (f, found) ← go false fe found
+        let (args, found) ← goArgs false true false args found
+        pure (← epush (.call id f args), found)
+    | .deref x => do
+      let (es, found) ← goArgs false true false #[x] found
+      pure (← epush (.deref (es[0]?.getD x)), found)
+    | .proj x n => do
+      let (es, found) ← goArgs false true false #[x] found
+      pure (← epush (.proj (es[0]?.getD x) n), found)
     -- (What a handler watches: a borrow written in it is made before the
     -- handler is there, and lasts until it is gone.)
     | .handle subject arms => do
       let (subject, found) ← go false subject found
-      pure (.handle subject arms, found)
+      pure (← epush (.handle subject arms), found)
     | _ => pure (e, found)
-  goArgs (stored take held : Bool) (args : List Expr) (found : List (String × Expr)) :
-      M (List Expr × List (String × Expr)) := do
-    let mut out : Array Expr := #[]
+  goArgs (stored take held : Bool) (args : Array Flat.ExprId) (found : List (String × Flat.ExprId)) :
+      M (Array Flat.ExprId × List (String × Flat.ExprId)) := do
+    let mut out : Array Flat.ExprId := #[]
     let mut found := found
     for a in args do
-      match borrowOf a with
+      match borrowOf (← get).body a with
       | some (_, y) =>
         if let (true, some (true, _, _)) := (take, lookupVar scope y) then
           let kind := if stored || wide then "%borrow" else if all then "%heldw" else if held then "%held" else "%lend"
           let n := s!"{kind}{site}.{found.length}"
-          out := out.push (.name none n)
+          out := out.push (← epush (.name none n))
           found := (n, a) :: found
         else out := out.push a
       | none =>
         let (a', found') ← go stored a found
         out := out.push a'
         found := found'
-    pure (out.toList, found)
+    pure (out, found)
 
 /-- A statement with the borrows written in it made first, each a scope: the
 statements to elaborate in its place, if the place this is may lend. Tried
 first with the borrows given to functions left to be scopes of their own,
 then with those too lasting as long as the statement. -/
-partial def lendWithin (scope : Scope) (s : Stmt) : M (Option (List Stmt)) := do
+partial def lendWithin (scope : Scope) (s : Flat.StmtId) : M (Option (List Flat.StmtId)) := do
   let site := (← get).sites
   let mode := (← read).lends site
-  let named := fun (wide all : Bool) => (match s with
+  let b := (← get).body
+  let named := fun (wide all : Bool) => (match b.stmt s with
     | .expr e => do
       let (e, found) ← nameBorrows scope site false all e
-      pure (Stmt.expr e, found)
+      pure (Flat.FStmt.expr e, found)
     | .assign target value => do
-      let (target, found) ← nameBorrows scope site false all (.tuple [target])
+      let (target, found) ← nameBorrows scope site false all (← epush (.tuple #[target]))
       let (value, more) ← nameBorrows scope (site + 1000000) false all value
-      let target := match target with
-        | .tuple [target] => target
-        | other => other
+      let target := match (← get).body.expr target with
+        | .tuple #[target] => target
+        | _ => target
       pure (.assign target value, found ++ more)
     -- (Of what is given a name, a borrow lasts while all of it is worked
     -- out: then, while what is made of it is used.)
@@ -726,7 +796,7 @@ partial def lendWithin (scope : Scope) (s : Stmt) : M (Option (List Stmt)) := do
     | .letMut x value => do
       let (value, found) ← nameBorrows scope site wide true value
       pure (.letMut x value, found)
-    | other => pure (other, []) : M (Stmt × List (String × Expr)))
+    | other => pure (other, []) : M (Flat.FStmt × List (String × Flat.ExprId)))
   -- (Whether this is a place at all does not depend on how it is tried.)
   if (← named false true).2.isEmpty then return none
   modify fun st =>
@@ -740,24 +810,25 @@ partial def lendWithin (scope : Scope) (s : Stmt) : M (Option (List Stmt)) := do
   let isCell := fun (x : String) => match lookupVar scope x with
     | some (true, _, _) => true
     | _ => false
-  let (s', first) := match s' with
+  let (s', first) ← match s' with
     | .expr e =>
-      let (e, first) := pullFirst site isCell e
-      (Stmt.expr e, first)
+      let (e, first) ← ebuild (pullFirst site isCell e)
+      pure (Flat.FStmt.expr e, first)
     | .assign target value =>
-      let (target, first) := pullFirst site isCell target
-      (.assign target value, first)
+      let (target, first) ← ebuild (pullFirst site isCell target)
+      pure (.assign target value, first)
     | .let_ pat value =>
-      let (value, first) := pullFirst site isCell value
-      (.let_ pat value, first)
+      let (value, first) ← ebuild (pullFirst site isCell value)
+      pure (.let_ pat value, first)
     | .letMut x value =>
-      let (value, first) := pullFirst site isCell value
-      (.letMut x value, first)
-    | other => (other, [])
-  pure (some ((first ++ found).map (fun (n, a) => Stmt.let_ (.var n) a) ++ [s']))
+      let (value, first) ← ebuild (pullFirst site isCell value)
+      pure (.letMut x value, first)
+    | other => pure (other, [])
+  let lets ← (first ++ found).mapM fun (n, a) => epushS (.let_ (.var n) a)
+  pure (some (lets ++ [← epushS s']))
 
 partial def elabBorrowScope (scope : Scope) (tailPos : Bool) (p : String) (uniq : Bool)
-    (cell : Atom) (rest : List Stmt) (wide : Bool) : M Atom := do
+    (cell : Atom) (rest : List Flat.StmtId) (wide : Bool) : M Atom := do
   -- (A borrow a statement's place named, `%lend12.0`, is of place 12.)
   let named := if p.startsWith "%" then
       let digits := (p.toList.dropWhile fun c => !c.isDigit).takeWhile Char.isDigit
@@ -771,28 +842,35 @@ partial def elabBorrowScope (scope : Scope) (tailPos : Bool) (p : String) (uniq 
   pure r
 
 partial def elabBorrowScopeIn (scope : Scope) (tailPos : Bool) (p : String) (uniq : Bool)
-    (cell : Atom) (rest : List Stmt) (wide : Bool) : M Atom := do
-  let k := scopeExtent p rest wide
+    (cell : Atom) (rest : List Flat.StmtId) (wide : Bool) : M Atom := do
+  let b := (← get).body
+  let k := scopeExtent b p rest wide
   let inner := rest.take k
   let after := rest.drop k
   -- If the last statement of the scope is a call whose later arguments do not
   -- mention the borrow, the scope ends before them: the arguments up to the
   -- last that does are computed first and given names.
-  let (inner, after) := match inner.getLast?.map (splitCallOn p (← get).sites) with
-    | some (some (lets, last)) =>
+  let split ← match inner.getLast? with
+    | some last => ebuild (splitCallOn p (← get).sites last)
+    | none => pure none
+  let (inner, after) := match split with
+    | some (lets, last) =>
       -- (Not where the borrow is to last as long as the statement.)
       if wide || p.startsWith "%heldw" then (inner, after) else (inner.dropLast ++ lets, last :: after)
-    | _ => (inner, after)
-  let used := fvStmts [] after
-  let out := ((letNames inner).filter used.contains).eraseDups
-  let (inner, pat) : List Stmt × Option Pattern :=
-    if after.isEmpty then (inner, none)
+    | none => (inner, after)
+  let b := (← get).body
+  let used := b.fvStmts [] after
+  let out := ((letNames b inner).filter used.contains).eraseDups
+  let (inner, pat) : List Flat.StmtId × Option Pattern ←
+    if after.isEmpty then pure (inner, none)
     else match out with
-      | [] => (inner ++ [.expr (.tuple [])], some .wild)
-      | [n] => (inner ++ [.expr (.name none n)], some (.var n))
-      | ns => (inner ++ [.expr (.tuple (ns.map (.name none)))], some (.tuple (ns.map .var)))
+      | [] => pure (inner ++ [← epushS (.expr (← epush (.tuple #[])))], some .wild)
+      | [n] => pure (inner ++ [← epushS (.expr (← epush (.name none n)))], some (.var n))
+      | ns =>
+        let parts ← ns.toArray.mapM fun n => epush (.name none n)
+        pure (inner ++ [← epushS (.expr (← epush (.tuple parts)))], some (.tuple (ns.map .var)))
   let why := s!"the borrow `{p}` ends after the call returns"
-  let captures := captureNames scope (fvStmts [p] inner)
+  let captures := captureNames scope ((← get).body.fvStmts [p] inner)
   let body ← mkClause captures [.var p] (fun sc => withNoTail (some why) (elabStmts sc true inner))
   let idx ← addFn ⟨[body]⟩ s!"the scope of the borrow `{p}` in `{(← get).owner}`"
   let captured ← (captures.filterMap (fun y => scope.lookup y)).mapM useLocal
@@ -807,9 +885,9 @@ partial def elabBorrowScopeIn (scope : Scope) (tailPos : Bool) (p : String) (uni
 
 /-- Run the rest of a block under a guard. A `tail` call written directly in
 that rest would leave the guard behind on every iteration, so it is refused. -/
-partial def elabGuarded (scope : Scope) (tailPos : Bool) (cleanup : Atom) (rest : List Stmt)
+partial def elabGuarded (scope : Scope) (tailPos : Bool) (cleanup : Atom) (rest : List Flat.StmtId)
     (why : String) : M Atom := do
-  let captures := captureNames scope (fvStmts [] rest)
+  let captures := captureNames scope ((← get).body.fvStmts [] rest)
   let body ← mkClause captures [] (fun sc => withNoTail (some why) (elabStmts sc true rest))
   let idx ← addFn ⟨[body]⟩ s!"a guarded block in `{(← get).owner}`"
   let captured ← (captures.filterMap (fun x => scope.lookup x)).mapM useLocal
@@ -892,10 +970,10 @@ partial def mkClause (captures : List String) (pats : List Pattern) (body : Scop
   pure ⟨corePats.toList, tm⟩
 
 /-- A callable literal: a new closed function and a closure over its captures. -/
-partial def elabClosure (scope : Scope) (clauses : List Clause) (id : Nat := 0)
-    (destroy : List Stmt := []) : M Atom := do
-  let arities := clauses.map fun
-    | .mk pats _ => pats.length
+partial def elabClosure (scope : Scope) (clauses : Array Flat.ClauseId) (id : Nat := 0)
+    (destroy : List Flat.StmtId := []) : M Atom := do
+  let b := (← get).body
+  let arities := clauses.toList.map fun c => (b.clause c).pats.length
   match arities with
   | [] => throw "a callable needs at least one clause"
   | n :: rest =>
@@ -903,9 +981,10 @@ partial def elabClosure (scope : Scope) (clauses : List Clause) (id : Nat := 0)
       throw "the clauses of a callable take different numbers of arguments"
   -- (What destroys the captures may need what the function was given to
   -- know how: the callable captures that too.)
-  let captures := captureNames scope (clauses.flatMap (fvClause []) ++ fvStmts [] destroy)
-  let coreClauses ← clauses.mapM fun
-    | .mk pats body => mkClause captures pats (fun sc => elabStmts sc true body)
+  let captures := captureNames scope (b.fvClauses clauses ++ b.fvStmts [] destroy)
+  let coreClauses ← clauses.toList.mapM fun c =>
+    let ⟨pats, body⟩ := b.clause c
+    mkClause captures pats (fun sc => elabStmts sc true body.toList)
   let idx ← addFn ⟨coreClauses⟩ s!"a callable in `{(← get).owner}`"
   -- The function that destroys a closure of it: given what the closure
   -- captured, in order, as its arguments.
@@ -938,7 +1017,7 @@ other captured, instead of being captured a second time. So the two are two
 bodies over one environment, of which at most one runs, and a value that can be
 used once can be used by each. Otherwise the argument is dropped.
 -/
-partial def elabGiven (scope : Scope) (id : Nat) (body : List Stmt) : M Atom := do
+partial def elabGiven (scope : Scope) (id : Nat) (body : List Flat.StmtId) : M Atom := do
   let s ← get
   -- What the other block captured: each name with the local of this
   -- activation it stood for, if it was captured here or taken, in an
@@ -957,9 +1036,9 @@ partial def elabGiven (scope : Scope) (id : Nat) (body : List Stmt) : M Atom := 
     match a, scope.lookup x with
     | some a, some b => sameAtom a b
     | _, _ => false
-  let free := captureNames scope (fvStmts [] body)
+  let free := captureNames scope (s.body.fvStmts [] body)
   let taken := free.filter fun x => layout.any fun (y, a) => x == y && shared y a
-  if taken.isEmpty then elabClosure scope [.mk [.wild] body] id
+  if taken.isEmpty then elabClosure scope #[← epushC ⟨[.wild], body.toArray⟩] id
   else
     let own := free.filter fun x => !taken.contains x
     -- The body, as a function over the other block's environment: what this
@@ -1013,17 +1092,21 @@ a clause that performs the operation again outside the handler, so a payload no
 arm matches is forwarded; the operation must then be handled outside as well.
 In tail position the handler keeps no caller frame.
 -/
-partial def elabHandle (scope : Scope) (tailPos : Bool) (subject : Expr) (arms : List Clause) :
+partial def elabHandle (scope : Scope) (tailPos : Bool) (subject : Flat.ExprId) (arms : Array Flat.ClauseId) :
     M Atom := do
   let g ← read
-  let thunk ← elabClosure scope [.mk [] [.expr subject]]
-  let captures := captureNames scope (arms.flatMap (fvClause []))
-  let mut completions : Array (Pattern × List Stmt) := #[]
-  let mut opArms : Array (OpInfo × List Pattern × List Stmt) := #[]
+  let st ← epushS (.expr subject)
+  let thunk ← elabClosure scope #[← epushC ⟨[], #[st]⟩]
+  let b := (← get).body
+  let captures := captureNames scope (b.fvClauses arms)
+  let mut completions : Array (Pattern × List Flat.StmtId) := #[]
+  let mut opArms : Array (OpInfo × List Pattern × List Flat.StmtId) := #[]
   let mut opNames : List (Nat × String) := []
   for arm in arms do
-    match arm with
-    | .mk [.ctor x q ps] body =>
+    let ⟨pats, body⟩ := b.clause arm
+    let body := body.toList
+    match pats with
+    | [.ctor x q ps] =>
       match g.ops.lookup x with
       | some info =>
         if let some owner := q then
@@ -1031,8 +1114,8 @@ partial def elabHandle (scope : Scope) (tailPos : Bool) (subject : Expr) (arms :
         opArms := opArms.push (info, ps, body)
         opNames := (info.id, x) :: opNames
       | none => completions := completions.push (.ctor x q ps, body)
-    | .mk [p] body => completions := completions.push (p, body)
-    | .mk _ _ => throw "a handler arm has exactly one head pattern"
+    | [p] => completions := completions.push (p, body)
+    | _ => throw "a handler arm has exactly one head pattern"
   let identity : List Core.Clause := [⟨[.wild], .ret (.var 0)⟩]
   let retClauses ←
     if completions.isEmpty then pure identity
@@ -1058,15 +1141,18 @@ partial def elabHandle (scope : Scope) (tailPos : Bool) (subject : Expr) (arms :
           -- its cleanups run. Otherwise it would simply be forgotten.
           -- (What destroys it where the arm is done, written by the
           -- elaborator, is not a use: giving it up first does that.)
-          let hookOf := fun (k : String) (s : Stmt) => match unlocated s with
-            | .defer (.call id _ args) => id == dropCallId && args.any (fun a => fvExpr [] a == [k])
-            | .expr (.call id _ args) => id == dropCallId && args.any (fun a => fvExpr [] a == [k])
+          let hookOf := fun (k : String) (s : Flat.StmtId) =>
+            let call := fun (e : Flat.ExprId) => match b.expr e with
+              | .call id _ args => id == dropCallId && args.any (fun a => b.fvExpr [] a == [k])
+              | _ => false
+            match b.stmt (b.unlocated s) with
+            | .defer e | .expr e => call e
             | _ => false
           let (unused, body) := match ps.getLast? with
             | some .wild => (true, body)
             | some (.var k) =>
               let real := body.filter (!hookOf k ·)
-              if (fvStmts [] real).contains k then (false, body) else (true, real)
+              if (b.fvStmts [] real).contains k then (false, body) else (true, real)
             | _ => (false, body)
           if unused then
             mkClause captures ps (fun sc => do
@@ -1669,13 +1755,23 @@ def unfield (b : Blocks) (items : List Item) : Except String (List Item) := do
     | item => item)
 
 /-- Collect the global declarations. -/
-def collect (items : List Item) :
-    Except String (Globals × List (String × List Clause) × Array String) := do
+def collect (items : List Flat.FItem) :
+    Except String (Globals × List (String × Flat.Body) × Array String) := do
   let mut g : Globals := {}
-  let mut fns : Array (String × List Clause) := #[]
+  let mut fns : Array (String × Flat.Body) := #[]
   let mut names : Array String := #["tuple"]
   let mut nextOp := 0
-  for item in items do
+  for fitem in items do
+    match fitem with
+    | .fn name _ _ _ body =>
+      if g.fns.contains name then throw s!"function `{name}` is declared twice"
+      g := { g with fns := g.fns.insert name fns.size, bodies := g.bodies.insert name body }
+      fns := fns.push (name, body)
+    | .alias name b e => g := { g with aliases := g.aliases.insert name (Flat.treeExpr b e) }
+    | .pub _ _ | .traitInfo .. | .module .. => pure ()
+    | .impl _ tr _ _ _ _ =>
+      throw s!"an implementation of `{tr}`: a program with traits is elaborated only after it is checked"
+    | .other item =>
     match item with
     | .enum owner _ ctors =>
       for (c, fields) in ctors do
@@ -1694,10 +1790,7 @@ def collect (items : List Item) :
         g := { g with
           ops := (op.name, ⟨owner, nextOp, op.payload.length, op.terminal⟩) :: g.ops }
         nextOp := nextOp + 1
-    | .fn name _ _ _ clauses =>
-      if g.fns.contains name then throw s!"function `{name}` is declared twice"
-      g := { g with fns := g.fns.insert name fns.size, bodies := g.bodies.insert name clauses }
-      fns := fns.push (name, clauses)
+    | .fn name _ _ _ _ => throw s!"function `{name}`: its body is written flat"
     | .alias name value => g := { g with aliases := g.aliases.insert name value }
     | .fixity => pure ()
     | .coerce _ => pure ()
@@ -1721,39 +1814,59 @@ def collect (items : List Item) :
       throw s!"an implementation of `{tr}`: a program with traits is elaborated only after it is checked"
   pure (g, fns.toList, names)
 
+/-- Flat items as what they declare, for what reads declarations alone (the
+certificate): each function without its body. -/
+def declaredOf (items : List Flat.FItem) : List Item :=
+  items.map fun
+    | .fn n ps annots ret _ => .fn n ps annots ret []
+    | item => item.toItem
+
+/-- What tree items declare, for what reads declarations alone (the
+certificate): their functions' bodies are not asked. -/
+def collectDeclared (items : List Item) : Except String Globals := do
+  let (g, _, _) ← collect (items.map fun
+    | .fn n ps annots ret _ => Flat.FItem.fn n ps annots ret {}
+    | item => Flat.ofItem item)
+  pure g
+
 /-- A function whose body mentions its own label `@name` runs inside that label's
 scope, so applying the label returns from the function. -/
-private def withSelfLabel (name : String) : Clause → Clause
-  | .mk pats body =>
-    let free := fvStmts (pats.flatMap patVars) body
-    let short := Syntax.labelShort name
-    if free.contains (labelName name) then
-      .mk pats [.expr (.labelScope name body)]
-    -- (`@f` of `m::f` or `T::f`.)
-    else if short != name && free.contains (labelName short) then
-      .mk pats [.expr (.labelScope short body)]
-    else .mk pats body
+private def withSelfLabel (name : String) (b : Flat.Body) : Flat.Body := Id.run do
+  let short := Syntax.labelShort name
+  let (roots, b) := (b.roots.mapM fun c => (do
+      let b ← get
+      let ⟨pats, body⟩ := b.clause c
+      let free := b.fvStmts (pats.flatMap patVars) body.toList
+      let wrap := fun (l : String) => (do
+        let scope ← Flat.pushExpr (.labelScope l body)
+        let st ← Flat.pushStmt (.expr scope)
+        Flat.pushClause ⟨pats, #[st]⟩ : Flat.Build Flat.ClauseId)
+      if free.contains (labelName name) then wrap name
+      -- (`@f` of `m::f` or `T::f`.)
+      else if short != name && free.contains (labelName short) then wrap short
+      else pure c : Flat.Build Flat.ClauseId)).run b
+  pure { b with roots }
 
 /-- The program without the functions nothing reaches from `main` or from a
 coercion, which a call may be given without its being written. -/
-def reachable (roots : List String) (items : List Item) : List Item := Id.run do
+def reachable (roots : List String) (items : List Flat.FItem) : List Flat.FItem := Id.run do
   -- The function for a case that cannot be, if something is written with it
   -- and it is not yet there.
   let defined := items.any fun
     | .fn name _ _ _ _ => name == neverName
     | _ => false
   let wanted := items.any fun
-    | .fn _ _ _ _ clauses => (clauses.flatMap (fvClause [])).contains neverName
+    | .fn _ _ _ _ b => (b.fvClauses b.roots).contains neverName
     | _ => false
   let items := if wanted && !defined then
-      Item.fn neverName [] [] none [.mk [] [.expr (.tailCall 0 (.name none neverName) [])]] :: items
+      Flat.FItem.fn neverName [] [] none (Flat.ofClauses [.mk [] [.expr (.tailCall 0 (.name none neverName) [])]]) :: items
     else items
   let bodies : Std.HashMap String (List String) := items.foldl (init := {}) fun acc item =>
     match item with
-    | .fn name _ _ _ clauses =>
-      acc.insert name ((acc.getD name []) ++ clauses.flatMap (fvClause []))
+    | .fn name _ _ _ b =>
+      acc.insert name ((acc.getD name []) ++ b.fvClauses b.roots)
     -- (A name for an expression, a constant's: what the expression uses.)
-    | .alias name value => acc.insert name ((acc.getD name []) ++ fvExpr [] value)
+    | .alias name b e => acc.insert name ((acc.getD name []) ++ b.fvExpr [] e)
     | _ => acc
   let mut seen : Std.HashSet String := {}
   let mut todo := roots
@@ -1773,28 +1886,31 @@ def reachable (roots : List String) (items : List Item) : List Item := Id.run do
 
 /-- Elaborate a program. `blocks` is what the checker learnt about its blocks;
 without it, every block captures what it mentions for itself. -/
-def elabProgram (items : List Item) (blocks : Option Blocks := none)
+def elabProgram (items : List Flat.FItem) (blocks : Option Blocks := none)
     (lends : Nat → Nat := fun _ => 0) (root : String := "main") : Except String Output := do
   let (g, fns, names) ← collect items
   let g := { g with blocks := blocks, lends := lends }
   let coercions := (blocks.getD {}).coercions
-  let fns := fns.map fun (name, clauses) => (name, coerceFn coercions name clauses)
+  -- (The coercions written out: through the clauses as trees.)
+  let fns := if coercions.isEmpty then fns else fns.map fun (name, b) =>
+    (name, Flat.ofClauses (coerceFn coercions name (Flat.toClauses b)))
   let mainIdx ← match g.fns[root]? with
     | some idx => pure idx
     | none => throw s!"the program has no `{root}` function"
   let action : M Unit := do
     let mut idx := 0
-    for (name, clauses) in fns do
-      let arities := clauses.map fun
-        | .mk pats _ => pats.length
+    for (name, b) in fns do
+      let arities := b.roots.toList.map fun c => (b.clause c).pats.length
       match arities with
       | [] => throw s!"function `{name}` has no clauses"
       | n :: rest =>
         unless rest.all (· == n) do
           throw s!"the clauses of `{name}` take different numbers of arguments"
-      modify fun s => { s with owner := name }
-      let coreClauses ← (clauses.map (withSelfLabel name)).mapM fun
-        | .mk pats body => mkClause [] pats (fun sc => elabStmts sc true body)
+      let b := withSelfLabel name b
+      modify fun s => { s with owner := name, body := b }
+      let coreClauses ← b.roots.toList.mapM fun c =>
+        let ⟨pats, body⟩ := b.clause c
+        mkClause [] pats (fun sc => elabStmts sc true body.toList)
       modify fun s => { s with fns := s.fns.set! idx ⟨coreClauses⟩ }
       idx := idx + 1
   let fnNames := (fns.map fun (name, _) => s!"`{name}`").toArray

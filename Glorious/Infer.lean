@@ -327,7 +327,7 @@ to be kept for the next. -/
 def certifyKept (items : List Item) (p : Core.Program) (strict : Bool)
     (envSizes : List (Nat × Nat × Nat) := []) (regions loans ranked widen : Bool := false)
     (memo : Memo := {}) (remember : Bool := true) : Except String (Cert × Made) := do
-  let (g, _, _) ← Elab.collect items
+  let g ← Elab.collectDeclared items
   let (cert, st) ← (certifyM items g p envSizes).run
     { fns := p.fns, strict, regions, loans, ranked, widen, memo := memo.inst
       frozen := memo.schemes, keptFaces := memo.faces, remember }

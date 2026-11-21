@@ -257,6 +257,56 @@ end
 /-- A body's own clauses as trees again. -/
 def toClauses (b : Body) : List Clause := b.roots.toList.map (treeClause b)
 
+/-! ## Items with flat bodies -/
+
+/-- An item whose functions' clauses, and whose constant's value, are flat
+bodies of their own; an item with no code is as it was (`other`). -/
+inductive FItem where
+  | fn (name : String) (params : List String) (annots : List (Option TypeExpr))
+      (ret : Option TypeExpr) (body : Body)
+  | alias (name : String) (body : Body) (value : ExprId)
+  | impl (params : List String) (trait : String) (head : String) (args : List String)
+      (context : List (String × String)) (methods : List FItem)
+  | traitInfo (name : String) (supers : List String) (defaults : List FItem)
+      (params : List String) (assocs : List String)
+  | module (name : String) (body : Option (List FItem))
+  | pub (parent : Bool) (item : FItem)
+  | other (item : Item)
+  deriving Inhabited
+
+/-- An item with its code flat. -/
+partial def ofItem : Item → FItem
+  | .fn n ps annots ret clauses => .fn n ps annots ret (ofClauses clauses)
+  | .alias n v => let (b, e) := ofExpr v; .alias n b e
+  | .impl ps tr head args ctx ms => .impl ps tr head args ctx (ms.map ofItem)
+  | .traitInfo n supers ds ps assocs => .traitInfo n supers (ds.map ofItem) ps assocs
+  | .module n body => .module n (body.map (·.map ofItem))
+  | .pub parent item => .pub parent (ofItem item)
+  | item => .other item
+
+/-- The item as a tree again. -/
+partial def FItem.toItem : FItem → Item
+  | .fn n ps annots ret b => .fn n ps annots ret (toClauses b)
+  | .alias n b e => .alias n (treeExpr b e)
+  | .impl ps tr head args ctx ms => .impl ps tr head args ctx (ms.map FItem.toItem)
+  | .traitInfo n supers ds ps assocs => .traitInfo n supers (ds.map FItem.toItem) ps assocs
+  | .module n body => .module n (body.map (·.map FItem.toItem))
+  | .pub parent item => .pub parent item.toItem
+  | .other item => item
+
+def ofItems (items : List Item) : List FItem := items.map ofItem
+def toItems (items : List FItem) : List Item := items.map FItem.toItem
+
+/-- Every function of these items with its body made by `f`: in
+implementations, traits' defaults and modules too (`Item.mapClauses`). -/
+partial def FItem.mapBodies (f : Body → Body) : FItem → FItem
+  | .fn n ps annots ret b => .fn n ps annots ret (f b)
+  | .impl ps tr head args ctx ms => .impl ps tr head args ctx (ms.map (·.mapBodies f))
+  | .traitInfo n supers ds ps assocs => .traitInfo n supers (ds.map (·.mapBodies f)) ps assocs
+  | .module n (some body) => .module n (some (body.map (·.mapBodies f)))
+  | .pub parent item => .pub parent (item.mapBodies f)
+  | item => item
+
 /-- Do clauses come back as they were from their body? -/
 def roundTrips (clauses : List Clause) : Bool :=
   hash (toClauses (ofClauses clauses)) == hash clauses

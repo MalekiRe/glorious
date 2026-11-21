@@ -3,6 +3,7 @@ module
 public import Std.Data.HashMap
 public import Std.Data.HashSet
 public import Glorious.Syntax.Ast
+public import Glorious.Syntax.FlatOps
 public import Glorious.Core.Ast
 public import Glorious.Addr
 
@@ -293,8 +294,8 @@ structure Globals where
   ops : List (String × OpInfo) := []
   fns : Std.HashMap String Nat := {}
   aliases : Std.HashMap String Expr := {}
-  /-- The clauses of each top-level function, by name. -/
-  bodies : Std.HashMap String (List Clause) := {}
+  /-- The body of each top-level function, by name. -/
+  bodies : Std.HashMap String Flat.Body := {}
   /-- The prelude's type of arrays, its function that adds an element, and
   the trait of `a[i]`, by the names they have in this program. -/
   arrays : Option (String × String × String) := none
@@ -439,6 +440,10 @@ structure St where
   /-- Each function whose closures say how they are destroyed, with the
   function that destroys what one captured. -/
   drops : List (Nat × Nat) := []
+  /-- The body of the function being elaborated: what an `ExprId` is a place
+  of. What the elaborator writes out (a borrow named first, a block around a
+  statement) is added to it. -/
+  body : Flat.Body := {}
 
 abbrev M := ReaderT Globals (StateT St (Except String))
 
@@ -606,14 +611,19 @@ partial def unlocated : Stmt → Stmt
   | .located _ _ s => unlocated s
   | s => s
 
+open Flat in
 /-- The names a statement gives values that may hold what `tracked` names hold. -/
-def madeFrom (tracked : List String) (s : Stmt) : List String :=
-  match unlocated s with
-  | .let_ pat value => if (fvExpr [] value).any tracked.contains then patVars pat else []
-  | .letMut y value => if (fvExpr [] value).any tracked.contains then [y] else []
-  | .assign (.name none y) value => if (fvExpr [] value).any tracked.contains then [y] else []
+def madeFrom (b : Body) (tracked : List String) (s : StmtId) : List String :=
+  match b.stmt (b.unlocated s) with
+  | .let_ pat value => if (b.fvExpr [] value).any tracked.contains then patVars pat else []
+  | .letMut y value => if (b.fvExpr [] value).any tracked.contains then [y] else []
+  | .assign t value =>
+    match b.bare? t with
+    | some y => if (b.fvExpr [] value).any tracked.contains then [y] else []
+    | none => []
   | _ => []
 
+open Flat in
 /--
 How many of the statements after `let p = &x` the borrow's scope takes in: up
 to the last that mentions `p`, and with `wide`, anything made from `p`. A
@@ -621,11 +631,11 @@ mutable variable declared inside the scope ends with it, so the scope also
 takes in every statement that mentions one; and a `defer` inside it would run
 when the scope ends, so a scope that has one takes in the whole block.
 -/
-partial def scopeExtent (p : String) (rest : List Stmt) (wide : Bool) : Nat :=
+partial def scopeExtent (b : Body) (p : String) (rest : List StmtId) (wide : Bool) : Nat :=
   go [p] 0
 where
   go (tracked : List String) (k : Nat) : Nat :=
-    let inner := (rest.take k).map unlocated
+    let inner := (rest.take k).map fun s => b.stmt (b.unlocated s)
     let defers := inner.any fun
       | .defer _ => true
       | _ => false
@@ -635,10 +645,10 @@ where
         | .letMut y _ => some y
         | _ => none
       let made :=
-        if wide then inner.foldl (fun acc s => acc ++ madeFrom acc s) tracked else tracked
+        if wide then (rest.take k).foldl (fun acc s => acc ++ madeFrom b acc s) tracked else tracked
       let tracked' := (made ++ muts).eraseDups
       let k' := ((List.range (rest.length + 1)).drop k).find? fun j =>
-        !(fvStmts [] (rest.drop j)).any tracked'.contains
+        !(b.fvStmts [] (rest.drop j)).any tracked'.contains
       let k' := k'.getD rest.length
       if k' == k && tracked'.length == tracked.length then k else go tracked' k'
 
@@ -648,6 +658,7 @@ own: the statement was the place. -/
 def madeBorrow (p : String) : Bool :=
   p.startsWith "%lend" || p.startsWith "%held" || p.startsWith "%borrow"
 
+open Flat in
 /-- A statement's expression with what is worked out before its first borrow
 is used taken out and named, in the order it is worked out: so that a borrow
 made a scope around the statement does not last while that runs, which may
@@ -656,170 +667,211 @@ read the variable borrowed. (`a[len(a) - 1] = v`.)
 Only what comes first can be taken out without changing the order: once a
 call that is given a borrow has run, what follows stays where it is. Nothing
 is taken out of what a handler watches: it would then run unwatched. -/
-partial def pullFirst (site : Nat) (isCell : String → Bool) (e : Expr) :
-    Expr × List (String × Expr) :=
-  let (e, pulled, _) := go e [] true
-  (e, pulled.reverse)
+partial def pullFirst (site : Nat) (isCell : String → Bool) (e : ExprId) :
+    Build (ExprId × List (String × ExprId)) := do
+  let (e, pulled, _) ← go e [] true
+  pure (e, pulled.reverse)
 where
-  has : Expr → Bool
+  has (b : Body) (e : ExprId) : Bool :=
+    match b.expr e with
     | .name none n => madeBorrow n
-    | .call _ f args => has f || args.any has
-    | .tuple args => args.any has
-    | .deref e => has e
-    | .proj e _ => has e
-    | .handle subject _ => has subject
+    | .call _ f args => has b f || args.any (has b)
+    | .tuple args => args.any (has b)
+    | .deref e | .proj e _ => has b e
+    | .handle subject _ => has b subject
     | _ => false
   /-- Is it worked out at all: not a number, a callable written out, or a
   name that is not a variable's. -/
-  worth : Expr → Bool
-    | .int _ => false
-    | .closure _ _ => false
-    | .label _ => false
+  worth (b : Body) (e : ExprId) : Bool :=
+    match b.expr e with
+    | .int _ | .closure _ _ | .label _ => false
     | .name none n => isCell n
     | .name (some _) _ => false
     | _ => true
-  operand (e : Expr) (pulled : List (String × Expr)) (first : Bool) :
-      Expr × List (String × Expr) × Bool :=
-    if has e then go e pulled first
-    else if first && worth e then
+  operand (e : ExprId) (pulled : List (String × ExprId)) (first : Bool) :
+      Build (ExprId × List (String × ExprId) × Bool) := do
+    let b ← get
+    if has b e then go e pulled first
+    else if first && worth b e then
       let n := s!"%pre{site}.{pulled.length}"
-      (.name none n, (n, e) :: pulled, first)
-    else (e, pulled, first)
-  operands (es : List Expr) (pulled : List (String × Expr)) (first : Bool) :
-      List Expr × List (String × Expr) × Bool :=
-    es.foldl (fun (out, pulled, first) e =>
-      let (e, pulled, first) := operand e pulled first
-      (out ++ [e], pulled, first)) ([], pulled, first)
-  go (e : Expr) (pulled : List (String × Expr)) (first : Bool) :
-      Expr × List (String × Expr) × Bool :=
-    match e with
+      pure (← pushExpr (.name none n), (n, e) :: pulled, first)
+    else pure (e, pulled, first)
+  operands (es : Array ExprId) (pulled : List (String × ExprId)) (first : Bool) :
+      Build (Array ExprId × List (String × ExprId) × Bool) := do
+    let mut out : Array ExprId := #[]
+    let mut pulled := pulled
+    let mut first := first
+    for e in es do
+      let (e', pulled', first') ← operand e pulled first
+      out := out.push e'
+      pulled := pulled'
+      first := first'
+    pure (out, pulled, first)
+  go (e : ExprId) (pulled : List (String × ExprId)) (first : Bool) :
+      Build (ExprId × List (String × ExprId) × Bool) := do
+    match (← get).expr e with
     | .call id f args =>
-      let (f, pulled, first) := match f with
-        | .name _ _ => (f, pulled, first)
+      let (f, pulled, first) ← match (← get).expr f with
+        | .name _ _ => pure (f, pulled, first)
         | _ => operand f pulled first
-      let (args, pulled, _) := operands args pulled first
+      let (args, pulled, _) ← operands args pulled first
       -- (The call runs now: nothing after it is first.)
-      (.call id f args, pulled, false)
+      pure (← pushExpr (.call id f args), pulled, false)
     | .tuple args =>
-      let (args, pulled, first) := operands args pulled first
-      (.tuple args, pulled, first)
-    | .deref e =>
-      let (e, pulled, first) := operand e pulled first
-      (.deref e, pulled, first)
-    | .proj e n =>
-      let (e, pulled, first) := operand e pulled first
-      (.proj e n, pulled, first)
-    | other => (other, pulled, false)
+      let (args, pulled, first) ← operands args pulled first
+      pure (← pushExpr (.tuple args), pulled, first)
+    | .deref x =>
+      let (x, pulled, first) ← operand x pulled first
+      pure (← pushExpr (.deref x), pulled, first)
+    | .proj x n =>
+      let (x, pulled, first) ← operand x pulled first
+      pure (← pushExpr (.proj x n), pulled, first)
+    | _ => pure (e, pulled, false)
 
+open Flat in
 /-- The statements of a block with each `let p = &x` moved to just before the
 first statement that mentions `p`. Making a reference does nothing, and the
 later it is made the less its scope has to take in: two borrows that overlapped
 need not, and a `defer` between a borrow and its use is no longer inside the
 borrow's scope. One that nothing mentions, or that would pass a statement
 giving `p` or `x` another meaning, stays. Doing this twice changes nothing. -/
-partial def sinkBorrows (stmts : List Stmt) : List Stmt :=
+partial def sinkBorrows (b : Body) (stmts : List StmtId) : List StmtId :=
   let arr := stmts.toArray
   -- Where each statement is to go: before the statement at this index.
   let target := fun (i : Nat) =>
-    match arr[i]?.map unlocated with
-    | some (.let_ (.var p) (.ref _ x)) =>
-      let later := (List.range arr.size).drop (i + 1)
-      match later.find? fun j => (fvStmts [] [arr.getD j (.expr (.tuple []))]).contains p with
-      | none => none
-      | some j =>
-        let between := (later.takeWhile (· < j)).map fun k => unlocated (arr.getD k (.expr (.tuple [])))
-        let rebinds := between.any fun
-          | .let_ pat _ => (patVars pat).contains p || (patVars pat).contains x
-          | .letMut y _ => y == p || y == x
-          | _ => false
-        if rebinds || j == i + 1 then none else some j
+    match arr[i]?.map fun s => b.stmt (b.unlocated s) with
+    | some (.let_ (.var p) value) =>
+      match b.expr value with
+      | .ref _ x =>
+        let later := (List.range arr.size).drop (i + 1)
+        match later.find? fun j => (b.fvStmts [] (arr[j]?.toList)).contains p with
+        | none => none
+        | some j =>
+          let between := (later.takeWhile (· < j)).filterMap fun k => arr[k]?.map fun s => b.stmt (b.unlocated s)
+          let rebinds := between.any fun
+            | .let_ pat _ => (patVars pat).contains p || (patVars pat).contains x
+            | .letMut y _ => y == p || y == x
+            | _ => false
+          if rebinds || j == i + 1 then none else some j
+      | _ => none
     | _ => none
   let targets := (List.range arr.size).map target
   if targets.all Option.isNone then stmts
   else
     -- The statements moved to before `j`, each after those moved to before it.
-    let rec before (j : Nat) : List Stmt :=
+    let rec before (j : Nat) : List StmtId :=
       (List.range j).flatMap fun i =>
-        if targets.getD i none == some j then before i ++ [arr.getD i (.expr (.tuple []))] else []
+        if targets.getD i none == some j then before i ++ arr[i]?.toList else []
     (List.range arr.size).flatMap fun j =>
-      if (targets.getD j none).isSome then [] else before j ++ [arr.getD j (.expr (.tuple []))]
+      if (targets.getD j none).isSome then [] else before j ++ arr[j]?.toList
 
+open Flat in
 /-- A statement that ends in a call some of whose arguments mention `p` and are
 followed by arguments that do not: those up to the last that does, each given a
 name, and the statement with the names in their place. -/
-def splitCallOn (p : String) (site : Nat) (s : Stmt) : Option (List Stmt × Stmt) :=
-  let split := fun (e : Expr) =>
-    match e with
-    | .call id (.name q g) args =>
-      if g == p then none
-      else
-        let last := (List.range args.length).reverse.find? fun i =>
-          (fvExpr [] (args.getD i (.int 0))).contains p
+def splitCallOn (p : String) (site : Nat) (s : StmtId) : Build (Option (List StmtId × StmtId)) := do
+  let b ← get
+  let split := fun (e : ExprId) => (do
+    match b.expr e with
+    | .call id g args =>
+      match b.expr g with
+      | .name q gn =>
+        if gn == p then return none
+        let last := (List.range args.size).reverse.find? fun i =>
+          (b.fvExpr [] args[i]!).contains p
         match last with
-        | none => none
+        | none => return none
         | some j =>
-          if j + 1 == args.length then none
-          else
-            let named : List (Expr × Option (String × Expr)) :=
-              (args.zip (List.range args.length)).map fun (a, i) =>
-                let plain := match a with
-                  | Expr.name _ _ => true
-                  | Expr.int _ => true
-                  | _ => false
-                if i ≤ j && !plain then
-                  (Expr.name none s!"%part{site}.{i}", some (s!"%part{site}.{i}", a))
-                else (a, none)
-            -- An argument that is `p` itself would still be mentioned.
-            if (named.take (j + 1)).any fun (x : Expr × Option (String × Expr)) =>
-                (fvExpr [] x.1).contains p then none
-            else
-              let lets : List Stmt := named.filterMap fun (x : Expr × Option (String × Expr)) =>
-                x.2.map fun (na : String × Expr) => Stmt.let_ (.var na.1) na.2
-              some (lets, Expr.call id (.name q g) (named.map fun (x : Expr × Option (String × Expr)) => x.1))
-    | _ => none
-  let rec go (s : Stmt) : Option (List Stmt × Stmt) :=
-    match s with
-    | .located line col s => (go s).map fun (lets, last) => (lets, .located line col last)
-    | .expr e => (split e).map fun (lets, e) => (lets, .expr e)
-    | .let_ pat e => (split e).map fun (lets, e) => (lets, .let_ pat e)
+          if j + 1 == args.size then return none
+          let named : List (Option (String × ExprId)) := (List.range args.size).map fun i =>
+            let a := args[i]!
+            let plain := match b.expr a with
+              | .name _ _ | .int _ => true
+              | _ => false
+            if i ≤ j && !plain then some (s!"%part{site}.{i}", a) else none
+          -- An argument that is `p` itself would still be mentioned.
+          if ((List.range (j + 1)).any fun i =>
+              named[i]!.isNone && (b.fvExpr [] args[i]!).contains p) then return none
+          let mut lets : List StmtId := []
+          let mut newArgs : Array ExprId := #[]
+          for (n, i) in named.zipIdx do
+            match n with
+            | some (name, a) =>
+              lets := lets ++ [← pushStmt (.let_ (.var name) a)]
+              newArgs := newArgs.push (← pushExpr (.name none name))
+            | none => newArgs := newArgs.push args[i]!
+          let g' ← pushExpr (.name q gn)
+          return some (lets, ← pushExpr (.call id g' newArgs))
+      | _ => return none
+    | _ => return none : Build (Option (List StmtId × ExprId)))
+  let rec go (s : StmtId) (fuel : Nat) : Build (Option (List StmtId × StmtId)) := do
+    match fuel with
+    | 0 => return none
+    | fuel + 1 =>
+    match b.stmt s with
+    | .located line col inner =>
+      match ← go inner fuel with
+      | some (lets, last) => return some (lets, ← pushStmt (.located line col last))
+      | none => return none
+    | .expr e =>
+      match ← split e with
+      | some (lets, e) => return some (lets, ← pushStmt (.expr e))
+      | none => return none
+    | .let_ pat e =>
+      match ← split e with
+      | some (lets, e) => return some (lets, ← pushStmt (.let_ pat e))
+      | none => return none
     | .assign target e =>
-      if (fvExpr [] target).contains p then none
-      else (split e).map fun (lets, e) => (lets, .assign target e)
-    | _ => none
-  go s
+      if (b.fvExpr [] target).contains p then return none
+      match ← split e with
+      | some (lets, e) => return some (lets, ← pushStmt (.assign target e))
+      | none => return none
+    | _ => return none
+  go s 64
 
+open Flat in
 /-- The names the statements of a block bind with `let`. -/
-def letNames (ss : List Stmt) : List String :=
+def letNames (b : Body) (ss : List StmtId) : List String :=
   ss.flatMap fun s =>
-    match unlocated s with
+    match b.stmt (b.unlocated s) with
     | .let_ pat _ => patVars pat
     | _ => []
 
 /-! ## What a function gives a callable it is passed -/
 
+open Flat in
 mutual
 
 /-- With how many arguments the name `p` is applied, at each place it is,
 up to where a name `p` is bound again. -/
-partial def appliedExpr (p : String) (e : Expr) : List Nat :=
-  let here := match e with
-    | .call _ (.name none x) args | .tailCall _ (.name none x) args => if x == p then [args.length] else []
+partial def appliedExpr (b : Body) (p : String) (e : ExprId) : List Nat :=
+  let here := match b.expr e with
+    | .call _ f args | .tailCall _ f args => if b.bare? f == some p then [args.size] else []
     | _ => []
-  let direct := match e with
-    | .call _ (.name none _) args | .tailCall _ (.name none _) args => args
-    | e => e.direct
-  here ++ direct.flatMap (appliedExpr p) ++ e.bodies.flatMap fun (pats, body) =>
-    if (pats.flatMap patVars).contains p then [] else appliedStmts p body
+  let direct := match b.expr e with
+    | .call _ f args | .tailCall _ f args =>
+      match b.expr f with
+      | .name none _ => args.toList
+      | _ => (b.direct e).toList
+    | _ => (b.direct e).toList
+  let bodies : List (List Pattern × List StmtId) := match b.expr e with
+    | .closure _ cs | .handle _ cs => cs.toList.map fun c => let cl := b.clause c; (cl.pats, cl.body.toList)
+    | .labelScope _ body => [([], body.toList)]
+    | _ => []
+  here ++ direct.flatMap (appliedExpr b p) ++ bodies.flatMap fun (pats, body) =>
+    if (pats.flatMap patVars).contains p then [] else appliedStmts b p body
 
-partial def appliedStmts (p : String) : List Stmt → List Nat
+partial def appliedStmts (b : Body) (p : String) : List StmtId → List Nat
   | [] => []
-  | .located _ _ s :: rest => appliedStmts p (s :: rest)
   | s :: rest =>
-    let stops := match s with
-      | .let_ pat _ => (patVars pat).contains p
-      | .letMut x _ => x == p
-      | _ => false
-    s.exprs.flatMap (appliedExpr p) ++ (if stops then [] else appliedStmts p rest)
+    match b.stmt s with
+    | .located _ _ s => appliedStmts b p (s :: rest)
+    | st =>
+      let stops := match st with
+        | .let_ pat _ => (patVars pat).contains p
+        | .letMut x _ => x == p
+        | _ => false
+      (b.stmtExprs s).toList.flatMap (appliedExpr b p) ++ (if stops then [] else appliedStmts b p rest)
 
 end
 
@@ -831,14 +883,14 @@ knows. A program the checker rejects can still be elaborated, to be run and
 seen to go wrong; there are no types then, and this reading of the function's
 definition stands in for them.
 -/
-def givesOne (clauses : List Clause) (i : Nat) : Bool :=
-  !clauses.isEmpty && clauses.all fun
-    | .mk pats body =>
-      match pats[i]? with
-      | some (.var p) =>
-        let counts := appliedStmts p body
-        !counts.isEmpty && counts.all (· == 1)
-      | _ => false
+def givesOne (b : Flat.Body) (i : Nat) : Bool :=
+  !b.roots.isEmpty && b.roots.all fun c =>
+    let ⟨pats, body⟩ := b.clause c
+    match pats[i]? with
+    | some (.var p) =>
+      let counts := appliedStmts b p body.toList
+      !counts.isEmpty && counts.all (· == 1)
+    | _ => false
 
 /-- A block written in braces, without parameters. -/
 def plainBlock : Expr → Option (Nat × List Stmt)

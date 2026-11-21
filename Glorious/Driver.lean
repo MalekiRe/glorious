@@ -678,7 +678,7 @@ def lowered (b : Elab.Blocks) (written all : List Syntax.Item) :
   pure (items, b)
 
 /-- Elaborate, and work out the constants at compile time (`Comptime`). -/
-def elaborate (items : List Syntax.Item) (blocks : Option Elab.Blocks)
+def elaborate (items : List Syntax.Flat.FItem) (blocks : Option Elab.Blocks)
     (lends : Nat → Nat := fun _ => 0) (root : String := "main") : Except String Elab.Output := do
   Comptime.evaluate (← Elab.elabProgram items blocks lends root)
 
@@ -824,6 +824,8 @@ def compileSourceAt (src : String) (check : Bool := true)
   -- `main` does not reach is elaborated too, for what the elaborator alone
   -- refuses, and then left out.
   let roots := "main" :: ((blocks.map (·.coercions.toList)).getD []).map (·.2)
+  -- (Elaborated from flat bodies.)
+  let all := Trace.timed "flat bodies" fun _ => Syntax.Flat.ofItems all
   let unreached := all
   let all := Trace.timed "what main reaches" fun _ => Elab.reachable roots all
   -- (Only they and what they reach: what `main` reaches is elaborated below.
@@ -833,13 +835,16 @@ def compileSourceAt (src : String) (check : Bool := true)
       let named := fun (items : List Syntax.Item) => items.filterMap fun
         | Syntax.Item.fn name _ _ _ _ => some name
         | _ => none
+      let namedFlat := fun (items : List Syntax.Flat.FItem) => items.filterMap fun
+        | .fn name _ _ _ _ => some name
+        | _ => none
       let own := match first with
         | .ok (count, _) => named (written.drop count)
         | .error _ => []
-      let reached := named all
+      let reached := namedFlat all
       -- (Those still there once traits are lowered: one made into copies is
       -- elaborated as each copy is.)
-      let lowered := named unreached
+      let lowered := namedFlat unreached
       own.filter fun f => !reached.contains f && lowered.contains f
     else []
   let aside : Task (Except String Unit) := Task.spawn fun _ =>
@@ -848,7 +853,7 @@ def compileSourceAt (src : String) (check : Bool := true)
         elaborate (Elab.reachable (roots.drop 1 ++ missing) unreached) blocks (root := missing.headD "main") with
     | .error e => .error e
     | .ok _ => .ok ()
-  let declared := Trace.timed "what is declared" fun _ => Elab.withDeclared written all
+  let declared := Trace.timed "what is declared" fun _ => Elab.withDeclared written (Elab.declaredOf all)
   -- (What a compile gives, from what was elaborated and certified.)
   let compiled := fun (out : Elab.Output) (cert : Option Typing.Cert) (lent : Nat)
       (places : List ((String × Nat) × Nat)) (made : Infer.Made) =>
