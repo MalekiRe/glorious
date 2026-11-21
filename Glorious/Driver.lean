@@ -649,7 +649,7 @@ def checkFirstPart (std drop : Bool) : Except String (Nat × Check.St) := do
   if !std then
     let (prelude, _) ← readPrelude.get
     let resolved ← Syntax.Modules.resolve prelude []
-    let all := withoutUnitMarksFlat (Syntax.Flat.fillDefaults (Syntax.Flat.ofItems (← Syntax.expandAliases resolved.items)))
+    let all := withoutUnitMarksFlat (Syntax.Flat.fillDefaults (← Syntax.Flat.expandAliases (Syntax.Flat.ofItems resolved.items)))
     return (all.length, ← Check.checkFirst all resolved.info drop)
   let (prelude, items, _, _) ← parseProgram "// std" []
   let resolved ← Syntax.Modules.resolve prelude items
@@ -657,7 +657,7 @@ def checkFirstPart (std drop : Bool) : Except String (Nat × Check.St) := do
   -- what a program has first is these, item for item.)
   let (first, units) := unitsOf resolved.items resolved.info.unitUses
   let items := first ++ units.flatMap (fun (k, is) => Syntax.Item.fieldNames Syntax.unitMark [k] [] :: is)
-  let all := Syntax.Flat.fillDefaults (Syntax.Flat.ofItems (← Syntax.expandAliases items))
+  let all := Syntax.Flat.fillDefaults (← Syntax.Flat.expandAliases (Syntax.Flat.ofItems items))
   -- (Without the first module's mark, at the end: it has nothing.)
   let all := match all.getLast? with
     | some (.other (.fieldNames m [""] [])) => if m == Syntax.unitMark then all.dropLast else all
@@ -729,11 +729,11 @@ def compileSourceAt (src : String) (check : Bool := true)
       else Syntax.lastSegment name
     | none => Syntax.lastSegment name
   -- A type alias is written out wherever it is used.
-  let all ← Trace.timed "expand aliases" fun _ => Syntax.expandAliases resolved.items
+  -- (Expanded, filled in, checked, and all that follows, from flat bodies.)
+  let all := Trace.timed "flat bodies" fun _ => Syntax.Flat.ofItems resolved.items
+  let all ← Trace.timed "expand aliases" fun _ => Syntax.Flat.expandAliases all
   -- An implementation that does not write a function its trait gives a body
   -- has that body.
-  -- (Filled in, checked, and all that follows, from flat bodies.)
-  let all := Trace.timed "flat bodies" fun _ => Syntax.Flat.ofItems all
   let all := Trace.timed "fill defaults, write out blankets" fun _ => Syntax.Flat.fillDefaults all
   -- What the checker learnt about blocks that share an environment. A program
   -- it rejects is elaborated without that.

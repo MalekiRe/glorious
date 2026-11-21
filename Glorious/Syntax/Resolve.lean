@@ -115,115 +115,6 @@ partial def mapTypesStmt (f : TypeExpr → Except String TypeExpr) (s : Stmt) : 
 
 end
 
-/-- A program without its type aliases: each use is what the alias stands for. -/
-partial def expandAliases (items : List Item) : Except String (List Item) := do
-  let aliases := items.filterMap fun
-    | .typeAlias name params body => some (name, params, body)
-    | _ => none
-  let mut seen : Std.HashSet String := {}
-  for (name, _, _) in aliases do
-    if seen.contains name then throw s!"type alias `{name}` is declared twice"
-    seen := seen.insert name
-  -- A type the program declares is that type, whatever an alias of the same
-  -- name would have stood for.
-  let declared : Std.HashSet String := .ofList (items.filterMap fun
-    | .enum name _ _ => some name
-    | .struct name _ _ => some name
-    | _ => none)
-  let aliases := aliases.filter fun (name, _, _) => !declared.contains name
-  if aliases.isEmpty then return items
-  let byName : Std.HashMap String (List String × TypeExpr) :=
-    aliases.foldl (fun m (name, ps, body) => if m.contains name then m else m.insert name (ps, body)) {}
-  let defaulted : Std.HashMap String Bool := aliases.foldl (fun m (name, _, _) =>
-    match defaultOf? name with
-    | some (x, byTypes) => m.insert x (byTypes || m.getD x false)
-    | none => m) {}
-  let ty := expandTypeExpr byName defaulted []
-  -- An argument of an implementation's type that is not one of its type
-  -- parameters is a type: `impl T for Option<Int>`. It is fixed, as an
-  -- argument another name of the type fixes is.
-  let concrete := fun (ps : List String) (tr head : String) (args : List String)
-      (context : List (String × String)) (methods : List Item) => do
-    let mut newArgs : Array String := #[]
-    let mut fresh : Array String := #[]
-    let mut fixed : Array Item := #[]
-    for (a, j) in args.zipIdx do
-      if ps.contains a || head.startsWith "(tuple" then newArgs := newArgs.push a
-      else
-        let name := s!"%fixed{j}"
-        newArgs := newArgs.push name
-        fresh := fresh.push name
-        fixed := fixed.push (.typeAlias (fixedArgName j) [] (← ty (.name a [])))
-    pure (Item.impl (ps ++ fresh.toList) tr head newArgs.toList context (methods ++ fixed.toList))
-  let rec item : Item → Except String Item
-    | .enum name ps ctors => do
-      pure (.enum name ps (← ctors.mapM fun (c, fields) => do pure (c, ← fields.mapM ty)))
-    | .struct name ps fields => do pure (.struct name ps (← fields.mapM ty))
-    | .effect name ps ops => do
-      let ops ← ops.mapM fun op => do
-        pure { op with payload := ← op.payload.mapM ty, result := ← op.result.mapM ty }
-      pure (.effect name ps ops)
-    | .fn name ps annots ret clauses => do
-      pure (.fn name ps (← annots.mapM fun a => a.mapM ty) (← ret.mapM ty)
-        (← clauses.mapM (mapTypesClause ty)))
-    | .trait name methods => do
-      pure (.trait name (← methods.mapM fun (m, ps, r) => do
-        pure (m, ← ps.mapM ty, ← r.mapM ty)))
-    | .impl ps tr head args context methods => do
-      let methods ← methods.mapM fun
-        | .typeAlias name aps body => do pure (.typeAlias name aps (← ty body))
-        | m => item m
-      -- For a type whose last parameter is `..T`: the arguments written from
-      -- there on are one tuple, an argument the implementation fixes.
-      let (ps, args, methods) := match byName[variadicKey head]? with
-        | some (_, .name kk []) =>
-          match kk.toNat? with
-          | some k =>
-            let fixedOf := fun (j : Nat) => methods.findSome? fun
-              | .typeAlias n [] body => if n == fixedArgName j then some body else none
-              | _ => none
-            let parts := (args.drop k).zipIdx.map fun (a, i) =>
-              if ps.contains a then TypeExpr.name a [] else (fixedOf (k + i)).getD (.name a [])
-            let rest := methods.filter fun
-              | .typeAlias n [] _ => !((List.range args.length).drop k |>.any (fixedArgName · == n))
-              | _ => true
-            let name := s!"%fixed{k}"
-            (ps.filter (fun p => !((List.range args.length).drop k |>.any (s!"%fixed{·}" == p))) ++ [name],
-              args.take k ++ [name], rest ++ [.typeAlias (fixedArgName k) [] (.tuple parts)])
-          | none => (ps, args, methods)
-        | _ => (ps, args, methods)
-      -- An implementation for another name of a type, `impl T for
-      -- Option<A>`, is one for the type the name stands for, with the
-      -- arguments the name fixes said beside it.
-      match byName[head]? with
-      | some (aps, .name target targs) =>
-        let given := aps.zip args
-        let mut newArgs : Array String := #[]
-        let mut fresh : Array String := #[]
-        let mut fixed : Array Item := #[]
-        for (targ, j) in targs.zipIdx do
-          let named := match targ with
-            | .name p [] => given.lookup p
-            | _ => none
-          match named with
-          | some a => newArgs := newArgs.push a
-          | none =>
-            let name := s!"%fixed{j}"
-            newArgs := newArgs.push name
-            fresh := fresh.push name
-            fixed := fixed.push (.typeAlias (fixedArgName j) [] (← ty targ))
-        concrete (ps ++ fresh.toList) tr target newArgs.toList context (methods ++ fixed.toList)
-      | _ => concrete ps tr head args context methods
-    -- A name given a value with its type written, `let Just: fn(Int) ->
-    -- Option<Int> = Ok;`.
-    | .alias name value => do pure (.alias name (← mapTypesExpr ty value))
-    | i => pure i
-  let rest := items.filter fun
-    | .typeAlias _ _ _ => false
-    | _ => true
-  rest.mapM item
-
-
 /-- How `givesReference`'s functions are kept among `takesReference`'s. -/
 def givesKey (name : String) : String := "%gives:" ++ name
 
@@ -701,6 +592,115 @@ partial def borrowReceivers (items : List FItem) : List FItem :=
       .alias name b value
     | item => item
   items.map (go true)
+
+/-- A program without its type aliases: each use is what the alias stands for. -/
+partial def expandAliases (items : List FItem) : Except String (List FItem) := do
+  let aliases := items.filterMap fun
+    | .other (.typeAlias name params body) => some (name, params, body)
+    | _ => none
+  let mut seen : Std.HashSet String := {}
+  for (name, _, _) in aliases do
+    if seen.contains name then throw s!"type alias `{name}` is declared twice"
+    seen := seen.insert name
+  -- A type the program declares is that type, whatever an alias of the same
+  -- name would have stood for.
+  let declared : Std.HashSet String := .ofList (items.filterMap fun
+    | .other (.enum name _ _) => some name
+    | .other (.struct name _ _) => some name
+    | _ => none)
+  let aliases := aliases.filter fun (name, _, _) => !declared.contains name
+  if aliases.isEmpty then return items
+  let byName : Std.HashMap String (List String × TypeExpr) :=
+    aliases.foldl (fun m (name, ps, body) => if m.contains name then m else m.insert name (ps, body)) {}
+  let defaulted : Std.HashMap String Bool := aliases.foldl (fun m (name, _, _) =>
+    match defaultOf? name with
+    | some (x, byTypes) => m.insert x (byTypes || m.getD x false)
+    | none => m) {}
+  let ty := expandTypeExpr byName defaulted []
+  -- An argument of an implementation's type that is not one of its type
+  -- parameters is a type: `impl T for Option<Int>`. It is fixed, as an
+  -- argument another name of the type fixes is.
+  let concrete := fun (ps : List String) (tr head : String) (args : List String)
+      (context : List (String × String)) (methods : List FItem) => do
+    let mut newArgs : Array String := #[]
+    let mut fresh : Array String := #[]
+    let mut fixed : Array FItem := #[]
+    for (a, j) in args.zipIdx do
+      if ps.contains a || head.startsWith "(tuple" then newArgs := newArgs.push a
+      else
+        let name := s!"%fixed{j}"
+        newArgs := newArgs.push name
+        fresh := fresh.push name
+        fixed := fixed.push (.other (.typeAlias (fixedArgName j) [] (← ty (.name a []))))
+    pure (FItem.impl (ps ++ fresh.toList) tr head newArgs.toList context (methods ++ fixed.toList))
+  let rec item : FItem → Except String FItem
+    | .other (.enum name ps ctors) => do
+      pure (.other (.enum name ps (← ctors.mapM fun (c, fields) => do pure (c, ← fields.mapM ty))))
+    | .other (.struct name ps fields) => do pure (.other (.struct name ps (← fields.mapM ty)))
+    | .other (.effect name ps ops) => do
+      let ops ← ops.mapM fun op => do
+        pure { op with payload := ← op.payload.mapM ty, result := ← op.result.mapM ty }
+      pure (.other (.effect name ps ops))
+    | .fn name ps annots ret b => do
+      pure (.fn name ps (← annots.mapM fun a => a.mapM ty) (← ret.mapM ty) (← mapTypes ty b))
+    | .other (.trait name methods) => do
+      pure (.other (.trait name (← methods.mapM fun (m, ps, r) => do
+        pure (m, ← ps.mapM ty, ← r.mapM ty))))
+    | .impl ps tr head args context methods => do
+      let methods ← methods.mapM fun
+        | .other (.typeAlias name aps body) => do pure (.other (.typeAlias name aps (← ty body)))
+        | m => item m
+      -- For a type whose last parameter is `..T`: the arguments written from
+      -- there on are one tuple, an argument the implementation fixes.
+      let (ps, args, methods) := match byName[variadicKey head]? with
+        | some (_, .name kk []) =>
+          match kk.toNat? with
+          | some k =>
+            let fixedOf := fun (j : Nat) => methods.findSome? fun
+              | .other (.typeAlias n [] body) => if n == fixedArgName j then some body else none
+              | _ => none
+            let parts := (args.drop k).zipIdx.map fun (a, i) =>
+              if ps.contains a then TypeExpr.name a [] else (fixedOf (k + i)).getD (.name a [])
+            let rest := methods.filter fun
+              | .other (.typeAlias n [] _) => !((List.range args.length).drop k |>.any (fixedArgName · == n))
+              | _ => true
+            let name := s!"%fixed{k}"
+            (ps.filter (fun p => !((List.range args.length).drop k |>.any (s!"%fixed{·}" == p))) ++ [name],
+              args.take k ++ [name], rest ++ [.other (.typeAlias (fixedArgName k) [] (.tuple parts))])
+          | none => (ps, args, methods)
+        | _ => (ps, args, methods)
+      -- An implementation for another name of a type, `impl T for
+      -- Option<A>`, is one for the type the name stands for, with the
+      -- arguments the name fixes said beside it.
+      match byName[head]? with
+      | some (aps, .name target targs) =>
+        let given := aps.zip args
+        let mut newArgs : Array String := #[]
+        let mut fresh : Array String := #[]
+        let mut fixed : Array FItem := #[]
+        for (targ, j) in targs.zipIdx do
+          let named := match targ with
+            | .name p [] => given.lookup p
+            | _ => none
+          match named with
+          | some a => newArgs := newArgs.push a
+          | none =>
+            let name := s!"%fixed{j}"
+            newArgs := newArgs.push name
+            fresh := fresh.push name
+            fixed := fixed.push (.other (.typeAlias (fixedArgName j) [] (← ty targ)))
+        concrete (ps ++ fresh.toList) tr target newArgs.toList context (methods ++ fixed.toList)
+      | _ => concrete ps tr head args context methods
+    -- A name given a value with its type written, `let Just: fn(Int) ->
+    -- Option<Int> = Ok;`.
+    | .alias name b value => do
+      let (b, value) ← mapTypesOf ty b value
+      pure (.alias name b value)
+    | i => pure i
+  let rest := items.filter fun
+    | .other (.typeAlias _ _ _) => false
+    | _ => true
+  rest.mapM item
 
 /-- `Layout` (the prelude's) for each type: each declared type's right after
 its declaration, and those of the types with no declaration (`Int`, each

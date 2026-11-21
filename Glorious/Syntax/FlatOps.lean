@@ -511,11 +511,21 @@ and then written in. -/
 def mapTypes (f : TypeExpr → Except String TypeExpr) (b : Body) : Except String Body := do
   let places := b.ascriptions
   if places.isEmpty then return b
-  let mut made : Std.HashMap ExprId Expr := {}
-  for ty in places do
-    made := made.insert ty (← f (TypeExpr.ofExpr (treeExpr b ty))).asExpr
-  let r : FRewrite := { onExpr := fun _ _ e => (made[e]?).map fun t => flatExpr t }
-  pure (r.body b)
+  pure ((← typesRewrite f b places).body b)
+where
+  typesRewrite (f : TypeExpr → Except String TypeExpr) (b : Body) (places : List ExprId) :
+      Except String FRewrite := do
+    let mut made : Std.HashMap ExprId Expr := {}
+    for ty in places do
+      made := made.insert ty (← f (TypeExpr.ofExpr (treeExpr b ty))).asExpr
+    pure { onExpr := fun _ _ e => (made[e]?).map fun t => flatExpr t }
+
+/-- An expression with each type written in it changed (`Syntax.mapTypesExpr`). -/
+def mapTypesOf (f : TypeExpr → Except String TypeExpr) (b : Body) (e : ExprId) : Except String (Body × ExprId) := do
+  let places := Body.ascriptions.expr b e
+  if places.isEmpty then return (b, e)
+  let (e, b) := ((← mapTypes.typesRewrite f b places).ex e).run b
+  pure (b, e)
 
 /-- A body with each of its own clauses made by `f`, as trees (what the
 front end has not yet written flat). -/
