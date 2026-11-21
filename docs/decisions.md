@@ -6729,7 +6729,6 @@ leaves alone what it has nothing to do in.**
 - The flat form stays, with its check (97), for what keeps things by node
   later (per-declaration caching).
 
-
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by
