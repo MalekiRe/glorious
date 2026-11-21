@@ -768,10 +768,10 @@ def why (path : String) : IO UInt32 := do
   -- (With what destroys values written, where the program has something to
   -- destroy, as a compile has it.)
   let drops := hasDrop items || (src.splitOn "defer").length > 1
+  let all := Syntax.Flat.ofItems all
   let blocks ← match Check.checkProgram all resolved.info drops with
     | .ok blocks => pure blocks
     | .error e => IO.println s!"check failed: {e}"; return 1
-  let all := Syntax.Flat.ofItems all
   let written := Elab.declaredOf all
   let all := Elab.eraseLifetimes all
   let .ok (all, blocks) := lowered blocks written all | IO.println "lowering failed"; return 1
@@ -861,12 +861,12 @@ def stages (path : String) : IO UInt32 := do
   -- (With what destroys values written, where the program has something to
   -- destroy, as a compile has it.)
   let drops := hasDrop items || (src.splitOn "defer").length > 1
+  let all := Syntax.Flat.ofItems all
   let blocks ← match Check.checkProgram all resolved.info drops with
     | .ok blocks => pure blocks
     | .error e => IO.println s!"check failed: {e}"; return 1
   IO.println s!"{blocks.given.size} given"
   last ← lap "check" last
-  let all := Syntax.Flat.ofItems all
   let written := Elab.declaredOf all
   let all := Elab.eraseLifetimes all
   let .ok (all, blocks) := lowered blocks written all | IO.println "lowering failed"; return 1
@@ -957,7 +957,7 @@ def stages (path : String) : IO UInt32 := do
   let drops := hasDrop items
   let first := if drops then checkedStdDrop.get else checkedStd.get
   if let .ok (count, first) := first then
-    match Check.checkAfter first (all0.drop count) resolved.info with
+    match Check.checkAfter first (Syntax.Flat.ofItems (all0.drop count)) resolved.info with
     | .ok b => IO.println s!"{b.given.size} given"
     | .error e => IO.println s!"checkAfter: {e}"
     last ← lap "check, after the library" last

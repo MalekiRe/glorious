@@ -107,8 +107,12 @@ the coercions that apply in it, the dot calls among its calls the resolver
 found more than one function for, and which fields of the constructors of it
 and of the units before it are `pub`. -/
 def unitInfoKey (info : Syntax.ModuleInfo) (before : List String) (unit : String)
-    (items : List Syntax.Item) : UInt64 :=
-  let ids : Std.HashSet Nat := items.foldl (fun set i => (Syntax.callIdsItem [] i).foldl (·.insert ·) set) {}
+    (items : List Syntax.Flat.FItem) : UInt64 :=
+  -- (The calls of its bodies, where they are kept.)
+  let ids : Std.HashSet Nat := items.foldl (fun set i =>
+    i.allBodies.foldl (fun set b => b.exprs.foldl (fun set n => match n with
+      | .call id _ _ | .tailCall id _ _ => set.insert id
+      | _ => set) set) set) {}
   let alts := info.dotAlts.filter fun (id, _) => ids.contains id
   let seen := unit :: before
   let vis := info.fieldVis.filter fun (_, home, _) => seen.contains home
@@ -590,13 +594,10 @@ def parseProgram (src : String) (files : List (List String × String)) (check : 
 (`Syntax.unitMark`), put in an order that has every module after those it
 uses, the prelude's items first and the library's modules before the
 program's: the items before the first mark, and each module's key and items. -/
-def unitsOf (items : List Syntax.Item) (uses : List (String × List String)) :
-    List Syntax.Item × List (String × List Syntax.Item) := Id.run do
-  let mark : Syntax.Item → Option String
-    | .fieldNames m [k] [] => if m == Syntax.unitMark then some k else none
-    | _ => none
+def unitsOfBy {α : Type} (mark : α → Option String) (items : List α) (uses : List (String × List String)) :
+    List α × List (String × List α) := Id.run do
   let first := items.takeWhile fun i => (mark i).isNone
-  let mut units : Array (String × Array Syntax.Item) := #[]
+  let mut units : Array (String × Array α) := #[]
   for i in items.drop first.length do
     match mark i with
     | some k => units := units.push (k, #[])
@@ -617,10 +618,27 @@ def unitsOf (items : List Syntax.Item) (uses : List (String × List String)) :
   let order := (all.map (·.1)).foldl (visit (all.length + 1)) []
   pure (first, order.filterMap fun k => (all.lookup k).map (k, ·))
 
+/-- The unit a mark item begins. -/
+def unitMarkOf : Syntax.Item → Option String
+  | .fieldNames m [k] [] => if m == Syntax.unitMark then some k else none
+  | _ => none
+
+def unitsOf (items : List Syntax.Item) (uses : List (String × List String)) :
+    List Syntax.Item × List (String × List Syntax.Item) := unitsOfBy unitMarkOf items uses
+
+def unitsOfFlat (items : List Syntax.Flat.FItem) (uses : List (String × List String)) :
+    List Syntax.Flat.FItem × List (String × List Syntax.Flat.FItem) :=
+  unitsOfBy (fun | .other i => unitMarkOf i | _ => none) items uses
+
 /-- The items without the marks of units. -/
 def withoutUnitMarks (items : List Syntax.Item) : List Syntax.Item :=
   items.filter fun
     | .fieldNames m [_] [] => m != Syntax.unitMark
+    | _ => true
+
+def withoutUnitMarksFlat (items : List Syntax.Flat.FItem) : List Syntax.Flat.FItem :=
+  items.filter fun
+    | .other (.fieldNames m [_] []) => m != Syntax.unitMark
     | _ => true
 
 /-- The prelude, with the standard library if `std`, checked: how many items
@@ -633,7 +651,7 @@ def checkFirstPart (std drop : Bool) : Except String (Nat × Check.St) := do
     let (prelude, _) ← readPrelude.get
     let resolved ← Syntax.Modules.resolve prelude []
     let all := withoutUnitMarks (Syntax.fillDefaults (← Syntax.expandAliases resolved.items))
-    return (all.length, ← Check.checkFirst all resolved.info drop)
+    return (all.length, ← Check.checkFirst (Syntax.Flat.ofItems all) resolved.info drop)
   let (prelude, items, _, _) ← parseProgram "// std" []
   let resolved ← Syntax.Modules.resolve prelude items
   -- (Its modules in the order a program has them, marks and all, so that
@@ -645,7 +663,7 @@ def checkFirstPart (std drop : Bool) : Except String (Nat × Check.St) := do
   let all := match all.getLast? with
     | some (.fieldNames m [""] []) => if m == Syntax.unitMark then all.dropLast else all
     | _ => all
-  pure (all.length, ← Check.checkFirst (withoutUnitMarks all) resolved.info drop)
+  pure (all.length, ← Check.checkFirst (Syntax.Flat.ofItems (withoutUnitMarks all)) resolved.info drop)
 
 /-- Each of those, checked once in a process. -/
 def checkedPrelude : Thunk (Except String (Nat × Check.St)) := Thunk.mk fun _ => checkFirstPart false false
@@ -747,6 +765,8 @@ def compileSourceAt (src : String) (check : Bool := true)
   -- (The program's own tuple variables whose fields are borrowed apart: a
   -- variable per field. The library, checked once for every program, is as
   -- it was checked.)
+  -- (Checked, and all that follows, from flat bodies.)
+  let all := Trace.timed "flat bodies" fun _ => Syntax.Flat.ofItems all
   let all := Trace.timed "split fields borrowed apart" fun _ => match first with
     | .ok (count, _) => all.take count ++ Elab.splitFieldItems all (all.drop count)
     | .error _ => Elab.splitFieldItems all all
@@ -755,9 +775,9 @@ def compileSourceAt (src : String) (check : Bool := true)
   let seed := mixHash (hash withStd) (mixHash (hash drops) (hash few))
   -- (Each unit's items, in order, for the checker; and the items whole.)
   let unitList := match first with
-    | .ok (count, _) => (unitsOf (all.drop count) resolved.info.unitUses).2
+    | .ok (count, _) => (unitsOfFlat (all.drop count) resolved.info.unitUses).2
     | .error _ => []
-  let units := unitList.map (fun (u : String × List Syntax.Item) => u.2)
+  let units := unitList.map (fun (u : String × List Syntax.Flat.FItem) => u.2)
   -- (For each, the units before it that it uses.)
   let unitDeps := unitList.zipIdx.map fun ((k, _), i) =>
     let uses := (resolved.info.unitUses.lookup k).getD []
@@ -770,16 +790,16 @@ def compileSourceAt (src : String) (check : Bool := true)
   let infoKeys := Trace.timed "units' keys" fun _ => unitList.zipIdx.map fun ((k, is), i) =>
     unitInfoKey resolved.info ((unitList.take i).map (·.1)) k is
   -- (And what the prelude and library checked first count, without marks.)
-  let first := first.map fun (count, st) => ((withoutUnitMarks (all.take count)).length, st)
-  let all := withoutUnitMarks all
+  let first := first.map fun (count, st) => ((withoutUnitMarksFlat (all.take count)).length, st)
+  let all := withoutUnitMarksFlat all
   -- (Each unit's items as the items now are: read again after the checker
   -- asked for something to be written otherwise, each has as many items.)
-  let cut := fun (rest : List Syntax.Item) =>
+  let cut := fun (rest : List Syntax.Flat.FItem) =>
     if (units.map List.length).sum == rest.length then
-      ((units.foldl (fun (acc : List (List Syntax.Item) × List Syntax.Item) (u : List Syntax.Item) =>
+      ((units.foldl (fun (acc : List (List Syntax.Flat.FItem) × List Syntax.Flat.FItem) (u : List Syntax.Flat.FItem) =>
         (acc.1 ++ [acc.2.take u.length], acc.2.drop u.length)) ([], rest)).1).zip infoKeys
     else [(rest, hash resolved.info)]
-  let checkOnce := fun (all : List Syntax.Item) =>
+  let checkOnce := fun (all : List Syntax.Flat.FItem) =>
     match check, resolved.info.shadowed, first with
     | true, false, .ok (count, first) =>
       Check.checkUnitsKept { first with lenient } (cut (all.drop count)) resolved.info (mixHash seed (hash count)) checkKept
@@ -794,11 +814,10 @@ def compileSourceAt (src : String) (check : Bool := true)
   -- (What the checker decides of how the program is read once it knows
   -- types, `..` in a tuple pattern, a function named as a value, a value
   -- kept in a variable, it decides where it finds it: `Check.checkDeciding`.)
-  let checkWith := fun (all : List Syntax.Item) => (all, checkOnce all)
+  let checkWith := fun (all : List Syntax.Flat.FItem) => (all, checkOnce all)
   let (all, checked) := Trace.timed "check" fun _ => checkWith all
   -- (Dot calls the checker chose a type's own function for, by the value's
   -- type: written so for what follows.)
-  let all := Trace.timed "flat bodies" fun _ => Syntax.Flat.ofItems all
   let all := Trace.timed "what the checker decided, written in" fun _ => match checked with
     | .ok (blocks, _) =>
       Elab.decidedProgram blocks all

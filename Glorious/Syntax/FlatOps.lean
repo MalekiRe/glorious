@@ -312,18 +312,24 @@ what has a part that changed is a node made anew. -/
 structure FGo where
   ex : ExprId → Build ExprId
   st : StmtId → Build StmtId
+  stmts : List StmtId → Build (List StmtId)
   clause : ClauseId → Build ClauseId
+
+instance : Inhabited FGo := ⟨⟨pure, pure, pure, pure⟩⟩
 
 structure FRewrite where
   /-- (Given how the rest is rewritten.) -/
   onExpr : FGo → Body → ExprId → Option (Build ExprId) := fun _ _ _ => none
   onStmt : FGo → Body → StmtId → Option (Build StmtId) := fun _ _ _ => none
+  /-- A block's statements from one on (`Rewrite.onStmts`). -/
+  onStmts : FGo → Body → List StmtId → Option (Build (List StmtId)) := fun _ _ _ => none
+  onClause : FGo → Body → ClauseId → Option (Build ClauseId) := fun _ _ _ => none
 
 mutual
 
 partial def FRewrite.ex (r : FRewrite) (e : ExprId) : Build ExprId := do
   let b ← get
-  if let some made := r.onExpr ⟨r.ex, r.st, r.clause⟩ b e then return ← made
+  if let some made := r.onExpr r.go b e then return ← made
   match b.expr e with
   | .call id f args => do
     let f' ← r.ex f
@@ -347,7 +353,7 @@ partial def FRewrite.ex (r : FRewrite) (e : ExprId) : Build ExprId := do
     let cs' ← cs.mapM r.clause
     if s' == s && cs' == cs then pure e else pushExpr (.handle s' cs')
   | .labelScope l body => do
-    let body' ← body.mapM r.st
+    let body' := (← r.stmtList body.toList).toArray
     if body' == body then pure e else pushExpr (.labelScope l body')
   | .deref x => do
     let x' ← r.ex x
@@ -361,13 +367,23 @@ partial def FRewrite.ex (r : FRewrite) (e : ExprId) : Build ExprId := do
   | _ => pure e
 
 partial def FRewrite.clause (r : FRewrite) (c : ClauseId) : Build ClauseId := do
+  if let some made := r.onClause r.go (← get) c then return ← made
   let ⟨pats, body⟩ := (← get).clause c
-  let body' ← body.mapM r.st
+  let body' := (← r.stmtList body.toList).toArray
   if body' == body then pure c else pushClause ⟨pats, body'⟩
+
+partial def FRewrite.stmtList (r : FRewrite) (ss : List StmtId) : Build (List StmtId) := do
+  if let some made := r.onStmts r.go (← get) ss then return ← made
+  match ss with
+  | [] => pure []
+  | s :: rest => pure ((← r.st s) :: (← r.stmtList rest))
+
+/-- How the rest is rewritten, for a hook. -/
+partial def FRewrite.go (r : FRewrite) : FGo := ⟨r.ex, r.st, r.stmtList, r.clause⟩
 
 partial def FRewrite.st (r : FRewrite) (s : StmtId) : Build StmtId := do
   let b ← get
-  if let some made := r.onStmt ⟨r.ex, r.st, r.clause⟩ b s then return ← made
+  if let some made := r.onStmt r.go b s then return ← made
   match b.stmt s with
   | .let_ p v => do
     let v' ← r.ex v
@@ -398,7 +414,7 @@ def FRewrite.body (r : FRewrite) (b : Body) : Body :=
 
 /-- Statements rewritten, in a body that grows by what is made. -/
 def FRewrite.stmts (r : FRewrite) (b : Body) (ss : List StmtId) : Body × List StmtId :=
-  let (out, b) := (ss.mapM r.st).run b
+  let (out, b) := (r.stmtList ss).run b
   (b, out)
 
 /-- What follows a variable with each read of a part of it left out

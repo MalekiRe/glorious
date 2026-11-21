@@ -54,7 +54,7 @@ this program's: what the resolver said of its modules (the dot calls'
 alternatives and the rest), and whether its own items are checked. -/
 def adopt (st : St) : M Unit := do
   let now ← get
-  set { st with modules := now.modules, ownItems := now.ownItems }
+  set { st with modules := now.modules, ownItems := now.ownItems, fnBodies := now.fnBodies }
 
 /-- The functions an implementation gives, as functions to check. -/
 def implFnDecls (im : ImplDecl) : M (List FnDecl) := do
@@ -76,9 +76,13 @@ def implFnDecls (im : ImplDecl) : M (List FnDecl) := do
         -- (And of the trait's function's own, what the trait says.)
         let uses := uses ++ sig.uses.map fun (p, lo, hi) =>
           ({ subject := p, trait := "Use", quantity := some (lo, hi) } : Syntax.Bound)
-        out := out ++ [{ name := Syntax.implFnName im.trait im.head m,
+        let name := Syntax.implFnName im.trait im.head m
+        -- (Its body, where the declaration has none: by its name.)
+        let kept := (← get).fnBodies[name]?
+        let body := if clauses.isEmpty then kept.getD {} else Flat.ofClauses clauses
+        out := out ++ [{ name,
                          params := im.params ++ inner ++ sig.mparams.map (·.1) ++ lifetimes, annots,
-                         ret, body := Flat.ofClauses clauses, impl := some (im, sig), bounds := uses }]
+                         ret, body, impl := some (im, sig), bounds := uses }]
   pure out
 
 /-- Check a group, deciding where it is found what can be known only once
@@ -287,13 +291,20 @@ it. What the functions of later groups are is put back as this program has
 them. Gives what this check kept, the state after all of it first, under a
 key of every item whole: where that is kept, nothing else is looked at, and
 nothing else is kept. -/
-def checkItems (items : List Item) (seed : UInt64 := 0) (kept : Kept := []) : M Kept := do
+def checkItems (fitems : List Flat.FItem) (seed : UInt64 := 0) (kept : Kept := []) : M Kept := do
+  -- The items as they declare, and their functions' bodies by name.
+  let items := fitems.map Flat.FItem.declared
+  let bodies := fitems.flatMap Flat.FItem.bodies
+  let ownBodies := fun (_ : Unit) => (modify fun s =>
+    { s with fnBodies := bodies.foldl (fun m (n, b) => m.insert n b) s.fnBodies } : M Unit)
+  ownBodies ()
+  let bodyOf : Std.HashMap String Flat.Body := bodies.foldl (fun m (n, b) => m.insertIfNew n b) {}
   let written := items.filterMap fun
     | .bounds fn bounds => some (fn, bounds)
     | _ => none
   let decls : List FnDecl := items.filterMap fun
-    | .fn name params annots ret clauses =>
-      some { name, params, annots, ret, body := Flat.ofClauses clauses, bounds := (written.lookup name).getD [] }
+    | .fn name params annots ret _ =>
+      some { name, params, annots, ret, body := (bodyOf[name]?).getD {}, bounds := (written.lookup name).getD [] }
     | _ => none
   -- What is asked of a declared type's parameters: a trait without arguments
   -- of its own, of the parameter at a place.
@@ -348,9 +359,10 @@ def checkItems (items : List Item) (seed : UInt64 := 0) (kept : Kept := []) : M 
   do
     -- (The unit whole, as an earlier compile left it: every step taken from
     -- there at once. A unit that is the same keeps only this.)
-    let whole := mixHash seed (hash items)
+    let whole := mixHash seed (hash fitems)
     if let some st := kept.lookup whole then
       adopt st
+      ownBodies ()
       return [(whole, st)]
     let before := (← get).impls.size
     let mut made : Kept := []
@@ -376,7 +388,9 @@ def checkItems (items : List Item) (seed : UInt64 := 0) (kept : Kept := []) : M 
     let ours := fun (st : St) => withImplBodies st before written
     let look := fun (k : UInt64) => (kept.lookup k).bind ours
     match look key with
-    | some st => adopt st
+    | some st =>
+      adopt st
+      ownBodies ()
     | none =>
       declare items
       computeVariances
@@ -694,7 +708,7 @@ def finish : M Elab.Blocks := fun st => Trace.timed "check: finish" fun _ => (sh
 blocks: which take an argument they do not name, and for each that is handed a
 block which was not run, the identity of that block if it can only be one. The
 elaborator then lets those two share what they capture. -/
-def checkProgram (items : List Item) (modules : Syntax.ModuleInfo := {}) (drops : Bool := false) :
+def checkProgram (items : List Flat.FItem) (modules : Syntax.ModuleInfo := {}) (drops : Bool := false) :
     Except String Elab.Blocks := do
   let action : M Elab.Blocks := do
     modify fun s => { s with modules }
@@ -705,7 +719,7 @@ def checkProgram (items : List Item) (modules : Syntax.ModuleInfo := {}) (drops 
 
 /-- What is known once some items are checked: for a program that is checked
 after them, against what they declare. -/
-def checkFirst (items : List Item) (modules : Syntax.ModuleInfo := {}) (drops : Bool := false) :
+def checkFirst (items : List Flat.FItem) (modules : Syntax.ModuleInfo := {}) (drops : Bool := false) :
     Except String St := do
   let action : M Unit := do
     modify fun s => { s with modules }
@@ -714,7 +728,7 @@ def checkFirst (items : List Item) (modules : Syntax.ModuleInfo := {}) (drops : 
   pure st
 
 /-- Check a program whose first items are already checked. -/
-def checkAfter (first : St) (items : List Item) (modules : Syntax.ModuleInfo := {}) :
+def checkAfter (first : St) (items : List Flat.FItem) (modules : Syntax.ModuleInfo := {}) :
     Except String Elab.Blocks := do
   let action : M Elab.Blocks := do
     modify fun s => { s with modules, ownItems := true }
@@ -735,7 +749,7 @@ whose units used are all checked, are checked side by side, each on a
 thread of its own, and what each added is put together (`mergeStates`);
 where it cannot be, or one of them is refused, they are checked one after
 another, as all were. -/
-def checkUnitsKept (first : St) (units : List (List Item × UInt64)) (modules : Syntax.ModuleInfo)
+def checkUnitsKept (first : St) (units : List (List Flat.FItem × UInt64)) (modules : Syntax.ModuleInfo)
     (seed : UInt64) (kept : Kept) (own : Bool := true) (library : Nat := 0)
     (deps : List (List Nat) := []) : Except Elab.Said (Elab.Blocks × Kept × Kept) := do
   -- (Each unit's level: one more than the highest of the units it uses.)

@@ -549,7 +549,7 @@ assigning it assigns each. -/
 whole value is made from them and taken apart into them. -/
 structure Split where
   fields : List String
-  make : List Expr → Expr
+  make : Array Flat.ExprId → Flat.Build Flat.ExprId
   apart : List Pattern → Pattern
 
 /-- The variable for field `f` of `x`. -/
@@ -566,72 +566,79 @@ def Split.var (sp : Split) (x : String) (i : Nat) : String :=
 
 /-- What follows the making of `x`, with its fields as variables of their
 own, up to where a name `x` is made again. -/
-def splitRewrite (x : String) (sp : Split) : Rewrite where
-  onExpr _
-    | .proj (.name none y) i =>
-      if y == x && i < sp.fields.length then some (.name none (sp.var x i)) else none
-    | .fieldOf _ (.name none y) s =>
-      match sp.index s, y == x with
-      | some i, true => some (.name none (sp.var x i))
+def splitRewrite (x : String) (sp : Split) : Flat.FRewrite where
+  onExpr _ b e :=
+    match b.expr e with
+    | .proj e' i =>
+      if b.bare? e' == some x && i < sp.fields.length then some (Flat.pushExpr (.name none (sp.var x i))) else none
+    | .fieldOf _ e' s =>
+      match sp.index s, b.bare? e' == some x with
+      | some i, true => some (Flat.pushExpr (.name none (sp.var x i)))
       | _, _ => none
     | .refField id uniq y (s :: path) star =>
       match sp.index s, y == x && !star with
       | some i, true =>
-        some (if path.isEmpty then .ref uniq (sp.var x i) else .refField id uniq (sp.var x i) path false)
+        some (Flat.pushExpr (if path.isEmpty then .ref uniq (sp.var x i) else .refField id uniq (sp.var x i) path false))
       | _, _ => none
     | .name none y =>
-      if y == x then some (sp.make ((List.range sp.fields.length).map fun i => .name none (sp.var x i)))
+      if y == x then some (do
+        let parts ← (List.range sp.fields.length).toArray.mapM fun i => Flat.pushExpr (.name none (sp.var x i))
+        sp.make parts)
       else none
     | _ => none
-  onClause _
-    | .mk pats body => if (pats.flatMap patVars).contains x then some (.mk pats body) else none
-  onStmts go
-    | .located l c s :: rest =>
-      some (match go.stmts (s :: rest) with
-        | first :: more => .located l c first :: more
-        | [] => [])
-    | .let_ pat value :: rest =>
-      if (patVars pat).contains x then some (.let_ pat (go.ex value) :: rest) else none
-    | .letMut y value :: rest =>
-      if y == x then some (.letMut y (go.ex value) :: rest) else none
-    | .assign (.name none y) value :: rest =>
-      if y != x then none else
-      -- (Assigning the whole: its parts, each to its variable.)
-      let parts := (List.range sp.fields.length).map fun i => s!"%{sp.var x i}"
-      some (.let_ (sp.apart (parts.map Pattern.var)) (go.ex value)
-        :: (parts.zipIdx.map fun (p, i) => Stmt.assign (.name none (sp.var x i)) (.name none p))
-        ++ go.stmts rest)
-    | _ => none
+  onClause _ b c :=
+    if ((b.clause c).pats.flatMap Elab.patVars).contains x then some (pure c) else none
+  onStmts go b ss :=
+    match ss with
+    | s :: rest =>
+      match b.stmt s with
+      | .located l c inner => some (do
+        match ← go.stmts (inner :: rest) with
+        | first :: more => pure ((← Flat.pushStmt (.located l c first)) :: more)
+        | [] => pure [])
+      | .let_ pat value =>
+        if (Elab.patVars pat).contains x then some (do pure ((← Flat.pushStmt (.let_ pat (← go.ex value))) :: rest)) else none
+      | .letMut y value =>
+        if y == x then some (do pure ((← Flat.pushStmt (.letMut y (← go.ex value))) :: rest)) else none
+      | .assign target value =>
+        if b.bare? target != some x then none else some (do
+          -- (Assigning the whole: its parts, each to its variable.)
+          let parts := (List.range sp.fields.length).map fun i => s!"%{sp.var x i}"
+          let first ← Flat.pushStmt (.let_ (sp.apart (parts.map Pattern.var)) (← go.ex value))
+          let mut assigns : List Flat.StmtId := []
+          for (p, i) in parts.zipIdx do
+            let t ← Flat.pushExpr (.name none (sp.var x i))
+            let v ← Flat.pushExpr (.name none p)
+            assigns := assigns ++ [← Flat.pushStmt (.assign t v)]
+          pure (first :: assigns ++ (← go.stmts rest)))
+      | _ => none
+    | [] => none
 
-/-- The statements after `x` is made, with its fields as variables of their
-own (`splitRewrite`). -/
-def splitStmts (x : String) (sp : Split) : List Stmt → List Stmt := (splitRewrite x sp).stmts
-
+open Flat in
 /-- Does `x` have a field borrowed in these statements, before it is made again? -/
-partial def fieldBorrowed (x : String) (stmts : List Stmt) : Bool :=
-  let rec inExpr : Expr → Bool
+partial def fieldBorrowed (b : Body) (x : String) (stmts : List StmtId) : Bool :=
+  let rec inExpr (e : ExprId) : Bool :=
+    match b.expr e with
     | .refField _ _ y (_ :: _) false => y == x
-    | .call _ f args => inExpr f || args.any inExpr
-    | .tailCall _ f args => inExpr f || args.any inExpr
+    | .call _ f args | .tailCall _ f args => inExpr f || args.any inExpr
     | .tuple args => args.any inExpr
-    | .proj e _ => inExpr e
-    | .closure _ clauses => clauses.any fun
-      | .mk pats body => !(pats.flatMap patVars).contains x && fieldBorrowed x body
-    | .handle subject arms => inExpr subject || arms.any fun
-      | .mk pats body => !(pats.flatMap patVars).contains x && fieldBorrowed x body
-    | .labelScope _ body => fieldBorrowed x body
-    | .deref e => inExpr e
-    | .reborrow _ e => inExpr e
-    | .fieldOf _ e _ => inExpr e
+    | .proj e _ | .deref e | .reborrow _ e | .fieldOf _ e _ => inExpr e
+    | .closure _ clauses | .handle _ clauses =>
+      (match b.expr e with | .handle s _ => inExpr s | _ => false) ||
+      clauses.any fun c =>
+        let ⟨pats, body⟩ := b.clause c
+        !(pats.flatMap Elab.patVars).contains x && fieldBorrowed b x body.toList
+    | .labelScope _ body => fieldBorrowed b x body.toList
     | _ => false
   match stmts with
   | [] => false
-  | .located _ _ s :: rest => fieldBorrowed x (s :: rest)
-  | .let_ pat value :: rest => inExpr value || (!(patVars pat).contains x && fieldBorrowed x rest)
-  | .letMut y value :: rest => inExpr value || (y != x && fieldBorrowed x rest)
-  | .assign target value :: rest => inExpr target || inExpr value || fieldBorrowed x rest
-  | .expr e :: rest => inExpr e || fieldBorrowed x rest
-  | .defer e :: rest => inExpr e || fieldBorrowed x rest
+  | s :: rest =>
+    match b.stmt s with
+    | .located _ _ inner => fieldBorrowed b x (inner :: rest)
+    | .let_ pat value => inExpr value || (!(Elab.patVars pat).contains x && fieldBorrowed b x rest)
+    | .letMut y value => inExpr value || (y != x && fieldBorrowed b x rest)
+    | .assign target value => inExpr target || inExpr value || fieldBorrowed b x rest
+    | .expr e | .defer e => inExpr e || fieldBorrowed b x rest
 
 /-- The structs whose variables can be split: each constructor with its
 fields' names, for those without `Drop` (whose value is taken apart only by
@@ -639,56 +646,73 @@ its own `drop`). -/
 abbrev Structs := List (String × List String)
 
 /-- How a variable made by this value would be split, if it can be. -/
-def splitOf (structs : Structs) : Expr → Option (Split × List Expr)
+def splitOf (structs : Structs) (b : Flat.Body) (e : Flat.ExprId) : Option (Split × Array Flat.ExprId) :=
+  match b.expr e with
   | .tuple es =>
-    if es.length ≥ 2 then
-      some (⟨(List.range es.length).map toString, .tuple, .tuple⟩, es)
+    if es.size ≥ 2 then
+      some (⟨(List.range es.size).map toString, fun vs => Flat.pushExpr (.tuple vs), .tuple⟩, es)
     else none
-  | .call _ (.name q s) args =>
-    match structs.lookup s with
-    | some names =>
-      if names.length ≥ 2 && names.length == args.length then
-        some (⟨names, fun vs => .call 0 (.name q s) vs, fun ps => .ctor s q ps⟩, args)
-      else none
-    | none => none
+  | .call _ f args =>
+    match b.expr f with
+    | .name q s =>
+      match structs.lookup s with
+      | some names =>
+        if names.length ≥ 2 && names.length == args.size then
+          some (⟨names, fun vs => do Flat.pushExpr (.call 0 (← Flat.pushExpr (.name q s)) vs), fun ps => .ctor s q ps⟩, args)
+        else none
+      | none => none
+    | _ => none
   | _ => none
 
 /-- Every variable whose fields are borrowed, and that is used no other way
 than its fields and its whole value are, made one variable per field. -/
-def splitFieldsRewrite (structs : Structs) : Rewrite where
-  onStmts go
-    | .located l c (.letMut x value) :: rest =>
-      (splitOf structs value).bind fun (sp, es) =>
-        let split := splitStmts x sp rest
-        -- (Kept as it is where it is used some other way: borrowed whole, say.)
-        if fieldBorrowed x rest && !(fvStmts [] split).contains x then
-          some ((es.zipIdx.map fun (e, i) => Stmt.located l c (.letMut (sp.var x i) (go.ex e)))
-            ++ go.stmts split)
-        else none
-    | _ => none
+def splitFieldsRewrite (structs : Structs) : Flat.FRewrite where
+  onStmts go b ss :=
+    match ss with
+    | s :: rest =>
+      match b.stmt s with
+      | .located l c inner =>
+        match b.stmt inner with
+        | .letMut x value =>
+          (splitOf structs b value).bind fun (sp, es) =>
+            if !fieldBorrowed b x rest then none else
+            let (b', split) := (splitRewrite x sp).stmts b rest
+            -- (Kept as it is where it is used some other way: borrowed whole, say.)
+            if (b'.fvStmts [] split).contains x then none else
+            some (do
+              set b'
+              let mut lets : List Flat.StmtId := []
+              for (e, i) in es.toList.zipIdx do
+                let v ← Flat.pushStmt (.letMut (sp.var x i) (← go.ex e))
+                lets := lets ++ [← Flat.pushStmt (.located l c v)]
+              pure (lets ++ (← go.stmts split)))
+        | _ => none
+      | _ => none
+    | [] => none
 
 /-- A program's items with its variables whose fields are borrowed apart made
 one variable per field (`splitFieldVars`); `all` are every item of the
 program, for the structs and what has `Drop`. -/
-def splitFieldItems (all items : List Item) : List Item :=
-  let unwrap := fun (item : Item) => match item with
+def splitFieldItems (all items : List Flat.FItem) : List Flat.FItem :=
+  let unwrap := fun (item : Flat.FItem) => match item with
     | .pub _ inner => inner
     | other => other
   let dropped := all.filterMap fun item => match unwrap item with
     | .impl _ tr head _ _ _ => if tr == "Drop" then some head else none
     | _ => none
   let structs : Structs := all.filterMap fun item => match unwrap item with
-    | .fieldNames ctor names _ => if dropped.contains ctor then none else some (ctor, names)
+    | .other (.fieldNames ctor names _) => if dropped.contains ctor then none else some (ctor, names)
     | _ => none
-  -- (Only a clause with a field borrowed, `fieldBorrowed`, has one to split.)
-  let borrowed := fun (e : Expr) => match e with
+  -- (Only a body with a field borrowed, `fieldBorrowed`, has one to split.)
+  let borrowed := fun (n : Flat.FExpr) => match n with
     | .refField _ _ _ (_ :: _) false => true
     | _ => false
-  let clause := fun (c : Clause) => if c.anyExpr borrowed then (splitFieldsRewrite structs).clause c else c
+  let split := fun (b : Flat.Body) =>
+    if b.exprs.any borrowed then (splitFieldsRewrite structs).body b else b
   items.map fun
-    | .fn name ps annots ret clauses => .fn name ps annots ret (clauses.map clause)
+    | .fn name ps annots ret b => .fn name ps annots ret (split b)
     | .impl ps tr head args context methods => .impl ps tr head args context (methods.map fun
-        | .fn m mps annots ret clauses => .fn m mps annots ret (clauses.map clause)
+        | .fn m mps annots ret b => .fn m mps annots ret (split b)
         | item => item)
     | item => item
 

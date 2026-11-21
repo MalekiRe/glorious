@@ -934,6 +934,10 @@ structure St where
   written (a block called where it is written, a receiver given otherwise) is
   added to it. -/
   body : Flat.Body := {}
+  /-- The bodies of the functions declared so far, by the names they are
+  checked by (an implementation's by `implFnName`): what an implementation's
+  function is checked from, its declaration having none. -/
+  fnBodies : Std.HashMap String Flat.Body := {}
 
 abbrev M := StateT St (Except Elab.Said)
 

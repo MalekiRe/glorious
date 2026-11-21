@@ -272,7 +272,7 @@ inductive FItem where
   | module (name : String) (body : Option (List FItem))
   | pub (parent : Bool) (item : FItem)
   | other (item : Item)
-  deriving Inhabited
+  deriving Inhabited, Hashable
 
 /-- An item with its code flat. -/
 partial def ofItem : Item → FItem
@@ -295,6 +295,37 @@ partial def FItem.toItem : FItem → Item
   | .other item => item
 
 def ofItems (items : List Item) : List FItem := items.map ofItem
+
+/-- The item as what it declares: every function in it, at any depth,
+without its clauses (whose bodies `FItem.bodies` gives). -/
+partial def FItem.declared : FItem → Item
+  | .fn n ps annots ret _ => .fn n ps annots ret []
+  | .alias n b e => .alias n (treeExpr b e)
+  | .impl ps tr head args ctx ms => .impl ps tr head args ctx (ms.map FItem.declared)
+  | .traitInfo n supers ds ps assocs => .traitInfo n supers (ds.map FItem.declared) ps assocs
+  | .module n body => .module n (body.map (·.map FItem.declared))
+  | .pub parent item => .pub parent item.declared
+  | .other item => item
+
+/-- Every body in an item: its functions' at any depth, and a constant's. -/
+partial def FItem.allBodies : FItem → List Body
+  | .fn _ _ _ _ b => [b]
+  | .alias _ b _ => [b]
+  | .impl _ _ _ _ _ ms => ms.flatMap FItem.allBodies
+  | .traitInfo _ _ ds _ _ => ds.flatMap FItem.allBodies
+  | .module _ (some body) => body.flatMap FItem.allBodies
+  | .pub _ item => item.allBodies
+  | _ => []
+
+/-- The bodies of an item's functions, each under the name the function is
+checked by: its own, or an implementation's (`implFnName`). -/
+partial def FItem.bodies : FItem → List (String × Body)
+  | .fn n _ _ _ b => [(n, b)]
+  | .impl _ tr head _ _ ms => ms.filterMap fun
+    | .fn m _ _ _ b => some (implFnName tr head m, b)
+    | _ => none
+  | .pub _ item => item.bodies
+  | _ => []
 def toItems (items : List FItem) : List Item := items.map FItem.toItem
 
 /-- Every function of these items with its body made by `f`: in

@@ -252,6 +252,7 @@ def mergeStates (p a b : St) : Option St := do
     paramTraits := ← m3 (·.paramTraits), gatOccs := ← m3 (·.gatOccs),
     gatHolds := ← m3 (·.gatHolds), dictTable := ← m3 (·.dictTable),
     methodCalls := ← m3 (·.methodCalls), fnBounds := ← m3 (·.fnBounds), impls := ← m3 (·.impls),
+    fnBodies := ← m3 (·.fnBodies),
     brands := max a.brands b.brands, anyMust := a.anyMust || b.anyMust, modules := a.modules,
     shapes := a.shapes || b.shapes, patterned := a.patterned || b.patterned, dropMode := a.dropMode,
     dropAsked := max a.dropAsked b.dropAsked, implsByBase, implsByHead, at_ := p.at_,
