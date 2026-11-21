@@ -4,6 +4,7 @@ public import Std.Data.HashMap
 public import Std.Data.HashSet
 public import Glorious.Syntax.Ast
 public import Glorious.Syntax.ByRef
+public import Glorious.Syntax.FlatOps
 
 /-!
 # Modules
@@ -205,6 +206,22 @@ def qualifyShared (items : List Item) : List Item := Id.run do
         else out := out.push item
       | none => out := out.push item
     | _ => out := out.push item
+  out.toList
+
+/-- The same, of flat items: only declarations are renamed. -/
+def qualifySharedF (items : List Flat.FItem) : List Flat.FItem :=
+  let decls := items.filterMap fun
+    | .other i => some i
+    | .pub p (.other i) => some (Item.pub p i)
+    | _ => none
+  let renamed := qualifyShared decls
+  if hash renamed == hash decls then items else
+  -- (Put back in place, one for one.)
+  let (out, _) := items.foldl (fun (acc : Array Flat.FItem × List Item) item =>
+    match item, acc.2 with
+    | .other _, r :: rest => (acc.1.push (.other r), rest)
+    | .pub _ (.other _), .pub p r :: rest => (acc.1.push (.pub p (.other r)), rest)
+    | item, rest => (acc.1.push item, rest)) (#[], renamed)
   out.toList
 
 /-- What a module declares. `taken` are the names the first module has: it
@@ -769,90 +786,6 @@ partial def patternShape : Pattern → String
   | .ctor name qual args =>
     s!"{qual.getD ""}::{name}(" ++ ",".intercalate (args.map patternShape) ++ ")"
 
-/-- Clauses in which a pattern for a value has `&P` inside it, `Some(&Leaf(n))
-=> ..`, where the value holds a reference: the reference is bound first, and
-what it points to is then asked of it by clauses of its own. Where none of
-those is for what it points to, the clauses that follow are tried, with the
-value the callable was given: so that value is one that can be looked at
-again. Clauses without such a pattern are as they are. -/
-partial def nestedRefs (clauses : List Clause) (within : Bool := false) : R (List Clause) := do
-  let arity := match clauses.head? with
-    | some (.mk pats _) => pats.length
-    | none => 0
-  -- The clauses up to the first with a reference inside a pattern.
-  let mut before : Array Clause := #[]
-  let mut rest := clauses
-  let mut first : Option (List Pattern × List (String × Pattern) × List Stmt) := none
-  while first.isNone && !rest.isEmpty do
-    match rest with
-    | .mk pats body :: more =>
-      let mut skeleton : Array Pattern := #[]
-      let mut refs : List (String × Pattern) := []
-      for p in pats do
-        let (p, found) ← liftRefs true p
-        skeleton := skeleton.push p
-        refs := refs ++ found
-      rest := more
-      if refs.isEmpty then before := before.push (.mk pats body)
-      else first := some (skeleton.toList, refs, body)
-    | [] => pure ()
-  let some (skeleton, refs, body) := first | return clauses
-  -- The clauses after it that ask the same of the value, and differ only
-  -- in what they ask of the references.
-  let shape := skeleton.map patternShape
-  let mut group : Array (List (String × Pattern) × List Stmt) := #[(refs, body)]
-  let mut going := true
-  while going do
-    match rest with
-    | .mk pats body :: more =>
-      let mut theirs : Array Pattern := #[]
-      let mut found : List (String × Pattern) := []
-      for p in pats do
-        let (p, f) ← liftRefs true p
-        theirs := theirs.push p
-        found := found ++ f
-      if !found.isEmpty && theirs.toList.map patternShape == shape && found.length == refs.length then
-        group := group.push (found, body)
-        rest := more
-      else going := false
-    | [] => going := false
-  -- What is tried where none of them is for what the references point to:
-  -- the clauses that follow, given the value again.
-  let k ← freshId
-  let given := (List.range arity).map fun i => s!"%again{k}_{i}"
-  let later := s!"%later{k}"
-  let after ← nestedRefs rest true
-  -- (The clauses that follow are tried only for what is left: that all of
-  -- them together take every case is asked once, of all as written.)
-  let after := if after.isEmpty then after
-    else after ++ [.mk (given.map fun _ => Pattern.wild) [.expr (.tailCall 0 (.name none "%never") [])]]
-  let again := Expr.call 0 (.name none later) (given.map (.name none ·))
-  let names := refs.map (·.1)
-  -- (Where nothing follows, what is left is nothing: the clauses as written
-  -- are asked whether they take every case, not these.)
-  let left := if after.isEmpty then Expr.tailCall 0 (.name none "%never") [] else again
-  let inner := group.toList.map (fun (found, body) => Clause.mk (found.map (·.2)) body)
-    ++ [.mk (names.map fun _ => Pattern.wild) [.expr left]]
-  let chosen := Clause.mk skeleton [.expr (.call 0 (.closure 0 inner) (names.map (.name none ·)))]
-  let outer := before.toList ++ [chosen] ++ [.mk (given.map fun _ => Pattern.wild) [.expr left]]
-  -- Whether the clauses as written take every case: asked of what the
-  -- callable is given, each pattern reaching through the references in it.
-  let asked := if within then [] else
-    [Stmt.expr (.call 0 (.name none "%shapes") (given.map (.name none ·) ++
-      [.closure 0 (clauses.map fun
-        | .mk pats _ => Clause.mk (pats.map fun p =>
-            match byRef? p with
-            | some _ => Pattern.wild
-            | none => throughRefs p) [])]))]
-  -- (Asked after the clauses are gone through: what the value is, and so
-  -- where it holds references, is known from them by then.)
-  let run := Expr.call 0 (.closure 0 outer) (given.map (.name none ·))
-  let result := s!"%result{k}"
-  pure [.mk (given.map Pattern.var)
-    ((if after.isEmpty then [] else [Stmt.let_ (.var later) (.closure 0 after)])
-      ++ (if asked.isEmpty then [.expr run]
-          else [.let_ (.var result) run] ++ asked ++ [.expr (.name none result)]))]
-
 /-- What the resolver knows of the names in a pattern it writes out by
 reference, before they are resolved. -/
 def refNamesOf (ctx : Ctx) : RefNames R where
@@ -937,229 +870,352 @@ partial def resolvePattern (ctx : Ctx) : Pattern → R (Pattern × List String)
     let args ← args.mapM (resolvePattern ctx)
     pure (.ctor name' qual' (args.map (·.1)), args.flatMap (·.2))
 
+
+/-! ### Names resolved in a flat body -/
+
+open Flat in
+/-- Resolving names in a flat body: what is written is read from it, and
+what it means is written to it anew. -/
+abbrev RF := StateT Flat.Body R
+
+open Flat in
+def fpush (n : FExpr) : RF ExprId := modifyGet fun b => (b.exprs.size, { b with exprs := b.exprs.push n })
+open Flat in
+def fpushS (n : FStmt) : RF StmtId := modifyGet fun b => (b.stmts.size, { b with stmts := b.stmts.push n })
+open Flat in
+def fpushC (n : FClause) : RF ClauseId := modifyGet fun b => (b.clauses.size, { b with clauses := b.clauses.push n })
+open Flat in
+def fbuild {α : Type} (act : Build α) : RF α := modifyGet fun b => act.run b
+open Flat in
+def fpushTree (e : Expr) : RF ExprId := fbuild (flatExpr e)
+
+/-- What the resolver knows of names, in a flat body. -/
+def refNamesOfF (ctx : Ctx) : RefNames RF :=
+  let rn := refNamesOf ctx
+  { kind := fun x => liftM (rn.kind x)
+    ctor := fun name qual args => liftM (rn.ctor name qual args)
+    ctorTest := fun name qual => liftM (rn.ctorTest name qual)
+    fresh := liftM rn.fresh }
+
+open Flat in
+/-- Clauses in which a pattern for a value has `&P` inside it, `Some(&Leaf(n))
+=> ..`, where the value holds a reference: the reference is bound first, and
+what it points to is then asked of it by clauses of its own. Where none of
+those is for what it points to, the clauses that follow are tried, with the
+value the callable was given: so that value is one that can be looked at
+again. Clauses without such a pattern are as they are. -/
+partial def nestedRefsF (clauses : Array ClauseId) (within : Bool := false) : RF (Array ClauseId) := do
+  let b ← get
+  let arity := (clauses[0]?.map fun c => (b.clause c).pats.length).getD 0
+  -- The clauses up to the first with a reference inside a pattern.
+  let mut before : Array ClauseId := #[]
+  let mut rest := clauses.toList
+  let mut first : Option (List Pattern × List (String × Pattern) × Array StmtId) := none
+  while first.isNone && !rest.isEmpty do
+    match rest with
+    | c :: more =>
+      let ⟨pats, body⟩ := b.clause c
+      let mut skeleton : Array Pattern := #[]
+      let mut refs : List (String × Pattern) := []
+      for p in pats do
+        let (p, found) ← liftM (liftRefs true p)
+        skeleton := skeleton.push p
+        refs := refs ++ found
+      rest := more
+      if refs.isEmpty then before := before.push c
+      else first := some (skeleton.toList, refs, body)
+    | [] => pure ()
+  let some (skeleton, refs, body) := first | return clauses
+  -- The clauses after it that ask the same of the value, and differ only
+  -- in what they ask of the references.
+  let shape := skeleton.map patternShape
+  let mut group : Array (List (String × Pattern) × Array StmtId) := #[(refs, body)]
+  let mut going := true
+  while going do
+    match rest with
+    | c :: more =>
+      let ⟨pats, body⟩ := b.clause c
+      let mut theirs : Array Pattern := #[]
+      let mut found : List (String × Pattern) := []
+      for p in pats do
+        let (p, f) ← liftM (liftRefs true p)
+        theirs := theirs.push p
+        found := found ++ f
+      if !found.isEmpty && theirs.toList.map patternShape == shape && found.length == refs.length then
+        group := group.push (found, body)
+        rest := more
+      else going := false
+    | [] => going := false
+  -- What is tried where none of them is for what the references point to:
+  -- the clauses that follow, given the value again.
+  let k ← liftM freshId
+  let given := (List.range arity).map fun i => s!"%again{k}_{i}"
+  let later := s!"%later{k}"
+  let after ← nestedRefsF rest.toArray true
+  let never := fun (_ : Unit) => (do fpush (.tailCall 0 (← fpush (.name none "%never")) #[]) : RF ExprId)
+  -- (The clauses that follow are tried only for what is left: that all of
+  -- them together take every case is asked once, of all as written.)
+  let after ← if after.isEmpty then pure after
+    else pure (after.push (← fpushC ⟨given.map fun _ => Pattern.wild, #[← fpushS (.expr (← never ()))]⟩))
+  let names := refs.map (·.1)
+  -- (Where nothing follows, what is left is nothing: the clauses as written
+  -- are asked whether they take every case, not these.)
+  let left := fun (_ : Unit) => (do
+    if after.isEmpty then never ()
+    else fpush (.call 0 (← fpush (.name none later)) (← given.toArray.mapM fun x => fpush (.name none x))) : RF ExprId)
+  let mut inner : Array ClauseId := #[]
+  for (found, body) in group do
+    inner := inner.push (← fpushC ⟨found.map (·.2), body⟩)
+  inner := inner.push (← fpushC ⟨names.map fun _ => Pattern.wild, #[← fpushS (.expr (← left ()))]⟩)
+  let innerCall ← fpush (.call 0 (← fpush (.closure 0 inner)) (← names.toArray.mapM fun x => fpush (.name none x)))
+  let chosen ← fpushC ⟨skeleton, #[← fpushS (.expr innerCall)]⟩
+  let outer := before ++ #[chosen, ← fpushC ⟨given.map fun _ => Pattern.wild, #[← fpushS (.expr (← left ()))]⟩]
+  -- Whether the clauses as written take every case: asked of what the
+  -- callable is given, each pattern reaching through the references in it.
+  let asked ← if within then pure [] else do
+    let rows ← clauses.mapM fun c => fpushC ⟨(b.clause c).pats.map fun p =>
+        match byRef? p with
+        | some _ => Pattern.wild
+        | none => throughRefs p, #[]⟩
+    let args ← given.toArray.mapM fun x => fpush (.name none x)
+    let call ← fpush (.call 0 (← fpush (.name none "%shapes")) (args.push (← fpush (.closure 0 rows))))
+    pure [← fpushS (.expr call)]
+  -- (Asked after the clauses are gone through: what the value is, and so
+  -- where it holds references, is known from them by then.)
+  let run ← fpush (.call 0 (← fpush (.closure 0 outer)) (← given.toArray.mapM fun x => fpush (.name none x)))
+  let result := s!"%result{k}"
+  let lets ← if after.isEmpty then pure [] else pure [← fpushS (.let_ (.var later) (← fpush (.closure 0 after)))]
+  let tail ← if asked.isEmpty then pure [← fpushS (.expr run)]
+    else pure ([← fpushS (.let_ (.var result) run)] ++ asked ++ [← fpushS (.expr (← fpush (.name none result)))])
+  pure #[← fpushC ⟨given.map Pattern.var, (lets ++ tail).toArray⟩]
+
+open Flat in
 mutual
 
-partial def resolveExpr (ctx : Ctx) (bound : List String) : Expr → R Expr
-  | .int n => pure (.int n)
-  | .label l => pure (.label l)
+partial def resolveExprF (ctx : Ctx) (bound : List String) (e : ExprId) : RF ExprId := do
+  let b ← get
+  match b.expr e with
+  | .int n => fpush (.int n)
+  | .label l => fpush (.label l)
   | .name qual name => do
-    let (qual', name', entry) ← resolveValue ctx bound qual name
+    let (qual', name', entry) ← liftM (resolveValue ctx bound qual name)
     -- What indexing and the like are written with is the prelude's function
     -- even where the program has a name of its own that is the same.
     let qual' := if qual == some "%prelude" && bound.contains name' then some "%prelude" else qual'
     -- An operation, or a trait's function, named where it is not called: a
     -- callable that performs it, or calls it, with what it is given (10.8).
-    if true then
-      if let some e := entry then
-        if e.kind == .op || e.kind == .method then
-          let written := (← unitOf e.home).bind fun u =>
-            (u.own.find? fun b => b.entry.global == e.global && b.entry.kind == e.kind).map (u, ·.name)
-          let arity := written.bind fun (u, own) =>
-            u.items.findSome? fun item =>
-              let item := match item with
-                | .pub _ i => i
-                | i => i
-              match item with
-              | .effect _ _ ops => (ops.find? (·.name == own)).map (·.payload.length)
-              | .trait _ methods => (methods.find? (·.1 == own)).map (·.2.1.length)
-              | _ => none
-          if let some n := arity then
-            let made := (← get).made
-            modify fun s => { s with made := made + 1 }
-            let params := (List.range n).map fun i => s!"%arg{i}"
-            return .closure 0 [.mk (params.map Pattern.var)
-              [.expr (.call (7000000000000 + made) (.name qual' name') (params.map (Expr.name none)))]]
-    pure (.name qual' name')
+    if let some en := entry then
+      if en.kind == .op || en.kind == .method then
+        let written := (← liftM (unitOf en.home)).bind fun u =>
+          (u.own.find? fun bd => bd.entry.global == en.global && bd.entry.kind == en.kind).map (u, ·.name)
+        let arity := written.bind fun (u, own) =>
+          u.items.findSome? fun item =>
+            let item := match item with
+              | .pub _ i => i
+              | i => i
+            match item with
+            | .effect _ _ ops => (ops.find? (·.name == own)).map (·.payload.length)
+            | .trait _ methods => (methods.find? (·.1 == own)).map (·.2.1.length)
+            | _ => none
+        if let some n := arity then
+          let made := (← getThe St).made
+          modifyThe St fun s => { s with made := made + 1 }
+          let params := (List.range n).map fun i => s!"%arg{i}"
+          return ← fpushTree (.closure 0 [.mk (params.map Pattern.var)
+            [.expr (.call (7000000000000 + made) (.name qual' name') (params.map (Expr.name none)))]])
+    fpush (.name qual' name')
   | .call id f args => do
     -- `value.f(a)`: `f(value, a)`, where `f` is a function or a trait's
-    -- function that can be named here. (Where it is neither, `f` is a field
-    -- that holds a callable, as it was.)
-    if let .fieldOf _ receiver name := f then
+    -- function that can be named here.
+    if let .fieldOf _ receiver name := b.expr f then
       -- Types' own functions of the name, that can be named here.
-      -- (`anywhere`: also of a type that cannot be named here, a value of
-      -- which is had, and its functions called through the value.)
       let own := fun (anywhere : Bool) => (do
-        let st ← get
-        let found := (st.typeFns.getD name #[]).toList.filter fun (path, b, ty) =>
-          b.entry.kind.space == .value
-            && (path == ctx.here || visible b.shown path ctx.here)
+        let st ← getThe St
+        let found := (st.typeFns.getD name #[]).toList.filter fun (path, bd, ty) =>
+          bd.entry.kind.space == .value
+            && (path == ctx.here || visible bd.shown path ctx.here)
             && (if anywhere then (st.typesOf.getD path {}).contains ty
               else (ctx.of ty).any fun named => named.name == ty && named.entry.kind == .type
                 && named.entry.home == path)
-        pure (found.map (·.2.1)) : R (List Bound))
+        pure (found.map (·.2.1)) : RF (List Bound))
       unless bound.contains name do
-        if let some e := lookupIn (ctx.of name) .value name then
-          if e.kind == .fn || e.kind == .method then
-            -- (Of any type a value of which may be had here: one need not be
-            -- able to name the type to call its functions through a value.)
+        if let some en := lookupIn (ctx.of name) .value name then
+          if en.kind == .fn || en.kind == .method then
             let alts := (← own true).map (·.entry.global)
             unless alts.isEmpty || id == 0 do
-              modify fun s => { s with dotAlts := (id, alts) :: s.dotAlts }
+              modifyThe St fun s => { s with dotAlts := (id, alts) :: s.dotAlts }
             -- (Marked: whether it is borrowed for the call is decided once
             -- every function's declaration has been seen.)
-            return ← resolveExpr ctx bound
-              (.call id (.name none name) (.call 0 (.name none receiverMark) [receiver] :: args))
-        -- A function of a type's own, `impl Type { fn name .. }`: found by
-        -- its name alone, where one type that can be named here has it and
-        -- no declared type has a field of that name (which may then hold a
-        -- callable). The value's type is not known where names are given
-        -- their meaning.
-        -- (A field of the name that can be read here: one that is `pub`, or
-        -- of a type of this module.)
-        let fieldNamed := ((← get).fieldsNamed.getD name #[]).any fun (path, p) => p || path == ctx.here
+            let mark ← fpush (.call 0 (← fpush (.name none receiverMark)) #[receiver])
+            let call ← fpush (.call id (← fpush (.name none name)) (#[mark] ++ args))
+            return ← resolveExprF ctx bound call
+        -- A function of a type's own: found by its name alone, where one
+        -- type that can be named here has it and no declared type has a
+        -- field of that name.
+        let fieldNamed := ((← getThe St).fieldsNamed.getD name #[]).any fun (path, p) => p || path == ctx.here
         unless fieldNamed do
           let found ← own true
-          -- (Of several types: the first, and the checker told of the rest,
-          -- which it chooses from by the value's type where the first does
-          -- not fit.)
           if found.length > 1 && id != 0 then
-            modify fun s => { s with dotAlts := (id, found.map (·.entry.global)) :: s.dotAlts }
-          if let b :: _ := found then
-            noteUse ctx.here b.entry
-            let receiver ← resolveExpr ctx bound receiver
-            let args ← args.mapM (resolveExpr ctx bound)
-            return .call id (.name none b.entry.global)
-              (.call 0 (.name none receiverMark) [receiver] :: args)
-    if let (.name none mark, [.name (some q) name]) := (f, args) then
-      if mark == pathMark then
-        -- `Owner::NAME`: a trait's function of that name called with
-        -- nothing, at the type `Owner`, if that is what `NAME` is here;
-        -- or else whatever `Owner::NAME` names.
-        let (_, _, entry) ← resolveValue ctx bound (some q) name
-        let method := (lookupIn (ctx.of name) .value name).any (·.kind == .method)
-        if method && (entry.isNone || entry.any (·.kind == .method)) then
-          -- (`Self::NAME` is `Self::NAME()`, which an implementation's
-          -- functions and a trait's own bodies already know.)
-          if q == "Self" then return ← resolveExpr ctx bound (.call id (.name (some q) name) [])
-          return ← resolveExpr ctx bound (.call 0 (.name none instMark)
-            [.call id (.name none name) [], (TypeExpr.tuple [.name q []]).asExpr])
-        return ← resolveExpr ctx bound (.name (some q) name)
-    match f, args with
-    | .name none mark, [value, ty] =>
+            modifyThe St fun s => { s with dotAlts := (id, found.map (·.entry.global)) :: s.dotAlts }
+          if let bd :: _ := found then
+            liftM (noteUse ctx.here bd.entry)
+            let receiver ← resolveExprF ctx bound receiver
+            let args ← args.mapM (resolveExprF ctx bound)
+            let mark ← fpush (.call 0 (← fpush (.name none receiverMark)) #[receiver])
+            return ← fpush (.call id (← fpush (.name none bd.entry.global)) (#[mark] ++ args))
+    if let (some mark, #[a]) := (b.bare? f, args) then
+      if let .name (some q) name := b.expr a then
+        if mark == pathMark then
+          -- `Owner::NAME`: a trait's function of that name called with
+          -- nothing, at the type `Owner`, if that is what `NAME` is here;
+          -- or else whatever `Owner::NAME` names.
+          let (_, _, entry) ← liftM (resolveValue ctx bound (some q) name)
+          let method := (lookupIn (ctx.of name) .value name).any (·.kind == .method)
+          if method && (entry.isNone || entry.any (·.kind == .method)) then
+            if q == "Self" then
+              return ← resolveExprF ctx bound (← fpush (.call id (← fpush (.name (some q) name)) #[]))
+            let inner ← fpush (.call id (← fpush (.name none name)) #[])
+            let ty ← fpushTree (TypeExpr.tuple [.name q []]).asExpr
+            return ← resolveExprF ctx bound (← fpush (.call 0 (← fpush (.name none instMark)) #[inner, ty]))
+          return ← resolveExprF ctx bound (← fpush (.name (some q) name))
+    if let (some mark, #[value, ty]) := (b.bare? f, args) then
       if mark == ascribeMark || mark == instMark then
         -- `let x: Type = value`: the type's names are resolved as types.
-        let ty ← resolveType ctx ctx.generics (TypeExpr.ofExpr ty)
-        return .call id f [← resolveExpr ctx bound value, ty.asExpr]
-    | _, _ => pure ()
-    match f, args with
-    | .name none mark, [subject, .closure _ [.mk [pat] _]] =>
-      if mark == isMark then
-        -- `subject is Pattern`: a pattern callable applied to the subject,
-        -- which gives what the pattern's new names stand for, or fails.
-        let subject ← resolveExpr ctx bound subject
-        let (pat, names) ← resolvePattern ctx pat
-        let result := fun (ctor : String) (payload : Expr) => do
-          let (qual, name, _) ← resolveValue ctx [] (some "%prelude::Result") ctor
-          pure (Expr.call 0 (.name qual name) [payload])
-        let found := if names.isEmpty then Expr.tuple []
-          else .call 0 (.name none (packName names)) (names.map fun x => .name none x)
-        return .call id (.closure 0
-          [.mk [pat] [.expr (← result "Ok" found)], .mk [.wild] [.expr (← result "Err" (.tuple []))]])
-          [subject]
-    | _, _ => pure ()
-    match f, args with
-    | .name qual name, .name none mark :: gave =>
-      if mark == recordMark then
-        -- `Point { y: 2, x: 1 }`: computed as written, kept as declared.
-        let (qual', name', entry) ← resolveValue ctx bound qual name
-        let names ← fieldNamesOf name entry
-        let gave ← gave.filterMapM fun
-          | .call _ (.name none mark) [v] => do
-            match fieldOfMark mark with
-            | some field => pure (some (field, ← resolveExpr ctx bound v))
-            | none => pure none
-          | _ => pure none
-        let _ ← match orderFields name names (gave.map fun (f, _) => (f, ())) none with
-          | .ok r => pure r
-          | .error e => throw e
-        if gave.map (·.1) == names then
-          return .call id (.name qual' name') (gave.map (·.2))
-        let temps := gave.map fun (field, _) => s!"%{field}"
-        return .call id (.closure 0 [.mk (temps.map Pattern.var)
-          [.expr (.call (id + 1) (.name qual' name') (names.map fun field => .name none s!"%{field}"))]])
-          (gave.map (·.2))
-    | _, _ => pure ()
+        let ty ← liftM (resolveType ctx ctx.generics (TypeExpr.ofExpr (treeExpr b ty)))
+        let value ← resolveExprF ctx bound value
+        return ← fpush (.call id (← fpush (.name none mark)) #[value, ← fpushTree ty.asExpr])
+    if let (some mark, #[subject, cl]) := (b.bare? f, args) then
+      if let .closure _ #[c] := b.expr cl then
+        let ⟨pats, _⟩ := b.clause c
+        if let ([pat], true) := (pats, mark == isMark) then
+          -- `subject is Pattern`: a pattern callable applied to the subject,
+          -- which gives what the pattern's new names stand for, or fails.
+          let subject ← resolveExprF ctx bound subject
+          let (pat, names) ← liftM (resolvePattern ctx pat)
+          let result := fun (ctor : String) (payload : Expr) => (do
+            let (qual, name, _) ← resolveValue ctx [] (some "%prelude::Result") ctor
+            pure (Expr.call 0 (.name qual name) [payload]) : R Expr)
+          let found := if names.isEmpty then Expr.tuple []
+            else .call 0 (.name none (packName names)) (names.map fun x => .name none x)
+          let ok ← liftM (result "Ok" found)
+          let err ← liftM (result "Err" (.tuple []))
+          let callable ← fpushTree (.closure 0 [.mk [pat] [.expr ok], .mk [.wild] [.expr err]])
+          return ← fpush (.call id callable #[subject])
+    if let .name qual name := b.expr f then
+      if let some first := args[0]? then
+        if b.bare? first == some recordMark then
+          -- `Point { y: 2, x: 1 }`: computed as written, kept as declared.
+          let (qual', name', entry) ← liftM (resolveValue ctx bound qual name)
+          let names ← liftM (fieldNamesOf name entry)
+          let mut gave : Array (String × ExprId) := #[]
+          for g in args.extract 1 args.size do
+            match b.expr g with
+            | .call _ m #[v] =>
+              match b.bare? m >>= fieldOfMark with
+              | some field => gave := gave.push (field, ← resolveExprF ctx bound v)
+              | none => pure ()
+            | _ => pure ()
+          let _ ← match orderFields name names (gave.toList.map fun (f, _) => (f, ())) none with
+            | .ok r => pure r
+            | .error err => throw err
+          if gave.toList.map (·.1) == names then
+            return ← fpush (.call id (← fpush (.name qual' name')) (gave.map (·.2)))
+          let temps := gave.toList.map fun (field, _) => s!"%{field}"
+          let built ← fpushTree (.call (id + 1) (.name qual' name') (names.map fun field => .name none s!"%{field}"))
+          let cl ← fpushC ⟨temps.map Pattern.var, #[← fpushS (.expr built)]⟩
+          return ← fpush (.call id (← fpush (.closure 0 #[cl])) (gave.map (·.2)))
     -- What is called is named as it is.
-    let called ← match f with
+    let called ← match b.expr f with
       | .name q x => do
-        let (q', x', _) ← resolveValue ctx bound q x
+        let (q', x', _) ← liftM (resolveValue ctx bound q x)
         -- (The prelude's function, whatever is named the same here.)
-        pure (Expr.name (if q == some "%prelude" && bound.contains x' then some "%prelude" else q') x')
-      | _ => resolveExpr ctx bound f
-    pure (.call id called (← args.mapM (resolveExpr ctx bound)))
+        fpush (.name (if q == some "%prelude" && bound.contains x' then some "%prelude" else q') x')
+      | _ => resolveExprF ctx bound f
+    fpush (.call id called (← args.mapM (resolveExprF ctx bound)))
   | .tailCall id f args => do
-    let called ← match f with
+    let called ← match b.expr f with
       | .name q x => do
-        let (q, x, _) ← resolveValue ctx bound q x
-        pure (Expr.name q x)
-      | _ => resolveExpr ctx bound f
-    pure (.tailCall id called (← args.mapM (resolveExpr ctx bound)))
-  | .tuple args => .tuple <$> args.mapM (resolveExpr ctx bound)
-  | .proj e i => do pure (.proj (← resolveExpr ctx bound e) i)
-  | .fieldOf id e name => do pure (.fieldOf id (← resolveExpr ctx bound e) name)
-  | .deref e => .deref <$> resolveExpr ctx bound e
-  | .reborrow uniq e => .reborrow uniq <$> resolveExpr ctx bound e
+        let (q, x, _) ← liftM (resolveValue ctx bound q x)
+        fpush (.name q x)
+      | _ => resolveExprF ctx bound f
+    fpush (.tailCall id called (← args.mapM (resolveExprF ctx bound)))
+  | .tuple args => do fpush (.tuple (← args.mapM (resolveExprF ctx bound)))
+  | .proj x i => do fpush (.proj (← resolveExprF ctx bound x) i)
+  | .fieldOf id x name => do fpush (.fieldOf id (← resolveExprF ctx bound x) name)
+  | .deref x => do fpush (.deref (← resolveExprF ctx bound x))
+  | .reborrow uniq x => do fpush (.reborrow uniq (← resolveExprF ctx bound x))
   | .closure id clauses => do
-    pure (.closure id (← (← byReference (refNamesOf ctx) (← nestedRefs clauses)).mapM (resolveClause ctx bound)))
+    let clauses ← Flat.byReference (refNamesOfF ctx) (← nestedRefsF clauses)
+    fpush (.closure id (← clauses.mapM (resolveClauseF ctx bound)))
   | .handle subject arms => do
-    pure (.handle (← resolveExpr ctx bound subject) (← arms.mapM (resolveClause ctx bound)))
-  | .labelScope l body => .labelScope l <$> resolveStmts ctx bound body
-  | e => pure e
+    fpush (.handle (← resolveExprF ctx bound subject) (← arms.mapM (resolveClauseF ctx bound)))
+  | .labelScope l body => do fpush (.labelScope l (← resolveStmtsF ctx bound body.toList).toArray)
+  | _ => pure e
 
-partial def resolveClause (ctx : Ctx) (bound : List String) : Clause → R Clause
-  | .mk pats body => do
-    -- `let name` in a pattern: the name is told from a constant of its
-    -- spelling by being written another way, in the pattern and wherever the
-    -- body means it.
-    let forced := pats.flatMap forcedNames
-    let pats := pats.map unforce
-    let body := forced.foldl (fun body x => renameStmts x (x ++ letMark) [] body) body
-    let pats ← pats.mapM (resolvePattern ctx)
-    pure (.mk (pats.map (·.1)) (← resolveStmts ctx (pats.flatMap (·.2) ++ bound) body))
+partial def resolveClauseF (ctx : Ctx) (bound : List String) (c : ClauseId) : RF ClauseId := do
+  let ⟨pats, body⟩ := (← get).clause c
+  -- `let name` in a pattern: the name is told from a constant of its
+  -- spelling by being written another way, in the pattern and wherever the
+  -- body means it.
+  let forced := pats.flatMap forcedNames
+  let pats := pats.map unforce
+  let mut renamed := body.toList
+  for x in forced do
+    renamed ← fbuild (Flat.renameStmts x (x ++ letMark) [] renamed)
+  let pats ← pats.mapM fun p => liftM (resolvePattern ctx p)
+  let body ← resolveStmtsF ctx (pats.flatMap (·.2) ++ bound) renamed
+  fpushC ⟨pats.map (·.1), body.toArray⟩
 
 /-- A statement with its names resolved, and the names it binds for the rest. -/
-partial def resolveStmt (ctx : Ctx) (bound : List String) : Stmt → R (Stmt × List String)
+partial def resolveStmtF (ctx : Ctx) (bound : List String) (s : StmtId) : RF (StmtId × List String) := do
+  match (← get).stmt s with
   | .let_ pat value => do
     if (byRef? pat).isSome then
       throw "`let &mut Pattern = ..` is written as several statements: this is a compiler defect"
-
-    let value ← resolveExpr ctx bound value
-    let (pat, names) ← resolvePattern ctx pat
-    pure (.let_ pat value, names)
-  | .letMut x value => do pure (.letMut x (← resolveExpr ctx bound value), [x])
-  | .expr e => do pure (.expr (← resolveExpr ctx bound e), [])
-  | .defer e => do pure (.defer (← resolveExpr ctx bound e), [])
+    let value ← resolveExprF ctx bound value
+    let (pat, names) ← liftM (resolvePattern ctx pat)
+    pure (← fpushS (.let_ pat value), names)
+  | .letMut x value => do pure (← fpushS (.letMut x (← resolveExprF ctx bound value)), [x])
+  | .expr e => do pure (← fpushS (.expr (← resolveExprF ctx bound e)), [])
+  | .defer e => do pure (← fpushS (.defer (← resolveExprF ctx bound e)), [])
   | .assign target value => do
-    pure (.assign (← resolveExpr ctx bound target) (← resolveExpr ctx bound value), [])
-  | .located line col s => do
-    match (resolveStmt ctx bound s).run (← get) with
-    | .ok ((s, names), st) =>
-      set st
-      pure (.located line col s, names)
-    | .error e => throw (positioned line col e)
+    let t ← resolveExprF ctx bound target
+    let v ← resolveExprF ctx bound value
+    pure (← fpushS (.assign t v), [])
+  | .located line col inner => do
+    let (inner, names) ← tryCatch (resolveStmtF ctx bound inner) fun err => throw (positioned line col err)
+    pure (← fpushS (.located line col inner), names)
 
-partial def resolveStmts (ctx : Ctx) (bound : List String) : List Stmt → R (List Stmt)
+partial def resolveStmtsF (ctx : Ctx) (bound : List String) : List StmtId → RF (List StmtId)
   | [] => pure []
   | s :: rest => do
     -- `let &mut (a, b) = r;`: the reference is given a name, and each name
     -- of the pattern is a borrow of its part through it. The pattern has to
     -- be one that cannot fail.
-    let rec peel : Stmt → Option ((Stmt → Stmt) × Bool × Pattern × Expr)
-      | .located line col s => (peel s).map fun (wrap, u, p, v) => (fun x => .located line col (wrap x), u, p, v)
-      | .let_ pat value => (byRef? pat).map fun (uniq, p) => (id, uniq, p, value)
+    let b ← get
+    let rec peel (s : StmtId) (fuel : Nat) : Option (List (Nat × Nat) × Bool × Pattern × ExprId) :=
+      match fuel with
+      | 0 => none
+      | fuel + 1 =>
+      match b.stmt s with
+      | .located line col inner => (peel inner fuel).map fun (places, u, p, v) => ((line, col) :: places, u, p, v)
+      | .let_ pat value => (byRef? pat).map fun (uniq, p) => ([], uniq, p, value)
       | _ => none
-    if let some (wrap, uniq, pat, value) := peel s then
-      let k ← freshId
+    if let some (places, uniq, pat, value) := peel s 64 then
+      let wrap := fun (st : StmtId) => (places.foldr (fun (line, col) (acc : RF StmtId) => do
+        fpushS (.located line col (← acc))) (pure st) : RF StmtId)
+      let k ← liftM freshId
       let holder := s!"%given{k}_0"
-      let (_, names) ← shapeOf (refNamesOf ctx) [] pat
-      let mut lets : List Stmt := [wrap (.let_ (.var holder) value)]
+      let (_, names) ← liftM (shapeOf (refNamesOf ctx) [] pat)
+      let mut lets : List StmtId := [← wrap (← fpushS (.let_ (.var holder) value))]
       for (x, way) in names do
-        let id := 900000000 + (← freshId)
-        lets := lets ++ [wrap (.let_ (.var x)
-          (if way.isEmpty then .reborrow uniq (.name none holder) else .refField id uniq holder way true))]
-      return ← resolveStmts ctx bound (lets ++ rest)
-    let (s, names) ← resolveStmt ctx bound s
-    pure (s :: (← resolveStmts ctx (names ++ bound) rest))
+        let id := 900000000 + (← liftM freshId)
+        let v ← if way.isEmpty then fpush (.reborrow uniq (← fpush (.name none holder)))
+          else fpush (.refField id uniq holder way true)
+        lets := lets ++ [← wrap (← fpushS (.let_ (.var x) v))]
+      return ← resolveStmtsF ctx bound (lets ++ rest)
+    let (s, names) ← resolveStmtF ctx bound s
+    pure (s :: (← resolveStmtsF ctx (names ++ bound) rest))
 
 end
 
@@ -1170,30 +1226,10 @@ def ownName (ctx : Ctx) (space : Space) (name : String) : String :=
   | some b => b.entry.global
   | none => mangle ctx.here name
 
-/-- A function with its names resolved, under the name it has in the program. -/
-def resolveFn (ctx : Ctx) (global : String) (generics : List String) :
-    Item → R Item
-  | .fn name ps annots ret clauses => do
-    let generics := genericParams ps ++ generics
-    let ctx := { ctx with generics }
-    let annots ← annots.mapM fun a => a.mapM (resolveType ctx generics)
-    let ret ← ret.mapM (resolveType ctx generics)
-    let run := (do (← byReference (refNamesOf ctx) (← nestedRefs clauses)).mapM (resolveClause ctx [])).run (← get)
-    match run with
-    | .ok (clauses, st) =>
-      set st
-      modify fun s => { s with homes := (global, key ctx.here) :: s.homes }
-      pure (.fn global ps annots ret clauses)
-    | .error e => throw (inFunction name e)
-  | item => pure item
-
-/-- An item with its names resolved: none for what only this pass reads. -/
-partial def resolveItem (ctx : Ctx) : Item → R (List Item)
-  | .pub _ item => resolveItem ctx item
-  | .module _ _ => pure []
+/-- An item that has no code with its names resolved: none for what only this
+pass reads. (Items with code are `resolveItemF`'s.) -/
+def resolveItem (ctx : Ctx) : Item → R (List Item)
   | .import _ _ _ => pure []
-  | .fn name ps annots ret clauses => do
-    pure [← resolveFn ctx (ownName ctx .value name) [] (.fn name ps annots ret clauses)]
   | .enum name ps ctors => do
     let generics := genericParams ps
     let ctors ← ctors.mapM fun (c, fields) => do
@@ -1209,7 +1245,6 @@ partial def resolveItem (ctx : Ctx) : Item → R (List Item)
         payload := ← op.payload.mapM (resolveType ctx generics)
         result := ← op.result.mapM (resolveType ctx generics) }
     pure [.effect (ownName ctx .effect name) ps ops]
-  | .alias name value => do pure [.alias (ownName ctx .value name) (← resolveExpr ctx [] value)]
   | .unsafeFn name => pure [.unsafeFn (ownName ctx .value name)]
   | .coerce name => do
     let global := (← resolveValue ctx [] none name).2.1
@@ -1234,47 +1269,6 @@ partial def resolveItem (ctx : Ctx) : Item → R (List Item)
       pure (ownName ctx .value m, ← ps.mapM (resolveType ctx known),
         withMethodGenerics (← r.mapM (resolveType ctx known)) own)
     pure [.trait (ownName ctx .trait name) methods]
-  | .traitInfo name supers defaults params assocs => do
-    let supers ← supers.mapM fun s => (·.1) <$> resolveNamed ctx .trait [] s
-    let generics := "Self" :: genericParams params ++ assocs
-    let defaults ← defaults.mapM fun
-      | .fn m ps annots ret clauses =>
-        resolveFn ctx (ownName ctx .value m) generics (.fn m ps annots ret clauses)
-      | item => pure item
-    pure [.traitInfo (ownName ctx .trait name) supers defaults params assocs]
-  | .impl ps tr head args context methods => do
-    let (tr', trEntry) ← resolveNamed ctx .trait [] tr
-    let (head', headEntry) ← resolveNamed ctx .type [] head
-    -- An implementation is written beside the trait or beside the type, so
-    -- that there is one place to look for it and no two can disagree.
-    let foreign := fun (e : Option Entry) => match e with
-      | some e => e.home != ctx.here
-      | none => true
-    if foreign trEntry && foreign headEntry && (trEntry.isSome || headEntry.isSome) then
-      let homes := (trEntry.toList ++ headEntry.toList).filter (·.home != preludePath)
-      unless homes.isEmpty do
-        throw s!"`impl {tr} for {head}` is written in {showPath ctx.here}: an implementation is written in the module of its trait or of its type"
-    let context ← context.mapM fun (p, bound) => do
-      pure (p, (← resolveNamed ctx .trait [] bound).1)
-    let generics := "Self" :: genericParams ps
-    let methods ← methods.mapM fun
-      | .fn m mps annots ret clauses => do
-        -- A function of the trait has the name the trait gave it.
-        let units := (← get).units
-        let member : Option Bound := match trEntry with
-          | some t => (units.find? fun (u : Module) => u.path == t.home).bind fun u =>
-              u.own.find? fun (b : Bound) => b.name == m && b.entry.kind == Kind.method
-          | none => none
-        let m' := (member.map (·.entry.global)).getD m
-        let item ← resolveFn ctx m' generics (.fn m mps annots ret clauses)
-        modify fun s => { s with homes := (implFnName tr' head' m', key ctx.here) :: s.homes }
-        pure item
-      -- A type the implementation says: an argument of its trait, or a type
-      -- the trait leaves to it.
-      | .typeAlias name aps body => do
-        pure (.typeAlias name aps (← resolveType ctx (genericParams ps) body))
-      | item => pure item
-    pure [.impl ps tr' head' args context methods]
   | .use head lower upper => do
     let (head', entry) ← resolveNamed ctx .type [] head
     if let some e := entry then
@@ -1313,10 +1307,82 @@ partial def resolveItem (ctx : Ctx) : Item → R (List Item)
     pure [.typeAlias (ownName ctx .type name) ps (← resolveType ctx (genericParams ps) body)]
   | item => pure [item]
 
+/-- A function with its names resolved, under the name it has in the
+program, its body flat. -/
+def resolveFnF (ctx : Ctx) (global : String) (generics : List String) (name : String) (ps : List String)
+    (annots : List (Option TypeExpr)) (ret : Option TypeExpr) (body : Flat.Body) : R Flat.FItem := do
+  let generics := genericParams ps ++ generics
+  let ctx := { ctx with generics }
+  let annots ← annots.mapM fun a => a.mapM (resolveType ctx generics)
+  let ret ← ret.mapM (resolveType ctx generics)
+  let run := (do
+    let roots ← Flat.byReference (refNamesOfF ctx) (← nestedRefsF body.roots)
+    roots.mapM (resolveClauseF ctx []) : RF (Array Flat.ClauseId))
+  match (run.run body).run (← get) with
+  | .ok ((roots, body), st) =>
+    set st
+    modify fun s => { s with homes := (global, key ctx.here) :: s.homes }
+    pure (.fn global ps annots ret { body with roots })
+  | .error e => throw (inFunction name e)
+
+/-- An item with its names resolved, its bodies flat: none for what only this
+pass reads. What has no code is resolved as it is (`resolveItem`). -/
+partial def resolveItemF (ctx : Ctx) : Flat.FItem → R (List Flat.FItem)
+  | .pub _ item => resolveItemF ctx item
+  | .module _ _ => pure []
+  | .fn name ps annots ret b => do
+    pure [← resolveFnF ctx (ownName ctx .value name) [] name ps annots ret b]
+  | .alias name b value => do
+    let (value, b) ← (resolveExprF ctx [] value).run b
+    pure [.alias (ownName ctx .value name) b value]
+  | .traitInfo name supers defaults params assocs => do
+    let supers ← supers.mapM fun s => (·.1) <$> resolveNamed ctx .trait [] s
+    let generics := "Self" :: genericParams params ++ assocs
+    let defaults ← defaults.mapM fun
+      | .fn m ps annots ret b =>
+        resolveFnF ctx (ownName ctx .value m) generics m ps annots ret b
+      | item => pure item
+    pure [.traitInfo (ownName ctx .trait name) supers defaults params assocs]
+  | .impl ps tr head args context methods => do
+    let (tr', trEntry) ← resolveNamed ctx .trait [] tr
+    let (head', headEntry) ← resolveNamed ctx .type [] head
+    -- An implementation is written beside the trait or beside the type, so
+    -- that there is one place to look for it and no two can disagree.
+    let foreign := fun (e : Option Entry) => match e with
+      | some e => e.home != ctx.here
+      | none => true
+    if foreign trEntry && foreign headEntry && (trEntry.isSome || headEntry.isSome) then
+      let homes := (trEntry.toList ++ headEntry.toList).filter (·.home != preludePath)
+      unless homes.isEmpty do
+        throw s!"`impl {tr} for {head}` is written in {showPath ctx.here}: an implementation is written in the module of its trait or of its type"
+    let context ← context.mapM fun (p, bound) => do
+      pure (p, (← resolveNamed ctx .trait [] bound).1)
+    let generics := "Self" :: genericParams ps
+    let methods ← methods.mapM fun
+      | .fn m mps annots ret b => do
+        -- A function of the trait has the name the trait gave it.
+        let units := (← get).units
+        let member : Option Bound := match trEntry with
+          | some t => (units.find? fun (u : Module) => u.path == t.home).bind fun u =>
+              u.own.find? fun (b : Bound) => b.name == m && b.entry.kind == Kind.method
+          | none => none
+        let m' := (member.map (·.entry.global)).getD m
+        let item ← resolveFnF ctx m' generics m mps annots ret b
+        modify fun s => { s with homes := (implFnName tr' head' m', key ctx.here) :: s.homes }
+        pure item
+      -- A type the implementation says: an argument of its trait, or a type
+      -- the trait leaves to it.
+      | .other (.typeAlias name aps body) => do
+        pure (.other (.typeAlias name aps (← resolveType ctx (genericParams ps) body)))
+      | item => pure item
+    pure [.impl ps tr' head' args context methods]
+  | .other item => do pure ((← resolveItem ctx item).map .other)
+
 /-- The modules of a program, each with its items: `root` is the first, and a
 module written inside another is taken out of it. -/
-partial def gather (path : List String) (items : List Item) : Except String (List (List String × List Item)) := do
-  let mut out : List (List String × List Item) := [(path, items)]
+partial def gatherF (path : List String) (items : List Flat.FItem) :
+    Except String (List (List String × List Flat.FItem)) := do
+  let mut out : List (List String × List Flat.FItem) := [(path, items)]
   for item in items do
     let inner := match item with
       | .pub _ i => i
@@ -1325,7 +1391,7 @@ partial def gather (path : List String) (items : List Item) : Except String (Lis
     | .module name (some body) =>
       if name == "crate" || name == "self" || name == "super" then
         throw s!"a module cannot be named `{name}`"
-      let more ← gather (path ++ [name]) body
+      let more ← gatherF (path ++ [name]) body
       for (p, _) in more do
         if out.any (·.1 == p) then throw s!"module `{"::".intercalate p}` is written twice"
       out := out ++ more
@@ -1344,23 +1410,24 @@ partial def findCycle (edges : List (List String × List String)) : Option (List
 
 /-- What the checker is told of the modules of a program. -/
 structure Resolved where
-  items : List Item
+  items : List Flat.FItem
   info : ModuleInfo
 
 /-- A program of modules as one list of items, each name meaning one thing:
 see above. `prelude` is a module every other can name without `use`. -/
-def resolve (prelude root : List Item) : Except String Resolved := do
-  let mods ← gather [] root
+def resolve (prelude root : List Flat.FItem) : Except String Resolved := do
+  let mods ← gatherF [] root
   -- The library's modules come straight after the prelude's, whatever the
   -- program is: what is checked first is then the same for every program.
-  let library := fun (m : List String × List Item) =>
+  let library := fun (m : List String × List Flat.FItem) =>
     m.1.head? == some "std" || m.1.head? == some "core" || m.1.head? == some "alloc"
-  let mods := (← gather preludePath prelude) ++ mods.filter library ++ mods.filter (!library ·)
+  let mods := (← gatherF preludePath prelude) ++ mods.filter library ++ mods.filter (!library ·)
   let mut units : List Module := []
   let mut fields : List (String × List String × List String × List Bool) := []
-  let taken := (declared [] root).1.map (·.name)
-  let mods := mods.map fun (path, items) => (path, qualifyShared items)
-  for (path, items) in mods do
+  let taken := (declared [] (root.map Flat.FItem.declared)).1.map (·.name)
+  let mods := mods.map fun (path, items) => (path, qualifySharedF items)
+  for (path, fitems) in mods do
+    let items := fitems.map Flat.FItem.declared
     let (own, fs) := declared path items taken
     -- A constructor has one name in its module: a `struct` is its own, and
     -- an `enum`'s are written without the type's name.
@@ -1373,14 +1440,14 @@ def resolve (prelude root : List Item) : Except String Resolved := do
     items.filterMap fun
       | .module name _ => some (path ++ [name])
       | _ => none
-  let run : R (List Item × List (String × List String)) := do
-    let mut out : Array Item := #[]
-    for u in units do
+  let run : R (List Flat.FItem × List (String × List String)) := do
+    let mut out : Array Flat.FItem := #[]
+    for (u, (_, fitems)) in units.zip mods do
       let scope ← scopeOf u.path
       let ctx : Ctx := { here := u.path, scope := scope, named := byName scope, ctorsByLast := ctorsByLastName scope }
-      unless u.path.head? == preludePath.head? do out := out.push (.fieldNames unitMark [key u.path] [])
-      for item in u.items do
-        out := out ++ (← resolveItem ctx item).toArray
+      unless u.path.head? == preludePath.head? do out := out.push (.other (.fieldNames unitMark [key u.path] []))
+      for item in fitems do
+        out := out ++ (← resolveItemF ctx item).toArray
       -- The prelude's type of arrays, by the name it has in this program.
       if u.path == preludePath then
         let named := fun (name : String) (kind : Kind) =>
@@ -1389,8 +1456,8 @@ def resolve (prelude root : List Item) : Except String Resolved := do
           -- With it, the function that adds an element and the trait of
           -- `a[i]`, so that changing an array a variable holds can be done
           -- where the array is.
-          out := out.push (.fieldNames arrayMark
-            (array :: (named "push" .fn).toList ++ (named "Index" .trait).toList) [])
+          out := out.push (.other (.fieldNames arrayMark
+            (array :: (named "push" .fn).toList ++ (named "Index" .trait).toList) []))
     -- Where each coercion applies: in the module that declares it, and in
     -- one that brings its function in with `use`.
     let coerced := (← get).coerced
@@ -1404,7 +1471,7 @@ def resolve (prelude root : List Item) : Except String Resolved := do
       applies := applies ++ [(key u.path, here)]
     pure (out.toList, applies)
   let bare := root.any fun
-    | .fieldNames mark _ _ => mark == attrMark "no_std" || mark == attrMark "no_implicit_prelude"
+    | .other (.fieldNames mark _ _) => mark == attrMark "no_std" || mark == attrMark "no_implicit_prelude"
     | _ => false
   -- (For dot calls: see `St.typeFns`.)
   let typeFns := units.foldl (init := {}) fun (m : Std.HashMap String (Array (List String × Bound × String))) u =>
@@ -1437,7 +1504,7 @@ def resolve (prelude root : List Item) : Except String Resolved := do
   let text := match ctor "StrEnd", ctor "StrChar" with
     | some e, some c => some (e, c)
     | _, _ => none
-  let preludeNames := (declared preludePath prelude).1.map (·.name)
+  let preludeNames := (declared preludePath (prelude.map Flat.FItem.declared)).1.map (·.name)
   let mine := units.filter (·.path != preludePath)
   let pubFns := mine.flatMap fun u => u.own.filterMap fun b =>
     if b.entry.kind == .fn && !(b.entry.vis matches .priv) then some b.entry.global else none

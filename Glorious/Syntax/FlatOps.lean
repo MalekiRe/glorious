@@ -619,6 +619,60 @@ partial def nameBorrowsStmts (body : List StmtId) : Build (List StmtId) :=
 
 end
 
+mutual
+
+/-- An expression with `x` written `y` wherever it means what it means
+outside (`Syntax.renameExpr`). -/
+partial def renameExpr (x y : String) (bound : List String) (e : ExprId) : Build ExprId := do
+  let b ← get
+  let here := !bound.contains x
+  match b.expr e with
+  | .name none z => if z == x && here then pushExpr (.name none y) else pure e
+  | .ref uniq z => if z == x && here then pushExpr (.ref uniq y) else pure e
+  | .refField id uniq z path star => if z == x && here then pushExpr (.refField id uniq y path star) else pure e
+  | .call i g args => do pushExpr (.call i (← renameExpr x y bound g) (← args.mapM (renameExpr x y bound)))
+  | .tailCall i g args => do pushExpr (.tailCall i (← renameExpr x y bound g) (← args.mapM (renameExpr x y bound)))
+  | .tuple args => do pushExpr (.tuple (← args.mapM (renameExpr x y bound)))
+  | .proj a n => do pushExpr (.proj (← renameExpr x y bound a) n)
+  | .deref a => do pushExpr (.deref (← renameExpr x y bound a))
+  | .reborrow u a => do pushExpr (.reborrow u (← renameExpr x y bound a))
+  | .fieldOf i a n => do pushExpr (.fieldOf i (← renameExpr x y bound a) n)
+  | .closure i cs => do pushExpr (.closure i (← cs.mapM (renameClause x y bound)))
+  | .handle s cs => do pushExpr (.handle (← renameExpr x y bound s) (← cs.mapM (renameClause x y bound)))
+  | .labelScope l body => do pushExpr (.labelScope l (← renameStmts x y bound body.toList).toArray)
+  | _ => pure e
+
+partial def renameClause (x y : String) (bound : List String) (c : ClauseId) : Build ClauseId := do
+  let ⟨pats, body⟩ := (← get).clause c
+  pushClause ⟨pats, (← renameStmts x y (pats.flatMap patternNames ++ bound) body.toList).toArray⟩
+
+partial def renameStmts (x y : String) (bound : List String) : List StmtId → Build (List StmtId)
+  | [] => pure []
+  | s :: rest => do
+    match (← get).stmt s with
+    | .let_ pat value => do
+      let v ← renameExpr x y bound value
+      pure ((← pushStmt (.let_ pat v)) :: (← renameStmts x y (patternNames pat ++ bound) rest))
+    | .letMut z value => do
+      let v ← renameExpr x y bound value
+      pure ((← pushStmt (.letMut z v)) :: (← renameStmts x y (z :: bound) rest))
+    | .expr e => do
+      let e ← renameExpr x y bound e
+      pure ((← pushStmt (.expr e)) :: (← renameStmts x y bound rest))
+    | .defer e => do
+      let e ← renameExpr x y bound e
+      pure ((← pushStmt (.defer e)) :: (← renameStmts x y bound rest))
+    | .located line col inner => do
+      match ← renameStmts x y bound (inner :: rest) with
+      | first :: more => pure ((← pushStmt (.located line col first)) :: more)
+      | [] => pure []
+    | .assign target value => do
+      let t ← renameExpr x y bound target
+      let v ← renameExpr x y bound value
+      pure ((← pushStmt (.assign t v)) :: (← renameStmts x y bound rest))
+
+end
+
 /-- `&list[i]` of a parameter `list` written with a reference's type
 (`Syntax.throughParamsRewrite`). -/
 def throughParamsRewrite (refs : List String) : FRewrite where

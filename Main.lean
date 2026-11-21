@@ -762,8 +762,8 @@ def why (path : String) : IO UInt32 := do
   let src ← IO.FS.readFile path
   let files ← moduleFiles path
   let .ok (prelude, items, _, _) := parseProgram src files | IO.println "parse failed"; return 1
-  let .ok resolved := Syntax.Modules.resolve prelude items | IO.println "resolve failed"; return 1
-  let .ok all := Syntax.Flat.expandAliases (Syntax.Flat.ofItems resolved.items) | IO.println "aliases failed"; return 1
+  let .ok resolved := Syntax.Modules.resolve (Syntax.Flat.ofItems prelude) (Syntax.Flat.ofItems items) | IO.println "resolve failed"; return 1
+  let .ok all := Syntax.Flat.expandAliases resolved.items | IO.println "aliases failed"; return 1
   let all := Syntax.Flat.fillDefaults all
   -- (With what destroys values written, where the program has something to
   -- destroy, as a compile has it.)
@@ -849,10 +849,10 @@ def stages (path : String) : IO UInt32 := do
   let .ok (prelude, items, _, _) := parseProgram src files | IO.println "parse failed"; return 1
   IO.println s!"{prelude.length + items.length} items"
   last ← lap "parse" last
-  let .ok resolved := Syntax.Modules.resolve prelude items | IO.println "resolve failed"; return 1
+  let .ok resolved := Syntax.Modules.resolve (Syntax.Flat.ofItems prelude) (Syntax.Flat.ofItems items) | IO.println "resolve failed"; return 1
   IO.println s!"{resolved.items.length} resolved"
   last ← lap "resolve" last
-  let .ok all := Syntax.Flat.expandAliases (Syntax.Flat.ofItems resolved.items) | IO.println "aliases failed"; return 1
+  let .ok all := Syntax.Flat.expandAliases resolved.items | IO.println "aliases failed"; return 1
   let all := Syntax.Flat.fillDefaults all
   let all0 := all
   IO.println s!"{all.length} filled"

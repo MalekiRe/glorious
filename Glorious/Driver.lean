@@ -648,16 +648,16 @@ function is given how to destroy the types it is generic in. -/
 def checkFirstPart (std drop : Bool) : Except String (Nat × Check.St) := do
   if !std then
     let (prelude, _) ← readPrelude.get
-    let resolved ← Syntax.Modules.resolve prelude []
-    let all := withoutUnitMarksFlat (Syntax.Flat.fillDefaults (← Syntax.Flat.expandAliases (Syntax.Flat.ofItems resolved.items)))
+    let resolved ← Syntax.Modules.resolve (Syntax.Flat.ofItems prelude) []
+    let all := withoutUnitMarksFlat (Syntax.Flat.fillDefaults (← Syntax.Flat.expandAliases resolved.items))
     return (all.length, ← Check.checkFirst all resolved.info drop)
   let (prelude, items, _, _) ← parseProgram "// std" []
-  let resolved ← Syntax.Modules.resolve prelude items
+  let resolved ← Syntax.Modules.resolve (Syntax.Flat.ofItems prelude) (Syntax.Flat.ofItems items)
   -- (Its modules in the order a program has them, marks and all, so that
   -- what a program has first is these, item for item.)
-  let (first, units) := unitsOf resolved.items resolved.info.unitUses
-  let items := first ++ units.flatMap (fun (k, is) => Syntax.Item.fieldNames Syntax.unitMark [k] [] :: is)
-  let all := Syntax.Flat.fillDefaults (← Syntax.Flat.expandAliases (Syntax.Flat.ofItems items))
+  let (first, units) := unitsOfFlat resolved.items resolved.info.unitUses
+  let items := first ++ units.flatMap (fun (k, is) => Syntax.Flat.FItem.other (Syntax.Item.fieldNames Syntax.unitMark [k] []) :: is)
+  let all := Syntax.Flat.fillDefaults (← Syntax.Flat.expandAliases items)
   -- (Without the first module's mark, at the end: it has nothing.)
   let all := match all.getLast? with
     | some (.other (.fieldNames m [""] [])) => if m == Syntax.unitMark then all.dropLast else all
@@ -715,10 +715,12 @@ def compileSourceAt (src : String) (check : Bool := true)
     parseProgram src files check few packs lexed parsedKept preludeKept texts
   -- Every name is given its meaning: the modules become one list of items,
   -- each module a unit, after those it uses.
-  let resolved ← Trace.timed "resolve names" fun _ => Syntax.Modules.resolve prelude items
-  let (firstItems, unitItems) := unitsOf resolved.items resolved.info.unitUses
+  -- (Resolved, and all that follows, from flat bodies.)
+  let (flatPrelude, flatItems) := Trace.timed "flat bodies" fun _ => (Syntax.Flat.ofItems prelude, Syntax.Flat.ofItems items)
+  let resolved ← Trace.timed "resolve names" fun _ => Syntax.Modules.resolve flatPrelude flatItems
+  let (firstItems, unitItems) := unitsOfFlat resolved.items resolved.info.unitUses
   let resolved := { resolved with items :=
-    firstItems ++ unitItems.flatMap (fun (k, is) => Syntax.Item.fieldNames Syntax.unitMark [k] [] :: is) }
+    firstItems ++ unitItems.flatMap (fun (k, is) => Syntax.Flat.FItem.other (Syntax.Item.fieldNames Syntax.unitMark [k] []) :: is) }
   -- How a constructor is named where a value is shown: without its module,
   -- and the two of the prelude's text under names that mark them.
   let shownName := fun (name : String) =>
@@ -729,9 +731,7 @@ def compileSourceAt (src : String) (check : Bool := true)
       else Syntax.lastSegment name
     | none => Syntax.lastSegment name
   -- A type alias is written out wherever it is used.
-  -- (Expanded, filled in, checked, and all that follows, from flat bodies.)
-  let all := Trace.timed "flat bodies" fun _ => Syntax.Flat.ofItems resolved.items
-  let all ← Trace.timed "expand aliases" fun _ => Syntax.Flat.expandAliases all
+  let all ← Trace.timed "expand aliases" fun _ => Syntax.Flat.expandAliases resolved.items
   -- An implementation that does not write a function its trait gives a body
   -- has that body.
   let all := Trace.timed "fill defaults, write out blankets" fun _ => Syntax.Flat.fillDefaults all
