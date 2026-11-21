@@ -842,9 +842,10 @@ def checkDups (dups : Array (Ty × String)) : M Unit := do
       if let some name ← tyHasDrop [] t then
         let s ← get
         let through := (why.splitOn "reading through a reference").length > 1
-        let home := s.kimpls.impls.any fun I =>
-          I.trait == "Drop" && bareName I.head == name
-            && (s.owner.splitOn "@").head? == some "Drop::drop"
+        -- (Of a `drop`: the function being checked, or the one a requirement
+        -- checked again at the end was made in, which its message names.)
+        let inDrop := (s.owner.splitOn "@").head? == some "Drop::drop" || (why.splitOn "in `Drop::drop@").length > 1
+        let home := inDrop && s.kimpls.impls.any fun I => I.trait == "Drop" && bareName I.head == name
         let observed := (why.splitOn "to choose a clause").length > 1
         if through && (home || observed) then continue
         throw s!"{why}, but a `{name}` has a `drop`, which would then run once for each"

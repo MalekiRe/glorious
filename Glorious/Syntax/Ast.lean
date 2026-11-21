@@ -512,6 +512,16 @@ type, the type's name, as a text (what Rust's `type_name::<Self>()` names
 the type by, without its path). -/
 def selfNameFn : String := "self_name"
 
+/-- The prelude's trait of a type's size and alignment, whose implementation
+for every type is written out for each with `self_size()` and `self_align()`
+its own (`expandBlankets`). -/
+def layoutTrait : String := "Layout"
+
+/-- The prelude's trait of a type with one runtime representation, no
+payload and no finalizer (the specification's `nil_represented`): written
+out for each type that is (`writeLayouts`). -/
+def nilTrait : String := "NilRepresented"
+
 def destroyFn : String := "%destroy"
 
 /-- The name under which the type a declared type's parameter is, where it is

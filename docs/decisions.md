@@ -6419,6 +6419,40 @@ relations (`Unlinks::linked_under`), ends the entity, then each of those,
 and what is under them (covey/ordered2, as upstream's `Child`).
 `despawn_linked<R>` ends what is under an entity by any one relation.
 
+## size_of, align_of and NilRepresented
+
+**Decision: `size_of<T>()` and `align_of<T>()` (the prelude's) are a type's
+size and alignment in bytes as the specification lays types out (4.4): its
+fields in their order, each at its alignment, the whole rounded to the
+widest; an enum a one-byte tag where it has more than one constructor, then
+the widest of its constructors' fields; a field of the type itself, through
+nothing that points, a pointer (`Str`, a list, is 16).** Scalars are their
+width; `Int` 8; references 8; callables 16 (code and what they hold); an
+array 24 (pointer, length, room). They are `<T as Layout>::SIZE`, and
+`Layout` is written out for each type beside its declaration
+(`Syntax.writeLayouts`; those with no declaration after the trait's), from
+its structure: a field of a type that mentions no type parameter is a
+number found then (`staticLayout`), any other asked of its type, so a type
+parameter is asked `Layout`, as Rust's are `Sized`. Each is checked only
+where something asks it (as a copy for each length of a list is). A type
+with a field whose type is left to be found has none.
+
+This is the layout the specification describes, not what the machines keep:
+there every value is 32 bytes, a constructor's an object of the runtime's
+(docs/abi.md). What it is for is what Rust's is for in a library: telling a
+type that is nothing from one that is not, and sizes in a declared layout.
+
+`NilRepresented` (the specification's `nil_represented`): written out for a
+type with one constructor each of whose fields is a type parameter, asked
+it too, or a type of size 0, and no `drop`: `()`, a struct with no fields,
+tuples and structs of such. A library asks it where Rust's asks
+`size_of::<T>() == 0` in a const assertion (covey's fragmenting relations).
+
+Found on the way: a `drop` reading through the reference it is given
+(`let File(n) = *f`) was refused when the requirement was checked again at
+the unit's end, which looked at the function then being checked, not the
+one the requirement was made in; it now reads that from the requirement.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by

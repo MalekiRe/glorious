@@ -3213,6 +3213,17 @@ fn main() -> Int { walk(3) }",
   -- `Kind`), not the one implemented; and a field read of it once known.
   ⟨"trait Item { type Got<'a>; fn get<'a>(&'a Self) -> Got<'a> }\ntrait KindOf<T> { type Got<'a>; fn get_by<'a>(&'a T) -> Got<'a> }\ntrait Rel { type Kind; }\nstruct One\nstruct Many\nstruct Pair(Int)\nstruct Lot\nimpl Rel for Pair { type Kind = One; }\nimpl Rel for Lot { type Kind = Many; }\nimpl<T> KindOf<T> for One { type Got<'a> = &'a T; fn get_by<'a>(t: &'a T) -> &'a T { t } }\nimpl<T> KindOf<T> for Many { type Got<'a> = [&'a T]; fn get_by<'a>(t: &'a T) -> [&'a T] { [t, t] } }\nstruct Wrap<R, T> { value: T, rel: [R] }\nimpl<R, T, K> Item for Wrap<R, T> where R: Rel<Kind = K>, K: KindOf<T> {\n    type Got<'a> = K::Got<'a>;\n    fn get<'a>(w: &'a Wrap<R, T>) -> K::Got<'a> { <K as KindOf<T>>::get_by(&w.value) }\n}\nfn main() -> Int {\n    let a: Wrap<Pair, (Int,)> = Wrap { value: (5,), rel: [] };\n    let x = a.get().0;\n    x\n}\n",
     [], "5"⟩,
+  -- Sizes and alignments as the specification lays types out (4.4): fields
+  -- in order at their alignment, an enum's tag, a field of the type itself
+  -- a pointer (`Str`).
+  ⟨"struct Unit\nstruct Pair(u8, i32)\nstruct Point { x: Int, y: Int }\nenum Shape { Dot, Line(Point, Point), Flag(u8) }\nstruct Wrap<T>(T, u8)\nfn main() -> Int {\n    say(size_of<()>());\n    say(size_of<Unit>());\n    say(size_of<u8>());\n    say(size_of<Pair>());\n    say(align_of<Pair>());\n    say(size_of<Point>());\n    say(size_of<Shape>());\n    say(size_of<Bool>());\n    say(size_of<Wrap<i32>>());\n    say(size_of<Str>());\n    say(size_of<(u8, u16, u8)>());\n    say(size_of<&Point>());\n    0\n}\n",
+    [], "0\n0\n1\n8\n4\n16\n40\n1\n8\n16\n6\n8\n0"⟩,
+  -- `NilRepresented`: of `()`, a struct with no fields, tuples and structs
+  -- of such; not of one with a `drop`.
+  ⟨"struct Unit\nstruct Marker<T>(T)\nstruct Pair(u8, i32)\nstruct Noisy\nimpl Drop for Noisy { fn drop(n: &mut Noisy) { () } }\nfn nothing<T>() -> Int where T: NilRepresented { size_of_nil<T>() }\nfn size_of_nil<T>() -> Int { 0 }\nfn main() -> Int {\n    say(nothing<()>());\n    say(nothing<Unit>());\n    say(nothing<(Unit, ())>());\n    say(nothing<Marker<Unit>>());\n    0\n}\n",
+    [], "0\n0\n0\n0\n0"⟩,
+  ⟨"struct Unit\nstruct Marker<T>(T)\nstruct Pair(u8, i32)\nstruct Noisy\nimpl Drop for Noisy { fn drop(n: &mut Noisy) { () } }\nfn nothing<T>() -> Int where T: NilRepresented { size_of_nil<T>() }\nfn size_of_nil<T>() -> Int { 0 }\nfn main() -> Int {\n    say(nothing<Noisy>());\n    say(nothing<Unit>());\n    say(nothing<(Unit, ())>());\n    say(nothing<Marker<Unit>>());\n    0\n}\n",
+    [], "error: 9:5: in `main`: `Noisy` does not implement `NilRepresented`"⟩,
   -- Pointers: two places of one array written at once, through pointers
   -- (`std::ptr`); `transmute` only where it is unsafe to name.
   ⟨"use std::ptr::{ptr_mut, as_mut, element_mut};\nfn main() -> Int {\n    let mut xs = [1, 2, 3];\n    let p = ptr_mut(&mut xs);\n    let a = unsafe { as_mut(element_mut(p, 0)) };\n    let b = unsafe { as_mut(element_mut(p, 2)) };\n    *a = *a + 10;\n    *b = *b + 30;\n    *a = *a + *b;\n    xs[0] * 100 + xs[2]\n}",

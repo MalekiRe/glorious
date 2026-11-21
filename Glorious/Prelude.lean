@@ -1096,7 +1096,37 @@ private def fixedElements : String :=
 trait Elements { type Each; fn elements(Self) -> Each }
 " ++ String.join ((List.range 9).map one)
 
-def source : String := core ++ operators ++ scalars ++ world ++ fixedElements
+
+private def layouts : String := r#"
+// How large a value of a type is, and how it is aligned, in bytes, as the
+// specification lays types out (4.4): its fields in their order, each at its
+// alignment; an enum a tag where it has more than one constructor, then the
+// widest of its constructors' fields. A type with no fields and one
+// constructor is nothing (`size_of<()>()` is 0). Written out for each type
+// from its structure (`Syntax.writeLayouts`).
+trait Layout { const SIZE: Int; const ALIGN: Int; }
+// A type with one value, which is nothing: no payload, no finalizer (the
+// specification's `nil_represented`, 4): `()`, a struct with no fields, a
+// tuple or struct of such. Each that is has it, and no other.
+trait NilRepresented {}
+fn size_of<T>() -> Int where T: Layout { <T as Layout>::SIZE }
+fn align_of<T>() -> Int where T: Layout { <T as Layout>::ALIGN }
+// (A layout so far, its size and alignment; a field put after it.)
+fn layout_add(at: (Int, Int), size: Int, align: Int) -> (Int, Int) {
+    let (s, a) = at;
+    let start = (s + align - 1) / align * align;
+    (start + size, if(align > a) { align } else { a })
+}
+fn layout_widest(x: (Int, Int), y: (Int, Int)) -> (Int, Int) {
+    let (s1, a1) = x;
+    let (s2, a2) = y;
+    (if(s1 > s2) { s1 } else { s2 }, if(a1 > a2) { a1 } else { a2 })
+}
+fn layout_size(at: (Int, Int)) -> Int { let (s, a) = at; (s + a - 1) / a * a }
+fn layout_align(at: (Int, Int)) -> Int { let (s, a) = at; a }
+"#
+
+def source : String := core ++ operators ++ scalars ++ world ++ fixedElements ++ layouts
 
 /-- The prelude of a program run without the checker. -/
 def unchecked : String := core ++ intOperators ++ world
