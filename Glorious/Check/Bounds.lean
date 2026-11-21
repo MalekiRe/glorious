@@ -1027,6 +1027,30 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
           | .var id => scheme.tvars.contains id
           | .con n [] => (seen.lookup n).isSome
           | _ => false
+        -- How each type parameter it is given values of is destroyed: by
+        -- its signature, whether or not its body lets one go, so that what
+        -- the function asks of its callers is what its signature says.
+        let mut inferred := inferred
+        -- (A coercion is given nothing: what it lets go of a type it is
+        -- generic in, or what what it calls does, is not destroyed.)
+        if (← get).coercing.contains d.name then
+          inferred := inferred.filter (·.1 != Syntax.destroyTrait)
+        else if (← get).dropMode then
+          -- (Last, in the order of the type parameters, whatever order the
+          -- body asked them in: as the signature alone gives them.)
+          let byBody := inferred.filter (·.1 == Syntax.destroyTrait)
+          inferred := inferred.filter (·.1 != Syntax.destroyTrait)
+          -- (Each one its type has, as Rust gives every type parameter how
+          -- its values are dropped: what the body does with one is not
+          -- asked.)
+          for p in (genericParams d.params).filter (!isLifetime ·) do
+            let t := Ty.con s!"'{p}@{rigidOwner decls d}" []
+            if (seen.lookup s!"'{p}@{rigidOwner decls d}").isSome then
+              let k := (← keyOf t).getD 0
+              inferred := inferred ++ [(Syntax.destroyTrait, k, t)]
+          for b in byBody do
+            unless inferred.any (fun (tr, k', _) => tr == Syntax.destroyTrait && k' == b.2.1) do
+              inferred := inferred ++ [b]
         -- Where traits are written of the function's type parameters, they
         -- are all a type parameter has: what the body needs of one must be
         -- among them, or among the traits those need.

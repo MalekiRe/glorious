@@ -415,7 +415,12 @@ partial def parsePrimary (noBlock : Bool) : P Expr := do
     -- from the numbers of what is written; in a file too long for that
     -- they go without.)
     let base := (← read).base
-    let numbered := fun (at_ offset : Nat) => if at_ < 100000 then base + at_ + offset else 0
+    -- (Past the first 100,000 tokens of a text, where `base + at_ + offset`
+    -- would be another token's: numbered in a space of their own, by the
+    -- text's place, the token and the offset.)
+    let numbered := fun (at_ offset : Nat) =>
+      if at_ < 100000 then base + at_ + offset
+      else 800000000000000000 + (base / 1000000) * 100000000 + at_ * 10 + (offset / 100000) % 10
     let opened ← get
     let empty := numbered opened 600000
     advance
@@ -430,7 +435,7 @@ partial def parsePrimary (noBlock : Bool) : P Expr := do
     if ← acceptPunct ";" then
       let count ← parseBinary 0 false
       expectPunct "]"
-      return .call 0 (preludeFn "array_repeat") [first, count]
+      return .call (numbered opened 900000) (preludeFn "array_repeat") [first, count]
     let mut elements : Array Expr := #[first]
     while ← acceptPunct "," do
       if (← peek) == .punct "]" then break

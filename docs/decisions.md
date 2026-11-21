@@ -6910,6 +6910,32 @@ kept for a group's bounds only). An edit of `main`: bounds 726 ms -> 486,
 of it making dictionaries 197 -> 7; the program's index 124 ms -> 11; the
 edit 1.98 s -> 1.40 s.
 
+## How a type parameter is destroyed: by the signature
+
+**Decision: a function given values of type parameters, in a program where
+some type has `Drop` (`dropMode`), is given how each type parameter its
+type has is destroyed (`%Destroy`), whatever its body does with values of
+it: as Rust gives every type parameter its drop glue. A coercion is given
+none (what it lets go of a type it is generic in is not destroyed, as
+before).** Before, the function was given it only where its body let a
+value of it go, so what a caller passed depended on the callee's body:
+one of the reasons each function could not be checked from its callees'
+signatures alone (see "Each function its own universe").
+
+- The destroyers come last among a function's bounds, in the order of its
+  type parameters; one its body asks of a type that is no type parameter
+  (what a trait leaves to an implementation) after them.
+- Calls the parser made without an identity that now need a bound were
+  given one: `[x; n]` (`array_repeat`), the pushes of a byte literal, and
+  array literals past the first 100,000 tokens of a text, whose identities
+  ran into the next text's (`numbered`, `scalarLiteral`).
+
+Measured: with `GLORIOUS_UNIVERSES=1`, the functions of `covey/states2`
+whose body gives a type other than its signature's went from 139 to 57;
+what is left is what the result holds of the arguments (`holds`, edges)
+and one bound of an associated type. An edit of `main` 1.40 s -> 1.46 s
+(the destroyers passed, most of them written out by specialization).
+
 ## Not done, and why (measured)
 
 - **Certificate inference in parallel.** Inference is per function already:

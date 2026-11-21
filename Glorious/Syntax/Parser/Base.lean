@@ -224,8 +224,14 @@ def scalarLiteral (neg : Bool) : P (Option Expr) := do
     pure (some (textValue codes))
   | .bytes codes =>
     if neg then failAt "bytes have no sign"
+    -- (Each push numbered, by the text's place, the token and the byte, in
+    -- a space of their own.)
+    let at_ ← get
+    let base := (← read).base
     advance
-    pure (some (arrayValue (codes.map fun (c : Nat) => scalarValue "u8_of" (c : Int))))
+    let pushes := (List.range codes.length).map fun i =>
+      if i < 1000 then 850000000000000000 + (base / 1000000) * 100000000000 + at_ * 1000 + i else 0
+    pure (some (arrayValue (codes.map fun (c : Nat) => scalarValue "u8_of" (c : Int)) 0 pushes))
   | _ => pure none
 
 /-- A literal as a pattern: the value it is, to be compared with. -/
