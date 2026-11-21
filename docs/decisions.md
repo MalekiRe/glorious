@@ -6332,8 +6332,19 @@ from the first while the choice was not made, its key spelled as the
 trait's is, and fitting it made the type's unknown part `Yes`. One the type
 does not fit as it is now waits (`implFitsAsIs`).
 
+- `From<R, Q>` is of any query `Q` of each source, `From<R, &mut Fuel>`
+  and `From<R, From<R, Entity>>` (nested joins) among them: each source is
+  another entity, so what is had of each is apart from the others', and the
+  inner store is lent to each through a pointer (`item_through`).
+  `Related<R>` is `With<Relates<R>>`. covey/joins4 ports
+  `fragmenting_joins_run_in_systems_and_infer_joined_components` and
+  `fragmenting_joins_read_targets_and_subtrees_inside_systems` (covey's
+  relations are not fragmenting: the same joins, of columns), but for a
+  component only a join names, which upstream's world comes to have and
+  covey's does not, and `To` of a many-to-many relation.
+
 Limits: a resource is still taken out whole (`lift`/`lower`), so one is
-asked for once; `From<R, &mut A>` is not there; columns are pointers into
+asked for once; columns are pointers into
 the world's value, so a world moved while a query is had would leave them
 pointing where it was (nothing does that: a query borrows the world).
 

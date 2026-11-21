@@ -37,7 +37,7 @@ use std::tuple::{Tuple, nest};
 use core::option::{as_ref, as_mut, is_none, is_some};
 use core::value::{Default, default, discard};
 use core::iter::{into_iter, next};
-use std::ptr::{Ptr, PtrMut, ptr_mut, as_const, dangling, dangling_mut};
+use std::ptr::{Ptr, PtrMut, ptr, ptr_mut, as_const, dangling, dangling_mut};
 
 // An entity: a place in the columns, and which of the entities that have had
 // that place this one is.
@@ -1329,35 +1329,35 @@ impl<R, Q> Item for To<R, Q> where Q: Item {
 // a component to read, or the entities themselves.)
 pub struct From<R, Q>(R, Q)
 // (A source disabled is not one, as a target is not to `To`.)
-impl<R, A> Item for From<R, &A> {
-    type Store = (Ptr<Column<Sources<R>>>, (Ptr<Column<A>>, [Entity]));
-    type Got<'a> = [&'a A];
-    fn item_at<'a>(store: &'a mut (Ptr<Column<Sources<R>>>, (Ptr<Column<A>>, [Entity])), entity: Entity) -> Option<[&'a A]> {
+impl<R, Q> Item for From<R, Q> where Q: Item {
+    type Store = (Ptr<Column<Sources<R>>>, (Q::Store, [Entity]));
+    type Got<'a> = [Q::Got<'a>];
+    fn item_at<'a>(store: &'a mut (Ptr<Column<Sources<R>>>, (Q::Store, [Entity])), entity: Entity) -> Option<[Q::Got<'a>]> {
+        let sources: &Column<Sources<R>> = unsafe { lent(store.0) };
+        let hidden = copied(&store.1.1);
+        let inner = ptr_mut(&mut store.1.0);
         let mut out = [];
-        let sources: &'a Column<Sources<R>> = unsafe { lent(store.0) };
         let at = slot_of(sources, entity);
         if(at >= 0) {
-            let list = &sources.dense[at].list;
-            let column: &'a Column<A> = unsafe { lent(store.1.0) };
-            let hidden = &store.1.1;
+            let list = copied(&sources.dense[at].list);
             let mut i = 0;
-            while({ i < len_at(list) }) {
-                let there = slot_of(column, list[i]);
-                if(there >= 0) { if(not_b(has_entity(hidden, list[i]))) { push_at(&mut out, &column.dense[there]) } else { () } };
+            while({ i < len_at(&list) }) {
+                // (Each source is another entity, so what is had of each is
+                // apart from what is had of the others: the inner store is
+                // lent to each, one at a time.)
+                if(not_b(has_entity(&hidden, list[i]))) {
+                    match(unsafe { item_through<Q>(inner, list[i]) }) { Some(got) => push_at(&mut out, got), None => () }
+                } else { () };
                 i = i + 1
             }
         };
         Some(out)
     }
 }
-impl<R> Item for From<R, Entity> {
-    type Store = Ptr<Column<Sources<R>>>;
-    type Got<'a> = [Entity];
-    fn item_at<'a>(store: &'a mut Ptr<Column<Sources<R>>>, entity: Entity) -> Option<[Entity]> {
-        let sources: &Column<Sources<R>> = unsafe { lent(*store) };
-        let at = slot_of(sources, entity);
-        Some(if(at >= 0) { copied(&sources.dense[at].list) } else { [] })
-    }
+// What a query has of an entity, through a pointer to its store: borrowed
+// for as long as whoever says so says.
+unsafe fn item_through<'a, Q>(store: PtrMut<Q::Store>, entity: Entity) -> Option<Q::Got<'a>> where Q: Item {
+    <Q as Item>::item_at(std::ptr::as_mut(store), entity)
 }
 // (The columns as a pair of the first and the rest's, so that each is a
 // field of its own to borrow.)
@@ -1450,8 +1450,8 @@ impl<R, Q, S> Fill<S> for To<R, Q> where S: Get<Relates<R>>, Q: Fill<S>, Q: Item
     }
     fn hollow() -> <To<R, Q> as Item>::Store { (dangling(), (<Q as Fill<S>>::hollow(), [])) }
 }
-impl<R, A, S> Fill<S> for From<R, &A> where S: Get<Sources<R>>, S: Get<A>, S: Hidden<(&A,), ()> {
-    fn fill(columns: &mut S, now: Int) -> <From<R, &A> as Item>::Store {
+impl<R, Q, S> Fill<S> for From<R, Q> where S: Get<Sources<R>>, Q: Fill<S>, Q: Item, S: Hidden<Q, ()> {
+    fn fill(columns: &mut S, now: Int) -> <From<R, Q> as Item>::Store {
         let lent_sources = lend_read<Sources<R>, S>(columns, now);
         let sources: &Column<Sources<R>> = unsafe { lent(lent_sources) };
         let mut hidden = [];
@@ -1460,20 +1460,19 @@ impl<R, A, S> Fill<S> for From<R, &A> where S: Get<Sources<R>>, S: Get<A>, S: Hi
             let list = &sources.dense[i].list;
             let mut k = 0;
             while({ k < len_at(list) }) {
-                if(<S as Hidden<(&A,), ()>>::hidden(&*columns, list[k])) { push_at(&mut hidden, list[k]) } else { () };
+                if(<S as Hidden<Q, ()>>::hidden(&*columns, list[k])) { push_at(&mut hidden, list[k]) } else { () };
                 k = k + 1
             };
             i = i + 1
         };
-        (lent_sources, (lend_read<A, S>(columns, now), hidden))
+        (lent_sources, (<Q as Fill<S>>::fill(columns, now), hidden))
     }
-    fn unfill(columns: &mut S, store: <From<R, &A> as Item>::Store) { () }
-    fn hollow() -> <From<R, &A> as Item>::Store { (dangling(), (dangling(), [])) }
-}
-impl<R, S> Fill<S> for From<R, Entity> where S: Get<Sources<R>> {
-    fn fill(columns: &mut S, now: Int) -> <From<R, Entity> as Item>::Store { lend_read<Sources<R>, S>(columns, now) }
-    fn unfill(columns: &mut S, store: <From<R, Entity> as Item>::Store) { () }
-    fn hollow() -> <From<R, Entity> as Item>::Store { dangling() }
+    fn unfill(columns: &mut S, store: <From<R, Q> as Item>::Store) {
+        let (_, rest) = store;
+        let (inner, _) = rest;
+        <Q as Fill<S>>::unfill(columns, inner)
+    }
+    fn hollow() -> <From<R, Q> as Item>::Store { (dangling(), (<Q as Fill<S>>::hollow(), [])) }
 }
 impl<H, ..R, S> Fill<S> for (H, ..R) where H: Fill<S>, (..R): Fill<S>, H: Item, (..R): Item, ..R: Item {
     fn fill(columns: &mut S, now: Int) -> <(H, ..R) as Item>::Store { (<H as Fill<S>>::fill(columns, now), <(..R) as Fill<S>>::fill(columns, now)) }
@@ -1543,6 +1542,8 @@ impl<H, ..R, S> AnyOnly<S> for (H, ..R) where H: Only<S>, (..R): AnyOnly<S> {
 impl<T, S> Only<S> for Or<T> where T: AnyOnly<S> {
     fn lets(columns: &S, entity: Entity, since: Int) -> Bool { <T as AnyOnly<S>>::any_lets(columns, entity, since) }
 }
+// Those that relate to something by `R` (one target each, `Relates<R>`).
+pub type Related<R> = With<Relates<R>>;
 // Those whose link by `R` was made or changed since the system last ran:
 // upstream's `Relinked<R>`, `Changed<Relates<R>>` (the same link again,
 // the same value to the same target, is no change: `SameLink`).
@@ -1982,8 +1983,7 @@ pub trait Joining { type Out; }
 impl Joining for () { type Out = (); }
 impl<H, T> Joining for (H, T) where T: Joining { type Out = (Joined<H>, <T as Joining>::Out); }
 impl<R, Q> ItemTouches for To<R, Q> where Q: ItemTouches, <Q as ItemTouches>::List: Joining { type List = (Read<Relates<R>>, <<Q as ItemTouches>::List as Joining>::Out); }
-impl<R, A> ItemTouches for From<R, &A> { type List = (Read<Sources<R>>, (Read<A>, ())); }
-impl<R> ItemTouches for From<R, Entity> { type List = (Read<Sources<R>>, ()); }
+impl<R, Q> ItemTouches for From<R, Q> where Q: ItemTouches, <Q as ItemTouches>::List: Joining { type List = (Read<Sources<R>>, <<Q as ItemTouches>::List as Joining>::Out); }
 impl ItemTouches for () { type List = (); }
 impl<H, ..R> ItemTouches for (H, ..R) where H: ItemTouches, (..R): ItemTouches,
     <H as ItemTouches>::List: Concat<<(..R) as ItemTouches>::List> {

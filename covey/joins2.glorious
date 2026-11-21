@@ -35,7 +35,7 @@ fn read<S>(world: &mut World<S>, unit: Entity) -> Str
 }
 fn crew<S>(world: &mut World<S>, e: Entity) -> Str
     where S: ecs::Get<ecs::Sources<DockedAt>>, S: ecs::Get<ecs::Sources<InSquad>>,
-          S: ecs::Hidden<(From<DockedAt, Entity>, From<InSquad, Entity>), ()> {
+          S: ecs::Hidden<(From<DockedAt, Entity>, From<InSquad, Entity>), ()>, S: ecs::Hidden<Entity, ()> {
     match(world.query<(From<DockedAt, Entity>, From<InSquad, Entity>)>().get_mut(e)) {
         Some((d, s)) => show(len_at(&d)) ++ " " ++ show(len_at(&s)),
         None => "0 0"
