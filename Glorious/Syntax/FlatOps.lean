@@ -26,32 +26,43 @@ def labelName (l : String) : String := "@" ++ l
 
 mutual
 
-/-- The names free in an expression (`Elab.fvExpr`). -/
-partial def fvExpr (b : Body) (bound : List String) (e : ExprId) : List String :=
+/-- The names free in an expression, added in front of `acc`: the same names,
+in the same order, as `Elab.fvExpr` gives (`fvExpr`). -/
+partial def fvExprAcc (b : Body) (bound : List String) (e : ExprId) (acc : List String) : List String :=
   match b.expr e with
-  | .name qual x => if qual.isNone && !bound.contains x then [x] else []
-  | .label l => if bound.contains (labelName l) then [] else [labelName l]
-  | .labelScope l body => b.fvStmts (labelName l :: bound) body.toList
-  | .ref _ x | .refField _ _ x _ _ => if bound.contains x then [] else [x]
-  | .closure _ cs => cs.toList.flatMap (b.fvClause bound)
-  | .handle s cs => b.fvExpr bound s ++ cs.toList.flatMap (b.fvClause bound)
-  | _ => (b.direct e).toList.flatMap (b.fvExpr bound)
+  | .name qual x => if qual.isNone && !bound.contains x then x :: acc else acc
+  | .label l => if bound.contains (labelName l) then acc else labelName l :: acc
+  | .labelScope l body => b.fvStmtsAcc (labelName l :: bound) body.toList acc
+  | .ref _ x | .refField _ _ x _ _ => if bound.contains x then acc else x :: acc
+  | .closure _ cs => cs.foldr (fun c acc => b.fvClauseAcc bound c acc) acc
+  | .handle s cs => b.fvExprAcc bound s (cs.foldr (fun c acc => b.fvClauseAcc bound c acc) acc)
+  | .call _ f args | .tailCall _ f args =>
+    b.fvExprAcc bound f (args.foldr (fun a acc => b.fvExprAcc bound a acc) acc)
+  | .tuple args => args.foldr (fun a acc => b.fvExprAcc bound a acc) acc
+  | .proj x _ | .deref x | .reborrow _ x | .fieldOf _ x _ => b.fvExprAcc bound x acc
+  | .int _ => acc
 
-partial def fvClause (b : Body) (bound : List String) (c : ClauseId) : List String :=
+partial def fvClauseAcc (b : Body) (bound : List String) (c : ClauseId) (acc : List String) : List String :=
   let ⟨pats, body⟩ := b.clause c
-  b.fvStmts (pats.flatMap patternNames ++ bound) body.toList
+  b.fvStmtsAcc (pats.flatMap patternNames ++ bound) body.toList acc
 
-partial def fvStmts (b : Body) (bound : List String) : List StmtId → List String
-  | [] => []
+partial def fvStmtsAcc (b : Body) (bound : List String) (ss : List StmtId) (acc : List String) : List String :=
+  match ss with
+  | [] => acc
   | s :: rest =>
     match b.stmt s with
-    | .let_ pat value => b.fvExpr bound value ++ b.fvStmts (patternNames pat ++ bound) rest
-    | .expr e | .defer e => b.fvExpr bound e ++ b.fvStmts bound rest
-    | .located _ _ s => b.fvStmts bound (s :: rest)
-    | .letMut x value => b.fvExpr bound value ++ b.fvStmts (x :: bound) rest
-    | .assign target value => b.fvExpr bound target ++ b.fvExpr bound value ++ b.fvStmts bound rest
+    | .let_ pat value => b.fvExprAcc bound value (b.fvStmtsAcc (patternNames pat ++ bound) rest acc)
+    | .expr e | .defer e => b.fvExprAcc bound e (b.fvStmtsAcc bound rest acc)
+    | .located _ _ s => b.fvStmtsAcc bound (s :: rest) acc
+    | .letMut x value => b.fvExprAcc bound value (b.fvStmtsAcc (x :: bound) rest acc)
+    | .assign target value => b.fvExprAcc bound target (b.fvExprAcc bound value (b.fvStmtsAcc bound rest acc))
 
 end
+
+/-- The names free in an expression (`Elab.fvExpr`). -/
+@[inline] def fvExpr (b : Body) (bound : List String) (e : ExprId) : List String := b.fvExprAcc bound e []
+@[inline] def fvClause (b : Body) (bound : List String) (c : ClauseId) : List String := b.fvClauseAcc bound c []
+@[inline] def fvStmts (b : Body) (bound : List String) (ss : List StmtId) : List String := b.fvStmtsAcc bound ss []
 
 /-- The names free in clauses. -/
 def fvClauses (b : Body) (cs : Array ClauseId) : List String := cs.toList.flatMap (b.fvClause [])

@@ -6670,64 +6670,71 @@ places, the way that passed) is kept by its text (`library/selftest-known`)
 and tried first the next time, as the command tries what a file's last
 compile found.
 
-## A flat representation of a module (toward one Sema pass)
+## A flat representation of each declaration's body
 
-**Decision: a module's items get a flat form (`Syntax.Flat`): its
-expressions, statements, clauses and patterns each one array, a node naming
-its parts by place, the items naming their clauses and values by place.**
-As Zig's ZIR: every expression has a place of its own, by which what is
-decided of it is said beside it, not written into a copy of the tree; a
-pass goes through arrays instead of rebuilding every node it passes; and a
-kept module is a few arrays.
+**Decision: from the parser's items on, every function's code is a flat body
+of its own (`Syntax.Flat.Body`): its expressions, statements and clauses each
+one array, a node naming its parts by place, the function's clauses its
+roots. Patterns and types stay trees. Items are `Flat.FItem`: functions and
+constants with flat bodies, everything without code as it was.** As Zig's
+ZIR is to its AST: the parser's trees are made flat once (`Flat.ofItems`,
+Zig's AstGen), and every pass from name resolution to Core reads and writes
+flat bodies.
 
-What the front end does today, measured on `covey/states2` edited (4.1 s):
-after the parse, a dozen passes over the whole program each rebuild it:
-names resolved (0.20 s), aliases expanded (0.04), defaults and blankets
-written out (0.22), fields borrowed apart split (0.03), checked (2.2),
-what the checker decided written in (0.18), lifetimes erased (0.02), traits
-lowered to values (0.37), what main reaches (0.07), elaborated (0.2).
+What is where:
+- `Syntax/Flat.lean`: the body, `FItem`, between trees and bodies
+  (`ofClauses`, `toClauses`, `ofItem`, `FItem.declared`, `FItem.bodies`);
+  check 97 says the prelude's and the library's functions come back as they
+  were.
+- `Syntax/FlatOps.lean`: what is asked of a body (free names, how a name is
+  used, given away, call ids, a structural hash) and `FRewrite`, a rewrite
+  that copies only what changes, with hooks on expressions, statements,
+  blocks, clauses and patterns; the front end's rewrites over it (`Self`,
+  ids moved on, types written in a body, borrows named, names kept in
+  variables, renaming).
+- Name resolution (`resolveExprF` and the rest, `nestedRefsF`,
+  `Flat.byReference`), aliases, defaults and blankets (`Resolve.lean`,
+  `namespace Flat`), fields split apart, the checker (`St.body`, the body
+  being checked, to which what it reads that was not written is added;
+  `St.fnBodies`, declarations read without bodies), the use counts and
+  their abstract run, decisions, lowering (untrait, unfield, instances,
+  specialization, constants), coercions and the elaborator (`St.body` too)
+  all read flat bodies.
 
-The way there was to be, each step with the suite as it was:
-1. **The flat form, and back**: `flatten`, `unflatten`; check 97 says the
-   prelude's and the library's modules come back as they were.
-2. The parser writes the flat form; the trees are made from it.
-3. The passes before the checker go over the flat form, one at a time,
-   then as one pass: names, aliases, defaults, fields.
-4. What the checker decides is a table by node: "what the checker decided,
-   written in" goes.
-5. The checker and the elaborator read the flat form; lowering traits is
-   done as the elaborator reads (one Sema pass, as Zig's from ZIR to AIR).
+**What the checker decides is written where it is.** A decision (`..` in a
+tuple pattern, a function named as a value, a value kept in a variable, a
+match of a reference, a dot call's receiver, a field through `Deref`) is
+written into the function's body by `decideBody`, by the checker before it
+checks the group again and after the check into the items it is of; the dot
+calls and arguments it chose are written into those calls (`chosenRewrite`).
+The items with something decided are found by scanning their bodies' arrays.
 
-**Measured, steps 2, 3 and 5 do not pay in Lean, and are set aside.**
-- A node of the flat form is still an object of its own: Lean has no
-  arrays of unboxed variants, so the arrays point at nodes as a tree's
-  nodes point at each other. Nothing is nearer in memory.
-- Kept flat, the parsed modules of `states2` are 7.7 MB where kept as
-  trees they are 4.4 MB (a compacted tree shares; the arrays and indices
-  are more), and reading them back took 80 ms where trees take 71.
-- Flattening the whole program takes 19 ms and making trees of it again
-  12 ms; one rewrite of the whole program (`Rewrite.items`) about 35. The
-  passes take 16 to 170 ms each: their time is the work they do (names
-  looked up, blankets written out, implementations specialized), not the
-  nodes they rebuild. A pass on the flat form saves at most the rebuilding,
-  and each place the form changes back costs about as much.
-- Of the check (1.8 s), `main`'s bounds are 0.74 s; the three times the
-  checker stops in `main` for a decision and starts the group again cost
-  7 ms each (it stops early in the group).
+**A pass leaves alone what it has nothing to do in.** Constants folded,
+fields written out and variables split rewrite only the bodies with
+something to do in them; `FRewrite` keeps the place of every node that does
+not change.
 
-**What is kept of it: what is decided is written where it is, and a pass
-leaves alone what it has nothing to do in.**
-- What the checker decided (`decidedProgram`) is written into the items it
-  is of alone, found by the identities it is of (`Decided`: calls,
-  callables, fields, tuple patterns, and the functions an `eta` or
-  `let mut` is in): 81 ms to 12 on `states2`, where each of its 10
-  decisions went over the whole program.
-- Constants folded (`foldConstants`), fields written out (`unfield`) and
-  variables split (`splitFieldItems`) rewrite only the functions with
-  something to do, found by a read that builds nothing
-  (`Expr.anyExpr`/`Item.anyExpr`): 66 ms to 27, 28 to 21, 24 to 16.
-- The flat form stays, with its check (97), for what keeps things by node
-  later (per-declaration caching).
+**What stays trees, and why.**
+- The parser builds trees and its own desugarings over them (`promoteItems`,
+  `unmutItems`, `selfClause`, `mapTypesClause`, `renameStmts`), which are
+  made flat once after parsing; the parsed modules are kept as trees, which
+  a compacted region shares (kept flat they were 7.7 MB against 4.4, and
+  read back slower). This is Zig's split: its AST is not its IR.
+- What is made rather than written stays a tree until it is put in a body:
+  constants (`aliases`), what the checker chose to give as an argument
+  (`argsChosen`), the clauses of a `refPats` decision, implementations as
+  values (`dictExpr`), destroyers and layouts.
+
+**Measured** (see the commit messages for each step): writing in what the
+checker decided went from 81 ms to 5–9 on an edited `covey/states2`, as each
+decision had gone over the whole program. Otherwise the flat form is about
+as fast as the trees were, a few per cent either way per pass: in Lean a
+node of a body is still an object of its own (there are no arrays of
+unboxed variants), so nothing is nearer in memory, and a pass's time is the
+work it does, not the nodes it rebuilds. What the flat form gives is that a
+body is a value of its own, hashed as it is written whatever else changes,
+with every node at a place: what per-declaration caching and a check of each
+function on its own are made from.
 
 ## Other standing decisions
 

@@ -257,6 +257,56 @@ end
 /-- A body's own clauses as trees again. -/
 def toClauses (b : Body) : List Clause := b.roots.toList.map (treeClause b)
 
+/-! ## A body without what nothing reaches
+
+A pass writes what it makes after what was there; what it made anew of is
+then reached by nothing. `compact` copies what the roots reach, in order,
+into a body of its own. -/
+
+mutual
+
+partial def compactExpr (src : Body) (e : ExprId) : Build ExprId := do
+  match src.expr e with
+  | .call id f args => do
+    let f ← compactExpr src f
+    pushExpr (.call id f (← args.mapM (compactExpr src)))
+  | .tailCall id f args => do
+    let f ← compactExpr src f
+    pushExpr (.tailCall id f (← args.mapM (compactExpr src)))
+  | .tuple args => do pushExpr (.tuple (← args.mapM (compactExpr src)))
+  | .proj x i => do pushExpr (.proj (← compactExpr src x) i)
+  | .closure id cs => do pushExpr (.closure id (← cs.mapM (compactClause src)))
+  | .handle s cs => do
+    let s ← compactExpr src s
+    pushExpr (.handle s (← cs.mapM (compactClause src)))
+  | .labelScope l body => do pushExpr (.labelScope l (← body.mapM (compactStmt src)))
+  | .deref x => do pushExpr (.deref (← compactExpr src x))
+  | .reborrow u x => do pushExpr (.reborrow u (← compactExpr src x))
+  | .fieldOf id x n => do pushExpr (.fieldOf id (← compactExpr src x) n)
+  | n => pushExpr n
+
+partial def compactStmt (src : Body) (s : StmtId) : Build StmtId := do
+  match src.stmt s with
+  | .let_ p v => do pushStmt (.let_ p (← compactExpr src v))
+  | .expr v => do pushStmt (.expr (← compactExpr src v))
+  | .defer v => do pushStmt (.defer (← compactExpr src v))
+  | .letMut x v => do pushStmt (.letMut x (← compactExpr src v))
+  | .assign t v => do
+    let t ← compactExpr src t
+    pushStmt (.assign t (← compactExpr src v))
+  | .located l c inner => do pushStmt (.located l c (← compactStmt src inner))
+
+partial def compactClause (src : Body) (c : ClauseId) : Build ClauseId := do
+  let ⟨pats, body⟩ := src.clause c
+  pushClause ⟨pats, ← body.mapM (compactStmt src)⟩
+
+end
+
+/-- The body with only what its roots reach. -/
+def Body.compact (b : Body) : Body :=
+  let (roots, nb) := (b.roots.mapM (compactClause b)).run {}
+  { nb with roots }
+
 /-! ## Items with flat bodies -/
 
 /-- An item whose functions' clauses, and whose constant's value, are flat
@@ -336,6 +386,17 @@ partial def FItem.mapBodies (f : Body → Body) : FItem → FItem
   | .traitInfo n supers ds ps assocs => .traitInfo n supers (ds.map (·.mapBodies f)) ps assocs
   | .module n (some body) => .module n (some (body.map (·.mapBodies f)))
   | .pub parent item => .pub parent (item.mapBodies f)
+  | item => item
+
+/-- Every body of these items with only what its roots reach; a constant's
+too. -/
+partial def FItem.compact : FItem → FItem
+  | .alias n b e => let (e, nb) := (compactExpr b e).run {}; .alias n nb e
+  | .impl ps tr head args ctx ms => .impl ps tr head args ctx (ms.map FItem.compact)
+  | .traitInfo n supers ds ps assocs => .traitInfo n supers (ds.map FItem.compact) ps assocs
+  | .module n (some body) => .module n (some (body.map FItem.compact))
+  | .pub parent item => .pub parent item.compact
+  | .fn n ps annots ret b => .fn n ps annots ret b.compact
   | item => item
 
 /-- Do clauses come back as they were from their body? -/

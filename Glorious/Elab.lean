@@ -1584,7 +1584,8 @@ def untrait (blocks : Blocks) (items : List Flat.FItem) : List Flat.FItem × Blo
       (ret : Option TypeExpr) (b : Flat.Body) =>
     let n := (tr.boundedAt[name]?).getD 0
     let (roots, b) := (b.roots.mapM (untraitClause tr name)).run b
-    Flat.FItem.fn name params ((List.replicate n none) ++ annots) ret (withDicts n { b with roots })
+    -- (Every node is made anew: what was there is reached by nothing.)
+    Flat.FItem.fn name params ((List.replicate n none) ++ annots) ret (withDicts n { b with roots }).compact
   let out := items.flatMap fun
     | .other (.trait _ _) => []
     | .impl params trait head _ context methods =>

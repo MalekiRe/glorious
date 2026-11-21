@@ -769,6 +769,9 @@ def compileSourceAt (src : String) (check : Bool := true)
   let all := Trace.timed "split fields borrowed apart" fun _ => match first with
     | .ok (count, _) => all.take count ++ Elab.splitFieldItems all (all.drop count)
     | .error _ => Elab.splitFieldItems all all
+  -- (What nothing reaches of the bodies left out: what is checked, kept and
+  -- hashed from here on is what is written.)
+  let all := Trace.timed "compact" fun _ => all.map Syntax.Flat.FItem.compact
   -- (`kept`: what an earlier check of the same program kept, in the same
   -- process: the steps whose inputs did not change are not checked again.)
   let seed := mixHash (hash withStd) (mixHash (hash drops) (hash few))

@@ -22,7 +22,12 @@ def keptEvery (n : Nat) : Nat := max 1 ((n + 47) / 48)
 /-- A state as it is kept: without what a group's bounds found, which the
 next group's start anew (`settleBounds`). -/
 def forKeeping (st : St) : St :=
-  { st with solvedFit := {}, leavesFit := {}, leavesAt := {}, tyIds := {}, tyIdCount := 0, tyMemo := {}, dictShared := {} }
+  { st with solvedFit := {}, leavesFit := {}, leavesAt := {}, tyIds := {}, tyIdCount := 0, tyMemo := {}, dictShared := {},
+            body := {}, fnBodies := {} }
+
+/-- A state to keep, without the bodies of the functions: those are the
+program's as it is now, which `adopt` keeps. -/
+def noBodies (st : St) : St := { st with body := {}, fnBodies := {} }
 
 /-- An item as its declarations have it: its functions without their bodies. -/
 partial def withoutBodies : Item → Item
@@ -394,7 +399,7 @@ def checkItems (fitems : List Flat.FItem) (seed : UInt64 := 0) (kept : Kept := [
       computeVariances
       declareTraits items
       checkUseDecls
-    made := (key, ← get) :: made
+    made := (key, noBodies (← get)) :: made
     modify fun s =>
       { s with runFns := decls.foldl (fun m d => m.insertIfNew d.name d.body) s.runFns }
     -- (A state kept from before has the bodies that program's later
@@ -546,7 +551,7 @@ def checkItems (fitems : List Flat.FItem) (seed : UInt64 := 0) (kept : Kept := [
     -- (None uses another: all side by side.)
     checkSideBySide (implGroups.toList.drop implStart)
     if implStart < implGroups.size then
-      if let some k := implKeys.getLast? then made := (k, ← get) :: made
+      if let some k := implKeys.getLast? then made := (k, noBodies (← get)) :: made
     if let some k := implKeys.getLast? then key := k
     for c in coercing do
       unless (((← get).fnBounds.lookup c).getD 0) == 0 do
@@ -583,7 +588,7 @@ def checkItems (fitems : List Flat.FItem) (seed : UInt64 := 0) (kept : Kept := [
     checkDrops (← get).lateDrops
     checkStays (← get).lateStays
     modify fun s => { s with lateDups := #[], lateDrops := #[], lateStays := #[] }
-    pure ((whole, ← get) :: made)
+    pure ((whole, noBodies (← get)) :: made)
 
 /-- The declared types a type is made of. -/
 partial def namedIn : Ty → List String
