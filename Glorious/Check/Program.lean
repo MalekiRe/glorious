@@ -165,6 +165,13 @@ partial def capsOf : Ty → List Nat
   | .tuple args => args.flatMap capsOf
   | .var _ => []
 
+/-- The lifetimes of the references a type is made of, outermost first. -/
+partial def refCapsOf : Ty → List Nat
+  | .ref _ t c => c :: refCapsOf t
+  | .con _ args => args.flatMap refCapsOf
+  | .tuple args => args.flatMap refCapsOf
+  | _ => []
+
 /-- A function's type as callers see it: the type, with its variables
 numbered in order; how many bounds, of what; and for each capture of the
 type, what it holds in the end, through captures the type does not have
@@ -186,12 +193,19 @@ def schemeShape (s : Scheme) : String :=
         | .ty (.ref (.con "'" []) (.tuple []) c') => match place c' with
           | some k => [s!"life#{k}"]
           | none => if seen.contains c' then [] else holds fuel (c' :: seen) c'
-        | .ty t => [s!"ty {showTy t}"]
+        -- (A value held whose type is a reference with a lifetime of the
+        -- type's own: as that lifetime held, which is what a signature says
+        -- of a borrow of what it is given.)
+        | .ty t => match refCapsOf t with
+          | [] => [s!"ty {showTy t}"]
+          | cs => if cs.all (fun c' => (place c').isSome) then cs.filterMap fun c' => (place c').map (s!"life#{·}")
+            else [s!"ty {showTy t}"]
         | .inner _ => if quiet then [] else ["inner"]
         | .brand _ => ["brand"]
         | .once => ["once"]
         | .must => ["must"]
-        | .loan _ => ["loan"]
+        -- (That it is a borrow, not a value: what it is a borrow of says it.)
+        | .loan _ => []
         | .touch _ w => [s!"touch {w}"]
   let held := caps.map fun c => ((holds 32 [c] c).eraseDups.mergeSort (· ≤ ·))
   let n := fun (k : Nat) => String.ofList (List.replicate k '|')
