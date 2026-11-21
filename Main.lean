@@ -361,7 +361,10 @@ def compileFile (path : String) (checkKept : Check.Kept := []) (search : Bool :=
     if ← groupsDir.isDir then
       for entry in ← groupsDir.readDir do
         if let some k := entry.fileName.toNat? then
-          if let some [d] ← Store.load (α := List Check.StDelta) entry.path "group" then kept := kept.insert k.toUInt64 d
+          let later := Store.loadLater (α := List Check.StDelta) entry.path "group"
+          kept := kept.insert k.toUInt64 (Thunk.mk fun _ => match later.get with
+            | some [d] => some d
+            | _ => none)
     pure kept
   -- (And each module's items as resolution made them.)
   let unitsKept : Syntax.Modules.UnitsKept ← if (← IO.getEnv "GLORIOUS_FRESH").isSome then pure {} else
@@ -402,11 +405,15 @@ def compileFile (path : String) (checkKept : Check.Kept := []) (search : Bool :=
     -- (Saved again only where a group was checked anew.)
     Trace.timedIO "save: groups" do
       for (k, d) in c.groupsMade do
-        unless groupsKept.contains k do Store.save (dir / "groups" / toString k) "group" [d]
-      -- (Those no group of this compile is: taken away.)
-      let made : Std.HashSet UInt64 := c.groupsMade.foldl (fun s (k, _) => s.insert k) {}
-      for (k, _) in groupsKept do
-        unless made.contains k do discard <| (IO.FS.removeFile (dir / "groups" / toString k)).toBaseIO
+        -- (One kept by another compiler, or not at all: written.)
+        unless ((groupsKept[k]?).bind (·.get)).isSome do Store.save (dir / "groups" / toString k) "group" [d]
+      -- (Those of earlier versions of the program are kept, for an edit
+      -- taken back; past 4096, those no group of this compile is are taken
+      -- away.)
+      if groupsKept.size > 4096 then
+        let made : Std.HashSet UInt64 := c.groupsMade.foldl (fun s (k, _) => s.insert k) {}
+        for (k, _) in groupsKept do
+          unless made.contains k do discard <| (IO.FS.removeFile (dir / "groups" / toString k)).toBaseIO
     -- (`GLORIOUS_CORE`: the Core that was compiled, with what destroys what.)
     if (← IO.getEnv "GLORIOUS_CORE").isSome then
       IO.eprintln (showCore c.fnNames c.core)

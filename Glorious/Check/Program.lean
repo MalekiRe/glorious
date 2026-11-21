@@ -302,7 +302,7 @@ def checkSideBySide (groups : List (List FnDecl)) : M Unit := do
 
 /-- What each of the program's own groups added, by a key of what it is
 checked from (`checkGroupKept`): kept by one compile for the next. -/
-abbrev Deltas := Std.HashMap UInt64 StDelta
+abbrev Deltas := Std.HashMap UInt64 (Thunk (Option StDelta))
 
 /-- The state with what is made next numbered from where the `i`-th group
 of a unit that began at `pre` numbers from, `runGap` after the one before;
@@ -332,7 +332,7 @@ def checkGroupKept (kept : Deltas) (pre : St) (key : UInt64) (i : Nat) (g : List
   | none => checkMaybe g; pure #[]
   | some st =>
     set st
-    if let some d := kept[key]? then
+    if let some d := (kept[key]?).bind (·.get) then
       if let some st' := Trace.timed "group: reused" fun _ => applyDelta none st d then
         set st'
         return #[(key, d)]
@@ -463,7 +463,7 @@ def checkItems (fitems : List Flat.FItem) (seed : UInt64 := 0) (kept : Kept := [
       let declFrom := mixHash key (hash [here.tys.size, here.rows.size, here.caps.size, here.capEdges.size,
         here.loans.size, here.rigidKeys.size, here.brands, here.dropAsked, here.impls.size])
       let taken := match deltas with
-        | some kept => (kept[declFrom]?).bind fun d =>
+        | some kept => (kept[declFrom]?).bind (·.get) |>.bind fun d =>
           ((applyDelta none here d).bind ours).map (d, ·)
         | none => none
       match taken with
