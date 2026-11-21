@@ -6910,6 +6910,21 @@ kept for a group's bounds only). An edit of `main`: bounds 726 ms -> 486,
 of it making dictionaries 197 -> 7; the program's index 124 ms -> 11; the
 edit 1.98 s -> 1.40 s.
 
+## Not done, and why (measured)
+
+- **Certificate inference in parallel.** Inference is per function already:
+  what it found is kept by each function's key and signature
+  (`Infer.Memo`), and a group's callers are keyed by what it shows them
+  (`faceOf`), so a change that leaves that is not seen past it. An edit of
+  the generated program of 2,000 functions infers in 54 ms (once 430: each
+  function's key looked things up in lists). Doing it in parallel would
+  save little of that. Dropped.
+- **Types interned in the checker (intern pool 3).** What was measured to
+  need it was dictionaries: `main` of `covey/states2` made 243,045 of 2,915
+  different ones, now one object each (see "Measured against Zig"). Interning
+  `Ty` itself would rewrite how the checker handles every type, for no hot
+  spot measured now. Done as far as dictionaries; types dropped.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by
