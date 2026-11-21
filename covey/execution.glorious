@@ -14,16 +14,18 @@
 // - `non_send_systems_and_listeners_still_run_parallel_groups`.
 // - `explicit_work_threshold_runs_small_groups_on_caller`: a pool's least
 //   work for a group, every system still run.
-// Not ported: the tests that need two branches to run at the same moment
-// (a barrier both wait at: `dependent_runs_before_unrelated_root_finishes`,
-// `narrow_prefix_reactivates_workers_and_nested_groups_join`,
-// `flattened_condition_skips_preserve_locals_and_release_dependents`), and
-// those of a system that panics (`panic_joins_running_nodes_and_graph_can_run_again`,
+// The tests that need two branches to run at the same moment are in
+// barrier.glorious (`dependent_runs_before_unrelated_root_finishes`) and
+// continuations.glorious
+// (`narrow_prefix_reactivates_workers_and_nested_groups_join`,
+// `flattened_condition_skips_preserve_locals_and_release_dependents`).
+// Not ported: those of a system that panics, which aborts the program (the
+// language's panic: `panic_joins_running_nodes_and_graph_can_run_again`,
 // `dynamic_reentry_is_direct_and_pool_binding_restores_after_unwind`,
 // `multiple_panics_release_payloads_on_the_caller_and_pool_is_reusable`,
-// `cancelled_invocations_return_only_after_every_published_branch_finishes`),
-// and `simultaneous_callers_keep_worlds_and_invocation_lifetimes_separate`
-// (two threads emitting into apps at once: an app is not shared here).
+// `cancelled_invocations_return_only_after_every_published_branch_finishes`).
+// `simultaneous_callers_keep_worlds_and_invocation_lifetimes_separate` is
+// callers.glorious.
 // expect:
 // 150
 // --

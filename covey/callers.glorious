@@ -1,0 +1,40 @@
+// `simultaneous_callers_keep_worlds_and_invocation_lifetimes_separate`
+// (upstream's tests/continuations.rs): two threads each build an app and
+// emit into it thirty times, its parallel group's branches beside the
+// other thread's; each world keeps its own values.
+// expect:
+// 40 60
+// 1030 60
+// 0
+mod ecs;
+
+use ecs::{App, Single, parallel};
+use std::thread::{scope, Scope, Threads, join};
+
+struct Update
+struct Small(Int)
+struct Big(Int)
+
+fn add_one(value: &mut Single<(&mut Small,), ()>) { match(value.get_mut()) { Some((mut v,)) => v.0 = v.0 + 1;, None => () } }
+fn add_two(value: &mut Single<(&mut Big,), ()>) { match(value.get_mut()) { Some((mut v,)) => v.0 = v.0 + 2;, None => () } }
+
+fn caller(seed: Int) -> Str {
+    let mut app = App::new().register<Small>().register<Big>().add_systems(Update, parallel((add_one, add_two))).build();
+    let entity = app.world.spawn_bundle((Small(seed), Big(0)));
+    let mut i = 0;
+    while({ i < 30 }) { app.emit(&Update); i = i + 1 };
+    let small = match(app.world.get<Small>(entity)) { Some(v) => v.0, None => 0 - 1 };
+    let big = match(app.world.get<Big>(entity)) { Some(v) => v.0, None => 0 - 1 };
+    show(small) ++ " " ++ show(big)
+}
+
+fn main() -> Int {
+    let (a, b) = scope(fn(s: &Scope) -> (Str, Str) / {Threads} {
+        let first = s.spawn({ caller(10) });
+        let second = s.spawn({ caller(1000) });
+        (join(first), join(second))
+    });
+    say(a);
+    say(b);
+    0
+}
