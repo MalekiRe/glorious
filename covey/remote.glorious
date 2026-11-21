@@ -12,6 +12,10 @@
 //   an envelope point in a parallel group runs its bridge on a thread of
 //   its own beside a system apart from it, the two meeting at a barrier
 //   (but for inferring its components: `A` is registered here).
+// - `one_point_placed_twice_is_driven_by_one_driver_at_a_time`: a point
+//   placed twice in a parallel group, both run at once (read-only
+//   envelopes), each request run by one of them (4 threads of 5 bridges,
+//   upstream's 8 of 20).
 // Not ported: `dropping_the_app_or_a_granted_bridge_never_strands_anyone`
 // (a request is not failed when the app is dropped); the envelope sync
 // points that run beside other systems
@@ -46,6 +50,8 @@
 // 1 1
 // --
 // 2 2 2
+// --
+// 20
 // 0
 mod ecs;
 
@@ -301,5 +307,42 @@ fn main() -> Int {
         join(worker)
     });
     say(show(match(app.world.get<A>(entity)) { Some(a) => a.0, None => 0 - 1 }) ++ " " ++ show(match(app.world.get<B>(entity)) { Some(b) => b.0, None => 0 - 1 }) ++ " " ++ show(load(&met)));
+    say("--");
+
+    let mut app = App::new().register<A>().register<B>()
+        .add_systems(Update, parallel((sync_point(Reads), sync_point(Reads), fn(q: &mut Query<(&B,), ()>) { () })))
+        .build();
+    discard(app.world.spawn_bundle((A(1), B(1))));
+    let remote = app.world.remote();
+    let finished = AtomicInt::new(0);
+    let right = AtomicInt::new(0);
+    scope(fn(s: &Scope) / {Threads} {
+        let mut workers = [];
+        let mut k = 0;
+        while({ k < 4 }) {
+            let mine = remote.share();
+            let f = std::thread::share(&finished);
+            let r = std::thread::share(&right);
+            workers = push(workers, s.spawn({
+                let m = mine;
+                let ff = f;
+                let rr = r;
+                let mut n = 0;
+                while({ n < 5 }) {
+                    match(m.bridge(Reads, fn(q: &mut Query<(&A,), ()>) -> Int { let mut sum = 0; q.for_each() { (a,) => sum = sum + a.0; }; sum })) {
+                        Ok(1) => discard(fetch_add(&rr, 1)),
+                        _ => ()
+                    };
+                    n = n + 1
+                };
+                discard(fetch_add(&ff, 1))
+            }));
+            k = k + 1
+        };
+        while({ load(&finished) < 4 }) { app.emit(&Update); yield_now() };
+        let mut each = into_iter(workers);
+        while({ match(next(&mut each)) { Some(w) => join(w); true, None => false } }) { () }
+    });
+    say(load(&right));
     0
 }
