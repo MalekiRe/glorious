@@ -631,11 +631,6 @@ def unitsOfFlat (items : List Syntax.Flat.FItem) (uses : List (String × List St
   unitsOfBy (fun | .other i => unitMarkOf i | _ => none) items uses
 
 /-- The items without the marks of units. -/
-def withoutUnitMarks (items : List Syntax.Item) : List Syntax.Item :=
-  items.filter fun
-    | .fieldNames m [_] [] => m != Syntax.unitMark
-    | _ => true
-
 def withoutUnitMarksFlat (items : List Syntax.Flat.FItem) : List Syntax.Flat.FItem :=
   items.filter fun
     | .other (.fieldNames m [_] []) => m != Syntax.unitMark

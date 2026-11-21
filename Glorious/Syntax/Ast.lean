@@ -905,31 +905,6 @@ partial def Rewrite.go (r : Rewrite) : Go := ⟨r.ex, r.st, r.stmts, r.clause⟩
 
 end
 
-/-- The expressions a statement has. -/
-def Stmt.exprs : Stmt → List Expr
-  | .let_ _ v | .expr v | .defer v | .letMut _ v => [v]
-  | .assign target v => [target, v]
-  | .located _ _ s => s.exprs
-
-/-- The expressions directly inside an expression, outside any block. -/
-def Expr.direct : Expr → List Expr
-  | .call _ f args | .tailCall _ f args => f :: args
-  | .tuple args => args
-  | .proj e _ | .deref e | .reborrow _ e | .fieldOf _ e _ => [e]
-  | .handle subject _ => [subject]
-  | _ => []
-
-/-- The blocks directly inside an expression: each clause's patterns and
-statements, and a labelled block's statements. -/
-def Expr.bodies : Expr → List (List Pattern × List Stmt)
-  | .closure _ clauses | .handle _ clauses => clauses.map fun | .mk pats body => (pats, body)
-  | .labelScope _ body => [([], body)]
-  | _ => []
-
-/-- The expressions inside an expression, one level down, blocks' too. -/
-def Expr.children (e : Expr) : List Expr :=
-  e.direct ++ e.bodies.flatMap fun (_, body) => body.flatMap Stmt.exprs
-
 /-- An expression with each expression directly inside it made by `fe`, and
 each block inside it (with the patterns of its clause) by `fb`. -/
 def Expr.traverse {m : Type → Type} [Monad m] (fe : Expr → m Expr)

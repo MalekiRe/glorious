@@ -962,10 +962,6 @@ keeps the state from before to go back to, nothing holds that state while
 open Flat in
 /-- The expression at a place of the body being checked. -/
 @[inline] def node (e : ExprId) : M FExpr := return (← get).body.expr e
-open Flat in
-@[inline] def stmtNode (s : StmtId) : M FStmt := return (← get).body.stmt s
-open Flat in
-@[inline] def clauseNode (c : ClauseId) : M FClause := return (← get).body.clause c
 
 /-- Nodes made in the body being checked. -/
 def build {α : Type} (act : Flat.Build α) : M α :=
@@ -978,9 +974,6 @@ def pushE (n : FExpr) : M ExprId := build (pushExpr n)
 
 /-- A tree made a part of the body being checked. -/
 def flatIn (e : Expr) : M Flat.ExprId := build (Flat.flatExpr e)
-
-/-- The expression at a place, as a tree. -/
-def treeOf (e : Flat.ExprId) : M Expr := return Flat.treeExpr (← get).body e
 
 /-- `act` checked with another body (a constant's), the one being checked
 after as it was. -/

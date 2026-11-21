@@ -27,7 +27,7 @@ def labelName (l : String) : String := "@" ++ l
 mutual
 
 /-- The names free in an expression, added in front of `acc`: the same names,
-in the same order, as `Elab.fvExpr` gives (`fvExpr`). -/
+each where it is first met (`fvExpr`). -/
 partial def fvExprAcc (b : Body) (bound : List String) (e : ExprId) (acc : List String) : List String :=
   match b.expr e with
   | .name qual x => if qual.isNone && !bound.contains x then x :: acc else acc

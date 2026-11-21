@@ -482,19 +482,6 @@ def rekey (b : Bound) : M Bound := do
     pure { b with trait := ← implKey (Syntax.traitBase b.trait) b.ty b.args }
   else pure b
 
-/-- A type with the named type parameters it is made of, `'P@f`, the
-variables `back` says. -/
-partial def unrigidTy (back : List (String × Nat)) : Ty → Ty
-  | .con n [] => match back.lookup n with
-    | some id => .var id
-    | none => .con n []
-  | .con n as => .con n (as.map (unrigidTy back))
-  | .tuple ts => .tuple (ts.map (unrigidTy back))
-  | .fn ps r effs tail cap =>
-    .fn (ps.map (unrigidTy back)) (unrigidTy back r) (effs.map fun (e, as) => (e, as.map (unrigidTy back))) tail cap
-  | .ref how t cap => .ref how (unrigidTy back t) cap
-  | t => t
-
 /-- Meet the bounds of the group just inferred, and give each of its functions
 its type. A bound on a type the function is generic in becomes something the
 function is given; every other is met by `Traits.solve`. -/

@@ -324,9 +324,10 @@ def checkItems (fitems : List Flat.FItem) (seed : UInt64 := 0) (kept : Kept := [
   let names := decls.map (·.name)
   -- (A name that stands for an expression, a constant's, mentions what that
   -- does: the function that works the constant out.)
+  let freeIn := fun (value : Expr) => let (b, e) := Flat.ofExpr value; b.fvExpr [] e
   let aliasOf : Std.HashMap String (List String) := Elab.firstOf (items.filterMap fun
-    | .alias name value => some (name, Elab.fvExpr [] value)
-    | .pub _ (.alias name value) => some (name, Elab.fvExpr [] value)
+    | .alias name value => some (name, freeIn value)
+    | .pub _ (.alias name value) => some (name, freeIn value)
     | _ => none)
   let nameSet : Std.HashSet String := names.foldl (·.insert ·) {}
   -- (And the functions a dot call in it may turn out to be of, the types'

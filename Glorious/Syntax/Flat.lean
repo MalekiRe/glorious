@@ -376,7 +376,6 @@ partial def FItem.bodies : FItem → List (String × Body)
     | _ => none
   | .pub _ item => item.bodies
   | _ => []
-def toItems (items : List FItem) : List Item := items.map FItem.toItem
 
 /-- Every function of these items with its body made by `f`: in
 implementations, traits' defaults and modules too (`Item.mapClauses`). -/

@@ -39,7 +39,7 @@ open Glorious.Syntax
 implementations it is for, and whether their places are dropped. An
 implementation with nothing left to be known is a number here (`pool`: its
 function and its parts' numbers; `byId` back), and stands in a body being
-written out as a name of its own (`dictRef`) until it is called or taken
+written out as a name of its own (`%known#n`) until it is called or taken
 apart: so a copy is found, and a body written out, without implementations
 written out and looked at again and again. -/
 structure Copies where
@@ -49,14 +49,6 @@ structure Copies where
   /-- Each copy by its name: the function it is of, the implementations it
   is for, and whether their places are dropped. -/
   byName : Std.HashMap String (String × List Nat × Bool) := {}
-
-/-- The name an implementation's number stands as in a body. -/
-def dictRef (n : Nat) : Expr := .name none s!"%known#{n}"
-
-/-- The number a `dictRef` stands for. -/
-def dictRefOf? : Expr → Option Nat
-  | .name none x => if x.startsWith "%known#" then (x.drop 7).toString.toNat? else none
-  | _ => none
 
 def internId (f : String) (ids : List Nat) : StateM Copies Nat := do
   match (← get).pool[(f, ids)]? with
@@ -73,7 +65,7 @@ def specPush (n : Flat.FExpr) : SpecM Flat.ExprId := modifyGet fun b => (b.exprs
 def specPushS (n : Flat.FStmt) : SpecM Flat.StmtId := modifyGet fun b => (b.stmts.size, { b with stmts := b.stmts.push n })
 def specPushC (n : Flat.FClause) : SpecM Flat.ClauseId := modifyGet fun b => (b.clauses.size, { b with clauses := b.clauses.push n })
 
-/-- The number a `dictRef` stands for. -/
+/-- The number a name `%known#n` stands for. -/
 def dictRefOfName? (x : String) : Option Nat :=
   if x.startsWith "%known#" then (x.drop 7).toString.toNat? else none
 
@@ -235,7 +227,7 @@ partial def namesLabel (b : Flat.Body) (l : String) (e : Flat.ExprId) : Bool :=
 
 def stmtNamesLabel (b : Flat.Body) (l : String) (s : Flat.StmtId) : Bool := (b.stmtExprs s).any (namesLabel b l)
 
-/-- Each `dictRef` left in a body, written out as the implementation. -/
+/-- Each `%known#n` left in a body, written out as the implementation. -/
 def unrefBody (byId : Array (String × List Nat)) (b : Flat.Body) : Flat.Body :=
   let r : Flat.FRewrite := { onExpr := fun _ b e =>
     (b.bare? e >>= dictRefOfName?).map fun n => Flat.flatExpr (dictExprOf byId n) }

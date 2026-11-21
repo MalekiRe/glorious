@@ -559,31 +559,6 @@ partial def patVars : Pattern → List String
   | .ctor _ _ args => args.flatMap patVars
   | .tuple args => args.flatMap patVars
 
-mutual
-
-partial def fvExpr (bound : List String) : Expr → List String
-  | .name qual x => if qual.isNone && !bound.contains x then [x] else []
-  | .label l => if bound.contains (labelName l) then [] else [labelName l]
-  | .labelScope l body => fvStmts (labelName l :: bound) body
-  | .ref _ x | .refField _ _ x _ _ => if bound.contains x then [] else [x]
-  | e => e.direct.flatMap (fvExpr bound) ++ e.bodies.flatMap fun (pats, body) =>
-    fvStmts (pats.flatMap patVars ++ bound) body
-
-partial def fvClause (bound : List String) : Clause → List String
-  | .mk pats body => fvStmts (pats.flatMap patVars ++ bound) body
-
-partial def fvStmts (bound : List String) : List Stmt → List String
-  | [] => []
-  | .let_ pat value :: rest => fvExpr bound value ++ fvStmts (patVars pat ++ bound) rest
-  | .expr e :: rest => fvExpr bound e ++ fvStmts bound rest
-  | .defer e :: rest => fvExpr bound e ++ fvStmts bound rest
-  | .located _ _ s :: rest => fvStmts bound (s :: rest)
-  | .letMut x value :: rest => fvExpr bound value ++ fvStmts (x :: bound) rest
-  | .assign target value :: rest =>
-    fvExpr bound target ++ fvExpr bound value ++ fvStmts bound rest
-
-end
-
 open Flat in
 /-- The names a statement gives values that may hold what `tracked` names hold. -/
 def madeFrom (b : Body) (tracked : List String) (s : StmtId) : List String :=

@@ -6735,8 +6735,14 @@ not change.
 - The parser builds trees and its own desugarings over them (`promoteItems`,
   `unmutItems`, `selfClause`, `mapTypesClause`, `renameStmts`), which are
   made flat once after parsing; the parsed modules are kept as trees, which
-  a compacted region shares (kept flat they were 7.7 MB against 4.4, and
-  read back slower). This is Zig's split: its AST is not its IR.
+  a compacted region shares. Both other ways were measured on an edited
+  `covey/states2`: keeping the parsed modules flat made the kept file 7.7 MB
+  against 4.4, and slower to read back; keeping them undesugared and
+  desugaring flat after each read (`unmut` and promotion over flat bodies,
+  only where something is borrowed) cost 43 ms a compile, as every
+  library function is desugared again where it was kept desugared. So the
+  desugarings are the parser's, on its trees, done once per text; Zig's
+  split, where an AST is not its IR.
 - What is made rather than written stays a tree until it is put in a body:
   constants (`aliases`), what the checker chose to give as an argument
   (`argsChosen`), the clauses of a `refPats` decision, implementations as
