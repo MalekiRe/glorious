@@ -368,10 +368,14 @@ def checkGroup (decls : List FnDecl) (signature : Bool := false) : M Unit := do
         let (retExpr, declared) := match d.ret with
           | some (.performs t effects) => (some t, some effects)
           | other => (other, if d.impl.isNone then some [] else none)
+        let firstRef := annots.findSome? fun
+          | some (.ref _ _ c) => some c
+          | _ => none
+        modify fun s => { s with projElided := firstRef }
         let ret ← match retExpr with
           | some t => some <$> resolveType rigid false t
           | none => pure none
-        modify fun s => { s with paramTraits := [] }
+        modify fun s => { s with paramTraits := [], projElided := none }
         -- A function an implementation gives is the function its trait declares,
         -- at the implementation's type. What it is given is known from that
         -- before its clauses are looked at, so they can read a field of it.

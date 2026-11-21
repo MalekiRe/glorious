@@ -70,7 +70,12 @@ partial def resolveType (params : List (String × Ty)) (decl : Bool) : TypeExpr 
         if let some (tr, targs) := (if (mine.map (·.1)).eraseDups.length == 1 then mine.head? else none) then
           let targTys ← targs.mapM (resolveType params decl)
           let base := if targTys.isEmpty then self else Ty.tuple (self :: targTys)
-          let asked ← args.mapM (resolveType params decl)
+          -- (An unwritten lifetime in a function's result is its first
+          -- reference's.)
+          let asked ← args.mapM fun a => do
+            match a, (← get).projElided with
+            | .name "'_" [], some c => pure (Ty.life c)
+            | _, _ => resolveType params decl a
           let subject := if asked.isEmpty then base else Ty.con Syntax.gatMark (base :: asked)
           if (freeTys self).any (← get).projecting.contains then
             return .con Syntax.projMark [subject, .con tr [], .con name []]
@@ -100,8 +105,13 @@ partial def resolveType (params : List (String × Ty)) (decl : Bool) : TypeExpr 
           else traits
         match traits with
         | [(tr, _, _)] =>
-          -- (`F::Of<Int>`: asked at types, which go with the type asked.)
-          let asked ← args.mapM (resolveType params decl)
+          -- (`F::Of<Int>`: asked at types, which go with the type asked. An
+          -- unwritten lifetime in a function's result is its first
+          -- reference's.)
+          let asked ← args.mapM fun a => do
+            match a, (← get).projElided with
+            | .name "'_" [], some c => pure (Ty.life c)
+            | _, _ => resolveType params decl a
           let subject := if asked.isEmpty then self else Ty.con Syntax.gatMark (self :: asked)
           if (freeTys self).any (← get).projecting.contains then
             return .con Syntax.projMark [subject, .con tr [], .con name []]

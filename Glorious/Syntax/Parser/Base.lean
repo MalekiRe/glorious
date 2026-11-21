@@ -492,13 +492,14 @@ partial def parseType : P TypeExpr := do
       let lifetimes ← parseLifetimes
       return .name rankedMark (lifetimes.map (.name · []) ++ [← parseType])
     let x := "::".intercalate (← parsePathRest x)
-    -- (`'_`: a lifetime left to be found, which is to say not written.)
+    -- (`'_`: a lifetime left to be found, kept in its place: of what a
+    -- trait leaves, `Q::Got<'_>`, it says where the lifetime goes.)
     let args ← angledList do
       if (← peek) == .ident "'_" then
         advance
-        pure none
-      else some <$> parseType
-    pure (.name x args.reduceOption)
+        pure (.name "'_" [])
+      else parseType
+    pure (.name x args)
   | .int n =>
     -- A whole number where a type is written: the type that stands for it.
     advance

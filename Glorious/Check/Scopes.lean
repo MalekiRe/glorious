@@ -522,6 +522,21 @@ def settleAssocs : M Unit := do
     match seen.lookup question with
     | some first => unify first a
     | none => seen := (question, a) :: seen
+  -- One answer to the same question at lifetimes (`T::Got<'a>` and a
+  -- `T::Got<'b>` that is the same type): the lifetimes are one. What a
+  -- function gives of a type its parameter's trait leaves, borrowed from
+  -- what it was given, is so tied to what it was given.
+  let mut answers : List (Nat × String × String × List Ty) := []
+  for (tr, subject, name, a, _, _) in left do
+    let .var id ← find a | continue
+    let .con mark (_ :: asked) ← find subject | continue
+    unless mark == Syntax.gatMark do continue
+    match answers.find? (·.1 == id) with
+    | some (_, tr2, name2, asked2) =>
+      if tr2 == tr && name2 == name then
+        for (x, y) in asked.zip asked2 do
+          if let (.ref (.con "'" []) _ _, .ref (.con "'" []) _ _) := (← find x, ← find y) then unify x y
+    | none => answers := (id, tr, name, asked) :: answers
   modify fun s => { s with assocUses := left ++ s.assocUses }
 
 /-- `settleAssocs` until it settles nothing more (a list of sixteen's types,

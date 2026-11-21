@@ -607,6 +607,11 @@ structure St where
   /-- While a function is read that has no body to find its lifetimes from, a
   trait's: the one lifetime every unwritten lifetime of it is. -/
   elided : Option Nat := none
+  /-- While a function's result is read: the lifetime an unwritten one in
+  what a type parameter's trait leaves is (`Q::Got<'_>`), the lifetime of
+  the reference it is first given, as Rust's elision says. (Such a type is
+  not known in the function, so its body cannot tie it to what it borrows.) -/
+  projElided : Option Nat := none
   /-- The blocks given what an `is` found, each with the names it then has. -/
   packs : Array (Nat × List String) := #[]
   /-- The callables a function is given that run in one environment it is
