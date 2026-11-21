@@ -809,6 +809,9 @@ structure St where
   the type and arguments spelled, and what the function is given
   (`solveFitting`, `leavesFitting`). -/
   solvedFit : PMap (String × String × List Nat × Traits.Givens) (Option Traits.Dict) := {}
+  /-- How each type's values are destroyed, as found in a group: by the type
+  as the solver has it and what the function is given. -/
+  destroyFit : Std.HashMap (Traits.STy × Traits.Givens) (Option Traits.Dict) := {}
   leavesFit : PMap (String × String × List Nat) (List (String × Nat × Ty × List Ty)) := {}
   /-- Types all known, each a number: its head and its parts' numbers (see
   `internTy`). Made anew for each group's bounds, as the caches keyed by
@@ -824,6 +827,10 @@ structure St where
   tyMemo : Std.HashMap USize (Ty × Nat) := {}
   /-- Dictionaries made for a group's calls, by the object each was found as. -/
   dictShared : PMap USize (Traits.Dict × Elab.DictE) := {}
+  /-- Each dictionary made in a group's bounds by what it is (its function
+  and its parts, each one object): one object for each, however often it is
+  found. -/
+  dictByShape : Std.HashMap (String × List USize) Elab.DictE := {}
   /-- `leavesFit` by where the type and its arguments are, kept with them so
   that no other object comes to be there. -/
   leavesAt : PMap (String × String × USize × List USize) (Ty × List Ty × List (String × Nat × Ty × List Ty)) := {}

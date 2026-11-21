@@ -167,7 +167,15 @@ partial def toDictEShared (impls : Array ImplDecl) (marker : String → Bool) (d
       if (impls[i]?.map fun im => marker (Syntax.traitBase im.trait)).getD false then
         pure (Elab.DictE.impl Syntax.markerDict [])
       else
-      pure (Elab.DictE.impl ((impls[i]?.map (·.dictFn)).getD "") (← subs.mapM (toDictEShared impls marker)))
+      let fn := (impls[i]?.map (·.dictFn)).getD ""
+      let subs ← subs.mapM (toDictEShared impls marker)
+      let key := (fn, subs.map addrOf)
+      match (← get).dictByShape[key]? with
+      | some e => pure e
+      | none =>
+        let e := Elab.DictE.impl fn subs
+        modify fun s => { s with dictByShape := s.dictByShape.insert key e }
+        pure e
   modify fun s => { s with dictShared := s.dictShared.insert (addrOf d) (d, e) }
   pure e
 
@@ -338,7 +346,13 @@ partial def solveFittingNow (givens : Traits.Givens) (fuel : Nat) (key : String)
     let rec settle : Traits.STy → Traits.STy
       | .var k => if givens.contains (Syntax.destroyTrait, k) then .var k else .con "(reference)" []
       | .con n args => .con n (args.map settle)
-    return Traits.solveIx (← get).kimpls givens 100000 key (settle (← toSTy ty))
+    -- (Found once for each type in a group: the same dictionary object for
+    -- each, so that it is written out once.)
+    let sty := settle (← toSTy ty)
+    if let some d := (← get).destroyFit[(sty, givens)]? then return d
+    let d := Traits.solveIx (← get).kimpls givens 100000 key sty
+    modify fun s => { s with destroyFit := s.destroyFit.insert (sty, givens) d }
+    return d
   for k in ← projectedCondition key ty do
     if let some g := Traits.findGiven key k givens then return some (.given g)
   if let some k ← keyOf ty then return (Traits.findGiven key k givens).map .given
@@ -486,7 +500,7 @@ def rekey (b : Bound) : M Bound := do
 its type. A bound on a type the function is generic in becomes something the
 function is given; every other is met by `Traits.solve`. -/
 def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := do
-  modify fun s => { s with solvedFit := {}, leavesFit := {}, leavesAt := {}, tyIds := {}, tyIdCount := 0, tyMemo := {}, dictShared := {} }
+  modify fun s => { s with solvedFit := {}, leavesFit := {}, leavesAt := {}, tyIds := {}, tyIdCount := 0, tyMemo := {}, dictShared := {}, dictByShape := {}, destroyFit := {} }
   -- A name of which parts were read before its type was known, which is now:
   -- if the type has a `drop` of its own and the parts read can be used any
   -- number of times, the value stayed whole and is destroyed when its block

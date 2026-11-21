@@ -6896,8 +6896,19 @@ without making lists of every index or every list's length, an edit of the
 middle went from 2.4 s to 1.6 s.
 
 And `covey/states2` (12,700 lines with its library and `ecs`): a comment
-in `main` 0.8 s, a string in `main` 2.05 s; `main`'s check is 0.85 s of
-that, the bounds of its calls most of it.
+in `main` 0.73 s, a string in `main` 1.40 s.
+
+**One dictionary for each.** `main`'s bounds made 243,045 dictionary
+objects of 2,915 different ones: how a type's values are destroyed was
+solved anew for each place one is let go (`solveFittingNow` did not keep
+what it found of `%Destroy`, as `solveFitting` does of the rest), each a
+fresh tree, and every one was then made a `DictE`, numbered for the program
+(`TraitInfo.index`) and written out. Now what destroys a type is found once
+for each type and what the function is given (`St.destroyFit`), and each
+`DictE` is made once for each function and parts (`St.dictByShape`, both
+kept for a group's bounds only). An edit of `main`: bounds 726 ms -> 486,
+of it making dictionaries 197 -> 7; the program's index 124 ms -> 11; the
+edit 1.98 s -> 1.40 s.
 
 ## Other standing decisions
 

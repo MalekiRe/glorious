@@ -925,7 +925,7 @@ def diffStates (p b : St) : Option StDelta := do
       fnBodies := {},
       assocUses := #[],
       solvedFit := {}, leavesFit := {}, leavesAt := {}, tyIds := {}, tyIdCount := 0,
-      tyMemo := {}, dictShared := {}, modules := {}, body := {}, blockRoots := {}, blockRootsAt := 0,
+      tyMemo := {}, dictShared := {}, dictByShape := {}, destroyFit := {}, modules := {}, body := {}, blockRoots := {}, blockRootsAt := 0,
       -- (Of where implementations are, only those it declared.)
       implsByBase := ownImpls p.impls.size b.implsByBase, implsByHead := ownImpls p.impls.size b.implsByHead }
     implsStart := p.impls.size

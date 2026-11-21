@@ -33,6 +33,7 @@ name, or one the function being checked is generic in. -/
 inductive STy where
   | con (name : String) (args : List STy)
   | var (id : Nat)
+  deriving BEq, Hashable
 
 /-- `impl Trait for Head<T0, ..., Tn>`, on condition that each `(trait, i)` in
 `context` holds: that `Ti` has that trait. -/
