@@ -6867,6 +6867,32 @@ The delta is in parts of twelve fields (`StDelta0`..`StDelta9`): written as
 one function each, Lean's code generator took 300 s on the file, in parts
 22 s.
 
+## Measured against Zig
+
+The same program in both: 2,000 functions, each calling the one before it
+and choosing between two results (8,000 lines; `gen` in the commit message
+that measured it), a `main` that calls the last. Glorious with this
+compiler's build directory kept; Zig 0.14.0 with its cache, each edit a
+number changed in the middle function. Wall time, on this machine (load
+3–6):
+
+| | Cold | An edit of the middle function | An edit of the last |
+|---|---|---|---|
+| Glorious | 5.1 s | 1.6 s | 1.1 s |
+| Zig, LLVM backend (Debug) | 4.2 s | 1.7 s | |
+| Zig, its own x86 backend | 0.59 s | 0.59 s | |
+
+An edit of the middle function checks it and the thousand that call it,
+each kept group of the program a delta (above). Each group checked costs
+what diffing and putting its delta cost besides: the stores' segments, one
+for each group, and what each map changed, found among its buckets. Found
+without making lists of every index or every list's length, an edit of the
+middle went from 2.4 s to 1.6 s.
+
+And `covey/states2` (12,700 lines with its library and `ecs`): a comment
+in `main` 0.8 s, a string in `main` 2.05 s; `main`'s check is 0.85 s of
+that, the bounds of its calls most of it.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by

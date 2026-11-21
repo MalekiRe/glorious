@@ -331,11 +331,11 @@ def checkGroupKept (kept : Deltas) (pre : St) (key : UInt64) (i : Nat) (g : List
   match jumpedTo (← get) pre i with
   | none => checkMaybe g; pure #[]
   | some st =>
-    set st
     if let some d := (kept[key]?).bind (·.get) then
       if let some st' := Trace.timed "group: reused" fun _ => applyDelta none st d then
         set st'
         return #[(key, d)]
+    set st
     checkMaybe g
     let after ← get
     -- (One that made more than its room: what it added is not kept.)

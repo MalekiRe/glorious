@@ -127,6 +127,8 @@ def diff (p b : Store α) : Option (StoreD α) := do
     | some sp =>
       if sp.base == sb.base then
         k := k + 1
+        -- (Most are the same object: nothing changed in them.)
+        if samePtr sb sp then continue
         if sb.count < sp.count then none
         for c in [0:sb.pieces.size] do
           let pb := sb.pieces.getD c #[]
@@ -190,10 +192,23 @@ instance {α : Type} [Absorb α] : Delta (Store α) (StoreD α) where
   apply _ a d := StoreD.apply a d
 
 /-- Does `b` go on from `p`: its first entries `p`'s? -/
-def extendsArr {α : Type} (p b : Array α) : Bool :=
-  b.size ≥ p.size && (List.range p.size).all fun i => match b[i]?, p[i]? with
-    | some x, some z => samePtr x z
-    | _, _ => false
+def extendsArr {α : Type} (p b : Array α) : Bool := Id.run do
+  if b.size < p.size then return false
+  for i in [0:p.size] do
+    match b[i]?, p[i]? with
+    | some x, some z => unless samePtr x z do return false
+    | _, _ => return false
+  pure true
+
+/-- The entries `b` has in front of `p`, where `b` is `p` with entries put
+in front: found by going down `b` until what is left is `p`. -/
+def frontOf {α : Type} (p b : List α) : Option (List α) :=
+  let rec go (acc : List α) (l : List α) : Option (List α) :=
+    if samePtr l p then some acc.reverse else
+    match l with
+    | [] => none
+    | x :: more => go (x :: acc) more
+  go [] b
 
 instance {α : Type} : Delta (Array α) (ArrD α) where
   diff p b :=
@@ -218,12 +233,12 @@ def extendsList {α : Type} (p b : List α) : Bool :=
 instance {α : Type} : Delta (List α) (ListD α) where
   diff p b :=
     if samePtr p b then some (.front [])
-    else
-      let lp := p.length
-      let lb := b.length
-      if lb ≥ lp && samePtr (b.drop (lb - lp)) p then some (.front (b.take (lb - lp)))
-      else if extendsList p b then some (.back lp (b.drop lp))
-      else some (.whole b)
+    else match frontOf p b with
+      | some xs => some (.front xs)
+      | none =>
+        let lp := p.length
+        if extendsList p b then some (.back lp (b.drop lp))
+        else some (.whole b)
   apply p a
     | .front [] => some a
     | .front xs =>
@@ -250,11 +265,13 @@ buckets: a bucket not changed is the same object. -/
 def changedEntries {κ ν : Type} [BEq κ] [Hashable κ] (p b : Std.HashMap κ ν) : Option (List (κ × ν)) :=
   let pb := p.inner.1.buckets
   let bb := b.inner.1.buckets
-  if pb.size != bb.size then none else
-  some ((List.range bb.size).foldl (fun acc i =>
-    match bb[i]?, pb[i]? with
-    | some bl, some pl => if samePtr bl pl then acc else bl.toList.foldl (fun acc e => (e.1, e.2) :: acc) acc
-    | _, _ => acc) [])
+  if pb.size != bb.size then none else Id.run do
+    let mut acc : List (κ × ν) := []
+    for i in [0:bb.size] do
+      match bb[i]?, pb[i]? with
+      | some bl, some pl => unless samePtr bl pl do acc := bl.toList.foldl (fun acc e => (e.1, e.2) :: acc) acc
+      | _, _ => pure ()
+    pure (some acc)
 
 /-- The entries of `b` that are not `p`'s. -/
 def newEntries {κ ν : Type} [BEq κ] [Hashable κ] (p b : Std.HashMap κ ν) : List (κ × ν × Option ν) :=
