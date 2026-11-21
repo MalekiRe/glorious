@@ -1,0 +1,32 @@
+// Upstream's tests/remote.rs, `awaiting_a_remote_bridge_inside_a_task_panics_instead_of_deadlocking`:
+// a task waits for its bridges through `AsyncWorld` (`bridge`); a remote's
+// bridge, which waits on a thread for the app's sync point, would wait
+// for the very emit the task runs in. Upstream panics when it is tried;
+// here a task's body performs `Bridge` alone, so it is refused when
+// compiled: waiting on a thread is the effect `Threads`.
+// expect:
+// error containing: `std::thread::Threads` is not handled here
+mod ecs;
+
+use ecs::{App, World, Query, AsyncWorld, Bridge, Remote, sync_point, bridge};
+
+struct Update
+struct Net
+struct A
+
+fn remote_of<S>(world: &mut World<S>) -> Remote<S> { world.remote() }
+fn read(q: &mut Query<(&A,), ()>) { () }
+fn waits_remotely<S>(world: AsyncWorld<S>) -> AsyncWorld<S> / {Bridge<S>} where S: ecs::Get<A> {
+    let mut world = world;
+    match(bridge(&mut world, Update, remote_of)) {
+        Ok(remote) => discard(Remote::bridge(&remote, Net, read)),
+        Err(_) => ()
+    };
+    world
+}
+
+fn main() -> Int {
+    let mut app = App::new().register<A>().add_systems(Update, sync_point(Net)).add_task(waits_remotely).build();
+    app.emit(&Update);
+    0
+}

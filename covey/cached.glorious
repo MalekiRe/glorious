@@ -1,0 +1,65 @@
+// Upstream's tests/params.rs, `cached_queries_keep_every_table_as_tables_appear_between_runs`:
+// a system's query sees every entity that has what it asks, as entities of
+// new combinations of components appear between runs; and a new world put
+// in the app's place is seen from scratch. (Covey keeps no tables, so
+// nothing is cached that could miss one: this is what a query sees.)
+// expect:
+// 3
+// 5
+// 13
+// 1
+// 0
+mod ecs;
+
+use ecs::{App, World, Entity, Query, Single};
+
+struct Update
+struct Position(Int)
+struct Seen(Int)
+struct T0
+struct T1
+struct T2
+struct T3
+struct T4
+struct T5
+struct T6
+
+fn count_all(q: &mut Query<(&Position,), ()>, seen: &mut Single<(&mut Seen,), ()>) {
+    let n = q.count();
+    match(seen.get_mut()) { Some((mut s,)) => s.0 = n;, None => () }
+}
+fn seen_of<S>(world: &World<S>, e: Entity) -> Int where S: ecs::Get<Seen> { match(world.get<Seen>(e)) { Some(s) => s.0, None => 0 - 1 } }
+
+fn main() -> Int {
+    let mut app = App::new().register<Position>().register<Seen>()
+        .register<T0>().register<T1>().register<T2>().register<T3>().register<T4>().register<T5>().register<T6>()
+        .add_systems(Update, count_all).build();
+    let seen = app.world.spawn_bundle((Seen(0),));
+    discard(app.world.spawn_bundle((Position(0),)));
+    discard(app.world.spawn_bundle((Position(0), T0)));
+    discard(app.world.spawn_bundle((Position(0), T1)));
+    app.emit(&Update);
+    say(seen_of(&app.world, seen));
+    discard(app.world.spawn_bundle((Position(0), T2)));
+    discard(app.world.spawn_bundle((Position(0), T3)));
+    app.emit(&Update);
+    say(seen_of(&app.world, seen));
+    let mut i = 0;
+    while({ i < 2 }) {
+        discard(app.world.spawn_bundle((Position(0), T4)));
+        discard(app.world.spawn_bundle((Position(0), T5)));
+        discard(app.world.spawn_bundle((Position(0), T6)));
+        discard(app.world.spawn_bundle((Position(0), T0, T6)));
+        i = i + 1
+    };
+    app.emit(&Update);
+    say(seen_of(&app.world, seen));
+    // (A new world in the app's place.)
+    let mut fresh = World::new();
+    let seen = fresh.spawn_bundle((Seen(0),));
+    discard(fresh.spawn_bundle((Position(0), T5)));
+    app.world = fresh;
+    app.emit(&Update);
+    say(seen_of(&app.world, seen));
+    0
+}
