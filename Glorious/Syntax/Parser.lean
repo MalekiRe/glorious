@@ -1562,9 +1562,11 @@ def reflectTexts (items : List Item) : List String := Id.run do
         | .fieldNames c ns ps => some (c, ns, ps)
         | _ => none
     let fieldsOf := fun (c : String) (n : Nat) =>
+      -- (A constructor's fields without names are named by their places.)
+      let places := (List.range n).map toString
       match beside.find? (·.1 == c) with
-      | some (_, ns, ps) => (ns, ps)
-      | none => ((List.range n).map toString, List.replicate n false)
+      | some (_, ns, ps) => (if ns.length == n then ns else places, if ps.length == n then ps else List.replicate n false)
+      | none => (places, List.replicate n false)
     match inner with
     | .struct n ps fs =>
       let (ns, pubs) := fieldsOf n fs.length

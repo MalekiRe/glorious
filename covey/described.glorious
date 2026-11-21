@@ -1,0 +1,54 @@
+// Upstream's tests/devtools.rs, `values_are_described_and_edited_without_debug`:
+// a component described by its name and its fields set from text, through
+// reflection (`std::reflect`), with what is private (module `reflected`).
+// expect:
+// Armor{ value: 3 tough: false }
+// value tough
+// 200
+// out of range
+// true
+// 200 true
+// true
+// 7
+// no component `Nothing` in this world
+// 0
+pub mod ecs;
+mod reflected;
+
+use ecs::{App, World, Entity};
+use reflected::{describe_component, editable_fields, set_field};
+use std::reflect::{Described, NoValue, FlagValue, WholeValue, FloatValue, CharValue, TextValue, StructValue, ListValue, OpaqueValue};
+
+pub struct Armor { pub value: u8, tough: Bool }
+pub struct Hp(pub Int)
+
+fn shown(d: Described) -> Str {
+    match(d) {
+        NoValue => "()",
+        FlagValue(b) => if(b) { "true" } else { "false" },
+        WholeValue(n) => show(n),
+        FloatValue(_) => "float",
+        CharValue(_) => "char",
+        TextValue(t) => t,
+        StructValue(name, fields) => name ++ "{" ++ fold(fields, "", fn(out: Str, f: (Str, Described)) -> Str { let (n, v) = f; out ++ " " ++ n ++ ": " ++ shown(v) }) ++ " }",
+        ListValue(_) => "list",
+        OpaqueValue(n) => "opaque " ++ n
+    }
+}
+fn said(r: Result<Described, Str>) -> Str { match(r) { Ok(d) => shown(d), Err(e) => e } }
+
+fn main() -> Int {
+    let mut app = App::new().register<Armor>().register<Hp>().build();
+    let e = app.world.spawn_bundle((Armor { value: 3, tough: false }, Hp(1)));
+    say(match(app.world.describe_component(e, "Armor")) { Some(d) => shown(d), None => "none" });
+    say(match(app.world.editable_fields("Armor")) { Some(fs) => fold(fs, "", fn(out: Str, f: Str) -> Str { if(out == "") { f } else { out ++ " " ++ f } }), None => "none" });
+    let before = app.world.tick();
+    say(said(app.world.set_field(e, "Armor", "value", "200")));
+    say(said(app.world.set_field(e, "Armor", "value", "300")));
+    say(said(app.world.set_field(e, "Armor", "tough", "true")));
+    match(app.world.get<Armor>(e)) { Some(a) => say(show(int(a.value)) ++ " " ++ (if(a.tough) { "true" } else { "false" })), None => () };
+    say(if(len_at(&app.world.changes_since<Armor>(before)) == 1) { "true" } else { "false" });
+    say(said(app.world.set_field(e, "Hp", "0", "7")));
+    say(said(app.world.set_field(e, "Nothing", "0", "7")));
+    0
+}

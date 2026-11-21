@@ -1,0 +1,85 @@
+// Devtools that read and write components through reflection, upstream's
+// `World::describe_component`, `editable_fields` and `set_field`: each by
+// the component's name. A separate module, so that a program that does not
+// ask them does not have each of its types' `Reflect` written.
+//
+// Each is a devtool, which sees what is private: through the unsafe
+// functions of `std::reflect`. A component kept `Immutable` is not set in
+// place: a new value is inserted instead.
+use std::reflect::{Reflect, Described, FieldInfo, describe_unchecked, set_field_unchecked, type_info_unchecked};
+use ecs::{World, Column, Resource, Get, Writable, Visible, Entity, Mutability, Mutable, Immutable, Mut};
+
+// What each column of a world's store does, by its component's name.
+pub trait Edits<S> {
+    fn describe_in(world: &World<S>, entity: Entity, name: Str) -> Option<Option<Described>>;
+    fn fields_in(name: Str) -> Option<[Str]>;
+    fn set_in(world: &mut World<S>, entity: Entity, name: Str, path: Str, text: Str) -> Option<Result<Described, Str>>;
+}
+impl<S> Edits<S> for () {
+    fn describe_in(world: &World<S>, entity: Entity, name: Str) -> Option<Option<Described>> { None }
+    fn fields_in(name: Str) -> Option<[Str]> { None }
+    fn set_in(world: &mut World<S>, entity: Entity, name: Str, path: Str, text: Str) -> Option<Result<Described, Str>> { None }
+}
+impl<H, R, S> Edits<S> for (Resource<H>, R) where R: Edits<S> {
+    fn describe_in(world: &World<S>, entity: Entity, name: Str) -> Option<Option<Described>> { <R as Edits<S>>::describe_in(world, entity, name) }
+    fn fields_in(name: Str) -> Option<[Str]> { <R as Edits<S>>::fields_in(name) }
+    fn set_in(world: &mut World<S>, entity: Entity, name: Str, path: Str, text: Str) -> Option<Result<Described, Str>> { <R as Edits<S>>::set_in(world, entity, name, path, text) }
+}
+// (A component's name: its type's.)
+fn name_of<H>() -> Str where H: Reflect { let info = unsafe { type_info_unchecked<H>() }; info.name }
+impl<H, R, S> Edits<S> for (Column<H>, R) where R: Edits<S>, S: Get<H>, H: Reflect, H: Visible, H: Mutability, <H as Mutability>::Writes: WriteBy<H, S> {
+    fn describe_in(world: &World<S>, entity: Entity, name: Str) -> Option<Option<Described>> {
+        if(name_of<H>() == name) {
+            Some(match(world.get<H>(entity)) { Some(h) => Some(unsafe { describe_unchecked(h) }), None => None })
+        } else { <R as Edits<S>>::describe_in(world, entity, name) }
+    }
+    fn fields_in(name: Str) -> Option<[Str]> {
+        if(name_of<H>() == name) {
+            let info = unsafe { type_info_unchecked<H>() };
+            Some(if(len_at(&info.variants) == 1) { fold(info.variants[0].fields, [], fn(out: [Str], f: FieldInfo) -> [Str] { push(out, f.name) }) } else { [] })
+        } else { <R as Edits<S>>::fields_in(name) }
+    }
+    fn set_in(world: &mut World<S>, entity: Entity, name: Str, path: Str, text: Str) -> Option<Result<Described, Str>> {
+        if(name_of<H>() == name) { Some(<<H as Mutability>::Writes as WriteBy<H, S>>::set(world, entity, name, path, text)) }
+        else { <R as Edits<S>>::set_in(world, entity, name, path, text) }
+    }
+}
+
+// How a component is set in place: through `get_mut`, a change at the
+// world's time; one kept `Immutable` is not.
+pub trait WriteBy<H, S> { fn set(world: &mut World<S>, entity: Entity, name: Str, path: Str, text: Str) -> Result<Described, Str> }
+fn set_through<'a, H>(m: Mut<'a, H>, path: Str, text: Str) -> Result<Described, Str> where H: Reflect {
+    let mut m = m;
+    unsafe { set_field_unchecked(Mut::get_mut(&mut m), path, text) }
+}
+impl<H, S> WriteBy<H, S> for Mutable where S: Get<H>, H: Writable, H: Visible, H: Reflect {
+    fn set(world: &mut World<S>, entity: Entity, name: Str, path: Str, text: Str) -> Result<Described, Str> {
+        match(world.get_mut<H>(entity)) {
+            Some(m) => set_through(m, path, text),
+            None => Err("the entity has no `" ++ name ++ "`")
+        }
+    }
+}
+impl<H, S> WriteBy<H, S> for Immutable {
+    fn set(world: &mut World<S>, entity: Entity, name: Str, path: Str, text: Str) -> Result<Described, Str> {
+        Err("`" ++ name ++ "` is Immutable: change it by inserting a new value")
+    }
+}
+
+// The devtools, as the world's: `world.describe_component(e, "Armor")`.
+// An entity's component by its name, described: none where it has none or
+// no component has that name.
+pub fn describe_component<S>(world: &World<S>, entity: Entity, component: Str) -> Option<Described> where S: Edits<S> {
+    match(<S as Edits<S>>::describe_in(world, entity, component)) { Some(d) => d, None => None }
+}
+// The fields of a component by its name, which `set_field` sets.
+pub fn editable_fields<S>(world: &World<S>, component: Str) -> Option<[Str]> where S: Edits<S> { <S as Edits<S>>::fields_in(component) }
+// A field of an entity's component set from text: what it was set to.
+pub fn set_field<S>(world: &mut World<S>, entity: Entity, component: Str, path: Str, text: Str) -> Result<Described, Str> where S: Edits<S> {
+    if(world.contains(entity)) {
+        match(<S as Edits<S>>::set_in(world, entity, component, path, text)) {
+            Some(r) => r,
+            None => Err("no component `" ++ component ++ "` in this world")
+        }
+    } else { Err("the entity is not alive") }
+}
