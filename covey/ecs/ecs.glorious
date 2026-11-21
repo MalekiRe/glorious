@@ -928,8 +928,35 @@ impl<T, H, R> Evicts<T> for (Resource<H>, R) where R: Evicts<T> {
     fn evict(columns: &mut (Resource<H>, R), entity: Entity) { <R as Evicts<T>>::evict(&mut columns.1, entity) }
 }
 
+// Whether a component shares a group with one of a list it is not (`M`
+// and what another requires: both cannot be kept).
+pub trait ClashIn<M> { fn clashes() -> Bool }
+impl<M> ClashIn<M> for () { fn clashes() -> Bool { false } }
+impl<M, H, ..R> ClashIn<M> for (H, ..R) where M: OneOf, H: OneOf, <M as OneOf>::Groups: Shares<<H as OneOf>::Groups>, M: Same<H>, (..R): ClashIn<M> {
+    fn clashes() -> Bool {
+        if(<M as Same<H>>::same()) { false }
+        else if(<<M as OneOf>::Groups as Shares<<H as OneOf>::Groups>>::shares()) { true }
+        else { <(..R) as ClashIn<M>>::clashes() }
+    }
+}
+// Whether a member of a list clashes with a list of requirements; whether
+// any member of a bundle clashes with what any member requires.
+pub trait AnyClash<L> { fn any_clash() -> Bool }
+impl<L> AnyClash<L> for () { fn any_clash() -> Bool { false } }
+impl<M, ..R, L> AnyClash<L> for (M, ..R) where L: ClashIn<M>, (..R): AnyClash<L> {
+    fn any_clash() -> Bool { if(<L as ClashIn<M>>::clashes()) { true } else { <(..R) as AnyClash<L>>::any_clash() } }
+}
+pub trait RequiresClash<All> { fn requires_clash() -> Bool }
+impl<All> RequiresClash<All> for () { fn requires_clash() -> Bool { false } }
+impl<N, ..R, All> RequiresClash<All> for (N, ..R) where N: Requires, All: AnyClash<<N as Requires>::Required>, (..R): RequiresClash<All> {
+    fn requires_clash() -> Bool { if(<All as AnyClash<<N as Requires>::Required>>::any_clash()) { true } else { <(..R) as RequiresClash<All>>::requires_clash() } }
+}
+
 // Components given together: a tuple of them, each put in its column, and
-// then what they require. Put on an entity, what it had of them comes back;
+// then what they require. A bundle one of whose members shares a `OneOf`
+// group with what another requires is refused (the program aborts):
+// bringing the one would take the other (upstream's panic). Which bundles
+// those are is a fact of their types, a constant. Put on an entity, what it had of them comes back;
 // taken from one, what it had of them.
 pub trait Bundle<S> {
     type Had;
@@ -938,10 +965,13 @@ pub trait Bundle<S> {
     fn put_all(Self, &mut World<S>, Entity) -> Self::Had
     fn take_all(&mut World<S>, Entity) -> Self::Had
 }
-impl<..T, S> Bundle<S> for (..T) where ..S: Get<T>, ..T: EvictOne<S>, ..T: Put<S>, (..T): BringsFor<S>, (..T): NamesOf {
+impl<..T, S> Bundle<S> for (..T) where ..S: Get<T>, ..T: EvictOne<S>, ..T: Put<S>, (..T): BringsFor<S>, (..T): NamesOf, (..T): RequiresClash<(..T)> {
     type Had = (..Option<T>);
     fn names() -> [Str] { <(..T) as NamesOf>::names_of() }
     fn put_all(bundle: (..T), world: &mut World<S>, entity: Entity) -> (..Option<T>) {
+        if(<(..T) as RequiresClash<(..T)>>::requires_clash()) {
+            abort("put: a member of the bundle would remove a component another requires: they share a `OneOf` group")
+        } else { () };
         let (..t) = bundle;
         let had = (..<T as Put<S>>::put_value(world, entity, t));
         <(..T) as BringsFor<S>>::bring_for(world, entity);

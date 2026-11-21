@@ -1,0 +1,27 @@
+// Upstream's tests/relations.rs, `acyclic_relations_refuse_closing_a_chain`
+// and `acyclic_fragmenting_bundles_refuse_cycles` (which says the same of a
+// fragmenting one put as a bundle's value, in `refused_cycle2`): relating
+// what would close a chain of an `Acyclic` relation into a cycle aborts
+// the program.
+// expect:
+// went wrong
+mod ecs;
+
+use ecs::{App, Relation, OneToMany, Acyclic};
+
+struct Attached
+impl Relation for Attached { type Kind = OneToMany; }
+impl Use<[0, *]> for Attached {}
+impl Acyclic for Attached { const ACYCLIC: Bool = true; }
+
+fn main() -> Int {
+    let mut world = App::new().relation<Attached>().build().into_world();
+    let a = world.spawn_bundle(());
+    let b = world.spawn_bundle(());
+    let c = world.spawn_bundle(());
+    discard(world.relate(a, Attached, b));
+    discard(world.relate(b, Attached, c));
+    discard(world.relate(c, Attached, a));
+    say("not refused");
+    0
+}

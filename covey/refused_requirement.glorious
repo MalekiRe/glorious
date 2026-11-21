@@ -1,0 +1,29 @@
+// Upstream's tests/one_of.rs, `a_member_excluding_a_requirement_panics`: a
+// bundle one of whose members shares a group with what another requires
+// (`Rider` requires `Walking`; `Running` is a way to move, as walking is)
+// is refused: the program aborts.
+// expect:
+// went wrong
+mod ecs;
+
+use ecs::{App, OneOf, Requires};
+use core::value::Default;
+
+struct Locomotion
+struct Life
+struct Walking(Int)
+impl Default for Walking { fn default() -> Walking { Walking(0) } }
+struct Running(Int)
+struct Dead
+struct Rider
+impl OneOf for Walking { type Groups = (Locomotion, Life); }
+impl OneOf for Running { type Groups = (Locomotion,); }
+impl OneOf for Dead { type Groups = (Life,); }
+impl Requires for Rider { type Required = (Walking,); }
+
+fn main() -> Int {
+    let mut world = App::new().register<Rider>().register<Running>().register<Dead>().register<Walking>().build().into_world();
+    discard(world.spawn_bundle((Rider, Running(1))));
+    say("not refused");
+    0
+}

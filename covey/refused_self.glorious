@@ -1,0 +1,19 @@
+// Upstream's tests/relations.rs, `one_sided_relations_refuse_self_edges`:
+// an entity related to itself through a relation with a one-side aborts
+// the program (a many-to-many relation allows it: relations.glorious).
+// expect:
+// went wrong
+mod ecs;
+
+use ecs::{App, Relation, OneToMany};
+
+struct DockedAt { berth: Int }
+impl Relation for DockedAt { type Kind = OneToMany; }
+
+fn main() -> Int {
+    let mut world = App::new().relation<DockedAt>().build().into_world();
+    let ship = world.spawn_bundle(());
+    discard(world.relate(ship, DockedAt { berth: 0 }, ship));
+    say("not refused");
+    0
+}

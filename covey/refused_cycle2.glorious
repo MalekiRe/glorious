@@ -1,0 +1,23 @@
+// Upstream's tests/relations.rs, `acyclic_fragmenting_bundles_refuse_cycles`:
+// a fragmenting, acyclic relation put as a bundle's value that would close
+// a cycle aborts the program.
+// expect:
+// went wrong
+mod ecs;
+
+use ecs::{App, Relation, OneToMany, Acyclic, Fragmenting, to};
+
+struct Carried
+impl Relation for Carried { type Kind = OneToMany; }
+impl Use<[0, *]> for Carried {}
+impl Acyclic for Carried { const ACYCLIC: Bool = true; }
+impl Fragmenting for Carried {}
+
+fn main() -> Int {
+    let mut world = App::new().relation<Carried>().build().into_world();
+    let a = world.spawn_bundle(());
+    let b = world.spawn_bundle((Carried.to(a),));
+    discard(world.insert(a, Carried.to(b)));
+    say("not refused");
+    0
+}
