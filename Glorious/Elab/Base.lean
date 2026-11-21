@@ -367,6 +367,10 @@ def hosts : List (String × Nat × Nat) :=
    -- cell holds is not seen by the checker: the library's shared values
    -- and threads, which are safe, are made of them.
    ("heap_new", 6, 1), ("heap_take", 7, 1), ("heap_put", 8, 2),
+   -- Unsafe: a machine is to start for a thread of the system's the
+   -- program is about to have C start (`pthread_create`); the Rust VM
+   -- alone gives it meaning.
+   ("heap_machine_coming", 10, 0),
    -- The name of the function a callable is of, and the callable back.
    ("host_fn_name", 9, 1)]
 

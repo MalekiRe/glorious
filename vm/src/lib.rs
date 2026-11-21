@@ -12,7 +12,10 @@
 use std::collections::{HashMap, VecDeque};
 use std::io::{self, BufWriter, Write};
 use std::process::ExitCode;
-use std::rc::Rc;
+// (Shared between machines on several threads: what one machine makes,
+// another may be given, through the cells they share.)
+use std::sync::Arc as Rc;
+use std::sync::{Condvar, Mutex};
 
 // ---------------------------------------------------------------- values
 
@@ -741,17 +744,20 @@ struct Program {
     /// For each function whose closures say how they are destroyed, the
     /// function that destroys what one captured.
     drops: HashMap<usize, usize>,
+    /// Each function's name, by its index.
+    fn_names: Vec<String>,
 }
 
 fn decode(bytes: &[u8], rewrite: bool) -> Decoded<Program> {
     if bytes.len() < 5 || &bytes[..4] != b"GLBC" {
         return Err("not a Glorious bytecode file".into());
     }
-    if bytes[4] != 6 {
+    if bytes[4] != 7 {
         return Err(format!("unsupported bytecode version {}", bytes[4]));
     }
     let mut r = Reader { bytes, pos: 5 };
     let names = r.list(Reader::string)?;
+    let fn_names = r.list(Reader::string)?;
     let mut codes = r.list(Reader::code)?;
     codes.push(r.code()?);
     let mut drops = HashMap::new();
@@ -783,7 +789,7 @@ fn decode(bytes: &[u8], rewrite: bool) -> Decoded<Program> {
         return Err("trailing bytes after the program".into());
     }
     let main = codes.len() - 1;
-    let mut program = Program { names, codes, starts, main, drops };
+    let mut program = Program { names, fn_names, codes, starts, main, drops };
     if rewrite {
         opt::optimise(&mut program);
     }
@@ -989,6 +995,9 @@ struct Callback {
     vm: *mut Vm,
     callee: Value,
     arity: usize,
+    /// The thread of the machine that made it: called from another, it runs
+    /// on a machine of its own (a thread C started, `pthread_create`).
+    owner: std::thread::ThreadId,
 }
 
 /// # Safety
@@ -996,8 +1005,25 @@ struct Callback {
 /// a foreign call.
 unsafe extern "C" fn called_back(ctx: *const Callback, a: usize, b: usize, c: usize, d: usize, e: usize) -> u64 {
     let cb = &*ctx;
-    let vm = &mut *cb.vm;
     let args = [a, b, c, d, e][..cb.arity].iter().map(|x| Value::Int(*x as i128)).collect();
+    if std::thread::current().id() != cb.owner {
+        // (A machine for this thread, sharing the program's cells; it is
+        // counted while it runs, so that one waiting for a cell it fills
+        // waits for it.)
+        let mut own = sibling(&*cb.vm);
+        let result = own.call_back(cb.callee.clone(), args);
+        let _ = own.out.flush();
+        own.heap.ended();
+        return match result {
+            Some(Value::Int(n)) => n as u64,
+            Some(_) => 0,
+            None => {
+                eprintln!("the program went wrong in a thread C started");
+                std::process::exit(2);
+            }
+        };
+    }
+    let vm = &mut *cb.vm;
     match vm.call_back(cb.callee.clone(), args) {
         Some(Value::Int(n)) => n as u64,
         Some(_) => 0,
@@ -1017,7 +1043,7 @@ fn callback(vm: &mut Vm, callee: Value, arity: usize) -> Step<usize> {
     extern "C" {
         fn mmap(addr: *mut u8, len: usize, prot: i32, flags: i32, fd: i32, off: i64) -> *mut u8;
     }
-    let ctx = Box::into_raw(Box::new(Callback { vm, callee, arity }));
+    let ctx = Box::into_raw(Box::new(Callback { vm, callee, arity, owner: std::thread::current().id() }));
     // The values C gives move over by one, the first becomes `ctx`, and
     // `called_back` is jumped to: mov r9, r8; mov r8, rcx; mov rcx, rdx;
     // mov rdx, rsi; mov rsi, rdi; mov rdi, ctx; mov rax, called_back; jmp rax.
@@ -1036,6 +1062,79 @@ fn callback(vm: &mut Vm, callee: Value, arity: usize) -> Step<usize> {
         }
         std::ptr::copy_nonoverlapping(code.as_ptr(), page, code.len());
         Ok(page as usize)
+    }
+}
+
+/// The tag of an array of no elements; an array of `n` has this plus `n`.
+const ARRAY_BASE: u64 = 1 << 62;
+
+/// Cells more than one holder reaches (`heap_new`, `heap_take`,
+/// `heap_put`): what the library's shared values and threads are kept in.
+/// Every machine of the program has them, one machine for each thread of
+/// the system's that runs the program: taking from an empty cell waits
+/// while another machine may fill it, and goes wrong when none can.
+pub struct Heap {
+    cells: Mutex<HeapCells>,
+    filled: Condvar,
+}
+struct HeapCells {
+    cells: Vec<Option<Value>>,
+    /// How many machines run, and how many of them wait for a cell.
+    machines: usize,
+    waiting: usize,
+}
+
+impl Heap {
+    fn new() -> Heap {
+        Heap { cells: Mutex::new(HeapCells { cells: Vec::new(), machines: 1, waiting: 0 }), filled: Condvar::new() }
+    }
+    fn lock(&self) -> std::sync::MutexGuard<'_, HeapCells> {
+        self.cells.lock().unwrap_or_else(|e| e.into_inner())
+    }
+    fn make(&self, v: Value) -> usize {
+        let mut h = self.lock();
+        h.cells.push(Some(v));
+        h.cells.len() - 1
+    }
+    fn take(&self, at: usize) -> Step<Value> {
+        let mut h = self.lock();
+        loop {
+            match h.cells.get_mut(at) {
+                None => return wrong(),
+                Some(slot) => {
+                    if let Some(v) = slot.take() {
+                        drop(h);
+                        self.filled.notify_all();
+                        return Ok(v);
+                    }
+                }
+            }
+            // (Empty: another machine may fill it, unless every other
+            // machine waits too.)
+            if h.waiting + 1 >= h.machines {
+                return wrong();
+            }
+            h.waiting += 1;
+            h = self.filled.wait(h).unwrap_or_else(|e| e.into_inner());
+            h.waiting -= 1;
+        }
+    }
+    fn put(&self, at: usize, v: Value) -> Step<()> {
+        let mut h = self.lock();
+        let slot = h.cells.get_mut(at).ok_or(Stop::Wrong)?;
+        *slot = Some(v);
+        drop(h);
+        self.filled.notify_all();
+        Ok(())
+    }
+    /// A machine more, or one fewer: one that stops may be what the others
+    /// wait for.
+    fn started(&self) {
+        self.lock().machines += 1;
+    }
+    fn ended(&self) {
+        self.lock().machines -= 1;
+        self.filled.notify_all();
     }
 }
 
@@ -1065,6 +1164,10 @@ pub struct Vm {
     /// For each function whose closures say how they are destroyed, the
     /// function that destroys what one captured.
     drops: Rc<HashMap<usize, usize>>,
+    /// The cells every machine of the program shares.
+    heap: Rc<Heap>,
+    /// The functions' names, shared with the other machines.
+    shared_names: Rc<Vec<String>>,
 }
 
 impl Vm {
@@ -1578,6 +1681,36 @@ impl Vm {
                     (5, [callee, Value::Int(arity)]) if (0..=5).contains(arity) => {
                         Value::Int(callback(self, callee.clone(), *arity as usize)? as i128)
                     }
+                    // The cells every machine shares.
+                    (6, [v]) => Value::Int(self.heap.make(v.clone()) as i128),
+                    (7, [Value::Int(at)]) => {
+                        let at = usize::try_from(*at).map_err(|_| Stop::Wrong)?;
+                        // (Waiting, what this machine wrote is seen first.)
+                        self.out.flush().expect("cannot write to standard output");
+                        self.heap.take(at)?
+                    }
+                    (8, [Value::Int(at), v]) => {
+                        let at = usize::try_from(*at).map_err(|_| Stop::Wrong)?;
+                        self.heap.put(at, v.clone())?;
+                        unit()
+                    }
+                    // A machine is to start, for a thread the program is
+                    // about to have C start: counted from now, so that one
+                    // waiting for what it will fill waits for it.
+                    (10, []) => {
+                        self.heap.started();
+                        unit()
+                    }
+                    // The name of the function a callable is of, and the
+                    // callable back.
+                    (9, [v]) => {
+                        let name = match v {
+                            Value::Clo(c) => self.shared_names.get(c.func).cloned().unwrap_or_default(),
+                            _ => String::new(),
+                        };
+                        let codes: Vec<Value> = name.chars().map(|c| Value::Int(c as i128)).collect();
+                        data(0, vec![data(ARRAY_BASE + codes.len() as u64, codes), v.clone()])
+                    }
                     _ => return wrong(),
                 };
                 self.locals.push(result);
@@ -1940,10 +2073,36 @@ fn machine(program: Program, input: VecDeque<i64>) -> Vm {
         cells: Vec::new(),
         input,
         out: BufWriter::new(io::stdout()),
+        shared_names: Rc::new(program.fn_names),
         names: program.names,
         stop: None,
         pool: Vec::new(),
         drops: Rc::new(program.drops),
+        heap: Rc::new(Heap::new()),
+    }
+}
+
+/// Another machine of the same program, for a thread of the system's: the
+/// same code and shared cells, nothing else of the first's.
+fn sibling(vm: &Vm) -> Vm {
+    Vm {
+        codes: Rc::clone(&vm.codes),
+        functions: vm.functions,
+        code: vm.code,
+        pc: 0,
+        locals: Vec::new(),
+        frames: Vec::new(),
+        conts: Vec::new(),
+        labels: 0,
+        cells: Vec::new(),
+        input: VecDeque::new(),
+        out: BufWriter::new(io::stdout()),
+        names: vm.names.clone(),
+        stop: None,
+        pool: Vec::new(),
+        drops: Rc::clone(&vm.drops),
+        heap: Rc::clone(&vm.heap),
+        shared_names: Rc::clone(&vm.shared_names),
     }
 }
 

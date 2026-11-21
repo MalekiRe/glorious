@@ -134,8 +134,9 @@ def program (p : Program) : Bytes :=
 def string (s : String) : Bytes := list (fun b => [b.toNat]) s.toUTF8.toList
 
 /-- A bytecode file: the magic `GLBC`, a format version, the constructor names
-used to print values, and the program. -/
+used to print values, the functions' names (what `host_fn_name` gives),
+and the program. -/
 def file (ctorNames : List String) (p : Program) : Bytes :=
-  [0x47, 0x4C, 0x42, 0x43, 6] ++ list string ctorNames ++ program p
+  [0x47, 0x4C, 0x42, 0x43, 7] ++ list string ctorNames ++ list string p.names.toList ++ program p
 
 end Glorious.Bytecode.Encode

@@ -219,6 +219,11 @@ pub(crate) fn write(p: &Program) -> Vec<u8> {
         nat(&mut out, n.len() as u64);
         out.extend_from_slice(n.as_bytes());
     }
+    nat(&mut out, p.fn_names.len() as u64);
+    for n in &p.fn_names {
+        nat(&mut out, n.len() as u64);
+        out.extend_from_slice(n.as_bytes());
+    }
     nat(&mut out, p.codes.len() as u64);
     for code in &p.codes {
         nat(&mut out, code.len() as u64);
@@ -281,6 +286,7 @@ pub(crate) fn read(bytes: &[u8]) -> Decoded<Program> {
     }
     let mut r = Reader { bytes, pos: MAGIC.len() };
     let names = r.list(Reader::string)?;
+    let fn_names = r.list(Reader::string)?;
     let codes = r.list(|r| r.list(Reader::loaded_instr))?;
     let mut starts = Vec::with_capacity(codes.len());
     for _ in 0..codes.len() {
@@ -293,5 +299,5 @@ pub(crate) fn read(bytes: &[u8]) -> Decoded<Program> {
         let f = r.index()?;
         drops.insert(f, r.index()?);
     }
-    Ok(Program { names, codes, starts, main, drops })
+    Ok(Program { names, fn_names, codes, starts, main, drops })
 }

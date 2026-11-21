@@ -26,7 +26,7 @@
 
 use super::*;
 use std::collections::{HashMap, HashSet};
-use std::rc::Rc;
+use std::sync::Arc as Rc;
 
 /// The most instructions a function is let grow to.
 const LIMIT: usize = 800;

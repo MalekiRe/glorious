@@ -6599,6 +6599,43 @@ per-table slices) is covey/query_loop. `devtools.rs` serves the MCP tools
 over a Unix socket (covey/mcp_session has the tools over a channel), and
 `tokio_web.rs` fetches web pages: Glorious's library has no sockets.
 
+## Threads of the system's (std::thread::spawn_os)
+
+**Decision: threads that run at the same moment on more than one core are
+the library's, started through C, and run by the Rust VM: a machine for
+each thread, sharing the program's code and the cells more than one holder
+reaches.** They are not Core's: the proved machines give a thread C starts
+no meaning, and a program that starts one is foreign (no certificate), as
+any that calls C is.
+
+- `std::thread::spawn_os(f)` starts `f` on a thread of the system's
+  (`pthread_create`, its start a `c_callback`), and `join_os` waits for it
+  (`pthread_join`) and gives what it gave. `f` borrows nothing
+  (`F: 'static`) and performs nothing: what it shares it is given, a
+  `Mutex`, an `AtomicInt`, a channel's end (`share`).
+- The VM: values are counted atomically (`Arc`), so a value one machine
+  made another may be given. The cells `heap_new`, `heap_take` and
+  `heap_put` give (what `Mutex`, `AtomicInt`, channels and the cooperative
+  threads are made of) are one store every machine has, under a lock.
+  Taking from an empty cell waits while another machine may fill it, and
+  goes wrong where every machine waits; so a `Mutex`'s lock (a take, then
+  a put) holds across machines as it holds across the cooperative threads.
+- C calling back from a thread other than the one whose machine made the
+  callback runs the callable on a machine of its own (`sibling`: the
+  program's code, function names and cells; its own locals, frames and
+  output). `heap_machine_coming` (host operation 10) counts a machine
+  before C starts it, so the thread that waits for what it will fill
+  waits rather than going wrong.
+- The Rust VM had not given the host operations 6 to 9 any meaning; it does
+  now. The bytecode carries the functions' names (version 7), what
+  `host_fn_name` gives.
+
+Measured: a sum over 8 million numbers, 17.5 s on one thread, 5.0 s on
+four (18 s of processor time either way); four threads adding 20 000 each
+through one `Mutex` give 80 000. The cooperative threads (`scope`,
+`spawn`, which covey's parallel groups run on) are as they were: they take
+turns on one machine, which the proved machines run too.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by

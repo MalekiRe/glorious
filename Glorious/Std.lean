@@ -4086,6 +4086,39 @@ pub struct Detached<T> { value: T }
 pub fn spawn_detached<T>(f: fn() -> T) -> Detached<T> { Detached { value: f() } }
 impl<T> Detached<T> { pub fn wait(d: Self) -> T { d.value } }
 
+// Threads of the system's, which run at the same moment on more than one
+// core: each runs a computation on a machine of its own, and what they
+// share is kept in the cells every machine has (`Mutex`, `AtomicInt`,
+// channels), taking from one that another holds waiting until it is put
+// back. Started through C (`pthread_create`): the Rust VM runs them; the
+// proved machines give a thread C starts no meaning. The computation
+// borrows nothing (`F: 'static`), and performs nothing: what it shares it
+// is given.
+extern "C" {
+    fn pthread_create(thread: usize, attr: usize, start: usize, arg: usize) -> i32;
+    fn pthread_join(thread: usize, result: usize) -> i32;
+    fn malloc(n: usize) -> usize;
+    fn free(p: usize);
+}
+pub struct OsThread<T> { id: usize, cell: Int, none: [T] }
+pub fn spawn_os<T, F>(f: F) -> OsThread<T> where F: Fn<(), Output = T>, F: 'static {
+    let cell = new_cell<Option<T>>(None);
+    unsafe {
+        let entry = c_callback(fn(arg: usize) -> Int { let r = f(); put_cell(cell, Some(r)); 0 }, 1);
+        let place = malloc(8usize);
+        heap_machine_coming();
+        if(pthread_create(place, 0usize, entry, 0usize) != 0i32) { abort("a thread could not be started") } else { () };
+        let id = usize(ptr_read(place, 64));
+        free(place);
+        OsThread { id: id, cell: cell, none: [] }
+    }
+}
+// Wait for a thread of the system's to be done, and what it gave.
+pub fn join_os<T>(t: OsThread<T>) -> T {
+    unsafe { discard(pthread_join(t.id, 0usize)) };
+    match(take_cell<Option<T>>(t.cell)) { Some(r) => r, None => abort("the thread gave nothing") }
+}
+
 // Another holder of something threads share.
 pub trait Share { fn share(&Self) -> Self }
 
