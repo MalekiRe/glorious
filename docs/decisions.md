@@ -6369,6 +6369,14 @@ envelope waits for a point that runs alone. covey/remote ports
 `an_envelope_point_runs_beside_disjoint_systems_and_infers_its_components`
 (its component registered: a world has what it is said to have).
 
+A list of systems is one branch beside others, as a function system is:
+it touches what each of it does, and runs on its thread with the world lent
+through a pointer, each in turn there (`run_in_turn`: in its steps where it
+has them, so that one that may wait waits among the threads beside it).
+covey/remote ports `a_waiting_envelope_point_runs_work_published_to_its_worker`
+(its point's bridge waits while a list beside it goes on), but for which
+thread ran what, which upstream asks.
+
 A bridge's function may wait, as a system's may, said by `waits(f)`
 (`RunsRemote`: taken out as a waiting system's parameters are, and called
 among the threads of the point's run), so two bridges that wait for each

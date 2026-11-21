@@ -16,6 +16,10 @@
 //   placed twice in a parallel group, both run at once (read-only
 //   envelopes), each request run by one of them (4 threads of 5 bridges,
 //   upstream's 8 of 20).
+// - `a_waiting_envelope_point_runs_work_published_to_its_worker`: while an
+//   envelope point's bridge waits, the systems beside it go on, one of them
+//   waiting for another that comes after it (upstream asks which thread ran
+//   `y`: here, that the emit ends).
 // Not ported: `dropping_the_app_or_a_granted_bridge_never_strands_anyone`
 // (a request is not failed when the app is dropped); the envelope sync
 // points that run beside other systems
@@ -52,12 +56,14 @@
 // 2 2 2
 // --
 // 20
+// --
+// ran
 // 0
 mod ecs;
 
 use core::iter::{into_iter, next};
 
-use ecs::{App, World, Entity, Commands, Query, Single, With, Remote, BridgeError, Schedule, sync_point, waits, parallel};
+use ecs::{App, World, Entity, Commands, Query, Single, With, Remote, BridgeError, Schedule, sync_point, waits, parallel, chain};
 use std::thread::{scope, Scope, Threads, join, yield_now, AtomicInt, load, store, fetch_add};
 
 struct Update
@@ -344,5 +350,43 @@ fn main() -> Int {
         while({ match(next(&mut each)) { Some(w) => join(w); true, None => false } }) { () }
     });
     say(load(&right));
+    say("--");
+
+    let started = AtomicInt::new(0);
+    let y_ran = AtomicInt::new(0);
+    let gate_at = std::thread::share(&started);
+    let x_waits = std::thread::share(&y_ran);
+    let y_flag = std::thread::share(&y_ran);
+    let mut app = App::new().register<A>().register<B>()
+        .add_systems(Update, parallel((sync_point(Writes), (
+            waits(fn() / {Threads} { let g = gate_at; while({ load(&g) == 0 }) { yield_now() } }),
+            parallel((
+                waits(fn(q: &mut Query<(&B,), ()>) / {Threads} { let w = x_waits; while({ load(&w) == 0 }) { yield_now() } }),
+                fn(q: &mut Query<(&B,), ()>) { let f = y_flag; store(&f, 1) }
+            ))
+        ).chain())))
+        .build();
+    let remote = app.world.remote();
+    discard(app.world.spawn_bundle((A(0), B(0))));
+    scope(fn(s: &Scope) / {Threads} {
+        let mine = remote.share();
+        let st = std::thread::share(&started);
+        let yr = std::thread::share(&y_ran);
+        let worker = s.spawn({
+            let m = mine;
+            let a = st;
+            let b = yr;
+            discard(m.bridge(Writes, waits(fn(q: &mut Query<(&mut A,), ()>) / {Threads} {
+                let aa = a;
+                let bb = b;
+                store(&aa, 1);
+                while({ load(&bb) == 0 }) { yield_now() }
+            })))
+        });
+        wait_for(&remote, 1);
+        app.emit(&Update);
+        join(worker)
+    });
+    say(if(load(&y_ran) == 1) { "ran" } else { "not" });
     0
 }

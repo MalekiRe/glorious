@@ -2551,13 +2551,21 @@ impl<E, S> System<E, S> for () {
     fn run(nothing: &mut (), event: &E, world: &mut World<S>, commands: &mut Commands<S>) { () }
     fn system_names(nothing: &(), names: [Str]) -> [Str] { names }
 }
+// (A list run in order beside others, as a branch of a parallel group or a
+// node of a graph: it touches what each of it does, and runs on its thread
+// with the world lent to it through a pointer, each in turn there, one that
+// may wait waiting among the threads it is beside.)
 impl<E, S, X, Y> System<E, S> for (X, Y) where X: System<E, S>, Y: System<E, S> {
     fn system_names(pair: &(X, Y), names: [Str]) -> [Str] { <Y as System<E, S>>::system_names(&pair.1, <X as System<E, S>>::system_names(&pair.0, names)) }
-    type Prepared = ();
-    fn touches(system: &(X, Y)) -> [Str] { ["w:*"] }
-    fn prepare(system: &mut (X, Y), event: &E, world: &mut World<S>) -> Option<()> { None }
-    fn run_prepared(system: &mut (X, Y), event: &E, prepared: &mut (), commands: &mut Commands<S>) / {std::thread::Threads} { () }
-    fn finish(system: &mut (X, Y), world: &mut World<S>, prepared: ()) { () }
+    type Prepared = PtrMut<World<S>>;
+    fn touches(pair: &(X, Y)) -> [Str] { join_onto(<X as System<E, S>>::touches(&pair.0), <Y as System<E, S>>::touches(&pair.1)) }
+    fn prepare(pair: &mut (X, Y), event: &E, world: &mut World<S>) -> Option<PtrMut<World<S>>> { Some(ptr_mut(world)) }
+    fn run_prepared(pair: &mut (X, Y), event: &E, prepared: &mut PtrMut<World<S>>, commands: &mut Commands<S>) / {std::thread::Threads} {
+        let at = *prepared;
+        run_in_turn<E, S, X>(&mut pair.0, event, at, commands);
+        run_in_turn<E, S, Y>(&mut pair.1, event, at, commands)
+    }
+    fn finish(pair: &mut (X, Y), world: &mut World<S>, prepared: PtrMut<World<S>>) { () }
     fn why_not(pair: &(X, Y), name: &Str, world: &World<S>, entity: Entity) -> Option<[Str]> {
         match(<X as System<E, S>>::why_not(&pair.0, name, world, entity)) { Some(why) => Some(why), None => <Y as System<E, S>>::why_not(&pair.1, name, world, entity) }
     }
@@ -2568,6 +2576,19 @@ impl<E, S, X, Y> System<E, S> for (X, Y) where X: System<E, S>, Y: System<E, S> 
     fn run(pair: &mut (X, Y), event: &E, world: &mut World<S>, commands: &mut Commands<S>) {
         <X as System<E, S>>::run(&mut pair.0, event, world, commands);
         <Y as System<E, S>>::run(&mut pair.1, event, world, commands)
+    }
+}
+// One of a list run on a thread: in its steps where it has them, so that
+// one that may wait waits among the threads it is beside; at once where not.
+fn run_in_turn<E, S, X>(system: &mut X, event: &E, at: PtrMut<World<S>>, commands: &mut Commands<S>) / {std::thread::Threads} where X: System<E, S> {
+    let world: &mut World<S> = unsafe { std::ptr::as_mut(at) };
+    match(<X as System<E, S>>::prepare(system, event, world)) {
+        Some(prepared) =>
+            let mut p = prepared;
+            <X as System<E, S>>::run_prepared(system, event, &mut p, commands);
+            let again: &mut World<S> = unsafe { std::ptr::as_mut(at) };
+            <X as System<E, S>>::finish(system, again, p),
+        None => <X as System<E, S>>::run(system, event, world, commands)
     }
 }
 // A function, of however many parameters, each asking for something, no
