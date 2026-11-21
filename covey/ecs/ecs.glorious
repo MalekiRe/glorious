@@ -909,6 +909,16 @@ fn bring_named<S>(world: &mut World<S>, name: Str, entity: Entity) {
         i = i + 1
     }
 }
+// The components of a world's columns that require the one named.
+pub trait Requirers { fn requirers(&Str, [Str]) -> [Str] }
+impl Requirers for () { fn requirers(name: &Str, out: [Str]) -> [Str] { out } }
+impl<H, R> Requirers for (Column<H>, R) where H: Requires, <H as Requires>::Required: NamesOf, H: Schedule, R: Requirers {
+    fn requirers(name: &Str, out: [Str]) -> [Str] {
+        let out = <R as Requirers>::requirers(name, out);
+        if(named_in(&<<H as Requires>::Required as NamesOf>::names_of(), name)) { push(out, <H as Schedule>::NAME) } else { out }
+    }
+}
+impl<H, R> Requirers for (Resource<H>, R) where R: Requirers { fn requirers(name: &Str, out: [Str]) -> [Str] { <R as Requirers>::requirers(name, out) } }
 // What each of a list of components requires, brought.
 pub trait BringsFor<S> { fn bring_for(&mut World<S>, Entity) }
 impl<S> BringsFor<S> for () { fn bring_for(world: &mut World<S>, entity: Entity) { () } }
@@ -3014,6 +3024,12 @@ pub struct Stepper { at: Int, target: Int, kind: Int, flag: Bool }
 pub struct StepReport { pub index: Int, pub kind: Int, pub flag: Bool, pub finished: Bool }
 
 pub trait System<E, S> {
+    // (Each of its functions with where it is among the app's systems,
+    // `parallel[0] > chain[1]`, and what it touches: upstream's
+    // `app.systems()` with each one's place. `places`: where this is.)
+    fn explain(&Self, [Str], [SystemInfo]) -> [SystemInfo]
+    // (As the element `at` of a chain.)
+    fn explain_chain(&Self, [Str], Int, [SystemInfo]) -> [SystemInfo]
     fn run(&mut Self, &E, &mut World<S>, &mut Commands<S>)
     // (The names of its functions, after those given: upstream's
     // `app.systems()`.)
@@ -3034,7 +3050,36 @@ pub trait System<E, S> {
     fn run_prepared(&mut Self, &E, &mut Self::Prepared, &mut Commands<S>) / {std::thread::Threads}
     fn finish(&mut Self, &mut World<S>, Self::Prepared)
 }
+// A system as the app lists it (`app.system_infos()`): its function's name,
+// where it is (`parallel[0] > chain[1]`), and what it reads and writes.
+pub struct SystemInfo { pub id: Int, pub name: Str, pub path: Str, pub places: [Str], pub touches: [Str] }
+impl SystemInfo {
+    // The names of what it writes; of what it reads.
+    pub fn writes(info: &Self) -> [Str] { touched(&info.touches, "w:") }
+    pub fn reads(info: &Self) -> [Str] { touched(&info.touches, "r:") }
+}
+fn touched(touches: &[Str], mark: Str) -> [Str] {
+    let mut out = [];
+    let mut i = 0;
+    while({ i < len_at(touches) }) {
+        if(std::text::starts_with(touches[i], mark)) { push_at(&mut out, std::text::drop(touches[i], 2)) } else { () };
+        i = i + 1
+    };
+    out
+}
+fn explain_leaf(names: [Str], places: [Str], touches: [Str], out: [SystemInfo]) -> [SystemInfo] {
+    let mut out = out;
+    let mut i = 0;
+    while({ i < len_at(&names) }) {
+        let id = len_at(&out);
+        push_at(&mut out, SystemInfo { id: id, name: names[i], path: std::text::join(clone(&places), " > "), places: clone(&places), touches: clone(&touches) });
+        i = i + 1
+    };
+    out
+}
 impl<E, S> System<E, S> for () {
+    fn explain(nothing: &(), places: [Str], out: [SystemInfo]) -> [SystemInfo] { out }
+    fn explain_chain(nothing: &(), places: [Str], at: Int, out: [SystemInfo]) -> [SystemInfo] { out }
     fn step(nothing: &mut (), event: &E, world: &mut World<S>, commands: &mut Commands<S>, at: Stepper) -> Stepper { at }
     type Prepared = ();
     fn touches(system: &()) -> [Str] { ["w:*"] }
@@ -3050,6 +3095,11 @@ impl<E, S> System<E, S> for () {
 // with the world lent to it through a pointer, each in turn there, one that
 // may wait waiting among the threads it is beside.)
 impl<E, S, X, Y> System<E, S> for (X, Y) where X: System<E, S>, Y: System<E, S> {
+    fn explain(pair: &(X, Y), places: [Str], out: [SystemInfo]) -> [SystemInfo] { <(X, Y) as System<E, S>>::explain_chain(pair, places, 0, out) }
+    fn explain_chain(pair: &(X, Y), places: [Str], at: Int, out: [SystemInfo]) -> [SystemInfo] {
+        let out = <X as System<E, S>>::explain(&pair.0, push(clone(&places), "chain[" ++ show(at) ++ "]"), out);
+        <Y as System<E, S>>::explain_chain(&pair.1, places, at + 1, out)
+    }
     fn system_names(pair: &(X, Y), names: [Str]) -> [Str] { <Y as System<E, S>>::system_names(&pair.1, <X as System<E, S>>::system_names(&pair.0, names)) }
     type Prepared = PtrMut<World<S>>;
     fn touches(pair: &(X, Y)) -> [Str] { join_onto(<X as System<E, S>>::touches(&pair.0), <Y as System<E, S>>::touches(&pair.1)) }
@@ -3195,6 +3245,8 @@ impl<E, S, ..P, ..A, L, Ts, F, Lc> System<E, S> for Sys<F, Lc>
         world.tick = world.tick + 1
     }
     fn system_names(sys: &Sys<F, Lc>, names: [Str]) -> [Str] { push(names, sys.name) }
+    fn explain(sys: &Sys<F, Lc>, places: [Str], out: [SystemInfo]) -> [SystemInfo] { explain_leaf([sys.name], places, <L as TouchNames>::touch_names([]), out) }
+    fn explain_chain(sys: &Sys<F, Lc>, places: [Str], at: Int, out: [SystemInfo]) -> [SystemInfo] { explain_leaf([sys.name], push(places, "chain[" ++ show(at) ++ "]"), <L as TouchNames>::touch_names([]), out) }
     fn why_not(sys: &Sys<F, Lc>, name: &Str, world: &World<S>, entity: Entity) -> Option<[Str]> {
         if(sys.name == *name) { Some(<L as WhyAll<S>>::why_all(world, entity, sys.last, [])) } else { None }
     }
@@ -3295,6 +3347,8 @@ impl<E, S, ..P, ..A, L, Ts, F, Lc> System<E, S> for Sys<Waits<F>, Lc>
         world.tick = world.tick + 1
     }
     fn system_names(sys: &Sys<Waits<F>, Lc>, names: [Str]) -> [Str] { push(names, sys.name) }
+    fn explain(sys: &Sys<Waits<F>, Lc>, places: [Str], out: [SystemInfo]) -> [SystemInfo] { explain_leaf([sys.name], places, <L as TouchNames>::touch_names([]), out) }
+    fn explain_chain(sys: &Sys<Waits<F>, Lc>, places: [Str], at: Int, out: [SystemInfo]) -> [SystemInfo] { explain_leaf([sys.name], push(places, "chain[" ++ show(at) ++ "]"), <L as TouchNames>::touch_names([]), out) }
     fn why_not(sys: &Sys<Waits<F>, Lc>, name: &Str, world: &World<S>, entity: Entity) -> Option<[Str]> { None }
     fn step(sys: &mut Sys<Waits<F>, Lc>, event: &E, world: &mut World<S>, commands: &mut Commands<S>, at: Stepper) -> Stepper {
         if(at.at == at.target) {
@@ -3338,6 +3392,8 @@ impl<E, S, ..P, ..A, L, Ts, Lc> IntoCondition<E, S> for fn(..P) -> Bool
 pub struct RunIf<P, C> { systems: P, condition: C, held: Bool }
 pub fn run_if<P, C>(systems: P, condition: C) -> RunIf<P, C> { RunIf { systems: systems, condition: condition, held: false } }
 impl<E, S, P, C> System<E, S> for RunIf<P, C> where P: System<E, S>, C: Condition<E, S> {
+    fn explain_chain(sys: &RunIf<P, C>, places: [Str], at: Int, out: [SystemInfo]) -> [SystemInfo] { <RunIf<P, C> as System<E, S>>::explain(sys, push(places, "chain[" ++ show(at) ++ "]"), out) }
+    fn explain(guarded: &RunIf<P, C>, places: [Str], out: [SystemInfo]) -> [SystemInfo] { <P as System<E, S>>::explain(&guarded.systems, places, out) }
     fn system_names(guarded: &RunIf<P, C>, names: [Str]) -> [Str] { <P as System<E, S>>::system_names(&guarded.systems, names) }
     type Prepared = ();
     fn touches(system: &RunIf<P, C>) -> [Str] { ["w:*"] }
@@ -3375,6 +3431,8 @@ pub fn exclusive<F>(f: F) -> Exclusive<F> { let (name, f) = std::any::fn_name(f)
 // systems are: the entities commands made have their places before the
 // system makes its own.)
 impl<E, S, F> System<E, S> for Exclusive<F> where F: Fn<(&mut World<S>,), Output = ()> {
+    fn explain(system: &Exclusive<F>, places: [Str], out: [SystemInfo]) -> [SystemInfo] { let names: [Str] = []; explain_leaf(push(names, system.name), places, ["w:*"], out) }
+    fn explain_chain(system: &Exclusive<F>, places: [Str], at: Int, out: [SystemInfo]) -> [SystemInfo] { let names: [Str] = []; explain_leaf(push(names, system.name), push(places, "chain[" ++ show(at) ++ "]"), ["w:*"], out) }
     fn system_names(system: &Exclusive<F>, names: [Str]) -> [Str] { push(names, system.name) }
     type Prepared = ();
     fn touches(system: &Exclusive<F>) -> [Str] { ["w:*"] }
@@ -3401,6 +3459,8 @@ impl<E, S, F> System<E, S> for Exclusive<F> where F: Fn<(&mut World<S>,), Output
 pub struct ExclusiveWith<F> { f: F, name: Str }
 pub fn exclusive_with<F>(f: F) -> ExclusiveWith<F> { let (name, f) = std::any::fn_name(f); ExclusiveWith { f: f, name: name } }
 impl<E, S, F> System<E, S> for ExclusiveWith<F> where F: Fn<(&E, &mut World<S>), Output = ()> {
+    fn explain(system: &ExclusiveWith<F>, places: [Str], out: [SystemInfo]) -> [SystemInfo] { let names: [Str] = []; explain_leaf(push(names, system.name), places, ["w:*"], out) }
+    fn explain_chain(system: &ExclusiveWith<F>, places: [Str], at: Int, out: [SystemInfo]) -> [SystemInfo] { let names: [Str] = []; explain_leaf(push(names, system.name), push(places, "chain[" ++ show(at) ++ "]"), ["w:*"], out) }
     fn system_names(system: &ExclusiveWith<F>, names: [Str]) -> [Str] { push(names, system.name) }
     type Prepared = ();
     fn touches(system: &ExclusiveWith<F>) -> [Str] { ["w:*"] }
@@ -3440,9 +3500,13 @@ impl<E, S, F> IntoSystem<E, S> for Exclusive<F> where F: Fn<(&mut World<S>,), Ou
 // take of the world apart is not yet given to each apart.)
 pub struct Parallel<P> { branches: P }
 pub fn parallel<T, P>(systems: T) -> Parallel<P> where T: Tuple<Nested = P> { Parallel { branches: nest(systems) } }
-pub trait Branches<E, S> { fn run_branches(&mut Self, &E, &mut World<S>, &mut Commands<S>) fn branch_names(&Self, [Str]) -> [Str] fn step_branches(&mut Self, &E, &mut World<S>, &mut Commands<S>, Stepper) -> Stepper fn why_not_branches(&Self, &Str, &World<S>, Entity) -> Option<[Str]> }
-impl<E, S> Branches<E, S> for () { fn run_branches(none: &mut (), event: &E, world: &mut World<S>, commands: &mut Commands<S>) { () } fn branch_names(none: &(), names: [Str]) -> [Str] { names } fn step_branches(none: &mut (), event: &E, world: &mut World<S>, commands: &mut Commands<S>, at: Stepper) -> Stepper { at } fn why_not_branches(none: &(), name: &Str, world: &World<S>, entity: Entity) -> Option<[Str]> { None } }
+pub trait Branches<E, S> { fn explain_branches(&Self, [Str], Int, [SystemInfo]) -> [SystemInfo] fn run_branches(&mut Self, &E, &mut World<S>, &mut Commands<S>) fn branch_names(&Self, [Str]) -> [Str] fn step_branches(&mut Self, &E, &mut World<S>, &mut Commands<S>, Stepper) -> Stepper fn why_not_branches(&Self, &Str, &World<S>, Entity) -> Option<[Str]> }
+impl<E, S> Branches<E, S> for () { fn explain_branches(none: &(), places: [Str], at: Int, out: [SystemInfo]) -> [SystemInfo] { out } fn run_branches(none: &mut (), event: &E, world: &mut World<S>, commands: &mut Commands<S>) { () } fn branch_names(none: &(), names: [Str]) -> [Str] { names } fn step_branches(none: &mut (), event: &E, world: &mut World<S>, commands: &mut Commands<S>, at: Stepper) -> Stepper { at } fn why_not_branches(none: &(), name: &Str, world: &World<S>, entity: Entity) -> Option<[Str]> { None } }
 impl<E, S, X, R> Branches<E, S> for (X, R) where X: System<E, S>, R: Branches<E, S> {
+    fn explain_branches(list: &(X, R), places: [Str], at: Int, out: [SystemInfo]) -> [SystemInfo] {
+        let out = <X as System<E, S>>::explain(&list.0, push(clone(&places), "parallel[" ++ show(at) ++ "]"), out);
+        <R as Branches<E, S>>::explain_branches(&list.1, places, at + 1, out)
+    }
     fn branch_names(list: &(X, R), names: [Str]) -> [Str] { <R as Branches<E, S>>::branch_names(&list.1, <X as System<E, S>>::system_names(&list.0, names)) }
     fn why_not_branches(list: &(X, R), name: &Str, world: &World<S>, entity: Entity) -> Option<[Str]> {
         match(<X as System<E, S>>::why_not(&list.0, name, world, entity)) { Some(why) => Some(why), None => <R as Branches<E, S>>::why_not_branches(&list.1, name, world, entity) }
@@ -3529,6 +3593,8 @@ impl<E, S, X, R> StartBranches<E, S> for (X, R) where X: System<E, S>, R: StartB
 }
 
 impl<E, S, P> System<E, S> for Parallel<P> where P: Branches<E, S>, P: StartBranches<E, S> {
+    fn explain_chain(sys: &Parallel<P>, places: [Str], at: Int, out: [SystemInfo]) -> [SystemInfo] { <Parallel<P> as System<E, S>>::explain(sys, push(places, "chain[" ++ show(at) ++ "]"), out) }
+    fn explain(group: &Parallel<P>, places: [Str], out: [SystemInfo]) -> [SystemInfo] { <P as Branches<E, S>>::explain_branches(&group.branches, places, 0, out) }
     fn system_names(group: &Parallel<P>, names: [Str]) -> [Str] { <P as Branches<E, S>>::branch_names(&group.branches, names) }
     type Prepared = ();
     fn touches(system: &Parallel<P>) -> [Str] { ["w:*"] }
@@ -3688,6 +3754,8 @@ pub trait CountNodes { fn count_nodes() -> Int }
 impl CountNodes for () { fn count_nodes() -> Int { 0 } }
 impl<N, P, D, R> CountNodes for (Node<N, P, D>, R) where R: CountNodes { fn count_nodes() -> Int { 1 + <R as CountNodes>::count_nodes() } }
 impl<E, S, Ns> System<E, S> for Graph<Ns> where Ns: StartNodes<E, S, Ns>, Ns: CountNodes {
+    fn explain(graph: &Graph<Ns>, places: [Str], out: [SystemInfo]) -> [SystemInfo] { let names: [Str] = []; explain_leaf(names, places, ["w:*"], out) }
+    fn explain_chain(graph: &Graph<Ns>, places: [Str], at: Int, out: [SystemInfo]) -> [SystemInfo] { let names: [Str] = []; explain_leaf(names, push(places, "chain[" ++ show(at) ++ "]"), ["w:*"], out) }
     // (Its nodes' names are not said.)
     fn system_names(graph: &Graph<Ns>, names: [Str]) -> [Str] { names }
     type Prepared = ();
@@ -3804,6 +3872,8 @@ impl<T> LifecycleEvent for OnRemove<T> where T: Schedule { const KIND: Int = 3; 
 pub struct SharedSystem<Q> { shared: Mutex<Q> }
 impl<Q> Use<[0, *]> for SharedSystem<Q> {}
 impl<E, S, Q> System<E, S> for SharedSystem<Q> where Q: System<E, S> {
+    fn explain(system: &SharedSystem<Q>, places: [Str], out: [SystemInfo]) -> [SystemInfo] { let names: [Str] = []; explain_leaf(lock(&system.shared, fn(q: &mut Q) -> [Str] { <Q as System<E, S>>::system_names(&*q, names) }), places, ["w:*"], out) }
+    fn explain_chain(system: &SharedSystem<Q>, places: [Str], at: Int, out: [SystemInfo]) -> [SystemInfo] { let names: [Str] = []; explain_leaf(lock(&system.shared, fn(q: &mut Q) -> [Str] { <Q as System<E, S>>::system_names(&*q, names) }), push(places, "chain[" ++ show(at) ++ "]"), ["w:*"], out) }
     fn system_names(system: &SharedSystem<Q>, names: [Str]) -> [Str] { lock(&system.shared, fn(q: &mut Q) -> [Str] { <Q as System<E, S>>::system_names(&*q, names) }) }
     type Prepared = ();
     fn touches(system: &SharedSystem<Q>) -> [Str] { ["w:*"] }
@@ -3860,18 +3930,19 @@ impl<B, X, R, S> WorldHooks<S> for (BehaviorsOf<B, X>, R) where R: WorldHooks<S>
 
 // The names of the app's systems, in the order they were added (upstream's
 // `app.systems()`): each function's name, `""` of a block written in place.
-pub trait Listed<S> { fn listed(&Self, [Str]) -> [Str] fn why_listed(&Self, &Str, &World<S>, Entity) -> Option<[Str]> }
-impl<S> Listed<S> for () { fn listed(list: &(), names: [Str]) -> [Str] { names } fn why_listed(list: &(), name: &Str, world: &World<S>, entity: Entity) -> Option<[Str]> { None } }
+pub trait Listed<S> { fn explained(&Self, [SystemInfo]) -> [SystemInfo] fn listed(&Self, [Str]) -> [Str] fn why_listed(&Self, &Str, &World<S>, Entity) -> Option<[Str]> }
+impl<S> Listed<S> for () { fn explained(list: &(), out: [SystemInfo]) -> [SystemInfo] { out } fn listed(list: &(), names: [Str]) -> [Str] { names } fn why_listed(list: &(), name: &Str, world: &World<S>, entity: Entity) -> Option<[Str]> { None } }
 impl<E, P, R, S> Listed<S> for (On<E, P>, R) where P: System<E, S>, R: Listed<S> {
+    fn explained(list: &(On<E, P>, R), out: [SystemInfo]) -> [SystemInfo] { <P as System<E, S>>::explain(&list.0.systems, [], <R as Listed<S>>::explained(&list.1, out)) }
     fn listed(list: &(On<E, P>, R), names: [Str]) -> [Str] { <P as System<E, S>>::system_names(&list.0.systems, <R as Listed<S>>::listed(&list.1, names)) }
     fn why_listed(list: &(On<E, P>, R), name: &Str, world: &World<S>, entity: Entity) -> Option<[Str]> {
         match(<R as Listed<S>>::why_listed(&list.1, name, world, entity)) { Some(why) => Some(why), None => <P as System<E, S>>::why_not(&list.0.systems, name, world, entity) }
     }
 }
-impl<X, R, S> Listed<S> for (TaskOf<X>, R) where R: Listed<S> { fn why_listed(list: &(TaskOf<X>, R), name: &Str, world: &World<S>, entity: Entity) -> Option<[Str]> { <R as Listed<S>>::why_listed(&list.1, name, world, entity) } fn listed(list: &(TaskOf<X>, R), names: [Str]) -> [Str] { <R as Listed<S>>::listed(&list.1, names) } }
-impl<P, X, R, S> Listed<S> for (SubOf<P, X>, R) where R: Listed<S> { fn why_listed(list: &(SubOf<P, X>, R), name: &Str, world: &World<S>, entity: Entity) -> Option<[Str]> { <R as Listed<S>>::why_listed(&list.1, name, world, entity) } fn listed(list: &(SubOf<P, X>, R), names: [Str]) -> [Str] { <R as Listed<S>>::listed(&list.1, names) } }
-impl<P, C, R, S> Listed<S> for (ComputedOf<P, C>, R) where R: Listed<S> { fn why_listed(list: &(ComputedOf<P, C>, R), name: &Str, world: &World<S>, entity: Entity) -> Option<[Str]> { <R as Listed<S>>::why_listed(&list.1, name, world, entity) } fn listed(list: &(ComputedOf<P, C>, R), names: [Str]) -> [Str] { <R as Listed<S>>::listed(&list.1, names) } }
-impl<B, X, R, S> Listed<S> for (BehaviorsOf<B, X>, R) where R: Listed<S> { fn why_listed(list: &(BehaviorsOf<B, X>, R), name: &Str, world: &World<S>, entity: Entity) -> Option<[Str]> { <R as Listed<S>>::why_listed(&list.1, name, world, entity) } fn listed(list: &(BehaviorsOf<B, X>, R), names: [Str]) -> [Str] { <R as Listed<S>>::listed(&list.1, names) } }
+impl<X, R, S> Listed<S> for (TaskOf<X>, R) where R: Listed<S> { fn explained(list: &(TaskOf<X>, R), out: [SystemInfo]) -> [SystemInfo] { <R as Listed<S>>::explained(&list.1, out) } fn why_listed(list: &(TaskOf<X>, R), name: &Str, world: &World<S>, entity: Entity) -> Option<[Str]> { <R as Listed<S>>::why_listed(&list.1, name, world, entity) } fn listed(list: &(TaskOf<X>, R), names: [Str]) -> [Str] { <R as Listed<S>>::listed(&list.1, names) } }
+impl<P, X, R, S> Listed<S> for (SubOf<P, X>, R) where R: Listed<S> { fn explained(list: &(SubOf<P, X>, R), out: [SystemInfo]) -> [SystemInfo] { <R as Listed<S>>::explained(&list.1, out) } fn why_listed(list: &(SubOf<P, X>, R), name: &Str, world: &World<S>, entity: Entity) -> Option<[Str]> { <R as Listed<S>>::why_listed(&list.1, name, world, entity) } fn listed(list: &(SubOf<P, X>, R), names: [Str]) -> [Str] { <R as Listed<S>>::listed(&list.1, names) } }
+impl<P, C, R, S> Listed<S> for (ComputedOf<P, C>, R) where R: Listed<S> { fn explained(list: &(ComputedOf<P, C>, R), out: [SystemInfo]) -> [SystemInfo] { <R as Listed<S>>::explained(&list.1, out) } fn why_listed(list: &(ComputedOf<P, C>, R), name: &Str, world: &World<S>, entity: Entity) -> Option<[Str]> { <R as Listed<S>>::why_listed(&list.1, name, world, entity) } fn listed(list: &(ComputedOf<P, C>, R), names: [Str]) -> [Str] { <R as Listed<S>>::listed(&list.1, names) } }
+impl<B, X, R, S> Listed<S> for (BehaviorsOf<B, X>, R) where R: Listed<S> { fn explained(list: &(BehaviorsOf<B, X>, R), out: [SystemInfo]) -> [SystemInfo] { <R as Listed<S>>::explained(&list.1, out) } fn why_listed(list: &(BehaviorsOf<B, X>, R), name: &Str, world: &World<S>, entity: Entity) -> Option<[Str]> { <R as Listed<S>>::why_listed(&list.1, name, world, entity) } fn listed(list: &(BehaviorsOf<B, X>, R), names: [Str]) -> [Str] { <R as Listed<S>>::listed(&list.1, names) } }
 
 fn named_in(names: &[Str], name: &Str) -> Bool {
     let mut i = 0;
@@ -5027,6 +5098,8 @@ fn within(mine: &[Str], allowed: &[Str]) -> Bool {
     all
 }
 impl<E, S, P> System<E, S> for SyncPointOf<P> where P: Schedule, P: PointKind, P: PointTouches {
+    fn explain(system: &SyncPointOf<P>, places: [Str], out: [SystemInfo]) -> [SystemInfo] { let names: [Str] = []; explain_leaf(names, places, <P as PointTouches>::point_touches(), out) }
+    fn explain_chain(system: &SyncPointOf<P>, places: [Str], at: Int, out: [SystemInfo]) -> [SystemInfo] { let names: [Str] = []; explain_leaf(names, push(places, "chain[" ++ show(at) ++ "]"), <P as PointTouches>::point_touches(), out) }
     fn system_names(system: &SyncPointOf<P>, names: [Str]) -> [Str] { names }
     // (An envelope's: the world, lent to the point's thread, and the
     // requests within its envelope, run there beside the systems apart from
@@ -5452,6 +5525,43 @@ impl<S, L> App<S, L> {
     // the components it has.
     // The names of its systems, in the order they were added.
     pub fn systems(app: &Self) -> [Str] where L: Listed<S> { <L as Listed<S>>::listed(&app.systems, []) }
+    // Each of its systems with where it is and what it touches.
+    pub fn system_infos(app: &Self) -> [SystemInfo] where L: Listed<S> { <L as Listed<S>>::explained(&app.systems, []) }
+    // Why the system `a` runs before `b`, or that nothing orders them
+    // (upstream's `why_order`); none if either is not one of the app's.
+    pub fn why_order(app: &Self, a: Int, b: Int) -> Option<Str> where L: Listed<S> {
+        let infos = app.system_infos();
+        if(if(a < 0) { true } else if(b < 0) { true } else if(a >= len_at(&infos)) { true } else { b >= len_at(&infos) }) { None } else {
+            let pa = clone(&infos[a].places);
+            let pb = clone(&infos[b].places);
+            let mut k = 0;
+            while({ if(k < len_at(&pa)) { if(k < len_at(&pb)) { pa[k] == pb[k] } else { false } } else { false } }) { k = k + 1 };
+            let named = "`" ++ infos[a].name ++ "` and `" ++ infos[b].name ++ "`";
+            if(if(k < len_at(&pa)) { k < len_at(&pb) } else { false }) {
+                if(std::text::starts_with(pa[k], "chain[")) { Some("chain: " ++ named ++ " are run in the order of a chain") }
+                else { Some("no order: " ++ named ++ " are branches of one parallel group") }
+            } else { Some("registration order: " ++ named ++ " are run in the order they were added") }
+        }
+    }
+    // Why the world stores the component named (upstream's `why_component`):
+    // that it was registered, what requires it, and which systems use it and
+    // how; none if it stores none of the name.
+    pub fn why_component(app: &Self, name: Str) -> Option<[Str]> where L: Listed<S>, S: Requirers {
+        let mut out = [];
+        if(named_in(&app.world.bring_names, &name)) { push_at(&mut out, "`register::<" ++ name ++ ">`: registered with the app") } else { () };
+        let requirers = <S as Requirers>::requirers(&name, []);
+        let mut i = 0;
+        while({ i < len_at(&requirers) }) { push_at(&mut out, "`" ++ requirers[i] ++ "` requires it"); i = i + 1 };
+        let infos = app.system_infos();
+        let mut j = 0;
+        while({ j < len_at(&infos) }) {
+            let info = &infos[j];
+            if(named_in(&info.writes(), &name)) { push_at(&mut out, "`" ++ info.name ++ "` uses it: Write") }
+            else if(named_in(&info.reads(), &name)) { push_at(&mut out, "`" ++ info.name ++ "` uses it: Read") } else { () };
+            j = j + 1
+        };
+        if(len_at(&out) == 0) { None } else { Some(out) }
+    }
     // Why the system of the name does not run on the entity: what each of its
     // queries says against it (none if it would); none at all if no system
     // has the name.
