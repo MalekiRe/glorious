@@ -1,6 +1,7 @@
 module
 
 public import Glorious.Driver
+public import Glorious.Syntax.Flat
 
 /-!
 # What is asked of the front end besides what programs give
@@ -46,6 +47,16 @@ def keptProgram (body : String) : String :=
     pub fn go() -> Int { d(&(2, (3, ()))) }
   }
   fn main() -> Int { m::go() }"
+
+/-- A module's items made flat and made trees again are the items. -/
+def sameFlat (items : List Syntax.Item) : Bool :=
+  hash (Syntax.Flat.unflatten (Syntax.Flat.flatten items)) == hash items
+
+/-- Of the prelude and every module of the library. -/
+def flatRoundTrips : Bool :=
+  match readPrelude.get, readStd.get with
+  | .ok (prelude, _), .ok std => sameFlat prelude && std.parsed.all sameFlat
+  | _, _ => false
 
 /-- Each thing asked, with its number. -/
 def all : List (Nat × (Unit → Bool)) := [
@@ -271,7 +282,10 @@ def all : List (Nat × (Unit → Bool)) := [
   -- program has it: an implementation's function written longer before
   -- another implementation's moves where the other's calls are.
   (95, fun _ => keptAfterEdit (keptProgram "1") (keptProgram "let z = 0; 1 + z")),
-  (96, fun _ => keptAfterEdit (keptProgram "let z = 0; 1 + z") (keptProgram "1"))
+  (96, fun _ => keptAfterEdit (keptProgram "let z = 0; 1 + z") (keptProgram "1")),
+  -- A module's items made flat and made trees again are the items: the
+  -- prelude's and every module of the library's.
+  (97, fun _ => flatRoundTrips)
 ]
 
 end Glorious.Checks

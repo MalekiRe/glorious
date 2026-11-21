@@ -6670,6 +6670,37 @@ places, the way that passed) is kept by its text (`library/selftest-known`)
 and tried first the next time, as the command tries what a file's last
 compile found.
 
+## A flat representation of a module (toward one Sema pass)
+
+**Decision: a module's items get a flat form (`Syntax.Flat`): its
+expressions, statements, clauses and patterns each one array, a node naming
+its parts by place, the items naming their clauses and values by place.**
+As Zig's ZIR: every expression has a place of its own, by which what is
+decided of it is said beside it, not written into a copy of the tree; a
+pass goes through arrays instead of rebuilding every node it passes; and a
+kept module is a few arrays.
+
+What the front end does today, measured on `covey/states2` edited (4.1 s):
+after the parse, a dozen passes over the whole program each rebuild it:
+names resolved (0.20 s), aliases expanded (0.04), defaults and blankets
+written out (0.22), fields borrowed apart split (0.03), checked (2.2),
+what the checker decided written in (0.18), lifetimes erased (0.02), traits
+lowered to values (0.37), what main reaches (0.07), elaborated (0.2).
+
+The way there, each step with the suite as it was:
+1. **The flat form, and back** (this step): `flatten`, `unflatten`;
+   check 97 says the prelude's and the library's modules come back as they
+   were.
+2. The parser writes the flat form; the trees are made from it.
+3. The passes before the checker go over the flat form, one at a time,
+   then as one pass: names, aliases, defaults, fields.
+4. What the checker decides is a table by node (`dotChosen`, `argsChosen`,
+   `decided`, coercions, dictionaries, drop sites are by id already): the
+   elaborator reads it there, and "what the checker decided, written in"
+   goes.
+5. The checker and the elaborator read the flat form; lowering traits is
+   done as the elaborator reads (one Sema pass, as Zig's from ZIR to AIR).
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by
