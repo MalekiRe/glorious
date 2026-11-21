@@ -316,12 +316,18 @@ pub fn alive<S>(world: &World<S>, entity: Entity) -> Bool {
 pub fn despawn<S>(world: &mut World<S>, entity: Entity) where S: Columns, S: Unlinks<S> {
     if(alive(&*world, entity)) {
         let under = <S as Unlinks<S>>::linked_under(&world.columns, entity, []);
+        despawn_one(world, entity);
+        let mut i = 0;
+        while({ i < len_at(&under) }) { despawn(world, under[i]); i = i + 1 }
+    };
+}
+// The entity alone ended.
+fn despawn_one<S>(world: &mut World<S>, entity: Entity) where S: Columns, S: Unlinks<S> {
+    if(alive(&*world, entity)) {
         world.generations[entity.index] = entity.generation + 1;
         push_at(&mut world.free, entity.index);
         <S as Unlinks<S>>::unlink(&mut world.columns, entity);
-        <S as Columns>::forget(&mut world.columns, entity);
-        let mut i = 0;
-        while({ i < len_at(&under) }) { despawn(world, under[i]); i = i + 1 }
+        <S as Columns>::forget(&mut world.columns, entity)
     };
 }
 // A relation whose sources end with their target (upstream's `LINKED`):
@@ -5130,12 +5136,16 @@ impl<S, L> App<S, L> {
     }
     pub fn despawn(app: &mut Self, entity: Entity) -> Bool where S: Columns, S: Unlinks<S>, S: RemoveHooks<S, L> {
         if(alive(&app.world, entity)) {
+            // (What is under it by a `Linked` relation ends after it, each
+            // with its hooks, as upstream's.)
+            let under = <S as Unlinks<S>>::linked_under(&app.world.columns, entity, []);
             <S as RemoveHooks<S, L>>::removing(app, entity);
-            despawn(&mut app.world, entity);
+            despawn_one(&mut app.world, entity);
+            let mut i = 0;
+            while({ i < len_at(&under) }) { discard(app.despawn(under[i])); i = i + 1 };
             true
         } else { false }
     }
-
     // Run the next system or condition of a pass of what is emitted, upstream's
     // `app.step`, and do what it asked: which it was (`kind` 1 a system,
     // `flag` whether it ran; 2 a condition, `flag` what it said), at which
