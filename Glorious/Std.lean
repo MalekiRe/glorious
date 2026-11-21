@@ -3745,6 +3745,9 @@ pub fn ptr<T>(r: &T) -> Ptr<T> { Ptr { at: unsafe { transmute(r) } } }
 pub fn ptr_mut<T>(r: &mut T) -> PtrMut<T> { PtrMut { at: unsafe { transmute(r) } } }
 // The same place, to read only.
 pub fn as_const<T>(p: PtrMut<T>) -> Ptr<T> { Ptr { at: p.at } }
+// A pointer to no place, which nothing is to go through.
+pub fn dangling<T>() -> Ptr<T> { Ptr { at: 0 } }
+pub fn dangling_mut<T>() -> PtrMut<T> { PtrMut { at: 0 } }
 
 // The place, borrowed for as long as whoever says so says.
 pub unsafe fn as_ref<'a, T>(p: Ptr<T>) -> &'a T { transmute(p.at) }

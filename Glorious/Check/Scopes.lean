@@ -353,6 +353,20 @@ def fitHead (im : ImplDecl) (hargs args : List Ty) (said : Option String := none
     unless ← fit want got do return none
   pure (some at_)
 
+/-- What an implementation is for, as one list: the trait's arguments, then
+the type's (its own type parameters, as variables, where it takes any). -/
+def implPattern (im : ImplDecl) (arity : Nat) : List Ty :=
+  im.targs ++ (List.range arity).map fun j =>
+    match im.fixed.lookup j with
+    | some t => t
+    | none => (((im.params[j]?).bind fun p => im.pvars.lookup p).map Ty.var).getD (.var 0)
+
+/-- Does what is known of a type and the trait's arguments fit an
+implementation, as they are, nothing of them made anything to fit? -/
+def implFitsAsIs (im : ImplDecl) (hargs args : List Ty) : M Bool := do
+  let goal ← (args ++ hargs).mapM zonk
+  pure (Ty.fitsAll (im.pvars.map (·.2)) (implPattern im hargs.length) goal []).isSome
+
 /-- The name of an implementation of a trait at arguments for a type. Where
 the type's implementation gives the trait arguments made of its own type
 parameters (`impl<T> From<T> for Wrap<T>`), the arguments asked are made
@@ -479,8 +493,15 @@ def settleAssocs : M Unit := do
     match known, ground with
     | some (head, hargs), true =>
       let key ← implKey tr self args
-      match (← implsOfHead (Syntax.traitBase key) head).find? fun im => im.trait == key with
+      let family ← implsOfHead (Syntax.traitBase key) head
+      match family.find? fun im => im.trait == key with
       | some im =>
+        -- (Of several for the type, the one it fits as it is: of `impl<X>
+        -- Either for (Yes, X)` and `(No, X)`, neither while the first is
+        -- not known, though the first is spelled as the trait is.)
+        if family.length > 1 && !(← implFitsAsIs im hargs args) then
+          left := left.push (tr, subject, name, a, owner, pos)
+          continue
         match im.assocs.lookup name with
         | some said =>
           -- The implementation's type parameters are the type's arguments,

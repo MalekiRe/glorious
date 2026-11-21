@@ -37,6 +37,7 @@ use std::tuple::{Tuple, nest};
 use core::option::{as_ref, as_mut, is_none, is_some};
 use core::value::{Default, default, discard};
 use core::iter::{into_iter, next};
+use std::ptr::{Ptr, PtrMut, ptr_mut, as_const, dangling, dangling_mut};
 
 // An entity: a place in the columns, and which of the entities that have had
 // that place this one is.
@@ -1255,19 +1256,21 @@ fn mut_at<'a, A>(column: &'a mut Column<A>, at: Int) -> Mut<'a, A> {
 }
 
 impl<A> Item for &mut A {
-    type Store = Column<A>;
+    type Store = PtrMut<Column<A>>;
     type Got<'a> = Mut<'a, A>;
-    fn item_at<'a>(store: &'a mut Column<A>, entity: Entity) -> Option<Mut<'a, A>> {
-        let at = slot_of(&*store, entity);
-        if(at >= 0) { Some(mut_at(store, at)) } else { None }
+    fn item_at<'a>(store: &'a mut PtrMut<Column<A>>, entity: Entity) -> Option<Mut<'a, A>> {
+        let column: &'a mut Column<A> = unsafe { lent_mut(*store) };
+        let at = slot_of(&*column, entity);
+        if(at >= 0) { Some(mut_at(column, at)) } else { None }
     }
 }
 impl<A> Item for &A {
-    type Store = Column<A>;
+    type Store = Ptr<Column<A>>;
     type Got<'a> = &'a A;
-    fn item_at<'a>(store: &'a mut Column<A>, entity: Entity) -> Option<&'a A> {
-        let at = slot_of(&*store, entity);
-        if(at >= 0) { Some(&store.dense[at]) } else { None }
+    fn item_at<'a>(store: &'a mut Ptr<Column<A>>, entity: Entity) -> Option<&'a A> {
+        let column: &'a Column<A> = unsafe { lent(*store) };
+        let at = slot_of(column, entity);
+        if(at >= 0) { Some(&column.dense[at]) } else { None }
     }
 }
 impl Item for () {
@@ -1284,20 +1287,20 @@ impl Item for Entity {
 // Whether the entity has an `A`: every entity is found, with it or not.
 pub struct Has<A>(A)
 impl<A> Item for Has<A> {
-    type Store = Column<A>;
+    type Store = Ptr<Column<A>>;
     type Got<'a> = Bool;
-    fn item_at<'a>(store: &'a mut Column<A>, entity: Entity) -> Option<Bool> { Some(slot_of(&*store, entity) >= 0) }
+    fn item_at<'a>(store: &'a mut Ptr<Column<A>>, entity: Entity) -> Option<Bool> { let column: &Column<A> = unsafe { lent(*store) }; Some(slot_of(column, entity) >= 0) }
 }
 // Its `A` if it has one: every entity is found, with it or not.
 impl<A> Item for Option<&mut A> {
-    type Store = Column<A>;
+    type Store = PtrMut<Column<A>>;
     type Got<'a> = Option<Mut<'a, A>>;
-    fn item_at<'a>(store: &'a mut Column<A>, entity: Entity) -> Option<Option<Mut<'a, A>>> { Some(<&mut A as Item>::item_at(store, entity)) }
+    fn item_at<'a>(store: &'a mut PtrMut<Column<A>>, entity: Entity) -> Option<Option<Mut<'a, A>>> { Some(<&mut A as Item>::item_at(store, entity)) }
 }
 impl<A> Item for Option<&A> {
-    type Store = Column<A>;
+    type Store = Ptr<Column<A>>;
     type Got<'a> = Option<&'a A>;
-    fn item_at<'a>(store: &'a mut Column<A>, entity: Entity) -> Option<Option<&'a A>> { Some(<&A as Item>::item_at(store, entity)) }
+    fn item_at<'a>(store: &'a mut Ptr<Column<A>>, entity: Entity) -> Option<Option<&'a A>> { Some(<&A as Item>::item_at(store, entity)) }
 }
 // Of what the entity relates to by `R`: `To<ChildOf, &Name>`, its parent's
 // name. None where it relates to nothing by `R`, or that has not what `Q`
@@ -1307,12 +1310,13 @@ pub struct To<R, Q>(R, Q)
 // disables it: `To<ChildOf, (&Hp, Has<Disabled>)>` sees it. Which are, found
 // when the query is made.)
 impl<R, Q> Item for To<R, Q> where Q: Item {
-    type Store = (Column<Relates<R>>, (Q::Store, [Entity]));
+    type Store = (Ptr<Column<Relates<R>>>, (Q::Store, [Entity]));
     type Got<'a> = Option<Q::Got<'a>>;
-    fn item_at<'a>(store: &'a mut (Column<Relates<R>>, (Q::Store, [Entity])), entity: Entity) -> Option<Option<Q::Got<'a>>> {
-        let at = slot_of(&store.0, entity);
+    fn item_at<'a>(store: &'a mut (Ptr<Column<Relates<R>>>, (Q::Store, [Entity])), entity: Entity) -> Option<Option<Q::Got<'a>>> {
+        let links: &Column<Relates<R>> = unsafe { lent(store.0) };
+        let at = slot_of(links, entity);
         if(at < 0) { Some(None) } else {
-            let target = store.0.dense[at].target;
+            let target = links.dense[at].target;
             if(has_entity(&store.1.1, target)) { Some(None) }
             else { Some(<Q as Item>::item_at(&mut store.1.0, target)) }
         }
@@ -1324,14 +1328,15 @@ impl<R, Q> Item for To<R, Q> where Q: Item {
 pub struct From<R, Q>(R, Q)
 // (A source disabled is not one, as a target is not to `To`.)
 impl<R, A> Item for From<R, &A> {
-    type Store = (Column<Sources<R>>, (Column<A>, [Entity]));
+    type Store = (Ptr<Column<Sources<R>>>, (Ptr<Column<A>>, [Entity]));
     type Got<'a> = [&'a A];
-    fn item_at<'a>(store: &'a mut (Column<Sources<R>>, (Column<A>, [Entity])), entity: Entity) -> Option<[&'a A]> {
+    fn item_at<'a>(store: &'a mut (Ptr<Column<Sources<R>>>, (Ptr<Column<A>>, [Entity])), entity: Entity) -> Option<[&'a A]> {
         let mut out = [];
-        let at = slot_of(&store.0, entity);
+        let sources: &'a Column<Sources<R>> = unsafe { lent(store.0) };
+        let at = slot_of(sources, entity);
         if(at >= 0) {
-            let list = &store.0.dense[at].list;
-            let column = &store.1.0;
+            let list = &sources.dense[at].list;
+            let column: &'a Column<A> = unsafe { lent(store.1.0) };
             let hidden = &store.1.1;
             let mut i = 0;
             while({ i < len_at(list) }) {
@@ -1344,11 +1349,12 @@ impl<R, A> Item for From<R, &A> {
     }
 }
 impl<R> Item for From<R, Entity> {
-    type Store = Column<Sources<R>>;
+    type Store = Ptr<Column<Sources<R>>>;
     type Got<'a> = [Entity];
-    fn item_at<'a>(store: &'a mut Column<Sources<R>>, entity: Entity) -> Option<[Entity]> {
-        let at = slot_of(&*store, entity);
-        Some(if(at >= 0) { copied(&store.dense[at].list) } else { [] })
+    fn item_at<'a>(store: &'a mut Ptr<Column<Sources<R>>>, entity: Entity) -> Option<[Entity]> {
+        let sources: &Column<Sources<R>> = unsafe { lent(*store) };
+        let at = slot_of(sources, entity);
+        Some(if(at >= 0) { copied(&sources.dense[at].list) } else { [] })
     }
 }
 // (The columns as a pair of the first and the rest's, so that each is a
@@ -1367,13 +1373,19 @@ impl<H, ..R> Item for (H, ..R) where H: Item, (..R): Item {
     }
 }
 
-// The columns a query asks for, taken out of the world while it is used and
-// put back after: each is found as a column is.
-fn take_now<A, S>(columns: &mut S, now: Int) -> Column<A> where S: Get<A> {
-    let mut column = <S as Get<A>>::take(columns);
+// The columns a query asks for, lent to it while it is used: a pointer to
+// each, which its items go through. Whether two of them may be of one
+// column, or two queries of one system be, is said of their types
+// (`AllApart`): a column read by two, or written by two that two filters
+// keep apart. (Nothing is taken out, so nothing is put back.)
+fn lend_now<A, S>(columns: &mut S, now: Int) -> PtrMut<Column<A>> where S: Get<A> {
+    let column = <S as Get<A>>::column_mut(columns);
     column.now = now;
-    column
+    ptr_mut(column)
 }
+fn lend_read<A, S>(columns: &mut S, now: Int) -> Ptr<Column<A>> where S: Get<A> { as_const(lend_now<A, S>(columns, now)) }
+unsafe fn lent_mut<'a, A>(p: PtrMut<Column<A>>) -> &'a mut Column<A> { std::ptr::as_mut(p) }
+unsafe fn lent<'a, A>(p: Ptr<Column<A>>) -> &'a Column<A> { std::ptr::as_ref(p) }
 
 pub trait Fill<S>: Item {
     fn fill(&mut S, Int) -> Self::Store
@@ -1382,14 +1394,14 @@ pub trait Fill<S>: Item {
     fn hollow() -> Self::Store
 }
 impl<A, S> Fill<S> for &mut A where S: Get<A>, A: Writable {
-    fn fill(columns: &mut S, now: Int) -> <&mut A as Item>::Store { take_now<A, S>(columns, now) }
-    fn unfill(columns: &mut S, column: <&mut A as Item>::Store) { <S as Get<A>>::put(columns, column) }
-    fn hollow() -> <&mut A as Item>::Store { empty_column() }
+    fn fill(columns: &mut S, now: Int) -> <&mut A as Item>::Store { lend_now<A, S>(columns, now) }
+    fn unfill(columns: &mut S, column: <&mut A as Item>::Store) { () }
+    fn hollow() -> <&mut A as Item>::Store { dangling_mut() }
 }
 impl<A, S> Fill<S> for &A where S: Get<A> {
-    fn fill(columns: &mut S, now: Int) -> <&A as Item>::Store { take_now<A, S>(columns, now) }
-    fn unfill(columns: &mut S, column: <&A as Item>::Store) { <S as Get<A>>::put(columns, column) }
-    fn hollow() -> <&A as Item>::Store { empty_column() }
+    fn fill(columns: &mut S, now: Int) -> <&A as Item>::Store { lend_read<A, S>(columns, now) }
+    fn unfill(columns: &mut S, column: <&A as Item>::Store) { () }
+    fn hollow() -> <&A as Item>::Store { dangling() }
 }
 impl<S> Fill<S> for () {
     fn fill(columns: &mut S, now: Int) -> <() as Item>::Store { () }
@@ -1402,23 +1414,24 @@ impl<S> Fill<S> for Entity {
     fn hollow() -> <Entity as Item>::Store { () }
 }
 impl<A, S> Fill<S> for Has<A> where S: Get<A> {
-    fn fill(columns: &mut S, now: Int) -> <Has<A> as Item>::Store { take_now<A, S>(columns, now) }
-    fn unfill(columns: &mut S, column: <Has<A> as Item>::Store) { <S as Get<A>>::put(columns, column) }
-    fn hollow() -> <Has<A> as Item>::Store { empty_column() }
+    fn fill(columns: &mut S, now: Int) -> <Has<A> as Item>::Store { lend_read<A, S>(columns, now) }
+    fn unfill(columns: &mut S, column: <Has<A> as Item>::Store) { () }
+    fn hollow() -> <Has<A> as Item>::Store { dangling() }
 }
 impl<A, S> Fill<S> for Option<&mut A> where S: Get<A>, A: Writable {
-    fn fill(columns: &mut S, now: Int) -> <Option<&mut A> as Item>::Store { take_now<A, S>(columns, now) }
-    fn unfill(columns: &mut S, column: <Option<&mut A> as Item>::Store) { <S as Get<A>>::put(columns, column) }
-    fn hollow() -> <Option<&mut A> as Item>::Store { empty_column() }
+    fn fill(columns: &mut S, now: Int) -> <Option<&mut A> as Item>::Store { lend_now<A, S>(columns, now) }
+    fn unfill(columns: &mut S, column: <Option<&mut A> as Item>::Store) { () }
+    fn hollow() -> <Option<&mut A> as Item>::Store { dangling_mut() }
 }
 impl<A, S> Fill<S> for Option<&A> where S: Get<A> {
-    fn fill(columns: &mut S, now: Int) -> <Option<&A> as Item>::Store { take_now<A, S>(columns, now) }
-    fn unfill(columns: &mut S, column: <Option<&A> as Item>::Store) { <S as Get<A>>::put(columns, column) }
-    fn hollow() -> <Option<&A> as Item>::Store { empty_column() }
+    fn fill(columns: &mut S, now: Int) -> <Option<&A> as Item>::Store { lend_read<A, S>(columns, now) }
+    fn unfill(columns: &mut S, column: <Option<&A> as Item>::Store) { () }
+    fn hollow() -> <Option<&A> as Item>::Store { dangling() }
 }
 impl<R, Q, S> Fill<S> for To<R, Q> where S: Get<Relates<R>>, Q: Fill<S>, Q: Item, S: Hidden<Q, ()> {
     fn fill(columns: &mut S, now: Int) -> <To<R, Q> as Item>::Store {
-        let links = take_now<Relates<R>, S>(columns, now);
+        let lent_links = lend_read<Relates<R>, S>(columns, now);
+        let links: &Column<Relates<R>> = unsafe { lent(lent_links) };
         let mut hidden = [];
         let mut i = 0;
         while({ i < len_at(&links.dense) }) {
@@ -1426,19 +1439,19 @@ impl<R, Q, S> Fill<S> for To<R, Q> where S: Get<Relates<R>>, Q: Fill<S>, Q: Item
             if(<S as Hidden<Q, ()>>::hidden(&*columns, target)) { push_at(&mut hidden, target) } else { () };
             i = i + 1
         };
-        (links, (<Q as Fill<S>>::fill(columns, now), hidden))
+        (lent_links, (<Q as Fill<S>>::fill(columns, now), hidden))
     }
     fn unfill(columns: &mut S, store: <To<R, Q> as Item>::Store) {
-        let (links, rest) = store;
+        let (_, rest) = store;
         let (inner, _) = rest;
-        <S as Get<Relates<R>>>::put(columns, links);
         <Q as Fill<S>>::unfill(columns, inner)
     }
-    fn hollow() -> <To<R, Q> as Item>::Store { (empty_column(), (<Q as Fill<S>>::hollow(), [])) }
+    fn hollow() -> <To<R, Q> as Item>::Store { (dangling(), (<Q as Fill<S>>::hollow(), [])) }
 }
 impl<R, A, S> Fill<S> for From<R, &A> where S: Get<Sources<R>>, S: Get<A>, S: Hidden<(&A,), ()> {
     fn fill(columns: &mut S, now: Int) -> <From<R, &A> as Item>::Store {
-        let sources = take_now<Sources<R>, S>(columns, now);
+        let lent_sources = lend_read<Sources<R>, S>(columns, now);
+        let sources: &Column<Sources<R>> = unsafe { lent(lent_sources) };
         let mut hidden = [];
         let mut i = 0;
         while({ i < len_at(&sources.dense) }) {
@@ -1450,20 +1463,15 @@ impl<R, A, S> Fill<S> for From<R, &A> where S: Get<Sources<R>>, S: Get<A>, S: Hi
             };
             i = i + 1
         };
-        (sources, (take_now<A, S>(columns, now), hidden))
+        (lent_sources, (lend_read<A, S>(columns, now), hidden))
     }
-    fn unfill(columns: &mut S, store: <From<R, &A> as Item>::Store) {
-        let (sources, rest) = store;
-        let (column, _) = rest;
-        <S as Get<Sources<R>>>::put(columns, sources);
-        <S as Get<A>>::put(columns, column)
-    }
-    fn hollow() -> <From<R, &A> as Item>::Store { (empty_column(), (empty_column(), [])) }
+    fn unfill(columns: &mut S, store: <From<R, &A> as Item>::Store) { () }
+    fn hollow() -> <From<R, &A> as Item>::Store { (dangling(), (dangling(), [])) }
 }
 impl<R, S> Fill<S> for From<R, Entity> where S: Get<Sources<R>> {
-    fn fill(columns: &mut S, now: Int) -> <From<R, Entity> as Item>::Store { take_now<Sources<R>, S>(columns, now) }
-    fn unfill(columns: &mut S, store: <From<R, Entity> as Item>::Store) { <S as Get<Sources<R>>>::put(columns, store) }
-    fn hollow() -> <From<R, Entity> as Item>::Store { empty_column() }
+    fn fill(columns: &mut S, now: Int) -> <From<R, Entity> as Item>::Store { lend_read<Sources<R>, S>(columns, now) }
+    fn unfill(columns: &mut S, store: <From<R, Entity> as Item>::Store) { () }
+    fn hollow() -> <From<R, Entity> as Item>::Store { dangling() }
 }
 impl<H, ..R, S> Fill<S> for (H, ..R) where H: Fill<S>, (..R): Fill<S>, H: Item, (..R): Item, ..R: Item {
     fn fill(columns: &mut S, now: Int) -> <(H, ..R) as Item>::Store { (<H as Fill<S>>::fill(columns, now), <(..R) as Fill<S>>::fill(columns, now)) }
@@ -1800,20 +1808,84 @@ impl<X> Parameter for &X { type Asks = Shared<X>; }
 impl<X> Parameter for Option<&mut X> { type Asks = MaybeOwned<X>; }
 impl<X> Parameter for Option<&X> { type Asks = Maybe<X>; }
 
-// A system takes a component once. Two of what it asks for are apart unless
-// they are one column, which is only if the component has a trait nothing
-// has: so such a system does not compile, and the message names the
-// component.
-pub trait ASystemTakesAComponentOnce {}
+// Two of what a system asks for are apart unless one writes a column the
+// other reads or writes, and their filters do not keep them apart; a column
+// read by both is lent to both. Those that are not apart are of a trait
+// nothing has, so such a system does not compile, and the message names the
+// component. (A query's items are seen apart as two parameters are, with
+// no filter between them; a resource is taken out whole, so one is asked
+// for once.)
+pub trait AComponentWrittenIsUsedOnceUnlessFiltersKeepItApart {}
 pub trait Apart {}
 impl<X, Y> Apart for (X, Y) {}
-impl<A> Apart for (Writes<A>, Writes<A>) where A: ASystemTakesAComponentOnce {}
-impl<A> Apart for (Writes<A>, Read<A>) where A: ASystemTakesAComponentOnce {}
-impl<A> Apart for (Read<A>, Writes<A>) where A: ASystemTakesAComponentOnce {}
-impl<A> Apart for (Read<A>, Read<A>) where A: ASystemTakesAComponentOnce {}
-impl<X> Apart for (Owned<X>, Owned<X>) where X: ASystemTakesAComponentOnce {}
-impl<X> Apart for (Owned<X>, Shared<X>) where X: ASystemTakesAComponentOnce {}
-impl<X> Apart for (Shared<X>, Owned<X>) where X: ASystemTakesAComponentOnce {}
+impl<A> Apart for (Writes<A>, Writes<A>) where A: AComponentWrittenIsUsedOnceUnlessFiltersKeepItApart {}
+impl<A> Apart for (Writes<A>, Read<A>) where A: AComponentWrittenIsUsedOnceUnlessFiltersKeepItApart {}
+impl<A> Apart for (Read<A>, Writes<A>) where A: AComponentWrittenIsUsedOnceUnlessFiltersKeepItApart {}
+impl<A, N1, N2> Apart for (Filtered<Writes<A>, N1>, Filtered<Writes<A>, N2>) where (A, N1, N2): KeptApart {}
+impl<A, N1, N2> Apart for (Filtered<Writes<A>, N1>, Filtered<Read<A>, N2>) where (A, N1, N2): KeptApart {}
+impl<A, N1, N2> Apart for (Filtered<Read<A>, N1>, Filtered<Writes<A>, N2>) where (A, N1, N2): KeptApart {}
+impl<X> Apart for (Owned<X>, Owned<X>) where X: AComponentWrittenIsUsedOnceUnlessFiltersKeepItApart {}
+impl<X> Apart for (Owned<X>, Shared<X>) where X: AComponentWrittenIsUsedOnceUnlessFiltersKeepItApart {}
+impl<X> Apart for (Shared<X>, Owned<X>) where X: AComponentWrittenIsUsedOnceUnlessFiltersKeepItApart {}
+impl<X> Apart for (Shared<X>, Shared<X>) where X: AComponentWrittenIsUsedOnceUnlessFiltersKeepItApart {}
+// What a query's parameter touches, under its filter.
+pub struct Filtered<K, N>(K, N)
+// Two filters keep apart what they are of where one lets through only
+// those with a `T`, and the other only those without (upstream's
+// `Disjoint`): `With<T>` (or `Added<T>`, `Changed<T>`, which are of those
+// with one) against `Without<T>`, either way. Found as a type, `Yes` or
+// `No`, so that it is one implementation that is chosen.
+pub struct Yes
+pub struct No
+pub trait SameIs<T> { type Is; }
+impl<T> SameIs<T> for T { type Is = Yes; }
+impl<T, U> SameIs<T> for U { type Is = No; }
+pub trait Either { type Out; }
+impl<X> Either for (Yes, X) { type Out = Yes; }
+impl<X> Either for (No, X) { type Out = X; }
+pub trait KeptApart {}
+impl<A, N1, N2> KeptApart for (A, N1, N2)
+    where N1: ExcludesIs<N2>, N2: ExcludesIs<N1>, (<N1 as ExcludesIs<N2>>::Is, <N2 as ExcludesIs<N1>>::Is): Either,
+    (A, <(<N1 as ExcludesIs<N2>>::Is, <N2 as ExcludesIs<N1>>::Is) as Either>::Out): Concluded {}
+pub trait Concluded {}
+impl<A> Concluded for (A, Yes) {}
+impl<A> Concluded for (A, No) where A: AComponentWrittenIsUsedOnceUnlessFiltersKeepItApart {}
+// Whether a filter lets through only those with a `T`; only those without.
+pub trait WithOf<T> { type Is; }
+pub trait WithoutOf<T> { type Is; }
+// Whether one filter lets through only what another does not.
+pub trait ExcludesIs<N> { type Is; }
+impl<T, U> WithOf<T> for With<U> where U: SameIs<T> { type Is = <U as SameIs<T>>::Is; }
+impl<T, U> WithoutOf<T> for With<U> { type Is = No; }
+impl<U, N> ExcludesIs<N> for With<U> where N: WithoutOf<U> { type Is = <N as WithoutOf<U>>::Is; }
+impl<T, U> WithOf<T> for Added<U> where U: SameIs<T> { type Is = <U as SameIs<T>>::Is; }
+impl<T, U> WithoutOf<T> for Added<U> { type Is = No; }
+impl<U, N> ExcludesIs<N> for Added<U> where N: WithoutOf<U> { type Is = <N as WithoutOf<U>>::Is; }
+impl<T, U> WithOf<T> for Changed<U> where U: SameIs<T> { type Is = <U as SameIs<T>>::Is; }
+impl<T, U> WithoutOf<T> for Changed<U> { type Is = No; }
+impl<U, N> ExcludesIs<N> for Changed<U> where N: WithoutOf<U> { type Is = <N as WithoutOf<U>>::Is; }
+impl<T, U> WithOf<T> for Without<U> { type Is = No; }
+impl<T, U> WithoutOf<T> for Without<U> where U: SameIs<T> { type Is = <U as SameIs<T>>::Is; }
+impl<U, N> ExcludesIs<N> for Without<U> where N: WithOf<U> { type Is = <N as WithOf<U>>::Is; }
+impl<T, U> WithOf<T> for MayHave<U> { type Is = No; }
+impl<T, U> WithoutOf<T> for MayHave<U> { type Is = No; }
+impl<U, N> ExcludesIs<N> for MayHave<U> { type Is = No; }
+impl<T, U> WithOf<T> for Relinked<U> { type Is = No; }
+impl<T, U> WithoutOf<T> for Relinked<U> { type Is = No; }
+impl<U, N> ExcludesIs<N> for Relinked<U> { type Is = No; }
+impl<T, U> WithOf<T> for Or<U> { type Is = No; }
+impl<T, U> WithoutOf<T> for Or<U> { type Is = No; }
+impl<U, N> ExcludesIs<N> for Or<U> { type Is = No; }
+impl<T> WithOf<T> for () { type Is = No; }
+impl<T> WithoutOf<T> for () { type Is = No; }
+impl<N> ExcludesIs<N> for () { type Is = No; }
+impl<T, H, ..R> WithOf<T> for (H, ..R) where H: WithOf<T>, (..R): WithOf<T>, (<H as WithOf<T>>::Is, <(..R) as WithOf<T>>::Is): Either { type Is = <(<H as WithOf<T>>::Is, <(..R) as WithOf<T>>::Is) as Either>::Out; }
+impl<T, H, ..R> WithoutOf<T> for (H, ..R) where H: WithoutOf<T>, (..R): WithoutOf<T>, (<H as WithoutOf<T>>::Is, <(..R) as WithoutOf<T>>::Is): Either { type Is = <(<H as WithoutOf<T>>::Is, <(..R) as WithoutOf<T>>::Is) as Either>::Out; }
+impl<N, H, ..R> ExcludesIs<N> for (H, ..R) where H: ExcludesIs<N>, (..R): ExcludesIs<N>, (<H as ExcludesIs<N>>::Is, <(..R) as ExcludesIs<N>>::Is): Either { type Is = <(<H as ExcludesIs<N>>::Is, <(..R) as ExcludesIs<N>>::Is) as Either>::Out; }
+// A list of what is touched, each under a filter.
+pub trait Under<N> { type Out; }
+impl<N> Under<N> for () { type Out = (); }
+impl<H, T, N> Under<N> for (H, T) where T: Under<N> { type Out = (Filtered<H, N>, <T as Under<N>>::Out); }
 // One thing asked for, apart from each of a list; and a list each of whose
 // members is apart from those after it.
 pub trait ApartFrom<X> {}
@@ -1845,16 +1917,16 @@ impl<H, ..R> ItemTouches for (H, ..R) where H: ItemTouches, (..R): ItemTouches,
     type List = <<H as ItemTouches>::List as Concat<<(..R) as ItemTouches>::List>>::Out;
 }
 pub trait Touches { type List; }
-impl<A> Touches for Writes<A> { type List = (Writes<A>, ()); }
-impl<A> Touches for Read<A> { type List = (Read<A>, ()); }
+impl<A> Touches for Writes<A> { type List = (Filtered<Writes<A>, ()>, ()); }
+impl<A> Touches for Read<A> { type List = (Filtered<Read<A>, ()>, ()); }
 impl<X> Touches for Owned<X> { type List = (Owned<X>, ()); }
 impl<X> Touches for Shared<X> { type List = (Shared<X>, ()); }
 impl<X> Touches for Maybe<X> { type List = (Shared<X>, ()); }
 impl<X> Touches for MaybeOwned<X> { type List = (Owned<X>, ()); }
 impl Touches for Asking { type List = (); }
 impl<T> Touches for Localing<T> { type List = (); }
-impl<Q, N, St> Touches for Querying<Q, N, St> where Q: ItemTouches { type List = <Q as ItemTouches>::List; }
-impl<Q, N, St> Touches for Singling<Q, N, St> where Q: ItemTouches { type List = <Q as ItemTouches>::List; }
+impl<Q, N, St> Touches for Querying<Q, N, St> where Q: ItemTouches, <Q as ItemTouches>::List: Under<N> { type List = <<Q as ItemTouches>::List as Under<N>>::Out; }
+impl<Q, N, St> Touches for Singling<Q, N, St> where Q: ItemTouches, <Q as ItemTouches>::List: Under<N> { type List = <<Q as ItemTouches>::List as Under<N>>::Out; }
 pub trait AllTouches { type List; }
 impl AllTouches for () { type List = (); }
 impl<H, R> AllTouches for (H, R) where H: Touches, R: AllTouches,
@@ -1885,20 +1957,16 @@ impl<E, S, ..G, F, O, Lc, A, Rest> Fetch<E, S, (..G), F, O, Lc> for (Writes<A>, 
     where S: Get<A>, Rest: Fetch<E, S, (..G, &mut Column<A>), F, O, Lc>, A: Writable {
     fn fetch(event: &E, world: &mut World<S>, commands: &mut Commands<S>, state: &mut Lc, gathered: (..G), f: &F) -> Option<O> {
         let (..g) = gathered;
-        let mut a = take_at<A, S>(world);
-        let made = <Rest as Fetch<E, S, (..G, &mut Column<A>), F, O, Lc>>::fetch(event, world, commands, state, (..g, &mut a), f);
-        <S as Get<A>>::put(&mut world.columns, a);
-        made
+        let a = lend_now<A, S>(&mut world.columns, world.tick);
+        <Rest as Fetch<E, S, (..G, &mut Column<A>), F, O, Lc>>::fetch(event, world, commands, state, (..g, unsafe { lent_mut(a) }), f)
     }
 }
 impl<E, S, ..G, F, O, Lc, A, Rest> Fetch<E, S, (..G), F, O, Lc> for (Read<A>, Rest)
     where S: Get<A>, Rest: Fetch<E, S, (..G, &Column<A>), F, O, Lc> {
     fn fetch(event: &E, world: &mut World<S>, commands: &mut Commands<S>, state: &mut Lc, gathered: (..G), f: &F) -> Option<O> {
         let (..g) = gathered;
-        let a = take_at<A, S>(world);
-        let made = <Rest as Fetch<E, S, (..G, &Column<A>), F, O, Lc>>::fetch(event, world, commands, state, (..g, &a), f);
-        <S as Get<A>>::put(&mut world.columns, a);
-        made
+        let a = lend_read<A, S>(&mut world.columns, world.tick);
+        <Rest as Fetch<E, S, (..G, &Column<A>), F, O, Lc>>::fetch(event, world, commands, state, (..g, unsafe { lent(a) }), f)
     }
 }
 // A shared reference to the label's type is the value emitted; to any other
@@ -2052,28 +2120,27 @@ impl<E, S> Takes<E, S> for () {
     fn take_asked(world: &mut World<S>) -> Option<()> { Some(()) }
     fn put_asked_back(world: &mut World<S>, taken: ()) { () }
 }
+// (A column is lent, as to a query: nothing of it is taken out.)
 impl<E, S, A, Rest> Takes<E, S> for (Writes<A>, Rest) where S: Get<A>, Rest: Takes<E, S> {
-    type Taken = (Column<A>, <Rest as Takes<E, S>>::Taken);
-    fn take_asked(world: &mut World<S>) -> Option<(Column<A>, <Rest as Takes<E, S>>::Taken)> {
-        let a = take_at<A, S>(world);
-        match(<Rest as Takes<E, S>>::take_asked(world)) { Some(rest) => Some((a, rest)), None => <S as Get<A>>::put(&mut world.columns, a); None }
+    type Taken = (PtrMut<Column<A>>, <Rest as Takes<E, S>>::Taken);
+    fn take_asked(world: &mut World<S>) -> Option<(PtrMut<Column<A>>, <Rest as Takes<E, S>>::Taken)> {
+        let a = lend_now<A, S>(&mut world.columns, world.tick);
+        match(<Rest as Takes<E, S>>::take_asked(world)) { Some(rest) => Some((a, rest)), None => None }
     }
-    fn put_asked_back(world: &mut World<S>, taken: (Column<A>, <Rest as Takes<E, S>>::Taken)) {
-        let (a, rest) = taken;
-        <Rest as Takes<E, S>>::put_asked_back(world, rest);
-        <S as Get<A>>::put(&mut world.columns, a)
+    fn put_asked_back(world: &mut World<S>, taken: (PtrMut<Column<A>>, <Rest as Takes<E, S>>::Taken)) {
+        let (_, rest) = taken;
+        <Rest as Takes<E, S>>::put_asked_back(world, rest)
     }
 }
 impl<E, S, A, Rest> Takes<E, S> for (Read<A>, Rest) where S: Get<A>, Rest: Takes<E, S> {
-    type Taken = (Column<A>, <Rest as Takes<E, S>>::Taken);
-    fn take_asked(world: &mut World<S>) -> Option<(Column<A>, <Rest as Takes<E, S>>::Taken)> {
-        let a = take_at<A, S>(world);
-        match(<Rest as Takes<E, S>>::take_asked(world)) { Some(rest) => Some((a, rest)), None => <S as Get<A>>::put(&mut world.columns, a); None }
+    type Taken = (Ptr<Column<A>>, <Rest as Takes<E, S>>::Taken);
+    fn take_asked(world: &mut World<S>) -> Option<(Ptr<Column<A>>, <Rest as Takes<E, S>>::Taken)> {
+        let a = lend_read<A, S>(&mut world.columns, world.tick);
+        match(<Rest as Takes<E, S>>::take_asked(world)) { Some(rest) => Some((a, rest)), None => None }
     }
-    fn put_asked_back(world: &mut World<S>, taken: (Column<A>, <Rest as Takes<E, S>>::Taken)) {
-        let (a, rest) = taken;
-        <Rest as Takes<E, S>>::put_asked_back(world, rest);
-        <S as Get<A>>::put(&mut world.columns, a)
+    fn put_asked_back(world: &mut World<S>, taken: (Ptr<Column<A>>, <Rest as Takes<E, S>>::Taken)) {
+        let (_, rest) = taken;
+        <Rest as Takes<E, S>>::put_asked_back(world, rest)
     }
 }
 impl<E, S, Rest> Takes<E, S> for (Shared<E>, Rest) where Rest: Takes<E, S> {
@@ -2192,16 +2259,18 @@ impl<..P, O, F> CallWaiting<(..P), O> for Waits<F> where F: Fn<(..P), Output = O
 }
 impl<E, S, ..G, F, O, Lc, A, Rest> CallTaken<E, S, (..G), F, O, Lc> for (Writes<A>, Rest)
     where S: Get<A>, Rest: Takes<E, S>, Rest: CallTaken<E, S, (..G, &mut Column<A>), F, O, Lc> {
-    fn call_taken(event: &E, taken: &mut (Column<A>, <Rest as Takes<E, S>>::Taken), commands: &mut Commands<S>, state: &mut Lc, gathered: (..G), f: &F) -> O / {std::thread::Threads} {
+    fn call_taken(event: &E, taken: &mut (PtrMut<Column<A>>, <Rest as Takes<E, S>>::Taken), commands: &mut Commands<S>, state: &mut Lc, gathered: (..G), f: &F) -> O / {std::thread::Threads} {
         let (..g) = gathered;
-        <Rest as CallTaken<E, S, (..G, &mut Column<A>), F, O, Lc>>::call_taken(event, &mut taken.1, commands, state, (..g, &mut taken.0), f)
+        let a = taken.0;
+        <Rest as CallTaken<E, S, (..G, &mut Column<A>), F, O, Lc>>::call_taken(event, &mut taken.1, commands, state, (..g, unsafe { lent_mut(a) }), f)
     }
 }
 impl<E, S, ..G, F, O, Lc, A, Rest> CallTaken<E, S, (..G), F, O, Lc> for (Read<A>, Rest)
     where S: Get<A>, Rest: Takes<E, S>, Rest: CallTaken<E, S, (..G, &Column<A>), F, O, Lc> {
-    fn call_taken(event: &E, taken: &mut (Column<A>, <Rest as Takes<E, S>>::Taken), commands: &mut Commands<S>, state: &mut Lc, gathered: (..G), f: &F) -> O / {std::thread::Threads} {
+    fn call_taken(event: &E, taken: &mut (Ptr<Column<A>>, <Rest as Takes<E, S>>::Taken), commands: &mut Commands<S>, state: &mut Lc, gathered: (..G), f: &F) -> O / {std::thread::Threads} {
         let (..g) = gathered;
-        <Rest as CallTaken<E, S, (..G, &Column<A>), F, O, Lc>>::call_taken(event, &mut taken.1, commands, state, (..g, &taken.0), f)
+        let a = taken.0;
+        <Rest as CallTaken<E, S, (..G, &Column<A>), F, O, Lc>>::call_taken(event, &mut taken.1, commands, state, (..g, unsafe { lent(a) }), f)
     }
 }
 impl<E, S, ..G, F, O, Lc, Rest> CallTaken<E, S, (..G), F, O, Lc> for (Shared<E>, Rest) where (Shared<E>, Rest): Takes<E, S>, Rest: Takes<E, S>, Rest: CallTaken<E, S, (..G, &E), F, O, Lc> {

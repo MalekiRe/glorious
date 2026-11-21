@@ -3,12 +3,15 @@
 // - `filtered_single_and_query_can_write_complementary_populations`.
 // - `parallel_read_singletons_join_before_dependents`.
 // - `condition_skips_nested_group_without_advancing_system_locals`.
-// Not ported: `filtered_parameters_retain_disjoint_mutable_items_together`
-// (one system writing a component through two parameters whose filters
-// keep them apart: a system here takes a component once).
+// - `filtered_parameters_retain_disjoint_mutable_items_together`: one
+//   system writes a component through two parameters whose filters keep
+//   them apart, the items of both had at once.
 // expect:
 // 15
 // 3
+// --
+// 6
+// 7
 // --
 // 10
 // 6
@@ -36,6 +39,13 @@ struct Enabled(Bool)
 
 fn triple(value: &mut Single<(&mut Value,), (With<Global>,)>) { match(value.get_mut()) { Some((mut v,)) => v.0 = v.0 * 3;, None => () } }
 fn add_two(values: &mut Query<(&mut Value,), (Without<Global>,)>) { values.for_each() { (mut v,) => v.0 = v.0 + 2; } }
+
+fn mix(value: &mut Single<(&mut Value,), (With<Global>,)>, values: &mut Query<(&mut Value,), (Without<Global>,)>) {
+    match(value.get_mut()) {
+        Some((mut global,)) => values.for_each() { (mut ordinary,) => global.0 = global.0 + ordinary.0; ordinary.0 = ordinary.0 + global.0; };,
+        None => ()
+    }
+}
 
 fn step_of(step: &mut Single<(&Step,), ()>) -> Int { match(step.get_mut()) { Some((s,)) => s.0, None => 0 } }
 fn move_by(step: &mut Single<(&Step,), ()>, query: &mut Query<(&mut Position,), ()>) { let by = step_of(step); query.for_each() { (mut p,) => p.0 = p.0 + by; } }
@@ -65,6 +75,14 @@ fn set_value<S>(world: &mut World<S>, e: Entity, to: Int) where S: ecs::Get<Valu
 fn main() -> Int {
     let mut app = App::new().register<Value>().register<Global>()
         .add_systems(Update, parallel((triple, add_two))).build();
+    let global = app.world.spawn_bundle((Value(5), Global));
+    let ordinary = app.world.spawn_bundle((Value(1),));
+    app.emit(&Update);
+    say(value(&app.world, global));
+    say(value(&app.world, ordinary));
+    say("--");
+
+    let mut app = App::new().register<Value>().register<Global>().add_systems(Update, mix).build();
     let global = app.world.spawn_bundle((Value(5), Global));
     let ordinary = app.world.spawn_bundle((Value(1),));
     app.emit(&Update);
