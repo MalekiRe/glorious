@@ -1,0 +1,110 @@
+// `non_fragmenting_joins_follow_relations_by_cardinality` (upstream's
+// tests/relations.rs): a join reads what the entity a row relates to has,
+// beside what the row's own entity has of the same component.
+// - One target per source: the edge's data beside the target's name, none
+//   where the target has no name.
+// - Many sources per target: their names, none where there are none.
+// - Sources write their shared target one row at a time: `To<R, &mut Fuel>`
+//   beside the row's own `&Fuel`.
+// - One to one, writing the partner: `To<Partner, &mut Fuel>`, read back
+//   by `From<Partner, &Fuel>`.
+// (Its step writing each source of a target through `From<R, &mut Fuel>`
+// is done by a query of the sources: covey's `From` reads.)
+// expect:
+// 1 1 10
+// 2 2 10
+// 3 7 11
+// 4 0 -1
+// 1 []
+// 2 []
+// 3 []
+// 4 []
+// 10 [1, 2]
+// 11 [3]
+// 303 303
+// 2 0
+// 0
+mod ecs;
+
+use ecs::{App, World, Entity, Relation, OneToMany, OneToOne, Relates, To, From, to};
+use std::vec::sort;
+
+struct Name(Int)
+struct Fuel(Int)
+struct DockedAt { berth: Int }
+impl Relation for DockedAt { type Kind = OneToMany; }
+struct Partner
+impl Relation for Partner { type Kind = OneToOne; }
+impl Eq for Partner { fn ==(a: Partner, b: Partner) -> Bool { true } }
+impl Clone for Partner { fn clone(p: &Partner) -> Partner { Partner } }
+
+fn lines(all: [(Int, Str)]) -> [Str] {
+    let mut keys = [];
+    let mut i = 0;
+    while({ i < len_at(&all) }) { keys = push(keys, all[i].0); i = i + 1 };
+    let keys = sort(keys);
+    let mut out = [];
+    let mut k = 0;
+    while({ k < len_at(&keys) }) {
+        let mut j = 0;
+        while({ j < len_at(&all) }) { if(all[j].0 == keys[k]) { out = push(out, show(keys[k]) ++ " " ++ all[j].1) } else { () }; j = j + 1 };
+        k = k + 1
+    };
+    out
+}
+fn say_all(xs: [Str]) { let mut i = 0; while({ i < len_at(&xs) }) { say(xs[i]); i = i + 1 } }
+fn fuel<S>(world: &World<S>, e: Entity) -> Int where S: ecs::Get<Fuel> { match(world.get<Fuel>(e)) { Some(f) => f.0, None => 0 - 1 } }
+
+fn main() -> Int {
+    let mut world = App::new().relation<DockedAt>().relation<Partner>().register<Name>().register<Fuel>().build().world;
+    let kestrel = world.spawn_bundle((Name(10), Fuel(0)));
+    let osprey = world.spawn_bundle((Name(11), Fuel(0)));
+    let s1 = world.spawn_bundle((Name(1), Fuel(1)));
+    let s2 = world.spawn_bundle((Name(2), Fuel(2)));
+    let s3 = world.spawn_bundle((Name(3), Fuel(3)));
+    discard(world.insert(s1, DockedAt { berth: 1 }.to(kestrel)));
+    discard(world.insert(s2, DockedAt { berth: 2 }.to(kestrel)));
+    discard(world.insert(s3, DockedAt { berth: 7 }.to(osprey)));
+    // (A target without the joined data is skipped.)
+    let bare = world.spawn_bundle(());
+    discard(world.spawn_bundle((Name(4), DockedAt { berth: 0 }.to(bare))));
+
+    let mut docked = [];
+    world.query<(&Name, &Relates<DockedAt>, To<DockedAt, (&Name,)>)>().for_each() { n, d, s =>
+        let target = match(s) { Some((t,)) => t.0, None => 0 - 1 };
+        docked = push(docked, (n.0, show(d.relation.berth) ++ " " ++ show(target)));
+    };
+    say_all(lines(docked));
+
+    let mut crews = [];
+    world.query<(&Name, From<DockedAt, &Name>)>().for_each() { n, s =>
+        let mut names = [];
+        let mut i = 0;
+        while({ i < len_at(&s) }) { names = push(names, s[i].0); i = i + 1 };
+        crews = push(crews, (n.0, show(sort(names))));
+    };
+    say_all(lines(crews));
+
+    // Sources write their shared target one row at a time.
+    world.query<(&Fuel, To<DockedAt, (&mut Fuel,)>)>().for_each() { own, station =>
+        match(station) { Some((mut station,)) => station.0 = station.0 + own.0;, None => () };
+    };
+    world.query<(&Fuel, To<DockedAt, (&mut Fuel,)>)>().for_each() { own, station =>
+        match(station) { Some((mut station,)) => station.0 = station.0 + own.0 * 100;, None => () };
+    };
+    say(show(fuel(&world, kestrel)) ++ " " ++ show(fuel(&world, osprey)));
+
+    // One to one both ways, writing the partner (the sources' fuel first
+    // made none).
+    world.query_filtered<(&mut Fuel,), (ecs::With<Relates<DockedAt>>,)>().for_each() { (mut f,) => f.0 = 0; };
+    discard(world.relate(s1, Partner, s2));
+    world.query<(&Name, To<Partner, (&mut Fuel,)>)>().for_each() { name, partner =>
+        match(partner) { Some((mut p,)) => p.0 = name.0;, None => () };
+    };
+    let mut back = [];
+    world.query<(&Name, From<Partner, &Fuel>)>().for_each() { n, p =>
+        if(len_at(&p) > 0) { back = push(back, (n.0, show(p[0].0))) } else { () };
+    };
+    say_all(lines(back));
+    0
+}

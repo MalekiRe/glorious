@@ -5505,10 +5505,10 @@ gives the one it had of that target a new value), `unlink` undoes one,
 
 Not there against upstream: `To`/`From` through many-to-many links,
 fragmenting relations, `LINKED`, `ACYCLIC`,
-`ORDERED`, `Relinked`, `cascade`. A query through a link cannot write a
-component the query also takes, nor take `Sources<R>` twice (two `From` of
-one relation): a system takes a component once, as columns are lent whole
-(upstream allows `(&mut Cargo, To<DockedAt, &mut Cargo>)` with `each`).
+`ORDERED`, `cascade` (`Relinked` came later, covey/relinked). A query
+through a link writes a component the row also has, `(&Fuel, To<DockedAt,
+&mut Fuel>)`, as upstream's `each` does (see "Queries lend their columns
+through pointers").
 
 A hole found on the way, closed: a field by number of an indexed
 reference, `hulls[i].0` of `hulls: [&Hull]`, was refused, the element's type
@@ -5961,15 +5961,11 @@ Each is to go; none is a design covey keeps.
   a graph's nodes are not listed, and what wrote a change is not kept.
 - No unwinding: tests of panics are not ported. Taken away by panics that
   run destructors and can be caught.
-- A system, and a world's query, takes each component it asks for once: a
-  query takes a component's column out of the world while it is used, so
-  a second use of the column in the same query or system would find it
-  empty. Upstream reads a component twice (two joins to `Name`), and
-  writes one through two queries whose filters keep them apart
-  (`With<Tag>`, `Without<Tag>`). Both are refused here (`AllApart`, for
-  `world.query` too since it silently found nothing), and the ported
-  tests split them (covey/joins2, covey/params7). Taken away by queries
-  that lend a column, not take it.
+- ~~A system, and a world's query, takes each component it asks for
+  once~~: queries are lent their columns (see "Queries lend their columns
+  through pointers"), a column read by any number of them, and written
+  where filters keep the writer apart from every other use (covey/params5,
+  covey/joins2, covey/joins3).
 - ~~An entity does not say which world it is of~~: an `Entity` has its
   world's number (`World.id`, a fresh cell's place, `std::thread::
   fresh_number`), and a world finds none of another's: `contains`, `get`,
@@ -6280,6 +6276,49 @@ Done:
 Still departing: upstream's systems may block as any Rust function may;
 here a function that may wait says so (`waits`). And the threads take
 turns on one core.
+
+## Queries lend their columns through pointers
+
+**Decision: a query, a column parameter and the parameters a system has
+taken to run beside others are pointers to the world's columns
+(`std::ptr`), and what may be had at once is said of their types.** Before,
+each was the column itself, taken out of the world and put back, so one of
+them had a column at a time: a system took a component once, and a
+second use found the column empty. Upstream's queries hold raw pointers,
+and an access algebra of types (`Read`, `Write`, `Filtered`, `Disjoint`)
+proves what they hand out never aliases; covey now does the same, with the
+unsafe part in its items (`lent`, `lent_mut`) and nowhere else.
+
+- `Fill::fill` is a pointer to the column, its writes of the time now;
+  `unfill` puts nothing back; `hollow` is a pointer to no column.
+  `Item::item_at` goes through it.
+- Two of what a system asks for are apart unless one writes a column the
+  other reads or writes. A column read by both is lent to both.
+- A written one is apart from another use under filters that keep them
+  apart: `With<T>`, `Added<T>` or `Changed<T>` against `Without<T>`, either
+  way (`Filtered<K, N>`, `KeptApart`, found as `Yes` or `No` types so that
+  one implementation is chosen). covey/params5 ports
+  `filtered_parameters_retain_disjoint_mutable_items_together`.
+- What a join touches (`Joined<K>`) is of the entity the row relates to: an
+  entity relates to itself by no relation with a one-side (`relate` aborts,
+  as upstream panics), and a query lends one row at a time (`for_each`,
+  `get_mut`), so a join's `&mut A` is apart from the row's own `A`. Two
+  joins of one component, one writing, are not; nor a join and another
+  parameter, as two rows may relate to one target. covey/joins3 ports
+  `non_fragmenting_joins_follow_relations_by_cardinality`.
+- Refused otherwise: the message names the component
+  (`AComponentWrittenIsUsedOnceUnlessFiltersKeepItApart`).
+
+Found on the way, in the checker: of several implementations for one type
+(`Either for (Yes, X)` and `(No, X)`), what one says of a type was taken
+from the first while the choice was not made, its key spelled as the
+trait's is, and fitting it made the type's unknown part `Yes`. One the type
+does not fit as it is now waits (`implFitsAsIs`).
+
+Limits: a resource is still taken out whole (`lift`/`lower`), so one is
+asked for once; `From<R, &mut A>` is not there; columns are pointers into
+the world's value, so a world moved while a query is had would leave them
+pointing where it was (nothing does that: a query borrows the world).
 
 ## Other standing decisions
 

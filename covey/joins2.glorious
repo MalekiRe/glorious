@@ -20,20 +20,18 @@ impl Relation for DockedAt { type Kind = OneToMany; }
 struct InSquad
 impl Relation for InSquad { type Kind = OneToMany; }
 
-// (Each join in a query of its own: a query here takes a component once,
-// and two joins to `Name` would both take its column.)
+// (Both joins in one query: two joins read `Name` of the entities they
+// relate to, and that is apart.)
 fn read<S>(world: &mut World<S>, unit: Entity) -> Str
     where S: ecs::Get<Name>, S: ecs::Get<Relates<DockedAt>>, S: ecs::Get<Relates<InSquad>>,
-          S: ecs::Hidden<(To<DockedAt, (&Name,)>,), ()>, S: ecs::Hidden<(To<InSquad, (&Name,)>,), ()>, S: ecs::Hidden<(&Name,), ()> {
-    let docked = docked_to(world, unit);
-    let squad = squad_of(world, unit);
-    show(docked) ++ " " ++ show(squad)
-}
-fn docked_to<S>(world: &mut World<S>, unit: Entity) -> Int where S: ecs::Get<Name>, S: ecs::Get<Relates<DockedAt>>, S: ecs::Hidden<(To<DockedAt, (&Name,)>,), ()>, S: ecs::Hidden<(&Name,), ()> {
-    match(world.query<(To<DockedAt, (&Name,)>,)>().get_mut(unit)) { Some((Some((n,)),)) => n.0, _ => 0 - 1 }
-}
-fn squad_of<S>(world: &mut World<S>, unit: Entity) -> Int where S: ecs::Get<Name>, S: ecs::Get<Relates<InSquad>>, S: ecs::Hidden<(To<InSquad, (&Name,)>,), ()>, S: ecs::Hidden<(&Name,), ()> {
-    match(world.query<(To<InSquad, (&Name,)>,)>().get_mut(unit)) { Some((Some((n,)),)) => n.0, _ => 0 - 1 }
+          S: ecs::Hidden<(To<DockedAt, (&Name,)>, To<InSquad, (&Name,)>), ()>, S: ecs::Hidden<(&Name,), ()> {
+    match(world.query<(To<DockedAt, (&Name,)>, To<InSquad, (&Name,)>)>().get_mut(unit)) {
+        Some((docked, squad)) =>
+            let d = match(docked) { Some((n,)) => n.0, None => 0 - 1 };
+            let s = match(squad) { Some((n,)) => n.0, None => 0 - 1 };
+            show(d) ++ " " ++ show(s),
+        None => "-1 -1"
+    }
 }
 fn crew<S>(world: &mut World<S>, e: Entity) -> Str
     where S: ecs::Get<ecs::Sources<DockedAt>>, S: ecs::Get<ecs::Sources<InSquad>>,

@@ -13,7 +13,7 @@
 // 0
 mod ecs;
 
-use ecs::{App, World, Entity, Query, Single, Relation, OneToMany, Relates, Relinked, to, chain};
+use ecs::{App, World, Entity, Query, Single, Relation, OneToMany, Relates, Relinked, to};
 use std::vec::sort;
 
 struct Update
@@ -24,30 +24,19 @@ struct InSquad
 impl Relation for InSquad { type Kind = OneToMany; }
 impl Eq for InSquad { fn ==(a: InSquad, b: InSquad) -> Bool { true } }
 impl Clone for InSquad { fn clone(s: &InSquad) -> InSquad { InSquad } }
-// (What each emit saw, and what it has seen so far: the two queries read
-// `Name`, so they are two systems, a query here taking a component once.)
-struct Seen([Str], [Int])
+struct Seen([Str])
 
-fn watch_docked(docked: &mut Query<(&Name,), (Relinked<DockedAt>,)>, seen: &mut Single<(&mut Seen,), ()>) {
+fn watch(docked: &mut Query<(&Name,), (Relinked<DockedAt>,)>, squads: &mut Query<(&Name,), (Relinked<InSquad>,)>, seen: &mut Single<(&mut Seen,), ()>) {
     let mut all = [];
     docked.for_each() { (n,) => all = push(all, n.0); };
-    match(seen.get_mut()) { Some((mut s,)) => s.1 = all;, None => () }
-}
-fn watch_squads(squads: &mut Query<(&Name,), (Relinked<InSquad>,)>, seen: &mut Single<(&mut Seen,), ()>) {
-    let mut all = [];
     squads.for_each() { (n,) => all = push(all, n.0 + 100); };
-    match(seen.get_mut()) {
-        Some((mut s,)) =>
-            let both = fold(all, clone(&s.1), fn(out: [Int], v: Int) -> [Int] { push(out, v) });
-            let line = std::text::join(std::vec::map(sort(both), fn(v: Int) -> Str { show(v) }), " ");
-            push_at(&mut s.0, line);,
-        None => ()
-    }
+    let line = std::text::join(std::vec::map(sort(all), fn(v: Int) -> Str { show(v) }), " ");
+    match(seen.get_mut()) { Some((mut s,)) => push_at(&mut s.0, line);, None => () }
 }
 
 fn main() -> Int {
-    let mut app = App::new().register<Name>().register<Seen>().relation<DockedAt>().relation<InSquad>().add_systems(Update, (watch_docked, watch_squads).chain()).build();
-    let seen = app.world.spawn_bundle((Seen([], []),));
+    let mut app = App::new().register<Name>().register<Seen>().relation<DockedAt>().relation<InSquad>().add_systems(Update, watch).build();
+    let seen = app.world.spawn_bundle((Seen([]),));
     let a = app.world.spawn_bundle((Name(10),));
     let b = app.world.spawn_bundle((Name(11),));
     let ship0 = app.world.spawn_bundle((Name(1), DockedAt { berth: 0 }.to(a)));

@@ -543,6 +543,8 @@ impl<R> SameLink for R { fn same_link(a: &R, b: &R) -> Bool { false } }
 
 pub fn relate<R, S>(world: &mut World<S>, source: Entity, relation: R, target: Entity) -> Option<R>
     where S: Get<Relates<R>>, S: Get<Sources<R>>, R: SameLink {
+    // (Upstream's: what a join of a row gives is then of another entity.)
+    if(same_entity(source, target)) { abort("relate: an entity cannot relate to itself through a relation with a one-side") } else { () };
     // (A link to the same target keeps its place; it changes only where
     // its value is not the same.)
     let column = <S as Get<Relates<R>>>::column(&world.columns);
@@ -1821,6 +1823,9 @@ impl<X, Y> Apart for (X, Y) {}
 impl<A> Apart for (Writes<A>, Writes<A>) where A: AComponentWrittenIsUsedOnceUnlessFiltersKeepItApart {}
 impl<A> Apart for (Writes<A>, Read<A>) where A: AComponentWrittenIsUsedOnceUnlessFiltersKeepItApart {}
 impl<A> Apart for (Read<A>, Writes<A>) where A: AComponentWrittenIsUsedOnceUnlessFiltersKeepItApart {}
+impl<A> Apart for (Joined<Writes<A>>, Joined<Writes<A>>) where A: AComponentWrittenIsUsedOnceUnlessFiltersKeepItApart {}
+impl<A> Apart for (Joined<Writes<A>>, Joined<Read<A>>) where A: AComponentWrittenIsUsedOnceUnlessFiltersKeepItApart {}
+impl<A> Apart for (Joined<Read<A>>, Joined<Writes<A>>) where A: AComponentWrittenIsUsedOnceUnlessFiltersKeepItApart {}
 impl<A, N1, N2> Apart for (Filtered<Writes<A>, N1>, Filtered<Writes<A>, N2>) where (A, N1, N2): KeptApart {}
 impl<A, N1, N2> Apart for (Filtered<Writes<A>, N1>, Filtered<Read<A>, N2>) where (A, N1, N2): KeptApart {}
 impl<A, N1, N2> Apart for (Filtered<Read<A>, N1>, Filtered<Writes<A>, N2>) where (A, N1, N2): KeptApart {}
@@ -1884,8 +1889,13 @@ impl<T, H, ..R> WithoutOf<T> for (H, ..R) where H: WithoutOf<T>, (..R): WithoutO
 impl<N, H, ..R> ExcludesIs<N> for (H, ..R) where H: ExcludesIs<N>, (..R): ExcludesIs<N>, (<H as ExcludesIs<N>>::Is, <(..R) as ExcludesIs<N>>::Is): Either { type Is = <(<H as ExcludesIs<N>>::Is, <(..R) as ExcludesIs<N>>::Is) as Either>::Out; }
 // A list of what is touched, each under a filter.
 pub trait Under<N> { type Out; }
+// (A join's, under no filter: the filter is of the row's entity, not the
+// one it relates to.)
 impl<N> Under<N> for () { type Out = (); }
-impl<H, T, N> Under<N> for (H, T) where T: Under<N> { type Out = (Filtered<H, N>, <T as Under<N>>::Out); }
+impl<H, T, N> Under<N> for (H, T) where H: UnderOne<N>, T: Under<N> { type Out = (<H as UnderOne<N>>::Out, <T as Under<N>>::Out); }
+pub trait UnderOne<N> { type Out; }
+impl<K, N> UnderOne<N> for K { type Out = Filtered<K, N>; }
+impl<K, N> UnderOne<N> for Joined<K> { type Out = Filtered<K, ()>; }
 // One thing asked for, apart from each of a list; and a list each of whose
 // members is apart from those after it.
 pub trait ApartFrom<X> {}
@@ -1908,7 +1918,16 @@ impl<A> ItemTouches for Option<&mut A> { type List = (Writes<A>, ()); }
 impl<A> ItemTouches for Option<&A> { type List = (Read<A>, ()); }
 impl<A> ItemTouches for Has<A> { type List = (Read<A>, ()); }
 impl ItemTouches for Entity { type List = (); }
-impl<R, Q> ItemTouches for To<R, Q> where Q: ItemTouches { type List = (Read<Relates<R>>, <Q as ItemTouches>::List); }
+// (What a join touches is of the entity it relates to, not of the one the
+// row is of: an entity relates to itself by no relation with a one-side,
+// and a query lends one row at a time, so a join's `&mut A` is apart from
+// the row's own `&A`. Two joins are not apart, nor a join and another
+// parameter: two rows may relate to one target.)
+pub struct Joined<K>(K)
+pub trait Joining { type Out; }
+impl Joining for () { type Out = (); }
+impl<H, T> Joining for (H, T) where T: Joining { type Out = (Joined<H>, <T as Joining>::Out); }
+impl<R, Q> ItemTouches for To<R, Q> where Q: ItemTouches, <Q as ItemTouches>::List: Joining { type List = (Read<Relates<R>>, <<Q as ItemTouches>::List as Joining>::Out); }
 impl<R, A> ItemTouches for From<R, &A> { type List = (Read<Sources<R>>, (Read<A>, ())); }
 impl<R> ItemTouches for From<R, Entity> { type List = (Read<Sources<R>>, ()); }
 impl ItemTouches for () { type List = (); }
@@ -2331,6 +2350,7 @@ impl<E, S, ..G, F, O, Tl, Lc, Rest> CallTaken<E, S, (..G), F, O, (Local<Tl>, Lc)
 pub trait TouchNames { fn touch_names([Str]) -> [Str] }
 impl TouchNames for () { fn touch_names(names: [Str]) -> [Str] { names } }
 impl<A, Rest> TouchNames for (Writes<A>, Rest) where A: Schedule, Rest: TouchNames { fn touch_names(names: [Str]) -> [Str] { <Rest as TouchNames>::touch_names(push(names, "w:" ++ <A as Schedule>::NAME)) } }
+impl<K, Rest> TouchNames for (Joined<K>, Rest) where (K, Rest): TouchNames { fn touch_names(names: [Str]) -> [Str] { <(K, Rest) as TouchNames>::touch_names(names) } }
 impl<A, Rest> TouchNames for (Read<A>, Rest) where A: Schedule, Rest: TouchNames { fn touch_names(names: [Str]) -> [Str] { <Rest as TouchNames>::touch_names(push(names, "r:" ++ <A as Schedule>::NAME)) } }
 impl<X, Rest> TouchNames for (Shared<X>, Rest) where X: Schedule, Rest: TouchNames { fn touch_names(names: [Str]) -> [Str] { <Rest as TouchNames>::touch_names(push(names, "r:" ++ <X as Schedule>::NAME)) } }
 impl<X, Rest> TouchNames for (Owned<X>, Rest) where X: Schedule, Rest: TouchNames { fn touch_names(names: [Str]) -> [Str] { <Rest as TouchNames>::touch_names(push(names, "w:" ++ <X as Schedule>::NAME)) } }
