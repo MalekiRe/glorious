@@ -764,11 +764,10 @@ def why (path : String) : IO UInt32 := do
   let .ok (prelude, items, _, _) := parseProgram src files | IO.println "parse failed"; return 1
   let .ok resolved := Syntax.Modules.resolve prelude items | IO.println "resolve failed"; return 1
   let .ok all := Syntax.expandAliases resolved.items | IO.println "aliases failed"; return 1
-  let all := Syntax.fillDefaults all
+  let all := Syntax.Flat.fillDefaults (Syntax.Flat.ofItems all)
   -- (With what destroys values written, where the program has something to
   -- destroy, as a compile has it.)
   let drops := hasDrop items || (src.splitOn "defer").length > 1
-  let all := Syntax.Flat.ofItems all
   let blocks ← match Check.checkProgram all resolved.info drops with
     | .ok blocks => pure blocks
     | .error e => IO.println s!"check failed: {e}"; return 1
@@ -854,14 +853,13 @@ def stages (path : String) : IO UInt32 := do
   IO.println s!"{resolved.items.length} resolved"
   last ← lap "resolve" last
   let .ok all := Syntax.expandAliases resolved.items | IO.println "aliases failed"; return 1
-  let all := Syntax.fillDefaults all
+  let all := Syntax.Flat.fillDefaults (Syntax.Flat.ofItems all)
   let all0 := all
   IO.println s!"{all.length} filled"
   last ← lap "aliases, defaults" last
   -- (With what destroys values written, where the program has something to
   -- destroy, as a compile has it.)
   let drops := hasDrop items || (src.splitOn "defer").length > 1
-  let all := Syntax.Flat.ofItems all
   let blocks ← match Check.checkProgram all resolved.info drops with
     | .ok blocks => pure blocks
     | .error e => IO.println s!"check failed: {e}"; return 1
@@ -879,7 +877,7 @@ def stages (path : String) : IO UInt32 := do
   if (← IO.getEnv "GLORIOUS_CORE").isSome then IO.println (showCore out.fnNames out.program)
   -- One try of the search for borrows that are scopes of their own: every
   -- place lent, then certified as it is and with ranked callables.
-  let declared := Elab.withDeclared all0 (Elab.declaredOf all)
+  let declared := Elab.withDeclared (Elab.declaredOf all0) (Elab.declaredOf all)
   if let .ok lentOut := Elab.elabProgram all (some blocks) (fun _ => 1) then
     IO.println s!"{lentOut.sites} places a borrow could be a scope, {lentOut.lent} made one"
     last ← lap "elaborate, every place lent" last
@@ -957,7 +955,7 @@ def stages (path : String) : IO UInt32 := do
   let drops := hasDrop items
   let first := if drops then checkedStdDrop.get else checkedStd.get
   if let .ok (count, first) := first then
-    match Check.checkAfter first (Syntax.Flat.ofItems (all0.drop count)) resolved.info with
+    match Check.checkAfter first (all0.drop count) resolved.info with
     | .ok b => IO.println s!"{b.given.size} given"
     | .error e => IO.println s!"checkAfter: {e}"
     last ← lap "check, after the library" last

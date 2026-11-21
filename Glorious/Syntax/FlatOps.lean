@@ -1,6 +1,7 @@
 module
 
 public import Glorious.Syntax.Flat
+public import Std.Data.HashMap
 
 /-!
 # What is asked of a flat body
@@ -324,6 +325,8 @@ structure FRewrite where
   /-- A block's statements from one on (`Rewrite.onStmts`). -/
   onStmts : FGo → Body → List StmtId → Option (Build (List StmtId)) := fun _ _ _ => none
   onClause : FGo → Body → ClauseId → Option (Build ClauseId) := fun _ _ _ => none
+  /-- Each pattern: a clause's and a `let`'s. -/
+  onPat : Pattern → Pattern := id
 
 mutual
 
@@ -369,8 +372,9 @@ partial def FRewrite.ex (r : FRewrite) (e : ExprId) : Build ExprId := do
 partial def FRewrite.clause (r : FRewrite) (c : ClauseId) : Build ClauseId := do
   if let some made := r.onClause r.go (← get) c then return ← made
   let ⟨pats, body⟩ := (← get).clause c
+  let pats' := pats.map r.onPat
   let body' := (← r.stmtList body.toList).toArray
-  if body' == body then pure c else pushClause ⟨pats, body'⟩
+  if body' == body && pats' == pats then pure c else pushClause ⟨pats', body'⟩
 
 partial def FRewrite.stmtList (r : FRewrite) (ss : List StmtId) : Build (List StmtId) := do
   if let some made := r.onStmts r.go (← get) ss then return ← made
@@ -386,8 +390,9 @@ partial def FRewrite.st (r : FRewrite) (s : StmtId) : Build StmtId := do
   if let some made := r.onStmt r.go b s then return ← made
   match b.stmt s with
   | .let_ p v => do
+    let p' := r.onPat p
     let v' ← r.ex v
-    if v' == v then pure s else pushStmt (.let_ p v')
+    if v' == v && p' == p then pure s else pushStmt (.let_ p' v')
   | .expr v => do
     let v' ← r.ex v
     if v' == v then pure s else pushStmt (.expr v')
@@ -440,5 +445,338 @@ def onlyPartStmts (b : Body) (x part : String) (ss : List StmtId) : Body × List
   let r : FRewrite :=
     { onExpr := fun _ b e => (b.partRead x e).map fun p => pushExpr (if p == part then .name none x else .int 0) }
   r.stmts b ss
+
+/-! ## What the front end writes out, flat -/
+
+/-- Every identity moved on by `k` (`Syntax.shiftRewrite`). -/
+def shiftRewrite (k : Nat) : FRewrite where
+  onExpr go b e :=
+    match b.expr e with
+    | .call id g args => some (do pushExpr (.call (id + k) (← go.ex g) (← args.mapM go.ex)))
+    | .tailCall id g args => some (do pushExpr (.tailCall (id + k) (← go.ex g) (← args.mapM go.ex)))
+    | .fieldOf id x name => some (do pushExpr (.fieldOf (id + k) (← go.ex x) name))
+    | .refField id uniq name path star => some (pushExpr (.refField (id + k) uniq name path star))
+    | .closure id clauses => some (do pushExpr (.closure (id + k) (← clauses.mapM go.clause)))
+    | _ => none
+
+/-- `Self` written out as the type an implementation is for
+(`Syntax.selfRewrite`). -/
+def selfRewrite (self : String) (trait : Option (String × Expr)) : FRewrite where
+  onExpr go b e :=
+    match b.expr e with
+    | .name qual z =>
+      some (pushExpr (.name (if qual == some "Self" then some ((trait.map (·.1)).getD self) else qual)
+        (if z == "Self" then self else z)))
+    | .call id f args =>
+      match b.expr f, trait with
+      | .name (some "Self") z, some (tr, at_) => some (do
+        let callee ← pushExpr (.name (some tr) z)
+        let call ← pushExpr (.call id callee (← args.mapM go.ex))
+        let ty ← flatExpr at_
+        pushExpr (.call 0 (← pushExpr (.name none instMark)) #[call, ty]))
+      | _, _ => none
+    | _ => none
+  onPat := selfPattern self
+
+/-- The ascriptions of a body, `let x: Type = ..`: each with the place of the
+type written. Only those reached from the body's own clauses. -/
+partial def Body.ascriptions (b : Body) : List ExprId :=
+  b.roots.toList.flatMap clause
+where
+  clause (c : ClauseId) : List ExprId := (b.clause c).body.toList.flatMap stmt
+  stmt (s : StmtId) : List ExprId := (b.stmtExprs s).toList.flatMap expr
+  expr (e : ExprId) : List ExprId :=
+    let here := match b.expr e with
+      | .call _ f #[_, ty] =>
+        match b.bare? f with
+        | some mark => if mark == ascribeMark || mark == instMark then [ty] else []
+        | none => []
+      | _ => []
+    let inner := match b.expr e with
+      | .closure _ cs | .handle _ cs =>
+        (match b.expr e with | .handle s _ => expr s | _ => []) ++ cs.toList.flatMap clause
+      | .labelScope _ body => body.toList.flatMap stmt
+      | .call _ f #[v, ty] =>
+        -- (The type itself is not looked in.)
+        match b.bare? f with
+        | some mark => if mark == ascribeMark || mark == instMark then expr v else expr f ++ expr v ++ expr ty
+        | none => expr f ++ expr v ++ expr ty
+      | _ => (b.direct e).toList.flatMap expr
+    here ++ inner
+
+/-- A body with each type written in it, `let x: Type = ..`, changed
+(`Syntax.mapTypesClause`): the types are worked out first, which may fail,
+and then written in. -/
+def mapTypes (f : TypeExpr → Except String TypeExpr) (b : Body) : Except String Body := do
+  let places := b.ascriptions
+  if places.isEmpty then return b
+  let mut made : Std.HashMap ExprId Expr := {}
+  for ty in places do
+    made := made.insert ty (← f (TypeExpr.ofExpr (treeExpr b ty))).asExpr
+  let r : FRewrite := { onExpr := fun _ _ e => (made[e]?).map fun t => flatExpr t }
+  pure (r.body b)
+
+/-- A body with each of its own clauses made by `f`, as trees (what the
+front end has not yet written flat). -/
+def Body.mapClauseTrees (f : Clause → Clause) (b : Body) : Body :=
+  ofClauses (toClauses b |>.map f)
+
+mutual
+
+/-- A value that is borrowed where it is made, `&f(x)`, given a name first
+(`Syntax.nameBorrowsM`): the statements that bind the names, made before it. -/
+partial def nameBorrowsE (e : ExprId) : StateT (Array StmtId) Build ExprId := do
+  let b ← getThe Body
+  match b.expr e with
+  | .call id f #[x] =>
+    match b.bare? f with
+    | some mark =>
+      let x' ← nameBorrowsE x
+      if mark != borrowMark && mark != borrowMutMark then
+        return ← if x' == x then pure e else (pushExpr (.call id f #[x']) : Build ExprId)
+      let name := s!"borrowed%{id}"
+      let uniq := mark == borrowMutMark
+      let st ← (pushStmt (if uniq then .letMut name x' else .let_ (.var name) x') : Build StmtId)
+      modify (·.push st)
+      (pushExpr (.ref uniq name) : Build ExprId)
+    | none => nameBorrowsChildren e
+  | .handle subject arms =>
+    -- What is handled is run under the handler: so is what it borrows.
+    let (subject', before) ← ((nameBorrowsE subject).run #[] : Build _)
+    let subject' ← if before.isEmpty then pure subject' else (do
+      let st ← pushStmt (.expr subject')
+      pushExpr (.labelScope "%block" (before.push st)) : Build ExprId)
+    let arms' ← arms.mapM fun c => (nameBorrowsClause c : Build ClauseId)
+    (pushExpr (.handle subject' arms') : Build ExprId)
+  | _ => nameBorrowsChildren e
+
+/-- The parts directly inside, and the blocks inside, made so. -/
+partial def nameBorrowsChildren (e : ExprId) : StateT (Array StmtId) Build ExprId := do
+  let b ← getThe Body
+  match b.expr e with
+  | .call i g args => do (pushExpr (.call i (← nameBorrowsE g) (← args.mapM nameBorrowsE)) : Build _)
+  | .tailCall i g args => do (pushExpr (.tailCall i (← nameBorrowsE g) (← args.mapM nameBorrowsE)) : Build _)
+  | .tuple args => do (pushExpr (.tuple (← args.mapM nameBorrowsE)) : Build _)
+  | .proj x n => do (pushExpr (.proj (← nameBorrowsE x) n) : Build _)
+  | .deref x => do (pushExpr (.deref (← nameBorrowsE x)) : Build _)
+  | .reborrow u x => do (pushExpr (.reborrow u (← nameBorrowsE x)) : Build _)
+  | .fieldOf i x n => do (pushExpr (.fieldOf i (← nameBorrowsE x) n) : Build _)
+  | .closure i cs => do (pushExpr (.closure i (← cs.mapM fun c => nameBorrowsClause c)) : Build _)
+  | .labelScope l body => do (pushExpr (.labelScope l (← nameBorrowsStmts body.toList).toArray) : Build _)
+  | _ => pure e
+
+partial def nameBorrowsClause (c : ClauseId) : Build ClauseId := do
+  let ⟨pats, body⟩ := (← get).clause c
+  pushClause ⟨pats, (← nameBorrowsStmts body.toList).toArray⟩
+
+partial def nameBorrowsStmt (s : StmtId) : Build (List StmtId) := do
+  let named := fun (e : ExprId) => ((nameBorrowsE e).run #[] : Build (ExprId × Array StmtId))
+  match (← get).stmt s with
+  | .let_ pat e => let (e, before) ← named e; pure (before.toList ++ [← pushStmt (.let_ pat e)])
+  | .letMut x e => let (e, before) ← named e; pure (before.toList ++ [← pushStmt (.letMut x e)])
+  -- (Of a statement that is an expression, the values named are let go
+  -- where it ends: a block of its own.)
+  | .expr e =>
+    let (e, before) ← named e
+    if before.isEmpty then pure [← pushStmt (.expr e)]
+    else
+      let last ← pushStmt (.expr e)
+      pure [← pushStmt (.expr (← pushExpr (.labelScope "%block" (before.push last))))]
+  | .defer e => let (e, before) ← named e; pure (before.toList ++ [← pushStmt (.defer e)])
+  | .assign target e =>
+    let (target, first) ← named target
+    let (e, second) ← named e
+    pure (first.toList ++ second.toList ++ [← pushStmt (.assign target e)])
+  | .located line col inner =>
+    -- (Each `let` made where the statement is: what a value so named holds
+    -- is let go where its block ends, found by that place.)
+    let made ← nameBorrowsStmt inner
+    made.mapM fun s => do
+      let b ← get
+      match b.stmt s with
+      | .expr e =>
+        match b.expr e with
+        | .labelScope "%block" body =>
+          let placed ← body.mapM fun s => pushStmt (.located line col s)
+          let scope ← pushExpr (.labelScope "%block" placed)
+          pushStmt (.located line col (← pushStmt (.expr scope)))
+        | _ => pushStmt (.located line col s)
+      | _ => pushStmt (.located line col s)
+
+partial def nameBorrowsStmts (body : List StmtId) : Build (List StmtId) :=
+  return (← body.mapM nameBorrowsStmt).flatten
+
+end
+
+/-- `&list[i]` of a parameter `list` written with a reference's type
+(`Syntax.throughParamsRewrite`). -/
+def throughParamsRewrite (refs : List String) : FRewrite where
+  onExpr go b e :=
+    match b.expr e with
+    | .call id f args => some (do
+      let args ← args.mapM go.ex
+      let b ← get
+      let args ← match (b.name? f).map (·.2), args.toList with
+        | some "element_at", [r, i] =>
+          match b.expr r with
+          | .ref false x => if refs.contains x then pure #[← pushExpr (.name none x), i] else pure args
+          | _ => pure args
+        | some "place_at", [i, r] =>
+          match b.expr r with
+          | .ref true x => if refs.contains x then pure #[i, ← pushExpr (.name none x)] else pure args
+          | _ => pure args
+        | _, _ => pure args
+      pushExpr (.call id (← go.ex f) args))
+    | _ => none
+
+/-- May what an expression gives be a value and not a reference, by how it is
+written (`Syntax.valueLike`)? -/
+def Body.valueLike (b : Body) (e : ExprId) : Bool :=
+  match b.expr e with
+  | .tuple args => !args.isEmpty
+  | .int _ => true
+  | .name _ x => (lastSegment x).front.isUpper
+  | .call _ f args =>
+    match b.bare? f, args.toList with
+    | some mark, [_, ty] =>
+      mark != ascribeMark || (match TypeExpr.ofExpr (treeExpr b ty) with
+        | .ref _ _ _ => false
+        | _ => true)
+    | _, _ => true
+  | _ => false
+
+/-- Is a name bound here one that what follows borrows with `&` and never
+changes (`Syntax.borrowedOnly`)? -/
+def Body.borrowedOnly (b : Body) (x : String) (after : List StmtId) : Bool :=
+  let u := b.nameUseStmts false x after
+  !x.startsWith "%" && u.shared && !u.changed
+
+def Body.fieldBorrowedOnly (b : Body) (x : String) (after : List StmtId) : Bool :=
+  let u := b.nameUseStmts false x after
+  !x.startsWith "%" && u.fielded && !u.changed
+
+/-- `let mut x = x` for each name, where the body starts. -/
+def heldStmts (held : List String) (body : List StmtId) : Build (List StmtId) := do
+  let b ← get
+  let first := match body.head? with
+    | some s => match b.stmt s with
+      | .located line col _ => some (line, col)
+      | _ => none
+    | none => none
+  held.mapM fun x => do
+    let v ← pushStmt (.letMut x (← pushExpr (.name none x)))
+    match first with
+    | some (line, col) => pushStmt (.located line col v)
+    | none => pure v
+
+/-- The names a clause binds that are only borrowed in it, or (of `values`)
+only borrowed by field, each kept in a variable of the same name where the
+clause starts (`Syntax.promoteHeld`). -/
+def promoteHeld (values : List String) (c : ClauseId) : Build ClauseId := do
+  let b ← get
+  let ⟨pats, body⟩ := b.clause c
+  let body := body.toList
+  let held := ((pats.flatMap patternNames).eraseDups).filter fun x =>
+    b.borrowedOnly x body || (values.contains x && b.fieldBorrowedOnly x body)
+  if held.isEmpty then return c
+  pushClause ⟨pats, ((← heldStmts held body) ++ body).toArray⟩
+
+/-- A value that is given a name and then borrowed with `&` kept where a
+reference can point (`Syntax.promoteRewrite`). -/
+def promoteRewrite : FRewrite where
+  onExpr go b e :=
+    match b.expr e with
+    | .call id f args => some (do
+      -- (`if(e is Some(n)) { .. &n .. }`: the names an `is` among the
+      -- arguments binds are the blocks' after it, and are kept where a
+      -- reference can point as a clause's are.)
+      let isOf := fun (a : ExprId) =>
+        match b.expr a with
+        | .call _ m #[_, cl] =>
+          if b.bare? m == some isMark then
+            match b.expr cl with
+            | .closure _ #[c] =>
+              let ⟨ps, body⟩ := b.clause c
+              match ps with
+              | [pat] => if body.isEmpty then patternNames pat else []
+              | _ => []
+            | _ => []
+          else []
+        | _ => []
+      let isNames := fun (a : ExprId) =>
+        match b.expr a with
+        | .closure _ #[c] =>
+          let ⟨ps, body⟩ := b.clause c
+          if !ps.isEmpty then isOf a else
+          match body.toList with
+          | [s] => match b.stmt s with
+            | .expr e => isOf e
+            | _ => []
+          | _ => isOf a
+        | _ => isOf a
+      let named := args.toList.flatMap isNames
+      let args ← args.mapM go.ex
+      let args ← if named.isEmpty then pure args else args.mapM fun a => do
+        let b ← get
+        match b.expr a with
+        | .closure cid #[c] =>
+          let ⟨ps, body⟩ := b.clause c
+          if !ps.isEmpty then pure a else
+          let held := named.eraseDups.filter (b.borrowedOnly · body.toList)
+          let made := ((← heldStmts held body.toList) ++ body.toList).toArray
+          pushExpr (.closure cid #[← pushClause ⟨[], made⟩])
+        | _ => pure a
+      pushExpr (.call id (← go.ex f) args))
+    | _ => none
+  onClause go b c := some (do
+    let ⟨pats, body⟩ := b.clause c
+    let made ← pushClause ⟨pats, (← go.stmts body.toList).toArray⟩
+    promoteHeld [] made)
+  onStmts go _ ss :=
+    match ss with
+    | [] => none
+    | s :: rest => some (do
+      let rest ← go.stmts rest
+      let rec here (s : StmtId) (fuel : Nat) : Build (List StmtId) := do
+        let b ← get
+        match fuel, b.stmt s with
+        | 0, _ => pure [← go.st s]
+        | fuel + 1, .located line col inner =>
+          (← here inner fuel).mapM fun s => pushStmt (.located line col s)
+        | _, .let_ (.var x) e =>
+          if b.borrowedOnly x rest || (b.valueLike e && b.fieldBorrowedOnly x rest) then
+            pure [← pushStmt (.letMut x (← go.ex e))]
+          else pure [← pushStmt (.let_ (.var x) (← go.ex e))]
+        | _, .let_ pat e =>
+          let held := (patternNames pat).eraseDups.filter (b.borrowedOnly · rest)
+          let first ← pushStmt (.let_ pat (← go.ex e))
+          let more ← held.mapM fun x => do pushStmt (.letMut x (← pushExpr (.name none x)))
+          pure (first :: more)
+        | _, _ => pure [← go.st s]
+      pure ((← here s 64) ++ rest))
+
+/-- A clause made so, with `values` as its parameters whose written types
+are not references' (`Syntax.promoteClause`). -/
+def promoteClause (values : List String) (c : ClauseId) : Build ClauseId := do
+  let ⟨pats, body⟩ := (← get).clause c
+  let body ← promoteRewrite.stmtList body.toList
+  promoteHeld values (← pushClause ⟨pats, body.toArray⟩)
+
+/-- A clause of a function whose parameters are written with `annots`
+(`Syntax.promoteFnClause`). -/
+def promoteFnClause (annots : List (Option TypeExpr)) (c : ClauseId) : Build ClauseId := do
+  let ⟨pats, _⟩ := (← get).clause c
+  -- A parameter written with a type that is no reference's is a value.
+  let values := (pats.zip annots).filterMap fun
+    | (.var _, some (.ref _ _ _)) => none
+    | (.var x, some _) => some x
+    | _ => none
+  -- (One written with a reference's type, `list: &[T]`: `&list[0]` is the
+  -- element through that reference, not through one to it.)
+  let refs := (pats.zip annots).filterMap fun
+    | (Pattern.var x, some (TypeExpr.ref _ _ _)) => some x
+    | _ => none
+  let c ← if refs.isEmpty then pure c else (throughParamsRewrite refs).clause c
+  promoteClause values (← nameBorrowsClause c)
 
 end Glorious.Syntax.Flat

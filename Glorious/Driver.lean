@@ -91,17 +91,6 @@ def placeKeys (owners : Array String) : Array (String × Nat) := Id.run do
     count := count.insert o (k + 1)
   pure out
 
-/-- Every name an expression writes, bound or not, and every field or function
-named after a dot: more than it can mean, never less. -/
-partial def namesInExpr (acc : List String) : Syntax.Expr → List String
-  | .name _ n | .ref _ n => n :: acc
-  | .refField _ _ n path _ => n :: path ++ acc
-  | .fieldOf _ e n => namesInExpr (n :: acc) e
-  | e => e.children.foldl namesInExpr acc
-
-def namesInClause (acc : List String) : Syntax.Clause → List String
-  | .mk _ body => (body.flatMap Syntax.Stmt.exprs).foldl namesInExpr acc
-
 /-- What of a program's modules a unit's check reads besides its own items:
 the coercions that apply in it, the dot calls among its calls the resolver
 found more than one function for, and which fields of the constructors of it
@@ -118,13 +107,23 @@ def unitInfoKey (info : Syntax.ModuleInfo) (before : List String) (unit : String
   let vis := info.fieldVis.filter fun (_, home, _) => seen.contains home
   hash (unit, info.coercions.lookup unit, alts, vis, info.text, info.shadowed)
 
+/-- Every name a body writes, bound or not, and every field or function named
+after a dot, read off its nodes where they are kept: more than it can mean,
+never less. -/
+def namesInBody (acc : List String) (b : Syntax.Flat.Body) : List String :=
+  b.exprs.foldl (fun acc n => match n with
+    | .name _ x | .ref _ x => x :: acc
+    | .refField _ _ x path _ => x :: path ++ acc
+    | .fieldOf _ _ x => x :: acc
+    | _ => acc) acc
+
 /-- The names written in an item that is not one of the library's functions. -/
-partial def namesInItem (acc : List String) : Syntax.Item → List String
-  | .fn _ _ _ _ clauses => clauses.foldl namesInClause acc
+partial def namesInItem (acc : List String) : Syntax.Flat.FItem → List String
+  | .fn _ _ _ _ b => namesInBody acc b
   | .impl _ _ _ _ _ methods => methods.foldl namesInItem acc
   | .traitInfo _ _ defaults _ _ => defaults.foldl namesInItem acc
-  | .alias _ value => namesInExpr acc value
-  | .coerce name => name :: acc
+  | .alias _ b _ => namesInBody acc b
+  | .other (.coerce name) => name :: acc
   | .pub _ item => namesInItem acc item
   | .module _ (some body) => body.foldl namesInItem acc
   | _ => acc
@@ -134,10 +133,10 @@ the program's text can reach: each is kept if its name, without its module, is
 written in what is kept. (They are known to be well typed: the library is
 checked whole by the tests. A function its text names but nothing calls is
 kept, and so checked, as it was.) -/
-partial def withoutUnreached (items : List Syntax.Item) : List Syntax.Item := Id.run do
+partial def withoutUnreached (items : List Syntax.Flat.FItem) : List Syntax.Flat.FItem := Id.run do
   let library := fun (name : String) =>
     name.startsWith "std::" || name.startsWith "core::" || name.startsWith "alloc::"
-  let isLibraryFn : Syntax.Item → Option String
+  let isLibraryFn : Syntax.Flat.FItem → Option String
     | .fn name _ _ _ _ => if library name then some (Syntax.lastSegment name) else none
     | _ => none
   let mut wanted : Std.HashSet String := {}
@@ -650,20 +649,20 @@ def checkFirstPart (std drop : Bool) : Except String (Nat × Check.St) := do
   if !std then
     let (prelude, _) ← readPrelude.get
     let resolved ← Syntax.Modules.resolve prelude []
-    let all := withoutUnitMarks (Syntax.fillDefaults (← Syntax.expandAliases resolved.items))
-    return (all.length, ← Check.checkFirst (Syntax.Flat.ofItems all) resolved.info drop)
+    let all := withoutUnitMarksFlat (Syntax.Flat.fillDefaults (Syntax.Flat.ofItems (← Syntax.expandAliases resolved.items)))
+    return (all.length, ← Check.checkFirst all resolved.info drop)
   let (prelude, items, _, _) ← parseProgram "// std" []
   let resolved ← Syntax.Modules.resolve prelude items
   -- (Its modules in the order a program has them, marks and all, so that
   -- what a program has first is these, item for item.)
   let (first, units) := unitsOf resolved.items resolved.info.unitUses
   let items := first ++ units.flatMap (fun (k, is) => Syntax.Item.fieldNames Syntax.unitMark [k] [] :: is)
-  let all := Syntax.fillDefaults (← Syntax.expandAliases items)
+  let all := Syntax.Flat.fillDefaults (Syntax.Flat.ofItems (← Syntax.expandAliases items))
   -- (Without the first module's mark, at the end: it has nothing.)
   let all := match all.getLast? with
-    | some (.fieldNames m [""] []) => if m == Syntax.unitMark then all.dropLast else all
+    | some (.other (.fieldNames m [""] [])) => if m == Syntax.unitMark then all.dropLast else all
     | _ => all
-  pure (all.length, ← Check.checkFirst (Syntax.Flat.ofItems (withoutUnitMarks all)) resolved.info drop)
+  pure (all.length, ← Check.checkFirst (withoutUnitMarksFlat all) resolved.info drop)
 
 /-- Each of those, checked once in a process. -/
 def checkedPrelude : Thunk (Except String (Nat × Check.St)) := Thunk.mk fun _ => checkFirstPart false false
@@ -733,7 +732,9 @@ def compileSourceAt (src : String) (check : Bool := true)
   let all ← Trace.timed "expand aliases" fun _ => Syntax.expandAliases resolved.items
   -- An implementation that does not write a function its trait gives a body
   -- has that body.
-  let all := Trace.timed "fill defaults, write out blankets" fun _ => Syntax.fillDefaults all
+  -- (Filled in, checked, and all that follows, from flat bodies.)
+  let all := Trace.timed "flat bodies" fun _ => Syntax.Flat.ofItems all
+  let all := Trace.timed "fill defaults, write out blankets" fun _ => Syntax.Flat.fillDefaults all
   -- What the checker learnt about blocks that share an environment. A program
   -- it rejects is elaborated without that.
   -- (Or that has a cleanup, which a resumption given up runs: what destroys
@@ -765,8 +766,6 @@ def compileSourceAt (src : String) (check : Bool := true)
   -- (The program's own tuple variables whose fields are borrowed apart: a
   -- variable per field. The library, checked once for every program, is as
   -- it was checked.)
-  -- (Checked, and all that follows, from flat bodies.)
-  let all := Trace.timed "flat bodies" fun _ => Syntax.Flat.ofItems all
   let all := Trace.timed "split fields borrowed apart" fun _ => match first with
     | .ok (count, _) => all.take count ++ Elab.splitFieldItems all (all.drop count)
     | .error _ => Elab.splitFieldItems all all

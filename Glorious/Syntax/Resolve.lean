@@ -1,6 +1,7 @@
 module
 
 public import Glorious.Syntax.Ast
+public import Glorious.Syntax.FlatOps
 public import Glorious.Trace
 public import Std.Data.HashMap
 public import Std.Data.HashSet
@@ -831,5 +832,457 @@ def fillDefaults (items : List Item) : List Item :=
       (seen.insert (tr, head, given) (before + 1), out.push (.impl ps (traitAt named given) head args context all))
     | item => (seen, out.push item)
   out.toList
+
+namespace Flat
+
+mutual
+
+/-- `value.f(a)` where `f` takes a reference first and `value` is a variable,
+or a field of one: the variable is borrowed for the call
+(`Syntax.receiverExpr`). -/
+partial def receiverExpr (taken : Std.HashMap String Bool) (known : List (String × Nat)) (e : ExprId) : Build ExprId := do
+  let b ← get
+  match b.expr e with
+  | .call id f args =>
+    let f ← receiverExpr taken known f
+    let args ← args.mapM (receiverExpr taken known)
+    let b ← get
+    let plain := fun (_ : Unit) => pushExpr (.call id f args)
+    match b.expr f, args.toList with
+    | .name q name, recv :: rest =>
+      match b.expr recv with
+      | .call _ rm #[receiver] =>
+        if b.bare? rm != some receiverMark then return ← plain () else
+        -- The name a path of fields starts at, and the path.
+        let rec place (e : ExprId) (fuel : Nat) : Option (String × List String × Nat) :=
+          match fuel with
+          | 0 => none
+          | fuel + 1 =>
+          match b.expr e with
+          | .name none x => if (known.lookup x).any (fun k => k != 0 && k != 3) then some (x, [], 0) else none
+          | .fieldOf fid e field => (place e fuel).map fun (x, path, _) => (x, path ++ [field], fid)
+          | .proj e n => (place e fuel).map fun (x, path, fid) => (x, path ++ [toString n], fid)
+          | _ => none
+        -- (A field of what a `&mut` parameter points to, `p.items`.)
+        let rec throughRef (e : ExprId) (fuel : Nat) : Option (String × List String × Nat) :=
+          match fuel with
+          | 0 => none
+          | fuel + 1 =>
+          match b.expr e with
+          | .fieldOf fid inner field =>
+            match b.bare? inner with
+            | some x => if known.lookup x == some 3 then some (x, [field], fid) else none
+            | none => (throughRef inner fuel).map fun (x, path, _) => (x, path ++ [field], fid)
+          | _ => none
+        -- (`v[i].f()` where `f` takes a reference: the element, borrowed
+        -- where it is.)
+        let rec element (uniq : Bool) (fuel : Nat) (e : ExprId) : Build (Option ExprId) := do
+          match b.expr e with
+          | .call cid g #[a, i] =>
+            if (b.name? g).map (·.2) != some "index" then return none
+            let base ← match fuel, place a 64, throughRef a 64 with
+              | _, some (x, [], _), _ => some <$> pushExpr (.ref uniq x)
+              | _, some (x, path, fid), _ => if fid == 0 then pure none else some <$> pushExpr (.refField fid uniq x path false)
+              | _, none, some (x, path, fid) => some <$> pushExpr (.refField fid uniq x path true)
+              | fuel + 1, none, none =>
+                match b.bare? a with
+                | some x => if known.lookup x == some 3 then pure (some a) else pure none
+                | none => element uniq fuel a
+              | 0, _, _ => pure none
+            match base with
+            | some bs =>
+              if uniq then some <$> pushExpr (.call cid (← pushExpr (.name none "place_at")) #[i, bs])
+              else some <$> pushExpr (.call cid (← pushExpr (.name none "element_at")) #[bs, i])
+            | none => pure none
+          | _ => pure none
+        let borrowed := fun (uniq : Bool) => (do
+          pushExpr (.call id (← pushExpr (.name none (if uniq then borrowMutMark else borrowMark))) #[receiver]) : Build ExprId)
+        let given ← match taken[name]?, place receiver 64, throughRef receiver 64 with
+          | some uniq, some (x, [], _), _ => pushExpr (.ref uniq x)
+          | some uniq, some (x, path, fid), _ => if fid == 0 then pure receiver else pushExpr (.refField fid uniq x path false)
+          | some uniq, none, some (x, path, fid) => pushExpr (.refField fid uniq x path true)
+          | some uniq, none, none =>
+            match ← element uniq 8 receiver with
+            | some e => pure e
+            | none =>
+              -- (A value made where it is called on, `half(4).is_ok()`:
+              -- given a name first, and borrowed.)
+              match b.expr receiver with
+              -- (Not what a function written to give a reference gives.)
+              | .call _ g _ =>
+                match b.expr g with
+                | .name _ gn => if taken.contains (givesKey gn) then pure receiver else borrowed uniq
+                | _ => borrowed uniq
+              -- (A constructor without fields or a constant, `D.greet()`.)
+              | .name none x =>
+                if (lastSegment x).front.isUpper then borrowed uniq else pure receiver
+              | _ => pure receiver
+          | _, _, _ => pure receiver
+        pushExpr (.call id (← pushExpr (.name q name)) (#[given] ++ rest.toArray))
+      | _ => plain ()
+    | _, _ => plain ()
+  | .tailCall id f args => do
+    pushExpr (.tailCall id (← receiverExpr taken known f) (← args.mapM (receiverExpr taken known)))
+  | .tuple args => do pushExpr (.tuple (← args.mapM (receiverExpr taken known)))
+  | .proj x n => do pushExpr (.proj (← receiverExpr taken known x) n)
+  | .deref x => do pushExpr (.deref (← receiverExpr taken known x))
+  | .reborrow u x => do pushExpr (.reborrow u (← receiverExpr taken known x))
+  | .fieldOf i x n => do pushExpr (.fieldOf i (← receiverExpr taken known x) n)
+  | .closure i cs => do pushExpr (.closure i (← cs.mapM (receiverClause taken known [])))
+  | .handle s cs => do
+    pushExpr (.handle (← receiverExpr taken known s) (← cs.mapM (receiverClause taken known [])))
+  | .labelScope l body => do
+    pushExpr (.labelScope l (← receiverStmts taken known body.toList).toArray)
+  | _ => pure e
+
+/-- (`values`: the parameters written with types that are no reference's.) -/
+partial def receiverClause (taken : Std.HashMap String Bool) (known : List (String × Nat))
+    (values : List String) (c : ClauseId) : Build ClauseId := do
+  let ⟨pats, body⟩ := (← get).clause c
+  let named := (pats.flatMap patternNames).map fun x =>
+    (x, if values.contains x then 2 else if known.lookup x == some 3 then 3 else 0)
+  pushClause ⟨pats, (← receiverStmts taken (named ++ known) body.toList).toArray⟩
+
+partial def receiverStmts (taken : Std.HashMap String Bool) (known : List (String × Nat)) :
+    List StmtId → Build (List StmtId)
+  | [] => pure []
+  | s :: rest => do
+    let rec here (s : StmtId) (fuel : Nat) : Build (StmtId × List (String × Nat)) := do
+      let b ← get
+      match fuel, b.stmt s with
+      | 0, _ => pure (s, known)
+      | _, .let_ pat value =>
+        -- (`let s = &v[i]`: an element borrowed, a reference.)
+        let elementRef : Bool := match b.expr value with
+          | .call _ f _ => match (b.name? f).map (·.2) with
+            | some g => g == "element_at" || g == "place_at"
+            | none => false
+          | .ref _ _ => true
+          | .refField .. => true
+          | _ => false
+        let kind := match pat with
+          | .var _ => if elementRef then 3 else if b.valueLike value then 2 else 0
+          | _ => 0
+        pure (← pushStmt (.let_ pat (← receiverExpr taken known value)), (patternNames pat).map (·, kind) ++ known)
+      | _, .letMut x value => pure (← pushStmt (.letMut x (← receiverExpr taken known value)), (x, 1) :: known)
+      | _, .expr e => pure (← pushStmt (.expr (← receiverExpr taken known e)), known)
+      | _, .defer e => pure (← pushStmt (.defer (← receiverExpr taken known e)), known)
+      | _, .assign target value =>
+        let t ← receiverExpr taken known target
+        let v ← receiverExpr taken known value
+        pure (← pushStmt (.assign t v), known)
+      | fuel + 1, .located line col inner =>
+        let (inner, known) ← here inner fuel
+        pure (← pushStmt (.located line col inner), known)
+    let (s, known) ← here s 64
+    pure (s :: (← receiverStmts taken known rest))
+
+end
+
+/-- Does a body call, on what it is called on, a function that takes a
+reference (`Syntax.borrowsReceiver`)? -/
+def Body.borrowsReceiver (b : Body) (taken : Std.HashMap String Bool) (body : Array StmtId) : Bool :=
+  body.any fun s => b.anyStmt (fun n => match n with
+    | .call _ f args =>
+      match b.name? f, args[0]?.map b.expr with
+      | some (_, name), some (.call _ m _) => b.bare? m == some receiverMark && taken.contains name
+      | _, _ => false
+    | _ => false) s
+
+/-- Every dotted call of a program with what it is called on borrowed where
+the function takes a reference (`Syntax.borrowReceivers`). -/
+partial def borrowReceivers (items : List FItem) : List FItem :=
+  let decls := items.map FItem.declared
+  let taken : Std.HashMap String Bool :=
+    (takesReference decls ++ (givesReference decls).map (givesKey ·, false)).foldl (fun m (k, v) => m.insertIfNew k v) {}
+  -- (`promote`: not of a trait's defaults, which are made so where they are
+  -- written out.)
+  let rec go (promote : Bool) : FItem → FItem
+    | .pub parent item => .pub parent (go promote item)
+    | .module name (some body) => .module name (some (body.map (go promote)))
+    | .fn name ps annots ret b =>
+      let (roots, b) := (b.roots.mapM fun c => (do
+        let b ← get
+        let ⟨pats, body⟩ := b.clause c
+        let values := (pats.zip annots).filterMap fun
+          | (.var _, some (.ref _ _ _)) => none
+          | (.var x, some _) => some x
+          | _ => none
+        -- (Those written with a reference's type: a field of what one points
+        -- to is borrowed through it.)
+        let refs : List String := (pats.zip annots).filterMap fun
+          | (Pattern.var x, some (TypeExpr.ref _ _ _)) => some x
+          | _ => none
+        let borrows := b.borrowsReceiver taken body
+        let c' ← nameBorrowsClause (← receiverClause taken (refs.map (·, 3)) values c)
+        if promote && borrows then promoteFnClause annots c' else pure c' : Build ClauseId)).run b
+      .fn name ps annots ret { b with roots }
+    | .impl ps tr head args context methods => .impl ps tr head args context (methods.map (go promote))
+    | .traitInfo name supers defaults params assocs => .traitInfo name supers (defaults.map (go false)) params assocs
+    | .alias name b value =>
+      let (value, b) := (receiverExpr taken [] value).run b
+      .alias name b value
+    | item => item
+  items.map (go true)
+
+/-- `Layout` (the prelude's) for each type (`Syntax.writeLayouts`), over
+flat items: what is written out is made as trees and then flat. -/
+def writeLayouts (items : List FItem) : List FItem := Id.run do
+  let rec flatAll : List FItem → List FItem
+    | [] => []
+    | .module _ (some body) :: rest => flatAll body ++ flatAll rest
+    | .pub _ inner :: rest => flatAll [inner] ++ flatAll rest
+    | item :: rest => item :: flatAll rest
+  let all := flatAll items
+  unless all.any (fun | .other (.trait n _) => n == layoutTrait | _ => false) do return items
+  let hasNil := all.any (fun | .other (.trait n _) => n == nilTrait | _ => false)
+  let fieldsOf : Std.HashMap String (List String × List (List TypeExpr)) := all.foldl (init := {}) fun m item =>
+    match item with
+    | .other (.struct n ps fs) => m.insert n (ps, [fs])
+    | .other (.enum n ps cs) => m.insert n (ps, cs.map (·.2))
+    | _ => m
+  let params := fun (n : Nat) => (List.range n).map (s!"T{·}")
+  let count := 0
+  -- (The trait's functions, by the names the program has for them.)
+  let (sizeName, alignName) := match all.findSome? (fun | .other (.trait n ms) => if n == layoutTrait then some ms else none | _ => none) with
+    | some [(s, _, _), (a, _, _)] => (s, a)
+    | _ => ("SIZE", "ALIGN")
+  -- (The types a field may be of: those declared, and those with none.)
+  let known : Std.HashSet String := Std.HashSet.ofList (fieldsOf.toList.map (·.1) ++ ["Int"] ++ scalars.map (·.1))
+  let typed := fun (ps : List String) (t : TypeExpr) => typedField known ps t
+  -- (The implementation for one head, its calls numbered apart; none for a
+  -- type with a field whose type is left to be found.)
+  let implFor := fun (count : Nat) (head : String) (ps : List String) =>
+    let fresh := ps.zipIdx.map fun (p, j) => if p.startsWith "'" then s!"'%l{j}" else s!"%l{j}"
+    let (sizeE, alignE) := layoutOf fieldsOf head fresh (9000000000000000 + 1000 * count)
+    let int := TypeExpr.name "Int" []
+    let untyped := match fieldsOf[head]? with
+      | some (ps, cs) => cs.any (·.any (!typed ps ·))
+      | none => false
+    if untyped then [] else
+    -- (`NilRepresented`, of one with no payload: one constructor, each field a
+    -- type parameter, asked it too, or of a type that is nothing itself; and
+    -- no `drop` to run.)
+    let nils : List Item := match (if head.startsWith "(tuple" then some (ps, [ps.map (TypeExpr.name · [])]) else fieldsOf[head]?) with
+      | some (hps, [fs]) =>
+        let isParam := fun (f : TypeExpr) => match f with
+          | .name x [] => hps.contains x
+          | _ => false
+        let nothing := fun (f : TypeExpr) => isParam f || (staticLayout fieldsOf [head] f).any (·.1 == 0)
+        let dropped := all.any fun
+          | .impl _ tr h _ _ _ => (tr.splitOn "::").getLast! == "Drop" && h == head
+          | _ => false
+        if hasNil && !dropped && fs.all nothing then
+          let m := hps.zip fresh
+          let asked := (fs.filterMap fun f => match f with
+            | .name x [] => m.lookup x
+            | _ => none).eraseDups
+          [Item.impl fresh nilTrait head fresh (asked.map (·, nilTrait)) []]
+        else []
+      | _ => []
+    (nils ++ [Item.impl fresh layoutTrait head fresh ((fresh.filter (!·.startsWith "'")).map (·, layoutTrait))
+      -- (Checked only where something asks it, as a copy of an
+      -- implementation for every length is: `packCopyName`.)
+      [.fn sizeName [] [] (some int) [.mk [] [.expr sizeE]], .fn alignName [] [] (some int) [.mk [] [.expr alignE]],
+       .typeAlias packCopyName [] (.tuple [])]]).map ofItem
+  -- (After what is written out beside a declaration, `fieldNames`.)
+  let rec beside : List FItem → List FItem × List FItem
+    | (.other (.fieldNames m ns ps)) :: rest =>
+      if m.startsWith "%" then ([], .other (.fieldNames m ns ps) :: rest) else
+      let (mine, after) := beside rest
+      (.other (.fieldNames m ns ps) :: mine, after)
+    | rest => ([], rest)
+  -- (`fuel`: one for each item.)
+  let rec go (fuel count : Nat) : List FItem → (List FItem × Nat)
+    | [] => ([], count)
+    | item :: rest =>
+      match fuel with
+      | 0 => (item :: rest, count)
+      | fuel + 1 =>
+        let declared : Option (String × List String) := match item with
+          | .other (.struct n ps _) | .other (.enum n ps _) | .pub _ (.other (.struct n ps _))
+          | .pub _ (.other (.enum n ps _)) => some (n, ps)
+          | _ => none
+        match declared with
+        | some (n, ps) =>
+          let (names, rest) := beside rest
+          let (more, count') := go fuel (count + 1) rest
+          (item :: names ++ implFor count n ps ++ more, count')
+        | none =>
+          let (mine, count) : List FItem × Nat := match item with
+            | .other (.trait n _) =>
+              if n == layoutTrait then
+                let heads := [("Int", [])] ++ scalars.map (fun (n, _) => (n, []))
+                  ++ (List.range 9).map (fun n => (s!"(tuple{n})", params n))
+                  ++ (List.range 7).map (fun n => (s!"(fn{n})", params (n + 1)))
+                  ++ [("(&)", ["T"]), ("(&mut)", ["T"])]
+                let (out, c) := heads.foldl (fun (acc : List FItem × Nat) (h, ps) => (acc.1 ++ implFor acc.2 h ps, acc.2 + 1)) ([], count)
+                (item :: out, c)
+              else ([item], count)
+            | .module name (some body) =>
+              let (body, c) := go fuel count body
+              ([.module name (some body)], c)
+            | other => ([other], count)
+          let (more, count) := go fuel count rest
+          (mine ++ more, count)
+  (go (2 * (flatAll items).length + 2) count items).1
+
+/-- Each implementation for every type written out as one for each type
+(`Syntax.expandBlankets`), over flat items. -/
+def expandBlankets (items : List FItem) : List FItem := Id.run do
+  let blankets := items.filterMap fun
+    | .impl ps tr head [t] ctx ms => if head == blanketHead then some (ps, tr, t, ctx, ms) else none
+    | _ => none
+  if blankets.isEmpty then return items
+  let rest := items.filter fun
+    | .impl _ _ head _ _ _ => head != blanketHead
+    | _ => true
+  let declared : List (String × List String) := rest.filterMap fun
+    | .other (.struct n ps _) | .pub _ (.other (.struct n ps _)) | .other (.enum n ps _)
+    | .pub _ (.other (.enum n ps _)) => some (n, ps)
+    | _ => none
+  let params := fun (n : Nat) => (List.range n).map (s!"T{·}")
+  let heads : List (String × List String) :=
+    [("Int", [])] ++ scalars.map (fun (n, _) => (n, [])) ++ declared
+      ++ (List.range 9).map (fun n => (s!"(tuple{n})", params n))
+      ++ (List.range 7).map (fun n => (s!"(fn{n})", params (n + 1)))
+      ++ [("(&)", ["T"]), ("(&mut)", ["T"])]
+  -- (The arguments an implementation gives its trait, as written.)
+  let givenArgs := fun (ms : List FItem) => (givenTraitArgs (ms.map FItem.declared)).map (·.spell)
+  -- (Which trait each implementation is of, at which arguments, for which
+  -- head.)
+  let implOf : FItem → Option (String × String × List String) := fun
+    | .impl _ tr head _ _ ms => some (traitBase tr, head, givenArgs ms)
+    | _ => none
+  let mut known : Std.HashSet (String × String × List String) := .ofList (rest.filterMap implOf)
+  -- (Which traits each head has some implementation of.)
+  let mut has : Std.HashSet (String × String) := .ofList ((rest.filterMap implOf).map fun (tr, h, _) => (tr, h))
+  -- (Those another implementation for every type gave, by which.)
+  let mut byBlanket : Std.HashMap (String × String × List String) (List Nat) := {}
+  -- (`impl !Print for Secret {}`: not written out for that type.)
+  let last := fun (s : String) => (s.splitOn "::").getLast!
+  let denied := rest.filterMap fun
+    | .other (.fieldNames mark [tr, head] _) => if mark == attrMark "negative_impl" then some (last tr, last head) else none
+    | _ => none
+  -- (What a function generic in `T` may take a trait of `T` to be met by.)
+  let mut out : Array FItem := (blankets.map fun (_, tr, t, ctx, _) =>
+    FItem.other (.fieldNames (attrMark "blanket_impl")
+      (traitBase tr :: ctx.filterMap fun (p, c) => if p == t then some (traitBase c) else none) [])).toArray
+  let mut copies := 0
+  -- (How many traits of its type each asks: tried first.)
+  let askedOf := fun (b : Nat) => match blankets[b]? with
+    | some (_, _, t, ctx, _) => (ctx.filter fun (pc : String × String) => pc.1 == t).length
+    | none => 0
+  let order := (List.range blankets.length).mergeSort fun a b => askedOf a ≥ askedOf b
+  let blankets := order.filterMap fun b => blankets[b]?
+  -- (A copy may give what another asks: as many rounds as there are.)
+  for _ in List.range (blankets.length + 1) do
+    let mut more := false
+    for ((ps, tr, t, ctx, ms), b) in blankets.zipIdx do
+      let asked := ctx.filterMap fun (p, c) => if p == t then some (traitBase c) else none
+      let bodies := givenTraitArgs (ms.map FItem.declared)
+      for (h, hps) in heads do
+        let fresh := hps.zipIdx.map fun (p, j) => if p.startsWith "'" then s!"'%b{j}" else s!"%b{j}"
+        let self := selfTypeOf h (fresh.map (TypeExpr.name · []))
+        let mine := bodies.map fun body => (substTypeExpr [(t, self)] body).spell
+        let givers := byBlanket.getD (traitBase tr, h, mine) []
+        if givers.contains b then continue
+        -- (One that asks more already gave it this type: that one is its.)
+        let asksOf := fun (g : Nat) => match blankets[g]? with
+          | some (_, _, t', ctx', _) => (ctx'.filter fun (pc : String × String) => pc.1 == t').length
+          | none => 0
+        if givers.any (fun g => asksOf g > asked.length) then continue
+        let mineToo := givers.any (· != b)
+        if !mineToo && known.contains (traitBase tr, h, mine) then continue
+        if denied.contains (last (traitBase tr), last h) then continue
+        unless asked.all (fun c => has.contains (c, h)) do continue
+        let ctx' := ctx.zipIdx.map fun ((p, c), k) => if p == t then (s!"%subject{k}", c) else (p, c)
+        let subjects := (ctx.zipIdx.filter fun ((p, _), _) => p == t).map fun (_, k) =>
+          FItem.other (.typeAlias (ctxSubjectName k) [] self)
+        copies := copies + 1
+        let shift := 100000000000000 * copies
+        -- (`self_name()` in it: this type's name.)
+        let named : FRewrite := { onExpr := fun _ b e => match b.expr e with
+          | .call _ f #[] =>
+            -- (Written as the resolver has written texts by now: the
+            -- prelude's constructors by their own names.)
+            if b.bare? f == some selfNameFn then some (flatExpr ((last h).toList.foldr (fun c rest =>
+              .call 0 (.name none "StrChar") [scalarValue "char_of" (c.toNat : Int), rest]) (.name none "StrEnd")))
+            else none
+          | _ => none }
+        let ms' := ms.map fun
+          | .other (.typeAlias n takes body) => .other (.typeAlias n takes (substTypeExpr [(t, self)] body))
+          | .fn m fps annots ret b =>
+            .fn m fps (annots.map (·.map (substTypeExpr [(t, self)]))) (ret.map (substTypeExpr [(t, self)]))
+              (named.body ((shiftRewrite shift).body b))
+          | item => item
+        out := out.push (.impl (fresh ++ ps.filter (· != t)) tr h fresh ctx'
+          (ms' ++ subjects ++ [.other (.typeAlias (blanketName t) [] self)]))
+        known := known.insert (traitBase tr, h, mine)
+        has := has.insert (traitBase tr, h)
+        byBlanket := byBlanket.insert (traitBase tr, h, mine) (givers ++ [b])
+        more := true
+    unless more do break
+  pure (rest ++ out.toList)
+
+/-- Each implementation with the functions its trait gives a body that it
+does not write itself (`Syntax.fillDefaults`), over flat items. -/
+def fillDefaults (items : List FItem) : List FItem :=
+  -- (Implementations for every type written out for each.)
+  let items := writeLayouts items
+  let items := Trace.timed "fill: blankets" fun _ => expandBlankets items
+  -- (First, with every declaration to hand: what dotted calls borrow.)
+  let items := Trace.timed "fill: borrow receivers" fun _ => borrowReceivers items
+  let defaults := items.filterMap fun
+    | .traitInfo name _ fns _ _ => some (name, fns)
+    | _ => none
+  -- (How many implementations of each trait for each type, at the same
+  -- arguments, came before: the later ones are numbered.)
+  let (_, out) := items.zipIdx.foldl (init := (({} : Std.HashMap (String × String × List String) Nat), #[]))
+    fun (seen, out) (item, index) => match item with
+    | .impl ps tr head args context methods =>
+      let targs := givenTraitArgs (methods.map FItem.declared)
+      let given := targs.map (·.spell)
+      let before := seen.getD (tr, head, given) 0
+      let written := methods.filterMap fun
+        | .fn m _ _ _ _ => some m
+        | _ => none
+      let said := methods.filterMap fun
+        | .other (.typeAlias n _ _) => some n
+        | _ => none
+      let missing := ((defaults.lookup tr).getD []).filter fun
+        | .fn m _ _ _ _ => !written.contains m
+        | .other (.typeAlias n _ _) => !said.contains n
+        | _ => false
+      -- A default is written against `Self`; in the implementation its types
+      -- are the trait's at the implementing type. Each implementation has its
+      -- own copy: the calls in it are met by this implementation's types, and
+      -- are known by their identities. (`Self::f(..)` in it is this
+      -- implementation's `f`.)
+      let self := selfTypeOf head (args.map (TypeExpr.name · []))
+      let missing := missing.map fun
+        | .fn m fps annots _ b =>
+          FItem.fn m fps (annots.map fun _ => none) none
+            ((shiftRewrite (10000000000 * (index + 1))).body
+              ((selfRewrite head (some (tr, (TypeExpr.tuple [self]).asExpr))).body b))
+        -- (A type's default is written against `Self` too.)
+        | .other (.typeAlias n takes body) => .other (.typeAlias n takes (TypeExpr.withSelf self body))
+        | item => item
+      -- (`Self::Components` in its functions: what this implementation's
+      -- trait leaves, at this type.)
+      let ofSelf := selfAssocs self tr targs
+      let all := (methods ++ missing).map fun
+        | .fn m fps annots ret b =>
+          FItem.fn m fps (annots.map (·.map ofSelf)) (ret.map ofSelf)
+            (match mapTypes (fun t => pure (ofSelf t)) b with
+              | .ok b => b
+              | .error _ => b)
+        | item => item
+      let named := if before == 0 then tr else s!"{tr}#{before}"
+      (seen.insert (tr, head, given) (before + 1), out.push (.impl ps (traitAt named given) head args context all))
+    | item => (seen, out.push item)
+  out.toList
+
+end Flat
 
 end Glorious.Syntax
