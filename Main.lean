@@ -330,7 +330,11 @@ def compileFile (path : String) (checkKept : Check.Kept := []) (search : Bool :=
   let library ← Target.libraryDir
   let libraryKept ← if (← IO.getEnv "GLORIOUS_FRESH").isSome then pure []
     else pure ((← Store.load (α := Check.Kept) (library / "units") "units").getD [])
-  let checkKept := checkKept ++ libraryKept
+  -- (And what any program kept of modules that are files of their own,
+  -- `mod ecs;`: another program of the same modules starts from them.)
+  let modulesKept ← if (← IO.getEnv "GLORIOUS_FRESH").isSome then pure []
+    else pure ((← Store.load (α := Check.Kept) (library / "modules") "modules").getD [])
+  let checkKept := checkKept ++ libraryKept ++ modulesKept
   -- (What certificate inference made the last time, by function and signature.)
   let memo ← if (← IO.getEnv "GLORIOUS_FRESH").isSome then pure {}
     else pure ((← Store.load (α := Infer.Memo) (dir / "infer") "infer").getD {})
@@ -364,6 +368,14 @@ def compileFile (path : String) (checkKept : Check.Kept := []) (search : Bool :=
     let mine := c.checkKept.filter fun (k, _) => !ofLibrary k
     unless mine.isEmpty do
       Trace.timedIO "save: checked" (Store.save (dir / "checked") "checked" mine (chain := 4))
+    -- (The states after the program's own modules that are files, all but
+    -- the last, which is the program's: kept for any program, newest first
+    -- and no more than eight, where one is new.)
+    if !files.isEmpty && mine.length > 1 then
+      let modules := mine.dropLast
+      unless modules.all (fun (k, _) => modulesKept.any (·.1 == k)) do
+        Trace.timedIO "save: modules" (Store.save (library / "modules") "modules"
+          ((modules ++ modulesKept.filter fun (k, _) => !modules.any (·.1 == k)).take 8) (chain := 4))
     if preludeKept.isNone then
       if let .ok parsed := readPrelude.get then Store.save (library / "prelude") "prelude" parsed
     -- (Saved again only where something was parsed anew.)

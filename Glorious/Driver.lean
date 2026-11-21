@@ -486,7 +486,10 @@ def parseProgram (src : String) (files : List (List String × String)) (check : 
   -- (`few`: only the library's modules the program needs, read and checked
   -- with it, where it is one program that is compiled: the whole library
   -- read once serves many.)
-  let needed := if few && std then neededStd (src :: own.map (·.2)) else none
+  -- (A program with modules that are files of their own reads the whole
+  -- library, checked once for any program: so each module's check, after
+  -- it, is the same for every program of it, and kept for them all.)
+  let needed := if few && std && own.isEmpty then neededStd (src :: own.map (·.2)) else none
   let library := needed.getD Std.texts
   let files := if std then library ++ files else files
   -- (The prelude as an earlier process of this compiler parsed it, where
@@ -723,7 +726,7 @@ def compileSourceAt (src : String) (check : Bool := true)
   let drops := hasDrop items || (src.splitOn "defer").length > 1
   -- (The library read for this program alone is checked with it.)
   let withStd := usesStd src files && (src.splitOn "#![no_std]").length == 1
-    && !(few && (neededStd (src :: files.map (·.2))).isSome)
+    && !(few && files.isEmpty && (neededStd (src :: files.map (·.2))).isSome)
     -- (Where reflection is named, the library's types have their
     -- `Reflect`, which the library checked once has not.)
     && !((src :: files.map (·.2)).any mentionsReflection)

@@ -6636,6 +6636,24 @@ through one `Mutex` give 80 000. The cooperative threads (`scope`,
 `spawn`, which covey's parallel groups run on) are as they were: they take
 turns on one machine, which the proved machines run too.
 
+## Modules checked once for every program of them
+
+**Decision: the state after checking a program's module that is a file of
+its own (`mod ecs;`) is kept for any program (`library/modules`, newest
+first, eight), and a program with such modules reads the whole library.**
+A unit's key is made of what comes before it, so a module's check was the
+same for two programs only where the library modules before it were: with
+the library chosen by what each program names, `covey/ecs` was checked
+anew for each covey program. With the whole library (checked once by any
+process of the compiler, the first part kept with the library), each
+module's check comes after the same states, and the second program of the
+same modules takes it.
+
+Measured, each with a build directory of its own: covey programs took 5.5
+to 7 s; once one program has checked `ecs`, another takes 2.5 to 4 s (the
+program's own unit and what follows checking). The first compile after the
+compiler changes checks the whole library first: about 17 s, once.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by
