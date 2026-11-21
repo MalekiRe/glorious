@@ -33,7 +33,7 @@ partial def withoutBodies : Item → Item
 
 /-- A group of functions, as what its check is made from. -/
 def groupKey (key : UInt64) (group : List FnDecl) : UInt64 :=
-  group.foldl (fun h d => mixHash h (hash (d.name, d.params, d.annots, d.ret, d.clauses, d.bounds))) key
+  group.foldl (fun h d => mixHash h (hash (d.name, d.params, d.annots, d.ret, d.body, d.bounds))) key
 
 /-- A state kept from an earlier check, with the functions of the
 implementations declared after the first `before` replaced by `written`
@@ -78,7 +78,7 @@ def implFnDecls (im : ImplDecl) : M (List FnDecl) := do
           ({ subject := p, trait := "Use", quantity := some (lo, hi) } : Syntax.Bound)
         out := out ++ [{ name := Syntax.implFnName im.trait im.head m,
                          params := im.params ++ inner ++ sig.mparams.map (·.1) ++ lifetimes, annots,
-                         ret, clauses, impl := some (im, sig), bounds := uses }]
+                         ret, body := Flat.ofClauses clauses, impl := some (im, sig), bounds := uses }]
   pure out
 
 /-- Check a group, deciding where it is found what can be known only once
@@ -100,17 +100,17 @@ partial def checkDeciding (decls : List FnDecl) (fuel : Nat := 64) (first : Opti
     | fuel + 1, some d =>
       if Glorious.Trace.groupsTraced then
         (dbgTrace s!"decision {fuel}: {e.msg.take 200}" fun _ => (pure () : M Unit))
-      let items := decls.map fun d => Item.fn d.name d.params d.annots d.ret d.clauses
+      let items := decls.map fun d => Item.fn d.name d.params d.annots d.ret (Flat.toClauses d.body)
       let after := Elab.decidedItems [d] items
-      let decls' := (decls.zip after).map fun
-        | (d, .fn _ _ _ _ clauses) => { d with clauses }
-        | (d, _) => d
+      let decls' := (decls.zip (after.zip items)).map fun
+        | (d, .fn _ _ _ _ clauses, .fn _ _ _ _ was) => if hash clauses == hash was then d else { d with body := Flat.ofClauses clauses }
+        | (d, _, _) => d
       -- (Nothing changed: what was said stands.)
-      if (decls'.map (·.clauses)).map hash == (decls.map (·.clauses)).map hash then throwThe Elab.Said said
+      if (decls'.map (·.body)).map hash == (decls.map (·.body)).map hash then throwThe Elab.Said said
       set before
       modify fun s =>
         { s with decided := s.decided ++ [d]
-                 runFns := decls'.foldl (fun m d => m.insert d.name d.clauses) s.runFns }
+                 runFns := decls'.foldl (fun m d => m.insert d.name d.body) s.runFns }
       let first := match d with
         | .letMut .. => some (first.getD e.msg)
         | _ => first
@@ -293,7 +293,7 @@ def checkItems (items : List Item) (seed : UInt64 := 0) (kept : Kept := []) : M 
     | _ => none
   let decls : List FnDecl := items.filterMap fun
     | .fn name params annots ret clauses =>
-      some { name, params, annots, ret, clauses, bounds := (written.lookup name).getD [] }
+      some { name, params, annots, ret, body := Flat.ofClauses clauses, bounds := (written.lookup name).getD [] }
     | _ => none
   -- What is asked of a declared type's parameters: a trait without arguments
   -- of its own, of the parameter at a place.
@@ -320,9 +320,9 @@ def checkItems (items : List Item) (seed : UInt64 := 0) (kept : Kept := []) : M 
   let modules := (← get).modules
   -- (What each function mentions, found once for each.)
   let mentioned : Std.HashMap String (List String) := decls.foldl (fun m d =>
-    let fvs := d.clauses.flatMap (Elab.fvClause [])
+    let fvs := d.body.fvClauses d.body.roots
     let alts := if modules.dotAlts.isEmpty then [] else
-      ((d.clauses.flatMap fun | .mk _ body => body.flatMap Stmt.exprs).foldl Syntax.callIdsExpr []).flatMap
+      (d.body.callIdsClauses d.body.roots).flatMap
         fun id => (dotAltsOf modules id).getD []
     if m.contains d.name then m
     else m.insert d.name ((fvs ++ alts ++ fvs.flatMap fun x => aliasOf.getD x []).filter nameSet.contains).eraseDups) {}
@@ -384,13 +384,13 @@ def checkItems (items : List Item) (seed : UInt64 := 0) (kept : Kept := []) : M 
       checkUseDecls
     made := (key, ← get) :: made
     modify fun s =>
-      { s with runFns := decls.foldl (fun m d => m.insertIfNew d.name d.clauses) s.runFns }
+      { s with runFns := decls.foldl (fun m d => m.insertIfNew d.name d.body) s.runFns }
     -- (A state kept from before has the bodies that program's later
     -- functions had: this one's are put in their place.)
     let restore := fun (st : St) (later : List FnDecl) => (do
       adopt st
       modify fun s =>
-        { s with runFns := later.foldl (fun m d => m.insert d.name d.clauses) s.runFns } : M Unit)
+        { s with runFns := later.foldl (fun m d => m.insert d.name d.body) s.runFns } : M Unit)
     let declBy : Std.HashMap String FnDecl := decls.foldl (fun m d => if m.contains d.name then m else m.insert d.name d) {}
     let groups := (components names deps).map fun comp => comp.filterMap fun n => declBy[n]?
     -- Each group's level: groups of one level use none of each other, so
@@ -435,7 +435,7 @@ def checkItems (items : List Item) (seed : UInt64 := 0) (kept : Kept := []) : M 
     for im in ((← get).impls.toList.drop before).filter (fun im => blanket im || packed im) do
       for d in ← implFnDecls im do copies := copies.push (im.dictFn, d, packed im)
     let namesAny := fun (d : FnDecl) =>
-      ((d.clauses.flatMap (Elab.fvClause [])).flatMap fun x => x :: aliasOf.getD x []).any nameSet.contains
+      ((d.body.fvClauses d.body.roots).flatMap fun x => x :: aliasOf.getD x []).any nameSet.contains
     let earlyCopies : Array (String × FnDecl) := if coercing.isEmpty then
         (copies.filter (fun (_, d, isPack) => isPack || !namesAny d)).map fun (f, d, _) => (f, d)
       else #[]

@@ -35,6 +35,7 @@ public import Glorious.Syntax.Ast
 public import Glorious.Syntax.Lexer
 public import Glorious.Syntax.Parser
 public import Glorious.Syntax.Flat
+public import Glorious.Syntax.FlatOps
 public import Glorious.Elab
 public import Glorious.Elab.Instances
 public import Glorious.Elab.Specialize

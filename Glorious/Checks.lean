@@ -49,8 +49,7 @@ def keptProgram (body : String) : String :=
   fn main() -> Int { m::go() }"
 
 /-- A module's items made flat and made trees again are the items. -/
-def sameFlat (items : List Syntax.Item) : Bool :=
-  hash (Syntax.Flat.unflatten (Syntax.Flat.flatten items)) == hash items
+def sameFlat (items : List Syntax.Item) : Bool := Syntax.Flat.itemsRoundTrip items
 
 /-- Of the prelude and every module of the library. -/
 def flatRoundTrips : Bool :=

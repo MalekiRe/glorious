@@ -144,55 +144,57 @@ def checkDrops (drops : Array (Ty × String)) (callables : Bool := false) : M Un
 
 def addUses (a b : Nat) : Nat := min 2 (a + b)
 
+open Flat in
 mutual
 
 /-- How often an expression uses the binding `x`: 0, 1, or 2 for more.
 `resumptive` says which operation names have arms that may run repeatedly. -/
-partial def usesExpr (resumptive : String → Bool) (x : String) : Expr → Nat
+partial def usesExpr (b : Body) (resumptive : String → Bool) (x : String) (e : ExprId) : Nat :=
+  match b.expr e with
   | .int _ => 0
   | .name q y => if q.isNone && y == x then 1 else 0
   | .label _ => 0
-  | .call _ f args =>
-    (args.map (usesExpr resumptive x)).foldl addUses (usesExpr resumptive x f)
-  | .tailCall _ f args =>
-    (args.map (usesExpr resumptive x)).foldl addUses (usesExpr resumptive x f)
-  | .tuple args => (args.map (usesExpr resumptive x)).foldl addUses 0
-  | .proj e _ => usesExpr resumptive x e
-  | .closure _ clauses => (clauses.map (usesClause resumptive x)).foldl max 0
+  | .call _ f args | .tailCall _ f args =>
+    (args.map (usesExpr b resumptive x)).foldl addUses (usesExpr b resumptive x f)
+  | .tuple args => (args.map (usesExpr b resumptive x)).foldl addUses 0
+  | .proj e _ => usesExpr b resumptive x e
+  | .closure _ clauses => (clauses.map (usesClause b resumptive x)).foldl max 0
   | .handle subject arms =>
-    let repeated := fun (arm : Clause) =>
-      match arm with
-      | .mk [.ctor name _ _] _ => resumptive name
+    let repeated := fun (arm : ClauseId) =>
+      match (b.clause arm).pats with
+      | [.ctor name _ _] => resumptive name
       | _ => false
-    let once := ((arms.filter (!repeated ·)).map (usesClause resumptive x)).foldl max 0
-    let many := if (arms.filter repeated).any (usesClause resumptive x · > 0) then 2 else 0
-    addUses (addUses (usesExpr resumptive x subject) once) many
-  | .labelScope _ body => usesStmts resumptive x body
+    let once := ((arms.filter (!repeated ·)).map (usesClause b resumptive x)).foldl max 0
+    let many := if (arms.filter repeated).any (usesClause b resumptive x · > 0) then 2 else 0
+    addUses (addUses (usesExpr b resumptive x subject) once) many
+  | .labelScope _ body => usesStmts b resumptive x body.toList
   | .ref _ _ => 0
-  | .deref e => usesExpr resumptive x e
-  | .reborrow _ e => usesExpr resumptive x e
+  | .deref e => usesExpr b resumptive x e
+  | .reborrow _ e => usesExpr b resumptive x e
   | .refField _ _ _ _ _ => 0
-  | .fieldOf _ e _ => usesExpr resumptive x e
+  | .fieldOf _ e _ => usesExpr b resumptive x e
 
-partial def usesClause (resumptive : String → Bool) (x : String) : Clause → Nat
-  | .mk pats body =>
-    if (pats.flatMap Elab.patVars).contains x then 0 else usesStmts resumptive x body
+partial def usesClause (b : Body) (resumptive : String → Bool) (x : String) (c : ClauseId) : Nat :=
+  let ⟨pats, body⟩ := b.clause c
+  if (pats.flatMap Elab.patVars).contains x then 0 else usesStmts b resumptive x body.toList
 
-partial def usesStmts (resumptive : String → Bool) (x : String) : List Stmt → Nat
+partial def usesStmts (b : Body) (resumptive : String → Bool) (x : String) : List StmtId → Nat
   | [] => 0
-  | .expr e :: rest => addUses (usesExpr resumptive x e) (usesStmts resumptive x rest)
-  | .let_ pat value :: rest =>
-    addUses (usesExpr resumptive x value)
-      (if (Elab.patVars pat).contains x then 0 else usesStmts resumptive x rest)
-  | .letMut y value :: rest =>
-    addUses (usesExpr resumptive x value) (if y == x then 0 else usesStmts resumptive x rest)
-  | .assign target value :: rest =>
-    let inTarget := match target with
-      | .deref e => usesExpr resumptive x e
-      | _ => 0
-    addUses (addUses inTarget (usesExpr resumptive x value)) (usesStmts resumptive x rest)
-  | .defer e :: rest => addUses (usesExpr resumptive x e) (usesStmts resumptive x rest)
-  | .located _ _ s :: rest => usesStmts resumptive x (s :: rest)
+  | s :: rest =>
+    match b.stmt s with
+    | .expr e => addUses (usesExpr b resumptive x e) (usesStmts b resumptive x rest)
+    | .let_ pat value =>
+      addUses (usesExpr b resumptive x value)
+        (if (Elab.patVars pat).contains x then 0 else usesStmts b resumptive x rest)
+    | .letMut y value =>
+      addUses (usesExpr b resumptive x value) (if y == x then 0 else usesStmts b resumptive x rest)
+    | .assign target value =>
+      let inTarget := match b.expr target with
+        | .deref e => usesExpr b resumptive x e
+        | _ => 0
+      addUses (addUses inTarget (usesExpr b resumptive x value)) (usesStmts b resumptive x rest)
+    | .defer e => addUses (usesExpr b resumptive x e) (usesStmts b resumptive x rest)
+    | .located _ _ s => usesStmts b resumptive x (s :: rest)
 
 end
 
@@ -219,7 +221,7 @@ inductive AVal where
   | tracked
   /-- A constructed value; a tuple has the empty tag. -/
   | data (tag : String) (args : List AVal)
-  | clo (clauses : List Clause) (env : List (String × AVal))
+  | clo (body : Flat.Body) (clauses : Array Flat.ClauseId) (env : List (String × AVal))
   | fn (name : String)
   /-- No value: the path left for somewhere else, an operation's handler
   (named by the operation), a label's scope (`@name`), or somewhere unknown. -/
@@ -230,7 +232,7 @@ inductive AVal where
   deriving Inhabited
 
 structure ACtx where
-  fns : Std.HashMap String (List Clause)
+  fns : Std.HashMap String Flat.Body
   ctors : Std.HashSet String
   aliases : Std.HashMap String Expr
   ops : Std.HashMap String Bool
@@ -320,7 +322,7 @@ partial def AVal.key? : AVal → Option String
   | .data tag args => do
     let ks ← args.mapM AVal.key?
     pure s!"d{tag.length}:{tag}({args.length}:{String.join ks})"
-  | .clo _ _ => none
+  | .clo _ _ _ => none
 
 /-- The outcomes of a computation: its value and the uses so far, per path. -/
 abbrev Alts := List (AVal × Nat)
@@ -422,8 +424,8 @@ partial def takenApart (ctx : ACtx) : Pattern → AVal → Nat
 partial def holdsTracked : AVal → Bool
   | .tracked => true
   | .data _ args => args.any holdsTracked
-  | .clo clauses env =>
-    (clauses.flatMap (Elab.fvClause [])).eraseDups.any fun y =>
+  | .clo b clauses env =>
+    (b.fvClauses clauses).eraseDups.any fun y =>
       match env.lookup y with
       | some v => holdsTracked v
       | none => false
@@ -448,13 +450,14 @@ def ACtx.inside (ctx : ACtx) (env : List (String × AVal)) : ACtx :=
 partial def holdsProbe : AVal → Bool
   | .probe => true
   | .data _ args => args.any holdsProbe
-  | .clo clauses env =>
-    (clauses.flatMap (Elab.fvClause [])).eraseDups.any fun y =>
+  | .clo b clauses env =>
+    (b.fvClauses clauses).eraseDups.any fun y =>
       match env.lookup y with
       | some v => holdsProbe v
       | none => false
   | _ => false
 
+open Flat in
 mutual
 
 /-- The uses made if a value goes somewhere the count cannot follow. For the
@@ -466,21 +469,20 @@ partial def escapes (ctx : ACtx) (depth : Nat) : AVal → A Nat
   | .data _ args => do
     let ns ← args.mapM (escapes ctx depth)
     pure (ns.foldl (· + ·) 0)
-  | .clo clauses env => do
-    if ctx.probing && !ctx.lenient && holdsProbe (.clo clauses env) then failure
+  | .clo b clauses env => do
+    if ctx.probing && !ctx.lenient && holdsProbe (.clo b clauses env) then failure
     let ctx := ctx.inside env
     -- For the fewest uses: a callable that mentions the binding has to be
     -- called, since the binding has to be used; one that does not, need not.
-    if ctx.lower && !holdsTracked (.clo clauses env) then return 0
+    if ctx.lower && !holdsTracked (.clo b clauses env) then return 0
     tick
     let mut ns : List Nat := []
     for clause in clauses do
-      match clause with
-      | .mk pats body =>
-        let params := (pats.flatMap (binders ctx)).map (·, AVal.unknown)
-        let found ← runStmts ctx depth (params ++ env) body
-        for (v, n) in found do
-          ns := (n + (← escapes ctx depth v)) :: ns
+      let ⟨pats, body⟩ := b.clause clause
+      let params := (pats.flatMap (binders ctx)).map (·, AVal.unknown)
+      let found ← runStmts ctx depth b (params ++ env) body.toList
+      for (v, n) in found do
+        ns := (n + (← escapes ctx depth v)) :: ns
     pure (ctx.fold ns)
   | _ => pure 0
 
@@ -523,39 +525,38 @@ partial def unfollowed (ctx : ACtx) (depth : Nat) (args : List AVal) (quiet : Bo
   -- What is called may not come back.
   pure (if ctx.lower && !quiet then [(.unknown, n), (.gone "*", n)] else [(.unknown, n)])
 
-partial def applyClauses (ctx : ACtx) (depth : Nat) (clauses : List Clause)
+partial def applyClauses (ctx : ACtx) (depth : Nat) (b : Body) (clauses : Array ClauseId)
     (env : List (String × AVal)) (args : List AVal) : A Alts := do
   let mut out : Alts := []
   for clause in clauses do
-    match clause with
-    | .mk pats body =>
-      -- A block without parameters that is given one argument drops it.
-      let pats := if pats.isEmpty && args.length == 1 then [Pattern.wild] else pats
-      -- A clause of one tuple, given that many arguments, takes them as its
-      -- parts.
-      let pats := match pats with
-        | [.tuple parts] => if args.length ≥ 2 && parts.length == args.length then parts else pats
-        | _ => pats
-      if pats.length == args.length then
-        let (fitness, binds) := fitAll ctx pats args
-        -- A value a `probe` may be in is not followed through a pattern.
-        if ctx.probing then
-          for (p, v) in pats.zip args do
-            match p, v with
-            | .var _, _ => pure ()
-            | .wild, _ => pure ()
-            | _, .probe => failure
-            | _, _ => pure ()
-        let taken := ((pats.zip args).map fun (p, v) => takenApart ctx p v).foldl (· + ·) 0
-        let run : A Alts := do
-          let alts ← runStmts ctx depth (binds ++ env) body
-          pure (alts.map fun (v, n) => (v, n + taken))
-        match fitness with
-        | .no => pure ()
-        | .maybe => out := out ++ (← run)
-        | .yes =>
-          out := out ++ (← run)
-          break
+    let ⟨pats, body⟩ := b.clause clause
+    -- A block without parameters that is given one argument drops it.
+    let pats := if pats.isEmpty && args.length == 1 then [Pattern.wild] else pats
+    -- A clause of one tuple, given that many arguments, takes them as its
+    -- parts.
+    let pats := match pats with
+      | [.tuple parts] => if args.length ≥ 2 && parts.length == args.length then parts else pats
+      | _ => pats
+    if pats.length == args.length then
+      let (fitness, binds) := fitAll ctx pats args
+      -- A value a `probe` may be in is not followed through a pattern.
+      if ctx.probing then
+        for (p, v) in pats.zip args do
+          match p, v with
+          | .var _, _ => pure ()
+          | .wild, _ => pure ()
+          | _, .probe => failure
+          | _, _ => pure ()
+      let taken := ((pats.zip args).map fun (p, v) => takenApart ctx p v).foldl (· + ·) 0
+      let run : A Alts := do
+        let alts ← runStmts ctx depth b (binds ++ env) body.toList
+        pure (alts.map fun (v, n) => (v, n + taken))
+      match fitness with
+      | .no => pure ()
+      | .maybe => out := out ++ (← run)
+      | .yes =>
+        out := out ++ (← run)
+        break
   if out.isEmpty then unfollowed ctx depth args else cap ctx depth out
 
 partial def callValue (ctx : ACtx) (depth : Nat) (f : AVal) (args : List AVal) : A Alts := do
@@ -570,15 +571,15 @@ partial def callValue (ctx : ACtx) (depth : Nat) (f : AVal) (args : List AVal) :
     for a in args do
       n := n + (← escapes { ctx with lenient := true } depth a)
     pure [(.gone probeTarget, n), (if args.any holdsProbe then .probe else .unknown, n)]
-  | .clo clauses env => applyClauses (ctx.inside env) depth clauses env args
+  | .clo b clauses env => applyClauses (ctx.inside env) depth b clauses env args
   | .fn name =>
     match depth, ctx.fns[name]? with
-    | d + 1, some clauses =>
+    | d + 1, some fb =>
       -- (A call of a function being followed, again: it comes back, or never
       -- does, as the first call does; that one's paths are counted there.)
       if ctx.active.contains name then unfollowed ctx depth args (quiet := true)
       else
-        let follow := applyClauses { ctx with active := name :: ctx.active } d clauses [] args
+        let follow := applyClauses { ctx with active := name :: ctx.active } d fb fb.roots [] args
         -- (A call followed before, with the same values and in the same
         -- context, comes to what it came to then, and costs what it cost.)
         match args.mapM AVal.key? with
@@ -601,17 +602,17 @@ partial def callValue (ctx : ACtx) (depth : Nat) (f : AVal) (args : List AVal) :
 
 /-- Evaluate expressions left to right, over every combination of paths. A
 path that left on the way has only the value that says so. -/
-partial def runList (ctx : ACtx) (depth : Nat) (env : List (String × AVal)) :
-    List Expr → A (List (List AVal × Nat))
+partial def runList (ctx : ACtx) (depth : Nat) (b : Body) (env : List (String × AVal)) :
+    List ExprId → A (List (List AVal × Nat))
   | [] => pure [([], 0)]
   | e :: es => do
-    let heads ← runExpr ctx depth env e
+    let heads ← runExpr ctx depth b env e
     let mut out : List (List AVal × Nat) := []
     for (v, n) in heads do
       if isGone v then out := ([v], n) :: out
     let on := heads.filter fun (v, _) => !isGone v
     unless on.isEmpty do
-      let tails ← runList ctx depth env es
+      let tails ← runList ctx depth b env es
       out := out ++ on.flatMap fun (v, n) => tails.map fun (vs, m) =>
         if (goneOf vs).isSome then (vs, n + m) else (v :: vs, n + m)
     if out.length ≤ 16 then pure out
@@ -628,7 +629,8 @@ partial def runList (ctx : ACtx) (depth : Nat) (env : List (String × AVal)) :
       let merged := if ns.isEmpty then [] else [((e :: es).map fun _ => AVal.unknown, ctx.fold ns)]
       pure (merged ++ (if left.isEmpty then [] else [([AVal.gone "*"], ctx.fold left)]))
 
-partial def runExpr (ctx : ACtx) (depth : Nat) (env : List (String × AVal)) : Expr → A Alts
+partial def runExpr (ctx : ACtx) (depth : Nat) (b : Body) (env : List (String × AVal)) (e : ExprId) : A Alts :=
+  match b.expr e with
   | .int _ => pure [(.unknown, 0)]
   | .name q x => do
     tick
@@ -642,17 +644,19 @@ partial def runExpr (ctx : ACtx) (depth : Nat) (env : List (String × AVal)) : E
       else if (ctx.fns[x]?).isSome then pure [(.fn x, 0)]
       else
         match ctx.aliases[x]? with
-        | some e => runExpr ctx depth [] e
+        | some value =>
+          let (ab, ae) := Flat.ofExpr value
+          runExpr ctx depth ab [] ae
         | none => pure [(.unknown, 0)]
   | .label _ => pure [(.unknown, 0)]
   | .tuple es => do
-    let alts ← runList ctx depth env es
+    let alts ← runList ctx depth b env es.toList
     pure (alts.map fun (vs, n) =>
       match goneOf vs with
       | some t => (.gone t, n)
       | none => (.data "" vs, n))
   | .proj e idx => do
-    let alts ← runExpr ctx depth env e
+    let alts ← runExpr ctx depth b env e
     pure (alts.map fun (v, n) =>
       match v with
       | .data _ args => (args.getD idx .unknown, n)
@@ -660,36 +664,37 @@ partial def runExpr (ctx : ACtx) (depth : Nat) (env : List (String × AVal)) : E
       | .gone t => (.gone t, n)
       | .probe => (.probe, n)
       | _ => (.unknown, n))
-  | .call id f args => runCall ctx depth env f args id
-  | .tailCall id f args => runCall ctx depth env f args id
+  | .call id f args => runCall ctx depth b env f args.toList id
+  | .tailCall id f args => runCall ctx depth b env f args.toList id
   | .closure id clauses =>
-    if id != 0 && ctx.now.contains id then applyClauses ctx depth clauses env []
+    if id != 0 && ctx.now.contains id then applyClauses ctx depth b clauses env []
     else
       -- Counting where a value is handed on: a callable that captures it
       -- and is kept in a variable has it, and destroys it if it is let go
       -- without being called. (The variable is then counted as any value.)
       let captured := if ctx.owning && ctx.capturesOwned then
-          let free := clauses.flatMap (Elab.fvClause [])
+          let free := b.fvClauses clauses
           env.filter fun (y, v) => free.contains y && isTracked v
         else []
       let env := if captured.isEmpty then env
         else env.map fun (y, v) => if captured.any (·.1 == y) then (y, AVal.unknown) else (y, v)
-      pure [(.clo clauses ((activeMark, .data activeMark (ctx.active.map AVal.fn)) :: env),
+      pure [(.clo b clauses ((activeMark, .data activeMark (ctx.active.map AVal.fn)) :: env),
         if captured.isEmpty then 0 else 1)]
   | .handle subject arms => do
-    let subject ← runExpr ctx depth env subject
-    let mut completions : List Clause := []
+    let subject ← runExpr ctx depth b env subject
+    let mut completions : Array ClauseId := #[]
     let mut repeated := 0
     let mut terminal : Alts := []
     let mut handled : List String := []
     for arm in arms do
-      match arm with
-      | .mk [.ctor name q ps] body =>
+      let ⟨pats, body⟩ := b.clause arm
+      match pats with
+      | [.ctor name _ ps] =>
         match ctx.ops[name]? with
         | some resumptive =>
           handled := name :: handled
           let params := (ps.flatMap (binders ctx)).map (·, AVal.unknown)
-          let alts ← runStmts ctx depth (params ++ env) body
+          let alts ← runStmts ctx depth b (params ++ env) body.toList
           if resumptive then
             -- May run any number of times: one use there is already too many,
             -- and none there can be relied on.
@@ -700,8 +705,8 @@ partial def runExpr (ctx : ACtx) (depth : Nat) (env : List (String × AVal)) : E
                   terminal := terminal ++ [(.gone probeTarget, n)]
                 else if n + (← escapes ctx depth v) > 0 then repeated := 2
           else terminal := terminal ++ alts
-        | none => completions := completions ++ [.mk [.ctor name q ps] body]
-      | other => completions := completions ++ [other]
+        | none => completions := completions.push arm
+      | _ => completions := completions.push arm
     -- A path that left for an operation handled here goes on from here.
     let subject := subject.map fun (v, n) =>
       match v with
@@ -711,7 +716,7 @@ partial def runExpr (ctx : ACtx) (depth : Nat) (env : List (String × AVal)) : E
     for (v, n) in subject do
       if isGone v || completions.isEmpty then done := (v, n) :: done
       else
-        let found ← applyClauses ctx depth completions env [v]
+        let found ← applyClauses ctx depth b completions env [v]
         for (v', n') in found do
           done := (v', n + n') :: done
     -- How much of the subject ran before an arm that does not resume is not
@@ -720,7 +725,7 @@ partial def runExpr (ctx : ACtx) (depth : Nat) (env : List (String × AVal)) : E
     let all := done ++ terminal.map fun (v, n) => (v, n + before)
     cap ctx depth (all.map fun (v, n) => (v, n + repeated))
   | .labelScope l body => do
-    let alts ← runStmts ctx depth env body
+    let alts ← runStmts ctx depth b env body.toList
     if ctx.lower then
       -- A path that left for this label goes on from here.
       pure (alts.map fun (v, n) =>
@@ -733,7 +738,7 @@ partial def runExpr (ctx : ACtx) (depth : Nat) (env : List (String × AVal)) : E
   | .ref _ _ => pure [(.unknown, 0)]
   | .refField _ _ _ _ _ => pure [(.unknown, 0)]
   | .fieldOf _ e _ => do
-    let alts ← runExpr ctx depth env e
+    let alts ← runExpr ctx depth b env e
     pure (alts.map fun (v, n) =>
       match v with
       | .tracked => (AVal.unknown, n + 1)
@@ -742,35 +747,35 @@ partial def runExpr (ctx : ACtx) (depth : Nat) (env : List (String × AVal)) : E
       | _ => (.unknown, n))
   -- Borrowing from a reference is no use of it.
   | .reborrow _ e => do
-    let alts ← runExpr ctx depth env e
+    let alts ← runExpr ctx depth b env e
     pure (alts.map fun (v, n) => if isGone v then (v, n) else (AVal.unknown, n))
   | .deref e => do
-    let alts ← runExpr ctx depth env e
+    let alts ← runExpr ctx depth b env e
     let (on, left) ← settle ctx depth alts
     pure ((match on with
       | some n => [(AVal.unknown, n)]
       | none => []) ++ left)
 
-partial def runCall (ctx : ACtx) (depth : Nat) (env : List (String × AVal)) (f : Expr)
-    (args : List Expr) (id : Nat) : A Alts := do
+partial def runCall (ctx : ACtx) (depth : Nat) (b : Body) (env : List (String × AVal)) (f : ExprId)
+    (args : List ExprId) (id : Nat) : A Alts := do
   tick
   let sure := ctx.lower && ctx.sure.contains id
-  let alts ← runCallee ctx depth env f args sure
+  let alts ← runCallee ctx depth b env f args sure
   -- A call whose type says it comes back does, whatever was lost track of
   -- inside it.
   if sure then
     pure (alts.map fun (v, n) => if isGone v then (AVal.unknown, n) else (v, n))
   else pure alts
 
-partial def runCallee (ctx : ACtx) (depth : Nat) (env : List (String × AVal)) (f : Expr)
-    (args : List Expr) (sure : Bool) : A Alts := do
+partial def runCallee (ctx : ACtx) (depth : Nat) (b : Body) (env : List (String × AVal)) (f : ExprId)
+    (args : List ExprId) (sure : Bool) : A Alts := do
   let general : A Alts := do
     let mut out : Alts := []
-    let found ← runExpr ctx depth env f
+    let found ← runExpr ctx depth b env f
     for (fv, n) in found do
       if isGone fv then out := (fv, n) :: out
       else
-        let found ← runList ctx depth env args
+        let found ← runList ctx depth b env args
         for (vs, m) in found do
           match goneOf vs with
           | some t => out := (.gone t, n + m) :: out
@@ -799,7 +804,7 @@ partial def runCallee (ctx : ACtx) (depth : Nat) (env : List (String × AVal)) (
   -- becomes of the path once they have.
   let handedOn := fun (after : Nat → Alts) => (do
     let mut out : Alts := []
-    let found ← runList ctx depth env args
+    let found ← runList ctx depth b env args
     for (vs, n) in found do
       match goneOf vs with
       | some t => out := (.gone t, n) :: out
@@ -809,7 +814,7 @@ partial def runCallee (ctx : ACtx) (depth : Nat) (env : List (String × AVal)) (
           k := k + (← escapes ctx depth v)
         out := out ++ after k
     cap ctx depth out : A Alts)
-  match f with
+  match b.expr f with
   | .label l =>
     -- Applying a label leaves for its scope.
     if ctx.lower then handedOn fun n => [(.gone ("@" ++ l), n)] else general
@@ -817,11 +822,11 @@ partial def runCallee (ctx : ACtx) (depth : Nat) (env : List (String × AVal)) (
     -- A value written with its type is the value: nothing is called.
     if q.isNone && (x == Syntax.ascribeMark || x == Syntax.instMark || x == Syntax.moveMark) then
       match args with
-      | value :: _ => runExpr ctx depth env value
+      | value :: _ => runExpr ctx depth b env value
       | [] => pure [(.unknown, 0)]
     else if q.isNone && (env.lookup x).isSome then general
     else if let some c := ctx.ctorOf x then
-      let alts ← runList ctx depth env args
+      let alts ← runList ctx depth b env args
       pure (alts.map fun (vs, n) =>
         match goneOf vs with
         | some t => (.gone t, n)
@@ -829,7 +834,7 @@ partial def runCallee (ctx : ACtx) (depth : Nat) (env : List (String × AVal)) (
     else if x == "arr_len" && (ctx.fns[x]?).isNone then
       -- Asking how long an array is only looks at it: the array is still
       -- whoever's it was.
-      let found ← runList ctx depth env args
+      let found ← runList ctx depth b env args
       pure (found.map fun (vs, n) =>
         match goneOf vs with
         | some t => (.gone t, n)
@@ -843,7 +848,7 @@ partial def runCallee (ctx : ACtx) (depth : Nat) (env : List (String × AVal)) (
         else handedOn fun n => (if resumptive then [(AVal.unknown, n)] else []) ++ [(.gone x, n)]
       else
         let mut worst := 0
-        let found ← runList ctx depth env args
+        let found ← runList ctx depth b env args
         for (vs, n) in found do
           let found ← unfollowed ctx depth vs
           for (_, k) in found do
@@ -854,93 +859,96 @@ partial def runCallee (ctx : ACtx) (depth : Nat) (env : List (String × AVal)) (
     else general
   | _ => general
 
-partial def runStmts (ctx : ACtx) (depth : Nat) (env : List (String × AVal)) :
-    List Stmt → A Alts
+partial def runStmts (ctx : ACtx) (depth : Nat) (b : Body) (env : List (String × AVal)) :
+    List StmtId → A Alts
   | [] => pure [(.data "" [], 0)]
-  | .located _ _ s :: rest => runStmts ctx depth env (s :: rest)
-  | [.expr e] => runExpr ctx depth env e
-  | .expr e :: rest => do
-    -- The value is dropped, so the rest does not depend on which path was taken.
-    let found ← runExpr ctx depth env e
-    -- (Where being let go is a use, as it is of a value with a `drop` to
-    -- run, which the statement then runs: the value itself, let go here.)
-    let letGo := if ctx.handed && !found.isEmpty && found.all (fun (v, _) => isTracked v) then 1 else 0
-    let (on, left) ← settle ctx depth found (leaves := false)
-    match on with
-    | none => pure left
-    | some first =>
-      let alts ← runStmts ctx depth env rest
-      pure ((alts.map fun (v, n) => (v, n + first + letGo)) ++ left)
-  | .let_ pat value :: rest => do
-    let mut out : Alts := []
-    let owning := match pat, value with
-      | .var _, .closure _ _ => true
-      | .var _, .call _ (.name none m) [.closure _ _, _] => m == Syntax.ascribeMark
-      | _, _ => false
-    let found ← runExpr { ctx with owning := owning } depth env value
-    for (v, n) in found do
-      if isGone v then out := (v, n) :: out
-      else
-        if ctx.probing then
-          match pat, v with
-          | .var _, _ => pure ()
-          | .wild, _ => pure ()
-          | _, .probe => failure
-          | _, _ => pure ()
-        let (_, binds) := fit ctx pat v
-        let bound := binds.map (·.1)
-        let others := ((binders ctx pat).filter (!bound.contains ·)).map (·, AVal.unknown)
-        let taken := takenApart ctx pat v
-        -- (`let _ = x` lets `x` go, as `x;` does.)
-        let taken := match pat with
-          | .wild => if ctx.handed && isTracked v then taken + 1 else taken
-          | _ => taken
-        let found ← runStmts ctx depth (binds ++ others ++ env) rest
-        for (v', n') in found do
-          out := (v', n + n' + taken) :: out
-    cap ctx depth out
-  | .letMut x value :: rest => do
-    -- The value goes into a cell, where the count does not follow it.
-    let (on, left) ← settle ctx depth (← runExpr ctx depth env value)
-    match on with
-    | none => pure left
-    | some first =>
-      let alts ← runStmts ctx depth ((x, .unknown) :: env) rest
-      pure ((alts.map fun (v, n) => (v, n + first)) ++ left)
-  | .assign target value :: rest => do
-    let (on, left) ← settle ctx depth (← runExpr ctx depth env value)
-    match on with
-    | none => pure left
-    | some first =>
-      let (inTarget, left') ← match target with
-        | .deref e => settle ctx depth (← runExpr ctx depth env e)
-        | _ => pure (some 0, [])
-      match inTarget with
-      | none => pure (left ++ left'.map fun (v, n) => (v, n + first))
-      | some inTarget =>
-        let alts ← runStmts ctx depth env rest
-        pure ((alts.map fun (v, n) => (v, n + first + inTarget)) ++ left
-          ++ left'.map fun (v, n) => (v, n + first))
-  | .defer e :: rest => do
-    -- A cleanup runs however the rest is left.
-    let mut ns : List Nat := []
-    for (v, n) in ← runExpr ctx depth env e do
-      ns := (n + (← escapes ctx depth v)) :: ns
-    let first := ctx.fold ns
-    let alts ← runStmts ctx depth env rest
-    pure (alts.map fun (v, n) => (v, n + first))
+  | s :: rest =>
+    match b.stmt s, rest with
+    | .located _ _ s, rest => runStmts ctx depth b env (s :: rest)
+    | .expr e, [] => runExpr ctx depth b env e
+    | .expr e, rest => do
+      -- The value is dropped, so the rest does not depend on which path was taken.
+      let found ← runExpr ctx depth b env e
+      -- (Where being let go is a use, as it is of a value with a `drop` to
+      -- run, which the statement then runs: the value itself, let go here.)
+      let letGo := if ctx.handed && !found.isEmpty && found.all (fun (v, _) => isTracked v) then 1 else 0
+      let (on, left) ← settle ctx depth found (leaves := false)
+      match on with
+      | none => pure left
+      | some first =>
+        let alts ← runStmts ctx depth b env rest
+        pure ((alts.map fun (v, n) => (v, n + first + letGo)) ++ left)
+    | .let_ pat value, rest => do
+      let mut out : Alts := []
+      let owning := match pat, b.expr value with
+        | .var _, .closure _ _ => true
+        | .var _, .call _ m #[c, _] =>
+          b.bare? m == some Syntax.ascribeMark && (match b.expr c with | .closure _ _ => true | _ => false)
+        | _, _ => false
+      let found ← runExpr { ctx with owning := owning } depth b env value
+      for (v, n) in found do
+        if isGone v then out := (v, n) :: out
+        else
+          if ctx.probing then
+            match pat, v with
+            | .var _, _ => pure ()
+            | .wild, _ => pure ()
+            | _, .probe => failure
+            | _, _ => pure ()
+          let (_, binds) := fit ctx pat v
+          let bound := binds.map (·.1)
+          let others := ((binders ctx pat).filter (!bound.contains ·)).map (·, AVal.unknown)
+          let taken := takenApart ctx pat v
+          -- (`let _ = x` lets `x` go, as `x;` does.)
+          let taken := match pat with
+            | .wild => if ctx.handed && isTracked v then taken + 1 else taken
+            | _ => taken
+          let found ← runStmts ctx depth b (binds ++ others ++ env) rest
+          for (v', n') in found do
+            out := (v', n + n' + taken) :: out
+      cap ctx depth out
+    | .letMut x value, rest => do
+      -- The value goes into a cell, where the count does not follow it.
+      let (on, left) ← settle ctx depth (← runExpr ctx depth b env value)
+      match on with
+      | none => pure left
+      | some first =>
+        let alts ← runStmts ctx depth b ((x, .unknown) :: env) rest
+        pure ((alts.map fun (v, n) => (v, n + first)) ++ left)
+    | .assign target value, rest => do
+      let (on, left) ← settle ctx depth (← runExpr ctx depth b env value)
+      match on with
+      | none => pure left
+      | some first =>
+        let (inTarget, left') ← match b.expr target with
+          | .deref e => settle ctx depth (← runExpr ctx depth b env e)
+          | _ => pure (some 0, [])
+        match inTarget with
+        | none => pure (left ++ left'.map fun (v, n) => (v, n + first))
+        | some inTarget =>
+          let alts ← runStmts ctx depth b env rest
+          pure ((alts.map fun (v, n) => (v, n + first + inTarget)) ++ left
+            ++ left'.map fun (v, n) => (v, n + first))
+    | .defer e, rest => do
+      -- A cleanup runs however the rest is left.
+      let mut ns : List Nat := []
+      for (v, n) in ← runExpr ctx depth b env e do
+        ns := (n + (← escapes ctx depth v)) :: ns
+      let first := ctx.fold ns
+      let alts ← runStmts ctx depth b env rest
+      pure (alts.map fun (v, n) => (v, n + first))
 
 end
 
 /-- The most uses of `x` along any path through `body`, or with `ctx.lower` the
 fewest, if the count finishes. `outer` are the other local names in scope,
 about which nothing is known. -/
-def pathUses (ctx : ACtx) (outer : List String) (x : String) (body : List Stmt)
+def pathUses (ctx : ACtx) (outer : List String) (x : String) (b : Flat.Body) (body : List Flat.StmtId)
     (known : List (String × AVal) := []) : Option Nat :=
   let env := known ++ (x, AVal.tracked) :: outer.map (·, AVal.unknown)
   let count : A Nat := do
     let mut ns : List Nat := []
-    let found ← runStmts ctx 8 env body
+    let found ← runStmts ctx 8 b env body
     for (v, n) in found do
       -- What the body yields leaves the region being counted.
       ns := (n + (← escapes ctx 8 v)) :: ns
@@ -951,13 +959,13 @@ def pathUses (ctx : ACtx) (outer : List String) (x : String) (body : List Stmt)
 `probes`, if the count finishes: none if no use comes before such a call. A
 path that leaves the body with something a probe may be called through ends
 there too, since the call may follow. -/
-def usesBeforeProbe (ctx : ACtx) (outer : List String) (x : String) (body : List Stmt)
+def usesBeforeProbe (ctx : ACtx) (outer : List String) (x : String) (b : Flat.Body) (body : List Flat.StmtId)
     (known : List (String × AVal)) : Option Nat :=
   let ctx := { ctx with lower := false, probing := true }
   let env := known ++ (x, AVal.tracked) :: outer.map (·, AVal.unknown)
   let count : A Nat := do
     let mut worst := 0
-    for (v, n) in ← runStmts ctx 8 env body do
+    for (v, n) in ← runStmts ctx 8 b env body do
       match v with
       | .gone t => if t == probeTarget || t == "*" then worst := max worst n
       | _ =>
@@ -966,39 +974,36 @@ def usesBeforeProbe (ctx : ACtx) (outer : List String) (x : String) (body : List
     pure worst
   (count.run { fuel := 20000 }).map (·.1)
 
+open Flat in
 /-- Does evaluating this run nothing at all? `quiet` names what only builds a
 value. -/
-partial def stillExpr (quiet : String → Bool) : Expr → Bool
-  | .int _ => true
-  | .name _ _ => true
-  | .label _ => true
-  | .closure _ _ => true
-  | .ref _ _ => true
-  | .tuple es => es.all (stillExpr quiet)
-  | .call _ (.name _ f) args => quiet f && args.all (stillExpr quiet)
+partial def stillExpr (b : Body) (quiet : String → Bool) (e : ExprId) : Bool :=
+  match b.expr e with
+  | .int _ | .name _ _ | .label _ | .closure _ _ | .ref _ _ => true
+  | .tuple es => es.all (stillExpr b quiet)
+  | .call _ f args =>
+    match b.expr f with
+    | .name _ g => quiet g && args.all (stillExpr b quiet)
+    | _ => false
   | _ => false
 
-def isName (x : String) : Expr → Bool
-  | .name none y => y == x
-  | _ => false
+def isName (b : Flat.Body) (x : String) (e : Flat.ExprId) : Bool := b.bare? e == some x
 
+open Flat in
 mutual
 
 /-- Whether `x` is used by this expression before anything in it could fail to
 come back: `some true` if so, `some false` if something that may not come back
 runs first, `none` if neither happens. -/
-partial def firstUse (quiet : String → Bool) (x : String) : Expr → Option Bool
-  | .tuple es => firstParts quiet x true false es
-  | .call _ f args =>
-    firstParts quiet x (match f with
+partial def firstUse (b : Body) (quiet : String → Bool) (x : String) (e : ExprId) : Option Bool :=
+  match b.expr e with
+  | .tuple es => firstParts b quiet x true false es.toList
+  | .call _ f args | .tailCall _ f args =>
+    firstParts b quiet x (match b.expr f with
       | .name _ g => quiet g
-      | _ => false) false (f :: args)
-  | .tailCall _ f args =>
-    firstParts quiet x (match f with
-      | .name _ g => quiet g
-      | _ => false) false (f :: args)
-  | .proj e _ => if isName x e then some true else firstUse quiet x e
-  | .deref e => if isName x e then none else firstUse quiet x e
+      | _ => false) false (f :: args.toList)
+  | .proj e _ => if isName b x e then some true else firstUse b quiet x e
+  | .deref e => if isName b x e then none else firstUse b quiet x e
   | .handle _ _ => some false
   | .labelScope _ _ => some false
   | _ => none
@@ -1006,56 +1011,59 @@ partial def firstUse (quiet : String → Bool) (x : String) : Expr → Option Bo
 /-- The parts of a tuple or call, in order. `x` among them is handed on once
 all are computed, so nothing after it may fail to come back. `builds` says the
 whole only builds a value; otherwise it is a call that may not come back. -/
-partial def firstParts (quiet : String → Bool) (x : String) (builds pending : Bool) :
-    List Expr → Option Bool
+partial def firstParts (b : Body) (quiet : String → Bool) (x : String) (builds pending : Bool) :
+    List ExprId → Option Bool
   | [] => if pending then some true else if builds then none else some false
   | e :: rest =>
-    if isName x e then firstParts quiet x builds true rest
-    else if stillExpr quiet e then firstParts quiet x builds pending rest
+    if isName b x e then firstParts b quiet x builds true rest
+    else if stillExpr b quiet e then firstParts b quiet x builds pending rest
     else
-      match firstUse quiet x e with
+      match firstUse b quiet x e with
       | some true => if pending then some false else some true
       | some false => some false
-      | none => if pending then some false else firstParts quiet x builds pending rest
+      | none => if pending then some false else firstParts b quiet x builds pending rest
 
 end
 
+open Flat in
 /-- Is `x` certainly used before anything in these statements could fail to
 come back? Decided from their shape, in the order they are evaluated: a quick
 yes that saves counting along paths. -/
-partial def usedFirst (quiet : String → Bool) (x : String) : List Stmt → Bool
+partial def usedFirst (b : Body) (quiet : String → Bool) (x : String) : List StmtId → Bool
   | [] => false
-  | .located _ _ s :: rest => usedFirst quiet x (s :: rest)
-  | [.expr e] => isName x e || firstUse quiet x e == some true
-  | .expr e :: rest =>
-    match firstUse quiet x e with
-    | some b => b
-    | none => usedFirst quiet x rest
-  | .let_ pat value :: rest =>
-    if isName x value then true
-    else
-      match firstUse quiet x value with
-      | some b => b
-      | none => !(Elab.patVars pat).contains x && usedFirst quiet x rest
-  | .letMut y value :: rest =>
-    if isName x value then true
-    else
-      match firstUse quiet x value with
-      | some b => b
-      | none => y != x && usedFirst quiet x rest
-  | .assign _ value :: rest =>
-    if isName x value then true
-    else
-      match firstUse quiet x value with
-      | some b => b
-      | none => usedFirst quiet x rest
-  | .defer _ :: rest => usedFirst quiet x rest
+  | s :: rest =>
+    match b.stmt s, rest with
+    | .located _ _ s, rest => usedFirst b quiet x (s :: rest)
+    | .expr e, [] => isName b x e || firstUse b quiet x e == some true
+    | .expr e, rest =>
+      match firstUse b quiet x e with
+      | some r => r
+      | none => usedFirst b quiet x rest
+    | .let_ pat value, rest =>
+      if isName b x value then true
+      else
+        match firstUse b quiet x value with
+        | some r => r
+        | none => !(Elab.patVars pat).contains x && usedFirst b quiet x rest
+    | .letMut y value, rest =>
+      if isName b x value then true
+      else
+        match firstUse b quiet x value with
+        | some r => r
+        | none => y != x && usedFirst b quiet x rest
+    | .assign _ value, rest =>
+      if isName b x value then true
+      else
+        match firstUse b quiet x value with
+        | some r => r
+        | none => usedFirst b quiet x rest
+    | .defer _, rest => usedFirst b quiet x rest
 
 /-- Record, for each binding used more than once in `body`, that its type must
 allow that. `outer` is the scope the bindings are added to. A binding whose
 type is already known to allow it needs no count; one that fails the coarse
 count is counted again along the paths the program can take. -/
-def checkUses (pos : String) (outer : Scope) (binds : Scope) (body : List Stmt) : M Unit := do
+def checkUses (code : Flat.Body) (pos : String) (outer : Scope) (binds : Scope) (body : List Flat.StmtId) : M Unit := do
   -- Report at the statement the bindings belong to, not the last one checked.
   modify fun st => { st with pos := pos }
   let s ← get
@@ -1096,7 +1104,7 @@ def checkUses (pos : String) (outer : Scope) (binds : Scope) (body : List Stmt) 
     if let .val _ bid := b then
       unless mine.isEmpty do
         modify fun st => { st with partReads := st.partReads.filter fun (owner, _, _, _, _, _) => owner != bid }
-    let apart := !mine.isEmpty && !body.any (Syntax.usedWholeStmt x)
+    let apart := !mine.isEmpty && !body.any (code.usedWholeStmt x)
     -- A value with a `drop` to run, of which only parts that can be used
     -- any number of times are read: reading them takes nothing out of it.
     -- It stays whole, and is destroyed when its block is left, as a name
@@ -1141,7 +1149,7 @@ def checkUses (pos : String) (outer : Scope) (binds : Scope) (body : List Stmt) 
       let taken := (mine.map fun (_, idx, _, _) => idx).eraseDups
       -- (The machine counts each read of a value that holds a resumption
       -- as a use of all of it.)
-      if usesStmts resumptive x body ≥ 2 then
+      if usesStmts code resumptive x body ≥ 2 then
         modify fun st => { st with takenApart := st.takenApart.push (subject, pos ++ s!"`{x}` is used more than once") }
       let others ← (try otherFields subject 0 catch _ => pure none)
       let count := match others with
@@ -1169,14 +1177,14 @@ def checkUses (pos : String) (outer : Scope) (binds : Scope) (body : List Stmt) 
       for (_, idx, part, at_) in mine do
         unless seenParts.contains part do
           seenParts := part :: seenParts
-          let only := Syntax.onlyPartStmts x part body
+          let (ob, only) := Flat.onlyPartStmts code x part body
           let ft := (← (try fieldType subject idx catch _ => pure none)).getD subject
-          if usesStmts resumptive x only ≥ 2 then
+          if usesStmts ob resumptive x only ≥ 2 then
             let ft ← zonk ft
             modify fun st => { st with seen := {} }
             let dropped := (← tyHasDrop [] ft).isSome
             let twice : Bool := match pathUses (if dropped then { ctx with handed := true } else ctx)
-                (names.filter (· != x)) x only with
+                (names.filter (· != x)) x ob only with
               | some n => decide (n ≥ 2)
               | none => true
             if twice then
@@ -1185,7 +1193,7 @@ def checkUses (pos : String) (outer : Scope) (binds : Scope) (body : List Stmt) 
               modify fun st => { st with pos := pos }
           if s.anyMust && !x.startsWith "%" then
             modify fun st =>
-              { st with lowerChecks := st.lowerChecks.push (pos, x, ft, names.filter (· != x), only) }
+              { st with lowerChecks := st.lowerChecks.push (pos, x, ft, names.filter (· != x), ob, only) }
     else
       -- Used as a whole too: each part read lets go of the rest of it.
       for (subject, idx, _, at_) in mine do
@@ -1199,7 +1207,7 @@ def checkUses (pos : String) (outer : Scope) (binds : Scope) (body : List Stmt) 
         modify fun st => { st with pos := pos }
     if apart then continue
     if let some t := t then
-      let mentions := usesStmts resumptive x body
+      let mentions := usesStmts code resumptive x body
       if mentions ≥ 2 then
         let t ← zonk t
         modify fun st => { st with seen := {} }
@@ -1210,7 +1218,7 @@ def checkUses (pos : String) (outer : Scope) (binds : Scope) (body : List Stmt) 
           && !(← tyOwnsOnce [] t) && !dropped
         unless settled do
           match pathUses (if dropped then { ctx with handed := true } else ctx)
-              (names.filter (· != x)) x body with
+              (names.filter (· != x)) x code body with
           | some n => if n ≥ 2 then mustDup t (twice x)
           | none => mustDup t (twice x)
       -- A value that has to be used: is it, however the body goes? Looked at
@@ -1218,7 +1226,13 @@ def checkUses (pos : String) (outer : Scope) (binds : Scope) (body : List Stmt) 
       -- stands for nothing the program wrote.
       if s.anyMust && !x.startsWith "%" then
         modify fun st =>
-          { st with lowerChecks := st.lowerChecks.push (pos, x, t, names.filter (· != x), body) }
+          { st with lowerChecks := st.lowerChecks.push (pos, x, t, names.filter (· != x), code, body) }
+
+/-- A callable of `arity` arguments that uses the environment `%env` when it
+is called. -/
+def usesEnv (arity : Nat) : AVal :=
+  let b := Flat.ofClauses [.mk (List.replicate arity Pattern.wild) [.expr (.proj (.name none "%env") 0)]]
+  .clo b b.roots [("%env", AVal.tracked)]
 
 /-- Does a value of this type hold a callable that can jump to a label? -/
 partial def tyJumps (t : Ty) : M Bool := do
@@ -1344,12 +1358,12 @@ def runLowerChecks (fnTy : Ty) : M Unit := do
   -- the others are then let go is no loss. Whoever gives them is asked that
   -- each holds what has to be used.
   let certain := (s.envGroups.toList.filter (·.2.2.1)).flatMap fun g => g.2.1.map (·.1)
-  for (pos, x, t, names, body) in s.lowerChecks do
+  for (pos, x, t, names, b, body) in s.lowerChecks do
     -- A variable that gives its value away: if some path does not use the
     -- value, the variable is given a cleanup that destroys it there.
     if let some (site, held, at_) := s.givenSites.lookup pos then
-      unless usedFirst quiet x body do
-        let somewhere_not := match pathUses { ctx with handed := true } names x body with
+      unless usedFirst b quiet x body do
+        let somewhere_not := match pathUses { ctx with handed := true } names x b body with
           | some n => n == 0
           | none => true
         if somewhere_not then
@@ -1396,8 +1410,8 @@ def runLowerChecks (fnTy : Ty) : M Unit := do
     let library := libraryOwner s.owner
     if free && !heldDrop && hasParam t && ownValue && s.ownItems && !library
         && (← tyMustUse roots [] t).isNone then
-      unless s.flagged.contains pos || usesStmts resumptive x body == 0 || usedFirst quiet x body do
-        if (pathUses { ctx with handed := true, capturesOwned := true } names x body) == some 0 then
+      unless s.flagged.contains pos || usesStmts b resumptive x body == 0 || usedFirst b quiet x body do
+        if (pathUses { ctx with handed := true, capturesOwned := true } names x b body) == some 0 then
           let place := ((pos.splitOn ":").take 2).filterMap String.toNat?
           let (line, col) := match place with
             | [line, col] => (line, col)
@@ -1416,13 +1430,13 @@ def runLowerChecks (fnTy : Ty) : M Unit := do
       if let some name := named then
         -- (A variable that gives its value away asks, when its block ends,
         -- whether it did: it may on some paths and not on others.)
-        unless s.flagged.contains pos || usesStmts resumptive x body == 0
-            || (!heldDrop && usedFirst quiet x body) do
+        unless s.flagged.contains pos || usesStmts b resumptive x body == 0
+            || (!heldDrop && usedFirst b quiet x body) do
           -- (A callable is counted as what has to be used is: handed to a
           -- function, it is used only if that function uses it, since one
           -- that lets it go does not destroy it.)
-          let count := if heldDrop then pathUses { ctx with capturesOwned := true } names x body
-            else pathUses { ctx with handed := true, capturesOwned := true } names x body
+          let count := if heldDrop then pathUses { ctx with capturesOwned := true } names x b body
+            else pathUses { ctx with handed := true, capturesOwned := true } names x b body
           if count == some 0 then
             if heldDrop && name == "%generic" then
               throw s!"{pos}`{x}` holds a value of a type the function is generic in, which may have a `drop` to run, and is not used on every path (a function it is given uses it only if it calls it or hands it on): where it is not used nothing would run the `drop`. Use it on every path, or give it up there with `cancel({x})`, which destroys what it holds"
@@ -1440,11 +1454,11 @@ def runLowerChecks (fnTy : Ty) : M Unit := do
             throwThe Elab.Said { msg := s!"{pos}`{x}` is used on one path and not on another, and a `{name}` has a `drop` to run: where it is not used nothing would run it. Use it on every path, let it go there with a function that takes it, or keep it in a variable (`let mut {x}`), which is destroyed where it was not used", decision := some (.letMut owner line col x) }
       continue
     let mut unused := false
-    if usesStmts resumptive x body == 0 then unused := true
-    else if usedFirst quiet x body then unused := false
+    if usesStmts b resumptive x body == 0 then unused := true
+    else if usedFirst b quiet x body then unused := false
     else
       let counted := fun (c : ACtx) =>
-        match pathUses c names x body with
+        match pathUses c names x b body with
         | some n => n == 0
         | none => true
       unused := counted ctx
@@ -1480,20 +1494,19 @@ def runLowerChecks (fnTy : Ty) : M Unit := do
   -- Callables that run in one environment, given whole: calling one uses it
   -- up. Each is taken to use the environment when called, and the uses are
   -- counted along every path, as for any value used once.
-  for (env, members, must, names, body) in s.envGroups do
+  for (env, members, must, names, b, body) in s.envGroups do
     let listed := ", ".intercalate (members.map fun (x, _) => s!"`{x}`")
     let known := members.map fun (x, arity) =>
-      (x, AVal.clo [.mk (List.replicate arity Pattern.wild) [.expr (.proj (.name none "%env") 0)]]
-        [("%env", AVal.tracked)])
+      (x, usesEnv arity)
     let outer := names.filter fun n => !members.any (·.1 == n)
-    match pathUses { ctx with lower := false } outer "%env" body known with
+    match pathUses { ctx with lower := false } outer "%env" b body known with
     | some n =>
       if n ≥ 2 then
         throw s!"{listed} run in the environment `{env}`, which is used up by the first that is called: on some path more than one call is made"
     | none =>
       throw s!"{listed} run in the environment `{env}`, which is used up by the first that is called: it could not be shown that no path calls more than one"
     if must then
-      match pathUses ctx outer "%env" body known with
+      match pathUses ctx outer "%env" b body known with
       | some n =>
         if n == 0 then
           throw s!"the environment `{env}` has to be used: on some path none of {listed} is called"
@@ -1502,17 +1515,15 @@ def runLowerChecks (fnTy : Ty) : M Unit := do
   -- An environment that is there only once a callable has run: nothing runs in
   -- it before. A path is followed up to the first call that leaves the
   -- environment, and no call of one that runs in it may be on it.
-  for (env, producers, members, names, body) in s.envAfter do
+  for (env, producers, members, names, b, body) in s.envAfter do
     let known :=
       (producers.map fun (x, arity) =>
-        (x, AVal.clo [.mk (List.replicate arity Pattern.wild) [.expr (.name none "%left")]]
-          [("%left", AVal.gone "%after")]))
-      ++ members.map fun (x, arity) =>
-        (x, AVal.clo [.mk (List.replicate arity Pattern.wild) [.expr (.proj (.name none "%env") 0)]]
-          [("%env", AVal.tracked)])
+        let left := Flat.ofClauses [.mk (List.replicate arity Pattern.wild) [.expr (.name none "%left")]]
+        (x, AVal.clo left left.roots [("%left", AVal.gone "%after")]))
+      ++ members.map fun (x, arity) => (x, usesEnv arity)
     let outer := names.filter fun n => !known.any (·.1 == n)
     let listed := fun (xs : List (String × Nat)) => ", ".intercalate (xs.map fun (x, _) => s!"`{x}`")
-    match pathUses { ctx with lower := false } outer "%env" body known with
+    match pathUses { ctx with lower := false } outer "%env" b body known with
     | some 0 => pure ()
     | _ =>
       throw s!"{listed members} runs in the environment `{env}`, which is there only once {listed producers} has run: on some path it is called first"
@@ -1520,15 +1531,13 @@ def runLowerChecks (fnTy : Ty) : M Unit := do
   -- it is used up, so none it is lent to is called after. A path is followed
   -- up to each call of one it is lent to, and no call of one it is given to
   -- may be on it.
-  for (env, owners, borrowers, names, body) in s.envLent do
+  for (env, owners, borrowers, names, b, body) in s.envLent do
     let known :=
-      (owners.map fun (x, arity) =>
-        (x, AVal.clo [.mk (List.replicate arity Pattern.wild) [.expr (.proj (.name none "%env") 0)]]
-          [("%env", AVal.tracked)]))
+      (owners.map fun (x, arity) => (x, usesEnv arity))
       ++ borrowers.map fun (x, _) => (x, AVal.probe)
     let outer := names.filter fun n => !known.any (·.1 == n)
     let listed := fun (xs : List (String × Nat)) => ", ".intercalate (xs.map fun (x, _) => s!"`{x}`")
-    match usesBeforeProbe ctx outer "%env" body known with
+    match usesBeforeProbe ctx outer "%env" b body known with
     | some 0 => pure ()
     | some _ =>
       throw s!"{listed borrowers} runs in the environment `{env}` lent to it, and {listed owners} is given `{env}` and uses it up: on some path {listed borrowers} is called after {listed owners}"

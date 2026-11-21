@@ -3,38 +3,34 @@ module
 public import Glorious.Syntax.Ast
 
 /-!
-# A module's items, flat
+# A declaration's body, flat
 
-The parser's items are trees: each pass over a program rebuilds every node it
-passes through, and keeping a parsed module keeps every node apart. Flat, a
-module's expressions, statements, clauses and patterns are each one array,
-and a node names its parts by their places in those (`ExprId`, ...). Every
-expression has a place of its own, by which what is decided of it can be said
-beside it rather than written into a copy of the tree.
+A function's clauses as trees: each pass over a program rebuilds every node it
+passes through. Flat, a body's expressions, statements and clauses are each
+one array, and a node names its parts by their places in those (`ExprId`,
+...). Every expression has a place of its own in its body, by which what is
+decided of it can be said beside it rather than written into a copy of the
+tree. Each declaration has a body of its own, so that its places do not move
+when another declaration changes, and a body is the same value wherever the
+same text is (per-declaration caching).
 
-`flatten` and `unflatten` go between the two; `unflatten (flatten items)` is
-the items again (checked of the prelude, the library and every example,
-`Checks`). Types stay trees: they are small, and the checker reads them whole.
+Patterns and types stay trees: they are small, and are read whole.
+
+`ofClauses` and `toClauses` go between the two; `toClauses (ofClauses cs)` is
+`cs` again (checked of the prelude, the library and every example,
+`Checks`).
 -/
 
 public section
 
 namespace Glorious.Syntax.Flat
 
-/-- Where a node is in its module's arrays. -/
+/-- Where a node is in its body's arrays. -/
 abbrev ExprId := Nat
 abbrev StmtId := Nat
 abbrev ClauseId := Nat
-abbrev PatId := Nat
 
-/-- A pattern, its parts by place. -/
-inductive FPat where
-  | wild
-  | var (name : String)
-  | int (n : Int)
-  | ctor (name : String) (qual : Option String) (args : Array PatId)
-  | tuple (args : Array PatId)
-  deriving Inhabited, Hashable, BEq
+deriving instance BEq for Pattern
 
 /-- An expression, its parts by place (`Syntax.Expr`). -/
 inductive FExpr where
@@ -57,7 +53,7 @@ inductive FExpr where
 
 /-- A statement, its parts by place (`Syntax.Stmt`). -/
 inductive FStmt where
-  | let_ (pat : PatId) (value : ExprId)
+  | let_ (pat : Pattern) (value : ExprId)
   | expr (e : ExprId)
   | defer (e : ExprId)
   | letMut (name : String) (value : ExprId)
@@ -65,67 +61,95 @@ inductive FStmt where
   | located (line col : Nat) (s : StmtId)
   deriving Inhabited, Hashable, BEq
 
-/-- A clause: its patterns and its body, by place. -/
+/-- A clause: its patterns, and its body's statements by place. -/
 structure FClause where
-  pats : Array PatId
+  pats : List Pattern
   body : Array StmtId
   deriving Inhabited, Hashable, BEq
 
-/-- An item, its functions' clauses by place (`Syntax.Item`). -/
-inductive FItem where
-  | enum (name : String) (params : List String) (ctors : List (String × List TypeExpr))
-  | struct (name : String) (params : List String) (fields : List TypeExpr)
-  | effect (name : String) (params : List String) (ops : List OpDecl)
-  | fn (name : String) (params : List String) (annots : List (Option TypeExpr))
-      (ret : Option TypeExpr) (clauses : Array ClauseId)
-  | alias (name : String) (value : ExprId)
-  | fixity
-  | coerce (name : String)
-  | trait (name : String) (methods : List (String × List TypeExpr × Option TypeExpr))
-  | impl (params : List String) (trait : String) (head : String) (args : List String)
-      (context : List (String × String)) (methods : Array FItem)
-  | use (head : String) (lower : Nat) (upper : Option Nat)
-  | fieldNames (ctor : String) (names : List String) (pubs : List Bool)
-  | typeAlias (name : String) (params : List String) (body : TypeExpr)
-  | traitInfo (name : String) (supers : List String) (defaults : Array FItem)
-      (params : List String) (assocs : List String)
-  | bounds (fn : String) (bounds : List Bound)
-  | pub (parent : Bool) (item : FItem)
-  | unsafeFn (name : String)
-  | module (name : String) (body : Option (Array FItem))
-  | import (path : List String) (rename : Option String) (glob : Bool)
-  deriving Inhabited
-
-/-- A module's items, flat: the nodes, each kind in an array of its own, and
-the items, which name the nodes by place. -/
-structure Module where
+/-- A declaration's body: its nodes, each kind in an array of its own, and
+its own clauses (`roots`). -/
+structure Body where
   exprs : Array FExpr := #[]
   stmts : Array FStmt := #[]
   clauses : Array FClause := #[]
-  pats : Array FPat := #[]
-  items : Array FItem := #[]
-  deriving Inhabited
+  roots : Array ClauseId := #[]
+  deriving Inhabited, Hashable, BEq
+
+namespace Body
+
+@[inline] def expr (b : Body) (e : ExprId) : FExpr := b.exprs[e]!
+@[inline] def stmt (b : Body) (s : StmtId) : FStmt := b.stmts[s]!
+@[inline] def clause (b : Body) (c : ClauseId) : FClause := b.clauses[c]!
+
+/-- The statement under its places (`located`), with the place of the
+innermost. -/
+partial def unlocated (b : Body) (s : StmtId) : StmtId :=
+  match b.stmt s with
+  | .located _ _ inner => b.unlocated inner
+  | _ => s
+
+/-- The expressions a statement has (`Stmt.exprs`). -/
+partial def stmtExprs (b : Body) (s : StmtId) : Array ExprId :=
+  match b.stmt s with
+  | .let_ _ v | .expr v | .defer v | .letMut _ v => #[v]
+  | .assign t v => #[t, v]
+  | .located _ _ s => b.stmtExprs s
+
+/-- The expressions directly inside an expression, outside any block
+(`Expr.direct`). -/
+def direct (b : Body) (e : ExprId) : Array ExprId :=
+  match b.expr e with
+  | .call _ f args | .tailCall _ f args => #[f] ++ args
+  | .tuple args => args
+  | .proj e _ | .deref e | .reborrow _ e | .fieldOf _ e _ => #[e]
+  | .handle subject _ => #[subject]
+  | _ => #[]
+
+/-- The name an expression is, if it is one. -/
+@[inline] def name? (b : Body) (e : ExprId) : Option (Option String × String) :=
+  match b.expr e with
+  | .name q x => some (q, x)
+  | _ => none
+
+/-- The name an expression is, if it is one written without a path. -/
+@[inline] def bare? (b : Body) (e : ExprId) : Option String :=
+  match b.expr e with
+  | .name none x => some x
+  | _ => none
+
+mutual
+
+/-- Is `p` true of an expression or of one inside it, blocks' too? -/
+partial def anyExpr (b : Body) (p : FExpr → Bool) (e : ExprId) : Bool :=
+  let n := b.expr e
+  p n || match n with
+    | .call _ f args | .tailCall _ f args => b.anyExpr p f || args.any (b.anyExpr p)
+    | .tuple args => args.any (b.anyExpr p)
+    | .proj e _ | .deref e | .reborrow _ e | .fieldOf _ e _ => b.anyExpr p e
+    | .closure _ cs => cs.any (b.anyClause p)
+    | .handle s cs => b.anyExpr p s || cs.any (b.anyClause p)
+    | .labelScope _ body => body.any (b.anyStmt p)
+    | _ => false
+
+partial def anyClause (b : Body) (p : FExpr → Bool) (c : ClauseId) : Bool :=
+  (b.clause c).body.any (b.anyStmt p)
+
+partial def anyStmt (b : Body) (p : FExpr → Bool) (s : StmtId) : Bool :=
+  (b.stmtExprs s).any (b.anyExpr p)
+
+end
+
+end Body
 
 /-! ## From trees -/
 
 /-- The nodes made so far. -/
-abbrev Build := StateM Module
+abbrev Build := StateM Body
 
-def pushPat (p : FPat) : Build PatId := modifyGet fun m => (m.pats.size, { m with pats := m.pats.push p })
-def pushExpr (e : FExpr) : Build ExprId := modifyGet fun m => (m.exprs.size, { m with exprs := m.exprs.push e })
-def pushStmt (s : FStmt) : Build StmtId := modifyGet fun m => (m.stmts.size, { m with stmts := m.stmts.push s })
-def pushClause (c : FClause) : Build ClauseId := modifyGet fun m => (m.clauses.size, { m with clauses := m.clauses.push c })
-
-partial def flatPat : Pattern → Build PatId
-  | .wild => pushPat .wild
-  | .var x => pushPat (.var x)
-  | .int n => pushPat (.int n)
-  | .ctor name qual args => do
-    let args ← args.toArray.mapM flatPat
-    pushPat (.ctor name qual args)
-  | .tuple args => do
-    let args ← args.toArray.mapM flatPat
-    pushPat (.tuple args)
+def pushExpr (e : FExpr) : Build ExprId := modifyGet fun b => (b.exprs.size, { b with exprs := b.exprs.push e })
+def pushStmt (s : FStmt) : Build StmtId := modifyGet fun b => (b.stmts.size, { b with stmts := b.stmts.push s })
+def pushClause (c : FClause) : Build ClauseId := modifyGet fun b => (b.clauses.size, { b with clauses := b.clauses.push c })
 
 mutual
 
@@ -162,10 +186,7 @@ partial def flatExpr : Expr → Build ExprId
   | .fieldOf id e x => do pushExpr (.fieldOf id (← flatExpr e) x)
 
 partial def flatStmt : Stmt → Build StmtId
-  | .let_ p v => do
-    let p ← flatPat p
-    let v ← flatExpr v
-    pushStmt (.let_ p v)
+  | .let_ p v => do pushStmt (.let_ p (← flatExpr v))
   | .expr e => do pushStmt (.expr (← flatExpr e))
   | .defer e => do pushStmt (.defer (← flatExpr e))
   | .letMut x v => do pushStmt (.letMut x (← flatExpr v))
@@ -177,45 +198,20 @@ partial def flatStmt : Stmt → Build StmtId
 
 partial def flatClause : Clause → Build ClauseId
   | .mk pats body => do
-    let ps ← pats.toArray.mapM flatPat
     let b ← body.toArray.mapM flatStmt
-    pushClause ⟨ps, b⟩
+    pushClause ⟨pats, b⟩
 
 end
 
-partial def flatItem : Item → Build FItem
-  | .enum n ps cs => pure (.enum n ps cs)
-  | .struct n ps fs => pure (.struct n ps fs)
-  | .effect n ps ops => pure (.effect n ps ops)
-  | .fn n ps annots ret clauses => do
-    let cs ← clauses.toArray.mapM flatClause
-    pure (.fn n ps annots ret cs)
-  | .alias n v => do pure (.alias n (← flatExpr v))
-  | .fixity => pure .fixity
-  | .coerce n => pure (.coerce n)
-  | .trait n ms => pure (.trait n ms)
-  | .impl ps tr head args context methods => do
-    let ms ← methods.toArray.mapM flatItem
-    pure (.impl ps tr head args context ms)
-  | .use head lo hi => pure (.use head lo hi)
-  | .fieldNames c ns ps => pure (.fieldNames c ns ps)
-  | .typeAlias n ps body => pure (.typeAlias n ps body)
-  | .traitInfo n supers defaults ps assocs => do
-    let ds ← defaults.toArray.mapM flatItem
-    pure (.traitInfo n supers ds ps assocs)
-  | .bounds f bs => pure (.bounds f bs)
-  | .pub parent item => do pure (.pub parent (← flatItem item))
-  | .unsafeFn n => pure (.unsafeFn n)
-  | .module n none => pure (.module n none)
-  | .module n (some body) => do
-    let b ← body.toArray.mapM flatItem
-    pure (.module n (some b))
-  | .import path rename glob => pure (.import path rename glob)
+/-- Clauses as a body of their own. -/
+def ofClauses (clauses : List Clause) : Body :=
+  let (roots, b) := (clauses.toArray.mapM flatClause).run {}
+  { b with roots }
 
-/-- A module's items, flat. -/
-def flatten (items : List Item) : Module :=
-  let (fs, m) := (items.toArray.mapM flatItem).run {}
-  { m with items := fs }
+/-- An expression as a body of its own, and its place there. -/
+def ofExpr (e : Expr) : Body × ExprId :=
+  let (id, b) := (flatExpr e).run {}
+  (b, id)
 
 /-! ## Back to trees -/
 
@@ -223,75 +219,57 @@ instance : Inhabited Stmt := ⟨.expr (.int 0)⟩
 instance : Inhabited Clause := ⟨.mk [] []⟩
 instance : Inhabited Item := ⟨.fixity⟩
 
-partial def treePat (m : Module) (p : PatId) : Pattern :=
-  match m.pats[p]? with
-  | some .wild => .wild
-  | some (.var x) => .var x
-  | some (.int n) => .int n
-  | some (.ctor name qual args) => .ctor name qual (args.toList.map (treePat m))
-  | some (.tuple args) => .tuple (args.toList.map (treePat m))
-  | none => .wild
-
 mutual
 
-partial def treeExpr (m : Module) (e : ExprId) : Expr :=
-  match m.exprs[e]? with
-  | some (.int n) => .int n
-  | some (.name q x) => .name q x
-  | some (.label x) => .label x
-  | some (.call id f args) => .call id (treeExpr m f) (args.toList.map (treeExpr m))
-  | some (.tailCall id f args) => .tailCall id (treeExpr m f) (args.toList.map (treeExpr m))
-  | some (.tuple args) => .tuple (args.toList.map (treeExpr m))
-  | some (.proj e i) => .proj (treeExpr m e) i
-  | some (.closure id cs) => .closure id (cs.toList.map (treeClause m))
-  | some (.handle s cs) => .handle (treeExpr m s) (cs.toList.map (treeClause m))
-  | some (.labelScope x b) => .labelScope x (b.toList.map (treeStmt m))
-  | some (.ref uniq x) => .ref uniq x
-  | some (.deref e) => .deref (treeExpr m e)
-  | some (.reborrow uniq e) => .reborrow uniq (treeExpr m e)
-  | some (.refField id uniq x path star) => .refField id uniq x path star
-  | some (.fieldOf id e x) => .fieldOf id (treeExpr m e) x
-  | none => .int 0
+partial def treeExpr (b : Body) (e : ExprId) : Expr :=
+  match b.expr e with
+  | .int n => .int n
+  | .name q x => .name q x
+  | .label x => .label x
+  | .call id f args => .call id (treeExpr b f) (args.toList.map (treeExpr b))
+  | .tailCall id f args => .tailCall id (treeExpr b f) (args.toList.map (treeExpr b))
+  | .tuple args => .tuple (args.toList.map (treeExpr b))
+  | .proj e i => .proj (treeExpr b e) i
+  | .closure id cs => .closure id (cs.toList.map (treeClause b))
+  | .handle s cs => .handle (treeExpr b s) (cs.toList.map (treeClause b))
+  | .labelScope x body => .labelScope x (body.toList.map (treeStmt b))
+  | .ref uniq x => .ref uniq x
+  | .deref e => .deref (treeExpr b e)
+  | .reborrow uniq e => .reborrow uniq (treeExpr b e)
+  | .refField id uniq x path star => .refField id uniq x path star
+  | .fieldOf id e x => .fieldOf id (treeExpr b e) x
 
-partial def treeStmt (m : Module) (s : StmtId) : Stmt :=
-  match m.stmts[s]? with
-  | some (.let_ p v) => .let_ (treePat m p) (treeExpr m v)
-  | some (.expr e) => .expr (treeExpr m e)
-  | some (.defer e) => .defer (treeExpr m e)
-  | some (.letMut x v) => .letMut x (treeExpr m v)
-  | some (.assign t v) => .assign (treeExpr m t) (treeExpr m v)
-  | some (.located l c s) => .located l c (treeStmt m s)
-  | none => .expr (.int 0)
+partial def treeStmt (b : Body) (s : StmtId) : Stmt :=
+  match b.stmt s with
+  | .let_ p v => .let_ p (treeExpr b v)
+  | .expr e => .expr (treeExpr b e)
+  | .defer e => .defer (treeExpr b e)
+  | .letMut x v => .letMut x (treeExpr b v)
+  | .assign t v => .assign (treeExpr b t) (treeExpr b v)
+  | .located l c s => .located l c (treeStmt b s)
 
-partial def treeClause (m : Module) (c : ClauseId) : Clause :=
-  match m.clauses[c]? with
-  | some ⟨ps, b⟩ => .mk (ps.toList.map (treePat m)) (b.toList.map (treeStmt m))
-  | none => .mk [] []
+partial def treeClause (b : Body) (c : ClauseId) : Clause :=
+  let ⟨ps, body⟩ := b.clause c
+  .mk ps (body.toList.map (treeStmt b))
 
 end
 
-partial def treeItem (m : Module) : FItem → Item
-  | .enum n ps cs => .enum n ps cs
-  | .struct n ps fs => .struct n ps fs
-  | .effect n ps ops => .effect n ps ops
-  | .fn n ps annots ret cs => .fn n ps annots ret (cs.toList.map (treeClause m))
-  | .alias n v => .alias n (treeExpr m v)
-  | .fixity => .fixity
-  | .coerce n => .coerce n
-  | .trait n ms => .trait n ms
-  | .impl ps tr head args context ms => .impl ps tr head args context (ms.toList.map (treeItem m))
-  | .use head lo hi => .use head lo hi
-  | .fieldNames c ns ps => .fieldNames c ns ps
-  | .typeAlias n ps body => .typeAlias n ps body
-  | .traitInfo n supers ds ps assocs => .traitInfo n supers (ds.toList.map (treeItem m)) ps assocs
-  | .bounds f bs => .bounds f bs
-  | .pub parent item => .pub parent (treeItem m item)
-  | .unsafeFn n => .unsafeFn n
-  | .module n none => .module n none
-  | .module n (some b) => .module n (some (b.toList.map (treeItem m)))
-  | .import path rename glob => .import path rename glob
+/-- A body's own clauses as trees again. -/
+def toClauses (b : Body) : List Clause := b.roots.toList.map (treeClause b)
 
-/-- A module's items as trees again. -/
-def unflatten (m : Module) : List Item := m.items.toList.map (treeItem m)
+/-- Do clauses come back as they were from their body? -/
+def roundTrips (clauses : List Clause) : Bool :=
+  hash (toClauses (ofClauses clauses)) == hash clauses
+
+/-- Does every function of these items come back as it was from its body? -/
+partial def itemsRoundTrip (items : List Item) : Bool :=
+  items.all fun
+    | .fn _ _ _ _ clauses => roundTrips clauses
+    | .impl _ _ _ _ _ methods => itemsRoundTrip methods
+    | .traitInfo _ _ defaults _ _ => itemsRoundTrip defaults
+    | .module _ (some body) => itemsRoundTrip body
+    | .pub _ item => itemsRoundTrip [item]
+    | .alias _ value => let (b, e) := ofExpr value; hash (treeExpr b e) == hash value
+    | _ => true
 
 end Glorious.Syntax.Flat

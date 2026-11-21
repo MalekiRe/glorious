@@ -60,9 +60,9 @@ def pushTemp (t : Ty) : M Unit := modify fun s => { s with temps := (t, s.loans.
 
 /-- A value just computed that has no name: until it is passed on, nothing
 but the expression holds it. A name's value is the name's to account for. -/
-def pushAnon (e : Expr) (t : Ty) : M Unit := do
+def pushAnon (e : Flat.ExprId) (t : Ty) : M Unit := do
   unless (← get).anyMust do return
-  match e with
+  match ← node e with
   | .name _ _ => pure ()
   | .int _ => pure ()
   | .label _ => pure ()
@@ -391,25 +391,31 @@ def checkLoans (loansAt cellsAt : Nat := 0) : M Unit := do
                 let does := if write then "assign or borrow" else "read"
                 fail u s!"calling {what} may {does} `{x}` while {who} holds a {kind} to it"
 
+open Flat in
 mutual
 
 /-- Does the code assign the mutable variable `x`, or borrow it with `&mut`? -/
-partial def assignsExpr (x : String) : Expr → Bool
+partial def assignsExpr (b : Body) (x : String) (e : ExprId) : Bool :=
+  match b.expr e with
   | .ref uniq y | .refField _ uniq y _ _ => uniq && y == x
-  | e => e.direct.any (assignsExpr x) || e.bodies.any fun (_, body) => assignsStmts x body
+  | .closure _ cs => cs.any fun c => assignsStmts b x (b.clause c).body
+  | .handle s cs => assignsExpr b x s || cs.any fun c => assignsStmts b x (b.clause c).body
+  | .labelScope _ body => assignsStmts b x body
+  | _ => (b.direct e).any (assignsExpr b x)
 
-partial def assignsStmts (x : String) (body : List Stmt) : Bool :=
+partial def assignsStmts (b : Body) (x : String) (body : Array StmtId) : Bool :=
   body.any fun s =>
-    let rec one : Stmt → Bool
-      | .located _ _ s => one s
-      | .assign (.name none y) value => y == x || assignsExpr x value
-      | s => s.exprs.any (assignsExpr x)
-    one s
+    match b.stmt (b.unlocated s) with
+    | .assign t value =>
+      match b.bare? t with
+      | some y => y == x || assignsExpr b x value
+      | none => (b.stmtExprs s).any (assignsExpr b x)
+    | _ => (b.stmtExprs s).any (assignsExpr b x)
 
 end
 
-def assignsClause (x : String) : Clause → Bool
-  | .mk _ body => assignsStmts x body
+def assignsClause (b : Flat.Body) (x : String) (c : Flat.ClauseId) : Bool :=
+  assignsStmts b x (b.clause c).body
 
 /-- A `&mut` reference used as a value is lent: what is given is a reference
 that borrows from it. Anything else is given as it is. -/
@@ -426,32 +432,45 @@ def lend (scope : Scope) (x : String) (t : Ty) : M Ty := do
     | _ => pure t
   | _ => pure t
 
+open Flat in
 /-- Does evaluating this certainly take what the mutable variable `x` holds
 out of it, with `replace(&mut x, e)`, before anything else could happen? Then
 `e`, what is put in its place. -/
-partial def takesOut (x : String) : Expr → Option Expr
-  | .call _ (.name none "replace") [.ref true y, e] => if y == x then some e else none
-  -- (A block that is run where it is written: its first statement.)
-  | .call _ (.closure _ [.mk [] (s :: _)]) [] =>
-    let rec inner : Stmt → Option Expr
-      | .located _ _ s => inner s
-      | .expr e => takesOut x e
-      | .let_ _ e => takesOut x e
-      | .letMut _ e => takesOut x e
-      | _ => none
-    inner s
-  | .call _ (.name _ _) args => first args
-  | .tailCall _ (.name _ _) args => first args
-  | .tuple es => first es
+partial def takesOut (b : Body) (x : String) (e : ExprId) : Option ExprId :=
+  match b.expr e with
+  | .call _ f args =>
+    match b.expr f, args.toList with
+    | .name none "replace", [r, v] =>
+      match b.expr r with
+      | .ref true y => if y == x then some v else none
+      | _ => first args.toList
+    -- (A block that is run where it is written: its first statement.)
+    | .closure _ #[c], [] =>
+      let ⟨pats, body⟩ := b.clause c
+      if !pats.isEmpty then none else
+      match body.toList with
+      | s :: _ =>
+        match b.stmt (b.unlocated s) with
+        | .expr e | .let_ _ e | .letMut _ e => takesOut b x e
+        | _ => none
+      | [] => none
+    | .name _ _, _ => first args.toList
+    | _, _ => none
+  | .tailCall _ f args =>
+    match b.expr f with
+    | .name _ _ => first args.toList
+    | _ => none
+  | .tuple es => first es.toList
   | _ => none
 where
   -- The first part that is not just a name or a number is the one evaluated
   -- first that does anything.
-  first : List Expr → Option Expr
+  first : List ExprId → Option ExprId
     | [] => none
-    | .name _ _ :: rest => first rest
-    | .int _ :: rest => first rest
-    | e :: _ => takesOut x e
+    | e :: rest =>
+      match b.expr e with
+      | .name _ _ | .int _ => first rest
+      | _ => takesOut b x e
 
 /-- Is this a value written out that holds nothing but numbers and
 constructors: nothing, that is, that could have to be used? -/
@@ -580,19 +599,28 @@ def needBounds (call : Nat) (bs : List (String × Ty)) : M Unit := do
 /-- `x.i.name` as the name and the way to the field, if that is what this
 is: each step a field's number or its name, with the identity of the read
 where it is by name. -/
-def fieldOfName : Expr → Option (String × List (String × Option Nat))
-  | .proj (.name none x) idx => some (x, [(toString idx, none)])
-  | .fieldOf id (.name none x) name => some (x, [(name, some id)])
-  | .proj e idx => (fieldOfName e).map fun (x, path) => (x, path ++ [(toString idx, none)])
-  | .fieldOf id e name => (fieldOfName e).map fun (x, path) => (x, path ++ [(name, some id)])
+partial def fieldOfName (b : Flat.Body) (e : Flat.ExprId) : Option (String × List (String × Option Nat)) :=
+  let step := fun (inner : Flat.ExprId) (s : String × Option Nat) =>
+    match b.bare? inner with
+    | some x => some (x, [s])
+    | none => (fieldOfName b inner).map fun (x, path) => (x, path ++ [s])
+  match b.expr e with
+  | .proj inner idx => step inner (toString idx, none)
+  | .fieldOf id inner name => step inner (name, some id)
   | _ => none
 
 /-- `(*p).i.name` likewise. -/
-def fieldOfDeref : Expr → Option (String × List (String × Option Nat))
-  | .proj (.deref (.name none x)) idx => some (x, [(toString idx, none)])
-  | .fieldOf id (.deref (.name none x)) name => some (x, [(name, some id)])
-  | .proj e idx => (fieldOfDeref e).map fun (x, path) => (x, path ++ [(toString idx, none)])
-  | .fieldOf id e name => (fieldOfDeref e).map fun (x, path) => (x, path ++ [(name, some id)])
+partial def fieldOfDeref (b : Flat.Body) (e : Flat.ExprId) : Option (String × List (String × Option Nat)) :=
+  let step := fun (inner : Flat.ExprId) (s : String × Option Nat) =>
+    let direct := match b.expr inner with
+      | .deref r => b.bare? r
+      | _ => none
+    match direct with
+    | some x => some (x, [s])
+    | none => (fieldOfDeref b inner).map fun (x, path) => (x, path ++ [s])
+  match b.expr e with
+  | .proj inner idx => step inner (toString idx, none)
+  | .fieldOf id inner name => step inner (name, some id)
   | _ => none
 
 /-- The type of the field reached by `path` in a value of type `t`, and the
@@ -671,7 +699,8 @@ def captureAll (scope : Scope) (cap : Nat) (names : List String) (assigns : Stri
     | some (.poly s) => captures cap (.ty s.ty) (some (name, 0))
     | none => pure ()
 
-def placeName : Expr → String
+def placeName (b : Flat.Body) (e : Flat.ExprId) : String :=
+  match b.expr e with
   | .name _ x => s!"`{x}`"
   | _ => "this reference"
 

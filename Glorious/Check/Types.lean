@@ -4,6 +4,7 @@ public import Std.Data.HashMap
 public import Std.Data.HashSet
 public import Glorious.Syntax.Ast
 public import Glorious.Syntax.ByRef
+public import Glorious.Syntax.FlatOps
 public import Glorious.Elab.Base
 public import Glorious.Traits
 public import Glorious.Trace
@@ -463,7 +464,8 @@ structure FnDecl where
   params : List String
   annots : List (Option TypeExpr)
   ret : Option TypeExpr
-  clauses : List Clause
+  /-- Its clauses, flat: `body.roots`. -/
+  body : Flat.Body
   /-- For a function an implementation gives: the implementation, and the
   trait's function it is. -/
   impl : Option (ImplDecl × MethodSig) := none
@@ -618,16 +620,16 @@ structure St where
   given whole: the environment's name, each callable with how many arguments
   it takes, whether one of them has to be called, the other names in scope,
   and the function's body. At most one of them can be called on a path. -/
-  envGroups : Array (String × List (String × Nat) × Bool × List String × List Stmt) := #[]
+  envGroups : Array (String × List (String × Nat) × Bool × List String × Flat.Body × List Flat.StmtId) := #[]
   /-- Environments that are there only once a callable has run, `After = E2`:
   the environment, the callables that leave it, those that run in it, the
   other names in scope, and the function's body. None of those that run in
   it is called before one of those that leave it. -/
-  envAfter : Array (String × List (String × Nat) × List (String × Nat) × List String × List Stmt) := #[]
+  envAfter : Array (String × List (String × Nat) × List (String × Nat) × List String × Flat.Body × List Flat.StmtId) := #[]
   /-- Environments some callables are given whole and others are lent: the
   environment, those given it, those lent it, the other names in scope, and
   the function's body. None lent it can be called once one given it has been. -/
-  envLent : Array (String × List (String × Nat) × List (String × Nat) × List String × List Stmt) := #[]
+  envLent : Array (String × List (String × Nat) × List (String × Nat) × List String × Flat.Body × List Flat.StmtId) := #[]
   /-- For a function whose callables run in an environment given whole:
   which of its parameters they are, for each such environment. -/
   fnGroups : List (String × List (List Nat)) := []
@@ -701,7 +703,7 @@ structure St where
   /-- Bindings whose use on every path is still to be looked at, once the
   types of the function they are in are known: where, the name, its type, the
   other names in scope, and the code the name is in scope of. -/
-  lowerChecks : Array (String × String × Ty × List String × List Stmt) := #[]
+  lowerChecks : Array (String × String × Ty × List String × Flat.Body × List Flat.StmtId) := #[]
 
   /-- What the count of uses reads of what is declared, kept as it is
   declared and found in one look: the bodies of functions, the names of
@@ -709,7 +711,7 @@ structure St where
   the operations whoever handles must resume, and the blocks run where they
   are written. Each is what its list says, the first of a name where the
   list has two. -/
-  runFns : Std.HashMap String (List Clause) := {}
+  runFns : Std.HashMap String Flat.Body := {}
   runCtors : Std.HashSet String := {}
   runAliases : Std.HashMap String Expr := {}
   runOps : Std.HashMap String Bool := {}
@@ -927,6 +929,11 @@ structure St where
   pendingCopies : Array (String × FnDecl) := #[]
   methodCalls : Array (Nat × Nat) := #[]
   fnBounds : List (String × Nat) := []
+  /-- The body of the function being checked, flat: what an `ExprId` the
+  checker is given is a place of. What the checker reads that was not
+  written (a block called where it is written, a receiver given otherwise) is
+  added to it. -/
+  body : Flat.Body := {}
 
 abbrev M := StateT St (Except Elab.Said)
 
@@ -945,6 +952,43 @@ keeps the state from before to go back to, nothing holds that state while
   match act s with
   | .ok r => .ok r
   | .error e => .error (e.map f)
+
+/-! ### The body being checked -/
+
+open Flat in
+/-- The expression at a place of the body being checked. -/
+@[inline] def node (e : ExprId) : M FExpr := return (← get).body.expr e
+open Flat in
+@[inline] def stmtNode (s : StmtId) : M FStmt := return (← get).body.stmt s
+open Flat in
+@[inline] def clauseNode (c : ClauseId) : M FClause := return (← get).body.clause c
+
+/-- Nodes made in the body being checked. -/
+def build {α : Type} (act : Flat.Build α) : M α :=
+  modifyGet fun s =>
+    let (a, b) := act.run s.body
+    (a, { s with body := b })
+
+open Flat in
+def pushE (n : FExpr) : M ExprId := build (pushExpr n)
+
+/-- A tree made a part of the body being checked. -/
+def flatIn (e : Expr) : M Flat.ExprId := build (Flat.flatExpr e)
+
+/-- The expression at a place, as a tree. -/
+def treeOf (e : Flat.ExprId) : M Expr := return Flat.treeExpr (← get).body e
+
+/-- `act` checked with another body (a constant's), the one being checked
+after as it was. -/
+def withBody {α : Type} (b : Flat.Body) (act : M α) : M α := do
+  let before := (← get).body
+  modify fun s => { s with body := b }
+  tryCatchThe Elab.Said (do
+      let r ← act
+      modify fun s => { s with body := before }
+      pure r) fun e => do
+    modify fun s => { s with body := before }
+    throwThe Elab.Said e
 
 /-- The implementations of a trait, by its name without arguments. -/
 def implsOfBase (base : String) : M (List ImplDecl) := do

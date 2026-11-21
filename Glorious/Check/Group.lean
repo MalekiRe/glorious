@@ -207,8 +207,8 @@ def checkGroup (decls : List FnDecl) (signature : Bool := false) : M Unit := do
               match b.trait, b.args.head? with
               | "RunsIn", some (.name e []) => if e == env then some (b.subject, b.args.length - 1) else none
               | _, _ => none
-            let (pats, body) := match d.clauses with
-              | [.mk pats body] => (pats, body)
+            let (pats, body) : List Pattern × List Flat.StmtId := match d.body.roots with
+              | #[c] => let cl := d.body.clause c; (cl.pats, cl.body.toList)
               | _ => ([], [])
             let mut members : List (String × Nat) := []
             for (pat, annot) in pats.zip d.annots do
@@ -221,7 +221,7 @@ def checkGroup (decls : List FnDecl) (signature : Bool := false) : M Unit := do
               | _ => pure ()
             unless members.isEmpty do
               let names := pats.flatMap Elab.patVars
-              modify fun s => { s with envGroups := s.envGroups.push (env, members, must, names, body) }
+              modify fun s => { s with envGroups := s.envGroups.push (env, members, must, names, d.body, body) }
               if members.length ≥ 2 then
                 let places := members.filterMap fun (x, _) =>
                   pats.findIdx? fun
@@ -248,8 +248,8 @@ def checkGroup (decls : List FnDecl) (signature : Bool := false) : M Unit := do
           modify fun s => { s with fnRunsIn := (d.name, runsIn) :: s.fnRunsIn.filter (·.1 != d.name) }
         -- `After = E2`: the environment a callable leaves, in which others run
         -- only once it has.
-        let (pats', body') := match d.clauses with
-          | [.mk pats body] => (pats, body)
+        let (pats', body') : List Pattern × List Flat.StmtId := match d.body.roots with
+          | #[c] => let cl := d.body.clause c; (cl.pats, cl.body.toList)
           | _ => ([], [])
         let named := fun (f : String) => (pats'.zip d.annots).filterMap fun (pat, annot) =>
           match pat, annot with
@@ -280,7 +280,7 @@ def checkGroup (decls : List FnDecl) (signature : Bool := false) : M Unit := do
             let borrowers := lent.flatMap fun (f, arity) => (named f).map (·, arity)
             unless owners.isEmpty || borrowers.isEmpty do
               modify fun s =>
-                { s with envLent := s.envLent.push (env, owners, borrowers, pats'.flatMap Elab.patVars, body') }
+                { s with envLent := s.envLent.push (env, owners, borrowers, pats'.flatMap Elab.patVars, d.body, body') }
           let running := given ++ lent ++ d.bounds.filterMap fun b =>
             match b.trait, b.args.head? with
             | "RunsIn", some (.name e []) =>
@@ -290,7 +290,7 @@ def checkGroup (decls : List FnDecl) (signature : Bool := false) : M Unit := do
             let producers := leaving.flatMap fun (f, arity) => (named f).map (·, arity)
             let members := running.flatMap fun (f, arity) => (named f).map (·, arity)
             modify fun s =>
-              { s with envAfter := s.envAfter.push (env, producers, members, pats'.flatMap Elab.patVars, body') }
+              { s with envAfter := s.envAfter.push (env, producers, members, pats'.flatMap Elab.patVars, d.body, body') }
         for b in d.bounds do
           if let some (.name e []) := b.assoc.lookup "After" then
             unless environments.contains e do
@@ -494,7 +494,9 @@ def checkGroup (decls : List FnDecl) (signature : Bool := false) : M Unit := do
                 unless named.contains c || c == one do
                   captures c (.ty (Ty.life one))
             pure (Ty.fn ps r [] (some (← freshRowVar)) (← freshCap))
-          else (fun s => Glorious.Trace.said "infer" fun _ => (timedM "group: infer" (inferCallable [] annots ret (some d.name) d.clauses s!"the clauses of `{d.name}` do") : M Ty).run s : M Ty)
+          else (fun s => Glorious.Trace.said "infer" fun _ => (timedM "group: infer" (do
+              modify fun s => { s with body := d.body }
+              inferCallable [] annots ret (some d.name) d.body.roots s!"the clauses of `{d.name}` do") : M Ty).run s : M Ty)
         if let some effects := declared then
           let (effects, rest) ← resolveRow rigid false effects
           if let .fn _ _ effs tail _ ← find t then
@@ -568,7 +570,7 @@ def checkGroup (decls : List FnDecl) (signature : Bool := false) : M Unit := do
     modify fun s =>
       { s with runFns := decls.foldl (fun m d =>
                  match m[d.name]? with
-                 | some clauses => m.insert d.name (Elab.coerceFn cs d.name clauses)
+                 | some fb => m.insert d.name (Flat.ofClauses (Elab.coerceFn cs d.name (Flat.toClauses fb)))
                  | none => m) s.runFns }
   -- A later function can still decide a requirement made here, through a
   -- declaration whose field types are inferred, so each is checked again at
