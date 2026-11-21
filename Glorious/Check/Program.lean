@@ -104,13 +104,11 @@ partial def checkDeciding (decls : List FnDecl) (fuel : Nat := 64) (first : Opti
     | fuel + 1, some d =>
       if Glorious.Trace.groupsTraced then
         (dbgTrace s!"decision {fuel}: {e.msg.take 200}" fun _ => (pure () : M Unit))
-      let items := decls.map fun d => Item.fn d.name d.params d.annots d.ret (Flat.toClauses d.body)
-      let after := Elab.decidedItems [d] items
-      let decls' := (decls.zip (after.zip items)).map fun
-        | (d, .fn _ _ _ _ clauses, .fn _ _ _ _ was) => if hash clauses == hash was then d else { d with body := Flat.ofClauses clauses }
-        | (d, _, _) => d
+      let decls' := decls.map fun dl => { dl with body := Elab.decideBody d dl.name dl.annots dl.body }
       -- (Nothing changed: what was said stands.)
-      if (decls'.map (·.body)).map hash == (decls.map (·.body)).map hash then throwThe Elab.Said said
+      -- (As written out: a rewrite may make new nodes of what it leaves the same.)
+      if (decls'.map fun d => hash (Flat.toClauses d.body)) == (decls.map fun d => hash (Flat.toClauses d.body)) then
+        throwThe Elab.Said said
       set before
       modify fun s =>
         { s with decided := s.decided ++ [d]

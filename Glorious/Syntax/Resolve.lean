@@ -147,113 +147,6 @@ partial def takesReference : List Item → List (String × Bool)
       | _ => none) ++ takesReference rest
   | _ :: rest => takesReference rest
 
-mutual
-
-/-- `value.f(a)` where `f` takes a reference first and `value` is a variable,
-or a field of one: the variable is borrowed for the call. `known` are the
-names in scope that are known to hold a value and not a reference: `1` a
-mutable variable, `2` a name bound to what is plainly a value (see
-`valueLike`), or a parameter written with a type that is no reference's.
-Anything else is given as it is: a reference already, or a value `f` takes
-whole. -/
-partial def receiverExpr (taken : Std.HashMap String Bool) (known : List (String × Nat)) : Expr → Expr
-  | .call id f args =>
-    let f := receiverExpr taken known f
-    let args := args.map (receiverExpr taken known)
-    match f, args with
-    | .name q name, .call _ (.name none mark) [receiver] :: rest =>
-      if mark == receiverMark then
-        -- The name a path of fields starts at, and the path.
-        let rec place : Expr → Option (String × List String × Nat)
-          | .name none x => if (known.lookup x).any (fun k => k != 0 && k != 3) then some (x, [], 0) else none
-          | .fieldOf fid e field => (place e).map fun (x, path, _) => (x, path ++ [field], fid)
-          | .proj e n => (place e).map fun (x, path, fid) => (x, path ++ [toString n], fid)
-          | _ => none
-        -- (A field of what a `&mut` parameter points to, `p.items`.)
-        let rec throughRef : Expr → Option (String × List String × Nat)
-          | .fieldOf fid (.name none x) field =>
-            if known.lookup x == some 3 then some (x, [field], fid) else none
-          | .fieldOf fid e field => (throughRef e).map fun (x, path, _) => (x, path ++ [field], fid)
-          | _ => none
-        -- (`v[i].f()` where `f` takes a reference: the element, borrowed
-        -- where it is.)
-        let rec element (uniq : Bool) (fuel : Nat) : Expr → Option Expr
-          | .call cid (.name _ "index") [a, i] =>
-            let base := match fuel, place a, throughRef a with
-              | _, some (x, [], _), _ => some (Expr.ref uniq x)
-              | _, some (x, path, fid), _ => if fid == 0 then none else some (.refField fid uniq x path false)
-              | _, none, some (x, path, fid) => some (.refField fid uniq x path true)
-              | fuel + 1, none, none =>
-                match a with
-                | .name none x => if known.lookup x == some 3 then some (.name none x) else none
-                | _ => element uniq fuel a
-              | 0, _, _ => none
-            base.map fun b =>
-              if uniq then .call cid (.name none "place_at") [i, b] else .call cid (.name none "element_at") [b, i]
-          | _ => none
-        let given := match taken[name]?, place receiver, throughRef receiver with
-          | some uniq, some (x, [], _), _ => Expr.ref uniq x
-          | some uniq, some (x, path, fid), _ => if fid == 0 then receiver else .refField fid uniq x path false
-          | some uniq, none, some (x, path, fid) => .refField fid uniq x path true
-          | some uniq, none, none =>
-            match element uniq 8 receiver with
-            | some e => e
-            | none =>
-              -- (A value made where it is called on, `half(4).is_ok()`:
-              -- given a name first, and borrowed.)
-              match receiver with
-              -- (Not what a function written to give a reference gives.)
-              | .call _ (.name _ g) _ =>
-                if taken.contains (givesKey g) then receiver
-                else .call id (.name none (if uniq then borrowMutMark else borrowMark)) [receiver]
-              | .call .. => .call id (.name none (if uniq then borrowMutMark else borrowMark)) [receiver]
-              -- (A constructor without fields or a constant, `D.greet()`.)
-              | .name none x =>
-                if (lastSegment x).front.isUpper then
-                  .call id (.name none (if uniq then borrowMutMark else borrowMark)) [receiver]
-                else receiver
-              | _ => receiver
-          | _, _, _ => receiver
-        .call id (.name q name) (given :: rest)
-      else .call id f args
-    | _, _ => .call id f args
-  | e => Id.run (e.traverse (pure <| receiverExpr taken known ·) fun pats body =>
-      pure (match receiverClause taken known [] (.mk pats body) with | .mk _ body => body))
-
-/-- (`values`: the parameters written with types that are no reference's.) -/
-partial def receiverClause (taken : Std.HashMap String Bool) (known : List (String × Nat))
-    (values : List String) : Clause → Clause
-  | .mk pats body =>
-    let named := (pats.flatMap patternNames).map fun x =>
-      (x, if values.contains x then 2 else if known.lookup x == some 3 then 3 else 0)
-    .mk pats (receiverStmts taken (named ++ known) body)
-
-partial def receiverStmts (taken : Std.HashMap String Bool) (known : List (String × Nat)) :
-    List Stmt → List Stmt
-  | [] => []
-  | s :: rest =>
-    let rec here : Stmt → Stmt × List (String × Nat)
-      | .let_ pat value =>
-        -- (`let s = &v[i]`: an element borrowed, a reference.)
-        let elementRef := match value with
-          | .call _ (.name _ f) _ => f == "element_at" || f == "place_at"
-          | .ref _ _ => true
-          | .refField .. => true
-          | _ => false
-        let kind := match pat with
-          | .var _ => if elementRef then 3 else if valueLike value then 2 else 0
-          | _ => 0
-        (.let_ pat (receiverExpr taken known value), (patternNames pat).map (·, kind) ++ known)
-      | .letMut x value => (.letMut x (receiverExpr taken known value), (x, 1) :: known)
-      | .expr e => (.expr (receiverExpr taken known e), known)
-      | .defer e => (.defer (receiverExpr taken known e), known)
-      | .assign target value =>
-        (.assign (receiverExpr taken known target) (receiverExpr taken known value), known)
-      | .located line col s => let (s, known) := here s; (.located line col s, known)
-    let (s, known) := here s
-    s :: receiverStmts taken known rest
-
-end
 
 /-- The arguments an implementation gives its trait, as written
 (`traitArgName`), in order. -/
@@ -403,8 +296,13 @@ namespace Flat
 mutual
 
 /-- `value.f(a)` where `f` takes a reference first and `value` is a variable,
-or a field of one: the variable is borrowed for the call
-(`Syntax.receiverExpr`). -/
+or a field of one: the variable is borrowed for the call. `known` are the
+names in scope that are known to hold a value and not a reference: `1` a
+mutable variable, `2` a name bound to what is plainly a value (see
+`valueLike`), or a parameter written with a type that is no reference's.
+Anything else is given as it is: a reference already, or a value `f` takes
+whole. -/
+
 partial def receiverExpr (taken : Std.HashMap String Bool) (known : List (String × Nat)) (e : ExprId) : Build ExprId := do
   let b ← get
   match b.expr e with

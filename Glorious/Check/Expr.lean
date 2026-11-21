@@ -360,7 +360,7 @@ partial def inferExpr (scope : Scope) (amb : Row) (e0 : Flat.ExprId) : M Ty := d
     let t ← inferCallable scope [] none none clauses "the clauses of this callable do" id
     if let .fn ps _ _ _ cap := t then
       modify fun s => { s with blockCaps := s.blockCaps.push (id, cap) }
-      -- A block written for a function named as a value (`Elab.etaItems`)
+      -- A block written for a function named as a value (`Elab.etaBody`)
       -- is for every lifetime of the references it is given, as the
       -- function is: it holds none of them.
       if let #[c] := clauses then
@@ -799,7 +799,7 @@ partial def checkArgsIn (scope : Scope) (amb : Row) (what : String) (params : Li
               let lowered ← (Syntax.byReference rn wrapped).run' (500000000000000000 + id * 10000)
               throwThe Elab.Said { msg := s!"argument {i + 1} of {what}: what is matched is a reference: a pattern of what it points to is written `{shown}Pattern`, and binds references (`{shown}Some(x) => *x`)", decision := some (.refPats id lowered) }
       -- (A value made where a dot call is made on it, named and borrowed for
-      -- the call (`Resolve.receiverExpr`), that is a reference already: the
+      -- the call (`Flat.receiverExpr`), that is a reference already: the
       -- reference is given.)
       let a ← match b.expr a with
         | .ref _ x =>
