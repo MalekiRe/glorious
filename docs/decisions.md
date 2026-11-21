@@ -6826,8 +6826,11 @@ of it: 14,732 entries of 332 types, each type now looked at once.
 **Not kept, and why.** The library's units are kept whole as before, by the
 chain of the units before them (`Kept`): a delta for each would be put on at
 every compile, where one state is taken at once. The keys keep each body's
-places, so a line added above a function checks it again; what it reports
-is written with those places.
+places, so a line added above a function checks it again. Keys without them
+were tried: with a line added at the top of `covey/states2`, the program
+written differed from a fresh build's (implementations as values numbered
+otherwise), as what the checker keys by where a clause is (`clausePlace`)
+was then of the old places; and `main` was checked again all the same.
 
 The delta is in parts of twelve fields (`StDelta0`..`StDelta9`): written as
 one function each, Lean's code generator took 300 s on the file, in parts
