@@ -6725,16 +6725,26 @@ not change.
   (`argsChosen`), the clauses of a `refPats` decision, implementations as
   values (`dictExpr`), destroyers and layouts.
 
-**Measured** (see the commit messages for each step): writing in what the
-checker decided went from 81 ms to 5–9 on an edited `covey/states2`, as each
-decision had gone over the whole program. Otherwise the flat form is about
-as fast as the trees were, a few per cent either way per pass: in Lean a
-node of a body is still an object of its own (there are no arrays of
-unboxed variants), so nothing is nearer in memory, and a pass's time is the
-work it does, not the nodes it rebuilds. What the flat form gives is that a
-body is a value of its own, hashed as it is written whatever else changes,
-with every node at a place: what per-declaration caching and a check of each
-function on its own are made from.
+**Measured** against the compiler just before it (85ef0920), each built and
+run alone on the same edits of `covey/states2`: 2.96 s before, 3.17 s now.
+- Writing in what the checker decided went from 81 ms (each decision went
+  over the whole program) to 5–9.
+- The check is as fast as it was (1.63 s against 1.62 for the program's
+  unit), once kept states stopped carrying bodies (`noBodies`) and bodies
+  were compacted before it (`Body.compact`): what an earlier rewrite left
+  behind was hashed and copied by everything after.
+- What is still slower: lowering (+40 ms), defaults and blankets (+40),
+  aliases (+13), resolution (+12), what main reaches (+12), making the
+  program flat and compact (+26). In Lean a node of a body is still an
+  object of its own (there are no arrays of unboxed variants), so nothing is
+  nearer in memory; a rewrite copies a body's arrays where a tree's would
+  share what it did not change; and a pass's time is mostly the work it
+  does, not the nodes it rebuilds.
+
+What the flat form gives is that a body is a value of its own, hashed as it
+is written whatever else changes, with every node at a place: what
+per-declaration caching and a check of each function on its own are made
+from.
 
 ## Other standing decisions
 

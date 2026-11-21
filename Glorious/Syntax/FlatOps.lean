@@ -535,31 +535,49 @@ def selfRewrite (self : String) (trait : Option (String × Expr)) : FRewrite whe
     | _ => none
   onPat := selfPattern self
 
+/-- Is an ascription, `let x: Type = ..`, among a body's nodes (reached or
+not)? Asked first: most bodies have none. -/
+def Body.anyAscription (b : Body) : Bool :=
+  b.exprs.any fun
+    | .call _ f #[_, _] =>
+      match b.bare? f with
+      | some mark => mark == ascribeMark || mark == instMark
+      | none => false
+    | _ => false
+
+mutual
+
+/-- The ascriptions an expression has, `let x: Type = ..`: the places of the
+types written, added in front of `acc`. -/
+partial def Body.ascriptionsExpr (b : Body) (e : ExprId) (acc : List ExprId) : List ExprId :=
+  match b.expr e with
+  | .call _ f args =>
+    match args, b.bare? f with
+    | #[v, ty], some mark =>
+      -- (The type itself is not looked in.)
+      if mark == ascribeMark || mark == instMark then ty :: b.ascriptionsExpr v acc
+      else b.ascriptionsExpr f (args.foldr (fun a acc => b.ascriptionsExpr a acc) acc)
+    | _, _ => b.ascriptionsExpr f (args.foldr (fun a acc => b.ascriptionsExpr a acc) acc)
+  | .tailCall _ f args => b.ascriptionsExpr f (args.foldr (fun a acc => b.ascriptionsExpr a acc) acc)
+  | .tuple args => args.foldr (fun a acc => b.ascriptionsExpr a acc) acc
+  | .proj x _ | .deref x | .reborrow _ x | .fieldOf _ x _ => b.ascriptionsExpr x acc
+  | .closure _ cs => cs.foldr (fun c acc => b.ascriptionsClause c acc) acc
+  | .handle s cs => b.ascriptionsExpr s (cs.foldr (fun c acc => b.ascriptionsClause c acc) acc)
+  | .labelScope _ body => body.foldr (fun s acc => b.ascriptionsStmt s acc) acc
+  | _ => acc
+
+partial def Body.ascriptionsClause (b : Body) (c : ClauseId) (acc : List ExprId) : List ExprId :=
+  (b.clause c).body.foldr (fun s acc => b.ascriptionsStmt s acc) acc
+
+partial def Body.ascriptionsStmt (b : Body) (s : StmtId) (acc : List ExprId) : List ExprId :=
+  (b.stmtExprs s).foldr (fun e acc => b.ascriptionsExpr e acc) acc
+
+end
+
 /-- The ascriptions of a body, `let x: Type = ..`: each with the place of the
 type written. Only those reached from the body's own clauses. -/
-partial def Body.ascriptions (b : Body) : List ExprId :=
-  b.roots.toList.flatMap clause
-where
-  clause (c : ClauseId) : List ExprId := (b.clause c).body.toList.flatMap stmt
-  stmt (s : StmtId) : List ExprId := (b.stmtExprs s).toList.flatMap expr
-  expr (e : ExprId) : List ExprId :=
-    let here := match b.expr e with
-      | .call _ f #[_, ty] =>
-        match b.bare? f with
-        | some mark => if mark == ascribeMark || mark == instMark then [ty] else []
-        | none => []
-      | _ => []
-    let inner := match b.expr e with
-      | .closure _ cs | .handle _ cs =>
-        (match b.expr e with | .handle s _ => expr s | _ => []) ++ cs.toList.flatMap clause
-      | .labelScope _ body => body.toList.flatMap stmt
-      | .call _ f #[v, ty] =>
-        -- (The type itself is not looked in.)
-        match b.bare? f with
-        | some mark => if mark == ascribeMark || mark == instMark then expr v else expr f ++ expr v ++ expr ty
-        | none => expr f ++ expr v ++ expr ty
-      | _ => (b.direct e).toList.flatMap expr
-    here ++ inner
+def Body.ascriptions (b : Body) : List ExprId :=
+  if !b.anyAscription then [] else b.roots.foldr (fun c acc => b.ascriptionsClause c acc) []
 
 /-- A body with each type written in it, `let x: Type = ..`, changed
 (`Syntax.mapTypesClause`): the types are worked out first, which may fail,
@@ -578,7 +596,7 @@ where
 
 /-- An expression with each type written in it changed (`Syntax.mapTypesExpr`). -/
 def mapTypesOf (f : TypeExpr → Except String TypeExpr) (b : Body) (e : ExprId) : Except String (Body × ExprId) := do
-  let places := Body.ascriptions.expr b e
+  let places := if b.anyAscription then b.ascriptionsExpr e [] else []
   if places.isEmpty then return (b, e)
   let (e, b) := ((← mapTypes.typesRewrite f b places).ex e).run b
   pure (b, e)
