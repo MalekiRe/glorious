@@ -1,0 +1,248 @@
+// Upstream's examples/relations.rs: a small fleet, told through relations:
+// every cardinality, edge data, joins in every direction and depth, writes
+// through joins one row at a time, `cascade`, `Relinked`, linked and acyclic
+// relations, fragmenting ones.
+// expect:
+// == frame 1
+//   Dauntless launches 2 drones
+//   harbor: Heron at Vesta, berth 1
+//   harbor: Osprey at Ceres, berth 2
+//   harbor: Kestrel at Ceres, berth 1
+//   Ceres holds 19 cargo; docked: Kestrel (Ada), Osprey (Grace)
+//   Vesta holds 4 cargo; docked: Heron (no pilot)
+//   Dauntless: allies none, allied by none, hunted by none
+//   Heron: allies Kestrel, allied by none, hunted by none
+//   Kestrel: allies Osprey, allied by Heron, Osprey, hunted by Vex
+//   Osprey: allies Kestrel, allied by Kestrel, hunted by Vex
+//   Dauntless fuel 170  hull 100  pos  -50  fleet -
+//   Heron     fuel  30  hull  40  pos  -15  fleet Dauntless
+//   Kestrel   fuel  60  hull  73  pos    5  fleet Dauntless
+//   Osprey    fuel  40  hull  95  pos   -5  fleet Dauntless
+// == frame 2: Osprey moves to Vesta, Grace takes the Heron, Vex drops the Kestrel
+//   (Kestrel following Heron would be refused: Follows is acyclic; 2 follow Kestrel)
+//   harbor: Osprey at Vesta, berth 3
+//   Ceres holds 19 cargo; docked: Kestrel (Ada)
+//   Vesta holds 13 cargo; docked: Heron (Grace), Osprey (no pilot)
+//   Dauntless: allies none, allied by none, hunted by none
+//   Heron: allies Kestrel, allied by none, hunted by none
+//   Kestrel: allies Osprey, allied by Heron, Osprey, hunted by none
+//   Osprey: allies Kestrel, allied by Kestrel, hunted by Vex
+//   Dauntless fuel 140  hull 100  pos  -50  fleet -
+//   Heron     fuel  40  hull  45  pos  -10  fleet Dauntless
+//   Kestrel   fuel  70  hull  76  pos   10  fleet Dauntless
+//   Osprey    fuel  50  hull  95  pos    0  fleet Dauntless
+// == frame 3: Dauntless is lost; Ceres closes
+//   2 drones were aboard, 0 remain
+//   Kestrel docked: false, Vesta's ships: 2
+//   Vesta holds 13 cargo; docked: Heron (Grace), Osprey (no pilot)
+//   Heron: allies Kestrel, allied by none, hunted by none
+//   Kestrel: allies Osprey, allied by Heron, Osprey, hunted by none
+//   Osprey: allies Kestrel, allied by Kestrel, hunted by Vex
+//   Heron     fuel  40  hull  50  pos   -5  fleet -
+//   Kestrel   fuel  70  hull  79  pos   15  fleet -
+//   Osprey    fuel  50  hull  95  pos    5  fleet -
+// 0
+mod ecs;
+
+use ecs::{App, World, Entity, Query, Local, Commands, With, Relation, OneToMany, OneToOne, ManyToMany, Relates, Related, Relinked,
+    Fragmenting, Acyclic, Linked, To, From, to, parallel};
+use std::text::{join, pad_end, pad_start};
+
+// ---- Relations
+// Ship to station, with the berth as edge data. Many ships per station.
+struct DockedAt { berth: Int }
+impl Relation for DockedAt { type Kind = OneToMany; }
+// Pilot and ship: one each way. Relating again displaces the old partner.
+struct Piloting
+impl Relation for Piloting { type Kind = OneToOne; }
+// Ship to flagship; fragmenting.
+struct InFleet
+impl Relation for InFleet { type Kind = OneToMany; }
+impl Fragmenting for InFleet {}
+// Ship and ship, both ways allowed, any number.
+struct Allied
+impl Relation for Allied { type Kind = ManyToMany; }
+// Hunter to marks; fragmenting many-to-many.
+struct Hunting
+impl Relation for Hunting { type Kind = ManyToMany; }
+impl Fragmenting for Hunting {}
+// Follower to leader: acyclic, so a convoy always has a head and `cascade`
+// moves leaders before followers.
+struct Follows
+impl Relation for Follows { type Kind = OneToMany; }
+impl Acyclic for Follows {}
+// Drone to carrier: linked, the drones go down with their carrier.
+struct Aboard
+impl Relation for Aboard { type Kind = OneToMany; }
+impl Linked for Aboard { const LINKED: Bool = true; }
+
+// ---- Components
+struct Name(Str)
+struct Cargo(Int)
+struct Fuel(Int)
+struct Hull(Int)
+struct Skill(Int)
+struct Pos(Int)
+struct Gap(Int)
+struct Speed(Int)
+struct Carrier
+struct Update
+
+fn say_all(lines: [Str]) { let mut i = 0; while({ i < len_at(&lines) }) { say(lines[i]); i = i + 1 } }
+fn list(items: [Str]) -> Str { if(len_at(&items) == 0) { "none" } else { join(items, ", ") } }
+
+// ---- Systems
+// Docked ships unload into their station: one row at a time.
+fn unload(ships: &mut Query<(&mut Cargo, To<DockedAt, (&mut Cargo,)>), ()>) {
+    ships.for_each() { mut hold, station =>
+        match(station) { Some((mut s,)) => s.0 = s.0 + hold.0; hold.0 = 0;, None => () };
+    }
+}
+// Pilots patch their ship.
+fn repair(pilots: &mut Query<(&Skill, To<Piloting, (&mut Hull,)>), ()>) {
+    pilots.for_each() { skill, ship =>
+        match(ship) { Some((mut hull,)) => hull.0 = if(hull.0 + skill.0 > 100) { 100 } else { hull.0 + skill.0 };, None => () };
+    }
+}
+// The flagship hands 10 fuel to each ship of its fleet.
+fn refuel(flagships: &mut Query<(&mut Fuel, From<InFleet, (&mut Fuel,)>), ()>) {
+    flagships.for_each() { mut tank, fleet =>
+        let mut i = 0;
+        let mut ships: [(ecs::Mut<'_, Fuel>,)] = fleet;
+        while({ i < len_at(&ships) }) {
+            let given = if(tank.0 < 10) { tank.0 } else { 10 };
+            tank.0 = tank.0 - given;
+            let entry = &mut ships[i];
+            let fuel = ecs::Mut::get_mut(&mut entry.0);
+            fuel.0 = fuel.0 + given;
+            i = i + 1
+        };
+    }
+}
+// The convoy head moves; everyone else keeps their gap to whoever they
+// follow, leaders first.
+fn advance(heads: &mut Query<(&Speed, &mut Pos), ()>) { heads.for_each() { speed, mut pos => pos.0 = pos.0 + speed.0; } }
+fn keep_formation(convoy: &mut Query<(To<Follows, (&Pos,)>, (&Gap, &mut Pos))>) {
+    convoy.cascade() { (leader, (gap, mut pos)) =>
+        match(leader) { Some((l,)) => pos.0 = l.0 + gap.0;, None => () };
+    }
+}
+// Only ships whose docking changed since this system last ran.
+fn harbor_log(moved: &mut Query<(&Name, &Relates<DockedAt>, To<DockedAt, (&Name,)>), (Relinked<DockedAt>,)>) {
+    moved.for_each() { ship, dock, station =>
+        let at = match(station) { Some((s,)) => s.0, None => "?" };
+        say("  harbor: " ++ ship.0 ++ " at " ++ at ++ ", berth " ++ show(dock.relation.berth));
+    }
+}
+// Station rosters, two joins deep: docked ships, then each ship's pilot.
+fn rosters(stations: &mut Query<(&Name, &Cargo, From<DockedAt, (&Name, From<Piloting, (&Name,)>)>), ()>) {
+    stations.for_each() { station, cargo, ships =>
+        let shown = std::vec::map(ships, fn(s: (&Name, [(&Name,)])) -> Str {
+            let (ship, pilots) = s;
+            if(len_at(&pilots) > 0) { let (p,) = pilots[0]; ship.0 ++ " (" ++ p.0 ++ ")" } else { ship.0 ++ " (no pilot)" }
+        });
+        if(if(len_at(&shown) > 0) { true } else { cargo.0 > 0 }) { say("  " ++ station.0 ++ " holds " ++ show(cargo.0) ++ " cargo; docked: " ++ list(shown)) } else { () };
+    }
+}
+// Read-only joins both ways.
+fn politics(ships: &mut Query<(&Name, (To<Allied, (&Name,)>, From<Allied, (&Name,)>), From<Hunting, (&Name,)>), (With<Hull>,)>) {
+    let mut lines = [];
+    ships.for_each() { ship, (allies, allied_by), hunters =>
+        let names = fn(l: [(&Name,)]) -> [Str] { std::vec::map(l, fn(x: (&Name,)) -> Str { let (n,) = x; n.0 }) };
+        push_at(&mut lines, "  " ++ ship.0 ++ ": allies " ++ list(std::vec::sort(names(allies))) ++ ", allied by " ++ list(std::vec::sort(names(allied_by))) ++ ", hunted by " ++ list(std::vec::sort(names(hunters))));
+    };
+    say_all(std::vec::sort(lines))
+}
+// Every ship's status, reading its flagship through the fragmenting join.
+fn status(ships: &mut Query<(&Name, (&Fuel, &Hull, &Pos), To<InFleet, (&Name,)>), ()>) {
+    let mut lines = [];
+    ships.for_each() { ship, (fuel, hull, pos), flagship =>
+        let fleet = match(flagship) { Some((f,)) => f.0, None => "-" };
+        push_at(&mut lines, "  " ++ pad_end(ship.0, 9, ' ') ++ " fuel " ++ pad_start(show(fuel.0), 3, ' ') ++ "  hull " ++ pad_start(show(hull.0), 3, ' ') ++ "  pos " ++ pad_start(show(pos.0), 4, ' ') ++ "  fleet " ++ fleet);
+    };
+    say_all(std::vec::sort(lines))
+}
+
+fn main() -> Int {
+    let mut app = App::new()
+        .register<Name>().register<Cargo>().register<Fuel>().register<Hull>().register<Skill>().register<Pos>().register<Gap>().register<Speed>()
+        .relation<DockedAt>().relation<Piloting>().relation<InFleet>().relation<Allied>().relation<Hunting>().relation<Follows>().relation<Aboard>()
+        .register<Carrier>()
+        // (Carriers launch two drones each, once; bundles relate on spawn. A
+        // block: `Commands<_>` is of the world it is given.)
+        .add_systems(Update, fn(carriers: &mut Query<(Entity, &Name), (With<Carrier>,)>, launched: &mut Local<Bool>, commands: &mut Commands<_>) {
+            if(launched.0) { () } else {
+                launched.0 = true;
+                carriers.for_each() { carrier, name =>
+                    say("  " ++ name.0 ++ " launches 2 drones");
+                    discard(commands.spawn((Name("drone-a"), Aboard.to(carrier))));
+                    discard(commands.spawn((Name("drone-b"), Aboard.to(carrier))));
+                }
+            }
+        })
+        // (Cargo and Hull are apart, joins too: proven when compiled.)
+        .add_systems(Update, parallel((unload, repair)))
+        .add_systems(Update, refuel)
+        .add_systems(Update, advance)
+        .add_systems(Update, keep_formation)
+        .add_systems(Update, harbor_log)
+        .add_systems(Update, rosters)
+        .add_systems(Update, politics)
+        .add_systems(Update, status)
+        .build();
+    // (Followers spawned before their leaders: iteration order would be
+    // wrong, cascade order is not.)
+    let heron = app.world.spawn_bundle((Name("Heron"), Cargo(4), Fuel(20), Hull(40), Pos(0), Gap(0 - 10)));
+    let osprey = app.world.spawn_bundle((Name("Osprey"), Cargo(7), Fuel(30), Hull(90), Pos(0), Gap(0 - 10)));
+    let kestrel = app.world.spawn_bundle((Name("Kestrel"), Cargo(12), Fuel(50), Hull(70), Pos(0), Speed(5)));
+    let dauntless = app.world.spawn_bundle((Name("Dauntless"), Cargo(0), Fuel(200), Hull(100), Pos(0 - 50), Carrier));
+    let ceres = app.world.spawn_bundle((Name("Ceres"), Cargo(0)));
+    let vesta = app.world.spawn_bundle((Name("Vesta"), Cargo(0)));
+    let vex = app.world.spawn_bundle((Name("Vex"),));
+    let ada = app.world.spawn_bundle((Name("Ada"), Skill(3)));
+    let grace = app.world.spawn_bundle((Name("Grace"), Skill(5)));
+
+    // (Relate by value: bundles, inserts, or `relate`.)
+    discard(app.world.insert(kestrel, DockedAt { berth: 1 }.to(ceres)));
+    discard(app.world.insert(osprey, DockedAt { berth: 2 }.to(ceres)));
+    discard(app.world.insert(heron, DockedAt { berth: 1 }.to(vesta)));
+    discard(app.world.relate(ada, Piloting, kestrel));
+    discard(app.world.relate(grace, Piloting, osprey));
+    discard(app.world.relate(heron, InFleet, dauntless));
+    discard(app.world.relate(osprey, InFleet, dauntless));
+    discard(app.world.relate(kestrel, InFleet, dauntless));
+    discard(app.world.relate(osprey, Follows, kestrel));
+    discard(app.world.relate(heron, Follows, osprey));
+    discard(app.world.relate(kestrel, Allied, osprey));
+    discard(app.world.relate(osprey, Allied, kestrel));
+    discard(app.world.relate(heron, Allied, kestrel));
+    discard(app.world.relate(vex, Hunting, kestrel));
+    discard(app.world.relate(vex, Hunting, osprey));
+
+    say("== frame 1");
+    app.emit(&Update);
+
+    say("== frame 2: Osprey moves to Vesta, Grace takes the Heron, Vex drops the Kestrel");
+    discard(app.world.insert(osprey, Cargo(9)));
+    discard(app.world.insert(osprey, DockedAt { berth: 3 }.to(vesta)));
+    discard(app.world.relate(grace, Piloting, heron));
+    discard(app.world.unlink<Hunting>(vex, kestrel));
+    // (The convoy cannot close on itself: relating would abort the program,
+    // so it is not tried. Kestrel leads Osprey, which Heron follows.)
+    say("  (Kestrel following Heron would be refused: Follows is acyclic; " ++ show(len_at(&app.world.descendants<Follows>(kestrel))) ++ " follow Kestrel)");
+    app.emit(&Update);
+
+    say("== frame 3: Dauntless is lost; Ceres closes");
+    let drones = len_at(&app.world.descendants<Aboard>(dauntless));
+    discard(app.world.despawn(dauntless));
+    discard(app.world.despawn(ceres));
+    let mut aboard = app.world.query_filtered<(Entity,), (Related<Aboard>,), _>();
+    let left = aboard.count();
+    discard(aboard);
+    say("  " ++ show(drones) ++ " drones were aboard, " ++ show(left) ++ " remain");
+    let docked = len_at(&app.world.targets<DockedAt, _>(kestrel)) > 0;
+    let at_vesta = len_at(&app.world.sources<DockedAt>(vesta));
+    say("  Kestrel docked: " ++ (if(docked) { "true" } else { "false" }) ++ ", Vesta's ships: " ++ show(at_vesta));
+    app.emit(&Update);
+    0
+}

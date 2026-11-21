@@ -6593,6 +6593,12 @@ head (225 test functions; 209 named), but for these:
 - `error_reply`, `reply_text`, `with_workers`, `birds`: helpers of the
   tests, not tests.
 
+Upstream's examples: `relations.rs` is covey/fleet, `simulation.rs` is
+covey/simulation, `query_loop.rs` (its loop, not its timing; covey keeps no
+per-table slices) is covey/query_loop. `devtools.rs` serves the MCP tools
+over a Unix socket (covey/mcp_session has the tools over a channel), and
+`tokio_web.rs` fetches web pages: Glorious's library has no sockets.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by

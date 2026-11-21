@@ -2579,6 +2579,7 @@ impl<A, N> ReadsOnly for Filtered<Read<A>, N> {}
 impl<A, N> ReadsOnly for Filtered<Ticks<A>, N> {}
 impl<A, N> ReadsOnly for Filtered<Writes<A>, N> where A: AConditionOnlyReads {}
 impl<K> ReadsOnly for Joined<K> where K: ReadsOnly {}
+impl<K> ReadsOnly for Fan<K> where K: ReadsOnly {}
 impl<X> ReadsOnly for Shared<X> {}
 impl<X> ReadsOnly for Owned<X> where X: AConditionOnlyReads {}
 
@@ -2980,6 +2981,7 @@ pub trait TouchNames { fn touch_names([Str]) -> [Str] }
 impl TouchNames for () { fn touch_names(names: [Str]) -> [Str] { names } }
 impl<A, Rest> TouchNames for (Writes<A>, Rest) where A: Schedule, Rest: TouchNames { fn touch_names(names: [Str]) -> [Str] { <Rest as TouchNames>::touch_names(push(names, "w:" ++ <A as Schedule>::NAME)) } }
 impl<K, Rest> TouchNames for (Joined<K>, Rest) where (K, Rest): TouchNames { fn touch_names(names: [Str]) -> [Str] { <(K, Rest) as TouchNames>::touch_names(names) } }
+impl<K, Rest> TouchNames for (Fan<K>, Rest) where (K, Rest): TouchNames { fn touch_names(names: [Str]) -> [Str] { <(K, Rest) as TouchNames>::touch_names(names) } }
 impl<A, Rest> TouchNames for (Read<A>, Rest) where A: Schedule, Rest: TouchNames { fn touch_names(names: [Str]) -> [Str] { <Rest as TouchNames>::touch_names(push(names, "r:" ++ <A as Schedule>::NAME)) } }
 impl<X, Rest> TouchNames for (Shared<X>, Rest) where X: Schedule, Rest: TouchNames { fn touch_names(names: [Str]) -> [Str] { <Rest as TouchNames>::touch_names(push(names, "r:" ++ <X as Schedule>::NAME)) } }
 impl<X, Rest> TouchNames for (Owned<X>, Rest) where X: Schedule, Rest: TouchNames { fn touch_names(names: [Str]) -> [Str] { <Rest as TouchNames>::touch_names(push(names, "w:" ++ <X as Schedule>::NAME)) } }

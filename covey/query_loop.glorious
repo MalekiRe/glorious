@@ -1,0 +1,46 @@
+// Upstream's examples/query_loop.rs, what of it is not timing: one system
+// over one combination of components, which should do what the loop over
+// raw arrays does (`ideal`). Upstream times both and reads the machine code
+// (covey's `asm` reads objdump's text); its per-table slices are not
+// covey's, which keeps no tables.
+// expect:
+// 256 entities, 10 frames: the query and the raw loop agree
+// 0
+mod ecs;
+
+use ecs::{App, World, Entity, Query};
+
+struct Position(Int)
+struct Velocity(Int)
+struct Update
+
+fn integrate(query: &mut Query<(&mut Position, &Velocity), ()>) { query.for_each() { mut position, velocity => position.0 = position.0 + velocity.0; } }
+
+// What the loop means: add, and say when each was changed.
+fn ideal(positions: &mut [Int], velocities: &[Int], changed: &mut [Int], tick: Int) {
+    let mut i = 0;
+    while({ i < len_at(positions) }) { positions[i] = positions[i] + velocities[i]; changed[i] = tick; i = i + 1 }
+}
+
+fn main() -> Int {
+    let n = 256;
+    let mut positions = [];
+    let mut velocities = [];
+    let mut changed = [];
+    let mut i = 0;
+    while({ i < n }) { push_at(&mut positions, i); push_at(&mut velocities, 1); push_at(&mut changed, 0); i = i + 1 };
+    let mut tick = 0;
+    while({ tick < 10 }) { ideal(&mut positions, &velocities, &mut changed, tick); tick = tick + 1 };
+
+    let mut app = App::new().register<Position>().register<Velocity>().add_systems(Update, integrate).build();
+    let mut es = [];
+    let mut k = 0;
+    while({ k < n }) { push_at(&mut es, app.world.spawn_bundle((Position(k), Velocity(1)))); k = k + 1 };
+    let mut f = 0;
+    while({ f < 10 }) { app.emit(&Update); f = f + 1 };
+    let mut agree = true;
+    let mut j = 0;
+    while({ j < n }) { match(app.world.get<Position>(es[j])) { Some(p) => if(p.0 == positions[j]) { () } else { agree = false }, None => agree = false }; j = j + 1 };
+    say(show(n) ++ " entities, 10 frames: " ++ (if(agree) { "the query and the raw loop agree" } else { "they differ" }));
+    0
+}
