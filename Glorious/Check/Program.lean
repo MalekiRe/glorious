@@ -579,6 +579,9 @@ def checkItems (fitems : List Flat.FItem) (seed : UInt64 := 0) (kept : Kept := [
     -- body's type is not what its signature said, the groups are checked
     -- as before, callees first.
     let pre ← get
+    -- (Where each group numbers from is part of what it is checked from.)
+    let from_ := hash [pre.tys.size, pre.rows.size, pre.caps.size, pre.capEdges.size, pre.loans.size,
+      pre.rigidKeys.size, pre.brands, pre.dropAsked]
     let signed ← if !Trace.universesAsked then pure false else
       tryCatchThe Elab.Said (do
           for (g, _) in rest do
@@ -616,9 +619,6 @@ def checkItems (fitems : List Flat.FItem) (seed : UInt64 := 0) (kept : Kept := [
       let run := (rest.extract i j).toList
       match deltas with
       | some kept =>
-        -- (Where each numbers from is part of what it is checked from.)
-        let from_ := hash [pre.tys.size, pre.rows.size, pre.caps.size, pre.capEdges.size, pre.loans.size,
-          pre.rigidKeys.size, pre.brands, pre.dropAsked]
         let keyOf := fun (k : Nat) => mixHash ((readKeyAt[k]?).getD 0) (mixHash from_ (hash k))
         groupDeltas := groupDeltas ++ (← checkSideBySideWith run (jump := false) fun (g, k) =>
           checkGroupKept kept pre (keyOf k) k g)
@@ -662,6 +662,8 @@ def checkItems (fitems : List Flat.FItem) (seed : UInt64 := 0) (kept : Kept := [
     -- (What the table names, gone through once for each entry made since the
     -- last look, and once for each dictionary however often it is shared.)
     let mut asking := true
+    -- (Each copy checked is kept as the groups are, numbered after them.)
+    let mut copyAt := groups.length + 1
     let mut used : Std.HashSet String := {}
     let mut seen : Std.HashSet USize := {}
     let mut scanned := 0
@@ -683,7 +685,20 @@ def checkItems (fitems : List Flat.FItem) (seed : UInt64 := 0) (kept : Kept := [
       if ready.isEmpty then asking := false
       else
         modify fun s => { s with pendingCopies := rest }
-        checkSideBySide (ready.toList.map fun (_, d) => [d])
+        match deltas with
+        | some kept =>
+          -- (A copy's key: the declarations, the copy, the copies checked
+          -- with it, and the keys of the unit's groups it names.)
+          let batch := hash (ready.toList.map fun (f, d) => (f, groupKey 0 [d]))
+          let keyOfCopy := fun (d : FnDecl) (at_ : Nat) =>
+            let callees := ((d.body.fvClauses d.body.roots).filterMap fun n => groupOf[n]?).eraseDups.mergeSort
+            let read := callees.foldl (fun h j => mixHash h ((readKeys[j]?).getD 0)) (mixHash (groupKey declKey [d]) batch)
+            mixHash read (mixHash from_ (hash at_))
+          let start := copyAt
+          groupDeltas := groupDeltas ++ (← checkSideBySideWith ready.toList.zipIdx (jump := false) fun ((_, d), j) =>
+            checkGroupKept kept pre (keyOfCopy d (start + j)) (start + j) [d])
+          copyAt := start + ready.size
+        | none => checkSideBySide (ready.toList.map fun (_, d) => [d])
     timedM "unit: late" do
       checkDups (← get).lateDups
       checkDrops (← get).lateDrops
