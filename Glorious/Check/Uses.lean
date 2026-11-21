@@ -137,7 +137,15 @@ def checkAparts : M Unit := do
 def checkDrops (drops : Array (Ty × String)) (callables : Bool := false) : M Unit := do
   if drops.isEmpty then return
   let info ← mustInfo
+  -- (Each type once: what is said is of the first that has to be used, as
+  -- the first of each type comes before the others.)
+  let mut done : Std.HashSet String := {}
   for (t, why) in drops do
+    let t ← zonk t
+    -- (A callable's by what it captures too.)
+    let key := s!"{showTy t} {← (freeCaps t).mapM findCap}"
+    if done.contains key then continue
+    done := done.insert key
     modify fun s => { s with seen := {} }
     if let some what ← tyMustUse info [] t callables then
       throw s!"{why}, but {what} has to be used"

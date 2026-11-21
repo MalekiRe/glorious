@@ -62,6 +62,10 @@ instance : Absorb (Array Nat) := ⟨fun z x y =>
   if x.size ≥ z.size && y.size ≥ z.size && y.extract 0 z.size == z then some (x ++ y.extract z.size y.size)
   else none⟩
 
+/-- (A function's body as a check wrote a decision into it: where it is what
+it was, written alike.) -/
+instance : Absorb Flat.Body := ⟨fun z x y => if x == z then some y else if x == y then some x else none⟩
+
 /-- What a check did to a store: segments of its own, entries pushed onto a
 segment that was there (its start, how many it had, and those), and entries
 changed (where, what it was, what it is). -/
@@ -261,11 +265,11 @@ def newEntries {κ ν : Type} [BEq κ] [Hashable κ] (p b : Std.HashMap κ ν) :
     | some pv => if samePtr pv v then none else some (k, v, some pv)
     | none => some (k, v, none)
 
-instance (priority := low) {κ ν : Type} [BEq κ] [Hashable κ] : Delta (Std.HashMap κ ν) (MapD κ ν) where
+instance (priority := low) {κ ν : Type} [BEq κ] [Hashable κ] [Absorb ν] : Delta (Std.HashMap κ ν) (MapD κ ν) where
   diff p b := if samePtr p b then some #[] else some ((newEntries p b).map fun (k, v, was) => (k, was, v)).toArray
   apply p a d := d.foldlM (init := a) fun m (k, was, v) =>
     match was, m.get? k with
-    | some pv, some cur => if samePtr cur pv || samePtr cur v then some (m.insert k v) else none
+    | some pv, some cur => (putEntry cur pv v).map (m.insert k ·)
     -- (Made by both: the same, as both took it from what is the same.)
     | none, some cur => if samePtr cur v then some m else
         match p with
@@ -1054,6 +1058,7 @@ def applyDelta (p : Option St) (a : St) (d : StDelta) : Option St := do
     at_ := (p.map (·.at_)).getD a.at_,
     -- (Found again from the block captures put together.)
     blockRoots := {}, blockRootsAt := 0 }
+
 
 /-- The state after checking `b`'s units after `a`'s, both having gone on
 from `p`, where it can be put together from what each added. -/

@@ -352,10 +352,15 @@ def compileFile (path : String) (checkKept : Check.Kept := []) (search : Bool :=
     pure (Std.HashMap.ofList ((← Store.load (α := List (UInt64 × List Syntax.Item)) (dir / "parsed") "parsed").getD []))
   let texts : Texts ← if (← IO.getEnv "GLORIOUS_FRESH").isSome then pure {} else
     pure (Std.HashMap.ofList ((← Store.load (α := List (UInt64 × TextRead)) (dir / "texts") "texts").getD []))
+  -- (What each of the program's own groups added, as the last compile of it
+  -- checked them.)
+  let groupsKept : Check.Deltas ← if (← IO.getEnv "GLORIOUS_FRESH").isSome then pure {} else
+    pure (Std.HashMap.ofList ((← Store.load (α := List (UInt64 × Check.StDelta)) (dir / "groups") "groups").getD []))
   let text ← IO.FS.readFile path
   let files ← moduleFiles path
   let result ← Trace.timedIO "compile" (IO.lazyPure fun _ =>
-    compileSource text true files (few := true) known kept checkKept search memo firsts parsedKept preludeKept texts)
+    compileSource text true files (few := true) known kept checkKept search memo firsts parsedKept preludeKept texts
+      (groupsKept := some groupsKept))
   if let .ok c := result then keep <| Trace.timedIO "save what is kept" do
     -- (What a compile that did not look for each place found is not kept
     -- for one that does.)
@@ -381,6 +386,9 @@ def compileFile (path : String) (checkKept : Check.Kept := []) (search : Bool :=
       Store.save (library / "units") "units"
         ((c.libraryKept ++ libraryKept.filter fun (k, _) => !newKeys.contains k).take 96)
     if let some k := List.lookup ("%way", 0) c.places then Store.save (dir / "way") "way" k
+    -- (Saved again only where a group was checked anew.)
+    unless c.groupsMade.all (fun (k, _) => groupsKept.contains k) && c.groupsMade.size == groupsKept.size do
+      Trace.timedIO "save: groups" (Store.save (dir / "groups") "groups" c.groupsMade.toList)
     -- (`GLORIOUS_CORE`: the Core that was compiled, with what destroys what.)
     if (← IO.getEnv "GLORIOUS_CORE").isSome then
       IO.eprintln (showCore c.fnNames c.core)

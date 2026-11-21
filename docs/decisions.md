@@ -6770,6 +6770,69 @@ is written whatever else changes, with every node at a place: what
 per-declaration caching and a check of each function on its own are made
 from.
 
+## The checker's state as deltas, kept by group
+
+**Decision: what a check adds to the state it began with is a value of its
+own (`Check.StDelta`, `diffStates`), put on another state by `applyDelta`.
+Checks side by side are put together so (`mergeStates` is `applyDelta (some
+p) a (diffStates p b)`), and each group of the program's own units keeps its
+delta, under a key of what it reads, for the next compile
+(`checkGroupKept`, the build directory's `groups`).**
+
+A delta is, for each part of the state: the store segments the check made,
+entries it pushed onto a segment that was there, entries it changed with
+what they were; the end of an array or list, or its front, or all of it made
+anew; the map entries it made or changed. Put on a state, a changed entry is
+changed where it is still what it was; where the other state changed it too,
+only if the two can be put together (`Absorb`: a variable bound by one or by
+both alike, what a capture variable captures grown by both, a body a
+decision was written into, alike). With the state both began with at hand
+(side by side) "what it was" is the same object; for a later compile it is
+the same value.
+
+**Why groups can be kept so.** Two things had to hold, and now do:
+- *A check binds nothing it began with.* Two open rows with nothing the
+  other lacks were each bound to a third, new one, and of two capture
+  variables the first gave way; so a check bound variables of the
+  implementations' declarations, shared by their functions, and on
+  `covey/states2` 7 of 21 runs side by side could not be put together. Now
+  the side with nothing more stands for the other, and the newer capture
+  variable gives way; none is checked again.
+- *What a group makes is numbered from a place of its own.* The `i`-th group
+  of a unit numbers from `runGap` times `i + 1` past where the unit's groups
+  began (`jumpedTo`), so what it added does not depend on what the groups
+  before it made.
+
+A group's key is the unit's declarations, the group whole (its bodies with
+their places), the keys of the groups it calls into, and where the unit's
+groups begin. The unit's declarations are kept the same way, under the
+declarations' key and where they begin. Delta in hand, nothing is checked;
+where it does not go on (`applyDelta` gives none), the group is checked.
+
+**Measured** on `covey/states2` (each against a build of the same text with
+`GLORIOUS_FRESH`, the programs written byte for byte the same):
+
+| Edit | Before | Now |
+|---|---|---|
+| a comment in `main` (no line moves) | 3.0 s | 1.35 s |
+| a string in `main` | 3.0 s | 2.57 s |
+| a string in a small function | 3.0 s | 2.60 s |
+| a line added at the top (every place moves) | 3.0 s | 2.5 s |
+
+What is left of a check of the program's unit is `main` (0.85 s, of it the
+bounds of its calls 0.74). The late checks of what must be used were 0.3 s
+of it: 14,732 entries of 332 types, each type now looked at once.
+
+**Not kept, and why.** The library's units are kept whole as before, by the
+chain of the units before them (`Kept`): a delta for each would be put on at
+every compile, where one state is taken at once. The keys keep each body's
+places, so a line added above a function checks it again; what it reports
+is written with those places.
+
+The delta is in parts of twelve fields (`StDelta0`..`StDelta9`): written as
+one function each, Lean's code generator took 300 s on the file, in parts
+22 s.
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by

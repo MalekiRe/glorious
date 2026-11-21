@@ -259,10 +259,12 @@ before it (both changed one thing that was there: a lifetime a declared type
 has, which each binds), or that was refused, is checked again after them: what
 is said is then the first refusal in their order, as one after another would
 say it. -/
-def checkSideBySide (groups : List (List FnDecl)) : M Unit := do
+def checkSideBySideWith {α : Type} (groups : List α) (one : α → M (Array (UInt64 × StDelta)))
+    (jump : Bool := true) : M (Array (UInt64 × StDelta)) := do
   if groups.length < 8 then
-    for g in groups do checkMaybe g
-    return
+    let mut made := #[]
+    for g in groups do made := made ++ (← one g)
+    return made
   let threads := min (groups.length / 4 + 1) sideThreads
   let size := (groups.length + threads - 1) / threads
   let runs := (List.range threads).filterMap fun t =>
@@ -271,18 +273,74 @@ def checkSideBySide (groups : List (List FnDecl)) : M Unit := do
     | run => some run
   let start ← get
   let tasks := runs.zipIdx.map fun (run, j) =>
-    (run, j, Task.spawn (prio := .dedicated) fun _ => (run.forM checkMaybe : M Unit).run (jumpedFor start j runGap))
+    (run, j, Task.spawn (prio := .dedicated) fun _ =>
+      (run.foldlM (fun acc g => do pure (acc ++ (← one g))) #[] : M (Array (UInt64 × StDelta))).run
+        (if jump then jumpedFor start j runGap else start))
   -- (In order: a run that cannot be put with those before it, or was
   -- refused, is checked again after them, as one after another would.)
+  let mut made := #[]
   for (run, j, t) in tasks do
     let here ← get
     let got := Trace.timed "side: wait" fun _ => t.get
     let put := match got with
-      | .ok ((), after) => if stayedBelow after start j runGap then Trace.timed "side: merge" fun _ => mergeStates start here after else none
+      | .ok (mine, after) =>
+        if !jump || stayedBelow after start j runGap then
+          (Trace.timed "side: merge" fun _ => mergeStates start here after).map (mine, ·)
+        else none
       | .error _ => none
     match put with
-    | some st => set st
-    | none => timedM "side: again" (for g in run do checkMaybe g)
+    | some (mine, st) =>
+      set st
+      made := made ++ mine
+    | none =>
+      let again ← timedM "side: again" (run.foldlM (fun acc g => do pure (acc ++ (← one g))) #[])
+      made := made ++ again
+  pure made
+
+def checkSideBySide (groups : List (List FnDecl)) : M Unit := do
+  let _ ← checkSideBySideWith groups fun g => do checkMaybe g; pure #[]
+
+/-- What each of the program's own groups added, by a key of what it is
+checked from (`checkGroupKept`): kept by one compile for the next. -/
+abbrev Deltas := Std.HashMap UInt64 StDelta
+
+/-- The state with what is made next numbered from where the `i`-th group
+of a unit that began at `pre` numbers from, `runGap` after the one before;
+none if as much is made already. -/
+def jumpedTo (s pre : St) (i : Nat) : Option St :=
+  let at_ := fun (n : Nat) => n + (i + 1) * runGap
+  let room := fun (now was : Nat) => now ≤ at_ was
+  if !(room s.tys.size pre.tys.size && room s.rows.size pre.rows.size && room s.caps.size pre.caps.size
+      && room s.capEdges.size pre.capEdges.size && room s.loans.size pre.loans.size
+      && room s.rigidKeys.size pre.rigidKeys.size && room s.brands pre.brands && room s.dropAsked pre.dropAsked) then none
+  else some { s with
+    tys := s.tys.jumpTo (at_ pre.tys.size), rows := s.rows.jumpTo (at_ pre.rows.size)
+    caps := s.caps.jumpTo (at_ pre.caps.size), capOut := s.capOut.jumpTo (at_ pre.caps.size)
+    capEdges := s.capEdges.jumpTo (at_ pre.capEdges.size)
+    capEdgeNames := s.capEdgeNames.jumpTo (at_ pre.capEdges.size)
+    loans := s.loans.jumpTo (at_ pre.loans.size), rigidKeys := s.rigidKeys.jumpTo (at_ pre.rigidKeys.size)
+    brands := at_ pre.brands, dropAsked := at_ pre.dropAsked }
+
+/-- A group of a unit begun at `pre`, the `i`-th, under `key`: what an
+earlier compile found it added (`kept`), put on the state, where it can be;
+else checked. Each group numbers from a place of its own (`jumpedTo`), so
+what it added does not depend on what the groups before it made, only on
+what it reads, which `key` is made from. Gives what it added, under `key`. -/
+def checkGroupKept (kept : Deltas) (pre : St) (key : UInt64) (i : Nat) (g : List FnDecl) :
+    M (Array (UInt64 × StDelta)) := do
+  match jumpedTo (← get) pre i with
+  | none => checkMaybe g; pure #[]
+  | some st =>
+    set st
+    if let some d := kept[key]? then
+      if let some st' := Trace.timed "group: reused" fun _ => applyDelta none st d then
+        set st'
+        return #[(key, d)]
+    checkMaybe g
+    let after ← get
+    -- (One that made more than its room: what it added is not kept.)
+    if (jumpedTo after pre (i + 1)).isNone then return #[]
+    pure ((Trace.timed "group: delta" fun _ => diffStates st after).toArray.map (key, ·))
 
 /-- Check items. With `kept` from an earlier check of a program that began
 alike (`seed`: what was checked before them), the state after each step whose
@@ -294,7 +352,8 @@ it. What the functions of later groups are is put back as this program has
 them. Gives what this check kept, the state after all of it first, under a
 key of every item whole: where that is kept, nothing else is looked at, and
 nothing else is kept. -/
-def checkItems (fitems : List Flat.FItem) (seed : UInt64 := 0) (kept : Kept := []) : M Kept := do
+def checkItems (fitems : List Flat.FItem) (seed : UInt64 := 0) (kept : Kept := []) (deltas : Option Deltas := none) :
+    M (Kept × Array (UInt64 × StDelta)) := do
   -- The items as they declare, and their functions' bodies by name.
   let items := fitems.map Flat.FItem.declared
   let bodies := fitems.flatMap Flat.FItem.bodies
@@ -367,9 +426,10 @@ def checkItems (fitems : List Flat.FItem) (seed : UInt64 := 0) (kept : Kept := [
     if let some st := kept.lookup whole then
       adopt st
       ownBodies ()
-      return [(whole, st)]
+      return ([(whole, st)], #[])
     let before := (← get).impls.size
     let mut made : Kept := []
+    let mut groupDeltas : Array (UInt64 × StDelta) := #[]
     -- (A function is declared by checking it, with its group: what is
     -- declared first is the rest, so a function added, or a signature
     -- changed, keeps what was found of the declarations and the groups
@@ -396,10 +456,29 @@ def checkItems (fitems : List Flat.FItem) (seed : UInt64 := 0) (kept : Kept := [
       adopt st
       ownBodies ()
     | none =>
-      declare items
-      computeVariances
-      declareTraits items
-      checkUseDecls
+      -- (Of the program's own units, what declaring added, as an earlier
+      -- compile found it, with this program's bodies put in: where it
+      -- numbered from is part of its key.)
+      let here ← get
+      let declFrom := mixHash key (hash [here.tys.size, here.rows.size, here.caps.size, here.capEdges.size,
+        here.loans.size, here.rigidKeys.size, here.brands, here.dropAsked, here.impls.size])
+      let taken := match deltas with
+        | some kept => (kept[declFrom]?).bind fun d =>
+          ((applyDelta none here d).bind ours).map (d, ·)
+        | none => none
+      match taken with
+      | some (d, st) =>
+        set st
+        ownBodies ()
+        groupDeltas := groupDeltas.push (declFrom, d)
+      | none =>
+        timedM "unit: declare" do
+          declare items
+          computeVariances
+          declareTraits items
+          checkUseDecls
+        if deltas.isSome then
+          if let some d := diffStates here (← get) then groupDeltas := groupDeltas.push (declFrom, d)
     made := (key, noBodies (← get)) :: made
     modify fun s =>
       { s with runFns := decls.foldl (fun m d => m.insertIfNew d.name d.body) s.runFns }
@@ -434,6 +513,17 @@ def checkItems (fitems : List Flat.FItem) (seed : UInt64 := 0) (kept : Kept := [
     let sorted := (groups.zipIdx.map fun (g, i) =>
         (if (called[i]?).getD false then (levelOf[i]?).getD 0 else last, i, g)).mergeSort
       fun a b => a.1 < b.1 || (a.1 == b.1 && a.2.1 ≤ b.2.1)
+    -- (Each group's key of what it is checked from, where what each added
+    -- is kept (`checkGroupKept`): the declarations, the group whole, and the
+    -- groups it calls into, each by its own such key.)
+    let declKey := key
+    let readKeys : Array UInt64 := groups.zipIdx.foldl (fun (acc : Array UInt64) (g, i) =>
+      let callees := (g.foldl (fun l d => (deps d.name).foldl (fun l n =>
+        match groupOf[n]? with
+        | some j => if j < i then j :: l else l
+        | none => l) l) []).eraseDups.mergeSort
+      acc.push (callees.foldl (fun h j => mixHash h ((acc[j]?).getD 0)) (groupKey declKey g))) #[]
+    let readKeyAt : Array UInt64 := (sorted.map fun (_, i, _) => (readKeys[i]?).getD 0).toArray
     let groups := sorted.map (·.2.2)
     let levels := (sorted.map (·.1)).toArray
     -- The functions of the copies of an implementation for every type
@@ -475,7 +565,8 @@ def checkItems (fitems : List Flat.FItem) (seed : UInt64 := 0) (kept : Kept := [
       let k := groupKey acc.2 g
       (k :: acc.1, k)) ([], key)).1.reverse
     let every := keptEvery groups.length
-    let start := ((keys.zipIdx.reverse.find? fun (k, _) => (look k).isSome).map (·.2 + 1)).getD 0
+    let start := if deltas.isSome then 0 else
+      ((keys.zipIdx.reverse.find? fun (k, _) => (look k).isSome).map (·.2 + 1)).getD 0
     if start > 0 then
       if let some k := keys[start - 1]? then
         if let some st := look k then
@@ -523,7 +614,15 @@ def checkItems (fitems : List Flat.FItem) (seed : UInt64 := 0) (kept : Kept := [
       let mut j := i
       while j < rest.size && (levels[(rest[j]?.map (·.2)).getD 0]?).getD 0 == level do j := j + 1
       let run := (rest.extract i j).toList
-      checkSideBySide (run.map (·.1))
+      match deltas with
+      | some kept =>
+        -- (Where each numbers from is part of what it is checked from.)
+        let from_ := hash [pre.tys.size, pre.rows.size, pre.caps.size, pre.capEdges.size, pre.loans.size,
+          pre.rigidKeys.size, pre.brands, pre.dropAsked]
+        let keyOf := fun (k : Nat) => mixHash ((readKeyAt[k]?).getD 0) (mixHash from_ (hash k))
+        groupDeltas := groupDeltas ++ (← checkSideBySideWith run (jump := false) fun (g, k) =>
+          checkGroupKept kept pre (keyOf k) k g)
+      | none => checkSideBySide (run.map (·.1))
       let last := (run.getLast?.map (·.2)).getD 0
       if run.any (fun (_, k) => (k + 1) % every == 0) || last + 1 == groups.length then
         made := (keys[last]!, forKeeping (← get)) :: made
@@ -550,7 +649,7 @@ def checkItems (fitems : List Flat.FItem) (seed : UInt64 := 0) (kept : Kept := [
           refreshCopies
           made := (k, st) :: made
     -- (None uses another: all side by side.)
-    checkSideBySide (implGroups.toList.drop implStart)
+    timedM "unit: impl groups" (checkSideBySide (implGroups.toList.drop implStart))
     if implStart < implGroups.size then
       if let some k := implKeys.getLast? then made := (k, noBodies (← get)) :: made
     if let some k := implKeys.getLast? then key := k
@@ -585,11 +684,12 @@ def checkItems (fitems : List Flat.FItem) (seed : UInt64 := 0) (kept : Kept := [
       else
         modify fun s => { s with pendingCopies := rest }
         checkSideBySide (ready.toList.map fun (_, d) => [d])
-    checkDups (← get).lateDups
-    checkDrops (← get).lateDrops
-    checkStays (← get).lateStays
+    timedM "unit: late" do
+      checkDups (← get).lateDups
+      checkDrops (← get).lateDrops
+      checkStays (← get).lateStays
     modify fun s => { s with lateDups := #[], lateDrops := #[], lateStays := #[] }
-    pure ((whole, noBodies (← get)) :: made)
+    pure ((whole, noBodies (← get)) :: made, groupDeltas)
 
 /-- The declared types a type is made of. -/
 partial def namedIn : Ty → List String
@@ -755,7 +855,8 @@ where it cannot be, or one of them is refused, they are checked one after
 another, as all were. -/
 def checkUnitsKept (first : St) (units : List (List Flat.FItem × UInt64)) (modules : Syntax.ModuleInfo)
     (seed : UInt64) (kept : Kept) (own : Bool := true) (library : Nat := 0)
-    (deps : List (List Nat) := []) : Except Elab.Said (Elab.Blocks × Kept × Kept) := do
+    (deps : List (List Nat) := []) (groupsKept : Option Deltas := none) :
+    Except Elab.Said (Elab.Blocks × Kept × Kept × Array (UInt64 × StDelta)) := do
   -- (Each unit's level: one more than the highest of the units it uses.)
   let levelOf := units.length.fold (init := (#[] : Array Nat)) fun i _ acc =>
     acc.push (((deps[i]?).getD []).foldl (fun m d => max m ((acc[d]?).getD 0 + 1)) 0)
@@ -763,8 +864,12 @@ def checkUnitsKept (first : St) (units : List (List Flat.FItem × UInt64)) (modu
     (units.zipIdx.filter fun (_, k) => levelOf[k]? == some l)
   -- (Side by side only where each unit says what it uses.)
   let levels := if deps.length == units.length then levels else units.zipIdx.map ([·])
-  let action : M (Elab.Blocks × Kept × Kept) := do
+  -- (What each of the program's own units' groups added, kept where asked:
+  -- the library's units are kept whole.)
+  let deltasOf := fun (k : Nat) => if k ≥ library then groupsKept else none
+  let action : M (Elab.Blocks × Kept × Kept × Array (UInt64 × StDelta)) := do
     modify fun s => { s with modules, ownItems := own }
+    let mut groupsMade : Array (UInt64 × StDelta) := #[]
     let mut key := seed
     let mut made : Kept := []
     -- (What the first `library` units made: the library's modules, which
@@ -792,13 +897,15 @@ def checkUnitsKept (first : St) (units : List (List Flat.FItem × UInt64)) (modu
           continue
         let tasks := level.zipIdx.map fun (((u, info), k), j) =>
           (k, j, Task.spawn fun _ => Trace.timed s!"check unit {k} (side by side)" fun _ =>
-            (checkItems u (mixHash side info) kept).run (jumpedFor start j))
+            (checkItems u (mixHash side info) kept (deltasOf k)).run (jumpedFor start j))
         let mut together : Option St := none
         let mut mines : List (Nat × Kept) := []
+        let mut deltasMine : Array (UInt64 × StDelta) := #[]
         let mut ok := true
         for (k, j, t) in tasks do
           match t.get with
-          | .ok (mine, after) =>
+          | .ok ((mine, ds), after) =>
+            deltasMine := deltasMine ++ ds
             if !stayedBelow after start j then ok := false
             together := match together with
               | none => some after
@@ -809,6 +916,7 @@ def checkUnitsKept (first : St) (units : List (List Flat.FItem × UInt64)) (modu
         if ok then
           if let some st := together then
             set st
+            groupsMade := groupsMade ++ deltasMine
             for (k, mine) in mines do
               made := mine ++ made
               if k < library then shared := mine ++ shared
@@ -820,11 +928,12 @@ def checkUnitsKept (first : St) (units : List (List Flat.FItem × UInt64)) (modu
       let levelStart := key
       for ((u, info), k) in level do
         let before ← get
-        let (mine, after) ← match Trace.timed s!"check unit {k}" fun _ =>
-            (checkItems u (mixHash key info) kept).run before with
+        let ((mine, ds), after) ← match Trace.timed s!"check unit {k}" fun _ =>
+            (checkItems u (mixHash key info) kept (deltasOf k)).run before with
           | .ok r => pure r
           | .error e => throwThe Elab.Said e
         set after
+        groupsMade := groupsMade ++ ds
         if let some (k, _) := mine.head? then key := k
         made := mine ++ made
         if k < library then shared := mine ++ shared
@@ -835,7 +944,7 @@ def checkUnitsKept (first : St) (units : List (List Flat.FItem × UInt64)) (modu
         let whole := mixHash (mixHash levelStart (hash "side by side")) key
         made := (whole, ← get) :: made
         if level.all (fun (_, k) => k < library) then shared := (whole, ← get) :: shared
-    pure (← finish, made, shared)
+    pure (← finish, made, shared, groupsMade)
   let (r, _) ← action.run first
   pure r
 
