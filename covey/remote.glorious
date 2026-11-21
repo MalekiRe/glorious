@@ -5,9 +5,10 @@
 // - `a_loop_runs_once_per_drive_while_a_chain_may_finish_in_one`.
 // - `systems_hand_the_remote_to_other_threads`.
 // - `envelope_commands_apply_when_the_emit_ends`.
-// Not ported: `disjoint_bridges_run_in_parallel_in_one_wave` (two bridges
-// that wait for each other: those granted at one sync point run one after
-// another here); `dropping_the_app_or_a_granted_bridge_never_strands_anyone`
+// - `disjoint_bridges_run_in_parallel_in_one_wave`: two bridges that wait
+//   for each other (`waits`, at a barrier) touch what is apart, so they run
+//   at once, in one wave.
+// Not ported: `dropping_the_app_or_a_granted_bridge_never_strands_anyone`
 // (a request is not failed when the app is dropped); the envelope sync
 // points that run beside other systems
 // (`an_envelope_point_runs_beside_disjoint_systems_and_infers_its_components`,
@@ -37,12 +38,14 @@
 // --
 // 0
 // 1
+// --
+// 1 1
 // 0
 mod ecs;
 
 use core::iter::{into_iter, next};
 
-use ecs::{App, World, Entity, Commands, Query, Single, With, Remote, BridgeError, Schedule, sync_point};
+use ecs::{App, World, Entity, Commands, Query, Single, With, Remote, BridgeError, Schedule, sync_point, waits};
 use std::thread::{scope, Scope, Threads, join, yield_now, AtomicInt, load, store, fetch_add};
 
 struct Update
@@ -59,6 +62,12 @@ fn after(q: &mut Query<(&A,), (With<Player>,)>) { say("after " ++ show(q.count()
 fn spawn_a<S>(commands: &mut Commands<S>) -> Entity where S: ecs::Get<A>, S: ecs::Get<Player>, S: ecs::Columns, S: ecs::Unlinks<S> { commands.spawn((A(5), Player)) }
 fn spawn_a3<S>(commands: &mut Commands<S>) where S: ecs::Get<A>, S: ecs::Columns, S: ecs::Unlinks<S> { discard(commands.spawn((A(3),))) }
 fn wait_for<S>(remote: &Remote<S>, n: Int) / {Threads} { while({ remote.waiting() < n }) { yield_now() } }
+// A barrier of two: each arrives, and goes on once both have.
+fn meet(at: &AtomicInt) / {Threads} {
+    let round = load(at) / 2;
+    discard(fetch_add(at, 1));
+    while({ load(at) < (round + 1) * 2 }) { yield_now() }
+}
 
 // `conflicting_shared_state_and_exclusive_bridges_never_share_a_wave`
 struct Flight { now: AtomicInt, most: AtomicInt }
@@ -211,5 +220,40 @@ fn main() -> Int {
     });
     say(load(&seen));
     say(app.world.count<A>());
+    say("--");
+
+    let mut app = App::new().register<A>().register<B>().add_systems(Update, sync_point(Net)).build();
+    let remote = app.world.remote();
+    let both = app.world.spawn_bundle((A(0), B(0)));
+    let barrier = AtomicInt::new(0);
+    scope(fn(s: &Scope) / {Threads} {
+        let first = remote.share();
+        let second = remote.share();
+        let b1 = std::thread::share(&barrier);
+        let b2 = std::thread::share(&barrier);
+        let one = s.spawn({
+            let m = first;
+            let at = b1;
+            discard(m.bridge(Net, waits(fn(q: &mut Query<(&mut A,), ()>) / {Threads} {
+                let b = at;
+                meet(&b);
+                q.for_each() { (mut a,) => a.0 = a.0 + 1; }
+            })))
+        });
+        let two = s.spawn({
+            let m = second;
+            let at = b2;
+            discard(m.bridge(Net, waits(fn(q: &mut Query<(&mut B,), ()>) / {Threads} {
+                let b = at;
+                meet(&b);
+                q.for_each() { (mut b,) => b.0 = b.0 + 1; }
+            })))
+        });
+        wait_for(&remote, 2);
+        app.emit(&Update);
+        join(one);
+        join(two)
+    });
+    say(show(match(app.world.get<A>(both)) { Some(a) => a.0, None => 0 - 1 }) ++ " " ++ show(match(app.world.get<B>(both)) { Some(b) => b.0, None => 0 - 1 }));
     0
 }

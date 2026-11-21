@@ -6348,6 +6348,24 @@ asked for once; columns are pointers into
 the world's value, so a world moved while a query is had would leave them
 pointing where it was (nothing does that: a query borrows the world).
 
+## Bridges run in waves at a sync point
+
+**Decision: an exclusive sync point runs what is asked of it in waves: the
+requests whose touches are apart from each before them in the wave, taken
+in the order asked, run at once, each on a thread of its own with the world
+lent to it through a pointer, and their commands done after the wave in
+the order asked.** A request keeps what its function touches (`touches`,
+found from its parameters' types, `TouchNames`), as a system says it.
+After one left for a later wave the rest wait too, so requests still run
+in the order asked. An envelope's are run in turn, their commands done
+with the systems' when the emit ends.
+
+A bridge's function may wait, as a system's may, said by `waits(f)`
+(`RunsRemote`: taken out as a waiting system's parameters are, and called
+among the threads of the point's run), so two bridges that wait for each
+other at a barrier finish in one wave (covey/remote ports
+`disjoint_bridges_run_in_parallel_in_one_wave`).
+
 ## Other standing decisions
 
 - **Branching is by pattern callables** (language specification §6), not by

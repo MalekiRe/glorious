@@ -3944,10 +3944,11 @@ fn drive_task<S>(task: &mut TaskOf<S>, label: Str, world: &mut World<S>) where S
 
 // Run a system-like function on a world: its parameters fetched as a
 // system's are; `None` if one of them is not there.
-pub trait RunsOnWorld<S, O> { fn run_on(&Self, &mut World<S>, &mut Commands<S>) -> Option<O> }
+pub trait RunsOnWorld<S, O> { fn run_on(&Self, &mut World<S>, &mut Commands<S>) -> Option<O> fn touch_list() -> [Str] }
 impl<S, O, ..P, ..A, L, Ts, Lc, F> RunsOnWorld<S, O> for F
     where F: Fn<(..P), Output = O>, ..P: Parameter<Asks = A>, (..A): Tuple<Nested = L>, L: AllTouches<List = Ts>, Ts: AllApart,
-          L: Locals<State = Lc>, L: Fetch<(), S, (), F, O, Lc> {
+          L: Locals<State = Lc>, L: Fetch<(), S, (), F, O, Lc>, L: TouchNames {
+    fn touch_list() -> [Str] { <L as TouchNames>::touch_names([]) }
     fn run_on(f: &F, world: &mut World<S>, commands: &mut Commands<S>) -> Option<O> {
         let mut locals = <L as Locals>::start();
         <L as Fetch<(), S, (), F, O, Lc>>::fetch(&(), world, commands, &mut locals, (), f)
@@ -4336,7 +4337,36 @@ impl<G, S, B, T> Follows<G, S> for (BehaviorsOf<B, S>, T) where T: Follows<G, S>
 // commands is done before the sync point is left. `until` asks again at the
 // next sync point while its parameters are not there.
 // (Those granted at one sync point are run one after another.)
-pub struct Request<S> { point: Str, run: for<'a, 'b> fn(&'a mut World<S>, &'b mut Commands<S>) -> Option<Request<S>> }
+pub struct Request<S> { point: Str, touches: [Str], run: for<'a, 'b> fn(&'a mut World<S>, &'b mut Commands<S>) -> Option<Request<S>> / {Threads} }
+// What a sync point runs for another thread: a function as a system is, or
+// one that may wait (`waits(f)`: at a barrier, for a channel), run among
+// the threads of the point's run.
+pub trait RunsRemote<S, O> { fn run_remote(&Self, &mut World<S>, &mut Commands<S>) -> Option<O> / {Threads} fn remote_touches() -> [Str] }
+impl<S, O, ..P, ..A, L, Ts, Lc, F> RunsRemote<S, O> for F
+    where F: Fn<(..P), Output = O>, ..P: Parameter<Asks = A>, (..A): Tuple<Nested = L>, L: AllTouches<List = Ts>, Ts: AllApart,
+          L: Locals<State = Lc>, L: Fetch<(), S, (), F, O, Lc>, L: TouchNames {
+    fn run_remote(f: &F, world: &mut World<S>, commands: &mut Commands<S>) -> Option<O> / {Threads} {
+        let mut locals = <L as Locals>::start();
+        <L as Fetch<(), S, (), F, O, Lc>>::fetch(&(), world, commands, &mut locals, (), f)
+    }
+    fn remote_touches() -> [Str] { <L as TouchNames>::touch_names([]) }
+}
+impl<S, O, ..P, ..A, L, Ts, Lc, F> RunsRemote<S, O> for Waits<F>
+    where F: Fn<(..P), Output = O, Effects = {Threads}>, ..P: Parameter<Asks = A>, (..A): Tuple<Nested = L>, L: AllTouches<List = Ts>, Ts: AllApart,
+          L: Locals<State = Lc>, L: Takes<(), S>, L: CallTaken<(), S, (), Waits<F>, O, Lc>, L: TouchNames {
+    fn run_remote(w: &Waits<F>, world: &mut World<S>, commands: &mut Commands<S>) -> Option<O> / {Threads} {
+        match(<L as Takes<(), S>>::take_asked(world)) {
+            Some(taken) =>
+                let mut t = taken;
+                let mut locals = <L as Locals>::start();
+                let out = <L as CallTaken<(), S, (), Waits<F>, O, Lc>>::call_taken(&(), &mut t, commands, &mut locals, (), w);
+                <L as Takes<(), S>>::put_asked_back(world, t);
+                Some(out),
+            None => None
+        }
+    }
+    fn remote_touches() -> [Str] { <L as TouchNames>::touch_names([]) }
+}
 pub struct Remote<S> { queue: Mutex<[Request<S>]> }
 // (A handle to the world's queue: as many as like, each the same queue.)
 impl<S> Use<[0, *]> for Remote<S> {}
@@ -4348,7 +4378,7 @@ impl<S> Remote<S> {
     // Another handle to the same world.
     pub fn share(remote: &Self) -> Remote<S> { Remote { queue: std::thread::share(&remote.queue) } }
     // Run `f` at the next sync point named `P`, and wait for what it gives.
-    pub fn bridge<P, F, O>(remote: &Self, point: P, f: F) -> Result<O, BridgeError> / {Threads} where P: Schedule, F: RunsOnWorld<S, O>, F: Use<[0, *]>, O: Use<[0, *]> {
+    pub fn bridge<P, F, O>(remote: &Self, point: P, f: F) -> Result<O, BridgeError> / {Threads} where P: Schedule, F: RunsRemote<S, O>, F: Use<[0, *]>, O: Use<[0, *]> {
         discard(point);
         let (tx, rx) = channel();
         let asked = bridge_request<S, F, O>(<P as Schedule>::NAME, f, tx);
@@ -4356,7 +4386,7 @@ impl<S> Remote<S> {
         match(recv(&rx)) { Some(answer) => answer, None => Err(BridgeError::Invalid) }
     }
     // The same, asked again at each sync point until it can run.
-    pub fn until<P, F, O>(remote: &Self, point: P, f: F) -> O / {Threads} where P: Schedule, F: RunsOnWorld<S, O>, F: Use<[0, *]>, O: Use<[0, *]> {
+    pub fn until<P, F, O>(remote: &Self, point: P, f: F) -> O / {Threads} where P: Schedule, F: RunsRemote<S, O>, F: Use<[0, *]>, O: Use<[0, *]> {
         discard(point);
         let (tx, rx) = channel();
         let asked = until_request<S, F, O>(<P as Schedule>::NAME, f, tx);
@@ -4367,20 +4397,22 @@ impl<S> Remote<S> {
     pub fn waiting(remote: &Self) -> Int { lock(&remote.queue, fn(queue: &mut [Request<S>]) -> Int { len_at(&*queue) }) }
 }
 // What is asked of a sync point: run `f` there, and send back what it gave.
-fn bridge_request<S, F, O>(point: Str, f: F, tx: std::thread::Sender<Result<O, BridgeError>>) -> Request<S> where F: RunsOnWorld<S, O>, F: Use<[0, *]>, O: Use<[0, *]> {
-    Request { point: point, run: fn(world: &mut World<S>, commands: &mut Commands<S>) -> Option<Request<S>> {
+fn bridge_request<S, F, O>(point: Str, f: F, tx: std::thread::Sender<Result<O, BridgeError>>) -> Request<S> where F: RunsRemote<S, O>, F: Use<[0, *]>, O: Use<[0, *]> {
+    let touches = <F as RunsRemote<S, O>>::remote_touches();
+    Request { point: point, touches: touches, run: fn(world: &mut World<S>, commands: &mut Commands<S>) -> Option<Request<S>> / {Threads} {
         let g = f;
         let to = tx;
-        match(<F as RunsOnWorld<S, O>>::run_on(&g, world, commands)) { Some(out) => send(&to, Ok(out)), None => send(&to, Err(BridgeError::Invalid)) };
+        match(<F as RunsRemote<S, O>>::run_remote(&g, world, commands)) { Some(out) => send(&to, Ok(out)), None => send(&to, Err(BridgeError::Invalid)) };
         None
     } }
 }
 // (Asked again at the next sync point while it cannot run.)
-fn until_request<S, F, O>(point: Str, f: F, tx: std::thread::Sender<O>) -> Request<S> where F: RunsOnWorld<S, O>, F: Use<[0, *]>, O: Use<[0, *]> {
-    Request { point: point, run: fn(world: &mut World<S>, commands: &mut Commands<S>) -> Option<Request<S>> {
+fn until_request<S, F, O>(point: Str, f: F, tx: std::thread::Sender<O>) -> Request<S> where F: RunsRemote<S, O>, F: Use<[0, *]>, O: Use<[0, *]> {
+    let touches = <F as RunsRemote<S, O>>::remote_touches();
+    Request { point: point, touches: touches, run: fn(world: &mut World<S>, commands: &mut Commands<S>) -> Option<Request<S>> / {Threads} {
         let g = f;
         let to = tx;
-        match(<F as RunsOnWorld<S, O>>::run_on(&g, world, commands)) {
+        match(<F as RunsRemote<S, O>>::run_remote(&g, world, commands)) {
             Some(out) => send(&to, out); None,
             None => Some(until_request<S, F, O>(point, g, to))
         }
@@ -4418,26 +4450,109 @@ impl<E, S, P> System<E, S> for SyncPointOf<P> where P: Schedule, P: PointKind {
         let name = <P as Schedule>::NAME;
         let asked = lock(&world.remotes, fn(queue: &mut [Request<S>]) -> [Request<S>] { replace(queue, []) });
         let mut kept = [];
+        let mut mine = [];
         let mut each = into_iter(asked);
         while({ match(next(&mut each)) {
-            Some(request) =>
-                let Request { point, run } = request;
-                if(point == name) {
-                    // (Exclusive: what each asks is done at once. An
-                    // envelope's is done with the systems', when the emit
-                    // ends.)
-                    let again = if(<P as PointKind>::EXCLUSIVE) {
-                        let mut mine = no_commands(&*world);
-                        let again = run(world, &mut mine);
-                        apply(mine, world);
-                        again
-                    } else { run(world, commands) };
-                    match(again) { Some(later) => kept = push(kept, later), None => () }
-                } else { kept = push(kept, Request { point: point, run: run }) };
-                true,
+            Some(request) => if(request.point == name) { mine = push(mine, request) } else { kept = push(kept, request) }; true,
             None => false
         } }) { () };
+        // (Exclusive: in waves, each of requests whose touches are apart, run
+        // at once, each with commands of its own done after the wave in the
+        // order asked. An envelope's are run in turn, their commands done
+        // with the systems', when the emit ends.)
+        while({ len_at(&mine) > 0 }) {
+            if(<P as PointKind>::EXCLUSIVE) {
+                let (wave, rest) = wave_of(mine);
+                mine = rest;
+                let again = run_wave(wave, world);
+                kept = join_onto(kept, again)
+            } else {
+                let (first, rest) = first_of(mine);
+                mine = rest;
+                let Request { point, touches, run } = first;
+                match(std::thread::scope(fn(s: &std::thread::Scope) -> Option<Request<S>> / {Threads} { run(world, commands) })) { Some(later) => kept = push(kept, later), None => () }
+            }
+        };
         lock(&world.remotes, fn(queue: &mut [Request<S>]) { let mut later = replace(queue, []); *queue = join_onto(kept, later) })
+    }
+}
+fn first_of<S>(all: [Request<S>]) -> (Request<S>, [Request<S>]) {
+    let mut rest = [];
+    let mut first = None;
+    let mut each = into_iter(all);
+    while({ match(next(&mut each)) { Some(r) => match(first) { None => first = Some(r), Some(f) => first = Some(f); rest = push(rest, r) }; true, None => false } }) { () };
+    match(first) { Some(f) => (f, rest), None => abort("no request") }
+}
+// The requests that are apart from every one before them in the wave,
+// taken in the order asked; and those left for a later wave.
+fn wave_of<S>(all: [Request<S>]) -> ([Request<S>], [Request<S>]) {
+    let mut wave = [];
+    let mut touched = [];
+    let mut left = [];
+    let mut blocked = false;
+    let mut each = into_iter(all);
+    while({ match(next(&mut each)) {
+        Some(r) =>
+            let r: Request<S> = r;
+            // (After one left for later, the rest wait too: requests are
+            // run in the order asked, a wave at a time.)
+            if(if(blocked) { false } else { apart_from_all(&r.touches, &touched) }) {
+                touched = push(touched, clone(&r.touches));
+                wave = push(wave, r)
+            } else { blocked = true; left = push(left, r) };
+            true,
+        None => false
+    } }) { () };
+    (wave, left)
+}
+fn apart_from_all(mine: &[Str], others: &[[Str]]) -> Bool {
+    let mut i = 0;
+    let mut apart = true;
+    while({ i < len_at(others) }) { if(touches_apart(mine, &others[i])) { () } else { apart = false }; i = i + 1 };
+    apart
+}
+// A wave run: one alone where it is; more at once, each on a thread of its
+// own, the world lent to each (they touch what is apart), and their commands
+// done after in the order asked. What each asks again is given back.
+fn run_wave<S>(wave: [Request<S>], world: &mut World<S>) -> [Request<S>] {
+    if(len_at(&wave) == 1) {
+        let (first, _) = first_of(wave);
+        let Request { point, touches, run } = first;
+        let mut mine = no_commands(&*world);
+        let again = std::thread::scope(fn(s: &std::thread::Scope) -> Option<Request<S>> / {Threads} { run(world, &mut mine) });
+        apply(mine, world);
+        match(again) { Some(later) => [later], None => [] }
+    } else {
+        let at = ptr_mut(world);
+        let done = std::thread::scope(fn(s: &std::thread::Scope) -> [(Option<Request<S>>, Commands<S>)] / {std::thread::Threads} {
+            let mut cells = [];
+            let mut each = into_iter(wave);
+            while({ match(next(&mut each)) {
+                Some(r) =>
+                    let Request { point, touches, run } = r;
+                    let w = at;
+                    let cell = unsafe { std::thread::spawn_unchecked(s, fn() -> (Option<Request<S>>, Commands<S>) / {std::thread::Threads} {
+                        let lent: &mut World<S> = unsafe { std::ptr::as_mut(w) };
+                        let mut theirs = no_commands(&*lent);
+                        let again = run(lent, &mut theirs);
+                        (again, theirs)
+                    }) };
+                    cells = push(cells, cell);
+                    true,
+                None => false
+            } }) { () };
+            let mut out = [];
+            let mut i = 0;
+            while({ i < len_at(&cells) }) { out = push(out, unsafe { std::thread::join_cell<(Option<Request<S>>, Commands<S>)>(cells[i]) }); i = i + 1 };
+            out
+        });
+        let mut again = [];
+        let mut each = into_iter(done);
+        while({ match(next(&mut each)) {
+            Some((later, theirs)) => apply(theirs, world); match(later) { Some(l) => again = push(again, l), None => () }; true,
+            None => false
+        } }) { () };
+        again
     }
 }
 impl<E, S, P> IntoSystem<E, S> for SyncPointOf<P> where P: Schedule, P: PointKind {
