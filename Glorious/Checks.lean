@@ -51,8 +51,9 @@ def keptProgram (body : String) : String :=
 /-- A module's items made flat and made trees again are the items. -/
 def sameFlat (items : List Syntax.Item) : Bool := Syntax.Flat.itemsRoundTrip items
 
-/-- Of the prelude and every module of the library. -/
-def flatRoundTrips : Bool :=
+/-- Of the prelude and every module of the library. (Asked as it is run:
+a constant would be worked out whenever the compiler starts.) -/
+def flatRoundTrips (_ : Unit) : Bool :=
   match readPrelude.get, readStd.get with
   | .ok (prelude, _), .ok std => sameFlat prelude && std.parsed.all sameFlat
   | _, _ => false
@@ -284,7 +285,7 @@ def all : List (Nat × (Unit → Bool)) := [
   (96, fun _ => keptAfterEdit (keptProgram "let z = 0; 1 + z") (keptProgram "1")),
   -- A module's items made flat and made trees again are the items: the
   -- prelude's and every module of the library's.
-  (97, fun _ => flatRoundTrips)
+  (97, fun _ => flatRoundTrips ())
 ]
 
 end Glorious.Checks

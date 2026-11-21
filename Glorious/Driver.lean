@@ -535,7 +535,7 @@ def parseProgram (src : String) (files : List (List String × String)) (check : 
   let files := if std then library ++ files else files
   -- (The prelude as an earlier process of this compiler parsed it, where
   -- one did: `preludeKept`.)
-  let (prelude, fix) ← Trace.timed "parse: the prelude" fun _ => if check then preludeKept.getDM readPrelude.get else
+  let (prelude, fix) ← Trace.timed "parse: the prelude" fun _ => if check then (match preludeKept with | some p => pure p | none => readPrelude.get) else
     match Syntax.parse {} Prelude.unchecked (reflect := false) with
     | .ok r => pure r
     | .error e => throw s!"prelude: {e}"
