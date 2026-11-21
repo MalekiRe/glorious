@@ -309,6 +309,9 @@ followed gave: by the call, what came of it and what it cost. -/
 structure AState where
   fuel : Nat
   memo : Std.HashMap String (List (AVal × Nat) × Nat) := {}
+  /-- The functions whose bodies were followed: what the count read of the
+  program besides the body counted in. -/
+  followed : Array String := #[]
 
 abbrev A := StateT AState Option
 
@@ -583,6 +586,7 @@ partial def callValue (ctx : ACtx) (depth : Nat) (f : AVal) (args : List AVal) :
   | .fn name =>
     match depth, ctx.fns[name]? with
     | d + 1, some fb =>
+      modify fun s => { s with followed := s.followed.push name }
       -- (A call of a function being followed, again: it comes back, or never
       -- does, as the first call does; that one's paths are counted there.)
       if ctx.active.contains name then unfollowed ctx depth args (quiet := true)
@@ -951,8 +955,8 @@ end
 /-- The most uses of `x` along any path through `body`, or with `ctx.lower` the
 fewest, if the count finishes. `outer` are the other local names in scope,
 about which nothing is known. -/
-def pathUses (ctx : ACtx) (outer : List String) (x : String) (b : Flat.Body) (body : List Flat.StmtId)
-    (known : List (String × AVal) := []) : Option Nat :=
+def pathUsesWith (ctx : ACtx) (outer : List String) (x : String) (b : Flat.Body) (body : List Flat.StmtId)
+    (known : List (String × AVal) := []) : Option Nat × Array String :=
   let env := known ++ (x, AVal.tracked) :: outer.map (·, AVal.unknown)
   let count : A Nat := do
     let mut ns : List Nat := []
@@ -961,14 +965,17 @@ def pathUses (ctx : ACtx) (outer : List String) (x : String) (b : Flat.Body) (bo
       -- What the body yields leaves the region being counted.
       ns := (n + (← escapes ctx 8 v)) :: ns
     pure (ctx.fold ns)
-  (count.run { fuel := 20000 }).map (·.1)
+  match count.run { fuel := 20000 } with
+  | some (n, s) => (some n, s.followed)
+  -- (Not finished: what it would have read is not known.)
+  | none => (none, #["*"])
 
 /-- The most uses of `x` on any path through `body` up to a call of one of the
 `probes`, if the count finishes: none if no use comes before such a call. A
 path that leaves the body with something a probe may be called through ends
 there too, since the call may follow. -/
-def usesBeforeProbe (ctx : ACtx) (outer : List String) (x : String) (b : Flat.Body) (body : List Flat.StmtId)
-    (known : List (String × AVal)) : Option Nat :=
+def usesBeforeProbeWith (ctx : ACtx) (outer : List String) (x : String) (b : Flat.Body) (body : List Flat.StmtId)
+    (known : List (String × AVal)) : Option Nat × Array String :=
   let ctx := { ctx with lower := false, probing := true }
   let env := known ++ (x, AVal.tracked) :: outer.map (·, AVal.unknown)
   let count : A Nat := do
@@ -980,7 +987,24 @@ def usesBeforeProbe (ctx : ACtx) (outer : List String) (x : String) (b : Flat.Bo
         if holdsProbe v then
           worst := max worst (n + (← escapes { ctx with lenient := true } 8 v))
     pure worst
-  (count.run { fuel := 20000 }).map (·.1)
+  match count.run { fuel := 20000 } with
+  | some (n, s) => (some n, s.followed)
+  | none => (none, #["*"])
+
+/-- `pathUsesWith`, what it followed noted (`St.followed`): what a group's
+check read of other functions' bodies, which what is kept of it is keyed
+by (`checkGroupKept`). -/
+def pathUses (ctx : ACtx) (outer : List String) (x : String) (b : Flat.Body) (body : List Flat.StmtId)
+    (known : List (String × AVal) := []) : M (Option Nat) := do
+  let (r, f) := pathUsesWith ctx outer x b body known
+  unless f.isEmpty do modify fun s => { s with followed := s.followed ++ f }
+  pure r
+
+def usesBeforeProbe (ctx : ACtx) (outer : List String) (x : String) (b : Flat.Body) (body : List Flat.StmtId)
+    (known : List (String × AVal)) : M (Option Nat) := do
+  let (r, f) := usesBeforeProbeWith ctx outer x b body known
+  unless f.isEmpty do modify fun s => { s with followed := s.followed ++ f }
+  pure r
 
 open Flat in
 /-- Does evaluating this run nothing at all? `quiet` names what only builds a
@@ -1191,7 +1215,7 @@ def checkUses (code : Flat.Body) (pos : String) (outer : Scope) (binds : Scope) 
             let ft ← zonk ft
             modify fun st => { st with seen := {} }
             let dropped := (← tyHasDrop [] ft).isSome
-            let twice : Bool := match pathUses (if dropped then { ctx with handed := true } else ctx)
+            let twice : Bool := match ← pathUses (if dropped then { ctx with handed := true } else ctx)
                 (names.filter (· != x)) x ob only with
               | some n => decide (n ≥ 2)
               | none => true
@@ -1225,7 +1249,7 @@ def checkUses (code : Flat.Body) (pos : String) (outer : Scope) (binds : Scope) 
         let settled := (freeTys t).isEmpty && (freeCaps t).isEmpty && !hasParam t
           && !(← tyOwnsOnce [] t) && !dropped
         unless settled do
-          match pathUses (if dropped then { ctx with handed := true } else ctx)
+          match ← pathUses (if dropped then { ctx with handed := true } else ctx)
               (names.filter (· != x)) x code body with
           | some n => if n ≥ 2 then mustDup t (twice x)
           | none => mustDup t (twice x)
@@ -1371,7 +1395,7 @@ def runLowerChecks (fnTy : Ty) : M Unit := do
     -- value, the variable is given a cleanup that destroys it there.
     if let some (site, held, at_) := s.givenSites.lookup pos then
       unless usedFirst b quiet x body do
-        let somewhere_not := match pathUses { ctx with handed := true } names x b body with
+        let somewhere_not := match ← pathUses { ctx with handed := true } names x b body with
           | some n => n == 0
           | none => true
         if somewhere_not then
@@ -1419,7 +1443,7 @@ def runLowerChecks (fnTy : Ty) : M Unit := do
     if free && !heldDrop && hasParam t && ownValue && s.ownItems && !library
         && (← tyMustUse roots [] t).isNone then
       unless s.flagged.contains pos || usesStmts b resumptive x body == 0 || usedFirst b quiet x body do
-        if (pathUses { ctx with handed := true, capturesOwned := true } names x b body) == some 0 then
+        if (← pathUses { ctx with handed := true, capturesOwned := true } names x b body) == some 0 then
           let place := ((pos.splitOn ":").take 2).filterMap String.toNat?
           let (line, col) := match place with
             | [line, col] => (line, col)
@@ -1443,7 +1467,7 @@ def runLowerChecks (fnTy : Ty) : M Unit := do
           -- (A callable is counted as what has to be used is: handed to a
           -- function, it is used only if that function uses it, since one
           -- that lets it go does not destroy it.)
-          let count := if heldDrop then pathUses { ctx with capturesOwned := true } names x b body
+          let count ← if heldDrop then pathUses { ctx with capturesOwned := true } names x b body
             else pathUses { ctx with handed := true, capturesOwned := true } names x b body
           if count == some 0 then
             if heldDrop && name == "%generic" then
@@ -1465,15 +1489,15 @@ def runLowerChecks (fnTy : Ty) : M Unit := do
     if usesStmts b resumptive x body == 0 then unused := true
     else if usedFirst b quiet x body then unused := false
     else
-      let counted := fun (c : ACtx) =>
-        match pathUses c names x b body with
-        | some n => n == 0
-        | none => true
-      unused := counted ctx
+      let counted := fun (c : ACtx) => (do
+        match ← pathUses c names x b body with
+        | some n => pure (n == 0)
+        | none => pure true : M Bool)
+      unused ← counted ctx
       -- Used on every path if the callables the function was given come
       -- back: then that is asked of whoever gives them.
       if unused && !conditional.isEmpty then
-        unless counted { ctx with sure := conditional.foldl (fun set c => set.insert c.1) sure } do
+        unless ← counted { ctx with sure := conditional.foldl (fun set c => set.insert c.1) sure } do
           unused := false
           relied := true
     if unused then
@@ -1507,14 +1531,14 @@ def runLowerChecks (fnTy : Ty) : M Unit := do
     let known := members.map fun (x, arity) =>
       (x, usesEnv arity)
     let outer := names.filter fun n => !members.any (·.1 == n)
-    match pathUses { ctx with lower := false } outer "%env" b body known with
+    match ← pathUses { ctx with lower := false } outer "%env" b body known with
     | some n =>
       if n ≥ 2 then
         throw s!"{listed} run in the environment `{env}`, which is used up by the first that is called: on some path more than one call is made"
     | none =>
       throw s!"{listed} run in the environment `{env}`, which is used up by the first that is called: it could not be shown that no path calls more than one"
     if must then
-      match pathUses ctx outer "%env" b body known with
+      match ← pathUses ctx outer "%env" b body known with
       | some n =>
         if n == 0 then
           throw s!"the environment `{env}` has to be used: on some path none of {listed} is called"
@@ -1531,7 +1555,7 @@ def runLowerChecks (fnTy : Ty) : M Unit := do
       ++ members.map fun (x, arity) => (x, usesEnv arity)
     let outer := names.filter fun n => !known.any (·.1 == n)
     let listed := fun (xs : List (String × Nat)) => ", ".intercalate (xs.map fun (x, _) => s!"`{x}`")
-    match pathUses { ctx with lower := false } outer "%env" b body known with
+    match ← pathUses { ctx with lower := false } outer "%env" b body known with
     | some 0 => pure ()
     | _ =>
       throw s!"{listed members} runs in the environment `{env}`, which is there only once {listed producers} has run: on some path it is called first"
@@ -1545,7 +1569,7 @@ def runLowerChecks (fnTy : Ty) : M Unit := do
       ++ borrowers.map fun (x, _) => (x, AVal.probe)
     let outer := names.filter fun n => !known.any (·.1 == n)
     let listed := fun (xs : List (String × Nat)) => ", ".intercalate (xs.map fun (x, _) => s!"`{x}`")
-    match usesBeforeProbe ctx outer "%env" b body known with
+    match ← usesBeforeProbe ctx outer "%env" b body known with
     | some 0 => pure ()
     | some _ =>
       throw s!"{listed borrowers} runs in the environment `{env}` lent to it, and {listed owners} is given `{env}` and uses it up: on some path {listed borrowers} is called after {listed owners}"

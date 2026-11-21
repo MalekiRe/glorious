@@ -361,7 +361,7 @@ def compileFile (path : String) (checkKept : Check.Kept := []) (search : Bool :=
     if ← groupsDir.isDir then
       for entry in ← groupsDir.readDir do
         if let some k := entry.fileName.toNat? then
-          let later := Store.loadLater (α := List Check.StDelta) entry.path "group"
+          let later := Store.loadLater (α := List Check.KeptGroup) entry.path "group"
           kept := kept.insert k.toUInt64 (Thunk.mk fun _ => match later.get with
             | some [d] => some d
             | _ => none)

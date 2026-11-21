@@ -6938,6 +6938,32 @@ what a callable parameter performs or gives where the signature leaves it
 open, and which uses of a type parameter are written. An edit of `main` 1.40 s -> 1.46 s
 (the destroyers passed, most of them written out by specialization).
 
+## A group kept by what it read of the others
+
+**Decision: a group of the program's own units is kept under a key of the
+unit's declarations and the group alone, with what it read of the rest of
+the unit beside it: for each function of the unit it calls, what that
+function shows its callers (`interfaceOf`: its scheme written out whole,
+and what the checker keeps of it by its name for callers: arguments run in
+place or together, whether it must be run, its type parameters as written,
+`unsafe`, its rows); and for each body of the unit its count of uses
+followed (`St.followed`, noted by `pathUses`), that body. A later compile
+puts it on where each of those is still what it was (`readsHold`).** Before,
+the key held the keys of every group it called, so a change of any body
+checked every function that reached it: the edit of the middle of a chain
+of 2,000 checked a thousand.
+
+How a function is written is no longer read by its callers, but where the
+count of uses follows into it (729 of 1,666 groups of `covey/states2` follow
+some body, nearly all the prelude's `if`, `match`, `loop`, whose bodies the
+unit's chain of keys covers). A count that did not finish (`*`) keeps
+nothing.
+
+Measured: the generated program's middle function edited 1.5 s -> 0.81 s
+(Zig 0.14's own x86 backend 0.59 s, LLVM 1.7 s); `covey/states2`, a string
+in a small function 1.7 s -> 0.78 s, `main` not checked again. Each build
+compared byte for byte with a `GLORIOUS_FRESH` one of the same text.
+
 ## Not done, and why (measured)
 
 - **Certificate inference in parallel.** Inference is per function already:

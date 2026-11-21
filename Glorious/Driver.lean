@@ -77,7 +77,7 @@ structure Compiled where
   libraryKept : Check.Kept := []
   /-- What each of the program's own groups added, where `groupsKept` was
   given: for the next compile of the program (`Check.checkGroupKept`). -/
-  groupsMade : Array (UInt64 × Check.StDelta) := #[]
+  groupsMade : Array (UInt64 × Check.KeptGroup) := #[]
   /-- Each module's items as name resolution made them, where `unitsKept`
   was given: for the next compile (`Syntax.Modules.UnitsKept`). -/
   unitsMade : List (UInt64 × List Syntax.Flat.FItem × Syntax.Modules.UnitMade) := []

@@ -827,6 +827,10 @@ structure St where
   tyMemo : Std.HashMap USize (Ty × Nat) := {}
   /-- Dictionaries made for a group's calls, by the object each was found as. -/
   dictShared : PMap USize (Traits.Dict × Elab.DictE) := {}
+  /-- The functions whose bodies a count of uses followed (`pathUses`), in
+  the order followed, `*` where one was not finished: what a group's check
+  read of bodies besides its own. -/
+  followed : Array String := #[]
   /-- Each dictionary made in a group's bounds by what it is (its function
   and its parts, each one object): one object for each, however often it is
   found. -/

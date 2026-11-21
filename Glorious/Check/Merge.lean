@@ -766,6 +766,7 @@ structure StDelta9 where
   fnBounds : ListD (String × Nat)
   impls : ArrD ImplDecl
   fnBodies : MapD String Flat.Body
+  followed : ArrD String
 
 def diffPart9 (p b : St) : Option StDelta9 := do
   pure {
@@ -774,7 +775,8 @@ def diffPart9 (p b : St) : Option StDelta9 := do
     methodCalls := ← Delta.diff p.methodCalls b.methodCalls
     fnBounds := ← Delta.diff p.fnBounds b.fnBounds
     impls := ← Delta.diff p.impls b.impls
-    fnBodies := ← Delta.diff p.fnBodies b.fnBodies }
+    fnBodies := ← Delta.diff p.fnBodies b.fnBodies
+    followed := ← Delta.diff p.followed b.followed }
 
 def applyPart9 (p : Option St) (a : St) (d : StDelta9) : Option St := do
   pure { a with
@@ -783,7 +785,8 @@ def applyPart9 (p : Option St) (a : St) (d : StDelta9) : Option St := do
     methodCalls := ← Delta.apply (p.map (·.methodCalls)) a.methodCalls d.methodCalls,
     fnBounds := ← Delta.apply (p.map (·.fnBounds)) a.fnBounds d.fnBounds,
     impls := ← Delta.apply (p.map (·.impls)) a.impls d.impls,
-    fnBodies := ← Delta.apply (p.map (·.fnBodies)) a.fnBodies d.fnBodies }
+    fnBodies := ← Delta.apply (p.map (·.fnBodies)) a.fnBodies d.fnBodies,
+    followed := ← Delta.apply (p.map (·.followed)) a.followed d.followed }
 
 /-- What a check added to the state it began with (`diffStates`): each part
 the checks put together as above, and the rest as the check left it. -/
@@ -923,6 +926,7 @@ def diffStates (p b : St) : Option StDelta := do
       fnBounds := [],
       impls := #[],
       fnBodies := {},
+      followed := #[],
       assocUses := #[],
       solvedFit := {}, leavesFit := {}, leavesAt := {}, tyIds := {}, tyIdCount := 0,
       tyMemo := {}, dictShared := {}, dictByShape := {}, destroyFit := {}, modules := {}, body := {}, blockRoots := {}, blockRootsAt := 0,
@@ -1089,6 +1093,7 @@ def applyDelta (p : Option St) (a : St) (d : StDelta) : Option St := do
     fnBounds := s.fnBounds,
     impls := s.impls,
     fnBodies := s.fnBodies,
+    followed := s.followed,
     assocUses,
     brands := max a.brands b.brands, anyMust := a.anyMust || b.anyMust, modules := a.modules,
     shapes := a.shapes || b.shapes, patterned := a.patterned || b.patterned, dropMode := a.dropMode,

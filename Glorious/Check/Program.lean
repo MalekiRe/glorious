@@ -251,6 +251,11 @@ def schemeDetail (s : Scheme) : String :=
     | .inner l => s!"inner {l}"
   s!"bounds {s.bounds.map fun (tr, t) => (tr, showTy t)} dups {dups} drops {drops} edges {s.edges.map fun (c, w) => (c, what w)} cvars {s.cvars} tvars {s.tvars} ty {showTyCaps s.ty}"
 
+/-- What a group added, with what it read of the rest of its unit: each
+name it calls, with what that function showed it (`interfaceOf`), and each
+body its count of uses followed (`bodyKey`). -/
+abbrev KeptGroup := StDelta × Array (String × UInt64)
+
 /-- Groups none of which uses another, checked side by side: a few runs of
 them, each on a thread of its own from the state before, its ids from a place
 of its own (`jumpedFor`), and what each added put together (`mergeStates`),
@@ -259,8 +264,8 @@ before it (both changed one thing that was there: a lifetime a declared type
 has, which each binds), or that was refused, is checked again after them: what
 is said is then the first refusal in their order, as one after another would
 say it. -/
-def checkSideBySideWith {α : Type} (groups : List α) (one : α → M (Array (UInt64 × StDelta)))
-    (jump : Bool := true) : M (Array (UInt64 × StDelta)) := do
+def checkSideBySideWith {α : Type} (groups : List α) (one : α → M (Array (UInt64 × KeptGroup)))
+    (jump : Bool := true) : M (Array (UInt64 × KeptGroup)) := do
   if groups.length < 8 then
     let mut made := #[]
     for g in groups do made := made ++ (← one g)
@@ -274,7 +279,7 @@ def checkSideBySideWith {α : Type} (groups : List α) (one : α → M (Array (U
   let start ← get
   let tasks := runs.zipIdx.map fun (run, j) =>
     (run, j, Task.spawn (prio := .dedicated) fun _ =>
-      (run.foldlM (fun acc g => do pure (acc ++ (← one g))) #[] : M (Array (UInt64 × StDelta))).run
+      (run.foldlM (fun acc g => do pure (acc ++ (← one g))) #[] : M (Array (UInt64 × KeptGroup))).run
         (if jump then jumpedFor start j runGap else start))
   -- (In order: a run that cannot be put with those before it, or was
   -- refused, is checked again after them, as one after another would.)
@@ -302,7 +307,7 @@ def checkSideBySide (groups : List (List FnDecl)) : M Unit := do
 
 /-- What each of the program's own groups added, by a key of what it is
 checked from (`checkGroupKept`): kept by one compile for the next. -/
-abbrev Deltas := Std.HashMap UInt64 (Thunk (Option StDelta))
+abbrev Deltas := Std.HashMap UInt64 (Thunk (Option KeptGroup))
 
 /-- The state with what is made next numbered from where the `i`-th group
 of a unit that began at `pre` numbers from, `runGap` after the one before;
@@ -321,26 +326,65 @@ def jumpedTo (s pre : St) (i : Nat) : Option St :=
     loans := s.loans.jumpTo (at_ pre.loans.size), rigidKeys := s.rigidKeys.jumpTo (at_ pre.rigidKeys.size)
     brands := at_ pre.brands, dropAsked := at_ pre.dropAsked }
 
-/-- A group of a unit begun at `pre`, the `i`-th, under `key`: what an
-earlier compile found it added (`kept`), put on the state, where it can be;
-else checked. Each group numbers from a place of its own (`jumpedTo`), so
-what it added does not depend on what the groups before it made, only on
-what it reads, which `key` is made from. Gives what it added, under `key`. -/
-def checkGroupKept (kept : Deltas) (pre : St) (key : UInt64) (i : Nat) (g : List FnDecl) :
-    M (Array (UInt64 × StDelta)) := do
+/-- What a function shows the functions that call it: its scheme written
+out whole, and what the checker keeps of it by its name for its callers
+(the arguments it runs in place or together, whether it must be run, its
+type parameters as written, whether it is `unsafe`, its rows). -/
+def interfaceOf (c : String) : M UInt64 := do
+  let s ← get
+  let shown := fun (xs : List (Ty × String)) => xs.map fun (t, w) => (showTy t, w)
+  let sch := match s.fns[c]? with
+    | some sc => s!"{schemeDetail sc} {shown sc.stays} {shown sc.statics} {sc.sites.map showTy} {sc.ranked} {shown sc.quiets} {sc.assocs.map fun ((a, t, b, u) : String × Ty × String × Ty) => (a, showTy t, b, showTy u)} {sc.incls.map fun ((t, u) : Ty × Ty) => (showTy t, showTy u)} {sc.rvars} {showTyCaps sc.ty}"
+    | none => ""
+  let rows := (s.rowChecks.filter (·.1 == c)).map fun (_, ps) => ps.map fun ((n, t) : String × Ty) => (n, showTy t)
+  pure (hash (sch, s.fnRunsIn.lookup c, s.fnGroups.lookup c, s.envMust.contains c, s.typeParams.lookup c,
+    s.unsafeFns.contains c, rows))
+
+/-- What a function's body is, as the count of uses follows it. -/
+def bodyKey (f : String) : M UInt64 := do pure (hash ((← get).runFns[f]?))
+
+/-- Is what a group read still what it was? `fn ` a name it calls, `body ` a
+body it followed; `*` a count that did not finish, never. -/
+def readsHold (reads : Array (String × UInt64)) : M Bool := do
+  for (what, was) in reads do
+    let now ← if what.startsWith "fn " then interfaceOf (what.drop 3).toString
+      else if what.startsWith "body " then bodyKey (what.drop 5).toString
+      else pure (was + 1)
+    unless now == was do return false
+  pure true
+
+/-- A group of a unit begun at `pre`, the `i`-th, under `key` (of the
+unit's declarations and the group whole): what an earlier compile found it
+added (`kept`), put on the state, where what it read of the rest of the
+unit is as it was (`readsHold`): what each function it calls shows it
+(`interfaceOf`), not how its body is written, and the bodies its count of
+uses followed. Else checked. Each group numbers from a place of its own
+(`jumpedTo`), so what it added does not depend on what the groups before
+it made. Gives what it added, under `key`, with what it read. `callees`:
+the unit's functions it calls; `locals`: the unit's functions. -/
+def checkGroupKept (kept : Deltas) (pre : St) (key : UInt64) (i : Nat) (g : List FnDecl)
+    (callees : List String) (locals : Std.HashSet String) : M (Array (UInt64 × KeptGroup)) := do
   match jumpedTo (← get) pre i with
   | none => checkMaybe g; pure #[]
   | some st =>
-    if let some d := (kept[key]?).bind (·.get) then
-      if let some st' := Trace.timed "group: reused" fun _ => applyDelta none st d then
-        set st'
-        return #[(key, d)]
+    if let some (d, reads) := (kept[key]?).bind (·.get) then
+      set st
+      if ← readsHold reads then
+        if let some st' := Trace.timed "group: reused" fun _ => applyDelta none st d then
+          set st'
+          return #[(key, (d, reads))]
     set st
     checkMaybe g
     let after ← get
     -- (One that made more than its room: what it added is not kept.)
     if (jumpedTo after pre (i + 1)).isNone then return #[]
-    pure ((Trace.timed "group: delta" fun _ => diffStates st after).toArray.map (key, ·))
+    let followed := (after.followed.extract st.followed.size after.followed.size).toList.eraseDups
+    if followed.contains "*" then return #[]
+    let mut reads : Array (String × UInt64) := #[]
+    for c in callees do reads := reads.push (s!"fn {c}", ← interfaceOf c)
+    for f in followed do
+      if locals.contains f then reads := reads.push (s!"body {f}", ← bodyKey f)
+    pure ((Trace.timed "group: delta" fun _ => diffStates st after).toArray.map fun d => (key, (d, reads)))
 
 /-- Check items. With `kept` from an earlier check of a program that began
 alike (`seed`: what was checked before them), the state after each step whose
@@ -353,7 +397,7 @@ them. Gives what this check kept, the state after all of it first, under a
 key of every item whole: where that is kept, nothing else is looked at, and
 nothing else is kept. -/
 def checkItems (fitems : List Flat.FItem) (seed : UInt64 := 0) (kept : Kept := []) (deltas : Option Deltas := none) :
-    M (Kept × Array (UInt64 × StDelta)) := do
+    M (Kept × Array (UInt64 × KeptGroup)) := do
   -- The items as they declare, and their functions' bodies by name.
   let items := fitems.map Flat.FItem.declared
   let bodies := fitems.flatMap Flat.FItem.bodies
@@ -429,7 +473,7 @@ def checkItems (fitems : List Flat.FItem) (seed : UInt64 := 0) (kept : Kept := [
       return ([(whole, st)], #[])
     let before := (← get).impls.size
     let mut made : Kept := []
-    let mut groupDeltas : Array (UInt64 × StDelta) := #[]
+    let mut groupDeltas : Array (UInt64 × KeptGroup) := #[]
     -- (A function is declared by checking it, with its group: what is
     -- declared first is the rest, so a function added, or a signature
     -- changed, keeps what was found of the declarations and the groups
@@ -463,14 +507,14 @@ def checkItems (fitems : List Flat.FItem) (seed : UInt64 := 0) (kept : Kept := [
       let declFrom := mixHash key (hash [here.tys.size, here.rows.size, here.caps.size, here.capEdges.size,
         here.loans.size, here.rigidKeys.size, here.brands, here.dropAsked, here.impls.size])
       let taken := match deltas with
-        | some kept => (kept[declFrom]?).bind (·.get) |>.bind fun d =>
+        | some kept => (kept[declFrom]?).bind (·.get) |>.bind fun (d, _) =>
           ((applyDelta none here d).bind ours).map (d, ·)
         | none => none
       match taken with
       | some (d, st) =>
         set st
         ownBodies ()
-        groupDeltas := groupDeltas.push (declFrom, d)
+        groupDeltas := groupDeltas.push (declFrom, (d, #[]))
       | none =>
         timedM "unit: declare" do
           declare items
@@ -478,7 +522,7 @@ def checkItems (fitems : List Flat.FItem) (seed : UInt64 := 0) (kept : Kept := [
           declareTraits items
           checkUseDecls
         if deltas.isSome then
-          if let some d := diffStates here (← get) then groupDeltas := groupDeltas.push (declFrom, d)
+          if let some d := diffStates here (← get) then groupDeltas := groupDeltas.push (declFrom, (d, #[]))
     made := (key, noBodies (← get)) :: made
     modify fun s =>
       { s with runFns := decls.foldl (fun m d => m.insertIfNew d.name d.body) s.runFns }
@@ -523,7 +567,14 @@ def checkItems (fitems : List Flat.FItem) (seed : UInt64 := 0) (kept : Kept := [
         | some j => if j < i then j :: l else l
         | none => l) l) []).eraseDups.mergeSort
       acc.push (callees.foldl (fun h j => mixHash h ((acc[j]?).getD 0)) (groupKey declKey g))) #[]
-    let readKeyAt : Array UInt64 := (sorted.map fun (_, i, _) => (readKeys[i]?).getD 0).toArray
+    -- (Of the groups themselves: the declarations and the group whole; what
+    -- each reads of the others is said with what it added, `checkGroupKept`.)
+    let ownKeyAt : Array UInt64 := (sorted.map fun (_, _, g) => groupKey declKey g).toArray
+    let calleesAt : Array (List String) := (sorted.map fun (_, i, g) =>
+      (g.flatMap fun d => (deps d.name).filter fun n => match groupOf[n]? with
+        | some j => j != i
+        | none => false).eraseDups).toArray
+    let localFns : Std.HashSet String := names.foldl (·.insert ·) {}
     let groups := sorted.map (·.2.2)
     let levels := (sorted.map (·.1)).toArray
     -- The functions of the copies of an implementation for every type
@@ -619,9 +670,9 @@ def checkItems (fitems : List Flat.FItem) (seed : UInt64 := 0) (kept : Kept := [
       let run := (rest.extract i j).toList
       match deltas with
       | some kept =>
-        let keyOf := fun (k : Nat) => mixHash ((readKeyAt[k]?).getD 0) (mixHash from_ (hash k))
+        let keyOf := fun (k : Nat) => mixHash ((ownKeyAt[k]?).getD 0) (mixHash from_ (hash k))
         groupDeltas := groupDeltas ++ (← checkSideBySideWith run (jump := false) fun (g, k) =>
-          checkGroupKept kept pre (keyOf k) k g)
+          checkGroupKept kept pre (keyOf k) k g ((calleesAt[k]?).getD []) localFns)
       | none => checkSideBySide (run.map (·.1))
       let last := (run.getLast?.map (·.2)).getD 0
       if run.any (fun (_, k) => (k + 1) % every == 0) || last + 1 == groups.length then
@@ -696,7 +747,7 @@ def checkItems (fitems : List Flat.FItem) (seed : UInt64 := 0) (kept : Kept := [
             mixHash read (mixHash from_ (hash at_))
           let start := copyAt
           groupDeltas := groupDeltas ++ (← checkSideBySideWith ready.toList.zipIdx (jump := false) fun ((_, d), j) =>
-            checkGroupKept kept pre (keyOfCopy d (start + j)) (start + j) [d])
+            checkGroupKept kept pre (keyOfCopy d (start + j)) (start + j) [d] [] localFns)
           copyAt := start + ready.size
         | none => checkSideBySide (ready.toList.map fun (_, d) => [d])
     timedM "unit: late" do
@@ -871,7 +922,7 @@ another, as all were. -/
 def checkUnitsKept (first : St) (units : List (List Flat.FItem × UInt64)) (modules : Syntax.ModuleInfo)
     (seed : UInt64) (kept : Kept) (own : Bool := true) (library : Nat := 0)
     (deps : List (List Nat) := []) (groupsKept : Option Deltas := none) :
-    Except Elab.Said (Elab.Blocks × Kept × Kept × Array (UInt64 × StDelta)) := do
+    Except Elab.Said (Elab.Blocks × Kept × Kept × Array (UInt64 × KeptGroup)) := do
   -- (Each unit's level: one more than the highest of the units it uses.)
   let levelOf := units.length.fold (init := (#[] : Array Nat)) fun i _ acc =>
     acc.push (((deps[i]?).getD []).foldl (fun m d => max m ((acc[d]?).getD 0 + 1)) 0)
@@ -882,9 +933,9 @@ def checkUnitsKept (first : St) (units : List (List Flat.FItem × UInt64)) (modu
   -- (What each of the program's own units' groups added, kept where asked:
   -- the library's units are kept whole.)
   let deltasOf := fun (k : Nat) => if k ≥ library then groupsKept else none
-  let action : M (Elab.Blocks × Kept × Kept × Array (UInt64 × StDelta)) := do
+  let action : M (Elab.Blocks × Kept × Kept × Array (UInt64 × KeptGroup)) := do
     modify fun s => { s with modules, ownItems := own }
-    let mut groupsMade : Array (UInt64 × StDelta) := #[]
+    let mut groupsMade : Array (UInt64 × KeptGroup) := #[]
     let mut key := seed
     let mut made : Kept := []
     -- (What the first `library` units made: the library's modules, which
@@ -915,7 +966,7 @@ def checkUnitsKept (first : St) (units : List (List Flat.FItem × UInt64)) (modu
             (checkItems u (mixHash side info) kept (deltasOf k)).run (jumpedFor start j))
         let mut together : Option St := none
         let mut mines : List (Nat × Kept) := []
-        let mut deltasMine : Array (UInt64 × StDelta) := #[]
+        let mut deltasMine : Array (UInt64 × KeptGroup) := #[]
         let mut ok := true
         for (k, j, t) in tasks do
           match t.get with
