@@ -1,0 +1,151 @@
+// A system's machine code read from what `objdump -d -l --inlines
+// --no-show-raw-insn -C --no-addresses` writes (upstream's devtools::asm):
+// the instructions whose inline chain reaches a function, or lines of a
+// file, normalized (addresses and offsets left out), and counts that say
+// most about the code. Reading the binary is the caller's: this reads the
+// text.
+use std::text::{starts_with, ends_with, contains, find, take, drop, trim, split, words, join, parse_int, char_at};
+
+// What to collect: a function by path, matched by its last segment; or the
+// lines `first` to `last` of a file (a closure's body).
+pub enum Target { Function(Str), Lines(Str, Int, Int) }
+
+pub struct Code { pub instructions: [Str], pub symbols: [Str] }
+
+// One source location of an instruction's inline chain.
+struct Frame { file: Str, line: Int, function: Option<Str> }
+
+// The last segment of a path, `game::apply_damage` to `apply_damage`, its
+// type arguments left out.
+fn last_segment(path: Str) -> Str {
+    let bare = match(find(path, "<")) { Some(at) => take(path, at), None => path };
+    let parts = split(bare, ':');
+    let mut out = bare;
+    let mut i = 0;
+    while({ i < len_at(&parts) }) { if(parts[i] == "") { () } else { out = parts[i] }; i = i + 1 };
+    out
+}
+// Each path in a type's name shortened to its last segment.
+pub fn short_type(name: Str) -> Str {
+    let mut out = "";
+    let mut word = "";
+    let mut i = 0;
+    let n = length(name);
+    while({ i < n }) {
+        match(char_at(name, i)) {
+            Some(c) => if(if(std::char::is_alphanumeric(c)) { true } else { if(c == '_') { true } else { c == ':' } }) { word = word ++ show(c) }
+                else { out = out ++ last_segment(word) ++ show(c); word = "" },
+            None => ()
+        };
+        i = i + 1
+    };
+    out ++ last_segment(word)
+}
+
+// `file:line`, with ` (function)` after it or not.
+fn parse_frame(text: Str) -> Option<Frame> {
+    let (location, rest) = match(find(text, " (")) { Some(at) => (take(text, at), Some(drop(text, at + 2))), None => (text, None) };
+    let parts = split(location, ':');
+    let count = len_at(&parts);
+    if(count < 2) { None } else {
+        let file = join(std::vec::take(clone(&parts), count - 1), ":");
+        let function = match(rest) {
+            Some(r) => let f = if(ends_with(r, ")")) { take(r, length((r)) - 1) } else { r }; if(starts_with(f, "discriminator")) { None } else { Some(f) },
+            None => None
+        };
+        match(parse_int(parts[count - 1])) { Some(line) => Some(Frame { file: file, line: line, function: function }), None => None }
+    }
+}
+
+fn matches(target: &Target, frame: &Frame) -> Bool {
+    match(target) {
+        Target::Function(name) => match(&frame.function) { Some(f) => last_segment(*f) == *name, None => false },
+        Target::Lines(file, first, last) =>
+            let same = if(ends_with(frame.file, *file)) { true } else { ends_with(*file, frame.file) };
+            let end = if(*last < 0) { *first } else { *last };
+            if(same) { if(frame.line >= *first) { frame.line <= end } else { false } } else { false }
+    }
+}
+
+fn is_hex(word: Str) -> Bool {
+    let cs = chars(word);
+    std::vec::all(cs, fn(c: char) -> Bool { if(std::char::is_digit(c)) { true } else { contains("abcdefABCDEF", show(c)) } })
+}
+// An instruction with its addresses and offsets left out.
+fn normalize(instruction: Str) -> Str {
+    let ws = words(instruction);
+    let mut out = [];
+    let mut i = 0;
+    let mut going = true;
+    while({ if(going) { i < len_at(&ws) } else { false } }) {
+        let word = ws[i];
+        let hex = if(ends_with(word, ",")) { take(word, length((word)) - 1) } else { word };
+        let next_symbol = if(i + 1 < len_at(&ws)) { starts_with(ws[i + 1], "<") } else { false };
+        if(if(length((hex)) >= 4) { if(is_hex(hex)) { next_symbol } else { false } } else { false }) {
+            push_at(&mut out, "<addr>");
+            let symbol = ws[i + 1];
+            let bare = split(symbol, '+')[0];
+            let bare = if(ends_with(bare, ">")) { take(bare, length((bare)) - 1) } else { bare };
+            push_at(&mut out, bare ++ ">");
+            i = i + 2
+        } else if(starts_with(word, "#")) { going = false }
+        else {
+            match(find(word, "(%rip)")) {
+                Some(at) => push_at(&mut out, "<rip>" ++ drop(word, at + 6)),
+                None => push_at(&mut out, word)
+            };
+            i = i + 1
+        }
+    };
+    join(out, " ")
+}
+
+// The instructions of `target` in what objdump wrote, line by line; and
+// whether it had line tables at all. Each location block (the innermost
+// line, then the `inlined by` callers) is of the instructions after it; an
+// instruction is the target's where any frame of its chain is.
+pub fn scan(lines: [Str], target: Target) -> (Code, Bool) {
+    let mut instructions = [];
+    let mut symbols = [];
+    let mut symbol = "";
+    let mut function: Option<Str> = None;
+    let mut matched = false;
+    let mut saw_lines = false;
+    let mut i = 0;
+    while({ i < len_at(&lines) }) {
+        let line = lines[i];
+        let white = match(char_at(line, 0)) { Some(c) => if(c == ' ') { true } else { c == '\t' }, None => false };
+        if(if(starts_with(line, "<")) { ends_with(line, ">:") } else { false }) {
+            symbol = take(drop(line, 1), length((line)) - 3);
+            matched = false
+        } else if(starts_with(line, "inlined by ")) {
+            match(parse_frame(drop(line, 11))) { Some(frame) => if(matches(&target, &frame)) { matched = true } else { () }, None => () }
+        } else if(if(starts_with(line, "/")) { true } else { starts_with(line, "./") }) {
+            match(parse_frame(line)) {
+                Some(frame) => saw_lines = true; let Frame { file, line: at, function: _ } = frame; matched = matches(&target, &Frame { file: file, line: at, function: function }),
+                None => ()
+            }
+        } else if(if(ends_with(line, ":")) { if(white) { false } else { line != ":" } } else { false }) {
+            let name = take(line, length((line)) - 1);
+            function = Some(if(ends_with(name, "()")) { take(name, length(name) - 2) } else { name })
+        } else if(if(white) { matched } else { false }) {
+            let instruction = trim(line);
+            if(instruction == "") { () } else {
+                push_at(&mut instructions, normalize(instruction));
+                if(std::vec::contains(clone(&symbols), symbol)) { () } else { push_at(&mut symbols, symbol) }
+            }
+        } else { () };
+        i = i + 1
+    };
+    (Code { instructions: instructions, symbols: std::vec::sort(symbols) }, saw_lines)
+}
+
+// Counts that say most about the code.
+pub fn stats(code: &Code) -> Str {
+    let count = fn(test: fn(Str) -> Bool) -> Int { len_at(&std::vec::filter(clone(&code.instructions), test)) };
+    let vector = count(fn(i: Str) -> Bool { if(contains(i, "%ymm")) { true } else if(contains(i, "%zmm")) { true } else if(contains(i, "%xmm")) { contains(i, "p") } else { false } });
+    show(len_at(&code.instructions)) ++ " instructions (" ++ show(vector) ++ " vector, "
+        ++ show(count(fn(i: Str) -> Bool { starts_with(i, "call") })) ++ " calls, "
+        ++ show(count(fn(i: Str) -> Bool { starts_with(i, "j") })) ++ " branches) in "
+        ++ join(std::vec::map(clone(&code.symbols), short_type), ", ")
+}

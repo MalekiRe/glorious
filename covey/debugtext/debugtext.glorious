@@ -1,0 +1,197 @@
+// Values read back from what Rust's `{:?}` writes (upstream's
+// devtools::value::parse_debug): tuples, lists, maps, structs with named
+// or positional fields, text, characters, numbers, and bare names (unit
+// structs and variants). What is not one of those is kept as raw text.
+use std::text::{join};
+
+pub enum Value {
+    VUnit, VBool(Bool), VInt(Int), VFloat(f64), VChar(char), VStr(Str),
+    // Named fields: `Pos { x: 1.0 }`; positional, `Hp(3)`, a tuple where
+    // the name is empty.
+    VStruct(Str, [(Str, Value)]), VTuple(Str, [Value]),
+    VList([Value]), VMap([(Value, Value)]),
+    // A bare name: `None`, `Idle`.
+    VName(Str),
+    VRaw(Str)
+}
+
+fn at(cs: &[char], i: Int) -> char { if(i < len_at(cs)) { cs[i] } else { '\u{0}' } }
+fn skip_space(cs: &[char], i: Int) -> Int { if(std::char::is_space(at(cs, i))) { skip_space(cs, i + 1) } else { i } }
+fn name_char(c: char) -> Bool { if(std::char::is_alphanumeric(c)) { true } else if(c == '_') { true } else { c == ':' } }
+
+// A whole number or a float, from `i`; and where it ends.
+fn number(cs: &[char], i: Int) -> (Value, Int) {
+    let negative = at(cs, i) == '-';
+    let mut j = if(negative) { i + 1 } else { i };
+    let mut whole = 0;
+    while({ std::char::is_digit(at(cs, j)) }) { whole = whole * 10 + (int(at(cs, j)) - int('0')); j = j + 1 };
+    let mut float = false;
+    let mut value = f64(whole);
+    if(at(cs, j) == '.') {
+        float = true;
+        j = j + 1;
+        let mut scale = 0.1;
+        while({ std::char::is_digit(at(cs, j)) }) { value = value + scale * f64(int(at(cs, j)) - int('0')); scale = scale / 10.0; j = j + 1 }
+    } else { () };
+    if(if(at(cs, j) == 'e') { true } else { at(cs, j) == 'E' }) {
+        float = true;
+        j = j + 1;
+        let down = at(cs, j) == '-';
+        if(if(down) { true } else { at(cs, j) == '+' }) { j = j + 1 } else { () };
+        let mut power = 0;
+        while({ std::char::is_digit(at(cs, j)) }) { power = power * 10 + (int(at(cs, j)) - int('0')); j = j + 1 };
+        let mut k = 0;
+        while({ k < power }) { value = if(down) { value / 10.0 } else { value * 10.0 }; k = k + 1 }
+    } else { () };
+    if(float) { (VFloat(if(negative) { 0.0 - value } else { value }), j) } else { (VInt(if(negative) { 0 - whole } else { whole }), j) }
+}
+
+// Text between quotes, its escapes read; and where it ends.
+fn quoted(cs: &[char], i: Int, close: char) -> (Str, Int) {
+    let mut out = "";
+    let mut j = i + 1;
+    while({ if(j < len_at(cs)) { at(cs, j) != close } else { false } }) {
+        if(at(cs, j) == '\\') {
+            let e = at(cs, j + 1);
+            out = out ++ show(if(e == 'n') { '\n' } else if(e == 't') { '\t' } else { e });
+            j = j + 2
+        } else { out = out ++ show(at(cs, j)); j = j + 1 }
+    };
+    (out, j + 1)
+}
+
+// The value written from `i`, and where it ends. (One function: what a
+// list holds is read by it again.)
+fn value_at(cs: &[char], i: Int) -> (Value, Int) {
+    let i = skip_space(cs, i);
+    let c = at(cs, i);
+    if(if(c == '(') { true } else if(c == '[') { true } else { c == '{' }) {
+        // (A list up to its close: values, or of braces `key: value` pairs.)
+        let close = if(c == '(') { ')' } else if(c == '[') { ']' } else { '}' };
+        let mut vs = [];
+        let mut pairs = [];
+        let mut j = skip_space(cs, i + 1);
+        while({ if(j < len_at(cs)) { at(cs, j) != close } else { false } }) {
+            let (v, k) = value_at(cs, j);
+            j = skip_space(cs, k);
+            if(if(c == '{') { at(cs, j) == ':' } else { false }) {
+                let (w, k2) = value_at(cs, j + 1);
+                push_at(&mut pairs, (v, w));
+                j = skip_space(cs, k2)
+            } else { push_at(&mut vs, v) };
+            if(at(cs, j) == ',') { j = skip_space(cs, j + 1) } else { () }
+        };
+        let made = if(c == '(') { if(len_at(&vs) == 0) { VUnit } else { VTuple("", vs) } }
+            else if(c == '[') { VList(vs) }
+            else if(len_at(&vs) > 0) { VList(vs) } else { VMap(pairs) };
+        (made, j + 1)
+    }
+    else if(c == '"') { let (t, j) = quoted(cs, i, '"'); (VStr(t), j) }
+    else if(c == '\'') { let (t, j) = quoted(cs, i, '\''); (match(chars(t)) { [one] => VChar(one), _ => VRaw(t) }, j) }
+    else if(if(std::char::is_digit(c)) { true } else { c == '-' }) { number(cs, i) }
+    else if(name_char(c)) {
+        let mut name = "";
+        let mut j = i;
+        while({ name_char(at(cs, j)) }) { name = name ++ show(at(cs, j)); j = j + 1 };
+        let k = skip_space(cs, j);
+        if(at(cs, j) == '(') {
+            match(value_at(cs, j)) {
+                (VTuple(_, vs), e) => (VTuple(name, vs), e),
+                (VUnit, e) => (VTuple(name, []), e),
+                (other, e) => (VTuple(name, [other]), e)
+            }
+        } else if(at(cs, k) == '{') {
+            // (Named fields: `name: value` up to `}`.)
+            let mut fs = [];
+            let mut e = skip_space(cs, k + 1);
+            while({ if(e < len_at(cs)) { at(cs, e) != '}' } else { false } }) {
+                let mut field = "";
+                while({ if(std::char::is_alphanumeric(at(cs, e))) { true } else { at(cs, e) == '_' } }) { field = field ++ show(at(cs, e)); e = e + 1 };
+                e = skip_space(cs, e);
+                if(at(cs, e) == ':') { e = e + 1 } else { () };
+                let (v, e2) = value_at(cs, e);
+                push_at(&mut fs, (field, v));
+                e = skip_space(cs, e2);
+                if(at(cs, e) == ',') { e = skip_space(cs, e + 1) } else { () }
+            };
+            (VStruct(name, fs), e + 1)
+        }
+        else if(name == "true") { (VBool(true), j) } else if(name == "false") { (VBool(false), j) }
+        else { (VName(name), j) }
+    } else { (VRaw(show(c)), i + 1) }
+}
+
+// What `{:?}` wrote, read back.
+pub fn parse_debug(text: Str) -> Value {
+    let cs = chars(text);
+    let (v, end) = value_at(&cs, 0);
+    if(skip_space(&cs, end) >= len_at(&cs)) { v } else { VRaw(text) }
+}
+
+// The value at a path of field names and places, `pos.x`, `items.2`.
+pub fn get<'a>(value: &'a Value, path: Str) -> Option<&'a Value> {
+    let steps = std::text::split(path, '.');
+    let mut at_: Option<&'a Value> = Some(value);
+    let mut k = 0;
+    while({ k < len_at(&steps) }) {
+        let step = steps[k];
+        let place = std::text::parse_int(step);
+        if(step == "") { () } else {
+            at_ = match(at_) {
+                Some(v) => match(v) {
+                    VStruct(_, fs) => field_of(fs, step),
+                    VTuple(_, vs) => item_of(vs, place),
+                    VList(vs) => item_of(vs, place),
+                    _ => None
+                },
+                None => None
+            }
+        };
+        k = k + 1
+    };
+    at_
+}
+fn item_of<'a>(vs: &'a [Value], place: Option<Int>) -> Option<&'a Value> {
+    match(place) { Some(p) => if(p < len_at(vs)) { let v = &vs[p]; Some(v) } else { None }, None => None }
+}
+fn field_of<'a>(fs: &'a [(Str, Value)], name: Str) -> Option<&'a Value> {
+    let mut found: Option<&'a Value> = None;
+    let mut i = 0;
+    while({ i < len_at(fs) }) { let pair = &fs[i]; if(pair.0 == name) { found = Some(&pair.1) } else { () }; i = i + 1 };
+    found
+}
+
+fn shown_all(vs: &[Value]) -> Str {
+    let mut out = [];
+    let mut i = 0;
+    while({ i < len_at(vs) }) { push_at(&mut out, shown(&vs[i])); i = i + 1 };
+    join(out, ", ")
+}
+// A value written as `{:?}` writes it.
+pub fn shown(value: &Value) -> Str {
+    match(value) {
+        VUnit => "()",
+        VBool(b) => if(*b) { "true" } else { "false" },
+        VInt(n) => show(*n),
+        VFloat(f) => show(*f),
+        VChar(c) => "'" ++ show(*c) ++ "'",
+        VStr(t) => "\"" ++ escaped(*t) ++ "\"",
+        VStruct(n, fs) =>
+            let mut out = [];
+            let mut i = 0;
+            while({ i < len_at(fs) }) { let pair = &fs[i]; push_at(&mut out, pair.0 ++ ": " ++ shown(&pair.1)); i = i + 1 };
+            *n ++ " { " ++ join(out, ", ") ++ " }",
+        VTuple(n, vs) => *n ++ "(" ++ shown_all(vs) ++ ")",
+        VList(vs) => "[" ++ shown_all(vs) ++ "]",
+        VMap(ps) =>
+            let mut out = [];
+            let mut i = 0;
+            while({ i < len_at(ps) }) { let pair = &ps[i]; push_at(&mut out, shown(&pair.0) ++ ": " ++ shown(&pair.1)); i = i + 1 };
+            "{" ++ join(out, ", ") ++ "}",
+        VName(n) => *n,
+        VRaw(t) => *t
+    }
+}
+fn escaped(t: Str) -> Str {
+    std::text::concat(std::vec::map(chars(t), fn(c: char) -> Str { if(c == '"') { "\\\"" } else if(c == '\\') { "\\\\" } else { show(c) } }))
+}

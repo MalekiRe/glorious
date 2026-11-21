@@ -1,0 +1,27 @@
+// Upstream's tests/devtools.rs, `assembly_is_collected_through_inline_chains`:
+// a system's instructions read from objdump's output, matched by its
+// function's name or by lines of a file through an `inlined by` frame,
+// normalized, and counted (module `asm`).
+// expect:
+// true
+// mov %rax,%rbx
+// call <addr> <helper>
+// 2
+// 2 instructions (0 vector, 1 calls, 0 branches) in frame
+// 0
+mod asm;
+
+use asm::{Target, Code, scan, stats};
+
+fn main() -> Int {
+    let objdump = ["<frame>:", "game::apply_damage:", "/src/game.rs:10", "inlined by /src/game.rs:30 (run)", "\tmov    %rax,%rbx", "\tcall   1234 <helper+0x10>", "other::finish:", "/src/other.rs:5", "\tret"];
+    let (found, saw): (Code, Bool) = scan(clone(&objdump), Target::Function("apply_damage"));
+    say(if(saw) { "true" } else { "false" });
+    let instructions = found.instructions;
+    let mut i = 0;
+    while({ i < len_at(&instructions) }) { say(instructions[i]); i = i + 1 };
+    let (lines, _): (Code, Bool) = scan(objdump, Target::Lines("game.rs", 28, 31));
+    say(len_at(&lines.instructions));
+    say(stats(&lines));
+    0
+}

@@ -1,0 +1,28 @@
+// Upstream's tests/devtools.rs, `debug_output_parses_into_values`: what
+// Rust's `{:?}` writes, read back into values (module `debugtext`). The
+// text is written here as `{:?}` writes it: Glorious has no `{:?}`.
+// expect:
+// Some([1.5, -2.0])
+// "a\"b"
+// 'x'
+// {1: "one"}
+// a"b
+// true
+// None
+// 0
+mod debugtext;
+
+use debugtext::{Value, VTuple, VStr, VFloat, parse_debug, get, shown};
+
+fn main() -> Int {
+    let parsed = parse_debug("(Some([1.5, -2.0]), \"a\\\"b\", 'x', [(\"k\", 3)], {1: \"one\"})");
+    match(&parsed) {
+        VTuple(_, items) => say(shown(&items[0])); say(shown(&items[1])); say(shown(&items[2])); say(shown(&items[4]));
+            match(&items[1]) { VStr(t) => say(*t), _ => say("not text") },
+        _ => say("not a tuple")
+    };
+    let pos = parse_debug("Pos { x: 1e-9, tag: None }");
+    say(match(get(&pos, "x")) { Some(v) => match(v) { VFloat(f) => if(*f > 0.0) { if(*f < 0.000000002) { "true" } else { "false" } } else { "false" }, _ => "false" }, None => "false" });
+    say(match(get(&pos, "tag")) { Some(v) => shown(v), None => "none" });
+    0
+}

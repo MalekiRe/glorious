@@ -14,9 +14,9 @@
 //   named, the first thing it says against an entity.
 // `values_are_described_and_edited_without_debug` is `described`, through
 // reflection; `explains_why_components_exist_and_why_systems_are_ordered`
-// is `explained`. Not ported: `debug_output_parses_into_values`, `mcp_tools_serve_a_live_app_on_its_own_thread`
-// and `assembly_is_collected_through_inline_chains`: they read values
-// through reflection, places in the source, or the binary.
+// is `explained`; `debug_output_parses_into_values` is `debugtext`;
+// `assembly_is_collected_through_inline_chains` is `assembly`. Not ported
+// yet: `mcp_tools_serve_a_live_app_on_its_own_thread`.
 // expect:
 // ramp, apply_damage
 // 2
