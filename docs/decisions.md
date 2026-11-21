@@ -6343,12 +6343,14 @@ does not fit as it is now waits (`implFitsAsIs`).
   component only a join names, which upstream's world comes to have and
   covey's does not, and `To` of a many-to-many relation.
 
-Tried and undone: `To` by the relation's kind (`ToKind`, of one target an
-`Option`, of any number a list): what a join gives became a type left to
-an implementation of a type left to another (`R`'s `Kind`, then its
-`Got`), not known while a body is checked, so `up.0` of a join's item
-asked to be annotated in every program that reads one. `To` stays of
-one-target relations.
+`To` is by the relation's kind (`ToKind`, `ToFill`, `LinkColumn`): of one
+target an `Option`, of any number a list, of each target in the order
+linked (covey/joins4: `To<Tagged, &Name>`). Two checker holes it found,
+closed: `K::Got` in an implementation of a trait that leaves a `Got` too
+named the implemented trait's, not the one written of `K` (the
+implementation's conditions were not known where its types are read);
+and a field read of such a type is now done once every type left to an
+implementation is settled (`runPending` settles until nothing changes).
 
 Limits: a resource is still taken out whole (`lift`/`lower`), so one is
 asked for once; columns are pointers into

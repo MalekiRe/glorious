@@ -58,6 +58,25 @@ partial def resolveType (params : List (String × Ty)) (decl : Bool) : TypeExpr 
           if !args.isEmpty && (← get).gatScope.contains name then
             return ← resolveType params decl (.name name args)
           if let some own := params.lookup name then return own
+        -- (Of a trait written of the parameter that leaves it, with its
+        -- arguments: that one, before any other that leaves a type of the
+        -- name, `K::Got` of `K: KindOf<T>` in an implementation of `Item`,
+        -- which leaves a `Got` too.)
+        let mine ← (← get).paramTraits.filterMapM fun (q, tr, targs) => do
+          if q != p then return none
+          match ((← get).traitShape[tr]?).map (fun x => (tr, x)) with
+          | some (_, arity, assocs) => pure (if arity == targs.length && assocs.contains name then some (tr, targs) else none)
+          | none => pure none
+        if let some (tr, targs) := (if (mine.map (·.1)).eraseDups.length == 1 then mine.head? else none) then
+          let targTys ← targs.mapM (resolveType params decl)
+          let base := if targTys.isEmpty then self else Ty.tuple (self :: targTys)
+          let asked ← args.mapM (resolveType params decl)
+          let subject := if asked.isEmpty then base else Ty.con Syntax.gatMark (base :: asked)
+          if (freeTys self).any (← get).projecting.contains then
+            return .con Syntax.projMark [subject, .con tr [], .con name []]
+          let a ← freshTy
+          modify fun s => { s with assocUses := s.assocUses.push (tr, subject, name, a, s.owner, s.pos) }
+          return a
         let traits := (← get).traitShape.toList.filter fun (_, arity, assocs) => arity == 0 && assocs.contains name
         -- (Several: the one written of the parameter, if one is.)
         let written := (← get).paramTraits.filterMap fun (q, tr, _) => if q == p then some tr else none
@@ -636,11 +655,19 @@ def declareTraits (items : List Item) : M Unit := do
               own := own ++ [(p, .var id)]
               ids := ids ++ [(false, id)]
           unless ids.isEmpty do gatParams := gatParams ++ [(a, ids)]
-          modify fun s => { s with projecting := pmap.filterMap fun (_, t) => match t with
+          -- (`K::Got` of a type parameter: of the trait written of it here,
+          -- `K: KindOf<T>`, with its arguments.)
+          let written := context.zipIdx.map fun ((p, t'), k) =>
+            let targs := (List.range 16).filterMap fun i => methods.findSome? fun
+              | .typeAlias n _ body => if n == Syntax.ctxArgName k i then some body else none
+              | _ => none
+            (p, Syntax.traitBase t', targs)
+          let projecting := pmap.filterMap fun (_, t) => match t with
             | .var id => some id
-            | _ => none }
+            | _ => none
+          modify fun s => { s with projecting := projecting, paramTraits := written }
           let said ← resolveType (own ++ pmap) false body
-          modify fun s => { s with projecting := [] }
+          modify fun s => { s with projecting := [], paramTraits := [] }
           assocs := assocs ++ [(a, said)]
         | none => throw s!"{what} does not say what `{a}` is: write `type {a} = ..;`"
       for m in methods do

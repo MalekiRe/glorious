@@ -558,7 +558,10 @@ def fitConditions (im : ImplDecl) (at_ : List (Nat × Ty)) (hargs : List Ty) (ow
   pure true
 
 def runPending : M Unit := do
-  settleAssocs
+  -- (Until it settles: a field read of what a trait leaves to an
+  -- implementation of what another leaves, `K::Got` of `R`'s `Kind`, is
+  -- known once both are.)
+  settleAssocsAll
   runProjections true
   settleRows (some fun _ => true) true
   let pending := (← get).pending

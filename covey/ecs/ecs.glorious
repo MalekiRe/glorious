@@ -1356,18 +1356,67 @@ pub struct To<R, Q>(R, Q)
 // (A target disabled is not one, unless the inner query mentions what
 // disables it: `To<ChildOf, (&Hp, Has<Disabled>)>` sees it. Which are, found
 // when the query is made.)
-impl<R, Q> Item for To<R, Q> where Q: Item {
+// (By the relation's kind: of one target, what `Q` has of it, if anything;
+// of any number, what it has of each, in the order linked.)
+impl<R, Q, K> Item for To<R, Q> where R: Relation<Kind = K>, K: ToKind<R, Q>, Q: Item {
+    type Store = K::Store;
+    type Got<'a> = K::Got<'a>;
+    fn item_at<'a>(store: &'a mut K::Store, entity: Entity) -> Option<K::Got<'a>> { <K as ToKind<R, Q>>::to_item(store, entity) }
+}
+pub trait ToKind<R, Q> {
+    type Store;
+    type Got<'a>;
+    fn to_item<'a>(&'a mut Store, Entity) -> Option<Got<'a>>
+}
+fn one_target<'a, R, Q>(store: &'a mut (Ptr<Column<Relates<R>>>, (Q::Store, [Entity])), entity: Entity) -> Option<Option<Q::Got<'a>>> where Q: Item {
+    let links: &Column<Relates<R>> = unsafe { lent(store.0) };
+    let at = slot_of(links, entity);
+    if(at < 0) { Some(None) } else {
+        let target = links.dense[at].target;
+        if(has_entity(&store.1.1, target)) { Some(None) }
+        else { Some(<Q as Item>::item_at(&mut store.1.0, target)) }
+    }
+}
+impl<R, Q> ToKind<R, Q> for OneToMany where Q: Item {
     type Store = (Ptr<Column<Relates<R>>>, (Q::Store, [Entity]));
     type Got<'a> = Option<Q::Got<'a>>;
-    fn item_at<'a>(store: &'a mut (Ptr<Column<Relates<R>>>, (Q::Store, [Entity])), entity: Entity) -> Option<Option<Q::Got<'a>>> {
-        let links: &Column<Relates<R>> = unsafe { lent(store.0) };
+    fn to_item<'a>(store: &'a mut (Ptr<Column<Relates<R>>>, (Q::Store, [Entity])), entity: Entity) -> Option<Option<Q::Got<'a>>> { one_target<R, Q>(store, entity) }
+}
+impl<R, Q> ToKind<R, Q> for OneToOne where Q: Item {
+    type Store = (Ptr<Column<Relates<R>>>, (Q::Store, [Entity]));
+    type Got<'a> = Option<Q::Got<'a>>;
+    fn to_item<'a>(store: &'a mut (Ptr<Column<Relates<R>>>, (Q::Store, [Entity])), entity: Entity) -> Option<Option<Q::Got<'a>>> { one_target<R, Q>(store, entity) }
+}
+impl<R, Q> ToKind<R, Q> for ManyToMany where Q: Item {
+    type Store = (Ptr<Column<Links<R>>>, (Q::Store, [Entity]));
+    type Got<'a> = [Q::Got<'a>];
+    fn to_item<'a>(store: &'a mut (Ptr<Column<Links<R>>>, (Q::Store, [Entity])), entity: Entity) -> Option<[Q::Got<'a>]> {
+        let links: &Column<Links<R>> = unsafe { lent(store.0) };
+        let hidden = copied(&store.1.1);
+        let inner = ptr_mut(&mut store.1.0);
+        let mut out = [];
         let at = slot_of(links, entity);
-        if(at < 0) { Some(None) } else {
-            let target = links.dense[at].target;
-            if(has_entity(&store.1.1, target)) { Some(None) }
-            else { Some(<Q as Item>::item_at(&mut store.1.0, target)) }
-        }
+        if(at >= 0) {
+            let targets = targets_at<R>(links, at);
+            let mut i = 0;
+            while({ i < len_at(&targets) }) {
+                // (Each target is another entity: what is had of each is
+                // apart from the others'.)
+                if(not_b(has_entity(&hidden, targets[i]))) {
+                    match(unsafe { item_through<Q>(inner, targets[i]) }) { Some(got) => push_at(&mut out, got), None => () }
+                } else { () };
+                i = i + 1
+            }
+        };
+        Some(out)
     }
+}
+fn targets_at<R>(links: &Column<Links<R>>, at: Int) -> [Entity] { let l: &Links<R> = &links.dense[at]; clone_targets(&l.list) }
+fn clone_targets<R>(list: &[Relates<R>]) -> [Entity] {
+    let mut out = [];
+    let mut i = 0;
+    while({ i < len_at(list) }) { out = push(out, list[i].target); i = i + 1 };
+    out
 }
 // Of each entity that relates to it by `R`, in the order they came to:
 // `From<DockedAt, &Hull>`, the hulls of the ships docked at a station. (Of
@@ -1475,25 +1524,60 @@ impl<A, S> Fill<S> for Option<&A> where S: Get<A> {
     fn unfill(columns: &mut S, column: <Option<&A> as Item>::Store) { () }
     fn hollow() -> <Option<&A> as Item>::Store { dangling() }
 }
-impl<R, Q, S> Fill<S> for To<R, Q> where S: Get<Relates<R>>, Q: Fill<S>, Q: Item, S: Hidden<Q, ()> {
-    fn fill(columns: &mut S, now: Int) -> <To<R, Q> as Item>::Store {
-        let lent_links = lend_read<Relates<R>, S>(columns, now);
-        let links: &Column<Relates<R>> = unsafe { lent(lent_links) };
-        let mut hidden = [];
+impl<R, Q, S, K> Fill<S> for To<R, Q> where R: Relation<Kind = K>, K: ToKind<R, Q>, K: ToFill<R, Q, S>, Q: Item {
+    fn fill(columns: &mut S, now: Int) -> K::Store { <K as ToFill<R, Q, S>>::to_fill(columns, now) }
+    fn unfill(columns: &mut S, store: K::Store) { <K as ToFill<R, Q, S>>::to_unfill(columns, store) }
+    fn hollow() -> K::Store { <K as ToFill<R, Q, S>>::to_hollow() }
+}
+pub trait ToFill<R, Q, S> {
+    type Store;
+    fn to_fill(&mut S, Int) -> Store
+    fn to_unfill(&mut S, Store)
+    fn to_hollow() -> Store
+}
+// The targets of each link, hidden where the inner query does not mention
+// what disables them.
+fn hidden_targets<Q, S>(columns: &S, targets: [Entity]) -> [Entity] where S: Hidden<Q, ()> {
+    let mut hidden = [];
+    let mut i = 0;
+    while({ i < len_at(&targets) }) {
+        if(<S as Hidden<Q, ()>>::hidden(columns, targets[i])) { push_at(&mut hidden, targets[i]) } else { () };
+        i = i + 1
+    };
+    hidden
+}
+fn fill_one<R, Q, S>(columns: &mut S, now: Int) -> (Ptr<Column<Relates<R>>>, (Q::Store, [Entity])) where S: Get<Relates<R>>, Q: Fill<S>, Q: Item, S: Hidden<Q, ()> {
+    let lent_links = lend_read<Relates<R>, S>(columns, now);
+    let links: &Column<Relates<R>> = unsafe { lent(lent_links) };
+    let targets = clone_targets(&links.dense);
+    let hidden = hidden_targets<Q, S>(&*columns, targets);
+    (lent_links, (<Q as Fill<S>>::fill(columns, now), hidden))
+}
+impl<R, Q, S> ToFill<R, Q, S> for OneToMany where S: Get<Relates<R>>, Q: Fill<S>, Q: Item, S: Hidden<Q, ()> {
+    type Store = (Ptr<Column<Relates<R>>>, (Q::Store, [Entity]));
+    fn to_fill(columns: &mut S, now: Int) -> (Ptr<Column<Relates<R>>>, (Q::Store, [Entity])) { fill_one<R, Q, S>(columns, now) }
+    fn to_unfill(columns: &mut S, store: (Ptr<Column<Relates<R>>>, (Q::Store, [Entity]))) { let (_, rest) = store; let (inner, _) = rest; <Q as Fill<S>>::unfill(columns, inner) }
+    fn to_hollow() -> (Ptr<Column<Relates<R>>>, (Q::Store, [Entity])) { (dangling(), (<Q as Fill<S>>::hollow(), [])) }
+}
+impl<R, Q, S> ToFill<R, Q, S> for OneToOne where S: Get<Relates<R>>, Q: Fill<S>, Q: Item, S: Hidden<Q, ()> {
+    type Store = (Ptr<Column<Relates<R>>>, (Q::Store, [Entity]));
+    fn to_fill(columns: &mut S, now: Int) -> (Ptr<Column<Relates<R>>>, (Q::Store, [Entity])) { fill_one<R, Q, S>(columns, now) }
+    fn to_unfill(columns: &mut S, store: (Ptr<Column<Relates<R>>>, (Q::Store, [Entity]))) { let (_, rest) = store; let (inner, _) = rest; <Q as Fill<S>>::unfill(columns, inner) }
+    fn to_hollow() -> (Ptr<Column<Relates<R>>>, (Q::Store, [Entity])) { (dangling(), (<Q as Fill<S>>::hollow(), [])) }
+}
+impl<R, Q, S> ToFill<R, Q, S> for ManyToMany where S: Get<Links<R>>, Q: Fill<S>, Q: Item, S: Hidden<Q, ()> {
+    type Store = (Ptr<Column<Links<R>>>, (Q::Store, [Entity]));
+    fn to_fill(columns: &mut S, now: Int) -> (Ptr<Column<Links<R>>>, (Q::Store, [Entity])) {
+        let lent_links = lend_read<Links<R>, S>(columns, now);
+        let links: &Column<Links<R>> = unsafe { lent(lent_links) };
+        let mut targets = [];
         let mut i = 0;
-        while({ i < len_at(&links.dense) }) {
-            let target = links.dense[i].target;
-            if(<S as Hidden<Q, ()>>::hidden(&*columns, target)) { push_at(&mut hidden, target) } else { () };
-            i = i + 1
-        };
+        while({ i < len_at(&links.dense) }) { targets = join_onto(targets, targets_at<R>(links, i)); i = i + 1 };
+        let hidden = hidden_targets<Q, S>(&*columns, targets);
         (lent_links, (<Q as Fill<S>>::fill(columns, now), hidden))
     }
-    fn unfill(columns: &mut S, store: <To<R, Q> as Item>::Store) {
-        let (_, rest) = store;
-        let (inner, _) = rest;
-        <Q as Fill<S>>::unfill(columns, inner)
-    }
-    fn hollow() -> <To<R, Q> as Item>::Store { (dangling(), (<Q as Fill<S>>::hollow(), [])) }
+    fn to_unfill(columns: &mut S, store: (Ptr<Column<Links<R>>>, (Q::Store, [Entity]))) { let (_, rest) = store; let (inner, _) = rest; <Q as Fill<S>>::unfill(columns, inner) }
+    fn to_hollow() -> (Ptr<Column<Links<R>>>, (Q::Store, [Entity])) { (dangling(), (<Q as Fill<S>>::hollow(), [])) }
 }
 impl<R, Q, S> Fill<S> for From<R, Q> where S: Get<Sources<R>>, Q: Fill<S>, Q: Item, S: Hidden<Q, ()> {
     fn fill(columns: &mut S, now: Int) -> <From<R, Q> as Item>::Store {
@@ -2027,7 +2111,12 @@ pub struct Joined<K>(K)
 pub trait Joining { type Out; }
 impl Joining for () { type Out = (); }
 impl<H, T> Joining for (H, T) where T: Joining { type Out = (Joined<H>, <T as Joining>::Out); }
-impl<R, Q> ItemTouches for To<R, Q> where Q: ItemTouches, <Q as ItemTouches>::List: Joining { type List = (Read<Relates<R>>, <<Q as ItemTouches>::List as Joining>::Out); }
+impl<R, Q, K, C> ItemTouches for To<R, Q> where R: Relation<Kind = K>, K: LinkColumn<R, Col = C>, Q: ItemTouches, <Q as ItemTouches>::List: Joining { type List = (Read<C>, <<Q as ItemTouches>::List as Joining>::Out); }
+// The column a relation's kind keeps an entity's links in.
+pub trait LinkColumn<R> { type Col; }
+impl<R> LinkColumn<R> for OneToMany { type Col = Relates<R>; }
+impl<R> LinkColumn<R> for OneToOne { type Col = Relates<R>; }
+impl<R> LinkColumn<R> for ManyToMany { type Col = Links<R>; }
 impl<R, Q> ItemTouches for From<R, Q> where Q: ItemTouches, <Q as ItemTouches>::List: Joining { type List = (Read<Sources<R>>, <<Q as ItemTouches>::List as Joining>::Out); }
 impl ItemTouches for () { type List = (); }
 impl<H, ..R> ItemTouches for (H, ..R) where H: ItemTouches, (..R): ItemTouches,
@@ -2611,8 +2700,8 @@ impl<A, S> WhyFill<S> for Has<A> { fn why_fill(columns: &S, entity: Entity, why:
 impl<A, S> WhyFill<S> for Option<&mut A> { fn why_fill(columns: &S, entity: Entity, why: [Str]) -> [Str] { why } }
 impl<A, S> WhyFill<S> for Option<&A> { fn why_fill(columns: &S, entity: Entity, why: [Str]) -> [Str] { why } }
 // (A join is not explained further than whether there is a link.)
-impl<R, Q, S> WhyFill<S> for To<R, Q> where S: Get<Relates<R>>, R: Schedule {
-    fn why_fill(columns: &S, entity: Entity, why: [Str]) -> [Str] { if(<S as Get<Relates<R>>>::has(columns, entity)) { why } else { push(why, "relates to nothing by `" ++ <R as Schedule>::NAME ++ "`") } }
+impl<R, Q, S, K, C> WhyFill<S> for To<R, Q> where R: Relation<Kind = K>, K: LinkColumn<R, Col = C>, S: Get<C>, R: Schedule {
+    fn why_fill(columns: &S, entity: Entity, why: [Str]) -> [Str] { if(<S as Get<C>>::has(columns, entity)) { why } else { push(why, "relates to nothing by `" ++ <R as Schedule>::NAME ++ "`") } }
 }
 impl<R, Q, S> WhyFill<S> for From<R, Q> where S: Get<Sources<R>>, R: Schedule {
     fn why_fill(columns: &S, entity: Entity, why: [Str]) -> [Str] { if(<S as Get<Sources<R>>>::has(columns, entity)) { why } else { push(why, "nothing relates to it by `" ++ <R as Schedule>::NAME ++ "`") } }

@@ -4,10 +4,10 @@
 //   system writes the target's `Fuel` through `To<InSquad, &mut Fuel>`,
 //   another each source's through `From<InSquad, &mut Fuel>`; the two run
 //   one after the other. Then one target per row and the sources gathered,
-//   and the sources of a many-to-many relation (`From<Tagged, &Name>`).
-//   (`Fuel` is registered here: a world has what it is said to have, not
-//   what its systems' joins name; and covey's `To` is of one-target
-//   relations, so the test's `To<Tagged, &Name>` is not.)
+//   and the targets and sources of a many-to-many relation.
+//   `To<Tagged, &Name>` of a many-to-many relation is a list, of each
+//   target. (`Fuel` is registered here: a world has what it is said to
+//   have, not what its systems' joins name.)
 // - `fragmenting_joins_read_targets_and_subtrees_inside_systems`: a query
 //   of those `Related<InSquad>`, and one through nested joins,
 //   `From<InSquad, From<InSquad, Entity>>`, counting two levels below.
@@ -19,11 +19,11 @@
 // 3 11 []
 // 10 -1 [1, 2]
 // 11 -1 [3]
-// 1 []
-// 2 []
-// 3 []
-// 10 [1]
-// 11 [1, 2]
+// 1 [10, 11] []
+// 2 [11] []
+// 3 [] []
+// 10 [] [1]
+// 11 [] [1, 2]
 // --
 // [(1, 0), (2, 1)]
 // 2
@@ -111,11 +111,14 @@ fn main() -> Int {
     };
     say_all(lines(rows));
     let mut tags = [];
-    app.world.query<(&Name, From<Tagged, &Name>)>().for_each() { n, from =>
-        let mut fs = [];
+    app.world.query<(&Name, To<Tagged, &Name>, From<Tagged, &Name>)>().for_each() { n, to, from =>
+        let mut ts = [];
         let mut i = 0;
-        while({ i < len_at(&from) }) { fs = push(fs, from[i].0); i = i + 1 };
-        tags = push(tags, (n.0, show(sort(fs))));
+        while({ i < len_at(&to) }) { ts = push(ts, to[i].0); i = i + 1 };
+        let mut fs = [];
+        let mut k = 0;
+        while({ k < len_at(&from) }) { fs = push(fs, from[k].0); k = k + 1 };
+        tags = push(tags, (n.0, show(sort(ts)) ++ " " ++ show(sort(fs))));
     };
     say_all(lines(tags));
     say("--");
