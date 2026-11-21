@@ -1,0 +1,43 @@
+// Upstream's tests/resources.rs, `builder_resources_apply_in_order_after_hooks_are_installed`:
+// resources given while the app is built are put in once it is, after its
+// hooks are installed, so their hooks run, in the order given; a resource
+// at its type's start (`init_resource`) given already keeps the value given.
+// (A system names its resources once they are given: the hook is added
+// after them, as covey's systems are.)
+// expect:
+// score 4
+// 4
+// 9
+// 0
+mod ecs;
+
+use ecs::{App, OnInsert, Res, ResMut};
+use core::value::Default;
+
+struct Score(Int)
+impl Default for Score { fn default() -> Score { Score(0) } }
+struct Speed(Int)
+struct Log { lines: [Str] }
+impl Default for Log { fn default() -> Log { Log { lines: [] } } }
+
+fn note(trigger: &OnInsert<Score>, score: Res<Score>, log: Option<ResMut<Log>>) {
+    match(log) { Some(log) => push_at(&mut log.lines, "score " ++ show(score.0)), None => () }
+}
+
+fn say_all(lines: &[Str]) { let mut i = 0; while({ i < len_at(lines) }) { say(lines[i]); i = i + 1 } }
+
+fn main() -> Int {
+    let app = App::new()
+        .init_resource<Log>()
+        .insert_resource(Score(4))
+        // (Given already: keeps 4.)
+        .init_resource<Score>()
+        .insert_resource(Speed(9))
+        // (A hook added after them: they are put in once the app is built.)
+        .on<OnInsert<Score>, _, _>(note)
+        .build();
+    match(app.world.resource<Log>()) { Some(log) => say_all(&log.lines), None => say("no log") };
+    match(app.world.resource<Score>()) { Some(s) => say(s.0), None => say("no score") };
+    match(app.world.resource<Speed>()) { Some(s) => say(s.0), None => say("no speed") };
+    0
+}

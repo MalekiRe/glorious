@@ -151,7 +151,8 @@ fn take_at<T, S>(world: &mut World<S>) -> Column<T> where S: Get<T> {
 
 // One value the whole world has, kept among its columns: a score, a clock.
 // While a system has it, it is out of its place.
-pub struct Resource<T> { value: Option<T> }
+// (`fresh`: given while the app was built, its hooks not yet run.)
+pub struct Resource<T> { value: Option<T>, fresh: Bool }
 
 // What a system names a resource by: `score: Res<Score>`, `speed: ResMut<Speed>`.
 // A system that takes one runs only while the world has it; one that takes
@@ -172,6 +173,30 @@ impl<T, H, R> Holds<T> for (Resource<H>, R) where R: Holds<T> {
     fn slot(columns: &(Resource<H>, R)) -> &Option<T> { <R as Holds<T>>::slot(&columns.1) }
     fn slot_mut(columns: &mut (Resource<H>, R)) -> &mut Option<T> { <R as Holds<T>>::slot_mut(&mut columns.1) }
 }
+// The value of a resource the world has, taken from its place (which keeps
+// none), and whether its hooks are yet to run; none if it has none.
+pub trait TakesResource<T> { fn take_resource(&mut Self) -> Option<(T, Bool)> }
+impl<T> TakesResource<T> for () { fn take_resource(columns: &mut ()) -> Option<(T, Bool)> { None } }
+impl<T, R> TakesResource<T> for (Resource<T>, R) {
+    fn take_resource(columns: &mut (Resource<T>, R)) -> Option<(T, Bool)> {
+        let fresh = columns.0.fresh;
+        columns.0.fresh = false;
+        match(replace(&mut columns.0.value, None)) { Some(v) => Some((v, fresh)), None => None }
+    }
+}
+impl<T, H, R> TakesResource<T> for (Resource<H>, R) where R: TakesResource<T> { fn take_resource(columns: &mut (Resource<H>, R)) -> Option<(T, Bool)> { <R as TakesResource<T>>::take_resource(&mut columns.1) } }
+impl<T, H, R> TakesResource<T> for (Column<H>, R) where R: TakesResource<T> { fn take_resource(columns: &mut (Column<H>, R)) -> Option<(T, Bool)> { <R as TakesResource<T>>::take_resource(&mut columns.1) } }
+// The names of the resources given while the app was built, in the order
+// given (the innermost first), each then no longer fresh.
+pub trait FreshResources { fn fresh_names(&mut Self, [Str]) -> [Str] }
+impl FreshResources for () { fn fresh_names(columns: &mut (), names: [Str]) -> [Str] { names } }
+impl<H, R> FreshResources for (Resource<H>, R) where R: FreshResources, H: Schedule {
+    fn fresh_names(columns: &mut (Resource<H>, R), names: [Str]) -> [Str] {
+        let names = <R as FreshResources>::fresh_names(&mut columns.1, names);
+        if(columns.0.fresh) { columns.0.fresh = false; push(names, <H as Schedule>::NAME) } else { names }
+    }
+}
+impl<H, R> FreshResources for (Column<H>, R) where R: FreshResources { fn fresh_names(columns: &mut (Column<H>, R), names: [Str]) -> [Str] { <R as FreshResources>::fresh_names(&mut columns.1, names) } }
 impl<T, H, R> Holds<T> for (Column<H>, R) where R: Holds<T> {
     fn slot(columns: &(Column<H>, R)) -> &Option<T> { <R as Holds<T>>::slot(&columns.1) }
     fn slot_mut(columns: &mut (Column<H>, R)) -> &mut Option<T> { <R as Holds<T>>::slot_mut(&mut columns.1) }
@@ -243,7 +268,7 @@ impl<H, R> Columns for (Resource<H>, R) where R: Columns {
     fn held(columns: &(Resource<H>, R), entity: Entity, names: [Str]) -> [Str] { <R as Columns>::held(&columns.1, entity, names) }
     fn kind_of(columns: &(Resource<H>, R), entity: Entity, kind: Str) -> Str { <R as Columns>::kind_of(&columns.1, entity, kind) }
     fn forget(columns: &mut (Resource<H>, R), entity: Entity) { <R as Columns>::forget(&mut columns.1, entity) }
-    fn empty() -> (Resource<H>, R) { (Resource { value: None }, <R as Columns>::empty()) }
+    fn empty() -> (Resource<H>, R) { (Resource { value: None, fresh: false }, <R as Columns>::empty()) }
     fn copy_onto(columns: &mut (Resource<H>, R), from: Entity, to: Entity) { <R as Columns>::copy_onto(&mut columns.1, from, to) }
     fn copy_all(columns: &(Resource<H>, R), into: &mut (Resource<H>, R)) { <R as Columns>::copy_all(&columns.1, &mut into.1) }
 }
@@ -3577,6 +3602,16 @@ fn named_in(names: &[Str], name: &Str) -> Bool {
     while({ i < len_at(names) }) { if(names[i] == *name) { found = true } else { () }; i = i + 1 };
     found
 }
+// Run the world's hooks of `kind` for a resource named: it is no entity's.
+fn run_hooks<S>(world: &mut World<S>, kind: Int, name: &Str, none: &[Entity]) {
+    let hooks: [WorldHook<S>] = world.hooks;
+    let mut i = 0;
+    while({ i < len_at(&hooks) }) {
+        let hook: WorldHook<S> = hooks[i];
+        if(if(hook.kind == kind) { hook.name == *name } else { false }) { lock(&hook.run, fn(run: &mut fn(&[Entity], &mut World<S>) -> ()) { (*run)(none, world) }) } else { () };
+        i = i + 1
+    }
+}
 // Run the world's hooks of `kind` for the components named, where an
 // exclusive system has the world.
 fn fire_world<S>(world: &mut World<S>, kind: Int, names: &[Str], entities: &[Entity]) {
@@ -5032,19 +5067,30 @@ impl<S, L> App<S, L> {
         world
     }
 
-    // Give the world a resource.
-    pub fn insert_resource<T>(app: Self, value: T) -> App<(Resource<T>, S), L> {
+    // Give the world a resource: put in once the app is built, after its
+    // hooks are installed, so that its `OnAdd` and `OnInsert` hooks run;
+    // resources given so are put in the order given.
+    pub fn insert_resource<T>(app: Self, value: T) -> App<(Resource<T>, S), L> { app.give_resource(value, true) }
+    fn give_resource<T>(app: Self, value: T, named: Bool) -> App<(Resource<T>, S), L> {
         let App { world, systems, guard } = app;
         let World { columns, generations, free, tick, since, remotes, id, bring_names: _, bring_fns: _, brought_entities: _, brought_names: _, hooks: _, direct: _, stepping: _ } = world;
         discard(remotes);
-        let w = World { columns: (Resource { value: Some(value) }, columns), generations: generations, free: free, tick: tick, since: since, remotes: no_remotes(), id: id, bring_names: [], bring_fns: [], brought_entities: [], brought_names: [], hooks: [], direct: false, stepping: 0 };
+        let w = World { columns: (Resource { value: Some(value), fresh: named }, columns), generations: generations, free: free, tick: tick, since: since, remotes: no_remotes(), id: id, bring_names: [], bring_fns: [], brought_entities: [], brought_names: [], hooks: [], direct: false, stepping: 0 };
         discard(guard);
         let guard = guard_of(&w);
         App { world: w, systems: systems, guard: guard }
     }
 
-    // The resource at its type's start.
-    pub fn init_resource<T: Default>(app: Self) -> App<(Resource<T>, S), L> { app.insert_resource(default<T>()) }
+    // The resource at its type's start, unless it was given already: then
+    // the one given (upstream's `init_resource`, which an earlier insert
+    // provides).
+    pub fn init_resource<T: Default>(app: Self) -> App<(Resource<T>, S), L> where S: TakesResource<T> {
+        let mut app = app;
+        match(<S as TakesResource<T>>::take_resource(&mut app.world.columns)) {
+            Some(given) => let (value, fresh) = given; app.give_resource(value, fresh),
+            None => app.give_resource(default<T>(), true)
+        }
+    }
 
     // A place for a resource the world does not have yet. (Upstream finds
     // it from the systems that ask for it.)
@@ -5052,7 +5098,7 @@ impl<S, L> App<S, L> {
         let App { world, systems, guard } = app;
         let World { columns, generations, free, tick, since, remotes, id, bring_names: _, bring_fns: _, brought_entities: _, brought_names: _, hooks: _, direct: _, stepping: _ } = world;
         discard(remotes);
-        let w = World { columns: (Resource { value: None }, columns), generations: generations, free: free, tick: tick, since: since, remotes: no_remotes(), id: id, bring_names: [], bring_fns: [], brought_entities: [], brought_names: [], hooks: [], direct: false, stepping: 0 };
+        let w = World { columns: (Resource { value: None, fresh: false }, columns), generations: generations, free: free, tick: tick, since: since, remotes: no_remotes(), id: id, bring_names: [], bring_fns: [], brought_entities: [], brought_names: [], hooks: [], direct: false, stepping: 0 };
         discard(guard);
         let guard = guard_of(&w);
         App { world: w, systems: systems, guard: guard }
@@ -5119,12 +5165,22 @@ impl<S, L> App<S, L> {
     // has the name.
     pub fn why_not(app: &Self, name: Str, entity: Entity) -> Option<[Str]> where L: Listed<S> { <L as Listed<S>>::why_listed(&app.systems, &name, &app.world, entity) }
 
-    pub fn build(app: Self) -> Self where S: Bringers<S>, L: WorldHooks<S> {
+    pub fn build(app: Self) -> Self where S: Bringers<S>, L: WorldHooks<S>, S: FreshResources {
         let mut app = app;
         let (names, fns) = <S as Bringers<S>>::bringers();
         app.world.bring_names = names;
         app.world.bring_fns = fns;
         app.world.hooks = <L as WorldHooks<S>>::world_hooks(&app.systems, []);
+        // (The resources given while it was built, now that its hooks are
+        // installed: each one's `OnAdd` and then its `OnInsert`.)
+        let fresh = <S as FreshResources>::fresh_names(&mut app.world.columns, []);
+        let none: [Entity] = [];
+        let mut i = 0;
+        while({ i < len_at(&fresh) }) {
+            run_hooks(&mut app.world, 0, &fresh[i], &none);
+            run_hooks(&mut app.world, 1, &fresh[i], &none);
+            i = i + 1
+        };
         app
     }
 
