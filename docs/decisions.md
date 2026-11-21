@@ -5959,8 +5959,14 @@ Each is to go; none is a design covey keeps.
   `app.systems()` lists them in the order they were added (covey/devtools).
   Still: a block written in place is named `""` (upstream's `{{closure}}`),
   a graph's nodes are not listed, and what wrote a change is not kept.
-- No unwinding: tests of panics are not ported. Taken away by panics that
-  run destructors and can be caught.
+- No unwinding: tests that catch a panic are not ported. This is the
+  language's, not covey's: a panic aborts (the language specification,
+  §20.3: not an effect, never in a row, not handled, no unwinding, no
+  finalizers), so covey's `abort` is upstream's `panic!`, and a test that
+  catches one has nothing to be in Glorious. What can fail and be gone on
+  from is typed failure: a terminal operation, `Fail<E>`'s `fail` caught by
+  `catch_fail`, unwinds and runs the cleanups of what it leaves (a value's
+  `Drop` there runs before the handler's arm).
 - ~~A system, and a world's query, takes each component it asks for
   once~~: queries are lent their columns (see "Queries lend their columns
   through pointers"), a column read by any number of them, and written
