@@ -317,6 +317,12 @@ instance : Delta Traits.ImplIndex (Array Traits.Impl) where
     | some p => if samePtr a p || extendsArr p.impls a.impls then some (.ofArray (a.impls ++ d)) else none
     | none => some (.ofArray (a.impls ++ d))
 
+/-- Of a map to implementations by their places, the places from `start` on. -/
+def ownImpls {κ : Type} [BEq κ] [Hashable κ] (start : Nat) (m : Std.HashMap κ (Array Nat)) : Std.HashMap κ (Array Nat) :=
+  m.fold (init := {}) fun acc k is =>
+    let mine := is.filter (· ≥ start)
+    if mine.isEmpty then acc else acc.insert k mine
+
 /-- (A part of `StDelta`.) -/
 structure StDelta0 where
   tys : StoreD (Option Ty)
@@ -889,7 +895,9 @@ def diffStates (p b : St) : Option StDelta := do
       fnBodies := {},
       assocUses := #[],
       solvedFit := {}, leavesFit := {}, leavesAt := {}, tyIds := {}, tyIdCount := 0,
-      tyMemo := {}, dictShared := {}, modules := {}, body := {}, blockRoots := {}, blockRootsAt := 0 }
+      tyMemo := {}, dictShared := {}, modules := {}, body := {}, blockRoots := {}, blockRootsAt := 0,
+      -- (Of where implementations are, only those it declared.)
+      implsByBase := ownImpls p.impls.size b.implsByBase, implsByHead := ownImpls p.impls.size b.implsByHead }
     implsStart := p.impls.size
     assocUses := ← Delta.diff p.assocUses b.assocUses
     part0 := ← diffPart0 p b

@@ -6812,12 +6812,28 @@ where it does not go on (`applyDelta` gives none), the group is checked.
 **Measured** on `covey/states2` (each against a build of the same text with
 `GLORIOUS_FRESH`, the programs written byte for byte the same):
 
-| Edit | Before | Now |
-|---|---|---|
-| a comment in `main` (no line moves) | 3.0 s | 1.35 s |
-| a string in `main` | 3.0 s | 2.57 s |
-| a string in a small function | 3.0 s | 2.60 s |
-| a line added at the top (every place moves) | 3.0 s | 2.5 s |
+| Edit | Before | Groups kept | And modules resolved kept |
+|---|---|---|---|
+| a comment in `main` (no line moves) | 3.0 s | 1.35 s | 1.03 s |
+| a string in `main` | 3.0 s | 2.57 s | 2.26 s |
+| a string in a small function | 3.0 s | 2.60 s | 2.25 s |
+| a line added at the top (every place moves) | 3.0 s | 2.5 s | 2.32 s |
+
+**Each module's resolution is kept too** (`Syntax.Modules.UnitsKept`, the
+build directory's `resolved`): a module's items as resolution made them,
+with what it added besides (`UnitMade`: which module names what, the homes
+of names, coercions, dot calls' alternatives, the counters), under a key of
+what every module declares, its own items and the counters where it began.
+Name resolution of an edited `covey/states2` went from 184 ms to 14. It is
+saved pointing into what was read (`Store.save (chain := 8)`): 2 ms, where
+writing it all was 300.
+
+Each kept group is a file of its own (`groups/<key>`): a compile writes
+those it made anew, and takes away those no group of it is. A group's
+requirements checked again at the end of the unit (`lateDups`, `lateDrops`,
+`lateStays`) are kept once for each type and reason; the end-of-unit checks
+of the program's unit went from 80 ms to 14. Writing `main`'s delta is still
+about 110 ms of an edit of `main` (1.3 MB).
 
 What is left of a check of the program's unit is `main` (0.85 s, of it the
 bounds of its calls 0.74). The late checks of what must be used were 0.3 s

@@ -576,9 +576,21 @@ def checkGroup (decls : List FnDecl) (signature : Bool := false) : M Unit := do
   -- declaration whose field types are inferred, so each is checked again at
   -- the end of the program.
   let owner := (decls.head?.map (·.name)).getD "the program"
-  let late := (← get).dups.map fun (t, why) => (t, inFunction owner why)
-  let lateDrops := (← get).drops.map fun (t, why) => (t, inFunction owner why)
-  let lateStays := (← get).stays.map fun (t, why) => (t, inFunction owner why)
+  -- (Each type once, the first: two alike now are alike whatever is found
+  -- later, and what is said is of the first, `checkDrops`.)
+  let once := fun (xs : Array (Ty × String)) => (do
+    let mut seen : Std.HashSet String := {}
+    let mut out : Array (Ty × String) := #[]
+    for (t, why) in xs do
+      let t ← zonk t
+      let key := s!"{showTy t} {← (freeCaps t).mapM findCap} {why}"
+      unless seen.contains key do
+        seen := seen.insert key
+        out := out.push (t, inFunction owner why)
+    pure out : M (Array (Ty × String)))
+  let late ← once (← get).dups
+  let lateDrops ← once (← get).drops
+  let lateStays ← once (← get).stays
   modify fun s =>
     { s with group := [], dups := #[], lateDups := s.lateDups ++ late, drops := #[],
              lateDrops := s.lateDrops ++ lateDrops, stays := #[],

@@ -1408,14 +1408,32 @@ partial def findCycle (edges : List (List String × List String)) : Option (List
     else (edges.filter (·.1 == at_)).findSome? fun (_, next) => go (at_ :: trail) next (fuel - 1)
   (edges.map (·.1)).findSome? fun start => go [] start (edges.length + 2)
 
+/-- What resolving a module's items added to what is known of the program,
+besides them: kept with them (`UnitsKept`). -/
+structure UnitMade where
+  edges : List (List String × List String)
+  homes : List (String × String)
+  coerced : List (List String × String)
+  dotAlts : List (Nat × List String)
+  fresh : Nat
+  made : Nat
+
+/-- Each module's items as resolution made them, with what it added, under
+a key of what they were made from (`resolve`): kept by one compile for the
+next. -/
+abbrev UnitsKept := Std.HashMap UInt64 (List Flat.FItem × UnitMade)
+
 /-- What the checker is told of the modules of a program. -/
 structure Resolved where
   items : List Flat.FItem
   info : ModuleInfo
+  /-- Each module's items resolved, under its key, where `resolve` was given
+  modules to keep. -/
+  unitsMade : List (UInt64 × List Flat.FItem × UnitMade) := []
 
 /-- A program of modules as one list of items, each name meaning one thing:
 see above. `prelude` is a module every other can name without `use`. -/
-def resolve (prelude root : List Flat.FItem) : Except String Resolved := do
+def resolve (prelude root : List Flat.FItem) (kept : Option UnitsKept := none) : Except String Resolved := do
   let mods ← gatherF [] root
   -- The library's modules come straight after the prelude's, whatever the
   -- program is: what is checked first is then the same for every program.
@@ -1440,14 +1458,38 @@ def resolve (prelude root : List Flat.FItem) : Except String Resolved := do
     items.filterMap fun
       | .module name _ => some (path ++ [name])
       | _ => none
-  let run : R (List Flat.FItem × List (String × List String)) := do
+  -- (A module's items are resolved from what every module declares, and
+  -- their own: with both as they were, and the counters where they were,
+  -- what an earlier compile made of them is taken.)
+  let declaredKey := hash (units.map fun u => (u.path, u.items))
+  let run : R (List Flat.FItem × List (String × List String) × List (UInt64 × List Flat.FItem × UnitMade)) := do
     let mut out : Array Flat.FItem := #[]
+    let mut unitsMade : List (UInt64 × List Flat.FItem × UnitMade) := []
     for (u, (_, fitems)) in units.zip mods do
       let scope ← scopeOf u.path
       let ctx : Ctx := { here := u.path, scope := scope, named := byName scope, ctorsByLast := ctorsByLastName scope }
       unless u.path.head? == preludePath.head? do out := out.push (.other (.fieldNames unitMark [key u.path] []))
-      for item in fitems do
-        out := out ++ (← resolveItemF ctx item).toArray
+      let before ← get
+      let unitKey := mixHash declaredKey (hash (u.path, fitems, before.fresh, before.made))
+      match kept.bind (·[unitKey]?) with
+      | some (items, m) =>
+        modify fun s => { s with edges := m.edges ++ s.edges, homes := m.homes ++ s.homes,
+                                 coerced := s.coerced ++ m.coerced, dotAlts := m.dotAlts ++ s.dotAlts,
+                                 fresh := m.fresh, made := m.made }
+        out := out ++ items.toArray
+        unitsMade := (unitKey, items, m) :: unitsMade
+      | none =>
+        let start := out.size
+        for item in fitems do
+          out := out ++ (← resolveItemF ctx item).toArray
+        if kept.isSome then
+          let after ← get
+          let grown := fun {α : Type} (now was : List α) => now.take (now.length - was.length)
+          let m : UnitMade :=
+            { edges := grown after.edges before.edges, homes := grown after.homes before.homes,
+              coerced := after.coerced.drop before.coerced.length, dotAlts := grown after.dotAlts before.dotAlts,
+              fresh := after.fresh, made := after.made }
+          unitsMade := (unitKey, (out.extract start out.size).toList, m) :: unitsMade
       -- The prelude's type of arrays, by the name it has in this program.
       if u.path == preludePath then
         let named := fun (name : String) (kind : Kind) =>
@@ -1469,7 +1511,7 @@ def resolve (prelude root : List Flat.FItem) : Except String Resolved := do
             || scope.any (fun b => b.rank ≤ 1 && b.entry.global == g && b.entry.kind == .fn)
         then some g else none
       applies := applies ++ [(key u.path, here)]
-    pure (out.toList, applies)
+    pure (out.toList, applies, unitsMade)
   let bare := root.any fun
     | .other (.fieldNames mark _ _) => mark == attrMark "no_std" || mark == attrMark "no_implicit_prelude"
     | _ => false
@@ -1489,7 +1531,7 @@ def resolve (prelude root : List Flat.FItem) : Except String Resolved := do
       | .fieldNames _ names pubs => (names.zip pubs).foldl (init := m) fun m (n, p) =>
         m.insert n ((m.getD n #[]).push (u.path, p))
       | _ => m
-  let ((items, coercions), st) ← match run.run { units, fields, hidden, bare, typeFns, typesOf, fieldsNamed } with
+  let ((items, coercions, unitsMade), st) ← match run.run { units, fields, hidden, bare, typeFns, typesOf, fieldsNamed } with
     | .ok r => pure r
     | .error e => throw e
   if let some cycle := findCycle st.edges then
@@ -1513,6 +1555,6 @@ def resolve (prelude root : List Flat.FItem) : Except String Resolved := do
   let unitUses := (units.filter (·.path.head? != preludePath.head?)).map fun u =>
     (key u.path, ((st.edges.filter (·.1 == u.path)).map fun (_, t) => key t).eraseDups)
   pure ⟨items, ⟨st.homes, fieldVis, text, preludeNames.any taken.contains, pubFns, privTypes, coercions,
-    st.dotAlts, unitUses⟩⟩
+    st.dotAlts, unitUses⟩, unitsMade⟩
 
 end Glorious.Syntax.Modules

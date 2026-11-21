@@ -354,13 +354,24 @@ def compileFile (path : String) (checkKept : Check.Kept := []) (search : Bool :=
     pure (Std.HashMap.ofList ((← Store.load (α := List (UInt64 × TextRead)) (dir / "texts") "texts").getD []))
   -- (What each of the program's own groups added, as the last compile of it
   -- checked them.)
-  let groupsKept : Check.Deltas ← if (← IO.getEnv "GLORIOUS_FRESH").isSome then pure {} else
-    pure (Std.HashMap.ofList ((← Store.load (α := List (UInt64 × Check.StDelta)) (dir / "groups") "groups").getD []))
+  -- (Each in a file of its own: a compile writes only those it made anew.)
+  let groupsKept : Check.Deltas ← if (← IO.getEnv "GLORIOUS_FRESH").isSome then pure {} else do
+    let groupsDir := dir / "groups"
+    let mut kept : Check.Deltas := {}
+    if ← groupsDir.isDir then
+      for entry in ← groupsDir.readDir do
+        if let some k := entry.fileName.toNat? then
+          if let some [d] ← Store.load (α := List Check.StDelta) entry.path "group" then kept := kept.insert k.toUInt64 d
+    pure kept
+  -- (And each module's items as resolution made them.)
+  let unitsKept : Syntax.Modules.UnitsKept ← if (← IO.getEnv "GLORIOUS_FRESH").isSome then pure {} else
+    pure (Std.HashMap.ofList ((← Store.load (α := List (UInt64 × List Syntax.Flat.FItem × Syntax.Modules.UnitMade))
+      (dir / "resolved") "resolved").getD []))
   let text ← IO.FS.readFile path
   let files ← moduleFiles path
   let result ← Trace.timedIO "compile" (IO.lazyPure fun _ =>
     compileSource text true files (few := true) known kept checkKept search memo firsts parsedKept preludeKept texts
-      (groupsKept := some groupsKept))
+      (groupsKept := some groupsKept) (unitsKept := some unitsKept))
   if let .ok c := result then keep <| Trace.timedIO "save what is kept" do
     -- (What a compile that did not look for each place found is not kept
     -- for one that does.)
@@ -386,9 +397,16 @@ def compileFile (path : String) (checkKept : Check.Kept := []) (search : Bool :=
       Store.save (library / "units") "units"
         ((c.libraryKept ++ libraryKept.filter fun (k, _) => !newKeys.contains k).take 96)
     if let some k := List.lookup ("%way", 0) c.places then Store.save (dir / "way") "way" k
+    unless c.unitsMade.all (fun (k, _) => unitsKept.contains k) && c.unitsMade.length == unitsKept.size do
+      Trace.timedIO "save: resolved" (Store.save (dir / "resolved") "resolved" c.unitsMade (chain := 8))
     -- (Saved again only where a group was checked anew.)
-    unless c.groupsMade.all (fun (k, _) => groupsKept.contains k) && c.groupsMade.size == groupsKept.size do
-      Trace.timedIO "save: groups" (Store.save (dir / "groups") "groups" c.groupsMade.toList)
+    Trace.timedIO "save: groups" do
+      for (k, d) in c.groupsMade do
+        unless groupsKept.contains k do Store.save (dir / "groups" / toString k) "group" [d]
+      -- (Those no group of this compile is: taken away.)
+      let made : Std.HashSet UInt64 := c.groupsMade.foldl (fun s (k, _) => s.insert k) {}
+      for (k, _) in groupsKept do
+        unless made.contains k do discard <| (IO.FS.removeFile (dir / "groups" / toString k)).toBaseIO
     -- (`GLORIOUS_CORE`: the Core that was compiled, with what destroys what.)
     if (← IO.getEnv "GLORIOUS_CORE").isSome then
       IO.eprintln (showCore c.fnNames c.core)

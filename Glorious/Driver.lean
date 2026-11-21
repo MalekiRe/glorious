@@ -78,6 +78,9 @@ structure Compiled where
   /-- What each of the program's own groups added, where `groupsKept` was
   given: for the next compile of the program (`Check.checkGroupKept`). -/
   groupsMade : Array (UInt64 × Check.StDelta) := #[]
+  /-- Each module's items as name resolution made them, where `unitsKept`
+  was given: for the next compile (`Syntax.Modules.UnitsKept`). -/
+  unitsMade : List (UInt64 × List Syntax.Flat.FItem × Syntax.Modules.UnitMade) := []
   /-- Each module's items as this compile parsed them or took them, under
   what they were parsed from: kept for the next. -/
   parsedMade : List (UInt64 × List Syntax.Item) := []
@@ -705,7 +708,8 @@ def compileSourceAt (src : String) (check : Bool := true)
     (firsts : List ((Bool × Bool) × (Nat × Check.St)) := [])
     (lexed : List (List String × Array Syntax.Token) := []) (parsedKept : Parsed := {})
     (preludeKept : Option (List Syntax.Item × Syntax.Fixities) := none) (texts : Texts := {})
-    (lenient : Bool := false) (groupsKept : Option Check.Deltas := none) :
+    (lenient : Bool := false) (groupsKept : Option Check.Deltas := none)
+    (unitsKept : Option Syntax.Modules.UnitsKept := none) :
     Except String Compiled := do
   let (prelude, items, parsedMade, textsMade) ← Trace.timed "parse" fun _ =>
     parseProgram src files check few packs lexed parsedKept preludeKept texts
@@ -713,7 +717,7 @@ def compileSourceAt (src : String) (check : Bool := true)
   -- each module a unit, after those it uses.
   -- (Resolved, and all that follows, from flat bodies.)
   let (flatPrelude, flatItems) := Trace.timed "flat bodies" fun _ => (Syntax.Flat.ofItems prelude, Syntax.Flat.ofItems items)
-  let resolved ← Trace.timed "resolve names" fun _ => Syntax.Modules.resolve flatPrelude flatItems
+  let resolved ← Trace.timed "resolve names" fun _ => Syntax.Modules.resolve flatPrelude flatItems unitsKept
   let (firstItems, unitItems) := unitsOfFlat resolved.items resolved.info.unitUses
   let resolved := { resolved with items :=
     firstItems ++ unitItems.flatMap (fun (k, is) => Syntax.Flat.FItem.other (Syntax.Item.fieldNames Syntax.unitMark [k] []) :: is) }
@@ -884,7 +888,8 @@ def compileSourceAt (src : String) (check : Bool := true)
       (places : List ((String × Nat) × Nat)) (made : Infer.Made) =>
     ({ core := out.program, ctorNames := out.ctorNames.map shownName, fnNames := out.fnNames
        opNames := out.opNames, cert, lent, plain := out.plain, places, checkKept := checkMade
-       inferMade := made, firstMade, libraryKept := libraryMade, groupsMade, parsedMade, textsMade } : Compiled)
+       inferMade := made, firstMade, libraryKept := libraryMade, groupsMade, unitsMade := resolved.unitsMade,
+       parsedMade, textsMade } : Compiled)
   let plain := fun (blocks : Option Elab.Blocks) (failed : List (Bool × Bool)) => do
     let out ← match Trace.timed "elaborate" fun _ => elaborate all blocks with
       | .ok out => do aside.get; pure out
@@ -1170,7 +1175,8 @@ def compileSource (src : String) (check : Bool := true)
     (checkKept : Check.Kept := []) (search : Bool := true) (memo : Infer.Memo := {})
     (firsts : List ((Bool × Bool) × (Nat × Check.St)) := []) (parsedKept : Parsed := {})
     (preludeKept : Option (List Syntax.Item × Syntax.Fixities) := none) (texts : Texts := {})
-    (lenient : Bool := false) (groupsKept : Option Check.Deltas := none) :
+    (lenient : Bool := false) (groupsKept : Option Check.Deltas := none)
+    (unitsKept : Option Syntax.Modules.UnitsKept := none) :
     Except String Compiled := do
   -- (What the default prelude has from the library, where the text uses it;
   -- and each text lexed, once: each that an earlier compile read as it is,
@@ -1193,7 +1199,7 @@ def compileSource (src : String) (check : Bool := true)
   let rec go (fuel packs : Nat) : Except String Compiled :=
     match compileSourceAt src check files few known packs kept checkKept (search := search) (memo := memo)
         (firsts := firsts) (lexed := lexed) (parsedKept := parsedKept) (preludeKept := preludeKept) (texts := texts)
-        (lenient := lenient) (groupsKept := groupsKept) with
+        (lenient := lenient) (groupsKept := groupsKept) (unitsKept := unitsKept) with
     | .error e =>
       let wanted := longestUnimplemented e
       match fuel with
