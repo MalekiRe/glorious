@@ -6640,8 +6640,14 @@ turns on one machine, which the proved machines run too.
 
 **Decision: the state after checking a program's module that is a file of
 its own (`mod ecs;`) is kept for any program, with the library's units
-(`library/units`, newest first, 96), and a program with such modules reads
-the whole library.** The program's own unit's state is not kept at all: a
+(`library/units`, newest first, 96).** For a while a program with such
+modules read the whole library, so that each module's check came after the
+same states for every program; undone: checked after the whole library,
+covey's `ecs` took 5 to 10 s instead of 2, which every compile with
+nothing kept paid (the suite, 16 minutes of processor time against 13.5).
+A module's check is shared between programs that read the same library
+modules; sharing it between any two waits for checker states made of
+deltas. The program's own unit's state is not kept at all: a
 compile of the same texts takes the program built, and one of other texts
 checks it anew; saving it cost a second each build.
 A unit's key is made of what comes before it, so a module's check was the
@@ -6652,10 +6658,17 @@ process of the compiler, the first part kept with the library), each
 module's check comes after the same states, and the second program of the
 same modules takes it.
 
-Measured, each with a build directory of its own: covey programs took 5.5
-to 7 s; once one program has checked `ecs`, another takes 2.6 to 4.4 s
-(the program's own unit and what follows checking). The first compile after the
-compiler changes checks the whole library first: about 17 s, once.
+Measured while the whole library was read, each with a build directory of
+its own: covey programs took 5.5 to 7 s; once one program had checked
+`ecs`, another took 2.6 to 4.4 s.
+
+The suite: `GLORIOUS_ONLY=cases` runs the test programs alone (11 s),
+`GLORIOUS_ONLY=examples` the examples alone, `GLORIOUS_ONLY=text` the
+programs whose source has the text in it (without the checks). The examples
+are started first. What each program's certificate search found (its
+places, the way that passed) is kept by its text (`library/selftest-known`)
+and tried first the next time, as the command tries what a file's last
+compile found.
 
 ## Other standing decisions
 

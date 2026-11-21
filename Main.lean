@@ -127,12 +127,15 @@ structure Outcome where
   /-- Run on the Core machine: the cleanups installed, those started, and those
   left in resumptions never taken (`Core.cleanup_accounting`). -/
   cleanups : Option (Nat × Nat × Nat) := none
+  /-- What the compile found for each place, and the way its certificate
+  was found: what a later compile is given to try first. -/
+  places : List ((String × Nat) × Nat) := []
   deriving Inhabited
 
 /-- Compile a test program, and with `run` run it on the Lean machines. -/
-def outcome (run : Bool) (c : Case) (files : List (List String × String)) (few : Bool := false) :
-    Outcome :=
-  match compileSource c.src true files few with
+def outcome (run : Bool) (c : Case) (files : List (List String × String)) (few : Bool := false)
+    (known : List ((String × Nat) × Nat) := []) : Outcome :=
+  match compileSource c.src true files few (known := known) with
   | .error e => { lean := s!"error: {e}", error := some e }
   | .ok compiled =>
     let has := fun (f : Typing.Cert → Bool) => (compiled.cert.map f).getD false
@@ -143,7 +146,8 @@ def outcome (run : Bool) (c : Case) (files : List (List String × String)) (few 
       certified := compiled.cert.isSome
       strict := has (·.strict), regions := has (·.regions), loans := has (·.loans)
       lent := compiled.lent, plain := compiled.plain.length
-      cleanups := if run then cleanupsOf compiled.core c.input else none }
+      cleanups := if run then cleanupsOf compiled.core c.input else none
+      places := compiled.places }
 
 /-- What every program starts from, the prelude and the library checked,
 found before the programs are gone through side by side: each would find it
@@ -174,6 +178,11 @@ def sideBySideTimed {α β : Type} [Inhabited β] (xs : List α) (f : α → β)
     match ← IO.wait t with
     | .ok r => pure r
     | .error _ => pure (default, 0)
+
+/-- What was found of each, put back in the order of the list: `order` is
+the list's entries with their places, in the order they were gone through. -/
+def placed {α β : Type} [Inhabited β] (order : List (α × Nat)) (found : Array β) (n : Nat) : Array β :=
+  (order.zip found.toList).foldl (fun acc ((_, i), b) => acc.set! i b) (Array.replicate n default)
 
 /-- How many programs the Rust VM is run on at a time. -/
 def vmJobs : IO Nat := do
@@ -543,6 +552,14 @@ def selftest (vm : Option String) : IO UInt32 := do
   let examples := (← exampleCases "examples") ++ (← exampleCases "covey")
   -- (The programs that take the Lean machines too long come last, and are
   -- run on the Rust VM alone.)
+  -- (`GLORIOUS_ONLY=text`: only the programs whose source has the text in
+  -- it, for trying a change on those first; `GLORIOUS_ONLY=examples`: the
+  -- examples alone; `GLORIOUS_ONLY=cases`: the test programs alone.)
+  let only := (← IO.getEnv "GLORIOUS_ONLY").getD ""
+  let keep := fun (c : Case) => only.isEmpty || only == "examples" || only == "cases" || (c.src.splitOn only).length > 1
+  let cases := if only == "examples" then [] else cases.filter keep
+  let examples := if only == "cases" then [] else examples.filter (keep ·.1)
+  let longCases := if only.isEmpty then longCases else longCases.filter keep
   let quick := (cases.map (·, [])) ++ examples
   let all := quick ++ longCases.map (·, [])
   -- `GLORIOUS_TIMES`: how long each part of this takes.
@@ -551,21 +568,36 @@ def selftest (vm : Option String) : IO UInt32 := do
   let lap := fun (what : String) => do
     if times then IO.eprintln s!"{what}: at {(← IO.monoMsNow) - started} ms"
   -- The checks are started with the programs, and looked at after them.
-  let asked := Checks.all.toArray.map fun (_, check) => Task.spawn fun _ => check ()
+  -- (Not where only some programs are asked for, `GLORIOUS_ONLY=text`.)
+  let checksAsked := only.isEmpty || only == "examples" || only == "cases"
+  let asked := if checksAsked then Checks.all.toArray.map fun (_, check) => Task.spawn fun _ => check () else #[]
   warm
   lap "the prelude and library checked"
+  -- (What the last run found of each program's places and the way its
+  -- certificate was found, by its text: tried first, as a compile of the
+  -- command tries what the last compile of the file found. Only where to
+  -- look first: a certificate is checked as any other.)
+  let knownFile := (← Target.libraryDir) / "selftest-known"
+  let knownBefore : Std.HashMap UInt64 (List ((String × Nat) × Nat)) ←
+    if (← IO.getEnv "GLORIOUS_FRESH").isSome then pure {}
+    else pure (Std.HashMap.ofList ((← Store.load (α := List (UInt64 × List ((String × Nat) × Nat))) knownFile "known").getD []))
+  -- (The examples first, and the long ones among them: the others, which
+  -- are quick, fill in around them.)
+  let order := (all.zipIdx.filter fun (_, i) => cases.length ≤ i) ++ (all.zipIdx.filter fun (_, i) => i < cases.length)
+  let run := fun (((c, files), i) : (Case × List (List String × String)) × Nat) =>
+    -- (An example is compiled as the command compiles a file.)
+    outcome (i < quick.length) c files (cases.length ≤ i && i < quick.length)
+      (known := knownBefore.getD (hash c.src) [])
   let found ← if times then do
-      let timed ← sideBySideTimed all.zipIdx fun ((c, files), i) =>
-        -- (An example is compiled as the command compiles a file.)
-        outcome (i < quick.length) c files (cases.length ≤ i && i < quick.length)
-      let slow := ((all.zip timed.toList).toArray.qsort fun a b => a.2.2 > b.2.2).toList.take 8
-      for ((c, _), (_, ms)) in slow do
+      let timed ← sideBySideTimed order run
+      let slow := ((order.zip timed.toList).toArray.qsort fun a b => a.2.2 > b.2.2).toList.take 8
+      for (((c, _), _), (_, ms)) in slow do
         IO.eprintln s!"{ms} ms: {((c.src.take 100).toString.replace "\n" " ")}"
-      pure (timed.map (·.1))
-    else sideBySide all.zipIdx fun ((c, files), i) =>
-        -- (An example is compiled as the command compiles a file.)
-        outcome (i < quick.length) c files (cases.length ≤ i && i < quick.length)
+      pure (placed order (timed.map (·.1)) all.length)
+    else do pure (placed order (← sideBySide order run) all.length)
   lap "programs compiled and run on the Lean machines"
+  Store.save knownFile "known" ((all.zip found.toList).filterMap fun ((c, _), o) =>
+    if o.places.isEmpty then none else some (hash c.src, o.places))
   -- What is unsafe runs on the Rust VM alone, and the proved machines say so.
   let foreign ← if vm.isSome then sideBySide foreignCases fun c => outcome false c [] else pure #[]
   let mut failures : Array (Nat × String) := #[]
@@ -623,7 +655,7 @@ def selftest (vm : Option String) : IO UInt32 := do
   let held ← asked.mapM fun t => IO.wait t
   lap "checks"
   for ((n, _), i) in Checks.all.zipIdx do
-    unless held[i]?.getD false do
+    unless !checksAsked || held[i]?.getD false do
       failures := failures.push (2 * (all.length + foreignCases.length) + n,
         s!"check {n} of `Glorious/Checks.lean` does not hold\n")
   for (_, said) in failures.qsort (fun a b => a.1 < b.1) do
