@@ -1472,6 +1472,7 @@ def untrait (blocks : Blocks) (items : List Item) : List Item × Blocks :=
     | .fn name params annots ret clauses => [fnItem name params annots ret clauses]
     | item => [item]
   let out := out ++ destroyers tr
+    ++ [Item.fn Syntax.markerDict [] [] none [.mk [] [.expr (.tuple [])]]]
   let coercions := blocks.coercions.fold (init := {}) fun (m : Std.HashMap Site String) site fn =>
     let site := match site with
       | .arg call index =>

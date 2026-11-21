@@ -156,12 +156,18 @@ partial def leaves (pos trait : String) (t : Ty) : M (List (String × Nat × Ty)
 one found for many calls (as `solveFitting` finds them) is the same value,
 not a copy for each, in what the program is elaborated with and what is
 kept of the checker. -/
-partial def toDictEShared (impls : Array ImplDecl) (d : Traits.Dict) : M Elab.DictE := do
+partial def toDictEShared (impls : Array ImplDecl) (marker : String → Bool) (d : Traits.Dict) : M Elab.DictE := do
   if let some (_, e) := (← get).dictShared[addrOf d]? then return e
   let e ← match d with
     | .given k => pure (Elab.DictE.param k)
     | .impl i subs => do
-      pure (Elab.DictE.impl ((impls[i]?.map (·.dictFn)).getD "") (← subs.mapM (toDictEShared impls)))
+      -- (Of a trait with no functions, every implementation is the same
+      -- value, `()`: one, `Syntax.markerDict`, whatever its conditions are
+      -- met by, which are not looked at.)
+      if (impls[i]?.map fun im => marker (Syntax.traitBase im.trait)).getD false then
+        pure (Elab.DictE.impl Syntax.markerDict [])
+      else
+      pure (Elab.DictE.impl ((impls[i]?.map (·.dictFn)).getD "") (← subs.mapM (toDictEShared impls marker)))
   modify fun s => { s with dictShared := s.dictShared.insert (addrOf d) (d, e) }
   pure e
 
@@ -718,7 +724,7 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
               modify fun s => { s with assocUses := s.assocUses.push use }
   -- A trait with arguments is asked of a type together with them: from here
   -- on it is the trait at those arguments, asked of the type.
-  settleAssocs
+  timedM "bounds: settle" settleAssocs
   -- (What an implementation found only now performs is passed on.)
   settleRows (some fun _ => true) true
   let mut keyed : List (String × String × List Ty) := []
@@ -761,8 +767,8 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
   for b in known ++ unknown do
     let b ← rekey b
     -- (How to destroy a type that nothing decides is not asked for.)
-    let ls ← try (if (← get).patterned && b.trait != Syntax.destroyTrait then leavesFitting b.pos b.trait b.ty b.args b.owner
-        else (·.map fun (tr, k, t) => (tr, k, t, [])) <$> leaves b.pos b.trait b.ty) catch e =>
+    let ls ← try (timedM "bounds: leaves" (if (← get).patterned && b.trait != Syntax.destroyTrait then leavesFitting b.pos b.trait b.ty b.args b.owner
+        else (·.map fun (tr, k, t) => (tr, k, t, [])) <$> leaves b.pos b.trait b.ty)) catch e =>
       if b.trait == Syntax.destroyTrait then pure [] else do
         dotOwnInstead b.call b.ty e
         throw (inFunction b.owner e)
@@ -1108,6 +1114,9 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
         fnBounds := (d.name, mine.length) :: s.fnBounds }
   let impls := (← get).impls
   let kimpls := (← get).kimpls
+  let methodless : Std.HashSet String := (← get).traits.foldl (init := {}) fun m (t, fns) =>
+    if fns.isEmpty && t != Syntax.destroyTrait then m.insert t else m
+  let marker := fun (t : String) => methodless.contains t
   let mut table : List (Nat × List Elab.DictE) := []
   let record := fun (table : List (Nat × List Elab.DictE)) (call : Nat) (d : Elab.DictE) =>
     match table.lookup call with
@@ -1127,11 +1136,11 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
    last := last || waiting.length == before || round > 100
    before := waiting.length
    -- (What the bounds met so far said a type left to an implementation is.)
-   if round > 1 then settleAssocsAll
+   if round > 1 then timedM "bounds: rounds settle" settleAssocsAll
    let now := waiting
    waiting := []
    for b in now do
-    let b ← rekey b
+    let b ← timedM "bounds: rekey" (rekey b)
     let givens := (givensOf.lookup b.owner).getD []
     -- What `Traits.coherent` asks of the assumptions.
     unless Traits.distinct givens do
@@ -1162,14 +1171,14 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
         let given ← (← projectedCondition trait ty).findSomeM? fun k => do
           pure ((Traits.findGiven trait k givens).map Traits.Dict.given)
         pure (given <|> Traits.solveIx kimpls givens 100000 trait sty)
-    let solved ← match ← solve b.trait b.ty sty with
+    let solved ← match ← timedM "bounds: solve" (solve b.trait b.ty sty) with
       | some d => pure (some d)
       | none =>
         match ← saidOf with
         | some (_, key, _, cond) => solve key cond (← toSTy cond)
         | none => pure none
     match solved with
-    | some d => table := record table b.call (← toDictEShared impls d)
+    | some d => table := record table b.call (← timedM "bounds: dict" (toDictEShared impls marker d))
     | none =>
       if b.trait == Syntax.destroyTrait then continue
       if !last && !(← zonk b.ty).ground then

@@ -622,13 +622,13 @@ def finish : M Elab.Blocks := fun st => Trace.timed "check: finish" fun _ => (sh
     -- name as a lookup finds it, found once.)
     let traitsBy := Elab.firstOf s.traits
     let arityBy : Std.HashMap String Nat := s.methods.fold (fun m n sig => m.insert n sig.params.length) {}
-    let implEs := s.impls.toList.map fun im =>
+    let implEs := (s.impls.toList.map fun im =>
       let names := traitsBy.getD (Syntax.traitBase im.trait) []
       (⟨im.dictFn, im.context.length + im.extra.length, names.map fun m =>
         (Syntax.implFnName im.trait im.head m,
           if im.trait == Syntax.destroyTrait then 1
           else arityBy.getD m 0)⟩ :
-        Elab.ImplE)
+        Elab.ImplE)) ++ [({ dictFn := Syntax.markerDict, conditions := 0, methods := [] } : Elab.ImplE)]
     -- How each type is destroyed, for the elaborator to write the function:
     -- its own `Drop` first, if it has one, and then for each constructor
     -- which fields are destroyed, each by how its type is.

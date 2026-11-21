@@ -300,6 +300,10 @@ its trait's types is, where `T` is one of its type parameters: answered at
 each use of the implementation, once `T` is known there. -/
 def projMark : String := "%proj"
 
+/-- The implementation, as a value, of a trait with no functions: `()`,
+whichever implementation it is. -/
+def markerDict : String := "%marker"
+
 /-- The name under which a name bound by the pattern of a `let` is known
 where it is destroyed: the place is the statement's, which a clause's own
 names are known by too when the statement is its first. -/
