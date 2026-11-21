@@ -1,0 +1,61 @@
+// `ordered_children_survive_removal_reparenting_and_reordering_in_joins`
+// (upstream's tests/relations.rs): a target's sources, read through
+// `From<Child, &Name>`, in the order they came or were put at
+// (`relate_at`), through despawning one, moving one to the front and to
+// the end, moving one to another parent, and ending the parent and all
+// under it. (Upstream's `Child` is `LINKED`, so ending the parent ends its
+// children; here that is `despawn_linked`.)
+// expect:
+// [0, 1, 2, 3, 4]
+// [0, 2, 3, 4]
+// [4, 0, 2, 3]
+// [0, 2, 3, 4]
+// [0, 3, 4]
+// [2]
+// [3, 4, 0]
+// 0 1
+// 0
+mod ecs;
+
+use ecs::{App, World, Entity, Relation, OneToMany, From, to};
+
+struct Name(Int)
+struct Child
+impl Relation for Child { type Kind = OneToMany; }
+impl Eq for Child { fn ==(a: Child, b: Child) -> Bool { true } }
+impl Clone for Child { fn clone(c: &Child) -> Child { Child } }
+
+fn names<S>(world: &mut World<S>, parent: Entity) -> [Int]
+    where S: ecs::Get<Name>, S: ecs::Get<ecs::Sources<Child>>, S: ecs::Hidden<(From<Child, &Name>,), ()>, S: ecs::Hidden<&Name, ()> {
+    match(world.query<(From<Child, &Name>,)>().get_mut(parent)) {
+        Some((kids,)) => let mut out = []; let mut i = 0; while({ i < len_at(&kids) }) { out = push(out, kids[i].0); i = i + 1 }; out,
+        None => []
+    }
+}
+
+fn main() -> Int {
+    let mut world = App::new().relation<Child>().register<Name>().build().world;
+    let root = world.spawn_bundle((Name(100),));
+    let other = world.spawn_bundle((Name(200),));
+    let mut kids = [];
+    let mut i = 0;
+    while({ i < 5 }) { kids = push(kids, world.spawn_bundle((Name(i), Child.to(root)))); i = i + 1 };
+    say(names(&mut world, root));
+    discard(world.despawn(kids[1]));
+    say(names(&mut world, root));
+    discard(world.relate_at(kids[4], Child, root, 0));
+    say(names(&mut world, root));
+    discard(world.relate_at(kids[4], Child, root, 99));
+    say(names(&mut world, root));
+    discard(world.relate_at(kids[2], Child, other, 0));
+    say(names(&mut world, root));
+    say(names(&mut world, other));
+    discard(world.relate_at(kids[0], Child, root, 2));
+    say(names(&mut world, root));
+    world.despawn_linked<Child>(root);
+    let mut alive = 0;
+    let mut k = 0;
+    while({ k < len_at(&kids) }) { if(world.contains(kids[k])) { alive = alive + 1 } else { () }; k = k + 1 };
+    say(show(alive - (if(world.contains(kids[2])) { 1 } else { 0 })) ++ " " ++ show(if(world.contains(kids[2])) { 1 } else { 0 }));
+    0
+}

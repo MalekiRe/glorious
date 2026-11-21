@@ -5505,7 +5505,7 @@ gives the one it had of that target a new value), `unlink` undoes one,
 
 Not there against upstream: `To`/`From` through many-to-many links,
 fragmenting relations, `LINKED`, `ACYCLIC`,
-`ORDERED` (`Relinked` and `cascade` came later, covey/relinked, covey/cascade). A query
+`ORDERED` (`Relinked`, `cascade` and `ACYCLIC` came later: covey/relinked, covey/cascade, covey/acyclic, the last as an `Acyclic` implementation saying `ACYCLIC` is true, relating what would close a cycle aborting; and `relate_at` is of every kind, covey/ordered2). A query
 through a link writes a component the row also has, `(&Fuel, To<DockedAt,
 &mut Fuel>)`, as upstream's `each` does (see "Queries lend their columns
 through pointers").

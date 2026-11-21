@@ -1,0 +1,32 @@
+// `acyclic_many_to_many_allows_diamonds_and_refuses_back_edges` (upstream's
+// tests/relations.rs), what of it does not panic: a relation no chain of
+// links may close into a cycle (`Acyclic`) has diamonds, two ways down to
+// one entity. Relating what would close a cycle aborts the program (the
+// language's panic: not caught here, so not run).
+// expect:
+// 2
+// 0
+// 0
+mod ecs;
+
+use ecs::{App, Entity, Relation, ManyToMany, Acyclic};
+
+struct Precedes
+impl Relation for Precedes { type Kind = ManyToMany; }
+impl Use<[0, *]> for Precedes {}
+impl Acyclic for Precedes { const ACYCLIC: Bool = true; }
+
+fn main() -> Int {
+    let mut world = App::new().relation<Precedes>().build().world;
+    let top = world.spawn_bundle(());
+    let left = world.spawn_bundle(());
+    let right = world.spawn_bundle(());
+    let bottom = world.spawn_bundle(());
+    discard(world.relate(left, Precedes, top));
+    discard(world.relate(right, Precedes, top));
+    discard(world.relate(bottom, Precedes, left));
+    discard(world.relate(bottom, Precedes, right));
+    say(len_at(&world.targets<Precedes>(bottom)));
+    say(len_at(&world.targets<Precedes>(top)));
+    0
+}

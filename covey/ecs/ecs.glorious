@@ -417,7 +417,10 @@ fn move_source<R, S>(columns: &mut S, target: Entity, source: Entity, position: 
 }
 
 fn link<R, S>(world: &mut World<S>, source: Entity, relation: R, target: Entity) -> Option<R>
-    where S: Get<Links<R>>, S: Get<Sources<R>>, R: Use<[0, *]> {
+    where S: Get<Links<R>>, S: Get<Sources<R>>, R: Use<[0, *]>, R: Acyclic {
+    if(<R as Acyclic>::ACYCLIC) {
+        if(if(same_entity(source, target)) { true } else { reaches_many<R, S>(&world.columns, target, source) }) { abort("relate: would close a cycle") } else { () }
+    } else { () };
     let mut column = take_at<Links<R>, S>(world);
     let at = slot_of(&column, source);
     let before = if(at >= 0) {
@@ -468,10 +471,10 @@ fn targets_in<R, S>(columns: &S, source: Entity) -> [Entity] where S: Get<Links<
 
 // How an entity is related to another, by the relation's kind.
 pub trait Relating<R, S> { fn relate_by(&mut World<S>, Entity, R, Entity) -> Option<R> }
-impl<R, S> Relating<R, S> for OneToMany where S: Get<Relates<R>>, S: Get<Sources<R>>, R: SameLink {
+impl<R, S> Relating<R, S> for OneToMany where S: Get<Relates<R>>, S: Get<Sources<R>>, R: SameLink, R: Acyclic {
     fn relate_by(world: &mut World<S>, source: Entity, relation: R, target: Entity) -> Option<R> { relate<R, S>(world, source, relation, target) }
 }
-impl<R, S> Relating<R, S> for OneToOne where S: Get<Relates<R>>, S: Get<Sources<R>>, R: SameLink {
+impl<R, S> Relating<R, S> for OneToOne where S: Get<Relates<R>>, S: Get<Sources<R>>, R: SameLink, R: Acyclic {
     fn relate_by(world: &mut World<S>, source: Entity, relation: R, target: Entity) -> Option<R> {
         let others = sources_in<R, S>(&world.columns, target);
         let mut i = 0;
@@ -484,7 +487,7 @@ impl<R, S> Relating<R, S> for OneToOne where S: Get<Relates<R>>, S: Get<Sources<
         relate<R, S>(world, source, relation, target)
     }
 }
-impl<R, S> Relating<R, S> for ManyToMany where S: Get<Links<R>>, S: Get<Sources<R>>, R: Use<[0, *]> {
+impl<R, S> Relating<R, S> for ManyToMany where S: Get<Links<R>>, S: Get<Sources<R>>, R: Use<[0, *]>, R: Acyclic {
     fn relate_by(world: &mut World<S>, source: Entity, relation: R, target: Entity) -> Option<R> { link<R, S>(world, source, relation, target) }
 }
 // A relation related by its kind.
@@ -541,10 +544,52 @@ pub trait SameLink { fn same_link(&Self, &Self) -> Bool }
 impl<R> SameLink for R where R: Eq, R: Clone { fn same_link(a: &R, b: &R) -> Bool { clone(a) == clone(b) } }
 impl<R> SameLink for R { fn same_link(a: &R, b: &R) -> Bool { false } }
 
+// A relation no chain of links may close into a cycle (upstream's
+// `ACYCLIC`): `impl Acyclic for Precedes { const ACYCLIC: Bool = true; }`.
+// Relating what would close one aborts.
+pub trait Acyclic { const ACYCLIC: Bool; }
+impl<T> Acyclic for T { const ACYCLIC: Bool = false; }
+// Whether following one-target links from `from` comes to `to`.
+fn reaches_one<R, S>(columns: &S, from: Entity, to: Entity) -> Bool where S: Get<Relates<R>> {
+    let column = <S as Get<Relates<R>>>::column(columns);
+    let mut at = from;
+    let mut found = false;
+    let mut steps = 0;
+    while({ if(found) { false } else { steps <= len_at(&column.dense) } }) {
+        let slot = slot_of(column, at);
+        if(slot < 0) { steps = len_at(&column.dense) + 1 } else {
+            at = column.dense[slot].target;
+            if(same_entity(at, to)) { found = true } else { () };
+            steps = steps + 1
+        }
+    };
+    found
+}
+// Whether following links of any number each way from `from` comes to `to`.
+fn reaches_many<R, S>(columns: &S, from: Entity, to: Entity) -> Bool where S: Get<Links<R>> {
+    let mut seen = [];
+    let mut left = [from];
+    let mut found = false;
+    while({ if(found) { false } else { len_at(&left) > 0 } }) {
+        match(pop_at(&mut left)) {
+            Some(at) =>
+                if(has_entity(&seen, at)) { () } else {
+                    seen = push(seen, at);
+                    let next = targets_in<R, S>(columns, at);
+                    let mut i = 0;
+                    while({ i < len_at(&next) }) { if(same_entity(next[i], to)) { found = true } else { left = push(left, next[i]) }; i = i + 1 }
+                },
+            None => ()
+        }
+    };
+    found
+}
+
 pub fn relate<R, S>(world: &mut World<S>, source: Entity, relation: R, target: Entity) -> Option<R>
-    where S: Get<Relates<R>>, S: Get<Sources<R>>, R: SameLink {
+    where S: Get<Relates<R>>, S: Get<Sources<R>>, R: SameLink, R: Acyclic {
     // (Upstream's: what a join of a row gives is then of another entity.)
     if(same_entity(source, target)) { abort("relate: an entity cannot relate to itself through a relation with a one-side") } else { () };
+    if(<R as Acyclic>::ACYCLIC) { if(reaches_one<R, S>(&world.columns, target, source)) { abort("relate: would close a cycle") } else { () } } else { () };
     // (A link to the same target keeps its place; it changes only where
     // its value is not the same.)
     let column = <S as Get<Relates<R>>>::column(&world.columns);
@@ -886,7 +931,7 @@ impl<R, S> PutsBy<R, S> for OneToOne where R: RelateBy<S>, S: Get<Relates<R>> {
     fn put_by(world: &mut World<S>, entity: Entity, relation: R, target: Entity) -> Option<Relates<R>> { put_one_way<R, S>(world, entity, relation, target) }
     fn linked_by(world: &World<S>, entity: Entity) -> Bool { <S as Get<Relates<R>>>::has(&world.columns, entity) }
 }
-impl<R, S> PutsBy<R, S> for ManyToMany where S: Get<Links<R>>, S: Get<Sources<R>>, R: Use<[0, *]> {
+impl<R, S> PutsBy<R, S> for ManyToMany where S: Get<Links<R>>, S: Get<Sources<R>>, R: Use<[0, *]>, R: Acyclic {
     fn linked_by(world: &World<S>, entity: Entity) -> Bool { len_at(&targets_in<R, S>(&world.columns, entity)) > 0 }
     fn put_by(world: &mut World<S>, entity: Entity, relation: R, target: Entity) -> Option<Relates<R>> {
         if(if(alive(&*world, entity)) { alive(&*world, target) } else { false }) {
@@ -1024,12 +1069,12 @@ impl<S> World<S> {
         unrelate<R, S>(world, source)
     }
     // Undo an entity's link to a target by a relation of any number each way.
-    // Relate by a relation of any number each way, `source` put at `position`
-    // among those that relate to `target` (upstream's `relate_at`).
+    // Relate, `source` put at `position` among those that relate to
+    // `target` (upstream's `relate_at`; past the end is at the end).
     pub fn relate_at<R>(world: &mut Self, source: Entity, relation: R, target: Entity, position: Int) -> Option<R>
-        where S: Get<Links<R>>, S: Get<Sources<R>>, R: Use<[0, *]> {
+        where R: RelateBy<S>, S: Get<Sources<R>> {
         if(if(alive(&*world, source)) { alive(&*world, target) } else { false }) {
-            let had = link<R, S>(world, source, relation, target);
+            let had = <R as RelateBy<S>>::relate_as(world, source, relation, target);
             move_source<R, S>(&mut world.columns, target, source, position);
             had
         } else { discard(relation); None }
