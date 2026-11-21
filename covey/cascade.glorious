@@ -1,0 +1,50 @@
+// `cascade_inside_a_system_propagates_every_frame` (upstream's
+// tests/relations.rs): a query led by a join, `(To<Attached, (&Global,)>,
+// (&Local, &mut Global))`, goes through its rows each after its parent,
+// so a row reads its parent's `Global` as already updated; children
+// spawned before their parents, and a leaf moved to another parent.
+// expect:
+// 111 11 1
+// 112 12 2
+// 102 12 2
+// 0
+mod ecs;
+
+use ecs::{App, World, Entity, Query, Relation, OneToMany, To};
+
+struct Update
+struct Local(Int)
+struct Global(Int)
+struct Attached
+impl Relation for Attached { type Kind = OneToMany; }
+impl Eq for Attached { fn ==(a: Attached, b: Attached) -> Bool { true } }
+impl Clone for Attached { fn clone(a: &Attached) -> Attached { Attached } }
+
+fn propagate(tree: &mut Query<(To<Attached, (&Global,)>, (&Local, &mut Global))>) {
+    tree.cascade() { (up, (local, mut global)) =>
+        global.0 = match(up) { Some((u,)) => u.0, None => 0 } + local.0;
+    }
+}
+
+fn global<S>(world: &World<S>, e: Entity) -> Int where S: ecs::Get<Global> { match(world.get<Global>(e)) { Some(g) => g.0, None => 0 - 1 } }
+
+fn main() -> Int {
+    let mut app = App::new().relation<Attached>().register<Local>().register<Global>().add_systems(Update, propagate).build();
+    // (Children spawned before their parents: plain iteration would see
+    // stale parents.)
+    let leaf = app.world.spawn_bundle((Local(100), Global(0)));
+    let mid = app.world.spawn_bundle((Local(10), Global(0)));
+    let root = app.world.spawn_bundle((Local(1), Global(0)));
+    discard(app.world.relate(leaf, Attached, mid));
+    discard(app.world.relate(mid, Attached, root));
+    app.emit(&Update);
+    say(show(global(&app.world, leaf)) ++ " " ++ show(global(&app.world, mid)) ++ " " ++ show(global(&app.world, root)));
+    discard(app.world.insert(root, Local(2)));
+    app.emit(&Update);
+    say(show(global(&app.world, leaf)) ++ " " ++ show(global(&app.world, mid)) ++ " " ++ show(global(&app.world, root)));
+    // (The leaf moved to the root.)
+    discard(app.world.relate(leaf, Attached, root));
+    app.emit(&Update);
+    say(show(global(&app.world, leaf)) ++ " " ++ show(global(&app.world, mid)) ++ " " ++ show(global(&app.world, root)));
+    0
+}

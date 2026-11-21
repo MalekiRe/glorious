@@ -5505,7 +5505,7 @@ gives the one it had of that target a new value), `unlink` undoes one,
 
 Not there against upstream: `To`/`From` through many-to-many links,
 fragmenting relations, `LINKED`, `ACYCLIC`,
-`ORDERED`, `cascade` (`Relinked` came later, covey/relinked). A query
+`ORDERED` (`Relinked` and `cascade` came later, covey/relinked, covey/cascade). A query
 through a link writes a component the row also has, `(&Fuel, To<DockedAt,
 &mut Fuel>)`, as upstream's `each` does (see "Queries lend their columns
 through pointers").
@@ -6314,6 +6314,17 @@ unsafe part in its items (`lent`, `lent_mut`) and nowhere else.
   `non_fragmenting_joins_follow_relations_by_cardinality`.
 - Refused otherwise: the message names the component
   (`AComponentWrittenIsUsedOnceUnlessFiltersKeepItApart`).
+- A system's parameters are each a group of what they touch (`Group<L>`):
+  two groups are apart where each of one's is apart from each of the
+  other's, a join's as what it joins (`CrossApart`, `Bare`), and a group's
+  own are apart as a query's items are. So a query reads its rows'
+  parents' `Global` while writing its own (covey/cascade), and another
+  parameter reading what a join writes is refused.
+- `Query::cascade` (upstream's): each row after its parent, for a query
+  whose store leads with a join's (`Cascading`); rows whose parent is not
+  a row first, the order fixed before `f` runs. covey/cascade ports
+  `cascade_inside_a_system_propagates_every_frame`. A cycle's rows come
+  last (covey has no `ACYCLIC`).
 
 Found on the way, in the checker: of several implementations for one type
 (`Either for (Yes, X)` and `(No, X)`), what one says of a type was taken

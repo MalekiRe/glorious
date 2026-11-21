@@ -1601,6 +1601,40 @@ impl<Q, N, St> Query<Q, N, St> {
         }
     }
 
+    // Each row, one at a time, each after its parent: the query leads with
+    // `To<R, P>`, so `P` reads the parent as already updated (transforms).
+    // Rows whose parent is not a row of the query come first; the order is
+    // fixed before `f` runs, so writes cannot reorder or repeat rows.
+    // (Upstream's `cascade`. A cycle's rows, which have no first, come
+    // last, in the query's order.)
+    pub fn cascade(query: &mut Self, f: for<'a> fn(Q::Got<'a>)) where Q: Item<Store = St>, St: Cascading {
+        let rows = copied(&query.entities);
+        let mut placed = std::vec::map(copied(&rows), fn(e: Entity) -> Bool { false });
+        let mut order = [];
+        let mut grew = true;
+        while({ grew }) {
+            grew = false;
+            let mut i = 0;
+            while({ i < len_at(&rows) }) {
+                if(placed[i]) { () } else {
+                    let ready = match(<St as Cascading>::parent_in(&query.store, rows[i])) {
+                        Some(parent) => row_placed(&rows, &placed, parent),
+                        None => true
+                    };
+                    if(ready) { placed[i] = true; order = push(order, rows[i]); grew = true } else { () }
+                };
+                i = i + 1
+            }
+        };
+        let mut k = 0;
+        while({ k < len_at(&rows) }) { if(placed[k]) { () } else { order = push(order, rows[k]) }; k = k + 1 };
+        let mut j = 0;
+        while({ j < len_at(&order) }) {
+            match(<Q as Item>::item_at(&mut query.store, order[j])) { Some(got) => f(got), None => () };
+            j = j + 1
+        }
+    }
+
     // What it asks for of one entity, if the query is of it.
     pub fn get_mut(query: &mut Self, entity: Entity) -> Option<Q::Got<'_>> where Q: Item<Store = St> {
         if(has_entity(&query.entities, entity)) { <Q as Item>::item_at(&mut query.store, entity) } else { None }
@@ -1629,6 +1663,23 @@ impl<Q, N, St> Query<Q, N, St> {
     }
 }
 
+// Whether a parent is placed: not a row, or a row placed already.
+fn row_placed(rows: &[Entity], placed: &[Bool], parent: Entity) -> Bool {
+    let mut i = 0;
+    let mut out = true;
+    while({ i < len_at(rows) }) { if(same_entity(rows[i], parent)) { out = placed[i] } else { () }; i = i + 1 };
+    out
+}
+// What a query led by a join, `(To<R, P>, ..)`, keeps: the entity a row's
+// join leads to.
+pub trait Cascading { fn parent_in(&Self, Entity) -> Option<Entity> }
+impl<R, Inner, Rest> Cascading for ((Ptr<Column<Relates<R>>>, Inner), Rest) {
+    fn parent_in(store: &((Ptr<Column<Relates<R>>>, Inner), Rest), entity: Entity) -> Option<Entity> {
+        let links: &Column<Relates<R>> = unsafe { lent(store.0.0) };
+        let at = slot_of(links, entity);
+        if(at >= 0) { Some(links.dense[at].target) } else { None }
+    }
+}
 fn has_entity(entities: &[Entity], entity: Entity) -> Bool {
     let mut i = 0;
     let mut found = false;
@@ -1826,6 +1877,9 @@ impl<A> Apart for (Read<A>, Writes<A>) where A: AComponentWrittenIsUsedOnceUnles
 impl<A> Apart for (Joined<Writes<A>>, Joined<Writes<A>>) where A: AComponentWrittenIsUsedOnceUnlessFiltersKeepItApart {}
 impl<A> Apart for (Joined<Writes<A>>, Joined<Read<A>>) where A: AComponentWrittenIsUsedOnceUnlessFiltersKeepItApart {}
 impl<A> Apart for (Joined<Read<A>>, Joined<Writes<A>>) where A: AComponentWrittenIsUsedOnceUnlessFiltersKeepItApart {}
+impl<A, N1, N2> Apart for (Joined<Filtered<Writes<A>, N1>>, Joined<Filtered<Writes<A>, N2>>) where A: AComponentWrittenIsUsedOnceUnlessFiltersKeepItApart {}
+impl<A, N1, N2> Apart for (Joined<Filtered<Writes<A>, N1>>, Joined<Filtered<Read<A>, N2>>) where A: AComponentWrittenIsUsedOnceUnlessFiltersKeepItApart {}
+impl<A, N1, N2> Apart for (Joined<Filtered<Read<A>, N1>>, Joined<Filtered<Writes<A>, N2>>) where A: AComponentWrittenIsUsedOnceUnlessFiltersKeepItApart {}
 impl<A, N1, N2> Apart for (Filtered<Writes<A>, N1>, Filtered<Writes<A>, N2>) where (A, N1, N2): KeptApart {}
 impl<A, N1, N2> Apart for (Filtered<Writes<A>, N1>, Filtered<Read<A>, N2>) where (A, N1, N2): KeptApart {}
 impl<A, N1, N2> Apart for (Filtered<Read<A>, N1>, Filtered<Writes<A>, N2>) where (A, N1, N2): KeptApart {}
@@ -1895,7 +1949,7 @@ impl<N> Under<N> for () { type Out = (); }
 impl<H, T, N> Under<N> for (H, T) where H: UnderOne<N>, T: Under<N> { type Out = (<H as UnderOne<N>>::Out, <T as Under<N>>::Out); }
 pub trait UnderOne<N> { type Out; }
 impl<K, N> UnderOne<N> for K { type Out = Filtered<K, N>; }
-impl<K, N> UnderOne<N> for Joined<K> { type Out = Filtered<K, ()>; }
+impl<K, N> UnderOne<N> for Joined<K> { type Out = Joined<Filtered<K, ()>>; }
 // One thing asked for, apart from each of a list; and a list each of whose
 // members is apart from those after it.
 pub trait ApartFrom<X> {}
@@ -1936,16 +1990,32 @@ impl<H, ..R> ItemTouches for (H, ..R) where H: ItemTouches, (..R): ItemTouches,
     type List = <<H as ItemTouches>::List as Concat<<(..R) as ItemTouches>::List>>::Out;
 }
 pub trait Touches { type List; }
-impl<A> Touches for Writes<A> { type List = (Filtered<Writes<A>, ()>, ()); }
-impl<A> Touches for Read<A> { type List = (Filtered<Read<A>, ()>, ()); }
-impl<X> Touches for Owned<X> { type List = (Owned<X>, ()); }
-impl<X> Touches for Shared<X> { type List = (Shared<X>, ()); }
-impl<X> Touches for Maybe<X> { type List = (Shared<X>, ()); }
-impl<X> Touches for MaybeOwned<X> { type List = (Owned<X>, ()); }
+// (Each parameter's touches are a group: two groups are apart where each of
+// one's is apart from each of the other's, a join's as any other's; a
+// group's own, as a query's items are.)
+pub struct Group<L>(L)
+impl<A> Touches for Writes<A> { type List = (Group<(Filtered<Writes<A>, ()>, ())>, ()); }
+impl<A> Touches for Read<A> { type List = (Group<(Filtered<Read<A>, ()>, ())>, ()); }
+impl<X> Touches for Owned<X> { type List = (Group<(Owned<X>, ())>, ()); }
+impl<X> Touches for Shared<X> { type List = (Group<(Shared<X>, ())>, ()); }
+impl<X> Touches for Maybe<X> { type List = (Group<(Shared<X>, ())>, ()); }
+impl<X> Touches for MaybeOwned<X> { type List = (Group<(Owned<X>, ())>, ()); }
 impl Touches for Asking { type List = (); }
 impl<T> Touches for Localing<T> { type List = (); }
-impl<Q, N, St> Touches for Querying<Q, N, St> where Q: ItemTouches, <Q as ItemTouches>::List: Under<N> { type List = <<Q as ItemTouches>::List as Under<N>>::Out; }
-impl<Q, N, St> Touches for Singling<Q, N, St> where Q: ItemTouches, <Q as ItemTouches>::List: Under<N> { type List = <<Q as ItemTouches>::List as Under<N>>::Out; }
+impl<Q, N, St> Touches for Querying<Q, N, St> where Q: ItemTouches, <Q as ItemTouches>::List: Under<N> { type List = (Group<<<Q as ItemTouches>::List as Under<N>>::Out>, ()); }
+impl<Q, N, St> Touches for Singling<Q, N, St> where Q: ItemTouches, <Q as ItemTouches>::List: Under<N> { type List = (Group<<<Q as ItemTouches>::List as Under<N>>::Out>, ()); }
+impl<L1, L2> Apart for (Group<L1>, Group<L2>) where L1: CrossApart<L2> {}
+impl<L, Rest> AllApart for (Group<L>, Rest) where L: AllApart, Rest: ApartFrom<Group<L>>, Rest: AllApart {}
+// Each of one list apart from each of another, a join's as what it joins.
+pub trait CrossApart<L> {}
+impl<L> CrossApart<L> for () {}
+impl<H, T, L> CrossApart<L> for (H, T) where H: Bare, L: CrossFrom<<H as Bare>::Out>, T: CrossApart<L> {}
+pub trait CrossFrom<X> {}
+impl<X> CrossFrom<X> for () {}
+impl<X, F, R> CrossFrom<X> for (F, R) where F: Bare, (X, <F as Bare>::Out): Apart, R: CrossFrom<X> {}
+pub trait Bare { type Out; }
+impl<K> Bare for K { type Out = K; }
+impl<K> Bare for Joined<K> { type Out = K; }
 pub trait AllTouches { type List; }
 impl AllTouches for () { type List = (); }
 impl<H, R> AllTouches for (H, R) where H: Touches, R: AllTouches,
