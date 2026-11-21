@@ -6236,6 +6236,38 @@ for the implementations whose conditions ask of a shorter list (the `(H,
 pairs (`(H, R)`, as `AllTouches` is), which are never written out, with
 one bridge from the flat tuple through `std::tuple::Tuple`.
 
+## Variadic implementations checked once
+
+**Decision: a variadic implementation whose lists are only ever the rest of
+a tuple, `(H, ..R)` and `(..R)`, is one implementation for every length:
+`R` is a type parameter that stands for a tuple, `(H, ..R)` the type
+`%Cons<H, R>` (`Syntax.consHead`), and `(..R)` is `R`.** It is parsed,
+declared and checked once (`Syntax.expandPacks.consOnly` writes it so on
+tokens), and its dictionaries are made of each other one level at a time,
+as any implementation's conditions are: `Item` at `(A, B, C)` is the one
+for `%Cons` with `H = A` and `R = (B, C)`, whose condition `(..R): Item` is
+met by it again, down to the one for `()`.
+
+- **Types.** `%Cons<H, R>` with `R` a tuple is that tuple with `H` first
+  (`find`, `resolveType`); it unifies with a tuple of one or more, `H` with
+  the first and `R` with the tuple of the rest (`unify`, `apart`).
+- **Finding implementations.** A tuple of one or more that has no
+  implementation of the trait for its length has the trait's one for
+  `%Cons`, its first and the rest its arguments (`Traits.consView`; in the
+  checker `headFor`). The proved solver says so (`Entails.cons`), and a
+  bound is still met in at most one way (`coherent`) where no trait has
+  one for `%Cons` beside one for a tuple of one or more
+  (`NoConsOverlap`, checked by `noConsOverlap`; an implementation for every
+  type leaves those tuples to the one for `%Cons`, `expandBlankets`).
+- **What is still written out per length**, up to the longest list, as
+  before: an implementation that spreads a list anywhere else, a list of
+  values (`let (..t) = bundle`, `(h, ..r)`, `(..f(t))`), a list in a
+  callable's arguments (`Fn<(..P)>`, `(*f)(..p)`), a list's elements
+  (`..R::Got<'a>`, `(..Option<T>)`), a condition for each element (`..S:
+  Get<T>`), or a list not last (`(..G, X)`). Those need code for each
+  length; the step after is the specializer writing them out at the lengths
+  the program's uses have.
+
 ## A graph's nodes on threads of their own: where it is
 
 Upstream's executor runs a graph's nodes at once where it can: a node's

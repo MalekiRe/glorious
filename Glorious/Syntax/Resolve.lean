@@ -833,6 +833,8 @@ def expandBlankets (items : List FItem) : List FItem := Id.run do
         let mineToo := givers.any (· != b)
         if !mineToo && known.contains (traitBase tr, h, mine) then continue
         if denied.contains (last (traitBase tr), last h) then continue
+        -- (A tuple of one or more has the one for its first and the rest.)
+        if h.startsWith "(tuple" && h != "(tuple0)" && has.contains (traitBase tr, consHead) then continue
         unless asked.all (fun c => has.contains (c, h)) do continue
         let ctx' := ctx.zipIdx.map fun ((p, c), k) => if p == t then (s!"%subject{k}", c) else (p, c)
         let subjects := (ctx.zipIdx.filter fun ((p, _), _) => p == t).map fun (_, k) =>

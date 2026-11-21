@@ -29,6 +29,11 @@ partial def apart (a b : Ty) : M Bool := do
   | .con n as, .con m bs =>
     if n != m || as.length != bs.length then pure true else anyApart as bs
   | .tuple as, .tuple bs => if as.length != bs.length then pure true else anyApart as bs
+  | .con n [h, r], .tuple bs | .tuple bs, .con n [h, r] =>
+    if n != Traits.consHead then pure true
+    else match bs with
+      | [] => pure true
+      | x :: xs => do pure ((← apart h x) || (← apart r (.tuple xs)))
   | .fn ps r _ _ _, .fn qs s _ _ _ =>
     if ps.length != qs.length then pure true else anyApart (r :: ps) (s :: qs)
   | .ref _ x _, .ref _ y _ => apart x y
@@ -81,6 +86,11 @@ partial def unify (a b : Ty) : M Unit := do
   | .con n as, .con m bs =>
     if n == m && as.length == bs.length then unifyAll as bs else mismatch a b
   | .tuple as, .tuple bs => if as.length == bs.length then unifyAll as bs else mismatch a b
+  -- (A tuple's first and the rest, `(H, ..R)`, and a tuple of one or more.)
+  | .con n [h, r], .tuple (x :: xs) =>
+    if n == Traits.consHead then do unify h x; unify r (.tuple xs) else mismatch a b
+  | .tuple (x :: xs), .con n [h, r] =>
+    if n == Traits.consHead then do unify x h; unify (.tuple xs) r else mismatch a b
   | .fn ps r e1 t1 c1, .fn qs s e2 t2 c2 =>
     if ps.length == qs.length then do
       unifyAll ps qs

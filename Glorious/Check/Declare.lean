@@ -152,6 +152,12 @@ partial def resolveType (params : List (String × Ty)) (decl : Bool) : TypeExpr 
         | none => throw "`for<..>` is written before the type of a callable"
       else if x == "Int" then
         if args.isEmpty then pure .int else throw "`Int` takes no arguments"
+      else if x == Syntax.consHead then
+        -- (A tuple's first and the rest, `(H, ..R)`; a tuple once the rest is.)
+        match ← args.mapM (resolveType params decl) with
+        | [first, .tuple rest] => pure (.tuple (first :: rest))
+        | [first, rest] => pure (.con x [first, rest])
+        | _ => throw "a tuple's rest is written last: `(H, ..R)`"
       else if Syntax.isScalar x then
         if args.isEmpty then pure (.con x []) else throw s!"`{x}` takes no arguments"
       else
@@ -521,6 +527,7 @@ def declareTraits (items : List Item) : M Unit := do
         | none => throw s!"{what}: unknown trait `{base}`"
       let arity ← if head == "Int" || Syntax.isScalar head then pure 0
         else if head.startsWith "(tuple" then pure args.length
+        else if head == Syntax.consHead then pure 2
         -- (A function's, with what it gives after what it is given; a
         -- reference's, with what it is to.)
         else if head.startsWith "(fn" then pure args.length
@@ -803,6 +810,11 @@ def declareTraits (items : List Item) : M Unit := do
   -- What `Traits.coherent` asks of the implementations.
   unless Traits.noOverlap (← get).kimpls.impls.toList do
     throw "two implementations are for the same trait and type"
+  unless Traits.noConsOverlap (← get).kimpls.impls.toList do
+    let impls := (← get).kimpls.impls.toList
+    let tr := ((impls.find? fun J => J.head == Traits.consHead
+      && impls.any fun I => I.trait == J.trait && Traits.isConsable I).map (·.trait)).getD ""
+    throw s!"`{bareName tr}` is implemented for `(H, ..R)` and for a tuple of a length: a tuple of one or more has one implementation"
   -- A type that has a trait has the traits that one needs, on no more
   -- conditions than it has the first.
   let kimpls := (← get).kimpls

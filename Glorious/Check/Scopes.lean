@@ -372,7 +372,7 @@ the type's implementation gives the trait arguments made of its own type
 parameters (`impl<T> From<T> for Wrap<T>`), the arguments asked are made
 those, and the name is that implementation's. -/
 def implKey (trait : String) (self : Ty) (args : List Ty) : M String := do
-  let head := (← find self).head
+  let head ← headFor trait (← find self)
   if let some (h, hargs) := head then
     let family := (← implsOfHead trait h).filter fun im => im.targs.length == args.length
     -- The implementation to make the arguments fit, and its name.
@@ -457,7 +457,7 @@ def assocAt (tr : String) (subject : Ty) (name : String) : M (Option Ty) := do
   let (self, args) ← subjectOf tr subject
   let known ← match ← find self with
     | .con n hargs => pure (if n.startsWith "'" then none else some (n, hargs))
-    | other => pure other.head
+    | other => headFor tr other
   let some (head, hargs) := known | return none
   let key ← try implKey tr self args catch _ => return none
   let some im := (← implsOfHead (Syntax.traitBase key) head).find? fun im => im.trait == key | return none
@@ -487,7 +487,7 @@ def settleAssocs : M Unit := do
     let (self, args) ← subjectOf tr subject
     let known ← match ← find self with
       | .con n hargs => pure (if n.startsWith "'" then none else some (n, hargs))
-      | other => pure other.head
+      | other => headFor tr other
     let ground ← args.allM fun x => do pure (freeTys (← zonk x)).isEmpty
     let ground := ground || (← hasGenericImpl tr self)
     match known, ground with

@@ -136,10 +136,10 @@ partial def leaves (pos trait : String) (t : Ty) : M (List (String × Nat × Ty)
       throw s!"{pos}`{showTy (← zonk t)}` does not implement `{trait}`"
     -- (Its head's: a name, a tuple, a callable, a reference; of how a
     -- value is destroyed, one for every callable and every reference.)
-    let head := match t with
-      | .fn .. => if trait == Syntax.destroyTrait then some ("(callable)", []) else t.head
-      | .ref .. => if trait == Syntax.destroyTrait then some ("(reference)", []) else t.head
-      | t => t.head
+    let head ← match t with
+      | .fn .. => pure (if trait == Syntax.destroyTrait then some ("(callable)", []) else t.head)
+      | .ref .. => pure (if trait == Syntax.destroyTrait then some ("(reference)", []) else t.head)
+      | t => headFor trait t
     match head with
     | some (n, args) =>
       match (← get).kimpls.find trait n args.length with
@@ -253,7 +253,7 @@ partial def needsDestroying (seen : List String) (t : Ty) : M Bool := do
 /-- The name of the implementation a condition of another comes down to: the
 trait itself, or the one chosen by fitting where there is a choice. -/
 def subKey (trait : String) (ty : Ty) (args : List Ty) : M String := do
-  let several ← severalFor trait ((← find ty).head.map (·.1))
+  let several ← severalFor trait ((← headFor trait (← find ty)).map (·.1))
   if args.isEmpty && !several then pure trait else implKey trait ty args
 
 /-- A condition's type and the trait's arguments with what traits leave to
@@ -363,7 +363,7 @@ partial def solveFittingNow (givens : Traits.Givens) (fuel : Nat) (key : String)
   -- functions is for: what is written of `Self` there performs nothing.)
   if let .fn _ _ effs tail _ := ty then
     try unifyRow ⟨effs, tail⟩ ⟨[], none⟩ catch _ => return none
-  let some (h, hargs) := ty.head | return none
+  let some (h, hargs) ← headFor key ty | return none
   let some (i, _) := (← get).kimpls.find key h hargs.length | return none
   let some im := (← get).impls[i]? | return none
   let some at_ ← fitHead im hargs args | return none
@@ -450,7 +450,7 @@ partial def leavesFittingNow (pos key : String) (t : Ty) (args : List Ty) (owner
   if let .fn _ _ effs tail _ := t then
     try unifyRow ⟨effs, tail⟩ ⟨[], none⟩
     catch _ => throw s!"{pos}`{showTy (← zonk t)}` performs effects, and `{Syntax.traitShown key}` is implemented for functions that perform none"
-  let some (h, hargs) := t.head | missing
+  let some (h, hargs) ← headFor key t | missing
   let some (i, _) := (← get).kimpls.find key h hargs.length | missing
   let some im := (← get).impls[i]? | missing
   let some at_ ← fitHead im hargs args | missing
@@ -490,7 +490,7 @@ implementations for that type's head. (One whose name says the trait's
 arguments, `Get<Value>`, and that does not have them apart, is found by its
 name.) -/
 def rekey (b : Bound) : M Bound := do
-  let several ← severalFor (Syntax.traitBase b.trait) ((← find b.ty).head.map (·.1))
+  let several ← severalFor (Syntax.traitBase b.trait) ((← headFor b.trait (← find b.ty)).map (·.1))
   if (← get).patterned && several && !b.trait.any (· == '#')
       && (!b.args.isEmpty || b.trait == Syntax.traitBase b.trait) then
     pure { b with trait := ← implKey (Syntax.traitBase b.trait) b.ty b.args }
@@ -685,10 +685,10 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
         if let .var _ ← find (← subjectOf b.trait b.ty).1 then undecided := at_ :: undecided
       let goal ← zonk b.ty
       let fitting := (← get).patterned
-      let named := match goal with
-        | .con h args => some (h, args)
-        | .tuple parts => some (s!"(tuple{parts.length})", parts)
-        | _ => if fitting then goal.head else none
+      let named ← match goal with
+        | .con h args => pure (some (h, args))
+        | .tuple _ => headFor b.trait goal
+        | _ => pure (if fitting then goal.head else none)
       if let some (h, args) := named then
         -- (Where the type has several implementations of the trait, the one
         -- chosen makes the arguments fit when it is chosen.)
@@ -735,7 +735,7 @@ def settleBounds (decls : List FnDecl) (defs : List (String × Ty)) : M Unit := 
     -- (Where a type has several implementations of the trait, which one
     -- is chosen by fitting, arguments or none.)
     let several ← do
-      pure ((← get).patterned && (← severalFor b.trait ((← find self).head.map (·.1))))
+      pure ((← get).patterned && (← severalFor b.trait ((← headFor b.trait (← find self)).map (·.1))))
     if args.isEmpty && !several then split := split.push b
     else
       let key ← try implKey b.trait self args

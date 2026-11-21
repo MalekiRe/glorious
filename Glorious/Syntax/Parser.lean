@@ -1282,6 +1282,13 @@ def expandPacks (toks : Array Token) (most : Nat) : Array Token := Id.run do
         | _ => pure ()
         e := e + 1
       let body := toks.extract i e
+      -- One whose lists are only the rest of a tuple, `(H, ..R)` or
+      -- `(..R)`, is one implementation for every length: the rest is a type
+      -- parameter of its own (`Traits.consHead`).
+      if let some once := consOnly body (j - i) packs then
+        out := out ++ once
+        i := e
+        continue
       -- Lists named together after one `..` are as long as each other.
       let together := linked body packs
       let leaders := packs.filter fun p => (together.lookup p).getD p == p
@@ -1308,6 +1315,97 @@ def expandPacks (toks : Array Token) (most : Nat) : Array Token := Id.run do
       i := i + 1
   return out
 where
+  /-- An implementation (`body`, its parameters ending before `params`)
+  whose every list `..R` is the last of a tuple of types, written with
+  each such tuple as its first parts and the rest: `(H, ..R)` as
+  `%Cons<H, R>`, `(..R)` as `R`, and `..R` among its parameters as `R`.
+  None if a list is spread anywhere else. -/
+  consOnly (body : Array Token) (params : Nat) (packs : List String) : Option (Array Token) := Id.run do
+    let tok := fun (i : Nat) => (body[i]?.map (·.tok)).getD .eof
+    let keywords := ["for", "as", "return", "in", "else", "where", "let", "mut"]
+    -- (Every `..` after the parameters: a list's name and then `)`, in
+    -- brackets that are a tuple's, not a call's.)
+    -- (Among the parameters, `..` only declares one: `<..T` or `, ..T`.)
+    for k in [0:params] do
+      if tok k == .punct "." && tok (k + 1) == .punct "." && k > 0 then
+        unless tok (k - 1) == .op "<" || tok (k - 1) == .punct "," do return none
+    let mut opens : List Nat := []
+    for k in [params:body.size] do
+      match tok k with
+      | .punct "(" => opens := k :: opens
+      | .punct ")" => opens := opens.drop 1
+      | _ => pure ()
+      if tok k == .punct "." && tok (k + 1) == .punct "." then
+        if tok (k + 2) == .punct "." || (k > 0 && tok (k - 1) == .punct ".") then continue
+        let named := match tok (k + 2) with
+          | .ident x => packs.contains x
+          | _ => false
+        unless named && tok (k + 3) == .punct ")" do return none
+        let some o := opens.head? | return none
+        let callLike := match (if o == 0 then none else some (tok (o - 1))) with
+          | some (.ident w) => !keywords.contains w
+          | some (.punct ")") => true
+          | some (.punct "]") => true
+          | some (.op ">") => true
+          | _ => false
+        if callLike then return none
+        -- (A callable's arguments, `Fn<(..P)>`, are a list of their own.)
+        if o ≥ 2 && tok (o - 1) == .op "<" then
+          if let .ident w := tok (o - 2) then
+            if ["Fn", "RunsIn", "FnMut", "FnOnce"].contains (Syntax.lastSegment w) then return none
+    -- The parameters, without `..`.
+    let mut out : Array Token := #[]
+    let mut k := 0
+    while k < params do
+      if tok k == .punct "." && tok (k + 1) == .punct "." then k := k + 2
+      else
+        out := out.push body[k]!
+        k := k + 1
+    pure (some (out ++ rewrite (body.extract params body.size)))
+  /-- Each tuple whose last part is `..R` as its first parts and `R`. -/
+  rewrite (ts : Array Token) : Array Token := Id.run do
+    let tok := fun (i : Nat) => (ts[i]?.map (·.tok)).getD .eof
+    let mut out : Array Token := #[]
+    -- (Where each open bracket began in `out`.)
+    let mut opens : List Nat := []
+    for t in ts do
+      match t.tok with
+      | .punct "(" =>
+        opens := out.size :: opens
+        out := out.push t
+      | .punct ")" =>
+        let start := (opens.head?).getD 0
+        opens := opens.drop 1
+        let inner := out.extract (start + 1) out.size
+        let n := inner.size
+        let last := fun (i : Nat) => (inner[n - i]?.map (·.tok)).getD .eof
+        if n ≥ 3 && last 3 == .punct "." && last 2 == .punct "." && (match last 1 with | .ident _ => true | _ => false) then
+          let at_ := out[start]!
+          let mk := fun (tk : Tok) => ({ at_ with tok := tk } : Token)
+          let rest := inner[n - 1]!
+          -- The parts before, at the top level of the brackets.
+          let mut parts : Array (Array Token) := #[]
+          let mut cur : Array Token := #[]
+          let mut depth : Int := 0
+          for x in inner.extract 0 (n - 3) do
+            match x.tok with
+            | .punct "(" | .punct "[" | .punct "{" | .op "<" => depth := depth + 1
+            | .punct ")" | .punct "]" | .punct "}" | .op ">" => depth := depth - 1
+            | .op ">>" => depth := depth - 2
+            | _ => pure ()
+            if depth == 0 && x.tok == .punct "," then
+              parts := parts.push cur
+              cur := #[]
+            else cur := cur.push x
+          if !cur.isEmpty then parts := parts.push cur
+          let mut made : Array Token := #[rest]
+          for p in parts.reverse do
+            made := #[mk (.ident Syntax.consHead), mk (.op "<")] ++ p ++ #[mk (.punct ",")] ++ made ++ #[mk (.op ">")]
+          out := out.extract 0 start ++ made
+        else out := out.push t
+      | _ => out := out.push t
+    let _ := tok
+    return out
   /-- For each list of types, the first of those it is named together with
   after one `..` (`..P: Parameter<Asks = A>`), itself if none. -/
   linked (body : Array Token) (packs : List String) : List (String × String) := Id.run do

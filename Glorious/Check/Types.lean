@@ -1097,6 +1097,13 @@ partial def find (t : Ty) : M Ty := do
     match (← get).tys.get? id with
     | some (some t') => find t'
     | _ => pure t
+  -- (A tuple's first and a rest that is known: the tuple.)
+  | .con n [first, rest] =>
+    if n == Traits.consHead then
+      match ← find rest with
+      | .tuple more => pure (.tuple (first :: more))
+      | _ => pure t
+    else pure t
   | _ => pure t
 
 /-- Expand a row's tail as far as it is known. -/
@@ -1131,6 +1138,21 @@ def Ty.head : Ty → Option (String × List Ty)
   | .ref (.con "&mut" []) t _ => some ("(&mut)", [t])
   | .ref _ t _ => some ("(&)", [t])
   | .var _ => none
+
+/-- The head a type has as the implementations of a trait are for, and its
+arguments: `Ty.head`, but a tuple of one or more that has none of the
+trait for its length is its first and the tuple of the rest
+(`Traits.consHead`), where the trait has one for `(H, ..R)`. -/
+def headFor (trait : String) (t : Ty) : M (Option (String × List Ty)) := do
+  match t with
+  | .tuple (first :: rest) =>
+    let base := Syntax.traitBase trait
+    let s ← get
+    if (s.implsByHead.getD (base, s!"(tuple{rest.length + 1})") #[]).isEmpty
+        && !(s.implsByHead.getD (base, Traits.consHead) #[]).isEmpty then
+      pure (some (Traits.consHead, [first, .tuple rest]))
+    else pure t.head
+  | _ => pure t.head
 
 mutual
 

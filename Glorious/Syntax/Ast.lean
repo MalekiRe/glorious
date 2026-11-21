@@ -452,6 +452,10 @@ def blanketName (param : String) : String := s!"%blanket:{param}"
 copies written out for each length of a list of types (`expandPacks`). -/
 def packCopyName : String := "%pack"
 
+/-- The type a tuple of one or more is as its first and the tuple of the
+rest, `(H, ..R)` (`Traits.consHead`, the same name). -/
+def consHead : String := "%Cons"
+
 /-- The type parameter a name made by `blanketName` is for. -/
 def blanketParam (name : String) : Option String :=
   if name.startsWith "%blanket:" then some (name.drop 9).toString else none
