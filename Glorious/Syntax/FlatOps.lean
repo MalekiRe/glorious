@@ -56,7 +56,7 @@ end
 /-- The names free in clauses. -/
 def fvClauses (b : Body) (cs : Array ClauseId) : List String := cs.toList.flatMap (b.fvClause [])
 
-/-- The expressions one level down, blocks' too (`Expr.children`). -/
+/-- The expressions one level down, blocks' too. -/
 def children (b : Body) (e : ExprId) : List ExprId :=
   (b.direct e).toList ++ match b.expr e with
     | .closure _ cs | .handle _ cs => cs.toList.flatMap fun c => (b.clause c).body.toList.flatMap fun s => (b.stmtExprs s).toList
@@ -64,7 +64,7 @@ def children (b : Body) (e : ExprId) : List ExprId :=
     | _ => []
 
 /-- The names an expression hands on with `move name`, wherever in it
-(`Elab.movedExpr`). -/
+. -/
 partial def movedExpr (b : Body) (e : ExprId) : List String :=
   let here := match b.expr e with
     | .call _ f #[a] =>
@@ -78,7 +78,52 @@ partial def movedExpr (b : Body) (e : ExprId) : List String :=
 
 def movedStmt (b : Body) (s : StmtId) : List String := (b.stmtExprs s).toList.flatMap b.movedExpr
 
-/-- Where a body starts (`Elab.firstPlace`). -/
+mutual
+
+/-- A hash of an expression as it is written, whatever places its nodes are
+at: two written alike hash alike. -/
+partial def hashExpr (b : Body) (e : ExprId) : UInt64 :=
+  let many := fun (tag : UInt64) (es : Array ExprId) => es.foldl (fun h e => mixHash h (b.hashExpr e)) tag
+  match b.expr e with
+  | .int n => mixHash 1 (hash n)
+  | .name q x => mixHash 2 (hash (q, x))
+  | .label x => mixHash 3 (hash x)
+  | .call id f args => many (mixHash 4 (mixHash (hash id) (b.hashExpr f))) args
+  | .tailCall id f args => many (mixHash 5 (mixHash (hash id) (b.hashExpr f))) args
+  | .tuple args => many 6 args
+  | .proj x i => mixHash 7 (mixHash (hash i) (b.hashExpr x))
+  | .closure id cs => b.hashClosure id cs
+  | .handle s cs => cs.foldl (fun h c => mixHash h (b.hashClause c)) (mixHash 9 (b.hashExpr s))
+  | .labelScope l body => mixHash (mixHash 10 (hash l)) (b.hashStmts body.toList)
+  | .ref u x => mixHash 11 (hash (u, x))
+  | .deref x => mixHash 12 (b.hashExpr x)
+  | .reborrow u x => mixHash 13 (mixHash (hash u) (b.hashExpr x))
+  | .refField id u x path star => mixHash 14 (hash (id, u, x, path, star))
+  | .fieldOf id x n => mixHash 15 (mixHash (hash (id, n)) (b.hashExpr x))
+
+/-- A callable written with these clauses. -/
+partial def hashClosure (b : Body) (id : Nat) (cs : Array ClauseId) : UInt64 :=
+  cs.foldl (fun h c => mixHash h (b.hashClause c)) (mixHash 8 (hash id))
+
+partial def hashClause (b : Body) (c : ClauseId) : UInt64 :=
+  let ⟨pats, body⟩ := b.clause c
+  mixHash (hash pats) (b.hashStmts body.toList)
+
+partial def hashStmt (b : Body) (s : StmtId) : UInt64 :=
+  match b.stmt s with
+  | .let_ p v => mixHash 21 (mixHash (hash p) (b.hashExpr v))
+  | .expr v => mixHash 22 (b.hashExpr v)
+  | .defer v => mixHash 23 (b.hashExpr v)
+  | .letMut x v => mixHash 24 (mixHash (hash x) (b.hashExpr v))
+  | .assign t v => mixHash 25 (mixHash (b.hashExpr t) (b.hashExpr v))
+  | .located l c inner => mixHash 26 (mixHash (hash (l, c)) (b.hashStmt inner))
+
+partial def hashStmts (b : Body) (ss : List StmtId) : UInt64 :=
+  ss.foldl (fun h s => mixHash h (b.hashStmt s)) 20
+
+end
+
+/-- Where a body starts. -/
 def firstPlace (b : Body) (body : List StmtId) : Nat × Nat :=
   match body with
   | s :: _ =>
@@ -87,14 +132,15 @@ def firstPlace (b : Body) (body : List StmtId) : Nat × Nat :=
     | _ => (0, 0)
   | [] => (0, 0)
 
-/-- The place a clause's names are known by (`Elab.clausePlace`): its first
-statement's, or the hash of its body as a tree. -/
+/-- The place a clause's names and `_` are known by, for what destroys them:
+its first statement's, or, where that has none, the clause's body as written
+(its hash), so that two such clauses of one function are not taken for one. -/
 def clausePlace (b : Body) (body : List StmtId) : Nat × Nat :=
   match b.firstPlace body with
-  | (0, 0) => ((hash (body.map (treeStmt b))).toNat, 0)
+  | (0, 0) => ((b.hashStmts body).toNat, 0)
   | place => place
 
-/-- A block written in braces, without parameters (`Elab.plainBlock`). -/
+/-- A block written in braces, without parameters. -/
 def plainBlock (b : Body) (e : ExprId) : Option (Nat × Array StmtId) :=
   match b.expr e with
   | .closure id #[c] =>
@@ -102,8 +148,8 @@ def plainBlock (b : Body) (e : ExprId) : Option (Nat × Array StmtId) :=
     if id == 0 || !pats.isEmpty then none else some (id, body)
   | _ => none
 
-/-- Does a body end with a value that can be given to a coercion
-(`(Elab.wrapResult fn body).isSome`)? -/
+/-- Does a body end with a value that can be given to a coercion: not a
+statement, nor a `tail` call, which must stay the last thing done? -/
 partial def wrapsResult (b : Body) : List StmtId → Bool
   | [] => false
   | [s] =>
@@ -185,7 +231,7 @@ def nameUseClauses (b : Body) (x : String) (cs : Array ClauseId) : NameUse :=
 mutual
 
 /-- Is the name borrowed once its value has been used
-(`Syntax.borrowAfterValue`)? -/
+? -/
 partial def borrowAfterValue (b : Body) (x : String) (seen : Bool) (e : ExprId) : Bool × Bool :=
   match b.expr e with
   | .name none y => (seen || y == x, false)
@@ -242,8 +288,7 @@ end
 
 mutual
 
-/-- The cleanups written in an expression, at any depth (what
-`Syntax.splitDefersM` takes out). -/
+/-- The cleanups written in an expression, at any depth. -/
 partial def defersExpr (b : Body) (e : ExprId) : List StmtId :=
   match b.expr e with
   | .closure _ cs => cs.toList.flatMap fun c => b.defersStmts (b.clause c).body.toList
@@ -260,7 +305,7 @@ partial def defersStmts (b : Body) (body : List StmtId) : List StmtId :=
 end
 
 /-- Is the value a name holds used as it is, with no borrow of the name and
-nothing written to it after (`Syntax.givenAway`)? -/
+nothing written to it after? -/
 def givenAway (b : Body) (x : String) (rest : List StmtId) : Bool :=
   let cleanups := b.defersStmts rest
   let late := cleanups.any fun d =>
@@ -274,7 +319,7 @@ def givenAway (b : Body) (x : String) (rest : List StmtId) : Bool :=
     (seen', bad || bad')) (false, false)
   !u.rebound && (u.valued || u.valuedInside) && !bad
 
-/-- Is a name used other than by reading a part of it (`Syntax.usedWhole`)? -/
+/-- Is a name used other than by reading a part of it? -/
 partial def usedWhole (b : Body) (x : String) (e : ExprId) : Bool :=
   match b.expr e with
   | .name none y | .ref _ y | .refField _ _ y _ _ => y == x
@@ -286,7 +331,7 @@ partial def usedWhole (b : Body) (x : String) (e : ExprId) : Bool :=
 
 def usedWholeStmt (b : Body) (x : String) (s : StmtId) : Bool := (b.stmtExprs s).any (b.usedWhole x)
 
-/-- The identities of an expression's calls (`Syntax.callIdsExpr`). -/
+/-- The identities of an expression's calls. -/
 partial def callIdsExpr (b : Body) (acc : List Nat) (e : ExprId) : List Nat :=
   match b.expr e with
   | .call id f args | .tailCall id f args => (#[f] ++ args).foldl (b.callIdsExpr) (id :: acc)
@@ -296,7 +341,7 @@ partial def callIdsExpr (b : Body) (acc : List Nat) (e : ExprId) : List Nat :=
 def callIdsClauses (b : Body) (cs : Array ClauseId) : List Nat :=
   cs.foldl (fun acc c => (b.clause c).body.foldl (fun acc s => (b.stmtExprs s).foldl b.callIdsExpr acc) acc) []
 
-/-- The part of a name an expression reads (`Syntax.partRead`). -/
+/-- The part of a name an expression reads. -/
 def partRead (b : Body) (x : String) (e : ExprId) : Option String :=
   match b.expr e with
   | .fieldOf _ e' f => if b.bare? e' == some x then some f else none
@@ -423,7 +468,7 @@ def FRewrite.stmts (r : FRewrite) (b : Body) (ss : List StmtId) : Body × List S
   (b, out)
 
 /-- What follows a variable with each read of a part of it left out
-(`Syntax.lessPartsStmts`). -/
+. -/
 def lessPartsStmts (b : Body) (x : String) (ss : List StmtId) : Body × List StmtId :=
   let r : FRewrite :=
     { onExpr := fun _ b e => match b.expr e with
@@ -440,7 +485,7 @@ def lessPartsStmts (b : Body) (x : String) (ss : List StmtId) : Body × List Stm
   r.stmts b ss
 
 /-- What follows a name with every read of a part of it but one left out
-(`Syntax.onlyPartStmts`). -/
+. -/
 def onlyPartStmts (b : Body) (x part : String) (ss : List StmtId) : Body × List StmtId :=
   let r : FRewrite :=
     { onExpr := fun _ b e => (b.partRead x e).map fun p => pushExpr (if p == part then .name none x else .int 0) }
@@ -526,11 +571,6 @@ def mapTypesOf (f : TypeExpr → Except String TypeExpr) (b : Body) (e : ExprId)
   if places.isEmpty then return (b, e)
   let (e, b) := ((← mapTypes.typesRewrite f b places).ex e).run b
   pure (b, e)
-
-/-- A body with each of its own clauses made by `f`, as trees (what the
-front end has not yet written flat). -/
-def Body.mapClauseTrees (f : Clause → Clause) (b : Body) : Body :=
-  ofClauses (toClauses b |>.map f)
 
 mutual
 

@@ -1993,7 +1993,7 @@ partial def inferCallable (scope : Scope) (annots : List (Option Ty)) (ret : Opt
   -- A value it captures is the callable's: if the callable is let go without
   -- being called, it destroys the value. The elaborator asks how, by the
   -- callable as written and the name.
-  let written := hash (Expr.closure id (clauses.toList.map (Flat.treeClause b)))
+  let written := b.hashClosure id clauses
   for x in free do
     let held := match scope.lookup x with
       | some (.val tx _) => some tx
@@ -2048,9 +2048,8 @@ partial def inferCallable (scope : Scope) (annots : List (Option Ty)) (ret : Opt
         let cs := Elab.firstOf (← get).coercions.toList
         if cs.isEmpty then checkUses (← get).body here scope binds body
         else
-          let tree := Clause.mk pats (body.map (Flat.treeStmt (← get).body))
-          let coerced := Flat.ofClauses [Elab.coerceClause cs ((site j).bind (cs[·]?)) tree]
-          checkUses coerced here scope binds (coerced.roots.toList.flatMap fun c => (coerced.clause c).body.toList)
+          let (c, coerced) := (Elab.coerceClause cs ((site j).bind (cs[·]?)) clauses[j]!).run (← get).body
+          checkUses coerced here scope binds (coerced.clause c).body.toList
         pure none : M (Option String))
   -- As with arguments: a clause whose result does not fit is looked at first
   -- on a second attempt, so that the others can be converted to what it gives.

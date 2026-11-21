@@ -930,19 +930,6 @@ def Expr.bodies : Expr → List (List Pattern × List Stmt)
 def Expr.children (e : Expr) : List Expr :=
   e.direct ++ e.bodies.flatMap fun (_, body) => body.flatMap Stmt.exprs
 
-/-- The identities of an expression's calls. -/
-partial def callIdsExpr (acc : List Nat) : Expr → List Nat
-  | .call id f args | .tailCall id f args => (f :: args).foldl callIdsExpr (id :: acc)
-  | e => e.children.foldl callIdsExpr acc
-
-partial def callIdsItem (acc : List Nat) : Item → List Nat
-  | .fn _ _ _ _ clauses => (clauses.flatMap fun | .mk _ body => body.flatMap Stmt.exprs).foldl callIdsExpr acc
-  | .impl _ _ _ _ _ methods => methods.foldl callIdsItem acc
-  | .traitInfo _ _ defaults _ _ => defaults.foldl callIdsItem acc
-  | .alias _ value => callIdsExpr acc value
-  | .pub _ item => callIdsItem acc item
-  | _ => acc
-
 /-- An expression with each expression directly inside it made by `fe`, and
 each block inside it (with the patterns of its clause) by `fb`. -/
 def Expr.traverse {m : Type → Type} [Monad m] (fe : Expr → m Expr)
@@ -981,41 +968,6 @@ partial def Item.mapClauses (f : Clause → Clause) : Item → Item
 /-- A program rewritten. -/
 def Rewrite.items (r : Rewrite) (items : List Item) : List Item :=
   items.map (·.mapClauses r.clause)
-
-mutual
-
-/-- Is `p` true of an expression or of one inside it, blocks' too? (Read
-only: a pass that has nothing to do in an item leaves it as it is.) -/
-partial def Expr.anyExpr (p : Expr → Bool) (e : Expr) : Bool :=
-  p e || match e with
-    | .call _ f args | .tailCall _ f args => f.anyExpr p || args.any (·.anyExpr p)
-    | .tuple args => args.any (·.anyExpr p)
-    | .proj e _ | .deref e | .reborrow _ e | .fieldOf _ e _ => e.anyExpr p
-    | .closure _ clauses => clauses.any (·.anyExpr p)
-    | .handle subject arms => subject.anyExpr p || arms.any (·.anyExpr p)
-    | .labelScope _ body => body.any (·.anyExpr p)
-    | _ => false
-
-partial def Clause.anyExpr (p : Expr → Bool) : Clause → Bool
-  | .mk _ body => body.any (·.anyExpr p)
-
-partial def Stmt.anyExpr (p : Expr → Bool) : Stmt → Bool
-  | .let_ _ v | .expr v | .defer v | .letMut _ v => v.anyExpr p
-  | .assign t v => t.anyExpr p || v.anyExpr p
-  | .located _ _ s => s.anyExpr p
-
-end
-
-/-- Is `p` true of an expression in an item: its functions' (in
-implementations, traits' defaults and modules too) and a constant's. -/
-partial def Item.anyExpr (p : Expr → Bool) : Item → Bool
-  | .fn _ _ _ _ clauses => clauses.any (·.anyExpr p)
-  | .impl _ _ _ _ _ methods => methods.any (·.anyExpr p)
-  | .traitInfo _ _ defaults _ _ => defaults.any (·.anyExpr p)
-  | .module _ (some body) => body.any (·.anyExpr p)
-  | .pub _ item => item.anyExpr p
-  | .alias _ value => value.anyExpr p
-  | _ => false
 
 /-- Every name a pattern could bind. -/
 partial def patternNames : Pattern → List String
@@ -1225,140 +1177,10 @@ partial def nameUseStmt (x : String) : Stmt → NameUse
 
 end
 
-mutual
-
-/-- Going through an expression in the order it is evaluated: is the name
-borrowed once its value has been used? `seen` is whether the value has been
-used so far; what comes back is whether it has by the end, and whether a
-borrow came after. A callable that borrows the name counts as coming after:
-when it runs is not known here. -/
-partial def borrowAfterValue (x : String) (seen : Bool) : Expr → Bool × Bool
-  | .name none y => (seen || y == x, false)
-  | .ref _ y => (seen, seen && y == x)
-  | .refField _ _ y _ _ => (seen, seen && y == x)
-  | .call _ f args => borrowAfterValues x seen (f :: args)
-  | .tailCall _ f args => borrowAfterValues x seen (f :: args)
-  | .tuple args => borrowAfterValues x seen args
-  | .proj e _ => if placeRoot e == some x then (seen, seen) else borrowAfterValue x seen e
-  | .deref e => borrowAfterValue x seen e
-  | .reborrow _ e => borrowAfterValue x seen e
-  | .fieldOf _ e _ => if placeRoot e == some x then (seen, seen) else borrowAfterValue x seen e
-  | .closure id clauses =>
-    -- (One that uses the value may do so whenever it runs: from here on.)
-    -- One that looks at the name or writes it, written after the value is
-    -- used or using the value itself, could do so once the value is gone.
-    -- (One written before that does neither is seen to where the value is
-    -- given away: it must not be something that can still be called.)
-    let u := nameUseExpr x (.closure id clauses)
-    (seen || u.valuedInside,
-      (seen || u.valuedInside) && (u.shared || u.changed || u.fielded || u.looked))
-  | .handle subject arms =>
-    let (seen, bad) := borrowAfterValue x seen subject
-    let u := arms.foldl (fun u c => u.or (nameUseClause x c)) ({} : NameUse)
-    (seen || u.valued || u.valuedInside, bad || u.shared || u.changed || u.fielded || u.looked)
-  | .labelScope _ body =>
-    body.foldl (fun (seen, bad) s =>
-      let (seen', bad') := borrowAfterValueStmt x seen s
-      (seen', bad || bad')) (seen, false)
-  | _ => (seen, false)
-
-partial def borrowAfterValues (x : String) (seen : Bool) (es : List Expr) : Bool × Bool :=
-  es.foldl (fun (seen, bad) e =>
-    let (seen', bad') := borrowAfterValue x seen e
-    (seen', bad || bad')) (seen, false)
-
-partial def borrowAfterValueStmt (x : String) (seen : Bool) : Stmt → Bool × Bool
-  | .let_ _ e => borrowAfterValue x seen e
-  | .letMut _ e => borrowAfterValue x seen e
-  | .expr e => borrowAfterValue x seen e
-  | .defer e =>
-    -- A cleanup runs last of all: what it borrows it borrows after any use
-    -- of the value before it, and a use of the value in it comes after
-    -- every borrow outside it. A block is gone through in its own order.
-    match e with
-    | .call _ (.closure _ [.mk [] body]) [] =>
-      let (_, bad) := body.foldl (fun (seen, bad) s =>
-        let (seen', bad') := borrowAfterValueStmt x seen s
-        (seen', bad || bad')) (seen, false)
-      (seen, bad)
-    | e =>
-      let (_, bad) := borrowAfterValue x seen e
-      (seen, bad)
-  | .located _ _ s => borrowAfterValueStmt x seen s
-  | .assign target e =>
-    -- Writing the variable, or a place of it, once its value has been used
-    -- is as a borrow after is. The value written is computed first.
-    if placeRoot target == some x then
-      let (seen, bad) := borrowAfterValue x seen e
-      (seen, bad || seen)
-    else borrowAfterValues x seen [e, target]
-
-end
-
-mutual
-
-/-- The cleanups written in an expression, at any depth, and the expression
-without them. -/
-partial def splitDefersM (e : Expr) : StateM (List Stmt) Expr :=
-  e.traverse splitDefersM fun _ b => splitDefersBodyM b
-
-partial def splitDefersBodyM (body : List Stmt) : StateM (List Stmt) (List Stmt) := do
-  let rec one : Stmt → StateM (List Stmt) (List Stmt)
-    | .defer e => do
-      modify (· ++ [.defer e])
-      pure []
-    | .located l c s => do pure ((← one s).map (.located l c))
-    | s => do pure [← s.traverse splitDefersM]
-  pure (← body.mapM one).flatten
-
-partial def splitDefersStmts (body : List Stmt) : List Stmt × List Stmt := (splitDefersBodyM body).run []
-
-end
-
 /-- The variable that says whether what a variable held has been given away,
 and the name the variable's cleanup is known by where it is one that asks. -/
 def movedFlag (x : String) : String := s!"%moved:{x}"
 def givenSite (x : String) : String := s!"%given:{x}"
-
-/-- Every use of a variable's value marked: the flag is set, and then the
-value read. Borrows of the variable are left as they are; and a part of the
-variable read where it is is not its value used. -/
-def markMovesRewrite (x : String) : Rewrite where
-  onExpr _
-    | .name none y =>
-      if y == x then some (.labelScope "%block" [.assign (.name none (movedFlag x)) (.int 1), .expr (.name none x)])
-      else none
-    | .proj e i => if placeRoot e == some x then some (.proj e i) else none
-    | .fieldOf id e n => if placeRoot e == some x then some (.fieldOf id e n) else none
-    | _ => none
-  onStmt go
-    | .assign target e => some (.assign target (go.ex e))
-    | _ => none
-
-def markMovesStmts (x : String) : List Stmt → List Stmt := (markMovesRewrite x).stmts
-
-/-- What follows a variable with each read of a part of it, `x.f`, left out:
-what remains is where the variable's whole value is used. -/
-def lessPartsRewrite (x : String) : Rewrite where
-  onExpr _
-    | .proj e _ | .fieldOf _ e _ => if placeRoot e == some x then some (.int 0) else none
-    | _ => none
-  onStmt go
-    -- (Nor is a part of it written.)
-    | .assign target e =>
-      if placeRoot target == some x then some (.assign (.name none "%place") (go.ex e)) else none
-    | _ => none
-
-def lessPartsStmts (x : String) : List Stmt → List Stmt := (lessPartsRewrite x).stmts
-
-/-- Is a name used other than by reading a part of it, `x.f`: as a whole,
-borrowed, or written? -/
-partial def usedWhole (x : String) : Expr → Bool
-  | .name none y | .ref _ y | .refField _ _ y _ _ => y == x
-  | .fieldOf _ (.name none _) _ | .proj (.name none _) _ => false
-  | e => e.children.any (usedWhole x)
-
-def usedWholeStmt (x : String) (s : Stmt) : Bool := s.exprs.any (usedWhole x)
 
 /-- The place of a field read by name before the type it is read from was
 known: found from the name once the type is. -/
@@ -1373,36 +1195,6 @@ def partOf (name : String) : Option (String × Nat) :=
   match name.splitOn ".%" with
   | [x, i] => i.toNat?.map (x, ·)
   | _ => none
-
-/-- The part of a name an expression reads, if it is `x.f` or `x.0`. -/
-def partRead (x : String) : Expr → Option String
-  | .fieldOf _ (.name none y) f => if y == x then some f else none
-  | .proj (.name none y) i => if y == x then some (toString i) else none
-  | _ => none
-
-/-- What follows a name with every read of a part of it but one left out:
-where that one part is used. -/
-def onlyPartRewrite (x part : String) : Rewrite where
-  onExpr _ e := (partRead x e).map fun p => if p == part then .name none x else .int 0
-
-def onlyPartStmts (x part : String) : List Stmt → List Stmt := (onlyPartRewrite x part).stmts
-
-/-- Is the value a name holds used as it is, with no borrow of the name and
-nothing written to it after? Then the name gives its value away where it is
-used. A cleanup runs after what follows it: one that borrows the name is a
-borrow after any use of the value outside it. -/
-def givenAway (x : String) (rest : List Stmt) : Bool :=
-  let (outside, cleanups) := splitDefersStmts rest
-  let late := cleanups.any fun d =>
-    let v := nameUseStmt x d
-    v.shared || v.fielded || v.changed || v.looked
-  let early := nameUseStmts x outside
-  if late && (early.valued || early.valuedInside) then false else
-  let u := nameUseStmts x rest
-  let (_, bad) := rest.foldl (fun (seen, bad) s =>
-    let (seen', bad') := borrowAfterValueStmt x seen s
-    (seen', bad || bad')) (false, false)
-  !u.rebound && (u.valued || u.valuedInside) && !bad
 
 /-- Is a name bound here one that what follows borrows with `&` and never
 changes? It is then kept where a reference can point: as a variable is. -/

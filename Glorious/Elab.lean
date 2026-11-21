@@ -1379,7 +1379,7 @@ partial def nameWild (named : Nat → Bool) : Pattern → Nat → Pattern × Nat
 end
 
 /-- Every use of a variable's value marked: the flag is set, and then the
-value read (`Syntax.markMovesStmts`). -/
+value read. -/
 def markMoves (x : String) : Flat.FRewrite where
   onExpr _ b e :=
     match b.expr e with
@@ -1406,7 +1406,7 @@ private partial def untraitExpr (tr : TraitInfo) (owner : String) (e : ExprId) :
   | .proj x idx => do pushExpr (.proj (← untraitExpr tr owner x) idx)
   | .closure id clauses => do
     -- What the callable captures is destroyed if it is let go uncalled.
-    let written := hash (Expr.closure id (clauses.toList.map (treeClause b)))
+    let written := b.hashClosure id clauses
     let hooks := (b.fvClauses clauses).eraseDups.filterMap fun x =>
       dropHook tr (captureDropSite owner written x)
     let c ← pushExpr (.closure id (← clauses.mapM (untraitClause tr owner)))
@@ -1941,9 +1941,7 @@ def elabProgram (items : List Flat.FItem) (blocks : Option Blocks := none)
   let (g, fns, names) ← collect items
   let g := { g with blocks := blocks, lends := lends }
   let coercions := (blocks.getD {}).coercions
-  -- (The coercions written out: through the clauses as trees.)
-  let fns := if coercions.isEmpty then fns else fns.map fun (name, b) =>
-    (name, Flat.ofClauses (coerceFn coercions name (Flat.toClauses b)))
+  let fns := fns.map fun (name, b) => (name, coerceFn coercions name b)
   let mainIdx ← match g.fns[root]? with
     | some idx => pure idx
     | none => throw s!"the program has no `{root}` function"

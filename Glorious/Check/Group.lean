@@ -570,7 +570,7 @@ def checkGroup (decls : List FnDecl) (signature : Bool := false) : M Unit := do
     modify fun s =>
       { s with runFns := decls.foldl (fun m d =>
                  match m[d.name]? with
-                 | some fb => m.insert d.name (Flat.ofClauses (Elab.coerceFn cs d.name (Flat.toClauses fb)))
+                 | some fb => m.insert d.name (Elab.coerceFn cs d.name fb)
                  | none => m) s.runFns }
   -- A later function can still decide a requirement made here, through a
   -- declaration whose field types are inferred, so each is checked again at

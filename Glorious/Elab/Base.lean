@@ -584,33 +584,6 @@ partial def fvStmts (bound : List String) : List Stmt → List String
 
 end
 
-/-- The names an expression hands on with `move name`, wherever in it. -/
-partial def movedExpr : Expr → List String
-  | .call _ (.name none mark) [.name none x] => if mark == Syntax.moveMark then [x] else []
-  | e => e.children.flatMap movedExpr
-
-def movedStmt (s : Stmt) : List String := s.exprs.flatMap movedExpr
-
-/-- Where a body starts: the place of its first statement, by which what
-its clause is given is known. -/
-def firstPlace : List Stmt → Nat × Nat
-  | .located line col _ :: _ => (line, col)
-  | _ => (0, 0)
-
-/-- The place a clause's names and `_` are known by, for what destroys them:
-its first statement's, or, where that has none, the clause's body as written
-(its hash), so that two such clauses of one function are not taken for one. -/
-def clausePlace (body : List Stmt) : Nat × Nat :=
-  match firstPlace body with
-  | (0, 0) => ((hash body).toNat, 0)
-  | place => place
-
-/-! ## How long a borrow lasts -/
-
-partial def unlocated : Stmt → Stmt
-  | .located _ _ s => unlocated s
-  | s => s
-
 open Flat in
 /-- The names a statement gives values that may hold what `tracked` names hold. -/
 def madeFrom (b : Body) (tracked : List String) (s : StmtId) : List String :=
@@ -892,51 +865,61 @@ def givesOne (b : Flat.Body) (i : Nat) : Bool :=
       !counts.isEmpty && counts.all (· == 1)
     | _ => false
 
-/-- A block written in braces, without parameters. -/
-def plainBlock : Expr → Option (Nat × List Stmt)
-  | .closure id [.mk [] body] => if id == 0 then none else some (id, body)
-  | _ => none
-
-/-! ## Coercions -/
-
+open Flat in
 /-- Apply `fn` to the value a body ends with. A body that ends with a statement,
 or with a `tail` call, which must stay the last thing done, has no such value. -/
-partial def wrapResult (fn : String) : List Stmt → Option (List Stmt)
-  | [] => none
-  | [.expr (.tailCall _ _ _)] => none
-  | [.expr e] => some [.expr (.call 0 (.name none fn) [e])]
-  | [.located line col s] => (wrapResult fn [s]).map fun ss => ss.map (.located line col)
-  | [_] => none
-  | s :: rest => (wrapResult fn rest).map (s :: ·)
+partial def wrapResult (fn : String) : List StmtId → Build (Option (List StmtId))
+  | [] => pure none
+  | [s] => do
+    match (← get).stmt s with
+    | .expr e =>
+      match (← get).expr e with
+      | .tailCall .. => pure none
+      | _ => pure (some [← pushStmt (.expr (← pushExpr (.call 0 (← pushExpr (.name none fn)) #[e])))])
+    | .located line col inner =>
+      match ← wrapResult fn [inner] with
+      | some ss => some <$> ss.mapM fun s => pushStmt (.located line col s)
+      | none => pure none
+    | _ => pure none
+  | s :: rest => do pure ((← wrapResult fn rest).map (s :: ·))
 
+open Flat in
 /-- A clause's value given to the coercion `fn`, where there is one. -/
-def coercedClause (result : Option String) : Clause → Clause
-  | .mk pats body => .mk pats ((result.bind fun fn => wrapResult fn body).getD body)
+def coercedClause (result : Option String) (c : ClauseId) : Build ClauseId := do
+  let some fn := result | return c
+  let ⟨pats, body⟩ := (← get).clause c
+  match ← wrapResult fn body.toList with
+  | some body => pushClause ⟨pats, body.toArray⟩
+  | none => pure c
 
+open Flat in
 /-- The coercions the checker decided on, written out as the calls they are. -/
-def coerceRewrite (cs : Std.HashMap Site String) : Rewrite where
-  onExpr go e :=
-    let args := fun (call : Nat) (args : List Expr) => args.zipIdx.map fun (a, i) =>
-      let a := go.ex a
+def coerceRewrite (cs : Std.HashMap Site String) : FRewrite where
+  onExpr go b e :=
+    let args := fun (call : Nat) (as : Array ExprId) => as.toList.zipIdx.toArray.mapM fun (a, i) => (do
+      let a ← go.ex a
       match cs[Site.arg call i]? with
-      | some fn => .call 0 (.name none fn) [a]
-      | none => a
-    match e with
-    | .call id f as => some (.call id (go.ex f) (args id as))
-    | .tailCall id f as => some (.tailCall id (go.ex f) (args id as))
-    | .closure id clauses =>
-      some (.closure id (clauses.zipIdx.map fun (c, j) => coercedClause cs[Site.result id j]? (go.clause c)))
+      | some fn => pushExpr (.call 0 (← pushExpr (.name none fn)) #[a])
+      | none => pure a : Build ExprId)
+    match b.expr e with
+    | .call id f as => some (do pushExpr (.call id (← go.ex f) (← args id as)))
+    | .tailCall id f as => some (do pushExpr (.tailCall id (← go.ex f) (← args id as)))
+    | .closure id clauses => some (do
+      let cs' ← clauses.toList.zipIdx.toArray.mapM fun (c, j) => do
+        coercedClause cs[Site.result id j]? (← go.clause c)
+      pushExpr (.closure id cs'))
     | _ => none
 
 /-- A clause with the coercions in it written out, its value given to the
 coercion `result`, where there is one. -/
-def coerceClause (cs : Std.HashMap Site String) (result : Option String) (c : Clause) : Clause :=
-  coercedClause result ((coerceRewrite cs).clause c)
+def coerceClause (cs : Std.HashMap Site String) (result : Option String) (c : Flat.ClauseId) : Flat.Build Flat.ClauseId := do
+  coercedClause result (← (coerceRewrite cs).clause c)
 
-/-- The clauses of a top-level function with its coercions written out. -/
-def coerceFn (cs : Std.HashMap Site String) (name : String) (clauses : List Clause) : List Clause :=
-  if cs.isEmpty then clauses
-  else clauses.zipIdx.map fun (c, j) => coerceClause cs cs[Site.fnResult name j]? c
+/-- A top-level function's body with its coercions written out. -/
+def coerceFn (cs : Std.HashMap Site String) (name : String) (b : Flat.Body) : Flat.Body :=
+  if cs.isEmpty then b else
+  let (roots, b) := (b.roots.toList.zipIdx.toArray.mapM fun (c, j) => coerceClause cs cs[Site.fnResult name j]? c).run b
+  { b with roots }
 
 /-! ## Names and patterns -/
 
