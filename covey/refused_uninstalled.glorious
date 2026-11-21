@@ -1,0 +1,21 @@
+// Upstream's tests/relations.rs, `relating_without_installing_the_relation_panics`:
+// a relation's columns registered as components, without the relation
+// (`app.relation<R>()`), which installs what keeps both sides. Upstream
+// panics when it is related; here registering them is refused when
+// compiled.
+// expect:
+// error containing: ARelationIsInstalledWithAppRelation
+mod ecs;
+
+use ecs::{App, Relation, ManyToMany, Relates, Sources};
+
+struct Likes
+impl Relation for Likes { type Kind = ManyToMany; }
+
+fn main() -> Int {
+    let mut world = App::new().register<Relates<Likes>>().register<Sources<Likes>>().build().into_world();
+    let a = world.spawn_bundle(());
+    let b = world.spawn_bundle(());
+    discard(world.relate(a, Likes, b));
+    0
+}

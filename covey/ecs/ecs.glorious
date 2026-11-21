@@ -286,6 +286,14 @@ pub trait InPlace {}
 impl InPlace for Mutable {}
 pub trait Writable {}
 impl<T> Writable for T where <T as Mutability>::Writes: InPlace {}
+// (A relation's columns come with the relation, `app.relation<R>()`, which
+// installs what keeps both sides: not registered as components.)
+pub trait ARelationIsInstalledWithAppRelation {}
+pub trait NotALinkColumn {}
+impl<T> NotALinkColumn for T {}
+impl<R> NotALinkColumn for Relates<R> where R: ARelationIsInstalledWithAppRelation {}
+impl<R> NotALinkColumn for Links<R> where R: ARelationIsInstalledWithAppRelation {}
+impl<R> NotALinkColumn for Sources<R> where R: ARelationIsInstalledWithAppRelation {}
 // (A relation's links are changed through the world, `relate` and
 // `unrelate`, which keep both sides: never written in place.)
 impl<R> Mutability for Relates<R> { type Writes = Immutable; }
@@ -5472,7 +5480,7 @@ impl<S, L> App<S, L> {
     }
 
     // Store a component.
-    pub fn register<T>(app: Self) -> App<(Column<T>, S), L> {
+    pub fn register<T>(app: Self) -> App<(Column<T>, S), L> where T: NotALinkColumn {
         let App { world, systems, guard } = app;
         let World { columns, generations, free, tick, since, remotes, id, bring_names: _, bring_fns: _, brought_entities: _, brought_names: _, hooks: _, direct: _, stepping: _ } = world;
         discard(remotes);
